@@ -163,6 +163,37 @@ static bool zf_route_reproduction_complete(struct json_value *selector,
     return true;
 }
 
+static bool zf_discover_provider_package(struct json_value *selector,
+                                         struct json_value *result)
+{
+    const char *kind = json_get_str(json_get(selector, "kind"));
+    const char *ns = json_get_str(json_get(selector, "namespace"));
+    const char *root = json_get_str(json_get(selector, "transport_root"));
+    if (!kind || strcmp(kind, "provider") != 0 ||
+        !ns || strcmp(ns, "zclassic23.package") != 0 ||
+        !root || strlen(root) != 64)
+        return false;
+    json_set_object(result);
+    (void)json_push_kv_bool(result, "ok", true);
+    (void)json_push_kv_int(result, "count", 2);
+    return true;
+}
+
+/* The daemon routed the root and then refused under its own name: the
+ * transport-level reply carries ok:false plus the refusal body. */
+static bool zf_route_provider_refused(struct json_value *selector,
+                                      struct json_value *result)
+{
+    (void)selector;
+    json_set_object(result);
+    (void)json_push_kv_bool(result, "ok", false);
+    (void)json_push_kv_str(result, "code", "FETCH_REFUSED");
+    (void)json_push_kv_str(result, "error", "no-authenticated-provider");
+    (void)json_push_kv_str(result, "fetch_result", "no-authenticated-provider");
+    (void)json_push_kv_bool(result, "restricted", true);
+    return false;
+}
+
 static char zf_reproduction_root[65];
 static unsigned zf_reproduction_plan_calls;
 static unsigned zf_reproduction_commit_calls;
@@ -358,6 +389,40 @@ static int zf_t_fetch_dht_routed_live(void)
         ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data,
                                             "package_root")),
                       pkg.root_hex);
+        zf_cmd_free(&c);
+        zcl_native_zcode_discovery_test_backend(NULL, NULL);
+        zf_free_package(&pkg);
+        PASS();
+    } _test_next:;
+    zcl_native_zcode_discovery_test_backend(NULL, NULL);
+    return failures;
+}
+
+static int zf_t_fetch_dht_routed_refused(void)
+{
+    int failures = 0;
+    TEST("zcode package fetch: a routed refusal keeps the daemon's exact code") {
+        char dd[1024];
+        test_make_tmpdir(dd, sizeof(dd), "zcode_fetch", "dht-refused");
+        struct zf_pkg pkg;
+        ASSERT(zf_make_package(&pkg, 0x6b));
+        zcl_native_zcode_discovery_test_backend(
+            zf_discover_provider_package, zf_route_provider_refused);
+        struct zf_cmd c;
+        zf_cmd_init(&c, dd);
+        (void)json_push_kv_str(&c.input, "root", pkg.root_hex);
+        (void)json_push_kv_str(&c.input, "namespace", "zclassic23.package");
+        (void)json_push_kv_int(&c.input, "maximum_bytes", 67108864);
+        zcl_native_handle_zcode_package_fetch(&c.request, &c.reply);
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_BLOCKED);
+        ASSERT_EQ(c.reply.exit_code, ZCL_COMMAND_EXIT_TRANSIENT);
+        /* The code must survive the routed tree's release byte-for-byte;
+         * before the copy-out fix this read freed memory. */
+        ASSERT_STR_EQ(c.reply.error.code, "FETCH_REFUSED");
+        ASSERT(strstr(c.reply.error.message, "no-authenticated-provider") !=
+               NULL);
+        ASSERT(strstr(c.reply.error.message, "2 provider record(s)") != NULL);
+        ASSERT(c.reply.error.retryable);
         zf_cmd_free(&c);
         zcl_native_zcode_discovery_test_backend(NULL, NULL);
         zf_free_package(&pkg);
@@ -896,6 +961,7 @@ int test_zcode_fetch(void)
     failures += zf_t_fetch_missing_identity();
     failures += zf_t_fetch_unknown_name();
     failures += zf_t_fetch_dht_routed_live();
+    failures += zf_t_fetch_dht_routed_refused();
     failures += zf_t_fetch_complete();
     failures += zf_t_source_reproduction_loop();
     failures += zf_t_peers_one_shot();

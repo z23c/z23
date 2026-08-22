@@ -431,11 +431,15 @@ void zcl_native_handle_zcode_package_fetch(
             if (route_code && route_code[0]) {
                 /* The node routed the root and then refused under its own
                  * name. Pass that name through rather than blaming discovery
-                 * for a failure that happened after it succeeded. */
-                bool transient = strcmp(route_code, "FETCH_REFUSED") == 0;
+                 * for a failure that happened after it succeeded. The routed
+                 * tree is freed before the reply is built, so the code must
+                 * be copied out first. */
+                char code_copy[64];
+                (void)snprintf(code_copy, sizeof(code_copy), "%s", route_code);
+                bool transient = strcmp(code_copy, "FETCH_REFUSED") == 0;
                 (void)snprintf(detail, sizeof(detail),
                                "%s: %s (fetch=%s, %lu provider record(s))",
-                               route_code,
+                               code_copy,
                                route_error ? route_error : "no reason given",
                                fetch_result ? fetch_result : "none",
                                (unsigned long)records);
@@ -444,7 +448,7 @@ void zcl_native_handle_zcode_package_fetch(
                     reply, ZCL_COMMAND_STATUS_BLOCKED,
                     transient ? ZCL_COMMAND_EXIT_TRANSIENT
                               : ZCL_COMMAND_EXIT_BLOCKED,
-                    route_code, "fetch", transient, false, detail,
+                    code_copy, "fetch", transient, false, detail,
                     "zcode.package.fetch");
                 return;
             }

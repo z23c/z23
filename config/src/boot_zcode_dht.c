@@ -536,8 +536,23 @@ bool boot_zcode_dht_revalidate(void) {
   dht_lock();
   struct boot_svc_ctx *svc = g_dht_svc;
   zcl_mutex_unlock(&g_dht_lock);
-  if (svc)
-    (void)dht_chain_prepare(svc);
+  bool definitive = svc && dht_chain_prepare(svc);
+  /* The sweep below removes contacts and strips session authentication on the
+   * cache's word alone, so it may run only when every held delegation
+   * received a definitive chain answer this pass.  While the identity or
+   * header epoch is still moving (a reducer fold catching up), the cache-only
+   * callback answers "absent" for delegations it simply has not re-authorized
+   * yet; treating that non-answer as refutation would de-authenticate live,
+   * valid overlay sessions and make their provider records unroutable.  A
+   * non-answer keeps the held state and lets the next pass decide — the same
+   * rule the endpoint revalidator follows for held records. */
+  if (!definitive) {
+    LOG_INFO("net.zcode_dht",
+             "revalidate deferred: chain answers not definitive this pass "
+             "(identity/header epoch still moving); held contacts and "
+             "sessions kept");
+    return true;
+  }
   dht_lock();
   bool ok = !g_dht || vcs_zcode_dht_service_revalidate(g_dht, now);
   zcl_mutex_unlock(&g_dht_lock);
