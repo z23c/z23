@@ -2295,6 +2295,62 @@ static int case_derived_stage_cursor_equivalence(void)
         sqlite3_close(db);
     }
 
+    /* (5) HEAL-UNDER-STATIC-CURSOR — a vetoed memo entry must drop once the
+     * blocking row flips ok=1 WITHOUT the raw cursor moving (the C3
+     * cold-start freeze: validate_headers' ok=0 solution-backfill rows are
+     * rewritten by recheck while the header-tip-pinned cursor never moves;
+     * raw-keyed invalidation alone pinned the floor for a full block
+     * interval per hole). */
+    {
+        sqlite3 *db = NULL;
+        reducer_frontier_stage_cursor_derived_reset_memo_for_testing();
+        if (sqlite3_open(":memory:", &db) != SQLITE_OK) return 1;
+        RF_CHECK("derived-heal: schema", build_schema(db));
+        RF_CHECK("derived-heal: proven authority",
+                 stamp_proven_authority(db, A + 1));
+        const int32_t tip = A + 5;
+        bool built = true;
+        for (int32_t h = A + 1; h <= tip; h++)
+            built = built && put_consistent_height(db, h);
+        RF_CHECK("derived-heal: rows", built);
+        bool cur = true;
+        for (size_t i = 0; i < n_up; i++)
+            cur = cur && set_cursor(db, upstream[i], tip + 1);
+        cur = cur && set_cursor(db, "tip_finalize", tip);
+        RF_CHECK("derived-heal: cursors", cur);
+        /* The live freeze row class: an ok=0 validate verdict sitting below
+         * the static cursor. */
+        char fail_sql[160];
+        snprintf(fail_sql, sizeof(fail_sql),
+                 "UPDATE validate_headers_log SET ok=0, "
+                 "fail_reason='no-header-solution-backfill-required' "
+                 "WHERE height=%d", A + 3);
+        RF_CHECK("derived-heal: solution-missing row recorded",
+                 sqlite3_exec(db, fail_sql, NULL, NULL, NULL) == SQLITE_OK);
+
+        /* First read walks, vetoes the cursor down to the prefix, memoizes. */
+        RF_CHECK("derived-heal: blocked derived == log frontier",
+                 derived_stage_cursor(db, "validate_headers") == A + 3);
+        /* Second read is the memo path (same assertion, memo-served). */
+        RF_CHECK("derived-heal: memo holds the blocked floor",
+                 derived_stage_cursor(db, "validate_headers") == A + 3);
+
+        /* Recheck heals the row ok=1; the raw cursor does NOT move. */
+        char heal_sql[96];
+        snprintf(heal_sql, sizeof(heal_sql),
+                 "UPDATE validate_headers_log SET ok=1, fail_reason=NULL "
+                 "WHERE height=%d", A + 3);
+        RF_CHECK("derived-heal: recheck rewrites the row ok=1",
+                 sqlite3_exec(db, heal_sql, NULL, NULL, NULL) == SQLITE_OK);
+
+        /* The very next derived read must see the healed frontier even
+         * though raw is unchanged (pre-fix: stale memo returned A+3 until a
+         * new network header moved the cursor). */
+        RF_CHECK("derived-heal: healed row drops the stale-LOW memo",
+                 derived_stage_cursor(db, "validate_headers") == tip + 1);
+        sqlite3_close(db);
+    }
+
     return failures;
 }
 

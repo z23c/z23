@@ -638,10 +638,11 @@ int test_sticky_escalator(void)
         SE_CHECK("T1: targeted_rederive applies the reconcile and holds",
                  sticky_escalator_test_drive(0, t0 + 32) ==
                      STICKY_RUNG_TARGETED_REDERIVE);
-        SE_CHECK("T1: script/proof cursors clamped to the hole, tip to hstar",
+        SE_CHECK("T1: script/proof cursors clamped to the hole, tip to the "
+                 "coins-backed served tip",
                  cursor_value(db, "script_validate") == A + 2 &&
                  cursor_value(db, "proof_validate") == A + 2 &&
-                 cursor_value(db, "tip_finalize") == A + 1);
+                 cursor_value(db, "tip_finalize") == A + 2);
         SE_CHECK("T1: utxo cursor untouched + no log rows deleted",
                  cursor_value(db, "utxo_apply") == A + 2 &&
                  total_log_rows(db) == rows_before);

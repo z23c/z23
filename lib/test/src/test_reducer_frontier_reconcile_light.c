@@ -812,9 +812,9 @@ int test_reducer_frontier_reconcile_light(void)
                    dry.clamped_body_fetch &&
                    !dry.clamped_body_persist &&
                    /* OWN-frame (task #31): clamp band [hstar, hstar+1]
-                    * capped at coins_applied-1 = min(A+2, A+1) = A+1 —
-                    * the served tip, no longer the next transition. */
-                   dry.tip_finalize_cursor_after == A + 1);
+                    * capped at coins_applied = min(A+2, A+2) = A+2 —
+                    * the served-tip ceiling the step itself rests at. */
+                   dry.tip_finalize_cursor_after == A + 2);
         RFRL_CHECK("dry-run does not mutate",
                    fx.idx[2]->nStatus == before2 &&
                    fx.idx[3]->nStatus == before3 &&
@@ -828,7 +828,7 @@ int test_reducer_frontier_reconcile_light(void)
                    stage_reducer_frontier_reconcile_light(
                        db, &fx.ms, &applied));
         RFRL_CHECK("apply clamps body_fetch and tip_finalize",
-                   cursor_value(db, "tip_finalize") == A + 1 &&
+                   cursor_value(db, "tip_finalize") == A + 2 &&
                    cursor_value(db, "validate_headers") == A + 4 &&
                    cursor_value(db, "body_fetch") == A + 2 &&
                    cursor_value(db, "body_persist") == A + 4 &&
@@ -922,9 +922,10 @@ int test_reducer_frontier_reconcile_light(void)
                    cursor_value(db, "validate_headers") == A + 2 &&
                    cursor_value(db, "body_fetch") == A + 2 &&
                    cursor_value(db, "body_persist") == A + 2 &&
-                   /* tip_finalize is OWN-frame: served tip = A+1 (coins
-                    * applied through A+1), one below the refill cursors. */
-                   cursor_value(db, "tip_finalize") == A + 1);
+                   /* tip_finalize is OWN-frame: served tip = A+2, backed by
+                    * the intact transition row at A+1 and coins applied
+                    * through A+1 (coins_applied A+2, NEXT-frame). */
+                   cursor_value(db, "tip_finalize") == A + 2);
 
         teardown_fixture(&fx);
     }
@@ -1045,10 +1046,12 @@ int test_reducer_frontier_reconcile_light(void)
                    rr.hstar == A + 1 &&
                    rr.served_floor == A + 3 &&
                    rr.coins_applied_height == A + 2 &&
-                   /* OWN-frame: served tip capped at coins applied-through
-                    * (coins_applied A+2 is NEXT-frame => through A+1). */
-                   rr.tip_finalize_cursor_after == A + 1 &&
-                   cursor_value(db, "tip_finalize") == A + 1 &&
+                   /* OWN-frame: served tip capped at coins_applied's own
+                    * frame (coins_applied A+2 is NEXT-frame => applied
+                    * through A+1 => can serve the transition row at A+1,
+                    * i.e. served tip A+2). */
+                   rr.tip_finalize_cursor_after == A + 2 &&
+                   cursor_value(db, "tip_finalize") == A + 2 &&
                    rr.clamped_tip_finalize);
 
         teardown_fixture(&fx);
@@ -1068,14 +1071,15 @@ int test_reducer_frontier_reconcile_light(void)
         RFRL_CHECK("coin-lag apply succeeds",
                    stage_reducer_frontier_reconcile_light(
                        db, &fx.ms, &rr));
-        RFRL_CHECK("coin-lag caps tip_finalize at coins applied-through",
+        RFRL_CHECK("coin-lag caps tip_finalize at coins_applied",
                    rr.hstar == A + 3 &&
                    rr.coins_applied_height == A + 3 &&
                    /* OWN-frame: hstar allows served A+3..A+4 but coins
-                    * (NEXT-frame A+3 => applied through A+2) cap the
-                    * served-tip claim at A+2. */
-                   rr.tip_finalize_cursor_after == A + 2 &&
-                   cursor_value(db, "tip_finalize") == A + 2 &&
+                    * (NEXT-frame A+3 => applied through A+2 => transition
+                    * rows provable through A+2) cap the served-tip claim
+                    * at A+3 — exactly where the step itself rests. */
+                   rr.tip_finalize_cursor_after == A + 3 &&
+                   cursor_value(db, "tip_finalize") == A + 3 &&
                    rr.clamped_tip_finalize);
 
         teardown_fixture(&fx);
@@ -1183,7 +1187,7 @@ int test_reducer_frontier_reconcile_light(void)
         bool ok = got &&
                   reducer_frontier_reconcile_light_test_remedy_calls() == 1 &&
                   cursor_value(db, "body_fetch") == A + 2 &&
-                  cursor_value(db, "tip_finalize") == A + 1 &&
+                  cursor_value(db, "tip_finalize") == A + 2 &&
                   snap.currently_active &&
                   snap.attempts == 1 &&
                   snap.last_outcome == COND_REMEDY_UNWITNESSED &&
@@ -1261,7 +1265,7 @@ int test_reducer_frontier_reconcile_light(void)
                      == A + 4;
         ok = ok && json_get_int(json_get(
                      detail, "last_reconcile_tip_finalize_cursor_after"))
-                     == A + 1;
+                     == A + 2;
         json_free(&dump);
 
         /* A second tick must still NOT false-clear: with H* unchanged the
@@ -2107,11 +2111,11 @@ int test_reducer_frontier_reconcile_light(void)
         bool got = condition_engine_get_registered_snapshot(
             "reducer_frontier_reconcile_light", &snap);
         RFRL_CHECK("F6: peer ahead of H* (not the download tip) admits the "
-                   "repair — remedy runs and clamps tip_finalize to H*",
+                   "repair — remedy runs and clamps tip_finalize to H*+1",
                    got &&
                    reducer_frontier_reconcile_light_test_remedy_calls() == 1 &&
                    snap.currently_active &&
-                   cursor_value(db, "tip_finalize") == A + 1);
+                   cursor_value(db, "tip_finalize") == A + 2);
         /* Admitted via the H* peer-lag path, not the tear/refill bypass. */
         RFRL_CHECK("F6: no tear/refill bypass WARN (plain peer-ahead admit)",
                    reducer_frontier_reconcile_light_test_bypass_warns() == 0);

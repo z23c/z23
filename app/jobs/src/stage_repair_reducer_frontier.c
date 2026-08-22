@@ -348,10 +348,9 @@ static bool reconcile_tip_finalize_cursor(
     bool apply,
     struct stage_reducer_frontier_reconcile_result *out)
 {
-    /* OWN-frame: tip_finalize's cursor is the served tip. Accept [hstar,
-     * hstar+1], with a one-height lower cap for coins_applied's next-height
-     * convention. A deeper coins cap is an anchor/window inconsistency, not a
-     * cursor convention mismatch; refuse it below the trusted floor. */
+    /* OWN-frame: accept [hstar, hstar+1] capped at coins_applied's next
+     * height. Capping one lower clamped the catch-up resting state every
+     * pass and livelocked the rewind-churn gate; refuse deeper caps. */
     int cur = out->tip_finalize_cursor_before;
     int lo = out->hstar;
     int hi = out->hstar + 1;
@@ -370,8 +369,8 @@ static bool reconcile_tip_finalize_cursor(
                      out->hstar, min_allowed, cur);
             return true;
         }
-        if (hi > applied_through)
-            hi = applied_through;
+        if (hi > applied_through + 1)
+            hi = applied_through + 1;
         if (lo > hi)
             lo = hi;
     }

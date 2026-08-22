@@ -703,11 +703,13 @@ int test_reorg_residue_tipfin_replace(void)
         RR_CHECK("GREEN body_fetch + body_persist cascade to R+1",
                  cursor_value(db, "body_fetch") == R + 1 &&
                  cursor_value(db, "body_persist") == R + 1);
-        /* OWN-frame (task #31): tip_finalize's cursor is the served tip
-         * height; with H* = R and coins applied through R the served-tip
-         * claim is R (the upstream column cursors stay NEXT-frame at R+1). */
-        RR_CHECK("GREEN tip_finalize clamped to the served tip R",
-                 cursor_value(db, "tip_finalize") == R);
+        /* OWN-frame (task #31, corrected): tip_finalize's cursor is the
+         * served tip height; with H* = R and coins applied through R the
+         * served-tip claim is R+1 — backed by the just-replaced ok=1
+         * transition row at R and exactly where the forward step rests
+         * (the upstream column cursors stay NEXT-frame at R+1). */
+        RR_CHECK("GREEN tip_finalize clamped to the served tip R+1",
+                 cursor_value(db, "tip_finalize") == R + 1);
 
         /* COINS UNTOUCHED: utxo_apply cursor and coins_applied unchanged —
          * no coin rewind, no double-apply. */

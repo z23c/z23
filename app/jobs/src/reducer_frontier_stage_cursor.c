@@ -86,6 +86,20 @@ static bool reducer_log_table_present(sqlite3 *db, const char *table)
  * costs one point read. Thread-local: the single reducer drive thread keeps it
  * warm; observers on other threads keep their own copy.
  *
+ * STALE-LOW HEAL CHECK: raw-keyed invalidation only fires when the upstream
+ * cursor MOVES, but a vetoed (value < raw) entry names a transient hole/fail
+ * row that heals under a STATIC cursor — validate_headers records ok=0
+ * "no-header-solution-backfill-required" rows ahead of the Equihash solution
+ * fetch, recheck rewrites them ok=1 once the solution lands, and once the
+ * header chain reaches the network tip the raw cursor stops moving entirely.
+ * Without a heal check the floor then pins for a full block interval per hole
+ * (the C3 cold-start freeze: body_fetch idle at a healed height until the next
+ * network block). So a vetoed HIT pays ONE extra point read at the blocking
+ * height: still absent/failing keeps the memoized floor; flipped ok=1 falls
+ * through to a single re-walk that memoizes the healed frontier. A veto-free
+ * entry (value == raw) cannot go stale — the contiguous-to-cursor log only
+ * shrinks under a cursor-moving rewind — and stays a pure hit.
+ *
  * Enough slots for all eight stage-cursor names across two live progress-store
  * epochs without round-robin thrash (a `find` matches ANY slot, so a stored
  * name only evicts on a genuinely new key). */
@@ -141,6 +155,31 @@ void reducer_frontier_stage_cursor_derived_reset_memo_for_testing(void)
 }
 #endif
 
+/* Point read used ONLY to invalidate a stale-LOW memo entry (see "STALE-LOW
+ * HEAL CHECK" above): true when `table` has a row at `height` with ok == 1.
+ * False on an absent row, any other ok value, or any read error — a read
+ * error keeps the conservative memoized floor; compute_hstar reads the same
+ * logs and surfaces a genuine fault there. Table names come from the fixed
+ * k_logs mapping (reducer_frontier_cursor_log_table), never caller input. */
+static bool log_row_ok_one(sqlite3 *db, const char *table, int64_t height)
+{
+    char sql[96];
+    int n = snprintf(sql, sizeof(sql),
+                     "SELECT ok FROM %s WHERE height = ?", table);
+    if (n <= 0 || n >= (int)sizeof(sql))
+        return false;  // raw-return-ok:bounded-name-cannot-overflow
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK)
+        return false;  // raw-return-ok:stale-memo-probe-stays-conservative
+    sqlite3_bind_int64(st, 1, (sqlite3_int64)height);
+    int rc = sqlite3_step(st);  // raw-sql-ok:progress-kv-kernel-store
+    bool ok_one = (rc == SQLITE_ROW &&
+                   sqlite3_column_type(st, 0) == SQLITE_INTEGER &&
+                   sqlite3_column_int(st, 0) == 1);
+    sqlite3_finalize(st);
+    return ok_one;
+}
+
 bool reducer_frontier_stage_cursor_derived(sqlite3 *progress_db,
                                            const char *name,
                                            uint64_t *out, bool *found)
@@ -174,10 +213,30 @@ bool reducer_frontier_stage_cursor_derived(sqlite3 *progress_db,
     struct stage_derived_memo_slot *hit =
         stage_derived_memo_find(epoch, progress_db, name);
     if (hit && hit->raw == raw) {
-        progress_store_tx_unlock();
-        if (out)   *out = hit->value;
-        if (found) *found = row_present;
-        return true;  /* static upstream — no contiguity scan */
+        /* STALE-LOW HEAL CHECK (see the memo contract above): a vetoed entry
+         * (value < raw) names the row whose absence/failure ended the walk;
+         * that row can flip ok=1 under a static cursor, so confirm the floor
+         * is still blocked before serving the memoized value. */
+        bool healed = false;
+        if (hit->value < (uint64_t)raw) {
+            bool served_tip_hit = false;
+            const char *hit_log =
+                reducer_frontier_cursor_log_table(name, &served_tip_hit);
+            /* The vetoed frame names the blocking row directly for an
+             * upstream stage (frame = frontier_h + 1); tip_finalize's
+             * served-tip frame stops AT the last proven row, so its blocker
+             * sits one higher. */
+            int64_t blocking_h = served_tip_hit ? (int64_t)hit->value + 1
+                                                : (int64_t)hit->value;
+            healed = hit_log &&
+                     log_row_ok_one(progress_db, hit_log, blocking_h);
+        }
+        if (!healed) {
+            progress_store_tx_unlock();
+            if (out)   *out = hit->value;
+            if (found) *found = row_present;
+            return true;  /* static upstream — no contiguity scan */
+        }
     }
 
     /* Only the six success-checked logs carry a contiguous-ok=1 frontier. A

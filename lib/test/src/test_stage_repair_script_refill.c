@@ -872,10 +872,11 @@ int test_stage_repair_script_refill(void)
                   rr.clamped_tip_finalize &&
                   cursor_value(db, "script_validate") == A + 2 &&
                   cursor_value(db, "proof_validate") == A + 2 &&
-                  /* OWN-frame (task #31): served tip = hstar A+1 (coins
-                   * applied through A+1), one below the NEXT-frame
-                   * script/proof refill cursors at the hole A+2. */
-                  cursor_value(db, "tip_finalize") == A + 1 &&
+                  /* OWN-frame (task #31, corrected): served tip = A+2,
+                   * backed by the intact transition row at A+1 and coins
+                   * applied through A+1 (coins_applied A+2, NEXT-frame) —
+                   * the same height the forward step rests at. */
+                  cursor_value(db, "tip_finalize") == A + 2 &&
                   cursor_value(db, "validate_headers") == A + 4 &&
                   cursor_value(db, "body_fetch") == A + 4 &&
                   cursor_value(db, "body_persist") == A + 4);

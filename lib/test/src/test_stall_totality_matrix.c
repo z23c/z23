@@ -35,7 +35,7 @@
  *         transaction (the co-commit cure); a genuine consensus
  *         reject (ok=0 whose hash IS canonical) survives untouched.
  *   K4  — tip_finalize cursor stranded above the coins frontier: clamped
- *         into the [H*, coins-applied-through] serving band; nothing else
+ *         into the [H*, coins_applied] serving band; nothing else
  *         moves and no row is deleted.
  *   K5  — hash_split: a stored ok=1 validate verdict whose hash disagrees
  *         with the canonical verdict at the same height; the validate
@@ -747,8 +747,8 @@ int test_stall_totality_matrix(void)
         STM_CHECK("K1: script/proof cursors clamp to the hole",
                   cursor_value(db, "script_validate") == A + 2 &&
                   cursor_value(db, "proof_validate") == A + 2);
-        STM_CHECK("K1: tip_finalize clamps to the served floor",
-                  cursor_value(db, "tip_finalize") == A + 1);
+        STM_CHECK("K1: tip_finalize clamps to the coins-backed served tip",
+                  cursor_value(db, "tip_finalize") == A + 2);
         STM_CHECK("K1: unrelated cursors untouched + no log rows deleted",
                   cursor_value(db, "utxo_apply") == A + 4 &&
                   cursor_value(db, "validate_headers") == A + 4 &&
@@ -864,15 +864,16 @@ int test_stall_totality_matrix(void)
         STM_CHECK("K3: script/proof cursors clamped with the deletes",
                   cursor_value(db, "script_validate") == A + 2 &&
                   cursor_value(db, "proof_validate") == A + 2);
-        STM_CHECK("K3: served floor + coins writer untouched",
-                  cursor_value(db, "tip_finalize") == A + 1 &&
+        STM_CHECK("K3: coins writer untouched, tip_finalize at the "
+                  "coins-backed served tip",
+                  cursor_value(db, "tip_finalize") == A + 2 &&
                   cursor_value(db, "utxo_apply") == A + 4);
 
         teardown_fixture(&fx);
     }
 
     /* K4 — tip_finalize cursor stranded above the coins frontier: clamped
-     * into the [H*, coins-applied-through] serving band. Clamp-only: no
+     * into the [H*, coins_applied] serving band. Clamp-only: no
      * other cursor moves, no row is touched. */
     {
         struct stm_fixture fx;
@@ -891,8 +892,8 @@ int test_stall_totality_matrix(void)
                   arm_and_run_rederive(&fx, "k4_tip_above_coins", NULL) ==
                       STICKY_RUNG_TARGETED_REDERIVE &&
                   sticky_escalator_test_armed());
-        STM_CHECK("K4: tip_finalize clamps to the coins applied-through cap",
-                  cursor_value(db, "tip_finalize") == A + 2);
+        STM_CHECK("K4: tip_finalize clamps to the coins_applied cap",
+                  cursor_value(db, "tip_finalize") == A + 3);
         STM_CHECK("K4: clamp-only — every other cursor + row untouched",
                   cursor_value(db, "script_validate") == A + 4 &&
                   cursor_value(db, "proof_validate") == A + 4 &&

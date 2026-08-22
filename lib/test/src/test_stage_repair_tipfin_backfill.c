@@ -1112,23 +1112,28 @@ int test_stage_repair_tipfin_backfill(void)
                      snapshot(db, &rr) && rr.hstar == C - 1 &&
                      !rr.refused_coin_tear);
 
-        /* Step 6 — the existing reconcile clamps tip_finalize to C-1.
-         * OWN-frame (task #31): the clamp band is [hstar, hstar+1] capped at
-         * coins applied-through; hstar = C-1, coins_applied = C (NEXT-frame
-         * => applied through C-1), so the served-tip claim is C-1 — NOT C.
-         * The old `== C` pin encoded the +1-convention overshoot: a cursor at
-         * C with no finalized row at C makes reducer_anchor_candidate_ok
-         * reject a fresh seed anchor, collapsing the trusted anchor to the
-         * compiled checkpoint and latching the I4.3 HOLD over the log-less
-         * import region (a cold-import wedge class: HOLD refuse_from=3056759,
-         * step_finalize FATAL loop at h=3145076). */
+        /* Step 6 — the existing reconcile clamps tip_finalize to C.
+         * OWN-frame (task #31, corrected): the clamp band is [hstar, hstar+1]
+         * capped at coins_applied's own NEXT-frame value; hstar = C-1,
+         * coins_applied = C (=> applied through C-1, so the transition row at
+         * C-1 — which serves C — is fully backed), so the served-tip claim is
+         * C. The step_finalize resting state IS cursor == coins_applied (it
+         * writes row C-1 and advances to C); clamping one lower made the
+         * reconcile fight the step on every pass (the live rewind-churn
+         * livelock: cur=hstar+1 clamped to hstar, re-finalized, repeat, until
+         * the churn gate refused and fed the escalator). Seed-anchor
+         * candidacy does not depend on the one-lower clamp: the durable
+         * trusted-base declaration vets an ABSENT first row above the base
+         * (reducer_trusted_anchor's allow_rowless_first path), and
+         * stage_repair_preserve_trusted_base_transition keeps a completed
+         * first transition above the base from being rewound at all. */
         struct main_state ms;
         main_state_init(&ms);
         struct stage_reducer_frontier_reconcile_result fin;
-        TIPFIN_CHECK("T9 reconcile clamps tip_finalize to C-1 (served tip)",
+        TIPFIN_CHECK("T9 reconcile clamps tip_finalize to C (served tip)",
                      stage_reducer_frontier_reconcile_light(db, &ms, &fin) &&
                      !fin.refused_coin_tear &&
-                     cursor_value(db, "tip_finalize") == C - 1);
+                     cursor_value(db, "tip_finalize") == C);
         main_state_free(&ms);
 
         progress_store_close();
