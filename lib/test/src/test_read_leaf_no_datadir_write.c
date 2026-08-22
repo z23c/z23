@@ -172,6 +172,8 @@ struct rlw_leaf {
 #define RLW_DATADIR_VALUE "@fixture-datadir@"
 
 static const struct rlw_leaf g_rlw_leaves[] = {
+    { "core.zdir.list",         zcl_native_handle_core_zdir_list,
+      NULL, NULL,               NULL, NULL, NULL },
     { "app.service.access",     zcl_native_handle_service_access,
       "service", "reference",   NULL, NULL, NULL },
     { "zcode.release.prove",    zcl_native_handle_zcode_release_prove,
