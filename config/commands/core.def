@@ -1611,6 +1611,41 @@ ZCL_COMMAND_READY_READ(
 ZCL_COMMAND_BRANCH("core.zdir", "core",
                    "On-chain node directory: announce and retire onion hostnames",
                    ZCL_COMMAND_LAYER_CORE)
+ZCL_COMMAND_READY_READ(
+    "core.zdir.guide", "core.zdir", "",
+    "How to find Z23 nodes from the chain, without seed IPs",
+    "The on-chain onion directory is the stranger's front door: list "
+    "hostnames the chain has already paid to announce, then dial them. "
+    "It is a hint about where to look, never proof of who is there, and "
+    "never a host allowlist. Extra input is refused.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "zdir,directory,onion,guide,discover,peer,decentralized",
+    "zcl.core_zdir_guide.input.v1", "zcl.core_zdir_guide.v1", "", "",
+    "z23 core zdir guide",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_INSTANT,
+    ZCL_COMMAND_COST_TINY,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_core_zdir_guide)
+ZCL_COMMAND_READY_READ(
+    "core.zdir.list", "core.zdir", "",
+    "Active onion hostnames folded from confirmed ZDIR records",
+    "One page of active onion_directory rows, senior registration first. "
+    "Each row is a hostname and height — a dial hint from the chain, not "
+    "an IP and not an owner address. An absent node.db is an empty "
+    "directory, not a seed list.", ZCL_COMMAND_LIST_BUDGET,
+    "zdir,directory,onion,list,discover,peer",
+    "zcl.core_zdir_list.input.v1", "zcl.core_zdir_list.v1",
+    "datadir", "",
+    "z23 core zdir list",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_OFFLINE_COPY,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_core_zdir_list)
 ZCL_COMMAND_READY_COMMAND(
     "core.zdir.register", "core.zdir", "",
     "Announce a v3 onion hostname on-chain as a node (spends a fee)",

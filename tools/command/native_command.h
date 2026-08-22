@@ -1542,6 +1542,12 @@ void zcl_native_handle_core_identity_revoke(
  * transfer leaf: ZDIR command byte 3 is reserved and zdir_parse rejects it,
  * so handing a hostname over is deregister-then-register. Bound by
  * config/commands/core.def. */
+void zcl_native_handle_core_zdir_guide(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_core_zdir_list(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 void zcl_native_handle_core_zdir_register(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);

@@ -74,11 +74,11 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 704 |
+| Registry entries (branches + leaves) | 706 |
 | Top-level roots | 11 |
 | Branches | 162 |
-| Leaves (dispatchable command paths) | 542 |
-| … `ready` (live handler in this build) | 488 |
+| Leaves (dispatchable command paths) | 544 |
+| … `ready` (live handler in this build) | 490 |
 | … `compat` (metadata only, names a fallback) | 25 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 29 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 24 |
@@ -91,7 +91,7 @@ Per source file:
 | `.def` file | Entries | Branches | Leaves |
 |---|---|---|---|
 | `config/commands/root.def` | 10 | 5 | 5 |
-| `config/commands/core.def` | 118 | 29 | 89 |
+| `config/commands/core.def` | 120 | 29 | 91 |
 | `config/commands/apps.def` | 16 | 3 | 13 |
 | `config/commands/app_features.def` | 71 | 19 | 52 |
 | `config/commands/store.def` | 18 | 0 | 18 |
@@ -419,6 +419,8 @@ represented by its children's sections.
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
+| `core zdir guide` | ready | read / read / public · instant/tiny | none | `zcl.core_zdir_guide.v1` | `z23 core zdir guide` | How to find Z23 nodes from the chain, without seed IPs |
+| `core zdir list` | ready | read / read / public · fast/low | `datadir` | `zcl.core_zdir_list.v1` | `z23 core zdir list` | Active onion hostnames folded from confirmed ZDIR records |
 | `core zdir register` | ready | mutate / wallet / **owner**, plan-commit · foreground/moderate | **`wallet_scope`**, `hostname`, `pubkey`, `idempotency_key`, `plan_id`, `confirm`, `datadir` | `zcl.core_zdir_register.v2` | `z23 core zdir register --input='{"wallet_scope":"dev","hostname":"<56base32>.onion","idempotency_key":"zdir-register-1"}'` | Announce a v3 onion hostname on-chain as a node (spends a fee) |
 | `core zdir deregister` | ready | mutate / wallet / **owner**, plan-commit · foreground/moderate | **`wallet_scope`**, `hostname`, `idempotency_key`, `plan_id`, `confirm`, `datadir` | `zcl.core_zdir_register.v2` | `z23 core zdir deregister --input='{"wallet_scope":"dev","hostname":"<56base32>.onion","idempotency_key":"zdir-deregister-1"}'` | Retire an onion hostname from the on-chain directory (spends a fee) |
 
