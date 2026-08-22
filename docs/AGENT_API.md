@@ -1347,9 +1347,9 @@ The implementation is intentionally observe-only:
 Common commands:
 
 ```bash
-tools/scripts/remote_node_update.sh rhett@205.209.104.118
-tools/scripts/remote_node_update.sh --json rhett@205.209.104.118
-make remote-node-plan-json ZCL_REMOTE_HOST=rhett@205.209.104.118
+tools/scripts/remote_node_update.sh <user>@<remote-host>
+tools/scripts/remote_node_update.sh --json <user>@<remote-host>
+make remote-node-plan-json ZCL_REMOTE_HOST=<user>@<remote-host>
 ```
 
 For periodic read-only observation, run `make install-remote-status-linger`.

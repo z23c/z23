@@ -2,7 +2,8 @@
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 #
 # proof_server_pin.sh — records, and later checks, which commit the
-# immutable proof server (${ZCL_SHIP_REMOTE:-205.209.104.118}) is actually
+# immutable proof server ($ZCL_SHIP_REMOTE — operator-local, not committed)
+# is actually
 # running.
 #
 # WHY THIS EXISTS: tools/ship.sh's proof-server guard used to say the box
@@ -145,7 +146,11 @@ recorded_utc=${ts}"
 
 # ── check ────────────────────────────────────────────────────────────────
 cmd_check() {
-    local host="${1:-${ZCL_SHIP_REMOTE:-205.209.104.118}}"
+    local host="${1:-${ZCL_SHIP_REMOTE:-}}"
+    if [ -z "$host" ]; then
+        echo "set ZCL_SHIP_REMOTE=<host> locally; fleet endpoints are operator-local and not committed" >&2
+        return 2
+    fi
 
     local tag
     tag="$(git for-each-ref --sort=-creatordate --format='%(refname:short)' 'refs/tags/proof-server/*' 2>/dev/null | head -1)"

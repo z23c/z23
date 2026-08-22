@@ -57,9 +57,9 @@ Still outstanding regardless of the 06:27 change: **`WatchdogSec=0`** (§5),
 /home/rhett/.local/bin/zclassic23-live
     -datadir=/home/rhett/.zclassic-c23 -port=8033 -rpcport=18232
     -listen -txindex -tor -nobgvalidation -nolegacyimport
-    -externalip=74.50.74.102:8033
+    -externalip=192.0.2.10:8033
     -addnode=127.0.0.1:8034 -addnode=140.174.189.17 -addnode=51.178.179.75
-    -addnode=205.209.104.118 -addnode=142.54.184.106
+    -addnode=198.51.100.10 -addnode=142.54.184.106
     -load-snapshot-at-own-height=/home/rhett/.zclassic-c23/utxo-seed-3155842.snapshot
     -showmetrics=0
 ```

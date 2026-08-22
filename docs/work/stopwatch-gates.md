@@ -276,9 +276,9 @@ even eligible, and they are separate services:
 
 | run | `ZCL_PEER` | `ZCL_CS_FILE_PEER` | verdict | wall | final H\* | network tip |
 |-----|-----------|--------------------|---------|------|-----------|-------------|
-| 1 | `74.50.74.102:39070` | `74.50.74.102:39072` | STALLED-NAMED | 603 s | 0 | never observed (`-1`) |
+| 1 | `192.0.2.10:39070` | `192.0.2.10:39072` | STALLED-NAMED | 603 s | 0 | never observed (`-1`) |
 | 2 | `127.0.0.1:8033` | `127.0.0.1:18034` | SEAM | 603 s | 192 | 3,222,327 |
-| 3 | `127.0.0.1:8033` | `74.50.74.102:39072` | SEAM | 619 s | 3,193,024 | 3,222,352 |
+| 3 | `127.0.0.1:8033` | `192.0.2.10:39072` | SEAM | 619 s | 3,193,024 | 3,222,352 |
 
 Run 1 — the fixture host serves files but not P2P. `dumpstate peer_lifecycle`
 recorded `attempted=1 connected=1 version_sent=1 version_received=0`: the TCP

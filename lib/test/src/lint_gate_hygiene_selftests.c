@@ -150,7 +150,7 @@ int t_git_hooks_gate_rejects_noop_pre_commit(void)
  * script reads /proc/meminfo of whatever machine happens to run this test,
  * which is only meaningful when that machine's RAM matches the actual
  * deploy target. That coincidentally holds on the maintainer's dev host
- * (rhett.dev-class hardware — see docs/HANDOFF.md), so it passed there
+ * (maintainer-host-class hardware — see docs/HANDOFF.md), so it passed there
  * silently, but a hosted CI runner's RAM (a few GB) is nowhere near the
  * ~93 GiB deploy target, so the SAME finite MemoryMax sum that legitimately
  * fits the real host reads as over-budget there — not a real regression,
@@ -159,7 +159,7 @@ int t_git_hooks_gate_rejects_noop_pre_commit(void)
  * to the real deploy target for exactly this reason (see that job's own
  * comment); pin the SAME value here so this test verifies the same real
  * invariant identically on every host, never the ambient host's own RAM. */
-/* rhett.dev, ~93 GiB — keep numerically identical to build.yml's
+/* The maintainer host, ~93 GiB — keep numerically identical to build.yml's
  * ZCL_SYSTEMD_MEMORY_BUDGET_MEMTOTAL_BYTES. */
 #define ZCL_TEST_DEPLOY_TARGET_MEMTOTAL_BYTES "100300546048"
 int t_systemd_memory_budget(void)

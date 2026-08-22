@@ -346,7 +346,8 @@ jobs:
           ZCL_LINT_VERBOSE: "1"
           # check-systemd-memory-budget sums the deploy/*.service MemoryMax
           # caps and fails if they reach/exceed a percentage of REAL host
-          # memory — a fact about the actual deploy target (rhett.dev, the
+          # memory — a fact about the actual deploy target (the maintainer
+          # host, the
           # 32-core/93 GB box cited as the "dev reference host" throughout
           # this repo's docs and this very workflow's comments), not about
           # whatever RAM a given hosted CI runner happens to have. Reading

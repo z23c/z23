@@ -630,8 +630,8 @@ observation row, not a looser key in the recorder.
 
 Measured 2026-07-29, read-only, against the canonical node: inside a
 15-minute window exactly **one** remote host was surfacing a learnable tip
-hash at all, and it was `205.209.104.118` — the operator's own second
-server — on three separate connections. A recorder counting distinct
+hash at all, and it was the operator's own second server — on three
+separate connections. A recorder counting distinct
 `ip:port` would have called that three independent witnesses; the recorder
 counts distinct HOSTS, so it is one, it is below the two-witness control,
 and every sample records `could-not-ask`.

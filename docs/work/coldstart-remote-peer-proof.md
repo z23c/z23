@@ -19,7 +19,7 @@ cannot stand in for a remote one:
 
 ```
 bash tools/scripts/cold_start_to_tip_stopwatch.sh \
-    --peer=205.209.104.118:8033 --budget=600 --sample=15
+    --peer=198.51.100.10:8033 --budget=600 --sample=15
 ```
 
 Fresh `/tmp` datadir, isolated `$HOME`, ports 39170-39173, `-listen=0`,
@@ -50,11 +50,11 @@ verack_received 0, handshake_complete 0, pre_handshake_disconnects 8
 Every attempt reached TCP and none reached the handshake; the captured
 `node.log` carries 18 `protocol failure before handshake` lines over the run.
 
-`dumpstate connman` addnode ledger for `205.209.104.118:8033`:
+`dumpstate connman` addnode ledger for `198.51.100.10:8033`:
 `tcp_failures 0`, `protocol_failures 1+`, `backoff_sec 60`. Node log:
 
 ```
-Addnode 205.209.104.118:8033: protocol failure before handshake
+Addnode 198.51.100.10:8033: protocol failure before handshake
     (remote-close, state=connecting)
 ```
 
@@ -80,7 +80,7 @@ exists.
 The fitting server-side rule is the per-IP inbound cap in `lib/net/src/net.c`:
 `same_ip_count >= 3` closes the socket immediately with
 `too many inbound connections from same IP`. `ss -tn state established 'dst
-205.209.104.118:8033'` shows this host already holding exactly three
+198.51.100.10:8033'` shows this host already holding exactly three
 established sockets to that peer — the cap value — opened by the canonical node
 that shares this machine's public IP. The harness node is the fourth connection
 from the same source IP and is refused at accept. This is the sybil defence

@@ -33,7 +33,8 @@
 #   tools/ship.sh --skip-gate         # reuse a banked verdict for this source id
 #
 # Environment:
-#   ZCL_SHIP_REMOTE   ssh destination of the second node (default rhett2)
+#   ZCL_SHIP_REMOTE   ssh destination of the second node (required; fleet
+#                     endpoints are operator-local and not committed)
 #   ZCL_SHIP_HOSTS    override the whole fleet list, space separated
 set -euo pipefail
 
@@ -43,7 +44,11 @@ cd "$REPO_ROOT"
 # shellcheck source=tools/scripts/source_identity_lib.sh
 . "$REPO_ROOT/tools/scripts/source_identity_lib.sh"  # zcl_is_sha256, zcl_json_first_sha256
 
-REMOTE_HOST="${ZCL_SHIP_REMOTE:-205.209.104.118}"
+if [ -z "${ZCL_SHIP_REMOTE:-}" ]; then
+    echo "set ZCL_SHIP_REMOTE=<host> locally; fleet endpoints are operator-local and not committed" >&2
+    exit 2
+fi
+REMOTE_HOST="$ZCL_SHIP_REMOTE"
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15)
 TARGETS="local remote"
 TARGETS_EXPLICIT=0

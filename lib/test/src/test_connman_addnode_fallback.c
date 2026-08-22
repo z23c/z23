@@ -257,7 +257,7 @@ int test_connman_addnode_fallback(void)
 
         /* Three days of a peer that accepts TCP and immediately closes must
          * remain a small bounded number of scheduler assignments, not the
-         * tens-of-thousands/day trajectory observed on rhett4. */
+         * tens-of-thousands/day trajectory observed on node4. */
         int simulated_attempts = 0;
         int64_t next_attempt = 0;
         for (int64_t second = 0; second < 3 * 86400; second++) {

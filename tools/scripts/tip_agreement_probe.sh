@@ -99,8 +99,8 @@
 # into TWO witnesses in two shapes this codebase actually produces, both
 # confirmed against the node's own SQLite:
 #   * an addr with no ":port" at all — rtrim eats the last IPv4 octet, so
-#     "205.209.104.118" keys as "205.209.104." while the same host's ported
-#     row keys as "205.209.104.118". Two keys, one machine.
+#     "198.51.100.10" keys as "198.51.100." while the same host's ported
+#     row keys as "198.51.100.10". Two keys, one machine.
 #   * IPv6 is rendered TWO different ways by two production paths. An
 #     -addnode dial goes through net_service_to_string (connman_dialer.c,
 #     connman_complete_dial) and BRACKETS the address: "[2001:...:0001]:8033".
@@ -123,8 +123,8 @@
 # is a per-peer identity in the observation row, not a looser key here.
 #
 # That measurement carries a second, larger finding, and this file is where
-# it is written down rather than smoothed over: the one host was
-# 205.209.104.118 — the operator's OWN second server. At a two-distinct-host
+# it is written down rather than smoothed over: the one host was the
+# operator's OWN second server. At a two-distinct-host
 # bar this node currently has NO off-host tip-hash agreement evidence, only
 # its own infrastructure talking to itself one layer further out. That is
 # the honest state of the network view, and the correct response is to get
