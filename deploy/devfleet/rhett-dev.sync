@@ -1,0 +1,9 @@
+BOX=rhett-dev
+LAST_SYNC_AT=2026-08-22T21:36:37Z
+LAST_SYNC_SHA=4d252d7d440853567ee20371256eda5bce594e2f
+ORIGIN_MAIN=4d252d7d440853567ee20371256eda5bce594e2f
+DEVFLEET_NODE_UP=1
+DEVFLEET_PEERS=3
+DEVFLEET_ACTION=none
+PROD_ACTION=restart_error:Failed to restart zclassic23.service: Unit zclassic23.service not found.
+SYNC_ERROR=prod_restart_failed
