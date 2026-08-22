@@ -985,6 +985,20 @@ case "$MODE" in
     paths)
         emit_paths
         ;;
+    session-cache-drop)
+        # A Makefile parse/restart boundary (the vendor/view bootstrap
+        # includes) establishes or repairs build inputs AFTER this session's
+        # first capture may already have cached a record that cannot see them.
+        # Drop the pre-boundary record so the post-restart parse re-derives
+        # the identity from the final input bytes. Best-effort by design: an
+        # unset/malformed session token means there is no cache to drop, and
+        # a failed removal still leaves every later verify-record fail-closed.
+        if cache="$(session_cache_path "$ZCL_SOURCE_IDENTITY_SESSION")"; then
+            rm -f -- "$cache" ||
+                echo "source-identity: could not drop session cache: $cache" >&2
+        fi
+        exit 0
+        ;;
     capture)
         capture
         ;;
@@ -1026,7 +1040,7 @@ case "$MODE" in
         verify_mutation "$EXPECTED"
         ;;
     *)
-        echo "usage: tools/dev/source-identity.sh paths|capture|capture-record|verify EXPECTED|verify-record EXPECTED CLEAN MUTATION|verify-mutation EXPECTED_MUTATION" >&2
+        echo "usage: tools/dev/source-identity.sh paths|capture|capture-record|session-cache-drop|verify EXPECTED|verify-record EXPECTED CLEAN MUTATION|verify-mutation EXPECTED_MUTATION" >&2
         exit 2
         ;;
 esac

@@ -175,6 +175,17 @@ case "$MODE" in
     paths) ;;
     capture) capture_authority ;;
     capture-record) capture_record_cached ;;
+    session-cache-drop)
+        # Same parse/restart-boundary contract as source-identity.sh: a
+        # bootstrap include that establishes build inputs invalidates this
+        # session's pre-boundary cached record. Best-effort; verify stays
+        # fail-closed even when there is nothing to drop.
+        if cache="$(session_cache_path "$ZCL_SOURCE_IDENTITY_SESSION")"; then
+            rm -f -- "$cache" ||
+                echo "sovereign-source-identity: could not drop session cache: $cache" >&2
+        fi
+        exit 0
+        ;;
     verify)
         [[ "$EXPECTED" =~ ^[0-9a-fA-F]{64}$ ]] ||
             fail "verify requires a 64-hex expected identity"
@@ -206,7 +217,7 @@ case "$MODE" in
         printf '%s\n' "$mutation"
         ;;
     *)
-        echo "usage: tools/dev/source-identity.sh paths|capture|capture-record|verify EXPECTED|verify-record EXPECTED COMPLETE MUTATION|verify-mutation MUTATION" >&2
+        echo "usage: tools/dev/source-identity.sh paths|capture|capture-record|session-cache-drop|verify EXPECTED|verify-record EXPECTED COMPLETE MUTATION|verify-mutation MUTATION" >&2
         exit 2
         ;;
 esac

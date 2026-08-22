@@ -88,7 +88,11 @@ ZCL_PORTABLE_FRONTDOOR_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip \
 # parse/restart boundary before BUILD_SOURCE_RECORD is captured. Otherwise the
 # first parse would omit the archives, create them later, and correctly refuse
 # its own post-link identity check. The same boundary protects entry points
-# whose `vendor-ready` prerequisite may repair stale archives.
+# whose `vendor-ready` prerequisite may repair stale archives. Because GNU Make
+# keeps its pid (and therefore its ZCL_SOURCE_IDENTITY_SESSION) across the
+# restart, the boundary recipe must also drop this session's cached capture:
+# the pre-boundary parse may already have memoized a record that cannot see
+# the inputs this boundary establishes.
 NODE_VENDOR_ARCHIVES = libsecp256k1.a libcrypto.a libssl.a libevent.a \
 	libevent_openssl.a libevent_pthreads.a libsqlite3.a libz.a libtor_stub.a
 # A focused `make z23` (or legacy `make zclassic23`) needs no C++ toolchain.
@@ -1059,9 +1063,14 @@ tor-full:
 # Included only on the first parse when inputs are missing or a requested
 # front door can repair them. Remaking an included makefile forces GNU Make to
 # restart parsing; the second parse captures the final linked archive bytes.
+# The session-cache drop runs FIRST: the pre-restart parse already memoized a
+# capture keyed by this Make process's identity-session token, and without the
+# drop the post-restart parse would cache-hit that cold record instead of
+# re-deriving the identity from the archives vendor-ready just established.
 $(VENDOR_BOOTSTRAP_MK): vendor-ready
 	@set -eu; \
 	mkdir -p "$(dir $@)"; \
+	ZCL_SOURCE_IDENTITY_SESSION='$(ZCL_SOURCE_IDENTITY_SESSION)' tools/dev/source-identity.sh session-cache-drop; \
 	tmp="$$(mktemp "$(dir $@).vendor-ready.XXXXXX")"; \
 	trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
 	printf '%s\n' '# generated: vendor inputs established before source identity capture' > "$$tmp"; \
@@ -1686,9 +1695,13 @@ $(SITE_CSS_GEN): $(SITE_CSS_SRC) tools/gen_templates.c | $(TMPL_TOOL)
 
 # Included near the top of this file. Updating it after its generated-header
 # prerequisites makes GNU Make restart before any ordinary target recipe runs.
+# Same session-cache contract as VENDOR_BOOTSTRAP_MK above: a regenerated
+# header is invisible to a capture the pre-restart parse already memoized, so
+# drop that record and let the post-restart parse re-derive it.
 $(VIEW_BOOTSTRAP_MK): $(VIEW_GEN_HEADERS)
 	@set -eu; \
 	mkdir -p "$(dir $@)"; \
+	ZCL_SOURCE_IDENTITY_SESSION='$(ZCL_SOURCE_IDENTITY_SESSION)' tools/dev/source-identity.sh session-cache-drop; \
 	tmp="$$(mktemp "$(dir $@).views-ready.XXXXXX")"; \
 	trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
 	printf '%s\n' '# generated: view inputs established before source identity capture' > "$$tmp"; \
