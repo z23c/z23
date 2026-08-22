@@ -20,6 +20,7 @@
 #include "test/test_core.h"
 
 #include "net/netaddr.h"
+#include "net/onion_v3_address.h"
 
 #include <string.h>
 
@@ -49,6 +50,7 @@ static void addr_tor(struct net_addr *a)
 {
     net_addr_init(a);
     a->has_torv3 = true;
+    memset(a->torv3, 0xAB, TORV3_ADDR_SIZE);   /* nonzero: renderable */
 }
 
 /* ── net_addr_is_rfc1918 (10/8, 172.16/12, 192.168/16) ───────────── */
@@ -609,8 +611,22 @@ static int test_to_string(void)
 
     addr_tor(&a);
     rc = net_addr_to_string(&a, buf, sizeof(buf));
-    NC_CHECK("to_string: torv3 address renders the fixed placeholder",
-             rc > 0 && strcmp(buf, "[torv3]") == 0);
+    {
+        char expect[ONION_V3_ADDRESS_LEN + 1];
+        bool rendered = onion_v3_address_from_pubkey(a.torv3, expect);
+        NC_CHECK("to_string: torv3 address renders the real v3 hostname",
+                 rendered && rc > 0 && strcmp(buf, expect) == 0);
+    }
+
+    {
+        /* The degenerate all-zero key cannot render a hostname — the
+         * fixed placeholder remains as the defensive fallback. */
+        net_addr_init(&a);
+        a.has_torv3 = true;
+        rc = net_addr_to_string(&a, buf, sizeof(buf));
+        NC_CHECK("to_string: all-zero torv3 key falls back to placeholder",
+                 rc > 0 && strcmp(buf, "[torv3]") == 0);
+    }
 
     {
         addr_ipv4(&a, 192, 168, 1, 42);
@@ -654,10 +670,15 @@ static int test_service_to_string(void)
         net_service_init(&s);
         addr_tor(&s.addr);
         s.port = 8033;
-        rc = net_service_to_string(&s, buf, sizeof(buf));
-        NC_CHECK("service_to_string: torv3 renders [torv3]:port, "
-                 "NOT double-bracketed",
-                 rc > 0 && strcmp(buf, "[torv3]:8033") == 0);
+        char svcbuf[NET_SERVICE_STR_MAX + 1];
+        rc = net_service_to_string(&s, svcbuf, sizeof(svcbuf));
+        char expect[ONION_V3_ADDRESS_LEN + 1];
+        bool rendered = onion_v3_address_from_pubkey(s.addr.torv3, expect);
+        char expect_svc[NET_SERVICE_STR_MAX + 1];
+        snprintf(expect_svc, sizeof(expect_svc), "%s:8033", expect);
+        NC_CHECK("service_to_string: torv3 renders hostname:port, "
+                 "NOT bracketed",
+                 rendered && rc > 0 && strcmp(svcbuf, expect_svc) == 0);
     }
     return failures;
 }

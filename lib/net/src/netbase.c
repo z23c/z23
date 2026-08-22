@@ -149,6 +149,34 @@ bool lookup_numeric(const char *name, struct net_service *result,
     return true;
 }
 
+bool net_name_is_onion(const char *name)
+{
+    if (!name)
+        return false;
+    char host[256];
+    int port = 0;
+    split_host_port(name, host, sizeof(host), &port);
+    size_t len = strlen(host);
+    return len > 6 && strcmp(host + len - 6, ".onion") == 0;
+}
+
+bool lookup_onion(const char *name, struct net_service *result,
+                  uint16_t default_port)
+{
+    if (!name || !result)
+        LOG_FAIL("net", "lookup_onion: invalid arguments");
+
+    char host[256];
+    int port = (int)default_port;
+    split_host_port(name, host, sizeof(host), &port);
+
+    if (!net_addr_from_onion(host, &result->addr))
+        LOG_FAIL("net", "lookup_onion: '%s' is not a valid v3 onion address",
+                 host);
+    result->port = (uint16_t)port;
+    return true;
+}
+
 struct timeval millis_to_timeval(int64_t ms)
 {
     struct timeval tv;
@@ -183,6 +211,16 @@ enum zcl_connect_start connect_socket_start(const struct net_service *addr,
                                             zcl_socket_t *sock_out)
 {
     *sock_out = ZCL_INVALID_SOCKET;
+
+    /* Fail closed: a torv3 service has no sockaddr. Onion dials route
+     * through onion_stream_connect (raw dynhost stream over the embedded
+     * Tor circuit); letting one reach connect(2) would dial the all-zero
+     * IPv6 address on the clearnet. */
+    if (net_addr_is_tor(&addr->addr)) {
+        LOG_RETURN(ZCL_CONNECT_START_ERROR, "net",
+                   "connect_socket_start: torv3 address refused — onion "
+                   "dials use onion_stream_connect, never connect(2)");
+    }
 
     struct sockaddr_storage ss;
     socklen_t len = sizeof(ss);

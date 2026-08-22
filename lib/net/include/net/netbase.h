@@ -33,6 +33,16 @@ bool lookup_host(const char *name, struct net_addr *results,
 bool lookup_numeric(const char *name, struct net_service *result,
                     uint16_t default_port);
 
+/* True when the host part of "host[:port]" carries the ".onion" suffix.
+ * Detection only — no parsing, no resolution. */
+bool net_name_is_onion(const char *name);
+
+/* Parse "<56 base32>.onion[:port]" into a torv3 net_service. Fails CLOSED:
+ * false on any malformed onion name, and NEVER attempts DNS or clearnet
+ * resolution — a .onion name must never leak to getaddrinfo. */
+bool lookup_onion(const char *name, struct net_service *result,
+                  uint16_t default_port);
+
 bool connect_socket_directly(const struct net_service *addr,
                              zcl_socket_t *sock_out,
                              int timeout_ms);

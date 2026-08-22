@@ -5,6 +5,7 @@
  * file COPYING or http://www.opensource.org/licenses/mit-license.php. */
 
 #include "net/netaddr.h"
+#include "net/onion_v3_address.h"
 #include "util/log_macros.h"
 #include <stdio.h>
 
@@ -188,11 +189,17 @@ size_t net_addr_get_group(const struct net_addr *a, unsigned char *out,
     return pos;
 }
 
-void net_service_get_key(const struct net_service *s, unsigned char out[18])
+void net_service_get_key(const struct net_service *s,
+                         unsigned char out[NET_SERVICE_KEY_SIZE])
 {
-    memcpy(out, s->addr.ip, 16);
-    out[16] = (unsigned char)(s->port >> 8);
-    out[17] = (unsigned char)(s->port & 0xFF);
+    memset(out, 0, NET_SERVICE_KEY_SIZE);
+    out[0] = s->addr.has_torv3 ? 1 : 0;
+    if (s->addr.has_torv3)
+        memcpy(out + 1, s->addr.torv3, TORV3_ADDR_SIZE);
+    else
+        memcpy(out + 1, s->addr.ip, 16);
+    out[33] = (unsigned char)(s->port >> 8);
+    out[34] = (unsigned char)(s->port & 0xFF);
 }
 
 int net_addr_to_string(const struct net_addr *a, char *out, size_t out_size)
@@ -203,6 +210,11 @@ int net_addr_to_string(const struct net_addr *a, char *out, size_t out_size)
     }
 
     if (a->has_torv3) {
+        char hostname[ONION_V3_ADDRESS_LEN + 1];
+        if (onion_v3_address_from_pubkey(a->torv3, hostname))
+            return snprintf(out, out_size, "%s", hostname);
+        /* Degenerate all-zero key cannot render — keep a placeholder so
+         * the caller still gets a printable, unmistakable token. */
         return snprintf(out, out_size, "[torv3]");
     }
 
@@ -217,11 +229,26 @@ int net_addr_to_string(const struct net_addr *a, char *out, size_t out_size)
 
 int net_service_to_string(const struct net_service *s, char *out, size_t out_size)
 {
-    char addr_str[128];
+    char addr_str[NET_ADDR_STR_MAX + 1];
     net_addr_to_string(&s->addr, addr_str, sizeof(addr_str));
 
     if (net_addr_is_ipv6(&s->addr) && !s->addr.has_torv3) {
         return snprintf(out, out_size, "[%s]:%u", addr_str, s->port);
     }
     return snprintf(out, out_size, "%s:%u", addr_str, s->port);
+}
+
+bool net_addr_from_onion(const char *hostname, struct net_addr *out)
+{
+    if (!out)
+        return false;
+    net_addr_init(out);
+    if (!hostname)
+        return false;
+    if (!onion_v3_pubkey_from_address(hostname, out->torv3)) {
+        net_addr_init(out);
+        return false;
+    }
+    out->has_torv3 = true;
+    return true;
 }

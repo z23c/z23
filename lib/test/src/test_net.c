@@ -13,6 +13,7 @@
 #include "net/version.h"
 #include "net/fast_sync.h"
 #include "net/onion_service.h"
+#include "net/onion_v3_address.h"
 #include "net/onion_ratelimit.h"
 #include "net/puzzle.h"
 #include "net/msgprocessor.h"
@@ -725,6 +726,89 @@ int test_net(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    printf("lookup_onion parse accept/refuse... ");
+    {
+        /* The .onion addnode parse branch (shared by RPC addnode, boot
+         * -addnode, and connman_add_seed_node): a valid v3 name — derived
+         * from a fixed pubkey through the shared codec, so the checksum is
+         * real — parses to the pubkey bytes and port; everything else
+         * fails CLOSED and never touches DNS. */
+        uint8_t pub[32];
+        for (int i = 0; i < 32; i++)
+            pub[i] = (uint8_t)(i * 7 + 1);
+        char host[ONION_V3_ADDRESS_LEN + 1];
+        bool ok = onion_v3_address_from_pubkey(pub, host);
+
+        char withport[ONION_V3_ADDRESS_LEN + 8];
+        snprintf(withport, sizeof(withport), "%s:8233", host);
+        struct net_service svc;
+        memset(&svc, 0, sizeof(svc));
+        ok = ok && lookup_onion(withport, &svc, 8033);
+        ok = ok && svc.addr.has_torv3 &&
+             memcmp(svc.addr.torv3, pub, 32) == 0 && svc.port == 8233;
+
+        /* No port in the string -> the caller's default port. */
+        ok = ok && lookup_onion(host, &svc, 8033) && svc.port == 8033 &&
+             svc.addr.has_torv3;
+
+        /* Refusals: corrupted checksum, truncated name, clearnet literal,
+         * and a non-onion name — all fail closed. */
+        char bad[ONION_V3_ADDRESS_LEN + 1];
+        snprintf(bad, sizeof(bad), "%s", host);
+        bad[0] = (bad[0] == 'a') ? 'b' : 'a';
+        ok = ok && !lookup_onion(bad, &svc, 8033) && !svc.addr.has_torv3;
+        ok = ok && !lookup_onion("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion",
+                                 &svc, 8033);
+        ok = ok && !lookup_onion("127.0.0.1:8233", &svc, 8033);
+        ok = ok && !lookup_onion("example.com", &svc, 8033);
+
+        /* Detection helper: suffix on the host part, with or without port. */
+        ok = ok && net_name_is_onion(host) && net_name_is_onion(withport) &&
+             !net_name_is_onion("10.0.0.1:8233") &&
+             !net_name_is_onion("example.com");
+
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+
+    printf("net_addr onion render/parse round-trip... ");
+    {
+        uint8_t pub[32];
+        for (int i = 0; i < 32; i++)
+            pub[i] = (uint8_t)(0xff - i * 5);
+        char host[ONION_V3_ADDRESS_LEN + 1];
+        bool ok = onion_v3_address_from_pubkey(pub, host);
+
+        /* pubkey -> net_addr -> string == original hostname. */
+        struct net_addr a;
+        ok = ok && net_addr_from_onion(host, &a);
+        ok = ok && a.has_torv3 && memcmp(a.torv3, pub, 32) == 0;
+        char rendered[NET_ADDR_STR_MAX + 1];
+        int n = net_addr_to_string(&a, rendered, sizeof(rendered));
+        ok = ok && n == (int)strlen(host) && strcmp(rendered, host) == 0;
+
+        /* The 56-char suffix-less form parses too (codec contract). */
+        char bare[57];
+        memcpy(bare, host, 56);
+        bare[56] = '\0';
+        struct net_addr b2;
+        ok = ok && net_addr_from_onion(bare, &b2) && net_addr_eq(&a, &b2);
+
+        /* Service render is the bare hostname:port form (no brackets). */
+        struct net_service s;
+        net_service_init(&s);
+        s.addr = a;
+        s.port = 8033;
+        char svc_str[NET_SERVICE_STR_MAX + 1];
+        n = net_service_to_string(&s, svc_str, sizeof(svc_str));
+        char expect[NET_SERVICE_STR_MAX + 1];
+        snprintf(expect, sizeof(expect), "%s:8033", host);
+        ok = ok && n == (int)strlen(expect) && strcmp(svc_str, expect) == 0;
+
+        if (ok) printf("OK (%s)\n", host);
+        else { printf("FAIL\n"); failures++; }
+    }
+
     printf("millis_to_timeval... ");
     {
         struct timeval tv = millis_to_timeval(5500);
@@ -777,9 +861,41 @@ int test_net(void)
         unsigned char ip[] = {192, 168, 1, 1};
         net_addr_set_ipv4(&s.addr, ip);
         s.port = 8233;
-        unsigned char key[18];
+        unsigned char key[NET_SERVICE_KEY_SIZE];
         net_service_get_key(&s, key);
-        bool ok = key[16] == (8233 >> 8) && key[17] == (8233 & 0xFF);
+        bool ok = key[0] == 0 &&
+                  memcmp(key + 1, s.addr.ip, 16) == 0 &&
+                  key[33] == (8233 >> 8) && key[34] == (8233 & 0xFF);
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+
+    printf("net_service_get_key torv3 distinctness... ");
+    {
+        /* Two DIFFERENT onion services on the same port must produce
+         * different keys, and must not collide with any IP service —
+         * previously all torv3 services shared the all-zero ip[16] key. */
+        struct net_service o1, o2, ip4;
+        net_service_init(&o1);
+        net_service_init(&o2);
+        net_service_init(&ip4);
+        o1.addr.has_torv3 = true;
+        o2.addr.has_torv3 = true;
+        memset(o1.addr.torv3, 0x11, TORV3_ADDR_SIZE);
+        memset(o2.addr.torv3, 0x22, TORV3_ADDR_SIZE);
+        o1.port = o2.port = ip4.port = 8033;
+        unsigned char k1[NET_SERVICE_KEY_SIZE], k2[NET_SERVICE_KEY_SIZE],
+                      k3[NET_SERVICE_KEY_SIZE];
+        net_service_get_key(&o1, k1);
+        net_service_get_key(&o2, k2);
+        net_service_get_key(&ip4, k3);
+        bool ok = memcmp(k1, k2, NET_SERVICE_KEY_SIZE) != 0 &&
+                  memcmp(k1, k3, NET_SERVICE_KEY_SIZE) != 0 &&
+                  k1[0] == 1 && k2[0] == 1;
+        /* Same service twice → identical key. */
+        unsigned char k1b[NET_SERVICE_KEY_SIZE];
+        net_service_get_key(&o1, k1b);
+        ok = ok && memcmp(k1, k1b, NET_SERVICE_KEY_SIZE) == 0;
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }

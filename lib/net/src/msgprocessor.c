@@ -1140,7 +1140,7 @@ static bool handle_zfileaddr(struct msg_processor *mp, struct p2p_node *node,
                 fip, fport, node->addr.svc.port,
                 (int64_t)platform_time_wall_time_t(), true,
                 mp->file_service_save_ctx);
-        char ipbuf[64];
+        char ipbuf[NET_ADDR_STR_MAX + 1];
         net_addr_to_string(&node->addr.svc.addr, ipbuf, sizeof(ipbuf));
         printf("Peer %s: file service at port %d (saved)\n",
                ipbuf, fport);

@@ -160,11 +160,31 @@ bool net_addr_is_operator_local(const struct net_addr *a);
 size_t net_addr_get_group(const struct net_addr *a, unsigned char *out,
                           size_t out_size);
 
-#define NET_SERVICE_KEY_SIZE 18
+/* Worst-case rendered lengths, excluding the NUL: a torv3 hostname is
+ * "<56 base32>.onion" (62); a service adds ":<port>" (6). Callers that may
+ * carry an onion address must size buffers with these, not INET6_ADDRSTRLEN
+ * habits. */
+#define NET_ADDR_STR_MAX 62
+#define NET_SERVICE_STR_MAX 69
 
-void net_service_get_key(const struct net_service *s, unsigned char out[18]);
+/* Fixed-size identity key for a service. Layout:
+ *   out[0]      = 1 when the address is a torv3 onion, else 0
+ *   out[1..32]  = torv3 pubkey for onion addresses, else ip[16] followed
+ *                 by 16 zero bytes
+ *   out[33..34] = port, big-endian
+ * The torv3 pubkey MUST be part of the key: before it was, every onion
+ * service (ip[16] zeroed) collided onto the single all-zero key. */
+#define NET_SERVICE_KEY_SIZE 35
+
+void net_service_get_key(const struct net_service *s,
+                         unsigned char out[NET_SERVICE_KEY_SIZE]);
 
 int net_addr_to_string(const struct net_addr *a, char *out, size_t out_size);
 int net_service_to_string(const struct net_service *s, char *out, size_t out_size);
+
+/* Parse a v3 onion hostname ("<56 base32>.onion", suffix optional per the
+ * codec) into a torv3 net_addr. False — with *out zeroed — on any malformed
+ * input. NEVER resolves anything; pure decode. */
+bool net_addr_from_onion(const char *hostname, struct net_addr *out);
 
 #endif

@@ -105,7 +105,7 @@ static void push_addnode_entries_json(struct json_value *out,
         struct json_value e = {0};
         json_set_object(&e);
 
-        char addr_str[64] = {0};
+        char addr_str[NET_SERVICE_STR_MAX + 1] = {0};
         net_service_to_string(&cm->addnodes[i].svc, addr_str,
                               sizeof(addr_str));
 

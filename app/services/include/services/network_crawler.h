@@ -189,10 +189,11 @@ bool network_crawler_default_probe(const struct net_address *addr,
                                    int handshake_timeout_ms,
                                    struct ncrawl_probe_result *out);
 
-/* Render `addr` into its census key string: "<ip>:<port>" for clearnet, and the
- * REAL "<56 base32>.onion:<port>" for a Tor v3 address. net_addr_to_string()
- * renders every onion as the literal "[torv3]", which would collapse the whole
- * onion half of the network into a single census row keyed "[torv3]:8033".
+/* Render `addr` into its census key string: "<ip>:<port>" for clearnet, and
+ * "<56 base32>.onion:<port>" for a Tor v3 address. The onion branch keeps
+ * its own codec call (ncrawl_onion_hostname) because an UNRENDERABLE onion
+ * must classify as a NOT_PROBED census row with a reason, while
+ * net_service_to_string() would emit the "[torv3]" fallback placeholder.
  * Returns false when the address cannot be rendered (out is NUL-terminated
  * empty in that case). */
 bool network_crawler_render_addr(const struct net_address *addr,
