@@ -1,0 +1,8 @@
+BOX=rhett-dev
+ROUNDTRIP=fail
+ASSERTION=PEER_ADDED
+WALL_SECONDS=1
+ATTEMPTED_AT=2026-08-22T20:46:49Z
+PEER_ONION=24xma2daqzhryowrdbf2qskzansowqqhmxzadad5srbrcsmt4hrc3ayd.onion
+PEER_PORT=39030
+DETAIL=addnode refuses onion endpoints (numeric IP only); tor-socks connect to onion:39030 and onion:8033 refused (SOCKS5 err5 x3 each); peer onion serves dynhost HTTP on port 80 only; peer directory.json advertises no clearnet endpoint
