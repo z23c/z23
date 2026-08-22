@@ -1,0 +1,4 @@
+BOX=rhett-dev
+ONION_ADDRESS=5wvfod4ikluv4w3lqe3whn2k7xdsympxxu2qkqw452thtjxbar5hrcqd.onion
+P2P_ENDPOINT=74.50.74.102:8055
+SOURCE_SHA=8f38ff31e0c2c41b0da02a80c3c6b6b9b26f6860
