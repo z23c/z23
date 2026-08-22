@@ -13,6 +13,7 @@ AGENT_IMPACT_RULE("app/services/src/segment_sealer_service.c|app/services/includ
 AGENT_IMPACT_RULE("app/conditions/src/segment_corruption.c|app/conditions/include/conditions/segment_corruption.h|lib/test/src/test_segment_corruption.c", "segment_corruption chain_segment condition_engine syncdiag_rpc make_lint_gates")
 AGENT_IMPACT_RULE("lib/sim/src/simnet_chaos_faults.c|lib/sim/include/sim/simnet_chaos_faults.h|lib/test/src/test_always_sync_chaos.c", "always_sync_chaos always_sync_lifecycle reducer_frontier segment_corruption supervisor condition_engine stage_repair make_lint_gates")
 AGENT_IMPACT_RULE("lib/test/src/test_always_sync_lifecycle.c", "always_sync_lifecycle make_lint_gates")
+AGENT_IMPACT_RULE("lib/test/src/test_read_leaf_no_datadir_write.c", "read_leaf_no_datadir_write make_lint_gates")
 AGENT_IMPACT_RULE("app/controllers/src/store_controller.c|app/controllers/src/store_controller_pow.c|app/controllers/src/store_controller_schema.c|app/controllers/include/controllers/store_controller.h|app/controllers/include/controllers/store_controller_internal.h|app/models/src/store.c|app/models/include/models/store.h|app/views/src/store_view.c|app/views/include/views/store_internal.h", "store store_listing store_e2e_gate store_e2e_shielded sqlite make_lint_gates")
 /* The typed merchant surface (app.store.list-product / app.store.products) is
  * a second writer of the same db_store_product record the storefront serves,
