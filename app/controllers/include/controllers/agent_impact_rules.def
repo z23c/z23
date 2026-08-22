@@ -88,6 +88,9 @@ AGENT_IMPACT_RULE("lib/net/src/msg_blocks.c|lib/net/src/msgprocessor.c|lib/net/i
 AGENT_IMPACT_RULE("lib/net/src/msgprocessor_inv.c|lib/net/src/msgprocessor_internal.h|lib/net/src/msg_bounds_guard.c|lib/net/include/net/msg_bounds_guard.h|lib/test/src/test_net_msg_dos.c", "net_msg_dos net msg_handlers process_headers_adversarial make_lint_gates")
 AGENT_IMPACT_RULE("lib/net/src/download.c|lib/net/include/net/download.h|lib/test/src/test_download.c", "download syncdiag_rpc api block_swarm_loopback")
 AGENT_IMPACT_RULE("lib/net/src/tor_integration.c|lib/net/include/net/tor_integration.h|lib/test/src/test_tor.c", "tor make_lint_gates")
+/* Raw dynhost-stream onion P2P dialer (no SOCKS): the socketpair bridge,
+ * its public header, and its fail-closed unit tests. */
+AGENT_IMPACT_RULE("lib/net/src/onion_stream.c|lib/net/include/net/onion_stream.h|lib/test/src/test_onion_stream.c", "onion_stream net tor connman_addnode_fallback make_lint_gates")
 AGENT_IMPACT_RULE("lib/net/src/ws_events.c|lib/net/include/net/ws_events.h|lib/test/src/test_ws_events.c", "ws_events make_lint_gates")
 AGENT_IMPACT_RULE("lib/rpc/src/async_rpc_queue.c|lib/rpc/include/rpc/async_rpc_queue.h", "rpc make_lint_gates")
 AGENT_IMPACT_RULE("lib/rpc/src/httpserver.c|lib/rpc/include/rpc/httpserver.h", "rpc make_lint_gates")

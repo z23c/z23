@@ -1231,6 +1231,8 @@ int main(int argc, char **argv)
       failures += test_onion_directory(); }
     { extern int test_onion_persistence(void);
       failures += test_onion_persistence(); }
+    { extern int test_onion_stream(void);
+      failures += test_onion_stream(); }
     { extern int test_cold_start_sync(void);
       failures += test_cold_start_sync(); }
     { extern int test_kill9_recovery(void);

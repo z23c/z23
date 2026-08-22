@@ -100,15 +100,14 @@ check which one a claim is about before believing it:
 - `package_swarm_node.c` — scheduler/serving engine. Also has **no socket**,
   but it is not "pure" either: it takes a mutex and writes the package store
   on disk.
-- `config/src/boot_zcode_dht.c` and
-  `config/src/boot_zcode_swarm_membership.c` — the composition adapters that
-  reach the network, carrying frames under the `zpkgswm` tag via
-  `p2p_node_begin_message`, gated behind `-packagehost=1` (default off).
+- `config/src/boot_zcode_swarm.c` — the ONLY file that reaches the network,
+  carrying frames under the `zpkgswm` tag via `p2p_node_begin_message`
+  (slice 12, `833d7f398`), gated behind `-packagehost=1` (default off).
 
 So the subsystem IS socket-wired while both `lib/vcs` halves are not. It still
 has no install, execution, wallet, or publication authority.
 <!-- claim: symbol-absent socket lib/vcs/src/package_swarm_node.c # the engine half has no socket either -->
-<!-- claim: symbol-present p2p_node_begin_message config/src/boot_zcode_swarm_membership.c # the swarm IS socket-wired -->
+<!-- claim: symbol-present p2p_node_begin_message config/src/boot_zcode_swarm.c # the swarm IS socket-wired -->
 <!-- claim: symbol-absent socket lib/vcs/src/package_swarm.c # the codec half stays pure -->
 
 `lib/metaverse/` owns the sovereign-property vocabulary: the `property_id`
@@ -148,7 +147,7 @@ page changing with it.
 <!--   app_shape_folders    = directories directly under app/                        -->
 <!-- Fix a mismatch with `tools/scripts/check_doc_counts.sh --fix`, never by hand.  -->
 
-test_groups: 941
+test_groups: 942
 port_interfaces: 13
 persistence_adapters: 14
 condition_registrations: 52
