@@ -4200,7 +4200,7 @@ skip_parallel_tests:
         struct node_profile p;
         memset(&p, 0, sizeof(p));
         enum peer_transport t = peer_strategy_select(
-            &p, "205.209.104.118:8033");
+            &p, "203.0.113.9:8033");
         bool ok = (t == TRANSPORT_TOR);
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }

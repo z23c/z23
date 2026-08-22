@@ -6,6 +6,14 @@
  * -allow-clearnet-snapshot-fetch probe loop) can never drift apart. Both
  * ports default to FS_PORT (net/file_service.h).
  *
+ * This project's OWN file-service seeds are deliberately NOT committed here:
+ * they are passed at RUNTIME via -fileservice=HOST[:PORT] (handled by
+ * bbf_add_peer in config/src/boot_bundle_fetch_seeds.c, which honours
+ * ctx->file_service_peer as slot 0) or via -connect= hosts, so operator
+ * endpoints stay local-only and are never named in the public source. The
+ * single compiled seed below is a pre-existing third-party public seed not
+ * operated by this project.
+ *
  * Trust note: these seeds are unauthenticated (clearnet, no TLS, no
  * ZClassic state commitment) — an unreachable, hostile, or simply
  * operator-unknown seed can only waste a fetch attempt, never forge
@@ -18,19 +26,8 @@
  * reference text" doctrine for the same shape of reasoning applied to
  * content instead of network identity.
  *
- * Per-seed provenance:
- *   - 205.209.104.118, 140.174.189.3: pre-existing seeds (operator of the
- *     latter is unknown to this project). Owner decision: KEEP
- *     both under the trust note above — "best with what we have."
- *   - 74.50.74.102: this project's own host, added after a
- *     LOCAL reachability probe: confirmed bound on a local interface
- *     (`ip addr`) and a real file_service fs_handshake nonce exchange
- *     answered on FS_PORT from this host. A local probe proves bind +
- *     local-route ONLY, not external firewall/NAT traversal from a remote
- *     peer — that verification is a follow-up, not established here.
- *
- * Do not add a new seed IP without the same explicit owner review — this
- * file is the single place that decision is recorded. */
+ * Do not add a new seed IP without explicit owner review — this file is the
+ * single place that decision is recorded. */
 
 #ifndef ZCL_CONFIG_BUNDLE_FETCH_SEEDS_H
 #define ZCL_CONFIG_BUNDLE_FETCH_SEEDS_H
@@ -38,9 +35,7 @@
 /* NULL-terminated so callers loop `for (i = 0; arr[i]; i++)` with no
  * separate count constant to keep in sync. */
 static const char *const ZCL_BUNDLE_FETCH_CLEARNET_SEEDS[] = {
-    "205.209.104.118",
     "140.174.189.3",
-    "74.50.74.102",
     NULL,
 };
 

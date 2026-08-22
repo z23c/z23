@@ -340,8 +340,8 @@ int test_tip_agreement_watch(void)
     /* ── the VERBATIM live row, nulls and all ──────────────────────────
      * Copied byte-for-byte out of the ledger a read-only probe wrote against
      * the owner's live node on 2026-07-30 (21 connected peers, exactly one
-     * surfacing a tip hash, and that one host was 205.209.104.118 — the
-     * operator's OWN second server). Two reasons it is pinned here rather than
+     * surfacing a tip hash, and that one host was the operator's OWN second
+     * server). Two reasons it is pinned here rather than
      * generated:
      *   - the real recorder writes JSON `null`, not -1, for anything it could
      *     not measure. A parser that read null as 0 would turn "nobody

@@ -5892,20 +5892,25 @@ mvp-coldstart-to-tip-triple: zclassic23
 #     one-node-per-loopback case.
 # Pinning the invocation keeps the remote run repeatable instead of folklore.
 #
-# ZCL_REMOTE_PEER=HOST:PORT retargets it; ZCL_BIN / ZCL_BUDGET_SECS /
-# ZCL_SAMPLE_SECS pass through. Same isolation as the sibling target (fresh
-# /tmp datadir, isolated $$HOME, ports 39170-39173, -listen=0, -nolegacyimport,
-# no bundle/snapshot/import flags) and the same read-only posture: it dials the
-# remote as a P2P CLIENT only and never writes to the peer's datadir or its
-# systemd. Same SKIP discipline: exit 2 -> 0 when the binary is absent or the
-# remote peer is unreachable. Exits 3 (SEAM), 4 (STALLED-NAMED), 5
-# (FRONTIER-BUSY-TIMEOUT) and 6 (READBACK-FAILED) are honest verdicts and
-# propagate as a failing recipe — a remote peer that refuses the handshake is
-# NOT laundered into a SKIP, it is labelled peer_precheck=accept_close in the
-# artifact and the run reports what the node actually earned.
-ZCL_REMOTE_PEER ?= 205.209.104.118:8033
+# ZCL_REMOTE_PEER=HOST:PORT is REQUIRED (no default): fleet endpoints are
+# operator-local and are not committed to the public source. ZCL_BIN /
+# ZCL_BUDGET_SECS / ZCL_SAMPLE_SECS pass through. Same isolation as the
+# sibling target (fresh /tmp datadir, isolated $$HOME, ports 39170-39173,
+# -listen=0, -nolegacyimport, no bundle/snapshot/import flags) and the same
+# read-only posture: it dials the remote as a P2P CLIENT only and never
+# writes to the peer's datadir or its systemd. Same SKIP discipline: exit 2
+# -> 0 when the binary is absent or the remote peer is unreachable. Exits 3
+# (SEAM), 4 (STALLED-NAMED), 5 (FRONTIER-BUSY-TIMEOUT) and 6
+# (READBACK-FAILED) are honest verdicts and propagate as a failing recipe —
+# a remote peer that refuses the handshake is NOT laundered into a SKIP, it
+# is labelled peer_precheck=accept_close in the artifact and the run reports
+# what the node actually earned.
 .PHONY: mvp-coldstart-to-tip-remote
 mvp-coldstart-to-tip-remote: zclassic23
+	@if [ -z "$(ZCL_REMOTE_PEER)" ]; then \
+	 echo "mvp-coldstart-to-tip-remote: set ZCL_REMOTE_PEER=<host:port> locally; fleet endpoints are operator-local and not committed"; \
+	 exit 1; \
+	fi
 	@bash -c 'set -uo pipefail; \
 	 echo "══ MVP C3 STOPWATCH (REMOTE peer $(ZCL_REMOTE_PEER)): wiped datadir -> fold -> peer tip, real wall-clock ══"; \
 	 bash tools/scripts/cold_start_to_tip_stopwatch.sh \

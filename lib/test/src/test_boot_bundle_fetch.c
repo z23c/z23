@@ -847,10 +847,12 @@ static int case_seed_set(void)
          "never an empty set") {
         struct app_context ctx;
 
-        /* (1) No flags at all: the compiled clearnet seeds. */
+        /* (1) No flags at all: the compiled clearnet seeds (the operator's
+         * own file-service seeds are runtime -fileservice=/-connect= values,
+         * never compiled in — see config/bundle_fetch_seeds.h). */
         memset(&ctx, 0, sizeof(ctx));
         size_t open_seeds = boot_bundle_fetch_seed_count(&ctx);
-        ASSERT(open_seeds >= 2);
+        ASSERT(open_seeds >= 1);
 
         /* (2) connect-only with a -connect host that NAMES A PORT and no
          * -fileservice: REFUSED, zero seeds. This used to strip the port and

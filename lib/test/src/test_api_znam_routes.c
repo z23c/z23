@@ -191,11 +191,11 @@ int api_znam_routes_focused_tests(void)
         ok = ok && db_znam_text_save(&ndb, "alice", "service.onion",
                                      "aliceexample.onion:8033");
         ok = ok && db_znam_text_save(&ndb, "alice", "service.p2p",
-                                     "74.50.74.102:8033");
+                                     "192.0.2.10:8033");
         ok = ok && db_znam_text_save(&ndb, "alice", "svc.direct_p2p",
                                      "missing-port");
         ok = ok && db_znam_text_save(&ndb, "alice", "bootstrap",
-                                     "205.209.104.118:8033");
+                                     "198.51.100.20:8033");
         ok = ok && db_znam_text_save(&ndb, "alice", "service.unknown",
                                      "unknown-service-metadata");
         ok = ok && db_znam_addr_save(&ndb, "alice", ZNAM_TYPE_LTC,

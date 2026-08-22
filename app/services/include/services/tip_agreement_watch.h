@@ -46,8 +46,8 @@
  * An agreement claim backed by ONE peer must not read like one backed by
  * twenty, and a peer that is not an independent source must not read like one
  * at all. Measured against the live node on 2026-07-30: of 21 connected
- * peers exactly ONE was surfacing a tip hash, and it was 205.209.104.118 —
- * the operator's OWN second server. That is zero independent witnesses, and
+ * peers exactly ONE was surfacing a tip hash, and it was the operator's OWN
+ * second server. That is zero independent witnesses, and
  * the honest report is a refusal, not a verdict.
  *
  * So a sample is graded here in this ORDER, and the order is the contract:
