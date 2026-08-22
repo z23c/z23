@@ -1,8 +1,9 @@
 BOX=rhett-dev
 ROUNDTRIP=fail
-ASSERTION=PEER_ADDED
-WALL_SECONDS=1
-ATTEMPTED_AT=2026-08-22T20:46:49Z
-PEER_ONION=24xma2daqzhryowrdbf2qskzansowqqhmxzadad5srbrcsmt4hrc3ayd.onion
-PEER_PORT=39030
-DETAIL=addnode refuses onion endpoints (numeric IP only); tor-socks connect to onion:39030 and onion:8033 refused (SOCKS5 err5 x3 each); peer onion serves dynhost HTTP on port 80 only; peer directory.json advertises no clearnet endpoint
+ASSERTION=PEER_LISTED
+WALL_SECONDS=301
+ATTEMPTED_AT=2026-08-22T21:40:24Z
+PEER_ENDPOINT=205.209.104.118:39640
+PEER_ONION=32cazytwxyy2bcxtrcgssksz3pigsm5tdtefy436iyy4gh7r55suvhyd.onion
+DETAIL=advertised rhett2 clearnet 39640 refuses TCP; host port 8033 accepts TCP but no P2P peer session establishes within 300s (endpoint_not_connected); outbound P2P over onion unsupported in this tree, so rhett2 onion unreachable
+SOURCE_SHA=6829819a1f6d770c62440b66154df2e5cded3a86
