@@ -10,7 +10,7 @@
 #
 #   MY_NODE_UP       this node's RPC answers at all
 #   MY_ONION_READY   tor_ready + onion_service_ready + a minted persistent
-#                    v3 address on disk (rhett4 readiness contract: the
+#                    v3 address on disk (peer readiness contract: the
 #                    onion-status envelope need not carry bootstrap_state)
 #   PEER_ADDED       the legacy addnode RPC accepted the endpoint
 #   PEER_LISTED      the peers list shows the endpoint connected

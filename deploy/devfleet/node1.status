@@ -1,9 +1,8 @@
-BOX=rhett-dev
+BOX=node1
 ROUNDTRIP=fail
 ASSERTION=PEER_LISTED
 WALL_SECONDS=301
 ATTEMPTED_AT=2026-08-22T21:40:24Z
-PEER_ENDPOINT=205.209.104.118:39640
 PEER_ONION=32cazytwxyy2bcxtrcgssksz3pigsm5tdtefy436iyy4gh7r55suvhyd.onion
-DETAIL=advertised rhett2 clearnet 39640 refuses TCP; host port 8033 accepts TCP but no P2P peer session establishes within 300s (endpoint_not_connected); outbound P2P over onion unsupported in this tree, so rhett2 onion unreachable
+DETAIL=node2 advertised clearnet port refuses TCP; its host's default P2P port accepts TCP but no P2P peer session establishes within 300s (endpoint_not_connected); outbound P2P over onion unsupported in this tree, so the node2 onion is unreachable
 SOURCE_SHA=6829819a1f6d770c62440b66154df2e5cded3a86

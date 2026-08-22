@@ -9,9 +9,11 @@
 #   4. rewrites deploy/devfleet/<box>.sync with the observed state and pushes
 #      it to main when anything material changed or the heartbeat is stale.
 #
-# Per-box configuration lives in deploy/devfleet/<box>.env (committed). Other
-# fleet boxes adopt this loop by adding their own <box>.env and a crontab
-# entry after pulling main.
+# Per-box configuration lives OUTSIDE the repo at
+# ~/.config/zclassic23-fleetsync/<box>.env (uncommitted: local paths, clearnet
+# endpoints, and unit names never land on GitHub). Other fleet boxes adopt
+# this loop by writing their own local env and a crontab entry after pulling
+# main.
 #
 # Usage: tools/scripts/fleet_sync.sh <box>
 
@@ -20,7 +22,14 @@ set -euo pipefail
 BOX="${1:?usage: fleet_sync.sh <box>}"
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SELF_DIR/../.." && pwd)"
-ENV_FILE="$REPO_DIR/deploy/devfleet/$BOX.env"
+# Per-box configuration lives OUTSIDE the repo at
+# ~/.config/zclassic23-fleetsync/<box>.env (uncommitted: it holds local paths,
+# clearnet endpoints, and unit names that must never land on GitHub). A
+# committed deploy/devfleet/<box>.env is accepted only as a legacy fallback.
+ENV_FILE="${FLEET_SYNC_ENV:-$HOME/.config/zclassic23-fleetsync/$BOX.env}"
+if [ ! -f "$ENV_FILE" ] && [ -f "$REPO_DIR/deploy/devfleet/$BOX.env" ]; then
+    ENV_FILE="$REPO_DIR/deploy/devfleet/$BOX.env"
+fi
 if [ ! -f "$ENV_FILE" ]; then
     echo "fleet_sync: missing $ENV_FILE" >&2
     exit 2

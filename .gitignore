@@ -84,3 +84,6 @@ chaos-output/
 # Sealed consensus-core unseal token (owner ritual; never tracked)
 .core-unseal-token
 .codeindex/
+
+# devfleet: per-box operator config is local-only, never committed
+deploy/devfleet/*.env
