@@ -1,17 +1,25 @@
 #!/bin/sh
-# agent_msg_roundtrip.sh — prove a ZMSG P2P round-trip from the isolated
-# fleet node to one fleet peer.
+# agent_msg_roundtrip.sh — prove a ZMSG agent-message round-trip from this
+# box's isolated node to one fleet peer and back.
 #
-#   agent_msg_roundtrip.sh <endpoint host:port> <message>
+#   agent_msg_roundtrip.sh <peer_endpoint host:port> <text>
 #
-# The endpoint is the peer's advertised P2P endpoint (ip:port or
-# onion:port). The script drives THIS box's isolated node through four
-# named assertions, in order, and stops at the first one that breaks:
+# The endpoint is the peer's advertised dial address (ip:port or
+# onion:port). The script drives THIS box's isolated node through a chain
+# of named assertions and stops at the first one that breaks:
 #
-#   ADDNODE_ACCEPTED  the legacy addnode RPC accepted the endpoint
-#   PEER_CONNECTED    getpeerinfo lists the endpoint as a connected peer
-#   SEND_COMMITTED    app messaging send committed with status=sent
-#   ACK_OBSERVED      the peer's zmsgack reached this node's log
+#   MY_NODE_UP       this node's RPC answers at all
+#   MY_ONION_READY   tor_ready + onion_service_ready + a minted persistent
+#                    v3 address on disk (rhett4 readiness contract: the
+#                    onion-status envelope need not carry bootstrap_state)
+#   PEER_ADDED       the legacy addnode RPC accepted the endpoint
+#   PEER_LISTED      the peers list shows the endpoint connected
+#   SEND_PLANNED     app messaging send without confirm returns a plan
+#   SEND_COMMITTED   the same send with confirm:true reports status=sent
+#   ACK_OBSERVED     the peer's zmsgack reached this node's log
+#   INBOX_RECEIVED   an inbound echo of <text> appears in msg_inbox
+#   MSG_READ         msg_read on the echo returns status=read
+#   CONTENT_MATCH    the echo body equals <text> exactly
 #
 # Stdout contract (the final line is the verdict):
 #   ROUNDTRIP=pass WALL_SECONDS=<n>
@@ -28,12 +36,12 @@
 #   ZCL_ROUNDTRIP_DATADIR isolated datadir  (default ~/.zclassic-c23-devfleet)
 #   ZCL_ROUNDTRIP_RPCPORT RPC port          (default 18255)
 #   ZCL_ROUNDTRIP_LOG     node stdout log   (default <datadir>/node.log)
-#   ZCL_ROUNDTRIP_TIMEOUT total budget, sec (default 120)
+#   ZCL_ROUNDTRIP_TIMEOUT total budget, sec (default 300)
 
 set -u
 
 if [ "$#" -ne 2 ] || [ -z "$1" ] || [ -z "$2" ]; then
-    echo "usage: $0 <endpoint host:port> <message>" >&2
+    echo "usage: $0 <peer_endpoint host:port> <text>" >&2
     exit 2
 fi
 ENDPOINT="$1"
@@ -47,7 +55,8 @@ ZCL_JSONQ=${ZCL_JSONQ:-"$REPO_ROOT/build/bin/jsonq"}
 DATADIR=${ZCL_ROUNDTRIP_DATADIR:-"$HOME/.zclassic-c23-devfleet"}
 RPCPORT=${ZCL_ROUNDTRIP_RPCPORT:-18255}
 NODE_LOG=${ZCL_ROUNDTRIP_LOG:-"$DATADIR/node.log"}
-TIMEOUT=${ZCL_ROUNDTRIP_TIMEOUT:-120}
+TIMEOUT=${ZCL_ROUNDTRIP_TIMEOUT:-300}
+ONION_HOSTNAME_FILE="$DATADIR/tor_data/onion_service/hostname"
 
 if [ ! -x "$ZCL_CLI" ] || [ ! -x "$ZCL_JSONQ" ]; then
     echo "ROUNDTRIP=fail ASSERTION=ENV WALL_SECONDS=0 DETAIL=z23_or_jsonq_missing"
@@ -74,72 +83,105 @@ fail() {
 }
 
 cli() {
-    timeout 30 "$ZCL_CLI" -datadir="$DATADIR" -rpcport="$RPCPORT" "$@" 2>/dev/null
+    timeout 60 "$ZCL_CLI" -datadir="$DATADIR" -rpcport="$RPCPORT" "$@" 2>/dev/null
 }
 
-# peer_id_for <endpoint> — print the connected peer's numeric id, or nothing.
-# The CLI prints legacy RPC results bare (getpeerinfo is a raw array) but
-# wraps native commands in the zcl.result.v1 envelope, so accept both.
-peer_id_for() {
-    peers=$(cli getpeerinfo) || return 1
+jqget() {  # jqget <path> — read one path from JSON on stdin, empty on miss
+    "$ZCL_JSONQ" get "$1" 2>/dev/null || true
+}
+
+# ── MY_NODE_UP ───────────────────────────────────────────────────────
+if ! cli getconnectioncount >/dev/null 2>&1; then
+    fail MY_NODE_UP "rpc_unanswered_at:$DATADIR"
+fi
+echo "assertion MY_NODE_UP ok"
+
+# ── MY_ONION_READY ───────────────────────────────────────────────────
+hc=$(cli healthcheck) || fail MY_ONION_READY "healthcheck_rpc_error"
+tor_ready=$(printf '%s' "$hc" | jqget checks.tor_ready)
+svc_ready=$(printf '%s' "$hc" | jqget checks.onion_service_ready)
+my_onion=""
+[ -f "$ONION_HOSTNAME_FILE" ] && \
+    my_onion=$(tr -d '[:space:]' <"$ONION_HOSTNAME_FILE")
+case "$my_onion" in
+    ????????????????????????????????????????????????????????.onion) ;;
+    *) my_onion="" ;;
+esac
+if [ "$tor_ready" != "true" ] || [ "$svc_ready" != "true" ] || \
+   [ -z "$my_onion" ]; then
+    fail MY_ONION_READY \
+        "tor_ready=${tor_ready:-absent} onion_service_ready=${svc_ready:-absent} minted=${my_onion:-none}"
+fi
+echo "assertion MY_ONION_READY ok onion=$my_onion"
+
+# ── PEER_ADDED ───────────────────────────────────────────────────────
+addnode_out=$(cli addnode "$ENDPOINT" onetry 2>&1)
+if [ $? -ne 0 ] || [ "$addnode_out" != "null" ]; then
+    detail=$(printf '%s' "$addnode_out" | tr '\n' ' ' | cut -c1-160)
+    fail PEER_ADDED "addnode_refused:$ENDPOINT rpc=${detail:-empty}"
+fi
+echo "assertion PEER_ADDED ok"
+
+# ── PEER_LISTED ──────────────────────────────────────────────────────
+PEER_ID=""
+retried=0
+while :; do
+    peers=$(cli getpeerinfo 2>/dev/null || true)
     case "$peers" in
         \{*) u=$(printf '%s' "$peers" | "$ZCL_JSONQ" unwrap 2>/dev/null) \
             && peers=$u ;;
     esac
-    count=$(printf '%s' "$peers" | "$ZCL_JSONQ" count . 2>/dev/null) || return 1
+    count=$(printf '%s' "$peers" | "$ZCL_JSONQ" count . 2>/dev/null || true)
     i=0
-    while [ "$i" -lt "$count" ]; do
-        addr=$(printf '%s' "$peers" | "$ZCL_JSONQ" get "[$i].addr" 2>/dev/null || true)
-        case "$addr" in
-            "$1"|"$1 "*) ;;
-            *) i=$((i + 1)); continue ;;
-        esac
-        printf '%s' "$peers" | "$ZCL_JSONQ" get "[$i].id" 2>/dev/null
-        return 0
+    while [ -n "$count" ] && [ "$i" -lt "$count" ]; do
+        addr=$(printf '%s' "$peers" | jqget "[$i].addr")
+        if [ "$addr" = "$ENDPOINT" ]; then
+            PEER_ID=$(printf '%s' "$peers" | jqget "[$i].id")
+            break
+        fi
+        i=$((i + 1))
     done
-    return 1
-}
-
-# ── 1. ADDNODE_ACCEPTED ──────────────────────────────────────────────
-if ! cli addnode "$ENDPOINT" onetry >/dev/null 2>&1; then
-    fail ADDNODE_ACCEPTED "addnode_rpc_refused:$ENDPOINT"
-fi
-echo "assertion ADDNODE_ACCEPTED ok"
-
-# ── 2. PEER_CONNECTED ────────────────────────────────────────────────
-PEER_ID=""
-retried=0
-while :; do
-    PEER_ID=$(peer_id_for "$ENDPOINT" 2>/dev/null || true)
     [ -n "$PEER_ID" ] && break
     now=$(date +%s)
     [ "$now" -ge "$DEADLINE" ] && \
-        fail PEER_CONNECTED "endpoint_not_in_getpeerinfo:${ENDPOINT}"
-    if [ "$retried" -eq 0 ] && [ "$now" -ge $((T0 + TIMEOUT / 2)) ]; then
+        fail PEER_LISTED "endpoint_not_connected:$ENDPOINT"
+    if [ "$retried" -eq 0 ] && [ "$now" -ge $((T0 + TIMEOUT / 4)) ]; then
         retried=1
         cli addnode "$ENDPOINT" onetry >/dev/null 2>&1 || true
     fi
     sleep 2
 done
-echo "assertion PEER_CONNECTED ok peer_id=$PEER_ID"
+echo "assertion PEER_LISTED ok peer_id=$PEER_ID"
 
-# ── 3. SEND_COMMITTED ────────────────────────────────────────────────
+# ── SEND_PLANNED ─────────────────────────────────────────────────────
+plan_out=$(cli app messaging send \
+    --input="{\"channel\":\"p2p\",\"peer_id\":$PEER_ID,\"message\":\"$MESSAGE\"}") \
+    || fail SEND_PLANNED "messaging_send_plan_rpc_error"
+plan_stage=$(printf '%s' "$plan_out" | jqget data.stage)
+[ -z "$plan_stage" ] && \
+    plan_stage=$(printf '%s' "$plan_out" | "$ZCL_JSONQ" unwrap 2>/dev/null \
+        | jqget data.stage)
+if [ "$plan_stage" != "plan" ]; then
+    detail=$(printf '%s' "$plan_out" | tr '\n' ' ' | cut -c1-160)
+    fail SEND_PLANNED "stage=${plan_stage:-absent} raw=$detail"
+fi
+echo "assertion SEND_PLANNED ok"
+
+# ── SEND_COMMITTED ───────────────────────────────────────────────────
 send_out=$(cli app messaging send \
     --input="{\"channel\":\"p2p\",\"peer_id\":$PEER_ID,\"message\":\"$MESSAGE\",\"confirm\":true}") \
     || fail SEND_COMMITTED "messaging_send_rpc_error"
-# Native-command envelope: data.status; JSON-RPC envelope: result.data.status.
-send_status=$(printf '%s' "$send_out" | "$ZCL_JSONQ" get data.status 2>/dev/null || true)
-if [ -z "$send_status" ]; then
+send_status=$(printf '%s' "$send_out" | jqget data.status)
+[ -z "$send_status" ] && \
     send_status=$(printf '%s' "$send_out" | "$ZCL_JSONQ" unwrap 2>/dev/null \
-        | "$ZCL_JSONQ" get data.status 2>/dev/null || true)
-fi
+        | jqget data.status)
 if [ "$send_status" != "sent" ]; then
     detail=$(printf '%s' "$send_out" | tr '\n' ' ' | cut -c1-160)
     fail SEND_COMMITTED "status=${send_status:-absent} raw=$detail"
 fi
 echo "assertion SEND_COMMITTED ok peer_id=$PEER_ID"
 
-# ── 4. ACK_OBSERVED ──────────────────────────────────────────────────
+# ── ACK_OBSERVED ─────────────────────────────────────────────────────
 while :; do
     if [ -f "$NODE_LOG" ]; then
         hits=$(tail -c "+$((LOG_MARK + 1))" "$NODE_LOG" 2>/dev/null \
@@ -147,10 +189,72 @@ while :; do
         [ "${hits:-0}" -gt 0 ] && break
     fi
     [ "$(date +%s)" -ge "$DEADLINE" ] && \
-        fail ACK_OBSERVED "no_zmsgack_from:${ENDPOINT_HOST}"
+        fail ACK_OBSERVED "no_zmsgack_from:$ENDPOINT_HOST"
     sleep 2
 done
 echo "assertion ACK_OBSERVED ok"
+
+# ── INBOX_RECEIVED ───────────────────────────────────────────────────
+# The round-trip closes when the peer's echo of <text> lands inbound.
+ECHO_ID=""
+while :; do
+    inbox=$(cli msg_inbox 2>/dev/null || true)
+    case "$inbox" in
+        \{*) u=$(printf '%s' "$inbox" | "$ZCL_JSONQ" unwrap 2>/dev/null) \
+            && inbox=$u ;;
+    esac
+    count=$(printf '%s' "$inbox" | "$ZCL_JSONQ" count . 2>/dev/null || true)
+    i=0
+    while [ -n "$count" ] && [ "$i" -lt "$count" ]; do
+        dir=$(printf '%s' "$inbox" | jqget "[$i].direction")
+        body=$(printf '%s' "$inbox" | jqget "[$i].body")
+        if [ "$dir" = "inbound" ] && [ "$body" = "$MESSAGE" ]; then
+            ECHO_ID=$(printf '%s' "$inbox" | jqget "[$i].msg_id")
+            break
+        fi
+        i=$((i + 1))
+    done
+    [ -n "$ECHO_ID" ] && break
+    [ "$(date +%s)" -ge "$DEADLINE" ] && \
+        fail INBOX_RECEIVED "no_echo_of_message_in_inbox"
+    sleep 3
+done
+echo "assertion INBOX_RECEIVED ok msg_id=$ECHO_ID"
+
+# ── MSG_READ ─────────────────────────────────────────────────────────
+read_out=$(cli app messaging read \
+    --input="{\"msg_id\":\"$ECHO_ID\"}") \
+    || fail MSG_READ "messaging_read_rpc_error"
+read_status=$(printf '%s' "$read_out" | jqget data.status)
+[ -z "$read_status" ] && \
+    read_status=$(printf '%s' "$read_out" | "$ZCL_JSONQ" unwrap 2>/dev/null \
+        | jqget data.status)
+if [ "$read_status" != "read" ]; then
+    detail=$(printf '%s' "$read_out" | tr '\n' ' ' | cut -c1-160)
+    fail MSG_READ "status=${read_status:-absent} raw=$detail"
+fi
+echo "assertion MSG_READ ok msg_id=$ECHO_ID"
+
+# ── CONTENT_MATCH ────────────────────────────────────────────────────
+inbox=$(cli msg_inbox 2>/dev/null || true)
+case "$inbox" in
+    \{*) u=$(printf '%s' "$inbox" | "$ZCL_JSONQ" unwrap 2>/dev/null) \
+        && inbox=$u ;;
+esac
+count=$(printf '%s' "$inbox" | "$ZCL_JSONQ" count . 2>/dev/null || true)
+i=0
+matched=0
+while [ -n "$count" ] && [ "$i" -lt "$count" ]; do
+    id=$(printf '%s' "$inbox" | jqget "[$i].msg_id")
+    if [ "$id" = "$ECHO_ID" ]; then
+        body=$(printf '%s' "$inbox" | jqget "[$i].body")
+        [ "$body" = "$MESSAGE" ] && matched=1
+        break
+    fi
+    i=$((i + 1))
+done
+[ "$matched" = 1 ] || fail CONTENT_MATCH "echo_body_differs_from_sent_text"
+echo "assertion CONTENT_MATCH ok"
 
 now=$(date +%s)
 echo "ROUNDTRIP=pass WALL_SECONDS=$((now - T0))"
