@@ -29,7 +29,7 @@ app/controllers/src/swap_controller.c 1027
 app/controllers/src/shop_native_want.c 902 # buyer want-ads: 5 leaves (post/list/status/cancel/review), sign+store controller (split seam: model helpers -> models/shop_want.c)
 app/jobs/src/reducer_frontier.c 801
 app/jobs/src/reducer_frontier_replay.c 809
-app/jobs/src/stage_repair_reducer_frontier.c 852
+app/jobs/src/stage_repair_reducer_frontier.c 851
 app/jobs/src/tip_finalize_stage.c 809
 app/jobs/src/utxo_apply_stage.c 941
 app/jobs/src/validate_headers_stage.c 1051

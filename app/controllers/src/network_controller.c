@@ -15,6 +15,7 @@
 #include "net/connman.h"
 #include "net/fast_sync.h"
 #include "net/netbase.h"
+#include "net/onion_peer_merge.h"
 #include "net/peer_identity.h"
 #include "net/peer_lifecycle.h"
 #include "net/protocol.h"
@@ -726,9 +727,20 @@ static bool rpc_addnode(const struct json_value *params, bool help,
 
     struct net_service svc;
     if (!lookup_numeric(node_str, &svc, ctx->connman->manager.default_port)) {
-        json_set_str(result,
-            "addnode requires a numeric IP address (DNS names are not resolved)");
-        return false;
+        if (!onion_hostname_valid(node_str)) {
+            json_set_str(result,
+                "addnode requires a numeric IP address or a valid v3 onion "
+                "rendezvous address");
+            return false;
+        }
+        int scheduled = connman_add_onion_seed(ctx->connman, node_str);
+        if (scheduled < 1) {
+            json_set_str(result,
+                "onion rendezvous did not yield a numeric P2P endpoint");
+            return false;
+        }
+        json_set_null(result);
+        return true;
     }
     struct net_address addr;
     net_address_init(&addr);
@@ -765,6 +777,7 @@ void register_net_rpc_commands(struct rpc_table *t)
     struct rpc_command cmds[] = {
         { "network", "getnetworkinfo",    rpc_getnetworkinfo,    true },
         { "network", "bootstrapstatus",   rpc_bootstrapstatus,   true },
+        { "network", "onionstatus",       network_onion_status_rpc, true },
         { "network", "getpeerinfo",       rpc_getpeerinfo,       true },
         { "network", "getconnectioncount", rpc_getconnectioncount, true },
         { "network", "peerincidents",     rpc_peerincidents,     true },

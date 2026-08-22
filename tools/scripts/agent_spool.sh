@@ -100,7 +100,8 @@ spool_watch() {
         reply=$(printf '%s\n' "$raw" | spool_last_json)
         [ "$rc" -eq 0 ] || spool_fail inbox command_failed
         spool_reply_ok "$reply" || spool_fail inbox typed_command_refused
-        count=$(printf '%s' "$reply" | "$JSONQ" count data 2>/dev/null)
+        count=$(printf '%s' "$reply" \
+            | "$JSONQ" count data.messages 2>/dev/null)
         rc=$?
         [ "$rc" -eq 0 ] || spool_fail inbox invalid_message_array
         case $count in ''|*[!0-9]*) spool_fail inbox invalid_message_count ;; esac
@@ -113,12 +114,12 @@ spool_watch() {
         index=0
         while [ "$index" -lt "$count" ] && [ "$stop" -eq 0 ]; do
             read_state=$(printf '%s' "$reply" \
-                | "$JSONQ" get "data[$index].read" 2>/dev/null)
+                | "$JSONQ" get "data.messages[$index].read" 2>/dev/null)
             rc=$?
             [ "$rc" -eq 0 ] || spool_fail inbox missing_read_state
             if [ "$read_state" = false ]; then
                 msg_id=$(printf '%s' "$reply" \
-                    | "$JSONQ" get "data[$index].msg_id" 2>/dev/null)
+                    | "$JSONQ" get "data.messages[$index].msg_id" 2>/dev/null)
                 rc=$?
                 [ "$rc" -eq 0 ] || spool_fail inbox missing_msg_id
                 case $msg_id in
@@ -128,7 +129,7 @@ spool_watch() {
 
                 tmp="$SPOOL_DIR/.${msg_id}.$$"
                 if ! printf '%s' "$reply" \
-                    | "$JSONQ" get "data[$index].body" > "$tmp"; then
+                    | "$JSONQ" get "data.messages[$index].body" > "$tmp"; then
                     rm -f "$tmp"
                     spool_fail spool_write missing_message_body
                 fi

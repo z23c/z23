@@ -1195,6 +1195,13 @@ void zcl_native_handle_network_chain_view(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 
+/* core.network.peers.add — operator-requested P2P edge. A numeric endpoint
+ * dials directly; a v3 onion is resolved through its Tor-served directory
+ * before the advertised numeric P2P fast path is scheduled. */
+void zcl_native_handle_network_peer_add(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+
 /* core.network.census / .node / .versions / .graph — READ-ONLY operator
  * surface over the banked network census + topology stores (node_census,
  * topology_edges, census_observations under <datadir>/peers_projection.db +

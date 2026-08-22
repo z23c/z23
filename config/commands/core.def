@@ -616,22 +616,24 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
     ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
-ZCL_COMMAND_PLANNED_COMMAND(
+ZCL_COMMAND_READY_COMMAND(
     "core.network.peers.add", "core.network.peers", "",
     "Add an outbound peer connection",
-    "Will report the connection outcome for the given address once "
-    "wired; today the handler is unbound and fails closed with exit 3 "
-    "rather than dialing a peer.", 0,
+    "A numeric IP:port is persisted and scheduled directly. A v3 onion is "
+    "resolved through its Tor-served directory first, then each advertised "
+    "numeric fast path is persisted and scheduled. Success means a dial was "
+    "requested, not that a handshake completed; raw blockchain transport "
+    "over onion remains separate future work.", 0,
     "peers,add,connect,addnode",
     "zcl.core_peer_add.input.v1", "zcl.peer_add.v1", "address", "address",
-    "z23 core network peers add --address=<ip:port>",
+    "z23 core network peers add --address=<ip:port|v3.onion>",
     ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_CORE_RECOVERY, ZCL_COMMAND_SCOPE_NODE,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
     ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_NONE,
     ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
     ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_NONE,
-    "peer-mutation binding is a Wave 2.2 deliverable")
+    zcl_native_handle_network_peer_add)
 /* Network-omniscience operator surface over the banked census + topology
  * stores (node_census, census_observations under <datadir>/peers_projection.db;
  * topology_edges, topology_sweeps under <datadir>/topology.db). Read-only;

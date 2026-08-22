@@ -24,6 +24,7 @@
 #include "net/fast_sync.h"
 #include "net/tor_integration.h"
 #include "net/onion_service.h"
+#include "net/onion_peer_merge.h"
 #include "core/random.h"
 #include "core/serialize.h"
 #include "net/netbase.h"
@@ -370,14 +371,14 @@ void connman_set_known_zcl23_peer_source(
  * configured seed, and g_stop aborts between hops. */
 #define ONION_RELAY_FETCH_TIMEOUT 20
 
-static void try_onion_seed_fetch_depth(struct connman *cm, const char *onion,
-                                       int depth);
+static int try_onion_seed_fetch_depth(struct connman *cm, const char *onion,
+                                      int depth, bool pin_endpoints);
 
 /* Fetch /directory.json from a .onion seed and add clearnet IPs. Entry
  * point for every existing caller — signature unchanged. */
 static void try_onion_seed_fetch(struct connman *cm, const char *onion)
 {
-    try_onion_seed_fetch_depth(cm, onion, 0);
+    (void)try_onion_seed_fetch_depth(cm, onion, 0, false);
 }
 
 /* Record one MEASURED dial outcome — the census bridge in
@@ -394,10 +395,10 @@ static void onion_seed_note_dial(const char *onion, bool reachable)
     (void)onion_service_directory_observe(&obs, 1, NULL);
 }
 
-static void try_onion_seed_fetch_depth(struct connman *cm, const char *onion,
-                                       int depth)
+static int try_onion_seed_fetch_depth(struct connman *cm, const char *onion,
+                                      int depth, bool pin_endpoints)
 {
-    if (!cm || !onion) return;
+    if (!cm || !onion) return -1;
     printf("Onion seed: fetching /directory.json from %s (depth=%d)...\n",
            onion, depth);
     fflush(stdout);
@@ -413,7 +414,7 @@ static void try_onion_seed_fetch_depth(struct connman *cm, const char *onion,
          * refreshes last_seen — a failed dial carries no identity. */
         onion_seed_note_dial(onion, false);
         if (result.body) free(result.body);
-        return;
+        return -1;
     }
 
     /* We reached it ourselves: this one IS contact, not hearsay. learn()
@@ -454,8 +455,12 @@ static void try_onion_seed_fetch_depth(struct connman *cm, const char *onion,
         uint16_t port = default_port;
         const char *pp = strstr(p, "\"clearnet_port\":");
         if (pp && pp - p < 50) {
-            port = (uint16_t)atoi(pp + 16);
-            if (port == 0) port = default_port;
+            const char *port_text = pp + 16;
+            char *port_end = NULL;
+            unsigned long parsed_port = strtoul(port_text, &port_end, 10);
+            if (port_end != port_text && parsed_port > 0 &&
+                parsed_port <= 65535)
+                port = (uint16_t)parsed_port;
         }
 
         /* Add to address manager */
@@ -464,7 +469,10 @@ static void try_onion_seed_fetch_depth(struct connman *cm, const char *onion,
             memset(&addr, 0, sizeof(addr));
             /* Parse IPv4 */
             unsigned a, b, c, d;
-            if (sscanf(ip, "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
+            char trailing;
+            if (sscanf(ip, "%u.%u.%u.%u%c", &a, &b, &c, &d,
+                       &trailing) == 4 &&
+                a <= 255 && b <= 255 && c <= 255 && d <= 255) {
                 /* IPv4-mapped IPv6 */
                 unsigned char ip4[4] = {(unsigned char)a, (unsigned char)b,
                                         (unsigned char)c, (unsigned char)d};
@@ -474,6 +482,8 @@ static void try_onion_seed_fetch_depth(struct connman *cm, const char *onion,
                 struct net_addr src;
                 net_addr_init(&src);
                 addrman_add(&cm->manager.addrman, &addr, &src, 0);
+                if (pin_endpoints)
+                    connman_open_connection(cm, &addr);
                 added++;
                 printf("Onion seed: discovered clearnet peer %s:%d\n",
                        ip, port);
@@ -522,7 +532,8 @@ static void try_onion_seed_fetch_depth(struct connman *cm, const char *onion,
             if (!onion_directory_claim_relay_follow(hints[i].hostname, now))
                 continue;
             followed++;
-            try_onion_seed_fetch_depth(cm, hints[i].hostname, depth + 1);
+            (void)try_onion_seed_fetch_depth(cm, hints[i].hostname,
+                                             depth + 1, false);
         }
     }
     printf("Onion seed: added %d clearnet peers, %d onion peers advertised "
@@ -530,6 +541,15 @@ static void try_onion_seed_fetch_depth(struct connman *cm, const char *onion,
            added, nh, onion, learned, followed);
 
     free(result.body);
+    return added;
+}
+
+int connman_add_onion_seed(struct connman *cm, const char *onion)
+{
+    if (!cm || !onion_hostname_valid(onion) || g_stop ||
+        !tor_integration_is_ready())
+        return -1;
+    return try_onion_seed_fetch_depth(cm, onion, 0, true);
 }
 
 /* Run the onion-directory bootstrap pass: operator-curated seeds first

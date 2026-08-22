@@ -4,15 +4,17 @@
 #
 #   agent_msg_roundtrip.sh <peer_endpoint host:port> <text>
 #
-# The endpoint is the peer's advertised dial address (ip:port or
-# onion:port). The script drives THIS box's isolated node through a chain
+# The endpoint is the peer's advertised numeric P2P_ENDPOINT (ip:port).
+# Its onion service remains the censorship-resistant rendezvous/control
+# address; raw P2P-over-onion dialing is not available in this build. The
+# script drives THIS box's isolated node through a chain
 # of named assertions and stops at the first one that breaks:
 #
 #   MY_NODE_UP       this node's RPC answers at all
 #   MY_ONION_READY   tor_ready + onion_service_ready + a minted persistent
 #                    v3 address on disk (peer readiness contract: the
 #                    onion-status envelope need not carry bootstrap_state)
-#   PEER_ADDED       the legacy addnode RPC accepted the endpoint
+#   PEER_ADDED       the typed peer command accepted the endpoint
 #   PEER_LISTED      the peers list shows the endpoint connected
 #   SEND_PLANNED     app messaging send without confirm returns a plan
 #   SEND_COMMITTED   the same send with confirm:true reports status=sent
@@ -115,17 +117,18 @@ fi
 echo "assertion MY_ONION_READY ok onion=$my_onion"
 
 # ── PEER_ADDED ───────────────────────────────────────────────────────
-addnode_out=$(timeout 60 "$ZCL_CLI" -datadir="$DATADIR" -rpcport="$RPCPORT" \
-    addnode "$ENDPOINT" onetry 2>&1)
-if [ $? -ne 0 ] || [ "$addnode_out" != "null" ]; then
+addnode_out=$(cli core network peers add --address="$ENDPOINT") \
+    || fail PEER_ADDED "typed_peer_add_failed:$ENDPOINT"
+addnode_ok=$(printf '%s' "$addnode_out" | jqget ok)
+addnode_status=$(printf '%s' "$addnode_out" | jqget data.status)
+if [ "$addnode_ok" != true ] || [ "$addnode_status" != dial_requested ]; then
     detail=$(printf '%s' "$addnode_out" | tr '\n' ' ' | tr -d '"' | cut -c1-160)
-    fail PEER_ADDED "addnode_refused:$ENDPOINT rpc=${detail:-empty}"
+    fail PEER_ADDED "typed_peer_add_refused:$ENDPOINT rpc=${detail:-empty}"
 fi
 echo "assertion PEER_ADDED ok"
 
 # ── PEER_LISTED ──────────────────────────────────────────────────────
 PEER_ID=""
-retried=0
 while :; do
     peers=$(cli getpeerinfo 2>/dev/null || true)
     case "$peers" in
@@ -146,10 +149,6 @@ while :; do
     now=$(date +%s)
     [ "$now" -ge "$DEADLINE" ] && \
         fail PEER_LISTED "endpoint_not_connected:$ENDPOINT"
-    if [ "$retried" -eq 0 ] && [ "$now" -ge $((T0 + TIMEOUT / 4)) ]; then
-        retried=1
-        cli addnode "$ENDPOINT" onetry >/dev/null 2>&1 || true
-    fi
     sleep 2
 done
 echo "assertion PEER_LISTED ok peer_id=$PEER_ID"

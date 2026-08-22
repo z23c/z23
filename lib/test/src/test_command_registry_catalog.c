@@ -14,9 +14,11 @@
 #include "command/native_command.h"
 #include "json/json.h"
 #include "controllers/diagnostics_internal.h"
+#include "controllers/app_native_handlers.h"
 #include "controllers/chain_native_handlers.h"
 #include "controllers/rpc_client.h"
 
+#include <stdio.h>
 #include <string.h>
 
 static const struct zcl_command_spec *find_spec(
@@ -416,6 +418,114 @@ static char *bridge_rpc_error_mock(const char *method,
     return strdup(g_bridge_rpc_error_fixture);
 }
 
+static int test_messaging_inbox_wraps_rpc_array(void)
+{
+    int failures = 0;
+    TEST("native messaging inbox preserves the RPC array in an object") {
+        g_bridge_rpc_method_fixture = "msg_inbox";
+        g_bridge_rpc_error_fixture =
+            "[{\"msg_id\":\"abc\",\"read\":false}]";
+        node_rpc_client_set_test_hook(bridge_rpc_error_mock);
+
+        struct zcl_native_body_err err = {0};
+        char *body = zcl_native_msg_inbox_body(NULL, &err);
+        struct json_value doc;
+        json_init(&doc);
+        bool parsed = body && json_read(&doc, body, strlen(body));
+        const struct json_value *messages =
+            parsed ? json_get(&doc, "messages") : NULL;
+        const struct json_value *first =
+            messages && messages->type == JSON_ARR ? json_at(messages, 0)
+                                                   : NULL;
+        bool ok = parsed && doc.type == JSON_OBJ && messages &&
+                  messages->type == JSON_ARR && json_size(messages) == 1 &&
+                  first && strcmp(json_get_str(json_get(first, "msg_id")),
+                                  "abc") == 0;
+
+        json_free(&doc);
+        free(body);
+        node_rpc_client_set_test_hook(NULL);
+        g_bridge_rpc_method_fixture = NULL;
+        g_bridge_rpc_error_fixture = NULL;
+        ASSERT(ok);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int g_peer_add_rpc_calls;
+static char g_peer_add_params[256];
+static const char *g_peer_add_reply;
+
+static char *peer_add_rpc_mock(const char *method, const char *params_json)
+{
+    if (!method || strcmp(method, "addnode") != 0)
+        return strdup("{\"code\":-32601,\"message\":\"unexpected method\"}");
+    g_peer_add_rpc_calls++;
+    (void)snprintf(g_peer_add_params, sizeof(g_peer_add_params), "%s",
+                   params_json ? params_json : "");
+    return strdup(g_peer_add_reply ? g_peer_add_reply : "null");
+}
+
+static int test_network_peer_add_binding(void)
+{
+    int failures = 0;
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    TEST("typed peer add requests numeric or Tor-rendezvous edges") {
+        const struct zcl_command_spec *spec =
+            find_spec(reg, "core.network.peers.add");
+        ASSERT(spec != NULL);
+        ASSERT_EQ(spec->availability, ZCL_COMMAND_READY);
+        ASSERT(spec->handler == zcl_native_handle_network_peer_add);
+
+        g_peer_add_rpc_calls = 0;
+        g_peer_add_params[0] = '\0';
+        g_peer_add_reply = "null";
+        node_rpc_client_set_test_hook(peer_add_rpc_mock);
+
+        struct json_value input;
+        json_init(&input);
+        json_set_object(&input);
+        (void)json_push_kv_str(&input, "address", "203.0.113.8:39023");
+        struct zcl_command_request request = {
+            .spec = spec, .input = &input, .view = "normal",
+        };
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, spec->output_schema);
+        zcl_native_handle_network_peer_add(&request, &reply);
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT(reply.error.mutated);
+        ASSERT_EQ(g_peer_add_rpc_calls, 1);
+        ASSERT_STR_EQ(g_peer_add_params,
+                      "[\"203.0.113.8:39023\",\"add\"]");
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "status")),
+                      "dial_requested");
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+
+        json_init(&input);
+        json_set_object(&input);
+        (void)json_push_kv_str(
+            &input, "address",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion");
+        request.input = &input;
+        zcl_command_reply_init(&reply, spec->output_schema);
+        zcl_native_handle_network_peer_add(&request, &reply);
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT(reply.error.mutated);
+        ASSERT_EQ(g_peer_add_rpc_calls, 2);
+        ASSERT(strstr(g_peer_add_params, ".onion") != NULL);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "transport")),
+                      "tor_rendezvous+p2p_tcp");
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+        PASS();
+    } _test_next:;
+    node_rpc_client_set_test_hook(NULL);
+    g_peer_add_reply = NULL;
+    return failures;
+}
+
 static int test_bridge_rpc_errors_fail_closed(void)
 {
     int failures = 0;
@@ -618,7 +728,9 @@ static int test_bridge_rpc_success_shapes_fail_closed(void)
           "[{\"peer_id\":1,\"addr\":\"peer\"}]",
           "[{\"peer_id\":1,\"addr\":7}]" },
         { "core.network.onion.status",
-          "{\"status\":\"ok\",\"healthy\":true,\"serving\":true}",
+          "{\"schema\":\"zcl.onion_status.v1\","
+          "\"bootstrap_state\":\"ready\",\"tor_ready\":true,"
+          "\"onion_service_ready\":true,\"onion_address\":\"node.onion\"}",
           "{}" },
         { "core.wallet.status", "{\"balance\":\"1.0\",\"txcount\":0}",
           "{}" },
@@ -3531,6 +3643,8 @@ int test_command_registry_catalog(void)
     failures += test_ready_leaves_bound();
     failures += test_bridge_bindings_reverse();
     failures += test_bridge_replacement_rejects_non_bridge_leaf();
+    failures += test_messaging_inbox_wraps_rpc_array();
+    failures += test_network_peer_add_binding();
     failures += test_bridge_rpc_errors_fail_closed();
     failures += test_raw_transaction_string_is_typed();
     failures += test_raw_transaction_verbose_bool();

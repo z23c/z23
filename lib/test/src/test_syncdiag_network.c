@@ -9,6 +9,47 @@ int syncdiag_cases_network(void)
 {
     int failures = 0;
 
+    printf("onionstatus: exposes one coherent bootstrap-state contract... ");
+    {
+        struct rpc_table tbl;
+        struct json_value params;
+        struct json_value result;
+
+        rpc_table_init(&tbl);
+        register_net_rpc_commands(&tbl);
+        json_init(&params);
+        json_set_array(&params);
+        json_init(&result);
+        bool ok = rpc_table_execute(&tbl, "onionstatus", &params, &result);
+        const struct json_value *state = json_get(&result,
+                                                   "bootstrap_state");
+        const struct json_value *tor_ready = json_get(&result, "tor_ready");
+        const struct json_value *service_ready =
+            json_get(&result, "onion_service_ready");
+        const struct json_value *address = json_get(&result,
+                                                     "onion_address");
+
+        ok = ok && result.type == JSON_OBJ;
+        ok = ok && strcmp(json_get_str(json_get(&result, "schema")),
+                          "zcl.onion_status.v1") == 0;
+        ok = ok && state && state->type == JSON_STR;
+        ok = ok && tor_ready && tor_ready->type == JSON_BOOL;
+        ok = ok && service_ready && service_ready->type == JSON_BOOL;
+        ok = ok && address && address->type == JSON_STR;
+        if (ok && strcmp(json_get_str(state), "ready") == 0) {
+            const char *hostname = json_get_str(address);
+            size_t hostname_len = strlen(hostname);
+            ok = json_get_bool(tor_ready) && json_get_bool(service_ready) &&
+                 hostname_len > 6 &&
+                 strcmp(hostname + hostname_len - 6, ".onion") == 0;
+        }
+
+        json_free(&params);
+        json_free(&result);
+        if (ok) printf("OK\n");
+        else    { printf("FAIL\n"); failures++; }
+    }
+
     printf("getnetworkinfo: reports stable startup reachability schema "
            "(RED)... ");
     {

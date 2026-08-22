@@ -165,7 +165,7 @@ struct bridge_rpc_binding {
     const char *path;
     const char *rpc_method;
     enum json_type top_type;
-    struct bridge_rpc_required_field required[3];
+    struct bridge_rpc_required_field required[5];
     enum bridge_rpc_array_kind array_kind;
 };
 
@@ -195,8 +195,10 @@ static const struct bridge_rpc_binding g_bridge_rpc_direct[] = {
       {{0}}, BRIDGE_RPC_ARRAY_PEERS },
     { "core.network.peers.latency", "getpeerlatency", JSON_ARR,
       {{0}}, BRIDGE_RPC_ARRAY_LATENCY },
-    { "core.network.onion.status", "healthcheck", JSON_OBJ,
-      {{"status", JSON_STR}, {"healthy", JSON_BOOL}, {"serving", JSON_BOOL}},
+    { "core.network.onion.status", "onionstatus", JSON_OBJ,
+      {{"schema", JSON_STR}, {"bootstrap_state", JSON_STR},
+       {"tor_ready", JSON_BOOL}, {"onion_service_ready", JSON_BOOL},
+       {"onion_address", JSON_STR}},
       BRIDGE_RPC_ARRAY_NONE },
     { "core.wallet.status", "getwalletinfo", JSON_OBJ,
       {{"balance", JSON_STR}, {"txcount", JSON_INT}},

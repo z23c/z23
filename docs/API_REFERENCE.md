@@ -78,9 +78,9 @@ z23 discover schema <path> --side=input|output
 | Top-level roots | 11 |
 | Branches | 162 |
 | Leaves (dispatchable command paths) | 544 |
-| … `ready` (live handler in this build) | 490 |
+| … `ready` (live handler in this build) | 491 |
 | … `compat` (metadata only, names a fallback) | 25 |
-| … `planned` (fail-closed BLOCKED, exit 3) | 29 |
+| … `planned` (fail-closed BLOCKED, exit 3) | 28 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 24 |
 | Leaves with `effect=mutate` | 184 |
 | Leaves with `effect=destructive` | 4 |
@@ -297,7 +297,7 @@ represented by its children's sections.
 | `core network peers list` | ready | read / read / public · fast/low | none | `zcl.peers.v1` | `z23 core network peers list` | List connected peers |
 | `core network peers incidents` | ready | read / read / operator · fast/low | none | `zcl.peer_incidents.v2` | `z23 core network peers incidents` | Recent peer misbehavior incidents |
 | `core network peers latency` | ready | read / read / public · fast/low | none | `zcl.peer_latency.v1` | `z23 core network peers latency` | Round-trip latency for every peer |
-| `core network peers add` | planned | mutate / core-recovery / operator · fast/low | **`address`** | `zcl.peer_add.v1` | `z23 core network peers add --address=<ip:port>` | Add an outbound peer connection — *peer-mutation binding is a Wave 2.2 deliverable* |
+| `core network peers add` | ready | mutate / core-recovery / operator · fast/low | **`address`** | `zcl.peer_add.v1` | `z23 core network peers add --address=<ip:port\|v3.onion>` | Add an outbound peer connection |
 
 #### `core.network.onion` — Embedded onion service
 

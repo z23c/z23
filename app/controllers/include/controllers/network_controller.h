@@ -22,6 +22,10 @@ void register_net_rpc_commands(struct rpc_table *t);
 
 struct json_value;
 
+/* Backing RPC for the typed core.network.onion.status contract. */
+bool network_onion_status_rpc(const struct json_value *params, bool help,
+                              struct json_value *result);
+
 /* Shared bootstrap-service readiness contract for RPC, REST, and native. */
 bool network_bootstrap_status_json(struct json_value *out);
 const char *network_bootstrap_readiness_label(bool p2p_serving,

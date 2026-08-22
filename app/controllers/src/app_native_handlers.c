@@ -116,7 +116,37 @@ char *zcl_native_msg_inbox_body(const struct json_value *args,
                                 struct zcl_native_body_err *err)
 {
     (void)args;
-    return app_native_rpc_noargs("msg_inbox", err);
+    char *raw = app_native_rpc_noargs("msg_inbox", err);
+    if (!raw)
+        return NULL;
+    /* msg_inbox is an RPC/REST array, while native handler bodies are
+     * objects. Preserve the message rows and make the native index shape
+     * explicit instead of letting the bridge reject every valid inbox. */
+    struct json_value doc;
+    json_init(&doc);
+    if (!json_read(&doc, raw, strlen(raw)) || doc.type != JSON_ARR) {
+        json_free(&doc);
+        return raw;
+    }
+    free(raw);
+    struct json_value wrapped;
+    json_init(&wrapped);
+    json_set_object(&wrapped);
+    (void)json_push_kv(&wrapped, "messages", &doc);
+    json_free(&doc);
+    size_t need = json_write(&wrapped, NULL, 0);
+    char *out = zcl_malloc(need + 1, "native.messaging_inbox");
+    if (out)
+        (void)json_write(&wrapped, out, need + 1);
+    json_free(&wrapped);
+    if (!out) {
+        err->status = ZCL_NATIVE_BODY_INTERNAL;
+        snprintf(err->message, sizeof(err->message),
+                 "could not serialize the wrapped message inbox");
+        LOG_NULL("native.app", "messaging.inbox wrap alloc failed (%zu bytes)",
+                 need + 1);
+    }
+    return out;
 }
 
 /* ── File market ────────────────────────────────────────────── */

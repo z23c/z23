@@ -20,6 +20,10 @@ db_pass() {
     printf 'devbox_init: PASS step=%s\n' "$1" >&2
 }
 
+db_defer() {
+    printf 'devbox_init: DEFER step=%s detail=%s\n' "$1" "$2" >&2
+}
+
 db_field() {
     key=$1
     file=$2
@@ -76,6 +80,96 @@ db_status() {
 db_status_field() {
     key=$1
     sed -n "s/.*\"${key}\":\"\([^\"]*\)\".*/\1/p" | head -n 1
+}
+
+db_valid_onion_address() {
+    onion=$1
+    [ "${#onion}" -eq 62 ] || return 1
+    case $onion in
+        [a-z2-7][a-z2-7][a-z2-7][a-z2-7][a-z2-7][a-z2-7]*.onion) ;;
+        *) return 1 ;;
+    esac
+    onion_host=${onion%.onion}
+    [ "${#onion_host}" -eq 56 ] || return 1
+    case $onion_host in *[!a-z2-7]*) return 1 ;; esac
+    return 0
+}
+
+db_valid_port() {
+    port=$1
+    case $port in ''|*[!0-9]*) return 1 ;; esac
+    [ "$port" -ge 1 ] && [ "$port" -le 65535 ]
+}
+
+db_configure_fleet_peers() {
+    control=$1
+    repo_root=$2
+    datadir=$3
+    rpcport=$4
+    local_onion=$5
+    requested_count=0
+    deferred_count=0
+
+    for fleet_file in "$repo_root"/deploy/devfleet/*.txt; do
+        [ -e "$fleet_file" ] || continue
+        [ -f "$fleet_file" ] && [ ! -L "$fleet_file" ] || {
+            db_write_failure "$control" fleet_file unsafe_file
+            return 1
+        }
+        fleet_box=$(db_field BOX "$fleet_file")
+        fleet_onion=$(db_field ONION_ADDRESS "$fleet_file")
+        fleet_port=$(db_field P2P_PORT "$fleet_file")
+        fleet_source=$(db_field SOURCE_SHA "$fleet_file")
+        [ -n "$fleet_box" ] || {
+            db_write_failure "$control" fleet_file missing_box
+            return 1
+        }
+        case $fleet_box in *[!a-zA-Z0-9_-]*|'')
+            db_write_failure "$control" fleet_file invalid_box
+            return 1
+            ;;
+        esac
+        db_valid_onion_address "$fleet_onion" || {
+            db_write_failure "$control" fleet_onion invalid_onion_address
+            return 1
+        }
+        db_valid_port "$fleet_port" || {
+            db_write_failure "$control" fleet_port invalid_p2p_port
+            return 1
+        }
+        if [ "$fleet_onion" = "$local_onion" ]; then
+            db_pass "fleet_self_skipped_$fleet_box"
+            continue
+        fi
+        resolved_source=$(git -C "$repo_root" rev-parse --verify \
+            "${fleet_source}^{commit}" 2>/dev/null) || {
+            db_write_failure "$control" fleet_source source_not_found
+            return 1
+        }
+        [ "$resolved_source" = "$fleet_source" ] || {
+            db_write_failure "$control" fleet_source source_not_exact_sha
+            return 1
+        }
+        git -C "$repo_root" merge-base --is-ancestor "$fleet_source" HEAD \
+            2>/dev/null || {
+            db_write_failure "$control" fleet_source source_not_ancestor
+            return 1
+        }
+        peer_result=$("$Z23_BIN" -datadir="$datadir" -rpcport="$rpcport" \
+            core network peers add --address="$fleet_onion" 2>&1)
+        peer_exit=$?
+        if [ "$peer_exit" -ne 0 ] \
+            || ! printf '%s' "$peer_result" | grep -q '"ok":true'; then
+            deferred_count=$((deferred_count + 1))
+            db_defer "fleet_peer_unavailable_$fleet_box" \
+                onion_rendezvous_failed
+            continue
+        fi
+        requested_count=$((requested_count + 1))
+        db_pass "fleet_peer_requested_$fleet_box"
+    done
+    db_pass "fleet_peers_scanned_requested_${requested_count}_deferred_${deferred_count}"
+    return 0
 }
 
 db_write_failure() {
@@ -176,6 +270,9 @@ db_supervisor() {
     p2p_endpoint="$external_ip:$ISO_PORT"
     db_pass p2p_endpoint_listening
 
+    db_configure_fleet_peers "$control" "$repo_root" "$ISO_DD" \
+        "$ISO_RPCPORT" "$onion_address" || exit 1
+
     state_tmp="$control/state.$$"
     {
         printf 'SUPERVISOR_PID=%s\n' "$$"
@@ -218,8 +315,10 @@ fi
 [ "$#" -eq 0 ] || db_fail usage 'expected no arguments'
 
 command -v bash >/dev/null 2>&1 || db_fail preflight bash_not_found
+command -v git >/dev/null 2>&1 || db_fail preflight git_not_found
 command -v ip >/dev/null 2>&1 || db_fail preflight ip_not_found
 command -v realpath >/dev/null 2>&1 || db_fail preflight realpath_not_found
+command -v setsid >/dev/null 2>&1 || db_fail preflight setsid_not_found
 command -v ss >/dev/null 2>&1 || db_fail preflight ss_not_found
 [ -x "$Z23_BIN" ] || db_fail preflight 'build/bin/z23 missing; run make -j2'
 [ -x "$REPO_ROOT/build/bin/zclassic23" ] \
@@ -259,6 +358,12 @@ if [ -e "$CONTROL/state" ] || [ -e "$CONTROL/ready" ]; then
         bootstrap_state=$(printf '%s' "$status" | db_status_field bootstrap_state)
         [ "$bootstrap_state" = ready ] \
             || db_fail existing_instance onion_not_ready
+        local_onion=$(printf '%s' "$status" | db_status_field onion_address)
+        db_valid_onion_address "$local_onion" \
+            || db_fail existing_instance invalid_onion_address
+        db_configure_fleet_peers "$CONTROL" "$REPO_ROOT" "$datadir" \
+            "$rpcport" "$local_onion" \
+            || db_fail existing_instance fleet_peer_configuration_failed
         db_pass existing_instance_ready
         cat "$CONTROL/ready"
         exit 0
@@ -279,7 +384,8 @@ rm -f "$CONTROL/failure" "$CONTROL/ready" "$CONTROL/state"
 # named refusal from isolated_node_env.sh; this script never hunts for a port
 # whose accidental availability could hide faulty ownership.
 port_base=$((39000 + (($$ % 190) * 4)))
-nohup bash "$SCRIPT_PATH" --supervisor "$CONTROL" "$port_base" "$REPO_ROOT" \
+nohup setsid bash "$SCRIPT_PATH" --supervisor "$CONTROL" "$port_base" \
+    "$REPO_ROOT" \
     > "$CONTROL/supervisor.log" 2>&1 &
 supervisor_pid=$!
 db_pass supervisor_started
