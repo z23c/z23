@@ -1,8 +1,10 @@
 BOX=node1
-ROUNDTRIP=fail
-ASSERTION=PEER_LISTED
-WALL_SECONDS=301
-ATTEMPTED_AT=2026-08-22T21:40:24Z
-PEER_ONION=32cazytwxyy2bcxtrcgssksz3pigsm5tdtefy436iyy4gh7r55suvhyd.onion
-DETAIL=node2 advertised clearnet port refuses TCP; its host's default P2P port accepts TCP but no P2P peer session establishes within 300s (endpoint_not_connected); outbound P2P over onion unsupported in this tree, so the node2 onion is unreachable
-SOURCE_SHA=6829819a1f6d770c62440b66154df2e5cded3a86
+ROUNDTRIP=pending
+ATTEMPTED_AT=2026-08-22T23:57:15Z
+PEER_ONION=i7mmpdml2twgqlsvrtofcfzdfvmxkdpk6dghq5kccdtfcva4kyzk4rid.onion
+PEER_PORT=39304
+ONION_SELF_DIAL=pass
+ONION_SELF_DIAL_DETAIL=full Tor circuit to own onion:8055 established, inbound P2P port mapping accepted the stream, version handshake reached version_sent then remote-close by the self-connection guard (expected on self-dial)
+ONION_PEER_DIAL=refused
+DETAIL=outbound onion P2P verified end-to-end on self-dial; node2 onion:39304 refused by remote Tor (node2 runs bcaea5bce, predates inbound P2P port mapping at 355808b13); self-heals when node2 pulls 594169cc0+ and restarts its isolated node
+SOURCE_SHA=594169cc0e7cc0993f9a27749703b10523799e35
