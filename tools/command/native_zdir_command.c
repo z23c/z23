@@ -29,6 +29,7 @@
 
 #include "command/native_command.h"
 
+#include "base/log_macros.h"
 #include "encoding/utilstrencodings.h"
 #include "json/json.h"
 #include "models/database.h"
@@ -38,6 +39,7 @@
 
 #include <sqlite3.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* ── small helpers ────────────────────────────────────────────────── */
@@ -122,6 +124,119 @@ static const char *zdc_require_hostname(const struct json_value *input,
         return NULL;
     }
     return hostname;
+}
+
+#define ZDC_LIST_CAP 32
+#define ZDC_TAG "native.zdir"
+
+void zcl_native_handle_core_zdir_guide(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    if (!reply)
+        return;
+    if (!request || !request->input || request->input->type != JSON_OBJ ||
+        request->input->num_children != 0) {
+        LOG_ERROR(ZDC_TAG, "BAD_ZDIR_GUIDE_INPUT: zdir guide accepts no "
+                          "input keys");
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID,
+                               "BAD_ZDIR_GUIDE_INPUT", "validate", false,
+                               false, "zdir guide accepts no input keys",
+                               "core.zdir.guide");
+        return;
+    }
+    bool ok = json_push_kv_str(
+            &reply->data, "mission",
+            "Find Z23 nodes from the chain you already verify.") &&
+        json_push_kv_str(&reply->data, "list_command",
+                         "z23 core zdir list") &&
+        json_push_kv_str(&reply->data, "announce_command",
+                         "z23 core zdir register") &&
+        json_push_kv_str(
+            &reply->data, "never",
+            "Do not hardcode hosts. Directory authorities are the chain.");
+    if (!ok) {
+        LOG_ERROR(ZDC_TAG, "ZDIR_GUIDE_OUTPUT: the directory guide could "
+                          "not be rendered");
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "ZDIR_GUIDE_OUTPUT",
+                               "render", false, false,
+                               "the directory guide could not be rendered",
+                               "core.zdir.guide");
+    }
+}
+
+void zcl_native_handle_core_zdir_list(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    if (!request || !reply)
+        return;
+    const char *path = "core.zdir.list";
+    const char *datadir = zdc_datadir(request);
+    sqlite3 *db = NULL;
+    struct node_db ndb;
+    enum zcl_node_db_ro_status st =
+        zcl_native_node_db_open_readonly(datadir, &db, &ndb, NULL, 0);
+    if (st != ZCL_NODE_DB_RO_OK && st != ZCL_NODE_DB_RO_ABSENT &&
+        st != ZCL_NODE_DB_RO_NO_DATADIR) {
+        LOG_ERROR(ZDC_TAG, "NODE_DB_UNREADABLE: onion_directory could not "
+                          "be opened read-only");
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_FAILED, "NODE_DB_UNREADABLE",
+                               "execute", false, false,
+                               "the onion directory could not be read",
+                               path);
+        return;
+    }
+
+    int offset = 0;
+    if (request->cursor && request->cursor[0]) {
+        char *end = NULL;
+        unsigned long long c = strtoull(request->cursor, &end, 10);
+        if (end && !*end && c <= 100000)
+            offset = (int)c;
+    }
+
+    struct db_onion_directory rows[ZDC_LIST_CAP];
+    int n = 0;
+    int64_t active = 0;
+    bool folded = (st == ZCL_NODE_DB_RO_OK);
+    if (folded) {
+        n = db_onion_directory_list_active(&ndb, rows, ZDC_LIST_CAP,
+                                           offset);
+        active = db_onion_directory_count_by_status(
+            &ndb, ONION_DIRECTORY_STATUS_ACTIVE);
+        zcl_native_node_db_close_readonly(&db, &ndb);
+    }
+
+    struct json_value items;
+    json_init(&items);
+    json_set_array(&items);
+    for (int i = 0; i < n; i++) {
+        struct json_value row;
+        json_init(&row);
+        json_set_object(&row);
+        (void)json_push_kv_str(&row, "hostname", rows[i].hostname);
+        (void)json_push_kv_int(&row, "height", rows[i].height);
+        (void)json_push_back(&items, &row);
+        json_free(&row);
+    }
+    (void)json_push_kv(&reply->data, "items", &items);
+    json_free(&items);
+    (void)json_push_kv_int(&reply->data, "count", n);
+    (void)json_push_kv_int(&reply->data, "active", active);
+    (void)json_push_kv_bool(&reply->data, "folded", folded);
+    if (folded && offset + n < active) {
+        char cont[80];
+        snprintf(cont, sizeof(cont), "z23 core zdir list --cursor=%d",
+                 offset + n);
+        (void)json_push_kv_str(&reply->data, "continue", cont);
+    }
+    (void)json_push_kv_str(&reply->data, "next_action",
+                           folded && n > 0 ? "z23 core network onion status"
+                                           : "z23 core zdir guide");
+    reply->status = ZCL_COMMAND_STATUS_PASSED;
+    reply->exit_code = ZCL_COMMAND_EXIT_OK;
 }
 
 /* ── core.zdir.register ───────────────────────────────────────────── */
