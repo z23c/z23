@@ -15,7 +15,6 @@
 #include "net/connman.h"
 #include "net/fast_sync.h"
 #include "net/netbase.h"
-#include "net/onion_peer_merge.h"
 #include "net/peer_identity.h"
 #include "net/peer_lifecycle.h"
 #include "net/protocol.h"
@@ -224,7 +223,7 @@ static void push_addnode_status(struct json_value *result,
     if (cm) {
         for (int i = 0; i < cm->num_addnodes; i++) {
             struct json_value entry = {0};
-            char addr[64];
+            char addr[NET_SERVICE_STR_MAX + 1];
             int64_t last = cm->addnode_last_attempt[i];
             int64_t elapsed = last > 0 && now >= last ? now - last : -1;
             int64_t remaining = 0;
@@ -726,21 +725,20 @@ static bool rpc_addnode(const struct json_value *params, bool help,
     }
 
     struct net_service svc;
-    if (!lookup_numeric(node_str, &svc, ctx->connman->manager.default_port)) {
-        if (!onion_hostname_valid(node_str)) {
+    if (net_name_is_onion(node_str)) {
+        /* Operator-directed onion peer: parse locally, NEVER resolve via
+         * DNS and never fall back to clearnet. */
+        if (!lookup_onion(node_str, &svc,
+                          ctx->connman->manager.default_port)) {
             json_set_str(result,
-                "addnode requires a numeric IP address or a valid v3 onion "
-                "rendezvous address");
+                "addnode: invalid .onion address (onion peers are parsed "
+                "locally and never resolved via DNS)");
             return false;
         }
-        int scheduled = connman_add_onion_seed(ctx->connman, node_str);
-        if (scheduled < 1) {
-            json_set_str(result,
-                "onion rendezvous did not yield a numeric P2P endpoint");
-            return false;
-        }
-        json_set_null(result);
-        return true;
+    } else if (!lookup_numeric(node_str, &svc, ctx->connman->manager.default_port)) {
+        json_set_str(result,
+            "addnode requires a numeric IP address (DNS names are not resolved)");
+        return false;
     }
     struct net_address addr;
     net_address_init(&addr);
@@ -756,7 +754,7 @@ static bool rpc_addnode(const struct json_value *params, bool help,
     }
 
     if (strcmp(cmd, "onetry") == 0 || strcmp(cmd, "add") == 0) {
-        char host[64];
+        char host[NET_ADDR_STR_MAX + 1];
 
         net_addr_to_string(&addr.svc.addr, host, sizeof(host));
         connman_add_seed_node(ctx->connman, host, addr.svc.port);
@@ -777,7 +775,6 @@ void register_net_rpc_commands(struct rpc_table *t)
     struct rpc_command cmds[] = {
         { "network", "getnetworkinfo",    rpc_getnetworkinfo,    true },
         { "network", "bootstrapstatus",   rpc_bootstrapstatus,   true },
-        { "network", "onionstatus",       network_onion_status_rpc, true },
         { "network", "getpeerinfo",       rpc_getpeerinfo,       true },
         { "network", "getconnectioncount", rpc_getconnectioncount, true },
         { "network", "peerincidents",     rpc_peerincidents,     true },

@@ -11,6 +11,7 @@
 #include "net/tor_integration.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <netinet/in.h>   /* AF_INET for the inbound P2P port mapping */
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -50,6 +51,12 @@ static struct thread_liveness_child g_tor_monitor_liveness = { .id = SUPERVISOR_
 static _Atomic uint64_t g_tor_monitor_poll_count = 0;
 static char g_onion_address[128];
 static char g_tor_datadir[512];
+/* The node's public P2P port, captured by tor_integration_start(). Used by
+ * tor_try_install_persistent_identity() for the SECOND port mapping on the
+ * persistent onion service: <onion>:<p2p_port> forwards to the local P2P
+ * listener (see the install site for why this is NOT a dynhost virtual
+ * port). 0 = unknown (no mapping installed). */
+static uint16_t g_tor_p2p_port = 0;
 /* tor.log size at THIS boot's Tor start. The log is append-mode across
  * boots and (in default mode) dynhost mints a fresh ephemeral service
  * every start, so any address line below this offset names a dead
@@ -528,16 +535,42 @@ static int tor_try_install_persistent_identity(const char *datadir)
      * is consulted, so real_addr stays AF_UNSPEC. */
     tor_smartlist_t *ports = smartlist_new();
     tor_hs_port_config_t *pc = NULL;
-    if (ports)
+    tor_hs_port_config_t *p2p_pc = NULL;
+    if (ports) {
         pc = tor_malloc_zero_(sizeof(*pc) + 1);
-    if (!ports || !pc) {
+        p2p_pc = tor_malloc_zero_(sizeof(*p2p_pc) + 1);
+    }
+    if (!ports || !pc || !p2p_pc) {
         if (pc) tor_free_(pc);
+        if (p2p_pc) tor_free_(p2p_pc);
         if (ports) smartlist_free_(ports);
         tor_free_(sk);
         LOG_ERR("tor", "allocation failed for persistent onion ports");
     }
     pc->virtual_port = 80;
     smartlist_add(ports, pc);
+
+    /* SECOND port mapping: the node's P2P port. Inbound P2P rides the
+     * persistent onion identity at <onion>:<p2p_port>, forwarded to the
+     * local listener by stock Tor hidden-service machinery
+     * (hs_service.c -> connection_exit_connect) as an ordinary TCP
+     * connection from 127.0.0.1 — no fork change needed. Deliberately NOT
+     * dynhost_add_virtual_port: that would route the port into the HTTP
+     * interception layer (dynhost_handlers.c), which exists for port-80
+     * traffic only. */
+    if (g_tor_p2p_port > 0 && g_tor_p2p_port != 80) {
+        p2p_pc->virtual_port = g_tor_p2p_port;
+        p2p_pc->is_unix_addr = 0;
+        p2p_pc->real_port = g_tor_p2p_port;
+        p2p_pc->real_addr.family = AF_INET;
+        p2p_pc->real_addr.addr.in_addr[0] = 127;
+        p2p_pc->real_addr.addr.in_addr[1] = 0;
+        p2p_pc->real_addr.addr.in_addr[2] = 0;
+        p2p_pc->real_addr.addr.in_addr[3] = 1;
+        smartlist_add(ports, p2p_pc);
+    } else {
+        tor_free_(p2p_pc);
+    }
 
     char *address_out = NULL;
     /* Ownership of sk and ports passes to Tor on EVERY path below. */
@@ -792,6 +825,7 @@ bool tor_integration_start(const char *datadir, uint16_t p2p_port)
         return true;
 
     snprintf(g_tor_datadir, sizeof(g_tor_datadir), "%s", datadir);
+    g_tor_p2p_port = p2p_port;
     g_onion_address[0] = '\0';
     g_rotated_old_address[0] = '\0';
     atomic_store(&g_persist_install_state, 0);

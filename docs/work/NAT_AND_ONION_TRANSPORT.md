@@ -1,5 +1,27 @@
 # NAT traversal, onion hosting, and fast P2P transport — design notes (2026-07-27)
 
+> **Owner decision (2026-08-22): onion P2P transport landed on the raw
+> dynhost stream API, NO SOCKS.** zclassic23 never proxies P2P through a
+> SOCKS port. Outbound onion dials use the fork's raw bidirectional stream
+> API (`dynhost_stream_open/write/close`,
+> `vendor/tor/src/feature/dynhost/dynhost_stream.h`) via the socketpair <!-- doc-path-ok: vendor/tor is a submodule; the dynhost fork header lives inside it -->
+> bridge in `lib/net/src/onion_stream.c`, which presents the circuit to connman as an
+> ordinary connected fd — the reactor, version handshake, and message layer
+> are unchanged. Onion peers are **operator-directed only** (`addnode`,
+> `-addnode`, seed entries): they are parsed locally
+> (`net_addr_from_onion`), never DNS-resolved, never dialed over clearnet,
+> and **never gossiped** — deliberately no BIP155-style addr wire change.
+> Inbound P2P rides the persistent onion identity's SECOND port mapping
+> (`tor_try_install_persistent_identity` in `lib/net/src/tor_integration.c`):
+> virtual port = the node's P2P port, forwarded by stock hidden-service
+> machinery to `127.0.0.1:<p2p_port>`; it is NOT a dynhost virtual port
+> (that would land in the HTTP interception layer). The
+> `MAX_OUTBOUND_ONION` diversity cap (2) bounds outbound onion slots.
+> Onion dials carry their own 120 s connect budget
+> (`ONION_STREAM_CONNECT_TIMEOUT_MS`); the clearnet dialer's shared 5 s
+> window is never applied to them. Everything below remains the larger
+> design context.
+
 Owner question: how to use Tor for NAT traversal, keep fast P2P networking,
 and build both robustly into Z23 (onion hosts, ZNAM hosting, the
 package swarm, future P2P services). All of this is P2P-layer policy — no

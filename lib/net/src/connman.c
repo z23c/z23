@@ -1262,7 +1262,7 @@ void connman_record_addnode_attempt(struct connman *cm,
          * permanently dead, whatever the historical failure streak said. */
         if (cm->addnode_retired[addnode_index]) {
             cm->addnode_retired[addnode_index] = false;
-            char addr[64];
+            char addr[NET_SERVICE_STR_MAX + 1];
             net_service_to_string(&cm->addnodes[addnode_index].svc, addr,
                                   sizeof(addr));
             LOG_INFO("connman",
@@ -1357,7 +1357,7 @@ void connman_retire_dead_addnodes(struct connman *cm, size_t outbound_healthy)
         cm->addnode_retired_at[i] = now;
         cm->addnode_retirements_total++;
 
-        char addr[64];
+        char addr[NET_SERVICE_STR_MAX + 1];
         net_service_to_string(&cm->addnodes[i].svc, addr, sizeof(addr));
         LOG_WARN("connman",
                  "addnode retired: addr=%s tcp_failures=%lld "
@@ -2732,6 +2732,21 @@ void connman_add_seed_node(struct connman *cm, const char *host,
     net_address_init(&addr);
     addr.svc.port = port;
 
+    /* A .onion seed is parsed locally and enters addrman as a torv3
+     * address — it must NEVER reach getaddrinfo (no DNS leak, no clearnet
+     * fallback). Onion peers remain operator-directed: they are accepted
+     * here and via addnode, never gossiped. */
+    if (net_name_is_onion(host)) {
+        if (!net_addr_from_onion(host, &addr.svc.addr)) {
+            LOG_WARN("connman", "ignoring invalid .onion seed '%s'", host);
+            return;
+        }
+        struct net_addr src;
+        net_addr_init(&src);
+        addrman_add(&cm->manager.addrman, &addr, &src, 0);
+        return;
+    }
+
     struct addrinfo hints;
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_UNSPEC;
@@ -2777,7 +2792,7 @@ void connman_open_connection(struct connman *cm,
                     cm->addnode_tcp_failures[i] = 0;
                     cm->addnode_protocol_failures[i] = 0;
                     cm->addnode_first_failure_ts[i] = 0;
-                    char revived_addr[64];
+                    char revived_addr[NET_SERVICE_STR_MAX + 1];
                     net_service_to_string(&cm->addnodes[i].svc, revived_addr,
                                           sizeof(revived_addr));
                     LOG_INFO("connman",
@@ -2798,7 +2813,7 @@ void connman_open_connection(struct connman *cm,
 
     /* Pass addr_name as dest so connect_node skips is_local check.
      * This allows connecting to localhost (e.g. local zclassicd peer). */
-    char dest[64];
+    char dest[NET_SERVICE_STR_MAX + 1];
     net_service_to_string(&addr->svc, dest, sizeof(dest));
     peer_lifecycle_note_attempt(addr, PEER_LIFECYCLE_SOURCE_MANUAL);
     struct p2p_node *node = connect_node(&cm->manager,

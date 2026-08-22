@@ -50,6 +50,7 @@
 #include "net/connman.h"
 #include "net/addrman.h"
 #include "net/addnode_file.h"
+#include "net/netbase.h"
 #include "util/log_macros.h"
 #include <netdb.h>
 #include <stdio.h>
@@ -213,6 +214,20 @@ void app_add_node(const char *host, int port)
     struct net_address addr;
     net_address_init(&addr);
     addr.svc.port = use_port;
+
+    /* Operator-directed onion peer: parse the v3 hostname locally and dial
+     * it through the embedded Tor stream bridge. A .onion name must NEVER
+     * reach getaddrinfo — no DNS leak, no clearnet fallback. */
+    if (net_name_is_onion(hostbuf)) {
+        if (!net_addr_from_onion(hostbuf, &addr.svc.addr)) {
+            printf("Invalid .onion addnode %s (not a v3 onion address; "
+                   "never resolved via DNS)\n", hostbuf);
+            return;
+        }
+        printf("Connecting to onion addnode %s:%u\n", hostbuf, use_port);
+        connman_open_connection(svc->connman, &addr);
+        return;
+    }
 
     struct addrinfo hints;
     memset(&hints, 0, sizeof(hints));

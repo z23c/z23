@@ -16,6 +16,7 @@
 #include "platform/time_compat.h"
 #include "connman_internal.h"
 #include "net/connman.h"
+#include "net/onion_stream.h"
 #include "net/addrman.h"
 #include "net/peer_lifecycle.h"
 #include "net/port_policy.h"
@@ -419,7 +420,7 @@ static void connman_sweep_feelers(struct connman *cm)
 static void connman_record_dial_failure(struct connman *cm,
                                         const struct connman_dial_candidate *c)
 {
-    char ipbuf[64];
+    char ipbuf[NET_ADDR_STR_MAX + 1];
     net_addr_to_string(&c->addr.svc.addr, ipbuf, sizeof(ipbuf));
     if (c->source == CONNMAN_TARGET_ADDNODE) {
         connman_record_addnode_attempt(cm, c->addnode_index, false);
@@ -457,7 +458,7 @@ static void connman_complete_dial(struct connman *cm,
         c->source == CONNMAN_TARGET_ZCL23_DB ? PEER_LIFECYCLE_SOURCE_ZCL23_DB :
                                               PEER_LIFECYCLE_SOURCE_ADDRMAN;
     const char *dest = NULL;
-    char destbuf[64];
+    char destbuf[NET_SERVICE_STR_MAX + 1];
     if (c->source == CONNMAN_TARGET_ADDNODE) {
         net_service_to_string(&c->addr.svc, destbuf, sizeof(destbuf));
         dest = destbuf;
@@ -478,7 +479,7 @@ static void connman_complete_dial(struct connman *cm,
         connman_record_addnode_attempt(cm, c->addnode_index, true);
     peer_lifecycle_note_connected(node, ls);
     if (created) {
-        char ipbuf[64];
+        char ipbuf[NET_ADDR_STR_MAX + 1];
         net_addr_to_string(&c->addr.svc.addr, ipbuf, sizeof(ipbuf));
         printf("Outbound dial: connected to %s:%u%s\n", ipbuf,
                c->addr.svc.port, c->is_feeler ? " (feeler)" : "");
@@ -509,6 +510,22 @@ static void connman_dial_batch(struct connman *cm,
             c->source == CONNMAN_TARGET_ANCHOR  ? PEER_LIFECYCLE_SOURCE_ANCHOR  :
             c->source == CONNMAN_TARGET_ZCL23_DB ? PEER_LIFECYCLE_SOURCE_ZCL23_DB :
                                                   PEER_LIFECYCLE_SOURCE_ADDRMAN);
+        if (net_addr_is_tor(&c->addr.svc.addr)) {
+            /* Onion candidates do NOT join the non-blocking socket race:
+             * there is no fd to poll until the circuit exists, and the
+             * shared 5 s clearnet window is far short of a 10-60 s circuit
+             * build. They get their own blocking budget instead (capped at
+             * MAX_OUTBOUND_ONION per batch by batch_diversity_ok), inline on
+             * the scheduler thread — g_open_liveness is liveness-only (no
+             * progress deadline), so the block trips no supervisor gate. */
+            zcl_socket_t s = ZCL_INVALID_SOCKET;
+            if (onion_stream_connect(&c->addr.svc, &s,
+                                     ONION_STREAM_CONNECT_TIMEOUT_MS))
+                connman_complete_dial(cm, c, s);   /* takes ownership of s */
+            else
+                connman_record_dial_failure(cm, c);
+            continue;
+        }
         zcl_socket_t s = ZCL_INVALID_SOCKET;
         enum zcl_connect_start st = connect_socket_start(&c->addr.svc, &s);
         if (st == ZCL_CONNECT_START_ERROR) {

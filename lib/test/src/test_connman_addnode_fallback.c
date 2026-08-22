@@ -5,6 +5,7 @@
 #include "coins/undo.h"
 #include "net/connman.h"
 #include "net/tor_integration.h"
+#include "net/onion_v3_address.h"
 #include "storage/census_read.h"
 #include "util/blocker.h"
 #include <unistd.h>
@@ -1125,6 +1126,42 @@ int test_connman_addnode_fallback(void)
         }
 
         connman_free(&cm);
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+
+    /* Onion dial routing, no live Tor: an onion addnode is stored like any
+     * other, but the connect attempt routes to the onion stream bridge,
+     * which fails CLOSED (named error, immediate return) with the Tor
+     * runtime down — no clearnet fallback, no block on a circuit timeout,
+     * and no node is ever registered for the address. */
+    printf("connman_addnode_fallback: onion addnode fails closed "
+           "without Tor... ");
+    {
+        chain_params_select(CHAIN_MAIN);
+        const struct chain_params *params = chain_params_get();
+        struct connman cm;
+        struct node_signals sigs;
+        memset(&sigs, 0, sizeof(sigs));
+        bool ok = connman_init(&cm, params, &sigs);
+
+        if (ok) {
+            uint8_t pub[32];
+            for (int i = 0; i < 32; i++)
+                pub[i] = (uint8_t)(0x30 + i);
+            char host[ONION_V3_ADDRESS_LEN + 1];
+            ok = onion_v3_address_from_pubkey(pub, host);
+
+            struct net_address a;
+            net_address_init(&a);
+            ok = ok && net_addr_from_onion(host, &a.svc.addr);
+            a.svc.port = 8033;
+
+            connman_open_connection(&cm, &a);
+            ok = ok && cm.num_addnodes == 1 && cm.manager.num_nodes == 0;
+        }
+
+        if (ok) connman_free(&cm);
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }

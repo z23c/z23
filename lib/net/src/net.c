@@ -7,6 +7,7 @@
 #include "net/net.h"
 #include "net/v2_transport.h"
 #include "net/net_fault.h"
+#include "net/onion_stream.h"
 #include "net/peer_lifecycle.h"
 #include "net/peer_scoring.h"
 #include "net/peer_eviction.h"
@@ -314,7 +315,7 @@ struct p2p_node *p2p_node_create(struct net_manager *nm, zcl_socket_t sock,
     if (name && name[0]) {
         snprintf(node->addr_name, sizeof(node->addr_name), "%s", name);
     } else {
-        char ipbuf[64];
+        char ipbuf[NET_ADDR_STR_MAX + 1];
         net_addr_to_string(&addr->svc.addr, ipbuf, sizeof(ipbuf));
         snprintf(node->addr_name, sizeof(node->addr_name), "%s:%u",
                  ipbuf, addr->svc.port);
@@ -653,7 +654,7 @@ void p2p_node_copy_stats(const struct p2p_node *node, struct node_stats *stats)
     stats->ping_wait = (double)ping_wait / 1e6;
 
     if (net_addr_is_valid(&node->addr_local.addr)) {
-        char buf[64];
+        char buf[NET_ADDR_STR_MAX + 1];
         net_addr_to_string(&node->addr_local.addr, buf, sizeof(buf));
         snprintf(stats->addr_local, sizeof(stats->addr_local), "%s:%u",
                  buf, node->addr_local.port);
@@ -1115,7 +1116,7 @@ struct p2p_node *connect_node_from_socket(struct net_manager *nm,
     if (created_out)
         *created_out = true;
 
-    char addr_str[64];
+    char addr_str[NET_SERVICE_STR_MAX + 1];
     net_service_to_string(&addr_connect->svc, addr_str, sizeof(addr_str));
     char addr_safe[96];
     log_json_escape(addr_safe, sizeof(addr_safe), addr_str);
@@ -1143,8 +1144,22 @@ struct p2p_node *connect_node(struct net_manager *nm,
         return existing;
 
     zcl_socket_t sock;
-    if (!connect_socket_directly(&addr_connect->svc, &sock, DEFAULT_CONNECT_TIMEOUT)) {
-        char addr_str[64];
+    bool sock_ok;
+    if (net_addr_is_tor(&addr_connect->svc.addr)) {
+        /* Onion endpoints never touch connect(2): the raw dynhost stream
+         * rides an in-process Tor circuit and surfaces here as a bridged
+         * socket fd. Fails closed (never a clearnet fallback) with its own
+         * named error when the Tor runtime is absent or not ready. Circuit
+         * builds need their own budget — the shared 5 s clearnet window is
+         * far short of the 10-60 s a cold circuit takes. */
+        sock_ok = onion_stream_connect(&addr_connect->svc, &sock,
+                                       ONION_STREAM_CONNECT_TIMEOUT_MS);
+    } else {
+        sock_ok = connect_socket_directly(&addr_connect->svc, &sock,
+                                          DEFAULT_CONNECT_TIMEOUT);
+    }
+    if (!sock_ok) {
+        char addr_str[NET_SERVICE_STR_MAX + 1];
         net_service_to_string(&addr_connect->svc, addr_str, sizeof(addr_str));
         char addr_safe[96];
         log_json_escape(addr_safe, sizeof(addr_safe), addr_str);
