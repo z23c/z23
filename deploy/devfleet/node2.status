@@ -1,0 +1,13 @@
+BOX=node2
+INIT=pass
+IDEMPOTENT_INIT=pass
+ONION_BOOTSTRAP=pass
+ONION_DIRECTORY_NODE1=pass
+LOCAL_SYNC=pass
+LOCAL_SYNC_HEIGHT=8
+SPOOL=pass
+REMOTE_SYNC=fail
+FLEET_SOURCE_MATCH=fail
+BLOCKERS=node1_source_sha_stale,raw_p2p_over_onion_ingress_missing,node1_directory_has_zero_numeric_fast_paths
+SOURCE_SHA=bcaea5bce9cceecae709e9d0c175c20d66ea660f
+OBSERVED_AT=2026-08-22T22:50:40Z
