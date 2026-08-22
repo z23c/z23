@@ -102,9 +102,14 @@ bool block_locator_serialize(const struct block_locator *loc,
 
 /* Reads the leading nVersion and IGNORES it (deserialization is
  * version-agnostic for locators), then a compact-size count and that many
- * 32-byte hashes. DESERIALIZATION INVARIANT: a count above
- * MAX_LOCATOR_HASHES (64) is rejected with a logged failure (returns false)
- * to bound the allocation against hostile peers. On success `loc->vhave` is
+ * 32-byte hashes. DESERIALIZATION INVARIANT (P2P wire, not consensus):
+ * legacy ZClassic/MagicBean peers routinely send one more hash than
+ * MAX_LOCATOR_HASHES (64), and zclassicd's CBlockLocator has no count
+ * limit, so an oversized count is TOLERATED — the first
+ * MAX_LOCATOR_HASHES (tip-most) entries are kept and the remainder is
+ * read and discarded, leaving the stream cursor on the trailing
+ * hash_stop. The cap still bounds the allocation against hostile peers;
+ * an overclaimed count fails on a short read. On success `loc->vhave` is
  * a freshly heap-allocated array of `loc->num_hashes` entries that the
  * caller owns and must release with block_locator_free; the prior contents
  * of `*loc` are overwritten (NOT freed) — pass a fresh/zeroed locator. */

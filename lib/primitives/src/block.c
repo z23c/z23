@@ -154,15 +154,35 @@ bool block_locator_deserialize(struct block_locator *loc,
     (void)nVersion;
     uint64_t count;
     if (!stream_read_compact_size(s, &count)) return false;
+    /* Legacy ZClassic/MagicBean peers routinely send locators one entry past
+     * MAX_LOCATOR_HASHES (65 observed on mainnet), and zclassicd's
+     * CBlockLocator deserialization has no count limit at all — rejecting
+     * here silently drops honest getblocks/getheaders requests (the peer
+     * waits forever on a reply that never comes) and stalls its sync.
+     * Tolerate instead: keep the first MAX_LOCATOR_HASHES (tip-most)
+     * entries, which are the ones the common-ancestor scan needs, and
+     * read-and-discard the remainder so the stream cursor still lands on
+     * the trailing hash_stop. The cap still bounds the vhave allocation
+     * against hostile peers; an overclaimed count simply fails on a short
+     * read below. */
     if (count > MAX_LOCATOR_HASHES)
-        LOG_FAIL("block", "locator hash count %llu exceeds MAX_LOCATOR_HASHES %d",
-                 (unsigned long long)count, MAX_LOCATOR_HASHES);
-    loc->num_hashes = (size_t)count;
+        LOG_WARN("block",
+                 "locator hash count %llu exceeds MAX_LOCATOR_HASHES %d; "
+                 "keeping tip-most %d and discarding %llu",
+                 (unsigned long long)count, MAX_LOCATOR_HASHES,
+                 MAX_LOCATOR_HASHES,
+                 (unsigned long long)(count - MAX_LOCATOR_HASHES));
+    loc->num_hashes = count < MAX_LOCATOR_HASHES ? (size_t)count
+                                                 : MAX_LOCATOR_HASHES;
     loc->vhave = zcl_calloc(loc->num_hashes, sizeof(struct uint256), "locator_hashes");
     if (!loc->vhave && loc->num_hashes > 0)
         LOG_FAIL("block", "alloc failed for %zu locator hashes", loc->num_hashes);
     for (size_t i = 0; i < loc->num_hashes; i++) {
         if (!stream_read_bytes(s, loc->vhave[i].data, 32)) return false;
+    }
+    unsigned char discard[32];
+    for (uint64_t i = loc->num_hashes; i < count; i++) {
+        if (!stream_read_bytes(s, discard, 32)) return false;
     }
     return true;
 }
