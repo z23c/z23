@@ -115,9 +115,10 @@ fi
 echo "assertion MY_ONION_READY ok onion=$my_onion"
 
 # ── PEER_ADDED ───────────────────────────────────────────────────────
-addnode_out=$(cli addnode "$ENDPOINT" onetry 2>&1)
+addnode_out=$(timeout 60 "$ZCL_CLI" -datadir="$DATADIR" -rpcport="$RPCPORT" \
+    addnode "$ENDPOINT" onetry 2>&1)
 if [ $? -ne 0 ] || [ "$addnode_out" != "null" ]; then
-    detail=$(printf '%s' "$addnode_out" | tr '\n' ' ' | cut -c1-160)
+    detail=$(printf '%s' "$addnode_out" | tr '\n' ' ' | tr -d '"' | cut -c1-160)
     fail PEER_ADDED "addnode_refused:$ENDPOINT rpc=${detail:-empty}"
 fi
 echo "assertion PEER_ADDED ok"
