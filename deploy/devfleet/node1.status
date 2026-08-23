@@ -11,7 +11,20 @@ TARGET_P2P_PORT=8055
 ACTION=disconnect_existing_node1_session_then_addnode_target_once
 VARIABLE=node4_outbound_redial_only
 EVIDENCE_REQUIRED=attempted_at,local_stream_state,bytes_sent,bytes_received
-VERDICT=pending
+VERDICT=ONION_EDGE_SYNC_GATE_startingheight
+INGRESS_TRIAGE_VERDICT=unclassified_node4_attempt_unacknowledged
+CAPTURE_COMPLETED_AT=2026-08-23T04:55:01Z
+CAPTURE_STREAM_COUNT=0
+CAPTURE_MAP_BEGIN=installed:routes=2/2:virtual_ports=80,8055:p2p_target=127.0.0.1:8055
+CAPTURE_MAP_END=installed:routes=2/2:virtual_ports=80,8055:p2p_target=127.0.0.1:8055
+SYNC_GATE_ONION_NODE=node3
+SYNC_GATE_ONION_STATE=active
+SYNC_GATE_ONION_STARTINGHEIGHT=0
+SYNC_GATE_ONION_EVIDENCE_COMMIT=d2d2ab022726c825adc89606c7fc80b41b2eca68
+SYNC_GATE_CLEARNET_STATE=active
+SYNC_GATE_CLEARNET_STARTINGHEIGHT=3225916
+SYNC_GATE_FIX_COMMIT=30cab1f521e012d9409a3c73f5f2c83a3b7858bc
+SYNC_GATE_REGRESSION=test_sync_service:zero_height_zcl23_onion_once:pass
 HUB_CAPTURE_ID=node1-selfdial-20260823T035203Z
 HUB_OBSERVED_AT=2026-08-23T03:52:31Z
 HUB_ONION_MAP_STATE=installed
@@ -28,4 +41,4 @@ HUB_INGRESS_CANDIDATE=true
 HUB_INGRESS_BYTES_SENT=202
 HUB_INGRESS_BYTES_RECEIVED=436
 HUB_SELF_DIAL=pass
-GAP=node4_attempt_ack_pending_for_node4-redial-20260823T0450Z
+GAP=node4_attempt_ack_missing_for_node4-redial-20260823T0450Z
