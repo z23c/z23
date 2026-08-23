@@ -20,3 +20,5 @@
 {"ts":"2026-08-23T17:20:12Z","head_sha":"851ff8cc09e77cf2e5be73ab2496a044de809524","verdict":"PAIRED","paired_at_s":88,"dial_attempted":true,"rendezvous_seen":true,"descriptor_uploaded":true}
 {"ts":"2026-08-23T17:22:08Z","head_sha":"4e1b5e722c72659a5f1ae179c83f8f39bb6d2e74","verdict":"PAIRED","paired_at_s":87,"dial_attempted":true,"rendezvous_seen":true,"descriptor_uploaded":true}
 {"ts":"2026-08-23T17:24:02Z","head_sha":"d121170dea8665326129a3bad2e4bddd6b3d2461","verdict":"PAIRED","paired_at_s":85,"dial_attempted":true,"rendezvous_seen":true,"descriptor_uploaded":true}
+{"ts":"2026-08-23T17:25:56Z","head_sha":"22ca0357dc6147775add49c24a8f8c83997133f6","verdict":"RPC_B_NOT_READY","paired_at_s":null,"dial_attempted":false,"rendezvous_seen":false,"descriptor_uploaded":false}
+{"ts":"2026-08-23T17:26:41Z","head_sha":"22ca0357dc6147775add49c24a8f8c83997133f6","verdict":"PAIRED","paired_at_s":90,"dial_attempted":true,"rendezvous_seen":true,"descriptor_uploaded":true}
