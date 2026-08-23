@@ -66,3 +66,27 @@ diverged checkout, a failed build, or a failed restart is recorded as a named
 `RESTART_PROD=auto` lets the loop swap the production binary and restart its
 systemd unit on new main. That restarts soak clocks; use `manual` on a box
 whose production node is mid-acceptance.
+
+## Onion mesh acceptance
+
+The designated hub runs the mesh gate every five minutes, offset from its
+sync loop:
+
+```
+2,7,12,17,22,27,32,37,42,47,52,57 * * * * /path/to/checkout/tools/scripts/fleet_mesh_acceptance.sh node1 >> ~/.local/state/zclassic23-fleet-mesh.log 2>&1
+```
+
+Each cycle pulls `origin/main`, validates `node1.txt` through `node4.txt`, and
+dials every missing peer through its published onion endpoint from the
+isolated node. A peer counts only after the P2P state machine reaches `active`
+(VERSION/VERACK complete) and its handshake height matches the isolated
+node's tip at the start or end of that bounded observation. Missing or
+malformed publications, pre-onion source identities, refused dials,
+incomplete handshakes, and height mismatches remain named in
+`mesh.status`. The script exits zero only on a 4/4 observation. After two such
+observations at least four minutes apart it records `HOLD=pass`, and later
+timer invocations leave that acceptance evidence untouched.
+
+The mesh gate never installs a binary or signals either node. In particular,
+it has no production-unit code path; production restart authority remains
+solely in the separately configured sync loop.
