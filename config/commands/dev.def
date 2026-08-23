@@ -3,9 +3,10 @@
 ZCL_COMMAND_READY_READ(
     "dev.status", "dev", "", "Read the latest native cycle verdict",
     "The most recent native compile/test/lint cycle verdict persisted by "
-    "the local dev-state store at call time; reports status=unavailable "
-    "if no cycle has run yet.", 0,
-    "dev,status,cycle,verdict", "zcl.command.empty_input.v1",
+    "the local dev-state store at call time, including exact ran, reused, "
+    "failed, and runtime-skip proof counts when present; reports "
+    "status=unavailable if no cycle has run yet.", 0,
+    "dev,status,cycle,verdict,receipt,cache,push", "zcl.command.empty_input.v1",
     "zcl.dev_cycle.v1", "", "", "z23 dev status",
     ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_INSTANT,

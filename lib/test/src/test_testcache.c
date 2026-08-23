@@ -507,6 +507,44 @@ int test_testcache(void)
     }
     tc_env_restore(&caller_stress, "ZCL_STRESS_TESTS");
 
+    /* Fast-CI's frozen source record is orchestration identity, not test
+     * behavior. Hashing it globally defeats the closure key: even a docs-only
+     * rebase changes the record and invalidates every unrelated group. */
+    struct tc_envsave caller_fast_record;
+    uint8_t key_fast_a[32], key_fast_b[32];
+    bool have_fast_a = false, have_fast_b = false;
+    tc_env_capture(&caller_fast_record, "ZCL_FAST_BUILD_SOURCE_RECORD");
+    setenv("ZCL_FAST_BUILD_SOURCE_RECORD", "source-a mutation-a", 1);
+    {
+        struct testcache *tc = testcache_open(TC_FIX);
+        if (tc) {
+            struct testcache_probe p;
+            testcache_probe_group(tc, "test_demo_entry", &p);
+            if (p.cacheable) {
+                memcpy(key_fast_a, p.key, sizeof(key_fast_a));
+                have_fast_a = true;
+            }
+            testcache_close(tc);
+        }
+    }
+    setenv("ZCL_FAST_BUILD_SOURCE_RECORD", "source-b mutation-b", 1);
+    {
+        struct testcache *tc = testcache_open(TC_FIX);
+        if (tc) {
+            struct testcache_probe p;
+            testcache_probe_group(tc, "test_demo_entry", &p);
+            if (p.cacheable) {
+                memcpy(key_fast_b, p.key, sizeof(key_fast_b));
+                have_fast_b = true;
+            }
+            testcache_close(tc);
+        }
+    }
+    TC_CHECK("fast-CI source-record control does not globally bust closure keys",
+             have_fast_a && have_fast_b &&
+             memcmp(key_fast_a, key_fast_b, sizeof(key_fast_a)) == 0);
+    tc_env_restore(&caller_fast_record, "ZCL_FAST_BUILD_SOURCE_RECORD");
+
     /* Both branches of the capture/restore pair on a private variable, so the
      * "caller had it set" case above is not the only one covered. test.c runs
      * this group in-process ahead of 125 more groups; leaking either branch
@@ -605,6 +643,16 @@ int test_testcache(void)
     TC_CHECK("runner never stores a self-skipped group as PASS",
              file_contains("lib/test/src/test_parallel.c",
                            "results[i].skip_markers == 0"));
+    TC_CHECK("pre-push opts into exact per-group PASS receipts",
+             file_contains("tools/agent_fast_ci.sh",
+                           "T_FAST_EXACT_ARGS=--cache") &&
+             file_contains("Makefile",
+                           "--exact=$(EXACT_ONLY_MATCHED) $(T_FAST_EXACT_ARGS)"));
+    TC_CHECK("pre-push rejects skips and incomplete receipt accounting",
+             file_contains("tools/agent_fast_ci.sh",
+                           "focused receipt invalid reason=self_skips") &&
+             file_contains("tools/agent_fast_ci.sh",
+                           "focused receipt invalid reason=accounting"));
     TC_CHECK("v3 key retires PASS records minted before skip rejection",
              file_contains("lib/test/src/testcache.c",
                            "zcl.testcache.key.v3"));

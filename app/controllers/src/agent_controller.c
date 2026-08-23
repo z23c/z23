@@ -489,7 +489,7 @@ bool rpc_agent_build(const struct json_value *params, bool help,
     json_push_kv_str(&loop, "pre_push_compile_default",
                      "ZCL_FAST_COMPILE=strict -> make build-only");
     json_push_kv_str(&loop, "rule",
-                     "Changed paths are classification hints only; compile every current source in a mutation-keyed epoch, recover unchanged work through ccache/sccache, and push through the strict pre-push gate.");
+                     "Changed paths are classification hints only; keep z23-dev dev begin running to warm exact PASS receipts, inspect ran/reused/skip counts with z23 dev status, and push through strict source-wide compile/lint.");
     json_push_kv(result, "recommended_loop", &loop);
     json_free(&loop);
 
@@ -679,7 +679,7 @@ bool rpc_agent_build(const struct json_value *params, bool help,
                              "make t-fast ONLY=<group>",
                              "cached non-LTO per-file test harness");
     agent_push_build_command(&commands, "agent_fast_ci", "make fast-ci",
-                             "lint-fast, source-wide compile/test proof, live probe");
+                             "async dev.begin receipts plus strict pre-push compile/lint; inspect reuse and skips with z23 dev status");
     agent_push_build_command(&commands, "immutable_history_canaries",
                              "make immutable-history-canaries",
                              "fast real-mainnet historical KATs: h=478544 oversize tx plus consensus parity pins");

@@ -34,6 +34,9 @@ DEV_NODE_BIN="${ZCL_FAST_DEV_NODE_BIN:-build/bin/z23-dev}"
 FAST_JOBS="${ZCL_FAST_JOBS:-}"
 IMPACT_RULES_FILE="${ZCL_FAST_IMPACT_RULES_FILE:-app/controllers/include/controllers/agent_impact_rules.def}"
 FROZEN_SOURCE_RECORD="${ZCL_FAST_BUILD_SOURCE_RECORD:-}"
+FOCUSED_RECEIPT_RAN=0
+FOCUSED_RECEIPT_REUSED=0
+FOCUSED_RECEIPT_TOOLKEY=""
 
 log() {
     printf '[agent-fast-ci] %s\n' "$*"
@@ -816,6 +819,7 @@ run_shell_checks() {
     # run before a v3 receipt can be written; an exact-source cache hit may
     # therefore reattach without paying their cost on every warm interaction.
     make_fast watcher-safety-gates
+    tools/agent_fast_ci.sh receipt-selftest
     for script in tools/agent_fast_ci.sh tools/githooks/pre-push \
         tools/deploy_guard.sh tools/deploy_verify.sh \
         tools/dev/deploy-dev-lane.sh tools/dev/agent-dev-status.sh \
@@ -828,6 +832,90 @@ run_shell_checks() {
         tools/scripts/check_agentdeployguard_cli_exit.sh; do
         bash -n "$script"
     done
+}
+
+focused_receipt_uint() {
+    local verdict="$1" key="$2"
+    printf '%s\n' "$verdict" |
+        sed -n "s/.* ${key}=\([0-9][0-9]*\).*/\1/p" | head -1
+}
+
+# A cached runner exit of zero is not, by itself, push authority. Require the
+# runner's machine verdict to account for every selected exact group, reject
+# failures, and reject runtime SKIP markers. The test cache stores only
+# skip-free PASS, so a reused group is exactly as strong as the fresh PASS that
+# minted its content-addressed receipt.
+validate_focused_receipt() {
+    local output="$1" expected="$2" verdict ran reused failed skips toolkey
+    verdict="$(printf '%s\n' "$output" |
+        sed -n '/^SUITE VERDICT /p' | tail -1)"
+    if [ -z "$verdict" ]; then
+        log "focused receipt invalid reason=missing_suite_verdict"
+        return 1
+    fi
+    ran="$(focused_receipt_uint "$verdict" groups_ran)"
+    reused="$(focused_receipt_uint "$verdict" groups_cached)"
+    failed="$(focused_receipt_uint "$verdict" groups_failed)"
+    skips="$(focused_receipt_uint "$verdict" self_skips)"
+    toolkey="$(printf '%s\n' "$verdict" |
+        sed -n 's/.* toolkey=\([^[:space:]]*\).*/\1/p' | head -1)"
+    case "$ran:$reused:$failed:$skips:$expected" in
+        *[!0-9:]*|:*|*::*)
+            log "focused receipt invalid reason=malformed_counts"
+            return 1
+            ;;
+    esac
+    if [ "$failed" -ne 0 ]; then
+        log "focused receipt invalid reason=failed_groups count=$failed"
+        return 1
+    fi
+    if [ "$skips" -ne 0 ]; then
+        log "focused receipt invalid reason=self_skips count=$skips"
+        return 1
+    fi
+    if [ $((ran + reused)) -ne "$expected" ]; then
+        log "focused receipt invalid reason=accounting expected=$expected ran=$ran reused=$reused"
+        return 1
+    fi
+    if [ -z "$toolkey" ]; then
+        log "focused receipt invalid reason=missing_toolkey"
+        return 1
+    fi
+    if [ "${#toolkey}" -ne 12 ]; then
+        log "focused receipt invalid reason=malformed_toolkey"
+        return 1
+    fi
+    case "$toolkey" in
+        *[!0-9a-f]*)
+            log "focused receipt invalid reason=malformed_toolkey"
+            return 1
+            ;;
+    esac
+    FOCUSED_RECEIPT_RAN="$ran"
+    FOCUSED_RECEIPT_REUSED="$reused"
+    FOCUSED_RECEIPT_TOOLKEY="$toolkey"
+    return 0
+}
+
+focused_receipt_selftest() {
+    local good prefix
+    prefix="SUITE VERDICT mode=cached groups_total=946"
+    good="$prefix groups_ran=2 groups_cached=3 groups_gated=941 groups_failed=0 self_skips=0 toolkey=0123456789ab"
+    validate_focused_receipt "$good" 5 ||
+        fail "focused receipt selftest rejected a complete PASS"
+    if validate_focused_receipt "${good/self_skips=0/self_skips=1}" 5 >/dev/null; then
+        fail "focused receipt selftest accepted a runtime SKIP"
+    fi
+    if validate_focused_receipt "${good/groups_failed=0/groups_failed=1}" 5 >/dev/null; then
+        fail "focused receipt selftest accepted a failed group"
+    fi
+    if validate_focused_receipt "$good" 6 >/dev/null; then
+        fail "focused receipt selftest accepted incomplete accounting"
+    fi
+    if validate_focused_receipt "ALL TESTS PASSED (CACHED)" 5 >/dev/null; then
+        fail "focused receipt selftest accepted a missing machine verdict"
+    fi
+    log "PASS: focused receipt authority selftest"
 }
 
 run_test_proof() {
@@ -1132,7 +1220,7 @@ compile_affected_gate() {
 }
 
 run_mapped_focused_tests() {
-    local exact_groups exact_csv count=0
+    local exact_groups exact_csv count=0 output rc
     [ -z "$UNMAPPED_CODE_CHANGES" ] ||
         fail "unmapped code changes require an impact rule: $UNMAPPED_CODE_CHANGES"
     if [ -z "$TEST_GROUPS" ]; then
@@ -1144,9 +1232,21 @@ run_mapped_focused_tests() {
     count="$(printf '%s\n' "$exact_groups" | sed '/^$/d' | wc -l | tr -d ' ')"
     exact_csv="$(printf '%s\n' "$exact_groups" | sed '/^$/d' | paste -sd, -)"
     log "focused test exact_groups=$exact_csv count=$count"
-    make_fast t-fast-exact "ONLY=$exact_csv"
+    set +e
+    output="$(make_fast t-fast-exact "ONLY=$exact_csv" \
+        "T_FAST_EXACT_ARGS=--cache" 2>&1)"
+    rc=$?
+    set -e
+    printf '%s\n' "$output"
+    if [ "$rc" -ne 0 ]; then
+        first_error_line focused-tests "$output"
+        fail "focused proof set failed (exit $rc)"
+    fi
+    validate_focused_receipt "$output" "$count" ||
+        fail "focused proof set did not produce complete skip-free authority"
     FROZEN_SOURCE_RECORD="$(capture_source_identity_record)" ||
         fail "source identity recapture failed after focused proof set"
+    log "focused receipt schema=zcl.push_focused_receipt.v1 selected=$count ran=$FOCUSED_RECEIPT_RAN reused=$FOCUSED_RECEIPT_REUSED toolkey=$FOCUSED_RECEIPT_TOOLKEY"
     log "focused test scope=mapped_groups count=$count"
 }
 
@@ -1175,6 +1275,10 @@ main() {
     case "$mode" in
         cache-selftest|--cache-selftest)
             cache_authority_selftest
+            return
+            ;;
+        receipt-selftest|--receipt-selftest)
+            focused_receipt_selftest
             return
             ;;
     esac

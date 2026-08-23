@@ -23,6 +23,7 @@
 #include "test/test_core.h"
 #include "net/net.h"
 #include "core/utiltime.h"
+#include "platform/os_proc.h"
 #include "util/log_json.h"
 
 #include <limits.h>
@@ -318,11 +319,9 @@ static const char *repo_root(void)
     if (cached) return root[0] ? root : NULL;
 
     char exe[PATH_MAX];
-    ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
-    if (n <= 0 || n >= (ssize_t)sizeof(exe) - 1) {
+    if (!os_proc_exe_path(exe, sizeof(exe))) {
         cached = 1; root[0] = '\0'; return NULL;
     }
-    exe[n] = '\0';
 
     for (int depth = 0; depth < 8; depth++) {
         char *slash = strrchr(exe, '/');

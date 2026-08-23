@@ -255,10 +255,12 @@ static bool trc_file_hash(struct testcache *tc, const char *relpath,
  * fixture path overrides, tunables) plus HOME (the ~/.zcash-params root) and the
  * two legacy-named gates.
  *
- * EXCLUDED, and it must stay that way: the cache's OWN control variables. They
- * are set on a cached run and unset on a cold one while provably changing no
- * group's verdict, so folding them in would put cold and cached runs in
- * different keyspaces and the cache could never hit. */
+ * EXCLUDED, and it must stay that way: the cache's OWN control variables and
+ * the ZCL_FAST_* orchestration namespace. Fast-CI exports its frozen source
+ * record, changed-path hints, compiler choice and scheduling knobs; source
+ * bytes/toolchain/flags are already bound elsewhere in the key and none of
+ * those controls changes a group's verdict. Folding them in globally busts
+ * every per-group receipt after any edit or docs-only rebase. */
 static bool trc_env_is_cache_control(const char *name, size_t namelen)
 {
     static const char *const ctl[] = {
@@ -267,6 +269,8 @@ static bool trc_env_is_cache_control(const char *name, size_t namelen)
     for (size_t i = 0; i < sizeof(ctl) / sizeof(ctl[0]); i++)
         if (strlen(ctl[i]) == namelen && strncmp(name, ctl[i], namelen) == 0)
             return true;
+    if (namelen > 9 && strncmp(name, "ZCL_FAST_", 9) == 0)
+        return true;
     return false;
 }
 

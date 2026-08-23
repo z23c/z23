@@ -79,7 +79,7 @@ symptom as a body gap, and shipping a chain-reset fix that deletes
 | `make immutable-history-canaries` | fast real-chain consensus KATs: h=478544 oversized canonical transaction plus consensus parity pins |
 | `z23 status` / `z23 dumpstate <subsystem>` | native node reads (the native command registry is the sole agent interface) |
 | `z23-dev status` | dev-lane native read against the installed dev binary |
-| `make pre-push-ci` | bounded push gate: cached focused fast-ci for changed files with `ZCL_FAST_COMPILE=strict` |
+| `make pre-push-ci` | bounded push gate: strict compile/lint plus mapped tests, reusing only exact skip-free content-addressed PASS receipts |
 | `make install-quality-linger` | install background full-test, fuzz, and coverage user timers |
 | `make quality-linger-status` | show latest background tests/fuzz/coverage JSON verdicts |
 | `make test` | the fast fork-based parallel suite (~1 min), now built from the cached per-TU `test_parallel` (incremental after the first build); `make test-full` is the slow single-process binary |
@@ -157,6 +157,15 @@ installed, the Makefile auto-wraps `CC` with it unless `ZCL_USE_CCACHE=0` is set
 the right binary for
 local `agentbuild`, `agentimpact`, parser, API, and diagnostics iteration; it is
 not a deploy or release artifact.
+
+For an asynchronous edit-to-push path, start the existing resident verifier
+with `z23-dev dev begin` and inspect its durable cycle with `z23 dev status`.
+The watcher mints the same per-group content-addressed PASS receipts consumed by
+`make pre-push-ci`. Pre-push still performs strict source-wide compilation and
+lint, runs external-input or stale-graph groups fresh, rejects runtime SKIPs,
+and requires `groups_ran + groups_cached` to equal the exact mapped set. A
+documentation-only rebase therefore preserves unrelated C test receipts while
+its documentation/lint authority continues to run fresh.
 
 The native build contract is discoverable with `build/bin/z23 agentbuild`;
 it advertises

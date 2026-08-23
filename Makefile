@@ -2353,7 +2353,7 @@ t-fast-exact:
 
 t-fast-exact-locked: $(TEST_PARALLEL_FAST_CANDIDATE) dev-package-verifier-ensure
 	ulimit -s unlimited && \
-	  $(TEST_PARALLEL_FAST_ACTIVE) --exact=$(EXACT_ONLY_MATCHED)
+	  $(TEST_PARALLEL_FAST_ACTIVE) --exact=$(EXACT_ONLY_MATCHED) $(T_FAST_EXACT_ARGS)
 
 # Closed historical-failure corpus required by build_release_confirmation.v2.
 # This focused physical gate is uncached and exact; release qualification also

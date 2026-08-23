@@ -65,6 +65,15 @@ make test-parallel                    # default: cold, runs everything
 make test-parallel TEST_PARALLEL_ARGS=--no-cache   # force cold even if ZCL_TEST_CACHE set
 ```
 
+The canonical full suite remains cold by default. The mapped `make pre-push-ci`
+lane deliberately enables the cache for its exact focused set and then
+validates the runner's machine verdict: every selected group must be accounted
+for as freshly run or reused, failures and runtime SKIPs must both be zero, and
+the toolchain key must be present. `z23-dev dev begin` can populate those exact
+receipts asynchronously during editing; `z23 dev status` shows the native cycle
+receipt. Unbounded-input and stale/missing dependency-graph groups are never
+reused.
+
 The final summary gains one line: `cached N / ran M`, and the run reports its
 plan and reason histogram up front. `.cache/test-timing/last-run.json` carries
 `mode`, `groups_ran`, `groups_cached`, `groups_cacheable`, `toolkey`, and a
@@ -148,9 +157,13 @@ got a cache HIT and never executed the stress lane — reporting green for cover
 that did not run. Every `ZCL_`-prefixed variable (plus `HOME`, `EQUIHASH_TEST`,
 `REDUCER_FUZZ_SEED`) is therefore hashed into the key. Hashing beats denylisting
 those 16 groups: it is exhaustive by construction and cannot rot when someone adds
-the 17th gate. The cache's own control variables (`ZCL_TEST_CACHE`,
-`ZCL_TEST_CACHE_DUMP`) are excluded — they change no group's verdict, and folding
-them in would put cold and cached runs in different keyspaces.
+the 17th gate. The cache's own controls (`ZCL_TEST_CACHE`,
+`ZCL_TEST_CACHE_DUMP`) and the `ZCL_FAST_*` orchestration namespace are excluded.
+Fast-CI's frozen source identity, changed-path hints, compiler selection and
+scheduling knobs change no group's verdict; source bytes and toolchain/flags are
+already bound directly. Folding those controls into the environment digest
+would globally invalidate every unrelated receipt after any edit or docs-only
+rebase.
 
 ## Soundness: a cached SKIP is provably equivalent to a fresh PASS
 
