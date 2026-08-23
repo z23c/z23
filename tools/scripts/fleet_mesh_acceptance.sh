@@ -6,7 +6,9 @@
 #   * validates all four neutral node publications;
 #   * self-dials the hub onion from a fresh, isolated mainnet instance;
 #   * asks the isolated node to dial every missing peer by its onion endpoint;
-#   * requires an ACTIVE peer (VERSION/VERACK complete) at tip-height parity;
+#   * requires a handshaked peer (VERSION/VERACK complete) whose CURRENT
+#     height — the accepted-header vote, not the handshake-static VERSION
+#     number — sits inside the node's own synced band around our tip;
 #   * checks each publication's mandatory GIT_SHA against observed main;
 #   * writes and publishes deploy/devfleet/mesh.status.
 #
@@ -44,6 +46,12 @@ DIAL_TIMEOUT="${FLEET_MESH_DIAL_TIMEOUT:-45}"
 SELF_DIAL_TIMEOUT="${FLEET_MESH_SELF_DIAL_TIMEOUT:-120}"
 SELF_DIAL_PORT_BASE="${FLEET_MESH_SELF_DIAL_PORT_BASE:-39250}"
 MIN_PASS_INTERVAL="${FLEET_MESH_MIN_PASS_INTERVAL:-240}"
+# The product's own synced band: ZCL_NODE_HEALTH_LAG_WARN_BLOCKS in
+# app/services/include/services/node_health_service.h:14, used verbatim at
+# node_health_service.c:613-616 to decide this node is synced and serving.
+# Deliberately NOT env-overridable: widening it is the one edit that could
+# turn a genuinely-behind peer into a mesh pass. See remote_peer_at_local_tip.
+MESH_TIP_LAG_BLOCKS=10
 STATE_DIR="$HOME/.local/state/zclassic23-fleetsync"
 STATUS_REL="deploy/devfleet/mesh.status"
 STATUS_FILE="${FLEET_MESH_STATUS_FILE:-$REPO_DIR/$STATUS_REL}"
@@ -249,6 +257,11 @@ cli_read_stderr() {
 json_get() {
     local document="$1" path="$2"
     printf '%s' "$document" | "$JSONQ" get "$path" 2>/dev/null || true
+}
+
+json_count() {
+    local document="$1" path="$2"
+    printf '%s' "$document" | "$JSONQ" count "$path" 2>/dev/null || true
 }
 
 peer_row_from() {
@@ -532,6 +545,47 @@ refresh_referee_local_tip() {
     return 1
 }
 
+# Every remote node's height check needs this box's per-peer accepted-header
+# votes. Read ONCE for the whole cycle and cached: the referee fires every
+# five minutes against the same RPC front door that has already bricked at 54
+# CLOSE_WAIT sockets, so it must not add one read per node. Bounded
+# diagnostic leaf, same discipline as dumpstate status_frontdoor and for the
+# same reason getblockchaininfo is banned here. A malformed or unreadable
+# reply is a fault of THIS box, recorded once in REFEREE_LOCAL_RPC_FAULT
+# exactly like refresh_referee_local_tip, so a saturated RPC queue is never
+# misattributed as a per-node gap. live_peer_votes is required to be an
+# integer: it is the leaf's proof that the shape we parse is the shape the
+# node actually published, so an older daemon without the field fails closed
+# to unknown instead of silently reading zero votes for every peer.
+PEER_HEIGHT_VOTES=""
+PEER_HEIGHT_VOTES_STATE=unread
+refresh_peer_height_votes() {
+    local out rc live
+    case "$PEER_HEIGHT_VOTES_STATE" in
+        ok) return 0 ;;
+        failed) return 1 ;;
+    esac
+    if out="$(cli dumpstate quorum_oracle)"; then
+        rc=0
+    else
+        rc=$?
+    fi
+    cli_read_stderr
+    if [ "$rc" -eq 0 ] && [ -n "$out" ]; then
+        live="$(json_get "$out" state.live_peer_votes)"
+        if [[ "$live" =~ ^[0-9]+$ ]]; then
+            PEER_HEIGHT_VOTES="$out"
+            PEER_HEIGHT_VOTES_STATE=ok
+            return 0
+        fi
+    fi
+    PEER_HEIGHT_VOTES=""
+    PEER_HEIGHT_VOTES_STATE=failed
+    [ -n "$REFEREE_LOCAL_RPC_FAULT" ] || \
+        REFEREE_LOCAL_RPC_FAULT="$(classify_cli_failure "$CLI_LAST_STDERR")"
+    return 1
+}
+
 check_local_node() {
     local node="$1" frontdoor frontdoor_rc blocks published sync_gap sync_gap_known
     local all_members_fresh published_onion
@@ -637,10 +691,114 @@ remote_peer_handshake_complete() {
     [[ "$version" =~ ^[1-9][0-9]*$ ]]
 }
 
+# ── peer tip-height acceptance ───────────────────────────────────────────
+#
+# Same class of defect as the state==active one above, and fixed the same
+# way. `startingheight` is the height the peer wrote into its VERSION message
+# at handshake time. lib/net/src/msg_version.c:367 is its only writer and
+# lib/net/src/msgprocessor.c:2388 calls it "handshake-static" in so many
+# words: it never updates for the life of the connection. Comparing it for
+# equality against our own advancing tip is therefore a structural false
+# negative — it can only hold if the peer happened to be at exactly our
+# height at the instant it connected, and it becomes permanently false as we
+# advance. Observed live: node2, at the network tip with blocks == headers
+# and verification progress 1, scored tip_height_mismatch:peer=3225759
+# against a local tip of 3226744 — the height it had a thousand blocks ago.
+#
+# peer_lifecycle's `advertised_height` is NOT a fresher second number.
+# lib/net/src/peer_lifecycle.c:925-926 publishes `startingheight` and
+# `advertised_height` from the same field, e->start_height, whose only writer
+# is peer_lifecycle_note_version_received (peer_lifecycle.c:619). Reading it
+# would rename this defect, not fix it. `advertised_height_trust`
+# (peer_lifecycle.c:420-432) says only that the stale number came from a
+# currently-open, handshaked, NODE_NETWORK connection — it annotates
+# attributability, never currency.
+#
+# The one per-peer height in this node that moves AFTER the handshake is the
+# accepted-header vote. lib/net/src/msg_headers.c:1400-1405 records
+# (peer_id, height, hash) for every header this node ACCEPTED from that peer,
+# and app/services/src/quorum_oracle_service.c:368-386 publishes the live
+# ones as state.peer_votes[].{source_id,height} on `dumpstate quorum_oracle`,
+# TTL 1800s (quorum_oracle_service.c:43). That number is evidence, not a
+# claim: to move it a peer must deliver a header chain our own
+# accept_block_header() validated, so it cannot simply assert a height the
+# way VERSION does. Residual, stated plainly rather than hidden: an accepted
+# header proves the peer knows the chain to that height, not that it holds
+# the blocks — still strictly stronger than the unverified VERSION number it
+# replaces, and the only per-peer height in the product that is current.
+
+# A peer's CURRENT chain height, resolved exactly the way the node itself
+# resolves one (app/services/src/network_monitor.c:306-320): the handshake
+# height, RAISED by that peer's newest live accepted-header vote when one
+# exists. max() and not "vote wins" because the vote table is bounded (64
+# slots) and TTL'd, so a peer with no live vote is judged on the handshake
+# number — which is exactly what the referee had before this function
+# existed, never something weaker. Prints "<height>:<source>"; returns 1
+# only when the handshake height itself is unreadable.
+remote_peer_current_height() {
+    local votes="$1" peer_id="$2" starting="$3"
+    local count i src height best source
+    [[ "$starting" =~ ^[0-9]+$ ]] || return 1
+    best="$starting"
+    source=handshake
+    if [[ "$peer_id" =~ ^[0-9]+$ ]]; then
+        count="$(json_count "$votes" state.peer_votes)"
+        case "$count" in *[!0-9]*|'') count=0 ;; esac
+        i=0
+        while [ "$i" -lt "$count" ]; do
+            src="$(json_get "$votes" "state.peer_votes[$i].source_id")"
+            height="$(json_get "$votes" "state.peer_votes[$i].height")"
+            if [ "$src" = "$peer_id" ] && [[ "$height" =~ ^[0-9]+$ ]]; then
+                source=header_vote
+                [ "$height" -gt "$best" ] && best="$height"
+            fi
+            i=$((i + 1))
+        done
+    fi
+    printf '%s:%s' "$best" "$source"
+}
+
+# Tip parity, judged against a height this box has CONFIRMED. Our own tip
+# advances while the check runs, which is why the caller samples it either
+# side of the peer read; min() of the two samples is the height we
+# demonstrably held for the whole window, so the race can never manufacture a
+# gap. Exact equality is the wrong test in both directions:
+#
+#   * a peer AT or ABOVE the confirmed tip is in sync. If it is ahead, the
+#     box that is behind is this one, which is check_local_node's business
+#     and not this peer's.
+#   * a peer BELOW it is in sync only while its lag sits inside the node's
+#     own synced band, ZCL_NODE_HEALTH_LAG_WARN_BLOCKS = 10
+#     (app/services/include/services/node_health_service.h:14), which
+#     node_health_service.c:613-616 uses verbatim — tip_lag >= 0 &&
+#     tip_lag <= ZCL_NODE_HEALTH_LAG_WARN_BLOCKS — to decide the node is
+#     synced and serving. The referee reuses the product's own number rather
+#     than inventing a second, disagreeing definition of parity.
+#
+# Ten blocks is about 25 minutes of chain at the 150s target: wide enough to
+# absorb one bounded cycle (a 120s self-dial, a 45s dial wait, RPC waits) and
+# a peer that has not yet re-announced the block we just connected, and six
+# orders of magnitude short of a genuinely-behind peer — node4 syncing at
+# height 192 against a 3,226,744 tip misses the band by 3.2 million. A
+# stalled or forked peer stops voting, its height freezes, our tip walks past
+# the band, and it fails: this check decays into a gap, never into a pass.
+remote_peer_at_local_tip() {
+    local peer_height="$1" local_before="$2" local_after="$3" confirmed
+    [[ "$peer_height" =~ ^[0-9]+$ ]] || return 1
+    [[ "$local_before" =~ ^[0-9]+$ ]] || return 1
+    [[ "$local_after" =~ ^[0-9]+$ ]] || return 1
+    confirmed="$local_before"
+    if [ "$local_after" -lt "$confirmed" ]; then
+        confirmed="$local_after"
+    fi
+    [ $((peer_height + MESH_TIP_LAG_BLOCKS)) -ge "$confirmed" ]
+}
+
 check_remote_node() {
     local node="$1" endpoint row state version peer_height local_before
     local local_after add_out add_ok add_status deadline now source_error
     local publication_suffix fresh_raw fresh_rc fresh_detail
+    local peer_id peer_start_height resolved height_source
     source_error=""
     NODE_SILENT[$node]=yes
     if ! read_node_record "$node"; then
@@ -739,21 +897,34 @@ check_remote_node() {
         return
     fi
     NODE_SILENT[$node]=no
-    peer_height="$(json_get "$row" startingheight)"
-    if [[ ! "$peer_height" =~ ^[0-9]+$ ]]; then
+    peer_id="$(json_get "$row" id)"
+    peer_start_height="$(json_get "$row" startingheight)"
+    if [[ ! "$peer_start_height" =~ ^[0-9]+$ ]]; then
         record_gap "$node" "peer_tip_height_unreadable"
         return
     fi
+    # Resolving a CURRENT height needs this box's vote snapshot. A failure to
+    # read it is this box's RPC front door being unhealthy, never the remote
+    # node's fault, so it takes the same route as a failed local tip read:
+    # unknown, not a gap naming the peer. Falling back to the handshake
+    # height here would resurrect exactly the false negative above.
+    if ! refresh_peer_height_votes; then
+        record_unknown "$node" "referee_local_read_failed:$REFEREE_LOCAL_RPC_FAULT"
+        return
+    fi
+    resolved="$(remote_peer_current_height "$PEER_HEIGHT_VOTES" \
+        "$peer_id" "$peer_start_height")"
+    peer_height="${resolved%%:*}"
+    height_source="${resolved##*:}"
     if ! refresh_referee_local_tip; then
         record_unknown "$node" "referee_local_read_failed:$REFEREE_LOCAL_RPC_FAULT"
         return
     fi
     local_after="$REFEREE_LOCAL_TIP"
     LOCAL_HEIGHT_AFTER="$local_after"
-    if [ "$peer_height" != "$local_before" ] &&
-       [ "$peer_height" != "$local_after" ]; then
+    if ! remote_peer_at_local_tip "$peer_height" "$local_before" "$local_after"; then
         record_gap "$node" \
-            "tip_height_mismatch:peer=$peer_height:local_before=$local_before:local_after=$local_after"
+            "tip_height_mismatch:peer=$peer_height:height_source=$height_source:handshake=$peer_start_height:local_before=$local_before:local_after=$local_after"
         return
     fi
     if [ -n "$source_error" ]; then
@@ -761,7 +932,7 @@ check_remote_node() {
         return
     fi
     record_pass "$node" \
-        "version_verack:protocol=$version:tip_height=$peer_height"
+        "version_verack:protocol=$version:tip_height=$peer_height:height_source=$height_source"
 }
 
 join_gaps() {

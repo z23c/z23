@@ -16,6 +16,13 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+REPO_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
+JSONQ="${FLEET_MESH_JSONQ:-$REPO_DIR/build/bin/jsonq}"
+[ -x "$JSONQ" ] || {
+    echo "check_fleet_mesh_evidence: jsonq is not built at $JSONQ (make jsonq)" >&2
+    exit 1
+}
+
 grep -q 'cli dumpstate status_frontdoor' "$REFEREE" || {
     echo 'check_fleet_mesh_evidence: referee bypasses bounded status front door' >&2
     exit 1
@@ -183,6 +190,242 @@ if refresh_referee_local_tip; then
 fi
 [ "$REFEREE_LOCAL_RPC_FAULT" = 'rpc_error:RPC_server_busy' ] || {
     echo 'check_fleet_mesh_evidence: REFEREE_LOCAL_RPC_FAULT must record the first fault, not the latest' >&2
+    exit 1
+}
+
+# ── FACT 7: sync is judged on a CURRENT height, never the handshake one ──
+#
+# Same class as FACT 5. `startingheight` is the VERSION-message height, and
+# lib/net/src/msgprocessor.c:2388 calls it handshake-static: it never updates
+# for the life of the connection. Comparing it to our advancing tip could
+# only hold by coincidence, and node2 — genuinely at the network tip — was
+# scored tip_height_mismatch:peer=3225759 against a local 3226744 for it.
+# These checks pin the replacement so it cannot be undone at one site.
+
+grep -q 'remote_peer_at_local_tip "\$peer_height"' "$REFEREE" || {
+    echo 'check_fleet_mesh_evidence: remote-peer path does not judge tip parity through the shared predicate' >&2
+    exit 1
+}
+if grep -q '\[ "\$peer_height" != "\$local_before" \]' "$REFEREE"; then
+    echo 'check_fleet_mesh_evidence: remote-peer path still demands exact equality with a moving tip' >&2
+    exit 1
+fi
+# The band is the product's own synced band. Widening it is the single edit
+# that could convert a genuinely-behind peer into a mesh pass, so pin the
+# literal and pin that it is not env-overridable.
+grep -q '^MESH_TIP_LAG_BLOCKS=10$' "$REFEREE" || {
+    echo 'check_fleet_mesh_evidence: MESH_TIP_LAG_BLOCKS is not pinned to the node-health synced band (10)' >&2
+    exit 1
+}
+grep -q "^#define ZCL_NODE_HEALTH_LAG_WARN_BLOCKS 10$" \
+    "$REPO_DIR/app/services/include/services/node_health_service.h" || {
+    echo 'check_fleet_mesh_evidence: node health synced band moved; MESH_TIP_LAG_BLOCKS must follow it' >&2
+    exit 1
+}
+
+for fn in json_get json_count remote_peer_current_height \
+    remote_peer_at_local_tip refresh_peer_height_votes; do
+    FN_SRC="$(extract_fn "$fn" "$REFEREE")"
+    [ -n "$FN_SRC" ] || {
+        echo "check_fleet_mesh_evidence: $fn not found in referee" >&2
+        exit 1
+    }
+    eval "$FN_SRC"
+done
+
+# Take the band from the referee itself rather than restating it here: the
+# grep above already pins its value, and a second literal could drift.
+eval "$(sed -n 's/^\(MESH_TIP_LAG_BLOCKS=[0-9][0-9]*\)$/\1/p' "$REFEREE")"
+[ "${MESH_TIP_LAG_BLOCKS:-}" = 10 ] || {
+    echo 'check_fleet_mesh_evidence: could not read MESH_TIP_LAG_BLOCKS from the referee' >&2
+    exit 1
+}
+
+# One live accepted-header vote from peer id 7 at the network tip, and none
+# for peer id 9. Same shape dumpstate quorum_oracle publishes
+# (app/services/src/quorum_oracle_service.c:368-386).
+VOTES='{"state":{"live_peer_votes":1,"peer_votes":[{"source_id":7,"source_class":"zclassic23_peer","height":3226744,"hash":"000005a174a85d15ad64000f70d81959a937af3f00f4e4e41c64fcbb36d9e546","ttl_age_seconds":42}]}}'
+NO_VOTES='{"state":{"live_peer_votes":0,"peer_votes":[]}}'
+
+# The live node2 case: handshake height a thousand blocks stale, current
+# height at our tip. The old rule could not pass this and never would again.
+NODE2_HANDSHAKE=3225759
+LOCAL_BEFORE=3226744
+LOCAL_AFTER=3226745
+[ "$NODE2_HANDSHAKE" != "$LOCAL_BEFORE" ] && [ "$NODE2_HANDSHAKE" != "$LOCAL_AFTER" ] || {
+    echo 'check_fleet_mesh_evidence: node2 fixture no longer reproduces the old false negative' >&2
+    exit 1
+}
+RESOLVED="$(remote_peer_current_height "$VOTES" 7 "$NODE2_HANDSHAKE")"
+[ "$RESOLVED" = "3226744:header_vote" ] || {
+    echo "check_fleet_mesh_evidence: node2 current height resolved to $RESOLVED" >&2
+    exit 1
+}
+remote_peer_at_local_tip "${RESOLVED%%:*}" "$LOCAL_BEFORE" "$LOCAL_AFTER" || {
+    echo 'check_fleet_mesh_evidence: a peer at the network tip must pass' >&2
+    exit 1
+}
+printf 'check_fleet_mesh_evidence: FIXTURE node2 handshake=%s current=%s local=%s/%s -> pass:version_verack:tip_height=%s:height_source=%s\n' \
+    "$NODE2_HANDSHAKE" "${RESOLVED%%:*}" "$LOCAL_BEFORE" "$LOCAL_AFTER" \
+    "${RESOLVED%%:*}" "${RESOLVED##*:}"
+
+# The live node4 case: genuinely far behind and still catching up. It has no
+# accepted-header vote because it has no chain to serve us, so it is judged
+# on the handshake number and MUST still be a gap.
+NODE4_HANDSHAKE=192
+RESOLVED="$(remote_peer_current_height "$VOTES" 9 "$NODE4_HANDSHAKE")"
+[ "$RESOLVED" = "192:handshake" ] || {
+    echo "check_fleet_mesh_evidence: node4 current height resolved to $RESOLVED" >&2
+    exit 1
+}
+if remote_peer_at_local_tip "${RESOLVED%%:*}" "$LOCAL_BEFORE" "$LOCAL_AFTER"; then
+    echo 'check_fleet_mesh_evidence: a peer 3.2 million blocks behind must still be a gap' >&2
+    exit 1
+fi
+printf 'check_fleet_mesh_evidence: FIXTURE node4 handshake=%s current=%s local=%s/%s -> fail:tip_height_mismatch:peer=%s:height_source=%s:handshake=%s:local_before=%s:local_after=%s\n' \
+    "$NODE4_HANDSHAKE" "${RESOLVED%%:*}" "$LOCAL_BEFORE" "$LOCAL_AFTER" \
+    "${RESOLVED%%:*}" "${RESOLVED##*:}" "$NODE4_HANDSHAKE" \
+    "$LOCAL_BEFORE" "$LOCAL_AFTER"
+
+# The gap token vocabulary is unchanged: the same condition keeps the same
+# name, with the resolved height and its provenance added as detail.
+grep -q 'tip_height_mismatch:peer=\$peer_height:height_source=\$height_source:handshake=\$peer_start_height' \
+    "$REFEREE" || {
+    echo 'check_fleet_mesh_evidence: tip_height_mismatch detail no longer names the resolved height and its source' >&2
+    exit 1
+}
+
+# One peer's vote must never vouch for another peer.
+[ "$(remote_peer_current_height "$VOTES" 9 3226700)" = "3226700:handshake" ] || {
+    echo "check_fleet_mesh_evidence: a vote leaked across source_id" >&2
+    exit 1
+}
+# A vote can only ever RAISE the handshake height, never lower it.
+[ "$(remote_peer_current_height "$VOTES" 7 3226800)" = "3226800:header_vote" ] || {
+    echo 'check_fleet_mesh_evidence: a stale vote lowered a peer height' >&2
+    exit 1
+}
+# No votes at all is the pre-existing handshake judgement, not an error.
+[ "$(remote_peer_current_height "$NO_VOTES" 7 3226744)" = "3226744:handshake" ] || {
+    echo 'check_fleet_mesh_evidence: an empty vote set must fall back to the handshake height' >&2
+    exit 1
+}
+# An unreadable handshake height stays unreadable — never defaulted to zero.
+if remote_peer_current_height "$VOTES" 7 absent; then
+    echo 'check_fleet_mesh_evidence: an unreadable handshake height must not resolve' >&2
+    exit 1
+fi
+
+# Band edges, both sides of the product's synced band.
+remote_peer_at_local_tip 990 1000 1000 || {
+    echo 'check_fleet_mesh_evidence: a peer exactly at the synced band edge must pass' >&2
+    exit 1
+}
+if remote_peer_at_local_tip 989 1000 1000; then
+    echo 'check_fleet_mesh_evidence: a peer one block past the synced band must fail' >&2
+    exit 1
+fi
+# Ahead of us is not this peer's gap.
+remote_peer_at_local_tip 1200 1000 1000 || {
+    echo 'check_fleet_mesh_evidence: a peer ahead of our tip must pass' >&2
+    exit 1
+}
+# The race window is judged against the height we held throughout it, in
+# either sampling order, and it never manufactures a gap.
+remote_peer_at_local_tip 1000 1000 1010 || {
+    echo 'check_fleet_mesh_evidence: our own tip advancing must not score the peer a gap' >&2
+    exit 1
+}
+remote_peer_at_local_tip 1000 1010 1000 || {
+    echo 'check_fleet_mesh_evidence: the confirmed tip must be the lower of the two samples' >&2
+    exit 1
+}
+# ...but a race must not launder a genuinely-behind peer into a pass.
+if remote_peer_at_local_tip 500 1000 1010; then
+    echo 'check_fleet_mesh_evidence: a behind peer passed through the race window' >&2
+    exit 1
+fi
+# A stalled peer decays into a gap: its vote height freezes while our tip
+# walks past the band.
+remote_peer_at_local_tip 3226744 3226750 3226750 || {
+    echo 'check_fleet_mesh_evidence: a peer still inside the band must pass' >&2
+    exit 1
+}
+if remote_peer_at_local_tip 3226744 3226800 3226800; then
+    echo 'check_fleet_mesh_evidence: a stalled peer must decay into a gap, not a pass' >&2
+    exit 1
+fi
+# A non-numeric height is never a pass.
+for bad in "" absent -1 3226744x; do
+    if remote_peer_at_local_tip "$bad" 1000 1000; then
+        echo "check_fleet_mesh_evidence: non-numeric peer height '$bad' passed" >&2
+        exit 1
+    fi
+done
+
+# The vote snapshot is read once per cycle and a failed read is THIS box's
+# fault, classified exactly like a failed local tip read (FACT 6) so the
+# caller records the node unknown instead of naming it in a gap.
+PEER_HEIGHT_VOTES=""
+PEER_HEIGHT_VOTES_STATE=unread
+REFEREE_LOCAL_RPC_FAULT=""
+CLI_LAST_STDERR=""
+# The referee calls cli() inside a command substitution, i.e. a forked
+# subshell, so a counter it incremented in a variable could never reach this
+# shell. Tally the calls in a file, the same way the referee routes the CLI's
+# stderr through one.
+CLI_CALL_LOG="$TMP_DIR/cli_calls"
+: >"$CLI_CALL_LOG"
+cli() { printf 'x' >>"$CLI_CALL_LOG"; printf '%s' "$VOTES"; return 0; }
+cli_read_stderr() { CLI_LAST_STDERR=""; }
+refresh_peer_height_votes || {
+    echo 'check_fleet_mesh_evidence: a healthy quorum_oracle read must succeed' >&2
+    exit 1
+}
+[ "$PEER_HEIGHT_VOTES" = "$VOTES" ] || {
+    echo 'check_fleet_mesh_evidence: vote snapshot not captured' >&2
+    exit 1
+}
+refresh_peer_height_votes
+CLI_CALLS="$(wc -c <"$CLI_CALL_LOG" | tr -d ' ')"
+[ "$CLI_CALLS" = 1 ] || {
+    echo "check_fleet_mesh_evidence: vote snapshot read $CLI_CALLS times in one cycle" >&2
+    exit 1
+}
+
+PEER_HEIGHT_VOTES=""
+PEER_HEIGHT_VOTES_STATE=unread
+REFEREE_LOCAL_RPC_FAULT=""
+cli() { printf ''; return 1; }
+cli_read_stderr() { CLI_LAST_STDERR='Error: RPC server busy'; }
+if refresh_peer_height_votes; then
+    echo 'check_fleet_mesh_evidence: a failed quorum_oracle read must not report votes' >&2
+    exit 1
+fi
+[ "$REFEREE_LOCAL_RPC_FAULT" = 'rpc_error:RPC_server_busy' ] || {
+    echo "check_fleet_mesh_evidence: got REFEREE_LOCAL_RPC_FAULT=$REFEREE_LOCAL_RPC_FAULT" >&2
+    exit 1
+}
+
+# A reply whose shape we cannot confirm fails closed. Reading it as "zero
+# votes for everybody" would silently restore the handshake-height verdict
+# for every peer, which is the defect this fact exists to prevent.
+PEER_HEIGHT_VOTES=""
+PEER_HEIGHT_VOTES_STATE=unread
+REFEREE_LOCAL_RPC_FAULT=""
+cli() { printf '%s' '{"state":{"peer_votes":[]}}'; return 0; }
+cli_read_stderr() { CLI_LAST_STDERR=''; }
+if refresh_peer_height_votes; then
+    echo 'check_fleet_mesh_evidence: a reply without live_peer_votes must fail closed' >&2
+    exit 1
+fi
+[ -n "$REFEREE_LOCAL_RPC_FAULT" ] || {
+    echo 'check_fleet_mesh_evidence: an unconfirmed vote reply recorded no fault' >&2
+    exit 1
+}
+# A node scored unknown on that failure must never be counted as a pass.
+grep -q 'if ! refresh_peer_height_votes; then' "$REFEREE" || {
+    echo 'check_fleet_mesh_evidence: remote-peer path does not gate on the vote snapshot' >&2
     exit 1
 }
 
