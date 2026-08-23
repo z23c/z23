@@ -500,6 +500,43 @@ const char *p2p_disconnect_source_name(enum p2p_disconnect_source source)
     }
 }
 
+/* One emitter for every close line, so the "peer_connected" open line always
+ * has a partner in node.log. Fields mirror that line's style: addr first, then
+ * peer_id, then the cause. `state` is the state the session actually reached,
+ * which is what separates "never handshaked" from "was syncing and dropped" —
+ * the distinction no reader could make while the close side was invisible.
+ * See net.h for the event-name contract. */
+void p2p_log_peer_close(const struct p2p_node *node, const char *event,
+                        enum p2p_disconnect_reason reason,
+                        enum p2p_disconnect_source source)
+{
+    if (!node || !event)
+        return;
+
+    char addr_safe[96];
+    log_json_escape(addr_safe, sizeof(addr_safe), node->addr_name);
+
+    /* Lifetime is wall-clock seconds since the socket was created. A clock
+     * step backwards must not print a negative age. */
+    int64_t now = GetTime();
+    long long lifetime = 0;
+    if (node->time_connected > 0 && now > node->time_connected)
+        lifetime = (long long)(now - node->time_connected);
+
+    log_jsonf(LOG_JSON_INFO, event,
+              "\"addr\":\"%s\",\"peer_id\":%d,\"inbound\":%s,"
+              "\"state\":\"%s\",\"reason\":\"%s\",\"source\":\"%s\","
+              "\"version\":%d,\"misbehavior\":%d,\"lifetime_secs\":%lld,"
+              "\"endpoint_generation\":%llu",
+              addr_safe, (int)node->id,
+              node->inbound ? "true" : "false",
+              peer_state_name(node->state),
+              p2p_disconnect_reason_name(reason),
+              p2p_disconnect_source_name(source),
+              node->version, node->misbehavior, lifetime,
+              (unsigned long long)node->endpoint_generation);
+}
+
 bool p2p_node_request_disconnect(
     struct p2p_node *node, enum p2p_disconnect_reason reason,
     enum p2p_disconnect_source source, uint64_t endpoint_generation)
@@ -964,8 +1001,26 @@ void net_manager_free(struct net_manager *nm)
             close_socket(&nm->listen_sockets[i].socket);
     free(nm->listen_sockets);
 
-    for (size_t i = 0; i < nm->num_nodes; i++)
-        p2p_node_free(nm->nodes[i]);
+    /* Teardown is a removal path like any other: a peer still in nodes[] here
+     * was never swept, so without this line every live session disappears
+     * from node.log at shutdown with no record. Report the causal reason when
+     * one was already latched (a peer flagged but not yet swept), otherwise
+     * local_shutdown. */
+    for (size_t i = 0; i < nm->num_nodes; i++) {
+        struct p2p_node *node = nm->nodes[i];
+        enum p2p_disconnect_reason reason =
+            (enum p2p_disconnect_reason)atomic_load_explicit(
+                &node->disconnect_reason, memory_order_acquire);
+        enum p2p_disconnect_source source =
+            (enum p2p_disconnect_source)atomic_load_explicit(
+                &node->disconnect_source, memory_order_relaxed);
+        if (reason <= P2P_DISCONNECT_NONE) {
+            reason = P2P_DISCONNECT_LOCAL_SHUTDOWN;
+            source = P2P_DISCONNECT_SOURCE_SHUTDOWN;
+        }
+        p2p_log_peer_close(node, "peer_disconnected", reason, source);
+        p2p_node_free(node);
+    }
     free(nm->nodes);
 
     for (size_t i = 0; i < nm->num_disconnected; i++)
@@ -1116,12 +1171,15 @@ struct p2p_node *connect_node_from_socket(struct net_manager *nm,
     if (created_out)
         *created_out = true;
 
-    char addr_str[NET_SERVICE_STR_MAX + 1];
-    net_service_to_string(&addr_connect->svc, addr_str, sizeof(addr_str));
+    /* Open line. `addr_name` — not the raw service string — because that is
+     * the identity every close line, event and warning uses for this peer; a
+     * reader pairing open with close must not have to reconcile two spellings
+     * of the same endpoint (an addnode dest override differs from the service
+     * string, and IPv6 brackets differ too). */
     char addr_safe[96];
-    log_json_escape(addr_safe, sizeof(addr_safe), addr_str);
+    log_json_escape(addr_safe, sizeof(addr_safe), node->addr_name);
     log_jsonf(LOG_JSON_INFO, "peer_connected",
-              "\"addr\":\"%s\",\"peer_id\":%d",
+              "\"addr\":\"%s\",\"peer_id\":%d,\"inbound\":false",
               addr_safe, (int)node->id);
     return node;
 }
@@ -2008,6 +2066,18 @@ bool accept_connection(struct net_manager *nm, const struct listen_socket *ls)
     node->whitelisted = is_whitelisted;
     node->accepted_local_port = ls->local_port;
     peer_lifecycle_note_connected(node, PEER_LIFECYCLE_SOURCE_INBOUND);
+
+    /* Inbound sessions get the same open line as outbound ones. Without it
+     * every inbound close line in node.log would be an orphan, and a reader
+     * counting opens against closes would see a permanent, meaningless
+     * deficit. Emitted BEFORE the node is published into nodes[]: past that
+     * point the manager ref this function holds is the only one, and the
+     * disconnect sweep may retire the node. */
+    char addr_safe[96];
+    log_json_escape(addr_safe, sizeof(addr_safe), node->addr_name);
+    log_jsonf(LOG_JSON_INFO, "peer_connected",
+              "\"addr\":\"%s\",\"peer_id\":%d,\"inbound\":true",
+              addr_safe, (int)node->id);
 
     zcl_mutex_lock(&nm->cs_nodes);
     nm_add_node(nm, node);

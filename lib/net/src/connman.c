@@ -1864,6 +1864,14 @@ static void *thread_socket_handler(void *arg)
                     event_emitf(EV_TCP_TIMEOUT, (uint32_t)n->id,
                                 "tcp_connect %llds state=connecting",
                                 (long long)(now_check - n->time_connected));
+                    /* Machine-readable in node.log, not only in the event
+                     * ring. Its own event name: the terminal
+                     * "peer_disconnected" line still follows from the sweep,
+                     * and may carry a different reason if another thread won
+                     * the causal CAS first. */
+                    p2p_log_peer_close(n, "peer_connect_timeout",
+                                       P2P_DISCONNECT_CONNECT_TIMEOUT,
+                                       P2P_DISCONNECT_SOURCE_DIAL_SCHEDULER);
                     peer_lifecycle_note_timeout(n, "tcp_connect");
                     if (is_addnode)
                         connman_record_addnode_failure(
@@ -1893,13 +1901,12 @@ static void *thread_socket_handler(void *arg)
                                 "handshake %llds state=%s",
                                 (long long)(now_check - n->time_connected),
                                 peer_state_name(n->state));
-                    printf("Peer %s: handshake timeout after %llds "
-                           "(version=%d, state=%s, %s)\n",
-                           n->addr_name,
-                           (long long)(now_check - n->time_connected),
-                           n->version,
-                           peer_state_name(n->state),
-                           n->inbound ? "inbound" : "outbound");
+                    /* Replaces a free-form printf that no tool could parse.
+                     * Same facts (addr, age, version, state, direction) in
+                     * the structured shape every other peer line uses. */
+                    p2p_log_peer_close(n, "peer_handshake_timeout",
+                                       P2P_DISCONNECT_HANDSHAKE_TIMEOUT,
+                                       P2P_DISCONNECT_SOURCE_DIAL_SCHEDULER);
                     peer_lifecycle_note_timeout(n, "handshake");
                     if (is_addnode)
                         connman_record_addnode_failure(
@@ -1936,6 +1943,13 @@ static void *thread_socket_handler(void *arg)
                             p2p_disconnect_reason_name(reason),
                             p2p_disconnect_source_name(source),
                             (unsigned long long)generation);
+                /* THE terminal record. This is the only place a p2p_node
+                 * leaves nodes[], so exactly one "peer_disconnected" line is
+                 * written per session — swept, replaced, deduped or evicted
+                 * alike, each with its own named reason. Emitted BEFORE the
+                 * forced state overwrite below so the line reports the state
+                 * the session actually reached, not PEER_DISCONNECTED. */
+                p2p_log_peer_close(node, "peer_disconnected", reason, source);
                 peer_lifecycle_note_disconnected(
                     node, p2p_disconnect_reason_name(reason));
 

@@ -1830,6 +1830,7 @@ int main(int argc, char **argv)
     failures += test_net_handshake_adversarial();
     failures += test_net_ban_persistence();
     failures += test_net_census();
+    { extern int test_peer_disconnect_log(void); failures += test_peer_disconnect_log(); }
     failures += test_zclassicd_oracle();
     failures += test_header_probe();
     failures += test_header_probe_p2p_fallback();
