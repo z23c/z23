@@ -149,3 +149,43 @@ The sync and mesh loops serialize on the same per-box lock. If a prior push
 failed, the mesh loop may recover only commits whose complete changed-path set
 is `mesh.status` and this box's `<box>.sync`; any other local commit or tracked
 edit remains a named source-sync refusal.
+
+## Supervising the node (required)
+
+The sync loop used to launch the node with a bare `setsid nohup`. Nothing
+restarted it when it died, nothing recorded why, and the launcher redirected
+with `>` so each restart destroyed the log of the crash it was restarting from.
+A box whose node only runs until its first crash cannot hold a mesh together.
+
+Each box runs its node under `deploy/zcl23-devfleet@.service` instead:
+
+```bash
+install -m644 deploy/zcl23-devfleet@.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now zcl23-devfleet@<box>.service
+systemctl --user status zcl23-devfleet@<box>.service
+```
+
+`Type=notify` matters: the node holds `READY=1` until its onion descriptor is
+actually published, so `active` means the box is reachable at its `.onion`, not
+merely that a process exists. `WatchdogSec=120` converts a silent hard wedge —
+previously indistinguishable from a healthy node — into a bounded restart.
+
+Two settings need care:
+
+- **Pin the other boxes' onions.** Add one `-addnode=<onion>:<port>` per peer to
+  `DEVFLEET_FLAGS` in `~/.config/zclassic23-fleetsync/<box>.env`. Without them a
+  box's only mesh edges are the referee's per-cycle RPC injections, which
+  evaporate on every restart — and a box the referee never reaches is never
+  dialed at all.
+- **Do not shrink the memory envelope.** `MemoryHigh` equals `MemoryMax` on
+  purpose: a soft limit below the real need is a thrash zone, not a diet. Boot
+  peaks near 19G running `sqlite.quick_check` after an unclean shutdown, against
+  a steady state near 2.8G.
+
+A box whose checkout is not at `~/github/zclassic23`, or whose devfleet datadir
+is not `~/.zclassic-c23-devfleet`, overrides those lines with
+`systemctl --user edit zcl23-devfleet@<box>`. systemd expands `${VAR}` only in
+`Exec*` lines — in `ReadWritePaths=` and `StandardOutput=` a variable is
+silently dropped, which yields no sandbox and a silent fallback to the journal.
+Verify with `systemctl --user show <unit> -p ReadWritePaths -p StandardOutput`.

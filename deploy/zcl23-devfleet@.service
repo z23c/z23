@@ -1,0 +1,99 @@
+[Unit]
+Description=Z23 devfleet mesh member %i (isolated datadir+ports, onion-peered)
+After=network-online.target
+Wants=network-online.target
+
+# The devfleet node is this box's member of the four-node onion mesh. Before
+# this unit existed it was a bare `setsid nohup` child of the sync script
+# (tools/scripts/fleet_sync.sh), so nothing restarted it when it died and
+# nothing recorded why. A mesh member that only runs until its first crash
+# cannot hold a mesh together; supervision is the point of this file.
+#
+# Deliberately NO StartLimitBurst: a mesh member must keep trying forever.
+# The crash loop is bounded by the stepped RestartSec below, not by systemd
+# giving up permanently.
+
+[Service]
+# Type=notify is REQUIRED with WatchdogSec: under Type=simple systemd counts
+# startup complete at fork, so the watchdog clock would start before the node
+# has run a line of boot and Restart=always would livelock it. The node holds
+# READY=1 until its onion descriptor is actually published
+# (config/src/boot_sd_watchdog.c:327) — so "active" here means the box is
+# genuinely reachable at its .onion, not merely that a process exists.
+Type=notify
+NotifyAccess=main
+TimeoutStartSec=3600
+WatchdogSec=120
+
+# Per-box configuration stays OUTSIDE the repo: local paths, ports and the
+# peer onions this box dials live in the box's own uncommitted env, exactly
+# as deploy/devfleet/README.md requires. $DEVFLEET_FLAGS is intentionally
+# unbraced so systemd word-splits it.
+EnvironmentFile=%h/.config/zclassic23-fleetsync/%i.env
+
+# NOTE: the datadir is a %h literal, not ${DEVFLEET_DATADIR}: systemd expands
+# environment variables ONLY in Exec* lines. In ReadWritePaths= and
+# StandardOutput= a ${VAR} is silently dropped — which yields an empty
+# ReadWritePaths and a silent fallback to the journal. Ports still come from
+# the env because Exec* does expand them. A box using a different devfleet
+# datadir must override those three lines together.
+#
+# A box whose checkout is not at %h/github/zclassic23 overrides just this line:
+#   systemctl --user edit zcl23-devfleet@%i
+# ExecStart must be a literal absolute path; systemd will not expand a
+# variable in the first token.
+ExecStart=%h/github/zclassic23/build/bin/zclassic23 \
+    -datadir=%h/.zclassic-c23-devfleet \
+    -port=${DEVFLEET_PORT} \
+    -rpcport=${DEVFLEET_RPCPORT} \
+    $DEVFLEET_FLAGS
+
+# Restart=always keeps the node's own self-recovery escape hatches effective;
+# the stepped delay bounds a genuine crash loop at ten minutes.
+Restart=always
+RestartSec=5
+RestartSteps=8
+RestartMaxDelaySec=600
+
+# Standard systemd stop: one SIGTERM, then TimeoutStopSec, then SIGKILL. The
+# node's handler absorbs repeated SIGTERMs idempotently and checkpoints the
+# WAL plus the verified-clean marker BEFORE its slow teardown, so a SIGKILL at
+# the deadline costs the block-index boot cache and never the marker. An
+# observed shutdown on this box took 180 s and still hit its own internal
+# drain deadline, so this bound is deliberately generous.
+TimeoutStopSec=300
+KillMode=control-group
+
+# Generous envelope ON PURPOSE, and MemoryHigh == MemoryMax deliberately: a soft
+# limit BELOW the real need is not a diet, it is a thrash zone. An 8G soft cap
+# stalled this node at crypto_ready for 7 minutes pinned at 7.9G, reproducing
+# the 2026-08-06 starvation. Boot transiently needs far more than the ~2.8G
+# steady state. These numbers are a runaway backstop only.
+# cgroup at its soft limit and starved RPC on 2026-08-06; this node sits near
+# 2.8G in steady state. These numbers are a runaway backstop, not a diet.
+MemoryHigh=24G
+MemoryMax=24G
+MemorySwapMax=2G
+# No CPUQuota: throttling a mesh member fights the requirement that a node
+# always syncs fast. Weights yield to the canonical live node under contention
+# without capping this one when the box is idle.
+CPUWeight=30
+IOWeight=30
+Nice=5
+TasksMax=4096
+OOMScoreAdjust=300
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=%h/.zclassic-c23-devfleet
+PrivateTmp=yes
+
+# append:, never truncate. The previous launcher redirected with `>` and
+# destroyed the evidence of the crash it was restarting from.
+StandardOutput=append:%h/.zclassic-c23-devfleet/node.log
+StandardError=append:%h/.zclassic-c23-devfleet/node.log
+
+LimitCORE=infinity
+
+[Install]
+WantedBy=default.target
