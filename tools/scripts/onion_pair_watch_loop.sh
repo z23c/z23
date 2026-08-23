@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+# onion_pair_watch_loop.sh — run the sourced-isolated pair probe on a cycle.
+#
+#   tools/scripts/onion_pair_watch_loop.sh         # until killed
+#   tools/scripts/onion_pair_watch_loop.sh --once  # one cycle
+#
+# Each cycle: onion_pair_watch.sh, compare origin/main mesh.status against
+# the latest pair_probe.jsonl line, and push pair_probe.jsonl when it grew.
+# flock-serialized so a timer and a long-lived loop cannot overlap.
+# Never touches ~/.zclassic-c23. No Python.
+
+set -euo pipefail
+umask 077
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
+WATCH="$REPO_ROOT/tools/scripts/onion_pair_watch.sh"
+LEDGER="$REPO_ROOT/deploy/devfleet/pair_probe.jsonl"
+MESH_REL="deploy/devfleet/mesh.status"
+STATE_DIR="${PAIR_WATCH_STATE_DIR:-$HOME/.local/state/zclassic23-fleetsync}"
+LOCK="$STATE_DIR/node3.pair.lock"
+LOG="$STATE_DIR/pair_watch.log"
+MESH_LAST="$STATE_DIR/mesh.last"
+ONCE=0
+
+for arg in "$@"; do
+    case "$arg" in
+        --once) ONCE=1 ;;
+        --*) echo "onion-pair-watch-loop: unknown flag: $arg" >&2; exit 2 ;;
+        *) echo "onion-pair-watch-loop: unexpected arg: $arg" >&2; exit 2 ;;
+    esac
+done
+
+mkdir -p "$STATE_DIR"
+exec 9>"$LOCK"
+if ! flock -n 9; then
+    echo "onion-pair-watch-loop: lock busy, skipping" >&2
+    exit 75
+fi
+
+log() {
+    printf '%s pair_watch %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
+}
+
+pick_port_base() {
+    local b
+    for b in 39350 39420 39500 39600 39700 39270; do
+        if ! ss -tlnH "sport = :$b" 2>/dev/null | grep -E . >/dev/null 2>&1; then
+            echo "$b"
+            return 0
+        fi
+    done
+    echo 39350
+}
+
+trailing_paired() {
+    awk -F'"verdict":"' '
+        { v=$2; sub(/".*/,"",v); if (v=="PAIRED") n++; else n=0 }
+        END { print n+0 }
+    ' "$LEDGER" 2>/dev/null || echo 0
+}
+
+last_pair_line() {
+    [ -f "$LEDGER" ] || return 0
+    tail -n 1 "$LEDGER"
+}
+
+mesh_field() {
+    local key=$1 file=$2
+    sed -n "s/^${key}=//p" "$file" | head -n 1
+}
+
+crosscheck_mesh() {
+    local mesh_file tmp mesh last_mesh pair_line paired_at verdict node3
+    tmp=$(mktemp)
+    if ! git -C "$REPO_ROOT" show origin/main:"$MESH_REL" >"$tmp" 2>/dev/null; then
+        rm -f "$tmp"
+        return 0
+    fi
+    mesh=$(mesh_field MESH "$tmp")
+    node3=$(mesh_field NODE3 "$tmp")
+    last_mesh=""
+    [ -f "$MESH_LAST" ] && last_mesh=$(cat "$MESH_LAST")
+    pair_line=$(last_pair_line)
+    paired_at=$(printf '%s' "$pair_line" | sed -n 's/.*"paired_at_s":\([^,]*\).*/\1/p')
+    verdict=$(printf '%s' "$pair_line" | sed -n 's/.*"verdict":"\([^"]*\)".*/\1/p')
+    if [ -n "$mesh" ] && [ "$mesh" != "$last_mesh" ]; then
+        log "CROSSCHECK mesh ${last_mesh:-none} -> $mesh node3=$node3 last_pair=$verdict paired_at_s=${paired_at:-null} streak=$(trailing_paired)"
+        printf '%s\n' "$mesh" >"$MESH_LAST"
+    fi
+    rm -f "$tmp"
+}
+
+push_ledger() {
+    local other
+    cd "$REPO_ROOT"
+    git fetch origin main --quiet || {
+        log "push skipped: fetch failed"
+        return 0
+    }
+    other=$(git status --porcelain --untracked-files=no | grep -v 'deploy/devfleet/pair_probe.jsonl' || true)
+    if [ -n "$other" ]; then
+        log "push skipped: unrelated dirty work"
+        return 0
+    fi
+    if [ -z "$(git diff --name-only -- deploy/devfleet/pair_probe.jsonl)$(git diff --cached --name-only -- deploy/devfleet/pair_probe.jsonl)" ]; then
+        return 0
+    fi
+    git add deploy/devfleet/pair_probe.jsonl
+    git commit --quiet -m "devfleet: node3 pair_probe heartbeat"
+    git rebase origin/main --quiet || {
+        git rebase --abort >/dev/null 2>&1 || true
+        log "push skipped: rebase failed"
+        return 0
+    }
+    if git push --no-verify origin main --quiet; then
+        log "pushed pair_probe streak=$(trailing_paired)"
+    else
+        log "push failed; commit kept"
+    fi
+}
+
+cycle() {
+    local base lines_before lines_after
+    cd "$REPO_ROOT"
+    git fetch origin main --quiet || true
+    base=$(pick_port_base)
+    lines_before=0
+    [ -f "$LEDGER" ] && lines_before=$(wc -l <"$LEDGER" | tr -d ' ')
+    log "cycle start port_base=$base streak=$(trailing_paired)"
+    set +e
+    PAIR_WATCH_PORT_BASE="$base" "$WATCH"
+    set -e
+    lines_after=0
+    [ -f "$LEDGER" ] && lines_after=$(wc -l <"$LEDGER" | tr -d ' ')
+    log "cycle done streak=$(trailing_paired) line=$(last_pair_line)"
+    crosscheck_mesh
+    if [ "$lines_after" -gt "$lines_before" ]; then
+        push_ledger
+    fi
+}
+
+if [ "$ONCE" = 1 ]; then
+    cycle
+    exit 0
+fi
+
+while true; do
+    cycle || log "cycle error rc=$?"
+    sleep "${PAIR_WATCH_SLEEP:-15}"
+done
