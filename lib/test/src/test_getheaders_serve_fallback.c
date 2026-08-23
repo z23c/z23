@@ -171,6 +171,7 @@ static void gsf_setup_outbound_peer(struct p2p_node *node, int32_t height)
     snprintf(node->addr_name, sizeof(node->addr_name),
              "203.0.113.23:8033");
     atomic_store(&node->state, PEER_HANDSHAKE_COMPLETE);
+    zcl_mutex_init(&node->cs_send);
 }
 
 static void gsf_drain_send_queue(struct p2p_node *node)
@@ -185,6 +186,12 @@ static void gsf_drain_send_queue(struct p2p_node *node)
     node->send_tail = NULL;
     node->send_size = 0;
     node->send_offset = 0;
+}
+
+static void gsf_free_outbound_peer(struct p2p_node *node)
+{
+    gsf_drain_send_queue(node);
+    zcl_mutex_destroy(&node->cs_send);
 }
 
 int test_getheaders_serve_fallback(void);
@@ -318,8 +325,8 @@ int test_getheaders_serve_fallback(void)
                   retry_peer.send_size > 0 &&
                   header_serve_repair_test_expected_count() == 3 &&
                   header_serve_repair_test_cached_count() == 1);
-        gsf_drain_send_queue(&peer);
-        gsf_drain_send_queue(&retry_peer);
+        gsf_free_outbound_peer(&peer);
+        gsf_free_outbound_peer(&retry_peer);
     }
 
     /* 3. The successor walk ADVANCES: from g, past unservable A, to
@@ -605,6 +612,47 @@ int test_getheaders_serve_fallback(void)
     GSF_CHECK("serve cache stays inside its 64 MiB budget",
               getheaders_solution_cache_bytes() <=
               (size_t)64 * 1024 * 1024);
+
+    /* 11. A peer can be node2's source for the current block, so ordinary
+     *     anti-echo relay intentionally sends it no header. Its first BIP 130
+     *     sendheaders negotiation must therefore publish one independently
+     *     verified current-tip header. Duplicates are inert: the proof is
+     *     bounded to once per connection. */
+    {
+        struct p2p_node peer;
+        gsf_setup_outbound_peer(&peer, bi_d->nHeight);
+        GSF_CHECK("active tip fixture installed",
+                  active_chain_move_window_tip(&ms.chain_active, bi_d));
+        bool first = process_sendheaders(&mp, &peer);
+        struct send_segment *seg = peer.send_head;
+        bool framed = first && peer.prefer_headers && seg &&
+                      seg->size > (size_t)MSG_HEADER_SIZE &&
+                      memcmp(seg->data + MESSAGE_START_SIZE, "headers", 7) == 0;
+        GSF_CHECK("first sendheaders publishes one current-tip header",
+                  framed && seg->data[MSG_HEADER_SIZE] == 1);
+        if (framed) {
+            struct byte_stream wire;
+            stream_init_from_data(&wire, seg->data + MSG_HEADER_SIZE,
+                                  seg->size - MSG_HEADER_SIZE);
+            uint64_t count = 0;
+            uint64_t tx_count = 1;
+            struct block_header announced;
+            block_header_init(&announced);
+            bool decoded = stream_read_compact_size(&wire, &count) &&
+                           block_header_deserialize(&announced, &wire) &&
+                           stream_read_compact_size(&wire, &tx_count);
+            struct uint256 announced_hash;
+            block_header_get_hash(&announced, &announced_hash);
+            GSF_CHECK("negotiation header is exact verified tip",
+                      decoded && count == 1 && tx_count == 0 &&
+                      uint256_eq(&announced_hash, &hash_d));
+        }
+        gsf_drain_send_queue(&peer);
+        GSF_CHECK("duplicate sendheaders emits no second tip proof",
+                  process_sendheaders(&mp, &peer) && peer.send_head == NULL &&
+                  peer.send_size == 0);
+        gsf_free_outbound_peer(&peer);
+    }
 
     app_runtime_set_current(NULL);
     db_service_stop(&dbsvc);

@@ -44,6 +44,7 @@ bool msg_version_should_save_peer(const struct p2p_node *node);
 bool process_version(struct msg_processor *mp, struct p2p_node *node,
                      struct byte_stream *s);
 bool process_verack(struct msg_processor *mp, struct p2p_node *node);
+bool process_sendheaders(struct msg_processor *mp, struct p2p_node *node);
 
 /* msg_headers.c — header sync messages */
 struct block_header;
@@ -84,6 +85,13 @@ bool getheaders_try_append_header(struct byte_stream *body,
 bool getheaders_index_header_servable(struct msg_processor *mp,
                                       struct block_index *iter,
                                       struct block_header *hdr_out);
+/* Send one independently verified, hash-bound index header as a BIP 130
+ * announcement. Shared by ordinary new-tip relay and the one-shot
+ * sendheaders negotiation reply, so neither path can publish a partial
+ * in-memory header on snapshot-seeded nodes. */
+bool push_verified_header_announcement(struct msg_processor *mp,
+                                       struct p2p_node *node,
+                                       struct block_index *index);
 bool getheaders_cache_repair_candidate(struct msg_processor *mp,
                                        struct block_index *iter,
                                        const struct block_header *hdr);

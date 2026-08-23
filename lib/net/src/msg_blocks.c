@@ -812,39 +812,18 @@ bool process_block_msg(struct msg_processor *mp, struct p2p_node *node,
                                     block_free(&blk_cmp);
                                 }
                             } else if (peer->prefer_headers) {
-                                /* BIP 130: send headers directly */
-                                struct block_header hdr;
-                                block_header_init(&hdr);
-                                hdr.nVersion = new_tip->nVersion;
-                                if (new_tip->pprev && new_tip->pprev->phashBlock)
-                                    hdr.hashPrevBlock = *new_tip->pprev->phashBlock;
-                                hdr.hashMerkleRoot = new_tip->hashMerkleRoot;
-                                hdr.hashFinalSaplingRoot = new_tip->hashFinalSaplingRoot;
-                                hdr.nTime = new_tip->nTime;
-                                hdr.nBits = new_tip->nBits;
-                                hdr.nNonce = new_tip->nNonce;
-                                if (new_tip->nSolution && new_tip->nSolutionSize > 0) {
-                                    memcpy(hdr.nSolution, new_tip->nSolution, new_tip->nSolutionSize);
-                                    hdr.nSolutionSize = new_tip->nSolutionSize;
-                                } else {
-                                    struct block blk_tip;
-                                    if (read_block_from_disk_index(&blk_tip, new_tip, mp->datadir)) {
-                                        memcpy(hdr.nSolution, blk_tip.header.nSolution, blk_tip.header.nSolutionSize);
-                                        hdr.nSolutionSize = blk_tip.header.nSolutionSize;
-                                        block_free(&blk_tip);
-                                    }
+                                /* BIP 130: direct verified header. If local
+                                 * bytes are unavailable, fall back to inv so
+                                 * the peer still learns that a block exists. */
+                                if (!push_verified_header_announcement(
+                                        mp, peer, new_tip)) {
+                                    LOG_WARN("headers",
+                                             "new-tip header announcement "
+                                             "failed h=%d peer=%s; using inv",
+                                             new_tip->nHeight,
+                                             peer->addr_name);
+                                    p2p_node_push_inventory(peer, &blk_inv);
                                 }
-
-                                struct byte_stream hs;
-                                stream_init(&hs, 2048);
-                                stream_write_compact_size(&hs, 1);
-                                block_header_serialize(&hdr, &hs);
-                                stream_write_compact_size(&hs, 0); /* tx count */
-                                p2p_node_begin_message(peer, "headers",
-                                                       mp->params->pchMessageStart);
-                                p2p_node_write_message_data(peer, hs.data, hs.size);
-                                p2p_node_end_message(peer);
-                                stream_free(&hs);
                             } else {
                                 p2p_node_push_inventory(peer, &blk_inv);
                             }

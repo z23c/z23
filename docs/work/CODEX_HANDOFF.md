@@ -177,8 +177,7 @@ should not start them.
 
 ### Track A — Correctness of what we serve  *(P0)*
 
-**A1. A seeded node cannot serve early headers, and until recently said so
-wrongly.** *(P0 — diagnosis landed; the remaining part is a product decision)*
+**A1. Seeded-node early-header availability.** *(P0 — bounded repair landed)*
 
 This was investigated twice and misdiagnosed both times, so the corrected
 account matters more than the fix.
@@ -206,13 +205,19 @@ throttled per reason so an availability storm cannot bury a genuine
 forged-solution refusal, and the index fill no longer reads the whole block
 just to discard most of it.
 
-**What remains is a decision, not an implementation.** A seeded node still
-cannot serve early headers, because it does not have them. Closing that means
-either shipping header bytes below the seed floor (on the order of gigabytes of
-solutions — the reason the bundle omits them today) or steering
-genesis-syncing peers to an archival node. `getheaders_serve_refusals_no_header_bytes()`
-is now the single number that says whether a box is in this state. Do not pick
-one of those options inside a work unit; it is a product call.
+Fixed after that diagnosis: the first honest serve miss arms one immutable,
+64-header peer repair span. The node requests only headers, independently
+hash-binds and full-PoW verifies every response, and caches only proved bytes
+in the bounded resident serve cache. It neither downloads block bodies nor
+adds a new durable authority. A retry preserves partial progress and the exact
+span. `getheaders_serve_refusals_no_header_bytes()` remains the attribution
+counter for the initial local availability miss.
+
+Also fixed: a peer that sends `sendheaders` now receives one verified current
+tip header on that connection. Normal block relay still excludes the source
+peer to prevent echo, but the one-shot negotiation proof lets a mesh observer
+record an accepted-header vote even when it supplied node2's tip and the chain
+is otherwise quiet. Duplicate `sendheaders` messages produce no extra proof.
 
 *Deliberately not done:* the 64-probe guard was left alone. Shortening it on
 the first `no-header-bytes` would break the real case of scattered bodies, and
