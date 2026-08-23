@@ -47,7 +47,7 @@ lib/net/src/peer_lifecycle.c 1856
 lib/net/src/rom_fetch.c 1709
 lib/net/src/rom_seed.c 1111
 lib/platform/src/os_sandbox_linux.c 1422
-lib/rpc/src/httpserver.c 1345
+lib/rpc/src/httpserver.c 1667
 lib/sapling/src/circuit_gadgets.c 1064
 lib/sapling/src/circuit_spend.c 959
 lib/sapling/src/groth16_prover.c 1203
