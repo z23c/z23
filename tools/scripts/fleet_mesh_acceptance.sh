@@ -123,6 +123,32 @@ clean_detail() {
         cut -c1-180
 }
 
+# Turn a failed local RPC call into one of a small set of honest, named
+# causes instead of collapsing every distinct failure into "absent".
+# CLI_LAST_STDERR carries the z23 CLI's own diagnosis verbatim: src/cli.c
+# prints "Cannot connect to ..." (and "RPC call failed") when the socket
+# never connects, or "Error: <message>" from the JSON-RPC error object —
+# which is also how a leaf missing from this binary surfaces (e.g. an
+# unknown-method message), so that case carries its real cause too rather
+# than needing a separate branch.
+classify_cli_failure() {
+    local stderr="$1"
+    case "$stderr" in
+        *'Cannot connect to'*|*'RPC call failed'*)
+            printf 'rpc_connection_failed'
+            ;;
+        *'Error: '*)
+            printf 'rpc_error:%s' "$(clean_detail "${stderr#*Error: }")"
+            ;;
+        '')
+            printf 'rpc_no_response'
+            ;;
+        *)
+            printf 'rpc_failed:%s' "$(clean_detail "$stderr")"
+            ;;
+    esac
+}
+
 status_value() {
     local key="$1"
     [ -f "$STATUS_FILE" ] || return 0
@@ -204,9 +230,20 @@ sync_main() {
     }
 }
 
+# A command substitution runs cli() in a forked subshell, so any variable it
+# assigned directly would vanish the moment that subshell exits. Route the
+# CLI's stderr through a fixed file instead — a filesystem write survives
+# subshell exit — and have callers who need the diagnosis pull it back into
+# the parent shell with cli_read_stderr() right after the `x="$(cli ...)"`
+# that produced it.
+CLI_STDERR_FILE="$STATE_DIR/$BOX.cli_stderr"
+CLI_LAST_STDERR=""
 cli() {
     timeout 60 "$ZCL_CLI" -datadir="$DEVFLEET_DATADIR" \
-        -rpcport="$DEVFLEET_RPCPORT" "$@" 2>/dev/null
+        -rpcport="$DEVFLEET_RPCPORT" "$@" 2>"$CLI_STDERR_FILE"
+}
+cli_read_stderr() {
+    CLI_LAST_STDERR="$(cat "$CLI_STDERR_FILE" 2>/dev/null || true)"
 }
 
 json_get() {
@@ -427,6 +464,8 @@ PUBLISHED_COUNT=0
 LOCAL_HEIGHT_BEFORE=""
 LOCAL_HEIGHT_AFTER=""
 LOCAL_HASH=""
+REFEREE_LOCAL_TIP=""
+REFEREE_LOCAL_RPC_FAULT=""
 
 record_source_evidence() {
     local node="$1"
@@ -465,8 +504,36 @@ record_gap() {
     GAPS+=("$node:$reason")
 }
 
+# A remote node whose check could not run because THIS box's own RPC read
+# failed is neither a pass nor a peer-attributable gap: its status this
+# cycle is unknown, not failed, and it must never join GAPS naming the node.
+record_unknown() {
+    local node="$1" reason="$2"
+    NODE_RESULTS[$node]="unknown:$(clean_detail "$reason")"
+}
+
+# The referee's own tip height. Every remote check needs it, but a failure
+# here is this box's local RPC front door being unhealthy, never a remote
+# peer's fault. Read it fresh (state may advance across the cycle) but
+# record the cause once, in REFEREE_LOCAL_RPC_FAULT, so a saturated RPC
+# queue is never misattributed as a per-node gap.
+refresh_referee_local_tip() {
+    local out rc
+    out="$(cli getblockcount)"
+    rc=$?
+    cli_read_stderr
+    if [ "$rc" -eq 0 ] && [[ "$out" =~ ^[0-9]+$ ]]; then
+        REFEREE_LOCAL_TIP="$out"
+        return 0
+    fi
+    REFEREE_LOCAL_TIP=""
+    [ -n "$REFEREE_LOCAL_RPC_FAULT" ] || \
+        REFEREE_LOCAL_RPC_FAULT="$(classify_cli_failure "$CLI_LAST_STDERR")"
+    return 1
+}
+
 check_local_node() {
-    local node="$1" frontdoor blocks published sync_gap sync_gap_known
+    local node="$1" frontdoor frontdoor_rc blocks published sync_gap sync_gap_known
     local all_members_fresh published_onion
     local self_dial_detail self_dial_raw self_dial_rc source_error
     source_error=""
@@ -504,7 +571,14 @@ check_local_node() {
     # is named.  Do not use getblockchaininfo here: a stuck chain read outlives
     # the client timeout, consumes one of four RPC workers, and recurring
     # telemetry can eventually fill the entire 64-connection queue.
-    frontdoor="$(cli dumpstate status_frontdoor 2>/dev/null || true)"
+    frontdoor="$(cli dumpstate status_frontdoor)"
+    frontdoor_rc=$?
+    cli_read_stderr
+    if [ "$frontdoor_rc" -ne 0 ] || [ -z "$frontdoor" ]; then
+        record_gap "$node" \
+            "local_status_frontdoor_$(classify_cli_failure "$CLI_LAST_STDERR")"
+        return
+    fi
     blocks="$(json_get "$frontdoor" state.height)"
     published="$(json_get "$frontdoor" state.provable_tip_published)"
     sync_gap="$(json_get "$frontdoor" state.sync_gap)"
@@ -538,6 +612,29 @@ check_local_node() {
         return
     fi
     record_pass "$node" "self_synced:height=$blocks:$self_dial_detail"
+}
+
+# The product's own definition of ready (app/controllers/src/
+# status_native_helpers.c:337-343): handshake_complete precedes active,
+# which precedes header/block/snapshot sync in the C peer ladder (lib/
+# event/src/event.c:836-837), so a peer that has moved on to any later
+# ready state already completed VERSION/VERACK. Defined once and called
+# from every acceptance site in check_remote_node so the false negative
+# (requiring state==active) cannot be reintroduced at one call site while
+# fixed at another. Pairing the state with a nonzero negotiated protocol
+# version keeps acceptance honest: it means the handshake demonstrably
+# finished, not merely that a row with this address exists.
+remote_peer_handshake_complete() {
+    local state="$1" version="$2"
+    case "$state" in
+        handshake_complete|active|syncing_headers|syncing_blocks| \
+            snapshot_serving|snapshot_receiving)
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    [[ "$version" =~ ^[1-9][0-9]*$ ]]
 }
 
 check_remote_node() {
@@ -599,15 +696,19 @@ check_remote_node() {
         fi
     fi
 
-    local_before="$(cli getblockcount 2>/dev/null || true)"
-    if [[ ! "$local_before" =~ ^[0-9]+$ ]]; then
-        record_gap "$node" "local_tip_unreadable"
+    # A referee-local RPC failure belongs to this box, never to the remote
+    # node under test: record it once (REFEREE_LOCAL_RPC_FAULT) and leave
+    # this node's status unknown rather than scoring it a gap.
+    if ! refresh_referee_local_tip; then
+        record_unknown "$node" "referee_local_read_failed:$REFEREE_LOCAL_RPC_FAULT"
         return
     fi
+    local_before="$REFEREE_LOCAL_TIP"
 
     row="$(peer_row "$endpoint" || true)"
     state="$(json_get "$row" state)"
-    if [ "$state" != active ]; then
+    version="$(json_get "$row" version)"
+    if ! remote_peer_handshake_complete "$state" "$version"; then
         add_out="$(cli core network peers add --address="$endpoint" 2>&1 || true)"
         add_ok="$(json_get "$add_out" ok)"
         add_status="$(json_get "$add_out" data.status)"
@@ -623,7 +724,8 @@ check_remote_node() {
         while :; do
             row="$(peer_row "$endpoint" || true)"
             state="$(json_get "$row" state)"
-            [ "$state" = active ] && break
+            version="$(json_get "$row" version)"
+            remote_peer_handshake_complete "$state" "$version" && break
             now="$(date +%s)"
             [ "$now" -ge "$deadline" ] && break
             # Condition-driven polling only: no redial/restart or sleep-as-fix.
@@ -631,25 +733,23 @@ check_remote_node() {
         done
     fi
 
-    if [ "$state" != active ]; then
+    if ! remote_peer_handshake_complete "$state" "$version"; then
         record_gap "$node" \
             "version_verack_incomplete:state=${state:-absent}$publication_suffix"
         return
     fi
     NODE_SILENT[$node]=no
-    version="$(json_get "$row" version)"
     peer_height="$(json_get "$row" startingheight)"
-    local_after="$(cli getblockcount 2>/dev/null || true)"
+    if [[ ! "$peer_height" =~ ^[0-9]+$ ]]; then
+        record_gap "$node" "peer_tip_height_unreadable"
+        return
+    fi
+    if ! refresh_referee_local_tip; then
+        record_unknown "$node" "referee_local_read_failed:$REFEREE_LOCAL_RPC_FAULT"
+        return
+    fi
+    local_after="$REFEREE_LOCAL_TIP"
     LOCAL_HEIGHT_AFTER="$local_after"
-    if [[ ! "$version" =~ ^[1-9][0-9]*$ ]]; then
-        record_gap "$node" "version_missing_after_active"
-        return
-    fi
-    if [[ ! "$peer_height" =~ ^[0-9]+$ ]] ||
-       [[ ! "$local_after" =~ ^[0-9]+$ ]]; then
-        record_gap "$node" "tip_height_unreadable"
-        return
-    fi
     if [ "$peer_height" != "$local_before" ] &&
        [ "$peer_height" != "$local_after" ]; then
         record_gap "$node" \
@@ -698,6 +798,7 @@ write_status() {
         printf 'LOCAL_BOX=%s\n' "$BOX"
         printf 'LOCAL_HEIGHT=%s\n' "${LOCAL_HEIGHT_AFTER:-$LOCAL_HEIGHT_BEFORE}"
         printf 'LOCAL_BEST_BLOCK=%s\n' "$LOCAL_HASH"
+        printf 'REFEREE_LOCAL_RPC_FAULT=%s\n' "${REFEREE_LOCAL_RPC_FAULT:-none}"
         printf 'REFEREE_SOURCE_SHA=%s\n' "$source_sha"
         printf 'OBSERVED_MAIN_SHA=%s\n' "$(git rev-parse "$OBSERVED_MAIN")"
         local node
