@@ -64,9 +64,70 @@ bool onion_stream_connect(const struct net_service *svc,
                           zcl_socket_t *sock_out,
                           int connect_timeout_ms);
 
+/* ── Raw-stream backend ──────────────────────────────────────────────────
+ * The bridge talks to the circuit through this three-call interface, not
+ * to dynhost_stream_* directly. Production binds the embedded Tor fork's
+ * weak symbols (onion_stream.c); a test binds a loopback double, so the
+ * socketpair bridge itself is exercised without a live Tor network. The
+ * handle is opaque here — only the backend that minted it may touch it. */
+struct onion_stream_raw;
+
+/* Mirrors the fork's event codes (dynhost_stream.h) one-for-one. */
+#define ONION_STREAM_EVENT_OPEN      0
+#define ONION_STREAM_EVENT_CONNECTED 1
+#define ONION_STREAM_EVENT_CLOSED    2
+#define ONION_STREAM_EVENT_TIMEOUT   3
+
+typedef void (*onion_stream_read_fn)(struct onion_stream_raw *stream,
+                                     const uint8_t *data, size_t len,
+                                     void *ctx);
+typedef void (*onion_stream_event_fn)(struct onion_stream_raw *stream,
+                                      int event, void *ctx);
+
+struct onion_stream_backend {
+    struct onion_stream_raw *(*open)(const char *onion, uint16_t port,
+                                     onion_stream_read_fn read_cb,
+                                     onion_stream_event_fn event_cb,
+                                     void *ctx, int lifetime_secs);
+    int  (*write)(struct onion_stream_raw *stream, const uint8_t *data,
+                  size_t len);
+    void (*close)(struct onion_stream_raw *stream);
+};
+
+/* ── Stage ledger ────────────────────────────────────────────────────────
+ * docs/work/ONION_DIAL_GAP.md requires every stage of the loop to be named
+ * by a log line OR a counter. These are the stages this file owns — from
+ * "a dial was issued" through "the peer answered on the bridge" — counted
+ * monotonically since process start so an acceptance check can assert on a
+ * number instead of grepping a log that may have rotated. */
+struct onion_stream_stages {
+    uint64_t dial_started;       /* onion_stream_connect entered */
+    uint64_t stream_queued;      /* backend accepted the open (INTRODUCE1 next) */
+    uint64_t circuit_ready;      /* CONNECTED: rendezvous done, bytes may flow */
+    uint64_t bridge_up;          /* fd handed to the P2P layer */
+    uint64_t open_refused;       /* backend refused to queue the open */
+    uint64_t circuit_timeout;    /* connect budget spent, no circuit */
+    uint64_t circuit_torn_down;  /* terminal event before the bridge went up */
+    uint64_t bridge_closed;      /* pump teardown (any reason) */
+    uint64_t bytes_to_peer;      /* app → Tor, accepted by the backend */
+    uint64_t bytes_from_peer;    /* Tor → app, handed to the socketpair */
+    uint64_t peers_answered;     /* bridges that saw a first inbound byte */
+};
+void onion_stream_get_stages(struct onion_stream_stages *out);
+
 #ifdef ZCL_TESTING
 size_t onion_stream_connect_plan_for_test(int connect_timeout_ms,
                                           int budgets[2]);
+
+/* Build the bridge over an injected backend, skipping the Tor-runtime
+ * gates onion_stream_connect() enforces. Same socket contract as the
+ * production path: *sock_out is a connected, non-blocking stream fd the
+ * caller owns. */
+bool onion_stream_connect_backend_for_test(
+    const struct net_service *svc, zcl_socket_t *sock_out,
+    int connect_timeout_ms, const struct onion_stream_backend *backend);
+
+void onion_stream_reset_stages_for_test(void);
 #endif
 
 #endif /* ZCL_NET_ONION_STREAM_H */
