@@ -569,6 +569,27 @@ bool p2p_node_request_disconnect(
 const char *p2p_disconnect_reason_name(enum p2p_disconnect_reason reason);
 const char *p2p_disconnect_source_name(enum p2p_disconnect_source source);
 
+/* Structured close line — the pair to the "peer_connected" JSON line emitted
+ * when a session opens.  Before this the close side reached only the event
+ * ring (EV_TCP_DISCONNECTED), so a connection could vanish from node.log with
+ * no line, no reason and no counter; that silence is what made the onion
+ * handshake failure undiagnosable from the log alone.  Every path that retires
+ * a p2p_node routes through here, so node.log carries exactly one
+ * "peer_disconnected" line per "peer_connected" line, carrying the named
+ * reason and source.
+ *
+ * `event` names the line: "peer_disconnected" is the single terminal record.
+ * A pre-terminal incident that a peer can survive in principle (a handshake or
+ * TCP-connect timeout, which requests cleanup but may lose the causal CAS to a
+ * concurrent reason) uses its own event name so the terminal record stays
+ * unique and countable.
+ *
+ * Hot path: stack escape buffers only, no allocation, and no lock is taken —
+ * callers already hold cs_nodes and log_jsonf only formats and appends. */
+void p2p_log_peer_close(const struct p2p_node *node, const char *event,
+                        enum p2p_disconnect_reason reason,
+                        enum p2p_disconnect_source source);
+
 void p2p_node_copy_stats(const struct p2p_node *node, struct node_stats *stats);
 
 void p2p_node_push_address(struct p2p_node *node, const struct net_address *addr);
