@@ -149,9 +149,9 @@ path:
 
 - [`METAVERSE.md`](METAVERSE.md) and [`METAVERSE_MVP.md`](METAVERSE_MVP.md) —
   application/creation layer; token economics remain simulation-only.
-- [`FILE_MARKET_PROTOCOL.md`](FILE_MARKET_PROTOCOL.md) and
-  [`TWO_LAPTOP_MARKET_TEST.md`](TWO_LAPTOP_MARKET_TEST.md) — marketplace
-  protocol and operator acceptance.
+- [`FILE_MARKET_PROTOCOL.md`](FILE_MARKET_PROTOCOL.md) — marketplace protocol;
+  the operator acceptance journey it once planned now lives as
+  `make commons-multihost-acceptance` (see the top-level README).
 - [`FRAMEWORK.md`](FRAMEWORK.md) and [`AGENT_ARCHITECTURE.md`](AGENT_ARCHITECTURE.md)
   — architectural reference, off the public-node critical path unless the
   current plan explicitly pulls in a bounded item.

@@ -5,7 +5,7 @@ Status: CORRECTED 2026-08-23 after fresh probes on current main
 which was true of the then-checked-out binary and false of current main.
 Owner: embedded-Tor hidden-service loop (`vendor/tor` fork +
 `lib/net/src/onion_stream.c` / `connman_dialer.c`). Referee evidence:
-[`deploy/devfleet/mesh.status`](../deploy/devfleet/mesh.status).
+`deploy/devfleet/mesh.status`.
 
 ## Verified current behavior (two fresh isolated nodes, strict probe)
 

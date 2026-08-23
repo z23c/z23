@@ -143,6 +143,19 @@ Every command is a leaf of the native command registry, so nothing here has to
 be memorised — `build/bin/z23 discover help` prints the live surface, and
 `build/bin/z23 discover describe <leaf>` prints one command's typed contract.
 
+Nodes meet each other over Tor onion services, so a node behind any NAT can
+dial and be dialed without port forwarding:
+
+```bash
+# join an operator-directed peer (onion endpoint of the peer you trust)
+build/bin/z23 zses invite accept --invite=<json>
+build/bin/z23 ops mesh join --endpoint=<host>.onion:<port> --input='{"confirm":true}'
+build/bin/z23 ops mesh join_status        # did the peer land? honest verdict
+```
+
+Onion identities persist in your datadir; the same node keeps the same
+address across restarts.
+
 ![the live command surface](docs/assets/z23-term-command-surface.svg)
 
 For development, `make dev-bin` builds the faster development binary and
@@ -155,9 +168,12 @@ For development, `make dev-bin` builds the faster development binary and
 | | |
 | --- | --- |
 | **Public start here** | [Getting started](docs/GETTING_STARTED.md) |
+| Agent entry point | [AGENTS.md](AGENTS.md) |
 | The commons | [C23 Commons quickstart](docs/C23_COMMONS_QUICKSTART.md) |
 | Verification | [Security and integrity](docs/SECURITY_AND_INTEGRITY.md) |
 | Design | [Architecture north star](docs/ARCHITECTURE_NORTH_STAR.md) |
+| Source map | [Codebase map](docs/CODEBASE_MAP.md) |
+| Work ledger | [docs/work index](docs/work/README.md) |
 | The market | [ZCODE plan](docs/work/ZCODE_PLAN.md) |
 | Contributing | [Developing](docs/DEVELOPING.md) |
 | Where it stands | [MVP criteria](docs/MVP.md) |
