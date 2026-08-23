@@ -1,7 +1,7 @@
 BOX=node3
 DRILL=ux_join_drill
 RUNS=5
-OBSERVED_AT=2026-08-23T01:21:45Z
+OBSERVED_AT=2026-08-23T01:52:24Z
 CLOCK=deploy/devfleet/ux_join_clock.jsonl
 SOURCE_SHA=9ad0b7ab78296e2d3f5f14171d06861d827ef8d0
 PEER=node1
@@ -12,9 +12,15 @@ P2P_PORT=39150
 VERDICT=fail
 BEST_PEERED_S=5
 BEST_FIRST_MSG_S=11
-BEST_SYNCED_S=
+BEST_SYNCED_S=26
+BEST_SYNCED_LANE=regtest
 WORST_PEERED_S=59
 WORST_FIRST_MSG_S=65
 WORST_SYNCED_S=
-DEFECTS=synced_over_60s,typed_peer_add_bad_rpc_body,first_msg_over_60s
-DETAIL=published node3.txt from a sourced-isolation -tor node; live onion P2P verack with node1 in 7s and ZMSG ack in 13s. synced_s null (from-genesis height 0 vs tip ~3225770). node2 onion:39304 named Tor refuse (source predates inbound P2P mapping).
+DEFECTS=mainnet_from_genesis_stall,typed_peer_add_bad_rpc_body,first_msg_over_60s
+DEFECT_mainnet_from_genesis_stall=expected: empty datadir vs live H*=3.2M; onion PEERED/FIRST_MSG are real; SYNCED on mainnet is not a handshake bug
+DEFECT_C3_MAKE=make mvp-coldstart-to-tip-local
+DEFECT_C3_SCRIPT=tools/scripts/cold_start_to_tip_probe.sh
+DEFECT_typed_peer_add_bad_rpc_body=core.network.peers.add returns BAD_RPC_BODY (250ms budget / ~10s RPC); RPC addnode still dials
+DEFECT_first_msg_over_60s=one onion run first_msg_s=65; best is 11s
+DETAIL=onion P2P verack and ZMSG ack against node1 are green (best 5s/11s). Mainnet SYNCED_s stays null by design without the C3 operator bundle. Isolated regtest two-node drill: SYNCED_s=26 to height 10.
