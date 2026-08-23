@@ -10,3 +10,4 @@
 {"ts":"2026-08-23T16:57:32Z","head_sha":"a19d7f9628d2df641be850f3f38aca28f93760e0","verdict":"PAIRED","paired_at_s":87,"dial_attempted":true,"rendezvous_seen":true,"descriptor_uploaded":true}
 {"ts":"2026-08-23T16:59:26Z","head_sha":"758850de0d2f80209ddfa8c1333a8b581f88512c","verdict":"PAIRED","paired_at_s":87,"dial_attempted":true,"rendezvous_seen":true,"descriptor_uploaded":true}
 {"ts":"2026-08-23T17:01:22Z","head_sha":"fe925dfa654f083f191a30a6c9d5495d260a811b","verdict":"PAIRED","paired_at_s":86,"dial_attempted":true,"rendezvous_seen":true,"descriptor_uploaded":true}
+{"ts":"2026-08-23T17:03:17Z","head_sha":"89b47d43684542b82ee7c4068d9f674ef8a1cd39","verdict":"PAIR_TIMEOUT","paired_at_s":null,"dial_attempted":true,"rendezvous_seen":true,"descriptor_uploaded":true}
