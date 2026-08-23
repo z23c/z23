@@ -78,6 +78,7 @@ citation, `git log --follow -- docs/work/<name>.md` recovers older intent.
 | [`os/A6-adaptive-client-puzzle.md`](./os/A6-adaptive-client-puzzle.md) | DESIGN | load-adaptive client-puzzle primitive design (not yet built) |
 | [`NAT_AND_ONION_TRANSPORT.md`](./NAT_AND_ONION_TRANSPORT.md) | DESIGN | onion-as-universal-rendezvous / clearnet-as-fast-path transport design notes (NAT traversal, onion hosting, package swarm); P2P-layer policy only, no consensus surface |
 | [`DIRECT_TRANSPORT.md`](./DIRECT_TRANSPORT.md) | DESIGN | UDP datagram fast path + PEX-lite clearnet discovery + disclosure posture (`onion`\|`clearnet`\|`none`) + `zses:v1` session invites; application plane only, no consensus surface; complements NAT_AND_ONION_TRANSPORT |
+| [`ONION_DIAL_GAP.md`](./ONION_DIAL_GAP.md) | LIVE | locally-reproduced defect record: outbound `.onion` P2P dials are never issued through the embedded Tor SOCKS path; names the fix slice and the two-node acceptance probe |
 | [`palace-design.md`](./palace-design.md) | DESIGN | code-legibility layer: file/group purpose, `code room`, the three P1/P2/P3 lint gates (§3 cited by `test_make_lint_gates.c`) |
 | [`service-result-convergence.md`](./service-result-convergence.md) | LIVE | `struct zcl_result` convergence ratchet inventory + lane plan for `app/services/`; gate is live, this is the shrinking-floor inventory |
 | [`secure-transport-design.md`](./secure-transport-design.md) | DESIGN | Noise_XX v2 transport protocol contract (implemented, default off) |
