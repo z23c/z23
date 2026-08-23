@@ -85,6 +85,25 @@ ISO_RPC_BIN="${ISO_RPC_BIN:-./build/bin/zcl-rpc}"
 
 iso_die() { echo "isolated_node_env: FATAL: $*" >&2; exit 1; }
 
+# Drop inherited /dev/pts and /dev/tty descriptors. A leftover operator
+# pts (not stdin — that is already /dev/null) lets a child hit wall(1)
+# "Broadcast message from user@host" on every logged-in terminal.
+iso_drop_inherited_ttys() {
+    local fd n target
+    for fd in /proc/self/fd/*; do
+        n=${fd##*/}
+        case $n in
+            ''|*[!0-9]*) continue ;;
+            0|1|2) continue ;;
+        esac
+        target=$(readlink "$fd" 2>/dev/null || true)
+        case $target in
+            /dev/pts/*|/dev/tty|/dev/tty*) eval "exec ${n}>&-" 2>/dev/null || true ;;
+        esac
+    done
+    return 0
+}
+
 # Abort if a chosen port collides with the static live set.
 # NOTE: the trailing `return 0` is load-bearing — without it the
 # function returns the rc of the final failed `[ ]` test (1), which
@@ -158,6 +177,7 @@ iso_cleanup() {
 #   leak a /tmp datadir. Port validation that needs no datadir runs
 #   first so a bad base aborts before anything is created.
 iso_init() {
+    iso_drop_inherited_ttys
     command -v ss   >/dev/null 2>&1 || iso_die "ss(8) not found (need iproute2 for the port preflight)"
     command -v mktemp >/dev/null 2>&1 || iso_die "mktemp not found"
     [ -x "$ISO_NODE_BIN" ] || iso_die "$ISO_NODE_BIN not built — run make first"

@@ -32,6 +32,13 @@ for arg in "$@"; do
 done
 
 mkdir -p "$STATE_DIR"
+# Close leftover operator pts before taking the lock so wall(1)/write(1)
+# cannot target a logged-in terminal. Flock fd 9 is a file, not a tty.
+if [ -r "$REPO_ROOT/tools/scripts/isolated_node_env.sh" ]; then
+    # shellcheck source=tools/scripts/isolated_node_env.sh
+    . "$REPO_ROOT/tools/scripts/isolated_node_env.sh"
+    iso_drop_inherited_ttys
+fi
 exec 9>"$LOCK"
 if ! flock -n 9; then
     echo "onion-pair-watch-loop: lock busy, skipping" >&2
