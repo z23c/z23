@@ -738,7 +738,7 @@ AGENT_IMPACT_RULE("app/conditions/src/checkpoint_bundle_install_ready.c|app/cond
 AGENT_IMPACT_RULE("app/conditions/src/checkpoint_header_solution_repair.c|app/conditions/include/conditions/checkpoint_header_solution_repair.h|lib/net/src/checkpoint_header_fetch.c|lib/net/include/net/checkpoint_header_fetch.h|lib/test/src/test_checkpoint_header_solution_repair.c", "checkpoint_header_solution_repair consensus_state_install_runtime condition_engine msg_handlers make_lint_gates")
 /* THE WELD: instant-on download-before-autodetect glue (net/rom_fetch consumer).
  * Maps to its own focused group + the install-runtime group it feeds + rom_fetch. */
-AGENT_IMPACT_RULE("config/src/boot_bundle_fetch.c|config/src/boot_bundle_fetch_discovery_outcome.c|config/include/config/boot_bundle_fetch.h|config/include/config/bundle_fetch_seeds.h|config/src/boot_services.c|lib/test/src/test_boot_bundle_fetch.c", "boot_bundle_fetch boot_header_seed_import consensus_state_install_runtime rom_fetch make_lint_gates")
+AGENT_IMPACT_RULE("config/src/boot_bundle_fetch.c|config/src/boot_bundle_fetch_seeds.c|config/src/boot_bundle_fetch_seeds_internal.h|config/src/boot_bundle_fetch_discovery_outcome.c|config/include/config/boot_bundle_fetch.h|config/include/config/bundle_fetch_seeds.h|config/src/boot_services.c|lib/test/src/test_boot_bundle_fetch.c", "boot_bundle_fetch boot_header_seed_import consensus_state_install_runtime rom_fetch make_lint_gates")
 /* Headers-as-artifact fast path: swarm-downloaded block_index.bin imported into
  * the header index at boot (reuses the verified flat loader). Maps to its own
  * focused group + the fetch weld + the flat loader group it consumes. */
