@@ -1,4 +1,4 @@
 BOX=node3
 ONION_ADDRESS=r4ypj3xrxjwjomdtxf5mk4dle6dv32n3yxr2pkuibbxpwml3v6ch2xid.onion
 P2P_PORT=39150
-SOURCE_SHA=ef7506aabcf8f3e633c0c11459d6880d7ded1694
+SOURCE_SHA=5a0fc242231ba7afe6cb0afc2bab2e2116bc09f5

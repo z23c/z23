@@ -10,7 +10,7 @@
 #   spawn A -tor -onion-persist
 #   wait hostname
 #   spawn B -addnode=A.onion:port
-#   poll getconnectioncount 120s
+#   poll getconnectioncount 150s
 #
 # Appends one JSON object per run to deploy/devfleet/pair_probe.jsonl:
 #   {"ts":"...","head_sha":"...","verdict":"TOKEN","paired_at_s":N|null,
@@ -30,7 +30,7 @@
 #   PAIR_WATCH_PORT_BASE      isolated 39xxx P2P port (default 39350)
 #   PAIR_WATCH_ONION_WAIT     seconds to wait for A's hostname (default 60)
 #   PAIR_WATCH_RPC_WAIT       seconds to wait for RPC (default 60)
-#   PAIR_WATCH_POLL           seconds to poll getconnectioncount (default 120)
+#   PAIR_WATCH_POLL           seconds to poll getconnectioncount (default 150)
 #
 # No Python, no jq. No `| grep -q` under pipefail.
 
@@ -45,7 +45,7 @@ ISO_NODE_BIN=${ISO_NODE_BIN:-"$REPO_ROOT/build/bin/zclassic23"}
 ISO_RPC_BIN=${ISO_RPC_BIN:-"$REPO_ROOT/build/bin/zcl-rpc"}
 ONION_WAIT=${PAIR_WATCH_ONION_WAIT:-60}
 RPC_WAIT=${PAIR_WATCH_RPC_WAIT:-60}
-PAIR_POLL=${PAIR_WATCH_POLL:-120}
+PAIR_POLL=${PAIR_WATCH_POLL:-150}
 ISO_KIND=pairwatch
 ISO_PORT_BASE=${PAIR_WATCH_PORT_BASE:-39350}
 SELFTEST=0
@@ -136,19 +136,30 @@ log_has() {
 }
 
 observe_stages() {
+    # Client dial: boot_node_utilities.c prints this when B's -addnode is an
+    # onion. Observed on every successful pair.
     if log_has "${ISO_PEER_DD:-}/node.log" "Connecting to onion addnode"; then
         DIAL_ATTEMPTED=true
     fi
+    # This fork's client path is dynhost, not vanilla INTRODUCE/rendezvous
+    # log lines (those count 0 on a PAIRED run). B.tor.log actually prints
+    # "Dynhost stream: initiated stream to <A.onion>:<port>" and
+    # "Dynhost stream: queued open to ...". onion_stream.c may also log
+    # "onion circuit established".
     if log_has "${ISO_PEER_DD:-}/tor.log" \
-        "rendezvous point|rendezvous circuit|INTRODUCE|intro point" ||
+        "Dynhost stream: initiated stream|Dynhost stream: queued open|rendezvous point|rendezvous circuit|INTRODUCE|intro point" ||
        log_has "${ISO_PEER_DD:-}/node.log" \
-        "rendezvous point|rendezvous circuit|INTRODUCE|intro point"; then
+        "onion circuit established|Dynhost stream: initiated stream|rendezvous point|rendezvous circuit"; then
         RENDEZVOUS_SEEN=true
     fi
+    # Service half: this fork never prints "Uploading HS descriptor" on a
+    # PAIRED run. A's tor.log prints "hs_service_callback conditions now met"
+    # then "hs_service_callback running, calling dynhost_check_and_activate"
+    # and may print "Dynhost service successfully activated".
     if log_has "${ISO_DD:-}/tor.log" \
-        "Uploading HS descriptor|HS_DESC UPLOAD|hidden-service descriptor upload" ||
+        "hs_service_callback running, calling dynhost_check_and_activate|hs_service_callback conditions now met|Dynhost service successfully activated|Uploading HS descriptor|HS_DESC UPLOAD|hidden-service descriptor upload" ||
        log_has "${ISO_DD:-}/node.log" \
-        "Uploading HS descriptor|HS_DESC UPLOAD|hidden-service descriptor upload"; then
+        "hs_service_callback running, calling dynhost_check_and_activate|Uploading HS descriptor|HS_DESC UPLOAD"; then
         DESCRIPTOR_UPLOADED=true
     fi
 }

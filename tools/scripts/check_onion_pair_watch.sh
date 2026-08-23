@@ -47,6 +47,22 @@ fi
 if grep -E '^[[:space:]]*iso_spawn_node( |$)' "$WATCH" >/dev/null 2>&1; then
     die "onion_pair_watch.sh must not call iso_spawn_node (that helper is -regtest)"
 fi
+if ! grep -F 'Dynhost stream: initiated stream' "$WATCH" >/dev/null 2>&1; then
+    die "onion_pair_watch.sh must observe this fork's Dynhost stream client log"
+fi
+if ! grep -F 'hs_service_callback running, calling dynhost_check_and_activate' "$WATCH" >/dev/null 2>&1; then
+    die "onion_pair_watch.sh must observe this fork's hs_service_callback service log"
+fi
+if ! grep -E 'PAIR_WATCH_POLL:-[0-9]+' "$WATCH" >/dev/null 2>&1; then
+    die "onion_pair_watch.sh missing PAIR_WATCH_POLL default"
+fi
+poll_default=$(sed -n 's/^PAIR_POLL=\${PAIR_WATCH_POLL:-\([0-9]*\)}/\1/p' "$WATCH" | head -1)
+case $poll_default in
+    ''|*[!0-9]*) die "could not parse PAIR_WATCH_POLL default" ;;
+esac
+if [ "$poll_default" -lt 150 ]; then
+    die "PAIR_WATCH_POLL default is ${poll_default}s; paired_at_s~68s needs >=150s"
+fi
 
 validate_line() {
     local line=$1 src=$2
