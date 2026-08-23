@@ -364,7 +364,7 @@ read_node_record() {
            ! git merge-base --is-ancestor "$NODE_SOURCE" HEAD; then
             NODE_RECORD_ERROR="source_sha_not_in_main_history"
         elif ! git merge-base --is-ancestor "$ONION_BASE_COMMIT" "$NODE_SOURCE"; then
-            NODE_RECORD_ERROR="source_predates_onion_p2p"
+            NODE_RECORD_ERROR="STALE_SOURCE"
         fi
     elif [[ ! "$NODE_SOURCE" =~ ^[0-9a-f]{64}$ ]]; then
         NODE_RECORD_ERROR="invalid_source_sha"
@@ -376,6 +376,7 @@ declare -A NODE_RESULTS
 declare -A NODE_SOURCE_SHAS
 declare -A NODE_SOURCE_KINDS
 declare -A NODE_SOURCE_STALE
+declare -A NODE_STALE_SOURCE
 declare -A NODE_SOURCE_BEHIND
 declare -A NODE_SOURCE_DETAILS
 declare -a GAPS
@@ -390,6 +391,7 @@ record_source_evidence() {
     NODE_SOURCE_SHAS[$node]="${NODE_SOURCE:-absent}"
     NODE_SOURCE_KINDS[$node]=unknown
     NODE_SOURCE_STALE[$node]=unknown
+    NODE_STALE_SOURCE[$node]=unknown
     NODE_SOURCE_BEHIND[$node]=unknown
     NODE_SOURCE_DETAILS[$node]="${NODE_RECORD_ERROR:-unavailable}"
 
@@ -421,7 +423,10 @@ record_source_evidence() {
         NODE_SOURCE_DETAILS[$node]="behind_observed_main:$behind"
     fi
     if ! git merge-base --is-ancestor "$ONION_BASE_COMMIT" "$NODE_SOURCE"; then
-        NODE_SOURCE_DETAILS[$node]="predates_onion_p2p:behind=$behind"
+        NODE_STALE_SOURCE[$node]=yes
+        NODE_SOURCE_DETAILS[$node]="STALE_SOURCE:floor=355808b13:behind=$behind"
+    else
+        NODE_STALE_SOURCE[$node]=no
     fi
 }
 
@@ -446,7 +451,7 @@ check_local_node() {
         record_source_evidence "$node"
         [ -f "deploy/devfleet/$node.txt" ] && PUBLISHED_COUNT=$((PUBLISHED_COUNT + 1))
         case "$NODE_RECORD_ERROR" in
-            invalid_source_sha|source_sha_not_in_main_history|source_predates_onion_p2p)
+            invalid_source_sha|source_sha_not_in_main_history|STALE_SOURCE)
                 source_error="$NODE_RECORD_ERROR"
                 ;;
             *)
@@ -517,7 +522,7 @@ check_remote_node() {
             return
         fi
         case "$NODE_RECORD_ERROR" in
-            invalid_source_sha|source_sha_not_in_main_history|source_predates_onion_p2p)
+            invalid_source_sha|source_sha_not_in_main_history|STALE_SOURCE)
                 source_error="$NODE_RECORD_ERROR"
                 ;;
             *)
@@ -642,6 +647,8 @@ write_status() {
                 "${NODE_SOURCE_KINDS[$node]:-unknown}"
             printf '%s_SOURCE_SHA_STALE=%s\n' "${node^^}" \
                 "${NODE_SOURCE_STALE[$node]:-unknown}"
+            printf '%s_STALE_SOURCE=%s\n' "${node^^}" \
+                "${NODE_STALE_SOURCE[$node]:-unknown}"
             printf '%s_SOURCE_SHA_BEHIND=%s\n' "${node^^}" \
                 "${NODE_SOURCE_BEHIND[$node]:-unknown}"
             printf '%s_SOURCE_SHA_DETAIL=%s\n' "${node^^}" \

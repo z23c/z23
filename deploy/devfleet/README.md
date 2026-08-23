@@ -94,7 +94,10 @@ start or end of that bounded observation.
 
 `mesh.status` records every node's published `SOURCE_SHA`, its identity kind,
 and whether it is stale against the observed `main`. Git identities carry the
-exact commit distance. An authoritative runtime `source_id_sha256` cannot be
+exact commit distance. `NODE*_STALE_SOURCE=yes` is the hard acceptance flag
+for a Git source that predates
+`355808b13b704624927d9c997a1d5677f17486f6`. An authoritative runtime
+`source_id_sha256` cannot be
 ordered against Git without a separate binding, so its staleness is explicitly
 `unknown` rather than guessed. Staleness is evidence, not by itself a mesh
 failure: a Git source that is still in main history and includes the required
