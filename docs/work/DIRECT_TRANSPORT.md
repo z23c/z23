@@ -116,3 +116,28 @@ fall back until mapping/UPnP lands (rung 2); amplification blocked by
 proof-of-possession + rate limits; scope discipline forbids QUIC ambitions;
 the UDP layer can never touch consensus or block-relay paths because it
 does not share code with them.
+
+## Resilience layer: sticky connectivity (added 2026-08-23)
+
+Goal: start the node anywhere and it finds peers — fast path first,
+onion always as guaranteed fallback — without router configuration.
+
+Mechanisms, in dependency order:
+
+1. MESH-STUN — a connected peer echoes back the external `ip:port` it
+   observes for us. Our own nodes are the reflectors; no third-party
+   STUN dependency. Optional standards STUN (RFC 5389) client as a
+   backup probe. Both trivially small C23.
+2. Candidate exchange — over whichever channel connects first, peers
+   trade direct candidates, then race: simultaneous TCP open where the
+   NATs allow, else the onion channel keeps carrying traffic. Failure
+   of the fast path is invisible to the operator.
+3. Stickiness — per-peer last-good path (`direct|onion`) persisted in
+   the peer store; restarts try the remembered path first.
+4. Router assist — optional NAT-PMP/UPnP port-opening client, logged,
+   disableable.
+
+Security envelope unchanged: candidates confirmed by echo before use,
+identity checks unchanged, unsolicited packets confer no authority.
+Fleet acceptance extends the pair ledger: `path=direct|onion`,
+punch attempts/successes per cycle.
