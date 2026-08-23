@@ -242,12 +242,26 @@ int test_getheaders_serve_fallback(void)
     {
         struct block_header out;
         block_header_init(&out);
+        uint64_t nb_before = getheaders_serve_refusals_no_header_bytes();
         bool ok = getheaders_index_header_servable(&mp, bi_a, &out);
         GSF_CHECK("entry with no reachable store is refused", !ok);
         GSF_CHECK("refusal does NOT mark BLOCK_FAILED_VALID",
                   !ok && bi_a->nStatus == BLOCK_VALID_TREE);
         GSF_CHECK("refusal fabricates no in-memory solution",
                   !ok && bi_a->nSolutionSize == 0);
+        /* 2b. ATTRIBUTION. This refusal is DATA AVAILABILITY — no store on
+         *     this node holds the bytes — and it must be named and counted as
+         *     that. Pre-fix headers_fill_header_from_index returned "filled"
+         *     with an empty nSolution, so the bind screen relabelled it
+         *     "header-hash-mismatch": a hash-comparison verdict over a header
+         *     the node had never actually assembled. On a bundle/snapshot
+         *     -seeded datadir that is the state of EVERY height below the seed
+         *     floor, and the mislabel read as index corruption to two
+         *     independent investigations of the live fleet. */
+        GSF_CHECK("refusal is attributed to no-header-bytes, not a hash "
+                  "mismatch",
+                  !ok && getheaders_serve_refusals_no_header_bytes() ==
+                             nb_before + 1);
     }
 
     /* 3. The successor walk ADVANCES: from g, past unservable A, to
@@ -444,12 +458,23 @@ int test_getheaders_serve_fallback(void)
 
                     struct block_header out;
                     block_header_init(&out);
+                    uint64_t nb_before =
+                        getheaders_serve_refusals_no_header_bytes();
                     bool ok = getheaders_index_header_servable(&mp, bi_y,
                                                                &out);
                     GSF_CHECK("a BLOCK_VALID_TREE entry whose Equihash "
                               "solution is forged is REFUSED", !ok);
                     GSF_CHECK("that refusal is still not a validity verdict",
                               !ok && bi_y->nStatus == BLOCK_VALID_TREE);
+                    /* The no-header-bytes counter ATTRIBUTES; it does not
+                     * just tally refusals. This entry's bytes were right
+                     * here in the index — it failed on PoW, not on
+                     * availability — so it must NOT move that counter. */
+                    GSF_CHECK("a PoW refusal is NOT counted as missing "
+                              "header bytes",
+                              !ok &&
+                              getheaders_serve_refusals_no_header_bytes() ==
+                                  nb_before);
                 }
             }
         }

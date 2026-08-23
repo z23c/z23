@@ -41,6 +41,7 @@
 #include "models/op_return_index.h"
 #include "services/op_return_backfill_service.h"
 #include "jobs/reducer_frontier.h"
+#include "json/json.h"
 #include "script/op_return_push.h"
 #include "primitives/block.h"
 #include "primitives/transaction.h"
@@ -819,6 +820,133 @@ static int test_backfill_genesis_fake_pos(void)
     return failures;
 }
 
+/* Read one integer out of `z23 dumpstate op_return_index`. Reading the shipped
+ * dumper (rather than a test-only accessor) keeps the assertion honest: the
+ * number the operator sees is the number under test. */
+static int64_t oprix_dump_int(const char *key)
+{
+    struct json_value out;
+    json_init(&out);
+    int64_t v = -1;
+    if (op_return_index_dump_state_json(&out, NULL)) {
+        const struct json_value *f = json_get(&out, key);
+        if (f) v = json_get_int(f);
+    }
+    json_free(&out);
+    return v;
+}
+
+/* HOT-LOOP REGRESSION. A body the index flags BLOCK_HAVE_DATA but that does
+ * NOT read back is not a transient — nothing in this process repairs a height
+ * this far below the fold frontier (have_data_unreadable only inspects tip+1
+ * and the reducer stages). Live 2026-08-23 on node1 this service re-read h=1
+ * every ~3 s for 14.5 h: 12,435 identical failures, 12,435 identical WARN
+ * lines, and not one of them could ever have succeeded.
+ *
+ * The batch must back off and latch into a named condition instead. `holes` is
+ * the pre-existing counter the fold bumps once per failed read, so it counts
+ * the READS: pre-fix it climbed once per run (a true hot loop), post-fix it
+ * moves once and then the backoff eats the tick without a read, a 2 MB buffer
+ * or a log line. The blocker is the report, not a silencer — the deferrals are
+ * counted and the outcome stays BLOCKED, so the supervisor's NO_PROGRESS quiet
+ * clock still runs. */
+static int test_backfill_unreadable_body_backoff(void)
+{
+    int failures = 0;
+    struct e2e_fixture f;
+    const int RUNS = 12;
+
+    printf("backfill unreadable-body: fixture... ");
+    if (e2e_fixture_init(&f)) printf("OK\n");
+    else { printf("FAIL\n"); return 1; }
+
+    /* Tear h=1's position: keep BLOCK_HAVE_DATA (the index still CLAIMS the
+     * body) but point it into the middle of h=0's record, where no frame
+     * header sits. This is the live shape — a foreign writer's appends over a
+     * hardlinked blk file leave exactly this: a flagged entry whose recorded
+     * (nFile,nDataPos) names bytes that are not that block. h=0 is left alone
+     * so the fold takes its first step and then wedges at h=1. */
+    int32_t good_file = f.blocks[1].nFile;
+    uint32_t good_pos = f.blocks[1].nDataPos;
+    f.blocks[1].nFile = f.blocks[0].nFile;
+    f.blocks[1].nDataPos = f.blocks[0].nDataPos + 24;
+
+    g_op_return_backfill_test_ndb = &f.ndb;
+    g_op_return_backfill_test_ms = &f.ms;
+    g_op_return_backfill_test_datadir = f.datadir;
+    op_return_backfill_reset_for_test();
+    reducer_frontier_provable_tip_set(OPRIDX_E2E_HEIGHTS - 1); /* H*=2 */
+
+    printf("backfill unreadable-body: the fold stops at the torn height "
+          "(h=0 folds, h=1 does not)... ");
+    {
+        int folded = op_return_backfill_run_once();
+        if (folded == 1) printf("OK\n");
+        else { printf("FAIL (folded=%d)\n", folded); failures++; }
+    }
+
+    int64_t holes_after_first = oprix_dump_int("holes");
+    printf("backfill unreadable-body: first failed read is counted... ");
+    if (holes_after_first == 1) printf("OK\n");
+    else { printf("FAIL (holes=%lld)\n", (long long)holes_after_first);
+           failures++; }
+
+    printf("backfill unreadable-body: %d further runs re-read the dead "
+          "position ZERO times (backoff, not a hot loop)... ", RUNS);
+    {
+        for (int i = 0; i < RUNS; i++)
+            (void)op_return_backfill_run_once();
+        int64_t holes = oprix_dump_int("holes");
+        /* Pre-fix this was 1 + RUNS: one wasted block read, one 2 MB buffer
+         * and one WARN line per run, forever. */
+        if (holes == holes_after_first) printf("OK\n");
+        else {
+            printf("FAIL (holes=%lld, expected %lld — still hot-looping)\n",
+                   (long long)holes, (long long)holes_after_first);
+            failures++;
+        }
+    }
+
+    printf("backfill unreadable-body: the deferrals are COUNTED, not "
+          "swallowed... ");
+    {
+        int64_t deferrals = oprix_dump_int("unreadable_deferrals");
+        int64_t latched = oprix_dump_int("unreadable_height");
+        if (deferrals == (int64_t)RUNS && latched == 1) printf("OK\n");
+        else {
+            printf("FAIL (deferrals=%lld latched_height=%lld)\n",
+                   (long long)deferrals, (long long)latched);
+            failures++;
+        }
+    }
+
+    printf("backfill unreadable-body: repairing the position clears the "
+          "latch and the fold resumes... ");
+    {
+        /* Restore the real position, exactly as a repaired index entry would
+         * look, and drop the latch the way the next due retry does. */
+        f.blocks[1].nFile = good_file;
+        f.blocks[1].nDataPos = good_pos;
+        op_return_backfill_reset_for_test();
+        (void)op_return_index_truncate(&f.ndb);
+        int folded = op_return_backfill_run_once();
+        int64_t latched = oprix_dump_int("unreadable_height");
+        if (folded == OPRIDX_E2E_HEIGHTS && latched == -1) printf("OK\n");
+        else {
+            printf("FAIL (folded=%d latched=%lld)\n", folded,
+                   (long long)latched);
+            failures++;
+        }
+    }
+
+    g_op_return_backfill_test_ndb = NULL;
+    g_op_return_backfill_test_ms = NULL;
+    g_op_return_backfill_test_datadir = NULL;
+    reducer_frontier_provable_tip_reset();
+    e2e_fixture_free(&f);
+    return failures;
+}
+
 /* The live defect this whole change exists for: on a snapshot-seeded datadir
  * the bodies below reducer_trusted_base_height were NEVER downloaded, so the
  * from-genesis fold could never take its first step. The canonical node sat at
@@ -947,6 +1075,7 @@ int test_op_return_index(void)
     failures += test_cursor_state();
     failures += test_backfill_e2e();
     failures += test_backfill_genesis_fake_pos();
+    failures += test_backfill_unreadable_body_backoff();
     failures += test_backfill_declared_partial_coverage();
     return failures;
 }

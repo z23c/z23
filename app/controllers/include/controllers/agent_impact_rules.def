@@ -247,6 +247,12 @@ AGENT_IMPACT_RULE("app/conditions/src/sync_violation_lag.c|app/conditions/includ
 AGENT_IMPACT_RULE("app/conditions/src/download_queue_starved.c|app/conditions/include/conditions/download_queue_starved.h|app/conditions/src/local_header_refill_needed.c|app/conditions/src/tip_wedged_resnapshot.c|app/conditions/src/tip_stall_oracle_rebuild.c|lib/test/src/test_sync_watchdog_conditions.c|lib/test/src/test_tip_stall_oracle_rebuild_condition.c", "sync_watchdog_conditions utxo_activation_paused tip_stall_oracle_rebuild_condition condition_engine syncdiag_rpc make_lint_gates")
 AGENT_IMPACT_RULE("app/conditions/src/stale_validate_headers_repair.c|lib/test/src/test_stale_validate_headers_repair_condition.c", "stale_validate_headers_repair_condition validate_headers_stage make_lint_gates")
 AGENT_IMPACT_RULE("app/services/src/header_probe.c|app/conditions/src/stale_validate_headers_repair.c|lib/net/src/msg_headers.c|lib/test/src/test_header_probe_p2p_fallback.c", "header_probe_p2p_fallback header_probe stale_validate_headers_repair_condition process_headers_adversarial make_lint_gates")
+/* getheaders SERVE path. msg_headers.c owns both halves — what this node will
+ * put on the wire for a peer, and the PoW/receipt budget a peer can drive — so
+ * a change there must re-run all three serve suites, not just the header-probe
+ * one above (the resolver UNIONS matching rules). msg_internal.h carries the
+ * serve-path counters those suites assert on. */
+AGENT_IMPACT_RULE("lib/net/src/msg_headers.c|lib/net/include/net/msg_internal.h|lib/test/src/test_getheaders_serve_fallback.c|lib/test/src/test_getheaders_serve_pow_dedup.c|lib/test/src/test_getheaders_serve_receipt.c", "getheaders_serve_fallback getheaders_serve_pow_dedup getheaders_serve_receipt make_lint_gates")
 AGENT_IMPACT_RULE("app/conditions/src/body_fetch_missing_have_data.c|app/conditions/include/conditions/body_fetch_missing_have_data.h|lib/test/src/test_body_fetch_missing_have_data_condition.c", "body_fetch_missing_have_data_condition have_data_unreadable sync_watchdog_conditions make_lint_gates")
 AGENT_IMPACT_RULE("app/conditions/src/have_data_unreadable.c|app/conditions/include/conditions/have_data_unreadable.h|lib/test/src/test_have_data_unreadable.c", "have_data_unreadable body_fetch_missing_have_data_condition condition_engine syncdiag_rpc make_lint_gates")
 AGENT_IMPACT_RULE("app/conditions/src/mirror_divergence_located.c|app/conditions/src/tip_label_divergence.c|app/conditions/src/state_window_inconsistent.c|lib/test/src/test_validation_pack_conditions.c", "validation_pack_conditions condition_engine make_lint_gates")
@@ -822,6 +828,12 @@ AGENT_IMPACT_RULE("apps/blog/*|app/models/src/app_event.c|app/models/include/mod
  * populated at tip-finalize (explorer_index.c hook) and by a supervised
  * bounded backfill service up to the reducer's provable tip. */
 AGENT_IMPACT_RULE("app/models/src/op_return_index.c|app/models/include/models/op_return_index.h|app/services/src/op_return_backfill_service.c|app/services/include/services/op_return_backfill_service.h|app/controllers/src/op_return_index_controller.c|app/controllers/include/controllers/op_return_index_controller.h|app/models/src/database_migrate_features.c|app/models/include/models/database.h|app/models/src/explorer_index.c|app/models/include/models/explorer_index.h|lib/test/src/test_op_return_index.c", "op_return_index explorer models db_migration_idempotent schema_migration supervisor syncdiag_rpc make_lint_gates")
+
+/* Shared index-fold rails (disk floor, below-seed body, torn body position) and
+ * the two operator-facing tables their blocker ids must be bound in. All three
+ * body-derived projections raise through this one module, so a rail change has
+ * to re-run every one of them plus the blocker-binding lint. */
+AGENT_IMPACT_RULE("app/services/src/index_fold_guard.c|app/services/include/services/index_fold_guard.h|app/conditions/include/conditions/blocker_operator_decisions.def", "op_return_index address_index txindex_projection blocker make_lint_gates")
 
 /* E2 boot-loop-failsafe: the boot-loop detector (reusing boot_flight_
  * recorder's durable history), the exit-reason breadcrumb it reads

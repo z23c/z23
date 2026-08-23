@@ -116,7 +116,26 @@ ssize_t disk_block_pread(const char *datadir, const struct disk_block_pos *pos,
                          const char *prefix, uint8_t *buf, size_t len);
 
 /* Read and deserialize a block using pread(). Thread-safe.
- * Equivalent to read_block_from_disk() but without the FILE* cache. */
+ * Equivalent to read_block_from_disk() but without the FILE* cache.
+ *
+ * FRAMED POSITIONS ONLY. `pos` must name a record carrying the 8-byte
+ * magic+size frame header, at either convention: the payload offset (frame at
+ * pos-8, what a canonical block index stores) or the frame offset itself (what
+ * some recovery/import paths hand over). A position with no frame at either is
+ * REFUSED — it is provably not a block record, because every writer frames its
+ * records (write_block_to_disk, the whole-file blk transfers in
+ * net/file_service.c) and the sibling mmap reader (blocks_mmap_reader.c
+ * bmr_get_payload) already refuses the same shape.
+ *
+ * This used to fall back to "read a fixed 2 MB window from the raw offset and
+ * hand it to block_deserialize" — a guess dressed as a read, with only the
+ * caller's downstream hash check between it and a wrong block. Measured live
+ * (node1 2026-08-23: blk00050.dat hardlinked into a foreign live writer's
+ * datadir, whose appends overwrote the indexed region) that guess produced
+ * ~52% of the node's entire log volume in garbage-parse errors, plus 22.1k
+ * "hash mismatch" lines where the garbage happened to parse. A dangling
+ * position is now a named read failure; block_index_repair_pos_from_disk()
+ * below is the repair for one that still has a copy elsewhere on disk. */
 bool read_block_from_disk_pread(struct block *b,
                                 const struct disk_block_pos *pos,
                                 const char *datadir);

@@ -32,6 +32,7 @@
 #include "models/database.h"
 #include "models/op_return_index.h"
 #include "models/zanc.h"
+#include "platform/time_compat.h"
 #include "primitives/block.h"
 #include "services/index_fold_guard.h"
 #include "storage/disk_block_io.h"
@@ -60,6 +61,30 @@ static _Atomic uint64_t g_backfill_base_seeds     = 0;
 /* Declared ONCE per process (the fact is standing, not recurring) — see
  * index_fold_declare_partial_coverage. */
 static _Atomic bool     g_backfill_partial_declared = false;
+
+/* ── Unreadable-body latch + backoff ────────────────────────────────
+ *
+ * A body the index flags BLOCK_HAVE_DATA but that does not read back is not a
+ * transient. Nothing in this process repairs a height this far below the fold
+ * frontier: the have_data_unreadable Condition only inspects tip+1 and the
+ * reducer stages. Live 2026-08-23 (node1) this service re-read h=1 every ~3 s
+ * for 14.5 h — 12,435 identical failures, 12,435 identical WARN lines, and not
+ * one of them could ever have succeeded. A batch that fails identically
+ * forever must back off and latch into a named condition, not hot-loop.
+ *
+ * So: count consecutive failures at ONE height; retry on a geometric schedule
+ * (the 2 s tick, then 4, 8, ... capped at 15 min) instead of every tick; and
+ * once the retry budget is spent name the standing fact through the shared
+ * index-fold guard. The blocker is the REPORT, never a silencer — the retry
+ * keeps running on the slow schedule, the supervisor still sees BLOCKED (so
+ * its NO_PROGRESS quiet clock still runs), and any successful fold at that
+ * height clears the latch and the blocker together. */
+#define BACKFILL_UNREADABLE_NAME_AFTER   5      /* attempts before naming it */
+#define BACKFILL_UNREADABLE_MAX_DELAY_US ((int64_t)15 * 60 * 1000 * 1000)
+static _Atomic int64_t  g_unreadable_height   = -1;
+static _Atomic uint64_t g_unreadable_attempts = 0;
+static _Atomic int64_t  g_unreadable_next_us  = 0;   /* monotonic due time */
+static _Atomic uint64_t g_unreadable_deferrals = 0;  /* ticks the backoff ate */
 
 static const char *g_backfill_datadir = NULL; /* process-lifetime string */
 
@@ -162,6 +187,68 @@ static bool backfill_adopt_base(struct node_db *ndb,
     return true;
 }
 
+/* Drop the latch (and the blocker it raised) — the height folded, or the fold
+ * moved somewhere else entirely. Safe to call when nothing is latched. */
+static void backfill_unreadable_clear(void)
+{
+    if (atomic_exchange(&g_unreadable_height, -1) < 0)
+        return;
+    atomic_store(&g_unreadable_attempts, 0);
+    atomic_store(&g_unreadable_next_us, 0);
+    index_fold_clear_unreadable_body("op_return_index");
+}
+
+/* True when `h` is the latched height AND its backoff has not expired: skip
+ * the read entirely this tick. A different height clears the latch — the fold
+ * moved, so the old fact no longer stands. */
+static bool backfill_unreadable_defer_at(int32_t h)
+{
+    int64_t latched = atomic_load(&g_unreadable_height);
+    if (latched < 0)
+        return false;
+    if (latched != (int64_t)h) {
+        backfill_unreadable_clear();
+        return false;
+    }
+    if (platform_time_monotonic_us() >= atomic_load(&g_unreadable_next_us))
+        return false;              /* due: let this tick re-read it */
+    atomic_fetch_add(&g_unreadable_deferrals, 1);
+    return true;
+}
+
+/* Record one failed read at `h`: extend the backoff and, once the retry budget
+ * is spent, name the standing condition. The FIRST failure at a height still
+ * logs in full — the operator gets the height, the position and the fact, once
+ * — and after that the named blocker carries it. */
+static void backfill_unreadable_note(struct block_index *bi, int32_t h)
+{
+    uint64_t attempts;
+    if (atomic_exchange(&g_unreadable_height, (int64_t)h) != (int64_t)h) {
+        atomic_store(&g_unreadable_attempts, 1);
+        attempts = 1;
+        LOG_WARN("op_return_index",
+                 "backfill: h=%d body unreadable (index says HAVE_DATA at "
+                 "file=%d pos=%u) — backing off; the standing fact will be "
+                 "named as op_return_index.body_unreadable if it persists",
+                 h, block_index_file_load(bi), block_index_data_pos_load(bi));
+    } else {
+        attempts = atomic_fetch_add(&g_unreadable_attempts, 1) + 1;
+    }
+
+    /* Geometric: 2s, 4s, 8s ... capped. Shift is bounded by the cap check, so
+     * it can never reach an undefined shift width. */
+    int64_t delay = (int64_t)OP_RETURN_BACKFILL_PERIOD_SECS * 1000 * 1000;
+    for (uint64_t i = 1; i < attempts && delay < BACKFILL_UNREADABLE_MAX_DELAY_US; i++)
+        delay *= 2;
+    if (delay > BACKFILL_UNREADABLE_MAX_DELAY_US)
+        delay = BACKFILL_UNREADABLE_MAX_DELAY_US;
+    atomic_store(&g_unreadable_next_us, platform_time_monotonic_us() + delay);
+
+    if (attempts >= BACKFILL_UNREADABLE_NAME_AFTER)
+        index_fold_note_unreadable_body("op_return_index", "op_return_index",
+                                        (int64_t)h, attempts);
+}
+
 /* ── One bounded batch ──────────────────────────────────────────────
  *
  * This function used to return a bare `int folded`, and returned 0 from FIVE
@@ -239,6 +326,12 @@ static enum op_return_backfill_outcome backfill_run_once_typed(int *folded_out)
     int folded = 0;
     bool base_adopted = false;
     for (int32_t h = cursor + 1; h <= target; h++) {
+        /* Still backing off a body that will not read: skip WITHOUT the read,
+         * the 2 MB buffer and the log line. Nothing above h can fold either —
+         * the fold is forward-only — so break, exactly as the miss would. */
+        if (backfill_unreadable_defer_at(h))
+            break;
+
         struct block_index *bi = active_chain_at(&ms->chain_active, h);
         if (!bi || !bi->phashBlock ||
             !(block_index_status_load(bi) & BLOCK_HAVE_DATA)) {
@@ -320,11 +413,11 @@ static enum op_return_backfill_outcome backfill_run_once_typed(int *folded_out)
                 continue;
             }
             atomic_fetch_add(&g_backfill_holes, 1);
-            LOG_WARN("op_return_index",
-                     "backfill: h=%d body unreadable — stopping this batch",
-                     h);
+            backfill_unreadable_note(bi, h);
             break;
         }
+        /* Read back: whatever was latched here is over. */
+        backfill_unreadable_clear();
 
         size_t n = 0;
         (void)op_return_index_apply_block_rows(
@@ -477,6 +570,8 @@ void op_return_backfill_reset_for_test(void)
     atomic_store(&g_backfill_last_height, -1);
     atomic_store(&g_backfill_base_seeds, 0);
     atomic_store(&g_backfill_partial_declared, false);
+    atomic_store(&g_unreadable_deferrals, 0);
+    backfill_unreadable_clear();
     index_fold_clear_partial_coverage("op_return_index");
 }
 
@@ -500,6 +595,16 @@ bool op_return_index_dump_state_json(struct json_value *out, const char *key)
                      atomic_load(&g_backfill_last_height));
     json_push_kv_int(out, "base_seeds",
                      (int64_t)atomic_load(&g_backfill_base_seeds));
+    /* The unreadable-body latch. -1 = nothing latched. A non-negative height
+     * with a climbing attempt count is the fold standing still on a torn body,
+     * and `unreadable_deferrals` is how many ticks the backoff has SAVED (the
+     * read + 2 MB buffer + WARN line each would have cost). */
+    json_push_kv_int(out, "unreadable_height",
+                     atomic_load(&g_unreadable_height));
+    json_push_kv_int(out, "unreadable_attempts",
+                     (int64_t)atomic_load(&g_unreadable_attempts));
+    json_push_kv_int(out, "unreadable_deferrals",
+                     (int64_t)atomic_load(&g_unreadable_deferrals));
 
     struct node_db *ndb = backfill_ndb();
     bool db_open = ndb && ndb->open;

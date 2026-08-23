@@ -327,6 +327,51 @@ void index_fold_clear_partial_coverage(const char *index_id)
     blocker_clear(id);
 }
 
+void index_fold_note_unreadable_body(const char *index_id, const char *subsys,
+                                     int64_t height, uint64_t attempts)
+{
+    if (!index_id || !subsys)
+        return;
+
+    char id[BLOCKER_ID_MAX];
+    /* blocker-id: *.body_unreadable */
+    mk_blocker_id(id, sizeof(id), index_id, "body_unreadable");
+
+    struct blocker_record r;
+    char reason[BLOCKER_REASON_MAX];
+    snprintf(reason, sizeof(reason),
+             "%s backfill cannot fold at height %lld: the block index flags "
+             "BLOCK_HAVE_DATA and names an (nFile,nDataPos), but the bytes "
+             "there do not read back as that block — a torn import, or a "
+             "blk*.dat shared with a foreign writer that overwrote the "
+             "indexed record. %llu consecutive re-reads have failed "
+             "identically; nothing in this process repairs a height this far "
+             "below the fold frontier, so the retry is now backed off rather "
+             "than run every tick. A PERSON decides: re-point the index at a "
+             "surviving copy (block_index_repair_pos_from_disk), clear "
+             "HAVE_DATA so the body is re-fetched, or accept partial "
+             "coverage. See operator_decision in `dumpstate blocker`.",
+             index_id, (long long)height, (unsigned long long)attempts);
+    /* No escape action and no retry budget, deliberately: the node cannot
+     * re-derive bytes that are not on disk, and the ONE thing it could try
+     * (a hash-targeted rescan) belongs to the have_data_unreadable Condition,
+     * not to a projection backfill. The hand-off IS the remedy (OWNER-bound). */
+    if (blocker_init(&r, id, subsys, BLOCKER_DEPENDENCY, reason)) {
+        r.escape_deadline_secs = 0;
+        r.retry_budget = 0;
+        (void)blocker_set(&r);
+    }
+}
+
+void index_fold_clear_unreadable_body(const char *index_id)
+{
+    if (!index_id)
+        return;
+    char id[BLOCKER_ID_MAX];
+    mk_blocker_id(id, sizeof(id), index_id, "body_unreadable");
+    blocker_clear(id);
+}
+
 void index_fold_clear_seed_blocker(const char *index_id)
 {
     if (!index_id)
