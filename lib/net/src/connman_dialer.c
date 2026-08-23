@@ -21,6 +21,7 @@
 #include "net/peer_lifecycle.h"
 #include "net/port_policy.h"
 #include "core/random.h"
+#include "util/log_macros.h"
 #include <errno.h>
 #include <poll.h>
 #include <stdio.h>
@@ -503,9 +504,23 @@ struct dial_inflight {
     size_t       ci;      /* index into the candidate batch */
 };
 
+static enum peer_lifecycle_source dial_lifecycle_source(
+    const struct connman_dial_candidate *c)
+{
+    return c->source == CONNMAN_TARGET_ADDNODE ? PEER_LIFECYCLE_SOURCE_ADDNODE :
+           c->source == CONNMAN_TARGET_ANCHOR  ? PEER_LIFECYCLE_SOURCE_ANCHOR  :
+           c->source == CONNMAN_TARGET_ZCL23_DB ? PEER_LIFECYCLE_SOURCE_ZCL23_DB :
+                                                 PEER_LIFECYCLE_SOURCE_ADDRMAN;
+}
+
 /* Fire every candidate's non-blocking connect, then poll the in-progress set
  * against ONE shared DEFAULT_CONNECT_TIMEOUT window, completing winners and
- * closing losers. Immediate (localhost) connects complete inline. */
+ * closing losers. Immediate (localhost) connects complete inline. The
+ * clearnet race runs to completion BEFORE any onion dial: an onion dial
+ * blocks this thread for up to ONION_STREAM_CONNECT_TIMEOUT_MS, so in
+ * candidate order one leading onion address delayed every clearnet
+ * connect(2) in the batch by that budget, and a single unreachable hidden
+ * service held the outbound floor down for minutes. */
 static void connman_dial_batch(struct connman *cm,
                                struct connman_dial_candidate *batch,
                                size_t count)
@@ -515,29 +530,9 @@ static void connman_dial_batch(struct connman *cm,
 
     for (size_t i = 0; i < count && !g_stop; i++) {
         struct connman_dial_candidate *c = &batch[i];
-        peer_lifecycle_note_attempt(&c->addr,
-            c->source == CONNMAN_TARGET_ADDNODE ? PEER_LIFECYCLE_SOURCE_ADDNODE :
-            c->source == CONNMAN_TARGET_ANCHOR  ? PEER_LIFECYCLE_SOURCE_ANCHOR  :
-            c->source == CONNMAN_TARGET_ZCL23_DB ? PEER_LIFECYCLE_SOURCE_ZCL23_DB :
-                                                  PEER_LIFECYCLE_SOURCE_ADDRMAN);
-        if (net_addr_is_tor(&c->addr.svc.addr)) {
-            /* Onion candidates do NOT join the non-blocking socket race:
-             * there is no fd to poll until a circuit exists, and the shared
-             * 5 s clearnet window is far short of a 10-60 s circuit build.
-             * They get one total blocking budget instead (internally split
-             * across two fresh circuits at the normal ceiling), capped at
-             * MAX_OUTBOUND_ONION per batch by batch_diversity_ok.  The work
-             * remains inline on the scheduler thread — g_open_liveness is
-             * liveness-only (no progress deadline), so the block trips no
-             * supervisor gate. */
-            zcl_socket_t s = ZCL_INVALID_SOCKET;
-            if (onion_stream_connect(&c->addr.svc, &s,
-                                     ONION_STREAM_CONNECT_TIMEOUT_MS))
-                connman_complete_dial(cm, c, s);   /* takes ownership of s */
-            else
-                connman_record_dial_failure(cm, c);
-            continue;
-        }
+        if (net_addr_is_tor(&c->addr.svc.addr))
+            continue;                      /* second pass, below */
+        peer_lifecycle_note_attempt(&c->addr, dial_lifecycle_source(c));
         zcl_socket_t s = ZCL_INVALID_SOCKET;
         enum zcl_connect_start st = connect_socket_start(&c->addr.svc, &s);
         if (st == ZCL_CONNECT_START_ERROR) {
@@ -600,6 +595,38 @@ static void connman_dial_batch(struct connman *cm,
         zcl_socket_t s = inflight[i].sock;
         close_socket(&s);
         connman_record_dial_failure(cm, &batch[inflight[i].ci]);
+    }
+
+    /* Onion candidates never join the socket race: there is no fd to poll
+     * until a circuit exists. They get a blocking budget instead, inline on
+     * the scheduler thread (g_open_liveness is liveness-only, so the block
+     * trips no supervisor gate), and ONE ceiling is shared by the entire
+     * batch — per-candidate budgets let MAX_OUTBOUND_ONION dead hidden
+     * services stall the only dial scheduler for MAX_OUTBOUND_ONION x 120 s
+     * with no outbound progress. One that finds the budget spent waits for
+     * the next iteration: never dialed, never charged. */
+    int64_t onion_budget_ms = ONION_STREAM_CONNECT_TIMEOUT_MS;
+    for (size_t i = 0; i < count && !g_stop; i++) {
+        struct connman_dial_candidate *c = &batch[i];
+        if (!net_addr_is_tor(&c->addr.svc.addr))
+            continue;
+        if (onion_budget_ms <= 0) {
+            /* The one stage onion_stream.c cannot name: never handed over. */
+            char obuf[NET_ADDR_STR_MAX + 1];
+            net_addr_to_string(&c->addr.svc.addr, obuf, sizeof(obuf));
+            LOG_WARN("net", "onion stage=dial_deferred target=%s:%u (batch "
+                            "spent its whole %d ms circuit budget)",
+                     obuf, c->addr.svc.port, ONION_STREAM_CONNECT_TIMEOUT_MS);
+            continue;
+        }
+        peer_lifecycle_note_attempt(&c->addr, dial_lifecycle_source(c));
+        int64_t began_ms = platform_time_monotonic_ms();
+        zcl_socket_t s = ZCL_INVALID_SOCKET;
+        if (onion_stream_connect(&c->addr.svc, &s, (int)onion_budget_ms))
+            connman_complete_dial(cm, c, s);   /* takes ownership of s */
+        else
+            connman_record_dial_failure(cm, c);
+        onion_budget_ms -= platform_time_monotonic_ms() - began_ms;
     }
 }
 
