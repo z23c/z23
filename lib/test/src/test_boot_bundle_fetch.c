@@ -854,27 +854,26 @@ static int case_seed_set(void)
         size_t open_seeds = boot_bundle_fetch_seed_count(&ctx);
         ASSERT(open_seeds >= 1);
 
-        /* (2) connect-only with a -connect host that NAMES A PORT and no
-         * -fileservice: REFUSED, zero seeds. This used to strip the port and
-         * refill it with FS_PORT, which is how `-connect=127.0.0.1:39099` (a
-         * deliberately dead sink that seals a fixture) became a dial to
-         * 127.0.0.1:18034 — the operator's LIVE node — and pulled ~1 GB of
-         * mainnet chain state into a regtest datadir. -connect means the
-         * address it names; a port is never substituted. */
+        /* (2) connect-only with `-connect=host:8033` (the published mainnet
+         * P2P port) and no `-fileservice`: seeds file-service at host:FS_PORT.
+         * That is the new-node command. A NON-default port stays refused, which
+         * is how `-connect=127.0.0.1:39099` (a deliberately dead fixture sink)
+         * must not become a dial to 127.0.0.1:18034. */
         memset(&ctx, 0, sizeof(ctx));
         ctx.connect_only = true;
         ctx.connect_peers[0] = "203.0.113.7:8033";
         ctx.n_connect_peers = 1;
-        ASSERT(boot_bundle_fetch_seed_count(&ctx) == 0);
+        ASSERT(boot_bundle_fetch_seed_count(&ctx) == 1);
 
         /* The dead-sink shape every isolated fixture on this box uses. */
         ctx.connect_peers[0] = "127.0.0.1:39099";
         ASSERT(boot_bundle_fetch_seed_count(&ctx) == 0);
 
-        /* More port-naming hosts are still zero — refusal is per value. */
+        /* Two default-P2P-port hosts → two seeds. */
+        ctx.connect_peers[0] = "203.0.113.7:8033";
         ctx.connect_peers[1] = "203.0.113.8:8033";
         ctx.n_connect_peers = 2;
-        ASSERT(boot_bundle_fetch_seed_count(&ctx) == 0);
+        ASSERT(boot_bundle_fetch_seed_count(&ctx) == 2);
 
         /* (2b) A -connect value that names NO port is unchanged: the operator
          * named a host, so nothing is being overridden, and it seeds the file
@@ -909,8 +908,11 @@ static int case_seed_set(void)
         ctx.n_connect_peers = 1;
         ASSERT(boot_bundle_fetch_seed_count(&ctx) == 2);
 
-        /* ...and a port-naming -connect alongside it adds nothing. */
+        /* ...and a default-P2P-port -connect alongside it adds the host at
+         * FS_PORT (de-duped if it matches the explicit fileservice). */
         ctx.connect_peers[0] = "203.0.113.7:8033";
+        ASSERT(boot_bundle_fetch_seed_count(&ctx) == 2);
+        ctx.connect_peers[0] = "203.0.113.7:39099";
         ASSERT(boot_bundle_fetch_seed_count(&ctx) == 1);
 
         /* (5) NULL ctx must not crash and must not silently disable the weld. */

@@ -124,8 +124,9 @@ ports (P2P `8033`, RPC `18232`):
 build/bin/z23
 ```
 
-A fresh datadir starts honestly empty (`getblockcount` returns `0`) and syncs
-from peers — there is no phantom tip. Check health at any time with:
+A fresh datadir starts honestly empty (`getblockcount` returns `0`) until a
+verified header seed and complete-state bundle land — there is no phantom tip.
+Check health at any time with:
 
 ```bash
 build/bin/z23 status
@@ -133,20 +134,38 @@ build/bin/z23 status
 
 ### Syncing to the chain tip
 
-There are two ways to reach tip, with different trade-offs. Judge success by
-height **climbing toward the network tip**, never just "the process stayed
-up."
+Judge success by height **climbing toward the network tip**, never just "the
+process stayed up." The easy path for a new Z23 node is instant-on from a
+serving Z23 peer. Genesis IBD and a `zclassicd` datadir import remain available.
 
-1. **Plain P2P from genesis** (the sovereignty-preserving default). Start on
-   an empty datadir; the node discovers peers (hardcoded legacy IP seeds plus
-   a Tor `.onion` directory seed — no DNS seeders) and fully validates every
-   block body itself. This is the most conservative path but is **slow**: a
-   full from-genesis sync validates the entire chain's Equihash PoW, scripts,
-   and Sapling/Sprout proofs, which takes on the order of hours depending on
-   hardware. Use this when you want a node whose state is entirely
-   self-derived and don't need it useful within minutes.
+1. **Instant-on from a serving Z23 peer** (the easy new-node path). Point the
+   node at one reachable Z23 peer. `-connect=HOST` and `-connect=HOST:8033`
+   are the same command: the node uses that host's P2P port 8033 and its file
+   service on 18034, fetches the header-chain seed plus complete-state bundle,
+   verifies them against the compiled checkpoint, installs, then folds the
+   remaining delta to tip. No `zclassicd` datadir, no extra flags:
 
-2. **Two-step import from an existing `zclassicd` datadir** (fast, requires
+   ```bash
+   build/bin/z23 -connect=PEER.EXAMPLE:8033
+   ```
+
+   Optional: if you already have a `consensus-state-bundle-*.sqlite`, set
+   `ZCL_CHECKPOINT_BUNDLE_SOURCE` in `~/.config/zclassic23/env` so systemd
+   stages it before boot (`docs/ROM_DELIVERY.md` "Local bundle bootstrap").
+   The install path still re-derives checkpoint authority; staging is only
+   a courier.
+
+2. **Plain P2P from genesis** (the sovereignty-preserving fallback). Start on
+   an empty datadir with no `-connect` / no file-service seed; the node
+   discovers peers (hardcoded legacy IP seeds plus a Tor `.onion` directory
+   seed — no DNS seeders) and fully validates every block body itself. This
+   is the most conservative path but is **slow**: a full from-genesis sync
+   validates the entire chain's Equihash PoW, scripts, and Sapling/Sprout
+   proofs, which takes on the order of hours depending on hardware. Use this
+   when you want a node whose state is entirely self-derived and don't need
+   it useful within minutes.
+
+3. **Two-step import from an existing `zclassicd` datadir** (fast, requires
    you already run the legacy C++ node). Import headers first, then boot
    normally — order matters, skipping step 1 leaves a multi-million-header
    hole and the node pins:
@@ -164,7 +183,7 @@ up."
    [`docs/SYNC.md`](SYNC.md) "Method 3".
 
 A published/prebuilt starter-pack snapshot loader also exists
-(`-load-snapshot-at-own-height`) as a faster-but-partial third option; it
+(`-load-snapshot-at-own-height`) as a faster-but-partial extra option; it
 seeds transparent state quickly but the node's shielded-history gate
 intentionally stops at the first unproven spend, and body-derived
 projections (explorer token/tx/address history below the seed height) stay

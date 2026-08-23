@@ -19,6 +19,13 @@
 
 #define BBFS_SUBSYS "boot_bundle_fetch"
 
+/* Mainnet nDefaultPort (core/chainparams/src/chainparams.c). The weld is
+ * already mainnet-only. Operators write `-connect=peer:8033` because that is
+ * the published P2P port; treating THAT one port as "the operator named a
+ * host" is how a new node instant-on works. Any other named port stays
+ * refused so 39xxx fixture sinks cannot be rewritten to FS_PORT. */
+#define BBF_MAINNET_P2P_PORT 8033
+
 /* Append host[:port] to peers[] (default port FS_PORT). No-op when full or the
  * host does not fit rom_fetch_peer.addr. */
 void bbf_add_peer(struct rom_fetch_peer *peers, size_t *np, size_t cap,
@@ -71,40 +78,62 @@ static bool bbf_names_a_port(const char *host_port)
 
 /* Derive a file-service seed from ONE `-connect=` value.
  *
- * `-connect` means EXACTLY the address the operator named. This used to accept
- * the value with its port STRIPPED and refilled with FS_PORT, so
- * `-connect=127.0.0.1:39099` — a deliberately DEAD sink, chosen so a fixture is
- * sealed — was contacted as 127.0.0.1:18034, a different and very much LIVE
- * address. On 2026-07-28 that pulled ~1 GB of real mainnet chain state off the
- * operator's live node into a sealed regtest fixture. A dead sink whose
- * deadness lives in the port number is not a dead sink if the port is the one
- * field we discard.
+ * `-connect` means the peer the operator named. This used to strip ANY port
+ * and refill FS_PORT, so `-connect=127.0.0.1:39099` — a deliberately DEAD
+ * fixture sink — was contacted as 127.0.0.1:18034, the operator's LIVE file
+ * service. On 2026-07-28 that pulled ~1 GB of mainnet chain state into a
+ * sealed regtest datadir. A dead sink whose deadness lives in a NON-DEFAULT
+ * port is not a dead sink if that port is discarded.
  *
- * So the rule is: a value that names NO port still seeds the file service at
- * FS_PORT (the operator named a host, not a port — nothing is overridden, and
- * this is the case the seam was built for). A value that NAMES a port is
- * REFUSED, loudly and by name; an operator who wants a file-service seed says
- * `-fileservice=HOST[:PORT]`, which is honoured verbatim by bbf_add_peer.
- * Refusing is the safe direction: the worst case is an empty seed set, which
- * nss_classify already reports as `seeds_empty`. Returns false when refused. */
+ * Rule:
+ *   - no port: seed file-service at HOST:FS_PORT (the operator named a host)
+ *   - port == mainnet P2P 8033: same — that is the published `-connect=peer:8033`
+ *     new-node command, not a fixture sink
+ *   - any other port: REFUSE. Pass `-fileservice=HOST[:PORT]` to name a
+ *     file-service seed on a specific port.
+ * Refusing a custom port is the safe direction for fixtures. Returns false
+ * when refused. */
 static bool bbf_add_connect_seed(struct rom_fetch_peer *peers, size_t *np,
                                  size_t cap, const char *host_port)
 {
     if (!host_port || !host_port[0])
         return false;
-    if (bbf_names_a_port(host_port)) {
-        LOG_WARN(BBFS_SUBSYS,
-                 "-connect=%s names a PORT, so it is NOT usable as a "
-                 "file-service seed: contacting that host on the file "
-                 "service's own port would be a different address than the one "
-                 "you named. Refusing to substitute a port. Pass "
-                 "-fileservice=HOST[:PORT] to name a file-service seed "
-                 "explicitly.",
-                 host_port);
-        return false;
+    if (!bbf_names_a_port(host_port)) {
+        bbf_add_peer(peers, np, cap, host_port);
+        return true;
     }
-    bbf_add_peer(peers, np, cap, host_port);
-    return true;
+
+    char host[128];
+    snprintf(host, sizeof(host), "%s", host_port);
+    char *colon = strrchr(host, ':');
+    if (!colon || !colon[1])
+        return false;
+    char *end = NULL;
+    long p = strtol(colon + 1, &end, 10);
+    if (!end || *end != '\0' || p < 1 || p > 65535)
+        return false;
+
+    if (p == BBF_MAINNET_P2P_PORT) {
+        *colon = '\0';
+        if (!host[0])
+            return false;
+        LOG_INFO(BBFS_SUBSYS,
+                 "-connect=%s names the default mainnet P2P port — seeding "
+                 "file-service at %s:%u (pass -fileservice=HOST[:PORT] to "
+                 "override)",
+                 host_port, host, (unsigned)FS_PORT);
+        bbf_add_peer(peers, np, cap, host);
+        return true;
+    }
+
+    LOG_WARN(BBFS_SUBSYS,
+             "-connect=%s names a non-default PORT, so it is NOT usable as a "
+             "file-service seed: contacting that host on the file service's "
+             "own port would be a different address than the one you named. "
+             "Refusing to substitute a port. Pass -fileservice=HOST[:PORT] "
+             "to name a file-service seed explicitly.",
+             host_port);
+    return false;
 }
 
 size_t bbf_assemble_seeds(const struct app_context *ctx,

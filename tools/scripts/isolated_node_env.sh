@@ -241,7 +241,9 @@ iso_init() {
 # Both node-side causes are now fixed and regression-tested (see
 # lib/test/src/test_boot_bundle_fetch.c case_network_gate /
 # case_seed_set): boot_bundle_fetch_should_run is mainnet-only, and
-# bbf_add_connect_seed refuses to substitute a port the operator named.
+# bbf_add_connect_seed refuses to substitute a NON-DEFAULT port the
+# operator named (39xxx fixture sinks stay dead; :8033 is the published
+# mainnet P2P port and is allowed to seed file-service at FS_PORT).
 # The flag stays anyway — a harness must not depend on a node-side gate
 # staying correct, and this is the layer that fails safe.
 iso_spawn_node() {
