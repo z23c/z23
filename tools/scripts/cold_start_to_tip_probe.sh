@@ -54,9 +54,12 @@ CONSENSUS_BUNDLE_CANDIDATES=(
     "$HOME"/.zclassic-c23/consensus-state-bundle-*.sqlite
 )
 PEER="${ZCL_C3_PEER:-127.0.0.1:8033}"        # zclassic23 P2P — DIAL this for sync
-# Read the target tip from a zclassic23 node that answers zcl-rpc cleanly (the
-# live node), rather than zclassicd (whose RPC uses a different cookie). Same
-# chain → same tip. This is one cheap getblockcount, no sync load on it.
+# File-service seed for instant-on header-chain / ROM fetch. -connect=HOST:P2P
+# is NOT a fileservice seed: boot_bundle_fetch_seeds refuses a -connect value
+# that names a port (rewriting 8033→18034 previously pulled live chain state
+# into sealed fixtures). Pass -fileservice explicitly. Default: same host as
+# PEER, FS_PORT 18034. Set ZCL_C3_FILE_PEER empty to disable.
+FS_PORT=18034
 TIP_DATADIR="${ZCL_C3_TIP_DATADIR:-$HOME/.zclassic-c23}"
 PEER_RPC="${ZCL_C3_PEER_RPC:-18232}"         # live zclassic23 RPC (read tip only)
 BUDGET="${ZCL_C3_BUDGET_SECS:-600}"          # 10-minute MVP target
@@ -72,6 +75,7 @@ RUN_ID="${ZCL_C3_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 ARTIFACT_DIR="$ARTIFACT_ROOT/$RUN_ID"
 DATADIR=""
 PID=""
+FILE_PEER=""
 start=0
 seeded=0
 last_h=-1
@@ -130,6 +134,7 @@ write_artifact() {
         echo "last_headers=$last_hdr"
         echo "bundle_snapshot=${BUNDLE_SNAP:-}"
         echo "bundle_index=${BUNDLE_INDEX:-}"
+        echo "file_peer=${FILE_PEER:-}"
         echo "scratch_datadir=${DATADIR:-}"
         echo "scratch_datadir_removed=true"
         echo "boots=$boots"
@@ -153,6 +158,7 @@ write_artifact() {
         printf '  "last_headers": %s,\n' "$(json_number_or_null "$last_hdr")"
         printf '  "bundle_snapshot": %s,\n' "$(json_string "${BUNDLE_SNAP:-}")"
         printf '  "bundle_index": %s,\n' "$(json_string "${BUNDLE_INDEX:-}")"
+        printf '  "file_peer": %s,\n' "$(json_string "${FILE_PEER:-}")"
         printf '  "scratch_datadir": %s,\n' "$(json_string "${DATADIR:-}")"
         printf '  "scratch_datadir_removed": true,\n'
         printf '  "boots": %s,\n' "$(json_number_or_null "$boots")"
@@ -247,6 +253,14 @@ select_newest_consensus_bundle() {
     printf '%s' "$newest_path"
 }
 
+# Same host as a P2P HOST:PORT, on the dedicated file-service port.
+derive_file_peer() {
+    local p2p="$1"
+    local host="${p2p%:*}"
+    [ -n "$host" ] && [ "$host" != "$p2p" ] || return 1
+    printf '%s:%s' "$host" "$FS_PORT"
+}
+
 # True iff the boot-exit-reason.v1 `reason` is a supervised self-respawn
 # request (self_respawn_tip_watchdog / self_respawn_supervisor_backstop /
 # self_respawn_both). Matches tools/scripts/cold_start_to_tip_stopwatch.sh.
@@ -324,6 +338,11 @@ run_selftest() {
     esac
     st_check "utxo-seed fallback selector still works" "1" "$got_ok"
 
+    st_check "derive_file_peer rewrites P2P host onto FS_PORT" \
+        "127.0.0.1:18034" "$(derive_file_peer "127.0.0.1:8033")"
+    st_check "derive_file_peer rejects a host with no port" \
+        "" "$(derive_file_peer "127.0.0.1" || true)"
+
     rm -rf "$st_dir"
     if [ "$st_fail" != 0 ]; then
         echo "c3-probe: --selftest FAIL" >&2
@@ -351,6 +370,24 @@ peer_port="${PEER##*:}"
     || skip "invalid peer address: $PEER"
 if ! timeout 3 bash -c "exec 3<>/dev/tcp/$peer_host/$peer_port" 2>/dev/null; then
     skip "serving peer not reachable: $PEER"
+fi
+
+# ZCL_C3_FILE_PEER unset → derive from PEER host + FS_PORT; empty → disable.
+if [ -z "${ZCL_C3_FILE_PEER+x}" ]; then
+    FILE_PEER="$(derive_file_peer "$PEER" || true)"
+else
+    FILE_PEER="${ZCL_C3_FILE_PEER}"
+fi
+if [ -n "$FILE_PEER" ]; then
+    file_host="${FILE_PEER%:*}"
+    file_port="${FILE_PEER##*:}"
+    if [ -n "$file_host" ] && [ -n "$file_port" ] && [ "$file_host" != "$file_port" ] &&
+       timeout 3 bash -c "exec 3<>/dev/tcp/$file_host/$file_port" 2>/dev/null; then
+        echo "c3-probe: fileservice seed $FILE_PEER reachable — passing -fileservice (instant-on header/bundle fetch)"
+    else
+        echo "c3-probe: fileservice seed $FILE_PEER not reachable — continuing without -fileservice (P2P IBD only)"
+        FILE_PEER=""
+    fi
 fi
 
 # Reference peer tip (the target). zclassicd has no params on getblockcount.
@@ -422,6 +459,8 @@ else
 fi
 
 launch_node() {
+    declare -a FILE_ARGS=()
+    [ -n "${FILE_PEER:-}" ] && FILE_ARGS=(-fileservice="$FILE_PEER")
     setsid "$NODE_BIN" \
         -datadir="$DATADIR" \
         -port=$P2P \
@@ -430,6 +469,7 @@ launch_node() {
         -httpsport=$HTTPS \
         -listen=0 \
         -connect="$PEER" \
+        "${FILE_ARGS[@]}" \
         -nolegacyimport \
         -nobgvalidation \
         -showmetrics=0 \

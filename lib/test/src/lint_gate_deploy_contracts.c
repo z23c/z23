@@ -360,6 +360,8 @@ int t_dev_lane_deploy_contract(void)
         ASSERT(strstr(coldstart_tip, "zclassic23-bundle-bootstrap.sh") != NULL);
         ASSERT(strstr(coldstart_tip, "self_respawn_") != NULL);
         ASSERT(strstr(coldstart_tip, "--selftest") != NULL);
+        ASSERT(strstr(coldstart_tip, "ZCL_C3_FILE_PEER") != NULL);
+        ASSERT(strstr(coldstart_tip, "-fileservice") != NULL);
         ASSERT(strstr(coldstart_tip, "zcl.c3_probe_artifact.v2") != NULL);
         ASSERT(strstr(coldstart_tip, "proof.json") != NULL);
         ASSERT(strstr(coldstart_tip, "\"seed_authority_loaded\"") != NULL);
