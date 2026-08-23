@@ -78,6 +78,7 @@ PID=""
 FILE_PEER=""
 start=0
 seeded=0
+install_s=""
 last_h=-1
 last_hdr=-1
 boots=1
@@ -129,6 +130,8 @@ write_artifact() {
         echo "budget_seconds=$BUDGET"
         echo "mode=${MODE:-unknown}"
         echo "seeded=$seeded"
+        echo "install_seconds=${install_s:-}"
+        echo "to_tip_seconds=$([ "$reached_at_tip" = 1 ] && echo "$elapsed" || echo "")"
         echo "reached_at_tip=$reached_at_tip"
         echo "last_height=$last_h"
         echo "last_headers=$last_hdr"
@@ -150,6 +153,8 @@ write_artifact() {
         printf '  "elapsed_seconds": %s,\n' "$elapsed"
         printf '  "budget_seconds": %s,\n' "$(json_number_or_null "$BUDGET")"
         printf '  "seed_authority_loaded": %s,\n' "$(json_bool "$seeded")"
+        printf '  "install_seconds": %s,\n' "$(json_number_or_null "${install_s:-}")"
+        printf '  "to_tip_seconds": %s,\n' "$(json_number_or_null "$([ "$reached_at_tip" = 1 ] && echo "$elapsed" || echo "")")"
         printf '  "reached_at_tip": %s,\n' "$(json_bool "$reached_at_tip")"
         printf '  "peer": %s,\n' "$(json_string "$PEER")"
         printf '  "peer_tip": %s,\n' "$(json_number_or_null "${PEER_TIP:-}")"
@@ -478,19 +483,31 @@ launch_node() {
     PID=$!
 }
 
+mark_seeded() {
+    [ "$seeded" = 0 ] || return 0
+    seeded=1
+    now=$(date +%s)
+    if [ "${start:-0}" -gt 0 ]; then
+        install_s=$((now - start))
+    else
+        install_s=0
+    fi
+    echo "c3-probe: C3_INSTALL_S=$install_s"
+}
+
 note_seed_ready() {
     [ "$seeded" = 0 ] || return 0
     if [ "$MODE" = "operator-bundle" ]; then
         seed_hit=$(grep -m1 -F -- "$BUNDLE_SUCCESS_PATTERN" "$DATADIR/probe.log" 2>/dev/null || true)
         if [ -n "$seed_hit" ]; then
-            seeded=1
+            mark_seeded
             echo "c3-probe: seed authority ready — $seed_hit"
         fi
     elif [ "$MODE" = "consensus-state-bundle" ]; then
         if [ -f "$DATADIR/$CONSENSUS_BUNDLE_MARKER" ] ||
            grep -q -F -- "$CONSENSUS_BUNDLE_SUCCESS_PATTERN" "$DATADIR/probe.log" 2>/dev/null ||
            grep -q -F -- "$CONSENSUS_BUNDLE_REQUEST_PATTERN" "$DATADIR/probe.log" 2>/dev/null; then
-            seeded=1
+            mark_seeded
             echo "c3-probe: seed authority ready — consensus-state-bundle installed"
         fi
     fi
@@ -527,10 +544,13 @@ while :; do
     if printf '%s' "$h" | grep -qE '^[0-9]+$'; then
         last_hdr="${hdr:-?}"
         [ "$h" != "$last_h" ] && { echo "c3-probe: t=${elapsed}s blocks=$h headers=${hdr:-?}"; last_h="$h"; }
-        [ "$h" -ge 1000000 ] && seeded=1
+        [ "$h" -ge 1000000 ] && mark_seeded
         if [ "$h" -ge "$PEER_TIP" ] && printf '%s' "$hdr" | grep -qE '^[0-9]+$' \
            && [ "$hdr" -ge "$PEER_TIP" ] && [ "$h" -eq "$hdr" ]; then
-            reached=1; echo "c3-probe: REACHED at_tip blocks=$h headers=$hdr in ${elapsed}s"; break
+            reached=1
+            echo "c3-probe: REACHED at_tip blocks=$h headers=$hdr in ${elapsed}s"
+            echo "c3-probe: C3_TO_TIP_S=$elapsed"
+            break
         fi
     fi
     sleep 5

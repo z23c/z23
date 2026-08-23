@@ -365,6 +365,9 @@ int t_dev_lane_deploy_contract(void)
         ASSERT(strstr(coldstart_tip, "zcl.c3_probe_artifact.v2") != NULL);
         ASSERT(strstr(coldstart_tip, "proof.json") != NULL);
         ASSERT(strstr(coldstart_tip, "\"seed_authority_loaded\"") != NULL);
+        ASSERT(strstr(coldstart_tip, "\"install_seconds\"") != NULL);
+        ASSERT(strstr(coldstart_tip, "\"to_tip_seconds\"") != NULL);
+        ASSERT(strstr(coldstart_tip, "C3_INSTALL_S=") != NULL);
         ASSERT(strstr(coldstart_tip, "\"reached_at_tip\"") != NULL);
         ASSERT(strstr(coldstart_tip,
                       "write_artifact \"skip\" 2 \"$*\"") != NULL);

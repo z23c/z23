@@ -93,12 +93,17 @@ cli() {
 
 write_clock() {
     mkdir -p "$(dirname "$CLOCK_FILE")"
-    printf '{"ts":"%s","box":"node3","peered_s":%s,"synced_s":%s,"first_msg_s":%s,"sha":"%s"}\n' \
+    extra=""
+    case " ${DEFECTS:-} " in
+        *" first_msg_over_60s "*) extra=',"defect":"first_msg_over_60s","dial_cap_s":120' ;;
+    esac
+    printf '{"ts":"%s","box":"node3","peered_s":%s,"synced_s":%s,"first_msg_s":%s,"sha":"%s"%s}\n' \
         "$TS" \
         "$(num_or_null "$PEERED_S")" \
         "$(num_or_null "$SYNCED_S")" \
         "$(num_or_null "$FIRST_MSG_S")" \
-        "$SHA" >>"$CLOCK_FILE"
+        "$SHA" \
+        "$extra" >>"$CLOCK_FILE"
 }
 
 save_evidence() {
