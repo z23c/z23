@@ -938,6 +938,94 @@ void onion_directory_reset_relay_follow(void)
     pthread_mutex_unlock(&g_relay_mutex);
 }
 
+/* ── Stale hearsay: counted, reported once per window ──────────
+ *
+ * A relayed stamp already past ONION_DIR_EXPIRE_SECS is EXPECTED input,
+ * not a fault of ours. Any peer still running a binary from before
+ * last_seen became a maintained column serves a directory frozen at first
+ * sighting (the UPSERT comment above describes exactly that pathology),
+ * and it serves the SAME frozen rows on every discovery pass — so the
+ * rejection re-fires per record, per seed, forever. At one ERROR line per
+ * record that single message took 707 of the node's last 3000 log lines:
+ * a quarter of the log restating a condition that never changes, at a
+ * level that means "something is broken here".
+ *
+ * Counted instead, with the same rolling-window shape and the same
+ * cadence (ONION_RELAY_WINDOW_SECS) as the follow budget above, and
+ * reported as ONE line: how many were ignored, over how long, the oldest
+ * age seen and the host it belonged to. That is strictly more useful than
+ * the per-record lines were — those never named the host, so no reader
+ * could tell WHICH records were stale.
+ *
+ * The report fires on whichever comes first, the window elapsing or the
+ * count reaching ONION_DIR_STALE_REPORT_MAX. The count bound is what
+ * keeps a genuine BURST visible: at the observed fleet rate the window is
+ * always the trigger, but a peer suddenly relaying thousands of dead rows
+ * would otherwise sit unreported for the rest of the window. Either way
+ * the log grows by at most one line per REPORT, never per record.
+ *
+ * INFO, not ERROR: the aggregate reports a remote peer's directory
+ * hygiene, and this node's own handling of it is correct and complete.
+ *
+ * The window is only ever advanced by a new rejection, so a node that
+ * stops meeting stale directories goes quiet rather than reporting an
+ * empty window forever; the counters are the whole record and no other
+ * code reads them. */
+#define ONION_DIR_STALE_REPORT_MAX 256
+
+static pthread_mutex_t g_stale_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int64_t  g_stale_window_start = 0;
+static uint64_t g_stale_ignored = 0;
+static int64_t  g_stale_oldest_age = 0;
+static char     g_stale_oldest_host[64];
+
+static void note_stale_hearsay(const char *hostname, int64_t age, int64_t now)
+{
+    bool rolled = false;
+    uint64_t n = 0;
+    int64_t oldest = 0, span = 0;
+    char host[64] = "";
+
+    pthread_mutex_lock(&g_stale_mutex);
+    if (g_stale_window_start == 0) {
+        g_stale_window_start = now;
+    } else if (now - g_stale_window_start >= ONION_RELAY_WINDOW_SECS ||
+               now < g_stale_window_start ||
+               g_stale_ignored >= ONION_DIR_STALE_REPORT_MAX) {
+        /* Window ran its course, the burst filled the budget, or the wall
+         * clock stepped backwards: hand the finished tally to the caller
+         * and start a fresh one. */
+        n = g_stale_ignored;
+        oldest = g_stale_oldest_age;
+        span = now - g_stale_window_start;
+        if (span < 0) span = 0;
+        snprintf(host, sizeof(host), "%s", g_stale_oldest_host);
+        rolled = true;
+        g_stale_window_start = now;
+        g_stale_ignored = 0;
+        g_stale_oldest_age = 0;
+        g_stale_oldest_host[0] = '\0';
+    }
+    g_stale_ignored++;
+    if (age > g_stale_oldest_age) {
+        g_stale_oldest_age = age;
+        snprintf(g_stale_oldest_host, sizeof(g_stale_oldest_host), "%s",
+                 hostname ? hostname : "");
+    }
+    pthread_mutex_unlock(&g_stale_mutex);
+
+    /* Emitted outside the lock: the sink is stderr, and no lock in this
+     * file is held across I/O. */
+    if (rolled && n > 0)
+        LOG_INFO(ODIR_LOG,
+                 "learn: ignored %llu relayed stamp%s already past expiry in "
+                 "the last %llds (oldest %llds, %s) — a peer is relaying a "
+                 "directory it never refreshes",
+                 (unsigned long long)n, n == 1 ? "" : "s",
+                 (long long)span, (long long)oldest,
+                 host[0] ? host : "host unrecorded");
+}
+
 bool onion_service_directory_learn(const char *hostname, int port, int height,
                                    int64_t peer_last_seen, const char *apps)
 {
@@ -948,10 +1036,19 @@ bool onion_service_directory_learn(const char *hostname, int port, int height,
     /* Hearsay may age a row, never freshen it past our own clock. */
     int64_t stamp = (peer_last_seen > 0 && peer_last_seen < now)
                         ? peer_last_seen : now;
-    if (now - stamp >= ONION_DIR_EXPIRE_SECS)
-        LOG_FAIL(ODIR_LOG,
-                 "learn: relayed stamp is already past expiry (age %llds)",
-                 (long long)(now - stamp));
+    /* An already-expired stamp is refused, not clamped up to the expiry
+     * floor. Clamping would make this row read STALE — served by our own
+     * /directory.json — so the next hop would clamp it to the floor again,
+     * and a host nobody has reached in weeks would ride the relay graph
+     * forever with its apparent age reset at every hop. The refusal is
+     * what terminates that chain: hearsay may only ADD a place to look,
+     * and a place nobody has confirmed inside the expiry window is not one
+     * we can honestly pass on. Counted, never logged per record — see
+     * note_stale_hearsay() above. */
+    if (now - stamp >= ONION_DIR_EXPIRE_SECS) {
+        note_stale_hearsay(hostname, now - stamp, now);
+        return false;
+    }
 
     /* Re-normalize whatever the caller handed in: the column only ever
      * holds bounded, validated CSV. */
