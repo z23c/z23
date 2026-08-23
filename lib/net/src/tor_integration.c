@@ -44,8 +44,8 @@ static _Atomic bool g_monitor_started = false;
  * (read_onion_address, called synchronously from tor_onion_monitor): a
  * successful poll iteration there is evidence Tor is alive. Both
  * liveness-only (no deadline / no progress gate) — the monitor polls on a
- * bootstrap loop bounded by g_tor_running, and once the address is found
- * it does no further polling for the rest of the boot. */
+ * bootstrap loop bounded by g_tor_running, and it keeps polling after the
+ * address lands until onion DESCRIPTOR PUBLICATION is observed. */
 static struct thread_liveness_child g_tor_liveness = { .id = SUPERVISOR_INVALID_ID };
 static struct thread_liveness_child g_tor_monitor_liveness = { .id = SUPERVISOR_INVALID_ID };
 static _Atomic uint64_t g_tor_monitor_poll_count = 0;
@@ -154,8 +154,9 @@ bool tor_write_torrc(const char *datadir, uint16_t p2p_port)
     fprintf(f,
         "SocksPort 127.0.0.1:%u\n"
         "DataDirectory %s/tor_data\n"
-        "Log notice file %s/tor.log\n",
-        bootstrap_port, datadir, datadir);
+        "Log notice file %s/tor.log\n"
+        "Log info [rend] file %s/tor.log\n",
+        bootstrap_port, datadir, datadir, datadir);
 
     fclose(f);
     return true;
@@ -200,6 +201,40 @@ bool tor_log_last_ephemeral_address(const char *log_path, long scan_from,
             memcpy(out, p, len);
             out[len] = '\0';
             found = true;   /* keep scanning — a later line supersedes */
+        }
+    }
+    fclose(f);
+    return found;
+}
+
+bool tor_log_has_descriptor_publication(const char *log_path, long scan_from)
+{
+    if (!log_path)
+        return false;
+
+    FILE *f = fopen(log_path, "r");
+    if (!f)
+        return false;
+
+    if (scan_from > 0) {
+        if (fseek(f, 0, SEEK_END) != 0 || ftell(f) < scan_from ||
+            fseek(f, scan_from, SEEK_SET) != 0)
+            rewind(f);
+    }
+
+    char line[512];
+    bool found = false;
+    while (fgets(line, sizeof(line), f)) {
+        /* Success-only: a hostname file or a failed upload must not count.
+         * "DESCRIPTOR PUBLICATION" is the first-boot ready marker the
+         * installer selftest greps for; the rest are stock Tor rend lines
+         * that become visible once torrc logs info [rend]. */
+        if (strstr(line, "DESCRIPTOR PUBLICATION") != NULL ||
+            strstr(line, "Uploaded hidden service descriptor (status 200") != NULL ||
+            strstr(line, "finished with status 200") != NULL ||
+            strstr(line, "HS_DESC UPLOADED") != NULL) {
+            found = true;
+            break;
         }
     }
     fclose(f);
@@ -714,12 +749,16 @@ static bool read_onion_from_hostname_file(const char *datadir)
     return true;
 }
 
-/* Wait for the .onion address. Default (ephemeral) mode: parse the
- * dynhost log for THIS start's ephemeral service. -onion-persist mode:
- * install our persisted identity into dynhost, then read the hostname
- * file it (re)wrote.
+/* Wait for the .onion address AND onion DESCRIPTOR PUBLICATION.
+ * Default (ephemeral) mode: parse the dynhost log for THIS start's
+ * ephemeral service. -onion-persist mode: install our persisted identity
+ * into dynhost, then read the hostname file it (re)wrote.
  *
- * Polls until the address appears or Tor dies — deliberately NO fixed
+ * Hostname-only is not ready: HSDir upload can lag the hostname file, and
+ * a Type=notify first-boot that fires READY=1 on hostname lets clients
+ * dial a service the network cannot intro (docs/work/ONION_DIAL_GAP.md).
+ *
+ * Polls until both are observed or Tor dies — deliberately NO fixed
  * attempt cap. A slow public-network bootstrap (e.g. a ~120 s guard
  * retry before the first circuit) legitimately delays the dynhost
  * ephemeral-service line past any small cap, and the old 120-attempt
@@ -733,6 +772,8 @@ static bool read_onion_address(const char *datadir)
     snprintf(log_path, sizeof(log_path), "%s/tor.log", datadir);
 
     int waited = 0;
+    bool have_addr = false;
+    bool announced_addr = false;
     for (;;) {
         /* g_tor is opaque vendored code and is never beaten from inside
          * its own loop — this poll iteration is the proxy for "Tor is
@@ -744,40 +785,58 @@ static bool read_onion_address(const char *datadir)
         if (!atomic_load(&g_tor_running))
             return false;
 
-        if (atomic_load(&g_onion_persist)) {
-            /* -onion-persist: the address comes from OUR persisted
-             * identity, registered with dynhost by the install step. The
-             * ephemeral log-scan fallback is deliberately skipped here —
-             * in persist mode an ephemeral line would name dynhost's
-             * throwaway race-loser service, not this node's identity.
-             * Install failure is already a named LOG_ERR; the poll's
-             * "still waiting" line keeps the stall named. */
-            if (atomic_load(&g_persist_install_state) == 0) {
-                int rc = tor_try_install_persistent_identity(datadir);
-                if (rc != 0)
-                    atomic_store(&g_persist_install_state, rc);
+        if (!have_addr) {
+            if (atomic_load(&g_onion_persist)) {
+                /* -onion-persist: the address comes from OUR persisted
+                 * identity, registered with dynhost by the install step. The
+                 * ephemeral log-scan fallback is deliberately skipped here —
+                 * in persist mode an ephemeral line would name dynhost's
+                 * throwaway race-loser service, not this node's identity.
+                 * Install failure is already a named LOG_ERR; the poll's
+                 * "still waiting" line keeps the stall named. */
+                if (atomic_load(&g_persist_install_state) == 0) {
+                    int rc = tor_try_install_persistent_identity(datadir);
+                    if (rc != 0)
+                        atomic_store(&g_persist_install_state, rc);
+                }
+                if (atomic_load(&g_persist_install_state) == 1 &&
+                    read_onion_from_hostname_file(datadir))
+                    have_addr = true;
+            } else {
+                /* Default ephemeral mode: a hostname file left by a previous
+                 * -onion-persist boot is deliberately NOT read here — no
+                 * service is registered for that identity this boot. */
+                if (tor_log_last_ephemeral_address(log_path,
+                                                   g_tor_log_scan_from,
+                                                   g_onion_address,
+                                                   sizeof(g_onion_address))) {
+                    ensure_onion_suffix();
+                    have_addr = true;
+                }
             }
-            if (atomic_load(&g_persist_install_state) == 1 &&
-                read_onion_from_hostname_file(datadir))
-                return true;
-        } else {
-            /* Default ephemeral mode: a hostname file left by a previous
-             * -onion-persist boot is deliberately NOT read here — no
-             * service is registered for that identity this boot. */
-            if (tor_log_last_ephemeral_address(log_path,
-                                               g_tor_log_scan_from,
-                                               g_onion_address,
-                                               sizeof(g_onion_address))) {
-                ensure_onion_suffix();
-                return true;
+            if (have_addr && !announced_addr) {
+                printf("Tor .onion: %s (waiting for DESCRIPTOR PUBLICATION)\n",
+                       g_onion_address);
+                fflush(stdout);
+                announced_addr = true;
             }
         }
 
+        if (have_addr &&
+            tor_log_has_descriptor_publication(log_path, g_tor_log_scan_from))
+            return true;
+
         /* Slow bootstrap is a named state, not a silent hang. */
-        if (++waited % 60 == 0)
-            fprintf(stderr,  // obs-ok:bootstrap-progress-named
-                    "Tor: still waiting for .onion address after %ds "
-                    "(bootstrap may be slow)\n", waited);
+        if (++waited % 60 == 0) {
+            if (have_addr)
+                fprintf(stderr,  // obs-ok:bootstrap-progress-named
+                        "Tor: still waiting for onion DESCRIPTOR PUBLICATION "
+                        "after %ds (HSDir upload may be slow)\n", waited);
+            else
+                fprintf(stderr,  // obs-ok:bootstrap-progress-named
+                        "Tor: still waiting for .onion address after %ds "
+                        "(bootstrap may be slow)\n", waited);
+        }
         sleep(1);
     }
 }
@@ -861,7 +920,8 @@ static void *tor_onion_monitor(void *arg)
         extern void onion_service_set_address(const char *);
         onion_service_set_address(g_onion_address);
 
-        printf("Tor .onion: %s\n", g_onion_address);
+        printf("Tor: DESCRIPTOR PUBLICATION observed for %s\n",
+               g_onion_address);
         fflush(stdout);
     } else {
         if (atomic_load(&g_tor_running))

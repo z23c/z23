@@ -117,12 +117,15 @@ static int test_tor_write_torrc_bootstrap_port(void)
     bool has_correct_port = strstr(buf, "SocksPort 127.0.0.1:19999") != NULL;
     bool has_datadir = strstr(buf, "DataDirectory") != NULL;
     bool has_log = strstr(buf, "Log notice") != NULL;
+    bool has_rend_info = strstr(buf, "Log info [rend]") != NULL;
 
-    if (has_localhost && has_correct_port && has_datadir && has_log) {
+    if (has_localhost && has_correct_port && has_datadir && has_log &&
+        has_rend_info) {
         printf("OK\n");
     } else {
-        printf("FAIL (localhost=%d port=%d datadir=%d log=%d)\n",
-               has_localhost, has_correct_port, has_datadir, has_log);
+        printf("FAIL (localhost=%d port=%d datadir=%d log=%d rend=%d)\n",
+               has_localhost, has_correct_port, has_datadir, has_log,
+               has_rend_info);
         failures++;
     }
 
@@ -496,6 +499,99 @@ static int test_tor_log_last_ephemeral_address(void)
     return failures;
 }
 
+/* Hostname-only is not publication. First-boot READY must wait for a
+ * successful HSDir upload line (or the DESCRIPTOR PUBLICATION marker).
+ * Drives the shipped scanner; does not reimplement it. */
+static int test_tor_log_has_descriptor_publication(void)
+{
+    int failures = 0;
+    printf("test_tor_log_has_descriptor_publication: ");
+
+    char tmpdir[] = "/tmp/zcl_test_tordesc_XXXXXX";
+    if (!mkdtemp(tmpdir)) {
+        printf("FAIL (mkdtemp)\n");
+        return 1;
+    }
+    char path[1100];
+
+    const char *hostname_only =
+        "Jun 11 [notice] Dynamic onion host ephemeral service created "
+        "with address: aaaaboot1dead\n"
+        "Jun 11 [notice] Bootstrapped 100% (done)\n";
+    const char *failed_upload =
+        "Jun 12 [info] Uploaded hidden service descriptor (status 503 "
+        "(Service Unavailable))\n";
+    const char *published =
+        "Jun 13 [info] Uploaded hidden service descriptor (status 200 "
+        "(OK))\n";
+    const char *marker =
+        "Jun 14 [notice] DESCRIPTOR PUBLICATION observed for "
+        "bbbbboot2live.onion\n";
+
+    snprintf(path, sizeof(path), "%s/host.log", tmpdir);
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        printf("FAIL (open host.log)\n");
+        remove_tree(tmpdir);
+        return 1;
+    }
+    fputs(hostname_only, f);
+    fclose(f);
+    bool ok_host = !tor_log_has_descriptor_publication(path, 0);
+
+    snprintf(path, sizeof(path), "%s/fail.log", tmpdir);
+    f = fopen(path, "w");
+    if (!f) {
+        printf("FAIL (open fail.log)\n");
+        remove_tree(tmpdir);
+        return 1;
+    }
+    fputs(failed_upload, f);
+    fclose(f);
+    bool ok_fail = !tor_log_has_descriptor_publication(path, 0);
+
+    snprintf(path, sizeof(path), "%s/pub.log", tmpdir);
+    f = fopen(path, "w");
+    if (!f) {
+        printf("FAIL (open pub.log)\n");
+        remove_tree(tmpdir);
+        return 1;
+    }
+    fputs(hostname_only, f);
+    long after_host = ftell(f);
+    fputs(published, f);
+    fclose(f);
+    bool ok_pub = tor_log_has_descriptor_publication(path, 0);
+    bool ok_offset = tor_log_has_descriptor_publication(path, after_host);
+
+    snprintf(path, sizeof(path), "%s/marker.log", tmpdir);
+    f = fopen(path, "w");
+    if (!f) {
+        printf("FAIL (open marker.log)\n");
+        remove_tree(tmpdir);
+        return 1;
+    }
+    fputs(marker, f);
+    fclose(f);
+    bool ok_marker = tor_log_has_descriptor_publication(path, 0);
+
+    snprintf(path, sizeof(path), "%s/absent.log", tmpdir);
+    bool ok_missing = !tor_log_has_descriptor_publication(path, 0);
+
+    if (ok_host && ok_fail && ok_pub && ok_offset && ok_marker &&
+        ok_missing) {
+        printf("OK\n");
+    } else {
+        printf("FAIL (host=%d fail=%d pub=%d offset=%d marker=%d "
+               "missing=%d)\n",
+               ok_host, ok_fail, ok_pub, ok_offset, ok_marker, ok_missing);
+        failures++;
+    }
+
+    remove_tree(tmpdir);
+    return failures;
+}
+
 int test_tor(void)
 {
     int failures = 0;
@@ -515,6 +611,7 @@ int test_tor(void)
     failures += test_tor_address_persists_across_restarts();
     failures += test_tor_set_address_null_clears();
     failures += test_tor_log_last_ephemeral_address();
+    failures += test_tor_log_has_descriptor_publication();
 
     printf("Tor integration: %d failures\n", failures);
     return failures;

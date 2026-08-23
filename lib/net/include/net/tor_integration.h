@@ -109,6 +109,15 @@ bool tor_write_torrc(const char *datadir, uint16_t p2p_port);
 bool tor_log_last_ephemeral_address(const char *log_path, long scan_from,
                                     char *out, size_t out_size);
 
+/* True when THIS boot's tor.log (from scan_from) records a successful
+ * onion DESCRIPTOR PUBLICATION / HSDir upload. Hostname-file presence is
+ * not enough: a Type=notify first-boot that declares READY on the
+ * hostname lets clients dial before HSDirs have the descriptor
+ * (docs/work/ONION_DIAL_GAP.md). Exposed for testing — driven by
+ * read_onion_address() before g_tor_ready flips. */
+bool tor_log_has_descriptor_publication(const char *log_path,
+                                        long scan_from);
+
 /* ── Persistent onion identity (-onion-persist / -onion-rotate) ──
  *
  * Default stays ephemeral: dynhost mints a throwaway service every boot.

@@ -7,13 +7,13 @@
 #include "controllers/rpc_params.h"
 #include "json/json.h"
 #include "keys/key.h"
+#include "platform/time_compat.h"
 #include "session/zses.h"
 #include "util/log_macros.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 #define ZSES_TAG "native.zses"
 
@@ -76,7 +76,7 @@ void zcl_native_handle_zses_invite_create(
         request->input ? json_get(request->input, "expires") : NULL;
     int64_t expires = exp_v ? json_get_int(exp_v) : 0;
     if (expires <= 0)
-        expires = (int64_t)time(NULL) + 3600;
+        expires = platform_time_wall_unix() + 3600;
 
     char picked[ZSES_ENDPOINT_MAX + 1];
     enum zses_refuse refuse = ZSES_OK;
@@ -172,7 +172,7 @@ void zcl_native_handle_zses_invite_accept(
     }
     const struct json_value *now_v =
         request->input ? json_get(request->input, "now") : NULL;
-    int64_t now = now_v ? json_get_int(now_v) : (int64_t)time(NULL);
+    int64_t now = now_v ? json_get_int(now_v) : platform_time_wall_unix();
     struct zses_invite inv;
     if (!zses_invite_decode_json(invite, &inv)) {
         zses_fail(reply, "malformed", "invite is not valid zses:v1 JSON",
@@ -319,8 +319,7 @@ void zcl_native_handle_ops_mesh_join(
             return;
         }
         json_free(&tmp);
-        struct timespec wait = { .tv_sec = 0, .tv_nsec = 250000000L };
-        (void)nanosleep(&wait, NULL);
+        platform_sleep_ms(250);
     }
     (void)mesh_fill_join_status(endpoint, &reply->data);
 }

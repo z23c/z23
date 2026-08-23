@@ -1,4 +1,7 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * zses:v1 signed session invite codec: encode, sign, verify, and
+ * fail-closed refuse of {endpoint, expires, capability-tag}. */
 
 #include "session/zses.h"
 

@@ -1,10 +1,11 @@
 SCHEMA=pass
-DRILL=fail
+DRILL=hold
 CREATE_S=null
 ACCEPT_S=null
 JOIN_S=null
 PEERED_S=null
 PEERED=false
-GAPS=rpc_a
-OBSERVED_AT=2026-08-23T05:53:59Z
-DETAIL=SCHEMA: t-fast test_zses PASS; discover schema (create/accept/ops.mesh.join) agreed twice and names endpoint,expires,capability-tag; session_drill --selftest PASS (unsigned, wrong_key, tampered, expired, CLEARNET_FORBIDDEN). DRILL: isolated two-node spawn did not produce an RPC cookie within 60s; join_status was never observed; named gap rpc_a. peered=true is not claimed.
+TRANSPORT=unclaimed
+GAPS=rendezvous_descriptor
+OBSERVED_AT=2026-08-23T15:30:00Z
+DETAIL=SCHEMA: t-fast test_zses PASS; discover schema (create/accept/ops.mesh.join) agreed twice and names endpoint,expires,capability-tag; session_drill --selftest PASS (unsigned, wrong_key, tampered, expired, CLEARNET_FORBIDDEN). DRILL: held until node2/dev1 land rendezvous/descriptor fixes (docs/work/ONION_DIAL_GAP.md). TRANSPORT=tor_dynhost is not claimed. peered=true over a clearnet masquerade does not count.

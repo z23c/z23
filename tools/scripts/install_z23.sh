@@ -98,7 +98,11 @@ Wants=network-online.target
 
 [Service]
 Type=notify
-ExecStart=$bin -datadir=%h/.zclassic-c23
+# First-boot onion: -tor -onion-persist so a stranger is reachable, and
+# Type=notify holds activating until READY=1. READY waits for onion
+# DESCRIPTOR PUBLICATION (not hostname-only) so cold-boot clients do not
+# dial before HSDirs have the descriptor (docs/work/ONION_DIAL_GAP.md).
+ExecStart=$bin -datadir=%h/.zclassic-c23 -listen -tor -onion-persist
 # Restart=always (not on-failure): a new node clean-exits once to install the
 # checkpoint bundle (install-on-next-boot). on-failure would drop that boot.
 Restart=always
@@ -199,6 +203,33 @@ selftest() {
     # (a clean exit) is brought back. on-failure would strand a new node.
     grep -qx 'Restart=always' "$0" \
         || die "selftest: z23.service must Restart=always (install-on-next-boot)"
+
+    # Drive the shipped write_unit path (run_install skips it under
+    # Z23_SKIP_SYSTEMD=1). First-boot Type=notify READY must wait for onion
+    # DESCRIPTOR PUBLICATION: hostname-only readiness lets systemd declare
+    # started before HSDir upload, which is why "always connects" fails on
+    # cold boots (docs/work/ONION_DIAL_GAP.md).
+    write_unit "$tmp/prefix" "$tmp/units"
+    [ -f "$tmp/units/z23.service" ] || die "selftest: write_unit did not emit z23.service"
+    grep -q 'DESCRIPTOR PUBLICATION' "$tmp/units/z23.service" \
+        || die "selftest: unit must wait for onion DESCRIPTOR PUBLICATION before ready"
+    grep -q -- '-listen -tor -onion-persist' "$tmp/units/z23.service" \
+        || die "selftest: z23.service must boot with -listen -tor -onion-persist"
+    repo_root="$(cd "$SCRIPT_DIR/../.." && pwd)"
+    if [ -f "$repo_root/lib/net/src/tor_integration.c" ]; then
+        grep -q 'tor_log_has_descriptor_publication' \
+            "$repo_root/lib/net/src/tor_integration.c" \
+            || die "selftest: missing shipped tor_log_has_descriptor_publication"
+        grep -q 'DESCRIPTOR PUBLICATION' \
+            "$repo_root/lib/net/src/tor_integration.c" \
+            || die "selftest: first-boot must wait for DESCRIPTOR PUBLICATION in tor_integration.c"
+        grep -q 'DESCRIPTOR PUBLICATION' \
+            "$repo_root/config/src/boot_sd_watchdog.c" \
+            || die "selftest: sd_notify READY must wait for DESCRIPTOR PUBLICATION"
+        grep -q 'boot_sd_watchdog_maybe_notify_ready' \
+            "$repo_root/config/src/boot_sd_watchdog.c" \
+            || die "selftest: missing READY hold until onion publication"
+    fi
 
     # Unexpected SHA256SUMS member refuses before copy.
     mkdir -p "$tmp/extra"

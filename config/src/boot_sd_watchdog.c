@@ -45,6 +45,7 @@
 #include "util/supervisor.h"
 #include "util/supervisor_backstop.h"
 #include "util/thread_registry.h"
+#include "net/tor_integration.h"
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -86,6 +87,23 @@ static struct boot_svc_ctx *g_sd_watchdog_ctx;
 static _Atomic bool g_pet_stop       = false;
 static _Atomic bool g_pet_handle_set = false;
 static pthread_t    g_pet_tid;
+static _Atomic bool g_notify_ready_sent = false;
+
+/* Type=notify first-boot must not fire READY=1 on hostname-only onion
+ * readiness. When embedded Tor is up, hold READY until
+ * tor_integration_is_ready() — which waits for onion DESCRIPTOR
+ * PUBLICATION. Without Tor, READY is immediate (same as before). */
+static void boot_sd_watchdog_maybe_notify_ready(void)
+{
+    if (atomic_load(&g_notify_ready_sent))
+        return;
+    if (tor_integration_is_enabled() && !tor_integration_is_ready())
+        return;
+    if (!sd_notify_ready())
+        return;
+    atomic_store(&g_notify_ready_sent, true);
+    sd_notify_status("zclassic23 started");
+}
 
 /* Pillar 7: true unless the root supervisor's sweep heartbeat
  * (util/supervisor.h) has gone stale. A heartbeat of 0 means the
@@ -204,6 +222,7 @@ static void *boot_sd_watchdog_pet_main(void *arg)
         int64_t pub_us = 0;
         bool have = node_health_last_verdict(&pub_us);
         int64_t verdict_age_us = have ? now_us - pub_us : 0;
+        boot_sd_watchdog_maybe_notify_ready();
         if (boot_sd_watchdog_pet_decide(boot_sd_watchdog_runtime_alive(),
                                         have, verdict_age_us,
                                         boot_sd_watchdog_recent_progress(),
@@ -302,8 +321,14 @@ bool boot_sd_watchdog_start(void *ctx)
      * send WATCHDOG=1 whenever the root supervisor sweep is stale, even
      * if some future call site forgets the explicit check above. */
     sd_notify_set_health_check(boot_sd_watchdog_runtime_alive);
-    sd_notify_ready();
-    sd_notify_status("zclassic23 started");
+    atomic_store(&g_notify_ready_sent, false);
+    if (tor_integration_is_enabled() && !tor_integration_is_ready()) {
+        sd_notify_status("waiting for onion DESCRIPTOR PUBLICATION");
+        printf("[sd-watchdog] holding READY=1 until onion "
+               "DESCRIPTOR PUBLICATION\n");
+    } else {
+        boot_sd_watchdog_maybe_notify_ready();
+    }
 
     /* Pet half: dedicated thread — see the heartbeat section header for why
      * it must not ride the health ring. */
