@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * File Transfer Controller — SHA3-verified, quantum-secure file service.
+ * File Transfer Controller — X25519/HKDF session with SHA3-verified files.
  *
  * Splits blockchain state (block files, UTXO snapshots) into ~50MB chunks.
  * Each chunk is SHA3-256 hashed. The manifest (ordered list of chunk hashes)

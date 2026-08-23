@@ -13,9 +13,7 @@
 #include "net/file_service.h"
 #include "net/rom_seed.h"
 #include "util/log_json.h"
-#include "crypto/sha3_crypt.h"
 #include "crypto/sha3.h"
-#include "core/random.h"
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -37,6 +35,7 @@
 #include "util/thread_registry.h"
 #include "util/thread_liveness.h"
 #include "json/json.h"
+#include "support/cleanse.h"
 static void fs_join_deadline_from_now(struct timespec *ts, int timeout_sec)
 {
     platform_time_realtime_timespec(ts);
@@ -186,6 +185,7 @@ static bool encrypt_frame(const struct fs_session *s, uint8_t type,
     sha3_256_write(&mac_ctx, (const unsigned char *)&counter, 8);
     sha3_256_write(&mac_ctx, out, sizeof(plain));
     sha3_256_finalize(&mac_ctx, out + sizeof(plain));
+    memory_cleanse(&mac_ctx, sizeof(mac_ctx));
 
     return true;
 }
@@ -205,6 +205,7 @@ static bool decrypt_frame(const struct fs_session *s,
     sha3_256_write(&mac_ctx, (const unsigned char *)&counter, 8);
     sha3_256_write(&mac_ctx, in, ct_len);
     sha3_256_finalize(&mac_ctx, expected_mac);
+    memory_cleanse(&mac_ctx, sizeof(mac_ctx));
 
     /* Constant-time compare */
     uint8_t diff = 0;
@@ -282,56 +283,6 @@ bool fs_recv_frame(struct fs_session *s, uint8_t *type_out,
     return true;
 }
 
-/* ── Handshake ─────────────────────────────────────────────────── */
-
-bool fs_handshake(struct fs_session *s, const uint8_t utxo_root[32],
-                   bool is_initiator)
-{
-    /* Generate our nonce */
-    GetRandBytes(s->our_nonce, 32);
-
-    if (is_initiator) {
-        /* Send our nonce in cleartext (pre-key) */
-        if (!send_all(s->fd, s->our_nonce, 32))
-            LOG_FAIL("filesvc", "handshake: failed to send nonce (initiator)");
-        /* Receive peer nonce */
-        if (!recv_all(s->fd, s->peer_nonce, 32))
-            LOG_FAIL("filesvc", "handshake: failed to recv peer nonce (initiator)");
-    } else {
-        /* Receive peer nonce first */
-        if (!recv_all(s->fd, s->peer_nonce, 32))
-            LOG_FAIL("filesvc", "handshake: failed to recv peer nonce (responder)");
-        /* Send our nonce */
-        if (!send_all(s->fd, s->our_nonce, 32))
-            LOG_FAIL("filesvc", "handshake: failed to send nonce (responder)");
-    }
-
-    /* Derive shared key from UTXO root + both nonces */
-    sha3_crypt_derive_key(utxo_root, s->our_nonce, s->peer_nonce, s->key);
-    s->key_established = true;
-
-    /* Verify key agreement: send SHA3(key || "verify") */
-    uint8_t verify[32];
-    struct sha3_256_ctx vctx;
-    sha3_256_init(&vctx);
-    sha3_256_write(&vctx, s->key, 32);
-    sha3_256_write(&vctx, (const unsigned char *)"verify", 6);
-    sha3_256_finalize(&vctx, verify);
-
-    if (!send_all(s->fd, verify, 32))
-        LOG_FAIL("filesvc", "handshake: failed to send verify hash");
-    uint8_t peer_verify[32];
-    if (!recv_all(s->fd, peer_verify, 32))
-        LOG_FAIL("filesvc", "handshake: failed to recv peer verify hash");
-
-    if (memcmp(verify, peer_verify, 32) != 0) {
-        LOG_FAIL("filesvc", "handshake: key verification failed (peer not on same chain)");
-    }
-
-    printf("fs_handshake: key established (SHA3 quantum-secure)\n");
-    return true;
-}
-
 /* ── Fast encrypted chunk transfer ─────────────────────────────── */
 /* Fast authenticated chunk transfer.
  * SHA3 MAC for integrity + authentication (post-quantum secure).
@@ -369,6 +320,7 @@ bool fs_send_chunk_fast(struct fs_session *s, const uint8_t *data,
     sha3_256_write(&mctx, sha3, 32);
     sha3_256_write(&mctx, data, size);
     sha3_256_finalize(&mctx, mac);
+    memory_cleanse(&mctx, sizeof(mctx));
 
     if (!send_all(s->fd, mac, 32))
         LOG_FAIL("filesvc", "send_chunk_fast: failed to send MAC");
@@ -414,6 +366,7 @@ bool fs_send_chunk_refusal(struct fs_session *s, uint8_t reason)
     sha3_256_write(&mctx, FS_ROM_REFUSAL_MAC_TAG, 32);
     sha3_256_write(&mctx, &reason, 1);
     sha3_256_finalize(&mctx, mac);
+    memory_cleanse(&mctx, sizeof(mctx));
     if (!send_all(s->fd, mac, 32))
         LOG_FAIL("filesvc", "send_chunk_refusal: failed to send MAC");
 
@@ -452,6 +405,7 @@ bool fs_recv_chunk_fast(struct fs_session *s, uint8_t **out,
     sha3_256_write(&mctx, expected_sha3, 32);
     sha3_256_write(&mctx, buf, size);
     sha3_256_finalize(&mctx, mac_expected);
+    memory_cleanse(&mctx, sizeof(mctx));
 
     /* Constant-time MAC verification */
     uint8_t diff = 0;
@@ -1177,6 +1131,7 @@ static void fs_handle_client_fd(int client_fd, const uint8_t client_ip[16])
     uint8_t ur[32];
     memset(ur, 0, 32);
     if (!fs_handshake(&session, ur, false)) {
+        fs_session_cleanup(&session);
         close(client_fd);
         return;
     }
@@ -1310,6 +1265,7 @@ static void fs_handle_client_fd(int client_fd, const uint8_t client_ip[16])
     printf("file_service: client done (%.1f MB/s, %llu bytes)\n",
            fs_session_mbps(&session),
            (unsigned long long)(session.bytes_sent + session.bytes_received));
+    fs_session_cleanup(&session);
     close(client_fd);
 }
 
@@ -1368,7 +1324,7 @@ static void *fs_server_thread(void *arg)
 
     listen(listen_fd, 32);
     log_jsonf(LOG_JSON_INFO, "file_service_listening",
-              "\"port\":%d,\"transport\":\"sha3_quantum_secure\"",
+              "\"port\":%d,\"transport\":\"x25519_hkdf_sha256_sha3\"",
               resolved_port);
 
     pthread_mutex_lock(&g_fs_state_mutex);
@@ -1703,12 +1659,12 @@ static void *range_worker_fn(void *arg)
     w->fd = wfd;  /* allow main thread to close on cancel */
     struct fs_session ws;
     fs_session_init(&ws, wfd);
-    if (!fs_handshake(&ws, w->utxo_root, true)) { close(wfd); LOG_NULL("filesvc", "worker %d: handshake failed", w->id); }
+    if (!fs_handshake(&ws, w->utxo_root, true)) { fs_session_cleanup(&ws); close(wfd); LOG_NULL("filesvc", "worker %d: handshake failed", w->id); }
 
     /* Solve the server's PoW challenge before requesting the range. */
     uint8_t solution[FS_POW_SOLUTION_SIZE];
     if (!fs_client_solve_challenge(&ws, solution)) {
-        close(wfd); LOG_NULL("filesvc", "worker %d: PoW challenge/solve failed", w->id);
+        fs_session_cleanup(&ws); close(wfd); LOG_NULL("filesvc", "worker %d: PoW challenge/solve failed", w->id);
     }
 
     /* Send the gated range request: [48-byte solution]["RNG"][start][end]. */
@@ -1723,11 +1679,11 @@ static void *range_worker_fn(void *arg)
     rng[FS_POW_SOLUTION_SIZE + 6] = (uint8_t)(w->end >> 8);
     rng[FS_POW_SOLUTION_SIZE + 7] = 0;
     if (!fs_send_frame(&ws, FS_REQUEST, rng, sizeof(rng))) {
-        close(wfd); LOG_NULL("filesvc", "worker %d: range request send failed", w->id);
+        fs_session_cleanup(&ws); close(wfd); LOG_NULL("filesvc", "worker %d: range request send failed", w->id);
     }
 
     for (uint32_t i = w->start; i < w->end; i++) {
-        if (atomic_load(&w->cancel)) { close(wfd); LOG_NULL("filesvc", "worker %d: cancelled", w->id); }
+        if (atomic_load(&w->cancel)) { fs_session_cleanup(&ws); close(wfd); LOG_NULL("filesvc", "worker %d: cancelled", w->id); }
         uint8_t *buf = NULL;
         uint32_t sz = 0;
         if (!fs_recv_chunk_fast(&ws, &buf, &sz, w->chunks[i].sha3)) {
@@ -1778,6 +1734,7 @@ static void *range_worker_fn(void *arg)
         free(buf);
         atomic_fetch_add(&w->bytes, sz);
     }
+    fs_session_cleanup(&ws);
     close(wfd);
     atomic_store(&w->done, true);
     return NULL;
@@ -1848,6 +1805,7 @@ bool fs_client_sync(const char *peer_addr, uint16_t port,
     fs_session_init(&session, fd);
 
     if (!fs_handshake(&session, utxo_root, true)) {
+        fs_session_cleanup(&session);
         close(fd);
         LOG_FAIL("filesvc", "client_sync: handshake failed with %s:%d", peer_addr, port);
     }
@@ -1861,6 +1819,7 @@ bool fs_client_sync(const char *peer_addr, uint16_t port,
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &mtv, sizeof(mtv));
 
     if (!fs_send_frame(&session, FS_MANIFEST, NULL, 0)) {
+        fs_session_cleanup(&session);
         close(fd);
         LOG_FAIL("filesvc", "client_sync: manifest request send failed to %s:%d", peer_addr, port);
     }
@@ -1900,12 +1859,14 @@ bool fs_client_sync(const char *peer_addr, uint16_t port,
              * file_index must address a real sink (0-252 block files, 253
              * block_index.bin, 254 consensus_snapshot.db); 255 is invalid. */
             if (c->size == 0 || c->size > 60 * 1024 * 1024) {
+                fs_session_cleanup(&session);
                 close(fd);
                 LOG_FAIL("filesvc", "client_sync: manifest chunk %u has invalid "
                          "size=%u (peer-supplied) — rejecting manifest",
                          num_chunks, c->size);
             }
             if (c->file_index > 254) {
+                fs_session_cleanup(&session);
                 close(fd);
                 LOG_FAIL("filesvc", "client_sync: manifest chunk %u has invalid "
                          "file_index=%u — rejecting manifest",
@@ -1916,6 +1877,7 @@ bool fs_client_sync(const char *peer_addr, uint16_t port,
     }
 
     if (num_chunks == 0) {
+        fs_session_cleanup(&session);
         close(fd);
         LOG_FAIL("filesvc", "client_sync: manifest empty (server still building)");
     }
@@ -1929,6 +1891,7 @@ bool fs_client_sync(const char *peer_addr, uint16_t port,
     for (uint32_t j = 0; j < num_chunks; j++)
         total_bytes += chunks[j].size;
     if (total_bytes > (uint64_t)FILE_MAX_CHUNKS * FILE_CHUNK_SIZE) {
+        fs_session_cleanup(&session);
         close(fd);
         LOG_FAIL("filesvc", "client_sync: manifest total %llu bytes exceeds "
                  "ceiling — rejecting manifest",
@@ -1999,6 +1962,7 @@ bool fs_client_sync(const char *peer_addr, uint16_t port,
     }
 
     /* Close manifest connection — we'll open parallel ones */
+    fs_session_cleanup(&session);
     close(fd);
 
     /* Launch 8 parallel workers, each downloads a range of chunks */
@@ -2194,6 +2158,7 @@ bool fs_client_sync(const char *peer_addr, uint16_t port,
         struct fs_session rs;
         fs_session_init(&rs, rfd);
         if (!fs_handshake(&rs, utxo_root, true)) {
+            fs_session_cleanup(&rs);
             close(rfd); free(retry_idx); break;
         }
 
@@ -2237,6 +2202,7 @@ bool fs_client_sync(const char *peer_addr, uint16_t port,
             free(buf);
         }
 
+        fs_session_cleanup(&rs);
         close(rfd);
         free(retry_idx);
         total_fail = (recovered >= total_fail) ? 0 : total_fail - recovered;

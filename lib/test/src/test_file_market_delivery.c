@@ -8,6 +8,7 @@
 #include "crypto/chacha20poly1305.h"
 #include "crypto/ed25519.h"
 #include "crypto/sha3.h"
+#include "crypto/sha3_crypt.h"
 #include "net/file_market_delivery.h"
 #include "net/file_service.h"
 #include "net/onion_v3_address.h"
@@ -107,6 +108,166 @@ static bool delivery_recv_exact(int fd, uint8_t *out, size_t len)
     return true;
 }
 
+static bool delivery_send_exact(int fd, const uint8_t *data, size_t len)
+{
+    size_t sent = 0;
+    while (sent < len) {
+        ssize_t n = send(fd, data + sent, len - sent, MSG_NOSIGNAL);
+        if (n <= 0)
+            return false;
+        sent += (size_t)n;
+    }
+    return true;
+}
+
+struct delivery_handshake_call {
+    struct fs_session session;
+    uint8_t root[32];
+    bool initiator;
+    bool ok;
+};
+
+static void *delivery_handshake_call_main(void *opaque)
+{
+    struct delivery_handshake_call *call = opaque;
+    call->ok = fs_handshake(&call->session, call->root, call->initiator);
+    return NULL;
+}
+
+/* Relay and record a real handshake plus paid ciphertext. A recorder using
+ * every public handshake byte and the historic KDF must fail to open it. */
+static bool delivery_handshake_capture_has_no_session_key(void)
+{
+    static const uint8_t paid_plain[] = "paid-wire-capture-proof";
+    int initiator_pair[2] = {-1, -1};
+    int responder_pair[2] = {-1, -1};
+    int attacker_pair[2] = {-1, -1};
+    pthread_t initiator_thread, responder_thread;
+    bool initiator_started = false, responder_started = false;
+    struct delivery_handshake_call initiator = {.initiator = true};
+    struct delivery_handshake_call responder = {.initiator = false};
+    uint8_t initiator_wire[64], responder_wire[64];
+    uint8_t private_wire[4 + sizeof(paid_plain) + POLY1305_TAG_SIZE];
+    uint8_t paid_sha3[32], captured_derivation[32];
+    uint8_t *opened = NULL, *attacker_opened = NULL;
+    uint32_t opened_size = 0, attacker_size = 0;
+    bool relayed = false;
+    bool result = false;
+
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, initiator_pair) != 0 ||
+        socketpair(AF_UNIX, SOCK_STREAM, 0, responder_pair) != 0)
+        goto done;
+    fs_session_init(&initiator.session, initiator_pair[0]);
+    fs_session_init(&responder.session, responder_pair[0]);
+    responder_started = pthread_create(&responder_thread, NULL,
+                                       delivery_handshake_call_main,
+                                       &responder) == 0;
+    initiator_started = responder_started &&
+        pthread_create(&initiator_thread, NULL, delivery_handshake_call_main,
+                       &initiator) == 0;
+    if (!initiator_started)
+        goto done;
+
+    relayed = delivery_recv_exact(initiator_pair[1], initiator_wire, 32) &&
+        delivery_send_exact(responder_pair[1], initiator_wire, 32) &&
+        delivery_recv_exact(responder_pair[1], responder_wire, 32) &&
+        delivery_send_exact(initiator_pair[1], responder_wire, 32) &&
+        delivery_recv_exact(initiator_pair[1], initiator_wire + 32, 32) &&
+        delivery_send_exact(responder_pair[1], initiator_wire + 32, 32) &&
+        delivery_recv_exact(responder_pair[1], responder_wire + 32, 32) &&
+        delivery_send_exact(initiator_pair[1], responder_wire + 32, 32);
+
+    if (!relayed)
+        goto done;
+    pthread_join(initiator_thread, NULL);
+    pthread_join(responder_thread, NULL);
+    initiator_started = responder_started = false;
+    if (!initiator.ok || !responder.ok ||
+        memcmp(initiator.session.key, responder.session.key, 32) != 0)
+        goto done;
+
+    sha3_256(paid_plain, sizeof(paid_plain), paid_sha3);
+    if (!fs_send_chunk_private(&responder.session, paid_plain,
+                               sizeof(paid_plain), paid_sha3) ||
+        !delivery_recv_exact(responder_pair[1], private_wire,
+                             sizeof(private_wire)) ||
+        !delivery_send_exact(initiator_pair[1], private_wire,
+                             sizeof(private_wire)) ||
+        !fs_recv_chunk_private(&initiator.session, &opened, &opened_size,
+                               sizeof(paid_plain), paid_sha3) ||
+        opened_size != sizeof(paid_plain) ||
+        memcmp(opened, paid_plain, sizeof(paid_plain)) != 0)
+        goto done;
+
+    const uint8_t zero_root[32] = {0};
+    sha3_crypt_derive_key(zero_root, initiator_wire, responder_wire,
+                          captured_derivation);
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, attacker_pair) != 0 ||
+        !delivery_send_exact(attacker_pair[0], private_wire,
+                             sizeof(private_wire)))
+        goto done;
+    struct fs_session attacker;
+    fs_session_init(&attacker, attacker_pair[1]);
+    memcpy(attacker.key, captured_derivation, 32);
+    memcpy(attacker.our_nonce, initiator_wire, 32);
+    memcpy(attacker.peer_nonce, responder_wire, 32);
+    attacker.key_established = true;
+    bool attacker_decrypted = fs_recv_chunk_private(
+        &attacker, &attacker_opened, &attacker_size,
+        sizeof(paid_plain), paid_sha3);
+    fs_session_cleanup(&attacker);
+
+    result = !attacker_decrypted && attacker_opened == NULL &&
+        memcmp(initiator.session.key, captured_derivation, 32) != 0;
+
+done:
+    if (initiator_pair[1] >= 0) close(initiator_pair[1]);
+    if (responder_pair[1] >= 0) close(responder_pair[1]);
+    if (initiator_started) pthread_join(initiator_thread, NULL);
+    if (responder_started) pthread_join(responder_thread, NULL);
+    fs_session_cleanup(&initiator.session);
+    fs_session_cleanup(&responder.session);
+    if (initiator_pair[0] >= 0) close(initiator_pair[0]);
+    if (responder_pair[0] >= 0) close(responder_pair[0]);
+    if (attacker_pair[0] >= 0) close(attacker_pair[0]);
+    if (attacker_pair[1] >= 0) close(attacker_pair[1]);
+    free(opened);
+    free(attacker_opened);
+    return result;
+}
+
+static bool delivery_handshake_rejects_zero_peer_key(void)
+{
+    int sockets[2] = {-1, -1};
+    pthread_t thread;
+    bool started = false;
+    struct delivery_handshake_call initiator = {.initiator = true};
+    uint8_t offered_public[32];
+    const uint8_t zero_public[32] = {0};
+    bool relayed = false;
+
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0)
+        return false;
+    fs_session_init(&initiator.session, sockets[0]);
+    started = pthread_create(&thread, NULL, delivery_handshake_call_main,
+                             &initiator) == 0;
+    if (started)
+        relayed = delivery_recv_exact(sockets[1], offered_public, 32) &&
+            delivery_send_exact(sockets[1], zero_public, 32);
+    close(sockets[1]);
+    if (started)
+        pthread_join(thread, NULL);
+    close(sockets[0]);
+
+    uint8_t key_or = 0;
+    for (size_t i = 0; i < sizeof(initiator.session.key); i++)
+        key_or |= initiator.session.key[i];
+    bool rejected = relayed && !initiator.ok &&
+        !initiator.session.key_established && key_or == 0;
+    fs_session_cleanup(&initiator.session);
+    return rejected;
+}
+
 struct delivery_server_call {
     struct fs_session *session;
     bool served;
@@ -148,6 +309,7 @@ static void *delivery_endpoint_server_main(void *opaque)
         fs_recv_frame(&session, &type, &payload, &payload_len) &&
         type == FS_REQUEST && file_market_delivery_serve(
             &session, client_ip, payload, payload_len);
+    fs_session_cleanup(&session);
     close(fd);
     return NULL;
 }
@@ -227,6 +389,10 @@ static bool onion_loopback_get(void *ctx, const char *onion_address,
 int file_market_delivery_tests(void)
 {
     int failures = 0;
+    DELIVERY_CHECK("captured handshake cannot reconstruct paid-file key",
+                   delivery_handshake_capture_has_no_session_key());
+    DELIVERY_CHECK("low-order X25519 peer key fails the handshake closed",
+                   delivery_handshake_rejects_zero_peer_key());
     struct fs_session server;
     struct file_market_delivery_request request, decoded;
     uint8_t wire[FILE_MARKET_DELIVERY_WIRE_BYTES], buyer_seed[32];
@@ -363,6 +529,10 @@ int file_market_delivery_tests(void)
     DELIVERY_CHECK("paid chunk wire is encrypted after authenticated reply",
         served && served_size == reply_roundtrip.size &&
         memcmp(body, "paid-chunk-proof", served_size) != 0);
+    if (socket_ready) {
+        fs_session_cleanup(&server);
+        fs_session_cleanup(&client);
+    }
     if (sockets[0] >= 0) close(sockets[0]);
     if (sockets[1] >= 0) close(sockets[1]);
 
@@ -409,6 +579,10 @@ int file_market_delivery_tests(void)
         memcmp(fetched.data, "paid-chunk-proof",
                sizeof("paid-chunk-proof")) == 0);
     free(fetched.data);
+    if (buyer_ready) {
+        fs_session_cleanup(&buyer_server);
+        fs_session_cleanup(&buyer_client);
+    }
     if (buyer_sockets[0] >= 0) close(buyer_sockets[0]);
     if (buyer_sockets[1] >= 0) close(buyer_sockets[1]);
 

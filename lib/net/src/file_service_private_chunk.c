@@ -67,6 +67,7 @@ static void private_derive_key(const struct fs_session *session,
     sha3_256_write(&sha, sender_nonce, 32);
     sha3_256_write(&sha, receiver_nonce, 32);
     sha3_256_finalize(&sha, out);
+    memory_cleanse(&sha, sizeof(sha));
 }
 
 static size_t private_aad(uint8_t out[sizeof(k_private_aad_domain) + 44],
