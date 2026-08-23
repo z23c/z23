@@ -77,6 +77,7 @@ citation, `git log --follow -- docs/work/<name>.md` recovers older intent.
 | [`os/A4-noise-transport-p1.md`](./os/A4-noise-transport-p1.md) | DESIGN | the Noise v2 P2P transport implementation contract |
 | [`os/A6-adaptive-client-puzzle.md`](./os/A6-adaptive-client-puzzle.md) | DESIGN | load-adaptive client-puzzle primitive design (not yet built) |
 | [`NAT_AND_ONION_TRANSPORT.md`](./NAT_AND_ONION_TRANSPORT.md) | DESIGN | onion-as-universal-rendezvous / clearnet-as-fast-path transport design notes (NAT traversal, onion hosting, package swarm); P2P-layer policy only, no consensus surface |
+| [`DIRECT_TRANSPORT.md`](./DIRECT_TRANSPORT.md) | DESIGN | UDP datagram fast path + PEX-lite clearnet discovery + disclosure posture (`onion`\|`clearnet`\|`none`) + `zses:v1` session invites; application plane only, no consensus surface; complements NAT_AND_ONION_TRANSPORT |
 | [`palace-design.md`](./palace-design.md) | DESIGN | code-legibility layer: file/group purpose, `code room`, the three P1/P2/P3 lint gates (§3 cited by `test_make_lint_gates.c`) |
 | [`service-result-convergence.md`](./service-result-convergence.md) | LIVE | `struct zcl_result` convergence ratchet inventory + lane plan for `app/services/`; gate is live, this is the shrinking-floor inventory |
 | [`secure-transport-design.md`](./secure-transport-design.md) | DESIGN | Noise_XX v2 transport protocol contract (implemented, default off) |
@@ -182,3 +183,34 @@ Each assignment lives at `docs/work/wt<N>-<slug>.md` and contains:
   appends a `FAILED` section with the failing test output.
 - **Two workers touch overlapping files (should not happen)** →
   second-to-merge rebases, orchestrator session resolves.
+
+## Late-indexed records (reconciled 2026-08-23)
+
+| File | Authority | Purpose |
+|---|---|---|
+| [`C23_LIVING_COMMONS_V2.md`](./C23_LIVING_COMMONS_V2.md) | DESIGN | additive pre-genesis protocol foundation: family commons + evidence economics objects and commands |
+| [`C23_P2P_CORE_INVENTORY.md`](./C23_P2P_CORE_INVENTORY.md) | DESIGN | reviewed P2P core-consolidation code inventory (2026-08-12); a map, not a plan |
+| [`canonical-unit-reconciliation.md`](./canonical-unit-reconciliation.md) | DESIGN | canonical unit reconciliation — explicitly PREPARED, NOT APPLIED; nothing here is live |
+| [`LIVE_TRANSACTION_DEMONSTRATIONS.md`](./LIVE_TRANSACTION_DEMONSTRATIONS.md) | LIVE | runbook: which cataloged transaction shapes are demonstrated live, and how |
+| [`REFLEX_REACTOR.md`](./REFLEX_REACTOR.md) | LIVE | local zero-wait reflex reactor: edit C23, receive first exact next-build result |
+| [`REFLEX_SUBSTRATE_AUDIT.md`](./REFLEX_SUBSTRATE_AUDIT.md) | EVIDENCE | measured coverage/latency audit of the merged reflex implementation (2026-08-12) |
+| [`SHOP_COMMAND.md`](./SHOP_COMMAND.md) | PLAN | owner-approved `zclassic shop` one-command sovereign storefront specification |
+| [`TRANSACTION_LAB.md`](./TRANSACTION_LAB.md) | LIVE | transaction laboratory notebook; keeps its two questions separate |
+| [`TRANSACTION_MICRO_LAB.md`](./TRANSACTION_MICRO_LAB.md) | PLAN | owner-visible 100-transaction micro lab demonstration plan |
+| [`ZC23_DISTRIBUTION_RULES.md`](./ZC23_DISTRIBUTION_RULES.md) | PLAN | ZC23 distribution rules — phase C2, owner-decided 2026-08-09 |
+| [`transaction-lab-events.jsonl`](./transaction-lab-events.jsonl) | EVIDENCE | event ledger backing TRANSACTION_LAB |
+| [`transaction-micro-lab-events.jsonl`](./transaction-micro-lab-events.jsonl) | EVIDENCE | event ledger backing TRANSACTION_MICRO_LAB |
+| [`zcode-selfhost-validation-ledger.json`](./zcode-selfhost-validation-ledger.json) | EVIDENCE | zcl.zcode_selfhost_validation_ledger.v1 snapshot |
+| [`zcode-selfhost-evidence/`](./zcode-selfhost-evidence/) | EVIDENCE | frozen born-red replay artifacts: 15 paired json+log files (foundation-replay, codec-cursor, package-dev, package-registry, score-receipt, sha3-foundation) |
+| [`zcode-selfhost-evidence/born-red-base-foundation-replay.json`](./zcode-selfhost-evidence/born-red-base-foundation-replay.json) | EVIDENCE | born-red replay artifact (base-foundation-replay json half of paired proof) |
+| [`zcode-selfhost-evidence/born-red-base-foundation-replay.log`](./zcode-selfhost-evidence/born-red-base-foundation-replay.log) | EVIDENCE | born-red replay artifact (base-foundation-replay log half of paired proof) |
+| [`zcode-selfhost-evidence/born-red-codec-cursor.json`](./zcode-selfhost-evidence/born-red-codec-cursor.json) | EVIDENCE | born-red replay artifact (codec-cursor json half of paired proof) |
+| [`zcode-selfhost-evidence/born-red-codec-cursor.log`](./zcode-selfhost-evidence/born-red-codec-cursor.log) | EVIDENCE | born-red replay artifact (codec-cursor log half of paired proof) |
+| [`zcode-selfhost-evidence/born-red-package-dev.json`](./zcode-selfhost-evidence/born-red-package-dev.json) | EVIDENCE | born-red replay artifact (package-dev json half of paired proof) |
+| [`zcode-selfhost-evidence/born-red-package-dev.log`](./zcode-selfhost-evidence/born-red-package-dev.log) | EVIDENCE | born-red replay artifact (package-dev log half of paired proof) |
+| [`zcode-selfhost-evidence/born-red-package-registry.json`](./zcode-selfhost-evidence/born-red-package-registry.json) | EVIDENCE | born-red replay artifact (package-registry json half of paired proof) |
+| [`zcode-selfhost-evidence/born-red-package-registry.log`](./zcode-selfhost-evidence/born-red-package-registry.log) | EVIDENCE | born-red replay artifact (package-registry log half of paired proof) |
+| [`zcode-selfhost-evidence/born-red-score-receipt.json`](./zcode-selfhost-evidence/born-red-score-receipt.json) | EVIDENCE | born-red replay artifact (score-receipt json half of paired proof) |
+| [`zcode-selfhost-evidence/born-red-score-receipt.log`](./zcode-selfhost-evidence/born-red-score-receipt.log) | EVIDENCE | born-red replay artifact (score-receipt log half of paired proof) |
+| [`zcode-selfhost-evidence/born-red-sha3-foundation-replay.json`](./zcode-selfhost-evidence/born-red-sha3-foundation-replay.json) | EVIDENCE | born-red replay artifact (sha3-foundation-replay json half of paired proof) |
+| [`zcode-selfhost-evidence/born-red-sha3-foundation-replay.log`](./zcode-selfhost-evidence/born-red-sha3-foundation-replay.log) | EVIDENCE | born-red replay artifact (sha3-foundation-replay log half of paired proof) |
