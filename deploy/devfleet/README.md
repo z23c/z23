@@ -135,6 +135,34 @@ update local status and first-pass evidence, but recurring telemetry does not
 commit, push, move `main`, or change product source identity. Publishing a
 reviewed snapshot is a separate manual product-history action.
 
+### Advancing the pinned referee
+
+The pin is deliberate: a judge that silently tracks `main` is no longer a
+judge, so nothing advances the referee automatically. The pin does, however,
+have to be advanced *deliberately*, and that is what
+`tools/scripts/referee_refresh.sh` is for.
+
+```
+tools/scripts/referee_refresh.sh --check   # rc=1 if the referee is behind main
+tools/scripts/referee_refresh.sh           # advance it to origin/main
+```
+
+`--check` exists because staleness is otherwise invisible: the gate keeps
+logging confident verdicts while judging with code that `main` has already
+fixed, and the only symptom is a peer gap that never clears. Treat a `STALE`
+result as a reason to look, not as an error in itself — a referee is *supposed*
+to lag a lane that is still in review.
+
+The refresh stages a new checkout out of place, then takes the same lock a
+cycle takes before swapping it in. That ordering matters: `bash` reads a script
+incrementally as it executes, so replacing the tree under a live cycle can
+produce a half-old, half-new judge. If the lock is busy the refresh refuses and
+leaves the existing checkout untouched. One rollback copy is retained.
+
+Advance the pin through this command rather than by adding a numbered checkout
+directory beside the old one; the running gate's identity has to stay traceable
+to a commit.
+
 The recurring onion pair ledger follows the same rule: absent an explicit
 `PAIR_PROBE_FILE`, it writes
 `${XDG_STATE_HOME:-$HOME/.local/state}/zclassic23-referee/pair_probe.jsonl`.
