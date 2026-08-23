@@ -653,7 +653,14 @@ static bool headers_bind_reason_can_retry_store(const char *reason)
           * merkle root, nor nonce), so the index alone cannot bind and BOTH
           * stores are worth asking. This is the ordinary path on every
           * bundle/snapshot-seeded node, not an exception. */
-         strcmp(reason, HDR_REASON_NO_INDEX_SOLUTION) == 0);
+         strcmp(reason, HDR_REASON_NO_INDEX_SOLUTION) == 0 ||
+         /* Same condition after attribution renames it: the serve path
+          * relabels no-index-solution to no-header-bytes once it has
+          * confirmed no store on this node holds them. That rename is the
+          * point at which asking a PEER is the only remaining move, so it
+          * must stay retryable -- dropping it here silently disarms the
+          * bounded header-only repair on exactly the boxes that need it. */
+         strcmp(reason, HDR_REASON_NO_HEADER_BYTES) == 0);
 }
 
 static bool headers_refresh_index_from_header(struct block_index *iter,
