@@ -7,6 +7,6 @@ ARTIFACT_SHA256=a61a2f8af277c5ee1c5ec91f35e4daa6703d3ed7ff87f6a2341885c6246a566f
 RUNNING_SOURCE_ID=84e72a99812ca1f6ad75a472badf7c3a55d12edd198aa9a0ca57e0bd788ca836
 ONION_RELAY=pass
 CLEARNET_RELAY=pass
-OBSERVED_AT=2026-08-23T02:02:53Z
+OBSERVED_AT=2026-08-23T02:12:27Z
 GAPS=none
-DETAIL=INSTALL: wiped scratch datadir; clean-PATH install_z23.sh SECS=1 stdout=z23 status; installed binary SHA256 matches pack; installed z23 answered getblockcount on that datadir. DUAL: one isolated node, outbound onion:8055 vs node1.txt AND outbound clearnet P2P both syncing_headers startingheight 3225805. Production pid unchanged.
+DETAIL=INSTALL: wiped /tmp/zcl23-install-e2e/datadir; clean-PATH install_z23.sh --source=build/release/z23-x86_64-linux SECS=1 stdout=z23 status; installed SHA256=a61a2f8af277c5ee1c5ec91f35e4daa6703d3ed7ff87f6a2341885c6246a566f matches pack; installed z23 answered getblockcount=0 on that datadir. DUAL: one isolated node pid 830201, outbound onion 5wvfod4ikluv4w3lqe3whn2k7xdsympxxu2qkqw452thtjxbar5hrcqd.onion:8055 vs node1.txt state=handshake_complete startingheight=3225812 AND outbound clearnet P2P state=syncing_headers startingheight=3225810, both subver=/ZClassic23:0.1.0/. Production pid 3716895 unchanged.
