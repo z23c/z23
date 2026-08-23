@@ -19,8 +19,9 @@ env at `~/.config/zclassic23-fleetsync/<box>.env` (see below). The
 ## Files per box
 
 - `<box>.txt` — static identity: `BOX`, `ONION_ADDRESS`, `P2P_PORT` (the port
-  the onion service forwards to), `SOURCE_SHA` of the checkout the node was
-  built from.
+  the onion service forwards to), and `SOURCE_SHA`. Legacy publications use a
+  40-hex Git commit; exact runtime publications use the binary's authoritative
+  64-hex `source_id_sha256`.
 - `<box>.sync` — heartbeat written by the sync loop: last synced SHA, node
   liveness, peer count, last action, named error if any.
 - `<box>.status` — on-demand evidence (for example cross-host round-trip
@@ -63,6 +64,11 @@ heartbeat is older than `PUSH_HEARTBEAT_SECONDS`. It fails closed: a dirty or
 diverged checkout, a failed build, or a failed restart is recorded as a named
 `SYNC_ERROR` and never force-resolved.
 
+Fleet commits use the checkout's configured Git author and email. Configure an
+email associated with the operator's GitHub account when profile attribution
+and its avatar are required; the box identity remains explicit in the commit
+message and the committed record.
+
 `RESTART_PROD=auto` lets the loop swap the production binary and restart its
 systemd unit on new main. That restarts soak clocks; use `manual` on a box
 whose production node is mid-acceptance.
@@ -77,15 +83,27 @@ sync loop:
 ```
 
 Each cycle pulls `origin/main`, validates `node1.txt` through `node4.txt`, and
-dials every missing peer through its published onion endpoint from the
-isolated node. A peer counts only after the P2P state machine reaches `active`
-(VERSION/VERACK complete) and its handshake height matches the isolated
-node's tip at the start or end of that bounded observation. Missing or
-malformed publications, pre-onion source identities, refused dials,
-incomplete handshakes, and height mismatches remain named in
-`mesh.status`. The script exits zero only on a 4/4 observation. After two such
-observations at least four minutes apart it records `HOLD=pass`, and later
-timer invocations leave that acceptance evidence untouched.
+first dials the hub's own published onion from a fresh mainnet instance in an
+audited throwaway `/tmp` datadir. The hub counts only when that external path
+reaches VERSION/VERACK; its long-running process is never used as its own
+self-probe. The referee then dials every missing remote peer through its
+published onion endpoint from the long-running isolated node. A remote peer
+counts only after the P2P state machine reaches `active` (VERSION/VERACK
+complete) and its handshake height matches the isolated node's tip at the
+start or end of that bounded observation.
+
+`mesh.status` records every node's published `SOURCE_SHA`, its identity kind,
+and whether it is stale against the observed `main`. Git identities carry the
+exact commit distance. An authoritative runtime `source_id_sha256` cannot be
+ordered against Git without a separate binding, so its staleness is explicitly
+`unknown` rather than guessed. Staleness is evidence, not by itself a mesh
+failure: a Git source that is still in main history and includes the required
+onion-P2P baseline may interoperate. A missing, invalid, foreign, or pre-onion
+Git source remains a named hard gap. Missing or malformed publications, a
+failed fresh self-dial, refused remote dials, incomplete handshakes, and height
+mismatches are also named. The script exits zero only on a 4/4 observation.
+After two such observations at least four minutes apart it records `HOLD=pass`,
+and later timer invocations leave that acceptance evidence untouched.
 
 The mesh gate never installs a binary or signals either node. In particular,
 it has no production-unit code path; production restart authority remains

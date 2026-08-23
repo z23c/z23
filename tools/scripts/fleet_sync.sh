@@ -227,8 +227,7 @@ if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
 fi
 
 git add "$SYNC_FILE"
-git -c user.name="$BOX-fleetsync" -c user.email="$BOX@devfleet.local" \
-    commit --quiet -m "devfleet: $BOX sync heartbeat"
+git commit --quiet -m "devfleet: $BOX sync heartbeat"
 pushed=0
 for attempt in 1 2 3; do
     git fetch origin --quiet

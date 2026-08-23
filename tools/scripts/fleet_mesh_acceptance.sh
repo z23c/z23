@@ -4,8 +4,10 @@
 # The hub runs this from cron every five minutes.  One bounded cycle:
 #   * reconciles the checkout with origin/main without discarding local work;
 #   * validates all four neutral node publications;
+#   * self-dials the hub onion from a fresh, isolated mainnet instance;
 #   * asks the isolated node to dial every missing peer by its onion endpoint;
 #   * requires an ACTIVE peer (VERSION/VERACK complete) at tip-height parity;
+#   * flags each publication's SOURCE_SHA freshness against the observed main;
 #   * writes and publishes deploy/devfleet/mesh.status.
 #
 # Two full observations separated by a real watcher interval set HOLD=pass.
@@ -17,6 +19,8 @@
 # Development-only controls:
 #   FLEET_MESH_GIT_MODE=local   skip fetch/commit/push, but write status
 #   FLEET_MESH_DIAL_TIMEOUT=45  bounded seconds to observe a handshake
+#   FLEET_MESH_SELF_DIAL_TIMEOUT=120  total fresh-probe budget
+#   FLEET_MESH_SELF_DIAL_PORT_BASE=39250  isolated 39xxx port quad
 
 set -euo pipefail
 
@@ -35,12 +39,16 @@ fi
 EXPECTED_NODES=4
 GIT_MODE="${FLEET_MESH_GIT_MODE:-publish}"
 DIAL_TIMEOUT="${FLEET_MESH_DIAL_TIMEOUT:-45}"
+SELF_DIAL_TIMEOUT="${FLEET_MESH_SELF_DIAL_TIMEOUT:-120}"
+SELF_DIAL_PORT_BASE="${FLEET_MESH_SELF_DIAL_PORT_BASE:-39250}"
 MIN_PASS_INTERVAL="${FLEET_MESH_MIN_PASS_INTERVAL:-240}"
 STATE_DIR="$HOME/.local/state/zclassic23-fleetsync"
 STATUS_REL="deploy/devfleet/mesh.status"
 STATUS_FILE="$REPO_DIR/$STATUS_REL"
 ZCL_CLI="${FLEET_MESH_CLI:-$REPO_DIR/build/bin/z23}"
 JSONQ="${FLEET_MESH_JSONQ:-$REPO_DIR/build/bin/jsonq}"
+NODE_BIN="${FLEET_MESH_NODE_BIN:-$REPO_DIR/build/bin/zclassic23}"
+RPC_BIN="${FLEET_MESH_RPC_BIN:-$REPO_DIR/build/bin/zcl-rpc}"
 ONION_BASE_COMMIT="355808b13b704624927d9c997a1d5677f17486f6"
 
 case "$BOX" in
@@ -51,19 +59,29 @@ case "$GIT_MODE" in
     publish|local) ;;
     *) echo "fleet-mesh: invalid FLEET_MESH_GIT_MODE: $GIT_MODE" >&2; exit 2 ;;
 esac
-case "$DIAL_TIMEOUT:$MIN_PASS_INTERVAL" in
-    *[!0-9:]*|:*|*:) echo "fleet-mesh: timeout values must be unsigned integers" >&2; exit 2 ;;
+case "$DIAL_TIMEOUT:$SELF_DIAL_TIMEOUT:$SELF_DIAL_PORT_BASE:$MIN_PASS_INTERVAL" in
+    *[!0-9:]*|:*|*:) echo "fleet-mesh: timeout/port values must be unsigned integers" >&2; exit 2 ;;
 esac
 if [ "$DIAL_TIMEOUT" -lt 1 ] || [ "$DIAL_TIMEOUT" -gt 300 ]; then
     echo "fleet-mesh: FLEET_MESH_DIAL_TIMEOUT must be in 1..300" >&2
+    exit 2
+fi
+if [ "$SELF_DIAL_TIMEOUT" -lt 1 ] || [ "$SELF_DIAL_TIMEOUT" -gt 180 ]; then
+    echo "fleet-mesh: FLEET_MESH_SELF_DIAL_TIMEOUT must be in 1..180" >&2
+    exit 2
+fi
+if [ "$SELF_DIAL_PORT_BASE" -lt 39000 ] ||
+   [ "$SELF_DIAL_PORT_BASE" -gt 39990 ]; then
+    echo "fleet-mesh: FLEET_MESH_SELF_DIAL_PORT_BASE must be in 39000..39990" >&2
     exit 2
 fi
 if [ "$MIN_PASS_INTERVAL" -lt 1 ] || [ "$MIN_PASS_INTERVAL" -gt 3600 ]; then
     echo "fleet-mesh: FLEET_MESH_MIN_PASS_INTERVAL must be in 1..3600" >&2
     exit 2
 fi
-if [ ! -x "$ZCL_CLI" ] || [ ! -x "$JSONQ" ]; then
-    echo "fleet-mesh: z23 or jsonq is not built" >&2
+if [ ! -x "$ZCL_CLI" ] || [ ! -x "$JSONQ" ] ||
+   [ ! -x "$NODE_BIN" ] || [ ! -x "$RPC_BIN" ]; then
+    echo "fleet-mesh: z23/jsonq/zclassic23/zcl-rpc is not built" >&2
     exit 2
 fi
 if [ -z "${DEVFLEET_DATADIR:-}" ] || [ -z "${DEVFLEET_RPCPORT:-}" ] ||
@@ -178,9 +196,9 @@ json_get() {
     printf '%s' "$document" | "$JSONQ" get "$path" 2>/dev/null || true
 }
 
-peer_row() {
-    local endpoint="$1" peers count i addr row
-    peers="$(cli getpeerinfo 2>/dev/null || true)"
+peer_row_from() {
+    local cli_fn="$1" endpoint="$2" peers count i addr row
+    peers="$("$cli_fn" getpeerinfo 2>/dev/null || true)"
     case "$peers" in
         \{*) peers="$(printf '%s' "$peers" | "$JSONQ" unwrap 2>/dev/null || true)" ;;
     esac
@@ -199,6 +217,110 @@ peer_row() {
     done
     return 1
 }
+
+peer_row() { peer_row_from cli "$1"; }
+
+probe_cli() {
+    timeout 60 "$ZCL_CLI" -datadir="$ISO_DD" -rpcport="$ISO_RPCPORT" \
+        "$@" 2>/dev/null
+}
+
+probe_peer_row() { peer_row_from probe_cli "$1"; }
+
+# Prove the published hub onion from a new process and empty /tmp datadir on
+# every observation.  The shared isolation helper owns port refusal, process-
+# group teardown, and the structural canonical-datadir exclusion.  Run it in a
+# subshell so an isolation refusal becomes a named mesh gap and its EXIT trap
+# cannot affect the long-running referee.
+fresh_self_dial() (
+    set -euo pipefail
+    local endpoint="$1" start deadline status bootstrap add_out add_error
+    local row state version elapsed
+
+    ISO_KIND=fleet-selfdial
+    ISO_PORT_BASE="$SELF_DIAL_PORT_BASE"
+    ISO_NODE_BIN="$NODE_BIN"
+    ISO_RPC_BIN="$RPC_BIN"
+    # shellcheck source=tools/scripts/isolated_node_env.sh
+    . "$REPO_DIR/tools/scripts/isolated_node_env.sh"
+    iso_init >/dev/null
+
+    start="$(date +%s)"
+    deadline=$((start + SELF_DIAL_TIMEOUT))
+    setsid "$ISO_NODE_BIN" \
+        -datadir="$ISO_DD" \
+        -port="$ISO_PORT" -rpcport="$ISO_RPCPORT" \
+        -fsport="$ISO_FSPORT" -httpsport="$ISO_HTTPSPORT" \
+        -connect=127.0.0.1:"$ISO_CONNECT_SINK" \
+        -listen -tor -onion-persist -operator-lane=test \
+        -nobgvalidation -nolegacyimport -nofilesync -showmetrics=0 \
+        >"$ISO_DD/node.log" 2>&1 &
+    ISO_NODE_PID=$!
+    ISO_PGID="$ISO_NODE_PID"
+
+    probe_finish() {
+        local rc="$1" detail="$2"
+        set +e
+        iso_cleanup
+        wait "$ISO_NODE_PID" 2>/dev/null || true
+        trap - EXIT INT TERM
+        printf '\nSELF_DIAL_RESULT=%s\n' "$detail"
+        exit "$rc"
+    }
+
+    if ! iso_wait_rpc_ready "$SELF_DIAL_TIMEOUT" >/dev/null 2>&1; then
+        probe_finish 1 self_dial_rpc_not_ready
+    fi
+
+    bootstrap="absent"
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        if ! kill -0 "$ISO_NODE_PID" 2>/dev/null; then
+            probe_finish 1 self_dial_probe_exited_during_tor_bootstrap
+        fi
+        status="$(probe_cli core network onion status 2>/dev/null || true)"
+        bootstrap="$(json_get "$status" data.bootstrap_state)"
+        [ -z "$bootstrap" ] && bootstrap="$(json_get "$status" bootstrap_state)"
+        [ "$bootstrap" = ready ] && break
+        sleep 1
+    done
+    if [ "$bootstrap" != ready ]; then
+        probe_finish 1 \
+            "self_dial_tor_not_ready:bootstrap=${bootstrap:-absent}"
+    fi
+
+    add_out="$(iso_rpc addnode "\"$endpoint\"" '"add"' 2>/dev/null || true)"
+    add_error="$(json_get "$add_out" error)"
+    case "$add_error" in
+        ''|null) ;;
+        *)
+            probe_finish 1 \
+                "self_dial_addnode_refused:error=$(clean_detail "$add_error")"
+            ;;
+    esac
+
+    state="absent"
+    version=""
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        if ! kill -0 "$ISO_NODE_PID" 2>/dev/null; then
+            probe_finish 1 self_dial_probe_exited_during_handshake
+        fi
+        row="$(probe_peer_row "$endpoint" || true)"
+        state="$(json_get "$row" state)"
+        version="$(json_get "$row" version)"
+        # A fresh mainnet node advances immediately into header sync after
+        # verack.  The negotiated nonzero protocol version is the established
+        # stranger-join proof that VERSION/VERACK completed; requiring
+        # state=active here would misclassify syncing_headers as handshake rot.
+        if [[ "$version" =~ ^[1-9][0-9]*$ ]]; then
+            elapsed=$(( $(date +%s) - start ))
+            probe_finish 0 \
+                "self_dial_version_verack:protocol=$version:state=${state:-unknown}:seconds=$elapsed"
+        fi
+        sleep 1
+    done
+    probe_finish 1 \
+        "self_dial_version_verack_incomplete:state=${state:-absent}"
+)
 
 field_from_file() {
     local file="$1" key="$2" count value
@@ -237,23 +359,71 @@ read_node_record() {
     elif [[ ! "$NODE_PORT" =~ ^[0-9]+$ ]] ||
          [ "$NODE_PORT" -lt 1 ] || [ "$NODE_PORT" -gt 65535 ]; then
         NODE_RECORD_ERROR="invalid_p2p_port"
-    elif [[ ! "$NODE_SOURCE" =~ ^[0-9a-f]{40}$ ]]; then
+    elif [[ "$NODE_SOURCE" =~ ^[0-9a-f]{40}$ ]]; then
+        if ! git cat-file -e "$NODE_SOURCE^{commit}" 2>/dev/null ||
+           ! git merge-base --is-ancestor "$NODE_SOURCE" HEAD; then
+            NODE_RECORD_ERROR="source_sha_not_in_main_history"
+        elif ! git merge-base --is-ancestor "$ONION_BASE_COMMIT" "$NODE_SOURCE"; then
+            NODE_RECORD_ERROR="source_predates_onion_p2p"
+        fi
+    elif [[ ! "$NODE_SOURCE" =~ ^[0-9a-f]{64}$ ]]; then
         NODE_RECORD_ERROR="invalid_source_sha"
-    elif ! git cat-file -e "$NODE_SOURCE^{commit}" 2>/dev/null; then
-        NODE_RECORD_ERROR="source_sha_not_in_main_history"
-    elif ! git merge-base --is-ancestor "$ONION_BASE_COMMIT" "$NODE_SOURCE"; then
-        NODE_RECORD_ERROR="source_predates_onion_p2p"
     fi
     [ -z "$NODE_RECORD_ERROR" ]
 }
 
 declare -A NODE_RESULTS
+declare -A NODE_SOURCE_SHAS
+declare -A NODE_SOURCE_KINDS
+declare -A NODE_SOURCE_STALE
+declare -A NODE_SOURCE_BEHIND
+declare -A NODE_SOURCE_DETAILS
 declare -a GAPS
 PASS_COUNT=0
 PUBLISHED_COUNT=0
 LOCAL_HEIGHT_BEFORE=""
 LOCAL_HEIGHT_AFTER=""
 LOCAL_HASH=""
+
+record_source_evidence() {
+    local node="$1" behind
+    NODE_SOURCE_SHAS[$node]="${NODE_SOURCE:-absent}"
+    NODE_SOURCE_KINDS[$node]=unknown
+    NODE_SOURCE_STALE[$node]=unknown
+    NODE_SOURCE_BEHIND[$node]=unknown
+    NODE_SOURCE_DETAILS[$node]="${NODE_RECORD_ERROR:-unavailable}"
+
+    if [[ "${NODE_SOURCE:-}" =~ ^[0-9a-f]{64}$ ]]; then
+        NODE_SOURCE_KINDS[$node]=source_id_sha256
+        NODE_SOURCE_DETAILS[$node]=runtime_source_id_git_freshness_unmapped
+        return
+    fi
+    if [[ ! "${NODE_SOURCE:-}" =~ ^[0-9a-f]{40}$ ]]; then
+        [ "$NODE_RECORD_ERROR" = unpublished ] && NODE_SOURCE_KINDS[$node]=absent
+        [ "$NODE_RECORD_ERROR" = invalid_source_sha ] && NODE_SOURCE_KINDS[$node]=invalid
+        [ "$NODE_RECORD_ERROR" = unpublished ] || NODE_SOURCE_STALE[$node]=yes
+        return
+    fi
+    NODE_SOURCE_KINDS[$node]=git_commit
+    if ! git cat-file -e "$NODE_SOURCE^{commit}" 2>/dev/null ||
+       ! git merge-base --is-ancestor "$NODE_SOURCE" HEAD; then
+        NODE_SOURCE_STALE[$node]=yes
+        NODE_SOURCE_DETAILS[$node]=not_in_main_history
+        return
+    fi
+    behind="$(git rev-list --count "$NODE_SOURCE..HEAD")"
+    NODE_SOURCE_BEHIND[$node]="$behind"
+    if [ "$behind" -eq 0 ]; then
+        NODE_SOURCE_STALE[$node]=no
+        NODE_SOURCE_DETAILS[$node]=at_observed_main
+    else
+        NODE_SOURCE_STALE[$node]=yes
+        NODE_SOURCE_DETAILS[$node]="behind_observed_main:$behind"
+    fi
+    if ! git merge-base --is-ancestor "$ONION_BASE_COMMIT" "$NODE_SOURCE"; then
+        NODE_SOURCE_DETAILS[$node]="predates_onion_p2p:behind=$behind"
+    fi
+}
 
 record_pass() {
     local node="$1" detail="$2"
@@ -270,12 +440,24 @@ record_gap() {
 
 check_local_node() {
     local node="$1" chain_info blocks headers progress published_onion
+    local self_dial_detail self_dial_raw self_dial_rc source_error
+    source_error=""
     if ! read_node_record "$node"; then
+        record_source_evidence "$node"
         [ -f "deploy/devfleet/$node.txt" ] && PUBLISHED_COUNT=$((PUBLISHED_COUNT + 1))
-        record_gap "$node" "$NODE_RECORD_ERROR"
-        return
+        case "$NODE_RECORD_ERROR" in
+            invalid_source_sha|source_sha_not_in_main_history|source_predates_onion_p2p)
+                source_error="$NODE_RECORD_ERROR"
+                ;;
+            *)
+                record_gap "$node" "$NODE_RECORD_ERROR"
+                return
+                ;;
+        esac
+    else
+        record_source_evidence "$node"
+        PUBLISHED_COUNT=$((PUBLISHED_COUNT + 1))
     fi
-    PUBLISHED_COUNT=$((PUBLISHED_COUNT + 1))
     if [ "$NODE_PORT" != "$DEVFLEET_PORT" ]; then
         record_gap "$node" "published_port_differs_from_local_env"
         return
@@ -301,7 +483,25 @@ check_local_node() {
         return
     fi
     LOCAL_HEIGHT_BEFORE="$blocks"
-    record_pass "$node" "self_synced:height=$blocks"
+    if self_dial_raw="$(fresh_self_dial "$NODE_ONION:$NODE_PORT" 2>&1)"; then
+        self_dial_rc=0
+    else
+        self_dial_rc=$?
+    fi
+    self_dial_detail="$(printf '%s\n' "$self_dial_raw" |
+        sed -n 's/^SELF_DIAL_RESULT=//p' | tail -n 1)"
+    if [ -z "$self_dial_detail" ]; then
+        self_dial_detail="self_dial_isolation_refused:$(clean_detail "$self_dial_raw")"
+    fi
+    if [ "$self_dial_rc" -ne 0 ]; then
+        record_gap "$node" "${self_dial_detail:-self_dial_failed_without_detail}"
+        return
+    fi
+    if [ -n "$source_error" ]; then
+        record_gap "$node" "$source_error:$self_dial_detail"
+        return
+    fi
+    record_pass "$node" "self_synced:height=$blocks:$self_dial_detail"
 }
 
 check_remote_node() {
@@ -310,6 +510,7 @@ check_remote_node() {
     local publication_suffix
     source_error=""
     if ! read_node_record "$node"; then
+        record_source_evidence "$node"
         [ -f "deploy/devfleet/$node.txt" ] && PUBLISHED_COUNT=$((PUBLISHED_COUNT + 1))
         if [ "$NODE_RECORD_ERROR" = unpublished ]; then
             record_gap "$node" "$NODE_RECORD_ERROR"
@@ -325,6 +526,7 @@ check_remote_node() {
                 ;;
         esac
     else
+        record_source_evidence "$node"
         PUBLISHED_COUNT=$((PUBLISHED_COUNT + 1))
     fi
     publication_suffix=""
@@ -434,6 +636,16 @@ write_status() {
         printf 'SOURCE_SHA=%s\n' "$source_sha"
         local node
         for node in node1 node2 node3 node4; do
+            printf '%s_SOURCE_SHA=%s\n' "${node^^}" \
+                "${NODE_SOURCE_SHAS[$node]:-absent}"
+            printf '%s_SOURCE_SHA_KIND=%s\n' "${node^^}" \
+                "${NODE_SOURCE_KINDS[$node]:-unknown}"
+            printf '%s_SOURCE_SHA_STALE=%s\n' "${node^^}" \
+                "${NODE_SOURCE_STALE[$node]:-unknown}"
+            printf '%s_SOURCE_SHA_BEHIND=%s\n' "${node^^}" \
+                "${NODE_SOURCE_BEHIND[$node]:-unknown}"
+            printf '%s_SOURCE_SHA_DETAIL=%s\n' "${node^^}" \
+                "${NODE_SOURCE_DETAILS[$node]:-not_checked}"
             printf '%s=%s\n' "${node^^}" "${NODE_RESULTS[$node]:-fail:not_checked}"
         done
         printf 'GAPS=%s\n' "$gap_text"
@@ -447,9 +659,7 @@ publish_status() {
         log "status unchanged"
         return 0
     fi
-    git -c user.name="$BOX-fleetmesh" \
-        -c user.email="$BOX@devfleet.local" \
-        commit --quiet -m "devfleet: mesh acceptance ${PASS_COUNT}/${EXPECTED_NODES}"
+    git commit --quiet -m "devfleet: mesh acceptance ${PASS_COUNT}/${EXPECTED_NODES}"
 
     git fetch origin main --quiet || {
         log "REFUSED publish: post-commit fetch failed; commit preserved"
