@@ -1350,6 +1350,13 @@ int test_onion_directory(void)
     failures += od_test_app_peers(datadir);
     failures += od_test_served_pages(datadir);
 
+    /* Sub-test in its own file (test_onion_directory_stale_hearsay.c):
+     * the freshness boundary from both sides, and the bound on what a
+     * flood of expired relayed stamps costs the log. Runs last — it
+     * re-points the onion context at its own datadir. */
+    { extern int od_stale_hearsay_bound(void);
+      failures += od_stale_hearsay_bound(); }
+
     test_cleanup_tmpdir(datadir);
     onion_service_set_address(saved[0] ? saved : NULL);
 
