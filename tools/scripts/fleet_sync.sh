@@ -65,7 +65,7 @@ devfleet_peers() {
 devfleet_start() {
     setsid nohup build/bin/zclassic23 -datadir="$DEVFLEET_DATADIR" \
         -port="$DEVFLEET_PORT" -rpcport="$DEVFLEET_RPCPORT" $DEVFLEET_FLAGS \
-        > "$DEVFLEET_DATADIR/node.log" 2>&1 < /dev/null &
+        > "$DEVFLEET_DATADIR/node.log" 2>&1 < /dev/null 9>&- &
 }
 
 devfleet_stop() {
