@@ -1,7 +1,7 @@
 BOX=node3
 DRILL=ux_join_drill
 RUNS=6
-OBSERVED_AT=2026-08-23T03:01:00Z
+OBSERVED_AT=2026-08-23T03:22:47Z
 CLOCK=deploy/devfleet/ux_join_clock.jsonl
 SOURCE_SHA=9ad0b7ab78296e2d3f5f14171d06861d827ef8d0
 PEER=node1
@@ -18,23 +18,23 @@ BEST_SYNCED_LANE=regtest
 WORST_PEERED_S=59
 WORST_FIRST_MSG_S=65
 WORST_SYNCED_S=
-DEFECTS=mainnet_from_genesis_stall,c3_header_tip_stall,typed_peer_add_fix_unrestarted
+DEFECTS=mainnet_from_genesis_stall,c3_delta_sync_over_budget,typed_peer_add_fix_unrestarted
 DEFECT_mainnet_from_genesis_stall=expected: empty datadir vs live H*=3.2M; onion PEERED/FIRST_MSG are real
-DEFECT_c3_header_tip_stall=complete-state bundle staged and node booted; headers peaked then rewound around 48576 (SLOW ADVANCE) so checkpoint install never armed; last_height=4582 after 602s
+DEFECT_c3_delta_sync_over_budget=complete-state bundle installed at checkpoint 3056758 (seeded=1) but remaining fold to peer tip did not finish in 602s
 C3_MAKE=make mvp-coldstart-to-tip-local
 C3_SCRIPT=tools/scripts/cold_start_to_tip_probe.sh
-C3_VERDICT=fail
-C3_EXIT=1
+C3_VERDICT=seam
+C3_EXIT=3
 C3_MODE=consensus-state-bundle
-C3_SEEDED=0
+C3_SEEDED=1
 C3_BUNDLE_BYTES=513867776
 C3_SECONDS=602
-C3_PEER_TIP=3225851
-C3_LAST_HEIGHT=4582
-C3_LAST_HEADERS=48576
-C3_BLOCK_INDEX_BYTES=
+C3_PEER_TIP=3225857
+C3_LAST_HEIGHT=3056758
+C3_LAST_HEADERS=3056758
+C3_BLOCK_INDEX_BYTES=555253380
 C3_BUNDLE_SHA3=7a4a863e5a35d7c93e812326dfad8a71f72ff6f0be94f6a73cedf8100e029b9d
-C3_REASON=seed authority itself did not complete (<1M height/UTXOs) in budget; header tip stalled/rewound around 48576; complete-state bundle staged but not installed
+C3_REASON=seed authority loaded but forward-sync did not complete within budget; installed at checkpoint 3056758 vs peer_tip 3225857
 DEFECT_typed_peer_add_fix_unrestarted=source now treats JSON-RPC result:null as dial_requested (command_registry_catalog 0 fail); live node3 binary not restarted
 FIRST_MSG_OUTLIER=retired: 65s was inside ONION_STREAM_CONNECT_TIMEOUT_MS=120000 circuit cap; latest first_msg_s=18 on unchanged pid/onion
-DETAIL=C3 probe now prefers consensus-state-bundle (no longer skip). Run at 296cf236a: bundle 513867776 bytes staged, boot mode=consensus-state-bundle, seeded=0, last_height=4582 last_headers=48576 in 602s vs peer_tip=3225851. Header SLOW ADVANCE rewind is the named C3 gap. Onion drill on live pid 2845431: peered_s=11 first_msg_s=18. Regtest SYNCED_s=26.
+DETAIL=New-node instant-on works: header-chain seed fetched, checkpoint Equihash solution persisted, consensus-state-bundle installed, H*=3056758. C3 SEAM is the remaining ~170k-block fold vs 10min budget. Onion drill on live pid 2845431: peered_s=11 first_msg_s=18. Regtest SYNCED_s=26.
