@@ -933,6 +933,7 @@ add/remove a gate.
 - `check-stage-log-reorg-unsafe`
 - `check-stable-publish-contained`
 - `check-zclassicd-reach-allowlist`
+- `check-z23-release-install`
 - `check-no-csr-lock-on-finalize-drive`
 - `check-mint-skip-crypto-offline-only`
 - `check-wire-harness-security-gate`

@@ -10,6 +10,7 @@
 
 # Build artifacts
 build/
+/dist/
 
 # Vendor (built from source by `make vendor`, not tracked)
 # Exception: libsecp256k1.a is committed (custom Bitcoin Core fork build).

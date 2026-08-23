@@ -1413,6 +1413,7 @@ $(filter-out vendor/lib/libsecp256k1.a,$(VENDOR_LIBS)):
         check-promotion-receipt-chain \
         check-verification-coverage \
         check-ship-remote-transaction \
+        check-z23-release-install \
         check-identity-parser-single \
         check-status-reason-single \
         check-operator-needed-sink check-systemd-memory-budget check-doc-accuracy check-doc-counts check-doc-claims check-no-stale-pinned-facts check-markdown-links check-doc-inline-paths \
@@ -8649,6 +8650,13 @@ check-ship-remote-transaction:
 	@echo "══ LINT: remote ship transaction rollback + process qualification ══"
 	@./tools/lint/check_ship_remote_transaction.sh
 
+# Fail-closed Z23 release packager + installer: checksum mismatch never
+# installs, and the packager never invokes docker.
+check-z23-release-install:
+	@echo "══ LINT: z23 release package + fail-closed installer ══"
+	@bash packaging/release/build_release.sh --selftest
+	@bash tools/scripts/install_z23.sh --selftest
+
 # Gate — stop a tenth copy of the source-identity JSON parser from growing
 # back. tools/scripts/source_identity_lib.sh is the one canonical reader
 # (anchored on the FIRST "source_id_sha256" occurrence — a greedy copy
@@ -9165,6 +9173,7 @@ LINT_GATES := \
     check-promotion-receipt-chain \
     check-verification-coverage \
     check-ship-remote-transaction \
+    check-z23-release-install \
     check-identity-parser-single \
     check-status-reason-single \
     check-pipefail-status-pipe \

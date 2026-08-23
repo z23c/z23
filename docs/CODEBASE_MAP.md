@@ -168,7 +168,10 @@ job chain, plus `address_backfill`, `bg_workers`, `bg_verification`,
 
 `command/` (native command dispatch + dev hot-swap RPC), `lint/` (gate
 shell scripts), `fuzz/`, `soak/`, `sim/` (deterministic replay), `dev/`,
-`githooks/`, `scripts/`, `data/` (fixtures).
+`githooks/`, `scripts/`, `data/` (fixtures). Stripped x86_64-linux node
+packages land under `build/release/` from `packaging/release/build_release.sh`
+and are installed by `tools/scripts/install_z23.sh` from any node URL or
+local directory (SHA256SUMS fail-closed; no registry).
 
 The unified local loop is `tools/dev/watch-dev-lane.sh` (`make dev-watch`): it
 classifies a coalesced save, runs the shared impact plan, and selects check,
