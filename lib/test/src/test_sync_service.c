@@ -128,6 +128,56 @@ static int test_sync_service_probes_equal_peer_after_restart(void)
     return failures;
 }
 
+static int test_sync_service_probes_zero_height_onion_once(void)
+{
+    int failures = 0;
+
+    TEST("sync_service probes a zero-height ZCL23 onion edge exactly once") {
+        struct p2p_node onion;
+        struct p2p_node clearnet;
+
+        memset(&onion, 0, sizeof(onion));
+        onion.id = 15;
+        onion.state = PEER_ACTIVE;
+        onion.starting_height = 0;
+        onion.services = NODE_NETWORK | NODE_ZCL23;
+        onion.addr.svc.addr.has_torv3 = true;
+
+        ASSERT(syncsvc_should_begin_peer_sync(&onion, 3225916, 3225916,
+                                              SYNC_AT_TIP));
+        ASSERT(syncsvc_begin_peer_sync(&onion, 3225916, 3225916));
+        ASSERT(onion.state == PEER_SYNCING_HEADERS);
+        ASSERT(!syncsvc_should_mark_peer_caught_up(&onion, 3225916,
+                                                   3225916));
+        ASSERT(syncsvc_should_request_headers(&onion, 3225916, 121));
+
+        syncsvc_note_headers_requested(&onion, 121);
+        ASSERT(syncsvc_should_mark_peer_caught_up(&onion, 3225916,
+                                                  3225916));
+        ASSERT(syncsvc_peer_is_behind(&onion, 3225916));
+        ASSERT(!syncsvc_should_request_headers(&onion, 3225916, 1000));
+        onion.state = PEER_ACTIVE;
+        ASSERT(!syncsvc_should_begin_peer_sync(&onion, 3225916, 3225916,
+                                               SYNC_AT_TIP));
+
+        /* The exception is onion- and native-ZCL23-specific.  A generic
+         * zero-height clearnet peer remains proven substantially behind. */
+        memset(&clearnet, 0, sizeof(clearnet));
+        clearnet.id = 16;
+        clearnet.state = PEER_ACTIVE;
+        clearnet.starting_height = 0;
+        clearnet.services = NODE_NETWORK | NODE_ZCL23;
+        net_addr_set_ipv4(&clearnet.addr.svc.addr,
+                          (const unsigned char[4]){203, 0, 113, 16});
+        ASSERT(!syncsvc_should_begin_peer_sync(&clearnet, 3225916, 3225916,
+                                               SYNC_AT_TIP));
+        ASSERT(syncsvc_peer_is_behind(&clearnet, 3225916));
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
 static int test_sync_service_marks_caught_up_syncing_peers_active(void)
 {
     int failures = 0;
@@ -2143,6 +2193,7 @@ int test_sync_service(void)
     failures += test_sync_service_keeps_caught_up_peers_active();
     failures += test_sync_service_begins_when_peer_one_block_ahead();
     failures += test_sync_service_probes_equal_peer_after_restart();
+    failures += test_sync_service_probes_zero_height_onion_once();
     failures += test_sync_service_marks_caught_up_syncing_peers_active();
     failures += test_sync_service_request_policy();
     failures += test_sync_service_band_hole_forces_ibd_interval();

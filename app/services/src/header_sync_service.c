@@ -29,6 +29,25 @@ static _Atomic int64_t g_stale_window_min = 0;
 static _Atomic int64_t g_stale_window_max = 0;
 #define STALE_SUMMARY_WINDOW_SECS ((int64_t)60)
 
+/* ONION_EDGE_SYNC_GATE_startingheight
+ *
+ * A late outbound onion edge can complete VERSION/VERACK while advertising
+ * start_height=0.  The ordinary substantially-behind gate then suppresses
+ * every getheaders request, so the edge can remain ACTIVE without ever being
+ * tested as a header source.  Permit exactly one probe for a native ZCL23
+ * onion peer.  last_getheaders_time closes the exception as soon as that
+ * request is recorded; all later rounds use the ordinary height/backoff
+ * policy.  This is transport discovery only, never a validity shortcut. */
+static bool syncsvc_zero_height_onion_probe_pending(
+    const struct p2p_node *node)
+{
+    return node && !node->inbound && node->starting_height == 0 &&
+           net_addr_is_tor(&node->addr.svc.addr) &&
+           peer_supports_fast_sync(node->services) &&
+           atomic_load_explicit(&node->last_getheaders_time,
+                                memory_order_relaxed) == 0;
+}
+
 bool syncsvc_should_begin_peer_sync(const struct p2p_node *node,
                                     int our_height,
                                     int best_header_height,
@@ -41,6 +60,9 @@ bool syncsvc_should_begin_peer_sync(const struct p2p_node *node,
      * inbound peer, not an error worth logging. */
     if (node->inbound || node->state != PEER_ACTIVE)
         return false;
+
+    if (syncsvc_zero_height_onion_probe_pending(node))
+        return true;
 
     /* An equal-height warm restart still needs one outbound getheaders probe
      * to leave FINDING_PEERS; the reply grants no at-tip claim. */
@@ -77,6 +99,8 @@ bool syncsvc_should_mark_peer_caught_up(const struct p2p_node *node,
         return false;
     if (node->state != PEER_SYNCING_HEADERS &&
         node->state != PEER_SYNCING_BLOCKS)
+        return false;
+    if (syncsvc_zero_height_onion_probe_pending(node))
         return false;
     if (best_header_height > our_height + 1)
         return false;
@@ -386,6 +410,8 @@ static int64_t syncsvc_getheaders_interval(const struct p2p_node *node,
 bool syncsvc_peer_is_behind(const struct p2p_node *node, int our_height)
 {
     if (!node)
+        return false;
+    if (syncsvc_zero_height_onion_probe_pending(node))
         return false;
     /* Unknown advertised height (mid-handshake, or the co-located
      * zclassicd oracle before it reports a tip): cannot prove behind,
