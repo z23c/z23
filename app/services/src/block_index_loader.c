@@ -5,6 +5,7 @@
 
 #include "platform/time_compat.h"
 #include "services/block_index_loader.h"
+#include "services/block_index_flat_anchor.h"
 #include "services/block_row_verify.h"
 #include "services/block_index_integrity.h"
 #include "services/chain_state_service.h"
@@ -44,15 +45,9 @@
 #include "support/log_throttle.h"
 #include "util/safe_alloc.h"
 
-/* ── Flat-loader per-row admission quarantine ───────────────────────
- * The flat cache stores no merkle root / nonce / Equihash solution, so it
- * cannot hash-bind or re-check the solution the way the import + blocks-hydrate
- * loaders do; it CAN re-check that each stored hash still meets its own PoW
- * difficulty target. A row that fails is dropped per-row (never inserted into
- * the map, so header sync + body_fetch re-supply it) instead of admitting an
- * entry below PoW strength. The whole-file bii_verify SHA3 envelope stays the
- * OUTER gate; this is the inner one, capped by the shared
- * BLOCKS_HYDRATE_MAX_QUARANTINE outer bound. */
+/* Flat rows omit the complete header, so their inner admission only rechecks
+ * hash-versus-target. The outer SHA3 envelope and quarantine cap remain the
+ * whole-artifact guards; failed rows are left for P2P to re-supply. */
 static _Atomic int64_t g_flat_row_quarantined = 0;
 static struct log_throttle g_flat_row_quarantine_log = LOG_THROTTLE_INIT;
 
@@ -335,29 +330,22 @@ void promote_best_header_after_load(struct main_state *ms,
 
 /* ── save_block_index_flat ───────────────────────────────── */
 
-/* Payload writer for the embedded single-file format. Streams the
- * "ZCLI"+count+entries payload at the current file offset (48, right
- * after the integrity header the shared helper owns) while hashing
- * exactly those bytes.
- * The shared helper back-patches the {magic, version, size, sha3}
- * header and publishes the whole file with ONE atomic rename, so the
- * integrity commitment and the bytes it certifies can never diverge
- * across a crash. */
+/* Stream "ZCLI"+count+entries after the integrity header while hashing the
+ * exact payload. The shared helper back-patches its commitment and publishes
+ * the whole file with one atomic rename. */
 struct bif_emit_ctx {
+    struct main_state  *ms;
     struct block_index **sorted;
     size_t               count;
 };
-
 static bool bif_emit_payload(FILE *f, void *vctx,
                              uint64_t *out_payload_size,
                              uint8_t out_payload_sha3[32])
 {
     struct bif_emit_ctx *c = (struct bif_emit_ctx *)vctx;
-
     struct sha3_256_ctx hctx;
     sha3_256_init(&hctx);
     uint64_t bytes = 0;
-
     uint32_t magic = 0x5A434C49; /* "ZCLI" payload magic */
     uint32_t count32 = (uint32_t)c->count;
     if (fwrite(&magic, 4, 1, f) != 1 || // disk-io-lock: private-fd (block index flat file)
@@ -397,7 +385,20 @@ static bool bif_emit_payload(FILE *f, void *vctx,
         sha3_256_write(&hctx, (const uint8_t *)&entry, sizeof(entry));
         bytes += sizeof(entry);
     }
-
+    uint8_t anchor[BIFA_TRAILER_MAX];
+    size_t anchor_len = 0;
+    struct zcl_result ar = block_index_flat_anchor_encode(
+        c->ms, c->sorted, c->count, anchor, sizeof(anchor), &anchor_len);
+    if (!ar.ok)
+        return false;
+    if (anchor_len) {
+        if (fwrite(anchor, anchor_len, 1, f) != 1) {
+            LOG_FAIL("block_index_flat",
+                     "save_block_index_flat: anchor trailer write failed");
+        }
+        sha3_256_write(&hctx, anchor, anchor_len);
+        bytes += anchor_len;
+    }
     sha3_256_finalize(&hctx, out_payload_sha3);
     *out_payload_size = bytes;
     return true;
@@ -433,7 +434,7 @@ void save_block_index_flat(const char *datadir, struct main_state *ms)
      * a fresh body under a stale commitment. No lock is taken on this
      * path (it only iterates the single-threaded block_map), so the
      * shutdown/drive lock order is unaffected. */
-    struct bif_emit_ctx ectx = { .sorted = sorted, .count = count };
+    struct bif_emit_ctx ectx = { .ms = ms, .sorted = sorted, .count = count };
     struct zcl_result wr = bii_write_embedded(datadir, bif_emit_payload, &ectx);
     free(sorted);
     if (!wr.ok) {
@@ -482,13 +483,8 @@ struct zcl_result load_block_index_flat(const char *datadir, struct main_state *
         return ZCL_ERR(-4, "block_index_flat: mmap failed (%zu bytes): %s",
                        file_size, strerror(errno));
 
-    /* Format detection: the embedded single-file format prefixes the
-     * body with a 48-byte integrity header (magic "BIIE"). The legacy
-     * two-file format starts directly with the "ZCLI" payload magic at
-     * offset 0 and carries its integrity in a separate .sha3 sidecar.
-     * We peek 4 bytes to choose the payload offset, then — for the
-     * embedded format — VERIFY the embedded SHA3 over the payload
-     * BEFORE trusting a single byte. */
+    /* BIIE embeds a 48-byte integrity header; legacy ZCLI begins at offset 0.
+     * Verify the embedded payload before reading any row. */
     uint64_t payload_off = 0;
     {
         uint32_t lead;
@@ -496,10 +492,7 @@ struct zcl_result load_block_index_flat(const char *datadir, struct main_state *
         uint32_t embedded_magic;
         memcpy(&embedded_magic, BII_EMBEDDED_MAGIC, 4);
         if (lead == embedded_magic) {
-            /* New format — re-hash the payload against the embedded
-             * header; refuse loudly on any mismatch so boot falls
-             * through to the loader's quarantine path rather than
-             * trusting unverified bytes. */
+            /* Re-hash before trusting the payload. */
             struct ssio_sidecar_header ehdr;
             int ev = bii_verify_embedded(datadir, &ehdr, &payload_off);
             if (ev != 0) {
@@ -508,8 +501,7 @@ struct zcl_result load_block_index_flat(const char *datadir, struct main_state *
                                "FAILED (verdict=%d) — refusing the body", ev);
             }
         }
-        /* else: legacy "ZCLI"-magic body — payload_off stays 0; the
-         * sidecar bii_verify gate downstream owns its integrity. */
+        /* Legacy ZCLI keeps payload_off=0; its sidecar gate is downstream. */
     }
 
     uint32_t magic, count;
@@ -673,6 +665,14 @@ struct zcl_result load_block_index_flat(const char *datadir, struct main_state *
                 pindex->pprev = pp;
             /* else: parent not loaded — leave pprev NULL (see above). */
         }
+    }
+
+    /* Old files end at `expected`; old readers ignore the new trailer. */
+    if (file_size > expected) {
+        struct zcl_result ar = block_index_flat_anchor_apply(
+            ms, data + expected, file_size - expected);
+        if (!ar.ok)
+            LOG_WARN("block_index_flat", "%s", ar.message);
     }
 
     /* Timing only (no behavior change): the qsort + forward pass below is a

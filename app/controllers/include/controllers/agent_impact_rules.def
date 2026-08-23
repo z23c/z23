@@ -650,7 +650,7 @@ AGENT_IMPACT_RULE("tools/scripts/remote_node_update.sh|tools/scripts/lane_recove
 /* Instant dev loop Wave 1/2: Tier-2 fast restart (clean-shutdown marker + skip). */
 AGENT_IMPACT_RULE("config/src/boot_shutdown_marker.c|config/include/config/boot_shutdown_marker.h|config/src/boot_fast_restart.c|config/include/config/boot_fast_restart.h|lib/test/src/test_shutdown_marker.c", "shutdown_marker unclean_shutdown_advance boot_phase make_lint_gates")
 AGENT_IMPACT_RULE("config/src/boot_datadir_lock.c|config/include/config/boot_datadir_lock.h|lib/test/src/test_boot_datadir_lock.c", "boot_datadir_lock make_lint_gates")
-AGENT_IMPACT_RULE("app/services/src/block_index_loader.c|app/services/src/block_index_loader_rebuild.c|app/services/src/block_index_blocks_hydrate.c|app/services/include/services/block_index_loader.h|lib/test/src/test_block_index_loader.c|lib/test/src/test_block_index_rebuild.c", "load_verify_boot block_index_loader block_index_rebuild block_index_integrity make_lint_gates")
+AGENT_IMPACT_RULE("app/services/src/block_index_loader.c|app/services/src/block_index_loader_rebuild.c|app/services/src/block_index_blocks_hydrate.c|app/services/src/block_index_flat_anchor.c|app/services/include/services/block_index_loader.h|app/services/include/services/block_index_flat_anchor.h|lib/test/src/test_block_index_loader.c|lib/test/src/test_block_index_rebuild.c", "load_verify_boot block_index_loader block_index_rebuild block_index_integrity boot_header_seed_import checkpoint_header_solution_repair make_lint_gates")
 /* Canonical per-row header admission verify shared by every persisted-state
  * loader (import, blocks-hydrate, flat). Exercised through those loaders'
  * focused tests + the validate-headers stage. */

@@ -20,6 +20,7 @@
 #include "supervisors/self_heal.h"
 #include "supervisors/staged_sync_supervisor.h"
 #include "services/block_index_loader.h"
+#include "services/block_index_flat_anchor.h"
 #include "controllers/blockchain_controller.h"
 #include "controllers/diagnostics_controller.h"
 #include "controllers/network_controller.h"
@@ -209,6 +210,14 @@ static bool shutdown_persist_runtime_state(struct boot_svc_ctx *svc)
     rpc_blockchain_mmr_save(boot_node_db(svc));
     rpc_blockchain_mmb_save(boot_node_db(svc));
     rpc_blockchain_commitment_mmr_save(boot_node_db(svc));
+
+    /* block_index.bin is intentionally published only after the clean marker,
+     * when node.db has already closed. Retain its one complete, hash-bound
+     * checkpoint header now so that durability ordering does not strip the
+     * Equihash solution from the swarm bootstrap artifact. */
+    struct zcl_result anchor = block_index_flat_anchor_prepare(svc->state);
+    if (!anchor.ok)
+        LOG_WARN("shutdown", "flat anchor prepare failed: %s", anchor.message);
 
     if (svc->block_tree_open) {
         block_tree_db_close(svc->block_tree);

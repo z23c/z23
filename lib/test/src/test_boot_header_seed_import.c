@@ -32,6 +32,7 @@
 #include "net/rom_fetch.h"
 #include "net/rom_seed.h"
 #include "net/file_service.h"
+#include "services/block_index_flat_anchor.h"
 #include "services/block_index_loader.h"
 #include "validation/main_state.h"
 #include "validation/chainstate.h"
@@ -39,7 +40,10 @@
 #include "chain/chainparams.h"
 #include "chain/pow.h"
 #include "core/arith_uint256.h"
+#include "mining/miner.h"
+#include "primitives/block.h"
 #include "util/blocker.h"
+#include "util/safe_alloc.h"
 #include "platform/time_compat.h"
 
 #include <fcntl.h>
@@ -64,9 +68,11 @@ static struct uint256 hsi_make_hash(int h)
 /* Build a minimal height-linked block_index chain of `n` blocks. When
  * bad_row_at >= 0, that height's stored hash is forced to all-0xFF (numerically
  * above any regtest PoW target) so the loader's per-row gate quarantines it. */
-static void hsi_build_chain(struct main_state *ms, int n, int bad_row_at)
+static void hsi_build_chain(struct main_state *ms, int n, int bad_row_at,
+                            bool complete_tip)
 {
-    for (int h = 0; h < n; h++) {
+    int simple_count = complete_tip && n > 1 ? n - 1 : n;
+    for (int h = 0; h < simple_count; h++) {
         struct uint256 hash = hsi_make_hash(h);
         if (h == bad_row_at)
             memset(hash.data, 0xFF, sizeof(hash.data));
@@ -100,6 +106,52 @@ static void hsi_build_chain(struct main_state *ms, int n, int bad_row_at)
             pi->nChainTx = 1;
         }
     }
+
+    if (complete_tip && n > 1 && bad_row_at != n - 1) {
+        struct uint256 prev_hash = hsi_make_hash(n - 2);
+        struct block_index *prev = block_map_find(&ms->map_block_index,
+                                                  &prev_hash);
+        const struct chain_params *cp = chain_params_get();
+        struct block blk;
+        block_init(&blk);
+        blk.header.nVersion = 4;
+        blk.header.hashPrevBlock = prev_hash;
+        blk.header.hashMerkleRoot.data[0] = 0x51;
+        blk.header.nTime = 1600000000u + (uint32_t)n;
+        struct arith_uint256 limit;
+        uint256_to_arith(&limit, &cp->consensus.powLimit);
+        blk.header.nBits = arith_uint256_get_compact(&limit, false);
+        if (mine_block_pow(&blk, n - 1, cp, 0)) {
+            struct uint256 full_hash;
+            block_header_get_hash(&blk.header, &full_hash);
+            struct block_index *pi = chainstate_insert_block_index(
+                (struct chainstate *)ms, &full_hash);
+            if (pi) {
+                pi->nHeight = n - 1;
+                pi->pprev = prev;
+                pi->nVersion = blk.header.nVersion;
+                pi->hashMerkleRoot = blk.header.hashMerkleRoot;
+                pi->hashFinalSaplingRoot = blk.header.hashFinalSaplingRoot;
+                pi->nTime = blk.header.nTime;
+                pi->nBits = blk.header.nBits;
+                pi->nNonce = blk.header.nNonce;
+                pi->nSolution = zcl_malloc(blk.header.nSolutionSize,
+                                           "header seed test solution");
+                if (pi->nSolution) {
+                    memcpy(pi->nSolution, blk.header.nSolution,
+                           blk.header.nSolutionSize);
+                    pi->nSolutionSize = blk.header.nSolutionSize;
+                }
+                pi->nStatus = BLOCK_VALID_TREE;
+                pi->nTx = 1;
+                pi->nChainWork = prev->nChainWork;
+                struct arith_uint256 proof = GetBlockProof(pi);
+                arith_uint256_add(&pi->nChainWork, &pi->nChainWork, &proof);
+                pi->nChainTx = prev->nChainTx + 1;
+            }
+        }
+        block_free(&blk);
+    }
 }
 
 /* Wrap the serve-side artifacts array into the {"artifacts":[...]} object the
@@ -129,7 +181,24 @@ static bool hsi_seed_artifact(const char *sdir, int n, int bad_row_at,
     memset(&ms, 0, sizeof(ms));
     block_map_init(&ms.map_block_index);
     active_chain_init(&ms.chain_active);
-    hsi_build_chain(&ms, n, bad_row_at);
+    hsi_build_chain(&ms, n, bad_row_at, bad_row_at < 0);
+    if (!block_index_flat_anchor_prepare(&ms).ok) {
+        block_map_free(&ms.map_block_index);
+        active_chain_free(&ms.chain_active);
+        return false;
+    }
+    if (bad_row_at < 0) {
+        struct block_index *tip = NULL;
+        size_t iter = 0;
+        while (block_map_next(&ms.map_block_index, &iter, NULL, &tip)) {
+            if (tip && tip->nHeight == n - 1) {
+                free(tip->nSolution);
+                tip->nSolution = NULL;
+                tip->nSolutionSize = 0;
+                break;
+            }
+        }
+    }
     save_block_index_flat(sdir, &ms);
     block_map_free(&ms.map_block_index);
     active_chain_free(&ms.chain_active);
@@ -193,6 +262,26 @@ static int case_import_roundtrip(void)
         ASSERT(cms.map_block_index.size == 100);
         ASSERT(cms.pindex_best_header != NULL);
         ASSERT(cms.pindex_best_header->nHeight == 99);
+        ASSERT(cms.pindex_best_header->nSolution != NULL);
+        ASSERT(cms.pindex_best_header->nSolutionSize > 0);
+
+        struct block_header restored;
+        block_header_init(&restored);
+        restored.nVersion = cms.pindex_best_header->nVersion;
+        restored.hashPrevBlock = *cms.pindex_best_header->pprev->phashBlock;
+        restored.hashMerkleRoot = cms.pindex_best_header->hashMerkleRoot;
+        restored.hashFinalSaplingRoot =
+            cms.pindex_best_header->hashFinalSaplingRoot;
+        restored.nTime = cms.pindex_best_header->nTime;
+        restored.nBits = cms.pindex_best_header->nBits;
+        restored.nNonce = cms.pindex_best_header->nNonce;
+        memcpy(restored.nSolution, cms.pindex_best_header->nSolution,
+               cms.pindex_best_header->nSolutionSize);
+        restored.nSolutionSize = cms.pindex_best_header->nSolutionSize;
+        struct uint256 restored_hash;
+        block_header_get_hash(&restored, &restored_hash);
+        ASSERT(uint256_eq(&restored_hash,
+                          cms.pindex_best_header->phashBlock));
 
         /* Header-only clamp: a non-genesis row has HAVE_DATA/UNDO stripped so
          * the body is re-fetched + fully re-validated (never trust the seeder's
