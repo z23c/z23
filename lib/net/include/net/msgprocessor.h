@@ -148,6 +148,18 @@ struct msg_block_intake_stats {
     bool stopping;
 };
 
+/* Lifetime ZMSG transport counters. These distinguish wire receipt from
+ * application acceptance and expose ACK progress without logging message
+ * bodies. All fields are monotone except the two last-event timestamps. */
+struct msg_zmsg_stats {
+    uint64_t frames_received;
+    uint64_t messages_accepted;
+    uint64_t duplicates;
+    uint64_t acknowledgements_received;
+    int64_t last_received_unix;
+    int64_t last_ack_unix;
+};
+
 /* Slice-12 hook signatures. frame: one received swarm frame's payload
  * bytes (already framing-verified); the implementation penalizes
  * (peer_scoring_record) and replies through the node's send queue.
@@ -186,6 +198,12 @@ struct msg_processor {
     void *peer_save_ctx;
     msg_zmsg_save_fn zmsg_save;
     void *zmsg_save_ctx;
+    _Atomic uint64_t zmsg_frames_received;
+    _Atomic uint64_t zmsg_messages_accepted;
+    _Atomic uint64_t zmsg_duplicates;
+    _Atomic uint64_t zmsg_acknowledgements_received;
+    _Atomic int64_t zmsg_last_received_unix;
+    _Atomic int64_t zmsg_last_ack_unix;
     msg_file_offer_save_fn file_offer_save;
     void *file_offer_save_ctx;
     msg_file_payment_ingest_fn file_payment_ingest;
@@ -275,6 +293,8 @@ void msg_processor_stop_block_intake(struct msg_processor *mp);
 void msg_processor_get_block_intake_stats(
     const struct msg_processor *mp,
     struct msg_block_intake_stats *out);
+void msg_processor_get_zmsg_stats(const struct msg_processor *mp,
+                                  struct msg_zmsg_stats *out);
 
 void msg_processor_set_compact_block_submit(
     struct msg_processor *mp,

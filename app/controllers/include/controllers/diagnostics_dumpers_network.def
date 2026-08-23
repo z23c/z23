@@ -64,7 +64,10 @@
     DIAG_LOCAL("network", network_dump_state_json,
                "network rollup: what the node knows about the ZClassic "
                "network in one call — connman {wired, connected_peers, "
-               "outbound_healthy, addrman_size}, peer_floor (the "
+               "outbound_healthy, addrman_size}, messaging (channel readiness "
+               "+ ZMSG received/accepted/duplicate/ACK totals + last-event "
+               "timestamps), "
+               "peer_floor (the "
                "net.outbound_floor supervisor contract: registered, "
                "healthy_outbound, last_tick_age_us, deadline_secs, "
                "ticks_run, stall_fires), chain_view (network_monitor: "
@@ -185,6 +188,8 @@
     DIAG_SERVICE("messaging", messaging_dump_state_json,
                  "ZMSG channels: controller_wired/db_open/network_available, "
                  "p2p_channel_available (always; plaintext on the wire), "
+                 "transport_telemetry_wired, received/accepted/duplicate/ACK "
+                 "totals + last-event timestamps, "
                  "onchain_channel_ready (Sapling prover params loaded), "
                  "in-memory inbox_store_count/cap, and onchain_memo_max_bytes",
                  "app/controllers/src/messaging_controller.c",

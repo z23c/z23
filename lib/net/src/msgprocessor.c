@@ -56,6 +56,7 @@
 #include "core/random.h"
 #include "core/serialize.h"
 #include "crypto/sha3.h"
+#include "encoding/utilstrencodings.h"
 #include "consensus/validation.h"
 #include "event/event.h"
 #include "sync/sync_state.h"
@@ -695,6 +696,29 @@ void msg_processor_get_block_intake_stats(
     pthread_mutex_unlock(&g_block_intake_create_lock);
 }
 
+void msg_processor_get_zmsg_stats(const struct msg_processor *mp,
+                                  struct msg_zmsg_stats *out)
+{
+    if (!out)
+        return;
+    memset(out, 0, sizeof(*out));
+    if (!mp)
+        return;
+
+    out->frames_received = atomic_load_explicit(
+        &mp->zmsg_frames_received, memory_order_relaxed);
+    out->messages_accepted = atomic_load_explicit(
+        &mp->zmsg_messages_accepted, memory_order_relaxed);
+    out->duplicates = atomic_load_explicit(
+        &mp->zmsg_duplicates, memory_order_relaxed);
+    out->acknowledgements_received = atomic_load_explicit(
+        &mp->zmsg_acknowledgements_received, memory_order_relaxed);
+    out->last_received_unix = atomic_load_explicit(
+        &mp->zmsg_last_received_unix, memory_order_relaxed);
+    out->last_ack_unix = atomic_load_explicit(
+        &mp->zmsg_last_ack_unix, memory_order_relaxed);
+}
+
 /* How many MORE block bodies may be outstanding on the wire right now.
  *
  * Every body a peer sends during catch-up must land in this fixed ring or be
@@ -830,6 +854,23 @@ static bool handle_zmsg(struct msg_processor *mp, struct p2p_node *node,
     /* Store locally */
     bool is_new = zmsg_store_add(&msg);
 
+    uint64_t received = atomic_fetch_add_explicit(
+        &mp->zmsg_frames_received, 1, memory_order_relaxed) + 1;
+    uint64_t accepted = atomic_load_explicit(
+        &mp->zmsg_messages_accepted, memory_order_relaxed);
+    uint64_t duplicates = atomic_load_explicit(
+        &mp->zmsg_duplicates, memory_order_relaxed);
+    if (is_new) {
+        accepted = atomic_fetch_add_explicit(
+            &mp->zmsg_messages_accepted, 1, memory_order_relaxed) + 1;
+    } else {
+        duplicates = atomic_fetch_add_explicit(
+            &mp->zmsg_duplicates, 1, memory_order_relaxed) + 1;
+    }
+    int64_t now = (int64_t)platform_time_wall_time_t();
+    atomic_store_explicit(&mp->zmsg_last_received_unix, now,
+                          memory_order_relaxed);
+
     if (mp->zmsg_save)
         (void)mp->zmsg_save(&msg, mp->zmsg_save_ctx);
 
@@ -843,22 +884,35 @@ static bool handle_zmsg(struct msg_processor *mp, struct p2p_node *node,
     p2p_node_end_message(node);
     stream_free(&os);
 
-    if (is_new) {
-        printf("zmsg: received message from %s via peer %s\n",
-               msg.sender, node->addr_name);
-    }
+    char msg_hex[65];
+    HexStr(msg.msg_id, 32, false, msg_hex, sizeof(msg_hex));
+    LOG_INFO("zmsg", "event=message_received msg_id=%s peer_id=%lld "
+             "peer=%s body_bytes=%zu duplicate=%s frames_total=%llu "
+             "accepted_total=%llu duplicates_total=%llu",
+             msg_hex, (long long)node->id, node->addr_name, strlen(msg.body),
+             is_new ? "false" : "true", (unsigned long long)received,
+             (unsigned long long)accepted, (unsigned long long)duplicates);
     return true;
 }
 
 static bool handle_zmsgack(struct msg_processor *mp, struct p2p_node *node,
                            struct byte_stream *s)
 {
-    (void)mp;
     uint8_t ack_id[32];
     if (!stream_read(s, ack_id, 32))
         return true;
 
-    printf("zmsg: delivery ack from peer %s\n", node->addr_name);
+    uint64_t total = atomic_fetch_add_explicit(
+        &mp->zmsg_acknowledgements_received, 1, memory_order_relaxed) + 1;
+    int64_t now = (int64_t)platform_time_wall_time_t();
+    atomic_store_explicit(&mp->zmsg_last_ack_unix, now,
+                          memory_order_relaxed);
+    char ack_hex[65];
+    HexStr(ack_id, 32, false, ack_hex, sizeof(ack_hex));
+    LOG_INFO("zmsg", "event=delivery_ack msg_id=%s peer_id=%lld peer=%s "
+             "acknowledgements_total=%llu",
+             ack_hex, (long long)node->id, node->addr_name,
+             (unsigned long long)total);
     return true;
 }
 
@@ -1534,6 +1588,12 @@ void msg_processor_init(struct msg_processor *mp,
     mp->peer_save_ctx = NULL;
     mp->zmsg_save = NULL;
     mp->zmsg_save_ctx = NULL;
+    atomic_init(&mp->zmsg_frames_received, 0);
+    atomic_init(&mp->zmsg_messages_accepted, 0);
+    atomic_init(&mp->zmsg_duplicates, 0);
+    atomic_init(&mp->zmsg_acknowledgements_received, 0);
+    atomic_init(&mp->zmsg_last_received_unix, 0);
+    atomic_init(&mp->zmsg_last_ack_unix, 0);
     mp->file_offer_save = NULL;
     mp->file_offer_save_ctx = NULL;
     mp->file_payment_ingest = NULL;

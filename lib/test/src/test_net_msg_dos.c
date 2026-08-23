@@ -56,11 +56,15 @@
  *      items past the 64th, so the requester's download manager sat out
  *      its full per-block timeout instead of the prompt notfound-driven
  *      requeue (net/download.h::dl_mark_notfound).
+ *   J. ZMSG transport telemetry — accepted, duplicate, and acknowledgment
+ *      frames increment distinct monotone counters and retain last-event
+ *      timestamps, so an operator can tell delivery from an inbox echo.
  *
  * Sections A/B/E/F/H/H2 use a stack p2p_node + memset (mirrors
  * test_process_headers_adversarial.c) since the code paths under test
  * return before touching any node mutex. Sections C/D/G/I touch
- * mutex-guarded node/dispatch machinery and use a heap node from
+ * mutex-guarded node/dispatch machinery, and J queues ACK frames; these use
+ * a heap node from
  * p2p_node_create (properly mutex-initialized). */
 
 #include "test/test_core.h"
@@ -71,6 +75,7 @@
 #include "net/msgprocessor.h"
 #include "net/peer_scoring.h"
 #include "net/version.h"
+#include "net/zmsg.h"
 #include "core/hash.h"
 #include "validation/chainstate.h"
 #include "validation/process_block.h"  /* accept_block_header */
@@ -748,6 +753,74 @@ int test_net_msg_dos(void)
 
             stream_free(&s);
             p2p_node_free(node);
+        }
+    }
+
+    /* ── J. zmsg: transport counters distinguish accepted/duplicate/ACK. ── */
+    {
+        const struct msg_dispatch_entry *zmsg = dos_find_entry("zmsg");
+        const struct msg_dispatch_entry *zmsgack = dos_find_entry("zmsgack");
+        DOS_CHECK("zmsg telemetry: dispatch entries found",
+                  zmsg != NULL && zmsgack != NULL);
+        if (zmsg && zmsgack) {
+            struct net_address zaddr;
+            net_address_init(&zaddr);
+            unsigned char zip[4] = {203, 0, 113, 79};
+            net_addr_set_ipv4(&zaddr.svc.addr, zip);
+            zaddr.svc.port = 8033;
+            struct p2p_node *node = p2p_node_create(
+                &nm, ZCL_INVALID_SOCKET, &zaddr, "zmsg-telemetry", true);
+            DOS_CHECK("zmsg telemetry: node created", node != NULL);
+            if (node) {
+                struct zmsg_message msg;
+                memset(&msg, 0, sizeof(msg));
+                msg.timestamp = 1787463600;
+                snprintf(msg.sender, sizeof(msg.sender), "%s", "peer-agent");
+                snprintf(msg.recipient, sizeof(msg.recipient), "%s", "self");
+                snprintf(msg.body, sizeof(msg.body), "%s",
+                         "telemetry-correlation-probe");
+                zmsg_compute_id(&msg, msg.msg_id);
+
+                struct byte_stream first;
+                stream_init(&first, 256);
+                bool wrote_first = zmsg_serialize(&msg, &first);
+                bool handled_first = wrote_first &&
+                    zmsg->handler(&mp, node, &first);
+                struct msg_zmsg_stats stats;
+                msg_processor_get_zmsg_stats(&mp, &stats);
+                DOS_CHECK("zmsg telemetry: accepted frame counted",
+                          handled_first && stats.frames_received == 1 &&
+                          stats.messages_accepted == 1 &&
+                          stats.duplicates == 0 &&
+                          stats.last_received_unix > 0);
+                stream_free(&first);
+
+                struct byte_stream duplicate;
+                stream_init(&duplicate, 256);
+                bool wrote_duplicate = zmsg_serialize(&msg, &duplicate);
+                bool handled_duplicate = wrote_duplicate &&
+                    zmsg->handler(&mp, node, &duplicate);
+                msg_processor_get_zmsg_stats(&mp, &stats);
+                DOS_CHECK("zmsg telemetry: duplicate frame separated",
+                          handled_duplicate && stats.frames_received == 2 &&
+                          stats.messages_accepted == 1 &&
+                          stats.duplicates == 1);
+                stream_free(&duplicate);
+
+                struct byte_stream ack;
+                stream_init(&ack, 32);
+                bool wrote_ack = stream_write(&ack, msg.msg_id,
+                                               sizeof(msg.msg_id));
+                bool handled_ack = wrote_ack &&
+                    zmsgack->handler(&mp, node, &ack);
+                msg_processor_get_zmsg_stats(&mp, &stats);
+                DOS_CHECK("zmsg telemetry: acknowledgement counted",
+                          handled_ack &&
+                          stats.acknowledgements_received == 1 &&
+                          stats.last_ack_unix > 0);
+                stream_free(&ack);
+                p2p_node_free(node);
+            }
         }
     }
 

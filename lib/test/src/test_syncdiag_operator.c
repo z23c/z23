@@ -508,6 +508,18 @@ int syncdiag_cases_operator(void)
         ok = ok && json_get(addnode_j0, "count") &&
             json_get_int(json_get(addnode_j0, "count")) == -1;
 
+        const struct json_value *messaging_j =
+            json_get(&result, "messaging");
+        ok = ok && messaging_j && messaging_j->type == JSON_OBJ;
+        ok = ok && json_get(messaging_j, "transport_telemetry_wired") &&
+            !json_get_bool(json_get(messaging_j,
+                                    "transport_telemetry_wired"));
+        ok = ok && json_get(messaging_j, "frames_received") &&
+            json_get_int(json_get(messaging_j, "frames_received")) == 0;
+        ok = ok && json_get(messaging_j, "acknowledgements_received") &&
+            json_get_int(json_get(messaging_j,
+                                  "acknowledgements_received")) == 0;
+
         const struct json_value *peer_floor_j = json_get(&result, "peer_floor");
         ok = ok && peer_floor_j && peer_floor_j->type == JSON_OBJ;
         ok = ok && json_get(peer_floor_j, "registered") != NULL;

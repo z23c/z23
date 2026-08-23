@@ -36,6 +36,7 @@
  */
 
 #include "controllers/diagnostics_internal.h"
+#include "controllers/messaging_controller.h"
 #include "controllers/network_controller.h"
 
 #include "json/json.h"
@@ -109,6 +110,14 @@ static void push_addnode_json(struct json_value *out, struct connman *cm)
         json_push_kv_int(&obj, "retirements_total", -1);
     }
     json_push_kv(out, "addnode", &obj);
+    json_free(&obj);
+}
+
+static void push_zmsg_json(struct json_value *out)
+{
+    struct json_value obj = {0};
+    (void)messaging_dump_state_json(&obj, NULL);
+    json_push_kv(out, "messaging", &obj);
     json_free(&obj);
 }
 
@@ -227,6 +236,7 @@ bool network_dump_state_json(struct json_value *out, const char *key)
     int64_t connman_outbound_healthy = -1;
     push_connman_json(out, cm, &connman_outbound_healthy);
     push_addnode_json(out, cm);
+    push_zmsg_json(out);
     push_peer_floor_json(out, connman_outbound_healthy);
 
     int64_t our_height = -1, peer_modal = -1, peer_delta = 0;

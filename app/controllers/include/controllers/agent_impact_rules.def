@@ -57,7 +57,7 @@ AGENT_IMPACT_RULE("lib/util/src/time_authority.c|lib/util/include/util/time_auth
 AGENT_IMPACT_RULE("lib/metrics/src/prometheus_metrics.c|lib/metrics/include/metrics/prometheus_metrics.h|lib/metrics/src/stage_metrics.c|lib/metrics/include/metrics/stage_metrics.h", "metric_alerts make_lint_gates")
 
 AGENT_IMPACT_RULE("app/controllers/src/rpc_client.c|app/controllers/include/controllers/rpc_client.h|app/controllers/src/rpc_params.c|app/controllers/include/controllers/rpc_params.h", "rpc")
-AGENT_IMPACT_RULE("app/controllers/src/diagnostics_*.c|app/controllers/include/controllers/diagnostics_*.h|app/controllers/include/controllers/diagnostics_dumpers.def", "syncdiag_rpc make_lint_gates rpc")
+AGENT_IMPACT_RULE("app/controllers/src/diagnostics_*.c|app/controllers/include/controllers/diagnostics_*.h|app/controllers/include/controllers/diagnostics_*.def", "syncdiag_rpc make_lint_gates rpc")
 AGENT_IMPACT_RULE("app/controllers/src/status_frontdoor.c|app/controllers/include/controllers/status_frontdoor.h|lib/test/src/test_status_frontdoor.c", "status_frontdoor rpc syncdiag_rpc command_registry_catalog make_lint_gates")
 AGENT_IMPACT_RULE("app/controllers/src/diagnostics_debug_bundle.c|app/controllers/src/diagnostics_dispatch.c|lib/test/src/test_debug_bundle.c", "debug_bundle supervisor syncdiag_rpc command_registry_catalog make_lint_gates")
 AGENT_IMPACT_RULE("tools/repro_on_copy.sh|app/controllers/src/agent_copy_prove_controller.c|app/controllers/include/controllers/agent_copy_prove_controller.h|lib/test/src/test_agent_copy_prove.c", "agent_copy_prove syncdiag_rpc make_lint_gates")

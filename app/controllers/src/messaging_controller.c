@@ -9,8 +9,10 @@
 
 #include "platform/time_compat.h"
 #include "net/zmsg.h"
+#include "net/msgprocessor.h"
 #include "net/net.h"
 #include "net/connman.h"
+#include "controllers/network_controller.h"
 #include "sapling/params_init.h"     /* sapling_params_loaded (diagnostics) */
 #include "sapling/sapling_prover.h"  /* prover readiness = can we send on-chain */
 #include "chain/chainparams.h"
@@ -303,7 +305,9 @@ static bool rpc_msg_send(const struct json_value *params, bool help,
     json_push_kv_int(result, "peer_id", peer_id);
     json_push_kv_str(result, "status", "sent");
 
-    printf("zmsg: sent message to peer %lld\n", (long long)peer_id);
+    LOG_INFO("zmsg", "event=message_sent msg_id=%s peer_id=%lld "
+             "body_bytes=%zu",
+             hex, (long long)peer_id, strlen(msg.body));
     return true;
 }
 
@@ -462,9 +466,10 @@ bool api_msg_inbox(struct json_value *result)
  * See CLAUDE.md "Adding state introspection". Reports the two ZMSG channels'
  * live readiness (off-chain P2P is always available but plaintext on the wire;
  * the on-chain Sapling-memo channel needs the prover params loaded), whether
- * the controller is wired to a node_db + connman, and the in-memory inbox
- * store occupancy. No SQLite scan — the store counter read is a bounded mutex
- * acquire, so this is safe on the health-rollup hot path. */
+ * the controller is wired to a node_db + connman, ZMSG wire counters owned by
+ * the message processor, and the in-memory inbox store occupancy. No SQLite
+ * scan — these are atomic loads plus one bounded store-mutex acquire, so this
+ * is safe on the health-rollup hot path. */
 bool messaging_dump_state_json(struct json_value *out, const char *key)
 {
     (void)key;
@@ -474,6 +479,9 @@ bool messaging_dump_state_json(struct json_value *out, const char *key)
 
     bool db_open = g_msg_ndb != NULL;
     bool net_up = g_msg_connman != NULL;
+    struct msg_processor *mp = rpc_net_get_msg_processor();
+    struct msg_zmsg_stats transport;
+    msg_processor_get_zmsg_stats(mp, &transport);
     /* READY means a shielded tx can actually be built: params on disk AND a
      * proving backend compiled into this binary. Reporting only the former
      * advertised a channel that cannot send on a build with no proving
@@ -484,6 +492,17 @@ bool messaging_dump_state_json(struct json_value *out, const char *key)
     json_push_kv_bool(out, "db_open", db_open);
     json_push_kv_bool(out, "network_available", net_up);
     json_push_kv_bool(out, "p2p_channel_available", true);
+    json_push_kv_bool(out, "transport_telemetry_wired", mp != NULL);
+    json_push_kv_int(out, "frames_received",
+                     (int64_t)transport.frames_received);
+    json_push_kv_int(out, "messages_accepted",
+                     (int64_t)transport.messages_accepted);
+    json_push_kv_int(out, "duplicates", (int64_t)transport.duplicates);
+    json_push_kv_int(out, "acknowledgements_received",
+                     (int64_t)transport.acknowledgements_received);
+    json_push_kv_int(out, "last_received_unix",
+                     transport.last_received_unix);
+    json_push_kv_int(out, "last_ack_unix", transport.last_ack_unix);
     json_push_kv_bool(out, "onchain_channel_ready", onchain_ready);
     json_push_kv_bool(out, "sapling_params_loaded", sapling_params_loaded());
     json_push_kv_str(out, "onchain_prover_backend",
