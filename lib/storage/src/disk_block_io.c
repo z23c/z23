@@ -45,6 +45,8 @@
  * carrying the running suppressed-repeat count and a sample path. */
 static struct log_throttle g_open_fail_throttle = LOG_THROTTLE_INIT;
 static struct log_throttle g_readfail_throttle  = LOG_THROTTLE_INIT;
+/* Same, for a DANGLING position (foreign writer, torn import): every sweep. */
+static struct log_throttle g_locate_fail_throttle = LOG_THROTTLE_INIT;
 
 void get_block_pos_filename(char *buf, size_t buflen,
                             const char *datadir,
@@ -490,6 +492,16 @@ static bool disk_block_frame_header_valid(const uint8_t hdr[8],
     return true;
 }
 
+/* True when an 8-byte magic+size frame header sits at `off`. */
+static bool disk_block_frame_at(int fd, off_t off, uint32_t *out_size)
+{
+    uint8_t hdr[8];
+    return pread(fd, hdr, sizeof(hdr), off) == (ssize_t)sizeof(hdr) &&
+           disk_block_frame_header_valid(hdr, out_size);
+}
+
+/* Resolve (payload offset, size), or REFUSE an unframed position — see the
+ * FRAMED POSITIONS ONLY contract in storage/disk_block_io.h. */
 static bool disk_block_locate_payload(int fd,
                                       const struct disk_block_pos *pos,
                                       uint32_t *out_payload_pos,
@@ -497,39 +509,23 @@ static bool disk_block_locate_payload(int fd,
 {
     if (!pos || !out_payload_pos || !out_size)
         return false;
-
-    uint8_t hdr[8];
     uint32_t block_size = 0;
-
-    /* Canonical block indexes store the payload offset. Check the
-     * frame header immediately before it first. */
-    if (pos->nPos >= 8) {
-        ssize_t hr = pread(fd, hdr, sizeof(hdr), (off_t)(pos->nPos - 8));
-        if (hr == (ssize_t)sizeof(hdr) &&
-            disk_block_frame_header_valid(hdr, &block_size)) {
-            *out_payload_pos = pos->nPos;
-            *out_size = block_size;
-            return true;
-        }
+    /* Canonical block indexes store the PAYLOAD offset: frame sits at pos-8. */
+    if (pos->nPos >= 8 &&
+        disk_block_frame_at(fd, (off_t)(pos->nPos - 8), &block_size)) {
+        *out_payload_pos = pos->nPos;
+        *out_size = block_size;
+        return true;
     }
-
-    /* Some recovery/import paths may hand us the frame offset instead
-     * of the payload offset. Accept that shape too; it is cheaper and
-     * safer to read the block than to strand validation behind a
-     * recoverable offset convention mismatch. */
-    ssize_t hr = pread(fd, hdr, sizeof(hdr), (off_t)pos->nPos);
-    if (hr == (ssize_t)sizeof(hdr) &&
-        disk_block_frame_header_valid(hdr, &block_size)) {
-        if (pos->nPos > UINT32_MAX - 8u)
-            return false;
+    /* Some recovery/import paths hand the FRAME offset instead. Accept it. */
+    if (pos->nPos <= UINT32_MAX - 8u &&
+        disk_block_frame_at(fd, (off_t)pos->nPos, &block_size)) {
         *out_payload_pos = pos->nPos + 8u;
         *out_size = block_size;
         return true;
     }
 
-    *out_payload_pos = pos->nPos;
-    *out_size = 2000000u;
-    return true;
+    return false;
 }
 
 /* ── Thread-local read fd cache (pread fast path) ─────────────────────
@@ -676,9 +672,13 @@ bool read_block_from_disk_pread_profiled(struct block *b,
     size_t bufsize = 2000000u;
     if (!disk_block_locate_payload(fd, pos, &payload_pos, &bufsize)) {
         if (!fd_cached) close(fd);
-        LOG_FAIL("disk_block_io",
-                 "read_block_pread: locate payload failed for file=%d pos=%u",
-                 pos->nFile, pos->nPos);
+        uint64_t reps = 0;  /* throttled: see g_locate_fail_throttle above */
+        if (log_throttle_should_emit(&g_locate_fail_throttle, 0u,
+                                     platform_time_wall_unix(), 60, &reps))
+            fprintf(stderr, "read_block_pread_no_frame: file=%d pos=%u "
+                    "(no frame at pos-8 or pos; %llu suppressed)\n",
+                    pos->nFile, pos->nPos, (unsigned long long)reps);
+        return false;  // raw-return-ok:throttled-named-refusal-replaces-LOG_FAIL
     }
 
     unsigned char *buf = zcl_malloc(bufsize, "read_block_pread_buf");

@@ -306,6 +306,11 @@ ZCL_BLOCKER_REMEDY(*.below_snapshot_seed,                       OWNER)
  * seed floor as its base and folds forward. Standing fact, not a stall — but
  * still OWNER, because only a person can decide to buy the pre-seed history. */
 ZCL_BLOCKER_REMEDY(*.partial_coverage,                          OWNER)
+/* The other shape of the same wall: the body is FLAGGED present but its
+ * indexed bytes do not read back. OWNER because the only repairs (re-point the
+ * index at a surviving copy, or clear HAVE_DATA and re-fetch) are datadir
+ * decisions a projection backfill must not make for itself. */
+ZCL_BLOCKER_REMEDY(*.body_unreadable,                           OWNER)
 ZCL_BLOCKER_REMEDY(stage_stalled_*,                             OWNER)
 ZCL_BLOCKER_REMEDY(thread_stalled_*,                            OWNER)
 ZCL_BLOCKER_REMEDY(thread_restart_storm_*,                      OWNER)

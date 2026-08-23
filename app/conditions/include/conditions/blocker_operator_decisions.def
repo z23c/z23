@@ -102,6 +102,36 @@ ZCL_BLOCKER_DECISION(*.partial_coverage,
     "Consensus is unaffected either way - these are rebuildable projections, "
     "never consensus state, and this blocker never holds the reducer frontier.")
 
+/* ── Torn body position (app/services/src/index_fold_guard.c,
+ * index_fold_note_unreadable_body). NOT the same wall as below_snapshot_seed:
+ * there the body was never downloaded; here the index SAYS it has the body and
+ * the bytes at that position are something else. Live cause on the dev fleet
+ * 2026-08-23: blk*.dat hardlinked into a running foreign node's datadir, whose
+ * appends overwrote records this node had already indexed. ────────────── */
+ZCL_BLOCKER_DECISION(*.body_unreadable,
+    "A person must choose; the node will not choose for you. The block index "
+    "flags this height BLOCK_HAVE_DATA and names a position in a blk*.dat file, "
+    "but the bytes there are not that block. Retrying cannot fix it - the "
+    "backfill was re-reading the same dead position every tick until this "
+    "blocker replaced the spin - and no safe automatic repair exists at a "
+    "height this far below the fold frontier. "
+    "FIRST, check whether the blk*.dat files are shared: `stat` them and look "
+    "at the link count. A blk file hardlinked into another running node's "
+    "datadir is rewritten under this node, which is exactly how a hash-valid "
+    "position goes dead. If so, stop sharing the files before repairing "
+    "anything, or the repair will be undone. "
+    "OPTION A - re-point the index at a surviving copy. If the block still "
+    "exists elsewhere in the blk files, the hash-targeted rescan "
+    "(block_index_repair_pos_from_disk) finds it and re-stores the position "
+    "through the verified path. Cost: a scan of the blk set. "
+    "OPTION B - clear BLOCK_HAVE_DATA for the height and let the body be "
+    "re-fetched from peers. Cost: bandwidth, and it only works while some peer "
+    "still serves that height. "
+    "OPTION C - accept partial coverage below the affected range (-<index>=0). "
+    "Cost: that history is unqueryable through this index. "
+    "Consensus is unaffected - these are rebuildable projections, never "
+    "consensus state, and this blocker never holds the reducer frontier.")
+
 /* ── Full-history authority publication
  * (app/services/src/bg_validation_authority.c). The live blocker reason names
  * the exact missing proof or moving frontier; no trust override exists. ─── */

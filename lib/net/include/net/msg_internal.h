@@ -107,6 +107,24 @@ size_t getheaders_solution_cache_bytes(void);
  * for that test and for operator diagnostics; nothing branches on it. */
 uint64_t getheaders_serve_pow_checks(void);
 
+/* Header serves refused because NO store on this node holds the header bytes:
+ * the in-memory index entry came from block_index.bin (whose on-disk row keeps
+ * no hashMerkleRoot, no nNonce and no nSolution), the block body is absent or
+ * unreadable, and node.db has no `blocks` row for it. That is DATA
+ * AVAILABILITY, never a validity verdict — the entry keeps its status bits and
+ * is never marked failed.
+ *
+ * It is also the fleet's genesis-sync blocker in one number: on a
+ * snapshot/bundle-seeded datadir EVERY height below the seed floor is
+ * permanently in this state (measured on a seeded node, node.db `blocks`
+ * starts at h=3222916 against a 3226485-entry header index), so a peer syncing
+ * from genesis gets a 0-header reply and stalls. A non-zero and climbing count
+ * means this node cannot serve early history and something upstream — shipping
+ * header bytes below the floor, or steering such peers elsewhere — has to give.
+ * Exposed for the offline serve regression tests and operator diagnostics;
+ * nothing branches on it. */
+uint64_t getheaders_serve_refusals_no_header_bytes(void);
+
 /* Serve-path verification receipts — the bound on how often a peer can make
  * this node REDO an Equihash verification it has already done.
  *

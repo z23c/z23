@@ -21,6 +21,7 @@
 #include "event/event.h"
 #include "sync/sync_state.h"
 #include "util/log_macros.h"
+#include "support/log_throttle.h"
 #include "util/safe_alloc.h"
 #include "util/timedata.h"
 #include "coins/coins_view.h"
@@ -382,12 +383,67 @@ static size_t collect_active_tip_successors(struct main_state *ms,
     return count;
 }
 
-static bool headers_fill_header_from_index(struct msg_processor *mp,
-                                           struct block_index *iter,
-                                           struct block_header *hdr)
+/* Reasons this file names itself, on top of the bind screen's own. Compared
+ * with strcmp like every other reason here, never by pointer. */
+#define HDR_REASON_NO_INDEX_SOLUTION  "no-index-solution"
+#define HDR_REASON_NO_HEADER_BYTES    "no-header-bytes"
+#define HDR_REASON_OVERSIZED_SOLUTION "oversized-index-solution"
+
+/* Refusals attributed to "no store on this node holds these header bytes" —
+ * a DATA-AVAILABILITY count, not a validity one. See msg_internal.h. */
+static _Atomic uint64_t g_serve_refusals_no_bytes = 0;
+/* De-storm the serve refusal: see the throttled emit in
+ * getheaders_index_header_servable for the measured flood it bounds. Keyed by
+ * REASON, not globally — a standing availability storm must never swallow the
+ * first sighting of a different refusal (a forged solution, a wrong-hash
+ * entry). A changed key always emits, and carries the previous key's
+ * suppressed count with it. */
+static struct log_throttle g_serve_refuse_throttle = LOG_THROTTLE_INIT;
+
+static uint64_t headers_reason_key(const char *reason)
+{
+    uint64_t h = 1469598103934665603ULL;  /* FNV-1a 64 */
+    for (const char *p = reason; p && *p; p++) {
+        h ^= (uint64_t)(unsigned char)*p;
+        h *= 1099511628211ULL;
+    }
+    /* LOG_THROTTLE_KEY_NONE is reserved; nudge the (unreachable) collision. */
+    return h == LOG_THROTTLE_KEY_NONE ? 0u : h;
+}
+
+uint64_t getheaders_serve_refusals_no_header_bytes(void)
+{
+    return atomic_load(&g_serve_refusals_no_bytes);
+}
+
+/* Build the wire header for `iter` from the IN-MEMORY INDEX ALONE. Returns
+ * NULL when the entry carries its own nSolution (the hot path), else a named
+ * reason the caller's store ladder may still resolve.
+ *
+ * This used to read the whole block off disk here and copy only nSolution out
+ * of it, then return true — so the caller re-read the identical block in
+ * headers_try_disk_header a moment later (TWO full block reads per served
+ * header on any flat-hydrated entry), and when nothing could be read it
+ * returned true with nSolutionSize=0, which surfaced as the MISLEADING
+ * "header-hash-mismatch". Both stores belong to the caller's ladder, which
+ * already hash-binds before healing the index; this function only says
+ * whether the index by itself is enough.
+ *
+ * Why the index alone is usually NOT enough: block_index.bin's on-disk row
+ * (struct block_index_flat, app/services/src/block_index_loader.c) persists no
+ * hashMerkleRoot, no nNonce and no nSolution, so an entry hydrated from it is
+ * missing three of a header's seven fields. Below a snapshot-seed floor
+ * neither store has the bytes either — measured on a seeded fleet node, the
+ * node.db `blocks` table starts at h=3222916 against a 3226485-entry index —
+ * so those headers are unservable as a matter of DATA AVAILABILITY, not
+ * validity. That is a fleet-wide property of seeded datadirs; naming it
+ * honestly is this function's whole job. */
+static const char *headers_fill_header_from_index(struct msg_processor *mp,
+                                                  struct block_index *iter,
+                                                  struct block_header *hdr)
 {
     if (!mp || !iter || !hdr)
-        return false;
+        return "invalid-args";
 
     block_header_init(hdr);
     hdr->nVersion = iter->nVersion;
@@ -400,36 +456,18 @@ static bool headers_fill_header_from_index(struct msg_processor *mp,
     hdr->nTime = iter->nTime;
     hdr->nBits = iter->nBits;
     hdr->nNonce = iter->nNonce;
-    if (iter->nSolution && iter->nSolutionSize > 0) {
-        if (iter->nSolutionSize > sizeof(hdr->nSolution)) {
-            LOG_WARN("headers",
-                     "getheaders: oversized in-memory solution h=%d size=%zu",
-                     iter->nHeight, iter->nSolutionSize);
-            return false;
-        }
-        memcpy(hdr->nSolution, iter->nSolution, iter->nSolutionSize);
-        hdr->nSolutionSize = iter->nSolutionSize;
-        return true;
-    }
 
-    struct block blk_tmp;
-    block_init(&blk_tmp);
-    if (read_block_from_disk_index(&blk_tmp, iter, mp->datadir)) {
-        if (blk_tmp.header.nSolutionSize > sizeof(hdr->nSolution)) {
-            LOG_WARN("headers",
-                     "getheaders: oversized on-disk solution h=%d size=%zu",
-                     iter->nHeight, blk_tmp.header.nSolutionSize);
-            block_free(&blk_tmp);
-            return false;
-        }
-        memcpy(hdr->nSolution, blk_tmp.header.nSolution,
-               blk_tmp.header.nSolutionSize);
-        hdr->nSolutionSize = blk_tmp.header.nSolutionSize;
-        block_free(&blk_tmp);
-        return true;
+    if (!iter->nSolution || iter->nSolutionSize == 0)
+        return HDR_REASON_NO_INDEX_SOLUTION;
+    if (iter->nSolutionSize > sizeof(hdr->nSolution)) {
+        LOG_WARN("headers",
+                 "getheaders: oversized in-memory solution h=%d size=%zu",
+                 iter->nHeight, iter->nSolutionSize);
+        return HDR_REASON_OVERSIZED_SOLUTION;
     }
-    block_free(&blk_tmp);
-    return true;
+    memcpy(hdr->nSolution, iter->nSolution, iter->nSolutionSize);
+    hdr->nSolutionSize = iter->nSolutionSize;
+    return NULL;
 }
 
 /* ── BIND, then VERIFY: the cheap screen ────────────────────────────
@@ -609,7 +647,12 @@ static bool headers_bind_reason_can_retry_store(const char *reason)
 {
     return reason &&
         (strcmp(reason, "bad-equihash-solution-size") == 0 ||
-         strcmp(reason, "header-hash-mismatch") == 0);
+         strcmp(reason, "header-hash-mismatch") == 0 ||
+         /* The hydrated-entry case: block_index.bin carries no nSolution (nor
+          * merkle root, nor nonce), so the index alone cannot bind and BOTH
+          * stores are worth asking. This is the ordinary path on every
+          * bundle/snapshot-seeded node, not an exception. */
+         strcmp(reason, HDR_REASON_NO_INDEX_SOLUTION) == 0);
 }
 
 static void headers_refresh_index_from_header(struct block_index *iter,
@@ -740,8 +783,7 @@ bool getheaders_index_header_servable(struct msg_processor *mp,
                                       struct block_header *hdr_out)
 {
     struct block_header hdr;
-    if (!headers_fill_header_from_index(mp, iter, &hdr))
-        return false;
+    const char *fill_reason = headers_fill_header_from_index(mp, iter, &hdr);
 
     /* RESOLVE first, then VERIFY exactly once.
      *
@@ -761,7 +803,13 @@ bool getheaders_index_header_servable(struct msg_processor *mp,
      * first. */
     struct uint256 hash;
     uint256_set_null(&hash);
-    const char *reason = headers_candidate_bind_reason(mp, iter, &hdr, &hash);
+    /* Only screen what the index actually produced. When the index could not
+     * fill the header at all, its own reason stands — running the bind screen
+     * over a header we KNOW is incomplete would relabel a data-availability
+     * miss as "header-hash-mismatch", which is precisely the mislabel that
+     * made two separate investigations read a seeded datadir as corrupt. */
+    const char *reason = fill_reason ? fill_reason
+        : headers_candidate_bind_reason(mp, iter, &hdr, &hash);
 
     if (reason && headers_bind_reason_can_retry_store(reason)) {
         struct block_header disk_hdr;
@@ -795,13 +843,32 @@ bool getheaders_index_header_servable(struct msg_processor *mp,
         reason = headers_verify_bound_header(mp, &hdr, &hash);
 
     if (reason) {
+        /* Name the CONCLUSION, not the first miss: the index could not fill
+         * the header AND neither store had the bytes. On a seeded datadir
+         * every height below the seed floor is in this state permanently, so
+         * this is a standing coverage fact, not a per-request anomaly. */
+        if (strcmp(reason, HDR_REASON_NO_INDEX_SOLUTION) == 0) {
+            reason = HDR_REASON_NO_HEADER_BYTES;
+            atomic_fetch_add(&g_serve_refusals_no_bytes, 1);
+        }
         char hex[65] = {0};
         if (iter && iter->phashBlock)
             uint256_get_hex(iter->phashBlock, hex);
-        LOG_WARN("headers",
-                 "getheaders: refusing to serve header %s h=%d reason=%s",
-                 hex[0] ? hex : "(unknown)", iter ? iter->nHeight : -1,
-                 reason);
+        /* THROTTLED per reason. One getheaders whose locator lands in an
+         * unservable span costs 64 of these (the successor-walk guard), and a
+         * peer re-asks forever: node1 logged 100,230 identical refusals in
+         * 400k lines, ~25% of its whole log. The keep-alive line still carries
+         * a live sample (hash, height, reason) plus the suppressed count, so
+         * the failure stays visible — it just stops being the log. */
+        uint64_t reps = 0;
+        if (log_throttle_should_emit(&g_serve_refuse_throttle,
+                                     headers_reason_key(reason),
+                                     platform_time_wall_unix(), 60, &reps))
+            LOG_WARN("headers",
+                     "getheaders: refusing to serve header %s h=%d reason=%s "
+                     "(%llu suppressed refusals since last line)",
+                     hex[0] ? hex : "(unknown)", iter ? iter->nHeight : -1,
+                     reason, (unsigned long long)reps);
         /* A serve refusal is NOT a validity verdict: every reason here can
          * arise from data UNAVAILABILITY (a hydrated index entry with no
          * nSolution and no reachable store yields "invalid-solution" for a

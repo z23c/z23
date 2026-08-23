@@ -96,6 +96,33 @@ void index_fold_declare_partial_coverage(const char *index_id,
  * from genesis, or the pre-seed bodies arrived). No-op if not set. */
 void index_fold_clear_partial_coverage(const char *index_id);
 
+/* UNREADABLE BODY — the sibling of note_absent_body, for the other shape.
+ * Here the block index says BLOCK_HAVE_DATA and hands out an (nFile,nDataPos),
+ * but the bytes there do not read back as that block: a torn import, or a
+ * blk*.dat hardlinked into a live foreign writer's datadir whose own appends
+ * overwrote the indexed record (see the hardlink tripwire in
+ * lib/storage/src/disk_block_io.c).
+ *
+ * Unlike an absent body this is NOT self-limiting. Nothing in-process repairs
+ * a height far below the fold frontier: the have_data_unreadable Condition
+ * only inspects tip+1 and the reducer stages, so a torn body at h=1 is retried
+ * by the backfill forever. Measured live 2026-08-23 on node1: 12,435 identical
+ * re-reads of h=1 over 14.5 h at one every ~3 s, each emitting an identical
+ * WARN, none of which could ever have succeeded.
+ *
+ * Raises "<index_id>.body_unreadable" (BLOCKER_DEPENDENCY, remedy OWNER, no
+ * escape action and no retry budget — the node cannot re-derive bytes that are
+ * not on disk). Call it once the caller's own retry budget at `height` is
+ * spent, not on the first miss: a body being written right now can miss once.
+ * `attempts` is the consecutive-failure count, carried into the reason text so
+ * the operator sees how long it has stood. */
+void index_fold_note_unreadable_body(const char *index_id, const char *subsys,
+                                     int64_t height, uint64_t attempts);
+
+/* Retire "<index_id>.body_unreadable" — the height finally read back, or the
+ * fold moved past it. No-op if not set. */
+void index_fold_clear_unreadable_body(const char *index_id);
+
 /* Test-only: override the free-space floor (bytes). Pass a negative value to
  * restore the compiled INDEX_FOLD_MIN_FREE_BYTES default. */
 void index_fold_set_min_free_for_test(int64_t bytes);

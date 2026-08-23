@@ -347,6 +347,95 @@ static int test_pread_accepts_frame_offset(void)
     return failures;
 }
 
+/* A position carrying NO 8-byte magic+size frame at either pos-8 or pos is
+ * refused outright — even when a bare, perfectly-parseable block payload sits
+ * exactly there and hashes to the entry's own hash.
+ *
+ * Before the fix disk_block_locate_payload() fell through to "payload=nPos,
+ * size=2000000, return true": a fixed 2 MB read from a raw offset handed
+ * straight to block_deserialize. That made an unframed offset *answer* — a
+ * guess dressed as a read, with only the downstream hash check between it and
+ * a wrong block. On a real datadir (node1 2026-08-23: blk00050.dat hardlinked
+ * into a foreign live writer's datadir which overwrote the indexed region) the
+ * guess parsed arbitrary bytes and produced ~52% of the node's log volume.
+ * Every writer in the tree frames its records and the sibling mmap reader
+ * (blocks_mmap_reader.c bmr_get_payload) already refuses this shape; the pread
+ * reader now agrees. */
+static int test_pread_refuses_unframed_position(void)
+{
+    int failures = 0;
+    char tmpdir[256];
+    make_test_dir(tmpdir, sizeof(tmpdir));
+
+    TEST("pread: refuses a position with no block frame") {
+        struct block a;
+        build_test_block(&a, 787878);
+        struct byte_stream s;
+        stream_init(&s, 4096);
+        bool ok = block_serialize(&a, &s);
+        struct uint256 hash_a;
+        block_get_hash(&a, &hash_a);
+        block_free(&a);
+        if (!ok) {
+            stream_free(&s);
+            printf("FAIL (serialize)\n"); failures++; goto _test_next;
+        }
+
+        /* Hand-write blk00000.dat: 16 filler bytes (0x5a5a5a5a is none of
+         * the three accepted magics), then the RAW block payload with no
+         * magic+size frame in front of it. */
+        char path[512];
+        snprintf(path, sizeof(path), "%s/blocks/blk00000.dat", tmpdir);
+        FILE *f = fopen(path, "wb");
+        if (!f) {
+            stream_free(&s);
+            printf("FAIL (open blk00000.dat)\n"); failures++; goto _test_next;
+        }
+        unsigned char filler[16];
+        memset(filler, 0x5a, sizeof(filler));
+        ok = fwrite(filler, 1, sizeof(filler), f) == sizeof(filler) &&
+             fwrite(s.data, 1, s.size, f) == s.size;
+        fclose(f);
+        stream_free(&s);
+        if (!ok) {
+            printf("FAIL (write blk00000.dat)\n"); failures++; goto _test_next;
+        }
+
+        /* The payload starts at 16, so a naive raw-offset read WOULD parse
+         * it. Neither 8..15 nor 16..23 is a frame header, so the position
+         * names no record and must be refused. */
+        struct disk_block_pos pos = { .nFile = 0, .nPos = 16 };
+        struct block r;
+        if (read_block_from_disk_pread(&r, &pos, tmpdir)) {
+            printf("FAIL (unframed position answered: nTime=%u)\n",
+                   r.header.nTime);
+            block_free(&r);
+            failures++;
+            goto _test_next;
+        }
+
+        /* Same through the index-level reader: a HAVE_DATA entry pointing at
+         * a frameless offset reports unreadable instead of feeding a guessed
+         * parse into the hash check. */
+        struct block_index bi;
+        block_index_init(&bi);
+        bi.nHeight = 9;
+        bi.hashBlock = hash_a;
+        bi.phashBlock = &bi.hashBlock;
+        block_index_disk_pos_store(&bi, 0, 16);
+        block_index_status_fetch_or(&bi, BLOCK_HAVE_DATA);
+        if (block_index_have_data_readable(&bi, tmpdir)) {
+            printf("FAIL (index reader answered an unframed position)\n");
+            failures++;
+            goto _test_next;
+        }
+        printf("OK\n");
+    }
+_test_next:
+    cleanup_test_dir(tmpdir);
+    return failures;
+}
+
 static int test_set_have_data_verified(void)
 {
     int failures = 0;
@@ -796,6 +885,7 @@ int test_disk_block_io(void)
     failures += test_concurrent_pread_same_file();
     failures += test_disk_block_pread_raw();
     failures += test_pread_accepts_frame_offset();
+    failures += test_pread_refuses_unframed_position();
     failures += test_set_have_data_verified();
     failures += test_write_allocates_append_position();
     failures += test_deferred_sync_byte_identical();
