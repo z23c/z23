@@ -252,6 +252,9 @@ iso_spawn_node() {
 
     # setsid → new session+group led by the node; we record its PGID
     # (== its PID, since setsid makes it the group leader).
+    # stdin is /dev/null: do not inherit the operator pts. A child that
+    # keeps the TUI as stdin can wall(1) "Broadcast message from user@host"
+    # onto every logged-in terminal.
     # shellcheck disable=SC2086
     setsid "$ISO_NODE_BIN" \
         -datadir="$ISO_DD" -regtest \
@@ -260,7 +263,7 @@ iso_spawn_node() {
         -connect=127.0.0.1:"$ISO_CONNECT_SINK" \
         -nobgvalidation -nolegacyimport -nofilesync -showmetrics=0 \
         $extra \
-        >"$ISO_DD/node.log" 2>&1 &
+        </dev/null >"$ISO_DD/node.log" 2>&1 &
     ISO_NODE_PID=$!
     ISO_PGID="$ISO_NODE_PID"   # setsid leader: PGID == PID
 }
@@ -327,7 +330,7 @@ iso_spawn_peer() {
         -connect=127.0.0.1:"${ISO_PEER_DIAL:-$ISO_PORT}" \
         -nobgvalidation -nolegacyimport -nofilesync -showmetrics=0 \
         $extra \
-        >"$ISO_PEER_DD/node.log" 2>&1 &
+        </dev/null >"$ISO_PEER_DD/node.log" 2>&1 &
     ISO_PEER_PID=$!
     ISO_PEER_PGID="$ISO_PEER_PID"
 }

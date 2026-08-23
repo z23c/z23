@@ -175,7 +175,7 @@ setsid "$ISO_NODE_BIN" \
     -listen -tor -onion-persist \
     -operator-lane=test \
     -nobgvalidation -nolegacyimport -nofilesync -showmetrics=0 \
-    >"$ISO_DD/node.log" 2>&1 &
+    </dev/null >"$ISO_DD/node.log" 2>&1 &
 ISO_NODE_PID=$!
 ISO_PGID="$ISO_NODE_PID"
 echo "spawned pid=$ISO_NODE_PID datadir=$ISO_DD p2p=$ISO_PORT rpc=$ISO_RPCPORT"

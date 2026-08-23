@@ -609,8 +609,7 @@ static void run_onion_seed_pass(struct connman *cm)
 void connman_kick_onion_seeds(struct connman *cm)
 {
     if (!cm || g_stop || g_connect_only) return;
-    printf("[connman] peer-of-last-resort: querying onion-directory seeds\n");
-    fflush(stdout);
+    LOG_INFO("connman", "peer-of-last-resort: querying onion-directory seeds");
     run_onion_seed_pass(cm);
     /* Persist whatever clearnet hosts we just harvested so a subsequent
      * crash/restart before the periodic flush does not lose them. */
@@ -623,7 +622,8 @@ static void *thread_dns_seed(void *arg)
     thread_liveness_beat(&g_dns_seed_liveness, -1);
 
     if (g_connect_only) {
-        printf("Connect-only mode: skipping seeds, connecting to addnodes only\n");
+        LOG_INFO("connman",
+                 "Connect-only mode: skipping seeds, connecting to addnodes only");
         return NULL;
     }
 
@@ -2811,11 +2811,20 @@ void connman_open_connection(struct connman *cm,
     if (connman_addr_is_connected(cm, addr))
         return;
 
+    peer_lifecycle_note_attempt(addr, PEER_LIFECYCLE_SOURCE_MANUAL);
+
+    /* Onion circuits can take tens of seconds. addnode / peers.add contract
+     * is "dial requested", not "handshake complete". Queue on the addnode
+     * list (above) and let the dialer thread open the circuit; do not block
+     * the RPC or the 250ms native command on Tor. Numeric IPs stay a
+     * direct connect_node. */
+    if (net_addr_is_tor(&addr->svc.addr))
+        return;
+
     /* Pass addr_name as dest so connect_node skips is_local check.
      * This allows connecting to localhost (e.g. local zclassicd peer). */
     char dest[NET_SERVICE_STR_MAX + 1];
     net_service_to_string(&addr->svc, dest, sizeof(dest));
-    peer_lifecycle_note_attempt(addr, PEER_LIFECYCLE_SOURCE_MANUAL);
     struct p2p_node *node = connect_node(&cm->manager,
                                          (struct net_address *)addr, dest);
     if (node) {

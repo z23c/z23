@@ -479,7 +479,7 @@ launch_node() {
         -nobgvalidation \
         -showmetrics=0 \
         "${LOAD_ARGS[@]}" \
-        >>"$DATADIR/probe.log" 2>&1 &
+        </dev/null >>"$DATADIR/probe.log" 2>&1 &
     PID=$!
 }
 

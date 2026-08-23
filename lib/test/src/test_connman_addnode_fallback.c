@@ -1179,11 +1179,13 @@ int test_connman_addnode_fallback(void)
 
     /* Onion dial routing, no live Tor: an onion addnode is stored like any
      * other, but the connect attempt routes to the onion stream bridge,
-     * which fails CLOSED (named error, immediate return) with the Tor
-     * runtime down — no clearnet fallback, no block on a circuit timeout,
-     * and no node is ever registered for the address. */
-    printf("connman_addnode_fallback: onion addnode fails closed "
-           "without Tor... ");
+     * which is queued on the addnode list and NOT opened via blocking
+     * connect_node — onion circuits belong on the dialer thread so RPC /
+     * native peers.add stay inside the 250ms FAST budget. No clearnet
+     * fallback, no circuit timeout on this call, and no node is registered
+     * until the dialer actually connects. */
+    printf("connman_addnode_fallback: onion addnode queues without a "
+           "blocking connect_node... ");
     {
         chain_params_select(CHAIN_MAIN);
         const struct chain_params *params = chain_params_get();
