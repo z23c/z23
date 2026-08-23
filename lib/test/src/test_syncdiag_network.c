@@ -28,6 +28,14 @@ int syncdiag_cases_network(void)
             json_get(&result, "onion_service_ready");
         const struct json_value *address = json_get(&result,
                                                      "onion_address");
+        const struct json_value *p2p_ready = json_get(
+            &result, "p2p_publish_ready");
+        const struct json_value *setup_state = json_get(&result,
+                                                        "setup_state");
+        const struct json_value *mapping = json_get(&result,
+                                                     "port_mapping");
+        const struct json_value *routes = mapping
+            ? json_get(mapping, "routes") : NULL;
 
         ok = ok && result.type == JSON_OBJ;
         ok = ok && strcmp(json_get_str(json_get(&result, "schema")),
@@ -36,6 +44,15 @@ int syncdiag_cases_network(void)
         ok = ok && tor_ready && tor_ready->type == JSON_BOOL;
         ok = ok && service_ready && service_ready->type == JSON_BOOL;
         ok = ok && address && address->type == JSON_STR;
+        ok = ok && p2p_ready && p2p_ready->type == JSON_BOOL;
+        ok = ok && setup_state && setup_state->type == JSON_STR;
+        ok = ok && mapping && mapping->type == JSON_OBJ;
+        ok = ok && json_get(mapping, "state") != NULL;
+        ok = ok && json_get(mapping, "complete") != NULL;
+        ok = ok && json_get(mapping, "expected_route_count") != NULL;
+        ok = ok && json_get(mapping, "installed_route_count") != NULL;
+        ok = ok && routes && routes->type == JSON_ARR;
+        ok = ok && routes && json_size(routes) == 2;
         if (ok && strcmp(json_get_str(state), "ready") == 0) {
             const char *hostname = json_get_str(address);
             size_t hostname_len = strlen(hostname);
@@ -854,10 +871,13 @@ int syncdiag_cases_network(void)
         memset(&cm, 0, sizeof(cm));
         memset(&sigs, 0, sizeof(sigs));
         bool ok = connman_init(&cm, chain_params_get(), &sigs);
-        ok = ok && syncdiag_add_peer(&cm, 11, false,
-                                     PEER_HANDSHAKE_COMPLETE) != NULL;
-        ok = ok && syncdiag_add_peer(&cm, 12, true,
-                                     PEER_HANDSHAKE_COMPLETE) != NULL;
+        struct p2p_node *outbound = syncdiag_add_peer(
+            &cm, 11, false, PEER_HANDSHAKE_COMPLETE);
+        struct p2p_node *inbound = syncdiag_add_peer(
+            &cm, 12, true, PEER_HANDSHAKE_COMPLETE);
+        ok = ok && outbound != NULL && inbound != NULL;
+        if (inbound)
+            inbound->accepted_local_port = 8055;
         if (!ok)
             goto syncdiag_net_split_done;
         if (ok) {
@@ -1003,9 +1023,19 @@ int syncdiag_cases_network(void)
                                      &params, &result);
         const struct json_value *peer0 =
             result.type == JSON_ARR ? json_at(&result, 0) : NULL;
+        const struct json_value *peer1 =
+            result.type == JSON_ARR ? json_at(&result, 1) : NULL;
         ok = ok && peer0 && json_get_bool(json_get(peer0, "zclassic23"));
         ok = ok && peer0 && json_get_bool(json_get(peer0, "zclassic_c23"));
         ok = ok && peer0 && json_get(peer0, "lifecycle") == NULL;
+        ok = ok && peer0 &&
+             json_get_int(json_get(peer0, "accepted_local_port")) == 0;
+        ok = ok && peer1 &&
+             json_get_int(json_get(peer1, "accepted_local_port")) == 8055;
+        ok = ok && peer1 &&
+             !json_get_bool(json_get(peer1, "source_is_loopback"));
+        ok = ok && peer1 &&
+             !json_get_bool(json_get(peer1, "onion_ingress_candidate"));
 
 syncdiag_net_split_done:
         json_free(&params);

@@ -1778,6 +1778,23 @@ bool bind_listen_port(struct net_manager *nm, const struct net_service *addr,
         LOG_FAIL("net", "bind() failed for listen port");
     }
 
+    struct sockaddr_storage bound;
+    socklen_t bound_len = sizeof(bound);
+    memset(&bound, 0, sizeof(bound));
+    if (getsockname(sock, (struct sockaddr *)&bound, &bound_len) != 0) {
+        close_socket(&sock);
+        LOG_FAIL("net", "getsockname() failed for bound listen port");
+    }
+    uint16_t local_port = 0;
+    if (bound.ss_family == AF_INET)
+        local_port = ntohs(((struct sockaddr_in *)&bound)->sin_port);
+    else if (bound.ss_family == AF_INET6)
+        local_port = ntohs(((struct sockaddr_in6 *)&bound)->sin6_port);
+    if (local_port == 0) {
+        close_socket(&sock);
+        LOG_FAIL("net", "bound listen socket reported local port zero");
+    }
+
     if (listen(sock, SOMAXCONN) == ZCL_SOCKET_ERROR) {
         close_socket(&sock);
         LOG_FAIL("net", "listen() failed");
@@ -1792,6 +1809,7 @@ bool bind_listen_port(struct net_manager *nm, const struct net_service *addr,
     }
     nm->listen_sockets[nm->num_listen_sockets].socket = sock;
     nm->listen_sockets[nm->num_listen_sockets].whitelisted = whitelisted;
+    nm->listen_sockets[nm->num_listen_sockets].local_port = local_port;
     nm->num_listen_sockets++;
 
     if (net_addr_is_routable(&addr->addr) && nm->discover && !whitelisted)
@@ -1988,6 +2006,7 @@ bool accept_connection(struct net_manager *nm, const struct listen_socket *ls)
 
     p2p_node_add_ref(node);
     node->whitelisted = is_whitelisted;
+    node->accepted_local_port = ls->local_port;
     peer_lifecycle_note_connected(node, PEER_LIFECYCLE_SOURCE_INBOUND);
 
     zcl_mutex_lock(&nm->cs_nodes);

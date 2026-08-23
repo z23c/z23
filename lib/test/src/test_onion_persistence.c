@@ -256,17 +256,31 @@ static int test_onion_ephemeral_default(void)
     printf("test_onion_ephemeral_default: ");
 
     bool def = !tor_integration_persistence_enabled();
+    struct tor_onion_port_map initial_map;
+    tor_integration_port_map_snapshot(&initial_map);
     tor_integration_configure_identity(true, false);
     bool on = tor_integration_persistence_enabled();
+    struct tor_onion_port_map configured_map;
+    tor_integration_port_map_snapshot(&configured_map);
     tor_integration_configure_identity(false, true);   /* rotate alone */
     bool rotate_alone_ignored = !tor_integration_persistence_enabled();
     tor_integration_configure_identity(false, false);
 
-    if (def && on && rotate_alone_ignored) {
+    bool map_contract =
+        initial_map.state == TOR_ONION_PORT_MAP_DISABLED &&
+        initial_map.application_virtual_port == 80 &&
+        initial_map.expected_route_count == 1 &&
+        !initial_map.complete &&
+        configured_map.persistent_identity &&
+        configured_map.state == TOR_ONION_PORT_MAP_DISABLED &&
+        strcmp(tor_onion_port_map_state_name(configured_map.state),
+               "disabled") == 0;
+
+    if (def && on && rotate_alone_ignored && map_contract) {
         printf("OK\n");
     } else {
-        printf("FAIL (default=%d on=%d rotate_alone_ignored=%d)\n",
-               def, on, rotate_alone_ignored);
+        printf("FAIL (default=%d on=%d rotate_alone_ignored=%d map=%d)\n",
+               def, on, rotate_alone_ignored, map_contract);
         failures++;
     }
 

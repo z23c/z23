@@ -712,11 +712,11 @@ ZCL_COMMAND_BRANCH("core.network.onion", "core.network",
                    "Embedded onion service", ZCL_COMMAND_LAYER_CORE)
 ZCL_COMMAND_READY_READ(
     "core.network.onion.status", "core.network.onion", "",
-    "Onion address and bootstrap status",
-    "Live embedded-Tor onion address and bootstrap percentage, read "
-    "from the running node's Tor pthread state at call time; absent "
-    "when the stub Tor build is linked.", 0,
-    "onion,tor,status,address",
+    "Onion address, port map, and bootstrap status",
+    "Live embedded-Tor onion address, P2P publish readiness, setup state, "
+    "and installed virtual-port map, read from the running node's Tor "
+    "pthread state at call time; absent when the stub Tor build is linked.", 0,
+    "onion,tor,status,address,port,map,p2p,setup",
     "zcl.command.empty_input.v1", "zcl.onion_status.v1", "", "",
     "z23 core network onion status",
     ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_PUBLIC,

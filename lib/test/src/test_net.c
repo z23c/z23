@@ -2014,6 +2014,26 @@ int test_net(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    /* listen socket: records the kernel-assigned local port */
+    {
+        printf("listen socket: records bound local port... ");
+        struct net_manager nm;
+        struct net_service svc;
+        unsigned char ip4[4] = {127, 0, 0, 1};
+        net_manager_init(&nm);
+        net_service_init(&svc);
+        net_addr_set_ipv4(&svc.addr, ip4);
+        svc.port = 0;
+
+        bool ok = bind_listen_port(&nm, &svc, false);
+        ok = ok && nm.num_listen_sockets == 1;
+        ok = ok && nm.listen_sockets[0].local_port > 0;
+
+        net_manager_free(&nm);
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+
     /* p2p_node: create and free lifecycle */
     {
         printf("p2p_node: create and free... ");

@@ -18,6 +18,7 @@
 #include "net/peer_identity.h"
 #include "net/peer_lifecycle.h"
 #include "net/protocol.h"
+#include "net/tor_integration.h"
 #include "net/version.h"
 #include <stdatomic.h>
 #include <stdio.h>
@@ -593,6 +594,9 @@ static bool rpc_getpeerinfo(const struct json_value *params, bool help,
     struct network_context *ctx = network_ctx();
     if (!ctx->connman) return true;
 
+    struct tor_onion_port_map port_map;
+    tor_integration_port_map_snapshot(&port_map);
+
     zcl_mutex_lock(&ctx->connman->manager.cs_nodes);
     for (size_t i = 0; i < ctx->connman->manager.num_nodes; i++) {
         struct p2p_node *node = ctx->connman->manager.nodes[i];
@@ -611,6 +615,14 @@ static bool rpc_getpeerinfo(const struct json_value *params, bool help,
         json_push_kv_int(&entry, "lastrecv", node->last_recv);
         json_push_kv_int(&entry, "bytessent", (int64_t)node->send_bytes);
         json_push_kv_int(&entry, "bytesrecv", (int64_t)node->recv_bytes);
+        bool source_is_loopback = node->inbound && net_addr_is_operator_local(
+            &node->addr.svc.addr);
+        bool onion_ingress_candidate = source_is_loopback &&
+            port_map.p2p_route_installed &&
+            node->accepted_local_port == port_map.p2p_target_port;
+        json_push_kv_int(&entry, "accepted_local_port", node->accepted_local_port);
+        json_push_kv_bool(&entry, "source_is_loopback", source_is_loopback);
+        json_push_kv_bool(&entry, "onion_ingress_candidate", onion_ingress_candidate);
 
         double ping_ms = (double)node->ping_usec_time / 1000000.0;
         json_push_kv_real(&entry, "pingtime", ping_ms);

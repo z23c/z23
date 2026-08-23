@@ -303,7 +303,7 @@ represented by its children's sections.
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
-| `core network onion status` | ready | read / read / public · fast/low | none | `zcl.onion_status.v1` | `z23 core network onion status` | Onion address and bootstrap status |
+| `core network onion status` | ready | read / read / public · fast/low | none | `zcl.onion_status.v1` | `z23 core network onion status` | Onion address, port map, and bootstrap status |
 | `core network onion health` | ready | read / read / operator · fast/low | none | `zcl.onion_health.v1` | `z23 core network onion health` | Onion reachability health |
 
 #### `core.wallet` — Keys, balance, and transactions

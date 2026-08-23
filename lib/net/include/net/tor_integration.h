@@ -63,6 +63,36 @@ bool tor_integration_is_ready(void);
 /* Check if Tor was started (may still be bootstrapping). */
 bool tor_integration_is_enabled(void);
 
+/* Snapshot of the onion service's live virtual-port contract. This is the
+ * authoritative C23 view of what embedded Tor was asked to expose and what
+ * completed registration. Callers must not infer that an arbitrary loopback
+ * P2P connection used Tor; combine this with accepted-listener evidence and
+ * keep the result labelled as a candidate unless Tor supplied stream ID. */
+enum tor_onion_port_map_state {
+    TOR_ONION_PORT_MAP_DISABLED = 0,
+    TOR_ONION_PORT_MAP_PENDING,
+    TOR_ONION_PORT_MAP_INSTALLED,
+    TOR_ONION_PORT_MAP_FAILED
+};
+
+struct tor_onion_port_map {
+    enum tor_onion_port_map_state state;
+    bool complete;
+    bool persistent_identity;
+    int expected_route_count;
+    int installed_route_count;
+    uint16_t application_virtual_port;
+    bool application_route_installed;
+    uint16_t p2p_virtual_port;
+    uint16_t p2p_target_port;
+    bool p2p_route_expected;
+    bool p2p_route_installed;
+};
+
+void tor_integration_port_map_snapshot(struct tor_onion_port_map *out);
+const char *tor_onion_port_map_state_name(
+    enum tor_onion_port_map_state state);
+
 /* Write torrc to datadir. We do NOT use SOCKS — dynhost handles
  * everything. A localhost-only SocksPort is opened as a bootstrap
  * workaround (Tor refuses to start without a listener). The port is

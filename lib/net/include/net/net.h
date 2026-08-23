@@ -238,6 +238,10 @@ struct p2p_node {
     int64_t time_offset;
     struct net_address addr;
     char addr_name[256];
+    /* Exact local listener port which accepted this inbound TCP stream.
+     * Zero for outbound peers. This proves listener ingress, not by itself
+     * that Tor supplied the stream. */
+    uint16_t accepted_local_port;
     struct net_service addr_local;
     /* For an inbound connection, the peer's version.addr_from is its stable
      * listening endpoint while addr.svc contains the socket's ephemeral
@@ -442,6 +446,7 @@ struct node_signals {
 struct listen_socket {
     zcl_socket_t socket;
     bool whitelisted;
+    uint16_t local_port;
 };
 
 struct net_manager {

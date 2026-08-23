@@ -56,7 +56,7 @@ static char g_tor_datadir[512];
  * persistent onion service: <onion>:<p2p_port> forwards to the local P2P
  * listener (see the install site for why this is NOT a dynhost virtual
  * port). 0 = unknown (no mapping installed). */
-static uint16_t g_tor_p2p_port = 0;
+static _Atomic uint16_t g_tor_p2p_port = 0;
 /* tor.log size at THIS boot's Tor start. The log is append-mode across
  * boots and (in default mode) dynhost mints a fresh ephemeral service
  * every start, so any address line below this offset names a dead
@@ -558,10 +558,11 @@ static int tor_try_install_persistent_identity(const char *datadir)
      * dynhost_add_virtual_port: that would route the port into the HTTP
      * interception layer (dynhost_handlers.c), which exists for port-80
      * traffic only. */
-    if (g_tor_p2p_port > 0 && g_tor_p2p_port != 80) {
-        p2p_pc->virtual_port = g_tor_p2p_port;
+    uint16_t p2p_port = atomic_load(&g_tor_p2p_port);
+    if (p2p_port > 0 && p2p_port != 80) {
+        p2p_pc->virtual_port = p2p_port;
         p2p_pc->is_unix_addr = 0;
-        p2p_pc->real_port = g_tor_p2p_port;
+        p2p_pc->real_port = p2p_port;
         p2p_pc->real_addr.family = AF_INET;
         p2p_pc->real_addr.addr.in_addr[0] = 127;
         p2p_pc->real_addr.addr.in_addr[1] = 0;
@@ -628,6 +629,56 @@ void tor_integration_configure_identity(bool persist, bool rotate)
 bool tor_integration_persistence_enabled(void)
 {
     return atomic_load(&g_onion_persist);
+}
+
+const char *tor_onion_port_map_state_name(
+    enum tor_onion_port_map_state state)
+{
+    switch (state) {
+    case TOR_ONION_PORT_MAP_DISABLED:  return "disabled";
+    case TOR_ONION_PORT_MAP_PENDING:   return "pending";
+    case TOR_ONION_PORT_MAP_INSTALLED: return "installed";
+    case TOR_ONION_PORT_MAP_FAILED:    return "failed";
+    }
+    return "unknown";
+}
+
+void tor_integration_port_map_snapshot(struct tor_onion_port_map *out)
+{
+    if (!out)
+        return;
+
+    memset(out, 0, sizeof(*out));
+    bool enabled = atomic_load(&g_tor_running);
+    bool ready = atomic_load(&g_tor_ready);
+    bool persistent = atomic_load(&g_onion_persist);
+    int install_state = atomic_load(&g_persist_install_state);
+    uint16_t p2p_port = atomic_load(&g_tor_p2p_port);
+
+    out->persistent_identity = persistent;
+    out->application_virtual_port = 80;
+    out->p2p_virtual_port = p2p_port;
+    out->p2p_target_port = p2p_port;
+    out->p2p_route_expected = persistent && p2p_port > 0 && p2p_port != 80;
+    out->expected_route_count = 1 + (out->p2p_route_expected ? 1 : 0);
+
+    if (!enabled)
+        out->state = TOR_ONION_PORT_MAP_DISABLED;
+    else if (persistent && install_state < 0)
+        out->state = TOR_ONION_PORT_MAP_FAILED;
+    else if (!ready || (persistent && install_state != 1))
+        out->state = TOR_ONION_PORT_MAP_PENDING;
+    else
+        out->state = TOR_ONION_PORT_MAP_INSTALLED;
+
+    out->application_route_installed = ready;
+    out->p2p_route_installed = ready && out->p2p_route_expected &&
+                               install_state == 1;
+    out->installed_route_count =
+        (out->application_route_installed ? 1 : 0) +
+        (out->p2p_route_installed ? 1 : 0);
+    out->complete = enabled && ready &&
+                    out->installed_route_count == out->expected_route_count;
 }
 
 
@@ -825,7 +876,7 @@ bool tor_integration_start(const char *datadir, uint16_t p2p_port)
         return true;
 
     snprintf(g_tor_datadir, sizeof(g_tor_datadir), "%s", datadir);
-    g_tor_p2p_port = p2p_port;
+    atomic_store(&g_tor_p2p_port, p2p_port);
     g_onion_address[0] = '\0';
     g_rotated_old_address[0] = '\0';
     atomic_store(&g_persist_install_state, 0);
