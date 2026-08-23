@@ -61,11 +61,11 @@ extern struct thread_liveness_child g_open_liveness;
  * Onion: a v3 onion address is a self-generated Ed25519 public key —
  * free and unlimited to mint, with no ISP/RIR allocation cost at all.
  * There is no "group" to diversify within; the only meaningful bound is
- * a flat cap on TOTAL outbound onion connections. MAX_OUTBOUND_ONION=2
- * matches MAX_OUTBOUND_PER_GROUP16 (the existing IPv4 per-subnet cap) —
- * enough that a normal mixed clearnet+onion peer set keeps some onion
- * diversity, but a wall of attacker-minted .onion identities cannot
- * consume more than 2 of the (default 8) outbound slots.
+ * a flat cap on TOTAL outbound onion connections. MAX_OUTBOUND_ONION=3 is
+ * enough for every remote edge in a four-node operator mesh while still
+ * reserving a majority (5 of the default 8 slots) for non-onion network
+ * diversity. A wall of attacker-minted .onion identities therefore still
+ * cannot consume the whole outbound set.
  *
  * connman_kick_onion_seeds() / run_onion_seed_pass() is UNAFFECTED by
  * this cap: it fetches /directory.json directly over Tor via
@@ -75,7 +75,7 @@ extern struct thread_liveness_child g_open_liveness;
  * seeds still works even when the onion outbound bucket is full. */
 #define MAX_OUTBOUND_PER_GROUP16 2
 #define MAX_OUTBOUND_IPV6_GROUP32 2
-#define MAX_OUTBOUND_ONION 2
+#define MAX_OUTBOUND_ONION 3
 
 /* Extract /16 subnet group from IPv4-mapped address (bytes 12-13). */
 uint16_t ipv4_group16(const unsigned char ip[16]);

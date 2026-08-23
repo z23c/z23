@@ -1051,8 +1051,8 @@ int test_connman_addnode_fallback(void)
         else { printf("FAIL\n"); failures++; }
     }
 
-    printf("connman_addnode_fallback: IPv6 /32 and onion outbound "
-          "diversity caps enforced... ");
+    printf("connman_addnode_fallback: IPv6 /32 and three-slot onion "
+           "outbound diversity caps enforced... ");
     {
         chain_params_select(CHAIN_MAIN);
         const struct chain_params *params = chain_params_get();
@@ -1072,9 +1072,11 @@ int test_connman_addnode_fallback(void)
          * the RFC 3849 documentation prefix 2001:0db8::/32, which
          * net_addr_is_valid() deliberately rejects as non-routable and
          * would make every addrman_add() below silently fail) saturate
-         * MAX_OUTBOUND_IPV6_GROUP32 (2). Two already-connected outbound
-         * onion peers saturate the flat MAX_OUTBOUND_ONION (2) bucket —
-         * onion has no sub-grouping, see
+         * MAX_OUTBOUND_IPV6_GROUP32 (2). Three already-connected outbound
+         * onion peers saturate the flat MAX_OUTBOUND_ONION (3) bucket —
+         * enough for all remote edges of a four-node mesh while still
+         * reserving five of eight outbound slots. Onion has no sub-grouping;
+         * see
          * connman_outbound_diversity_capped()'s doc comment. */
         if (ok) {
             const unsigned char ipv6_prefix[4] = {0x26, 0x00, 0x01, 0x00};
@@ -1089,7 +1091,7 @@ int test_connman_addnode_fallback(void)
                 ok = ok && n != NULL;
                 if (n) cm.manager.nodes[cm.manager.num_nodes++] = n;
             }
-            for (int i = 0; i < 2 && ok; i++) {
+            for (int i = 0; i < 3 && ok; i++) {
                 struct net_address a;
                 net_address_init(&a);
                 a.svc.addr.has_torv3 = true;

@@ -16,7 +16,8 @@
 > virtual port = the node's P2P port, forwarded by stock hidden-service
 > machinery to `127.0.0.1:<p2p_port>`; it is NOT a dynhost virtual port
 > (that would land in the HTTP interception layer). The
-> `MAX_OUTBOUND_ONION` diversity cap (2) bounds outbound onion slots.
+> `MAX_OUTBOUND_ONION` diversity cap (3) bounds outbound onion slots while
+> permitting all remote edges of a four-node operator mesh.
 > Onion dials carry their own 120 s connect budget
 > (`ONION_STREAM_CONNECT_TIMEOUT_MS`); the clearnet dialer's shared 5 s
 > window is never applied to them. Everything below remains the larger
