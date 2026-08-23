@@ -61,12 +61,14 @@
 #include "config/runtime.h"
 #include "core/arith_uint256.h"
 #include "core/uint256.h"
+#include "jobs/stage_repair.h"
 #include "mining/miner.h"
 #include "models/block.h"
 #include "models/database.h"
 #include "net/msg_internal.h"
 #include "net/msgprocessor.h"
 #include "primitives/block.h"
+#include "storage/progress_store.h"
 #include "validation/chainstate.h"
 #include "validation/main_state.h"
 #include "util/safe_alloc.h"
@@ -173,6 +175,10 @@ int test_getheaders_serve_fallback(void)
     char dir[256];
     test_make_tmpdir(dir, sizeof(dir), "gsf", "ok");
 
+    GSF_CHECK("repair store opens", progress_store_open(dir));
+    sqlite3 *progress_db = progress_store_db();
+    GSF_CHECK("repair store handle published", progress_db != NULL);
+
     /* node.db fixture behind the production port seam. */
     struct node_db ndb;
     struct db_service dbsvc;
@@ -263,7 +269,31 @@ int test_getheaders_serve_fallback(void)
                   next == bi_b && bi_a->nStatus == BLOCK_VALID_TREE);
     }
 
-    /* 4. The healed entry serves again off the in-memory hot path, still
+    /* 4. Snapshot reducers already retain many complete, hash-bound headers
+     *    in header_solution_repair even when both the old body and node.db
+     *    row are absent. The runtime port must reuse that existing authority,
+     *    and the serve path must still run its independent full-PoW gate. */
+    GSF_CHECK("repair row for A stored",
+              progress_db && stage_repair_header_solution_save(
+                  progress_db, 1, &hash_a, &ha));
+    {
+        struct block_header out;
+        block_header_init(&out);
+        bool ok = getheaders_index_header_servable(&mp, bi_a, &out);
+        struct uint256 served_hash;
+        block_header_get_hash(&out, &served_hash);
+        GSF_CHECK("fallback serves header from reducer repair row", ok);
+        GSF_CHECK("repair-row header hash-binds to the index entry",
+                  ok && uint256_eq(&served_hash, &hash_a));
+        GSF_CHECK("repair-row header carries the real Equihash solution",
+                  ok && out.nSolutionSize == ha.nSolutionSize &&
+                  memcmp(out.nSolution, ha.nSolution,
+                         ha.nSolutionSize) == 0);
+        GSF_CHECK("repair-row fallback heals the in-memory entry",
+                  ok && bi_a->nSolutionSize == ha.nSolutionSize);
+    }
+
+    /* 5. The healed entry serves again off the in-memory hot path, still
      *    hash-bound and still carrying the real solution — no re-read of
      *    the store needed, and the same accepted header comes back. */
     {
@@ -281,13 +311,14 @@ int test_getheaders_serve_fallback(void)
                          hb.nSolutionSize) == 0);
     }
 
-    /* 5. Serve-path solution cache accounting is wired: healing B pinned
-     *    exactly B's solution, and it is bounded (never unbounded growth
+    /* 6. Serve-path solution cache accounting is wired: healing A and B pins
+     *    their solutions, and it is bounded (never unbounded growth
      *    driven by an unauthenticated peer's header walk). */
     GSF_CHECK("healed solution is counted against the serve cache budget",
-              getheaders_solution_cache_bytes() >= hb.nSolutionSize);
+              getheaders_solution_cache_bytes() >=
+              ha.nSolutionSize + hb.nSolutionSize);
 
-    /* 6. A header that is internally VALID but is filed under the WRONG
+    /* 7. A header that is internally VALID but is filed under the WRONG
      *    hash must never be served. Entry X is keyed by a hash that is not
      *    B's, yet reassembles byte-for-byte into B's header — same prev
      *    (pprev = A), same fields, same real Equihash solution. So every
@@ -349,7 +380,7 @@ int test_getheaders_serve_fallback(void)
         }
     }
 
-    /* 7. F1 REGRESSION — a hash-bound header marked BLOCK_VALID_TREE whose
+    /* 8. F1 REGRESSION — a hash-bound header marked BLOCK_VALID_TREE whose
      *    Equihash solution is GARBAGE must still be refused.
      *
      *    This is the whole reason the serve path re-verifies Equihash
@@ -455,7 +486,7 @@ int test_getheaders_serve_fallback(void)
         }
     }
 
-    /* 8. F3 — the serve-path solution cache is BOUNDED, not merely
+    /* 9. F3 — the serve-path solution cache is BOUNDED, not merely
      *    counted. 64 MiB mirrors HEADERS_SOLUTION_CACHE_MAX_BYTES in
      *    lib/net/src/msg_headers.c; that constant is the whole worst case
      *    an unauthenticated post-handshake peer can drive this cache to,
@@ -470,6 +501,7 @@ int test_getheaders_serve_fallback(void)
     app_runtime_set_current(NULL);
     db_service_stop(&dbsvc);
     node_db_close(&ndb);
+    progress_store_close();
     main_state_free(&ms);
     test_rm_rf(dir);
     chain_params_select(CHAIN_MAIN);

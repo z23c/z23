@@ -3,11 +3,14 @@
  * file COPYING or http://www.opensource.org/licenses/mit-license.php. */
 
 #include "config/runtime.h"
+#include "jobs/stage_repair.h"
 #include "models/block.h"
 #include "models/database.h"
 #include "models/tx_index.h"
 #include "services/chain_activation_service.h"
+#include "storage/block_index_projection.h"
 #include "storage/node_db_runtime.h"
+#include "storage/progress_store.h"
 #include "util/ar_step_readonly.h"
 #include "validation/process_block.h"
 #include <limits.h>
@@ -114,15 +117,71 @@ int app_runtime_node_db_utxo_max_height(struct node_db *ndb)
     return max_height;
 }
 
+static bool app_runtime_projection_header_by_hash_height(
+    int height, const uint8_t hash[32], struct block_header *out)
+{
+    block_index_projection_t *projection =
+        block_index_projection_singleton();
+    if (!projection)
+        return false;
+
+    struct disk_block_index disk;
+    disk_block_index_init(&disk);
+    if (!block_index_projection_get(projection, hash, &disk) ||
+        disk.nHeight != height || disk.nSolutionSize == 0 ||
+        disk.nSolutionSize > sizeof(out->nSolution))
+        return false;
+
+    block_header_init(out);
+    out->nVersion = disk.nVersion;
+    out->hashPrevBlock = disk.hashPrev;
+    out->hashMerkleRoot = disk.hashMerkleRoot;
+    out->hashFinalSaplingRoot = disk.hashFinalSaplingRoot;
+    out->nTime = disk.nTime;
+    out->nBits = disk.nBits;
+    out->nNonce = disk.nNonce;
+    memcpy(out->nSolution, disk.nSolution, disk.nSolutionSize);
+    out->nSolutionSize = disk.nSolutionSize;
+
+    struct uint256 computed;
+    block_header_get_hash(out, &computed);
+    return memcmp(computed.data, hash, sizeof(computed.data)) == 0;
+}
+
 /* node_db_runtime_port.load_header_by_hash_height — the composition root's
- * side of the header-by-(height,hash) read port. Delegates to the models
- * loader, which hash-binds the stored row (recomputes the serialized
- * header hash against `hash`) before returning it. */
+ * side of the complete-header read port. A snapshot may intentionally omit
+ * old block bodies and node.db rows, while the reducer's hash-bound repair
+ * table or the append-only event projection still retains the exact header.
+ * Try each existing durable authority without making lib/net depend upward on
+ * jobs/config. Every successful source recomputes the serialized header hash.
+ *
+ * The consensus store is shared with the reducer. Serving is subordinate, so
+ * it uses trylock and falls through immediately rather than delaying a reducer
+ * transaction. A later peer retry can use the row after contention clears. */
 static bool app_runtime_load_header_by_hash_height(
     int height, const uint8_t hash[32], struct block_header *out)
 {
-    return db_block_load_header_by_hash_height(app_runtime_node_db(),
-                                               height, hash, out);
+    if (!hash || !out || height < 0)
+        return false;
+
+    if (db_block_load_header_by_hash_height(app_runtime_node_db(),
+                                            height, hash, out))
+        return true;
+
+    if (progress_store_tx_trylock()) {
+        /* Read the singleton only after taking its lifetime/transaction lock:
+         * shutdown exchanges the pointer to NULL under this same lock. */
+        sqlite3 *progress_db = progress_store_db();
+        struct uint256 expected;
+        memcpy(expected.data, hash, sizeof(expected.data));
+        bool loaded = progress_db && stage_repair_header_solution_load(
+            progress_db, height, &expected, out);
+        progress_store_tx_unlock();
+        if (loaded)
+            return true;
+    }
+
+    return app_runtime_projection_header_by_hash_height(height, hash, out);
 }
 
 bool app_runtime_node_db_tx_index_find(struct node_db *ndb,

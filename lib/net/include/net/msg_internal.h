@@ -64,9 +64,9 @@ bool getheaders_try_append_header(struct byte_stream *body,
  * process_getheaders' serve loop only.
  *
  * getheaders_index_header_servable builds the servable header for `iter`:
- * in-memory index first, then the flat block file, then the node.db
- * `blocks` row (the store a snapshot-seeded node still has below its body
- * floor). A true return always hash-binds: the header written to `hdr_out`
+ * in-memory index first, then the flat block file, then the runtime's durable
+ * complete-header authorities (node.db, reducer repair table, projection).
+ * A true return always hash-binds: the header written to `hdr_out`
  * serializes to `iter->phashBlock`, so it is byte-for-byte the header this
  * node accepted under that hash. A false return names the refusal in the
  * log; it is an availability/serve verdict, never a validity verdict (no

@@ -716,16 +716,12 @@ static bool headers_try_node_db_header(struct block_index *iter,
     if (!iter || !hdr_out || !iter->phashBlock)
         return false;
 
-    /* node.db `blocks` rows carry the full stored header — the 1344-byte
-     * Equihash nSolution included — even below the body floor of a
-     * snapshot-seeded node, whose hydrated in-memory index has no
-     * nSolution and whose flat block files are absent. The loader
-     * hash-binds the row to phashBlock (it recomputes the serialized
-     * header hash), so a true return is the real connected header — the
-     * same bytes the disk-file retry would have produced, from the one
-     * store a snapshot seed DOES have. Pattern follows
-     * header_from_node_db_block (app/jobs/src/validate_headers_validator.c);
-     * the port keeps lib/net from naming app/models directly. */
+    /* The runtime read port tries the existing durable full-header
+     * authorities (node.db, the reducer repair table, then the event
+     * projection). Each source hash-binds its bytes to phashBlock before a
+     * true return. The port keeps lib/net below app/jobs and config while
+     * allowing snapshot-seeded nodes whose old bodies are absent to serve
+     * every locally retained solution. */
     /* raw-return-ok: the caller (getheaders_index_header_servable) logs the
      * named serve refusal; this guard only selects the fallback source. */
     if (!node_db_runtime_load_header_by_hash_height(
