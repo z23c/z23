@@ -31,9 +31,12 @@
 #include "controllers/diagnostics_controller.h"
 #include "controllers/diagnostics_internal.h"
 #include "json/json.h"
+#include "platform/time_compat.h"
 #include "rpc/server.h"
 #include "util/safe_alloc.h"
 
+#include <errno.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -63,6 +66,54 @@ static char *dbb_read_file(const char *path, long *size_out)
     buf[sz] = '\0';
     if (size_out) *size_out = sz;
     return buf;
+}
+
+/* ── (d) bounded-drain harness ───────────────────────────────────────
+ *
+ * Runs diagnostics_controller_shutdown() on its own thread so the test can
+ * put a DEADLINE on a call that, before the bounded drain landed, waited
+ * forever on a capture lease. The live incident this pins: SIGTERM on a
+ * healthy node, stage 'diagnostics-drain' blows its deadline, and the
+ * watchdog force-exits UNCLEAN before the coins flush / WAL checkpoint /
+ * clean marker ever run — costing the next boot a ~180 s quick_check. */
+struct dbb_drain_probe {
+    pthread_mutex_t lock;
+    pthread_cond_t  cond;
+    bool            done;
+    bool            result;
+};
+
+static void *dbb_drain_thread(void *arg)
+{
+    struct dbb_drain_probe *p = arg;
+    bool r = diagnostics_controller_shutdown();
+    pthread_mutex_lock(&p->lock);
+    p->result = r;
+    p->done = true;
+    pthread_cond_broadcast(&p->cond);
+    pthread_mutex_unlock(&p->lock);
+    return NULL;
+}
+
+/* Wait up to `budget_ms` for the probe to finish. Returns whether it did. */
+static bool dbb_drain_wait(struct dbb_drain_probe *p, int budget_ms)
+{
+    struct timespec deadline;
+    platform_time_realtime_timespec(&deadline);
+    deadline.tv_sec  += budget_ms / 1000;
+    deadline.tv_nsec += (long)(budget_ms % 1000) * 1000000L;
+    if (deadline.tv_nsec >= 1000000000L) {
+        deadline.tv_sec += 1;
+        deadline.tv_nsec -= 1000000000L;
+    }
+    pthread_mutex_lock(&p->lock);
+    while (!p->done) {
+        if (pthread_cond_timedwait(&p->cond, &p->lock, &deadline) == ETIMEDOUT)
+            break;
+    }
+    bool done = p->done;
+    pthread_mutex_unlock(&p->lock);
+    return done;
 }
 
 /* Parse the bundle file at `path` into `doc` (caller json_free's). */
@@ -224,6 +275,47 @@ int test_debug_bundle(void)
     }
     DBB_CHECK("restart: owned worker joins",
               diagnostics_controller_shutdown());
+
+    /* ── (d) the shutdown drain is BOUNDED ───────────────────────── */
+    {
+        diagnostics_controller_set_state(NULL, dir);   /* worker live again */
+
+        /* One capture lease held open stands in for the live failure mode:
+         * a capture blocked inside a single dumper, which the walk can only
+         * cancel at the NEXT dumper boundary. */
+        DBB_CHECK("drain: a capture lease can be taken before shutdown",
+                  debug_bundle_capture_lease_acquire_for_test());
+        debug_bundle_set_drain_budget_ms_for_test(200);
+
+        struct dbb_drain_probe probe = {
+            .lock = PTHREAD_MUTEX_INITIALIZER,
+            .cond = PTHREAD_COND_INITIALIZER,
+            .done = false,
+            .result = false,
+        };
+        pthread_t th;
+        bool spawned = pthread_create(&th, NULL, dbb_drain_thread,
+                                      &probe) == 0;
+        DBB_CHECK("drain: probe thread starts", spawned);
+
+        bool returned = spawned && dbb_drain_wait(&probe, 5000);
+        DBB_CHECK("drain: returns inside its budget with a capture live",
+                  returned);
+        DBB_CHECK("drain: an undrained capture reports false (never a "
+                  "silent clean pass)",
+                  returned && !probe.result);
+
+        /* Release the lease: the drain must then report a true, complete
+         * drain — the fix must not turn every shutdown into 'undrained'. */
+        debug_bundle_capture_lease_release_for_test();
+        if (spawned)
+            pthread_join(th, NULL);
+        DBB_CHECK("drain: reports true once the capture is gone",
+                  diagnostics_controller_shutdown());
+
+        debug_bundle_set_drain_budget_ms_for_test(0);   /* restore default */
+    }
+
     rmdir(dir);
     return failures;
 }

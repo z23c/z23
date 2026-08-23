@@ -64,6 +64,15 @@
  * Manual ops.debug.bundle calls are never rate-limited. */
 #define DEBUG_BUNDLE_AUTO_MIN_INTERVAL_SECS 300
 
+/* Bounded shutdown drain (see debug_bundle_shutdown in
+ * controllers/diagnostics_internal.h). A capture is only cancellable at a
+ * dumper boundary, so one dumper that blocks makes the drain unbounded; this
+ * budget converts "wait forever, then get force-killed before durability"
+ * into "report truthfully, retain ownership, and let shutdown reach its
+ * coins flush and WAL checkpoint". Comfortably above the ~25 s a full
+ * 160-dumper walk costs on a loaded node, far below the stage deadline. */
+#define DEBUG_BUNDLE_DRAIN_BUDGET_MS 20000
+
 /* Owned auto-capture worker.  A previous detached one-shot helper could still
  * be walking dumpers after connman/node.db teardown; the debug path then
  * crashed the process it was meant to diagnose.  One persistent joinable
@@ -77,12 +86,17 @@ static bool            g_auto_started = false;
 static bool            g_auto_stop = false;
 static bool            g_auto_pending = false;
 static bool            g_auto_running = false;
+/* Published by the worker under g_bundle_lock immediately before it returns,
+ * so the drain can wait for its exit with a DEADLINE (pthread_join has none)
+ * and only join a thread that has already finished. */
+static bool            g_auto_exited = false;
 /* Every bundle walk, including synchronous RPC captures, holds one lease.
  * Shutdown revokes new leases and waits for this count to reach zero before
  * any dumper dependency may be released. */
 static size_t           g_active_captures = 0;
 static _Atomic bool    g_auto_accepting = false;
 static _Atomic bool    g_auto_shutdown = false;
+static _Atomic int     g_drain_budget_ms = DEBUG_BUNDLE_DRAIN_BUDGET_MS;
 static int64_t         g_last_auto_us = 0;
 static char            g_pending_child[SUPERVISOR_NAME_MAX];
 static int             g_pending_reason;
@@ -196,6 +210,23 @@ static void debug_bundle_capture_leave(void)
         g_active_captures--;
     pthread_cond_broadcast(&g_bundle_cond);
     pthread_mutex_unlock(&g_bundle_lock);
+}
+
+void debug_bundle_set_drain_budget_ms_for_test(int ms)
+{
+    atomic_store_explicit(&g_drain_budget_ms,
+                          ms > 0 ? ms : DEBUG_BUNDLE_DRAIN_BUDGET_MS,
+                          memory_order_release);
+}
+
+bool debug_bundle_capture_lease_acquire_for_test(void)
+{
+    return debug_bundle_capture_enter();
+}
+
+void debug_bundle_capture_lease_release_for_test(void)
+{
+    debug_bundle_capture_leave();
 }
 
 static bool debug_bundle_write_leased(const char *trigger,
@@ -399,6 +430,9 @@ static void *debug_bundle_auto_thread(void *arg)
         pthread_cond_broadcast(&g_bundle_cond);
     }
     g_auto_running = false;
+    /* Publish the exit BEFORE returning: debug_bundle_shutdown waits on this
+     * with a deadline instead of blocking in pthread_join, which has none. */
+    g_auto_exited = true;
     pthread_cond_broadcast(&g_bundle_cond);
     pthread_mutex_unlock(&g_bundle_lock);
     return NULL;
@@ -452,6 +486,7 @@ void debug_bundle_register_stall_observer(void)
         g_auto_stop = false;
         g_auto_pending = false;
         g_auto_running = false;
+        g_auto_exited = false;
         atomic_store_explicit(&g_auto_shutdown, false, memory_order_release);
         /* Persistent diagnostics worker is owned and joined by
          * debug_bundle_shutdown before any dumper dependency is freed. */
@@ -473,42 +508,85 @@ void debug_bundle_register_stall_observer(void)
     supervisor_set_stall_observer(debug_bundle_on_stall);
 }
 
+/* Caller holds g_bundle_lock. Wait until the worker has published its exit
+ * (when `need_worker_exit`) and every capture lease is dropped, or until
+ * `budget_ms` elapses. Returns whether the drain completed. */
+static bool debug_bundle_drain_wait_locked(bool need_worker_exit,
+                                           int budget_ms)
+{
+    struct timespec deadline;
+    platform_time_realtime_timespec(&deadline);
+    deadline.tv_sec  += budget_ms / 1000;
+    deadline.tv_nsec += (long)(budget_ms % 1000) * 1000000L;
+    if (deadline.tv_nsec >= 1000000000L) {
+        deadline.tv_sec += 1;
+        deadline.tv_nsec -= 1000000000L;
+    }
+
+    while ((need_worker_exit && !g_auto_exited) || g_active_captures > 0) {
+        if (pthread_cond_timedwait(&g_bundle_cond, &g_bundle_lock,
+                                   &deadline) == ETIMEDOUT)
+            break;
+    }
+    return !((need_worker_exit && !g_auto_exited) || g_active_captures > 0);
+}
+
 bool debug_bundle_shutdown(void)
 {
     /* Revoke every capture entrypoint first: after this point neither the
-     * observer nor a late RPC can begin walking dumpers.  Then cancel pending
-     * automatic work, join its sole worker, and wait for any manual capture
-     * that already held a lease. */
+     * observer nor a late RPC can begin walking dumpers, and a capture that
+     * is mid-walk truncates at its next dumper boundary.  Then cancel pending
+     * automatic work and wait — WITH A DEADLINE — for the sole worker to exit
+     * and for any capture that already held a lease to drop it. */
     supervisor_set_stall_observer(NULL);
     atomic_store_explicit(&g_auto_accepting, false, memory_order_release);
     atomic_store_explicit(&g_auto_shutdown, true, memory_order_release);
 
+    int budget_ms = atomic_load_explicit(&g_drain_budget_ms,
+                                         memory_order_acquire);
+
     pthread_mutex_lock(&g_bundle_lock);
-    if (!g_auto_started) {
-        while (g_active_captures > 0)
-            pthread_cond_wait(&g_bundle_cond, &g_bundle_lock);
-        pthread_mutex_unlock(&g_bundle_lock);
-        return true;
+    bool started = g_auto_started;
+    if (started) {
+        g_auto_stop = true;
+        g_auto_pending = false;
+        pthread_cond_broadcast(&g_bundle_cond);
     }
-    g_auto_stop = true;
-    g_auto_pending = false;
-    pthread_cond_broadcast(&g_bundle_cond);
+    bool drained = debug_bundle_drain_wait_locked(started, budget_ms);
+    bool worker_exited = g_auto_exited;
+    size_t in_flight = g_active_captures;
     pthread_mutex_unlock(&g_bundle_lock);
 
-    int rc = pthread_join(g_auto_thread, NULL);
-    if (rc != 0) {
+    if (!drained) {
+        /* Never detached, never freed: the caller keeps ownership of every
+         * dumper dependency. Loud and truthful — and bounded, so shutdown
+         * still reaches its durability stages instead of being force-killed
+         * before them. */
         LOG_ERROR(DBB_SUBSYS,
-                  "auto-capture worker join failed: %s; refusing to release "
-                  "dumper dependencies", strerror(rc));
+                  "capture still live after %dms drain budget "
+                  "(worker_exited=%d in_flight=%zu); dumper dependencies "
+                  "retained, not released",
+                  budget_ms, worker_exited ? 1 : 0, in_flight);
         return false;
+    }
+
+    if (started) {
+        /* The worker already published its exit above, so this join is a
+         * formality that cannot block. */
+        int rc = pthread_join(g_auto_thread, NULL);
+        if (rc != 0) {
+            LOG_ERROR(DBB_SUBSYS,
+                      "auto-capture worker join failed: %s; refusing to "
+                      "release dumper dependencies", strerror(rc));
+            return false;
+        }
     }
 
     pthread_mutex_lock(&g_bundle_lock);
     g_auto_started = false;
     g_auto_running = false;
     g_auto_pending = false;
-    while (g_active_captures > 0)
-        pthread_cond_wait(&g_bundle_cond, &g_bundle_lock);
+    g_auto_exited = false;
     pthread_mutex_unlock(&g_bundle_lock);
     LOG_INFO(DBB_SUBSYS,
              "auto-capture worker stopped; dumper dependencies may be released");
