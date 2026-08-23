@@ -66,11 +66,6 @@ citation, `git log --follow -- docs/work/<name>.md` recovers older intent.
 | [`refold-fold-rate-bottlenecks.md`](./refold-fold-rate-bottlenecks.md) | DESIGN | from-genesis refold fold-rate bottlenecks + fix order |
 | [`tip-durability-collapse.md`](./tip-durability-collapse.md) | DESIGN | rationale of record for `coins_kv` as sole live UTXO author |
 | [`wt-rom-fetch-engine.md`](./wt-rom-fetch-engine.md) | DESIGN | ROM-bundle fetch engine (client side of ROM delivery): trust model + open items |
-| [`wt-zcode-s6-iterative.md`](./wt-zcode-s6-iterative.md) | LIVE | completed S6 iterative DHT assignment and acceptance receipt |
-| [`wt-zcode-s6-hardening.md`](./wt-zcode-s6-hardening.md) | LIVE | completed S6 production-hardening assignment and exact gate receipt |
-| [`wt-zcode-s7-discovery.md`](./wt-zcode-s7-discovery.md) | LIVE | completed S7 generic provider, local-sovereignty policy, replication, and root-only discovery assignment |
-| [`wt-zcode-s7-1-replication.md`](./wt-zcode-s7-1-replication.md) | LIVE | completed S7.1 iterative record discovery, closest-node publication, possession-backed ACK, and provider-directed science proof lane |
-| [`wt-zcode-s7-2-space-scout.md`](./wt-zcode-s7-2-space-scout.md) | PLAN | active S7.2 operational-integrity, read-only Sovereign Space and deterministic Scout lane |
 | [`wt-s7-2-1-metaverse.md`](./wt-s7-2-1-metaverse.md) | PLAN | owner-directed S7.2.1 usability and consolidation lane over the existing Space/Scout foundation |
 | [`os-substrate-plan.md`](./os-substrate-plan.md) | DESIGN | OS-substrate three-rung plan (shell-out removal, `os_proc` shim, sandbox facade) |
 | [`os/A1-authority-receipt-idiom.md`](./os/A1-authority-receipt-idiom.md) | DESIGN | the Law-7 privileged-transition authority-receipt idiom, cited by `tools/lint/check_privileged_transition_receipt.sh` |
