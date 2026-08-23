@@ -39,8 +39,15 @@ struct p2p_node;
 
 /* Arm a fetch for the checkpoint header at `height` whose block hash is `hash`.
  * Idempotent: re-arming for the same target is safe. NULL hash / negative
- * height is a no-op. Set by the app-layer repair condition. */
+ * height is a no-op. Set by the app-layer repair condition AND by boot on a
+ * mainnet node that still needs the checkpoint bundle, so process_headers can
+ * capture nSolution as IBD headers fly past — arming only after the height is
+ * already passed misses the one header a new node needs. */
 void checkpoint_header_fetch_arm(int32_t height, const struct uint256 *hash);
+
+/* Arm for the compiled SHA3 UTXO checkpoint. No-op when no compiled
+ * checkpoint exists. Cheap; capturing one header is the whole point. */
+void checkpoint_header_fetch_arm_compiled(void);
 
 /* Disarm: stop sending span requests and drop any un-consumed capture. Called by
  * the condition once the solution is durably persisted (or on shutdown). */
@@ -76,5 +83,9 @@ void checkpoint_header_fetch_offer(const struct block_header *hdr,
 void checkpoint_header_fetch_maybe_send(struct msg_processor *mp,
                                         struct p2p_node *node,
                                         int64_t now_seconds);
+
+#ifdef ZCL_TESTING
+void checkpoint_header_fetch_test_reset(void);
+#endif
 
 #endif /* ZCL_NET_CHECKPOINT_HEADER_FETCH_H */

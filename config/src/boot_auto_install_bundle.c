@@ -27,6 +27,7 @@
 #include "config/boot_bundle_fetch.h"          /* THE WELD: download-before-autodetect */
 #include "config/boot_header_seed_import.h"    /* headers-as-artifact in-process import */
 #include "config/boot_consensus_bundle_marker.h"
+#include "net/checkpoint_header_fetch.h"       /* pre-arm compiled-checkpoint capture */
 #include "conditions/no_state_source.h"        /* LOUD no-state-source signage */
 #include "jobs/reducer_frontier.h"             /* reducer_frontier_provable_tip_cached */
 #include "storage/boot_auto_refold.h"          /* A1: consume the escalator's armed refold */
@@ -599,6 +600,15 @@ void boot_select_state_source(struct node_db *ndb, struct main_state *ms,
     memset(out, 0, sizeof(*out));
     if (!ctx)
         return;
+
+    /* Capture the compiled checkpoint header's Equihash solution as IBD
+     * headers fly past. Arming only after the height is already passed (the
+     * repair condition's old path) misses the one header a new node needs.
+     * Mainnet only: the compiled checkpoint is mainnet. Skip a datadir that
+     * already holds sovereign installed state. */
+    if (!ctx->regtest && !ctx->testnet &&
+        !boot_consensus_bundle_marker_exists(ctx->datadir))
+        checkpoint_header_fetch_arm_compiled();
 
     /* THE WELD (instant-on linchpin): on a fresh, marker-less datadir with no
      * local *.sqlite bundle, swarm-download the content-verified checkpoint

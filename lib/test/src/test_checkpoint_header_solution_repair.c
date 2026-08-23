@@ -25,6 +25,7 @@
 #include "core/uint256.h"
 #include "jobs/stage_repair.h"
 #include "jobs/validate_headers_stage.h"
+#include "net/checkpoint_header_fetch.h"
 #include "primitives/block.h"
 #include "storage/progress_store.h"
 #include "validation/chainstate.h"
@@ -179,6 +180,35 @@ int test_checkpoint_header_solution_repair(void)
     CHSR_CHECK("good header: second persist idempotent",
                checkpoint_header_solution_verify_and_persist(&ms, H, &good_hash,
                                                              &good));
+
+    /* Net capture: a new node must pin the checkpoint header as IBD headers
+     * fly past. Offering before arm must not capture; arm then offer must. */
+    checkpoint_header_fetch_test_reset();
+    checkpoint_header_fetch_offer(&good, &good_hash);
+    CHSR_CHECK("offer before arm does not capture",
+               !checkpoint_header_fetch_has_capture());
+    checkpoint_header_fetch_arm(H, &good_hash);
+    checkpoint_header_fetch_offer(&good, &good_hash);
+    CHSR_CHECK("arm then offer captures hash-pinned header",
+               checkpoint_header_fetch_has_capture());
+    {
+        struct block_header taken;
+        int32_t taken_h = -1;
+        memset(&taken, 0, sizeof(taken));
+        CHSR_CHECK("take consumes the capture",
+                   checkpoint_header_fetch_take(&taken, &taken_h));
+        CHSR_CHECK("taken height matches", taken_h == H);
+        CHSR_CHECK("capture slot empty after take",
+                   !checkpoint_header_fetch_has_capture());
+    }
+    checkpoint_header_fetch_test_reset();
+    checkpoint_header_fetch_arm_compiled();
+    CHSR_CHECK("arm_compiled arms the compiled checkpoint",
+               checkpoint_header_fetch_is_armed());
+    checkpoint_header_fetch_offer(&good, &good_hash);
+    CHSR_CHECK("arm_compiled does not capture a non-checkpoint hash",
+               !checkpoint_header_fetch_has_capture());
+    checkpoint_header_fetch_test_reset();
 
     validate_headers_ensure_set_validator_for_test(NULL, NULL);
     checkpoint_header_solution_set_frozen_verifier_for_test(NULL);

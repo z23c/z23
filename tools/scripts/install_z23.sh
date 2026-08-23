@@ -99,7 +99,10 @@ Wants=network-online.target
 [Service]
 Type=notify
 ExecStart=$bin -datadir=%h/.zclassic-c23
-Restart=on-failure
+# Restart=always (not on-failure): a new node clean-exits once to install the
+# checkpoint bundle (install-on-next-boot). on-failure would drop that boot.
+Restart=always
+RestartSec=5
 TimeoutStartSec=14400
 NotifyAccess=main
 
@@ -191,6 +194,11 @@ selftest() {
     out="$(run_install "$tmp/prefix" "$tmp/units" "$tmp/good" 2>"$tmp/ok2.err")" \
         || die "selftest: second install failed"
     [ "$out" = "$NEXT_COMMAND" ] || die "selftest: re-run stdout drifted"
+
+    # The shipped unit must Restart=always so checkpoint install-on-next-boot
+    # (a clean exit) is brought back. on-failure would strand a new node.
+    grep -qx 'Restart=always' "$0" \
+        || die "selftest: z23.service must Restart=always (install-on-next-boot)"
 
     # Unexpected SHA256SUMS member refuses before copy.
     mkdir -p "$tmp/extra"

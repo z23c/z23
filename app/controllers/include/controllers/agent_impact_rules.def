@@ -725,7 +725,7 @@ AGENT_IMPACT_RULE("config/src/consensus_state_snapshot_export*.c|config/src/cons
  * install_checkpoint_authority.c) + its focused unit test. Also runs the
  * install group since it shares the authority lattice + install tests. */
 AGENT_IMPACT_RULE("config/src/consensus_state_snapshot_install_checkpoint_authority.c|lib/test/src/test_checkpoint_rom_authority.c", "checkpoint_rom_authority consensus_state_snapshot_install make_lint_gates")
-AGENT_IMPACT_RULE("config/src/consensus_state_install_runtime.c|config/src/boot_auto_install_bundle.c|config/include/config/consensus_state_install_runtime.h|lib/test/src/test_consensus_state_install_runtime.c", "consensus_state_install_runtime boot_bundle_fetch consensus_state_snapshot_install make_lint_gates")
+AGENT_IMPACT_RULE("config/src/consensus_state_install_runtime.c|config/src/boot_auto_install_bundle.c|config/include/config/consensus_state_install_runtime.h|lib/test/src/test_consensus_state_install_runtime.c", "consensus_state_install_runtime boot_bundle_fetch consensus_state_snapshot_install checkpoint_header_solution_repair make_lint_gates")
 /* The mid-session install-timing RETRY: the checkpoint_bundle_install_ready
  * condition arms the install once the header chain reaches the checkpoint. Its
  * detect/remedy logic is proven in the install-runtime test group; it is also a

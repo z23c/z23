@@ -14,6 +14,7 @@
 #include "net/msg_internal.h"          /* push_getheaders_span */
 #include "net/net.h"                   /* struct p2p_node, enum peer_state */
 #include "chain/chain.h"               /* struct block_index */
+#include "chain/checkpoints.h"         /* get_sha3_utxo_checkpoint */
 #include "core/uint256.h"
 #include "primitives/block.h"          /* struct block_header */
 #include "validation/chainstate.h"     /* block_map_find */
@@ -49,6 +50,20 @@ void checkpoint_header_fetch_arm(int32_t height, const struct uint256 *hash)
     pthread_mutex_unlock(&g_lock);
     atomic_store(&g_target_height, height);
     atomic_store(&g_armed, true);
+}
+
+void checkpoint_header_fetch_arm_compiled(void)
+{
+    const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
+    if (!cp || cp->height < 0)
+        return; // raw-return-ok:no-compiled-checkpoint
+    struct uint256 hash;
+    memcpy(hash.data, cp->block_hash, 32);
+    checkpoint_header_fetch_arm(cp->height, &hash);
+    LOG_INFO(CHF_SUBSYS,
+             "armed compiled-checkpoint header capture h=%d — IBD headers "
+             "that hash-pin to the checkpoint keep nSolution for instant-on",
+             cp->height);
 }
 
 void checkpoint_header_fetch_disarm(void)
@@ -182,3 +197,13 @@ void checkpoint_header_fetch_maybe_send(struct msg_processor *mp,
              "span (fork at parent, hash_stop=checkpoint)",
              height, node->addr_name);
 }
+
+#ifdef ZCL_TESTING
+void checkpoint_header_fetch_test_reset(void)
+{
+    checkpoint_header_fetch_disarm();
+    atomic_store(&g_last_send_us, 0);
+    atomic_store(&g_sends, 0);
+    atomic_store(&g_captures, 0);
+}
+#endif
