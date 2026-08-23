@@ -5739,14 +5739,21 @@ mvp-coldstart-local: zclassic23 zcl-rpc
 # ── mvp-coldstart-to-tip-local (C3 full fresh bundle -> at-tip proof) ─
 #
 # This is the LONG empirical C3 proof: a fresh /tmp datadir loads the secure
-# operator bundle (block_index.bin + utxo-seed-*.snapshot), dials a serving
-# zclassic23 peer, and must reach that peer's captured tip within the 10-minute
-# MVP budget. It SKIPs only when the local bundle or serving peer is absent.
-# Exit 3 is an honest C3 seam, not a fixture skip.
+# operator bundle (complete-state consensus-state-bundle-*.sqlite preferred;
+# block_index.bin + utxo-seed-*.snapshot remains the assisted fallback), dials a
+# serving zclassic23 peer, and must reach that peer's captured tip within the
+# 10-minute MVP budget. It SKIPs only when the local bundle or serving peer is
+# absent. Exit 3 is an honest C3 seam, not a fixture skip. The recipe runs the
+# harness --selftest first (no binary, no network, no datadir) so fixture
+# selection and self-respawn classification cannot rot between runs.
 .PHONY: mvp-coldstart-to-tip-local
 mvp-coldstart-to-tip-local: zclassic23 zcl-rpc
 	@bash -c 'set -uo pipefail; \
 	 echo "══ MVP C3 FULL (real): fresh operator bundle -> zclassic23 peer tip <10min ══"; \
+	 if ! bash tools/scripts/cold_start_to_tip_probe.sh --selftest >/dev/null 2>&1; then \
+	     echo "mvp-coldstart-to-tip-local: FAIL harness --selftest (run tools/scripts/cold_start_to_tip_probe.sh --selftest to see which check broke)"; \
+	     exit 1; \
+	 fi; \
 	 bash tools/scripts/cold_start_to_tip_probe.sh; rc=$$?; \
 	 if [ "$$rc" -eq 2 ]; then \
 	     echo "mvp-coldstart-to-tip-local: SKIP (per the c3-probe SKIP line above — no usable bundle/snapshot fixture, serving peer, or binary for this build)"; \

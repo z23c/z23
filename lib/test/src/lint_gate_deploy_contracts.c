@@ -352,9 +352,14 @@ int t_dev_lane_deploy_contract(void)
                != NULL);
         ASSERT(strstr(coldstart, "python") == NULL);
         ASSERT(strstr(coldstart_tip, "BUNDLE_SNAP_CANDIDATES") != NULL);
+        ASSERT(strstr(coldstart_tip, "CONSENSUS_BUNDLE_CANDIDATES") != NULL);
         ASSERT(strstr(coldstart_tip, "127.0.0.1:8033") != NULL);
         ASSERT(strstr(coldstart_tip, "-load-snapshot-at-own-height") != NULL);
         ASSERT(strstr(coldstart_tip, "BUNDLE_SUCCESS_PATTERN") != NULL);
+        ASSERT(strstr(coldstart_tip, "consensus-state-bundle") != NULL);
+        ASSERT(strstr(coldstart_tip, "zclassic23-bundle-bootstrap.sh") != NULL);
+        ASSERT(strstr(coldstart_tip, "self_respawn_") != NULL);
+        ASSERT(strstr(coldstart_tip, "--selftest") != NULL);
         ASSERT(strstr(coldstart_tip, "zcl.c3_probe_artifact.v2") != NULL);
         ASSERT(strstr(coldstart_tip, "proof.json") != NULL);
         ASSERT(strstr(coldstart_tip, "\"seed_authority_loaded\"") != NULL);
@@ -368,6 +373,8 @@ int t_dev_lane_deploy_contract(void)
         ASSERT(strstr(makefile, "mvp-coldstart-to-tip-local:") != NULL);
         ASSERT(strstr(makefile, "tools/scripts/cold_start_to_tip_probe.sh")
                != NULL);
+        ASSERT(strstr(makefile,
+                      "cold_start_to_tip_probe.sh --selftest") != NULL);
         ASSERT(strstr(makefile, "lane-recover:") != NULL);
         ASSERT(strstr(makefile, "tools/scripts/lane_recover.sh") != NULL);
         ASSERT(strstr(guard, "ZCL_DEPLOY_ALLOW_CANONICAL") != NULL);
