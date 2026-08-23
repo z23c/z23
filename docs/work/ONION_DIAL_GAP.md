@@ -1,78 +1,43 @@
 # Onion dial gap — local repro and root cause
 
-Status: LIVE-REPRODUCED defect, 2026-08-23. Owner: `lib/net` connection
-opening. Referee evidence cross-checked against
-[`deploy/devfleet/mesh.status`](../deploy/devfleet/mesh.status)
-(`INGRESS_TRIAGE_VERDICT=PEER_SIDE_DIAL_BROKEN`, capture
-`node4-redial-20260823T0740Z`).
+Status: CORRECTED 2026-08-23 after fresh probes on current main
+(`12de13d32`+). Supersedes the earlier "dials are never issued" claim,
+which was true of the then-checked-out binary and false of current main.
+Owner: embedded-Tor hidden-service loop (`vendor/tor` fork +
+`lib/net/src/onion_stream.c` / `connman_dialer.c`). Referee evidence:
+[`deploy/devfleet/mesh.status`](../deploy/devfleet/mesh.status).
 
-## The one-sentence finding
+## Verified current behavior (two fresh isolated nodes, strict probe)
 
-No code path in the node opens a P2P socket **through Tor** to a remote
-`.onion` destination: `-addnode=<host>.onion:<port>` is scheduled but the
-connection opener only dials numeric addresses, so every operator-directed
-onion edge silently never connects while both embedded Tor clients look
-perfectly healthy.
+1. Node A boots with `-tor -onion-persist`; hostname file appears (~8 s
+   historically; 20–45 s observed on current main — slower).
+2. B dials `-addnode=<A.onion>:<port>` and DOES log
+   `Connecting to onion addnode …` — the dynhost bridge dial attempt
+   exists (`64c4446a7`, hardened by `385a32bf9`).
+3. Failure is downstream of the attempt, in BOTH halves of the
+   hidden-service loop:
+   - CLIENT half: B's tor log shows ZERO `intro`/`rendezvous` events —
+     the dynhost client stream never builds a circuit.
+   - SERVICE half: A's tor log shows ZERO descriptor-upload lines — the
+     service publishes its hostname file but never (visibly) uploads its
+     descriptor to HSDirs, so even a healthy client could not intro.
+4. An older locally-built binary paired at `PAIRED_AT=5s` under the same
+   probe → there is a REGRESSION WINDOW between that build and current
+   main, or a flaky publish path that older timing masked. Not yet
+   bisected; bisection is assigned.
 
-## How it was reproduced locally (two fresh isolated nodes)
+## What "strong always" requires (the loop, end to end)
 
-Script shape (sourced isolation, regtest, `-listen -tor -onion-persist`):
-
-1. Node A boots; persistent identity mints; hostname file appears in ~8 s.
-2. Node B boots with `-addnode=<A.onion>:<A.p2p-port>`.
-3. Poll `getconnectioncount` on B for 60 s.
-
-Result, repeated across runs on the current main build:
-`VERDICT=no_dial_within_60s`.
-
-- B's tor: `Bootstrapped 100% (done)` — client healthy.
-- A's tor: service published, directory traffic flowing.
-- B's `node.log`: its own `onion_self_registered` line, then **not a single
-  log line about attempting the A.onion dial** — no resolve, no SOCKS
-  attempt, no failure. The dial is not failing; it is never issued.
-
-Control: clearnet pairs on the same box pair in seconds; node1's hub shows
-healthy clearnet ZClassic23 edges at full height while every `.onion` row
-sits at `startingheight:0` and ages out.
-
-## Why the fleet table looks half-alive
-
-`core.network.peers.add` documents that a v3 onion is *resolved through its
-Tor-served directory first, then each advertised numeric fast path is
-persisted and scheduled*. So peer rows can display an onion address while
-the actual socket attempt was a plain numeric dial to a directory-advertised
-IP. On live machines with routable addresses that accidentally works; for
-isolated/regtest nodes behind NAT there is nothing numeric to dial, so the
-edge sits at height 0 forever. This explains:
-
-- mesh referee `MESH=1/4` with three peers stuck pre-handshake;
-- dev1's capture: zero inbound streams during bracketed redials;
-- `PEER_SIDE_DIAL_BROKEN`: correct observation, wrong side blamed — the
-  dialing side never dials *over Tor*.
-
-## The fix (owned slice)
-
-Route `.onion` destinations through the per-datadir embedded-tor SOCKS5
-listener (`SocksPort 127.0.0.1:<auto>`, already written by the integration
-to `<datadir>/torrc`) using ATYP=domainname with remote name resolution:
-
-- in the connection opener, detect torv3 hosts; open SOCKS5 to the local
-  tor SocksPort; send CONNECT with the onion host + port; proceed with P2P
-  framing on the accepted stream;
-- keep numeric paths byte-for-byte unchanged;
-- log the attempt (`addnode <onion>:<port>: tor socks dial`) so absence of
-  a dial can never again masquerade as a failed one;
-- regression: two-node sourced-isolated pair over onion must reach
-  `getconnectioncount >= 1` within the 120 s dial budget (the probe above,
-  promoted into the test tree).
-
-Acceptance is the fleet metric itself: after this lands, node2/3/4 join
-cycles should show real inbound rows on node1 and MESH should climb past
-1/4 for the first time.
+publish descriptor → upload observed → client INTRODUCE1 → RENDEZVOUS1 →
+circuit ready → P2P framing flows. Every stage must be observable by
+log line or counter, retried within the existing budgets, and asserted
+by the pair-probe ledger. Acceptance for the fleet milestone stays:
+15 consecutive PAIRED cycles + observed descriptor upload + MESH=4/4
+twice separated.
 
 ## Probe artifacts
 
-Probe script pattern and raw logs live outside the tree (`/tmp/opencode`,
-ephemeral by policy); the durable record is this document plus the named
-verdict fields above. Re-run cost: under two minutes on any checkout with
+Probe scripts live outside the tree (`/tmp/opencode`, ephemeral by
+policy); node3 owns promoting them into `tools/scripts/` as the always-
+on ledger. Re-run cost: under two minutes on any checkout with
 `make tor-full` done.
