@@ -1,5 +1,5 @@
 #!/bin/sh
-# Poll one isolated devbox node for messages, or send one P2P message.
+# Poll one isolated devbox node for inbound messages, or send one P2P message.
 
 set -u
 umask 077
@@ -90,6 +90,18 @@ spool_last_json() {
     tail -n 1
 }
 
+spool_mark_read() {
+    msg_id=$1
+    read_input="{\"msg_id\":\"$msg_id\"}"
+    read_raw=$(spool_native app messaging read \
+        --input="$read_input" 2>/dev/null)
+    read_rc=$?
+    read_reply=$(printf '%s\n' "$read_raw" | spool_last_json)
+    [ "$read_rc" -eq 0 ] || spool_fail mark_read command_failed
+    spool_reply_ok "$read_reply" \
+        || spool_fail mark_read typed_command_refused
+}
+
 spool_watch() {
     stop=0
     trap 'stop=1' TERM INT
@@ -127,6 +139,21 @@ spool_watch() {
                 esac
                 [ "${#msg_id}" -eq 64 ] || spool_fail inbox invalid_msg_id_length
 
+                direction=$(printf '%s' "$reply" \
+                    | "$JSONQ" get "data.messages[$index].direction" 2>/dev/null)
+                rc=$?
+                [ "$rc" -eq 0 ] || spool_fail inbox missing_direction
+                case $direction in
+                    inbound) ;;
+                    outbound)
+                        spool_mark_read "$msg_id"
+                        spool_pass "message_${msg_id}_outbound_ignored"
+                        index=$((index + 1))
+                        continue
+                        ;;
+                    *) spool_fail inbox invalid_direction ;;
+                esac
+
                 tmp="$SPOOL_DIR/.${msg_id}.$$"
                 if ! printf '%s' "$reply" \
                     | "$JSONQ" get "data.messages[$index].body" > "$tmp"; then
@@ -140,14 +167,7 @@ spool_watch() {
                 mv "$tmp" "$SPOOL_DIR/$msg_id.txt" \
                     || spool_fail spool_write atomic_publish_failed
 
-                read_input="{\"msg_id\":\"$msg_id\"}"
-                read_raw=$(spool_native app messaging read \
-                    --input="$read_input" 2>/dev/null)
-                read_rc=$?
-                read_reply=$(printf '%s\n' "$read_raw" | spool_last_json)
-                [ "$read_rc" -eq 0 ] || spool_fail mark_read command_failed
-                spool_reply_ok "$read_reply" \
-                    || spool_fail mark_read typed_command_refused
+                spool_mark_read "$msg_id"
                 spool_pass "message_${msg_id}_stored_and_read"
             elif [ "$read_state" != true ]; then
                 spool_fail inbox invalid_read_state
