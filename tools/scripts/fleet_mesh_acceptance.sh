@@ -384,13 +384,24 @@ fresh_self_dial() (
         "self_dial_version_verack_incomplete:state=${state:-absent}"
 )
 
-field_from_file() {
-    local file="$1" key="$2" count value
-    count="$(sed -n "s/^${key}=//p" "$file" | wc -l | tr -d ' ')"
+# field_from_content is the ONE parser: every KEY=VALUE record, wherever its
+# bytes came from (a live file, a git-show blob), ends up here as a plain
+# string. file/ref readers below only differ in how they PRODUCE that string
+# — the extraction rule (exactly one match, non-empty) lives in exactly one
+# place.
+field_from_content() {
+    local content="$1" key="$2" count value
+    count="$(printf '%s\n' "$content" | sed -n "s/^${key}=//p" | wc -l | tr -d ' ')"
     [ "$count" = 1 ] || return 1
-    value="$(sed -n "s/^${key}=//p" "$file")"
+    value="$(printf '%s\n' "$content" | sed -n "s/^${key}=//p")"
     [ -n "$value" ] || return 1
     printf '%s' "$value"
+}
+
+field_from_file() {
+    local file="$1" key="$2" content
+    content="$(cat "$file" 2>/dev/null)" || return 1
+    field_from_content "$content" "$key"
 }
 
 NODE_FILE_BOX=""
@@ -399,24 +410,39 @@ NODE_PORT=""
 NODE_SOURCE=""
 NODE_GIT_SHA=""
 NODE_RECORD_ERROR=""
+# A node's published record is EVIDENCE (what the fleet claims right now),
+# never part of the pinned JUDGE. Every box's record — the local box's own
+# publication included, since it is data the fleet-sync heartbeat refreshes
+# on origin/main just like any peer's — is therefore resolved from
+# $OBSERVED_MAIN (freshly fetched origin/main), not this checkout's pinned
+# worktree. Reading the local box's record from the frozen worktree instead
+# would reproduce the exact same staleness bug for this box alone, so there
+# is no special case here: one rule, four boxes.
+node_record_published() {
+    [ "$NODE_RECORD_ERROR" != unpublished ]
+}
 read_node_record() {
-    local expected="$1" file
-    file="deploy/devfleet/$expected.txt"
+    local expected="$1" path content
+    path="deploy/devfleet/$expected.txt"
     NODE_FILE_BOX=""
     NODE_ONION=""
     NODE_PORT=""
     NODE_SOURCE=""
     NODE_GIT_SHA=""
     NODE_RECORD_ERROR=""
-    if [ ! -f "$file" ]; then
+    if ! content="$(git show "$OBSERVED_MAIN:$path" 2>/dev/null)"; then
+        # git show fails exactly when the path does not exist at that ref
+        # (or the ref itself is unusable) — today's only other failure mode
+        # for this function was "no such file", so this maps onto the same
+        # existing "unpublished" token rather than inventing a new one.
         NODE_RECORD_ERROR="unpublished"
         return 1
     fi
-    NODE_FILE_BOX="$(field_from_file "$file" BOX || true)"
-    NODE_ONION="$(field_from_file "$file" ONION_ADDRESS || true)"
-    NODE_PORT="$(field_from_file "$file" P2P_PORT || true)"
-    NODE_SOURCE="$(field_from_file "$file" SOURCE_SHA || true)"
-    NODE_GIT_SHA="$(field_from_file "$file" GIT_SHA || true)"
+    NODE_FILE_BOX="$(field_from_content "$content" BOX || true)"
+    NODE_ONION="$(field_from_content "$content" ONION_ADDRESS || true)"
+    NODE_PORT="$(field_from_content "$content" P2P_PORT || true)"
+    NODE_SOURCE="$(field_from_content "$content" SOURCE_SHA || true)"
+    NODE_GIT_SHA="$(field_from_content "$content" GIT_SHA || true)"
     if [ "$NODE_FILE_BOX" != "$expected" ]; then
         NODE_RECORD_ERROR="box_identity_mismatch"
     elif [[ ! "$NODE_ONION" =~ ^[a-z2-7]{56}\.onion$ ]]; then
@@ -539,7 +565,7 @@ check_local_node() {
     source_error=""
     if ! read_node_record "$node"; then
         record_source_evidence "$node"
-        [ -f "deploy/devfleet/$node.txt" ] && PUBLISHED_COUNT=$((PUBLISHED_COUNT + 1))
+        node_record_published && PUBLISHED_COUNT=$((PUBLISHED_COUNT + 1))
         case "$NODE_RECORD_ERROR" in
             invalid_source_sha|invalid_git_sha|source_sha_not_in_main_history|STALE_SOURCE|STALE_PEER_SOURCE)
                 source_error="$NODE_RECORD_ERROR"
@@ -645,7 +671,7 @@ check_remote_node() {
     NODE_SILENT[$node]=yes
     if ! read_node_record "$node"; then
         record_source_evidence "$node"
-        [ -f "deploy/devfleet/$node.txt" ] && PUBLISHED_COUNT=$((PUBLISHED_COUNT + 1))
+        node_record_published && PUBLISHED_COUNT=$((PUBLISHED_COUNT + 1))
         if [ "$NODE_RECORD_ERROR" = unpublished ]; then
             record_gap "$node" "$NODE_RECORD_ERROR"
             return
