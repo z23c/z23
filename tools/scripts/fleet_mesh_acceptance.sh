@@ -619,8 +619,10 @@ join_gaps() {
 write_status() {
     local now_iso="$1" now_epoch="$2" passes="$3" hold="$4"
     local last_full_epoch="$5" source_sha gap_text tmp
+    local ingress_file ingress_key ingress_value
     source_sha="$(git rev-parse HEAD)"
     gap_text="$(join_gaps)"
+    ingress_file="$REPO_DIR/deploy/devfleet/node1.status"
     tmp="$(mktemp "$REPO_DIR/deploy/devfleet/.mesh.status.XXXXXX")"
     {
         printf 'MESH=%s/%s\n' "$PASS_COUNT" "$EXPECTED_NODES"
@@ -656,6 +658,34 @@ write_status() {
             printf '%s=%s\n' "${node^^}" "${NODE_RESULTS[$node]:-fail:not_checked}"
         done
         printf 'GAPS=%s\n' "$gap_text"
+        # Preserve the referee's bounded ingress verdict and only its exact
+        # evidence fields.  node1.status is the capture evidence file;
+        # mesh.status remains the five-minute summary rather than growing a
+        # second free-form incident ledger.
+        for ingress_key in \
+            INGRESS_TRIAGE_VERDICT \
+            INGRESS_CAPTURE_ID \
+            INGRESS_CAPTURE_COMPLETED_AT \
+            INGRESS_TARGET_BOX \
+            INGRESS_TARGET_ENDPOINT \
+            INGRESS_NODE4_STATUS_OBSERVED_AT \
+            INGRESS_NODE4_ACK_CAPTURE_ID \
+            INGRESS_NODE4_ATTEMPTED_AT \
+            INGRESS_MAP_BEGIN \
+            INGRESS_MAP_END \
+            INGRESS_P2P_BEGIN_COUNT \
+            INGRESS_TCP_SAMPLE_COUNT \
+            INGRESS_INBOUND_PEER_SAMPLE_COUNT \
+            INGRESS_LAST_PROTOCOL_STATE \
+            INGRESS_BYTES_IN \
+            INGRESS_BYTES_OUT \
+            INGRESS_EVIDENCE_FILE \
+            INGRESS_SCOPE; do
+            ingress_value="$(field_from_file "$ingress_file" \
+                "$ingress_key" || true)"
+            [ -z "$ingress_value" ] ||
+                printf '%s=%s\n' "$ingress_key" "$ingress_value"
+        done
     } > "$tmp"
     mv "$tmp" "$STATUS_FILE"
 }
