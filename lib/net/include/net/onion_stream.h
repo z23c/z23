@@ -40,12 +40,21 @@
  * backoff. */
 #define ONION_STREAM_CONNECT_TIMEOUT_MS 120000
 
+/* A cold circuit can occasionally consume its whole connect budget without
+ * reaching CONNECTED.  At the normal 120 s ceiling, spend the same total
+ * budget across two fresh streams so one poisoned circuit cannot monopolize
+ * the only dial scheduler for the entire attempt.  Short diagnostic budgets
+ * remain a single attempt instead of being split into unusably small slices. */
+#define ONION_STREAM_RETRY_MIN_TOTAL_MS 120000
+
 /* Open a raw onion stream to svc (must satisfy net_addr_is_tor) and bridge
- * it to a freshly-connected socket fd, returned in *sock_out. Blocks up to
- * connect_timeout_ms waiting for the circuit to reach CONNECTED. The fd is
- * an ordinary socket: poll/recv/send/shutdown/close all work; the peer
- * closing the stream reads as EOF on the fd, and closing the fd tears the
- * stream down.
+ * it to a freshly-connected socket fd, returned in *sock_out. The circuit
+ * connect-phase waits share connect_timeout_ms; at the normal ceiling the
+ * dial may replace one failed circuit once without extending that wait
+ * budget. Bounded terminal-callback teardown remains outside that budget,
+ * as it was for the former single attempt. The fd is an ordinary socket:
+ * poll/recv/send/shutdown/close all work; the peer closing the stream reads
+ * as EOF on the fd, and closing the fd tears the stream down.
  *
  * Fails CLOSED with a named log line — never a clearnet fallback:
  *   - stub build (dynhost_stream_* not linked);
@@ -54,5 +63,10 @@
 bool onion_stream_connect(const struct net_service *svc,
                           zcl_socket_t *sock_out,
                           int connect_timeout_ms);
+
+#ifdef ZCL_TESTING
+size_t onion_stream_connect_plan_for_test(int connect_timeout_ms,
+                                          int budgets[2]);
+#endif
 
 #endif /* ZCL_NET_ONION_STREAM_H */

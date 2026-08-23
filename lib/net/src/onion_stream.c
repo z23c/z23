@@ -313,23 +313,32 @@ static bool onion_bridge_spawn_pump(struct onion_bridge *b)
     return true;
 }
 
-bool onion_stream_connect(const struct net_service *svc,
-                          zcl_socket_t *sock_out,
-                          int connect_timeout_ms)
+static size_t onion_stream_connect_plan(int connect_timeout_ms,
+                                        int budgets[2])
 {
-    if (!sock_out)
-        LOG_FAIL("onion", "onion_stream_connect: NULL sock_out");
-    *sock_out = ZCL_INVALID_SOCKET;
+    budgets[0] = connect_timeout_ms;
+    budgets[1] = 0;
+    if (connect_timeout_ms < ONION_STREAM_RETRY_MIN_TOTAL_MS)
+        return 1;
 
-    if (!svc || !net_addr_is_tor(&svc->addr))
-        LOG_FAIL("onion", "onion_stream_connect: not a torv3 address");
-    if (!dynhost_stream_open || !dynhost_stream_write || !dynhost_stream_close)
-        LOG_FAIL("onion", "onion dialing unavailable: tor stub build");
-    if (!tor_integration_is_enabled())
-        LOG_FAIL("onion", "onion dialing unavailable: tor not running");
-    if (!tor_integration_is_ready())
-        LOG_FAIL("onion", "onion dialing unavailable: tor not ready "
-                          "(still bootstrapping)");
+    budgets[0] = connect_timeout_ms / 2;
+    budgets[1] = connect_timeout_ms - budgets[0];
+    return 2;
+}
+
+#ifdef ZCL_TESTING
+size_t onion_stream_connect_plan_for_test(int connect_timeout_ms,
+                                          int budgets[2])
+{
+    return onion_stream_connect_plan(connect_timeout_ms, budgets);
+}
+#endif
+
+static bool onion_stream_connect_once(const struct net_service *svc,
+                                      zcl_socket_t *sock_out,
+                                      int connect_timeout_ms)
+{
+    *sock_out = ZCL_INVALID_SOCKET;
 
     char host[ONION_V3_ADDRESS_LEN + 1];
     if (!onion_v3_address_from_pubkey(svc->addr.torv3, host))
@@ -408,4 +417,35 @@ bool onion_stream_connect(const struct net_service *svc,
     *sock_out = app_fd;
     LOG_INFO("onion", "onion circuit established to %s", b->desc);
     return true;
+}
+
+bool onion_stream_connect(const struct net_service *svc,
+                          zcl_socket_t *sock_out,
+                          int connect_timeout_ms)
+{
+    if (!sock_out)
+        LOG_FAIL("onion", "onion_stream_connect: NULL sock_out");
+    *sock_out = ZCL_INVALID_SOCKET;
+
+    if (!svc || !net_addr_is_tor(&svc->addr))
+        LOG_FAIL("onion", "onion_stream_connect: not a torv3 address");
+    if (!dynhost_stream_open || !dynhost_stream_write || !dynhost_stream_close)
+        LOG_FAIL("onion", "onion dialing unavailable: tor stub build");
+    if (!tor_integration_is_enabled())
+        LOG_FAIL("onion", "onion dialing unavailable: tor not running");
+    if (!tor_integration_is_ready())
+        LOG_FAIL("onion", "onion dialing unavailable: tor not ready "
+                          "(still bootstrapping)");
+
+    int budgets[2];
+    size_t attempts = onion_stream_connect_plan(connect_timeout_ms, budgets);
+    for (size_t i = 0; i < attempts; i++) {
+        if (onion_stream_connect_once(svc, sock_out, budgets[i]))
+            return true;
+        if (i + 1 < attempts)
+            LOG_WARN("onion", "first onion circuit attempt failed; "
+                              "retrying once with a fresh stream "
+                              "(remaining_budget_ms=%d)", budgets[i + 1]);
+    }
+    return false;
 }

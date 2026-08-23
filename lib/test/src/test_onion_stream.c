@@ -28,6 +28,30 @@ int test_onion_stream(void)
 {
     int failures = 0;
 
+    printf("onion_stream: default connect budget uses two bounded fresh "
+           "circuits... ");
+    {
+        int budgets[2] = {-1, -1};
+        size_t attempts = onion_stream_connect_plan_for_test(
+            ONION_STREAM_CONNECT_TIMEOUT_MS, budgets);
+        bool ok = attempts == 2 &&
+                  budgets[0] == ONION_STREAM_RETRY_MIN_TOTAL_MS / 2 &&
+                  budgets[1] == ONION_STREAM_RETRY_MIN_TOTAL_MS / 2 &&
+                  budgets[0] + budgets[1] ==
+                      ONION_STREAM_CONNECT_TIMEOUT_MS;
+
+        budgets[0] = -1;
+        budgets[1] = -1;
+        attempts = onion_stream_connect_plan_for_test(
+            ONION_STREAM_RETRY_MIN_TOTAL_MS - 1, budgets);
+        ok = ok && attempts == 1 &&
+             budgets[0] == ONION_STREAM_RETRY_MIN_TOTAL_MS - 1 &&
+             budgets[1] == 0;
+
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+
     printf("onion_stream: refuses a non-tor service... ");
     {
         struct net_service svc;

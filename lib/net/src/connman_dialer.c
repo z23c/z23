@@ -522,12 +522,14 @@ static void connman_dial_batch(struct connman *cm,
                                                   PEER_LIFECYCLE_SOURCE_ADDRMAN);
         if (net_addr_is_tor(&c->addr.svc.addr)) {
             /* Onion candidates do NOT join the non-blocking socket race:
-             * there is no fd to poll until the circuit exists, and the
-             * shared 5 s clearnet window is far short of a 10-60 s circuit
-             * build. They get their own blocking budget instead (capped at
-             * MAX_OUTBOUND_ONION per batch by batch_diversity_ok), inline on
-             * the scheduler thread — g_open_liveness is liveness-only (no
-             * progress deadline), so the block trips no supervisor gate. */
+             * there is no fd to poll until a circuit exists, and the shared
+             * 5 s clearnet window is far short of a 10-60 s circuit build.
+             * They get one total blocking budget instead (internally split
+             * across two fresh circuits at the normal ceiling), capped at
+             * MAX_OUTBOUND_ONION per batch by batch_diversity_ok.  The work
+             * remains inline on the scheduler thread — g_open_liveness is
+             * liveness-only (no progress deadline), so the block trips no
+             * supervisor gate. */
             zcl_socket_t s = ZCL_INVALID_SOCKET;
             if (onion_stream_connect(&c->addr.svc, &s,
                                      ONION_STREAM_CONNECT_TIMEOUT_MS))
