@@ -5,6 +5,7 @@ umask 077
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$SCRIPT_DIR/fleet_mesh_evidence.sh"
+REFEREE="$SCRIPT_DIR/fleet_mesh_acceptance.sh"
 
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/z23-fleet-mesh-evidence-XXXXXX")
 cleanup() {
@@ -14,6 +15,15 @@ cleanup() {
     esac
 }
 trap cleanup EXIT INT TERM
+
+grep -q 'cli dumpstate status_frontdoor' "$REFEREE" || {
+    echo 'check_fleet_mesh_evidence: referee bypasses bounded status front door' >&2
+    exit 1
+}
+if grep -q 'cli getblockchaininfo' "$REFEREE"; then
+    echo 'check_fleet_mesh_evidence: recurring referee may exhaust RPC workers' >&2
+    exit 1
+fi
 
 STATUS_FILE="$TMP_DIR/mesh.status"
 EVIDENCE_FILE="$TMP_DIR/mesh.first-4of4.status"

@@ -466,7 +466,8 @@ record_gap() {
 }
 
 check_local_node() {
-    local node="$1" chain_info blocks headers progress published_onion
+    local node="$1" frontdoor blocks published sync_gap sync_gap_known
+    local all_members_fresh published_onion
     local self_dial_detail self_dial_raw self_dial_rc source_error
     source_error=""
     if ! read_node_record "$node"; then
@@ -498,15 +499,23 @@ check_local_node() {
         record_gap "$node" "published_onion_differs_from_live_service"
         return
     fi
-    chain_info="$(cli getblockchaininfo 2>/dev/null || true)"
-    blocks="$(json_get "$chain_info" blocks)"
-    headers="$(json_get "$chain_info" headers)"
-    progress="$(json_get "$chain_info" verificationprogress)"
-    LOCAL_HASH="$(json_get "$chain_info" bestblockhash)"
-    if [[ ! "$blocks" =~ ^[0-9]+$ ]] || [ "$blocks" != "$headers" ] ||
-       [ "$progress" != 1 ] || [[ ! "$LOCAL_HASH" =~ ^[0-9a-f]{64}$ ]]; then
+    # Program O2's status_frontdoor is the node's one bounded operator read:
+    # height is lock-free, peer state is trylock/cached, and every dark member
+    # is named.  Do not use getblockchaininfo here: a stuck chain read outlives
+    # the client timeout, consumes one of four RPC workers, and recurring
+    # telemetry can eventually fill the entire 64-connection queue.
+    frontdoor="$(cli dumpstate status_frontdoor 2>/dev/null || true)"
+    blocks="$(json_get "$frontdoor" state.height)"
+    published="$(json_get "$frontdoor" state.provable_tip_published)"
+    sync_gap="$(json_get "$frontdoor" state.sync_gap)"
+    sync_gap_known="$(json_get "$frontdoor" state.sync_gap_known)"
+    all_members_fresh="$(json_get "$frontdoor" state.all_members_fresh)"
+    LOCAL_HASH=STATUS_FRONTDOOR_NO_HASH
+    if [[ ! "$blocks" =~ ^[0-9]+$ ]] || [ "$published" != true ] ||
+       [ "$sync_gap_known" != true ] || [[ ! "$sync_gap" =~ ^[0-9]+$ ]] ||
+       [ "$sync_gap" -ne 0 ] || [ "$all_members_fresh" != true ]; then
         record_gap "$node" \
-            "local_not_synced:blocks=${blocks:-absent}:headers=${headers:-absent}:progress=${progress:-absent}"
+            "local_status_frontdoor_not_synced:height=${blocks:-absent}:published=${published:-absent}:sync_gap=${sync_gap:-absent}:sync_gap_known=${sync_gap_known:-absent}:fresh=${all_members_fresh:-absent}"
         return
     fi
     LOCAL_HEIGHT_BEFORE="$blocks"
