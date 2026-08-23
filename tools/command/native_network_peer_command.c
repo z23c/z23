@@ -50,6 +50,21 @@ static const char *nnp_rpc_error(const struct json_value *body)
     return NULL;
 }
 
+/* addnode success is JSON null: either the unwrapped result, or a JSON-RPC
+ * envelope whose result is null and whose error is absent/null. A non-null
+ * result is not a success for this method. */
+static bool nnp_addnode_success(const struct json_value *body)
+{
+    if (!body)
+        return false;
+    if (body->type == JSON_NULL)
+        return true;
+    if (body->type != JSON_OBJ)
+        return false;
+    const struct json_value *result = json_get(body, "result");
+    return result && json_is_null(result);
+}
+
 void zcl_native_handle_network_peer_add(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
@@ -114,7 +129,7 @@ void zcl_native_handle_network_peer_add(
                  address);
         return;
     }
-    if (body.type != JSON_NULL) {
+    if (!nnp_addnode_success(&body)) {
         json_free(&body);
         nnp_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                  ZCL_COMMAND_EXIT_INTERNAL, "BAD_RPC_BODY", "serialize",

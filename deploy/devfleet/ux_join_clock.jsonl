@@ -5,3 +5,4 @@
 {"ts":"2026-08-23T01:21:34Z","box":"node3","peered_s":5,"synced_s":null,"first_msg_s":11,"sha":"9ad0b7ab78296e2d3f5f14171d06861d827ef8d0"}
 {"ts":"2026-08-23T01:52:24Z","box":"node3","peered_s":null,"synced_s":26,"first_msg_s":null,"sha":"16f52051e0d1b597b321f0e34aecb89b0bf92679","lane":"regtest"}
 {"ts":"2026-08-23T01:52:24Z","box":"node3","defect":"mainnet_from_genesis_stall","hstar":3225781,"remedy":"make mvp-coldstart-to-tip-local","path":"tools/scripts/cold_start_to_tip_probe.sh","note":"empty datadir vs live H*~3.2M is expected; C3 operator bundle is the fast cold-start"}
+{"ts":"2026-08-23T02:07:53Z","box":"node3","peered_s":11,"synced_s":null,"first_msg_s":18,"sha":"8d46bfbe39fce5ad21b5950ecc173a6c54538efd"}

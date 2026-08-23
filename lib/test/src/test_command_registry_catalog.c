@@ -519,6 +519,42 @@ static int test_network_peer_add_binding(void)
                       "tor_rendezvous+p2p_tcp");
         zcl_command_reply_free(&reply);
         json_free(&input);
+
+        /* Live node_rpc_call returns the JSON-RPC envelope, not a bare
+         * null. The shipped handler must treat result:null as dial_requested
+         * and still refuse a real error envelope. */
+        g_peer_add_reply = "{\"result\":null,\"error\":null,\"id\":1}";
+        json_init(&input);
+        json_set_object(&input);
+        (void)json_push_kv_str(
+            &input, "address",
+            "5wvfod4ikluv4w3lqe3whn2k7xdsympxxu2qkqw452thtjxbar5hrcqd.onion:8055");
+        request.input = &input;
+        zcl_command_reply_init(&reply, spec->output_schema);
+        zcl_native_handle_network_peer_add(&request, &reply);
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT_STR_EQ(reply.error.code, "");
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "status")),
+                      "dial_requested");
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "transport")),
+                      "tor_rendezvous+p2p_tcp");
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+
+        g_peer_add_reply =
+            "{\"result\":null,\"error\":{\"code\":-8,\"message\":"
+            "\"addnode: invalid .onion address\"},\"id\":1}";
+        json_init(&input);
+        json_set_object(&input);
+        (void)json_push_kv_str(&input, "address", "not-an-onion:8055");
+        request.input = &input;
+        zcl_command_reply_init(&reply, spec->output_schema);
+        zcl_native_handle_network_peer_add(&request, &reply);
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_FAILED);
+        ASSERT_STR_EQ(reply.error.code, "PEER_ADD_REFUSED");
+        ASSERT(strstr(reply.error.message, "invalid .onion") != NULL);
+        zcl_command_reply_free(&reply);
+        json_free(&input);
         PASS();
     } _test_next:;
     node_rpc_client_set_test_hook(NULL);

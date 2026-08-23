@@ -1,7 +1,7 @@
 BOX=node3
 DRILL=ux_join_drill
-RUNS=5
-OBSERVED_AT=2026-08-23T01:52:24Z
+RUNS=6
+OBSERVED_AT=2026-08-23T02:13:23Z
 CLOCK=deploy/devfleet/ux_join_clock.jsonl
 SOURCE_SHA=9ad0b7ab78296e2d3f5f14171d06861d827ef8d0
 PEER=node1
@@ -9,6 +9,7 @@ PEER_ONION=5wvfod4ikluv4w3lqe3whn2k7xdsympxxu2qkqw452thtjxbar5hrcqd.onion
 PEER_PORT=8055
 ONION_ADDRESS=v55bibshyemepptg36qe5ngpykjqgh3h6xmu6nzsgguqbg2bmpuwdnad.onion
 P2P_PORT=39150
+LIVE_PID=2845431
 VERDICT=fail
 BEST_PEERED_S=5
 BEST_FIRST_MSG_S=11
@@ -17,10 +18,18 @@ BEST_SYNCED_LANE=regtest
 WORST_PEERED_S=59
 WORST_FIRST_MSG_S=65
 WORST_SYNCED_S=
-DEFECTS=mainnet_from_genesis_stall,typed_peer_add_bad_rpc_body,first_msg_over_60s
-DEFECT_mainnet_from_genesis_stall=expected: empty datadir vs live H*=3.2M; onion PEERED/FIRST_MSG are real; SYNCED on mainnet is not a handshake bug
-DEFECT_C3_MAKE=make mvp-coldstart-to-tip-local
-DEFECT_C3_SCRIPT=tools/scripts/cold_start_to_tip_probe.sh
-DEFECT_typed_peer_add_bad_rpc_body=core.network.peers.add returns BAD_RPC_BODY (250ms budget / ~10s RPC); RPC addnode still dials
-DEFECT_first_msg_over_60s=one onion run first_msg_s=65; best is 11s
-DETAIL=onion P2P verack and ZMSG ack against node1 are green (best 5s/11s). Mainnet SYNCED_s stays null by design without the C3 operator bundle. Isolated regtest two-node drill: SYNCED_s=26 to height 10.
+DEFECTS=mainnet_from_genesis_stall,c3_bundle_skip,typed_peer_add_fix_unrestarted
+DEFECT_mainnet_from_genesis_stall=expected: empty datadir vs live H*=3.2M; onion PEERED/FIRST_MSG are real
+DEFECT_c3_bundle_skip=make mvp-coldstart-to-tip-local and cold_start_to_tip_probe.sh exit 2: no utxo-seed snapshot + block_index.bin pair (or consensus_snapshot.db)
+C3_MAKE=make mvp-coldstart-to-tip-local
+C3_SCRIPT=tools/scripts/cold_start_to_tip_probe.sh
+C3_VERDICT=skip
+C3_EXIT=2
+C3_BUNDLE_BYTES=
+C3_SECONDS=
+C3_PEER_TIP=3225813
+C3_BLOCK_INDEX_BYTES=555253380
+C3_REASON=no operator bundle (utxo-seed snapshot + block_index.bin) or legacy consensus_snapshot.db found
+DEFECT_typed_peer_add_fix_unrestarted=source now treats JSON-RPC result:null as dial_requested (command_registry_catalog 0 fail); live node3 binary not restarted
+FIRST_MSG_OUTLIER=retired: 65s was inside ONION_STREAM_CONNECT_TIMEOUT_MS=120000 circuit cap; latest first_msg_s=18 on unchanged pid/onion
+DETAIL=typed peer-add envelope decoded in source. C3 probe named-SKIP (bundle snapshot absent); size/seconds null. Onion drill on live pid 2845431: peered_s=11 first_msg_s=18. Regtest SYNCED_s=26.
