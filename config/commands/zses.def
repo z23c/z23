@@ -1,0 +1,43 @@
+/* zses:v1 signed session invites. Consumer defines ZCL_COMMAND_*. */
+
+ZCL_COMMAND_BRANCH("zses", "", "Session invites",
+                   ZCL_COMMAND_LAYER_APP)
+ZCL_COMMAND_BRANCH("zses.invite", "zses", "Invite",
+                   ZCL_COMMAND_LAYER_APP)
+
+ZCL_COMMAND_READY_COMMAND(
+    "zses.invite.create", "zses.invite", "",
+    "Create a signed zses:v1 session invite",
+    "Signs {endpoint, expires, capability-tag} with secp256k1 compact "
+    "recoverable signatures. Default disclosure is onion: a numeric IP "
+    "endpoint is refused unless posture=clearnet. Returns the invite JSON.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "zses,invite,create,session,onion,posture",
+    "zcl.zses_invite_create.input.v1", "zcl.zses_invite.v1",
+    "endpoint,expires,capability_tag,capability-tag,posture,port", "",
+    "z23 zses invite create",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_READ,
+    ZCL_COMMAND_RISK_READ, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_zses_invite_create)
+
+ZCL_COMMAND_READY_COMMAND(
+    "zses.invite.accept", "zses.invite", "",
+    "Verify and accept a signed zses:v1 invite",
+    "Fail-closed verify of a zses:v1 invite: unsigned, wrong-key, tampered, "
+    "or expired invites are refused by name. Returns the verified endpoint.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "zses,invite,accept,session,verify",
+    "zcl.zses_invite_accept.input.v1", "zcl.zses_invite_accept.v1",
+    "invite,now", "invite",
+    "z23 zses invite accept --invite=<json>",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_READ,
+    ZCL_COMMAND_RISK_READ, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_zses_invite_accept)

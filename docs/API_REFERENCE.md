@@ -74,15 +74,15 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 706 |
-| Top-level roots | 11 |
-| Branches | 162 |
-| Leaves (dispatchable command paths) | 544 |
-| … `ready` (live handler in this build) | 491 |
+| Registry entries (branches + leaves) | 713 |
+| Top-level roots | 12 |
+| Branches | 165 |
+| Leaves (dispatchable command paths) | 548 |
+| … `ready` (live handler in this build) | 495 |
 | … `compat` (metadata only, names a fallback) | 25 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 28 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 24 |
-| Leaves with `effect=mutate` | 184 |
+| Leaves with `effect=mutate` | 185 |
 | Leaves with `effect=destructive` | 4 |
 | Leaves requiring **owner** authority | 112 |
 
@@ -95,7 +95,7 @@ Per source file:
 | `config/commands/apps.def` | 16 | 3 | 13 |
 | `config/commands/app_features.def` | 71 | 19 | 52 |
 | `config/commands/store.def` | 18 | 0 | 18 |
-| `config/commands/ops.def` | 44 | 8 | 36 |
+| `config/commands/ops.def` | 47 | 9 | 38 |
 | `config/commands/dev.def` | 55 | 13 | 42 |
 | `config/commands/code.def` | 17 | 2 | 15 |
 | `config/commands/accounts.def` | 11 | 2 | 9 |
@@ -104,6 +104,7 @@ Per source file:
 | `config/commands/zcode_science.def` | 25 | 7 | 18 |
 | `config/commands/metaverse.def` | 30 | 7 | 23 |
 | `config/commands/yardsale.def` | 7 | 2 | 5 |
+| `config/commands/zses.def` | 4 | 2 | 2 |
 | `config/commands/telemetry/root.def` | 6 | 2 | 4 |
 | `config/commands/telemetry/watch.def` | 1 | 0 | 1 |
 | `config/commands/telemetry/runtime.def` | 4 | 1 | 3 |
@@ -169,6 +170,7 @@ The root order below is a wire contract, not a presentation choice.
 | `zcode` | `zcode` | branch | ready | Create, verify and preserve public C23 work together |
 | `metaverse` | `metaverse` | branch | ready | Sovereign digital property: catalog, rights, receipts |
 | `yardsale` | `yardsale` | branch | ready | For-sale-by-owner signed ads, settled bilaterally |
+| `zses` | `zses` | branch | ready | Session invites |
 
 
 ## The tree, leaf by leaf
@@ -802,6 +804,13 @@ represented by its children's sections.
 |---|---|---|---|---|---|---|
 | `ops debug rom_fetch status` | ready | read / read / public · fast/low | none | `zcl.rom_fetch_status.v1` | `z23 ops debug rom_fetch status` | ROM-fetch engine status |
 | `ops debug rom_fetch bundle` | ready | mutate / app-write / **owner** · background/moderate | `peer`, `port`, `root`, `whole_sha3`, `size`, `filename`, `out_dir` | `zcl.rom_fetch_bundle.result.v1` | `z23 ops debug rom_fetch bundle --input='{"peer":"203.0.113.7","root":"<64hex>","whole_sha3":"<64hex>","size":"538507264"}'` | Fetch + verify a ROM artifact from a peer |
+
+#### `ops.mesh` — Mesh
+
+| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
+|---|---|---|---|---|---|---|
+| `ops mesh join` | ready | mutate / core-recovery / operator · foreground/low | **`endpoint`**, `address` | `zcl.ops_mesh_join_status.v1` | `z23 ops mesh join --endpoint=<host:port>` | Join a peer from a verified session invite |
+| `ops mesh join_status` | ready | read / read / operator · fast/low | **`endpoint`**, `address` | `zcl.ops_mesh_join_status.v1` | `z23 ops mesh join_status --endpoint=<host:port>` | Report whether a mesh join has peered |
 
 #### `ops.postmortem` — Postmortems
 
@@ -1518,6 +1527,15 @@ represented by its children's sections.
 | `yardsale seller disarm` | ready | mutate / app-write / **owner** · foreground/low | none | `zcl.yardsale_seller_disarm.v1` | `z23 yardsale.seller.disarm` | Disarm the seller profile |
 | `yardsale seller status` | ready | read / read / operator · fast/low | `now_unix` | `zcl.yardsale_seller_status.v1` | `z23 yardsale.seller.status` | Seller profile status |
 
+### `zses` — Session invites
+
+#### `zses.invite` — Invite
+
+| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
+|---|---|---|---|---|---|---|
+| `zses invite create` | ready | read / read / public · fast/low | `endpoint`, `expires`, `capability_tag`, `capability-tag`, `posture`, `port` | `zcl.zses_invite.v1` | `z23 zses invite create` | Create a signed zses:v1 session invite |
+| `zses invite accept` | ready | read / read / public · fast/low | **`invite`**, `now` | `zcl.zses_invite_accept.v1` | `z23 zses invite accept --invite=<json>` | Verify and accept a signed zses:v1 invite |
+
 
 ## Aliases
 
@@ -1587,6 +1605,7 @@ promise the same document shape.
 | `zcl.market_purchase.v1` | `app.market.purchase.plan`, `app.market.purchase.commit`, `app.market.purchase.status`, `app.market.purchase.retrieve` |
 | `zcl.app_swap_contract.v1` | `app.swap.initiate`, `app.swap.participate` |
 | `zcl.rom_seed_status.v1` | `ops.debug.rom_seed.status`, `ops.debug.rom_seed.enable`, `ops.debug.rom_seed.disable` |
+| `zcl.ops_mesh_join_status.v1` | `ops.mesh.join`, `ops.mesh.join_status` |
 | `zcl.dev_cycle.v1` | `dev.status`, `dev.change.apply`, `dev.loop.wait` |
 | `zcl.dev_hotswap.v1` | `dev.hotswap.apply`, `dev.hotswap.probe` |
 | `zcl.dev_loop_status.v1` | `dev.loop.ensure`, `dev.loop.status`, `dev.loop.stop` |

@@ -186,6 +186,14 @@ void ecc_verify_init(void)
     assert(secp256k1_ctx_verify != NULL); // abort-ok: without a verification context every signature check is meaningless
 }
 
+bool ecc_verify_init_once(void)
+{
+    if (secp256k1_ctx_verify)
+        return true;
+    ecc_verify_init();
+    return secp256k1_ctx_verify != NULL;
+}
+
 void ecc_verify_destroy(void)
 {
     assert(secp256k1_ctx_verify != NULL); // abort-ok: shutdown ordering violation, the context was already torn down

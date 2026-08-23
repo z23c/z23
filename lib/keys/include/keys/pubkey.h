@@ -118,6 +118,7 @@ bool ext_pubkey_derive(const struct ext_pubkey *epk,
 /* Create / destroy the process-wide secp256k1 verification context. Call
  * ecc_verify_init once at startup before any pubkey verify/recover/parse. */
 void ecc_verify_init(void);
+bool ecc_verify_init_once(void);
 void ecc_verify_destroy(void);
 
 #endif

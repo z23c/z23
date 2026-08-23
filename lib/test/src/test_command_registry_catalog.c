@@ -117,14 +117,14 @@ static int test_six_roots(void)
 {
     int failures = 0;
     const struct zcl_command_registry *reg = zcl_command_catalog();
-    TEST("root exposes exactly eleven choices") {
+    TEST("root exposes exactly twelve choices") {
         size_t roots = 0;
         for (size_t i = 0; i < reg->count; i++) {
             const char *p = reg->commands[i].parent;
             if (!p || !p[0])
                 roots++;
         }
-        ASSERT_EQ(roots, (size_t)11);
+        ASSERT_EQ(roots, (size_t)12);
         ASSERT(find_spec(reg, "status") != NULL);
         ASSERT(find_spec(reg, "core") != NULL);
         ASSERT(find_spec(reg, "app") != NULL);
@@ -136,6 +136,7 @@ static int test_six_roots(void)
         ASSERT(find_spec(reg, "zcode") != NULL);
         ASSERT(find_spec(reg, "metaverse") != NULL);
         ASSERT(find_spec(reg, "yardsale") != NULL);
+        ASSERT(find_spec(reg, "zses") != NULL);
         PASS();
     } _test_next:;
     return failures;
@@ -2742,6 +2743,7 @@ static int test_is_root_ownership(void)
         ASSERT(zcl_native_command_is_root("status"));
         ASSERT(zcl_native_command_is_root("dev"));
         ASSERT(zcl_native_command_is_root("vault"));
+        ASSERT(zcl_native_command_is_root("zses"));
         ASSERT(!zcl_native_command_is_root("getblockcount"));
         /* Dotted first-token form: `<root>.<rest>` is owned too (the
          * canonical documented invocation), split into segments by
@@ -2753,6 +2755,132 @@ static int test_is_root_ownership(void)
         ASSERT(!zcl_native_command_is_root("zcodeextra.leaf"));
         PASS();
     } _test_next:;
+    return failures;
+}
+
+static int test_zses_invite_leaves(void)
+{
+    int failures = 0;
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    TEST("zses invite create/accept and ops.mesh.join are discoverable") {
+        const struct zcl_command_spec *create =
+            find_spec(reg, "zses.invite.create");
+        const struct zcl_command_spec *accept =
+            find_spec(reg, "zses.invite.accept");
+        const struct zcl_command_spec *join =
+            find_spec(reg, "ops.mesh.join");
+        const struct zcl_command_spec *st =
+            find_spec(reg, "ops.mesh.join_status");
+        ASSERT(create != NULL);
+        ASSERT(accept != NULL);
+        ASSERT(join != NULL);
+        ASSERT(st != NULL);
+        ASSERT_EQ(create->availability, ZCL_COMMAND_READY);
+        ASSERT_EQ(accept->availability, ZCL_COMMAND_READY);
+        ASSERT_EQ(join->availability, ZCL_COMMAND_READY);
+        ASSERT(create->handler == zcl_native_handle_zses_invite_create);
+        ASSERT(accept->handler == zcl_native_handle_zses_invite_accept);
+        ASSERT(join->handler == zcl_native_handle_ops_mesh_join);
+        ASSERT(st->handler == zcl_native_handle_ops_mesh_join_status);
+        ASSERT(strstr(create->input_keys, "endpoint") != NULL);
+        ASSERT(strstr(create->input_keys, "expires") != NULL);
+        ASSERT(strstr(create->input_keys, "capability-tag") != NULL);
+        ASSERT(strstr(accept->input_keys, "invite") != NULL);
+        ASSERT(strstr(join->input_keys, "endpoint") != NULL);
+        PASS();
+    }
+
+    TEST("create signs a zses:v1 invite and accept verifies it") {
+        const struct zcl_command_spec *create =
+            find_spec(reg, "zses.invite.create");
+        const struct zcl_command_spec *accept =
+            find_spec(reg, "zses.invite.accept");
+        ASSERT(create && accept);
+        struct json_value input;
+        json_init(&input);
+        json_set_object(&input);
+        (void)json_push_kv_str(
+            &input, "endpoint",
+            "abcdeabcdeabcdeabcdeabcdeabcdeabcdeabcdeabcdeabcdeabcd.onion:8055");
+        (void)json_push_kv_int(&input, "expires", 2000000000);
+        struct zcl_command_request request = {
+            .spec = create, .input = &input, .view = "normal",
+        };
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, create->output_schema);
+        zcl_native_handle_zses_invite_create(&request, &reply);
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        const char *invite = json_get_str(json_get(&reply.data, "invite"));
+        ASSERT(invite && invite[0]);
+        ASSERT(strstr(invite, "zses:v1") != NULL);
+
+        struct json_value acc_in;
+        json_init(&acc_in);
+        json_set_object(&acc_in);
+        (void)json_push_kv_str(&acc_in, "invite", invite);
+        (void)json_push_kv_int(&acc_in, "now", 1900000000);
+        struct zcl_command_request acc_req = {
+            .spec = accept, .input = &acc_in, .view = "normal",
+        };
+        struct zcl_command_reply acc_reply;
+        zcl_command_reply_init(&acc_reply, accept->output_schema);
+        zcl_native_handle_zses_invite_accept(&acc_req, &acc_reply);
+        ASSERT_EQ(acc_reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT(json_get_bool(json_get(&acc_reply.data, "accepted")));
+        zcl_command_reply_free(&acc_reply);
+        json_free(&acc_in);
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+        PASS();
+    }
+
+    TEST("create refuses a numeric endpoint unless posture=clearnet") {
+        const struct zcl_command_spec *create =
+            find_spec(reg, "zses.invite.create");
+        ASSERT(create);
+        struct json_value input;
+        json_init(&input);
+        json_set_object(&input);
+        (void)json_push_kv_str(&input, "endpoint", "203.0.113.9:8033");
+        struct zcl_command_request request = {
+            .spec = create, .input = &input, .view = "normal",
+        };
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, create->output_schema);
+        zcl_native_handle_zses_invite_create(&request, &reply);
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_INVALID);
+        ASSERT_STR_EQ(reply.error.code, "CLEARNET_FORBIDDEN");
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+        PASS();
+    }
+
+    TEST("accept refuses an unsigned invite by name") {
+        const struct zcl_command_spec *accept =
+            find_spec(reg, "zses.invite.accept");
+        ASSERT(accept);
+        struct json_value input;
+        json_init(&input);
+        json_set_object(&input);
+        (void)json_push_kv_str(
+            &input, "invite",
+            "{\"schema\":\"zses:v1\",\"endpoint\":"
+            "\"abcdeabcdeabcdeabcdeabcdeabcdeabcdeabcdeabcdeabcdeabcd.onion:8055\","
+            "\"expires\":2000000000,\"capability_tag\":\"session\"}");
+        (void)json_push_kv_int(&input, "now", 1900000000);
+        struct zcl_command_request request = {
+            .spec = accept, .input = &input, .view = "normal",
+        };
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, accept->output_schema);
+        zcl_native_handle_zses_invite_accept(&request, &reply);
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_INVALID);
+        ASSERT_STR_EQ(reply.error.code, "unsigned");
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+        PASS();
+    }
+_test_next:;
     return failures;
 }
 
@@ -3710,6 +3838,7 @@ int test_command_registry_catalog(void)
     failures += test_dev_vcs_revert_release_stub();
     failures += test_dev_vcs_seal_grant_release_stub();
     failures += test_is_root_ownership();
+    failures += test_zses_invite_leaves();
     printf("=== command_registry_catalog: %d failures ===\n", failures);
     return failures;
 }

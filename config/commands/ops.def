@@ -528,6 +528,41 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
     zcl_native_handle_rom_fetch_bundle)
 
+ZCL_COMMAND_BRANCH("ops.mesh", "ops", "Mesh",
+                   ZCL_COMMAND_LAYER_OPS)
+ZCL_COMMAND_READY_COMMAND(
+    "ops.mesh.join", "ops.mesh", "",
+    "Join a peer from a verified session invite",
+    "Dials the invite endpoint and reports join_status.peered after the "
+    "P2P handshake (VERSION/VERACK). Does not substitute addnode in the "
+    "operator contract: this leaf is the join entry.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "mesh,join,invite,session,peer",
+    "zcl.ops_mesh_join.input.v1", "zcl.ops_mesh_join_status.v1",
+    "endpoint,address", "endpoint",
+    "z23 ops mesh join --endpoint=<host:port>",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_CORE_RECOVERY, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_ops_mesh_join)
+ZCL_COMMAND_READY_READ(
+    "ops.mesh.join_status", "ops.mesh", "",
+    "Report whether a mesh join has peered",
+    "join_status for one endpoint: peered=true only after VERSION/VERACK.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "mesh,join,status,peered,session",
+    "zcl.ops_mesh_join.input.v1", "zcl.ops_mesh_join_status.v1",
+    "endpoint,address", "endpoint",
+    "z23 ops mesh join_status --endpoint=<host:port>",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_mesh_join_status)
+
 ZCL_COMMAND_BRANCH("ops.postmortem", "ops", "Postmortems",
                    ZCL_COMMAND_LAYER_OPS)
 ZCL_COMMAND_READY_READ(

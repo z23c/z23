@@ -1,0 +1,10 @@
+SCHEMA=pass
+DRILL=fail
+CREATE_S=null
+ACCEPT_S=null
+JOIN_S=null
+PEERED_S=null
+PEERED=false
+GAPS=rpc_a
+OBSERVED_AT=2026-08-23T05:53:59Z
+DETAIL=SCHEMA: t-fast test_zses PASS; discover schema (create/accept/ops.mesh.join) agreed twice and names endpoint,expires,capability-tag; session_drill --selftest PASS (unsigned, wrong_key, tampered, expired, CLEARNET_FORBIDDEN). DRILL: isolated two-node spawn did not produce an RPC cookie within 60s; join_status was never observed; named gap rpc_a. peered=true is not claimed.

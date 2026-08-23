@@ -1140,7 +1140,9 @@ bool zcl_command_registry_input_validate(const struct zcl_command_spec *spec,
              * pin every zcode reward/badge/seed/fetch surface takes. */
             type_ok = value->type == JSON_INT && json_get_int(value) >= 0;
         } else if (strcmp(key, "now_unix") == 0 ||
+                   strcmp(key, "now") == 0 ||
                    strcmp(key, "created_at") == 0 ||
+                   strcmp(key, "expires") == 0 ||
                    strcmp(key, "expires_at") == 0 ||
                    strcmp(key, "issued_unix") == 0 ||
                    strcmp(key, "expires_unix") == 0) {
@@ -1148,10 +1150,10 @@ bool zcl_command_registry_input_validate(const struct zcl_command_spec *spec,
              * submission-window pin used by zcode.science; created_at and
              * expires_at are the ZPAY envelope bounds (and existing build
              * worker fields); issued_unix and expires_unix bound the
-             * app.shop.want.post advertisement window. Without this rule the
-             * default branch demands a string while every handler reads
-             * JSON_INT, making the declared commands uninvokable through
-             * the CLI. */
+             * app.shop.want.post advertisement window; expires/now are the
+             * zses:v1 invite window. Without this rule the default branch
+             * demands a string while every handler reads JSON_INT, making
+             * the declared commands uninvokable through the CLI. */
             type_ok = value->type == JSON_INT && json_get_int(value) >= 0;
         } else if (strcmp(key, "amount_zatoshi") == 0) {
             /* app.shop.want.post declared payment terms (uint64 in struct

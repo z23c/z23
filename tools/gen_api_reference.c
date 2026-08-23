@@ -302,6 +302,9 @@ static const struct row g_rows[] = {
 #define ZCL_DEF_FILE "config/commands/yardsale.def"
 #include "../config/commands/yardsale.def"
 #undef ZCL_DEF_FILE
+#define ZCL_DEF_FILE "config/commands/zses.def"
+#include "../config/commands/zses.def"
+#undef ZCL_DEF_FILE
 #define ZCL_DEF_FILE "config/commands/telemetry/root.def"
 #include "../config/commands/telemetry/root.def"
 #undef ZCL_DEF_FILE
