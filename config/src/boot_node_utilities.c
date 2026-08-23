@@ -195,18 +195,10 @@ void app_add_node(const char *host, int port)
 {
     struct boot_svc_ctx *svc = boot_active_svc();
     char hostbuf[256];
-    snprintf(hostbuf, sizeof(hostbuf), "%s", host);
-
-    if (port <= 0) {
-        char *colon = strrchr(hostbuf, ':');
-        if (colon && colon != hostbuf) {
-            int p = atoi(colon + 1);
-            if (p > 0 && p < 65536) {
-                port = p;
-                *colon = '\0';
-            }
-        }
-    }
+    int parsed_port = 0;
+    split_host_port(host, hostbuf, sizeof(hostbuf), &parsed_port);
+    if (port <= 0)
+        port = parsed_port;
 
     uint16_t use_port = port > 0 ? (uint16_t)port
                                  : svc->connman->manager.default_port;
