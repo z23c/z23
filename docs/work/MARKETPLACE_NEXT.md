@@ -16,7 +16,8 @@ settlement is ordinary opt-in transactions with plan/commit + fee preview.
 Everything so far was proven with regtest daemons on one host. This phase
 is two real machines finding each other over Tor and trading a file.
 
-- [ ] A1. Guide written: `docs/TWO_LAPTOP_MARKET_TEST.md`
+- [x] A1. Journey shipped: `make commons-multihost-acceptance` in the top-level
+      README (the standalone two-laptop guide was purged as superseded)
 - [ ] A2. Both machines build the real-Tor binary (`vendor/tor` submodule + `libtor.a`)
 - [ ] A3. Node A boots with `-tor`, serves its onion, shares the address
 - [ ] A4. Node B discovers/connects to A (`/directory.json` or `-addnode`)
