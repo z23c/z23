@@ -4811,6 +4811,12 @@ $(JSONQ_BIN): tools/jsonq.c \
 	    -o $@ tools/jsonq.c packages/zjsonp/src/zjsonp.c \
 	    packages/zutf8/src/zutf8.c
 
+# Drive tools/scripts/onion_pair_watch.sh --selftest and validate
+# deploy/devfleet/pair_probe.jsonl. Does not spawn nodes.
+.PHONY: check-onion-pair-watch
+check-onion-pair-watch: jsonq
+	@tools/scripts/check_onion_pair_watch.sh
+
 # Physical native-agent UI acceptance driver. It links only the workstation's
 # X11 client ABI and sends one bounded event to an exact titled window; it owns
 # no node/package authority and is never shipped. Link the stable runtime
