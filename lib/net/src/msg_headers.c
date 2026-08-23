@@ -34,6 +34,7 @@
 #include "net/netaddr.h"
 #include "net/header_corroboration.h"
 #include "net/checkpoint_header_fetch.h"
+#include "net/header_serve_repair.h"
 #include "platform/time_compat.h"
 #include "services/header_range_scheduler.h"  // lib-layer-ok:net3-range-parallel-header-planner
 #include <signal.h>
@@ -612,11 +613,11 @@ static bool headers_bind_reason_can_retry_store(const char *reason)
          strcmp(reason, "header-hash-mismatch") == 0);
 }
 
-static void headers_refresh_index_from_header(struct block_index *iter,
+static bool headers_refresh_index_from_header(struct block_index *iter,
                                               const struct block_header *hdr)
 {
     if (!iter || !hdr)
-        return;
+        return false;
 
     iter->nVersion = hdr->nVersion;
     iter->hashMerkleRoot = hdr->hashMerkleRoot;
@@ -631,7 +632,7 @@ static void headers_refresh_index_from_header(struct block_index *iter,
          * concurrent reader of this entry cannot see a dangling pointer. */
         if (iter->nSolution && iter->nSolutionSize == hdr->nSolutionSize) {
             memcpy(iter->nSolution, hdr->nSolution, hdr->nSolutionSize);
-            return;
+            return true;
         }
 
         /* Reserve first, roll back on refusal — two serve threads must not
@@ -652,7 +653,7 @@ static void headers_refresh_index_from_header(struct block_index *iter,
                          "instead of being kept in RAM",
                          (size_t)HEADERS_SOLUTION_CACHE_MAX_BYTES,
                          iter->nHeight);
-            return;
+            return false;
         }
 
         uint8_t *sol = zcl_malloc(hdr->nSolutionSize,
@@ -663,13 +664,46 @@ static void headers_refresh_index_from_header(struct block_index *iter,
             LOG_WARN("headers",
                      "getheaders: solution refresh alloc failed h=%d size=%zu",
                      iter->nHeight, hdr->nSolutionSize);
-            return;
+            return false;
         }
         memcpy(sol, hdr->nSolution, hdr->nSolutionSize);
         free(iter->nSolution);
         iter->nSolution = sol;
         iter->nSolutionSize = hdr->nSolutionSize;
+        return true;
     }
+    return false;
+}
+
+/* A header-only repair response is never trusted because it came from a peer.
+ * Re-run the exact serve-path bind + full Equihash/PoW/time gate, then cache it
+ * under the existing 64 MiB ceiling. The repair flight completes only after
+ * the bytes are actually resident; allocation/budget refusal stays armed for
+ * a later bounded retry. */
+bool getheaders_cache_repair_candidate(struct msg_processor *mp,
+                                       struct block_index *iter,
+                                       const struct block_header *hdr)
+{
+    if (!header_serve_repair_wants(iter))
+        return false;
+
+    struct uint256 hash;
+    const char *reason =
+        headers_candidate_bind_reason(mp, iter, hdr, &hash);
+    if (!reason)
+        reason = headers_verify_bound_header(mp, hdr, &hash);
+    if (reason) {
+        LOG_WARN("headers",
+                 "getheaders: header-only repair candidate refused h=%d "
+                 "reason=%s",
+                 iter ? iter->nHeight : -1, reason);
+        return false;
+    }
+    if (!headers_refresh_index_from_header(iter, hdr))
+        return false;
+
+    header_serve_repair_note_cached(iter);
+    return true;
 }
 
 static bool headers_try_disk_header(struct msg_processor *mp,
@@ -802,6 +836,9 @@ bool getheaders_index_header_servable(struct msg_processor *mp,
                  "getheaders: refusing to serve header %s h=%d reason=%s",
                  hex[0] ? hex : "(unknown)", iter ? iter->nHeight : -1,
                  reason);
+        if (iter && iter->phashBlock &&
+            headers_bind_reason_can_retry_store(reason))
+            header_serve_repair_arm(mp ? mp->main_state : NULL, iter);
         /* A serve refusal is NOT a validity verdict: every reason here can
          * arise from data UNAVAILABILITY (a hydrated index entry with no
          * nSolution and no reachable store yields "invalid-solution" for a
@@ -815,6 +852,9 @@ bool getheaders_index_header_servable(struct msg_processor *mp,
 
     if (hdr_out)
         *hdr_out = hdr;
+    if (header_serve_repair_wants(iter) && iter->nSolution &&
+        iter->nSolutionSize == hdr.nSolutionSize)
+        header_serve_repair_note_cached(iter);
     return true;
 }
 
@@ -1156,6 +1196,10 @@ bool process_headers(struct msg_processor *mp, struct p2p_node *node,
             accepted++;
             if (!was_known)
                 newly_added++;
+            /* A serve miss may have requested this exact bounded header-only
+             * span. Known headers take a cheap path in accept_block_header,
+             * so independently full-verify before caching their solutions. */
+            (void)getheaders_cache_repair_candidate(mp, pindex, &hdr);
             /* Record that THIS peer's address group served this header, so a
              * later best-header SWITCH to this branch can be corroborated
              * against a second distinct group before we adopt it. Records the

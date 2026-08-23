@@ -25,6 +25,7 @@
 #include "msgprocessor_internal.h"
 #include "net/addrman.h"
 #include "net/checkpoint_header_fetch.h"
+#include "net/header_serve_repair.h"
 #include "net/dandelion.h"
 #include "net/download.h"
 #include "net/fast_sync.h"
@@ -2627,6 +2628,8 @@ bool msg_send_messages(void *ctx, struct p2p_node *node, bool send_trickle)
          * armed; globally throttled so only one request goes out per interval. */
         if (!snapshot_active)
             checkpoint_header_fetch_maybe_send(mp, node, now_send);
+        if (!snapshot_active)
+            header_serve_repair_maybe_send(mp, node, now_send);
     }
 
     /* ── Download manager: assign queued blocks to this peer ────── */
