@@ -71,9 +71,9 @@ KillMode=control-group
 # steady state. These numbers are a runaway backstop only.
 # cgroup at its soft limit and starved RPC on 2026-08-06; this node sits near
 # 2.8G in steady state. These numbers are a runaway backstop, not a diet.
-MemoryHigh=24G
-MemoryMax=24G
-MemorySwapMax=2G
+MemoryHigh=21G
+MemoryMax=21G
+MemorySwapMax=512M
 # No CPUQuota: throttling a mesh member fights the requirement that a node
 # always syncs fast. Weights yield to the canonical live node under contention
 # without capping this one when the box is idle.
