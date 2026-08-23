@@ -29,103 +29,6 @@ static _Atomic int64_t g_stale_window_min = 0;
 static _Atomic int64_t g_stale_window_max = 0;
 #define STALE_SUMMARY_WINDOW_SECS ((int64_t)60)
 
-/* ONION_EDGE_SYNC_GATE_startingheight
- *
- * A late outbound onion edge can complete VERSION/VERACK while advertising
- * start_height=0.  The ordinary substantially-behind gate then suppresses
- * every getheaders request, so the edge can remain ACTIVE without ever being
- * tested as a header source.  Permit exactly one probe for a native ZCL23
- * onion peer.  last_getheaders_time closes the exception as soon as that
- * request is recorded; all later rounds use the ordinary height/backoff
- * policy.  This is transport discovery only, never a validity shortcut. */
-static bool syncsvc_zero_height_onion_probe_pending(
-    const struct p2p_node *node)
-{
-    return node && !node->inbound && node->starting_height == 0 &&
-           net_addr_is_tor(&node->addr.svc.addr) &&
-           peer_supports_fast_sync(node->services) &&
-           atomic_load_explicit(&node->last_getheaders_time,
-                                memory_order_relaxed) == 0;
-}
-
-bool syncsvc_should_begin_peer_sync(const struct p2p_node *node,
-                                    int our_height,
-                                    int best_header_height,
-                                    enum sync_state sync_state)
-{
-    if (!node)
-        LOG_FAIL("header_sync", "begin_peer_sync: null node");
-    /* Inbound peers are not eligible for initiating header sync —
-     * return false silently. This is expected on every tick for every
-     * inbound peer, not an error worth logging. */
-    if (node->inbound || node->state != PEER_ACTIVE)
-        return false;
-
-    if (syncsvc_zero_height_onion_probe_pending(node))
-        return true;
-
-    /* An equal-height warm restart still needs one outbound getheaders probe
-     * to leave FINDING_PEERS; the reply grants no at-tip claim. */
-    if (node->starting_height > our_height ||
-        sync_state == SYNC_FINDING_PEERS)
-        return true;
-    if (best_header_height > our_height + 1)
-        return true;
-    if (node->starting_height >= 0)
-        return false;
-
-    if (sync_state == SYNC_AT_TIP)
-        return false;
-
-    if (sync_state == SYNC_HEADERS_DOWNLOAD ||
-        sync_state == SYNC_BLOCKS_DOWNLOAD ||
-        sync_state == SYNC_CONNECTING_BLOCKS ||
-        sync_state == SYNC_REORG ||
-        sync_state == SYNC_REORG_RECOVERY)
-        return true;
-
-    if ((sync_state == SYNC_IDLE || sync_state == SYNC_FINDING_PEERS) &&
-        (our_height <= 0 || node->starting_height < 0))
-        return true;
-
-    return false;
-}
-
-bool syncsvc_should_mark_peer_caught_up(const struct p2p_node *node,
-                                        int our_height,
-                                        int best_header_height)
-{
-    if (!node)
-        return false;
-    if (node->state != PEER_SYNCING_HEADERS &&
-        node->state != PEER_SYNCING_BLOCKS)
-        return false;
-    if (syncsvc_zero_height_onion_probe_pending(node))
-        return false;
-    if (best_header_height > our_height + 1)
-        return false;
-    if (node->starting_height > our_height)
-        return false;
-    return true;
-}
-
-bool syncsvc_begin_peer_sync(struct p2p_node *node,
-                             int our_height,
-                             int best_header_height)
-{
-    if (!syncsvc_should_begin_peer_sync(node, our_height, best_header_height,
-                                       sync_get_state()))
-        return false;
-
-    peer_set_state_checked((uint32_t)node->id, &node->state,
-                           PEER_SYNCING_HEADERS, "IBD start");
-    if (sync_get_state() == SYNC_IDLE ||
-        sync_get_state() == SYNC_FINDING_PEERS) {
-        sync_set_state(SYNC_HEADERS_DOWNLOAD, "first outbound peer");
-    }
-    return true;
-}
-
 static void syncsvc_build_locator_from_tip(struct block_locator *loc,
                                            const struct block_index *tip,
                                            const char *alloc_label,
@@ -405,35 +308,6 @@ static int64_t syncsvc_getheaders_interval(const struct p2p_node *node,
     }
 
     return base;
-}
-
-bool syncsvc_peer_is_behind(const struct p2p_node *node, int our_height)
-{
-    if (!node)
-        return false;
-    if (syncsvc_zero_height_onion_probe_pending(node))
-        return false;
-    /* Unknown advertised height (mid-handshake, or the co-located
-     * zclassicd oracle before it reports a tip): cannot prove behind,
-     * so keep eligible — header sync is how we learn its real tip. */
-    if (node->starting_height < 0)
-        return false;
-    /* node->starting_height is HANDSHAKE-STATIC (set once from the version
-     * message, msg_version.c:221; never updated). So a peer that connected
-     * when the chain was lower shows a stale-low starting_height even though
-     * it has since followed the tip. We must NOT gate such a long-lived
-     * at-tip peer — that would suppress the 120s at-tip keepalive getheaders
-     * that discovers new blocks, and would wrongly demote healthy peers.
-     *
-     * We therefore EXCLUDE a peer only when it is SUBSTANTIALLY behind:
-     * its claimed tip is more than SYNC_PEER_BEHIND_TOLERANCE blocks below
-     * ours. This mirrors the existing frontier-parity band already used for
-     * stale-header discipline (best_header >= starting_height - 144,
-     * msgprocessor.c:1416-1418) — same handshake-static reasoning, same
-     * tolerance. The live wedge (peer at 3056758 while we are at 3150488,
-     * a ~94k gap) is far past the band and is correctly gated; a peer at or
-     * near our tip stays fully eligible. Net policy only; no validity. */
-    return node->starting_height + SYNC_PEER_BEHIND_TOLERANCE < our_height;
 }
 
 bool syncsvc_should_request_headers(const struct p2p_node *node,
