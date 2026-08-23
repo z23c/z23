@@ -458,10 +458,11 @@ struct connman_dial_candidate {
  *   2. a chain-bound DHT endpoint hint, then
  *   3. database-discovered ZCL23 peers on alternating scheduler turns, then
  *   4. addnode / addrman via connman_pick_next_outbound_target.
- * Every candidate passes the same per-candidate gates the serial dialer used
- * (reachable port, not already connected, not is_local, /16+/32+onion
- * diversity), PLUS an in-batch dedupe + diversity tally so a single batch
- * cannot itself breach a diversity cap. Returns the number written to `out`.
+ * Learned candidates pass the public reachable-port policy; explicit
+ * operator addnodes retain their requested non-zero port. Every candidate is
+ * still checked for existing/local connections and /16+/32+onion diversity,
+ * plus in-batch dedupe and diversity so one batch cannot breach a cap. Returns
+ * the number written to `out`.
  * Exposed so the anchors-before-addrman ordering is unit-testable. */
 size_t connman_gather_dial_candidates(struct connman *cm,
                                       struct connman_dial_candidate *out,

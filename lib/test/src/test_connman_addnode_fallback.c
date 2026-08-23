@@ -192,6 +192,53 @@ int test_connman_addnode_fallback(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    printf("connman_addnode_fallback: explicit custom-port onion remains "
+           "eligible for persistent redial... ");
+    {
+        chain_params_select(CHAIN_MAIN);
+        const struct chain_params *params = chain_params_get();
+        struct connman cm;
+        struct node_signals sigs;
+        memset(&sigs, 0, sizeof(sigs));
+        bool ok = connman_init(&cm, params, &sigs);
+
+        uint8_t pub[32];
+        for (int i = 0; i < 32; i++)
+            pub[i] = (uint8_t)(0x70 + i);
+        char host[ONION_V3_ADDRESS_LEN + 1];
+        ok = ok && onion_v3_address_from_pubkey(pub, host);
+
+        struct net_address onion;
+        net_address_init(&onion);
+        ok = ok && net_addr_from_onion(host, &onion.svc.addr);
+        onion.svc.port = 8055;
+        cm.addnodes[cm.num_addnodes++] = onion;
+
+        struct connman_dial_candidate candidate;
+        memset(&candidate, 0, sizeof(candidate));
+        size_t n = ok ? connman_gather_dial_candidates(
+                            &cm, &candidate, 1) : 0;
+        ok = ok && n == 1 &&
+             candidate.source == CONNMAN_TARGET_ADDNODE &&
+             net_addr_is_tor(&candidate.addr.svc.addr) &&
+             candidate.addr.svc.port == 8055;
+
+        /* The exception belongs only to operator authority.  The identical
+         * custom-port endpoint, when merely learned through addrman, remains
+         * outside the public reachable-port policy. */
+        struct net_addr source;
+        net_addr_init(&source);
+        ok = ok && connman_remove_addnode(&cm, &onion) &&
+             addrman_add(&cm.manager.addrman, &onion, &source, 0);
+        memset(&candidate, 0, sizeof(candidate));
+        n = ok ? connman_gather_dial_candidates(&cm, &candidate, 1) : 1;
+        ok = ok && n == 0;
+
+        connman_free(&cm);
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+
     printf("connman_addnode_fallback: discovered ZCL23 peers share durable "
            "backoff and reciprocal ownership... ");
     {

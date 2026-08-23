@@ -116,11 +116,19 @@ void connman_collect_healthy_anchors(struct connman *cm,
  * not already connected. Diversity is enforced by the batch tally below (the
  * connected-count check alone can't see in-flight dials). */
 static bool connman_candidate_addr_dialable(struct connman *cm,
-                                            const struct net_address *addr)
+                                            const struct net_address *addr,
+                                            enum connman_outbound_target_source source)
 {
     if (!cm || !addr)
         return false;
-    if (!zcl_net_port_is_reachable_candidate(addr->svc.port))
+    /* The public-port policy constrains learned addresses.  An explicit
+     * addnode is an operator-authorized endpoint and the direct addnode RPC
+     * already permits its non-zero port; persistent redial must preserve that
+     * authority instead of silently dropping custom-port onions after their
+     * first connection ages out. */
+    if (addr->svc.port == 0 ||
+        (source != CONNMAN_TARGET_ADDNODE &&
+         !zcl_net_port_is_reachable_candidate(addr->svc.port)))
         return false;
     if (is_local(&cm->manager, &addr->svc))
         return false;
@@ -238,7 +246,8 @@ size_t connman_gather_dial_candidates(struct connman *cm,
             struct net_address a;
             if (!connman_anchor_take_next(cm, &a))
                 break;
-            if (!connman_candidate_addr_dialable(cm, &a))
+            if (!connman_candidate_addr_dialable(cm, &a,
+                                                 CONNMAN_TARGET_ANCHOR))
                 continue;
             if (tally_has_service(&tally, &a.svc))
                 continue;
@@ -306,7 +315,7 @@ size_t connman_gather_dial_candidates(struct connman *cm,
         if (!connman_pick_next_outbound_target(cm, &cm->next_addnode_cursor,
                                                &info, &src, &idx))
             break;
-        if (!connman_candidate_addr_dialable(cm, &info.addr)) {
+        if (!connman_candidate_addr_dialable(cm, &info.addr, src)) {
             /* Already connected → an addnode gets its attempt marked good so
              * its cursor advances, matching the serial dialer. */
             if (src == CONNMAN_TARGET_ADDNODE &&
@@ -371,7 +380,8 @@ static bool connman_pick_feeler_target(struct connman *cm,
         memset(&pick, 0, sizeof(pick));
         if (!addrman_select(&cm->manager.addrman, /*new_only=*/true, &pick))
             return false;
-        if (!connman_candidate_addr_dialable(cm, &pick.addr))
+        if (!connman_candidate_addr_dialable(cm, &pick.addr,
+                                             CONNMAN_TARGET_ADDRMAN))
             continue;
         *out = pick.addr;
         return true;
