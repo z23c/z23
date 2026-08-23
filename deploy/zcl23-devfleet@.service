@@ -42,10 +42,19 @@ EnvironmentFile=%h/.config/zclassic23-fleetsync/%i.env
 #   systemctl --user edit zcl23-devfleet@%i
 # ExecStart must be a literal absolute path; systemd will not expand a
 # variable in the first token.
+# -onion-persist is set HERE, not left to the per-box env, because the mesh
+# addresses peers by committed .onion and the node's default identity is
+# ephemeral: dynhost mints a throwaway service every boot. A box that omits
+# the flag therefore publishes a new address on every restart and silently
+# invalidates every other box's dial list and the referee's pinned evidence.
+# node2 rotated through five addresses on 2026-08-23 that way. The flag sets
+# an idempotent boolean, so a box repeating it in DEVFLEET_FLAGS is harmless.
+# It is inert without -tor, which stays a per-box choice.
 ExecStart=%h/github/zclassic23/build/bin/zclassic23 \
     -datadir=%h/.zclassic-c23-devfleet \
     -port=${DEVFLEET_PORT} \
     -rpcport=${DEVFLEET_RPCPORT} \
+    -onion-persist \
     $DEVFLEET_FLAGS
 
 # Restart=always keeps the node's own self-recovery escape hatches effective;
