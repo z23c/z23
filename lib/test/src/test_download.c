@@ -5,6 +5,7 @@
 #include "test/test_core.h"
 #include "services/gap_fill_service.h"
 #include "net/download.h"
+#include "sync/sync_state.h"
 #include "core/uint256.h"
 #include "util/supervisor.h"
 #include "validation/main_state.h"
@@ -1068,10 +1069,80 @@ static int test_dl_many_insertions(void)
     return failures;
 }
 
+static void test_dl_force_sync_idle(void)
+{
+    enum sync_state cur = sync_get_state();
+    if (cur == SYNC_IDLE)
+        return;
+    if (cur == SYNC_AT_TIP) {
+        (void)sync_set_state(SYNC_IDLE, "download test cleanup");
+        return;
+    }
+    if (cur == SYNC_REORG) {
+        (void)sync_set_state(SYNC_AT_TIP, "download test cleanup");
+        (void)sync_set_state(SYNC_IDLE, "download test cleanup");
+        return;
+    }
+    (void)sync_set_state(SYNC_IDLE, "download test cleanup");
+}
+
+static void test_dl_force_blocks_download(void)
+{
+    test_dl_force_sync_idle();
+    if (sync_get_state() != SYNC_IDLE)
+        return;
+    (void)sync_set_state(SYNC_FINDING_PEERS, "download ibd test");
+    (void)sync_set_state(SYNC_HEADERS_DOWNLOAD, "download ibd test");
+    (void)sync_set_state(SYNC_BLOCKS_DOWNLOAD, "download ibd test");
+}
+
+static int test_dl_ibd_windows(void)
+{
+    int failures = 0;
+    TEST("IBD raises per-peer in-flight and request timeout") {
+        test_dl_force_sync_idle();
+        ASSERT(sync_get_state() == SYNC_IDLE);
+        ASSERT(dl_get_max_in_flight_per_peer() == DL_MAX_IN_FLIGHT_PER_PEER);
+        ASSERT(dl_get_request_timeout_secs() == DL_REQUEST_TIMEOUT_SECS);
+        ASSERT(dl_get_max_in_flight_total() == DL_MAX_IN_FLIGHT_TOTAL);
+
+        test_dl_force_blocks_download();
+        ASSERT(sync_get_state() == SYNC_BLOCKS_DOWNLOAD);
+        ASSERT(dl_get_max_in_flight_per_peer() == DL_MAX_IN_FLIGHT_PER_PEER_IBD);
+        ASSERT(dl_get_request_timeout_secs() == DL_REQUEST_TIMEOUT_SECS_IBD);
+        ASSERT(dl_get_max_in_flight_total() == DL_MAX_IN_FLIGHT_TOTAL_IBD);
+        ASSERT(DL_MAX_IN_FLIGHT_PER_PEER_IBD > DL_MAX_IN_FLIGHT_PER_PEER);
+        ASSERT(DL_REQUEST_TIMEOUT_SECS_IBD > DL_REQUEST_TIMEOUT_SECS);
+
+        struct download_manager dm;
+        dl_init(&dm);
+        const size_t n = DL_MAX_IN_FLIGHT_PER_PEER_IBD + 8;
+        struct uint256 hashes[DL_MAX_IN_FLIGHT_PER_PEER_IBD + 8];
+        int32_t heights[DL_MAX_IN_FLIGHT_PER_PEER_IBD + 8];
+        struct uint256 out[DL_MAX_IN_FLIGHT_PER_PEER_IBD + 8];
+        for (size_t i = 0; i < n; i++) {
+            hashes[i] = make_hash((uint8_t)(i + 1));
+            hashes[i].data[1] = (uint8_t)(i >> 8);
+            heights[i] = 2000 + (int32_t)i;
+        }
+        ASSERT(dl_queue_blocks(&dm, hashes, heights, n) == n);
+        size_t assigned = dl_assign_to_peer(&dm, 3, out, n);
+        ASSERT(assigned == DL_MAX_IN_FLIGHT_PER_PEER_IBD);
+        ASSERT(dl_peer_in_flight(&dm, 3) == DL_MAX_IN_FLIGHT_PER_PEER_IBD);
+        assigned = dl_assign_to_peer(&dm, 3, out, n);
+        ASSERT(assigned == 0);
+        dl_free(&dm);
+        PASS();
+    } _test_next:;
+    test_dl_force_sync_idle();
+    return failures;
+}
+
 static int test_dl_per_peer_limit(void)
 {
     int failures = 0;
     TEST("dl_assign_to_peer respects per-peer limit") {
+        test_dl_force_sync_idle();
         struct download_manager dm;
         dl_init(&dm);
 
@@ -1752,6 +1823,7 @@ int test_download(void)
     failures += test_gap_fill_timeout_wakes_dispatcher();
     failures += test_gap_fill_queued_idle_wakes_dispatcher();
     failures += test_dl_many_insertions();
+    failures += test_dl_ibd_windows();
     failures += test_dl_per_peer_limit();
     failures += test_dl_concurrent();
     failures += test_dl_byte_tracking();

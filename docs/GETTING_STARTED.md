@@ -138,16 +138,23 @@ Judge success by height **climbing toward the network tip**, never just "the
 process stayed up." The easy path for a new Z23 node is instant-on from a
 serving Z23 peer. Genesis IBD and a `zclassicd` datadir import remain available.
 
-1. **Instant-on from a serving Z23 peer** (the easy new-node path). Point the
-   node at one reachable Z23 peer. `-connect=HOST` and `-connect=HOST:8033`
-   are the same command: the node uses that host's P2P port 8033 and its file
-   service on 18034, fetches the header-chain seed plus complete-state bundle,
+1. **Instant-on from serving Z23 peers** (the easy new-node path). Name one
+   or more reachable Z23 peers with `-addnode`. Pair that with
+   `-fileservice=HOST` so the node also fetches the header-chain seed plus
+   complete-state bundle from that host's file service on port 18034,
    verifies them against the compiled checkpoint, installs, then folds the
-   remaining delta to tip. No `zclassicd` datadir, no extra flags:
+   remaining delta to tip over P2P from every connected peer. No
+   `zclassicd` datadir:
 
    ```bash
-   build/bin/z23 -connect=PEER.EXAMPLE:8033
+   build/bin/z23 -addnode=PEER.EXAMPLE:8033 -fileservice=PEER.EXAMPLE
    ```
+
+   You can repeat `-addnode=` for additional peers so the remaining fold is
+   not pinned to one host. `-connect=HOST` / `-connect=HOST:8033` still
+   works as a pin-to-one-peer mode (P2P 8033 plus file service 18034 on
+   that host only). Use it when you want no other peers, not as the default
+   fast path.
 
    Optional: if you already have a `consensus-state-bundle-*.sqlite`, set
    `ZCL_CHECKPOINT_BUNDLE_SOURCE` in `~/.config/zclassic23/env` so systemd

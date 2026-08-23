@@ -22,13 +22,18 @@
 #include <stddef.h>
 
 /* Tuning constants — conservative (at-tip) defaults.
- * During IBD, use dl_get_*() functions which return aggressive values. */
-#define DL_MAX_IN_FLIGHT_PER_PEER 128    /* max concurrent block requests per peer */
+ * During IBD, use dl_get_*() functions which return catch-up values.
+ * IBD per-peer and timeout used to stay at the at-tip 128 / 15 s pair;
+ * a 15 s reassign on a 128-deep WAN window stamped DL_PEER_AVOID_COOLDOWN
+ * on the only peer and parked GETDATA. IBD keeps Equihash / scripts /
+ * proofs; it only holds the request window open long enough to fill. */
+#define DL_MAX_IN_FLIGHT_PER_PEER 128    /* max concurrent block requests per peer (at tip) */
+#define DL_MAX_IN_FLIGHT_PER_PEER_IBD 256 /* max concurrent block requests per WAN peer (IBD) */
 #define DL_MAX_IN_FLIGHT_PER_LOOPBACK 512 /* loopback bypasses WAN-fairness ceiling */
 #define DL_MAX_IN_FLIGHT_TOTAL    1024   /* max total in-flight blocks (at tip) */
 #define DL_MAX_IN_FLIGHT_TOTAL_IBD 4096  /* max total in-flight blocks (during IBD) */
 #define DL_REQUEST_TIMEOUT_SECS   30     /* reassign after this many seconds (at tip) */
-#define DL_REQUEST_TIMEOUT_SECS_IBD 15   /* reassign after this many seconds (during IBD) */
+#define DL_REQUEST_TIMEOUT_SECS_IBD 45   /* reassign after this many seconds (during IBD) */
 #define DL_STALL_TIMEOUT_SECS     120    /* disconnect peer after this */
 #define DL_WINDOW_SIZE            512    /* blocks to request per batch */
 #define DL_MAX_TRACKED_PEERS      512    /* above connman's <=200 live peers;
@@ -59,9 +64,10 @@ enum dl_work_class {
     DL_WORK_HISTORY = 1,
 };
 
-/* Dynamic limits — return aggressive values during IBD, conservative at tip.
+/* Dynamic limits — return catch-up values during IBD, conservative at tip.
  * These check sync_get_state() internally. Thread-safe. */
 size_t dl_get_max_in_flight_total(void);
+size_t dl_get_max_in_flight_per_peer(void);
 int    dl_get_request_timeout_secs(void);
 
 /* Per-block in-flight entry */
@@ -393,8 +399,8 @@ void dl_queue_priority(struct download_manager *dm,
                        const struct uint256 *hash, int32_t height);
 
 /* Assign queued blocks to a peer. Returns number assigned.
- * Respects DL_MAX_IN_FLIGHT_PER_PEER (or DL_MAX_IN_FLIGHT_PER_LOOPBACK
- * for peers flagged via dl_set_peer_loopback) and DL_MAX_IN_FLIGHT_TOTAL.
+ * Respects dl_get_max_in_flight_per_peer() (or DL_MAX_IN_FLIGHT_PER_LOOPBACK
+ * for peers flagged via dl_set_peer_loopback) and dl_get_max_in_flight_total().
  * Fills `out_hashes` with the assigned block hashes. */
 size_t dl_assign_to_peer(struct download_manager *dm,
                          uint32_t peer_id,
@@ -436,7 +442,7 @@ void dl_get_throughput(struct download_manager *dm,
                        uint64_t *total_bytes, double *mbps_avg);
 
 /* Get the adaptive per-peer window size based on bandwidth score.
- * Fast peers get up to DL_MAX_IN_FLIGHT_PER_PEER; slow peers get fewer.
+ * Fast peers get up to dl_get_max_in_flight_per_peer(); slow peers get fewer.
  * Returns 0 if peer not found. */
 size_t dl_peer_adaptive_window(struct download_manager *dm, uint32_t peer_id);
 

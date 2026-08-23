@@ -8,6 +8,7 @@
 #include "controllers/diagnostics_internal.h"
 #include "json/json.h"
 #include "sync/sync_planner.h"
+#include "sync/sync_state.h"
 #include "validation/main_state.h"
 #include "net/download.h"
 #include "services/utxo_recovery_service.h"
@@ -509,6 +510,12 @@ static int test_sync_service_block_assignment_plan(void)
         node.starting_height = 100200;
         const int our_height = 100000;
 
+        /* Earlier cases in this group leave HEADERS_DOWNLOAD; pin at-tip
+         * so the WAN 64/16 pair is what this test measures. */
+        (void)sync_set_state(SYNC_IDLE, "assignment plan at-tip");
+        ASSERT(sync_get_state() == SYNC_IDLE);
+        ASSERT(dl_get_max_in_flight_per_peer() == DL_MAX_IN_FLIGHT_PER_PEER);
+
         syncsvc_plan_block_assignment(&plan, &node, 0, our_height);
         ASSERT(!plan.should_assign);
 
@@ -522,6 +529,21 @@ static int test_sync_service_block_assignment_plan(void)
                                       our_height);
         ASSERT(plan.should_assign);
         ASSERT(plan.max_assign == 16);
+
+        (void)sync_set_state(SYNC_FINDING_PEERS, "assignment plan ibd");
+        (void)sync_set_state(SYNC_HEADERS_DOWNLOAD, "assignment plan ibd");
+        (void)sync_set_state(SYNC_BLOCKS_DOWNLOAD, "assignment plan ibd");
+        ASSERT(sync_get_state() == SYNC_BLOCKS_DOWNLOAD);
+        ASSERT(dl_get_max_in_flight_per_peer() == DL_MAX_IN_FLIGHT_PER_PEER_IBD);
+        syncsvc_plan_block_assignment(&plan, &node, 0, our_height);
+        ASSERT(plan.should_assign);
+        ASSERT(plan.max_assign == 128);
+        syncsvc_plan_block_assignment(&plan, &node,
+                                      (DL_MAX_IN_FLIGHT_PER_PEER_IBD / 2) + 1,
+                                      our_height);
+        ASSERT(plan.should_assign);
+        ASSERT(plan.max_assign == 64);
+        (void)sync_set_state(SYNC_IDLE, "assignment plan restore");
 
         /* Behind-gate: a peer within the tolerance band is NOT gated (it
          * may be a long-lived at-tip peer with a stale-low handshake h). */
@@ -540,7 +562,8 @@ static int test_sync_service_block_assignment_plan(void)
         ASSERT(plan.should_assign);
         PASS();
     } _test_next:;
-
+    if (sync_get_state() != SYNC_IDLE)
+        (void)sync_set_state(SYNC_IDLE, "assignment plan restore");
     return failures;
 }
 

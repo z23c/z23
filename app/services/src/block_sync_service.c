@@ -85,9 +85,15 @@ void syncsvc_plan_block_assignment(struct sync_block_assignment *plan,
         if (in_flight > DL_MAX_IN_FLIGHT_PER_LOOPBACK / 2)
             plan->max_assign = 64;
     } else {
-        plan->max_assign = 64;
-        if (in_flight > DL_MAX_IN_FLIGHT_PER_PEER / 2)
-            plan->max_assign = 16;
+        /* WAN: IBD holds a deeper per-peer window (see
+         * dl_get_max_in_flight_per_peer). Plan a larger GETDATA batch so
+         * one send_messages tick can fill that window; at tip keep the
+         * conservative 64/16 pair so relay stays polite. */
+        size_t per_peer = dl_get_max_in_flight_per_peer();
+        bool ibd = per_peer > DL_MAX_IN_FLIGHT_PER_PEER;
+        plan->max_assign = ibd ? 128 : 64;
+        if (in_flight > per_peer / 2)
+            plan->max_assign = ibd ? 64 : 16;
     }
 }
 

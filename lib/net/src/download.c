@@ -33,6 +33,12 @@ size_t dl_get_max_in_flight_total(void)
                        : DL_MAX_IN_FLIGHT_TOTAL;
 }
 
+size_t dl_get_max_in_flight_per_peer(void)
+{
+    return dl_is_ibd() ? DL_MAX_IN_FLIGHT_PER_PEER_IBD
+                       : DL_MAX_IN_FLIGHT_PER_PEER;
+}
+
 int dl_get_request_timeout_secs(void)
 {
     return dl_is_ibd() ? DL_REQUEST_TIMEOUT_SECS_IBD
@@ -1267,7 +1273,7 @@ size_t dl_assign_to_peer(struct download_manager *dm,
         else
             forward_queued++;
     }
-    size_t peer_limit = DL_MAX_IN_FLIGHT_PER_PEER; /* default for new peers */
+    size_t peer_limit = dl_get_max_in_flight_per_peer(); /* default for new peers */
     if (ps_assign && ps_assign->is_loopback) {
         /* K2: loopback has no WAN-fairness constraint and effectively
          * unlimited bandwidth. Use the elevated cap; the global limit
@@ -1276,11 +1282,12 @@ size_t dl_assign_to_peer(struct download_manager *dm,
         peer_limit = DL_MAX_IN_FLIGHT_PER_LOOPBACK;
     } else if (ps_assign && ps_assign->bandwidth_score > 0) {
         /* Scale: score/128 * MAX, clamped to [16, MAX] */
+        size_t max_peer = dl_get_max_in_flight_per_peer();
         peer_limit = (size_t)ps_assign->bandwidth_score
-                     * DL_MAX_IN_FLIGHT_PER_PEER / 128;
+                     * max_peer / 128;
         if (peer_limit < 16) peer_limit = 16;
-        if (peer_limit > DL_MAX_IN_FLIGHT_PER_PEER)
-            peer_limit = DL_MAX_IN_FLIGHT_PER_PEER;
+        if (peer_limit > max_peer)
+            peer_limit = max_peer;
     }
     size_t available = 0;
     if (peer_count < peer_limit)
@@ -1590,13 +1597,14 @@ size_t dl_peer_adaptive_window(struct download_manager *dm, uint32_t peer_id)
 {
     zcl_mutex_lock(&dm->cs);
     struct dl_peer_stats *ps = dl_find_peer(dm, peer_id, false);
-    size_t window = DL_MAX_IN_FLIGHT_PER_PEER;
+    size_t window = dl_get_max_in_flight_per_peer();
     if (ps && ps->is_loopback) {
         window = DL_MAX_IN_FLIGHT_PER_LOOPBACK;
     } else if (ps && ps->bandwidth_score > 0) {
-        window = (size_t)ps->bandwidth_score * DL_MAX_IN_FLIGHT_PER_PEER / 128;
+        size_t max_peer = dl_get_max_in_flight_per_peer();
+        window = (size_t)ps->bandwidth_score * max_peer / 128;
         if (window < 16) window = 16;
-        if (window > DL_MAX_IN_FLIGHT_PER_PEER) window = DL_MAX_IN_FLIGHT_PER_PEER;
+        if (window > max_peer) window = max_peer;
     }
     zcl_mutex_unlock(&dm->cs);
     return window;
