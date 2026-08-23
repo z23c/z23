@@ -94,7 +94,8 @@ static bool shutdown_flush_coins_to_sqlite(struct boot_svc_ctx *svc,
     return true;
 }
 
-static bool shutdown_quiesce_network_and_flush_coins(struct boot_svc_ctx *svc)
+static bool shutdown_quiesce_network_and_flush_coins(struct boot_svc_ctx *svc,
+                                                     bool diagnostics_drained)
 {
     /* Stop P2P entrypoints before flush; any in-flight reducer sees
      * g_shutdown_requested and returns before mutating coins further. */
@@ -120,8 +121,16 @@ static bool shutdown_quiesce_network_and_flush_coins(struct boot_svc_ctx *svc)
      * late read fail closed instead of retaining a stale process-lifetime
      * pointer. */
     rpc_net_set_connman(NULL);
-    connman_free(svc->connman);
-    printf("[shutdown] connman stopped\n");
+    /* A diagnostics capture that did not drain is still an owned READER of
+     * connman. Retaining the allocation costs a process that is about to
+     * _exit() nothing; freeing it under a live reader is a use-after-free. */
+    if (diagnostics_drained) {
+        connman_free(svc->connman);
+        printf("[shutdown] connman stopped\n");
+    } else {
+        printf("[shutdown] connman retained: an undrained diagnostics "
+               "capture still owns it\n");
+    }
 
     /* Final flush in case message thread connected blocks before exit. */
     bool final_flush_ok = shutdown_flush_coins_to_sqlite(svc, "final");
@@ -292,10 +301,23 @@ static bool shutdown_persist_runtime_state(struct boot_svc_ctx *svc)
     return ok;
 }
 
-static void shutdown_release_owned_resources(struct boot_svc_ctx *svc)
+static void shutdown_release_owned_resources(struct boot_svc_ctx *svc,
+                                             bool diagnostics_drained)
 {
     printf("[shutdown] releasing owned resources\n");
+    /* Revoking the published runtime handle is fail-CLOSED, so it happens
+     * either way; everything below it is destructive. The one reader that may
+     * still be live is an undrained diagnostics capture (debug_bundle_shutdown
+     * returned false), and every reset/free below is state its dumpers read —
+     * so retain it all instead. Durability is already secured by now, so
+     * retaining costs nothing but address space in a process that _exit()s
+     * within milliseconds. */
     app_runtime_set_current(NULL);
+    if (!diagnostics_drained) {
+        printf("[shutdown] owned resources RETAINED: a diagnostics capture "
+               "did not drain\n");
+        return;
+    }
     zcl_service_kernel_reset(&svc->frontend_kernel);
     zcl_service_kernel_reset(&svc->runtime_kernel);
     zcl_service_kernel_reset(&svc->network_kernel);
@@ -353,21 +375,26 @@ void app_shutdown_svc(struct boot_svc_ctx *svc)
     }
 
     /* Debug capture is an owned reader of connman, node.db and main_state.
-     * Revoke new automatic AND RPC captures, then join/wait for every active
-     * capture before the first dumper dependency is quiesced.  The stage is
-     * intentionally generous: ownership is retained until every reader exits;
-     * a timed-out diagnostic is never detached. */
-    shutdown_stagewatch_enter("diagnostics-drain", 180, false, true);
-    if (!diagnostics_controller_shutdown()) {
+     * Revoke new automatic AND RPC captures, then wait — inside a BOUNDED
+     * budget — for every active capture before the first dumper dependency is
+     * quiesced.
+     *
+     * Ownership is still never abandoned: a capture that does not drain is
+     * never detached, and nothing it reads is freed (see the
+     * diagnostics_drained guards in shutdown_quiesce_network_and_flush_coins
+     * and shutdown_release_owned_resources). What changed is the CONSEQUENCE.
+     * This used to _exit(1) here, which threw away the coins flush, the WAL
+     * checkpoint and the clean marker — the whole durability barrier — over a
+     * best-effort postmortem capture, and the next boot then paid a ~180 s
+     * sqlite.quick_check. A blocked dumper must never cost the node its
+     * durability, so shutdown now says so loudly and keeps going. */
+    shutdown_stagewatch_enter("diagnostics-drain", 60, false, true);
+    bool diagnostics_drained = diagnostics_controller_shutdown();
+    if (!diagnostics_drained)
         fprintf(stderr,
-                "[shutdown] diagnostics ownership barrier failed; "
-                "refusing dependency teardown\n");
-        (void)boot_shutdown_marker_remove_clean(svc->datadir);
-        (void)shutdown_stagewatch_complete_unclean();
-        fflush(stdout);
-        fflush(stderr);
-        _exit(1);
-    }
+                "[shutdown] diagnostics capture did not drain inside its "
+                "budget; retaining every dependency it reads and continuing "
+                "to durability\n");
 
     /* I-7b phase-1: detach hot path observers from the feeder while
      * the network is still draining. New block_msg arrivals between
@@ -382,7 +409,8 @@ void app_shutdown_svc(struct boot_svc_ctx *svc)
      * legitimate socket/message cleanup and final coins I/O, still below the
      * service manager's 300s hard stop. */
     shutdown_stagewatch_enter("network-quiesce", 120, true, true);
-    bool durability_ok = shutdown_quiesce_network_and_flush_coins(svc);
+    bool durability_ok =
+        shutdown_quiesce_network_and_flush_coins(svc, diagnostics_drained);
     /* Consumer ownership is part of the durability barrier: dependencies may
      * not be closed while a consumer is live. A legitimate slow callback gets
      * bounded graces; a true wedge still exits loudly and unclean. */
@@ -431,7 +459,7 @@ void app_shutdown_svc(struct boot_svc_ctx *svc)
     /* Every worker was joined before persistence; destructive release is now
      * ownership-safe and cannot race a timed-out background callback. */
     shutdown_stagewatch_enter("release-resources", 15, false, true);
-    shutdown_release_owned_resources(svc);
+    shutdown_release_owned_resources(svc, diagnostics_drained);
 
     printf("Shutdown complete.\n");
     /* Closes the last stage, cancels the alarm, writes the CLEAN receipt. */

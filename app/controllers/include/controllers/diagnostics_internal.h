@@ -219,8 +219,31 @@ void debug_bundle_register_stall_observer(void);
 
 /* Stop accepting automatic and manual captures, join the owned worker, and
  * drain all capture leases. Must run before connman, databases, or main_state
- * are released. False means ownership is unproven. Idempotent. */
+ * are released. Idempotent.
+ *
+ * BOUNDED: the drain waits at most DEBUG_BUNDLE_DRAIN_BUDGET_MS for the
+ * worker to exit and for every in-flight lease to be dropped. A capture
+ * blocked inside one dumper is only cancellable at the NEXT dumper boundary
+ * (debug_bundle_push_subsystems checks the shutdown flag per entry), so an
+ * unbounded wait here hands a single slow dumper the power to stall the whole
+ * shutdown past its stage deadline — which is exactly how a healthy node was
+ * force-exited before it ever reached its coins flush or WAL checkpoint.
+ *
+ * false = the drain did NOT complete: a capture is still live and every
+ * dumper dependency it reads MUST be retained (never freed, never detached)
+ * by the caller, which then continues to its durability stages. It is never a
+ * reason to abandon durability. */
 bool debug_bundle_shutdown(void);
+
+/* Test seam for the bounded drain above: override the drain budget in
+ * milliseconds (<= 0 restores the production default). */
+void debug_bundle_set_drain_budget_ms_for_test(int ms);
+
+/* Test seam: take/drop one capture lease exactly as a live bundle walk does,
+ * so a test can hold the shutdown drain open without wedging a real dumper.
+ * acquire() returns false once the shutdown flag is set, same as a capture. */
+bool debug_bundle_capture_lease_acquire_for_test(void);
+void debug_bundle_capture_lease_release_for_test(void);
 
 /* profile [seconds] [top_n] — sample this node's threads over `seconds` and
  * return the busiest threads (cpu_ms/name/wchan), a one-line verdict, and the
