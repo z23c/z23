@@ -22,6 +22,7 @@
 #include <netinet/in.h>
 #include <openssl/err.h>
 #include <openssl/ssl.h>
+#include <poll.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -47,11 +48,60 @@
  * or out-of-band send. */
 #define RPC_HTTP_MAX_RESP_BYTES ((size_t)128 * 1024 * 1024)
 
+/* ── SINGLE-OWNER INVARIANT for accepted sockets ───────────────────
+ *
+ * Every accepted fd has exactly ONE owner at every instant, and no
+ * owner may hold it without a deadline. The owners, in order:
+ *
+ *   1. the listener      accept() → enqueue_client() succeeds
+ *   2. the client queue  enqueue_client() → dequeue_client()
+ *   3. a worker          dequeue_client() → handle_client()'s done:
+ *   4. ws_events         after a successful /events upgrade
+ *
+ * The queue is a WAITING ROOM, not a resource pool. It must never be
+ * the reason the server refuses work, so before it reports itself
+ * full it surrenders every entry it is no longer entitled to own: a
+ * peer that has hung up with nothing to serve, or an entry that has
+ * waited past RPC_HTTP_QUEUE_WAIT_MS.
+ *
+ * Why this exists: g_client_queue_count used to be a one-way ratchet.
+ * Its only decrementer was a worker returning from handle_client(),
+ * and handle_client() dispatches into the node — a wedged RPC method,
+ * or a client that stops reading a large response (there was no send
+ * deadline either), parks a worker forever. Four such workers pinned
+ * the count at RPC_HTTP_QUEUE_CAP for the life of the process: every
+ * later client got an instant 503 "RPC server busy" while the listener
+ * thread sat healthily in accept(), and every queued fd stayed open in
+ * CLOSE-WAIT with its unread request still in the receive queue,
+ * because the only owner that could ever close it never arrived. A
+ * long-running node's RPC front door died and never came back.
+ *
+ * With the rules below the worst case is bounded by the residency
+ * deadline, not by the process lifetime. */
+
+/* How long a connection may sit in the admission queue before the
+ * queue gives it up. Defaults to the per-request watchdog budget
+ * (rpc_timeout's 10 s): a request that has not even been READ within
+ * the whole time it was allowed to RUN is past any client's patience,
+ * and its slot is worth more than its fd. 0 disables age-based
+ * reclaim (hang-up reclaim still runs). Operators tune with
+ * ZCL_RPC_QUEUE_WAIT_MS. */
+#define RPC_HTTP_QUEUE_WAIT_MS_DEFAULT 10000
+
+/* Socket deadlines for a served connection. SO_RCVTIMEO bounds
+ * slowloris; SO_SNDTIMEO bounds the mirror attack — a client that
+ * sends a request and then stops reading, which otherwise parks a
+ * worker in write() with no deadline of its own. The rpc_timeout
+ * watchdog is not a substitute: it fails open when its 128 slots are
+ * exhausted and is disabled outright by ZCL_RPC_TIMEOUT_MS=0. */
+#define RPC_HTTP_SOCKET_TIMEOUT_SEC 5
+
 /* ── Connection abstraction for plain + TLS ───────────────────────── */
 
 struct rpc_conn {
-    int   fd;
-    SSL  *ssl;  /* NULL for plain-text connections */
+    int     fd;
+    SSL    *ssl;         /* NULL for plain-text connections */
+    int64_t admitted_us; /* monotonic stamp set by enqueue_client() */
 };
 
 static int g_listen_fd = -1;
@@ -100,6 +150,18 @@ static size_t g_client_queue_tail = 0;
 static size_t g_client_queue_count = 0;
 static pthread_mutex_t g_client_queue_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_client_queue_cond = PTHREAD_COND_INITIALIZER;
+/* Residency deadline in ms; see RPC_HTTP_QUEUE_WAIT_MS_DEFAULT. Read
+ * and written under g_client_queue_mutex. */
+static int g_client_queue_wait_ms = RPC_HTTP_QUEUE_WAIT_MS_DEFAULT;
+/* Admission accounting. Without these the ratchet was silent: the
+ * front door reported "busy" with nothing anywhere saying how deep the
+ * queue was or how long its head had been rotting. All under
+ * g_client_queue_mutex. */
+static size_t   g_client_queue_peak = 0;
+static uint64_t g_client_admitted = 0;
+static uint64_t g_client_reclaimed_hangup = 0;
+static uint64_t g_client_reclaimed_stale = 0;
+static uint64_t g_client_rejected_busy = 0;
 
 /* ── TLS state ────────────────────────────────────────────────────── */
 static SSL_CTX *g_tls_ctx = NULL;
@@ -249,6 +311,34 @@ static ssize_t conn_write(const struct rpc_conn *c, const void *buf, size_t len)
     return write(c->fd, buf, len);
 }
 
+/* Send the whole buffer, or give up. A blocking write() with
+ * SO_SNDTIMEO set returns SHORT when the window closes mid-transfer,
+ * so the send deadline that stops a non-reading client from parking a
+ * worker would otherwise truncate a large response into a corrupt
+ * reply. The rule here is progress, not wall-clock: any bytes accepted
+ * restart the deadline, so a slow-but-live client is served in full
+ * however long it takes, and only a client that moves ZERO bytes for a
+ * whole RPC_HTTP_SOCKET_TIMEOUT_SEC window is dropped. Returns false
+ * when the connection is finished; the caller is already unwinding to
+ * done: on any subsequent failure. */
+static bool conn_write_all(const struct rpc_conn *c, const void *buf, size_t len)
+{
+    const char *p = (const char *)buf;
+    size_t sent = 0;
+
+    while (sent < len) {
+        ssize_t w = conn_write(c, p + sent, len - sent);
+        if (w > 0) {
+            sent += (size_t)w;
+            continue;
+        }
+        if (w < 0 && errno == EINTR)
+            continue;
+        return false;
+    }
+    return true;
+}
+
 /* Cap request-header count so an endless-header stream (a slowloris variant)
  * cannot pin a server thread reading header lines forever. Legitimate
  * RPC/metrics/WebSocket clients send well under this. */
@@ -297,9 +387,10 @@ static void send_response_with_type(const struct rpc_conn *c, int status_code,
         "Connection: close\r\n"
         "\r\n",
         status_code, status_text, content_type, body_len);
-    (void)conn_write(c, header, (size_t)hlen);
+    if (!conn_write_all(c, header, (size_t)hlen))
+        return;
     if (body_len > 0)
-        (void)conn_write(c, body, body_len);
+        (void)conn_write_all(c, body, body_len);
 }
 
 static void send_response(const struct rpc_conn *c, int status_code,
@@ -310,27 +401,183 @@ static void send_response(const struct rpc_conn *c, int status_code,
                             "application/json", body, body_len);
 }
 
+static void conn_close(struct rpc_conn *c)
+{
+    if (c->ssl) {
+        SSL_shutdown(c->ssl);
+        SSL_free(c->ssl);
+        c->ssl = NULL;
+    }
+    if (c->fd >= 0) {
+        close(c->fd);
+        c->fd = -1;
+    }
+}
+
+/* Abandon a connection without touching the wire. conn_close() sends a
+ * TLS close_notify, and SSL_shutdown() is socket I/O that can block for
+ * the full SO_SNDTIMEO — unacceptable for a connection dropped while
+ * the admission queue's mutex is held. A peer we are refusing to serve
+ * is owed no graceful close, so free the SSL object and close the fd. */
+static void conn_discard(struct rpc_conn *c)
+{
+    if (c->ssl) {
+        SSL_free(c->ssl);
+        c->ssl = NULL;
+    }
+    if (c->fd >= 0) {
+        close(c->fd);
+        c->fd = -1;
+    }
+}
+
+/* Bound both directions of a served socket. Applied to every accepted
+ * fd we are about to write to — including the 503 rejection path, where
+ * a client that never reads would otherwise wedge the ACCEPT LOOP
+ * itself and stop the node taking any new RPC at all. */
+static void conn_set_deadlines(int fd)
+{
+    struct timeval tv = { .tv_sec = RPC_HTTP_SOCKET_TIMEOUT_SEC, .tv_usec = 0 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+}
+
+/* True when nothing this connection could ever say is still coming:
+ * the peer is fully gone (POLLHUP/POLLERR/POLLNVAL), or it is readable
+ * only because it hit end-of-file with no bytes buffered. A half-close
+ * WITH a complete request pending is legitimate HTTP and is NOT a
+ * hang-up — POLLIN plus a peekable byte keeps the connection.
+ * Non-blocking by construction: the peek runs only when poll() has
+ * already said the socket is readable. */
+static bool conn_peer_gone(const struct rpc_conn *c)
+{
+    if (c->fd < 0)
+        return true;
+
+    struct pollfd pfd = { .fd = c->fd, .events = POLLIN, .revents = 0 };
+    int r = poll(&pfd, 1, 0);
+    if (r < 0)
+        return errno != EINTR;   /* a broken poll target is unservable */
+    if (r == 0)
+        return false;            /* connected, still thinking */
+    if (pfd.revents & (POLLHUP | POLLERR | POLLNVAL))
+        return true;
+    if (pfd.revents & POLLIN) {
+        char probe;
+        ssize_t n = recv(c->fd, &probe, 1, MSG_PEEK);
+        if (n == 0)
+            return true;         /* clean EOF, nothing to serve */
+    }
+    return false;
+}
+
+/* Surrender every queued entry the queue is no longer entitled to own
+ * and compact the survivors back into the ring in arrival order.
+ * Returns the number of slots reclaimed.
+ *
+ * Called ONLY from the full-queue branch of enqueue_client(), so it
+ * costs nothing on the happy path and is O(RPC_HTTP_QUEUE_CAP) on a
+ * path that is already degraded. This is the single-owner rule being
+ * enforced, not a background sweep bolted on top of a leak: the queue
+ * owns these fds, and an owner that cannot serve them must release
+ * them. conn_discard() cannot block, so the mutex hold stays bounded.
+ *
+ * Caller holds g_client_queue_mutex. */
+static size_t queue_reclaim_locked(int64_t now_us)
+{
+    struct rpc_conn kept[RPC_HTTP_QUEUE_CAP];
+    size_t nkept = 0;
+    size_t reclaimed = 0;
+    int64_t wait_us = (int64_t)g_client_queue_wait_ms * 1000;
+
+    for (size_t i = 0; i < g_client_queue_count; i++) {
+        struct rpc_conn c =
+            g_client_queue[(g_client_queue_head + i) % RPC_HTTP_QUEUE_CAP];
+
+        if (conn_peer_gone(&c)) {
+            g_client_reclaimed_hangup++;
+            conn_discard(&c);
+            reclaimed++;
+            continue;
+        }
+        if (wait_us > 0 && now_us - c.admitted_us >= wait_us) {
+            g_client_reclaimed_stale++;
+            conn_discard(&c);
+            reclaimed++;
+            continue;
+        }
+        kept[nkept++] = c;
+    }
+
+    if (reclaimed > 0) {
+        for (size_t i = 0; i < nkept; i++)
+            g_client_queue[i] = kept[i];
+        g_client_queue_head = 0;
+        g_client_queue_tail = nkept % RPC_HTTP_QUEUE_CAP;
+        g_client_queue_count = nkept;
+    }
+
+    return reclaimed;
+}
+
 static bool enqueue_client(struct rpc_conn conn)
 {
     bool ok = false;
+    size_t reclaimed = 0;
 
     pthread_mutex_lock(&g_client_queue_mutex);
+    if (g_client_queue_count >= RPC_HTTP_QUEUE_CAP)
+        reclaimed = queue_reclaim_locked(platform_time_monotonic_us());
+
     if (g_client_queue_count < RPC_HTTP_QUEUE_CAP) {
+        conn.admitted_us = platform_time_monotonic_us();
         g_client_queue[g_client_queue_tail] = conn;
         g_client_queue_tail =
             (g_client_queue_tail + 1) % RPC_HTTP_QUEUE_CAP;
         g_client_queue_count++;
+        if (g_client_queue_count > g_client_queue_peak)
+            g_client_queue_peak = g_client_queue_count;
+        g_client_admitted++;
         ok = true;
         pthread_cond_signal(&g_client_queue_cond);
+    } else {
+        /* Genuine saturation: RPC_HTTP_QUEUE_CAP clients are all still
+         * connected and all still inside the residency deadline. The
+         * 503 the caller sends is honest backpressure, and the next
+         * admission after the deadline expires clears it. */
+        g_client_rejected_busy++;
     }
     pthread_mutex_unlock(&g_client_queue_mutex);
+
+    if (reclaimed > 0) {
+        fprintf(stderr,  // obs-ok:helper-context-logged
+                "RPC server: admission queue was full; reclaimed %zu "
+                "abandoned connection(s)\n", reclaimed);
+    }
 
     return ok;
 }
 
+/* Pop the head, or {.fd = -1} when empty. Caller holds
+ * g_client_queue_mutex. One popper for the worker path, the test hook,
+ * and the shutdown drain — the drain used to carry its own copy of
+ * this arithmetic. */
+static struct rpc_conn queue_pop_locked(void)
+{
+    struct rpc_conn conn = { .fd = -1, .ssl = NULL, .admitted_us = 0 };
+
+    if (g_client_queue_count > 0) {
+        conn = g_client_queue[g_client_queue_head];
+        g_client_queue_head =
+            (g_client_queue_head + 1) % RPC_HTTP_QUEUE_CAP;
+        g_client_queue_count--;
+    }
+    return conn;
+}
+
 static struct rpc_conn dequeue_client(void)
 {
-    struct rpc_conn conn = { .fd = -1, .ssl = NULL };
+    struct rpc_conn conn;
 
     pthread_mutex_lock(&g_client_queue_mutex);
     /* Timed wait so a worker never blocks past a shutdown that skipped
@@ -345,28 +592,66 @@ static struct rpc_conn dequeue_client(void)
                                &deadline);
     }
 
-    if (g_client_queue_count > 0) {
-        conn = g_client_queue[g_client_queue_head];
-        g_client_queue_head =
-            (g_client_queue_head + 1) % RPC_HTTP_QUEUE_CAP;
-        g_client_queue_count--;
-    }
+    conn = queue_pop_locked();
     pthread_mutex_unlock(&g_client_queue_mutex);
 
     return conn;
 }
 
-static void conn_close(struct rpc_conn *c)
+/* ── Admission-queue test surface ──────────────────────────────────
+ *
+ * Same convention as rpc_http_test_build_response_envelope above:
+ * production and the regression test drive the EXACT same admission
+ * path, so the single-owner invariant is proved on the real code
+ * rather than on a copy of it. */
+
+bool rpc_http_test_queue_admit(int fd)
 {
-    if (c->ssl) {
-        SSL_shutdown(c->ssl);
-        SSL_free(c->ssl);
-        c->ssl = NULL;
+    struct rpc_conn conn = { .fd = fd, .ssl = NULL, .admitted_us = 0 };
+    return enqueue_client(conn);
+}
+
+int rpc_http_test_queue_take(void)
+{
+    /* Non-blocking on purpose: dequeue_client() would park for 2 s on
+     * an empty queue and a test must never depend on that. */
+    pthread_mutex_lock(&g_client_queue_mutex);
+    struct rpc_conn conn = queue_pop_locked();
+    pthread_mutex_unlock(&g_client_queue_mutex);
+    return conn.fd;
+}
+
+void rpc_http_test_queue_reset(int wait_ms)
+{
+    pthread_mutex_lock(&g_client_queue_mutex);
+    while (g_client_queue_count > 0) {
+        struct rpc_conn c = queue_pop_locked();
+        conn_discard(&c);
     }
-    if (c->fd >= 0) {
-        close(c->fd);
-        c->fd = -1;
-    }
+    g_client_queue_head = 0;
+    g_client_queue_tail = 0;
+    g_client_queue_peak = 0;
+    g_client_admitted = 0;
+    g_client_reclaimed_hangup = 0;
+    g_client_reclaimed_stale = 0;
+    g_client_rejected_busy = 0;
+    g_client_queue_wait_ms = wait_ms >= 0 ? wait_ms
+                                          : RPC_HTTP_QUEUE_WAIT_MS_DEFAULT;
+    pthread_mutex_unlock(&g_client_queue_mutex);
+}
+
+void rpc_http_test_queue_stats(struct rpc_http_queue_stats *out)
+{
+    if (!out) return;
+    pthread_mutex_lock(&g_client_queue_mutex);
+    out->capacity          = RPC_HTTP_QUEUE_CAP;
+    out->depth             = g_client_queue_count;
+    out->peak_depth        = g_client_queue_peak;
+    out->admitted          = g_client_admitted;
+    out->reclaimed_hangup  = g_client_reclaimed_hangup;
+    out->reclaimed_stale   = g_client_reclaimed_stale;
+    out->rejected_busy     = g_client_rejected_busy;
+    pthread_mutex_unlock(&g_client_queue_mutex);
 }
 
 /* Two-pass serialization of a JSON-RPC response. json_write() returns
@@ -434,12 +719,26 @@ static void handle_client(struct rpc_conn conn)
 {
     struct trace_span *rpc_span = trace_start("rpc.dispatch");
     int client_fd = conn.fd;
+    /* Ownership hand-off flag. Set only where another module takes the
+     * fd; done: is then the SINGLE exit that closes what we still own.
+     * The /events upgrade used to `return` past done: outright, which
+     * also leaked the rpc_span trace_start() allocated above. */
+    bool fd_transferred = false;
+    /* Declared before the first `goto done` so the label never reads an
+     * indeterminate slot id. -1 means table full or module disabled;
+     * either way we proceed without tracking. */
+    int tmo_slot = -1;
 
-    /* Set socket timeout to prevent slowloris attacks.
-     * 5 seconds to send complete request — generous for local RPC,
-     * fatal for attackers trying to hold connections open. */
-    struct timeval tv = { .tv_sec = 5, .tv_usec = 0 };
-    setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    /* Bound both directions before touching the wire: slowloris on the
+     * read side, a client that stops reading on the write side. */
+    conn_set_deadlines(client_fd);
+
+    /* Cheapest possible drop for a client that already hung up. It
+     * costs one poll(), and it keeps a dead peer from consuming a
+     * middleware decision and one of rpc_timeout's 128 slots on its way
+     * to being closed anyway. */
+    if (conn_peer_gone(&conn))
+        goto done;
 
     /* Look up the source IP via getpeername() so we can drive the
      * middleware (rate limit + ban check) without changing the queue
@@ -457,9 +756,7 @@ static void handle_client(struct rpc_conn conn)
     /* Register this request with the timeout watchdog. The watchdog
      * will shutdown() our fd if the dispatch phase runs past
      * ZCL_RPC_TIMEOUT_MS — our in-flight read/write then fails and
-     * we unwind cleanly. slot == -1 means table full or module
-     * disabled; either way we just proceed without tracking. */
-    int tmo_slot = -1;
+     * we unwind cleanly. */
     if (g_rpc_timeout_active) {
         tmo_slot = rpc_timeout_register(&g_rpc_timeout, client_fd, client_ip_be);
     }
@@ -623,10 +920,13 @@ static void handle_client(struct rpc_conn conn)
             }
             const char *query = strchr(path, '?');
             if (ws_events_upgrade(client_fd, path, ws_key, query)) {
-                /* fd is now owned by ws_events — do NOT close it */
-                if (tmo_slot >= 0)
-                    rpc_timeout_unregister(&g_rpc_timeout, tmo_slot);
-                return;  /* skip done: label which closes fd */
+                /* Ownership moves to ws_events (which polls for
+                 * POLLHUP and reaps idle clients itself). Record the
+                 * hand-off and fall through to the ONE exit — the old
+                 * bare `return` skipped trace_end() and leaked the
+                 * rpc.dispatch span on every successful upgrade. */
+                fd_transferred = true;
+                goto done;
             }
             /* Upgrade failed — fall through to 503 */
             char errbuf[256];
@@ -767,12 +1067,15 @@ static void handle_client(struct rpc_conn conn)
     json_free(&response);
     json_request_free(&req);
 
+/* THE single exit. Every path out of this function lands here, so the
+ * worker's ownership of the connection ends in exactly one place. */
 done:
     if (tmo_slot >= 0) {
         rpc_timeout_unregister(&g_rpc_timeout, tmo_slot);
     }
     trace_end(rpc_span);
-    conn_close(&conn);
+    if (!fd_transferred)
+        conn_close(&conn);
 }
 
 static void *rpc_worker_thread_fn(void *arg)
@@ -804,15 +1107,19 @@ static void *listen_thread_fn(void *arg)
                 perror("accept");
             continue;
         }
-        struct rpc_conn conn = { .fd = client_fd, .ssl = NULL };
+        struct rpc_conn conn = { .fd = client_fd, .ssl = NULL,
+                                 .admitted_us = 0 };
         if (!enqueue_client(conn)) {
-            struct rpc_conn tmp = { .fd = client_fd, .ssl = NULL };
+            /* Bound the 503 write: this runs ON THE ACCEPT LOOP, so a
+             * client that never reads its rejection would otherwise
+             * stop the node accepting any RPC at all. */
+            conn_set_deadlines(client_fd);
             char errbuf[256];
             size_t elen = json_rpc_error_response(errbuf, sizeof(errbuf),
                 RPC_INTERNAL_ERROR, "RPC server busy", NULL, NULL);
-            send_response(&tmp, 503, "Service Unavailable",
+            send_response(&conn, 503, "Service Unavailable",
                           errbuf, elen);
-            close(client_fd);
+            conn_close(&conn);
         }
     }
     return NULL;
@@ -860,7 +1167,8 @@ static void *tls_listen_thread_fn(void *arg)
             continue;
         }
 
-        struct rpc_conn conn = { .fd = client_fd, .ssl = ssl };
+        struct rpc_conn conn = { .fd = client_fd, .ssl = ssl,
+                                 .admitted_us = 0 };
         if (!enqueue_client(conn)) {
             char errbuf[256];
             size_t elen = json_rpc_error_response(errbuf, sizeof(errbuf),
@@ -986,6 +1294,23 @@ bool rpc_http_start(const struct rpc_table *table, uint16_t port,
     g_client_queue_head = 0;
     g_client_queue_tail = 0;
     g_client_queue_count = 0;
+    g_client_queue_peak = 0;
+    g_client_admitted = 0;
+    g_client_reclaimed_hangup = 0;
+    g_client_reclaimed_stale = 0;
+    g_client_rejected_busy = 0;
+    /* Admission-queue residency deadline. 0 keeps entries until their
+     * peer hangs up; any positive value is the ceiling on how long the
+     * front door can stay saturated. */
+    g_client_queue_wait_ms = RPC_HTTP_QUEUE_WAIT_MS_DEFAULT;
+    {
+        const char *qw = getenv("ZCL_RPC_QUEUE_WAIT_MS");
+        if (qw && *qw) {
+            int v = atoi(qw);
+            if (v >= 0)
+                g_client_queue_wait_ms = v;
+        }
+    }
     g_table = table;
     g_rpc_user[0] = '\0';
     g_rpc_password[0] = '\0';
@@ -1290,11 +1615,8 @@ void rpc_http_stop(void)
 
     pthread_mutex_lock(&g_client_queue_mutex);
     while (g_client_queue_count > 0) {
-        struct rpc_conn c = g_client_queue[g_client_queue_head];
-        g_client_queue_head =
-            (g_client_queue_head + 1) % RPC_HTTP_QUEUE_CAP;
-        g_client_queue_count--;
-        conn_close(&c);
+        struct rpc_conn c = queue_pop_locked();
+        conn_discard(&c);
     }
     g_client_queue_head = 0;
     g_client_queue_tail = 0;

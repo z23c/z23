@@ -1501,6 +1501,8 @@ int main(int argc, char **argv)
     failures += test_utxo_audit();
     failures += test_utxo_parity_service();
     failures += test_rpc_error_envelope();
+    { extern int test_rpc_frontdoor_slots(void);
+      failures += test_rpc_frontdoor_slots(); }
     failures += test_tx_property();
     failures += test_workpool();
     failures += test_app_context();
