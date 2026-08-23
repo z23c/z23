@@ -232,7 +232,13 @@ void debug_bundle_register_stall_observer(void);
  * false = the drain did NOT complete: a capture is still live and every
  * dumper dependency it reads MUST be retained (never freed, never detached)
  * by the caller, which then continues to its durability stages. It is never a
- * reason to abandon durability. */
+ * reason to abandon durability.
+ *
+ * The distinction the caller must keep: durability WORK (coins flush, PRAGMA
+ * synchronous=FULL, WAL checkpoint) is unconditional and never waits on a
+ * capture; only the CLOSE/FREE of a handle a dumper can still read --
+ * connman, the coins views, and the node.db write handle -- is gated on a
+ * true return here. */
 bool debug_bundle_shutdown(void);
 
 /* Test seam for the bounded drain above: override the drain budget in

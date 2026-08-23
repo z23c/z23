@@ -134,8 +134,18 @@ static bool shutdown_quiesce_network_and_flush_coins(struct boot_svc_ctx *svc,
 
     /* Final flush in case message thread connected blocks before exit. */
     bool final_flush_ok = shutdown_flush_coins_to_sqlite(svc, "final");
-    coins_view_cache_free(svc->coins_tip);
-    coins_view_sqlite_close(svc->coins_sqlite);
+    /* The FLUSH above is unconditional -- durability never waits on a
+     * diagnostics capture. The CLOSE below is not: an undrained capture is
+     * still an owned reader of these views, exactly as it is of connman.
+     * Closing under a live reader is the use-after-free this whole branch
+     * exists to avoid. */
+    if (diagnostics_drained) {
+        coins_view_cache_free(svc->coins_tip);
+        coins_view_sqlite_close(svc->coins_sqlite);
+    } else {
+        printf("[shutdown] coins views retained: an undrained diagnostics "
+               "capture still owns them\n");
+    }
 
     /* Close cached block file handles */
     disk_block_io_close_cache();
@@ -212,7 +222,8 @@ static void shutdown_stop_runtime_and_drain_workers(struct boot_svc_ctx *svc)
     printf("[shutdown] runtime consumers drained; DB provider retained\n");
 }
 
-static bool shutdown_persist_runtime_state(struct boot_svc_ctx *svc)
+static bool shutdown_persist_runtime_state(struct boot_svc_ctx *svc,
+                                          bool diagnostics_drained)
 {
     bool ok = true;
 
@@ -271,8 +282,22 @@ static bool shutdown_persist_runtime_state(struct boot_svc_ctx *svc)
             fprintf(stderr, "[shutdown] WAL checkpoint failed\n");
             ok = false;
         }
-        if (!db_service_close_write(svc->db_service))
-            ok = false;
+        /* Flush, PRAGMA and checkpoint above are unconditional: they ARE
+         * durability. Only the close is gated -- app_runtime_node_db()
+         * hands this same handle to diagnostics dumpers, and an undrained
+         * capture can still be inside one (the omniscience dumper reaches
+         * node_db via db_parity_sample_recent). node_db_close() flips
+         * ndb->open and calls sqlite3_close() with no lock, so closing here
+         * races that reader. Before this stage was allowed to continue past
+         * a failed drain, _exit(1) made the window unreachable; now it is
+         * reachable, so it must be guarded. */
+        if (diagnostics_drained) {
+            if (!db_service_close_write(svc->db_service))
+                ok = false;
+        } else {
+            printf("[shutdown] node.db handle retained: an undrained "
+                   "diagnostics capture may still be reading it\n");
+        }
     }
     printf("[shutdown] stopping DB provider kernel\n");
     boot_stop_db_service_kernel();
@@ -423,7 +448,7 @@ void app_shutdown_svc(struct boot_svc_ctx *svc)
      * save — the slow-after-a-long-fold stage that used to breach the 90s
      * cliff. Durability-critical: never skipped, only graced. */
     shutdown_stagewatch_enter("runtime-persist", 45, true, true);
-    if (!shutdown_persist_runtime_state(svc))
+    if (!shutdown_persist_runtime_state(svc, diagnostics_drained))
         durability_ok = false;
 
     if (!durability_ok) {
