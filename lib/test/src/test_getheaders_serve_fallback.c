@@ -65,6 +65,8 @@
 #include "mining/miner.h"
 #include "models/block.h"
 #include "models/database.h"
+#include "net/header_serve_repair.h"
+#include "net/net.h"
 #include "net/msg_internal.h"
 #include "net/msgprocessor.h"
 #include "primitives/block.h"
@@ -161,6 +163,30 @@ static struct block_index *gsf_seed_index(struct main_state *ms,
 
 static struct net_manager g_gsf_nm;
 
+static void gsf_setup_outbound_peer(struct p2p_node *node, int32_t height)
+{
+    memset(node, 0, sizeof(*node));
+    node->socket = ZCL_INVALID_SOCKET;
+    node->starting_height = height;
+    snprintf(node->addr_name, sizeof(node->addr_name),
+             "203.0.113.23:8033");
+    atomic_store(&node->state, PEER_HANDSHAKE_COMPLETE);
+}
+
+static void gsf_drain_send_queue(struct p2p_node *node)
+{
+    struct send_segment *seg = node->send_head;
+    while (seg) {
+        struct send_segment *next = seg->next;
+        send_segment_free(seg);
+        seg = next;
+    }
+    node->send_head = NULL;
+    node->send_tail = NULL;
+    node->send_size = 0;
+    node->send_offset = 0;
+}
+
 int test_getheaders_serve_fallback(void);
 int test_getheaders_serve_fallback(void)
 {
@@ -193,9 +219,9 @@ int test_getheaders_serve_fallback(void)
     runtime.db_service = &dbsvc;
     app_runtime_set_current(&runtime);
 
-    /* Mine a 3-header chain g(0) -> A(1) -> B(2). */
-    struct block_header hg, ha, hb;
-    struct uint256 hash_g, hash_a, hash_b;
+    /* Mine a 4-header chain g(0) -> A(1) -> B(2) -> D(3). */
+    struct block_header hg, ha, hb, hd;
+    struct uint256 hash_g, hash_a, hash_b, hash_d;
     struct uint256 null_hash;
     uint256_set_null(&null_hash);
     GSF_CHECK("mine g", gsf_mine_header(&hg, 0, &null_hash, cp));
@@ -204,14 +230,17 @@ int test_getheaders_serve_fallback(void)
     block_header_get_hash(&ha, &hash_a);
     GSF_CHECK("mine B", gsf_mine_header(&hb, 2, &hash_a, cp));
     block_header_get_hash(&hb, &hash_b);
+    GSF_CHECK("mine D", gsf_mine_header(&hd, 3, &hash_b, cp));
+    block_header_get_hash(&hd, &hash_d);
 
     struct main_state ms;
     main_state_init(&ms);
     struct block_index *bi_g = gsf_seed_index(&ms, &hg, &hash_g, 0, NULL);
     struct block_index *bi_a = gsf_seed_index(&ms, &ha, &hash_a, 1, bi_g);
     struct block_index *bi_b = gsf_seed_index(&ms, &hb, &hash_b, 2, bi_a);
-    GSF_CHECK("index chain seeded", bi_g && bi_a && bi_b);
-    ms.pindex_best_header = bi_b;
+    struct block_index *bi_d = gsf_seed_index(&ms, &hd, &hash_d, 3, bi_b);
+    GSF_CHECK("index chain seeded", bi_g && bi_a && bi_b && bi_d);
+    ms.pindex_best_header = bi_d;
 
     /* Only B gets a node.db row: A models the entry whose store is gone. */
     GSF_CHECK("node.db row for B stored",
@@ -268,6 +297,29 @@ int test_getheaders_serve_fallback(void)
                   "mismatch",
                   !ok && getheaders_serve_refusals_no_header_bytes() ==
                              nb_before + 1);
+        GSF_CHECK("missing local solution arms bounded header-only repair",
+                  !ok && header_serve_repair_test_armed() &&
+                  header_serve_repair_wants(bi_a));
+
+        struct p2p_node peer;
+        gsf_setup_outbound_peer(&peer, bi_d->nHeight);
+        header_serve_repair_maybe_send(&mp, &peer, 1);
+        GSF_CHECK("first peer publishes one exact bounded repair span",
+                  peer.send_size > 0 &&
+                  header_serve_repair_test_expected_count() == 3);
+        GSF_CHECK("verified span member records partial progress",
+                  getheaders_cache_repair_candidate(&mp, bi_b, &hb) &&
+                  header_serve_repair_test_cached_count() == 1 &&
+                  header_serve_repair_test_armed());
+        struct p2p_node retry_peer;
+        gsf_setup_outbound_peer(&retry_peer, bi_d->nHeight);
+        header_serve_repair_maybe_send(&mp, &retry_peer, 7);
+        GSF_CHECK("retry preserves the immutable span and partial progress",
+                  retry_peer.send_size > 0 &&
+                  header_serve_repair_test_expected_count() == 3 &&
+                  header_serve_repair_test_cached_count() == 1);
+        gsf_drain_send_queue(&peer);
+        gsf_drain_send_queue(&retry_peer);
     }
 
     /* 3. The successor walk ADVANCES: from g, past unservable A, to
@@ -282,6 +334,7 @@ int test_getheaders_serve_fallback(void)
         GSF_CHECK("walk skipped entry is still not FAILED-marked",
                   next == bi_b && bi_a->nStatus == BLOCK_VALID_TREE);
     }
+    header_serve_repair_test_reset();
 
     /* 4. Snapshot reducers already retain many complete, hash-bound headers
      *    in header_solution_repair even when both the old body and node.db
@@ -307,7 +360,35 @@ int test_getheaders_serve_fallback(void)
                   ok && bi_a->nSolutionSize == ha.nSolutionSize);
     }
 
-    /* 5. The healed entry serves again off the in-memory hot path, still
+    /* 5. No local store retains D. A refusal arms one header-only peer fetch;
+     *    its response remains inert until the serve path independently
+     *    hash-binds and full-PoW verifies it. Successful verification heals D
+     *    and completes the bounded flight without downloading a block body. */
+    {
+        struct block_header out;
+        block_header_init(&out);
+        bool missed = !getheaders_index_header_servable(&mp, bi_d, &out);
+        GSF_CHECK("storeless D arms header-only peer repair",
+                  missed && header_serve_repair_test_armed() &&
+                  header_serve_repair_wants(bi_d));
+        struct block_header forged_d = hd;
+        forged_d.nSolution[0] ^= 0x01;
+        bool forged_cached =
+            getheaders_cache_repair_candidate(&mp, bi_d, &forged_d);
+        GSF_CHECK("wrong-hash peer repair candidate remains inert",
+                  !forged_cached && header_serve_repair_test_armed() &&
+                  bi_d->nSolutionSize == 0);
+        bool cached = getheaders_cache_repair_candidate(&mp, bi_d, &hd);
+        GSF_CHECK("peer repair candidate passes independent full verification",
+                  cached);
+        GSF_CHECK("verified peer repair completes its bounded flight",
+                  cached && !header_serve_repair_test_armed());
+        block_header_init(&out);
+        GSF_CHECK("verified peer repair heals subsequent serving",
+                  cached && getheaders_index_header_servable(&mp, bi_d, &out));
+    }
+
+    /* 6. The healed entry serves again off the in-memory hot path, still
      *    hash-bound and still carrying the real solution — no re-read of
      *    the store needed, and the same accepted header comes back. */
     {
@@ -325,14 +406,14 @@ int test_getheaders_serve_fallback(void)
                          hb.nSolutionSize) == 0);
     }
 
-    /* 6. Serve-path solution cache accounting is wired: healing A and B pins
+    /* 7. Serve-path solution cache accounting is wired: healing A, B, and D pins
      *    their solutions, and it is bounded (never unbounded growth
      *    driven by an unauthenticated peer's header walk). */
     GSF_CHECK("healed solution is counted against the serve cache budget",
               getheaders_solution_cache_bytes() >=
-              ha.nSolutionSize + hb.nSolutionSize);
+              ha.nSolutionSize + hb.nSolutionSize + hd.nSolutionSize);
 
-    /* 7. A header that is internally VALID but is filed under the WRONG
+    /* 8. A header that is internally VALID but is filed under the WRONG
      *    hash must never be served. Entry X is keyed by a hash that is not
      *    B's, yet reassembles byte-for-byte into B's header — same prev
      *    (pprev = A), same fields, same real Equihash solution. So every
@@ -390,11 +471,13 @@ int test_getheaders_serve_fallback(void)
                           "refused", !ok);
                 GSF_CHECK("that refusal is still not a validity verdict",
                           !ok && bi_x->nStatus == BLOCK_VALID_TREE);
+                GSF_CHECK("off-authority refusal cannot pin peer repair",
+                          !header_serve_repair_test_armed());
             }
         }
     }
 
-    /* 8. F1 REGRESSION — a hash-bound header marked BLOCK_VALID_TREE whose
+    /* 9. F1 REGRESSION — a hash-bound header marked BLOCK_VALID_TREE whose
      *    Equihash solution is GARBAGE must still be refused.
      *
      *    This is the whole reason the serve path re-verifies Equihash
@@ -511,7 +594,7 @@ int test_getheaders_serve_fallback(void)
         }
     }
 
-    /* 9. F3 — the serve-path solution cache is BOUNDED, not merely
+    /* 10. F3 — the serve-path solution cache is BOUNDED, not merely
      *    counted. 64 MiB mirrors HEADERS_SOLUTION_CACHE_MAX_BYTES in
      *    lib/net/src/msg_headers.c; that constant is the whole worst case
      *    an unauthenticated post-handshake peer can drive this cache to,
@@ -527,6 +610,7 @@ int test_getheaders_serve_fallback(void)
     db_service_stop(&dbsvc);
     node_db_close(&ndb);
     progress_store_close();
+    header_serve_repair_test_reset();
     main_state_free(&ms);
     test_rm_rf(dir);
     chain_params_select(CHAIN_MAIN);

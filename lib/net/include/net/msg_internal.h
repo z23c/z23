@@ -84,6 +84,9 @@ bool getheaders_try_append_header(struct byte_stream *body,
 bool getheaders_index_header_servable(struct msg_processor *mp,
                                       struct block_index *iter,
                                       struct block_header *hdr_out);
+bool getheaders_cache_repair_candidate(struct msg_processor *mp,
+                                       struct block_index *iter,
+                                       const struct block_header *hdr);
 struct block_index *getheaders_next_servable_successor(
     struct msg_processor *mp,
     struct block_index *parent,
