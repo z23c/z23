@@ -1,10 +1,11 @@
 BOX=node4
 INSTALL=pass
-SECS=2
+SECS=3
 SHA256SUMS=build/release/z23-x86_64-linux/SHA256SUMS
 ARTIFACT_SHA256=a61a2f8af277c5ee1c5ec91f35e4daa6703d3ed7ff87f6a2341885c6246a566f
-ONION_RELAY=pass
-CLEARNET_RELAY=pass
-OBSERVED_AT=2026-08-23T01:06:00Z
-GAPS=existing_hub_port_tcp_refused
-DETAIL=INSTALL: SHA256SUMS-verified stripped x86_64-linux z23 in 2s; PATH-only z23 status answered. ONION_RELAY: addnode node1 onion:8055, VERSION/VERACK, syncing_headers, peer startingheight 3225766, live beside clearnet. CLEARNET_RELAY: syncing_headers on listening clearnet P2P, startingheight 3225765. Production unit pid unchanged.
+RUNNING_SOURCE_ID=84e72a99812ca1f6ad75a472badf7c3a55d12edd198aa9a0ca57e0bd788ca836
+ONION_RELAY=fail
+CLEARNET_RELAY=fail
+OBSERVED_AT=2026-08-23T01:19:30Z
+GAPS=cannot_mine_mainnet,onion_ibd_from_genesis_headers_not_admitted,clearnet_ibd_incomplete
+DETAIL=INSTALL: SHA256SUMS installer 3s, PATH-only z23 status answered. Mine refused: isolated and node1 are mainnet. Onion-only: one outbound onion:8055 VERSION/VERACK syncing_headers startingheight 3225775, zero clearnet peers, local headers/blocks stayed 0. Clearnet-only: one outbound clearnet P2P VERSION/VERACK, zero onion peers, headers 0->50724 blocks 0->192 vs peer 3225779, not at tip. Production unit pid unchanged.
