@@ -4,8 +4,9 @@
 #   tools/scripts/onion_pair_watch_loop.sh         # until killed
 #   tools/scripts/onion_pair_watch_loop.sh --once  # one cycle
 #
-# Each cycle: onion_pair_watch.sh, compare origin/main mesh.status against
-# the latest pair_probe.jsonl line, and push pair_probe.jsonl when it grew.
+# Each cycle: onion_pair_watch.sh and compare origin/main mesh.status against
+# the latest host-local pair_probe.jsonl line. Telemetry never commits or
+# pushes source history.
 # flock-serialized so a timer and a long-lived loop cannot overlap.
 # Never touches ~/.zclassic-c23. No Python.
 
@@ -15,9 +16,9 @@ umask 077
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
 WATCH="$REPO_ROOT/tools/scripts/onion_pair_watch.sh"
-LEDGER="$REPO_ROOT/deploy/devfleet/pair_probe.jsonl"
 MESH_REL="deploy/devfleet/mesh.status"
 STATE_DIR="${PAIR_WATCH_STATE_DIR:-$HOME/.local/state/zclassic23-fleetsync}"
+LEDGER="${PAIR_PROBE_FILE:-$STATE_DIR/pair_probe.jsonl}"
 LOCK="$STATE_DIR/node3.pair.lock"
 LOG="$STATE_DIR/pair_watch.log"
 MESH_LAST="$STATE_DIR/mesh.last"
@@ -98,53 +99,17 @@ crosscheck_mesh() {
     rm -f "$tmp"
 }
 
-push_ledger() {
-    local other
-    cd "$REPO_ROOT"
-    git fetch origin main --quiet || {
-        log "push skipped: fetch failed"
-        return 0
-    }
-    other=$(git status --porcelain --untracked-files=no | grep -v 'deploy/devfleet/pair_probe.jsonl' || true)
-    if [ -n "$other" ]; then
-        log "push skipped: unrelated dirty work"
-        return 0
-    fi
-    if [ -z "$(git diff --name-only -- deploy/devfleet/pair_probe.jsonl)$(git diff --cached --name-only -- deploy/devfleet/pair_probe.jsonl)" ]; then
-        return 0
-    fi
-    git add deploy/devfleet/pair_probe.jsonl
-    git commit --quiet -m "devfleet: node3 pair_probe heartbeat"
-    git rebase origin/main --quiet || {
-        git rebase --abort >/dev/null 2>&1 || true
-        log "push skipped: rebase failed"
-        return 0
-    }
-    if git push --no-verify origin main --quiet; then
-        log "pushed pair_probe streak=$(trailing_paired)"
-    else
-        log "push failed; commit kept"
-    fi
-}
-
 cycle() {
-    local base lines_before lines_after
+    local base
     cd "$REPO_ROOT"
     git fetch origin main --quiet || true
     base=$(pick_port_base)
-    lines_before=0
-    [ -f "$LEDGER" ] && lines_before=$(wc -l <"$LEDGER" | tr -d ' ')
     log "cycle start port_base=$base streak=$(trailing_paired)"
     set +e
-    PAIR_WATCH_PORT_BASE="$base" "$WATCH"
+    PAIR_PROBE_FILE="$LEDGER" PAIR_WATCH_PORT_BASE="$base" "$WATCH"
     set -e
-    lines_after=0
-    [ -f "$LEDGER" ] && lines_after=$(wc -l <"$LEDGER" | tr -d ' ')
     log "cycle done streak=$(trailing_paired) line=$(last_pair_line)"
     crosscheck_mesh
-    if [ "$lines_after" -gt "$lines_before" ]; then
-        push_ledger
-    fi
 }
 
 if [ "$ONCE" = 1 ]; then

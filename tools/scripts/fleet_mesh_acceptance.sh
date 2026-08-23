@@ -7,7 +7,7 @@
 #   * self-dials the hub onion from a fresh, isolated mainnet instance;
 #   * asks the isolated node to dial every missing peer by its onion endpoint;
 #   * requires an ACTIVE peer (VERSION/VERACK complete) at tip-height parity;
-#   * flags each publication's SOURCE_SHA freshness against the observed main;
+#   * checks each publication's mandatory GIT_SHA against observed main;
 #   * writes and publishes deploy/devfleet/mesh.status.
 #
 # Two full observations separated by a real watcher interval set HOLD=pass.
@@ -21,6 +21,8 @@
 #   FLEET_MESH_DIAL_TIMEOUT=45  bounded seconds to observe a handshake
 #   FLEET_MESH_SELF_DIAL_TIMEOUT=120  total fresh-probe budget
 #   FLEET_MESH_SELF_DIAL_PORT_BASE=39250  isolated 39xxx port quad
+#   FLEET_MESH_STATUS_FILE=/tmp/mesh.status  local-mode test output
+#   FLEET_MESH_FIRST_FULL_FILE=/tmp/mesh.first-4of4.status  local-mode evidence
 
 set -euo pipefail
 
@@ -37,19 +39,26 @@ fi
 . "$ENV_FILE"
 
 EXPECTED_NODES=4
-GIT_MODE="${FLEET_MESH_GIT_MODE:-publish}"
+GIT_MODE="${FLEET_MESH_GIT_MODE:-local}"
 DIAL_TIMEOUT="${FLEET_MESH_DIAL_TIMEOUT:-45}"
 SELF_DIAL_TIMEOUT="${FLEET_MESH_SELF_DIAL_TIMEOUT:-120}"
 SELF_DIAL_PORT_BASE="${FLEET_MESH_SELF_DIAL_PORT_BASE:-39250}"
 MIN_PASS_INTERVAL="${FLEET_MESH_MIN_PASS_INTERVAL:-240}"
 STATE_DIR="$HOME/.local/state/zclassic23-fleetsync"
 STATUS_REL="deploy/devfleet/mesh.status"
-STATUS_FILE="$REPO_DIR/$STATUS_REL"
+STATUS_FILE="${FLEET_MESH_STATUS_FILE:-$REPO_DIR/$STATUS_REL}"
+FIRST_FULL_REL="deploy/devfleet/mesh.first-4of4.status"
+FIRST_FULL_FILE="${FLEET_MESH_FIRST_FULL_FILE:-$REPO_DIR/$FIRST_FULL_REL}"
 ZCL_CLI="${FLEET_MESH_CLI:-$REPO_DIR/build/bin/z23}"
 JSONQ="${FLEET_MESH_JSONQ:-$REPO_DIR/build/bin/jsonq}"
 NODE_BIN="${FLEET_MESH_NODE_BIN:-$REPO_DIR/build/bin/zclassic23}"
 RPC_BIN="${FLEET_MESH_RPC_BIN:-$REPO_DIR/build/bin/zcl-rpc}"
 ONION_BASE_COMMIT="355808b13b704624927d9c997a1d5677f17486f6"
+
+# shellcheck source=tools/scripts/fleet_source_status.sh
+. "$REPO_DIR/tools/scripts/fleet_source_status.sh"
+# shellcheck source=tools/scripts/fleet_mesh_evidence.sh
+. "$REPO_DIR/tools/scripts/fleet_mesh_evidence.sh"
 
 case "$BOX" in
     node1|node2|node3|node4) ;;
@@ -59,6 +68,12 @@ case "$GIT_MODE" in
     publish|local) ;;
     *) echo "fleet-mesh: invalid FLEET_MESH_GIT_MODE: $GIT_MODE" >&2; exit 2 ;;
 esac
+if [ "$GIT_MODE" = publish ] &&
+   { [ "$STATUS_FILE" != "$REPO_DIR/$STATUS_REL" ] ||
+     [ "$FIRST_FULL_FILE" != "$REPO_DIR/$FIRST_FULL_REL" ]; }; then
+    echo "fleet-mesh: output overrides are local-mode only" >&2
+    exit 2
+fi
 case "$DIAL_TIMEOUT:$SELF_DIAL_TIMEOUT:$SELF_DIAL_PORT_BASE:$MIN_PASS_INTERVAL" in
     *[!0-9:]*|:*|*:) echo "fleet-mesh: timeout/port values must be unsigned integers" >&2; exit 2 ;;
 esac
@@ -118,7 +133,10 @@ tracked_dirty_except_status() {
     local path
     while IFS= read -r path; do
         [ -z "$path" ] && continue
-        [ "$path" = "$STATUS_REL" ] || return 0
+        case "$path" in
+            "$STATUS_REL"|"$FIRST_FULL_REL") ;;
+            *) return 0 ;;
+        esac
     done < <({ git diff --name-only; git diff --cached --name-only; } | sort -u)
     return 1
 }
@@ -130,7 +148,7 @@ commits_owned_by_fleet_control() {
         [ -z "$path" ] && continue
         seen=1
         case "$path" in
-            "$STATUS_REL"|"deploy/devfleet/$BOX.sync") ;;
+            "$STATUS_REL"|"$FIRST_FULL_REL"|"deploy/devfleet/$BOX.sync") ;;
             *) return 1 ;;
         esac
     done <<< "$changed"
@@ -142,9 +160,9 @@ sync_main() {
         log "REFUSED source_sync: tracked checkout work is not mesh.status"
         return 1
     fi
-    if [ -n "$(git diff --name-only -- "$STATUS_REL")" ] ||
-       [ -n "$(git diff --cached --name-only -- "$STATUS_REL")" ]; then
-        log "REFUSED source_sync: prior mesh.status write is uncommitted"
+    if [ -n "$(git diff --name-only -- "$STATUS_REL" "$FIRST_FULL_REL")" ] ||
+       [ -n "$(git diff --cached --name-only -- "$STATUS_REL" "$FIRST_FULL_REL")" ]; then
+        log "REFUSED source_sync: prior mesh evidence write is uncommitted"
         return 1
     fi
 
@@ -234,8 +252,8 @@ probe_peer_row() { peer_row_from probe_cli "$1"; }
 # cannot affect the long-running referee.
 fresh_self_dial() (
     set -euo pipefail
-    local endpoint="$1" start deadline status bootstrap add_out add_error
-    local row state version elapsed
+    local endpoint="$1" start deadline status dial_ready descriptor_ready
+    local add_out add_error row state version elapsed dial_ready_elapsed
 
     ISO_KIND=fleet-selfdial
     ISO_PORT_BASE="$SELF_DIAL_PORT_BASE"
@@ -272,20 +290,27 @@ fresh_self_dial() (
         probe_finish 1 self_dial_rpc_not_ready
     fi
 
-    bootstrap="absent"
+    dial_ready=false
+    descriptor_ready=false
+    dial_ready_elapsed=0
     while [ "$(date +%s)" -lt "$deadline" ]; do
         if ! kill -0 "$ISO_NODE_PID" 2>/dev/null; then
             probe_finish 1 self_dial_probe_exited_during_tor_bootstrap
         fi
         status="$(probe_cli core network onion status 2>/dev/null || true)"
-        bootstrap="$(json_get "$status" data.bootstrap_state)"
-        [ -z "$bootstrap" ] && bootstrap="$(json_get "$status" bootstrap_state)"
-        [ "$bootstrap" = ready ] && break
+        dial_ready="$(json_get "$status" data.dial_ready)"
+        [ -n "$dial_ready" ] || dial_ready="$(json_get "$status" dial_ready)"
+        descriptor_ready="$(json_get "$status" data.tor_ready)"
+        [ -n "$descriptor_ready" ] || \
+            descriptor_ready="$(json_get "$status" tor_ready)"
+        if [ "$dial_ready" = true ]; then
+            dial_ready_elapsed=$(( $(date +%s) - start ))
+            break
+        fi
         sleep 1
     done
-    if [ "$bootstrap" != ready ]; then
-        probe_finish 1 \
-            "self_dial_tor_not_ready:bootstrap=${bootstrap:-absent}"
+    if [ "$dial_ready" != true ]; then
+        probe_finish 1 "self_dial_tor_dial_not_ready"
     fi
 
     add_out="$(iso_rpc addnode "\"$endpoint\"" '"add"' 2>/dev/null || true)"
@@ -314,7 +339,7 @@ fresh_self_dial() (
         if [[ "$version" =~ ^[1-9][0-9]*$ ]]; then
             elapsed=$(( $(date +%s) - start ))
             probe_finish 0 \
-                "self_dial_version_verack:protocol=$version:state=${state:-unknown}:seconds=$elapsed"
+                "self_dial_version_verack:protocol=$version:state=${state:-unknown}:seconds=$elapsed:dial_ready_seconds=$dial_ready_elapsed:descriptor_ready_at_dial=${descriptor_ready:-unknown}"
         fi
         sleep 1
     done
@@ -335,6 +360,7 @@ NODE_FILE_BOX=""
 NODE_ONION=""
 NODE_PORT=""
 NODE_SOURCE=""
+NODE_GIT_SHA=""
 NODE_RECORD_ERROR=""
 read_node_record() {
     local expected="$1" file
@@ -343,6 +369,7 @@ read_node_record() {
     NODE_ONION=""
     NODE_PORT=""
     NODE_SOURCE=""
+    NODE_GIT_SHA=""
     NODE_RECORD_ERROR=""
     if [ ! -f "$file" ]; then
         NODE_RECORD_ERROR="unpublished"
@@ -352,6 +379,7 @@ read_node_record() {
     NODE_ONION="$(field_from_file "$file" ONION_ADDRESS || true)"
     NODE_PORT="$(field_from_file "$file" P2P_PORT || true)"
     NODE_SOURCE="$(field_from_file "$file" SOURCE_SHA || true)"
+    NODE_GIT_SHA="$(field_from_file "$file" GIT_SHA || true)"
     if [ "$NODE_FILE_BOX" != "$expected" ]; then
         NODE_RECORD_ERROR="box_identity_mismatch"
     elif [[ ! "$NODE_ONION" =~ ^[a-z2-7]{56}\.onion$ ]]; then
@@ -359,15 +387,17 @@ read_node_record() {
     elif [[ ! "$NODE_PORT" =~ ^[0-9]+$ ]] ||
          [ "$NODE_PORT" -lt 1 ] || [ "$NODE_PORT" -gt 65535 ]; then
         NODE_RECORD_ERROR="invalid_p2p_port"
-    elif [[ "$NODE_SOURCE" =~ ^[0-9a-f]{40}$ ]]; then
-        if ! git cat-file -e "$NODE_SOURCE^{commit}" 2>/dev/null ||
-           ! git merge-base --is-ancestor "$NODE_SOURCE" HEAD; then
-            NODE_RECORD_ERROR="source_sha_not_in_main_history"
-        elif ! git merge-base --is-ancestor "$ONION_BASE_COMMIT" "$NODE_SOURCE"; then
-            NODE_RECORD_ERROR="STALE_SOURCE"
-        fi
-    elif [[ ! "$NODE_SOURCE" =~ ^[0-9a-f]{64}$ ]]; then
+    elif [[ ! "$NODE_SOURCE" =~ ^[0-9a-f]{40}$ ]] &&
+         [[ ! "$NODE_SOURCE" =~ ^[0-9a-f]{64}$ ]]; then
         NODE_RECORD_ERROR="invalid_source_sha"
+    elif [[ ! "$NODE_GIT_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+        NODE_RECORD_ERROR="invalid_git_sha"
+    else
+        fleet_source_status_audit "$REPO_DIR" "$OBSERVED_MAIN" \
+            "$NODE_SOURCE" "$NODE_GIT_SHA" "$ONION_BASE_COMMIT"
+        if [ "$FLEET_SOURCE_STATUS" = STALE ]; then
+            NODE_RECORD_ERROR="STALE_PEER_SOURCE"
+        fi
     fi
     [ -z "$NODE_RECORD_ERROR" ]
 }
@@ -379,7 +409,19 @@ declare -A NODE_SOURCE_STALE
 declare -A NODE_STALE_SOURCE
 declare -A NODE_SOURCE_BEHIND
 declare -A NODE_SOURCE_DETAILS
+declare -A NODE_SOURCE_STATUSES
+declare -A NODE_SOURCE_COMMITS
+declare -A NODE_SOURCE_COMMIT_DATES
+declare -A NODE_CURRENT
+declare -A NODE_SILENT
 declare -a GAPS
+NODE2_FRESH_INBOUND=not_attempted
+NODE2_FRESH_INBOUND_DETAIL=none
+NODE2_FIRST_REAL_PEER_EDGE_AT="$(status_value NODE2_FIRST_REAL_PEER_EDGE_AT)"
+NODE2_FIRST_REAL_PEER_EDGE_DETAIL="$(status_value NODE2_FIRST_REAL_PEER_EDGE_DETAIL)"
+[ -n "$NODE2_FIRST_REAL_PEER_EDGE_AT" ] || NODE2_FIRST_REAL_PEER_EDGE_AT=NONE
+[ -n "$NODE2_FIRST_REAL_PEER_EDGE_DETAIL" ] || \
+    NODE2_FIRST_REAL_PEER_EDGE_DETAIL=NONE
 PASS_COUNT=0
 PUBLISHED_COUNT=0
 LOCAL_HEIGHT_BEFORE=""
@@ -387,47 +429,27 @@ LOCAL_HEIGHT_AFTER=""
 LOCAL_HASH=""
 
 record_source_evidence() {
-    local node="$1" behind
+    local node="$1"
     NODE_SOURCE_SHAS[$node]="${NODE_SOURCE:-absent}"
-    NODE_SOURCE_KINDS[$node]=unknown
-    NODE_SOURCE_STALE[$node]=unknown
-    NODE_STALE_SOURCE[$node]=unknown
-    NODE_SOURCE_BEHIND[$node]=unknown
-    NODE_SOURCE_DETAILS[$node]="${NODE_RECORD_ERROR:-unavailable}"
-
-    if [[ "${NODE_SOURCE:-}" =~ ^[0-9a-f]{64}$ ]]; then
-        NODE_SOURCE_KINDS[$node]=source_id_sha256
-        NODE_SOURCE_DETAILS[$node]=runtime_source_id_git_freshness_unmapped
-        return
-    fi
-    if [[ ! "${NODE_SOURCE:-}" =~ ^[0-9a-f]{40}$ ]]; then
-        [ "$NODE_RECORD_ERROR" = unpublished ] && NODE_SOURCE_KINDS[$node]=absent
-        [ "$NODE_RECORD_ERROR" = invalid_source_sha ] && NODE_SOURCE_KINDS[$node]=invalid
-        [ "$NODE_RECORD_ERROR" = unpublished ] || NODE_SOURCE_STALE[$node]=yes
-        return
-    fi
-    NODE_SOURCE_KINDS[$node]=git_commit
-    if ! git cat-file -e "$NODE_SOURCE^{commit}" 2>/dev/null ||
-       ! git merge-base --is-ancestor "$NODE_SOURCE" HEAD; then
-        NODE_SOURCE_STALE[$node]=yes
-        NODE_SOURCE_DETAILS[$node]=not_in_main_history
-        return
-    fi
-    behind="$(git rev-list --count "$NODE_SOURCE..HEAD")"
-    NODE_SOURCE_BEHIND[$node]="$behind"
-    if [ "$behind" -eq 0 ]; then
+    fleet_source_status_audit "$REPO_DIR" "$OBSERVED_MAIN" \
+        "${NODE_SOURCE:-}" "${NODE_GIT_SHA:-}" "$ONION_BASE_COMMIT"
+    NODE_SOURCE_KINDS[$node]="$FLEET_SOURCE_KIND"
+    NODE_SOURCE_STATUSES[$node]="$FLEET_SOURCE_STATUS"
+    NODE_SOURCE_COMMITS[$node]="$FLEET_SOURCE_COMMIT"
+    NODE_SOURCE_COMMIT_DATES[$node]="$FLEET_SOURCE_COMMIT_DATE"
+    NODE_SOURCE_BEHIND[$node]="$FLEET_SOURCE_BEHIND"
+    NODE_SOURCE_DETAILS[$node]="$FLEET_SOURCE_DETAIL"
+    if [ "$FLEET_SOURCE_STATUS" = CURRENT ]; then
         NODE_SOURCE_STALE[$node]=no
-        NODE_SOURCE_DETAILS[$node]=at_observed_main
+        NODE_CURRENT[$node]=yes
     else
         NODE_SOURCE_STALE[$node]=yes
-        NODE_SOURCE_DETAILS[$node]="behind_observed_main:$behind"
+        NODE_CURRENT[$node]=no
     fi
-    if ! git merge-base --is-ancestor "$ONION_BASE_COMMIT" "$NODE_SOURCE"; then
-        NODE_STALE_SOURCE[$node]=yes
-        NODE_SOURCE_DETAILS[$node]="STALE_SOURCE:floor=355808b13:behind=$behind"
-    else
-        NODE_STALE_SOURCE[$node]=no
-    fi
+    NODE_STALE_SOURCE[$node]="$FLEET_SOURCE_REQUIRED_FLOOR"
+    [ "$NODE_RECORD_ERROR" = unpublished ] && \
+        NODE_SOURCE_KINDS[$node]=absent
+    return 0
 }
 
 record_pass() {
@@ -451,7 +473,7 @@ check_local_node() {
         record_source_evidence "$node"
         [ -f "deploy/devfleet/$node.txt" ] && PUBLISHED_COUNT=$((PUBLISHED_COUNT + 1))
         case "$NODE_RECORD_ERROR" in
-            invalid_source_sha|source_sha_not_in_main_history|STALE_SOURCE)
+            invalid_source_sha|invalid_git_sha|source_sha_not_in_main_history|STALE_SOURCE|STALE_PEER_SOURCE)
                 source_error="$NODE_RECORD_ERROR"
                 ;;
             *)
@@ -512,8 +534,9 @@ check_local_node() {
 check_remote_node() {
     local node="$1" endpoint row state version peer_height local_before
     local local_after add_out add_ok add_status deadline now source_error
-    local publication_suffix
+    local publication_suffix fresh_raw fresh_rc fresh_detail
     source_error=""
+    NODE_SILENT[$node]=yes
     if ! read_node_record "$node"; then
         record_source_evidence "$node"
         [ -f "deploy/devfleet/$node.txt" ] && PUBLISHED_COUNT=$((PUBLISHED_COUNT + 1))
@@ -522,7 +545,7 @@ check_remote_node() {
             return
         fi
         case "$NODE_RECORD_ERROR" in
-            invalid_source_sha|source_sha_not_in_main_history|STALE_SOURCE)
+            invalid_source_sha|invalid_git_sha|source_sha_not_in_main_history|STALE_SOURCE|STALE_PEER_SOURCE)
                 source_error="$NODE_RECORD_ERROR"
                 ;;
             *)
@@ -540,6 +563,31 @@ check_remote_node() {
     if [ -z "$NODE_ONION" ] || [ -z "$NODE_PORT" ]; then
         record_gap "$node" "$source_error"
         return
+    fi
+
+    # node2 ingress is independently proved from a new process and empty
+    # datadir.  This does not depend on the hosted hub's RPC health and starts
+    # at dial-ready, while this probe's own descriptor may still be publishing.
+    if [ "$node" = node2 ]; then
+        if fresh_raw="$(fresh_self_dial "$endpoint" 2>&1)"; then
+            fresh_rc=0
+        else
+            fresh_rc=$?
+        fi
+        fresh_detail="$(printf '%s\n' "$fresh_raw" |
+            sed -n 's/^SELF_DIAL_RESULT=//p' | tail -n 1)"
+        [ -n "$fresh_detail" ] || \
+            fresh_detail="fresh_inbound_no_result:$(clean_detail "$fresh_raw")"
+        NODE2_FRESH_INBOUND_DETAIL="$(clean_detail "$fresh_detail")"
+        if [ "$fresh_rc" -eq 0 ]; then
+            NODE2_FRESH_INBOUND=pass
+            if [ "$NODE2_FIRST_REAL_PEER_EDGE_AT" = NONE ]; then
+                NODE2_FIRST_REAL_PEER_EDGE_AT="$(date -u +%FT%TZ)"
+                NODE2_FIRST_REAL_PEER_EDGE_DETAIL="$NODE2_FRESH_INBOUND_DETAIL"
+            fi
+        else
+            NODE2_FRESH_INBOUND=fail
+        fi
     fi
 
     local_before="$(cli getblockcount 2>/dev/null || true)"
@@ -579,6 +627,7 @@ check_remote_node() {
             "version_verack_incomplete:state=${state:-absent}$publication_suffix"
         return
     fi
+    NODE_SILENT[$node]=no
     version="$(json_get "$row" version)"
     peer_height="$(json_get "$row" startingheight)"
     local_after="$(cli getblockcount 2>/dev/null || true)"
@@ -623,7 +672,7 @@ write_status() {
     source_sha="$(git rev-parse HEAD)"
     gap_text="$(join_gaps)"
     ingress_file="$REPO_DIR/deploy/devfleet/node1.status"
-    tmp="$(mktemp "$REPO_DIR/deploy/devfleet/.mesh.status.XXXXXX")"
+    tmp="$(mktemp "$(dirname -- "$STATUS_FILE")/.mesh.status.XXXXXX")"
     {
         printf 'MESH=%s/%s\n' "$PASS_COUNT" "$EXPECTED_NODES"
         printf 'PUBLISHED=%s/%s\n' "$PUBLISHED_COUNT" "$EXPECTED_NODES"
@@ -640,13 +689,27 @@ write_status() {
         printf 'LOCAL_BOX=%s\n' "$BOX"
         printf 'LOCAL_HEIGHT=%s\n' "${LOCAL_HEIGHT_AFTER:-$LOCAL_HEIGHT_BEFORE}"
         printf 'LOCAL_BEST_BLOCK=%s\n' "$LOCAL_HASH"
-        printf 'SOURCE_SHA=%s\n' "$source_sha"
+        printf 'REFEREE_SOURCE_SHA=%s\n' "$source_sha"
+        printf 'OBSERVED_MAIN_SHA=%s\n' "$(git rev-parse "$OBSERVED_MAIN")"
         local node
         for node in node1 node2 node3 node4; do
             printf '%s_SOURCE_SHA=%s\n' "${node^^}" \
                 "${NODE_SOURCE_SHAS[$node]:-absent}"
             printf '%s_SOURCE_SHA_KIND=%s\n' "${node^^}" \
                 "${NODE_SOURCE_KINDS[$node]:-unknown}"
+            printf '%s_SOURCE_STATUS=%s\n' "${node^^}" \
+                "${NODE_SOURCE_STATUSES[$node]:-STALE}"
+            printf '%s_GIT_SHA=%s\n' "${node^^}" \
+                "${NODE_SOURCE_COMMITS[$node]:-UNKNOWN}"
+            printf '%s_GIT_COMMIT_DATE=%s\n' "${node^^}" \
+                "${NODE_SOURCE_COMMIT_DATES[$node]:-UNKNOWN}"
+            printf '%s_CURRENT=%s\n' "${node^^}" \
+                "${NODE_CURRENT[$node]:-no}"
+            printf '%s_STALE=%s\n' "${node^^}" \
+                "${NODE_SOURCE_STALE[$node]:-yes}"
+            printf '%s_SOURCE_STAMP=%s:%s\n' "${node^^}" \
+                "${NODE_SOURCE_STATUSES[$node]:-STALE}" \
+                "${NODE_SOURCE_COMMIT_DATES[$node]:-UNKNOWN}"
             printf '%s_SOURCE_SHA_STALE=%s\n' "${node^^}" \
                 "${NODE_SOURCE_STALE[$node]:-unknown}"
             printf '%s_STALE_SOURCE=%s\n' "${node^^}" \
@@ -657,6 +720,19 @@ write_status() {
                 "${NODE_SOURCE_DETAILS[$node]:-not_checked}"
             printf '%s=%s\n' "${node^^}" "${NODE_RESULTS[$node]:-fail:not_checked}"
         done
+        printf 'NODE2_SILENT=%s\n' "${NODE_SILENT[node2]:-yes}"
+        printf 'NODE2_SILENT_CONSECUTIVE_CYCLES=%s\n' \
+            "$NODE2_SILENT_CYCLES"
+        printf 'NODE2_SILENT_SINCE=%s\n' "$NODE2_SILENT_SINCE"
+        printf 'NODE2_REASSIGNMENT_RECORD=%s\n' \
+            "$NODE2_REASSIGNMENT_RECORD"
+        printf 'NODE2_FRESH_INBOUND=%s\n' "$NODE2_FRESH_INBOUND"
+        printf 'NODE2_FRESH_INBOUND_DETAIL=%s\n' \
+            "$NODE2_FRESH_INBOUND_DETAIL"
+        printf 'NODE2_FIRST_REAL_PEER_EDGE_AT=%s\n' \
+            "$NODE2_FIRST_REAL_PEER_EDGE_AT"
+        printf 'NODE2_FIRST_REAL_PEER_EDGE_DETAIL=%s\n' \
+            "$NODE2_FIRST_REAL_PEER_EDGE_DETAIL"
         printf 'GAPS=%s\n' "$gap_text"
         # Preserve the referee's bounded ingress verdict and only its exact
         # evidence fields.  node1.status is the capture evidence file;
@@ -690,10 +766,20 @@ write_status() {
     mv "$tmp" "$STATUS_FILE"
 }
 
+capture_first_full() {
+    local now_iso="$1" source_sha
+    source_sha="$(git rev-parse "$OBSERVED_MAIN")"
+    fleet_mesh_capture_first_full "$PASS_COUNT" "$EXPECTED_NODES" \
+        "$STATUS_FILE" "$FIRST_FULL_FILE" "$now_iso" "$source_sha"
+    [ "$FLEET_FIRST_FULL_CAPTURED" != yes ] || \
+        log "captured immutable first 4/4 evidence at $FIRST_FULL_REL"
+}
+
 publish_status() {
     local attempt
     git add "$STATUS_REL"
-    if git diff --cached --quiet -- "$STATUS_REL"; then
+    [ ! -f "$FIRST_FULL_FILE" ] || git add "$FIRST_FULL_REL"
+    if git diff --cached --quiet -- "$STATUS_REL" "$FIRST_FULL_REL"; then
         log "status unchanged"
         return 0
     fi
@@ -738,12 +824,15 @@ publish_status() {
 
 if [ "$GIT_MODE" = publish ]; then
     sync_main || exit 1
-    if [ "$(status_value HOLD)" = pass ] &&
-       [ "$(status_value CONSECUTIVE_FULL_PASSES)" -ge 2 ] 2>/dev/null; then
-        log "HOLD: two consecutive 4/4 observations already recorded"
-        exit 0
-    fi
+else
+    # Update only the remote-tracking observation.  The detached referee's
+    # HEAD, worktree, and source identity remain pinned across every cycle.
+    git fetch origin main --quiet || {
+        log "REFUSED observation: fetch_origin_main_failed"
+        exit 1
+    }
 fi
+OBSERVED_MAIN=origin/main
 
 check_local_node "$BOX"
 for node in node1 node2 node3 node4; do
@@ -753,6 +842,16 @@ done
 
 NOW_EPOCH="$(date +%s)"
 NOW_ISO="$(date -u +%FT%TZ)"
+PREVIOUS_OBSERVED_EPOCH="$(status_value OBSERVED_EPOCH)"
+PREVIOUS_NODE2_SILENT_CYCLES="$(status_value NODE2_SILENT_CONSECUTIVE_CYCLES)"
+PREVIOUS_NODE2_SILENT_SINCE="$(status_value NODE2_SILENT_SINCE)"
+fleet_mesh_silence_observe "${NODE_SILENT[node2]:-yes}" \
+    "$PREVIOUS_NODE2_SILENT_CYCLES" \
+    "${PREVIOUS_NODE2_SILENT_SINCE:-NONE}" "$NOW_ISO" \
+    "$PREVIOUS_OBSERVED_EPOCH" "$NOW_EPOCH" "$MIN_PASS_INTERVAL"
+NODE2_SILENT_CYCLES=$FLEET_SILENT_COUNT
+NODE2_SILENT_SINCE=$FLEET_SILENT_SINCE
+NODE2_REASSIGNMENT_RECORD=$FLEET_SILENT_RECORD
 PREVIOUS_PASSES="$(status_value CONSECUTIVE_FULL_PASSES)"
 PREVIOUS_FULL_EPOCH="$(status_value LAST_FULL_PASS_EPOCH)"
 case "$PREVIOUS_PASSES" in *[!0-9]*|'') PREVIOUS_PASSES=0 ;; esac
@@ -777,6 +876,7 @@ fi
 
 write_status "$NOW_ISO" "$NOW_EPOCH" "$CONSECUTIVE" "$HOLD" \
     "$LAST_FULL_EPOCH"
+capture_first_full "$NOW_ISO"
 
 PUBLISH_OK=1
 if [ "$GIT_MODE" = publish ]; then

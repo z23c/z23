@@ -2,3 +2,4 @@ BOX=node1
 ONION_ADDRESS=5wvfod4ikluv4w3lqe3whn2k7xdsympxxu2qkqw452thtjxbar5hrcqd.onion
 P2P_PORT=8055
 SOURCE_SHA=657ce3bf2b366cd600596ae69e34e8566044897f6fddf98532300e3ac490bde5
+GIT_SHA=61f2ed7179a3219a47fbfad1383b60f36d2aaab4

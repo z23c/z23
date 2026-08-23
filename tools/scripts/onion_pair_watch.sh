@@ -12,7 +12,7 @@
 #   spawn B -addnode=A.onion:port
 #   poll getconnectioncount 150s
 #
-# Appends one JSON object per run to deploy/devfleet/pair_probe.jsonl:
+# Appends one JSON object per run to host-local referee state:
 #   {"ts":"...","head_sha":"...","verdict":"TOKEN","paired_at_s":N|null,
 #    "dial_attempted":true|false,"rendezvous_seen":true|false,
 #    "descriptor_uploaded":true|false}
@@ -26,7 +26,7 @@
 #   tools/scripts/onion_pair_watch.sh --selftest # hermetic, no spawn
 #
 # Environment:
-#   PAIR_PROBE_FILE           JSONL path (default deploy/devfleet/pair_probe.jsonl)
+#   PAIR_PROBE_FILE           JSONL path (default local state below)
 #   PAIR_WATCH_PORT_BASE      isolated 39xxx P2P port (default 39350)
 #   PAIR_WATCH_ONION_WAIT     seconds to wait for A's hostname (default 60)
 #   PAIR_WATCH_RPC_WAIT       seconds to wait for RPC (default 60)
@@ -49,7 +49,7 @@ PAIR_POLL=${PAIR_WATCH_POLL:-150}
 ISO_KIND=pairwatch
 ISO_PORT_BASE=${PAIR_WATCH_PORT_BASE:-39350}
 SELFTEST=0
-LIVE_PROBE_DEFAULT="$REPO_ROOT/deploy/devfleet/pair_probe.jsonl"
+LIVE_PROBE_DEFAULT="${XDG_STATE_HOME:-$HOME/.local/state}/zclassic23-referee/pair_probe.jsonl"
 
 for arg in "$@"; do
     case "$arg" in

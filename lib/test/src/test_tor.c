@@ -44,6 +44,14 @@ static int test_tor_initial_state(void)
         printf("OK\n");
     }
 
+    printf("test_tor_dial_initial_state: ");
+    if (tor_integration_is_dial_ready()) {
+        printf("FAIL (should not queue dials before start)\n");
+        failures++;
+    } else {
+        printf("OK\n");
+    }
+
     printf("test_tor_get_onion_null: ");
     if (tor_integration_get_onion_address() != NULL) {
         printf("FAIL (should be NULL before start)\n");
@@ -62,7 +70,8 @@ static int test_tor_stop_when_not_running(void)
 
     tor_integration_stop();
 
-    if (!tor_integration_is_ready()) {
+    if (!tor_integration_is_ready() &&
+        !tor_integration_is_dial_ready()) {
         printf("OK\n");
     } else {
         printf("FAIL (should not be ready after stop)\n");

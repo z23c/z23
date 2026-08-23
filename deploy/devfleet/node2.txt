@@ -2,3 +2,4 @@ BOX=node2
 ONION_ADDRESS=demuffv7qqqltf5gq4thzhkefclnnsyueyewqmnspxedbhvlv6bb57yd.onion
 P2P_PORT=39360
 SOURCE_SHA=53f7979bcbb291552f9cdfeaea87d569f9f1b4a7fb409fff6e86a2e8200e376c
+GIT_SHA=d613912e14fe9ff28d6febfee9b4f9a6bb97c18a

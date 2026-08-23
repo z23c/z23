@@ -23,6 +23,7 @@ bool network_onion_status_rpc(const struct json_value *params, bool help,
 
     bool tor_enabled = tor_integration_is_enabled();
     bool tor_ready = tor_integration_is_ready();
+    bool dial_ready = tor_integration_is_dial_ready();
     const char *tor_address = tor_integration_get_onion_address();
     const char *service_address = onion_service_get_address();
     bool service_ready = service_address && service_address[0] != '\0';
@@ -54,6 +55,7 @@ bool network_onion_status_rpc(const struct json_value *params, bool help,
     json_push_kv_str(result, "bootstrap_state", state);
     json_push_kv_bool(result, "tor_enabled", tor_enabled);
     json_push_kv_bool(result, "tor_ready", tor_ready);
+    json_push_kv_bool(result, "dial_ready", dial_ready);
     json_push_kv_bool(result, "onion_service_ready", service_ready);
     json_push_kv_str(result, "onion_address", address);
     json_push_kv_bool(result, "p2p_publish_ready", p2p_publish_ready);

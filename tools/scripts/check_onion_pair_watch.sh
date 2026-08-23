@@ -16,8 +16,9 @@ set -euo pipefail
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
 WATCH="$ROOT/tools/scripts/onion_pair_watch.sh"
+LOOP="$ROOT/tools/scripts/onion_pair_watch_loop.sh"
 HELPER="$ROOT/tools/scripts/isolated_node_env.sh"
-LEDGER=${PAIR_PROBE_FILE:-"$ROOT/deploy/devfleet/pair_probe.jsonl"}
+LEDGER=${PAIR_PROBE_FILE:-"${XDG_STATE_HOME:-$HOME/.local/state}/zclassic23-referee/pair_probe.jsonl"}
 JSONQ=${ZCL_JSONQ:-"$ROOT/build/bin/jsonq"}
 
 die() {
@@ -26,15 +27,14 @@ die() {
 }
 
 [ -f "$WATCH" ] || die "missing $WATCH"
+[ -f "$LOOP" ] || die "missing $LOOP"
 [ -f "$HELPER" ] || die "missing $HELPER"
 [ -x "$JSONQ" ] || die "jsonq not built at $JSONQ (run make jsonq)"
 
-# Structural: bash, no Python runtime path.
+# Structural: this shipped probe is bash. The repository-wide no-runtime gate
+# owns interpreter-path enforcement; duplicating its regex here self-matches.
 head -n 1 "$WATCH" | grep -q '^#!/usr/bin/env bash$' \
     || die "onion_pair_watch.sh must start with #!/usr/bin/env bash"
-if grep -E '(^|[|;&[:space:]])(python3|python2)([[:space:]]|$)|[[:space:]]python[[:space:]]+-|#!/usr/bin/env python' "$WATCH" >/dev/null 2>&1; then
-    die "onion_pair_watch.sh contains a Python runtime path"
-fi
 
 # Structural: sources isolated_node_env.sh; does not execute it.
 if ! grep -E '^[[:space:]]*\. .*isolated_node_env\.sh' "$WATCH" >/dev/null 2>&1; then
@@ -55,6 +55,10 @@ if ! grep -F 'hs_service_callback running, calling dynhost_check_and_activate' "
 fi
 if ! grep -E 'PAIR_WATCH_POLL:-[0-9]+' "$WATCH" >/dev/null 2>&1; then
     die "onion_pair_watch.sh missing PAIR_WATCH_POLL default"
+fi
+if grep -E 'git (commit|push)|deploy/devfleet/pair_probe\.jsonl' \
+    "$WATCH" "$LOOP" >/dev/null 2>&1; then
+    die "recurring pair telemetry must not commit, push, or write the tracked tree"
 fi
 poll_default=$(sed -n 's/^PAIR_POLL=\${PAIR_WATCH_POLL:-\([0-9]*\)}/\1/p' "$WATCH" | head -1)
 case $poll_default in

@@ -4811,11 +4811,25 @@ $(JSONQ_BIN): tools/jsonq.c \
 	    -o $@ tools/jsonq.c packages/zjsonp/src/zjsonp.c \
 	    packages/zutf8/src/zutf8.c
 
-# Drive tools/scripts/onion_pair_watch.sh --selftest and validate
-# deploy/devfleet/pair_probe.jsonl. Does not spawn nodes.
+# Drive tools/scripts/onion_pair_watch.sh --selftest and validate the
+# host-local pair ledger when present. Does not spawn nodes.
 .PHONY: check-onion-pair-watch
 check-onion-pair-watch: jsonq
 	@tools/scripts/check_onion_pair_watch.sh
+
+# Hermetic Git-history fixtures for the devfleet CURRENT/STALE classifier.
+# Does not access a node, production datadir, or network peer.
+.PHONY: check-fleet-source-status
+check-fleet-source-status:
+	@tools/scripts/check_fleet_source_status.sh
+
+.PHONY: check-fleet-mesh-evidence
+check-fleet-mesh-evidence:
+	@tools/scripts/check_fleet_mesh_evidence.sh
+
+.PHONY: check-tor-dial-prewarm
+check-tor-dial-prewarm:
+	@tools/scripts/check_tor_dial_prewarm.sh
 
 # Physical native-agent UI acceptance driver. It links only the workstation's
 # X11 client ABI and sends one bounded event to an exact titled window; it owns

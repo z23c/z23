@@ -433,9 +433,9 @@ bool onion_stream_connect(const struct net_service *svc,
         LOG_FAIL("onion", "onion dialing unavailable: tor stub build");
     if (!tor_integration_is_enabled())
         LOG_FAIL("onion", "onion dialing unavailable: tor not running");
-    if (!tor_integration_is_ready())
-        LOG_FAIL("onion", "onion dialing unavailable: tor not ready "
-                          "(still bootstrapping)");
+    if (!tor_integration_is_dial_ready())
+        LOG_FAIL("onion", "onion dialing unavailable: dynhost not ready "
+                          "to queue outbound streams");
 
     int budgets[2];
     size_t attempts = onion_stream_connect_plan(connect_timeout_ms, budgets);

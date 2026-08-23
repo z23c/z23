@@ -547,7 +547,7 @@ static int try_onion_seed_fetch_depth(struct connman *cm, const char *onion,
 int connman_add_onion_seed(struct connman *cm, const char *onion)
 {
     if (!cm || !onion_hostname_valid(onion) || g_stop ||
-        !tor_integration_is_ready())
+        !tor_integration_is_dial_ready())
         return -1;
     return try_onion_seed_fetch_depth(cm, onion, 0, true);
 }
@@ -556,13 +556,13 @@ int connman_add_onion_seed(struct connman *cm, const char *onion)
  * (~/.config/zclassic23/onion-seeds), then the chainparams onionSeeds, then
  * any known zcl23 .onion peers. Shared by the discovery thread's below-floor
  * branch and the public connman_kick_onion_seeds() peer-of-last-resort entry
- * so both reach an identical supplier set. Requires Tor ready; otherwise a
- * no-op (the clearnet fixed/DNS paths remain the fallback). */
+ * so both reach an identical supplier set. Requires outbound dynhost queueing;
+ * it deliberately does not wait for our own descriptor publication. */
 static void run_onion_seed_pass(struct connman *cm)
 {
     if (!cm || !cm->params || g_stop) return;
     if (g_connect_only) return;
-    if (!tor_integration_is_ready()) return;
+    if (!tor_integration_is_dial_ready()) return;
 
     /* Operator-curated onion seeds (one .onion per line, # comments). */
     const char *home = getenv("HOME");
@@ -688,7 +688,7 @@ static void *thread_dns_seed(void *arg)
      * the boot path can never drift from either of them. (Previously this
      * block re-implemented its own copy of the operator-file + chainparams
      * loop inline; consolidated so a future seed-source change only needs
-     * one edit.) run_onion_seed_pass() checks tor_integration_is_ready()
+     * one edit.) run_onion_seed_pass() checks tor_integration_is_dial_ready()
      * and g_stop/g_connect_only itself. Gated on "few peers" so a fresh
      * boot that already found peers via DNS/fixed seeds skips the
      * (up to 60s-per-seed, blocking) Tor round-trips. */
@@ -705,7 +705,7 @@ static void *thread_dns_seed(void *arg)
      * run_onion_seed_pass() already fetches from this same source when we
      * are below the floor, so this pass is the above-floor case and the
      * dedupe ring keeps a host from being fetched twice in a window. */
-    if (!g_stop && n_discovered > 0 && tor_integration_is_ready()) {
+    if (!g_stop && n_discovered > 0 && tor_integration_is_dial_ready()) {
         for (int i = 0; i < n_discovered && i < 3 && !g_stop; i++)
             try_onion_seed_fetch(cm, discovered[i].hostname);
     }

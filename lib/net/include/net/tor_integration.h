@@ -57,8 +57,14 @@ void tor_integration_stop(void);
 /* Get .onion address (NULL if not ready). */
 const char *tor_integration_get_onion_address(void);
 
-/* Check if Tor is bootstrapped and .onion is reachable. */
+/* Check if the local onion descriptor is published and inbound-reachable. */
 bool tor_integration_is_ready(void);
+
+/* Check if dynhost may queue outbound streams. This becomes true as soon as
+ * this boot's onion service registration yields an address, intentionally
+ * before descriptor publication, so peer circuits pre-warm while HSDir upload
+ * completes. It never weakens tor_integration_is_ready() or systemd READY. */
+bool tor_integration_is_dial_ready(void);
 
 /* Check if Tor was started (may still be bootstrapping). */
 bool tor_integration_is_enabled(void);

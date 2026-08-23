@@ -32,6 +32,7 @@ static pthread_t g_tor_thread;
 static pthread_t g_monitor_thread;
 static _Atomic bool g_tor_running = false;
 static _Atomic bool g_tor_ready = false;
+static _Atomic bool g_tor_dial_ready = false;
 static _Atomic bool g_tor_started = false;   /* true once tor thread spawn succeeds */
 static _Atomic bool g_tor_thread_done = false; /* true once tor thread returns */
 static _Atomic bool g_monitor_started = false;
@@ -815,6 +816,10 @@ static bool read_onion_address(const char *datadir)
                 }
             }
             if (have_addr && !announced_addr) {
+                /* Outbound dynhost streams can be queued now. Do not wait for
+                 * our own inbound descriptor upload: Tor will build the peer
+                 * circuit in parallel while HSDir publication completes. */
+                atomic_store(&g_tor_dial_ready, true);
                 printf("Tor .onion: %s (waiting for DESCRIPTOR PUBLICATION)\n",
                        g_onion_address);
                 fflush(stdout);
@@ -900,6 +905,7 @@ static void *tor_thread_fn(void *arg)
     /* Signal monitor to stop, then join it if it actually started. */
     atomic_store(&g_tor_running, false);
     atomic_store(&g_tor_ready, false);
+    atomic_store(&g_tor_dial_ready, false);
     if (atomic_exchange(&g_monitor_started, false)) {
         tor_join_thread_bounded(g_monitor_thread, "monitor", 5);
         thread_liveness_retire(&g_tor_monitor_liveness);
@@ -992,6 +998,8 @@ bool tor_integration_start(const char *datadir, uint16_t p2p_port)
     }
 
     atomic_store(&g_tor_running, true);
+    atomic_store(&g_tor_ready, false);
+    atomic_store(&g_tor_dial_ready, false);
     atomic_store(&g_tor_thread_done, false);
     atomic_store(&g_monitor_started, false);
 
@@ -1012,6 +1020,7 @@ void tor_integration_stop(void)
 
     atomic_store(&g_tor_running, false);
     atomic_store(&g_tor_ready, false);
+    atomic_store(&g_tor_dial_ready, false);
 
     /* Tell Tor's event loop to exit. Retry briefly in case Tor
      * hasn't entered its main loop yet when we first call. */
@@ -1037,6 +1046,11 @@ const char *tor_integration_get_onion_address(void)
 bool tor_integration_is_ready(void)
 {
     return atomic_load(&g_tor_ready);
+}
+
+bool tor_integration_is_dial_ready(void)
+{
+    return atomic_load(&g_tor_dial_ready);
 }
 
 bool tor_integration_is_enabled(void)
