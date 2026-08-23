@@ -90,3 +90,8 @@ timer invocations leave that acceptance evidence untouched.
 The mesh gate never installs a binary or signals either node. In particular,
 it has no production-unit code path; production restart authority remains
 solely in the separately configured sync loop.
+
+The sync and mesh loops serialize on the same per-box lock. If a prior push
+failed, the mesh loop may recover only commits whose complete changed-path set
+is `mesh.status` and this box's `<box>.sync`; any other local commit or tracked
+edit remains a named source-sync refusal.

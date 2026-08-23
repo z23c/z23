@@ -105,6 +105,20 @@ tracked_dirty_except_status() {
     return 1
 }
 
+commits_owned_by_fleet_control() {
+    local changed="$1" path seen=0
+    [ -n "$changed" ] || return 1
+    while IFS= read -r path; do
+        [ -z "$path" ] && continue
+        seen=1
+        case "$path" in
+            "$STATUS_REL"|"deploy/devfleet/$BOX.sync") ;;
+            *) return 1 ;;
+        esac
+    done <<< "$changed"
+    [ "$seen" = 1 ]
+}
+
 sync_main() {
     if tracked_dirty_except_status; then
         log "REFUSED source_sync: tracked checkout work is not mesh.status"
@@ -135,16 +149,16 @@ sync_main() {
 
     if git merge-base --is-ancestor "$origin" "$head"; then
         changed="$(git diff --name-only "$origin..$head")"
-        if [ "$changed" = "$STATUS_REL" ]; then
+        if commits_owned_by_fleet_control "$changed"; then
             return 0
         fi
-        log "REFUSED source_sync: local_commits_not_owned_by_mesh_status"
+        log "REFUSED source_sync: local_commits_not_owned_by_fleet_control"
         return 1
     fi
 
     changed="$(git diff --name-only "$(git merge-base "$head" "$origin")..$head")"
-    if [ "$changed" != "$STATUS_REL" ]; then
-        log "REFUSED source_sync: diverged_local_commits_not_owned_by_mesh_status"
+    if ! commits_owned_by_fleet_control "$changed"; then
+        log "REFUSED source_sync: diverged_local_commits_not_owned_by_fleet_control"
         return 1
     fi
     git rebase origin/main --quiet || {
