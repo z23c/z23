@@ -537,6 +537,24 @@ int test_connman_addnode_fallback(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    printf("connman_addnode_fallback: cold-start discovery follows healthy "
+           "outbound floor... ");
+    {
+        bool ok = true;
+        ok = ok && connman_seed_discovery_needed_for_test(0);
+        ok = ok && connman_seed_discovery_needed_for_test(1);
+        ok = ok && connman_seed_discovery_needed_for_test(2);
+        ok = ok && !connman_seed_discovery_needed_for_test(3);
+        ok = ok && !connman_seed_discovery_needed_for_test(8);
+        ok = ok && connman_seed_discovery_interval_for_test(0) == 30;
+        ok = ok && connman_seed_discovery_interval_for_test(1) == 60;
+        ok = ok && connman_seed_discovery_interval_for_test(2) == 60;
+        ok = ok && connman_seed_discovery_interval_for_test(3) == 300;
+
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+
     printf("connman_addnode_fallback: max peer height ignores unusable slots... ");
     {
         chain_params_select(CHAIN_MAIN);

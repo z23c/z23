@@ -65,6 +65,14 @@ static bool nnp_addnode_success(const struct json_value *body)
     return result && json_is_null(result);
 }
 
+static bool nnp_is_onion_endpoint(const char *address)
+{
+    if (!address)
+        return false;
+    const char *suffix = strstr(address, ".onion");
+    return suffix && (suffix[6] == '\0' || suffix[6] == ':');
+}
+
 void zcl_native_handle_network_peer_add(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
@@ -78,10 +86,11 @@ void zcl_native_handle_network_peer_add(
     if (!address || !address[0]) {
         nnp_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
                  "MISSING_ADDRESS", "normalize", false, false,
-                 "address is required as a numeric ip:port", "address");
+                 "address is required as a numeric ip:port or v3 onion endpoint",
+                 "address");
         return;
     }
-    bool onion_rendezvous = strstr(address, ".onion") != NULL;
+    bool onion_endpoint = nnp_is_onion_endpoint(address);
 
     struct rpc_arg_builder params;
     rpc_arg_builder_init(&params);
@@ -144,11 +153,10 @@ void zcl_native_handle_network_peer_add(
     (void)json_push_kv_str(&reply->data, "address", address);
     (void)json_push_kv_str(&reply->data, "status", "dial_requested");
     (void)json_push_kv_str(&reply->data, "transport",
-                           onion_rendezvous ? "tor_rendezvous+p2p_tcp"
-                                            : "p2p_tcp");
+                           onion_endpoint ? "tor+p2p_tcp" : "p2p_tcp");
     (void)json_push_kv_str(&reply->data, "rendezvous",
-                           onion_rendezvous ? "tor_directory"
-                                            : "operator_numeric_endpoint");
+                           onion_endpoint ? "direct_onion_p2p"
+                                          : "operator_numeric_endpoint");
     reply->status = ZCL_COMMAND_STATUS_PASSED;
     reply->exit_code = ZCL_COMMAND_EXIT_OK;
     reply->error.mutated = true;

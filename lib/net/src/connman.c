@@ -616,6 +616,32 @@ void connman_kick_onion_seeds(struct connman *cm)
     connman_save_addrman(cm);
 }
 
+static bool connman_seed_discovery_needed(size_t healthy_outbound)
+{
+    return healthy_outbound < (size_t)ZCL_PEER_FLOOR_HEALTHY;
+}
+
+static int connman_seed_discovery_interval(size_t healthy_outbound)
+{
+    if (healthy_outbound == 0)
+        return 30;
+    if (connman_seed_discovery_needed(healthy_outbound))
+        return 60;
+    return 300;
+}
+
+#ifdef ZCL_TESTING
+bool connman_seed_discovery_needed_for_test(size_t healthy_outbound)
+{
+    return connman_seed_discovery_needed(healthy_outbound);
+}
+
+int connman_seed_discovery_interval_for_test(size_t healthy_outbound)
+{
+    return connman_seed_discovery_interval(healthy_outbound);
+}
+#endif
+
 static void *thread_dns_seed(void *arg)
 {
     struct connman *cm = (struct connman *)arg;
@@ -666,7 +692,8 @@ static void *thread_dns_seed(void *arg)
      * and g_stop/g_connect_only itself. Gated on "few peers" so a fresh
      * boot that already found peers via DNS/fixed seeds skips the
      * (up to 60s-per-seed, blocking) Tor round-trips. */
-    if (!g_stop && cm->manager.num_nodes < 3)
+    if (!g_stop && connman_seed_discovery_needed(
+                       connman_outbound_healthy_count(cm)))
         run_onion_seed_pass(cm);
 
     /* Only NOW fetch from the .onion peers the projection named. This used
@@ -685,7 +712,7 @@ static void *thread_dns_seed(void *arg)
 
     /* If still no peers after 15s, retry everything. */
     (void)connman_wait_for_stop(12);
-    if (!g_stop && cm->manager.num_nodes == 0) {
+    if (!g_stop && connman_outbound_healthy_count(cm) == 0) {
         printf("No peers found, retrying all discovery methods...\n");
         seed_from_fixed(cm);
         dns_seed_resolve(cm);
@@ -714,14 +741,14 @@ static void *thread_dns_seed(void *arg)
     int64_t floor_below_since = 0;
     uint64_t seed_rounds = 0;
     while (!g_stop) {
-        size_t n = cm->manager.num_nodes;
-        int interval = (n == 0) ? 30 : (n < 3) ? 60 : 300;
+        size_t n = connman_outbound_healthy_count(cm);
+        int interval = connman_seed_discovery_interval(n);
         (void)connman_wait_for_stop(interval);
         if (g_stop) break;
         thread_liveness_beat(&g_dns_seed_liveness, (int64_t)++seed_rounds);
-        size_t cur = cm->manager.num_nodes;
+        size_t cur = connman_outbound_healthy_count(cm);
         int64_t now = (int64_t)platform_time_wall_time_t();
-        if ((int)cur < PEER_FLOOR_MIN) {
+        if (connman_seed_discovery_needed(cur)) {
             if (floor_below_since == 0) floor_below_since = now;
             int64_t below_for = now - floor_below_since;
             int64_t since_start = now - start_ts;

@@ -619,11 +619,10 @@ ZCL_COMMAND_READY_READ(
 ZCL_COMMAND_READY_COMMAND(
     "core.network.peers.add", "core.network.peers", "",
     "Add an outbound peer connection",
-    "A numeric IP:port is persisted and scheduled directly. A v3 onion is "
-    "resolved through its Tor-served directory first, then each advertised "
-    "numeric fast path is persisted and scheduled. Success means a dial was "
-    "requested, not that a handshake completed; raw blockchain transport "
-    "over onion remains separate future work.", 0,
+    "A numeric IP:port or v3 onion endpoint is persisted and scheduled "
+    "directly. Onion P2P uses embedded Tor and remains operator-directed; "
+    "onion endpoints are never learned through peer gossip. Success means a "
+    "dial was requested, not that VERSION/VERACK completed.", 0,
     "peers,add,connect,addnode",
     "zcl.core_peer_add.input.v1", "zcl.peer_add.v1", "address", "address",
     "z23 core network peers add --address=<ip:port|v3.onion>",

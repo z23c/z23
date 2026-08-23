@@ -483,6 +483,10 @@ bool connman_outbound_rate_allowed_for_test(bool below_floor,
                                             bool interval_elapsed,
                                             bool dht_hint_pending);
 int connman_addrman_retry_cooldown_for_test(int attempts);
+/* Pure seed-thread policy. Raw sockets, inbound peers, and peers without
+ * NODE_NETWORK must not suppress cold-start discovery. */
+bool connman_seed_discovery_needed_for_test(size_t healthy_outbound);
+int connman_seed_discovery_interval_for_test(size_t healthy_outbound);
 #endif
 
 /* Snapshot the currently healthy (handshaked, NODE_NETWORK, non-disconnecting,

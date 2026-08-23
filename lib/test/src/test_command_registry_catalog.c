@@ -472,7 +472,7 @@ static int test_network_peer_add_binding(void)
 {
     int failures = 0;
     const struct zcl_command_registry *reg = zcl_command_catalog();
-    TEST("typed peer add requests numeric or Tor-rendezvous edges") {
+    TEST("typed peer add requests numeric or direct onion P2P edges") {
         const struct zcl_command_spec *spec =
             find_spec(reg, "core.network.peers.add");
         ASSERT(spec != NULL);
@@ -517,7 +517,9 @@ static int test_network_peer_add_binding(void)
         ASSERT_EQ(g_peer_add_rpc_calls, 2);
         ASSERT(strstr(g_peer_add_params, ".onion") != NULL);
         ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "transport")),
-                      "tor_rendezvous+p2p_tcp");
+                      "tor+p2p_tcp");
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "rendezvous")),
+                      "direct_onion_p2p");
         zcl_command_reply_free(&reply);
         json_free(&input);
 
@@ -538,7 +540,9 @@ static int test_network_peer_add_binding(void)
         ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "status")),
                       "dial_requested");
         ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "transport")),
-                      "tor_rendezvous+p2p_tcp");
+                      "tor+p2p_tcp");
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "rendezvous")),
+                      "direct_onion_p2p");
         zcl_command_reply_free(&reply);
         json_free(&input);
 
