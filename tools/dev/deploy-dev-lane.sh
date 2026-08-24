@@ -53,7 +53,6 @@ case "${1:-}" in
         ;;
     *) echo "usage: $0 [--stage|--self-test]" >&2; exit 2 ;;
 esac
-
 if [ "$ACTIVATION_SELFTEST" -ne 1 ]; then
     echo "deploy-dev-lane: REFUSING — runtime generation publication is contained until immutable epochs, proof receipts, resident CAS, and rollback are one transaction" >&2
     exit 3
@@ -70,7 +69,6 @@ LAST_GOOD_LINK="$GEN_ROOT/last-good"
 STAGED_LINK="$GEN_ROOT/staged"
 LOCK_PATH="$GEN_ROOT/activation.lock"
 REJECTED_DIR="$GEN_ROOT/rejected"
-NODE_LOG="$DEV_DATADIR/node.log"
 AUTO_REINDEX_SENTINEL="$DEV_DATADIR/auto_reindex_request"
 STALE_REINDEX_DROPIN="$HOME/.config/systemd/user/zcl23-dev.service.d/reindex.conf"
 STALE_OOM_BUDGET_DROPIN="$HOME/.config/systemd/user/zcl23-dev.service.d/zz-oom-budget.conf"
@@ -127,7 +125,6 @@ json_first_string_field() {
     printf '%s\n' "$token" \
         | sed -n "s/^\"${key}\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\"$/\1/p"
 }
-
 auto_reindex_status() {
     local anchor="" count=""
     [ -r "$AUTO_REINDEX_SENTINEL" ] || return 1
@@ -136,28 +133,6 @@ auto_reindex_status() {
     [[ "$count" =~ ^-?[0-9]+$ ]] || return 1
     printf '%s %s\n' "$anchor" "$count"
 }
-
-pre_rpc_boot_diagnostic() {
-    [ -r "$NODE_LOG" ] || return 0
-    tail -n 500 "$NODE_LOG" | awk '
-        /crash-only recovery: consuming auto-reindex request/ { recovery=$0 }
-        /reindex-chainstate: rebuilding UTXO set/ { reindex=1 }
-        /height [0-9]+\/[0-9]+ .*ETA/ { progress=$0 }
-        END {
-            if (progress != "") print "pre-RPC recovery: reindex-chainstate " progress
-            else if (reindex) print "pre-RPC recovery: reindex-chainstate active"
-            else if (recovery != "") print "pre-RPC recovery: " recovery
-        }'
-}
-
-# Compatibility vocabulary retained for the agent/deploy source-contract gate.
-# `activation_probe_default` is now the bounded successor to
-# `probe_agent_contract`; it validates the full agent and operator-snapshot
-# schemas plus exact generation/build identity. The legacy diagnostics named
-# `agent_work_ready` and `chain_serving_ready`, controlled by
-# `ZCL_DEV_AGENT_TIMEOUT`, formerly printed `AGENT READY`,
-# `BLOCKED: agent status=`, `SYNC OK`, and `boot diagnostic: $diag`.
-
 guard_pending_auto_reindex() {
     local status anchor count
     [ -e "$AUTO_REINDEX_SENTINEL" ] || return 0

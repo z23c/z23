@@ -12,6 +12,7 @@ cd "$REPO"
 
 DEV_BIN="${ZCL_AGENT_DEV_BIN:-$HOME/.local/bin/zclassic23-dev}"
 SRC_BIN="${ZCL_AGENT_SRC_BIN:-build/bin/zclassic23-dev}"
+JSONQ="${ZCL_AGENT_JSONQ:-build/bin/jsonq}"
 DEV_DATADIR="${ZCL_AGENT_DEV_DATADIR:-$HOME/.zclassic-c23-dev}"
 DEV_RPCPORT="${ZCL_AGENT_DEV_RPCPORT:-18252}"
 UNIT="${ZCL_AGENT_DEV_UNIT:-zcl23-dev.service}"
@@ -21,7 +22,6 @@ LAST_GOOD_LINK="$GEN_ROOT/last-good"
 STAGED_LINK="$GEN_ROOT/staged"
 ACTIVATION_LOCK="$GEN_ROOT/activation.lock"
 REJECTED_DIR="$GEN_ROOT/rejected"
-NODE_LOG="$DEV_DATADIR/node.log"
 DEPLOY_STATE="$DEV_DATADIR/agent-deploy.json"
 AUTO_REINDEX_SENTINEL="$DEV_DATADIR/auto_reindex_request"
 DEV_LOOP_STATE_DIR="${ZCL_DEV_WATCH_STATE_DIR:-$HOME/.local/state/zclassic23-dev}"
@@ -183,30 +183,53 @@ file_state_json() {
         "$(json_escape "$build_commit")"
 }
 
-pre_rpc_boot_diagnostic() {
-    [ -r "$NODE_LOG" ] || return 0
-    tail -n 500 "$NODE_LOG" | awk '
-        /crash-only recovery: consuming auto-reindex request/ {
-            recovery=$0
-        }
-        /reindex-chainstate: rebuilding UTXO set/ {
-            reindex=1
-        }
-        /\[coins\] flush ok: max_height=/ {
-            progress=$0
-        }
-        /height [0-9]+\/[0-9]+ .*ETA/ {
-            progress=$0
-        }
-        END {
-            if (progress != "") {
-                print "pre-RPC recovery: reindex-chainstate " progress
-            } else if (reindex) {
-                print "pre-RPC recovery: reindex-chainstate active"
-            } else if (recovery != "") {
-                print "pre-RPC recovery: " recovery
-            }
-        }'
+boot_status_result_is_valid() {
+    local body="$1" ok status error_code
+    [ -x "$JSONQ" ] || return 1
+    printf '%s\n' "$body" | "$JSONQ" eq schema zcl.result.v1 \
+        >/dev/null 2>&1 || return 1
+    printf '%s\n' "$body" | "$JSONQ" eq command core.node.bootstatus \
+        >/dev/null 2>&1 || return 1
+    ok="$(printf '%s\n' "$body" | "$JSONQ" get ok 2>/dev/null)" || return 1
+    status="$(printf '%s\n' "$body" | "$JSONQ" get status 2>/dev/null)" || return 1
+    case "$ok:$status" in
+        true:passed)
+            printf '%s\n' "$body" | "$JSONQ" eq data_schema \
+                zcl.core_bootstatus.v1 >/dev/null 2>&1 &&
+                [ "$(printf '%s\n' "$body" | "$JSONQ" type data 2>/dev/null)" = object ]
+            ;;
+        false:blocked)
+            [ "$(printf '%s\n' "$body" | "$JSONQ" type error 2>/dev/null)" = object ] || return 1
+            error_code="$(printf '%s\n' "$body" | "$JSONQ" get error.code 2>/dev/null)"
+            [ -n "$error_code" ]
+            ;;
+        *) return 1 ;;
+    esac
+}
+proc_start_ticks() {
+    sed 's/^[0-9][0-9]* ([^)]*) //' "/proc/$1/stat" 2>/dev/null |
+        awk 'NF >= 20 { print $20; exit }'
+}
+boot_status_json() {
+    local pid ticks reader body stable_pid stable_ticks stable_reader datadirs
+    pid="$(service_field MainPID)"
+    is_uint "$pid" && [ "$pid" -gt 0 ] || return 1
+    ticks="$(proc_start_ticks "$pid" || true)"
+    reader="$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)"
+    [ -n "$ticks" ] && [ -x "$reader" ] || return 1
+    datadirs="$(tr '\000' '\n' < "/proc/$pid/cmdline" 2>/dev/null |
+        awk 'index($0, "-datadir=") == 1 { print substr($0, 10) }')"
+    [ "$(printf '%s\n' "$datadirs" | awk 'NF { n++ } END { print n+0 }')" = 1 ] &&
+        [ "$datadirs" = "$DEV_DATADIR" ] || return 1
+    body="$("$reader" core node bootstatus \
+        "-datadir=$DEV_DATADIR" 2>/dev/null || true)"
+    stable_pid="$(service_field MainPID)"
+    stable_ticks="$(proc_start_ticks "$pid" || true)"
+    stable_reader="$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)"
+    [ "$stable_pid" = "$pid" ] && [ "$stable_ticks" = "$ticks" ] &&
+        [ "$stable_reader" = "$reader" ] || return 1
+    boot_status_result_is_valid "$body" || return 1
+    printf '%s\n' "$body"
 }
 
 auto_reindex_json() {
@@ -321,19 +344,26 @@ service_json() {
 }
 
 rpc_json() {
-    local height="" status="unreachable" detail="" diag=""
+    local height="" status="unreachable" detail="" boot_status=""
+    local boot_status_payload="null"
     height="$(build/bin/zclassic-cli -datadir="$DEV_DATADIR" \
         -rpcport="$DEV_RPCPORT" getblockcount 2>/dev/null || true)"
     if [[ "$height" =~ ^[0-9]+$ ]]; then
         status="ok"
         detail="height=$height"
     else
-        diag="$(pre_rpc_boot_diagnostic || true)"
-        detail="${diag:-rpc unavailable}"
+        boot_status="$(boot_status_json || true)"
+        if boot_status_result_is_valid "$boot_status"; then
+            boot_status_payload="$boot_status"
+            detail="typed boot status from stable running executable"
+        else
+            detail="rpc unavailable; stable typed bootstatus unavailable"
+        fi
     fi
-    printf '{"status":"%s","height":"%s","detail":"%s","rpcport":"%s"}' \
+    printf '{"status":"%s","height":"%s","detail":"%s","rpcport":"%s","boot_status":%s}' \
         "$(json_escape "$status")" "$(json_escape "$height")" \
-        "$(json_escape "$detail")" "$(json_escape "$DEV_RPCPORT")"
+        "$(json_escape "$detail")" "$(json_escape "$DEV_RPCPORT")" \
+        "$boot_status_payload"
 }
 
 deploy_state_summary_json() {
@@ -469,7 +499,7 @@ next_action() {
     elif [ "$rpc_status" = "ok" ]; then
         printf 'z23-dev status'
     elif [ "$active_state" = "active" ]; then
-        printf 'wait; tail -f %s' "$NODE_LOG"
+        printf 'z23-dev core node bootstatus -datadir=%s' "$DEV_DATADIR"
     else
         printf 'build/bin/z23-dev dev generation history'
     fi
@@ -637,6 +667,16 @@ emit_text() {
 if [ "${ZCL_AGENT_DEV_STATUS_SELFTEST:-0}" = "1" ]; then
     quality_freshness_selftest
     next_action_selftest
+    valid='{"schema":"zcl.result.v1","command":"core.node.bootstatus","ok":true,"status":"passed","data_schema":"zcl.core_bootstatus.v1","data":{}}'
+    blocked='{"schema":"zcl.result.v1","command":"core.node.bootstatus","ok":false,"status":"blocked","error":{"code":"NO_BOOT_STATUS"}}'
+    boot_status_result_is_valid "$valid" && boot_status_result_is_valid "$blocked" &&
+        ! boot_status_result_is_valid '{not-json}' &&
+        ! boot_status_result_is_valid "${valid}TRAILING" &&
+        ! boot_status_result_is_valid '{"schema":"zcl.result.v1","command":"core.node.bootstatus","ok":true,"status":"garbage","data_schema":"zcl.core_bootstatus.v1","data":{}}' &&
+        ! boot_status_result_is_valid '{"schema":"zcl.result.v1","command":"core.node.bootstatus","ok":false,"status":"passed","data_schema":"zcl.core_bootstatus.v1","data":{}}' &&
+        ! boot_status_result_is_valid '{"schema":"zcl.result.v1","command":"core.node.bootstatus","ok":true,"status":"passed","data_schema":"foreign.v9","data":{}}' &&
+        ! boot_status_result_is_valid '{"schema":"zcl.result.v1","command":"core.node.bootstatus","ok":true,"status":"passed","data":{}}' || exit 1
+    printf '%s\n' 'agent-dev-status: boot-status validation selftest PASS'
     exit $?
 fi
 

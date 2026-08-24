@@ -166,7 +166,8 @@ static int test_ic_truncated_closure_preserves_groups(void)
         const char *files[] = { "lib/net/src/tor_integration.c" };
         struct zcl_devloop_plan plan;
         ASSERT(zcl_devloop_plan_files(files, 1, &plan));
-        ASSERT(ic_group_in(plan.path_groups, plan.path_groups_len, "tor"));
+        ASSERT(ic_group_in(plan.path_groups, plan.path_groups_len,
+                           "test_tor"));
 
         ASSERT(zcl_devloop_plan_add_closure(IC_FIX_TRUNC, files, 1, &plan));
         ASSERT(plan.closure_attempted);
@@ -186,7 +187,8 @@ static int test_ic_truncated_closure_preserves_groups(void)
         ASSERT(ic_planned(&plan, "download"));
 
         /* And the path floor is still whole. */
-        ASSERT(ic_group_in(plan.path_groups, plan.path_groups_len, "tor"));
+        ASSERT(ic_group_in(plan.path_groups, plan.path_groups_len,
+                           "test_tor"));
 
         system("rm -rf " IC_FIX_TRUNC);
         PASS();

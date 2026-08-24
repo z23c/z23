@@ -77,7 +77,7 @@ app/views/src/explorer_pages_view.c 819
 # existing wiring out of boot.c with it.
 config/src/boot.c 4331
 config/src/boot_bundle_fetch.c 905
-config/src/boot_index.c 853
+config/src/boot_index.c 851
 config/src/boot_mint_anchor.c 808
 config/src/boot_refold_staged.c 2077
 config/src/boot_services.c 1476

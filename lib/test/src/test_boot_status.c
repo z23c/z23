@@ -8,7 +8,9 @@
  *     boot_status_read recovers every field)
  *   - the writer (init/note_stage/set_height) publishes an atomically-readable
  *     <datadir>/boot_status.json the node-free reader recovers
- *   - the reader fails closed (returns false) on a missing/empty/malformed file
+ *   - typed recovery progress + named blockers survive writer/read round-trips
+ *   - the reader fails closed on missing, malformed, corrupt, or contradictory
+ *     documents
  *
  * Node-free and filesystem-scoped to a private mkdtemp dir, so it runs under
  * the parallel test driver without touching any live datadir. */
@@ -87,6 +89,12 @@ int test_boot_status(void)
         in.started_unix = 1700000000;
         in.updated_unix = 1700000042;
         in.elapsed_s = 42;
+        snprintf(in.activity, sizeof(in.activity), "reindex_chainstate");
+        in.progress_current = 120000;
+        in.progress_target = 478544;
+        snprintf(in.blocker, sizeof(in.blocker), "reindex_read_failed");
+        snprintf(in.blocker_reason, sizeof(in.blocker_reason),
+                 "block 120001 is unreadable");
 
         char buf[1024];
         size_t n = boot_status_write_json(&in, buf, sizeof(buf));
@@ -108,6 +116,16 @@ int test_boot_status(void)
         BS_CHECK("started_unix round-trips", out.started_unix == 1700000000);
         BS_CHECK("updated_unix round-trips", out.updated_unix == 1700000042);
         BS_CHECK("elapsed_s round-trips", out.elapsed_s == 42);
+        BS_CHECK("activity round-trips",
+                 strcmp(out.activity, "reindex_chainstate") == 0);
+        BS_CHECK("progress current round-trips",
+                 out.progress_current == 120000);
+        BS_CHECK("progress target round-trips",
+                 out.progress_target == 478544);
+        BS_CHECK("blocker round-trips",
+                 strcmp(out.blocker, "reindex_read_failed") == 0);
+        BS_CHECK("blocker reason round-trips",
+                 strcmp(out.blocker_reason, "block 120001 is unreadable") == 0);
     }
 
     /* ── writer publishes a readable beacon ───────────────────────── */
@@ -115,11 +133,26 @@ int test_boot_status(void)
         boot_status_init(dir);
         boot_status_note_stage((int)BOOT_STAGE_DB_OPEN);
         boot_status_set_height(478544);
-        boot_status_note_stage((int)BOOT_STAGE_READY);
+        boot_status_set_progress("reindex_chainstate", 120000, 478544);
+        boot_status_set_blocker("reindex_read_failed",
+                                "block 120001 is unreadable");
 
         struct boot_status_snapshot out;
         char why[128];
         bool ok = boot_status_read(dir, &out, why, sizeof(why));
+        BS_CHECK("writer recovery beacon is readable", ok);
+        BS_CHECK("writer carried recovery activity",
+                 strcmp(out.activity, "reindex_chainstate") == 0);
+        BS_CHECK("writer carried recovery progress",
+                 out.progress_current == 120000 &&
+                 out.progress_target == 478544);
+        BS_CHECK("writer carried named blocker",
+                 strcmp(out.blocker, "reindex_read_failed") == 0);
+
+        boot_status_set_progress(NULL, -1, -1);
+        boot_status_set_blocker(NULL, NULL);
+        boot_status_note_stage((int)BOOT_STAGE_READY);
+        ok = boot_status_read(dir, &out, why, sizeof(why));
         BS_CHECK("writer beacon is readable", ok);
         BS_CHECK("writer reached serving phase",
                  strcmp(out.phase, "serving") == 0);
@@ -127,6 +160,9 @@ int test_boot_status(void)
         BS_CHECK("writer marks serving true", out.serving == true);
         BS_CHECK("writer marks rpc_bound true", out.rpc_bound == true);
         BS_CHECK("writer carried the height", out.height == 478544);
+        BS_CHECK("writer cleared recovery before serving",
+                 out.activity[0] == '\0' && out.progress_current == -1 &&
+                 out.progress_target == -1);
         BS_CHECK("writer set a start time", out.started_unix > 0);
 
         /* Disarm so later tests' boot_stage_advance_to calls don't write into
@@ -171,6 +207,52 @@ int test_boot_status(void)
         /* point the reader at an explicitly malformed doc */
         bs_write_file(dir, ZCL_BOOT_STATUS_FILENAME, "not json at all {{{");
         BS_CHECK("read of malformed file returns false",
+                 !boot_status_read(dir, &out, why, sizeof(why)));
+
+        bs_write_file(dir, ZCL_BOOT_STATUS_FILENAME,
+            "{\"schema\":\"zcl.boot_status.v1\",\"phase\":\"starting\","
+            "\"stage\":\"init\",\"stage_ordinal\":0,\"height\":-1,"
+            "\"rpc_bound\":false,\"serving\":false,\"started_unix\":1,"
+            "\"updated_unix\":1,\"elapsed_s\":0}TRAILING");
+        BS_CHECK("valid beacon prefix with trailing junk is rejected",
+                 !boot_status_read(dir, &out, why, sizeof(why)));
+
+        bs_write_file(dir, ZCL_BOOT_STATUS_FILENAME, "{}");
+        BS_CHECK("empty object is corrupt, not a boot status",
+                 !boot_status_read(dir, &out, why, sizeof(why)));
+
+        bs_write_file(dir, ZCL_BOOT_STATUS_FILENAME,
+            "{\"schema\":\"wrong.v1\",\"phase\":\"loading\","
+            "\"stage\":\"db_open\",\"stage_ordinal\":3,\"height\":-1,"
+            "\"rpc_bound\":false,\"serving\":false,\"started_unix\":1,"
+            "\"updated_unix\":1,\"elapsed_s\":0}");
+        BS_CHECK("wrong schema is rejected",
+                 !boot_status_read(dir, &out, why, sizeof(why)));
+
+        bs_write_file(dir, ZCL_BOOT_STATUS_FILENAME,
+            "{\"schema\":\"zcl.boot_status.v1\",\"phase\":7,"
+            "\"stage\":\"db_open\",\"stage_ordinal\":3,\"height\":-1,"
+            "\"rpc_bound\":false,\"serving\":false,\"started_unix\":1,"
+            "\"updated_unix\":1,\"elapsed_s\":0}");
+        BS_CHECK("wrong required field type is rejected",
+                 !boot_status_read(dir, &out, why, sizeof(why)));
+
+        bs_write_file(dir, ZCL_BOOT_STATUS_FILENAME,
+            "{\"schema\":\"zcl.boot_status.v1\",\"phase\":\"loading\","
+            "\"stage\":\"db_open\",\"stage_ordinal\":3,\"height\":-1,"
+            "\"rpc_bound\":true,\"serving\":true,\"started_unix\":1,"
+            "\"updated_unix\":1,\"elapsed_s\":0}");
+        BS_CHECK("contradictory serving state is rejected",
+                 !boot_status_read(dir, &out, why, sizeof(why)));
+
+        bs_write_file(dir, ZCL_BOOT_STATUS_FILENAME,
+            "{\"schema\":\"zcl.boot_status.v1\",\"phase\":\"serving\","
+            "\"stage\":\"ready\",\"stage_ordinal\":9,\"height\":1,"
+            "\"rpc_bound\":true,\"serving\":true,\"started_unix\":1,"
+            "\"updated_unix\":1,\"elapsed_s\":0,"
+            "\"activity\":\"reindex_chainstate\","
+            "\"progress_current\":1,\"progress_target\":2}");
+        BS_CHECK("serving cannot retain an active boot recovery",
                  !boot_status_read(dir, &out, why, sizeof(why)));
 
         BS_CHECK("read with NULL datadir returns false",

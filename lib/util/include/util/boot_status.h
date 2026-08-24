@@ -23,7 +23,12 @@
  *     "serving": <bool>,
  *     "started_unix": <int>,
  *     "updated_unix": <int>,
- *     "elapsed_s": <int>
+ *     "elapsed_s": <int>,
+ *     "activity": "reindex_chainstate",      // optional
+ *     "progress_current": <int>,              // optional with activity
+ *     "progress_target": <int>,               // optional with activity
+ *     "blocker": "<stable id>",              // optional
+ *     "blocker_reason": "<operator remedy>"  // optional with blocker
  *   }
  *
  * The write is tmp+rename (crash-safe: a reader either sees the old complete
@@ -63,6 +68,12 @@ struct boot_status_snapshot {
     int64_t started_unix;    /* wall-clock boot start */
     int64_t updated_unix;    /* wall-clock of the last update */
     int64_t elapsed_s;       /* updated_unix - started_unix */
+    /* A long-running recovery owned by the boot path. Empty/-1 outside an
+     * active recovery. Current and target are exact work units (blocks for
+     * reindex_chainstate), not a percentage inferred from prose. */
+    char    activity[64];
+    int64_t progress_current;
+    int64_t progress_target;
     /* Why this boot stopped, when it stopped on purpose. Empty on every
      * ordinary boot; the two fields are written only once a caller names a
      * blocker, and they are what turns "phase=loading, stage=db_open, and
@@ -95,6 +106,13 @@ void boot_status_set_height(int64_t height);
  * on `wallet_loaded` for the rest of block-index load. No-op when the
  * writer is not armed. */
 void boot_status_heartbeat(void);
+
+/* Publish typed progress for a long-running boot recovery. Calls may be made
+ * at fine-grained loop boundaries: durable publication is internally capped
+ * to once per second, except for activity changes and completion. Passing an
+ * empty activity clears all progress fields and publishes immediately. */
+void boot_status_set_progress(const char *activity, int64_t current,
+                              int64_t target);
 
 /* Name the blocker this boot is stopping on, and rewrite the beacon, BEFORE
  * exiting. A boot that refuses must leave the reason where a node-free

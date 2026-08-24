@@ -81,8 +81,9 @@ const char *json_get_str(const struct json_value *v);
  * required length. The result is NUL-terminated iff it is < buflen. */
 size_t json_write(const struct json_value *v, char *buf, size_t buflen);
 
-/* Parse raw[0..len) into v. On parse failure, returns false and leaves v a
- * fresh JSON_NULL (safe to json_free or reuse). */
+/* Parse exactly one JSON value from raw[0..len). Trailing JSON whitespace is
+ * accepted; any other suffix is rejected. On parse failure, returns false and
+ * leaves v a fresh JSON_NULL (safe to json_free or reuse). */
 bool json_read(struct json_value *v, const char *raw, size_t len);
 
 #endif

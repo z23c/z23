@@ -4,13 +4,9 @@
  * Distributed under the MIT software license, see the accompanying
  * file COPYING or http://www.opensource.org/licenses/mit-license.php. */
 
-/* The persistent outbound dial scheduler: anchors-first candidate gathering
- * plus non-blocking connect machinery, and the thread_open_connections
- * loop that drives them. Split out of connman.c (which owns lifecycle,
- * addrman persistence, seed discovery, outbound-target selection +
- * diversity-cap accounting, the socket reactor, and the message-cycle
- * thread) — pure code motion, no behavior change. See connman_internal.h
- * for the shared state/helpers this file promotes across the split. */
+/* Persistent outbound scheduler: anchors-first candidate gathering,
+ * non-blocking connects, and the open-connection loop. connman.c retains
+ * lifecycle, persistence, discovery, selection, reactor, and message cycle. */
 
 #define _DEFAULT_SOURCE   /* usleep */
 #include "platform/time_compat.h"
@@ -31,16 +27,9 @@
 #include <unistd.h>
 
 /* ── Persistent dial scheduler: deduplicated candidates, one attempt ──────
- *
- * The old dialer dialed serially: connect_socket_directly() blocked in
- * select() for up to DEFAULT_CONNECT_TIMEOUT (5 s) PER address, up to 3
- * attempts a loop — so a cold boot could spend ~15 s of wall time before it
- * had even 3 peers if the first candidates were slow/dead. Candidate gathering
- * remains shared by anchors, DHT hints, database-discovered ZCL23 peers,
- * addnodes, and addrman, but the owning scheduler starts only one non-blocking
- * connect at a time. This makes endpoint deduplication and recovery backoff
- * deterministic and prevents dial storms. The scheduler remains a single
- * persistent thread. */
+ * A serial dial once spent 5 seconds per dead address. Shared gathering now
+ * feeds one scheduler-owned non-blocking attempt at a time, making endpoint
+ * deduplication and recovery backoff deterministic without dial storms. */
 
 #define ZCL_DIAL_BATCH_MAX 8   /* candidate/test buffer bound */
 #define ZCL_DIAL_SCHEDULER_WIDTH 1 /* one scheduler-owned TCP attempt */
@@ -598,14 +587,9 @@ static void connman_dial_batch(struct connman *cm,
         connman_record_dial_failure(cm, &batch[inflight[i].ci]);
     }
 
-    /* Onion candidates never join the socket race: there is no fd to poll
-     * until a circuit exists. They get a blocking budget instead, inline on
-     * the scheduler thread (g_open_liveness is liveness-only, so the block
-     * trips no supervisor gate), and ONE ceiling is shared by the entire
-     * batch — per-candidate budgets let MAX_OUTBOUND_ONION dead hidden
-     * services stall the only dial scheduler for MAX_OUTBOUND_ONION x 120 s
-     * with no outbound progress. One that finds the budget spent waits for
-     * the next iteration: never dialed, never charged. */
+    /* Onion candidates have no fd before circuit creation, so they share one
+     * blocking batch budget. A candidate finding it spent waits for the next
+     * iteration without being dialed or charged. */
     int64_t onion_budget_ms = ONION_STREAM_CONNECT_TIMEOUT_MS;
     for (size_t i = 0; i < count && !g_stop; i++) {
         struct connman_dial_candidate *c = &batch[i];
@@ -637,15 +621,9 @@ void *thread_open_connections(void *arg)
         atomic_store_explicit(&cm->dial_scheduler_last_progress_us,
                               platform_time_monotonic_us(),
                               memory_order_relaxed);
-        /* Count outbound peers in two buckets:
-         *   `outbound_slot` — all non-disconnecting outbound peers,
-         *     used as the upper bound on connection slots so we don't
-         *     overflow MAX_OUTBOUND_CONNECTIONS.
-         *   `outbound_healthy` — only outbound peers past handshake,
-         *     used to decide if we need aggressive backfill. Without
-         *     this distinction a node with 1 working peer + several stuck
-         *     in PEER_CONNECTING reads as fully-outbound and never
-         *     hunts for replacements. */
+        /* Count occupied outbound slots separately from peers past handshake;
+         * the latter drives aggressive backfill so stuck connecting sockets
+         * cannot masquerade as a healthy outbound floor. */
         /* Sweep any feeler probes that finished (mark good + disconnect) or
          * timed out, BEFORE counting slots — feelers never count toward the
          * outbound floor/slot budget. */
@@ -675,17 +653,9 @@ void *thread_open_connections(void *arg)
             continue;
         }
 
-        /* In connect-only mode maintain one outbound connection PER
-         * -connect addnode (each explicit target gets its own slot), not a
-         * single global connection. The old `outbound >= 1` gate stopped
-         * after the FIRST addnode connected, so a second/third -connect peer
-         * was never dialed despite the "1 connection per addnode" promise —
-         * a single-supplier node could not fan out to its other explicit
-         * peers. Multiple connections to the SAME peer still cause snapshot
-         * serving to split and stall, but that is prevented by connect_node's
-         * per-service dedupe, not by capping the global outbound count.
-         * Bound: MAX_OUTBOUND_CONNECTIONS (checked above) still caps the
-         * total, and num_addnodes <= MAX_ADDNODES. */
+        /* Connect-only maintains one slot per explicit target. Per-service
+         * dedupe prevents duplicate peer connections; MAX_OUTBOUND_CONNECTIONS
+         * and MAX_ADDNODES retain the global bounds. */
         if (connect_only_wait_needed(
                 g_connect_only, outbound, (size_t)cm->num_addnodes,
                 connman_dht_hint_pending(cm))) {

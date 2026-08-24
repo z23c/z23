@@ -45,13 +45,16 @@ int t_canonical_operator_diagnostics_contract(void)
         ASSERT(strstr(buf, "local_consensus_validation") != NULL);
         ASSERT(strstr(buf, "ZCL_DATADIR=$RPC_DATADIR") != NULL);
         ASSERT(strstr(buf, "ZCL_RPCPORT=$RPCPORT") != NULL);
-        ASSERT(strstr(buf, "NODE_LOG=\"$RPC_DATADIR/node.log\"") != NULL);
+        ASSERT(strstr(buf, "\"$SERVICE_EXE\" core node bootstatus") != NULL);
+        ASSERT(strstr(buf, "NODE_LOG") == NULL);
+        ASSERT(strstr(buf, "pre_rpc_boot_diagnostic") == NULL);
+        ASSERT(strstr(buf, "tail -n 500") == NULL);
         ASSERT(strstr(buf, "${ZCL_DEPLOY_NODE_LOG") == NULL);
         ASSERT(strstr(buf, "ZCL_DEPLOY_EXPECT_SOURCE_ID") != NULL);
         ASSERT(strstr(buf, "ZCL_DEPLOY_EXPECT_ARTIFACT_SHA256") != NULL);
         ASSERT(strstr(buf, "/proc/$SERVICE_MAIN_PID/exe") != NULL);
         ASSERT(strstr(buf, "norm_commit") == NULL);
-        ASSERT(strstr(buf, "pre-RPC recovery: reindex-chainstate") != NULL);
+        ASSERT(strstr(buf, "typed boot status") != NULL);
         ASSERT(strstr(buf, "zclassic-cli|zcl-rpc") != NULL);
         ASSERT(strstr(buf, "json_rpc_result") != NULL);
         ASSERT(strstr(buf, "extract_health_height") != NULL);
