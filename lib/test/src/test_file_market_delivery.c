@@ -460,6 +460,108 @@ static bool delivery_frame_rejects_partial_record_on_deadline(void)
     return rejected;
 }
 
+struct delivery_private_chunk_call {
+    struct fs_session *session;
+    uint8_t *data;
+    uint32_t size;
+    uint8_t expected_sha3[32];
+    bool ok;
+    _Atomic bool done;
+};
+
+static void *delivery_private_chunk_call_main(void *opaque)
+{
+    struct delivery_private_chunk_call *call = opaque;
+    call->ok = fs_recv_chunk_private(call->session, &call->data, &call->size,
+                                     16, call->expected_sha3);
+    atomic_store_explicit(&call->done, true, memory_order_release);
+    return NULL;
+}
+
+static bool delivery_private_chunk_rejects_partial_record_on_deadline(void)
+{
+    int sockets[2] = {-1, -1};
+    pthread_t thread;
+    bool started = false, sent = false, finished = false;
+    struct fs_session receiver;
+    struct delivery_private_chunk_call call = {.session = &receiver};
+    struct delivery_handshake_clock clock = {0};
+    struct platform_clock_source source = {
+        .monotonic_us = delivery_handshake_monotonic_us,
+        .wall_unix = delivery_handshake_wall_unix,
+        .user = &clock,
+    };
+    uint8_t partial_header = 16;
+
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0)
+        return false;
+    fs_session_init(&receiver, sockets[0]);
+    receiver.key[0] = 1;
+    receiver.key_established = true;
+    memset(call.expected_sha3, 0x5A, sizeof(call.expected_sha3));
+    platform_clock_set_source(&source);
+    started = pthread_create(&thread, NULL,
+                             delivery_private_chunk_call_main, &call) == 0;
+    if (started)
+        sent = delivery_send_exact(sockets[1], &partial_header, 1);
+    for (unsigned i = 0; started && i < 250; i++) {
+        if (atomic_load_explicit(&call.done, memory_order_acquire)) {
+            finished = true;
+            break;
+        }
+        platform_sleep_ms(1);
+    }
+    if (!finished)
+        finished = atomic_load_explicit(&call.done, memory_order_acquire);
+    close(sockets[1]);
+    sockets[1] = -1;
+    if (started)
+        pthread_join(thread, NULL);
+    platform_clock_clear_source();
+
+    bool rejected = sent && finished && !call.ok && call.data == NULL &&
+        call.size == 0 && receiver.recv_counter == 0 &&
+        receiver.bytes_received == 0 &&
+        atomic_load_explicit(&clock.reads, memory_order_relaxed) >= 3;
+    free(call.data);
+    fs_session_cleanup(&receiver);
+    close(sockets[0]);
+    return rejected;
+}
+
+static bool delivery_private_chunk_send_uses_one_deadline(void)
+{
+    int sockets[2] = {-1, -1};
+    struct fs_session sender;
+    struct delivery_handshake_clock clock = {0};
+    struct platform_clock_source source = {
+        .monotonic_us = delivery_handshake_monotonic_us,
+        .wall_unix = delivery_handshake_wall_unix,
+        .user = &clock,
+    };
+    uint8_t data[16], sha3[32], wire[64];
+
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0)
+        return false;
+    memset(data, 0x6C, sizeof(data));
+    sha3_256(data, sizeof(data), sha3);
+    fs_session_init(&sender, sockets[0]);
+    sender.key[0] = 1;
+    sender.key_established = true;
+    platform_clock_set_source(&source);
+    bool sent = fs_send_chunk_private(&sender, data, sizeof(data), sha3);
+    platform_clock_clear_source();
+    ssize_t wire_size = recv(sockets[1], wire, sizeof(wire), MSG_DONTWAIT);
+
+    bool rejected = !sent && wire_size == 4 && sender.send_counter == 0 &&
+        sender.bytes_sent == 0 &&
+        atomic_load_explicit(&clock.reads, memory_order_relaxed) >= 3;
+    fs_session_cleanup(&sender);
+    close(sockets[0]);
+    close(sockets[1]);
+    return rejected;
+}
+
 struct delivery_server_call {
     struct fs_session *session;
     bool served;
@@ -591,6 +693,10 @@ int file_market_delivery_tests(void)
                    delivery_handshake_rejects_partial_record_on_deadline());
     DELIVERY_CHECK("partial encrypted frame hits one absolute deadline",
                    delivery_frame_rejects_partial_record_on_deadline());
+    DELIVERY_CHECK("partial private chunk hits one absolute deadline",
+                   delivery_private_chunk_rejects_partial_record_on_deadline());
+    DELIVERY_CHECK("private chunk send shares one absolute deadline",
+                   delivery_private_chunk_send_uses_one_deadline());
     struct fs_session server;
     struct file_market_delivery_request request, decoded;
     uint8_t wire[FILE_MARKET_DELIVERY_WIRE_BYTES], buyer_seed[32];

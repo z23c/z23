@@ -7,45 +7,113 @@
 #include "base/serialize_le.h"
 #include "crypto/chacha20poly1305.h"
 #include "crypto/sha3.h"
+#include "platform/time_compat.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
 #include <errno.h>
+#include <poll.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 
 #define FS_PRIVATE_CHUNK_MAX (60u * 1024u * 1024u)
 #define FS_PRIVATE_TAG_SIZE POLY1305_TAG_SIZE
+/* One private record gets 30 s of startup slack plus 1 s per begun 256 KiB.
+ * A maximum 50 MiB market chunk therefore gets 231 s (~222 KiB/s average),
+ * bounding slow readers without imposing the frame path's fixed 30 s cap. */
+#define FS_PRIVATE_IO_BASE_BUDGET_MS 30000LL
+#define FS_PRIVATE_IO_MIN_BYTES_PER_SEC (256u * 1024u)
 
 static const uint8_t k_private_key_domain[] =
     "zcl.file.market.private-chunk.key.v1";
 static const uint8_t k_private_aad_domain[] =
     "zcl.file.market.private-chunk.aad.v1";
 
-static bool private_send_all(int fd, const uint8_t *buf, size_t len)
+static bool private_io_deadline(size_t wire_bytes, int64_t *deadline_ms)
+{
+    if (!deadline_ms)
+        LOG_FAIL("filesvc_private", "I/O deadline output is null");
+    int64_t now_ms = platform_time_monotonic_ms();
+    if (now_ms <= 0)
+        LOG_FAIL("filesvc_private", "monotonic I/O deadline unavailable");
+    uint64_t transfer_seconds =
+        (uint64_t)wire_bytes / FS_PRIVATE_IO_MIN_BYTES_PER_SEC;
+    if (wire_bytes % FS_PRIVATE_IO_MIN_BYTES_PER_SEC != 0)
+        transfer_seconds++;
+    if (transfer_seconds >
+        (uint64_t)(INT64_MAX - FS_PRIVATE_IO_BASE_BUDGET_MS) / 1000u)
+        LOG_FAIL("filesvc_private", "I/O deadline exceeds monotonic range");
+    int64_t budget_ms = FS_PRIVATE_IO_BASE_BUDGET_MS +
+        (int64_t)(transfer_seconds * 1000u);
+    if (now_ms > INT64_MAX - budget_ms)
+        LOG_FAIL("filesvc_private", "monotonic I/O deadline overflow");
+    *deadline_ms = now_ms + budget_ms;
+    return true;
+}
+
+static bool private_send_all(int fd, const uint8_t *buf, size_t len,
+                             int64_t deadline_ms)
 {
     size_t sent = 0;
     while (sent < len) {
-        ssize_t n = send(fd, buf + sent, len - sent, MSG_NOSIGNAL);
-        if (n < 0 && errno == EINTR)
+        int64_t now_ms = platform_time_monotonic_ms();
+        if (now_ms <= 0 || now_ms >= deadline_ms)
+            LOG_FAIL("filesvc_private", "send exceeded absolute deadline");
+        struct pollfd pfd = {.fd = fd, .events = POLLOUT};
+        int ready = poll(&pfd, 1, (int)(deadline_ms - now_ms));
+        if (ready < 0 && errno == EINTR)
             continue;
-        if (n <= 0)
+        if (ready < 0)
+            LOG_FAIL("filesvc_private", "send poll failed: errno=%d", errno);
+        if (ready == 0)
+            LOG_FAIL("filesvc_private", "send exceeded absolute deadline");
+        if (!(pfd.revents & POLLOUT))
+            LOG_FAIL("filesvc_private", "send poll revents=0x%x",
+                     pfd.revents);
+        ssize_t n = send(fd, buf + sent, len - sent,
+                         MSG_DONTWAIT | MSG_NOSIGNAL);
+        if (n < 0 && (errno == EINTR || errno == EAGAIN ||
+                      errno == EWOULDBLOCK))
+            continue;
+        if (n < 0)
             LOG_FAIL("filesvc_private", "send failed: errno=%d", errno);
+        if (n == 0)
+            LOG_FAIL("filesvc_private", "send made no progress");
         sent += (size_t)n;
     }
     return true;
 }
 
-static bool private_recv_all(int fd, uint8_t *buf, size_t len)
+static bool private_recv_all(int fd, uint8_t *buf, size_t len,
+                             int64_t deadline_ms)
 {
     size_t got = 0;
     while (got < len) {
-        ssize_t n = recv(fd, buf + got, len - got, 0);
-        if (n < 0 && errno == EINTR)
+        int64_t now_ms = platform_time_monotonic_ms();
+        if (now_ms <= 0 || now_ms >= deadline_ms)
+            LOG_FAIL("filesvc_private", "receive exceeded absolute deadline");
+        struct pollfd pfd = {.fd = fd, .events = POLLIN};
+        int ready = poll(&pfd, 1, (int)(deadline_ms - now_ms));
+        if (ready < 0 && errno == EINTR)
             continue;
-        if (n <= 0)
+        if (ready < 0)
+            LOG_FAIL("filesvc_private", "receive poll failed: errno=%d",
+                     errno);
+        if (ready == 0)
+            LOG_FAIL("filesvc_private", "receive exceeded absolute deadline");
+        if (!(pfd.revents & (POLLIN | POLLHUP)))
+            LOG_FAIL("filesvc_private", "receive poll revents=0x%x",
+                     pfd.revents);
+        ssize_t n = recv(fd, buf + got, len - got, MSG_DONTWAIT);
+        if (n < 0 && (errno == EINTR || errno == EAGAIN ||
+                      errno == EWOULDBLOCK))
+            continue;
+        if (n < 0)
             LOG_FAIL("filesvc_private", "receive failed: errno=%d", errno);
+        if (n == 0)
+            LOG_FAIL("filesvc_private",
+                     "peer closed after %zu/%zu private bytes", got, len);
         got += (size_t)n;
     }
     return true;
@@ -115,10 +183,15 @@ bool fs_send_chunk_private(struct fs_session *session, const uint8_t *data,
     private_nonce(nonce, session->send_counter);
     size_t aad_size = private_aad(aad, size, session->send_counter, sha3);
     zcl_write_u32_le(header, size);
+    int64_t deadline_ms = 0;
     bool ok = chacha20poly1305_encrypt(data, size, aad, aad_size, nonce, key,
                                       sealed) &&
-              private_send_all(session->fd, header, sizeof(header)) &&
-              private_send_all(session->fd, sealed, sealed_size);
+              private_io_deadline(sizeof(header) + sealed_size,
+                                  &deadline_ms) &&
+              private_send_all(session->fd, header, sizeof(header),
+                               deadline_ms) &&
+              private_send_all(session->fd, sealed, sealed_size,
+                               deadline_ms);
     memory_cleanse(key, sizeof(key));
     memory_cleanse(nonce, sizeof(nonce));
     memory_cleanse(aad, sizeof(aad));
@@ -145,7 +218,11 @@ bool fs_recv_chunk_private(struct fs_session *session, uint8_t **out,
     *out_size = 0;
 
     uint8_t header[4];
-    if (!private_recv_all(session->fd, header, sizeof(header)))
+    int64_t deadline_ms = 0;
+    if (!private_io_deadline(sizeof(header) + (size_t)expected_size +
+                             FS_PRIVATE_TAG_SIZE, &deadline_ms))
+        LOG_FAIL("filesvc_private", "receive: I/O deadline unavailable");
+    if (!private_recv_all(session->fd, header, sizeof(header), deadline_ms))
         LOG_FAIL("filesvc_private", "receive: size header unavailable");
     uint32_t wire_size = zcl_read_u32_le(header);
     if (wire_size != expected_size)
@@ -162,7 +239,7 @@ bool fs_recv_chunk_private(struct fs_session *session, uint8_t **out,
         LOG_FAIL("filesvc_private", "receive: allocation failed for %u bytes",
                  wire_size);
     }
-    if (!private_recv_all(session->fd, sealed, sealed_size)) {
+    if (!private_recv_all(session->fd, sealed, sealed_size, deadline_ms)) {
         free(sealed);
         free(plain);
         LOG_FAIL("filesvc_private", "receive: ciphertext unavailable");
