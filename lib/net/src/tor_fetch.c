@@ -4,6 +4,7 @@
 
 #define _DEFAULT_SOURCE
 #include "net/tor_integration.h"
+#include "support/cleanse.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
@@ -45,6 +46,8 @@ struct blocking_fetch_ctx {
 static void blocking_fetch_release(struct blocking_fetch_ctx *ctx)
 {
     if (atomic_fetch_sub(&ctx->refs, 1) == 1) {
+        if (ctx->body && ctx->body_len > 0)
+            memory_cleanse(ctx->body, ctx->body_len);
         free(ctx->body);
         free(ctx);
     }

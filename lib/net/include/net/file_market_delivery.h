@@ -184,6 +184,17 @@ enum file_market_delivery_status file_market_delivery_fetch_endpoint(
     uint32_t chunk_index, const uint8_t buyer_pubkey[32],
     const uint8_t buyer_seed[32],
     struct file_market_delivery_chunk *out_chunk);
+enum file_market_delivery_status file_market_delivery_fetch_session_until(
+    struct fs_session *session, const uint8_t network_genesis[32],
+    const uint8_t offer_id[32], uint32_t chunk_index,
+    const uint8_t buyer_pubkey[32], const uint8_t buyer_seed[32],
+    int64_t deadline_ms, struct file_market_delivery_chunk *out_chunk);
+enum file_market_delivery_status file_market_delivery_fetch_endpoint_until(
+    const uint8_t peer_ip[16], uint16_t peer_port,
+    const uint8_t network_genesis[32], const uint8_t offer_id[32],
+    uint32_t chunk_index, const uint8_t buyer_pubkey[32],
+    const uint8_t buyer_seed[32], int64_t deadline_ms,
+    struct file_market_delivery_chunk *out_chunk);
 
 /* ── Onion delivery (offer endpoint_type == FILE_MARKET_ENDPOINT_ONION) ──
  *
@@ -223,6 +234,12 @@ typedef bool (*file_market_delivery_onion_get_fn)(
     void *ctx, const char *onion_address, const char *path,
     uint8_t *body_out, size_t body_cap, size_t *body_len);
 
+/* Deadline-aware GET port. timeout_secs is the caller's remaining bounded
+ * per-request allowance, always in [1, 60]. */
+typedef bool (*file_market_delivery_onion_timed_get_fn)(
+    void *ctx, const char *onion_address, const char *path, int timeout_secs,
+    uint8_t *body_out, size_t body_cap, size_t *body_len);
+
 /* Fetch one paid chunk from an onion-endpoint offer: seals the onion-bound
  * signed request once, then runs the slice loop — each slice's sha3 is
  * verified before assembly and the assembled bytes are verified against the
@@ -230,6 +247,13 @@ typedef bool (*file_market_delivery_onion_get_fn)(
 enum file_market_delivery_status file_market_delivery_fetch_onion_with(
     file_market_delivery_onion_get_fn get, void *get_ctx,
     const uint8_t seller_onion_pubkey[32],
+    const uint8_t network_genesis[32], const uint8_t offer_id[32],
+    uint32_t chunk_index, const uint8_t buyer_pubkey[32],
+    const uint8_t buyer_seed[32],
+    struct file_market_delivery_chunk *out_chunk);
+enum file_market_delivery_status file_market_delivery_fetch_onion_with_deadline(
+    file_market_delivery_onion_timed_get_fn get, void *get_ctx,
+    int64_t deadline_ms, const uint8_t seller_onion_pubkey[32],
     const uint8_t network_genesis[32], const uint8_t offer_id[32],
     uint32_t chunk_index, const uint8_t buyer_pubkey[32],
     const uint8_t buyer_seed[32],
@@ -244,6 +268,12 @@ enum file_market_delivery_status file_market_delivery_fetch_onion_endpoint(
     const uint8_t network_genesis[32], const uint8_t offer_id[32],
     uint32_t chunk_index, const uint8_t buyer_pubkey[32],
     const uint8_t buyer_seed[32],
+    struct file_market_delivery_chunk *out_chunk);
+enum file_market_delivery_status file_market_delivery_fetch_onion_endpoint_until(
+    const uint8_t seller_onion_pubkey[32],
+    const uint8_t network_genesis[32], const uint8_t offer_id[32],
+    uint32_t chunk_index, const uint8_t buyer_pubkey[32],
+    const uint8_t buyer_seed[32], int64_t deadline_ms,
     struct file_market_delivery_chunk *out_chunk);
 
 #endif /* ZCL_NET_FILE_MARKET_DELIVERY_H */

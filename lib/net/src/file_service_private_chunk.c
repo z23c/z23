@@ -30,7 +30,8 @@ static const uint8_t k_private_key_domain[] =
 static const uint8_t k_private_aad_domain[] =
     "zcl.file.market.private-chunk.aad.v1";
 
-static bool private_io_deadline(size_t wire_bytes, int64_t *deadline_ms)
+static bool private_io_deadline(size_t wire_bytes, int64_t caller_deadline_ms,
+                                int64_t *deadline_ms)
 {
     if (!deadline_ms)
         LOG_FAIL("filesvc_private", "I/O deadline output is null");
@@ -49,6 +50,12 @@ static bool private_io_deadline(size_t wire_bytes, int64_t *deadline_ms)
     if (now_ms > INT64_MAX - budget_ms)
         LOG_FAIL("filesvc_private", "monotonic I/O deadline overflow");
     *deadline_ms = now_ms + budget_ms;
+    if (caller_deadline_ms <= 0)
+        LOG_FAIL("filesvc_private", "caller deadline is invalid");
+    if (caller_deadline_ms < *deadline_ms)
+        *deadline_ms = caller_deadline_ms;
+    if (now_ms >= *deadline_ms)
+        LOG_FAIL("filesvc_private", "caller deadline expired");
     return true;
 }
 
@@ -186,7 +193,7 @@ bool fs_send_chunk_private(struct fs_session *session, const uint8_t *data,
     int64_t deadline_ms = 0;
     bool ok = chacha20poly1305_encrypt(data, size, aad, aad_size, nonce, key,
                                       sealed) &&
-              private_io_deadline(sizeof(header) + sealed_size,
+              private_io_deadline(sizeof(header) + sealed_size, INT64_MAX,
                                   &deadline_ms) &&
               private_send_all(session->fd, header, sizeof(header),
                                deadline_ms) &&
@@ -209,6 +216,16 @@ bool fs_recv_chunk_private(struct fs_session *session, uint8_t **out,
                            uint32_t *out_size, uint32_t expected_size,
                            const uint8_t expected_sha3[32])
 {
+    return fs_recv_chunk_private_until(session, out, out_size, expected_size,
+                                       expected_sha3, INT64_MAX);
+}
+
+bool fs_recv_chunk_private_until(struct fs_session *session, uint8_t **out,
+                                 uint32_t *out_size,
+                                 uint32_t expected_size,
+                                 const uint8_t expected_sha3[32],
+                                 int64_t caller_deadline_ms)
+{
     if (!session || !out || !out_size || !expected_sha3 ||
         !session->key_established || expected_size == 0 ||
         expected_size > FS_PRIVATE_CHUNK_MAX)
@@ -220,7 +237,8 @@ bool fs_recv_chunk_private(struct fs_session *session, uint8_t **out,
     uint8_t header[4];
     int64_t deadline_ms = 0;
     if (!private_io_deadline(sizeof(header) + (size_t)expected_size +
-                             FS_PRIVATE_TAG_SIZE, &deadline_ms))
+                             FS_PRIVATE_TAG_SIZE, caller_deadline_ms,
+                             &deadline_ms))
         LOG_FAIL("filesvc_private", "receive: I/O deadline unavailable");
     if (!private_recv_all(session->fd, header, sizeof(header), deadline_ms))
         LOG_FAIL("filesvc_private", "receive: size header unavailable");
@@ -272,6 +290,12 @@ bool fs_recv_chunk_private(struct fs_session *session, uint8_t **out,
         memory_cleanse(plain, wire_size);
         free(plain);
         LOG_FAIL("filesvc_private", "receive: plaintext hash mismatch");
+    }
+    int64_t finished_ms = platform_time_monotonic_ms();
+    if (finished_ms <= 0 || finished_ms >= deadline_ms) {
+        memory_cleanse(plain, wire_size);
+        free(plain);
+        LOG_FAIL("filesvc_private", "receive: verification exceeded deadline");
     }
 
     session->bytes_received += sizeof(header) + sealed_size;

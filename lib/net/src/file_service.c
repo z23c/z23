@@ -15,6 +15,7 @@
 #include "util/log_json.h"
 #include "crypto/sha3.h"
 #include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -98,18 +99,43 @@ double fs_session_mbps(const struct fs_session *s)
 
 /* ── Raw I/O helpers ───────────────────────────────────────────── */
 
-static bool send_all(int fd, const uint8_t *buf, size_t len)
+static bool send_all_until(int fd, const uint8_t *buf, size_t len,
+                           int64_t deadline_ms)
 {
     size_t sent = 0;
     while (sent < len) {
-        ssize_t n = send(fd, buf + sent, len - sent, MSG_NOSIGNAL);
+        int flags = MSG_NOSIGNAL;
+        if (deadline_ms > 0 && deadline_ms != INT64_MAX) {
+            int64_t now_ms = platform_time_monotonic_ms();
+            if (now_ms <= 0 || now_ms >= deadline_ms)
+                LOG_FAIL("filesvc", "send_all exceeded absolute deadline");
+            struct pollfd pfd = {.fd = fd, .events = POLLOUT};
+            int64_t remain_ms = deadline_ms - now_ms;
+            int timeout_ms = remain_ms > INT_MAX
+                ? INT_MAX : (int)remain_ms;
+            int ready = poll(&pfd, 1, timeout_ms);
+            if (ready < 0 && errno == EINTR)
+                continue;
+            if (ready <= 0 || !(pfd.revents & POLLOUT))
+                LOG_FAIL("filesvc", "send_all deadline wait failed");
+            flags |= MSG_DONTWAIT;
+        }
+        ssize_t n = send(fd, buf + sent, len - sent, flags);
         if (n <= 0) {
-            if (n < 0 && errno == EINTR) continue;
+            if (n < 0 && (errno == EINTR ||
+                    (deadline_ms > 0 && deadline_ms != INT64_MAX &&
+                    (errno == EAGAIN || errno == EWOULDBLOCK))))
+                continue;
             LOG_FAIL("filesvc", "send_all failed: errno=%d (%s)", errno, strerror(errno));
         }
         sent += (size_t)n;
     }
     return true;
+}
+
+static bool send_all(int fd, const uint8_t *buf, size_t len)
+{
+    return send_all_until(fd, buf, len, 0);
 }
 
 static bool recv_all(int fd, uint8_t *buf, size_t len, int64_t deadline_ms)
@@ -283,25 +309,45 @@ static bool decrypt_frame(const struct fs_session *s,
 bool fs_send_frame(struct fs_session *s, uint8_t type,
                     const uint8_t *payload, uint32_t payload_len)
 {
+    return fs_send_frame_until(s, type, payload, payload_len, 0);
+}
+
+bool fs_send_frame_until(struct fs_session *s, uint8_t type,
+                         const uint8_t *payload, uint32_t payload_len,
+                         int64_t deadline_ms)
+{
     uint8_t frame[FS_FRAME_SIZE];
     if (!encrypt_frame(s, type, payload, payload_len,
                         frame, s->send_counter))
         LOG_FAIL("filesvc", "encrypt_frame failed: type=%u len=%u", type, payload_len);
     s->send_counter++;
     s->bytes_sent += FS_FRAME_SIZE;
-    return send_all(s->fd, frame, FS_FRAME_SIZE);
+    return send_all_until(s->fd, frame, FS_FRAME_SIZE, deadline_ms);
 }
 
 bool fs_recv_frame(struct fs_session *s, uint8_t *type_out,
                     const uint8_t **payload_out, uint32_t *payload_len_out)
+{
+    return fs_recv_frame_until(s, type_out, payload_out, payload_len_out,
+                               INT64_MAX);
+}
+
+bool fs_recv_frame_until(struct fs_session *s, uint8_t *type_out,
+                         const uint8_t **payload_out,
+                         uint32_t *payload_len_out, int64_t caller_deadline_ms)
 {
     uint8_t frame[FS_FRAME_SIZE];
     if (!s) LOG_FAIL("filesvc", "fs_recv_frame called with NULL session");
     int64_t now_ms = platform_time_monotonic_ms();
     if (now_ms <= 0 || now_ms > INT64_MAX - FS_FRAME_RECV_BUDGET_MS)
         LOG_FAIL("filesvc", "frame receive deadline unavailable");
-    if (!recv_all(s->fd, frame, FS_FRAME_SIZE,
-                  now_ms + FS_FRAME_RECV_BUDGET_MS))
+    int64_t deadline_ms = now_ms + FS_FRAME_RECV_BUDGET_MS;
+    if (caller_deadline_ms <= 0)
+        LOG_FAIL("filesvc", "frame receive caller deadline is invalid");
+    if (caller_deadline_ms < deadline_ms)
+        deadline_ms = caller_deadline_ms;
+    if (now_ms >= deadline_ms ||
+        !recv_all(s->fd, frame, FS_FRAME_SIZE, deadline_ms))
         LOG_FAIL("filesvc", "recv_all failed reading frame from fd=%d", s->fd);
     s->bytes_received += FS_FRAME_SIZE;
 

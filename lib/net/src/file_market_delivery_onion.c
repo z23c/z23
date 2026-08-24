@@ -17,6 +17,8 @@
 #include "net/file_market.h"
 #include "net/onion_v3_address.h"
 #include "net/tor_integration.h"
+#include "platform/time_compat.h"
+#include "support/cleanse.h"
 #include "util/safe_alloc.h"
 
 #include <stdio.h>
@@ -216,6 +218,8 @@ size_t file_market_delivery_onion_handle_request(
         slice_count = (reply.size + FILE_MARKET_ONION_SLICE_BYTES - 1) /
                       FILE_MARKET_ONION_SLICE_BYTES;
         if (slice_index >= slice_count) {
+            if (chunk.data && chunk.size > 0)
+                memory_cleanse(chunk.data, chunk.size);
             free(chunk.data);
             return onion_http_text(response, response_max, 400,
                                    "Bad Request", "slice out of range\n");
@@ -233,14 +237,58 @@ size_t file_market_delivery_onion_handle_request(
         memcpy(payload + header_len, chunk.data +
                (size_t)slice_index * FILE_MARKET_ONION_SLICE_BYTES,
                payload_len);
+    if (chunk.data && chunk.size > 0)
+        memory_cleanse(chunk.data, chunk.size);
     free(chunk.data);
-    return onion_http_respond(response, response_max, 200, "OK",
-                              "application/octet-stream", payload,
-                              header_len + payload_len);
+    size_t response_len = onion_http_respond(
+        response, response_max, 200, "OK", "application/octet-stream",
+        payload, header_len + payload_len);
+    memory_cleanse(payload, sizeof(payload));
+    return response_len;
 }
 
-enum file_market_delivery_status file_market_delivery_fetch_onion_with(
-    file_market_delivery_onion_get_fn get, void *get_ctx,
+struct onion_untimed_adapter {
+    file_market_delivery_onion_get_fn get;
+    void *ctx;
+};
+
+static bool onion_untimed_get_with_timeout(
+    void *opaque, const char *onion_address, const char *path,
+    int timeout_secs, uint8_t *body_out, size_t body_cap, size_t *body_len)
+{
+    struct onion_untimed_adapter *adapter = opaque;
+    (void)timeout_secs;
+    return adapter->get(adapter->ctx, onion_address, path,
+                        body_out, body_cap, body_len);
+}
+
+static bool onion_deadline_timeout(int64_t deadline_ms, int *timeout_secs)
+{
+    if (deadline_ms == INT64_MAX) {
+        *timeout_secs = 60;
+        return true;
+    }
+    int64_t now_ms = platform_time_monotonic_ms();
+    if (now_ms <= 0 || now_ms >= deadline_ms)
+        return false;
+    int64_t remain_ms = deadline_ms - now_ms;
+    int64_t seconds = remain_ms / 1000;
+    if (seconds == 0)
+        return false;
+    *timeout_secs = seconds < 60 ? (int)seconds : 60;
+    return true;
+}
+
+static void onion_assembly_discard(uint8_t *assembled, uint32_t size)
+{
+    if (assembled && size > 0)
+        memory_cleanse(assembled, size);
+    free(assembled);
+}
+
+static enum file_market_delivery_status onion_fetch_with_deadline(
+    file_market_delivery_onion_timed_get_fn get, void *get_ctx,
+    int64_t deadline_ms,
     const uint8_t seller_onion_pubkey[32],
     const uint8_t network_genesis[32], const uint8_t offer_id[32],
     uint32_t chunk_index, const uint8_t buyer_pubkey[32],
@@ -281,6 +329,7 @@ enum file_market_delivery_status file_market_delivery_fetch_onion_with(
     uint8_t chunk_sha3[32];
     memset(chunk_sha3, 0, sizeof(chunk_sha3));
     uint8_t body[FILE_MARKET_ONION_REPLY_MAX];
+    memset(body, 0, sizeof(body));
 
     for (uint32_t k = 0; !slice_count || k < slice_count; k++) {
         char path[sizeof(FILE_MARKET_ONION_PATH_PREFIX) +
@@ -288,17 +337,28 @@ enum file_market_delivery_status file_market_delivery_fetch_onion_with(
         snprintf(path, sizeof(path), "%s%s?slice=%u",
                  FILE_MARKET_ONION_PATH_PREFIX, request_hex, k);
         size_t body_len = 0;
-        if (!get(get_ctx, onion_address, path, body, sizeof(body),
-                 &body_len))
+        int timeout_secs = 0;
+        if (!onion_deadline_timeout(deadline_ms, &timeout_secs))
+            goto resource_limit;
+        if (!get(get_ctx, onion_address, path, timeout_secs, body,
+                 sizeof(body), &body_len)) {
+            if (!onion_deadline_timeout(deadline_ms, &timeout_secs))
+                goto resource_limit;
             goto transport_fail;
+        }
+        if (!onion_deadline_timeout(deadline_ms, &timeout_secs))
+            goto resource_limit;
         struct onion_reply_header header;
         if (!onion_reply_header_parse(body, body_len, &header) ||
             memcmp(header.offer_id, offer_id, 32) != 0 ||
             header.chunk_index != chunk_index)
             goto transport_fail;
         if (header.status != FILE_MARKET_DELIVERY_READY) {
-            free(assembled);
-            return (enum file_market_delivery_status)header.status;
+            enum file_market_delivery_status status =
+                (enum file_market_delivery_status)header.status;
+            memory_cleanse(body, sizeof(body));
+            onion_assembly_discard(assembled, chunk_size);
+            return status;
         }
         size_t slice_len = body_len - FILE_MARKET_ONION_REPLY_HEADER_BYTES;
         uint8_t slice_digest[32];
@@ -333,43 +393,98 @@ enum file_market_delivery_status file_market_delivery_fetch_onion_with(
         }
         memcpy(assembled + (size_t)k * FILE_MARKET_ONION_SLICE_BYTES,
                body + FILE_MARKET_ONION_REPLY_HEADER_BYTES, slice_len);
+        memory_cleanse(body, sizeof(body));
     }
 
     uint8_t assembled_digest[32];
+    int final_timeout_secs = 0;
+    if (!onion_deadline_timeout(deadline_ms, &final_timeout_secs))
+        goto resource_limit;
     sha3_256(assembled, chunk_size, assembled_digest);
+    if (!onion_deadline_timeout(deadline_ms, &final_timeout_secs))
+        goto resource_limit;
     if (memcmp(assembled_digest, chunk_sha3, 32) != 0)
         goto malformed;
     out_chunk->data = assembled;
     out_chunk->size = chunk_size;
     memcpy(out_chunk->sha3, chunk_sha3, 32);
+    memory_cleanse(body, sizeof(body));
+    memory_cleanse(assembled_digest, sizeof(assembled_digest));
     return FILE_MARKET_DELIVERY_READY;
 
 transport_fail:
-    free(assembled);
+    memory_cleanse(body, sizeof(body));
+    onion_assembly_discard(assembled, chunk_size);
     return FILE_MARKET_DELIVERY_PAYMENT_UNKNOWN;
+resource_limit:
+    memory_cleanse(body, sizeof(body));
+    onion_assembly_discard(assembled, chunk_size);
+    return FILE_MARKET_DELIVERY_RESOURCE_LIMIT;
 malformed:
-    free(assembled);
+    memory_cleanse(body, sizeof(body));
+    onion_assembly_discard(assembled, chunk_size);
     return FILE_MARKET_DELIVERY_MALFORMED;
+}
+
+enum file_market_delivery_status file_market_delivery_fetch_onion_with(
+    file_market_delivery_onion_get_fn get, void *get_ctx,
+    const uint8_t seller_onion_pubkey[32],
+    const uint8_t network_genesis[32], const uint8_t offer_id[32],
+    uint32_t chunk_index, const uint8_t buyer_pubkey[32],
+    const uint8_t buyer_seed[32],
+    struct file_market_delivery_chunk *out_chunk)
+{
+    if (!get) {
+        if (out_chunk)
+            memset(out_chunk, 0, sizeof(*out_chunk));
+        return FILE_MARKET_DELIVERY_MALFORMED;
+    }
+    struct onion_untimed_adapter adapter = {.get = get, .ctx = get_ctx};
+    return onion_fetch_with_deadline(
+        onion_untimed_get_with_timeout, &adapter, INT64_MAX,
+        seller_onion_pubkey, network_genesis, offer_id, chunk_index,
+        buyer_pubkey, buyer_seed, out_chunk);
+}
+
+enum file_market_delivery_status file_market_delivery_fetch_onion_with_deadline(
+    file_market_delivery_onion_timed_get_fn get, void *get_ctx,
+    int64_t deadline_ms, const uint8_t seller_onion_pubkey[32],
+    const uint8_t network_genesis[32], const uint8_t offer_id[32],
+    uint32_t chunk_index, const uint8_t buyer_pubkey[32],
+    const uint8_t buyer_seed[32],
+    struct file_market_delivery_chunk *out_chunk)
+{
+    return onion_fetch_with_deadline(
+        get, get_ctx, deadline_ms, seller_onion_pubkey, network_genesis,
+        offer_id, chunk_index, buyer_pubkey, buyer_seed, out_chunk);
 }
 
 /* Production GET port: one blocking embedded-Tor fetch per slice. The
  * dynhost layer treats any HTTP status >= 200 as transport-ok, so the 200
  * check happens here. */
 static bool onion_tor_get(void *ctx, const char *onion_address,
-                          const char *path,
+                          const char *path, int timeout_secs,
                           uint8_t *body_out, size_t body_cap,
                           size_t *body_len)
 {
     (void)ctx;
     struct onion_fetch_result result;
-    if (tor_integration_fetch_onion_blocking(onion_address, path, &result,
-                                             60) != 0)
+    memset(&result, 0, sizeof(result));
+    int rc = tor_integration_fetch_onion_blocking(
+        onion_address, path, &result, timeout_secs);
+    if (rc != 0) {
+        if (result.body && result.body_len > 0)
+            memory_cleanse(result.body, result.body_len);
+        free(result.body);
         return false;
+    }
     bool ok = result.status == 200 && result.body_len <= body_cap;
     if (ok && result.body_len > 0 && result.body)
         memcpy(body_out, result.body, result.body_len);
     if (ok)
         *body_len = result.body_len;
+    if (result.body && result.body_len > 0)
+        memory_cleanse(result.body, result.body_len);
     free(result.body);
     return ok;
 }
@@ -381,7 +496,20 @@ enum file_market_delivery_status file_market_delivery_fetch_onion_endpoint(
     const uint8_t buyer_seed[32],
     struct file_market_delivery_chunk *out_chunk)
 {
-    return file_market_delivery_fetch_onion_with(
-        onion_tor_get, NULL, seller_onion_pubkey, network_genesis, offer_id,
-        chunk_index, buyer_pubkey, buyer_seed, out_chunk);
+    return file_market_delivery_fetch_onion_endpoint_until(
+        seller_onion_pubkey, network_genesis, offer_id, chunk_index,
+        buyer_pubkey, buyer_seed, INT64_MAX, out_chunk);
+}
+
+enum file_market_delivery_status file_market_delivery_fetch_onion_endpoint_until(
+    const uint8_t seller_onion_pubkey[32],
+    const uint8_t network_genesis[32], const uint8_t offer_id[32],
+    uint32_t chunk_index, const uint8_t buyer_pubkey[32],
+    const uint8_t buyer_seed[32], int64_t deadline_ms,
+    struct file_market_delivery_chunk *out_chunk)
+{
+    return onion_fetch_with_deadline(
+        onion_tor_get, NULL, deadline_ms, seller_onion_pubkey,
+        network_genesis, offer_id, chunk_index, buyer_pubkey, buyer_seed,
+        out_chunk);
 }

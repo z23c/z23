@@ -23,7 +23,7 @@ app/controllers/src/agent_anchor_status_controller.c 847
 app/controllers/src/agent_controller.c 805
 app/controllers/src/api_controller_status.c 894
 app/controllers/src/api_controller_routes.c 834 # market-moderation dynamic route (split seam if this grows again)
-app/controllers/src/file_market_controller.c 1199 # market-moderation RPCs (split seam: moderation handlers -> market_moderation_native_handler.c)
+app/controllers/src/file_market_controller.c 1189 # market-moderation RPCs (split seam: moderation handlers -> market_moderation_native_handler.c)
 app/controllers/src/name_controller.c 1017
 app/controllers/src/swap_controller.c 1027
 app/controllers/src/shop_native_want.c 902 # buyer want-ads: 5 leaves (post/list/status/cancel/review), sign+store controller (split seam: model helpers -> models/shop_want.c)

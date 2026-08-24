@@ -26,12 +26,24 @@ static const uint8_t k_fs_handshake_domain[] =
 static const uint8_t k_fs_confirmation_domain[] =
     "zcl.file-service.key-confirmation.v1";
 
-static bool handshake_send_all(int fd, const uint8_t *data, size_t len)
+static bool handshake_send_all(int fd, const uint8_t *data, size_t len,
+                               int64_t deadline_ms)
 {
     size_t sent = 0;
     while (sent < len) {
-        ssize_t n = send(fd, data + sent, len - sent, MSG_NOSIGNAL);
-        if (n < 0 && errno == EINTR)
+        int64_t now_ms = platform_time_monotonic_ms();
+        if (now_ms <= 0 || now_ms >= deadline_ms)
+            return false;
+        struct pollfd pfd = {.fd = fd, .events = POLLOUT};
+        int ready = poll(&pfd, 1, (int)(deadline_ms - now_ms));
+        if (ready < 0 && errno == EINTR)
+            continue;
+        if (ready <= 0 || !(pfd.revents & POLLOUT))
+            return false;
+        ssize_t n = send(fd, data + sent, len - sent,
+                         MSG_DONTWAIT | MSG_NOSIGNAL);
+        if (n < 0 && (errno == EINTR || errno == EAGAIN ||
+                      errno == EWOULDBLOCK))
             continue;
         if (n <= 0)
             return false;
@@ -109,6 +121,13 @@ static bool confirmation_equal(const uint8_t a[32], const uint8_t b[32])
 bool fs_handshake(struct fs_session *session, const uint8_t utxo_root[32],
                   bool initiator)
 {
+    return fs_handshake_until(session, utxo_root, initiator, INT64_MAX);
+}
+
+bool fs_handshake_until(struct fs_session *session,
+                        const uint8_t utxo_root[32], bool initiator,
+                        int64_t caller_deadline_ms)
+{
     uint8_t ephemeral_private[32] = {0};
     uint8_t shared_secret[32] = {0};
     uint8_t transcript[sizeof(k_fs_handshake_domain) - 1 + 64] = {0};
@@ -129,6 +148,16 @@ bool fs_handshake(struct fs_session *session, const uint8_t utxo_root[32],
         goto done;
     }
     deadline_ms = now_ms + FS_HANDSHAKE_RECV_BUDGET_MS;
+    if (caller_deadline_ms <= 0) {
+        failure = "invalid caller deadline";
+        goto done;
+    }
+    if (caller_deadline_ms < deadline_ms)
+        deadline_ms = caller_deadline_ms;
+    if (now_ms >= deadline_ms) {
+        failure = "caller deadline expired";
+        goto done;
+    }
 
     if (!zcl_random_secret_bytes(ephemeral_private,
                                  sizeof(ephemeral_private),
@@ -143,7 +172,8 @@ bool fs_handshake(struct fs_session *session, const uint8_t utxo_root[32],
     }
 
     if (initiator) {
-        if (!handshake_send_all(session->fd, session->our_nonce, 32)) {
+        if (!handshake_send_all(session->fd, session->our_nonce, 32,
+                                deadline_ms)) {
             failure = "initiator public-key send failed";
             goto done;
         }
@@ -158,7 +188,8 @@ bool fs_handshake(struct fs_session *session, const uint8_t utxo_root[32],
             failure = "initiator public-key receive failed";
             goto done;
         }
-        if (!handshake_send_all(session->fd, session->our_nonce, 32)) {
+        if (!handshake_send_all(session->fd, session->our_nonce, 32,
+                                deadline_ms)) {
             failure = "responder public-key send failed";
             goto done;
         }
@@ -181,7 +212,8 @@ bool fs_handshake(struct fs_session *session, const uint8_t utxo_root[32],
                            our_confirmation);
     handshake_confirmation(session->key, transcript, initiator ? 2 : 1,
                            expected_peer_confirmation);
-    if (!handshake_send_all(session->fd, our_confirmation, 32)) {
+    if (!handshake_send_all(session->fd, our_confirmation, 32,
+                            deadline_ms)) {
         failure = "key confirmation send failed";
         goto done;
     }

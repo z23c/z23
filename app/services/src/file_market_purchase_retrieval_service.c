@@ -10,7 +10,7 @@
 #include "models/file_offer.h"
 #include "models/market_download.h"
 #include "models/vault_intent.h"
-#include "net/tor_integration.h"
+#include "platform/time_compat.h"
 #include "support/cleanse.h"
 #include "util/safe_alloc.h"
 
@@ -22,6 +22,32 @@
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+enum file_market_delivery_status market_purchase_fetch_endpoint(
+    void *ctx, const uint8_t peer_ip[16], uint16_t peer_port,
+    const uint8_t network_genesis[32], const uint8_t offer_id[32],
+    uint32_t chunk_index, const uint8_t buyer_pubkey[32],
+    const uint8_t buyer_seed[32], int64_t deadline_ms,
+    struct file_market_delivery_chunk *out_chunk)
+{
+    (void)ctx;
+    return file_market_delivery_fetch_endpoint_until(
+        peer_ip, peer_port, network_genesis, offer_id, chunk_index,
+        buyer_pubkey, buyer_seed, deadline_ms, out_chunk);
+}
+
+enum file_market_delivery_status market_purchase_fetch_onion_endpoint(
+    void *ctx, const uint8_t seller_onion_pubkey[32],
+    const uint8_t network_genesis[32], const uint8_t offer_id[32],
+    uint32_t chunk_index, const uint8_t buyer_pubkey[32],
+    const uint8_t buyer_seed[32], int64_t deadline_ms,
+    struct file_market_delivery_chunk *out_chunk)
+{
+    (void)ctx;
+    return file_market_delivery_fetch_onion_endpoint_until(
+        seller_onion_pubkey, network_genesis, offer_id, chunk_index,
+        buyer_pubkey, buyer_seed, deadline_ms, out_chunk);
+}
 
 static bool mp_private_paths(const uint8_t plan_id[32],
                              const char *destination,
@@ -98,6 +124,22 @@ static uint32_t mp_chunk_size(const struct file_offer *offer, uint32_t index)
         ? (uint32_t)remain : (uint32_t)FILE_MARKET_CHUNK_SIZE;
 }
 
+static void mp_chunk_discard(struct file_market_delivery_chunk *chunk)
+{
+    if (!chunk)
+        return;
+    if (chunk->data && chunk->size > 0)
+        memory_cleanse(chunk->data, chunk->size);
+    free(chunk->data);
+    memset(chunk, 0, sizeof(*chunk));
+}
+
+static bool mp_deadline_active(int64_t deadline_ms)
+{
+    int64_t now_ms = platform_time_monotonic_ms();
+    return now_ms > 0 && now_ms < deadline_ms;
+}
+
 static bool mp_verify_staged(struct node_db *ndb,
                              const struct market_download_record *download,
                              int fd)
@@ -127,8 +169,12 @@ static bool mp_verify_staged(struct node_db *ndb,
         bool read_ok = mp_read_exact_at(fd, buffer, chunk.size_bytes, offset);
         uint8_t digest[32];
         if (read_ok) sha3_256(buffer, chunk.size_bytes, digest);
+        memory_cleanse(buffer, chunk.size_bytes);
         free(buffer);
-        if (!read_ok || memcmp(digest, chunk.chunk_sha3, 32) != 0)
+        bool digest_ok = read_ok &&
+            memcmp(digest, chunk.chunk_sha3, 32) == 0;
+        memory_cleanse(digest, sizeof(digest));
+        if (!digest_ok)
             return false; // raw-return-ok:caller names staging verification error
         offset += chunk.size_bytes;
     }
@@ -281,6 +327,7 @@ struct zcl_result market_purchase_retrieve(
     const char *destination_path, struct market_purchase_view *out)
 {
     ZCL_CHECK(market_purchase_runtime_validate(rt, false, false));
+    int64_t retrieve_started_ms = platform_time_monotonic_ms();
     if (!plan_id || !destination_path || !destination_path[0] || !out ||
         !rt->fetch)
         return ZCL_ERR(-58, "plan id, private destination, output, and fetch transport are required");
@@ -352,23 +399,54 @@ struct zcl_result market_purchase_retrieve(
     bool onion_endpoint =
         offer.endpoint_type == FILE_MARKET_ENDPOINT_ONION;
     if (onion_endpoint && offer.num_chunks > download.chunks_received &&
-        !tor_integration_is_ready()) {
+        (!rt->onion_transport_ready || !rt->fetch_onion)) {
         close(fd);
         memory_cleanse(plain, sizeof(plain));
         memory_cleanse(&payload, sizeof(payload));
         return ZCL_ERR(-78, "signed offer names an onion endpoint but the embedded Tor client is not running (start the node with -tor)");
     }
+    int64_t retrieve_deadline_ms = INT64_MAX;
+    if (offer.num_chunks > download.chunks_received) {
+        if (retrieve_started_ms <= 0 ||
+            retrieve_started_ms >
+                INT64_MAX - MARKET_PURCHASE_RETRIEVE_BUDGET_MS) {
+            close(fd);
+            memory_cleanse(plain, sizeof(plain));
+            memory_cleanse(&payload, sizeof(payload));
+            return ZCL_ERR(-76, "seller delivery is %s",
+                file_market_delivery_status_string(
+                    FILE_MARKET_DELIVERY_RESOURCE_LIMIT));
+        }
+        retrieve_deadline_ms =
+            retrieve_started_ms + MARKET_PURCHASE_RETRIEVE_BUDGET_MS;
+    }
     for (uint32_t i = download.chunks_received; i < offer.num_chunks; i++) {
         struct file_market_delivery_chunk chunk;
         memset(&chunk, 0, sizeof(chunk));
+        if (!mp_deadline_active(retrieve_deadline_ms)) {
+            result = ZCL_ERR(-76, "seller delivery is %s",
+                file_market_delivery_status_string(
+                    FILE_MARKET_DELIVERY_RESOURCE_LIMIT));
+            break;
+        }
         enum file_market_delivery_status status = onion_endpoint
-            ? file_market_delivery_fetch_onion_endpoint(
-                offer.onion_pubkey, offer.network_genesis, offer.offer_id, i,
-                payload.buyer_pubkey, payload.buyer_seed, &chunk)
+            ? rt->fetch_onion(
+                rt->fetch_onion_ctx, offer.onion_pubkey,
+                offer.network_genesis, offer.offer_id, i,
+                payload.buyer_pubkey, payload.buyer_seed,
+                retrieve_deadline_ms, &chunk)
             : rt->fetch(
                 rt->fetch_ctx, offer.peer_ip, offer.peer_port,
                 offer.network_genesis, offer.offer_id, i,
-                payload.buyer_pubkey, payload.buyer_seed, &chunk);
+                payload.buyer_pubkey, payload.buyer_seed,
+                retrieve_deadline_ms, &chunk);
+        if (!mp_deadline_active(retrieve_deadline_ms)) {
+            mp_chunk_discard(&chunk);
+            result = ZCL_ERR(-76, "seller delivery is %s",
+                file_market_delivery_status_string(
+                    FILE_MARKET_DELIVERY_RESOURCE_LIMIT));
+            break;
+        }
         uint32_t expected = mp_chunk_size(&offer, i);
         uint8_t actual[32];
         bool exact = status == FILE_MARKET_DELIVERY_READY && chunk.data &&
@@ -378,7 +456,7 @@ struct zcl_result market_purchase_retrieve(
             exact = memcmp(actual, chunk.sha3, 32) == 0;
         }
         if (!exact) {
-            free(chunk.data);
+            mp_chunk_discard(&chunk);
             result = ZCL_ERR(-76, "seller delivery is %s",
                 file_market_delivery_status_string(status));
             break;
@@ -386,13 +464,20 @@ struct zcl_result market_purchase_retrieve(
         uint64_t offset = (uint64_t)i * FILE_MARKET_CHUNK_SIZE;
         if (!mp_write_exact_at(fd, chunk.data, chunk.size, offset) ||
             fsync(fd) != 0) {
-            free(chunk.data);
+            mp_chunk_discard(&chunk);
             result = ZCL_ERR(-77, "downloaded chunk could not be durably staged");
+            break;
+        }
+        if (!mp_deadline_active(retrieve_deadline_ms)) {
+            mp_chunk_discard(&chunk);
+            result = ZCL_ERR(-76, "seller delivery is %s",
+                file_market_delivery_status_string(
+                    FILE_MARKET_DELIVERY_RESOURCE_LIMIT));
             break;
         }
         struct zcl_result recorded = mp_download_record_chunk(
             rt, &download, i, &chunk);
-        free(chunk.data);
+        mp_chunk_discard(&chunk);
         if (!recorded.ok) {
             result = recorded;
             break;

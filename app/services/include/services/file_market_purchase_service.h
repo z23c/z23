@@ -16,6 +16,9 @@ struct node_db;
 
 #define MARKET_PURCHASE_APPLICATION "market_purchase"
 #define MARKET_PURCHASE_SOURCE_MAX 255
+/* Leaves one full minute for RPC rendering/cleanup before the fixed
+ * five-minute market-delivery watchdog closes the caller connection. */
+#define MARKET_PURCHASE_RETRIEVE_BUDGET_MS 240000LL
 
 typedef struct zcl_result (*market_purchase_money_fn)(
     void *ctx, const char *wallet_scope, struct wallet_money_snapshot *out);
@@ -31,7 +34,13 @@ typedef enum file_market_delivery_status (*market_purchase_fetch_fn)(
     void *ctx, const uint8_t peer_ip[16], uint16_t peer_port,
     const uint8_t network_genesis[32], const uint8_t offer_id[32],
     uint32_t chunk_index, const uint8_t buyer_pubkey[32],
-    const uint8_t buyer_seed[32],
+    const uint8_t buyer_seed[32], int64_t deadline_ms,
+    struct file_market_delivery_chunk *out_chunk);
+typedef enum file_market_delivery_status (*market_purchase_onion_fetch_fn)(
+    void *ctx, const uint8_t seller_onion_pubkey[32],
+    const uint8_t network_genesis[32], const uint8_t offer_id[32],
+    uint32_t chunk_index, const uint8_t buyer_pubkey[32],
+    const uint8_t buyer_seed[32], int64_t deadline_ms,
     struct file_market_delivery_chunk *out_chunk);
 
 /* Ports keep wallet selection/build/broadcast and peer transport in their
@@ -49,11 +58,29 @@ struct market_purchase_runtime {
     void *notify_ctx;
     market_purchase_fetch_fn fetch;
     void *fetch_ctx;
+    market_purchase_onion_fetch_fn fetch_onion;
+    void *fetch_onion_ctx;
+    bool onion_transport_ready;
     int32_t tip_height;
     uint8_t tip_hash[32];
     int64_t maximum_fee_zat;
     int64_t now_unix;
 };
+
+/* Production transport ports kept beside retrieval orchestration so the RPC
+ * controller only supplies runtime ownership/readiness. */
+enum file_market_delivery_status market_purchase_fetch_endpoint(
+    void *ctx, const uint8_t peer_ip[16], uint16_t peer_port,
+    const uint8_t network_genesis[32], const uint8_t offer_id[32],
+    uint32_t chunk_index, const uint8_t buyer_pubkey[32],
+    const uint8_t buyer_seed[32], int64_t deadline_ms,
+    struct file_market_delivery_chunk *out_chunk);
+enum file_market_delivery_status market_purchase_fetch_onion_endpoint(
+    void *ctx, const uint8_t seller_onion_pubkey[32],
+    const uint8_t network_genesis[32], const uint8_t offer_id[32],
+    uint32_t chunk_index, const uint8_t buyer_pubkey[32],
+    const uint8_t buyer_seed[32], int64_t deadline_ms,
+    struct file_market_delivery_chunk *out_chunk);
 
 struct market_purchase_request {
     char wallet_scope[5];

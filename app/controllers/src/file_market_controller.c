@@ -19,6 +19,7 @@
 #include "net/file_market.h"
 #include "net/msgprocessor.h"
 #include "net/rom_seed.h"
+#include "net/tor_integration.h"
 #include "util/util.h"
 #include "encoding/utilstrencodings.h"
 #include "util/log_macros.h"
@@ -469,19 +470,6 @@ static bool market_purchase_notify(void *opaque,
     return encoded;
 }
 
-static enum file_market_delivery_status market_purchase_fetch(
-    void *opaque, const uint8_t peer_ip[16], uint16_t peer_port,
-    const uint8_t network_genesis[32], const uint8_t offer_id[32],
-    uint32_t chunk_index, const uint8_t buyer_pubkey[32],
-    const uint8_t buyer_seed[32],
-    struct file_market_delivery_chunk *out_chunk)
-{
-    (void)opaque;
-    return file_market_delivery_fetch_endpoint(
-        peer_ip, peer_port, network_genesis, offer_id, chunk_index,
-        buyer_pubkey, buyer_seed, out_chunk);
-}
-
 static struct zcl_result market_purchase_runtime(
     struct market_purchase_runtime *runtime, bool money)
 {
@@ -492,7 +480,9 @@ static struct zcl_result market_purchase_runtime(
     runtime->now_unix = (int64_t)platform_time_wall_time_t();
     /* The fetch transport owes nothing to the money runtime — wire it
      * before the !money early return or retrieve can never run. */
-    runtime->fetch = market_purchase_fetch;
+    runtime->fetch = market_purchase_fetch_endpoint;
+    runtime->fetch_onion = market_purchase_fetch_onion_endpoint;
+    runtime->onion_transport_ready = tor_integration_is_ready();
     if (!money) return runtime->node_db && runtime->node_db->open
         ? ZCL_OK : ZCL_ERR(-2, "market database is unavailable");
     if (!ctx || !ctx->wallet || !ctx->main_state || !ctx->node_db ||

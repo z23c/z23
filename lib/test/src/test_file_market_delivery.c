@@ -401,6 +401,68 @@ struct delivery_frame_call {
     _Atomic bool done;
 };
 
+struct delivery_frame_send_call {
+    struct fs_session *session;
+    bool ok;
+    _Atomic bool done;
+};
+
+static void *delivery_frame_send_call_main(void *opaque)
+{
+    struct delivery_frame_send_call *call = opaque;
+    call->ok = fs_send_frame_until(
+        call->session, FS_REQUEST, NULL, 0, INT64_MAX);
+    atomic_store_explicit(&call->done, true, memory_order_release);
+    return NULL;
+}
+
+static bool delivery_legacy_frame_send_honors_socket_timeout(void)
+{
+    int sockets[2] = {-1, -1};
+    pthread_t thread;
+    bool started = false, finished = false;
+    struct fs_session sender;
+    struct delivery_frame_send_call call = {.session = &sender};
+    uint8_t fill[4096] = {0};
+    int small_buffer = 4096;
+    struct timeval send_timeout = {.tv_sec = 0, .tv_usec = 50000};
+
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0)
+        return false;
+    fs_session_init(&sender, sockets[0]);
+    sender.key[0] = 1;
+    sender.key_established = true;
+    if (setsockopt(sockets[0], SOL_SOCKET, SO_SNDBUF, &small_buffer,
+                   sizeof(small_buffer)) != 0 ||
+        setsockopt(sockets[0], SOL_SOCKET, SO_SNDTIMEO, &send_timeout,
+                   sizeof(send_timeout)) != 0) {
+        fs_session_cleanup(&sender);
+        close(sockets[0]);
+        close(sockets[1]);
+        return false;
+    }
+    while (send(sockets[0], fill, sizeof(fill), MSG_DONTWAIT) > 0) {}
+    started = pthread_create(&thread, NULL,
+                             delivery_frame_send_call_main, &call) == 0;
+    for (unsigned i = 0; started && i < 250; i++) {
+        if (atomic_load_explicit(&call.done, memory_order_acquire)) {
+            finished = true;
+            break;
+        }
+        platform_sleep_ms(1);
+    }
+    if (!finished)
+        finished = atomic_load_explicit(&call.done, memory_order_acquire);
+    close(sockets[1]);
+    sockets[1] = -1;
+    if (started)
+        pthread_join(thread, NULL);
+    bool bounded = started && finished && !call.ok;
+    fs_session_cleanup(&sender);
+    close(sockets[0]);
+    return bounded;
+}
+
 static void *delivery_frame_call_main(void *opaque)
 {
     struct delivery_frame_call *call = opaque;
@@ -636,6 +698,24 @@ struct onion_loopback {
     bool corrupt_path;
 };
 
+struct onion_deadline_loopback {
+    struct onion_loopback loop;
+    _Atomic int64_t now_us;
+    int timeouts[4];
+};
+
+static int64_t onion_deadline_monotonic_us(void *opaque)
+{
+    struct onion_deadline_loopback *deadline = opaque;
+    return atomic_load_explicit(&deadline->now_us, memory_order_relaxed);
+}
+
+static int64_t onion_deadline_wall_unix(void *opaque)
+{
+    (void)opaque;
+    return 1;
+}
+
 /* In-process stand-in for the production onion GET port: routes the GET
  * into the site-route handler and unwraps the HTTP envelope the same way
  * onion_tor_get does (non-200 is a transport failure; the body follows the
@@ -680,6 +760,23 @@ static bool onion_loopback_get(void *ctx, const char *onion_address,
     return true;
 }
 
+static bool onion_deadline_get(void *ctx, const char *onion_address,
+                               const char *path, int timeout_secs,
+                               uint8_t *body_out, size_t body_cap,
+                               size_t *body_len)
+{
+    struct onion_deadline_loopback *deadline = ctx;
+    int call = deadline->loop.calls;
+    if (call < (int)(sizeof(deadline->timeouts) /
+                     sizeof(deadline->timeouts[0])))
+        deadline->timeouts[call] = timeout_secs;
+    bool ok = onion_loopback_get(&deadline->loop, onion_address, path,
+                                 body_out, body_cap, body_len);
+    atomic_fetch_add_explicit(&deadline->now_us, 1500000,
+                              memory_order_relaxed);
+    return ok;
+}
+
 int file_market_delivery_tests(void)
 {
     int failures = 0;
@@ -693,6 +790,8 @@ int file_market_delivery_tests(void)
                    delivery_handshake_rejects_partial_record_on_deadline());
     DELIVERY_CHECK("partial encrypted frame hits one absolute deadline",
                    delivery_frame_rejects_partial_record_on_deadline());
+    DELIVERY_CHECK("legacy frame send retains bounded socket behavior",
+                   delivery_legacy_frame_send_honors_socket_timeout());
     DELIVERY_CHECK("partial private chunk hits one absolute deadline",
                    delivery_private_chunk_rejects_partial_record_on_deadline());
     DELIVERY_CHECK("private chunk send shares one absolute deadline",
@@ -704,6 +803,21 @@ int file_market_delivery_tests(void)
     DELIVERY_CHECK("session-bound signed request fixture", made);
     if (!made)
         return failures;
+
+    struct file_market_delivery_chunk expired_session_chunk;
+    memset(&expired_session_chunk, 0xA5, sizeof(expired_session_chunk));
+    server.key_established = true;
+    enum file_market_delivery_status expired_session_status =
+        file_market_delivery_fetch_session_until(
+            &server, request.network_genesis, request.offer_id,
+            request.chunk_index, request.buyer_pubkey, buyer_seed,
+            platform_time_monotonic_ms(), &expired_session_chunk);
+    server.key_established = false;
+    DELIVERY_CHECK("expired established session reports resource limit",
+        expired_session_status == FILE_MARKET_DELIVERY_RESOURCE_LIMIT &&
+        expired_session_chunk.data == NULL &&
+        expired_session_chunk.size == 0 &&
+        memcmp(expired_session_chunk.sha3, (uint8_t[32]){0}, 32) == 0);
 
     uint8_t expected_session[32];
     file_market_delivery_session_id(
@@ -929,6 +1043,18 @@ int file_market_delivery_tests(void)
         memcmp(endpoint_chunk.data, "paid-chunk-proof",
                sizeof("paid-chunk-proof")) == 0);
     free(endpoint_chunk.data);
+    struct file_market_delivery_chunk expired_endpoint;
+    memset(&expired_endpoint, 0xA5, sizeof(expired_endpoint));
+    int64_t expired_deadline = platform_time_monotonic_ms();
+    enum file_market_delivery_status expired_endpoint_status =
+        file_market_delivery_fetch_endpoint_until(
+            loopback_ip, ntohs(endpoint_addr.sin6_port),
+            request.network_genesis, request.offer_id, 7,
+            buyer_public, buyer_seed, expired_deadline, &expired_endpoint);
+    DELIVERY_CHECK("expired clearnet deadline fails closed before connect",
+        expired_endpoint_status == FILE_MARKET_DELIVERY_RESOURCE_LIMIT &&
+        expired_endpoint.data == NULL && expired_endpoint.size == 0 &&
+        memcmp(expired_endpoint.sha3, (uint8_t[32]){0}, 32) == 0);
     if (listen_fd >= 0) close(listen_fd);
 
     /* ── Phase B5 onion delivery (docs/work/MARKET_ONION_DELIVERY.md) ── */
@@ -1015,6 +1141,16 @@ int file_market_delivery_tests(void)
     file_market_delivery_set_handlers(
         request.network_genesis, delivery_authorize, delivery_load,
         &fixture);
+    struct file_market_delivery_chunk null_get_chunk;
+    memset(&null_get_chunk, 0xA5, sizeof(null_get_chunk));
+    enum file_market_delivery_status null_get_status =
+        file_market_delivery_fetch_onion_with(
+            NULL, NULL, seller_onion_pubkey, request.network_genesis,
+            request.offer_id, 7, buyer_public, buyer_seed, &null_get_chunk);
+    DELIVERY_CHECK("legacy onion fetch rejects a null GET port",
+        null_get_status == FILE_MARKET_DELIVERY_MALFORMED &&
+        null_get_chunk.data == NULL && null_get_chunk.size == 0 &&
+        memcmp(null_get_chunk.sha3, (uint8_t[32]){0}, 32) == 0);
     struct file_market_delivery_chunk single = {0};
     enum file_market_delivery_status single_status = onion_address_ok
         ? file_market_delivery_fetch_onion_with(
@@ -1046,6 +1182,32 @@ int file_market_delivery_tests(void)
     DELIVERY_CHECK("onion fetch reassembles three verified slices",
         multi_exact && loop.calls == 3);
     free(multi.data);
+
+    struct onion_deadline_loopback deadline_loop;
+    memset(&deadline_loop, 0, sizeof(deadline_loop));
+    memcpy(deadline_loop.loop.expected_address, loop.expected_address,
+           sizeof(deadline_loop.loop.expected_address));
+    atomic_init(&deadline_loop.now_us, 1000000);
+    struct platform_clock_source deadline_source = {
+        .monotonic_us = onion_deadline_monotonic_us,
+        .wall_unix = onion_deadline_wall_unix,
+        .user = &deadline_loop,
+    };
+    struct file_market_delivery_chunk bounded = {0};
+    platform_clock_set_source(&deadline_source);
+    enum file_market_delivery_status bounded_status =
+        file_market_delivery_fetch_onion_with_deadline(
+            onion_deadline_get, &deadline_loop, 3500,
+            seller_onion_pubkey, request.network_genesis, request.offer_id, 7,
+            buyer_public, buyer_seed, &bounded);
+    platform_clock_clear_source();
+    DELIVERY_CHECK("onion slice loop stops at one absolute budget",
+        bounded_status == FILE_MARKET_DELIVERY_RESOURCE_LIMIT &&
+        bounded.data == NULL && bounded.size == 0 &&
+        memcmp(bounded.sha3, (uint8_t[32]){0}, 32) == 0 &&
+        deadline_loop.loop.calls == 2 &&
+        deadline_loop.timeouts[0] == 2 && deadline_loop.timeouts[1] == 1);
+    free(bounded.data);
 
     int loads_before = fixture.load_calls;
     fixture.authorization = FILE_MARKET_DELIVERY_PENDING;

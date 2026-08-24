@@ -119,10 +119,15 @@ void fs_session_cleanup(struct fs_session *s);
  * is_initiator: true if we opened the connection. */
 bool fs_handshake(struct fs_session *s, const uint8_t utxo_root[32],
                    bool is_initiator);
+bool fs_handshake_until(struct fs_session *s, const uint8_t utxo_root[32],
+                        bool is_initiator, int64_t deadline_ms);
 
 /* Send a frame (encrypts, pads to 64KB, MACs, sends). */
 bool fs_send_frame(struct fs_session *s, uint8_t type,
                     const uint8_t *payload, uint32_t payload_len);
+bool fs_send_frame_until(struct fs_session *s, uint8_t type,
+                         const uint8_t *payload, uint32_t payload_len,
+                         int64_t deadline_ms);
 
 /* Receive a frame (reads 64KB, verifies MAC, decrypts).
  * type_out and payload_out are set. payload_out points into the
@@ -130,6 +135,9 @@ bool fs_send_frame(struct fs_session *s, uint8_t type,
  * fs_recv_frame call on the same session. */
 bool fs_recv_frame(struct fs_session *s, uint8_t *type_out,
                     const uint8_t **payload_out, uint32_t *payload_len_out);
+bool fs_recv_frame_until(struct fs_session *s, uint8_t *type_out,
+                         const uint8_t **payload_out,
+                         uint32_t *payload_len_out, int64_t deadline_ms);
 
 /* Send one raw authenticated chunk after an encrypted typed reply. */
 bool fs_send_chunk_fast(struct fs_session *s, const uint8_t *data,
@@ -154,6 +162,11 @@ bool fs_send_chunk_private(struct fs_session *s, const uint8_t *data,
 bool fs_recv_chunk_private(struct fs_session *s, uint8_t **out,
                            uint32_t *out_size, uint32_t expected_size,
                            const uint8_t expected_sha3[32]);
+bool fs_recv_chunk_private_until(struct fs_session *s, uint8_t **out,
+                                 uint32_t *out_size,
+                                 uint32_t expected_size,
+                                 const uint8_t expected_sha3[32],
+                                 int64_t deadline_ms);
 
 /* High-level: serve files on configured port. Runs in its own thread. */
 void fs_server_start(const char *datadir, uint16_t port);

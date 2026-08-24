@@ -30,6 +30,7 @@
 #include "wallet/sapling_keys.h"
 
 #include <stdio.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -51,6 +52,10 @@ struct purchase_fixture {
     int sends;
     int notifications;
     int fetches;
+    int onion_fetches;
+    int64_t onion_deadline_ms;
+    int64_t deadline_wall_unix;
+    _Atomic int deadline_clock_reads;
     bool money_current;
     bool source_owned;
     bool fetch_ready;
@@ -66,6 +71,31 @@ struct purchase_fixture {
 
 static const uint8_t k_purchase_content[] =
     "verified paid market content\n";
+
+static int64_t purchase_deadline_monotonic_us(void *opaque)
+{
+    struct purchase_fixture *fixture = opaque;
+    int read = atomic_fetch_add_explicit(&fixture->deadline_clock_reads, 1,
+                                         memory_order_relaxed);
+    return read < 4 ? 1000000 : 242000000;
+}
+
+static int64_t purchase_deadline_wall_unix(void *opaque)
+{
+    struct purchase_fixture *fixture = opaque;
+    return fixture->deadline_wall_unix;
+}
+
+static void purchase_zero_chunk_sha3(uint8_t out[32])
+{
+    uint8_t zeros[4096] = {0};
+    struct sha3_256_ctx sha;
+    sha3_256_init(&sha);
+    for (size_t done = 0; done < FILE_MARKET_CHUNK_SIZE;
+         done += sizeof(zeros))
+        sha3_256_write(&sha, zeros, sizeof(zeros));
+    sha3_256_finalize(&sha, out);
+}
 
 static struct zcl_result purchase_money(
     void *opaque, const char *scope, struct wallet_money_snapshot *out)
@@ -214,13 +244,13 @@ static enum file_market_delivery_status purchase_fetch(
     void *opaque, const uint8_t peer_ip[16], uint16_t peer_port,
     const uint8_t network_genesis[32], const uint8_t offer_id[32],
     uint32_t chunk_index, const uint8_t buyer_pubkey[32],
-    const uint8_t buyer_seed[32],
+    const uint8_t buyer_seed[32], int64_t deadline_ms,
     struct file_market_delivery_chunk *out)
 {
     struct purchase_fixture *f = opaque;
     uint8_t derived[32], secret[32];
     if (!f || !peer_ip || peer_ip[15] != 1 || peer_port != 18034 ||
-        !network_genesis || !offer_id || chunk_index != 0 ||
+        !network_genesis || !offer_id || chunk_index > 1 ||
         !buyer_pubkey || !buyer_seed || !out)
         return FILE_MARKET_DELIVERY_MALFORMED;
     ed25519_keypair(derived, secret, buyer_seed);
@@ -229,14 +259,36 @@ static enum file_market_delivery_status purchase_fetch(
     f->fetches++;
     if (!f->fetch_ready)
         return FILE_MARKET_DELIVERY_PAYMENT_PENDING;
-    out->data = zcl_malloc(sizeof(k_purchase_content),
+    if (deadline_ms <= 0)
+        return FILE_MARKET_DELIVERY_RESOURCE_LIMIT;
+    size_t size = chunk_index == 0
+        ? FILE_MARKET_CHUNK_SIZE : sizeof(k_purchase_content);
+    out->data = zcl_calloc(1, size,
                            "purchase fetched fixture");
     if (!out->data)
         return FILE_MARKET_DELIVERY_RESOURCE_LIMIT;
-    memcpy(out->data, k_purchase_content, sizeof(k_purchase_content));
-    out->size = sizeof(k_purchase_content);
+    if (chunk_index == 1)
+        memcpy(out->data, k_purchase_content, sizeof(k_purchase_content));
+    out->size = (uint32_t)size;
     sha3_256(out->data, out->size, out->sha3);
     return FILE_MARKET_DELIVERY_READY;
+}
+
+static enum file_market_delivery_status purchase_fetch_onion_limited(
+    void *opaque, const uint8_t seller_onion_pubkey[32],
+    const uint8_t network_genesis[32], const uint8_t offer_id[32],
+    uint32_t chunk_index, const uint8_t buyer_pubkey[32],
+    const uint8_t buyer_seed[32], int64_t deadline_ms,
+    struct file_market_delivery_chunk *out)
+{
+    struct purchase_fixture *fixture = opaque;
+    if (!fixture || !seller_onion_pubkey || !network_genesis || !offer_id ||
+        !buyer_pubkey || !buyer_seed || !out || chunk_index != 0)
+        return FILE_MARKET_DELIVERY_MALFORMED;
+    memset(out, 0, sizeof(*out));
+    fixture->onion_fetches++;
+    fixture->onion_deadline_ms = deadline_ms;
+    return FILE_MARKET_DELIVERY_RESOURCE_LIMIT;
 }
 
 static bool purchase_offer(struct file_offer *offer, int64_t now)
@@ -247,15 +299,17 @@ static bool purchase_offer(struct file_offer *offer, int64_t now)
     if (!params) return false;
     memset(offer, 0, sizeof(*offer));
     memset(seed, 0x57, sizeof(seed));
-    uint8_t chunk_hash[32];
-    sha3_256(k_purchase_content, sizeof(k_purchase_content), chunk_hash);
-    sha3_256(chunk_hash, sizeof(chunk_hash), offer->root_hash);
+    uint8_t chunk_hashes[64];
+    purchase_zero_chunk_sha3(chunk_hashes);
+    sha3_256(k_purchase_content, sizeof(k_purchase_content),
+             chunk_hashes + 32);
+    sha3_256(chunk_hashes, sizeof(chunk_hashes), offer->root_hash);
     memcpy(offer->network_genesis,
            params->consensus.hashGenesisBlock.data, 32);
     ed25519_keypair(offer->seller_pubkey, secret, seed);
     snprintf(offer->filename, sizeof(offer->filename), "purchase.bin");
-    offer->size_bytes = sizeof(k_purchase_content);
-    offer->num_chunks = 1;
+    offer->size_bytes = FILE_MARKET_CHUNK_SIZE + sizeof(k_purchase_content);
+    offer->num_chunks = 2;
     offer->price_per_mb = 1200;
     for (uint8_t d = 1; ; d++) {
         memset(offer->z_addr, 0, sizeof(offer->z_addr));
@@ -292,6 +346,7 @@ int file_market_purchase_tests(void)
     memset(fixture.initial_root, 0x31, 32);
     memset(fixture.reserved_root, 0x32, 32);
     fixture.tip_height = 420;
+    fixture.deadline_wall_unix = now;
     memset(fixture.tip_hash, 0x44, 32);
     fixture.money_current = true;
     fixture.source_owned = true;
@@ -326,10 +381,11 @@ int file_market_purchase_tests(void)
     snprintf(request.source_address, sizeof(request.source_address),
              "fixture-owned-source");
     request.chunk_start = 0;
-    request.chunks_paid = 1;
+    request.chunks_paid = offer.num_chunks;
     snprintf(request.idempotency_key, sizeof(request.idempotency_key),
              "purchase-1");
-    file_market_offer_range_zat(&offer, 0, 1, &fixture.expected_amount);
+    file_market_offer_range_zat(&offer, 0, request.chunks_paid,
+                                &fixture.expected_amount);
 
     if (ready) {
         enum { PURCHASE_SAPLING_HEIGHT = 100 };
@@ -439,6 +495,50 @@ int file_market_purchase_tests(void)
                    node_db_open(&ndb, path));
     fixture.ndb = &ndb;
     fixture.fetch_ready = true;
+    int fetches_before_budget = fixture.fetches;
+    atomic_init(&fixture.deadline_clock_reads, 0);
+    struct platform_clock_source budget_source = {
+        .monotonic_us = purchase_deadline_monotonic_us,
+        .wall_unix = purchase_deadline_wall_unix,
+        .user = &fixture,
+    };
+    platform_clock_set_source(&budget_source);
+    struct zcl_result budget_limited = market_purchase_retrieve(
+        &runtime, plan.plan_id, destination, &downloaded);
+    platform_clock_clear_source();
+    struct market_download_record bounded_progress;
+    bool bounded_found = db_market_download_find(
+        &ndb, plan.plan_id, &bounded_progress);
+    int bounded_chunk_count = db_market_download_chunk_count(
+        &ndb, plan.plan_id);
+    bool bounded_exact =
+        !budget_limited.ok && budget_limited.code == -76 &&
+        fixture.fetches == fetches_before_budget + 1 &&
+        bounded_found &&
+        bounded_progress.state == MARKET_DOWNLOAD_FETCHING &&
+        bounded_progress.chunks_received == 1 &&
+        bounded_progress.bytes_received == FILE_MARKET_CHUNK_SIZE &&
+        bounded_chunk_count == 1 && !downloaded.destination_published &&
+        access(destination, F_OK) != 0;
+    if (!bounded_exact)
+        printf("file_market purchase: clearnet budget detail ok=%d code=%d "
+               "fetch=%d/%d clock=%d found=%d state=%d chunks=%u bytes=%llu "
+               "rows=%d published=%d exists=%d\n",
+               budget_limited.ok, budget_limited.code, fixture.fetches,
+               fetches_before_budget, atomic_load(&fixture.deadline_clock_reads),
+               bounded_found,
+               bounded_found ? (int)bounded_progress.state : -1,
+               bounded_found ? bounded_progress.chunks_received : 0,
+               (unsigned long long)(bounded_found
+                   ? bounded_progress.bytes_received : 0),
+               bounded_chunk_count, downloaded.destination_published,
+               access(destination, F_OK) == 0);
+    PURCHASE_CHECK("clearnet budget persists one chunk and starts no next fetch",
+                   bounded_exact);
+    node_db_close(&ndb);
+    PURCHASE_CHECK("budgeted clearnet prefix survives database restart",
+                   node_db_open(&ndb, path));
+    fixture.ndb = &ndb;
     struct zcl_result retrieved = market_purchase_retrieve(
         &runtime, plan.plan_id, destination, &downloaded);
     if (!retrieved.ok)
@@ -446,12 +546,13 @@ int file_market_purchase_tests(void)
                retrieved.message);
     uint8_t disk[sizeof(k_purchase_content)];
     FILE *published = fopen(destination, "rb");
-    size_t disk_len = published
-        ? fread(disk, 1, sizeof(disk), published) : 0;
+    bool tail_seek = published &&
+        fseeko(published, (off_t)FILE_MARKET_CHUNK_SIZE, SEEK_SET) == 0;
+    size_t disk_len = tail_seek ? fread(disk, 1, sizeof(disk), published) : 0;
     if (published) fclose(published);
     PURCHASE_CHECK("verified manifest is atomically published after restart",
         retrieved.ok && downloaded.destination_published &&
-        downloaded.chunks_received == 1 && downloaded.num_chunks == 1 &&
+        downloaded.chunks_received == 2 && downloaded.num_chunks == 2 &&
         disk_len == sizeof(k_purchase_content) &&
         memcmp(disk, k_purchase_content, sizeof(disk)) == 0);
     int fetches_after_publish = fixture.fetches;
@@ -604,6 +705,30 @@ int file_market_purchase_tests(void)
         onion_planned.ok && onion_commit.ok && !onion_retrieved.ok &&
         onion_retrieved.code == -78 &&
         fixture.fetches == fetches_before_onion);
+    runtime.fetch_onion = purchase_fetch_onion_limited;
+    runtime.fetch_onion_ctx = &fixture;
+    runtime.onion_transport_ready = true;
+    struct market_purchase_view onion_limited_view;
+    memset(&onion_limited_view, 0, sizeof(onion_limited_view));
+    struct zcl_result onion_limited = onion_ready
+        ? market_purchase_retrieve(&runtime, onion_plan.plan_id,
+                                   onion_destination, &onion_limited_view)
+        : ZCL_ERR(-1, "onion fixture could not be built");
+    struct market_download_record onion_progress;
+    int64_t observed_now_ms = platform_time_monotonic_ms();
+    PURCHASE_CHECK("onion retrieval budget leaves only durable progress",
+        !onion_limited.ok && onion_limited.code == -76 &&
+        fixture.onion_fetches == 1 &&
+        fixture.onion_deadline_ms > observed_now_ms &&
+        fixture.onion_deadline_ms - observed_now_ms <=
+            MARKET_PURCHASE_RETRIEVE_BUDGET_MS &&
+        db_market_download_find(&ndb, onion_plan.plan_id, &onion_progress) &&
+        onion_progress.state == MARKET_DOWNLOAD_FETCHING &&
+        onion_progress.chunks_received == 0 &&
+        onion_progress.bytes_received == 0 &&
+        db_market_download_chunk_count(&ndb, onion_plan.plan_id) == 0 &&
+        !onion_limited_view.destination_published &&
+        access(onion_destination, F_OK) != 0);
 
 cleanup:
     if (ndb.open) node_db_close(&ndb);
