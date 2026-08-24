@@ -67,10 +67,11 @@ void boot_fast_restart_evaluate(const struct shutdown_clean_binding *binding,
  * once, BEFORE node.db is opened (after detect_unclean has cached the marker). */
 void boot_fast_restart_arm_quick_check_skip_probe(void);
 
-/* If this boot skipped quick_check on node.db, spawn one background quick_check
- * (fresh read-only connection) so the skipped check is still eventually run.
- * A failure is raised loudly via EV_DB_ERROR + EV_OPERATOR_NEEDED. No-op when
- * quick_check actually ran this boot. `datadir` locates node.db. */
+/* If this boot skipped or deferred quick_check on node.db, spawn one
+ * background quick_check (fresh read-only connection) so the check is still
+ * eventually run. A failure is raised loudly via EV_DB_ERROR +
+ * EV_OPERATOR_NEEDED. No-op when quick_check actually ran inline this boot.
+ * `datadir` locates node.db. */
 void boot_fast_restart_start_bg_quick_check(const char *datadir);
 
 #ifdef __cplusplus

@@ -25,19 +25,25 @@ extern "C" {
  *
  * ── Tier-2 fast restart: verified-clean quick_check skip ──────────────
  *
- * A warm boot spends ~9s in `PRAGMA quick_check` on node.db even when the DB
- * was checkpointed and closed cleanly. write_clean() records a content binding
- * for node.db into the marker (marker format v2 below). On the next boot,
- * node_db_open() may SKIP quick_check iff:
- *   1. the previous shutdown wrote a v2 binding (wal_checkpointed=1), AND
- *   2. node.db on disk is byte-consistent with that binding (size + the SQLite
- *      header file-change-counter both match), AND
- *   3. no node.db-wal is present (or it is zero bytes).
- * Any parse failure, any mismatch, or any WAL present → quick_check runs
- * exactly as before (the dirty path is bit-identical to today). The binding is
- * single-use: detect_unclean unlinks the on-disk marker and the in-memory cache
- * is cleared the first time the skip decision is consumed, so a subsequent
- * crash-boot can never reuse a stale binding.
+ * A warm boot used to spend ~9s (hours on a multi-GB production node.db) in
+ * blocking `PRAGMA quick_check` even when the DB was checkpointed and closed
+ * cleanly. write_clean() records a content binding for node.db into the marker
+ * (marker format v2 below). On the next boot, node_db_open() skips the
+ * blocking check when:
+ *   1. verified-clean: the previous shutdown wrote a v2 binding
+ *      (wal_checkpointed=1), node.db is byte-consistent with that binding
+ *      (size + SQLite header change-counter), AND no node.db-wal is present
+ *      (or it is zero bytes). This sets the skip flag; fast-restart may run.
+ *   2. deferred: node.db already exists as a SQLite file but (1) does not
+ *      hold. SQLite already ran WAL recovery on open. The same PRAGMA is
+ *      armed on the existing background recheck and fail-closes via
+ *      EV_OPERATOR_NEEDED. This does NOT set the verified-clean skip flag,
+ *      so fast-restart stays refused.
+ * Fresh/absent files still run the cheap blocking check (and the
+ * quarantine-rebuild path). The binding is single-use: detect_unclean
+ * unlinks the on-disk marker and the in-memory cache is cleared the first
+ * time the skip decision is consumed, so a subsequent crash-boot can never
+ * reuse a stale binding.
  *
  * Marker format v2 (text, one key=value per line):
  *   <unix_seconds>              (line 1 — legacy presence timestamp, kept)
@@ -140,14 +146,20 @@ void boot_shutdown_marker_set_schema_version(int schema_version);
 
 /* node_db_open's quick_check-skip probe (matches the
  * node_db_quick_check_skip_probe_fn signature in models/database.h). Reads the
- * pristine identity of `node_db_path`, compares it against the cached
- * clean-shutdown binding, and returns true to skip quick_check. Single-use:
- * clears the cache on first call. */
+ * identity of `node_db_path`, compares it against the cached clean-shutdown
+ * binding, and returns true to skip the blocking PRAGMA. True means either
+ * verified-clean skip or unclean/unverified deferral (see the getters).
+ * Single-use: the first call consumes the cache and the probe-consumed latch
+ * so a second call cannot reuse a stale decision. */
 bool boot_shutdown_marker_quick_check_probe(const char *node_db_path);
 
-/* True if the probe decided to skip quick_check this boot (a background
- * re-check should still run once). */
+/* True if the probe took the verified-clean skip this boot (fast-restart
+ * may run; a background re-check should still run once). */
 bool boot_shutdown_marker_quick_check_was_skipped(void);
+
+/* True if the probe deferred an unverified/unclean existing node.db to the
+ * background recheck. Does not imply node_db_clean for fast-restart. */
+bool boot_shutdown_marker_quick_check_was_deferred(void);
 
 /* Test-only: reset all module-level cache/state. */
 void boot_shutdown_marker_reset_for_test(void);

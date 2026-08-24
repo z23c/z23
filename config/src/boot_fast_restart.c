@@ -244,10 +244,14 @@ static void *boot_bg_quick_check_entry(void *arg)
         const unsigned char *txt = sqlite3_column_text(st, 0);
         ok = txt && strcmp((const char *)txt, "ok") == 0;
         if (!ok) {
+            const char *kind =
+                boot_shutdown_marker_quick_check_was_skipped()
+                    ? "verified-clean quick_check skip"
+                    : "unclean/unverified deferral";
             fprintf(stderr,  // obs-ok:operator-surface-is-the-alert
                     "[ALERT] bg_quick_check: node.db integrity FAILED after a "
-                    "verified-clean quick_check skip: %s\n",
-                    txt ? (const char *)txt : "(no detail)");
+                    "%s: %s\n",
+                    kind, txt ? (const char *)txt : "(no detail)");
             event_emitf(EV_DB_ERROR, 0,
                         "bg_quick_check failed result=%s",
                         txt ? (const char *)txt : "unknown");
@@ -262,15 +266,22 @@ static void *boot_bg_quick_check_entry(void *arg)
         sqlite3_finalize(st);
     sqlite3_close(db);
 
-    if (ok)
-        printf("[boot] bg_quick_check ok (verified-clean skip confirmed)\n");
+    if (ok) {
+        if (boot_shutdown_marker_quick_check_was_skipped())
+            printf("[boot] bg_quick_check ok (verified-clean skip confirmed)\n");
+        else
+            printf("[boot] bg_quick_check ok (deferred unclean recheck)\n");
+    }
     free(path);
     return NULL;
 }
 
 void boot_fast_restart_start_bg_quick_check(const char *datadir)
 {
-    if (!boot_shutdown_marker_quick_check_was_skipped() || !datadir)
+    if (!datadir)
+        return;
+    if (!boot_shutdown_marker_quick_check_was_skipped() &&
+        !boot_shutdown_marker_quick_check_was_deferred())
         return;
 
     char *path = zcl_malloc(1088, "bg_quick_check_path");

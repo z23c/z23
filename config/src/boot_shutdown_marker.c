@@ -23,6 +23,8 @@
 static struct shutdown_clean_binding g_cached_binding;   /* valid=false at start */
 static int                           g_schema_version = -1;
 static _Atomic bool                  g_quick_check_skipped;
+static _Atomic bool                  g_quick_check_deferred;
+static _Atomic bool                  g_quick_check_probe_consumed;
 
 /* Tier-2 P2: the fast-restart binding parsed from THIS boot's marker (cached
  * before detect_unclean unlinks the file). Separate from g_cached_binding so
@@ -360,6 +362,11 @@ bool boot_shutdown_marker_quick_check_was_skipped(void)
     return atomic_load(&g_quick_check_skipped);
 }
 
+bool boot_shutdown_marker_quick_check_was_deferred(void)
+{
+    return atomic_load(&g_quick_check_deferred);
+}
+
 void boot_shutdown_marker_reset_for_test(void)
 {
     memset(&g_cached_binding, 0, sizeof(g_cached_binding));
@@ -367,6 +374,8 @@ void boot_shutdown_marker_reset_for_test(void)
     memset(&g_fr_facts, 0, sizeof(g_fr_facts));
     g_schema_version = -1;
     atomic_store(&g_quick_check_skipped, false);
+    atomic_store(&g_quick_check_deferred, false);
+    atomic_store(&g_quick_check_probe_consumed, false);
 }
 
 void boot_shutdown_marker_set_fast_restart_facts(
@@ -389,22 +398,36 @@ bool boot_shutdown_marker_peek_fast_restart_binding(
 
 bool boot_shutdown_marker_quick_check_probe(const char *node_db_path)
 {
-    /* Single-use: consume the cached binding regardless of outcome. */
+    /* Single-use for this process: a second call cannot reuse a stale
+     * binding or re-arm deferral. */
+    if (atomic_exchange(&g_quick_check_probe_consumed, true))
+        return false;
+
     struct shutdown_clean_binding b = g_cached_binding;
     memset(&g_cached_binding, 0, sizeof(g_cached_binding));
 
-    if (!b.valid)
-        return false;
-
     struct node_db_file_identity cur;
-    if (!node_db_file_identity_read(node_db_path, &cur))
-        return false;
+    bool have = node_db_file_identity_read(node_db_path, &cur);
 
-    if (!boot_shutdown_marker_can_skip(&b, &cur))
-        return false;
+    if (b.valid && have && boot_shutdown_marker_can_skip(&b, &cur)) {
+        atomic_store(&g_quick_check_skipped, true);
+        printf("[boot] quick_check skipped (verified-clean shutdown)\n");
+        return true;
+    }
 
-    atomic_store(&g_quick_check_skipped, true);
-    return true;
+    /* Existing SQLite node.db without a matching clean binding. SQLite already
+     * recovered any WAL on open. PRAGMA quick_check(1) on a multi-GB
+     * production file can take hours of uninterruptible I/O and holds
+     * listen/READY hostage. Defer to the background recheck, which fail-closes
+     * via EV_OPERATOR_NEEDED. Fresh/absent files return false so the cheap
+     * blocking check and quarantine-rebuild path remain. */
+    if (have && cur.present) {
+        atomic_store(&g_quick_check_deferred, true);
+        printf("[boot] quick_check deferred to background "
+               "(no verified-clean binding; fail-closed recheck armed)\n");
+        return true;
+    }
+    return false;
 }
 
 bool boot_shutdown_marker_detect_unclean(const char *datadir)
@@ -427,11 +450,15 @@ bool boot_shutdown_marker_detect_unclean(const char *datadir)
 
     /* Cache the v2 content-binding (if any) BEFORE unlinking, so
      * node_db_open's quick_check-skip probe can consult it. A parse failure
-     * or a WAL present → no cached binding → quick_check runs as before.
+     * or a WAL present → no cached binding → the probe defers an existing
+     * node.db to the background recheck instead of blocking listen.
      * The same parse also yields the Tier-2 fast-restart binding (g_cached_fr),
      * kept separate so the quick_check probe's consume does not wipe it. */
     memset(&g_cached_binding, 0, sizeof(g_cached_binding));
     memset(&g_cached_fr, 0, sizeof(g_cached_fr));
+    atomic_store(&g_quick_check_skipped, false);
+    atomic_store(&g_quick_check_deferred, false);
+    atomic_store(&g_quick_check_probe_consumed, false);
     if (marker_exists && !wal_exists) {
         FILE *mf = fopen(marker_path, "r");
         if (mf) {

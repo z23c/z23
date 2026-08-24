@@ -4251,7 +4251,7 @@ sapling_tree_boot_check_done:
             sysinit_run_stage(BOOT_STAGE_SERVICES_RUNNING, ctx);
         if (!sr.ok) return false;
         boot_stage_advance_to(BOOT_STAGE_READY);
-        /* Tier-2 fast restart: if this boot SKIPPED quick_check, run one in the
+        /* If this boot skipped or deferred quick_check, run one in the
          * background now (failure raises OPERATOR_NEEDED — never silent). */
         boot_fast_restart_start_bg_quick_check(g_datadir);
     }
