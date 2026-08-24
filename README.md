@@ -11,26 +11,23 @@
 
 # Z23
 
-**A sovereign, peer-to-peer network for creating, owning and preserving
-software.**
+**Software made for you, not imposed on you.**
 
-Z23 turns the 100% proof-of-work ZClassic network into a global commons of
-reusable C23 software. Describe what you want. Your node searches the commons,
-creates only what is missing, builds and verifies the result locally, and lets
-you keep the exact version you chose.
+Z23 is one self-contained C23 binary that is two things at once:
 
-This is not simply an AI agent changing code in one repository. Source is
-content-addressed, releases can be independently reproduced, distribution needs
-no central registry, and the original creator can disappear without taking the
-software with them. AI workers are replaceable; the network, exact source
-history and user ownership remain.
+- **A full node** for the 100% proof-of-work ZClassic chain — consensus-compatible
+  with `zclassicd`, wallet custody behind your keys and nothing else, explorer
+  and API served over the node's own persistent Tor onion address.
+- **A software commons** — describe what you want in plain words. Your node finds
+  C23 that already does part of it, creates only the missing behavior, builds and
+  verifies everything on your machine, and lets you accept one exact version and
+  keep it.
 
-ZClassic provides decentralized payments, durable ordering, names and
-cryptographic anchors. Every node keeps its own keys, policy, software and
-authority.
-
-**Software made for you, owned by you and preserved by the network—not rented
-from a platform.**
+The point is ownership that survives platforms. Source is content-addressed,
+releases are independently reproducible, distribution needs no central registry,
+and the person who wrote the code can disappear without taking the software with
+them. AI workers are replaceable; the network, the exact source history and your
+authority over your own machine remain.
 
 ---
 
@@ -51,33 +48,31 @@ from a platform.**
 git clone https://github.com/z23c/z23
 cd z23
 make -j"$(nproc)"
-make commons-demo
+make commons-demo        # (optional first: make setup — arms git hooks + LSP config)
 ```
 
-Three fresh nodes start on your machine with empty datadirs. Nothing outside
-your machine is contacted, and exit 0 means every step below held — each one
-asserts its own promise and stops at the first that does not.
+Three fresh nodes start on empty datadirs inside your machine. Nothing outside
+it is contacted. Exit `0` means every promise below held; each one asserts
+itself and stops at the first that does not:
 
-- Ask for software behavior.
-- Reuse C23 from another node.
-- Build and accept an exact result.
-- Another node fetches it and reproduces it peer to peer.
-- Then do all of that again to software that already existed, written by
-  somebody else — and measure the behavior you asked to change: before on the
-  node that published it, after on the node that fetched and rebuilt it.
-- Kill the original publisher. A third node still fetches, reproduces, and
-  runs those exact bytes from whoever still holds them.
-
-Reproduce means what it sounds like: the second node re-derives the identical
-source from content addresses it verified itself, then builds a byte-identical
-program. Altered source, an unknown dependency and a stale acceptance are each
-refused by name rather than by silence, so the demo cannot print a happy summary
-over a failure.
+1. **Ask** for a behavior; reuse C23 another node already published.
+2. **Build and accept** one exact result — and watch the behavior you asked for,
+   before anything is published anywhere.
+3. A second node **fetches those bytes peer to peer** and rebuilds them
+   byte-identical. Altered source, an unknown dependency, a stale acceptance:
+   each refused by name, never by silence.
+4. **Kill the original publisher.** A third node still fetches, reproduces and
+   runs those exact bytes from whoever still holds them.
 
 ![make commons-demo — the whole loop, end to end](docs/assets/z23-term-commons-demo.svg)
 
+Reproduce means what it sounds like: the second node re-derives identical source
+from content addresses it verified itself, then builds a byte-identical program.
+
 The same journey with B and C on separate physical hosts — the publisher's
-machine itself gone — is `make commons-multihost-acceptance`.
+machine itself gone — is `make commons-multihost-acceptance`:
+
+![what the demo measured](docs/assets/z23-term-commons-proof.svg)
 
 ---
 
