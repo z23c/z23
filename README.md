@@ -97,7 +97,7 @@ your screen, before anyone has published anything.
 
 ## The flagship
 
-![an open world you fly through](docs/assets/z23-flyover.gif)
+![the flagship dogfight: the red ace turns, fires, and wins over the grid city](docs/assets/z23-flyover-hero.gif)
 
 The flagship is an application you are actually using. Fly it. Ask for a change.
 See the new behavior. Keep that exact version. Share it peer to peer.
