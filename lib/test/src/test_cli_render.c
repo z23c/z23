@@ -452,6 +452,40 @@ static int test_guide_tree_render(void)
         ASSERT(cr_max_line_width(out) <= 80);
         PASS();
     }
+    TEST("yardsale.guide renders layered stories, not JSON keys") {
+        const char *doc =
+            "{\"schema\":\"zcl.result.v1\",\"command\":\"yardsale.guide\","
+            "\"ok\":true,\"status\":\"passed\",\"data\":{"
+            "\"mission\":\"Pay ZCL and sell a 1/1 collectible.\","
+            "\"next_action\":\"See whether this node holds confirmed ZCL.\","
+            "\"start_command\":\"z23 vault list\","
+            "\"continue_rule\":\"Follow commit_input.\","
+            "\"layers\":["
+            "{\"id\":\"pay_zcl\",\"user_story\":\"Pay confirmed ZCL.\","
+            "\"plan_command\":\"vault.intent.plan\","
+            "\"test_group\":\"test_simnet_wallet_import_backup\","
+            "\"expected\":\"simnet_confirmed\"},"
+            "{\"id\":\"sapling\",\"user_story\":\"Shield value.\","
+            "\"plan_command\":\"vault.intent.plan\","
+            "\"test_group\":\"test_simnet_shielded_wallet_e2e\","
+            "\"expected\":\"simnet_confirmed\"}"
+            "]}}";
+        struct zcl_cli_render_env e = cr_env(80, false);
+        char out[8192];
+        size_t n = zcl_cli_render_doc(doc, strlen(doc), "yardsale.guide", &e,
+                                      out, sizeof(out));
+        ASSERT(n > 0);
+        ASSERT(strstr(out, "yardsale.guide") != NULL);
+        ASSERT(strstr(out, "z23 vault list") != NULL);
+        ASSERT(strstr(out, "pay_zcl") != NULL);
+        ASSERT(strstr(out, "vault.intent.plan") != NULL);
+        ASSERT(strstr(out, "Pay confirmed ZCL.") != NULL);
+        ASSERT(strstr(out, "sapling") != NULL);
+        ASSERT(strstr(out, "next_action") == NULL);
+        ASSERT(strstr(out, "\"schema\"") == NULL);
+        ASSERT(cr_max_line_width(out) <= 80);
+        PASS();
+    }
     TEST("code.guide renders a four-step recipe, not JSON keys") {
         const char *doc =
             "{\"schema\":\"zcl.result.v1\",\"command\":\"code.guide\","

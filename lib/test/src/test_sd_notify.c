@@ -9,7 +9,8 @@
  *   - silent no-op when NOTIFY_SOCKET is unset (init returns false, no
  *     send attempted, no datagram observed)
  *   - path-mode NOTIFY_SOCKET: READY=1 then WATCHDOG=1 datagrams arrive
- *     byte-for-byte on the bound socket; WATCHDOG_USEC round-trips
+ *     byte-for-byte on the bound socket; WATCHDOG_USEC round-trips;
+ *     EXTEND_TIMEOUT_USEC is sent for long Type=notify boots
  *   - abstract-namespace NOTIFY_SOCKET (leading '@'): same protocol,
  *     translated to the Linux abstract-socket wire form (leading NUL)
  *   - the sd_notify_watchdog_ping() health-check gate: a fake
@@ -204,6 +205,8 @@ int test_sd_notify(void)
             !sd_notify_watchdog_ping());
         SDN_CHECK("status() is a silent no-op (returns false)",
             !sd_notify_status("hello"));
+        SDN_CHECK("extend_timeout() is a silent no-op (returns false)",
+            !sd_notify_extend_timeout_usec(3600000000ULL));
         SDN_CHECK("watchdog_usec is 0 with nothing configured",
             sd_notify_watchdog_usec() == 0);
 
@@ -245,6 +248,14 @@ int test_sd_notify(void)
             n = sdn_try_recv(fd, buf, sizeof(buf));
             SDN_CHECK("STATUS= datagram observed",
                 n > 0 && strcmp(buf, "STATUS=h=100 peers=8\n") == 0);
+
+            SDN_CHECK("zero extend_timeout is a no-op",
+                !sd_notify_extend_timeout_usec(0));
+            SDN_CHECK("extend_timeout() reports success",
+                sd_notify_extend_timeout_usec(3600000000ULL));
+            n = sdn_try_recv(fd, buf, sizeof(buf));
+            SDN_CHECK("EXTEND_TIMEOUT_USEC datagram observed",
+                n > 0 && strcmp(buf, "EXTEND_TIMEOUT_USEC=3600000000\n") == 0);
 
             SDN_CHECK("stopping() delivers STOPPING=1",
                 sd_notify_stopping("bye"));
@@ -358,6 +369,14 @@ int test_sd_notify(void)
         SDN_CHECK("pet: no verdict past grace + progress pings",
             boot_sd_watchdog_test_pet_decide(true, false,
                                              0, true, 0, BOUND));
+        SDN_CHECK("keepalive: frozen sweep still stops even with progress",
+            !boot_sd_watchdog_test_keepalive_supervisor(false, false, true));
+        SDN_CHECK("keepalive: stale connman + IBD progress + live sweep",
+            boot_sd_watchdog_test_keepalive_supervisor(false, true, true));
+        SDN_CHECK("keepalive: stale connman without progress does not keep",
+            !boot_sd_watchdog_test_keepalive_supervisor(false, true, false));
+        SDN_CHECK("keepalive: runtime-alive keeps without progress",
+            boot_sd_watchdog_test_keepalive_supervisor(true, true, false));
     }
 
     /* ── real dedicated pet thread, health ring deliberately idle ── */

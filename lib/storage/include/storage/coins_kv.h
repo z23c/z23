@@ -525,6 +525,12 @@ bool coins_kv_seed_genesis_applied_height(
  * aborts the epilogue and leaves the reindex sentinel pending for a retry. */
 bool coins_kv_reset_for_reseed(struct sqlite3 *db);
 
+/* Durable generation of the entire coins authority.  Every destructive
+ * reset increments it atomically; forward reducer folds do not. */
+#define COINS_KV_AUTHORITY_GENERATION_KEY "coins_kv_authority_generation.v1"
+bool coins_kv_get_authority_generation(struct sqlite3 *db, uint64_t *out);
+bool coins_kv_bump_authority_generation_in_tx(struct sqlite3 *db);
+
 /* ── ANCHOR-SET MINT writer (lib/storage/src/coins_kv_snapshot_write.c) ──
  *
  * Stream the LIVE coins_kv set to a UTXO snapshot sidecar in the exact

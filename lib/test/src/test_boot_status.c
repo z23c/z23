@@ -134,6 +134,30 @@ int test_boot_status(void)
         boot_status_init(NULL);
     }
 
+    /* Intra-stage heartbeat: long block-index work must refresh
+     * updated_unix without pretending the stage advanced. */
+    {
+        boot_status_init(dir);
+        boot_status_note_stage((int)BOOT_STAGE_WALLET_LOADED);
+        struct boot_status_snapshot first, second;
+        char why[128];
+        BS_CHECK("heartbeat fixture readable",
+                 boot_status_read(dir, &first, why, sizeof(why)));
+        BS_CHECK("heartbeat fixture is wallet_loaded",
+                 strcmp(first.stage, "wallet_loaded") == 0);
+        (void)sleep(1);
+        boot_status_heartbeat();
+        BS_CHECK("heartbeat rewrite readable",
+                 boot_status_read(dir, &second, why, sizeof(why)));
+        BS_CHECK("heartbeat keeps wallet_loaded",
+                 strcmp(second.stage, "wallet_loaded") == 0);
+        BS_CHECK("heartbeat advances updated_unix",
+                 second.updated_unix > first.updated_unix);
+        BS_CHECK("heartbeat advances elapsed_s",
+                 second.elapsed_s >= first.elapsed_s);
+        boot_status_init(NULL);
+    }
+
     /* ── reader fails closed on absent / empty / malformed ────────── */
     {
         char empty_dir[] = "/tmp/zcl_bootstatus_empty_XXXXXX";

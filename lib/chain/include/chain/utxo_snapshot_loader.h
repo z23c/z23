@@ -90,6 +90,11 @@ struct uss_handle *uss_open(const char *path,
 
 void uss_close(struct uss_handle *h);
 
+/* SHA256 of the exact mapped artifact bytes.  Call before uss_close(); this
+ * binds header and payload bytes from the same open file description that the
+ * loader verified, without reopening a mutable path. */
+bool uss_artifact_sha256(const struct uss_handle *h, uint8_t out[32]);
+
 typedef bool (*uss_record_cb)(const struct uss_record *r, void *ctx);
 
 /* Iterate every record. Stops early if cb returns false.

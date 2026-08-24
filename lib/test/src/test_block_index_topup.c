@@ -33,6 +33,7 @@
 #include "test/test_core.h"
 
 #include "services/block_index_loader.h"
+#include "util/boot_phase.h"
 #include "storage/block_index_projection.h"
 #include "storage/disk_block_io.h"
 #include "storage/event_log.h"
@@ -255,8 +256,11 @@ int test_block_index_topup(void)
     TOPUP_CHECK("setup: rows emitted", rows_ok);
 
     /* ── Run the top-up. ─────────────────────────────────────────── */
+    uint64_t progress_before = boot_progress_marker();
     bool ran = block_index_projection_topup_with(bip, &ms, dir);
     TOPUP_CHECK("topup returns ok", ran);
+    TOPUP_CHECK("topup ticks boot_progress (born-red: silent nTx/iterate)",
+                boot_progress_marker() > progress_before);
 
     /* 1. raise-only merge on e101. */
     TOPUP_CHECK("e101 gained HAVE_DATA",

@@ -10,7 +10,9 @@
 
 #include "coins/utxo_commitment.h"
 #include "chain/checkpoints.h"
+#include "chain/utxo_snapshot_loader.h"
 #include "config/boot.h"
+#include "config/boot_snapshot_install.h"
 #include "config/consensus_state_bundle_validate.h"
 #include "config/consensus_state_install_verify_receipt.h"
 #include "config/consensus_state_producer_receipt.h"
@@ -2841,6 +2843,10 @@ int test_consensus_state_snapshot_install(void)
         /* Force the seed boundary itself to fail after streaming. Everything,
          * including schemas/cursors and stale-session deletion, must roll back
          * to the wedged pre-install generation. */
+        uint64_t generation_before_failed_cutover = 0;
+        CSI_CHECK("activate: failed-cutover generation baseline reads",
+                  coins_kv_get_authority_generation(
+                      pdb, &generation_before_failed_cutover));
         consensus_state_snapshot_install_activate_test_fail_seed_once();
         bool seed_failed = !consensus_state_snapshot_install_activate(
             pdb, &areq, &ares);
@@ -2862,6 +2868,12 @@ int test_consensus_state_snapshot_install(void)
                   refold_in_progress() && refold_from_anchor_active());
         CSI_CHECK("activate: failed cutover restores generation-bound metadata",
                   seed_failed && stale_generation_metadata_present(pdb));
+        uint64_t generation_after_failed_cutover = UINT64_MAX;
+        CSI_CHECK("activate: failed cutover rolls authority generation back",
+                  coins_kv_get_authority_generation(
+                      pdb, &generation_after_failed_cutover) &&
+                  generation_after_failed_cutover ==
+                      generation_before_failed_cutover);
         if (ares.prior_generation_path[0])
             (void)unlink(ares.prior_generation_path);
 
@@ -2914,6 +2926,20 @@ int test_consensus_state_snapshot_install(void)
          * hook stands in for a valid replay receipt): install atomically. */
         consensus_state_snapshot_install_activate_test_set_independent_authority(
             true);
+        uint64_t generation_before_activation = 0;
+        uint8_t stale_snapshot_artifact[32] = {0x6d};
+        struct uss_header stale_snapshot_header = {
+            .version = 2,
+            .height = (uint32_t)b.height,
+            .count = b.coin_count,
+        };
+        CSI_CHECK("activate: prior snapshot receipt binds current coins generation",
+                  coins_kv_get_authority_generation(
+                      pdb, &generation_before_activation) &&
+                  boot_snapshot_install_marker_begin(
+                      pdb, &stale_snapshot_header, stale_snapshot_artifact) &&
+                  boot_snapshot_install_marker_complete(
+                      pdb, stale_snapshot_artifact, true));
         CSI_CHECK("activate: complete bundle installs atomically",
                   consensus_state_snapshot_install_activate(pdb, &areq, &ares) &&
                   ares.activated &&
@@ -2922,6 +2948,24 @@ int test_consensus_state_snapshot_install(void)
                   ares.anchor_count == 2 && ares.nullifier_count == 2 &&
                   ares.hstar == b.height &&
                   ares.coins_applied_height == b.height + 1);
+        uint64_t generation_after_activation = 0;
+        CSI_CHECK("activate: successful cutover advances authority generation once",
+                  coins_kv_get_authority_generation(
+                      pdb, &generation_after_activation) &&
+                  generation_before_activation != UINT64_MAX &&
+                  generation_after_activation ==
+                      generation_before_activation + 1u);
+        int32_t stale_snapshot_applied = -1;
+        bool stale_snapshot_pending = true;
+        bool stale_snapshot_matches = false;
+        bool stale_snapshot_frontier = true;
+        CSI_CHECK("activate: replacing coins authority invalidates prior snapshot receipt",
+                  !boot_snapshot_install_resume_allowed(
+                      pdb, &stale_snapshot_header, stale_snapshot_artifact,
+                      &stale_snapshot_applied, &stale_snapshot_pending,
+                      &stale_snapshot_matches, &stale_snapshot_frontier) &&
+                  !stale_snapshot_pending && stale_snapshot_matches &&
+                  !stale_snapshot_frontier);
         CSI_CHECK("activate: installed coins/anchors/nullifiers match the bundle "
                   "with COMPLETE (cursor 0) history",
                   active_is(pdb, &b));

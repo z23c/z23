@@ -22,7 +22,11 @@ Wants=network-online.target
 # genuinely reachable at its .onion, not merely that a process exists.
 Type=notify
 NotifyAccess=main
-TimeoutStartSec=3600
+# Match production (deploy/zclassic23.service): cold IBD boot can spend
+# well over an hour in block-index load plus coins hydrate before the
+# onion descriptor is published and READY=1 fires. The previous 1h
+# budget SIGTERM'd that work and Restart=always livelocked the box.
+TimeoutStartSec=14400
 WatchdogSec=120
 
 # Per-box configuration stays OUTSIDE the repo: local paths, ports and the

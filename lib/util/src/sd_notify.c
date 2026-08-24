@@ -129,6 +129,17 @@ bool sd_notify_status(const char *msg)
     return sd_send(buf);
 }
 
+bool sd_notify_extend_timeout_usec(uint64_t usec)
+{
+    if (usec == 0)
+        return false;
+    char buf[64];
+    int n = snprintf(buf, sizeof(buf), "EXTEND_TIMEOUT_USEC=%llu\n",
+                     (unsigned long long)usec);
+    if (n <= 0) return false;
+    return sd_send(buf);
+}
+
 bool sd_notify_stopping(const char *reason)
 {
     char buf[512];

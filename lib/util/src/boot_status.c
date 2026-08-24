@@ -28,6 +28,7 @@ static int     g_stage_ordinal = (int)BOOT_STAGE_INIT;
 static int64_t g_height = -1;
 static int64_t g_started_unix;
 static int64_t g_started_mono_ms;
+static int64_t g_last_heartbeat_unix;
 /* blocker-ok:boot_status_beacon — this is not a blocker recorder, it is the
  * on-disk beacon a blocker gets COPIED into. The typed registry
  * (lib/util/blocker.h) lives in RAM and dies with the process, so a boot
@@ -214,6 +215,7 @@ void boot_status_init(const char *datadir)
     g_height = -1;
     g_started_unix = platform_time_wall_unix();
     g_started_mono_ms = platform_time_monotonic_ms();
+    g_last_heartbeat_unix = 0;
     boot_status_publish_locked();
     pthread_mutex_unlock(&g_lock);
 }
@@ -234,6 +236,19 @@ void boot_status_set_height(int64_t height)
     if (g_datadir[0] != '\0') {
         g_height = height;
         boot_status_publish_locked();
+    }
+    pthread_mutex_unlock(&g_lock);
+}
+
+void boot_status_heartbeat(void)
+{
+    pthread_mutex_lock(&g_lock);
+    if (g_datadir[0] != '\0') {
+        int64_t now = platform_time_wall_unix();
+        if (now != g_last_heartbeat_unix) {
+            g_last_heartbeat_unix = now;
+            boot_status_publish_locked();
+        }
     }
     pthread_mutex_unlock(&g_lock);
 }

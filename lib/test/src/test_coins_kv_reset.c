@@ -66,6 +66,10 @@ int test_coins_kv_reset_for_reseed(void)
      * nothing, clears absent keys) and returns true. */
     CKR_CHECK("reset on virgin store -> true", coins_kv_reset_for_reseed(db));
     CKR_CHECK("virgin: count == 0", coins_kv_count(db) == 0);
+    uint64_t generation = 0;
+    CKR_CHECK("virgin reset establishes authority generation",
+              coins_kv_get_authority_generation(db, &generation) &&
+              generation == 1);
 
     /* Populate a small set, set the applied frontier, and stamp migration —
      * the exact pre-reindex shape a reset must discard. */
@@ -90,6 +94,9 @@ int test_coins_kv_reset_for_reseed(void)
 
     /* THE reset. */
     CKR_CHECK("reset_for_reseed -> true", coins_kv_reset_for_reseed(db));
+    CKR_CHECK("destructive reset advances authority generation",
+              coins_kv_get_authority_generation(db, &generation) &&
+              generation == 2);
 
     /* AFTER: the coin set is empty, the migration stamp is gone, and the
      * applied frontier is absent (a clean "unknown", not 0-as-applied). */
@@ -107,6 +114,9 @@ int test_coins_kv_reset_for_reseed(void)
     /* Idempotent: a second reset on the now-empty store is still a clean
      * no-op true. */
     CKR_CHECK("reset idempotent", coins_kv_reset_for_reseed(db));
+    CKR_CHECK("every reset advances authority generation",
+              coins_kv_get_authority_generation(db, &generation) &&
+              generation == 3);
     CKR_CHECK("count still 0", coins_kv_count(db) == 0);
 
     progress_store_close();

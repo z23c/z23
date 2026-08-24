@@ -978,6 +978,52 @@ static void render_zcode_guide(struct buf *b, const struct zcl_cli_render_env *e
         emit_kv(b, e, 4, "keep", keep);
 }
 
+/* yardsale.guide is the money/content/software layer map: story, plan, test. */
+static void render_yardsale_guide(struct buf *b, const struct zcl_cli_render_env *e,
+                                  const struct json_value *root)
+{
+    emit_header(b, e, "yardsale.guide");
+    buf_putc(b, '\n');
+    const struct json_value *data = json_get(root, "data");
+    const char *mission = json_get_str(json_get(data, "mission"));
+    const char *next = json_get_str(json_get(data, "next_action"));
+    const char *keep = json_get_str(json_get(data, "continue_rule"));
+    if (mission && mission[0])
+        emit_kv(b, e, 4, "do", mission);
+    if (next && next[0])
+        emit_kv(b, e, 4, "next", next);
+    emit_kv(b, e, 4, "run",
+            json_get_str(json_get(data, "start_command")));
+    if (keep && keep[0])
+        emit_kv(b, e, 4, "keep", keep);
+
+    const struct json_value *layers = json_get(data, "layers");
+    size_t n = layers && layers->type == JSON_ARR ? layers->num_children : 0;
+    if (n == 0)
+        return;
+    buf_putc(b, '\n');
+    size_t rows = n > 8 ? 8 : n;
+    const char *headers[4] = { "LAYER", "PLAN", "TEST", "EXPECT" };
+    const char *cellbuf[8 * 4];
+    for (size_t r = 0; r < rows; r++) {
+        const struct json_value *row = json_at(layers, r);
+        cellbuf[r * 4 + 0] = json_get_str(json_get(row, "id"));
+        cellbuf[r * 4 + 1] = json_get_str(json_get(row, "plan_command"));
+        cellbuf[r * 4 + 2] = json_get_str(json_get(row, "test_group"));
+        cellbuf[r * 4 + 3] = json_get_str(json_get(row, "expected"));
+    }
+    emit_table(b, e, 4, headers, cellbuf, rows);
+    for (size_t r = 0; r < rows; r++) {
+        const struct json_value *row = json_at(layers, r);
+        const char *story = json_get_str(json_get(row, "user_story"));
+        const char *id = json_get_str(json_get(row, "id"));
+        if (!story || !story[0] || !id || !id[0])
+            continue;
+        buf_putc(b, '\n');
+        emit_kv(b, e, 4, id, story);
+    }
+}
+
 /* code.guide is a recipe, not a schema dump: four copyable commands. */
 static void render_code_guide(struct buf *b, const struct zcl_cli_render_env *e,
                               const struct json_value *root)
@@ -1130,6 +1176,9 @@ size_t zcl_cli_render_doc(const char *doc, size_t doc_len,
         else if (command_path &&
                  strcmp(command_path, "zcode.guide") == 0)
             render_zcode_guide(&b, env, &root);
+        else if (command_path &&
+                 strcmp(command_path, "yardsale.guide") == 0)
+            render_yardsale_guide(&b, env, &root);
         else if (command_path &&
                  strcmp(command_path, "core.network.peers.list") == 0)
             render_peer_list(&b, env, &root);

@@ -15,10 +15,12 @@
 #include "services/chain_restore_integrity.h"
 #include "services/chain_restore_planner.h"
 #include "services/binary_staleness_service.h"
+#include "encoding/utilstrencodings.h"
 #include "platform/time_compat.h"
 #include "util/boot_scan.h"
 #include "json/json.h"
 
+#include <stdio.h>
 #include <string.h>
 
 static struct chain_restore_boot_snapshot g_chain_restore_boot_snapshot;
@@ -133,11 +135,63 @@ void chain_restore_record_fast_restart(bool taken,
     }
 }
 
+void chain_restore_record_assisted_snapshot_load(
+    bool body_sha3_verified,
+    bool embedded_frontier_verified,
+    bool reseed_committed,
+    int64_t seed_height,
+    uint64_t record_count,
+    const uint8_t payload_sha3[32],
+    const uint8_t anchor_block_hash[32],
+    const uint8_t artifact_sha256[32],
+    const char *snapshot_path)
+{
+    g_chain_restore_boot_snapshot.has_data = true;
+    g_chain_restore_boot_snapshot.boot_time =
+        (int64_t)platform_time_wall_time_t();
+    g_chain_restore_boot_snapshot.assisted_snapshot_body_sha3_verified =
+        body_sha3_verified;
+    g_chain_restore_boot_snapshot.assisted_snapshot_embedded_frontier_verified =
+        embedded_frontier_verified;
+    g_chain_restore_boot_snapshot.assisted_snapshot_reseed_committed =
+        reseed_committed;
+    g_chain_restore_boot_snapshot.assisted_snapshot_seed_height = seed_height;
+    g_chain_restore_boot_snapshot.assisted_snapshot_record_count = record_count;
+    g_chain_restore_boot_snapshot.assisted_snapshot_recorded_unix =
+        (int64_t)platform_time_wall_time_t();
+    g_chain_restore_boot_snapshot.assisted_snapshot_payload_sha3[0] = '\0';
+    g_chain_restore_boot_snapshot.assisted_snapshot_anchor_block_hash[0] = '\0';
+    g_chain_restore_boot_snapshot.assisted_snapshot_artifact_sha256[0] = '\0';
+    if (payload_sha3)
+        HexStr(payload_sha3, 32, false,
+               g_chain_restore_boot_snapshot.assisted_snapshot_payload_sha3,
+               sizeof(g_chain_restore_boot_snapshot.assisted_snapshot_payload_sha3));
+    if (anchor_block_hash)
+        HexStr(anchor_block_hash, 32, false,
+               g_chain_restore_boot_snapshot.assisted_snapshot_anchor_block_hash,
+               sizeof(g_chain_restore_boot_snapshot.assisted_snapshot_anchor_block_hash));
+    if (artifact_sha256)
+        HexStr(artifact_sha256, 32, false,
+               g_chain_restore_boot_snapshot.assisted_snapshot_artifact_sha256,
+               sizeof(g_chain_restore_boot_snapshot.assisted_snapshot_artifact_sha256));
+    snprintf(g_chain_restore_boot_snapshot.assisted_snapshot_path,
+             sizeof(g_chain_restore_boot_snapshot.assisted_snapshot_path),
+             "%s", snapshot_path ? snapshot_path : "");
+}
+
 void chain_restore_get_boot_snapshot(struct chain_restore_boot_snapshot *out)
 {
     if (!out) return;
     *out = g_chain_restore_boot_snapshot;
 }
+
+#ifdef ZCL_TESTING
+void chain_restore_boot_snapshot_reset_for_testing(void)
+{
+    memset(&g_chain_restore_boot_snapshot, 0,
+           sizeof(g_chain_restore_boot_snapshot));
+}
+#endif
 
 bool chain_restore_dump_state_json(struct json_value *out, const char *key)
 {
@@ -198,6 +252,40 @@ bool chain_restore_dump_state_json(struct json_value *out, const char *key)
     json_push_kv_int(out, "fast_restart_tip_height",
                      s->fast_restart_tip_height);
     json_push_kv_str(out, "fast_restart_reason", s->fast_restart_reason);
+
+    struct json_value assisted;
+    json_init(&assisted);
+    json_set_object(&assisted);
+    json_push_kv_bool(&assisted, "complete",
+                      s->assisted_snapshot_body_sha3_verified &&
+                      s->assisted_snapshot_embedded_frontier_verified &&
+                      s->assisted_snapshot_reseed_committed &&
+                      s->assisted_snapshot_payload_sha3[0] != '\0' &&
+                      s->assisted_snapshot_anchor_block_hash[0] != '\0' &&
+                      s->assisted_snapshot_artifact_sha256[0] != '\0');
+    json_push_kv_bool(&assisted, "body_sha3_verified",
+                      s->assisted_snapshot_body_sha3_verified);
+    json_push_kv_bool(&assisted, "embedded_frontier_verified",
+                      s->assisted_snapshot_embedded_frontier_verified);
+    json_push_kv_bool(&assisted, "reseed_committed",
+                      s->assisted_snapshot_reseed_committed);
+    json_push_kv_int(&assisted, "seed_height",
+                     s->assisted_snapshot_recorded_unix > 0
+                         ? s->assisted_snapshot_seed_height : -1);
+    json_push_kv_int(&assisted, "record_count",
+                     (int64_t)s->assisted_snapshot_record_count);
+    json_push_kv_str(&assisted, "payload_sha3",
+                     s->assisted_snapshot_payload_sha3);
+    json_push_kv_str(&assisted, "anchor_block_hash",
+                     s->assisted_snapshot_anchor_block_hash);
+    json_push_kv_str(&assisted, "artifact_sha256",
+                     s->assisted_snapshot_artifact_sha256);
+    json_push_kv_int(&assisted, "recorded_unix",
+                     s->assisted_snapshot_recorded_unix);
+    json_push_kv_str(&assisted, "snapshot_path",
+                     s->assisted_snapshot_path);
+    json_push_kv(out, "assisted_snapshot_load", &assisted);
+    json_free(&assisted);
 
     /* O(delta) witness — per-step boot data-scan iteration counts (see
      * util/boot_scan.h). Each key is a named boot scanner; the value is how
