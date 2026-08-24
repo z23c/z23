@@ -7,6 +7,7 @@
  * Patterns use shell/fnmatch syntax. Keep groups space-separated. */
 
 AGENT_IMPACT_RULE("Makefile|README.md|.github/CONTRIBUTING.md|src/main.c|tools/*|tools/scripts/*|tools/githooks/*|deploy/*.service|deploy/*.timer|deploy/examples/*.service|deploy/examples/*.timer|docs/AGENT_API.md|docs/BUILD.md|docs/CODEBASE_MAP.md|docs/HOW_THE_NODE_WORKS.md|docs/GETTING_STARTED.md|docs/work/fast-path.md|docs/RUNBOOK.md|lib/test/src/test_make_lint_gates.c|lib/test/src/lint_gate_*.c|lib/test/src/lint_gate_selftests.h", "make_lint_gates")
+AGENT_IMPACT_RULE(".grok/rules/*|.grok/skills/*/SKILL.md", "make_lint_gates")
 AGENT_IMPACT_RULE("app/controllers/include/controllers/agent_impact_rules.def", "syncdiag_rpc test_group_selector make_lint_gates")
 AGENT_IMPACT_RULE("lib/storage/src/chain_segment.c|lib/storage/src/chain_segment_store.c|lib/storage/include/storage/chain_segment.h|app/controllers/src/chain_segment_controller.c|app/controllers/include/controllers/chain_segment_controller.h|lib/test/src/test_chain_segment.c|tools/lint/check_no_writer_below_sealed_frontier.sh", "chain_segment block_parse_cache segment_sealer segment_corruption syncdiag_rpc make_lint_gates")
 AGENT_IMPACT_RULE("app/services/src/segment_sealer_service.c|app/services/include/services/segment_sealer_service.h|lib/test/src/test_segment_sealer.c", "segment_sealer chain_segment supervisor syncdiag_rpc make_lint_gates")

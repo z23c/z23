@@ -432,7 +432,10 @@ static int test_guide_tree_render(void)
             "{\"schema\":\"zcl.result.v1\",\"command\":\"zcode.guide\","
             "\"ok\":true,\"status\":\"passed\",\"data\":{"
             "\"mission\":\"Tell Z23 what you want C23 software to do.\","
-            "\"start_command\":\"z23 zcode work start . \\\"<desired behavior>\\\"\"}}";
+            "\"next_action\":\"Describe the behavior you want.\","
+            "\"start_command\":\"z23 zcode work start . \\\"<desired behavior>\\\"\","
+            "\"journey\":\"reuse C23 -> create only missing code -> build\","
+            "\"continue_rule\":\"Follow the next_safe_command.\"}}";
         struct zcl_cli_render_env e = cr_env(80, false);
         char out[8192];
         size_t n = zcl_cli_render_doc(doc, strlen(doc), "zcode.guide", &e,
@@ -440,7 +443,11 @@ static int test_guide_tree_render(void)
         ASSERT(n > 0);
         ASSERT(strstr(out, "zcode.guide") != NULL);
         ASSERT(strstr(out, "z23 zcode work start .") != NULL);
+        ASSERT(strstr(out, "Describe the behavior you want.") != NULL);
+        ASSERT(strstr(out, "reuse C23") != NULL);
+        ASSERT(strstr(out, "next_safe_command") != NULL);
         ASSERT(strstr(out, "next_action") == NULL);
+        ASSERT(strstr(out, "continue_rule") == NULL);
         ASSERT(strstr(out, "\"schema\"") == NULL); /* not the raw envelope */
         ASSERT(cr_max_line_width(out) <= 80);
         PASS();
