@@ -35,10 +35,11 @@
  * Getting any of those wrong fabricates evidence, so there is one
  * implementation and both readers call it.
  *
- * THE ROW SHAPE this supports, deliberately narrow: flat, single-line,
- * unnested JSON objects with no duplicate keys — the same assumption the
- * shell judges' fld_num()/fld_str() already make. It is NOT a JSON parser
- * and must not grow into one; a nested field belongs in json/json.h.
+ * THE ROW SHAPE this supports, deliberately narrow: single-line JSON objects
+ * with no duplicate keys and scalar values; arrays may contain scalars or
+ * bounded flat objects with scalar values because tip-agreement evidence
+ * carries `{height,hash,peers}` entries. It is NOT a general JSON parser and
+ * must not grow into one; any deeper shape belongs in json/json.h.
  *
  * Pure: no allocation, no clock, no globals, no threads. Reentrant-safe. */
 
@@ -66,6 +67,12 @@ void evidence_copy_bounded(char *dst, size_t cap, const char *src, size_t len);
  * and not strstr(). */
 const char *evidence_find_sub(const char *hay, size_t len, const char *needle);
 
+/* Validate the complete narrow row grammar: one object, at most 64 unique
+ * unescaped keys, and string/integer/bool/null values or arrays containing
+ * those scalars and flat objects of at most 16 unique scalar fields. Trailing
+ * bytes, deeper containers, duplicate keys and invalid escapes are rejected. */
+bool evidence_row_flat_object_valid(const char *row, size_t len);
+
 /* Copy a string-valued field into dst (always NUL-terminated when cap > 0).
  * Returns true when the FIELD EXISTS AS A JSON STRING, even when empty:
  * callers must be able to tell "the recorder wrote an empty value" from
@@ -78,6 +85,14 @@ bool evidence_row_str(const char *row, size_t len, const char *key,
  * null for "I could not measure this", and null is not a zero. */
 bool evidence_row_int(const char *row, size_t len, const char *key,
                       int64_t *out);
+
+/* Read a JSON boolean field.  The token must be exactly `true` or `false`;
+ * prefixes such as `truex` are rejected rather than accepted as evidence. */
+bool evidence_row_bool(const char *row, size_t len, const char *key,
+                       bool *out);
+
+/* True only when the named field exists and its exact value is JSON null. */
+bool evidence_row_is_null(const char *row, size_t len, const char *key);
 
 /* Per-row callback. `row` is NOT NUL-terminated; use `len`. */
 typedef void (*evidence_row_fn)(const char *row, size_t len, void *ctx);

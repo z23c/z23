@@ -1199,6 +1199,11 @@ void zcl_native_handle_ops_statecatalog(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 
+/* ops.slo — node-free, bounded fold of the external uptime probe ledger. */
+void zcl_native_handle_ops_slo(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+
 /* core.network.chain_view — the reachable-network chain view (modal tip, max
  * advertised height, our delta, fork clusters) from the node's network_monitor.
  * Reads the running node's network_monitor dumpstate over the read-only RPC.

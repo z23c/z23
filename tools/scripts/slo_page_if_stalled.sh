@@ -3,8 +3,8 @@
 #
 # slo_page_if_stalled.sh — the EXTERNAL SLO PAGER (the pager half of the
 # uptime-SLO loop). node_slo_probe.sh is the scoreboard (it dials each
-# instance's RPC port and appends what it saw); slo_ledger_summary.sh is the
-# read surface (it prints a windowed per-instance summary). Neither of those
+# instance's RPC port and appends what it saw); `z23 ops slo` is the native
+# read surface (it emits a windowed per-instance summary). Neither of those
 # WAKES ANYONE UP. This script is the missing half: it reads the same ledger
 # and, when a page-worthy condition is active, it (a) appends a durable page
 # record, (b) best-effort broadcasts via wall(1), and (c) exits non-zero so a
@@ -118,7 +118,7 @@
 #                              skipped when not executable)
 #
 # No python (banned), no jq — bash + awk + flock only, same rule as
-# node_slo_probe.sh / slo_ledger_summary.sh.
+# node_slo_probe.sh.
 
 set -euo pipefail
 export LC_ALL=C

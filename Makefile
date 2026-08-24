@@ -7164,23 +7164,18 @@ slo-probe-status:
 	@systemctl --user status zclassic23-slo-pager.service zclassic23-slo-pager.timer --no-pager -n 12 2>/dev/null || true
 	@tail -n 6 "$(HOME)/.local/state/zclassic23-slo/uptime-ledger.jsonl" 2>/dev/null || echo "no ledger yet"
 	@tail -n 4 "$(HOME)/.local/state/zclassic23-slo/pages.jsonl" 2>/dev/null || echo "no pages (good)"
-	@./tools/scripts/slo_ledger_summary.sh --window-hours 24 2>/dev/null || true
+	@build/bin/z23 ops slo --window_hours=24 2>/dev/null || true
 
-# slo-probe-selftest: hermetic regression guard for the prober, the summary
-# reader, the 72h hold judge, and the external pager — fixture RPC commands
-# / fixture ledgers, no live nodes.
+# slo-probe-selftest: hermetic regression guard for the prober, native bounded
+# summary reader, 72h hold judge, and external pager — fixture RPC commands /
+# fixture ledgers, no live nodes.
 slo-probe-selftest:
+	@$(MAKE) -s t-fast-exact ONLY=slo_ledger_summary
 	@bash -c 'set -uo pipefail; \
 	 set +e; out=$$(bash tools/scripts/node_slo_probe.sh --selftest 2>&1); rc=$$?; set -e; \
 	 echo "$$out"; \
 	 if [ "$$rc" != "0" ] || ! echo "$$out" | grep -q "^selftest: PASS"; then \
 	     echo "slo-probe-selftest: FAIL node_slo_probe.sh (rc=$$rc; no selftest: PASS line)"; \
-	     exit 1; \
-	 fi; \
-	 set +e; out2=$$(bash tools/scripts/slo_ledger_summary.sh --selftest 2>&1); rc2=$$?; set -e; \
-	 echo "$$out2"; \
-	 if [ "$$rc2" != "0" ] || ! echo "$$out2" | grep -q "^selftest: PASS"; then \
-	     echo "slo-probe-selftest: FAIL slo_ledger_summary.sh (rc=$$rc2; no selftest: PASS line)"; \
 	     exit 1; \
 	 fi; \
 	 set +e; out3=$$(bash tools/scripts/slo_hold_judge.sh --selftest 2>&1); rc3=$$?; set -e; \

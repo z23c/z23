@@ -292,6 +292,26 @@ ZCL_COMMAND_BRANCH("ops.debug.dash", "ops.debug", "Operator rollup dashboards",
                    ZCL_COMMAND_LAYER_OPS)
 
 ZCL_COMMAND_READY_READ(
+    "ops.debug.dash.slo", "ops.debug.dash", "ops.slo",
+    "External public-node SLO evidence",
+    "A bounded, node-free fold of complete rows from the external uptime "
+    "probe ledger. Reports per-instance reachability, oracle gap, longest "
+    "outage, sample age, window coverage, parse defects and capacity limits. "
+    "Reporter-only: it grants no node authority and refuses an OK verdict "
+    "for malformed evidence, stale evidence, or an incomplete time window.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "slo,uptime,reachability,evidence,external,ledger,availability",
+    "zcl.ops_slo.input.v1", "zcl.slo_evidence.v1",
+    "instance,window_hours", "",
+    "z23 ops slo --window_hours=24",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_slo)
+
+ZCL_COMMAND_READY_READ(
     "ops.debug.dash.kpi", "ops.debug.dash", "kpi,ops.kpi",
     "One-shot subsystem KPI dashboard",
     "Every subsystem KPI — height, peers, sync, validation, health, mempool, "

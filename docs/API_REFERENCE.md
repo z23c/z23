@@ -74,11 +74,11 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 713 |
+| Registry entries (branches + leaves) | 714 |
 | Top-level roots | 12 |
 | Branches | 165 |
-| Leaves (dispatchable command paths) | 548 |
-| … `ready` (live handler in this build) | 495 |
+| Leaves (dispatchable command paths) | 549 |
+| … `ready` (live handler in this build) | 496 |
 | … `compat` (metadata only, names a fallback) | 25 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 28 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 24 |
@@ -95,7 +95,7 @@ Per source file:
 | `config/commands/apps.def` | 16 | 3 | 13 |
 | `config/commands/app_features.def` | 71 | 19 | 52 |
 | `config/commands/store.def` | 18 | 0 | 18 |
-| `config/commands/ops.def` | 47 | 9 | 38 |
+| `config/commands/ops.def` | 48 | 9 | 39 |
 | `config/commands/dev.def` | 55 | 13 | 42 |
 | `config/commands/code.def` | 17 | 2 | 15 |
 | `config/commands/accounts.def` | 11 | 2 | 9 |
@@ -781,6 +781,7 @@ represented by its children's sections.
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
+| `ops debug dash slo` (aliases: `ops.slo`) | ready | read / read / operator · fast/low | `instance`, `window_hours` | `zcl.slo_evidence.v1` | `z23 ops slo --window_hours=24` | External public-node SLO evidence |
 | `ops debug dash kpi` (aliases: `kpi`, `ops.kpi`) | ready | read / read / operator · fast/moderate | none | `zcl.ops_kpi.v1` | `z23 kpi` | One-shot subsystem KPI dashboard |
 | `ops debug dash snapshot` (aliases: `ops.snapshot`) | ready | read / read / operator · fast/low | none | `zcl.operator_snapshot.v3` | `z23 ops snapshot` | Operator snapshot payload |
 | `ops debug dash summary` (aliases: `ops.summary`) | ready | read / read / operator · fast/low | none | `zcl.operator_summary.v1` | `z23 ops summary` | Fail-closed operator summary |
@@ -1558,6 +1559,7 @@ Every alias resolves through the same grammar as its canonical path
 | `ops.profile` | `ops.debug.profile` |
 | `ops.producer.status` | `ops.debug.producer` |
 | `ops.rom` | `ops.debug.rom` |
+| `ops.slo` | `ops.debug.dash.slo` |
 | `kpi` | `ops.debug.dash.kpi` |
 | `ops.kpi` | `ops.debug.dash.kpi` |
 | `ops.snapshot` | `ops.debug.dash.snapshot` |

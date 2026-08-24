@@ -34,6 +34,7 @@
 #include "services/soak_attestation_service.h"
 #include "services/canary_sentinel_watch.h"
 #include "services/stopwatch_skip_watch.h"
+#include "services/slo_ledger_summary.h"
 #include "services/tip_agreement_watch.h"
 #include "services/bg_validation_service.h"
 #include "services/disk_monitor.h"

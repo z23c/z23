@@ -132,6 +132,18 @@
                "ledger name, or empty for every ledger",
                "c3", "netdisrupt",
                "lib/test/src/test_stopwatch_skip_watch.c", false),
+    DIAG_ENTRY("slo_evidence", slo_evidence_dump_state_json,
+               "REPORTER ONLY — bounded, node-free external uptime-probe "
+               "evidence: strict complete-row counts, per-instance window "
+               "coverage, reachability, oracle gap, outage run, staleness, "
+               "capacity flags and a fail-closed verdict. It grades no code, "
+               "controls no node and grants no authority",
+               "diagnostic", "service",
+               "app/services/src/slo_ledger_summary.c",
+               "filesystem_snapshot", "bounded_lookup",
+               "instance name, or empty for required and observed lanes",
+               "canonical", "dev",
+               "lib/test/src/test_slo_ledger_summary.c", false),
     DIAG_ENTRY("mvp", mvp_dump_state_json,
                "MVP v1 scoreboard (schema zcl.mvp_status.v1): docs/MVP.md's "
                "eight operator acceptance criteria as {id,title,met,evidence,"

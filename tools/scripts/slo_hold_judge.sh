@@ -15,8 +15,8 @@
 # prove a hold, and a prober that stopped running is itself a violation.
 #
 # HOLD BAR — every criterion must hold over the trailing-W-hours window
-# (window = [newest_sample_ts - W*3600, newest_sample_ts], mirroring
-# slo_ledger_summary.sh's anchor-to-newest idiom; staleness is a SEPARATE
+# (window = [newest_sample_ts - W*3600, newest_sample_ts], matching the
+# native SLO evidence reader's anchor-to-newest contract; staleness is a SEPARATE
 # criterion so a long-dead prober can never look "covered"):
 #
 #   reachability    reachable:true on >= 99.5% of in-window samples AND no
@@ -73,7 +73,7 @@
 #   ZCL_SLO_BUCKET_SEC    advance bucket width sec (default 900 = 15 min)
 #
 # No python (banned), no jq — bash + awk only, same rule as
-# slo_ledger_summary.sh / node_slo_probe.sh.
+# node_slo_probe.sh.
 
 set -euo pipefail
 export LC_ALL=C

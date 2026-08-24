@@ -12,9 +12,9 @@
 # reachable:false on every poll forever and drain the meaning out of the
 # ledger's any_unreachable flag). After installing this unit, add the row
 #     "soak|18242|${HOME:-/root}/.zclassic-c23-soak|ZCL_SLO_SOAK_CMD"
-# to that table, and move `soak` from RETIRED_INSTANCES back into INSTANCES
-# in tools/scripts/slo_ledger_summary.sh. Tearing the lane back down means
-# removing both again.
+# to that table. The native `z23 ops slo` reader discovers any bounded
+# instance name actually present in the ledger, so it needs no second table.
+# Tearing the lane back down means removing the prober row again.
 
 [Unit]
 Description=Z23 Soak Node (pinned binary, long-uptime MVP-C6 evidence)

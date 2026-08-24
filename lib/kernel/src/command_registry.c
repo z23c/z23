@@ -1130,6 +1130,12 @@ bool zcl_command_registry_input_validate(const struct zcl_command_spec *spec,
              * documented native fast path uncallable before its handler. */
             type_ok = value->type == JSON_INT && json_get_int(value) >= 1 &&
                       json_get_int(value) <= 100;
+        } else if (strcmp(key, "window_hours") == 0) {
+            /* External SLO evidence retains at most a seven-day reporting
+             * window. The handler repeats this bound; recognizing the typed
+             * integer here keeps its own declared CLI example invokable. */
+            type_ok = value->type == JSON_INT && json_get_int(value) >= 1 &&
+                      json_get_int(value) <= 168;
         } else if (strcmp(key, "height") == 0 ||
                    strcmp(key, "start_height") == 0 ||
                    strcmp(key, "after") == 0 ||

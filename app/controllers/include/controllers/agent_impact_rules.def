@@ -153,6 +153,10 @@ AGENT_IMPACT_RULE("app/services/src/soak_attestation_service.c|app/services/incl
  * emit the alarm. Reporter-only, so it maps to its own group plus the
  * registry test that owns every dumpstate descriptor row. */
 AGENT_IMPACT_RULE("app/services/src/stopwatch_skip_watch.c|app/services/include/services/stopwatch_skip_watch.h|app/services/include/services/stopwatch_skip_classes.def|lib/test/src/test_stopwatch_skip_watch.c|tools/scripts/stopwatch_skip_class.sh|tools/scripts/stopwatch_evidence_judge.sh|tools/scripts/c3_stopwatch_run_and_record.sh|tools/scripts/netdisrupt_stopwatch_run_and_record.sh|tools/lint/check_stopwatch_skip_detector.sh", "stopwatch_skip_watch syncdiag_rpc rpc make_lint_gates")
+/* External uptime evidence: one bounded C23 reader owns both the node-free
+ * typed leaf and dumpstate projection; the old whole-ledger awk reader is
+ * deliberately absent. */
+AGENT_IMPACT_RULE("app/services/src/slo_ledger_summary.c|app/services/include/services/slo_ledger_summary.h|app/services/src/evidence_ledger_row.c|app/services/include/services/evidence_ledger_row.h|tools/command/native_slo_ledger_command.c|lib/test/src/test_slo_ledger_summary.c|tools/scripts/node_slo_probe.sh", "slo_ledger_summary stopwatch_skip_watch tip_agreement_watch command_registry_catalog command_input_bounds native_api_contract syncdiag_rpc rpc make_lint_gates")
 /* sync_benchmark (zcl.sync_benchmark.v1 phase-timed receipt) — its unit tests
  * live in the existing test_soak_attestation.c file (same datadir-receipt
  * evidence pattern), so both map to the soak_attestation group. */
