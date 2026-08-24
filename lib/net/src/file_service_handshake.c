@@ -10,12 +10,16 @@
 #include "crypto/random_secret.h"
 #include "crypto/sha3.h"
 #include "crypto/x25519_safe.h"
+#include "platform/time_compat.h"
 #include "support/cleanse.h"
 #include "util/log_macros.h"
 
 #include <errno.h>
+#include <poll.h>
 #include <string.h>
 #include <sys/socket.h>
+
+#define FS_HANDSHAKE_RECV_BUDGET_MS 30000
 
 static const uint8_t k_fs_handshake_domain[] =
     "zcl.file-service.x25519-hkdf-sha3.v1";
@@ -36,12 +40,24 @@ static bool handshake_send_all(int fd, const uint8_t *data, size_t len)
     return true;
 }
 
-static bool handshake_recv_all(int fd, uint8_t *out, size_t len)
+static bool handshake_recv_all(int fd, uint8_t *out, size_t len,
+                               int64_t deadline_ms)
 {
     size_t got = 0;
     while (got < len) {
-        ssize_t n = recv(fd, out + got, len - got, 0);
-        if (n < 0 && errno == EINTR)
+        int64_t now_ms = platform_time_monotonic_ms();
+        if (now_ms <= 0 || now_ms >= deadline_ms)
+            return false;
+        int timeout_ms = (int)(deadline_ms - now_ms);
+        struct pollfd pfd = {.fd = fd, .events = POLLIN};
+        int ready = poll(&pfd, 1, timeout_ms);
+        if (ready < 0 && errno == EINTR)
+            continue;
+        if (ready <= 0 || !(pfd.revents & (POLLIN | POLLHUP)))
+            return false;
+        ssize_t n = recv(fd, out + got, len - got, MSG_DONTWAIT);
+        if (n < 0 && (errno == EINTR || errno == EAGAIN ||
+                      errno == EWOULDBLOCK))
             continue;
         if (n <= 0)
             return false;
@@ -100,11 +116,19 @@ bool fs_handshake(struct fs_session *session, const uint8_t utxo_root[32],
     uint8_t expected_peer_confirmation[32] = {0};
     uint8_t peer_confirmation[32] = {0};
     const char *failure = NULL;
+    int64_t now_ms = 0, deadline_ms = 0;
 
     if (!session || !utxo_root)
         LOG_FAIL("filesvc", "handshake: null session or UTXO root");
     session->key_established = false;
     memory_cleanse(session->key, sizeof(session->key));
+
+    now_ms = platform_time_monotonic_ms();
+    if (now_ms <= 0 || now_ms > INT64_MAX - FS_HANDSHAKE_RECV_BUDGET_MS) {
+        failure = "monotonic receive deadline unavailable";
+        goto done;
+    }
+    deadline_ms = now_ms + FS_HANDSHAKE_RECV_BUDGET_MS;
 
     if (!zcl_random_secret_bytes(ephemeral_private,
                                  sizeof(ephemeral_private),
@@ -123,12 +147,14 @@ bool fs_handshake(struct fs_session *session, const uint8_t utxo_root[32],
             failure = "initiator public-key send failed";
             goto done;
         }
-        if (!handshake_recv_all(session->fd, session->peer_nonce, 32)) {
+        if (!handshake_recv_all(session->fd, session->peer_nonce, 32,
+                                deadline_ms)) {
             failure = "responder public-key receive failed";
             goto done;
         }
     } else {
-        if (!handshake_recv_all(session->fd, session->peer_nonce, 32)) {
+        if (!handshake_recv_all(session->fd, session->peer_nonce, 32,
+                                deadline_ms)) {
             failure = "initiator public-key receive failed";
             goto done;
         }
@@ -159,7 +185,8 @@ bool fs_handshake(struct fs_session *session, const uint8_t utxo_root[32],
         failure = "key confirmation send failed";
         goto done;
     }
-    if (!handshake_recv_all(session->fd, peer_confirmation, 32)) {
+    if (!handshake_recv_all(session->fd, peer_confirmation, 32,
+                            deadline_ms)) {
         failure = "key confirmation receive failed";
         goto done;
     }

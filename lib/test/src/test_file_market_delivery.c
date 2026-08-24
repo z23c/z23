@@ -13,14 +13,17 @@
 #include "net/file_market_delivery.h"
 #include "net/file_service.h"
 #include "net/onion_v3_address.h"
+#include "platform/time_compat.h"
 #include "util/safe_alloc.h"
 
 #include <errno.h>
 #include <pthread.h>
 #include <netinet/in.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #define DELIVERY_CHECK(label, condition) do {                        \
@@ -126,12 +129,14 @@ struct delivery_handshake_call {
     uint8_t root[32];
     bool initiator;
     bool ok;
+    _Atomic bool done;
 };
 
 static void *delivery_handshake_call_main(void *opaque)
 {
     struct delivery_handshake_call *call = opaque;
     call->ok = fs_handshake(&call->session, call->root, call->initiator);
+    atomic_store_explicit(&call->done, true, memory_order_release);
     return NULL;
 }
 
@@ -315,6 +320,81 @@ done:
     return rejected;
 }
 
+struct delivery_handshake_clock {
+    _Atomic unsigned reads;
+};
+
+static int64_t delivery_handshake_monotonic_us(void *opaque)
+{
+    struct delivery_handshake_clock *clock = opaque;
+    unsigned read = atomic_fetch_add_explicit(&clock->reads, 1,
+                                               memory_order_relaxed);
+    return read < 2 ? 1000000LL : 32000000LL;
+}
+
+static int64_t delivery_handshake_wall_unix(void *opaque)
+{
+    (void)opaque;
+    return 1;
+}
+
+static bool delivery_handshake_rejects_partial_record_on_deadline(void)
+{
+    int sockets[2] = {-1, -1};
+    pthread_t thread;
+    bool started = false, exchanged = false, finished = false;
+    struct delivery_handshake_call initiator = {.initiator = true};
+    struct delivery_handshake_clock clock = {0};
+    struct platform_clock_source source = {
+        .monotonic_us = delivery_handshake_monotonic_us,
+        .wall_unix = delivery_handshake_wall_unix,
+        .user = &clock,
+    };
+    uint8_t initiator_public[32], partial_public = 1;
+
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0)
+        return false;
+    struct timeval peer_guard = {.tv_sec = 0, .tv_usec = 250000};
+    if (setsockopt(sockets[1], SOL_SOCKET, SO_RCVTIMEO, &peer_guard,
+                   sizeof(peer_guard)) != 0) {
+        close(sockets[0]);
+        close(sockets[1]);
+        return false;
+    }
+    fs_session_init(&initiator.session, sockets[0]);
+    platform_clock_set_source(&source);
+    started = pthread_create(&thread, NULL, delivery_handshake_call_main,
+                             &initiator) == 0;
+    if (started)
+        exchanged = delivery_recv_exact(sockets[1], initiator_public,
+                                        sizeof(initiator_public)) &&
+            delivery_send_exact(sockets[1], &partial_public, 1);
+    for (unsigned i = 0; started && i < 250; i++) {
+        if (atomic_load_explicit(&initiator.done, memory_order_acquire)) {
+            finished = true;
+            break;
+        }
+        platform_sleep_ms(1);
+    }
+    if (!finished)
+        finished = atomic_load_explicit(&initiator.done, memory_order_acquire);
+    close(sockets[1]);
+    sockets[1] = -1;
+    if (started)
+        pthread_join(thread, NULL);
+    platform_clock_clear_source();
+
+    uint8_t key_or = 0;
+    for (size_t i = 0; i < sizeof(initiator.session.key); i++)
+        key_or |= initiator.session.key[i];
+    bool rejected = exchanged && finished && !initiator.ok &&
+        !initiator.session.key_established && key_or == 0 &&
+        atomic_load_explicit(&clock.reads, memory_order_relaxed) >= 3;
+    fs_session_cleanup(&initiator.session);
+    close(sockets[0]);
+    return rejected;
+}
+
 struct delivery_server_call {
     struct fs_session *session;
     bool served;
@@ -442,6 +522,8 @@ int file_market_delivery_tests(void)
                    delivery_handshake_rejects_zero_peer_key());
     DELIVERY_CHECK("wrong confirmation fails handshake and cleanses key",
                    delivery_handshake_rejects_wrong_confirmation());
+    DELIVERY_CHECK("partial handshake record hits one absolute deadline",
+                   delivery_handshake_rejects_partial_record_on_deadline());
     struct fs_session server;
     struct file_market_delivery_request request, decoded;
     uint8_t wire[FILE_MARKET_DELIVERY_WIRE_BYTES], buyer_seed[32];
