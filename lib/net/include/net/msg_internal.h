@@ -306,6 +306,8 @@ bool msg_processor_enqueue_p2p_block(struct msg_processor *mp,
                                      struct validation_state *out);
 bool msg_blocks_should_mark_seen(const struct active_chain *chain,
                                   const struct block_index *bi);
+bool msg_blocks_should_echo_source_header(const struct p2p_node *peer,
+                                          int source_peer_id);
 bool msg_processor_snapshot_active(const struct msg_processor *mp);
 struct block_index *msg_processor_snapshot_anchor(const struct msg_processor *mp);
 void msg_processor_set_snapshot_anchor(const struct msg_processor *mp,

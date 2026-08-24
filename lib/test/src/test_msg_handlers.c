@@ -276,6 +276,32 @@ static int test_p148_should_mark_seen_accepts_active(void)
     return failures;
 }
 
+static int test_source_header_echo_policy(void)
+{
+    int failures = 0;
+    TEST("msg_handlers: source gets only its negotiated header proof") {
+        struct p2p_node peer;
+        memset(&peer, 0, sizeof(peer));
+        peer.id = 42;
+        peer.state = PEER_HANDSHAKE_COMPLETE;
+        peer.prefer_headers = true;
+
+        ASSERT(msg_blocks_should_echo_source_header(&peer, 42));
+        ASSERT(!msg_blocks_should_echo_source_header(&peer, 41));
+        peer.prefer_headers = false;
+        ASSERT(!msg_blocks_should_echo_source_header(&peer, 42));
+        peer.prefer_headers = true;
+        peer.disconnect = true;
+        ASSERT(!msg_blocks_should_echo_source_header(&peer, 42));
+        peer.disconnect = false;
+        peer.state = PEER_CONNECTED;
+        ASSERT(!msg_blocks_should_echo_source_header(&peer, 42));
+        ASSERT(!msg_blocks_should_echo_source_header(NULL, 42));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_block_validation_retryable_classifier(void)
 {
     int failures = 0;
@@ -911,6 +937,7 @@ int test_msg_handlers(void)
     failures += test_p148_should_mark_seen_rejects_null();
     failures += test_p148_should_mark_seen_rejects_orphan();
     failures += test_p148_should_mark_seen_accepts_active();
+    failures += test_source_header_echo_policy();
     failures += test_block_validation_retryable_classifier();
     failures += test_process_block_msg_reducer_pending_stays_retryable();
     failures += test_process_block_msg_scores_unrequested();

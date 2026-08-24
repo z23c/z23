@@ -213,11 +213,12 @@ adds a new durable authority. A retry preserves partial progress and the exact
 span. `getheaders_serve_refusals_no_header_bytes()` remains the attribution
 counter for the initial local availability miss.
 
-Also fixed: a peer that sends `sendheaders` now receives one verified current
-tip header on that connection. Normal block relay still excludes the source
-peer to prevent echo, but the one-shot negotiation proof lets a mesh observer
-record an accepted-header vote even when it supplied node2's tip and the chain
-is otherwise quiet. Duplicate `sendheaders` messages produce no extra proof.
+Also fixed: a peer that sends `sendheaders` receives one verified current-tip
+header on that connection. When that peer later supplies a block which becomes
+our tip, full/compact payload relay still excludes it, but the small verified
+header is echoed back to refresh its expiring chain vote. This lets a mesh
+observer remain current even when it is node2's recurring block source;
+duplicate `sendheaders` messages still produce no extra negotiation proof.
 
 *Deliberately not done:* the 64-probe guard was left alone. Shortening it on
 the first `no-header-bytes` would break the real case of scattered bodies, and
