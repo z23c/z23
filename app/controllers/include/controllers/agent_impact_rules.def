@@ -1041,3 +1041,11 @@ AGENT_IMPACT_RULE("app/services/src/mesh_observation_collect.c|app/services/src/
  * shared, not owned by one feature, so it gets its own rule rather than riding
  * on whichever feature touched it last. */
 AGENT_IMPACT_RULE("lib/net/include/net/site_routes.def|lib/test/src/test_site_routes.c", "site_routes make_lint_gates")
+
+/* The argument table and the node's own config file. util.c is where argv
+ * precedence lives, so a change there decides which setting a booting node
+ * actually obeys — the file must never beat the command line, and resolving
+ * the file's path must never create the datadir it names. src/main.c is
+ * already mapped elsewhere for its other roles; this rule exists so the
+ * settings-precedence group runs whenever the reader itself moves. */
+AGENT_IMPACT_RULE("lib/util/src/util.c|lib/util/include/util/util.h|lib/test/src/test_node_config_file.c", "node_config_file make_lint_gates")

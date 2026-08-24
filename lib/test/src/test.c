@@ -1225,6 +1225,8 @@ int main(int argc, char **argv)
       failures += test_wallet_metadata_encryption(); }
     { extern int test_transaction_intent(void);
       failures += test_transaction_intent(); }
+    { extern int test_node_config_file(void);
+      failures += test_node_config_file(); }
     failures += test_scan_util();
     failures += test_tor();
     { extern int test_onion_bootstrap(void);
