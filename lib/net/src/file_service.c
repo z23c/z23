@@ -39,6 +39,8 @@
 #include "json/json.h"
 #include "support/cleanse.h"
 #define FS_FRAME_RECV_BUDGET_MS 30000
+#define FS_SEND_IO_BASE_BUDGET_MS 30000LL
+#define FS_SEND_IO_MIN_BYTES_PER_SEC (256u * 1024u)
 
 static void fs_join_deadline_from_now(struct timespec *ts, int timeout_sec)
 {
@@ -99,6 +101,32 @@ double fs_session_mbps(const struct fs_session *s)
 
 /* ── Raw I/O helpers ───────────────────────────────────────────── */
 
+/* Bound the whole outbound record, not each send() call.  A socket timeout
+ * alone is only an inactivity timeout: a slow reader can reset it forever by
+ * accepting a few bytes per call.  Keep the private-record throughput floor
+ * so public 50 MiB chunks get the same 231 s aggregate budget. */
+static bool send_io_deadline(size_t wire_bytes, int64_t *deadline_ms)
+{
+    if (!deadline_ms)
+        LOG_FAIL("filesvc", "send deadline output is null");
+    int64_t now_ms = platform_time_monotonic_ms();
+    if (now_ms <= 0)
+        LOG_FAIL("filesvc", "monotonic send deadline unavailable");
+    uint64_t transfer_seconds =
+        (uint64_t)wire_bytes / FS_SEND_IO_MIN_BYTES_PER_SEC;
+    if (wire_bytes % FS_SEND_IO_MIN_BYTES_PER_SEC != 0)
+        transfer_seconds++;
+    if (transfer_seconds >
+        (uint64_t)(INT64_MAX - FS_SEND_IO_BASE_BUDGET_MS) / 1000u)
+        LOG_FAIL("filesvc", "send deadline exceeds monotonic range");
+    int64_t budget_ms = FS_SEND_IO_BASE_BUDGET_MS +
+        (int64_t)(transfer_seconds * 1000u);
+    if (now_ms > INT64_MAX - budget_ms)
+        LOG_FAIL("filesvc", "monotonic send deadline overflow");
+    *deadline_ms = now_ms + budget_ms;
+    return true;
+}
+
 static bool send_all_until(int fd, const uint8_t *buf, size_t len,
                            int64_t deadline_ms)
 {
@@ -131,11 +159,6 @@ static bool send_all_until(int fd, const uint8_t *buf, size_t len,
         sent += (size_t)n;
     }
     return true;
-}
-
-static bool send_all(int fd, const uint8_t *buf, size_t len)
-{
-    return send_all_until(fd, buf, len, 0);
 }
 
 static bool recv_all(int fd, uint8_t *buf, size_t len, int64_t deadline_ms)
@@ -309,7 +332,10 @@ static bool decrypt_frame(const struct fs_session *s,
 bool fs_send_frame(struct fs_session *s, uint8_t type,
                     const uint8_t *payload, uint32_t payload_len)
 {
-    return fs_send_frame_until(s, type, payload, payload_len, 0);
+    int64_t deadline_ms = 0;
+    if (!send_io_deadline(0, &deadline_ms))
+        return false;
+    return fs_send_frame_until(s, type, payload, payload_len, deadline_ms);
 }
 
 bool fs_send_frame_until(struct fs_session *s, uint8_t type,
@@ -374,17 +400,24 @@ bool fs_recv_frame_until(struct fs_session *s, uint8_t *type_out,
 bool fs_send_chunk_fast(struct fs_session *s, const uint8_t *data,
                          uint32_t size, const uint8_t sha3[32])
 {
+    if (!s || !data || !sha3 || size == 0 || size > 60u * 1024u * 1024u)
+        LOG_FAIL("filesvc", "send_chunk_fast: invalid arguments or size=%u",
+                 size);
+    int64_t deadline_ms = 0;
+    if (!send_io_deadline(4u + (size_t)size + 32u, &deadline_ms))
+        LOG_FAIL("filesvc", "send_chunk_fast: deadline unavailable");
+
     /* Send size header */
     uint8_t hdr[4];
     hdr[0] = (uint8_t)(size);
     hdr[1] = (uint8_t)(size >> 8);
     hdr[2] = (uint8_t)(size >> 16);
     hdr[3] = (uint8_t)(size >> 24);
-    if (!send_all(s->fd, hdr, 4))
+    if (!send_all_until(s->fd, hdr, 4, deadline_ms))
         LOG_FAIL("filesvc", "send_chunk_fast: failed to send size header");
 
     /* Send raw data — zero copy overhead */
-    if (!send_all(s->fd, data, size))
+    if (!send_all_until(s->fd, data, size, deadline_ms))
         LOG_FAIL("filesvc", "send_chunk_fast: failed to send data (%u bytes)", size);
 
     /* SHA3 MAC: authenticates data + binds to session + prevents replay */
@@ -398,7 +431,7 @@ bool fs_send_chunk_fast(struct fs_session *s, const uint8_t *data,
     sha3_256_finalize(&mctx, mac);
     memory_cleanse(&mctx, sizeof(mctx));
 
-    if (!send_all(s->fd, mac, 32))
+    if (!send_all_until(s->fd, mac, 32, deadline_ms))
         LOG_FAIL("filesvc", "send_chunk_fast: failed to send MAC");
 
     s->bytes_sent += 4 + size + 32;
@@ -423,15 +456,18 @@ static const uint8_t FS_ROM_REFUSAL_MAC_TAG[32] = { 'R', 'R', 'E', 'F' };
 bool fs_send_chunk_refusal(struct fs_session *s, uint8_t reason)
 {
     if (!s) LOG_FAIL("filesvc", "send_chunk_refusal: null session");
+    int64_t deadline_ms = 0;
+    if (!send_io_deadline(0, &deadline_ms))
+        LOG_FAIL("filesvc", "send_chunk_refusal: deadline unavailable");
     uint32_t sentinel = FS_ROM_REFUSAL_SENTINEL;
     uint8_t hdr[4];
     hdr[0] = (uint8_t)(sentinel);
     hdr[1] = (uint8_t)(sentinel >> 8);
     hdr[2] = (uint8_t)(sentinel >> 16);
     hdr[3] = (uint8_t)(sentinel >> 24);
-    if (!send_all(s->fd, hdr, 4))
+    if (!send_all_until(s->fd, hdr, 4, deadline_ms))
         LOG_FAIL("filesvc", "send_chunk_refusal: failed to send sentinel");
-    if (!send_all(s->fd, &reason, 1))
+    if (!send_all_until(s->fd, &reason, 1, deadline_ms))
         LOG_FAIL("filesvc", "send_chunk_refusal: failed to send reason");
 
     uint8_t mac[32];
@@ -443,7 +479,7 @@ bool fs_send_chunk_refusal(struct fs_session *s, uint8_t reason)
     sha3_256_write(&mctx, &reason, 1);
     sha3_256_finalize(&mctx, mac);
     memory_cleanse(&mctx, sizeof(mctx));
-    if (!send_all(s->fd, mac, 32))
+    if (!send_all_until(s->fd, mac, 32, deadline_ms))
         LOG_FAIL("filesvc", "send_chunk_refusal: failed to send MAC");
 
     s->bytes_sent += 4 + 1 + 32;

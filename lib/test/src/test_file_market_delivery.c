@@ -338,6 +338,14 @@ static int64_t delivery_handshake_wall_unix(void *opaque)
     return 1;
 }
 
+static int64_t delivery_immediate_deadline_monotonic_us(void *opaque)
+{
+    struct delivery_handshake_clock *clock = opaque;
+    unsigned read = atomic_fetch_add_explicit(&clock->reads, 1,
+                                               memory_order_relaxed);
+    return read == 0 ? 1000000LL : 32000000LL;
+}
+
 static bool delivery_handshake_rejects_partial_record_on_deadline(void)
 {
     int sockets[2] = {-1, -1};
@@ -461,6 +469,36 @@ static bool delivery_legacy_frame_send_honors_socket_timeout(void)
     fs_session_cleanup(&sender);
     close(sockets[0]);
     return bounded;
+}
+
+static bool delivery_default_frame_send_has_absolute_deadline(void)
+{
+    int sockets[2] = {-1, -1};
+    struct fs_session sender;
+    struct delivery_handshake_clock clock = {0};
+    struct platform_clock_source source = {
+        .monotonic_us = delivery_immediate_deadline_monotonic_us,
+        .wall_unix = delivery_handshake_wall_unix,
+        .user = &clock,
+    };
+    uint8_t wire_byte = 0;
+
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0)
+        return false;
+    fs_session_init(&sender, sockets[0]);
+    sender.key[0] = 1;
+    sender.key_established = true;
+    platform_clock_set_source(&source);
+    bool sent = fs_send_frame(&sender, FS_DONE, NULL, 0);
+    platform_clock_clear_source();
+    ssize_t wire_size = recv(sockets[1], &wire_byte, 1, MSG_DONTWAIT);
+
+    bool rejected = !sent && wire_size < 0 &&
+        atomic_load_explicit(&clock.reads, memory_order_relaxed) >= 2;
+    fs_session_cleanup(&sender);
+    close(sockets[0]);
+    close(sockets[1]);
+    return rejected;
 }
 
 static void *delivery_frame_call_main(void *opaque)
@@ -617,6 +655,72 @@ static bool delivery_private_chunk_send_uses_one_deadline(void)
 
     bool rejected = !sent && wire_size == 4 && sender.send_counter == 0 &&
         sender.bytes_sent == 0 &&
+        atomic_load_explicit(&clock.reads, memory_order_relaxed) >= 3;
+    fs_session_cleanup(&sender);
+    close(sockets[0]);
+    close(sockets[1]);
+    return rejected;
+}
+
+static bool delivery_fast_chunk_send_uses_one_deadline(void)
+{
+    int sockets[2] = {-1, -1};
+    struct fs_session sender;
+    struct delivery_handshake_clock clock = {0};
+    struct platform_clock_source source = {
+        .monotonic_us = delivery_handshake_monotonic_us,
+        .wall_unix = delivery_handshake_wall_unix,
+        .user = &clock,
+    };
+    uint8_t data[16], sha3[32], wire[64];
+
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0)
+        return false;
+    memset(data, 0xA7, sizeof(data));
+    sha3_256(data, sizeof(data), sha3);
+    fs_session_init(&sender, sockets[0]);
+    sender.key[0] = 1;
+    sender.key_established = true;
+    platform_clock_set_source(&source);
+    bool sent = fs_send_chunk_fast(&sender, data, sizeof(data), sha3);
+    platform_clock_clear_source();
+    ssize_t wire_size = recv(sockets[1], wire, sizeof(wire), MSG_DONTWAIT);
+
+    bool rejected = !sent && wire_size == 4 && sender.send_counter == 0 &&
+        sender.bytes_sent == 0 &&
+        atomic_load_explicit(&clock.reads, memory_order_relaxed) >= 3;
+    fs_session_cleanup(&sender);
+    close(sockets[0]);
+    close(sockets[1]);
+    return rejected;
+}
+
+static bool delivery_chunk_refusal_send_uses_one_deadline(void)
+{
+    int sockets[2] = {-1, -1};
+    struct fs_session sender;
+    struct delivery_handshake_clock clock = {0};
+    struct platform_clock_source source = {
+        .monotonic_us = delivery_handshake_monotonic_us,
+        .wall_unix = delivery_handshake_wall_unix,
+        .user = &clock,
+    };
+    uint8_t wire[64];
+
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0)
+        return false;
+    fs_session_init(&sender, sockets[0]);
+    sender.key[0] = 1;
+    sender.key_established = true;
+    platform_clock_set_source(&source);
+    bool sent = fs_send_chunk_refusal(&sender, 7);
+    platform_clock_clear_source();
+    ssize_t wire_size = recv(sockets[1], wire, sizeof(wire), MSG_DONTWAIT);
+
+    bool rejected = !sent && wire_size == 4 &&
+        wire[0] == 0xFF && wire[1] == 0xFF &&
+        wire[2] == 0xFF && wire[3] == 0xFF &&
+        sender.send_counter == 0 && sender.bytes_sent == 0 &&
         atomic_load_explicit(&clock.reads, memory_order_relaxed) >= 3;
     fs_session_cleanup(&sender);
     close(sockets[0]);
@@ -792,10 +896,16 @@ int file_market_delivery_tests(void)
                    delivery_frame_rejects_partial_record_on_deadline());
     DELIVERY_CHECK("legacy frame send retains bounded socket behavior",
                    delivery_legacy_frame_send_honors_socket_timeout());
+    DELIVERY_CHECK("default frame send has one absolute deadline",
+                   delivery_default_frame_send_has_absolute_deadline());
     DELIVERY_CHECK("partial private chunk hits one absolute deadline",
                    delivery_private_chunk_rejects_partial_record_on_deadline());
     DELIVERY_CHECK("private chunk send shares one absolute deadline",
                    delivery_private_chunk_send_uses_one_deadline());
+    DELIVERY_CHECK("fast chunk send shares one absolute deadline",
+                   delivery_fast_chunk_send_uses_one_deadline());
+    DELIVERY_CHECK("chunk refusal send shares one absolute deadline",
+                   delivery_chunk_refusal_send_uses_one_deadline());
     struct fs_session server;
     struct file_market_delivery_request request, decoded;
     uint8_t wire[FILE_MARKET_DELIVERY_WIRE_BYTES], buyer_seed[32];
