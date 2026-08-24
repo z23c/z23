@@ -40,3 +40,8 @@ pre-warm. It does not send `READY=1` and does not weaken
 `NOTIFY_SOCKET`, so they never send `READY=1`; their old launch gate was
 the hostname file. That is the probe defect this branch fixes. It is not a
 READY=1 contract miss for node2's bisect.
+
+Isolated pair-probe binds only 39250+ quads. Published `P2P_PORT` values in
+`deploy/devfleet/node*.txt` (node2=39360, node3=39150, node4=39040, node1=8055)
+are never bind candidates. Dialing node2's onion is a client path and does
+not bind 39360 locally.

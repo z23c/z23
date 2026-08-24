@@ -1,5 +1,5 @@
-{"ts":"2026-08-24T02:34:25Z","head_sha":"817f55b7e95536b78be8005c75f87a051e5f775f","verdict":"PAIRED","paired_at_s":146,"dial_attempted":true,"rendezvous_seen":true,"descriptor_uploaded":true}
-{"ts":"2026-08-24T02:37:02Z","head_sha":"817f55b7e95536b78be8005c75f87a051e5f775f","verdict":"PAIRED","paired_at_s":165,"dial_attempted":true,"rendezvous_seen":true,"descriptor_uploaded":true}
-{"ts":"2026-08-24T02:39:57Z","head_sha":"817f55b7e95536b78be8005c75f87a051e5f775f","verdict":"PAIRED","paired_at_s":109,"dial_attempted":true,"rendezvous_seen":true,"descriptor_uploaded":true}
-{"ts":"2026-08-24T02:41:56Z","head_sha":"817f55b7e95536b78be8005c75f87a051e5f775f","verdict":"PAIRED","paired_at_s":114,"dial_attempted":true,"rendezvous_seen":true,"descriptor_uploaded":true}
-{"ts":"2026-08-24T02:44:00Z","head_sha":"817f55b7e95536b78be8005c75f87a051e5f775f","verdict":"PAIRED","paired_at_s":101,"dial_attempted":true,"rendezvous_seen":true,"descriptor_uploaded":true}
+{"ts":"2026-08-24T03:20:24Z","head_sha":"9c092b5126758efad25108137ad091a7bb2113f2","verdict":"PAIRED","paired_at_s":194,"dial_attempted":true,"rendezvous_seen":true,"descriptor_uploaded":true}
+{"ts":"2026-08-24T03:23:49Z","head_sha":"9c092b5126758efad25108137ad091a7bb2113f2","verdict":"PAIRED","paired_at_s":147,"dial_attempted":true,"rendezvous_seen":true,"descriptor_uploaded":true}
+{"ts":"2026-08-24T03:26:26Z","head_sha":"9c092b5126758efad25108137ad091a7bb2113f2","verdict":"PAIRED","paired_at_s":108,"dial_attempted":true,"rendezvous_seen":true,"descriptor_uploaded":true}
+{"ts":"2026-08-24T03:28:25Z","head_sha":"9c092b5126758efad25108137ad091a7bb2113f2","verdict":"PAIRED","paired_at_s":125,"dial_attempted":true,"rendezvous_seen":true,"descriptor_uploaded":true}
+{"ts":"2026-08-24T03:30:41Z","head_sha":"9c092b5126758efad25108137ad091a7bb2113f2","verdict":"PAIRED","paired_at_s":121,"dial_attempted":true,"rendezvous_seen":true,"descriptor_uploaded":true}

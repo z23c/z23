@@ -51,14 +51,9 @@ log() {
 }
 
 pick_port_base() {
-    local b
-    for b in 39350 39420 39500 39600 39700 39270; do
-        if ! ss -tlnH "sport = :$b" 2>/dev/null | grep -E . >/dev/null 2>&1; then
-            echo "$b"
-            return 0
-        fi
-    done
-    echo 39350
+    # Start at the documented probe floor. onion_pair_watch.sh listen-tests
+    # the full A+B quad, skips published fleet P2P ports, and advances.
+    echo 39250
 }
 
 trailing_paired() {
