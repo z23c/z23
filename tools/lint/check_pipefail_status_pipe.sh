@@ -63,8 +63,8 @@
 # needs a human to look. The baseline file is the only route, it is
 # shrink-only, and every change to it is a visible diff in review.
 #
-# RATCHET_CEILING below is the total measured across the baseline: 161 sites in
-# 50 files (see tools/lint/pipefail_status_pipe_baseline.txt for exactly
+# RATCHET_CEILING below is the total measured across the baseline: 156 sites in
+# 49 files (see tools/lint/pipefail_status_pipe_baseline.txt for exactly
 # which). It may only go DOWN. Fixing a site means converting it
 # (str_contains/str_lacks from tools/scripts/sh_str.sh, or extract the match
 # into a variable and test the STRING) and then lowering the number — never
@@ -94,7 +94,7 @@ source tools/lint/gate_lib.sh
 . tools/scripts/sh_str.sh || { echo "check_pipefail_status_pipe: cannot source tools/scripts/sh_str.sh" >&2; exit 2; }
 
 GATE=check_pipefail_status_pipe
-RATCHET_CEILING=161
+RATCHET_CEILING=156
 
 # ── the detector ─────────────────────────────────────────────────────────
 # Emits: path<TAB>count<TAB>first-line-number. See the header for why this is
@@ -390,6 +390,19 @@ FIXTURE
 
     expect pass "a clean file with no status-carrying grep -q was reported as a violation" \
         "$clean"
+    printf '%s 1\n' "$tmp/sh/sandbox_probe.sh" > "$tmp/stale_baseline.txt"
+    plant "$clean"
+    stale_rc=0
+    ZCL_PIPEFAIL_GATE_SCAN_GLOB="$tmp/sh/*.sh" \
+        ZCL_PIPEFAIL_GATE_BASELINE="$tmp/stale_baseline.txt" \
+        ZCL_PIPEFAIL_GATE_CEILING=1 \
+        ZCL_PIPEFAIL_GATE_FILE_FLOOR=1 \
+        ZCL_LINT_MODE=FAIL \
+        bash "$self" >/dev/null 2>&1 || stale_rc=$?
+    if [ "$stale_rc" -eq 0 ]; then
+        echo "$GATE: SELFTEST FAILED — a stale baseline row for a clean file was accepted" >&2
+        exit 2
+    fi
     expect fail "a plain 'printf | grep -q' status pipeline did not fail the gate" \
         "$plain"
     expect pass "removing the planted violation did not clear it" \
@@ -416,7 +429,7 @@ FIXTURE
         exit 2
     fi
 
-    echo "[$GATE] SELFTEST PASS (clean passes; plain, REINDENTED and one-line violations all fail; a value pipeline, a converted site, a commented-out violation and a non-printf grep -q do not count; a no-pipefail script is exempt; this gate and sh_str.sh are clean)"
+    echo "[$GATE] SELFTEST PASS (clean passes; stale baseline rows and plain, REINDENTED and one-line violations all fail; a value pipeline, a converted site, a commented-out violation and a non-printf grep -q do not count; a no-pipefail script is exempt; this gate and sh_str.sh are clean)"
     exit 0
 fi
 

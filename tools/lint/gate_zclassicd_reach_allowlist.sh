@@ -14,10 +14,43 @@
 #
 # Exit 0 = pass. Non-zero + message on stderr = fail.
 #
-# Scope: NON-TEST source only — app/ lib/ config/ src/.
+# Scope: NON-TEST source only — app/ lib/ config/ src/. The agent impact
+# registry is excluded because it stores path strings, not runtime code.
 # Excluded: lib/test, tools/soak, *_test.c, tools/crash_recovery_test.c.
 #
 set -u
+
+if [ "${1:-}" = "--selftest" ]; then
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+  mkdir -p "$tmp/app/controllers/include/controllers" \
+           "$tmp/app/services/src" "$tmp/lib" "$tmp/config" \
+           "$tmp/src" "$tmp/tools/lint"
+  cp tools/lint/scan_exclusions.sh "$tmp/tools/lint/scan_exclusions.sh"
+  self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+  metadata="$tmp/app/controllers/include/controllers/agent_impact_rules.def"
+  runtime="$tmp/app/services/src/runtime_probe.c"
+  near_name="$tmp/app/controllers/include/controllers/agent_impact_rules_extra.def"
+
+  printf '%s\n' 'AGENT_IMPACT_RULE("app/services/src/zclassicd_oracle_service.c", "rpc")' > "$metadata"
+  if ! GATE_ROOT="$tmp" bash "$self" >/dev/null 2>&1; then
+    echo "gate_zclassicd_reach_allowlist: SELFTEST FAILED — exact metadata registry was treated as runtime code" >&2
+    exit 2
+  fi
+  printf '%s\n' 'static const char *probe = "zclassicd_oracle";' > "$runtime"
+  if GATE_ROOT="$tmp" bash "$self" >/dev/null 2>&1; then
+    echo "gate_zclassicd_reach_allowlist: SELFTEST FAILED — runtime reach was accepted" >&2
+    exit 2
+  fi
+  rm "$runtime"
+  printf '%s\n' 'static const char *probe = "zclassicd_oracle";' > "$near_name"
+  if GATE_ROOT="$tmp" bash "$self" >/dev/null 2>&1; then
+    echo "gate_zclassicd_reach_allowlist: SELFTEST FAILED — similarly named metadata file escaped" >&2
+    exit 2
+  fi
+  echo "gate_zclassicd_reach_allowlist: SELFTEST PASS (exact metadata excluded; runtime and near-name reaches fail)"
+  exit 0
+fi
 
 # Repo root: dir this script is wired into, or argv[1], or CWD.
 ROOT="${1:-${GATE_ROOT:-$(pwd)}}"
@@ -38,11 +71,13 @@ PAT='legacy_chain_rpc_|legacy_chain_oracle|zclassicd_oracle|127\.0\.0\.1:8232|:8
 SEARCH_DIRS="app lib config src"
 
 # --- Exclusions (test / soak harness code is allowed to reach freely) ------
-EXCLUDE_RE='(^|/)lib/test/|(^|/)tools/soak/|_test\.c$|(^|/)tools/crash_recovery_test\.c$'
+# The impact registry contains source-path strings only; it is test-selection
+# metadata, not compiled runtime code and cannot create a daemon dependency.
+EXCLUDE_RE='(^|/)lib/test/|(^|/)tools/soak/|_test\.c$|(^|/)tools/crash_recovery_test\.c$|(^|/)app/controllers/include/controllers/agent_impact_rules\.def$'
 
 # --- Frozen baseline allowlist (verified 2026-07-14 against current tree) ---
 # Every non-test source file that CURRENTLY contains a zclassicd reach.
-# 18 files. Keep sorted. Removing a reach from a file may leave its name here
+# 17 files. Keep sorted. Removing a reach from a file may leave its name here
 # harmlessly; ADDING a reach to any file NOT here is what fails the gate.
 read -r -d '' ALLOWLIST <<'EOF'
 app/conditions/src/tip_stall_oracle_rebuild.c
@@ -59,7 +94,6 @@ config/include/config/boot_internal.h
 config/src/boot_runtime_sync_services.c
 config/src/boot_services.c
 lib/net/src/fast_sync.c
-lib/net/src/msg_headers.c
 lib/rpc/include/rpc/legacy_chain_oracle.h
 lib/rpc/src/legacy_chain_oracle.c
 src/main.c

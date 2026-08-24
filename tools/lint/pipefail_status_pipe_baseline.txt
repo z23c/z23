@@ -20,7 +20,6 @@ tools/dev/agent-dev-status.sh 4
 tools/dev/agent-doctor.sh 1
 tools/dev/deploy-dev-lane.sh 12
 tools/dev/hotswap-module-fast.sh 2
-tools/dev/recover-dev-lane.sh 3
 tools/lint/check_hotswap_eligible_scope.sh 1
 tools/lint/check_no_stale_pinned_facts.sh 1
 tools/lint/check_release_no_dev_symbols.sh 1

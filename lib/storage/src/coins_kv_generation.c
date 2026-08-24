@@ -1,5 +1,7 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * purpose: Persist the coins authority generation as canonical little-endian bytes. */
 
+#include "base/serialize_le.h"
 #include "storage/coins_kv.h"
 #include "storage/progress_store.h"
 
@@ -17,7 +19,7 @@ bool coins_kv_get_authority_generation(sqlite3 *db, uint64_t *out)
             &len, &found) || (found && len != sizeof(blob)))
         return false;
     if (found)
-        for (int i = 0; i < 8; i++) *out |= (uint64_t)blob[i] << (8 * i);
+        *out = zcl_read_u64_le(blob);
     return true;
 }
 
@@ -29,7 +31,7 @@ bool coins_kv_bump_authority_generation_in_tx(sqlite3 *db)
         generation == UINT64_MAX)
         return false;
     generation++;
-    for (int i = 0; i < 8; i++) blob[i] = (uint8_t)(generation >> (8 * i));
+    zcl_write_u64_le(blob, generation);
     return progress_meta_set_in_tx(
         db, COINS_KV_AUTHORITY_GENERATION_KEY, blob, sizeof(blob));
 }
