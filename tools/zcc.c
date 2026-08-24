@@ -517,6 +517,125 @@ static void plan_build(struct plan *pl, int argc, char **argv)
 
 /* ── keying ──────────────────────────────────────────────────────────── */
 
+/* THE RECORDED WORKING DIRECTORY.
+ *
+ * -g writes the working directory into the object as DW_AT_comp_dir, so the
+ * directory is part of the artifact's identity even though it appears in no
+ * flag. It is the RECORDED directory that is part of that identity, though,
+ * not the real one, and this repository compiles everything with
+ * -ffile-prefix-map=$(CURDIR)=/zclassic23 (Makefile REPRO_CFLAGS) precisely
+ * so the recorded one is a constant. Hashing the raw getcwd() therefore keyed
+ * on a path the compiler had already erased: two checkouts produced
+ * byte-identical objects and this cache called the second one a miss. Every
+ * worktree got a 100% cold compile cache — measured 5.0% fleet hit rate with
+ * 24 worktrees on one host, 195 GB of cache serving almost nothing.
+ *
+ * What goes in the key is therefore the directory the compiler will ACTUALLY
+ * record: getcwd() with the prefix maps named in argv applied to it.
+ *
+ * GCC's parsing and matching rules, each VERIFIED on this toolchain rather
+ * than assumed, because a wrong rule here serves a wrong object:
+ *   - -ffile-prefix-map=ARG and -fdebug-prefix-map=ARG split ARG into OLD and
+ *     NEW at the LAST '=', not the first. A build directory whose name
+ *     contains '=' IS remapped by a map naming it, and a replacement that
+ *     contains '=' is NOT parsed as one.
+ *   - the match is a raw string prefix with no directory-boundary check:
+ *     OLD=/a/plain rewrites /a/plainX to <NEW>X, so the remainder is appended
+ *     verbatim.
+ *   - when several maps match, the LAST one on the command line wins.
+ *   - -fmacro-prefix-map moves __FILE__, never DW_AT_comp_dir, and is
+ *     deliberately not consulted here.
+ *
+ * SAFETY DIRECTION. Every case this cannot model with certainty — no map, an
+ * unparseable value, a getcwd() that failed — falls back to hashing the real
+ * cwd exactly as before. This change may only ever make the key match MORE
+ * builds that produce identical bytes; it must never make the key weaker in a
+ * case that was not proven, so do not "simplify" a fallback away. */
+
+/* The length of the prefix-map option name at the head of `a`, or 0 when `a`
+ * is not one of the two options that can move DW_AT_comp_dir. */
+static size_t prefix_map_opt(const char *a)
+{
+    static const char *const opt[] = { "-ffile-prefix-map=",
+                                       "-fdebug-prefix-map=" };
+    for (size_t i = 0; i < sizeof opt / sizeof opt[0]; i++) {
+        size_t n = strlen(opt[i]);
+        if (strncmp(a, opt[i], n) == 0)
+            return n;
+    }
+    return 0;
+}
+
+/* Split a map's OLD=NEW value at the last '=' and report whether OLD is a
+ * prefix of `cwd`, which is exactly when this map is the one that rewrites
+ * the recorded directory. On a match `old_len` is OLD's length and `repl`
+ * points at NEW inside `val`. */
+static bool prefix_map_covers(const char *val, const char *cwd,
+                              size_t *old_len, const char **repl)
+{
+    const char *eq = strrchr(val, '=');
+    if (!eq)
+        return false;
+    size_t n = (size_t)(eq - val);
+    /* An OLD of "", "/" or a relative path would rewrite paths this cache has
+     * not reasoned about — every system header, for one. Decline to model it
+     * and keep the raw cwd in the key. */
+    if (n < 2u || val[0] != '/')
+        return false;
+    if (strncmp(cwd, val, n) != 0)
+        return false;
+    *old_len = n;
+    *repl = eq + 1;
+    return true;
+}
+
+/* Does this invocation write GCC LTO IR? MEASURED, and the reason this whole
+ * mechanism has to be able to decline: a slim -flto object is NOT made
+ * directory-independent by a prefix map. Same source, same pinned
+ * -frandom-seed, two directories, the repository's release flag set with
+ * -ffile-prefix-map pointing each one at /zclassic23 — the non-LTO objects
+ * come out byte-identical and the LTO objects do not (they differ inside the
+ * streamed .gnu.lto_* IR, which the map never touches). Sharing an LTO object
+ * across directories would hand the linker IR carrying another checkout's
+ * identity, so an -flto compile keeps the real cwd in its key and stays
+ * unshared. -fno-lto later on the command line wins, as it does for GCC. */
+static bool lto_in_effect(const struct plan *pl)
+{
+    bool lto = false;
+    for (int i = 1; i < pl->argc; i++) {
+        const char *a = pl->argv[i];
+        if (strcmp(a, "-fno-lto") == 0)
+            lto = false;
+        else if (strcmp(a, "-flto") == 0 || strncmp(a, "-flto=", 6) == 0)
+            lto = true;
+    }
+    return lto;
+}
+
+/* The directory the compiler will record, given the real one. False means no
+ * map applies, or none can be trusted to, and the real cwd is the answer. */
+static bool recorded_cwd(const struct plan *pl, const char *cwd,
+                         char out[PATH_MAX])
+{
+    if (lto_in_effect(pl))
+        return false;
+    size_t old_len = 0;
+    const char *repl = NULL;
+    for (int i = 1; i < pl->argc; i++) {
+        size_t opt = prefix_map_opt(pl->argv[i]);
+        size_t n;
+        const char *r;
+        if (opt && prefix_map_covers(pl->argv[i] + opt, cwd, &n, &r)) {
+            old_len = n; /* a later matching option overrides an earlier one */
+            repl = r;
+        }
+    }
+    if (!repl)
+        return false;
+    int w = snprintf(out, PATH_MAX, "%s%s", repl, cwd + old_len);
+    return w > 0 && (size_t)w < PATH_MAX;
+}
+
 /* argv with the -o VALUE replaced by a fixed placeholder: the artifact's
  * destination must not change the key, but every other flag must. */
 /* Where an artifact is WRITTEN does not change the bytes written, so the key
@@ -528,15 +647,33 @@ static void plan_build(struct plan *pl, int argc, char **argv)
  *
  * `-MT`/`-MQ` are different and stay in the key: they set the target name
  * written INSIDE the depfile, so two invocations differing only there produce
- * different depfile bytes, and this cache restores depfiles. */
-static void hash_argv(struct sha3_256_ctx *h, const struct plan *pl)
+ * different depfile bytes, and this cache restores depfiles.
+ *
+ * A prefix map that covers `cwd` gets the same treatment for the same reason:
+ * the flag spells out the very build directory the compiler is being told to
+ * erase, so hashing it verbatim would reintroduce the path that the recorded
+ * comp_dir above just took out, and the two halves have to agree or nothing
+ * is shared. Its EFFECT is already in the key as that recorded directory;
+ * what stays here is which option it was (-ffile- also moves __FILE__,
+ * -fdebug- does not) and what it maps to. `cwd` is NULL — and every argument
+ * hashed verbatim — whenever the caller could not model the maps. */
+static void hash_argv(struct sha3_256_ctx *h, const struct plan *pl,
+                      const char *cwd)
 {
     for (int i = 1; i < pl->argc; i++) {
+        size_t opt = cwd ? prefix_map_opt(pl->argv[i]) : 0u;
+        size_t old_len;
+        const char *repl;
         if (i == pl->out_idx || i == pl->dep_idx)
             hstr(h, "<output>");
         else if (i == pl->dep_inline_idx)
             hstr(h, "-MF<output>");
-        else
+        else if (opt && prefix_map_covers(pl->argv[i] + opt, cwd, &old_len,
+                                          &repl)) {
+            hstr(h, "zcc:cwd-prefix-map");
+            hfield(h, pl->argv[i], opt);
+            hstr(h, repl);
+        } else
             hstr(h, pl->argv[i]);
     }
 }
@@ -580,11 +717,18 @@ static void hash_toolchain(struct sha3_256_ctx *h, const struct plan *pl)
         hstr(h, pl->argv[0]);
         hstr(h, "<unresolved-compiler>");
     }
-    char cwd[PATH_MAX];
-    /* -g embeds the working directory in debug info, so it is part of the
-     * identity of the artifact even though it appears in no flag. */
-    hstr(h, getcwd(cwd, sizeof cwd) ? cwd : "<nocwd>");
-    hash_argv(h, pl);
+    /* The directory the compiler will RECORD, not the one it runs in — see
+     * "THE RECORDED WORKING DIRECTORY" above for why the difference is the
+     * whole cross-worktree hit rate, and for the fallback rule. */
+    char cwd[PATH_MAX], recorded[PATH_MAX];
+    const char *real = getcwd(cwd, sizeof cwd) ? cwd : NULL;
+    if (real && recorded_cwd(pl, real, recorded)) {
+        hstr(h, recorded);
+        hash_argv(h, pl, real);
+    } else {
+        hstr(h, real ? real : "<nocwd>");
+        hash_argv(h, pl, NULL);
+    }
 }
 
 /* Archives named by -l are real inputs; fold in the ones we can resolve. */
@@ -787,6 +931,51 @@ static bool preprocess(const struct plan *pl, int src_idx, const char *tmpdir,
     return ok;
 }
 
+/* The SECOND half of keying on the recorded directory instead of the real
+ * one. cpp announces its working directory to the compiler proper as a
+ * `# 1 "<cwd>//"` line marker, the second line of every -E output, and
+ * -ffile-prefix-map does NOT rewrite it — the map is applied later, by the
+ * compiler, when it emits DW_AT_comp_dir. So the raw build directory rides
+ * into the level-2 content key inside the preprocessed text even after the
+ * toolchain hash has stopped keying on it, and two checkouts that produce
+ * byte-identical objects still miss. Hash the text AROUND that one line: what
+ * it announces is the working directory, and the working directory is already
+ * in the key above, in the form the artifact actually carries.
+ *
+ * Only the marker's own line is skipped, and only when a prefix map really
+ * covers this directory (`raw` is NULL otherwise, and the whole text is
+ * hashed verbatim as before). Every other absolute path in the preprocessed
+ * text — a header reached through an absolute -I, say — still keys the
+ * compile to this checkout, which is the conservative answer: such a compile
+ * simply is not shared. */
+static void hash_pp(struct sha3_256_ctx *h, const unsigned char *p, size_t len,
+                    const char *raw)
+{
+    char needle[PATH_MAX + 8u];
+    int nw = raw ? snprintf(needle, sizeof needle, "\"%s//\"", raw) : -1;
+    if (nw > 0 && (size_t)nw < sizeof needle) {
+        size_t nl = (size_t)nw;
+        size_t i = 0;
+        /* cpp emits it immediately after `# 0 "<source>"`, before any text.
+         * Bounding the search there keeps this off the hot path for the
+         * multi-megabyte outputs this hashes, and keeps it from matching a
+         * line marker deeper in the stream that means something else. */
+        for (int line = 0; line < 4 && i < len; line++) {
+            size_t eol = i;
+            while (eol < len && p[eol] != '\n')
+                eol++;
+            if (eol - i > nl + 2u && p[i] == '#' && p[i + 1] == ' ' &&
+                memcmp(p + eol - nl, needle, nl) == 0) {
+                hfield(h, p, i);
+                hfield(h, p + eol, len - eol);
+                return;
+            }
+            i = eol + 1u;
+        }
+    }
+    hfield(h, p, len);
+}
+
 static bool content_key(const struct plan *pl, const char *tmpdir,
                         struct deps *d,
                         char out[HEXLEN + 1u])
@@ -795,6 +984,9 @@ static bool content_key(const struct plan *pl, const char *tmpdir,
     sha3_256_init(&h);
     hstr(&h, "content");
     hash_toolchain(&h, pl);
+    char cwd[PATH_MAX], recorded[PATH_MAX];
+    const char *real = getcwd(cwd, sizeof cwd) ? cwd : NULL;
+    const char *raw = real && recorded_cwd(pl, real, recorded) ? real : NULL;
     for (int i = 0; i < pl->src_n; i++) {
         struct buf pp = { 0 };
         if (!preprocess(pl, pl->src[i], tmpdir, &pp)) {
@@ -803,7 +995,7 @@ static bool content_key(const struct plan *pl, const char *tmpdir,
         }
         deps_scan(d, pp.p, pp.len);
         hstr(&h, pl->argv[pl->src[i]]);
-        hfield(&h, pp.p, pp.len);
+        hash_pp(&h, pp.p, pp.len, raw);
         buf_free(&pp);
     }
     for (int i = 0; i < pl->blob_n; i++) {
