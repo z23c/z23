@@ -191,6 +191,15 @@ static bool boot_sd_watchdog_pet_decide(bool supervisor_alive,
     return verdict_age_us >= 0 && verdict_age_us < verdict_bound_us;
 }
 
+/* runtime_alive includes connman. IBD with a peer-floor drop is not a
+ * frozen sweep; recent boot_progress keeps the ping in that case. */
+static bool boot_sd_watchdog_keepalive_supervisor(bool runtime_alive,
+                                                  bool sweep_alive,
+                                                  bool recent_progress)
+{
+    return runtime_alive || (recent_progress && sweep_alive);
+}
+
 #ifdef ZCL_TESTING
 bool boot_sd_watchdog_test_pet_decide(bool supervisor_alive, bool have_verdict,
                                       int64_t verdict_age_us,
@@ -201,6 +210,14 @@ bool boot_sd_watchdog_test_pet_decide(bool supervisor_alive, bool have_verdict,
     return boot_sd_watchdog_pet_decide(supervisor_alive, have_verdict,
                                        verdict_age_us, recent_progress,
                                        grace_left_us, verdict_bound_us);
+}
+
+bool boot_sd_watchdog_test_keepalive_supervisor(bool runtime_alive,
+                                                bool sweep_alive,
+                                                bool recent_progress)
+{
+    return boot_sd_watchdog_keepalive_supervisor(runtime_alive, sweep_alive,
+                                                 recent_progress);
 }
 #endif
 
@@ -222,10 +239,15 @@ static void *boot_sd_watchdog_pet_main(void *arg)
         int64_t pub_us = 0;
         bool have = node_health_last_verdict(&pub_us);
         int64_t verdict_age_us = have ? now_us - pub_us : 0;
+        bool recent = boot_sd_watchdog_recent_progress();
+        bool supervisor_alive = boot_sd_watchdog_keepalive_supervisor(
+            boot_sd_watchdog_runtime_alive(),
+            boot_sd_watchdog_supervisor_alive(),
+            recent);
         boot_sd_watchdog_maybe_notify_ready();
-        if (boot_sd_watchdog_pet_decide(boot_sd_watchdog_runtime_alive(),
+        if (boot_sd_watchdog_pet_decide(supervisor_alive,
                                         have, verdict_age_us,
-                                        boot_sd_watchdog_recent_progress(),
+                                        recent,
                                         bound_us - (now_us - start_us),
                                         bound_us)) {
             sd_notify_watchdog_ping();

@@ -4,6 +4,7 @@
 #include "util/boot_phase.h"
 #include "util/boot_scan.h"
 #include "util/boot_status.h"
+#include "util/boot_progress.h"
 #include "util/sd_notify.h"
 #include "health/heartbeat.h"
 
@@ -114,6 +115,7 @@ void boot_progress_note(const char *label, uint64_t done, uint64_t total)
      * supervisor_backstop watches to tell a progressing boot loop apart
      * from a genuinely frozen supervisor sweep. Cheap: one relaxed add. */
     atomic_fetch_add_explicit(&g_boot_progress, 1u, memory_order_relaxed);
+    boot_progress_tick(label);
 
     /* Operator-visible progress line, throttled to ~1/s so a loop that
      * pumps every N entries never floods node.log. The CAS ensures only

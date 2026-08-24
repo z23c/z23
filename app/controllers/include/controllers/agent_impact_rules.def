@@ -724,7 +724,7 @@ AGENT_IMPACT_RULE("app/conditions/src/blocker_stall_meta_detector.c|app/conditio
 /* wf/test-storage-util: focused coverage added for previously-untested pure
  * storage/util primitives. */
 AGENT_IMPACT_RULE("lib/util/include/util/parse_num.h|lib/test/src/test_parse_num.c", "parse_num make_lint_gates")
-AGENT_IMPACT_RULE("lib/util/include/util/boot_progress.h|lib/util/src/boot_progress.c|lib/test/src/test_boot_progress.c", "boot_progress make_lint_gates")
+AGENT_IMPACT_RULE("lib/util/include/util/boot_progress.h|lib/util/src/boot_progress.c|lib/test/src/test_boot_progress.c|app/jobs/src/utxo_apply_batch_commit.c|app/services/src/reducer_ingest_service.c", "boot_progress sd_notify reducer_ingest_e2e make_lint_gates")
 AGENT_IMPACT_RULE("lib/storage/include/storage/sha3_sidecar_io.h|lib/storage/src/sha3_sidecar_io.c|lib/test/src/test_sha3_sidecar_io.c", "sha3_sidecar_io addrman_integrity block_index_integrity make_lint_gates")
 
 /* wf/snapshot-shielded-frontier-v3: v3 UTXO snapshot carries the SHIELDED

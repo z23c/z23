@@ -11,6 +11,7 @@
 #include "jobs/utxo_apply_batch_commit.h"
 
 #include "json/json.h"
+#include "util/boot_progress.h"
 #include "util/log_macros.h"
 
 #include <pthread.h>
@@ -53,6 +54,7 @@ void utxo_apply_batch_commit_record(int64_t height_before_batch, int rows,
     LOG_INFO("utxo_apply",
              "[batch_commit] heights=%d..%d rows=%d commit_us=%lld",
              height_lo, height_hi, rows, (long long)commit_us);
+    boot_progress_tick("utxo_apply_batch");
 
     pthread_mutex_lock(&g_lock);
     g_ring[g_ring_pos] = commit_us;

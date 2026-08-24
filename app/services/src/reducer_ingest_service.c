@@ -29,6 +29,7 @@
 #include <string.h>
 
 #include "util/log_macros.h"
+#include "util/boot_progress.h"
 #include "util/hw_profile.h"  /* hw_profile_drain_batch_effective (K3 lever) */
 #include "util/reducer_drive_guard.h"
 #include "util/util.h"  /* GetDataDir */
@@ -311,6 +312,7 @@ static bool reducer_persist_ingested_body_locked(
     }
 
     block_index_emit_header_event(bi, "reducer_ingest", NULL, NULL);
+    boot_progress_tick("reducer_body_persist");
     if (reducer_should_log_body_persist(bi->nHeight))
         LOG_INFO("reducer", "persisted ingested block bodies through h=%d "
                  "file=%d pos=%u", bi->nHeight, pos.nFile, pos.nPos);
