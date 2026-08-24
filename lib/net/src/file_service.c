@@ -1324,7 +1324,7 @@ static void *fs_server_thread(void *arg)
 
     listen(listen_fd, 32);
     log_jsonf(LOG_JSON_INFO, "file_service_listening",
-              "\"port\":%d,\"transport\":\"x25519_hkdf_sha256_sha3\"",
+              "\"port\":%d,\"transport\":\"x25519_hkdf_sha3\"",
               resolved_port);
 
     pthread_mutex_lock(&g_fs_state_mutex);

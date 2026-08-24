@@ -1,4 +1,8 @@
+<!-- Copyright 2026 Rhett Creighton - Apache License 2.0 -->
+
 # Z23 documentation map
+
+Copyright 2026 Rhett Creighton. Licensed under the Apache License, Version 2.0.
 
 This is a curated map, not an inventory. The documentation hierarchy is:
 
@@ -49,6 +53,8 @@ exact packages without a central registry.
   typed operator interface.
 - [`BOOTSTRAPPING.md`](BOOTSTRAPPING.md) and [`SYNC.md`](SYNC.md) — how a node
   reaches the chain.
+- [`OVERLAY.md`](OVERLAY.md) — FlyClient, SHA3 swarm, file-service overlay,
+  and onion marketplace; consensus hashes stay SHA-256d.
 - [`CUSTODY_MODEL.md`](CUSTODY_MODEL.md) — wallet ownership and spend
   authority.
 

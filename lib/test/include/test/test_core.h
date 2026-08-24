@@ -257,6 +257,7 @@ int test_coins_amount_codec_boundary_exponents(void);
 int test_coins_amount_codec_digit_preservation(void);
 int test_coins_amount_codec_regression_seal(void);
 int test_hkdf_sha256_rfc5869(void);
+int test_hkdf_sha3_256(void);
 int test_x25519_safe(void);
 int test_noise_nk_handshake(void);
 int test_noise_xx_handshake(void);

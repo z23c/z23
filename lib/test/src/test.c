@@ -1369,6 +1369,7 @@ int main(int argc, char **argv)
     failures += test_coins_amount_codec_digit_preservation();
     failures += test_coins_amount_codec_regression_seal();
     failures += test_hkdf_sha256_rfc5869();
+    failures += test_hkdf_sha3_256();
     failures += test_x25519_safe();
     failures += test_noise_nk_handshake();
     failures += test_noise_xx_handshake();

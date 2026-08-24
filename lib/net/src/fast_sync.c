@@ -6,7 +6,6 @@
 #include "net/fast_sync.h"
 #include "coins/utxo_commitment.h"
 #include "core/hash.h"
-#include "crypto/sha256.h"
 #include "crypto/sha3.h"
 #include "crypto/common.h"
 #include "core/random.h"

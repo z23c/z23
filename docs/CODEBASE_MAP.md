@@ -1,4 +1,8 @@
+<!-- Copyright 2026 Rhett Creighton - Apache License 2.0 -->
+
 # CODEBASE_MAP.md — where things live + how to do each thing
+
+Copyright 2026 Rhett Creighton. Licensed under the Apache License, Version 2.0.
 
 Fast reference for a fresh agent. Plain and technical. For the *why* (laws,
 shapes, doctrine) read `docs/FRAMEWORK.md`; for the concrete feature-slice
@@ -149,7 +153,7 @@ page changing with it.
 <!--   app_shape_folders    = directories directly under app/                        -->
 <!-- Fix a mismatch with `tools/scripts/check_doc_counts.sh --fix`, never by hand.  -->
 
-test_groups: 947
+test_groups: 948
 port_interfaces: 13
 persistence_adapters: 14
 condition_registrations: 52

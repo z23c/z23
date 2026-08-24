@@ -1,8 +1,15 @@
+<!-- Copyright 2026 Rhett Creighton - Apache License 2.0 -->
+
 # Z23 Sync Guide
+
+Copyright 2026 Rhett Creighton. Licensed under the Apache License, Version 2.0.
 
 How a fresh z23 node reaches chain tip, plus the one legacy-bootstrap
 path that exists only while the native peer network is still small. Primary =
-z23-native; legacy = pulling data from the old C++ `zclassicd`.
+z23-native; legacy = pulling data from the old C++ `zclassicd`. Overlay
+proofs, swarm piece ids, and the file-service handshake use SHA3-256;
+consensus block hashes stay SHA-256d. The operator map is
+[`OVERLAY.md`](OVERLAY.md).
 
 ## Canonical Authority Model
 
@@ -33,10 +40,13 @@ source and trust class only. Any `unsafe_overrides_total > 0` is fail-loud.
 A fresh node downloads a verified UTXO snapshot from another z23 peer,
 then catches up the tail via standard P2P. Activation is automatic — any peer
 advertising service bit `NODE_ZCL23` (`lib/net/include/net/fast_sync.h`)
-becomes a snapshot candidate. The machinery below is built and code-tested;
+becomes a snapshot candidate. Caught-up z23 peers also advertise SHA3
+block-piece manifests for IBD assist without the UTXO-export lock cost.
+The machinery below is built and code-tested;
 a full fresh z23-to-z23 sync-to-tip run has not yet been proven
 end-to-end on a live network (see `docs/HANDOFF.md` C3 status) — today's
-proven cold-start is Method 3 below.
+proven cold-start is Method 3 below. Overlay hashes and the file-service
+KDF are SHA3-256; see [`OVERLAY.md`](OVERLAY.md).
 
 ```bash
 build/bin/z23 -addnode=<z23_peer>

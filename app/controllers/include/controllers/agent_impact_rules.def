@@ -66,6 +66,7 @@ AGENT_IMPACT_RULE("app/controllers/src/dbquery_controller.c|app/controllers/incl
 AGENT_IMPACT_RULE("app/controllers/src/shielded_gap_remedy_controller.c|app/controllers/include/controllers/shielded_gap_remedy_controller.h|app/controllers/src/agent_runtime_controller.c|lib/test/src/test_shielded_gap_remedy.c", "shielded_gap_remedy syncdiag_rpc rpc make_lint_gates")
 
 AGENT_IMPACT_RULE("lib/crypto/src/hkdf_sha256.c|lib/crypto/include/crypto/hkdf_sha256.h|lib/test/src/test_hkdf.c", "hkdf_sha256_rfc5869 crypto make_lint_gates")
+AGENT_IMPACT_RULE("lib/crypto/src/hmac_sha3.c|lib/crypto/include/crypto/hmac_sha3.h|lib/crypto/src/hkdf_sha3.c|lib/crypto/include/crypto/hkdf_sha3.h|lib/test/src/test_hkdf_sha3_256.c", "hkdf_sha3_256 crypto make_lint_gates")
 /* SHA-256 is consensus crypto (block hash, merkle root, txid, sighash) and
  * dispatches between a portable and a SHA-NI transform at runtime. Any edit to
  * either transform, the dispatch, or the hw_profile reporting of the live
@@ -131,7 +132,7 @@ AGENT_IMPACT_RULE("lib/base/src/safe_alloc.c|lib/base/include/base/safe_alloc.h|
  * seven allocation labels has a hand-rolled multi-pointer unwind. */
 AGENT_IMPACT_RULE("lib/crypto/src/equihash.c|lib/crypto/include/crypto/equihash.h|lib/test/src/test_equihash_oom.c", "equihash_oom crypto make_lint_gates")
 AGENT_IMPACT_RULE("lib/base/src/result.c|lib/base/include/base/result.h|lib/util/include/util/result.h", "zcl_result make_lint_gates")
-AGENT_IMPACT_RULE("lib/net/src/file_service.c|lib/net/src/file_service_handshake.c|lib/net/include/net/file_service.h|app/controllers/src/file_controller.c|app/controllers/include/controllers/file_controller.h|lib/test/src/test_file_controller.c", "file_controller file_service_pow_gate file_market rom_manifest api make_lint_gates")
+AGENT_IMPACT_RULE("lib/net/src/file_service.c|lib/net/src/file_service_handshake.c|lib/net/include/net/file_service.h|app/controllers/src/file_controller.c|app/controllers/include/controllers/file_controller.h|lib/test/src/test_file_controller.c", "file_controller file_service_pow_gate file_market rom_manifest api hkdf_sha3_256 make_lint_gates")
 AGENT_IMPACT_RULE("lib/net/src/fast_sync.c|lib/net/include/net/fast_sync.h|lib/test/src/test_file_service_pow_gate.c", "fast_sync file_service_pow_gate snapshot_sync_service make_lint_gates")
 AGENT_IMPACT_RULE("lib/net/src/puzzle.c|lib/net/include/net/puzzle.h|lib/test/src/test_puzzle.c", "puzzle net file_service_pow_gate snapshot_sync_service make_lint_gates")
 AGENT_IMPACT_RULE("lib/net/src/onion_service.c|lib/net/include/net/onion_service.h|lib/net/src/onion_ratelimit.c|lib/net/include/net/onion_ratelimit.h", "net onion_bootstrap tor make_lint_gates")

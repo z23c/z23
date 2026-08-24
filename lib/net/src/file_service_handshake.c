@@ -1,10 +1,12 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Purpose: Forward-secret X25519/HKDF handshake for the direct file service. */
+ * Purpose: Forward-secret X25519/HKDF-SHA3 handshake for the overlay
+ * file service (FlyClient swarm, ROM, onion marketplace). Consensus
+ * hashes stay SHA-256d; Noise stays HKDF-SHA256. */
 
 #include "net/file_service.h"
 
 #include "crypto/curve25519.h"
-#include "crypto/hkdf_sha256.h"
+#include "crypto/hkdf_sha3.h"
 #include "crypto/random_secret.h"
 #include "crypto/sha3.h"
 #include "crypto/x25519_safe.h"
@@ -16,7 +18,7 @@
 #include <sys/socket.h>
 
 static const uint8_t k_fs_handshake_domain[] =
-    "zcl.file-service.x25519-hkdf-sha256.v1";
+    "zcl.file-service.x25519-hkdf-sha3.v1";
 static const uint8_t k_fs_confirmation_domain[] =
     "zcl.file-service.key-confirmation.v1";
 
@@ -142,10 +144,10 @@ bool fs_handshake(struct fs_session *session, const uint8_t utxo_root[32],
         goto done;
     }
     handshake_transcript(session, initiator, transcript);
-    if (!hkdf_sha256(utxo_root, 32, shared_secret, sizeof(shared_secret),
-                     transcript, sizeof(transcript), session->key,
-                     sizeof(session->key))) {
-        failure = "HKDF session-key derivation failed";
+    if (!hkdf_sha3_256(utxo_root, 32, shared_secret, sizeof(shared_secret),
+                       transcript, sizeof(transcript), session->key,
+                       sizeof(session->key))) {
+        failure = "HKDF-SHA3 session-key derivation failed";
         goto done;
     }
 

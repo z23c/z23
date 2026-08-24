@@ -3,7 +3,7 @@
  * Fast File Service — SHA3-encrypted, direct TCP, max bandwidth.
  *
  * Protocol: direct TCP connection, SHA3-CTR encrypted stream.
- * - Handshake: exchange ephemeral X25519 public keys, derive with HKDF-SHA256
+ * - Handshake: exchange ephemeral X25519 public keys, derive with HKDF-SHA3-256
  * - Transfer: 64KB frames, all same size, SHA3-authenticated
  * - Chunks: 50MB blocks of chain data, addressed by SHA3 hash
  *
@@ -90,7 +90,7 @@ enum fs_admit_result {
 
 struct fs_session {
     int              fd;              /* TCP socket */
-    uint8_t          key[32];         /* X25519/HKDF session key */
+    uint8_t          key[32];         /* X25519/HKDF-SHA3 session key */
     bool             key_established; /* true after key confirmation */
     uint8_t          our_nonce[32];   /* our ephemeral public key / token */
     uint8_t          peer_nonce[32];  /* peer ephemeral public key / token */
@@ -109,7 +109,7 @@ void fs_session_init(struct fs_session *s, int fd);
 void fs_session_cleanup(struct fs_session *s);
 
 /* Perform HELLO handshake — exchange ephemeral public keys and derive a
- * forward-secret shared key with X25519 + HKDF-SHA256. `utxo_root` is the
+ * forward-secret shared key with X25519 + HKDF-SHA3-256. `utxo_root` is the
  * HKDF salt, binding key confirmation to the peers' shared chain state.
  * This protects against passive wire capture; the bare handshake does not
  * authenticate peer identity against an active MITM. Paid delivery separately
