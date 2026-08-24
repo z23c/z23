@@ -564,8 +564,14 @@ AGENT_IMPACT_RULE("lib/test/src/test_golden_staleness_canary.c|lib/test/src/test
 /* Wave 3: metric alert rules + external gauge plumbing. */
 AGENT_IMPACT_RULE("lib/metrics/src/metrics.c|lib/metrics/include/metrics/metrics.h|config/src/boot_node_utilities.c|lib/test/src/test_metric_alerts.c", "metric_alerts net_bootstrap make_lint_gates")
 
-/* Wave 3: banlist persistence + net hardening. */
-AGENT_IMPACT_RULE("lib/net/src/net.c|lib/test/src/test_net_ban_persistence.c", "net_ban_persistence net_msg_dos net_framing_dos msg_handlers peer_eviction make_lint_gates")
+/* Wave 3: banlist persistence + net hardening. net.c owns is_trusted_peer(),
+ * the address-ban decision and the send-queue ceiling, so peer_scoring and
+ * single_peer_ban_recovery ride with it. */
+AGENT_IMPACT_RULE("lib/net/src/net.c|lib/test/src/test_net_ban_persistence.c", "net net_ban_persistence net_msg_dos net_framing_dos msg_handlers peer_eviction peer_scoring single_peer_ban_recovery make_lint_gates")
+
+/* Peer-offence scoring: the typed layer over peer_misbehaving(), plus the
+ * inbound admission ceilings it computes. */
+AGENT_IMPACT_RULE("lib/net/src/peer_scoring.c|lib/net/include/net/peer_scoring.h|lib/test/src/test_peer_scoring.c|lib/test/src/test_single_peer_ban_recovery.c", "peer_scoring single_peer_ban_recovery net peer_eviction make_lint_gates")
 
 /* Wave 3: _health seeding across stage/projection dumpers. */
 AGENT_IMPACT_RULE("app/jobs/include/jobs/stage_helpers.h|app/jobs/src/header_admit_stage.c|app/jobs/src/body_fetch_stage.c|app/jobs/src/body_persist_stage.c|lib/test/src/test_body_persist_stage.c|app/jobs/src/script_validate_stage_dump.c|app/jobs/src/proof_validate_stage_dump.c|lib/util/src/blocker.c|lib/test/src/test_health_rollup.c", "health_rollup reducer_forward_progress_gate body_persist_stage make_lint_gates")

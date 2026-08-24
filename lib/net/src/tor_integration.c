@@ -10,6 +10,7 @@
 #include "platform/time_compat.h"
 #include "net/tor_integration.h"
 #include "net/tor_request_state.h"
+#include "net/net.h"      /* net_set_onion_ingress_port() */
 #include <errno.h>
 #include <netinet/in.h>   /* AF_INET for the inbound P2P port mapping */
 #include <pthread.h>
@@ -336,6 +337,15 @@ static int tor_try_install_persistent_identity(const char *datadir)
 
     /* Become the dynhost service (see the layer-2 comment above). */
     ((struct dynhost_service_head_compat *)global)->hs_service = service;
+
+    /* The P2P route is live: from here on, inbound connections arriving at
+     * 127.0.0.1:<p2p_port> may be anonymous strangers Tor forwarded, not
+     * same-host processes. Tell lib/net so it stops handing those peers the
+     * trusted-peer exemption from misbehaviour scoring — see
+     * net_set_onion_ingress_port() in net/net.h for why the two are
+     * indistinguishable at accept() and what the operator escape is. */
+    if (p2p_port > 0 && p2p_port != 80)
+        net_set_onion_ingress_port(p2p_port);
 
     printf("Tor: persistent onion identity %s: %s.onion\n",
            created ? "minted" : "loaded", address_out);
@@ -719,6 +729,10 @@ void tor_integration_stop(void)
     atomic_store(&g_tor_running, false);
     atomic_store(&g_tor_ready, false);
     atomic_store(&g_tor_dial_ready, false);
+    /* No hidden-service route any more: loopback goes back to meaning
+     * same-host. Disarming can only ever RESTORE a trust exemption, so it
+     * belongs here, on the way down. */
+    net_set_onion_ingress_port(0);
 
     /* Tell Tor's event loop to exit. Retry briefly in case Tor
      * hasn't entered its main loop yet when we first call. */

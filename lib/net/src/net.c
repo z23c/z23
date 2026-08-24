@@ -173,6 +173,61 @@ size_t net_send_peer_bytes_cap(void)
     return cap;
 }
 
+/* Hard ceiling on ONE peer's queued send bytes — the backstop under the
+ * advisory cap above.
+ *
+ * net_send_over_budget() is ADVISORY: a serve path has to remember to ask.
+ * Exactly one path in the tree does (process_getdata for blocks), so every
+ * other thing we serve — headers, addr, inv, snapshot chunks, block pieces
+ * — appended to node->send_size unconditionally. A peer that pipelines
+ * requests and then stops reading its socket therefore made us retain
+ * arbitrary memory: the queue only shrinks as fast as the kernel drains it,
+ * and upload is additionally throttled per peer, so it grows faster than it
+ * drains for as long as the attacker keeps asking.
+ *
+ * This ceiling is enforced at the two places bytes actually enter the queue,
+ * so no serve path can opt out of it. It is deliberately a MULTIPLE of the
+ * advisory cap rather than equal to it, for two reasons:
+ *
+ *  - the advisory cap must still be the first thing that trips, so the
+ *    paths that do consult it keep pausing politely (in protocol, peer
+ *    re-requests later) instead of being cut off; and
+ *  - the headroom is what separates "serving a peer that reads slowly" from
+ *    "holding memory for a peer that is not reading at all". A peer on a
+ *    7200rpm box, or on a long Tor circuit, is slow — it is not a peer with
+ *    2× its whole 32 MiB budget outstanding and still asking for more.
+ *
+ * This is a bound on RESOURCES, not on time: there is no deadline anywhere
+ * in it, so an honest peer that takes as long as it likes to drain what it
+ * asked for is never punished. Overridable with the same env knob that sets
+ * the advisory cap. */
+size_t net_send_peer_bytes_hard_cap(void)
+{
+    size_t cap = net_send_peer_bytes_cap();
+    if (cap > SIZE_MAX / 2)
+        return SIZE_MAX;
+    return cap * 2;
+}
+
+/* Would appending `add` bytes push this peer past the hard ceiling?
+ *
+ * A queue that is EMPTY always accepts, whatever the size of the message:
+ * refusing the only message in flight would wedge the peer permanently
+ * rather than bound it, and would turn a small operator-set cap into a
+ * silent protocol failure. Past that first message the ceiling holds. */
+static bool send_queue_would_exceed_hard_cap(const struct p2p_node *node,
+                                             size_t add)
+{
+    if (!node || node->whitelisted)
+        return false;              /* explicit operator trust — never capped */
+    if (node->send_size == 0)
+        return false;              /* always room for one message */
+    size_t cap = net_send_peer_bytes_hard_cap();
+    if (add > cap)
+        return true;
+    return node->send_size > cap - add;   /* overflow-free form */
+}
+
 void net_message_init(struct net_message *msg,
                       const unsigned char msgstart[MESSAGE_START_SIZE])
 {
@@ -821,6 +876,29 @@ bool p2p_node_end_message(struct p2p_node *node)
         LOG_FAIL("net", "message stream empty or error: size=%zu error=%d", total, tls_msg_stream.error);
     }
 
+    /* Hard per-peer send-queue ceiling — see net_send_peer_bytes_hard_cap().
+     * Checked BEFORE the checksum and the transport seal so a peer that has
+     * stopped reading cannot make us pay for work we are about to throw
+     * away. Refusing the segment is not enough on its own: the queue would
+     * simply stay full and every subsequent serve would fail silently, so
+     * the peer is also flagged for disconnect and its queued bytes are
+     * released by the ordinary teardown path. */
+    if (send_queue_would_exceed_hard_cap(node, total)) {
+        stream_free(&tls_msg_stream);
+        tls_msg_active = false;
+        (void)p2p_node_request_disconnect(
+            node, P2P_DISCONNECT_RESOURCE_LIMIT,
+            P2P_DISCONNECT_SOURCE_RESOURCE_GOVERNOR,
+            node->endpoint_generation);
+        zcl_mutex_unlock(&node->cs_send);
+        LOG_FAIL("net",
+                 "send queue ceiling reached for node id=%d: queued=%zu "
+                 "+%zu > cap=%zu — peer is not draining its socket, "
+                 "disconnecting instead of buffering for it",
+                 (int)node->id, node->send_size, total,
+                 net_send_peer_bytes_hard_cap());
+    }
+
     uint8_t *buf = tls_msg_stream.data;
 
     unsigned int payload_size = (unsigned int)(total - MSG_HEADER_SIZE);
@@ -910,6 +988,24 @@ void p2p_node_queue_raw(struct p2p_node *node, const uint8_t *bytes, size_t len)
         return;
 
     zcl_mutex_lock(&node->cs_send);
+    /* Same hard ceiling as p2p_node_end_message(). Handshake records are
+     * tiny and only ever reach an empty queue, which always accepts, so
+     * this can only fire on a peer that has already banked its whole
+     * budget without reading any of it. */
+    if (send_queue_would_exceed_hard_cap(node, len)) {
+        (void)p2p_node_request_disconnect(
+            node, P2P_DISCONNECT_RESOURCE_LIMIT,
+            P2P_DISCONNECT_SOURCE_RESOURCE_GOVERNOR,
+            node->endpoint_generation);
+        size_t queued = node->send_size;
+        zcl_mutex_unlock(&node->cs_send);
+        LOG_WARN("net",
+                 "p2p_node_queue_raw: send queue ceiling reached node id=%d "
+                 "queued=%zu +%zu cap=%zu",
+                 (int)node->id, queued, len,
+                 net_send_peer_bytes_hard_cap());
+        return;
+    }
     struct send_segment *seg = send_segment_create(bytes, len);
     if (!seg) {
         (void)p2p_node_request_disconnect(
@@ -1323,7 +1419,52 @@ void ban_addr(struct net_manager *nm, const struct net_addr *addr,
     ban_addr_ex(nm, addr, ban_offset, since_epoch, 0, "manual");
 }
 
-/* Check if a peer is a trusted local node (localhost or whitelisted).
+/* ── Onion ingress ────────────────────────────────────────────────────
+ *
+ * When this node publishes a hidden-service port that forwards inbound P2P
+ * to a local listener, stock Tor delivers those streams as ordinary TCP
+ * connections FROM 127.0.0.1 (see the port-mapping install site in
+ * tor_integration.c). From accept()'s point of view an anonymous stranger
+ * arriving over the Tor network and a process on this machine present the
+ * same sixteen address bytes.
+ *
+ * That matters because "source is loopback" used to be read as "our own
+ * infrastructure" and bought a blanket exemption from peer_misbehaving().
+ * On an onion-reachable node that exemption covers EVERY inbound peer there
+ * is, so every DoS defence that ends in peer_scoring_record() — invalid
+ * block, invalid header, invalid proof, flood, protocol violation — became
+ * a no-op against the only inbound peers such a node ever sees.
+ *
+ * The port is armed by tor_integration.c the moment the hidden-service P2P
+ * route is actually installed, and disarmed with 0. Arming can only ever
+ * REMOVE a trust exemption, never grant one, so a wrong answer here is
+ * always the strict answer. An operator who genuinely runs several nodes on
+ * one host still has the explicit escape: whitelist the listener
+ * (bind_listen_port(..., whitelisted=true)), which is an operator decision
+ * rather than an inference from a source address anyone can present. */
+static _Atomic uint_least16_t g_onion_ingress_port = 0;
+
+void net_set_onion_ingress_port(uint16_t local_port)
+{
+    atomic_store(&g_onion_ingress_port, (uint_least16_t)local_port);
+}
+
+uint16_t net_onion_ingress_port(void)
+{
+    return (uint16_t)atomic_load(&g_onion_ingress_port);
+}
+
+bool net_peer_is_onion_ingress(const struct p2p_node *node)
+{
+    if (!node || !node->inbound)
+        return false;
+    uint16_t ingress = (uint16_t)atomic_load(&g_onion_ingress_port);
+    if (ingress == 0 || node->accepted_local_port != ingress)
+        return false;
+    return net_addr_is_operator_local(&node->addr.svc.addr);
+}
+
+/* Check if a peer is a trusted local node (same-host or whitelisted).
  * These peers are NEVER banned — they are our own infrastructure.
  *
  * Deliberately NARROW: an -addnode / -connect target is NOT trusted here.
@@ -1332,16 +1473,22 @@ void ban_addr(struct net_manager *nm, const struct net_addr *addr,
  * way onto the addnode list a permanent licence to feed us invalid blocks.
  * The stranding risk that exemption would have covered is handled instead by
  * the bounded last-peer ban in peer_misbehaving() below, which keeps the
- * penalty and bounds only its duration. */
+ * penalty and bounds only its duration.
+ *
+ * Loopback is trusted ONLY while it is still evidence of a same-host peer,
+ * i.e. while this node is not accepting Tor-forwarded inbound on the
+ * listener that took the connection — see net_peer_is_onion_ingress(). */
 static bool is_trusted_peer(const struct p2p_node *node)
 {
+    /* Whitelisted peers (set by -whitelist or listen socket config) — an
+     * explicit operator decision, so it is checked first and survives
+     * everything below. */
+    if (node->whitelisted)
+        return true;
     /* Localhost: 127.0.0.0/8 (IPv4-mapped: ::ffff:127.x.x.x) */
     static const uint8_t lo_prefix[13] = {0,0,0,0,0,0,0,0,0,0,0xff,0xff,127};
     if (memcmp(node->addr.svc.addr.ip, lo_prefix, 13) == 0)
-        return true;
-    /* Whitelisted peers (set by -whitelist or listen socket config) */
-    if (node->whitelisted)
-        return true;
+        return !net_peer_is_onion_ingress(node);
     return false;
 }
 
@@ -1419,7 +1566,8 @@ void peer_misbehaving(struct net_manager *nm, struct p2p_node *node,
     if (!nm || !node || howmuch <= 0) return;
 
     /* NEVER penalize trusted peers — see is_trusted_peer() above for exactly
-     * which peers that is (localhost and whitelisted; NOT addnode). */
+     * which peers that is (whitelisted, and same-host loopback that is not
+     * Tor-forwarded ingress; NOT addnode). */
     if (is_trusted_peer(node))
         return;
 
@@ -1451,6 +1599,26 @@ void peer_misbehaving(struct net_manager *nm, struct p2p_node *node,
         int64_t ban_secs = strand ? (int64_t)last_peer_secs
                                   : (int64_t)hours * 60 * 60;
 
+        /* An ADDRESS ban is collective punishment when the address is not
+         * the offender's. Every Tor-forwarded inbound peer arrives from
+         * 127.0.0.1, so putting that address on the ban list would refuse
+         * ALL inbound peering at accept() (is_banned() runs before any
+         * bytes are exchanged) for the full ban window, and banlist.dat
+         * carries it across restarts. One misbehaving stranger would take
+         * the node's whole front door with it — a far worse outcome than
+         * the offence being punished.
+         *
+         * So the address ban is skipped for operator-local sources while
+         * the score, the disconnect and the incident record all still
+         * apply: the offender loses its session immediately and has to pay
+         * a fresh Tor circuit and handshake to come back, and it re-earns
+         * the score from zero each time. Banning by peer IDENTITY (the
+         * torv3 key) rather than by source address is the durable answer
+         * and is deliberately NOT attempted here — the ban list is keyed
+         * on struct net_addr and that is a separate, larger change. */
+        bool addr_shared_by_unrelated_peers =
+            net_addr_is_operator_local(&node->addr.svc.addr);
+
         event_emitf(EV_PEER_BANNED, (uint32_t)node->id,
                     "score=%d %s", new_score,
                     reason ? reason : "threshold");
@@ -1461,20 +1629,38 @@ void peer_misbehaving(struct net_manager *nm, struct p2p_node *node,
                          reason ? reason : "threshold reached");
         log_jsonf(LOG_JSON_WARN, "peer_banned",
                   "\"addr\":\"%s\",\"score\":%d,\"reason\":\"%s\","
-                  "\"ban_hours\":%d,\"ban_secs\":%lld,\"last_peer\":%s",
+                  "\"ban_hours\":%d,\"ban_secs\":%lld,\"last_peer\":%s,"
+                  "\"addr_banned\":%s",
                   addr_safe, new_score, reason_safe, hours,
-                  (long long)ban_secs, strand ? "true" : "false");
-        ban_addr_ex(nm, &node->addr.svc.addr,
-                   ban_secs, false,
-                   new_score, reason ? reason : "threshold reached");
+                  (long long)ban_secs, strand ? "true" : "false",
+                  addr_shared_by_unrelated_peers ? "false" : "true");
+        if (!addr_shared_by_unrelated_peers) {
+            ban_addr_ex(nm, &node->addr.svc.addr,
+                       ban_secs, false,
+                       new_score, reason ? reason : "threshold reached");
+        } else {
+            LOG_WARN("net",
+                     "peer %s crossed the ban threshold (score=%d) but its "
+                     "source address is shared by every Tor-forwarded peer "
+                     "— disconnecting without an address ban, because "
+                     "banning it would refuse ALL inbound peering",
+                     node->addr_name, new_score);
+        }
         (void)p2p_node_request_disconnect(
             node, P2P_DISCONNECT_PROTOCOL_VIOLATION,
             P2P_DISCONNECT_SOURCE_PEER_POLICY,
             node->endpoint_generation);
 
-        if (strand) {
+        if (strand && !addr_shared_by_unrelated_peers) {
             /* Say it out loud: a silent bounded ban would look identical to
-             * a healthy node with nothing to do. */
+             * a healthy node with nothing to do.
+             *
+             * Gated on an address ban having actually been applied. The
+             * blocker's reason text states that a bounded recovery ban WAS
+             * applied, and blocker.h keys fault identity on that text, so
+             * raising it from the branch that deliberately skips the ban
+             * would put a false sentence in front of an operator. That
+             * branch logs its own line just above. */
             raise_last_peer_ban_blocker();
             LOG_WARN("net",
                      "peer %s was our ONLY peer — applied a bounded %ds "

@@ -30,6 +30,7 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <sys/socket.h>   /* socketpair() — slow-reader send-queue fixture */
 #include "util/safe_alloc.h"
 
 static int test_onion_peer_discover(const char *datadir,
@@ -1753,6 +1754,137 @@ int test_net(void)
 
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
+    }
+
+    /* Send-queue HARD ceiling: a peer that stops reading cannot make us
+     * hold unbounded memory.
+     *
+     * The budget exercised just above is ADVISORY — net_send_over_budget()
+     * only bites where a serve path remembers to call it, and exactly one
+     * path in the tree did. Everything else (headers, addr, inv, snapshot
+     * chunks, block pieces) appended to node->send_size unconditionally, so
+     * a peer that pipelined requests and then stopped reading its socket
+     * made the node retain arbitrary memory.
+     *
+     * The fixture is the real attack, not a mock: a socketpair whose far
+     * end is never read and whose kernel send buffer is squeezed to the
+     * minimum, so send() returns EAGAIN and the queue is the only place
+     * the bytes can go. Before the ceiling existed this loop queued every
+     * one of its 512 messages (≈4 MB for ONE peer, and unbounded in the
+     * real thing); with it, the queue stops at the ceiling and the peer is
+     * disconnected for not draining. */
+    {
+        printf("net: send queue hard ceiling bounds a non-draining peer ... ");
+
+        /* 256 KiB advisory cap -> 512 KiB hard ceiling. */
+        setenv("ZCL_MAX_SENDBUFFER_PEER_BYTES", "262144", 1);
+        unsetenv("ZCL_MAX_SENDBUFFER_TOTAL_BYTES");
+
+        struct net_manager nm;
+        net_manager_init(&nm);
+        unsigned char magic[MESSAGE_START_SIZE] = {0x24, 0xe9, 0x27, 0x64};
+        memcpy(nm.message_start, magic, MESSAGE_START_SIZE);
+
+        struct net_address addr;
+        net_address_init(&addr);
+        unsigned char ip4[4] = {127, 0, 0, 1};
+        net_addr_set_ipv4(&addr.svc.addr, ip4);
+        addr.svc.port = 8033;
+
+        int sv[2] = {-1, -1};
+        bool ok = (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+        if (ok) {
+            /* Squeeze both ends so the kernel absorbs only a few KB and
+             * the rest has to sit in our own queue, exactly as it would
+             * for a peer on a congested circuit that has stopped reading. */
+            int small = 2048;
+            setsockopt(sv[0], SOL_SOCKET, SO_SNDBUF, &small, sizeof(small));
+            setsockopt(sv[1], SOL_SOCKET, SO_RCVBUF, &small, sizeof(small));
+        }
+
+        const size_t hard_cap = net_send_peer_bytes_hard_cap();
+        ok = ok && (hard_cap == 2 * net_send_peer_bytes_cap());
+
+        struct p2p_node *node = ok
+            ? p2p_node_create(&nm, (zcl_socket_t)sv[0], &addr, "deaf-peer", true)
+            : NULL;
+        ok = ok && (node != NULL);
+
+        unsigned char payload[8192];
+        memset(payload, 0x5a, sizeof(payload));
+
+        int refused_at = -1;
+        size_t peak = 0;
+        if (ok) {
+            for (int i = 0; i < 512; i++) {
+                p2p_node_begin_message(node, "headers", magic);
+                p2p_node_write_message_data(node, payload, sizeof(payload));
+                if (!p2p_node_end_message(node)) {
+                    refused_at = i;
+                    break;
+                }
+                if (node->send_size > peak)
+                    peak = node->send_size;
+            }
+        }
+
+        /* The queue REFUSED, and it did so long before 512 messages: this
+         * is the property the old code did not have. */
+        ok = ok && (refused_at > 0) && (refused_at < 512);
+        /* Nothing ever went past the ceiling. */
+        ok = ok && (peak <= hard_cap);
+        ok = ok && (node && node->send_size <= hard_cap);
+        /* Refusing alone would leave the peer wedged with a full queue, so
+         * it is also flagged for disconnect. */
+        ok = ok && (node && node->disconnect);
+
+        /* An EMPTY queue always accepts one message however large, so a
+         * small operator-set cap bounds memory instead of wedging the
+         * connection. Fresh node, ceiling squeezed below one message. */
+        if (ok) {
+            setenv("ZCL_MAX_SENDBUFFER_PEER_BYTES", "1024", 1);
+            struct p2p_node *tiny = p2p_node_create(
+                &nm, ZCL_INVALID_SOCKET, &addr, "tiny-cap-peer", true);
+            ok = ok && (tiny != NULL);
+            if (tiny) {
+                p2p_node_begin_message(tiny, "headers", magic);
+                p2p_node_write_message_data(tiny, payload, sizeof(payload));
+                ok = ok && p2p_node_end_message(tiny);
+                p2p_node_free(tiny);
+            }
+            setenv("ZCL_MAX_SENDBUFFER_PEER_BYTES", "262144", 1);
+        }
+
+        /* A whitelisted peer is an explicit operator decision and is never
+         * capped — same exemption net_send_over_budget() already grants. */
+        if (ok) {
+            struct p2p_node *wl = p2p_node_create(
+                &nm, ZCL_INVALID_SOCKET, &addr, "whitelisted-peer", true);
+            ok = ok && (wl != NULL);
+            if (wl) {
+                wl->whitelisted = true;
+                bool all_accepted = true;
+                for (int i = 0; i < 256; i++) {
+                    p2p_node_begin_message(wl, "headers", magic);
+                    p2p_node_write_message_data(wl, payload, sizeof(payload));
+                    if (!p2p_node_end_message(wl)) { all_accepted = false; break; }
+                }
+                ok = ok && all_accepted;
+                p2p_node_free(wl);
+            }
+        }
+
+        if (node) p2p_node_free(node);
+        if (sv[1] >= 0) close(sv[1]);
+        net_manager_free(&nm);
+        unsetenv("ZCL_MAX_SENDBUFFER_PEER_BYTES");
+
+        if (ok) printf("OK\n");
+        else {
+            printf("FAIL (refused_at=%d peak=%zu cap=%zu)\n",
+                   refused_at, peak, hard_cap);
+            failures++;
+        }
     }
 
     /* version_message: serialize/deserialize roundtrip */
