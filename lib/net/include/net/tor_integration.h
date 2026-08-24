@@ -124,8 +124,8 @@ bool tor_log_last_ephemeral_address(const char *log_path, long scan_from,
 /* True when THIS boot's tor.log (from scan_from) records a successful
  * onion DESCRIPTOR PUBLICATION / HSDir upload. Hostname-file presence is
  * not enough: a Type=notify first-boot that declares READY on the
- * hostname lets clients dial before HSDirs have the descriptor
- * (docs/work/ONION_DIAL_GAP.md). Exposed for testing — driven by
+ * hostname lets clients dial before HSDirs have the descriptor.
+ * Exposed for testing — driven by
  * read_onion_address() before g_tor_ready flips. */
 bool tor_log_has_descriptor_publication(const char *log_path,
                                         long scan_from);

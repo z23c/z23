@@ -101,7 +101,7 @@ Type=notify
 # First-boot onion: -tor -onion-persist so a stranger is reachable, and
 # Type=notify holds activating until READY=1. READY waits for onion
 # DESCRIPTOR PUBLICATION (not hostname-only) so cold-boot clients do not
-# dial before HSDirs have the descriptor (docs/work/ONION_DIAL_GAP.md).
+# dial before HSDirs have the descriptor.
 ExecStart=$bin -datadir=%h/.zclassic-c23 -listen -tor -onion-persist
 # Restart=always (not on-failure): a new node clean-exits once to install the
 # checkpoint bundle (install-on-next-boot). on-failure would drop that boot.
@@ -208,7 +208,7 @@ selftest() {
     # Z23_SKIP_SYSTEMD=1). First-boot Type=notify READY must wait for onion
     # DESCRIPTOR PUBLICATION: hostname-only readiness lets systemd declare
     # started before HSDir upload, which is why "always connects" fails on
-    # cold boots (docs/work/ONION_DIAL_GAP.md).
+    # cold boots.
     write_unit "$tmp/prefix" "$tmp/units"
     [ -f "$tmp/units/z23.service" ] || die "selftest: write_unit did not emit z23.service"
     grep -q 'DESCRIPTOR PUBLICATION' "$tmp/units/z23.service" \

@@ -95,8 +95,9 @@ struct onion_stream_backend {
 };
 
 /* ── Stage ledger ────────────────────────────────────────────────────────
- * docs/work/ONION_DIAL_GAP.md requires every stage of the loop to be named
- * by a log line OR a counter. These are the stages this file owns — from
+ * Every stage of the loop must be named by a log line OR a counter, so a
+ * dial that stalls is attributable to a stage rather than to the loop.
+ * These are the stages this file owns — from
  * "a dial was issued" through "the peer answered on the bridge" — counted
  * monotonically since process start so an acceptance check can assert on a
  * number instead of grepping a log that may have rotated. */

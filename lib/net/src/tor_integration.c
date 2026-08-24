@@ -454,7 +454,7 @@ static bool read_onion_from_hostname_file(const char *datadir)
  *
  * Hostname-only is not ready: HSDir upload can lag the hostname file, and
  * a Type=notify first-boot that fires READY=1 on hostname lets clients
- * dial a service the network cannot intro (docs/work/ONION_DIAL_GAP.md).
+ * dial a service the network cannot intro.
  *
  * Polls until both are observed or Tor dies — deliberately NO fixed
  * attempt cap. A slow public-network bootstrap (e.g. a ~120 s guard

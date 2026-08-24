@@ -19,8 +19,8 @@
  *      1 s flush tick) must NOT cost the connection or drop the refused
  *      bytes — that silently truncated the P2P stream mid-frame.
  *   5. The stage ledger names every stage this layer owns, so the
- *      docs/work/ONION_DIAL_GAP.md acceptance contract can assert on a
- *      counter instead of grepping a rotated log.
+ *      acceptance contract can assert on a counter instead of grepping
+ *      a rotated log.
  *
  * The loopback double stands in for dynhost: its "Tor thread" is a real
  * thread, so the read/event callbacks fire off the caller's thread exactly

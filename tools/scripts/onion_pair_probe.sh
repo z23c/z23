@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # onion_pair_probe.sh — node3's always-on pair-probe ledger entry point.
 #
-# This is the instrument ONION_DIAL_GAP.md assigns to node3: run the
-# isolated two-node onion pair from ANY checkout. Isolation is sourced,
+# Runs the isolated two-node onion pair from ANY checkout. Isolation is sourced,
 # not executed. Recurring telemetry is JSONL under XDG state — this
 # script does not commit, push, or write deploy/devfleet/. The client Tor can
 # bootstrap target-free in parallel; its onion dial is gated on observed

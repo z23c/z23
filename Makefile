@@ -4926,12 +4926,6 @@ check-onion-pair-watch: jsonq
 check-fleet-source-status:
 	@tools/scripts/check_fleet_source_status.sh
 
-# Needs jsonq: the tip-height facts drive the referee's real json_get /
-# json_count accessors against a fixture vote document, not a stand-in parser.
-.PHONY: check-fleet-mesh-evidence
-check-fleet-mesh-evidence: jsonq
-	@tools/scripts/check_fleet_mesh_evidence.sh
-
 .PHONY: check-tor-dial-prewarm
 check-tor-dial-prewarm:
 	@tools/scripts/check_tor_dial_prewarm.sh

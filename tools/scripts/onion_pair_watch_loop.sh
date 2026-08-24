@@ -4,9 +4,9 @@
 #   tools/scripts/onion_pair_watch_loop.sh         # until killed
 #   tools/scripts/onion_pair_watch_loop.sh --once  # one cycle
 #
-# Each cycle: onion_pair_watch.sh and compare origin/main mesh.status against
-# the latest host-local pair_probe.jsonl line. Telemetry never commits or
-# pushes source history.
+# Each cycle: run onion_pair_watch.sh and append its result to the latest
+# host-local pair_probe.jsonl line. Telemetry never commits or pushes source
+# history.
 # flock-serialized so a timer and a long-lived loop cannot overlap.
 # Never touches ~/.zclassic-c23. No Python.
 
@@ -16,12 +16,10 @@ umask 077
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
 WATCH="$REPO_ROOT/tools/scripts/onion_pair_watch.sh"
-MESH_REL="deploy/devfleet/mesh.status"
 STATE_DIR="${PAIR_WATCH_STATE_DIR:-$HOME/.local/state/zclassic23-fleetsync}"
 LEDGER="${PAIR_PROBE_FILE:-$STATE_DIR/pair_probe.jsonl}"
 LOCK="$STATE_DIR/node3.pair.lock"
 LOG="$STATE_DIR/pair_watch.log"
-MESH_LAST="$STATE_DIR/mesh.last"
 ONCE=0
 
 for arg in "$@"; do
@@ -62,32 +60,6 @@ last_pair_line() {
     tail -n 1 "$LEDGER"
 }
 
-mesh_field() {
-    local key=$1 file=$2
-    sed -n "s/^${key}=//p" "$file" | head -n 1
-}
-
-crosscheck_mesh() {
-    local mesh_file tmp mesh last_mesh pair_line paired_at verdict node3
-    tmp=$(mktemp)
-    if ! git -C "$REPO_ROOT" show origin/main:"$MESH_REL" >"$tmp" 2>/dev/null; then
-        rm -f "$tmp"
-        return 0
-    fi
-    mesh=$(mesh_field MESH "$tmp")
-    node3=$(mesh_field NODE3 "$tmp")
-    last_mesh=""
-    [ -f "$MESH_LAST" ] && last_mesh=$(cat "$MESH_LAST")
-    pair_line=$(last_pair_line)
-    paired_at=$(printf '%s' "$pair_line" | sed -n 's/.*"paired_at_s":\([^,]*\).*/\1/p')
-    verdict=$(printf '%s' "$pair_line" | sed -n 's/.*"verdict":"\([^"]*\)".*/\1/p')
-    if [ -n "$mesh" ] && [ "$mesh" != "$last_mesh" ]; then
-        log "CROSSCHECK mesh ${last_mesh:-none} -> $mesh node3=$node3 last_pair=$verdict paired_at_s=${paired_at:-null} streak=$(trailing_paired)"
-        printf '%s\n' "$mesh" >"$MESH_LAST"
-    fi
-    rm -f "$tmp"
-}
-
 cycle() {
     local requested_base
     cd "$REPO_ROOT"
@@ -98,7 +70,6 @@ cycle() {
     PAIR_PROBE_FILE="$LEDGER" PAIR_WATCH_PORT_BASE="$requested_base" "$WATCH"
     set -e
     log "cycle done streak=$(trailing_paired) line=$(last_pair_line)"
-    crosscheck_mesh
 }
 
 if [ "$ONCE" = 1 ]; then
