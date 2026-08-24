@@ -2,6 +2,14 @@
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 # Prove single-goal depfile narrowing retains header invalidation and that every
 # ambiguous invocation falls back to all compile profiles.
+#
+# node-c23 is the SHIPPED CONSENSUS BINARY's profile. Its objects are compiled
+# per-TU, so header invalidation for it rides `-include $(NODE_C23_OBJS:.o=.d)`
+# exactly like every other profile — and losing that include is silent: the .d
+# files are still WRITTEN by -MD, every build still succeeds, and the only
+# symptom is a node binary that quietly does not contain a header edit. That is
+# the one staleness in this repository that reaches consensus, so it is probed
+# here rather than left to a human remembering to check it.
 
 set -euo pipefail
 
@@ -23,7 +31,7 @@ fail()
     exit 1
 }
 
-profiles=(build-only dev test-fast test-strict)
+profiles=(build-only dev test-fast test-strict node-c23)
 for profile in "${profiles[@]}"; do
     object="$WORK/$profile.o"
     header="$WORK/$profile.h"
@@ -35,7 +43,7 @@ for profile in "${profiles[@]}"; do
     touch -t 202101010000 -- "$header"
 done
 for ready in dev.complete test-fast.candidate test-fast.rsp \
-        test-strict.candidate test-strict.rsp; do
+        test-strict.candidate test-strict.rsp node-c23.rsp; do
     : > "$WORK/$ready"
     touch -t 202201010000 -- "$WORK/$ready"
 done
@@ -57,6 +65,7 @@ PROBE_MK="$WORK/probe.mk"
     done
     printf '\n'
     printf 'fast-compile build-only t-fast t dev-failure-execution-id: $(ZCL_DEP_PROBE_OBJECTS)\n'
+    printf 'zclassic23 z23: $(ZCL_DEP_PROBE_OBJECTS)\n'
     printf 'zcl-depfile-unknown zcl-depfile-default: $(ZCL_DEP_PROBE_OBJECTS)\n'
     printf '\t@:\n'
     printf '.DEFAULT_GOAL := zcl-depfile-default\n'
@@ -84,6 +93,8 @@ run_probe()
             TEST_PARALLEL_REL_OBJS="$WORK/test-strict.o" \
             TEST_PARALLEL_REL_CANDIDATE="$WORK/test-strict.candidate" \
             TEST_PARALLEL_REL_LINK_RSP="$WORK/test-strict.rsp" \
+            NODE_C23_OBJS="$WORK/node-c23.o" \
+            NODE_C23_LINK_RSP="$WORK/node-c23.rsp" \
             "$@"
     ) > "$output" 2>&1 || {
         sed -n '1,120p' "$output" >&2
@@ -123,14 +134,22 @@ assert_exact_profiles "$WORK/strict.out" test-strict
 run_probe "$WORK/failure-id.out" dev-failure-execution-id
 assert_exact_profiles "$WORK/failure-id.out" ""
 
+# The shipped node binary, under both spellings of its goal. Narrowing to
+# node-c23 alone is the point: a missing exact-goal branch would silently widen
+# this to every profile, and a missing -include would silently empty it.
+run_probe "$WORK/node.out" zclassic23
+assert_exact_profiles "$WORK/node.out" node-c23
+run_probe "$WORK/node-alias.out" z23
+assert_exact_profiles "$WORK/node-alias.out" node-c23
+
 # Two goals, an unknown goal, and no explicit goal are all ambiguous.  They
 # must import every depfile, so all four newer headers schedule rebuilds.
 run_probe "$WORK/mixed.out" fast-compile build-only
-assert_exact_profiles "$WORK/mixed.out" "build-only dev test-fast test-strict"
+assert_exact_profiles "$WORK/mixed.out" "build-only dev test-fast test-strict node-c23"
 run_probe "$WORK/unknown.out" zcl-depfile-unknown
-assert_exact_profiles "$WORK/unknown.out" "build-only dev test-fast test-strict"
+assert_exact_profiles "$WORK/unknown.out" "build-only dev test-fast test-strict node-c23"
 run_probe "$WORK/default.out"
-assert_exact_profiles "$WORK/default.out" "build-only dev test-fast test-strict"
+assert_exact_profiles "$WORK/default.out" "build-only dev test-fast test-strict node-c23"
 
 printf '%s\n' \
-    'make-depfile-scope-selftest: PASS header_rebuild=true single_goal_scoped=true mixed_unknown_default_all=true'
+    'make-depfile-scope-selftest: PASS header_rebuild=true single_goal_scoped=true node_c23_scoped=true mixed_unknown_default_all=true'
