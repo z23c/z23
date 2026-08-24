@@ -54,6 +54,7 @@ int test_onion_stream(void)
 
     printf("onion_stream: refuses a non-tor service... ");
     {
+        onion_stream_reset_stages_for_test();
         struct net_service svc;
         net_service_init(&svc);
         unsigned char ip4[4] = {10, 0, 0, 9};
@@ -62,6 +63,9 @@ int test_onion_stream(void)
         zcl_socket_t sock = ZCL_INVALID_SOCKET;
         bool ok = !onion_stream_connect(&svc, &sock, 1000) &&
                   sock == ZCL_INVALID_SOCKET;
+        struct onion_last_dial last;
+        onion_stream_get_last_dial(&last);
+        ok = ok && strcmp(last.result, "not_tor") == 0;
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
@@ -71,6 +75,7 @@ int test_onion_stream(void)
         /* A syntactically valid torv3 service (real checksum via the
          * codec). The connect must fail immediately — named "tor not
          * running/not ready" — never resolve or dial clearnet. */
+        onion_stream_reset_stages_for_test();
         uint8_t pub[32];
         for (int i = 0; i < 32; i++)
             pub[i] = (uint8_t)(0x40 + i);
@@ -85,6 +90,13 @@ int test_onion_stream(void)
         zcl_socket_t sock = ZCL_INVALID_SOCKET;
         ok = ok && !onion_stream_connect(&svc, &sock, 1000) &&
              sock == ZCL_INVALID_SOCKET;
+        struct onion_last_dial last;
+        onion_stream_get_last_dial(&last);
+        ok = ok && strstr(last.target, ".onion:8033") != NULL &&
+             (strcmp(last.result, "tor_not_running") == 0 ||
+              strcmp(last.result, "dynhost_not_ready") == 0 ||
+              strcmp(last.result, "stub_build") == 0) &&
+             last.attempted_unix > 0;
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
@@ -100,6 +112,37 @@ int test_onion_stream(void)
         enum zcl_connect_start st = connect_socket_start(&svc, &sock);
         bool ok = st == ZCL_CONNECT_START_ERROR &&
                   sock == ZCL_INVALID_SOCKET;
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+
+    printf("onion_stream: last dial records target, timestamp, result... ");
+    {
+        onion_stream_reset_stages_for_test();
+        struct onion_last_dial empty;
+        onion_stream_get_last_dial(&empty);
+        bool ok = empty.target[0] == '\0' &&
+                  empty.attempted_unix == 0 &&
+                  strcmp(empty.result, "none") == 0;
+        onion_stream_note_last_dial(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion:8055",
+            "queued");
+        struct onion_last_dial queued;
+        onion_stream_get_last_dial(&queued);
+        ok = ok && strstr(queued.target, ".onion:8055") != NULL &&
+             queued.attempted_unix > 0 &&
+             strcmp(queued.result, "queued") == 0;
+        onion_stream_note_last_dial(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion:8055",
+            "circuit_ready");
+        struct onion_last_dial ready;
+        onion_stream_get_last_dial(&ready);
+        ok = ok && strcmp(ready.result, "circuit_ready") == 0 &&
+             ready.attempted_unix >= queued.attempted_unix;
+        onion_stream_reset_stages_for_test();
+        struct onion_last_dial reset;
+        onion_stream_get_last_dial(&reset);
+        ok = ok && reset.target[0] == '\0' && reset.attempted_unix == 0;
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }

@@ -17,6 +17,7 @@
 #include "connman_internal.h"
 #include "net/connman.h"
 #include "net/onion_stream.h"
+#include "net/tor_integration.h"
 #include "net/addrman.h"
 #include "net/peer_lifecycle.h"
 #include "net/port_policy.h"
@@ -85,6 +86,10 @@ bool connman_outbound_rate_allowed_for_test(bool below_floor,
  * from connman_start()/connman_join() in connman.c (declared extern in
  * connman_internal.h); beaten from thread_open_connections() below. */
 struct thread_liveness_child g_open_liveness = { .id = SUPERVISOR_INVALID_ID };
+
+/* Rate-limit the "Tor not ready, holding onion addnode" line. The dialer
+ * retries every 200ms-1s; one log per 10s is enough to prove the hold. */
+static int64_t s_last_onion_not_ready_log_ms;
 
 void connman_collect_healthy_anchors(struct connman *cm,
                                      struct anchor_peer_set *set)
@@ -610,13 +615,33 @@ static void connman_dial_batch(struct connman *cm,
         struct connman_dial_candidate *c = &batch[i];
         if (!net_addr_is_tor(&c->addr.svc.addr))
             continue;
+        char dest[NET_SERVICE_STR_MAX + 1];
+        net_service_to_string(&c->addr.svc, dest, sizeof(dest));
         if (onion_budget_ms <= 0) {
             /* The one stage onion_stream.c cannot name: never handed over. */
-            char obuf[NET_ADDR_STR_MAX + 1];
-            net_addr_to_string(&c->addr.svc.addr, obuf, sizeof(obuf));
-            LOG_WARN("net", "onion stage=dial_deferred target=%s:%u (batch "
+            onion_stream_note_last_dial(dest, "dial_deferred");
+            LOG_WARN("net", "onion stage=dial_deferred target=%s (batch "
                             "spent its whole %d ms circuit budget)",
-                     obuf, c->addr.svc.port, ONION_STREAM_CONNECT_TIMEOUT_MS);
+                     dest, ONION_STREAM_CONNECT_TIMEOUT_MS);
+            continue;
+        }
+        /* Tor not ready is a local bootstrap wait, not a dead peer.
+         * Charging addnode TCP backoff here made isolation -connect +
+         * RPC addnode wait 30s+ after dynhost came up, so the 120s
+         * self-dial budget expired with last_dial stuck at queued. */
+        if (!tor_integration_is_enabled() ||
+            !tor_integration_is_dial_ready()) {
+            const char *stage = tor_integration_is_enabled()
+                ? "dynhost_not_ready" : "tor_not_running";
+            onion_stream_note_last_dial(dest, stage);
+            int64_t now_ms = platform_time_monotonic_ms();
+            if (now_ms - s_last_onion_not_ready_log_ms >= 10000) {
+                LOG_INFO("net",
+                         "onion stage=%s target=%s (holding addnode; "
+                         "not charging backoff)",
+                         stage, dest);
+                s_last_onion_not_ready_log_ms = now_ms;
+            }
             continue;
         }
         peer_lifecycle_note_attempt(&c->addr, dial_lifecycle_source(c));

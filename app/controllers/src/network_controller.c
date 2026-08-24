@@ -19,6 +19,7 @@
 #include "net/peer_lifecycle.h"
 #include "net/protocol.h"
 #include "net/tor_integration.h"
+#include "net/onion_stream.h"
 #include "net/version.h"
 #include <stdatomic.h>
 #include <stdio.h>
@@ -770,6 +771,13 @@ static bool rpc_addnode(const struct json_value *params, bool help,
 
         net_addr_to_string(&addr.svc.addr, host, sizeof(host));
         connman_add_seed_node(ctx->connman, host, addr.svc.port);
+
+        if (net_name_is_onion(node_str)) {
+            printf("Connecting to onion addnode %s\n", node_str);
+            onion_stream_note_last_dial(node_str, "queued");
+            LOG_INFO("net", "onion addnode RPC queued target=%s cmd=%s",
+                     node_str, cmd);
+        }
 
         /* Direct connect — don't rely on addrman random selection */
         connman_open_connection(ctx->connman, &addr);

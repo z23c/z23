@@ -78,6 +78,20 @@ int syncdiag_cases_network(void)
         ok = ok &&
              strcmp(json_get_str(json_get(handshake, "schema")),
                     "zcl.onion_handshake_stages.v1") == 0;
+        const struct json_value *last_dial = json_get(&result,
+                                                       "last_outbound_dial");
+        ok = ok && last_dial && last_dial->type == JSON_OBJ;
+        ok = ok &&
+             strcmp(json_get_str(json_get(last_dial, "schema")),
+                    "zcl.onion_last_dial.v1") == 0;
+        ok = ok && json_get(last_dial, "target") &&
+             json_get(last_dial, "target")->type == JSON_STR;
+        ok = ok && json_get(last_dial, "attempted_unix") &&
+             json_get(last_dial, "attempted_unix")->type == JSON_INT;
+        ok = ok && json_get(last_dial, "result") &&
+             json_get(last_dial, "result")->type == JSON_STR &&
+             strcmp(json_get_str(json_get(last_dial, "result")),
+                    "none") == 0;
         ok = ok &&
              strcmp(json_get_str(json_get(handshake,
                                            "first_incomplete_stage")),

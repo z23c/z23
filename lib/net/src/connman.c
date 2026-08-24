@@ -24,6 +24,7 @@
 #include "net/fast_sync.h"
 #include "net/tor_integration.h"
 #include "net/onion_service.h"
+#include "net/onion_stream.h"
 #include "net/onion_peer_merge.h"
 #include "core/random.h"
 #include "core/serialize.h"
@@ -2859,8 +2860,18 @@ void connman_open_connection(struct connman *cm,
      * list (above) and let the dialer thread open the circuit; do not block
      * the RPC or the 250ms native command on Tor. Numeric IPs stay a
      * direct connect_node. */
-    if (net_addr_is_tor(&addr->svc.addr))
+    if (net_addr_is_tor(&addr->svc.addr)) {
+        char dest[NET_SERVICE_STR_MAX + 1];
+        net_service_to_string(&addr->svc, dest, sizeof(dest));
+        onion_stream_note_last_dial(dest, "queued");
+        LOG_INFO("connman",
+                 "onion addnode queued for dialer target=%s "
+                 "tor_enabled=%s dial_ready=%s",
+                 dest,
+                 tor_integration_is_enabled() ? "true" : "false",
+                 tor_integration_is_dial_ready() ? "true" : "false");
         return;
+    }
 
     /* Pass addr_name as dest so connect_node skips is_local check.
      * This allows connecting to localhost (e.g. local zclassicd peer). */

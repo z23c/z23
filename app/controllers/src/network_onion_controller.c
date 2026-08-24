@@ -155,6 +155,17 @@ bool network_onion_status_rpc(const struct json_value *params, bool help,
                      handshake_totals.pre_handshake_disconnects);
     json_push_kv(result, "p2p_handshake", &handshake);
 
+    struct onion_last_dial last_dial;
+    onion_stream_get_last_dial(&last_dial);
+    struct json_value last = {0};
+    json_set_object(&last);
+    json_push_kv_str(&last, "schema", "zcl.onion_last_dial.v1");
+    json_push_kv_str(&last, "target", last_dial.target);
+    json_push_kv_int(&last, "attempted_unix", last_dial.attempted_unix);
+    json_push_kv_str(&last, "result", last_dial.result);
+    json_push_kv(result, "last_outbound_dial", &last);
+    json_free(&last);
+
     struct json_value mapping = {0};
     struct json_value routes = {0};
     struct json_value app_route = {0};
