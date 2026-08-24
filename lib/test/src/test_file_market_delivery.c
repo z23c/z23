@@ -6,6 +6,7 @@
 #include "base/hex.h"
 #include "chain/chainparams.h"
 #include "crypto/chacha20poly1305.h"
+#include "crypto/curve25519.h"
 #include "crypto/ed25519.h"
 #include "crypto/sha3.h"
 #include "crypto/sha3_crypt.h"
@@ -268,6 +269,52 @@ static bool delivery_handshake_rejects_zero_peer_key(void)
     return rejected;
 }
 
+static bool delivery_handshake_rejects_wrong_confirmation(void)
+{
+    int sockets[2] = {-1, -1};
+    pthread_t thread;
+    bool started = false;
+    struct delivery_handshake_call initiator = {.initiator = true};
+    uint8_t initiator_public[32] = {0};
+    uint8_t initiator_confirmation[32] = {0};
+    uint8_t responder_private[32];
+    uint8_t responder_public[32] = {0};
+    uint8_t wrong_confirmation[32];
+    bool relayed = false;
+
+    memset(responder_private, 0x6D, sizeof(responder_private));
+    memset(wrong_confirmation, 0xA7, sizeof(wrong_confirmation));
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0 ||
+        !curve25519_scalarmult_base(responder_public, responder_private))
+        goto done;
+    fs_session_init(&initiator.session, sockets[0]);
+    started = pthread_create(&thread, NULL, delivery_handshake_call_main,
+                             &initiator) == 0;
+    if (started)
+        relayed = delivery_recv_exact(sockets[1], initiator_public, 32) &&
+            delivery_send_exact(sockets[1], responder_public, 32) &&
+            delivery_recv_exact(sockets[1], initiator_confirmation, 32) &&
+            delivery_send_exact(sockets[1], wrong_confirmation, 32);
+    close(sockets[1]);
+    sockets[1] = -1;
+    if (started) {
+        pthread_join(thread, NULL);
+        started = false;
+    }
+
+done:
+    if (sockets[1] >= 0) close(sockets[1]);
+    if (started) pthread_join(thread, NULL);
+    if (sockets[0] >= 0) close(sockets[0]);
+    uint8_t key_or = 0;
+    for (size_t i = 0; i < sizeof(initiator.session.key); i++)
+        key_or |= initiator.session.key[i];
+    bool rejected = relayed && !initiator.ok &&
+        !initiator.session.key_established && key_or == 0;
+    fs_session_cleanup(&initiator.session);
+    return rejected;
+}
+
 struct delivery_server_call {
     struct fs_session *session;
     bool served;
@@ -393,6 +440,8 @@ int file_market_delivery_tests(void)
                    delivery_handshake_capture_has_no_session_key());
     DELIVERY_CHECK("low-order X25519 peer key fails the handshake closed",
                    delivery_handshake_rejects_zero_peer_key());
+    DELIVERY_CHECK("wrong confirmation fails handshake and cleanses key",
+                   delivery_handshake_rejects_wrong_confirmation());
     struct fs_session server;
     struct file_market_delivery_request request, decoded;
     uint8_t wire[FILE_MARKET_DELIVERY_WIRE_BYTES], buyer_seed[32];

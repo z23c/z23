@@ -179,7 +179,7 @@ done:
         LOG_FAIL("filesvc", "handshake: %s (%s)", failure,
                  initiator ? "initiator" : "responder");
     }
-    return true;
+    return failure == NULL;
 }
 
 void fs_session_cleanup(struct fs_session *session)
