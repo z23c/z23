@@ -5,6 +5,7 @@
 
 #include "test/syncdiag_rpc_fixture.h"
 #include "net/onion_stream.h"
+#include "net/tor_integration.h"
 
 int syncdiag_cases_network(void)
 {
@@ -82,6 +83,20 @@ int syncdiag_cases_network(void)
         ok = ok &&
              strcmp(json_get_str(json_get(handshake, "schema")),
                     "zcl.onion_handshake_stages.v1") == 0;
+        const struct json_value *last_dial = json_get(&result,
+                                                       "last_outbound_dial");
+        ok = ok && last_dial && last_dial->type == JSON_OBJ;
+        ok = ok &&
+             strcmp(json_get_str(json_get(last_dial, "schema")),
+                    "zcl.onion_last_dial.v1") == 0;
+        ok = ok && json_get(last_dial, "target") &&
+             json_get(last_dial, "target")->type == JSON_STR;
+        ok = ok && json_get(last_dial, "attempted_unix") &&
+             json_get(last_dial, "attempted_unix")->type == JSON_INT;
+        ok = ok && json_get(last_dial, "result") &&
+             json_get(last_dial, "result")->type == JSON_STR &&
+             strcmp(json_get_str(json_get(last_dial, "result")),
+                    "none") == 0;
         ok = ok &&
              strcmp(json_get_str(json_get(handshake,
                                            "first_incomplete_stage")),
@@ -100,14 +115,19 @@ int syncdiag_cases_network(void)
         }
         struct onion_stream_stages stream = {0};
         struct peer_lifecycle_summary peer = {0};
+        ok = ok && json_get(&result, "tor_requested") &&
+             json_get(&result, "tor_requested")->type == JSON_BOOL;
         ok = ok && strcmp(network_onion_first_incomplete_stage(
-                              true, true, NULL, &peer),
+                              true, true, true, NULL, &peer),
                           "invalid_snapshot") == 0;
         ok = ok && strcmp(network_onion_first_incomplete_stage(
-                              false, false, &stream, &peer),
+                              false, false, false, &stream, &peer),
                           "tor_disabled") == 0;
         ok = ok && strcmp(network_onion_first_incomplete_stage(
-                              true, false, &stream, &peer),
+                              false, true, false, &stream, &peer),
+                          "tor_unavailable") == 0;
+        ok = ok && strcmp(network_onion_first_incomplete_stage(
+                              true, true, false, &stream, &peer),
                           "tor_dial_not_ready") == 0;
         stream.dial_started = 1;
         stream.stream_queued = 1;
@@ -117,23 +137,23 @@ int syncdiag_cases_network(void)
         peer.connected = 1;
         peer.version_sent = 1;
         ok = ok && strcmp(network_onion_first_incomplete_stage(
-                              true, true, &stream, &peer),
+                              true, true, true, &stream, &peer),
                           "p2p_bytes_not_received") == 0;
         stream.bytes_from_peer = 1;
         ok = ok && strcmp(network_onion_first_incomplete_stage(
-                              true, true, &stream, &peer),
+                              true, true, true, &stream, &peer),
                           "version_not_received") == 0;
         peer.version_received = 1;
         ok = ok && strcmp(network_onion_first_incomplete_stage(
-                              true, true, &stream, &peer),
+                              true, true, true, &stream, &peer),
                           "verack_not_received") == 0;
         peer.verack_received = 1;
         ok = ok && strcmp(network_onion_first_incomplete_stage(
-                              true, true, &stream, &peer),
+                              true, true, true, &stream, &peer),
                           "handshake_not_complete") == 0;
         peer.handshake_complete = 1;
         ok = ok && strcmp(network_onion_first_incomplete_stage(
-                              true, true, &stream, &peer),
+                              true, true, true, &stream, &peer),
                           "complete") == 0;
         if (ok && strcmp(json_get_str(state), "ready") == 0) {
             const char *hostname = json_get_str(address);
@@ -145,6 +165,40 @@ int syncdiag_cases_network(void)
 
         json_free(&params);
         json_free(&result);
+        if (ok) printf("OK\n");
+        else    { printf("FAIL\n"); failures++; }
+    }
+
+    printf("onionstatus: -tor requested but not running is unavailable "
+           "not disabled (RED)... ");
+    {
+        struct rpc_table tbl;
+        struct json_value params;
+        struct json_value result;
+
+        tor_integration_stop();
+        tor_integration_mark_requested();
+        rpc_table_init(&tbl);
+        register_net_rpc_commands(&tbl);
+        json_init(&params);
+        json_set_array(&params);
+        json_init(&result);
+        bool ok = rpc_table_execute(&tbl, "onionstatus", &params, &result);
+        const char *state = json_get_str(json_get(&result, "bootstrap_state"));
+        const char *setup = json_get_str(json_get(&result, "setup_state"));
+        const struct json_value *requested = json_get(&result, "tor_requested");
+        const struct json_value *handshake = json_get(&result, "p2p_handshake");
+        ok = ok && state && strcmp(state, "unavailable") == 0;
+        ok = ok && setup && strcmp(setup, "tor_start_failed") == 0;
+        ok = ok && requested && json_get_bool(requested);
+        ok = ok && !json_get_bool(json_get(&result, "tor_enabled"));
+        ok = ok && strcmp(state, "disabled") != 0;
+        ok = ok && handshake &&
+             strcmp(json_get_str(json_get(handshake, "first_incomplete_stage")),
+                    "tor_unavailable") == 0;
+        json_free(&params);
+        json_free(&result);
+        tor_integration_stop();
         if (ok) printf("OK\n");
         else    { printf("FAIL\n"); failures++; }
     }

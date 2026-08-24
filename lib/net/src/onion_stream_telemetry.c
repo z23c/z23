@@ -30,10 +30,42 @@ static pthread_mutex_t g_records_mu = PTHREAD_MUTEX_INITIALIZER;
 static struct onion_stream_dial_record
     g_records[ONION_STREAM_RECENT_DIALS_MAX];
 static uint64_t g_generation;
+static pthread_mutex_t g_last_dial_mu = PTHREAD_MUTEX_INITIALIZER;
+static char g_last_dial_target[96];
+static char g_last_dial_result[32];
+static _Atomic int64_t g_last_dial_unix;
 
 static void stage_bump(_Atomic uint64_t *counter, uint64_t by)
 {
     atomic_fetch_add_explicit(counter, by, memory_order_relaxed);
+}
+
+void onion_stream_note_last_dial(const char *target, const char *result)
+{
+    if (!result || !result[0])
+        result = "none";
+    pthread_mutex_lock(&g_last_dial_mu);
+    if (target && target[0]) {
+        snprintf(g_last_dial_target, sizeof(g_last_dial_target), "%s", target);
+        atomic_store_explicit(&g_last_dial_unix, platform_time_wall_unix(),
+                              memory_order_relaxed);
+    }
+    snprintf(g_last_dial_result, sizeof(g_last_dial_result), "%s", result);
+    pthread_mutex_unlock(&g_last_dial_mu);
+}
+
+void onion_stream_get_last_dial(struct onion_last_dial *out)
+{
+    if (!out)
+        return;
+    memset(out, 0, sizeof(*out));
+    pthread_mutex_lock(&g_last_dial_mu);
+    snprintf(out->target, sizeof(out->target), "%s", g_last_dial_target);
+    snprintf(out->result, sizeof(out->result), "%s",
+             g_last_dial_result[0] ? g_last_dial_result : "none");
+    pthread_mutex_unlock(&g_last_dial_mu);
+    out->attempted_unix = atomic_load_explicit(&g_last_dial_unix,
+                                               memory_order_relaxed);
 }
 
 static void peer_baseline(const char *target,
@@ -61,6 +93,8 @@ struct onion_stream_dial_record *onion_stream_dial_begin(
     char target[NET_SERVICE_STR_MAX + 1];
     if (!svc || net_service_to_string(svc, target, sizeof(target)) < 0)
         return NULL;
+    onion_stream_note_last_dial(target, "dial_started");
+    LOG_INFO("onion", "onion stage=dial_started target=%s", target);
     struct peer_lifecycle_summary baseline;
     peer_baseline(target, &baseline);
 
@@ -102,6 +136,24 @@ void onion_stream_dial_bump(struct onion_stream_dial_record *record,
     stage_bump(&g_stage_totals[index + 1], by);
     if (record)
         stage_bump(&record->stages[index], by);
+
+    const char *result = NULL;
+    switch (stage) {
+    case ONION_DIAL_STREAM_QUEUED:      result = "stream_queued"; break;
+    case ONION_DIAL_CIRCUIT_READY:      result = "circuit_ready"; break;
+    case ONION_DIAL_BRIDGE_UP:          result = "bridge_up"; break;
+    case ONION_DIAL_OPEN_REFUSED:       result = "open_refused"; break;
+    case ONION_DIAL_CIRCUIT_TIMEOUT:    result = "circuit_timeout"; break;
+    case ONION_DIAL_CIRCUIT_TORN_DOWN:  result = "circuit_torn_down"; break;
+    case ONION_DIAL_BRIDGE_CLOSED:
+    case ONION_DIAL_BYTES_TO_PEER:
+    case ONION_DIAL_BYTES_FROM_PEER:
+    case ONION_DIAL_PEERS_ANSWERED:
+    case ONION_DIAL_STAGE_COUNT:
+        break;
+    }
+    if (result)
+        onion_stream_note_last_dial(record ? record->target : NULL, result);
 }
 
 void onion_stream_dial_poison(struct onion_stream_dial_record *record)
@@ -219,5 +271,10 @@ void onion_stream_reset_stages_for_test(void)
     memset(g_records, 0, sizeof(g_records));
     g_generation = 0;
     pthread_mutex_unlock(&g_records_mu);
+    pthread_mutex_lock(&g_last_dial_mu);
+    g_last_dial_target[0] = '\0';
+    g_last_dial_result[0] = '\0';
+    pthread_mutex_unlock(&g_last_dial_mu);
+    atomic_store(&g_last_dial_unix, 0);
 }
 #endif

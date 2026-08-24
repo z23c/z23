@@ -626,6 +626,23 @@ bool onion_stream_connect_backend_for_test(
 }
 #endif
 
+static void note_last_dial_svc(const struct net_service *svc,
+                               const char *result)
+{
+    char target[96];
+    target[0] = '\0';
+    if (svc && net_addr_is_tor(&svc->addr)) {
+        char host[ONION_V3_ADDRESS_LEN + 1];
+        if (onion_v3_address_from_pubkey(svc->addr.torv3, host))
+            snprintf(target, sizeof(target), "%s:%u", host, svc->port);
+        else
+            snprintf(target, sizeof(target), "onion:%u", svc->port);
+    } else if (svc) {
+        net_service_to_string(svc, target, sizeof(target));
+    }
+    onion_stream_note_last_dial(target[0] ? target : NULL, result);
+}
+
 bool onion_stream_connect(const struct net_service *svc,
                           zcl_socket_t *sock_out,
                           int connect_timeout_ms)
@@ -634,15 +651,23 @@ bool onion_stream_connect(const struct net_service *svc,
         LOG_FAIL("onion", "onion_stream_connect: NULL sock_out");
     *sock_out = ZCL_INVALID_SOCKET;
 
-    if (!svc || !net_addr_is_tor(&svc->addr))
+    if (!svc || !net_addr_is_tor(&svc->addr)) {
+        note_last_dial_svc(svc, "not_tor");
         LOG_FAIL("onion", "onion_stream_connect: not a torv3 address");
-    if (!dynhost_stream_open || !dynhost_stream_write || !dynhost_stream_close)
+    }
+    if (!dynhost_stream_open || !dynhost_stream_write || !dynhost_stream_close) {
+        note_last_dial_svc(svc, "stub_build");
         LOG_FAIL("onion", "onion dialing unavailable: tor stub build");
-    if (!tor_integration_is_enabled())
+    }
+    if (!tor_integration_is_enabled()) {
+        note_last_dial_svc(svc, "tor_not_running");
         LOG_FAIL("onion", "onion dialing unavailable: tor not running");
-    if (!tor_integration_is_dial_ready())
+    }
+    if (!tor_integration_is_dial_ready()) {
+        note_last_dial_svc(svc, "dynhost_not_ready");
         LOG_FAIL("onion", "onion dialing unavailable: dynhost not ready "
                           "to queue outbound streams");
+    }
 
     return onion_stream_connect_backend(svc, sock_out, connect_timeout_ms,
                                         &g_dynhost_backend);

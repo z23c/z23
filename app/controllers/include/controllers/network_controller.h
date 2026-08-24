@@ -27,8 +27,10 @@ struct json_value;
 /* Backing RPC for the typed core.network.onion.status contract. */
 bool network_onion_status_rpc(const struct json_value *params, bool help,
                               struct json_value *result);
+bool network_addnode_rpc(const struct json_value *params, bool help,
+                         struct json_value *result);
 const char *network_onion_first_incomplete_stage(
-    bool tor_enabled, bool dial_ready,
+    bool tor_enabled, bool tor_requested, bool dial_ready,
     const struct onion_stream_stages *stream,
     const struct peer_lifecycle_summary *peer);
 

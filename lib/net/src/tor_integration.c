@@ -9,8 +9,8 @@
 #define _DEFAULT_SOURCE
 #include "platform/time_compat.h"
 #include "net/tor_integration.h"
+#include "net/tor_request_state.h"
 #include <errno.h>
-#include <fcntl.h>
 #include <netinet/in.h>   /* AF_INET for the inbound P2P port mapping */
 #include <pthread.h>
 #include <stdatomic.h>
@@ -20,10 +20,6 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
-#include "crypto/ed25519.h"
-#include "crypto/random_secret.h"
-#include "sha3/sha3.h"
-#include "util/safe_alloc.h"
 #include "util/log_macros.h"
 #include "util/thread_liveness.h"
 #include "util/thread_registry.h"
@@ -138,31 +134,6 @@ void tor_integration_set_handler(tor_request_handler_fn handler, void *ctx)
  * that nothing ever connects to, purely to make Tor's startup check
  * happy. The port is derived from p2p_port so multiple instances
  * don't collide. */
-bool tor_write_torrc(const char *datadir, uint16_t p2p_port)
-{
-    char torrc_path[1024];
-    snprintf(torrc_path, sizeof(torrc_path), "%s/torrc", datadir);
-
-    FILE *f = fopen(torrc_path, "w");
-    if (!f) LOG_FAIL("tor", "failed to open torrc for writing: %s", torrc_path);
-
-    /* Localhost-only SocksPort — NOTHING connects to this.
-     * It exists only because Tor won't bootstrap without a listener.
-     * Derived from p2p_port to avoid collisions (8033→19999, 8035→20001).
-     * When the Tor fork supports SocksPort 0 with dynhost, replace
-     * this with "SocksPort 0\n". */
-    uint16_t bootstrap_port = (uint16_t)(p2p_port + 11966);
-    fprintf(f,
-        "SocksPort 127.0.0.1:%u\n"
-        "DataDirectory %s/tor_data\n"
-        "Log notice file %s/tor.log\n"
-        "Log info [rend] file %s/tor.log\n",
-        bootstrap_port, datadir, datadir, datadir);
-
-    fclose(f);
-    return true;
-}
-
 /* Scan the dynhost log from byte offset scan_from and return the LAST
  * "ephemeral service created with address:" match. Last-match + offset are
  * both load-bearing: the log appends across boots and every Tor start mints
@@ -170,78 +141,6 @@ bool tor_write_torrc(const char *datadir, uint16_t p2p_port)
  * old first-match-from-zero scan reported/published a dead onion after
  * every restart). If the file shrank below scan_from (rotated/truncated),
  * the scan restarts from the top. Exposed for testing. */
-bool tor_log_last_ephemeral_address(const char *log_path, long scan_from,
-                                    char *out, size_t out_size)
-{
-    if (!log_path || !out || out_size == 0)
-        return false;
-
-    FILE *f = fopen(log_path, "r");
-    if (!f)
-        return false;
-
-    if (scan_from > 0) {
-        if (fseek(f, 0, SEEK_END) != 0 || ftell(f) < scan_from ||
-            fseek(f, scan_from, SEEK_SET) != 0)
-            rewind(f);
-    }
-
-    static const char marker[] = "ephemeral service created with address: ";
-    char line[512];
-    bool found = false;
-    while (fgets(line, sizeof(line), f)) {
-        char *p = strstr(line, marker);
-        if (!p)
-            continue;
-        p += sizeof(marker) - 1;
-        char *end = p;
-        while (*end && *end != '\n' && *end != '\r' && *end != ' ')
-            end++;
-        size_t len = (size_t)(end - p);
-        if (len > 0 && len < out_size) {
-            memcpy(out, p, len);
-            out[len] = '\0';
-            found = true;   /* keep scanning — a later line supersedes */
-        }
-    }
-    fclose(f);
-    return found;
-}
-
-bool tor_log_has_descriptor_publication(const char *log_path, long scan_from)
-{
-    if (!log_path)
-        return false;
-
-    FILE *f = fopen(log_path, "r");
-    if (!f)
-        return false;
-
-    if (scan_from > 0) {
-        if (fseek(f, 0, SEEK_END) != 0 || ftell(f) < scan_from ||
-            fseek(f, scan_from, SEEK_SET) != 0)
-            rewind(f);
-    }
-
-    char line[512];
-    bool found = false;
-    while (fgets(line, sizeof(line), f)) {
-        /* Success-only: a hostname file or a failed upload must not count.
-         * "DESCRIPTOR PUBLICATION" is the first-boot ready marker the
-         * installer selftest greps for; the rest are stock Tor rend lines
-         * that become visible once torrc logs info [rend]. */
-        if (strstr(line, "DESCRIPTOR PUBLICATION") != NULL ||
-            strstr(line, "Uploaded hidden service descriptor (status 200") != NULL ||
-            strstr(line, "finished with status 200") != NULL ||
-            strstr(line, "HS_DESC UPLOADED") != NULL) {
-            found = true;
-            break;
-        }
-    }
-    fclose(f);
-    return found;
-}
-
 /* ── Persistent onion identity ─────────────────────────────────
  *
  * Two layers:
@@ -269,208 +168,6 @@ bool tor_log_has_descriptor_publication(const char *log_path, long scan_from)
  *    (harmless): the pointer swap below still retargets interception at
  *    our persistent service because the comparison reads
  *    dynhost->hs_service at connection time. */
-
-/* RFC 4648 base32, lowercase, no padding (the prop224 alphabet). */
-static void base32_lower_encode(const uint8_t *data, size_t len, char *out)
-{
-    static const char alpha[] = "abcdefghijklmnopqrstuvwxyz234567";
-    unsigned int buffer = 0;
-    int bits = 0;
-    char *p = out;
-    for (size_t i = 0; i < len; i++) {
-        buffer = (buffer << 8) | data[i];
-        bits += 8;
-        while (bits >= 5) {
-            *p++ = alpha[(buffer >> (bits - 5)) & 31u];
-            bits -= 5;
-        }
-    }
-    if (bits > 0)
-        *p++ = alpha[(buffer << (5 - bits)) & 31u];
-    *p = '\0';
-}
-
-bool onion_identity_address_from_seed(const uint8_t seed[32],
-                                      char *out, size_t out_size)
-{
-    if (!seed || !out || out_size < 57)
-        LOG_FAIL("tor", "onion_identity_address_from_seed: bad args "
-                        "(out_size=%zu)", out_size);
-
-    uint8_t pk[32], sk[32];
-    ed25519_keypair(pk, sk, seed);
-
-    /* prop224: checksum = SHA3-256(".onion checksum" || pubkey || version)
-     * [0..1]; address = base32(pubkey || checksum || version), version 3. */
-    struct sha3_256_ctx ctx;
-    sha3_256_init(&ctx);
-    static const char prefix[] = ".onion checksum";
-    sha3_256_write(&ctx, (const unsigned char *)prefix, sizeof(prefix) - 1);
-    sha3_256_write(&ctx, pk, sizeof(pk));
-    const uint8_t version = 3;
-    sha3_256_write(&ctx, &version, 1);
-    uint8_t digest[SHA3_256_OUTPUT_SIZE];
-    sha3_256_finalize(&ctx, digest);
-
-    uint8_t blob[35];
-    memcpy(blob, pk, 32);
-    blob[32] = digest[0];
-    blob[33] = digest[1];
-    blob[34] = version;
-    base32_lower_encode(blob, sizeof(blob), out);   /* exactly 56 chars */
-    return true;
-}
-
-/* Resolve <datadir>/tor_data/onion_service, creating it (and tor_data) with
- * mode 0700 when missing. */
-static bool onion_identity_dir(const char *datadir, char *dir_out,
-                               size_t dir_size)
-{
-    if (!datadir || !dir_out)
-        LOG_FAIL("tor", "onion_identity_dir: missing datadir or dir_out");
-    int n = snprintf(dir_out, dir_size, "%s/tor_data/onion_service", datadir);
-    if (n < 0 || (size_t)n >= dir_size)
-        LOG_FAIL("tor", "onion identity path too long for datadir: %s",
-                 datadir);
-
-    char td[1024];
-    snprintf(td, sizeof(td), "%s/tor_data", datadir);
-    if (mkdir(td, 0700) != 0 && errno != EEXIST)
-        LOG_FAIL("tor", "mkdir %s failed: %s", td, strerror(errno));
-    if (mkdir(dir_out, 0700) != 0 && errno != EEXIST)
-        LOG_FAIL("tor", "mkdir %s failed: %s", dir_out, strerror(errno));
-    return true;
-}
-
-bool onion_identity_ensure(const char *datadir, uint8_t seed_out[32],
-                           char *addr_out, size_t addr_out_size,
-                           bool *created_out)
-{
-    if (!datadir || !seed_out)
-        LOG_FAIL("tor", "onion_identity_ensure: missing datadir or seed_out");
-
-    char dir[1024];
-    if (!onion_identity_dir(datadir, dir, sizeof(dir)))
-        return false;
-
-    char seed_path[1152], hostname_path[1152];
-    snprintf(seed_path, sizeof(seed_path), "%s/identity_seed", dir);
-    snprintf(hostname_path, sizeof(hostname_path), "%s/hostname", dir);
-
-    bool created = false;
-    int fd = open(seed_path, O_RDONLY);
-    if (fd >= 0) {
-        ssize_t got = read(fd, seed_out, 32);
-        close(fd);
-        if (got != 32)
-            LOG_FAIL("tor", "onion identity seed corrupt (%zd bytes, want "
-                            "32): %s — refusing to silently remint (that "
-                            "would change the shop's address); restore the "
-                            "file or pass -onion-rotate", got, seed_path);
-    } else {
-        if (errno != ENOENT)
-            LOG_FAIL("tor", "cannot open onion identity seed %s: %s",
-                     seed_path, strerror(errno));
-        if (!zcl_random_secret_bytes(seed_out, 32, "onion_identity_seed"))
-            LOG_FAIL("tor", "CSPRNG refused the onion identity seed");
-        fd = open(seed_path, O_WRONLY | O_CREAT | O_EXCL, 0600);
-        if (fd < 0)
-            LOG_FAIL("tor", "cannot write onion identity seed %s: %s",
-                     seed_path, strerror(errno));
-        ssize_t put = write(fd, seed_out, 32);
-        close(fd);
-        if (put != 32)
-            LOG_FAIL("tor", "short write on onion identity seed %s",
-                     seed_path);
-        created = true;
-    }
-
-    char addr[57];
-    if (!onion_identity_address_from_seed(seed_out, addr, sizeof(addr)))
-        return false;
-
-    /* Standard Tor hostname-file semantics: "<addr>.onion\n". Rewritten
-     * every boot (idempotent content) so a lost hostname file self-heals. */
-    int hfd = open(hostname_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-    if (hfd < 0)
-        LOG_FAIL("tor", "cannot write onion hostname file %s: %s",
-                 hostname_path, strerror(errno));
-    char hline[80];
-    int hlen = snprintf(hline, sizeof(hline), "%s.onion\n", addr);
-    ssize_t hput = write(hfd, hline, (size_t)hlen);
-    close(hfd);
-    if (hput != hlen)
-        LOG_FAIL("tor", "short write on onion hostname file %s",
-                 hostname_path);
-
-    if (addr_out) {
-        if (addr_out_size < 57)
-            LOG_FAIL("tor", "addr_out too small (%zu, want 57)",
-                     addr_out_size);
-        memcpy(addr_out, addr, 57);
-    }
-    if (created_out)
-        *created_out = created;
-    return true;
-}
-
-bool onion_identity_rotate(const char *datadir, char *old_addr_out,
-                           size_t old_addr_size)
-{
-    if (!datadir || !old_addr_out || old_addr_size < 57)
-        LOG_FAIL("tor", "onion_identity_rotate: bad args");
-
-    char dir[1024];
-    if (!onion_identity_dir(datadir, dir, sizeof(dir)))
-        return false;
-
-    char seed_path[1152], hostname_path[1152];
-    snprintf(seed_path, sizeof(seed_path), "%s/identity_seed", dir);
-    snprintf(hostname_path, sizeof(hostname_path), "%s/hostname", dir);
-
-    uint8_t seed[32];
-    int fd = open(seed_path, O_RDONLY);
-    if (fd < 0) {
-        if (errno == ENOENT) {
-            LOG_WARN("tor", "-onion-rotate: no persistent identity at %s — "
-                            "nothing to archive", seed_path);
-            return false;
-        }
-        LOG_FAIL("tor", "cannot open onion identity seed %s: %s",
-                 seed_path, strerror(errno));
-    }
-    ssize_t got = read(fd, seed, sizeof(seed));
-    close(fd);
-    if (got != (ssize_t)sizeof(seed))
-        LOG_FAIL("tor", "onion identity seed corrupt (%zd bytes, want 32): "
-                        "%s — refusing to rotate a corrupt identity; restore "
-                        "or delete the file deliberately", got, seed_path);
-
-    char addr[57];
-    if (!onion_identity_address_from_seed(seed, addr, sizeof(addr)))
-        return false;
-
-    char archive[1280];
-    snprintf(archive, sizeof(archive), "%s/archive", dir);
-    if (mkdir(archive, 0700) != 0 && errno != EEXIST)
-        LOG_FAIL("tor", "mkdir %s failed: %s", archive, strerror(errno));
-
-    /* Archive under the old address: each rotated identity lands at a
-     * unique, self-describing path. */
-    char seed_arch[1408], host_arch[1408];
-    snprintf(seed_arch, sizeof(seed_arch), "%s/identity_seed.%s",
-             archive, addr);
-    snprintf(host_arch, sizeof(host_arch), "%s/hostname.%s", archive, addr);
-    if (rename(seed_path, seed_arch) != 0)
-        LOG_FAIL("tor", "failed to archive onion identity seed to %s: %s",
-                 seed_arch, strerror(errno));
-    if (rename(hostname_path, host_arch) != 0 && errno != ENOENT)
-        LOG_FAIL("tor", "failed to archive onion hostname to %s: %s",
-                 host_arch, strerror(errno));
-
-    memcpy(old_addr_out, addr, 57);
-    return true;
-}
 
 /* ── Persistent identity install (real-Tor builds only) ────────
  *
@@ -1015,6 +712,7 @@ bool tor_integration_start(const char *datadir, uint16_t p2p_port)
 
 void tor_integration_stop(void)
 {
+    tor_integration_clear_requested();
     if (!atomic_exchange(&g_tor_started, false))
         return; /* Never started or already stopped */
 
@@ -1056,141 +754,4 @@ bool tor_integration_is_dial_ready(void)
 bool tor_integration_is_enabled(void)
 {
     return atomic_load(&g_tor_running);
-}
-
-/* ── Outbound .onion fetch ─────────────────────────────────── */
-
-/* Weak reference to dynhost_client_fetch — resolved at link time.
- * When linked against libtor_stub.a, this is NULL. */
-extern int dynhost_client_fetch(const char *, uint16_t, const char *,
-    void (*)(int, const uint8_t *, size_t, void *), void *, int)
-    __attribute__((weak));
-
-int tor_integration_fetch_onion(const char *onion_address,
-                                 const char *path,
-                                 tor_fetch_callback_fn callback,
-                                 void *ctx,
-                                 int timeout_secs)
-{
-    if (!dynhost_client_fetch)
-        LOG_ERR("tor", "dynhost_client_fetch not linked (stub build)");
-    if (!atomic_load(&g_tor_running))
-        LOG_ERR("tor", "fetch_onion called but Tor not running");
-
-    return dynhost_client_fetch(onion_address, 80, path,
-        (void (*)(int, const uint8_t *, size_t, void *))callback,
-        ctx, timeout_secs);
-}
-
-/* Callback for blocking fetch — sets result and signals completion */
-/* Hard ceiling on what one onion response may allocate here, regardless of
- * what the far side claims. The remote is chosen from on-chain data or a
- * peer's directory — never trusted — and every caller applies its own,
- * tighter, purpose-specific cap on top of this one. This exists only so a
- * hostile responder cannot pick our allocation size. */
-#define ONION_FETCH_BODY_MAX (1u << 20)   /* 1 MiB */
-
-/* The waiter's deadline and the fetch callback are independent: dynhost may
- * complete AFTER we have given up. So the shared state is heap-owned and
- * refcounted rather than being the caller's stack frame — the last of the
- * two to let go frees it. Handing a stack address to a callback we cannot
- * cancel is a use-after-free waiting for a slow remote to trigger it, and
- * with the name gateway an anonymous visitor gets to choose that remote. */
-struct blocking_fetch_ctx {
-    _Atomic int refs;        /* waiter + callback; 0 => free */
-    _Atomic int complete;    /* 0=pending, 1=ok, -1=error */
-    int         status;
-    uint8_t    *body;
-    size_t      body_len;
-};
-
-static void blocking_fetch_release(struct blocking_fetch_ctx *c)
-{
-    if (atomic_fetch_sub(&c->refs, 1) == 1) {
-        free(c->body);
-        free(c);
-    }
-}
-
-static void blocking_fetch_cb(int status, const uint8_t *body,
-                                size_t body_len, void *ctx)
-{
-    struct blocking_fetch_ctx *c = (struct blocking_fetch_ctx *)ctx;
-    c->status = status;
-
-    if (body_len > ONION_FETCH_BODY_MAX) {
-        /* Refuse, never truncate: a caller cannot tell a clipped body from a
-         * short one, and half a document is the kind of input that gets
-         * parsed as if it were whole. */
-        LOG_WARN("tor", "onion response of %zu bytes exceeds the %u-byte "
-                        "ceiling — refused", body_len,
-                 (unsigned)ONION_FETCH_BODY_MAX);
-        atomic_store(&c->complete, -1);
-        blocking_fetch_release(c);
-        return;
-    }
-
-    if (body && body_len > 0) {
-        c->body = zcl_malloc(body_len + 1, "onion_fetch_body");
-        if (c->body) {
-            memcpy(c->body, body, body_len);
-            c->body[body_len] = '\0';
-            c->body_len = body_len;
-        }
-    }
-    atomic_store(&c->complete, status >= 200 ? 1 : -1);
-    blocking_fetch_release(c);
-}
-
-int tor_integration_fetch_onion_blocking(const char *onion_address,
-                                          const char *path,
-                                          struct onion_fetch_result *result,
-                                          int timeout_secs)
-{
-    if (!result) LOG_ERR("tor", "fetch_onion_blocking called with NULL result");
-    memset(result, 0, sizeof(*result));
-
-    struct blocking_fetch_ctx *c =
-        zcl_malloc(sizeof(*c), "onion_fetch_ctx");
-    if (!c) LOG_ERR("tor", "onion fetch context allocation failed");
-    memset(c, 0, sizeof(*c));
-    atomic_init(&c->refs, 2);        /* one for us, one for the callback */
-    atomic_init(&c->complete, 0);
-
-    int rc = tor_integration_fetch_onion(onion_address, path,
-                                          blocking_fetch_cb, c,
-                                          timeout_secs);
-    if (rc < 0) {
-        /* Dispatch failed, so the callback will never run and never release
-         * its reference — drop it on its behalf. */
-        blocking_fetch_release(c);
-        blocking_fetch_release(c);
-        atomic_store(&result->complete, -1);
-        LOG_ERR("tor", "fetch_onion failed for %s%s", onion_address, path);
-    }
-
-    int wait_ms = (timeout_secs > 0 ? timeout_secs : 60) * 1000;
-    for (int elapsed = 0; elapsed < wait_ms; elapsed += 100) {
-        if (atomic_load(&c->complete) != 0) {
-            /* The callback is done touching the context, so the body can be
-             * handed to the caller outright rather than copied again. */
-            int ok = atomic_load(&c->complete) == 1;
-            result->status   = c->status;
-            result->body     = c->body;
-            result->body_len = c->body_len;
-            c->body = NULL;                     /* ownership transferred */
-            atomic_store(&result->complete, ok ? 1 : -1);
-            blocking_fetch_release(c);
-            return ok ? 0 : -1;
-        }
-        usleep(100000); /* 100ms */
-    }
-
-    /* Timed out. We let go; if the fetch lands later the callback writes to
-     * the heap context it still owns and frees it there. Nothing of ours
-     * outlives this frame. */
-    blocking_fetch_release(c);
-    atomic_store(&result->complete, -1);
-    LOG_ERR("tor", "fetch_onion_blocking timed out after %ds for %s%s",
-            timeout_secs > 0 ? timeout_secs : 60, onion_address, path);
 }

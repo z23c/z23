@@ -16,12 +16,13 @@
 #include <string.h>
 
 const char *network_onion_first_incomplete_stage(
-    bool tor_enabled, bool dial_ready,
+    bool tor_enabled, bool tor_requested, bool dial_ready,
     const struct onion_stream_stages *stream,
     const struct peer_lifecycle_summary *peer)
 {
     if (!stream || !peer) return "invalid_snapshot";
-    if (!tor_enabled) return "tor_disabled";
+    if (!tor_requested && !tor_enabled) return "tor_disabled";
+    if (!tor_enabled) return "tor_unavailable";
     if (!dial_ready) return "tor_dial_not_ready";
     if (stream->dial_started == 0) return "dial_not_started";
     if (stream->stream_queued == 0) return "stream_not_queued";
@@ -105,7 +106,7 @@ static void push_recent_onion_dials(struct json_value *result)
         json_push_kv_int(&item, "elapsed_ms", elapsed_ms);
         json_push_kv_str(&item, "first_incomplete_stage",
                          network_onion_first_incomplete_stage(
-                             true, true, &dial->stages, &peer));
+                             true, true, true, &dial->stages, &peer));
         json_push_kv_bool(&item, "p2p_lifecycle_found", life_found);
         json_set_object(&peer_delta);
         json_push_kv_int(&peer_delta, "connected", peer.connected);
@@ -154,6 +155,7 @@ bool network_onion_status_rpc(const struct json_value *params, bool help,
         "the live virtual-port mapping contract.");
 
     bool tor_enabled = tor_integration_is_enabled();
+    bool tor_requested = tor_integration_is_requested() || tor_enabled;
     bool tor_ready = tor_integration_is_ready();
     bool dial_ready = tor_integration_is_dial_ready();
     const char *tor_address = tor_integration_get_onion_address();
@@ -163,8 +165,13 @@ bool network_onion_status_rpc(const struct json_value *params, bool help,
     bool address_matches = address_valid && tor_address &&
                            strcmp(service_address, tor_address) == 0;
     bool ready = tor_ready && address_matches;
+    /* "disabled" is only for operators who did not ask for Tor. A -tor
+     * process whose thread never started or already exited is unavailable
+     * — mesh self-dial of a published onion then fails closed instead of
+     * looking like a no-onion node (version_verack_incomplete:state=absent). */
     const char *state = ready ? "ready" :
-                        !tor_enabled ? "disabled" :
+                        !tor_requested ? "disabled" :
+                        !tor_enabled ? "unavailable" :
                         !tor_ready ? "bootstrapping" :
                         !service_ready ? "publishing" :
                         !address_valid ? "invalid_address" :
@@ -175,7 +182,8 @@ bool network_onion_status_rpc(const struct json_value *params, bool help,
     tor_integration_port_map_snapshot(&port_map);
     bool p2p_publish_ready = port_map.p2p_route_installed;
     const char *setup_state =
-        !tor_enabled ? "enable_tor" :
+        !tor_requested ? "enable_tor" :
+        !tor_enabled ? "tor_start_failed" :
         !port_map.persistent_identity ? "enable_persistent_identity" :
         !port_map.p2p_route_expected ? "configure_p2p_port" :
         port_map.state == TOR_ONION_PORT_MAP_FAILED ? "inspect_tor_log" :
@@ -186,6 +194,7 @@ bool network_onion_status_rpc(const struct json_value *params, bool help,
     json_push_kv_str(result, "schema", "zcl.onion_status.v1");
     json_push_kv_str(result, "bootstrap_state", state);
     json_push_kv_bool(result, "tor_enabled", tor_enabled);
+    json_push_kv_bool(result, "tor_requested", tor_requested);
     json_push_kv_bool(result, "tor_ready", tor_ready);
     json_push_kv_bool(result, "dial_ready", dial_ready);
     json_push_kv_bool(result, "onion_service_ready", service_ready);
@@ -247,8 +256,8 @@ bool network_onion_status_rpc(const struct json_value *params, bool help,
                      "bounded dial, or read directly in an isolated probe");
     json_push_kv_str(&handshake, "first_incomplete_stage",
                      network_onion_first_incomplete_stage(
-                         tor_enabled, dial_ready, &stream_stages,
-                         &handshake_totals));
+                         tor_enabled, tor_requested, dial_ready,
+                         &stream_stages, &handshake_totals));
     json_push_kv_int(&handshake, "attempted", handshake_totals.attempted);
     json_push_kv_int(&handshake, "connected", handshake_totals.connected);
     json_push_kv_int(&handshake, "version_sent",
@@ -268,6 +277,17 @@ bool network_onion_status_rpc(const struct json_value *params, bool help,
      * record for the same host:port, so one healthy peer can no longer hide
      * another peer's descriptor, circuit, byte, VERSION, or VERACK stall. */
     push_recent_onion_dials(result);
+
+    struct onion_last_dial last_dial;
+    onion_stream_get_last_dial(&last_dial);
+    struct json_value last = {0};
+    json_set_object(&last);
+    json_push_kv_str(&last, "schema", "zcl.onion_last_dial.v1");
+    json_push_kv_str(&last, "target", last_dial.target);
+    json_push_kv_int(&last, "attempted_unix", last_dial.attempted_unix);
+    json_push_kv_str(&last, "result", last_dial.result);
+    json_push_kv(result, "last_outbound_dial", &last);
+    json_free(&last);
 
     struct json_value mapping = {0};
     struct json_value routes = {0};

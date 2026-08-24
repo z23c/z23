@@ -709,79 +709,6 @@ static bool rpc_ping_rpc(const struct json_value *params, bool help,
     return true;
 }
 
-static bool rpc_addnode(const struct json_value *params, bool help,
-                         struct json_value *result)
-{
-    RPC_HELP(help, result,
-        "addnode \"node\" \"add|remove|onetry\"\n"
-        "Attempts to add or remove a node from the addnode list.");
-
-    struct rpc_params p;
-    rpc_params_init(&p, params);
-    rpc_params_expect(&p, 2, 2);
-    const char *node_str = rpc_require_str(&p, 0, "node");
-    const char *cmd = rpc_require_str(&p, 1, "command");
-    if (rpc_params_invalid(&p)) { rpc_params_error(&p, result); return false; }
-
-    struct network_context *ctx = network_ctx();
-    if (!ctx->connman) {
-        json_set_str(result, "P2P not initialized");
-        return false;
-    }
-
-    if (strcmp(cmd, "remove") != 0 &&
-        strcmp(cmd, "onetry") != 0 &&
-        strcmp(cmd, "add") != 0) {
-        json_set_str(result, "addnode command must be add, remove, or onetry");
-        return false;
-    }
-
-    struct net_service svc;
-    if (net_name_is_onion(node_str)) {
-        /* Operator-directed onion peer: parse locally, NEVER resolve via
-         * DNS and never fall back to clearnet. */
-        if (!lookup_onion(node_str, &svc,
-                          ctx->connman->manager.default_port)) {
-            json_set_str(result,
-                "addnode: invalid .onion address (onion peers are parsed "
-                "locally and never resolved via DNS)");
-            return false;
-        }
-    } else if (!lookup_numeric(node_str, &svc, ctx->connman->manager.default_port)) {
-        json_set_str(result,
-            "addnode requires a numeric IP address (DNS names are not resolved)");
-        return false;
-    }
-    struct net_address addr;
-    net_address_init(&addr);
-    addr.svc = svc;
-
-    if (strcmp(cmd, "remove") == 0) {
-        if (!connman_remove_addnode(ctx->connman, &addr)) {
-            json_set_str(result, "addnode entry not found");
-            return false;
-        }
-        json_set_null(result);
-        return true;
-    }
-
-    if (strcmp(cmd, "onetry") == 0 || strcmp(cmd, "add") == 0) {
-        char host[NET_ADDR_STR_MAX + 1];
-
-        net_addr_to_string(&addr.svc.addr, host, sizeof(host));
-        connman_add_seed_node(ctx->connman, host, addr.svc.port);
-
-        /* Direct connect — don't rely on addrman random selection */
-        connman_open_connection(ctx->connman, &addr);
-
-        json_set_null(result);
-        return true;
-    }
-
-    json_set_str(result, "addnode command must be add, remove, or onetry");
-    return false;
-}
-
 void register_net_rpc_commands(struct rpc_table *t)
 {
     struct rpc_command cmds[] = {
@@ -792,7 +719,7 @@ void register_net_rpc_commands(struct rpc_table *t)
         { "network", "getconnectioncount", rpc_getconnectioncount, true },
         { "network", "peerincidents",     rpc_peerincidents,     true },
         { "network", "ping",              rpc_ping_rpc,          true },
-        { "network", "addnode",           rpc_addnode,           true },
+        { "network", "addnode",           network_addnode_rpc,   true },
     };
 
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)

@@ -142,6 +142,20 @@ struct onion_stream_dial_snapshot {
 size_t onion_stream_get_recent_dials(struct onion_stream_dial_snapshot *out,
                                      size_t cap);
 
+/* Last operator/dialer onion attempt. Isolated probes and onionstatus
+ * read this instead of grepping node.log for "Connecting to onion addnode".
+ * result is one of: none, queued, tor_not_running, dynhost_not_ready,
+ * stub_build, not_tor, dial_deferred, dial_started, stream_queued,
+ * open_refused, circuit_timeout, circuit_torn_down, circuit_ready,
+ * bridge_up. */
+struct onion_last_dial {
+    char target[96];
+    int64_t attempted_unix;
+    char result[32];
+};
+void onion_stream_note_last_dial(const char *target, const char *result);
+void onion_stream_get_last_dial(struct onion_last_dial *out);
+
 #ifdef ZCL_TESTING
 size_t onion_stream_connect_plan_for_test(int connect_timeout_ms,
                                           int budgets[2]);

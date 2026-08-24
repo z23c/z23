@@ -16,6 +16,7 @@
 #include "platform/time_compat.h"
 #include "connman_internal.h"
 #include "net/connman.h"
+#include "net/connman_onion_dial_policy.h"
 #include "net/onion_stream.h"
 #include "net/addrman.h"
 #include "net/peer_lifecycle.h"
@@ -610,15 +611,9 @@ static void connman_dial_batch(struct connman *cm,
         struct connman_dial_candidate *c = &batch[i];
         if (!net_addr_is_tor(&c->addr.svc.addr))
             continue;
-        if (onion_budget_ms <= 0) {
-            /* The one stage onion_stream.c cannot name: never handed over. */
-            char obuf[NET_ADDR_STR_MAX + 1];
-            net_addr_to_string(&c->addr.svc.addr, obuf, sizeof(obuf));
-            LOG_WARN("net", "onion stage=dial_deferred target=%s:%u (batch "
-                            "spent its whole %d ms circuit budget)",
-                     obuf, c->addr.svc.port, ONION_STREAM_CONNECT_TIMEOUT_MS);
+        if (!connman_onion_dial_policy_allows(&c->addr.svc,
+                                               onion_budget_ms))
             continue;
-        }
         peer_lifecycle_note_attempt(&c->addr, dial_lifecycle_source(c));
         int64_t began_ms = platform_time_monotonic_ms();
         zcl_socket_t s = ZCL_INVALID_SOCKET;
