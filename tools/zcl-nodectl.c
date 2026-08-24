@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "platform/time_compat.h"
+#include "platform/os_binary_slots.h"
 #include <arpa/inet.h>
 #include <ctype.h>
 #include <errno.h>
@@ -20,6 +21,8 @@
 #include <unistd.h>
 
 #include "util/rpc_paths.h"
+
+extern char **environ;
 
 enum { MAX_BUF = 1024 * 1024, SMALL_BUF = 4096 };
 
@@ -613,9 +616,109 @@ static int cmd_verify_follow(struct rpc_target *legacy,
     return 1;
 }
 
+static int cmd_launch(int argc, char **argv)
+{
+    if (argc < 3 || !argv[2] || !argv[2][0]) {
+        fprintf(stderr, "zcl-nodectl launch: usage: zcl-nodectl launch "
+                        "<node-binary> [node args...]\n");
+        return 64;
+    }
+    const char *slots = getenv("ZCL_BINARY_SLOTS_DIR");
+    char default_slots[OS_BINARY_SLOTS_PATH_MAX];
+    if (!slots || !slots[0]) {
+        const char *home = getenv("HOME");
+        int slots_len = home && home[0]
+            ? snprintf(default_slots, sizeof(default_slots),
+                       "%s/.local/lib/zclassic23-slots", home)
+            : -1;
+        if (slots_len < 0 || (size_t)slots_len >= sizeof(default_slots)) {
+            fprintf(stderr, "zcl-nodectl launch: HOME is missing or too long\n");
+            return 64;
+        }
+        slots = default_slots;
+    }
+    uint32_t threshold = 3;
+    const char *threshold_text = getenv("ZCL_BINARY_FALLBACK_THRESHOLD");
+    if (threshold_text &&
+        !os_binary_slots_parse_threshold(threshold_text, &threshold)) {
+        fprintf(stderr, "zcl-nodectl launch: invalid "
+                        "ZCL_BINARY_FALLBACK_THRESHOLD\n");
+        return 64;
+    }
+
+    char error[OS_BINARY_SLOTS_ERROR_MAX];
+    if (!os_binary_slots_ensure_directory(slots, error, sizeof(error))) {
+        fprintf(stderr, "zcl-nodectl launch: %s\n",
+                error[0] ? error : "could not create slots directory");
+        return 1;
+    }
+    struct os_binary_slots_launch launch;
+    if (!os_binary_slots_prepare_launch(slots, argv[2], threshold, &launch)) {
+        fprintf(stderr, "zcl-nodectl launch: REFUSE: %s\n",
+                launch.error[0] ? launch.error : "launch decision failed");
+        return 1;
+    }
+
+    if (setenv("ZCL_BINARY_SLOTS_DIR", slots, 1) != 0) {
+        fprintf(stderr, "zcl-nodectl launch: setenv slots failed: %s\n",
+                strerror(errno));
+        os_binary_slots_close_launch(&launch);
+        return 1;
+    }
+    if (launch.fallback_active) {
+        if (setenv("ZCL_BINARY_FALLBACK_ACTIVE", "1", 1) != 0 ||
+            unsetenv("ZCL_BINARY_CURRENT") != 0) {
+            fprintf(stderr, "zcl-nodectl launch: fallback environment failed: %s\n",
+                    strerror(errno));
+            os_binary_slots_close_launch(&launch);
+            return 1;
+        }
+    } else {
+        if (unsetenv("ZCL_BINARY_FALLBACK_ACTIVE") != 0 ||
+            setenv("ZCL_BINARY_CURRENT", argv[2], 1) != 0) {
+            fprintf(stderr, "zcl-nodectl launch: current environment failed: %s\n",
+                    strerror(errno));
+            os_binary_slots_close_launch(&launch);
+            return 1;
+        }
+    }
+
+    fprintf(stderr,
+            "zcl-nodectl launch: target=%s fallback=%d streak_before=%u "
+            "streak_after=%u written=%d corrupt=%d\n",
+            launch.target_path, launch.fallback_active,
+            launch.streak_before, launch.streak_after,
+            launch.streak_written, launch.streak_corrupt);
+
+    const char *test_echo = getenv("ZCL_LAUNCH_TEST_ECHO");
+    if (test_echo && strcmp(test_echo, "1") == 0) {
+        printf("EXEC %s\n", launch.target_path);
+        printf("FALLBACK_ACTIVE=%s\n",
+               launch.fallback_active ? "1" : "");
+        printf("CURRENT=%s\n", launch.fallback_active ? "" : argv[2]);
+        if (launch.streak_written)
+            printf("STREAK_WRITTEN=%u\n", launch.streak_after);
+        else
+            printf("STREAK_WRITTEN=\n");
+        printf("STREAK_CORRUPT=%s\n", launch.streak_corrupt ? "1" : "0");
+        for (int i = 3; i < argc; i++)
+            printf("ARGV[%d]=%s\n", i - 3, argv[i]);
+        os_binary_slots_close_launch(&launch);
+        return 0;
+    }
+
+    argv[2] = launch.target_path;
+    fexecve(launch.executable_fd, &argv[2], environ);
+    int saved_errno = errno;
+    fprintf(stderr, "zcl-nodectl launch: fexecve(%s) failed: %s\n",
+            launch.target_path, strerror(saved_errno));
+    os_binary_slots_close_launch(&launch);
+    return saved_errno == ENOENT ? 127 : 126;
+}
+
 static void usage(void)
 {
-    puts("Usage: zcl-nodectl <status|stop|start|restart|verify-follow> [options]");
+    puts("Usage: zcl-nodectl <status|stop|start|restart|verify-follow|launch> [options]");
     puts("");
     puts("Options for verify-follow:");
     puts("  --restart          stop/start zclassic23 before polling");
@@ -626,6 +729,9 @@ static void usage(void)
 
 int main(int argc, char **argv)
 {
+    if (argc >= 2 && strcmp(argv[1], "launch") == 0)
+        return cmd_launch(argc, argv);
+
     static char legacy_dd[512], legacy_conf[512], legacy_cookie[512];
     static char c23_dd[512], c23_conf[512], c23_cookie[512];
     zcl_nodectl_build_default_paths(

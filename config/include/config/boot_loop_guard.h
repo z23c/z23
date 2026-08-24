@@ -50,7 +50,7 @@ struct json_value;
  * a self-respawn, also counts that exit toward the binary A/B launcher's
  * boot-failure streak (services/binary_ab_fallback.h) — a self-respawn
  * re-execs the SAME binary in-process, bypassing deploy/
- * zclassic23-launch.sh entirely, so without this the streak would never see
+ * the external native launcher entirely, so without this the streak would never see
  * it. */
 void boot_loop_guard_check(struct node_db *ndb);
 

@@ -14,6 +14,8 @@
 
 #include "services/binary_ab_fallback.h"
 
+#include "platform/os_binary_slots.h"
+#include "platform/os_proc.h"
 #include "util/blocker.h"
 
 #include <errno.h>
@@ -28,15 +30,27 @@
 
 #define BINARY_AB_COPY_CHUNK (64 * 1024)
 
+#ifdef ZCL_TESTING
+static bool g_binary_ab_fail_before_promote_rename_once;
+
+void binary_ab_test_fail_before_promote_rename_once(void)
+{
+    g_binary_ab_fail_before_promote_rename_once = true;
+}
+#endif
+
 /* ── fsync helpers ──────────────────────────────────────────────────── */
 
 /* fsync the directory that contains `path` so a rename into it is durable.
- * Best-effort: a filesystem that rejects O_DIRECTORY fsync (rare) must not
- * fail the whole promotion, so this logs and returns rather than aborting. */
-static void binary_ab_fsync_parent_dir(const char *path)
+ * Promotion is not successful unless this persistence barrier succeeds. */
+static bool binary_ab_fsync_parent_dir(const char *path)
 {
     char dir[1024];
-    snprintf(dir, sizeof(dir), "%s", path);
+    int dir_len = snprintf(dir, sizeof(dir), "%s", path);
+    if (dir_len < 0 || (size_t)dir_len >= sizeof(dir)) {
+        LOG_WARN("binary_ab", "parent directory path is too long");
+        return false;
+    }
     char *slash = strrchr(dir, '/');
     if (!slash) {
         dir[0] = '.';
@@ -50,11 +64,18 @@ static void binary_ab_fsync_parent_dir(const char *path)
     if (dfd < 0) {
         LOG_WARN("binary_ab", "open(%s) for dir fsync failed: %s",
                  dir, strerror(errno));
-        return;
+        return false;
     }
-    if (fsync(dfd) != 0)
+    if (fsync(dfd) != 0) {
         LOG_WARN("binary_ab", "fsync(%s) failed: %s", dir, strerror(errno));
-    close(dfd);
+        close(dfd);
+        return false;
+    }
+    if (close(dfd) != 0) {
+        LOG_WARN("binary_ab", "close(%s) failed: %s", dir, strerror(errno));
+        return false;
+    }
+    return true;
 }
 
 /* ── Streak reset ───────────────────────────────────────────────────── */
@@ -63,36 +84,12 @@ bool binary_ab_reset_streak(const char *streak_file)
 {
     if (!streak_file || streak_file[0] == '\0')
         LOG_FAIL("binary_ab", "reset_streak: empty streak_file path");
-
-    char tmp[1088];
-    snprintf(tmp, sizeof(tmp), "%s.tmp.%ld", streak_file, (long)getpid());
-
-    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0)
-        LOG_FAIL("binary_ab", "reset_streak: open(%s) failed: %s",
-                 tmp, strerror(errno));
-
-    static const char zero[] = "0\n";
-    ssize_t w = write(fd, zero, sizeof(zero) - 1);
-    if (w != (ssize_t)(sizeof(zero) - 1)) {
-        LOG_WARN("binary_ab", "reset_streak: short write to %s: %s",
-                 tmp, strerror(errno));
-        close(fd);
-        unlink(tmp);
+    char error[OS_BINARY_SLOTS_ERROR_MAX];
+    if (!os_binary_slots_reset_streak_file(streak_file, error, sizeof(error))) {
+        LOG_WARN("binary_ab", "reset_streak(%s) failed: %s",
+                 streak_file, error[0] ? error : "unknown error");
         return false;
     }
-    if (fsync(fd) != 0)
-        LOG_WARN("binary_ab", "reset_streak: fsync(%s) failed: %s",
-                 tmp, strerror(errno));
-    close(fd);
-
-    if (rename(tmp, streak_file) != 0) {
-        LOG_WARN("binary_ab", "reset_streak: rename(%s->%s) failed: %s",
-                 tmp, streak_file, strerror(errno));
-        unlink(tmp);
-        return false;
-    }
-    binary_ab_fsync_parent_dir(streak_file);
     LOG_INFO("binary_ab", "boot-failure streak reset to 0 (%s)", streak_file);
     return true;
 }
@@ -103,125 +100,112 @@ bool binary_ab_note_self_respawn_exit(const char *streak_file)
 {
     if (!streak_file || streak_file[0] == '\0')
         LOG_FAIL("binary_ab", "note_self_respawn_exit: empty streak_file path");
-
-    long cur = 0;
-    int in_fd = open(streak_file, O_RDONLY);
-    if (in_fd >= 0) {
-        char buf[32] = {0};
-        ssize_t r = read(in_fd, buf, sizeof(buf) - 1);
-        close(in_fd);
-        if (r > 0) {
-            buf[r] = '\0';
-            cur = strtol(buf, NULL, 10);
-        }
-    }
-    /* Missing/unreadable/malformed file -> streak 0, matching the launcher's
-     * own `cat "$STREAK_FILE" 2>/dev/null || echo 0` fallback. */
-    if (cur < 0) cur = 0;
-
-    char tmp[1088];
-    snprintf(tmp, sizeof(tmp), "%s.tmp.%ld", streak_file, (long)getpid());
-
-    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0)
-        LOG_FAIL("binary_ab", "note_self_respawn_exit: open(%s) failed: %s",
-                 tmp, strerror(errno));
-
-    char content[32];
-    int clen = snprintf(content, sizeof(content), "%ld\n", cur + 1);
-    ssize_t w = write(fd, content, (size_t)clen);
-    if (w != (ssize_t)clen) {
-        LOG_WARN("binary_ab", "note_self_respawn_exit: short write to %s: %s",
-                 tmp, strerror(errno));
-        close(fd);
-        unlink(tmp);
+    char error[OS_BINARY_SLOTS_ERROR_MAX];
+    if (!os_binary_slots_increment_streak_file(streak_file, error,
+                                                sizeof(error))) {
+        LOG_WARN("binary_ab", "note_self_respawn_exit(%s) refused: %s",
+                 streak_file, error[0] ? error : "unknown error");
         return false;
     }
-    if (fsync(fd) != 0)
-        LOG_WARN("binary_ab", "note_self_respawn_exit: fsync(%s) failed: %s",
-                 tmp, strerror(errno));
-    close(fd);
-
-    if (rename(tmp, streak_file) != 0) {
-        LOG_WARN("binary_ab", "note_self_respawn_exit: rename(%s->%s) failed: %s",
-                 tmp, streak_file, strerror(errno));
-        unlink(tmp);
-        return false;
-    }
-    binary_ab_fsync_parent_dir(streak_file);
     LOG_WARN("binary_ab",
-             "boot-failure streak incremented to %ld (self-respawn exit, %s)",
-             cur + 1, streak_file);
+             "boot-failure streak incremented (self-respawn exit, %s)",
+             streak_file);
     return true;
 }
 
 /* ── Promotion (current -> last-good) ───────────────────────────────── */
 
-bool binary_ab_promote(const char *slots_dir, const char *current_path)
+static bool binary_ab_promote_open_file(const char *slots_dir, FILE *input,
+                                        const char *source_name)
 {
     if (!slots_dir || slots_dir[0] == '\0')
         LOG_FAIL("binary_ab", "promote: empty slots_dir");
-    if (!current_path || current_path[0] == '\0')
-        LOG_FAIL("binary_ab", "promote: empty current_path");
+    if (!input)
+        LOG_FAIL("binary_ab", "promote: empty input stream");
+
+    int input_fd = fileno(input);
+    struct stat input_stat;
+    if (input_fd < 0 || fstat(input_fd, &input_stat) != 0 ||
+        !S_ISREG(input_stat.st_mode) ||
+        (input_stat.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) == 0)
+        LOG_FAIL("binary_ab", "promote: %s is not a regular executable",
+                 source_name);
 
     char dst[1024];
-    snprintf(dst, sizeof(dst), "%s/%s", slots_dir, BINARY_AB_LASTGOOD_BASENAME);
+    int dst_len = snprintf(dst, sizeof(dst), "%s/%s", slots_dir,
+                           BINARY_AB_LASTGOOD_BASENAME);
+    if (dst_len < 0 || (size_t)dst_len >= sizeof(dst))
+        LOG_FAIL("binary_ab", "promote: last-good path is too long");
     char tmp[1088];
-    snprintf(tmp, sizeof(tmp), "%s.tmp.%ld", dst, (long)getpid());
+    int tmp_len = snprintf(tmp, sizeof(tmp), "%s.tmp.%ld", dst,
+                           (long)getpid());
+    if (tmp_len < 0 || (size_t)tmp_len >= sizeof(tmp))
+        LOG_FAIL("binary_ab", "promote: temporary path is too long");
 
-    int in = open(current_path, O_RDONLY);
-    if (in < 0)
-        LOG_FAIL("binary_ab", "promote: open(%s) failed: %s",
-                 current_path, strerror(errno));
-
-    int out = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0755);
-    if (out < 0) {
-        close(in);
+    (void)unlink(tmp);
+    int out = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+                   0600);
+    if (out < 0)
         LOG_FAIL("binary_ab", "promote: open(%s) failed: %s",
                  tmp, strerror(errno));
-    }
 
     unsigned char buf[BINARY_AB_COPY_CHUNK];
-    ssize_t n;
     bool copy_ok = true;
-    while ((n = read(in, buf, sizeof(buf))) > 0) {
-        ssize_t off = 0;
+    size_t n = 0;
+    while ((n = fread(buf, 1, sizeof(buf), input)) > 0) {
+        size_t off = 0;
         while (off < n) {
-            ssize_t w = write(out, buf + off, (size_t)(n - off));
+            ssize_t w = write(out, buf + off, n - off);
+            if (w < 0 && errno == EINTR)
+                continue;
             if (w <= 0) {
                 LOG_WARN("binary_ab", "promote: write(%s) failed: %s",
                          tmp, strerror(errno));
                 copy_ok = false;
                 break;
             }
-            off += w;
+            off += (size_t)w;
         }
         if (!copy_ok)
             break;
     }
-    if (n < 0) {
+    if (ferror(input)) {
         LOG_WARN("binary_ab", "promote: read(%s) failed: %s",
-                 current_path, strerror(errno));
+                 source_name, strerror(errno));
         copy_ok = false;
     }
-    close(in);
 
     if (copy_ok) {
-        if (fchmod(out, 0755) != 0)
+        if (fchmod(out, 0755) != 0) {
             LOG_WARN("binary_ab", "promote: fchmod(%s) failed: %s",
                      tmp, strerror(errno));
+            copy_ok = false;
+        }
         if (fsync(out) != 0) {
             LOG_WARN("binary_ab", "promote: fsync(%s) failed: %s",
                      tmp, strerror(errno));
             copy_ok = false;
         }
     }
-    close(out);
+    if (close(out) != 0) {
+        LOG_WARN("binary_ab", "promote: close(%s) failed: %s",
+                 tmp, strerror(errno));
+        copy_ok = false;
+    }
 
     if (!copy_ok) {
         unlink(tmp);
         return false;
     }
+
+#ifdef ZCL_TESTING
+    if (g_binary_ab_fail_before_promote_rename_once) {
+        g_binary_ab_fail_before_promote_rename_once = false;
+        LOG_WARN("binary_ab", "promote: injected failure before rename");
+        unlink(tmp);
+        return false;
+    }
+#endif
 
     if (rename(tmp, dst) != 0) {
         LOG_WARN("binary_ab", "promote: rename(%s->%s) failed: %s",
@@ -229,12 +213,86 @@ bool binary_ab_promote(const char *slots_dir, const char *current_path)
         unlink(tmp);
         return false;
     }
-    binary_ab_fsync_parent_dir(dst);
+    if (!binary_ab_fsync_parent_dir(dst)) {
+        LOG_WARN("binary_ab", "promote: last-good directory sync failed");
+        return false;
+    }
     LOG_INFO("binary_ab", "promoted current binary to last-good slot (%s)", dst);
     return true;
 }
 
+bool binary_ab_promote(const char *slots_dir, const char *current_path)
+{
+    if (!current_path || current_path[0] == '\0')
+        LOG_FAIL("binary_ab", "promote: empty current_path");
+    int fd = open(current_path,
+                  O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0)
+        LOG_FAIL("binary_ab", "promote: open(%s) failed: %s",
+                 current_path, strerror(errno));
+    FILE *input = fdopen(fd, "rb");
+    if (!input) {
+        int saved_errno = errno;
+        close(fd);
+        LOG_FAIL("binary_ab", "promote: fdopen(%s) failed: %s",
+                 current_path, strerror(saved_errno));
+    }
+    bool ok = binary_ab_promote_open_file(slots_dir, input, current_path);
+    if (fclose(input) != 0 && ok) {
+        LOG_WARN("binary_ab", "promote: close(%s) failed: %s",
+                 current_path, strerror(errno));
+        ok = false;
+    }
+    return ok;
+}
+
+static bool binary_ab_promote_running(const char *slots_dir)
+{
+    FILE *input = os_proc_open_self_exe();
+    if (!input)
+        LOG_FAIL("binary_ab", "promote: open running executable failed: %s",
+                 strerror(errno));
+    bool ok = binary_ab_promote_open_file(slots_dir, input,
+                                          "running executable image");
+    if (fclose(input) != 0 && ok) {
+        LOG_WARN("binary_ab", "promote: close running executable failed: %s",
+                 strerror(errno));
+        ok = false;
+    }
+    return ok;
+}
+
 /* ── Ready action ───────────────────────────────────────────────────── */
+
+static bool binary_ab_build_streak_path(const char *slots_dir,
+                                        char *streak, size_t streak_size)
+{
+    int n = snprintf(streak, streak_size, "%s/%s", slots_dir,
+                     BINARY_AB_STREAK_BASENAME);
+    if (n < 0 || (size_t)n >= streak_size)
+        LOG_FAIL("binary_ab", "streak path is too long");
+    return true;
+}
+
+static bool binary_ab_reset_ready_streak(const char *slots_dir)
+{
+    char streak[1024];
+    if (!binary_ab_build_streak_path(slots_dir, streak, sizeof(streak))) {
+        LOG_WARN("binary_ab", "ready streak path construction failed");
+        return false;
+    }
+    return binary_ab_reset_streak(streak);
+}
+
+static bool binary_ab_ready_under_fallback(const char *slots_dir)
+{
+    bool ok = binary_ab_reset_ready_streak(slots_dir);
+    /* Never replace the known-good slot while it is the recovery image. */
+    LOG_WARN("binary_ab",
+             "reached ready under FALLBACK slot — streak reset, last-good "
+             "left intact (operator must deploy a good binary)");
+    return ok;
+}
 
 bool binary_ab_on_ready(const char *slots_dir, const char *current_path,
                         bool fallback_active)
@@ -242,27 +300,17 @@ bool binary_ab_on_ready(const char *slots_dir, const char *current_path,
     if (!slots_dir || slots_dir[0] == '\0')
         return true; /* not launcher-managed */
 
-    char streak[1024];
-    snprintf(streak, sizeof(streak), "%s/%s", slots_dir,
-             BINARY_AB_STREAK_BASENAME);
+    if (fallback_active)
+        return binary_ab_ready_under_fallback(slots_dir);
 
-    bool ok = binary_ab_reset_streak(streak);
-
-    if (fallback_active) {
-        /* Running the last-good slot: promoting `current` here would overwrite
-         * the good slot with the very binary we fell back away from. Reset the
-         * streak (so a subsequent good deploy gets a clean 3-strike budget)
-         * but never promote. */
-        LOG_WARN("binary_ab",
-                 "reached ready under FALLBACK slot — streak reset, last-good "
-                 "left intact (operator must deploy a good binary)");
-        return ok;
+    if (!current_path || current_path[0] == '\0')
+        LOG_FAIL("binary_ab", "managed normal ready requires current_path");
+    if (!binary_ab_promote(slots_dir, current_path)) {
+        LOG_WARN("binary_ab", "ready promotion failed; streak preserved");
+        return false;
     }
 
-    if (current_path && current_path[0] != '\0')
-        ok = binary_ab_promote(slots_dir, current_path) && ok;
-
-    return ok;
+    return binary_ab_reset_ready_streak(slots_dir);
 }
 
 /* ── Blocker ────────────────────────────────────────────────────────── */
@@ -295,10 +343,18 @@ void binary_ab_promote_on_ready_env(void)
     const char *slots = getenv(BINARY_AB_ENV_SLOTS_DIR);
     if (!slots || slots[0] == '\0')
         return; /* launched directly, not via the launcher */
-    const char *current = getenv(BINARY_AB_ENV_CURRENT);
     const char *fb = getenv(BINARY_AB_ENV_FALLBACK);
     bool fallback_active = fb && fb[0] == '1' && fb[1] == '\0';
-    binary_ab_on_ready(slots, current, fallback_active);
+    if (fallback_active) {
+        (void)binary_ab_ready_under_fallback(slots);
+        return;
+    }
+    if (!binary_ab_promote_running(slots)) {
+        LOG_WARN("binary_ab", "ready promotion from running image failed");
+        return;
+    }
+    if (!binary_ab_reset_ready_streak(slots))
+        LOG_WARN("binary_ab", "ready streak reset after promotion failed");
 }
 
 void binary_ab_raise_fallback_blocker_env(void)
@@ -313,6 +369,9 @@ void binary_ab_note_self_respawn_exit_env(void)
     if (!slots || slots[0] == '\0')
         return; /* launched directly, not via the launcher */
     char streak[1024];
-    snprintf(streak, sizeof(streak), "%s/%s", slots, BINARY_AB_STREAK_BASENAME);
+    if (!binary_ab_build_streak_path(slots, streak, sizeof(streak))) {
+        LOG_WARN("binary_ab", "self-respawn streak path construction failed");
+        return;
+    }
     binary_ab_note_self_respawn_exit(streak);
 }

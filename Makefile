@@ -1431,7 +1431,7 @@ $(filter-out vendor/lib/libsecp256k1.a,$(VENDOR_LIBS)):
         install-tip-agreement tip-agreement-status tip-agreement-selftest
 
 CLI_SRCS = lib/rpc/src/client.c lib/json/src/json.c lib/encoding/src/utilstrencodings.c lib/base/src/log_level.c
-all: test_zcl zclassic23 zclassic-cli zcl-rpc zclassic23-package-verify \
+all: test_zcl zclassic23 zclassic-cli zcl-rpc zcl-nodectl zclassic23-package-verify \
 	zclassic23-zcode-adapter-runner
 
 TEST_SRCS = $(call zcl_filter_ephemeral_sources,\
@@ -1784,7 +1784,7 @@ $(TEST_PARALLEL_BIN): $(TEST_PARALLEL_REL_CANDIDATE) FORCE
 	  "$(TEST_REL_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(TEST_REL_PROFILE)" \
 	  "$(TEST_REL_EPOCH_COMPILE_FLAGS)" "$(TEST_REL_EPOCH_LINK_FLAGS)" "$(CC)" "$(CXX)"
 
-$(TEST_PARALLEL_REL_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_REL_OBJS) $(TEST_PARALLEL_REL_LINK_RSP) | $(VENDOR_LIBS)
+$(TEST_PARALLEL_REL_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_REL_OBJS) $(TEST_PARALLEL_REL_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_BIN)
 	@mkdir -p $(dir $@)
 	@set -eu; \
 	tmp="$$(mktemp "$@.link.XXXXXX")"; \
@@ -1806,7 +1806,7 @@ $(TEST_PARALLEL_FAST_BIN): $(TEST_PARALLEL_FAST_CANDIDATE) FORCE
 	  "$(TEST_FAST_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(TEST_FAST_PROFILE)" \
 	  "$(TEST_FAST_EPOCH_COMPILE_FLAGS)" "$(TEST_FAST_EPOCH_LINK_FLAGS)" "$(CC)" "$(CXX)"
 
-$(TEST_PARALLEL_FAST_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_FAST_OBJS) $(TEST_PARALLEL_FAST_LINK_RSP) | $(VENDOR_LIBS)
+$(TEST_PARALLEL_FAST_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_FAST_OBJS) $(TEST_PARALLEL_FAST_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_BIN)
 	@mkdir -p $(dir $@)
 	@set -eu; \
 	tmp="$$(mktemp "$@.link.XXXXXX")"; \
@@ -4411,12 +4411,15 @@ bundle-bootstrap: $(BIN_DIR)/rom_bundle_sha3
 .PHONY: zcl-nodectl
 zcl-nodectl: $(ZCL_NODECTL_BIN)
 $(ZCL_NODECTL_BIN): tools/zcl-nodectl.c lib/util/include/util/rpc_paths.h \
-		lib/platform/src/clock.c lib/base/src/log_level.c
+		lib/platform/include/platform/os_binary_slots.h \
+		lib/platform/src/os_binary_slots.c lib/platform/src/clock.c \
+		lib/base/src/log_level.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror \
 	    -Ilib/base/include -Ilib/util/include -Ilib/platform/include \
 	    -D_POSIX_C_SOURCE=200809L -o $@ \
-	    tools/zcl-nodectl.c lib/platform/src/clock.c lib/base/src/log_level.c
+	    tools/zcl-nodectl.c lib/platform/src/os_binary_slots.c \
+	    lib/platform/src/clock.c lib/base/src/log_level.c
 
 .PHONY: export_snapshot
 export_snapshot: $(BIN_DIR)/export_snapshot
@@ -6716,13 +6719,15 @@ install -d "$(DESTDIR)$(PREFIX)/bin"; \
 install -m 755 $(ZCLASSIC23_BIN) "$(DESTDIR)$(PREFIX)/bin/z23"; \
 ln -sfn z23 "$(DESTDIR)$(PREFIX)/bin/zclassic23"; \
 install -m 755 $(ZCL_RPC_BIN) "$(DESTDIR)$(PREFIX)/bin/zcl-rpc"; \
+install -m 755 $(ZCL_NODECTL_BIN) "$(DESTDIR)$(PREFIX)/bin/zcl-nodectl"; \
 install -m 755 $(BIN_DIR)/zclassic23-package-verify \
 	"$(DESTDIR)$(PREFIX)/bin/zclassic23-package-verify"; \
 install -m 755 $(BIN_DIR)/zclassic23-package-sign \
 	"$(DESTDIR)$(PREFIX)/bin/zclassic23-package-sign"; \
 if [ -z "$(DESTDIR)" ]; then \
 	install -d "$(HOME)/.config/systemd/user"; \
-	sed 's|%h/zclassic23/build/bin/zclassic23|$(PREFIX)/bin/zclassic23|' \
+	sed -e 's|%h/zclassic23/build/bin/zcl-nodectl|$(PREFIX)/bin/zcl-nodectl|' \
+	    -e 's|%h/zclassic23/build/bin/z23|$(PREFIX)/bin/z23|' \
 		deploy/zclassic23.service \
 		> "$(HOME)/.config/systemd/user/zclassic23.service"; \
 	(systemctl --user daemon-reload 2>/dev/null || true); \
@@ -6732,7 +6737,7 @@ echo "make install: node, RPC, package verifier + offline signer -> $(DESTDIR)$(
 endef
 
 .PHONY: install
-install: vendor-ready zclassic23 zcl-rpc zclassic23-package-verify zclassic23-package-sign
+install: vendor-ready zclassic23 zcl-rpc zcl-nodectl zclassic23-package-verify zclassic23-package-sign
 	@$(INSTALL_C23_PRODUCTS)
 
 # Same installation surface, but every copied product was freshly built and
@@ -6741,7 +6746,7 @@ install: vendor-ready zclassic23 zcl-rpc zclassic23-package-verify zclassic23-pa
 c23-portable-install: c23-portable-release
 	@$(INSTALL_C23_PRODUCTS)
 
-deploy: vendor-ready lint zclassic-cli tools/wal_checkpoint
+deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	@./tools/deploy_guard.sh canonical-deploy
 	@case "$(DEPLOY_VERIFY_STAGE)" in stable|challenger) ;; *) \
 	    echo "deploy: DEPLOY_VERIFY_STAGE must be stable or challenger" >&2; exit 2;; esac
@@ -6851,12 +6856,13 @@ deploy: vendor-ready lint zclassic-cli tools/wal_checkpoint
 	fi; \
 	install -d "$(HOME)/.config/systemd/user"; \
 	service_unit="$(HOME)/.config/systemd/user/zclassic23.service"; \
-	if [ ! -f "$$service_unit" ]; then \
+	if [ ! -f "$$service_unit" ] || \
+	   grep -q '/deploy/zclassic23-launch.sh' "$$service_unit"; then \
 	    service_tmp="$$(mktemp "$$service_unit.tmp.XXXXXX")"; \
 	    sed 's|%h/zclassic23|$(CURDIR)|g' deploy/zclassic23.service > "$$service_tmp"; \
 	    install -m 644 "$$service_tmp" "$$service_unit"; \
 	    rm -f "$$service_tmp"; service_tmp=""; \
-	    echo "deploy: installed missing canonical service unit from template"; \
+	    echo "deploy: installed/migrated canonical service unit from template"; \
 	else \
 	    echo "deploy: preserving existing canonical service unit"; \
 	fi; \
@@ -6869,10 +6875,10 @@ deploy: vendor-ready lint zclassic-cli tools/wal_checkpoint
 	service_argv0="$$(printf '%s\n' "$$service_argv" | tr ' ' '\n' | awk 'NF { print; exit }')"; \
 	[ -n "$$service_path" ] && [ "$$service_path" = "$$service_argv0" ] || { \
 	    echo "deploy: canonical service path and executable argv disagree" >&2; exit 1; }; \
-	if [ "$$service_path" = "$(CURDIR)/deploy/zclassic23-launch.sh" ]; then \
+	if [ "$$service_path" = "$(CURDIR)/build/bin/zcl-nodectl" ]; then \
 	    SERVICE_BIN="$$(printf '%s\n' "$$service_argv" | tr ' ' '\n' | \
-	        awk 'NF { n++; if (n == 2) { print; exit } }')"; \
-	    [ "$$SERVICE_BIN" = "$(CURDIR)/build/bin/zclassic23" ] || { \
+	        awk 'NF { n++; if (n == 3) { print; exit } }')"; \
+	    [ "$$SERVICE_BIN" = "$(CURDIR)/build/bin/z23" ] || { \
 	        echo "deploy: canonical launcher node binary does not resolve to this checkout" >&2; exit 1; }; \
 	else \
 	    case "$$service_path" in /*) SERVICE_BIN="$$service_path" ;; *) \

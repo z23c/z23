@@ -420,7 +420,7 @@ static bool boot_step_init_observability(void)
      * backstop. */
     blocker_module_init();
 
-    /* If the launcher (deploy/zclassic23-launch.sh) fell back to the
+    /* If the native launcher (`zcl-nodectl launch`) fell back to the
      * last-known-good binary after a boot-failure streak, surface the
      * degraded-but-alive state as a typed blocker as early as the registry
      * is live — so `z23 status` shows it throughout this boot, not

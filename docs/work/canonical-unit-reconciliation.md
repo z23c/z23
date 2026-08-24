@@ -71,7 +71,7 @@ Effective (systemd's own answer, not inferred from file order):
 | `WatchdogUSec` | 120 s | **0** | safety-relevant |
 | `OOMScoreAdjust` | **-800** | **200** | safety-relevant, sign-inverted |
 | `-operator-lane=canonical` | present | **absent** | safety-relevant |
-| launcher | `deploy/zclassic23-launch.sh` (A/B fallback) | **direct binary, bypassed** | safety-relevant (not previously flagged) |
+| launcher | `build/bin/zcl-nodectl launch` (A/B fallback) | **direct binary, bypassed** | safety-relevant (not previously flagged) |
 | `MemoryHigh` / `MemoryMax` | 6G / unset | 28G / 32G | fold in |
 | `MemoryMin` | 2G | **lost** | fold back |
 | `Type` | notify | notify | ok |
@@ -193,8 +193,8 @@ node **as** canonical. Zero-risk to fix: the flag is declarative.
 
 ### Fourth, not in the brief: the A/B launcher is bypassed
 
-Tracked `ExecStart` goes through `deploy/zclassic23-launch.sh`, which exec's the
-last-known-good binary slot when a boot-failure streak hits threshold. All three
+Tracked `ExecStart` goes through `build/bin/zcl-nodectl launch`, which fexecve's
+the pinned last-known-good binary slot when a boot-failure streak hits threshold. All three
 drop-in resets exec `~/.local/bin/zclassic23-live` **directly**, so that fallback
 has not existed on the canonical node for as long as the resets have. A
 dead-on-arrival deploy currently has no automatic floor.
@@ -206,9 +206,9 @@ else in the tracked file stays.
 
 ```ini
 # --- fold in from zzzz-canonical-port.conf: the argv actually in use ---
-# (replaces the tracked ExecStart; keeps the launch.sh A/B wrapper, which the
+# (replaces the tracked ExecStart; keeps the native C23 A/B launcher, which the
 #  drop-in dropped, and restores -operator-lane=canonical, which it never had)
-ExecStart=%h/zclassic23/deploy/zclassic23-launch.sh %h/.local/bin/zclassic23-live \
+ExecStart=%h/zclassic23/build/bin/zcl-nodectl launch %h/.local/bin/zclassic23-live \
     -datadir=%h/.zclassic-c23 \
     -operator-lane=canonical \
     -port=8033 \
