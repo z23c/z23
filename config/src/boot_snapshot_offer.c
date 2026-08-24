@@ -5,9 +5,11 @@
  * the E1 800-line ceiling. PURE relocation: the worker body is byte-identical
  * to its prior home; only its surrounding TU changed.
  *
- * When explicitly enabled, the worker exports the consensus snapshot, embeds
- * the MMR + MMB roots, and publishes the snapshot / chunk / block-piece
- * manifests for fast-sync peers. It is a supervised background worker
+ * UTXO snapshot export stays opt-in (ZCL_PUBLISH_FASTSYNC_ON_BOOT) because
+ * it takes live DB read locks. Block-piece swarm publishing is default-on
+ * once bodies are within BOOT_BLOCK_SWARM_MAX_HEADER_LAG of the header tip,
+ * so caught-up zclassic23 peers can feed IBD without a RAM snapshot cache.
+ * It is a supervised background worker
  * (Shape 5 — MONITOR): it shares the
  * worker_on_stall handler + boot_register_worker_supervisor helper exposed by
  * boot_background_workers.h and implemented in boot_worker_supervisor.c
@@ -40,6 +42,7 @@
 #include "supervisors/domains.h"
 #include "util/ar_step_readonly.h"
 #include "util/supervisor.h"
+#include "validation/chainstate.h"
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -111,6 +114,59 @@ static bool env_flag_enabled(const char *name)
            strcmp(value, "true") == 0 ||
            strcmp(value, "yes") == 0 ||
            strcmp(value, "on") == 0;
+}
+
+bool boot_publish_block_swarm(int32_t body_height, int32_t header_height,
+                              int32_t blocks_per_piece)
+{
+    int32_t lag;
+
+    if (blocks_per_piece <= 0)
+        return false;
+    if (body_height <= blocks_per_piece)
+        return false;
+    if (header_height < body_height)
+        return false;
+    lag = header_height - body_height;
+    if (lag > BOOT_BLOCK_SWARM_MAX_HEADER_LAG)
+        return false;
+    return true;
+}
+
+static void boot_try_publish_block_swarm(struct boot_svc_ctx *svc,
+                                         const char *datadir)
+{
+    int32_t body_h = 0;
+    int32_t header_h = 0;
+    struct block_piece_manifest block_manifest;
+
+    if (svc && svc->state) {
+        body_h = active_chain_height(&svc->state->chain_active);
+        if (svc->state->pindex_best_header)
+            header_h = svc->state->pindex_best_header->nHeight;
+    }
+    if (header_h < body_h)
+        header_h = body_h;
+    if (!boot_publish_block_swarm(body_h, header_h, BLOCKS_PER_PIECE))
+        return;
+    if (!datadir || datadir[0] == '\0')
+        return;
+
+    printf("Building block piece manifest...\n");
+    memset(&block_manifest, 0, sizeof(block_manifest));
+    if ((svc && svc->state &&
+         block_piece_manifest_build_active_chain(&svc->state->chain_active, 1,
+                                                 body_h, &block_manifest)) ||
+        block_piece_manifest_build(datadir, 1, body_h, &block_manifest)) {
+        int32_t start_height = block_manifest.start_height;
+        int32_t end_height = block_manifest.end_height;
+        uint32_t num_pieces = block_manifest.num_pieces;
+        msg_processor_publish_block_manifest(&block_manifest, body_h);
+        printf("Block manifest ready: h=%d..%d, %u pieces\n",
+               start_height, end_height, num_pieces);
+    } else {
+        printf("Block manifest: build failed\n");
+    }
 }
 
 bool boot_snapshot_offer_trust_policy(
@@ -344,6 +400,7 @@ static void *build_snapshot_offer_thread(void *arg)
         printf("Fast sync snapshot publish skipped on boot "
                "(set ZCL_PUBLISH_FASTSYNC_ON_BOOT=1 to build offers)\n");
         (void)file_service_enabled;
+        boot_try_publish_block_swarm(svc, datadir);
         goto done;
     }
 
@@ -354,6 +411,7 @@ static void *build_snapshot_offer_thread(void *arg)
         printf("Fast sync snapshot publish withheld: node trust state is "
                "not sovereign (%s)\n",
                trust_reason[0] ? trust_reason : "unknown");
+        boot_try_publish_block_swarm(svc, datadir);
         goto done;
     }
 
@@ -519,29 +577,7 @@ static void *build_snapshot_offer_thread(void *arg)
     }
 
     offer_checkpoint(&checkpoint);
-
-    int32_t tip_h = offer.height;
-
-    if (file_service_enabled && tip_h > BLOCKS_PER_PIECE) {
-        printf("Building block piece manifest...\n");
-        struct block_piece_manifest block_manifest;
-        memset(&block_manifest, 0, sizeof(block_manifest));
-        if (block_piece_manifest_build_active_chain(&svc->state->chain_active,
-                                                    1, tip_h,
-                                                    &block_manifest) ||
-            block_piece_manifest_build(datadir, 1, tip_h,
-                                       &block_manifest)) {
-            int32_t start_height = block_manifest.start_height;
-            int32_t end_height = block_manifest.end_height;
-            uint32_t num_pieces = block_manifest.num_pieces;
-            msg_processor_publish_block_manifest(&block_manifest, tip_h);
-            printf("Block manifest ready: h=%d..%d, %u pieces\n",
-                   start_height, end_height, num_pieces);
-        } else {
-            printf("Block manifest: build failed\n");
-        }
-    }
-
+    boot_try_publish_block_swarm(svc, datadir);
     offer_checkpoint(&checkpoint);
 done:
     boot_complete_worker_supervisor(&g_offer_sup_id);

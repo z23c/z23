@@ -38,6 +38,15 @@ bool boot_snapshot_offer_trust_policy(
     bool sapling_cursor_found, int64_t sapling_cursor,
     bool nullifier_cursor_found, int64_t nullifier_cursor);
 
+/* Block-piece swarm is the cheap zclassic23 IBD assist: it advertises
+ * bodies this node already has. UTXO snapshot export stays opt-in
+ * (ZCL_PUBLISH_FASTSYNC_ON_BOOT) because it takes DB read locks.
+ * IBD nodes (header tip far ahead of bodies) skip so boot is not spent
+ * hashing a manifest they will replace. */
+#define BOOT_BLOCK_SWARM_MAX_HEADER_LAG 1024
+bool boot_publish_block_swarm(int32_t body_height, int32_t header_height,
+                              int32_t blocks_per_piece);
+
 /* Live composite serving check. It requires both sovereign state and an exact
  * authoritative payload binding. The latter is deliberately unavailable
  * until export streams from coins_kv and binds root/count/supply/active hash,

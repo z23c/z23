@@ -89,6 +89,23 @@ static int test_snapshot_offer_trust_policy(void)
     return failures;
 }
 
+static int test_boot_publish_block_swarm(void)
+{
+    int failures = 0;
+    TEST("block swarm publishes for caught-up z23 peers, not IBD") {
+        ASSERT(!boot_publish_block_swarm(0, 0, 64));
+        ASSERT(!boot_publish_block_swarm(64, 64, 64));
+        ASSERT(boot_publish_block_swarm(65, 65, 64));
+        ASSERT(boot_publish_block_swarm(3000000, 3000000, 64));
+        ASSERT(boot_publish_block_swarm(3000000, 3001024, 64));
+        ASSERT(!boot_publish_block_swarm(3000000, 3001025, 64));
+        ASSERT(!boot_publish_block_swarm(3000000, 2999999, 64));
+        ASSERT(!boot_publish_block_swarm(65, 65, 0));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* config/src/boot_snapshot_offer.c routes the offer-advertisement trust bit
  * through sync_trust_cap_allowed(sync_trust_derive(...), SYNC_CAP_SEED_BUNDLE)
  * instead of reading the raw self_derived predicate directly. By
@@ -2048,6 +2065,7 @@ int test_snapshot_sync_service(void)
     }
     failures += test_snapshot_sync_service_followups();
     failures += test_snapshot_offer_trust_policy();
+    failures += test_boot_publish_block_swarm();
     failures += test_snapshot_offer_seed_cap_matches_self_derived();
     failures += test_snapshot_sync_service_builds_pow();
     failures += test_snapshot_sync_service_stream_helpers();
