@@ -239,6 +239,39 @@ bool reducer_frontier_stage_cursor_derived(sqlite3 *progress_db,
         }
     }
 
+    /* FORWARD-EXTEND: walk O(rows above a proven floor), not O(cursor - anchor).
+     * The memo above only HITs a STATIC upstream. During IBD a downstream
+     * stage's upstream advances every drain — body_fetch reads
+     * validate_headers, which races far ahead of the bodies — so the memo
+     * misses and the walk below re-verifies the whole prefix from the trusted
+     * anchor every time, making per-block work grow with the upstream cursor.
+     * Measured on a from-genesis replay: 87,159,023 contiguity rows to fold
+     * 22,000 blocks (~3,962/block) and still climbing, which is the sync-rate
+     * decay itself.
+     *
+     * A veto-free prior entry (value == raw) proves this log contiguous ok=1
+     * through its own frame, which is exactly
+     * reducer_frontier_log_frontier_above's caller contract, so the walk may
+     * start there. Everything else falls through to the full walk unchanged:
+     * no prior entry, a VETOED one (names a hole that can still heal — the
+     * stale-LOW check above owns that case), or a REWOUND cursor
+     * (raw <= hit->raw), which is precisely the "an unwind deleted rows"
+     * signal the delta variant tells callers to re-walk on. */
+    bool have_delta_floor = false;
+    int32_t delta_floor = 0;
+    if (hit && hit->value == (uint64_t)hit->raw && raw > hit->raw) {
+        bool served_tip_prev = false;
+        (void)reducer_frontier_cursor_log_table(name, &served_tip_prev);
+        /* Invert the frame conversion below: an upstream frame is
+         * frontier_h + 1, tip_finalize's served-tip frame is frontier_h. */
+        int64_t proven = served_tip_prev ? (int64_t)hit->raw
+                                         : (int64_t)hit->raw - 1;
+        if (proven >= 0 && proven <= (int64_t)INT32_MAX) {
+            delta_floor = (int32_t)proven;
+            have_delta_floor = true;
+        }
+    }
+
     /* Only the six success-checked logs carry a contiguous-ok=1 frontier. A
      * stage without one (header_admit, body_fetch) keeps the raw cursor as its
      * frontier — there is nothing to derive. The log walk also reads
@@ -250,8 +283,14 @@ bool reducer_frontier_stage_cursor_derived(sqlite3 *progress_db,
         reducer_log_table_present(progress_db, log_table) &&
         reducer_log_table_present(progress_db, "tip_finalize_log")) {
         int32_t frontier_h = 0;
-        if (reducer_frontier_log_frontier(progress_db, log_table, name,
-                                          &frontier_h)) {
+        bool walked =
+            have_delta_floor
+                ? reducer_frontier_log_frontier_above(progress_db, log_table,
+                                                      name, delta_floor,
+                                                      &frontier_h)
+                : reducer_frontier_log_frontier(progress_db, log_table, name,
+                                                &frontier_h);
+        if (walked) {
             /* Convert the frontier HEIGHT into `name`'s cursor frame (upstream:
              * next-height = h+1; tip_finalize served-tip: h itself), then CLAMP
              * to the raw cursor. The log may only veto the cursor DOWN to the
