@@ -141,6 +141,7 @@ void boot_progress_note(const char *label, uint64_t done, uint64_t total)
             "[boot-phase] PROGRESS %s %llu\n",
             label ? label : "(unnamed)", (unsigned long long)done);
     fflush(stderr);
+    boot_status_heartbeat();
 
     char status[160];
     if (total > 0)

@@ -24,6 +24,7 @@
 // refusal).
 
 #include "platform/time_compat.h"
+#include "util/boot_phase.h"
 #include "util/log_macros.h"
 #include "services/block_index_integrity.h"
 
@@ -523,6 +524,7 @@ int block_index_repair_pprev(struct main_state *ms, const char *datadir,
             block_index_build_skip(bi);
         }
 
+        boot_progress_note("block_index.pprev_repair", i + 1, read_limit);
         if ((i + 1) % 50000 == 0) {
             printf("[pprev-repair] progress %zu/%zu repaired=%d "
                    "heights=%d read_errors=%d\n",

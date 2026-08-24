@@ -53,6 +53,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "util/boot_phase.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
@@ -102,6 +103,8 @@ static bool topup_row_cb(const uint8_t hash[32],
 {
     struct topup_ctx *c = (struct topup_ctx *)user;
     c->rows++;
+    if ((c->rows % 4096u) == 0)
+        boot_progress_note("block_index.projection_topup", c->rows, 0);
 
     struct uint256 h;
     memcpy(h.data, hash, 32);
@@ -317,6 +320,9 @@ static void topup_recover_ntx_from_disk(struct main_state *ms,
             capped++;
             continue;
         }
+        boot_progress_note("block_index.topup_ntx_recovery",
+                           recovered + unreadable + 1,
+                           TOPUP_NTX_RECOVERY_MAX);
         struct block blk;
         block_init(&blk);
         if (read_block_from_disk_index_pread(&blk, bi, datadir)) {
@@ -351,6 +357,10 @@ bool block_index_projection_topup_with(struct block_index_projection *bip,
         LOG_FAIL("block_index", "topup: null main_state");
     if (!bip)
         return true;  /* no projection on this datadir — nothing to fold */
+
+    printf("[boot] block index projection top-up begin\n");
+    fflush(stdout);
+    boot_progress_note("block_index.projection_topup", 0, 0);
 
     /* Drain any events the prior process lifetime appended but never
      * consumed (live emits queue in the log; the projection only folds

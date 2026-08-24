@@ -27,9 +27,10 @@
  *   }
  *
  * The write is tmp+rename (crash-safe: a reader either sees the old complete
- * file or the new complete file, never a torn one) and cheap (once per stage
- * transition — ~5 times per boot). It is best-effort observability: a failed
- * write NEVER fails boot.
+ * file or the new complete file, never a torn one). Stage transitions rewrite
+ * it; long intra-stage work (block-index top-up, pprev repair) must also
+ * heartbeat `updated_unix`/`elapsed_s` or a node-free reader freezes on the
+ * last stage name and looks hung. Best-effort: a failed write NEVER fails boot.
  *
  * The reader (`boot_status_read`) needs no running node and no RPC — it parses
  * the file straight off disk. That is what replaces the ss/ps/tail dance; the
@@ -87,6 +88,13 @@ void boot_status_note_stage(int stage);
 /* Record the best chain height (or -1 for unknown) and rewrite the beacon.
  * No-op when the writer is not armed. */
 void boot_status_set_height(int64_t height);
+
+/* Rewrite the beacon with a fresh `updated_unix`/`elapsed_s` without
+ * changing stage. Throttled to one publish per wall-clock second. Use
+ * from long intra-stage loops so `core.node.bootstatus` does not freeze
+ * on `wallet_loaded` for the rest of block-index load. No-op when the
+ * writer is not armed. */
+void boot_status_heartbeat(void);
 
 /* Name the blocker this boot is stopping on, and rewrite the beacon, BEFORE
  * exiting. A boot that refuses must leave the reason where a node-free
