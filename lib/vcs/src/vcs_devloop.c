@@ -16,11 +16,11 @@
 #include "vcs/package_release.h"
 #include "vcs/zcode_commons_v2.h"
 #include "vcs/zcode_dht_record.h"
+#include "vcs/build_action.h"
 
 #include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "base/serialize_le.h"
-#include "crypto/sha256.h"
 #include "platform/time_compat.h"
 #include "storage/event_log.h"
 #include "util/log_macros.h"
@@ -2301,15 +2301,8 @@ void vcs_devloop_publication_bind_accepted_candidate(
         accepted_candidate_fail(out, "accepted candidate manifest could not be serialized");
         return;
     }
-    static const char identity_domain[] =
-        "zcl.zcode.source_manifest_sha256.v1";
     uint8_t source_identity[32];
-    struct sha256_ctx sha;
-    sha256_init(&sha);
-    sha256_write(&sha, (const uint8_t *)identity_domain,
-                 sizeof(identity_domain));
-    sha256_write(&sha, manifest_wire, manifest_len);
-    sha256_finalize(&sha, source_identity);
+    vcs_source_manifest_id(manifest_wire, manifest_len, source_identity);
     free(manifest_wire);
     char source_identity_hex[65], source_cas_hex[65];
     zcl_hex_encode(source_identity, 32, source_identity_hex);

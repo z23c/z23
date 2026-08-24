@@ -8,7 +8,6 @@
 #include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "base/serialize_le.h"
-#include "crypto/sha256.h"
 #include "crypto/sha3.h"
 #include "platform/clock.h"
 #include "platform/os_sandbox.h"
@@ -619,16 +618,13 @@ static struct zcl_result exec_action_derive(
     memcpy(action->toolchain_capsule_sha3, ctx->study.toolchain_capsule_root,
            32);
     {
-        /* source_sha256 binds the exact candidate wire executed. */
+        /* source_sha256 slot holds SHA3-256 of the exact candidate wire. */
         uint8_t *cwire = NULL;
         size_t clen = 0;
         if (!exec_cas_load(req->workspace, ctx->candidate_root, &cwire,
                            &clen))
             return ZCL_ERR(-1, "executor-candidate-not-in-cas");
-        struct sha256_ctx sha;
-        sha256_init(&sha);
-        sha256_write(&sha, cwire, clen);
-        sha256_finalize(&sha, action->source_sha256);
+        vcs_source_manifest_id(cwire, clen, action->source_sha256);
         free(cwire);
     }
     (void)snprintf(action->target, sizeof(action->target), "%s",

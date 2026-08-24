@@ -2542,7 +2542,7 @@ static int test_zd_improve_command(void)
                strlen(candidate_sha256) == 64);
         ASSERT_STR_EQ(json_get_str(json_get(
                           &reply.data, "source_sha256_schema")),
-                      "zcl.zcode.source_manifest_sha256.v1");
+                      VCS_SOURCE_MANIFEST_ID_SCHEMA);
         ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "input_schema")),
                       "zcl.zcode.action_input.v1");
         ASSERT_STR_EQ(json_get_str(json_get(

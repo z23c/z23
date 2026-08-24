@@ -6,7 +6,6 @@
 #include "controllers/rpc_client.h"
 #include "base/hex.h"
 #include "base/serialize_le.h"
-#include "crypto/sha256.h"
 #include "crypto/sha3.h"
 #include "config/runtime.h"
 #include "hotswap/hotswap_service.h"
@@ -520,12 +519,7 @@ static bool zdev_capture_candidate(
         stored = vcs_manifest_serialize(&candidate, &manifest_wire,
                                         &manifest_len);
     if (stored) {
-        static const char domain[] = "zcl.zcode.source_manifest_sha256.v1";
-        struct sha256_ctx sha;
-        sha256_init(&sha);
-        sha256_write(&sha, (const uint8_t *)domain, sizeof(domain));
-        sha256_write(&sha, manifest_wire, manifest_len);
-        sha256_finalize(&sha, source_sha256);
+        vcs_source_manifest_id(manifest_wire, manifest_len, source_sha256);
     }
     free(manifest_wire); free(wire);
     vcs_zcode_patch_free(&patch);
@@ -1600,7 +1594,7 @@ void zcl_native_handle_zcode_improve(
                            source_sha256);
     (void)json_push_kv_str(&reply->data, "source_sha256_schema",
                            explicit_admit
-                             ? "zcl.zcode.source_manifest_sha256.v1"
+                             ? VCS_SOURCE_MANIFEST_ID_SCHEMA
                              : "caller-provided-legacy");
     if (explicit_admit) {
         (void)json_push_kv_int(&reply->data, "changed_files",

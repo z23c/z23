@@ -37,6 +37,20 @@ struct build_toolchain_cache {
 static pthread_mutex_t g_toolchain_cache_mu = PTHREAD_MUTEX_INITIALIZER;
 static struct build_toolchain_cache g_toolchain_cache;
 
+void vcs_source_manifest_id(const uint8_t *wire, size_t len, uint8_t out[32])
+{
+    static const char domain[] = VCS_SOURCE_MANIFEST_ID_SCHEMA;
+    struct sha3_256_ctx sha;
+
+    if (!out)
+        return;
+    sha3_256_init(&sha);
+    sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
+    if (wire && len > 0)
+        sha3_256_write(&sha, wire, len);
+    sha3_256_finalize(&sha, out);
+}
+
 static void build_hash_text(struct sha3_256_ctx *sha, const char *value)
 {
     uint64_t length = value ? strlen(value) : 0;

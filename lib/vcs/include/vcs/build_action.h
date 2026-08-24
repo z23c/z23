@@ -90,6 +90,11 @@ void vcs_toolchain_capsule_v1_cache_reset_for_test(void);
 void vcs_toolchain_capsule_v1_cache_stats_for_test(
     uint64_t *fresh_captures, uint64_t *cache_hits);
 #endif
+/* Domain-tagged SHA3-256 of exact source-manifest bytes. The action slot
+ * is still named source_sha256 for existing wires; new identities use SHA3. */
+#define VCS_SOURCE_MANIFEST_ID_SCHEMA "zcl.zcode.source_manifest_sha3.v1"
+void vcs_source_manifest_id(const uint8_t *wire, size_t len, uint8_t out[32]);
+
 void vcs_build_action_v1_fixed_flags_root(uint8_t out[32]);
 void vcs_build_action_v1_fixed_environment_root(uint8_t out[32]);
 /* Closed fixed-action registry. The returned work kind uses the canonical

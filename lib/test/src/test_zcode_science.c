@@ -5,6 +5,8 @@
 
 #include "base/hex.h"
 #include "crypto/ed25519.h"
+#include "crypto/sha256.h"
+#include "crypto/sha3.h"
 #include "vcs/build_action.h"
 #include "vcs/zcode_science.h"
 
@@ -656,6 +658,34 @@ static int test_zs_fixed_actions(void)
     return failures;
 }
 
+static int test_zs_source_manifest_id_is_sha3(void)
+{
+    int failures = 0;
+    TEST("zcode source-manifest identity is SHA3-256, not SHA-256") {
+        static const uint8_t wire[] = { 'c', '2', '3', 1, 2, 3 };
+        uint8_t id[32], sha3[32], sha2[32];
+        struct sha3_256_ctx s3;
+        struct sha256_ctx s2;
+        static const char domain[] = VCS_SOURCE_MANIFEST_ID_SCHEMA;
+
+        ASSERT_STR_EQ(VCS_SOURCE_MANIFEST_ID_SCHEMA,
+                      "zcl.zcode.source_manifest_sha3.v1");
+        vcs_source_manifest_id(wire, sizeof(wire), id);
+        sha3_256_init(&s3);
+        sha3_256_write(&s3, (const uint8_t *)domain, sizeof(domain));
+        sha3_256_write(&s3, wire, sizeof(wire));
+        sha3_256_finalize(&s3, sha3);
+        sha256_init(&s2);
+        sha256_write(&s2, (const uint8_t *)domain, sizeof(domain));
+        sha256_write(&s2, wire, sizeof(wire));
+        sha256_finalize(&s2, sha2);
+        ASSERT(memcmp(id, sha3, 32) == 0);
+        ASSERT(memcmp(id, sha2, 32) != 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_zs_hardware_profile(void)
 {
     int failures = 0;
@@ -921,6 +951,7 @@ int test_zcode_science(void)
     failures += test_zs_submission_window();
     failures += test_zs_curation_vote();
     failures += test_zs_fixed_actions();
+    failures += test_zs_source_manifest_id_is_sha3();
     failures += test_zs_hardware_profile();
     failures += test_zs_benchmark_method();
     failures += test_zs_result_v2();
