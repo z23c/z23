@@ -1,12 +1,11 @@
 BOX=node4
-INSTALL=pass
-SECS=1
-SHA256SUMS=build/release/z23-x86_64-linux/SHA256SUMS
-INSTALLED_SHA256=a61a2f8af277c5ee1c5ec91f35e4daa6703d3ed7ff87f6a2341885c6246a566f
-ARTIFACT_SHA256=a61a2f8af277c5ee1c5ec91f35e4daa6703d3ed7ff87f6a2341885c6246a566f
-RUNNING_SOURCE_ID=84e72a99812ca1f6ad75a472badf7c3a55d12edd198aa9a0ca57e0bd788ca836
-ONION_RELAY=pass
-CLEARNET_RELAY=pass
-OBSERVED_AT=2026-08-23T02:12:27Z
-GAPS=none
-DETAIL=INSTALL: wiped /tmp/zcl23-install-e2e/datadir; clean-PATH install_z23.sh --source=build/release/z23-x86_64-linux SECS=1 stdout=z23 status; installed SHA256=a61a2f8af277c5ee1c5ec91f35e4daa6703d3ed7ff87f6a2341885c6246a566f matches pack; installed z23 answered getblockcount=0 on that datadir. DUAL: one isolated node pid 830201, outbound onion 5wvfod4ikluv4w3lqe3whn2k7xdsympxxu2qkqw452thtjxbar5hrcqd.onion:8055 vs node1.txt state=handshake_complete startingheight=3225812 AND outbound clearnet P2P state=syncing_headers startingheight=3225810, both subver=/ZClassic23:0.1.0/. Production pid 3716895 unchanged.
+DRILL=stranger_onion_self_dial
+ONION_ADDRESS=v6yb3oukjnri3oa7jyejfy7mgzttfz2yvtiedbb4gq2oasnawsbbq7yd.onion
+P2P_PORT=39040
+SELF_DIAL=fail
+SELF_DIAL_DETAIL=self_dial_version_verack_incomplete:state=version_sent
+ATTEMPTS=2
+TIMEOUT_S=180,300
+OBSERVED_AT=2026-08-24T02:12:53Z
+GAPS=version_sent_no_verack
+DETAIL=isolated_throwaway_datadir_dialed_published_onion; VERSION left state=version_sent; VERACK not observed. Second attempt used 300s. Probe did not use the long-running process as its own self-probe.
