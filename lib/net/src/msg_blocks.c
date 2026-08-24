@@ -267,6 +267,13 @@ bool msg_blocks_should_mark_seen(const struct active_chain *chain,
     return active_chain_contains(chain, bi);
 }
 
+bool msg_blocks_should_echo_source_header(const struct p2p_node *peer,
+                                          int source_peer_id)
+{
+    return peer && peer->id == source_peer_id && peer->prefer_headers &&
+           peer->state >= PEER_HANDSHAKE_COMPLETE && !peer->disconnect;
+}
+
 bool msg_block_validation_is_retryable(const struct validation_state *state)
 {
     if (!state || validation_state_is_valid(state))
@@ -787,7 +794,27 @@ bool process_block_msg(struct msg_processor *mp, struct p2p_node *node,
                     zcl_mutex_lock(&mp->net_mgr->cs_nodes);
                     for (size_t pi = 0; pi < mp->net_mgr->num_nodes; pi++) {
                         struct p2p_node *peer = mp->net_mgr->nodes[pi];
-                        if (peer->id != node->id &&
+                        if (msg_blocks_should_echo_source_header(
+                                peer, node->id)) {
+                            /* Never echo the full/compact block to its source.
+                             * Its accepted block is exactly what advanced our
+                             * tip, so echo only the small verified header to
+                             * refresh the receiver's expiring chain vote. */
+                            if (!push_verified_header_announcement(
+                                    mp, peer, new_tip)) {
+                                LOG_WARN("headers",
+                                         "source-peer tip proof failed "
+                                         "h=%d peer=%s",
+                                         new_tip->nHeight,
+                                         peer->addr_name);
+                            } else {
+                                LOG_INFO("headers",
+                                         "source-peer verified tip proof "
+                                         "h=%d peer=%s",
+                                         new_tip->nHeight,
+                                         peer->addr_name);
+                            }
+                        } else if (peer->id != node->id &&
                             peer->state >= PEER_HANDSHAKE_COMPLETE &&
                             !peer->disconnect) {
                             if (peer->send_compact) {

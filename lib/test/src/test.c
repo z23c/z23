@@ -1292,6 +1292,7 @@ int main(int argc, char **argv)
     failures += test_agent_test();
     failures += test_recovery_policy();
     failures += test_oracle_policy();
+    failures += test_quorum_oracle();
     failures += test_db_txn();
     failures += test_sync_service();
     failures += test_node_db_catchup_service();
