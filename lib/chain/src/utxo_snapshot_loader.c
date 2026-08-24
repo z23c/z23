@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0 */
 
 #include "chain/utxo_snapshot_loader.h"
+#include "crypto/sha256.h"
 #include "coins/utxo_commitment.h"
 #include "core/amount.h"
 #include "crypto/sha3.h"
@@ -259,6 +260,16 @@ void uss_close(struct uss_handle *h)
     if (!h) return;
     if (h->base) munmap((void *)h->base, h->size);
     free(h);
+}
+
+bool uss_artifact_sha256(const struct uss_handle *h, uint8_t out[32])
+{
+    if (!h || !h->base || !out) return false;
+    struct sha256_ctx ctx;
+    sha256_init(&ctx);
+    sha256_write(&ctx, h->base, h->size);
+    sha256_finalize(&ctx, out);
+    return true;
 }
 
 int64_t uss_iter(struct uss_handle *h, uss_record_cb cb, void *ctx)

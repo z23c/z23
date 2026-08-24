@@ -645,7 +645,8 @@ int test_testcache(void)
                            "results[i].skip_markers == 0"));
     TC_CHECK("pre-push opts into exact per-group PASS receipts",
              file_contains("tools/agent_fast_ci.sh",
-                           "T_FAST_EXACT_ARGS=--cache") &&
+                           "T_FAST_EXACT_ARGS=--cache "
+                           "--activate-proof-contracts") &&
              file_contains("Makefile",
                            "--exact=$(EXACT_ONLY_MATCHED) $(T_FAST_EXACT_ARGS)"));
     TC_CHECK("pre-push rejects skips and incomplete receipt accounting",

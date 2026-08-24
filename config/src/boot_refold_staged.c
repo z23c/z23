@@ -934,62 +934,9 @@ void boot_load_snapshot_at_own_height_reset(struct node_db *ndb,
     }
     boot_snapshot_install_require_chain_context(ms);
 
-    /* D1: refuse a SHIELDLESS (v1 transparent-only) seed past Sapling activation
-     * UP FRONT (config/src/boot_seed_gate.c) — otherwise it seeds, climbs a few
-     * dozen blocks, then wedges permanently on utxo_apply.{anchor,nullifier}_
-     * backfill_gap at the first shielded tx. v2/v3 seeds pass. */
+    /* D1: refuse a shieldless v1 seed past Sapling activation up front; it
+     * otherwise wedges on shielded backfill. v2/v3 seeds pass. */
     boot_seed_refuse_shieldless_or_die(path);
-
-    /* RESUME-FAST declines to wipe independently accepted local authority; the
-     * read-only snapshot peek does not authenticate its state contents. */
-    {
-        char peek_err[256] = {0};
-        struct uss_header peek_hdr;
-        struct uss_handle *peek = uss_open(path, /*verify_full_sha3=*/false,
-                                           /*expected_sha3=*/NULL, &peek_hdr,
-                                           peek_err, sizeof(peek_err));
-        if (peek) {
-            const int32_t peek_seed_h = (int32_t)peek_hdr.height;
-            int32_t applied = -1;
-            bool marker_matches = false, install_pending = true;
-            const bool resume = boot_snapshot_install_resume_allowed(
-                progress_store_db(), &peek_hdr, &applied, &install_pending,
-                &marker_matches);
-            uss_close(peek);
-            if (install_pending)
-                LOG_WARN("boot", "[boot] snapshot install pending/read-failed "
-                         "(binding=%s): RESUME-FAST disabled; rerunning",
-                         marker_matches ? "matches" : "unknown_or_mismatch");
-            if (resume) {
-                bool repaired = boot_load_snapshot_resume_seed_from_authority(
-                    &peek_hdr, progress_store_db(), ms, applied);
-                if (!repaired) {
-                    fprintf(stderr,
-                            "FATAL: -load-snapshot-at-own-height: persisted "
-                            "coins authority exists at h=%d but reducer "
-                            "resume repair failed; REFUSING to report a "
-                            "successful recovery\n", applied - 1);
-                    event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
-                                "load_snapshot resume_repair_failed "
-                                "applied=%d seed_h=%d", applied,
-                                peek_seed_h);
-                    _exit(EXIT_FAILURE);
-                }
-                LOG_INFO("boot",
-                         "[boot] -load-snapshot-at-own-height: coins_kv satisfies the "
-                         "operational authority predicate at h=%d (>= snapshot seed h=%d) — "
-                         "RESUMING from the persisted coin set; skipping the "
-                         "re-seed + ~%d-block re-fold (stage_resume_repair=%s).",
-                         applied - 1, peek_seed_h, applied - 1 - peek_seed_h,
-                         "ok_or_unneeded");
-                event_emitf(EV_RECOVERY_ACTION, 0,
-                            "load_snapshot_at_own_height resume_skip applied=%d "
-                            "seed_h=%d stage_resume_repair=ok_or_unneeded",
-                            applied, peek_seed_h);
-                return;
-            }
-        }
-    }
 
     /* (i) Open + verify the snapshot body digest against its header (NOT the
      * compiled checkpoint). expected_sha3=NULL skips the checkpoint binding;
@@ -1005,6 +952,19 @@ void boot_load_snapshot_at_own_height_reset(struct node_db *ndb,
         event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
                     "load_snapshot_at_own_height uss_open_failed path=%s err=%s",
                     path, err);
+        _exit(EXIT_FAILURE);
+    }
+    uint8_t artifact_sha256[32] = {0};
+    if (!uss_artifact_sha256(h, artifact_sha256)) {
+        uss_close(h);
+        fprintf(stderr, "FATAL: snapshot exact artifact hash failed\n");
+        _exit(EXIT_FAILURE);
+    }
+    if (hdr.height > (uint32_t)INT32_MAX) {
+        uss_close(h);
+        fprintf(stderr, "FATAL: snapshot height exceeds signed chain range\n");
+        event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
+                    "load_snapshot snapshot_height_out_of_range");
         _exit(EXIT_FAILURE);
     }
     const int32_t seed_h = (int32_t)hdr.height;
@@ -1123,6 +1083,40 @@ void boot_load_snapshot_at_own_height_reset(struct node_db *ndb,
         LOG_WARN("boot", "[boot] ZCL_TESTING fixture has no anchor binding");
     }
 
+    int32_t applied = -1;
+    bool marker_matches = false, install_pending = true;
+    bool prior_frontier_verified = false;
+    bool resume = boot_snapshot_install_resume_allowed(
+        progress_store_db(), &hdr, artifact_sha256, &applied,
+        &install_pending, &marker_matches, &prior_frontier_verified);
+    if (install_pending)
+        LOG_WARN("boot", "[boot] snapshot install pending/read-failed "
+                 "(binding=%s): RESUME-FAST disabled; rerunning",
+                 marker_matches ? "matches" : "unknown_or_mismatch");
+    if (resume) {
+        bool repaired = boot_load_snapshot_resume_seed_from_authority(
+            &hdr, progress_store_db(), ms, applied);
+        if (!repaired) {
+            fprintf(stderr, "FATAL: persisted coins authority h=%d failed "
+                    "snapshot resume repair; REFUSING recovery\n", applied - 1);
+            event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
+                        "load_snapshot resume_repair_failed applied=%d seed_h=%d",
+                        applied, seed_h);
+            uss_close(h);
+            _exit(EXIT_FAILURE);
+        }
+        LOG_INFO("boot", "[boot] exact assisted receipt + coins authority "
+                 "resume at h=%d from seed h=%d (stage repair ok)",
+                 applied - 1, seed_h);
+        event_emitf(EV_RECOVERY_ACTION, 0,
+                    "load_snapshot resume_skip applied=%d seed_h=%d",
+                    applied, seed_h);
+        boot_snapshot_install_record_proof(path, &hdr, artifact_sha256,
+                                           prior_frontier_verified);
+        uss_close(h);
+        return;
+    }
+
     uss_close(h);
     h = NULL;
 
@@ -1145,8 +1139,7 @@ retry_authority_store:
     }
 
     /* Interim crash convergence (not atomic): journal before mutation. */
-    if (!boot_snapshot_install_marker_begin(rpdb, seed_h, hdr.count,
-                                            hdr.sha3_hash)) {
+    if (!boot_snapshot_install_marker_begin(rpdb, &hdr, artifact_sha256)) {
         if (!authority_retry_used) {
             authority_retry_used = true;
             if (reopen_progress_store_after_verified_snapshot(datadir, &rpdb,
@@ -1191,9 +1184,12 @@ retry_authority_store:
 
     char err2[256] = {0};
     struct uss_header hdr2;
+    uint8_t applied_artifact_sha256[32] = {0};
     h = uss_open(path, /*verify_full_sha3=*/true,
                  /*expected_sha3=*/NULL, &hdr2, err2, sizeof(err2));
-    if (!h || !boot_snapshot_install_headers_equal(&hdr, &hdr2)) {
+    if (!h || !uss_artifact_sha256(h, applied_artifact_sha256) ||
+        memcmp(applied_artifact_sha256, artifact_sha256, 32) != 0 ||
+        !boot_snapshot_install_headers_equal(&hdr, &hdr2)) {
         fprintf(stderr,
                 "FATAL: -load-snapshot-at-own-height: snapshot changed after "
                 "verification (%s) — refusing to seed\n",
@@ -1216,7 +1212,9 @@ retry_authority_store:
             goto retry_authority_store;
         h = uss_open(path, /*verify_full_sha3=*/true,
                      /*expected_sha3=*/NULL, &hdr2, err2, sizeof(err2));
-        if (!h || !boot_snapshot_install_headers_equal(&hdr, &hdr2)) {
+        if (!h || !uss_artifact_sha256(h, applied_artifact_sha256) ||
+            memcmp(applied_artifact_sha256, artifact_sha256, 32) != 0 ||
+            !boot_snapshot_install_headers_equal(&hdr, &hdr2)) {
             fprintf(stderr,
                     "FATAL: -load-snapshot-at-own-height: snapshot changed "
                     "while recovering authority store (%s) — refusing to seed\n",
@@ -1482,7 +1480,7 @@ retry_authority_store:
                     "tree REBUILT + re-persisted (%d commitments) coherent with "
                     "the chain tip\n", appended);
         }
-    } else {
+    } else if (!ms) {
         LOG_WARN("boot", "[boot] -load-snapshot-at-own-height: no main_state — "
                  "cleared sapling_tree to NULL; the catchup service rebuilds it "
                  "from genesis on next run");
@@ -1626,7 +1624,8 @@ retry_authority_store:
         event_emitf(EV_BOOT_VALIDATION_FAILED, 0, "load_snapshot tip_finalize_seed_failed h=%d", seed_h);
         _exit(EXIT_FAILURE);
     }
-    if (!boot_snapshot_install_marker_clear(rpdb)) {
+    if (!boot_snapshot_install_marker_complete(
+            rpdb, artifact_sha256, sapling_installed_from_frontier)) {
         fprintf(stderr, "FATAL: snapshot journal clear failed after tip seed h=%d\n", seed_h);
         event_emitf(EV_BOOT_VALIDATION_FAILED, 0, "load_snapshot install_marker_final_clear_failed h=%d", seed_h);
         _exit(EXIT_FAILURE);
@@ -1636,7 +1635,8 @@ retry_authority_store:
     embedded_frontier = NULL;
     free(embedded_sprout);
     free(embedded_nullifiers);
-
+    boot_snapshot_install_record_proof(path, &hdr, artifact_sha256,
+                                       sapling_installed_from_frontier);
     fprintf(stderr,
             "[boot] -load-snapshot-at-own-height: coin set RE-SEEDED + "
             "digest-verified assisted state (count=%llu, body SHA3 OK) at h=%d; coins-dependent "

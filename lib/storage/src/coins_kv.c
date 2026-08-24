@@ -1325,9 +1325,7 @@ bool coins_kv_seed_genesis_applied_height(
 bool coins_kv_reset_for_reseed(sqlite3 *db)
 {
     if (!db) return false;
-    /* Ensure the targets exist before we DELETE/clear them: a reset on a
-     * brand-new store (no coins schema, no keys) must be a clean no-op, not a
-     * "no such table" error. */
+    /* Ensure a brand-new store resets as a clean no-op. */
     if (!coins_kv_ensure_schema(db) || !progress_meta_table_ensure(db))
         return false;
 
@@ -1349,6 +1347,8 @@ bool coins_kv_reset_for_reseed(sqlite3 *db)
     if (ok && !progress_meta_delete_in_tx(db, COINS_KV_SELF_FOLDED_KEY))
         ok = false;
     if (ok && !progress_meta_delete_in_tx(db, COINS_APPLIED_HEIGHT_KEY))
+        ok = false;
+    if (ok && !coins_kv_bump_authority_generation_in_tx(db))
         ok = false;
     if (ok && sqlite3_exec(db, "COMMIT", NULL, NULL, &err) != SQLITE_OK)
         ok = false;

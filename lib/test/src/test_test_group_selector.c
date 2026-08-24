@@ -332,7 +332,25 @@ static int test_native_catalog_resolution(void)
             "test_event_log_kill9"));
         ASSERT(zcl_test_group_is_integration_only(
             "test_event_log_benchmark"));
+        ASSERT(zcl_test_group_is_integration_only(
+            "test_chain_advance_atomicity"));
+        ASSERT(zcl_test_group_is_integration_only(
+            "test_reducer_block_ingest_gate"));
         ASSERT(!zcl_test_group_is_integration_only("test_event_log"));
+        ASSERT(zcl_test_group_proof_contracts_valid());
+        ASSERT(zcl_test_group_proof_contract(
+                   "test_shielded_payment_gate") == ZCL_TEST_PROOF_STRESS);
+        ASSERT(zcl_test_group_proof_contract(
+                   "test_chain_advance_atomicity") == ZCL_TEST_PROOF_STRESS);
+        ASSERT(zcl_test_group_proof_contract(
+                   "test_reducer_block_ingest_gate") == ZCL_TEST_PROOF_STRESS);
+        ASSERT(zcl_test_group_proof_contract(
+                   "test_event_log_kill9") == ZCL_TEST_PROOF_EVENT_LOG_KILL9);
+        ASSERT(zcl_test_group_proof_contract(
+                   "test_event_log_benchmark") ==
+               ZCL_TEST_PROOF_EVENT_LOG_BENCH);
+        ASSERT(zcl_test_group_proof_contract("test_event_log") ==
+               ZCL_TEST_PROOF_NONE);
         ASSERT(zcl_test_group_catalog_contains(
             "test_zcode_score_receipt_packages"));
         ASSERT(zcl_test_group_catalog_contains(
@@ -515,6 +533,30 @@ static int test_runner_exact_selection(void)
         ASSERT(rc == 0);
         ASSERT(strstr(out, "groups_ran=2") != NULL);
         ASSERT(strstr(out, "groups_failed=0") != NULL);
+
+        n = snprintf(command, sizeof(command),
+                     "\"%s\" --jobs=1 "
+                     "--exact=test_chain_advance_atomicity "
+                     "--activate-proof-contracts --no-cache 2>&1", exe);
+        ASSERT(n > 0 && (size_t)n < sizeof(command));
+        rc = capture_command(command, out, sizeof(out));
+        dump_bad_rc("nested proof-contract activation", rc, 0, out);
+        ASSERT(rc == 0);
+        ASSERT(strstr(out,
+                      "proof contract group=test_chain_advance_atomicity "
+                      "env=ZCL_STRESS_TESTS") != NULL);
+        ASSERT(strstr(out, "groups_ran=1") != NULL);
+        ASSERT(strstr(out, "groups_failed=0 self_skips=0") != NULL);
+
+        n = snprintf(command, sizeof(command),
+                     "\"%s\" --activate-proof-contracts --no-cache 2>&1",
+                     exe);
+        ASSERT(n > 0 && (size_t)n < sizeof(command));
+        rc = capture_command(command, out, sizeof(out));
+        ASSERT(rc == 2);
+        ASSERT(strstr(out,
+                      "--activate-proof-contracts requires an exact selector")
+               != NULL);
 
         /* "test_api" is a valid exact id. Bare "api" is deliberately not:
          * accepting it here would restore the substring false-green. */

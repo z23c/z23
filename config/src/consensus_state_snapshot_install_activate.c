@@ -599,15 +599,15 @@ static bool activate_apply_in_tx(
         }
     }
 
-    /* 2. Replace the coin set (raw DELETE inside our txn — coins_kv_reset_for_
-     *    reseed owns its own BEGIN, so it cannot join our transaction). */
+    /* Replace coins in our txn; reset_for_reseed owns a separate BEGIN. */
     if (sqlite3_exec(progress_db, "DELETE FROM coins", NULL, NULL, &err)
         != SQLITE_OK) {
         if (err) { sqlite3_free(err); err = NULL; }
         return activate_fail(result, CONSENSUS_INSTALL_STORE_ERROR,
                              "clearing coins failed");
     }
-
+    if (!coins_kv_bump_authority_generation_in_tx(progress_db))
+        return activate_fail(result, CONSENSUS_INSTALL_STORE_ERROR, "advancing coins authority generation failed");
     /* 3. Reset both anchor tables + nullifier set to a COMPLETE (activation
      *    cursor 0) history, THEN install the actual rows. This is the exact
      *    difference from the wedge-causing refold: complete history, not an

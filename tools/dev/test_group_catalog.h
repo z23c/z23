@@ -13,6 +13,13 @@ extern "C" {
 
 #define ZCL_TEST_GROUP_FULL_MAX 96
 
+enum zcl_test_proof_contract {
+    ZCL_TEST_PROOF_NONE = 0,
+    ZCL_TEST_PROOF_STRESS,
+    ZCL_TEST_PROOF_EVENT_LOG_KILL9,
+    ZCL_TEST_PROOF_EVENT_LOG_BENCH,
+};
+
 /* Canonical registry order, shared with test_parallel's dispatch table. */
 size_t zcl_test_group_catalog_count(void);
 const char *zcl_test_group_catalog_at(size_t index);
@@ -22,6 +29,13 @@ bool zcl_test_group_catalog_contains(const char *full_id);
  * before the worker pool starts. Repository-exclusive lint groups remain a
  * separate runner policy. */
 bool zcl_test_group_requires_exclusive_run(const char *full_id);
+
+/* Return the one bounded opt-in contract associated with an exact group.
+ * NONE is the normal case.  The catalog validates that every declared row is
+ * registered and unique before a runner may activate these contracts. */
+enum zcl_test_proof_contract
+zcl_test_group_proof_contract(const char *full_id);
+bool zcl_test_group_proof_contracts_valid(void);
 
 /* True only for a mechanically audited test translation-unit proof leaf. */
 bool zcl_test_group_source_is_semantic_leaf(const char *path);

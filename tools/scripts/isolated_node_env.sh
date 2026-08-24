@@ -54,6 +54,32 @@ set -euo pipefail
 ISO_LIVE_PORTS="8023 8033 8034 8035 8043 8044 8045 8046 8232 8443 \
 18034 18232 18234 18243 18244 18245 18246"
 
+# Published fleet P2P ports (deploy/devfleet/node*.txt) are owned by their
+# units. Isolated instances must never bind them — node2's 39360 is the
+# collision that bit a pair-probe peer quad at base 39350.
+iso_append_published_fleet_ports() {
+    local dir="${ISO_FLEET_DIR:-}" f p
+    if [ -z "$dir" ] || [ ! -d "$dir" ]; then
+        if [ -d deploy/devfleet ]; then
+            dir=deploy/devfleet
+        else
+            return 0
+        fi
+    fi
+    for f in "$dir"/node*.txt; do
+        [ -f "$f" ] || continue
+        p=$(sed -n 's/^P2P_PORT=//p' "$f" | head -1)
+        case $p in
+            ''|*[!0-9]*) continue ;;
+        esac
+        case " $ISO_LIVE_PORTS " in
+            *" $p "*) ;;
+            *) ISO_LIVE_PORTS="$ISO_LIVE_PORTS $p" ;;
+        esac
+    done
+    return 0
+}
+
 # ── State (populated by iso_init / iso_spawn_node) ─────────────────
 ISO_KIND="${ISO_KIND:-soak}"
 ISO_DD=""
@@ -182,6 +208,8 @@ iso_init() {
     command -v mktemp >/dev/null 2>&1 || iso_die "mktemp not found"
     [ -x "$ISO_NODE_BIN" ] || iso_die "$ISO_NODE_BIN not built — run make first"
     [ -x "$ISO_RPC_BIN" ]  || iso_die "$ISO_RPC_BIN not built — run make zcl-rpc"
+
+    iso_append_published_fleet_ports
 
     # 1) Derive + validate the 39xxx port quad FIRST (no datadir yet, so
     #    a bad base or a live-set member aborts before we create anything).

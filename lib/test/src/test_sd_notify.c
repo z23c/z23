@@ -369,6 +369,14 @@ int test_sd_notify(void)
         SDN_CHECK("pet: no verdict past grace + progress pings",
             boot_sd_watchdog_test_pet_decide(true, false,
                                              0, true, 0, BOUND));
+        SDN_CHECK("keepalive: frozen sweep still stops even with progress",
+            !boot_sd_watchdog_test_keepalive_supervisor(false, false, true));
+        SDN_CHECK("keepalive: stale connman + IBD progress + live sweep",
+            boot_sd_watchdog_test_keepalive_supervisor(false, true, true));
+        SDN_CHECK("keepalive: stale connman without progress does not keep",
+            !boot_sd_watchdog_test_keepalive_supervisor(false, true, false));
+        SDN_CHECK("keepalive: runtime-alive keeps without progress",
+            boot_sd_watchdog_test_keepalive_supervisor(true, true, false));
     }
 
     /* ── real dedicated pet thread, health ring deliberately idle ── */

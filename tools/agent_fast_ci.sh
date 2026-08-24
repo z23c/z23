@@ -1234,7 +1234,7 @@ run_mapped_focused_tests() {
     log "focused test exact_groups=$exact_csv count=$count"
     set +e
     output="$(make_fast t-fast-exact "ONLY=$exact_csv" \
-        "T_FAST_EXACT_ARGS=--cache" 2>&1)"
+        "T_FAST_EXACT_ARGS=--cache --activate-proof-contracts" 2>&1)"
     rc=$?
     set -e
     printf '%s\n' "$output"

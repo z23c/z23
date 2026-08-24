@@ -85,6 +85,7 @@ STATE_DIR="${ZCL_DEV_WATCH_STATE_DIR:-$HOME/.local/state/zclassic23-dev}"
 LOADER_DROPIN="$HOME/.config/systemd/user/zcl23-dev.service.d/80-snapshot-loader.conf"
 BUILD_ID_DROPIN="$HOME/.config/systemd/user/zcl23-dev.service.d/90-build-identity.conf"
 CLI="${ZCL_DEV_RECOVERY_CLI:-$REPO/build/bin/zclassic-cli}"
+JSONQ="${ZCL_DEV_RECOVERY_JSONQ:-$REPO/build/bin/jsonq}"
 # Default to the bundle already present in the dev datadir. It is copied and
 # hash-checked before the old datadir is archived, so recovery does not depend
 # on or even read the canonical lane. An explicit bundle directory/file pair
@@ -115,6 +116,7 @@ SNAPSHOT_BASENAME=""
 SNAPSHOT_HEIGHT=""
 SNAPSHOT_VERSION=""
 SNAPSHOT_HEADER_HEIGHT=""
+SNAPSHOT_RECORD_COUNT="" SNAPSHOT_PAYLOAD_SHA3="" SNAPSHOT_ANCHOR_HASH=""
 SNAPSHOT_SHA256=""
 INDEX_SHA256=""
 INDEX_TIP_HEIGHT=""
@@ -124,17 +126,6 @@ json_escape()
     printf '%s' "${1:-}" | sed \
         -e 's/\\/\\\\/g' -e 's/"/\\"/g' \
         -e ':a;N;$!ba;s/\n/\\n/g' -e 's/\r/\\r/g' -e 's/\t/\\t/g'
-}
-
-json_first_string_field()
-{
-    local body="$1" key="$2" token
-    token="$(printf '%s\n' "$body" \
-        | grep -o "\"${key}\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" 2>/dev/null \
-        | head -1 || true)"
-    [ -n "$token" ] || return 0
-    printf '%s\n' "$token" \
-        | sed -n "s/^\"${key}\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\"$/\1/p"
 }
 
 die()
@@ -206,15 +197,20 @@ block_index_tip_height()
 
 snapshot_header_fields()
 {
-    local file="$1" size magic version height
+    local file="$1" size magic version height count payload_sha3 anchor_hash
     size="$(stat -c %s "$file")" || return 1
     [ "$size" -ge 24 ] || return 1
     magic="$(od -An -tx1 -N8 "$file" | tr -d ' \n')"
     [ "$magic" = "5a434c5554584f00" ] || return 1 # "ZCLUTXO\0"
     version="$(od -An -tu4 -j 8 -N4 "$file" | tr -d ' ')"
     height="$(od -An -td8 -j 16 -N8 "$file" | tr -d ' ')"
-    is_uint "$version" && is_uint "$height" || return 1
-    printf '%s %s\n' "$version" "$height"
+    count="$(od -An -tu8 -j 24 -N8 "$file" | tr -d ' ')"
+    anchor_hash="$(od -An -v -tx1 -j 40 -N32 "$file" | tr -d ' \n')"; payload_sha3="$(od -An -v -tx1 -j 72 -N32 "$file" | tr -d ' \n')"
+    is_uint "$version" && is_uint "$height" && is_uint "$count" &&
+        [[ "$anchor_hash" =~ ^[0-9a-f]{64}$ ]] &&
+        [[ "$payload_sha3" =~ ^[0-9a-f]{64}$ ]] || return 1
+    printf '%s %s %s %s %s\n' "$version" "$height" "$count" \
+        "$payload_sha3" "$anchor_hash"
 }
 
 read_generation_link()
@@ -356,7 +352,7 @@ require_recovery_selftest_env_exact()
 validate_internal_recovery_selftest_capability()
 {
     local root capability observed fd_observed fd_path owner mode home tail
-    local service_log binary found=0 expected_verify
+    local service_log binary found=0 active cli generation
     [[ "$SELFTEST_CAP_FD" =~ ^[3-8]$ ]] ||
         recovery_selftest_refuse "capability fd"
     root="$(readlink -f "$SELFTEST_ROOT" 2>/dev/null || true)"
@@ -404,29 +400,32 @@ validate_internal_recovery_selftest_capability()
     case "$VERIFY_TIMEOUT" in 1|10) ;;
         *) recovery_selftest_refuse "verify timeout" ;;
     esac
-    case "$TXN_ID" in success|failure|signal) ;;
+    case "$TXN_ID" in success|failure-digest|failure-hstar|signal) ;;
         *) recovery_selftest_refuse "transaction id" ;;
     esac
 
     service_log="$home/service.log"
+    active="$home/service-active"
+    generation="${REQUESTED_GENERATION:-}"
+    cli="$home/fake-cli"
     require_recovery_selftest_env_exact ZCL_DEV_RECOVERY_STOP_COMMAND \
-        "printf 'stop\\n' >> '$service_log'"
+        "rm -f '$active'; printf 'stop\\n' >> '$service_log'"
     require_recovery_selftest_env_exact ZCL_DEV_RECOVERY_START_COMMAND \
-        "printf 'start\\n' >> '$service_log'"
+        "touch '$active'; printf 'start\\n' >> '$service_log'"
     require_recovery_selftest_env_exact ZCL_DEV_RECOVERY_DAEMON_RELOAD_COMMAND \
         "printf 'reload\\n' >> '$service_log'"
     require_recovery_selftest_env_exact ZCL_DEV_RECOVERY_RESET_FAILED_COMMAND \
         "printf 'reset\\n' >> '$service_log'"
-    require_recovery_selftest_env_exact ZCL_DEV_RECOVERY_ACTIVE_COMMAND false
-    [ -z "${ZCL_DEV_RECOVERY_PID_COMMAND:-}" ] &&
-        [ -z "${ZCL_DEV_RECOVERY_RUNNING_EXE_COMMAND:-}" ] ||
-        recovery_selftest_refuse "process probe injection"
-    expected_verify="touch '$home/verify-started'; sleep 2"
-    case "${ZCL_DEV_RECOVERY_VERIFY_COMMAND:-}" in
-        true|false|"$expected_verify") ;;
-        *) recovery_selftest_refuse "verify command" ;;
-    esac
-
+    require_recovery_selftest_env_exact ZCL_DEV_RECOVERY_ACTIVE_COMMAND "test -f '$active'"
+    require_recovery_selftest_env_exact ZCL_DEV_RECOVERY_PID_COMMAND "printf '4242\\n'"
+    require_recovery_selftest_env_exact ZCL_DEV_RECOVERY_RUNNING_EXE_COMMAND "printf '%s\\n' '$GEN_ROOT/$generation/zclassic23-dev'"
+    require_recovery_selftest_env_exact ZCL_DEV_RECOVERY_CLI "$cli"
+    require_recovery_selftest_env_exact ZCL_DEV_RECOVERY_JSONQ "$REPO/build/bin/jsonq"
+    [ -z "${ZCL_DEV_RECOVERY_SNAPSHOT:-}" ] &&
+        [ -z "${ZCL_DEV_RECOVERY_BLOCK_INDEX:-}" ] ||
+        recovery_selftest_refuse "bundle file override"
+    [ -f "$cli" ] && [ ! -L "$cli" ] && [ -x "$cli" ] ||
+        recovery_selftest_refuse "CLI fixture"
     for binary in "$GEN_ROOT"/gen-*/zclassic23-dev; do
         [ -e "$binary" ] || continue
         found=1
@@ -473,8 +472,7 @@ validate_confinement()
             ZCL_DEV_RECOVERY_DAEMON_RELOAD_COMMAND \
             ZCL_DEV_RECOVERY_RESET_FAILED_COMMAND \
             ZCL_DEV_RECOVERY_ACTIVE_COMMAND ZCL_DEV_RECOVERY_PID_COMMAND \
-            ZCL_DEV_RECOVERY_RUNNING_EXE_COMMAND \
-            ZCL_DEV_RECOVERY_VERIFY_COMMAND; do
+            ZCL_DEV_RECOVERY_RUNNING_EXE_COMMAND; do
             [ -z "${!injected:-}" ] ||
                 die "$injected is confined to hermetic recovery tests"
         done
@@ -512,7 +510,8 @@ resolve_bundle()
     snapshot_fields="$(snapshot_header_fields "$SOURCE_SNAPSHOT" || true)"
     [ -n "$snapshot_fields" ] ||
         die "snapshot has an invalid ZCLUTXO header: $SOURCE_SNAPSHOT"
-    read -r SNAPSHOT_VERSION SNAPSHOT_HEADER_HEIGHT <<< "$snapshot_fields"
+    read -r SNAPSHOT_VERSION SNAPSHOT_HEADER_HEIGHT SNAPSHOT_RECORD_COUNT \
+        SNAPSHOT_PAYLOAD_SHA3 SNAPSHOT_ANCHOR_HASH <<< "$snapshot_fields"
     [ "$SNAPSHOT_HEADER_HEIGHT" = "$SNAPSHOT_HEIGHT" ] ||
         die "snapshot filename height $SNAPSHOT_HEIGHT disagrees with header height $SNAPSHOT_HEADER_HEIGHT"
     [ "$SNAPSHOT_VERSION" = "2" ] ||
@@ -590,30 +589,41 @@ prepare_fresh_datadir()
 
 verify_recovery_default()
 {
-    local deadline now pid exe height agent observed_source_id expected_bin
-    local proof_sha proof_frontier proof_seed
+    local deadline now pid pid_after exe height hstar agent observed_source_id expected_bin
+    local proof frontier expected_snapshot
     expected_bin="$GEN_ROOT/$CURRENT_GENERATION/zclassic23-dev"
+    expected_snapshot="$DEV_DATADIR/$SNAPSHOT_BASENAME"
     deadline=$(( $(date +%s) + VERIFY_TIMEOUT ))
     while :; do
         pid="$(service_pid 2>/dev/null || true)"
         exe="$(running_executable "$pid" 2>/dev/null || true)"
-        proof_sha="$(grep -F -m1 -- 'digest-verified assisted snapshot' "$DEV_DATADIR/node.log" 2>/dev/null || true)"
-        proof_frontier="$(grep -F -m1 -- 'installed the EMBEDDED Sapling frontier' "$DEV_DATADIR/node.log" 2>/dev/null || true)"
-        proof_seed="$(grep -F -m1 -- 'coin set RE-SEEDED' "$DEV_DATADIR/node.log" 2>/dev/null || true)"
+        proof="$(timeout 10 "$CLI" -datadir="$DEV_DATADIR" \
+            -rpcport="$DEV_RPCPORT" dumpstate boot 2>/dev/null || true)"
         if service_active && [ -n "$exe" ] &&
            [ "$(readlink -m "$exe")" = "$(readlink -m "$expected_bin")" ] &&
-           printf '%s' "$proof_sha" | grep -q 'body SHA3 OK' &&
-           printf '%s' "$proof_frontier" | grep -q 'root verified' &&
-           [ -n "$proof_seed" ] && [ -x "$CLI" ]; then
+           [ -x "$CLI" ] && [ -x "$JSONQ" ] &&
+           printf '%s\n' "$proof" | "$JSONQ" eq state.assisted_snapshot_load.complete true &&
+           printf '%s\n' "$proof" | "$JSONQ" eq state.assisted_snapshot_load.seed_height "$SNAPSHOT_HEIGHT" &&
+           printf '%s\n' "$proof" | "$JSONQ" eq state.assisted_snapshot_load.record_count "$SNAPSHOT_RECORD_COUNT" &&
+           printf '%s\n' "$proof" | "$JSONQ" eq state.assisted_snapshot_load.payload_sha3 "$SNAPSHOT_PAYLOAD_SHA3" &&
+           printf '%s\n' "$proof" | "$JSONQ" eq state.assisted_snapshot_load.anchor_block_hash "$SNAPSHOT_ANCHOR_HASH" &&
+           printf '%s\n' "$proof" | "$JSONQ" eq state.assisted_snapshot_load.artifact_sha256 "$SNAPSHOT_SHA256" &&
+           printf '%s\n' "$proof" | "$JSONQ" eq state.assisted_snapshot_load.snapshot_path "$expected_snapshot"; then
             height="$(timeout 10 "$CLI" -datadir="$DEV_DATADIR" \
                 -rpcport="$DEV_RPCPORT" getblockcount 2>/dev/null || true)"
             agent="$(timeout 10 "$CLI" -datadir="$DEV_DATADIR" \
                 -rpcport="$DEV_RPCPORT" agent 2>/dev/null || true)"
-            observed_source_id="$(json_first_string_field \
-                "$agent" source_id_sha256)"
-            if is_uint "$height" && [ "$height" -ge "$SNAPSHOT_HEIGHT" ] &&
-               printf '%s' "$agent" | grep -qE '"schema"[[:space:]]*:[[:space:]]*"zcl\.public_status\.v[23]"' &&
-               [ "$observed_source_id" = "$CURRENT_SOURCE_ID" ]; then
+            frontier="$(timeout 10 "$CLI" -datadir="$DEV_DATADIR" -rpcport="$DEV_RPCPORT" dumpstate reducer_frontier 2>/dev/null || true)"
+            hstar="$(printf '%s\n' "$frontier" | "$JSONQ" get state.hstar 2>/dev/null || true)"
+            observed_source_id="$(printf '%s\n' "$agent" |
+                "$JSONQ" get source_id_sha256 2>/dev/null || true)"
+            pid_after="$(service_pid 2>/dev/null || true)"
+            if is_uint "$height" && is_uint "$hstar" &&
+               [ "$height" -ge "$hstar" ] && [ "$hstar" -gt "$SNAPSHOT_HEIGHT" ] &&
+               { printf '%s\n' "$agent" | "$JSONQ" eq schema zcl.public_status.v2 ||
+                 printf '%s\n' "$agent" | "$JSONQ" eq schema zcl.public_status.v3; } &&
+               [ "$observed_source_id" = "$CURRENT_SOURCE_ID" ] &&
+               [ "$pid_after" = "$pid" ]; then
                 return 0
             fi
         fi
@@ -621,15 +631,6 @@ verify_recovery_default()
         [ "$now" -lt "$deadline" ] || return 1
         sleep 1
     done
-}
-
-verify_recovery()
-{
-    if [ -n "${ZCL_DEV_RECOVERY_VERIFY_COMMAND:-}" ]; then
-        /bin/sh -c "$ZCL_DEV_RECOVERY_VERIFY_COMMAND"
-    else
-        verify_recovery_default
-    fi
 }
 
 restore_dropin()
@@ -849,7 +850,7 @@ apply_recovery()
     service_reset_failed
     service_start
 
-    if ! verify_recovery; then
+    if ! verify_recovery_default; then
         rollback_datadir_swap
         die "fresh dev lane did not prove SHA3/header-bound seed plus RPC readiness; old datadir restored and service left stopped"
     fi

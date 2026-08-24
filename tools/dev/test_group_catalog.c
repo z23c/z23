@@ -41,6 +41,17 @@ static const char *const g_integration_only[] = {
     NULL,
 };
 
+struct proof_contract_row {
+    const char *full_id;
+    enum zcl_test_proof_contract contract;
+};
+
+static const struct proof_contract_row g_proof_contracts[] = {
+#define ZCL_TEST_PROOF_CONTRACT(full_id_, contract_) {full_id_, contract_},
+#include "test_proof_contracts.def"
+#undef ZCL_TEST_PROOF_CONTRACT
+};
+
 size_t zcl_test_group_catalog_count(void)
 {
     return sizeof(g_test_groups) / sizeof(g_test_groups[0]);
@@ -72,6 +83,34 @@ bool zcl_test_group_requires_exclusive_run(const char *full_id)
            strcmp(full_id, "test_simnet_perf") == 0 ||
            strcmp(full_id, "test_replay_canary_verdict") == 0 ||
            strcmp(full_id, "test_test_group_selector") == 0;
+}
+
+enum zcl_test_proof_contract
+zcl_test_group_proof_contract(const char *full_id)
+{
+    if (!full_id || !zcl_test_group_catalog_contains(full_id))
+        return ZCL_TEST_PROOF_NONE;
+    for (size_t i = 0; i < sizeof(g_proof_contracts) /
+                            sizeof(g_proof_contracts[0]); i++)
+        if (strcmp(g_proof_contracts[i].full_id, full_id) == 0)
+            return g_proof_contracts[i].contract;
+    return ZCL_TEST_PROOF_NONE;
+}
+
+bool zcl_test_group_proof_contracts_valid(void)
+{
+    for (size_t i = 0; i < sizeof(g_proof_contracts) /
+                            sizeof(g_proof_contracts[0]); i++) {
+        if (!zcl_test_group_catalog_contains(g_proof_contracts[i].full_id) ||
+            g_proof_contracts[i].contract <= ZCL_TEST_PROOF_NONE ||
+            g_proof_contracts[i].contract > ZCL_TEST_PROOF_EVENT_LOG_BENCH)
+            return false;
+        for (size_t j = 0; j < i; j++)
+            if (strcmp(g_proof_contracts[i].full_id,
+                       g_proof_contracts[j].full_id) == 0)
+                return false;
+    }
+    return true;
 }
 
 bool zcl_test_group_source_is_semantic_leaf(const char *path)

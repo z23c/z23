@@ -19,6 +19,7 @@
 #include "storage/disk_block_io.h"
 #include "storage/progress_store.h"
 #include "core/amount.h"
+#include "json/json.h"
 #include "util/boot_scan.h"
 #include <sqlite3.h>
 #include <string.h>
@@ -134,6 +135,99 @@ static int test_plan_records_failed_state_in_boot_snapshot(void) {
         ASSERT(snap.plan_next_state == (int)CHAIN_RESTORE_FAILED);
         ASSERT(snap.plan_should_skip_activate == true);
         ASSERT(strstr(snap.plan_reason, "height unknown") != NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* H3: assisted snapshot recovery must consume a typed dumpstate proof rather
+ * than reconstructing boot success from node.log prose.  The proof is absent
+ * until the boot path has completed every verified reseed step. */
+static int test_assisted_snapshot_proof_defaults_fail_closed(void) {
+    int failures = 0;
+    TEST("dumpstate boot: assisted snapshot proof defaults fail closed") {
+        struct json_value out = {0};
+        ASSERT(chain_restore_dump_state_json(&out, NULL));
+        const struct json_value *proof =
+            json_get(&out, "assisted_snapshot_load");
+        ASSERT(proof != NULL);
+        ASSERT(proof->type == JSON_OBJ);
+        ASSERT(!json_get_bool(json_get(proof, "complete")));
+        ASSERT(!json_get_bool(json_get(proof, "body_sha3_verified")));
+        ASSERT(!json_get_bool(json_get(proof,
+                                       "embedded_frontier_verified")));
+        ASSERT(!json_get_bool(json_get(proof, "reseed_committed")));
+        ASSERT(json_get_int(json_get(proof, "seed_height")) == -1);
+        ASSERT(json_get_int(json_get(proof, "record_count")) == 0);
+        ASSERT(strcmp(json_get_str(json_get(proof, "payload_sha3")), "") ==
+               0);
+        ASSERT(strcmp(json_get_str(json_get(proof, "anchor_block_hash")),
+                      "") == 0);
+        ASSERT(strcmp(json_get_str(json_get(proof, "artifact_sha256")), "") ==
+               0);
+        ASSERT(strcmp(json_get_str(json_get(proof, "snapshot_path")), "") ==
+               0);
+        json_free(&out);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_assisted_snapshot_proof_binds_verified_reseed(void) {
+    int failures = 0;
+    TEST("dumpstate boot: assisted snapshot proof binds verified reseed") {
+        const char *path = "/tmp/z23-test/utxo-seed-3170000.snapshot";
+        struct json_value out = {0};
+
+        chain_restore_record_assisted_snapshot_load(true, false, true,
+                                                    3170000, 0, NULL, NULL,
+                                                    NULL, path);
+        ASSERT(chain_restore_dump_state_json(&out, NULL));
+        const struct json_value *proof =
+            json_get(&out, "assisted_snapshot_load");
+        ASSERT(proof != NULL);
+        ASSERT(!json_get_bool(json_get(proof, "complete")));
+        ASSERT(json_get_bool(json_get(proof, "body_sha3_verified")));
+        ASSERT(!json_get_bool(json_get(proof,
+                                       "embedded_frontier_verified")));
+        ASSERT(json_get_bool(json_get(proof, "reseed_committed")));
+        json_free(&out);
+
+        static const uint8_t payload_sha3[32] = {0xA5};
+        static const uint8_t anchor_hash[32] = {0x5A};
+        static const uint8_t artifact_sha256[32] = {0x3C};
+        chain_restore_record_assisted_snapshot_load(true, true, true,
+                                                    3170000, 7,
+                                                    payload_sha3, anchor_hash,
+                                                    artifact_sha256, path);
+        memset(&out, 0, sizeof(out));
+        ASSERT(chain_restore_dump_state_json(&out, NULL));
+        proof = json_get(&out, "assisted_snapshot_load");
+        ASSERT(proof != NULL);
+        ASSERT(json_get_bool(json_get(proof, "complete")));
+        ASSERT(json_get_int(json_get(proof, "seed_height")) == 3170000);
+        ASSERT(json_get_int(json_get(proof, "recorded_unix")) > 0);
+        ASSERT(json_get_int(json_get(proof, "record_count")) == 7);
+        ASSERT(strcmp(json_get_str(json_get(proof, "payload_sha3")),
+                      "a500000000000000000000000000000000000000000000000000000000000000") == 0);
+        ASSERT(strcmp(json_get_str(json_get(proof, "anchor_block_hash")),
+                      "5a00000000000000000000000000000000000000000000000000000000000000") == 0);
+        ASSERT(strcmp(json_get_str(json_get(proof, "artifact_sha256")),
+                      "3c00000000000000000000000000000000000000000000000000000000000000") == 0);
+        ASSERT(strcmp(json_get_str(json_get(proof, "snapshot_path")), path) ==
+               0);
+        json_free(&out);
+
+        chain_restore_record_assisted_snapshot_load(
+            false, false, false, -1, 0, NULL, NULL, NULL, NULL);
+        memset(&out, 0, sizeof(out));
+        ASSERT(chain_restore_dump_state_json(&out, NULL));
+        proof = json_get(&out, "assisted_snapshot_load");
+        ASSERT(!json_get_bool(json_get(proof, "complete")));
+        ASSERT(strcmp(json_get_str(json_get(proof, "payload_sha3")), "") == 0);
+        ASSERT(strcmp(json_get_str(json_get(proof, "anchor_block_hash")), "") == 0);
+        ASSERT(strcmp(json_get_str(json_get(proof, "artifact_sha256")), "") == 0);
+        json_free(&out);
         PASS();
     } _test_next:;
     return failures;
@@ -1959,6 +2053,8 @@ int test_chain_restore_service(void) {
     failures += test_plan_null_hash();
     failures += test_plan_no_utxos();
     failures += test_plan_records_failed_state_in_boot_snapshot();
+    failures += test_assisted_snapshot_proof_defaults_fail_closed();
+    failures += test_assisted_snapshot_proof_binds_verified_reseed();
     failures += test_plan_snapshot_source();
     /* Execution tests */
     failures += test_execute_anchor_creation();

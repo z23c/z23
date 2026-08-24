@@ -59,10 +59,12 @@ ONION_WAIT=${PAIR_WATCH_ONION_WAIT:-60}
 RPC_WAIT=${PAIR_WATCH_RPC_WAIT:-60}
 PAIR_POLL=${PAIR_WATCH_POLL:-150}
 ISO_KIND=pairwatch
+PROBE_QUAD_FLOOR=39250
 PROBE_PORT_BASE=${PAIR_WATCH_PORT_BASE:-39250}
 PROBE_PORT_QUAD_ATTEMPTS=${PAIR_WATCH_PORT_QUAD_ATTEMPTS:-32}
 ISO_PORT_BASE=$PROBE_PORT_BASE
 ISO_PEER_PORT_BASE=""
+ISO_FLEET_DIR="$REPO_ROOT/deploy/devfleet"
 SELFTEST=0
 LIVE_PROBE_DEFAULT="${XDG_STATE_HOME:-$HOME/.local/state}/zclassic23-referee/pair_probe.jsonl"
 
@@ -99,9 +101,9 @@ num_or_null() {
 named_verdict() {
     case ${STAGE:-env} in
         env) echo ENV_MISSING_BINARY ;;
+        ports) echo PORT_QUAD_EXHAUSTED ;;
         spawn_a) echo SPAWN_A_FAILED ;;
         rpc_a) echo RPC_A_NOT_READY ;;
-        ports) echo PORT_QUAD_EXHAUSTED ;;
         onion)
             if [ -n "${ONION_ADDR:-}" ]; then
                 echo DESCRIPTOR_NOT_UPLOADED
@@ -300,6 +302,11 @@ fi
 # shellcheck source=tools/scripts/isolated_node_env.sh
 . "$REPO_ROOT/tools/scripts/isolated_node_env.sh"
 
+# Unit files own their published P2P_PORT values even while stopped. Add
+# those ports to the same refuse-set used by the bounded quad allocator
+# before inspecting any candidate.
+iso_append_published_fleet_ports
+
 probe_port_is_listening() {
     local p=$1
     ss -tlnH "sport = :$p" 2>/dev/null | grep -q .
@@ -420,6 +427,33 @@ if [ "$SELFTEST" = 1 ]; then
     CLIENT_TOR_READY=false
     INTRODUCE1_SEEN=false RENDEZVOUS1_SEEN=false CIRCUIT_READY=false P2P_FRAMING_SEEN=false
     st_check "env miss is ENV_MISSING_BINARY" ENV_MISSING_BINARY "$(named_verdict)"
+    STAGE=ports
+    st_check "no free probe quad is PORT_QUAD_EXHAUSTED" PORT_QUAD_EXHAUSTED "$(named_verdict)"
+    if [ "$PROBE_QUAD_FLOOR" = 39250 ]; then
+        echo "  ok: probe quad floor is 39250"
+    else
+        echo "  FAIL: probe quad floor is $PROBE_QUAD_FLOOR (want 39250)"
+        st_fail=1
+    fi
+    if probe_port_is_reserved 39360; then
+        echo "  ok: published node2 P2P 39360 is reserved"
+    else
+        echo "  FAIL: published node2 P2P 39360 must never be a bind candidate"
+        st_fail=1
+    fi
+    if probe_port_is_reserved 39150; then
+        echo "  ok: published node3 P2P 39150 is reserved"
+    else
+        echo "  FAIL: published node3 P2P 39150 must never be a bind candidate"
+        st_fail=1
+    fi
+    if [ "$PROBE_QUAD_FLOOR" -ge 39250 ] &&
+       ! probe_port_is_reserved 39250; then
+        echo "  ok: documented probe base 39250 is not fleet-owned"
+    else
+        echo "  FAIL: documented probe base 39250 is forbidden"
+        st_fail=1
+    fi
     STAGE=spawn_a
     st_check "spawn A miss is SPAWN_A_FAILED" SPAWN_A_FAILED "$(named_verdict)"
     STAGE=rpc_a
@@ -524,16 +558,6 @@ iso_cleanup() {
         append_probe || true
     fi
     _iso_cleanup_inner
-    # Reap both background jobs after the isolation helper has terminated
-    # their process groups. Without an explicit wait, Bash can print a late
-    # "Killed" job notification after an otherwise-green probe, which looks
-    # like a node crash and makes automated output needlessly ambiguous.
-    if [ -n "${ISO_PEER_PID:-}" ]; then
-        wait "$ISO_PEER_PID" 2>/dev/null || true
-    fi
-    if [ -n "${ISO_NODE_PID:-}" ]; then
-        wait "$ISO_NODE_PID" 2>/dev/null || true
-    fi
 }
 
 # ── A: listen + tor + onion-persist (not iso_spawn_node: that is -regtest)
@@ -550,6 +574,10 @@ setsid "$ISO_NODE_BIN" \
     </dev/null >"$ISO_DD/node.log" 2>&1 &
 ISO_NODE_PID=$!
 ISO_PGID="$ISO_NODE_PID"
+# The cleanup trap retains the PID/PGID and remains the sole lifetime owner.
+# Remove the child only from Bash's job table so intentional trap teardown
+# cannot print a misleading asynchronous "Killed" notification.
+disown "$ISO_NODE_PID" 2>/dev/null || true
 if [ -z "$ISO_NODE_PID" ] || ! kill -0 "$ISO_NODE_PID" 2>/dev/null; then
     VERDICT=SPAWN_A_FAILED
     append_probe
@@ -613,6 +641,9 @@ setsid "$ISO_NODE_BIN" \
     </dev/null >"$ISO_PEER_DD/node.log" 2>&1 &
 ISO_PEER_PID=$!
 ISO_PEER_PGID="$ISO_PEER_PID"
+# As with A, disown changes only Bash job reporting. The recorded process
+# group is still terminated by the fail-closed isolation cleanup trap.
+disown "$ISO_PEER_PID" 2>/dev/null || true
 if [ -z "$ISO_PEER_PID" ] || ! kill -0 "$ISO_PEER_PID" 2>/dev/null; then
     VERDICT=SPAWN_B_FAILED
     append_probe

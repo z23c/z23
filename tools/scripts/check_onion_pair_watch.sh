@@ -47,6 +47,12 @@ fi
 if grep -E '^[[:space:]]*iso_spawn_node( |$)' "$WATCH" >/dev/null 2>&1; then
     die "onion_pair_watch.sh must not call iso_spawn_node (that helper is -regtest)"
 fi
+if ! grep -F 'disown "$ISO_NODE_PID"' "$WATCH" >/dev/null 2>&1; then
+    die "onion_pair_watch.sh must suppress intentional primary cleanup job notices"
+fi
+if ! grep -F 'disown "$ISO_PEER_PID"' "$WATCH" >/dev/null 2>&1; then
+    die "onion_pair_watch.sh must suppress intentional peer cleanup job notices"
+fi
 if ! grep -F 'PAIR_WATCH_PORT_BASE:-39250' "$WATCH" >/dev/null 2>&1; then
     die "onion_pair_watch.sh must rent probe quads from documented base 39250"
 fi
@@ -124,6 +130,18 @@ for signal in \
 done
 if ! grep -E 'PAIR_WATCH_POLL:-[0-9]+' "$WATCH" >/dev/null 2>&1; then
     die "onion_pair_watch.sh missing PAIR_WATCH_POLL default"
+fi
+if ! grep -F 'PROBE_QUAD_FLOOR=39250' "$WATCH" >/dev/null 2>&1; then
+    die "onion_pair_watch.sh must bind only the documented 39250+ probe quad"
+fi
+if grep -E 'PAIR_WATCH_PORT_BASE:-[0-9]*39350' "$WATCH" >/dev/null 2>&1; then
+    die "onion_pair_watch.sh default must not be 39350 (peer quad binds node2 P2P 39360)"
+fi
+if ! grep -F 'P2P_PORT=' "$HELPER" >/dev/null 2>&1; then
+    die "isolation helper must read published P2P_PORT from deploy/devfleet/node*.txt"
+fi
+if grep -E 'for b in 39350' "$LOOP" >/dev/null 2>&1; then
+    die "onion_pair_watch_loop.sh must not prefer 39350 as a bind candidate"
 fi
 if grep -E 'git (commit|push)|deploy/devfleet/pair_probe\.jsonl' \
     "$WATCH" "$LOOP" >/dev/null 2>&1; then
