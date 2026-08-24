@@ -49,6 +49,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <string.h>
 #include <time.h>
 
 /* ── systemd watchdog heartbeat ─────────────────────────────────
@@ -100,16 +101,133 @@ bool boot_sd_watchdog_onion_blocks_ready(void)
     return !tor_integration_is_ready();
 }
 
+static bool    boot_sd_watchdog_supervisor_alive(void);
+static int64_t boot_sd_watchdog_freshness_bound_us(void);
+
+/* ── Earned readiness ────────────────────────────────────────────
+ *
+ * READY=1 used to rest on ONE fact: the onion descriptor was published
+ * (and on NO fact at all when onion was never requested — the gate
+ * returned false and the notify went out unconditionally). It was also
+ * emitted from the top of the pet loop, BEFORE and independent of the
+ * pet's own liveness decision, so a dead message pump, a dead dial
+ * scheduler, or a frozen supervisor sweep did not hold it back. A node
+ * could therefore tell systemd it was ready while nothing inside it was
+ * running.
+ *
+ * Now each leg is confirmed on its own evidence and the legs are ANDed.
+ * No leg is inferred from another — in particular a published descriptor
+ * says nothing about whether a peer can reach us, which is why the
+ * status line reports `rendezvous=unconfirmed` verbatim: nothing in this
+ * tree observes a completed rendezvous or an inbound circuit, so that
+ * fact is named as missing rather than quietly inferred from the
+ * descriptor. It is deliberately NOT part of the conjunction: a leg no
+ * observable can ever confirm would be a gate that can never pass.
+ *
+ * Withholding READY is not a kill. While a leg is unconfirmed the node
+ * keeps extending the Type=notify start timeout, exactly like a slow
+ * boot step does — a node that is slow to confirm a leg must not be
+ * SIGTERMed for being slow, and restarting cannot confirm a leg anyway.
+ */
+bool boot_ready_legs_all_confirmed(const struct boot_ready_legs *l)
+{
+    return l && l->descriptor && l->listener && l->pump && l->sweep;
+}
+
+void boot_ready_legs_describe(const struct boot_ready_legs *l,
+                              char *out, size_t cap)
+{
+    if (!out || cap == 0)
+        return;
+    if (!l) {
+        snprintf(out, cap, "legs=unavailable");
+        return;
+    }
+    snprintf(out, cap,
+             "descriptor=%s listener=%s pump=%s sweep=%s rendezvous=%s",
+             l->descriptor ? "yes" : "no",
+             l->listener   ? "yes" : "no",
+             l->pump       ? "yes" : "no",
+             l->sweep      ? "yes" : "no",
+             "unconfirmed");
+}
+
+static void boot_sd_watchdog_collect_ready_legs(struct boot_ready_legs *out)
+{
+    if (!out)
+        return;
+    struct boot_svc_ctx *svc = g_sd_watchdog_ctx;
+
+    /* Descriptor: onion published, or onion was never asked for. */
+    out->descriptor = !boot_sd_watchdog_onion_blocks_ready();
+
+    /* Sweep: the root supervisor is sweeping (or has not swept yet this
+     * boot, which is not a wedge). */
+    out->sweep = boot_sd_watchdog_supervisor_alive();
+
+    if (!svc || !svc->connman) {
+        /* No connman in this process shape (CLI/limited profile): the two
+         * network legs are not applicable, and an inapplicable leg must
+         * not be an unpassable one. */
+        out->listener = true;
+        out->pump     = true;
+        return;
+    }
+
+    /* Listener: a bound P2P socket, or listening was not requested. */
+    bool listen_requested = svc->app_ctx ? svc->app_ctx->listen : true;
+    out->listener = !listen_requested ||
+                    svc->connman->manager.num_listen_sockets > 0;
+
+    /* Pump: BOTH connman loops must have run recently. Unlike the
+     * watchdog gate, a connman that was never started does NOT count as
+     * fresh here — "the pump never started" is precisely the state this
+     * leg exists to refuse. */
+    out->pump = svc->connman->started &&
+                connman_runtime_progress_fresh(
+                    svc->connman, boot_sd_watchdog_freshness_bound_us());
+}
+
+/* One hour, same window boot_phase uses for a slow boot step. */
+#define BOOT_READY_EXTEND_TIMEOUT_USEC (3600ULL * 1000000ULL)
+
 static void boot_sd_watchdog_maybe_notify_ready(void)
 {
     if (atomic_load(&g_notify_ready_sent))
         return;
-    if (boot_sd_watchdog_onion_blocks_ready())
+
+    struct boot_ready_legs legs = {0};
+    boot_sd_watchdog_collect_ready_legs(&legs);
+    char desc[192];
+    boot_ready_legs_describe(&legs, desc, sizeof(desc));
+
+    if (!boot_ready_legs_all_confirmed(&legs)) {
+        char status[256];
+        snprintf(status, sizeof(status), "holding READY: %s", desc);
+        sd_notify_status(status);
+        (void)sd_notify_extend_timeout_usec(BOOT_READY_EXTEND_TIMEOUT_USEC);
+        /* Log only when the leg set changes, so a long hold costs one
+         * line per transition rather than one per pet period. Compared
+         * as a hash through one atomic: this runs on both the service
+         * start thread and the pet thread. */
+        static _Atomic uint32_t s_last_legs_hash;
+        uint32_t h = 2166136261u;
+        for (const char *p = desc; *p; p++)
+            h = (h ^ (uint32_t)(unsigned char)*p) * 16777619u;
+        if (atomic_exchange(&s_last_legs_hash, h) != h) {
+            printf("[sd-watchdog] holding READY=1: %s\n", desc);
+            fflush(stdout);
+        }
         return;
+    }
     if (!sd_notify_ready())
         return;
     atomic_store(&g_notify_ready_sent, true);
-    sd_notify_status("zclassic23 started");
+    char status[256];
+    snprintf(status, sizeof(status), "zclassic23 started (%s)", desc);
+    sd_notify_status(status);
+    printf("[sd-watchdog] READY=1 sent: %s\n", desc);
+    fflush(stdout);
 }
 
 /* Pillar 7: true unless the root supervisor's sweep heartbeat
@@ -351,13 +469,10 @@ bool boot_sd_watchdog_start(void *ctx)
      * if some future call site forgets the explicit check above. */
     sd_notify_set_health_check(boot_sd_watchdog_runtime_alive);
     atomic_store(&g_notify_ready_sent, false);
-    if (boot_sd_watchdog_onion_blocks_ready()) {
-        sd_notify_status("waiting for onion DESCRIPTOR PUBLICATION");
-        printf("[sd-watchdog] holding READY=1 until onion "
-               "DESCRIPTOR PUBLICATION\n");
-    } else {
-        boot_sd_watchdog_maybe_notify_ready();
-    }
+    /* Composed readiness: the call names every unconfirmed leg in the
+     * status line and in node.log, and holds READY until all of them are
+     * confirmed on their own evidence. */
+    boot_sd_watchdog_maybe_notify_ready();
 
     /* Pet half: dedicated thread — see the heartbeat section header for why
      * it must not ride the health ring. */

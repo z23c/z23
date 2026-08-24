@@ -11,6 +11,7 @@
 #include "platform/time_compat.h"
 #include "util/ar_step_readonly.h"
 #include "util/blocker.h"
+#include "util/boot_phase.h"
 #include "util/log_macros.h"
 #include "json/json.h"
 
@@ -30,6 +31,16 @@ static pthread_mutex_t g_bfr_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct bfr_mark g_bfr_marks[BOOT_FLIGHT_RECORDER_MAX_STAGES];
 static size_t g_bfr_count = 0;
 static bool g_bfr_overflow_warned = false;
+
+int64_t boot_mark_step(int64_t t0, const char *done, const char *next)
+{
+    struct timespec ts;
+    platform_time_monotonic_timespec(&ts);
+    int64_t now = (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    printf("[boot]   %-28s %lldms\n", done, (long long)(now - t0));
+    if (next) boot_step_enter(next); else boot_step_done();
+    return now;
+}
 
 void boot_flight_recorder_mark(const char *stage, int64_t ms)
 {

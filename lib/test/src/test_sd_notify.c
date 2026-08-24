@@ -42,6 +42,7 @@
 #include <poll.h>
 #include <stdlib.h>
 #include <sys/socket.h>
+#include <string.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -391,6 +392,72 @@ int test_sd_notify(void)
             !boot_sd_watchdog_test_keepalive_supervisor(false, true, false));
         SDN_CHECK("keepalive: runtime-alive keeps without progress",
             boot_sd_watchdog_test_keepalive_supervisor(true, true, false));
+    }
+
+    /* ── earned readiness: every leg confirmed on its own evidence ──
+     *
+     * The defect under regression: READY=1 rested on onion descriptor
+     * publication alone (and on nothing at all when onion was never
+     * requested), so a node whose message pump was dead, whose dial
+     * scheduler was dead, or whose supervisor sweep was frozen still
+     * told systemd it was ready. Readiness is now a conjunction of four
+     * independently-confirmed legs, and a single unconfirmed leg must
+     * withhold it. */
+    {
+        struct boot_ready_legs legs = {
+            .descriptor = true, .listener = true,
+            .pump = true, .sweep = true,
+        };
+        SDN_CHECK("ready: all four legs confirmed is ready",
+            boot_ready_legs_all_confirmed(&legs));
+
+        /* One leg at a time. Each must be sufficient to withhold READY,
+         * which is what "independently confirmed" means — no leg may be
+         * carried by its neighbours. */
+        for (int missing = 0; missing < 4; missing++) {
+            struct boot_ready_legs one = {
+                .descriptor = true, .listener = true,
+                .pump = true, .sweep = true,
+            };
+            switch (missing) {
+            case 0: one.descriptor = false; break;
+            case 1: one.listener   = false; break;
+            case 2: one.pump       = false; break;
+            case 3: one.sweep      = false; break;
+            default: break;
+            }
+            SDN_CHECK("ready: one unconfirmed leg withholds READY",
+                !boot_ready_legs_all_confirmed(&one));
+        }
+
+        /* The exact shape a descriptor-only claim would have produced:
+         * onion published, socket bound, pump dead. Must NOT read ready. */
+        struct boot_ready_legs dead_pump = {
+            .descriptor = true, .listener = true,
+            .pump = false, .sweep = true,
+        };
+        SDN_CHECK("ready: published descriptor does not carry a dead pump",
+            !boot_ready_legs_all_confirmed(&dead_pump));
+
+        SDN_CHECK("ready: NULL legs are not confirmed",
+            !boot_ready_legs_all_confirmed(NULL));
+
+        char desc[192];
+        boot_ready_legs_describe(&dead_pump, desc, sizeof(desc));
+        SDN_CHECK("ready: the hold names the unconfirmed leg",
+            strstr(desc, "pump=no") != NULL);
+        SDN_CHECK("ready: the hold names the confirmed legs too",
+            strstr(desc, "descriptor=yes") != NULL &&
+            strstr(desc, "listener=yes") != NULL &&
+            strstr(desc, "sweep=yes") != NULL);
+        /* Rendezvous has no observable in this tree. It must be reported
+         * as unconfirmed and never inferred from the descriptor. */
+        SDN_CHECK("ready: rendezvous is reported unconfirmed, not inferred",
+            strstr(desc, "rendezvous=unconfirmed") != NULL);
+
+        boot_ready_legs_describe(NULL, desc, sizeof(desc));
+        SDN_CHECK("ready: NULL legs describe as unavailable",
+            strstr(desc, "unavailable") != NULL);
     }
 
     /* ── real dedicated pet thread, health ring deliberately idle ── */

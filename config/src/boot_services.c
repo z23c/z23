@@ -49,6 +49,8 @@
 #include "health/heartbeat.h"
 #include "util/sd_notify.h"
 #include "util/alerts.h"
+#include "config/boot_flight_recorder.h"  /* boot_mark_step: marker + next step name */
+#include "util/boot_phase.h"              /* boot_step_enter / boot_step_fail */
 #include "util/boot_progress.h"
 #include "util/log_macros.h"
 #include "util/ar_step_readonly.h"
@@ -554,6 +556,11 @@ bool app_init_services(struct app_context *ctx,
     /* Report synchronous service sub-stage timing on the monotonic clock. */
     int64_t t_svc = svc_clock_ms();
 
+    /* Every step below names itself on the way IN (boot_mark_step), so one
+     * that never returns still reports; a node once wedged here four hours
+     * and the log named only the step BEFORE it. */
+    boot_step_enter("svc.init_wallet");
+
     node_db_sync_catchup_job_init(&svc->catchup_job);
     snapshot_tx_index_job_init(&svc->tx_index_job);
     snapsync_init(&svc->snapshot_sync, svc->node_db);
@@ -567,7 +574,7 @@ bool app_init_services(struct app_context *ctx,
     zcl_service_kernel_init(&svc->runtime_kernel);
     zcl_service_kernel_init(&svc->frontend_kernel);
     if (!boot_start_mempool_limits_service(svc))
-        return false;
+        return boot_step_fail("mempool_limits_service");
     svc->runtime.db_service = svc->db_service;
     svc->runtime.snapshot_sync = &svc->snapshot_sync;
     svc->runtime.mempool = svc->mempool;
@@ -789,7 +796,7 @@ bool app_init_services(struct app_context *ctx,
         if (!nr.ok) {
             fprintf(stderr, "[boot] NETWORK_READY boundary failed: %s\n",
                     nr.message);
-            return false;
+            return boot_step_fail("network_ready_boundary");
         }
     }
 
@@ -818,9 +825,7 @@ bool app_init_services(struct app_context *ctx,
             fprintf(stderr, "Warning: ZK params not loaded\n");
     }
 
-    printf("[boot]   %-28s %lldms\n", "svc.init_wallet",
-           (long long)(svc_clock_ms() - t_svc));
-    t_svc = svc_clock_ms();
+    t_svc = boot_mark_step(t_svc, "svc.init_wallet", "svc.file_sync");
 
     /* File sync BEFORE P2P — download block files first, then start P2P.
      * This prevents concurrent writes to block files (file sync + P2P
@@ -1098,20 +1103,16 @@ bool app_init_services(struct app_context *ctx,
     }
     skip_file_sync: ;
 
-    printf("[boot]   %-28s %lldms\n", "svc.file_sync",
-           (long long)(svc_clock_ms() - t_svc));
-    t_svc = svc_clock_ms();
+    t_svc = boot_mark_step(t_svc, "svc.file_sync", "svc.network_start");
 
     if (!boot_register_network_services(svc) ||
         !zcl_service_kernel_start_all(&svc->network_kernel)) {
         fprintf(stderr, "FATAL: failed to start P2P threads\n");
-        return false;
+        return boot_step_fail("p2p_threads");
     }
     sync_set_state(SYNC_FINDING_PEERS, "P2P started");
 
-    printf("[boot]   %-28s %lldms\n", "svc.network_start",
-           (long long)(svc_clock_ms() - t_svc));
-    t_svc = svc_clock_ms();
+    t_svc = boot_mark_step(t_svc, "svc.network_start", "svc.mmr_mmb_catchup");
 
     /* Advertise our external IP in version messages so peers relay us */
     if (ctx->external_ip)
@@ -1175,9 +1176,8 @@ bool app_init_services(struct app_context *ctx,
             }
         }
     }
-    printf("[boot]   %-28s %lldms\n", "svc.mmr_mmb_catchup",
-           (long long)(svc_clock_ms() - t_svc));
-    t_svc = svc_clock_ms();
+    t_svc = boot_mark_step(t_svc, "svc.mmr_mmb_catchup",
+                           "svc.register_rpc_cmds");
 
     register_blockchain_rpc_commands(svc->rpc_table);
 
@@ -1289,7 +1289,7 @@ bool app_init_services(struct app_context *ctx,
     zslp_rpc_set_datadir(ctx->datadir);
     register_zslp_rpc_commands(svc->rpc_table);
     boot_register_store_buyer_rpc(svc);
-    if (!register_dev_native_hotswap_rpc(svc->rpc_table, ctx->datadir, ctx->rpc_port)) return false;
+    if (!register_dev_native_hotswap_rpc(svc->rpc_table, ctx->datadir, ctx->rpc_port)) return boot_step_fail("dev_native_hotswap_rpc");
 
     /* Pre-compute fast sync snapshot offer in background */
     {
@@ -1313,12 +1313,15 @@ bool app_init_services(struct app_context *ctx,
     /* Initialize metrics observers for Prometheus /metrics */
     metrics_prometheus_init();
 
-    printf("[boot]   %-28s %lldms\n", "svc.register_rpc_cmds",
-           (long long)(svc_clock_ms() - t_svc));
-    t_svc = svc_clock_ms();
+    /* svc.core_liveness_reducer was THE UNNAMED GAP: supervisor_start, the
+     * condition registry, the self-heal runner and the staged-sync stage
+     * inits ran between two markers with no name, so a hang here left the
+     * log sitting on `svc.register_rpc_cmds` forever. */
+    t_svc = boot_mark_step(t_svc, "svc.register_rpc_cmds",
+                           "svc.core_liveness_reducer");
 
     boot_register_core_liveness_and_reducer(svc, params);
-
+    boot_step_enter("svc.frontend_tor_start");
     boot_configure_frontend_rpc(svc);
 
     /* frontend kernel start includes onion_tor bootstrap (Tor) — the
@@ -1342,9 +1345,8 @@ bool app_init_services(struct app_context *ctx,
                               "frontend_services_unavailable");
     }
 
-    printf("[boot]   %-28s %lldms\n", "svc.frontend_tor_start",
-           (long long)(svc_clock_ms() - t_svc));
-    t_svc = svc_clock_ms();
+    t_svc = boot_mark_step(t_svc, "svc.frontend_tor_start",
+                           "svc.peer_discover_self");
 
     /* Discover peer reachability */
     {
@@ -1371,9 +1373,8 @@ bool app_init_services(struct app_context *ctx,
         }
     }
 
-    printf("[boot]   %-28s %lldms\n", "svc.peer_discover_self",
-           (long long)(svc_clock_ms() - t_svc));
-    t_svc = svc_clock_ms();
+    t_svc = boot_mark_step(t_svc, "svc.peer_discover_self",
+                           "svc.runtime_and_catchup");
 
     if (svc->want_address_backfill) {
         /* Re-enabled: SIGSEGV was caused by SQLite memory pressure from
@@ -1458,8 +1459,7 @@ bool app_init_services(struct app_context *ctx,
         }
     }
 
-    printf("[boot]   %-28s %lldms\n", "svc.runtime_and_catchup",
-           (long long)(svc_clock_ms() - t_svc));
+    (void)boot_mark_step(t_svc, "svc.runtime_and_catchup", NULL);
 
     /* Booted successfully — every runtime service started (or degraded
      * loudly), EV_NODE_READY emitted, catchup/backfill spun up. Only NOW

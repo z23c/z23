@@ -426,6 +426,32 @@ void boot_sd_watchdog_stop(void *ctx);
  * PUBLICATION has not been observed — READY=1 must wait. */
 bool boot_sd_watchdog_onion_blocks_ready(void);
 
+/* ── Earned readiness: the legs of READY=1 ──────────────────────
+ * Each leg is confirmed from its OWN evidence; none is inferred from
+ * another. READY=1 goes out only when all four are confirmed.
+ *
+ *   descriptor — onion descriptor published, or onion never requested
+ *   listener   — a bound P2P listen socket, or listening not requested
+ *   pump       — connman started AND both its loops progressed recently
+ *   sweep      — the root supervisor sweep heartbeat is not frozen
+ *
+ * A completed rendezvous / inbound circuit has NO observable anywhere in
+ * this tree, so it is reported as `rendezvous=unconfirmed` and is
+ * deliberately absent from the conjunction: a leg nothing can ever
+ * confirm would be a gate that can never pass. */
+struct boot_ready_legs {
+    bool descriptor;
+    bool listener;
+    bool pump;
+    bool sweep;
+};
+
+/* Pure: true only when every leg is confirmed. NULL is not confirmed. */
+bool boot_ready_legs_all_confirmed(const struct boot_ready_legs *l);
+/* Pure: render the legs as `descriptor=yes listener=no ...` into `out`. */
+void boot_ready_legs_describe(const struct boot_ready_legs *l,
+                              char *out, size_t cap);
+
 #ifdef ZCL_TESTING
 /* Test seam for the pure pet decision (lib/test/src/test_sd_notify.c). */
 bool boot_sd_watchdog_test_pet_decide(bool supervisor_alive, bool have_verdict,
