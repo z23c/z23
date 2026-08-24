@@ -345,6 +345,9 @@ static int test_native_catalog_resolution(void)
         ASSERT(zcl_test_group_proof_contract(
                    "test_reducer_block_ingest_gate") == ZCL_TEST_PROOF_STRESS);
         ASSERT(zcl_test_group_proof_contract(
+                   "test_reducer_forward_progress_gate") ==
+               ZCL_TEST_PROOF_STRESS);
+        ASSERT(zcl_test_group_proof_contract(
                    "test_event_log_kill9") == ZCL_TEST_PROOF_EVENT_LOG_KILL9);
         ASSERT(zcl_test_group_proof_contract(
                    "test_event_log_benchmark") ==
