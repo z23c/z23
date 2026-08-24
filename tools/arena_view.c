@@ -979,6 +979,9 @@ int main(int argc, char **argv)
     bool check_only = false;
     long frames_limit = 0; /* 0 = run until closed */
     const char *screenshot = NULL;
+    const char *shot_dir = NULL;
+    long shot_every = 1;
+    const char *shot_every_s = NULL;
     const char *frames_s = NULL;
     const char *seek_s = NULL;
     const char *cam_s = NULL;
@@ -1026,6 +1029,10 @@ int main(int argc, char **argv)
             cam_s = v;
         else if (strcmp(name, "--screenshot") == 0)
             screenshot = v;
+        else if (strcmp(name, "--screenshot-dir") == 0)
+            shot_dir = v;
+        else if (strcmp(name, "--screenshot-every") == 0)
+            shot_every_s = v;
         else {
             av_err("unknown argument", a);
             av_usage(stderr);
@@ -1066,6 +1073,19 @@ int main(int argc, char **argv)
     }
     if (screenshot && !check_only && frames_limit <= 0) {
         av_err("--screenshot requires --frames", "see usage");
+        return 2;
+    }
+    if (shot_every_s) {
+        char *end = NULL;
+        shot_every = strtol(shot_every_s, &end, 10);
+        if (!end || *end || shot_every < 1) {
+            av_err("--screenshot-every needs a positive integer",
+                   shot_every_s);
+            return 2;
+        }
+    }
+    if (shot_dir && !shot_dir[0]) {
+        av_err("--screenshot-dir needs a directory path", shot_dir);
         return 2;
     }
 
@@ -1157,14 +1177,23 @@ int main(int argc, char **argv)
         av_draw_hud(&vw);
         if (IsTextureValid(hosted_tex))
             av_draw_hosted(&hosted_tex, &vw);
+        const char *shot_path = NULL;
+        char shot_name[512];
         if (screenshot && frames_limit > 0 && frame + 1 == frames_limit) {
+            shot_path = screenshot;
+        } else if (shot_dir && frame % shot_every == 0) {
+            snprintf(shot_name, sizeof(shot_name), "%s/frame_%08ld.png",
+                     shot_dir, frame);
+            shot_path = shot_name;
+        }
+        if (shot_path) {
             /* TakeScreenshot() has no error reporting. Flush the 2D
              * batch first so HUD vertices are in the GL backbuffer. */
             int sw = GetScreenWidth(), sh = GetScreenHeight();
             rlDrawRenderBatchActive();
             unsigned char *rawpx = rlReadScreenPixels(sw, sh);
             if (!rawpx) {
-                av_err("backbuffer read failed", screenshot);
+                av_err("backbuffer read failed", shot_path);
                 io_failed = true;
             } else {
                 Color *px = (Color *)rawpx;
@@ -1173,8 +1202,8 @@ int main(int argc, char **argv)
                                .height = sh,
                                .mipmaps = 1,
                                .format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 };
-                if (!ExportImage(shot, screenshot)) {
-                    av_err("PNG write failed", screenshot);
+                if (!ExportImage(shot, shot_path)) {
+                    av_err("PNG write failed", shot_path);
                     io_failed = true;
                 }
                 MemFree(px);

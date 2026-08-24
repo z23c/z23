@@ -95,12 +95,20 @@ your screen, before anyone has published anything.
 
 ---
 
-## The flagship
+## The game on the cover
 
-![the flagship dogfight: the red ace turns, fires, and wins over the grid city](docs/assets/z23-flyover-hero.gif)
+Every good box shows the toy. This one flies.
 
-The flagship is an application you are actually using. Fly it. Ask for a change.
-See the new behavior. Keep that exact version. Share it peer to peer.
+`zdogace` is a real-time 3D dogfight: two teams of AI pilots over a neon grid
+city. Nothing in that picture is faked for marketing — the HUD stamps the
+replay and state roots every frame was re-derived from, the same
+verify-don't-trust discipline the node applies to blocks and packages. The
+game is an ordinary C23 app assembled from small commons packages: the arena,
+the flight model, the pilots.
+
+![the red ace turns, fires, and takes the match — a verified replay, 30 fps](docs/assets/z23-flyover-hero.gif)
+
+Ask for a change. See it fly. Keep that exact version. Share it peer to peer.
 
 > *"Make the aircraft turn faster."*
 > *"Add a blue engine trail."*
