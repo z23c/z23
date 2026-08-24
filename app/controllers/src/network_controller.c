@@ -1,6 +1,5 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Distributed under the MIT software license, see the accompanying
- * file COPYING or http://www.opensource.org/licenses/mit-license.php. */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0. Distributed under the
+ * MIT software license; see COPYING or opensource.org/license/mit. */
 
 #include "platform/time_compat.h"
 #include "controllers/agent_controller.h"
@@ -250,10 +249,8 @@ static void push_addnode_status(struct json_value *result,
                              cm->addnode_tcp_failures[i]);
             json_push_kv_int(&entry, "protocol_failures",
                              cm->addnode_protocol_failures[i]);
-            /* Self-healing (RETIRE/HARVEST, net/connman.h): a retired
-             * addnode stays in the ledger (never removed) but is excluded
-             * from dial rotation; revivable by one manual dial success or
-             * an operator `addnode add` re-add. */
+            /* Retired addnodes remain recorded but undialed until a manual
+             * success or operator re-add revives them. */
             json_push_kv_bool(&entry, "retired", cm->addnode_retired[i]);
             json_push_kv_int(&entry, "retired_at",
                              cm->addnode_retired_at[i]);
@@ -628,7 +625,6 @@ static bool rpc_getpeerinfo(const struct json_value *params, bool help,
         double ping_ms = (double)node->ping_usec_time / 1000000.0;
         json_push_kv_real(&entry, "pingtime", ping_ms);
 
-        /* State machine fields — full observability */
         json_push_kv_str(&entry, "state",
                           peer_state_name(node->state));
         json_push_kv_int(&entry, "state_id", (int64_t)node->state);
@@ -640,9 +636,8 @@ static bool rpc_getpeerinfo(const struct json_value *params, bool help,
             json_push_kv_real(&entry, "avg_latency_ms",
                                (double)node->avg_latency_us / 1000.0);
 
-        /* Classification stays on the list row. The per-peer lifecycle blob
-         * lives on dumpstate peer_lifecycle — embedding it here made
-         * core.network.peers.list fit only two of ~29 live peers. */
+        /* Keep classification here; full lifecycle stays in its dumpstate so
+         * this bounded response can represent the whole peer list. */
         {
             bool is_mb = false, is_z23 = false;
             msg_version_classify_peer(node->sub_ver, node->services,
@@ -739,8 +734,7 @@ static bool rpc_addnode(const struct json_value *params, bool help,
 
     struct net_service svc;
     if (net_name_is_onion(node_str)) {
-        /* Operator-directed onion peer: parse locally, NEVER resolve via
-         * DNS and never fall back to clearnet. */
+        /* Parse operator onion peers locally; never fall back to DNS. */
         if (!lookup_onion(node_str, &svc,
                           ctx->connman->manager.default_port)) {
             json_set_str(result,
@@ -756,7 +750,6 @@ static bool rpc_addnode(const struct json_value *params, bool help,
     struct net_address addr;
     net_address_init(&addr);
     addr.svc = svc;
-
     if (strcmp(cmd, "remove") == 0) {
         if (!connman_remove_addnode(ctx->connman, &addr)) {
             json_set_str(result, "addnode entry not found");
@@ -768,7 +761,6 @@ static bool rpc_addnode(const struct json_value *params, bool help,
 
     if (strcmp(cmd, "onetry") == 0 || strcmp(cmd, "add") == 0) {
         char host[NET_ADDR_STR_MAX + 1];
-
         net_addr_to_string(&addr.svc.addr, host, sizeof(host));
         connman_add_seed_node(ctx->connman, host, addr.svc.port);
 
