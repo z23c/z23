@@ -943,6 +943,18 @@ int main(int argc, char **argv)
     if (cache_mode != CACHE_OFF) {
         for (size_t i = 0; i < g_num_groups; i++) {
             if (results[i].skipped) continue;
+            /* Proof policy is applied in the child after the ordinary cache
+             * key is computed. Never consult or populate that policy-blind
+             * keyspace for an activated proof: exact push authority must
+             * execute under the requested environment every time. */
+            if (activate_proof_contracts &&
+                zcl_test_group_proof_contract(g_groups[i].name) !=
+                    ZCL_TEST_PROOF_NONE) {
+                probes[i].code = TESTCACHE_R_ACTIVE_PROOF_CONTRACT;
+                snprintf(probes[i].reason, sizeof(probes[i].reason),
+                         "activated exact proof runs fresh");
+                continue;
+            }
             testcache_probe_group(tc, g_groups[i].name, &probes[i]);
         }
         /* CACHE_ON: a provable stored PASS at the current key means the group

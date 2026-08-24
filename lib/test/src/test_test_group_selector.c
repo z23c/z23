@@ -539,17 +539,23 @@ static int test_runner_exact_selection(void)
 
         n = snprintf(command, sizeof(command),
                      "\"%s\" --jobs=1 "
-                     "--exact=test_chain_advance_atomicity "
-                     "--activate-proof-contracts --no-cache 2>&1", exe);
+                     "--exact=test_reducer_forward_progress_gate "
+                     "--activate-proof-contracts --cache 2>&1", exe);
         ASSERT(n > 0 && (size_t)n < sizeof(command));
-        rc = capture_command(command, out, sizeof(out));
-        dump_bad_rc("nested proof-contract activation", rc, 0, out);
-        ASSERT(rc == 0);
-        ASSERT(strstr(out,
-                      "proof contract group=test_chain_advance_atomicity "
-                      "env=ZCL_STRESS_TESTS") != NULL);
-        ASSERT(strstr(out, "groups_ran=1") != NULL);
-        ASSERT(strstr(out, "groups_failed=0 self_skips=0") != NULL);
+        for (int proof_run = 0; proof_run < 2; proof_run++) {
+            rc = capture_command(command, out, sizeof(out));
+            dump_bad_rc("nested proof-contract activation", rc, 0, out);
+            ASSERT(rc == 0);
+            ASSERT(strstr(out,
+                          "proof contract "
+                          "group=test_reducer_forward_progress_gate "
+                          "env=ZCL_STRESS_TESTS") != NULL);
+            ASSERT(strstr(out, "active-proof-contract") != NULL);
+            ASSERT(strstr(out, "cache PLAN — 0 cacheable, 0 cache HIT") !=
+                   NULL);
+            ASSERT(strstr(out, "groups_ran=1 groups_cached=0") != NULL);
+            ASSERT(strstr(out, "groups_failed=0 self_skips=0") != NULL);
+        }
 
         n = snprintf(command, sizeof(command),
                      "\"%s\" --activate-proof-contracts --no-cache 2>&1",

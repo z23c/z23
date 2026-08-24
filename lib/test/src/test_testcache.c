@@ -654,9 +654,9 @@ int test_testcache(void)
                            "focused receipt invalid reason=self_skips") &&
              file_contains("tools/agent_fast_ci.sh",
                            "focused receipt invalid reason=accounting"));
-    TC_CHECK("v3 key retires PASS records minted before skip rejection",
+    TC_CHECK("v4 key retires proof-policy-blind and pre-skip PASS records",
              file_contains("lib/test/src/testcache.c",
-                           "zcl.testcache.key.v3"));
+                           "zcl.testcache.key.v4"));
     /* The label has to describe the run, not the flag. Keying it on cache_mode
      * made `ZCL_TEST_CACHE=1 ... --only=<group>` report "mode=cached ...
      * groups_cached=0" and the (CACHED) headline for a run in which everything

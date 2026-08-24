@@ -472,11 +472,12 @@ static bool trc_compute_key(struct testcache *tc, const char *group_name,
     struct sha3_256_ctx ctx;
     sha3_256_init(&ctx);
 
-    /* v3: only skip-free executions may mint reusable PASS records. Retire
-     * v2 because it could store a zero-exit group that printed SKIP; the
-     * environment digest distinguished skip modes but did not make a skip a
-     * proof. v2 already added the coverage-gating environment over v1. */
-    static const char DOMAIN[] = "zcl.testcache.key.v3";
+    /* v4 retires v3 PASS records minted while activated proof contracts still
+     * shared this ordinary keyspace. Active proofs now bypass lookup/storage;
+     * retiring v3 also prevents one of those old records becoming reachable
+     * if its contract row is later removed. v3 first rejected skipped PASSes,
+     * and v2 added the coverage-gating environment over v1. */
+    static const char DOMAIN[] = "zcl.testcache.key.v4";
     sha3_256_write(&ctx, (const unsigned char *)DOMAIN, sizeof(DOMAIN)); /* +NUL */
 
     const char *tk = ZCL_TESTCACHE_TOOLKEY;
@@ -616,6 +617,8 @@ const char *testcache_reason_label(enum testcache_reason r)
     case TESTCACHE_R_NO_INCLUDE_GRAPH: return "no-include-graph";
     case TESTCACHE_R_GRAPH_STALE:      return "input-newer-than-include-graph";
     case TESTCACHE_R_CHANGED_INPUT:    return "changed-input-runs-fresh";
+    case TESTCACHE_R_ACTIVE_PROOF_CONTRACT:
+        return "active-proof-contract";
     case TESTCACHE_R__COUNT:           break;
     }
     return "unknown";
@@ -650,7 +653,7 @@ const char *testcache_toolkey(void)
     return ZCL_TESTCACHE_TOOLKEY;
 }
 
-/* Populate *out for group_name. Fail-open: any failure => uncacheable. */
+/* Populate *out for group_name. Fail-safe: any failure => uncacheable. */
 void testcache_probe_group(struct testcache *tc, const char *group_name,
                            struct testcache_probe *out)
 {

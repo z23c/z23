@@ -19,6 +19,7 @@
  *   - the depfile-derived include graph is absent entirely      -> UNCACHEABLE
  *   - any closure input is NEWER than the newest depfile the graph was built
  *     from, i.e. the graph cannot describe that input yet       -> UNCACHEABLE
+ *   - the runner activated an exact proof contract               -> UNCACHEABLE
  *   - only PASS verdicts are ever stored (a fail is never cached)
  * An UNCACHEABLE group ALWAYS runs.
  *
@@ -79,6 +80,7 @@ enum testcache_reason {
     TESTCACHE_R_NO_INCLUDE_GRAPH,  /* build/ carries no depfiles at all */
     TESTCACHE_R_GRAPH_STALE,       /* an input is newer than the include graph */
     TESTCACHE_R_CHANGED_INPUT,     /* resident snapshot closure reaches edit */
+    TESTCACHE_R_ACTIVE_PROOF_CONTRACT, /* activated exact proof always runs */
     TESTCACHE_R__COUNT
 };
 
