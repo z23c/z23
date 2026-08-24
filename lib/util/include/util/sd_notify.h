@@ -17,6 +17,7 @@
  *   sd_notify_ready()         — once when the node is fully initialized
  *   sd_notify_watchdog_*()    — periodic heartbeat, gated on root liveness
  *   sd_notify_status(msg)     — free-form status visible in systemctl
+ *   sd_notify_extend_timeout_usec() — keep a Type=notify start job alive
  *   sd_notify_stopping()      — once at shutdown
  *
  * WatchdogSec interaction: when the unit file sets WatchdogSec=N,
@@ -79,6 +80,12 @@ void sd_notify_set_health_check(sd_notify_health_check_fn fn);
 
 /* Send free-form "STATUS=...". Visible in `systemctl status`. */
 bool sd_notify_status(const char *msg);
+
+/* Send "EXTEND_TIMEOUT_USEC=<usec>". Type=notify start/stop jobs use this
+ * to keep systemd from killing a still-progressing boot (block-index load,
+ * coins hydrate, onion descriptor). `usec==0` is a no-op. No-op when
+ * NOTIFY_SOCKET is absent. */
+bool sd_notify_extend_timeout_usec(uint64_t usec);
 
 /* Send "STOPPING=1" + "STATUS=..." once when shutdown begins. */
 bool sd_notify_stopping(const char *reason);

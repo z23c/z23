@@ -4,7 +4,23 @@
 #include "util/boot_phase.h"
 #include "util/boot_scan.h"
 #include "util/boot_status.h"
+#include "util/sd_notify.h"
 #include "health/heartbeat.h"
+
+/* One hour. Each throttled PROGRESS line (and phase BEGIN) tells systemd
+ * the Type=notify start job is still alive so TimeoutStartSec cannot
+ * SIGTERM a boot that is still scanning the block index or hydrating
+ * coins. WatchdogSec does not run until READY=1. */
+#define BOOT_PHASE_EXTEND_TIMEOUT_USEC (3600ULL * 1000000ULL)
+
+static void boot_phase_notify_progress(const char *status)
+{
+    (void)sd_notify_init();
+    if (!sd_notify_is_active())
+        return;
+    (void)sd_notify_status(status ? status : "booting");
+    (void)sd_notify_extend_timeout_usec(BOOT_PHASE_EXTEND_TIMEOUT_USEC);
+}
 
 #include <stdatomic.h>
 #include <stdio.h>
@@ -42,6 +58,7 @@ void boot_phase_begin(struct boot_phase *p, const char *name)
 
     fprintf(stderr, "[boot-phase] BEGIN %s\n", p->name);  // obs-ok:boot-phase-trace-marker
     fflush(stderr);
+    boot_phase_notify_progress(p->name);
 
     /* Lazy-start the heartbeat sweeper. health_start() is idempotent
      * so multiple boot phases (or other subsystems) calling it is
@@ -122,6 +139,16 @@ void boot_progress_note(const char *label, uint64_t done, uint64_t total)
             "[boot-phase] PROGRESS %s %llu\n",
             label ? label : "(unnamed)", (unsigned long long)done);
     fflush(stderr);
+
+    char status[160];
+    if (total > 0)
+        snprintf(status, sizeof(status), "boot %s %llu/%llu",
+                 label ? label : "(unnamed)",
+                 (unsigned long long)done, (unsigned long long)total);
+    else
+        snprintf(status, sizeof(status), "boot %s %llu",
+                 label ? label : "(unnamed)", (unsigned long long)done);
+    boot_phase_notify_progress(status);
 }
 
 /* ──────────────────────────────────────────────────────────────────

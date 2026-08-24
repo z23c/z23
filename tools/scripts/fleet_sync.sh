@@ -8,7 +8,8 @@
 #   2. rebuilds when HEAD moved;
 #   3. asks systemd to restart the box's devfleet unit when the RUNNING
 #      daemon's baked source identity no longer matches the built binary, or
-#      when the unit is not active;
+#      when the unit is failed/inactive. Type=notify "activating" with a live
+#      MainPID is a boot, not a down unit — restarting it aborts IBD.
 #   4. rewrites deploy/devfleet/<box>.sync with the observed state — including
 #      how far behind origin/main this box is and how many consecutive
 #      cycles it has failed to fully sync — and publishes it to main,
@@ -167,6 +168,17 @@ devfleet_unit_load_state() {
 
 devfleet_unit_active() {
     systemctl --user is-active --quiet "$DEVFLEET_UNIT"
+}
+
+# Type=notify stays "activating" until READY=1 (onion descriptor published).
+# `systemctl is-active` is false in that state, which used to look like a
+# down unit and trigger restart — killing a still-loading block index.
+devfleet_boot_in_progress() {
+    local st pid
+    st="$(systemctl --user is-active "$DEVFLEET_UNIT" 2>/dev/null || true)"
+    [ "$st" = "activating" ] || return 1
+    pid="$(devfleet_unit_main_pid)"
+    [ "$pid" != 0 ] && [ -d "/proc/$pid" ]
 }
 
 devfleet_unit_main_pid() {
@@ -338,7 +350,15 @@ else
         # trigger rather than silently skipping a restart the box owes.
         RESTART_REASON="head_moved"
     fi
-    if ! devfleet_unit_active; then
+    if devfleet_boot_in_progress; then
+        if [ -n "$RESTART_REASON" ]; then
+            log "deferring $RESTART_REASON: Type=notify boot in progress (pid=$(devfleet_unit_main_pid))"
+            DEVFLEET_ACTION="deferred_boot:$RESTART_REASON"
+            RESTART_REASON=""
+        else
+            DEVFLEET_ACTION="boot_in_progress"
+        fi
+    elif ! devfleet_unit_active; then
         RESTART_REASON="unit_inactive"
     fi
 
