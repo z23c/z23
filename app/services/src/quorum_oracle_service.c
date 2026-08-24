@@ -431,3 +431,30 @@ void quorum_oracle_peer_votes_reset_for_test(void)
     pthread_mutex_unlock(&g_qo.lock);
 }
 #endif
+
+/* ── Read-only peer-vote copy-out (see the header) ────────────────────────
+ *
+ * Pure copy-out under g_qo.lock, a documented leaf. It reads the vote
+ * register and nothing else: no tally, no verdict, no counter, no policy
+ * call. An observation surface may republish these rows as peer CLAIMS,
+ * labelled as claims; it may not treat them as agreement. */
+int quorum_oracle_peer_votes_snapshot(struct qo_peer_vote_view *out,
+                                      size_t max)
+{
+    if (!out || max == 0)
+        return 0;
+    int n = 0;
+    pthread_mutex_lock(&g_qo.lock);
+    for (size_t i = 0; i < QO_MAX_PEER_VOTES && (size_t)n < max; i++) {
+        if (!g_qo.peer_votes[i].present)
+            continue;
+        out[n].peer_id   = g_qo.peer_votes[i].peer_id;
+        out[n].height    = g_qo.peer_votes[i].height;
+        out[n].unix_time = g_qo.peer_votes[i].unix_time;
+        snprintf(out[n].hash_hex, sizeof(out[n].hash_hex), "%s",
+                 g_qo.peer_votes[i].hash_hex);
+        n++;
+    }
+    pthread_mutex_unlock(&g_qo.lock);
+    return n;
+}

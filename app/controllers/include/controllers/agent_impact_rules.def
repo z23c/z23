@@ -1027,3 +1027,17 @@ AGENT_IMPACT_RULE("lib/session/src/agent_broker*.c|lib/session/src/agent_audit.c
  * policy checkpoints, command surface and catalog are one fail-closed slice. */
 AGENT_IMPACT_RULE("lib/vcs/src/space.c|lib/vcs/include/vcs/space.h|lib/vcs/src/space_scout.c|lib/vcs/include/vcs/space_scout.h|app/services/src/metaverse_space_service.c|app/services/include/services/metaverse_space_service.h|app/services/src/metaverse_space_scout_service.c|app/services/include/services/metaverse_space_scout_service.h|tools/command/native_metaverse_space_command.c|tools/command/native_metaverse_space_scout_command.c|tools/command/native_zcode_discovery.c|tools/command/native_zcode_discovery.h|config/src/boot_zcode_dht.c|config/include/config/boot_zcode_dht.h|config/src/boot_zcode_dht_record_rpc.c|config/commands/metaverse.def|lib/test/src/test_space.c|lib/test/src/test_space_scout.c", "space space_scout zcode_dht_record zcode_dht_service zcode_swarm_net command_registry_catalog make_lint_gates")
 AGENT_IMPACT_RULE("app/services/include/services/tip_agreement_watch.h|lib/test/src/test_tip_agreement_watch.c", "tip_agreement_watch make_lint_gates")
+
+/* Per-box mesh observation. Each node publishes what IT observed and readers
+ * compose; there is no judging box. The collector, the composer, the JSON
+ * shape, the diagnostics dumper, the site route and the controller are one
+ * fail-closed slice — a change to any of them can silently alter what a peer
+ * reads as another peer's claim. */
+AGENT_IMPACT_RULE("app/services/src/mesh_observation_collect.c|app/services/src/mesh_observation_compose.c|app/services/src/mesh_observation_json.c|app/services/src/mesh_observation_sample.c|app/services/include/services/mesh_observation.h|app/controllers/src/diagnostics_mesh_observation.c|app/controllers/src/observation_site_controller.c|app/controllers/include/controllers/observation_site_controller.h|lib/test/src/test_mesh_observation.c|lib/test/src/test_mesh_observation_compose.c", "mesh_observation mesh_observation_compose site_routes make_lint_gates")
+
+/* The site-route registry itself. site_routes.def is the single X-macro table
+ * every HTTP surface is declared in, so any lane that adds a page edits it and
+ * would otherwise fail closed as unmapped — which is what happened here. It is
+ * shared, not owned by one feature, so it gets its own rule rather than riding
+ * on whichever feature touched it last. */
+AGENT_IMPACT_RULE("lib/net/include/net/site_routes.def|lib/test/src/test_site_routes.c", "site_routes make_lint_gates")

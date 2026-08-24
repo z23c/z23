@@ -25,4 +25,17 @@ bool boot_register_network_monitor_service(struct zcl_service_kernel *k,
  * Returns the register result. */
 bool boot_register_network_crawler_service(struct zcl_service_kernel *k);
 
+/* Register the mesh_observation service: this node's own observation sampler
+ * plus the reader-side collector (services/mesh_observation.h). Reports only —
+ * it pronounces no verdict, gates no block, and feeds no watchdog. Returns the
+ * register result. */
+bool boot_register_mesh_observation_service(struct zcl_service_kernel *k);
+
+/* Register the whole network-observability family (monitor + crawler +
+ * mesh observation) on kernel k in one call, so the boot service table names
+ * the family and this module owns its members. Returns the AND of the three
+ * register results. */
+bool boot_register_network_observability_services(struct zcl_service_kernel *k,
+                                                  struct node_db *db);
+
 #endif /* ZCL_CONFIG_BOOT_NETWORK_MONITOR_H */

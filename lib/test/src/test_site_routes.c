@@ -10,14 +10,16 @@
  *
  *   1. Dispatch order: the def rows, in order, are exactly the pinned
  *      (id, prefix) list — store, /n/, /names, zcode, metaverse, blog,
- *      yardsale, /market/chunk.
+ *      yardsale, /market/chunk, /observation.json.
  *   2. Every row's cost class is a valid onion_route_class, and the
  *      per-row classes are pinned at their current values (names_gateway
  *      EXPENSIVE with the "name-gateway" puzzle key, everything else
  *      CHEAP with no key).
  *   3. Method flags: the POST surface is onion-only by construction — the
- *      pinned POST-flagged set is {store, names, yardsale}, store and
- *      market_chunk are the mounts absent from the HTTPS expansion, and
+ *      pinned POST-flagged set is {store, names, yardsale}, store,
+ *      market_chunk and observation are the mounts absent from the HTTPS
+ *      expansion (observation is a peer-to-peer document served to
+ *      nodes, never to a browser), and
  *      the HTTPS-served POST rows (names, yardsale) carry
  *      F_HTTPS|F_POST_ONION, i.e. GET only on that listener (it 405s
  *      non-GET/HEAD before dispatch).
@@ -63,6 +65,7 @@ static const struct { const char *id; const char *prefix; } k_rows[] = {
     { "blog",          "/blog"         },
     { "yardsale",      "/yardsale"     },
     { "market_chunk",  "/market/chunk" },
+    { "observation",   "/observation.json" },
 };
 #define K_ROW_COUNT (sizeof(k_rows) / sizeof(k_rows[0]))
 
@@ -215,7 +218,7 @@ int test_site_routes(void)
         order_ok = strcmp(g_zcl_site_routes[i].id, k_rows[i].id) == 0 &&
                    strcmp(g_zcl_site_routes[i].prefix, k_rows[i].prefix) == 0;
     SR_CHECK("dispatch order pinned (store,/n/,/names,zcode,metaverse,"
-             "blog,yardsale,/market/chunk)", order_ok);
+             "blog,yardsale,/market/chunk,/observation.json)", order_ok);
 
     /* 2. Cost classes valid + pinned; route keys pinned. */
     bool cost_ok = true;
@@ -268,19 +271,25 @@ int test_site_routes(void)
     for (size_t i = 0; i < g_zcl_site_routes_count; i++) {
         const char *id = g_zcl_site_routes[i].id;
         bool want_https = strcmp(id, "store") != 0 &&
-                          strcmp(id, "market_chunk") != 0;
+                          strcmp(id, "market_chunk") != 0 &&
+                          strcmp(id, "observation") != 0;
         bool has_https =
             (g_zcl_site_routes[i].flags & ZCL_SITE_F_HTTPS) != 0;
         if (want_https != has_https)
             https_set_ok = false;
     }
-    SR_CHECK("HTTPS set is every row except store and market_chunk",
-             https_set_ok);
+    SR_CHECK("HTTPS set is every row except store, market_chunk and "
+             "observation", https_set_ok);
     SR_CHECK("onion-only rows carry no HTTPS bit",
              sr_find("store") && sr_find("market_chunk") &&
+             sr_find("observation") &&
              !(sr_find("store")->flags & ZCL_SITE_F_HTTPS) &&
              !(sr_find("market_chunk")->flags & ZCL_SITE_F_HTTPS) &&
+             !(sr_find("observation")->flags & ZCL_SITE_F_HTTPS) &&
              (sr_find("market_chunk")->flags &
+              (ZCL_SITE_F_PREFIX_GUARD | ZCL_SITE_F_FAIL_CLOSED)) ==
+                 (ZCL_SITE_F_PREFIX_GUARD | ZCL_SITE_F_FAIL_CLOSED) &&
+             (sr_find("observation")->flags &
               (ZCL_SITE_F_PREFIX_GUARD | ZCL_SITE_F_FAIL_CLOSED)) ==
                  (ZCL_SITE_F_PREFIX_GUARD | ZCL_SITE_F_FAIL_CLOSED));
     SR_CHECK("HTTPS-served POST rows are GET-only there (F_HTTPS|"

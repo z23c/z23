@@ -66,6 +66,7 @@
 #include "vcs/package_swarm_status.h"
 #include "vcs/zcode_work_node.h"
 #include "controllers/messaging_controller.h"
+#include "controllers/observation_site_controller.h"
 #include "services/chain_evidence_authority_service.h"
 #include "services/gap_fill_service.h"
 #include "services/wallet_backup_service.h"

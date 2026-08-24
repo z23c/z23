@@ -25,6 +25,7 @@
 #define ZCL_SERVICES_QUORUM_ORACLE_SERVICE_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "util/result.h"
@@ -77,6 +78,32 @@ void quorum_oracle_record_peer_header_vote(uint32_t peer_id,
                                            const char hash_hex[65]);
 
 bool quorum_oracle_dump_state_json(struct json_value *out, const char *key);
+
+/* ── Read-only peer-vote copy-out (observation surfaces) ─────────────────
+ *
+ * One row per live peer-header vote the oracle has registered. This is a
+ * pure copy-out under the oracle's own leaf lock: it reads nothing else,
+ * writes nothing, and touches neither the tally nor the verdict. Added for
+ * services/mesh_observation.h, which republishes each row as a peer CLAIM —
+ * explicitly labelled as a claim, and cross-checked by the emitter against
+ * its own chain before anything downstream sees it.
+ *
+ * It deliberately does NOT expose or influence the quorum verdict. The
+ * oracle's own 2-of-3 shape (QO_SRC_LOCAL and QO_SRC_ZCLASSICD are the same
+ * box, and every peer collapses to one vote) is a separate defect on a
+ * separate lane; nothing here is a workaround for it. */
+#define QO_PEER_VOTE_VIEW_MAX 64
+
+struct qo_peer_vote_view {
+    uint32_t peer_id;
+    int      height;
+    char     hash_hex[65];
+    int64_t  unix_time;   /* wall clock when the vote was recorded */
+};
+
+/* Copies up to `max` present votes into out[]; returns the number copied. */
+int quorum_oracle_peer_votes_snapshot(struct qo_peer_vote_view *out,
+                                      size_t max);
 
 #ifdef ZCL_TESTING
 /* Clear only the in-memory peer-vote register. Tests use this to prove its
