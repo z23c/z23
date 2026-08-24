@@ -955,7 +955,7 @@ static bool tree_render_leaf(const char *command_path)
             strcmp(command_path, "ops.logs") == 0);
 }
 
-/* zcode.guide is a recipe: one sentence, one copyable start command. */
+/* zcode.guide is a recipe: one next action, one copyable start, the journey. */
 static void render_zcode_guide(struct buf *b, const struct zcl_cli_render_env *e,
                                const struct json_value *root)
 {
@@ -963,10 +963,19 @@ static void render_zcode_guide(struct buf *b, const struct zcl_cli_render_env *e
     buf_putc(b, '\n');
     const struct json_value *data = json_get(root, "data");
     const char *mission = json_get_str(json_get(data, "mission"));
+    const char *next = json_get_str(json_get(data, "next_action"));
+    const char *journey = json_get_str(json_get(data, "journey"));
+    const char *keep = json_get_str(json_get(data, "continue_rule"));
     if (mission && mission[0])
         emit_kv(b, e, 4, "do", mission);
+    if (next && next[0])
+        emit_kv(b, e, 4, "next", next);
     emit_kv(b, e, 4, "run",
             json_get_str(json_get(data, "start_command")));
+    if (journey && journey[0])
+        emit_kv(b, e, 4, "then", journey);
+    if (keep && keep[0])
+        emit_kv(b, e, 4, "keep", keep);
 }
 
 /* code.guide is a recipe, not a schema dump: four copyable commands. */
