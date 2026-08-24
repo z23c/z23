@@ -35,6 +35,7 @@
 #include "platform/time_compat.h"
 #include "util/sd_notify.h"
 #include "config/boot_internal.h"   /* boot_sd_watchdog_test_pet_decide */
+#include "net/tor_integration.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -188,6 +189,19 @@ static int sdn_observe_pet_thread(int fd, int64_t deadline_us,
 int test_sd_notify(void)
 {
     int failures = 0;
+
+    /* ── onion requested but not running must block READY=1 ─────── */
+    {
+        tor_integration_stop();
+        SDN_CHECK("READY not blocked when onion was never requested",
+            !boot_sd_watchdog_onion_blocks_ready());
+        tor_integration_mark_requested();
+        SDN_CHECK("READY blocked when -tor was requested but Tor is down",
+            boot_sd_watchdog_onion_blocks_ready());
+        tor_integration_stop();
+        SDN_CHECK("READY unblocked after stop clears the request latch",
+            !boot_sd_watchdog_onion_blocks_ready());
+    }
 
     /* ── silent no-op without NOTIFY_SOCKET ──────────────────────── */
     {

@@ -33,6 +33,7 @@ static pthread_t g_monitor_thread;
 static _Atomic bool g_tor_running = false;
 static _Atomic bool g_tor_ready = false;
 static _Atomic bool g_tor_dial_ready = false;
+static _Atomic bool g_tor_requested = false; /* operator asked for onion */
 static _Atomic bool g_tor_started = false;   /* true once tor thread spawn succeeds */
 static _Atomic bool g_tor_thread_done = false; /* true once tor thread returns */
 static _Atomic bool g_monitor_started = false;
@@ -1015,6 +1016,7 @@ bool tor_integration_start(const char *datadir, uint16_t p2p_port)
 
 void tor_integration_stop(void)
 {
+    atomic_store(&g_tor_requested, false);
     if (!atomic_exchange(&g_tor_started, false))
         return; /* Never started or already stopped */
 
@@ -1056,6 +1058,16 @@ bool tor_integration_is_dial_ready(void)
 bool tor_integration_is_enabled(void)
 {
     return atomic_load(&g_tor_running);
+}
+
+void tor_integration_mark_requested(void)
+{
+    atomic_store(&g_tor_requested, true);
+}
+
+bool tor_integration_is_requested(void)
+{
+    return atomic_load(&g_tor_requested);
 }
 
 /* ── Outbound .onion fetch ─────────────────────────────────── */

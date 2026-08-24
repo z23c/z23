@@ -63,6 +63,30 @@ static int test_tor_initial_state(void)
     return failures;
 }
 
+static int test_tor_requested_without_start(void)
+{
+    int failures = 0;
+    printf("test_tor_requested_without_start: ");
+
+    tor_integration_stop();
+    if (tor_integration_is_requested() || tor_integration_is_enabled()) {
+        printf("FAIL (requested/enabled after stop)\n");
+        return 1;
+    }
+    tor_integration_mark_requested();
+    if (!tor_integration_is_requested()) {
+        printf("FAIL (mark_requested did not stick)\n");
+        failures++;
+    } else if (tor_integration_is_enabled() || tor_integration_is_ready()) {
+        printf("FAIL (requested must not imply running)\n");
+        failures++;
+    } else {
+        printf("OK\n");
+    }
+    tor_integration_stop();
+    return failures;
+}
+
 static int test_tor_stop_when_not_running(void)
 {
     int failures = 0;
@@ -607,6 +631,7 @@ int test_tor(void)
     printf("\n=== Tor Integration Tests ===\n");
 
     failures += test_tor_initial_state();
+    failures += test_tor_requested_without_start();
     failures += test_tor_stop_when_not_running();
 
     /* torrc generation — bootstrap port derivation */

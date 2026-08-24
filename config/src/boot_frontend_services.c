@@ -31,6 +31,7 @@
 #include "util/util.h"
 #include "net/onion_service.h"
 #include "net/tor_integration.h"
+#include "util/log_macros.h"
 #include "rpc/httpserver.h"
 #include "chain/chainparams.h"
 #include "keys/key_io.h"
@@ -339,21 +340,24 @@ static bool boot_onion_tor_start(void *ctx)
         return true;
     }
 
+    tor_integration_mark_requested();
     tor_integration_configure_identity(svc->app_ctx->onion_persist,
                                        svc->app_ctx->onion_rotate);
     onion_service_start(svc->datadir);
     tor_integration_set_handler(onion_request_adapter, NULL);
     printf("Starting embedded Tor...\n");
     if (!tor_integration_start(svc->datadir,
-                               (uint16_t)svc->app_ctx->p2p_port)) {
-        fprintf(stderr, "Warning: Tor failed to start\n");
-    } else {
-        const char *onion = tor_integration_get_onion_address();
-        if (onion)
-            printf("Tor .onion address: %s\n", onion);
-        else
-            printf("Tor: bootstrapping...\n");
+                               (uint16_t)svc->app_ctx->p2p_port) ||
+        !tor_integration_is_enabled()) {
+        LOG_FAIL("onion_tor",
+                 "Tor was requested (-tor or onion-node) but did not start; "
+                 "refusing to report READY=1 as a no-onion node");
     }
+    const char *onion = tor_integration_get_onion_address();
+    if (onion)
+        printf("Tor .onion address: %s\n", onion);
+    else
+        printf("Tor: bootstrapping...\n");
     return true;
 }
 

@@ -69,6 +69,12 @@ bool tor_integration_is_dial_ready(void);
 /* Check if Tor was started (may still be bootstrapping). */
 bool tor_integration_is_enabled(void);
 
+/* Operator asked for onion (-tor or onion-node profile). Sticky until
+ * tor_integration_stop(). Distinct from is_enabled(): a requested onion
+ * that never started or whose thread died must not look like "Tor off". */
+void tor_integration_mark_requested(void);
+bool tor_integration_is_requested(void);
+
 /* Snapshot of the onion service's live virtual-port contract. This is the
  * authoritative C23 view of what embedded Tor was asked to expose and what
  * completed registration. Callers must not infer that an arbitrary loopback
