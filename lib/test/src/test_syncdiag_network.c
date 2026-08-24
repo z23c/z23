@@ -36,6 +36,8 @@ int syncdiag_cases_network(void)
                                                      "port_mapping");
         const struct json_value *routes = mapping
             ? json_get(mapping, "routes") : NULL;
+        const struct json_value *streams = json_get(&result,
+                                                     "outbound_streams");
 
         ok = ok && result.type == JSON_OBJ;
         ok = ok && strcmp(json_get_str(json_get(&result, "schema")),
@@ -53,6 +55,22 @@ int syncdiag_cases_network(void)
         ok = ok && json_get(mapping, "installed_route_count") != NULL;
         ok = ok && routes && routes->type == JSON_ARR;
         ok = ok && routes && json_size(routes) == 2;
+        ok = ok && streams && streams->type == JSON_OBJ;
+        ok = ok &&
+             strcmp(json_get_str(json_get(streams, "schema")),
+                    "zcl.onion_stream_stages.v1") == 0;
+        static const char *stream_counts[] = {
+            "dial_started", "stream_queued", "circuit_ready", "bridge_up",
+            "open_refused", "circuit_timeout", "circuit_torn_down",
+            "bridge_closed", "bytes_to_peer", "bytes_from_peer",
+            "peers_answered",
+        };
+        for (size_t i = 0;
+             ok && i < sizeof(stream_counts) / sizeof(stream_counts[0]); i++) {
+            const struct json_value *count = json_get(streams,
+                                                       stream_counts[i]);
+            ok = count && count->type == JSON_INT && json_get_int(count) >= 0;
+        }
         if (ok && strcmp(json_get_str(state), "ready") == 0) {
             const char *hostname = json_get_str(address);
             size_t hostname_len = strlen(hostname);

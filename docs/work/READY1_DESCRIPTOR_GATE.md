@@ -15,7 +15,7 @@ rpc_b_ready_s=56
 PAIR_PROBE=DESCRIPTOR_NOT_UPLOADED dial_attempted=true rendezvous_seen=true descriptor_uploaded=false
 ```
 
-Hostname existed. The client launched. Descriptor upload was never observed.
+Hostname existed. The client dialed. Descriptor upload was never observed.
 A real stranger who dials on hostname-file presence burns the same way.
 
 ## Does READY=1 gate on confirmed upload?
@@ -37,6 +37,8 @@ Yes. The systemd Type=notify path is not the probe path.
 `g_tor_dial_ready` becomes true at hostname so outbound circuits can
 pre-warm. It does not send `READY=1` and does not weaken
 `tor_integration_is_ready()`. Isolated pair-probe spawns have no
-`NOTIFY_SOCKET`, so they never send `READY=1`; their old launch gate was
-the hostname file. That is the probe defect this branch fixes. It is not a
-READY=1 contract miss for node2's bisect.
+`NOTIFY_SOCKET`, so they never send `READY=1`; their old dial gate was the
+hostname file. The corrected probe starts the target-free client Tor in
+parallel, then introduces the peer target only after descriptor upload and
+client-Tor readiness are both observed. That is the probe defect this branch
+fixes. It is not a READY=1 contract miss for node2's bisect.

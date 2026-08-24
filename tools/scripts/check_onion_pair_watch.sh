@@ -47,23 +47,81 @@ fi
 if grep -E '^[[:space:]]*iso_spawn_node( |$)' "$WATCH" >/dev/null 2>&1; then
     die "onion_pair_watch.sh must not call iso_spawn_node (that helper is -regtest)"
 fi
-if ! grep -F 'Dynhost stream: initiated stream' "$WATCH" >/dev/null 2>&1; then
-    die "onion_pair_watch.sh must observe this fork's Dynhost stream client log"
+if ! grep -F 'PAIR_WATCH_PORT_BASE:-39250' "$WATCH" >/dev/null 2>&1; then
+    die "onion_pair_watch.sh must rent probe quads from documented base 39250"
+fi
+if ! grep -F 'PAIR_WATCH_PORT_QUAD_ATTEMPTS' "$WATCH" >/dev/null 2>&1; then
+    die "onion_pair_watch.sh must bound its probe-quad search"
+fi
+if ! grep -F 'select_probe_port_quads' "$WATCH" >/dev/null 2>&1; then
+    die "onion_pair_watch.sh must select two free dedicated quads"
+fi
+if ! grep -F 'PORT_QUAD_EXHAUSTED' "$WATCH" >/dev/null 2>&1; then
+    die "onion_pair_watch.sh must name bounded port exhaustion"
+fi
+if ! grep -F 'ISO_PEER_PORT_BASE' "$HELPER" >/dev/null 2>&1; then
+    die "isolation helper must accept an explicitly rented peer quad"
+fi
+if grep -F 'pick_port_base()' "$LOOP" >/dev/null 2>&1; then
+    die "pair loop must not select a base by checking only one port"
+fi
+if grep -F -- '-addnode="${ONION_ADDR}:${ISO_PORT}"' "$WATCH" \
+    >/dev/null 2>&1; then
+    die "client Tor must bootstrap before the descriptor-gated onion dial"
 fi
 if ! grep -F 'DESCRIPTOR PUBLICATION observed' "$WATCH" >/dev/null 2>&1; then
-    die "onion_pair_watch.sh must gate client launch on DESCRIPTOR PUBLICATION observed"
+    die "onion_pair_watch.sh must recognize DESCRIPTOR PUBLICATION observed"
 fi
 if ! grep -F 'Uploaded hidden service descriptor' "$WATCH" >/dev/null 2>&1; then
     die "onion_pair_watch.sh must observe the HSDir status-200 upload line"
 fi
-# Launch order: descriptor_publication_observed must appear before STAGE=spawn_b.
-desc_line=$(grep -n 'descriptor_publication_observed' "$WATCH" | head -1 | cut -d: -f1)
-spawn_b_line=$(grep -n '^STAGE=spawn_b$' "$WATCH" | head -1 | cut -d: -f1)
-case $desc_line in ''|*[!0-9]*) die "could not find descriptor_publication_observed" ;; esac
-case $spawn_b_line in ''|*[!0-9]*) die "could not find STAGE=spawn_b" ;; esac
-if [ "$desc_line" -ge "$spawn_b_line" ]; then
-    die "client spawn (STAGE=spawn_b line $spawn_b_line) must follow descriptor_publication_observed (line $desc_line)"
+if ! grep -F 'descriptor_publication_observed' "$WATCH" >/dev/null 2>&1; then
+    die "onion_pair_watch.sh must use the descriptor publication helper"
 fi
+if ! grep -F 'iso_peer_rpc addnode' "$WATCH" >/dev/null 2>&1; then
+    die "onion_pair_watch.sh must trigger the onion dial after readiness"
+fi
+# Dial order: the explicit readiness marker must precede the one-shot RPC.
+ready_line=$(grep -n '^echo "dial_prerequisites_ready_s=' "$WATCH" | head -1 | cut -d: -f1)
+dial_line=$(grep -n '^dial_out=$(iso_peer_rpc addnode' "$WATCH" | head -1 | cut -d: -f1)
+case $ready_line in ''|*[!0-9]*) die "could not find dial readiness marker" ;; esac
+case $dial_line in ''|*[!0-9]*) die "could not find descriptor-gated dial RPC" ;; esac
+if [ "$ready_line" -ge "$dial_line" ]; then
+    die "onion dial (line $dial_line) must follow readiness gate (line $ready_line)"
+fi
+if ! grep -F 'INTRODUCE1 sent' "$WATCH" >/dev/null 2>&1; then
+    die "onion_pair_watch.sh must require exact INTRODUCE1 evidence"
+fi
+if ! grep -F 'RENDEZVOUS1 sent' "$WATCH" >/dev/null 2>&1; then
+    die "onion_pair_watch.sh must require exact RENDEZVOUS1 evidence"
+fi
+if ! grep -F 'Hidden service descriptor upload complete' "$WATCH" >/dev/null 2>&1; then
+    die "onion_pair_watch.sh must require successful descriptor upload evidence"
+fi
+if ! grep -F 'onion stage=circuit_ready' "$WATCH" >/dev/null 2>&1; then
+    die "onion_pair_watch.sh must require circuit-ready evidence"
+fi
+if ! grep -F 'result.outbound_streams.circuit_ready' "$WATCH" >/dev/null 2>&1; then
+    die "onion_pair_watch.sh must read the monotonic circuit-ready counter"
+fi
+if ! grep -F 'result.outbound_streams.bytes_to_peer' "$WATCH" >/dev/null 2>&1; then
+    die "onion_pair_watch.sh must require observed P2P framing bytes"
+fi
+
+# The root source pin must contain the exact Tor milestones the watcher
+# requires. This is the born-red guard for the integration omission where
+# application readiness landed on main but the vendor-Tor observability and
+# descriptor retry commit remained only on a side lane.
+for signal in \
+    'Hidden service descriptor upload complete' \
+    'INTRODUCE1 sent' \
+    'RENDEZVOUS1 sent' \
+    'RENDEZVOUS2 received'; do
+    if ! git -C "$ROOT/vendor/tor" grep -F "$signal" -- src \
+        >/dev/null 2>&1; then
+        die "vendor/tor pin lacks required loop signal: $signal"
+    fi
+done
 if ! grep -E 'PAIR_WATCH_POLL:-[0-9]+' "$WATCH" >/dev/null 2>&1; then
     die "onion_pair_watch.sh missing PAIR_WATCH_POLL default"
 fi
@@ -81,7 +139,7 @@ fi
 
 validate_line() {
     local line=$1 src=$2
-    local ts head_sha verdict paired_at dial rend desc
+    local ts head_sha verdict paired_at dial rend desc client_ready intro rend1 circuit framing
     [ -n "$line" ] || die "$src: empty line"
     ts=$(printf '%s' "$line" | "$JSONQ" get ts 2>/dev/null || true)
     head_sha=$(printf '%s' "$line" | "$JSONQ" get head_sha 2>/dev/null || true)
@@ -90,6 +148,11 @@ validate_line() {
     dial=$(printf '%s' "$line" | "$JSONQ" get dial_attempted 2>/dev/null || true)
     rend=$(printf '%s' "$line" | "$JSONQ" get rendezvous_seen 2>/dev/null || true)
     desc=$(printf '%s' "$line" | "$JSONQ" get descriptor_uploaded 2>/dev/null || true)
+    client_ready=$(printf '%s' "$line" | "$JSONQ" get client_tor_ready 2>/dev/null || true)
+    intro=$(printf '%s' "$line" | "$JSONQ" get introduce1_seen 2>/dev/null || true)
+    rend1=$(printf '%s' "$line" | "$JSONQ" get rendezvous1_seen 2>/dev/null || true)
+    circuit=$(printf '%s' "$line" | "$JSONQ" get circuit_ready 2>/dev/null || true)
+    framing=$(printf '%s' "$line" | "$JSONQ" get p2p_framing_seen 2>/dev/null || true)
 
     [ -n "$ts" ] || die "$src: missing ts"
     case $head_sha in
@@ -115,6 +178,18 @@ validate_line() {
     case $dial in true|false) ;; *) die "$src: dial_attempted must be JSON boolean (got '$dial')" ;; esac
     case $rend in true|false) ;; *) die "$src: rendezvous_seen must be JSON boolean (got '$rend')" ;; esac
     case $desc in true|false) ;; *) die "$src: descriptor_uploaded must be JSON boolean (got '$desc')" ;; esac
+    case $client_ready in true|false) ;; *) die "$src: client_tor_ready must be JSON boolean (got '$client_ready')" ;; esac
+    case $intro in true|false) ;; *) die "$src: introduce1_seen must be JSON boolean (got '$intro')" ;; esac
+    case $rend1 in true|false) ;; *) die "$src: rendezvous1_seen must be JSON boolean (got '$rend1')" ;; esac
+    case $circuit in true|false) ;; *) die "$src: circuit_ready must be JSON boolean (got '$circuit')" ;; esac
+    case $framing in true|false) ;; *) die "$src: p2p_framing_seen must be JSON boolean (got '$framing')" ;; esac
+    if [ "$verdict" = PAIRED ] &&
+       { [ "$dial" != true ] || [ "$desc" != true ] ||
+         [ "$client_ready" != true ] ||
+         [ "$intro" != true ] || [ "$rend1" != true ] ||
+         [ "$circuit" != true ] || [ "$framing" != true ]; }; then
+        die "$src: PAIRED requires every declared loop stage"
+    fi
 }
 
 # Drive the shipped script: --selftest sources the isolation helper and

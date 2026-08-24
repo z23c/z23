@@ -7,6 +7,7 @@
 #include "json/json.h"
 #include "net/onion_peer_merge.h"
 #include "net/onion_service.h"
+#include "net/onion_stream.h"
 #include "net/tor_integration.h"
 
 #include <stdbool.h>
@@ -61,6 +62,45 @@ bool network_onion_status_rpc(const struct json_value *params, bool help,
     json_push_kv_bool(result, "p2p_publish_ready", p2p_publish_ready);
     json_push_kv_str(result, "setup_state", setup_state);
 
+    /* The raw-stream layer already owns a monotonic stage ledger so onion
+     * acceptance never has to infer transport state from a rotated log. Keep
+     * it in the public read contract: a published service and a dial-ready
+     * Tor are only the two local setup halves, while these counters identify
+     * how far real outbound circuits and peer bytes have progressed. */
+    struct onion_stream_stages stream_stages;
+    onion_stream_get_stages(&stream_stages);
+    struct json_value outbound_streams = {0};
+    json_set_object(&outbound_streams);
+    json_push_kv_str(&outbound_streams, "schema",
+                     "zcl.onion_stream_stages.v1");
+    json_push_kv_str(&outbound_streams, "semantics",
+                     "monotonic process-lifetime counters; deltas across a "
+                     "bounded dial observation identify progress without "
+                     "attributing concurrent attempts to one endpoint");
+    json_push_kv_int(&outbound_streams, "dial_started",
+                     (int64_t)stream_stages.dial_started);
+    json_push_kv_int(&outbound_streams, "stream_queued",
+                     (int64_t)stream_stages.stream_queued);
+    json_push_kv_int(&outbound_streams, "circuit_ready",
+                     (int64_t)stream_stages.circuit_ready);
+    json_push_kv_int(&outbound_streams, "bridge_up",
+                     (int64_t)stream_stages.bridge_up);
+    json_push_kv_int(&outbound_streams, "open_refused",
+                     (int64_t)stream_stages.open_refused);
+    json_push_kv_int(&outbound_streams, "circuit_timeout",
+                     (int64_t)stream_stages.circuit_timeout);
+    json_push_kv_int(&outbound_streams, "circuit_torn_down",
+                     (int64_t)stream_stages.circuit_torn_down);
+    json_push_kv_int(&outbound_streams, "bridge_closed",
+                     (int64_t)stream_stages.bridge_closed);
+    json_push_kv_int(&outbound_streams, "bytes_to_peer",
+                     (int64_t)stream_stages.bytes_to_peer);
+    json_push_kv_int(&outbound_streams, "bytes_from_peer",
+                     (int64_t)stream_stages.bytes_from_peer);
+    json_push_kv_int(&outbound_streams, "peers_answered",
+                     (int64_t)stream_stages.peers_answered);
+    json_push_kv(result, "outbound_streams", &outbound_streams);
+
     struct json_value mapping = {0};
     struct json_value routes = {0};
     struct json_value app_route = {0};
@@ -105,5 +145,6 @@ bool network_onion_status_rpc(const struct json_value *params, bool help,
     json_free(&app_route);
     json_free(&routes);
     json_free(&mapping);
+    json_free(&outbound_streams);
     return true;
 }
