@@ -24,6 +24,7 @@ void hkdf_sha256_extract(const uint8_t *salt, size_t salt_len,
     if (ikm != NULL && ikm_len > 0)
         hmac_sha256_write(&ctx, ikm, ikm_len);
     hmac_sha256_finalize(&ctx, prk);
+    memory_cleanse(&ctx, sizeof(ctx));
 }
 
 bool hkdf_sha256_expand(const uint8_t prk[HKDF_SHA256_PRK_SIZE],
@@ -51,6 +52,7 @@ bool hkdf_sha256_expand(const uint8_t prk[HKDF_SHA256_PRK_SIZE],
             hmac_sha256_write(&ctx, info, info_len);
         hmac_sha256_write(&ctx, &counter, 1);
         hmac_sha256_finalize(&ctx, t);
+        memory_cleanse(&ctx, sizeof(ctx));
         t_len = HMAC_SHA256_OUTPUT_SIZE;
 
         size_t take = out_len - done;

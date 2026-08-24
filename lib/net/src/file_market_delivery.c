@@ -709,6 +709,7 @@ enum file_market_delivery_status file_market_delivery_fetch_endpoint(
         status = file_market_delivery_fetch_session(
             &session, network_genesis, offer_id, chunk_index,
             buyer_pubkey, buyer_seed, out_chunk);
+    fs_session_cleanup(&session);
     close(fd);
     return status;
 }

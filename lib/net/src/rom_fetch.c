@@ -2,10 +2,8 @@
  *
  * ROM artifact fetching — the CLIENT half of docs/ROM_DELIVERY.md. See
  * net/rom_fetch.h for the contract, the trust model, and the wire protocol.
- *
- * Everything wire- or disk-derived is bounded and validated here. The module
- * verifies bytes against caller-committed digests and nothing more: install /
- * activation stays with the unified installer (no third activation door). */
+ * Wire/disk input is bounded and verified against caller-committed digests;
+ * install/activation remains with the unified installer. */
 
 #include "net/rom_fetch.h"
 #include "net/file_service.h"
@@ -15,6 +13,7 @@
 #include "encoding/utilstrencodings.h"
 #include "json/json.h"
 #include "platform/time_compat.h"
+#include "support/cleanse.h"
 #include "util/safe_alloc.h"
 #include "util/log_macros.h"
 #include "util/thread_registry.h"
@@ -31,14 +30,16 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
-
 #define RF_SUBSYS "rom_fetch"
 
+static void rf_session_close(struct fs_session *session, int fd)
+{
+    fs_session_cleanup(session);
+    close(fd);
+}
 /* Connect timeout for one chunk-fetch connection (seconds). */
 #define RF_CONNECT_TIMEOUT_SEC 10
-/* Per-socket send/recv timeout once connected (seconds). A 4 MB chunk over
- * even a 56 kbit/s link is ~10 min, but the ROM serve path is LAN/fast-WAN
- * oriented; 120 s bounds a stalled peer without false-failing a slow one. */
+/* Per-socket timeout: bound a stalled LAN/fast-WAN peer. */
 #define RF_IO_TIMEOUT_SEC 120
 
 /* Bounded per-chunk retry against the seeder's wall-clock-1s rate window
@@ -294,7 +295,7 @@ bool rom_fetch_chunk(const char *peer_addr, uint16_t port,
     uint8_t zero_root[32];
     memset(zero_root, 0, sizeof(zero_root));
     if (!fs_handshake(&s, zero_root, true)) {
-        close(fd);
+        rf_session_close(&s, fd);
         LOG_FAIL(RF_SUBSYS, "chunk: handshake failed with %s:%u",
                  peer_addr, (unsigned)port);
     }
@@ -308,30 +309,24 @@ bool rom_fetch_chunk(const char *peer_addr, uint16_t port,
     req[37] = (uint8_t)(idx >> 16);
     req[38] = (uint8_t)(idx >> 24);
     if (!fs_send_frame(&s, FS_REQUEST, req, sizeof(req))) {
-        close(fd);
+        rf_session_close(&s, fd);
         LOG_FAIL(RF_SUBSYS, "chunk: request send failed to %s:%u",
                  peer_addr, (unsigned)port);
     }
 
-    /* Success reply: raw [4-byte size LE][data][32-byte MAC]. A refusal is a
-     * typed frame [4-byte sentinel LE][1-byte reason][32-byte MAC] whose size
-     * field is the impossible-as-a-size FS_ROM_REFUSAL_SENTINEL — decoded here
-     * as a clean, retryable "peer busy — back off", never garbage. */
+    /* Reply is raw size/data/MAC or a typed refusal sentinel. */
     uint8_t hdr[4];
     if (!rf_recv_exact(fd, hdr, 4)) {
-        close(fd);
+        rf_session_close(&s, fd);
         LOG_FAIL(RF_SUBSYS, "chunk: size header read failed (peer %s:%u "
                  "refused or went away)", peer_addr, (unsigned)port);
     }
     if (rom_fetch_wire_is_refusal(hdr)) {
-        /* Typed refusal: [1-byte reason][32-byte MAC]. Fixed-size read (a
-         * malicious seeder cannot make us over-read); verify the MAC binds it
-         * to this session, then treat as a clean, retryable back-off — return
-         * false WITHOUT the "implausible size" fail path. */
+        /* Fixed-size authenticated refusal; never a peer-sized read. */
         uint8_t reason = 0;
         uint8_t rmac_wire[32];
         if (!rf_recv_exact(fd, &reason, 1) || !rf_recv_exact(fd, rmac_wire, 32)) {
-            close(fd);
+            rf_session_close(&s, fd);
             LOG_INFO(RF_SUBSYS, "chunk %u: peer %s:%u refused (truncated "
                      "refusal frame) — backing off", idx, peer_addr,
                      (unsigned)port);
@@ -346,6 +341,8 @@ bool rom_fetch_chunk(const char *peer_addr, uint16_t port,
         sha3_256_write(&rmc, RF_ROM_REFUSAL_MAC_TAG, 32);
         sha3_256_write(&rmc, &reason, 1);
         sha3_256_finalize(&rmc, rmac_expect);
+        memory_cleanse(&rmc, sizeof(rmc));
+        fs_session_cleanup(&s);
         uint8_t rdiff = 0;
         for (int i = 0; i < 32; i++) rdiff |= rmac_wire[i] ^ rmac_expect[i];
         if (rdiff != 0) {
@@ -362,19 +359,19 @@ bool rom_fetch_chunk(const char *peer_addr, uint16_t port,
     uint32_t size = (uint32_t)hdr[0] | ((uint32_t)hdr[1] << 8) |
                     ((uint32_t)hdr[2] << 16) | ((uint32_t)hdr[3] << 24);
     if (size == 0 || size > ROM_SEED_CHUNK_SIZE) {
-        close(fd);
+        rf_session_close(&s, fd);
         LOG_FAIL(RF_SUBSYS, "chunk: implausible chunk size %u from %s:%u "
                  "(refusal or corrupt stream)", size, peer_addr,
                  (unsigned)port);
     }
     if (!rf_recv_exact(fd, buf, size)) {
-        close(fd);
+        rf_session_close(&s, fd);
         LOG_FAIL(RF_SUBSYS, "chunk: data read failed (%u bytes) from %s:%u",
                  size, peer_addr, (unsigned)port);
     }
     uint8_t mac_wire[32];
     if (!rf_recv_exact(fd, mac_wire, 32)) {
-        close(fd);
+        rf_session_close(&s, fd);
         LOG_FAIL(RF_SUBSYS, "chunk: MAC read failed from %s:%u",
                  peer_addr, (unsigned)port);
     }
@@ -395,6 +392,8 @@ bool rom_fetch_chunk(const char *peer_addr, uint16_t port,
     sha3_256_write(&mctx, data_sha3, 32);
     sha3_256_write(&mctx, buf, size);
     sha3_256_finalize(&mctx, mac_expect);
+    memory_cleanse(&mctx, sizeof(mctx));
+    fs_session_cleanup(&s);
 
     uint8_t diff = 0;
     for (int i = 0; i < 32; i++)
@@ -1073,7 +1072,7 @@ bool rom_fetch_get_manifest(const char *peer_addr, uint16_t port,
     uint8_t zero_root[32];
     memset(zero_root, 0, sizeof(zero_root));
     if (!fs_handshake(&s, zero_root, true)) {
-        close(fd);
+        rf_session_close(&s, fd);
         LOG_INFO(RF_SUBSYS, "manifest: handshake failed with %s:%u — falling "
                  "back to whole-file verify", peer_addr, (unsigned)port);
         return false;
@@ -1084,18 +1083,16 @@ bool rom_fetch_get_manifest(const char *peer_addr, uint16_t port,
     memcpy(req, "RMF", 3);
     memcpy(req + 3, chunk_root, 32);
     if (!fs_send_frame(&s, FS_REQUEST, req, sizeof(req))) {
-        close(fd);
+        rf_session_close(&s, fd);
         LOG_INFO(RF_SUBSYS, "manifest: request send failed to %s:%u — falling "
                  "back", peer_addr, (unsigned)port);
         return false;
     }
 
-    /* Reply: [4-byte size LE][blob][32-byte MAC]. A refusal is an FS_DONE frame
-     * (64 KB) whose leading bytes parse as an implausible size here → fall
-     * back. */
+    /* Reply is size/blob/MAC; FS_DONE parses as an invalid size and falls back. */
     uint8_t hdr[4];
     if (!rf_recv_exact(fd, hdr, 4)) {
-        close(fd);
+        rf_session_close(&s, fd);
         LOG_INFO(RF_SUBSYS, "manifest: no reply from %s:%u (legacy seeder?) — "
                  "falling back", peer_addr, (unsigned)port);
         return false;
@@ -1106,7 +1103,7 @@ bool rom_fetch_get_manifest(const char *peer_addr, uint16_t port,
      * within the blob cap, and (size − 8) a whole number of 32-byte digests. */
     if (size < 8u || size > ROM_SEED_MANIFEST_BLOB_MAX ||
         ((size - 8u) % 32u) != 0u) {
-        close(fd);
+        rf_session_close(&s, fd);
         LOG_INFO(RF_SUBSYS, "manifest: implausible blob size %u from %s:%u — "
                  "falling back", size, peer_addr, (unsigned)port);
         return false;
@@ -1114,14 +1111,14 @@ bool rom_fetch_get_manifest(const char *peer_addr, uint16_t port,
 
     uint8_t blob[ROM_SEED_MANIFEST_BLOB_MAX];
     if (!rf_recv_exact(fd, blob, size)) {
-        close(fd);
+        rf_session_close(&s, fd);
         LOG_INFO(RF_SUBSYS, "manifest: blob read failed from %s:%u — falling "
                  "back", peer_addr, (unsigned)port);
         return false;
     }
     uint8_t mac_wire[32];
     if (!rf_recv_exact(fd, mac_wire, 32)) {
-        close(fd);
+        rf_session_close(&s, fd);
         LOG_INFO(RF_SUBSYS, "manifest: MAC read failed from %s:%u — falling "
                  "back", peer_addr, (unsigned)port);
         return false;
@@ -1138,6 +1135,8 @@ bool rom_fetch_get_manifest(const char *peer_addr, uint16_t port,
     sha3_256_write(&mctx, RF_ROM_MANIFEST_MAC_TAG, 32);
     sha3_256_write(&mctx, blob, size);
     sha3_256_finalize(&mctx, mac_expect);
+    memory_cleanse(&mctx, sizeof(mctx));
+    fs_session_cleanup(&s);
     uint8_t diff = 0;
     for (int i = 0; i < 32; i++)
         diff |= mac_wire[i] ^ mac_expect[i];
@@ -1188,7 +1187,7 @@ bool rom_fetch_get_directory(const char *peer_addr, uint16_t port,
     uint8_t zero_root[32];
     memset(zero_root, 0, sizeof(zero_root));
     if (!fs_handshake(&s, zero_root, true)) {
-        close(fd);
+        rf_session_close(&s, fd);
         LOG_INFO(RF_SUBSYS, "directory: handshake failed with %s:%u — skipping "
                  "seed", peer_addr, (unsigned)port);
         return false;
@@ -1198,17 +1197,16 @@ bool rom_fetch_get_directory(const char *peer_addr, uint16_t port,
     uint8_t req[FS_ROM_LIST_REQUEST_SIZE];
     memcpy(req, "RLS", 3);
     if (!fs_send_frame(&s, FS_REQUEST, req, sizeof(req))) {
-        close(fd);
+        rf_session_close(&s, fd);
         LOG_INFO(RF_SUBSYS, "directory: request send failed to %s:%u — skipping "
                  "seed", peer_addr, (unsigned)port);
         return false;
     }
 
-    /* Reply: [4-byte size LE][body][32-byte MAC]. A refusal is an FS_DONE frame
-     * (64 KB) whose leading bytes parse as an implausible size here → skip. */
+    /* Reply is size/body/MAC; FS_DONE parses as an invalid size and is skipped. */
     uint8_t hdr[4];
     if (!rf_recv_exact(fd, hdr, 4)) {
-        close(fd);
+        rf_session_close(&s, fd);
         LOG_INFO(RF_SUBSYS, "directory: no reply from %s:%u (legacy seeder?) — "
                  "skipping seed", peer_addr, (unsigned)port);
         return false;
@@ -1218,20 +1216,20 @@ bool rom_fetch_get_directory(const char *peer_addr, uint16_t port,
     /* Bounded by the caller's cap, leaving one byte for the NUL terminator. A
      * zero-length body or one at/over cap (incl. the FS_DONE refusal) fails. */
     if (size == 0 || size >= cap) {
-        close(fd);
+        rf_session_close(&s, fd);
         LOG_INFO(RF_SUBSYS, "directory: implausible body size %u (cap %zu) from "
                  "%s:%u — skipping seed", size, cap, peer_addr, (unsigned)port);
         return false;
     }
     if (!rf_recv_exact(fd, (uint8_t *)buf, size)) {
-        close(fd);
+        rf_session_close(&s, fd);
         LOG_INFO(RF_SUBSYS, "directory: body read failed from %s:%u — skipping "
                  "seed", peer_addr, (unsigned)port);
         return false;
     }
     uint8_t mac_wire[32];
     if (!rf_recv_exact(fd, mac_wire, 32)) {
-        close(fd);
+        rf_session_close(&s, fd);
         LOG_INFO(RF_SUBSYS, "directory: MAC read failed from %s:%u — skipping "
                  "seed", peer_addr, (unsigned)port);
         return false;
@@ -1248,6 +1246,8 @@ bool rom_fetch_get_directory(const char *peer_addr, uint16_t port,
     sha3_256_write(&mctx, RF_ROM_LIST_MAC_TAG, 32);
     sha3_256_write(&mctx, (const uint8_t *)buf, size);
     sha3_256_finalize(&mctx, mac_expect);
+    memory_cleanse(&mctx, sizeof(mctx));
+    fs_session_cleanup(&s);
     uint8_t diff = 0;
     for (int i = 0; i < 32; i++)
         diff |= mac_wire[i] ^ mac_expect[i];

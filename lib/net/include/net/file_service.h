@@ -3,7 +3,7 @@
  * Fast File Service — SHA3-encrypted, direct TCP, max bandwidth.
  *
  * Protocol: direct TCP connection, SHA3-CTR encrypted stream.
- * - Handshake: exchange nonces, derive key from blockchain UTXO root
+ * - Handshake: exchange ephemeral X25519 public keys, derive with HKDF-SHA256
  * - Transfer: 64KB frames, all same size, SHA3-authenticated
  * - Chunks: 50MB blocks of chain data, addressed by SHA3 hash
  *
@@ -90,10 +90,10 @@ enum fs_admit_result {
 
 struct fs_session {
     int              fd;              /* TCP socket */
-    uint8_t          key[32];         /* SHA3-derived session key */
-    bool             key_established; /* true after HELLO exchange */
-    uint8_t          our_nonce[32];
-    uint8_t          peer_nonce[32];
+    uint8_t          key[32];         /* X25519/HKDF session key */
+    bool             key_established; /* true after key confirmation */
+    uint8_t          our_nonce[32];   /* our ephemeral public key / token */
+    uint8_t          peer_nonce[32];  /* peer ephemeral public key / token */
     uint64_t         send_counter;    /* monotonic frame counter (nonce) */
     uint64_t         recv_counter;
     uint64_t         bytes_sent;
@@ -105,8 +105,17 @@ struct fs_session {
 /* Initialize a session on an existing TCP socket. */
 void fs_session_init(struct fs_session *s, int fd);
 
-/* Perform HELLO handshake — exchange nonces, derive shared key.
- * utxo_root is the SHA3 of the UTXO set (proves both nodes on same chain).
+/* Erase session key material after the owning connection is finished. */
+void fs_session_cleanup(struct fs_session *s);
+
+/* Perform HELLO handshake — exchange ephemeral public keys and derive a
+ * forward-secret shared key with X25519 + HKDF-SHA256. `utxo_root` is the
+ * HKDF salt, binding key confirmation to the peers' shared chain state.
+ * This protects against passive wire capture; the bare handshake does not
+ * authenticate peer identity against an active MITM. Paid delivery separately
+ * binds its signed request to these session public keys. This intentionally
+ * has no fallback to the legacy all-public nonce KDF, so mixed-version peers
+ * fail key confirmation instead of silently downgrading.
  * is_initiator: true if we opened the connection. */
 bool fs_handshake(struct fs_session *s, const uint8_t utxo_root[32],
                    bool is_initiator);
