@@ -33,7 +33,7 @@
 #
 # Environment:
 #   PAIR_PROBE_FILE           JSONL path (default local state below)
-#   PAIR_WATCH_PORT_BASE      isolated 39xxx P2P port (default 39350)
+#   PAIR_WATCH_PORT_BASE      probe-quad start (default 39250; 39250+ only)
 #   PAIR_WATCH_ONION_WAIT     seconds to wait for A's descriptor upload (default 60)
 #   PAIR_WATCH_RPC_WAIT       seconds to wait for RPC (default 60)
 #   PAIR_WATCH_POLL           seconds to poll getconnectioncount (default 150)
@@ -53,7 +53,11 @@ ONION_WAIT=${PAIR_WATCH_ONION_WAIT:-60}
 RPC_WAIT=${PAIR_WATCH_RPC_WAIT:-60}
 PAIR_POLL=${PAIR_WATCH_POLL:-150}
 ISO_KIND=pairwatch
-ISO_PORT_BASE=${PAIR_WATCH_PORT_BASE:-39350}
+PROBE_QUAD_FLOOR=39250
+PROBE_QUAD_STRIDE=20
+PROBE_QUAD_TRIES=16
+ISO_PORT_BASE=${PAIR_WATCH_PORT_BASE:-$PROBE_QUAD_FLOOR}
+ISO_FLEET_DIR="$REPO_ROOT/deploy/devfleet"
 SELFTEST=0
 LIVE_PROBE_DEFAULT="${XDG_STATE_HOME:-$HOME/.local/state}/zclassic23-referee/pair_probe.jsonl"
 
@@ -66,6 +70,74 @@ for arg in "$@"; do
 done
 
 now_s() { date +%s; }
+
+# Isolated pair-probe binds only 39250+ quads. Published P2P_PORT values in
+# deploy/devfleet/node*.txt are unit-owned and never candidates. Dialing a
+# fleet onion is a client path and does not bind that peer's port locally.
+fleet_p2p_ports() {
+    local f p
+    for f in "$REPO_ROOT"/deploy/devfleet/node*.txt; do
+        [ -f "$f" ] || continue
+        p=$(sed -n 's/^P2P_PORT=//p' "$f" | head -1)
+        case $p in
+            ''|*[!0-9]*) continue ;;
+            *) printf '%s\n' "$p" ;;
+        esac
+    done
+}
+
+pair_quad_ports() {
+    local b=$1
+    printf '%s\n' "$b" $((b + 1)) $((b + 2)) $((b + 3)) \
+        $((b + 10)) $((b + 11)) $((b + 12)) $((b + 13))
+}
+
+port_listening() {
+    ss -tlnH "sport = :$1" 2>/dev/null | grep -E . >/dev/null 2>&1
+}
+
+quad_forbidden() {
+    local b=$1 p fp
+    [ "$b" -ge "$PROBE_QUAD_FLOOR" ] || return 0
+    for p in $(pair_quad_ports "$b"); do
+        case " ${ISO_LIVE_PORTS:-} " in
+            *" $p "*) return 0 ;;
+        esac
+        for fp in $(fleet_p2p_ports); do
+            [ "$p" = "$fp" ] && return 0
+        done
+    done
+    return 1
+}
+
+quad_listening() {
+    local p
+    for p in $(pair_quad_ports "$1"); do
+        if port_listening "$p"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+pick_pair_quad() {
+    local start=$1 b i
+    case $start in
+        ''|*[!0-9]*) start=$PROBE_QUAD_FLOOR ;;
+    esac
+    [ "$start" -ge "$PROBE_QUAD_FLOOR" ] || start=$PROBE_QUAD_FLOOR
+    b=$start
+    i=0
+    while [ "$i" -lt "$PROBE_QUAD_TRIES" ]; do
+        if ! quad_forbidden "$b" && ! quad_listening "$b"; then
+            printf '%s\n' "$b"
+            return 0
+        fi
+        b=$((b + PROBE_QUAD_STRIDE))
+        i=$((i + 1))
+    done
+    return 1
+}
 
 elapsed() {
     now=$(now_s)
@@ -94,6 +166,7 @@ named_verdict() {
     fi
     case ${STAGE:-env} in
         env) echo ENV_MISSING_BINARY ;;
+        ports) echo PORT_QUAD_EXHAUSTED ;;
         spawn_a) echo SPAWN_A_FAILED ;;
         rpc_a) echo RPC_A_NOT_READY ;;
         onion)
@@ -276,6 +349,32 @@ if [ "$SELFTEST" = 1 ]; then
 
     STAGE=env PAIRED=0 DIAL_ATTEMPTED=false DESCRIPTOR_UPLOADED=false RENDEZVOUS_SEEN=false
     st_check "env miss is ENV_MISSING_BINARY" ENV_MISSING_BINARY "$(named_verdict)"
+    STAGE=ports
+    st_check "no free probe quad is PORT_QUAD_EXHAUSTED" PORT_QUAD_EXHAUSTED "$(named_verdict)"
+    if [ "$PROBE_QUAD_FLOOR" = 39250 ]; then
+        echo "  ok: probe quad floor is 39250"
+    else
+        echo "  FAIL: probe quad floor is $PROBE_QUAD_FLOOR (want 39250)"
+        st_fail=1
+    fi
+    if quad_forbidden 39350; then
+        echo "  ok: base 39350 is forbidden (peer 39360 is a published fleet P2P)"
+    else
+        echo "  FAIL: base 39350 was allowed; node2 P2P 39360 must never be a bind candidate"
+        st_fail=1
+    fi
+    if quad_forbidden 39150; then
+        echo "  ok: base 39150 is forbidden (node3 published P2P)"
+    else
+        echo "  FAIL: base 39150 was allowed; node3 P2P must never be a bind candidate"
+        st_fail=1
+    fi
+    if [ "$PROBE_QUAD_FLOOR" -ge 39250 ] && ! quad_forbidden 39250; then
+        echo "  ok: documented probe base 39250 is not fleet-owned"
+    elif quad_forbidden 39250; then
+        echo "  FAIL: documented probe base 39250 is forbidden"
+        st_fail=1
+    fi
     STAGE=spawn_a
     st_check "spawn A miss is SPAWN_A_FAILED" SPAWN_A_FAILED "$(named_verdict)"
     STAGE=rpc_a
@@ -324,6 +423,16 @@ if [ ! -x "$ZCL_CLI" ] || [ ! -x "$ISO_NODE_BIN" ] || [ ! -x "$ISO_RPC_BIN" ]; t
     echo "PAIR_PROBE=$VERDICT DETAIL=missing_binary"
     exit 2
 fi
+
+picked=$(pick_pair_quad "$ISO_PORT_BASE") || {
+    STAGE=ports
+    VERDICT=PORT_QUAD_EXHAUSTED
+    append_probe
+    echo "PAIR_PROBE=$VERDICT DETAIL=no_free_39250_quad"
+    exit 1
+}
+ISO_PORT_BASE=$picked
+echo "pair_quad_base=$ISO_PORT_BASE (floor=$PROBE_QUAD_FLOOR; fleet P2P never bound)"
 
 iso_init
 echo "onion-pair-watch: datadir=$ISO_DD p2p=$ISO_PORT peer_p2p=$ISO_PEER_PORT sha=$HEAD_SHA"

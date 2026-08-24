@@ -67,6 +67,18 @@ fi
 if ! grep -E 'PAIR_WATCH_POLL:-[0-9]+' "$WATCH" >/dev/null 2>&1; then
     die "onion_pair_watch.sh missing PAIR_WATCH_POLL default"
 fi
+if ! grep -F 'PROBE_QUAD_FLOOR=39250' "$WATCH" >/dev/null 2>&1; then
+    die "onion_pair_watch.sh must bind only the documented 39250+ probe quad"
+fi
+if grep -E 'PAIR_WATCH_PORT_BASE:-[0-9]*39350' "$WATCH" >/dev/null 2>&1; then
+    die "onion_pair_watch.sh default must not be 39350 (peer quad binds node2 P2P 39360)"
+fi
+if ! grep -F 'P2P_PORT=' "$WATCH" >/dev/null 2>&1; then
+    die "onion_pair_watch.sh must read published P2P_PORT from deploy/devfleet/node*.txt"
+fi
+if grep -E 'for b in 39350' "$LOOP" >/dev/null 2>&1; then
+    die "onion_pair_watch_loop.sh must not prefer 39350 as a bind candidate"
+fi
 if grep -E 'git (commit|push)|deploy/devfleet/pair_probe\.jsonl' \
     "$WATCH" "$LOOP" >/dev/null 2>&1; then
     die "recurring pair telemetry must not commit, push, or write the tracked tree"
