@@ -1,42 +1,21 @@
 BOX=node3
-DRILL=ux_join_drill
-RUNS=7
-OBSERVED_AT=2026-08-23T05:11:38Z
-CLOCK=deploy/devfleet/ux_join_clock.jsonl
-SOURCE_SHA=6d8d94ea160f69f94f11a296ad87205f70784f47
-PEER=node1
-PEER_ONION=5wvfod4ikluv4w3lqe3whn2k7xdsympxxu2qkqw452thtjxbar5hrcqd.onion
-PEER_PORT=8055
+DRILL=node2_onion_handshake_stage
+OBSERVED_AT=2026-08-24T01:54:24Z
+PEER=node2
+PEER_ONION=n3c4bry42qzoiduhfqk33ugeptdycmnsmjnrkmjirrudtpw7xvhc5kid.onion
+PEER_PORT=39360
 ONION_ADDRESS=r4ypj3xrxjwjomdtxf5mk4dle6dv32n3yxr2pkuibbxpwml3v6ch2xid.onion
 P2P_PORT=39150
-LIVE_PID=573110
+PROBE=throwaway_datadir_connect_only
+PROBE_DATADIR_KIND=tmp_isolated
+PROBE_FLAGS=-tor -listen -connect=PEER_ONION:PEER_PORT -nobgvalidation -nolegacyimport -nofilesync
+PROBE_SECONDS=180
+HANDSHAKE_STAGE=descriptor_fetch
+DIAL_ATTEMPTED=yes
+HS_DESC_FETCH=no
+INTRODUCE1=no
+RENDEZVOUS1=no
+VERSION_VERACK=no
+PEER_STATE=absent
 VERDICT=fail
-BEST_PEERED_S=5
-BEST_FIRST_MSG_S=11
-BEST_SYNCED_S=26
-BEST_SYNCED_LANE=regtest
-WORST_PEERED_S=59
-WORST_FIRST_MSG_S=65
-WORST_SYNCED_S=
-DEFECTS=mainnet_from_genesis_stall,c3_delta_sync_over_budget,typed_peer_add_bad_rpc_body
-DEFECT_mainnet_from_genesis_stall=expected: empty datadir vs live H*=3.2M; onion PEERED/FIRST_MSG are real
-DEFECT_c3_delta_sync_over_budget=bundle installed at checkpoint (C3_INSTALL_S=251 last_height=3056971) but fold to peer tip did not finish in 604s; C3_TO_TIP_S empty
-DEFECT_typed_peer_add_bad_rpc_body=typed core.network.peers.add exceeded 250ms budget (elapsed_ms=10024); rpc addnode fallback still peered
-C3_MAKE=make mvp-coldstart-to-tip-local
-C3_SCRIPT=tools/scripts/cold_start_to_tip_probe.sh
-C3_VERDICT=seam
-C3_EXIT=3
-C3_MODE=consensus-state-bundle
-C3_SEEDED=1
-C3_INSTALL_S=251
-C3_TO_TIP_S=
-C3_BUNDLE_BYTES=513867776
-C3_SECONDS=604
-C3_PEER_TIP=3225949
-C3_LAST_HEIGHT=3056971
-C3_LAST_HEADERS=3072758
-C3_BLOCK_INDEX_BYTES=555253380
-C3_BUNDLE_SHA3=7a4a863e5a35d7c93e812326dfad8a71f72ff6f0be94f6a73cedf8100e029b9d
-C3_REASON=seed authority loaded but forward-sync did not complete within budget; C3_INSTALL_S=251 last_height=3056971 vs peer_tip=3225949
-FIRST_MSG_OUTLIER=this run first_msg_s=48 (under 60s UX budget). Historical worst 65s is named first_msg_over_60s vs ONION_STREAM_CONNECT_TIMEOUT_MS=120000; budget not raised
-DETAIL=Running binary SOURCE_SHA=6d8d94ea160f69f94f11a296ad87205f70784f47 descendant of bbd3e0873. Instant-on install clocked C3_INSTALL_S=251. C3_TO_TIP_S not observed (seam). Onion drill peered_s=42 first_msg_s=48. typed_peer_add_fix_unrestarted dropped after restart.
+DETAIL=Exclusive -connect to node2 onion issued Connecting to onion addnode n3c4bry42qzoiduhfqk33ugeptdycmnsmjnrkmjirrudtpw7xvhc5kid.onion:39360. tor.log had no HS_DESC fetch, no INTRODUCE1, no RENDEZVOUS1, getpeerinfo state=absent for 180s. First dead stage is descriptor_fetch.

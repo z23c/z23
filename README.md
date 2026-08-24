@@ -34,6 +34,17 @@ from a platform.**
 
 ---
 
+## Status
+
+| Layer | Where it stands |
+| --- | --- |
+| **Full node** | Live. One self-contained C23 binary validates the proof-of-work chain, holds wallet custody behind local keys, and serves its own explorer and API over its persistent Tor onion address. |
+| **Onion mesh** | Hardening. Independent fleet nodes publish heartbeats to a shared blackboard while a fail-closed referee dials each one through its onion from a fresh datadir — a box counts only when a stranger completes a real handshake at tip height. Cross-node header repair has already run peer to peer. |
+| **C23 Commons** | Built, transport-gated. The full loop — describe, reuse, build, accept, fetch, reproduce, serve — runs locally today via `make commons-demo`; the peer-to-peer swarm opens over mesh transport once that transport proves itself. |
+| **Acceptance** | Honest by construction. [`make mvp`](docs/MVP.md) prints PASS only after observing the whole declared criterion; anything unavailable is named BLOCKED, never silently green. |
+
+---
+
 ## Try it
 
 ```bash
