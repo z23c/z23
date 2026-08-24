@@ -187,6 +187,23 @@ int test_json(void)
         if (ok) printf("OK\n"); else { printf("FAIL\n"); json_free(&v); failures++; }
     }
 
+    printf("json reject valid prefix plus trailing junk... ");
+    {
+        const char *s = "{\"ok\":true}TRAILING";
+        struct json_value v;
+        bool ok = !json_read(&v, s, strlen(s));
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); json_free(&v); failures++; }
+    }
+
+    printf("json accept trailing whitespace... ");
+    {
+        const char *s = "{\"ok\":true} \n\t";
+        struct json_value v;
+        bool ok = json_read(&v, s, strlen(s));
+        json_free(&v);
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
+
     printf("json parse zero-length... ");
     {
         struct json_value v;

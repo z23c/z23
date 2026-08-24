@@ -461,6 +461,20 @@ static int walk(const char *text, size_t len, cmd_kind cmd, const char *eq)
     }
 }
 
+static bool valid_document(const char *text, size_t len)
+{
+    zjsonp parser;
+    zjsonp_event event;
+    zjsonp_init(&parser, text, len);
+    for (;;) {
+        zjsonp_status status = zjsonp_next(&parser, &event);
+        if (status == ZJRP_DONE)
+            return true;
+        if (status != ZJRP_OK)
+            return false;
+    }
+}
+
 static int cmd_unwrap(const char *text, size_t len)
 {
     if (parse_path("error") != 0)
@@ -540,6 +554,10 @@ int main(int argc, char **argv)
     if (ferror(stdin) || !feof(stdin)) {
         fprintf(stderr, "jsonq: read error or input over %d bytes\n",
                 MAX_INPUT);
+        return 2;
+    }
+    if (!valid_document(g_input, len)) {
+        fputs("jsonq: input is not exactly one JSON document\n", stderr);
         return 2;
     }
     if (cmd == CMD_UNWRAP)

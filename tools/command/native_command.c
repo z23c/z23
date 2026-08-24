@@ -2562,6 +2562,18 @@ static void nc_bootstatus_fill(struct zcl_command_reply *reply,
     (void)json_push_kv_int(&reply->data, "started_unix", s->started_unix);
     (void)json_push_kv_int(&reply->data, "updated_unix", s->updated_unix);
     (void)json_push_kv_int(&reply->data, "elapsed_s", s->elapsed_s);
+    if (s->activity[0]) {
+        (void)json_push_kv_str(&reply->data, "activity", s->activity);
+        (void)json_push_kv_int(&reply->data, "progress_current",
+                               s->progress_current);
+        (void)json_push_kv_int(&reply->data, "progress_target",
+                               s->progress_target);
+    }
+    if (s->blocker[0]) {
+        (void)json_push_kv_str(&reply->data, "blocker", s->blocker);
+        (void)json_push_kv_str(&reply->data, "blocker_reason",
+                               s->blocker_reason);
+    }
 }
 
 void zcl_native_handle_core_node_bootstatus(

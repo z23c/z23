@@ -565,7 +565,7 @@ bool json_read(struct json_value *v, const char *raw, size_t len)
     json_init(v);
     const char *p = raw;
     const char *end = raw + len;
-    if (!parse_value_r(v, &p, end, 0)) {
+    if (!parse_value_r(v, &p, end, 0) || skip_ws(p, end) != end) {
         json_free(v);
         json_init(v);
         return false;
