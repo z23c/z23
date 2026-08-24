@@ -157,6 +157,23 @@ void zcl_native_handle_yardsale_buy(
     ys_forward(request, reply, "yardsale_buy", true);
 }
 
+static bool ys_push_layer(struct json_value *layers, const char *id,
+                          const char *story, const char *plan,
+                          const char *test_group, const char *expected)
+{
+    struct json_value layer;
+    json_init(&layer);
+    json_set_object(&layer);
+    bool ok = json_push_kv_str(&layer, "id", id) &&
+              json_push_kv_str(&layer, "user_story", story) &&
+              json_push_kv_str(&layer, "plan_command", plan) &&
+              json_push_kv_str(&layer, "test_group", test_group) &&
+              json_push_kv_str(&layer, "expected", expected) &&
+              json_push_back(layers, &layer);
+    json_free(&layer);
+    return ok;
+}
+
 void zcl_native_handle_yardsale_guide(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
@@ -232,6 +249,33 @@ void zcl_native_handle_yardsale_guide(
             "Follow the plan reply's commit_input. Discover exact keys with "
             "z23 discover schema <leaf>.") &&
         json_push_kv_str(&reply->data, "docs", "docs/SELL.md");
+    struct json_value layers;
+    json_init(&layers);
+    json_set_array(&layers);
+    ok = ok &&
+        ys_push_layer(&layers, "pay_zcl",
+            "Pay confirmed ZCL to a transparent address without exporting keys.",
+            "vault.intent.plan", "test_simnet_wallet_import_backup",
+            "simnet_confirmed") &&
+        ys_push_layer(&layers, "sapling",
+            "Shield or send Sapling value through the same plan-then-confirm vault.",
+            "vault.intent.plan", "test_simnet_shielded_wallet_e2e",
+            "simnet_confirmed") &&
+        ys_push_layer(&layers, "zslp_one_of_one",
+            "Mint a 1/1 ZSLP collectible (decimals 0, supply 1) as a plan.",
+            "app.tokens.create", "test_simnet", "simnet_confirmed") &&
+        ys_push_layer(&layers, "yardsale",
+            "Atomically swap that 1/1 for ZCL between two wallets in one transaction.",
+            "yardsale.buy", "test_yardsale_app", "simnet_confirmed") &&
+        ys_push_layer(&layers, "onion_market",
+            "Pay ZCL, then fetch SHA3-verified chunks over the onion file-service.",
+            "app.market.purchase.plan", "test_file_market",
+            "simnet_confirmed") &&
+        ys_push_layer(&layers, "zcode_package",
+            "Publish or fetch an exact C23 package root; fetch is inert until accept.",
+            "zcode.work.start", "test_zcode_release", "simnet_confirmed") &&
+        json_push_kv(&reply->data, "layers", &layers);
+    json_free(&layers);
     if (!ok)
         ys_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
                 "YARDSALE_GUIDE_OUTPUT", "render", false,
