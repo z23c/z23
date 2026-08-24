@@ -8,6 +8,7 @@
 #include "services/utxo_recovery_service.h"
 #include "services/recovery_policy.h"
 #include "services/chain_state_service.h"
+#include "services/chain_activation_service.h"
 #include "storage/utxo_reimport_flag.h"
 #include "storage/progress_store.h"
 #include "storage/coins_kv.h"
@@ -1716,7 +1717,10 @@ int test_utxo_recovery_service(void)
         struct recovery_exec_result er = utxo_recovery_execute(NULL, &vr);
         URS_CHECK("urs: execute null ctx returns zcl_result error",
                   !er.status.ok && er.status.code == -30 &&
-                  !er.recovered && !er.skip_activate);
+                  !er.recovered && !er.skip_activate &&
+                  /* A failed execute never authorises the caller to drop the
+                   * node.db secondary indexes (see bulk_reload_pending). */
+                  !er.bulk_reload_pending);
     }
 
     /* ── 13. Clean above tip: no-op when tip=0 ── */
@@ -1895,6 +1899,68 @@ int test_utxo_recovery_service(void)
                       false);
         }
         unlink(db_path);
+    }
+
+    /* ── Turbo mode follows the BULK RELOAD, not the word "recovered" ──
+     *
+     * Entering turbo mode DROPS every secondary index on node.db and the
+     * matching normal_mode call rebuilds all of them. That trade only pays
+     * when a wipe to genesis is followed by a bulk re-populate.
+     *
+     * utxo_recovery_execute() sets `recovered` on TWO different outcomes:
+     * the wipe, and the abort-wipe path where the coin stores turned out
+     * to be populated and only a stale cursor was corrected. Gating turbo
+     * on `recovered` therefore dropped the indexes on a healthy warm
+     * restart and paid a full rebuild seconds later, for nothing. The two
+     * outcomes need separate flags, and this pins the one that matters:
+     * refusing to wipe must NOT request a bulk reload. */
+    {
+        struct urs_frontier_fixture fx;
+        bool up = urs_frontier_fixture_setup(&fx, "urs_no_turbo", 1, 21);
+        if (!up) {
+            URS_CHECK("urs: abort-wipe requests no bulk reload (setup failed)",
+                      false);
+        } else {
+            /* Populate the mirror past recover_stale_metadata's 1000-row
+             * floor so the wipe is REFUSED — the exact state a warm
+             * restart with a stale coins cursor is in. */
+            node_db_exec(&fx.ndb, "BEGIN");
+            for (int i = 0; i < 1200; i++) {
+                char sql[256];
+                snprintf(sql, sizeof(sql),
+                    "INSERT INTO utxos(txid, vout, height, value, script) "
+                    "VALUES(randomblob(32), %d, %d, 100000, X'00')",
+                    i, (i % 20) + 1);
+                node_db_exec(&fx.ndb, sql);
+            }
+            node_db_exec(&fx.ndb, "COMMIT");
+
+            struct chain_activation_controller ctl;
+            activation_controller_init(&ctl, &fx.ms, NULL,
+                                       chain_params_get(), NULL);
+            fx.uctx.activation_ctl = &ctl;
+
+            struct boot_validation_result vr;
+            memset(&vr, 0, sizeof(vr));
+            vr.action = BOOT_RECOVER_WIPE_WAIT;
+            vr.chain_height = 20;
+
+            int64_t before = node_db_utxo_count(&fx.ndb);
+            struct recovery_exec_result er =
+                utxo_recovery_execute(&fx.uctx, &vr);
+            int64_t after = node_db_utxo_count(&fx.ndb);
+
+            /* The coins survived, a recovery action was taken, and NO
+             * bulk reload was requested — so boot.c leaves the indexes
+             * alone. The count assertion is what makes the flag
+             * assertion meaningful: it proves this really is the
+             * abort-wipe path and not a wipe that happened to be quiet. */
+            URS_CHECK("urs: refusing to wipe requests no bulk reload",
+                      before == 1200 && after == 1200 &&
+                      er.recovered && !er.bulk_reload_pending);
+
+            urs_frontier_fixture_teardown(&fx);
+        }
     }
 
     printf("--- utxo_recovery_service: %d failure(s) ---\n", failures);

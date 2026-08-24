@@ -3106,8 +3106,8 @@ bool app_init(struct app_context *ctx)
                     rr.status.message);
         (void)rr.skip_activate; /* activation controller handles state */
 
-        /* Enter turbo mode if genesis reset happened */
-        if (rr.recovered &&
+        /* Turbo DROPS every index — only worth it before a bulk reload. */
+        if (rr.bulk_reload_pending &&
             (vr.action == BOOT_RECOVER_REIMPORT ||
              vr.action == BOOT_RECOVER_WIPE_WAIT) &&
             g_node_db.open) {

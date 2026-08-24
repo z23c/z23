@@ -597,6 +597,10 @@ struct recovery_exec_result utxo_recovery_execute(
 
         /* SAFETY: check actual UTXO count before wiping */
         if (recover_stale_metadata(ctx)) {
+            /* Refused the wipe: the coin stores are populated, only the
+             * cursor was stale. A recovery ACTION was taken (the tip was
+             * corrected) but NO bulk reload follows, so bulk_reload_pending
+             * stays false — see struct recovery_exec_result. */
             res.recovered = true;
             break;
         }
@@ -620,7 +624,11 @@ struct recovery_exec_result utxo_recovery_execute(
             LOG_WARN("utxo_recovery", "%s", res.status.message);
             break;
         }
+        /* Wiped to genesis: the entire projection set is re-populated by the
+         * re-sync that follows, so the caller may legitimately drop the
+         * secondary indexes now and rebuild them once at the end. */
         res.recovered = true;
+        res.bulk_reload_pending = true;
         break;
 
     case BOOT_RECOVER_RESET_CHAIN: {
