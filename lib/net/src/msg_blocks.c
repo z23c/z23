@@ -758,8 +758,10 @@ bool process_block_msg(struct msg_processor *mp, struct p2p_node *node,
                     msg_processor_get_block_manifest_header(&header,
                                                             &built_at);
                 should_refresh_manifest =
-                    !has_manifest ||
-                    new_tip->nHeight - built_at >= MANIFEST_REFRESH_BLOCKS;
+                    block_piece_manifest_should_refresh(
+                        &mp->main_state->chain_active, has_manifest,
+                        has_manifest ? &header : NULL, built_at,
+                        new_tip->nHeight, MANIFEST_REFRESH_BLOCKS);
             }
             if (should_refresh_manifest) {
                 /* Rebuild in a detached thread to avoid blocking message processing */

@@ -915,6 +915,27 @@ static int test_ic_native_compositor_selects_physical_proof(void)
     return failures;
 }
 
+static int test_ic_fast_sync_splits_keep_proof_lane(void)
+{
+    int failures = 0;
+    TEST("impact composition: new fast-sync splits keep focused proof lane") {
+        static const char *const paths[] = {
+            "lib/net/src/fast_sync_manifest_policy.c",
+            "lib/net/include/net/fast_sync_future_policy.h",
+        };
+        for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+            struct agent_impact_acc impact = {0};
+            ASSERT(agent_impact_apply_shared_rules(paths[i], &impact));
+            ASSERT(impact.shared_rule_hits > 0);
+            ASSERT(ic_acc_has_group(&impact, "fast_sync"));
+            ASSERT(ic_acc_has_group(&impact, "snapshot_sync_service"));
+            ASSERT(ic_acc_has_group(&impact, "make_lint_gates"));
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_impact_composition(void)
 {
     int failures = 0;
@@ -930,5 +951,6 @@ int test_impact_composition(void)
     failures += test_ic_snapshot_overlays_current_symbols();
     failures += test_ic_code_capsule_stays_with_code_owner();
     failures += test_ic_native_compositor_selects_physical_proof();
+    failures += test_ic_fast_sync_splits_keep_proof_lane();
     return failures;
 }

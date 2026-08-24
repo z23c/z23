@@ -32,7 +32,7 @@ lib/metrics/src/prometheus_metrics.c 1100
 lib/net/src/addrman.c 1444
 lib/net/src/connman.c 2929
 lib/net/src/download.c 1623
-lib/net/src/fast_sync.c 1909
+lib/net/src/fast_sync.c 1908
 lib/net/src/file_service.c 2255
 lib/net/src/https_server.c 1047
 lib/net/src/msg_blocks.c 902
