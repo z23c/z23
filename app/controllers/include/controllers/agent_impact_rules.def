@@ -557,7 +557,7 @@ AGENT_IMPACT_RULE("lib/metrics/src/metrics.c|lib/metrics/include/metrics/metrics
 AGENT_IMPACT_RULE("lib/net/src/net.c|lib/test/src/test_net_ban_persistence.c", "net_ban_persistence net_msg_dos net_framing_dos msg_handlers peer_eviction make_lint_gates")
 
 /* Wave 3: _health seeding across stage/projection dumpers. */
-AGENT_IMPACT_RULE("app/jobs/include/jobs/stage_helpers.h|app/jobs/src/header_admit_stage.c|app/jobs/src/body_fetch_stage.c|app/jobs/src/body_persist_stage.c|app/jobs/src/script_validate_stage_dump.c|app/jobs/src/proof_validate_stage_dump.c|lib/util/src/blocker.c|lib/test/src/test_health_rollup.c", "health_rollup reducer_forward_progress_gate body_persist_stage make_lint_gates")
+AGENT_IMPACT_RULE("app/jobs/include/jobs/stage_helpers.h|app/jobs/src/header_admit_stage.c|app/jobs/src/body_fetch_stage.c|app/jobs/src/body_persist_stage.c|lib/test/src/test_body_persist_stage.c|app/jobs/src/script_validate_stage_dump.c|app/jobs/src/proof_validate_stage_dump.c|lib/util/src/blocker.c|lib/test/src/test_health_rollup.c", "health_rollup reducer_forward_progress_gate body_persist_stage make_lint_gates")
 AGENT_IMPACT_RULE("lib/storage/src/mempool_projection.c|lib/storage/src/znam_projection.c|lib/storage/src/wallet_projection.c|lib/storage/src/contacts_projection.c|lib/storage/src/onion_announcements_projection.c|lib/storage/src/hodl_history_projection.c|lib/storage/src/peers_projection.c", "health_rollup small_projections make_lint_gates")
 /* Generic event-log projection consumer skeleton (open/catch_up/rebuild/
  * close + projection_meta plumbing) that znam_projection.c and

@@ -29,6 +29,7 @@
 #include "storage/progress_store.h"
 #include "util/log_macros.h"
 #include "util/reducer_stage_profile.h"
+#include "util/safe_alloc.h"
 #include "util/stage.h"
 #include "util/util.h"
 #include "validation/chainstate.h"
@@ -55,6 +56,8 @@ static stage_t *g_stage = NULL;
 static char g_datadir[2048] = {0};
 static body_persist_reader_fn g_reader = NULL;
 static void *g_reader_user = NULL;
+static struct uint256 *g_merkle_txids = NULL;
+static size_t g_merkle_txids_capacity = 0;
 
 static _Atomic uint64_t g_verified_total = 0;
 static _Atomic uint64_t g_upstream_failed_total = 0;
@@ -190,24 +193,45 @@ static void release_stage_block(struct block_parse_handle *handle,
         block_free(owned);
 }
 
-static bool verify_merkle_root(const struct block *blk)
-{
-    if (!blk) return false;
-    if (blk->num_vtx == 0)
-        return uint256_is_null(&blk->header.hashMerkleRoot);
+enum merkle_verify_result {
+    MERKLE_VERIFY_OK = 0,
+    MERKLE_VERIFY_MISMATCH,
+    MERKLE_VERIFY_OOM,
+};
 
-    size_t bytes = blk->num_vtx * sizeof(struct uint256);
-    reducer_stage_profile_add(REDUCER_PROFILE_BODY_PERSIST,
-                              RPF_MERKLE_ALLOCS, 1);
-    reducer_stage_profile_add(REDUCER_PROFILE_BODY_PERSIST,
-                              RPF_MERKLE_BYTES, bytes);
-    struct uint256 *txids = malloc(bytes); // raw-alloc-ok:bounded-temporary
-    if (!txids) return false;
+static enum merkle_verify_result verify_merkle_root(const struct block *blk)
+{
+    if (!blk || blk->num_vtx > MAX_BLOCK_TRANSACTIONS)
+        return MERKLE_VERIFY_MISMATCH;
+    if (blk->num_vtx == 0)
+        return uint256_is_null(&blk->header.hashMerkleRoot)
+            ? MERKLE_VERIFY_OK : MERKLE_VERIFY_MISMATCH;
+
+    if (blk->num_vtx > g_merkle_txids_capacity) {
+        size_t new_capacity = g_merkle_txids_capacity > 0
+            ? g_merkle_txids_capacity : 1;
+        while (new_capacity < blk->num_vtx) {
+            new_capacity *= 2;
+            if (new_capacity > MAX_BLOCK_TRANSACTIONS)
+                new_capacity = MAX_BLOCK_TRANSACTIONS;
+        }
+        size_t bytes = new_capacity * sizeof(*g_merkle_txids);
+        reducer_stage_profile_add(REDUCER_PROFILE_BODY_PERSIST,
+                                  RPF_MERKLE_ALLOCS, 1);
+        reducer_stage_profile_add(REDUCER_PROFILE_BODY_PERSIST,
+                                  RPF_MERKLE_BYTES, bytes);
+        struct uint256 *grown = zcl_realloc(
+            g_merkle_txids, bytes, "body_persist_merkle_txids");
+        if (!grown)
+            return MERKLE_VERIFY_OOM;
+        g_merkle_txids = grown;
+        g_merkle_txids_capacity = new_capacity;
+    }
     for (size_t i = 0; i < blk->num_vtx; i++)
-        txids[i] = blk->vtx[i].hash;
-    struct uint256 root = compute_merkle_root(txids, blk->num_vtx);
-    free(txids);
-    return uint256_eq(&root, &blk->header.hashMerkleRoot);
+        g_merkle_txids[i] = blk->vtx[i].hash;
+    struct uint256 root = compute_merkle_root(g_merkle_txids, blk->num_vtx);
+    return uint256_eq(&root, &blk->header.hashMerkleRoot)
+        ? MERKLE_VERIFY_OK : MERKLE_VERIFY_MISMATCH;
 }
 
 /* READ-class failure discipline (mirrors proof_validate's reader handling
@@ -359,11 +383,17 @@ static job_result_t step_persist(struct stage_step_ctx *c)
     }
 
     phase_started = platform_time_monotonic_us();
-    bool merkle_ok = verify_merkle_root(blk);
+    enum merkle_verify_result merkle_result = verify_merkle_root(blk);
     reducer_stage_profile_observe_us(
         REDUCER_PROFILE_BODY_PERSIST, RPF_MERKLE_US,
         (uint64_t)(platform_time_monotonic_us() - phase_started));
-    if (!merkle_ok) {
+    if (merkle_result == MERKLE_VERIFY_OOM) {
+        release_stage_block(&handle, &owned, borrowed);
+        LOG_RETURN(JOB_FATAL, STAGE_NAME,
+                   "[body_persist] merkle scratch allocation failed height=%d",
+                   next_h);
+    }
+    if (merkle_result != MERKLE_VERIFY_OK) {
         release_stage_block(&handle, &owned, borrowed);
         return requeue_body_for_refetch(bi, next_h, "merkle_mismatch",
                                         &g_merkle_mismatch_total);
@@ -524,6 +554,9 @@ void body_persist_stage_shutdown(void)
     g_datadir[0] = '\0';
     g_reader = NULL;
     g_reader_user = NULL;
+    free(g_merkle_txids);
+    g_merkle_txids = NULL;
+    g_merkle_txids_capacity = 0;
     atomic_store(&g_verified_total, (uint64_t)0);
     atomic_store(&g_upstream_failed_total, (uint64_t)0);
     atomic_store(&g_read_failed_total, (uint64_t)0);

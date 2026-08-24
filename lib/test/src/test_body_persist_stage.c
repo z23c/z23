@@ -13,6 +13,7 @@
 #include "jobs/body_persist_stage.h"
 #include "storage/progress_store.h"
 #include "util/blocker.h"
+#include "util/reducer_stage_profile.h"
 #include "util/safe_alloc.h"
 #include "util/stage.h"
 #include "validation/chainstate.h"
@@ -216,6 +217,24 @@ static bool log_row_at(sqlite3 *db, int height,
     return found;
 }
 
+static int64_t profile_cumulative_field(const char *name)
+{
+    struct json_value root;
+    json_init(&root);
+    if (!reducer_stage_profile_dump_state_json(&root, NULL)) {
+        json_free(&root);
+        return -1;
+    }
+    const struct json_value *body = json_get(&root, "body_persist");
+    const struct json_value *cumulative = body
+        ? json_get(body, "cumulative") : NULL;
+    const struct json_value *field = cumulative
+        ? json_get(cumulative, name) : NULL;
+    int64_t value = field ? json_get_int(field) : -1;
+    json_free(&root);
+    return value;
+}
+
 static int bp_setup(const char *tag, int n, int upstream_fail_height,
                     int missing_row_height, char *dir_out,
                     size_t dir_out_size, struct main_state *ms,
@@ -261,12 +280,18 @@ int test_body_persist_stage(void)
         char dir[256]; struct main_state ms; struct synth_chain_bp sc;
         BP_CHECK("happy: setup",
                  bp_setup("happy", 5, -1, -1, dir, sizeof(dir), &ms, &sc) == 0);
+        reducer_stage_profile_reset();
         BP_CHECK("happy: drains 5", body_persist_stage_drain(100) == 5);
         BP_CHECK("happy: cursor at 5", body_persist_stage_cursor() == 5);
         BP_CHECK("happy: verified_total == 5",
                  body_persist_stage_verified_total() == 5);
         BP_CHECK("happy: log rows == 5",
                  log_row_count(progress_store_db()) == 5);
+        BP_CHECK("happy: one reusable merkle scratch allocation",
+                 profile_cumulative_field(
+                     "merkle_temporary_allocations") == 1);
+        BP_CHECK("happy: merkle scratch allocates one hash",
+                 profile_cumulative_field("merkle_temporary_bytes") == 32);
         for (int h = 0; h < 5; h++) {
             int ok = -1; char src[32];
             log_row_at(progress_store_db(), h, &ok, src, sizeof(src));
@@ -276,6 +301,25 @@ int test_body_persist_stage(void)
         }
         BP_CHECK("happy: next step IDLE",
                  body_persist_stage_step_once() == JOB_IDLE);
+        bp_teardown(dir, &ms, &sc);
+    }
+
+    {
+        char dir[256]; struct main_state ms; struct synth_chain_bp sc;
+        BP_CHECK("merkle_oom: setup",
+                 bp_setup("merkle_oom", 2, -1, -1, dir, sizeof(dir), &ms,
+                          &sc) == 0);
+        zcl_alloc_fault_fail_next("body_persist_merkle_txids");
+        job_result_t result = body_persist_stage_step_once();
+        zcl_alloc_fault_clear();
+        BP_CHECK("merkle_oom: allocation failure is fatal",
+                 result == JOB_FATAL);
+        BP_CHECK("merkle_oom: cursor stays at zero",
+                 body_persist_stage_cursor() == 0);
+        BP_CHECK("merkle_oom: HAVE_DATA is retained",
+                 (sc.blocks[0].nStatus & BLOCK_HAVE_DATA) != 0);
+        BP_CHECK("merkle_oom: no verdict row is written",
+                 log_row_count(progress_store_db()) == 0);
         bp_teardown(dir, &ms, &sc);
     }
 
