@@ -8,6 +8,7 @@
 #include "config/boot_internal.h"
 #include "validation/chainstate.h"
 #include "validation/main_state.h"
+#include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <sys/stat.h>
@@ -549,6 +550,111 @@ static long slurp_file(const char *path, unsigned char **out)
     return sz;
 }
 
+static int test_append_quarantines_hardlinked_tail(void)
+{
+    int failures = 0;
+    char tmpdir[256], shared_path[512], alias_path[512];
+    unsigned char *before = NULL, *after_shared = NULL, *after_alias = NULL;
+    long before_len = -1, after_shared_len = -1, after_alias_len = -1;
+    make_test_dir(tmpdir, sizeof(tmpdir));
+
+    TEST("write_block_to_disk: append rotates past hardlinked tail") {
+        struct disk_block_pos first;
+        disk_block_pos_init(&first);
+        if (!write_test_block(tmpdir, &first, 717171)) {
+            printf("FAIL (seed write)\n"); failures++; goto _test_next;
+        }
+        get_block_pos_filename(shared_path, sizeof(shared_path), tmpdir,
+                               &first, "blk");
+        snprintf(alias_path, sizeof(alias_path), "%s/shared-blk.dat", tmpdir);
+        if (link(shared_path, alias_path) != 0) {
+            printf("FAIL (hardlink fixture: %s)\n", strerror(errno));
+            failures++; goto _test_next;
+        }
+        before_len = slurp_file(shared_path, &before);
+        if (before_len <= 0) {
+            printf("FAIL (seed read)\n"); failures++; goto _test_next;
+        }
+
+        struct disk_block_pos appended;
+        disk_block_pos_init(&appended);
+        bool wrote = write_test_block(tmpdir, &appended, 727272);
+        after_shared_len = slurp_file(shared_path, &after_shared);
+        after_alias_len = slurp_file(alias_path, &after_alias);
+        bool shared_unchanged = after_shared_len == before_len &&
+            after_alias_len == before_len &&
+            memcmp(before, after_shared, (size_t)before_len) == 0 &&
+            memcmp(before, after_alias, (size_t)before_len) == 0;
+        struct block readback;
+        block_init(&readback);
+        bool read_ok = wrote && appended.nFile == first.nFile + 1 &&
+            read_block_from_disk_pread(&readback, &appended, tmpdir) &&
+            readback.header.nTime == 727272;
+        block_free(&readback);
+        if (!wrote || !shared_unchanged || !read_ok) {
+            printf("FAIL (wrote=%d file=%d shared_unchanged=%d read=%d)\n",
+                   wrote, appended.nFile, shared_unchanged, read_ok);
+            failures++; goto _test_next;
+        }
+        printf("OK\n");
+    }
+_test_next:
+    free(before);
+    free(after_shared);
+    free(after_alias);
+    cleanup_test_dir(tmpdir);
+    return failures;
+}
+
+static int test_explicit_write_refuses_hardlinked_file(void)
+{
+    int failures = 0;
+    char tmpdir[256], shared_path[512], alias_path[512];
+    unsigned char *before = NULL, *after_shared = NULL, *after_alias = NULL;
+    long before_len = -1, after_shared_len = -1, after_alias_len = -1;
+    make_test_dir(tmpdir, sizeof(tmpdir));
+
+    TEST("write_block_to_disk: explicit hardlinked position fails unchanged") {
+        struct disk_block_pos first;
+        disk_block_pos_init(&first);
+        if (!write_test_block(tmpdir, &first, 737373)) {
+            printf("FAIL (seed write)\n"); failures++; goto _test_next;
+        }
+        get_block_pos_filename(shared_path, sizeof(shared_path), tmpdir,
+                               &first, "blk");
+        snprintf(alias_path, sizeof(alias_path), "%s/shared-blk.dat", tmpdir);
+        if (link(shared_path, alias_path) != 0) {
+            printf("FAIL (hardlink fixture: %s)\n", strerror(errno));
+            failures++; goto _test_next;
+        }
+        before_len = slurp_file(shared_path, &before);
+        if (before_len <= 0) {
+            printf("FAIL (seed read)\n"); failures++; goto _test_next;
+        }
+
+        struct disk_block_pos explicit_pos = {.nFile = first.nFile,
+                                               .nPos = 0};
+        bool wrote = write_test_block(tmpdir, &explicit_pos, 747474);
+        after_shared_len = slurp_file(shared_path, &after_shared);
+        after_alias_len = slurp_file(alias_path, &after_alias);
+        bool unchanged = after_shared_len == before_len &&
+            after_alias_len == before_len &&
+            memcmp(before, after_shared, (size_t)before_len) == 0 &&
+            memcmp(before, after_alias, (size_t)before_len) == 0;
+        if (wrote || !unchanged) {
+            printf("FAIL (wrote=%d unchanged=%d)\n", wrote, unchanged);
+            failures++; goto _test_next;
+        }
+        printf("OK\n");
+    }
+_test_next:
+    free(before);
+    free(after_shared);
+    free(after_alias);
+    cleanup_test_dir(tmpdir);
+    return failures;
+}
+
 /* Deferred-sync mode must produce a byte-identical block file to immediate
  * mode, must record a pending file (not fdatasync inline), and the file must
  * be readable back both before and after disk_block_io_sync_pending(). This is
@@ -888,6 +994,8 @@ int test_disk_block_io(void)
     failures += test_pread_refuses_unframed_position();
     failures += test_set_have_data_verified();
     failures += test_write_allocates_append_position();
+    failures += test_append_quarantines_hardlinked_tail();
+    failures += test_explicit_write_refuses_hardlinked_file();
     failures += test_deferred_sync_byte_identical();
     failures += test_scoped_read_fd_cache();
     failures += test_scan_duplicate_keeps_earliest_copy();

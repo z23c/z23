@@ -59,7 +59,7 @@ lib/sim/src/simnet_wire.c 1491
 lib/storage/src/census_read.c 868
 lib/storage/src/coins_kv.c 1363
 lib/storage/src/consensus_db.c 883
-lib/storage/src/disk_block_io.c 979
+lib/storage/src/disk_block_io.c 973
 lib/storage/src/peers_projection.c 1304
 lib/storage/src/progress_store.c 881
 lib/storage/src/coins_ram.c 1406
