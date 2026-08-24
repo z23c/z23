@@ -410,7 +410,26 @@ bool stage_repair_tipfin_refusal_is_pending_forward(
  * tip_finalize to the coin-capped H*+1 floor so tip_finalize can replay
  * forward. This is a flag/cursor repair only: it never deletes log rows and
  * never mutates coins. If coins_applied_height is absent or present above H*,
- * the helper refuses (unknown/L2 coin-tear domain). */
+ * the helper refuses (unknown/L2 coin-tear domain).
+ *
+ * LOCK ORDER — main_state.cs_main is the OUTER lock, progress_store_tx_lock
+ * the INNER one, and this reconcile is the only site in the tree that holds
+ * both. That direction is forced by the rest of the tree, not chosen here:
+ * active_chain_height() and active_chain_tip() (lib/validation/src/chainstate.c)
+ * take the progress-store lock internally whenever no chain-height authority
+ * is registered, and roughly two dozen cs_main holders call them —
+ * sync_monitor.c, sticky_escalator_trigger.c, body_backfill_service.c,
+ * gap_fill_service.c, accept_to_mempool.c and several self-heal Conditions
+ * among them. Taking the progress-store lock first here made this function the
+ * single edge that closed an ABBA cycle: the reconcile runs both on the
+ * self-heal condition thread and, via sticky_escalator, on the supervisor
+ * sweep thread, so it could park holding the progress lock while it waited for
+ * cs_main while a supervisor tick parked holding cs_main waiting for the
+ * progress lock. Everything that then reached for the progress store blocked
+ * for the life of the process — including script_validate_stage_init on the
+ * boot thread, which is how a node wedges partway through startup with its
+ * P2P port open and its RPC port never opening. Regression cover: the
+ * "lock-order" cases in lib/test/src/test_reducer_frontier_reconcile_light.c. */
 bool stage_reducer_frontier_reconcile_light_needed(
     struct sqlite3 *db,
     struct main_state *ms,
