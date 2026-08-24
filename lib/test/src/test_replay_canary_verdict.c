@@ -467,18 +467,30 @@ static int test_fail_crossnode_fires(void)
     return failures;
 }
 
-static int test_fail_timeout_fires(void)
+/* A budget overrun is NOT a divergence. bg_validation never reached COMPLETE,
+ * so no sha3, no cross-node equality and no reject count was ever compared —
+ * there is no parity evidence to report in either direction. Typing that FAIL
+ * let mvp_gate.sh raise C8 "full-history parity alarm" (held 7 days) out of a
+ * stopwatch: an honest slow box sustaining 33 blk/s against the ~112 blk/s the
+ * 8 h budget assumes reported a disagreement it never found. BLOCKED (exit 2)
+ * is inert to the pager, which is the point — the run must be re-attempted
+ * with a bigger budget or faster hardware, not treated as a consensus finding.
+ *
+ * The distinction this pins: bg_validation FAILED still FAILs (a consensus
+ * reject surfaces there and IS consensus-grade). Only "did not finish" is
+ * demoted. See test_fail_bg_validation_failed for the other side. */
+static int test_timeout_blocks_rather_than_fails(void)
 {
     int failures = 0;
-    TEST("replay-canary: bg stuck past budget => FAIL reason=budget_exceeded") {
+    TEST("replay-canary: bg stuck past budget => BLOCKED (not FAIL), exit 2") {
         char verdict[16], reason[64];
         int ec = run_canary_selftest("fail-timeout", "anchor",
                                      verdict, sizeof(verdict),
                                      reason, sizeof(reason));
         if (ec == -999) { printf("SKIP (repo root not found)\n"); break; }
-        ASSERT(ec != 0);
-        ASSERT_STR_EQ(verdict, "FAIL");
-        ASSERT_STR_EQ(reason, "budget_exceeded");
+        ASSERT_EQ(ec, 2);
+        ASSERT_STR_EQ(verdict, "BLOCKED");
+        ASSERT_STR_EQ(reason, "budget_exceeded_incomplete_no_parity_evidence");
         PASS();
     } _test_next:;
     return failures;
@@ -1137,7 +1149,7 @@ int test_replay_canary_verdict(void)
     failures += test_fail_exact_sha3_fires();
     failures += test_pass_exact_skew_skips_tier();
     failures += test_fail_exact_unreadable_fires();
-    failures += test_fail_timeout_fires();
+    failures += test_timeout_blocks_rather_than_fails();
     failures += test_fail_elapsed_too_fast_fires();
     failures += test_fail_elapsed_too_slow_fires();
     failures += test_sigkill_midrun_clears_stale_no_fresh_pass();

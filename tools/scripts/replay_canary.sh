@@ -322,12 +322,22 @@ fail() {
 
 # blocked <reason>: write a BLOCKED sentinel + line, exit non-zero (distinct
 # exit code from fail's, though the durable signal is the sentinel's
-# "verdict" field, not the exit code). Use this for "could not attempt a
-# replay at all" conditions caught BEFORE any node/RPC evidence exists —
-# missing binary, unusable source datadir, no disk, isolation-setup refusal.
-# Never use it once the isolated node has been probed for real evidence
-# (bg_validation state, consensus rejects, sha3, cross-node stats) — those
-# paths stay on fail() because they ARE consensus-grade findings.
+# "verdict" field, not the exit code).
+#
+# Use this whenever the run produced NO parity evidence, so there is nothing
+# to report either way. Two kinds qualify:
+#   1. could not attempt a replay at all, caught before any node/RPC evidence
+#      exists — missing binary, unusable source datadir, no disk, isolation
+#      refusal;
+#   2. attempted but did not COMPLETE — the budget timeout. Nothing was
+#      compared: no sha3, no cross-node equality, no reject count.
+#
+# Once the isolated node HAS been probed and returned real evidence
+# (bg_validation FAILED, a consensus reject, a mismatched sha3 or cross-node
+# stat), stay on fail() — those ARE consensus-grade findings.
+#
+# The line to hold: a verdict may report what was MEASURED. It may never
+# convert "we ran out of time on this hardware" into "the chain disagrees".
 blocked() {
     local reason="$1"
     write_verdict "BLOCKED" "$reason"
@@ -467,13 +477,26 @@ evaluate_verdict() {
     local zd_best; zd_best="$(json_str "$ZD" bestblock)"
     R_ZD_SUPPLY="$(json_amount "$ZD" total_amount)"
     local zd_height; zd_height="$(json_num "$ZD" height)"; : "${zd_height:=0}"
-
-    # (a) bg_validation must reach COMPLETE. FAILED or a budget-timeout
-    #     (caller records bg_state=timeout) => FAIL. A consensus reject
-    #     during replay surfaces as FAILED.
+    # (a) bg_validation must reach COMPLETE.
+    #
+    #     FAILED => FAIL: a consensus reject during replay surfaces here, and
+    #     that IS a consensus-grade finding.
+    #
+    #     timeout (caller records bg_state=timeout) => BLOCKED, not FAIL. The
+    #     run did not diverge; it did not FINISH. bg_validation never reached
+    #     COMPLETE, so no sha3, no cross-node equality and no reject count was
+    #     ever compared — there is no parity evidence to report either way.
+    #     Typing it FAIL made mvp_gate.sh raise C8 "full-history parity alarm"
+    #     (held 7 days) out of a stopwatch: measured 2026-08-24, a from-genesis
+    #     replay sustained 33 blk/s against the ~112 blk/s the 8 h budget
+    #     assumes, so an honest slow box reported a divergence it never found.
+    #     A budget encodes an assumption about hardware, never a fact about
+    #     consensus. BLOCKED still earns C8 nothing (mvp_gate has no BLOCKED
+    #     branch for genesis, so it falls through to "unearned"), which is the
+    #     correct outcome: unproven, not proven-bad.
     case "$R_BGSTATE" in
         complete|COMPLETE) : ;;
-        timeout)  fail "budget_exceeded" ;;
+        timeout)  blocked "budget_exceeded_incomplete_no_parity_evidence" ;;
         failed|FAILED) fail "bg_validation_failed" ;;
         *) fail "bg_state_${R_BGSTATE:-empty}" ;;
     esac
