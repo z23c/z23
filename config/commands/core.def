@@ -713,12 +713,13 @@ ZCL_COMMAND_READY_READ(
     "core.network.onion.status", "core.network.onion", "",
     "Onion address, port map, bootstrap, and handshake stages",
     "Live embedded-Tor onion address, P2P publish readiness, setup state, "
-    "installed virtual-port map, monotonic stream counters, and aggregate "
-    "P2P handshake stages, read from the running node at call time. The "
-    "first-incomplete stage is directly authoritative for an isolated probe; "
-    "busy nodes compare bounded counter deltas. Tor state is absent when the "
-    "stub build is linked.", 0,
-    "onion,tor,status,address,port,map,p2p,setup,handshake,version,verack",
+    "installed virtual-port map, monotonic stream counters, aggregate P2P "
+    "handshake stages, and a bounded newest-first per-target dial ledger read "
+    "from the running node at call time. Each dial joins Tor circuit/byte "
+    "progress to the matching P2P lifecycle and names its first incomplete "
+    "stage, so concurrent peers need no counter-delta inference. Tor state is "
+    "absent when the stub build is linked.", 0,
+    "onion,tor,status,address,port,map,p2p,setup,handshake,version,verack,dial,target",
     "zcl.command.empty_input.v1", "zcl.onion_status.v1", "", "",
     "z23 core network onion status",
     ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_PUBLIC,

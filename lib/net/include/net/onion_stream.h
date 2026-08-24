@@ -115,6 +115,33 @@ struct onion_stream_stages {
 };
 void onion_stream_get_stages(struct onion_stream_stages *out);
 
+/* Bounded per-dial attribution.  The process-wide counters above are cheap
+ * health totals; these records answer which exact onion endpoint advanced or
+ * stalled.  A fixed ring is sufficient because connman permits at most three
+ * simultaneous outbound onion peers.  New completed dials replace the oldest
+ * completed record, while active records are never reused. */
+#define ONION_STREAM_RECENT_DIALS_MAX 16
+struct onion_stream_dial_snapshot {
+    char target[NET_SERVICE_STR_MAX + 1];
+    uint64_t generation;
+    bool active;
+    int64_t started_ms;
+    int64_t ended_ms;
+    struct onion_stream_stages stages;
+    struct {
+        int64_t connected;
+        int64_t version_sent;
+        int64_t version_received;
+        int64_t verack_received;
+        int64_t handshake_complete;
+        int64_t pre_handshake_disconnects;
+    } p2p_baseline;
+};
+
+/* Returns newest first, up to cap records. */
+size_t onion_stream_get_recent_dials(struct onion_stream_dial_snapshot *out,
+                                     size_t cap);
+
 #ifdef ZCL_TESTING
 size_t onion_stream_connect_plan_for_test(int connect_timeout_ms,
                                           int budgets[2]);

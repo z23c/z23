@@ -41,6 +41,8 @@ int syncdiag_cases_network(void)
                                                      "outbound_streams");
         const struct json_value *handshake = json_get(&result,
                                                        "p2p_handshake");
+        const struct json_value *recent_dials = json_get(&result,
+                                                          "recent_dials");
 
         ok = ok && result.type == JSON_OBJ;
         ok = ok && strcmp(json_get_str(json_get(&result, "schema")),
@@ -75,6 +77,8 @@ int syncdiag_cases_network(void)
             ok = count && count->type == JSON_INT && json_get_int(count) >= 0;
         }
         ok = ok && handshake && handshake->type == JSON_OBJ;
+        ok = ok && recent_dials && recent_dials->type == JSON_ARR;
+        ok = ok && recent_dials && json_size(recent_dials) == 0;
         ok = ok &&
              strcmp(json_get_str(json_get(handshake, "schema")),
                     "zcl.onion_handshake_stages.v1") == 0;

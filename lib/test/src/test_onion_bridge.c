@@ -29,8 +29,10 @@
 #define _DEFAULT_SOURCE   /* usleep */
 #include "platform/time_compat.h"
 #include "test/test_core.h"
+#include "controllers/network_controller.h"
 #include "net/onion_stream.h"
 #include "net/onion_v3_address.h"
+#include "net/peer_lifecycle.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -267,6 +269,25 @@ int test_onion_bridge(void)
         struct net_service svc;
         bool ok = make_onion_service(&svc, 39150);
 
+        /* Seed one OLD successful session for the same endpoint.  The fresh
+         * dial below must classify from its own generation delta, never let
+         * this historical success make a new unadopted bridge look complete. */
+        peer_lifecycle_reset_for_test();
+        struct p2p_node old_peer = {0};
+        old_peer.addr.svc = svc;
+        old_peer.id = 9001;
+        old_peer.state = PEER_HANDSHAKE_COMPLETE;
+        net_service_to_string(&svc, old_peer.addr_name,
+                              sizeof(old_peer.addr_name));
+        peer_lifecycle_note_connected(&old_peer,
+                                      PEER_LIFECYCLE_SOURCE_ADDNODE);
+        peer_lifecycle_note_version_sent(&old_peer, NODE_NETWORK, 1, "old");
+        peer_lifecycle_note_version_received(&old_peer, NODE_NETWORK, 1,
+                                             "old");
+        peer_lifecycle_note_verack_received(&old_peer);
+        peer_lifecycle_note_handshake_complete(&old_peer);
+        peer_lifecycle_note_disconnected(&old_peer, "test_old_session");
+
         zcl_socket_t app = ZCL_INVALID_SOCKET;
         ok = ok && onion_stream_connect_backend_for_test(&svc, &app, 4000,
                                                          &g_stub_backend) &&
@@ -298,11 +319,43 @@ int test_onion_bridge(void)
              st.bytes_from_peer == 126 + 24 + 70000 &&
              st.circuit_torn_down == 0 && st.circuit_timeout == 0;
 
+        struct onion_stream_dial_snapshot recent[2];
+        size_t recent_count = onion_stream_get_recent_dials(recent, 2);
+        ok = ok && recent_count == 1 && recent[0].active &&
+             strstr(recent[0].target, ".onion:39150") != NULL &&
+             recent[0].stages.dial_started == 1 &&
+             recent[0].stages.bridge_up == 1 &&
+             recent[0].stages.peers_answered == 1 &&
+             recent[0].stages.bytes_to_peer == 126 + 24 + 70000 &&
+             recent[0].stages.bytes_from_peer == 126 + 24 + 70000 &&
+             recent[0].p2p_baseline.handshake_complete == 1;
+
+        struct json_value params = {0};
+        struct json_value status = {0};
+        json_set_array(&params);
+        ok = ok && network_onion_status_rpc(&params, false, &status);
+        const struct json_value *dial = json_at(
+            json_get(&status, "recent_dials"), 0);
+        const struct json_value *delta = dial
+            ? json_get(dial, "p2p_handshake_delta") : NULL;
+        ok = ok && dial &&
+             strcmp(json_get_str(json_get(dial, "first_incomplete_stage")),
+                    "p2p_not_connected") == 0 &&
+             delta && json_get_int(json_get(delta, "connected")) == 0 &&
+             json_get_int(json_get(delta, "handshake_complete")) == 0;
+        json_free(&status);
+        json_free(&params);
+
         if (app != ZCL_INVALID_SOCKET)
             close_socket(&app);
         /* The pump must notice the app-side EOF and name its own teardown. */
         ok = ok && wait_bridge_closed(1, 5000);
+        recent_count = onion_stream_get_recent_dials(recent, 2);
+        ok = ok && recent_count == 1 && !recent[0].active &&
+             recent[0].stages.bridge_closed == 1 &&
+             recent[0].ended_ms >= recent[0].started_ms;
         stub_reset();
+        peer_lifecycle_reset_for_test();
 
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
@@ -366,6 +419,11 @@ int test_onion_bridge(void)
         onion_stream_get_stages(&st);
         ok = ok && st.circuit_torn_down == 1 && st.bridge_up == 0 &&
              st.circuit_ready == 0;
+        struct onion_stream_dial_snapshot recent[2];
+        size_t recent_count = onion_stream_get_recent_dials(recent, 2);
+        ok = ok && recent_count == 1 && !recent[0].active &&
+             recent[0].stages.circuit_torn_down == 1 &&
+             recent[0].stages.bridge_up == 0;
         stub_reset();
 
         if (ok) printf("OK\n");

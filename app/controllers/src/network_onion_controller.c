@@ -10,6 +10,7 @@
 #include "net/onion_stream.h"
 #include "net/peer_lifecycle.h"
 #include "net/tor_integration.h"
+#include "platform/time_compat.h"
 
 #include <stdbool.h>
 #include <string.h>
@@ -34,6 +35,113 @@ const char *network_onion_first_incomplete_stage(
     if (peer->verack_received == 0) return "verack_not_received";
     if (peer->handshake_complete == 0) return "handshake_not_complete";
     return "complete";
+}
+
+static int64_t monotonic_delta(int64_t current, int64_t baseline)
+{
+    return current >= baseline ? current - baseline : 0;
+}
+
+static void peer_summary_from_json(const struct json_value *life,
+                                   struct peer_lifecycle_summary *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (!life || life->type != JSON_OBJ)
+        return;
+#define COPY_PEER_COUNT(name) \
+    out->name = json_get_int(json_get(life, #name))
+    COPY_PEER_COUNT(connected);
+    COPY_PEER_COUNT(version_sent);
+    COPY_PEER_COUNT(version_received);
+    COPY_PEER_COUNT(verack_received);
+    COPY_PEER_COUNT(handshake_complete);
+    COPY_PEER_COUNT(pre_handshake_disconnects);
+#undef COPY_PEER_COUNT
+}
+
+static void push_recent_onion_dials(struct json_value *result)
+{
+    struct onion_stream_dial_snapshot
+        snapshots[ONION_STREAM_RECENT_DIALS_MAX];
+    size_t count = onion_stream_get_recent_dials(
+        snapshots, ONION_STREAM_RECENT_DIALS_MAX);
+    struct json_value recent = {0};
+    json_set_array(&recent);
+
+    int64_t now_ms = platform_time_monotonic_ms();
+    for (size_t i = 0; i < count; i++) {
+        const struct onion_stream_dial_snapshot *dial = &snapshots[i];
+        struct json_value item = {0};
+        struct json_value life = {0};
+        struct json_value peer_delta = {0};
+        struct peer_lifecycle_summary current = {0};
+        struct peer_lifecycle_summary peer = {0};
+        bool life_found = peer_lifecycle_addr_json(dial->target, &life);
+        if (life_found)
+            peer_summary_from_json(&life, &current);
+        peer.connected = monotonic_delta(
+            current.connected, dial->p2p_baseline.connected);
+        peer.version_sent = monotonic_delta(
+            current.version_sent, dial->p2p_baseline.version_sent);
+        peer.version_received = monotonic_delta(
+            current.version_received, dial->p2p_baseline.version_received);
+        peer.verack_received = monotonic_delta(
+            current.verack_received, dial->p2p_baseline.verack_received);
+        peer.handshake_complete = monotonic_delta(
+            current.handshake_complete,
+            dial->p2p_baseline.handshake_complete);
+        peer.pre_handshake_disconnects = monotonic_delta(
+            current.pre_handshake_disconnects,
+            dial->p2p_baseline.pre_handshake_disconnects);
+
+        int64_t end_ms = dial->active ? now_ms : dial->ended_ms;
+        int64_t elapsed_ms = end_ms >= dial->started_ms
+            ? end_ms - dial->started_ms : 0;
+        json_set_object(&item);
+        json_push_kv_str(&item, "schema", "zcl.onion_dial_stages.v1");
+        json_push_kv_str(&item, "target", dial->target);
+        json_push_kv_int(&item, "generation", (int64_t)dial->generation);
+        json_push_kv_bool(&item, "active", dial->active);
+        json_push_kv_int(&item, "elapsed_ms", elapsed_ms);
+        json_push_kv_str(&item, "first_incomplete_stage",
+                         network_onion_first_incomplete_stage(
+                             true, true, &dial->stages, &peer));
+        json_push_kv_bool(&item, "p2p_lifecycle_found", life_found);
+        json_set_object(&peer_delta);
+        json_push_kv_int(&peer_delta, "connected", peer.connected);
+        json_push_kv_int(&peer_delta, "version_sent", peer.version_sent);
+        json_push_kv_int(&peer_delta, "version_received",
+                         peer.version_received);
+        json_push_kv_int(&peer_delta, "verack_received",
+                         peer.verack_received);
+        json_push_kv_int(&peer_delta, "handshake_complete",
+                         peer.handshake_complete);
+        json_push_kv_int(&peer_delta, "pre_handshake_disconnects",
+                         peer.pre_handshake_disconnects);
+        json_push_kv(&item, "p2p_handshake_delta", &peer_delta);
+#define PUSH_DIAL_COUNT(name) \
+        json_push_kv_int(&item, #name, (int64_t)dial->stages.name)
+        PUSH_DIAL_COUNT(dial_started);
+        PUSH_DIAL_COUNT(stream_queued);
+        PUSH_DIAL_COUNT(circuit_ready);
+        PUSH_DIAL_COUNT(bridge_up);
+        PUSH_DIAL_COUNT(open_refused);
+        PUSH_DIAL_COUNT(circuit_timeout);
+        PUSH_DIAL_COUNT(circuit_torn_down);
+        PUSH_DIAL_COUNT(bridge_closed);
+        PUSH_DIAL_COUNT(bytes_to_peer);
+        PUSH_DIAL_COUNT(bytes_from_peer);
+        PUSH_DIAL_COUNT(peers_answered);
+#undef PUSH_DIAL_COUNT
+        if (life_found)
+            json_push_kv(&item, "p2p_lifecycle", &life);
+        json_push_back(&recent, &item);
+        json_free(&peer_delta);
+        json_free(&life);
+        json_free(&item);
+    }
+    json_push_kv(result, "recent_dials", &recent);
+    json_free(&recent);
 }
 
 bool network_onion_status_rpc(const struct json_value *params, bool help,
@@ -154,6 +262,12 @@ bool network_onion_status_rpc(const struct json_value *params, bool help,
     json_push_kv_int(&handshake, "pre_handshake_disconnects",
                      handshake_totals.pre_handshake_disconnects);
     json_push_kv(result, "p2p_handshake", &handshake);
+
+    /* Exact endpoint attribution for concurrent production traffic.  This
+     * bounded ring joins each raw Tor dial to the already-owned lifecycle
+     * record for the same host:port, so one healthy peer can no longer hide
+     * another peer's descriptor, circuit, byte, VERSION, or VERACK stall. */
+    push_recent_onion_dials(result);
 
     struct json_value mapping = {0};
     struct json_value routes = {0};
