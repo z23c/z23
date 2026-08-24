@@ -4,6 +4,7 @@
  */
 
 #include "test/syncdiag_rpc_fixture.h"
+#include "net/onion_stream.h"
 
 int syncdiag_cases_network(void)
 {
@@ -38,6 +39,8 @@ int syncdiag_cases_network(void)
             ? json_get(mapping, "routes") : NULL;
         const struct json_value *streams = json_get(&result,
                                                      "outbound_streams");
+        const struct json_value *handshake = json_get(&result,
+                                                       "p2p_handshake");
 
         ok = ok && result.type == JSON_OBJ;
         ok = ok && strcmp(json_get_str(json_get(&result, "schema")),
@@ -71,6 +74,63 @@ int syncdiag_cases_network(void)
                                                        stream_counts[i]);
             ok = count && count->type == JSON_INT && json_get_int(count) >= 0;
         }
+        ok = ok && handshake && handshake->type == JSON_OBJ;
+        ok = ok &&
+             strcmp(json_get_str(json_get(handshake, "schema")),
+                    "zcl.onion_handshake_stages.v1") == 0;
+        ok = ok &&
+             strcmp(json_get_str(json_get(handshake,
+                                           "first_incomplete_stage")),
+                    "tor_disabled") == 0;
+        static const char *handshake_counts[] = {
+            "attempted", "connected", "version_sent", "version_received",
+            "verack_received", "handshake_complete",
+            "pre_handshake_disconnects",
+        };
+        for (size_t i = 0;
+             ok && i < sizeof(handshake_counts) /
+                        sizeof(handshake_counts[0]); i++) {
+            const struct json_value *count = json_get(
+                handshake, handshake_counts[i]);
+            ok = count && count->type == JSON_INT && json_get_int(count) >= 0;
+        }
+        struct onion_stream_stages stream = {0};
+        struct peer_lifecycle_summary peer = {0};
+        ok = ok && strcmp(network_onion_first_incomplete_stage(
+                              true, true, NULL, &peer),
+                          "invalid_snapshot") == 0;
+        ok = ok && strcmp(network_onion_first_incomplete_stage(
+                              false, false, &stream, &peer),
+                          "tor_disabled") == 0;
+        ok = ok && strcmp(network_onion_first_incomplete_stage(
+                              true, false, &stream, &peer),
+                          "tor_dial_not_ready") == 0;
+        stream.dial_started = 1;
+        stream.stream_queued = 1;
+        stream.circuit_ready = 1;
+        stream.bridge_up = 1;
+        stream.bytes_to_peer = 1;
+        peer.connected = 1;
+        peer.version_sent = 1;
+        ok = ok && strcmp(network_onion_first_incomplete_stage(
+                              true, true, &stream, &peer),
+                          "p2p_bytes_not_received") == 0;
+        stream.bytes_from_peer = 1;
+        ok = ok && strcmp(network_onion_first_incomplete_stage(
+                              true, true, &stream, &peer),
+                          "version_not_received") == 0;
+        peer.version_received = 1;
+        ok = ok && strcmp(network_onion_first_incomplete_stage(
+                              true, true, &stream, &peer),
+                          "verack_not_received") == 0;
+        peer.verack_received = 1;
+        ok = ok && strcmp(network_onion_first_incomplete_stage(
+                              true, true, &stream, &peer),
+                          "handshake_not_complete") == 0;
+        peer.handshake_complete = 1;
+        ok = ok && strcmp(network_onion_first_incomplete_stage(
+                              true, true, &stream, &peer),
+                          "complete") == 0;
         if (ok && strcmp(json_get_str(state), "ready") == 0) {
             const char *hostname = json_get_str(address);
             size_t hostname_len = strlen(hostname);

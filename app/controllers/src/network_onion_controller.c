@@ -8,10 +8,33 @@
 #include "net/onion_peer_merge.h"
 #include "net/onion_service.h"
 #include "net/onion_stream.h"
+#include "net/peer_lifecycle.h"
 #include "net/tor_integration.h"
 
 #include <stdbool.h>
 #include <string.h>
+
+const char *network_onion_first_incomplete_stage(
+    bool tor_enabled, bool dial_ready,
+    const struct onion_stream_stages *stream,
+    const struct peer_lifecycle_summary *peer)
+{
+    if (!stream || !peer) return "invalid_snapshot";
+    if (!tor_enabled) return "tor_disabled";
+    if (!dial_ready) return "tor_dial_not_ready";
+    if (stream->dial_started == 0) return "dial_not_started";
+    if (stream->stream_queued == 0) return "stream_not_queued";
+    if (stream->circuit_ready == 0) return "circuit_not_ready";
+    if (stream->bridge_up == 0) return "bridge_not_up";
+    if (peer->connected == 0) return "p2p_not_connected";
+    if (peer->version_sent == 0) return "version_not_sent";
+    if (stream->bytes_to_peer == 0) return "p2p_bytes_not_sent";
+    if (stream->bytes_from_peer == 0) return "p2p_bytes_not_received";
+    if (peer->version_received == 0) return "version_not_received";
+    if (peer->verack_received == 0) return "verack_not_received";
+    if (peer->handshake_complete == 0) return "handshake_not_complete";
+    return "complete";
+}
 
 bool network_onion_status_rpc(const struct json_value *params, bool help,
                               struct json_value *result)
@@ -101,6 +124,37 @@ bool network_onion_status_rpc(const struct json_value *params, bool help,
                      (int64_t)stream_stages.peers_answered);
     json_push_kv(result, "outbound_streams", &outbound_streams);
 
+    /* Join the transport ledger to the P2P lifecycle ledger in one native
+     * read.  These remain process aggregates: on a busy node the operator
+     * compares deltas around one bounded dial; an isolated probe can read the
+     * first-incomplete label directly without grepping or correlating logs. */
+    struct peer_lifecycle_summary handshake_totals;
+    peer_lifecycle_get_summary(&handshake_totals);
+    struct json_value handshake = {0};
+    json_set_object(&handshake);
+    json_push_kv_str(&handshake, "schema",
+                     "zcl.onion_handshake_stages.v1");
+    json_push_kv_str(&handshake, "semantics",
+                     "process-lifetime aggregate; compare deltas around one "
+                     "bounded dial, or read directly in an isolated probe");
+    json_push_kv_str(&handshake, "first_incomplete_stage",
+                     network_onion_first_incomplete_stage(
+                         tor_enabled, dial_ready, &stream_stages,
+                         &handshake_totals));
+    json_push_kv_int(&handshake, "attempted", handshake_totals.attempted);
+    json_push_kv_int(&handshake, "connected", handshake_totals.connected);
+    json_push_kv_int(&handshake, "version_sent",
+                     handshake_totals.version_sent);
+    json_push_kv_int(&handshake, "version_received",
+                     handshake_totals.version_received);
+    json_push_kv_int(&handshake, "verack_received",
+                     handshake_totals.verack_received);
+    json_push_kv_int(&handshake, "handshake_complete",
+                     handshake_totals.handshake_complete);
+    json_push_kv_int(&handshake, "pre_handshake_disconnects",
+                     handshake_totals.pre_handshake_disconnects);
+    json_push_kv(result, "p2p_handshake", &handshake);
+
     struct json_value mapping = {0};
     struct json_value routes = {0};
     struct json_value app_route = {0};
@@ -145,6 +199,7 @@ bool network_onion_status_rpc(const struct json_value *params, bool help,
     json_free(&app_route);
     json_free(&routes);
     json_free(&mapping);
+    json_free(&handshake);
     json_free(&outbound_streams);
     return true;
 }
