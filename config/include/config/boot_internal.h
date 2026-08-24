@@ -315,6 +315,11 @@ void boot_register_store_buyer_rpc(struct boot_svc_ctx *svc);
  * Called once from app_init_services before the frontend kernel starts. */
 bool boot_register_frontend_services(struct boot_svc_ctx *svc);
 
+/* Start embedded Tor as soon as the datadir and wallet are up, so HSDir
+ * descriptor upload runs in parallel with block-index hydrate. Non-blocking
+ * and idempotent: the later frontend kernel start is a no-op if this ran. */
+bool boot_onion_tor_start_early(const struct app_context *ctx);
+
 /* Thin boot_svc_ctx-to-job wrappers stay in boot_services.c beside the
  * app_init/shutdown call sites that own &svc->catchup_job; the
  * projection-backfill worker in boot_background_workers.c drives them

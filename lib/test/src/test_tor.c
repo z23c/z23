@@ -7,6 +7,7 @@
 #include "test/test_core.h"
 #include "net/tor_integration.h"
 #include "net/onion_service.h"
+#include "config/boot_internal.h"
 #include <sys/stat.h>
 #include <unistd.h>
 #include <dirent.h>
@@ -102,6 +103,32 @@ static int test_tor_stop_when_not_running(void)
         failures++;
     }
 
+    return failures;
+}
+
+static int test_boot_onion_early_skips_without_tor(void)
+{
+    int failures = 0;
+    printf("test_boot_onion_early_skips_without_tor: ");
+
+    char tmpdir[512];
+    test_make_tmpdir(tmpdir, sizeof(tmpdir), "tor", "earlyskip");
+    struct app_context ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.datadir = tmpdir;
+    ctx.tor = false;
+    ctx.p2p_port = 39040;
+    bool ok = boot_onion_tor_start_early(&ctx);
+    bool idle = !tor_integration_is_enabled() && !tor_integration_is_ready();
+    if (ok && idle)
+        printf("OK\n");
+    else {
+        printf("FAIL (ok=%d enabled=%d ready=%d)\n",
+               ok, tor_integration_is_enabled(), tor_integration_is_ready());
+        failures++;
+        tor_integration_stop();
+    }
+    remove_tree(tmpdir);
     return failures;
 }
 
@@ -633,6 +660,7 @@ int test_tor(void)
     failures += test_tor_initial_state();
     failures += test_tor_requested_without_start();
     failures += test_tor_stop_when_not_running();
+    failures += test_boot_onion_early_skips_without_tor();
 
     /* torrc generation — bootstrap port derivation */
     failures += test_tor_write_torrc_bootstrap_port();

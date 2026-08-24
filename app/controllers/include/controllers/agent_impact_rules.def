@@ -91,7 +91,7 @@ AGENT_IMPACT_RULE("lib/net/include/net/msg_internal.h|lib/net/include/net/peer_l
 AGENT_IMPACT_RULE("lib/net/src/msg_blocks.c|lib/net/src/msgprocessor.c|lib/net/include/net/msgprocessor.h|lib/test/src/test_msg_handlers.c", "msg_handlers net download body_fetch_missing_have_data_condition sync_watchdog_conditions make_lint_gates")
 AGENT_IMPACT_RULE("lib/net/src/msgprocessor_inv.c|lib/net/src/msgprocessor_internal.h|lib/net/src/msg_bounds_guard.c|lib/net/include/net/msg_bounds_guard.h|lib/test/src/test_net_msg_dos.c", "net_msg_dos net msg_handlers process_headers_adversarial make_lint_gates")
 AGENT_IMPACT_RULE("lib/net/src/download.c|lib/net/include/net/download.h|lib/test/src/test_download.c", "download syncdiag_rpc api block_swarm_loopback")
-AGENT_IMPACT_RULE("lib/net/src/tor_integration.c|lib/net/include/net/tor_integration.h|lib/test/src/test_tor.c|lib/test/src/test_onion_persistence.c|tools/scripts/install_z23.sh", "tor onion_persistence make_lint_gates")
+AGENT_IMPACT_RULE("lib/net/src/tor_integration.c|lib/net/include/net/tor_integration.h|lib/net/src/onion_service.c|config/src/boot_frontend_services.c|config/include/config/boot_internal.h|lib/test/src/test_tor.c|lib/test/src/test_onion_persistence.c|tools/scripts/install_z23.sh", "tor onion_persistence make_lint_gates")
 /* Raw dynhost-stream onion P2P dialer (no SOCKS): the socketpair bridge,
  * its public header, and its fail-closed unit tests. */
 AGENT_IMPACT_RULE("lib/net/src/onion_stream.c|lib/net/include/net/onion_stream.h|lib/test/src/test_onion_stream.c|lib/test/src/test_onion_bridge.c", "onion_stream onion_bridge net tor connman_addnode_fallback make_lint_gates")

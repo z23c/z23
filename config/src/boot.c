@@ -1806,6 +1806,12 @@ bool app_init(struct app_context *ctx)
         if (!wr.ok) return false;
     }
 
+    /* Onion identity must not wait for block-index hydrate. Tor start is
+     * non-blocking; HSDir upload proceeds while this thread loads the
+     * index. The later frontend kernel start is idempotent. */
+    if (!ctx->no_services)
+        (void)boot_onion_tor_start_early(ctx);
+
     /* Open the dedicated progress.kv SQLite file that hosts every staged-sync
      * stage cursor — independent of node.db (commits off the hot path). */
     bool progress_open = progress_store_open(ctx->datadir);
