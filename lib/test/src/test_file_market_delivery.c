@@ -395,6 +395,71 @@ static bool delivery_handshake_rejects_partial_record_on_deadline(void)
     return rejected;
 }
 
+struct delivery_frame_call {
+    struct fs_session *session;
+    bool ok;
+    _Atomic bool done;
+};
+
+static void *delivery_frame_call_main(void *opaque)
+{
+    struct delivery_frame_call *call = opaque;
+    uint8_t type = 0;
+    const uint8_t *payload = NULL;
+    uint32_t payload_len = 0;
+    call->ok = fs_recv_frame(call->session, &type, &payload, &payload_len);
+    atomic_store_explicit(&call->done, true, memory_order_release);
+    return NULL;
+}
+
+static bool delivery_frame_rejects_partial_record_on_deadline(void)
+{
+    int sockets[2] = {-1, -1};
+    pthread_t thread;
+    bool started = false, sent = false, finished = false;
+    struct fs_session receiver;
+    struct delivery_frame_call call = {.session = &receiver};
+    struct delivery_handshake_clock clock = {0};
+    struct platform_clock_source source = {
+        .monotonic_us = delivery_handshake_monotonic_us,
+        .wall_unix = delivery_handshake_wall_unix,
+        .user = &clock,
+    };
+    uint8_t partial_frame = 1;
+
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0)
+        return false;
+    fs_session_init(&receiver, sockets[0]);
+    receiver.key[0] = 1;
+    receiver.key_established = true;
+    platform_clock_set_source(&source);
+    started = pthread_create(&thread, NULL, delivery_frame_call_main,
+                             &call) == 0;
+    if (started)
+        sent = delivery_send_exact(sockets[1], &partial_frame, 1);
+    for (unsigned i = 0; started && i < 250; i++) {
+        if (atomic_load_explicit(&call.done, memory_order_acquire)) {
+            finished = true;
+            break;
+        }
+        platform_sleep_ms(1);
+    }
+    if (!finished)
+        finished = atomic_load_explicit(&call.done, memory_order_acquire);
+    close(sockets[1]);
+    sockets[1] = -1;
+    if (started)
+        pthread_join(thread, NULL);
+    platform_clock_clear_source();
+
+    bool rejected = sent && finished && !call.ok &&
+        receiver.recv_counter == 0 && receiver.bytes_received == 0 &&
+        atomic_load_explicit(&clock.reads, memory_order_relaxed) >= 3;
+    fs_session_cleanup(&receiver);
+    close(sockets[0]);
+    return rejected;
+}
+
 struct delivery_server_call {
     struct fs_session *session;
     bool served;
@@ -524,6 +589,8 @@ int file_market_delivery_tests(void)
                    delivery_handshake_rejects_wrong_confirmation());
     DELIVERY_CHECK("partial handshake record hits one absolute deadline",
                    delivery_handshake_rejects_partial_record_on_deadline());
+    DELIVERY_CHECK("partial encrypted frame hits one absolute deadline",
+                   delivery_frame_rejects_partial_record_on_deadline());
     struct fs_session server;
     struct file_market_delivery_request request, decoded;
     uint8_t wire[FILE_MARKET_DELIVERY_WIRE_BYTES], buyer_seed[32];

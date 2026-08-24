@@ -26,6 +26,7 @@
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <poll.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <sys/time.h>
@@ -36,6 +37,8 @@
 #include "util/thread_liveness.h"
 #include "json/json.h"
 #include "support/cleanse.h"
+#define FS_FRAME_RECV_BUDGET_MS 30000
+
 static void fs_join_deadline_from_now(struct timespec *ts, int timeout_sec)
 {
     platform_time_realtime_timespec(ts);
@@ -109,15 +112,38 @@ static bool send_all(int fd, const uint8_t *buf, size_t len)
     return true;
 }
 
-static bool recv_all(int fd, uint8_t *buf, size_t len)
+static bool recv_all(int fd, uint8_t *buf, size_t len, int64_t deadline_ms)
 {
     size_t got = 0;
     while (got < len) {
-        ssize_t n = recv(fd, buf + got, len - got, 0);
-        if (n <= 0) {
-            if (n < 0 && errno == EINTR) continue;
-            LOG_FAIL("filesvc", "recv_all failed: errno=%d (%s)", errno, strerror(errno));
+        int flags = 0;
+        if (deadline_ms > 0) {
+            int64_t now_ms = platform_time_monotonic_ms();
+            if (now_ms <= 0 || now_ms >= deadline_ms)
+                LOG_FAIL("filesvc", "recv_all exceeded absolute deadline");
+            struct pollfd pfd = {.fd = fd, .events = POLLIN};
+            int ready = poll(&pfd, 1, (int)(deadline_ms - now_ms));
+            if (ready < 0 && errno == EINTR)
+                continue;
+            if (ready < 0)
+                LOG_FAIL("filesvc", "recv_all poll failed: errno=%d (%s)", errno, strerror(errno));
+            if (ready == 0)
+                LOG_FAIL("filesvc", "recv_all exceeded absolute deadline");
+            if (!(pfd.revents & (POLLIN | POLLHUP)))
+                LOG_FAIL("filesvc", "recv_all poll revents=0x%x",
+                         pfd.revents);
+            flags = MSG_DONTWAIT;
         }
+        ssize_t n = recv(fd, buf + got, len - got, flags);
+        if (n < 0 && (errno == EINTR || (deadline_ms > 0 &&
+                (errno == EAGAIN || errno == EWOULDBLOCK))))
+            continue;
+        if (n < 0)
+            LOG_FAIL("filesvc", "recv_all failed: errno=%d (%s)", errno,
+                     strerror(errno));
+        if (n == 0)
+            LOG_FAIL("filesvc", "recv_all peer closed after %zu/%zu bytes",
+                     got, len);
         got += (size_t)n;
     }
     return true;
@@ -271,7 +297,11 @@ bool fs_recv_frame(struct fs_session *s, uint8_t *type_out,
 {
     uint8_t frame[FS_FRAME_SIZE];
     if (!s) LOG_FAIL("filesvc", "fs_recv_frame called with NULL session");
-    if (!recv_all(s->fd, frame, FS_FRAME_SIZE))
+    int64_t now_ms = platform_time_monotonic_ms();
+    if (now_ms <= 0 || now_ms > INT64_MAX - FS_FRAME_RECV_BUDGET_MS)
+        LOG_FAIL("filesvc", "frame receive deadline unavailable");
+    if (!recv_all(s->fd, frame, FS_FRAME_SIZE,
+                  now_ms + FS_FRAME_RECV_BUDGET_MS))
         LOG_FAIL("filesvc", "recv_all failed reading frame from fd=%d", s->fd);
     s->bytes_received += FS_FRAME_SIZE;
 
@@ -382,7 +412,7 @@ bool fs_recv_chunk_fast(struct fs_session *s, uint8_t **out,
         LOG_FAIL("filesvc", "recv_chunk_fast: invalid arguments");
     *out = NULL; *out_size = 0;
     uint8_t hdr[4];
-    if (!recv_all(s->fd, hdr, 4))
+    if (!recv_all(s->fd, hdr, 4, 0))
         LOG_FAIL("filesvc", "recv_chunk_fast: failed to read size header");
     uint32_t size = (uint32_t)hdr[0] | ((uint32_t)hdr[1] << 8) |
                     ((uint32_t)hdr[2] << 16) | ((uint32_t)hdr[3] << 24);
@@ -391,11 +421,11 @@ bool fs_recv_chunk_fast(struct fs_session *s, uint8_t **out,
     /* Read data */
     uint8_t *buf = zcl_malloc(size, "file_recv_buf");
     if (!buf) LOG_FAIL("filesvc", "recv_chunk_fast: malloc failed for %u bytes", size);
-    if (!recv_all(s->fd, buf, size)) { free(buf); LOG_FAIL("filesvc", "recv_chunk_fast: failed to read data (%u bytes)", size); }
+    if (!recv_all(s->fd, buf, size, 0)) { free(buf); LOG_FAIL("filesvc", "recv_chunk_fast: failed to read data (%u bytes)", size); }
 
     /* Read and verify SHA3 MAC */
     uint8_t mac_wire[32];
-    if (!recv_all(s->fd, mac_wire, 32)) { free(buf); LOG_FAIL("filesvc", "recv_chunk_fast: failed to read MAC"); }
+    if (!recv_all(s->fd, mac_wire, 32, 0)) { free(buf); LOG_FAIL("filesvc", "recv_chunk_fast: failed to read MAC"); }
 
     uint8_t mac_expected[32];
     struct sha3_256_ctx mctx;
