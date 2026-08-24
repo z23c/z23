@@ -1073,6 +1073,14 @@ int t_agent_fast_ci_contract(void)
         ASSERT(strstr(buf, "git rev-parse --local-env-vars") != NULL);
         ASSERT(strstr(buf, "unset \"$name\"") != NULL);
         ASSERT(strstr(buf, "make install-quality-linger") != NULL);
+        /* Behavioural, not textual: the pre-push changed-set resolver builds a
+         * throwaway repository and asserts that a CLEAN worktree whose HEAD is
+         * ahead of its upstream still yields the committed file list. Every
+         * other assertion in this function greps a script; this one runs the
+         * property, because the defect it guards was invisible to grep — the
+         * gate said PASS while executing zero test groups. */
+        ASSERT(run_gate_script_arg("tools/agent_fast_ci.sh", NULL,
+                                   "changed-set-selftest") == 0);
         ASSERT(run_gate_script("tools/dev/build-epoch-selftest.sh", NULL)
                == 0);
         PASS();
