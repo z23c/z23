@@ -1178,6 +1178,8 @@ size_t onion_service_handle_request(const char *method,
 const char *onion_service_start(const char *datadir)
 {
     struct onion_context *ctx = onion_ctx();
+    if (ctx->datadir && ctx->start_time != 0)
+        return ctx->address[0] ? ctx->address : NULL;
     ctx->datadir = datadir;
     ctx->start_time = platform_time_wall_time_t();
 
