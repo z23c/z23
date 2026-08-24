@@ -289,8 +289,7 @@ esac
 service_pid_is_stable || fatal_binding "canonical MainPID changed during endpoint capture"
 
 # Never permit an inherited shell lane to redirect any part of this proof.
-unset ZCL_DATADIR ZCL_RPCPORT ZCL_RPCCONNECT ZCL_DEPLOY_NODE_LOG
-NODE_LOG="$RPC_DATADIR/node.log"
+unset ZCL_DATADIR ZCL_RPCPORT ZCL_RPCCONNECT
 
 rpc_exec() {
     rc=0
@@ -458,29 +457,13 @@ running_service_artifact_sha256() {
     sha256_file "/proc/$SERVICE_MAIN_PID/exe"
 }
 
-pre_rpc_boot_diagnostic() {
-    [ -r "$NODE_LOG" ] || return 0
-    tail -n 500 "$NODE_LOG" | awk '
-        /crash-only recovery: consuming auto-reindex request/ {
-            recovery=$0
-        }
-        /reindex-chainstate: rebuilding UTXO set/ {
-            reindex=1
-        }
-        /height [0-9]+\/[0-9]+ .*ETA/ {
-            progress=$0
-        }
-        END {
-            if (progress != "") {
-                print "pre-RPC recovery: reindex-chainstate " progress
-            } else if (reindex) {
-                print "pre-RPC recovery: reindex-chainstate active"
-            } else if (recovery != "") {
-                print "pre-RPC recovery: " recovery
-            }
-        }'
+pre_rpc_boot_status() {
+    service_pid_is_stable || return 1
+    boot_status_out=$("$SERVICE_EXE" core node bootstatus \
+        "-datadir=$RPC_DATADIR" 2>/dev/null || true)
+    service_pid_is_stable || return 1
+    printf '%s\n' "$boot_status_out"
 }
-
 rpc_dumpstate() {
     component="$1"
     key="${2:-}"
@@ -723,9 +706,10 @@ echo "DEPLOY FAILED: RPC/diagnostic contract did not become ready within ${TIMEO
 if [ -n "$last_err" ]; then
     echo "last error: $last_err"
 fi
-boot_diag=$(pre_rpc_boot_diagnostic || true)
-if [ -n "$boot_diag" ]; then
-    echo "boot diagnostic: $boot_diag"
-    echo "boot log: $NODE_LOG"
+boot_status=$(pre_rpc_boot_status || true)
+if [ -n "$boot_status" ]; then
+    echo "typed boot status: $boot_status"
+else
+    echo "typed boot status: unavailable (captured service process changed)"
 fi
 exit 1

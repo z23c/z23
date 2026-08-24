@@ -10,6 +10,7 @@
 
 #define _DEFAULT_SOURCE   /* usleep, MSG_NOSIGNAL */
 #include "net/onion_stream.h"
+#include "net/onion_stream_telemetry.h"
 #include "net/onion_v3_address.h"
 #include "net/tor_integration.h"
 #include "platform/time_compat.h"
@@ -87,75 +88,8 @@ struct onion_bridge {
     int64_t           up_since_ms;/* monotonic ms at bridge_up */
     const char       *close_reason; /* names the pump's exit path */
     char              desc[NET_SERVICE_STR_MAX + 1];
+    struct onion_stream_dial_record *dial_record;
 };
-
-/* ── Stage ledger ───────────────────────────────────────────────────────
- * One monotonic counter per named stage of the dial loop this file owns,
- * so the acceptance contract in docs/work/ONION_DIAL_GAP.md can assert on
- * a number instead of grepping a log that may have rotated. Relaxed
- * ordering throughout: observability totals, never a synchronization
- * edge. */
-static _Atomic uint64_t g_stage_dial_started;
-static _Atomic uint64_t g_stage_stream_queued;
-static _Atomic uint64_t g_stage_circuit_ready;
-static _Atomic uint64_t g_stage_bridge_up;
-static _Atomic uint64_t g_stage_open_refused;
-static _Atomic uint64_t g_stage_circuit_timeout;
-static _Atomic uint64_t g_stage_circuit_torn_down;
-static _Atomic uint64_t g_stage_bridge_closed;
-static _Atomic uint64_t g_stage_bytes_to_peer;
-static _Atomic uint64_t g_stage_bytes_from_peer;
-static _Atomic uint64_t g_stage_peers_answered;
-
-static void stage_bump(_Atomic uint64_t *c, uint64_t by)
-{
-    atomic_fetch_add_explicit(c, by, memory_order_relaxed);
-}
-
-void onion_stream_get_stages(struct onion_stream_stages *out)
-{
-    if (!out)
-        return;
-    out->dial_started      = atomic_load_explicit(&g_stage_dial_started,
-                                                  memory_order_relaxed);
-    out->stream_queued     = atomic_load_explicit(&g_stage_stream_queued,
-                                                  memory_order_relaxed);
-    out->circuit_ready     = atomic_load_explicit(&g_stage_circuit_ready,
-                                                  memory_order_relaxed);
-    out->bridge_up         = atomic_load_explicit(&g_stage_bridge_up,
-                                                  memory_order_relaxed);
-    out->open_refused      = atomic_load_explicit(&g_stage_open_refused,
-                                                  memory_order_relaxed);
-    out->circuit_timeout   = atomic_load_explicit(&g_stage_circuit_timeout,
-                                                  memory_order_relaxed);
-    out->circuit_torn_down = atomic_load_explicit(&g_stage_circuit_torn_down,
-                                                  memory_order_relaxed);
-    out->bridge_closed     = atomic_load_explicit(&g_stage_bridge_closed,
-                                                  memory_order_relaxed);
-    out->bytes_to_peer     = atomic_load_explicit(&g_stage_bytes_to_peer,
-                                                  memory_order_relaxed);
-    out->bytes_from_peer   = atomic_load_explicit(&g_stage_bytes_from_peer,
-                                                  memory_order_relaxed);
-    out->peers_answered    = atomic_load_explicit(&g_stage_peers_answered,
-                                                  memory_order_relaxed);
-}
-
-#ifdef ZCL_TESTING
-void onion_stream_reset_stages_for_test(void)
-{
-    atomic_store(&g_stage_dial_started, 0);
-    atomic_store(&g_stage_stream_queued, 0);
-    atomic_store(&g_stage_circuit_ready, 0);
-    atomic_store(&g_stage_bridge_up, 0);
-    atomic_store(&g_stage_open_refused, 0);
-    atomic_store(&g_stage_circuit_timeout, 0);
-    atomic_store(&g_stage_circuit_torn_down, 0);
-    atomic_store(&g_stage_bridge_closed, 0);
-    atomic_store(&g_stage_bytes_to_peer, 0);
-    atomic_store(&g_stage_bytes_from_peer, 0);
-    atomic_store(&g_stage_peers_answered, 0);
-}
-#endif
 
 static void onion_bridge_read(struct onion_stream_raw *stream,
                               const uint8_t *data, size_t len, void *ctx);
@@ -224,11 +158,12 @@ static void onion_bridge_read(struct onion_stream_raw *stream,
      * distinguishable from "the remote spoke and we mishandled it". */
     if (atomic_fetch_add_explicit(&b->rx_bytes, (uint64_t)len,
                                   memory_order_relaxed) == 0) {
-        stage_bump(&g_stage_peers_answered, 1);
+        onion_stream_dial_bump(b->dial_record, ONION_DIAL_PEERS_ANSWERED, 1);
         LOG_INFO("onion", "onion stage=peer_answered target=%s first_rx=%zu",
                  b->desc, len);
     }
-    stage_bump(&g_stage_bytes_from_peer, (uint64_t)len);
+    onion_stream_dial_bump(b->dial_record, ONION_DIAL_BYTES_FROM_PEER,
+                           (uint64_t)len);
 
     pthread_mutex_lock(&b->mu);
     if (b->dead) {
@@ -319,7 +254,8 @@ static bool onion_bridge_push(struct onion_bridge *b, const uint8_t *data,
     for (;;) {
         if (b->be->write(b->stream, data, len) == 0) {
             b->tx_bytes += (uint64_t)len;
-            stage_bump(&g_stage_bytes_to_peer, (uint64_t)len);
+            onion_stream_dial_bump(b->dial_record, ONION_DIAL_BYTES_TO_PEER,
+                                   (uint64_t)len);
             return true;
         }
         if (atomic_load(&b->terminal_seen)) {
@@ -364,6 +300,9 @@ static void onion_bridge_teardown(struct onion_bridge *b,
                           "(fork contract violation) — leaking the bridge "
                           "context rather than risking a late callback",
                  b->desc);
+
+    if (!atomic_load(&b->terminal_seen))
+        onion_stream_dial_poison(b->dial_record);
 
     close_socket(&b->pump_fd);
     if (app_fd_or_null)
@@ -480,7 +419,7 @@ static void *onion_bridge_pump(void *arg)
         }
     }
 
-    stage_bump(&g_stage_bridge_closed, 1);
+    onion_stream_dial_bump(b->dial_record, ONION_DIAL_BRIDGE_CLOSED, 1);
     LOG_INFO("onion", "onion stage=bridge_closed target=%s reason=%s "
                       "up_ms=%lld to_peer=%llu from_peer=%llu",
              b->desc, b->close_reason ? b->close_reason : "unknown",
@@ -489,7 +428,9 @@ static void *onion_bridge_pump(void *arg)
              (unsigned long long)atomic_load_explicit(&b->rx_bytes,
                                                       memory_order_relaxed));
 
+    struct onion_stream_dial_record *dial_record = b->dial_record;
     onion_bridge_teardown(b, NULL);
+    onion_stream_dial_end(dial_record);
     return NULL;
 }
 
@@ -536,7 +477,8 @@ size_t onion_stream_connect_plan_for_test(int connect_timeout_ms,
 static bool onion_stream_connect_once(const struct net_service *svc,
                                       zcl_socket_t *sock_out,
                                       int connect_timeout_ms,
-                                      const struct onion_stream_backend *be)
+                                      const struct onion_stream_backend *be,
+                                      struct onion_stream_dial_record *record)
 {
     *sock_out = ZCL_INVALID_SOCKET;
 
@@ -575,13 +517,14 @@ static bool onion_stream_connect_once(const struct net_service *svc,
     pthread_mutex_init(&b->mu, NULL);
     b->be = be;
     b->pump_fd = pump_fd;
+    b->dial_record = record;
     snprintf(b->desc, sizeof(b->desc), "%s:%u", host, svc->port);
 
     int64_t started_ms = platform_time_monotonic_ms();
     b->stream = be->open(host, svc->port, onion_bridge_read,
                          onion_bridge_event, b, ONION_STREAM_LIFETIME_SECS);
     if (!b->stream) {
-        stage_bump(&g_stage_open_refused, 1);
+        onion_stream_dial_bump(record, ONION_DIAL_OPEN_REFUSED, 1);
         LOG_WARN("onion", "onion stage=open_refused target=%s", b->desc);
         pthread_mutex_destroy(&b->mu);
         free(b->rxq);
@@ -590,7 +533,7 @@ static bool onion_stream_connect_once(const struct net_service *svc,
         close_socket(&pump_fd);
         return false;
     }
-    stage_bump(&g_stage_stream_queued, 1);
+    onion_stream_dial_bump(record, ONION_DIAL_STREAM_QUEUED, 1);
     LOG_INFO("onion", "onion stage=stream_queued target=%s budget_ms=%d",
              b->desc, connect_timeout_ms);
 
@@ -615,9 +558,9 @@ static bool onion_stream_connect_once(const struct net_service *svc,
         atomic_load(&b->terminal_seen)) {
         bool was_terminal = atomic_load(&b->terminal_seen);
         if (was_terminal)
-            stage_bump(&g_stage_circuit_torn_down, 1);
+            onion_stream_dial_bump(record, ONION_DIAL_CIRCUIT_TORN_DOWN, 1);
         else
-            stage_bump(&g_stage_circuit_timeout, 1);
+            onion_stream_dial_bump(record, ONION_DIAL_CIRCUIT_TIMEOUT, 1);
         LOG_WARN("onion", "onion dial to %s %s (stage=%s waited_ms=%d)",
                  b->desc,
                  was_terminal ? "was refused/torn down by Tor"
@@ -628,7 +571,7 @@ static bool onion_stream_connect_once(const struct net_service *svc,
         return false;
     }
 
-    stage_bump(&g_stage_circuit_ready, 1);
+    onion_stream_dial_bump(record, ONION_DIAL_CIRCUIT_READY, 1);
     LOG_INFO("onion", "onion stage=circuit_ready target=%s build_ms=%lld",
              b->desc, (long long)(platform_time_monotonic_ms() - started_ms));
 
@@ -640,7 +583,7 @@ static bool onion_stream_connect_once(const struct net_service *svc,
     }
 
     *sock_out = app_fd;
-    stage_bump(&g_stage_bridge_up, 1);
+    onion_stream_dial_bump(record, ONION_DIAL_BRIDGE_UP, 1);
     LOG_INFO("onion", "onion circuit established to %s (stage=bridge_up)",
              b->desc);
     return true;
@@ -651,16 +594,18 @@ static bool onion_stream_connect_backend(const struct net_service *svc,
                                          int connect_timeout_ms,
                                          const struct onion_stream_backend *be)
 {
+    struct onion_stream_dial_record *record = onion_stream_dial_begin(svc);
     int budgets[2];
     size_t attempts = onion_stream_connect_plan(connect_timeout_ms, budgets);
     for (size_t i = 0; i < attempts; i++) {
-        if (onion_stream_connect_once(svc, sock_out, budgets[i], be))
+        if (onion_stream_connect_once(svc, sock_out, budgets[i], be, record))
             return true;
         if (i + 1 < attempts)
             LOG_WARN("onion", "first onion circuit attempt failed; "
                               "retrying once with a fresh stream "
                               "(remaining_budget_ms=%d)", budgets[i + 1]);
     }
+    onion_stream_dial_end(record);
     return false;
 }
 
@@ -676,11 +621,27 @@ bool onion_stream_connect_backend_for_test(
         !backend->close)
         LOG_FAIL("onion", "onion_stream_connect: incomplete test backend");
 
-    stage_bump(&g_stage_dial_started, 1);
     return onion_stream_connect_backend(svc, sock_out, connect_timeout_ms,
                                         backend);
 }
 #endif
+
+static void note_last_dial_svc(const struct net_service *svc,
+                               const char *result)
+{
+    char target[96];
+    target[0] = '\0';
+    if (svc && net_addr_is_tor(&svc->addr)) {
+        char host[ONION_V3_ADDRESS_LEN + 1];
+        if (onion_v3_address_from_pubkey(svc->addr.torv3, host))
+            snprintf(target, sizeof(target), "%s:%u", host, svc->port);
+        else
+            snprintf(target, sizeof(target), "onion:%u", svc->port);
+    } else if (svc) {
+        net_service_to_string(svc, target, sizeof(target));
+    }
+    onion_stream_note_last_dial(target[0] ? target : NULL, result);
+}
 
 bool onion_stream_connect(const struct net_service *svc,
                           zcl_socket_t *sock_out,
@@ -690,17 +651,24 @@ bool onion_stream_connect(const struct net_service *svc,
         LOG_FAIL("onion", "onion_stream_connect: NULL sock_out");
     *sock_out = ZCL_INVALID_SOCKET;
 
-    if (!svc || !net_addr_is_tor(&svc->addr))
+    if (!svc || !net_addr_is_tor(&svc->addr)) {
+        note_last_dial_svc(svc, "not_tor");
         LOG_FAIL("onion", "onion_stream_connect: not a torv3 address");
-    if (!dynhost_stream_open || !dynhost_stream_write || !dynhost_stream_close)
+    }
+    if (!dynhost_stream_open || !dynhost_stream_write || !dynhost_stream_close) {
+        note_last_dial_svc(svc, "stub_build");
         LOG_FAIL("onion", "onion dialing unavailable: tor stub build");
-    if (!tor_integration_is_enabled())
+    }
+    if (!tor_integration_is_enabled()) {
+        note_last_dial_svc(svc, "tor_not_running");
         LOG_FAIL("onion", "onion dialing unavailable: tor not running");
-    if (!tor_integration_is_dial_ready())
+    }
+    if (!tor_integration_is_dial_ready()) {
+        note_last_dial_svc(svc, "dynhost_not_ready");
         LOG_FAIL("onion", "onion dialing unavailable: dynhost not ready "
                           "to queue outbound streams");
+    }
 
-    stage_bump(&g_stage_dial_started, 1);
     return onion_stream_connect_backend(svc, sock_out, connect_timeout_ms,
                                         &g_dynhost_backend);
 }

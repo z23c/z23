@@ -89,13 +89,15 @@ int api_health_gate_focused_tests(void)
                           "zcl.agent_impact.v2") == 0;
         ok = ok && json_get_int(json_get(&result, "files_count")) == 2;
         ok = ok && json_get_int(json_get(&result,
-                                         "relevant_test_groups_count")) == 5;
+                                         "relevant_test_groups_count")) == 7;
         const struct json_value *groups =
             json_get(&result, "relevant_test_groups");
         ok = ok && api_test_array_has_str(groups, "json");
         ok = ok && api_test_array_has_str(groups, "rpc");
         ok = ok && api_test_array_has_str(groups, "api");
         ok = ok && api_test_array_has_str(groups, "syncdiag_rpc");
+        ok = ok && api_test_array_has_str(groups, "zcode_package_registry");
+        ok = ok && api_test_array_has_str(groups, "zcode_swarm_net");
         ok = ok && api_test_array_has_str(groups, "make_lint_gates");
         json_free(&params);
         json_free(&result);

@@ -1,30 +1,43 @@
-# Onion dial gap — local repro and root cause
+# Onion dial gap — descriptor-gated rendezvous
 
-Status: CORRECTED 2026-08-23 after fresh probes on current main
-(`12de13d32`+). Supersedes the earlier "dials are never issued" claim,
-which was true of the then-checked-out binary and false of current main.
-Owner: embedded-Tor hidden-service loop (`vendor/tor` fork +
-`lib/net/src/onion_stream.c` / `connman_dialer.c`). Referee evidence:
-`deploy/devfleet/mesh.status`.
+Status: CODE-CORRECTED and isolated acceptance green on 2026-08-24. Fleet
+acceptance remains HOLD until the referee observes `MESH=4/4` twice at the
+unchanged thresholds. Owner: embedded-Tor hidden-service loop (`vendor/tor`
+fork + `lib/net/src/onion_stream.c`) and its bounded pair probe.
 
-## Verified current behavior (two fresh isolated nodes, strict probe)
+## Root cause
 
-1. Node A boots with `-tor -onion-persist`; hostname file appears (~8 s
-   historically; 20–45 s observed on current main — slower).
-2. B dials `-addnode=<A.onion>:<port>` and DOES log
-   `Connecting to onion addnode …` — the dynhost bridge dial attempt
-   exists (`64c4446a7`, hardened by `385a32bf9`).
-3. Failure is downstream of the attempt, in BOTH halves of the
-   hidden-service loop:
-   - CLIENT half: B's tor log shows ZERO `intro`/`rendezvous` events —
-     the dynhost client stream never builds a circuit.
-   - SERVICE half: A's tor log shows ZERO descriptor-upload lines — the
-     service publishes its hostname file but never (visibly) uploads its
-     descriptor to HSDirs, so even a healthy client could not intro.
-4. An older locally-built binary paired at `PAIRED_AT=5s` under the same
-   probe → there is a REGRESSION WINDOW between that build and current
-   main, or a flaky publish path that older timing masked. Not yet
-   bisected; bisection is assigned.
+The regression window reduced to an integration omission plus a probe race:
+
+1. Application-side descriptor readiness was on main, but Tor commit
+   `8f4b01ff3` (successful HSDir upload accounting, bounded upload retry, and
+   exact INTRODUCE1/RENDEZVOUS1/RENDEZVOUS2 milestones) remained only on the
+   node2 Tor lane. The root Git link still selected `7971a5e72`, so both
+   descriptor success and rendezvous progress were silent.
+2. The strict probe launched B with `-addnode=<A.onion>` as soon as A wrote
+   its hostname. A cold public-Tor bootstrap can expose the hostname long
+   before HSDirs confirm the descriptor. B therefore spent its bounded
+   circuit attempts waiting for an unpublished service. One captured failure
+   fetched the descriptor at the end of the second attempt and died at
+   `INTRODUCE1_NOT_SEEN`.
+3. The probe inferred circuit readiness from a buffered node log. One real
+   connection reached P2P framing while the ledger still reported
+   `CIRCUIT_NOT_READY`.
+
+## Correction
+
+- The root now pins Tor `8f4b01ff3`, which names successful descriptor upload,
+  INTRODUCE1, RENDEZVOUS1, and RENDEZVOUS2 and retries failed upload rounds
+  with the existing bounded 5--300 second backoff.
+- `core network onion status` exposes the existing monotonic outbound-stream
+  counters, including dial, circuit-ready, bridge, byte, answer, timeout, and
+  teardown totals. Acceptance no longer depends on a log flush.
+- The pair probe boots A and B in parallel without a peer target. It waits for
+  A's confirmed descriptor upload and B's Tor readiness, then triggers exactly
+  one operator-authorized `addnode onetry`. The 150-second readiness and pair
+  allowances and the two-attempt/120-second circuit budget are unchanged.
+- `PAIRED` now requires descriptor upload, client readiness, INTRODUCE1,
+  RENDEZVOUS1, circuit ready, nonzero P2P framing bytes, and a live peer count.
 
 ## What "strong always" requires (the loop, end to end)
 
@@ -35,9 +48,18 @@ by the pair-probe ledger. Acceptance for the fleet milestone stays:
 15 consecutive PAIRED cycles + observed descriptor upload + MESH=4/4
 twice separated.
 
-## Probe artifacts
+## Acceptance evidence
 
-Probe scripts live outside the tree (`/tmp/opencode`, ephemeral by
-policy); node3 owns promoting them into `tools/scripts/` as the always-
-on ledger. Re-run cost: under two minutes on any checkout with
-`make tor-full` done.
+On 2026-08-24, `tools/scripts/onion_pair_watch.sh` produced 15 consecutive
+`PAIRED` records from fresh throwaway datadirs at one source identity. Every
+record had all declared booleans true. Pair completion ranged from 38 to 146
+seconds; the 146-second cold-bootstrap case reached descriptor/client
+readiness at 141 seconds and then paired in five seconds. The hermetic checker
+validated all 15 JSONL records, and focused `syncdiag_rpc`, `onion_bridge`,
+`onion_stream`, and Tor integration groups passed.
+
+The contemporaneous local-mode fleet referee remained `MESH=2/4`: node1 and
+node2 completed VERSION/VERACK, while node3 and node4 were absent. That is a
+fleet convergence blocker, not grounds to weaken the onion or height gates.
+Probe telemetry stays host-local; the scripts live in `tools/scripts/` and do
+not commit, push, deploy, or touch canonical datadirs.

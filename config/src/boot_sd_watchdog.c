@@ -90,14 +90,21 @@ static pthread_t    g_pet_tid;
 static _Atomic bool g_notify_ready_sent = false;
 
 /* Type=notify first-boot must not fire READY=1 on hostname-only onion
- * readiness. When embedded Tor is up, hold READY until
- * tor_integration_is_ready() — which waits for onion DESCRIPTOR
- * PUBLICATION. Without Tor, READY is immediate (same as before). */
+ * readiness, and must not treat "Tor requested but not running" as
+ * "Tor was never asked for". Hold READY until DESCRIPTOR PUBLICATION
+ * whenever the operator asked for onion. */
+bool boot_sd_watchdog_onion_blocks_ready(void)
+{
+    if (!tor_integration_is_requested() && !tor_integration_is_enabled())
+        return false;
+    return !tor_integration_is_ready();
+}
+
 static void boot_sd_watchdog_maybe_notify_ready(void)
 {
     if (atomic_load(&g_notify_ready_sent))
         return;
-    if (tor_integration_is_enabled() && !tor_integration_is_ready())
+    if (boot_sd_watchdog_onion_blocks_ready())
         return;
     if (!sd_notify_ready())
         return;
@@ -344,7 +351,7 @@ bool boot_sd_watchdog_start(void *ctx)
      * if some future call site forgets the explicit check above. */
     sd_notify_set_health_check(boot_sd_watchdog_runtime_alive);
     atomic_store(&g_notify_ready_sent, false);
-    if (tor_integration_is_enabled() && !tor_integration_is_ready()) {
+    if (boot_sd_watchdog_onion_blocks_ready()) {
         sd_notify_status("waiting for onion DESCRIPTOR PUBLICATION");
         printf("[sd-watchdog] holding READY=1 until onion "
                "DESCRIPTOR PUBLICATION\n");

@@ -1798,16 +1798,16 @@ bool app_init(struct app_context *ctx)
     printf("Wallet has %zu keys.\n", g_wallet.keystore.num_keys);
     boot_topmark("wallet_load", t_phase);
 
-    /* WALLET_LOADED boundary: wallet_keys read + canary passed (STATE C) or a
-     * keypool was generated (STATE A/B). See BOOT_INVARIANTS.md. */
+    /* WALLET_LOADED: keys read + canary passed, or a keypool was generated. */
     {
-        struct zcl_result wr =
-            sysinit_run_stage(BOOT_STAGE_WALLET_LOADED, ctx);
+        struct zcl_result wr = sysinit_run_stage(BOOT_STAGE_WALLET_LOADED, ctx);
         if (!wr.ok) return false;
     }
 
-    /* Open the dedicated progress.kv SQLite file that hosts every staged-sync
-     * stage cursor — independent of node.db (commits off the hot path). */
+    /* Upload the onion descriptor in parallel with block-index hydration. */
+    if (!ctx->no_services) (void)boot_onion_tor_start_early(ctx);
+
+    /* Keep staged-sync cursors in progress.kv, independent of node.db. */
     bool progress_open = progress_store_open(ctx->datadir);
     boot_snapshot_install_gate_boot(progress_open, ctx->load_snapshot_at_own_height);
     if (progress_open) {

@@ -42,6 +42,7 @@
 #include "storage/nullifier_kv.h"
 #include "storage/progress_store.h"
 #include "util/log_macros.h"
+#include "util/boot_status.h"
 #include "util/ar_step_readonly.h"
 #include "util/safe_alloc.h"
 #include <stdio.h>
@@ -435,6 +436,7 @@ bool reindex_chainstate(struct main_state *ms,
     const struct chain_params *cparams = chain_params_get();
     int64_t t_start = (int64_t)platform_time_wall_time_t();
     int errors = 0;
+    boot_status_set_progress("reindex_chainstate", 0, tip_height);
 
     for (int h = 0; h <= tip_height; h++) {
         struct block_index *pindex = active_chain_at(
@@ -486,13 +488,8 @@ bool reindex_chainstate(struct main_state *ms,
                 break;
             }
             malloc_trim(0);
-            if (h % 1000 == 0) {
-                int64_t elapsed = (int64_t)platform_time_wall_time_t() - t_start;
-                double rate = elapsed > 0 ? (double)h / (double)elapsed : 0;
-                int eta = rate > 0 ? (int)((tip_height - h) / rate) : 0;
-                printf("  height %d/%d (%.0f blk/s, ETA %dm%ds, cache %zuMiB)\n",
-                       h, tip_height, rate, eta / 60, eta % 60, cache_bytes / (1024 * 1024));
-            }
+            if (h % 1000 == 0 || h == tip_height)
+                boot_status_set_progress("reindex_chainstate", h, tip_height);
         }
     }
     if (!boot_index_flush_reindex_coins(cvs, cvtip))
@@ -537,10 +534,11 @@ bool reindex_chainstate(struct main_state *ms,
                     "reindex-chainstate: epilogue derivation FAILED — durable "
                     "state not clamped to replayed tip; sentinel left pending "
                     "for next-boot retry\n");
+            boot_status_set_progress(NULL, -1, -1);
             return false;   /* leave the sentinel for retry; never serve torn */
         }
     }
-
+    boot_status_set_progress(NULL, -1, -1);
     return errors == 0;
 }
 

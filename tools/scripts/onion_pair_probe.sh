@@ -4,9 +4,9 @@
 # This is the instrument ONION_DIAL_GAP.md assigns to node3: run the
 # isolated two-node onion pair from ANY checkout. Isolation is sourced,
 # not executed. Recurring telemetry is JSONL under XDG state — this
-# script does not commit, push, or write deploy/devfleet/. Client launch
-# is gated on observed descriptor upload (onion_pair_watch.sh), not on
-# hostname-file presence.
+# script does not commit, push, or write deploy/devfleet/. The client Tor can
+# bootstrap target-free in parallel; its onion dial is gated on observed
+# descriptor upload and client readiness, not on hostname-file presence.
 #
 # Usage:
 #   tools/scripts/onion_pair_probe.sh

@@ -17,9 +17,13 @@
 #include "controllers/app_native_handlers.h"
 #include "controllers/chain_native_handlers.h"
 #include "controllers/rpc_client.h"
+#include "util/boot_status.h"
+#include "util/boot_phase.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 static const struct zcl_command_spec *find_spec(
     const struct zcl_command_registry *reg, const char *path)
@@ -377,6 +381,60 @@ static int test_bridge_bindings_reverse(void)
         }
         PASS();
     } _test_next:;
+    return failures;
+}
+
+static int test_bootstatus_projects_recovery_and_blocker(void)
+{
+    int failures = 0;
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    TEST("core.node.bootstatus projects typed recovery and named blocker") {
+        const struct zcl_command_spec *spec =
+            find_spec(reg, "core.node.bootstatus");
+        char tmpl[] = "/tmp/zcl_native_bootstatus_XXXXXX";
+        char *dir = mkdtemp(tmpl);
+        ASSERT(spec != NULL);
+        ASSERT(dir != NULL);
+
+        boot_status_init(dir);
+        boot_status_note_stage((int)BOOT_STAGE_DB_OPEN);
+        boot_status_set_progress("reindex_chainstate", 7000, 12000);
+        boot_status_set_blocker("reindex_read_failed",
+                                "block 7001 is unreadable");
+        boot_status_init(NULL);
+
+        struct json_value input;
+        json_init(&input);
+        json_set_object(&input);
+        (void)json_push_kv_str(&input, "datadir", dir);
+        struct zcl_command_request request = {
+            .spec = spec, .input = &input, .view = "normal",
+        };
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, spec->output_schema);
+        zcl_native_handle_core_node_bootstatus(&request, &reply);
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "activity")),
+                      "reindex_chainstate");
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "progress_current")),
+                  7000);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "progress_target")),
+                  12000);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "blocker")),
+                      "reindex_read_failed");
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "blocker_reason")),
+                      "block 7001 is unreadable");
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+
+        char path[512];
+        snprintf(path, sizeof(path), "%s/%s", dir,
+                 ZCL_BOOT_STATUS_FILENAME);
+        (void)unlink(path);
+        (void)rmdir(dir);
+        PASS();
+    } _test_next:;
+    boot_status_init(NULL);
     return failures;
 }
 
@@ -3823,6 +3881,7 @@ int test_command_registry_catalog(void)
     failures += test_search_multiword();
     failures += test_ready_leaves_bound();
     failures += test_bridge_bindings_reverse();
+    failures += test_bootstatus_projects_recovery_and_blocker();
     failures += test_bridge_replacement_rejects_non_bridge_leaf();
     failures += test_messaging_inbox_wraps_rpc_array();
     failures += test_network_peer_add_binding();

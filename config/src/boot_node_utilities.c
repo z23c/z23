@@ -51,6 +51,7 @@
 #include "net/addrman.h"
 #include "net/addnode_file.h"
 #include "net/netbase.h"
+#include "net/onion_stream.h"
 #include "util/log_macros.h"
 #include <netdb.h>
 #include <stdio.h>
@@ -217,6 +218,11 @@ void app_add_node(const char *host, int port)
             return;
         }
         printf("Connecting to onion addnode %s:%u\n", hostbuf, use_port);
+        {
+            char target[96];
+            snprintf(target, sizeof(target), "%s:%u", hostbuf, use_port);
+            onion_stream_note_last_dial(target, "queued");
+        }
         connman_open_connection(svc->connman, &addr);
         return;
     }

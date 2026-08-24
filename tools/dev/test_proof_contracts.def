@@ -1,0 +1,13 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Opt-in contracts which the canonical runner may activate for an explicitly
+ * selected push-proof set.  Keep the environment choice attached to the exact
+ * registered group: activating one proof must never opt unrelated groups into
+ * stress, destructive-process, or benchmark work.
+ */
+
+ZCL_TEST_PROOF_CONTRACT("test_shielded_payment_gate", ZCL_TEST_PROOF_STRESS)
+ZCL_TEST_PROOF_CONTRACT("test_chain_advance_atomicity", ZCL_TEST_PROOF_STRESS)
+ZCL_TEST_PROOF_CONTRACT("test_reducer_block_ingest_gate", ZCL_TEST_PROOF_STRESS)
+ZCL_TEST_PROOF_CONTRACT("test_event_log_kill9", ZCL_TEST_PROOF_EVENT_LOG_KILL9)
+ZCL_TEST_PROOF_CONTRACT("test_event_log_benchmark", ZCL_TEST_PROOF_EVENT_LOG_BENCH)

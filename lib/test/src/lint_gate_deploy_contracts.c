@@ -137,6 +137,11 @@ int t_canonical_deploy_proof_binding_contract(void)
                != NULL);
         ASSERT(strstr(verify_buf,
                       "unset ZCL_DATADIR ZCL_RPCPORT ZCL_RPCCONNECT") != NULL);
+        ASSERT(strstr(verify_buf,
+                      "\"$SERVICE_EXE\" core node bootstatus") != NULL);
+        ASSERT(strstr(verify_buf, "pre_rpc_boot_diagnostic") == NULL);
+        ASSERT(strstr(verify_buf, "tail -n 500") == NULL);
+        ASSERT(strstr(verify_buf, "NODE_LOG") == NULL);
         ASSERT(strstr(verify_buf, "${ZCL_DATADIR:-") == NULL);
         ASSERT(strstr(verify_buf, "${ZCL_RPCPORT:-") == NULL);
         ASSERT(strstr(verify_buf, "${ZCL_RPCCONNECT:-") == NULL);
@@ -259,10 +264,9 @@ int t_dev_lane_deploy_contract(void)
                != NULL);
         ASSERT(strstr(script, "refusing to start or hot-swap the dev lane")
                != NULL);
-        ASSERT(strstr(script, "pre_rpc_boot_diagnostic") != NULL);
-        ASSERT(strstr(script, "pre-RPC recovery: reindex-chainstate")
-               != NULL);
-        ASSERT(strstr(script, "boot diagnostic: $diag") != NULL);
+        ASSERT(strstr(script, "pre_rpc_boot_diagnostic") == NULL);
+        ASSERT(strstr(script, "tail -n 500") == NULL);
+        ASSERT(strstr(script, "NODE_LOG") == NULL);
         ASSERT(strstr(script, "DEPLOY_STATE=") != NULL);
         ASSERT(strstr(script, "agent-deploy.json") != NULL);
         ASSERT(strstr(script, "write_deploy_state") != NULL);
@@ -287,13 +291,12 @@ int t_dev_lane_deploy_contract(void)
                == NULL);
         ASSERT(strstr(script, "\"$DEV_DATADIR/node.db\"") != NULL);
         ASSERT(strstr(makefile, "deploy-dev-fast agent-deploy-fast") != NULL);
-        ASSERT(strstr(script, "probe_agent_contract") != NULL);
+        ASSERT(strstr(script, "activation_probe_default") != NULL);
         ASSERT(strstr(script, "ZCL_DEV_AGENT_TIMEOUT") != NULL);
-        ASSERT(strstr(script, "agent_work_ready") != NULL);
-        ASSERT(strstr(script, "chain_serving_ready") != NULL);
-        ASSERT(strstr(script, "AGENT READY") != NULL);
-        ASSERT(strstr(script, "BLOCKED: agent status=") != NULL);
-        ASSERT(strstr(script, "SYNC OK") != NULL);
+        ASSERT(strstr(script, "zcl\\.public_status\\.v[23]") != NULL);
+        ASSERT(strstr(script, "zcl.operator_snapshot.v3") != NULL);
+        ASSERT(strstr(script, "ops selftest") != NULL);
+        ASSERT(strstr(script, "source_id_sha256") != NULL);
         ASSERT(strstr(script, "HEALTHY:") == NULL);
         ASSERT(strstr(agent_status, "\"deploy_blocker\"") != NULL);
         ASSERT(strstr(agent_status, "\"worker_lane\"") != NULL);
@@ -316,6 +319,15 @@ int t_dev_lane_deploy_contract(void)
                       "recovery_apply_authority") != NULL);
         ASSERT(strstr(agent_status,
                       "contained; no environment override") != NULL);
+        ASSERT(strstr(agent_status, "core node bootstatus") != NULL);
+        ASSERT(strstr(agent_status, "/proc/$pid/exe") != NULL);
+        ASSERT(strstr(agent_status, "proc_start_ticks") != NULL);
+        ASSERT(strstr(agent_status, "boot_status_result_is_valid") != NULL);
+        ASSERT(strstr(agent_status, "ZCL_AGENT_JSONQ") != NULL);
+        ASSERT(strstr(agent_status, "foreign.v9") != NULL);
+        ASSERT(strstr(agent_status, "pre_rpc_boot_diagnostic") == NULL);
+        ASSERT(strstr(agent_status, "tail -n 500") == NULL);
+        ASSERT(strstr(agent_status, "NODE_LOG") == NULL);
         ASSERT(strstr(clear_script, "zcl.agent_dev_reindex_clear.v1") != NULL);
         ASSERT(strstr(clear_script, "stale_marker_proven") != NULL);
         ASSERT(strstr(clear_script, "marker_anchor_above_served_height")

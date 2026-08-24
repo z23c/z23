@@ -360,7 +360,8 @@ static bool dp_group_in(const char (*groups)[ZCL_DEVLOOP_GROUP_MAX],
 
 /* F3: dev test/change plan gains symbol-closure-derived proof groups. A tiny
  * codeindex fixture with a cross-file call edge lib/net/src/download.c ->
- * lib/net/src/tor_integration.c: changing the tor file (path group "tor") must
+ * lib/net/src/tor_integration.c: changing the Tor file (path group
+ * "test_tor") must
  * additionally surface download.c's groups ("download"...) via the closure,
  * WITHOUT dropping the path floor. */
 #define DP_CLOSURE_FIX "test-tmp/dp_closure"
@@ -372,7 +373,8 @@ static int test_change_plan_closure(void)
         system("rm -rf " DP_CLOSURE_FIX);
         /* tor_integration.c defines the changed leaf; download.c's function
          * calls it, so download.c is in the reverse-caller closure. Both paths
-         * match distinct agent_impact rules ("tor" vs "download ..."). */
+         * match distinct agent_impact rules ("test_tor" vs
+         * "download ..."). */
         ASSERT(dp_mk_write(DP_CLOSURE_FIX, "lib/net/src/tor_integration.c",
                            "/* tor fixture */\n"
                            "#include \"net/clp.h\"\n"
@@ -396,8 +398,9 @@ static int test_change_plan_closure(void)
         struct zcl_devloop_plan plan;
         ASSERT(zcl_devloop_plan_files(files, 1, &plan));
 
-        /* Floor: the path glob alone maps the changed file to "tor". */
-        ASSERT(dp_group_in(plan.path_groups, plan.path_groups_len, "tor"));
+        /* Floor: the path glob alone maps the changed file to "test_tor". */
+        ASSERT(dp_group_in(plan.path_groups, plan.path_groups_len,
+                           "test_tor"));
         /* "download" is NOT reachable by path glob from the tor file. */
         ASSERT(!dp_group_in(plan.path_groups, plan.path_groups_len, "download"));
 
@@ -409,9 +412,10 @@ static int test_change_plan_closure(void)
                            "download"));
         /* Additive only: the path floor is never dropped, and a closure group
          * is never also duplicated into the path set. */
-        ASSERT(dp_group_in(plan.path_groups, plan.path_groups_len, "tor"));
+        ASSERT(dp_group_in(plan.path_groups, plan.path_groups_len,
+                           "test_tor"));
         ASSERT(!dp_group_in(plan.closure_groups, plan.closure_groups_len,
-                            "tor"));
+                            "test_tor"));
 
         /* Fallback: an unavailable index (empty root, no sources) leaves the
          * path floor intact and adds nothing — never a partial/huge plan. */
@@ -421,7 +425,8 @@ static int test_change_plan_closure(void)
                                             files, 1, &plan2));
         ASSERT(plan2.closure_attempted);
         ASSERT(plan2.closure_groups_len == 0);
-        ASSERT(dp_group_in(plan2.path_groups, plan2.path_groups_len, "tor"));
+        ASSERT(dp_group_in(plan2.path_groups, plan2.path_groups_len,
+                           "test_tor"));
 
         /* JSON surface carries both group sets + the truncation flag. */
         char body[16384];

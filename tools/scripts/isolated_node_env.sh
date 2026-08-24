@@ -32,8 +32,8 @@
 #
 # Contract for the sourcing script:
 #   - `set -euo pipefail` is assumed; this file also sets it.
-#   - Define ISO_KIND ("soak"|"crash") and (optionally) ISO_PORT_BASE
-#     BEFORE sourcing, then call `iso_init`.
+#   - Define ISO_KIND ("soak"|"crash") and (optionally) ISO_PORT_BASE and
+#     ISO_PEER_PORT_BASE BEFORE sourcing, then call `iso_init`.
 #   - The sourcing script MUST NOT install its own conflicting EXIT trap.
 #
 # WHY a process-GROUP kill: the node embeds Tor as an in-process pthread
@@ -94,7 +94,7 @@ ISO_PGID=""
 # require peer_count > 0 (e.g. the wallet money-freshness classifier, which
 # fails closed to UNKNOWN on a zero-peer node). The peer lives INSIDE
 # $ISO_DD/peer so the cleanup trap's rm -rf and the datadir-substring pkill
-# cover it too. The port quad is derived in iso_init (values only — the
+# cover it too. Its dedicated port quad is derived in iso_init (values only — the
 # live-set refusal, band check, and LISTEN preflight all stay in
 # iso_spawn_peer) so a primary that must dial the peer can name the
 # -connect target before the peer process exists.
@@ -225,12 +225,21 @@ iso_init() {
     ISO_HTTPSPORT=$((base + 3))
 
     # Derive the optional-peer quad eagerly (iso_spawn_peer validates and
-    # binds it later). A primary that must DIAL its peer — required for
-    # money-gated flows, whose sync-state machine only leaves finding_peers
-    # on an OUTBOUND peer — needs the peer's -connect target before the
-    # peer process exists; the +10 quad is deterministic, so it can be
-    # named up front.
-    ISO_PEER_PORT=$((base + 10))
+    # binds it later). Callers with an allocator pass ISO_PEER_PORT_BASE;
+    # other isolated two-node fixtures use the next dedicated quad. Never
+    # infer this base from a published node port.
+    local peer_base="${ISO_PEER_PORT_BASE:-$((base + 4))}"
+    case "$peer_base" in
+        ''|*[!0-9]*) iso_die "ISO_PEER_PORT_BASE must be numeric, got '$peer_base'" ;;
+    esac
+    [ "$peer_base" -ge 39000 ] && [ "$peer_base" -le 39995 ] \
+        || iso_die "ISO_PEER_PORT_BASE $peer_base out of the 39000-39995 isolation band"
+    if [ "$peer_base" -le $((base + 3)) ] &&
+       [ $((peer_base + 3)) -ge "$base" ]; then
+        iso_die "primary and peer port quads overlap (primary=$base peer=$peer_base)"
+    fi
+    ISO_PEER_PORT_BASE=$peer_base
+    ISO_PEER_PORT=$peer_base
     ISO_PEER_RPCPORT=$((ISO_PEER_PORT + 1))
     ISO_PEER_FSPORT=$((ISO_PEER_PORT + 2))
     ISO_PEER_HTTPSPORT=$((ISO_PEER_PORT + 3))
@@ -320,7 +329,7 @@ iso_spawn_node() {
 # Some gates fail closed on a zero-peer node (the wallet money-freshness
 # classifier returns UNKNOWN when connman has no connected node, so any
 # money-gated intent is refused no matter how caught-up the chain is).
-# iso_spawn_peer forks a second regtest node on the +10 port quad whose
+# iso_spawn_peer forks a second regtest node on its dedicated port quad whose
 # ONLY job is to be a connected peer: it dials the primary over the same
 # -connect operator lane, giving the primary peer_count=1 (inbound) while
 # staying inside every isolation invariant above:
@@ -351,7 +360,7 @@ iso_spawn_peer() {
     # Keep the whole peer quad inside the isolation band and clear of the
     # dead-sink port (39999).
     [ "$ISO_PEER_HTTPSPORT" -lt "$ISO_CONNECT_SINK" ] \
-        || iso_die "ISO_PORT_BASE too high for a +10 peer quad (peer https $ISO_PEER_HTTPSPORT >= sink $ISO_CONNECT_SINK)"
+        || iso_die "peer port quad reaches the dead-connect sink (peer https $ISO_PEER_HTTPSPORT >= sink $ISO_CONNECT_SINK)"
 
     local p
     for p in "$ISO_PEER_PORT" "$ISO_PEER_RPCPORT" "$ISO_PEER_FSPORT" "$ISO_PEER_HTTPSPORT"; do

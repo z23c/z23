@@ -50,12 +50,6 @@ log() {
     printf '%s pair_watch %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
 }
 
-pick_port_base() {
-    # Start at the documented probe floor. onion_pair_watch.sh listen-tests
-    # the full A+B quad, skips published fleet P2P ports, and advances.
-    echo 39250
-}
-
 trailing_paired() {
     awk -F'"verdict":"' '
         { v=$2; sub(/".*/,"",v); if (v=="PAIRED") n++; else n=0 }
@@ -95,13 +89,13 @@ crosscheck_mesh() {
 }
 
 cycle() {
-    local base
+    local requested_base
     cd "$REPO_ROOT"
     git fetch origin main --quiet || true
-    base=$(pick_port_base)
-    log "cycle start port_base=$base streak=$(trailing_paired)"
+    requested_base=${PAIR_WATCH_PORT_BASE:-39250}
+    log "cycle start probe_port_base=$requested_base streak=$(trailing_paired)"
     set +e
-    PAIR_PROBE_FILE="$LEDGER" PAIR_WATCH_PORT_BASE="$base" "$WATCH"
+    PAIR_PROBE_FILE="$LEDGER" PAIR_WATCH_PORT_BASE="$requested_base" "$WATCH"
     set -e
     log "cycle done streak=$(trailing_paired) line=$(last_pair_line)"
     crosscheck_mesh

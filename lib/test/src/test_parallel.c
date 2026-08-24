@@ -125,7 +125,44 @@ static int get_nproc(void)
     return (int)n;
 }
 
-static void child_run(size_t idx, const char *out_path)
+static bool activate_proof_contract(size_t idx)
+{
+    const char *env_name = NULL;
+    switch (zcl_test_group_proof_contract(g_groups[idx].name)) {
+    case ZCL_TEST_PROOF_NONE:
+        return true;
+    case ZCL_TEST_PROOF_STRESS:
+        env_name = "ZCL_STRESS_TESTS";
+        break;
+    case ZCL_TEST_PROOF_EVENT_LOG_KILL9:
+        env_name = "ZCL_EVENT_LOG_KILL9_FUZZ";
+        break;
+    case ZCL_TEST_PROOF_EVENT_LOG_BENCH:
+        /* Push authority needs a bounded throughput proof.  The explicit
+         * ZCL_EVENT_LOG_BENCH=1 contract remains the full standalone
+         * measurement and is never enabled by the parallel gate. */
+        env_name = "ZCL_EVENT_LOG_BENCH_PROOF";
+        break;
+    default:
+        fprintf(stderr,
+                "test_parallel: invalid proof contract group=%s\n",
+                g_groups[idx].name);
+        return false;
+    }
+    if (setenv(env_name, "1", 1) != 0) {
+        fprintf(stderr,
+                "test_parallel: proof contract activation failed group=%s "
+                "env=%s: %s\n",
+                g_groups[idx].name, env_name, strerror(errno));
+        return false;
+    }
+    printf("test_parallel: proof contract group=%s env=%s\n",
+           g_groups[idx].name, env_name);
+    return true;
+}
+
+static void child_run(size_t idx, const char *out_path,
+                      bool activate_proof_contracts)
 {
     /* Redirect stdout + stderr to our tempfile. */
     int fd = open(out_path,
@@ -140,6 +177,9 @@ static void child_run(size_t idx, const char *out_path)
     }
     setbuf(stdout, NULL);
     setbuf(stderr, NULL);
+
+    if (activate_proof_contracts && !activate_proof_contract(idx))
+        _exit(2);
 
     /* A fatal signal (SIGSEGV/SIGBUS/SIGABRT/SIGFPE) in a group's fn() used
      * to reach the kernel default disposition with no diagnostics captured
@@ -336,7 +376,8 @@ static bool exact_selector_set_valid(const char *selectors,
 
 static void run_group_exclusive(size_t idx, pid_t parent_pid,
                                 struct group_result *results,
-                                int timeout_secs, bool verbose)
+                                int timeout_secs, bool verbose,
+                                bool activate_proof_contracts)
 {
     char out_path[128];
     make_tempfile_path(out_path, sizeof(out_path), idx, parent_pid);
@@ -351,7 +392,7 @@ static void run_group_exclusive(size_t idx, pid_t parent_pid,
         return;
     }
     if (pid == 0) {
-        child_run(idx, out_path);
+        child_run(idx, out_path, activate_proof_contracts);
         _exit(2); /* unreachable */
     }
 
@@ -409,7 +450,7 @@ static bool pool_phase_selects(enum pool_phase phase, const char *name)
 static bool run_parallel_phase(
     enum pool_phase phase, struct child_slot *slots, int jobs,
     pid_t parent_pid, struct group_result *results, int timeout_secs,
-    bool verbose, size_t *reaped)
+    bool verbose, bool activate_proof_contracts, size_t *reaped)
 {
     size_t remaining = 0;
     for (size_t i = 0; i < g_num_groups; i++)
@@ -436,7 +477,8 @@ static bool run_parallel_phase(
                 return false;
             }
             if (pid == 0) {
-                child_run(next_idx, slots[slot].out_path);
+                child_run(next_idx, slots[slot].out_path,
+                          activate_proof_contracts);
                 _exit(2);
             }
             slots[slot].pid = pid;
@@ -675,6 +717,7 @@ int main(int argc, char **argv)
     bool cli_cache = false;      /* --cache */
     bool cli_no_cache = false;   /* --no-cache */
     bool cli_cold_audit = false; /* --cold-audit */
+    bool activate_proof_contracts = false;
     bool cache_snapshot = false;
     const char *changed_sources[32];
     size_t changed_source_count = 0;
@@ -726,6 +769,8 @@ int main(int argc, char **argv)
             cli_no_cache = true;
         } else if (strcmp(argv[i], "--cold-audit") == 0) {
             cli_cold_audit = true;
+        } else if (strcmp(argv[i], "--activate-proof-contracts") == 0) {
+            activate_proof_contracts = true;
         } else {
             fprintf(stderr,
                     "Usage: %s [--jobs=N] [--timeout=SECS] [--verbose] "
@@ -733,7 +778,7 @@ int main(int argc, char **argv)
                     "[--only=SUBSTR|--exact=FULL_ID[,FULL...]] "
                     "[--cache|--no-cache] "
                     "[--cache-snapshot --changed-source=PATH] "
-                    "[--cold-audit]\n",
+                    "[--cold-audit] [--activate-proof-contracts]\n",
                     argv[0]);
             return 2;
         }
@@ -742,6 +787,13 @@ int main(int argc, char **argv)
         (cache_snapshot && !cli_cache)) {
         fprintf(stderr, "test_parallel: cache snapshot requires --cache and "
                         "one or more --changed-source paths\n");
+        return 2;
+    }
+    if (activate_proof_contracts &&
+        (!only_exact || !zcl_test_group_proof_contracts_valid())) {
+        fprintf(stderr,
+                "test_parallel: --activate-proof-contracts requires an "
+                "exact selector and a valid proof-contract catalog\n");
         return 2;
     }
 
@@ -977,7 +1029,8 @@ int main(int argc, char **argv)
         if (verbose)
             printf("[exclusive] [%zu/%zu] %s\n",
                    i + 1, g_num_groups, g_groups[i].name);
-        run_group_exclusive(i, parent_pid, results, timeout_secs, verbose);
+        run_group_exclusive(i, parent_pid, results, timeout_secs, verbose,
+                            activate_proof_contracts);
         reaped++;
     }
 
@@ -988,11 +1041,11 @@ int main(int argc, char **argv)
     int quiet_jobs = jobs < 4 ? jobs : 4;
     bool phases_ok = run_parallel_phase(
         POOL_PHASE_QUIET_LINT, slots, quiet_jobs, parent_pid, results,
-        timeout_secs, verbose, &reaped);
+        timeout_secs, verbose, activate_proof_contracts, &reaped);
     if (phases_ok)
         phases_ok = run_parallel_phase(
             POOL_PHASE_GENERAL, slots, jobs, parent_pid, results,
-            timeout_secs, verbose, &reaped);
+            timeout_secs, verbose, activate_proof_contracts, &reaped);
     if (!phases_ok || reaped != g_num_groups) {
         for (int i = 0; i < jobs; i++) {
             if (slots[i].pid <= 0) continue;

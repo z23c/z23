@@ -611,9 +611,13 @@ done:
 static int run_benchmark(int *failures)
 {
     int start_failures = *failures;
-    if (getenv("ZCL_EVENT_LOG_BENCH") == NULL) {
+    bool full_benchmark = getenv("ZCL_EVENT_LOG_BENCH") != NULL;
+    bool push_proof = !full_benchmark &&
+                      getenv("ZCL_EVENT_LOG_BENCH_PROOF") != NULL;
+    if (!full_benchmark && !push_proof) {
         printf("event_log: benchmark SKIP "
-               "(set ZCL_EVENT_LOG_BENCH=1 for standalone measurement)\n");
+               "(set ZCL_EVENT_LOG_BENCH=1 for standalone measurement or "
+               "use the push-proof runner contract)\n");
         return 0;
     }
 
@@ -630,10 +634,16 @@ static int run_benchmark(int *failures)
     /* Warm-up. */
     uint8_t pay[128];
     memset(pay, 0xC3, sizeof(pay));
-    for (int i = 0; i < 50; i++)
+    int warmup_count = push_proof ? 8 : 50;
+    for (int i = 0; i < warmup_count; i++)
         event_log_append(log, EV_BLOCK_HEADER, pay, sizeof(pay));
 
-    int N = 50000;
+    /* The full 50K sample measures an idle disk and can legitimately take
+     * longer than the correctness runner's fixed 300-second group budget on
+     * fsync-heavy storage.  Push authority uses a 128-event sample: enough to
+     * assert the same >10 event/s catastrophic-regression floor, bounded
+     * enough to remain a fast proof. */
+    int N = push_proof ? 128 : 50000;
 
     double t0 = mono_sec();
     for (int i = 0; i < N; i++)
@@ -642,8 +652,8 @@ static int run_benchmark(int *failures)
     double sec = t1 - t0;
     double rate = sec > 0 ? (double)N / sec : 0;
     printf("event_log: benchmark — %d events in %.3f s = %.0f events/sec "
-           "(standalone)\n",
-           N, sec, rate);
+           "(%s)\n",
+           N, sec, rate, push_proof ? "bounded push proof" : "standalone");
     if (rate >= 50000.0)
         printf("event_log: benchmark — MEETS 50K/sec target\n");
     else
@@ -665,7 +675,7 @@ static int run_benchmark(int *failures)
          * event, so on a busy disk even a few thousand take a while. This is
          * the in-tree smoke of the speedup; the standalone bench uses larger N
          * for a precise ratio. */
-        const int Nab = 4000;
+        const int Nab = push_proof ? 64 : 4000;
         const int flush_every = 64;
         for (int mode = 0; mode < 2; mode++) {
             char abpath[544];

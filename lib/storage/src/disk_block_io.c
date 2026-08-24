@@ -20,29 +20,11 @@
 #include <pthread.h>
 #include "util/safe_alloc.h"
 
-/* De-storm the read-fail logs (defense-in-depth). A blocks-less starter-pack
- * bundle ships block_index with HAVE_DATA + (nFile,nDataPos) for blocks whose
- * body was never shipped, so every read-walker — and the boot-time pprev-repair
- * (block_index_integrity.c) — would open() a missing blk*.dat once per block.
- * Below the snapshot seed that is ~3.1M absent-file opens; un-throttled it
- * emitted one line per block (~3.1M lines, a >1 GB node.log in ~2 min) which on
- * a near-full disk filled it and SILENTLY CRASHED the node before it could reach
- * tip.
- *
- * This throttle bounds that log flood to at most one line per 60 s (carrying the
- * running suppressed-repeat count + a sample path), which removes the disk-full
- * crash vector regardless of any boot-time mitigation. It is always-on
- * defense-in-depth for every residual unbacked read: a blk file lost/unlinked at
- * runtime, a present-but-wrong-coord legacy mismatch, or a blocks-less bundle
- * whose below-seed bodies were never shipped. Each such read costs only an
- * open()/pread() fail, which the fold tolerates. (The deeper fix — not re-reading
- * bodies the bundle never shipped — lives on the boot / mirror-rebuild path and
- * is tracked separately.)
- *
- * Single global key (0) per throttle: interleaved walkers over many blk files
- * would re-emit on every file transition if keyed by nFile (~4k lines observed),
- * so we collapse to one identity that emits at most once per 60 s keep-alive,
- * carrying the running suppressed-repeat count and a sample path. */
+/* De-storm absent-body reads from blocks-less bundles and residual missing or
+ * stale blk positions. Without this bound, millions of expected open/pread
+ * failures produced >1 GB of logs and could fill a nearly full disk before
+ * tip. One global throttle identity intentionally collapses interleaved file
+ * walkers; each 60-second keep-alive carries the suppressed count and sample. */
 static struct log_throttle g_open_fail_throttle = LOG_THROTTLE_INIT;
 static struct log_throttle g_readfail_throttle  = LOG_THROTTLE_INIT;
 /* Same, for a DANGLING position (foreign writer, torn import): every sweep. */
@@ -67,10 +49,8 @@ static bool ensure_directory(const char *path)
     return mkdir(path, 0755) == 0;
 }
 
-/* Hardlink tripwire: a blk*.dat with st_nlink > 1 shares its inode with
- * another path — potentially a live foreign process (e.g. a zclassicd
- * oracle datadir hardlinked into this one) whose own append pointer can
- * overwrite records we have just written and indexed. Warn once per file. */
+/* A hardlinked blk file may have a live foreign appender. Warn once per file;
+ * append allocation rotates away and opened-file validation refuses writes. */
 static uint8_t g_hardlink_warned[10000 / 8 + 1];
 
 static void hardlink_warn_once(int file_idx, const char *path,
@@ -82,7 +62,7 @@ static void hardlink_warn_once(int file_idx, const char *path,
     g_hardlink_warned[file_idx >> 3] |= mask;
     fprintf(stderr,  // obs-ok:hardlink-tripwire-boot-time-foreign-writer-warning
             "[disk_block_io] %s has %lu hard links — shared blk "
-            "file; foreign appends can invalidate indexed positions\n",
+            "file quarantined from writes\n",
             path, nlink);
 }
 
@@ -100,6 +80,7 @@ static bool choose_append_block_pos(struct disk_block_pos *pos,
 
     int last_file = 0;
     unsigned int last_size = 0;
+    bool last_shared = false;
     for (int i = 0; i <= 9999; i++) {
         char path[512];
         struct disk_block_pos probe = { .nFile = i, .nPos = 0 };
@@ -107,13 +88,14 @@ static bool choose_append_block_pos(struct disk_block_pos *pos,
         struct stat st;
         if (stat(path, &st) != 0)
             break;
-        if (st.st_nlink > 1)
+        last_shared = st.st_nlink > 1;
+        if (last_shared)
             hardlink_warn_once(i, path, (unsigned long)st.st_nlink);
         last_file = i;
         last_size = (unsigned int)st.st_size;
     }
 
-    if (last_size + block_size + 8u > 0x8000000u) {
+    if (last_shared || last_size + block_size + 8u > 0x8000000u) {
         last_file++;
         last_size = 0;
     }
@@ -345,6 +327,18 @@ bool write_block_to_disk(struct block *b, struct disk_block_pos *pos,
         pthread_mutex_unlock(&g_file_cache_mutex);
         stream_free(&s);
         LOG_FAIL("disk_block_io", "write_block: open_block_file failed for file=%d", pos->nFile);
+    }
+
+    struct stat opened = {0};
+    if (fstat(fileno(file), &opened) != 0 ||
+        !S_ISREG(opened.st_mode) || opened.st_nlink != 1) {
+        fclose(file);
+        pthread_mutex_unlock(&g_file_cache_mutex);
+        stream_free(&s);
+        LOG_FAIL("disk_block_io",
+                 "write_block: refusing unsafe file=%d regular=%d nlink=%lu",
+                 pos->nFile, S_ISREG(opened.st_mode),
+                 (unsigned long)opened.st_nlink);
     }
 
     long file_pos = ftell(file);
