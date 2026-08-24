@@ -22,6 +22,12 @@ struct arg_entry {
 extern struct arg_entry g_args[MAX_ARGS];
 extern int g_nargs;
 
+/* The node's own config file, read from <datadir>. One `key=value` (or bare
+ * `key`, meaning true) per line, `#` comments, an optional leading `-` on the
+ * key. It exists so a setting can be persisted for the NEXT boot without
+ * editing a service unit — `z23 join` writes -packagehost/-buildworker here. */
+#define ZCL_NODE_CONFIG_FILENAME "z23.conf"
+
 /* Parse argv[1..] into the g_args table. Accepts -key, -key=value, and
  * --key (normalized to -key); stops at the first non '-' token. A leading
  * -nofoo synthesizes -foo=0 unless -foo was given. Replaces any prior
@@ -41,6 +47,28 @@ int64_t GetArgInt(const char *arg, int64_t default_val);
  * the value parses non-zero. `default_val` if `arg` is absent. */
 bool GetBoolArg(const char *arg, bool default_val);
 
+
+/* Merge settings from the config file at `path` into the argument table.
+ * The COMMAND LINE WINS: a key ParseParameters already set is left alone, so
+ * this only fills in what argv did not mention. `-datadir` and `-conf` inside
+ * the file are ignored (the file's path comes FROM the datadir). Returns the
+ * number of settings applied, or -1 if the file could not be opened — a
+ * missing file is the normal case and changes nothing. Call it AFTER
+ * ParseParameters, which resets the table. */
+int ReadConfigFile(const char *path);
+
+/* Write <datadir>/z23.conf into `out`. `datadir` wins when non-empty; NULL or
+ * "" falls back to the -datadir argument, then the platform default. Creates
+ * no directory and does not touch the datadir cache — resolving a config-file
+ * path must never be the thing that mints an operator's data directory. */
+void GetConfigFilePath(const char *datadir, char *out, size_t out_size);
+
+/* -datadir=DIR (or --datadir=DIR) from ANYWHERE in argv, into `out`. Needed
+ * because ParseParameters stops at the first non-'-' token, so a CLI
+ * invocation such as `z23 zcode work toolchain -datadir=DIR` leaves the
+ * argument table empty. Returns false (and empties `out`) when absent. */
+bool ArgvDataDir(int argc, const char *const argv[], char *out,
+                 size_t out_size);
 
 /* True if a log line in `category` should be emitted. NULL category
  * (uncategorized) is always true; a named category requires -debug,
