@@ -39,8 +39,9 @@
 #include "json/json.h"
 #include "support/cleanse.h"
 #define FS_FRAME_RECV_BUDGET_MS 30000
-#define FS_SEND_IO_BASE_BUDGET_MS 30000LL
-#define FS_SEND_IO_MIN_BYTES_PER_SEC (256u * 1024u)
+#define FS_PUBLIC_IO_BASE_BUDGET_MS 30000LL
+#define FS_PUBLIC_IO_MIN_BYTES_PER_SEC (256u * 1024u)
+#define FS_FAST_CHUNK_MAX (60u * 1024u * 1024u)
 
 static void fs_join_deadline_from_now(struct timespec *ts, int timeout_sec)
 {
@@ -105,25 +106,33 @@ double fs_session_mbps(const struct fs_session *s)
  * alone is only an inactivity timeout: a slow reader can reset it forever by
  * accepting a few bytes per call.  Keep the private-record throughput floor
  * so public 50 MiB chunks get the same 231 s aggregate budget. */
-static bool send_io_deadline(size_t wire_bytes, int64_t *deadline_ms)
+static bool public_io_deadline_from(int64_t start_ms, size_t wire_bytes,
+                                    int64_t *deadline_ms)
 {
     if (!deadline_ms)
-        LOG_FAIL("filesvc", "send deadline output is null");
-    int64_t now_ms = platform_time_monotonic_ms();
-    if (now_ms <= 0)
-        LOG_FAIL("filesvc", "monotonic send deadline unavailable");
+        LOG_FAIL("filesvc", "public I/O deadline output is null");
+    if (start_ms <= 0)
+        LOG_FAIL("filesvc", "monotonic public I/O start unavailable");
     uint64_t transfer_seconds =
-        (uint64_t)wire_bytes / FS_SEND_IO_MIN_BYTES_PER_SEC;
-    if (wire_bytes % FS_SEND_IO_MIN_BYTES_PER_SEC != 0)
+        (uint64_t)wire_bytes / FS_PUBLIC_IO_MIN_BYTES_PER_SEC;
+    if (wire_bytes % FS_PUBLIC_IO_MIN_BYTES_PER_SEC != 0)
         transfer_seconds++;
     if (transfer_seconds >
-        (uint64_t)(INT64_MAX - FS_SEND_IO_BASE_BUDGET_MS) / 1000u)
-        LOG_FAIL("filesvc", "send deadline exceeds monotonic range");
-    int64_t budget_ms = FS_SEND_IO_BASE_BUDGET_MS +
+        (uint64_t)(INT64_MAX - FS_PUBLIC_IO_BASE_BUDGET_MS) / 1000u)
+        LOG_FAIL("filesvc", "public I/O deadline exceeds monotonic range");
+    int64_t budget_ms = FS_PUBLIC_IO_BASE_BUDGET_MS +
         (int64_t)(transfer_seconds * 1000u);
-    if (now_ms > INT64_MAX - budget_ms)
-        LOG_FAIL("filesvc", "monotonic send deadline overflow");
-    *deadline_ms = now_ms + budget_ms;
+    if (start_ms > INT64_MAX - budget_ms)
+        LOG_FAIL("filesvc", "monotonic public I/O deadline overflow");
+    *deadline_ms = start_ms + budget_ms;
+    return true;
+}
+
+static bool send_io_deadline(size_t wire_bytes, int64_t *deadline_ms)
+{
+    int64_t start_ms = platform_time_monotonic_ms();
+    if (!public_io_deadline_from(start_ms, wire_bytes, deadline_ms))
+        return false;
     return true;
 }
 
@@ -400,7 +409,7 @@ bool fs_recv_frame_until(struct fs_session *s, uint8_t *type_out,
 bool fs_send_chunk_fast(struct fs_session *s, const uint8_t *data,
                          uint32_t size, const uint8_t sha3[32])
 {
-    if (!s || !data || !sha3 || size == 0 || size > 60u * 1024u * 1024u)
+    if (!s || !data || !sha3 || size == 0 || size > FS_FAST_CHUNK_MAX)
         LOG_FAIL("filesvc", "send_chunk_fast: invalid arguments or size=%u",
                  size);
     int64_t deadline_ms = 0;
@@ -493,21 +502,28 @@ bool fs_recv_chunk_fast(struct fs_session *s, uint8_t **out,
     if (!s || !out || !out_size || !expected_sha3)
         LOG_FAIL("filesvc", "recv_chunk_fast: invalid arguments");
     *out = NULL; *out_size = 0;
+    int64_t start_ms = platform_time_monotonic_ms();
+    int64_t deadline_ms = 0;
+    if (!public_io_deadline_from(start_ms, 0, &deadline_ms))
+        LOG_FAIL("filesvc", "recv_chunk_fast: header deadline unavailable");
     uint8_t hdr[4];
-    if (!recv_all(s->fd, hdr, 4, 0))
+    if (!recv_all(s->fd, hdr, 4, deadline_ms))
         LOG_FAIL("filesvc", "recv_chunk_fast: failed to read size header");
     uint32_t size = (uint32_t)hdr[0] | ((uint32_t)hdr[1] << 8) |
                     ((uint32_t)hdr[2] << 16) | ((uint32_t)hdr[3] << 24);
-    if (size == 0 || size > 60 * 1024 * 1024)
+    if (size == 0 || size > FS_FAST_CHUNK_MAX)
         LOG_FAIL("filesvc", "recv_chunk_fast: invalid chunk size=%u", size);
+    if (!public_io_deadline_from(start_ms, 4u + (size_t)size + 32u,
+                                 &deadline_ms))
+        LOG_FAIL("filesvc", "recv_chunk_fast: record deadline unavailable");
     /* Read data */
     uint8_t *buf = zcl_malloc(size, "file_recv_buf");
     if (!buf) LOG_FAIL("filesvc", "recv_chunk_fast: malloc failed for %u bytes", size);
-    if (!recv_all(s->fd, buf, size, 0)) { free(buf); LOG_FAIL("filesvc", "recv_chunk_fast: failed to read data (%u bytes)", size); }
+    if (!recv_all(s->fd, buf, size, deadline_ms)) { free(buf); LOG_FAIL("filesvc", "recv_chunk_fast: failed to read data (%u bytes)", size); }
 
     /* Read and verify SHA3 MAC */
     uint8_t mac_wire[32];
-    if (!recv_all(s->fd, mac_wire, 32, 0)) { free(buf); LOG_FAIL("filesvc", "recv_chunk_fast: failed to read MAC"); }
+    if (!recv_all(s->fd, mac_wire, 32, deadline_ms)) { free(buf); LOG_FAIL("filesvc", "recv_chunk_fast: failed to read MAC"); }
 
     uint8_t mac_expected[32];
     struct sha3_256_ctx mctx;
@@ -526,8 +542,6 @@ bool fs_recv_chunk_fast(struct fs_session *s, uint8_t **out,
         free(buf);
         LOG_FAIL("filesvc", "recv_chunk_fast: MAC verification failed on chunk (%u bytes)", size);
     }
-    s->recv_counter++;
-
     /* Verify SHA3 of data matches manifest */
     uint8_t hash[32];
     sha3_256(buf, size, hash);
@@ -535,7 +549,13 @@ bool fs_recv_chunk_fast(struct fs_session *s, uint8_t **out,
         free(buf);
         LOG_FAIL("filesvc", "recv_chunk_fast: SHA3 hash mismatch on chunk (%u bytes)", size);
     }
+    int64_t completed_ms = platform_time_monotonic_ms();
+    if (completed_ms <= 0 || completed_ms >= deadline_ms) {
+        free(buf);
+        LOG_FAIL("filesvc", "recv_chunk_fast: verification exceeded record deadline");
+    }
 
+    s->recv_counter++;
     s->bytes_received += 4 + size + 32;
     *out = buf;
     *out_size = size;
@@ -1802,8 +1822,10 @@ static void *range_worker_fn(void *arg)
             fprintf(stderr,  // obs-ok:file-transfer-peer-failure
                     "worker %d: chunk %u/%u recv failed\n",
                     w->id, i, w->end);
-            atomic_fetch_add(&w->chunks_fail, 1);
-            continue;
+            /* A partial raw record desynchronizes this byte stream.  Count
+             * the unreceived tail and let retry open a fresh connection. */
+            atomic_fetch_add(&w->chunks_fail, w->end - i);
+            break;
         }
 
         /* Write to the correct file at the correct offset.
@@ -2157,13 +2179,14 @@ bool fs_client_sync(const char *peer_addr, uint16_t port,
             }
             break;
         }
-        /* Cancel workers stuck on a single chunk for >60s */
+        /* The transport itself bounds a maximum public record to 271s.
+         * Keep this coarser recovery guard above that honest wire budget. */
         {
             for (int w = 0; w < nworkers; w++) {
                 uint64_t wb = atomic_load(&workers[w].bytes);
                 if (!atomic_load(&workers[w].done) && wb == prev_done_bytes[w]) {
                     stall_counts[w]++;
-                    if (stall_counts[w] >= 12) { /* 12*5s = 60s stall */
+                    if (stall_counts[w] >= 60) { /* 60*5s = 300s stall */
                         fprintf(stderr,  // obs-ok:file-transfer-stall-recovery
                                 "file_service: worker %d stalled "
                                 "at %llu bytes, cancelling\n",
@@ -2288,7 +2311,7 @@ bool fs_client_sync(const char *peer_addr, uint16_t port,
             if (!fs_recv_chunk_fast(&rs, &buf, &sz, chunks[ci].sha3)) {
                 printf("[file] retrying chunk %u attempt %d failed\n",
                        ci, retry + 1);
-                continue;
+                break;
             }
 
             char blk_path[600];

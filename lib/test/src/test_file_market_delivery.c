@@ -695,6 +695,121 @@ static bool delivery_fast_chunk_send_uses_one_deadline(void)
     return rejected;
 }
 
+struct delivery_fast_chunk_recv_call {
+    struct fs_session *session;
+    uint8_t *data;
+    uint32_t size;
+    uint8_t expected_sha3[32];
+    bool ok;
+    _Atomic bool done;
+};
+
+static void *delivery_fast_chunk_recv_call_main(void *opaque)
+{
+    struct delivery_fast_chunk_recv_call *call = opaque;
+    call->ok = fs_recv_chunk_fast(call->session, &call->data, &call->size,
+                                  call->expected_sha3);
+    atomic_store_explicit(&call->done, true, memory_order_release);
+    return NULL;
+}
+
+static bool delivery_fast_chunk_recv_uses_one_deadline(void)
+{
+    int sockets[2] = {-1, -1};
+    pthread_t thread;
+    bool started = false, sent = false, finished = false;
+    struct fs_session receiver;
+    struct delivery_fast_chunk_recv_call call = {.session = &receiver};
+    struct delivery_handshake_clock clock = {0};
+    struct platform_clock_source source = {
+        .monotonic_us = delivery_handshake_monotonic_us,
+        .wall_unix = delivery_handshake_wall_unix,
+        .user = &clock,
+    };
+    uint8_t partial_record[5] = {16, 0, 0, 0, 0xA7};
+
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0)
+        return false;
+    fs_session_init(&receiver, sockets[0]);
+    receiver.key[0] = 1;
+    receiver.key_established = true;
+    memset(call.expected_sha3, 0x5A, sizeof(call.expected_sha3));
+    platform_clock_set_source(&source);
+    started = pthread_create(&thread, NULL,
+                             delivery_fast_chunk_recv_call_main, &call) == 0;
+    if (started)
+        sent = delivery_send_exact(sockets[1], partial_record,
+                                   sizeof(partial_record));
+    for (unsigned i = 0; started && i < 250; i++) {
+        if (atomic_load_explicit(&call.done, memory_order_acquire)) {
+            finished = true;
+            break;
+        }
+        platform_sleep_ms(1);
+    }
+    if (!finished)
+        finished = atomic_load_explicit(&call.done, memory_order_acquire);
+    close(sockets[1]);
+    sockets[1] = -1;
+    if (started)
+        pthread_join(thread, NULL);
+    platform_clock_clear_source();
+
+    bool rejected = sent && finished && !call.ok && call.data == NULL &&
+        call.size == 0 && receiver.recv_counter == 0 &&
+        receiver.bytes_received == 0 &&
+        atomic_load_explicit(&clock.reads, memory_order_relaxed) >= 3;
+    free(call.data);
+    fs_session_cleanup(&receiver);
+    close(sockets[0]);
+    return rejected;
+}
+
+static bool delivery_fast_chunk_hash_failure_preserves_counter(void)
+{
+    int sockets[2] = {-1, -1};
+    struct fs_session receiver;
+    uint8_t data[16], expected_sha3[32], mac[32], wire[52];
+    uint8_t *received = NULL;
+    uint32_t received_size = 0;
+
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0)
+        return false;
+    memset(data, 0x39, sizeof(data));
+    memset(expected_sha3, 0x5A, sizeof(expected_sha3));
+    fs_session_init(&receiver, sockets[0]);
+    receiver.key[0] = 1;
+    receiver.key_established = true;
+
+    struct sha3_256_ctx mctx;
+    sha3_256_init(&mctx);
+    sha3_256_write(&mctx, receiver.key, sizeof(receiver.key));
+    sha3_256_write(&mctx,
+                   (const unsigned char *)&receiver.recv_counter,
+                   sizeof(receiver.recv_counter));
+    sha3_256_write(&mctx, expected_sha3, sizeof(expected_sha3));
+    sha3_256_write(&mctx, data, sizeof(data));
+    sha3_256_finalize(&mctx, mac);
+    wire[0] = sizeof(data);
+    wire[1] = 0;
+    wire[2] = 0;
+    wire[3] = 0;
+    memcpy(wire + 4, data, sizeof(data));
+    memcpy(wire + 4 + sizeof(data), mac, sizeof(mac));
+    bool wrote = delivery_send_exact(sockets[1], wire, sizeof(wire));
+    bool accepted = fs_recv_chunk_fast(&receiver, &received, &received_size,
+                                       expected_sha3);
+
+    bool preserved = wrote && !accepted && received == NULL &&
+        received_size == 0 && receiver.recv_counter == 0 &&
+        receiver.bytes_received == 0;
+    free(received);
+    fs_session_cleanup(&receiver);
+    close(sockets[0]);
+    close(sockets[1]);
+    return preserved;
+}
+
 static bool delivery_chunk_refusal_send_uses_one_deadline(void)
 {
     int sockets[2] = {-1, -1};
@@ -904,6 +1019,10 @@ int file_market_delivery_tests(void)
                    delivery_private_chunk_send_uses_one_deadline());
     DELIVERY_CHECK("fast chunk send shares one absolute deadline",
                    delivery_fast_chunk_send_uses_one_deadline());
+    DELIVERY_CHECK("fast chunk receive shares one absolute deadline",
+                   delivery_fast_chunk_recv_uses_one_deadline());
+    DELIVERY_CHECK("fast chunk hash failure preserves receive counter",
+                   delivery_fast_chunk_hash_failure_preserves_counter());
     DELIVERY_CHECK("chunk refusal send shares one absolute deadline",
                    delivery_chunk_refusal_send_uses_one_deadline());
     struct fs_session server;
