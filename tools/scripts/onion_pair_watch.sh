@@ -8,9 +8,15 @@
 #
 # Probe (one cycle):
 #   spawn A -tor -onion-persist
-#   wait hostname
+#   wait until descriptor upload is OBSERVED (hostname is collected, not the gate)
 #   spawn B -addnode=A.onion:port
 #   poll getconnectioncount 150s
+#
+# Hostname creation is not publication. Cycle 3 (2026-08-23T19:49:55Z,
+# onion=qi4klh77naxt6cugxm2cislvgcpbyzmffj2hr2zmbqn22qbjlk4pjxad.onion)
+# launched B at onion_ready_s=31 after the hostname file appeared, then
+# finished DESCRIPTOR_NOT_UPLOADED with dial_attempted=true. Do not infer
+# upload from timing or from hs_service_callback / Dynhost-activated lines.
 #
 # Appends one JSON object per run to host-local referee state:
 #   {"ts":"...","head_sha":"...","verdict":"TOKEN","paired_at_s":N|null,
@@ -28,7 +34,7 @@
 # Environment:
 #   PAIR_PROBE_FILE           JSONL path (default local state below)
 #   PAIR_WATCH_PORT_BASE      isolated 39xxx P2P port (default 39350)
-#   PAIR_WATCH_ONION_WAIT     seconds to wait for A's hostname (default 60)
+#   PAIR_WATCH_ONION_WAIT     seconds to wait for A's descriptor upload (default 60)
 #   PAIR_WATCH_RPC_WAIT       seconds to wait for RPC (default 60)
 #   PAIR_WATCH_POLL           seconds to poll getconnectioncount (default 150)
 #
@@ -90,7 +96,13 @@ named_verdict() {
         env) echo ENV_MISSING_BINARY ;;
         spawn_a) echo SPAWN_A_FAILED ;;
         rpc_a) echo RPC_A_NOT_READY ;;
-        onion) echo ONION_HOSTNAME_TIMEOUT ;;
+        onion)
+            if [ -n "${ONION_ADDR:-}" ]; then
+                echo DESCRIPTOR_NOT_UPLOADED
+            else
+                echo ONION_HOSTNAME_TIMEOUT
+            fi
+            ;;
         spawn_b) echo SPAWN_B_FAILED ;;
         rpc_b) echo RPC_B_NOT_READY ;;
         pair|*)
@@ -152,16 +164,40 @@ observe_stages() {
         "onion circuit established|Dynhost stream: initiated stream|rendezvous point|rendezvous circuit"; then
         RENDEZVOUS_SEEN=true
     fi
-    # Service half: this fork never prints "Uploading HS descriptor" on a
-    # PAIRED run. A's tor.log prints "hs_service_callback conditions now met"
-    # then "hs_service_callback running, calling dynhost_check_and_activate"
-    # and may print "Dynhost service successfully activated".
-    if log_has "${ISO_DD:-}/tor.log" \
-        "hs_service_callback running, calling dynhost_check_and_activate|hs_service_callback conditions now met|Dynhost service successfully activated|Uploading HS descriptor|HS_DESC UPLOAD|hidden-service descriptor upload" ||
-       log_has "${ISO_DD:-}/node.log" \
-        "hs_service_callback running, calling dynhost_check_and_activate|Uploading HS descriptor|HS_DESC UPLOAD"; then
+    if descriptor_publication_observed; then
         DESCRIPTOR_UPLOADED=true
     fi
+}
+
+# Success-only publication, matching lib/net/src/tor_integration.c
+# tor_log_has_descriptor_publication(). Hostname-file presence, the
+# "waiting for DESCRIPTOR PUBLICATION" stdout line, hs_service_callback
+# running, calling dynhost_check_and_activate, and "Dynhost service
+# successfully activated" are not upload.
+descriptor_publication_observed() {
+    if log_has "${ISO_DD:-}/tor.log" \
+        "Uploaded hidden service descriptor \\(status 200|finished with status 200|HS_DESC UPLOADED"; then
+        return 0
+    fi
+    if log_has "${ISO_DD:-}/node.log" \
+        "DESCRIPTOR PUBLICATION observed|Uploaded hidden service descriptor \\(status 200|HS_DESC UPLOADED"; then
+        return 0
+    fi
+    return 1
+}
+
+read_onion_hostname() {
+    local hn addr
+    hn="${ISO_DD:-}/tor_data/onion_service/hostname"
+    [ -f "$hn" ] || return 1
+    addr=$(tr -d ' \n' <"$hn")
+    case $addr in
+        ????????????????????????????????????????????????????????.onion)
+            ONION_ADDR=$addr
+            return 0
+            ;;
+    esac
+    return 1
 }
 
 conn_count() {
@@ -244,8 +280,11 @@ if [ "$SELFTEST" = 1 ]; then
     st_check "spawn A miss is SPAWN_A_FAILED" SPAWN_A_FAILED "$(named_verdict)"
     STAGE=rpc_a
     st_check "rpc A miss is RPC_A_NOT_READY" RPC_A_NOT_READY "$(named_verdict)"
-    STAGE=onion
+    STAGE=onion ONION_ADDR=""
     st_check "hostname miss is ONION_HOSTNAME_TIMEOUT" ONION_HOSTNAME_TIMEOUT "$(named_verdict)"
+    STAGE=onion ONION_ADDR="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion"
+    st_check "hostname without upload is DESCRIPTOR_NOT_UPLOADED" DESCRIPTOR_NOT_UPLOADED "$(named_verdict)"
+    ONION_ADDR=""
     STAGE=spawn_b
     st_check "spawn B miss is SPAWN_B_FAILED" SPAWN_B_FAILED "$(named_verdict)"
     STAGE=rpc_b
@@ -342,25 +381,33 @@ while [ "$(now_s)" -lt "$onion_deadline" ]; do
         echo "PAIR_PROBE=$VERDICT DETAIL=a_exited_during_onion"
         exit 1
     fi
-    hn="$ISO_DD/tor_data/onion_service/hostname"
-    if [ -f "$hn" ]; then
-        ONION_ADDR=$(tr -d ' \n' <"$hn")
-        case $ONION_ADDR in
-            ????????????????????????????????????????????????????????.onion)
-                break
-                ;;
-            *) ONION_ADDR="" ;;
-        esac
+    read_onion_hostname || true
+    if descriptor_publication_observed; then
+        DESCRIPTOR_UPLOADED=true
+        read_onion_hostname || true
+        break
     fi
     sleep 1
 done
+if [ "$DESCRIPTOR_UPLOADED" != true ]; then
+    if [ -z "$ONION_ADDR" ]; then
+        VERDICT=ONION_HOSTNAME_TIMEOUT
+        append_probe
+        echo "PAIR_PROBE=$VERDICT DETAIL=hostname_absent_in_${ONION_WAIT}s"
+        exit 1
+    fi
+    VERDICT=DESCRIPTOR_NOT_UPLOADED
+    append_probe
+    echo "PAIR_PROBE=$VERDICT DETAIL=upload_unobserved_in_${ONION_WAIT}s onion=$ONION_ADDR"
+    exit 1
+fi
 if [ -z "$ONION_ADDR" ]; then
     VERDICT=ONION_HOSTNAME_TIMEOUT
     append_probe
-    echo "PAIR_PROBE=$VERDICT DETAIL=hostname_absent_in_${ONION_WAIT}s"
+    echo "PAIR_PROBE=$VERDICT DETAIL=upload_observed_hostname_absent"
     exit 1
 fi
-echo "onion_ready_s=$(elapsed) onion=$ONION_ADDR"
+echo "descriptor_uploaded_s=$(elapsed) onion=$ONION_ADDR"
 
 # ── B: isolated peer quad, -addnode=A.onion:port
 STAGE=spawn_b

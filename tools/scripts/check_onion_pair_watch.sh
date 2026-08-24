@@ -50,8 +50,19 @@ fi
 if ! grep -F 'Dynhost stream: initiated stream' "$WATCH" >/dev/null 2>&1; then
     die "onion_pair_watch.sh must observe this fork's Dynhost stream client log"
 fi
-if ! grep -F 'hs_service_callback running, calling dynhost_check_and_activate' "$WATCH" >/dev/null 2>&1; then
-    die "onion_pair_watch.sh must observe this fork's hs_service_callback service log"
+if ! grep -F 'DESCRIPTOR PUBLICATION observed' "$WATCH" >/dev/null 2>&1; then
+    die "onion_pair_watch.sh must gate client launch on DESCRIPTOR PUBLICATION observed"
+fi
+if ! grep -F 'Uploaded hidden service descriptor' "$WATCH" >/dev/null 2>&1; then
+    die "onion_pair_watch.sh must observe the HSDir status-200 upload line"
+fi
+# Launch order: descriptor_publication_observed must appear before STAGE=spawn_b.
+desc_line=$(grep -n 'descriptor_publication_observed' "$WATCH" | head -1 | cut -d: -f1)
+spawn_b_line=$(grep -n '^STAGE=spawn_b$' "$WATCH" | head -1 | cut -d: -f1)
+case $desc_line in ''|*[!0-9]*) die "could not find descriptor_publication_observed" ;; esac
+case $spawn_b_line in ''|*[!0-9]*) die "could not find STAGE=spawn_b" ;; esac
+if [ "$desc_line" -ge "$spawn_b_line" ]; then
+    die "client spawn (STAGE=spawn_b line $spawn_b_line) must follow descriptor_publication_observed (line $desc_line)"
 fi
 if ! grep -E 'PAIR_WATCH_POLL:-[0-9]+' "$WATCH" >/dev/null 2>&1; then
     die "onion_pair_watch.sh missing PAIR_WATCH_POLL default"
