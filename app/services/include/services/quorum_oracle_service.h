@@ -8,8 +8,9 @@
  *   QO_SRC_LOCAL       — our own active_chain at the probed height
  *   QO_SRC_ZCLASSICD   — RPC getblockhash against the local zclassicd
  *
- * QO_SRC_PEER is populated from recently accepted zclassic23 peer
- * headers via quorum_oracle_record_peer_header_vote().
+ * QO_SRC_PEER is populated from the latest recently accepted zclassic23
+ * header per peer via quorum_oracle_record_peer_header_vote(). Lower historical
+ * repair pages never downgrade or refresh that current-height evidence.
  *
  * Verdict logic:
  *   - If at least `min_agree` non-error sources return the same hash,
@@ -76,5 +77,12 @@ void quorum_oracle_record_peer_header_vote(uint32_t peer_id,
                                            const char hash_hex[65]);
 
 bool quorum_oracle_dump_state_json(struct json_value *out, const char *key);
+
+#ifdef ZCL_TESTING
+/* Clear only the in-memory peer-vote register. Tests use this to prove its
+ * bounded replacement semantics without resetting unrelated oracle policy or
+ * probe counters. */
+void quorum_oracle_peer_votes_reset_for_test(void);
+#endif
 
 #endif /* ZCL_SERVICES_QUORUM_ORACLE_SERVICE_H */

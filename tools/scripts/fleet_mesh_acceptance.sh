@@ -741,17 +741,17 @@ remote_peer_handshake_complete() {
 # attributability, never currency.
 #
 # The one per-peer height in this node that moves AFTER the handshake is the
-# accepted-header vote. lib/net/src/msg_headers.c:1400-1405 records
-# (peer_id, height, hash) for every header this node ACCEPTED from that peer,
-# and app/services/src/quorum_oracle_service.c:368-386 publishes the live
-# ones as state.peer_votes[].{source_id,height} on `dumpstate quorum_oracle`,
-# TTL 1800s (quorum_oracle_service.c:43). That number is evidence, not a
-# claim: to move it a peer must deliver a header chain our own
-# accept_block_header() validated, so it cannot simply assert a height the
-# way VERSION does. Residual, stated plainly rather than hidden: an accepted
-# header proves the peer knows the chain to that height, not that it holds
-# the blocks — still strictly stronger than the unverified VERSION number it
-# replaces, and the only per-peer height in the product that is current.
+# accepted-header vote. lib/net/src/msg_headers.c records accepted evidence,
+# and quorum_oracle_service retains one monotonic latest (peer_id, height,
+# hash) row per peer. Lower historical repair pages cannot downgrade or
+# refresh it; `dumpstate quorum_oracle` publishes the live rows as
+# state.peer_votes[].{source_id,height}, TTL 1800s. That number is evidence,
+# not a claim: to move it a peer must deliver a header chain our own
+# accept_block_header() validated, so it cannot simply assert a height the way
+# VERSION does. Residual, stated plainly rather than hidden: an accepted header
+# proves the peer knows the chain to that height, not that it holds the blocks
+# — still strictly stronger than the unverified VERSION number it replaces,
+# and the only per-peer height in the product that is current.
 
 # A peer's CURRENT chain height, resolved exactly the way the node itself
 # resolves one (app/services/src/network_monitor.c:306-320): the handshake

@@ -117,11 +117,20 @@ void quorum_oracle_record_peer_header_vote(uint32_t peer_id,
     size_t slot = QO_MAX_PEER_VOTES;
     for (size_t i = 0; i < QO_MAX_PEER_VOTES; i++) {
         if (g_qo.peer_votes[i].present &&
-            g_qo.peer_votes[i].peer_id == peer_id &&
-            g_qo.peer_votes[i].height == height) {
+            g_qo.peer_votes[i].peer_id == peer_id) {
             slot = i;
             break;
         }
+    }
+    /* One slot is the latest accepted-header evidence for one peer. The old
+     * per-(peer,height) ring let one chatty peer or a bounded historical
+     * repair occupy every slot and evict unrelated peers long before the
+     * advertised TTL. A lower page proves history availability, not a lower
+     * current tip, and must neither downgrade nor refresh the live vote. */
+    if (slot != QO_MAX_PEER_VOTES &&
+        height < g_qo.peer_votes[slot].height) {
+        pthread_mutex_unlock(&g_qo.lock);
+        return;
     }
     if (slot == QO_MAX_PEER_VOTES) {
         slot = g_qo.peer_vote_cursor++ % QO_MAX_PEER_VOTES;
@@ -412,3 +421,13 @@ bool quorum_oracle_dump_state_json(struct json_value *out, const char *key)
     json_push_kv_str(out, "source_peer",      "wired");
     return true;
 }
+
+#ifdef ZCL_TESTING
+void quorum_oracle_peer_votes_reset_for_test(void)
+{
+    pthread_mutex_lock(&g_qo.lock);
+    memset(g_qo.peer_votes, 0, sizeof(g_qo.peer_votes));
+    g_qo.peer_vote_cursor = 0;
+    pthread_mutex_unlock(&g_qo.lock);
+}
+#endif

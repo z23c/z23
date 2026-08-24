@@ -285,10 +285,10 @@ static int test_native_catalog_resolution(void)
         size_t total = zcl_test_group_expand_plan(
             ids, sizeof(ids) / sizeof(ids[0]), expanded,
             sizeof(expanded) / sizeof(expanded[0]), &truncated);
-        ASSERT(total == 9);
+        ASSERT(total == 10);
         ASSERT(!truncated);
         bool saw_api = false, saw_native_api = false, saw_stage_coin = false;
-        bool saw_groth = false, saw_zclassicd = false;
+        bool saw_groth = false, saw_zclassicd = false, saw_quorum = false;
         for (size_t i = 0; i < total; i++) {
             saw_api |= strcmp(expanded[i], "test_api") == 0;
             saw_native_api |= strcmp(expanded[i],
@@ -299,13 +299,14 @@ static int test_native_catalog_resolution(void)
                                 "test_groth16_r1cs_oracle") == 0;
             saw_zclassicd |= strcmp(expanded[i],
                                     "test_zclassicd_oracle") == 0;
+            saw_quorum |= strcmp(expanded[i], "test_quorum_oracle") == 0;
         }
         ASSERT(saw_api && saw_native_api && saw_stage_coin);
-        ASSERT(saw_groth && saw_zclassicd);
+        ASSERT(saw_groth && saw_zclassicd && saw_quorum);
 
         char one[1][ZCL_TEST_GROUP_FULL_MAX];
         truncated = false;
-        ASSERT(zcl_test_group_expand_plan(ids, 3, one, 1, &truncated) == 9);
+        ASSERT(zcl_test_group_expand_plan(ids, 3, one, 1, &truncated) == 10);
         ASSERT(truncated);
         const char *invalid[] = { "api_missing" };
         ASSERT(zcl_test_group_expand_plan(invalid, 1, one, 1, &truncated) ==
