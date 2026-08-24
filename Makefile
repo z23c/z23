@@ -4413,6 +4413,43 @@ $(BIN_DIR)/checkpoint_rung_export: tools/checkpoint_rung_export.c \
 	    -D_POSIX_C_SOURCE=200809L \
 	    -o $@ $^ -Lvendor/lib -l:libsqlite3.a -lpthread -lm
 
+# consensus_rule_sweep: the FORWARD-facing consensus check. Every past-facing
+# check we own (deterministic rebuild, replay to tip, historical UTXO-root
+# agreement, the E13 parity lint) is satisfiable by a build that reproduces all
+# of history and still carries a rule gated on a height we have not reached —
+# all five mainnet activations are <= 707,000. This tool folds the PURE
+# height-keyed schedule (subsidy, halvings, the full upgrade-activation
+# bitmask, Equihash N/K, powLimit, target spacing, the size caps, and a digest
+# of the compiled checkpoint table) over a deterministic sweep that reaches
+# millions of blocks past the tip, and prints one SHA3-256 digest. Two builds
+# that print the same digest agree on the whole swept forward schedule.
+# Standalone build: the sealed consensus core (core/{chainparams,params,
+# consensus,math}) plus lib/sha3 + result/log_level/utilstrencodings. No
+# sqlite, no node libs, no Tor, no RPC — and no datadir, disk, network or
+# clock at RUNTIME either, so it is safe to run beside a live node.
+.PHONY: tools/consensus_rule_sweep
+tools/consensus_rule_sweep: $(BIN_DIR)/consensus_rule_sweep
+$(BIN_DIR)/consensus_rule_sweep: tools/consensus_rule_sweep.c \
+		tools/consensus_rule_sweep.h \
+		core/chainparams/src/chainparams.c core/chainparams/src/chainparamsbase.c \
+		core/params/src/params.c core/params/src/upgrades.c \
+		core/consensus/src/upgrades.c core/consensus/src/subsidy.c \
+		core/math/src/uint256.c lib/encoding/src/utilstrencodings.c \
+		lib/base/src/result.c lib/base/src/log_level.c \
+		lib/sha3/src/sha3.c
+	@mkdir -p $(dir $@)
+	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
+	    -Itools -Icore/chainparams/include -Icore/params/include \
+	    -Icore/consensus/include -Icore/math/include \
+	    -Ilib/chain/include -Ilib/primitives/include -Ilib/core/include \
+	    -Ilib/encoding/include -Ilib/script/include -Ilib/sha3/include \
+	    -Ilib/sapling/include -Ilib/crypto/include \
+	    -Ilib/base/include -Ilib/util/include -Ilib/support/include \
+	    -Ivendor/include \
+	    -D_POSIX_C_SOURCE=200809L \
+	    -o $@ $(filter %.c,$^) -lpthread -lm
+
 # rom_bundle_sha3: standalone whole-file SHA3-256 digest tool used by
 # tools/scripts/rom-bundle-replicate.sh to verify a ROM bundle replication
 # copy byte-for-byte against its source. No node libs, no sqlite, no Tor —
