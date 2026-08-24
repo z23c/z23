@@ -10,12 +10,14 @@
  * deploy/systemd/zcl-portfwd.service, and docs/BLOCK_EXPLORER_HOSTING.md. */
 
 #define _XOPEN_SOURCE 700
+#include "net/https_frontdoor.h"
 #include "net/https_server.h"
 #include "net/site_routes.h"
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <netinet/in.h>
 #include <pthread.h>
@@ -71,108 +73,41 @@ static struct thread_liveness_child g_http_listen_liveness  = { .id = SUPERVISOR
 #define MAX_HTTPS_CONNECTIONS 64
 #define HTTPS_RESPONSE_BUFFER_SIZE (1024 * 1024)
 static _Atomic int g_active_connections = 0;
-#define HTTPS_CLIENT_QUEUE_CAP 128
+static struct https_frontdoor_queue g_client_queue;
 
-struct client_arg {
-    int fd;
-    bool tls;
-};
-
-static struct client_arg g_client_queue[HTTPS_CLIENT_QUEUE_CAP];
-static size_t g_client_queue_head = 0;
-static size_t g_client_queue_tail = 0;
-static size_t g_client_queue_len = 0;
-
-static void close_client_arg(struct client_arg *ca)
+static bool client_queue_push(const struct https_frontdoor_client *client)
 {
-    if (!ca)
-        return;
-    if (ca->fd >= 0)
-        close(ca->fd);
-    ca->fd = -1;
-}
-
-static bool client_queue_push(const struct client_arg *ca)
-{
-    bool ok = false;
-
     pthread_mutex_lock(&g_client_queue_mutex);
-    if (g_client_queue_len < HTTPS_CLIENT_QUEUE_CAP) {
-        g_client_queue[g_client_queue_tail] = *ca;
-        g_client_queue_tail =
-            (g_client_queue_tail + 1U) % HTTPS_CLIENT_QUEUE_CAP;
-        g_client_queue_len++;
-        ok = true;
-    }
+    bool ok = https_frontdoor_queue_push(&g_client_queue, client);
     pthread_cond_signal(&g_client_queue_cv);
     pthread_mutex_unlock(&g_client_queue_mutex);
     return ok;
 }
 
-static bool client_queue_pop(struct client_arg *ca)
+static bool client_queue_pop(struct https_frontdoor_client *client)
 {
     pthread_mutex_lock(&g_client_queue_mutex);
-    while (g_client_queue_len == 0 && atomic_load(&g_running))
+    while (g_client_queue.len == 0 && atomic_load(&g_running))
         pthread_cond_wait(&g_client_queue_cv, &g_client_queue_mutex);
-
-    if (g_client_queue_len == 0) {
-        pthread_mutex_unlock(&g_client_queue_mutex);
-        return false;
-    }
-
-    *ca = g_client_queue[g_client_queue_head];
-    g_client_queue_head = (g_client_queue_head + 1U) % HTTPS_CLIENT_QUEUE_CAP;
-    g_client_queue_len--;
+    bool ok = https_frontdoor_queue_pop(&g_client_queue, client);
     pthread_mutex_unlock(&g_client_queue_mutex);
-    return true;
+    return ok;
 }
 
 static void client_queue_close_all(void)
 {
     pthread_mutex_lock(&g_client_queue_mutex);
-    while (g_client_queue_len > 0) {
-        close_client_arg(&g_client_queue[g_client_queue_head]);
-        g_client_queue_head = (g_client_queue_head + 1U) % HTTPS_CLIENT_QUEUE_CAP;
-        g_client_queue_len--;
-    }
-    g_client_queue_head = 0;
-    g_client_queue_tail = 0;
+    https_frontdoor_queue_close_all(&g_client_queue);
     pthread_mutex_unlock(&g_client_queue_mutex);
 }
 
 /* ── HTTP helpers ─────────────────────────────────────────── */
 
-/* CRLF-trimming line reader shared by the TLS and plaintext request paths.
- * The byte-at-a-time buffering, max-length termination, and \r-stripping are
- * identical on both transports; only the single-byte read primitive differs,
- * so it is supplied as a closure (read one byte into *c; return <=0 on EOF/error). */
-typedef int (*read_byte_fn)(void *src, char *c);
-
-static int ssl_read_byte(void *src, char *c) { return SSL_read((SSL *)src, c, 1); }
-static int fd_read_byte(void *src, char *c)  { return (int)read(*(int *)src, c, 1); }
-
-static bool read_line(void *src, read_byte_fn rb, char *buf, size_t max)
+static bool plain_read_line(struct https_frontdoor_fd_reader *reader,
+                            char *buf, size_t max)
 {
-    size_t pos = 0;
-    while (pos < max - 1) {
-        char c;
-        int r = rb(src, &c);
-        if (r <= 0) return false;
-        if (c == '\n') break;
-        if (c != '\r') buf[pos++] = c;
-    }
-    buf[pos] = '\0';
-    return true;
-}
-
-static bool ssl_read_line(SSL *ssl, char *buf, size_t max)
-{
-    return read_line(ssl, ssl_read_byte, buf, max);
-}
-
-static bool plain_read_line(int fd, char *buf, size_t max)
-{
-    return read_line(&fd, fd_read_byte, buf, max);
+    return https_frontdoor_read_line(reader, https_frontdoor_fd_read_byte,
+                                     buf, max, reader->deadline_ms);
 }
 
 /* Bound the request-header count so an endless-header stream (a slowloris
@@ -206,10 +141,15 @@ static void https_write_all(SSL *ssl, const unsigned char *buf, size_t n)
 
 /* ── HTTPS handler ────────────────────────────────────────── */
 
-static void handle_https_client(SSL *ssl)
+static void handle_https_client(SSL *ssl, int fd, int original_flags,
+                                int64_t deadline_ms)
 {
+    struct https_frontdoor_ssl_reader reader = {
+        .ssl = ssl, .fd = fd, .deadline_ms = deadline_ms,
+    };
     char line[4096];
-    if (!ssl_read_line(ssl, line, sizeof(line)))
+    if (!https_frontdoor_read_line(&reader, https_frontdoor_ssl_read_byte,
+                                   line, sizeof(line), deadline_ms))
         return;
 
     char method[16] = "", path[2048] = "";
@@ -219,10 +159,20 @@ static void handle_https_client(SSL *ssl)
     /* Read remaining headers (discard). Cap the count so a peer streaming
      * endless headers cannot pin this thread. */
     int hdr_count = 0;
-    while (ssl_read_line(ssl, line, sizeof(line))) {
-        if (line[0] == '\0') break;
+    bool headers_complete = false;
+    while (https_frontdoor_read_line(&reader,
+                                     https_frontdoor_ssl_read_byte,
+                                     line, sizeof(line), deadline_ms)) {
+        if (line[0] == '\0') {
+            headers_complete = true;
+            break;
+        }
         if (++hdr_count > HTTP_MAX_REQUEST_HEADERS) return;
     }
+    if (!headers_complete)
+        return;
+    if (fcntl(fd, F_SETFL, original_flags) != 0)
+        return;
 
     /* Only serve GET requests to explorer routes */
     if (strcmp(method, "GET") != 0 && strcmp(method, "HEAD") != 0) {
@@ -409,10 +359,17 @@ static void handle_https_client(SSL *ssl)
     SSL_write(ssl, resp, (int)strlen(resp));
 }
 
-static void handle_https_client_fd(int fd)
+static void handle_https_client_fd(int fd, int64_t deadline_ms)
 {
     atomic_fetch_add(&g_active_connections, 1);
 
+    int original_flags = fcntl(fd, F_GETFL, 0);
+    if (original_flags < 0 ||
+        fcntl(fd, F_SETFL, original_flags | O_NONBLOCK) != 0) {
+        close(fd);
+        atomic_fetch_sub(&g_active_connections, 1);
+        return;
+    }
     SSL *ssl = SSL_new(g_ssl_ctx);
     if (!ssl) {
         close(fd);
@@ -422,14 +379,14 @@ static void handle_https_client_fd(int fd)
 
     SSL_set_fd(ssl, fd);
 
-    if (SSL_accept(ssl) <= 0) {
+    if (!https_frontdoor_ssl_accept(ssl, fd, deadline_ms)) {
         SSL_free(ssl);
         close(fd);
         atomic_fetch_sub(&g_active_connections, 1);
         return;
     }
 
-    handle_https_client(ssl);
+    handle_https_client(ssl, fd, original_flags, deadline_ms);
 
     SSL_shutdown(ssl);
     SSL_free(ssl);
@@ -472,9 +429,15 @@ static void *https_listen_fn(void *arg)
         setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
         setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
-        struct client_arg ca = {
+        int64_t deadline_ms = 0;
+        if (!https_frontdoor_deadline_start(&deadline_ms)) {
+            close(client_fd);
+            continue;
+        }
+        struct https_frontdoor_client ca = {
             .fd = client_fd,
             .tls = true,
+            .deadline_ms = deadline_ms,
         };
         if (!client_queue_push(&ca)) {
             const char *busy = "HTTP/1.1 503 Service Unavailable\r\n"
@@ -547,11 +510,14 @@ bool https_server_acme_challenge_filepath_for_testing(const char *root,
 }
 #endif
 
-static void handle_http_client_fd(int fd)
+static void handle_http_client_fd(int fd, int64_t deadline_ms)
 {
     /* Read the request line to get the path */
+    struct https_frontdoor_fd_reader reader = {
+        .fd = fd, .deadline_ms = deadline_ms,
+    };
     char line[4096];
-    if (!plain_read_line(fd, line, sizeof(line))) {
+    if (!plain_read_line(&reader, line, sizeof(line))) {
         close(fd);
         return;
     }
@@ -563,8 +529,12 @@ static void handle_http_client_fd(int fd)
      * Cap the count to bound an endless-header (slowloris) connection. */
     char req_host[256] = "";
     int hdr_count = 0;
-    while (plain_read_line(fd, line, sizeof(line))) {
-        if (line[0] == '\0') break;
+    bool headers_complete = false;
+    while (plain_read_line(&reader, line, sizeof(line))) {
+        if (line[0] == '\0') {
+            headers_complete = true;
+            break;
+        }
         if (++hdr_count > HTTP_MAX_REQUEST_HEADERS) { close(fd); return; }
         if (req_host[0] == '\0' &&
             strncasecmp(line, "Host:", 5) == 0) {
@@ -572,6 +542,10 @@ static void handle_http_client_fd(int fd)
             while (*v == ' ' || *v == '\t') v++;
             snprintf(req_host, sizeof(req_host), "%s", v);
         }
+    }
+    if (!headers_complete) {
+        close(fd);
+        return;
     }
 
     /* ACME challenge passthrough for cert renewal */
@@ -642,6 +616,13 @@ static void handle_http_client_fd(int fd)
     close(fd);
 }
 
+#ifdef ZCL_TESTING
+void https_server_handle_http_for_testing(int fd, int64_t deadline_ms)
+{
+    handle_http_client_fd(fd, deadline_ms);
+}
+#endif
+
 static void *http_listen_fn(void *arg)
 {
     (void)arg;
@@ -660,9 +641,15 @@ static void *http_listen_fn(void *arg)
         struct timeval tv = { .tv_sec = 5, .tv_usec = 0 };
         setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-        struct client_arg ca = {
+        int64_t deadline_ms = 0;
+        if (!https_frontdoor_deadline_start(&deadline_ms)) {
+            close(client_fd);
+            continue;
+        }
+        struct https_frontdoor_client ca = {
             .fd = client_fd,
             .tls = false,
+            .deadline_ms = deadline_ms,
         };
         if (!client_queue_push(&ca)) {
             const char *busy = "HTTP/1.1 503 Service Unavailable\r\n"
@@ -680,17 +667,21 @@ static void *https_worker_fn(void *arg)
     (void)arg;
 
     while (atomic_load(&g_running)) {
-        struct client_arg ca;
+        struct https_frontdoor_client ca;
 
         if (!client_queue_pop(&ca))
             break;
         thread_liveness_beat(&g_https_wkr_liveness, -1);
         if (ca.fd < 0)
             continue;
+        if (!https_frontdoor_deadline_active(ca.deadline_ms)) {
+            close(ca.fd);
+            continue;
+        }
         if (ca.tls)
-            handle_https_client_fd(ca.fd);
+            handle_https_client_fd(ca.fd, ca.deadline_ms);
         else
-            handle_http_client_fd(ca.fd);
+            handle_http_client_fd(ca.fd, ca.deadline_ms);
     }
 
     return NULL;
@@ -797,9 +788,7 @@ bool https_server_start_on_port(const char *cert_path, const char *key_path,
 
     atomic_store(&g_running, true);
     atomic_store(&g_https_port, https_port);
-    g_client_queue_head = 0;
-    g_client_queue_tail = 0;
-    g_client_queue_len = 0;
+    g_client_queue = (struct https_frontdoor_queue){0};
     atomic_store(&g_active_connections, 0);
 
     for (unsigned i = 0; i < (sizeof(g_worker_threads) / sizeof(g_worker_threads[0])); i++) {

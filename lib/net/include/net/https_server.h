@@ -27,10 +27,12 @@ bool https_deferred_pending(void);    /* HTTPS start deferred during IBD, not ye
 
 #ifdef ZCL_TESTING
 #include <stddef.h>
+#include <stdint.h>
 bool https_server_acme_challenge_filepath_for_testing(const char *root,
                                                       const char *path,
                                                       char *out,
                                                       size_t out_len);
+void https_server_handle_http_for_testing(int fd, int64_t deadline_ms);
 #endif
 
 #endif
