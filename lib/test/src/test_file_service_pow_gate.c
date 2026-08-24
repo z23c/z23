@@ -230,7 +230,7 @@ static int test_per_connection_budget(void)
 {
     int failures = 0;
     TEST("file_service: per-connection byte/time budget trips") {
-        int64_t now = (int64_t)platform_time_wall_time_t();
+        int64_t now = platform_time_monotonic_ms();
 
         /* Fresh connection, modest bytes → OK. */
         ASSERT(fs_conn_budget_ok(1024, now, now));
@@ -238,9 +238,16 @@ static int test_per_connection_budget(void)
         /* Over the byte ceiling → refused. */
         ASSERT(!fs_conn_budget_ok(FS_CONN_MAX_BYTES + 1, now, now));
 
-        /* Over the wall-time ceiling → refused. */
-        int64_t start = now - (FS_CONN_MAX_SECONDS + 5);
+        /* Over the monotonic-time ceiling → refused. */
+        int64_t start = now - ((int64_t)FS_CONN_MAX_SECONDS * 1000 + 5000);
         ASSERT(!fs_conn_budget_ok(1024, start, now));
+
+        /* Exact time boundary is allowed; one millisecond past and a
+         * backwards/invalid clock sample both fail closed. */
+        int64_t boundary = now - (int64_t)FS_CONN_MAX_SECONDS * 1000;
+        ASSERT(fs_conn_budget_ok(1024, boundary, now));
+        ASSERT(!fs_conn_budget_ok(1024, boundary, now + 1));
+        ASSERT(!fs_conn_budget_ok(1024, now + 1, now));
 
         /* At the boundary (exactly the ceiling) is still allowed. */
         ASSERT(fs_conn_budget_ok(FS_CONN_MAX_BYTES, now, now));

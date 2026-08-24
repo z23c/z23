@@ -8,6 +8,9 @@
 #include "net/file_service.h"
 #include "services/consensus_snapshot_export_service.h"
 #include <sqlite3.h>
+#include <arpa/inet.h>
+#include <poll.h>
+#include <sys/socket.h>
 #include <stdlib.h>
 #include <utime.h>
 #include <unistd.h>
@@ -407,29 +410,95 @@ static int test_manifest_status_reports_export_readiness(void)
     return failures;
 }
 
-static int test_file_service_start_stop_idempotent(void)
+struct file_service_lifetime_clock {
+    int64_t monotonic_us;
+    int64_t wall_unix;
+};
+
+static int64_t file_service_lifetime_monotonic_us(void *opaque)
+{
+    const struct file_service_lifetime_clock *clock = opaque;
+    return clock->monotonic_us;
+}
+
+static int64_t file_service_lifetime_wall_unix(void *opaque)
+{
+    const struct file_service_lifetime_clock *clock = opaque;
+    return clock->wall_unix;
+}
+
+static int test_file_service_start_stop_and_lifetime(void)
 {
     int failures = 0;
 
-    printf("file_controller: file service start/stop is idempotent... ");
+    printf("file_controller: file service start/stop and connection lifetime... ");
     {
         char dir[256];
-        char blk[320];
+        int fd = -1;
+        struct fs_session client;
+        bool session_initialized = false;
+        bool clock_installed = false;
         bool ok = true;
 
         setup_manifest_test_dir(dir, sizeof(dir));
+        char blk[320];
         snprintf(blk, sizeof(blk), "%s/blocks/blk00000.dat", dir);
         test_file_write_bytes(blk, 4096, 0xCC);
         test_file_touch_age(blk, 7200);
-
         fs_server_start(dir, 0);
         fs_server_start(dir, 0);
-        sleep(1);
+        for (unsigned i = 0; i < 200 && fs_server_get_port() == 0; i++)
+            platform_sleep_ms(5);
         ok = ok && fs_server_is_running();
+
+        fd = socket(AF_INET6, SOCK_STREAM, 0);
+        struct sockaddr_in6 address = {
+            .sin6_family = AF_INET6,
+            .sin6_port = htons(fs_server_get_port()),
+            .sin6_addr = IN6ADDR_LOOPBACK_INIT,
+        };
+        ok = ok && fd >= 0 && address.sin6_port != 0 &&
+            connect(fd, (struct sockaddr *)&address, sizeof(address)) == 0;
+        if (ok) {
+            uint8_t transport_root[32] = {0};
+            fs_session_init(&client, fd);
+            session_initialized = true;
+            ok = fs_handshake(&client, transport_root, true);
+        }
+
+        int64_t expired_ms = platform_time_monotonic_ms() +
+            ((int64_t)FS_CONN_MAX_SECONDS + 1) * 1000;
+        struct file_service_lifetime_clock lifetime = {
+            .monotonic_us = expired_ms * 1000,
+            .wall_unix = (int64_t)platform_time_wall_time_t(),
+        };
+        struct platform_clock_source source = {
+            .monotonic_us = file_service_lifetime_monotonic_us,
+            .wall_unix = file_service_lifetime_wall_unix,
+            .user = &lifetime,
+        };
+        if (ok) {
+            platform_clock_set_source(&source);
+            clock_installed = true;
+            ok = fs_send_frame(&client, FS_PADDING, NULL, 0);
+        }
+
+        struct pollfd pfd = {.fd = fd, .events = POLLIN | POLLHUP};
+        int ready = ok ? poll(&pfd, 1, 250) : -1;
+        uint8_t closed_probe = 0;
+        ssize_t closed_read = ready > 0
+            ? recv(fd, &closed_probe, 1, MSG_DONTWAIT) : -1;
+        ok = ok && ready > 0 && closed_read == 0;
+
+        if (clock_installed)
+            platform_clock_clear_source();
+        if (session_initialized)
+            fs_session_cleanup(&client);
+        if (fd >= 0)
+            close(fd);
         fs_server_stop();
         fs_server_stop();
         ok = ok && !fs_server_is_running();
-
         cleanup_manifest_test_dir(dir);
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
@@ -561,7 +630,7 @@ int test_file_controller(void)
     failures += test_manifest_skips_hot_block_index();
     failures += test_controller_refresh_manifest_api();
     failures += test_manifest_status_reports_export_readiness();
-    failures += test_file_service_start_stop_idempotent();
+    failures += test_file_service_start_stop_and_lifetime();
     failures += test_file_export_snapshot_success();
     failures += test_file_export_snapshot_fail_closes_partial();
 

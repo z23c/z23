@@ -81,7 +81,7 @@ void fs_session_init(struct fs_session *s, int fd)
 {
     memset(s, 0, sizeof(*s));
     s->fd = fd;
-    s->start_time = (int64_t)platform_time_wall_time_t();
+    s->start_monotonic_ms = platform_time_monotonic_ms();
 
     /* TCP tuning for max throughput */
     int one = 1;
@@ -94,10 +94,14 @@ void fs_session_init(struct fs_session *s, int fd)
 
 double fs_session_mbps(const struct fs_session *s)
 {
-    int64_t elapsed = (int64_t)platform_time_wall_time_t() - s->start_time;
-    if (elapsed < 1) elapsed = 1;
+    int64_t now_ms = platform_time_monotonic_ms();
+    int64_t elapsed_ms = 1000;
+    if (s->start_monotonic_ms > 0 && now_ms > s->start_monotonic_ms)
+        elapsed_ms = now_ms - s->start_monotonic_ms;
+    if (elapsed_ms < 1000)
+        elapsed_ms = 1000;
     uint64_t total = s->bytes_sent + s->bytes_received;
-    return (double)total / (1048576.0 * (double)elapsed);
+    return (double)total * 1000.0 / (1048576.0 * (double)elapsed_ms);
 }
 
 /* ── Raw I/O helpers ───────────────────────────────────────────── */
@@ -741,12 +745,27 @@ bool fs_ip_bytes_charge(const uint8_t ip[16], uint64_t n)
     return ok;
 }
 
-bool fs_conn_budget_ok(uint64_t bytes_sent, int64_t start_time, int64_t now)
+bool fs_conn_budget_ok(uint64_t bytes_sent, int64_t start_monotonic_ms,
+                       int64_t now_monotonic_ms)
 {
     if (bytes_sent > FS_CONN_MAX_BYTES)
         return false;
-    if (start_time > 0 && (now - start_time) > FS_CONN_MAX_SECONDS)
+    if (start_monotonic_ms <= 0 || now_monotonic_ms < start_monotonic_ms)
         return false;
+    if ((uint64_t)(now_monotonic_ms - start_monotonic_ms) >
+        (uint64_t)FS_CONN_MAX_SECONDS * 1000u)
+        return false;
+    return true;
+}
+
+static bool fs_conn_deadline_ms(const struct fs_session *session,
+                                int64_t *deadline_ms)
+{
+    int64_t budget_ms = (int64_t)FS_CONN_MAX_SECONDS * 1000;
+    if (!session || !deadline_ms || session->start_monotonic_ms <= 0 ||
+        session->start_monotonic_ms > INT64_MAX - budget_ms)
+        return false;
+    *deadline_ms = session->start_monotonic_ms + budget_ms;
     return true;
 }
 
@@ -1049,8 +1068,9 @@ static void fs_stream_range(struct fs_session *session,
                             bool snapshot_allowed)
 {
     for (uint32_t ci = start; ci < end && atomic_load(&g_fs_running); ci++) {
-        int64_t now = (int64_t)platform_time_wall_time_t();
-        if (!fs_conn_budget_ok(session->bytes_sent, session->start_time, now)) {
+        int64_t now = platform_time_monotonic_ms();
+        if (!fs_conn_budget_ok(session->bytes_sent,
+                               session->start_monotonic_ms, now)) {
             fs_gate_log_throttled("conn_budget_exceeded", (int)ci);
             return;
         }
@@ -1094,8 +1114,8 @@ static void fs_serve_rom_chunk(struct fs_session *session,
         (void)fs_send_chunk_refusal(session, FS_ROM_REFUSE_UNKNOWN);
         return;
     }
-    if (!fs_conn_budget_ok(session->bytes_sent, session->start_time,
-                           (int64_t)platform_time_wall_time_t())) {
+    if (!fs_conn_budget_ok(session->bytes_sent, session->start_monotonic_ms,
+                           platform_time_monotonic_ms())) {
         fs_gate_log_throttled("rom_conn_budget_exceeded", (int)idx);
         (void)fs_send_chunk_refusal(session, FS_ROM_REFUSE_CONN_BUDGET);
         return;
@@ -1159,8 +1179,8 @@ static void fs_serve_rom_manifest(struct fs_session *session,
         (void)fs_send_frame(session, FS_DONE, NULL, 0);
         return;
     }
-    if (!fs_conn_budget_ok(session->bytes_sent, session->start_time,
-                           (int64_t)platform_time_wall_time_t())) {
+    if (!fs_conn_budget_ok(session->bytes_sent, session->start_monotonic_ms,
+                           platform_time_monotonic_ms())) {
         fs_gate_log_throttled("rom_manifest_conn_budget_exceeded", 0);
         (void)fs_send_frame(session, FS_DONE, NULL, 0);
         return;
@@ -1219,8 +1239,8 @@ static void fs_serve_rom_list(struct fs_session *session,
         (void)fs_send_frame(session, FS_DONE, NULL, 0);
         return;
     }
-    if (!fs_conn_budget_ok(session->bytes_sent, session->start_time,
-                           (int64_t)platform_time_wall_time_t())) {
+    if (!fs_conn_budget_ok(session->bytes_sent, session->start_monotonic_ms,
+                           platform_time_monotonic_ms())) {
         fs_gate_log_throttled("rom_list_conn_budget_exceeded", 0);
         (void)fs_send_frame(session, FS_DONE, NULL, 0);
         return;
@@ -1271,13 +1291,34 @@ static void fs_handle_client_fd(int client_fd, const uint8_t client_ip[16])
      * presented — a PoW solution must be bound to it. */
 
     struct file_manifest manifest = {0};
+    int64_t connection_deadline_ms = 0;
+    if (!fs_conn_deadline_ms(&session, &connection_deadline_ms)) {
+        fs_gate_log_throttled("connection_deadline_unavailable", 0);
+        fs_session_cleanup(&session);
+        close(client_fd);
+        return;
+    }
 
     while (atomic_load(&g_fs_running)) {
+        if (!fs_conn_budget_ok(session.bytes_sent,
+                               session.start_monotonic_ms,
+                               platform_time_monotonic_ms())) {
+            fs_gate_log_throttled("connection_lifetime_exceeded", 0);
+            break;
+        }
         bool have_manifest = atomic_load(&g_have_manifest);
         uint8_t type;
         const uint8_t *payload;
         uint32_t plen;
-        if (!fs_recv_frame(&session, &type, &payload, &plen)) break;
+        if (!fs_recv_frame_until(&session, &type, &payload, &plen,
+                                 connection_deadline_ms))
+            break;
+        if (!fs_conn_budget_ok(session.bytes_sent,
+                               session.start_monotonic_ms,
+                               platform_time_monotonic_ms())) {
+            fs_gate_log_throttled("connection_lifetime_exceeded", 0);
+            break;
+        }
 
         if (have_manifest) {
             pthread_mutex_lock(&g_manifest_mutex);

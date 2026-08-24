@@ -558,8 +558,9 @@ bool file_market_delivery_serve(
     enum file_market_delivery_status status = file_market_delivery_prepare(
         session, payload, plen, &reply, &chunk);
     if (status == FILE_MARKET_DELIVERY_READY &&
-        (!fs_conn_budget_ok(session->bytes_sent, session->start_time,
-                            (int64_t)platform_time_wall_time_t()) ||
+        (!fs_conn_budget_ok(session->bytes_sent,
+                            session->start_monotonic_ms,
+                            platform_time_monotonic_ms()) ||
          !fs_ip_bytes_charge(client_ip, chunk.size))) {
         delivery_chunk_discard(&chunk);
         memset(&chunk, 0, sizeof(chunk));

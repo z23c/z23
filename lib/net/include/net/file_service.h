@@ -98,7 +98,7 @@ struct fs_session {
     uint64_t         recv_counter;
     uint64_t         bytes_sent;
     uint64_t         bytes_received;
-    int64_t          start_time;      /* for MB/s calculation */
+    int64_t          start_monotonic_ms; /* lifetime + MB/s calculation */
     uint8_t          recv_payload[FS_MAX_PAYLOAD];
 };
 
@@ -226,8 +226,9 @@ void fs_ip_serve_release(const uint8_t ip[16]);
 bool fs_ip_bytes_charge(const uint8_t ip[16], uint64_t n);
 
 /* Per-connection budget predicate: false once the connection exceeds its
- * byte or wall-time ceiling. */
-bool fs_conn_budget_ok(uint64_t bytes_sent, int64_t start_time, int64_t now);
+ * byte or monotonic-time ceiling. Times are absolute monotonic milliseconds. */
+bool fs_conn_budget_ok(uint64_t bytes_sent, int64_t start_monotonic_ms,
+                       int64_t now_monotonic_ms);
 
 /* ── Free-tier ROM artifact serving ──────────────────────────────────
  *
