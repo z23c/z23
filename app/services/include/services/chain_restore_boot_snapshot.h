@@ -51,6 +51,20 @@ struct chain_restore_boot_snapshot {
     bool    fast_restart_taken;       /* verify-then-trust skip fired         */
     int64_t fast_restart_tip_height;  /* installed tip height (fast path)     */
     char    fast_restart_reason[96];  /* named failing binding / "all-…"      */
+
+    /* Assisted snapshot loader proof.  This is an in-process observation of
+     * the current boot, published by `z23 dumpstate boot`; it is deliberately
+     * incomplete until the loader reaches its final committed success point. */
+    bool    assisted_snapshot_body_sha3_verified;
+    bool    assisted_snapshot_embedded_frontier_verified;
+    bool    assisted_snapshot_reseed_committed;
+    int64_t assisted_snapshot_seed_height;
+    uint64_t assisted_snapshot_record_count;
+    int64_t assisted_snapshot_recorded_unix;
+    char    assisted_snapshot_payload_sha3[65];
+    char    assisted_snapshot_anchor_block_hash[65];
+    char    assisted_snapshot_artifact_sha256[65];
+    char    assisted_snapshot_path[512];
 };
 
 void chain_restore_get_boot_snapshot(struct chain_restore_boot_snapshot *out);
@@ -70,6 +84,19 @@ void chain_restore_record_snapshot_import(bool ok,
 void chain_restore_record_fast_restart(bool taken,
                                        int64_t tip_height,
                                        const char *reason);
+void chain_restore_record_assisted_snapshot_load(
+    bool body_sha3_verified,
+    bool embedded_frontier_verified,
+    bool reseed_committed,
+    int64_t seed_height,
+    uint64_t record_count,
+    const uint8_t payload_sha3[32],
+    const uint8_t anchor_block_hash[32],
+    const uint8_t artifact_sha256[32],
+    const char *snapshot_path);
 bool chain_restore_dump_state_json(struct json_value *out, const char *key);
+#ifdef ZCL_TESTING
+void chain_restore_boot_snapshot_reset_for_testing(void);
+#endif
 
 #endif /* ZCL_CHAIN_RESTORE_BOOT_SNAPSHOT_H */

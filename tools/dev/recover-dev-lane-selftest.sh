@@ -4,6 +4,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO="$(cd "$SCRIPT_DIR/../.." && pwd)"
 RECOVER="$SCRIPT_DIR/recover-dev-lane.sh"
 SOURCE_ID="fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
 SANDBOX="$(mktemp -d /tmp/zcl-dev-recovery-selftest.XXXXXX)"
@@ -71,20 +72,45 @@ make_wedged_lane()
 run_recovery()
 {
     local home="$1" txn="$2" verify="$3" service_log="$4" generation="${5:-}"
+    local active="$home/service-active" cli="$home/fake-cli" fixture_sha runner=(env)
     local args=(--apply)
-    local stop_command="${RECOVERY_SELFTEST_STOP_OVERRIDE:-printf 'stop\\n' >> '$service_log'}"
+    local stop_command="${RECOVERY_SELFTEST_STOP_OVERRIDE:-rm -f '$active'; printf 'stop\\n' >> '$service_log'}"
     [ -z "$generation" ] || args+=(--generation "$generation")
-    HOME="$home" \
+    printf '%s\n' "$verify" > "$home/proof-mode"
+    fixture_sha="$(sha256sum "$home/.zclassic-c23-dev/utxo-seed-42.snapshot" | awk '{print $1}')"
+    cat > "$cli" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" != '-datadir=$home/.zclassic-c23-dev' ] || [ "\${2:-}" != '-rpcport=18252' ]; then exit 1; fi
+shift 2
+case "\$#:\$*" in
+  "2:dumpstate boot")
+    [ "\$(cat '$home/proof-mode')" != signal ] || { touch '$home/verify-started'; sleep 2; }
+    digest="$(printf '0%.0s' {1..64})" mode="\$(cat '$home/proof-mode')"
+    [ "\$mode" != typed-bad ] || digest="$(printf 'f%.0s' {1..64})"
+    printf '{"state":{"assisted_snapshot_load":{"complete":true,"seed_height":42,"snapshot_path":"%s/.zclassic-c23-dev/utxo-seed-42.snapshot","record_count":0,"payload_sha3":"%s","anchor_block_hash":"%s","artifact_sha256":"%s"}}}\n' "$home" "\$digest" "$(printf '0%.0s' {1..64})" "$fixture_sha" ;;
+  "2:dumpstate reducer_frontier")
+    [ "\$(cat '$home/proof-mode')" = hstar-stuck ] && hstar=42 || hstar=43; printf '{"state":{"hstar":%s}}\n' "\$hstar" ;;
+  "1:getblockcount") printf '43\n' ;;
+  "1:agent") printf '{"schema":"zcl.public_status.v3","source_id_sha256":"%s"}\n' "$SOURCE_ID" ;;
+  *) exit 1 ;;
+esac
+EOF
+    chmod 0555 "$cli"
+    [ "$verify" != signal ] || runner=(exec env)
+    "${runner[@]}" HOME="$home" \
     ZCL_DEV_RECOVERY_TXN_ID="$txn" \
     ZCL_DEV_RECOVERY_BUNDLE_DIR="$home/.zclassic-c23-dev" \
     ZCL_DEV_RECOVERY_MIN_PAYLOAD_BYTES=1 \
     ZCL_DEV_RECOVERY_TIMEOUT=1 \
     ZCL_DEV_RECOVERY_STOP_COMMAND="$stop_command" \
-    ZCL_DEV_RECOVERY_START_COMMAND="printf 'start\\n' >> '$service_log'" \
+    ZCL_DEV_RECOVERY_START_COMMAND="touch '$active'; printf 'start\\n' >> '$service_log'" \
     ZCL_DEV_RECOVERY_DAEMON_RELOAD_COMMAND="printf 'reload\\n' >> '$service_log'" \
     ZCL_DEV_RECOVERY_RESET_FAILED_COMMAND="printf 'reset\\n' >> '$service_log'" \
-    ZCL_DEV_RECOVERY_ACTIVE_COMMAND=false \
-    ZCL_DEV_RECOVERY_VERIFY_COMMAND="$verify" \
+    ZCL_DEV_RECOVERY_ACTIVE_COMMAND="test -f '$active'" \
+    ZCL_DEV_RECOVERY_PID_COMMAND="printf '4242\\n'" \
+    ZCL_DEV_RECOVERY_RUNNING_EXE_COMMAND="printf '%s\\n' '$home/.local/lib/zclassic23-dev/$generation/zclassic23-dev'" \
+    ZCL_DEV_RECOVERY_CLI="$cli" \
+    ZCL_DEV_RECOVERY_JSONQ="$REPO/build/bin/jsonq" \
     "$RECOVER" --internal-self-test "$SANDBOX" 8 "${args[@]}" \
         8< "$CAPABILITY_FILE"
 }
@@ -182,54 +208,42 @@ test_success_archives_and_commits()
     ln -sfn "$previous" "$root/current"
     make_wedged_lane "$home" "$generation"
 
-    run_recovery "$home" "$txn" true "$service_log" "$generation" >/dev/null ||
+    run_recovery "$home" "$txn" typed-pass "$service_log" "$generation" >/dev/null ||
         fail "successful recovery transaction was rejected"
 
-    [ -f "$archive/auto_reindex_request" ] ||
-        fail "old auto-reindex marker was not archived"
-    grep -qx '3175499 1' "$archive/auto_reindex_request" ||
-        fail "archived auto-reindex marker changed"
+    [ -f "$archive/auto_reindex_request" ] || fail "old auto-reindex marker was not archived"
+    grep -qx '3175499 1' "$archive/auto_reindex_request" || fail "archived auto-reindex marker changed"
     [ -f "$archive/old-state.txt" ] || fail "old datadir was not retained"
-    [ ! -e "$dd/auto_reindex_request" ] ||
-        fail "fresh datadir inherited the auto-reindex marker"
-    cmp -s "$archive/utxo-seed-42.snapshot" "$dd/utxo-seed-42.snapshot" ||
-        fail "snapshot payload changed during recovery"
-    cmp -s "$archive/block_index.bin" "$dd/block_index.bin" ||
-        fail "header-index payload changed during recovery"
-    [ "$(readlink "$root/last-good")" = "$generation" ] ||
-        fail "proven generation was not promoted to last-good"
-    [ "$(readlink "$root/current")" = "$generation" ] ||
-        fail "requested generation was not selected atomically"
-    [ ! -e "$root/rejected/$generation.json" ] ||
-        fail "superseded environmental rejection remained active"
+    [ ! -e "$dd/auto_reindex_request" ] || fail "fresh datadir inherited the auto-reindex marker"
+    cmp -s "$archive/utxo-seed-42.snapshot" "$dd/utxo-seed-42.snapshot" || fail "snapshot payload changed during recovery"
+    cmp -s "$archive/block_index.bin" "$dd/block_index.bin" || fail "header-index payload changed during recovery"
+    [ ! -e "$dd/node.log" ] || fail "typed recovery proof unexpectedly depended on node.log"
+    [ "$(readlink "$root/last-good")" = "$generation" ] || fail "proven generation was not promoted to last-good"
+    [ "$(readlink "$root/current")" = "$generation" ] || fail "requested generation was not selected atomically"
+    [ ! -e "$root/rejected/$generation.json" ] || fail "superseded environmental rejection remained active"
     find "$root/rejected-history" -type f -name "$generation.*.json" |
         grep -q . || fail "superseded rejection was deleted instead of archived"
-    grep -q '"activation_status": "recovery_ready"' "$dd/agent-deploy.json" ||
-        fail "coherent post-recovery deploy state missing"
+    grep -q '"activation_status": "recovery_ready"' "$dd/agent-deploy.json" || fail "coherent post-recovery deploy state missing"
     grep -q "\"source_id_sha256\": \"$SOURCE_ID\"" \
         "$dd/agent-deploy.json" ||
         fail "coherent deploy state omitted source identity"
     grep -q "ZCL_AGENT_EXPECT_SOURCE_ID=$SOURCE_ID" \
         "$home/.config/systemd/user/zcl23-dev.service.d/90-build-identity.conf" ||
         fail "recovery drop-in omitted source identity"
-    grep -q -- '-nolegacyimport -load-snapshot-at-own-height=' \
-        "$home/.config/systemd/user/zcl23-dev.service.d/80-snapshot-loader.conf" ||
-        fail "recovered lane can still merge legacy block coordinates"
-    grep -q '"status":"committed"' \
-        "$home/.local/state/zclassic23-dev/recovery-latest.json" ||
-        fail "committed recovery verdict missing"
+    grep -q -- '-nolegacyimport -load-snapshot-at-own-height=' "$home/.config/systemd/user/zcl23-dev.service.d/80-snapshot-loader.conf" || fail "recovered lane can still merge legacy block coordinates"
+    grep -q '"status":"committed"' "$home/.local/state/zclassic23-dev/recovery-latest.json" || fail "committed recovery verdict missing"
     grep -qx 'live-untouched' "$home/.zclassic-c23/sentinel" ||
         fail "canonical sentinel changed"
     grep -qx 'soak-untouched' "$home/.zclassic-c23-soak/sentinel" ||
         fail "soak sentinel changed"
-    [ "$(tr '\n' ' ' < "$service_log")" = "stop reload reset start " ] ||
-        fail "success service actions escaped the bounded order"
+    [ "$(tr '\n' ' ' < "$service_log")" = "stop reload reset start " ] || fail "success service actions escaped the bounded order"
 }
 
 test_failed_proof_restores_old_lane()
 {
-    local home="$SANDBOX/fail-home" generation="gen-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-    local previous="gen-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" txn="failure"
+    local mode="$1" label="$2" home="$SANDBOX/fail-$2-home"
+    local generation="gen-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    local previous="gen-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" txn="failure-$label"
     local dd failed root service_log
     dd="$home/.zclassic-c23-dev"
     failed="${dd}.recovery-failed-${txn}"
@@ -240,19 +254,15 @@ test_failed_proof_restores_old_lane()
     ln -sfn "$previous" "$root/current"
     make_wedged_lane "$home" "$generation"
 
-    if run_recovery "$home" "$txn" false "$service_log" "$generation" >/dev/null 2>&1; then
+    if run_recovery "$home" "$txn" "$mode" "$service_log" "$generation" >/dev/null 2>&1; then
         fail "failed loader/RPC proof unexpectedly committed"
     fi
-    [ -f "$dd/auto_reindex_request" ] ||
-        fail "rollback did not restore old auto-reindex marker"
+    [ -f "$dd/auto_reindex_request" ] || fail "rollback did not restore old auto-reindex marker"
     [ -f "$dd/old-state.txt" ] || fail "rollback did not restore old datadir"
     [ -d "$failed" ] || fail "failed fresh datadir was deleted"
-    [ -f "$failed/utxo-seed-42.snapshot" ] ||
-        fail "failed fresh evidence was not retained"
-    [ -f "$root/rejected/$generation.json" ] ||
-        fail "failed proof improperly rescinded rejection"
-    [ "$(readlink "$root/current")" = "$previous" ] ||
-        fail "failed proof did not restore the previous current generation"
+    [ -f "$failed/utxo-seed-42.snapshot" ] || fail "failed fresh evidence was not retained"
+    [ -f "$root/rejected/$generation.json" ] || fail "failed proof improperly rescinded rejection"
+    [ "$(readlink "$root/current")" = "$previous" ] || fail "failed proof did not restore the previous current generation"
     grep -q '"status":"rolled_back"' \
         "$home/.local/state/zclassic23-dev/recovery-latest.json" ||
         fail "rollback verdict missing"
@@ -317,20 +327,7 @@ test_signal_rolls_back_transaction()
     ln -sfn "$previous" "$root/current"
     make_wedged_lane "$home" "$generation"
 
-    HOME="$home" \
-    ZCL_DEV_RECOVERY_TXN_ID="$txn" \
-    ZCL_DEV_RECOVERY_BUNDLE_DIR="$dd" \
-    ZCL_DEV_RECOVERY_MIN_PAYLOAD_BYTES=1 \
-    ZCL_DEV_RECOVERY_TIMEOUT=10 \
-    ZCL_DEV_RECOVERY_STOP_COMMAND="printf 'stop\\n' >> '$service_log'" \
-    ZCL_DEV_RECOVERY_START_COMMAND="printf 'start\\n' >> '$service_log'" \
-    ZCL_DEV_RECOVERY_DAEMON_RELOAD_COMMAND="printf 'reload\\n' >> '$service_log'" \
-    ZCL_DEV_RECOVERY_RESET_FAILED_COMMAND="printf 'reset\\n' >> '$service_log'" \
-    ZCL_DEV_RECOVERY_ACTIVE_COMMAND=false \
-    ZCL_DEV_RECOVERY_VERIFY_COMMAND="touch '$started'; sleep 2" \
-    "$RECOVER" --internal-self-test "$SANDBOX" 8 \
-        --apply --generation "$generation" \
-        8< "$CAPABILITY_FILE" >/dev/null 2>&1 &
+    run_recovery "$home" "$txn" signal "$service_log" "$generation" >/dev/null 2>&1 &
     pid=$!
     for _ in $(seq 1 100); do
         [ -f "$started" ] && break
@@ -355,7 +352,8 @@ test_public_environment_cannot_authorize_apply
 test_internal_capability_is_fixture_bound
 test_internal_capability_rejects_command_injection
 test_success_archives_and_commits
-test_failed_proof_restores_old_lane
+test_failed_proof_restores_old_lane typed-bad digest
+test_failed_proof_restores_old_lane hstar-stuck hstar
 test_plan_is_read_only_and_canonical_refused
 test_signal_rolls_back_transaction
 printf '[dev-recovery-selftest] PASS: public apply containment, fd-bound fixture authority, archive/seed/commit, proof+signal rollback, and plan purity\n'
