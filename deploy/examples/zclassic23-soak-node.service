@@ -49,8 +49,6 @@ ExecStart=%h/.local/bin/zclassic23-soak \
     -txindex \
     -addnode=127.0.0.1:8034 \
     -addnode=127.0.0.1:8033 \
-    -addnode=140.174.189.17 \
-    -addnode=140.174.189.3 \
     -addnode=37.187.76.79 \
     -addnode=162.55.92.62 \
     -addnode=157.90.223.151 \
