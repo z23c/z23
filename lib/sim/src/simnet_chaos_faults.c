@@ -1235,7 +1235,7 @@ static void *sfm_bad_peer_loop(void *arg)
     uint8_t zero_root[32];
     memset(zero_root, 0, sizeof(zero_root));
     if (!fs_handshake(&s, zero_root, false)) {
-        fs_session_cleanup(&s); close(fd);
+        close(fd);
         return NULL;
     }
 
@@ -1261,7 +1261,7 @@ static void *sfm_bad_peer_loop(void *arg)
             (void)fs_send_frame(&s, FS_DONE, NULL, 0);
         }
     }
-    fs_session_cleanup(&s); close(fd);
+    close(fd);
     return NULL;
 }
 
