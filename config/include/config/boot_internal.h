@@ -262,6 +262,13 @@ void boot_block_prefetch_start(const struct app_context *ctx,
                                struct main_state *ms);
 void boot_block_prefetch_stop(void);
 
+/* Cross-block shielded-proof pre-verification pool wiring
+ * (config/src/boot_pv_lookahead.c). start is a no-op unless ctx->pv_lookahead
+ * (-pv-lookahead); stop is idempotent + safe without a prior start. */
+void boot_pv_lookahead_start(const struct app_context *ctx,
+                             struct main_state *ms);
+void boot_pv_lookahead_stop(void);
+
 /* ── boot_services.c accessors shared with boot_background_workers.c ──
  * The background-worker unit (config/src/boot_background_workers.c) was lifted
  * out of boot_services.c but its worker bodies still reach the boot context

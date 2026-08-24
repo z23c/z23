@@ -69,7 +69,8 @@
              "durable progress.kv keys (durable_in_progress/from_anchor), from_anchor_target_tip",
              "app/jobs/src/refold_progress.c", DIAG_TEST_DEFAULT),
     DIAG_JOB("pv_lookahead", pv_lookahead_dump_state_json,
-             "cross-height shielded-proof pre-verification pool (mint fold only): "
+             "cross-height shielded-proof pre-verification pool (offline mint fold; "
+             "live/replay under -pv-lookahead): "
              "running, workers, window, queue_depth, cache_hits/misses/hit_rate, "
              "verdicts_produced, throughput_blk_per_sec, supervised/supervisor_child_id",
              "app/jobs/src/pv_lookahead.c", "lib/test/src/test_pv_lookahead.c"),

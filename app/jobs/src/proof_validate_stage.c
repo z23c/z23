@@ -377,8 +377,9 @@ static job_result_t step_validate(struct stage_step_ctx *c)
     if (!skip_crypto &&
         pv_lookahead_take(next_h, bi->phashBlock, g_tx_verifier,
                           g_tx_verifier_user, &cached)) {
-        /* OFFLINE-MINT LOOKAHEAD HIT (jobs/pv_lookahead.h; the pool is started
-         * only by the -mint-anchor drive): a worker already verified this exact
+        /* LOOKAHEAD HIT (jobs/pv_lookahead.h; the pool is started by the
+         * -mint-anchor drive and, under -pv-lookahead, by the live/replay
+         * boot path): a worker already verified this exact
          * (height, block_hash) with the same effective verifier, so the verdict
          * IS what the serial sweep below would compute (proof verification is a
          * pure function of block bytes + verifying keys). internal_error is

@@ -1429,8 +1429,8 @@ bool app_init_services(struct app_context *ctx,
                                   "runtime_services_unavailable");
     }
 
-    /* K3: block-body read-ahead worker; no-op unless -prefetch-blocks. */
-    boot_block_prefetch_start(ctx, svc->state);
+    boot_block_prefetch_start(ctx, svc->state); /* no-op sans -prefetch-blocks */
+    boot_pv_lookahead_start(ctx, svc->state);   /* no-op sans -pv-lookahead */
     {
         struct block_index *tip = active_chain_tip(&svc->state->chain_active);
         int h = tip ? tip->nHeight : 0;

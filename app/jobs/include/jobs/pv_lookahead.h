@@ -25,10 +25,11 @@
  *     failure reduce, applied by the drive in serial height order.
  *
  * SCOPE GATE: pv_lookahead_start is reached only through
- * proof_validate_lookahead_start (proof_validate_stage.h), whose only
- * production caller is config/src/boot_mint_anchor.c — the live reducer path
- * never starts the pool, and pv_lookahead_take is a single relaxed atomic
- * load when the pool is not running. */
+ * proof_validate_lookahead_start (proof_validate_stage.h). Its production
+ * callers are config/src/boot_mint_anchor.c (the offline -mint-anchor fold,
+ * always) and config/src/boot_pv_lookahead.c (the live/replay reducer path,
+ * only under -pv-lookahead, default off). When the pool is not running
+ * pv_lookahead_take is a single relaxed atomic load. */
 
 #ifndef ZCL_JOBS_PV_LOOKAHEAD_H
 #define ZCL_JOBS_PV_LOOKAHEAD_H

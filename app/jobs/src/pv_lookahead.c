@@ -50,6 +50,17 @@ static bool      g_running = false;      /* under g_mu */
 static bool      g_stop = false;         /* under g_mu */
 static int64_t   g_next_claim = 0;       /* under g_mu */
 static uint64_t  g_populated = 0;        /* under g_mu */
+/* Lowest height this sweep skipped because its body had not landed yet, or -1.
+ * The offline -mint-anchor fold never needs this: every body is already on
+ * disk, so a PVLA_HEIGHT_GAP there is permanent and skipping it forever is
+ * right. On the live/replay path body_persist writes bodies CONCURRENTLY, so
+ * the same gap is transient — without a re-sweep the workers claim the whole
+ * window before the bodies arrive, skip every height, and the hit rate stays
+ * pinned at zero for the rest of the run. Under g_mu. */
+static int64_t   g_lowest_gap = -1;      /* under g_mu */
+/* Last drive cursor observed, so a rewind (reorg) is distinguishable from
+ * ordinary forward motion. Under g_mu. */
+static int64_t   g_last_cursor = 0;      /* under g_mu */
 static _Atomic bool g_running_fast = false;   /* lock-free take() fast path */
 static _Atomic uint64_t g_hit_total = 0;
 static _Atomic uint64_t g_miss_total = 0;
@@ -206,10 +217,32 @@ static void *pvla_worker_entry(void *arg)
                                 (int64_t)atomic_load(&g_verified_total));
         }
         int64_t cursor = (int64_t)proof_validate_stage_cursor();
+        /* Rewind (reorg): the drive moved BACKWARD, which the offline fold never
+         * does. Pull the claim back so the workers do not sit stranded above
+         * cursor + WINDOW until the drive climbs again. Liveness only — the
+         * slots are left alone deliberately: take() rejects an abandoned
+         * branch's slot on the block-hash compare, and heights below the fork
+         * keep verdicts that are still exactly right. */
+        if (cursor < g_last_cursor) {
+            g_next_claim = cursor;
+            g_lowest_gap = -1;
+        }
+        g_last_cursor = cursor;
         if (g_next_claim < cursor)
             g_next_claim = cursor;
         int64_t h = g_next_claim;
         if (h >= cursor + PV_LOOKAHEAD_WINDOW || h > INT32_MAX) {
+            /* Window exhausted. Re-sweep from the lowest height we skipped for
+             * a not-yet-written body: on the live path those bodies land while
+             * we scan. Bounded — the reclaim happens at most once per
+             * PVLA_RETRY_WAIT_MS, never in a hot loop, and heights above the
+             * gap keep the verdicts they already earned. A permanently missing
+             * height still costs only one cheap failed claim per sweep
+             * (active_chain_at / BLOCK_HAVE_DATA, no pread), so the
+             * "never block forever on a missing height" property above holds. */
+            if (g_lowest_gap >= cursor && g_lowest_gap < g_next_claim)
+                g_next_claim = g_lowest_gap;
+            g_lowest_gap = -1;
             pvla_timed_wait_locked(PVLA_RETRY_WAIT_MS);
             continue;
         }
@@ -222,6 +255,9 @@ static void *pvla_worker_entry(void *arg)
         enum pvla_attempt r = pvla_verify_height((int32_t)h);
 
         pthread_mutex_lock(&g_mu);
+        if (r == PVLA_HEIGHT_GAP &&
+            (g_lowest_gap < 0 || h < g_lowest_gap))
+            g_lowest_gap = h;
         if (r == PVLA_GLOBAL_RETRY) {
             /* Hold the height: pull the claim cursor back so it is retried
              * (by this or any worker) once the global verifier precondition
@@ -246,6 +282,8 @@ static void pvla_reset_locked(void)
         g_slots[i].height = -1;
     g_populated = 0;
     g_next_claim = 0;
+    g_lowest_gap = -1;
+    g_last_cursor = 0;
     g_stop = false;
     g_ms = NULL;
     g_datadir[0] = '\0';
