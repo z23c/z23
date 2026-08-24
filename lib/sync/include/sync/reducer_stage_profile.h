@@ -117,6 +117,12 @@ enum reducer_profile_field {
     RPF_FIELD_COUNT
 };
 
+/* Reverse of the domain->stage-name table: map a reducer stage's name (the
+ * same string it registers with stage_create) to its profile domain, or -1
+ * when that stage has no profile domain. Lets the shared stage runner attribute
+ * one whole committed step without every stage duplicating the bookkeeping. */
+int reducer_stage_profile_domain_for(const char *stage_name);
+
 void reducer_stage_profile_add(enum reducer_profile_domain domain,
                                enum reducer_profile_field field,
                                uint64_t value);

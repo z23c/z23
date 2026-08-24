@@ -446,10 +446,6 @@ static job_result_t step_persist(struct stage_step_ctx *c)
     atomic_store(&g_last_advance_height, (int64_t)next_h);
     requeue_hold_disarm();
     c->cursor_out = c->cursor_in + 1;
-    reducer_stage_profile_add(REDUCER_PROFILE_BODY_PERSIST, RPF_BLOCKS, 1);
-    reducer_stage_profile_observe_us(
-        REDUCER_PROFILE_BODY_PERSIST, RPF_TOTAL_US,
-        (uint64_t)(platform_time_monotonic_us() - total_started));
     return JOB_ADVANCED;
 }
 

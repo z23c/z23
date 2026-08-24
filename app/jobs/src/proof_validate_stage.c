@@ -245,7 +245,6 @@ static void add_failure_counter(const char *type, void *user)
 static job_result_t step_validate(struct stage_step_ctx *c)
 {
     atomic_store(&g_last_step_unix, platform_time_wall_unix());
-    const int64_t t_step = platform_time_monotonic_us();
     /* ZCL_PV_TRACE=1 narrates every reason this stage declines to advance.
      * proof_validate has several early returns that are deliberately silent
      * (they are normal "not yet" waits in a live sync), but on an OFFLINE
@@ -368,8 +367,6 @@ static job_result_t step_validate(struct stage_step_ctx *c)
         pv_unresolved_clear();
         atomic_store(&g_last_advance_height, (int64_t)next_h);
         c->cursor_out = c->cursor_in + 1;
-        pv_profile_add(RPF_BLOCKS, 1);
-        pv_profile_us(RPF_TOTAL_US, t_step);
         return JOB_ADVANCED;
     }
     struct proof_verify_summary summary;
@@ -551,8 +548,6 @@ static job_result_t step_validate(struct stage_step_ctx *c)
     pv_unresolved_clear();
     atomic_store(&g_last_advance_height, (int64_t)next_h);
     c->cursor_out = c->cursor_in + 1;
-    pv_profile_add(RPF_BLOCKS, 1);
-    pv_profile_us(RPF_TOTAL_US, t_step);
     return JOB_ADVANCED;
 }
 bool proof_validate_stage_init(struct main_state *ms)
