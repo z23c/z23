@@ -41,12 +41,15 @@
 #include "config/boot_internal.h"
 #include "kernel/service_kernel.h"
 #include "rpc/server.h"
+#include "rpc/httpserver.h"
 #include "rpc/protocol.h"
 #include "json/json.h"
 
 #include <errno.h>
+#include <netinet/in.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -103,6 +106,36 @@ static struct boot_svc_ctx g_svc;
 static struct app_context g_ctx;
 static struct rpc_table g_tbl;
 
+/* Hold one kernel-assigned loopback port open so the production frontend
+ * hook must propagate rpc_http_start()'s bind failure. */
+static int rsr_hold_loopback_port(uint16_t *port_out)
+{
+    if (!port_out)
+        return -1;
+    int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0)
+        return -1;
+    const struct sockaddr_in addr = {
+        .sin_family = AF_INET,
+        .sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+        .sin_port = 0,
+    };
+    if (bind(fd, (const struct sockaddr *)&addr, sizeof(addr)) != 0 ||
+        listen(fd, 1) != 0) {
+        close(fd);
+        return -1;
+    }
+    struct sockaddr_in bound = {0};
+    socklen_t bound_len = sizeof(bound);
+    if (getsockname(fd, (struct sockaddr *)&bound, &bound_len) != 0 ||
+        bound_len != sizeof(bound)) {
+        close(fd);
+        return -1;
+    }
+    *port_out = ntohs(bound.sin_port);
+    return fd;
+}
+
 int test_rpc_service_restart(void)
 {
     int failures = 0;
@@ -133,12 +166,19 @@ int test_rpc_service_restart(void)
         return 1;
     }
 
-    /* A loopback port well clear of the node's defaults, spread by pid so
-     * concurrent test groups cannot collide. */
-    g_ctx.rpc_port = 39000 + (int)(getpid() % 900);
-    g_ctx.rpc_user = "restarttest";
-    g_ctx.rpc_password = "restarttest";
+    uint16_t held_port = 0;
+    int held_fd = rsr_hold_loopback_port(&held_port);
+    if (held_fd < 0) {
+        printf("rpc_service_restart: FAIL (hold loopback port)\n");
+        test_rm_rf(datadir);
+        return 1;
+    }
+    g_ctx.rpc_port = held_port;
+    g_ctx.rpc_user = NULL;
+    g_ctx.rpc_password = NULL;
     g_ctx.datadir = datadir;
+    /* This test owns cookie lifecycle, not the periodic rotation worker. */
+    setenv("ZCL_RPC_COOKIE_ROTATE_SEC", "0", 1);
 
     g_svc.app_ctx = &g_ctx;
     g_svc.rpc_table = &g_tbl;
@@ -149,9 +189,51 @@ int test_rpc_service_restart(void)
     struct zcl_service_spec spec = boot_frontend_rpc_http_spec(&g_svc);
     if (!zcl_service_kernel_register(&kernel, &spec)) {
         printf("rpc_service_restart: FAIL (service registration)\n");
+        close(held_fd);
+        unsetenv("ZCL_RPC_COOKIE_ROTATE_SEC");
         test_rm_rf(datadir);
         return 1;
     }
+
+    char cookie_path[320], rpcport_path[320];
+    snprintf(cookie_path, sizeof(cookie_path), "%s/.cookie", datadir);
+    snprintf(rpcport_path, sizeof(rpcport_path), "%s/.rpcport", datadir);
+
+    printf("rpc_service_restart: occupied RPC port refuses frontend start... ");
+    bool occupied_started = zcl_service_kernel_start_all(&kernel);
+    if (!occupied_started) {
+        printf("OK\n");
+    } else {
+        printf("FAIL\n");
+        failures++;
+    }
+
+    printf("rpc_service_restart: failed start leaves no cookie authority... ");
+    if (access(cookie_path, F_OK) != 0) {
+        printf("OK\n");
+    } else {
+        printf("FAIL\n");
+        failures++;
+    }
+
+    printf("rpc_service_restart: failed start leaves no stale port hint... ");
+    if (access(rpcport_path, F_OK) != 0) {
+        printf("OK\n");
+    } else {
+        printf("FAIL\n");
+        failures++;
+    }
+
+    printf("rpc_service_restart: refused frontend stays in warmup... ");
+    if (!rpc_http_is_running() && rpc_is_in_warmup(NULL, 0)) {
+        printf("OK\n");
+    } else {
+        printf("FAIL\n");
+        failures++;
+    }
+    if (occupied_started)
+        zcl_service_kernel_stop_all(&kernel);
+    close(held_fd);
 
     printf("rpc_service_restart: a fresh process starts in warmup... ");
     if (rpc_is_in_warmup(NULL, 0) &&
@@ -181,6 +263,14 @@ int test_rpc_service_restart(void)
     /* The stop edge. Without the re-arm the node would come back up still
      * claiming ready while it re-initialises. */
     zcl_service_kernel_stop_all(&kernel);
+
+    printf("rpc_service_restart: stop removes cookie and port authority... ");
+    if (access(cookie_path, F_OK) != 0 && access(rpcport_path, F_OK) != 0) {
+        printf("OK\n");
+    } else {
+        printf("FAIL\n");
+        failures++;
+    }
 
     printf("rpc_service_restart: stop re-arms warmup with a reason... ");
     {
@@ -249,6 +339,7 @@ int test_rpc_service_restart(void)
     zcl_service_kernel_stop_all(&kernel);
     zcl_service_kernel_reset(&kernel);
     set_rpc_warmup_finished();
+    unsetenv("ZCL_RPC_COOKIE_ROTATE_SEC");
     test_rm_rf(datadir);
     return failures;
 }

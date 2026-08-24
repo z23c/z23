@@ -232,7 +232,7 @@ static uint16_t car_start_live_fixture(const char *datadir)
     return port;
 }
 
-/* A dead fixture: just the two files a live node would have left behind
+/* A dead fixture: the two files an uncleanly terminated node can leave behind
  * (.rpcport + .cookie), no listener. Good enough to exercise the
  * datadir-selection scan and the CONNECT_REFUSED taxonomy. */
 static void car_write_dead_fixture(const char *datadir, uint16_t port,

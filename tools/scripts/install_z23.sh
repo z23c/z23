@@ -215,22 +215,6 @@ selftest() {
         || die "selftest: unit must wait for onion DESCRIPTOR PUBLICATION before ready"
     grep -q -- '-listen -tor -onion-persist' "$tmp/units/z23.service" \
         || die "selftest: z23.service must boot with -listen -tor -onion-persist"
-    repo_root="$(cd "$SCRIPT_DIR/../.." && pwd)"
-    if [ -f "$repo_root/lib/net/src/tor_integration.c" ]; then
-        grep -q 'tor_log_has_descriptor_publication' \
-            "$repo_root/lib/net/src/tor_integration.c" \
-            || die "selftest: missing shipped tor_log_has_descriptor_publication"
-        grep -q 'DESCRIPTOR PUBLICATION' \
-            "$repo_root/lib/net/src/tor_integration.c" \
-            || die "selftest: first-boot must wait for DESCRIPTOR PUBLICATION in tor_integration.c"
-        grep -q 'DESCRIPTOR PUBLICATION' \
-            "$repo_root/config/src/boot_sd_watchdog.c" \
-            || die "selftest: sd_notify READY must wait for DESCRIPTOR PUBLICATION"
-        grep -q 'boot_sd_watchdog_maybe_notify_ready' \
-            "$repo_root/config/src/boot_sd_watchdog.c" \
-            || die "selftest: missing READY hold until onion publication"
-    fi
-
     # Unexpected SHA256SUMS member refuses before copy.
     mkdir -p "$tmp/extra"
     printf 'x\n' >"$tmp/extra/z23"

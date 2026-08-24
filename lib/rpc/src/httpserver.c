@@ -123,6 +123,7 @@ static char g_rpc_user[128];
 static char g_rpc_password[128];
 static char g_rpc_password_prev[128];  /* previous cookie — valid until next rotation */
 static char g_cookie_file[1024];
+static char g_rpc_port_file[1024];
 static bool g_auth_required = false;
 static bool g_cookie_mode = false;     /* true when using generated cookie (not explicit user/pass) */
 static pthread_mutex_t g_cookie_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -1316,6 +1317,7 @@ bool rpc_http_start(const struct rpc_table *table, uint16_t port,
     g_rpc_password[0] = '\0';
     memory_cleanse(g_rpc_password_prev, sizeof(g_rpc_password_prev));
     g_cookie_file[0] = '\0';
+    g_rpc_port_file[0] = '\0';
     g_auth_required = false;
     g_cookie_mode = false;
     if (rpc_user && rpc_password) {
@@ -1354,9 +1356,9 @@ bool rpc_http_start(const struct rpc_table *table, uint16_t port,
          * and getting an indistinguishable 401. Best-effort like the cookie
          * write above: a failure here only degrades auto-discovery, it
          * never blocks RPC startup. */
-        char port_path[600];
-        snprintf(port_path, sizeof(port_path), "%s/.rpcport", datadir);
-        FILE *pf = fopen(port_path, "w");
+        snprintf(g_rpc_port_file, sizeof(g_rpc_port_file),
+                 "%s/.rpcport", datadir);
+        FILE *pf = fopen(g_rpc_port_file, "w");
         if (pf) {
             fprintf(pf, "%u", port);
             fclose(pf);
@@ -1366,7 +1368,7 @@ bool rpc_http_start(const struct rpc_table *table, uint16_t port,
     g_listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (g_listen_fd < 0) {
         perror("socket");
-        return false;
+        goto fail;
     }
 
     int opt = 1;
@@ -1380,16 +1382,12 @@ bool rpc_http_start(const struct rpc_table *table, uint16_t port,
 
     if (bind(g_listen_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         perror("bind");
-        close(g_listen_fd);
-        g_listen_fd = -1;
-        return false;
+        goto fail;
     }
 
     if (listen(g_listen_fd, 8) < 0) {
         perror("listen");
-        close(g_listen_fd);
-        g_listen_fd = -1;
-        return false;
+        goto fail;
     }
 
     /* Rate limit + per-IP bucket + IP ban for the HTTP RPC surface.
@@ -1517,17 +1515,7 @@ bool rpc_http_start(const struct rpc_table *table, uint16_t port,
         if (thread_registry_spawn("zcl_rpc_worker", rpc_worker_thread_fn,
                                       NULL, &g_worker_threads[i]) != 0) {
             perror("thread_registry_spawn");
-            g_running = false;
-            shutdown(g_listen_fd, SHUT_RDWR);
-            close(g_listen_fd);
-            g_listen_fd = -1;
-            pthread_mutex_lock(&g_client_queue_mutex);
-            pthread_cond_broadcast(&g_client_queue_cond);
-            pthread_mutex_unlock(&g_client_queue_mutex);
-            for (size_t j = 0; j < i; j++)
-                pthread_join(g_worker_threads[j], NULL);
-            g_workers_started = 0;
-            return false;
+            goto fail;
         }
         g_workers_started = i + 1;
         if (i == 0)
@@ -1537,16 +1525,7 @@ bool rpc_http_start(const struct rpc_table *table, uint16_t port,
     if (thread_registry_spawn("zcl_rpc_listen", listen_thread_fn, NULL,
                                   &g_listen_thread) != 0) {
         perror("thread_registry_spawn");
-        g_running = false;
-        pthread_mutex_lock(&g_client_queue_mutex);
-        pthread_cond_broadcast(&g_client_queue_cond);
-        pthread_mutex_unlock(&g_client_queue_mutex);
-        for (size_t i = 0; i < g_workers_started; i++)
-            pthread_join(g_worker_threads[i], NULL);
-        g_workers_started = 0;
-        close(g_listen_fd);
-        g_listen_fd = -1;
-        return false;
+        goto fail;
     }
     g_listen_thread_started = true;
     thread_liveness_register(&g_rpc_listen_liveness, "zcl_rpc_listen", 0, 0);
@@ -1578,6 +1557,10 @@ bool rpc_http_start(const struct rpc_table *table, uint16_t port,
     }
 
     return true;
+
+fail:
+    rpc_http_stop();
+    return false;
 }
 
 void rpc_http_stop(void)
@@ -1631,6 +1614,10 @@ void rpc_http_stop(void)
     if (g_cookie_file[0]) {
         unlink(g_cookie_file);
         g_cookie_file[0] = '\0';
+    }
+    if (g_rpc_port_file[0]) {
+        unlink(g_rpc_port_file);
+        g_rpc_port_file[0] = '\0';
     }
     g_table = NULL;
     g_auth_required = false;
