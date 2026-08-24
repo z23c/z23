@@ -184,7 +184,7 @@ ZCL_SOURCE_IDENTITY_SESSION := $(BUILD_INVOCATION_PID):$(BUILD_INVOCATION_START)
 # they execute; mixed/default/unknown goals retain the conservative all-profile
 # fallback so a newly-added goal cannot silently lose freshness authority.
 ZCL_EPOCH_ALL_PROFILES := build-only dev dev-asan dev-tsan test-fast \
-	test-strict test-asan test-tsan coverage
+	test-strict test-asan test-tsan coverage node-c23
 ZCL_EPOCH_PROFILES := $(ZCL_EPOCH_ALL_PROFILES)
 ifeq ($(BUILD_EPOCH_CLEAN_ONLY),1)
 ZCL_EPOCH_PROFILES :=
@@ -194,6 +194,8 @@ else ifeq ($(words $(MAKECMDGOALS)),1)
 ZCL_EPOCH_SINGLE_GOAL := $(firstword $(MAKECMDGOALS))
 ifneq ($(filter build-only,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := build-only
+else ifneq ($(filter zclassic23 z23,$(ZCL_EPOCH_SINGLE_GOAL)),)
+ZCL_EPOCH_PROFILES := node-c23
 else ifneq ($(filter fast-compile dev-build-only,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := dev
 else ifneq ($(filter dev-bin z23-dev zclassic23-dev,$(ZCL_EPOCH_SINGLE_GOAL)),)
@@ -938,6 +940,53 @@ DEV_TSAN_LEASE = $(DEV_TSAN_OBJ_DIR)/.leases/$(BUILD_INVOCATION_ID)
 # BUILD_SOURCE_RECORD above) so ZCL_SOURCE_IDENTITY_SESSION exists before the
 # first source-identity.sh call in this parse.
 
+# node-c23: the shipped consensus node, compiled one TU at a time.
+#
+# The link rule used to hand $(CC) all 1760 .c files in ONE invocation. That
+# reads like a parallel build under `make -j`, but it is not: make sees a
+# single recipe, and GCC's front end is serial WITHIN one driver invocation,
+# so the whole node pinned one core no matter the -j. Measured here: 147.6s
+# for a one-line edit, with 31 cores idle. It also made the zcc object cache
+# all-or-nothing — one command, one key, so one changed byte missed everything.
+#
+# Same flags as before ($(NODE_C23_CFLAGS)), same link order, same LTO: the
+# only change is WHERE the TU boundary sits, which is why the artifact stays
+# byte-identical. Its own object root because -DZCL_C23_NODE -UHAVE_GTK
+# -UHAVE_WEBKIT make these objects genuinely different from build-only's.
+#
+# The epoch key binds the IDENTITY-FREE flags on purpose. $(BUILD_IDENTITY_CPPFLAGS)
+# carries the source-id hash, so folding it into the key would re-key every
+# object on every edit and reproduce the all-or-nothing miss this rule exists
+# to remove. Only lib/util/src/clientversion.c reads those macros (the sole
+# reference in the node source set), and it gets them as a per-target flag on
+# the object rule below — exactly what the build-only profile already does.
+NODE_C23_OBJECT_CFLAGS_BASE = \
+	$(filter-out -DZCL_BUILD_SOURCE_ID=% -DZCL_BUILD_CLEAN=%,$(NODE_C23_CFLAGS)) \
+	-Wno-deprecated-declarations
+NODE_C23_EPOCH_COMPILE_FLAGS := $(strip $(NODE_C23_OBJECT_CFLAGS_BASE) deps=-MD,-MP)
+NODE_C23_EPOCH_LINK_FLAGS := $(strip $(LDFLAGS) $(NODE_C23_TOR_LIBS) $(NODE_C23_LIBS) cxx=$(CXX))
+ifneq ($(filter node-c23,$(ZCL_EPOCH_PROFILES)),)
+NODE_C23_COMPILE_EPOCH := $(call zcl_compile_epoch,node-c23-v1,NODE_C23_EPOCH_COMPILE_FLAGS,NODE_C23_EPOCH_LINK_FLAGS)
+NODE_C23_COMPILE_EPOCH_VALID := $(shell printf '%s\n' '$(NODE_C23_COMPILE_EPOCH)' | awk '$$0 ~ /^[0-9a-f]{64}$$/ { print "yes" }')
+ifneq ($(NODE_C23_COMPILE_EPOCH_VALID),yes)
+$(error node-c23 compile-epoch derivation failed)
+endif
+else
+NODE_C23_COMPILE_EPOCH := $(ZCL_ZERO_SHA256)
+endif
+NODE_C23_OBJ_ROOT = $(BUILD_DIR)/node-obj
+NODE_C23_OBJ_DIR = $(NODE_C23_OBJ_ROOT)/epochs/$(NODE_C23_COMPILE_EPOCH)
+# Order is load-bearing: it is the order the monolithic link received through
+# $^ ($(NODE_ENTRY_SRCS) then $(ALL_SRCS)), and LTO symbol placement follows
+# input order. patsubst preserves it.
+NODE_C23_SRCS = $(NODE_ENTRY_SRCS) $(ALL_SRCS)
+NODE_C23_OBJS = $(patsubst %.c,$(NODE_C23_OBJ_DIR)/%.o,$(NODE_C23_SRCS))
+NODE_C23_LINK_RSP = $(NODE_C23_OBJ_DIR)/link-inputs.rsp
+NODE_C23_PROFILE = node-c23-v1
+NODE_C23_SESSION = $(NODE_C23_OBJ_DIR)/.build-session
+NODE_C23_LEASE = $(NODE_C23_OBJ_DIR)/.leases/$(BUILD_INVOCATION_ID)
+
+
 BUILD_ONLY_PROFILE = build-only-v2
 DEV_PROFILE = dev-v2
 BUILD_ONLY_SESSION = $(OBJ_DIR)/.build-session
@@ -951,6 +1000,14 @@ $(BUILD_ONLY_LEASE): FORCE
 	  "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" "$(BUILD_COMPILER_ID)" \
 	  "$(BUILD_ONLY_COMPILE_EPOCH)" "$(BUILD_ONLY_PROFILE)" \
 	  "$(BUILD_ONLY_EPOCH_COMPILE_FLAGS)" "$(BUILD_ONLY_EPOCH_LINK_FLAGS)" \
+	  "$(CC)" "$(CXX)" "$$PPID"
+
+$(NODE_C23_LEASE): FORCE
+	@$(BUILD_EPOCH_SESSION_TOOL) acquire "$(NODE_C23_SESSION)" "$@" \
+	  "$(NODE_C23_OBJ_ROOT)" - "$(BUILD_EPOCH_KEEP)" "$(BUILD_SOURCE_ID)" \
+	  "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" "$(BUILD_COMPILER_ID)" \
+	  "$(NODE_C23_COMPILE_EPOCH)" "$(NODE_C23_PROFILE)" \
+	  "$(NODE_C23_EPOCH_COMPILE_FLAGS)" "$(NODE_C23_EPOCH_LINK_FLAGS)" \
 	  "$(CC)" "$(CXX)" "$$PPID"
 
 $(DEV_LEASE): FORCE
@@ -982,7 +1039,8 @@ $(DEV_TSAN_LEASE): FORCE
 # explicitly-known single goal.  Empty/default, mixed, and unknown goals keep
 # the conservative source-wide fallback so a new target cannot accidentally
 # lose header invalidation merely because this table was not updated.
-ZCL_DEPFILE_ALL_PROFILES := build-only dev test-fast test-strict coverage fuzz
+ZCL_DEPFILE_ALL_PROFILES := build-only dev test-fast test-strict coverage fuzz \
+	node-c23
 ZCL_DEPFILE_PROFILES := $(ZCL_DEPFILE_ALL_PROFILES)
 ifeq ($(ZCL_HOTSWAP_DEPFILE_LEAN_ONLY),1)
 # The hot-swap loop recipes (plus hotswap-module-so's own single-TU shell
@@ -994,6 +1052,8 @@ else ifeq ($(words $(MAKECMDGOALS)),1)
 ZCL_DEPFILE_SINGLE_GOAL := $(firstword $(MAKECMDGOALS))
 ifneq ($(filter build-only,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := build-only
+else ifneq ($(filter zclassic23 z23,$(ZCL_DEPFILE_SINGLE_GOAL)),)
+ZCL_DEPFILE_PROFILES := node-c23
 else ifneq ($(filter fast-compile dev-build-only,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := dev
 else ifneq ($(filter dev-bin z23-dev zclassic23-dev,$(ZCL_DEPFILE_SINGLE_GOAL)),)
@@ -1023,6 +1083,9 @@ endif
 # exact epoch. There is no mutable "current object directory" symlink.
 ifneq ($(filter build-only,$(ZCL_DEPFILE_PROFILES)),)
 -include $(ALL_OBJS:.o=.d)
+endif
+ifneq ($(filter node-c23,$(ZCL_DEPFILE_PROFILES)),)
+-include $(NODE_C23_OBJS:.o=.d)
 endif
 ifneq ($(filter dev,$(ZCL_DEPFILE_PROFILES)),)
 -include $(DEV_OBJS:.o=.d)
@@ -3795,7 +3858,7 @@ portable: c23-portable-release
 # dir under its final basename because --add-gnu-debuglink reads the file
 # (stored name + CRC32) at link time.
 $(ZCLASSIC23_BIN): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) \
-		$(NODE_ENTRY_SRCS) $(ALL_SRCS) $(COMMAND_CATALOG_DEFS) \
+		$(NODE_C23_OBJS) $(NODE_C23_LINK_RSP) $(COMMAND_CATALOG_DEFS) \
 		$(C23_PORTABLE_RELINK) | $(NODE_VENDOR_LIBS)
 	@mkdir -p $(dir $@)
 	@set -eu; \
@@ -3803,7 +3866,7 @@ $(ZCLASSIC23_BIN): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) \
 	dbg="$@.debug"; \
 	dbgdir="$$(mktemp -d "$@.dbgdir.XXXXXX")"; \
 	trap 'rm -rf "$$tmp" "$$dbgdir"' EXIT HUP INT TERM; \
-	$(CC) $(NODE_C23_CFLAGS) -Wno-deprecated-declarations $(LDFLAGS) -o "$$tmp" $(filter-out $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(COMMAND_CATALOG_DEFS) $(C23_PORTABLE_RELINK),$^) $(NODE_C23_TOR_LIBS) $(NODE_C23_LIBS); \
+	$(CC) $(NODE_C23_CFLAGS) -Wno-deprecated-declarations $(LDFLAGS) -o "$$tmp" "@$(NODE_C23_LINK_RSP)" $(NODE_C23_TOR_LIBS) $(NODE_C23_LIBS); \
 	objcopy --only-keep-debug "$$tmp" "$$dbgdir/$$(basename "$$dbg")"; \
 	strip -s "$$tmp"; \
 	objcopy --add-gnu-debuglink="$$dbgdir/$$(basename "$$dbg")" "$$tmp"; \
@@ -6539,6 +6602,25 @@ $(OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) | $(BUILD_ONL
 
 # The one TU that bakes display + source identity — see the stamp above.
 $(OBJ_DIR)/lib/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
+
+# Same shape for the shipped node's own profile. clientversion.c is the only
+# TU in $(NODE_C23_SRCS) that references ZCL_BUILD_SOURCE_ID/ZCL_BUILD_CLEAN,
+# so scoping the identity macros to it leaves every other object's flags — and
+# therefore the epoch key — stable across source edits. Defining them tree-wide
+# (as the monolithic command did) changed no other TU's code anyway: an unused
+# -D emits nothing, and $(REPRO_CFLAGS) carries -gno-record-gcc-switches so the
+# command line never reaches the debug info either.
+NODE_C23_OBJECT_CFLAGS = $(NODE_C23_OBJECT_CFLAGS_BASE)
+$(NODE_C23_OBJ_DIR)/lib/util/src/clientversion.o: NODE_C23_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS)
+$(NODE_C23_OBJ_DIR)/lib/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
+$(NODE_C23_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) | $(NODE_C23_LEASE)
+	@$(BUILD_EPOCH_OBJECT_TOOL) dep "$@" "$<" \
+	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
+	  "$(NODE_C23_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(NODE_C23_SESSION)" -- \
+	  $(CC) $(NODE_C23_OBJECT_CFLAGS)
+
+$(NODE_C23_LINK_RSP): $(NODE_C23_OBJS)
+	@$(if $(ZCL_MAKE_NO_EXEC),,$(file >$@,$(NODE_C23_OBJS))) test -s "$@"
 
 # Dev-bin keeps most TUs at -Og for quick debug compiles, but leaves the
 # consensus/crypto/script/validation hot paths at a configurable optimized
