@@ -13,6 +13,7 @@
 /* Exercise the exact range-worker socket ownership helpers used by
  * fs_client_sync() against descriptor reuse and cancel-before-publication. */
 bool fs_test_range_worker_socket_lifecycle(void);
+bool fs_test_resolved_connect_lifecycle(void);
 #endif
 
 #endif

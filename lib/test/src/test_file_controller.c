@@ -522,6 +522,20 @@ static int test_file_service_range_worker_socket_lifecycle(void)
     return failures;
 }
 
+static int test_file_service_resolved_connect_lifecycle(void)
+{
+    int failures = 0;
+
+    printf("file_controller: resolved connects are bounded and blocking on return... ");
+    if (fs_test_resolved_connect_lifecycle())
+        printf("OK\n");
+    else {
+        printf("FAIL\n");
+        failures++;
+    }
+    return failures;
+}
+
 static int test_file_export_snapshot_success(void)
 {
     int failures = 0;
@@ -647,6 +661,7 @@ int test_file_controller(void)
     failures += test_manifest_status_reports_export_readiness();
     failures += test_file_service_start_stop_and_lifetime();
     failures += test_file_service_range_worker_socket_lifecycle();
+    failures += test_file_service_resolved_connect_lifecycle();
     failures += test_file_export_snapshot_success();
     failures += test_file_export_snapshot_fail_closes_partial();
 

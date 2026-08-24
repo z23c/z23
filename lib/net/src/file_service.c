@@ -1757,6 +1757,249 @@ void fs_server_stop(void)
         thread_liveness_retire(&g_fs_wkr_liveness);
 }
 
+struct fs_connect_ops {
+    int64_t (*now_ms)(void *opaque);
+    int (*connect_fd)(void *opaque, int fd, const struct sockaddr *addr,
+                      socklen_t addr_len);
+    int (*poll_fd)(void *opaque, struct pollfd *pfd, int timeout_ms);
+    bool (*check_fd)(void *opaque, int fd);
+    void *opaque;
+};
+
+/* Connect an already-resolved endpoint with one absolute monotonic budget.
+ * The returned descriptor is restored to blocking mode; every failure closes
+ * it.  Tests inject only the timing/syscall edge while production calls the
+ * real nonblocking connect/poll/SO_ERROR path. */
+static int fs_connect_resolved_until(const struct sockaddr_storage *address,
+                                     socklen_t address_len,
+                                     int socktype, int protocol,
+                                     int64_t budget_ms,
+                                     const struct fs_connect_ops *ops)
+{
+    const char *failure = NULL;
+    int fd = -1;
+    int flags = -1;
+    int64_t start_ms = 0;
+
+    if (!address || address_len == 0 || address_len > sizeof(*address) ||
+        budget_ms <= 0 ||
+        (ops && (!ops->now_ms || !ops->connect_fd || !ops->poll_fd ||
+                 !ops->check_fd))) {
+        failure = "invalid resolved endpoint or budget";
+        goto failed;
+    }
+    start_ms = ops ? ops->now_ms(ops->opaque)
+                   : platform_time_monotonic_ms();
+    if (start_ms <= 0 || start_ms > INT64_MAX - budget_ms) {
+        failure = "monotonic connect deadline unavailable";
+        goto failed;
+    }
+    int64_t deadline_ms = start_ms + budget_ms;
+
+    fd = socket(address->ss_family, socktype, protocol);
+    if (fd < 0) {
+        failure = "socket creation failed";
+        goto failed;
+    }
+    flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        failure = "nonblocking setup failed";
+        goto failed;
+    }
+
+    int rc = ops
+        ? ops->connect_fd(ops->opaque, fd,
+                          (const struct sockaddr *)address, address_len)
+        : connect(fd, (const struct sockaddr *)address, address_len);
+    if (rc < 0 && errno != EINPROGRESS && errno != EWOULDBLOCK) {
+        failure = "connect failed";
+        goto failed;
+    }
+    while (rc < 0) {
+        int64_t now_ms = ops ? ops->now_ms(ops->opaque)
+                             : platform_time_monotonic_ms();
+        if (now_ms < start_ms || now_ms >= deadline_ms) {
+            failure = "connect deadline expired or clock reversed";
+            goto failed;
+        }
+        int64_t remaining_ms = deadline_ms - now_ms;
+        int timeout_ms = remaining_ms > INT_MAX ? INT_MAX
+                                                : (int)remaining_ms;
+        struct pollfd pfd = {.fd = fd, .events = POLLOUT, .revents = 0};
+        int poll_rc = ops ? ops->poll_fd(ops->opaque, &pfd, timeout_ms)
+                          : poll(&pfd, 1, timeout_ms);
+        if (poll_rc < 0 && errno == EINTR)
+            continue;
+        if (poll_rc < 0) {
+            failure = "connect poll failed";
+            goto failed;
+        }
+        if (poll_rc == 0)
+            continue;
+        bool connected = ops ? ops->check_fd(ops->opaque, fd)
+                             : connect_socket_check(fd);
+        if ((pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0 ||
+            (pfd.revents & POLLOUT) == 0 || !connected) {
+            failure = "asynchronous connect failed";
+            goto failed;
+        }
+        rc = 0;
+    }
+
+    int64_t completed_ms = ops ? ops->now_ms(ops->opaque)
+                               : platform_time_monotonic_ms();
+    if (completed_ms < start_ms || completed_ms >= deadline_ms) {
+        failure = "connect completed outside its absolute deadline";
+        goto failed;
+    }
+    if (fcntl(fd, F_SETFL, flags) < 0) {
+        failure = "blocking-mode restore failed";
+        goto failed;
+    }
+    return fd;
+
+failed:
+    if (fd >= 0)
+        close(fd);
+    LOG_ERR("filesvc", "resolved connect: %s", failure ? failure : "failed");
+}
+
+#ifdef ZCL_TESTING
+struct fs_test_connect_state {
+    int now_calls;
+    int poll_calls;
+    int timeout_ms;
+    int connected_fd;
+    int64_t finished_ms;
+    bool poll_ready;
+    bool check_success;
+};
+
+static int64_t fs_test_connect_now(void *opaque)
+{
+    struct fs_test_connect_state *state = opaque;
+    state->now_calls++;
+    return state->now_calls < 3 ? 1000 : state->finished_ms;
+}
+
+static int fs_test_connect_pending(void *opaque, int fd,
+                                   const struct sockaddr *address,
+                                   socklen_t address_len)
+{
+    struct fs_test_connect_state *state = opaque;
+    (void)address;
+    (void)address_len;
+    state->connected_fd = fd;
+    errno = EINPROGRESS;
+    return -1;
+}
+
+static int fs_test_connect_poll_timeout(void *opaque, struct pollfd *pfd,
+                                        int timeout_ms)
+{
+    struct fs_test_connect_state *state = opaque;
+    (void)pfd;
+    state->poll_calls++;
+    state->timeout_ms = timeout_ms;
+    if (state->poll_ready) {
+        pfd->revents = POLLOUT;
+        return 1;
+    }
+    return 0;
+}
+
+static bool fs_test_connect_check(void *opaque, int fd)
+{
+    const struct fs_test_connect_state *state = opaque;
+    (void)fd;
+    return state->check_success;
+}
+
+bool fs_test_resolved_connect_lifecycle(void)
+{
+    int listen_fd = -1;
+    int connected_fd = -1;
+    int accepted_fd = -1;
+    bool ok = true;
+    struct sockaddr_in listener = {
+        .sin_family = AF_INET,
+        .sin_port = 0,
+        .sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+    };
+    socklen_t listener_len = sizeof(listener);
+
+    listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    ok = listen_fd >= 0 &&
+         bind(listen_fd, (struct sockaddr *)&listener, sizeof(listener)) == 0 &&
+         listen(listen_fd, 1) == 0 &&
+         getsockname(listen_fd, (struct sockaddr *)&listener,
+                     &listener_len) == 0;
+    struct sockaddr_storage resolved;
+    memset(&resolved, 0, sizeof(resolved));
+    memcpy(&resolved, &listener, sizeof(listener));
+    if (ok)
+        connected_fd = fs_connect_resolved_until(
+            &resolved, sizeof(listener), SOCK_STREAM, 0, 1000, NULL);
+    int connected_flags = connected_fd >= 0
+        ? fcntl(connected_fd, F_GETFL, 0) : -1;
+    struct pollfd accept_ready = {.fd = listen_fd, .events = POLLIN};
+    int accept_poll = connected_fd >= 0 ? poll(&accept_ready, 1, 250) : -1;
+    if (accept_poll > 0 && (accept_ready.revents & POLLIN) != 0)
+        accepted_fd = accept(listen_fd, NULL, NULL);
+    ok = ok && connected_fd >= 0 && accepted_fd >= 0 &&
+         connected_flags >= 0 && (connected_flags & O_NONBLOCK) == 0;
+
+    if (accepted_fd >= 0)
+        close(accepted_fd);
+    if (connected_fd >= 0)
+        close(connected_fd);
+    if (listen_fd >= 0)
+        close(listen_fd);
+
+    struct fs_test_connect_state state = {
+        .connected_fd = -1,
+        .finished_ms = 1138,
+    };
+    struct fs_connect_ops fake = {
+        .now_ms = fs_test_connect_now,
+        .connect_fd = fs_test_connect_pending,
+        .poll_fd = fs_test_connect_poll_timeout,
+        .check_fd = fs_test_connect_check,
+        .opaque = &state,
+    };
+    int timed_fd = fs_connect_resolved_until(
+        &resolved, sizeof(listener), SOCK_STREAM, 0, 137, &fake);
+    errno = 0;
+    int closed_probe = state.connected_fd >= 0
+        ? fcntl(state.connected_fd, F_GETFD) : 0;
+    ok = ok && timed_fd < 0 && state.now_calls == 3 &&
+         state.poll_calls == 1 && state.timeout_ms == 137 &&
+         closed_probe < 0 && errno == EBADF;
+
+    struct fs_test_connect_state edge = {
+        .connected_fd = -1,
+        .finished_ms = 1137,
+        .poll_ready = true,
+        .check_success = true,
+    };
+    fake.opaque = &edge;
+    int edge_fd = fs_connect_resolved_until(
+        &resolved, sizeof(listener), SOCK_STREAM, 0, 137, &fake);
+    errno = 0;
+    int edge_closed = edge.connected_fd >= 0
+        ? fcntl(edge.connected_fd, F_GETFD) : 0;
+    ok = ok && edge_fd < 0 && edge.now_calls == 3 &&
+         edge.poll_calls == 1 && edge.timeout_ms == 137 &&
+         edge_closed < 0 && errno == EBADF;
+
+    const struct fs_connect_ops bad_ops = {0};
+    int bad_fd = fs_connect_resolved_until(
+        &resolved, sizeof(listener), SOCK_STREAM, 0, 137, &bad_ops);
+    ok = ok && bad_fd < 0;
+    return ok;
+}
+#endif
+
 /* ── Parallel download worker ──────────────────────────────────── */
 
 struct range_worker {
@@ -2223,48 +2466,17 @@ bool fs_client_sync(const char *peer_addr, uint16_t port,
     int resolved_peer_socktype = res->ai_socktype;
     int resolved_peer_protocol = res->ai_protocol;
 
-    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (fd < 0) { freeaddrinfo(res); LOG_FAIL("filesvc", "client_sync: socket() failed: %s", strerror(errno)); }
-
-    /* Non-blocking connect with 10s timeout — don't block boot on
-     * unreachable file service peers. */
-    {
-        int flags = fcntl(fd, F_GETFL, 0);
-        fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-        int rc = connect(fd, res->ai_addr, res->ai_addrlen);
-        if (rc < 0 && errno == EINPROGRESS) {
-            struct timeval tv = { .tv_sec = 10, .tv_usec = 0 };
-            fd_set wfds;
-            FD_ZERO(&wfds);
-            FD_SET(fd, &wfds);
-            rc = select(fd + 1, NULL, &wfds, NULL, &tv);
-            if (rc <= 0) {
-                close(fd);
-                freeaddrinfo(res);
-                /* Optional fast-sync seed not reachable — routine on a
-                 * fresh node; P2P snapshot sync is the fallback. Warn,
-                 * don't error. */
-                LOG_WARN("filesvc", "client_sync: connect timeout to %s:%d (optional seed; falling back to P2P)", peer_addr, port);
-                return false;
-            }
-            int err = 0;
-            socklen_t elen = sizeof(err);
-            getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &elen);
-            if (err) {
-                close(fd);
-                freeaddrinfo(res);
-                LOG_WARN("filesvc", "client_sync: connect to %s:%d failed: %s (optional seed; falling back to P2P)", peer_addr, port, strerror(err));
-                return false;
-            }
-        } else if (rc < 0) {
-            close(fd);
-            freeaddrinfo(res);
-            LOG_WARN("filesvc", "client_sync: connect to %s:%d failed: %s (optional seed; falling back to P2P)", peer_addr, port, strerror(errno));
-            return false;
-        }
-        fcntl(fd, F_SETFL, flags);  /* restore blocking mode */
-    }
+    int fd = fs_connect_resolved_until(
+        &resolved_peer, resolved_peer_len, resolved_peer_socktype,
+        resolved_peer_protocol, FS_WORKER_CONNECT_BUDGET_MS, NULL);
     freeaddrinfo(res);
+    if (fd < 0) {
+        /* Optional fast-sync seed not reachable — routine on a fresh node;
+         * P2P snapshot sync remains the fallback. */
+        LOG_WARN("filesvc", "client_sync: bounded connect to %s:%d failed "
+                 "(optional seed; falling back to P2P)", peer_addr, port);
+        return false;
+    }
 
     struct fs_session session;
     fs_session_init(&session, fd);
@@ -2281,7 +2493,12 @@ bool fs_client_sync(const char *peer_addr, uint16_t port,
     struct timeval mtv;
     mtv.tv_sec = 60; /* 60s to receive full manifest */
     mtv.tv_usec = 0;
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &mtv, sizeof(mtv));
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &mtv, sizeof(mtv)) < 0) {
+        fs_session_cleanup(&session);
+        close(fd);
+        LOG_FAIL("filesvc", "client_sync: manifest timeout setup failed: %s",
+                 strerror(errno));
+    }
 
     if (!fs_send_frame(&session, FS_MANIFEST, NULL, 0)) {
         fs_session_cleanup(&session);
@@ -2600,32 +2817,33 @@ bool fs_client_sync(const char *peer_addr, uint16_t port,
 
         if (nretry == 0) { free(retry_idx); break; }
 
-        /* Open a single fresh connection for retries */
-        struct addrinfo rhints, *rres;
-        memset(&rhints, 0, sizeof(rhints));
-        rhints.ai_family = AF_UNSPEC;
-        rhints.ai_socktype = SOCK_STREAM;
-        char rps[8];
-        snprintf(rps, sizeof(rps), "%d", port);
-        if (getaddrinfo(peer_addr, rps, &rhints, &rres) != 0) {
-            free(retry_idx); break;
+        /* Reuse the address that completed the manifest connection.  Retry
+         * never re-enters DNS and every dial has the same absolute 10s cap. */
+        int rfd = fs_connect_resolved_until(
+            &resolved_peer, resolved_peer_len, resolved_peer_socktype,
+            resolved_peer_protocol, FS_WORKER_CONNECT_BUDGET_MS, NULL);
+        if (rfd < 0) {
+            free(retry_idx);
+            continue;
         }
-        int rfd = socket(rres->ai_family, rres->ai_socktype, rres->ai_protocol);
-        if (rfd < 0) { freeaddrinfo(rres); free(retry_idx); break; }
 
         struct timeval rtv = { .tv_sec = 120, .tv_usec = 0 };
-        setsockopt(rfd, SOL_SOCKET, SO_RCVTIMEO, &rtv, sizeof(rtv));
-        setsockopt(rfd, SOL_SOCKET, SO_SNDTIMEO, &rtv, sizeof(rtv));
-        if (connect(rfd, rres->ai_addr, rres->ai_addrlen) < 0) {
-            close(rfd); freeaddrinfo(rres); free(retry_idx); break;
+        if (setsockopt(rfd, SOL_SOCKET, SO_RCVTIMEO, &rtv, sizeof(rtv)) < 0 ||
+            setsockopt(rfd, SOL_SOCKET, SO_SNDTIMEO, &rtv, sizeof(rtv)) < 0) {
+            LOG_ERROR("filesvc", "retry %d: socket timeout setup failed: %s",
+                      retry + 1, strerror(errno));
+            close(rfd);
+            free(retry_idx);
+            continue;
         }
-        freeaddrinfo(rres);
 
         struct fs_session rs;
         fs_session_init(&rs, rfd);
         if (!fs_handshake(&rs, utxo_root, true)) {
             fs_session_cleanup(&rs);
-            close(rfd); free(retry_idx); break;
+            close(rfd);
+            free(retry_idx);
+            continue;
         }
 
         uint32_t recovered = 0;
