@@ -1,12 +1,12 @@
 BOX=node4
-LAST_SYNC_AT=2026-08-24T05:19:06Z
-LAST_SYNC_SHA=e77e8ab582513846a565a437473176f879f27126
-ORIGIN_MAIN=cc19b973670d8918e0d31ba592facecf50042e37
+LAST_SYNC_AT=2026-08-24T05:34:04Z
+LAST_SYNC_SHA=1cf2ddaa7360977e8e14b788d1670069d4cc34f4
+ORIGIN_MAIN=296450a319f0e209ce98703ff88b5461356e41c2
 DEVFLEET_NODE_UP=0
 DEVFLEET_PEERS=0
 DEVFLEET_ACTION=skipped:dirty_tracked_file:app/controllers/include/controllers/agent_impact_rules.def,config/include/config/boot_internal.h,config/src/boot.c,config/src/boot_frontend_services.c,lib/net/src/onion_service.c,lib/test/src/test_tor.c
 DEVFLEET_SOURCE=unknown
 PROD_ACTION=disabled
 SYNC_ERROR=dirty_tracked_file:app/controllers/include/controllers/agent_impact_rules.def,config/include/config/boot_internal.h,config/src/boot.c,config/src/boot_frontend_services.c,lib/net/src/onion_service.c,lib/test/src/test_tor.c
-COMMITS_BEHIND=15
-STALE_CYCLES=4
+COMMITS_BEHIND=17
+STALE_CYCLES=5
