@@ -75,7 +75,7 @@ int64_t clock_now_monotonic_ns(void)
 {
     /* Fast install-hook check; see rng.c:rng_u64 for rationale. */
     struct platform_clock_source *src =
-        atomic_load_explicit(&g_clock_source, memory_order_relaxed);
+        atomic_load_explicit(&g_clock_source, memory_order_acquire);
     if (src != NULL) {
         /* Source returns microseconds; this entry point is ns. */
         return src->monotonic_us(src->user) * 1000LL;
@@ -87,7 +87,7 @@ int64_t clock_now_monotonic_ns(void)
 int64_t clock_now_wall_ms(void)
 {
     struct platform_clock_source *src =
-        atomic_load_explicit(&g_clock_source, memory_order_relaxed);
+        atomic_load_explicit(&g_clock_source, memory_order_acquire);
     if (src != NULL) {
         /* Source returns unix seconds; this entry point is ms. */
         return src->wall_unix(src->user) * 1000LL;

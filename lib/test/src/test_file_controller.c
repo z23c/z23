@@ -6,6 +6,7 @@
 #include "config/boot_snapshot_offer.h"
 #include "controllers/file_controller.h"
 #include "net/file_service.h"
+#include "../../net/src/file_service_worker_internal.h"
 #include "services/consensus_snapshot_export_service.h"
 #include <sqlite3.h>
 #include <arpa/inet.h>
@@ -507,6 +508,20 @@ static int test_file_service_start_stop_and_lifetime(void)
     return failures;
 }
 
+static int test_file_service_range_worker_socket_lifecycle(void)
+{
+    int failures = 0;
+
+    printf("file_controller: range worker cancellation owns its socket... ");
+    if (fs_test_range_worker_socket_lifecycle())
+        printf("OK\n");
+    else {
+        printf("FAIL\n");
+        failures++;
+    }
+    return failures;
+}
+
 static int test_file_export_snapshot_success(void)
 {
     int failures = 0;
@@ -631,6 +646,7 @@ int test_file_controller(void)
     failures += test_controller_refresh_manifest_api();
     failures += test_manifest_status_reports_export_readiness();
     failures += test_file_service_start_stop_and_lifetime();
+    failures += test_file_service_range_worker_socket_lifecycle();
     failures += test_file_export_snapshot_success();
     failures += test_file_export_snapshot_fail_closes_partial();
 

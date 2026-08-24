@@ -11,6 +11,8 @@
 #include "net/file_manifest.h"
 #include "net/file_market_delivery.h"
 #include "net/file_service.h"
+#include "net/netbase.h"
+#include "file_service_worker_internal.h"
 #include "net/rom_seed.h"
 #include "util/log_json.h"
 #include "crypto/sha3.h"
@@ -42,6 +44,8 @@
 #define FS_PUBLIC_IO_BASE_BUDGET_MS 30000LL
 #define FS_PUBLIC_IO_MIN_BYTES_PER_SEC (256u * 1024u)
 #define FS_FAST_CHUNK_MAX (60u * 1024u * 1024u)
+#define FS_WORKER_CONNECT_BUDGET_MS 10000LL
+#define FS_WORKER_CONNECT_POLL_MS 100
 
 static void fs_join_deadline_from_now(struct timespec *ts, int timeout_sec)
 {
@@ -1756,21 +1760,202 @@ void fs_server_stop(void)
 /* ── Parallel download worker ──────────────────────────────────── */
 
 struct range_worker {
-    const char *peer_addr;
-    uint16_t port;
+    struct sockaddr_storage peer_sockaddr;
+    socklen_t peer_sockaddr_len;
+    int peer_socktype;
+    int peer_protocol;
     uint8_t utxo_root[32];
     struct file_chunk *chunks;
     uint32_t start, end;
-    const char *out_path;
     const char *datadir;
     int id;
-    int fd;                /* socket fd — for cancellation */
+    pthread_mutex_t *fd_mutex;
+    int fd;                /* guarded by fd_mutex; worker alone closes it */
     _Atomic bool done;
     _Atomic bool cancel;   /* set by main thread to abort stuck worker */
     _Atomic uint64_t bytes;
     _Atomic uint32_t chunks_ok;    /* successfully written chunks */
     _Atomic uint32_t chunks_fail;  /* failed recv or write */
 };
+
+/* `fd_mutex` protects the descriptor number through shutdown/close.  Clearing
+ * it before close while still holding the mutex prevents the manager from
+ * applying cancellation to an unrelated socket that later reuses the number.
+ * The atomic cancellation flag closes the cancel-before-publish window. */
+static bool range_worker_socket_publish(struct range_worker *w, int fd)
+{
+    bool cancelled;
+
+    pthread_mutex_lock(w->fd_mutex);
+    w->fd = fd;
+    cancelled = atomic_load_explicit(&w->cancel, memory_order_acquire);
+    if (cancelled)
+        (void)shutdown(fd, SHUT_RDWR);
+    pthread_mutex_unlock(w->fd_mutex);
+    return !cancelled;
+}
+
+static void range_worker_cancel(struct range_worker *w)
+{
+    atomic_store_explicit(&w->cancel, true, memory_order_release);
+    pthread_mutex_lock(w->fd_mutex);
+    if (w->fd >= 0)
+        (void)shutdown(w->fd, SHUT_RDWR);
+    pthread_mutex_unlock(w->fd_mutex);
+}
+
+static void range_worker_socket_close(struct range_worker *w, int fd)
+{
+    if (fd < 0)
+        return;
+
+    pthread_mutex_lock(w->fd_mutex);
+    if (w->fd == fd)
+        w->fd = -1;
+    (void)close(fd);
+    pthread_mutex_unlock(w->fd_mutex);
+}
+
+#ifdef ZCL_TESTING
+struct fs_test_range_close_race {
+    struct range_worker *worker;
+    pthread_barrier_t *barrier;
+    int fd;
+};
+
+static void *fs_test_range_close_race_fn(void *opaque)
+{
+    struct fs_test_range_close_race *race = opaque;
+    (void)pthread_barrier_wait(race->barrier);
+    range_worker_socket_close(race->worker, race->fd);
+    return NULL;
+}
+
+bool fs_test_range_worker_socket_lifecycle(void)
+{
+    pthread_mutex_t fd_mutex;
+    struct range_worker w;
+    int old_pair[2] = {-1, -1};
+    int replacement[2] = {-1, -1};
+    int early_pair[2] = {-1, -1};
+    int race_pair[2] = {-1, -1};
+    int old_number = -1;
+    int live_fd = -1;
+    int peer_fd = -1;
+    uint8_t byte = 0x5a;
+    uint8_t received = 0;
+    if (pthread_mutex_init(&fd_mutex, NULL) != 0)
+        return false;
+    bool ok = true;
+
+    memset(&w, 0, sizeof(w));
+    w.fd_mutex = &fd_mutex;
+    w.fd = -1;
+    atomic_init(&w.cancel, false);
+
+    ok = ok && socketpair(AF_UNIX, SOCK_STREAM, 0, old_pair) == 0;
+    if (ok) {
+        old_number = old_pair[0];
+        ok = range_worker_socket_publish(&w, old_pair[0]);
+    }
+    if (ok) {
+        range_worker_socket_close(&w, old_pair[0]);
+        old_pair[0] = -1;
+        ok = socketpair(AF_UNIX, SOCK_STREAM, 0, replacement) == 0;
+    }
+    if (ok) {
+        if (replacement[0] == old_number) {
+            live_fd = replacement[0];
+            peer_fd = replacement[1];
+            replacement[0] = replacement[1] = -1;
+        } else if (replacement[1] == old_number) {
+            live_fd = replacement[1];
+            peer_fd = replacement[0];
+            replacement[0] = replacement[1] = -1;
+        } else if (dup2(replacement[0], old_number) == old_number) {
+            live_fd = old_number;
+            peer_fd = replacement[1];
+            close(replacement[0]);
+            replacement[0] = replacement[1] = -1;
+        } else {
+            ok = false;
+        }
+    }
+    if (ok) {
+        range_worker_cancel(&w);
+        ok = send(peer_fd, &byte, 1, MSG_NOSIGNAL) == 1 &&
+             recv(live_fd, &received, 1, 0) == 1 && received == byte;
+    }
+    if (live_fd >= 0)
+        close(live_fd);
+    if (peer_fd >= 0)
+        close(peer_fd);
+    if (old_pair[0] >= 0)
+        close(old_pair[0]);
+    if (old_pair[1] >= 0)
+        close(old_pair[1]);
+    if (replacement[0] >= 0)
+        close(replacement[0]);
+    if (replacement[1] >= 0)
+        close(replacement[1]);
+
+    atomic_store(&w.cancel, false);
+    w.fd = -1;
+    range_worker_cancel(&w);
+    ok = ok && socketpair(AF_UNIX, SOCK_STREAM, 0, early_pair) == 0;
+    if (early_pair[0] >= 0) {
+        bool published = range_worker_socket_publish(&w, early_pair[0]);
+        ssize_t n = recv(early_pair[0], &received, 1, MSG_DONTWAIT);
+        ok = ok && !published && n == 0;
+        range_worker_socket_close(&w, early_pair[0]);
+        early_pair[0] = -1;
+    }
+    if (early_pair[0] >= 0)
+        close(early_pair[0]);
+    if (early_pair[1] >= 0)
+        close(early_pair[1]);
+
+    atomic_store(&w.cancel, false);
+    w.fd = -1;
+    ok = ok && socketpair(AF_UNIX, SOCK_STREAM, 0, race_pair) == 0;
+    pthread_barrier_t barrier;
+    bool barrier_initialized = ok && pthread_barrier_init(&barrier, NULL, 2) == 0;
+    pthread_t closer;
+    bool closer_started = false;
+    struct fs_test_range_close_race race = {
+        .worker = &w,
+        .barrier = &barrier,
+        .fd = race_pair[0],
+    };
+    if (barrier_initialized)
+        ok = range_worker_socket_publish(&w, race_pair[0]);
+    if (ok) {
+        /* raw-pthread-ok: deterministic joined ownership-race regression */
+        closer_started = pthread_create(&closer, NULL,
+                                         fs_test_range_close_race_fn,
+                                         &race) == 0;
+        ok = closer_started;
+    }
+    if (closer_started) {
+        (void)pthread_barrier_wait(&barrier);
+        range_worker_cancel(&w);
+        pthread_join(closer, NULL);
+        race_pair[0] = -1;
+        ok = ok && w.fd == -1;
+    } else if (race_pair[0] >= 0) {
+        range_worker_socket_close(&w, race_pair[0]);
+        race_pair[0] = -1;
+    }
+    if (barrier_initialized)
+        pthread_barrier_destroy(&barrier);
+    if (race_pair[0] >= 0)
+        close(race_pair[0]);
+    if (race_pair[1] >= 0)
+        close(race_pair[1]);
+    pthread_mutex_destroy(&fd_mutex);
+    return ok;
+}
+#endif
 
 /* Client side: fetch a PoW challenge from the server, solve it, and fill a
  * 48-byte solution bound to this session's handshake nonce. Honest peers must
@@ -1805,39 +1990,122 @@ static bool fs_client_solve_challenge(struct fs_session *s,
 static void *range_worker_fn(void *arg)
 {
     struct range_worker *w = (struct range_worker *)arg;
-    if (w->start >= w->end) { atomic_store(&w->done, true); return NULL; }
-
-    struct addrinfo hints, *res;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    char ps[8];
-    snprintf(ps, sizeof(ps), "%d", w->port);
-    if (getaddrinfo(w->peer_addr, ps, &hints, &res) != 0)
-        LOG_NULL("filesvc", "worker %d: getaddrinfo failed for %s", w->id, w->peer_addr);
-    int wfd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (wfd < 0) { freeaddrinfo(res); LOG_NULL("filesvc", "worker %d: socket() failed: %s", w->id, strerror(errno)); }
-
-    /* Timeouts prevent hung connections from blocking the whole download */
-    struct timeval tv;
-    tv.tv_sec = 120; /* 2 min per chunk max */
-    tv.tv_usec = 0;
-    setsockopt(wfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(wfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-    if (connect(wfd, res->ai_addr, res->ai_addrlen) < 0) {
-        close(wfd); freeaddrinfo(res); LOG_NULL("filesvc", "worker %d: connect failed: %s", w->id, strerror(errno));
-    }
-    freeaddrinfo(res);
-
-    w->fd = wfd;  /* allow main thread to close on cancel */
+    int wfd = -1;
+    int socket_flags = -1;
+    bool session_initialized = false;
+    uint32_t next_chunk = w->start;
     struct fs_session ws;
+
+    if (w->start >= w->end)
+        goto done;
+
+    wfd = socket(w->peer_sockaddr.ss_family, w->peer_socktype,
+                 w->peer_protocol);
+    if (wfd < 0) {
+        LOG_ERROR("filesvc", "worker %d: socket() failed: %s",
+                  w->id, strerror(errno));
+        goto done;
+    }
+
+    socket_flags = fcntl(wfd, F_GETFL, 0);
+    if (socket_flags < 0 || fcntl(wfd, F_SETFL, socket_flags | O_NONBLOCK) < 0) {
+        LOG_ERROR("filesvc", "worker %d: nonblocking setup failed: %s",
+                  w->id, strerror(errno));
+        goto done;
+    }
+    if (!range_worker_socket_publish(w, wfd)) {
+        LOG_WARN("filesvc", "worker %d: cancelled before connect", w->id);
+        goto done;
+    }
+
+    int connect_rc = connect(wfd, (struct sockaddr *)&w->peer_sockaddr,
+                             w->peer_sockaddr_len);
+    if (connect_rc < 0 && errno != EINPROGRESS && errno != EWOULDBLOCK) {
+        LOG_ERROR("filesvc", "worker %d: connect failed: %s",
+                  w->id, strerror(errno));
+        goto done;
+    }
+    if (connect_rc < 0) {
+        int64_t connect_start = platform_time_monotonic_ms();
+        if (connect_start <= 0 ||
+            connect_start > INT64_MAX - FS_WORKER_CONNECT_BUDGET_MS) {
+            LOG_ERROR("filesvc", "worker %d: invalid connect clock start=%lld",
+                      w->id, (long long)connect_start);
+            goto done;
+        }
+        int64_t connect_deadline = connect_start + FS_WORKER_CONNECT_BUDGET_MS;
+        for (;;) {
+            if (atomic_load_explicit(&w->cancel, memory_order_acquire)) {
+                LOG_WARN("filesvc", "worker %d: cancelled during connect",
+                         w->id);
+                goto done;
+            }
+            int64_t connect_now = platform_time_monotonic_ms();
+            if (connect_now < connect_start) {
+                LOG_ERROR("filesvc", "worker %d: connect clock reversed",
+                          w->id);
+                goto done;
+            }
+            int64_t remaining = connect_deadline - connect_now;
+            if (remaining <= 0) {
+                LOG_ERROR("filesvc", "worker %d: connect timed out after %lldms",
+                          w->id, (long long)FS_WORKER_CONNECT_BUDGET_MS);
+                goto done;
+            }
+            int wait_ms = remaining < FS_WORKER_CONNECT_POLL_MS
+                ? (int)remaining : FS_WORKER_CONNECT_POLL_MS;
+            struct pollfd pfd = {.fd = wfd, .events = POLLOUT, .revents = 0};
+            int poll_rc = poll(&pfd, 1, wait_ms);
+            if (poll_rc < 0 && errno == EINTR)
+                continue;
+            if (poll_rc < 0) {
+                LOG_ERROR("filesvc", "worker %d: connect poll failed: %s",
+                          w->id, strerror(errno));
+                goto done;
+            }
+            if (poll_rc == 0)
+                continue;
+            if ((pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0 ||
+                !connect_socket_check(wfd)) {
+                LOG_ERROR("filesvc", "worker %d: asynchronous connect failed",
+                          w->id);
+                goto done;
+            }
+            break;
+        }
+    }
+    if (atomic_load_explicit(&w->cancel, memory_order_acquire)) {
+        LOG_WARN("filesvc", "worker %d: cancelled after connect", w->id);
+        goto done;
+    }
+    if (fcntl(wfd, F_SETFL, socket_flags) < 0) {
+        LOG_ERROR("filesvc", "worker %d: blocking restore failed: %s",
+                  w->id, strerror(errno));
+        goto done;
+    }
+
+    /* The record layer has tighter absolute deadlines; socket timeouts remain
+     * a final kernel-level backstop for handshake and challenge traffic. */
+    struct timeval tv = {.tv_sec = 120, .tv_usec = 0};
+    if (setsockopt(wfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0 ||
+        setsockopt(wfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) < 0) {
+        LOG_ERROR("filesvc", "worker %d: socket timeout setup failed: %s",
+                  w->id, strerror(errno));
+        goto done;
+    }
+
     fs_session_init(&ws, wfd);
-    if (!fs_handshake(&ws, w->utxo_root, true)) { fs_session_cleanup(&ws); close(wfd); LOG_NULL("filesvc", "worker %d: handshake failed", w->id); }
+    session_initialized = true;
+    if (!fs_handshake(&ws, w->utxo_root, true)) {
+        LOG_ERROR("filesvc", "worker %d: handshake failed", w->id);
+        goto done;
+    }
 
     /* Solve the server's PoW challenge before requesting the range. */
     uint8_t solution[FS_POW_SOLUTION_SIZE];
     if (!fs_client_solve_challenge(&ws, solution)) {
-        fs_session_cleanup(&ws); close(wfd); LOG_NULL("filesvc", "worker %d: PoW challenge/solve failed", w->id);
+        LOG_ERROR("filesvc", "worker %d: PoW challenge/solve failed", w->id);
+        goto done;
     }
 
     /* Send the gated range request: [48-byte solution]["RNG"][start][end]. */
@@ -1852,21 +2120,24 @@ static void *range_worker_fn(void *arg)
     rng[FS_POW_SOLUTION_SIZE + 6] = (uint8_t)(w->end >> 8);
     rng[FS_POW_SOLUTION_SIZE + 7] = 0;
     if (!fs_send_frame(&ws, FS_REQUEST, rng, sizeof(rng))) {
-        fs_session_cleanup(&ws); close(wfd); LOG_NULL("filesvc", "worker %d: range request send failed", w->id);
+        LOG_ERROR("filesvc", "worker %d: range request send failed", w->id);
+        goto done;
     }
 
     for (uint32_t i = w->start; i < w->end; i++) {
-        if (atomic_load(&w->cancel)) { fs_session_cleanup(&ws); close(wfd); LOG_NULL("filesvc", "worker %d: cancelled", w->id); }
+        if (atomic_load_explicit(&w->cancel, memory_order_acquire)) {
+            LOG_WARN("filesvc", "worker %d: cancelled", w->id);
+            goto done;
+        }
         uint8_t *buf = NULL;
         uint32_t sz = 0;
         if (!fs_recv_chunk_fast(&ws, &buf, &sz, w->chunks[i].sha3)) {
             fprintf(stderr,  // obs-ok:file-transfer-peer-failure
                     "worker %d: chunk %u/%u recv failed\n",
                     w->id, i, w->end);
-            /* A partial raw record desynchronizes this byte stream.  Count
-             * the unreceived tail and let retry open a fresh connection. */
-            atomic_fetch_add(&w->chunks_fail, w->end - i);
-            break;
+            /* A partial raw record desynchronizes this byte stream.  Cleanup
+             * counts the unreceived tail; retry opens a fresh connection. */
+            goto done;
         }
 
         /* Write to the correct file at the correct offset.
@@ -1894,6 +2165,8 @@ static void *range_worker_fn(void *arg)
                         sz, written, errno);
                 close(bfd);
                 free(buf);
+                atomic_fetch_add(&w->chunks_fail, 1);
+                next_chunk = i + 1;
                 continue; /* skip — don't count failed write as progress */
             }
             /* Sync to disk so crash can't lose this chunk */
@@ -1908,10 +2181,16 @@ static void *range_worker_fn(void *arg)
         }
         free(buf);
         atomic_fetch_add(&w->bytes, sz);
+        next_chunk = i + 1;
     }
-    fs_session_cleanup(&ws);
-    close(wfd);
-    atomic_store(&w->done, true);
+
+done:
+    if (next_chunk < w->end)
+        atomic_fetch_add(&w->chunks_fail, w->end - next_chunk);
+    if (session_initialized)
+        fs_session_cleanup(&ws);
+    range_worker_socket_close(w, wfd);
+    atomic_store_explicit(&w->done, true, memory_order_release);
     return NULL;
 }
 
@@ -1932,6 +2211,17 @@ bool fs_client_sync(const char *peer_addr, uint16_t port,
 
     if (getaddrinfo(peer_addr, port_str, &hints, &res) != 0)
         LOG_FAIL("filesvc", "client_sync: resolve failed for %s", peer_addr);
+
+    struct sockaddr_storage resolved_peer;
+    if (res->ai_addrlen > sizeof(resolved_peer)) {
+        freeaddrinfo(res);
+        LOG_FAIL("filesvc", "client_sync: resolved address is too large");
+    }
+    memset(&resolved_peer, 0, sizeof(resolved_peer));
+    memcpy(&resolved_peer, res->ai_addr, res->ai_addrlen);
+    socklen_t resolved_peer_len = res->ai_addrlen;
+    int resolved_peer_socktype = res->ai_socktype;
+    int resolved_peer_protocol = res->ai_protocol;
 
     int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
     if (fd < 0) { freeaddrinfo(res); LOG_FAIL("filesvc", "client_sync: socket() failed: %s", strerror(errno)); }
@@ -2143,10 +2433,20 @@ bool fs_client_sync(const char *peer_addr, uint16_t port,
     /* Launch 8 parallel workers, each downloads a range of chunks */
     #define FS_NWORKERS 8
     uint32_t remaining = num_chunks - skip_chunks;
+    if (remaining == 0) {
+        printf("file_service: all %u chunks already verified on disk\n",
+               num_chunks);
+        return true;
+    }
     uint32_t per = (remaining + FS_NWORKERS - 1) / FS_NWORKERS;
     struct range_worker workers[FS_NWORKERS];
     pthread_t wthreads[FS_NWORKERS];
     int nworkers = 0;
+    pthread_mutex_t worker_fd_mutex;
+    int worker_mutex_rc = pthread_mutex_init(&worker_fd_mutex, NULL);
+    if (worker_mutex_rc != 0)
+        LOG_FAIL("filesvc", "client_sync: worker fd mutex init failed: %s",
+                 strerror(worker_mutex_rc));
 
     for (int w = 0; w < FS_NWORKERS; w++) {
         uint32_t ws = skip_chunks + (uint32_t)w * per;
@@ -2154,18 +2454,17 @@ bool fs_client_sync(const char *peer_addr, uint16_t port,
         if (we > num_chunks) we = num_chunks;
         if (ws >= num_chunks) break;
 
-        char *wp = zcl_malloc(600, "file_worker_path");
-        snprintf(wp, 600, "%s/blocks/.part%d", datadir, w);
-
-        workers[nworkers].peer_addr = peer_addr;
-        workers[nworkers].port = port;
+        workers[nworkers].peer_sockaddr = resolved_peer;
+        workers[nworkers].peer_sockaddr_len = resolved_peer_len;
+        workers[nworkers].peer_socktype = resolved_peer_socktype;
+        workers[nworkers].peer_protocol = resolved_peer_protocol;
         memcpy(workers[nworkers].utxo_root, utxo_root, 32);
         workers[nworkers].chunks = chunks;
         workers[nworkers].start = ws;
         workers[nworkers].end = we;
-        workers[nworkers].out_path = wp;
         workers[nworkers].datadir = datadir;
         workers[nworkers].id = w;
+        workers[nworkers].fd_mutex = &worker_fd_mutex;
         workers[nworkers].fd = -1;
         atomic_store(&workers[nworkers].done, false);
         atomic_store(&workers[nworkers].cancel, false);
@@ -2175,16 +2474,12 @@ bool fs_client_sync(const char *peer_addr, uint16_t port,
         /* raw-pthread-ok: short-burst-joined-immediately (per-download workers) */
         if (pthread_create(&wthreads[nworkers], NULL,
                            range_worker_fn, &workers[nworkers]) != 0) {
-            free(wp);
             for (int j = 0; j < nworkers; j++) {
-                atomic_store(&workers[j].cancel, true);
-                if (workers[j].fd >= 0)
-                    shutdown(workers[j].fd, SHUT_RDWR);
+                range_worker_cancel(&workers[j]);
             }
-            for (int j = 0; j < nworkers; j++) {
+            for (int j = 0; j < nworkers; j++)
                 pthread_join(wthreads[j], NULL);
-                free((void *)workers[j].out_path);
-            }
+            pthread_mutex_destroy(&worker_fd_mutex);
             LOG_FAIL("filesvc", "client_sync: failed to start download worker %d", w);
         }
         nworkers++;
@@ -2214,8 +2509,7 @@ bool fs_client_sync(const char *peer_addr, uint16_t port,
                    "workers\n", (long long)el);
             for (int w = 0; w < nworkers; w++) {
                 if (!atomic_load(&workers[w].done)) {
-                    atomic_store(&workers[w].cancel, true);
-                    shutdown(workers[w].fd, SHUT_RDWR);
+                    range_worker_cancel(&workers[w]);
                 }
             }
             break;
@@ -2232,8 +2526,7 @@ bool fs_client_sync(const char *peer_addr, uint16_t port,
                                 "file_service: worker %d stalled "
                                 "at %llu bytes, cancelling\n",
                                 w, (unsigned long long)wb);
-                        atomic_store(&workers[w].cancel, true);
-                        shutdown(workers[w].fd, SHUT_RDWR);
+                        range_worker_cancel(&workers[w]);
                         stall_counts[w] = 0;
                     }
                 } else {
@@ -2258,10 +2551,7 @@ bool fs_client_sync(const char *peer_addr, uint16_t port,
 
     for (int w = 0; w < nworkers; w++)
         pthread_join(wthreads[w], NULL);
-
-    /* Workers wrote directly to blk%05d.dat files — no concatenation needed */
-    for (int w = 0; w < nworkers; w++)
-        free((void *)workers[w].out_path);
+    pthread_mutex_destroy(&worker_fd_mutex);
 
     uint64_t bytes_done = 0;
     uint32_t total_ok = 0, total_fail = 0;
