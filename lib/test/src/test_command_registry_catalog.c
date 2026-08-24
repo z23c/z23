@@ -2876,7 +2876,7 @@ static int test_zses_invite_leaves(void)
         json_set_object(&input);
         (void)json_push_kv_str(
             &input, "endpoint",
-            "abcdeabcdeabcdeabcdeabcdeabcdeabcdeabcdeabcdeabcdeabcd.onion:8055");
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion:8055");
         (void)json_push_kv_int(&input, "expires", 2000000000);
         struct zcl_command_request request = {
             .spec = create, .input = &input, .view = "normal",
@@ -2925,6 +2925,57 @@ static int test_zses_invite_leaves(void)
         zcl_native_handle_zses_invite_create(&request, &reply);
         ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_INVALID);
         ASSERT_STR_EQ(reply.error.code, "CLEARNET_FORBIDDEN");
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+        PASS();
+    }
+
+    TEST("create refuses DNS and quasi-onion endpoints under onion posture") {
+        const struct zcl_command_spec *create =
+            find_spec(reg, "zses.invite.create");
+        ASSERT(create);
+        const char *bad[] = {
+            "example.com:8055",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion.evil:8055",
+        };
+        for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            struct json_value input;
+            json_init(&input);
+            json_set_object(&input);
+            (void)json_push_kv_str(&input, "endpoint", bad[i]);
+            struct zcl_command_request request = {
+                .spec = create, .input = &input, .view = "normal",
+            };
+            struct zcl_command_reply reply;
+            zcl_command_reply_init(&reply, create->output_schema);
+            zcl_native_handle_zses_invite_create(&request, &reply);
+            ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_INVALID);
+            ASSERT_STR_EQ(reply.error.code, "NO_ONION_ENDPOINT");
+            zcl_command_reply_free(&reply);
+            json_free(&input);
+        }
+        PASS();
+    }
+
+    TEST("create permits DNS only under explicit clearnet posture") {
+        const struct zcl_command_spec *create =
+            find_spec(reg, "zses.invite.create");
+        ASSERT(create);
+        struct json_value input;
+        json_init(&input);
+        json_set_object(&input);
+        (void)json_push_kv_str(&input, "endpoint", "example.com:8055");
+        (void)json_push_kv_str(&input, "posture", "clearnet");
+        (void)json_push_kv_int(&input, "expires", 2000000000);
+        struct zcl_command_request request = {
+            .spec = create, .input = &input, .view = "normal",
+        };
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, create->output_schema);
+        zcl_native_handle_zses_invite_create(&request, &reply);
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "posture")),
+                      "clearnet");
         zcl_command_reply_free(&reply);
         json_free(&input);
         PASS();

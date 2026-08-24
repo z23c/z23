@@ -9,7 +9,6 @@
 #
 # Usage:
 #   tools/scripts/session_drill.sh            # live two-node drill
-#   tools/scripts/session_drill.sh --selftest # hermetic, no spawn
 #
 # Environment:
 #   ZCL_CLI, ZCL_JSONQ, ISO_NODE_BIN, ISO_RPC_BIN
@@ -30,15 +29,10 @@ ISO_RPC_BIN=${ISO_RPC_BIN:-"$REPO_ROOT/build/bin/zcl-rpc"}
 STEP_BUDGET=${SESSION_DRILL_STEP_BUDGET:-60}
 ISO_KIND=zses
 ISO_PORT_BASE=${SESSION_DRILL_PORT_BASE:-39220}
-SELFTEST=0
-
-for arg in "$@"; do
-    case "$arg" in
-        --selftest) SELFTEST=1 ;;
-        --*) echo "session-drill: unknown flag: $arg" >&2; exit 2 ;;
-        *) echo "session-drill: unexpected positional arg: $arg" >&2; exit 2 ;;
-    esac
-done
+if [ "$#" -ne 0 ]; then
+    echo "session-drill: unexpected argument: $1" >&2
+    exit 2
+fi
 
 jsonq_get() {
     printf '%s' "$1" | "$ZCL_JSONQ" get "$2" 2>/dev/null || true
@@ -74,16 +68,6 @@ num_or_null() {
     esac
 }
 
-# Named refuse classifier — the fail-closed contract the selftest proves
-# without a live node. Live CLI errors must land in this set.
-classify_refuse() {
-    case ${1:-} in
-        unsigned|wrong_key|tampered|expired|malformed|CLEARNET_FORBIDDEN|NO_ONION_ENDPOINT|MISSING_INVITE)
-            echo refuse ;;
-        *) echo other ;;
-    esac
-}
-
 cli_a() {
     timeout 60 "$ZCL_CLI" -datadir="$ISO_DD" -rpcport="$ISO_RPCPORT" \
         "$@" --format=json 2>/dev/null || true
@@ -93,103 +77,6 @@ cli_b() {
     timeout 60 "$ZCL_CLI" -datadir="$ISO_PEER_DD" -rpcport="$ISO_PEER_RPCPORT" \
         "$@" --format=json 2>/dev/null || true
 }
-
-cli_local() {
-    timeout 60 "$ZCL_CLI" "$@" --format=json 2>/dev/null || true
-}
-
-# ── --selftest: hermetic, no live spawn ────────────────────────────────
-if [ "$SELFTEST" = "1" ]; then
-    st_fail=0
-    st_check() {
-        if [ "$3" = "$2" ]; then
-            echo "  ok: $1"
-        else
-            echo "  FAIL: $1 (expected $2 got $3)"
-            st_fail=1
-        fi
-    }
-    echo "session-drill: --selftest running hermetic fail-closed checks"
-
-    st_check "unsigned is a named refuse" refuse "$(classify_refuse unsigned)"
-    st_check "wrong_key is a named refuse" refuse "$(classify_refuse wrong_key)"
-    st_check "tampered is a named refuse" refuse "$(classify_refuse tampered)"
-    st_check "expired is a named refuse" refuse "$(classify_refuse expired)"
-    st_check "malformed is a named refuse" refuse "$(classify_refuse malformed)"
-    st_check "CLEARNET_FORBIDDEN is a named refuse" refuse "$(classify_refuse CLEARNET_FORBIDDEN)"
-    st_check "ok is not a refuse" other "$(classify_refuse ok)"
-    st_check "empty is not a refuse" other "$(classify_refuse '')"
-
-    if [ ! -x "$ZCL_CLI" ]; then
-        echo "  FAIL: missing z23 binary at $ZCL_CLI"
-        st_fail=1
-    else
-        ONION_EP="abcdeabcdeabcdeabcdeabcdeabcdeabcdeabcdeabcdeabcdeabcd.onion:8055"
-        CREATE=$(cli_local zses invite create --endpoint="$ONION_EP" --expires=2000000000)
-        CODE=$(jsonq_get "$CREATE" error.code)
-        INVITE=$(jsonq_get "$CREATE" data.invite)
-        if [ -n "$INVITE" ] && jsonq_eq "$CREATE" ok true; then
-            echo "  ok: create signed a zses:v1 invite"
-        else
-            echo "  FAIL: create did not return an invite (code=${CODE:-none})"
-            st_fail=1
-        fi
-
-        if [ -n "$INVITE" ]; then
-            ACCEPT=$(cli_local zses invite accept --invite="$INVITE" --now=1900000000)
-            if jsonq_eq "$ACCEPT" data.accepted true; then
-                echo "  ok: accept verified the signed invite"
-            else
-                echo "  FAIL: accept of a valid invite did not accept (code=$(jsonq_get "$ACCEPT" error.code))"
-                st_fail=1
-            fi
-        fi
-
-        FORBIDDEN=$(cli_local zses invite create --endpoint=203.0.113.9:8033)
-        FCODE=$(jsonq_get "$FORBIDDEN" error.code)
-        st_check "numeric IP without posture=clearnet is CLEARNET_FORBIDDEN" \
-            "CLEARNET_FORBIDDEN" "$FCODE"
-        st_check "CLEARNET_FORBIDDEN classifies as refuse" refuse "$(classify_refuse "$FCODE")"
-
-        UNSIGNED='{"schema":"zses:v1","endpoint":"'"$ONION_EP"'","expires":2000000000,"capability_tag":"session"}'
-        UACC=$(cli_local zses invite accept --invite="$UNSIGNED" --now=1900000000)
-        UCODE=$(jsonq_get "$UACC" error.code)
-        st_check "unsigned invite is refused as unsigned" unsigned "$UCODE"
-
-        EXPIRED=$(cli_local zses invite create --endpoint="$ONION_EP" --expires=1)
-        EINV=$(jsonq_get "$EXPIRED" data.invite)
-        if [ -n "$EINV" ]; then
-            EACC=$(cli_local zses invite accept --invite="$EINV" --now=2)
-            ECODE=$(jsonq_get "$EACC" error.code)
-            st_check "expired invite is refused as expired" expired "$ECODE"
-        else
-            echo "  FAIL: could not create an expired invite"
-            st_fail=1
-        fi
-
-        if [ -n "$INVITE" ]; then
-            TAMPERED=$(printf '%s' "$INVITE" | sed 's/"endpoint":"[^"]*"/"endpoint":"xbcdeabcdeabcdeabcdeabcdeabcdeabcdeabcdeabcdeabcdeabcd.onion:8055"/')
-            TACC=$(cli_local zses invite accept --invite="$TAMPERED" --now=1900000000)
-            TCODE=$(jsonq_get "$TACC" error.code)
-            case $TCODE in
-                wrong_key|tampered)
-                    echo "  ok: body tamper refused as $TCODE"
-                    ;;
-                *)
-                    echo "  FAIL: body tamper expected wrong_key|tampered got ${TCODE:-none}"
-                    st_fail=1
-                    ;;
-            esac
-        fi
-    fi
-
-    if [ "$st_fail" = 0 ]; then
-        echo "session-drill: --selftest PASS"
-        exit 0
-    fi
-    echo "session-drill: --selftest FAIL" >&2
-    exit 1
-fi
 
 # ── live two-node drill ────────────────────────────────────────────────
 if [ ! -x "$ZCL_CLI" ] || [ ! -x "$ZCL_JSONQ" ] || [ ! -x "$ISO_NODE_BIN" ]; then

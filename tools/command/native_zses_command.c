@@ -92,7 +92,14 @@ void zcl_native_handle_zses_invite_create(
             zses_fail(reply, "BAD_ENDPOINT", "endpoint too long", "endpoint");
             return;
         }
-        memcpy(picked, endpoint_in, strlen(endpoint_in) + 1);
+        const char *onion = strcmp(p, "clearnet") == 0 ? NULL : endpoint_in;
+        const char *clearnet = strcmp(p, "clearnet") == 0 ? endpoint_in : NULL;
+        if (!zses_pick_endpoint(p, onion, clearnet, picked, sizeof(picked),
+                                &refuse)) {
+            zses_fail(reply, "NO_ONION_ENDPOINT", zses_refuse_name(refuse),
+                      "endpoint");
+            return;
+        }
     } else {
         zcl_native_bridge_ensure_rpc();
         char onion[ZSES_ENDPOINT_MAX + 1];

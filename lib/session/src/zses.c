@@ -10,6 +10,7 @@
 #include "core/hash.h"
 #include "core/uint256.h"
 #include "json/json.h"
+#include "net/onion_peer_merge.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -32,7 +33,35 @@ const char *zses_refuse_name(enum zses_refuse code)
 
 bool zses_looks_onion(const char *endpoint)
 {
-    return endpoint && strstr(endpoint, ".onion") != NULL;
+    if (!endpoint || !endpoint[0])
+        return false;
+
+    const char *colon = strchr(endpoint, ':');
+    size_t host_len = colon ? (size_t)(colon - endpoint) : strlen(endpoint);
+    if (host_len != 62)
+        return false;
+
+    if (colon) {
+        const char *p = colon + 1;
+        unsigned port = 0;
+        if (!p[0])
+            return false;
+        while (*p) {
+            if (*p < '0' || *p > '9')
+                return false;
+            port = port * 10u + (unsigned)(*p - '0');
+            if (port > 65535u)
+                return false;
+            p++;
+        }
+        if (port == 0)
+            return false;
+    }
+
+    char host[63];
+    memcpy(host, endpoint, host_len);
+    host[host_len] = '\0';
+    return onion_hostname_valid(host);
 }
 
 bool zses_looks_clearnet(const char *endpoint)
@@ -77,7 +106,7 @@ bool zses_pick_endpoint(const char *posture, const char *onion,
         return true;
     }
     /* Default onion: never emit a numeric IP. */
-    if (!onion || !onion[0] || !zses_looks_onion(onion)) {
+    if (!onion || !onion[0]) {
         if (refuse)
             *refuse = ZSES_REFUSE_NO_ONION;
         LOG_FAIL("zses", "pick_endpoint: onion posture needs an onion endpoint");
@@ -86,6 +115,11 @@ bool zses_pick_endpoint(const char *posture, const char *onion,
         if (refuse)
             *refuse = ZSES_REFUSE_CLEARNET_FORBIDDEN;
         LOG_FAIL("zses", "pick_endpoint: refused clearnet under onion posture");
+    }
+    if (!zses_looks_onion(onion)) {
+        if (refuse)
+            *refuse = ZSES_REFUSE_NO_ONION;
+        LOG_FAIL("zses", "pick_endpoint: onion posture needs an exact v3 onion endpoint");
     }
     if (strlen(onion) >= out_cap) {
         if (refuse)

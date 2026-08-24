@@ -12,6 +12,10 @@
 
 #include <string.h>
 
+#define ZSES_TEST_ONION \
+    "aaaaaaaa" "aaaaaaaa" "aaaaaaaa" "aaaaaaaa" \
+    "aaaaaaaa" "aaaaaaaa" "aaaaaaaa" ".onion"
+
 static void zses_fill_body(struct zses_invite *inv, const char *endpoint,
                            int64_t expires, const char *tag)
 {
@@ -25,11 +29,41 @@ int test_zses(void)
 {
     int failures = 0;
 
+    TEST("onion endpoint shape is exact and port is bounded") {
+        ASSERT(zses_looks_onion(ZSES_TEST_ONION));
+        ASSERT(zses_looks_onion(ZSES_TEST_ONION ":1"));
+        ASSERT(zses_looks_onion(ZSES_TEST_ONION ":8055"));
+        ASSERT(zses_looks_onion(ZSES_TEST_ONION ":65535"));
+        ASSERT(!zses_looks_onion("example.com:8055"));
+        ASSERT(!zses_looks_onion("x.onion"));
+        ASSERT(!zses_looks_onion("abcdefghijklmnop.onion:8055"));
+        ASSERT(!zses_looks_onion(
+            "Aaaaaaaa" "aaaaaaaa" "aaaaaaaa" "aaaaaaaa"
+            "aaaaaaaa" "aaaaaaaa" "aaaaaaaa" ".onion:8055"));
+        ASSERT(!zses_looks_onion(ZSES_TEST_ONION ".evil:8055"));
+        ASSERT(!zses_looks_onion(ZSES_TEST_ONION ":"));
+        ASSERT(!zses_looks_onion(ZSES_TEST_ONION ":0"));
+        ASSERT(!zses_looks_onion(ZSES_TEST_ONION ":65536"));
+        ASSERT(!zses_looks_onion(ZSES_TEST_ONION ":abc"));
+        ASSERT(!zses_looks_onion(ZSES_TEST_ONION ":8055junk"));
+
+        char out[ZSES_ENDPOINT_MAX + 1];
+        enum zses_refuse r = ZSES_OK;
+        ASSERT(!zses_pick_endpoint("onion", "example.com:8055", NULL,
+                                   out, sizeof(out), &r));
+        ASSERT_EQ(r, ZSES_REFUSE_NO_ONION);
+        ASSERT(!zses_pick_endpoint("onion",
+                                   ZSES_TEST_ONION ".evil:8055", NULL,
+                                   out, sizeof(out), &r));
+        ASSERT_EQ(r, ZSES_REFUSE_NO_ONION);
+        PASS();
+    }
+
     TEST("onion posture never emits a numeric IP") {
         char out[ZSES_ENDPOINT_MAX + 1];
         enum zses_refuse r = ZSES_OK;
         ASSERT(zses_pick_endpoint("onion",
-                                  "abcdeabcdeabcdeabcdeabcdeabcdeabcdeabcdeabcdeabcdeabcd.onion:8055",
+                                  ZSES_TEST_ONION ":8055",
                                   "203.0.113.9:8033", out, sizeof(out), &r));
         ASSERT_EQ(r, ZSES_OK);
         ASSERT(zses_looks_onion(out));
@@ -44,7 +78,7 @@ int test_zses(void)
         char out[ZSES_ENDPOINT_MAX + 1];
         enum zses_refuse r = ZSES_OK;
         ASSERT(zses_pick_endpoint("clearnet",
-                                  "abcdeabcdeabcdeabcdeabcdeabcdeabcdeabcdeabcdeabcdeabcd.onion:8055",
+                                  ZSES_TEST_ONION ":8055",
                                   "203.0.113.9:8033", out, sizeof(out), &r));
         ASSERT(zses_looks_clearnet(out));
         PASS();
