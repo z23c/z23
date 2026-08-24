@@ -29,6 +29,10 @@ bool utxo_root_ladder_verify_against_store(
 
     bool any_divergence = false;
     size_t written = 0;
+    size_t compared = 0;   /* COVERAGE: rungs actually FOUND + byte-compared
+                            * this call — independent of any_divergence
+                            * (AGREEMENT). See the header: never let one
+                            * dimension stand in for the other. */
 
     for (size_t i = 0; i < g_utxo_root_ladder_count; i++) {
         const struct utxo_root_ladder_entry *rung = &g_utxo_root_ladder[i];
@@ -40,6 +44,7 @@ bool utxo_root_ladder_verify_against_store(
         bool found = false;
         if (coins_kv_boundary_root_get(db, rung->height, local_root, &found) &&
             found) {
+            compared++;
             if (memcmp(local_root, rung->utxo_root, 32) == 0) {
                 status = UTXO_ROOT_LADDER_VERIFY_MATCH;
             } else {
@@ -58,6 +63,17 @@ bool utxo_root_ladder_verify_against_store(
             out_results[written].status = status;
             written++;
         }
+    }
+
+    /* Broadcast the coverage pair onto every WRITTEN entry (computed over
+     * the FULL g_utxo_root_ladder_count loop above, not clamped by
+     * out_cap/written — coverage must stay accurate even when the caller's
+     * buffer is smaller than the ladder, same as any_divergence already
+     * is). Any consumer inspecting one entry or the whole array sees the
+     * same compared/total pair. */
+    for (size_t j = 0; j < written; j++) {
+        out_results[j].compared = compared;
+        out_results[j].total = g_utxo_root_ladder_count;
     }
 
     if (out_count) *out_count = written;

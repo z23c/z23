@@ -43,18 +43,52 @@ enum utxo_root_ladder_verify_status {
 struct utxo_root_ladder_verify_result {
     int32_t height;
     enum utxo_root_ladder_verify_status status;
+
+    /* COVERAGE pair (NEW) — IDENTICAL on every entry this call writes
+     * (read it off any entry, e.g. out_results[0]). This is a SEPARATE
+     * dimension from `status` above and must never be collapsed into it,
+     * or replaced by it, by any caller:
+     *
+     *   AGREEMENT (per-entry `status`, the function's bool return, the
+     *   tripwire's HEALTHY-vs-MISMATCH) answers "did anything we actually
+     *   looked at DISAGREE with the locked ladder?"
+     *
+     *   COVERAGE (compared/total, here) answers "how much of the ladder
+     *   did we actually LOOK AT?"
+     *
+     * "0 of 1 compared, no divergence observed" and "1 of 1 compared, no
+     * divergence observed" are different facts that both currently
+     * satisfy AGREEMENT == no-divergence; only COVERAGE tells them apart,
+     * and only the second one licenses a HEALTHY verdict — see
+     * utxo_root_ladder_tripwire_report()'s UNVERIFIED state, which is
+     * derived from compared==0 without discarding either dimension. */
+    size_t compared;  /* rungs FOUND in this node's own boundary-root
+                       * store and actually byte-compared this call
+                       * (status MATCH or DIVERGENT). A NOT_YET_REACHED
+                       * rung is examined but not compared, so it does
+                       * NOT count here. */
+    size_t total;     /* rungs examined this call — g_utxo_root_ladder_
+                       * count at call time, regardless of out_cap or how
+                       * many entries actually got written. */
 };
 
 /* Compares every rung in g_utxo_root_ladder against `db`'s OWN
  * coins_kv_boundary_root_get() at that height. Writes up to `out_cap`
  * per-rung results into `out_results` (in ladder order) and the number
  * written into `*out_count`. `out_results`/`out_count` may be NULL if the
- * caller only wants the aggregate verdict.
+ * caller only wants the aggregate verdict — in that case the coverage
+ * pair is not observable this call (it lives on the written entries); a
+ * caller that needs it must pass a real `out_results` buffer.
  *
  * Returns false iff at least one rung is DIVERGENT (a real mismatch —
  * refuse to treat this as healthy). NOT_YET_REACHED rungs never cause a
- * false return; they are normal, not an error. Returns false (and logs)
- * on a NULL `db`. */
+ * false return; they are normal, not an error — but they also do not
+ * bump `compared`, so a run where EVERY rung is NOT_YET_REACHED returns
+ * true (no disagreement) with `compared == 0` on every written entry.
+ * That is coverage, not agreement: true-with-compared==0 must never be
+ * read by a caller as "verified healthy" (see
+ * utxo_root_ladder_tripwire_report()). Returns false (and logs) on a
+ * NULL `db`. */
 bool utxo_root_ladder_verify_against_store(
         struct sqlite3 *db,
         struct utxo_root_ladder_verify_result *out_results, size_t out_cap,

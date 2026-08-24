@@ -8,6 +8,16 @@
  * parity guard — never moves chain_linkage_hold's accept/reject gate either
  * way (see test_sha3_windows.c:173-207 for the sibling proof this mirrors).
  *
+ * Also proves the COVERAGE fix: AGREEMENT (no rung diverged) and COVERAGE
+ * (how many rungs were actually found + byte-compared) are independent
+ * dimensions, and a verdict with compared==0 must read UNVERIFIED, never
+ * HEALTHY — the vacuous-pass shape the shipped ladder (count==1, its one
+ * rung absent from a fresh/lagging node's own boundary-root store) hit
+ * before this fix. The "fail-arm" section below mirrors the OLD (pre-fix)
+ * `divergent == 0 => HEALTHY` logic locally and proves it WOULD have
+ * reported healthy on that exact shape, then proves the real function does
+ * not.
+ *
  * The tripwire's header is internal to app/jobs/src (not on the test
  * include path by design — same convention as test_sha3_windows.c), so
  * mirror the enum + declare the entry points directly. Kept in lockstep
@@ -30,8 +40,9 @@
 #include <string.h>
 
 enum utxo_root_ladder_tripwire_result {
-    UTXO_ROOT_LADDER_TRIPWIRE_HEALTHY  = 0,
-    UTXO_ROOT_LADDER_TRIPWIRE_MISMATCH = 1,
+    UTXO_ROOT_LADDER_TRIPWIRE_HEALTHY    = 0,
+    UTXO_ROOT_LADDER_TRIPWIRE_MISMATCH   = 1,
+    UTXO_ROOT_LADDER_TRIPWIRE_UNVERIFIED = 2,
 };
 extern enum utxo_root_ladder_tripwire_result
 utxo_root_ladder_tripwire_report(struct sqlite3 *db,
@@ -263,27 +274,39 @@ int test_utxo_root_ladder_tripwire(void)
 
     printf("\n=== test_utxo_root_ladder_tripwire ===\n");
 
-    /* report() on an empty/NULL result set: HEALTHY, no blocker. */
-    printf("utxo_root_ladder_tripwire: report() is silent on an empty result "
-          "set... ");
+    /* report() on an empty/NULL result set: nothing was examined, so this
+     * is UNVERIFIED (no blocker) — NOT HEALTHY. This is one of the two
+     * named defects this lane closes (the other is verify_against_store()
+     * mapping an absent rung to a non-divergence): a NULL/empty results
+     * set previously read HEALTHY here, which is a vacuous pass by
+     * construction (zero rungs were ever compared). */
+    printf("utxo_root_ladder_tripwire: report() is UNVERIFIED (not HEALTHY) "
+          "on an empty result set... ");
     {
         blocker_clear(TRIPWIRE_BLOCKER_ID);
         enum utxo_root_ladder_tripwire_result rc =
             utxo_root_ladder_tripwire_report(NULL, NULL, 0);
-        if (rc == UTXO_ROOT_LADDER_TRIPWIRE_HEALTHY &&
+        if (rc == UTXO_ROOT_LADDER_TRIPWIRE_UNVERIFIED &&
+            rc != UTXO_ROOT_LADDER_TRIPWIRE_HEALTHY &&
             !blocker_exists(TRIPWIRE_BLOCKER_ID)) printf("OK\n");
         else { printf("FAIL (rc=%d)\n", (int)rc); failures++; }
     }
 
-    /* Every rung MATCH or NOT_YET_REACHED: SILENT — normal daily operation
-     * for most nodes most of the time. */
-    printf("utxo_root_ladder_tripwire: report() is SILENT when healthy "
-          "(MATCH/NOT_YET_REACHED only)... ");
+    /* At least one rung genuinely FOUND + compared (compared > 0) and none
+     * diverged: SILENT HEALTHY — normal daily operation for most nodes
+     * most of the time. COVERAGE (compared/total) is set explicitly here
+     * to the real facts of this fixture (1 of 2 rungs actually reachable)
+     * — AGREEMENT and COVERAGE are independent fields; this test would
+     * have been WRONG to leave compared/total defaulted to zero, since
+     * that shape is exactly the one that must read UNVERIFIED (proven
+     * below). */
+    printf("utxo_root_ladder_tripwire: report() is SILENT/HEALTHY when >=1 "
+          "rung is genuinely compared and none diverged... ");
     {
         blocker_clear(TRIPWIRE_BLOCKER_ID);
         struct utxo_root_ladder_verify_result results[2] = {
-            { 100000, UTXO_ROOT_LADDER_VERIFY_MATCH },
-            { 200000, UTXO_ROOT_LADDER_VERIFY_NOT_YET_REACHED },
+            { 100000, UTXO_ROOT_LADDER_VERIFY_MATCH, .compared = 1, .total = 2 },
+            { 200000, UTXO_ROOT_LADDER_VERIFY_NOT_YET_REACHED, .compared = 1, .total = 2 },
         };
         enum utxo_root_ladder_tripwire_result rc =
             utxo_root_ladder_tripwire_report(NULL, results, 2);
@@ -291,6 +314,94 @@ int test_utxo_root_ladder_tripwire(void)
             !blocker_exists(TRIPWIRE_BLOCKER_ID)) printf("OK\n");
         else { printf("FAIL (rc=%d blocker=%d)\n", (int)rc,
                       (int)blocker_exists(TRIPWIRE_BLOCKER_ID)); failures++; }
+    }
+
+    /* THE FAIL-ARM: a result set where COVERAGE is zero (every examined
+     * rung is NOT_YET_REACHED, compared==0) must report UNVERIFIED, never
+     * HEALTHY — even though AGREEMENT alone (divergent==0) looks identical
+     * to a real pass. Prove the OLD (pre-fix) logic — `divergent == 0 =>
+     * HEALTHY`, with no compared/coverage check at all — WOULD have
+     * reported healthy on this exact shape, then prove the real function
+     * does not. This is the precise shape the shipped ladder hits today:
+     * g_utxo_root_ladder_count == 1 and that one rung's height is absent
+     * from a lagging/fresh node's own boundary-root store. */
+    printf("utxo_root_ladder_tripwire: FAIL-ARM — compared==0 is UNVERIFIED, "
+          "never HEALTHY (old logic would have said HEALTHY here)... ");
+    {
+        struct utxo_root_ladder_verify_result vacuous[1] = {
+            { 3056758, UTXO_ROOT_LADDER_VERIFY_NOT_YET_REACHED, .compared = 0, .total = 1 },
+        };
+
+        /* Mirror of the OLD (pre-fix) utxo_root_ladder_tripwire_report()
+         * decision — literally the `if (divergent == 0) return HEALTHY;`
+         * shape from before this fix, with NO compared/coverage check.
+         * This is here to PROVE the vacuous-pass bug was real on this
+         * exact input, not to exercise production code. */
+        size_t old_divergent = 0;
+        for (size_t i = 0; i < 1; i++)
+            if (vacuous[i].status == UTXO_ROOT_LADDER_VERIFY_DIVERGENT)
+                old_divergent++;
+        bool old_logic_says_healthy = (old_divergent == 0);
+
+        blocker_clear(TRIPWIRE_BLOCKER_ID);
+        enum utxo_root_ladder_tripwire_result rc =
+            utxo_root_ladder_tripwire_report(NULL, vacuous, 1);
+
+        bool ok = old_logic_says_healthy &&               /* fail-arm proof */
+                  rc == UTXO_ROOT_LADDER_TRIPWIRE_UNVERIFIED &&
+                  rc != UTXO_ROOT_LADDER_TRIPWIRE_HEALTHY &&
+                  !blocker_exists(TRIPWIRE_BLOCKER_ID);
+        if (ok) printf("OK (old logic would say healthy=%d, new rc=%d)\n",
+                      (int)old_logic_says_healthy, (int)rc);
+        else { printf("FAIL (old_logic_healthy=%d rc=%d blocker=%d)\n",
+                      (int)old_logic_says_healthy, (int)rc,
+                      (int)blocker_exists(TRIPWIRE_BLOCKER_ID)); failures++; }
+    }
+
+    /* THE REAL SHIPPED LADDER, end-to-end: run the actual
+     * utxo_root_ladder_verify_against_store() (not a synthetic literal)
+     * against a FRESH progress store that has never recorded a boundary
+     * root at the compiled rung's height, then feed its real output into
+     * report(). Skips cleanly if the compiled table is empty (count==0,
+     * e.g. a placeholder regeneration) — mirrors this file's other
+     * count-gated sections. */
+    printf("utxo_root_ladder_tripwire: real shipped ladder against a FRESH "
+          "store reports UNVERIFIED end-to-end... ");
+    if (g_utxo_root_ladder_count > 0) {
+        char dir[256];
+        test_make_tmpdir(dir, sizeof(dir), "utxo_ladder_real_fresh", "main");
+        ASSERT(progress_store_open(dir));
+        sqlite3 *db = progress_store_db();
+        ASSERT(db != NULL);
+        ASSERT(coins_kv_ensure_schema(db));
+
+        struct utxo_root_ladder_verify_result results[256];
+        size_t n = 0;
+        bool verify_ok = utxo_root_ladder_verify_against_store(
+                db, results, sizeof(results) / sizeof(results[0]), &n);
+
+        blocker_clear(TRIPWIRE_BLOCKER_ID);
+        enum utxo_root_ladder_tripwire_result rc =
+            utxo_root_ladder_tripwire_report(db, results, n);
+
+        bool coverage_zero = n > 0 && results[0].compared == 0 &&
+                             results[0].total == g_utxo_root_ladder_count;
+        bool ok = verify_ok &&           /* no DIVERGENT — agreement holds */
+                  coverage_zero &&       /* but nothing was actually compared */
+                  rc == UTXO_ROOT_LADDER_TRIPWIRE_UNVERIFIED &&
+                  rc != UTXO_ROOT_LADDER_TRIPWIRE_HEALTHY &&
+                  !blocker_exists(TRIPWIRE_BLOCKER_ID);
+
+        progress_store_close();
+        test_rm_rf_recursive(dir);
+        if (ok) printf("OK (compared=%zu total=%zu rc=%d)\n",
+                      n > 0 ? results[0].compared : (size_t)0,
+                      n > 0 ? results[0].total : (size_t)0, (int)rc);
+        else { printf("FAIL (verify_ok=%d coverage_zero=%d rc=%d n=%zu)\n",
+                      (int)verify_ok, (int)coverage_zero, (int)rc, n);
+               failures++; }
+    } else {
+        printf("SKIP (no compiled ladder rungs)\n");
     }
 
     /* A synthetic DIVERGENT rung FIRES: by DEFAULT (fail-closed) an ESCALATING
@@ -302,8 +413,8 @@ int test_utxo_root_ladder_tripwire(void)
     {
         blocker_clear(TRIPWIRE_BLOCKER_ID);
         struct utxo_root_ladder_verify_result results[2] = {
-            { 100000, UTXO_ROOT_LADDER_VERIFY_MATCH },
-            { 3056758, UTXO_ROOT_LADDER_VERIFY_DIVERGENT },
+            { 100000, UTXO_ROOT_LADDER_VERIFY_MATCH, .compared = 2, .total = 2 },
+            { 3056758, UTXO_ROOT_LADDER_VERIFY_DIVERGENT, .compared = 2, .total = 2 },
         };
         enum utxo_root_ladder_tripwire_result rc =
             utxo_root_ladder_tripwire_report(NULL, results, 2);
@@ -414,28 +525,48 @@ int test_utxo_root_ladder_tripwire(void)
      * fold (an ok=0 utxo_apply_log verdict), NEVER through the chain_linkage
      * accept/reject latch — the latch that would refuse a tip move. Assert it
      * is byte-identical (no HOLD, refuse_from == -1) whether report() saw a
-     * healthy or a divergent verdict, so consensus accept/reject stays
-     * bit-identical to zclassicd — mirrors test_sha3_windows.c:173-207's proof
-     * for the sibling tripwire. (db NULL: no cap write; the blocker still fires
-     * to prove it is the ONLY consensus-visible side effect here — a plain
-     * blocker, not a linkage HOLD.) */
+     * healthy, UNVERIFIED, or a divergent verdict, so consensus accept/reject
+     * stays bit-identical to zclassicd — mirrors test_sha3_windows.c:173-207's
+     * proof for the sibling tripwire. UNVERIFIED is included here
+     * DELIBERATELY: it is a NEW return value added by this fix, and it must
+     * be proven E13-neutral exactly like the two values that already
+     * existed — a reporting-only addition must never gain a side effect the
+     * others don't have. (db NULL: no cap write; the blocker still fires on
+     * the divergent case to prove it is the ONLY consensus-visible side
+     * effect there — a plain blocker, not a linkage HOLD.) */
     printf("utxo_root_ladder_tripwire: does NOT touch the chain_linkage "
-          "accept/reject latch (consensus parity)... ");
+          "accept/reject latch (consensus parity, incl. UNVERIFIED)... ");
     {
         bool ok = true;
         bool hold_before = chain_linkage_hold_active();
         int  refuse_before = chain_linkage_hold_refuse_from();
 
         struct utxo_root_ladder_verify_result healthy[1] = {
-            { 100000, UTXO_ROOT_LADDER_VERIFY_MATCH },
+            { 100000, UTXO_ROOT_LADDER_VERIFY_MATCH, .compared = 1, .total = 1 },
         };
         blocker_clear(TRIPWIRE_BLOCKER_ID);
-        (void)utxo_root_ladder_tripwire_report(NULL, healthy, 1);
+        enum utxo_root_ladder_tripwire_result rc_healthy =
+            utxo_root_ladder_tripwire_report(NULL, healthy, 1);
         ok = ok && (chain_linkage_hold_active() == hold_before);
         ok = ok && (chain_linkage_hold_refuse_from() == refuse_before);
+        ok = ok && (rc_healthy == UTXO_ROOT_LADDER_TRIPWIRE_HEALTHY);
+        ok = ok && !blocker_exists(TRIPWIRE_BLOCKER_ID);
+
+        /* NEW: the UNVERIFIED case (compared==0) — same latch, same "no
+         * side effect" expectation as HEALTHY. */
+        struct utxo_root_ladder_verify_result unverified[1] = {
+            { 100000, UTXO_ROOT_LADDER_VERIFY_NOT_YET_REACHED, .compared = 0, .total = 1 },
+        };
+        blocker_clear(TRIPWIRE_BLOCKER_ID);
+        enum utxo_root_ladder_tripwire_result rc_unverified =
+            utxo_root_ladder_tripwire_report(NULL, unverified, 1);
+        ok = ok && (chain_linkage_hold_active() == hold_before);
+        ok = ok && (chain_linkage_hold_refuse_from() == refuse_before);
+        ok = ok && (rc_unverified == UTXO_ROOT_LADDER_TRIPWIRE_UNVERIFIED);
+        ok = ok && !blocker_exists(TRIPWIRE_BLOCKER_ID);
 
         struct utxo_root_ladder_verify_result divergent[1] = {
-            { 100000, UTXO_ROOT_LADDER_VERIFY_DIVERGENT },
+            { 100000, UTXO_ROOT_LADDER_VERIFY_DIVERGENT, .compared = 1, .total = 1 },
         };
         blocker_clear(TRIPWIRE_BLOCKER_ID);
         (void)utxo_root_ladder_tripwire_report(NULL, divergent, 1);
@@ -446,10 +577,11 @@ int test_utxo_root_ladder_tripwire(void)
 
         if (ok) printf("OK\n");
         else { printf("FAIL (hold_before=%d refuse_before=%d hold_now=%d "
-                      "refuse_now=%d)\n",
+                      "refuse_now=%d rc_healthy=%d rc_unverified=%d)\n",
                       (int)hold_before, refuse_before,
                       (int)chain_linkage_hold_active(),
-                      chain_linkage_hold_refuse_from()); failures++; }
+                      chain_linkage_hold_refuse_from(),
+                      (int)rc_healthy, (int)rc_unverified); failures++; }
     }
 
     /* Fail-closed cap: prove the default stops advance (caps H*), the
