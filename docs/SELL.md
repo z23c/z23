@@ -18,6 +18,11 @@ and never prints keys or addresses.
 The wallet default fee is the min-relay floor: **100 zat** (`0.00000100 ZCL`).
 That is the lowest amount this node's mempool and miners will accept.
 
+`z23 yardsale guide` lists six layers, each with a user story, the plan
+command, the focused test group, and the expected proof (`simnet_confirmed`
+today). Pay ZCL, Sapling, 1/1 ZSLP, yardsale swap, onion-market delivery, and
+C23 package fetch are the same journey at different abstraction levels.
+
 ## The journeys
 
 | Want | Plan (no broadcast) | Commit |

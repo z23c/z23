@@ -176,6 +176,19 @@ static int test_yardsale_guide(void)
                       "confirm:true") != NULL);
         ASSERT(strcmp(json_get_str(json_get(&reply.data, "docs")),
                       "docs/SELL.md") == 0);
+        const struct json_value *layers = json_get(&reply.data, "layers");
+        ASSERT(layers != NULL && layers->type == JSON_ARR);
+        ASSERT(layers->num_children == 6);
+        ASSERT(strcmp(json_get_str(json_get(json_at(layers, 0), "id")),
+                      "pay_zcl") == 0);
+        ASSERT(strcmp(json_get_str(json_get(json_at(layers, 1), "id")),
+                      "sapling") == 0);
+        ASSERT(strcmp(json_get_str(json_get(json_at(layers, 5), "id")),
+                      "zcode_package") == 0);
+        ASSERT(strstr(json_get_str(json_get(json_at(layers, 0), "user_story")),
+                      "ZCL") != NULL);
+        ASSERT(strcmp(json_get_str(json_get(json_at(layers, 4), "test_group")),
+                      "test_file_market") == 0);
         zcl_command_reply_free(&reply);
         json_free(&input);
         PASS();
