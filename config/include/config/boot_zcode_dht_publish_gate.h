@@ -25,7 +25,8 @@ struct json_value;
  * identically. Returns true when the publish may proceed; on refusal result
  * carries the exact named code (NO_PACKAGE_STORE, PACKAGE_INDEX_UNAVAILABLE,
  * UNKNOWN_PACKAGE, RELEASE_UNREADABLE, REPRODUCTION_NOT_EVIDENCED,
- * TRANSPORT_ROOT_NOT_CARRIER, TRANSPORT_ROOT_NOT_BOUND) in the
+ * TRANSPORT_ROOT_NOT_CARRIER, TRANSPORT_IMPORT_REFUSED,
+ * TRANSPORT_ROOT_NOT_BOUND) in the
  * ok/code/message shape every RPC refusal in this layer uses. */
 bool boot_zcode_dht_package_pointer_publish_gate(
     const struct vcs_zcode_dht_publish_spec *spec, struct json_value *result);

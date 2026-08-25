@@ -22,6 +22,7 @@
 #include "vcs/package_build.h"
 #include "vcs/package_manifest.h"
 #include "vcs/package_prepare.h"
+#include "vcs/package_public_shape.h"
 #include "vcs/package_release.h"
 #include "vcs/package_store.h"
 #include "vcs/package_transport.h"
@@ -3132,6 +3133,23 @@ static bool gate_store_transport(const char *source_dir,
   return ok;
 }
 
+/* Leave a complete carrier readable while making only its later inner-recipe
+ * admission fail. A directory at the exact recipe path makes the atomic file
+ * replacement refuse deterministically, including when the test runs as
+ * root; public-shape classification does not consult this inner index. */
+static bool gate_block_recipe_admission(const char *zcode_dir,
+                                        const uint8_t recipe_root[32],
+                                        char path[4400]) {
+  char recipe_hex[65];
+  zcl_hex_encode(recipe_root, 32, recipe_hex);
+  int n = snprintf(path, 4400, "%s/recipes/%s", zcode_dir, recipe_hex);
+  return n > 0 && n < 4400 && unlink(path) == 0 && mkdir(path, 0700) == 0;
+}
+
+static bool gate_unblock_recipe_admission(const char *path) {
+  return rmdir(path) == 0;
+}
+
 static const char *gate_code(const struct json_value *result) {
   const struct json_value *code = json_get(result, "code");
   return code && code->type == JSON_STR ? json_get_str(code) : "";
@@ -3265,6 +3283,32 @@ static int test_publish_reproduction_gate(void) {
     ASSERT(gate_receipt(&rb, real_pkg, real_recipe, "15.1.0", 0x40));
     ASSERT(gate_store_receipt(receipts_dir, &ra));
     ASSERT(gate_store_receipt(receipts_dir, &rb));
+
+    /* Classification proves the carrier closure, not that this node can
+     * persist the inner metadata during the consumer-equivalent import.
+     * Keep those refusals distinct from a successful import that names a
+     * different package root, because the operator remedies differ. */
+    char blocked_recipe[4400];
+    ASSERT(gate_block_recipe_admission(zcode_dir, real_recipe,
+                                       blocked_recipe));
+    struct vcs_package_public_verdict blocked_verdict;
+    enum vcs_package_public_shape blocked_shape =
+        vcs_package_public_shape_classify(vcs_package_store_global(),
+                                          carrier_root, &blocked_verdict);
+    json_init(&input);
+    gate_publish_roots(&input, "plan", "pointer", "zclassic23.package",
+                       real_pkg, carrier_root);
+    bool blocked_rpc = gate_rpc(&table, "zcode_dht_status", &input, &result);
+    char blocked_code[64];
+    (void)snprintf(blocked_code, sizeof(blocked_code), "%s",
+                   blocked_rpc ? gate_code(&result) : "RPC_FAILED");
+    json_free(&result);
+    json_free(&input);
+    bool unblocked = gate_unblock_recipe_admission(blocked_recipe);
+    ASSERT(unblocked);
+    ASSERT_EQ(blocked_shape, VCS_PACKAGE_PUBLIC_TRANSPORT);
+    ASSERT_STR_EQ(blocked_code, "TRANSPORT_IMPORT_REFUSED");
+
     json_init(&input);
     gate_publish_roots(&input, "plan", "pointer", "zclassic23.package",
                        real_pkg, carrier_root);

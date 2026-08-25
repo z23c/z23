@@ -156,15 +156,31 @@ bool boot_zcode_dht_package_pointer_publish_gate(
     return false;
   }
   /* Shape is right; prove the binding. import is the consumer's own
-   * fetch-time step: it re-derives the whole closure from stored bytes
-   * (re-admitting the canonical inner objects, a no-op CAS on the publisher
-   * that already holds them) and reports the inner package root it
-   * reconstructs — that root must be the one this pointer names, or the
-   * record binds a name to somebody else's carrier. */
+   * fetch-time step: it re-derives the whole closure from stored bytes and
+   * re-admits the canonical inner metadata. Those writes are idempotent for
+   * a publisher that already holds the package, but plan can still refuse
+   * here if its store cannot admit them. A successful import reports the
+   * inner package root it reconstructed; that root must be the one this
+   * pointer names, or the record binds a name to somebody else's carrier. */
   struct vcs_package_transport_import import;
-  if (vcs_package_transport_import(store, spec->transport_root, &import) !=
-          VCS_PACKAGE_TRANSPORT_OK ||
-      memcmp(import.package_root, spec->semantic_root, 32) != 0) {
+  enum vcs_package_transport_result imported =
+      vcs_package_transport_import(store, spec->transport_root, &import);
+  if (imported != VCS_PACKAGE_TRANSPORT_OK) {
+    const char *detail = vcs_package_transport_result_string(imported);
+    LOG_ERROR("net.zcode_dht",
+              "publish gate: transport root %s import refused: %s",
+              root_hex, detail);
+    char message[256];
+    (void)snprintf(message, sizeof(message),
+                   "the transport carrier is complete but this node could"
+                   " not admit its inner package metadata (%s); inspect the"
+                   " local package transport log and repair the store before"
+                   " publishing",
+                   detail);
+    gate_error(result, "TRANSPORT_IMPORT_REFUSED", message);
+    return false;
+  }
+  if (memcmp(import.package_root, spec->semantic_root, 32) != 0) {
     LOG_ERROR("net.zcode_dht",
               "publish gate: transport root %s does not reconstruct to the"
               " named package root",
