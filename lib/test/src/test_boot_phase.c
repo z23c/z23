@@ -349,6 +349,50 @@ int test_boot_phase(void)
             !boot_step_fail("nothing open"));
     }
 
+    /* ── An extension must be EARNED ──────────────────────────────
+     * The stall reporter re-arms every budget window, so any state that
+     * extends the systemd start deadline extends it FOREVER. That is
+     * fine for a step that is moving and fatal for one that is not:
+     * TimeoutStartSec stops being reachable, and Restart=always — the
+     * only thing that recovers a wedged boot — never gets its turn.
+     *
+     * These pin the rule at the seam boot_step_emit() actually consults,
+     * so a future edit that makes STUCK "just a bit more patient" has to
+     * delete an assertion rather than silently reintroduce the hang. */
+    {
+        BP_CHECK("budget: SLOW earns more start budget (moving, just slow)",
+            boot_step_state_earns_budget(BOOT_STEP_SLOW));
+        BP_CHECK("budget: RUNNING earns more start budget",
+            boot_step_state_earns_budget(BOOT_STEP_RUNNING));
+        BP_CHECK("budget: STUCK earns NOTHING — zero progress must not "
+                 "push the deadline out",
+            !boot_step_state_earns_budget(BOOT_STEP_STUCK));
+        BP_CHECK("budget: FAILED earns nothing",
+            !boot_step_state_earns_budget(BOOT_STEP_FAILED));
+        BP_CHECK("budget: DONE earns nothing",
+            !boot_step_state_earns_budget(BOOT_STEP_DONE));
+
+        /* Composed with the classifier: the ONLY way to reach the
+         * non-earning STUCK state is genuine zero progress, so an honest
+         * slow box (any delta > 0) always keeps its budget no matter how
+         * far over budget it runs. */
+        BP_CHECK("budget: over budget WITH progress stays earning",
+            boot_step_state_earns_budget(
+                boot_step_classify(3600000, BOOT_STEP_BUDGET_MS, 1)));
+        BP_CHECK("budget: over budget with ZERO progress stops earning",
+            !boot_step_state_earns_budget(
+                boot_step_classify(3600000, BOOT_STEP_BUDGET_MS, 0)));
+        BP_CHECK("budget: under budget always earning",
+            boot_step_state_earns_budget(
+                boot_step_classify(1, BOOT_STEP_BUDGET_MS, 0)));
+        /* A non-earning state is still REPORTED — telemetry is
+         * unconditional, only the budget is conditional. */
+        BP_CHECK("budget: STUCK still reports as telemetry, not failure",
+            strcmp(boot_step_state_verdict(BOOT_STEP_STUCK),
+                   "telemetry") == 0 &&
+            !boot_step_state_is_failure(BOOT_STEP_STUCK));
+    }
+
     /* Restore for any subsequent tests in this process. */
     boot_stage_reset_for_testing();
     return failures;

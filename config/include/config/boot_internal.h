@@ -448,6 +448,14 @@ struct boot_ready_legs {
 
 /* Pure: true only when every leg is confirmed. NULL is not confirmed. */
 bool boot_ready_legs_all_confirmed(const struct boot_ready_legs *l);
+/* Pure: how many legs are confirmed, 0..4. NULL counts as 0.
+ *
+ * Holding READY extends the systemd start deadline, and an extension has
+ * to be EARNED by an observable change or the deadline never arrives.
+ * This count is the earning signal, and it is used MONOTONICALLY (only a
+ * new high-water mark buys time) so a leg that flaps yes/no/yes cannot
+ * push the deadline out forever by oscillating. */
+unsigned boot_ready_legs_confirmed_count(const struct boot_ready_legs *l);
 /* Pure: render the legs as `descriptor=yes listener=no ...` into `out`. */
 void boot_ready_legs_describe(const struct boot_ready_legs *l,
                               char *out, size_t cap);

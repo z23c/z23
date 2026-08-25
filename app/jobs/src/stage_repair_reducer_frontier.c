@@ -163,8 +163,38 @@ static bool reconcile_block_index_flags(
     char datadir[2048];
     GetDataDir(true, datadir, sizeof(datadir));
 
-    zcl_mutex_lock(&ms->cs_main);  /* LOCK ORDER: cs_main OUTER, */
-    progress_store_tx_lock();      /* progress store INNER (stage_repair.h). */
+    /* LOCK ORDER: cs_main OUTER, progress store INNER — but the inner one
+     * is a TRYLOCK, and that is the whole point.
+     *
+     * The tree holds BOTH nesting orders and cannot be made to hold only
+     * one:
+     *   - Before tip_finalize_stage_init registers the height authority,
+     *     active_chain_height() reads the progress store internally
+     *     (lib/validation/src/chainstate.c), so every cs_main holder is
+     *     cs_main -> progress. That boot window is where the observed
+     *     startup wedge lived.
+     *   - After it, is_authoritative() returns true unconditionally
+     *     (app/jobs/src/tip_finalize_stage.c) so that edge disappears —
+     *     while the reducer drive runs the opposite way for the whole
+     *     process lifetime: STAGE_DRAIN_IMPL (app/jobs/include/jobs/job.h)
+     *     holds progress across every step, and body_fetch's step takes
+     *     cs_main inside it (app/jobs/src/body_fetch_stage.c).
+     * A repair that BLOCKS on the second lock therefore closes a cycle
+     * against one phase or the other no matter which order it picks.
+     *
+     * So it blocks on neither. This is a self-heal observer on the
+     * condition-engine thread, not a correctness-critical path, and the
+     * codebase already names this shape: progress_store_tx_trylock() is
+     * the "non-blocking counterpart for observational surfaces", used the
+     * same way by app/conditions/src/reducer_drive_watchdog.c. Losing the
+     * race costs one tick — the condition re-runs — and it can never
+     * wait-for a lock while holding cs_main, so it cannot be half of a
+     * deadlock. Skipped, not blocked. */
+    zcl_mutex_lock(&ms->cs_main);
+    if (!progress_store_tx_trylock()) {
+        zcl_mutex_unlock(&ms->cs_main);
+        return false;
+    }
 
     struct rf_evidence_stmts es;
     if (!rf_evidence_stmts_prepare(db, &es)) {
@@ -459,6 +489,15 @@ void stage_reducer_frontier_reset_detect_memo_for_testing(void)
      * refuses a fresh fixture's legitimate rewind. */
     memset(&g_tip_finalize_rewind_churn_memo, 0,
            sizeof(g_tip_finalize_rewind_churn_memo));
+}
+
+bool stage_reducer_frontier_reconcile_flags_for_testing(
+    sqlite3 *db,
+    struct main_state *ms,
+    bool apply,
+    struct stage_reducer_frontier_reconcile_result *out)
+{
+    return reconcile_block_index_flags(db, ms, apply, out);
 }
 #endif
 

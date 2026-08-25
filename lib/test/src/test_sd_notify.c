@@ -494,5 +494,48 @@ int test_sd_notify(void)
         }
     }
 
+    /* ── The READY hold buys time only when a leg newly confirms ──
+     * Holding READY extends TimeoutStartSec. Extending on every pet
+     * period made the deadline unreachable, so a leg that could never
+     * confirm — a failed bind, a pump that never started — hung the boot
+     * forever instead of letting Restart=always retry it.
+     *
+     * The hold uses this count as a MONOTONIC high-water mark, so the
+     * property that matters is that it rises only with real
+     * confirmations. A leg that flaps yes/no/yes returns to a count it
+     * has already reached and therefore buys nothing. */
+    {
+        struct boot_ready_legs l = {0};
+        SDN_CHECK("legs: none confirmed counts 0",
+                  boot_ready_legs_confirmed_count(&l) == 0);
+        SDN_CHECK("legs: NULL counts 0",
+                  boot_ready_legs_confirmed_count(NULL) == 0);
+
+        l.descriptor = true;
+        SDN_CHECK("legs: one confirmed counts 1",
+                  boot_ready_legs_confirmed_count(&l) == 1);
+        l.listener = true;
+        l.pump = true;
+        SDN_CHECK("legs: three confirmed counts 3",
+                  boot_ready_legs_confirmed_count(&l) == 3);
+        SDN_CHECK("legs: three confirmed is NOT all confirmed",
+                  !boot_ready_legs_all_confirmed(&l));
+
+        l.sweep = true;
+        SDN_CHECK("legs: four confirmed counts 4 and is all confirmed",
+                  boot_ready_legs_confirmed_count(&l) == 4 &&
+                  boot_ready_legs_all_confirmed(&l));
+
+        /* Flap: a leg dropping and returning revisits a count already
+         * seen, so a high-water mark cannot be pushed up by oscillation. */
+        unsigned high = boot_ready_legs_confirmed_count(&l);
+        l.pump = false;
+        unsigned dipped = boot_ready_legs_confirmed_count(&l);
+        l.pump = true;
+        unsigned back = boot_ready_legs_confirmed_count(&l);
+        SDN_CHECK("legs: a flapping leg never exceeds its previous high",
+                  dipped < high && back == high);
+    }
+
     return failures;
 }
