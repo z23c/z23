@@ -4,6 +4,7 @@
  */
 /* Purpose: select and pin crash-loop-safe executable slots without shell IO. */
 
+#define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
 
 #include "platform/os_binary_slots.h"
@@ -21,6 +22,12 @@
 
 #ifndef O_NOFOLLOW
 #error "os_binary_slots requires O_NOFOLLOW"
+#endif
+
+#ifdef O_PATH
+#define SLOT_TRAVERSE_FLAGS (O_PATH | O_DIRECTORY | O_CLOEXEC)
+#else
+#define SLOT_TRAVERSE_FLAGS (O_RDONLY | O_DIRECTORY | O_CLOEXEC)
 #endif
 
 #define SLOT_LOCK_BASENAME ".binary-slots.lock"
@@ -95,8 +102,7 @@ bool os_binary_slots_ensure_directory(const char *slots_dir,
 
     char copy[OS_BINARY_SLOTS_PATH_MAX];
     (void)snprintf(copy, sizeof(copy), "%s", slots_dir);
-    int dirfd = open(copy[0] == '/' ? "/" : ".",
-                     O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    int dirfd = open(copy[0] == '/' ? "/" : ".", SLOT_TRAVERSE_FLAGS);
     if (dirfd < 0) {
         set_error(error, error_size, "open path root failed: %s", strerror(errno));
         return false;
@@ -118,8 +124,7 @@ bool os_binary_slots_ensure_directory(const char *slots_dir,
             close(dirfd);
             return false;
         }
-        int next = openat(dirfd, part,
-                          O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        int next = openat(dirfd, part, SLOT_TRAVERSE_FLAGS | O_NOFOLLOW);
         if (next < 0) {
             set_error(error, error_size, "openat directory %s failed: %s",
                       part, strerror(errno));

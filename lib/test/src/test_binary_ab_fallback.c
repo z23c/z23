@@ -168,6 +168,24 @@ int test_binary_ab_fallback(void)
     snprintf(lastgood, sizeof(lastgood), "%s/%s", dir, BINARY_AB_LASTGOOD_BASENAME);
     snprintf(cur, sizeof(cur), "%s/current-bin", dir);
 
+#if defined(__linux__)
+    /* systemd ProtectSystem=strict exposes read-only ancestors as searchable
+     * but not readable. The launcher must traverse them without directory
+     * enumeration authority. */
+    {
+        char writable[PATH_MAX], protected_slots[PATH_MAX];
+        snprintf(writable, sizeof(writable), "%s/traverse", dir);
+        snprintf(protected_slots, sizeof(protected_slots), "%s/slots", writable);
+        AB_CHECK("create traversal fixture", mkdir(writable, 0700) == 0);
+        AB_CHECK("make traversal parent execute-only", chmod(dir, 0111) == 0);
+        AB_CHECK("create slots below execute-only ancestor",
+                 os_binary_slots_ensure_directory(protected_slots, NULL, 0));
+        AB_CHECK("restore traversal parent permissions", chmod(dir, 0700) == 0);
+        AB_CHECK("remove traversed slots fixture", rmdir(protected_slots) == 0);
+        AB_CHECK("remove traversal fixture", rmdir(writable) == 0);
+    }
+#endif
+
     /* ── 1. reset_streak overwrites any value with "0\n" ─────────────── */
     {
         AB_CHECK("seed streak file with 7", ab_write_file(streak, "7\n", 0644) == 0);
