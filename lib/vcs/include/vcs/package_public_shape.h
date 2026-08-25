@@ -46,6 +46,19 @@
  *                 inside is genuine, after the bytes arrive.
  *   WORK_CONTEXT  one fixed build action a requester sent to a worker.
  *   WORK_OUTPUT   the action-bound output a worker returned.
+ *   FASTOBJ_CARRIER
+ *                 a zcl.fastobj.v1 object-set carrier: DERIVED
+ *                 compile-cache artifacts, not authored source, and
+ *                 content-addressed end to end. It carries no authorship
+ *                 claim and cannot carry a source tree. The serve-time
+ *                 proof is exactly the consumer's own admit proof
+ *                 (vcs_fastobj_carrier_verify): every entry re-derives —
+ *                 each sidecar re-hashes to the key it is filed under,
+ *                 each object re-hashes to its sidecar's object_sha3 — so
+ *                 a stranger that fetches one re-proves every byte
+ *                 independently before any cache trusts it. It is NOT
+ *                 licensed content and carries no dependency graph, so
+ *                 neither license rule nor closure applies.
  *
  * The two work shapes are admitted because they move between peers that
  * have already accepted each other's SIGNED work frames, and are fetched
@@ -100,6 +113,7 @@ enum vcs_package_public_shape {
     VCS_PACKAGE_PUBLIC_BLOB,         /* one-file bytes-only object */
     VCS_PACKAGE_PUBLIC_WORK_CONTEXT, /* one fixed build action */
     VCS_PACKAGE_PUBLIC_WORK_OUTPUT,  /* action-bound work output */
+    VCS_PACKAGE_PUBLIC_FASTOBJ_CARRIER, /* derived compile-cache objects */
 };
 
 const char *vcs_package_public_shape_string(

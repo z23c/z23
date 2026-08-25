@@ -24,6 +24,22 @@
  *                          tracked package pins (operator path, never
  *                          tier-gated) and reports its pool
  *   zcode package unpin    releases the pin; idempotent
+ *   zcode package fastobj export  a hand-built one-entry cache (key via
+ *                          vcs_fastobj_key, sidecar components hashing to
+ *                          that key, object hashing to the sidecar — a
+ *                          real cache would need a confined worker run)
+ *                          becomes one carrier in the store: deterministic
+ *                          root, tracked + complete, and the honest
+ *                          public-shape verdict (refused /
+ *                          no-verified-release — the carrier is not a
+ *                          licensed shape); a torn pair refuses the whole
+ *                          export
+ *   zcode package fastobj admit   the carrier reconstructs into a fresh
+ *                          cache with byte-identical members; re-export
+ *                          of that cache yields the SAME root (the
+ *                          round-trip); the `root` input alias works;
+ *                          UNKNOWN_PACKAGE / BAD_ROOT / MISSING_CACHE_DIR
+ *                          name their refusals
  *
  * Handlers are called directly with a typed JSON input (the zp_cmd
  * idiom from test_zcode_publish.c) over ./test-tmp datadirs. */
@@ -38,7 +54,10 @@
 
 #include "chain/chainparams.h"
 #include "json/json.h"
+#include "sha3/sha3.h"
 #include "vcs/blob_store.h"
+#include "vcs/fastobj.h"
+#include "vcs/fastobj_carrier.h"
 #include "vcs/package_manifest.h"
 #include "vcs/package_reward.h"
 #include "vcs/package_store.h"
@@ -46,6 +65,7 @@
 #include "vcs/package_swarm_node.h"
 #include "util/safe_alloc.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -952,6 +972,323 @@ static int zf_t_offered_live(void)
     return failures;
 }
 
+/* ── fastobj carrier: the smallest honest cache fixture ─────────────── */
+
+/* One hand-built cache entry, produced through the same authorities the
+ * confined worker uses (vcs_fastobj_key derives the key,
+ * vcs_fastobj_cache_paths places it): the sidecar's key_components hash
+ * to the entry's own filename and the object hashes to the sidecar's
+ * object_sha3. A REAL cache needs a worker run — too heavy for a
+ * command-contract group; this fixture exercises every verify rule the
+ * leaves rely on. */
+struct zf_fastobj_fixture {
+    uint8_t key[32];
+    char key_hex[65];
+    uint8_t object[128];
+    size_t object_len;
+    char sidecar[640];
+    size_t sidecar_len;
+};
+
+static bool zf_fastobj_build(struct zf_fastobj_fixture *fx)
+{
+    memset(fx, 0, sizeof(*fx));
+    uint8_t capsule[32], preproc[32];
+    for (size_t i = 0; i < 32; i++) {
+        capsule[i] = (uint8_t)(0x40u + i);
+        preproc[i] = (uint8_t)(0x80u + i * 3u);
+    }
+    static const char *const argv[] = {"cc", "-c", "-O2", "src/tiny.c",
+                                       NULL};
+    static const char target[] = "x86_64-pc-linux-gnu";
+    static const char profile[] = "standard";
+    if (!vcs_fastobj_key(capsule, target, profile, argv, preproc, fx->key))
+        return false;
+    zcl_hex_encode(fx->key, 32, fx->key_hex);
+    fx->object_len = sizeof(fx->object);
+    for (size_t i = 0; i < fx->object_len; i++)
+        fx->object[i] = (uint8_t)(i * 7u + 0x20u);
+    uint8_t obj_sha[32];
+    zcl_sha3_256(fx->object, fx->object_len, obj_sha);
+    char capsule_hex[65], preproc_hex[65], obj_hex[65];
+    zcl_hex_encode(capsule, 32, capsule_hex);
+    zcl_hex_encode(preproc, 32, preproc_hex);
+    zcl_hex_encode(obj_sha, 32, obj_hex);
+    /* argv in the sidecar must be the same strings the key hashed. */
+    int n = snprintf(
+        fx->sidecar, sizeof(fx->sidecar),
+        "{\"schema\":\"%s\",\"key_components\":{\"capsule_root\":\"%s\","
+        "\"target\":\"%s\",\"profile\":\"%s\",\"argv\":[\"cc\",\"-c\","
+        "\"-O2\",\"src/tiny.c\"],\"preprocessed_sha3\":\"%s\"},"
+        "\"object_sha3\":\"%s\"}",
+        VCS_FASTOBJ_SIDECAR_SCHEMA, capsule_hex, target, profile,
+        preproc_hex, obj_hex);
+    if (n <= 0 || (size_t)n >= sizeof(fx->sidecar))
+        return false;
+    fx->sidecar_len = (size_t)n;
+    return true;
+}
+
+static bool zf_fastobj_mkdir(const char *path)
+{
+    if (mkdir(path, 0700) != 0 && errno != EEXIST)
+        return false;
+    return true;
+}
+
+static bool zf_fastobj_write_pair(const char *cache_dir,
+                                  const struct zf_fastobj_fixture *fx,
+                                  bool sidecar)
+{
+    char obj_path[4096], side_path[4096], shard[4096], objects[4096];
+    if (!vcs_fastobj_cache_paths(cache_dir, fx->key_hex, obj_path,
+                                 sizeof(obj_path), side_path,
+                                 sizeof(side_path)))
+        return false;
+    if (snprintf(shard, sizeof(shard), "%s", obj_path) >=
+            (int)sizeof(shard) ||
+        snprintf(objects, sizeof(objects), "%s/objects", cache_dir) >=
+            (int)sizeof(objects))
+        return false;
+    char *slash = strrchr(shard, '/');
+    if (!slash)
+        return false;
+    *slash = '\0';
+    /* mkdir creates one level; the cache dir itself must come first. */
+    if (!zf_fastobj_mkdir(cache_dir) || !zf_fastobj_mkdir(objects) ||
+        !zf_fastobj_mkdir(shard))
+        return false;
+    FILE *f = fopen(obj_path, "wb");
+    if (!f)
+        return false;
+    bool ok = fwrite(fx->object, 1, fx->object_len, f) == fx->object_len;
+    if (fclose(f) != 0)
+        ok = false;
+    if (!ok || !sidecar)
+        return ok;
+    f = fopen(side_path, "wb");
+    if (!f)
+        return false;
+    ok = fwrite(fx->sidecar, 1, fx->sidecar_len, f) == fx->sidecar_len;
+    if (fclose(f) != 0)
+        ok = false;
+    return ok;
+}
+
+static bool zf_fastobj_read_pair(const char *cache_dir,
+                                 const struct zf_fastobj_fixture *fx,
+                                 uint8_t *obj_out, size_t *obj_len,
+                                 char *side_out, size_t *side_len)
+{
+    char obj_path[4096], side_path[4096];
+    if (!vcs_fastobj_cache_paths(cache_dir, fx->key_hex, obj_path,
+                                 sizeof(obj_path), side_path,
+                                 sizeof(side_path)))
+        return false;
+    FILE *f = fopen(obj_path, "rb");
+    if (!f)
+        return false;
+    size_t got = fread(obj_out, 1, fx->object_len, f);
+    fclose(f);
+    if (got != fx->object_len)
+        return false;
+    *obj_len = got;
+    f = fopen(side_path, "rb");
+    if (!f)
+        return false;
+    got = fread(side_out, 1, fx->sidecar_len, f);
+    fclose(f);
+    if (got != fx->sidecar_len)
+        return false;
+    *side_len = got;
+    return true;
+}
+
+/* ── the fastobj cases ──────────────────────────────────────────────── */
+
+static int zf_t_fastobj_export_admit(void)
+{
+    int failures = 0;
+    TEST("zcode package fastobj export + admit: one entry round-trips") {
+        char dd[1024], dd2[1024], cache[1200], cache2[1200];
+        test_make_tmpdir(dd, sizeof(dd), "zcode_fetch", "fobj-x");
+        test_make_tmpdir(dd2, sizeof(dd2), "zcode_fetch", "fobj-x2");
+        struct zf_fastobj_fixture fx;
+        ASSERT(zf_fastobj_build(&fx));
+        snprintf(cache, sizeof(cache), "%s/cache", dd);
+        snprintf(cache2, sizeof(cache2), "%s/cache2", dd2);
+        ASSERT(zf_fastobj_write_pair(cache, &fx, true));
+
+        /* export: publish-here into the datadir store. */
+        struct zf_cmd c;
+        zf_cmd_init(&c, dd);
+        (void)json_push_kv_str(&c.input, "cache_dir", cache);
+        zcl_native_handle_zcode_package_fastobj_export(&c.request, &c.reply);
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
+        const char *root_hex =
+            json_get_str(json_get(&c.reply.data, "package_root"));
+        ASSERT(root_hex != NULL && strlen(root_hex) == 64u);
+        ASSERT_EQ(json_get_int(json_get(&c.reply.data, "entries")), 1);
+        ASSERT_EQ(json_get_int(json_get(&c.reply.data, "object_bytes")),
+                  (int)fx.object_len);
+        ASSERT_EQ(json_get_int(json_get(&c.reply.data, "files")), 2);
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "carrier_prefix")),
+                      "zcl-fastobj-carrier.v1");
+        /* The public-shape verdict is reported, not asserted away: the
+         * carrier IS its own shape — a fixed directory of derived
+         * objects, admitted only when the consumer-side verify re-derives
+         * every hash from stored bytes — so an honest node serves it. */
+        {
+            const struct json_value *pos =
+                json_get(&c.reply.data, "possession");
+            ASSERT(pos != NULL);
+            ASSERT(json_get_bool(json_get(pos, "tracked")));
+            ASSERT(json_get_bool(json_get(pos, "complete")));
+            ASSERT_STR_EQ(json_get_str(json_get(pos, "public_shape")),
+                          "fastobj-carrier");
+            ASSERT_STR_EQ(json_get_str(json_get(pos, "serve_rule")),
+                          "fastobj-carrier");
+            ASSERT(json_get_bool(json_get(pos, "public_serveable")));
+            ASSERT(json_get_bool(json_get(pos, "would_serve")));
+        }
+        char root_copy[65];
+        snprintf(root_copy, sizeof(root_copy), "%s", root_hex);
+        zf_cmd_free(&c);
+
+        /* Store-side truth, not the reply's word: the root is tracked and
+         * complete in the datadir store the leaf claimed. */
+        {
+            uint8_t root[32];
+            ASSERT(zcl_hex_decode(root_copy, root, 32));
+            struct vcs_package_store *store = vcs_package_store_open(
+                dd, VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
+            ASSERT(store != NULL);
+            struct vcs_package_store_status st;
+            memset(&st, 0, sizeof(st));
+            ASSERT(vcs_package_store_package_status(store, root, &st));
+            ASSERT(st.tracked && st.complete);
+            vcs_package_store_close(store);
+        }
+
+        /* admit: consume-there into a fresh cache the leaf creates. */
+        zf_cmd_init(&c, dd);
+        (void)json_push_kv_str(&c.input, "package_root", root_copy);
+        (void)json_push_kv_str(&c.input, "cache_dir", cache2);
+        zcl_native_handle_zcode_package_fastobj_admit(&c.request, &c.reply);
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_EQ(json_get_int(json_get(&c.reply.data, "entries")), 1);
+        ASSERT_EQ(json_get_int(json_get(&c.reply.data, "object_bytes")),
+                  (int)fx.object_len);
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "package_root")),
+                      root_copy);
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "cache_dir")),
+                      cache2);
+        zf_cmd_free(&c);
+
+        /* The reconstructed cache holds the exact bytes in the worker's
+         * own layout. */
+        {
+            uint8_t obj[sizeof(fx.object)];
+            char side[sizeof(fx.sidecar)];
+            size_t obj_len = 0, side_len = 0;
+            ASSERT(zf_fastobj_read_pair(cache2, &fx, obj, &obj_len, side,
+                                        &side_len));
+            ASSERT(obj_len == fx.object_len &&
+                   memcmp(obj, fx.object, obj_len) == 0);
+            ASSERT(side_len == fx.sidecar_len &&
+                   memcmp(side, fx.sidecar, side_len) == 0);
+        }
+
+        /* The round-trip: exporting the SECOND cache elsewhere must
+         * derive the SAME deterministic root. */
+        zf_cmd_init(&c, dd2);
+        (void)json_push_kv_str(&c.input, "cache_dir", cache2);
+        zcl_native_handle_zcode_package_fastobj_export(&c.request, &c.reply);
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "package_root")),
+                      root_copy);
+        zf_cmd_free(&c);
+
+        /* Idempotent: the same carrier over the identical cache passes,
+         * through the `root` input alias the sibling leaves use. */
+        zf_cmd_init(&c, dd);
+        (void)json_push_kv_str(&c.input, "root", root_copy);
+        (void)json_push_kv_str(&c.input, "cache_dir", cache2);
+        zcl_native_handle_zcode_package_fastobj_admit(&c.request, &c.reply);
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
+        zf_cmd_free(&c);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int zf_t_fastobj_refusals(void)
+{
+    int failures = 0;
+    TEST("zcode package fastobj: named refusals at both leaves") {
+        char dd[1024], torn[1200], good[1200];
+        test_make_tmpdir(dd, sizeof(dd), "zcode_fetch", "fobj-ref");
+        struct zf_fastobj_fixture fx;
+        ASSERT(zf_fastobj_build(&fx));
+        snprintf(torn, sizeof(torn), "%s/torn", dd);
+        snprintf(good, sizeof(good), "%s/good", dd);
+
+        /* A torn pair (object with no sidecar) refuses the WHOLE export
+         * and names the rule. */
+        ASSERT(zf_fastobj_write_pair(torn, &fx, false));
+        struct zf_cmd c;
+        zf_cmd_init(&c, dd);
+        (void)json_push_kv_str(&c.input, "cache_dir", torn);
+        zcl_native_handle_zcode_package_fastobj_export(&c.request, &c.reply);
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_FAILED);
+        ASSERT_STR_EQ(c.reply.error.code, "CARRIER_EXPORT_REFUSED");
+        ASSERT(strstr(c.reply.error.message, "torn") != NULL);
+        zf_cmd_free(&c);
+
+        /* Export without a cache_dir fails closed before any IO. */
+        zf_cmd_init(&c, dd);
+        zcl_native_handle_zcode_package_fastobj_export(&c.request, &c.reply);
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_FAILED);
+        ASSERT_STR_EQ(c.reply.error.code, "MISSING_CACHE_DIR");
+        zf_cmd_free(&c);
+
+        /* Admit refusals: BAD_ROOT and MISSING_CACHE_DIR. */
+        zf_cmd_init(&c, dd);
+        (void)json_push_kv_str(&c.input, "package_root", "not-hex");
+        (void)json_push_kv_str(&c.input, "cache_dir", good);
+        zcl_native_handle_zcode_package_fastobj_admit(&c.request, &c.reply);
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_FAILED);
+        ASSERT_STR_EQ(c.reply.error.code, "BAD_ROOT");
+        zf_cmd_free(&c);
+        zf_cmd_init(&c, dd);
+        (void)json_push_kv_str(&c.input, "package_root", fx.key_hex);
+        zcl_native_handle_zcode_package_fastobj_admit(&c.request, &c.reply);
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_FAILED);
+        ASSERT_STR_EQ(c.reply.error.code, "MISSING_CACHE_DIR");
+        zf_cmd_free(&c);
+
+        /* UNKNOWN_PACKAGE: after a real export creates the store, a root
+         * it never tracked fails by name. */
+        ASSERT(zf_fastobj_write_pair(good, &fx, true));
+        zf_cmd_init(&c, dd);
+        (void)json_push_kv_str(&c.input, "cache_dir", good);
+        zcl_native_handle_zcode_package_fastobj_export(&c.request, &c.reply);
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
+        zf_cmd_free(&c);
+        zf_cmd_init(&c, dd);
+        (void)json_push_kv_str(&c.input, "package_root",
+                               "00000000000000000000000000000000000000000000"
+                               "00000000000000000000");
+        (void)json_push_kv_str(&c.input, "cache_dir", good);
+        zcl_native_handle_zcode_package_fastobj_admit(&c.request, &c.reply);
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_FAILED);
+        ASSERT_STR_EQ(c.reply.error.code, "UNKNOWN_PACKAGE");
+        zf_cmd_free(&c);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_zcode_fetch(void)
 {
     int failures = 0;
@@ -969,5 +1306,7 @@ int test_zcode_fetch(void)
     failures += zf_t_pin_roundtrip();
     failures += zf_t_offered_one_shot();
     failures += zf_t_offered_live();
+    failures += zf_t_fastobj_export_admit();
+    failures += zf_t_fastobj_refusals();
     return failures;
 }

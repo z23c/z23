@@ -8,6 +8,7 @@
 
 #include "base/safe_alloc.h"
 #include "vcs/blob_store.h"
+#include "vcs/fastobj_carrier.h"
 #include "vcs/package_deps.h"
 #include "vcs/package_manifest.h"
 #include "vcs/package_publish.h"
@@ -33,6 +34,10 @@
 #define SHAPE_TRANSPORT_DEPS_PATH \
     VCS_PACKAGE_TRANSPORT_SOURCE_PREFIX VCS_PACKAGE_DEPS_META_PATH
 
+/* The fastobj carrier is one fixed directory of derived objects; every
+ * manifest path must live under it before the carrier proof is run. */
+#define SHAPE_FASTOBJ_DIR VCS_FASTOBJ_CARRIER_DIR "/"
+
 /* The closure walk is bounded by the same node budget the dependency lock
  * resolver uses, so a package that can be locked can also be classified. */
 #define SHAPE_MAX_CLOSURE VCS_PACKAGE_LOCK_MAX_NODES
@@ -48,6 +53,7 @@ const char *vcs_package_public_shape_string(
     case VCS_PACKAGE_PUBLIC_BLOB: return "blob";
     case VCS_PACKAGE_PUBLIC_WORK_CONTEXT: return "work-context";
     case VCS_PACKAGE_PUBLIC_WORK_OUTPUT: return "work-output";
+    case VCS_PACKAGE_PUBLIC_FASTOBJ_CARRIER: return "fastobj-carrier";
     }
     return "unknown";
 }
@@ -356,6 +362,21 @@ static bool shape_is_work_output(const struct vcs_package_manifest *m)
            shape_find(m, VCS_ZCODE_WORK_OUTPUT_BYTES_PATH) >= 0;
 }
 
+/* Every path under the fixed carrier directory picks the carrier branch.
+ * The scan is only the dispatch: the bytes are then judged by the
+ * consumer's own admit proof, so what this node announces is exactly what
+ * a stranger that fetches it re-proves pair by pair. */
+static bool shape_is_fastobj_carrier(const struct vcs_package_manifest *m)
+{
+    if (m->count == 0)
+        return false;
+    for (size_t i = 0; i < m->count; i++)
+        if (strncmp(m->files[i].path, SHAPE_FASTOBJ_DIR,
+                    sizeof(SHAPE_FASTOBJ_DIR) - 1u) != 0)
+            return false;
+    return true;
+}
+
 /* Classify one root on its own bytes. Never consults another package, so
  * the closure walk below can call it per node without recursing. */
 static void shape_eval_local(struct vcs_package_store *store,
@@ -409,6 +430,11 @@ static void shape_eval_local(struct vcs_package_store *store,
         out->shape = VCS_PACKAGE_PUBLIC_WORK_CONTEXT;
     } else if (shape_is_work_output(&m)) {
         out->shape = VCS_PACKAGE_PUBLIC_WORK_OUTPUT;
+    } else if (shape_is_fastobj_carrier(&m)) {
+        char detail[256]; /* verify's refusal text; the rule names the class */
+        out->rule = "fastobj-carrier-unverified";
+        if (vcs_fastobj_carrier_verify(store, root, detail, sizeof(detail)))
+            out->shape = VCS_PACKAGE_PUBLIC_FASTOBJ_CARRIER;
     } else if (!shape_release_signs(store, root, license)) {
         out->rule = "no-verified-release";
     } else {

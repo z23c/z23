@@ -30,6 +30,19 @@
  *   zcode package pin      operator-pin a tracked package (PINS pool,
  *                          never evicted, never tier-gated)
  *   zcode package unpin    release an operator pin
+ *   zcode package fastobj export  turn one VERIFIED zcl.fastobj.v1
+ *                          compile cache into the store as a single
+ *                          ordinary content.v2 carrier (the publish-here
+ *                          half of the wire compile cache): deterministic
+ *                          root, entry/byte counts, and the public-shape
+ *                          verdict so the operator sees whether this node
+ *                          would serve it
+ *   zcode package fastobj admit   re-verify a carrier the store already
+ *                          tracks and reconstruct the compile cache into
+ *                          cache_dir (the consume-there half) in the
+ *                          worker's own store-on-miss format. The swarm
+ *                          fetch (zcode package fetch by root) moves the
+ *                          carrier between nodes — never these leaves.
  *
  * LIVE VS ONE-SHOT (the same discipline as the publish branch): the CAS
  * bytes under <datadir>/zcode are the only package truth. fetch reads
@@ -49,6 +62,7 @@
 
 #include "json/json.h"
 #include "platform/time_compat.h"
+#include "vcs/fastobj_carrier.h"
 #include "vcs/package_index.h"
 #include "vcs/package_public_shape.h"
 #include "vcs/package_reward.h"
@@ -1007,4 +1021,230 @@ void zcl_native_handle_zcode_package_unpin(
     struct zcl_command_reply *reply)
 {
     zw_handle_pin(request, reply, false, "zcode.package.unpin");
+}
+
+/* ── zcode package fastobj export / admit ───────────────────────────── */
+
+/* One shared stats render: the carrier counts are the operator's proof
+ * of what moved, in the same vocabulary the lib reports. */
+static void zw_push_carrier_stats(struct json_value *obj,
+                                  const struct vcs_fastobj_carrier_stats *st)
+{
+    (void)json_push_kv_int(obj, "entries", (int64_t)st->entries);
+    (void)json_push_kv_int(obj, "object_bytes", (int64_t)st->object_bytes);
+    (void)json_push_kv_int(obj, "files", (int64_t)st->files);
+    (void)json_push_kv_int(obj, "chunks", (int64_t)st->chunks);
+    (void)json_push_kv_int(obj, "total_bytes", (int64_t)st->total_bytes);
+}
+
+void zcl_native_handle_zcode_package_fastobj_export(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply)
+{
+    if (!request || !reply)
+        return;
+    static const char *const command = "zcode.package.fastobj.export";
+    char zcode_dir[4400];
+    if (!zw_zcode_dir(request, reply, command, zcode_dir))
+        return;
+    const char *cache_dir = zw_input_str(request->input, "cache_dir");
+    if (!cache_dir || !cache_dir[0]) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "MISSING_CACHE_DIR",
+                               "normalize", false, false,
+                               "cache_dir is required (the zcl.fastobj.v1 "
+                               "compile-cache directory to export)",
+                               command);
+        return;
+    }
+
+    /* The publish-commit store rule: writes go through the resident
+     * handle when it owns exactly this <datadir>/zcode — a running host
+     * answers from that object, not from the bytes on disk, so publishing
+     * through a second handle would leave its engine announcing a root it
+     * cannot send until restart. Any other datadir keeps the one-shot
+     * owned-store path (which may create the store). */
+    struct vcs_package_store *resident = vcs_package_store_global();
+    const char *resident_root = vcs_package_store_root_dir(resident);
+    bool own_store = !(resident_root && strcmp(resident_root, zcode_dir) == 0);
+    struct vcs_package_store *store = own_store
+        ? vcs_package_store_open(zw_datadir(request),
+                                 vcs_package_store_quota_bytes())
+        : resident;
+    if (!store) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "NO_STORE",
+                               "execute", false, false,
+                               "the package store failed to open", zcode_dir);
+        return;
+    }
+
+    uint8_t root[32];
+    struct vcs_fastobj_carrier_stats stats;
+    char err[256] = "";
+    bool ok = vcs_fastobj_carrier_export(cache_dir, store, root, &stats, err,
+                                         sizeof(err));
+    if (ok) {
+        /* The operator's real question after publish-here: would this
+         * node hand the carrier to a stranger? Render the same possession
+         * block the peers leaf renders — one classifier, one vocabulary;
+         * a refused shape is an honest verdict, never an error. */
+        zw_push_possession(&reply->data, store, root);
+    }
+    if (own_store)
+        vcs_package_store_close(store);
+    if (!ok) {
+        /* The lib refuses the WHOLE cache before any store write when an
+         * entry fails verification; a mid-store failure leaves resumable
+         * staging (the store never shows a partial package complete). */
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID,
+                               "CARRIER_EXPORT_REFUSED", "verify", true, true,
+                               err[0] ? err : "the cache refused export",
+                               command);
+        return;
+    }
+
+    char hex[65];
+    zcl_hex_encode(root, 32, hex);
+    (void)json_push_kv_str(&reply->data, "package_root", hex);
+    (void)json_push_kv_str(&reply->data, "cache_dir", cache_dir);
+    (void)json_push_kv_str(&reply->data, "carrier_prefix",
+                           VCS_FASTOBJ_CARRIER_PREFIX);
+    zw_push_carrier_stats(&reply->data, &stats);
+    char pin_input[160];
+    if (snprintf(pin_input, sizeof(pin_input),
+                 "{\"root\":\"%s\",\"mode\":\"plan\"}", hex) > 0)
+        (void)zcl_command_reply_add_next(
+            reply, "zcode.package.pin", pin_input,
+            "protect the carrier from eviction (the PINS pool is never "
+            "evicted; the carrier itself lands in the evictable pool)");
+    (void)json_push_kv_str(
+        &reply->data, "note",
+        "the carrier is an ORDINARY content.v2 package: cross-node "
+        "transport is not this leaf (fetch the root with 'zcode package "
+        "fetch' on the receiving node, then 'zcode package fastobj "
+        "admit'); nothing was compiled, linked, executed or announced "
+        "here, and possession.public_shape says whether this node would "
+        "serve it publicly");
+}
+
+void zcl_native_handle_zcode_package_fastobj_admit(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply)
+{
+    if (!request || !reply)
+        return;
+    static const char *const command = "zcode.package.fastobj.admit";
+    /* package_root is the documented field; root stays accepted because
+     * every sibling leaf (and fetch's own reply) spells it that way. */
+    const char *hex = zw_input_str(request->input, "package_root");
+    if (!hex || !hex[0])
+        hex = zw_input_str(request->input, "root");
+    uint8_t root[32];
+    if (!hex || !zcl_hex_decode(hex, root, 32)) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "BAD_ROOT",
+                               "normalize", false, false,
+                               "package_root must be 64 lowercase hex chars "
+                               "(the carrier's package root)",
+                               hex ? hex : "(missing)");
+        return;
+    }
+    const char *cache_dir = zw_input_str(request->input, "cache_dir");
+    if (!cache_dir || !cache_dir[0]) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "MISSING_CACHE_DIR",
+                               "normalize", false, false,
+                               "cache_dir is required (the compile cache to "
+                               "reconstruct; it is created on demand)",
+                               command);
+        return;
+    }
+    char zcode_dir[4400];
+    if (!zw_zcode_dir(request, reply, command, zcode_dir))
+        return;
+
+    /* The observe rule (the peers leaf): admit only READS the store — the
+     * cache is what it writes — so it never creates <datadir>/zcode as a
+     * read side-effect and never opens a second recovery owner behind a
+     * live daemon's cookie. An explicit input datadir is the deliberate
+     * offline/copy path and must already hold the carrier. When the
+     * in-process resident owns exactly this store, borrowing its handle is
+     * the only safe read — a second open of the same root would contend
+     * with it on the store's own process lock. */
+    bool own_store = false;
+    struct vcs_package_store *store = NULL;
+    struct vcs_package_store *resident = vcs_package_store_global();
+    const char *resident_root = vcs_package_store_root_dir(resident);
+    if (resident_root && strcmp(resident_root, zcode_dir) == 0) {
+        store = resident;
+    } else if (zw_input_str(request->input, "datadir")) {
+        if (access(zcode_dir, F_OK) == 0) {
+            store = vcs_package_store_open(
+                zw_datadir(request), vcs_package_store_quota_bytes());
+            own_store = store != NULL;
+        }
+    } else {
+        store = zw_observe_store(request, &own_store);
+    }
+    if (!store) {
+        zcl_command_reply_fail(
+            reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+            "NO_STORE", "execute", false, false,
+            "no package store to admit from (fetch the carrier root first: "
+            "'zcode package fetch --input={\"root\":\"<64hex>\"}')",
+            zcode_dir);
+        return;
+    }
+
+    struct vcs_package_store_status st;
+    memset(&st, 0, sizeof(st));
+    if (!vcs_package_store_package_status(store, root, &st) || !st.tracked) {
+        if (own_store)
+            vcs_package_store_close(store);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "UNKNOWN_PACKAGE",
+                               "execute", false, false,
+                               "package root is not tracked by this store "
+                               "(fetch it first: 'zcode package fetch')",
+                               command);
+        return;
+    }
+
+    struct vcs_fastobj_carrier_stats stats;
+    char err[256] = "";
+    bool ok = vcs_fastobj_carrier_admit(cache_dir, store, root, &stats, err,
+                                        sizeof(err));
+    if (own_store)
+        vcs_package_store_close(store);
+    if (!ok) {
+        /* Admit writes entries as it verifies them, so a refusal can hold
+         * a verified prefix — every landed entry was fully re-checked, and
+         * the divergent entry itself never landed. */
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID,
+                               "CARRIER_ADMIT_REFUSED", "verify", true, true,
+                               err[0] ? err : "the carrier refused admit",
+                               command);
+        return;
+    }
+
+    /* hex aliases the request's input string; render into a local buffer
+     * rather than mutating the caller's JSON. */
+    char root_hex[65];
+    zcl_hex_encode(root, 32, root_hex);
+    (void)json_push_kv_str(&reply->data, "package_root", root_hex);
+    (void)json_push_kv_str(&reply->data, "cache_dir", cache_dir);
+    (void)json_push_kv_str(&reply->data, "carrier_prefix",
+                           VCS_FASTOBJ_CARRIER_PREFIX);
+    zw_push_carrier_stats(&reply->data, &stats);
+    (void)json_push_kv_str(
+        &reply->data, "note",
+        "every entry re-verified (manifest re-rooted, chunks re-hashed, "
+        "sidecar + key + object SHA3 re-checked) and landed in the "
+        "confined build worker's own store-on-miss format, so its hit path "
+        "re-verifies imported bytes unchanged; nothing was compiled, "
+        "linked, executed or installed here. Cross-node transport happened "
+        "before this leaf: 'zcode package fetch' by this root");
 }

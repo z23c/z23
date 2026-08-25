@@ -465,13 +465,40 @@ void zcl_native_handle_zcode_package_reproduce(
         return;
     }
 
+    /* Optional fast_cache: a LOCAL fastobj compile-cache directory handed
+     * to the confined candidate worker as --fast-cache=<dir>. Absent or
+     * empty means the ordinary cold rebuild; the service layer drops the
+     * flag, so the argv is byte-for-byte the cold one. */
+    const char *fast_cache = za_input_str(request->input, "fast_cache");
+
     struct package_lifecycle_reproduce_report report;
     struct zcl_result r = package_lifecycle_reproduce(datadir, name_or_root,
-                                                      &report);
+                                                      fast_cache, &report);
     if (report.name[0])
         (void)json_push_kv_str(&reply->data, "name", report.name);
     if (report.semver[0])
         (void)json_push_kv_str(&reply->data, "semver", report.semver);
+    /* The worker's cache outcome is rendered whenever a cache was handed
+     * over — including refusals, where the counters honestly read zero —
+     * so a cache that was asked for is never silently unreported. */
+    if (fast_cache && fast_cache[0]) {
+        struct json_value fc;
+        json_init(&fc);
+        json_set_object(&fc);
+        (void)json_push_kv_str(&fc, "dir", fast_cache);
+        (void)json_push_kv_int(&fc, "hits",
+                               (int64_t)report.fast_cache_hits);
+        (void)json_push_kv_int(&fc, "misses",
+                               (int64_t)report.fast_cache_misses);
+        (void)json_push_kv_int(&fc, "reused_bytes",
+                               (int64_t)report.fast_cache_reused_bytes);
+        (void)json_push_kv_str(&fc, "admission",
+                               report.fast_cache_admission[0]
+                                   ? report.fast_cache_admission
+                                   : "unavailable");
+        (void)json_push_kv(&reply->data, "fast_cache", &fc);
+        json_free(&fc);
+    }
     if (!r.ok) {
         /* The named rule plus the compare verdict (when the rebuild ran)
          * explain exactly why nothing was filed. */

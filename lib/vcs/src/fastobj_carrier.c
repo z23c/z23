@@ -704,7 +704,7 @@ bool vcs_fastobj_carrier_fetch(struct vcs_package_store *dst,
     return ok;
 }
 
-/* ── admit ──────────────────────────────────────────────────────────── */
+/* ── verify / admit ─────────────────────────────────────────────────── */
 
 /* Validate one carrier member path: exactly <prefix>/<64 hex><ext> with
  * the extension copied into ext_out. */
@@ -724,16 +724,18 @@ static bool fc_carrier_member(const char *path, const char *ext,
     return fc_is_lower_hex(key_out, 64u);
 }
 
-bool vcs_fastobj_carrier_admit(const char *cache_dir,
-                               struct vcs_package_store *store,
-                               const uint8_t root[32],
-                               struct vcs_fastobj_carrier_stats *stats,
-                               char *err, size_t err_cap)
+/* Walk one carrier root in the store, verifying every entry pair; when
+ * `cache_dir` is non-NULL each verified pair also lands in the receiving
+ * cache (admit). A NULL cache_dir is the read-only walk behind
+ * vcs_fastobj_carrier_verify(): it changes nothing, not even a directory,
+ * so serve-time classification re-proves bytes this node already holds
+ * without touching a cache. */
+static bool fc_carrier_apply(const char *cache_dir,
+                             struct vcs_package_store *store,
+                             const uint8_t root[32],
+                             struct vcs_fastobj_carrier_stats *stats,
+                             char *err, size_t err_cap)
 {
-    if (!cache_dir || !store || !root) {
-        (void)snprintf(err, err_cap, "null argument");
-        return false;
-    }
     uint8_t *wire = NULL;
     size_t wire_len = 0;
     enum vcs_package_store_result r = vcs_package_store_get_manifest_wire(
@@ -767,7 +769,7 @@ bool vcs_fastobj_carrier_admit(const char *cache_dir,
                        manifest.count);
         ok = false;
     }
-    if (ok && !fc_mkdir_p(cache_dir)) {
+    if (ok && cache_dir && !fc_mkdir_p(cache_dir)) {
         (void)snprintf(err, err_cap, "cannot create cache dir %s",
                        cache_dir);
         ok = false;
@@ -821,7 +823,7 @@ bool vcs_fastobj_carrier_admit(const char *cache_dir,
                 entry_ok = false;
             }
         }
-        if (entry_ok) {
+        if (entry_ok && cache_dir) {
             char obj_path[4096], side_path[4096];
             entry_ok = vcs_fastobj_cache_paths(cache_dir, key, obj_path,
                                                sizeof(obj_path), side_path,
@@ -886,4 +888,28 @@ bool vcs_fastobj_carrier_admit(const char *cache_dir,
     vcs_package_manifest_free(&manifest);
     free(wire);
     return ok;
+}
+
+bool vcs_fastobj_carrier_verify(struct vcs_package_store *store,
+                                const uint8_t root[32],
+                                char *err, size_t err_cap)
+{
+    if (!store || !root) {
+        (void)snprintf(err, err_cap, "null argument");
+        return false;
+    }
+    return fc_carrier_apply(NULL, store, root, NULL, err, err_cap);
+}
+
+bool vcs_fastobj_carrier_admit(const char *cache_dir,
+                               struct vcs_package_store *store,
+                               const uint8_t root[32],
+                               struct vcs_fastobj_carrier_stats *stats,
+                               char *err, size_t err_cap)
+{
+    if (!cache_dir || !store || !root) {
+        (void)snprintf(err, err_cap, "null argument");
+        return false;
+    }
+    return fc_carrier_apply(cache_dir, store, root, stats, err, err_cap);
 }

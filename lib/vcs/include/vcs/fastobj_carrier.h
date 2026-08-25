@@ -71,12 +71,23 @@ bool vcs_fastobj_carrier_fetch(struct vcs_package_store *dst,
                                struct vcs_fastobj_carrier_stats *stats,
                                char *err, size_t err_cap);
 
-/* Reconstruct a verified carrier from `store` into `cache_dir`. Every
- * entry is re-verified (manifest re-rooted, chunks re-hashed at their
- * exact coordinates, sidecar + key + object hash re-checked) before it
- * lands in the receiving cache in the worker's own store-on-miss format.
- * An existing identical entry is idempotent; a divergent one is
- * corruption and refuses the admit. */
+/* Re-derive the whole carrier from stored bytes, changing nothing: the
+ * manifest wire loads, parses and roots to `root`; the files pair as
+ * sidecar-at-2i / object-at-2i+1 entries under the carrier prefix; every
+ * sidecar re-derives its own cache key; and every object hashes to its
+ * sidecar's object_sha3. This IS the proof half of admit, so a consumer
+ * and the public-shape gate that decides a carrier may be served run the
+ * same verification a stranger re-runs after fetching it. */
+bool vcs_fastobj_carrier_verify(struct vcs_package_store *store,
+                                const uint8_t root[32],
+                                char *err, size_t err_cap);
+
+/* Reconstruct a verified carrier from `store` into `cache_dir`: verify
+ * (above) plus the cache write. Every entry is re-verified (manifest
+ * re-rooted, chunks re-hashed at their exact coordinates, sidecar + key +
+ * object hash re-checked) before it lands in the receiving cache in the
+ * worker's own store-on-miss format. An existing identical entry is
+ * idempotent; a divergent one is corruption and refuses the admit. */
 bool vcs_fastobj_carrier_admit(const char *cache_dir,
                                struct vcs_package_store *store,
                                const uint8_t root[32],

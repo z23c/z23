@@ -113,6 +113,15 @@ struct package_lifecycle_reproduce_report {
     uint8_t compare_rule;             /* enum vcs_reproduce_rule */
     char compare_detail[VCS_REPRODUCE_DETAIL_MAX];
     bool filed; /* the second receipt is filed under receipts/<id-hex> */
+    /* Outcome of the fastobj compile cache the rebuild was offered, parsed
+     * from the worker's zbuild-package-fast-cache=v1 stats line. Zero
+     * counters with an empty admission mean no line was reported (a cold
+     * run never sets one). */
+    bool fast_cache_used;
+    uint64_t fast_cache_hits;
+    uint64_t fast_cache_misses;
+    uint64_t fast_cache_reused_bytes;
+    char fast_cache_admission[32];
     char rule[PACKAGE_LIFECYCLE_RULE_MAX + 1u];       /* "" on success */
     char detail[PACKAGE_LIFECYCLE_DETAIL_MAX + 1u];
 };
@@ -155,9 +164,17 @@ struct zcl_result package_lifecycle_installed_inspect(
  * id — file it under <datadir>/zcode/receipts/<receipt-id-hex>. Two distinct
  * receipt ids with byte-identical output sets is the reproduction fact that
  * lets the receipts scan report reproduced=true. Every refusal is named in
- * rule/detail and files nothing. */
+ * rule/detail and files nothing.
+ *
+ * `fast_cache` (optional) is a LOCAL fastobj compile-cache directory handed
+ * to the confined candidate worker as --fast-cache=<dir>, so a node that
+ * already holds the objects can rebuild with zero compiler spawns. NULL or
+ * a string that is empty after trimming means the ordinary cold rebuild —
+ * the flag is not passed. The worker quarantines and re-verifies every
+ * cache entry itself; the path travels through unchanged, and its outcome
+ * lands in the report's fast_cache_* fields. */
 struct zcl_result package_lifecycle_reproduce(
-    const char *datadir, const char *name_or_root,
+    const char *datadir, const char *name_or_root, const char *fast_cache,
     struct package_lifecycle_reproduce_report *out);
 
 struct zcl_result package_lifecycle_rollback(

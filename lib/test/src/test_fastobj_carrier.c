@@ -13,17 +13,21 @@
  *      gcc compile really runs, the cache fills),
  *   3. export cacheA into store nodeA as one content.v2 carrier
  *      (zcl-fastobj-carrier.v1/objects/<key>.o|.json),
- *   4. re-export into a THIRD store: the carrier root must be identical
+ *   4. classify the exported carrier in nodeA: the public shape is
+ *      fastobj-carrier, so a -packagehost=1 node may announce and serve
+ *      it (the serve-time proof is the consumer's own admit proof,
+ *      re-derived read-only from stored bytes),
+ *   5. re-export into a THIRD store: the carrier root must be identical
  *      (deterministic root for identical object bytes),
- *   5. fetch the carrier root store-to-store into nodeB — the offline
+ *   6. fetch the carrier root store-to-store into nodeB — the offline
  *      stand-in for the swarm wire, same verify-before-store admission,
- *   6. admit from nodeB into a FRESH cacheB (every entry re-verified),
- *   7. re-export cacheB into a FOURTH store: same root again — cacheB
+ *   7. admit from nodeB into a FRESH cacheB (every entry re-verified),
+ *   8. re-export cacheB into a FOURTH store: same root again — cacheB
  *      is byte-identical to cacheA through the whole round trip,
- *   8. confined candidate build #2 with --fast-cache=cacheB: every
+ *   9. confined candidate build #2 with --fast-cache=cacheB: every
  *      eligible TU is a HIT (misses == 0 — zero gcc compile spawns; the
  *      -E identity probe still runs by design, it IS the key input),
- *   9. build-report #2 is byte-identical to build-report #1 (memcmp of
+ *  10. build-report #2 is byte-identical to build-report #1 (memcmp of
  *      the ZCLBLD receipt wires) and both receipts hash to the same id.
  *  10. the tested standard receipt really ran the fixture's tests.
  *  11. the testless standard-profile refusal, both sides: a tests/-less
@@ -34,7 +38,8 @@
  * Refusal legs (no builds): a torn pair, a sidecar whose object_sha3
  * lies about its object, an entry filed under the wrong key, and a
  * hand-built carrier whose sidecar does not hash to its own filename
- * all refuse — export at the source, admit at the destination.
+ * all refuse — export at the source, admit at the destination — and the
+ * public-shape gate refuses the lying carrier a servable shape.
  *
  * The candidate lane forks the package verifier beside this binary —
  * it MUST exist (make dev-bin); a missing binary is a loud failure,
@@ -56,6 +61,7 @@
 #include "vcs/package_content.h"
 #include "vcs/package_manifest.h"
 #include "vcs/package_prepare.h"
+#include "vcs/package_public_shape.h"
 #include "vcs/package_store.h"
 
 #include <dirent.h>
@@ -546,7 +552,24 @@ int test_fastobj_carrier(void)
     if (!expA)
         goto done;
 
-    /* 4. re-export into a THIRD store: the root must not move. */
+    /* 4. the exported carrier has a public shape: a -packagehost=1 node
+     *    may announce and serve it, because the serve-time proof is the
+     *    consumer's own admit proof re-derived read-only from the store. */
+    struct vcs_package_public_verdict shape_v;
+    enum vcs_package_public_shape pub =
+        vcs_package_public_shape_classify(nodeA, rootA, &shape_v);
+    FC_CHECK("exported carrier classifies as fastobj-carrier",
+             pub == VCS_PACKAGE_PUBLIC_FASTOBJ_CARRIER);
+    FC_CHECK("the carrier rule is its shape string",
+             shape_v.rule != NULL &&
+                 strcmp(shape_v.rule,
+                        vcs_package_public_shape_string(pub)) == 0);
+    FC_CHECK("fastobj carrier is not licensed content",
+             !vcs_package_public_shape_licensed(pub));
+    FC_CHECK("read-only carrier verify passes on the exporter's store",
+             vcs_fastobj_carrier_verify(nodeA, rootA, err, sizeof(err)));
+
+    /* 5. re-export into a THIRD store: the root must not move. */
     nodeC = vcs_package_store_open(dirC, VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
     bool expC = nodeC != NULL && vcs_fastobj_carrier_export(
                                      cacheA, nodeC, rootC, &stC, err,
@@ -557,7 +580,7 @@ int test_fastobj_carrier(void)
     FC_CHECK("the carrier root is deterministic (same cache, same root)",
              expC && memcmp(rootA, rootC, 32) == 0);
 
-    /* 5. fetch store-to-store: the offline stand-in for the swarm wire. */
+    /* 6. fetch store-to-store: the offline stand-in for the swarm wire. */
     nodeB = vcs_package_store_open(dirB, VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
     bool fetched = nodeB != NULL && vcs_fastobj_carrier_fetch(
                                         nodeB, nodeA, rootA, &stF, err,
@@ -568,7 +591,7 @@ int test_fastobj_carrier(void)
     FC_CHECK("fetched carrier carries the same entries",
              fetched && stF.entries == stA.entries);
 
-    /* 6. admit nodeB's carrier into a FRESH cacheB. */
+    /* 7. admit nodeB's carrier into a FRESH cacheB. */
     bool admitted = fetched && vcs_fastobj_carrier_admit(
                                    cacheB, nodeB, rootA, &stAd, err,
                                    sizeof(err));
@@ -578,7 +601,7 @@ int test_fastobj_carrier(void)
     FC_CHECK("cacheB holds every carried entry",
              admitted && stAd.entries == stA.entries);
 
-    /* 7. re-export cacheB into a FOURTH store: same root again. */
+    /* 8. re-export cacheB into a FOURTH store: same root again. */
     nodeD = vcs_package_store_open(dirD, VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
     bool expD = nodeD != NULL && vcs_fastobj_carrier_export(
                                      cacheB, nodeD, rootD, &stD, err,
@@ -589,7 +612,7 @@ int test_fastobj_carrier(void)
     FC_CHECK("round-trip root identical (cacheB bytes == cacheA bytes)",
              expD && memcmp(rootA, rootD, 32) == 0);
 
-    /* 8. candidate build #2 on cacheB: ZERO compiler spawns. */
+    /* 9. candidate build #2 on cacheB: ZERO compiler spawns. */
     fcw_candidate_build(worker, root_hex, pkg, recipe_path, emit2, lock_hex,
                         cacheB, false, &run2);
     FC_CHECK("candidate build #2 (warm cacheB) succeeded", run2.ok);
@@ -602,7 +625,7 @@ int test_fastobj_carrier(void)
     FC_CHECK("build #2 hit every entry build #1 missed",
              run2.ok && run2.hits == run1.misses);
 
-    /* 9. the ZCLBLD receipts are byte-identical. */
+    /* 10. the ZCLBLD receipts are byte-identical. */
     char report1[4096], report2[4096];
     bool got_reports =
         snprintf(report1, sizeof(report1), "%s/build-report", emit1) <
@@ -890,6 +913,18 @@ int test_fastobj_carrier(void)
                         if (!(refused && strstr(err, "filed under")))
                             printf("    lying admit: %s\n", err);
                     }
+                    /* The public-shape gate runs the same proof the admit
+                     * above just refused: no shape, no announce, no serve. */
+                    struct vcs_package_public_verdict lie_v;
+                    enum vcs_package_public_shape pub_l =
+                        vcs_package_public_shape_classify(storeR, rootL,
+                                                          &lie_v);
+                    FC_CHECK("the public-shape gate refuses the lying "
+                             "carrier",
+                             pub_l == VCS_PACKAGE_PUBLIC_REFUSED &&
+                                 lie_v.rule != NULL &&
+                                 strncmp(lie_v.rule, "fastobj-carrier",
+                                         15) == 0);
                 }
                 free(wire);
                 vcs_package_manifest_free(&manifest);

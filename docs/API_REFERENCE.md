@@ -74,15 +74,15 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 715 |
+| Registry entries (branches + leaves) | 717 |
 | Top-level roots | 12 |
 | Branches | 165 |
-| Leaves (dispatchable command paths) | 550 |
-| … `ready` (live handler in this build) | 497 |
+| Leaves (dispatchable command paths) | 552 |
+| … `ready` (live handler in this build) | 499 |
 | … `compat` (metadata only, names a fallback) | 25 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 28 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 24 |
-| Leaves with `effect=mutate` | 186 |
+| Leaves with `effect=mutate` | 188 |
 | Leaves with `effect=destructive` | 4 |
 | Leaves requiring **owner** authority | 112 |
 
@@ -100,7 +100,7 @@ Per source file:
 | `config/commands/code.def` | 17 | 2 | 15 |
 | `config/commands/accounts.def` | 11 | 2 | 9 |
 | `config/commands/vault.def` | 24 | 4 | 20 |
-| `config/commands/zcode.def` | 219 | 51 | 168 |
+| `config/commands/zcode.def` | 221 | 51 | 170 |
 | `config/commands/zcode_science.def` | 25 | 7 | 18 |
 | `config/commands/metaverse.def` | 30 | 7 | 23 |
 | `config/commands/yardsale.def` | 7 | 2 | 5 |
@@ -1277,9 +1277,11 @@ represented by its children's sections.
 | `zcode package offered` | ready | read / read / operator · fast/low | `datadir` | `zcl.zcode_package_offered.v1` | `z23 zcode package offered` | Roots peers ANNOUNCEd this session that this node can fetch |
 | `zcode package pin` | ready | mutate / app-write / operator, plan-commit · foreground/moderate | **`root`**, **`mode`**, `plan_token`, `datadir` | `zcl.zcode_package_pin.v1` | `z23 zcode package pin --input='{"root":"<64hex>","mode":"plan"}'` | Pin a tracked package (PINS pool, never evicted) |
 | `zcode package unpin` | ready | mutate / app-write / operator, plan-commit · foreground/moderate | **`root`**, **`mode`**, `plan_token`, `datadir` | `zcl.zcode_package_unpin.v1` | `z23 zcode package unpin --input='{"root":"<64hex>","mode":"plan"}'` | Release an operator pin |
+| `zcode package fastobj export` | ready | mutate / app-write / operator · foreground/moderate | `datadir`, **`cache_dir`** | `zcl.zcode_package_fastobj_export.v1` | `z23 zcode package fastobj export --input='{"datadir":"/tmp/zclassic23-node","cache_dir":"/tmp/zbuild-cache"}'` | Export a compile cache into the store as one carrier |
+| `zcode package fastobj admit` | ready | mutate / app-write / operator · foreground/moderate | `datadir`, **`package_root`**, `root`, **`cache_dir`** | `zcl.zcode_package_fastobj_admit.v1` | `z23 zcode package fastobj admit --input='{"datadir":"/tmp/zclassic23-node","package_root":"<64hex>","cache_dir":"/tmp/zbuild-cache"}'` | Admit a carrier from the store into a fresh compile cache |
 | `zcode package checkout` | ready | mutate / app-write / operator · foreground/moderate | **`root`**, **`destination`**, `datadir` | `zcl.zcode_package_checkout.v1` | `z23 zcode package checkout --input='{"root":"<64hex>","destination":"/tmp/package-source"}'` | Reconstruct one verified package tree without executing it |
 | `zcode package rollback` | ready | mutate / app-write / operator · fast/low | **`name`**, `now_unix`, `datadir` | `zcl.zcode_package_rollback.v1` | `z23 zcode package rollback --input='{"name":"alice/ringbuffer"}'` | Re-activate the previous generation |
-| `zcode package reproduce` | ready | mutate / app-write / operator · background/high | **`name_or_root`**, `datadir` | `zcl.zcode_package_reproduce.v1` | `z23 zcode package reproduce --input='{"name_or_root":"alice/ringbuffer"}'` | Reproduce one installed package's build receipt |
+| `zcode package reproduce` | ready | mutate / app-write / operator · background/high | **`name_or_root`**, `fast_cache`, `datadir` | `zcl.zcode_package_reproduce.v1` | `z23 zcode package reproduce --input='{"name_or_root":"alice/ringbuffer","fast_cache":"~/.cache/z23/fastobj"}'` | Reproduce one installed package's build receipt |
 
 #### `zcode.package.publish` — Commit a signed release into the local store (plan, then commit)
 

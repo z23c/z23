@@ -1158,6 +1158,17 @@ void zcl_native_handle_zcode_package_pin(
 void zcl_native_handle_zcode_package_unpin(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+/* fastobj export/admit — the compile-cache carrier's operator halves
+ * (docs/work/WIRE_COMPILE_CACHE.md): export turns a verified cache into
+ * ONE ordinary content.v2 carrier inside the store (publish here); admit
+ * re-verifies a carrier the store already tracks and reconstructs the
+ * cache (consume there). The swarm fetch moves the root between nodes. */
+void zcl_native_handle_zcode_package_fastobj_export(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_zcode_package_fastobj_admit(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 void zcl_native_handle_zcode_package_checkout(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);

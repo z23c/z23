@@ -1543,14 +1543,14 @@ cj_journey_object_set_carrier() {
     # export leaf reports the carrier root and the public-shape verdict, so
     # the journey asserts the serving gate said yes, not just that a root
     # came back.
-    export_out="$("cj_b" zcode package fastobj-export \
+    export_out="$("cj_b" zcode package fastobj export \
         --input="{\"datadir\":\"$DHT_DD_B\",\"cache_dir\":\"$cache_b\"}")"
     cj_require_ok "node B exported its cache as the carrier" "$export_out"
     printf '%s\n' "$export_out" >"$DHT_WORK/carrier-export.json"
     carrier="$(cj_field data.package_root "$export_out")"
     [ "${#carrier}" = 64 ] ||
         cj_die "the carrier export returned no package root: $export_out"
-    shape="$(cj_field data.public_shape "$export_out")"
+    shape="$(cj_field data.possession.public_shape "$export_out")"
     [ "$shape" = "fastobj-carrier" ] ||
         cj_die "the carrier is not publicly serveable (shape=$shape): $export_out"
     cj_publish_record b zclassic23.fastobj provider "$carrier" "$carrier" 1
@@ -1562,7 +1562,7 @@ cj_journey_object_set_carrier() {
     cj_fetch_fastobj_carrier c "$carrier"
     cache_c="$(cj_node_dir c)/fastobj-cache"
     cj_on c rm -rf "$cache_c"
-    admit_out="$("cj_c" zcode package fastobj-admit \
+    admit_out="$("cj_c" zcode package fastobj admit \
         --input="{\"datadir\":\"$DHT_DD_C\",\"package_root\":\"$carrier\",\"cache_dir\":\"$cache_c\"}")"
     cj_require_ok "node C admitted the carrier into a fresh cache" "$admit_out"
     printf '%s\n' "$admit_out" >"$DHT_WORK/carrier-admit.json"
@@ -2356,6 +2356,11 @@ cj_topology() {
    7 BUILD      zcode.workspace.source.package.checkout
                                                  carrier → accepted source → the program runs
    8 SERVE      node B answers for the same roots, so the next peer need not ask node A
+
+   9 EXPORT     zcode.package.fastobj.export     node B's compile cache leaves as one ordinary package
+  10 CARRY      zcode.package.fetch              the carrier crosses B → C, the publisher already gone
+  11 ADMIT      zcode.package.fastobj.admit      node C unpacks a cache it never compiled
+  12 REBUILD    zcode.package.reproduce          zero compilers, byte-identical receipt
 
   no registry · no coordinator · no privileged node · central services contacted: 0
 TOPO

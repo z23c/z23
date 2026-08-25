@@ -3067,6 +3067,84 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     zcl_native_handle_zcode_package_unpin)
 
+/* ── the fastobj object-set carrier's operator leaves ──────────────────
+ * (docs/work/WIRE_COMPILE_CACHE.md): a finished zcl.fastobj.v1 compile
+ * cache moves between nodes as an ORDINARY content.v2 package — no new
+ * CAS object, no new wire frame. export is the publish-here half, admit
+ * the consume-there half. Cross-node transport is deliberately NOT either
+ * leaf's job: the existing swarm fetch moves the carrier root exactly
+ * like any other package, so the operator chain is fetch → admit. */
+
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.package.fastobj.export", "zcode.package", "",
+    "Export a compile cache into the store as one carrier",
+    "Scans one zcl.fastobj.v1 compile-cache directory, verifies every "
+    "object+sidecar pair (sidecar schema, key-at-filename, object SHA3), "
+    "builds ONE ordinary content.v2 carrier "
+    "(zcl-fastobj-carrier.v1/objects/<key>.o|.json) whose root is "
+    "deterministic — identical cache bytes always produce the same root — "
+    "and admits manifest + chunks into the datadir package store through "
+    "the ordinary verify-before-store paths. The reply reports the carrier "
+    "package_root, entry/byte/chunk counts, and the public-shape verdict "
+    "(possession.public_shape + serve_rule) so the operator sees whether "
+    "this node would serve it publicly; a refused verdict is an honest "
+    "answer, not an error. A torn pair, a lying object_sha3, or an entry "
+    "filed under the wrong key refuses the WHOLE export, naming the rule "
+    "(CARRIER_EXPORT_REFUSED). Deliberately NOT done here: no compile, no "
+    "build, no exec, no announce — and no cross-node transport; on the "
+    "receiving node `zcode package fetch` by this root moves the carrier, "
+    "then `zcode package fastobj admit` reconstructs the cache there. v1 "
+    "operator boundary (the publish-commit rule): do not run concurrently "
+    "with a hosting node's own puts on the same datadir.",
+    0,
+    "zcode,package,fastobj,export,carrier,compile-cache,cache,content-v2",
+    "zcl.zcode_package_fastobj_export.input.v1",
+    "zcl.zcode_package_fastobj_export.v1",
+    "datadir,cache_dir", "cache_dir",
+    "z23 zcode package fastobj export --input='{\"datadir\":\"/tmp/zclassic23-node\",\"cache_dir\":\"/tmp/zbuild-cache\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_zcode_package_fastobj_export)
+
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.package.fastobj.admit", "zcode.package", "",
+    "Admit a carrier from the store into a fresh compile cache",
+    "Re-derives the carrier named by the 64-hex package_root from the "
+    "datadir package store — manifest re-rooted, every chunk re-hashed at "
+    "its exact coordinates, every sidecar, key and object hash re-checked "
+    "— and reconstructs the zcl.fastobj.v1 cache into cache_dir (created "
+    "on demand) in EXACTLY the format the confined build worker stores on "
+    "a miss, so the worker's own hit-path verification runs unchanged "
+    "over imported bytes: a fastobj key stays an INPUT identity and "
+    "nothing admitted here is ever promoted evidence. An existing "
+    "identical entry is idempotent; a divergent one is corruption and "
+    "refuses (CARRIER_ADMIT_REFUSED names the rule). The store is "
+    "observed, never created, by this leaf; UNKNOWN_PACKAGE names a root "
+    "it does not track. Cross-node transport is NOT this leaf's job: "
+    "fetch the root first with `zcode package fetch "
+    "--input='{\"root\":\"<64hex>\"}'` (the swarm fetches by root exactly "
+    "like any package), then admit. No compile, no build, no exec, no "
+    "install.",
+    0,
+    "zcode,package,fastobj,admit,carrier,compile-cache,cache,warm",
+    "zcl.zcode_package_fastobj_admit.input.v1",
+    "zcl.zcode_package_fastobj_admit.v1",
+    "datadir,package_root,root,cache_dir", "package_root,cache_dir",
+    "z23 zcode package fastobj admit --input='{\"datadir\":\"/tmp/zclassic23-node\",\"package_root\":\"<64hex>\",\"cache_dir\":\"/tmp/zbuild-cache\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_zcode_package_fastobj_admit)
+
 /* ── Sovereign Registry v1: zid release records ──────────────────────
  * Sign/verify release records that bind a package release (name, version,
  * manifest root) to an identity's master ed25519 key (lib/zid). File-based
@@ -4109,9 +4187,9 @@ ZCL_COMMAND_READY_COMMAND(
     "deterministic receipt.",
     0,
     "zcode,package,reproduce,rebuild,receipt,match,install,verify",
-    "zcl.zcode_package_reproduce.input.v1", "zcl.zcode_package_reproduce.v1",
-    "name_or_root,datadir", "name_or_root",
-    "z23 zcode package reproduce --input='{\"name_or_root\":\"alice/ringbuffer\"}'",
+    "zcl.zcode_package_reproduce.input.v2", "zcl.zcode_package_reproduce.v1",
+    "name_or_root,fast_cache,datadir", "name_or_root",
+    "z23 zcode package reproduce --input='{\"name_or_root\":\"alice/ringbuffer\",\"fast_cache\":\"~/.cache/z23/fastobj\"}'",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,

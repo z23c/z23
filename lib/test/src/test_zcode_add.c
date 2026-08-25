@@ -134,6 +134,24 @@ static bool za_exists(const char *path)
     return stat(path, &st) == 0;
 }
 
+/* Non-dot entry count of one directory (0 when it cannot be opened). The
+ * fastobj cache's object+sidecar pairs are the only thing that lands there,
+ * so a positive count proves the confined worker actually used the cache. */
+static size_t za_dir_entries(const char *path)
+{
+    DIR *d = opendir(path);
+    if (!d)
+        return 0;
+    struct dirent *e;
+    size_t n = 0;
+    while ((e = readdir(d)) != NULL) {
+        if (strcmp(e->d_name, ".") != 0 && strcmp(e->d_name, "..") != 0)
+            n++;
+    }
+    closedir(d);
+    return n;
+}
+
 static bool za_read_json_file(const char *path, struct json_value *out)
 {
     FILE *f = fopen(path, "rb");
@@ -1154,7 +1172,7 @@ static int t_e2e(void)
      * which is exactly what the receipts scan needs to report reproduced. */
     struct package_lifecycle_reproduce_report repro;
     struct zcl_result repr =
-        package_lifecycle_reproduce(base, "alice/ringbuffer", &repro);
+        package_lifecycle_reproduce(base, "alice/ringbuffer", NULL, &repro);
     if (!repr.ok)
         printf("  zcode_add: reproduce failed rule=%s detail=%s msg=%s\n",
                repro.rule, repro.detail, repr.message);
@@ -1204,6 +1222,82 @@ static int t_e2e(void)
                  strcmp(repro_cmd_id, repro_id_hex) == 0);
     zcl_command_reply_free(&repro_reply);
     json_free(&repro_input);
+
+    /* --- an optional fastobj cache rides along to the worker ------------
+     * The confined worker is the cache's only writer: a directory that did
+     * not exist before the run exists (with entries) after it only when
+     * --fast-cache=<dir> actually reached the worker's argv. */
+    char fast_dir[4600];
+    snprintf(fast_dir, sizeof(fast_dir), "%s/fastobj-repro", base);
+    struct package_lifecycle_reproduce_report fc_repro;
+    struct zcl_result fcr = package_lifecycle_reproduce(
+        base, "alice/ringbuffer", fast_dir, &fc_repro);
+    if (!fcr.ok)
+        printf("  zcode_add: fast-cache reproduce failed rule=%s detail=%s "
+               "msg=%s\n",
+               fc_repro.rule, fc_repro.detail, fcr.message);
+    ZA_CHECK("a reproduce handed a fastobj cache still matches and re-files",
+             fcr.ok && fc_repro.matched && fc_repro.filed &&
+                 memcmp(fc_repro.receipt_id, repro.receipt_id, 32) == 0);
+    ZA_CHECK("the cache directory was created and populated by the worker",
+             fc_repro.fast_cache_used && za_exists(fast_dir) &&
+                 za_dir_entries(fast_dir) > 0);
+    ZA_CHECK("the cold cache reports its misses and its admission",
+             fc_repro.fast_cache_misses > 0 && fc_repro.fast_cache_hits == 0 &&
+                 strcmp(fc_repro.fast_cache_admission,
+                        "local_candidate") == 0);
+
+    /* The second run against the SAME populated cache is all hits — the
+     * zero-compiler-spawn rebuild this seam exists for. */
+    struct package_lifecycle_reproduce_report fc2_repro;
+    struct zcl_result fc2r = package_lifecycle_reproduce(
+        base, "alice/ringbuffer", fast_dir, &fc2_repro);
+    ZA_CHECK("a re-run against the populated cache is all hits",
+             fc2r.ok && fc2_repro.matched && fc2_repro.filed &&
+                 fc2_repro.fast_cache_hits > 0 &&
+                 fc2_repro.fast_cache_misses == 0 &&
+                 memcmp(fc2_repro.receipt_id, repro.receipt_id, 32) == 0);
+
+    /* The native command accepts the optional field and renders the cache
+     * outcome in its reply (idempotently, against the same cache). */
+    struct json_value fc_input;
+    json_init(&fc_input);
+    json_set_object(&fc_input);
+    bool fc_input_ready =
+        json_push_kv_str(&fc_input, "name_or_root", "alice/ringbuffer") &&
+        json_push_kv_str(&fc_input, "datadir", base) &&
+        json_push_kv_str(&fc_input, "fast_cache", fast_dir);
+    struct zcl_command_request fc_request = {
+        .input = &fc_input,
+    };
+    struct zcl_command_reply fc_reply;
+    zcl_command_reply_init(&fc_reply, "zcl.zcode_package_reproduce.v1");
+    if (fc_input_ready)
+        zcl_native_handle_zcode_package_reproduce(&fc_request, &fc_reply);
+    const struct json_value *fc_obj = json_get(&fc_reply.data, "fast_cache");
+    const char *fc_admission =
+        fc_obj ? json_get_str(json_get(fc_obj, "admission")) : NULL;
+    ZA_CHECK("the reproduce command renders the cache outcome it was handed",
+             fc_input_ready &&
+                 fc_reply.status == ZCL_COMMAND_STATUS_PASSED &&
+                 fc_obj &&
+                 json_get_int(json_get(fc_obj, "hits")) > 0 &&
+                 json_get_int(json_get(fc_obj, "misses")) == 0 &&
+                 fc_admission &&
+                 strcmp(fc_admission, "local_candidate") == 0);
+    zcl_command_reply_free(&fc_reply);
+    json_free(&fc_input);
+
+    /* An empty-after-trim fast_cache is exactly the cold rebuild: the flag
+     * must be omitted, not passed empty (an empty --fast-cache= makes the
+     * worker refuse the run closed), so this succeeds and re-files. */
+    struct package_lifecycle_reproduce_report blank_repro;
+    struct zcl_result blankr = package_lifecycle_reproduce(
+        base, "alice/ringbuffer", "", &blank_repro);
+    ZA_CHECK("an empty fast_cache string is the cold rebuild",
+             blankr.ok && blank_repro.matched && blank_repro.filed &&
+                 !blank_repro.fast_cache_used &&
+                 memcmp(blank_repro.receipt_id, repro.receipt_id, 32) == 0);
 
     /* --- a second version, then rollback -------------------------------- */
     struct za_file ring2_files[] = {
@@ -1338,7 +1432,7 @@ static int t_e2e(void)
      * is a named refusal, not a build. */
     struct package_lifecycle_reproduce_report ni_repro;
     struct zcl_result nir =
-        package_lifecycle_reproduce(base, "bob/ringbuffer", &ni_repro);
+        package_lifecycle_reproduce(base, "bob/ringbuffer", NULL, &ni_repro);
     ZA_CHECK("reproduce of a package that was never installed is refused",
              pe && !nir.ok &&
                  strcmp(ni_repro.rule, "not-installed") == 0);

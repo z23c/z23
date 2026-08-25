@@ -92,13 +92,67 @@ static struct zcl_result pkgl_reproduce_paths_init(
     return ZCL_OK;
 }
 
+/* A fast_cache that is NULL or only whitespace IS the cold rebuild: the
+ * worker argv must stay byte-for-byte today's, so the flag is dropped
+ * rather than passed empty (an empty --fast-cache= makes the worker refuse
+ * the whole run). */
+static bool pkgl_fast_cache_blank(const char *s)
+{
+    if (!s)
+        return true;
+    for (; *s; s++)
+        if (*s != ' ' && *s != '\t' && *s != '\n' && *s != '\r')
+            return false;
+    return true;
+}
+
+/* The worker ends a cache-fed run with one stats line,
+ *   zbuild-package-fast-cache=v1 hits=N misses=N reused_bytes=N
+ *   admission=<token>
+ * Parse the FIRST such line into the report. A worker that printed none
+ * (a refusal, or a run the cache never applied to) leaves the counters at
+ * zero — reported as zero, never silently dropped. */
+static void pkgl_fast_stats_consume(
+    struct package_lifecycle_reproduce_report *out, const char *vout)
+{
+    const char *line = vout;
+    while (line && *line) {
+        const char *nl = strchr(line, '\n');
+        size_t len = nl ? (size_t)(nl - line) : strlen(line);
+        unsigned long long h = 0, m = 0, b = 0;
+        char admission[32];
+        admission[0] = '\0';
+        if (len < 1024 &&
+            strncmp(line, "zbuild-package-fast-cache=v1", 28) == 0 &&
+            sscanf(line,
+                   "zbuild-package-fast-cache=v1 hits=%llu misses=%llu "
+                   "reused_bytes=%llu admission=%31s",
+                   &h, &m, &b, admission) == 4) {
+            out->fast_cache_hits = h;
+            out->fast_cache_misses = m;
+            out->fast_cache_reused_bytes = b;
+            (void)snprintf(out->fast_cache_admission,
+                           sizeof(out->fast_cache_admission), "%s",
+                           admission);
+            return;
+        }
+        line = nl ? nl + 1 : NULL;
+    }
+}
+
 /* Rebuild one installed root under the standard profile in candidate mode.
  * The dependency argv comes from the reference (install) receipt's own
  * committed set — never from a re-derived lock — so the rebuild is fed
- * exactly the inputs the install-time validation committed to. */
+ * exactly the inputs the install-time validation committed to. When
+ * fast_cache names a directory, the confined worker gets it as
+ * --fast-cache=<dir> — the same candidate-mode flag the package factory's
+ * second-receipt run uses — so a node holding the objects rebuilds with
+ * zero compiler spawns. The worker quarantines and re-verifies every cache
+ * entry itself; this layer only hands the path over, unchanged. */
 static struct zcl_result pkgl_run_reproduce_worker(
     const struct pkgl_ctx *ctx, const struct pkgl_reproduce_paths *p,
-    const char *name, const struct vcs_package_build_receipt *reference)
+    const char *name, const struct vcs_package_build_receipt *reference,
+    const char *fast_cache, struct package_lifecycle_reproduce_report *rep)
 {
     char root_hex[65];
     zcl_hex_encode(reference->package_root, 32, root_hex);
@@ -121,6 +175,15 @@ static struct zcl_result pkgl_run_reproduce_worker(
     (void)snprintf(emit_arg, sizeof(emit_arg), "--emit=%s", p->emit);
     char lock_arg[96];
     (void)snprintf(lock_arg, sizeof(lock_arg), "--lock-root=%s", lock_hex);
+    char fast_arg[PKGL_PATH_MAX + 16];
+    bool use_fast = !pkgl_fast_cache_blank(fast_cache);
+    int fn = 0;
+    if (use_fast) {
+        fn = snprintf(fast_arg, sizeof(fast_arg), "--fast-cache=%s",
+                      fast_cache);
+        if (fn <= 0 || (size_t)fn >= sizeof(fast_arg))
+            return ZCL_ERR(-1, "fast-cache arg path too long");
+    }
 
     char *dep_args = NULL;
     const size_t dep_stride = PKGL_PATH_MAX + 96u;
@@ -130,7 +193,7 @@ static struct zcl_result pkgl_run_reproduce_worker(
         if (!dep_args)
             return ZCL_ERR(-1, "cannot allocate the dependency argv");
     }
-    const char *argv[12u + VCS_PACKAGE_BUILD_MAX_DEPS];
+    const char *argv[13u + VCS_PACKAGE_BUILD_MAX_DEPS];
     size_t argc = 0;
     argv[argc++] = p->worker;
     argv[argc++] = root_hex;
@@ -164,6 +227,10 @@ static struct zcl_result pkgl_run_reproduce_worker(
         (void)snprintf(slot, dep_stride, "--dep=%s,%s", dep_hex, install);
         argv[argc++] = slot;
     }
+    /* The cache flag sits where the factory's second-receipt run puts it:
+     * after the committed dependency set, before the isolation demand. */
+    if (use_fast)
+        argv[argc++] = fast_arg;
     argv[argc++] = "--require-full-isolation";
     /* Reproduce rebuilds an ALREADY-accepted package to check byte-identity,
      * not to compose admission evidence, so it opts out of the
@@ -174,6 +241,13 @@ static struct zcl_result pkgl_run_reproduce_worker(
     char out[8192];
     int rc = zcl_spawn_capture(argv, out, sizeof(out), PKGL_BUILD_TIMEOUT_MS);
     free(dep_args);
+    if (use_fast) {
+        rep->fast_cache_used = true;
+        /* The stats line is printed only by a run that completed, so a
+         * refused rebuild honestly reports the all-zero outcome. */
+        if (rc == 0)
+            pkgl_fast_stats_consume(rep, out);
+    }
     if (rc != 0) {
         /* Trim the captured stdout to one line for the operator's detail. */
         char *nl = strchr(out, '\n');
@@ -227,7 +301,7 @@ static struct zcl_result pkgl_reproduce_reference(
 // distinct-id gates having been applied to it.
 static struct zcl_result pkgl_reproduce_run(
     const struct pkgl_ctx *ctx, const uint8_t root[32],
-    const struct vcs_package_release *release,
+    const struct vcs_package_release *release, const char *fast_cache,
     struct package_lifecycle_reproduce_report *out)
 {
     /* Reproduction is a fact about an install: the reference receipt is the
@@ -269,7 +343,8 @@ static struct zcl_result pkgl_reproduce_run(
     ZCL_IGNORE_RESULT(pkgl_rm_rf(p.work), "stale reproduce work is replaced");
     r = pkgl_materialize_package(ctx, root, p.src);
     if (r.ok)
-        r = pkgl_run_reproduce_worker(ctx, &p, release->name, &reference);
+        r = pkgl_run_reproduce_worker(ctx, &p, release->name, &reference,
+                                      fast_cache, out);
     if (!r.ok) {
         ZCL_IGNORE_RESULT(pkgl_rm_rf(p.work),
                           "failed reproduce work removed");
@@ -364,7 +439,7 @@ static struct zcl_result pkgl_reproduce_run(
 }
 
 struct zcl_result package_lifecycle_reproduce(
-    const char *datadir, const char *name_or_root,
+    const char *datadir, const char *name_or_root, const char *fast_cache,
     struct package_lifecycle_reproduce_report *out)
 {
     if (!out)
@@ -391,7 +466,7 @@ struct zcl_result package_lifecycle_reproduce(
     (void)snprintf(out->name, sizeof(out->name), "%s", release->name);
     (void)snprintf(out->semver, sizeof(out->semver), "%s", release->semver);
     memcpy(out->root, root, 32);
-    r = pkgl_reproduce_run(&ctx, root, release, out);
+    r = pkgl_reproduce_run(&ctx, root, release, fast_cache, out);
     pkgl_ctx_close(&ctx);
     return r;
 }
