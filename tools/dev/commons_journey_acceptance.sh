@@ -18,11 +18,13 @@
 # authenticated DHT and gets every byte from node A's package swarm.
 #
 # WHAT IT PROVES, in the order the script asserts it:
-#   1. Reusable code is selected before new code is written.
-#   2. Code that is not available locally is never reported as reused.
+#   1. Code that is not available locally is never reported as reused.
+#   2. Reusable code is selected before new code is written.
 #   3. Only the behavior still missing enters candidate work.
 #   4. Fetched source stays inert; nothing builds or runs it on arrival.
-#   5. Building and testing it requires an explicit local admission.
+#   5. Building and testing it requires an explicit local admission — and a
+#      node announces a package pointer only after its own admission plus a
+#      distinct byte-identical rebuild receipt (the pointer gate).
 #   6. Source, dependency, recipe, toolchain, action, artifact and receipt
 #      identities stay bound to each other.
 #   7. Node B reconstructs the inputs and reproduces byte-identical output.
@@ -613,6 +615,21 @@ cj_use_package() {
     CJ_USE_COMMIT="$commit"
 }
 
+# The pointer publication gate refuses REPRODUCTION_NOT_EVIDENCED unless the
+# announcing node's own store holds two distinct byte-identical build
+# receipts for the exact (package root, recipe root) pair the signed release
+# commits. The explicit admission (`zcode use`) files the first; this
+# deterministic rebuild files the distinct second, before the pointer plan
+# exists. A node announces only what it has itself built twice.
+cj_reproduce_package() {
+    local node="$1" root="$2" reproduced
+    reproduced="$("cj_$node" zcode package reproduce \
+        --input="{\"name_or_root\":\"$root\"}")"
+    cj_require_ok "zcode package reproduce $root" "$reproduced"
+    [ "$(cj_field data.reproduced "$reproduced" False)" = True ] ||
+        cj_die "node $node filed no distinct rebuild receipt for $root: $reproduced"
+}
+
 # Turn the accepted-work carrier back into the exact accepted source. The
 # command is handed three independent identities — the package it holds, the
 # source tree it must derive, and the accepted work that authorizes it — and
@@ -834,7 +851,13 @@ cj_journey_publish_reusable() {
 # overlay for that exact content, and the bytes arrive as inert source.
 # Both nodes run on one physical host; nothing here claims otherwise.
 cj_journey_peer_distribution() {
-    cj_step "3/10  a second node fetches it peer-to-peer — and the bytes stay inert"
+    cj_step "4/10  a second node fetches it peer-to-peer — and the bytes stay inert"
+    # The pointer gate: A may announce only what its own store evidences as
+    # reproduced — the publisher admits its own package explicitly (first
+    # receipt), then re-runs the deterministic rebuild (distinct second
+    # receipt), before the pointer plan exists.
+    cj_use_package a "$CJ_TEXTSTAT_ROOT"
+    cj_reproduce_package a "$CJ_TEXTSTAT_ROOT"
     cj_announce_package a "$CJ_TEXTSTAT_ROOT" "$CJ_TEXTSTAT_TRANSPORT" 1
 
     # Before: node B has never seen this package.
@@ -860,12 +883,15 @@ cj_journey_peer_distribution() {
 }
 
 cj_journey_work_start_unavailable() {
-    cj_step "4/10  zcode work start — reuse is searched before any code is written"
+    cj_step "3/10  zcode work start — reuse is searched before any code is written"
     CJ_WS="$DHT_WORK/wordcount"
     cp -a "$CJ_FIXTURES/wordcount" "$CJ_WS"
     # The application declares NO dependency yet. Whether z23/textstat may be
     # reused is a question about this node, and the honest answer before any
-    # local admission is "not yet".
+    # local admission is "not yet". Published is not installed: the release
+    # is in A's index from step 2, but nobody on A has admitted it — the
+    # pointer gate makes admission the publisher's own explicit act, one
+    # step below.
     cj_write_package_json "$CJ_WS" ""
     rm -f "$CJ_WS/zcode-package.json.in"
 
@@ -1351,6 +1377,11 @@ cj_reproduce_accepted_source() {
 }
 
 cj_journey_remote_reproduction() {
+    # A announces only what its own store evidences: the accepted application
+    # is admitted locally (first receipt) and deterministically rebuilt
+    # (distinct second receipt) before its pointer plan exists.
+    cj_use_package a "$CJ_APP_ROOT"
+    cj_reproduce_package a "$CJ_APP_ROOT"
     cj_announce_package a "$CJ_APP_ROOT" "$CJ_APP_TRANSPORT" 1
     cj_announce_source  a "$CJ_APP_ROOT" 1
     cj_fetch_package b "$CJ_APP_ROOT" "$CJ_APP_TRANSPORT"
@@ -1693,6 +1724,13 @@ cj_journey_turn_faster() {
     # zprng refuses the action by name — `locked-dependency-not-installed` —
     # which is the correct refusal, not a missing feature. The remedy is the
     # ordinary one: the prover admits what the work depends on, for itself.
+    # The same gate binds node A's announcements below: A admits both
+    # packages and files the distinct rebuild receipts BEFORE the pointer
+    # plans exist (the re-admissions under BEFORE are then idempotent).
+    cj_use_package a "$CJ_ZPRNG_ROOT"
+    cj_reproduce_package a "$CJ_ZPRNG_ROOT"
+    cj_use_package a "$CJ_ZDOG_ROOT"
+    cj_reproduce_package a "$CJ_ZDOG_ROOT"
     cj_announce_package a "$CJ_ZPRNG_ROOT" "$CJ_ZPRNG_TRANSPORT" 1
     cj_fetch_package b "$CJ_ZPRNG_ROOT" "$CJ_ZPRNG_TRANSPORT"
     cj_use_package b "$CJ_ZPRNG_ROOT"
@@ -1833,6 +1871,10 @@ cj_journey_turn_faster() {
     cj_note "the changed version published: ${CJ_ZDOG_APP_ROOT:0:16}… (was ${CJ_ZDOG_ROOT:0:16}…)"
 
     # ── AFTER: another machine reproduces it and runs it ─────────────────
+    # A's pointer for the changed version needs A's own reproduction
+    # evidence: admit the accepted package, then file the distinct rebuild.
+    cj_use_package a "$CJ_ZDOG_APP_ROOT"
+    cj_reproduce_package a "$CJ_ZDOG_APP_ROOT"
     cj_announce_package a "$CJ_ZDOG_APP_ROOT" "$CJ_ZDOG_APP_TRANSPORT" 1
     cj_fetch_package b "$CJ_ZDOG_APP_ROOT" "$CJ_ZDOG_APP_TRANSPORT"
     CJ_ZDOG_BYTES="$CJ_FETCH_BYTES"
@@ -1967,7 +2009,14 @@ cj_journey_publisher_disappears() {
 
     # B, the only remaining holder, announces that it serves both packages
     # and the accepted application's source. These records are B's own; A
-    # never knew about this leg.
+    # never knew about this leg. The pointer gate binds B exactly as it
+    # bound A: B admits the changed version locally, then files the distinct
+    # rebuild receipt for every root it is about to name.
+    cj_use_package b "$CJ_ZDOG_APP_ROOT"
+    cj_reproduce_package b "$CJ_TEXTSTAT_ROOT"
+    cj_reproduce_package b "$CJ_APP_ROOT"
+    cj_reproduce_package b "$CJ_ZPRNG_ROOT"
+    cj_reproduce_package b "$CJ_ZDOG_APP_ROOT"
     cj_announce_package b "$CJ_TEXTSTAT_ROOT" "$CJ_TEXTSTAT_TRANSPORT" 2
     cj_announce_package b "$CJ_APP_ROOT" "$CJ_APP_TRANSPORT" 2
     cj_announce_source  b "$CJ_APP_ROOT" 2
@@ -2282,8 +2331,11 @@ cj_journey_turn_faster_stage
 # ordering every real publisher has: put the software on the machine, then
 # run the node that shares it.
 cj_overlay
-cj_journey_peer_distribution
+# The reuse-availability proof runs while the published package is still
+# un-admitted on A; peer distribution then admits it (the pointer gate makes
+# the publisher's own reproduction evidence a precondition of announcing).
 cj_journey_work_start_unavailable
+cj_journey_peer_distribution
 cj_journey_admit_reuse
 cj_journey_create_missing
 cj_journey_show

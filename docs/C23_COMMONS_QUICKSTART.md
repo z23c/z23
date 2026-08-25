@@ -33,6 +33,7 @@ remember the table.
 | Build and test it, contained | `z23 zcode work run --datadir=/tmp/z23-work` | [`work walkthrough`](work/ZCODE_DEVELOPMENT_WALKTHROUGH.md) |
 | See the real consequence | `z23 zcode work show --datadir=/tmp/z23-work` | [`work walkthrough`](work/ZCODE_DEVELOPMENT_WALKTHROUGH.md) |
 | Publish the exact source and release | `z23 zcode create --datadir=/tmp/z23-commons` | [Author](#author) |
+| Announce only what this node itself installed and rebuilt byte-identically | `z23 zcode package reproduce --datadir=/tmp/z23-commons` | [Author](#author) |
 | Fetch inert bytes on another node | `z23 zcode package fetch --datadir=/tmp/z23-commons` | [Consumer](#consumer) |
 | Reproduce it independently | `z23 zcode package source reproduce --datadir=/tmp/z23-commons` | [Reproducer](#reproducer) |
 | Accept and use that exact version | `z23 zcode use --datadir=/tmp/z23-commons` | [Consumer](#consumer) |
@@ -121,11 +122,27 @@ input spelling with `z23 discover schema <leaf>`.
    Commit is local CAS admission, not network publication. The reply
    names `package_root`, `transport_root`, and one copy-paste
    `next_command`: `zcode network publish` in `mode=plan` for a
-   `pointer` that already contains those roots. Run that, then commit
-   the returned `plan_token`. Repeat for a `provider` record so peers
-   can fetch after this node is gone.
+   `pointer` that already contains those roots. Hold it for one step:
+   the pointer is gated on local reproduction evidence first.
 
-5. On the running package-hosting node, publish a POINTER binding
+5. Admit your own package on the publishing node, then file the distinct
+   second build receipt. A `zclassic23.package` POINTER announce is
+   refused by name (`REPRODUCTION_NOT_EVIDENCED`) unless this node's own
+   store shows two distinct byte-identical installable build receipts for
+   the exact package and recipe roots the signed release commits —
+   `zcode use` files the first, `zcode package reproduce` rebuilds
+   deterministically and files the distinct second:
+
+   ```bash
+   z23 zcode use --datadir=/tmp/z23-commons \
+     --input='{"name_or_root":"<package_root>"}'
+   z23 zcode use --datadir=/tmp/z23-commons \
+     --input='{"plan_id":"<returned plan_id>"}'
+   z23 zcode package reproduce --datadir=/tmp/z23-commons \
+     --input='{"name_or_root":"<package_root>"}'
+   ```
+
+6. On the running package-hosting node, publish a POINTER binding
    `package_root` to `transport_root`, then a PROVIDER record for that
    `transport_root`. Each uses `zcode network publish` first with `mode=plan`
    and then `mode=commit` plus its returned `plan_token`. The records are

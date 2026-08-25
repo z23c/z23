@@ -531,13 +531,18 @@ static int t_zcode_package_view(void)
         const struct json_value *consumer = json_get(&reply.data, "consumer");
         const struct json_value *reproducer = json_get(&reply.data,
                                                        "reproducer");
-        ASSERT(author && author->type == JSON_ARR && author->num_children == 5);
+        ASSERT(author && author->type == JSON_ARR && author->num_children == 6);
         ASSERT(consumer && consumer->type == JSON_ARR &&
                consumer->num_children == 4);
         ASSERT(reproducer && reproducer->type == JSON_ARR &&
                reproducer->num_children == 3);
         ASSERT_STR_EQ(json_get_str(json_get(json_at(author, 1), "status")),
                       "unsigned");
+        /* The pointer gate is a named author journey step: publication of a
+         * package pointer follows local admission plus the distinct rebuild
+         * receipt, never bare CAS admission. */
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(author, 4), "status")),
+                      "locally-reproduced");
         ASSERT_STR_EQ(json_get_str(json_get(json_at(consumer, 1), "status")),
                       "inert-fetch-or-resume");
         ASSERT_STR_EQ(json_get_str(json_get(json_at(consumer, 0),
