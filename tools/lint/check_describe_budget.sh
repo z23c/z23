@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # check-describe-budget — every leaf's `discover describe` document must fit
-# ZCL_COMMAND_SPEC_BUDGET, so a leaf's written contract can actually be read.
+# ZCL_COMMAND_SPEC_BUDGET, and every branch's `discover help` menu must fit
+# ZCL_COMMAND_BRANCH_BUDGET (root: ZCL_COMMAND_ROOT_BUDGET), so a leaf's
+# written contract can actually be read and every branch menu can render.
 #
 # Why this gate exists. `discover describe <path>` is the ONLY surface that
 # renders a leaf's long-form `semantics` text: docs/API_REFERENCE.md carries

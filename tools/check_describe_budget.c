@@ -1,7 +1,8 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * check_describe_budget — every leaf's `discover describe` document must fit
- * the byte budget the renderer writes into.
+ * check_describe_budget — every leaf's `discover describe` document AND every
+ * branch's `discover help` menu must fit the byte budgets the renderer
+ * writes into.
  *
  * Why this gate exists. `discover describe <path>` is the ONLY surface that
  * renders a leaf's long-form `semantics` contract at all: docs/API_REFERENCE.md
@@ -14,6 +15,14 @@
  * nobody could read, and to zcode.endpoint.publish before it. Neither was
  * caught by any gate, because nothing rendered a describe document for every
  * leaf.
+ *
+ * Branch menus carried the same blind spot until zcode.package crossed
+ * ZCL_COMMAND_BRANCH_BUDGET: `discover help zcode.package` answered
+ * MENU_BUDGET, the native-api contract test (which renders every branch
+ * menu) failed a push, and no edit-time gate had noticed the branch growing.
+ * This tool now renders every branch menu (and the root menu) through the
+ * same real renderer, so an over-budget menu is a lint failure the moment
+ * it is written, not a rejected push later.
  *
  * Mechanism. This tool is a SECOND consumer of the same X-macro grammar
  * config/src/command_catalog.c uses (the same trick tools/gen_api_reference.c
@@ -385,6 +394,59 @@ static struct baseline_entry *baseline_find(const char *path)
 
 /* ── Measurement ──────────────────────────────────────────────────────── */
 
+/* Rank one over-budget branch's children by the bytes each child's menu row
+ * really costs. menu_json never reports a needed size, so this renders the
+ * branch from a catalog copy in which every OTHER child is detached (blank
+ * parent): each single-child render is that child's row plus the fixed
+ * header, which ranks rows by their true rendered weight. One measuring
+ * render per child, then sorted; printed with the failure so the fixer sees
+ * which rows to re-parent first. */
+static void menu_report_children(const char *branch_path)
+{
+    static struct zcl_command_spec probe[SPEC_COUNT];
+    memcpy(probe, g_specs, sizeof(g_specs));
+    struct zcl_command_registry reg = { .commands = probe,
+                                        .count = SPEC_COUNT };
+    char out[ZCL_COMMAND_LIST_BUDGET + 1];
+    size_t idx[SPEC_COUNT], size[SPEC_COUNT], kids = 0;
+    for (size_t i = 0; i < SPEC_COUNT; i++) {
+        const char *parent = g_specs[i].parent;
+        if (!parent || strcmp(parent, branch_path) != 0)
+            continue;
+        /* Detach every other child, render this one alone, restore. */
+        for (size_t j = 0; j < SPEC_COUNT; j++) {
+            const char *pj = g_specs[j].parent;
+            probe[j].parent =
+                (pj && strcmp(pj, branch_path) == 0 && j != i) ? "" : pj;
+        }
+        size[kids] = zcl_command_registry_menu_json(&reg, branch_path, out,
+                                                    sizeof(out));
+        idx[kids] = i;
+        kids++;
+    }
+    for (size_t j = 0; j < SPEC_COUNT; j++)
+        probe[j].parent = g_specs[j].parent;
+    if (kids == 0)
+        return;
+    /* Insertion sort descending; menus are small. */
+    for (size_t a = 1; a < kids; a++) {
+        size_t s = size[a], p = idx[a];
+        size_t b = a;
+        while (b > 0 && size[b - 1] < s) {
+            size[b] = size[b - 1];
+            idx[b] = idx[b - 1];
+            b--;
+        }
+        size[b] = s;
+        idx[b] = p;
+    }
+    fprintf(stderr, "  %zu direct children; heaviest rows (bytes each):\n",
+            kids);
+    for (size_t a = 0; a < kids && a < 6; a++)
+        fprintf(stderr, "    %5zu  %s\n", size[a], g_specs[idx[a]].path);
+}
+
+
 /* How many bytes the describe document needs, when it needs more than the
  * budget allows. describe_json returns 0 on overflow and never the needed
  * size, so this measures it from the same renderer instead of modelling it:
@@ -433,7 +495,7 @@ int main(int argc, char **argv)
     for (size_t i = 0; i < SPEC_COUNT; i++) {
         const struct zcl_command_spec *spec = &g_specs[i];
         if (spec->mode == ZCL_COMMAND_MODE_BRANCH)
-            continue;   /* branches render a menu, gated by MENU_BUDGET */
+            continue;   /* branches render a menu, gated below */
         leaves++;
         size_t n = zcl_command_registry_describe_json(&reg, spec->path, out,
                                                       sizeof(out));
@@ -489,18 +551,86 @@ int main(int argc, char **argv)
         if (!g_baseline[i].seen_overflowing)
             stale++;
 
-    if (new_overflow || fixed_overflow || stale) {
+    /* ── Branch menus ────────────────────────────────────────────────────
+     * The leaf loop above once skipped branches with "gated by MENU_BUDGET"
+     * — but nothing gated menus. zcode.package crossed
+     * ZCL_COMMAND_BRANCH_BUDGET unnoticed because its contract test group
+     * was cache-gated green, and the failure surfaced only at a push. Every
+     * branch menu (and the root menu) must render inside its fixed budget:
+     * over budget, `discover help <path>` answers MENU_BUDGET and the
+     * native-api contract test fails the push. No baseline: no menu was
+     * over when this check was added, so any overflow is new. Fix by
+     * NESTING (re-parent children under a new sub-branch, keeping the old
+     * dotted paths as aliases so existing CLI words resolve unchanged —
+     * the zcode.package.swarm and zcode.package.dev.* migrations are the
+     * precedent), not by raising the budget. */
+    size_t menus = 0, largest_menu = 0, menu_overflow = 0;
+    const char *largest_menu_path = "";
+    for (size_t i = 0; i < SPEC_COUNT; i++) {
+        const struct zcl_command_spec *spec = &g_specs[i];
+        if (spec->mode != ZCL_COMMAND_MODE_BRANCH)
+            continue;
+        menus++;
+        size_t n = zcl_command_registry_menu_json(&reg, spec->path, out,
+                                                  sizeof(out));
+        if (n > 0) {
+            if (n > largest_menu) {
+                largest_menu = n;
+                largest_menu_path = spec->path;
+            }
+            if (verbose)
+                printf("  %5zu  menu %s\n", n, spec->path);
+            continue;
+        }
+        menu_overflow++;
         fprintf(stderr,
-            "\nFAIL: %zu leaf/leaves over the describe budget"
-            "%s. Baseline: %s (%zu entr%s, may only shrink).\n",
-            new_overflow + fixed_overflow,
+            "MENU OVER BUDGET: %s — its branch menu does not fit "
+            "ZCL_COMMAND_BRANCH_BUDGET (%u bytes). `discover help %s` "
+            "answers MENU_BUDGET and the native-api contract test renders "
+            "every branch menu, so the push fails. Nest or re-parent "
+            "children under a sub-branch (keep old dotted paths as "
+            "aliases), or shorten child summaries. Do NOT raise the "
+            "budget.\n",
+            spec->path, ZCL_COMMAND_BRANCH_BUDGET, spec->path);
+        menu_report_children(spec->path);
+    }
+    /* The root menu is rendered from the same renderer with the root
+     * budget; gate it too. */
+    menus++;
+    {
+        size_t n = zcl_command_registry_menu_json(&reg, "", out,
+                                                  sizeof(out));
+        if (n > 0) {
+            if (n > largest_menu) {
+                largest_menu = n;
+                largest_menu_path = "root";
+            }
+            if (verbose)
+                printf("  %5zu  menu root\n", n);
+        } else {
+            menu_overflow++;
+            fprintf(stderr,
+                "MENU OVER BUDGET: root — the root menu does not fit "
+                "ZCL_COMMAND_ROOT_BUDGET (%u bytes).\n",
+                ZCL_COMMAND_ROOT_BUDGET);
+        }
+    }
+
+    if (new_overflow || fixed_overflow || menu_overflow || stale) {
+        fprintf(stderr,
+            "\nFAIL: %zu leaf/leaves over the describe budget, %zu "
+            "menu%s over the menu budget%s. Baseline: %s (%zu entr%s, "
+            "may only shrink).\n",
+            new_overflow + fixed_overflow, menu_overflow,
+            menu_overflow == 1 ? "" : "s",
             stale ? ", plus a stale baseline entry" : "", argv[1],
             g_baseline_count, g_baseline_count == 1 ? "y" : "ies");
         return 1;
     }
     printf("check-describe-budget: %zu leaves render; largest %zu/%u bytes "
-           "(%s); %zu baselined pre-existing.\n",
+           "(%s); %zu branch menus render, largest %zu bytes (%s); "
+           "%zu baselined pre-existing.\n",
            leaves, largest, ZCL_COMMAND_SPEC_BUDGET, largest_path,
-           g_baseline_count);
+           menus, largest_menu, largest_menu_path, g_baseline_count);
     return 0;
 }

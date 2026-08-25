@@ -2906,8 +2906,20 @@ ZCL_COMMAND_READY_READ(
  * session state: it reports live:false honestly on a one-shot CLI.
  * offered is the same session catalog of roots peers have ANNOUNCEd. */
 
+/* The zcode.package menu crossed its fixed branch budget once the swarm
+ * leaves and the fastobj branch coexisted as direct children (contract §8:
+ * every branch menu renders inside ZCL_COMMAND_BRANCH_BUDGET — the contract
+ * test renders them all and fails the push). Nesting, not summary-trimming
+ * and not a budget bump, is the repo's precedent (see docs/ROM_DELIVERY.md
+ * on ops.debug.rom_seed, and the zcode.package.dev.* aliases below left by
+ * the same migration). Old dotted paths stay as aliases so every existing
+ * `zcode package fetch`-style invocation keeps resolving unchanged. */
+ZCL_COMMAND_BRANCH("zcode.package.swarm", "zcode.package",
+                   "Authenticated swarm fetch and peer view",
+                   ZCL_COMMAND_LAYER_APP)
+
 ZCL_COMMAND_READY_COMMAND(
-    "zcode.package.fetch", "zcode.package", "",
+    "zcode.package.fetch", "zcode.package.swarm", "zcode.package.fetch",
     "Fetch a package from the authenticated swarm",
     "Starts (or idempotently resumes) a swarm download of one package: "
     "`root` (64 hex) is exact identity; optional `name` is a LOCAL "
@@ -2941,7 +2953,8 @@ ZCL_COMMAND_READY_COMMAND(
     zcl_native_handle_zcode_package_fetch)
 
 ZCL_COMMAND_READY_COMMAND(
-    "zcode.package.source.reproduce", "zcode.package", "",
+    "zcode.package.source.reproduce", "zcode.package.swarm",
+    "zcode.package.source.reproduce",
     "Fetch, reconstruct, and attest one exact source package",
     "One job-root-derived package root is enough: plan first drives the "
     "authenticated provider lookup/fetch, re-derives the self-describing "
@@ -2968,7 +2981,7 @@ ZCL_COMMAND_READY_COMMAND(
     zcl_native_handle_zcode_package_source_reproduce)
 
 ZCL_COMMAND_READY_READ(
-    "zcode.package.peers", "zcode.package", "",
+    "zcode.package.peers", "zcode.package.swarm", "zcode.package.peers",
     "Swarm peers, possession, pin, and transfer snapshot",
     "The live swarm engine's per-peer view for one 64-hex package `root`: "
     "peer id, the LOCAL session pseudo-key (0x02 || SHA3-256(domain || "
@@ -2996,7 +3009,7 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_zcode_package_peers)
 
 ZCL_COMMAND_READY_READ(
-    "zcode.package.offered", "zcode.package", "",
+    "zcode.package.offered", "zcode.package.swarm", "zcode.package.offered",
     "Roots peers ANNOUNCEd this session that this node can fetch",
     "The live swarm engine's union of package roots peers have ANNOUNCEd "
     "this session, sorted by root. Each row is one 64-hex `root` with "
@@ -3075,8 +3088,17 @@ ZCL_COMMAND_READY_COMMAND(
  * leaf's job: the existing swarm fetch moves the carrier root exactly
  * like any other package, so the operator chain is fetch → admit. */
 
+/* Own branch, not direct children of zcode.package: the parent's branch
+ * menu has a fixed byte budget (contract §8), and two more full child
+ * rows pushed it past the ceiling — the contract test renders every
+ * branch menu and fails the whole push. The CLI words are unchanged
+ * (zcode package fastobj export / admit resolve through this branch). */
+ZCL_COMMAND_BRANCH("zcode.package.fastobj", "zcode.package",
+                   "Move a compile cache between nodes as one carrier",
+                   ZCL_COMMAND_LAYER_APP)
+
 ZCL_COMMAND_READY_COMMAND(
-    "zcode.package.fastobj.export", "zcode.package", "",
+    "zcode.package.fastobj.export", "zcode.package.fastobj", "",
     "Export a compile cache into the store as one carrier",
     "Scans one zcl.fastobj.v1 compile-cache directory, verifies every "
     "object+sidecar pair (sidecar schema, key-at-filename, object SHA3), "
@@ -3112,7 +3134,7 @@ ZCL_COMMAND_READY_COMMAND(
     zcl_native_handle_zcode_package_fastobj_export)
 
 ZCL_COMMAND_READY_COMMAND(
-    "zcode.package.fastobj.admit", "zcode.package", "",
+    "zcode.package.fastobj.admit", "zcode.package.fastobj", "",
     "Admit a carrier from the store into a fresh compile cache",
     "Re-derives the carrier named by the 64-hex package_root from the "
     "datadir package store — manifest re-rooted, every chunk re-hashed at "
