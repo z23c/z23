@@ -3481,7 +3481,12 @@ int main(int argc, char **argv)
 
     char env_tmpdir[4200];
     snprintf(env_tmpdir, sizeof(env_tmpdir), "TMPDIR=%s", build_root);
-    const char *const compile_env[] = { env_tmpdir, NULL };
+    /* Pinned locale/clock so neither diagnostics nor __DATE__/__TIME__ can
+     * depend on the build host — the same pinning the zbuild unit path and
+     * the release profile already apply. */
+    const char *const compile_env[] = {
+        env_tmpdir, "LANG=C", "TZ=UTC", "SOURCE_DATE_EPOCH=0", NULL,
+    };
     char san_asan[96];
     char san_ubsan[96];
     /* detect_leaks=0 is deliberate: LeakSanitizer's stop-the-world needs
@@ -4143,7 +4148,9 @@ int main(int argc, char **argv)
             char aobjs[512][96];
             size_t an = 0;
             aargv[an++] = "ar";
-            aargv[an++] = "rcs";
+            /* D = explicit deterministic mode (zeroed uid/gid/mtime): never
+             * rely on the toolchain default for a receipt-bound artifact. */
+            aargv[an++] = "rcsD";
             aargv[an++] = archive_name;
             for (size_t o = 0; o < recipe.sources.count &&
                                o < sizeof(aobjs) / sizeof(aobjs[0]);
@@ -4159,7 +4166,7 @@ int main(int argc, char **argv)
             if (!ar.launched || ar.sandbox_fail || ar.timed_out ||
                 !ar.exited || ar.exit_code != 0) {
                 fprintf(stderr,
-                        "%s: `ar rcs %s` failed (%s) — no artifact emitted\n",
+                        "%s: `ar rcsD %s` failed (%s) — no artifact emitted\n",
                         PV_LOG, archive_name,
                         ar.timed_out ? "timed out" : ar.stderr_buf);
                 emitted = false;

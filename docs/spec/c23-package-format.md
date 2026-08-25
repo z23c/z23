@@ -107,11 +107,15 @@ A Commons build is a confined observation, not an act of faith:
 
 - **Hermetic, path-scrubbed build.** The isolated worker
   (`tools/package_verify.c`) compiles under seccomp + Landlock + rlimits
-  with a scrubbed environment and `-ffile-prefix-map=SOURCE=.` so neither
-  the checkout path nor the ambient environment can enter the artifact. The
-  frozen profile forces the original AMD64/SSE2 baseline
+  with a scrubbed, pinned environment (`TMPDIR`, `LANG=C`, `TZ=UTC`,
+  `SOURCE_DATE_EPOCH=0` — so neither locale, clock, nor `__DATE__`/
+  `__TIME__` can enter diagnostics or artifacts) and
+  `-ffile-prefix-map=SOURCE=.` so the checkout path cannot enter the
+  artifact. The frozen profile forces the original AMD64/SSE2 baseline
   (`-march=x86-64 -mtune=generic`) so artifacts never depend on the build
-  host's CPU.
+  host's CPU, and the archiver runs in explicit deterministic mode
+  (`ar rcsD`: zeroed uid/gid/mtime) rather than relying on a toolchain
+  default.
 
 <!-- claim: symbol-present ZCL_C23_COMMONS_BUILD_FLAGS_QUICK_V2 config/include/config/c23_commons_build_profile.h # frozen portable profile -->
 
@@ -142,12 +146,7 @@ The following format rules are being landed; until each does, this section
    schema v2 carrying `toolchain_capsule_root`, so "same toolchain" is a
    receipt property rather than a side-band comparison. v1 receipts remain
    parseable and are never rewritten.
-2. **Emit-mode environment pinning.** The install lane's compile/archive
-   children get the same pinned environment the zbuild path already uses
-   (`LANG=C`, `TZ=UTC`, `SOURCE_DATE_EPOCH=0`) and the archiver is invoked
-   in explicit deterministic mode (`ar rcsD`) instead of relying on the
-   toolchain default.
-3. **Publish requires two agreeing reproduction hashes.** Network
+2. **Publish requires two agreeing reproduction hashes.** Network
    publication (`zcode network publish`) refuses a package whose local
    store cannot show two distinct agreeing build receipts for the exact
    semantic triple. Local CAS admission (`zcode create` commit) stays free
