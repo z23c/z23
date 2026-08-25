@@ -4,6 +4,7 @@
 #include "config/boot_zcode_dht.h"
 #include "config/boot_zcode_dht_publish_gate.h"
 #include "config/boot_zcode_dht_record_kind.h"
+#include "config/boot_zcode_dht_render.h"
 #include "config/boot_zcode_dht_replication.h"
 
 #include "base/hex.h"
@@ -147,115 +148,12 @@ static enum vcs_zcode_dht_record_kind input_record_kind(
   return boot_zcode_dht_record_kind_from_name(input_str(in, "kind"));
 }
 
-static void record_json(struct json_value *row,
-                        const struct vcs_zcode_dht_record *record,
-                        bool include_wire) {
-  char semantic[65], transport[65], provider[65], owner[65], publisher[65];
-  char record_root[65] = "";
-  char record_wire[VCS_ZCODE_DHT_RECORD_WIRE_BYTES * 2u + 1u] = "";
-  uint8_t record_id[32];
-  uint8_t wire[VCS_ZCODE_DHT_RECORD_WIRE_BYTES];
-  if (vcs_zcode_dht_record_id(record, record_id) ==
-      VCS_ZCODE_DHT_RECORD_OK)
-    zcl_hex_encode(record_id, 32, record_root);
-  if (include_wire &&
-      vcs_zcode_dht_record_encode(record, wire) == VCS_ZCODE_DHT_RECORD_OK)
-    zcl_hex_encode(wire, sizeof(wire), record_wire);
-  zcl_hex_encode(record->semantic_root, 32, semantic);
-  zcl_hex_encode(record->transport_root, 32, transport);
-  zcl_hex_encode(record->provider_node_id, 32, provider);
-  zcl_hex_encode(record->owner_group, 32, owner);
-  zcl_hex_encode(record->delegation.doc.master_pubkey, 32, publisher);
-  json_set_object(row);
-  json_push_kv_str(row, "kind", boot_zcode_dht_record_kind_name(record->kind));
-  json_push_kv_str(row, "record_root", record_root);
-  if (include_wire)
-    json_push_kv_str(row, "record_wire", record_wire);
-  json_push_kv_str(row, "namespace", record->namespace_name);
-  json_push_kv_str(row, "semantic_root", semantic);
-  json_push_kv_str(row, "transport_root", transport);
-  json_push_kv_str(row, "provider_node_id", provider);
-  json_push_kv_str(row, "publisher_zid", publisher);
-  json_push_kv_str(row, "owner_group", owner);
-  json_push_kv_int(row, "sequence", (int64_t)record->sequence);
-  json_push_kv_int(row, "not_before", (int64_t)record->not_before);
-  json_push_kv_int(row, "expiry", (int64_t)record->expiry);
-  json_push_kv_bool(row, "possession_proof", false);
-  json_push_kv_bool(row, "declared_diversity_only", true);
-}
-
-#ifdef ZCL_TESTING
-void boot_zcode_dht_publication_record_test_render(
-    struct json_value *result, const struct vcs_zcode_dht_record *record) {
-  record_json(result, record, true);
-}
-#endif
-
 static void rpc_error(struct json_value *result, const char *code,
                       const char *message) {
   json_set_object(result);
   json_push_kv_bool(result, "ok", false);
   json_push_kv_str(result, "code", code);
   json_push_kv_str(result, "message", message);
-}
-
-static const char *lookup_state_name(enum vcs_zcode_dht_lookup_state state) {
-  if (state == VCS_ZCODE_DHT_LOOKUP_COMPLETE)
-    return "complete";
-  if (state == VCS_ZCODE_DHT_LOOKUP_TIMEOUT)
-    return "timeout";
-  if (state == VCS_ZCODE_DHT_LOOKUP_NOT_FOUND)
-    return "not_found";
-  return "pending";
-}
-
-static const char *lookup_termination_name(
-    enum vcs_zcode_dht_lookup_termination termination) {
-  static const char *const names[] = {
-      "none", "target_authenticated", "shortlist_stable", "timeout",
-      "no_authenticated_result"};
-  return (unsigned)termination < VCS_ZCODE_DHT_TERMINATION_COUNT
-             ? names[termination]
-             : "unknown";
-}
-
-static void lookup_json(struct json_value *result,
-                        const struct vcs_zcode_dht_lookup_result *lookup) {
-  bool successful = lookup->state == VCS_ZCODE_DHT_LOOKUP_PENDING ||
-                    lookup->state == VCS_ZCODE_DHT_LOOKUP_COMPLETE;
-  json_set_object(result);
-  json_push_kv_bool(result, "ok", successful);
-  json_push_kv_str(result, "state", lookup_state_name(lookup->state));
-  json_push_kv_str(result, "termination",
-                   lookup_termination_name(lookup->termination));
-  json_push_kv_int(result, "rounds", lookup->rounds);
-  json_push_kv_int(result, "xor_progress", lookup->xor_progress);
-  json_push_kv_int(result, "queue_wait_seconds",
-                   (int64_t)lookup->queue_wait_s);
-  if (!successful) {
-    bool timeout = lookup->state == VCS_ZCODE_DHT_LOOKUP_TIMEOUT;
-    json_push_kv_str(result, "code",
-                     timeout ? "LOOKUP_TIMEOUT" : "LOOKUP_NOT_FOUND");
-    json_push_kv_str(
-        result, "message",
-        timeout ? "lookup reached its 30-second bounded deadline"
-                : "all authenticated queries failed without a response");
-  }
-  json_push_kv_int(result, "count", lookup->count);
-  struct json_value rows;
-  json_init(&rows);
-  json_set_array(&rows);
-  for (uint32_t i = 0; i < lookup->count; i++) {
-    char node_id[65];
-    zcl_hex_encode(lookup->node_ids[i], 32, node_id);
-    struct json_value row;
-    json_init(&row);
-    json_set_str(&row, node_id);
-    json_push_back(&rows, &row);
-    json_free(&row);
-  }
-  json_push_kv(result, "node_ids", &rows);
-  json_free(&rows);
 }
 
 static bool parse_capability(const struct json_value *in,
@@ -468,7 +366,7 @@ static bool rpc_find_poll(const struct json_value *params, bool help,
   }
   struct vcs_zcode_dht_lookup_result snapshot = entry->result;
   zcl_mutex_unlock(&g_public_lock);
-  lookup_json(result, &snapshot);
+  boot_zcode_dht_lookup_json(result, &snapshot);
   return true;
 }
 
@@ -551,7 +449,7 @@ static bool rpc_records(const struct json_value *params, bool help,
   for (size_t i = 0; i < count; i++) {
     struct json_value row;
     json_init(&row);
-    record_json(&row, &records[i], false);
+    boot_zcode_dht_record_json(&row, &records[i], false);
     json_push_back(&rows, &row);
     json_free(&row);
   }
@@ -578,6 +476,26 @@ static bool parse_publish_spec(const struct json_value *in,
   spec->not_before = (uint64_t)not_before;
   spec->expiry = (uint64_t)expiry;
   return true;
+}
+
+/* A record-contract refusal names the exact operator action. "DHT_DISABLED"
+ * stays reserved for what it says — the authenticated DHT is off — instead
+ * of also swallowing spec/delegation mistakes that look nothing like it. */
+static void publish_build_refusal(struct json_value *result,
+                                  enum vcs_zcode_dht_record_error reason) {
+  if (reason == VCS_ZCODE_DHT_RECORD_OK) {
+    rpc_error(result, "DHT_DISABLED", "authenticated DHT is disabled");
+    return;
+  }
+  if (reason == VCS_ZCODE_DHT_RECORD_DELEGATION_WINDOW) {
+    rpc_error(result, "DELEGATION_WINDOW",
+              "the loaded delegation's window does not cover the record "
+              "window; delegate with a longer expiry or publish a shorter "
+              "window");
+    return;
+  }
+  rpc_error(result, "RECORD_REFUSED",
+            vcs_zcode_dht_record_error_string(reason));
 }
 
 static bool rpc_publish_impl(
@@ -620,25 +538,27 @@ static bool rpc_publish_impl(
     return true;
   uint8_t token[32];
   struct vcs_zcode_dht_record record;
+  enum vcs_zcode_dht_record_error reason = VCS_ZCODE_DHT_RECORD_OK;
   if (strcmp(mode, "plan") == 0) {
     bool planned = evidence_kind == VCS_ZCODE_DHT_RECORD_STORAGE_ACK
         ? boot_zcode_dht_storage_ack_plan(&spec, token, &record)
         : evidence_kind == VCS_ZCODE_DHT_RECORD_SOURCE_REPRODUCTION_ACK
           ? boot_zcode_dht_source_reproduction_ack_plan(
                 &spec, token, &record)
-          : boot_zcode_dht_record_publish_plan(&spec, token, &record);
+          : boot_zcode_dht_record_publish_plan(&spec, token, &record,
+                                               &reason);
     if (!planned) {
-      rpc_error(
-          result,
-          evidence_kind == VCS_ZCODE_DHT_RECORD_STORAGE_ACK
-              ? "POSSESSION_REQUIRED"
-              : evidence_kind == VCS_ZCODE_DHT_RECORD_SOURCE_REPRODUCTION_ACK
-                ? "SOURCE_RECONSTRUCTION_REQUIRED" : "DHT_DISABLED",
-          evidence_kind == VCS_ZCODE_DHT_RECORD_STORAGE_ACK
-              ? "complete pinned bytes failed full possession proof"
-              : evidence_kind == VCS_ZCODE_DHT_RECORD_SOURCE_REPRODUCTION_ACK
-                ? "complete accepted source carrier failed exact reconstruction"
-                : "authenticated DHT is disabled");
+      if (!evidence_kind)
+        publish_build_refusal(result, reason);
+      else
+        rpc_error(
+            result,
+            evidence_kind == VCS_ZCODE_DHT_RECORD_STORAGE_ACK
+                ? "POSSESSION_REQUIRED" : "SOURCE_RECONSTRUCTION_REQUIRED",
+            evidence_kind == VCS_ZCODE_DHT_RECORD_STORAGE_ACK
+                ? "complete pinned bytes failed full possession proof"
+                : "complete accepted source carrier failed exact "
+                  "reconstruction");
       return true;
     }
   } else {
@@ -655,15 +575,19 @@ static bool rpc_publish_impl(
         : evidence_kind == VCS_ZCODE_DHT_RECORD_SOURCE_REPRODUCTION_ACK
           ? boot_zcode_dht_source_reproduction_ack_commit(
                 &spec, token, public_now(), &record)
-          : boot_zcode_dht_record_publish_commit(
-                &spec, token, public_now(), &record);
+          : boot_zcode_dht_record_publish_commit(&spec, token, public_now(),
+                                                 &record, &reason);
     if (stored != VCS_ZCODE_DHT_RECORD_STORE_ADDED &&
         stored != VCS_ZCODE_DHT_RECORD_STORE_DUPLICATE &&
         stored != VCS_ZCODE_DHT_RECORD_STORE_CONFLICT) {
-      rpc_error(result,
-                stored == VCS_ZCODE_DHT_RECORD_STORE_STALE
-                    ? "STALE_PLAN" : "PUBLISH_REFUSED",
-                vcs_zcode_dht_record_store_result_string(stored));
+      if (!evidence_kind && reason != VCS_ZCODE_DHT_RECORD_OK &&
+          stored == VCS_ZCODE_DHT_RECORD_STORE_INVALID)
+        publish_build_refusal(result, reason);
+      else
+        rpc_error(result,
+                  stored == VCS_ZCODE_DHT_RECORD_STORE_STALE
+                      ? "STALE_PLAN" : "PUBLISH_REFUSED",
+                  vcs_zcode_dht_record_store_result_string(stored));
       return true;
     }
   }
@@ -676,7 +600,7 @@ static bool rpc_publish_impl(
   json_push_kv_str(result, "plan_token", token_hex);
   struct json_value row;
   json_init(&row);
-  record_json(&row, &record, true);
+  boot_zcode_dht_record_json(&row, &record, true);
   json_push_kv(result, "record", &row);
   json_free(&row);
   return true;
@@ -695,37 +619,6 @@ static bool rpc_source_reproduction_ack(const struct json_value *params, bool he
   return rpc_publish_impl(params, help, result,
                           VCS_ZCODE_DHT_RECORD_SOURCE_REPRODUCTION_ACK);
 }
-
-static void provider_route_json(
-    struct json_value *result, const struct vcs_zcode_dht_provider_route *route,
-    enum vcs_swarm_fetch_result fetched) {
-  bool scheduled = fetched == VCS_SWARM_FETCH_OK ||
-                   fetched == VCS_SWARM_FETCH_ALREADY_COMPLETE;
-  json_set_object(result);
-  json_push_kv_bool(result, "ok", scheduled);
-  if (!scheduled) {
-    json_push_kv_str(result, "code", "FETCH_REFUSED");
-    json_push_kv_str(result, "error",
-                     vcs_swarm_fetch_result_string(fetched));
-  }
-  json_push_kv_int(result, "authenticated_providers",
-                   route->authenticated_count);
-  json_push_kv_int(result, "reachability_pending",
-                   route->reachability_pending);
-  json_push_kv_int(result, "policy_denied", route->policy_denied);
-  json_push_kv_str(result, "fetch_result",
-                   vcs_swarm_fetch_result_string(fetched));
-  json_push_kv_bool(result, "restricted", true);
-}
-
-#ifdef ZCL_TESTING
-void boot_zcode_dht_provider_route_test_render(
-    struct json_value *result,
-    const struct vcs_zcode_dht_provider_route *route, uint32_t fetch_result) {
-  provider_route_json(result, route,
-                      (enum vcs_swarm_fetch_result)fetch_result);
-}
-#endif
 
 static bool rpc_provider_route(const struct json_value *params, bool help,
                                struct json_value *result) {
@@ -771,7 +664,7 @@ static bool rpc_provider_route(const struct json_value *params, bool help,
         : vcs_swarm_engine_fetch_from(
               engine, selector.root, (int64_t)(now / 86400u), now,
               route.peer_ids, route.authenticated_count);
-  provider_route_json(result, &route, fetched);
+  boot_zcode_dht_provider_route_json(result, &route, fetched);
   bool package_ns = strcmp(selector.namespace_name, "zclassic23.package") == 0;
   boot_zcode_package_import_render(package_ns ? engine : NULL, selector.root,
                                    fetched, result);

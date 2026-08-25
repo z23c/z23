@@ -49,11 +49,19 @@ static void publication_mark_dirty(struct vcs_zcode_dht_service *service,
   service->persistence_generation++;
 }
 
+/* Build the signed record and its plan token. On refusal, *reason (when
+ * non-NULL) says which named record contract failed — VCS_ZCODE_DHT_RECORD_OK
+ * still means "not a record-contract refusal" (service disabled, null input,
+ * or ack-kind guard), so callers can tell "enable the DHT" apart from "fix
+ * the spec or re-delegate". */
 static bool publication_build(
     struct vcs_zcode_dht_service *service,
     const struct vcs_zcode_dht_publish_spec *spec,
-    struct vcs_zcode_dht_record *record, uint8_t token[32], bool allow_ack)
+    struct vcs_zcode_dht_record *record, uint8_t token[32], bool allow_ack,
+    enum vcs_zcode_dht_record_error *reason)
 {
+  if (reason)
+    *reason = VCS_ZCODE_DHT_RECORD_OK;
   if (!service || !service->enabled || !service->record_store || !spec ||
       !record || !token ||
       ((spec->kind == VCS_ZCODE_DHT_RECORD_STORAGE_ACK ||
@@ -73,13 +81,21 @@ static bool publication_build(
   record->not_before = spec->not_before;
   record->expiry = spec->expiry;
   record->delegation = service->delegation;
-  if (vcs_zcode_dht_record_sign(record, service->online_seed) !=
-      VCS_ZCODE_DHT_RECORD_OK)
+  enum vcs_zcode_dht_record_error signed_error =
+      vcs_zcode_dht_record_sign(record, service->online_seed);
+  if (signed_error != VCS_ZCODE_DHT_RECORD_OK) {
+    if (reason)
+      *reason = signed_error;
     return false;
+  }
   uint8_t wire[VCS_ZCODE_DHT_RECORD_WIRE_BYTES], stream_digest[32];
-  if (vcs_zcode_dht_record_encode(record, wire) !=
-      VCS_ZCODE_DHT_RECORD_OK)
+  enum vcs_zcode_dht_record_error encoded_error =
+      vcs_zcode_dht_record_encode(record, wire);
+  if (encoded_error != VCS_ZCODE_DHT_RECORD_OK) {
+    if (reason)
+      *reason = encoded_error;
     return false;
+  }
   /* A plan governs one signed publication stream. Hashing the entire record
    * store made unrelated incoming gossip race every local plan/commit pair. */
   vcs_zcode_dht_record_store_stream_digest(
@@ -97,13 +113,15 @@ static bool publication_build(
 bool vcs_zcode_dht_service_record_publish_plan(
     struct vcs_zcode_dht_service *service,
     const struct vcs_zcode_dht_publish_spec *spec, uint8_t plan_token[32],
-    struct vcs_zcode_dht_record *record_out)
+    struct vcs_zcode_dht_record *record_out,
+    enum vcs_zcode_dht_record_error *reason)
 {
   if (plan_token)
     memset(plan_token, 0, 32);
   if (record_out)
     memset(record_out, 0, sizeof(*record_out));
-  return publication_build(service, spec, record_out, plan_token, false);
+  return publication_build(service, spec, record_out, plan_token, false,
+                           reason);
 }
 
 static struct service_publication *publication_slot(
@@ -120,15 +138,18 @@ vcs_zcode_dht_service_record_publish_commit(
     struct vcs_zcode_dht_service *service,
     const struct vcs_zcode_dht_publish_spec *spec,
     const uint8_t plan_token[32], struct vcs_zcode_dht_time now,
-    struct vcs_zcode_dht_record *record_out)
+    struct vcs_zcode_dht_record *record_out,
+    enum vcs_zcode_dht_record_error *reason)
 {
   uint8_t expected[32], difference = 0;
   struct vcs_zcode_dht_record record;
   struct service_publication *publication = publication_slot(service);
+  if (reason)
+    *reason = VCS_ZCODE_DHT_RECORD_OK;
   if (!publication)
     return VCS_ZCODE_DHT_RECORD_STORE_GLOBAL_CAP;
   if (!plan_token ||
-      !publication_build(service, spec, &record, expected, false))
+      !publication_build(service, spec, &record, expected, false, reason))
     return VCS_ZCODE_DHT_RECORD_STORE_INVALID;
   for (size_t i = 0; i < 32; i++)
     difference |= expected[i] ^ plan_token[i];
@@ -160,7 +181,7 @@ bool vcs_zcode_dht_storage_ack_plan_verified(
 {
   if (!spec || spec->kind != VCS_ZCODE_DHT_RECORD_STORAGE_ACK)
     return false;
-  return publication_build(service, spec, record_out, plan_token, true);
+  return publication_build(service, spec, record_out, plan_token, true, NULL);
 }
 
 static bool publication_owner_group_is_zero(const uint8_t owner_group[32])
@@ -200,7 +221,7 @@ bool vcs_zcode_dht_source_reproduction_ack_plan_verified(
              service, spec, VCS_ZCODE_DHT_RECORD_SOURCE_REPRODUCTION_ACK,
              &normalized) &&
       publication_build(
-          service, &normalized, record_out, plan_token, true);
+          service, &normalized, record_out, plan_token, true, NULL);
 }
 
 struct storage_ack_plan_apply {
@@ -256,7 +277,7 @@ vcs_zcode_dht_storage_ack_commit_verified(
     return VCS_ZCODE_DHT_RECORD_STORE_GLOBAL_CAP;
   if (!spec || spec->kind != VCS_ZCODE_DHT_RECORD_STORAGE_ACK ||
       !plan_token ||
-      !publication_build(service, spec, &record, expected, true))
+      !publication_build(service, spec, &record, expected, true, NULL))
     return VCS_ZCODE_DHT_RECORD_STORE_INVALID;
   for (size_t i = 0; i < 32; i++)
     difference |= expected[i] ^ plan_token[i];
@@ -303,7 +324,7 @@ vcs_zcode_dht_source_reproduction_ack_commit_verified(
           service, spec, VCS_ZCODE_DHT_RECORD_SOURCE_REPRODUCTION_ACK,
           &normalized) ||
       !publication_build(
-          service, &normalized, &record, expected, true))
+          service, &normalized, &record, expected, true, NULL))
     return VCS_ZCODE_DHT_RECORD_STORE_INVALID;
   for (size_t i = 0; i < 32; i++)
     difference |= expected[i] ^ plan_token[i];

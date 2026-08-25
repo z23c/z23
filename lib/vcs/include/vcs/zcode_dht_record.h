@@ -45,6 +45,10 @@ enum vcs_zcode_dht_record_error {
   VCS_ZCODE_DHT_RECORD_OWNER_GROUP,
   VCS_ZCODE_DHT_RECORD_SEQUENCE,
   VCS_ZCODE_DHT_RECORD_WINDOW,
+  /* The record's own window is well-formed but the loaded delegation does
+   * not cover it — a different operator action than reshaping the record:
+   * re-delegate with a longer expiry or publish a shorter window. */
+  VCS_ZCODE_DHT_RECORD_DELEGATION_WINDOW,
   VCS_ZCODE_DHT_RECORD_NOT_YET_VALID,
   VCS_ZCODE_DHT_RECORD_EXPIRED,
   VCS_ZCODE_DHT_RECORD_DELEGATION,

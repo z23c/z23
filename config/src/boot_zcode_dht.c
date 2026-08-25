@@ -715,10 +715,13 @@ bool boot_zcode_dht_provider_route(
 
 bool boot_zcode_dht_record_publish_plan(
     const struct vcs_zcode_dht_publish_spec *spec, uint8_t plan_token[32],
-    struct vcs_zcode_dht_record *record_out) {
+    struct vcs_zcode_dht_record *record_out,
+    enum vcs_zcode_dht_record_error *reason) {
+  if (reason)
+    *reason = VCS_ZCODE_DHT_RECORD_OK;
   dht_lock();
   bool ok = g_dht && vcs_zcode_dht_service_record_publish_plan(
-                         g_dht, spec, plan_token, record_out);
+                         g_dht, spec, plan_token, record_out, reason);
   zcl_mutex_unlock(&g_dht_lock);
   return ok;
 }
@@ -726,11 +729,14 @@ bool boot_zcode_dht_record_publish_plan(
 enum vcs_zcode_dht_record_store_result boot_zcode_dht_record_publish_commit(
     const struct vcs_zcode_dht_publish_spec *spec,
     const uint8_t plan_token[32], struct vcs_zcode_dht_time now,
-    struct vcs_zcode_dht_record *record_out) {
+    struct vcs_zcode_dht_record *record_out,
+    enum vcs_zcode_dht_record_error *reason) {
+  if (reason)
+    *reason = VCS_ZCODE_DHT_RECORD_OK;
   dht_lock();
   enum vcs_zcode_dht_record_store_result result =
       g_dht ? vcs_zcode_dht_service_record_publish_commit(
-                  g_dht, spec, plan_token, now, record_out)
+                  g_dht, spec, plan_token, now, record_out, reason)
             : VCS_ZCODE_DHT_RECORD_STORE_INVALID;
   zcl_mutex_unlock(&g_dht_lock);
   return result;

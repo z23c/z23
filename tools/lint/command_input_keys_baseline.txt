@@ -38,6 +38,13 @@ zcode.package.dev.publish.commit recipe_hex # accepted-lane commit injects its t
 zcode.package.source.reproduce day # nested package fetch reads this only from the private fetch object; reproduce does not copy request->input day into that object.
 zcode.package.source.reproduce maximum_bytes # reproduce injects the fixed source-carrier ceiling into its private package-fetch request; request->input never reaches that helper.
 zcode.package.source.reproduce name # nested package fetch reads this only from the private fetch object; reproduce copies root, not a local library name, into that object.
+zcode.package.attest.pull kind # pointer discovery fixes kind=pointer in its private records request; request->input never reaches the nested handler.
+zcode.package.attest.pull namespace # pointer discovery injects the fixed attestation namespace into its private records request; request->input never reaches it.
+zcode.package.attest.pull semantic_root # pointer discovery injects the attested package root as semantic_root into its private records request; request->input never reaches it.
+zcode.package.attest.pull root # attestation fetch injects the discovered transport root into its private package-fetch request; request->input never reaches it.
+zcode.package.attest.pull maximum_bytes # attestation fetch injects the fixed attestation wire ceiling into its private package-fetch request; request->input never reaches it.
+zcode.package.attest.pull day # nested package fetch reads this only from the private fetch object; attest pull builds that object itself and never copies a day into it.
+zcode.package.attest.pull name # nested package fetch reads this only from the private fetch object; attest pull fetches by transport root, never by local library name.
 metaverse.space.plan delegation_wire # delegation authorization serializes a private RPC object; request->input never reaches that helper.
 metaverse.space.commit delegation_wire # delegation authorization serializes a private RPC object; request->input never reaches that helper.
 metaverse.space.show delegation_wire # delegation authorization serializes a private RPC object; request->input never reaches that helper.

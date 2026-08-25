@@ -987,10 +987,10 @@ static bool zwn_discover_transport(
     struct vcs_zcode_dht_record record;
     stage = "publish";
     ok = vcs_zcode_dht_service_record_publish_plan(
-             publisher_dht, &pointer_spec, plan_token, &record) &&
+             publisher_dht, &pointer_spec, plan_token, &record, NULL) &&
          vcs_zcode_dht_service_record_publish_commit(
              publisher_dht, &pointer_spec, plan_token, zwn_dht_time(now),
-             &record) == VCS_ZCODE_DHT_RECORD_STORE_ADDED;
+             &record, NULL) == VCS_ZCODE_DHT_RECORD_STORE_ADDED;
     if (!ok)
         goto out;
 
@@ -1045,11 +1045,12 @@ static bool zwn_discover_transport(
     struct vcs_zcode_dht_record provider_record;
     stage = "provider-publish";
     ok = vcs_zcode_dht_service_record_publish_plan(
-             publisher_dht, &provider_spec, plan_token, &provider_record) &&
+             publisher_dht, &provider_spec, plan_token, &provider_record,
+             NULL) &&
          vcs_zcode_dht_service_record_publish_commit(
              publisher_dht, &provider_spec, plan_token,
              zwn_dht_time(now + 1),
-             &provider_record) == VCS_ZCODE_DHT_RECORD_STORE_ADDED;
+             &provider_record, NULL) == VCS_ZCODE_DHT_RECORD_STORE_ADDED;
     if (!ok)
         goto out;
 
@@ -1133,7 +1134,7 @@ static bool zwn_author_storage_ack(
     uint8_t plan_token[32];
     struct vcs_zcode_dht_record generic_record;
     bool ok = !vcs_zcode_dht_service_record_publish_plan(
-                  service, &spec, plan_token, &generic_record) &&
+                  service, &spec, plan_token, &generic_record, NULL) &&
         vcs_zcode_dht_service_storage_ack_plan(
             service, provider->store, &spec, plan_token, record_out) &&
         vcs_zcode_dht_service_storage_ack_commit(

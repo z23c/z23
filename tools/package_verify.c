@@ -920,17 +920,21 @@ struct pv_compiler {
 static void pv_detail_from_stderr(const char *prefix, const char *stderr_buf,
                                   char *out, size_t out_cap)
 {
-    char line[200];
+    /* A modern sandboxed compile reports absolute attempt paths; the
+     * materialized `<work>/src/<package-relative>` path alone can pass
+     * 200 bytes on a deep checkout, which used to cut the line before
+     * its `: error:` marker and mangle the repair coordinates. */
+    char line[512];
     line[0] = '\0';
     const char *p = stderr_buf;
-    char first[200];
+    char first[512];
     first[0] = '\0';
     while (p && *p) {
         const char *nl = strchr(p, '\n');
         size_t len = nl ? (size_t)(nl - p) : strlen(p);
         if (len >= sizeof(line))
             len = sizeof(line) - 1;
-        char cur[200];
+        char cur[512];
         memcpy(cur, p, len);
         cur[len] = '\0';
         if (cur[0] && !first[0])

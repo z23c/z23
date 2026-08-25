@@ -1008,10 +1008,15 @@ bool zcl_command_registry_input_validate(const struct zcl_command_spec *spec,
                    strcmp(key, "relink_generation") == 0 ||
                    strcmp(key, "wait_for_edit") == 0 ||
                    strcmp(key, "all") == 0 ||
-                   strcmp(key, "allow_high_fees") == 0) {
+                   strcmp(key, "allow_high_fees") == 0 ||
+                   strcmp(key, "include_evidence_wires") == 0) {
             /* `all` is app.shop.want.list's "include expired and cancelled
              * rows" flag — a bool in its declared schema; the default
-             * string branch made it uninvokable from the shell. */
+             * string branch made it uninvokable from the shell.
+             * `include_evidence_wires` is zcode.network.records' signed-wire
+             * opt-in, parsed as a bool by the DHT record RPC it forwards
+             * to; the string branch made the leaf's own documented flag
+             * unpassable while raw RPC accepted it fine. */
             type_ok = value->type == JSON_BOOL;
         } else if (strcmp(key, "effects") == 0) {
             /* vault.intent.plan owns the strict nested effect contract. The

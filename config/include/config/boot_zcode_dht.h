@@ -86,11 +86,13 @@ void boot_zcode_package_download_render(
     const struct vcs_swarm_download_status *status);
 bool boot_zcode_dht_record_publish_plan(
     const struct vcs_zcode_dht_publish_spec *spec, uint8_t plan_token[32],
-    struct vcs_zcode_dht_record *record_out);
+    struct vcs_zcode_dht_record *record_out,
+    enum vcs_zcode_dht_record_error *reason);
 enum vcs_zcode_dht_record_store_result boot_zcode_dht_record_publish_commit(
     const struct vcs_zcode_dht_publish_spec *spec,
     const uint8_t plan_token[32], struct vcs_zcode_dht_time now,
-    struct vcs_zcode_dht_record *record_out);
+    struct vcs_zcode_dht_record *record_out,
+    enum vcs_zcode_dht_record_error *reason);
 bool boot_zcode_dht_storage_ack_plan(
     const struct vcs_zcode_dht_publish_spec *spec, uint8_t plan_token[32],
     struct vcs_zcode_dht_record *record_out);

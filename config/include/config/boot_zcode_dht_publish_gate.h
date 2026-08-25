@@ -15,11 +15,18 @@ struct json_value;
  * node's own store holds a committed release naming the root AND the store's
  * receipts directory evidences reproduction: >= 2 distinct byte-identical
  * installable build receipts for the exact (package_root, recipe_root) pair
- * the signed release commits (vcs_package_reproduce_scan). Everything else
+ * the signed release commits (vcs_package_reproduce_scan). The transport
+ * half of the same claim: transport_root must classify as a complete signed
+ * transport carrier in this store (vcs_package_public_shape_classify) and
+ * re-import to exactly the named package root
+ * (vcs_package_transport_import), so a consumer's fetch cannot fail on a
+ * wrong-shaped or unbound root the publisher never checked. Everything else
  * refuses BEFORE a plan token exists, so plan and commit are gated
  * identically. Returns true when the publish may proceed; on refusal result
  * carries the exact named code (NO_PACKAGE_STORE, PACKAGE_INDEX_UNAVAILABLE,
- * UNKNOWN_PACKAGE, RELEASE_UNREADABLE, REPRODUCTION_NOT_EVIDENCED) in the
+ * UNKNOWN_PACKAGE, RELEASE_UNREADABLE, REPRODUCTION_NOT_EVIDENCED,
+ * TRANSPORT_ROOT_NOT_CARRIER, TRANSPORT_IMPORT_REFUSED,
+ * TRANSPORT_ROOT_NOT_BOUND) in the
  * ok/code/message shape every RPC refusal in this layer uses. */
 bool boot_zcode_dht_package_pointer_publish_gate(
     const struct vcs_zcode_dht_publish_spec *spec, struct json_value *result);
