@@ -66,6 +66,9 @@ does not authorize execution or deployment.
 
 - [`work/ZCODE_PLAN.md`](work/ZCODE_PLAN.md) — package and source protocol
   design.
+- [`spec/c23-package-format.md`](spec/c23-package-format.md) — normative
+  package format: root-only identity, versions as DAG edges, package anatomy
+  discipline, and proven (not hoped) build determinism.
 - [`C23_COMMONS_QUICKSTART.md`](C23_COMMONS_QUICKSTART.md) — concise public
   workflow and its current portability/reproduction limits.
 - [`ZVCS.md`](ZVCS.md) — in-binary source identity and versioning.
