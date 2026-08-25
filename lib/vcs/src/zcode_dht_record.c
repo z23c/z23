@@ -43,6 +43,8 @@ const char *vcs_zcode_dht_record_error_string(
   case VCS_ZCODE_DHT_RECORD_OWNER_GROUP: return "owner-group";
   case VCS_ZCODE_DHT_RECORD_SEQUENCE: return "record-sequence";
   case VCS_ZCODE_DHT_RECORD_WINDOW: return "validity-window";
+  case VCS_ZCODE_DHT_RECORD_DELEGATION_WINDOW:
+    return "delegation-window-coverage";
   case VCS_ZCODE_DHT_RECORD_NOT_YET_VALID: return "not-yet-valid";
   case VCS_ZCODE_DHT_RECORD_EXPIRED: return "expired";
   case VCS_ZCODE_DHT_RECORD_DELEGATION: return "delegation";
@@ -167,7 +169,7 @@ static enum vcs_zcode_dht_record_error record_shape(
     return VCS_ZCODE_DHT_RECORD_WINDOW;
   if (record->delegation.not_before > record->not_before ||
       record->delegation.doc.expiry < record->expiry)
-    return VCS_ZCODE_DHT_RECORD_WINDOW;
+    return VCS_ZCODE_DHT_RECORD_DELEGATION_WINDOW;
   return VCS_ZCODE_DHT_RECORD_OK;
 }
 

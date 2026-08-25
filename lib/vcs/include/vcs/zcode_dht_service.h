@@ -384,16 +384,21 @@ struct vcs_zcode_dht_publish_spec {
   uint64_t not_before;
   uint64_t expiry;
 };
+/* On refusal, *reason (nullable) names the failed record contract; OK means
+ * the refusal was not a record-contract one (service disabled, null input) —
+ * the two call for different operator actions. */
 bool vcs_zcode_dht_service_record_publish_plan(
     struct vcs_zcode_dht_service *service,
     const struct vcs_zcode_dht_publish_spec *spec, uint8_t plan_token[32],
-    struct vcs_zcode_dht_record *record_out);
+    struct vcs_zcode_dht_record *record_out,
+    enum vcs_zcode_dht_record_error *reason);
 enum vcs_zcode_dht_record_store_result
 vcs_zcode_dht_service_record_publish_commit(
     struct vcs_zcode_dht_service *service,
     const struct vcs_zcode_dht_publish_spec *spec,
     const uint8_t plan_token[32], struct vcs_zcode_dht_time now,
-    struct vcs_zcode_dht_record *record_out);
+    struct vcs_zcode_dht_record *record_out,
+    enum vcs_zcode_dht_record_error *reason);
 
 /* STORAGE_ACK has a separate authorship path. Both plan and commit require a
  * complete, pinned package and re-hash its manifest and every chunk. Generic

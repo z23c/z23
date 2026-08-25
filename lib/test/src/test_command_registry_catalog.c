@@ -200,6 +200,63 @@ static int test_yardsale_guide(void)
     return failures;
 }
 
+static int test_network_records_leaf_input(void)
+{
+    int failures = 0;
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    TEST("zcode.network.records takes pointer selectors and a bool evidence"
+         " flag") {
+        const struct zcl_command_spec *s =
+            find_spec(reg, "zcode.network.records");
+        ASSERT(s != NULL);
+        char why[160];
+        /* The leaf's own documented example: a POINTER selector addressed
+         * by semantic_root. The CLI transport must pass it — a selector
+         * the daemon would accept is useless if the CLI drops it. */
+        struct json_value input;
+        json_init(&input);
+        json_set_object(&input);
+        json_push_kv_str(&input, "kind", "pointer");
+        json_push_kv_str(&input, "namespace", "science.study");
+        json_push_kv_str(&input, "semantic_root",
+                         "c228c203b1e621b6c1145b42cba36f5dc7641821"
+                         "32a6e9822ed450af8a3f5d70");
+        ASSERT(zcl_command_registry_input_validate(s, &input, why,
+                                                   sizeof(why)));
+        json_free(&input);
+        /* The signed-wire opt-in is a JSON bool on the RPC side; the
+         * default nonempty-string branch used to make it unpassable from
+         * the shell while raw RPC accepted it. */
+        json_init(&input);
+        json_set_object(&input);
+        json_push_kv_str(&input, "kind", "provider");
+        json_push_kv_str(&input, "namespace", "zclassic23.package");
+        json_push_kv_str(&input, "transport_root",
+                         "fa4a94cdd0a6f491d1998255f15cbc98e45e5176"
+                         "0faddda570689901aeca1bf7");
+        json_push_kv_bool(&input, "include_evidence_wires", true);
+        ASSERT(zcl_command_registry_input_validate(s, &input, why,
+                                                   sizeof(why)));
+        json_free(&input);
+        /* A bool is a bool: the string spelling is refused, same as every
+         * other bool key in the contract. */
+        json_init(&input);
+        json_set_object(&input);
+        json_push_kv_str(&input, "kind", "provider");
+        json_push_kv_str(&input, "namespace", "zclassic23.package");
+        json_push_kv_str(&input, "transport_root",
+                         "fa4a94cdd0a6f491d1998255f15cbc98e45e5176"
+                         "0faddda570689901aeca1bf7");
+        json_push_kv_str(&input, "include_evidence_wires", "true");
+        ASSERT(!zcl_command_registry_input_validate(s, &input, why,
+                                                    sizeof(why)));
+        ASSERT(strstr(why, "include_evidence_wires") != NULL);
+        json_free(&input);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_code_guide_leaf(void)
 {
     int failures = 0;
@@ -3905,6 +3962,7 @@ int test_command_registry_catalog(void)
 {
     int failures = 0;
     failures += test_catalog_wellformed();
+    failures += test_network_records_leaf_input();
     failures += test_ops_statecatalog_matches_registry();
     failures += test_ops_statecatalog_paging_and_lookup();
     failures += test_ops_statecatalog_paging_covers_all();

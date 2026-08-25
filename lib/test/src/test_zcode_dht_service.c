@@ -6,9 +6,12 @@
 #include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "chain/chain.h"
+#include "core/uint256.h"
 #include "config/boot_zcode_dht.h"
 #include "crypto/ed25519.h"
 #include "json/json.h"
+#include "keys/key.h"
+#include "keys/pubkey.h"
 #include "net/net.h"
 #include "rpc/server.h"
 #include "services/metaverse_space_scout_service.h"
@@ -18,8 +21,10 @@
 #include "vcs/blob_store.h"
 #include "vcs/package_build.h"
 #include "vcs/package_manifest.h"
+#include "vcs/package_prepare.h"
 #include "vcs/package_release.h"
 #include "vcs/package_store.h"
+#include "vcs/package_transport.h"
 #include "vcs/package_swarm.h"
 #include "vcs/package_swarm_node.h"
 #include "vcs/space.h"
@@ -1000,10 +1005,10 @@ static int test_publication_monotonic_retry(void) {
     uint8_t token[32];
     struct vcs_zcode_dht_record record;
     ASSERT(vcs_zcode_dht_service_record_publish_plan(
-        service, &spec, token, &record));
+        service, &spec, token, &record, NULL));
     struct vcs_zcode_dht_time now = test_time(1000);
     ASSERT_EQ(vcs_zcode_dht_service_record_publish_commit(
-                  service, &spec, token, now, &record),
+                  service, &spec, token, now, &record, NULL),
               VCS_ZCODE_DHT_RECORD_STORE_ADDED);
     struct vcs_zcode_dht_service_status status;
     for (size_t i = 0; i < 4; i++) {
@@ -1055,6 +1060,56 @@ _test_next:;
   return failures;
 }
 
+/* A record whose own window is legal but extends past the loaded delegation
+ * is an operator mistake with its own remedy — re-delegate or shorten the
+ * window — and the refusal must say which, both through the record error and
+ * without disturbing DHT_DISABLED's meaning at the RPC edge. */
+static int test_publication_delegation_window(void) {
+  int failures = 0;
+  TEST("zcode dht service: delegation-window refusal names itself") {
+    char dir[] = "/tmp/zcl_dht_publication_window_XXXXXX";
+    ASSERT(mkdtemp(dir) != NULL);
+    uint8_t genesis[32], noise[32];
+    memset(genesis, 0x11, sizeof(genesis));
+    memset(noise, 0x42, sizeof(noise));
+    /* fixture_identity delegates [1000, 90000]. */
+    ASSERT(fixture_identity(dir, 0x6a, genesis, noise));
+    struct vcs_zcode_dht_service *service =
+        fixture_service_at(dir, genesis, noise, 1000);
+    ASSERT(service != NULL);
+    struct vcs_zcode_dht_publish_spec spec;
+    memset(&spec, 0, sizeof(spec));
+    spec.kind = VCS_ZCODE_DHT_RECORD_POINTER;
+    (void)snprintf(spec.namespace_name, sizeof(spec.namespace_name),
+                   "science");
+    memset(spec.semantic_root, 0x73, 32);
+    memset(spec.transport_root, 0x74, 32);
+    spec.sequence = 1;
+    spec.not_before = 1000;
+    spec.expiry = 91000; /* legal for a pointer, past the delegation. */
+    uint8_t token[32];
+    struct vcs_zcode_dht_record record;
+    enum vcs_zcode_dht_record_error reason = VCS_ZCODE_DHT_RECORD_OK;
+    ASSERT(!vcs_zcode_dht_service_record_publish_plan(service, &spec, token,
+                                                      &record, &reason));
+    ASSERT_EQ(reason, VCS_ZCODE_DHT_RECORD_DELEGATION_WINDOW);
+    ASSERT_STR_EQ(vcs_zcode_dht_record_error_string(reason),
+                  "delegation-window-coverage");
+    /* The refusal is about coverage, not the record's own shape: a window
+     * the delegation covers plans fine with the same inputs otherwise. */
+    spec.expiry = 90000;
+    reason = VCS_ZCODE_DHT_RECORD_SIGNER;
+    ASSERT(vcs_zcode_dht_service_record_publish_plan(service, &spec, token,
+                                                     &record, &reason));
+    ASSERT_EQ(reason, VCS_ZCODE_DHT_RECORD_OK);
+    vcs_zcode_dht_service_free(service, test_time(1000));
+    cleanup_fixture(dir);
+    PASS();
+  }
+_test_next:;
+  return failures;
+}
+
 /* The ceiling on how many records ONE node keeps announced is not an abstract
  * number: it decides whether a node can host the product's own demo. The
  * multi-host commons journey measured the floor at eleven records for five
@@ -1098,9 +1153,9 @@ static int test_publication_ceiling_hosts_a_real_node(void) {
       spec.not_before = 1000;
       spec.expiry = 1300;
       ASSERT(vcs_zcode_dht_service_record_publish_plan(
-          service, &spec, token, &record));
+          service, &spec, token, &record, NULL));
       ASSERT_EQ(vcs_zcode_dht_service_record_publish_commit(
-                    service, &spec, token, now, &record),
+                    service, &spec, token, now, &record, NULL),
                 VCS_ZCODE_DHT_RECORD_STORE_ADDED);
     }
     /* The ceiling is still a ceiling, and it still says so by name. */
@@ -1117,9 +1172,9 @@ static int test_publication_ceiling_hosts_a_real_node(void) {
     over.not_before = 1000;
     over.expiry = 1300;
     ASSERT(vcs_zcode_dht_service_record_publish_plan(
-        service, &over, over_token, &over_record));
+        service, &over, over_token, &over_record, NULL));
     ASSERT_EQ(vcs_zcode_dht_service_record_publish_commit(
-                  service, &over, over_token, now, &over_record),
+                  service, &over, over_token, now, &over_record, NULL),
               VCS_ZCODE_DHT_RECORD_STORE_GLOBAL_CAP);
     ASSERT_STR_EQ(vcs_zcode_dht_record_store_result_string(
                       VCS_ZCODE_DHT_RECORD_STORE_GLOBAL_CAP),
@@ -1254,9 +1309,10 @@ static int test_record_churn_fallback(void) {
     uint8_t token[32];
     struct vcs_zcode_dht_record published;
     ASSERT(vcs_zcode_dht_service_record_publish_plan(
-        net.service[origin], &publish, token, &published));
+        net.service[origin], &publish, token, &published, NULL));
     ASSERT_EQ(vcs_zcode_dht_service_record_publish_commit(
-                  net.service[origin], &publish, token, net.now, &published),
+                  net.service[origin], &publish, token, net.now, &published,
+                  NULL),
               VCS_ZCODE_DHT_RECORD_STORE_ADDED);
     struct vcs_zcode_dht_publication_test_view churn_view;
     bool lookup_ready = false;
@@ -1527,7 +1583,7 @@ static int test_record_transport_and_restart(void) {
     uint8_t plan_token[32];
     struct vcs_zcode_dht_record published_record;
     ASSERT(vcs_zcode_dht_service_record_publish_plan(
-        a, &publish, plan_token, &published_record));
+        a, &publish, plan_token, &published_record, NULL));
 
     /* Unrelated authenticated gossip may arrive between the two operator
      * calls. It changes the global store, but not the intended publication
@@ -1538,14 +1594,21 @@ static int test_record_transport_and_restart(void) {
                   a, &unrelated, test_time(1002)),
               VCS_ZCODE_DHT_RECORD_STORE_ADDED);
     ASSERT_EQ(vcs_zcode_dht_service_record_publish_commit(
-                  a, &publish, plan_token, test_time(1002), &published_record),
+                  a, &publish, plan_token, test_time(1002), &published_record,
+                  NULL),
               VCS_ZCODE_DHT_RECORD_STORE_ADDED);
     ASSERT_EQ(vcs_zcode_dht_service_record_publish_commit(
-                  a, &publish, plan_token, test_time(1002), &published_record),
+                  a, &publish, plan_token, test_time(1002), &published_record,
+                  NULL),
               VCS_ZCODE_DHT_RECORD_STORE_STALE);
+    /* The generic publisher refuses evidence kinds without a record-contract
+     * complaint — the refusal reason stays OK. */
     publish.kind = VCS_ZCODE_DHT_RECORD_STORAGE_ACK;
+    enum vcs_zcode_dht_record_error evidence_reason =
+        VCS_ZCODE_DHT_RECORD_SIGNER;
     ASSERT(!vcs_zcode_dht_service_record_publish_plan(
-        a, &publish, plan_token, &published_record));
+        a, &publish, plan_token, &published_record, &evidence_reason));
+    ASSERT_EQ(evidence_reason, VCS_ZCODE_DHT_RECORD_OK);
     publish.kind = VCS_ZCODE_DHT_RECORD_POINTER;
 
     struct vcs_zcode_dht_record first;
@@ -1681,8 +1744,10 @@ static int test_record_transport_and_restart(void) {
     ack_spec.expiry = 2000;
     uint8_t ack_token[32];
     struct vcs_zcode_dht_record ack_record;
+    enum vcs_zcode_dht_record_error ack_reason = VCS_ZCODE_DHT_RECORD_SIGNER;
     ASSERT(!vcs_zcode_dht_service_record_publish_plan(
-        a, &ack_spec, ack_token, &ack_record));
+        a, &ack_spec, ack_token, &ack_record, &ack_reason));
+    ASSERT_EQ(ack_reason, VCS_ZCODE_DHT_RECORD_OK);
     ASSERT(vcs_zcode_dht_service_storage_ack_plan(
         a, ack_store, &ack_spec, ack_token, &ack_record));
     ASSERT_EQ(vcs_zcode_dht_service_storage_ack_commit(
@@ -1701,9 +1766,12 @@ static int test_record_transport_and_restart(void) {
     memset(reproduction_spec.owner_group, 0, 32);
     uint8_t reproduction_token[32];
     struct vcs_zcode_dht_record reproduction_record;
+    enum vcs_zcode_dht_record_error reproduction_reason =
+        VCS_ZCODE_DHT_RECORD_SIGNER;
     ASSERT(!vcs_zcode_dht_service_record_publish_plan(
         a, &reproduction_spec, reproduction_token,
-        &reproduction_record));
+        &reproduction_record, &reproduction_reason));
+    ASSERT_EQ(reproduction_reason, VCS_ZCODE_DHT_RECORD_OK);
     ASSERT(vcs_zcode_dht_source_reproduction_ack_plan_verified(
         a, &reproduction_spec, reproduction_token,
         &reproduction_record));
@@ -2060,10 +2128,10 @@ static int test_sparse_iterative_network(void) {
     struct vcs_zcode_dht_record routed_record;
     ASSERT(vcs_zcode_dht_service_record_publish_plan(
         net.service[target_node], &routed_publish, routed_token,
-        &routed_record));
+        &routed_record, NULL));
     ASSERT_EQ(vcs_zcode_dht_service_record_publish_commit(
                   net.service[target_node], &routed_publish, routed_token,
-                  net.now, &routed_record),
+                  net.now, &routed_record, NULL),
               VCS_ZCODE_DHT_RECORD_STORE_ADDED);
     uint64_t publish_frames = net.frames;
     struct vcs_zcode_dht_record_selector routed_selector = {
@@ -2960,15 +3028,15 @@ static bool gate_store_release(const char *zcode_dir,
   return ok;
 }
 
-static void gate_publish_input(struct json_value *input, const char *mode,
+static void gate_publish_roots(struct json_value *input, const char *mode,
                                const char *kind, const char *namespace_name,
-                               const uint8_t semantic_root[32]) {
+                               const uint8_t semantic_root[32],
+                               const uint8_t transport_root[32]) {
   char semantic_hex[65], transport_hex[65], owner_hex[65];
   zcl_hex_encode(semantic_root, 32, semantic_hex);
-  uint8_t transport[32], owner[32];
-  memset(transport, 0xb2, 32);
+  uint8_t owner[32];
   memset(owner, 0xa7, 32);
-  zcl_hex_encode(transport, 32, transport_hex);
+  zcl_hex_encode(transport_root, 32, transport_hex);
   zcl_hex_encode(owner, 32, owner_hex);
   json_set_object(input);
   json_push_kv_str(input, "operation", "publish");
@@ -2981,6 +3049,87 @@ static void gate_publish_input(struct json_value *input, const char *mode,
   json_push_kv_int(input, "sequence", 1);
   json_push_kv_int(input, "not_before", 1000);
   json_push_kv_int(input, "expiry", 2000);
+}
+
+static void gate_publish_input(struct json_value *input, const char *mode,
+                               const char *kind, const char *namespace_name,
+                               const uint8_t semantic_root[32]) {
+  uint8_t transport[32];
+  memset(transport, 0xb2, 32);
+  gate_publish_roots(input, mode, kind, namespace_name, semantic_root,
+                     transport);
+}
+
+/* A real signed transport carrier, stored complete in the resident global
+ * store: prepare the checked-in source package, sign its release with the
+ * fixture key (the registry-pinned sibling of this flow lives in
+ * test_zcode_swarm_net.c), build the carrier, store it. The gate's transport
+ * checks then run against exactly what a publishing node holds. */
+static bool gate_store_transport(const char *source_dir,
+                                 uint8_t package_root[32],
+                                 uint8_t recipe_root[32],
+                                 uint8_t transport_root[32]) {
+  struct privkey key;
+  memset(&key, 0, sizeof(key));
+  memset(key.vch, 0x47, sizeof(key.vch));
+  key.fValid = true;
+  key.fCompressed = true;
+  struct pubkey pubkey;
+  if (!privkey_get_pubkey(&key, &pubkey) ||
+      pubkey.size != COMPRESSED_PUBLIC_KEY_SIZE)
+    return false;
+  struct vcs_package_prepare_options options = {
+      .dir = source_dir,
+      .publisher_sequence = 1,
+      .reward_address = "",
+      .chain_id = "zclassic-main",
+  };
+  memcpy(options.publisher_pubkey, pubkey.vch,
+         COMPRESSED_PUBLIC_KEY_SIZE);
+  char detail[160] = {0};
+  struct vcs_package_prepared prepared;
+  vcs_package_prepared_init(&prepared);
+  struct vcs_package_transport transport;
+  vcs_package_transport_init(&transport);
+  uint8_t *release_wire = NULL;
+  size_t release_wire_len = 0;
+  bool ok = vcs_package_prepare(&options, &prepared, detail,
+                                sizeof(detail)) == VCS_PACKAGE_PREPARE_OK;
+  if (!ok)
+    fprintf(stderr, "gate transport prepare: %s\n", detail);
+  if (ok) {
+    struct uint256 digest;
+    memcpy(digest.data, prepared.signing_digest, 32);
+    uint8_t compact[COMPACT_SIGNATURE_SIZE];
+    ok = privkey_sign_compact(&key, &digest, compact);
+    if (ok) {
+      memcpy(prepared.release.signature, compact + 1,
+             VCS_PACKAGE_RELEASE_SIGNATURE_BYTES);
+      ok = vcs_package_release_verify(&prepared.release) ==
+               VCS_PACKAGE_RELEASE_OK &&
+           vcs_package_release_serialize(&prepared.release, &release_wire,
+                                         &release_wire_len) ==
+               VCS_PACKAGE_RELEASE_OK;
+    }
+  }
+  if (ok)
+    ok = vcs_package_transport_build(
+             release_wire, release_wire_len, prepared.recipe_wire,
+             prepared.recipe_wire_len, prepared.manifest_wire,
+             prepared.manifest_wire_len,
+             &transport) == VCS_PACKAGE_TRANSPORT_OK;
+  if (ok)
+    ok = vcs_package_transport_store(vcs_package_store_global(), &transport,
+                                     source_dir) == VCS_PACKAGE_TRANSPORT_OK;
+  if (ok) {
+    memcpy(package_root, prepared.package_root, 32);
+    memcpy(recipe_root, prepared.recipe_root, 32);
+    memcpy(transport_root, transport.transport_root, 32);
+  }
+  free(release_wire);
+  vcs_package_transport_free(&transport);
+  vcs_package_prepared_free(&prepared);
+  return ok;
 }
 
 static const char *gate_code(const struct json_value *result) {
@@ -3076,14 +3225,49 @@ static int test_publish_reproduction_gate(void) {
     json_free(&result);
     json_free(&input);
 
-    /* Two distinct build events agreeing on every output byte open the
-     * gate; with no DHT service resident the publish then lands on the
-     * generic DHT_DISABLED refusal, proving the gate passed it through. */
+    /* Two distinct build events agreeing on every output byte satisfy the
+     * reproduction half — but the transport root (the fixture's 0xb2
+     * constant, held by no store as a carrier) fails the transport half by
+     * name, still before any plan token exists. */
     ASSERT(gate_receipt(&second, package_root, recipe_root, "15.1.0", 0x40));
     ASSERT(gate_store_receipt(receipts_dir, &second));
     json_init(&input);
     gate_publish_input(&input, "plan", "pointer", "zclassic23.package",
                        package_root);
+    ASSERT(gate_rpc(&table, "zcode_dht_status", &input, &result));
+    ASSERT_STR_EQ(gate_code(&result), "TRANSPORT_ROOT_NOT_CARRIER");
+    json_free(&result);
+    json_free(&input);
+
+    /* A real carrier that reconstructs to a DIFFERENT package than the one
+     * named is refused by name too: the record would bind this name to
+     * somebody else's bytes. */
+    uint8_t real_pkg[32], real_recipe[32], carrier_root[32];
+    ASSERT(gate_store_transport("lib/base", real_pkg, real_recipe,
+                                carrier_root));
+    json_init(&input);
+    gate_publish_roots(&input, "plan", "pointer", "zclassic23.package",
+                       package_root, carrier_root);
+    ASSERT(gate_rpc(&table, "zcode_dht_status", &input, &result));
+    ASSERT_STR_EQ(gate_code(&result), "TRANSPORT_ROOT_NOT_BOUND");
+    json_free(&result);
+    json_free(&input);
+
+    /* The same carrier with its own package root, release and two agreeing
+     * receipts opens the whole gate; with no DHT service resident the
+     * publish then lands on the generic DHT_DISABLED refusal, proving the
+     * gate passed it through. */
+    struct vcs_package_release real_release;
+    ASSERT(gate_release(&real_release, real_pkg, real_recipe));
+    ASSERT(gate_store_release(zcode_dir, &real_release));
+    struct vcs_package_build_receipt ra, rb;
+    ASSERT(gate_receipt(&ra, real_pkg, real_recipe, "14.2.0", 0x40));
+    ASSERT(gate_receipt(&rb, real_pkg, real_recipe, "15.1.0", 0x40));
+    ASSERT(gate_store_receipt(receipts_dir, &ra));
+    ASSERT(gate_store_receipt(receipts_dir, &rb));
+    json_init(&input);
+    gate_publish_roots(&input, "plan", "pointer", "zclassic23.package",
+                       real_pkg, carrier_root);
     ASSERT(gate_rpc(&table, "zcode_dht_status", &input, &result));
     ASSERT_STR_EQ(gate_code(&result), "DHT_DISABLED");
     json_free(&result);
@@ -3136,6 +3320,7 @@ int test_zcode_dht_service(void) {
   int failures = test_disabled_diagnostics();
   failures += test_publish_reproduction_gate();
   failures += test_publication_monotonic_retry();
+  failures += test_publication_delegation_window();
   failures += test_publication_ceiling_hosts_a_real_node();
   failures += test_record_churn_fallback();
   failures += test_deep_ancestry();

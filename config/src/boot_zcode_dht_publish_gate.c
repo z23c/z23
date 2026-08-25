@@ -3,6 +3,7 @@
 
 #include "config/boot_zcode_dht_publish_gate.h"
 
+#include "base/hex.h"
 #include "base/log_macros.h"
 #include "base/safe_alloc.h"
 #include "json/json.h"
@@ -10,9 +11,11 @@
 #include "vcs/package_attest.h"
 #include "vcs/package_attest_transport.h"
 #include "vcs/package_index.h"
+#include "vcs/package_public_shape.h"
 #include "vcs/package_release.h"
 #include "vcs/package_reproduce.h"
 #include "vcs/package_store.h"
+#include "vcs/package_transport.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -124,6 +127,52 @@ bool boot_zcode_dht_package_pointer_publish_gate(
                " receipts for this exact package and recipe root; install the"
                " package with zcode use, run zcode package reproduce, then"
                " republish");
+    return false;
+  }
+  /* The pointer's other half: a stranger who resolves this record fetches
+   * transport_root and imports it. That only works when this store holds the
+   * root as a complete signed transport carrier — not as the inner package
+   * root, and not as one of the derived object sets that ride alongside a
+   * carrier. A wrong-shaped root used to pass here and fail only at the
+   * consumer with "carrier metadata missing". */
+  struct vcs_package_public_verdict verdict;
+  enum vcs_package_public_shape shape = vcs_package_public_shape_classify(
+      store, spec->transport_root, &verdict);
+  char root_hex[65];
+  zcl_hex_encode(spec->transport_root, 32, root_hex);
+  if (shape != VCS_PACKAGE_PUBLIC_TRANSPORT) {
+    LOG_ERROR("net.zcode_dht",
+              "publish gate: transport root %s classifies as %s (%s)",
+              root_hex, vcs_package_public_shape_string(shape), verdict.rule);
+    char message[512];
+    (void)snprintf(message, sizeof(message),
+                   "the transport root must be a complete signed transport"
+                   " carrier held by this node's store; this root classifies"
+                   " as '%s' (%s). Publish the carrier root the package's"
+                   " transport build produced, not the inner package or a"
+                   " derived object root",
+                   vcs_package_public_shape_string(shape), verdict.rule);
+    gate_error(result, "TRANSPORT_ROOT_NOT_CARRIER", message);
+    return false;
+  }
+  /* Shape is right; prove the binding. import is the consumer's own
+   * fetch-time step: it re-derives the whole closure from stored bytes
+   * (re-admitting the canonical inner objects, a no-op CAS on the publisher
+   * that already holds them) and reports the inner package root it
+   * reconstructs — that root must be the one this pointer names, or the
+   * record binds a name to somebody else's carrier. */
+  struct vcs_package_transport_import import;
+  if (vcs_package_transport_import(store, spec->transport_root, &import) !=
+          VCS_PACKAGE_TRANSPORT_OK ||
+      memcmp(import.package_root, spec->semantic_root, 32) != 0) {
+    LOG_ERROR("net.zcode_dht",
+              "publish gate: transport root %s does not reconstruct to the"
+              " named package root",
+              root_hex);
+    gate_error(result, "TRANSPORT_ROOT_NOT_BOUND",
+               "the transport carrier reconstructs to a different package"
+               " root than this pointer names; publish the carrier built"
+               " from exactly this package");
     return false;
   }
   return true;
