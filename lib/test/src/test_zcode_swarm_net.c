@@ -41,7 +41,17 @@
  *   9. Ordinary C23 library titles (zhex, zstr, zbuf, zsha256, zring,
  *      zmap, zvec, zutf8, then zjson which locks zutf8) take the same
  *      A→B→C hop: a catalog, not only the Arena demo, survives the
- *      original publisher disappearing. */
+ *      original publisher disappearing.
+ *  10. Attestation flight: a signed ZCLATT attestation offered on A is
+ *      discovered by B through a signed POINTER in the attestation
+ *      namespace, pulled over the same frozen zpkgswm codec as an
+ *      ordinary blob, independently verified and re-rooted at B, and
+ *      filed as evidence — leaving BYTE-IDENTICAL receipts under the
+ *      same attestation-id filename on both nodes. With the two ways it
+ *      must refuse: a hostile pointer (an attestation about a different
+ *      package, delivered for the root B asked about) is ERR_BINDING and
+ *      files nothing, and a flipped byte is refused whether the sender
+ *      re-roots it or it is corrupted in flight. */
 
 #include "test/test_core.h"
 
@@ -69,6 +79,9 @@
 #include "util/safe_alloc.h"
 #include "validation/main_state.h"
 #include "validation/txmempool.h"
+#include "vcs/blob_store.h"
+#include "vcs/package_attest.h"
+#include "vcs/package_attest_transport.h"
 #include "vcs/package_build.h"
 #include "vcs/package_checkout.h"
 #include "vcs/package_content.h"
@@ -93,6 +106,7 @@
 #include "vcs/zcode_dht_service.h"
 #include "vcs/zcode_lane.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -4346,6 +4360,528 @@ static int zwn_t_ordinary_c23_redundant(const struct chain_params *params)
         "lib", k_dirs, sizeof(k_dirs) / sizeof(k_dirs[0]), 1600u);
 }
 
+/* ── attestation flight: a signed ZCLATT crosses the real swarm ─────── */
+
+/* An attestation is at most VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES (681),
+ * under VCS_BLOB_MAX_BYTES (8192), so it rides the frozen 'zpkgswm'
+ * ANNOUNCE/WANT/DATA codec as an ordinary one-file one-chunk blob. These
+ * cases add NO wire message: they reuse this file's two-node loopback
+ * exactly as the package cases do, so the bytes genuinely cross the
+ * codec — never a store reach-in and never a filesystem copy.
+ *
+ * Discovery is the same signed DHT POINTER these tests already drive for
+ * package carriers, published in VCS_PACKAGE_ATTEST_DHT_NAMESPACE and
+ * keyed on the ATTESTED PACKAGE ROOT. The record layer cannot check that
+ * binding — it signs whatever pair the publisher hands it — which is
+ * exactly why the binding is re-checked at admission on the receiver.
+ *
+ * What these cases do NOT prove: real DHT routing (the pointer and its
+ * query are driven between two in-process services over a hermetic
+ * session, not over a live overlay), and the approved-verifier quorum
+ * policy, which is `zcode package verify`'s question and is applied long
+ * after admission. */
+
+#define ZWN_ATT_NS VCS_PACKAGE_ATTEST_DHT_NAMESPACE
+#define ZWN_ATT_ID_HEX (2u * VCS_PACKAGE_ATTEST_ID_BYTES + 1u)
+
+static bool zwn_att_keypair(uint8_t seed, struct privkey *sk,
+                            struct pubkey *pk)
+{
+    memset(sk->vch, seed, 32);
+    sk->fValid = true;
+    sk->fCompressed = true;
+    return privkey_get_pubkey(sk, pk) &&
+           pk->size == COMPRESSED_PUBLIC_KEY_SIZE;
+}
+
+/* One valid, signed TEST_PASS attestation over `package_root`, in the
+ * field set the external verifier produces. `wire` must hold at least
+ * VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES. */
+static bool zwn_att_wire(const uint8_t package_root[32], uint8_t signer_seed,
+                         uint8_t *wire, size_t *wire_len,
+                         uint8_t id_out[VCS_PACKAGE_ATTEST_ID_BYTES])
+{
+    struct privkey sk;
+    struct pubkey pk;
+    if (!zwn_att_keypair(signer_seed, &sk, &pk))
+        return false;
+    struct vcs_package_attest a;
+    memset(&a, 0, sizeof(a));
+    a.schema_version = VCS_PACKAGE_ATTEST_VERSION;
+    memcpy(a.package_root, package_root, 32);
+    for (size_t i = 0; i < 32; i++) {
+        a.release_id[i] = (uint8_t)(package_root[i] ^ 0x5au);
+        a.recipe_root[i] = (uint8_t)(package_root[i] ^ 0xa5u);
+    }
+    a.result_class = VCS_PACKAGE_ATTEST_RESULT_TEST_PASS;
+    snprintf(a.compilers[0].id, sizeof(a.compilers[0].id), "clang");
+    snprintf(a.compilers[0].version, sizeof(a.compilers[0].version),
+             "18.1.3");
+    snprintf(a.compilers[1].id, sizeof(a.compilers[1].id), "gcc");
+    snprintf(a.compilers[1].version, sizeof(a.compilers[1].version),
+             "13.2.0");
+    a.compiler_count = 2;
+    a.compilers[0].outcome = VCS_PACKAGE_ATTEST_OUTCOME_PASS;
+    a.compilers[1].outcome = VCS_PACKAGE_ATTEST_OUTCOME_PASS;
+    a.isolation = VCS_PACKAGE_ATTEST_ISOLATION_FULL;
+    a.test_ran = true;
+    a.test_exit_code = 0;
+    snprintf(a.sanitizers[0].name, sizeof(a.sanitizers[0].name), "asan");
+    snprintf(a.sanitizers[1].name, sizeof(a.sanitizers[1].name), "ubsan");
+    a.sanitizer_count = 2;
+    a.sanitizers[0].outcome = VCS_PACKAGE_ATTEST_OUTCOME_PASS;
+    a.sanitizers[1].outcome = VCS_PACKAGE_ATTEST_OUTCOME_PASS;
+    memcpy(a.verifier_pubkey, pk.vch, VCS_PACKAGE_ATTEST_PUBKEY_BYTES);
+
+    uint8_t id[VCS_PACKAGE_ATTEST_ID_BYTES];
+    if (vcs_package_attest_id(&a, id) != VCS_PACKAGE_ATTEST_OK)
+        return false;
+    struct uint256 hash;
+    memcpy(hash.data, id, 32);
+    unsigned char compact[COMPACT_SIGNATURE_SIZE];
+    if (!privkey_sign_compact(&sk, &hash, compact))
+        return false;
+    memcpy(a.signature, compact + 1, VCS_PACKAGE_ATTEST_SIGNATURE_BYTES);
+
+    uint8_t *buf = NULL;
+    size_t len = 0;
+    if (vcs_package_attest_serialize(&a, &buf, &len) !=
+            VCS_PACKAGE_ATTEST_OK ||
+        len == 0 || len > VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES) {
+        free(buf);
+        return false;
+    }
+    /* The id is recomputed over the canonical encoding minus the
+     * signature, so signing did not move it. */
+    bool ok = vcs_package_attest_id(&a, id_out) == VCS_PACKAGE_ATTEST_OK &&
+              memcmp(id_out, id, sizeof(id)) == 0;
+    if (ok) {
+        memcpy(wire, buf, len);
+        *wire_len = len;
+    }
+    free(buf);
+    return ok;
+}
+
+/* <zcode_dir>/attestations/<attestation-id-hex>: the store filename the
+ * layer files under, on either node. */
+static bool zwn_att_path(const struct zwn_node *z,
+                         const uint8_t id[VCS_PACKAGE_ATTEST_ID_BYTES],
+                         char *out, size_t cap)
+{
+    char hex[ZWN_ATT_ID_HEX];
+    zcl_hex_encode(id, VCS_PACKAGE_ATTEST_ID_BYTES, hex);
+    int n = snprintf(out, cap, "%s/attestations/%s", z->zcode_dir, hex);
+    return n > 0 && (size_t)n < cap;
+}
+
+static bool zwn_att_read(const char *path, uint8_t *out, size_t cap,
+                         size_t *out_len)
+{
+    *out_len = 0;
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return false;
+    size_t len = fread(out, 1, cap, f);
+    bool ok = !ferror(f) && len > 0;
+    fclose(f);
+    if (ok)
+        *out_len = len;
+    return ok;
+}
+
+/* Entries filed under attestations/. -1 when the directory was never
+ * created — which is what "files NOTHING" looks like on a node that has
+ * only ever refused. */
+static int zwn_att_dir_count(const struct zwn_node *z)
+{
+    char dir[1300];
+    int n = snprintf(dir, sizeof(dir), "%s/attestations", z->zcode_dir);
+    if (n <= 0 || (size_t)n >= sizeof(dir))
+        return -1;
+    DIR *d = opendir(dir);
+    if (!d)
+        return -1;
+    int count = 0;
+    for (struct dirent *e = readdir(d); e; e = readdir(d)) {
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+            continue;
+        count++;
+    }
+    closedir(d);
+    return count;
+}
+
+/* Offer already-filed bytes and keep them: pinning is what makes this
+ * node a durable provider for the pointer it is about to publish. */
+static bool zwn_att_offer_pinned(
+    struct zwn_node *z, const uint8_t id[VCS_PACKAGE_ATTEST_ID_BYTES],
+    struct vcs_package_attest_transport_outcome *out)
+{
+    return vcs_package_attest_transport_offer(z->store, z->zcode_dir, id,
+                                              out) ==
+               VCS_PACKAGE_ATTEST_TRANSPORT_OK &&
+           vcs_package_store_pin(z->store, out->transport_root, true) ==
+               VCS_PACKAGE_STORE_OK;
+}
+
+/* Put arbitrary bytes on the wire as a blob, bypassing the transport
+ * layer's publish check. Only an adversary does this: it is how a
+ * tampered wire still gets a root the swarm will happily carry. */
+static bool zwn_att_publish_raw(struct zwn_node *z, const uint8_t *bytes,
+                                size_t len, uint8_t out_root[32])
+{
+    return vcs_blob_put_to(z->store, bytes, len, out_root) == VCS_BLOB_OK &&
+           vcs_package_store_pin(z->store, out_root, true) ==
+               VCS_PACKAGE_STORE_OK;
+}
+
+static int zwn_t_attestation_flight(const struct chain_params *params)
+{
+    int failures = 0;
+    struct zwn_fixture fixture = {0};
+    TEST("attestation flight: A offers a signed attestation, B resolves "
+         "the pointer, pulls the bytes over real zpkgswm frames, "
+         "re-derives the same transport root, and both nodes end holding "
+         "BYTE-IDENTICAL receipts under the same attestation-id name") {
+        struct zwn_pkg pkg;
+        ASSERT(zwn_make_package(&pkg, 3, 0x51));
+
+        uint8_t wire[VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES];
+        size_t wire_len = 0;
+        uint8_t id[VCS_PACKAGE_ATTEST_ID_BYTES];
+        ASSERT(zwn_att_wire(pkg.root, 0x31, wire, &wire_len, id));
+        ASSERT(wire_len > 0 && wire_len <= VCS_BLOB_MAX_BYTES);
+
+        struct zwn_node a, b;
+        const struct zwn_node_spec nodes[] = {
+            {&a, "att-a"}, {&b, "att-b"},
+        };
+        ASSERT(zwn_fixture_nodes(&fixture, params, nodes,
+                                 sizeof(nodes) / sizeof(nodes[0])));
+        struct zwn_link a_b, b_a;
+        const struct zwn_link_spec links[] = {
+            {&a, &a_b, {10, 4, 0, 1}, "att-peer-b"},
+            {&b, &b_a, {10, 4, 0, 2}, "att-peer-a"},
+        };
+        ASSERT(zwn_fixture_links(&fixture, links,
+                                 sizeof(links) / sizeof(links[0])));
+        ASSERT(zwn_meet_side_quiet(&a, &a_b));
+        ASSERT(zwn_meet_side_quiet(&b, &b_a));
+
+        /* 1. A holds it; B has never seen it. */
+        char a_path[1400], b_path[1400];
+        ASSERT(zwn_att_path(&a, id, a_path, sizeof(a_path)));
+        ASSERT(zwn_att_path(&b, id, b_path, sizeof(b_path)));
+        bool filed = false, present = false;
+        ASSERT(vcs_package_attest_transport_file(
+                   a.zcode_dir, wire, wire_len, id, &filed, &present) ==
+               VCS_PACKAGE_ATTEST_TRANSPORT_OK);
+        ASSERT(filed && !present);
+        ASSERT(zwn_att_dir_count(&a) == 1);
+        ASSERT(zwn_att_dir_count(&b) <= 0);
+
+        /* 2. The offer makes it a blob whose root is a pure function of
+         *    the exact signed bytes. */
+        struct vcs_package_attest_transport_outcome offer;
+        ASSERT(zwn_att_offer_pinned(&a, id, &offer));
+        uint8_t pure_root[32];
+        ASSERT(vcs_blob_root(wire, wire_len, pure_root));
+        ASSERT(memcmp(offer.transport_root, pure_root, 32) == 0);
+        ASSERT(memcmp(offer.attestation_id, id, sizeof(id)) == 0);
+
+        /* 3. B learns the root the way a stranger does: a signed POINTER
+         *    in the attestation namespace, keyed on the package root. */
+        uint8_t discovered[32];
+        struct vcs_zcode_dht_record provider;
+        memset(&provider, 0, sizeof(provider));
+        ASSERT(zwn_discover_transport(&a, &a, &b, ZWN_ATT_NS, pkg.root,
+                                      offer.transport_root, discovered,
+                                      &provider, 1010));
+        ASSERT(memcmp(discovered, offer.transport_root, 32) == 0);
+
+        /* 4. The bytes cross the codec. B holds nothing beforehand, and
+         *    A's DATA reply counter proves the chunk was served over a
+         *    real frame rather than copied out of A's store. */
+        uint8_t got[VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES];
+        size_t got_len = 0;
+        ASSERT(vcs_blob_get_from(b.store, discovered, got, sizeof(got),
+                                 &got_len) != VCS_BLOB_OK);
+        ASSERT(a.chunk_data_replies[0] == 0);
+        ASSERT(zwn_fetch_package_from_provider(&b, discovered, &a_b, &b_a,
+                                               params->pchMessageStart));
+        ASSERT(a.chunk_data_replies[0] > 0);
+
+        /* 5. B independently re-derives the transport root from what it
+         *    received — the property that makes a POINTER resolvable at
+         *    all — and the bytes are A's exact wire. */
+        ASSERT(vcs_blob_get_from(b.store, discovered, got, sizeof(got),
+                                 &got_len) == VCS_BLOB_OK);
+        ASSERT(got_len == wire_len && memcmp(got, wire, wire_len) == 0);
+        struct vcs_package_attest_transport_outcome rederived;
+        ASSERT(vcs_package_attest_transport_root(got, got_len,
+                                                 &rederived) ==
+               VCS_PACKAGE_ATTEST_TRANSPORT_OK);
+        ASSERT(memcmp(rederived.transport_root, discovered, 32) == 0);
+        ASSERT(memcmp(rederived.attestation_id, id, sizeof(id)) == 0);
+
+        /* 6. B admits under the root it asked about; the signature is
+         *    verified there, by B, not vouched for by A. */
+        struct vcs_package_attest_transport_outcome admit;
+        ASSERT(vcs_package_attest_transport_admit(
+                   b.store, b.zcode_dir, discovered, pkg.root, &admit) ==
+               VCS_PACKAGE_ATTEST_TRANSPORT_OK);
+        ASSERT(admit.filed && !admit.already_present);
+        ASSERT(memcmp(admit.attestation.package_root, pkg.root, 32) == 0);
+        ASSERT(memcmp(admit.attestation_id, id, sizeof(id)) == 0);
+
+        /* 7. BYTE-IDENTICAL RECEIPTS: same bytes, same filename, both
+         *    sides. This is the claim the whole flight exists to make. */
+        uint8_t a_bytes[VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES];
+        uint8_t b_bytes[VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES];
+        size_t a_len = 0, b_len = 0;
+        ASSERT(zwn_att_read(a_path, a_bytes, sizeof(a_bytes), &a_len));
+        ASSERT(zwn_att_read(b_path, b_bytes, sizeof(b_bytes), &b_len));
+        ASSERT(a_len == b_len && memcmp(a_bytes, b_bytes, a_len) == 0);
+        ASSERT(a_len == wire_len && memcmp(a_bytes, wire, wire_len) == 0);
+        ASSERT(strcmp(strrchr(a_path, '/'), strrchr(b_path, '/')) == 0);
+        ASSERT(zwn_att_dir_count(&b) == 1);
+
+        /* Re-admitting the identical bytes is a no-op success: the id IS
+         * the content hash, so a second delivery cannot fork a receipt. */
+        struct vcs_package_attest_transport_outcome again;
+        ASSERT(vcs_package_attest_transport_admit(
+                   b.store, b.zcode_dir, discovered, pkg.root, &again) ==
+               VCS_PACKAGE_ATTEST_TRANSPORT_OK);
+        ASSERT(!again.filed && again.already_present);
+        ASSERT(zwn_att_dir_count(&b) == 1);
+
+        zwn_fixture_cleanup(&fixture);
+        zwn_free_package(&pkg);
+        PASS();
+    } _test_next:
+    zwn_fixture_cleanup(&fixture);
+    return failures;
+}
+
+/* The security property of the whole design. A pointer is a signed pair
+ * (semantic_root, transport_root) and NOTHING in the record layer can
+ * check that the attestation on the far end is about the package the key
+ * names — so the check has to happen where the bytes land. */
+static int zwn_t_attestation_hostile_pointer(
+    const struct chain_params *params)
+{
+    int failures = 0;
+    struct zwn_fixture fixture = {0};
+    TEST("hostile pointer: an attestation about a DIFFERENT package, "
+         "delivered under the root B asked about, is refused ERR_BINDING "
+         "and files NOTHING") {
+        struct zwn_pkg asked, other;
+        ASSERT(zwn_make_package(&asked, 3, 0x61));
+        ASSERT(zwn_make_package(&other, 4, 0x62));
+        ASSERT(memcmp(asked.root, other.root, 32) != 0);
+
+        /* A genuine, correctly signed attestation — about the WRONG
+         * package. Nothing about these bytes is forged; the lie is the
+         * pointer that offers them as an answer about `asked`. */
+        uint8_t wire[VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES];
+        size_t wire_len = 0;
+        uint8_t id[VCS_PACKAGE_ATTEST_ID_BYTES];
+        ASSERT(zwn_att_wire(other.root, 0x41, wire, &wire_len, id));
+
+        struct zwn_node a, b;
+        const struct zwn_node_spec nodes[] = {
+            {&a, "hp-a"}, {&b, "hp-b"},
+        };
+        ASSERT(zwn_fixture_nodes(&fixture, params, nodes,
+                                 sizeof(nodes) / sizeof(nodes[0])));
+        struct zwn_link a_b, b_a;
+        const struct zwn_link_spec links[] = {
+            {&a, &a_b, {10, 5, 0, 1}, "hp-peer-b"},
+            {&b, &b_a, {10, 5, 0, 2}, "hp-peer-a"},
+        };
+        ASSERT(zwn_fixture_links(&fixture, links,
+                                 sizeof(links) / sizeof(links[0])));
+        ASSERT(zwn_meet_side_quiet(&a, &a_b));
+        ASSERT(zwn_meet_side_quiet(&b, &b_a));
+
+        bool filed = false, present = false;
+        ASSERT(vcs_package_attest_transport_file(
+                   a.zcode_dir, wire, wire_len, id, &filed, &present) ==
+               VCS_PACKAGE_ATTEST_TRANSPORT_OK);
+        struct vcs_package_attest_transport_outcome offer;
+        ASSERT(zwn_att_offer_pinned(&a, id, &offer));
+
+        /* The lie: a signed POINTER keyed on `asked` that names the
+         * transport root of the `other` attestation. The record layer
+         * signs it without complaint, and B's query resolves it. */
+        uint8_t discovered[32];
+        ASSERT(zwn_discover_transport(&a, &a, &b, ZWN_ATT_NS, asked.root,
+                                      offer.transport_root, discovered,
+                                      NULL, 1020));
+        ASSERT(memcmp(discovered, offer.transport_root, 32) == 0);
+
+        /* The bytes themselves transfer honestly — they hash to the root
+         * that was asked for, so no layer below can object. */
+        ASSERT(zwn_fetch_package_from_provider(&b, discovered, &a_b, &b_a,
+                                               params->pchMessageStart));
+        uint8_t got[VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES];
+        size_t got_len = 0;
+        ASSERT(vcs_blob_get_from(b.store, discovered, got, sizeof(got),
+                                 &got_len) == VCS_BLOB_OK);
+        ASSERT(got_len == wire_len && memcmp(got, wire, wire_len) == 0);
+
+        /* The refusal, and the absence it must leave behind. */
+        char b_path[1400];
+        ASSERT(zwn_att_path(&b, id, b_path, sizeof(b_path)));
+        struct vcs_package_attest_transport_outcome admit;
+        ASSERT(vcs_package_attest_transport_admit(
+                   b.store, b.zcode_dir, discovered, asked.root, &admit) ==
+               VCS_PACKAGE_ATTEST_TRANSPORT_ERR_BINDING);
+        ASSERT(admit.result == VCS_PACKAGE_ATTEST_TRANSPORT_ERR_BINDING);
+        ASSERT(!admit.filed && !admit.already_present);
+        {
+            uint8_t leaked[VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES];
+            size_t leaked_len = 0;
+            ASSERT(!zwn_att_read(b_path, leaked, sizeof(leaked),
+                                 &leaked_len));
+        }
+        ASSERT(zwn_att_dir_count(&b) <= 0);
+
+        /* The refusal is exactly the binding and nothing else: the same
+         * delivered bytes file when the question they answer is the one
+         * being asked. */
+        struct vcs_package_attest_transport_outcome honest;
+        ASSERT(vcs_package_attest_transport_admit(
+                   b.store, b.zcode_dir, discovered, other.root, &honest) ==
+               VCS_PACKAGE_ATTEST_TRANSPORT_OK);
+        ASSERT(honest.filed && !honest.already_present);
+        ASSERT(zwn_att_dir_count(&b) == 1);
+
+        zwn_fixture_cleanup(&fixture);
+        zwn_free_package(&asked);
+        zwn_free_package(&other);
+        PASS();
+    } _test_next:
+    zwn_fixture_cleanup(&fixture);
+    return failures;
+}
+
+/* Two ways a flipped byte can reach a receiver, and both must leave the
+ * attestations dir empty: re-rooted by the attacker so the carriage is
+ * honest, and flipped in flight so the carriage itself catches it. */
+static int zwn_t_attestation_corrupt_wire(const struct chain_params *params)
+{
+    int failures = 0;
+    struct zwn_fixture fixture = {0};
+    TEST("corrupt attestation wire: a flipped byte is refused at B "
+         "whether it is re-rooted by the sender or flipped in flight, "
+         "and files NOTHING either way") {
+        struct zwn_pkg pkg;
+        ASSERT(zwn_make_package(&pkg, 3, 0x71));
+
+        uint8_t wire[VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES];
+        size_t wire_len = 0;
+        uint8_t id[VCS_PACKAGE_ATTEST_ID_BYTES];
+        ASSERT(zwn_att_wire(pkg.root, 0x51, wire, &wire_len, id));
+
+        struct zwn_node a, b;
+        const struct zwn_node_spec nodes[] = {
+            {&a, "cw-a"}, {&b, "cw-b"},
+        };
+        ASSERT(zwn_fixture_nodes(&fixture, params, nodes,
+                                 sizeof(nodes) / sizeof(nodes[0])));
+        struct zwn_link a_b, b_a;
+        const struct zwn_link_spec links[] = {
+            {&a, &a_b, {10, 6, 0, 1}, "cw-peer-b"},
+            {&b, &b_a, {10, 6, 0, 2}, "cw-peer-a"},
+        };
+        ASSERT(zwn_fixture_links(&fixture, links,
+                                 sizeof(links) / sizeof(links[0])));
+        ASSERT(zwn_meet_side_quiet(&a, &a_b));
+        ASSERT(zwn_meet_side_quiet(&b, &b_a));
+
+        /* (a) The sender flips a signature byte and re-roots the result,
+         *     so every layer beneath the attestation is satisfied: these
+         *     bytes really are the bytes that root names. The flip sits
+         *     in r, leaving the low-S rule untouched, so the failure is
+         *     the ECDSA check itself. */
+        uint8_t bad[VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES];
+        memcpy(bad, wire, wire_len);
+        size_t sig_off = wire_len - VCS_PACKAGE_ATTEST_SIGNATURE_BYTES;
+        bad[sig_off] = (uint8_t)(bad[sig_off] ^ 0x01u);
+        struct vcs_package_attest_transport_outcome refused;
+        ASSERT(vcs_package_attest_transport_root(bad, wire_len, &refused) ==
+               VCS_PACKAGE_ATTEST_TRANSPORT_ERR_ATTEST);
+        uint8_t bad_root[32];
+        ASSERT(zwn_att_publish_raw(&a, bad, wire_len, bad_root));
+        ASSERT(memcmp(bad_root, refused.transport_root, 32) != 0);
+
+        ASSERT(zwn_fetch_package_from_provider(&b, bad_root, &a_b, &b_a,
+                                               params->pchMessageStart));
+        struct vcs_package_attest_transport_outcome admit_bad;
+        ASSERT(vcs_package_attest_transport_admit(
+                   b.store, b.zcode_dir, bad_root, pkg.root, &admit_bad) ==
+               VCS_PACKAGE_ATTEST_TRANSPORT_ERR_ATTEST);
+        ASSERT(admit_bad.attest_error == VCS_PACKAGE_ATTEST_ERR_SIG_VERIFY);
+        ASSERT(!admit_bad.filed && !admit_bad.already_present);
+        ASSERT(zwn_att_dir_count(&b) <= 0);
+
+        /* (b) The honest wire, flipped in flight. The blob root commits
+         *     the chunk hash, so the carriage refuses the delivery and
+         *     not one byte reaches B's CAS — the attestation layer is
+         *     never even asked. */
+        bool filed = false, present = false;
+        ASSERT(vcs_package_attest_transport_file(
+                   a.zcode_dir, wire, wire_len, id, &filed, &present) ==
+               VCS_PACKAGE_ATTEST_TRANSPORT_OK);
+        struct vcs_package_attest_transport_outcome offer;
+        ASSERT(zwn_att_offer_pinned(&a, id, &offer));
+        a.tamper_chunks = true;
+
+        uint64_t provider_peer = (uint64_t)b_a.node->id;
+        ASSERT(vcs_swarm_engine_fetch_from(b.engine, offer.transport_root,
+                                           ZWN_DAY, ++b.now,
+                                           &provider_peer, 1) ==
+               VCS_SWARM_FETCH_OK);
+        enum vcs_swarm_download_state state = VCS_SWARM_DL_INACTIVE;
+        bool terminal = false;
+        for (int i = 0; i < 800 && !terminal; i++) {
+            ASSERT(zwn_round(&a_b, &b_a, params->pchMessageStart));
+            terminal = zwn_download_done(&b, offer.transport_root, &state);
+        }
+        ASSERT(terminal && state == VCS_SWARM_DL_FAILED);
+        ASSERT(b_a.node->misbehavior >=
+               peer_offence_weight(PEER_OFFENCE_INVALID_CHUNK));
+
+        uint8_t got[VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES];
+        size_t got_len = 0;
+        ASSERT(vcs_blob_get_from(b.store, offer.transport_root, got,
+                                 sizeof(got), &got_len) != VCS_BLOB_OK);
+        struct vcs_package_attest_transport_outcome admit_flight;
+        ASSERT(vcs_package_attest_transport_admit(
+                   b.store, b.zcode_dir, offer.transport_root, pkg.root,
+                   &admit_flight) ==
+               VCS_PACKAGE_ATTEST_TRANSPORT_ERR_BLOB);
+        ASSERT(!admit_flight.filed && !admit_flight.already_present);
+        {
+            char b_path[1400];
+            uint8_t leaked[VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES];
+            size_t leaked_len = 0;
+            ASSERT(zwn_att_path(&b, id, b_path, sizeof(b_path)));
+            ASSERT(!zwn_att_read(b_path, leaked, sizeof(leaked),
+                                 &leaked_len));
+        }
+        ASSERT(zwn_att_dir_count(&b) <= 0);
+
+        zwn_fixture_cleanup(&fixture);
+        zwn_free_package(&pkg);
+        PASS();
+    } _test_next:
+    zwn_fixture_cleanup(&fixture);
+    return failures;
+}
+
 int test_zcode_swarm_net(void)
 {
     int failures = 0;
@@ -4373,6 +4909,9 @@ int test_zcode_swarm_net(void)
     failures += zwn_t_deterministic_replay(params);
     failures += zwn_t_useful_c23_redundant(params);
     failures += zwn_t_ordinary_c23_redundant(params);
+    failures += zwn_t_attestation_flight(params);
+    failures += zwn_t_attestation_hostile_pointer(params);
+    failures += zwn_t_attestation_corrupt_wire(params);
     if (failures == 0 && g_zwn_sovereign_receipt.ready)
         zwn_print_sovereign_receipt();
     return failures;

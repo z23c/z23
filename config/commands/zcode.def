@@ -2448,6 +2448,62 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     zcl_native_handle_zcode_package_attest_pull)
 
+/* ── attestation admit: carriage without a DHT ─────────────────────────
+ * offer and pull assume a working authenticated record layer. A node that
+ * has ALREADY fetched an attestation blob — zcode package fetch on the
+ * transport root, or the swarm delivering it some other way — had the
+ * evidence in its package store and no way to admit it: import wants hex
+ * it does not hold, pull wants a DHT that needs identity files and a
+ * delegation chain verified against real chain history. admit closes that
+ * hole with no network at all. Its package_root is OPTIONAL where pull's
+ * is mandatory, and the semantics below say exactly when omitting it is
+ * wrong. */
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.package.attest.admit", "zcode.package.attest", "",
+    "Admit one attestation blob this node already holds",
+    "Reads the blob at transport_root back out of the package store (the "
+    "blob layer re-verifies the manifest, root and chunk hash), parses it "
+    "as a canonical ZCLATT wire, re-verifies the embedded "
+    "signature, re-derives the id, and files the EXACT bytes at "
+    "<datadir>/zcode/attestations/<attestation-id-hex>. It contacts NO "
+    "network: it admits bytes you already hold, so a node whose "
+    "authenticated record layer is not up can still take in an attestation "
+    "it fetched with zcode package fetch. package_root is OPTIONAL here "
+    "and MANDATORY on zcode package attest pull, deliberately: pull "
+    "resolved the blob FROM a POINTER keyed on a package root, so it "
+    "is answering a question about one specific package and MUST bind, or "
+    "a hostile pointer could deliver an attestation for a DIFFERENT "
+    "package as evidence about yours; admit is handed a transport root "
+    "directly. If you are asking whether this attestation is evidence "
+    "about a particular package you MUST pass package_root; a wire naming "
+    "a different root is then refused PACKAGE_ROOT_BINDING and NOT filed. "
+    "Omitting it is NOT the safe default: it is the weaker 'I am not "
+    "asking about one package' case, which files whatever package the "
+    "wire names and asserts nothing about yours. A malformed "
+    "package_root is BAD_PACKAGE_ROOT, never treated as absent. "
+    "Idempotent: identical bytes succeed with already_present=true; a "
+    "same-name file that does not read back identical is fail-closed "
+    "STORE_CONFLICT. ATTESTATION_BYTES_ABSENT "
+    "names a root no blob is held for (fetch it first). Every refusal "
+    "names its own rule, and the reply repeats it as admit_result. "
+    "Admitting is NOT accepting: unapproved signers and "
+    "failure result classes are filed on purpose; the quorum is "
+    "applied later by zcode package verify.",
+    0,
+    "zcode,package,attest,admit,attestation,blob,transport,offline,file",
+    "zcl.zcode_package_attest_admit.input.v1",
+    "zcl.zcode_package_attest_admit.v1",
+    "transport_root,package_root,datadir", "transport_root",
+    "z23 zcode package attest admit --input='{\"transport_root\":\"<64hex>\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_zcode_package_attest_admit)
+
 /* ── slice 4: contributor identity + ZNAM pointers ─────────────────────
  * The secp256k1 publisher key is the only authoritative identity; ZNAM
  * records are mutable pointers resolved through the canonical ZNAM model

@@ -34,8 +34,8 @@ bool boot_zcode_dht_package_pointer_publish_gate(
  * embedded secp256k1 signature verifies, and that the wire's package_root
  * equals the pointer's semantic_root. Refusals carry the named code
  * (NO_PACKAGE_STORE, ATTESTATION_NOT_HELD, ATTESTATION_INVALID,
- * ATTESTATION_BINDING_MISMATCH, ATTESTATION_ID_MISMATCH,
- * ATTESTATION_STORE_CONFLICT, ATTESTATION_UNPUBLISHABLE) plus the exact
+ * ATTESTATION_BINDING_MISMATCH, ATTESTATION_STORE_CONFLICT,
+ * ATTESTATION_UNPUBLISHABLE) plus the exact
  * transport/blob/attest rule string, in the ok/code/message shape every RPC
  * refusal in this layer uses.
  *

@@ -226,11 +226,16 @@ bool boot_zcode_dht_attestation_pointer_publish_gate(
     why = "the bytes at transport_root are not a canonical ZCLATT wire, or"
           " their embedded verifier signature does not verify";
     break;
-  case VCS_PACKAGE_ATTEST_TRANSPORT_ERR_ID:
-    code = "ATTESTATION_ID_MISMATCH";
-    why = "the recomputed attestation id does not match the coordinate the"
-          " bytes are filed under";
-    break;
+  /* No case for VCS_PACKAGE_ATTEST_TRANSPORT_ERR_ID here on purpose: it is
+   * structurally unreachable from admit. ERR_ID is only ever produced by
+   * att_offer_inner() (package_attest_transport.c), where the id passed in
+   * by the caller is compared against the id recomputed from the stored
+   * bytes and the two can legitimately disagree. The admit path this gate
+   * calls (att_admit_inner()) never takes a caller-supplied id — it derives
+   * the id from the wire via att_authenticate() and then files at that same
+   * derived id, so there is nothing for it to mismatch against. An
+   * unreachable ERR_ID falls into default below (ATTESTATION_UNPUBLISHABLE),
+   * same as the other admit-side arms that require fault injection to hit. */
   case VCS_PACKAGE_ATTEST_TRANSPORT_ERR_BINDING:
     code = "ATTESTATION_BINDING_MISMATCH";
     why = "the attestation at transport_root attests a DIFFERENT package"
