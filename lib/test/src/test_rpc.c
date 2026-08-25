@@ -8,6 +8,7 @@
 #include "validation/main_state.h"
 #include "controllers/diagnostics_controller.h"
 #include "controllers/diagnostics_internal.h"
+#include "controllers/rpc_client.h"
 #include "platform/clock.h"
 #include "rpc/client.h"
 #include "rpc/httpserver.h"
@@ -1482,6 +1483,44 @@ int test_rpc(void) {
             printf("OK\n");
         else {
             printf("FAIL (started=%d tls=%d)\n", started, tls);
+            failures++;
+        }
+    }
+
+    printf("rpc port listening oracle... ");
+    {
+        /* node_rpc_port_listening is the liveness oracle
+         * core.consensus.producer-session.retire refuses a live node on.
+         * It must track the kernel's view of the port exactly: true only
+         * while a loopback listener holds it, false the instant it closes,
+         * and false for ports no listener can hold. The node_rpc_call*
+         * paths cannot answer this question — they return non-NULL
+         * self-describing error bodies on refused connects, which is how
+         * "any reply means running" once read a stopped node as live. */
+        int fd = socket(AF_INET, SOCK_STREAM, 0);
+        struct sockaddr_in addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = htons(0);
+        bool ok = fd >= 0 &&
+                  bind(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0 &&
+                  listen(fd, 1) == 0;
+        uint16_t port = 0;
+        if (ok) {
+            socklen_t len = sizeof(addr);
+            ok = getsockname(fd, (struct sockaddr *)&addr, &len) == 0;
+            port = ntohs(addr.sin_port);
+        }
+        ok = ok && port != 0 && node_rpc_port_listening((int)port, 250);
+        close(fd);
+        ok = ok && !node_rpc_port_listening((int)port, 250);
+        ok = ok && !node_rpc_port_listening(0, 250);
+        ok = ok && !node_rpc_port_listening(70000, 250);
+        if (ok)
+            printf("OK\n");
+        else {
+            printf("FAIL\n");
             failures++;
         }
     }

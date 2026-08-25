@@ -8,6 +8,8 @@
 #ifndef ZCL_CONTROLLERS_RPC_CLIENT_H
 #define ZCL_CONTROLLERS_RPC_CLIENT_H
 
+#include <stdbool.h>
+
 /* Call once at startup (from the node/CLI entry point). */
 void node_rpc_client_init(const char *datadir, int rpc_port);
 
@@ -42,6 +44,16 @@ char *node_rpc_call_deadline(const char *method, const char *params_json,
 char *node_rpc_call_at_deadline(const char *datadir, int rpc_port,
                                 const char *method, const char *params_json,
                                 long connect_ms, long total_ms);
+
+/* Pure socket-level liveness oracle: true iff something accepts TCP
+ * connections on 127.0.0.1:rpc_port within connect_ms. No cookie, no
+ * JSON-RPC, no error bodies. Needed because every node_rpc_call* variant
+ * returns a NON-NULL self-describing error body when the connect is refused
+ * or times out — a caller that treats any non-NULL reply as "the node
+ * answered" inverts the client's own convention and reads a stopped node as
+ * running. When the question is "is a node listening at all", ask this,
+ * not the call path. rpc_port outside 1..65535 returns false. */
+bool node_rpc_port_listening(int rpc_port, long connect_ms);
 
 /* The default out-of-process HTTP backend (socket + JSON-RPC POST), using
  * the env-configurable defaults. */

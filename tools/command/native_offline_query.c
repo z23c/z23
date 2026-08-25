@@ -41,7 +41,6 @@
 
 #include <sqlite3.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -283,12 +282,16 @@ void zcl_native_handle_core_consensus_producer_session_retire(
 
     /* Retirement is an OFFLINE act against a stopped datadir. A live node's
      * exporter may own exactly the session being deleted, so when something
-     * answers on this datadir's RPC, refuse and name the remedy. The probe
-     * is deliberately best-effort — cookie presence plus one short-deadline
-     * call, no port inventable beyond the explicit input / CLI binding —
-     * because the decisive ownership test is the retire primitive's own
-     * build-identity match: it refuses to touch a session this very binary
-     * owns, which is the case where a mid-run delete would actually bite. */
+     * is listening on this datadir's RPC port, refuse and name the remedy.
+     * The probe is the socket-level oracle, NOT node_rpc_call*: every call
+     * variant returns a non-NULL self-describing error body when the connect
+     * is refused, so "any reply means running" reads a stopped node as live
+     * (that exact false positive blocked a real deploy). Cookie presence
+     * gates the probe — no port inventable beyond the explicit input / CLI
+     * binding — because the decisive ownership test is the retire
+     * primitive's own build-identity match: it refuses to touch a session
+     * this very binary owns, which is the case where a mid-run delete would
+     * actually bite. */
     char cookie_path[1200];
     if (snprintf(cookie_path, sizeof(cookie_path), "%s/.cookie", datadir) <
             (int)sizeof(cookie_path) &&
@@ -297,20 +300,15 @@ void zcl_native_handle_core_consensus_producer_session_retire(
         int port = given_port > 0 && given_port <= 65535
                        ? (int)given_port
                        : zcl_native_command_rpc_port();
-        if (port > 0) {
-            char *probe = node_rpc_call_at_deadline(
-                datadir, port, "getblockcount", "[]", 250, 500);
-            if (probe) {
-                free(probe);
-                zcl_command_reply_fail(
-                    reply, ZCL_COMMAND_STATUS_BLOCKED,
-                    ZCL_COMMAND_EXIT_BLOCKED, "NODE_RUNNING", "normalize",
-                    true, false,
-                    "a node answered on this datadir's RPC — stop it first; "
-                    "retirement is offline and the exporter requalifies at "
-                    "next boot", datadir);
-                return;
-            }
+        if (port > 0 && node_rpc_port_listening(port, 250)) {
+            zcl_command_reply_fail(
+                reply, ZCL_COMMAND_STATUS_BLOCKED,
+                ZCL_COMMAND_EXIT_BLOCKED, "NODE_RUNNING", "normalize",
+                true, false,
+                "a node is listening on this datadir's RPC port — stop it "
+                "first; retirement is offline and the exporter requalifies "
+                "at next boot", datadir);
+            return;
         }
     }
 
