@@ -373,6 +373,29 @@ static bool group_reads_external_inputs(const char *name)
         "importblockindex_cli_dispatch",
         "kill9_recovery",
         "make_lint_gates",                /* plants fixtures + compiles the tree */
+        /* The whole make_lint_gates FAMILY, not just the base group. Matching
+         * here is EXACT, so "make_lint_gates" alone covered exactly one of the
+         * 13 registered names. Every sibling copies or scans the worktree and
+         * runs repo SCRIPTS, none of which its forward C closure reaches:
+         * heavy_01/heavy_02 exec the prove-selftest scripts under tools, realroot
+         * git-greps the real tree, partition sandboxes it. Measured: breaking
+         * tools/scripts/fresh-boot-weld-prove-selftest.sh left heavy_02's
+         * 17-file key unchanged, so a stored PASS was served while a cold run
+         * of the same tree FAILED. shard_01..08 are macro-generated, so the
+         * code index cannot resolve them and they report empty-closure today —
+         * listed anyway so de-macroing them cannot silently make them cacheable. */
+        "make_lint_gates_heavy_01",
+        "make_lint_gates_heavy_02",
+        "make_lint_gates_partition",
+        "make_lint_gates_realroot",
+        "make_lint_gates_shard_01",
+        "make_lint_gates_shard_02",
+        "make_lint_gates_shard_03",
+        "make_lint_gates_shard_04",
+        "make_lint_gates_shard_05",
+        "make_lint_gates_shard_06",
+        "make_lint_gates_shard_07",
+        "make_lint_gates_shard_08",
         "net",
         "no_hardcoded_home",              /* scans tree + env for home usage */
         "onion_bootstrap",
