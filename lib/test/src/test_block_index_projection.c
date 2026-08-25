@@ -302,6 +302,12 @@ static int run_iterate_canonical(int *failures)
     BIP_CHECK("iterate: last height is 50",
               c.n >= 3 && c.heights[2] == 50);
 
+    struct iter_ctx storage = {0};
+    BIP_CHECK("storage-order iterate: returns 0",
+              block_index_projection_iterate_storage_order(
+                  p, iter_cb, &storage) == 0);
+    BIP_CHECK("storage-order iterate: visited all 3", storage.n == 3);
+
     block_index_projection_close(p);
     event_log_close(log);
     bip_cleanup_dir(dir);
