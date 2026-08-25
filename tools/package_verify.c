@@ -4085,17 +4085,24 @@ int main(int argc, char **argv)
         att.sanitizers[1].outcome == VCS_PACKAGE_ATTEST_OUTCOME_PASS;
     if (candidate_mode && standard_profile && !allow_testless_standard &&
         !standard_sanitizers_passed) {
+        /* Name the real cause: a build or test failure leaves the sanitizer
+         * detail empty, and printing only that field misdirects the
+         * operator toward a sanitizer problem that never ran. */
+        const char *cause = !build_ok ? build_fail_detail
+            : (have_tests && !test_ok) ? test_fail_detail
+            : sanitizer_fail_detail;
+        if (!cause[0])
+            cause = have_tests ? "sanitizer diagnostic unavailable"
+                               : "recipe declares no test sources";
         fprintf(stdout,
                 "zbuild-package-standard-refused=1 asan=%u ubsan=%u "
                 "detail=%.120s\n", att.sanitizers[0].outcome,
-                att.sanitizers[1].outcome,
-                sanitizer_fail_detail[0] ? sanitizer_fail_detail : "none");
+                att.sanitizers[1].outcome, cause);
         fprintf(stderr,
                 "%s: standard profile requires declared tests and clean "
                 "ASan+UBSan runs; package evidence refused "
                 "(asan=%u ubsan=%u detail=%s)\n", PV_LOG,
-                att.sanitizers[0].outcome, att.sanitizers[1].outcome,
-                sanitizer_fail_detail[0] ? sanitizer_fail_detail : "none");
+                att.sanitizers[0].outcome, att.sanitizers[1].outcome, cause);
         pv_rm_rf(work);
         vcs_package_recipe_free(&recipe);
         vcs_package_manifest_free(&manifest);

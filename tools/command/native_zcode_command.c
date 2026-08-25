@@ -1413,11 +1413,13 @@ void zcl_native_handle_zcode_package_verify(
     json_free(&rj);
     (void)json_push_kv_str(
         &reply->data, "verification_note",
-        "headline signal: bit-identical third-party reproduction — two or "
+        "headline signal: bit-identical reproduction — two or "
         "more DISTINCT build receipts (any verifier's --emit build-report, "
         "filed under <datadir>/zcode/receipts) committing byte-identical "
-        "output sets for this package+recipe; reproduce it yourself with "
-        "zclassic23-package-verify --emit=... --reproduce-against=<report>. "
+        "output sets for this package+recipe; reproduce an installed "
+        "package on this node with zcode package reproduce, or externally "
+        "with zclassic23-package-verify --emit=... "
+        "--reproduce-against=<report>. "
         "The signer quorum (2+ approved independent verifier keys signing "
         "matching attestations) is the latency fast path over "
         "reproduction, never a substitute for it; attestations are "
