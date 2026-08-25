@@ -810,7 +810,7 @@ cj_fetch_package() {
 
 # ── the journey ──────────────────────────────────────────────────────────
 cj_journey_guide() {
-    cj_step "1/10  zcode guide — the person says what they want"
+    cj_step "1/12  zcode guide — the person says what they want"
     local guide
     guide="$(cj_a zcode guide)"
     cj_require_ok "zcode guide" "$guide"
@@ -824,7 +824,7 @@ cj_journey_guide() {
 }
 
 cj_journey_publish_reusable() {
-    cj_step "2/10  the commons already contains one finished, reusable package"
+    cj_step "2/12  the commons already contains one finished, reusable package"
     CJ_PUBLISHER="$("$CJ_SIGNER" --generate "$DHT_WORK/publisher.key")"
     [ -n "$CJ_PUBLISHER" ] || cj_die "could not create the offline publisher identity"
     CJ_TEXTSTAT_SRC="$DHT_WORK/textstat"
@@ -851,7 +851,7 @@ cj_journey_publish_reusable() {
 # overlay for that exact content, and the bytes arrive as inert source.
 # Both nodes run on one physical host; nothing here claims otherwise.
 cj_journey_peer_distribution() {
-    cj_step "4/10  a second node fetches it peer-to-peer — and the bytes stay inert"
+    cj_step "3/12  a second node fetches it peer-to-peer — and the bytes stay inert"
     # The pointer gate: A may announce only what its own store evidences as
     # reproduced — the publisher admits its own package explicitly (first
     # receipt), then re-runs the deterministic rebuild (distinct second
@@ -883,7 +883,7 @@ cj_journey_peer_distribution() {
 }
 
 cj_journey_work_start_unavailable() {
-    cj_step "3/10  zcode work start — reuse is searched before any code is written"
+    cj_step "4/12  zcode work start — reuse is searched before any code is written"
     CJ_WS="$DHT_WORK/wordcount"
     cp -a "$CJ_FIXTURES/wordcount" "$CJ_WS"
     # The application declares NO dependency yet. Whether z23/textstat may be
@@ -920,7 +920,7 @@ cj_journey_work_start_unavailable() {
 }
 
 cj_journey_admit_reuse() {
-    cj_step "5/10  zcode use — explicit local admission builds and installs it"
+    cj_step "5/12  zcode use — explicit local admission builds and installs it"
     cj_use_package a "$CJ_TEXTSTAT_ROOT"
     local installed="$DHT_DD_A/zcode/installed/$CJ_TEXTSTAT_ROOT"
     [ -f "$installed/lib/libtextstat.a" ] ||
@@ -1031,7 +1031,7 @@ cj_wait_work_state() {
 }
 
 cj_journey_create_missing() {
-    cj_step "6/10  zcode work run — only the missing behavior enters candidate work"
+    cj_step "6/12  zcode work run — only the missing behavior enters candidate work"
     local handoff candidate run
     handoff="$(cj_a zcode work run \
         --input="{\"workspace\":\"$CJ_WS\",\"work\":\"latest\",\"adapter\":\"manual\",\"details\":true}")"
@@ -1101,7 +1101,7 @@ cj_wait_proof_result() {
 }
 
 cj_journey_show() {
-    cj_step "7/10  zcode work show — the person sees the real consequence"
+    cj_step "7/12  zcode work show — the person sees the real consequence"
     cj_wait_work_state EVIDENCE_READY ||
         cj_die "the candidate never reached EVIDENCE_READY: $CJ_LAST_SHOW"
     cj_wait_proof_result ||
@@ -1246,13 +1246,13 @@ cj_overlay() {
     cj_connect_authenticated
 }
 
-# ── 8/9  the person decides, and the exact bytes travel ──────────────────
+# ── 8/12  the person decides, and the exact bytes travel ──────────────────
 # CANDIDATE is proof readiness. PROVEN is a human decision, and only this
 # command makes it. Everything downstream — publication, the source carrier
 # another node reconstructs — is derived from that one decision, which is
 # why acceptance can be bound to the exact facts the person was shown.
 cj_journey_accept() {
-    cj_step "8/10  zcode work accept — the person decides, and the exact bytes travel"
+    cj_step "8/12  zcode work accept — the person decides, and the exact bytes travel"
     local stale accept again
 
     # TAMPER (receipt): an acceptance bound to a decision that was never
@@ -1428,7 +1428,7 @@ cj_journey_tamper_refusals() {
     cj_note "tamper refused by name: source, dependency, receipt, artifact"
 }
 
-# ── 9/9  the accepted application runs ───────────────────────────────────
+# ── 9/12  the accepted application runs ───────────────────────────────────
 # What was published from the accepted work is a source carrier: it holds the
 # exact accepted source as verified shards, its closed authority chain, and
 # an inert marker. That is deliberate — distributing software is not the same
@@ -1437,7 +1437,7 @@ cj_journey_tamper_refusals() {
 # locally, turn it back into source, and build it against the dependency this
 # node already admitted.
 cj_journey_use_app() {
-    cj_step "9/10  zcode use — the accepted application runs on the second node"
+    cj_step "9/12  zcode use — the accepted application runs on the second node"
     local src_b src_a bin_b bin_a sample out want ts_a ts_b
 
     # The person on node B admits the accepted application explicitly.
@@ -1505,7 +1505,129 @@ cj_journey_use_app() {
     cj_note "the longest_line number is the behavior this journey created"
 }
 
-# ── 10/10  one bounded change to a package that already exists ───────────
+# ── 10/12  the object-set carrier: the compile cache itself travels ───────
+# Steps 1-9 moved source. This step moves the WORK: node B's confined rebuild
+# of the accepted application fills a fastobj cache (one object + one sidecar
+# per translation unit, each keyed by content the cache itself re-derives),
+# the cache leaves as ONE ordinary content.v2 package, and node C — which has
+# never compiled this application — reproduces it with ZERO compiler spawns
+# and files the byte-identical receipt. The carrier rides its own namespace
+# (zclassic23.fastobj): a fetch under zclassic23.package would force the
+# transport-import path on a root that is not a transport.
+cj_journey_object_set_carrier() {
+    cj_step "10/12  object-set carrier — a node that never compiled it rebuilds with zero compilers"
+    local cache_b cache_c cold cold_id carrier export_out shape admit_out warm warm_id
+    local cold_misses cold_hits warm_misses warm_hits plan deadline complete=False
+
+    # Node B already installed the accepted application in step 9. Its
+    # reproduce build now runs with a fastobj cache attached: every TU it
+    # compiles lands in the cache; nothing is reused yet.
+    cache_b="$(cj_node_dir b)/fastobj-cache"
+    cj_on b rm -rf "$cache_b"
+    cold="$("cj_b" zcode package reproduce \
+        --input="{\"name_or_root\":\"$CJ_APP_ROOT\",\"datadir\":\"$DHT_DD_B\",\"fast_cache\":\"$cache_b\"}")"
+    cj_require_ok "node B cached reproduce (cold)" "$cold"
+    printf '%s\n' "$cold" >"$DHT_WORK/carrier-reproduce-cold.json"
+    [ "$(cj_field data.reproduced "$cold" False)" = True ] ||
+        cj_die "node B's cached reproduce did not match its install build: $cold"
+    cold_misses="$(cj_field data.fast_cache.misses "$cold" 0)"
+    cold_hits="$(cj_field data.fast_cache.hits "$cold" 0)"
+    [ "$cold_misses" -ge 1 ] 2>/dev/null ||
+        cj_die "the cold lap compiled nothing (misses=$cold_misses) — the cache never filled: $cold"
+    [ "$cold_hits" = 0 ] 2>/dev/null ||
+        cj_die "the cold lap claimed hits=$cold_hits on an empty cache: $cold"
+    cold_id="$(cj_field data.receipt_id "$cold")"
+    cj_note "node B filled the cache cold: misses=$cold_misses hits=$cold_hits, receipt ${cold_id:0:16}…"
+
+    # The cache leaves as one ordinary package in node B's own store. The
+    # export leaf reports the carrier root and the public-shape verdict, so
+    # the journey asserts the serving gate said yes, not just that a root
+    # came back.
+    export_out="$("cj_b" zcode package fastobj-export \
+        --input="{\"datadir\":\"$DHT_DD_B\",\"cache_dir\":\"$cache_b\"}")"
+    cj_require_ok "node B exported its cache as the carrier" "$export_out"
+    printf '%s\n' "$export_out" >"$DHT_WORK/carrier-export.json"
+    carrier="$(cj_field data.package_root "$export_out")"
+    [ "${#carrier}" = 64 ] ||
+        cj_die "the carrier export returned no package root: $export_out"
+    shape="$(cj_field data.public_shape "$export_out")"
+    [ "$shape" = "fastobj-carrier" ] ||
+        cj_die "the carrier is not publicly serveable (shape=$shape): $export_out"
+    cj_publish_record b zclassic23.fastobj provider "$carrier" "$carrier" 1
+
+    # Node C admits the application explicitly — the install build is C's
+    # own, cache or no cache — then fetches the CARRIER by root through the
+    # overlay from B and unpacks it into a fresh cache.
+    cj_use_package c "$CJ_APP_ROOT"
+    cj_fetch_fastobj_carrier c "$carrier"
+    cache_c="$(cj_node_dir c)/fastobj-cache"
+    cj_on c rm -rf "$cache_c"
+    admit_out="$("cj_c" zcode package fastobj-admit \
+        --input="{\"datadir\":\"$DHT_DD_C\",\"package_root\":\"$carrier\",\"cache_dir\":\"$cache_c\"}")"
+    cj_require_ok "node C admitted the carrier into a fresh cache" "$admit_out"
+    printf '%s\n' "$admit_out" >"$DHT_WORK/carrier-admit.json"
+    [ "$(cj_field data.entries "$admit_out" 0)" = "$cold_misses" ] ||
+        cj_die "node C admitted a different entry count than node B compiled: $admit_out"
+
+    # The zero-spawn rebuild. Node C reproduces the application it just
+    # installed, with the carried cache attached: every TU is a hit, no
+    # compiler runs, and the filed receipt is the same bytes node B filed.
+    warm="$("cj_c" zcode package reproduce \
+        --input="{\"name_or_root\":\"$CJ_APP_ROOT\",\"datadir\":\"$DHT_DD_C\",\"fast_cache\":\"$cache_c\"}")"
+    cj_require_ok "node C cached reproduce (warm)" "$warm"
+    printf '%s\n' "$warm" >"$DHT_WORK/carrier-reproduce-warm.json"
+    [ "$(cj_field data.reproduced "$warm" False)" = True ] ||
+        cj_die "node C's warm rebuild did not match its install build: $warm"
+    warm_misses="$(cj_field data.fast_cache.misses "$warm" -1)"
+    warm_hits="$(cj_field data.fast_cache.hits "$warm" -1)"
+    [ "$warm_misses" = 0 ] 2>/dev/null ||
+        cj_die "node C spawned compilers (misses=$warm_misses) on a full cache: $warm"
+    [ "$warm_hits" = "$cold_misses" ] 2>/dev/null ||
+        cj_die "node C hit $warm_hits of $cold_misses carried objects — the caches disagree: $warm"
+    warm_id="$(cj_field data.receipt_id "$warm")"
+    [ "$warm_id" = "$cold_id" ] ||
+        cj_die "the two nodes filed different receipts for the same rebuild: $cold_id vs $warm_id"
+    [ "$(cj_sha3_on b "$DHT_DD_B/zcode/receipts/$cold_id")" = \
+      "$(cj_sha3_on c "$DHT_DD_C/zcode/receipts/$warm_id")" ] ||
+        cj_die "the filed receipts are not byte-identical across nodes"
+    CJ_CARRIER_ROOT="$carrier"
+    CJ_CARRIER_ENTRIES="$cold_misses"
+    cj_note "carrier ${carrier:0:16}… carried $CJ_CARRIER_ENTRIES objects node-B → node-C"
+    cj_note "node C rebuilt with zero compilers: hits=$warm_hits misses=0, identical receipt ${warm_id:0:16}…"
+}
+
+# A carrier is fetched by root through the live daemon like any package, but
+# under its own namespace: under zclassic23.package the completion of a fetch
+# triggers the zcode transport import, which a compile-cache carrier is not.
+# Provider discovery is retryable, so re-admit the same root until the pin
+# says whole — the same discipline cj_fetch_package applies to transports.
+cj_fetch_fastobj_carrier() {
+    local node="$1" root="$2" out plan complete=False deadline next_resume
+    out="$("cj_$node" zcode package fetch \
+        --input="{\"root\":\"$root\",\"namespace\":\"zclassic23.fastobj\",\"maximum_bytes\":67108864}")"
+    cj_require_ok "node $node fetch carrier $root" "$out"
+    printf '%s\n' "$out" >"$DHT_WORK/carrier-fetch-$node.json"
+    [ "$(cj_field data.live "$out" False)" = True ] ||
+        cj_die "node $node did not route the carrier fetch through its live daemon: $out"
+    deadline=$(( $(date +%s) + 180 )); next_resume=$(( $(date +%s) + 15 ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        plan="$("cj_$node" zcode package pin \
+            --input="{\"root\":\"$root\",\"mode\":\"plan\"}" || true)"
+        complete="$(cj_field data.package.complete "$plan" False)"
+        [ "$complete" = True ] && break
+        if [ "$(date +%s)" -ge "$next_resume" ]; then
+            "cj_$node" zcode package fetch \
+                --input="{\"root\":\"$root\",\"namespace\":\"zclassic23.fastobj\",\"maximum_bytes\":67108864}" \
+                >/dev/null 2>&1 || true
+            next_resume=$(( $(date +%s) + 15 ))
+        fi
+        sleep 1
+    done
+    [ "$complete" = True ] ||
+        cj_die "node $node never received the carrier $root whole: $plan"
+}
+
+# ── 11/12  one bounded change to a package that already exists ───────────
 # Steps 1-9 prove the commons can CREATE something. This proves the other
 # half, and it is the half a stranger actually wants: take software that
 # already works, change one thing about how it behaves, keep that exact
@@ -1708,7 +1830,7 @@ cj_journey_turn_faster_stage() {
 }
 
 cj_journey_turn_faster() {
-    cj_step "10/10  the same journey, on software that already exists: the aircraft turns faster"
+    cj_step "11/12  the same journey, on software that already exists: the aircraft turns faster"
     local before_bin start handoff candidate run show accept again
     local plan digest body signature seal commit src_b bin_b
 
@@ -1939,7 +2061,7 @@ cj_boot_c() {
 }
 
 cj_journey_publisher_disappears() {
-    cj_step "11/11  the publisher disappears and the software survives"
+    cj_step "12/12  the publisher disappears and the software survives"
     local anchor tip del_c
 
     # C takes its own anchored identity while A is still here to fund it —
@@ -2155,6 +2277,7 @@ REPRODUCED ON NODE B
 TAMPER REFUSED
 ACCEPTED
 USED
+CACHE TRAVELED
 CHANGED WHAT EXISTED
 PUBLISHER GONE'
 
@@ -2164,7 +2287,7 @@ cj_strip_cont() { printf '  %-26s\033[2m%s\033[0m\n' "" "$1"; }
 cj_strip() {
     printf '  \033[1mYOU ASKED\033[0m → \033[1mREUSED FROM PEER\033[0m → \033[1mCREATED MISSING BEHAVIOR\033[0m → \033[1mVISIBLE RESULT\033[0m →\n'
     printf '  \033[1mREPRODUCED ON NODE B\033[0m → \033[1mTAMPER REFUSED\033[0m → \033[1mACCEPTED\033[0m → \033[1mUSED\033[0m →\n'
-    printf '  \033[1mPUBLISHER GONE\033[0m\n\n'
+    printf '  \033[1mCACHE TRAVELED\033[0m → \033[1mPUBLISHER GONE\033[0m\n\n'
     cj_strip_row "YOU ASKED" "$CJ_GOAL"
     cj_strip_row "REUSED FROM PEER" \
         "z23/textstat ${CJ_TEXTSTAT_ROOT:0:12}… — $CJ_TEXTSTAT_BYTES bytes from node A, no registry"
@@ -2183,6 +2306,12 @@ cj_strip() {
     cj_strip_row "ACCEPTED" \
         "one exact version, by hand — PROVEN, published as you/wordcount"
     cj_strip_row "USED" "wordcount sample.txt → $CJ_APP_OUTPUT"
+    # The tenth stage moves the work, not the source: the compile cache left
+    # node B as one ordinary package, and a node that never compiled the
+    # application rebuilt it without running a single compiler.
+    cj_strip_row "CACHE TRAVELED" \
+        "$CJ_CARRIER_ENTRIES objects node-B → node-C as one ordinary package"
+    cj_strip_cont "node C rebuilt with zero compilers — same receipt ${CJ_CARRIER_ROOT:0:12}…"
     # The eight stages above built something from nothing. This last row is the
     # harder half of the same promise: the same eight stages run again on
     # software that already existed and that this journey did not write, and
@@ -2276,6 +2405,9 @@ cj_write_facts() {
         printf 'reused_package_match  = byte-identical on both nodes (%s bytes)\n' "$CJ_LIB_BYTES"
         printf 'application_match     = byte-identical program on both nodes (%s bytes)\n' "$CJ_APP_BINARY_BYTES"
         printf 'tamper_refused        = 4 of 4, each by name\n'
+        printf 'carrier_root          = %s\n' "$CJ_CARRIER_ROOT"
+        printf 'carrier_entries       = %s objects, node-B cache exported as one content.v2 package\n' "$CJ_CARRIER_ENTRIES"
+        printf 'carrier_rebuild       = node C reproduced with zero compilers, byte-identical receipt\n'
         printf 'central_services      = 0\n'
         # A 64-hex root plus a parenthetical does not fit the width this file
         # is rendered at, so the naming lives on its own line and the two
@@ -2347,7 +2479,11 @@ cj_journey_remote_reproduction
 CJ_SECS_REPRO=$(( $(date +%s) - CJ_T_REPRO ))
 cj_journey_tamper_refusals
 cj_journey_use_app
-# The tenth step is the other half of the promise: not "the commons can build
+# The tenth step moves the work, not the source: the compile cache itself
+# leaves node B as one ordinary package, and node C — which never compiled
+# this application — rebuilds it with zero compilers and the same receipt.
+cj_journey_object_set_carrier
+# The eleventh step is the other half of the promise: not "the commons can build
 # something new", but "the commons can change something that already works,
 # and you keep that exact version". Same nodes, same overlay, same lifecycle.
 cj_journey_turn_faster
@@ -2370,9 +2506,9 @@ cj_journey_publisher_disappears
 # both the facts line and the printed document, so the two cannot disagree.
 CJ_VERDICT_SCHEMA=zcl.commons_journey_acceptance.v1
 CJ_VERDICT_TOKEN=PASS
-CJ_STEPS_PROVEN=11
-CJ_STEPS_TOTAL=11
-CJ_VERDICT="{\"schema\":\"$CJ_VERDICT_SCHEMA\",\"verdict\":\"$CJ_VERDICT_TOKEN\",\"steps_proven\":$CJ_STEPS_PROVEN,\"steps_total\":$CJ_STEPS_TOTAL,\"complete\":true,\"reuse_before_creation\":true,\"no_false_reuse_claim\":true,\"peer_to_peer_fetch\":true,\"fetched_source_inert\":true,\"explicit_local_admission\":true,\"independent_remote_build\":true,\"approved_signer_required\":true,\"explicit_human_acceptance\":true,\"accepted_work_published\":true,\"remote_source_reproduced\":true,\"byte_identical_artifacts\":true,\"tamper_refused_by_name\":[\"source\",\"dependency\",\"receipt\",\"artifact\"],\"application_ran\":true,\"existing_package_changed\":true,\"behavior_change_measured_before_and_after\":true,\"changed_version_is_its_own_root\":true,\"central_services_contacted\":0,\"human_first_terminal_output\":true}"
+CJ_STEPS_PROVEN=12
+CJ_STEPS_TOTAL=12
+CJ_VERDICT="{\"schema\":\"$CJ_VERDICT_SCHEMA\",\"verdict\":\"$CJ_VERDICT_TOKEN\",\"steps_proven\":$CJ_STEPS_PROVEN,\"steps_total\":$CJ_STEPS_TOTAL,\"complete\":true,\"reuse_before_creation\":true,\"no_false_reuse_claim\":true,\"peer_to_peer_fetch\":true,\"fetched_source_inert\":true,\"explicit_local_admission\":true,\"independent_remote_build\":true,\"approved_signer_required\":true,\"explicit_human_acceptance\":true,\"accepted_work_published\":true,\"remote_source_reproduced\":true,\"byte_identical_artifacts\":true,\"tamper_refused_by_name\":[\"source\",\"dependency\",\"receipt\",\"artifact\"],\"application_ran\":true,\"compile_cache_carried_as_package\":true,\"zero_compiler_rebuild\":true,\"carrier_receipt_identical\":true,\"existing_package_changed\":true,\"behavior_change_measured_before_and_after\":true,\"changed_version_is_its_own_root\":true,\"central_services_contacted\":0,\"human_first_terminal_output\":true}"
 # The multi-host leg adds its fact only when it actually ran: the publisher
 # disappeared and node C still reproduced and ran the exact accepted bytes.
 if [ "$CJ_PUBLISHER_SURVIVAL" = 1 ]; then
