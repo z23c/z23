@@ -57,6 +57,7 @@
 #include "keys/pubkey.h"
 #include "presentation/model.h"
 #include "vcs/package_index.h"
+#include "vcs/package_build.h"
 #include "vcs/package_publish.h"
 #include "vcs/package_recipe.h"
 #include "vcs/package_store.h"
@@ -263,6 +264,36 @@ static char *zp_release_hex(const struct vcs_package_release *r,
     if (wire_len_out)
         *wire_len_out = wire_len;
     return hex;
+}
+
+/* File a build receipt under <dd>/zcode/receipts/<receipt-id-hex> — the
+ * exact location and name vcs_package_reproduce_scan enumerates. */
+static bool zp_file_receipt(const char *dd,
+                            const struct vcs_package_build_receipt *r)
+{
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    uint8_t id[32];
+    if (vcs_package_build_serialize(r, &wire, &wire_len) !=
+            VCS_PACKAGE_BUILD_OK ||
+        vcs_package_build_id(r, id) != VCS_PACKAGE_BUILD_OK) {
+        free(wire);
+        return false;
+    }
+    char id_hex[65];
+    zp_hex32(id, id_hex);
+    char dir[600], path[700];
+    snprintf(dir, sizeof(dir), "%s/zcode/receipts", dd);
+    if (mkdir(dir, 0700) != 0) {
+        /* EEXIST is fine (a second receipt under the same datadir). */
+    }
+    snprintf(path, sizeof(path), "%s/%s", dir, id_hex);
+    FILE *f = fopen(path, "wb");
+    bool wrote = f && fwrite(wire, 1, wire_len, f) == wire_len;
+    if (f)
+        fclose(f);
+    free(wire);
+    return wrote;
 }
 
 struct zp_pkg {
@@ -1512,6 +1543,96 @@ static int t_show(void)
              f0 &&
              strcmp(json_get_str(json_get(f0, "path")), "LICENSE") == 0 &&
              !json_get_bool(json_get(&c.reply.data, "files_truncated")));
+    /* No receipts filed yet: reproduction reads as an honest empty
+     * report — not reproduced, and the publish gate would refuse. */
+    const struct json_value *repro =
+        json_get(&c.reply.data, "reproduction");
+    ZP_CHECK("show: zero receipts report not-reproduced, not publishable",
+             repro &&
+             json_get_int(json_get(repro, "receipts_scanned")) == 0 &&
+             json_get_int(json_get(repro, "receipts_matching")) == 0 &&
+             !json_get_bool(json_get(repro, "reproduced")) &&
+             !json_get_bool(json_get(repro, "publishable")) &&
+             !json_get_bool(json_get(repro, "rows_truncated")));
+    char release_id[65];
+    const char *rid = rel ? json_get_str(json_get(rel, "release_id")) : NULL;
+    snprintf(release_id, sizeof(release_id), "%s", rid ? rid : "");
+    ZP_CHECK("show: the release names its own id", rid != NULL);
+    zp_cmd_free(&c);
+
+    /* File two distinct, mutually matching installable receipts (the same
+     * package+recipe roots, the same output set, different flags strings —
+     * distinct build events, distinct receipt ids): the gate's exact local
+     * predicate must now read true. */
+    struct vcs_package_build_receipt ra, rb;
+    vcs_package_build_receipt_init(&ra);
+    vcs_package_build_receipt_init(&rb);
+    struct vcs_package_build_receipt *rcpts[2] = {&ra, &rb};
+    static const char *const rcpt_flags[2] = {"fixture-quick",
+                                              "fixture-standard"};
+    bool rcpts_ok = true;
+    uint8_t out_sha[32];
+    memset(out_sha, 0x5a, sizeof(out_sha));
+    for (size_t i = 0; i < 2 && rcpts_ok; i++) {
+        struct vcs_package_build_receipt *rr = rcpts[i];
+        memcpy(rr->package_root, p.root, 32);
+        memcpy(rr->recipe_root, g_zp_recipe_root, 32);
+        memcpy(rr->lock_root, p.root, 32);
+        snprintf(rr->compiler_id, sizeof(rr->compiler_id), "gcc");
+        snprintf(rr->compiler_version, sizeof(rr->compiler_version), "14.2.0");
+        snprintf(rr->flags, sizeof(rr->flags), "%s", rcpt_flags[i]);
+        rr->isolation = (uint8_t)VCS_PACKAGE_BUILD_ISOLATION_FULL;
+        rr->test_ran = false;
+        rr->result_class = (uint8_t)VCS_PACKAGE_BUILD_RESULT_BUILD_PASS;
+        rcpts_ok = vcs_package_build_add_output(rr, "lib/ring-buffer.a",
+                                                out_sha, 123) ==
+                       VCS_PACKAGE_BUILD_OK &&
+                   zp_file_receipt(dd, rr);
+    }
+    uint8_t id_a[32], id_b[32];
+    bool ids_ok = rcpts_ok &&
+        vcs_package_build_id(&ra, id_a) == VCS_PACKAGE_BUILD_OK &&
+        vcs_package_build_id(&rb, id_b) == VCS_PACKAGE_BUILD_OK &&
+        memcmp(id_a, id_b, 32) != 0;
+    ZP_CHECK("show: two distinct matching receipts filed", ids_ok);
+
+    zp_cmd_init(&c);
+    (void)json_push_kv_str(&c.input, "datadir", dd);
+    (void)json_push_kv_str(&c.input, "root", p.root_hex);
+    zcl_native_handle_zcode_package_show(&c.request, &c.reply);
+    repro = json_get(&c.reply.data, "reproduction");
+    ZP_CHECK("show: two agreeing receipts report reproduced + publishable",
+             c.reply.status == ZCL_COMMAND_STATUS_PASSED && repro &&
+             json_get_int(json_get(repro, "receipts_matching")) == 2 &&
+             json_get_bool(json_get(repro, "reproduced")) &&
+             json_get_bool(json_get(repro, "publishable")) &&
+             !json_get_bool(json_get(repro, "rows_truncated")));
+    zp_cmd_free(&c);
+
+    /* A release envelope not filed under its own id (renamed away) still
+     * loads into the index — the loader keys on CONTENT, not filename — so
+     * show finds the package, but the envelope re-read 404s and the
+     * section degrades to an error string. Show itself stays a working
+     * read-only view. */
+    char envelope[600], envelope_off[600];
+    snprintf(envelope, sizeof(envelope), "%s/zcode/releases/%s", dd,
+             release_id);
+    char off_id[65];
+    snprintf(off_id, sizeof(off_id), "%s", release_id);
+    off_id[0] = off_id[0] == '0' ? '1' : '0';
+    snprintf(envelope_off, sizeof(envelope_off), "%s/zcode/releases/%s", dd,
+             off_id);
+    ZP_CHECK("show: release envelope renamed off its own id",
+             rename(envelope, envelope_off) == 0);
+    zp_cmd_init(&c);
+    (void)json_push_kv_str(&c.input, "datadir", dd);
+    (void)json_push_kv_str(&c.input, "root", p.root_hex);
+    zcl_native_handle_zcode_package_show(&c.request, &c.reply);
+    ZP_CHECK("show: unreadable envelope degrades to reproduction.error",
+             c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
+             json_get_str(json_get(&c.reply.data, "reproduction.error")) !=
+                 NULL &&
+             !json_get(&c.reply.data, "reproduction"));
     zp_cmd_free(&c);
 
     /* Unknown root: FAILED naming UNKNOWN_PACKAGE. */

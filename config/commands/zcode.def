@@ -2217,8 +2217,10 @@ ZCL_COMMAND_READY_READ(
     "(file/byte/chunk counts, LICENSE presence, executable count) for one "
     "64-hex package `root`, read from the rebuilt index projection at call "
     "time, plus a bounded first page of up to 32 manifest files "
-    "(files_truncated flags the rest). UNKNOWN_PACKAGE names a root no "
-    "persisted release claims.",
+    "(files_truncated flags the rest), plus the local reproduction evidence "
+    "summary (receipts scanned/matching, reproduced, publishable — the "
+    "exact predicate the pointer publish gate applies). UNKNOWN_PACKAGE "
+    "names a root no persisted release claims.",
     ZCL_COMMAND_LIST_BUDGET,
     "zcode,package,show,detail,manifest,release,root",
     "zcl.zcode_package_show.input.v1", "zcl.zcode_package_show.v1",

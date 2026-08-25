@@ -1884,6 +1884,59 @@ void zcl_native_handle_zcode_package_show(
                            (int64_t)view.executable_count);
     zcl_hotswap_service_release(&lease);
 
+    /* Reproduction evidence summary: the same local receipts the pointer
+     * publish gate counts (boot_zcode_dht_publish_gate.c refuses unless
+     * vcs_package_reproduce_scan reports reproduced=true). The persisted
+     * release envelope commits the recipe root the receipts must name. An
+     * unreadable envelope or a failed scan degrades this section to an
+     * error string — show is a read-only view, never failed by evidence. */
+    {
+        char repro_path[4400];
+        n = snprintf(repro_path, sizeof(repro_path), "%s/releases/%s",
+                     zcode_dir, view.release_id);
+        uint8_t *release_wire = NULL;
+        size_t release_wire_len = 0;
+        struct vcs_package_release release;
+        bool envelope_ok =
+            n > 0 && (size_t)n < sizeof(repro_path) &&
+            zc_read_object(repro_path, VCS_PACKAGE_RELEASE_MAX_WIRE_BYTES,
+                           &release_wire, &release_wire_len) &&
+            vcs_package_release_parse(release_wire, release_wire_len,
+                                      &release) == VCS_PACKAGE_RELEASE_OK;
+        free(release_wire);
+        if (!envelope_ok) {
+            (void)json_push_kv_str(&reply->data, "reproduction.error",
+                                   "persisted release envelope unreadable");
+        } else {
+            n = snprintf(repro_path, sizeof(repro_path), "%s/receipts",
+                         zcode_dir);
+            struct vcs_reproduce_report report;
+            if (n <= 0 || (size_t)n >= sizeof(repro_path) ||
+                !vcs_package_reproduce_scan(repro_path, root,
+                                            release.recipe_root, &report)) {
+                (void)json_push_kv_str(&reply->data, "reproduction.error",
+                                       "the receipt scan failed");
+            } else {
+                struct json_value repro;
+                json_init(&repro);
+                json_set_object(&repro);
+                (void)json_push_kv_int(&repro, "receipts_scanned",
+                                       (int64_t)report.scanned);
+                (void)json_push_kv_int(&repro, "receipts_matching",
+                                       (int64_t)report.matching);
+                (void)json_push_kv_bool(&repro, "reproduced",
+                                        report.reproduced);
+                /* The exact gate predicate the pointer publish applies. */
+                (void)json_push_kv_bool(&repro, "publishable",
+                                        report.reproduced);
+                (void)json_push_kv_bool(&repro, "rows_truncated",
+                                        report.rows_truncated);
+                (void)json_push_kv(&reply->data, "reproduction", &repro);
+                json_free(&repro);
+            }
+        }
+    }
+
     /* The bounded file page: parse the persisted manifest again (the index
      * projects summaries only; the CAS wire stays the truth). */
     if (view.manifest_present) {
