@@ -1083,3 +1083,10 @@ AGENT_IMPACT_RULE("lib/net/include/net/site_routes.def|lib/test/src/test_site_ro
  * already mapped elsewhere for its other roles; this rule exists so the
  * settings-precedence group runs whenever the reader itself moves. */
 AGENT_IMPACT_RULE("lib/util/src/util.c|lib/util/include/util/util.h|lib/test/src/test_node_config_file.c", "node_config_file make_lint_gates")
+/* `z23 join` / `z23 update`. The declarative surface, the handler, the shared
+ * join-posture reader, the config-file reader that makes the written flags
+ * mean anything, and the boot call site are ONE slice: change any of them and
+ * the command can silently write a file the node never reads. The catalog and
+ * native-API groups ride along because a new root ALIAS plus a new `zcode`
+ * child move both the root and branch menu budgets. */
+AGENT_IMPACT_RULE("tools/command/native_zcode_node_command.c|tools/command/native_zcode_join.c|tools/command/native_zcode_join.h|lib/util/src/util.c|lib/util/include/util/util.h|lib/test/src/test_zcode_node_command.c", "zcode_node_command command_registry_catalog native_api_contract encoding make_lint_gates")
