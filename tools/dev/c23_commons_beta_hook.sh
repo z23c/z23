@@ -774,6 +774,21 @@ beta_publish_record() {
     beta_ok "role $role $kind commit $root" "$commit"
 }
 
+# The pointer publication gate refuses REPRODUCTION_NOT_EVIDENCED unless the
+# publishing node's own store holds two distinct byte-identical build
+# receipts for the exact (package root, recipe root) pair the signed release
+# commits. The install (`zcode use`) files the first; this deterministic
+# rebuild files the distinct second, before the pointer plan exists.
+beta_pointer_reproduce() {
+    local role="$1" root="$2" reproduced
+    reproduced="$(beta_native "$role" zcode package reproduce \
+        --input="{\"name_or_root\":\"$root\"}" || true)"
+    beta_ok "role $role reproduce $root" "$reproduced"
+    [ "$(printf '%s' "$reproduced" | beta_jget data.reproduced)" = true ] &&
+    [ "$(printf '%s' "$reproduced" | beta_jget data.filed)" = true ] ||
+        beta_die "role $role did not file a distinct rebuild receipt for $root"
+}
+
 beta_publish_package() {
     local role="$1" root="$2" transport="$3" sequence="$4"
     # The frozen DHT grammar keeps semantic selection and byte custody
@@ -965,6 +980,14 @@ read -r PACKAGE_PUBLISHED BETA_PACKAGE_TRANSPORT PACKAGE_RELEASE_ID <<<"$(beta_s
 ! grep -q "$BETA_PACKAGE_ROOT" "$C23_BETA_FIXTURE_SOURCE/config/zcode_package_registry.def" ||
     beta_die "outside package leaked into the compiled registry"
 beta_restart "$BETA_A"
+# The pointer gate requires the publishing node's own reproduction evidence:
+# A installs its exact graph (first receipts), then re-runs the deterministic
+# rebuild of each root it is about to name (distinct second receipts).
+beta_build_graph "$BETA_A" "$BETA_PACKAGE_ROOT" "$BETA_BASE_ROOT" \
+    "$BETA_SHA3_ROOT" "$BETA_PACKAGE_ROOT"
+beta_pointer_reproduce "$BETA_A" "$BETA_BASE_ROOT"
+beta_pointer_reproduce "$BETA_A" "$BETA_SHA3_ROOT"
+beta_pointer_reproduce "$BETA_A" "$BETA_PACKAGE_ROOT"
 beta_publish_package "$BETA_A" "$BETA_BASE_ROOT" "$BETA_BASE_TRANSPORT" 1
 beta_publish_package "$BETA_A" "$BETA_SHA3_ROOT" "$BETA_SHA3_TRANSPORT" 1
 beta_publish_package "$BETA_A" "$BETA_PACKAGE_ROOT" "$BETA_PACKAGE_TRANSPORT" 1
@@ -1007,6 +1030,12 @@ BETA_SECOND_API_ROOT="$BETA_VERSION_API_ROOT"
     "$C23_BETA_FIXTURE_SOURCE/config/zcode_package_registry.def" ||
     beta_die "second outside package leaked into the compiled registry"
 beta_restart "$BETA_B" "$BETA_A"
+# B is about to publish the second package's pointer: its own store must
+# evidence reproduction first (install files receipt one, reproduce files
+# the distinct second).
+beta_build_graph "$BETA_B" "$BETA_SECOND_ROOT" "$BETA_BASE_ROOT" \
+    "$BETA_SECOND_ROOT"
+beta_pointer_reproduce "$BETA_B" "$BETA_SECOND_ROOT"
 beta_publish_package "$BETA_B" "$BETA_SECOND_ROOT" \
     "$BETA_SECOND_TRANSPORT" 1
 
@@ -1103,6 +1132,12 @@ fi
 # exact carrier with the node that proves it also leaves publication headroom
 # for the existing v2/v3 update story.
 beta_restart "$BETA_C" "$BETA_D"
+# C and D installed these exact graphs above; the distinct second receipt
+# per published root is what lets their pointer plans past the gate.
+beta_pointer_reproduce "$BETA_C" "$BETA_SECOND_ROOT"
+beta_pointer_reproduce "$BETA_D" "$BETA_BASE_ROOT"
+beta_pointer_reproduce "$BETA_D" "$BETA_SHA3_ROOT"
+beta_pointer_reproduce "$BETA_D" "$BETA_PACKAGE_ROOT"
 beta_publish_package "$BETA_C" "$BETA_SECOND_ROOT" \
     "$BETA_SECOND_TRANSPORT" 1
 beta_publish_package "$BETA_D" "$BETA_BASE_ROOT" "$BETA_BASE_TRANSPORT" 1
@@ -1214,6 +1249,11 @@ BETA_V2_API_ROOT="$BETA_VERSION_API_ROOT"
 [ "$BETA_V2_API_ROOT" = "$BETA_V1_API_ROOT" ] ||
     beta_die "v2 did not isolate source identity from recipe and public API"
 beta_restart "$BETA_D" "$BETA_C"
+# D authored v2 but never installed it; the pointer gate needs the install
+# receipt plus the distinct rebuild receipt in D's own store first.
+beta_build_graph "$BETA_D" "$BETA_V2_ROOT" "$BETA_BASE_ROOT" \
+    "$BETA_SHA3_ROOT" "$BETA_V2_ROOT"
+beta_pointer_reproduce "$BETA_D" "$BETA_V2_ROOT"
 beta_publish_package "$BETA_D" "$BETA_V2_ROOT" "$BETA_V2_TRANSPORT" 2
 beta_fetch_pin "$BETA_C" "$BETA_V2_ROOT" "$BETA_V2_TRANSPORT"
 if [ "$BETA_VISUAL_ENABLED" = true ]; then
@@ -1311,6 +1351,11 @@ BETA_V3_API_ROOT="$BETA_VERSION_API_ROOT"
 [ "$BETA_V3_API_ROOT" != "$BETA_V2_API_ROOT" ] ||
     beta_die "v3 did not isolate its public API capsule change"
 beta_restart "$BETA_C" "$BETA_D"
+# Same gate for C's v3 authorship: install the exact v3 graph, then file
+# the distinct rebuild receipt, then the pointer plan is admissible.
+beta_build_graph "$BETA_C" "$BETA_V3_ROOT" "$BETA_BASE_ROOT" \
+    "$BETA_SHA3_ROOT" "$BETA_V3_ROOT"
+beta_pointer_reproduce "$BETA_C" "$BETA_V3_ROOT"
 beta_publish_package "$BETA_C" "$BETA_V3_ROOT" "$BETA_V3_TRANSPORT" 1
 beta_fetch_pin "$BETA_D" "$BETA_V3_ROOT" "$BETA_V3_TRANSPORT"
 V3_REQUESTED_OBJECTS="$BETA_FETCH_REQUESTED_OBJECTS"

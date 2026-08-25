@@ -2,6 +2,8 @@
  * purpose: Nonblocking, capability-owned public lookup lifecycle. */
 
 #include "config/boot_zcode_dht.h"
+#include "config/boot_zcode_dht_publish_gate.h"
+#include "config/boot_zcode_dht_record_kind.h"
 #include "config/boot_zcode_dht_replication.h"
 
 #include "base/hex.h"
@@ -141,27 +143,7 @@ static bool input_namespace(const struct json_value *in, char out[32]) {
 
 static enum vcs_zcode_dht_record_kind input_record_kind(
     const struct json_value *in) {
-  const char *kind = input_str(in, "kind");
-  if (kind && strcmp(kind, "provider") == 0)
-    return VCS_ZCODE_DHT_RECORD_PROVIDER;
-  if (kind && strcmp(kind, "pointer") == 0)
-    return VCS_ZCODE_DHT_RECORD_POINTER;
-  if (kind && strcmp(kind, "storage_ack") == 0)
-    return VCS_ZCODE_DHT_RECORD_STORAGE_ACK;
-  if (kind && strcmp(kind, "source_reproduction_ack") == 0)
-    return VCS_ZCODE_DHT_RECORD_SOURCE_REPRODUCTION_ACK;
-  return 0;
-}
-
-static const char *record_kind_name(enum vcs_zcode_dht_record_kind kind) {
-  if (kind == VCS_ZCODE_DHT_RECORD_PROVIDER)
-    return "provider";
-  if (kind == VCS_ZCODE_DHT_RECORD_POINTER)
-    return "pointer";
-  if (kind == VCS_ZCODE_DHT_RECORD_STORAGE_ACK)
-    return "storage_ack";
-  return kind == VCS_ZCODE_DHT_RECORD_SOURCE_REPRODUCTION_ACK
-      ? "source_reproduction_ack" : "unknown";
+  return boot_zcode_dht_record_kind_from_name(input_str(in, "kind"));
 }
 
 static void record_json(struct json_value *row,
@@ -184,7 +166,7 @@ static void record_json(struct json_value *row,
   zcl_hex_encode(record->owner_group, 32, owner);
   zcl_hex_encode(record->delegation.doc.master_pubkey, 32, publisher);
   json_set_object(row);
-  json_push_kv_str(row, "kind", record_kind_name(record->kind));
+  json_push_kv_str(row, "kind", boot_zcode_dht_record_kind_name(record->kind));
   json_push_kv_str(row, "record_root", record_root);
   if (include_wire)
     json_push_kv_str(row, "record_wire", record_wire);
@@ -621,6 +603,10 @@ static bool rpc_publish_impl(
               "ACK evidence uses its dedicated byte-proof path");
     return true;
   }
+  if (!evidence_kind && spec.kind == VCS_ZCODE_DHT_RECORD_POINTER &&
+      strcmp(spec.namespace_name, "zclassic23.package") == 0 &&
+      !boot_zcode_dht_package_pointer_publish_gate(&spec, result))
+    return true;
   uint8_t token[32];
   struct vcs_zcode_dht_record record;
   if (strcmp(mode, "plan") == 0) {

@@ -159,6 +159,34 @@ APJ_FIGHT_TRANSPORT="$APJ_CREATE_TRANSPORT"
 apj_create_dir zdogdrone "$APJ_DEPENDENCY_AUTHOR/zdogdrone" 3 15 "$APJ_DRONE_ROOT"
 APJ_DRONE_TRANSPORT="$APJ_CREATE_TRANSPORT"
 
+apj_use() {
+    local role="$1" root="$2" plan plan_id commit now
+    now="$(date +%s)"
+    plan="$(apj_native "$role" zcode use \
+        --input="{\"name_or_root\":\"$root\",\"now_unix\":$now}")"
+    apj_ok "role $role use plan $root" "$plan"
+    plan_id="$(printf '%s' "$plan" | apj_jget data.plan_id)"
+    commit="$(apj_native "$role" zcode use \
+        --input="{\"plan_id\":\"$plan_id\",\"now_unix\":$((now + 1))}")"
+    apj_ok "role $role use commit $root" "$commit"
+    APJ_USE_RECEIPT="$(printf '%s' "$commit" | "$DHT_ACCEPTANCE_C23" \
+        array-match-get data.steps root "$root" build_receipt_id unused)"
+}
+
+# The pointer publication gate refuses REPRODUCTION_NOT_EVIDENCED unless the
+# publishing node's own store holds two distinct byte-identical build
+# receipts for the exact (package root, recipe root) pair. The install
+# (`zcode use`) files the first; this deterministic rebuild files the
+# distinct second, before the pointer plan exists.
+apj_reproduce() {
+    local role="$1" root="$2" reproduced
+    reproduced="$(apj_native "$role" zcode package reproduce \
+        --input="{\"name_or_root\":\"$root\"}" || true)"
+    apj_ok "role $role reproduce $root" "$reproduced"
+    [ "$(printf '%s' "$reproduced" | apj_jget data.reproduced False)" = True ] ||
+        apj_die "role $role did not file a distinct rebuild receipt for $root"
+}
+
 apj_publish_record() {
     local role="$1" kind="$2" semantic="$3" transport="$4" sequence="$5"
     local now expiry common plan token commit
@@ -178,6 +206,13 @@ apj_publish_package() {
     apj_publish_record "$1" provider "$2" "$3" 1
 }
 apj_restart "$APJ_A" "$APJ_C"
+# A is about to publish the three dependency pointers, and the gate requires
+# the evidence in A's own store first: install the exact DAG (receipt one
+# per root), then file the distinct rebuild receipt per published root.
+apj_use "$APJ_A" "$APJ_DRONE_ROOT"
+apj_reproduce "$APJ_A" "$APJ_ZPRNG_ROOT"
+apj_reproduce "$APJ_A" "$APJ_FIGHT_ROOT"
+apj_reproduce "$APJ_A" "$APJ_DRONE_ROOT"
 apj_publish_package "$APJ_A" "$APJ_ZPRNG_ROOT" "$APJ_ZPRNG_TRANSPORT"
 apj_publish_package "$APJ_A" "$APJ_FIGHT_ROOT" "$APJ_FIGHT_TRANSPORT"
 apj_publish_package "$APJ_A" "$APJ_DRONE_ROOT" "$APJ_DRONE_TRANSPORT"
@@ -212,19 +247,6 @@ apj_fetch() {
     [ "$(printf '%s' "$out" | apj_jget data.package_root)" = "$semantic" ] ||
         apj_die "role $role imported the wrong semantic root"
     apj_pin "$role" "$transport"; apj_pin "$role" "$semantic"
-}
-apj_use() {
-    local role="$1" root="$2" plan plan_id commit now
-    now="$(date +%s)"
-    plan="$(apj_native "$role" zcode use \
-        --input="{\"name_or_root\":\"$root\",\"now_unix\":$now}")"
-    apj_ok "role $role use plan $root" "$plan"
-    plan_id="$(printf '%s' "$plan" | apj_jget data.plan_id)"
-    commit="$(apj_native "$role" zcode use \
-        --input="{\"plan_id\":\"$plan_id\",\"now_unix\":$((now + 1))}")"
-    apj_ok "role $role use commit $root" "$commit"
-    APJ_USE_RECEIPT="$(printf '%s' "$commit" | "$DHT_ACCEPTANCE_C23" \
-        array-match-get data.steps root "$root" build_receipt_id unused)"
 }
 
 # Reuse the production async proof helpers, but supply this exact project.
@@ -467,6 +489,10 @@ apj_publish_record "$APJ_A" provider "$APJ_PACKAGE_ROOT" \
 apj_restart "$APJ_A" "$APJ_C"
 apj_fetch "$APJ_C" "$APJ_PACKAGE_ROOT" "$APJ_TRANSPORT_ROOT"
 apj_restart "$APJ_C" "$APJ_A"
+# C is about to publish this package's pointer: the gate requires C's own
+# install receipt plus the distinct rebuild receipt in C's store first.
+apj_use "$APJ_C" "$APJ_PACKAGE_ROOT"
+apj_reproduce "$APJ_C" "$APJ_PACKAGE_ROOT"
 apj_publish_record "$APJ_C" pointer "$APJ_PACKAGE_ROOT" \
     "$APJ_TRANSPORT_ROOT" 1
 apj_restart "$APJ_C" "$APJ_A"

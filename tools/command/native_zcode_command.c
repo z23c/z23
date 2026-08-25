@@ -918,8 +918,10 @@ void zcl_native_handle_zcode_package_publish_commit(
         (void)json_push_kv_str(&reply->data, "next_kind", "pointer");
         (void)json_push_kv_str(
             &reply->data, "next_action",
-            "plan then commit the pointer record so peers can discover "
-            "this exact package_root after this node is gone");
+            "install this exact package (zcode use) and file the distinct "
+            "rebuild receipt (zcode package reproduce) so the pointer gate "
+            "admits it, then plan then commit the pointer record so peers "
+            "can discover this exact package_root after this node is gone");
     }
     reply->error.mutated = committed;
     vcs_package_transport_free(&transport);

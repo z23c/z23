@@ -166,7 +166,12 @@ static void package_guide_journeys(struct json_value *data)
     package_guide_step(
         &author, "zcode create (plan, then commit)",
         "package_root + transport_root", "locally-available",
-        "verified CAS admission", "announce pointer and provider records");
+        "verified CAS admission", "install and reproduce on this node");
+    package_guide_step(
+        &author, "zcode use, then zcode package reproduce",
+        "package_root", "locally-reproduced",
+        "two distinct byte-identical build receipts filed",
+        "announce pointer and provider records");
     package_guide_step(
         &author, "zcode network publish (pointer/provider plan+commit)",
         "package_root -> transport_root", "availability-claimed",

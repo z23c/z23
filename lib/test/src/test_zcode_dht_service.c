@@ -10,11 +10,15 @@
 #include "crypto/ed25519.h"
 #include "json/json.h"
 #include "net/net.h"
+#include "rpc/server.h"
 #include "services/metaverse_space_scout_service.h"
 #include "services/metaverse_space_service.h"
 #include "support/cleanse.h"
+#include "util/util.h"
 #include "vcs/blob_store.h"
+#include "vcs/package_build.h"
 #include "vcs/package_manifest.h"
+#include "vcs/package_release.h"
 #include "vcs/package_store.h"
 #include "vcs/package_swarm.h"
 #include "vcs/package_swarm_node.h"
@@ -25,9 +29,11 @@
 #include "vcs/zcode_dht_service.h"
 #include "vcs/zcode_sovereignty_policy.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 static struct vcs_zcode_dht_time test_time(uint64_t wall) {
@@ -2809,8 +2815,326 @@ space16_cleanup:
   return failures;
 }
 
+/* ── package-pointer reproduction gate (rpc_publish_impl) ────────────── */
+
+static bool gate_rpc(const struct rpc_table *table, const char *method,
+                     const struct json_value *input,
+                     struct json_value *result) {
+  const struct rpc_command *command = rpc_table_find(table, method);
+  if (!command || !command->actor)
+    return false;
+  struct json_value params;
+  json_init(&params);
+  json_set_array(&params);
+  json_push_back(&params, input);
+  json_init(result);
+  bool ok = command->actor(&params, false, result);
+  json_free(&params);
+  return ok;
+}
+
+static bool gate_mkdir_p(const char *path) {
+  char buf[4096];
+  size_t len = strlen(path);
+  if (len == 0 || len >= sizeof(buf))
+    return false;
+  memcpy(buf, path, len + 1);
+  for (char *p = buf + 1; *p; p++) {
+    if (*p != '/')
+      continue;
+    *p = '\0';
+    if (mkdir(buf, 0700) != 0 && errno != EEXIST)
+      return false;
+    *p = '/';
+  }
+  return mkdir(buf, 0700) == 0 || errno == EEXIST;
+}
+
+static bool gate_write_file(const char *path, const uint8_t *bytes,
+                            size_t len) {
+  FILE *f = fopen(path, "wb");
+  if (!f)
+    return false;
+  size_t written = fwrite(bytes, 1, len, f);
+  return fclose(f) == 0 && written == len;
+}
+
+/* One installable build receipt: two committed outputs seeded by out_seed,
+ * under a fixed lock root. compiler_version varies the receipt id (a
+ * distinct build event) without touching the output set. */
+static bool gate_receipt(struct vcs_package_build_receipt *r,
+                         const uint8_t package_root[32],
+                         const uint8_t recipe_root[32],
+                         const char *compiler_version, uint8_t out_seed) {
+  vcs_package_build_receipt_init(r);
+  memcpy(r->package_root, package_root, 32);
+  memcpy(r->recipe_root, recipe_root, 32);
+  memset(r->lock_root, 0x77, 32);
+  (void)snprintf(r->compiler_id, sizeof(r->compiler_id), "gcc");
+  (void)snprintf(r->compiler_version, sizeof(r->compiler_version), "%s",
+                 compiler_version);
+  (void)snprintf(r->flags, sizeof(r->flags), "-std=c23 -O1");
+  r->result_class = (uint8_t)VCS_PACKAGE_BUILD_RESULT_TEST_PASS;
+  r->isolation = (uint8_t)VCS_PACKAGE_BUILD_ISOLATION_FULL;
+  r->test_ran = true;
+  r->test_exit_code = 0;
+  uint8_t h1[32], h2[32];
+  memset(h1, out_seed, 32);
+  memset(h2, (uint8_t)(out_seed + 1u), 32);
+  return vcs_package_build_add_output(r, "include/add.h", h1, 100) ==
+             VCS_PACKAGE_BUILD_OK &&
+         vcs_package_build_add_output(r, "lib/libaddpkg.a", h2, 4096) ==
+             VCS_PACKAGE_BUILD_OK;
+}
+
+/* Persist one receipt under <receipts_dir>/<receipt-id-hex> (the install
+ * lifecycle's filing convention). */
+static bool gate_store_receipt(const char *receipts_dir,
+                               const struct vcs_package_build_receipt *r) {
+  uint8_t *wire = NULL;
+  size_t wire_len = 0;
+  if (vcs_package_build_serialize(r, &wire, &wire_len) !=
+      VCS_PACKAGE_BUILD_OK)
+    return false;
+  uint8_t id[32];
+  bool ok = vcs_package_build_id(r, id) == VCS_PACKAGE_BUILD_OK;
+  if (ok) {
+    char id_hex[65];
+    zcl_hex_encode(id, 32, id_hex);
+    char path[4400];
+    int n = snprintf(path, sizeof(path), "%s/%s", receipts_dir, id_hex);
+    ok = n > 0 && (size_t)n < sizeof(path) && gate_mkdir_p(receipts_dir) &&
+         gate_write_file(path, wire, wire_len);
+  }
+  free(wire);
+  return ok;
+}
+
+/* A minimal parseable release envelope naming (package_root, recipe_root);
+ * the publish gate reads only the committed recipe root from it. */
+static bool gate_release(struct vcs_package_release *r,
+                         const uint8_t package_root[32],
+                         const uint8_t recipe_root[32]) {
+  memset(r, 0, sizeof(*r));
+  r->schema_version = VCS_PACKAGE_RELEASE_VERSION;
+  (void)snprintf(r->name, sizeof(r->name), "gate/pkg");
+  (void)snprintf(r->semver, sizeof(r->semver), "1.0.0");
+  memcpy(r->package_root, package_root, 32);
+  memcpy(r->recipe_root, recipe_root, 32);
+  /* The secp256k1 generator point: a valid compressed on-curve pubkey. */
+  static const uint8_t generator[33] = {
+      0x02, 0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0,
+      0x62, 0x95, 0xce, 0x87, 0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d,
+      0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8, 0x17, 0x98};
+  memcpy(r->publisher_pubkey, generator, sizeof(generator));
+  r->publisher_sequence = 1;
+  (void)snprintf(r->license, sizeof(r->license), "MIT");
+  (void)snprintf(r->chain_id, sizeof(r->chain_id), "zclassic");
+  memset(r->signature, 0, sizeof(r->signature));
+  r->signature[63] = 1; /* low-S */
+  return vcs_package_release_validate(r) == VCS_PACKAGE_RELEASE_OK;
+}
+
+/* Persist the release envelope under <zcode_dir>/releases/<release-id-hex>
+ * (the store's publication convention, rebuilt into the package index). */
+static bool gate_store_release(const char *zcode_dir,
+                               const struct vcs_package_release *r) {
+  uint8_t *wire = NULL;
+  size_t wire_len = 0;
+  if (vcs_package_release_serialize(r, &wire, &wire_len) !=
+      VCS_PACKAGE_RELEASE_OK)
+    return false;
+  uint8_t id[VCS_PACKAGE_RELEASE_ID_BYTES];
+  bool ok = vcs_package_release_id(r, id) == VCS_PACKAGE_RELEASE_OK;
+  if (ok) {
+    char id_hex[65];
+    zcl_hex_encode(id, sizeof(id), id_hex);
+    char dir[4400], path[4400];
+    int dn = snprintf(dir, sizeof(dir), "%s/releases", zcode_dir);
+    int pn = snprintf(path, sizeof(path), "%s/%s", dir, id_hex);
+    ok = dn > 0 && (size_t)dn < sizeof(dir) && pn > 0 &&
+         (size_t)pn < sizeof(path) && gate_mkdir_p(dir) &&
+         gate_write_file(path, wire, wire_len);
+  }
+  free(wire);
+  return ok;
+}
+
+static void gate_publish_input(struct json_value *input, const char *mode,
+                               const char *kind, const char *namespace_name,
+                               const uint8_t semantic_root[32]) {
+  char semantic_hex[65], transport_hex[65], owner_hex[65];
+  zcl_hex_encode(semantic_root, 32, semantic_hex);
+  uint8_t transport[32], owner[32];
+  memset(transport, 0xb2, 32);
+  memset(owner, 0xa7, 32);
+  zcl_hex_encode(transport, 32, transport_hex);
+  zcl_hex_encode(owner, 32, owner_hex);
+  json_set_object(input);
+  json_push_kv_str(input, "operation", "publish");
+  json_push_kv_str(input, "mode", mode);
+  json_push_kv_str(input, "kind", kind);
+  json_push_kv_str(input, "namespace", namespace_name);
+  json_push_kv_str(input, "semantic_root", semantic_hex);
+  json_push_kv_str(input, "transport_root", transport_hex);
+  json_push_kv_str(input, "owner_group", owner_hex);
+  json_push_kv_int(input, "sequence", 1);
+  json_push_kv_int(input, "not_before", 1000);
+  json_push_kv_int(input, "expiry", 2000);
+}
+
+static const char *gate_code(const struct json_value *result) {
+  const struct json_value *code = json_get(result, "code");
+  return code && code->type == JSON_STR ? json_get_str(code) : "";
+}
+
+/* The DHT publication gate for zclassic23.package POINTER records: without
+ * two distinct byte-identical build receipts in the node's own store the
+ * claim "this exact package is fetchable from me" is refused by name before
+ * a plan token exists. The DHT service itself is disabled in this process,
+ * so a publish that PASSES the gate lands on the generic DHT_DISABLED
+ * refusal — that code is the observable proof the gate opened. */
+static int test_publish_reproduction_gate(void) {
+  int failures = 0;
+  TEST("zcode dht publish: package pointer requires local reproduction") {
+    struct rpc_table table;
+    rpc_table_init(&table);
+    boot_zcode_dht_register_rpc(&table);
+    uint8_t package_root[32], recipe_root[32], foreign_root[32];
+    memset(package_root, 0xb1, 32);
+    memset(recipe_root, 0x51, 32);
+    memset(foreign_root, 0xc3, 32);
+    struct json_value input, result;
+
+    /* No resident store: the refusal names the missing prerequisite. */
+    vcs_package_store_close_global();
+    json_init(&input);
+    gate_publish_input(&input, "plan", "pointer", "zclassic23.package",
+                       package_root);
+    ASSERT(gate_rpc(&table, "zcode_dht_status", &input, &result));
+    ASSERT_STR_EQ(gate_code(&result), "NO_PACKAGE_STORE");
+    json_free(&result);
+    json_free(&input);
+
+    /* Resident store, but no committed release names the package root. */
+    const char *argv[] = {"zclassic23-test", "-packagehost=1",
+                          "-packagequota=1000000"};
+    ParseParameters(3, argv);
+    char dd[256];
+    test_make_tmpdir(dd, sizeof(dd), "zcode_dht_service", "publish_gate");
+    SetDataDir(dd);
+    ASSERT(vcs_package_store_open_global());
+    ASSERT(vcs_package_store_global() != NULL);
+    const char *zcode_dir =
+        vcs_package_store_root_dir(vcs_package_store_global());
+    ASSERT(zcode_dir != NULL);
+    json_init(&input);
+    gate_publish_input(&input, "plan", "pointer", "zclassic23.package",
+                       package_root);
+    ASSERT(gate_rpc(&table, "zcode_dht_status", &input, &result));
+    ASSERT_STR_EQ(gate_code(&result), "UNKNOWN_PACKAGE");
+    json_free(&result);
+    json_free(&input);
+
+    /* A committed release exists but the receipts dir is empty: plan and
+     * commit refuse identically, before any plan token is consulted. */
+    struct vcs_package_release release;
+    ASSERT(gate_release(&release, package_root, recipe_root));
+    ASSERT(gate_store_release(zcode_dir, &release));
+    json_init(&input);
+    gate_publish_input(&input, "plan", "pointer", "zclassic23.package",
+                       package_root);
+    ASSERT(gate_rpc(&table, "zcode_dht_status", &input, &result));
+    ASSERT_STR_EQ(gate_code(&result), "REPRODUCTION_NOT_EVIDENCED");
+    json_free(&result);
+    json_free(&input);
+    json_init(&input);
+    gate_publish_input(&input, "commit", "pointer", "zclassic23.package",
+                       package_root);
+    json_push_kv_str(&input, "plan_token",
+                     "00000000000000000000000000000000"
+                     "00000000000000000000000000000000");
+    ASSERT(gate_rpc(&table, "zcode_dht_status", &input, &result));
+    ASSERT_STR_EQ(gate_code(&result), "REPRODUCTION_NOT_EVIDENCED");
+    json_free(&result);
+    json_free(&input);
+
+    /* One build is one event: a single matching receipt is not
+     * reproduction. */
+    char receipts_dir[4400];
+    int rn = snprintf(receipts_dir, sizeof(receipts_dir), "%s/receipts",
+                      zcode_dir);
+    ASSERT(rn > 0 && (size_t)rn < sizeof(receipts_dir));
+    struct vcs_package_build_receipt first, second;
+    ASSERT(gate_receipt(&first, package_root, recipe_root, "14.2.0", 0x40));
+    ASSERT(gate_store_receipt(receipts_dir, &first));
+    json_init(&input);
+    gate_publish_input(&input, "plan", "pointer", "zclassic23.package",
+                       package_root);
+    ASSERT(gate_rpc(&table, "zcode_dht_status", &input, &result));
+    ASSERT_STR_EQ(gate_code(&result), "REPRODUCTION_NOT_EVIDENCED");
+    json_free(&result);
+    json_free(&input);
+
+    /* Two distinct build events agreeing on every output byte open the
+     * gate; with no DHT service resident the publish then lands on the
+     * generic DHT_DISABLED refusal, proving the gate passed it through. */
+    ASSERT(gate_receipt(&second, package_root, recipe_root, "15.1.0", 0x40));
+    ASSERT(gate_store_receipt(receipts_dir, &second));
+    json_init(&input);
+    gate_publish_input(&input, "plan", "pointer", "zclassic23.package",
+                       package_root);
+    ASSERT(gate_rpc(&table, "zcode_dht_status", &input, &result));
+    ASSERT_STR_EQ(gate_code(&result), "DHT_DISABLED");
+    json_free(&result);
+    json_free(&input);
+
+    /* Receipts naming a different root pair do not count. */
+    struct vcs_package_release foreign_release;
+    ASSERT(gate_release(&foreign_release, foreign_root, recipe_root));
+    ASSERT(gate_store_release(zcode_dir, &foreign_release));
+    struct vcs_package_build_receipt fa, fb;
+    ASSERT(gate_receipt(&fa, foreign_root, recipe_root, "14.2.0", 0x50));
+    ASSERT(gate_receipt(&fb, foreign_root, recipe_root, "15.1.0", 0x60));
+    ASSERT(gate_store_receipt(receipts_dir, &fa));
+    ASSERT(gate_store_receipt(receipts_dir, &fb));
+    json_init(&input);
+    gate_publish_input(&input, "plan", "pointer", "zclassic23.package",
+                       foreign_root);
+    ASSERT(gate_rpc(&table, "zcode_dht_status", &input, &result));
+    ASSERT_STR_EQ(gate_code(&result), "REPRODUCTION_NOT_EVIDENCED");
+    json_free(&result);
+    json_free(&input);
+
+    /* Other namespaces and other kinds are never gated. */
+    json_init(&input);
+    gate_publish_input(&input, "plan", "pointer", "science", package_root);
+    ASSERT(gate_rpc(&table, "zcode_dht_status", &input, &result));
+    ASSERT_STR_EQ(gate_code(&result), "DHT_DISABLED");
+    json_free(&result);
+    json_free(&input);
+    json_init(&input);
+    gate_publish_input(&input, "plan", "provider", "zclassic23.package",
+                       package_root);
+    ASSERT(gate_rpc(&table, "zcode_dht_status", &input, &result));
+    ASSERT_STR_EQ(gate_code(&result), "DHT_DISABLED");
+    json_free(&result);
+    json_free(&input);
+
+    vcs_package_store_close_global();
+    const char *reset_argv[] = {"zclassic23-test"};
+    ParseParameters(1, reset_argv);
+    SetDataDir("");
+    test_rm_rf_recursive(dd);
+    PASS();
+  }
+_test_next:;
+  return failures;
+}
+
 int test_zcode_dht_service(void) {
   int failures = test_disabled_diagnostics();
+  failures += test_publish_reproduction_gate();
   failures += test_publication_monotonic_retry();
   failures += test_publication_ceiling_hosts_a_real_node();
   failures += test_record_churn_fallback();

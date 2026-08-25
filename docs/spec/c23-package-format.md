@@ -134,6 +134,16 @@ A Commons build is a confined observation, not an act of faith:
   cache: the zcc cache is disabled for every reproduction target, and the
   package fast-object cache verifies cached bytes against sidecars before
   admitting them.
+- **Publication requires that evidence.** Network publication of a
+  `zclassic23.package` POINTER (`zcode network publish`) refuses by name
+  (`REPRODUCTION_NOT_EVIDENCED`) unless the publishing node's own store
+  shows two distinct byte-identical installable build receipts for the
+  exact (package root, recipe root) pair the signed release commits —
+  the install lifecycle files the first, `zcode package reproduce` files
+  the distinct second. A node announces only what it has itself built
+  twice. Local CAS admission (`zcode create` commit) stays free — it is
+  not publication. Other namespaces, PROVIDER records, and the ACK
+  evidence kinds are not gated.
 - **Toolchain fingerprint.** The toolchain capsule
   (`vcs_toolchain_capsule_v1`) pins compiler driver bytes, backend bytes,
   assembler identity, sysroot, and ABI files into one root. Work-fabric
@@ -142,17 +152,6 @@ A Commons build is a confined observation, not an act of faith:
   deliberately judges output bytes, with the capsule as named evidence.
 
 <!-- claim: symbol-present vcs_package_build_set_toolchain_capsule lib/vcs/include/vcs/package_build.h # receipt v2 capsule binding -->
-
-### Open hardening in this lane
-
-The following format rules are being landed; until each does, this section
-— not prose elsewhere — is their status:
-
-1. **Publish requires two agreeing reproduction hashes.** Network
-   publication (`zcode network publish`) refuses a package whose local
-   store cannot show two distinct agreeing build receipts for the exact
-   semantic triple. Local CAS admission (`zcode create` commit) stays free
-   — it is not publication.
 
 ## Wire format index
 
