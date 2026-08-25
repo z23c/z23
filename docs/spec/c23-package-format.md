@@ -124,7 +124,11 @@ A Commons build is a confined observation, not an act of faith:
   version, exact flags, the toolchain capsule root (schema v2 — the gcc
   driver/cc1/assembler/sysroot/ABI fingerprint, so "same toolchain" is a
   receipt property, not a side-band comparison), isolation level, test
-  verdict, and per-artifact hashes. The install lifecycle re-hashes every
+  verdict, and per-artifact hashes. The flags string's sanitizer segment
+  records the OBSERVED outcome, not the profile name: `clean` only when
+  both ASan and UBSan ran clean, `not-run` when the recipe declares no
+  tests, `unavailable` when the diagnostic could not run, and `findings`
+  when a run produced a real report. The install lifecycle re-hashes every
   emitted byte against the receipt before anything is installed — a worker
   that lied cannot install.
 - **Reproduction is quorum, not hope.** `vcs_package_reproduce_scan`

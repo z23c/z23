@@ -4076,8 +4076,9 @@ int main(int argc, char **argv)
      * package whose honesty bar is two distinct build events agreeing on
      * every committed output (vcs_package_reproduce_scan), not the
      * evidence-track test policy, and its receipt still records the
-     * testless facts honestly (have_tests=false, no test run, sanitizers
-     * unavailable). */
+     * observed facts honestly (test_ran=false, and the flags string's
+     * sanitizer segment names the observed outcome — not-run / findings /
+     * unavailable / clean — composed in the emit path below). */
     bool standard_sanitizers_passed = have_tests && test_ran && test_ok &&
         att.sanitizer_count == 2u &&
         att.sanitizers[0].outcome == VCS_PACKAGE_ATTEST_OUTCOME_PASS &&
@@ -4127,9 +4128,38 @@ int main(int argc, char **argv)
                  compilers[pick].id);
         snprintf(rec.compiler_version, sizeof(rec.compiler_version), "%s",
                  compilers[pick].version);
-        snprintf(rec.flags, sizeof(rec.flags), "%s",
-                 standard_profile ? ZCL_C23_COMMONS_BUILD_FLAGS_STANDARD_V2
-                                  : ZCL_C23_COMMONS_BUILD_FLAGS_QUICK_V2);
+        if (standard_profile) {
+            /* The sanitizer segment records the OBSERVED outcome, never the
+             * profile name. On the evidence track it always reads "clean"
+             * (the refusal above fired unless both outcomes are PASS); the
+             * reproduce track (--allow-testless-standard) can also reach
+             * "not-run" (testless recipe — the sanitizer stage never
+             * executed), "findings" (a real ASan/UBSan report: the receipt
+             * remains installable build evidence, exactly as quick emit
+             * always behaved, but it may not claim cleanliness), or
+             * "unavailable" (the diagnostic could not run). Precedence
+             * mirrors the attestation lane: findings > clean > unavailable.
+             */
+            const char *san_seg = "unavailable";
+            if (!have_tests)
+                san_seg = "not-run";
+            else if (att.sanitizers[0].outcome ==
+                         VCS_PACKAGE_ATTEST_OUTCOME_FAIL ||
+                     att.sanitizers[1].outcome ==
+                         VCS_PACKAGE_ATTEST_OUTCOME_FAIL)
+                san_seg = "findings";
+            else if (att.sanitizers[0].outcome ==
+                         VCS_PACKAGE_ATTEST_OUTCOME_PASS &&
+                     att.sanitizers[1].outcome ==
+                         VCS_PACKAGE_ATTEST_OUTCOME_PASS)
+                san_seg = "clean";
+            snprintf(rec.flags, sizeof(rec.flags),
+                     "%s;asan,ubsan=%s;sanitizer_pie=off;sanitizer_aslr=off",
+                     ZCL_C23_COMMONS_BUILD_FLAGS_STANDARD_BASE_V2, san_seg);
+        } else {
+            snprintf(rec.flags, sizeof(rec.flags), "%s",
+                     ZCL_C23_COMMONS_BUILD_FLAGS_QUICK_V2);
+        }
         /* The receipt names its toolchain exactly: schema v2 carries the
          * toolchain capsule root. The capsule capture is gcc-only today,
          * so a clang-picked receipt honestly stays v1; on the gcc path a
@@ -4167,12 +4197,15 @@ int main(int argc, char **argv)
             rec.result_class = (uint8_t)VCS_PACKAGE_BUILD_RESULT_TEST_PASS;
         else
             rec.result_class = (uint8_t)VCS_PACKAGE_BUILD_RESULT_BUILD_PASS;
-        /* A sanitizer finding is not a build/test verdict in quick emit mode; the
+        /* A sanitizer finding is not a build/test verdict in emit mode; the
          * attestation lane owns that diagnostic. The receipt records the
          * build+test verdict only, so a clean test that trips ASan still
          * installs — exactly as the attestation quorum, not the installer,
-         * is the place that judges sanitizer cleanliness. Standard mode
-         * failed closed above unless both ASan and UBSan were clean. */
+         * is the place that judges sanitizer cleanliness. The evidence
+         * track failed closed above unless both ASan and UBSan were clean;
+         * the reproduce track (--allow-testless-standard) instead records
+         * the observed outcome in the flags string composed above, so a
+         * finding installs but can never masquerade as "clean". */
 
         bool emitted = true;
         if (vcs_package_build_installable(&rec)) {

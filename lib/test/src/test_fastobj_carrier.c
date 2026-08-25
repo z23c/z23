@@ -29,11 +29,16 @@
  *      -E identity probe still runs by design, it IS the key input),
  *  10. build-report #2 is byte-identical to build-report #1 (memcmp of
  *      the ZCLBLD receipt wires) and both receipts hash to the same id.
- *  10. the tested standard receipt really ran the fixture's tests.
+ *  10. the tested standard receipt really ran the fixture's tests, and its
+ *      flags string still claims asan,ubsan=clean (both outcomes PASS).
  *  11. the testless standard-profile refusal, both sides: a tests/-less
  *      copy of the fixture is REFUSED (exit 6) in the evidence shape and
  *      BUILDS with --allow-testless-standard (the reproduce shape), its
- *      receipt honestly recording test_ran=false / BUILD_PASS.
+ *      receipt honestly recording test_ran=false / BUILD_PASS and flags
+ *      asan,ubsan=not-run.
+ *  12. a use-after-free fixture copy under the reproduce shape still EMITS
+ *      (installable TEST_PASS — the receipt is evidence, not a gate), but
+ *      its flags say asan,ubsan=findings, never clean.
  *
  * Refusal legs (no builds): a torn pair, a sidecar whose object_sha3
  * lies about its object, an entry filed under the wrong key, and a
@@ -229,6 +234,7 @@ struct fcw_build_result {
     unsigned long long misses;
     bool saw_refusal;
     char first_line[256];
+    char last_line[256];
 };
 
 /* Spawn the verifier in candidate proof mode with a fast cache, capture
@@ -344,6 +350,14 @@ static void fcw_candidate_build(const char *worker, const char *root_hex,
     out->ok = !killed && out->exit_code == 0;
     if (text) {
         snprintf(out->first_line, sizeof(out->first_line), "%.255s", text);
+        const char *end = text + len;
+        if (end > text && end[-1] == '\n')
+            end--;
+        const char *tail = end;
+        while (tail > text && tail[-1] != '\n')
+            tail--;
+        snprintf(out->last_line, sizeof(out->last_line), "%.*s",
+                 (int)(end - tail), tail);
         out->saw_refusal =
             strstr(text, "zbuild-package-standard-refused=1") != NULL;
         char *line = strstr(text, "zbuild-package-fast-cache=v1");
@@ -425,6 +439,8 @@ int test_fastobj_carrier(void)
     vcs_package_prepared_init(&prep);
     struct vcs_package_prepared prepT;
     vcs_package_prepared_init(&prepT);
+    struct vcs_package_prepared prepF;
+    vcs_package_prepared_init(&prepF);
     struct vcs_fastobj_carrier_stats stA, stC, stF, stAd, stD, stRef;
     memset(&stA, 0, sizeof(stA));
     memset(&stC, 0, sizeof(stC));
@@ -435,8 +451,8 @@ int test_fastobj_carrier(void)
     uint8_t rootA[32] = {0}, rootC[32] = {0}, rootD[32] = {0}, rootL[32] = {0};
     struct vcs_package_store *nodeA = NULL, *nodeB = NULL, *nodeC = NULL,
                              *nodeD = NULL, *storeR = NULL;
-    size_t r1_len = 0, r2_len = 0, rT_len = 0;
-    uint8_t *r1 = NULL, *r2 = NULL, *rT = NULL;
+    size_t r1_len = 0, r2_len = 0, rT_len = 0, rF_len = 0;
+    uint8_t *r1 = NULL, *r2 = NULL, *rT = NULL, *rF = NULL;
 
     /* The confined worker ships beside this binary — never from PATH. */
     char worker[4096];
@@ -652,10 +668,13 @@ int test_fastobj_carrier(void)
              ids_ok && memcmp(id1, id2, 32) == 0);
 
     /* 10. the tested path stays honest: receipt #1 really ran the
-     * fixture's declared tests under the standard profile. */
+     * fixture's declared tests under the standard profile, and its flags
+     * string still claims "clean" — both sanitizer outcomes were PASS. */
     FC_CHECK("tested standard receipt really ran its tests",
              ids_ok && rec1.test_ran &&
                  rec1.result_class == VCS_PACKAGE_BUILD_RESULT_TEST_PASS);
+    FC_CHECK("tested standard receipt flags still claim asan,ubsan=clean",
+             ids_ok && strstr(rec1.flags, "asan,ubsan=clean") != NULL);
 
     /* 11. the testless standard-profile refusal, both sides. A TESTLESS
      * copy of the fixture (tests/ dropped, nothing else changed) under
@@ -738,8 +757,124 @@ int test_fastobj_carrier(void)
                  "build-pass only)",
                  recT_ok && !recT.test_ran &&
                      recT.result_class == VCS_PACKAGE_BUILD_RESULT_BUILD_PASS);
+        FC_CHECK("testless receipt flags say asan,ubsan=not-run (never ran, "
+                 "never claimed clean)",
+                 recT_ok &&
+                     strstr(recT.flags, "asan,ubsan=not-run") != NULL);
         FC_CHECK("testless receipt stays installable for reproduction",
                  recT_ok && vcs_package_build_installable(&recT));
+    }
+
+    /* 12. a real sanitizer finding on the reproduce track: this fixture
+     * copy's test reads freed heap — the free is hidden in a second TU so
+     * the standard profile's -Werror=use-after-free cannot see it
+     * statically, the plain runs pass (exit 0, the page stays mapped), and
+     * the ASan run reports and dies by the marker exit code. With the
+     * opt-out flag the build still EMITS an installable TEST_PASS receipt
+     * (mirroring quick emit's long-standing behavior: the receipt is
+     * build+test evidence, not a gate), but the flags string must say
+     * "findings" — never "clean". */
+    static const char uaf_test[] =
+        "/* Deliberate heap-use-after-free: the plain run reads stale but\n"
+        " * mapped bytes and exits 0; the ASan run reports and exits by the\n"
+        " * marker code. Fixture for the flags-honesty leg only. The free\n"
+        " * hides in uaf_helper.c so -Wuse-after-free cannot see it. */\n"
+        "#include <stdlib.h>\n"
+        "\n"
+        "void fixture_uaf_free(void *p);\n"
+        "\n"
+        "int main(void)\n"
+        "{\n"
+        "    int *p = (int *)malloc(sizeof(*p));\n"
+        "    if (!p)\n"
+        "        return 1;\n"
+        "    *p = 42;\n"
+        "    fixture_uaf_free(p);\n"
+        "    volatile int sink = *p;\n"
+        "    (void)sink;\n"
+        "    return 0;\n"
+        "}\n";
+    static const char uaf_helper[] =
+        "/* Keeps free() out of the test TU's static-analysis reach. */\n"
+        "#include <stdlib.h>\n"
+        "\n"
+        "void fixture_uaf_free(void *p)\n"
+        "{\n"
+        "    free(p);\n"
+        "}\n";
+    char pkgF[4096], recipeF_path[4096], emitF[4096], cacheF[4096],
+         testF_path[4096], helperF_path[4096];
+    bool pathsF_ok =
+        snprintf(pkgF, sizeof(pkgF), "%s/pkgF", base) < (int)sizeof(pkgF) &&
+        snprintf(recipeF_path, sizeof(recipeF_path), "%s/recipeF.wire",
+                 base) < (int)sizeof(recipeF_path) &&
+        snprintf(emitF, sizeof(emitF), "%s/emitF", base) <
+            (int)sizeof(emitF) &&
+        snprintf(cacheF, sizeof(cacheF), "%s/cacheF", base) <
+            (int)sizeof(cacheF) &&
+        snprintf(testF_path, sizeof(testF_path),
+                 "%s/tests/test_tiny_lines.c", pkgF) < (int)sizeof(testF_path) &&
+        snprintf(helperF_path, sizeof(helperF_path),
+                 "%s/tests/uaf_helper.c", pkgF) < (int)sizeof(helperF_path);
+    struct vcs_package_prepare_options optsF;
+    memset(&optsF, 0, sizeof(optsF));
+    optsF.dir = pkgF;
+    memcpy(optsF.publisher_pubkey, pk.vch, COMPRESSED_PUBLIC_KEY_SIZE);
+    optsF.publisher_sequence = 1;
+    char prepF_detail[512] = "";
+    enum vcs_package_prepare_error prcF = VCS_PACKAGE_PREPARE_ERR_IO;
+    bool finding_ready = pathsF_ok &&
+        fcw_copy_tree("lib/test/fixtures/zcode/tiny-lines", pkgF) &&
+        fcw_write_file(testF_path, (const uint8_t *)uaf_test,
+                       sizeof(uaf_test) - 1u) &&
+        fcw_write_file(helperF_path, (const uint8_t *)uaf_helper,
+                       sizeof(uaf_helper) - 1u);
+    if (finding_ready)
+        prcF = vcs_package_prepare(&optsF, &prepF, prepF_detail,
+                                   sizeof(prepF_detail));
+    char rootF_hex[65] = "", lockF_hex[65] = "";
+    if (prcF == VCS_PACKAGE_PREPARE_OK) {
+        zcl_hex_encode(prepF.package_root, 32, rootF_hex);
+        zcl_hex_encode(prepF.lock_root, 32, lockF_hex);
+    }
+    finding_ready =
+        finding_ready && prcF == VCS_PACKAGE_PREPARE_OK &&
+        fcw_write_file(recipeF_path, prepF.recipe_wire,
+                       prepF.recipe_wire_len);
+    FC_CHECK("use-after-free fixture variant prepared", finding_ready);
+    if (!finding_ready && prcF != VCS_PACKAGE_PREPARE_OK)
+        printf("    prepare findings: %s\n", prepF_detail);
+    if (finding_ready) {
+        struct fcw_build_result frun;
+        memset(&frun, 0, sizeof(frun));
+        fcw_candidate_build(worker, rootF_hex, pkgF, recipeF_path, emitF,
+                            lockF_hex, cacheF, true, &frun);
+        FC_CHECK("reproduce-shape standard run with an ASan finding still "
+                 "emits (evidence, not a gate)", frun.ok);
+        if (!frun.ok)
+            printf("    findings run: exit %d: %.200s\n", frun.exit_code,
+                   frun.first_line);
+        printf("    findings run tail: %.200s\n", frun.last_line);
+        char reportF[4096];
+        if (frun.ok &&
+            snprintf(reportF, sizeof(reportF), "%s/build-report", emitF) <
+                (int)sizeof(reportF))
+            rF = fcw_read_file(reportF, VCS_PACKAGE_BUILD_MAX_WIRE_BYTES,
+                               &rF_len);
+        struct vcs_package_build_receipt recF;
+        bool recF_ok =
+            rF != NULL && vcs_package_build_parse(rF, rF_len, &recF) ==
+                              VCS_PACKAGE_BUILD_OK;
+        FC_CHECK("findings emit receipt parses", recF_ok);
+        FC_CHECK("findings receipt flags say asan,ubsan=findings (never "
+                 "clean)",
+                 recF_ok &&
+                     strstr(recF.flags, "asan,ubsan=findings") != NULL);
+        FC_CHECK("findings receipt keeps the build+test verdict "
+                 "(test-pass, installable) — unchanged emit semantics",
+                 recF_ok && recF.test_ran &&
+                     recF.result_class == VCS_PACKAGE_BUILD_RESULT_TEST_PASS &&
+                     vcs_package_build_installable(&recF));
     }
 
     /* ── refusal legs: nothing above is trusted, everything re-proves ── */
@@ -940,8 +1075,10 @@ done:
     free(r1);
     free(r2);
     free(rT);
+    free(rF);
     vcs_package_prepared_free(&prep);
     vcs_package_prepared_free(&prepT);
+    vcs_package_prepared_free(&prepF);
     if (nodeA)
         vcs_package_store_close(nodeA);
     if (nodeB)
