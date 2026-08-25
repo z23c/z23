@@ -1653,6 +1653,8 @@ int main(int argc, char **argv)
     { extern int test_zcode_recipe(void); failures += test_zcode_recipe(); }
     { extern int test_zcode_contributor(void); failures += test_zcode_contributor(); }
     { extern int test_zcode_verify(void); failures += test_zcode_verify(); }
+    { extern int test_zcode_attest_transport(void);
+      failures += test_zcode_attest_transport(); }
     { extern int test_zcode_score(void); failures += test_zcode_score(); }
     { extern int test_zcode_reward(void); failures += test_zcode_reward(); }
     { extern int test_zcode_rank(void); failures += test_zcode_rank(); }

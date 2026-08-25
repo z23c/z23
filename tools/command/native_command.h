@@ -1042,6 +1042,27 @@ void zcl_native_handle_zcode_package_attest_import(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 
+/* zcode attestation TRANSPORT — how a signed ZCLATT attestation MOVES.
+ * offer admits one locally-filed attestation into the package store as an
+ * ordinary BLOB (no new wire message: it is a one-file one-chunk
+ * content.v2 carrier under the frozen 'zpkgswm' codec) and returns BOTH
+ * ready-to-run zcode network publish inputs — PROVIDER ("ask me for these
+ * bytes", the record the fetch path routes on) and POINTER ("that blob
+ * attests this package root"). Either alone is a silent no-op at pull
+ * time. pull resolves every POINTER for one package root, drives the
+ * existing fetch handler per distinct attestation blob, and admits each
+ * result with expect_package_root ALWAYS set to the caller's root — that
+ * receiver-side binding check, not the publish gate, is what stops a
+ * hostile pointer delivering an attestation for another package. Pulling
+ * is not accepting: the approved-verifier quorum is applied later by
+ * zcode package verify. Bound by config/commands/zcode.def. */
+void zcl_native_handle_zcode_package_attest_offer(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_zcode_package_attest_pull(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+
 /* zcode slice 4 — contributor identity + ZNAM pointers. The publisher key
  * is the only identity; ZNAM records resolve through the canonical model
  * with an explicit binding proof. Bound by config/commands/zcode.def. */

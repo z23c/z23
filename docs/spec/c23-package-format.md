@@ -190,7 +190,9 @@ Two evidence lanes exist, and they are not interchangeable:
   `attestations/<attestation-id-hex>` and evaluated by
   `zcode package verify`. They are portable: `zcode package attest import`
   files a third party's signed wire into the local store (filing is not
-  acceptance — the local approved-verifier policy applies at evaluation).
+  acceptance — the local approved-verifier policy applies at evaluation),
+  and `zcode package attest offer` / `pull` move them between nodes over
+  the existing swarm with no human carrying bytes (§4.1).
 
 <!-- claim: symbol-present VCS_PACKAGE_ATTEST_ID_DOMAIN lib/vcs/include/vcs/package_attest.h # attestation id domain -->
 
@@ -211,6 +213,66 @@ Evidence establishes only its exact stated claim: a hash identifies bytes,
 a signature identifies the key that made a statement, a receipt records a
 bound observation. None of them proves that arbitrary code is safe or worth
 accepting — acceptance stays a local policy act.
+
+### 4.1 How a signed attestation travels
+
+An attestation is at most `VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES` (681 bytes),
+comfortably under `VCS_BLOB_MAX_BYTES`. It therefore moves as an ORDINARY
+BLOB — a one-file, one-chunk `content.v2` package carried by the frozen
+`zpkgswm` ANNOUNCE/WANT/DATA codec. **No new wire message, no new bound,
+and no new store exist for attestation transport, and none may be added.**
+A compile-time assertion in `vcs/package_attest_transport.h` breaks the
+build if the attestation schema ever outgrows the blob bound; that is the
+moment to decide whether attestations still ride as blobs, never a reason
+to raise `VCS_BLOB_MAX_BYTES`.
+
+Two roots must not be confused. The TRANSPORT ROOT is
+`vcs_blob_root(attestation wire)` — a pure function of the exact signed
+bytes, identical on every node forever. The ATTESTATION ID is
+`vcs_package_attest_id()`, the SHA3-256 over the canonical encoding minus
+the signature; it is the `attestations/` filename and the quorum's signer
+coordinate. They are different values and neither substitutes for the
+other.
+
+Discovery uses two ordinary signed DHT records in the
+`zclassic23.attestation` namespace, and **both are required**:
+
+| Record | Binds | Answers |
+| --- | --- | --- |
+| `PROVIDER` | `transport_root` = attestation blob root | "ask me for these bytes" |
+| `POINTER` | `semantic_root` = attested package root, `transport_root` = attestation blob root | "that blob attests this package" |
+
+The fetch path routes on the PROVIDER record; the puller looks up the
+POINTER when all it knows is a package root. Publishing only one is a
+silent no-op at pull time. `zcode package attest offer` admits the bytes
+into the local store and returns both ready-to-run publish inputs;
+`zcode package attest pull` resolves the pointers, fetches each distinct
+blob, and admits what arrives. N independent verifiers for one package are
+N records at one key, each in its own signed sequence stream; none can
+overwrite another.
+
+<!-- claim: symbol-present VCS_PACKAGE_ATTEST_DHT_NAMESPACE config/src/boot_zcode_dht_rpc.c # the publish path gates on this exact namespace -->
+
+**The publish-side gate is hygiene; the receiver-side binding check is the
+security property.** A node refuses to publish an attestation POINTER for
+bytes it does not hold, bytes that are not a canonical `ZCLATT` wire, a
+wire whose signature does not verify, or a wire attesting a different
+package than the pointer claims. That rule constrains only the node
+applying it. A hostile node runs its own build and can publish any pointer
+it likes. What protects a reader is that every admission passes the root it
+was asking about as `expect_package_root`: an attestation whose own
+`package_root` differs is refused `package-root-binding` and never filed.
+`zcode package attest pull` always passes that root, and so must any future
+puller. Do not treat a published attestation pointer as trustworthy because
+the publish gate exists.
+
+**Admitting is not accepting.** Both transport commands deliberately file
+attestations signed by keys this node has never approved, carrying failure
+result classes, for packages it does not hold. Refusing evidence at intake
+would let a node's own allowlist decide what it is allowed to SEE, and a
+quorum you can only observe when you already agree with it proves nothing.
+The approved-verifier quorum above is applied later, by
+`zcode package verify`.
 
 ## Wire format index
 

@@ -2360,6 +2360,94 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     zcl_native_handle_zcode_package_attest_import)
 
+/* ── attestation transport: offer + pull ───────────────────────────────
+ * import closes the loop for bytes a human already carried. These two
+ * close it for bytes nobody carried. An attestation is at most 681 bytes,
+ * under the blob bound, so it travels as an ordinary one-file one-chunk
+ * content.v2 package over the already-frozen 'zpkgswm' codec — NO new wire
+ * message, no new bound, no new store. Discovery is two ordinary signed
+ * DHT records in zclassic23.attestation, and BOTH are required: a PROVIDER
+ * on the attestation blob root ("ask me for these bytes" — the record the
+ * fetch path routes on) and a POINTER binding the attested package root to
+ * that blob root ("that blob attests this package"). Publishing only one
+ * is a silent no-op at pull time. Neither leaf consults the approved-
+ * verifier allowlist: admitting is not accepting, and the quorum belongs
+ * to zcode package verify. */
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.package.attest.offer", "zcode.package.attest", "",
+    "Make one filed attestation reachable over the swarm",
+    "Re-reads <datadir>/zcode/attestations/<attestation_id>, re-parses the "
+    "canonical ZCLATT wire, re-verifies the embedded secp256k1 signature, "
+    "re-derives the id, and admits the EXACT bytes into the package store "
+    "as an ordinary blob. Idempotent: the transport_root is a pure function "
+    "of the signed bytes — identical on every node forever — and is NOT the "
+    "attestation id. The reply carries attestation_id, transport_root, "
+    "package_root, release_id, recipe_root, signer_pubkey, result_class, "
+    "namespace, and TWO ready-to-run zcode network publish inputs. Offering "
+    "makes the bytes REACHABLE and announces NOTHING; telling the network "
+    "is the separate second act and takes BOTH records: run publish with "
+    "provider_publish_input (\"ask me for these bytes\" — what the fetch "
+    "path routes on) AND with pointer_publish_input (\"that blob attests "
+    "this package root\" — what a puller looks up). Pointer-only means a "
+    "puller learns which blob to want and finds nobody serving it; "
+    "provider-only means the bytes are reachable and nobody knows to ask. "
+    "ATTESTATION_ABSENT names an id with no filed wire; ATTESTATION_INVALID "
+    "and ATTESTATION_ID_MISMATCH name the failed codec rule.",
+    0,
+    "zcode,package,attest,offer,attestation,swarm,blob,provider,pointer",
+    "zcl.zcode_package_attest_offer.input.v1",
+    "zcl.zcode_package_attest_offer.v1",
+    "attestation_id,datadir", "attestation_id",
+    "z23 zcode package attest offer --input='{\"attestation_id\":\"<64hex>\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_zcode_package_attest_offer)
+
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.package.attest.pull", "zcode.package.attest", "",
+    "Fetch and admit published attestations for one package root",
+    "Resolves every zclassic23.attestation POINTER record at "
+    "semantic_root=package_root, drives the ordinary swarm fetch for each "
+    "DISTINCT attestation blob root, and admits each result with "
+    "expect_package_root ALWAYS set to package_root. That receiver-side "
+    "binding check — never the publish gate — is the security property: an "
+    "attestation whose own package_root differs is refused "
+    "package-root-binding and NOT filed, so a hostile pointer in this "
+    "namespace cannot deliver evidence about another package. Bounded rows "
+    "carry transport_root, fetch_outcome, admit_result (the NAMED rule), "
+    "attestation_id, signer_pubkey, result_class, filed and "
+    "already_present, plus totals pointers_seen, distinct_transport_roots, "
+    "fetched, admitted, filed, refused and rows_truncated — capped by "
+    "maximum_records, never truncated silently. A row that fails STAYS in "
+    "the report naming its rule: one bad or unreachable pointer never "
+    "aborts the sweep, so the other verifiers' attestations still land. "
+    "status separates the two dead ends that must never be merged: "
+    "NO_ATTESTATION_POINTERS (nobody has attested this root yet) versus "
+    "ATTESTATION_BYTES_UNREACHABLE (pointers exist, no authenticated "
+    "provider served the bytes). Pulling is NOT accepting — attestations "
+    "from unapproved signers and failure result classes are filed on "
+    "purpose, and the approved-verifier quorum is applied later by zcode "
+    "package verify.",
+    0,
+    "zcode,package,attest,pull,attestation,swarm,pointer,quorum,evidence",
+    "zcl.zcode_package_attest_pull.input.v1",
+    "zcl.zcode_package_attest_pull.v1",
+    "package_root,datadir,maximum_records", "package_root",
+    "z23 zcode package attest pull --input='{\"package_root\":\"<64hex>\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_zcode_package_attest_pull)
+
 /* ── slice 4: contributor identity + ZNAM pointers ─────────────────────
  * The secp256k1 publisher key is the only authoritative identity; ZNAM
  * records are mutable pointers resolved through the canonical ZNAM model
@@ -3714,7 +3802,11 @@ ZCL_COMMAND_READY_COMMAND(
     "independent parse/signature/chain verification and restart-safe storage. "
     "STORAGE_ACK is refused here and must use storage_ack, whose package-store "
     "proof cannot be supplied by the caller. The reply contains no secret "
-    "key material.",
+    "key material. One exception to plan being a dry run: a POINTER in the "
+    "zclassic23.attestation namespace is gated by re-admitting the "
+    "attestation blob, which FILES those bytes under "
+    "<datadir>/zcode/attestations on BOTH plan and commit — idempotent, and "
+    "normally a no-op because zcode package attest offer filed them first.",
     16384, "zcode,network,dht,publish,provider,pointer,storage-ack,plan,commit",
     "zcl.zcode_network_publish.input.v1", "zcl.zcode_network_publish.v1",
     "mode,kind,namespace,semantic_root,transport_root,owner_group,sequence,not_before,expiry,plan_token",
