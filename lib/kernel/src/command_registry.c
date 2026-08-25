@@ -1414,6 +1414,15 @@ bool zcl_command_registry_input_validate(const struct zcl_command_spec *spec,
         } else if (strcmp(key, "limit") == 0 || strcmp(key, "depth") == 0) {
             type_ok = value->type == JSON_INT && json_get_int(value) >= 1 &&
                       json_get_int(value) <= 1000000;
+        } else if (strcmp(key, "rpc_port") == 0) {
+            /* core.consensus.producer-session.retire's optional liveness
+             * probe target: the RPC port of the node that owns this
+             * datadir. Typed here because the probe must aim at THAT node —
+             * a sibling node on another port must never answer for it — and
+             * `--rpc_port=18260` types as an integer. The handler re-checks
+             * the 1..65535 range; 0 means "no explicit port". */
+            type_ok = value->type == JSON_INT && json_get_int(value) >= 0 &&
+                      json_get_int(value) <= 65535;
         } else if (strcmp(key, "watcher_id") == 0) {
             type_ok = value->type == JSON_INT && json_get_int(value) > 1;
         } else if (strcmp(key, "seconds") == 0) {
