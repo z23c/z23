@@ -5104,6 +5104,28 @@ c23-commons-installed-acceptance: zcode-c23-commons-alpha
 sovereign-source-network-acceptance: zclassic23 zcl-rpc zclassic23-package-sign
 	@bash tools/dev/sovereign_source_network_acceptance.sh
 
+# Two-role attestation flight over the same seven-identity DHT/Noise harness.
+# It proves that a signed ZCLATT attestation MOVES: the publisher mints one
+# with the real zclassic23-package-verify program (a genuine confined build
+# and test of a minimal package, really signed — never hand-assembled),
+# offers it as an ordinary blob, publishes BOTH records the design requires
+# in zclassic23.attestation (PROVIDER on the transport root, POINTER binding
+# the package root to it), and a second daemon that has never seen those
+# bytes pulls them over the frozen package swarm codec with no operator
+# carrying anything.  The receipt is asserted BYTE-IDENTICAL to the
+# publisher's file under the same attestation-id filename, and the receiver's
+# own quorum policy then evaluates it and honestly declines to count an
+# unapproved signer -- admitting is not accepting.  The adversarial leg
+# asserts a shipped node REFUSES to publish a pointer binding a package root
+# the attestation does not attest (ATTESTATION_BINDING_MISMATCH) and that the
+# decoy package's evidence set stays empty; the receiver-side half of that
+# rule is proven in-process by test_zcode_attest_transport / swarm_net and is
+# reported UNPROVEN here rather than faked.  Opt-in: seven real daemons; no
+# production datadir, wallet key, or live port.
+attestation-flight-acceptance: zclassic23 zcl-rpc zclassic23-package-sign \
+		zclassic23-package-verify
+	@bash tools/dev/attestation_flight_acceptance.sh
+
 # B3 file-market trade acceptance: two isolated regtest daemons (395xx
 # quads + 20030/20031, loopback only). The seller (-externalip + file
 # service) plans then commits a signed paid offer; it gossips to the buyer,
