@@ -56,13 +56,13 @@
  * Two halves, deliberately on different threads:
  *
  *   1. COLLECT tick (lib/health periodic ring): runs node_health_collect,
- *      which publishes the verdict (node_health_last_verdict), and emits
+ *      which publishes diagnostic health evidence, and emits
  *      the STATUS= line. This half MAY block — a collect can wait minutes
  *      on reducer-held locks during bulk ingest — and when it does, only
  *      the verdict/status go stale.
  *
  *   2. PET thread (dedicated, this file): pings WATCHDOG=1 every
- *      WATCHDOG_USEC/4 from CHEAP ATOMICS ONLY (verdict freshness,
+ *      WATCHDOG_USEC/4 from CHEAP ATOMICS ONLY (runtime progress,
  *      boot_progress, supervisor sweep heartbeat). It never runs a collect
  *      and never takes a node lock, so ring contention cannot starve the
  *      heartbeat. Before this split the ping rode the same ring as the
@@ -75,10 +75,11 @@
  *      gates and only prevents the work that can. Together those were the
  *      2026-08-02 and 2026-08-05 kill loops.
  *
- * Health verdict CONTENT is handled by the condition/remedy/operator planes;
- * it never decides process liveness. If the verdict pipeline itself dies (no
- * collect completes for a whole WatchdogSec window), or the supervisor sweep
- * freezes, the ping stops and systemd kills + restarts the hung unit.
+ * Health verdict content and collection cadence are handled by the
+ * condition/remedy/operator planes; neither decides process liveness. A
+ * collect may remain blocked while the reducer continues useful work. The
+ * independently sampled runtime pillars below stop the ping when the process
+ * actually freezes.
  *
  * No-op when NOTIFY_SOCKET is absent (e.g. CLI invocation). */
 static health_subsystem_id g_sd_watchdog_id = HEALTH_INVALID_ID;
@@ -291,29 +292,12 @@ static bool boot_sd_watchdog_recent_progress(void)
 }
 
 /* Pure pet decision — ONE code path for the pet thread and the ZCL_TESTING
- * seam (mirrors supervisor_backstop's backstop_decide factoring):
- *   - a frozen root supervisor sweep always stops the ping (Pillar 7);
- *   - otherwise ping when any collected verdict is fresh (younger than
- *     verdict_bound_us = one WatchdogSec window). Verdict content belongs to
- *     health/conditions and must not turn a named, restart-proof degradation
- *     into a systemd crash loop;
- *   - before the first verdict, ping only while startup grace remains;
- *   - recent boot_progress is the bounded escape hatch for a synchronous
- *     worker which legitimately delays the next collect. */
-static bool boot_sd_watchdog_pet_decide(bool supervisor_alive,
-                                        bool have_verdict,
-                                        int64_t verdict_age_us,
-                                        bool recent_progress,
-                                        int64_t grace_left_us,
-                                        int64_t verdict_bound_us)
+ * seam (mirrors supervisor_backstop's backstop_decide factoring). Collection
+ * freshness is deliberately absent: node_health_collect may block for minutes
+ * on reducer-held locks while every runtime pillar remains live. */
+static bool boot_sd_watchdog_pet_decide(bool runtime_gate_alive)
 {
-    if (!supervisor_alive)
-        return false;
-    if (recent_progress)
-        return true;
-    if (!have_verdict)
-        return grace_left_us > 0;
-    return verdict_age_us >= 0 && verdict_age_us < verdict_bound_us;
+    return runtime_gate_alive;
 }
 
 /* runtime_alive includes connman. IBD with a peer-floor drop is not a
@@ -326,15 +310,9 @@ static bool boot_sd_watchdog_keepalive_supervisor(bool runtime_alive,
 }
 
 #ifdef ZCL_TESTING
-bool boot_sd_watchdog_test_pet_decide(bool supervisor_alive, bool have_verdict,
-                                      int64_t verdict_age_us,
-                                      bool recent_progress,
-                                      int64_t grace_left_us,
-                                      int64_t verdict_bound_us)
+bool boot_sd_watchdog_test_pet_decide(bool runtime_gate_alive)
 {
-    return boot_sd_watchdog_pet_decide(supervisor_alive, have_verdict,
-                                       verdict_age_us, recent_progress,
-                                       grace_left_us, verdict_bound_us);
+    return boot_sd_watchdog_pet_decide(runtime_gate_alive);
 }
 
 bool boot_sd_watchdog_test_keepalive_supervisor(bool runtime_alive,
@@ -356,25 +334,15 @@ static void *boot_sd_watchdog_pet_main(void *arg)
     int64_t period_us = bound_us / 4;
     if (period_us < 5000000)  period_us = 5000000;  /* never DoS systemd */
     if (period_us > 60000000) period_us = 60000000;
-    const int64_t start_us = platform_time_monotonic_us();
-
     while (!atomic_load(&g_pet_stop) &&
            !thread_registry_shutdown_requested()) {
-        int64_t now_us = platform_time_monotonic_us();
-        int64_t pub_us = 0;
-        bool have = node_health_last_verdict(&pub_us);
-        int64_t verdict_age_us = have ? now_us - pub_us : 0;
         bool recent = boot_sd_watchdog_recent_progress();
-        bool supervisor_alive = boot_sd_watchdog_keepalive_supervisor(
+        bool runtime_gate_alive = boot_sd_watchdog_keepalive_supervisor(
             boot_sd_watchdog_runtime_alive(),
             boot_sd_watchdog_supervisor_alive(),
             recent);
         boot_sd_watchdog_maybe_notify_ready();
-        if (boot_sd_watchdog_pet_decide(supervisor_alive,
-                                        have, verdict_age_us,
-                                        recent,
-                                        bound_us - (now_us - start_us),
-                                        bound_us)) {
+        if (boot_sd_watchdog_pet_decide(runtime_gate_alive)) {
             sd_notify_watchdog_ping();
         }
         int64_t left_us = period_us;

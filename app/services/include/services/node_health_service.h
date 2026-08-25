@@ -165,17 +165,12 @@ void node_health_collect(struct node_health_snapshot *snapshot,
                          struct node_db *ndb,
                          const struct main_state *ms);
 
-/* Last-collected verdict, published by node_health_collect() on every call
- * (health ring, RPC handlers, soak service — last writer wins). Read by the
- * dedicated sd-watchdog pet thread (config/src/boot_sd_watchdog.c), which
- * must decide ping/no-ping from CHEAP atomics only — never by running a
- * collect inline, because a collect can block for minutes on reducer-held
- * locks during bulk ingest, and that blocking was the pet-starvation source
- * behind the 2026-08-02 systemd watchdog kill loop.
- * Returns false when no collect has completed yet this process.
- * Only publication freshness is exposed to the systemd pet thread. Verdict
- * content belongs to the health/condition/operator planes: a fresh negative
- * verdict proves the collector is alive and must not create a restart loop. */
+/* Last-collected verdict timestamp, published by node_health_collect() on
+ * every call (health ring, RPC handlers, soak service — last writer wins).
+ * Returns false when no collect has completed yet this process. This is
+ * diagnostic evidence only: a collect can block for minutes on reducer-held
+ * locks during bulk ingest, so publication freshness must not decide process
+ * liveness. */
 bool node_health_last_verdict(int64_t *publish_us_out);
 
 /* Publish side of the same contract (node_health_verdict.c): called once at

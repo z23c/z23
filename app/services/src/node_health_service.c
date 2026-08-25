@@ -239,7 +239,7 @@ static void health_finalize_serving_status(struct node_health_snapshot *snapshot
         health_add_warning(snapshot, snapshot->degraded_reason);
 
     snapshot->warning = snapshot->warning_count > 0;
-    node_health_verdict_publish(snapshot); /* sd pet's only health signal */
+    node_health_verdict_publish(snapshot); /* diagnostic publication time */
 }
 
 void node_health_collect(struct node_health_snapshot *snapshot,

@@ -3828,7 +3828,7 @@ spec: spec_zcl
 	ulimit -s unlimited && $(BIN_DIR)/spec_zcl
 
 .PHONY: z23 zclassic23 portable c23-portable-toolchain c23-portable-release \
-	c23-portable-install
+	c23-portable-install release-deploy
 z23: $(ZCLASSIC23_BIN) $(ZCLASSIC23_BIN_ALIAS)
 
 # Temporary migration alias: `make zclassic23` and build/bin/zclassic23 keep
@@ -3854,6 +3854,20 @@ c23-portable-release:
 # Short, memorable release front door. Keep the explicit name above for
 # scripts and old documentation; operators should only need `make portable`.
 portable: c23-portable-release
+
+# Build one portable runtime set on this host, then bootstrap those exact
+# checksummed bytes sequentially on fresh remote nodes. Remote hosts never
+# compile. Z23_RELEASE_HOSTS is deliberately operator-local.
+#   make release-deploy Z23_RELEASE_HOSTS='node3.example node4.example'
+release-deploy:
+	@set -eu; \
+	test -n "$(strip $(Z23_RELEASE_HOSTS))" || \
+		{ echo "release-deploy: REFUSE: set Z23_RELEASE_HOSTS='host1 host2'" >&2; exit 2; }; \
+	test -z "$$(git status --porcelain)" || \
+		{ echo "release-deploy: REFUSE: working tree is dirty" >&2; exit 2; }; \
+	$(MAKE) c23-portable-release; \
+	packaging/release/build_release.sh; \
+	tools/scripts/deploy_z23_release.sh --hosts="$(Z23_RELEASE_HOSTS)"
 
 # Split-debug: CFLAGS carries -g, but the shipped binary stays stripped —
 # the debug payload moves to $@.debug next to the binary and .gnu_debuglink
@@ -8828,6 +8842,7 @@ check-z23-release-install:
 	@echo "══ LINT: z23 release package + fail-closed installer ══"
 	@bash packaging/release/build_release.sh --selftest
 	@bash tools/scripts/install_z23.sh --selftest
+	@bash tools/scripts/deploy_z23_release.sh --selftest
 
 # Gate — stop a tenth copy of the source-identity JSON parser from growing
 # back. tools/scripts/source_identity_lib.sh is the one canonical reader

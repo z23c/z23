@@ -19,9 +19,8 @@
  *     healthy again resumes it
  *
  *   - the boot_sd_watchdog_pet_decide() decision table (via the
- *     ZCL_TESTING seam): supervisor-frozen always suppresses; fresh
- *     healthy verdict, body-gap posture, startup grace, and recent boot
- *     progress each permit; stale/unhealthy without progress suppresses
+ *     ZCL_TESTING seam): the independently computed runtime gate alone
+ *     decides whether the pet thread may send
  *   - the real dedicated pet thread continues emitting WATCHDOG=1 while
  *     the shared health-ring sweeper is deliberately absent, reproducing
  *     the collector-starvation boundary that caused the live restart loop
@@ -150,7 +149,8 @@ static bool fake_health_check(void) { return g_fake_health_healthy; }
 static int sdn_observe_pet_thread(int fd, int64_t deadline_us,
                                   int *ready_count, int *status_count,
                                   int64_t *first_watchdog_us,
-                                  int64_t *second_watchdog_us)
+                                  int64_t *second_watchdog_us,
+                                  int64_t *third_watchdog_us)
 {
     int watchdog_count = 0;
     while (platform_time_monotonic_us() < deadline_us) {
@@ -174,6 +174,8 @@ static int sdn_observe_pet_thread(int fd, int64_t deadline_us,
                 *first_watchdog_us = received_us;
             else if (watchdog_count == 1)
                 *second_watchdog_us = received_us;
+            else if (watchdog_count == 2)
+                *third_watchdog_us = received_us;
             watchdog_count++;
         } else if (strcmp(buf, "READY=1\n") == 0) {
             (*ready_count)++;
@@ -181,7 +183,7 @@ static int sdn_observe_pet_thread(int fd, int64_t deadline_us,
             (*status_count)++;
         }
 
-        if (watchdog_count >= 2 && *ready_count >= 1 && *status_count >= 1)
+        if (watchdog_count >= 3 && *ready_count >= 1 && *status_count >= 1)
             break;
     }
     return watchdog_count;
@@ -355,35 +357,13 @@ int test_sd_notify(void)
     }
 
     /* ── pet decision table (boot_sd_watchdog_pet_decide via seam) ──
-     * The dedicated pet thread's pure gate: supervisor liveness, verdict
-     * verdict freshness (not verdict content), startup grace, and the
-     * boot_progress escape hatch. */
+     * Collection freshness is intentionally absent. The runtime gate already
+     * combines the sweep, tick runner, connman, and bounded progress escape. */
     {
-        const int64_t BOUND = 600LL * 1000000;
-        SDN_CHECK("pet: frozen supervisor always stops the ping",
-            !boot_sd_watchdog_test_pet_decide(false, true,
-                                              0, true, BOUND, BOUND));
-        SDN_CHECK("pet: fresh verdict pings regardless of health content",
-            boot_sd_watchdog_test_pet_decide(true, true,
-                                             1000, false, 0, BOUND));
-        SDN_CHECK("pet: stale verdict without progress does not ping",
-            !boot_sd_watchdog_test_pet_decide(true, true,
-                                              BOUND + 1, false, 0, BOUND));
-        SDN_CHECK("pet: negative-age verdict is rejected",
-            !boot_sd_watchdog_test_pet_decide(true, true,
-                                              -1, false, 0, BOUND));
-        SDN_CHECK("pet: stale verdict + recent boot progress pings",
-            boot_sd_watchdog_test_pet_decide(true, true,
-                                             BOUND + 1, true, 0, BOUND));
-        SDN_CHECK("pet: no verdict inside startup grace pings",
-            boot_sd_watchdog_test_pet_decide(true, false,
-                                             0, false, BOUND, BOUND));
-        SDN_CHECK("pet: no verdict past grace without progress does not ping",
-            !boot_sd_watchdog_test_pet_decide(true, false,
-                                              0, false, 0, BOUND));
-        SDN_CHECK("pet: no verdict past grace + progress pings",
-            boot_sd_watchdog_test_pet_decide(true, false,
-                                             0, true, 0, BOUND));
+        SDN_CHECK("pet: frozen runtime gate always stops the ping",
+            !boot_sd_watchdog_test_pet_decide(false));
+        SDN_CHECK("pet: live runtime gate pings without collector evidence",
+            boot_sd_watchdog_test_pet_decide(true));
         SDN_CHECK("keepalive: frozen sweep still stops even with progress",
             !boot_sd_watchdog_test_keepalive_supervisor(false, false, true));
         SDN_CHECK("keepalive: stale connman + IBD progress + live sweep",
@@ -468,9 +448,9 @@ int test_sd_notify(void)
 
         if (fd >= 0) {
             setenv("NOTIFY_SOCKET", path, 1);
-            /* The production thread clamps its cadence to five seconds.
-             * Eight seconds keeps startup grace valid through the second
-             * expected ping while still making the test tightly bounded. */
+            /* The production thread clamps its cadence to five seconds. The
+             * third ping lands after the former eight-second collector grace,
+             * proving an idle health ring cannot suppress a live runtime. */
             setenv("WATCHDOG_USEC", "8000000", 1);
             sd_notify_reset_for_testing();
 
@@ -483,22 +463,27 @@ int test_sd_notify(void)
             int watchdog_count = 0;
             int64_t first_watchdog_us = 0;
             int64_t second_watchdog_us = 0;
+            int64_t third_watchdog_us = 0;
+            int64_t pet_started_us = platform_time_monotonic_us();
             if (started) {
                 int64_t deadline_us = platform_time_monotonic_us()
-                                    + 12000LL * 1000;
+                                    + 13000LL * 1000;
                 watchdog_count = sdn_observe_pet_thread(
                     fd, deadline_us, &ready_count, &status_count,
-                    &first_watchdog_us, &second_watchdog_us);
+                    &first_watchdog_us, &second_watchdog_us,
+                    &third_watchdog_us);
             }
             SDN_CHECK("watchdog start emits READY while health ring is idle",
                       ready_count >= 1);
             SDN_CHECK("watchdog start emits STATUS while health ring is idle",
                       status_count >= 1);
-            SDN_CHECK("pet thread emits two independent watchdog pings",
-                      watchdog_count >= 2);
+            SDN_CHECK("pet thread emits three independent watchdog pings",
+                      watchdog_count >= 3);
             SDN_CHECK("second watchdog ping follows the five-second cadence",
                       first_watchdog_us > 0 && second_watchdog_us > 0 &&
                       second_watchdog_us - first_watchdog_us >= 4500LL * 1000);
+            SDN_CHECK("pet thread continues beyond former collector grace",
+                      third_watchdog_us >= pet_started_us + 8000LL * 1000);
 
             boot_sd_watchdog_stop(&svc);
             close(fd);
