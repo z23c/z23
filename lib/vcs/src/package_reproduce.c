@@ -199,6 +199,7 @@ void vcs_package_reproduce_compare(
 struct repro_entry {
     uint8_t id[32];
     struct vcs_package_build_receipt receipt;
+    bool matched; /* reference row, or MATCH against it — set in the row pass */
 };
 
 static int repro_entry_cmp(const void *a, const void *b)
@@ -288,6 +289,7 @@ bool vcs_package_reproduce_scan(const char *receipts_dir,
             VCS_PACKAGE_BUILD_OK)
             continue;
         entries[count].receipt = receipt;
+        entries[count].matched = false;
         count++;
     }
     closedir(dir);
@@ -315,18 +317,49 @@ bool vcs_package_reproduce_scan(const char *receipts_dir,
         }
         if (!v.reproduced)
             all_match = false;
+        entries[i].matched = v.reproduced;
         if (out->row_count < VCS_REPRODUCE_MAX_ROWS) {
             struct vcs_reproduce_row *row = &out->rows[out->row_count++];
             memcpy(row->receipt_id, entries[i].id, 32);
             row->reference = i == 0;
             row->rule = v.rule;
             snprintf(row->detail, sizeof(row->detail), "%s", v.detail);
+            row->has_toolchain_capsule =
+                entries[i].receipt.has_toolchain_capsule;
+            memcpy(row->toolchain_capsule_root,
+                   entries[i].receipt.toolchain_capsule_root, 32);
         } else {
             out->rows_truncated = true;
             all_match = false; /* unexamined receipts: never claim it */
         }
     }
     out->reproduced = all_match;
+
+    /* Toolchain diversity among the MATCHING rows: the distinct nonzero
+     * pinned capsule roots. A capsule-less (v1) receipt adds nothing —
+     * it proves byte-identity, not toolchain independence. Rows beyond
+     * the display cap still count here (they were compared above). */
+    for (size_t i = 0; i < count; i++) {
+        if (!entries[i].matched ||
+            !entries[i].receipt.has_toolchain_capsule)
+            continue;
+        const uint8_t *root = entries[i].receipt.toolchain_capsule_root;
+        bool zero = true;
+        for (size_t b = 0; b < 32 && zero; b++)
+            zero = root[b] == 0;
+        if (zero)
+            continue;
+        bool seen = false;
+        for (size_t j = 0; j < i && !seen; j++)
+            if (entries[j].matched &&
+                entries[j].receipt.has_toolchain_capsule &&
+                memcmp(entries[j].receipt.toolchain_capsule_root, root,
+                       32) == 0)
+                seen = true;
+        if (!seen)
+            out->distinct_toolchains++;
+    }
+    out->cross_toolchain = out->distinct_toolchains >= 2;
     free(entries);
     return true;
 }

@@ -138,6 +138,16 @@ A Commons build is a confined observation, not an act of faith:
   cache: the zcc cache is disabled for every reproduction target, and the
   package fast-object cache verifies cached bytes against sidecars before
   admitting them.
+- **Reproduction evidence says HOW independent it is.** `reproduced`
+  asserts byte-identity among >= 2 distinct build events. The scan report
+  also carries `distinct_toolchains` (the count of distinct nonzero pinned
+  toolchain-capsule roots among the matching receipts) and
+  `cross_toolchain` — the stronger claim that at least two DIFFERENT pinned
+  toolchain capsules produced those identical bytes. Capsule-less v1
+  receipts count toward neither: same-capsule reproduction is honest
+  evidence of process determinism, not of toolchain independence. These
+  are telemetry, not a gate — the publish gate still judges `reproduced`
+  alone.
 - **Publication requires that evidence.** Network publication of a
   `zclassic23.package` POINTER (`zcode network publish`) refuses by name
   (`REPRODUCTION_NOT_EVIDENCED`) unless the publishing node's own store

@@ -95,12 +95,26 @@ struct vcs_reproduce_row {
     bool reference;  /* the lowest-id receipt the other rows compare to */
     uint8_t rule;    /* enum vcs_reproduce_rule vs the reference */
     char detail[VCS_REPRODUCE_DETAIL_MAX];
+    /* The row receipt's pinned toolchain capsule (receipt schema v2). A
+     * v1 receipt has neither field set and proves nothing about toolchain
+     * identity. */
+    bool has_toolchain_capsule;
+    uint8_t toolchain_capsule_root[32];
 };
 
 struct vcs_reproduce_report {
     uint32_t scanned;   /* receipt files examined */
     uint32_t matching;  /* installable receipts naming the exact root pair */
     bool reproduced;    /* >= 2 distinct receipt ids, every row MATCH */
+    /* Toolchain diversity among the MATCHING rows (including rows beyond
+     * the display cap): distinct_toolchains counts the distinct nonzero
+     * pinned capsule roots; cross_toolchain is true exactly when at least
+     * two DIFFERENT capsules produced the identical bytes — the strong
+     * toolchain-independence claim. Capsule-less v1 receipts add nothing
+     * to either: same-capsule reproduction is honest evidence of process
+     * determinism, not of toolchain independence. */
+    uint32_t distinct_toolchains;
+    bool cross_toolchain;
     struct vcs_reproduce_row rows[VCS_REPRODUCE_MAX_ROWS];
     size_t row_count;
     bool rows_truncated;

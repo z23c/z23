@@ -1553,6 +1553,8 @@ static int t_show(void)
              json_get_int(json_get(repro, "receipts_matching")) == 0 &&
              !json_get_bool(json_get(repro, "reproduced")) &&
              !json_get_bool(json_get(repro, "publishable")) &&
+             json_get_int(json_get(repro, "distinct_toolchains")) == 0 &&
+             !json_get_bool(json_get(repro, "cross_toolchain")) &&
              !json_get_bool(json_get(repro, "rows_truncated")));
     char release_id[65];
     const char *rid = rel ? json_get_str(json_get(rel, "release_id")) : NULL;
@@ -1563,7 +1565,8 @@ static int t_show(void)
     /* File two distinct, mutually matching installable receipts (the same
      * package+recipe roots, the same output set, different flags strings —
      * distinct build events, distinct receipt ids): the gate's exact local
-     * predicate must now read true. */
+     * predicate must now read true. The two receipts pin DIFFERENT
+     * toolchain capsules, so the strong diversity claim must read too. */
     struct vcs_package_build_receipt ra, rb;
     vcs_package_build_receipt_init(&ra);
     vcs_package_build_receipt_init(&rb);
@@ -1584,8 +1587,12 @@ static int t_show(void)
         rr->isolation = (uint8_t)VCS_PACKAGE_BUILD_ISOLATION_FULL;
         rr->test_ran = false;
         rr->result_class = (uint8_t)VCS_PACKAGE_BUILD_RESULT_BUILD_PASS;
+        uint8_t cap[32];
+        memset(cap, i == 0 ? 0xc1 : 0xc2, sizeof(cap));
         rcpts_ok = vcs_package_build_add_output(rr, "lib/ring-buffer.a",
                                                 out_sha, 123) ==
+                       VCS_PACKAGE_BUILD_OK &&
+                   vcs_package_build_set_toolchain_capsule(rr, cap) ==
                        VCS_PACKAGE_BUILD_OK &&
                    zp_file_receipt(dd, rr);
     }
@@ -1606,6 +1613,8 @@ static int t_show(void)
              json_get_int(json_get(repro, "receipts_matching")) == 2 &&
              json_get_bool(json_get(repro, "reproduced")) &&
              json_get_bool(json_get(repro, "publishable")) &&
+             json_get_int(json_get(repro, "distinct_toolchains")) == 2 &&
+             json_get_bool(json_get(repro, "cross_toolchain")) &&
              !json_get_bool(json_get(repro, "rows_truncated")));
     zp_cmd_free(&c);
 

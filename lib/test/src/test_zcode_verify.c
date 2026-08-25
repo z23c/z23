@@ -1357,6 +1357,97 @@ static int t_reproduce(void)
             named = true;
     ZV_CHECK("reproduce: a diverging build is rejected loudly",
              scan_ok && !rep.reproduced && rep.matching == 3 && named);
+
+    /* ── toolchain-capsule diversity: HOW independent the evidence is ──
+     * Fresh receipts dirs per scenario; all fixtures reuse the agreeing
+     * output set (out_seed 0x40) so only the capsule dimension moves. */
+    uint8_t cap_a[32], cap_b[32];
+    zv_pattern_root(0x61, cap_a);
+    zv_pattern_root(0x62, cap_b);
+    struct vcs_package_build_receipt c1, c2;
+    char capdir[4400];
+
+    /* (a) two matching v2 receipts pinning the SAME capsule: reproduced,
+     * one distinct toolchain, NOT cross-toolchain. */
+    bool cap_fix =
+        zv_receipt(&c1, package_root, recipe_root, "14.2.0", 0x40) &&
+        zv_receipt(&c2, package_root, recipe_root, "15.0.1", 0x40) &&
+        vcs_package_build_set_toolchain_capsule(&c1, cap_a) ==
+            VCS_PACKAGE_BUILD_OK &&
+        vcs_package_build_set_toolchain_capsule(&c2, cap_a) ==
+            VCS_PACKAGE_BUILD_OK;
+    ZV_CHECK("reproduce: same-capsule fixtures build", cap_fix);
+    snprintf(capdir, sizeof(capdir), "%s/caps_same", base);
+    ZV_CHECK("reproduce: same capsule is one toolchain, never cross",
+             cap_fix && zv_store_receipt(capdir, &c1) &&
+             zv_store_receipt(capdir, &c2) &&
+             vcs_package_reproduce_scan(capdir, package_root, recipe_root,
+                                        &rep) &&
+             rep.reproduced && rep.distinct_toolchains == 1 &&
+             !rep.cross_toolchain && rep.row_count == 2 &&
+             rep.rows[0].has_toolchain_capsule &&
+             rep.rows[1].has_toolchain_capsule &&
+             memcmp(rep.rows[0].toolchain_capsule_root, cap_a, 32) == 0);
+
+    /* (b) two matching v2 receipts pinning DIFFERENT capsules: the strong
+     * claim — two toolchains produced byte-identical outputs. */
+    cap_fix =
+        zv_receipt(&c1, package_root, recipe_root, "14.2.0", 0x40) &&
+        zv_receipt(&c2, package_root, recipe_root, "15.0.1", 0x40) &&
+        vcs_package_build_set_toolchain_capsule(&c1, cap_a) ==
+            VCS_PACKAGE_BUILD_OK &&
+        vcs_package_build_set_toolchain_capsule(&c2, cap_b) ==
+            VCS_PACKAGE_BUILD_OK;
+    ZV_CHECK("reproduce: cross-capsule fixtures build", cap_fix);
+    snprintf(capdir, sizeof(capdir), "%s/caps_diff", base);
+    ZV_CHECK("reproduce: two distinct capsules report cross_toolchain",
+             cap_fix && zv_store_receipt(capdir, &c1) &&
+             zv_store_receipt(capdir, &c2) &&
+             vcs_package_reproduce_scan(capdir, package_root, recipe_root,
+                                        &rep) &&
+             rep.reproduced && rep.distinct_toolchains == 2 &&
+             rep.cross_toolchain);
+
+    /* (c) a capsule-less (v1) matching pair: byte-identity proven,
+     * toolchain independence not claimed. */
+    cap_fix =
+        zv_receipt(&c1, package_root, recipe_root, "14.2.0", 0x40) &&
+        zv_receipt(&c2, package_root, recipe_root, "15.0.1", 0x40);
+    snprintf(capdir, sizeof(capdir), "%s/caps_v1", base);
+    ZV_CHECK("reproduce: v1 receipts add zero toolchain diversity",
+             cap_fix && zv_store_receipt(capdir, &c1) &&
+             zv_store_receipt(capdir, &c2) &&
+             vcs_package_reproduce_scan(capdir, package_root, recipe_root,
+                                        &rep) &&
+             rep.reproduced && rep.distinct_toolchains == 0 &&
+             !rep.cross_toolchain &&
+             !rep.rows[0].has_toolchain_capsule);
+
+    /* (d) a NON-matching row never inflates the counts: an agreeing
+     * same-capsule pair plus a diverging third build pinning a different
+     * capsule still reads one toolchain, not cross. */
+    cap_fix =
+        zv_receipt(&c1, package_root, recipe_root, "14.2.0", 0x40) &&
+        zv_receipt(&c2, package_root, recipe_root, "15.0.1", 0x40) &&
+        vcs_package_build_set_toolchain_capsule(&c1, cap_a) ==
+            VCS_PACKAGE_BUILD_OK &&
+        vcs_package_build_set_toolchain_capsule(&c2, cap_a) ==
+            VCS_PACKAGE_BUILD_OK;
+    struct vcs_package_build_receipt cdiv;
+    cap_fix = cap_fix &&
+        zv_receipt(&cdiv, package_root, recipe_root, "15.0.2", 0x99) &&
+        vcs_package_build_set_toolchain_capsule(&cdiv, cap_b) ==
+            VCS_PACKAGE_BUILD_OK;
+    ZV_CHECK("reproduce: diverging-capsule fixtures build", cap_fix);
+    snprintf(capdir, sizeof(capdir), "%s/caps_mixed", base);
+    ZV_CHECK("reproduce: a diverging row's capsule never inflates diversity",
+             cap_fix && zv_store_receipt(capdir, &c1) &&
+             zv_store_receipt(capdir, &c2) &&
+             zv_store_receipt(capdir, &cdiv) &&
+             vcs_package_reproduce_scan(capdir, package_root, recipe_root,
+                                        &rep) &&
+             !rep.reproduced && rep.matching == 3 &&
+             rep.distinct_toolchains == 1 && !rep.cross_toolchain);
     zv_rm_rf(base);
 
     /* ── the eligibility gates: reproduction outranks the quorum ── */
@@ -1519,16 +1610,26 @@ static int t_command(void)
 
     /* The reproduction object: two distinct build receipts committing
      * byte-identical output sets reproduce; a diverging third receipt
-     * kills the verdict and is named by rule. */
+     * kills the verdict and is named by rule. The two agreeing receipts
+     * pin DIFFERENT toolchain capsules, so the response must also carry
+     * the strong diversity claim (distinct_toolchains=2, cross_toolchain)
+     * — and that telemetry survives a rejected verdict. */
     {
         char receipts_dir[4400];
         snprintf(receipts_dir, sizeof(receipts_dir), "%s/receipts", store);
+        uint8_t cap1[32], cap2[32];
+        zv_pattern_root(0x71, cap1);
+        zv_pattern_root(0x72, cap2);
         struct vcs_package_build_receipt r1, r2;
         ZV_CHECK("command: reproduction receipts build",
                  zv_receipt(&r1, package_root, recipe_root, "14.2.0",
                             0x40) &&
                  zv_receipt(&r2, package_root, recipe_root,
-                            "15.0.1-third-party", 0x40));
+                            "15.0.1-third-party", 0x40) &&
+                 vcs_package_build_set_toolchain_capsule(&r1, cap1) ==
+                     VCS_PACKAGE_BUILD_OK &&
+                 vcs_package_build_set_toolchain_capsule(&r2, cap2) ==
+                     VCS_PACKAGE_BUILD_OK);
         ZV_CHECK("command: reproduction receipts persist",
                  zv_store_receipt(receipts_dir, &r1) &&
                  zv_store_receipt(receipts_dir, &r2));
@@ -1542,6 +1643,10 @@ static int t_command(void)
                  json_get_bool(json_get(repro, "scanned_ok")) &&
                  json_get_bool(json_get(repro, "reproduced")) &&
                  json_get_int(json_get(repro, "matching_receipts")) == 2);
+        ZV_CHECK("command: two pinned capsules report cross_toolchain",
+                 repro &&
+                 json_get_int(json_get(repro, "distinct_toolchains")) == 2 &&
+                 json_get_bool(json_get(repro, "cross_toolchain")));
         zv_cmd_free(&c);
 
         struct vcs_package_build_receipt r3;
@@ -1568,6 +1673,11 @@ static int t_command(void)
                  !json_get_bool(json_get(repro2, "reproduced")) &&
                  json_get_int(json_get(repro2, "matching_receipts")) == 3 &&
                  mismatch_named);
+        ZV_CHECK("command: the diverging capsule-less row never inflates "
+                 "diversity",
+                 repro2 &&
+                 json_get_int(json_get(repro2, "distinct_toolchains")) == 2 &&
+                 json_get_bool(json_get(repro2, "cross_toolchain")));
         zv_cmd_free(&c2);
     }
     zv_rm_rf(datadir);

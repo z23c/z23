@@ -1387,6 +1387,9 @@ void zcl_native_handle_zcode_package_verify(
     (void)json_push_kv_int(&rj, "matching_receipts",
                            (int64_t)repro.matching);
     (void)json_push_kv_bool(&rj, "reproduced", repro.reproduced);
+    (void)json_push_kv_int(&rj, "distinct_toolchains",
+                           (int64_t)repro.distinct_toolchains);
+    (void)json_push_kv_bool(&rj, "cross_toolchain", repro.cross_toolchain);
     struct json_value rrows;
     json_init(&rrows);
     json_set_array(&rrows);
@@ -1931,6 +1934,10 @@ void zcl_native_handle_zcode_package_show(
                 /* The exact gate predicate the pointer publish applies. */
                 (void)json_push_kv_bool(&repro, "publishable",
                                         report.reproduced);
+                (void)json_push_kv_int(&repro, "distinct_toolchains",
+                                       (int64_t)report.distinct_toolchains);
+                (void)json_push_kv_bool(&repro, "cross_toolchain",
+                                        report.cross_toolchain);
                 (void)json_push_kv_bool(&repro, "rows_truncated",
                                         report.rows_truncated);
                 (void)json_push_kv(&reply->data, "reproduction", &repro);
