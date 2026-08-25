@@ -9,10 +9,10 @@
  * canonical UTXO set ONLY into coins_kv (the `coins` table in progress.kv) —
  * the store gettxoutsetinfo / the SHA3 commitment read. The node.db `utxos`
  * table is a DERIVED read model used by the block explorer, address balances,
- * the richlist, HodlWave, /explorer/stats and circulating supply. Its only
- * forward writer (process_block_flush_coins) is dead code, so after a cold
- * import seeds `utxos` once it FREEZES at the restore height while coins_kv
- * (correctly) tracks the tip. This service is the missing feeder.
+ * the richlist, HodlWave, /explorer/stats and circulating supply. It has NO
+ * forward writer on the consensus path, so after a cold import seeds `utxos`
+ * once it FREEZES at the restore height while coins_kv (correctly) tracks the
+ * tip. This service is the missing feeder.
  *
  * DESIGN — incremental next-frontier projection
  * ---------------------------------------------

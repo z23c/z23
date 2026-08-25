@@ -483,8 +483,8 @@ bool boot_mem_pressure_register(struct boot_svc_ctx *svc);
 
 /* ── utxo_mirror_sync (boot_runtime_sync_services.c) ────────────
  * Keep node.db's explorer `utxos` mirror synced to the authoritative
- * coins_kv set (process_block_flush_coins, its only forward writer, is dead
- * code, so the mirror otherwise freezes at the cold-import seed height). The
+ * coins_kv set (nothing on the consensus path writes the mirror forward, so it
+ * otherwise freezes at the cold-import seed height). The
  * service is additive + node.db-only — never touches the consensus coins_kv
  * write path. Registered into the runtime kernel by
  * boot_utxo_mirror_sync_register() (called from boot_register_runtime_services). */
