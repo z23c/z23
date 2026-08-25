@@ -167,6 +167,49 @@ A Commons build is a confined observation, not an act of faith:
 
 <!-- claim: symbol-present vcs_package_build_set_toolchain_capsule lib/vcs/include/vcs/package_build.h # receipt v2 capsule binding -->
 
+## 4. Evidence: who may say what
+
+Two evidence lanes exist, and they are not interchangeable:
+
+- **Build receipts (`ZCLBLD\r\n`) are unsigned local evidence.** A receipt
+  says "THIS node's worker ran THIS build and got THESE bytes." It is
+  written only by the node's own install/reproduce lifecycle into its own
+  store's `receipts/` directory, keyed by receipt id. Receipts never travel:
+  an unsigned receipt received from the network would prove nothing, so no
+  wire or command imports one. The reproduction quorum
+  (`vcs_package_reproduce_scan`) is therefore always a LOCAL observation —
+  and that is why the publish gate can demand it of the publisher's own
+  store.
+- **Attestations (`ZCLATT\r\n`) are signed portable evidence.** One
+  attestation binds the package root, the exact release id, the recipe
+  root, per-compiler and sanitizer outcomes, the test facts, and the
+  isolation level, signed under the verifier's secp256k1 key
+  (`zcl.zcode_attest.v1` domain). Only the separate
+  `zclassic23-package-verify` program signs them; the node never compiles
+  or executes downloaded code. Attestations are filed under
+  `attestations/<attestation-id-hex>` and evaluated by
+  `zcode package verify`.
+
+<!-- claim: symbol-present VCS_PACKAGE_ATTEST_ID_DOMAIN lib/vcs/include/vcs/package_attest.h # attestation id domain -->
+
+**Verification is quorum over named keys, never anonymous volume.** A
+release counts as verified only when at least `VCS_VERIFY_QUORUM_REQUIRED`
+(2) APPROVED, INDEPENDENT verifier keys sign MATCHING attestations. The
+approved-verifier allowlist (`<datadir>/zcode/approved_verifiers`, one
+66-hex pubkey per line) is explicit local configuration and never comes
+from the network; self-verification by the publisher's key and duplicate
+signers are named rejections. A missing allowlist means no quorum is
+possible — a named refusal, not a silent "unverified". The signer quorum is
+the latency fast path over bit-identical reproduction, never a substitute
+for it.
+
+<!-- claim: symbol-present VCS_VERIFY_QUORUM_REQUIRED lib/vcs/include/vcs/package_verify_policy.h # quorum constant -->
+
+Evidence establishes only its exact stated claim: a hash identifies bytes,
+a signature identifies the key that made a statement, a receipt records a
+bound observation. None of them proves that arbitrary code is safe or worth
+accepting — acceptance stays a local policy act.
+
 ## Wire format index
 
 | Format | Magic | Authority | Root / id domain |
@@ -176,6 +219,7 @@ A Commons build is a confined observation, not an act of faith:
 | Declarative build recipe | `ZCLRCP` | `lib/vcs/include/vcs/package_recipe.h` | see header |
 | Dependency lock | `ZCLLCK` | `lib/vcs/include/vcs/package_deps.h` | `zcl.zcode_lock.v1` |
 | Build receipt | `ZCLBLD` | `lib/vcs/include/vcs/package_build.h` | `zcl.zcode_build.v1` |
+| Verifier attestation | `ZCLATT` | `lib/vcs/include/vcs/package_attest.h` | `zcl.zcode_attest.v1` |
 | Transport carrier | (content.v2) | `lib/vcs/include/vcs/package_transport.h` | reuses manifest domains |
 | API capsule | `ZCLAPI` | `lib/vcs/src/package_capsule.c` | see source |
 | Toolchain capsule | (struct) | `lib/vcs/include/vcs/build_action.h` | `zcl.toolchain_capsule.v1` |
