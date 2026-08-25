@@ -205,6 +205,7 @@ static void pv_usage(FILE *out)
         "           --emit=<abs-dir> --lock-root=<64hex>\n"
         "           [--dep=<64hex>,<installed-dir>]...\n"
         "           [--plan=<file>] [--fast-cache=<dir>]\n"
+        "           [--allow-testless-standard]\n"
         "           --require-full-isolation\n"
         "   or: zclassic23-package-verify --zbuild-input=<abs>/unit.i\n"
         "           --zbuild-output=<abs>/unit.o --require-full-isolation\n"
@@ -2857,6 +2858,7 @@ int main(int argc, char **argv)
     const char *candidate_profile = NULL;
     const char *candidate_cpu_arg = NULL;
     bool require_full_isolation = false;
+    bool allow_testless_standard = false;
     struct pv_emit_dep emit_deps[PV_EMIT_MAX_DEPS];
     size_t emit_dep_count = 0;
     memset(emit_deps, 0, sizeof(emit_deps));
@@ -2939,6 +2941,8 @@ int main(int argc, char **argv)
             emit_dep_count++;
         } else if (strcmp(argv[i], "--require-full-isolation") == 0)
             require_full_isolation = true;
+        else if (strcmp(argv[i], "--allow-testless-standard") == 0)
+            allow_testless_standard = true;
         else if (strcmp(argv[i], "--help") == 0 ||
                  strcmp(argv[i], "-h") == 0) {
             pv_usage(stdout);
@@ -4060,11 +4064,26 @@ int main(int argc, char **argv)
         return 5;
     }
 
+    /* The standard-profile refusal guards the EVIDENCE track: a candidate
+     * standard run that composes admission evidence (the build fabric's
+     * candidate builds, the factory's standard-profile rebuild — neither
+     * passes --allow-testless-standard) must show declared tests and clean
+     * ASan+UBSan runs before package evidence may carry the standard
+     * profile's name. Every candidate run emits (candidate_shape requires
+     * --emit and refuses --key), so the exemption is keyed on the explicit
+     * opt-in flag instead: the reproduce track (package lifecycle
+     * reproduce, cross-machine reproduce) rebuilds an ALREADY-accepted
+     * package whose honesty bar is two distinct build events agreeing on
+     * every committed output (vcs_package_reproduce_scan), not the
+     * evidence-track test policy, and its receipt still records the
+     * testless facts honestly (have_tests=false, no test run, sanitizers
+     * unavailable). */
     bool standard_sanitizers_passed = have_tests && test_ran && test_ok &&
         att.sanitizer_count == 2u &&
         att.sanitizers[0].outcome == VCS_PACKAGE_ATTEST_OUTCOME_PASS &&
         att.sanitizers[1].outcome == VCS_PACKAGE_ATTEST_OUTCOME_PASS;
-    if (candidate_mode && standard_profile && !standard_sanitizers_passed) {
+    if (candidate_mode && standard_profile && !allow_testless_standard &&
+        !standard_sanitizers_passed) {
         fprintf(stdout,
                 "zbuild-package-standard-refused=1 asan=%u ubsan=%u "
                 "detail=%.120s\n", att.sanitizers[0].outcome,

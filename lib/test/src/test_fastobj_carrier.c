@@ -25,6 +25,11 @@
  *      -E identity probe still runs by design, it IS the key input),
  *   9. build-report #2 is byte-identical to build-report #1 (memcmp of
  *      the ZCLBLD receipt wires) and both receipts hash to the same id.
+ *  10. the tested standard receipt really ran the fixture's tests.
+ *  11. the testless standard-profile refusal, both sides: a tests/-less
+ *      copy of the fixture is REFUSED (exit 6) in the evidence shape and
+ *      BUILDS with --allow-testless-standard (the reproduce shape), its
+ *      receipt honestly recording test_ran=false / BUILD_PASS.
  *
  * Refusal legs (no builds): a torn pair, a sidecar whose object_sha3
  * lies about its object, an entry filed under the wrong key, and a
@@ -216,15 +221,18 @@ struct fcw_build_result {
     int exit_code;
     unsigned long long hits;
     unsigned long long misses;
+    bool saw_refusal;
     char first_line[256];
 };
 
 /* Spawn the verifier in candidate proof mode with a fast cache, capture
- * merged stdout/stderr, and parse the fast-cache counters line. */
+ * merged stdout/stderr, and parse the fast-cache counters line. When
+ * allow_testless is true the run passes --allow-testless-standard (the
+ * reproduce track's opt-out of the evidence-track testless refusal). */
 static void fcw_candidate_build(const char *worker, const char *root_hex,
                                 const char *pkg_abs, const char *recipe_abs,
                                 const char *emit_dir, const char *lock_hex,
-                                const char *cache_dir,
+                                const char *cache_dir, bool allow_testless,
                                 struct fcw_build_result *out)
 {
     memset(out, 0, sizeof(*out));
@@ -254,7 +262,11 @@ static void fcw_candidate_build(const char *worker, const char *root_hex,
                           recipe_arg,   name_arg,
                           "--zbuild-package-profile=standard",
                           cpu_arg,      emit_arg,     lock_arg,
-                          fast_arg,     "--require-full-isolation", NULL};
+                          fast_arg,
+                          allow_testless ? "--allow-testless-standard"
+                                         : "--require-full-isolation",
+                          allow_testless ? "--require-full-isolation" : NULL,
+                          NULL};
     int fds[2];
     if (pipe(fds) != 0)
         return;
@@ -326,6 +338,8 @@ static void fcw_candidate_build(const char *worker, const char *root_hex,
     out->ok = !killed && out->exit_code == 0;
     if (text) {
         snprintf(out->first_line, sizeof(out->first_line), "%.255s", text);
+        out->saw_refusal =
+            strstr(text, "zbuild-package-standard-refused=1") != NULL;
         char *line = strstr(text, "zbuild-package-fast-cache=v1");
         if (line)
             (void)sscanf(line,
@@ -403,6 +417,8 @@ int test_fastobj_carrier(void)
     char err[512] = "";
     struct vcs_package_prepared prep;
     vcs_package_prepared_init(&prep);
+    struct vcs_package_prepared prepT;
+    vcs_package_prepared_init(&prepT);
     struct vcs_fastobj_carrier_stats stA, stC, stF, stAd, stD, stRef;
     memset(&stA, 0, sizeof(stA));
     memset(&stC, 0, sizeof(stC));
@@ -413,8 +429,8 @@ int test_fastobj_carrier(void)
     uint8_t rootA[32] = {0}, rootC[32] = {0}, rootD[32] = {0}, rootL[32] = {0};
     struct vcs_package_store *nodeA = NULL, *nodeB = NULL, *nodeC = NULL,
                              *nodeD = NULL, *storeR = NULL;
-    size_t r1_len = 0, r2_len = 0;
-    uint8_t *r1 = NULL, *r2 = NULL;
+    size_t r1_len = 0, r2_len = 0, rT_len = 0;
+    uint8_t *r1 = NULL, *r2 = NULL, *rT = NULL;
 
     /* The confined worker ships beside this binary — never from PATH. */
     char worker[4096];
@@ -502,7 +518,7 @@ int test_fastobj_carrier(void)
     memset(&run1, 0, sizeof(run1));
     memset(&run2, 0, sizeof(run2));
     fcw_candidate_build(worker, root_hex, pkg, recipe_path, emit1, lock_hex,
-                        cacheA, &run1);
+                        cacheA, false, &run1);
     FC_CHECK("candidate build #1 (cold cacheA) succeeded", run1.ok);
     if (!run1.ok)
         printf("    build #1 exit %d: %.200s\n", run1.exit_code,
@@ -575,7 +591,7 @@ int test_fastobj_carrier(void)
 
     /* 8. candidate build #2 on cacheB: ZERO compiler spawns. */
     fcw_candidate_build(worker, root_hex, pkg, recipe_path, emit2, lock_hex,
-                        cacheB, &run2);
+                        cacheB, false, &run2);
     FC_CHECK("candidate build #2 (warm cacheB) succeeded", run2.ok);
     if (!run2.ok)
         printf("    build #2 exit %d: %.200s\n", run2.exit_code,
@@ -611,6 +627,97 @@ int test_fastobj_carrier(void)
         vcs_package_build_id(&rec2, id2) == VCS_PACKAGE_BUILD_OK;
     FC_CHECK("both receipts parse and hash to the same id",
              ids_ok && memcmp(id1, id2, 32) == 0);
+
+    /* 10. the tested path stays honest: receipt #1 really ran the
+     * fixture's declared tests under the standard profile. */
+    FC_CHECK("tested standard receipt really ran its tests",
+             ids_ok && rec1.test_ran &&
+                 rec1.result_class == VCS_PACKAGE_BUILD_RESULT_TEST_PASS);
+
+    /* 11. the testless standard-profile refusal, both sides. A TESTLESS
+     * copy of the fixture (tests/ dropped, nothing else changed) under
+     * the standard profile is REFUSED with exit 6 in the evidence shape
+     * (no opt-out flag — the build fabric / factory candidate shape), and
+     * BUILDS with --allow-testless-standard (the reproduce track's
+     * opt-out), its receipt recording the testless facts honestly:
+     * test_ran=false, result_class=BUILD_PASS, still installable. */
+    char pkgT[4096], recipeT_path[4096], emitT1[4096], emitT2[4096],
+         cacheT[4096], testsT[4096];
+    bool pathsT_ok =
+        snprintf(pkgT, sizeof(pkgT), "%s/pkgT", base) < (int)sizeof(pkgT) &&
+        snprintf(recipeT_path, sizeof(recipeT_path), "%s/recipeT.wire",
+                 base) < (int)sizeof(recipeT_path) &&
+        snprintf(emitT1, sizeof(emitT1), "%s/emitT1", base) <
+            (int)sizeof(emitT1) &&
+        snprintf(emitT2, sizeof(emitT2), "%s/emitT2", base) <
+            (int)sizeof(emitT2) &&
+        snprintf(cacheT, sizeof(cacheT), "%s/cacheT", base) <
+            (int)sizeof(cacheT) &&
+        snprintf(testsT, sizeof(testsT), "%s/tests", pkgT) <
+            (int)sizeof(testsT);
+    bool testless_ready = pathsT_ok &&
+        fcw_copy_tree("lib/test/fixtures/zcode/tiny-lines", pkgT) &&
+        fcw_rm_rf(testsT);
+    struct vcs_package_prepare_options optsT;
+    memset(&optsT, 0, sizeof(optsT));
+    optsT.dir = pkgT;
+    memcpy(optsT.publisher_pubkey, pk.vch, COMPRESSED_PUBLIC_KEY_SIZE);
+    optsT.publisher_sequence = 1;
+    char prepT_detail[512] = "";
+    enum vcs_package_prepare_error prcT = VCS_PACKAGE_PREPARE_ERR_IO;
+    if (testless_ready)
+        prcT = vcs_package_prepare(&optsT, &prepT, prepT_detail,
+                                   sizeof(prepT_detail));
+    char rootT_hex[65] = "", lockT_hex[65] = "";
+    if (prcT == VCS_PACKAGE_PREPARE_OK) {
+        zcl_hex_encode(prepT.package_root, 32, rootT_hex);
+        zcl_hex_encode(prepT.lock_root, 32, lockT_hex);
+    }
+    testless_ready =
+        testless_ready && prcT == VCS_PACKAGE_PREPARE_OK &&
+        fcw_write_file(recipeT_path, prepT.recipe_wire,
+                       prepT.recipe_wire_len);
+    FC_CHECK("testless fixture variant (tests/ dropped) prepared",
+             testless_ready);
+    if (!testless_ready && prcT != VCS_PACKAGE_PREPARE_OK)
+        printf("    prepare testless: %s\n", prepT_detail);
+    if (testless_ready) {
+        struct fcw_build_result tref, tok;
+        memset(&tref, 0, sizeof(tref));
+        memset(&tok, 0, sizeof(tok));
+        fcw_candidate_build(worker, rootT_hex, pkgT, recipeT_path, emitT1,
+                            lockT_hex, cacheT, false, &tref);
+        FC_CHECK("evidence-shape standard run of a testless package "
+                 "refuses (exit 6 + refusal line)",
+                 tref.exit_code == 6 && tref.saw_refusal);
+        if (!(tref.exit_code == 6 && tref.saw_refusal))
+            printf("    testless refuse: exit %d: %.200s\n",
+                   tref.exit_code, tref.first_line);
+        fcw_candidate_build(worker, rootT_hex, pkgT, recipeT_path, emitT2,
+                            lockT_hex, cacheT, true, &tok);
+        FC_CHECK("reproduce-shape standard run of a testless package "
+                 "builds", tok.ok);
+        if (!tok.ok)
+            printf("    testless allow: exit %d: %.200s\n", tok.exit_code,
+                   tok.first_line);
+        char reportT[4096];
+        if (tok.ok &&
+            snprintf(reportT, sizeof(reportT), "%s/build-report", emitT2) <
+                (int)sizeof(reportT))
+            rT = fcw_read_file(reportT, VCS_PACKAGE_BUILD_MAX_WIRE_BYTES,
+                               &rT_len);
+        struct vcs_package_build_receipt recT;
+        bool recT_ok =
+            rT != NULL && vcs_package_build_parse(rT, rT_len, &recT) ==
+                              VCS_PACKAGE_BUILD_OK;
+        FC_CHECK("testless emit receipt parses", recT_ok);
+        FC_CHECK("testless receipt records the honest facts (no test run, "
+                 "build-pass only)",
+                 recT_ok && !recT.test_ran &&
+                     recT.result_class == VCS_PACKAGE_BUILD_RESULT_BUILD_PASS);
+        FC_CHECK("testless receipt stays installable for reproduction",
+                 recT_ok && vcs_package_build_installable(&recT));
+    }
 
     /* ── refusal legs: nothing above is trusted, everything re-proves ── */
 
@@ -797,7 +904,9 @@ int test_fastobj_carrier(void)
 done:
     free(r1);
     free(r2);
+    free(rT);
     vcs_package_prepared_free(&prep);
+    vcs_package_prepared_free(&prepT);
     if (nodeA)
         vcs_package_store_close(nodeA);
     if (nodeB)

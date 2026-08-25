@@ -310,6 +310,7 @@ run_local_build()
         "--emit=$emit" "--lock-root=$LOCK_ROOT" \
         ${DEP_ARGS[@]+"${DEP_ARGS[@]}"} \
         "--plan=$plan" --require-full-isolation \
+        --allow-testless-standard \
         > "$out" 2>"$out.stderr" || rc=$?
     printf '%s' "$rc"
 }
@@ -401,7 +402,8 @@ if [ -n "$SSH_HOST" ]; then
 '--zbuild-package-profile=standard' \
 '--zbuild-package-max-cpu-seconds=120' \
 '--emit=$RWORK/emit' '--lock-root=$LOCK_ROOT'$REMOTE_DEPS \
-'--plan=$RWORK/plan.json' '--require-full-isolation'" \
+'--plan=$RWORK/plan.json' '--require-full-isolation' \
+'--allow-testless-standard'" \
             > "$WORK/remote.stdout" 2>"$WORK/remote.stderr" || RC_B=$?
         ssh "${SSH_OPTS[@]}" "$SSH_HOST" \
             "tar czf - -C '$RWORK' emit plan.json" 2>/dev/null |

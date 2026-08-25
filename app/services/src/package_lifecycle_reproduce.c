@@ -165,6 +165,10 @@ static struct zcl_result pkgl_run_reproduce_worker(
         argv[argc++] = slot;
     }
     argv[argc++] = "--require-full-isolation";
+    /* Reproduce rebuilds an ALREADY-accepted package to check byte-identity,
+     * not to compose admission evidence, so it opts out of the
+     * evidence-track refusal of testless standard-profile builds. */
+    argv[argc++] = "--allow-testless-standard";
     argv[argc] = NULL;
 
     char out[8192];
