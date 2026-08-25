@@ -7,9 +7,18 @@
 #include "base/hex.h"
 #include "json/json.h"
 #include "rpc/server.h"
+#include "vcs/package_public_shape.h"
+#include "vcs/package_store.h"
 #include "vcs/package_swarm_node.h"
 
 #include <string.h>
+
+/* Row ceilings for zcode_swarm_status. Small on purpose: this is an
+ * operator's diagnostic, not a catalog — the first screenful must name
+ * the refusing rule, and `truncated` says when a bigger store needs a
+ * per-root zcode_package_status probe instead. */
+#define SWARM_STATUS_MAX_ROOTS 32u
+#define SWARM_STATUS_MAX_PEERS 32u
 
 static const struct json_value *package_rpc_input(
     const struct json_value *params)
@@ -184,6 +193,104 @@ static bool package_status(const struct json_value *params, bool help,
     return true;
 }
 
+/* Whole-engine observation for the operator. package_status answers "is
+ * THIS root downloading"; it cannot answer "why is nothing moving" — the
+ * refusing decision (no eligible peers joined, or a root the announcer
+ * filters out) lives in state no other surface renders, and a CLI probe
+ * opens a one-shot engine that sees none of it. Everything here reads the
+ * resident engine and the resident store; nothing mutates. */
+static bool swarm_status(const struct json_value *params, bool help,
+                         struct json_value *result)
+{
+    (void)params;
+    if (help) {
+        json_set_str(result, "zcode_swarm_status {}");
+        return true;
+    }
+    struct vcs_swarm_engine *engine = vcs_swarm_engine_global();
+    struct vcs_package_store *store = vcs_package_store_global();
+
+    json_set_object(result);
+    json_push_kv_bool(result, "ok", true);
+    json_push_kv_str(result, "schema", "zcl.zcode_swarm_observation.v1");
+    json_push_kv_bool(result, "swarm_enabled", engine != NULL);
+
+    if (engine) {
+        uint64_t ids[SWARM_STATUS_MAX_PEERS];
+        size_t peers = vcs_swarm_engine_peer_ids(
+            engine, ids, SWARM_STATUS_MAX_PEERS);
+        json_push_kv_int(result, "engine_peers", (int64_t)peers);
+        json_push_kv_bool(result, "peers_truncated",
+                          peers == SWARM_STATUS_MAX_PEERS);
+        json_push_kv_int(result, "active_downloads",
+                         (int64_t)vcs_swarm_engine_active_downloads(engine));
+
+        /* Roots peers ANNOUNCEd to this engine this session — the mesh's
+         * answer to "does anyone out there have anything". */
+        struct vcs_swarm_advertised ads[SWARM_STATUS_MAX_ROOTS];
+        size_t ad_n = vcs_swarm_engine_advertised(
+            engine, ads, SWARM_STATUS_MAX_ROOTS);
+        struct json_value advertised;
+        json_init(&advertised);
+        json_set_array(&advertised);
+        for (size_t i = 0; i < ad_n; i++) {
+            char hex[65];
+            zcl_hex_encode(ads[i].root, 32, hex);
+            struct json_value row;
+            json_init(&row);
+            json_set_object(&row);
+            json_push_kv_str(&row, "root", hex);
+            json_push_kv_int(&row, "advertisers",
+                             (int64_t)ads[i].advertisers);
+            json_push_back(&advertised, &row);
+            json_free(&row);
+        }
+        json_push_kv(result, "advertised_to_us", &advertised);
+        json_free(&advertised);
+        json_push_kv_bool(result, "advertised_truncated",
+                          ad_n == SWARM_STATUS_MAX_ROOTS);
+    }
+
+    /* What this resident would announce: every complete store root with
+     * the announcer's own verdict. A root absent from the mesh despite
+     * sitting complete in the store answers here, by rule name. */
+    if (store) {
+        struct vcs_package_store_summary summaries[SWARM_STATUS_MAX_ROOTS];
+        size_t roots = vcs_package_store_list_summaries(
+            store, true, summaries, SWARM_STATUS_MAX_ROOTS);
+        struct json_value local;
+        json_init(&local);
+        json_set_array(&local);
+        for (size_t i = 0; i < roots; i++) {
+            struct vcs_package_public_verdict verdict;
+            enum vcs_package_public_shape shape =
+                vcs_package_public_shape_classify(
+                    store, summaries[i].root, &verdict);
+            char hex[65];
+            zcl_hex_encode(summaries[i].root, 32, hex);
+            struct json_value row;
+            json_init(&row);
+            json_set_object(&row);
+            json_push_kv_str(&row, "root", hex);
+            json_push_kv_str(&row, "public_shape",
+                             vcs_package_public_shape_string(shape));
+            json_push_kv_str(&row, "serve_rule",
+                             verdict.rule ? verdict.rule : "null-input");
+            json_push_kv_bool(&row, "would_announce",
+                              shape != VCS_PACKAGE_PUBLIC_REFUSED);
+            json_push_kv_int(&row, "total_bytes",
+                             (int64_t)summaries[i].total_bytes);
+            json_push_back(&local, &row);
+            json_free(&row);
+        }
+        json_push_kv(result, "local_roots", &local);
+        json_free(&local);
+        json_push_kv_bool(result, "local_truncated",
+                          roots == SWARM_STATUS_MAX_ROOTS);
+    }
+    return true;
+}
+
 void boot_zcode_package_register_rpc(struct rpc_table *table)
 {
     const struct rpc_command commands[] = {
@@ -191,6 +298,7 @@ void boot_zcode_package_register_rpc(struct rpc_table *table)
         { "zcode", "zcode_package_unpin", package_unpin, true },
         { "zcode", "zcode_package_fastobj_export", package_fastobj_export, true },
         { "zcode", "zcode_package_status", package_status, true },
+        { "zcode", "zcode_swarm_status", swarm_status, true },
     };
     for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); i++)
         rpc_table_must_append(table, &commands[i]);
