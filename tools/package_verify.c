@@ -90,6 +90,7 @@
 #include "vcs/build_action.h"
 #include "vcs/build_artifact_manifest.h"
 #include "vcs/package_build.h"
+#include "vcs/fastobj.h"
 #include "vcs/package_manifest.h"
 #include "vcs/package_recipe.h"
 #include "vcs/package_reproduce.h"
@@ -1968,22 +1969,11 @@ static bool pv_emit_dep_plan(const char *plan_path, const char *package_name,
  * format is untouched; the counters go to the run's stdout summary. */
 
 #define PV_FASTOBJ_SIDECAR_CAP (256u * 1024u)
+#define PV_COMPILE_ARGV_MAX 192u
 
 static uint64_t g_pv_fast_hits;
 static uint64_t g_pv_fast_misses;
 static uint64_t g_pv_fast_reused_bytes;
-
-/* The build_action.c hashing convention: u64 LE length, then the bytes. */
-static void pv_hash_text(struct sha3_256_ctx *sha, const char *value)
-{
-    uint64_t length = value ? strlen(value) : 0;
-    uint8_t le[8];
-    for (unsigned i = 0; i < sizeof(le); i++)
-        le[i] = (uint8_t)(length >> (8U * i) & 0xffU);
-    sha3_256_write(sha, le, sizeof(le));
-    if (length)
-        sha3_256_write(sha, (const uint8_t *)value, (size_t)length);
-}
 
 /* Run the preprocess probe (-E -MD) for one TU with the exact compile flag
  * vector in `store` and hash the preprocessed unit. False with err set. */
@@ -2044,29 +2034,36 @@ static bool pv_fast_preproc_sha3(struct pv_plan_ctx *ctx,
 }
 
 /* The cache key: domain || capsule_root || target || profile || the exact
- * (root-normalized) compile argv || preprocessed-unit SHA3-256. */
+ * (root-normalized) compile argv || preprocessed-unit SHA3-256. The
+ * derivation itself lives in lib/vcs (vcs/fastobj.h) so the carrier that
+ * moves cache entries between nodes proves entry placement with the SAME
+ * key — one authority, no second source of truth. */
 static bool pv_fastobj_key(struct pv_plan_ctx *ctx, const char *profile,
                            const char *target, const uint8_t capsule_root[32],
                            const struct pv_compile_args *store,
                            const uint8_t preproc_sha3[32], uint8_t out[32])
 {
-    struct sha3_256_ctx sha;
-    sha3_256_init(&sha);
-    static const char domain[] = "zcl.fastobj.v1";
-    sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
-    sha3_256_write(&sha, capsule_root, 32);
-    pv_hash_text(&sha, target);
-    pv_hash_text(&sha, profile);
+    /* Rendered argv, NULL-terminated for vcs_fastobj_key. */
+    const char *rendered[PV_COMPILE_ARGV_MAX + 1u];
+    size_t count = 0;
     for (size_t i = 0; store->argv[i]; i++) {
-        char rendered[4400];
-        if (!pv_plan_render_arg(ctx, store->argv[i], rendered,
-                                sizeof(rendered)))
+        if (count >= PV_COMPILE_ARGV_MAX)
             return false;
-        pv_hash_text(&sha, rendered);
+        char *one = zcl_malloc(4400, "pv_fastobj.render");
+        if (!one)
+            return false;
+        if (!pv_plan_render_arg(ctx, store->argv[i], one, 4400)) {
+            free(one);
+            return false;
+        }
+        rendered[count++] = one;
     }
-    sha3_256_write(&sha, preproc_sha3, 32);
-    sha3_256_finalize(&sha, out);
-    return true;
+    rendered[count] = NULL;
+    bool ok = vcs_fastobj_key(capsule_root, target, profile, rendered,
+                              preproc_sha3, out);
+    for (size_t i = 0; i < count; i++)
+        free((void *)rendered[i]);
+    return ok;
 }
 
 static bool pv_fastobj_paths(const char *cache_dir, const uint8_t key[32],
@@ -2099,7 +2096,7 @@ static char *pv_fastobj_sidecar(struct pv_plan_ctx *ctx, const char *profile,
     json_init(&root);
     json_set_object(&root);
     char hex[65];
-    bool ok = json_push_kv_str(&root, "schema", "zcl.fastobj.sidecar.v1");
+    bool ok = json_push_kv_str(&root, "schema", VCS_FASTOBJ_SIDECAR_SCHEMA);
     {
         struct json_value kc;
         json_init(&kc);

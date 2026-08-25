@@ -1685,6 +1685,8 @@ int main(int argc, char **argv)
     { extern int test_zcode_fetch(void); failures += test_zcode_fetch(); }
     { extern int test_zcode_site(void); failures += test_zcode_site(); }
     { extern int test_zcode_add(void); failures += test_zcode_add(); }
+    { extern int test_fastobj_carrier(void);
+      failures += test_fastobj_carrier(); }
     { extern int test_zcode_science(void); failures += test_zcode_science(); }
     { extern int test_zcode_science_store(void);
       failures += test_zcode_science_store(); }
