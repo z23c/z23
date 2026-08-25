@@ -185,6 +185,33 @@ size_t net_send_total_bytes_cap(void);
 size_t net_send_peer_bytes_cap(void);
 bool net_send_over_budget(const struct p2p_node *node);
 
+/* Hard per-peer ceiling, 2 × net_send_peer_bytes_cap(). The cap above is
+ * ADVISORY — a serve path has to remember to ask, and only one in the tree
+ * does — so this one is enforced where bytes actually enter the queue
+ * (p2p_node_end_message / p2p_node_queue_raw) and no serve path can opt
+ * out of it. Past it the segment is refused and the peer is disconnected
+ * with P2P_DISCONNECT_RESOURCE_LIMIT. A peer with an EMPTY queue always
+ * gets to send one message whatever its size, so a small operator-set cap
+ * bounds memory instead of wedging the connection. There is no deadline in
+ * any of this: it bounds resources, never a peer's speed. */
+size_t net_send_peer_bytes_hard_cap(void);
+
+/* Onion ingress: the local P2P listener port that Tor forwards inbound
+ * hidden-service streams to, or 0 when this node has no such route
+ * installed. Armed/disarmed by tor_integration.c.
+ *
+ * Every Tor-forwarded inbound peer arrives as a plain TCP connection from
+ * 127.0.0.1, so on an onion-reachable node a loopback source address is no
+ * longer evidence of a same-host peer, and must not buy the trusted-peer
+ * exemption from peer_misbehaving(). net_peer_is_onion_ingress() is true
+ * for an INBOUND peer with a loopback source that was accepted on that
+ * listener. Arming can only ever remove a trust exemption, never grant
+ * one; the explicit escape for a genuine multi-node host is to whitelist
+ * the listener. */
+void net_set_onion_ingress_port(uint16_t local_port);
+uint16_t net_onion_ingress_port(void);
+bool net_peer_is_onion_ingress(const struct p2p_node *node);
+
 /* reason is a short human-readable label ("threshold reached: <offence>"
  * etc, truncated) captured at ban time purely for operator diagnosis
  * (`z23 core network peers incidents` / node.log) — it is never matched

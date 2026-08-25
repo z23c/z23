@@ -29,9 +29,6 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-/* A confined build of a v1-sized package (static archive, no network, no
- * generated build system) that has not finished in ten minutes is wedged. */
-#define PKGL_BUILD_TIMEOUT_MS 600000
 #define PKGL_DEV_WORKER_NAME "zclassic23-package-verify-dev"
 #define PKGL_RELEASE_WORKER_NAME "zclassic23-package-verify"
 
@@ -43,7 +40,7 @@
  * the build tree's own build/bin, because the fast-test lane runs its binary
  * out of a per-epoch subdirectory; it is still a fixed relative path, not a
  * search. */
-static struct zcl_result pkgl_worker_path(char *out, size_t cap)
+struct zcl_result pkgl_worker_path(char *out, size_t cap)
 {
     char exe[PKGL_PATH_MAX];
     if (!os_proc_exe_path(exe, sizeof(exe)))

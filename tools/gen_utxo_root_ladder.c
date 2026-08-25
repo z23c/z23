@@ -40,12 +40,14 @@
  *       SOURCE db's own blocks table at that exact height (a plain block
  *       hash, not boundary-aligned, is available at ANY height).
  *   (b) In-binary PoW checkpoint headers (chainparams.c mainnet_checkpoints,
- *       every 50,000 blocks) do NOT currently carry real hashes — every
- *       entry is a `{{0}}` placeholder (see chainparams.c:18-82; consumed
- *       today only for `checkpoint_covers()` deferred-proof-validation
- *       gating, not header hash enforcement). That cross-check source is
- *       UNAVAILABLE until those hashes are filled in — this tool does not
- *       pretend otherwise; it is simply skipped.
+ *       every 50,000 blocks) DO carry real hashes: the static initializer
+ *       (chainparams.c:18-82) is 63 `{{0}}` placeholders, but
+ *       init_main_params() overwrites every one of them via uint256_set_hex
+ *       (chainparams.c:293-421) before chain_params_get() hands the table
+ *       out, so at RUNTIME all 63 are populated (re-verified 2026-08-24;
+ *       pinned by the test_consensus_rule_sweep group). This tool does not
+ *       consume them today — wiring that cross-check in is open work, not a
+ *       missing data source.
  *   (c) Dual-source: pass --second-db=<copy of an independently-folded
  *       node.db> (e.g. a from-genesis anchor-mint datadir) and this tool
  *       cross-checks every stride's block_hash AND utxo_root against it.

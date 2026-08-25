@@ -82,7 +82,7 @@ void boot_loop_guard_check(struct node_db *ndb)
                                              sizeof(exit_reason), &exit_forced);
 
     /* A self-respawn re-execs the SAME binary in-process (main.c), bypassing
-     * deploy/zclassic23-launch.sh entirely, so the launcher's own streak
+     * the external native launcher entirely, so its own streak
      * increment never sees it — count it here instead. */
     if (have_reason && strncmp(exit_reason, "self_respawn", 12) == 0)
         binary_ab_note_self_respawn_exit_env();

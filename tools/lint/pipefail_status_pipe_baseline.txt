@@ -53,7 +53,6 @@ tools/scripts/promotion_receipt.sh 8
 tools/scripts/proof_server_pin.sh 5
 tools/scripts/pr_security_scan.sh 4
 tools/scripts/slo_hold_judge.sh 13
-tools/scripts/slo_ledger_summary.sh 9
 tools/scripts/soak_evidence.sh 4
 tools/scripts/stopwatch_skip_class.sh 1
 tools/scripts/worktree_gc.sh 3

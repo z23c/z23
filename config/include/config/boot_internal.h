@@ -262,6 +262,13 @@ void boot_block_prefetch_start(const struct app_context *ctx,
                                struct main_state *ms);
 void boot_block_prefetch_stop(void);
 
+/* Cross-block shielded-proof pre-verification pool wiring
+ * (config/src/boot_pv_lookahead.c). start is a no-op unless ctx->pv_lookahead
+ * (-pv-lookahead); stop is idempotent + safe without a prior start. */
+void boot_pv_lookahead_start(const struct app_context *ctx,
+                             struct main_state *ms);
+void boot_pv_lookahead_stop(void);
+
 /* ── boot_services.c accessors shared with boot_background_workers.c ──
  * The background-worker unit (config/src/boot_background_workers.c) was lifted
  * out of boot_services.c but its worker bodies still reach the boot context
@@ -419,6 +426,32 @@ void boot_sd_watchdog_stop(void *ctx);
  * PUBLICATION has not been observed — READY=1 must wait. */
 bool boot_sd_watchdog_onion_blocks_ready(void);
 
+/* ── Earned readiness: the legs of READY=1 ──────────────────────
+ * Each leg is confirmed from its OWN evidence; none is inferred from
+ * another. READY=1 goes out only when all four are confirmed.
+ *
+ *   descriptor — onion descriptor published, or onion never requested
+ *   listener   — a bound P2P listen socket, or listening not requested
+ *   pump       — connman started AND both its loops progressed recently
+ *   sweep      — the root supervisor sweep heartbeat is not frozen
+ *
+ * A completed rendezvous / inbound circuit has NO observable anywhere in
+ * this tree, so it is reported as `rendezvous=unconfirmed` and is
+ * deliberately absent from the conjunction: a leg nothing can ever
+ * confirm would be a gate that can never pass. */
+struct boot_ready_legs {
+    bool descriptor;
+    bool listener;
+    bool pump;
+    bool sweep;
+};
+
+/* Pure: true only when every leg is confirmed. NULL is not confirmed. */
+bool boot_ready_legs_all_confirmed(const struct boot_ready_legs *l);
+/* Pure: render the legs as `descriptor=yes listener=no ...` into `out`. */
+void boot_ready_legs_describe(const struct boot_ready_legs *l,
+                              char *out, size_t cap);
+
 #ifdef ZCL_TESTING
 /* Test seam for the pure pet decision (lib/test/src/test_sd_notify.c). */
 bool boot_sd_watchdog_test_pet_decide(bool supervisor_alive, bool have_verdict,
@@ -450,8 +483,8 @@ bool boot_mem_pressure_register(struct boot_svc_ctx *svc);
 
 /* ── utxo_mirror_sync (boot_runtime_sync_services.c) ────────────
  * Keep node.db's explorer `utxos` mirror synced to the authoritative
- * coins_kv set (process_block_flush_coins, its only forward writer, is dead
- * code, so the mirror otherwise freezes at the cold-import seed height). The
+ * coins_kv set (nothing on the consensus path writes the mirror forward, so it
+ * otherwise freezes at the cold-import seed height). The
  * service is additive + node.db-only — never touches the consensus coins_kv
  * write path. Registered into the runtime kernel by
  * boot_utxo_mirror_sync_register() (called from boot_register_runtime_services). */

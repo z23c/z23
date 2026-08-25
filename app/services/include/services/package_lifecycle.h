@@ -51,6 +51,7 @@
 #include "base/result.h"
 #include "vcs/package_build.h"
 #include "vcs/package_install.h"
+#include "vcs/package_reproduce.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -102,6 +103,20 @@ struct package_lifecycle_rollback_report {
     char detail[PACKAGE_LIFECYCLE_DETAIL_MAX + 1u];
 };
 
+struct package_lifecycle_reproduce_report {
+    char name[VCS_PACKAGE_RELEASE_NAME_MAX + 1u];
+    char semver[VCS_PACKAGE_RELEASE_SEMVER_MAX + 1u];
+    uint8_t root[32];
+    uint8_t reference_receipt_id[32]; /* the install build's receipt */
+    uint8_t receipt_id[32];           /* the second, distinct receipt */
+    bool matched;                     /* every committed output byte-equal */
+    uint8_t compare_rule;             /* enum vcs_reproduce_rule */
+    char compare_detail[VCS_REPRODUCE_DETAIL_MAX];
+    bool filed; /* the second receipt is filed under receipts/<id-hex> */
+    char rule[PACKAGE_LIFECYCLE_RULE_MAX + 1u];       /* "" on success */
+    char detail[PACKAGE_LIFECYCLE_DETAIL_MAX + 1u];
+};
+
 /* `name_or_root` is either a 64-hex package root (identity) or a
  * "publisher/package" name, which SELECTS the highest-semver release under
  * that name. `now_unix` stamps the plan and its expiry (the caller passes
@@ -130,6 +145,20 @@ struct zcl_result package_lifecycle_receipt_read(
 struct zcl_result package_lifecycle_installed_inspect(
     const char *datadir, const uint8_t root[32],
     struct package_lifecycle_step *out, bool *installed_out);
+
+/* Reproduce the install build of one ALREADY-INSTALLED package: re-verify
+ * every committed input against the CAS, re-materialize the source tree,
+ * re-run the fixed verifier worker under the standard build profile against
+ * the install receipt's own lock root and committed dependency set, and —
+ * only when the rebuild receipt is byte-identical on every committed output
+ * (vcs_package_reproduce_compare == MATCH) and hashes to a DISTINCT receipt
+ * id — file it under <datadir>/zcode/receipts/<receipt-id-hex>. Two distinct
+ * receipt ids with byte-identical output sets is the reproduction fact that
+ * lets the receipts scan report reproduced=true. Every refusal is named in
+ * rule/detail and files nothing. */
+struct zcl_result package_lifecycle_reproduce(
+    const char *datadir, const char *name_or_root,
+    struct package_lifecycle_reproduce_report *out);
 
 struct zcl_result package_lifecycle_rollback(
     const char *datadir, const char *name, int64_t now_unix,

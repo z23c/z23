@@ -382,6 +382,10 @@ void app_shutdown_svc(struct boot_svc_ctx *svc)
      * reads active_chain_at + preads blk*.dat). Idempotent + safe if never
      * started. */
     boot_block_prefetch_stop();
+    /* Stop the proof pre-verification pool before main_state teardown (its
+     * workers read active_chain_at + block bodies). Idempotent; belt and
+     * braces, since proof_validate_stage_shutdown also stops it. */
+    boot_pv_lookahead_stop();
     event_emitf(EV_NODE_SHUTDOWN, 0, "graceful");
     event_async_stop();
 

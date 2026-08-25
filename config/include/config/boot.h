@@ -387,6 +387,16 @@ struct app_context {
                                  * see docs; page-cache warm only helps when the FS
                                  * can evict, so a ramdisk sandbox cannot show the
                                  * win). K3. */
+    bool pv_lookahead;         /* -pv-lookahead : start the bounded, supervised
+                                 * cross-block shielded-proof pre-verification
+                                 * pool (app/jobs/pv_lookahead.c) alongside the
+                                 * reducer drive, so proof_validate consumes a
+                                 * cached verdict instead of verifying Groth16
+                                 * inline on the serial fold thread. FAIL-SAFE:
+                                 * a miss verifies inline exactly as today, so a
+                                 * failed start costs throughput, never a verdict.
+                                 * Default false → a normal boot runs its current
+                                 * path exactly. */
 };
 
 void app_context_defaults(struct app_context *ctx);

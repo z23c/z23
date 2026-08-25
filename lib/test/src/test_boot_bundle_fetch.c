@@ -29,6 +29,7 @@
 
 #include "config/boot.h"                       /* struct app_context */
 #include "config/boot_bundle_fetch.h"
+#include "config/bundle_fetch_seeds.h"          /* ZCL_BUNDLE_FETCH_CLEARNET_SEEDS */
 #include "config/boot_consensus_bundle_marker.h"
 #include "config/consensus_state_install_runtime.h"
 #include "chain/checkpoints.h"
@@ -847,12 +848,19 @@ static int case_seed_set(void)
          "never an empty set") {
         struct app_context ctx;
 
-        /* (1) No flags at all: the compiled clearnet seeds (the operator's
-         * own file-service seeds are runtime -fileservice=/-connect= values,
-         * never compiled in — see config/bundle_fetch_seeds.h). */
+        /* (1) No flags at all: exactly the compiled clearnet seed set, whose
+         * length this reads rather than assuming. The set is EMPTY by policy —
+         * this project's own file-service endpoints are runtime
+         * -fileservice=/-connect= values and are never compiled in (see
+         * config/bundle_fetch_seeds.h), and no third-party seed is vouched for
+         * in-tree. Asserting equality instead of ">= 1" keeps this case honest
+         * whichever way that list later moves. */
         memset(&ctx, 0, sizeof(ctx));
+        size_t compiled_seeds = 0;
+        while (ZCL_BUNDLE_FETCH_CLEARNET_SEEDS[compiled_seeds])
+            compiled_seeds++;
         size_t open_seeds = boot_bundle_fetch_seed_count(&ctx);
-        ASSERT(open_seeds >= 1);
+        ASSERT(open_seeds == compiled_seeds);
 
         /* (2) connect-only with `-connect=host:8033` (the published mainnet
          * P2P port) and no `-fileservice`: seeds file-service at host:FS_PORT.

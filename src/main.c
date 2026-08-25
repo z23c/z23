@@ -160,6 +160,26 @@ int main(int argc, char **argv)
         return ui_present_host_main();
 
     ParseParameters(argc, (const char *const *)argv);
+
+    /* <datadir>/z23.conf, read AFTER argv so the command line always wins
+     * (ReadConfigFile skips any key argv already set). This is how a setting
+     * persisted by `z23 join` reaches the next boot without anyone editing a
+     * service unit; a missing file is the normal case and changes nothing.
+     *
+     * The datadir comes from a scan of the WHOLE argv, not from the argument
+     * table: ParseParameters stops at the first non-'-' token, so a CLI
+     * invocation (`z23 zcode ... -datadir=DIR`) parses no flags at all and the
+     * table would name the DEFAULT datadir — i.e. the operator's live node
+     * rather than the instance they explicitly targeted. */
+    {
+        char conf_datadir[4096];
+        char conf_path[4600];
+        (void)ArgvDataDir(argc, (const char *const *)argv, conf_datadir,
+                          sizeof(conf_datadir));
+        GetConfigFilePath(conf_datadir, conf_path, sizeof(conf_path));
+        (void)ReadConfigFile(conf_path);
+    }
+
     apply_argv_loglevel();
 
     for (int i = 1; i < argc; ++i) {

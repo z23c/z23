@@ -42,6 +42,7 @@
 #include "vcs/package_manifest.h"
 #include "vcs/package_recipe.h"
 #include "vcs/package_release.h"
+#include "vcs/package_reproduce.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -1147,6 +1148,63 @@ static int t_e2e(void)
              ar.ok && present && gens == 1 &&
                  memcmp(active, ring_root, 32) == 0);
 
+    /* --- the installed node reproduces its own install build ------------
+     * A standard-profile rebuild of the same committed inputs must emit
+     * byte-identical outputs, hash to a DISTINCT receipt id, and file it —
+     * which is exactly what the receipts scan needs to report reproduced. */
+    struct package_lifecycle_reproduce_report repro;
+    struct zcl_result repr =
+        package_lifecycle_reproduce(base, "alice/ringbuffer", &repro);
+    if (!repr.ok)
+        printf("  zcode_add: reproduce failed rule=%s detail=%s msg=%s\n",
+               repro.rule, repro.detail, repr.message);
+    ZA_CHECK("the standard-profile rebuild reproduces the install build",
+             repr.ok && repro.matched && repro.filed &&
+                 memcmp(repro.reference_receipt_id, ring_receipt, 32) == 0 &&
+                 memcmp(repro.receipt_id, ring_receipt, 32) != 0);
+    char repro_id_hex[65];
+    za_hex(repro.receipt_id, 32, repro_id_hex);
+    char repro_filed[4500];
+    snprintf(repro_filed, sizeof(repro_filed), "%s/receipts/%s", zcode,
+             repro_id_hex);
+    ZA_CHECK("the second, distinct receipt is filed by its exact id",
+             za_exists(repro_filed));
+    char receipts_dir[4400];
+    snprintf(receipts_dir, sizeof(receipts_dir), "%s/receipts", zcode);
+    struct vcs_reproduce_report scan;
+    bool scanned = vcs_package_reproduce_scan(receipts_dir, ring_root,
+                                              inspected_receipt.recipe_root,
+                                              &scan);
+    ZA_CHECK("two distinct byte-identical receipts report reproduced",
+             scanned && scan.reproduced && scan.matching == 2);
+
+    /* The native command is idempotent: a re-run re-files the same
+     * deterministic receipt and reports both ids. */
+    struct json_value repro_input;
+    json_init(&repro_input);
+    json_set_object(&repro_input);
+    bool repro_input_ready =
+        json_push_kv_str(&repro_input, "name_or_root", "alice/ringbuffer") &&
+        json_push_kv_str(&repro_input, "datadir", base);
+    struct zcl_command_request repro_request = {
+        .input = &repro_input,
+    };
+    struct zcl_command_reply repro_reply;
+    zcl_command_reply_init(&repro_reply, "zcl.zcode_package_reproduce.v1");
+    if (repro_input_ready)
+        zcl_native_handle_zcode_package_reproduce(&repro_request,
+                                                  &repro_reply);
+    const char *repro_cmd_id = json_get_str(
+        json_get(&repro_reply.data, "receipt_id"));
+    ZA_CHECK("the reproduce command re-files the same receipt id",
+             repro_input_ready &&
+                 repro_reply.status == ZCL_COMMAND_STATUS_PASSED &&
+                 json_get_bool(json_get(&repro_reply.data, "reproduced")) &&
+                 repro_cmd_id &&
+                 strcmp(repro_cmd_id, repro_id_hex) == 0);
+    zcl_command_reply_free(&repro_reply);
+    json_free(&repro_input);
+
     /* --- a second version, then rollback -------------------------------- */
     struct za_file ring2_files[] = {
         { "LICENSE", ZA_LICENSE },
@@ -1276,6 +1334,14 @@ static int t_e2e(void)
     struct package_lifecycle_plan_report eplan;
     struct zcl_result er =
         package_lifecycle_plan(base, "bob/ringbuffer", t0 + 7, &eplan);
+    /* Published is not installed: reproduction without an install receipt
+     * is a named refusal, not a build. */
+    struct package_lifecycle_reproduce_report ni_repro;
+    struct zcl_result nir =
+        package_lifecycle_reproduce(base, "bob/ringbuffer", &ni_repro);
+    ZA_CHECK("reproduce of a package that was never installed is refused",
+             pe && !nir.ok &&
+                 strcmp(ni_repro.rule, "not-installed") == 0);
     bool tampered_ok = pe && er.ok &&
                        za_tamper_chunk(zcode, ZA_RING_C "/* v3 */\n");
     /* Re-plan AFTER the tamper: the plan itself must now refuse to be

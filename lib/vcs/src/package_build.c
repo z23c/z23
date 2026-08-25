@@ -49,6 +49,7 @@ const char *vcs_package_build_error_string(enum vcs_package_build_error error)
     case VCS_PACKAGE_BUILD_ERR_OUTPUT_ORDER: return "outputs-not-canonical";
     case VCS_PACKAGE_BUILD_ERR_OUTPUT_COUNT: return "output-count-bound";
     case VCS_PACKAGE_BUILD_ERR_OUTPUT_EMPTY: return "passing-build-no-outputs";
+    case VCS_PACKAGE_BUILD_ERR_CAPSULE: return "toolchain-capsule";
     }
     return "unknown-error";
 }
@@ -79,7 +80,7 @@ void vcs_package_build_receipt_init(struct vcs_package_build_receipt *r)
     if (!r)
         return;
     memset(r, 0, sizeof(*r));
-    r->schema_version = (uint16_t)VCS_PACKAGE_BUILD_VERSION;
+    r->schema_version = (uint16_t)VCS_PACKAGE_BUILD_VERSION_MIN;
 }
 
 static bool build_root_is_zero(const uint8_t root[32])
@@ -101,6 +102,20 @@ static bool build_printable(const char *s, size_t max)
             return false;
     }
     return true;
+}
+
+enum vcs_package_build_error vcs_package_build_set_toolchain_capsule(
+    struct vcs_package_build_receipt *r, const uint8_t capsule_root[32])
+{
+    if (!r || !capsule_root)
+        LOG_RETURN(VCS_PACKAGE_BUILD_ERR_NULL, BUILD_LOG,
+                   "null argument binding a toolchain capsule root");
+    if (build_root_is_zero(capsule_root))
+        return VCS_PACKAGE_BUILD_ERR_CAPSULE;
+    memcpy(r->toolchain_capsule_root, capsule_root, 32);
+    r->has_toolchain_capsule = true;
+    r->schema_version = (uint16_t)VCS_PACKAGE_BUILD_VERSION;
+    return VCS_PACKAGE_BUILD_OK;
 }
 
 enum vcs_package_build_error vcs_package_build_add_dep(
@@ -167,8 +182,17 @@ enum vcs_package_build_error vcs_package_build_validate(
     if (!r)
         LOG_RETURN(VCS_PACKAGE_BUILD_ERR_NULL, BUILD_LOG,
                    "null build receipt to validate");
-    if (r->schema_version != VCS_PACKAGE_BUILD_VERSION)
+    if (r->schema_version != VCS_PACKAGE_BUILD_VERSION &&
+        r->schema_version != VCS_PACKAGE_BUILD_VERSION_MIN)
         return VCS_PACKAGE_BUILD_ERR_SCHEMA_VERSION;
+    /* The capsule binding and the schema version move together: a v2 wire
+     * carries the 32-byte capsule root, a v1 wire carries none. */
+    if (r->has_toolchain_capsule !=
+        (r->schema_version == VCS_PACKAGE_BUILD_VERSION))
+        return VCS_PACKAGE_BUILD_ERR_CAPSULE;
+    if (r->has_toolchain_capsule &&
+        build_root_is_zero(r->toolchain_capsule_root))
+        return VCS_PACKAGE_BUILD_ERR_CAPSULE;
     if (build_root_is_zero(r->package_root) ||
         build_root_is_zero(r->recipe_root))
         return VCS_PACKAGE_BUILD_ERR_ROOT;
@@ -229,8 +253,9 @@ static size_t build_wire_size(const struct vcs_package_build_receipt *r)
 {
     size_t n = VCS_PACKAGE_BUILD_WIRE_MAGIC_BYTES + 2u + 96u + 2u +
                r->dep_count * 32u + 2u + strlen(r->compiler_id) + 2u +
-               strlen(r->compiler_version) + 2u + strlen(r->flags) + 1u + 1u +
-               1u + 4u + 2u;
+               strlen(r->compiler_version) + 2u + strlen(r->flags) +
+               (r->has_toolchain_capsule ? 32u : 0u) +
+               1u + 1u + 1u + 4u + 2u;
     for (size_t i = 0; i < r->output_count; i++)
         n += 2u + strlen(r->outputs[i].path) + 32u + 8u;
     return n;
@@ -277,6 +302,10 @@ enum vcs_package_build_error vcs_package_build_serialize(
         o += 2;
         memcpy(buf + o, strs[i], l);
         o += l;
+    }
+    if (r->has_toolchain_capsule) {
+        memcpy(buf + o, r->toolchain_capsule_root, 32);
+        o += 32;
     }
     buf[o++] = r->result_class;
     buf[o++] = r->isolation;
@@ -335,7 +364,8 @@ enum vcs_package_build_error vcs_package_build_parse(
     size_t o = sizeof(build_wire_magic);
     out->schema_version = vcs_rd_u16le(wire + o);
     o += 2;
-    if (out->schema_version != VCS_PACKAGE_BUILD_VERSION) {
+    if (out->schema_version != VCS_PACKAGE_BUILD_VERSION &&
+        out->schema_version != VCS_PACKAGE_BUILD_VERSION_MIN) {
         vcs_package_build_receipt_init(out);
         return VCS_PACKAGE_BUILD_ERR_SCHEMA_VERSION;
     }
@@ -367,6 +397,15 @@ enum vcs_package_build_error vcs_package_build_parse(
         !build_rd_str(wire, wire_len, &o, out->flags, sizeof(out->flags))) {
         vcs_package_build_receipt_init(out);
         return VCS_PACKAGE_BUILD_ERR_WIRE_TRUNCATED;
+    }
+    if (out->schema_version == VCS_PACKAGE_BUILD_VERSION) {
+        if (wire_len - o < 32u) {
+            vcs_package_build_receipt_init(out);
+            return VCS_PACKAGE_BUILD_ERR_WIRE_TRUNCATED;
+        }
+        memcpy(out->toolchain_capsule_root, wire + o, 32);
+        o += 32;
+        out->has_toolchain_capsule = true;
     }
     if (wire_len - o < 1u + 1u + 1u + 4u + 2u) {
         vcs_package_build_receipt_init(out);

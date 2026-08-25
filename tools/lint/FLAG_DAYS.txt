@@ -1,0 +1,100 @@
+# tools/lint/FLAG_DAYS.txt — registry for check_consensus_parity.sh (E13)
+# scan classes HEIGHT and CLOCK. See tools/scripts/check_consensus_parity.sh
+# (header comment) and docs/CONSENSUS_PARITY_DOCTRINE.md for the full story.
+#
+# WHY THIS FILE EXISTS
+# ---------------------
+# An adversarial review planted
+#     if (n_height >= 3400000) halvings--;
+# two lines below a legitimate height gate in core/consensus/src/subsidy.c.
+# It is a bare integer comparison — it matches NONE of check_consensus_parity's
+# original forbidden-token list (no versionbits/BIP9/signaling identifier
+# anywhere near it), so that scan was structurally blind to it, and the bomb
+# was set for a height ~170k blocks in the future so every existing gate
+# (deterministic rebuild, full-chain replay, historical UTXO-root agreement)
+# passed clean until the chain actually reached the planted height.
+#
+# This registry, plus the HEIGHT/CLOCK scan classes in the gate, close that
+# blind spot: every bare integer literal >= 3,100,000 (the last baked
+# mainnet checkpoint — i.e. strictly future relative to anything this
+# codebase has ever validated) that sits next to a relational operator on a
+# line mentioning "height", and every wall-clock read (time(NULL),
+# GetTime(), GetAdjustedTime(), gettimeofday(), clock_gettime()), anywhere
+# in the consensus source surface, must appear here or the gate fails.
+#
+# WHAT THIS DOES NOT DO (read before trusting it)
+# -------------------------------------------------
+# This is visibility, not a lock. It does not stop a hostile publisher who
+# edits this registry alongside the bomb in the same commit — nothing
+# textual can prove a rationale is honest. What it buys: the edit is FORCED
+# to be textual and DIFFABLE. A reviewer (human or a weak node checking only
+# "did this file change, and does the new row's story hold up") gets a
+# small, targeted diff instead of having to silently trust that no bare
+# integer comparison or clock read was ever added to six directories of C.
+# It also does not catch a future-height literal hidden behind a named
+# constant (#define FUTURE_HEIGHT 3400000; if (n_height >= FUTURE_HEIGHT)),
+# a C23 digit-separated literal (3'400'000), a hex-encoded height
+# (0x33E140), or a comparison whose height-carrying variable is not named
+# with "height" anywhere on the same physical line. See
+# docs/CONSENSUS_PARITY_DOCTRINE.md for the complete limitations list.
+#
+# FORMAT
+# ------
+# One record per physical source line, six pipe-delimited fields, no spaces
+# around the pipes:
+#
+#   path:line|CLASS|height|digest|tag|rationale
+#
+#   path:line — the flagged source line's path (relative to repo root) and
+#                1-based line number, exactly as `grep -n` would report it.
+#   CLASS     — HEIGHT (a future-height literal in a height comparison) or
+#                CLOCK (a wall-clock read).
+#   height    — for HEIGHT: the literal integer value found on the line.
+#                for CLOCK: "-" (no height literal is involved).
+#   digest    — sha256 (lowercase hex, 64 chars) of the EXACT current text
+#                of the flagged line, with no trailing newline: the same
+#                encoding `line_digest()` in the gate computes at scan time.
+#                ANY edit to that physical line — the literal, the operator,
+#                unrelated whitespace, a trailing comment, anything —
+#                changes this digest and turns the row stale, which fails
+#                the gate exactly like an unregistered site: re-review the
+#                line and record a fresh digest, deliberately, before this
+#                clears again.
+#   tag       — a short human slug for the site (same character set as the
+#                existing `consensus-parity-ok:<tag>` escape-comment
+#                convention: [A-Za-z][A-Za-z0-9_-]+). The gate does not
+#                require this tag to appear as an inline comment in the
+#                flagged file — several rows below were registered without
+#                touching lib/validation/ or lib/mining/ at all, which is
+#                the whole point of a file-based registry — but a
+#                maintainer who DOES own the flagged file is encouraged to
+#                also leave `// consensus-parity-ok:<same-tag>` on the line
+#                for a reader with no access to this file. The registry
+#                entry is what the gate checks either way.
+#   rationale — one line, no "|" characters, explaining why this specific
+#                site is NOT a zclassicd divergence.
+#
+# MATCHING RULE: a scanned hit clears ONLY on an EXACT (path:line, CLASS,
+# digest) triple match against a row below. A line-number shift from an
+# unrelated refactor above it, or any content edit, is treated as a NEW
+# site requiring a NEW reviewed row — by design, not as a bug to route
+# around. This is stricter than a diff on this file alone: this file can
+# grow OR shrink line-content changes elsewhere without itself changing,
+# so a release record should carry the digest the gate prints
+# (FLAG_DAYS_REGISTRY_DIGEST:) alongside a note of how many rows exist, not
+# just watch this file's own hash.
+#
+# Lines starting with "#" and blank lines are comments, ignored by the gate.
+
+# ── CLASS: HEIGHT ───────────────────────────────────────────────────────
+# (none registered — the current tree has no bare future-height literal in
+# a height comparison anywhere in the scanned surface; this section is
+# empty because nothing needed exempting, not because the class is unused.
+# The selftest below proves the class still fires: see
+# `./tools/scripts/check_consensus_parity.sh --selftest`.)
+
+# ── CLASS: CLOCK ────────────────────────────────────────────────────────
+lib/validation/src/process_block_tip_publish.c:273|CLOCK|-|02ece7a19ccb402cd94b39224ddc01d15d22ae2fdae467a9b767d35f469ea360|tip-log-speed-metric|Progress-log blocks/sec metric printed to stdout only; the value never feeds block acceptance, subsidy, or any consensus decision.
+lib/validation/include/validation/main_logic.h:43|CLOCK|-|ede7d2b265df29cf3d6d7982cfb171e2e8cecfc3d1f28277265c8ede92c4813a|ibd-recency-heuristic|Initial-block-download recency heuristic (is_initial_block_download); gates local relay/rescan behavior only, never block validity, mirroring zclassicd's IsInitialBlockDownload.
+lib/validation/src/check_block.c:173|CLOCK|-|479de01fe521babbc24dae895583f7fa6c47b682f770357d51083b649c6e427d|time-too-new-check|Standard time-too-new header rule (nTime > adjusted-time+2h) — identical DoS-resistance check zclassicd runs; not a divergence.
+lib/mining/src/miner.c:198|CLOCK|-|8fc1015319a322e6a73aa69e2db6e8e2fd819952a9d225c5a8869245125751d6|miner-template-ntime|Sets nTime on a LOCALLY MINED block template (production, not validation); identical to zclassicd's miner and never consulted by another node's acceptance rules.

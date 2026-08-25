@@ -243,9 +243,14 @@ struct block_index *body_fetch_exact_authority_resolve(
     if (bi || *out_state != BODY_FETCH_EXACT_PARENT_ABSENT || height == 0)
         return bi;
 
-    /* LOCK ORDER: durable read outside cs_main.  The read acquires the
-     * recursive progress-store lock; taking it under cs_main would invert the
-     * reducer's progress_store -> cs_main order. */
+    /* Durable read outside cs_main. NOT a lock-order requirement: the tree's
+     * order is cs_main OUTER, progress_store_tx_lock INNER — active_chain_height
+     * and active_chain_tip take the progress lock internally, so every cs_main
+     * holder that calls them already nests that way, and
+     * reconcile_block_index_flags (stage_repair_reducer_frontier.c), the only
+     * site that needs both, matches. This split exists for correctness and
+     * latency instead: no pointer or verdict from the first pass may cross the
+     * lock gap, and the sqlite read stays off cs_main. */
     struct uint256 durable_parent_hash;
     if (!body_fetch_durable_parent_hash_at(db, height - 1,
                                            &durable_parent_hash))

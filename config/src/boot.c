@@ -420,7 +420,7 @@ static bool boot_step_init_observability(void)
      * backstop. */
     blocker_module_init();
 
-    /* If the launcher (deploy/zclassic23-launch.sh) fell back to the
+    /* If the native launcher (`zcl-nodectl launch`) fell back to the
      * last-known-good binary after a boot-failure streak, surface the
      * degraded-but-alive state as a typed blocker as early as the registry
      * is live — so `z23 status` shows it throughout this boot, not
@@ -1013,8 +1013,8 @@ static bool boot_register_maintenance_services(void)
            zcl_service_kernel_register(&g_maintenance_kernel, &db_maintenance_spec) &&
            zcl_service_kernel_register(&g_maintenance_kernel, &binary_staleness_spec) &&
            bundle_exporter_register_service(&g_maintenance_kernel, g_datadir) &&
-           boot_register_network_monitor_service(&g_maintenance_kernel, &g_node_db) &&
-           boot_register_network_crawler_service(&g_maintenance_kernel);
+           boot_register_network_observability_services(
+               &g_maintenance_kernel, &g_node_db);
 }
 
 static void boot_step_start_disk_and_ibd_guards(const char *datadir)
@@ -3106,8 +3106,8 @@ bool app_init(struct app_context *ctx)
                     rr.status.message);
         (void)rr.skip_activate; /* activation controller handles state */
 
-        /* Enter turbo mode if genesis reset happened */
-        if (rr.recovered &&
+        /* Turbo DROPS every index — only worth it before a bulk reload. */
+        if (rr.bulk_reload_pending &&
             (vr.action == BOOT_RECOVER_REIMPORT ||
              vr.action == BOOT_RECOVER_WIPE_WAIT) &&
             g_node_db.open) {
@@ -4251,7 +4251,7 @@ sapling_tree_boot_check_done:
             sysinit_run_stage(BOOT_STAGE_SERVICES_RUNNING, ctx);
         if (!sr.ok) return false;
         boot_stage_advance_to(BOOT_STAGE_READY);
-        /* Tier-2 fast restart: if this boot SKIPPED quick_check, run one in the
+        /* If this boot skipped or deferred quick_check, run one in the
          * background now (failure raises OPERATOR_NEEDED — never silent). */
         boot_fast_restart_start_bg_quick_check(g_datadir);
     }

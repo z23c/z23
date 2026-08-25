@@ -227,6 +227,13 @@ For a push checkpoint:
 make pre-push-ci
 ```
 
+It gates whatever your branch would actually push. When the working tree
+has uncommitted edits it uses those; when the tree is clean — the normal
+state at push time — it falls back to the commits between your upstream
+(or `origin/main`) and `HEAD`. The log says which source it used and how
+many files it found, so `count=0` is legible as "nothing to push" rather
+than passing silently over untested commits.
+
 Full `make lint` is the umbrella (every gate, including whole-node tool links).
 Run it only when an impact rule names a gate that `lint-fast` excludes, or at
 a sub-wave / release boundary. An uncached full suite is:

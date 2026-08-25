@@ -59,6 +59,17 @@ static const char *const g_domain_names[REDUCER_PROFILE_DOMAIN_COUNT] = {
     [REDUCER_PROFILE_PROOF_VALIDATE]  = "proof_validate",
 };
 
+int reducer_stage_profile_domain_for(const char *stage_name)
+{
+    if (!stage_name || !stage_name[0])
+        return -1;
+    for (int d = 0; d < REDUCER_PROFILE_DOMAIN_COUNT; d++) {
+        if (g_domain_names[d] && strcmp(stage_name, g_domain_names[d]) == 0)
+            return d;
+    }
+    return -1;
+}
+
 static const char *const g_field_names[RPF_FIELD_COUNT] = {
     [RPF_BLOCKS] = "blocks",
     [RPF_TOTAL_US] = "total_us",

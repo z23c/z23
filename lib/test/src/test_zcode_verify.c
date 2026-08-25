@@ -1106,6 +1106,89 @@ static bool zv_store_receipt(const char *receipts_dir,
     return ok;
 }
 
+static int t_build_receipt_v2(void)
+{
+    int failures = 0;
+    uint8_t package_root[32], recipe_root[32], capsule_root[32];
+    zv_pattern_root(0x50, package_root);
+    zv_pattern_root(0x51, recipe_root);
+    zv_pattern_root(0x52, capsule_root);
+
+    /* A receipt init defaults to schema v1 with no capsule; binding a
+     * capsule root bumps it to v2. */
+    struct vcs_package_build_receipt r;
+    ZV_CHECK("receipt v2: fixture builds",
+             zv_receipt(&r, package_root, recipe_root, "14.2.0", 0x40));
+    ZV_CHECK("receipt v2: init is v1, no capsule",
+             r.schema_version == VCS_PACKAGE_BUILD_VERSION_MIN &&
+             !r.has_toolchain_capsule);
+    ZV_CHECK("receipt v2: zero capsule root rejected",
+             vcs_package_build_set_toolchain_capsule(
+                 &r, (const uint8_t[32]){ 0 }) == VCS_PACKAGE_BUILD_ERR_CAPSULE &&
+             !r.has_toolchain_capsule);
+    ZV_CHECK("receipt v2: capsule bind bumps schema",
+             vcs_package_build_set_toolchain_capsule(&r, capsule_root) ==
+                 VCS_PACKAGE_BUILD_OK &&
+             r.schema_version == VCS_PACKAGE_BUILD_VERSION &&
+             r.has_toolchain_capsule);
+
+    /* Round-trip: v2 wire preserves the capsule and is exactly 32 bytes
+     * longer than the same receipt's v1 wire. */
+    uint8_t *wire2 = NULL;
+    size_t wire2_len = 0;
+    ZV_CHECK("receipt v2: serializes",
+             vcs_package_build_serialize(&r, &wire2, &wire2_len) ==
+                 VCS_PACKAGE_BUILD_OK);
+    struct vcs_package_build_receipt back;
+    ZV_CHECK("receipt v2: parse round-trips capsule",
+             vcs_package_build_parse(wire2, wire2_len, &back) ==
+                 VCS_PACKAGE_BUILD_OK &&
+             back.schema_version == VCS_PACKAGE_BUILD_VERSION &&
+             back.has_toolchain_capsule &&
+             memcmp(back.toolchain_capsule_root, capsule_root, 32) == 0 &&
+             back.output_count == r.output_count);
+    struct vcs_package_build_receipt v1;
+    ZV_CHECK("receipt v2: v1 twin builds",
+             zv_receipt(&v1, package_root, recipe_root, "14.2.0", 0x40));
+    uint8_t *wire1 = NULL;
+    size_t wire1_len = 0;
+    ZV_CHECK("receipt v2: v1 twin serializes",
+             vcs_package_build_serialize(&v1, &wire1, &wire1_len) ==
+                 VCS_PACKAGE_BUILD_OK);
+    ZV_CHECK("receipt v2: v2 wire = v1 wire + 32 bytes",
+             wire2_len == wire1_len + 32u);
+
+    /* v1 wires still parse (old evidence is never orphaned), and a v1
+     * wire with its version byte flipped to 2 is truncated, never
+     * misparsed. */
+    struct vcs_package_build_receipt old;
+    ZV_CHECK("receipt v2: v1 wire still parses",
+             vcs_package_build_parse(wire1, wire1_len, &old) ==
+                 VCS_PACKAGE_BUILD_OK &&
+             old.schema_version == VCS_PACKAGE_BUILD_VERSION_MIN &&
+             !old.has_toolchain_capsule);
+    wire1[8] = (uint8_t)VCS_PACKAGE_BUILD_VERSION;
+    wire1[9] = 0;
+    ZV_CHECK("receipt v2: relabeled v1 wire fails closed",
+             vcs_package_build_parse(wire1, wire1_len, &old) !=
+                 VCS_PACKAGE_BUILD_OK);
+    free(wire1);
+    free(wire2);
+
+    /* Byte-identity ignores the toolchain on purpose: the v1 twin and the
+     * v2 capsule receipt commit the same outputs, so they MATCH — and
+     * their receipt ids differ, so they count as two build events. */
+    struct vcs_reproduce_verdict v;
+    vcs_package_reproduce_compare(&v1, &r, &v);
+    uint8_t id1[32], id2[32];
+    bool ids = vcs_package_build_id(&v1, id1) == VCS_PACKAGE_BUILD_OK &&
+               vcs_package_build_id(&r, id2) == VCS_PACKAGE_BUILD_OK;
+    ZV_CHECK("receipt v2: cross-schema reproduction MATCHes, ids differ",
+             v.reproduced && v.rule == VCS_REPRODUCE_MATCH && ids &&
+             memcmp(id1, id2, 32) != 0);
+    return failures;
+}
+
 static int t_reproduce(void)
 {
     int failures = 0;
@@ -1850,6 +1933,7 @@ int test_zcode_verify(void)
     failures += t_signature();
     failures += t_policy();
     failures += t_quorum();
+    failures += t_build_receipt_v2();
     failures += t_reproduce();
     failures += t_command();
     failures += t_verifier_e2e();

@@ -2,10 +2,14 @@ BOX=node4
 DRILL=stranger_onion_self_dial
 ONION_ADDRESS=v6yb3oukjnri3oa7jyejfy7mgzttfz2yvtiedbb4gq2oasnawsbbq7yd.onion
 P2P_PORT=39040
-SELF_DIAL=fail
-SELF_DIAL_DETAIL=self_dial_version_verack_incomplete:state=version_sent
-ATTEMPTS=2
-TIMEOUT_S=180,300
-OBSERVED_AT=2026-08-24T02:12:53Z
-GAPS=version_sent_no_verack
-DETAIL=isolated_throwaway_datadir_dialed_published_onion; VERSION left state=version_sent; VERACK not observed. Second attempt used 300s. Probe did not use the long-running process as its own self-probe.
+SELF_DIAL=pass
+SELF_DIAL_DETAIL=self_dial_version_verack:protocol=170011:state=syncing_headers:seconds=6:circuit_ready_ms=4313
+ATTEMPTS=1
+TIMEOUT_S=240
+OBSERVED_AT=2026-08-24T16:34:47Z
+GAPS=none
+DETAIL=isolated_throwaway_datadir_dialed_published_onion; handshake complete (outbound); VERSION/VERACK observed; peer state=syncing_headers proto=170011 height=3227621 first_rx=176
+HEAD_SHA=ce9bec71f1a60c33b040d17c563823c8222b8b31
+UNIT_PID=1257023
+UNIT_STATE=active
+READY=1

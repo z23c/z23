@@ -284,6 +284,92 @@ struct zcl_result pkgl_load_declared_deps(const struct pkgl_ctx *ctx,
 
 /* ── survey + verify ────────────────────────────────────────────────── */
 
+/* Reassemble one package's full source tree from the CAS. Every chunk is
+ * re-verified against the hash committed at its exact manifest coordinate
+ * before its bytes land on disk (the same gate pkgl_read_member applies to
+ * the declaration file), and the manifest must re-hash to the requested
+ * root before anything is written — so a tampered store object can never
+ * reach the tree a rebuild compiles. Files land read-only (0444), matching
+ * the worker's own materialization discipline. */
+struct zcl_result pkgl_materialize_package(const struct pkgl_ctx *ctx,
+                                           const uint8_t root[32],
+                                           const char *destination)
+{
+    if (!ctx || !root || !destination || !destination[0])
+        return ZCL_ERR(-1, "null argument materializing a package");
+    struct vcs_package_manifest manifest;
+    ZCL_CHECK(pkgl_load_manifest(ctx, root, &manifest));
+    uint8_t derived[32];
+    if (!vcs_package_manifest_root(&manifest, derived) ||
+        memcmp(derived, root, 32) != 0) {
+        vcs_package_manifest_free(&manifest);
+        return ZCL_ERR(-1, "the stored manifest does not re-hash to the "
+                           "requested package root");
+    }
+    struct zcl_result res = pkgl_mkdir_p(destination);
+    for (size_t i = 0; res.ok && i < manifest.count; i++) {
+        const struct vcs_package_file *f = &manifest.files[i];
+        char dest[PKGL_PATH_MAX];
+        int n = snprintf(dest, sizeof(dest), "%s/%s", destination, f->path);
+        if (n <= 0 || (size_t)n >= sizeof(dest)) {
+            res = ZCL_ERR(-1, "materialized path too long: %s", f->path);
+            break;
+        }
+        char parent[PKGL_PATH_MAX];
+        (void)snprintf(parent, sizeof(parent), "%s", dest);
+        char *slash = strrchr(parent, '/');
+        if (slash) {
+            *slash = '\0';
+            res = pkgl_mkdir_p(parent);
+        }
+        int fd = -1;
+        if (res.ok) {
+            fd = open(dest, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0444);
+            if (fd < 0)
+                res = ZCL_ERR(-1, "open %s: %s", dest, strerror(errno));
+        }
+        uint64_t wrote = 0;
+        for (uint32_t c = 0; res.ok && c < f->chunk_count; c++) {
+            char hex[65];
+            zcl_hex_encode(f->chunk_hashes + (size_t)c * 32u, 32, hex);
+            char rel[96];
+            (void)snprintf(rel, sizeof(rel), "cas/sha3/%.2s/%s", hex, hex);
+            char path[PKGL_PATH_MAX];
+            res = pkgl_join(ctx, rel, path, sizeof(path));
+            uint8_t *chunk = NULL;
+            size_t chunk_len = 0;
+            if (res.ok)
+                res = pkgl_read_file(path, VCS_PACKAGE_CHUNK_BYTES, &chunk,
+                                     &chunk_len);
+            if (res.ok &&
+                !vcs_package_verify_chunk(f, c, chunk, chunk_len))
+                res = ZCL_ERR(-1, "chunk %s#%u does not match its committed "
+                                  "hash", f->path, c);
+            size_t off = 0;
+            while (res.ok && off < chunk_len) {
+                ssize_t w = write(fd, chunk + off, chunk_len - off);
+                if (w < 0) {
+                    if (errno == EINTR)
+                        continue;
+                    res = ZCL_ERR(-1, "write %s: %s", dest, strerror(errno));
+                    break;
+                }
+                off += (size_t)w;
+            }
+            wrote += off;
+            free(chunk);
+        }
+        if (fd >= 0 && close(fd) != 0 && res.ok)
+            res = ZCL_ERR(-1, "close %s: %s", dest, strerror(errno));
+        if (res.ok && wrote != f->size)
+            res = ZCL_ERR(-1, "%s materialized to %llu of %llu committed "
+                              "bytes", f->path, (unsigned long long)wrote,
+                          (unsigned long long)f->size);
+    }
+    vcs_package_manifest_free(&manifest);
+    return res;
+}
+
 struct zcl_result pkgl_survey_package(const struct pkgl_ctx *ctx,
                                       const uint8_t root[32],
                                       bool *complete_out,

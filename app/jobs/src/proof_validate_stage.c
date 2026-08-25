@@ -245,7 +245,6 @@ static void add_failure_counter(const char *type, void *user)
 static job_result_t step_validate(struct stage_step_ctx *c)
 {
     atomic_store(&g_last_step_unix, platform_time_wall_unix());
-    const int64_t t_step = platform_time_monotonic_us();
     /* ZCL_PV_TRACE=1 narrates every reason this stage declines to advance.
      * proof_validate has several early returns that are deliberately silent
      * (they are normal "not yet" waits in a live sync), but on an OFFLINE
@@ -368,8 +367,6 @@ static job_result_t step_validate(struct stage_step_ctx *c)
         pv_unresolved_clear();
         atomic_store(&g_last_advance_height, (int64_t)next_h);
         c->cursor_out = c->cursor_in + 1;
-        pv_profile_add(RPF_BLOCKS, 1);
-        pv_profile_us(RPF_TOTAL_US, t_step);
         return JOB_ADVANCED;
     }
     struct proof_verify_summary summary;
@@ -377,8 +374,9 @@ static job_result_t step_validate(struct stage_step_ctx *c)
     if (!skip_crypto &&
         pv_lookahead_take(next_h, bi->phashBlock, g_tx_verifier,
                           g_tx_verifier_user, &cached)) {
-        /* OFFLINE-MINT LOOKAHEAD HIT (jobs/pv_lookahead.h; the pool is started
-         * only by the -mint-anchor drive): a worker already verified this exact
+        /* LOOKAHEAD HIT (jobs/pv_lookahead.h; the pool is started by the
+         * -mint-anchor drive and, under -pv-lookahead, by the live/replay
+         * boot path): a worker already verified this exact
          * (height, block_hash) with the same effective verifier, so the verdict
          * IS what the serial sweep below would compute (proof verification is a
          * pure function of block bytes + verifying keys). internal_error is
@@ -550,8 +548,6 @@ static job_result_t step_validate(struct stage_step_ctx *c)
     pv_unresolved_clear();
     atomic_store(&g_last_advance_height, (int64_t)next_h);
     c->cursor_out = c->cursor_in + 1;
-    pv_profile_add(RPF_BLOCKS, 1);
-    pv_profile_us(RPF_TOTAL_US, t_step);
     return JOB_ADVANCED;
 }
 bool proof_validate_stage_init(struct main_state *ms)

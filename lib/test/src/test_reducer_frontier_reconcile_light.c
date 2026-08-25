@@ -704,6 +704,64 @@ static void *active_chain_lock_probe(void *arg)
     return NULL;
 }
 
+/* ── Lock-order probe: cs_main OUTER, progress_store_tx_lock INNER ─────────
+ * active_chain_height() / active_chain_tip() acquire progress_store_tx_lock
+ * internally, and roughly two dozen call sites reach them while holding
+ * main_state.cs_main (sync_monitor.c, sticky_escalator_trigger.c,
+ * body_backfill_service.c, gap_fill_service.c, accept_to_mempool.c, several
+ * self-heal Conditions). reconcile_block_index_flags is the ONLY place in the
+ * tree that needs both locks, so if it takes progress_store_tx_lock first it
+ * closes an ABBA cycle and the whole progress store is lost for the lifetime
+ * of the process — which is what wedges a boot inside
+ * script_validate_stage_init.
+ *
+ * The probe holds cs_main from a second thread and runs the REAL reconcile in
+ * a third. Whatever else it does, the reconcile must reach its cs_main wait
+ * WITHOUT owning the global progress-store transaction lock. Under the
+ * inverted order the trylock below can never succeed. */
+struct rfrl_order_probe {
+    sqlite3 *db;
+    struct main_state *ms;
+    bool finished;
+    bool ok;
+};
+
+static pthread_mutex_t g_order_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_order_cv = PTHREAD_COND_INITIALIZER;
+static bool g_order_csmain_held;
+static bool g_order_release;
+
+static void rfrl_order_sleep_ms(long ms)
+{
+    struct timespec ts = { .tv_sec = ms / 1000,
+                           .tv_nsec = (ms % 1000) * 1000L * 1000L };
+    nanosleep(&ts, NULL);
+}
+
+static void *rfrl_csmain_holder(void *arg)
+{
+    struct main_state *ms = arg;
+    zcl_mutex_lock(&ms->cs_main);
+    pthread_mutex_lock(&g_order_mu);
+    g_order_csmain_held = true;
+    pthread_cond_broadcast(&g_order_cv);
+    while (!g_order_release)
+        pthread_cond_wait(&g_order_cv, &g_order_mu);
+    pthread_mutex_unlock(&g_order_mu);
+    zcl_mutex_unlock(&ms->cs_main);
+    return NULL;
+}
+
+static void *rfrl_reconcile_worker(void *arg)
+{
+    struct rfrl_order_probe *p = arg;
+    struct stage_reducer_frontier_reconcile_result rr;
+    memset(&rr, 0, sizeof(rr));
+    p->ok = stage_reducer_frontier_reconcile_light(p->db, p->ms, &rr);
+    __atomic_store_n(&p->finished, true, __ATOMIC_RELEASE);
+    return NULL;
+}
+
 static int cursor_value(sqlite3 *db, const char *name)
 {
     sqlite3_stmt *st = NULL;
@@ -2320,6 +2378,83 @@ int test_reducer_frontier_reconcile_light(void)
         RFRL_CHECK("conflation: re-bind + coin refusal -> OK (re-bind wins)",
                    reducer_frontier_reconcile_light_test_remedy_outcome(&rr) ==
                        COND_REMEDY_OK);
+    }
+
+    /* ── ABBA regression: the reconcile must not own progress_store_tx_lock
+     * while it waits for cs_main. See the rfrl_order_probe comment above. */
+    {
+        struct rfrl_fixture fx;
+        RFRL_CHECK("lock-order: setup fixture",
+                   setup_fixture(&fx, "lock_order_csmain"));
+        sqlite3 *db = progress_store_db();
+
+        pthread_mutex_lock(&g_order_mu);
+        g_order_csmain_held = false;
+        g_order_release = false;
+        pthread_mutex_unlock(&g_order_mu);
+
+        struct rfrl_order_probe probe = { .db = db, .ms = &fx.ms,
+                                          .finished = false, .ok = false };
+        pthread_t holder;
+        bool holder_started =
+            pthread_create(&holder, NULL, rfrl_csmain_holder, &fx.ms) == 0;
+        RFRL_CHECK("lock-order: cs_main holder starts", holder_started);
+
+        if (holder_started) {
+            pthread_mutex_lock(&g_order_mu);
+            while (!g_order_csmain_held)
+                pthread_cond_wait(&g_order_cv, &g_order_mu);
+            pthread_mutex_unlock(&g_order_mu);
+
+            pthread_t worker;
+            bool worker_started =
+                pthread_create(&worker, NULL, rfrl_reconcile_worker,
+                               &probe) == 0;
+            RFRL_CHECK("lock-order: reconcile worker starts", worker_started);
+
+            bool tx_free = false;
+            bool parked = false;
+            if (worker_started) {
+                /* Settle: long enough for the worker to reach whichever lock
+                 * it blocks on. It cannot complete — cs_main is held. */
+                rfrl_order_sleep_ms(300);
+                parked = !__atomic_load_n(&probe.finished, __ATOMIC_ACQUIRE);
+
+                /* Decisive poll. The correct order parks on cs_main owning
+                 * nothing, so the progress lock is free and STAYS free. The
+                 * inverted order parks holding it, so this never succeeds.
+                 * (Early polls can legitimately miss: the reconcile takes and
+                 * releases the progress lock a few times on its way in.) */
+                for (int i = 0; i < 250 && !tx_free; i++) {
+                    if (progress_store_tx_trylock()) {
+                        progress_store_tx_unlock();
+                        tx_free = true;
+                        break;
+                    }
+                    rfrl_order_sleep_ms(20);
+                }
+            }
+
+            RFRL_CHECK("lock-order: reconcile waits on cs_main (probe valid)",
+                       parked);
+            RFRL_CHECK("lock-order: progress lock NOT held while waiting for "
+                       "cs_main",
+                       tx_free);
+
+            pthread_mutex_lock(&g_order_mu);
+            g_order_release = true;
+            pthread_cond_broadcast(&g_order_cv);
+            pthread_mutex_unlock(&g_order_mu);
+
+            if (worker_started) {
+                pthread_join(worker, NULL);
+                RFRL_CHECK("lock-order: reconcile completes after release",
+                           probe.ok);
+            }
+            pthread_join(holder, NULL);
+        }
+
+        teardown_fixture(&fx);
     }
 
     printf("reducer_frontier_reconcile_light: %d failures\n", failures);

@@ -80,12 +80,13 @@ void proof_validate_stage_set_reader(proof_validate_reader_fn fn, void *user);
 void proof_validate_stage_set_tx_verifier(proof_validate_tx_verify_fn fn,
                                           void *user);
 
-/* OFFLINE-MINT lookahead (jobs/pv_lookahead.h): start/stop the cross-height
- * proof pre-verification pool bound to this stage's exact (main_state,
- * datadir, reader, verifier) tuple. SCOPE GATE: the only production caller of
- * the start is config/src/boot_mint_anchor.c — the live reducer never starts
- * the pool, so its verify path is unchanged (a not-started pool is a single
- * atomic-load miss). Stop is idempotent and also runs in stage shutdown. */
+/* Cross-height proof pre-verification pool (jobs/pv_lookahead.h): start/stop
+ * the pool bound to this stage's exact (main_state, datadir, reader, verifier)
+ * tuple. Production callers of the start are config/src/boot_mint_anchor.c
+ * (the offline -mint-anchor fold) and config/src/boot_pv_lookahead.c (the
+ * live/replay path, only under -pv-lookahead, default off). A not-started pool
+ * leaves the verify path unchanged: take is a single atomic-load miss and the
+ * step verifies inline. Stop is idempotent and also runs in stage shutdown. */
 bool proof_validate_lookahead_start(void);
 void proof_validate_lookahead_stop(void);
 

@@ -204,3 +204,19 @@
                  "puzzle_required/passed/failed_total",
                  "lib/net/src/onion_ratelimit.c",
                  "lib/test/src/test_net.c"),
+    DIAG_CHAIN("mesh_observation", mesh_observation_dump_state_json,
+               "THIS node's own observation record: tip + chainwork + a "
+               "5-rung anchor ladder any reader recomputes, one edge row per "
+               "peer with {outcome, stage, elapsed_us, deadline_us}, the "
+               "onion promise ladder, and self-declared capability. Emits no "
+               "verdict.",
+               "app/services/src/mesh_observation_sample.c",
+               "lib/test/src/test_mesh_observation.c"),
+    DIAG_CHAIN("mesh_compose", mesh_observation_compose_dump_state_json,
+               "what THIS reader derives from the records it collected: "
+               "coverage first (offered/parsed/fresh/silent/not_probed), "
+               "distinct identities by service key, then agree/disagree/"
+               "no_common_height recomputed against our OWN chain. Zero "
+               "fresh records reports UNVERIFIED, never healthy.",
+               "app/services/src/mesh_observation_compose.c",
+               "lib/test/src/test_mesh_observation_compose.c"),

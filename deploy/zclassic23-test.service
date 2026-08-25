@@ -26,7 +26,7 @@ TimeoutStartSec=900
 # Binary A/B launcher — see deploy/zclassic23.service for the rationale. Slots
 # live under this instance's own datadir for isolation from the main unit.
 Environment="ZCL_BINARY_SLOTS_DIR=%h/.zclassic-c23-test/binary-slots"
-ExecStart=%h/zclassic23/deploy/zclassic23-launch.sh %h/zclassic23/build/bin/zclassic23 \
+ExecStart=%h/zclassic23/build/bin/zcl-nodectl launch %h/zclassic23/build/bin/z23 \
     -datadir=%h/.zclassic-c23-test \
     -port=8035 \
     -rpcport=18234 \

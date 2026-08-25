@@ -493,6 +493,19 @@ bool block_piece_manifest_build_active_chain(
                                  int32_t start_height, int32_t end_height,
                                  struct block_piece_manifest *out);
 
+/* Decide whether a cached block manifest must be rebuilt at tip. Besides the
+ * normal end-height cadence, this detects a sparse-tail cache whose immediate
+ * predecessor has since gained trusted body data. Without that second edge, a
+ * node that published only its two newest bodies before checkpoint-delta
+ * catch-up could remain "fresh" forever and hide the newly serveable range. */
+bool block_piece_manifest_should_refresh(
+                                 const struct active_chain *chain,
+                                 bool has_cached,
+                                 const struct block_piece_manifest *cached,
+                                 int32_t built_at_height,
+                                 int32_t tip_height,
+                                 int32_t refresh_interval);
+
 /* Build a block piece manifest from SQLite block metadata.
  * Legacy fallback for tests or boot paths that do not have an active chain.
  * Allocates piece_hashes; caller must call block_piece_manifest_free(). */

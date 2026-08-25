@@ -314,7 +314,7 @@ int test_boot_flight_recorder(void)
      * via finish()) reads it back at the NEXT boot and, for a self-respawn
      * reason, increments the binary A/B launcher's boot-failure streak file
      * (services/binary_ab_fallback.h) since a self-respawn's in-process
-     * execv bypasses deploy/zclassic23-launch.sh entirely. */
+     * execv bypasses the external native launcher entirely. */
     {
         /* Clear history again: boot_loop_guard_check() below (called
          * directly, not through finish()) must not ALSO trip on the prior

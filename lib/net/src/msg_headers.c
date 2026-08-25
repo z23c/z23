@@ -342,8 +342,10 @@ static _Atomic uint64_t g_push_getheaders_span_alloc_fail = 0;
 static _Atomic uint64_t g_getheaders_deferred_snapshot_serving = 0;
 static _Atomic bool g_getheaders_deferred_streak = false;
 
-/* Per-peer header advancement tracking (simplified: tracks last peer). */
-static _Atomic int g_last_header_tip_height = 0;
+/* Height of the last header in the most recently accepted batch, over all
+ * peers.  This is neither per-peer nor the active chain tip; it exists only
+ * to feed the coarse SLOW ADVANCE diagnostic below. */
+static _Atomic int g_last_batch_end_height = 0;
 
 static size_t collect_active_tip_successors(struct main_state *ms,
                                             struct uint256 *hashes,
@@ -1723,22 +1725,6 @@ bool process_headers(struct msg_processor *mp, struct p2p_node *node,
      * If some headers were new, use pindex_last — the peer will continue
      * from right after it. */
     if (header_plan.batch.should_request_more_headers) {
-        /* Track header advancement rate.  If a full batch of headers
-         * didn't advance the tip by at least 100, something may be
-         * wrong (e.g., heights still scrambled, bouncing locators). */
-        if (pindex_last && accepted >= 100) {
-            int prev_tip = atomic_load(&g_last_header_tip_height);
-            int cur_tip = pindex_last->nHeight;
-            if (prev_tip > 0 && cur_tip - prev_tip < 100 &&
-                cur_tip > 0 && prev_tip > 0) {
-                LOG_WARN("headers",
-                    "SLOW ADVANCE: peer %s sent %zu headers "
-                    "but tip only moved from %d to %d",
-                    node->addr_name, accepted, prev_tip, cur_tip);
-            }
-            atomic_store(&g_last_header_tip_height, cur_tip);
-        }
-
         /* Band fill: a below-tip batch that extends the trust-rooted
          * frontier toward an installed-above-frontier island is progress
          * — it must suppress BOTH the restart-from-tip and the
@@ -1750,6 +1736,28 @@ bool process_headers(struct msg_processor *mp, struct p2p_node *node,
             ? syncsvc_header_band_continue(&mp->main_state->chain_active,
                                            pindex_last)
             : false;
+
+        /* Track header advancement rate.  If a full batch of headers
+         * didn't carry the frontier forward by at least 100, something
+         * may be wrong (e.g., heights still scrambled, bouncing
+         * locators).  Two things keep this coarse: the comparison is
+         * against the previous batch from ANY peer, and band-fill
+         * batches land below the frontier by design, so they are
+         * excluded rather than reported as a regression. */
+        if (pindex_last && accepted >= 100 && !band_fill) {
+            int prev_end = atomic_load(&g_last_batch_end_height);
+            int cur_end = pindex_last->nHeight;
+            if (prev_end > 0 && cur_end > 0 &&
+                cur_end - prev_end < 100) {
+                LOG_WARN("headers",
+                    "SLOW ADVANCE: peer %s sent %zu headers but the "
+                    "batch ended at h=%d, %d from the previous batch "
+                    "end h=%d",
+                    node->addr_name, accepted, cur_end,
+                    cur_end - prev_end, prev_end);
+            }
+            atomic_store(&g_last_batch_end_height, cur_end);
+        }
 
         if (syncsvc_should_restart_headers_from_tip(
                 accepted, pindex_last, active_chain_height(

@@ -54,11 +54,11 @@ int t_canonical_deploy_proof_binding_contract(void)
             : NULL;
         const char *launcher_guard = service_preserve
             ? strstr(service_preserve,
-                     "service_path\" = \"$(CURDIR)/deploy/zclassic23-launch.sh")
+                     "service_path\" = \"$(CURDIR)/build/bin/zcl-nodectl")
             : NULL;
         const char *binary_target = launcher_guard
             ? strstr(launcher_guard,
-                     "n == 2")
+                     "n == 3")
             : NULL;
         const char *candidate_install = record_verify
             ? strstr(record_verify,
@@ -82,7 +82,7 @@ int t_canonical_deploy_proof_binding_contract(void)
         ASSERT(launcher_guard != NULL && launcher_guard < seed_target);
         ASSERT(binary_target != NULL && binary_target < seed_target);
         ASSERT(strstr(binary_target,
-                      "[ \"$$SERVICE_BIN\" = \"$(CURDIR)/build/bin/zclassic23\" ]")
+                      "[ \"$$SERVICE_BIN\" = \"$(CURDIR)/build/bin/z23\" ]")
                != NULL);
         ASSERT(candidate_install != NULL && candidate_install < seed_target);
         ASSERT(restart != NULL && restart < seed_target);
@@ -116,6 +116,15 @@ int t_canonical_deploy_proof_binding_contract(void)
         ASSERT(strstr(candidate_install,
                       "[ \"$$installed_sha256\" = \"$$artifact_sha256\" ]")
                != NULL);
+
+        char *unit_buf = NULL;
+        ASSERT(repo_path(path, sizeof(path), "deploy/zclassic23.service") == 0);
+        ASSERT(read_entire_file(path, &unit_buf) == 0);
+        ASSERT(strstr(unit_buf,
+                      "ExecStart=%h/zclassic23/build/bin/zcl-nodectl launch "
+                      "%h/zclassic23/build/bin/z23") != NULL);
+        ASSERT(strstr(unit_buf, "zclassic23-launch.sh") == NULL);
+        free(unit_buf);
 
         ASSERT(repo_path(path, sizeof(path), "tools/deploy_verify.sh") == 0);
         ASSERT(read_entire_file(path, &verify_buf) == 0);
@@ -1064,6 +1073,14 @@ int t_agent_fast_ci_contract(void)
         ASSERT(strstr(buf, "git rev-parse --local-env-vars") != NULL);
         ASSERT(strstr(buf, "unset \"$name\"") != NULL);
         ASSERT(strstr(buf, "make install-quality-linger") != NULL);
+        /* Behavioural, not textual: the pre-push changed-set resolver builds a
+         * throwaway repository and asserts that a CLEAN worktree whose HEAD is
+         * ahead of its upstream still yields the committed file list. Every
+         * other assertion in this function greps a script; this one runs the
+         * property, because the defect it guards was invisible to grep — the
+         * gate said PASS while executing zero test groups. */
+        ASSERT(run_gate_script_arg("tools/agent_fast_ci.sh", NULL,
+                                   "changed-set-selftest") == 0);
         ASSERT(run_gate_script("tools/dev/build-epoch-selftest.sh", NULL)
                == 0);
         PASS();

@@ -1162,7 +1162,8 @@ void zcl_native_handle_zcode_package_checkout(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 
-/* zcode package add plan / add commit / rollback — the install lifecycle.
+/* zcode package add plan / add commit / rollback / reproduce — the install
+ * lifecycle.
  * plan resolves a name-or-root, locks the dependency DAG to immutable
  * package roots and reports what each step's state actually is; commit
  * re-derives that lock, refuses a stale or expired plan, then verifies,
@@ -1177,6 +1178,13 @@ void zcl_native_handle_zcode_package_add_commit(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 void zcl_native_handle_zcode_package_rollback(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+/* reproduce re-runs the confined build of one installed package under the
+ * standard profile and files the second, distinct build receipt when every
+ * committed output is byte-identical (the reproduction fact
+ * zcode.package.verify reports). */
+void zcl_native_handle_zcode_package_reproduce(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 
@@ -1196,6 +1204,11 @@ void zcl_native_handle_ops_state(
  * complete; per-entry metadata is paged by `limit`/`page`, or fetched
  * whole for one `subsystem`. Bound by config/src/command_catalog.c. */
 void zcl_native_handle_ops_statecatalog(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+
+/* ops.slo — node-free, bounded fold of the external uptime probe ledger. */
+void zcl_native_handle_ops_slo(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 

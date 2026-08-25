@@ -12,6 +12,7 @@
 #include "models/database.h"
 #include "net/connman.h"
 #include "services/network_monitor.h"
+#include "services/mesh_observation.h"
 #include "services/network_crawler.h"
 #include "services/sync_monitor.h"
 #include "util/result.h"
@@ -98,4 +99,67 @@ bool boot_register_network_crawler_service(struct zcl_service_kernel *k)
         .flags = ZCL_SERVICE_OPTIONAL,
     };
     return zcl_service_kernel_register(k, &spec);
+}
+
+/* ── mesh observation surface (services/mesh_observation.h) ──────────────
+ *
+ * The node's own OBSERVATION record plus the reader-side collector. It
+ * publishes what this box saw and recomputes what other boxes published; it
+ * pronounces nothing, gates nothing, and feeds no watchdog. OPTIONAL like
+ * its neighbours: a node with the surface off still validates and still
+ * follows the most-work valid-PoW chain, it just cannot corroborate. */
+
+static bool boot_mesh_observation_service_start(void *ctx)
+{
+    (void)ctx;
+    struct zcl_result sampler = mesh_observation_register_sampler();
+    struct zcl_result collector = mesh_observation_collect_register();
+    if (!sampler.ok)
+        fprintf(stderr, "[boot] %s:%d mesh_observation sampler: code=%d %s\n",
+                sampler.source_file, sampler.source_line, sampler.code,
+                sampler.message);
+    if (!collector.ok)
+        fprintf(stderr, "[boot] %s:%d mesh_observation collector: code=%d %s\n",
+                collector.source_file, collector.source_line, collector.code,
+                collector.message);
+    printf("Mesh observation surface (sampler=%s collector=%s)\n",
+           sampler.ok ? "running" : "declined",
+           collector.ok ? "running" : "declined");
+    /* A declined worker is NAMED above, never silently treated as running,
+     * and it is not a boot failure: this surface reports, so its absence
+     * costs coverage and nothing else. */
+    return true;
+}
+
+static void boot_mesh_observation_service_stop(void *ctx)
+{
+    (void)ctx;
+    mesh_observation_collect_unregister();
+    mesh_observation_unregister_sampler();
+}
+
+bool boot_register_mesh_observation_service(struct zcl_service_kernel *k)
+{
+    const struct zcl_service_spec spec = {
+        .name = "mesh_observation",
+        .start = boot_mesh_observation_service_start,
+        .stop = boot_mesh_observation_service_stop,
+        .ctx = NULL,
+        .flags = ZCL_SERVICE_OPTIONAL,
+    };
+    return zcl_service_kernel_register(k, &spec);
+}
+
+/* ── one registrar for the network-observability family ──────────────────
+ *
+ * The three services above are the file's whole subject; registering them
+ * one call at a time from boot.c only spread that fact across the boot
+ * table. This is the seam the file was extracted along, so boot.c names the
+ * family and this file owns the members. */
+bool boot_register_network_observability_services(struct zcl_service_kernel *k,
+                                                  struct node_db *db)
+{
+    return boot_register_network_monitor_service(k, db) &&
+           boot_register_network_crawler_service(k) &&
+           boot_register_mesh_observation_service(k);
 }

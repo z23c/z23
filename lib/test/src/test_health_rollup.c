@@ -40,6 +40,7 @@
  * logic anywhere, just exercising what each dumper already computes. */
 
 #include "test/test_core.h"
+#include "controllers/diagnostics_controller.h"
 #include "controllers/diagnostics_internal.h"
 #include "jobs/tip_finalize_stage.h"
 #include "storage/event_log.h"
@@ -85,6 +86,22 @@ int test_health_rollup(void)
     mkdir("./test-tmp", 0755);
     mkdir(dir, 0755);
     bool store_ok = progress_store_open(dir);
+
+    /* Point the diagnostics controller at THIS fixture's datadir before any
+     * rollup call. The rollup invokes every registered dumper, and the
+     * datadir-reading ones (omniscience's census freshness probe, block_index,
+     * nodelog, ...) resolve their paths through diag_datadir(). That is a
+     * zero-initialised buffer until something sets it, and census_datadir()
+     * (lib/storage/src/census_read.c) treats an EMPTY datadir as: use the
+     * default live datadir under $HOME. Unset, this test
+     * opened the live node's peers_projection.db + topology.db and ran
+     * census_read_graph()'s correlated ip_to_str() join across them on every
+     * one of its four rollup calls: 37-80s each (measured), scaling with
+     * whatever the live crawler has accumulated, for a result this test never
+     * asserts on. Same pattern as lib/test/src/test_rpc.c. main_state stays
+     * NULL exactly as before, so no dumper's outcome changes — only the
+     * directory the datadir-reading ones look in. */
+    diagnostics_controller_set_state(NULL, dir);
 
     struct main_state ms;
     memset(&ms, 0, sizeof(ms));
@@ -239,6 +256,9 @@ int test_health_rollup(void)
         test_rm_rf_recursive(proj_dir);
     }
 
+    /* diagnostics_controller_set_state() above started the debug-bundle stall
+     * worker; join it before the state and tmpdir it inspects go away. */
+    (void)diagnostics_controller_shutdown();
     tip_finalize_stage_shutdown();
     main_state_free(&ms);
     if (store_ok) progress_store_close();

@@ -2,9 +2,10 @@
  *
  * Tier-2 fast restart — verified-clean quick_check skip marker.
  *
- * Proves the content-binding that lets a warm boot skip the ~9s PRAGMA
- * quick_check when (and only when) the previous shutdown left node.db provably
- * clean:
+ * Proves the content-binding that lets a warm boot skip the blocking PRAGMA
+ * quick_check when the previous shutdown left node.db provably clean, and the
+ * unclean/unverified deferral that still skips the blocking check without
+ * claiming node_db_clean:
  *   (a) format→parse round-trips a v2 binding exactly.
  *   (b) a corrupt / wrong-magic / wrong-version / not-checkpointed marker does
  *       NOT parse (never trusted).
@@ -13,9 +14,10 @@
  *   (d) node_db_file_identity_read parses a SQLite header off disk and rejects a
  *       non-SQLite file.
  *   (e) end-to-end: write_clean binds the on-disk node.db, detect_unclean caches
- *       + deletes the marker (single-use), the probe skips on a byte-identical
- *       file, is consumed after one call, and a one-byte corruption of node.db
- *       makes the probe REFUSE to skip.
+ *       + deletes the marker (single-use), the probe verified-clean-skips on a
+ *       byte-identical file, is consumed after one call; a mutated header or
+ *       WAL defers (blocking skip, was_skipped=false, was_deferred=true);
+ *       missing node.db does not skip.
  *
  * All hermetic: temp files only, no sqlite, no live chain. */
 
@@ -207,7 +209,7 @@ int test_shutdown_marker(void)
             printf("FAIL (marker not deleted by detect_unclean)\n"); failures++; goto cleanup_e2e;
         }
 
-        /* Byte-identical node.db → probe skips, and is single-use. */
+        /* Byte-identical node.db → verified-clean skip, and is single-use. */
         bool skip1 = boot_shutdown_marker_quick_check_probe(ndb);
         bool skip2 = boot_shutdown_marker_quick_check_probe(ndb);
         if (!skip1) { printf("FAIL (probe did not skip clean file)\n"); failures++; goto cleanup_e2e; }
@@ -215,9 +217,12 @@ int test_shutdown_marker(void)
         if (!boot_shutdown_marker_quick_check_was_skipped()) {
             printf("FAIL (was_skipped flag not set)\n"); failures++; goto cleanup_e2e;
         }
+        if (boot_shutdown_marker_quick_check_was_deferred()) {
+            printf("FAIL (clean skip must not also defer)\n"); failures++; goto cleanup_e2e;
+        }
 
-        /* Now prove the corruption / WAL refusals: rewrite the marker, but
-         * mutate node.db by one header byte → probe must REFUSE to skip. */
+        /* Mutated header: blocking check is deferred, but verified-clean
+         * skip (and therefore fast-restart node_db_clean) must stay false. */
         boot_shutdown_marker_reset_for_test();
         boot_shutdown_marker_set_schema_version(25);
         if (!boot_shutdown_marker_write_clean(dir)) {
@@ -228,12 +233,16 @@ int test_shutdown_marker(void)
         if (!write_fake_node_db(ndb, 40960, 0x0A0B0C0Eu, 0x0A0B0C0Eu)) {
             printf("FAIL (corrupt rewrite)\n"); failures++; goto cleanup_e2e;
         }
-        if (boot_shutdown_marker_quick_check_probe(ndb)) {
-            printf("FAIL (probe skipped a mutated node.db)\n"); failures++; goto cleanup_e2e;
+        if (!boot_shutdown_marker_quick_check_probe(ndb)) {
+            printf("FAIL (mutated node.db must defer blocking check)\n"); failures++; goto cleanup_e2e;
+        }
+        if (boot_shutdown_marker_quick_check_was_skipped() ||
+            !boot_shutdown_marker_quick_check_was_deferred()) {
+            printf("FAIL (mutated node.db must defer, not verified-clean skip)\n");
+            failures++; goto cleanup_e2e;
         }
 
-        /* WAL-present refusal: rewrite matching node.db + marker, add a
-         * non-empty WAL → probe must refuse. */
+        /* WAL present: same deferral, not verified-clean skip. */
         boot_shutdown_marker_reset_for_test();
         boot_shutdown_marker_set_schema_version(25);
         if (!write_fake_node_db(ndb, 40960, 0x0A0B0C0Du, 0x0A0B0C0Du) ||
@@ -243,8 +252,45 @@ int test_shutdown_marker(void)
         (void)boot_shutdown_marker_detect_unclean(dir);
         { int wf = open(wal, O_WRONLY | O_CREAT | O_TRUNC, 0644);
           if (wf >= 0) { (void)!write(wf, "wal-bytes", 9); close(wf); } }
+        if (!boot_shutdown_marker_quick_check_probe(ndb)) {
+            printf("FAIL (WAL-present existing db must defer)\n"); failures++; goto cleanup_e2e;
+        }
+        if (boot_shutdown_marker_quick_check_was_skipped() ||
+            !boot_shutdown_marker_quick_check_was_deferred()) {
+            printf("FAIL (WAL-present must defer, not verified-clean skip)\n");
+            failures++; goto cleanup_e2e;
+        }
+
+        /* Unclean crash: WAL, no marker. Binding cache is empty; existing
+         * node.db still defers so listen is not held hostage. */
+        boot_shutdown_marker_reset_for_test();
+        unlink(marker);
+        { int wf = open(wal, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+          if (wf >= 0) { (void)!write(wf, "wal-bytes", 9); close(wf); } }
+        if (!boot_shutdown_marker_detect_unclean(dir)) {
+            printf("FAIL (wal without marker should be unclean)\n"); failures++; goto cleanup_e2e;
+        }
+        if (!boot_shutdown_marker_quick_check_probe(ndb)) {
+            printf("FAIL (unclean existing db must defer)\n"); failures++; goto cleanup_e2e;
+        }
+        if (boot_shutdown_marker_quick_check_was_skipped() ||
+            !boot_shutdown_marker_quick_check_was_deferred()) {
+            printf("FAIL (unclean must defer, not verified-clean skip)\n");
+            failures++; goto cleanup_e2e;
+        }
         if (boot_shutdown_marker_quick_check_probe(ndb)) {
-            printf("FAIL (probe skipped with WAL present)\n"); failures++; goto cleanup_e2e;
+            printf("FAIL (unclean deferral not single-use)\n"); failures++; goto cleanup_e2e;
+        }
+
+        /* Absent node.db: no skip and no deferral. */
+        boot_shutdown_marker_reset_for_test();
+        unlink(ndb);
+        unlink(wal);
+        if (boot_shutdown_marker_quick_check_probe(ndb) ||
+            boot_shutdown_marker_quick_check_was_skipped() ||
+            boot_shutdown_marker_quick_check_was_deferred()) {
+            printf("FAIL (missing node.db must run blocking check)\n");
+            failures++; goto cleanup_e2e;
         }
         printf("OK\n");
 

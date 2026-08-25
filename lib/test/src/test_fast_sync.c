@@ -832,6 +832,60 @@ static int test_block_piece_manifest_active_chain_skips_leading_gap(void)
     return failures;
 }
 
+static int test_block_piece_manifest_refresh_after_coverage_expands(void)
+{
+    int failures = 0;
+    TEST("block piece manifest refreshes when contiguous body coverage "
+         "expands behind a fresh cached tail") {
+        struct active_chain chain;
+        struct block_index idx[5];
+        struct uint256 hashes[5];
+        struct block_piece_manifest cached;
+
+        active_chain_init(&chain);
+        memset(idx, 0, sizeof(idx));
+        memset(hashes, 0, sizeof(hashes));
+        memset(&cached, 0, sizeof(cached));
+        for (int i = 0; i < 5; i++) {
+            memset(hashes[i].data, (uint8_t)(0xA0 + i), 32);
+            block_index_init(&idx[i]);
+            idx[i].phashBlock = &hashes[i];
+            idx[i].nHeight = i;
+            idx[i].nStatus = BLOCK_VALID_TREE;
+            idx[i].pprev = i > 0 ? &idx[i - 1] : NULL;
+        }
+        idx[3].nStatus |= BLOCK_HAVE_DATA;
+        idx[4].nStatus |= BLOCK_HAVE_DATA;
+        ASSERT(active_chain_move_window_tip(&chain, &idx[4]));
+
+        cached.start_height = 3;
+        cached.end_height = 4;
+        cached.num_pieces = 1;
+
+        /* The cached tail is honest while height 2 is still absent. */
+        ASSERT(!block_piece_manifest_should_refresh(
+            &chain, true, &cached, 4, 4, 1000));
+
+        /* Once the predecessor lands, keeping the two-block tail would hide
+         * newly serveable history even though its end height is still fresh. */
+        idx[2].nStatus |= BLOCK_HAVE_DATA;
+        ASSERT(block_piece_manifest_should_refresh(
+            &chain, true, &cached, 4, 4, 1000));
+
+        cached.start_height = 1;
+        ASSERT(!block_piece_manifest_should_refresh(
+            &chain, true, &cached, 4, 4, 1000));
+        ASSERT(block_piece_manifest_should_refresh(
+            &chain, false, NULL, 0, 4, 1000));
+        ASSERT(block_piece_manifest_should_refresh(
+            &chain, true, &cached, 4, 1004, 1000));
+
+        active_chain_free(&chain);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* ── UTXO commitment checkpoint tests ────────────────────── */
 
 static int test_commitment_checkpoint_roundtrip(void)
@@ -1618,6 +1672,7 @@ int test_fast_sync(void)
     failures += test_block_piece_hash_deterministic();
     failures += test_block_piece_manifest_active_chain();
     failures += test_block_piece_manifest_active_chain_skips_leading_gap();
+    failures += test_block_piece_manifest_refresh_after_coverage_expands();
     failures += test_block_swarm_lifecycle();
     failures += test_block_swarm_fail_retry();
 

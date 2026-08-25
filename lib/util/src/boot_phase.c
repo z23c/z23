@@ -23,23 +23,283 @@ static void boot_phase_notify_progress(const char *status)
     (void)sd_notify_extend_timeout_usec(BOOT_PHASE_EXTEND_TIMEOUT_USEC);
 }
 
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
-#define BOOT_PHASE_STALL_SECS 30
+#define BOOT_PHASE_STALL_SECS (BOOT_STEP_BUDGET_MS / 1000)
+
+/* ──────────────────────────────────────────────────────────────────
+ * Boot step reporter — see util/boot_phase.h for the contract and for
+ * the incident that produced it. Three observations (running / slow /
+ * stuck), one terminal success (done), one terminal failure (failed);
+ * elapsed time alone can never produce the failure. */
+
+static const char *const k_boot_step_state_names[BOOT_STEP_STATE__MAX] = {
+    [BOOT_STEP_RUNNING] = "running",
+    [BOOT_STEP_SLOW]    = "slow",
+    [BOOT_STEP_STUCK]   = "stuck",
+    [BOOT_STEP_DONE]    = "done",
+    [BOOT_STEP_FAILED]  = "failed",
+};
+
+const char *boot_step_state_name(enum boot_step_state s)
+{
+    if (s < 0 || s >= BOOT_STEP_STATE__MAX || !k_boot_step_state_names[s])
+        return "(invalid)";
+    return k_boot_step_state_names[s];
+}
+
+const char *boot_step_state_verdict(enum boot_step_state s)
+{
+    switch (s) {
+    case BOOT_STEP_DONE:   return "ok";
+    case BOOT_STEP_FAILED: return "failure";
+    case BOOT_STEP_RUNNING:
+    case BOOT_STEP_SLOW:
+    case BOOT_STEP_STUCK:  return "telemetry";
+    default:               return "(invalid)";
+    }
+}
+
+bool boot_step_state_is_failure(enum boot_step_state s)
+{
+    return s == BOOT_STEP_FAILED;
+}
+
+enum boot_step_state boot_step_classify(int64_t elapsed_ms,
+                                        int64_t budget_ms,
+                                        uint64_t progress_delta)
+{
+    if (budget_ms <= 0)
+        budget_ms = BOOT_STEP_BUDGET_MS;
+    if (elapsed_ms < budget_ms)
+        return BOOT_STEP_RUNNING;
+    /* Over budget is NOT a failure and never becomes one here. The only
+     * question left is whether the step is moving. */
+    return progress_delta > 0 ? BOOT_STEP_SLOW : BOOT_STEP_STUCK;
+}
+
+/* Progress evidence = the global boot-progress marker (bumped by long
+ * boot loops) PLUS step-local notes. Composed, not inferred: either
+ * source advancing proves the step is moving. */
+static _Atomic uint64_t g_step_notes = 0;
+
+static uint64_t boot_step_evidence_count(void)
+{
+    return boot_progress_marker() +
+           atomic_load_explicit(&g_step_notes, memory_order_relaxed);
+}
+
+/* How much progress evidence appeared since the caller last looked.
+ *
+ * COMPOSED from three independent sources, because no single one covers
+ * the whole boot: the boot_progress marker (bumped by the long index
+ * loops), step-local notes, and boot_progress_tick's timestamp (bumped
+ * by reducer ingest, node_db catchup, UTXO apply and snapshot import —
+ * the subsystems that are busy during service startup and that bump no
+ * counter at all). Any one of them moving means the step is moving.
+ * `*seen_count` / `*seen_tick` carry the caller's previous observation
+ * and are updated in place. */
+static uint64_t boot_step_delta(uint64_t *seen_count, int64_t *seen_tick)
+{
+    uint64_t count = boot_step_evidence_count();
+    int64_t  tick  = boot_progress_last_us();
+    uint64_t delta = count > *seen_count ? count - *seen_count : 0;
+    if (tick != *seen_tick)
+        delta++;
+    *seen_count = count;
+    *seen_tick  = tick;
+    return delta;
+}
+
+void boot_step_note(void)
+{
+    atomic_fetch_add_explicit(&g_step_notes, 1u, memory_order_relaxed);
+    boot_progress_tick("boot_step");
+}
+
+/* Emit one typed record.
+ *
+ * Ordering is load-bearing: the operator line and the systemd timeout
+ * extension go out FIRST, and the boot_status beacon refresh last. The
+ * beacon takes a lock the (possibly wedged) boot thread can be holding,
+ * and this runs on the shared heartbeat sweeper — a record that must
+ * never be lost cannot be sequenced behind that lock. */
+static void boot_step_emit(const char *name, enum boot_step_state st,
+                           int64_t elapsed_ms, int64_t budget_ms,
+                           uint64_t progress_delta, unsigned report,
+                           const char *reason)
+{
+    const char *nm = (name && name[0]) ? name : "(unnamed)";
+    /* Raw stderr, NOT LOG_INFO, and deliberately so: the LOG_* macros go
+     * through the -loglevel gate (base/log_level.h), and a boot-stall
+     * record that an operator can silence with -loglevel=warn recreates
+     * exactly the silence this module exists to end. journald timestamps
+     * the line. Keep the rest of the module's raw-stderr convention too.
+     *
+     * `reason` is the only free-text field, so it is quoted: the record
+     * stays one parseable key=value line even when the reason has
+     * spaces in it. */
+    fprintf(stderr,  // obs-ok:boot-step-record-observed-via-heartbeat
+        "[boot-step] step=%s state=%s verdict=%s elapsed_ms=%lld "
+        "budget_ms=%lld progress_delta=%llu report=%u%s%s%s\n",
+        nm, boot_step_state_name(st), boot_step_state_verdict(st),
+        (long long)elapsed_ms, (long long)budget_ms,
+        (unsigned long long)progress_delta, report,
+        reason ? " reason=\"" : "", reason ? reason : "",
+        reason ? "\"" : "");
+    fflush(stderr);
+
+    if (st == BOOT_STEP_FAILED)
+        return;
+
+    /* A step that is merely slow must buy MORE start budget by saying so,
+     * never less. This is what keeps a 7200 rpm box from being killed for
+     * being honest about its disk. */
+    char status[200];
+    snprintf(status, sizeof(status), "boot %s %s %llds",
+             nm, boot_step_state_name(st), (long long)(elapsed_ms / 1000));
+    boot_phase_notify_progress(status);
+    boot_status_heartbeat();
+}
+
+/* ── the tracked current step ─────────────────────────────────────
+ * ONE registration for the whole boot, whose name is re-pointed at each
+ * step boundary. A per-step register/unregister pair would leak a
+ * phantom ring entry on every early `return false` out of the boot
+ * path; this cannot. */
+static pthread_mutex_t     g_step_mu = PTHREAD_MUTEX_INITIALIZER;
+static char                g_step_name[BOOT_PHASE_NAME_MAX];
+static int64_t             g_step_start_ms     = 0;
+static uint64_t            g_step_seen_count   = 0;
+static int64_t             g_step_seen_tick_us = 0;
+static unsigned            g_step_reports      = 0;
+static bool                g_step_active       = false;
+static health_subsystem_id g_step_health_id    = HEALTH_INVALID_ID;
+
+/* g_step_mu guards the whole record — name, clock, evidence baseline,
+ * report counter — because the boot thread rewrites it at each step
+ * boundary while the heartbeat sweeper reads it from another thread.
+ * The critical section is a few stores and takes no other lock, so it
+ * can never itself be the thing that wedges. */
+
+/* One consistent snapshot of the open step, advancing its bookkeeping.
+ * Returns false when no step is open. */
+static bool boot_step_snapshot(char *name, size_t cap, int64_t *elapsed_ms,
+                               uint64_t *delta, unsigned *report)
+{
+    pthread_mutex_lock(&g_step_mu);
+    if (!g_step_active) {
+        pthread_mutex_unlock(&g_step_mu);
+        return false;
+    }
+    snprintf(name, cap, "%s", g_step_name);
+    *elapsed_ms = platform_time_monotonic_ms() - g_step_start_ms;
+    *delta      = boot_step_delta(&g_step_seen_count, &g_step_seen_tick_us);
+    *report     = ++g_step_reports;
+    pthread_mutex_unlock(&g_step_mu);
+    return true;
+}
+
+static void boot_step_on_stall(void *ctx)
+{
+    (void)ctx;
+    char     name[BOOT_PHASE_NAME_MAX];
+    int64_t  elapsed = 0;
+    uint64_t delta   = 0;
+    unsigned report  = 0;
+    if (!boot_step_snapshot(name, sizeof(name), &elapsed, &delta, &report))
+        return;
+    boot_step_emit(name,
+                   boot_step_classify(elapsed, BOOT_STEP_BUDGET_MS, delta),
+                   elapsed, BOOT_STEP_BUDGET_MS, delta, report, NULL);
+
+    /* Re-arm. The health ring is edge-triggered: without a fresh
+     * heartbeat a stalled entry fires exactly once, which is how a
+     * four-hour hang produced one line and then silence. */
+    health_heartbeat(g_step_health_id);
+}
+
+static void boot_step_close(enum boot_step_state st, const char *reason)
+{
+    char     name[BOOT_PHASE_NAME_MAX];
+    int64_t  elapsed;
+    unsigned report;
+    health_subsystem_id id;
+
+    pthread_mutex_lock(&g_step_mu);
+    if (!g_step_active) {
+        pthread_mutex_unlock(&g_step_mu);
+        return;
+    }
+    g_step_active = false;
+    snprintf(name, sizeof(name), "%s", g_step_name);
+    elapsed = platform_time_monotonic_ms() - g_step_start_ms;
+    report  = g_step_reports;
+    id      = g_step_health_id;
+    g_step_health_id = HEALTH_INVALID_ID;
+    pthread_mutex_unlock(&g_step_mu);
+
+    if (id != HEALTH_INVALID_ID)
+        health_unregister(id);
+    boot_step_emit(name, st, elapsed, BOOT_STEP_BUDGET_MS, 0, report, reason);
+}
+
+void boot_step_enter(const char *name)
+{
+    /* A new step implicitly ends the previous one. */
+    boot_step_close(BOOT_STEP_DONE, NULL);
+    (void)health_start();  /* idempotent; only the first call spawns it */
+
+    char nm[BOOT_PHASE_NAME_MAX];
+    pthread_mutex_lock(&g_step_mu);
+    snprintf(g_step_name, sizeof(g_step_name), "%s",
+             (name && name[0]) ? name : "(unnamed)");
+    snprintf(nm, sizeof(nm), "%s", g_step_name);
+    g_step_start_ms = platform_time_monotonic_ms();
+    g_step_reports  = 0;
+    g_step_active   = true;
+    /* Seed the baseline so the first record diffs against THIS step's
+     * start, not against zero — otherwise every step would open by
+     * claiming the progress some earlier step made. */
+    (void)boot_step_delta(&g_step_seen_count, &g_step_seen_tick_us);
+    g_step_health_id = health_register("boot_step", BOOT_PHASE_STALL_SECS,
+                                       boot_step_on_stall, NULL);
+    pthread_mutex_unlock(&g_step_mu);
+
+    boot_step_emit(nm, BOOT_STEP_RUNNING, 0, BOOT_STEP_BUDGET_MS, 0, 0, NULL);
+}
+
+void boot_step_done(void)
+{
+    boot_step_close(BOOT_STEP_DONE, NULL);
+}
+
+bool boot_step_fail(const char *reason)
+{
+    boot_step_close(BOOT_STEP_FAILED, reason ? reason : "unspecified");
+    return false;  /* so a caller can report and return in one statement */
+}
+
+/* ────────────────────────────────────────────────────────────────── */
 
 static void boot_phase_on_stall(void *ctx)
 {
     struct boot_phase *p = (struct boot_phase *)ctx;
     if (!p) return;
     int64_t elapsed = platform_time_monotonic_ms() - p->start_ms;
-    fprintf(stderr,  // obs-ok:boot-phase-stall-observed-via-heartbeat
-        "[boot-phase] STALL %s %lldms (no progress reported)\n",
-        p->name, (long long)elapsed);
-    fflush(stderr);
+    uint64_t delta = boot_step_delta(&p->evidence_seen, &p->evidence_tick_us);
+    p->reports++;
+    boot_step_emit(p->name,
+                   boot_step_classify(elapsed, BOOT_STEP_BUDGET_MS, delta),
+                   elapsed, BOOT_STEP_BUDGET_MS, delta, p->reports, NULL);
+    /* Re-arm so an over-budget phase keeps reporting once per budget
+     * window instead of going quiet after the first edge. */
+    health_heartbeat(p->health_id);
 }
 
 void boot_phase_begin(struct boot_phase *p, const char *name)
@@ -56,6 +316,12 @@ void boot_phase_begin(struct boot_phase *p, const char *name)
     }
     p->start_ms = platform_time_monotonic_ms();
     p->health_id = HEALTH_INVALID_ID;
+    /* Seed the evidence baseline so the FIRST over-budget record diffs
+     * against this phase's own start, not against zero (which would
+     * report every phase as `slow` on the strength of progress some
+     * earlier phase made). */
+    (void)boot_step_delta(&p->evidence_seen, &p->evidence_tick_us);
+    p->reports = 0;
 
     fprintf(stderr, "[boot-phase] BEGIN %s\n", p->name);  // obs-ok:boot-phase-trace-marker
     fflush(stderr);

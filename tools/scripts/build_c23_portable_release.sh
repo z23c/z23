@@ -69,7 +69,7 @@ zcl_is_sha256 "$SOURCE_BEFORE" || {
 # The portable baseline is the ordinary offline-friendly node. A checkout
 # containing an optional host-built full-Tor archive must not silently import
 # that host ABI into this artifact; the stub leaves Tor explicitly disabled.
-products=(zclassic23 zcl-rpc zclassic23-package-sign zclassic23-package-verify)
+products=(zclassic23 zcl-rpc zcl-nodectl zclassic23-package-sign zclassic23-package-verify)
 # The two tiny stable-name helpers are FORCE-built by their canonical rules;
 # changing this compiler also changes vendor provenance, which invalidates the
 # two whole-program products without making every source prerequisite phony.

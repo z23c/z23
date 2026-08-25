@@ -9,7 +9,9 @@
   "dependencies": [],
   "files": [
     "LICENSE",
+    "include/platform/os_binary_slots.h",
     "include/platform/os_proc.h",
+    "src/os_binary_slots.c",
     "src/os_proc.c",
     "tests/test_platform.c",
     "zcode-package.json"

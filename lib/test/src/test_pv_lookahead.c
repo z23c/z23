@@ -626,8 +626,17 @@ int test_pv_lookahead(void)
 
     /* 4) Per-height body gap: begin at h3 with its HAVE_DATA bit absent while
      * h4..h7 are readable.  The pool must retain exact-hash h4/h5 work instead
-     * of parking behind h3.  Once h3 becomes readable, h3 verifies inline and
-     * h4..h7 consume the warmed verdicts; rows/counters remain serial-identical. */
+     * of parking behind h3, and h4..h7 must consume the warmed verdicts;
+     * rows/counters remain serial-identical.
+     *
+     * h3 itself is a RACE by design and the count is asserted as a range.  The
+     * worker loop re-sweeps from the lowest gapped height once the claim window
+     * is exhausted (pv_lookahead.c), because on the live/replay path a gap means
+     * "body has not landed yet", not "body is missing".  So once this fixture
+     * makes h3 readable, either the drive reaches it first (inline miss, 4 hits)
+     * or a re-sweeping worker verifies it first (5 hits).  Both are correct and
+     * indistinguishable in the verdict: the serial-identical check below is the
+     * guarantee, and it stays exact.  Only WHO computed h3 varies. */
     {
         struct la_result serial, pooled;
         la_fold_from(&serial, "g_ser", 8, false, -1, false, false,
@@ -642,8 +651,12 @@ int test_pv_lookahead(void)
                    pooled.warm_ok);
         PVLA_CHECK("gap: wrong h4 hash misses without consuming exact slot",
                    pooled.wrong_hash_missed);
-        PVLA_CHECK("gap: h3 inline miss, exact h4..h7 are four hits",
-                   pooled.hits == 4 && pooled.misses == 2 &&
+        /* Six takes either way: h3..h7 plus the wrong-hash probe above. h4..h7
+         * are always hits; h3 is the raced height, so hits is 4 or 5 and the
+         * remainder are misses. drained/cursor stay exact. */
+        PVLA_CHECK("gap: h4..h7 are hits, h3 raced, six takes total",
+                   pooled.hits >= 4 && pooled.hits <= 5 &&
+                   pooled.hits + pooled.misses == 6 &&
                    pooled.drained == 5 && pooled.cursor == 8);
         PVLA_CHECK("gap: rows + counters + cursor remain serial-identical",
                    la_results_identical(&serial, &pooled));

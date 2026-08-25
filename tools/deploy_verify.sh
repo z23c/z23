@@ -64,7 +64,7 @@ exec_path_values_from_text() {
 
 exec_argv_values_from_text() {
     # `systemctl show -p ExecStart --value` renders one command as:
-    #   { path=/launcher ; argv[]=/launcher /node <args> ; ... }
+    #   { path=/zcl-nodectl ; argv[]=/zcl-nodectl launch /node <args> ; ... }
     # Canonical paths contain no whitespace (the same constraint already used
     # by exec_arg_values_from_text), so split only the argv[] segment.
     printf '%s\n' "$1" |
@@ -123,7 +123,7 @@ deploy_verify_selftest() {
     ZCL_DATADIR="/attacker/datadir"
     ZCL_RPCPORT="1"
     ZCL_RPCCONNECT="attacker.invalid"
-    fixture_exec='{ path=/canonical/deploy/zclassic23-launch.sh ; argv[]=/canonical/deploy/zclassic23-launch.sh /canonical/bin/zclassic23 -datadir=/canonical/data -rpcport=18232 ; }'
+    fixture_exec='{ path=/canonical/bin/zcl-nodectl ; argv[]=/canonical/bin/zcl-nodectl launch /canonical/bin/z23 -datadir=/canonical/data -rpcport=18232 ; }'
     fixture_datadirs=$(exec_arg_values_from_text datadir "$fixture_exec")
     fixture_ports=$(exec_arg_values_from_text rpcport "$fixture_exec")
     fixture_datadir=$(single_value_or_empty "$fixture_datadirs") || return 1
@@ -141,10 +141,11 @@ deploy_verify_selftest() {
         return 1
     fi
     fixture_paths=$(exec_path_values_from_text "$fixture_exec")
-    [ "$(single_value_or_empty "$fixture_paths")" = "/canonical/deploy/zclassic23-launch.sh" ] || return 1
+    [ "$(single_value_or_empty "$fixture_paths")" = "/canonical/bin/zcl-nodectl" ] || return 1
     fixture_argv=$(exec_argv_values_from_text "$fixture_exec")
-    [ "$(printf '%s\n' "$fixture_argv" | sed -n '1p')" = "/canonical/deploy/zclassic23-launch.sh" ] || return 1
-    [ "$(printf '%s\n' "$fixture_argv" | sed -n '2p')" = "/canonical/bin/zclassic23" ] || return 1
+    [ "$(printf '%s\n' "$fixture_argv" | sed -n '1p')" = "/canonical/bin/zcl-nodectl" ] || return 1
+    [ "$(printf '%s\n' "$fixture_argv" | sed -n '2p')" = "launch" ] || return 1
+    [ "$(printf '%s\n' "$fixture_argv" | sed -n '3p')" = "/canonical/bin/z23" ] || return 1
     fixture_direct='{ path=/canonical/bin/zclassic23 ; argv[]=/canonical/bin/zclassic23 -datadir=/canonical/data -rpcport=18232 ; }'
     fixture_direct_paths=$(exec_path_values_from_text "$fixture_direct")
     [ "$(single_value_or_empty "$fixture_direct_paths")" = "/canonical/bin/zclassic23" ] || return 1
@@ -235,10 +236,16 @@ SERVICE_ARGV0_EXE=$(readlink -f "$SERVICE_ARGV0" 2>/dev/null || true)
 [ "$SERVICE_ARGV0_EXE" = "$SERVICE_LAUNCHER_EXE" ] ||
     fatal_binding "canonical service path and executable argv disagree"
 
+if [ "$(basename "$SERVICE_LAUNCHER_EXE")" = "zcl-nodectl" ]; then
+    [ "$SERVICE_NODE_ARG" = "launch" ] ||
+        fatal_binding "canonical zcl-nodectl launcher must use the launch subcommand"
+    SERVICE_NODE_ARG=$(printf '%s\n' "$SERVICE_ARGV_VALUES" | sed -n '3p')
+fi
+
 # Accept both canonical unit forms while preserving an exact executable bind:
 #
 #   direct:   ExecStart=/absolute/zclassic23 <flags>
-#   launcher: ExecStart=/absolute/launcher /absolute/zclassic23 <flags>
+#   launcher: ExecStart=/absolute/zcl-nodectl launch /absolute/z23 <flags>
 #
 # In direct mode argv[1] is normally the first flag, not another executable.
 # A launcher is only accepted when its explicit node argument resolves to the

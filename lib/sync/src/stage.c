@@ -29,6 +29,7 @@
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 #include "sync/stage_lcc.h"
+#include "sync/reducer_stage_profile.h"
 #include "util/subsystem_snapshot.h"
 
 #include <pthread.h>
@@ -582,6 +583,26 @@ job_result_t stage_run_once(stage_t *s, sqlite3 *db)
         }
         s->cursor = ctx.cursor_out;
         atomic_fetch_add(&s->advanced_count, 1u);
+        /* Attribute ONE fully committed step to this stage's profile domain.
+         * Central rather than per-stage: the five profiled stages used to
+         * record this themselves and three never did, so a fold profile could
+         * show the parts and never the whole -- the 2026-08-24 C3 cold-start
+         * artifact accounted for only a quarter of its own wall time because
+         * utxo_apply and tip_finalize reported no total at all. Measured here,
+         * every domain means the same thing and includes the savepoint and
+         * cursor write that a step genuinely costs. Advancing steps only, so
+         * idle ticks waiting on an upstream frontier never dilute us/block. */
+        {
+            int prof_domain = reducer_stage_profile_domain_for(s->name);
+            if (prof_domain >= 0) {
+                int64_t prof_us = GetTimeMicros() - step_t0;
+                reducer_stage_profile_observe_us(
+                    (enum reducer_profile_domain)prof_domain, RPF_TOTAL_US,
+                    prof_us > 0 ? (uint64_t)prof_us : 0);
+                reducer_stage_profile_add(
+                    (enum reducer_profile_domain)prof_domain, RPF_BLOCKS, 1);
+            }
+        }
         progress_store_tx_unlock();
         pthread_mutex_unlock(&s->lock);
         return JOB_ADVANCED;

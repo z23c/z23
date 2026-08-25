@@ -110,6 +110,16 @@ historical fixture passes, then deploy/restart intentionally.
   headers and the target-specific `-Og`/hot-bucket `-O2` split, then records
   hash/freshness metadata. clangd is optional and its absence is not an index
   generation failure.
+- **Do not restore blocking `PRAGMA quick_check(1)` on unclean WAL boots.**
+  On a multi-GB production `node.db` that scan is hours of `folio_wait`
+  D-state and holds `Type=notify` READY / P2P 8033 hostage. SQLite already
+  recovered the WAL on open. Unverified/unclean existing files defer the
+  same PRAGMA to `boot_fast_restart_start_bg_quick_check`, which fail-closes
+  via `EV_OPERATOR_NEEDED`. Verified-clean skip still requires the v2
+  marker binding; deferral must not set `quick_check_was_skipped` or
+  fast-restart will trust an unproven node.db. Pinned by
+  `test_shutdown_marker` (mutated header / WAL / no-marker existing file
+  defer, missing file still runs the cheap blocking check).
 - **FIXED 2026-08-10 (d032f1c36, integrated commit) — node_db newer-schema refusal used to
   fire only AFTER the open ceremony had already written to the datadir.**
   The old order ran quick_check (whose failure path quarantines/renames

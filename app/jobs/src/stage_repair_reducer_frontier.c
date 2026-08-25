@@ -163,13 +163,13 @@ static bool reconcile_block_index_flags(
     char datadir[2048];
     GetDataDir(true, datadir, sizeof(datadir));
 
-    progress_store_tx_lock();
-    zcl_mutex_lock(&ms->cs_main);
+    zcl_mutex_lock(&ms->cs_main);  /* LOCK ORDER: cs_main OUTER, */
+    progress_store_tx_lock();      /* progress store INNER (stage_repair.h). */
 
     struct rf_evidence_stmts es;
     if (!rf_evidence_stmts_prepare(db, &es)) {
-        zcl_mutex_unlock(&ms->cs_main);
         progress_store_tx_unlock();
+        zcl_mutex_unlock(&ms->cs_main);
         return false;
     }
 
@@ -243,8 +243,8 @@ static bool reconcile_block_index_flags(
     }
 
     rf_evidence_stmts_finalize(&es);
-    zcl_mutex_unlock(&ms->cs_main);
     progress_store_tx_unlock();
+    zcl_mutex_unlock(&ms->cs_main);
     return ok;
 }
 

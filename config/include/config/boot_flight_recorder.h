@@ -69,6 +69,17 @@ void boot_flight_recorder_finish(struct node_db *ndb);
  * answer, not a failure. */
 bool boot_flight_recorder_dump_state_json(struct json_value *out, const char *key);
 
+/* Close out one named boot sub-stage and open the next, in one move.
+ *
+ * Prints the `[boot]   <done> <ms>` marker for the step that just
+ * finished — which, by construction, can only describe a step that
+ * RETURNED — and then hands the name of the step starting now to the
+ * boot-step reporter (util/boot_phase.h), which reports it from the
+ * heartbeat sweeper every budget window until it ends. That is the half
+ * that survives a step which never returns. Pass NULL for `next` to end
+ * the sequence. Returns the sub-stage clock for the new step. */
+int64_t boot_mark_step(int64_t t0, const char *done, const char *next);
+
 #ifdef ZCL_TESTING
 /* Test-only: drop every buffered-but-not-yet-persisted mark, so a test
  * process that shares translation units with unrelated code can start each

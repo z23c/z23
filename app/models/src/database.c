@@ -591,13 +591,11 @@ static bool node_db_open_impl(struct node_db *ndb, const char *path,
     if (!raw_opened)
         return node_db_open_abort(ndb);
     if (boot_ceremony) {
-        /* Tier-2 fast restart: skip-probe reads the PRISTINE file; true = prior
-         * shutdown proved it clean, skip the ~9s quick_check. */
+        /* Skip-probe: true = verified-clean skip or unclean/unverified
+         * deferral (probe logs which). False = run blocking PRAGMA. */
         bool skip_quick_check = g_quick_check_skip_probe && path &&
                                 g_quick_check_skip_probe(path);
-        if (skip_quick_check) {
-            printf("[boot] quick_check skipped (verified-clean shutdown)\n");
-        } else {
+        if (!skip_quick_check) {
             int64_t t_qc = db_now_ms();
             bool qc_ok = db_quick_check_ok(ndb->db, path);
             printf("[boot]   %-28s %lldms\n", "sqlite.quick_check",

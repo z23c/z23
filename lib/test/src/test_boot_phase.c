@@ -15,6 +15,7 @@
 #include "test/test_core.h"
 #include "config/boot.h"
 #include "util/boot_phase.h"
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <signal.h>
@@ -237,6 +238,115 @@ int test_boot_phase(void)
                      got == pid && WIFSIGNALED(status) &&
                      WTERMSIG(status) == SIGABRT);
         }
+    }
+
+    /* ── boot step reporter: slow, stuck, and failed are three states ──
+     *
+     * The incident: a boot step ran for four hours with no record of its
+     * own, because the only marker for a step is printed after it
+     * returns. The reporter now names a step on the way in and reports
+     * it every budget window until it finishes.
+     *
+     * The property pinned here is the ANTI-CENTRALIZATION one. Two of
+     * this network's four nodes are 7200 rpm HDD boxes whose disks sit
+     * at 57-91% IO pressure while their CPUs idle; steps that take
+     * seconds on NVMe take minutes there. If "over budget" were graded
+     * as failure, those nodes would be graded off the network for being
+     * honest about their hardware. So: no elapsed time, however large,
+     * may ever produce a failure verdict. Failure is reported by the
+     * step, never inferred from the clock. */
+    {
+        const int64_t B = BOOT_STEP_BUDGET_MS;
+
+        /* Under budget: nothing is wrong. */
+        BP_CHECK("step: inside budget is running",
+            boot_step_classify(B - 1, B, 0) == BOOT_STEP_RUNNING);
+        BP_CHECK("step: inside budget with progress is still running",
+            boot_step_classify(0, B, 9) == BOOT_STEP_RUNNING);
+
+        /* Over budget WITH progress: slow. The HDD case. */
+        enum boot_step_state slow = boot_step_classify(B * 20, B, 7);
+        BP_CHECK("step: 20x over budget but progressing is slow",
+            slow == BOOT_STEP_SLOW);
+        BP_CHECK("step: slow is NOT a failure",
+            !boot_step_state_is_failure(slow));
+        BP_CHECK("step: slow carries verdict=telemetry",
+            strcmp(boot_step_state_verdict(slow), "telemetry") == 0);
+        BP_CHECK("step: slow is not spelled the same as failed",
+            strcmp(boot_step_state_name(slow),
+                   boot_step_state_name(BOOT_STEP_FAILED)) != 0);
+
+        /* Over budget WITHOUT progress: stuck — distinct from slow, and
+         * still only an observation. */
+        enum boot_step_state stuck = boot_step_classify(B * 20, B, 0);
+        BP_CHECK("step: over budget with no progress is stuck",
+            stuck == BOOT_STEP_STUCK);
+        BP_CHECK("step: stuck is distinguishable from slow", stuck != slow);
+        BP_CHECK("step: stuck is NOT a failure either",
+            !boot_step_state_is_failure(stuck));
+        BP_CHECK("step: stuck carries verdict=telemetry",
+            strcmp(boot_step_state_verdict(stuck), "telemetry") == 0);
+
+        /* The clock can never manufacture a failure — not at an hour,
+         * not at a day, not with any progress value. */
+        {
+            bool clock_can_fail = false;
+            const int64_t elapsed[] = {
+                0, B, B + 1, 3600LL * 1000, 86400LL * 1000, INT64_MAX / 2,
+            };
+            for (size_t i = 0; i < sizeof(elapsed) / sizeof(elapsed[0]); i++)
+                for (uint64_t d = 0; d < 3; d++)
+                    if (boot_step_state_is_failure(
+                            boot_step_classify(elapsed[i], B, d)))
+                        clock_can_fail = true;
+            BP_CHECK("step: no elapsed time can produce a failure verdict",
+                !clock_can_fail);
+        }
+
+        /* Failure is its own state, reported explicitly. */
+        BP_CHECK("step: failed is the only failure state",
+            boot_step_state_is_failure(BOOT_STEP_FAILED) &&
+            !boot_step_state_is_failure(BOOT_STEP_DONE) &&
+            !boot_step_state_is_failure(BOOT_STEP_RUNNING));
+        BP_CHECK("step: failed carries verdict=failure",
+            strcmp(boot_step_state_verdict(BOOT_STEP_FAILED),
+                   "failure") == 0);
+        BP_CHECK("step: done carries verdict=ok",
+            strcmp(boot_step_state_verdict(BOOT_STEP_DONE), "ok") == 0);
+
+        /* A budget of zero must not divide by, or fall back into, chaos. */
+        BP_CHECK("step: zero budget falls back to the default budget",
+            boot_step_classify(BOOT_STEP_BUDGET_MS + 1, 0, 1) ==
+                BOOT_STEP_SLOW);
+
+        /* Every state has a distinct, non-empty name; out-of-range is
+         * named rather than read off the end of the table. */
+        {
+            bool all_named = true;
+            for (int s = 0; s < (int)BOOT_STEP_STATE__MAX; s++) {
+                const char *n = boot_step_state_name((enum boot_step_state)s);
+                if (!n || !*n || strcmp(n, "(invalid)") == 0)
+                    all_named = false;
+                for (int t = s + 1; t < (int)BOOT_STEP_STATE__MAX; t++)
+                    if (strcmp(n, boot_step_state_name(
+                                   (enum boot_step_state)t)) == 0)
+                        all_named = false;
+            }
+            BP_CHECK("step: every state has a distinct non-empty name",
+                all_named);
+            BP_CHECK("step: out-of-range state names as (invalid)",
+                strcmp(boot_step_state_name(BOOT_STEP_STATE__MAX),
+                       "(invalid)") == 0);
+        }
+
+        /* The tracked-step API must be safe to drive with no step open
+         * and must not leave one behind. boot_step_fail always returns
+         * false so a boot exit can name its failure and return on the
+         * statement it was already returning on. */
+        boot_step_done();                 /* nothing open — no-op */
+        boot_step_note();
+        BP_CHECK("step: fail() returns false even with no step open",
+            !boot_step_fail("nothing open"));
     }
 
     /* Restore for any subsequent tests in this process. */

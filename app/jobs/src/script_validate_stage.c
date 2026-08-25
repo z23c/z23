@@ -609,10 +609,6 @@ static job_result_t step_validate(struct stage_step_ctx *c)
     c->cursor_out = c->cursor_in + 1;
     /* Clean advancing step — the infra-db fault retry budget resets. */
     stage_db_fault_clear(&g_sv_db_fault);
-    reducer_stage_profile_add(REDUCER_PROFILE_SCRIPT_VALIDATE, RPF_BLOCKS, 1);
-    reducer_stage_profile_observe_us(
-        REDUCER_PROFILE_SCRIPT_VALIDATE, RPF_TOTAL_US,
-        (uint64_t)(platform_time_monotonic_us() - total_started));
     return JOB_ADVANCED;
 }
 

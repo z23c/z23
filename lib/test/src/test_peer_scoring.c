@@ -254,6 +254,10 @@ static int test_localhost_exempt(void)
         struct p2p_node node;
         setup_manager(&nm);
         setup_localhost(&node);
+        /* No hidden-service P2P route installed, so a loopback source is
+         * still evidence of a same-host peer — see the onion-ingress tests
+         * below for what happens once Tor is forwarding to this listener. */
+        net_set_onion_ingress_port(0);
 
         for (int i = 0; i < 10; i++)
             peer_scoring_record(&nm, &node, PEER_OFFENCE_INVALID_BLOCK, "bad");
@@ -261,6 +265,136 @@ static int test_localhost_exempt(void)
         ASSERT_EQ(atomic_load(&node.misbehavior), 0);
         ASSERT(!node.disconnect);
         ASSERT(!peer_scoring_should_ban(&node));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* LANE C REGRESSION — an onion-reachable node sees EVERY inbound peer as
+ * 127.0.0.1, because stock Tor forwards hidden-service streams to the local
+ * listener as an ordinary TCP connection from loopback. While a loopback
+ * source bought a blanket trusted-peer exemption, that exemption covered
+ * every inbound peer such a node has, and every DoS defence that ends in
+ * peer_scoring_record() was a no-op against all of them.
+ *
+ * The two halves of the fix are asserted together here because either one
+ * alone is wrong: score the peer but keep banning by ADDRESS and the first
+ * offender takes the node's whole front door with it (127.0.0.1 on the ban
+ * list is checked at accept(), before any bytes, and persists in
+ * banlist.dat); skip the address ban but keep the exemption and nothing is
+ * ever punished at all. */
+static int test_onion_ingress_scored_never_self_banned(void)
+{
+    int failures = 0;
+    unsetenv("ZCL_PEER_BAN_THRESHOLD");
+    unsetenv("ZCL_PEER_BAN_HOURS");
+    peer_scoring_init();
+
+    TEST("peer_scoring: Tor-forwarded inbound is scored but never address-banned") {
+        struct net_manager nm;
+        struct p2p_node node;
+        setup_manager(&nm);
+        setup_localhost(&node);
+        node.inbound = true;
+        node.accepted_local_port = 8033;
+
+        /* No hidden-service route installed: loopback still means
+         * same-host, and the peer keeps the exemption. This is the
+         * pre-change behaviour, and it is the behaviour every local
+         * multi-node fixture depends on. */
+        net_set_onion_ingress_port(0);
+        ASSERT(!net_peer_is_onion_ingress(&node));
+        for (int i = 0; i < 10; i++)
+            peer_scoring_record(&nm, &node, PEER_OFFENCE_INVALID_BLOCK, "bad");
+        ASSERT_EQ(atomic_load(&node.misbehavior), 0);
+        ASSERT(!node.disconnect);
+        ASSERT_EQ((int)nm.num_banned, 0);
+
+        /* Arm the hidden-service P2P route on the listener that accepted
+         * this stream. The same sixteen address bytes are now an anonymous
+         * stranger, and one invalid block must cost it the session. */
+        net_set_onion_ingress_port(8033);
+        ASSERT(net_peer_is_onion_ingress(&node));
+        peer_scoring_record(&nm, &node, PEER_OFFENCE_INVALID_BLOCK, "bad");
+        ASSERT_EQ(atomic_load(&node.misbehavior), 100);
+        ASSERT(node.disconnect);
+        ASSERT(peer_scoring_should_ban(&node));
+
+        /* ...and the ban list must still be EMPTY. Banning 127.0.0.1 would
+         * refuse every future inbound peer on an onion-only node. */
+        ASSERT_EQ((int)nm.num_banned, 0);
+
+        net_set_onion_ingress_port(0);
+        free(nm.banned);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* The ingress arming is NARROW: it re-arms scoring only for an inbound
+ * loopback peer accepted on the exact listener Tor forwards to. An outbound
+ * loopback dial, a peer accepted on some other listener, and a whitelisted
+ * peer all keep the exemption. */
+static int test_onion_ingress_is_narrow(void)
+{
+    int failures = 0;
+    TEST("peer_scoring: onion-ingress exemption removal is narrowly scoped") {
+        struct net_manager nm;
+        struct p2p_node node;
+        net_set_onion_ingress_port(8033);
+
+        /* Outbound dial to a loopback peer — we chose it, Tor did not
+         * hand it to us. Still exempt. */
+        setup_manager(&nm);
+        setup_localhost(&node);
+        node.inbound = false;
+        node.accepted_local_port = 8033;
+        ASSERT(!net_peer_is_onion_ingress(&node));
+        peer_scoring_record(&nm, &node, PEER_OFFENCE_INVALID_BLOCK, "bad");
+        ASSERT_EQ(atomic_load(&node.misbehavior), 0);
+
+        /* Inbound on a DIFFERENT listener than the forwarded one. */
+        setup_manager(&nm);
+        setup_localhost(&node);
+        node.inbound = true;
+        node.accepted_local_port = 18033;
+        ASSERT(!net_peer_is_onion_ingress(&node));
+        peer_scoring_record(&nm, &node, PEER_OFFENCE_INVALID_BLOCK, "bad");
+        ASSERT_EQ(atomic_load(&node.misbehavior), 0);
+
+        /* Whitelisting the listener is the operator's explicit escape for
+         * a host that genuinely runs several nodes. */
+        setup_manager(&nm);
+        setup_localhost(&node);
+        node.inbound = true;
+        node.accepted_local_port = 8033;
+        node.whitelisted = true;
+        peer_scoring_record(&nm, &node, PEER_OFFENCE_INVALID_BLOCK, "bad");
+        ASSERT_EQ(atomic_load(&node.misbehavior), 0);
+        ASSERT(!node.disconnect);
+
+        net_set_onion_ingress_port(0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Counterpart to the two above: a ROUTABLE peer's address is its own, so
+ * banning it punishes only the offender and the address ban still fires. */
+static int test_routable_peer_still_address_banned(void)
+{
+    int failures = 0;
+    TEST("peer_scoring: a routable offender still earns a real address ban") {
+        struct net_manager nm;
+        struct p2p_node node;
+        setup_manager(&nm);
+        setup_node(&node, "test_peer_addrban", false);
+
+        peer_scoring_record(&nm, &node, PEER_OFFENCE_INVALID_BLOCK, "bad");
+        ASSERT_EQ(atomic_load(&node.misbehavior), 100);
+        ASSERT(node.disconnect);
+        ASSERT_EQ((int)nm.num_banned, 1);
+        free(nm.banned);
         PASS();
     } _test_next:;
     return failures;
@@ -714,6 +848,9 @@ int test_peer_scoring(void)
     failures += test_autoban_single_hit();
     failures += test_accumulated_hits();
     failures += test_localhost_exempt();
+    failures += test_onion_ingress_scored_never_self_banned();
+    failures += test_onion_ingress_is_narrow();
+    failures += test_routable_peer_still_address_banned();
     failures += test_whitelist_exempt();
     failures += test_linear_decay();
     failures += test_decay_floors_zero();

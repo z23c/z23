@@ -248,6 +248,37 @@ int test_tip_agreement_watch(void)
                   ok);
     }
 
+    /* The producer emits a non-empty array of flat objects when it sees rival
+     * hashes. Pin that exact shape: rejecting the array would silently remove
+     * the most important (DISAGREES) evidence from the rollup. */
+    {
+        bool ok = true;
+        static const char producer_disagreement[] =
+            "{\"ts\":1785386160,\"instance\":\"canonical\",\"rpcport\":18232,"
+            "\"window_secs\":900,\"min_distinct_peers\":2,"
+            "\"our_height\":3198906,\"height\":3198900,"
+            "\"our_tip_hash\":\"" HASH_A "\","
+            "\"modal_remote_hash\":\"" HASH_B "\","
+            "\"modal_remote_peers\":6,\"modal_remote_groups\":3,"
+            "\"disagreeing_peers\":6,\"contested_peers\":6,"
+            "\"rival_heights_unresolved\":0,\"heights_above_tip\":0,"
+            "\"disagreeing_hashes\":[{\"height\":3198900,\"hash\":\""
+            HASH_B "\",\"peers\":6}],\"peers_total\":21,"
+            "\"peers_with_height\":21,\"peers_usable\":6,"
+            "\"clusters_seen\":7,\"excluded_hosts\":0,"
+            "\"outcome\":\"disagrees\",\"reason\":\"remote_mode_differs\","
+            "\"error_detail\":\"\"}\n";
+        ok = ok && scan_text(producer_disagreement, &rep);
+        ok = ok && rep.present && rep.rows_scanned == 1;
+        ok = ok && rep.malformed_rows == 0;
+        ok = ok && rep.disagrees == 1 && rep.agrees == 0;
+        ok = ok && rep.last_disagree_ts == 1785386160LL;
+        ok = ok && rep.disagreeing_peers == 6;
+        ok = ok && rep.outcome == TIP_AGREEMENT_OUTCOME_DISAGREES;
+        ok = ok && !tip_agreement_reports_agreement(&rep);
+        TAW_CHECK("producer nonempty disagreement array remains visible", ok);
+    }
+
     /* ── (e) agreement, when all three hold ───────────────────────────── */
     {
         bool ok = true;

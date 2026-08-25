@@ -48,23 +48,64 @@ struct utxo_root_ladder_verify_result;
 struct sqlite3;
 
 enum utxo_root_ladder_tripwire_result {
-    UTXO_ROOT_LADDER_TRIPWIRE_HEALTHY  = 0,  /* no divergence (incl. all
-                                              * NOT_YET_REACHED / empty) */
-    UTXO_ROOT_LADDER_TRIPWIRE_MISMATCH = 1,  /* >=1 rung diverged; fail-closed
-                                              * (H* capped + blocker + event),
-                                              * or observe-only under the hatch */
+    UTXO_ROOT_LADDER_TRIPWIRE_HEALTHY    = 0,  /* >=1 rung actually FOUND +
+                                                * compared this call
+                                                * (compared > 0), and none
+                                                * of them diverged */
+    UTXO_ROOT_LADDER_TRIPWIRE_MISMATCH   = 1,  /* >=1 rung diverged; fail-closed
+                                                * (H* capped + blocker + event),
+                                                * or observe-only under the hatch */
+    UTXO_ROOT_LADDER_TRIPWIRE_UNVERIFIED = 2,  /* NEW: compared == 0 this
+                                                * call — NOTHING was actually
+                                                * found + byte-compared
+                                                * (empty/NULL results, or
+                                                * every examined rung was
+                                                * NOT_YET_REACHED). This is
+                                                * the vacuous-pass shape a
+                                                * naive `divergent == 0 =>
+                                                * HEALTHY` check cannot tell
+                                                * apart from a real pass —
+                                                * it is now a DISTINCT value
+                                                * so any caller branching on
+                                                * `== HEALTHY` cannot mistake
+                                                * "nothing verified" for
+                                                * "verified and fine". Purely
+                                                * a REPORTING distinction:
+                                                * no blocker, no H* cap,
+                                                * E13-neutral, same as
+                                                * HEALTHY's side effects
+                                                * (none). Does not replace or
+                                                * hide the coverage pair —
+                                                * see struct
+                                                * utxo_root_ladder_verify_
+                                                * result's compared/total,
+                                                * which remain the primitive
+                                                * a caller should read for
+                                                * the raw numbers; this enum
+                                                * is only the derived
+                                                * scalar. */
 };
 
 /* Act on a completed utxo_root_ladder_verify_against_store() call. `results`/`n`
- * are that call's own output array. Silent (HEALTHY, no blocker, no cap) when
- * every rung is MATCH or NOT_YET_REACHED. When at least one rung is DIVERGENT it
- * registers the `utxo_ladder_mismatch` typed blocker naming the FIRST divergent
- * rung's height and, by DEFAULT (fail-closed), caps H* below that height by
- * writing an ok=0 utxo_apply_log verdict there via `db` (the live progress.kv
- * handle) — so pass the same handle the verify read from. `db` NULL skips only
- * the cap write (the blocker/event still fire); the env
- * ZCL_UTXO_LADDER_OBSERVE_ONLY suppresses the cap and keeps a PERMANENT
- * evidence-only blocker. `results` NULL or `n` 0 is a no-op HEALTHY return. */
+ * are that call's own output array — this reads `results[0].compared` (all
+ * entries carry the same coverage pair) when `n > 0`.
+ *
+ * Verdict precedence (AGREEMENT and COVERAGE compose, they do not collapse
+ * into one another):
+ *   1. Any rung DIVERGENT (AGREEMENT found a real disagreement, which can
+ *      only happen on a compared rung) => MISMATCH, unchanged from before:
+ *      registers the `utxo_ladder_mismatch` typed blocker naming the FIRST
+ *      divergent rung's height and, by DEFAULT (fail-closed), caps H* below
+ *      that height by writing an ok=0 utxo_apply_log verdict there via `db`
+ *      (the live progress.kv handle) — so pass the same handle the verify
+ *      read from. `db` NULL skips only the cap write (the blocker/event
+ *      still fire); the env ZCL_UTXO_LADDER_OBSERVE_ONLY suppresses the cap
+ *      and keeps a PERMANENT evidence-only blocker.
+ *   2. Else, if COVERAGE is zero (`results` NULL, `n` 0, or every examined
+ *      rung is NOT_YET_REACHED so `compared == 0`) => UNVERIFIED. No
+ *      blocker, no cap — reporting-only.
+ *   3. Else (>=1 rung was actually compared and none diverged) => HEALTHY.
+ *      No blocker, no cap. */
 enum utxo_root_ladder_tripwire_result
 utxo_root_ladder_tripwire_report(struct sqlite3 *db,
                                  const struct utxo_root_ladder_verify_result *results,

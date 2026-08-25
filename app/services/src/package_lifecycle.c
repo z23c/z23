@@ -82,9 +82,9 @@ static const struct vcs_package_release *pkgl_release_for_name_semver(
 /* `name_or_root` is 64 hex (identity), "publisher/package@semver" (an exact
  * version selection), or "publisher/package" (a selection that resolves to
  * the highest published semver). Every later lifecycle step is root-pinned. */
-static struct zcl_result pkgl_resolve_target(const struct pkgl_ctx *ctx,
-                                             const char *name_or_root,
-                                             uint8_t out_root[32])
+struct zcl_result pkgl_resolve_target(const struct pkgl_ctx *ctx,
+                                      const char *name_or_root,
+                                      uint8_t out_root[32])
 {
     if (!name_or_root || !name_or_root[0])
         return ZCL_ERR(-1, "name_or_root is required");

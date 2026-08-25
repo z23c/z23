@@ -103,6 +103,153 @@ void ParseParameters(int argc, const char *const argv[])
     }
 }
 
+
+/* ── the node's own config file ────────────────────────────────────────────
+ *
+ * ParseParameters() reads argv and nothing else, so before this existed a
+ * setting could only be delivered by editing the service unit's ExecStart.
+ * `z23 join` has to be able to persist -packagehost/-buildworker for the NEXT
+ * boot without touching systemd and without ever restarting the node itself,
+ * which is what this reader is for.
+ *
+ * PRECEDENCE: the command line ALWAYS wins. A key already present in g_args
+ * (i.e. supplied on argv) is left exactly as parsed; the file only fills keys
+ * argv did not mention. That ordering is what keeps a unit's ExecStart the
+ * final authority on a running fleet node.
+ *
+ * `-datadir` and `-conf` are deliberately IGNORED from inside the file: the
+ * file's own path is derived from the datadir, so honouring a datadir there
+ * would mean the file could relocate the directory it was just read out of.
+ */
+int ReadConfigFile(const char *path)
+{
+    if (!path || !path[0])
+        return -1;
+    FILE *f = fopen(path, "re");
+    if (!f)
+        return -1;
+
+    int applied = 0;
+    char line[MAX_ARG_LEN * 2];
+    while (fgets(line, sizeof(line), f)) {
+        char *s = line;
+        char *hash = strchr(s, '#');
+        if (hash)
+            *hash = '\0';
+        while (*s == ' ' || *s == '\t')
+            s++;
+        size_t n = strlen(s);
+        while (n > 0 && (s[n - 1] == '\n' || s[n - 1] == '\r' ||
+                         s[n - 1] == ' ' || s[n - 1] == '\t'))
+            s[--n] = '\0';
+        if (n == 0)
+            continue;
+
+        /* A leading dash is optional: both `packagehost=1` and
+         * `-packagehost=1` name the same flag, so a line copy-pasted out of
+         * an ExecStart works unchanged. */
+        if (*s == '-')
+            s++;
+        if (!*s)
+            continue;
+
+        char key[MAX_ARG_LEN];
+        char value[MAX_ARG_LEN];
+        char *eq = strchr(s, '=');
+        if (eq) {
+            size_t klen = (size_t)(eq - s);
+            /* Trim space between the key and the '=' so `packagehost = 1`
+             * is not read as a flag literally named "packagehost ". */
+            while (klen > 0 && (s[klen - 1] == ' ' || s[klen - 1] == '\t'))
+                klen--;
+            if (klen == 0 || klen >= MAX_ARG_LEN - 1)
+                continue;
+            memcpy(key + 1, s, klen);
+            key[0] = '-';
+            key[klen + 1] = '\0';
+            const char *v = eq + 1;
+            while (*v == ' ' || *v == '\t')
+                v++;
+            snprintf(value, sizeof(value), "%s", v);
+        } else {
+            if (strlen(s) >= MAX_ARG_LEN - 1)
+                continue;
+            key[0] = '-';
+            snprintf(key + 1, sizeof(key) - 1, "%s", s);
+            /* Bare `-flag` is TRUE, matching ParseParameters' present-but-
+             * empty rule (GetBoolArg reads an empty value as true). */
+            value[0] = '\0';
+        }
+
+        if (strcmp(key, "-datadir") == 0 || strcmp(key, "-conf") == 0)
+            continue;
+        if (find_arg(key) >= 0)   /* argv already decided this one */
+            continue;
+        if (g_nargs >= MAX_ARGS)
+            break;
+        snprintf(g_args[g_nargs].key, MAX_ARG_LEN, "%s", key);
+        snprintf(g_args[g_nargs].value, MAX_ARG_LEN, "%s", value);
+        g_nargs++;
+        applied++;
+    }
+    fclose(f);
+    return applied;
+}
+
+/* <datadir>/z23.conf for the CURRENT argv, without creating anything. The
+ * deliberate difference from GetDataDir() is that this never mkdir()s and
+ * never populates the datadir cache: resolving a config-file path must not
+ * be the thing that mints an operator's data directory (`z23 help` on a
+ * fresh box would otherwise leave one behind). */
+void GetConfigFilePath(const char *datadir, char *out, size_t out_size)
+{
+    if (!out || out_size == 0)
+        return;
+    char dir[4096];
+    if (datadir && datadir[0]) {
+        snprintf(dir, sizeof(dir), "%s", datadir);
+    } else {
+        int idx = find_arg("-datadir");
+        if (idx >= 0 && g_args[idx].value[0])
+            snprintf(dir, sizeof(dir), "%s", g_args[idx].value);
+        else
+            GetDefaultDataDir(dir, sizeof(dir));
+    }
+    snprintf(out, out_size, "%s/%s", dir, ZCL_NODE_CONFIG_FILENAME);
+}
+
+/* -datadir= / --datadir= from ANYWHERE in argv.
+ *
+ * The argument TABLE cannot answer this on its own: ParseParameters stops at
+ * the first token that does not begin with '-', so for a CLI invocation like
+ * `z23 zcode work toolchain -datadir=/tmp/x` it parses nothing at all and
+ * find_arg("-datadir") returns the default. Resolving the config file from
+ * that table would silently read the WRONG datadir's config — the operator's
+ * live node instead of the instance they named. Scanning argv directly is the
+ * same "scanned anywhere in argv" rule src/main.c already applies to its other
+ * mode selectors. Returns false when no -datadir was given. */
+bool ArgvDataDir(int argc, const char *const argv[], char *out, size_t out_size)
+{
+    if (!out || out_size == 0)
+        return false;
+    out[0] = '\0';
+    if (!argv)
+        return false;
+    for (int i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        if (!a)
+            continue;
+        if (a[0] == '-' && a[1] == '-')
+            a++;
+        if (strncmp(a, "-datadir=", 9) != 0)
+            continue;
+        if (!a[9])
+            continue;
+        snprintf(out, out_size, "%s", a + 9);
+        return true;
+    }
+    return false;
+}
 const char *GetArg(const char *arg, const char *default_val)
 {
     int idx = find_arg(arg);

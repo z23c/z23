@@ -172,6 +172,40 @@ changed_file_hints() {
     git ls-files --others --exclude-standard
 }
 
+# True when the caller handed us an explicit changed-file list. The pre-push
+# hook always does; a human or an agent typing `make pre-push-ci` never does.
+explicit_changed_file_hints() {
+    [ -n "${ZCL_FAST_CHANGED_FILES_FILE:-}" ] || [ -n "${ZCL_FAST_CHANGED_FILES:-}" ]
+}
+
+# The commits this branch would push, as a file list.
+#
+# WHY THIS EXISTS. changed_file_hints() reads the WORKING TREE — unstaged,
+# staged, untracked. That is right for the edit loop, and exactly wrong for a
+# push gate: by the time you push, your changes are COMMITTED and the tree is
+# clean, so the set is empty, nothing maps to a group, and
+# run_mapped_focused_tests prints `count=0` and returns success. `make
+# pre-push-ci` on a clean tree therefore printed PASS having executed zero
+# test groups — a green receipt for an untested commit.
+#
+# The hook (tools/githooks/pre-push) was never affected: it computes the
+# pushed range from the refs git hands it and passes it in explicitly. This
+# fallback only fires when nobody supplied a list, which is precisely the
+# by-hand invocation that was silently vacuous.
+#
+# The range is @{upstream} when the branch tracks one, else origin/main —
+# and merge-base, not a two-dot diff, so an origin/main that has moved ahead
+# does not read as this branch deleting everything landed since it forked.
+pushed_range_files() {
+    local base upstream
+    upstream="$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)"
+    [ -n "$upstream" ] || upstream="origin/main"
+    git rev-parse --verify --quiet "$upstream" >/dev/null 2>&1 || return 0
+    base="$(git merge-base "$upstream" HEAD 2>/dev/null || true)"
+    [ -n "$base" ] || return 0
+    git diff --name-only "$base" HEAD -- 2>/dev/null || true
+}
+
 add_group() {
     local group="$1"
     case " $TEST_GROUPS " in
@@ -820,6 +854,7 @@ run_shell_checks() {
     # therefore reattach without paying their cost on every warm interaction.
     make_fast watcher-safety-gates
     tools/agent_fast_ci.sh receipt-selftest
+    tools/agent_fast_ci.sh changed-set-selftest
     for script in tools/agent_fast_ci.sh tools/githooks/pre-push \
         tools/deploy_guard.sh tools/deploy_verify.sh \
         tools/dev/deploy-dev-lane.sh tools/dev/agent-dev-status.sh \
@@ -916,6 +951,84 @@ focused_receipt_selftest() {
         fail "focused receipt selftest accepted a missing machine verdict"
     fi
     log "PASS: focused receipt authority selftest"
+}
+
+# Prove the push gate cannot grade an empty input set.
+#
+# Driven against a THROWAWAY repository, never this checkout: the property
+# under test is "a clean worktree whose HEAD is ahead of its upstream still
+# yields the committed file list", and the only honest way to assert that is
+# to build exactly that situation. Three shapes, each the state a real push
+# can be in:
+#
+#   committed-and-clean  -> the pushed range, NOT the empty worktree diff.
+#                           This is the case that used to report count=0
+#                           and PASS.
+#   nothing-to-push      -> genuinely empty. Empty is the right answer here
+#                           and must stay distinguishable from the case
+#                           above, which is why the log names its source.
+#   upstream-moved-ahead -> merge-base, so files landed on the upstream
+#                           since this branch forked are NOT reported as
+#                           this push deleting them.
+changed_set_selftest() {
+    local tmp out
+    tmp="$(mktemp -d)"
+    # Expanded NOW, not at trap time: the RETURN trap fires in the caller's
+    # scope where the local $tmp no longer exists, and set -u would abort.
+    trap "rm -rf '$tmp'" RETURN
+
+    git -C "$tmp" init -q -b main
+    git -C "$tmp" config user.email selftest@localhost
+    git -C "$tmp" config user.name selftest
+    : >"$tmp/base.c"
+    git -C "$tmp" add base.c
+    git -C "$tmp" commit -qm base
+    git -C "$tmp" branch -q upstream-ref
+    git -C "$tmp" config branch.main.remote .
+    git -C "$tmp" config branch.main.merge refs/heads/upstream-ref
+
+    # nothing-to-push: HEAD is its upstream.
+    out="$(cd "$tmp" && ROOT="$tmp" pushed_range_files)"
+    [ -z "$out" ] ||
+        fail "changed-set selftest: an unmoved HEAD reported files: $out"
+
+    # committed-and-clean: the worktree diff is empty, the push is not.
+    : >"$tmp/pushed.c"
+    git -C "$tmp" add pushed.c
+    git -C "$tmp" commit -qm pushed
+    [ -z "$(git -C "$tmp" status --porcelain)" ] ||
+        fail "changed-set selftest: fixture worktree is not clean"
+    out="$(cd "$tmp" && ROOT="$tmp" pushed_range_files)"
+    [ "$out" = "pushed.c" ] ||
+        fail "changed-set selftest: clean tree with a committed change reported '$out', expected pushed.c"
+
+    # upstream-moved-ahead: a file landed upstream after the fork must not
+    # appear as though this branch removed it.
+    git -C "$tmp" checkout -q upstream-ref
+    : >"$tmp/theirs.c"
+    git -C "$tmp" add theirs.c
+    git -C "$tmp" commit -qm theirs
+    git -C "$tmp" checkout -q main
+    out="$(cd "$tmp" && ROOT="$tmp" pushed_range_files)"
+    [ "$out" = "pushed.c" ] ||
+        fail "changed-set selftest: an advanced upstream reported '$out', expected pushed.c"
+
+    # In a subshell with the variables explicitly cleared: this self-test runs
+    # from inside the pre-push hook, which legitimately EXPORTS both of them,
+    # and an assertion that reads ambient state tests the caller rather than
+    # the predicate. (Caught by this self-test failing under the hook on its
+    # first real run.)
+    if ( unset ZCL_FAST_CHANGED_FILES_FILE ZCL_FAST_CHANGED_FILES
+         explicit_changed_file_hints ); then
+        fail "changed-set selftest: hints reported present with none set"
+    fi
+    if ! ( unset ZCL_FAST_CHANGED_FILES_FILE
+           ZCL_FAST_CHANGED_FILES="a.c"
+           explicit_changed_file_hints ); then
+        fail "changed-set selftest: an explicit list was not detected"
+    fi
+
+    log "PASS: pre-push changed-set resolver selftest"
 }
 
 run_test_proof() {
@@ -1219,12 +1332,45 @@ compile_affected_gate() {
     log "compile scope=affected_translation_units count=$count"
 }
 
+# Resolve WHAT this push is gating, before anything is selected.
+#
+# A push gate whose input set is empty grades nothing and says PASS. That is
+# the one failure mode a gate must not have, so this refuses to guess: it
+# uses the caller's explicit list when there is one, falls back to the
+# committed pushed range when the working tree is clean, and states which
+# source it used in the log either way. merge-base, not a two-dot diff, keeps
+# the file set correct even when origin/main has moved ahead of this branch;
+# the hook separately refuses a push whose remote main is not yet integrated.
+pre_push_resolve_changed_set() {
+    local tmp count
+    if explicit_changed_file_hints; then
+        log "pre-push changed-set source=caller count=$(changed_file_count)"
+        return
+    fi
+    count="$(changed_file_count)"
+    if [ "$count" != "0" ]; then
+        log "pre-push changed-set source=worktree count=$count"
+        return
+    fi
+    tmp="$ROOT/build/pre-push-changed-files.txt"
+    mkdir -p "$ROOT/build" 2>/dev/null || true
+    pushed_range_files | sed '/^$/d' | sort -u >"$tmp" || true
+    count="$(wc -l <"$tmp" | tr -d ' ')"
+    ZCL_FAST_CHANGED_FILES_FILE="$tmp"
+    ZCL_FAST_CHANGED_FILES_ONLY=1
+    export ZCL_FAST_CHANGED_FILES_FILE ZCL_FAST_CHANGED_FILES_ONLY
+    log "pre-push changed-set source=pushed-range count=$count list=$tmp"
+    if [ "$count" = "0" ]; then
+        log "pre-push has nothing to gate: the working tree is clean and HEAD matches its upstream"
+    fi
+}
+
 run_mapped_focused_tests() {
     local exact_groups exact_csv count=0 output rc
     [ -z "$UNMAPPED_CODE_CHANGES" ] ||
         fail "unmapped code changes require an impact rule: $UNMAPPED_CODE_CHANGES"
     if [ -z "$TEST_GROUPS" ]; then
-        log "focused test scope=mapped_groups count=0"
+        log "focused test scope=mapped_groups count=0 reason=no-mapped-group-in-changed-set"
         return
     fi
     exact_groups="$(tools/dev/test-group-list.sh --resolve-proof $TEST_GROUPS)" ||
@@ -1275,6 +1421,10 @@ main() {
     case "$mode" in
         cache-selftest|--cache-selftest)
             cache_authority_selftest
+            return
+            ;;
+        changed-set-selftest|--changed-set-selftest)
+            changed_set_selftest
             return
             ;;
         receipt-selftest|--receipt-selftest)
@@ -1365,6 +1515,7 @@ main() {
         pre-push)
             # Push gate: strict compile + lint-fast + mapped focused tests.
             # A missing impact rule must not expand to the 941-group suite.
+            pre_push_resolve_changed_set
             select_test_groups
             log "pre-push focused groups=${TEST_GROUPS:-none} unmapped=${UNMAPPED_CODE_CHANGES:-none}"
             run_shell_checks

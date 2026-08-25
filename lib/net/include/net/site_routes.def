@@ -160,3 +160,19 @@ SITE_ROUTE(market_chunk, "/market/chunk",
            NONE, NONE, NONE,
            NULL, NULL, NULL, NULL,
            "Paid file chunk delivery is unavailable.\n", NULL)
+
+/* The observation document — services/mesh_observation.h. Onion-only by
+ * construction: it is served to PEERS, and the reader that fetches it is
+ * another node, never a browser. The torv3 address IS the publisher's
+ * ed25519 public key, so the transport authenticates the document and no
+ * signature key needs to exist — a signing key would create an identity
+ * readers must TRUST, which is the authority shape this surface removes.
+ * Before the first sample the handler returns 0 and the flavor's 503 says
+ * so by name: an unsampled node has nothing, rather than an
+ * empty-but-healthy document. */
+SITE_ROUTE(observation, "/observation.json",
+           observation_site_handle_request, ONIONCLOSED,
+           0, ZCL_SITE_COST_CHEAP, "",
+           NONE, NONE, NONE,
+           NULL, NULL, NULL, NULL,
+           "Observation record unavailable.\n", NULL)

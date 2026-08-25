@@ -764,17 +764,6 @@ static void lookup3_xy_padded(struct constraint_system *cs,
     }
 }
 
-/* lookup3_xy: 3-bit window table lookup, all three bits real wires.
- * 3 constraints: 1 AND(b1,b2) + 1 x-enforce + 1 y-enforce. */
-void gadget_lookup3_xy(struct constraint_system *cs,
-                        size_t b0, size_t b1, size_t b2,
-                        const struct fr coords_x[8],
-                        const struct fr coords_y[8],
-                        size_t *rx, size_t *ry)
-{
-    lookup3_xy_padded(cs, b0, b1, b2, false, false, coords_x, coords_y, rx, ry);
-}
-
 /* ── Fixed-Base Scalar Multiplication (windowed) ───────────────── */
 
 void gadget_fixed_base_mul(struct constraint_system *cs,

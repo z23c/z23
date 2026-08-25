@@ -1,0 +1,30 @@
+# node2 install identity — convenience tier, never security-critical.
+
+BOX=node2
+ID_SCHEME=z23-install-v1
+INSTALL_ID=a4ae992f3676dd4fd44695b52b6b48fb3bfd51a20886de28721a2037ae9e36e7
+MACHINE_TAG=a42ea2b9ef83299924fe8eaa6380b539897360b6749a82c62b246f0320343027
+BOOT_TAG=c4f0ee4a15fbcf7b0843ef6e392bf3c6506aa7802beec5343999cffedb90d2d3
+CLAIM=identifies-this-installation-only-not-hardware
+OBSERVED=2026-08-25
+
+# Every value above is sha256(SALT || raw) with the salt held only in the
+# operator env. Raw host keys and machine-id are never committed: a raw
+# hostkey hash would let anyone with internet scan data match a scanned
+# address to this box, which is exactly what committing onions avoids.
+#
+# RECIPE for INSTALL_ID, for a reader who holds the salt:
+#   { printf "%s\\n" "$ZCL_FLEET_ID_SALT"; \
+#     cat /etc/ssh/ssh_host_*.pub | awk "NF>=2 {print \$1, \$2}" \
+#       | LC_ALL=C sort | sha256sum | cut -d" " -f1; } | sha256sum
+# The trailing key comment is dropped on purpose: renaming the host must
+# not move the name of the installation.
+#
+# No address appears here, per the devfleet privacy rule. Where the box
+# answers is reachability, not identity, and lives in the operator env.
+#
+# BOOT_TAG changes on every reboot by design. It is recorded to explain
+# heartbeat gaps and is NOT part of the pin.
+#
+# METAL_TIER is an optional owner-gated field that is absent here, which is
+# normal. Nothing reads for it, nothing waits on it.

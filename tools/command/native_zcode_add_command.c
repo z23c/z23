@@ -5,6 +5,10 @@
  *   zcode package add plan     what installing <name_or_root> would do
  *   zcode package add commit   do exactly that plan, or refuse and say why
  *   zcode package rollback     re-activate the previous generation
+ *   zcode package reproduce    rebuild one installed package under the
+ *                              standard profile and file the second,
+ *                              distinct build receipt on a byte-identical
+ *                              MATCH
  *
  * These handlers parse request JSON and render reply JSON. Every decision —
  * resolution, the dependency lock, verification, the confined build, the
@@ -20,6 +24,7 @@
 #include "platform/time_compat.h"
 #include "services/package_lifecycle.h"
 #include "vcs/package_checkout.h"
+#include "vcs/package_reproduce.h"
 #include "vcs/package_store.h"
 
 #include <stdio.h>
@@ -435,4 +440,71 @@ void zcl_native_handle_zcode_package_rollback(
         &reply->data, "note",
         "rollback appends a new generation naming the older root — history "
         "is never rewritten and both installs remain on disk");
+}
+
+/* ── zcode package reproduce ────────────────────────────────────────── */
+
+void zcl_native_handle_zcode_package_reproduce(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply)
+{
+    if (!request || !reply)
+        return;
+    const char *command = "zcode.package.reproduce";
+    const char *datadir = za_datadir(request, reply, command);
+    if (!datadir)
+        return;
+    const char *name_or_root = za_input_str(request->input, "name_or_root");
+    if (!name_or_root || !name_or_root[0]) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "MISSING_NAME_OR_ROOT",
+                               "normalize", false, false,
+                               "name_or_root is required (a 64-hex package "
+                               "root, publisher/package, or name@semver)",
+                               command);
+        return;
+    }
+
+    struct package_lifecycle_reproduce_report report;
+    struct zcl_result r = package_lifecycle_reproduce(datadir, name_or_root,
+                                                      &report);
+    if (report.name[0])
+        (void)json_push_kv_str(&reply->data, "name", report.name);
+    if (report.semver[0])
+        (void)json_push_kv_str(&reply->data, "semver", report.semver);
+    if (!r.ok) {
+        /* The named rule plus the compare verdict (when the rebuild ran)
+         * explain exactly why nothing was filed. */
+        (void)json_push_kv_str(
+            &reply->data, "match_rule",
+            vcs_reproduce_rule_string(
+                (enum vcs_reproduce_rule)report.compare_rule));
+        if (report.compare_detail[0])
+            (void)json_push_kv_str(&reply->data, "match_detail",
+                                   report.compare_detail);
+        za_fail(reply, report.rule[0] ? report.rule : "reproduce-failed",
+                r.message, command);
+        return;
+    }
+    za_push_hex(&reply->data, "package_root", report.root);
+    za_push_hex(&reply->data, "reference_receipt_id",
+                report.reference_receipt_id);
+    za_push_hex(&reply->data, "receipt_id", report.receipt_id);
+    (void)json_push_kv_bool(&reply->data, "reproduced", report.matched);
+    (void)json_push_kv_str(
+        &reply->data, "match_rule",
+        vcs_reproduce_rule_string(
+            (enum vcs_reproduce_rule)report.compare_rule));
+    char filed_rel[96];
+    char id_hex[65];
+    zcl_hex_encode(report.receipt_id, 32, id_hex);
+    (void)snprintf(filed_rel, sizeof(filed_rel), "receipts/%s", id_hex);
+    (void)json_push_kv_str(&reply->data, "filed_receipt", filed_rel);
+    (void)json_push_kv_bool(&reply->data, "filed", report.filed);
+    (void)json_push_kv_str(
+        &reply->data, "note",
+        "the second, distinct receipt is filed under "
+        "<datadir>/zcode/receipts/; 'zcode package verify' now reports "
+        "reproduced=true for this package (two distinct receipt ids, "
+        "byte-identical output sets)");
 }

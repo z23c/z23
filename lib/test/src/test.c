@@ -1225,6 +1225,8 @@ int main(int argc, char **argv)
       failures += test_wallet_metadata_encryption(); }
     { extern int test_transaction_intent(void);
       failures += test_transaction_intent(); }
+    { extern int test_node_config_file(void);
+      failures += test_node_config_file(); }
     failures += test_scan_util();
     failures += test_tor();
     { extern int test_onion_bootstrap(void);
@@ -1258,6 +1260,9 @@ int main(int argc, char **argv)
     { extern int test_check_tx_edge(void);        failures += test_check_tx_edge(); }
     { extern int test_check_block_edge(void);     failures += test_check_block_edge(); }
     { extern int test_amount_subsidy_edge(void);  failures += test_amount_subsidy_edge(); }
+    /* Forward-facing schedule digest: catches a rule gated on a height we
+     * have not reached, which every past-facing check passes by construction. */
+    { extern int test_consensus_rule_sweep(void); failures += test_consensus_rule_sweep(); }
     { extern int test_clientversion_format(void); failures += test_clientversion_format(); }
     { extern int test_locktime_edge(void);        failures += test_locktime_edge(); }
     /* Consensus-parity round-3 lock-in pins (assert CURRENT zcl23-vs-zclassicd
@@ -1689,6 +1694,8 @@ int main(int argc, char **argv)
       failures += test_zcode_discovery_projection(); }
     { extern int test_metaverse_catalog(void); failures += test_metaverse_catalog(); }
     { extern int test_site_routes(void); failures += test_site_routes(); }
+    { extern int test_mesh_observation(void); failures += test_mesh_observation(); }
+    { extern int test_mesh_observation_compose(void); failures += test_mesh_observation_compose(); }
     { extern int test_space(void); failures += test_space(); }
     { extern int test_space_scout(void); failures += test_space_scout(); }
     { extern int test_vcs_devloop(void); failures += test_vcs_devloop(); }

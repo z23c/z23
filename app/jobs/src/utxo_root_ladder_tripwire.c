@@ -50,8 +50,21 @@ utxo_root_ladder_tripwire_report(sqlite3 *db,
                                  const struct utxo_root_ladder_verify_result *results,
                                  size_t n)
 {
-    if (!results || n == 0)
-        return UTXO_ROOT_LADDER_TRIPWIRE_HEALTHY;
+    /* COVERAGE pair for this call — identical on every entry `results`
+     * writes (struct utxo_root_ladder_verify_result's doc comment). This
+     * is REPORTING-ONLY telemetry: it is read here to pick a verdict
+     * label, never to gate accept/reject, a blocker, or the H* cap —
+     * those still key exclusively off `divergent` below, unchanged from
+     * before this fix. */
+    size_t compared = (results && n > 0) ? results[0].compared : 0;
+    size_t total    = (results && n > 0) ? results[0].total    : n;
+
+    if (!results || n == 0) {
+        LOG_INFO("utxo_ladder",
+                "UNVERIFIED: no ladder rungs examined this call (n=%zu) — "
+                "nothing to compare yet; NOT a HEALTHY verdict", n);
+        return UTXO_ROOT_LADDER_TRIPWIRE_UNVERIFIED;
+    }
 
     int32_t first_divergent_height = -1;
     size_t divergent = 0;
@@ -63,8 +76,25 @@ utxo_root_ladder_tripwire_report(sqlite3 *db,
         }
     }
 
-    if (divergent == 0)
-        return UTXO_ROOT_LADDER_TRIPWIRE_HEALTHY;  /* MATCH / NOT_YET_REACHED only */
+    if (divergent == 0) {
+        if (compared == 0) {
+            /* AGREEMENT (divergent==0) alone is a VACUOUS pass here: every
+             * examined rung was NOT_YET_REACHED, so nothing was actually
+             * byte-compared this call (COVERAGE == 0). This is exactly the
+             * shape that let the shipped ladder (count==1, its one rung
+             * absent from this node's own boundary-root store) read as
+             * HEALTHY before this fix. Report UNVERIFIED instead — purely
+             * a reporting distinction: no blocker, no cap, same (zero)
+             * side effects as HEALTHY, E13-neutral. */
+            LOG_INFO("utxo_ladder",
+                    "UNVERIFIED: compared=0 of total=%zu locked rung(s) — "
+                    "no comparison has actually happened on this node yet; "
+                    "NOT a HEALTHY verdict", total);
+            return UTXO_ROOT_LADDER_TRIPWIRE_UNVERIFIED;
+        }
+        return UTXO_ROOT_LADDER_TRIPWIRE_HEALTHY;  /* >=1 rung genuinely
+            * found + compared (compared > 0) and none of them diverged */
+    }
 
     /* The ladder is an immutable commitment over frozen history, so a divergence
      * here means THIS node's own coins_kv boundary-root store no longer
@@ -73,17 +103,20 @@ utxo_root_ladder_tripwire_report(sqlite3 *db,
      * to the historical evidence-only posture. */
     bool observe_only = getenv("ZCL_UTXO_LADDER_OBSERVE_ONLY") != NULL;
 
-    /* The DEFAULT (fail-closed) form is 324 bytes — a 256-byte local cut it at
-     * "...advance holds ", i.e. mid-sentence in the exact clause that tells the
-     * operator H* is capped and what lifts the cap. The observe-only form fits
-     * (251), which made the truncation look like it did not exist. Build whole,
-     * then mark and log the cut. */
+    /* The DEFAULT (fail-closed) form previously ran to 324 bytes on its own — a
+     * 256-byte local cut it at "...advance holds ", i.e. mid-sentence in the
+     * exact clause that tells the operator H* is capped and what lifts the
+     * cap; adding the coverage clause below only makes this longer. Build
+     * whole into an oversized local, then mark and log the cut via
+     * zcl_text_fit() (never silent: it leaves an in-band [cut N/cap] marker
+     * and WARN-logs the full untruncated text either way). */
     char full[BLOCKER_REASON_MAX * 2];
     snprintf(full, sizeof(full),
-             "utxo root ladder mismatch: %zu of %zu locked rung(s) diverged, "
-             "first at h=%d (this node's own coins_kv boundary root differs from "
-             "the locked golden-height ladder — state-wrong-coin class). %s",
-             divergent, n, first_divergent_height,
+             "utxo root ladder mismatch: %zu of %zu locked rung(s) diverged "
+             "(coverage: %zu of %zu compared this call), first at h=%d (this "
+             "node's own coins_kv boundary root differs from the locked "
+             "golden-height ladder — state-wrong-coin class). %s",
+             divergent, n, compared, total, first_divergent_height,
              observe_only
                  ? "OBSERVE-ONLY (ZCL_UTXO_LADDER_OBSERVE_ONLY): H* not capped."
                  : "FAIL-CLOSED: H* capped below the divergent rung; advance "

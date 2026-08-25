@@ -237,6 +237,20 @@ struct recovery_exec_result {
     struct zcl_result status; /* rich status for recovery execution */
     bool skip_activate;     /* caller should skip reducer activation */
     bool recovered;         /* a recovery action was taken */
+    /* A BULK reload of the projection tables (utxos / transactions /
+     * tx_outputs / tx_inputs / ...) is about to run, so the caller may drop
+     * the secondary indexes and rebuild them once at the end. Set ONLY by the
+     * wipe / reset-to-genesis path.
+     *
+     * Refusing to wipe (recover_stale_metadata) sets `recovered` but must NOT
+     * set this: nothing bulk-loads afterwards, so dropping the indexes there
+     * opens a ~2 s window and then pays a full rebuild of every projection
+     * index on the next normal_mode call. Measured on a 6.74 GB node.db: the
+     * drop frees 452,715 pages = 1,854 MB of index B-tree, and rebuilding it
+     * costs 36.9 s on NVMe with a fully warm page cache. On a seek-bound disk
+     * the sort runs cannot stay resident and it degrades to an external merge
+     * sort against a ~120-IOPS spindle. */
+    bool bulk_reload_pending;
 };
 
 enum utxo_count_check_level {

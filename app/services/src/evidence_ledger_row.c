@@ -46,24 +46,263 @@ const char *evidence_find_sub(const char *hay, size_t len, const char *needle)
     return NULL;
 }
 
-/* Locate `"key":` in one row and return the first byte of its value, or NULL.
- * Deliberately simple: rows are flat, single-line, unnested JSON with no
- * duplicate keys (see the header). */
+enum {
+    EVIDENCE_FLAT_KEY_CAP = 64,
+    EVIDENCE_ARRAY_OBJECT_KEY_CAP = 16
+};
+
+struct key_span {
+    const char *at;
+    size_t len;
+};
+
+static const char *row_ws(const char *p, const char *end)
+{
+    while (p < end && (*p == ' ' || *p == '\t' || *p == '\r'))
+        p++;
+    return p;
+}
+
+static bool row_hex(char c)
+{
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+           (c >= 'A' && c <= 'F');
+}
+
+/* Skip one valid JSON string. Keys set reject_escape because ledger field
+ * names are fixed ASCII tokens; accepting an escaped spelling would make
+ * duplicate-key comparison ambiguous. */
+static bool row_skip_string(const char **pp, const char *end,
+                            const char **content, size_t *content_len,
+                            bool reject_escape)
+{
+    const char *p = *pp;
+    if (p >= end || *p != '"')
+        return false; // raw-return-ok:pure-flat-row-predicate
+    p++;
+    const char *start = p;
+    while (p < end && *p != '"') {
+        unsigned char c = (unsigned char)*p;
+        if (c < 0x20)
+            return false; // raw-return-ok:pure-flat-row-predicate
+        if (*p == '\\') {
+            if (reject_escape)
+                return false; // raw-return-ok:pure-flat-row-predicate
+            p++;
+            if (p >= end)
+                return false; // raw-return-ok:pure-flat-row-predicate
+            if (*p == 'u') {
+                for (unsigned i = 0; i < 4; i++) {
+                    p++;
+                    if (p >= end || !row_hex(*p))
+                        return false; // raw-return-ok:pure-flat-row-predicate
+                }
+            } else if (!strchr("\"\\/bfnrt", *p)) {
+                return false; // raw-return-ok:pure-flat-row-predicate
+            }
+        }
+        p++;
+    }
+    if (p >= end)
+        return false; // raw-return-ok:pure-flat-row-predicate
+    if (content)
+        *content = start;
+    if (content_len)
+        *content_len = (size_t)(p - start);
+    *pp = p + 1;
+    return true;
+}
+
+static bool row_skip_scalar(const char **pp, const char *end)
+{
+    const char *p = *pp;
+    if (p >= end)
+        return false; // raw-return-ok:pure-flat-row-predicate
+    if (*p == '"') {
+        if (!row_skip_string(&p, end, NULL, NULL, false))
+            return false; // raw-return-ok:pure-flat-row-predicate
+    } else if ((size_t)(end - p) >= 4 && memcmp(p, "true", 4) == 0) {
+        p += 4;
+    } else if ((size_t)(end - p) >= 5 && memcmp(p, "false", 5) == 0) {
+        p += 5;
+    } else if ((size_t)(end - p) >= 4 && memcmp(p, "null", 4) == 0) {
+        p += 4;
+    } else {
+        if (*p == '-')
+            p++;
+        if (p >= end || *p < '0' || *p > '9')
+            return false; // raw-return-ok:pure-flat-row-predicate
+        if (*p == '0') {
+            p++;
+        } else {
+            while (p < end && *p >= '0' && *p <= '9')
+                p++;
+        }
+    }
+    *pp = p;
+    return true;
+}
+
+/* The tip-agreement recorder's disagreeing_hashes field is an array of
+ * {height,hash,peers} objects. Accept exactly that bounded structural class:
+ * flat objects with unique ASCII keys and scalar values. No object may nest
+ * another container, and the fixed key cap bounds stack and comparison work. */
+static bool row_skip_array_object(const char **pp, const char *end)
+{
+    const char *p = *pp;
+    if (p >= end || *p != '{')
+        return false; // raw-return-ok:pure-flat-row-predicate
+    p = row_ws(p + 1, end);
+    if (p < end && *p == '}') {
+        *pp = p + 1;
+        return true;
+    }
+
+    struct key_span keys[EVIDENCE_ARRAY_OBJECT_KEY_CAP];
+    size_t key_count = 0;
+    for (;;) {
+        const char *key_at = NULL;
+        size_t key_len = 0;
+        if (!row_skip_string(&p, end, &key_at, &key_len, true) ||
+            key_len == 0 || key_count >= EVIDENCE_ARRAY_OBJECT_KEY_CAP)
+            return false; // raw-return-ok:pure-flat-row-predicate
+        for (size_t i = 0; i < key_count; i++) {
+            if (keys[i].len == key_len &&
+                memcmp(keys[i].at, key_at, key_len) == 0)
+                return false; // raw-return-ok:pure-flat-row-predicate
+        }
+        keys[key_count++] = (struct key_span){ key_at, key_len };
+        p = row_ws(p, end);
+        if (p >= end || *p != ':')
+            return false; // raw-return-ok:pure-flat-row-predicate
+        p = row_ws(p + 1, end);
+        if (!row_skip_scalar(&p, end))
+            return false; // raw-return-ok:pure-flat-row-predicate
+        p = row_ws(p, end);
+        if (p < end && *p == ',') {
+            p = row_ws(p + 1, end);
+            continue;
+        }
+        if (p >= end || *p != '}')
+            return false; // raw-return-ok:pure-flat-row-predicate
+        *pp = p + 1;
+        return true;
+    }
+}
+
+static bool row_skip_value(const char **pp, const char *end)
+{
+    const char *p = *pp;
+    if (p >= end)
+        return false; // raw-return-ok:pure-flat-row-predicate
+    if (*p != '[')
+        return row_skip_scalar(pp, end);
+
+    p = row_ws(p + 1, end);
+    if (p < end && *p == ']') {
+        *pp = p + 1;
+        return true;
+    }
+    for (;;) {
+        if (p < end && *p == '{') {
+            if (!row_skip_array_object(&p, end))
+                return false; // raw-return-ok:pure-flat-row-predicate
+        } else if (!row_skip_scalar(&p, end)) {
+            return false; // raw-return-ok:pure-flat-row-predicate
+        }
+        p = row_ws(p, end);
+        if (p < end && *p == ',') {
+            p = row_ws(p + 1, end);
+            continue;
+        }
+        if (p >= end || *p != ']')
+            return false; // raw-return-ok:pure-flat-row-predicate
+        *pp = p + 1;
+        return true;
+    }
+}
+
+/* Validate the WHOLE object while finding an exact top-level key. This is
+ * intentionally not substring search: a string value containing `"ts":1`
+ * must never masquerade as the real timestamp field. */
+static bool row_scan_object(const char *row, size_t len, const char *want,
+                            const char **value, bool *found)
+{
+    if (value)
+        *value = NULL;
+    if (found)
+        *found = false;
+    if (!row)
+        return false; // raw-return-ok:pure-flat-row-predicate
+    const char *p = row_ws(row, row + len);
+    const char *end = row + len;
+    if (p >= end || *p != '{')
+        return false; // raw-return-ok:pure-flat-row-predicate
+    p = row_ws(p + 1, end);
+    if (p < end && *p == '}')
+        return row_ws(p + 1, end) == end;
+
+    struct key_span keys[EVIDENCE_FLAT_KEY_CAP];
+    size_t key_count = 0;
+    for (;;) {
+        const char *key_at = NULL;
+        size_t key_len = 0;
+        if (!row_skip_string(&p, end, &key_at, &key_len, true) ||
+            key_len == 0 || key_count >= EVIDENCE_FLAT_KEY_CAP)
+            return false; // raw-return-ok:pure-flat-row-predicate
+        for (size_t i = 0; i < key_count; i++) {
+            if (keys[i].len == key_len &&
+                memcmp(keys[i].at, key_at, key_len) == 0)
+                return false; // raw-return-ok:pure-flat-row-predicate
+        }
+        keys[key_count++] = (struct key_span){ key_at, key_len };
+        p = row_ws(p, end);
+        if (p >= end || *p != ':')
+            return false; // raw-return-ok:pure-flat-row-predicate
+        p = row_ws(p + 1, end);
+        const char *value_at = p;
+        if (!row_skip_value(&p, end))
+            return false; // raw-return-ok:pure-flat-row-predicate
+        if (want && strlen(want) == key_len &&
+            memcmp(want, key_at, key_len) == 0) {
+            if (value)
+                *value = value_at;
+            if (found)
+                *found = true;
+        }
+        p = row_ws(p, end);
+        if (p < end && *p == ',') {
+            p = row_ws(p + 1, end);
+            continue;
+        }
+        if (p >= end || *p != '}')
+            return false; // raw-return-ok:pure-flat-row-predicate
+        return row_ws(p + 1, end) == end;
+    }
+}
+
+bool evidence_row_flat_object_valid(const char *row, size_t len)
+{
+    return row_scan_object(row, len, NULL, NULL, NULL);
+}
+
 static const char *row_value(const char *row, size_t len, const char *key)
 {
-    if (!row || !key)
+    const char *value = NULL;
+    bool found = false;
+    if (!key || !row_scan_object(row, len, key, &value, &found))
         return NULL;
-    char needle[64];
-    if (snprintf(needle, sizeof(needle), "\"%s\":", key) >= (int)sizeof(needle))
-        return NULL;
-    const char *at = evidence_find_sub(row, len, needle);
-    if (!at)
-        return NULL;
-    at += strlen(needle);
-    const char *end = row + len;
-    while (at < end && (*at == ' ' || *at == '\t'))
+    return found ? value : NULL;
+}
+
+/* A primitive is evidence only when its whole token ended.  Without this
+ * check `100x` becomes timestamp 100 and `truex` becomes true, which lets a
+ * torn or foreign row manufacture a plausible sample. */
+static bool row_token_ended(const char *at, const char *end)
+{
+    while (at < end && (*at == ' ' || *at == '\t' || *at == '\r'))
         at++;
-    return at < end ? at : NULL;
+    return at == end || *at == ',' || *at == '}';
 }
 
 bool evidence_row_str(const char *row, size_t len, const char *key,
@@ -91,7 +330,7 @@ bool evidence_row_str(const char *row, size_t len, const char *key,
     }
     if (dst && cap)
         dst[n < cap ? n : cap - 1] = '\0';
-    return at < end;
+    return at < end && row_token_ended(at + 1, end);
 }
 
 bool evidence_row_int(const char *row, size_t len, const char *key,
@@ -115,9 +354,46 @@ bool evidence_row_int(const char *row, size_t len, const char *key,
         v = v * 10 + (*at - '0');
         at++;
     }
+    if (!row_token_ended(at, end))
+        return false; // raw-return-ok:pure-token-boundary-predicate
     if (out)
         *out = neg ? -v : v;
     return true;
+}
+
+bool evidence_row_bool(const char *row, size_t len, const char *key,
+                       bool *out)
+{
+    const char *at = row_value(row, len, key);
+    if (!at)
+        return false; // raw-return-ok:field-absence-predicate
+    const char *end = row + len;
+    bool value;
+    size_t width;
+    if ((size_t)(end - at) >= 4 && memcmp(at, "true", 4) == 0) {
+        value = true;
+        width = 4;
+    } else if ((size_t)(end - at) >= 5 && memcmp(at, "false", 5) == 0) {
+        value = false;
+        width = 5;
+    } else {
+        return false; // raw-return-ok:field-type-predicate
+    }
+    if (!row_token_ended(at + width, end))
+        return false; // raw-return-ok:pure-token-boundary-predicate
+    if (out)
+        *out = value;
+    return true;
+}
+
+bool evidence_row_is_null(const char *row, size_t len, const char *key)
+{
+    const char *at = row_value(row, len, key);
+    if (!at)
+        return false; // raw-return-ok:field-absence-predicate
+    const char *end = row + len;
+    return (size_t)(end - at) >= 4 && memcmp(at, "null", 4) == 0 &&
+           row_token_ended(at + 4, end);
 }
 
 bool evidence_ledger_scan_text(const char *text, size_t len,

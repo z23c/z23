@@ -130,10 +130,17 @@ static bool boot_rpc_http_start(void *ctx)
     struct boot_svc_ctx *svc = ctx;
     if (!svc || !svc->app_ctx)
         return false;
+    if (!rpc_http_start(svc->rpc_table,
+                        (uint16_t)svc->app_ctx->rpc_port,
+                        svc->app_ctx->rpc_user,
+                        svc->app_ctx->rpc_password,
+                        svc->datadir))
+        LOG_FAIL("rpc_http", "front door failed to start on port %d",
+                 svc->app_ctx->rpc_port);
+
+    /* Readiness follows the listening workers. Clearing warmup first let a
+     * failed bind return through the service kernel as a ready frontend. */
     set_rpc_warmup_finished();
-    rpc_http_start(svc->rpc_table, (uint16_t)svc->app_ctx->rpc_port,
-                   svc->app_ctx->rpc_user, svc->app_ctx->rpc_password,
-                   svc->datadir);
     return true;
 }
 

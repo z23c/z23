@@ -54,7 +54,7 @@ observability. Here z23 is free to be better than zclassicd.
 
 | Layer | What | Where |
 |---|---|---|
-| **1. `check-consensus-parity` (lint gate E13)** | Forbids the *shape* of a divergence | `tools/scripts/check_consensus_parity.sh`; run by `make lint` / `make ci` / `make deploy` |
+| **1. `check-consensus-parity` (lint gate E13)** | Forbids the *shape* of a divergence: forbidden mechanism tokens, plus registry-checked future-height literals and wall-clock reads | `tools/scripts/check_consensus_parity.sh`; run by `make lint` / `make ci` / `make deploy` |
 | **2. `test_consensus_parity` (test group)** | Pins the consensus *values* | `lib/test/src/test_consensus_parity.c`; run by `make test_parallel` / `make ci` |
 | **3. Runtime cross-check** | Compares live block hashes against zclassicd | `legacy_mirror` / `z23 ops mirror` / `z23 core consensus report` |
 
@@ -70,6 +70,90 @@ nothing. Banned token classes:
 zclassicd has none of them; introducing one means activation or PoW params
 would depend on something other than the fixed height schedule. False positive?
 Mark the line `// consensus-parity-ok:<reason>`.
+
+### Scan classes `HEIGHT` / `CLOCK` (E13 extension) — future-height literals and wall-clock reads
+
+The forbidden-token scan above catches the *versionbits/BIP9* family by
+name. It is blind to a bomb that never names any of those tokens: an
+adversarial review once planted
+
+```
+if (n_height >= 3400000) halvings--;
+```
+
+two lines below a legitimate height gate in `core/consensus/src/subsidy.c` —
+a bare integer comparison. Deterministic rebuild, full-chain replay, and
+historical UTXO-root agreement all pass clean against it, because the
+divergence only fires once the chain actually reaches the planted height.
+
+E13 also scans the same `PATHS` for two more shapes:
+
+- **`HEIGHT`** — an integer literal at or above the last baked mainnet
+  checkpoint (3,100,000 — i.e. strictly in this codebase's future) sitting
+  next to a relational operator (`>=`, `<=`, `==`, `<`, `>`) on a line that
+  also mentions "height". This is the exact shape of the bomb above.
+- **`CLOCK`** — a read of `time(NULL)`, `GetTime()`, `GetAdjustedTime()`,
+  `gettimeofday()`, or `clock_gettime()` in the consensus surface: a
+  non-deterministic, non-height-keyed input with no business deciding a
+  consensus outcome on its own.
+
+A hit in either class fails the gate unless it is registered in
+**`tools/lint/FLAG_DAYS.txt`** — a machine-checked ledger, not the
+`consensus-parity-ok:` comment. That comment is unchanged and still means
+exactly what it meant before, for the forbidden-token class only; it is not
+reused as a second escape for `HEIGHT`/`CLOCK`, on purpose — the registry
+exists specifically so a hit can be cleared without editing (or even owning)
+the flagged file. The registry keys on the exact
+`(path:line, class, sha256-of-the-line)` triple, so ANY edit to a registered
+line — the literal, the operator, unrelated whitespace, anything — turns
+that row **stale** and fails the gate exactly like an unregistered site.
+That is deliberate: a line-number drift from an unrelated refactor is a new
+site needing a fresh, reviewed row, not a false alarm to silence.
+
+`tools/lint/FLAG_DAYS.txt`'s own header documents the field format in
+full. Its current entries are the authoritative, current list — this
+document does not mirror a count that would just go stale; read the
+registry itself. Every wall-clock site the scan finds in the tree today was
+reviewed and is a known, non-divergent use: a progress-log speed metric, the
+initial-block-download recency heuristic, the standard "block timestamp too
+far in the future" check zclassicd also runs, and a miner's own candidate
+block's timestamp — none of them decide whether a *received* block is valid
+based on the local clock in a way zclassicd doesn't also do.
+
+The gate also prints `FLAG_DAYS_REGISTRY_DIGEST: sha256:<hex>` on every run
+— a whole-file digest of the registry, meant to be carried in a release
+record so a weak node (or a human comparing two releases) can tell **that**
+the registry moved between releases without diffing the file itself.
+
+**What this does NOT do.** This is a visibility mechanism, not a lock. It
+does not stop a hostile publisher who edits `FLAG_DAYS.txt` in the same
+commit as a new bomb and writes a plausible-sounding rationale — nothing
+textual can verify that a rationale is honest. What it buys is that the
+edit is forced to be small, textual, and diffable, instead of invisible
+inside six directories of C. It also does not catch:
+
+- a future-height literal hidden behind a named constant
+  (`#define FUTURE_HEIGHT 3400000; if (n_height >= FUTURE_HEIGHT)`);
+- a C23 digit-separated literal (`3'400'000`) or a hex-encoded height
+  (`0x33E140`);
+- a height comparison whose variable isn't spelled with "height" anywhere on
+  the same physical line — the co-occurrence check is same-line-only, chosen
+  so the scanner doesn't also flag unrelated large-integer comparisons
+  (byte-size ceilings, nanosecond timeouts) that happen to share a
+  relational operator with a big number;
+- a literal written across a `<<`/`>>` shift or a `->` member-access token
+  touching it (the operator-adjacency check doesn't special-case those, on
+  the theory that a false positive there costs one registry row, while a
+  false negative costs the point of the gate);
+- anything hidden behind indirection a textual scanner can't see through —
+  a value computed at runtime and compared later, a function pointer, a
+  macro expansion whose body lives on a different line.
+
+It is a lint gate: cheap, mechanical, and blind to anything that isn't
+matching text in the files it reads. Treat a clean run as "no *textually
+obvious* new future-height or wall-clock dependency," never as a proof of
+absence — the runtime cross-check (row 3 of the table above) and a human
+reviewing every `FLAG_DAYS.txt` diff are still load-bearing.
 
 **Test group** pins the consensus values (Equihash table, all activation
 heights, protocol versions, pow constants, `powLimit`, genesis hash) to the
