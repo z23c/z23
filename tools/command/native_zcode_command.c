@@ -15,6 +15,10 @@
  *                                 package index projection
  *   zcode package library         complete tracked packages in the local
  *                                 store (the shelf this node can seed);
+ *                                 each row carries the local reproduction
+ *                                 evidence summary (the exact predicate the
+ *                                 pointer publish gate applies), and the
+ *                                 reply counts evaluated/reproduced rows;
  *                                 the JSON names one next_command (fetch
  *                                 by a listed local name/root, or how to
  *                                 fetch when the shelf is empty)
@@ -1792,7 +1796,8 @@ void zcl_native_handle_zcode_package_search(
 
 static void zc_library_emit(struct zcl_command_reply *reply,
                             struct json_value *packages, size_t rendered,
-                            bool truncated, int64_t limit)
+                            bool truncated, int64_t limit,
+                            size_t evaluated, size_t reproduced)
 {
     char next[384];
     if (rendered == 0) {
@@ -1835,6 +1840,13 @@ static void zc_library_emit(struct zcl_command_reply *reply,
     (void)json_push_kv_int(&reply->data, "rendered", (int64_t)rendered);
     (void)json_push_kv_bool(&reply->data, "items_truncated", truncated);
     (void)json_push_kv_int(&reply->data, "limit", limit);
+    /* The shelf census: how many rendered rows carried evaluable
+     * reproduction evidence, and how many of those prove the exact
+     * predicate the pointer publish gate applies. */
+    (void)json_push_kv_int(&reply->data, "evaluated_count",
+                           (int64_t)evaluated);
+    (void)json_push_kv_int(&reply->data, "reproduced_count",
+                           (int64_t)reproduced);
     (void)json_push_kv_str(&reply->data, "next_command", next);
 }
 
@@ -1883,6 +1895,77 @@ static bool zc_library_has_manifests(const char *zcode_dir, bool *unreadable)
     }
     closedir(d);
     return present;
+}
+
+/* Per-row reproduction evidence: the same local receipts scan the pointer
+ * publish gate applies (boot_zcode_dht_publish_gate.c refuses unless
+ * vcs_package_reproduce_scan reports reproduced=true), with the exact field
+ * names zcode package show emits. The object is always present so the
+ * contract is uniform: the real fields on success, {"error": ...} when the
+ * row is unevaluable (no persisted release names the root) or the evidence
+ * is unreadable — library is a read-only view, never failed by evidence.
+ * *evaluated counts rows carrying real fields; *reproduced counts rows
+ * with reproduced=true. */
+static void zc_library_row_reproduction(
+    struct json_value *row, const char *zcode_dir, const uint8_t root[32],
+    const struct vcs_package_index_entry *named, size_t *evaluated,
+    size_t *reproduced)
+{
+    struct json_value repro;
+    json_init(&repro);
+    json_set_object(&repro);
+    if (!named) {
+        (void)json_push_kv_str(&repro, "error",
+                               "no persisted release names this root");
+    } else {
+        char path[4400];
+        int n = snprintf(path, sizeof(path), "%s/releases/%s", zcode_dir,
+                         named->release_id_hex);
+        uint8_t *release_wire = NULL;
+        size_t release_wire_len = 0;
+        struct vcs_package_release release;
+        bool envelope_ok =
+            n > 0 && (size_t)n < sizeof(path) &&
+            zc_read_object(path, VCS_PACKAGE_RELEASE_MAX_WIRE_BYTES,
+                           &release_wire, &release_wire_len) &&
+            vcs_package_release_parse(release_wire, release_wire_len,
+                                      &release) == VCS_PACKAGE_RELEASE_OK;
+        free(release_wire);
+        if (!envelope_ok) {
+            (void)json_push_kv_str(&repro, "error",
+                                   "persisted release envelope unreadable");
+        } else {
+            n = snprintf(path, sizeof(path), "%s/receipts", zcode_dir);
+            struct vcs_reproduce_report report;
+            if (n <= 0 || (size_t)n >= sizeof(path) ||
+                !vcs_package_reproduce_scan(path, root, release.recipe_root,
+                                            &report)) {
+                (void)json_push_kv_str(&repro, "error",
+                                       "the receipt scan failed");
+            } else {
+                (void)json_push_kv_int(&repro, "receipts_scanned",
+                                       (int64_t)report.scanned);
+                (void)json_push_kv_int(&repro, "receipts_matching",
+                                       (int64_t)report.matching);
+                (void)json_push_kv_bool(&repro, "reproduced",
+                                        report.reproduced);
+                /* The exact gate predicate the pointer publish applies. */
+                (void)json_push_kv_bool(&repro, "publishable",
+                                        report.reproduced);
+                (void)json_push_kv_int(&repro, "distinct_toolchains",
+                                       (int64_t)report.distinct_toolchains);
+                (void)json_push_kv_bool(&repro, "cross_toolchain",
+                                        report.cross_toolchain);
+                (void)json_push_kv_bool(&repro, "rows_truncated",
+                                        report.rows_truncated);
+                (*evaluated)++;
+                if (report.reproduced)
+                    (*reproduced)++;
+            }
+        }
+    }
+    (void)json_push_kv(row, "reproduction", &repro);
+    json_free(&repro);
 }
 
 void zcl_native_handle_zcode_package_library(
@@ -1936,7 +2019,7 @@ void zcl_native_handle_zcode_package_library(
     } else {
         struct stat st;
         if (stat(zcode_dir, &st) != 0) {
-            zc_library_emit(reply, &arr, 0, false, limit);
+            zc_library_emit(reply, &arr, 0, false, limit, 0, 0);
             json_free(&arr);
             return;
         }
@@ -1960,7 +2043,7 @@ void zcl_native_handle_zcode_package_library(
                     zcode_dir);
                 return;
             }
-            zc_library_emit(reply, &arr, 0, false, limit);
+            zc_library_emit(reply, &arr, 0, false, limit, 0, 0);
             json_free(&arr);
             return;
         }
@@ -1987,6 +2070,8 @@ void zcl_native_handle_zcode_package_library(
     bool truncated = total > rendered;
 
     struct vcs_package_index *index = vcs_package_index_build(zcode_dir);
+    size_t evaluated = 0;
+    size_t reproduced = 0;
     for (size_t i = 0; i < rendered; i++) {
         char root_hex[65];
         zcl_hex_encode(summaries[i].root, 32, root_hex);
@@ -2011,12 +2096,15 @@ void zcl_native_handle_zcode_package_library(
                                (int64_t)summaries[i].total_chunks);
         (void)json_push_kv_bool(&row, "public_serveable",
                                 shape != VCS_PACKAGE_PUBLIC_REFUSED);
+        zc_library_row_reproduction(&row, zcode_dir, summaries[i].root,
+                                    named, &evaluated, &reproduced);
         (void)json_push_back(&arr, &row);
         json_free(&row);
     }
     vcs_package_index_free(index);
     zc_store_release(store, own_store);
-    zc_library_emit(reply, &arr, rendered, truncated, limit);
+    zc_library_emit(reply, &arr, rendered, truncated, limit, evaluated,
+                    reproduced);
     json_free(&arr);
 }
 

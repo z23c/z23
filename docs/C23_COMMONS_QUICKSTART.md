@@ -168,7 +168,11 @@ search` searches releases already verified in the local store. This avoids
 turning a name index into central technical truth.
 
 Browse the local shelf first. `zcode package library` lists complete packages
-this node can seed and names one next command. `zcode package offered` lists
+this node can seed and names one next command. Every row also carries the
+local reproduction evidence for that package (`reproduction.reproduced` /
+`publishable` — the same receipts scan the pointer publish gate applies),
+with `evaluated_count` / `reproduced_count` census counters on the reply.
+`zcode package offered` lists
 what connected peers are seeding this session that you can fetch. When a
 persisted release in the rebuildable index names a root, that `name` is
 enough to fetch without copying 64 hex by hand:

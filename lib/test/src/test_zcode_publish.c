@@ -26,6 +26,11 @@
  *      the index, complete/pinned/counts/public_serveable, next_command
  *      on empty and non-empty shelves). Fetch by that local name after
  *      a published complete package; name+root mismatch fails closed.
+ *  8b. library reproduction evidence: every row carries the local
+ *      receipts scan (the publish-gate predicate) or an unevaluable
+ *      error object (transport-carrier packages — no persisted release —
+ *      are the production unnamed case); the reply censuses
+ *      evaluated/reproduced rows; evidence never fails the view.
  *   9. show: full record + manifest summary + bounded file page;
  *      UNKNOWN_PACKAGE and BAD_ROOT rejections.
  *  10. Index rebuild: a fresh build from the persisted CAS bytes equals the
@@ -1363,6 +1368,8 @@ static int t_library(void)
              c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
              json_get_int(json_get(&c.reply.data, "count")) == 0 &&
              json_get_int(json_get(&c.reply.data, "rendered")) == 0 &&
+             json_get_int(json_get(&c.reply.data, "evaluated_count")) == 0 &&
+             json_get_int(json_get(&c.reply.data, "reproduced_count")) == 0 &&
              !json_get_bool(json_get(&c.reply.data, "items_truncated")));
     ZP_CHECK("library: empty shelf names an obvious fetch next command",
              empty_next && strstr(empty_next, "zcode package fetch") != NULL);
@@ -1488,6 +1495,200 @@ static int t_library(void)
              json_get_bool(json_get(&c.reply.data, "items_truncated")));
     zp_cmd_free(&c);
 
+    test_rm_rf_recursive(dd);
+    return failures;
+}
+
+/* ── 8b: library reproduction evidence ────────────────────────────────
+ * Every shelf row carries the local receipts scan for its package+recipe —
+ * the exact predicate the pointer publish gate applies — and the reply
+ * censuses evaluated/reproduced rows. Evidence never fails the view: a
+ * complete package with no persisted release reads an error object. */
+static int t_library_reproduction(void)
+{
+    int failures = 0;
+    chain_params_select(CHAIN_MAIN);
+    char dd[256];
+    test_make_tmpdir(dd, sizeof(dd), "zcode_publish", "library_repro");
+    struct zp_cmd c;
+
+    /* Package A: committed, then two distinct, mutually matching receipts
+     * filed under <dd>/zcode/receipts (different flags strings, different
+     * pinned toolchain capsules — distinct build events, distinct ids). */
+    char pkgdir[512];
+    snprintf(pkgdir, sizeof(pkgdir), "%s/pkg-a", dd);
+    struct zp_pkg pa;
+    ZP_CHECK("library repro: package A builds", zp_make_package(&pa, pkgdir));
+    ZP_CHECK("library repro: recipe A builds", zp_use_recipe(&pa.manifest));
+    struct vcs_package_release rel_a;
+    ZP_CHECK("library repro: release A signs",
+             zp_release(&rel_a, 0xaa, 1u, "rhett/repro-ok", "MIT", pa.root));
+    char *ra_hex = zp_release_hex(&rel_a, NULL, NULL);
+    char *ma_hex = zp_hex(pa.wire, pa.wire_len);
+    zp_publish_input(&c, dd, ra_hex, ma_hex, pkgdir);
+    zcl_native_handle_zcode_package_publish_commit(&c.request, &c.reply);
+    ZP_CHECK("library repro: package A commits",
+             c.reply.status == ZCL_COMMAND_STATUS_PASSED);
+    zp_cmd_free(&c);
+    free(ra_hex);
+    free(ma_hex);
+
+    struct vcs_package_build_receipt rca, rcb;
+    vcs_package_build_receipt_init(&rca);
+    vcs_package_build_receipt_init(&rcb);
+    struct vcs_package_build_receipt *rcpts[2] = {&rca, &rcb};
+    static const char *const rcpt_flags[2] = {"shelf-quick",
+                                              "shelf-standard"};
+    bool rcpts_ok = true;
+    uint8_t out_sha[32];
+    memset(out_sha, 0x5a, sizeof(out_sha));
+    for (size_t i = 0; i < 2 && rcpts_ok; i++) {
+        struct vcs_package_build_receipt *rr = rcpts[i];
+        memcpy(rr->package_root, pa.root, 32);
+        memcpy(rr->recipe_root, g_zp_recipe_root, 32);
+        memcpy(rr->lock_root, pa.root, 32);
+        snprintf(rr->compiler_id, sizeof(rr->compiler_id), "gcc");
+        snprintf(rr->compiler_version, sizeof(rr->compiler_version),
+                 "14.2.0");
+        snprintf(rr->flags, sizeof(rr->flags), "%s", rcpt_flags[i]);
+        rr->isolation = (uint8_t)VCS_PACKAGE_BUILD_ISOLATION_FULL;
+        rr->test_ran = false;
+        rr->result_class = (uint8_t)VCS_PACKAGE_BUILD_RESULT_BUILD_PASS;
+        uint8_t cap[32];
+        memset(cap, i == 0 ? 0xd1 : 0xd2, sizeof(cap));
+        rcpts_ok = vcs_package_build_add_output(rr, "lib/repro-ok.a",
+                                                out_sha, 123) ==
+                       VCS_PACKAGE_BUILD_OK &&
+                   vcs_package_build_set_toolchain_capsule(rr, cap) ==
+                       VCS_PACKAGE_BUILD_OK &&
+                   zp_file_receipt(dd, rr);
+    }
+    ZP_CHECK("library repro: two distinct matching receipts filed",
+             rcpts_ok);
+
+    /* Package B: committed, no receipts of its own — evaluated, not
+     * reproduced. */
+    ZP_CHECK("library repro: package B commits",
+             zp_commit_one(dd, 0xbb, 1u, "bob/repro-none", "ISC", 31));
+
+    /* Package C: committed, then its envelope moved OUT of releases/ (the
+     * index loader keys on content, so the bytes must leave the dir).
+     * Manifest and chunks keep it complete, but no persisted release names
+     * the root — the row is unevaluable, never a failure. The fixture
+     * content must differ from package A's (zp_make_package is
+     * fixed-content: identical bytes would mean the SAME package root). */
+    snprintf(pkgdir, sizeof(pkgdir), "%s/pkg-c", dd);
+    struct zp_pkg pc;
+    memset(&pc, 0, sizeof(pc));
+    vcs_package_manifest_init(&pc.manifest);
+    mkdir(pkgdir, 0700);
+    bool c_built =
+        zp_add_file(&pc, pkgdir, "LICENSE",
+                    "ISC\nsee the LICENSE file, variant 31\n",
+                    VCS_PACKAGE_MODE_FILE) &&
+        zp_add_file(&pc, pkgdir, "src/y.c", "int y_31;\n",
+                    VCS_PACKAGE_MODE_FILE) &&
+        vcs_package_manifest_serialize(&pc.manifest, &pc.wire,
+                                       &pc.wire_len) &&
+        vcs_package_manifest_root(&pc.manifest, pc.root) &&
+        memcmp(pc.root, pa.root, 32) != 0;
+    if (c_built)
+        zp_hex32(pc.root, pc.root_hex);
+    ZP_CHECK("library repro: package C builds (distinct root)", c_built);
+    ZP_CHECK("library repro: recipe C builds", zp_use_recipe(&pc.manifest));
+    struct vcs_package_release rel_c;
+    ZP_CHECK("library repro: release C signs",
+             zp_release(&rel_c, 0xcc, 1u, "carol/repro-unreleased", "ISC",
+                        pc.root));
+    char *rc_hex = zp_release_hex(&rel_c, NULL, NULL);
+    char *mc_hex = zp_hex(pc.wire, pc.wire_len);
+    zp_publish_input(&c, dd, rc_hex, mc_hex, pkgdir);
+    zcl_native_handle_zcode_package_publish_commit(&c.request, &c.reply);
+    ZP_CHECK("library repro: package C commits",
+             c.reply.status == ZCL_COMMAND_STATUS_PASSED);
+    zp_cmd_free(&c);
+    free(rc_hex);
+    free(mc_hex);
+    uint8_t id_c[32];
+    char id_c_hex[65];
+    bool id_c_ok =
+        vcs_package_release_id(&rel_c, id_c) == VCS_PACKAGE_RELEASE_OK;
+    if (id_c_ok)
+        zp_hex32(id_c, id_c_hex);
+    char envelope[600], envelope_off[600];
+    snprintf(envelope, sizeof(envelope), "%s/zcode/releases/%s", dd,
+             id_c_hex);
+    snprintf(envelope_off, sizeof(envelope_off), "%s/envelope-c", dd);
+    ZP_CHECK("library repro: C's envelope leaves the releases dir",
+             id_c_ok && rename(envelope, envelope_off) == 0);
+
+    zp_cmd_init(&c);
+    (void)json_push_kv_str(&c.input, "datadir", dd);
+    zcl_native_handle_zcode_package_library(&c.request, &c.reply);
+    const struct json_value *rows = json_get(&c.reply.data, "packages");
+    const struct json_value *row_a = NULL, *row_b = NULL, *row_c = NULL;
+    size_t n_rows = rows ? rows->num_children : 0;
+    for (size_t i = 0; i < n_rows; i++) {
+        const struct json_value *row = json_at(rows, i);
+        const char *name = row ? json_get_str(json_get(row, "name")) : NULL;
+        if (name && strcmp(name, "rhett/repro-ok") == 0)
+            row_a = row;
+        if (name && strcmp(name, "bob/repro-none") == 0)
+            row_b = row;
+        const char *root_hex =
+            row ? json_get_str(json_get(row, "package_root")) : NULL;
+        if (root_hex && strcmp(root_hex, pc.root_hex) == 0)
+            row_c = row;
+    }
+    const struct json_value *repro_a =
+        row_a ? json_get(row_a, "reproduction") : NULL;
+    ZP_CHECK("library repro: row A proves the gate predicate",
+             row_a && repro_a &&
+             json_get_int(json_get(repro_a, "receipts_scanned")) == 2 &&
+             json_get_int(json_get(repro_a, "receipts_matching")) == 2 &&
+             json_get_bool(json_get(repro_a, "reproduced")) &&
+             json_get_bool(json_get(repro_a, "publishable")) &&
+             json_get_int(json_get(repro_a, "distinct_toolchains")) == 2 &&
+             json_get_bool(json_get(repro_a, "cross_toolchain")) &&
+             !json_get_bool(json_get(repro_a, "rows_truncated")));
+    const struct json_value *repro_b =
+        row_b ? json_get(row_b, "reproduction") : NULL;
+    ZP_CHECK("library repro: row B is evaluated with no matching receipts",
+             row_b && repro_b &&
+             !json_get_bool(json_get(repro_b, "reproduced")) &&
+             !json_get_bool(json_get(repro_b, "publishable")) &&
+             json_get_int(json_get(repro_b, "receipts_matching")) == 0 &&
+             json_get(repro_b, "error") == NULL);
+    const struct json_value *repro_c =
+        row_c ? json_get(row_c, "reproduction") : NULL;
+    const char *err_c = repro_c ? json_get_str(json_get(repro_c, "error"))
+                                : NULL;
+    ZP_CHECK("library repro: row C is complete, unnamed, unevaluable",
+             row_c && json_get_bool(json_get(row_c, "complete")) &&
+             err_c &&
+             strcmp(err_c, "no persisted release names this root") == 0);
+    /* The shelf also carries the transport-carrier packages commit
+     * persists alongside each release — complete tracked packages no
+     * persisted release names. They are the production unnamed-row case:
+     * each must read the same unevaluable error object as C. */
+    size_t unevaluable = 0;
+    for (size_t i = 0; i < n_rows; i++) {
+        const struct json_value *row = json_at(rows, i);
+        const struct json_value *repro =
+            row ? json_get(row, "reproduction") : NULL;
+        if (repro && json_get(repro, "error"))
+            unevaluable++;
+    }
+    ZP_CHECK("library repro: census counts agree with the rows",
+             c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
+             json_get_int(json_get(&c.reply.data, "count")) == 6 &&
+             unevaluable == 4 &&
+             json_get_int(json_get(&c.reply.data, "evaluated_count")) == 2 &&
+             json_get_int(json_get(&c.reply.data, "reproduced_count")) == 1);
+    zp_cmd_free(&c);
+
+    zp_pkg_free(&pa);
+    zp_pkg_free(&pc);
     test_rm_rf_recursive(dd);
     return failures;
 }
@@ -1979,6 +2180,7 @@ int test_zcode_publish(void)
     failures += t_acceptance_replay();
     failures += t_search();
     failures += t_library();
+    failures += t_library_reproduction();
     failures += t_show();
     failures += t_index_rebuild();
     failures += t_registry_path();
