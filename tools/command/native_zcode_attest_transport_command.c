@@ -849,10 +849,12 @@ void zcl_native_handle_zcode_package_attest_admit(
         if (r == VCS_PACKAGE_ATTEST_TRANSPORT_ERR_BLOB &&
             outcome.blob_error == VCS_BLOB_ERR_ABSENT) {
             code = "ATTESTATION_BYTES_ABSENT";
-            why = "this node holds no blob at that transport root; fetch the "
-                  "bytes first with zcode package fetch on the transport "
-                  "root, or use zcode package attest pull to discover and "
-                  "fetch them from a package root";
+            /* Kept under the 192-byte reply message bound: an operator
+             * instruction that truncates mid-word stops being an
+             * instruction. */
+            why = "this node holds no blob at that transport root; fetch it "
+                  "first with zcode package fetch, or use zcode package "
+                  "attest pull to discover and fetch it from a package root";
         } else if (r == VCS_PACKAGE_ATTEST_TRANSPORT_ERR_BLOB) {
             code = "BLOB_REFUSED";
             why = "the blob layer refused the delivered bytes: the tracked "
