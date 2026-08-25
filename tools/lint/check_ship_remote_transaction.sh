@@ -3,8 +3,9 @@
 #
 # Execute ship.sh's exact remote activation heredoc against a fake user service.
 # This is a behavioral transaction test: success must activate exact process
-# bytes and identity, while failures after either identity reload or executable
-# replacement must restore both and restart the outgoing process.
+# bytes, identity, and both package-verify workers staged beside the executable,
+# while failures after either identity reload or executable replacement must
+# restore all three files and restart the outgoing process.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -90,10 +91,14 @@ EOF
 chmod +x "$tmp/mockbin/systemctl"
 
 target="$tmp/zclassic23"
+worker_v="$tmp/zclassic23-package-verify"
+worker_d="$tmp/zclassic23-package-verify-dev"
 dropin="$tmp/home/.config/systemd/user/zclassic23.service.d/90-build-identity.conf"
 
 start_old() {
     install -m 755 "$tmp/old" "$target"
+    install -m 755 "$tmp/old" "$worker_v"
+    install -m 755 "$tmp/old" "$worker_d"
     "$target" >/dev/null 2>&1 &
     echo $! > "$pidfile"
 }
@@ -117,11 +122,14 @@ invoke() {
     ZCL_SHIP_REMOTE_HEALTH_SECONDS=5 \
     ZCL_SHIP_ROLLBACK_HEALTH_SECONDS=5 \
         bash "$tmp/activate.sh" "$target" "$new_sha" \
-            "$(printf 'a%.0s' {1..64})" candidate-commit
+            "$(printf 'a%.0s' {1..64})" candidate-commit \
+            "$new_sha" "$new_sha"
 }
 
 assert_rolled_back() {
     [ "$(sha256sum < "$target" | awk '{print $1}')" = "$old_sha" ]
+    [ "$(sha256sum < "$worker_v" | awk '{print $1}')" = "$old_sha" ]
+    [ "$(sha256sum < "$worker_d" | awk '{print $1}')" = "$old_sha" ]
     grep -qx 'old identity' "$dropin"
     live_pid="$(cat "$pidfile")"
     [ "$(sha256sum < "/proc/$live_pid/exe" | awk '{print $1}')" = "$old_sha" ]
@@ -130,10 +138,15 @@ assert_rolled_back() {
 for fault in reload restart; do
     stop_current
     rm -f "$tmp/fail.marker" "${target}.incoming" \
-        "${target}.rollback" "${dropin}.ship.rollback" "${dropin}.ship.absent"
+        "${target}.rollback" "${dropin}.ship.rollback" "${dropin}.ship.absent" \
+        "${worker_v}.incoming" "${worker_d}.incoming" \
+        "${worker_v}.ship.rollback" "${worker_d}.ship.rollback" \
+        "${worker_v}.ship.absent" "${worker_d}.ship.absent"
     printf 'old identity\n' > "$dropin"
     start_old
     install -m 755 "$tmp/new" "${target}.incoming"
+    install -m 755 "$tmp/new" "${worker_v}.incoming"
+    install -m 755 "$tmp/new" "${worker_d}.incoming"
     if invoke "$fault" >/dev/null 2>&1; then
         echo "check_ship_remote_transaction: activation unexpectedly survived $fault fault" >&2
         exit 1
@@ -147,10 +160,15 @@ done
 # transaction reports the rollback as unverified.
 stop_current
 rm -f "$tmp/fail.marker" "${target}.incoming" \
-    "${target}.rollback" "${dropin}.ship.rollback" "${dropin}.ship.absent"
+    "${target}.rollback" "${dropin}.ship.rollback" "${dropin}.ship.absent" \
+    "${worker_v}.incoming" "${worker_d}.incoming" \
+    "${worker_v}.ship.rollback" "${worker_d}.ship.rollback" \
+    "${worker_v}.ship.absent" "${worker_d}.ship.absent"
 printf 'old identity\n' > "$dropin"
 start_old
 install -m 755 "$tmp/new" "${target}.incoming"
+install -m 755 "$tmp/new" "${worker_v}.incoming"
+install -m 755 "$tmp/new" "${worker_d}.incoming"
 if out="$(invoke "" restart 2>&1)"; then
     echo "check_ship_remote_transaction: activation survived persistent restart fault" >&2
     exit 1
@@ -163,12 +181,19 @@ assert_rolled_back
 
 stop_current
 rm -f "$tmp/fail.marker" "${target}.incoming" \
-    "${target}.rollback" "${dropin}.ship.rollback" "${dropin}.ship.absent"
+    "${target}.rollback" "${dropin}.ship.rollback" "${dropin}.ship.absent" \
+    "${worker_v}.incoming" "${worker_d}.incoming" \
+    "${worker_v}.ship.rollback" "${worker_d}.ship.rollback" \
+    "${worker_v}.ship.absent" "${worker_d}.ship.absent"
 printf 'old identity\n' > "$dropin"
 start_old
 install -m 755 "$tmp/new" "${target}.incoming"
+install -m 755 "$tmp/new" "${worker_v}.incoming"
+install -m 755 "$tmp/new" "${worker_d}.incoming"
 invoke "" >/dev/null
 [ "$(sha256sum < "$target" | awk '{print $1}')" = "$new_sha" ]
+[ "$(sha256sum < "$worker_v" | awk '{print $1}')" = "$new_sha" ]
+[ "$(sha256sum < "$worker_d" | awk '{print $1}')" = "$new_sha" ]
 live_pid="$(cat "$pidfile")"
 [ "$(sha256sum < "/proc/$live_pid/exe" | awk '{print $1}')" = "$new_sha" ]
 grep -q '^Environment="ZCL_AGENT_EXPECT_SOURCE_ID=a\{64\}"$' "$dropin"
@@ -188,6 +213,8 @@ assert_rolled_back
 # Re-activate new bytes, then deny the fallback restart. The fallback must
 # return nonzero and call the rollback unqualified rather than claiming it.
 install -m 755 "$tmp/new" "${target}.incoming"
+install -m 755 "$tmp/new" "${worker_v}.incoming"
+install -m 755 "$tmp/new" "${worker_d}.incoming"
 invoke "" >/dev/null
 if out="$(HOME="$tmp/home" PATH="$tmp/mockbin:$PATH" \
     ZCL_SHIP_TEST_PIDFILE="$pidfile" ZCL_SHIP_TEST_TARGET="$target" \
@@ -202,4 +229,4 @@ case "$out" in
     *) echo "check_ship_remote_transaction: missing fallback rollback alarm" >&2; exit 1 ;;
 esac
 
-echo "check_ship_remote_transaction: PASS (activation/fallback faults rollback bytes+identity; success and rollback process-qualified)"
+echo "check_ship_remote_transaction: PASS (activation/fallback faults rollback bytes+identity+workers; success and rollback process-qualified)"

@@ -3,6 +3,10 @@
 #
 # ship.sh — build ONE production binary and put those exact bytes on every node
 # in the fleet, verifying each one by the source identity it reports back.
+# The two package-verify workers the daemon spawns at reproduce time
+# (zclassic23-package-verify{,-dev}, resolved beside its executable) ship as
+# part of the same frozen artifact set: a host with a fresh daemon beside a
+# stale worker fails reproduces with a bare "rebuild worker exit 2".
 #
 # Why this exists. Before it, deployment was: `make deploy` for this host only,
 # `deploy-dev` refusing outright, and no path at all to the second server —
@@ -50,6 +54,10 @@ if [ -z "${ZCL_SHIP_REMOTE:-}" ]; then
 fi
 REMOTE_HOST="$ZCL_SHIP_REMOTE"
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15)
+# Spawnable companions of the daemon, resolved BESIDE its executable at
+# reproduce time (pkgl_worker_path). Both ship with every candidate; the
+# index order here is the order the remote swap stages them.
+WORKER_NAMES=(zclassic23-package-verify zclassic23-package-verify-dev)
 TARGETS="local remote"
 TARGETS_EXPLICIT=0
 DRY_RUN=0
@@ -222,13 +230,15 @@ fi
 step "Build"
 
 if [ "$DRY_RUN" -eq 1 ]; then
-    say "build      (dry run — would rebuild and freeze one candidate)"
+    say "build      (dry run — would rebuild and freeze one candidate + both workers)"
     CANDIDATE=""; ARTIFACT_SHA=""; CAND_SOURCE_ID="$SOURCE_ID"
 else
-    rm -f build/bin/zclassic23
-    make -j"$(nproc)" zclassic23 >/dev/null || die "production build failed"
+    rm -f build/bin/zclassic23 build/bin/zclassic23-package-verify build/bin/zclassic23-package-verify-dev
+    make -j"$(nproc)" zclassic23 zclassic23-package-verify dev-package-verifier >/dev/null || \
+        die "production build failed"
     CANDIDATE="$(mktemp "${TMPDIR:-/tmp}/zclassic23.ship.XXXXXX")"
-    trap 'rm -f "$CANDIDATE"' EXIT HUP INT TERM
+    WORKER_FILES=(); WORKER_SHAS=()
+    trap 'rm -f "$CANDIDATE" "${WORKER_FILES[@]}"' EXIT HUP INT TERM
     install -m 755 build/bin/zclassic23 "$CANDIDATE"
     ARTIFACT_SHA="$(sha256sum < "$CANDIDATE" | awk '{print $1}')"
     zcl_is_sha256 "$ARTIFACT_SHA" || die "could not hash the frozen candidate"
@@ -249,15 +259,61 @@ else
             die "frozen candidate reports an invalid display build_commit" ;;
     esac
     say "candidate  source_id ${CAND_SOURCE_ID:0:16}…  commit $CAND_BUILD_COMMIT  sha256 ${ARTIFACT_SHA:0:16}…  $(du -h "$CANDIDATE" | cut -f1)"
+
+    # The package-verify workers are spawned by the daemon at reproduce time
+    # and resolved BESIDE the running executable (pkgl_worker_path). A ship
+    # that moves only the daemon leaves every host spawning whatever stale
+    # worker bytes happen to sit in that directory — the exact trap that
+    # broke a fleet warm rebuild on 2026-08-25: the fresh CLI passed
+    # --allow-testless-standard, the day-old worker exited 2 on usage, and
+    # zcl_spawn_capture swallowed the stderr, so reproduce failed with a bare
+    # "rebuild worker exit 2". Freeze the workers from the SAME gated checkout
+    # so all three spawnables travel as one artifact set.
+    for w in zclassic23-package-verify zclassic23-package-verify-dev; do
+        [ -x "build/bin/$w" ] || die "gated build did not produce worker $w"
+        f="$(mktemp "${TMPDIR:-/tmp}/zclassic23.ship.XXXXXX")"
+        install -m 755 "build/bin/$w" "$f"
+        WORKER_FILES+=("$f")
+        s="$(sha256sum < "$f" | awk '{print $1}')"
+        zcl_is_sha256 "$s" || die "could not hash frozen worker $w"
+        WORKER_SHAS+=("$s")
+    done
+    say "workers    zclassic23-package-verify ${WORKER_SHAS[0]:0:16}…  zclassic23-package-verify-dev ${WORKER_SHAS[1]:0:16}…  $(du -ch "${WORKER_FILES[@]}" | tail -1 | cut -f1)"
 fi
 
 # ── 4. Deploy, host by host ─────────────────────────────────────────────────
 # Sequential on purpose. Two nodes restarting at once is how a fleet goes dark
 # on one bad build; this way the first failure stops the rollout with every
 # later host still serving.
+# Install the frozen worker candidates beside a service executable,
+# byte-verified against the gated build. Local counterpart of the remote
+# worker swap. Workers go in BEFORE the daemon: a newer worker is
+# backward-compatible with the older CLI (flags are only ever added), while
+# the reverse mix — a new daemon spawning a stale worker — is the outage
+# class this ship exists to close. `make deploy` owns the daemon binary's
+# own build/swap/rollback transaction; worker bytes here come from the same
+# gated checkout it builds from.
+install_local_workers() {
+    local dir="$1" i got
+    for i in "${!WORKER_NAMES[@]}"; do
+        install -m 755 "${WORKER_FILES[$i]}" "$dir/${WORKER_NAMES[$i]}"
+        got="$(sha256sum < "$dir/${WORKER_NAMES[$i]}" | awk '{print $1}')"
+        [ "$got" = "${WORKER_SHAS[$i]}" ] || \
+            die "local worker install bytes differ for ${WORKER_NAMES[$i]}"
+    done
+    say "workers    installed beside $dir/"
+}
+
 deploy_local() {
     step "Deploy → local"
-    if [ "$DRY_RUN" -eq 1 ]; then say "would run: make deploy"; return 0; fi
+    if [ "$DRY_RUN" -eq 1 ]; then say "would install workers + run make deploy"; return 0; fi
+    local pid svc_dir
+    pid="$(systemctl --user show zclassic23 -p MainPID --value 2>/dev/null || true)"
+    case "$pid" in
+        ""|*[!0-9]*|0) die "local canonical service must be running before ship" ;;
+    esac
+    svc_dir="$(dirname "$(readlink -f "/proc/$pid/exe")")"
+    install_local_workers "$svc_dir"
     ZCL_DEPLOY_ALLOW_CANONICAL=1 make deploy 2>&1 | tail -6
     return "${PIPESTATUS[0]}"
 }
@@ -275,7 +331,7 @@ deploy_remote() {
         *) die "remote running executable path is missing or not absolute: '$svc_bin'" ;;
     esac
     say "remote bin $svc_bin"
-    if [ "$DRY_RUN" -eq 1 ]; then say "would install candidate + restart + verify"; return 0; fi
+    if [ "$DRY_RUN" -eq 1 ]; then say "would install candidate + workers + restart + verify"; return 0; fi
 
     prev_sha="$(ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" "sha256sum < '$svc_bin' | awk '{print \$1}'" 2>/dev/null || echo none)"
     say "remote now sha256 ${prev_sha:0:16}…"
@@ -286,10 +342,25 @@ deploy_remote() {
     scp -q "${SSH_OPTS[@]}" "$CANDIDATE" "$REMOTE_HOST:${svc_bin}.incoming" || \
         die "could not copy the candidate to $REMOTE_HOST"
 
+    # Stage the workers beside the same executable: pkgl_worker_path resolves
+    # them there, so that directory is the only location where worker bytes
+    # matter at reproduce time.
+    local wi
+    for wi in "${!WORKER_NAMES[@]}"; do
+        scp -q "${SSH_OPTS[@]}" "${WORKER_FILES[$wi]}" \
+            "$REMOTE_HOST:${svc_bin%/*}/${WORKER_NAMES[$wi]}.incoming" || \
+            die "could not copy ${WORKER_NAMES[$wi]} to $REMOTE_HOST"
+    done
+
     ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" bash -s -- \
-        "$svc_bin" "$ARTIFACT_SHA" "$CAND_SOURCE_ID" "$CAND_BUILD_COMMIT" <<'REMOTE_SCRIPT'
+        "$svc_bin" "$ARTIFACT_SHA" "$CAND_SOURCE_ID" "$CAND_BUILD_COMMIT" \
+        "${WORKER_SHAS[0]}" "${WORKER_SHAS[1]}" <<'REMOTE_SCRIPT'
 set -euo pipefail
 svc_bin="$1"; want_sha="$2"; want_src="$3"; want_commit="$4"
+want_worker_v="$5"; want_worker_d="$6"
+worker_dir="$(dirname "$svc_bin")"
+worker_v="$worker_dir/zclassic23-package-verify"
+worker_d="$worker_dir/zclassic23-package-verify-dev"
 dropin_dir="$HOME/.config/systemd/user/zclassic23.service.d"
 dropin="$dropin_dir/90-build-identity.conf"
 rollback_bin="${svc_bin}.rollback"
@@ -299,7 +370,38 @@ dropin_tmp=""
 prior_sha=""
 rollback_armed=0
 
+# Workers stage beside the service binary. Each swap verifies the exact
+# transferred bytes against the gated build, snapshots the outgoing file the
+# same way the daemon's rollback_bin does, and uses the same
+# present/absent marker pair as the dropin so restore_prior can undo a
+# worker that did not exist before the ship.
+stage_worker() {
+    w_dst="$1"; w_sha="$2"
+    w_got="$(sha256sum < "${w_dst}.incoming" | awk '{print $1}')"
+    [ "$w_got" = "$w_sha" ] || \
+        { echo "remote: transferred worker bytes differ from candidate: $w_dst" >&2; exit 1; }
+    chmod 755 "${w_dst}.incoming"
+    if [ -f "$w_dst" ]; then
+        install -m 755 "$w_dst" "${w_dst}.ship.rollback"
+        rm -f "${w_dst}.ship.absent"
+    else
+        : > "${w_dst}.ship.absent"
+        rm -f "${w_dst}.ship.rollback"
+    fi
+    mv -f "${w_dst}.incoming" "$w_dst"
+}
+
+restore_worker() {
+    r_dst="$1"
+    if [ -f "${r_dst}.ship.rollback" ]; then
+        install -m 755 "${r_dst}.ship.rollback" "$r_dst" || return 1
+    elif [ -f "${r_dst}.ship.absent" ]; then
+        rm -f "$r_dst" || return 1
+    fi
+}
+
 restore_prior() {
+    restore_worker "$worker_v" && restore_worker "$worker_d" || return 1
     install -m 755 "$rollback_bin" "$svc_bin" || return 1
     if [ -f "$rollback_dropin" ]; then
         install -m 644 "$rollback_dropin" "$dropin" || return 1
@@ -347,6 +449,14 @@ trap restore_on_failure EXIT HUP INT TERM
 got="$(sha256sum < "${svc_bin}.incoming" | awk '{print $1}')"
 [ "$got" = "$want_sha" ] || { echo "remote: transferred bytes differ from candidate" >&2; exit 1; }
 chmod 755 "${svc_bin}.incoming"
+
+# Workers swap BEFORE the daemon. If a worker stage fails, the host still has
+# its old daemon and old workers — a consistent pair. Once the daemon swap
+# begins, restore_prior (armed below) undoes workers and binary together. The
+# brief old-daemon-spawns-new-worker window is the safe direction: worker
+# flags are only ever added, so the newer worker accepts the older CLI.
+stage_worker "$worker_v" "$want_worker_v"
+stage_worker "$worker_d" "$want_worker_d"
 
 # The transferred SHA-256 is the source binding. The local preflight already
 # asked these exact bytes for their baked source id; re-parsing the same large
@@ -446,6 +556,14 @@ dropin="$HOME/.config/systemd/user/zclassic23.service.d/90-build-identity.conf"
 if [ -f "${svc_bin}.rollback" ]; then
     prior_sha="$(sha256sum < "${svc_bin}.rollback" | awk '{print $1}')"
     install -m 755 "${svc_bin}.rollback" "$svc_bin"
+    rb_dir="$(dirname "$svc_bin")"
+    for rb_w in "$rb_dir/zclassic23-package-verify" "$rb_dir/zclassic23-package-verify-dev"; do
+        if [ -f "${rb_w}.ship.rollback" ]; then
+            install -m 755 "${rb_w}.ship.rollback" "$rb_w"
+        elif [ -f "${rb_w}.ship.absent" ]; then
+            rm -f "$rb_w"
+        fi
+    done
     if [ -f "${dropin}.ship.rollback" ]; then
         install -m 644 "${dropin}.ship.rollback" "$dropin"
     elif [ -f "${dropin}.ship.absent" ]; then
