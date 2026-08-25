@@ -5,6 +5,9 @@
 
 #include "base/hex.h"
 #include "config/c23_commons_build_profile.h"
+#include "core/uint256.h"
+#include "keys/key.h"
+#include "keys/pubkey.h"
 #include "services/package_lifecycle.h"
 #include "util/spawn.h"
 #include "vcs/package_build.h"
@@ -631,6 +634,46 @@ int test_zcode_package_registry(void)
             zcl_hex_encode(prepared.recipe_root, 32, recipe);
             zcl_hex_encode(prepared.lock_root, 32, lock);
             zcl_hex_encode(prepared.capsule_root, 32, capsule);
+            /* The def is a projection of lib/ content; when a lane moves
+             * that content the derived row below is the ready-to-paste
+             * replacement (ZCODE_PACKAGE keeps name, dir and sequence; the
+             * signature is re-signed live by the alpha fixture identity,
+             * the same 0x47-key convention every swarm fixture signs
+             * with). */
+            char signature[VCS_PACKAGE_RELEASE_SIGNATURE_BYTES * 2u + 1u];
+            bool drifted = strcmp(content, expected->content_root) != 0 ||
+                           strcmp(release, expected->release_root) != 0 ||
+                           strcmp(recipe, expected->recipe_root) != 0 ||
+                           strcmp(lock, expected->lock_root) != 0 ||
+                           strcmp(capsule, expected->capsule_root) != 0 ||
+                           vcs_package_release_verify(&prepared.release) !=
+                               VCS_PACKAGE_RELEASE_OK;
+            if (drifted) {
+                struct privkey key;
+                memset(&key, 0, sizeof(key));
+                memset(key.vch, 0x47, sizeof(key.vch));
+                key.fValid = true;
+                key.fCompressed = true;
+                struct uint256 digest;
+                memcpy(digest.data, prepared.signing_digest, 32);
+                uint8_t compact[COMPACT_SIGNATURE_SIZE];
+                if (privkey_sign_compact(&key, &digest, compact)) {
+                    memcpy(prepared.release.signature, compact + 1,
+                           VCS_PACKAGE_RELEASE_SIGNATURE_BYTES);
+                    zcl_hex_encode(prepared.release.signature,
+                                   VCS_PACKAGE_RELEASE_SIGNATURE_BYTES,
+                                   signature);
+                } else {
+                    signature[0] = '\0';
+                }
+                printf("  registry drift %s: re-derive as\n"
+                       "    \"%s\", \"%s\", \"%s\",\n"
+                       "    \"%s\",\n    \"%s\",\n    \"%s\",\n"
+                       "    \"%s\",\n    \"%s\",\n    \"%s\")\n",
+                       expected->name, expected->name, expected->dir,
+                       content, release, recipe, lock, capsule,
+                       expected->publisher_pubkey, signature);
+            }
             ASSERT_STR_EQ(content, expected->content_root);
             ASSERT_STR_EQ(release, expected->release_root);
             ASSERT_STR_EQ(recipe, expected->recipe_root);
