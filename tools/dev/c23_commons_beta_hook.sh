@@ -308,7 +308,7 @@ beta_visual_development_receipt() {
 BETA_NAMESPACE="zclassic23.package"
 BETA_BASE_ROOT="7f15ba590a82de200152b1c02b5b1dc11b4932a9b690fbe332e7c2fa60d764fe"
 BETA_SHA3_ROOT="ea54d7038792764c059a697792d46ee92fe75e29aa302d3c8db3a208a580876e"
-BETA_PACKAGE_ROOT="401b0377f494937690ca0b2c240fbbf18b34ad519f132f0ed425882ec7bf9390"
+BETA_PACKAGE_ROOT="86130b763363f4da0b7f74dc669519561d4c2d4e4298140524b0ae6e5c65f039"
 BETA_SECOND_ROOT_EXPECTED="263a53e35626a3e4b0a25c8a3f6f70b478872484f037380d4e8cd4b977935d26"
 BETA_EXPECTED_NOTE="3338be694f50c5f338814986cdf0686453a888b84f424d792af4b9202398f392"
 
@@ -445,7 +445,7 @@ EOF
 #define STRANGER_NOTE_HEX_SIZE 65u
 
 bool stranger_note_digest(const char *text,
-                          char out[static STRANGER_NOTE_HEX_SIZE]);
+                          char out[STRANGER_NOTE_HEX_SIZE]);
 
 #endif
 EOF
@@ -462,7 +462,7 @@ EOF
 #include <string.h>
 
 bool stranger_note_digest(const char *text,
-                          char out[static STRANGER_NOTE_HEX_SIZE])
+                          char out[STRANGER_NOTE_HEX_SIZE])
 {
     if (!text || !out)
         return false;
