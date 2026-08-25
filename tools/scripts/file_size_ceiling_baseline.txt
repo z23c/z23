@@ -89,7 +89,7 @@ config/src/boot_services.c 1476
 config/src/boot_zcode_swarm.c 885
 config/src/bundle_exporter.c 991
 config/src/consensus_state_install_runtime.c 919
-config/src/consensus_state_producer_receipt.c 805
+config/src/consensus_state_producer_receipt.c 787
 config/src/consensus_state_snapshot_install_activate.c 1169 # ADR-0008 (seed-floor declaration)
 app/services/src/header_sync_service.c 846
 app/controllers/src/event_agent_summary.c 853

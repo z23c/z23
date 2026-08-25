@@ -1,15 +1,65 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Internal contract shared by the producer-receipt TUs
- * (consensus_state_producer_receipt.c + _corpus.c). */
+ * (consensus_state_producer_receipt.c + _corpus.c + _session_retire.c). */
 
 #ifndef ZCL_CONSENSUS_STATE_PRODUCER_RECEIPT_INTERNAL_H
 #define ZCL_CONSENSUS_STATE_PRODUCER_RECEIPT_INTERNAL_H
+
+#include "config/consensus_state_producer_receipt.h"
+#include "storage/consensus_state_bundle_codec.h"
 
 #include <sqlite3.h>
 #include <stdbool.h>
 #include <stdint.h>
 
 #define PRODUCER_RECEIPT_SUBSYS "consensus_producer_receipt"
+
+#define PRODUCER_SESSION_SCHEMA_V1 "zcl.consensus_state_producer_session.v1"
+#define PRODUCER_SESSION_SCHEMA_V2 "zcl.consensus_state_producer_session.v2"
+
+#define PRODUCER_SESSION_SCHEMA_SQL \
+    "CREATE TABLE IF NOT EXISTS consensus_state_producer_session(" \
+    "singleton INTEGER PRIMARY KEY CHECK(singleton=1)," \
+    "schema TEXT NOT NULL,running_binary_digest BLOB NOT NULL," \
+    "source_tree_root BLOB NOT NULL,toolchain_digest BLOB NOT NULL," \
+    "build_inputs_digest BLOB NOT NULL,source_epoch_digest BLOB NOT NULL," \
+    "source_clean INTEGER NOT NULL,validation_profile INTEGER NOT NULL," \
+    "producer_commit TEXT NOT NULL,datadir TEXT NOT NULL," \
+    "start_time_us INTEGER NOT NULL)"
+
+struct producer_session {
+    uint8_t running_binary_digest[32];
+    uint8_t source_epoch_digest[32];
+    struct consensus_state_source_receipt claim; /* claim fields only */
+    int64_t started_us; /* session start_time_us (0 when absent) */
+    bool present;
+};
+
+/* SHA3-256 of the running executable's on-disk image. Used by begin() to
+ * bind the session to this build and by retire() to decide whether the
+ * stored session already matches the build about to judge it. */
+bool producer_running_binary_digest(uint8_t out[32]);
+
+/* The running build's own v2 claim and source epoch — recomputed from the
+ * executable, never derived from any stored row (resume/retire authority is
+ * always the running build's, not the row's). */
+bool producer_current_v2_claim(
+    uint8_t validation_profile,
+    struct consensus_state_source_receipt *out,
+    uint8_t source_epoch[32]);
+
+/* Load the singleton start session from the store. Returns false only on a
+ * store error; out->present reports whether a row exists (a missing table
+ * is a legitimate "no session"). */
+bool producer_session_load(sqlite3 *db, struct producer_session *out);
+
+/* Exact-equality resume test between a stored session and the running
+ * build's independently derived claim/epoch/binary digest. */
+bool producer_session_matches_current(
+    const struct producer_session *stored,
+    const struct consensus_state_source_receipt *current,
+    const uint8_t current_epoch[32],
+    const uint8_t running_binary[32]);
 
 /* Recompute the genesis..height header corpus digest and confirm the tip hash.
  * MUST stay byte-identical to prove_header_chain() in

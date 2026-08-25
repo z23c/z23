@@ -13,18 +13,23 @@
  * ZCL_COMMAND_SCOPE_OFFLINE_COPY (lib/kernel/include/kernel/command_
  * registry.h) has existed with zero leaves using it until this file.
  *
- * Both leaves below open an AD HOC handle straight at the caller-supplied
- * `--datadir=<path>` and run the SAME SELECT-only production primitive a
- * live node would use — dbquery_execute() for storage.query.offline,
+ * The leaves below open an AD HOC handle straight at the caller-supplied
+ * `--datadir=<path>` and run the SAME production primitive a live node
+ * would use — dbquery_execute() for storage.query.offline,
  * reducer_frontier_compute_hstar() for sync.frontier.offline — so the
  * safety envelope (SELECT-only, no secrets, budget/row caps for the
  * former; the pure L0 H* fold for the latter) is identical to the
- * RPC-backed leaves, just without requiring a booted node. */
+ * RPC-backed leaves, just without requiring a booted node. The one
+ * write-scoped exception is producer-session.retire: an OFFLINE operator
+ * mutation of a FOREIGN start session, refuse-gated on node liveness and
+ * on the retire primitive's own build-identity match. */
 
 #include "command/native_command.h"
 
 #include "chain/chainparams.h"
+#include "config/consensus_state_producer_receipt.h"
 #include "controllers/diagnostics_controller.h"
+#include "controllers/rpc_client.h"
 #include "jobs/reducer_frontier.h"
 #include "jobs/refold_progress.h"
 #include "json/json.h"
@@ -36,6 +41,7 @@
 
 #include <sqlite3.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -254,4 +260,141 @@ void zcl_native_handle_core_sync_frontier_offline(
     sqlite3_close(db);
     reply->status = ZCL_COMMAND_STATUS_PASSED;
     reply->exit_code = ZCL_COMMAND_EXIT_OK;
+}
+
+/* ── core.consensus.producer-session.retire ─────────────────────────── */
+
+void zcl_native_handle_core_consensus_producer_session_retire(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply)
+{
+    if (!request || !reply)
+        return;
+
+    const char *datadir = json_get_str(json_get(request->input, "datadir"));
+    if (!datadir || !datadir[0]) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "MISSING_DATADIR",
+                               "normalize", false, false,
+                               "no datadir given",
+                               "core.consensus.producer-session.retire");
+        return;
+    }
+
+    /* Retirement is an OFFLINE act against a stopped datadir. A live node's
+     * exporter may own exactly the session being deleted, so when something
+     * answers on this datadir's RPC, refuse and name the remedy. The probe
+     * is deliberately best-effort — cookie presence plus one short-deadline
+     * call, no port inventable beyond the explicit input / CLI binding —
+     * because the decisive ownership test is the retire primitive's own
+     * build-identity match: it refuses to touch a session this very binary
+     * owns, which is the case where a mid-run delete would actually bite. */
+    char cookie_path[1200];
+    if (snprintf(cookie_path, sizeof(cookie_path), "%s/.cookie", datadir) <
+            (int)sizeof(cookie_path) &&
+        access(cookie_path, F_OK) == 0) {
+        int64_t given_port = json_get_int_or(request->input, "rpc_port", 0);
+        int port = given_port > 0 && given_port <= 65535
+                       ? (int)given_port
+                       : zcl_native_command_rpc_port();
+        if (port > 0) {
+            char *probe = node_rpc_call_at_deadline(
+                datadir, port, "getblockcount", "[]", 250, 500);
+            if (probe) {
+                free(probe);
+                zcl_command_reply_fail(
+                    reply, ZCL_COMMAND_STATUS_BLOCKED,
+                    ZCL_COMMAND_EXIT_BLOCKED, "NODE_RUNNING", "normalize",
+                    true, false,
+                    "a node answered on this datadir's RPC — stop it first; "
+                    "retirement is offline and the exporter requalifies at "
+                    "next boot", datadir);
+                return;
+            }
+        }
+    }
+
+    /* Read-write, but NO CREATE: retiring is meaningless against a datadir
+     * with no kernel store, and a mistyped path must fail closed instead of
+     * minting an empty consensus.db. */
+    char kernel_path[1200];
+    if (!consensus_db_kernel_store_path(datadir, kernel_path,
+                                        sizeof(kernel_path))) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID,
+                               "DATADIR_PATH_TOO_LONG", "normalize", false,
+                               false, "datadir path too long", datadir);
+        return;
+    }
+    sqlite3 *db = NULL;
+    if (sqlite3_open_v2(kernel_path, &db, SQLITE_OPEN_READWRITE, NULL) !=
+        SQLITE_OK) {
+        if (db)
+            sqlite3_close(db);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
+                               ZCL_COMMAND_EXIT_BLOCKED,
+                               "KERNEL_STORE_NOT_FOUND", "execute", true,
+                               false,
+                               "no consensus.db/progress.kv at this datadir "
+                               "to retire a session from",
+                               kernel_path);
+        return;
+    }
+
+    struct consensus_state_producer_session_retired evidence;
+    char why[256];
+    enum consensus_state_producer_session_retire_result r =
+        consensus_state_producer_session_retire(db, &evidence, why,
+                                                sizeof(why));
+    sqlite3_close(db);
+
+    switch (r) {
+    case CONSENSUS_STATE_PRODUCER_SESSION_RETIRE_RETIRED:
+        (void)json_push_kv_str(&reply->data, "datadir", datadir);
+        (void)json_push_kv_str(&reply->data, "kernel_store", kernel_path);
+        (void)json_push_kv_str(&reply->data, "retired_running_binary_digest",
+                               evidence.running_binary_digest);
+        (void)json_push_kv_str(&reply->data, "retired_source_tree_root",
+                               evidence.source_tree_root);
+        (void)json_push_kv_str(&reply->data, "retired_source_epoch_digest",
+                               evidence.source_epoch_digest);
+        (void)json_push_kv_int(&reply->data, "retired_validation_profile",
+                               evidence.validation_profile);
+        (void)json_push_kv_int(&reply->data, "retired_started_us",
+                               evidence.started_us);
+        (void)json_push_kv_bool(&reply->data, "restart_required", true);
+        (void)json_push_kv_str(
+            &reply->data, "remedy",
+            "foreign session retired; the next boot's begin() inserts a "
+            "fresh session owned by that build and the exporter "
+            "requalifies");
+        reply->status = ZCL_COMMAND_STATUS_PASSED;
+        reply->exit_code = ZCL_COMMAND_EXIT_OK;
+        return;
+    case CONSENSUS_STATE_PRODUCER_SESSION_RETIRE_ABSENT:
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
+                               ZCL_COMMAND_EXIT_BLOCKED, "SESSION_ABSENT",
+                               "execute", true, false,
+                               "no producer session in this datadir — "
+                               "nothing to retire",
+                               kernel_path);
+        return;
+    case CONSENSUS_STATE_PRODUCER_SESSION_RETIRE_CURRENT:
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
+                               ZCL_COMMAND_EXIT_BLOCKED, "SESSION_CURRENT",
+                               "execute", false, false,
+                               why[0] ? why : "stored session matches this "
+                                              "running build",
+                               kernel_path);
+        return;
+    case CONSENSUS_STATE_PRODUCER_SESSION_RETIRE_ERROR:
+    default:
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "RETIRE_FAILED",
+                               "execute", false, false,
+                               why[0] ? why : "producer session retire "
+                                              "failed",
+                               kernel_path);
+        return;
+    }
 }

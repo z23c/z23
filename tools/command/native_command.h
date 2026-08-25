@@ -1671,6 +1671,15 @@ void zcl_native_handle_core_storage_query_offline(
 void zcl_native_handle_core_sync_frontier_offline(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+/* The one write-scoped OFFLINE_COPY leaf: retires a FOREIGN
+ * consensus_state_producer_session row (one written by a different build)
+ * from a STOPPED datadir so the next boot's begin() can insert a fresh
+ * session and the exporter requalifies. Refuses when a node answers on the
+ * datadir's RPC (retirement is offline) and delegates the ownership decision
+ * to consensus_state_producer_session_retire()'s build-identity match. */
+void zcl_native_handle_core_consensus_producer_session_retire(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 
 /* app.auth.* / app.account.* — the multi-user-server identity surface
  * (app/controllers/src/account_controller.c), mounted under the `app` root.

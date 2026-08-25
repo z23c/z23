@@ -503,6 +503,30 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
     ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+ZCL_COMMAND_READY_COMMAND(
+    "core.consensus.producer-session.retire", "core.consensus", "",
+    "Retire a foreign producer start session from a STOPPED datadir",
+    "Deletes the consensus_state_producer_session row when it was written "
+    "by a DIFFERENT build than this z23, so the next boot's begin() inserts "
+    "a fresh session and the exporter requalifies — the operator remedy for "
+    "STATUS_SOURCE_UNAVAILABLE / bundle_exporter.degraded after a binary "
+    "upgrade. Refuses (SESSION_CURRENT) when the session matches this very "
+    "build, answers SESSION_ABSENT when there is nothing to retire, and "
+    "refuses NODE_RUNNING when a node still answers on the datadir's RPC. "
+    "Audits the retired session's binary digest into progress_meta.", 0,
+    "consensus,producer,session,retire,offline,datadir,exporter,degraded",
+    "zcl.core_producer_session_retire.input.v1",
+    "zcl.core_producer_session_retire.v1", "datadir,rpc_port", "datadir",
+    "z23 core consensus producer-session retire "
+    "--input='{\"datadir\":\"/home/you/.zclassic-c23\"}'",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_CORE_RECOVERY, ZCL_COMMAND_SCOPE_OFFLINE_COPY,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_core_consensus_producer_session_retire)
 ZCL_COMMAND_BRANCH("core.consensus.block", "core.consensus",
                    "Invalidate or reconsider a block", ZCL_COMMAND_LAYER_CORE)
 ZCL_COMMAND_PLANNED_COMMAND(

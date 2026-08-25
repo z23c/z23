@@ -71,6 +71,51 @@ bool consensus_state_producer_receipt_finalize(sqlite3 *pdb, int32_t height,
                                                const uint8_t block_hash[32],
                                                char *err, size_t err_size);
 
+/* Operator retirement of a FOREIGN start session. begin() adopts nothing: when
+ * the datadir's session row was written by a different build, every subsequent
+ * boot of a newer binary degrades the exporter (STATUS_SOURCE_UNAVAILABLE /
+ * bundle_exporter.degraded) until an operator explicitly retires the stale
+ * row. This is that explicit act — offline, typed, audited:
+ *
+ *   RETIRED  - the stored session was written by a DIFFERENT build; the row is
+ *              deleted and an audit digest of the retired session's binary is
+ *              written to progress_meta. The next begin() inserts a fresh
+ *              session owned by the then-running build.
+ *   ABSENT   - no session row exists; nothing to do (not an error).
+ *   CURRENT  - the stored session exactly matches THIS running build's
+ *              identity; refused, because deleting it would destroy a session
+ *              the running build legitimately owns and can resume.
+ *   ERROR    - store failure, or this build carries no exact source identity
+ *              (an unstamped build cannot judge a session — fail closed).
+ *
+ * The match is decided by build identity alone (running binary digest, source
+ * tree root, toolchain, build inputs, source epoch, cleanliness, commit): the
+ * current claim is recomputed at the STORED session's validation profile so a
+ * profile difference alone never marks a same-build session foreign. */
+enum consensus_state_producer_session_retire_result {
+    CONSENSUS_STATE_PRODUCER_SESSION_RETIRE_ERROR = 0,
+    CONSENSUS_STATE_PRODUCER_SESSION_RETIRE_RETIRED,
+    CONSENSUS_STATE_PRODUCER_SESSION_RETIRE_ABSENT,
+    CONSENSUS_STATE_PRODUCER_SESSION_RETIRE_CURRENT,
+};
+
+struct consensus_state_producer_session_retired {
+    char    running_binary_digest[65]; /* lowercase hex; "" never happens */
+    char    source_tree_root[65];      /* lowercase hex claim of retired row */
+    char    source_epoch_digest[65];   /* lowercase hex epoch of retired row */
+    int     validation_profile;        /* retired session's profile */
+    int64_t started_us;                /* retired session's start time */
+};
+
+/* `pdb` must be an OPEN read-write consensus/progress store handle. On every
+ * non-ERROR result `out` (may be NULL) receives what an operator needs to
+ * audit the decision. Single DELETE + audit write in one transaction; a store
+ * error rolls back and leaves the session row untouched. */
+enum consensus_state_producer_session_retire_result
+consensus_state_producer_session_retire(
+    sqlite3 *pdb, struct consensus_state_producer_session_retired *out,
+    char *err, size_t err_size);
+
 /* This running executable's build-epoch digest: the same domain-separated
  * SHA3-256 binding of the exact current source tree
  * (zcl_build_source_id_sha256()), toolchain identity, and build inputs used

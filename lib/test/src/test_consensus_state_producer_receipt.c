@@ -653,6 +653,54 @@ int test_consensus_state_producer_receipt(void)
                                                          sizeof(err)) &&
              strstr(err, "does not own the start session") != NULL);
 
+    /* OPERATOR RETIREMENT. The session above is now foreign (zeroblob binary
+     * digest): exactly the datadir state a binary upgrade leaves behind, the
+     * state that degrades the exporter at every boot. The typed remedy must
+     * delete it, audit it, and let begin() start over. */
+    struct consensus_state_producer_session_retired retired;
+    memset(&retired, 0, sizeof(retired));
+    PR_CHECK("retire deletes the foreign session and audits it",
+             consensus_state_producer_session_retire(
+                 db, &retired, err, sizeof(err)) ==
+                 CONSENSUS_STATE_PRODUCER_SESSION_RETIRE_RETIRED &&
+             pr_scalar_true(db,
+                 "SELECT count(*)=0 "
+                 "FROM consensus_state_producer_session") &&
+             pr_scalar_true(db,
+                 "SELECT count(*)=1 FROM progress_meta "
+                 "WHERE key='consensus_state.producer_session_retired_"
+                 "binary_digest' AND value=zeroblob(32)"));
+    PR_CHECK("retire evidence reports the retired foreign session",
+             strspn(retired.running_binary_digest, "0") == 64 &&
+             strlen(retired.source_tree_root) == 64 &&
+             strlen(retired.source_epoch_digest) == 64 &&
+             retired.validation_profile == CONSENSUS_STATE_VALIDATION_FULL &&
+             retired.started_us > 0);
+    PR_CHECK("retire is idempotent against an empty datadir",
+             consensus_state_producer_session_retire(
+                 db, &retired, err, sizeof(err)) ==
+                 CONSENSUS_STATE_PRODUCER_SESSION_RETIRE_ABSENT);
+    PR_CHECK("begin re-mints a fresh session after retirement",
+             consensus_state_producer_receipt_begin(
+                 db, CONSENSUS_STATE_VALIDATION_FULL, err, sizeof(err)) &&
+             pr_scalar_true(db,
+                 "SELECT count(*)=1 "
+                 "FROM consensus_state_producer_session"));
+    PR_CHECK("retire refuses the running build's own session",
+             consensus_state_producer_session_retire(
+                 db, &retired, err, sizeof(err)) ==
+                 CONSENSUS_STATE_PRODUCER_SESSION_RETIRE_CURRENT &&
+             strstr(err, "matches this running build") != NULL &&
+             pr_scalar_true(db,
+                 "SELECT count(*)=1 "
+                 "FROM consensus_state_producer_session"));
+    PR_CHECK("retire tolerates a datadir with no session table",
+             pr_exec(db,
+                 "DROP TABLE consensus_state_producer_session") &&
+             consensus_state_producer_session_retire(
+                 db, &retired, err, sizeof(err)) ==
+                 CONSENSUS_STATE_PRODUCER_SESSION_RETIRE_ABSENT);
+
     reducer_frontier_test_set_compiled_anchor(-1);
     checkpoints_reset_sha3_override_for_test();
     consensus_state_producer_receipt_test_set_identity(NULL, false);
