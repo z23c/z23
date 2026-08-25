@@ -728,6 +728,22 @@ cj_announce_source() {
     cj_publish_record "$node" zclassic23.source provider "$root" "$root" "$seq"
 }
 
+# An accepted-work publication is a SOURCE TRANSPORT: its recipe is the
+# synthetic carrier, not a build recipe with declared tests, so the store
+# can never evidence it the way the pointer gate demands — the standard
+# profile refuses to sign evidence for a recipe with no tests
+# (zbuild-package-standard-refused, measured). Transports announce the two
+# claims that are theirs to make: PROVIDER for the bytes (I hold and serve
+# this exact root) and PROVIDER in the source namespace (anyone can
+# re-derive the source I accepted). The POINTER stays reserved for
+# packages whose local reproduction the store can prove — that gate is the
+# whole point of the pointer, and refusing here is it working.
+cj_announce_transport() {
+    local node="$1" root="$2" transport="$3" seq="$4"
+    cj_publish_record "$node" zclassic23.package provider "$root" "$transport" "$seq"
+    cj_publish_record "$node" zclassic23.source provider "$root" "$root" "$seq"
+}
+
 cj_pin_root() {
     local node="$1" root="$2" plan token commit attempt=0
     while [ "$attempt" -lt 3 ]; do
@@ -1382,13 +1398,13 @@ cj_reproduce_accepted_source() {
 }
 
 cj_journey_remote_reproduction() {
-    # A announces only what its own store evidences: the accepted application
-    # is admitted locally (first receipt) and deterministically rebuilt
-    # (distinct second receipt) before its pointer plan exists.
-    cj_use_package a "$CJ_APP_ROOT"
-    cj_reproduce_package a "$CJ_APP_ROOT"
-    cj_announce_package a "$CJ_APP_ROOT" "$CJ_APP_TRANSPORT" 1
-    cj_announce_source  a "$CJ_APP_ROOT" 1
+    # The accepted application is a source transport: it announces provider
+    # (the bytes) and source (the derivation), never a pointer — the pointer
+    # gate requires local reproduction evidence, and the standard profile
+    # refuses a recipe without declared tests. Cross-node proof for a
+    # transport is the source ACK below, which is stronger than a pointer
+    # anyway: B re-derives the exact source root A accepted.
+    cj_announce_transport a "$CJ_APP_ROOT" "$CJ_APP_TRANSPORT" 1
     cj_fetch_package b "$CJ_APP_ROOT" "$CJ_APP_TRANSPORT"
     CJ_APP_BYTES="$CJ_FETCH_BYTES"
     cj_note "node B fetched the accepted application: $CJ_APP_BYTES bytes"
@@ -1973,11 +1989,10 @@ cj_journey_turn_faster() {
     cj_note "the changed version published: ${CJ_ZDOG_APP_ROOT:0:16}… (was ${CJ_ZDOG_ROOT:0:16}…)"
 
     # ── AFTER: another machine reproduces it and runs it ─────────────────
-    # A's pointer for the changed version needs A's own reproduction
-    # evidence: admit the accepted package, then file the distinct rebuild.
-    cj_use_package a "$CJ_ZDOG_APP_ROOT"
-    cj_reproduce_package a "$CJ_ZDOG_APP_ROOT"
-    cj_announce_package a "$CJ_ZDOG_APP_ROOT" "$CJ_ZDOG_APP_TRANSPORT" 1
+    # The changed version is published from accepted work, so it is a
+    # source transport like the application: provider + source, no pointer
+    # (its recipe carries no declared tests to evidence).
+    cj_announce_transport a "$CJ_ZDOG_APP_ROOT" "$CJ_ZDOG_APP_TRANSPORT" 1
     cj_fetch_package b "$CJ_ZDOG_APP_ROOT" "$CJ_ZDOG_APP_TRANSPORT"
     CJ_ZDOG_BYTES="$CJ_FETCH_BYTES"
 
@@ -2116,20 +2131,19 @@ cj_journey_publisher_disappears() {
     # B, the only remaining holder, announces that it serves both packages
     # and the accepted application's source. These records are B's own; A
     # never knew about this leg. The pointer gate binds B exactly as it
-    # bound A: B admits the changed version locally, then files the distinct
-    # rebuild receipt for every root it is about to name.
-    cj_use_package b "$CJ_ZDOG_APP_ROOT"
+    # bound A: B files the distinct rebuild receipt for every testable
+    # root it names a pointer for. The two accepted-work transports (the
+    # application and the changed aircraft) announce provider + source —
+    # the pointer is not a claim a transport can evidence.
     cj_reproduce_package b "$CJ_TEXTSTAT_ROOT"
-    cj_reproduce_package b "$CJ_APP_ROOT"
     cj_reproduce_package b "$CJ_ZPRNG_ROOT"
-    cj_reproduce_package b "$CJ_ZDOG_APP_ROOT"
     cj_announce_package b "$CJ_TEXTSTAT_ROOT" "$CJ_TEXTSTAT_TRANSPORT" 2
-    cj_announce_package b "$CJ_APP_ROOT" "$CJ_APP_TRANSPORT" 2
-    cj_announce_source  b "$CJ_APP_ROOT" 2
+    cj_announce_transport b "$CJ_APP_ROOT" "$CJ_APP_TRANSPORT" 2
     # Step 10's two packages travel the same way, from the same surviving
-    # holder: the dependency, and the changed version of the aircraft.
+    # holder: the dependency (testable, so it earns a pointer), and the
+    # changed version of the aircraft (a transport, so provider + source).
     cj_announce_package b "$CJ_ZPRNG_ROOT" "$CJ_ZPRNG_TRANSPORT" 2
-    cj_announce_package b "$CJ_ZDOG_APP_ROOT" "$CJ_ZDOG_APP_TRANSPORT" 2
+    cj_announce_transport b "$CJ_ZDOG_APP_ROOT" "$CJ_ZDOG_APP_TRANSPORT" 2
 
     # C and B form an authenticated overlay session — the same discipline the
     # A<->B session had, observed from both ends, with one re-arm for the
