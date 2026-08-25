@@ -266,7 +266,7 @@ represented by its children's sections.
 | `core consensus report` | ready | read / read / public · fast/low | none | `zcl.consensus_report.v1` | `z23 core consensus report` | Consensus parity and rule report |
 | `core consensus integrity` | ready | read / read / public · foreground/moderate | none | `zcl.data_integrity.v1` | `z23 core consensus integrity` | SHA3 over consensus tables |
 | `core consensus mmb` | ready | read / read / public · fast/low | none | `zcl.mmb.v1` | `z23 core consensus mmb` | Merkle Mountain Belt commitment state |
-| `core consensus producer-session retire` | ready | mutate / core-recovery / operator · fast/low | **`datadir`**, `rpc_port` | `zcl.core_producer_session_retire.v1` | `z23 core consensus producer-session retire --input='{"datadir":"/home/you/.zclassic-c23"}'` | Retire a foreign producer start session from a STOPPED datadir |
+| `core consensus producer-session retire` | ready | mutate / core-recovery / operator · fast/low | **`datadir`**, `rpc_port` | `zcl.core_producer_session_retire.v1` | `z23 core consensus producer-session retire --input='{"datadir":"/home/you/.zclassic-c23","rpc_port":18232}'` | Retire a foreign producer start session from a STOPPED datadir |
 
 #### `core.consensus.utxo` — UTXO set commitment and audit
 

@@ -518,7 +518,8 @@ ZCL_COMMAND_READY_COMMAND(
     "zcl.core_producer_session_retire.input.v1",
     "zcl.core_producer_session_retire.v1", "datadir,rpc_port", "datadir",
     "z23 core consensus producer-session retire "
-    "--input='{\"datadir\":\"/home/you/.zclassic-c23\"}'",
+    "--input='{\"datadir\":\"/home/you/.zclassic-c23\","
+    "\"rpc_port\":18232}'",
     ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_CORE_RECOVERY, ZCL_COMMAND_SCOPE_OFFLINE_COPY,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
