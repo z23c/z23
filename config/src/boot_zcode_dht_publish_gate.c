@@ -1,11 +1,14 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * purpose: Local reproduction evidence for package POINTER publication. */
+ * purpose: Local evidence gates for package and attestation POINTER publishes. */
 
 #include "config/boot_zcode_dht_publish_gate.h"
 
 #include "base/log_macros.h"
 #include "base/safe_alloc.h"
 #include "json/json.h"
+#include "vcs/blob_store.h"
+#include "vcs/package_attest.h"
+#include "vcs/package_attest_transport.h"
 #include "vcs/package_index.h"
 #include "vcs/package_release.h"
 #include "vcs/package_reproduce.h"
@@ -124,4 +127,129 @@ bool boot_zcode_dht_package_pointer_publish_gate(
     return false;
   }
   return true;
+}
+
+/* ── attestation POINTER gate ───────────────────────────────────────────
+ *
+ * THIS GATE IS HYGIENE, NOT THE SECURITY PROPERTY. READ THAT AGAIN BEFORE
+ * BUILDING ANYTHING ON TOP OF IT.
+ *
+ * All it does is stop THIS node from advertising an attestation pointer it
+ * cannot stand behind: bytes it does not hold, bytes that are not a
+ * canonical ZCLATT wire, a wire whose embedded signature does not verify,
+ * or a wire that attests a DIFFERENT package than the pointer claims. That
+ * is worth having — a node should not publish claims it cannot back — but
+ * it is a rule this node applies to ITSELF.
+ *
+ * A hostile node runs its own build. It never calls this function, and no
+ * amount of tightening here reaches it. It can publish a pointer in
+ * VCS_PACKAGE_ATTEST_DHT_NAMESPACE binding any semantic_root to any
+ * transport_root, signed with a perfectly valid record signature, and the
+ * DHT will carry it.
+ *
+ * What actually protects a reader is the RECEIVER-side check:
+ * vcs_package_attest_transport_admit() called with a non-NULL
+ * expect_package_root — the root the reader was asking about. An
+ * attestation whose package_root differs is refused ERR_BINDING and never
+ * filed, no matter who published the pointer or how well-formed the record
+ * was. `zcode package attest pull` always passes that root; so must any
+ * future puller.
+ *
+ * So: if you are here because you are about to treat an attestation pointer
+ * as trustworthy BECAUSE this gate exists, you are wrong, and this comment
+ * is here to stop you. The gate makes this node honest. It makes nobody
+ * else honest.
+ *
+ * THIS GATE IS NOT READ-ONLY, AND IT RUNS ON mode=plan TOO. A successful
+ * check FILES the attestation at <zcode_dir>/attestations/<id-hex>,
+ * because vcs_package_attest_transport_admit() is the single filer and
+ * verifying without filing would mean forking the verification logic into
+ * a second copy that drifts. The write is idempotent — identical bytes
+ * report already_present=true — and in the normal flow it is a no-op,
+ * since `zcode package attest offer` filed the attestation before the
+ * operator ever published a pointer. It is NOT a no-op when the blob
+ * reached the store by some other path, and "usually a no-op" is not
+ * "read-only", so a reader expecting plan to be a dry run must be told.
+ *
+ * Why that is acceptable rather than merely tolerated: publishing a
+ * pointer to an attestation IS the node asserting it holds that
+ * attestation. Having the bytes filed locally is exactly the state the
+ * claim describes, and refusing to file would leave this node advertising
+ * evidence it cannot serve out of its own store.
+ *
+ * PROVIDER records in this namespace are deliberately ungated. A provider
+ * claim only says "ask me for these bytes"; a false one fails the fetch and
+ * costs a round trip, so a gate would buy nothing. */
+bool boot_zcode_dht_attestation_pointer_publish_gate(
+    const struct vcs_zcode_dht_publish_spec *spec,
+    struct json_value *result) {
+  struct vcs_package_store *store = vcs_package_store_global();
+  if (!store) {
+    gate_error(result, "NO_PACKAGE_STORE",
+               "package hosting is disabled on this node; enable -packagehost=1"
+               " and run zcode package attest offer to admit the attestation"
+               " bytes before publishing its pointer");
+    return false;
+  }
+  const char *zcode_dir = vcs_package_store_root_dir(store);
+
+  /* ONE call carries every rule this gate has: possession of the blob at
+   * transport_root, canonical ZCLATT grammar, the embedded secp256k1
+   * signature, the recomputed attestation id, and — because
+   * expect_package_root is spec->semantic_root and never NULL — that the
+   * wire attests exactly the package this pointer names. Re-admitting bytes
+   * this node already holds is idempotent by contract, so the gate is free
+   * to run on both plan and commit. */
+  struct vcs_package_attest_transport_outcome outcome;
+  memset(&outcome, 0, sizeof(outcome));
+  enum vcs_package_attest_transport_result admitted =
+      vcs_package_attest_transport_admit(store, zcode_dir,
+                                         spec->transport_root,
+                                         spec->semantic_root, &outcome);
+  if (admitted == VCS_PACKAGE_ATTEST_TRANSPORT_OK)
+    return true;
+
+  /* Name the rule that failed, not merely that something did. The operator
+   * reading this has a different next step for every one of these. */
+  const char *code = "ATTESTATION_UNPUBLISHABLE";
+  const char *why = "the local node cannot stand behind this attestation"
+                    " pointer";
+  switch (admitted) {
+  case VCS_PACKAGE_ATTEST_TRANSPORT_ERR_ABSENT:
+  case VCS_PACKAGE_ATTEST_TRANSPORT_ERR_BLOB:
+    code = "ATTESTATION_NOT_HELD";
+    why = "this node does not hold the attestation blob at transport_root;"
+          " run zcode package attest offer first";
+    break;
+  case VCS_PACKAGE_ATTEST_TRANSPORT_ERR_ATTEST:
+    code = "ATTESTATION_INVALID";
+    why = "the bytes at transport_root are not a canonical ZCLATT wire, or"
+          " their embedded verifier signature does not verify";
+    break;
+  case VCS_PACKAGE_ATTEST_TRANSPORT_ERR_ID:
+    code = "ATTESTATION_ID_MISMATCH";
+    why = "the recomputed attestation id does not match the coordinate the"
+          " bytes are filed under";
+    break;
+  case VCS_PACKAGE_ATTEST_TRANSPORT_ERR_BINDING:
+    code = "ATTESTATION_BINDING_MISMATCH";
+    why = "the attestation at transport_root attests a DIFFERENT package"
+          " root than this pointer's semantic_root";
+    break;
+  case VCS_PACKAGE_ATTEST_TRANSPORT_ERR_CONFLICT:
+    code = "ATTESTATION_STORE_CONFLICT";
+    why = "a different or unreadable object already occupies this"
+          " attestation id in the local store";
+    break;
+  default:
+    break;
+  }
+  char message[512];
+  (void)snprintf(message, sizeof(message),
+                 "%s (rule=%s, blob=%s, attestation=%s)", why,
+                 vcs_package_attest_transport_result_string(admitted),
+                 vcs_blob_result_string(outcome.blob_error),
+                 vcs_package_attest_error_string(outcome.attest_error));
+  gate_error(result, code, message);
+  return false;
 }

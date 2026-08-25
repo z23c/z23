@@ -1817,7 +1817,150 @@ static int t_show(void)
              json_get_int(json_get(repro, "distinct_toolchains")) == 2 &&
              json_get_bool(json_get(repro, "cross_toolchain")) &&
              !json_get_bool(json_get(repro, "rows_truncated")));
+    /* Capture this cross-toolchain package's verdict so it can be
+     * compared, below, against a SOLO single-toolchain package's verdict
+     * on an entirely separate package root. */
+    bool cross_publishable =
+        repro && json_get_bool(json_get(repro, "publishable"));
+    int cross_distinct =
+        repro ? (int)json_get_int(json_get(repro, "distinct_toolchains"))
+              : -1;
+    bool cross_flag = repro && json_get_bool(json_get(repro, "cross_toolchain"));
     zp_cmd_free(&c);
+
+    /* ── owner directive pin (2026-08-25): cross-toolchain diversity is
+     * EVIDENCE, NEVER A GATE. The owner ruled: "RECORD cross-toolchain
+     * diversity as evidence whenever it is observed, but NEVER GATE
+     * PUBLICATION ON IT. A two-toolchain requirement locks out every
+     * solo publisher working on one machine, which betrays runs-anywhere.
+     * Diversity accumulates from witnesses over time. It is a STRENGTH
+     * SCORE, NOT A DOOR." Prove it end to end on the real show/publish
+     * path: a SEPARATE package whose two agreeing receipts pin the SAME
+     * toolchain capsule (one publisher, one machine, rebuilt twice) must
+     * still read publishable — and the diversity fields must still be
+     * honestly reported, because recording never stops just because it
+     * doesn't gate. */
+    char pkgdir2[512];
+    snprintf(pkgdir2, sizeof(pkgdir2), "%s/pkg-solo", dd);
+    struct zp_pkg p2;
+    memset(&p2, 0, sizeof(p2));
+    vcs_package_manifest_init(&p2.manifest);
+    mkdir(pkgdir2, 0700);
+    /* zp_make_package() always writes the SAME fixed file content
+     * (manifest content is what the package root hashes over, not the
+     * directory path) — reusing it here would collide p2's root with
+     * p's and pollute p's already-filed receipts. Distinct content, a
+     * distinct root, an isolated receipts bucket. */
+    bool p2_built =
+        zp_add_file(&p2, pkgdir2, "LICENSE",
+                    "MIT License\n\nsolo publisher, one machine.\n",
+                    VCS_PACKAGE_MODE_FILE) &&
+        zp_add_file(&p2, pkgdir2, "src/solo.c",
+                    "int solo_build(void) { return 9; }\n",
+                    VCS_PACKAGE_MODE_FILE) &&
+        vcs_package_manifest_serialize(&p2.manifest, &p2.wire,
+                                       &p2.wire_len) &&
+        vcs_package_manifest_root(&p2.manifest, p2.root) &&
+        memcmp(p2.root, p.root, 32) != 0;
+    if (p2_built)
+        zp_hex32(p2.root, p2.root_hex);
+    ZP_CHECK("owner directive fixture: solo-toolchain package builds "
+             "(distinct root)",
+             p2_built);
+    ZP_CHECK("owner directive fixture: solo-toolchain recipe builds",
+             zp_use_recipe(&p2.manifest));
+    struct vcs_package_release r2;
+    ZP_CHECK("owner directive fixture: solo-toolchain release signs",
+             zp_release(&r2, 0xdd, 1u, "solo/one-machine", "MIT", p2.root));
+    char *r2_hex = zp_release_hex(&r2, NULL, NULL);
+    char *m2_hex = zp_hex(p2.wire, p2.wire_len);
+    struct zp_cmd c2;
+    zp_publish_input(&c2, dd, r2_hex, m2_hex, pkgdir2);
+    zcl_native_handle_zcode_package_publish_commit(&c2.request, &c2.reply);
+    ZP_CHECK("owner directive fixture: solo-toolchain package commits",
+             c2.reply.status == ZCL_COMMAND_STATUS_PASSED);
+    zp_cmd_free(&c2);
+
+    struct vcs_package_build_receipt sa, sb;
+    vcs_package_build_receipt_init(&sa);
+    vcs_package_build_receipt_init(&sb);
+    struct vcs_package_build_receipt *srcpts[2] = {&sa, &sb};
+    static const char *const srcpt_flags[2] = {"fixture-quick",
+                                               "fixture-standard"};
+    bool srcpts_ok = true;
+    uint8_t sout_sha[32];
+    memset(sout_sha, 0x5b, sizeof(sout_sha));
+    uint8_t solo_cap[32];
+    memset(solo_cap, 0xc9, sizeof(solo_cap));
+    for (size_t i = 0; i < 2 && srcpts_ok; i++) {
+        struct vcs_package_build_receipt *rr = srcpts[i];
+        memcpy(rr->package_root, p2.root, 32);
+        memcpy(rr->recipe_root, g_zp_recipe_root, 32);
+        memcpy(rr->lock_root, p2.root, 32);
+        snprintf(rr->compiler_id, sizeof(rr->compiler_id), "gcc");
+        snprintf(rr->compiler_version, sizeof(rr->compiler_version),
+                 "14.2.0");
+        snprintf(rr->flags, sizeof(rr->flags), "%s", srcpt_flags[i]);
+        rr->isolation = (uint8_t)VCS_PACKAGE_BUILD_ISOLATION_FULL;
+        rr->test_ran = false;
+        rr->result_class = (uint8_t)VCS_PACKAGE_BUILD_RESULT_BUILD_PASS;
+        /* SAME capsule on both receipts, deliberately: one publisher, one
+         * machine, rebuilt twice — the exact case the owner ruled must
+         * still pass. */
+        srcpts_ok = vcs_package_build_add_output(rr, "lib/ring-buffer.a",
+                                                 sout_sha, 123) ==
+                        VCS_PACKAGE_BUILD_OK &&
+                    vcs_package_build_set_toolchain_capsule(rr, solo_cap) ==
+                        VCS_PACKAGE_BUILD_OK &&
+                    zp_file_receipt(dd, rr);
+    }
+    uint8_t sid_a[32], sid_b[32];
+    bool sids_ok = srcpts_ok &&
+        vcs_package_build_id(&sa, sid_a) == VCS_PACKAGE_BUILD_OK &&
+        vcs_package_build_id(&sb, sid_b) == VCS_PACKAGE_BUILD_OK &&
+        memcmp(sid_a, sid_b, 32) != 0;
+    ZP_CHECK("owner directive fixture: two same-capsule receipts filed",
+             sids_ok);
+
+    zp_cmd_init(&c2);
+    (void)json_push_kv_str(&c2.input, "datadir", dd);
+    (void)json_push_kv_str(&c2.input, "root", p2.root_hex);
+    zcl_native_handle_zcode_package_show(&c2.request, &c2.reply);
+    const struct json_value *repro2 =
+        json_get(&c2.reply.data, "reproduction");
+    ZP_CHECK("owner directive: a single-toolchain package still PASSES "
+             "publication (cross-toolchain diversity must be evidence, "
+             "never a publication gate — owner directive)",
+             c2.reply.status == ZCL_COMMAND_STATUS_PASSED && repro2 &&
+             json_get_int(json_get(repro2, "receipts_matching")) == 2 &&
+             json_get_bool(json_get(repro2, "reproduced")) &&
+             json_get_bool(json_get(repro2, "publishable")));
+    ZP_CHECK("owner directive: single-toolchain diversity is still "
+             "HONESTLY REPORTED (distinct_toolchains=1, cross_toolchain="
+             "false) — recording never stops just because it doesn't "
+             "gate (owner directive)",
+             repro2 &&
+             json_get_int(json_get(repro2, "distinct_toolchains")) == 1 &&
+             !json_get_bool(json_get(repro2, "cross_toolchain")));
+    bool solo_publishable =
+        repro2 && json_get_bool(json_get(repro2, "publishable"));
+    int solo_distinct =
+        repro2 ? (int)json_get_int(json_get(repro2, "distinct_toolchains"))
+               : -1;
+    bool solo_flag =
+        repro2 && json_get_bool(json_get(repro2, "cross_toolchain"));
+    ZP_CHECK("owner directive: adding a second toolchain (distinct=1->2, "
+             "cross_toolchain=false->true) changes NO publish verdict — "
+             "same pass, strictly more evidence; diversity is a strength "
+             "score, not a door (owner directive)",
+             solo_publishable && cross_publishable &&
+             solo_publishable == cross_publishable &&
+             solo_distinct == 1 && !solo_flag &&
+             cross_distinct == 2 && cross_flag);
+    zp_cmd_free(&c2);
+    free(r2_hex);
+    free(m2_hex);
+    zp_pkg_free(&p2);
 
     /* A release envelope not filed under its own id (renamed away) still
      * loads into the index — the loader keys on CONTENT, not filename — so

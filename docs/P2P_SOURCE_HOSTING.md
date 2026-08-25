@@ -333,6 +333,82 @@ not peer authentication and is not used here. Adding an authenticated session
 would improve reputation locality — it would not change what a peer can make
 you store.
 
+## Attestations ride the same swarm
+
+Third-party verifier attestations move over the flow above with **no new
+wire message, no new bound, and no new store**. A canonical `ZCLATT` wire
+is at most 681 bytes — under `VCS_BLOB_MAX_BYTES` — so it is admitted as an
+ordinary one-file, one-chunk `content.v2` package and served by the same
+ANNOUNCE/WANT/DATA codec as any other carrier. Nothing in the swarm engine
+knows or needs to know that a particular blob is an attestation.
+
+Discovery is two ordinary signed DHT records in the `zclassic23.attestation`
+namespace, and a publisher needs **both**:
+
+- **PROVIDER** on the attestation blob root — "ask me for these bytes".
+  This is the record the fetch path actually reads: it builds a
+  `{kind:"provider", namespace, transport_root}` selector and routes to
+  authenticated peers holding a match.
+- **POINTER** binding `semantic_root` = the attested package root to
+  `transport_root` = the attestation blob root — "that blob attests this
+  package". This is what a puller looks up when all it knows is a package
+  root.
+
+They answer different questions and neither substitutes for the other.
+Publish only the POINTER and a puller learns which blob to want but finds
+nobody serving it; publish only the PROVIDER and the bytes are reachable
+but nobody knows to ask for them. Either mistake is a silent no-op at pull
+time, so `zcode package attest offer` returns both ready-to-run publish
+inputs, provider first.
+
+The operator sequence is three acts, deliberately not collapsed into one:
+
+```text
+zcode package attest offer  --input='{"attestation_id":"<64hex>"}'
+    -> admits the exact signed bytes into the store, returns
+       transport_root plus provider_publish_input and pointer_publish_input
+zcode network publish       --input='<provider_publish_input>'   # plan, then commit
+zcode network publish       --input='<pointer_publish_input>'    # plan, then commit
+```
+
+On the other side, `zcode package attest pull --input='{"package_root":
+"<64hex>"}'` resolves every POINTER at that key, drives the ordinary swarm
+fetch for each distinct attestation blob, and admits each result. N
+independent verifiers are N records at one key, each in its own signed
+sequence stream; none can overwrite another. A row that fails stays in the
+report naming its rule — one bad or unreachable pointer never aborts the
+sweep, because losing the other verifiers' evidence to one bad publisher is
+exactly the failure a quorum exists to avoid. The report separates the two
+dead ends that must never be merged into a single "not found":
+`NO_ATTESTATION_POINTERS` means nobody has attested this root yet (wait for
+a verifier), while `ATTESTATION_BYTES_UNREACHABLE` means pointers exist but
+no authenticated provider served the bytes (a reachability problem, or a
+publisher who skipped the PROVIDER half of `offer`).
+
+**Where the trust actually sits.** The publish-side gate refuses to
+advertise a pointer this node cannot stand behind — bytes it does not hold,
+bytes that are not a canonical `ZCLATT` wire, a signature that does not
+verify, or a wire attesting a different package than the pointer claims.
+That check is not read-only and runs on `mode=plan` as well as `commit`: it
+re-admits the blob, which files those bytes locally. The write is idempotent
+and normally a no-op — `offer` filed them first — and it is consistent with
+the claim being made, since publishing the pointer IS asserting this node
+holds the attestation. That is hygiene, and it constrains only the node
+applying it: a hostile node runs its own build and can publish any pointer
+it likes. What protects a
+reader is the receiver-side binding check — every admission passes the root
+the reader asked about as `expect_package_root`, and an attestation whose
+own `package_root` differs is refused `package-root-binding` and never
+filed. Do not treat a published attestation pointer as trustworthy because
+the publish gate exists.
+
+**Pulling is not accepting.** `pull` files attestations signed by keys this
+node has never approved, carrying failure result classes, for packages it
+does not hold — on purpose. Refusing evidence at intake would let a node's
+own allowlist decide what it is allowed to see, and a quorum you can only
+observe when you already agree with it proves nothing. The
+approved-verifier quorum is applied afterwards, by `zcode package verify`.
+
 ## Ratio and optional ZCL burn credits
 
 The primary ratio should be earned by serving verified bytes:

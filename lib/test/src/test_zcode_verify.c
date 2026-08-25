@@ -1490,6 +1490,107 @@ static int t_reproduce(void)
                  strstr(e.gates[VCS_REWARD_GATE_VERIFIER_QUORUM].detail,
                         "no recorded reproduction") != NULL);
     }
+
+    /* ── owner directive pin (2026-08-25): cross-toolchain diversity is
+     * EVIDENCE, NEVER A GATE, all the way through to reward eligibility.
+     * The owner ruled: "RECORD cross-toolchain diversity as evidence
+     * whenever it is observed, but NEVER GATE PUBLICATION ON IT. A
+     * two-toolchain requirement locks out every solo publisher working
+     * on one machine, which betrays runs-anywhere. Diversity accumulates
+     * from witnesses over time. It is a STRENGTH SCORE, NOT A DOOR."
+     * struct vcs_reward_eligibility_input (lib/vcs/include/vcs/
+     * package_eligible.h) does not even carry a toolchain-diversity
+     * field — it takes only reproduction_verified — so drive it from a
+     * REAL vcs_package_reproduce_scan() report end to end and prove the
+     * verdict a solo, single-toolchain publisher gets is identical to a
+     * two-toolchain publisher's. */
+    {
+        char ebase[4400];
+        snprintf(ebase, sizeof(ebase), "%s/eligibility_toolchain", base);
+        zv_rm_rf(ebase);
+        uint8_t ecap_a[32], ecap_b[32];
+        zv_pattern_root(0x81, ecap_a);
+        zv_pattern_root(0x82, ecap_b);
+
+        /* (a)+(b) SOLO: two matching receipts pinning the SAME capsule —
+         * one publisher, one machine, rebuilt twice. Must still be
+         * eligible, and the scan must still honestly report
+         * distinct_toolchains=1, cross_toolchain=false (recording never
+         * stops just because it doesn't gate). */
+        struct vcs_package_build_receipt e1, e2;
+        char edir_solo[4400];
+        snprintf(edir_solo, sizeof(edir_solo), "%s/solo", ebase);
+        struct vcs_reproduce_report erep;
+        bool solo_scan_ok =
+            zv_receipt(&e1, package_root, recipe_root, "14.2.0", 0x40) &&
+            zv_receipt(&e2, package_root, recipe_root, "15.0.1", 0x40) &&
+            vcs_package_build_set_toolchain_capsule(&e1, ecap_a) ==
+                VCS_PACKAGE_BUILD_OK &&
+            vcs_package_build_set_toolchain_capsule(&e2, ecap_a) ==
+                VCS_PACKAGE_BUILD_OK &&
+            zv_store_receipt(edir_solo, &e1) &&
+            zv_store_receipt(edir_solo, &e2) &&
+            vcs_package_reproduce_scan(edir_solo, package_root, recipe_root,
+                                       &erep);
+        ZV_CHECK("owner directive: solo single-toolchain scan reproduces "
+                 "and honestly reports distinct_toolchains=1, "
+                 "cross_toolchain=false",
+                 solo_scan_ok && erep.reproduced &&
+                 erep.distinct_toolchains == 1 && !erep.cross_toolchain);
+
+        struct vcs_reward_eligibility_input ein;
+        memset(&ein, 0, sizeof(ein));
+        ein.manifest_parsed = true;
+        ein.root_matches = true;
+        ein.chunks_checked = true;
+        ein.chunks_verified = 1;
+        ein.chunks_total = 1;
+        ein.release_verifies = true;
+        ein.license_accepted = true;
+        ein.lineage_valid = true;
+        ein.lineage_detail = "root release (no parent)";
+        ein.reproduction_verified = solo_scan_ok && erep.reproduced;
+        struct vcs_reward_eligibility esolo;
+        vcs_reward_eligibility_evaluate(&ein, &esolo);
+        ZV_CHECK("owner directive: a solo single-toolchain reproduction "
+                 "still earns FULL reward eligibility (cross-toolchain "
+                 "diversity must be evidence, never a publication/"
+                 "eligibility gate — owner directive)",
+                 esolo.eligible && esolo.failed_count == 0 &&
+                 esolo.reproduction_verified);
+
+        /* (c) TWO capsules: strictly more evidence, same verdict. */
+        struct vcs_package_build_receipt e3, e4;
+        char edir_cross[4400];
+        snprintf(edir_cross, sizeof(edir_cross), "%s/cross", ebase);
+        struct vcs_reproduce_report erep2;
+        bool cross_scan_ok =
+            zv_receipt(&e3, package_root, recipe_root, "14.2.0", 0x40) &&
+            zv_receipt(&e4, package_root, recipe_root, "15.0.1", 0x40) &&
+            vcs_package_build_set_toolchain_capsule(&e3, ecap_a) ==
+                VCS_PACKAGE_BUILD_OK &&
+            vcs_package_build_set_toolchain_capsule(&e4, ecap_b) ==
+                VCS_PACKAGE_BUILD_OK &&
+            zv_store_receipt(edir_cross, &e3) &&
+            zv_store_receipt(edir_cross, &e4) &&
+            vcs_package_reproduce_scan(edir_cross, package_root, recipe_root,
+                                       &erep2);
+        ZV_CHECK("owner directive: two-capsule scan reports "
+                 "distinct_toolchains=2, cross_toolchain=true",
+                 cross_scan_ok && erep2.reproduced &&
+                 erep2.distinct_toolchains == 2 && erep2.cross_toolchain);
+        ein.reproduction_verified = cross_scan_ok && erep2.reproduced;
+        struct vcs_reward_eligibility ecross;
+        vcs_reward_eligibility_evaluate(&ein, &ecross);
+        ZV_CHECK("owner directive: two-toolchain evidence changes NO "
+                 "eligibility verdict relative to the solo case above — "
+                 "same eligible=true, strictly more evidence; diversity "
+                 "is a strength score, not a door (owner directive)",
+                 ecross.eligible == esolo.eligible &&
+                 ecross.eligible && ecross.failed_count == 0 &&
+                 erep.distinct_toolchains != erep2.distinct_toolchains);
+        zv_rm_rf(ebase);
+    }
     return failures;
 }
 

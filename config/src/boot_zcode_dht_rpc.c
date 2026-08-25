@@ -12,6 +12,7 @@
 #include "rpc/server.h"
 #include "util/sync.h"
 #include "json/json.h"
+#include "vcs/package_attest_transport.h"
 #include "vcs/package_swarm_node.h"
 #include <stdatomic.h>
 #include <string.h>
@@ -606,6 +607,16 @@ static bool rpc_publish_impl(
   if (!evidence_kind && spec.kind == VCS_ZCODE_DHT_RECORD_POINTER &&
       strcmp(spec.namespace_name, "zclassic23.package") == 0 &&
       !boot_zcode_dht_package_pointer_publish_gate(&spec, result))
+    return true;
+  /* The attestation lane rides the SAME frozen publish path: a POINTER in
+   * VCS_PACKAGE_ATTEST_DHT_NAMESPACE binds the attested package root to the
+   * attestation blob root. Its gate is local hygiene only — the binding a
+   * READER can rely on is re-checked receiver-side by
+   * vcs_package_attest_transport_admit(expect_package_root). PROVIDER
+   * records in the same namespace are deliberately ungated. */
+  if (!evidence_kind && spec.kind == VCS_ZCODE_DHT_RECORD_POINTER &&
+      strcmp(spec.namespace_name, VCS_PACKAGE_ATTEST_DHT_NAMESPACE) == 0 &&
+      !boot_zcode_dht_attestation_pointer_publish_gate(&spec, result))
     return true;
   uint8_t token[32];
   struct vcs_zcode_dht_record record;

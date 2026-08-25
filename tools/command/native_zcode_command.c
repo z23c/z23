@@ -86,6 +86,7 @@
 #include "services/zcode_package_view_service.h"
 #include "platform/time_compat.h"
 #include "vcs/package_attest.h"
+#include "vcs/package_attest_transport.h"
 #include "vcs/package_index.h"
 #include "vcs/package_policy.h"
 #include "vcs/package_publish.h"
@@ -100,11 +101,9 @@
 
 #include <dirent.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <unistd.h>
 
 #define ZC_LOG "zcode.command"
 
@@ -1443,58 +1442,11 @@ void zcl_native_handle_zcode_package_verify(
 
 /* ── zcode package attest import ────────────────────────────────────── */
 
-/* mkdir -p: the attestations dir need not exist on a fresh datadir. */
-static bool zc_mkdir_p(const char *path)
-{
-    char buf[4400];
-    size_t len = strlen(path);
-    if (len == 0 || len >= sizeof(buf))
-        return false;
-    memcpy(buf, path, len + 1);
-    for (char *p = buf + 1; *p; p++) {
-        if (*p != '/')
-            continue;
-        *p = '\0';
-        if (mkdir(buf, 0700) != 0 && errno != EEXIST)
-            return false;
-        *p = '/';
-    }
-    return mkdir(buf, 0700) == 0 || errno == EEXIST;
-}
-
-/* tmp+fsync+rename — the same atomic-write discipline the verifier uses
- * when it files an attestation (pv_atomic_write, tools/package_verify.c):
- * a crash mid-write leaves a temp file, never partial visibility. */
-static bool zc_atomic_write(const char *path, const uint8_t *data,
-                            size_t data_len)
-{
-    char tmp[4400];
-    int tn = snprintf(tmp, sizeof(tmp), "%s.zvtmp.%ld", path,
-                      (long)getpid());
-    if (tn <= 0 || (size_t)tn >= sizeof(tmp))
-        return false;
-    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-    if (fd < 0)
-        return false;
-    size_t off = 0;
-    while (off < data_len) {
-        ssize_t w = write(fd, data + off, data_len - off);
-        if (w < 0) {
-            if (errno == EINTR)
-                continue;
-            close(fd);
-            unlink(tmp);
-            return false;
-        }
-        off += (size_t)w;
-    }
-    if (fsync(fd) != 0 || close(fd) != 0 || rename(tmp, path) != 0) {
-        close(fd);
-        unlink(tmp);
-        return false;
-    }
-    return true;
-}
+/* Filing discipline (mkdir -p, tmp+fsync+rename, idempotence, and the
+ * fail-closed same-name conflict) lives in ONE place:
+ * vcs_package_attest_transport_file(). The operator import path below and
+ * the swarm pull path call that same function with the same argument
+ * list; neither keeps its own copy. */
 
 void zcl_native_handle_zcode_package_attest_import(
     const struct zcl_command_request *request,
@@ -1592,22 +1544,9 @@ void zcl_native_handle_zcode_package_attest_import(
     char id_hex[65];
     zcl_hex_encode(id, sizeof(id), id_hex);
 
-    char attest_dir[4400];
-    int n = snprintf(attest_dir, sizeof(attest_dir), "%s/zcode/attestations",
-                     datadir);
-    if (n < 0 || (size_t)n >= sizeof(attest_dir) ||
-        !zc_mkdir_p(attest_dir)) {
-        free(wire);
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INTERNAL, "STORE_WRITE",
-                               "execute", false, false,
-                               "the attestations directory cannot be created",
-                               datadir);
-        return;
-    }
-    char dest[4400];
-    n = snprintf(dest, sizeof(dest), "%s/%s", attest_dir, id_hex);
-    if (n < 0 || (size_t)n >= sizeof(dest)) {
+    char zcode_dir[4400];
+    int n = snprintf(zcode_dir, sizeof(zcode_dir), "%s/zcode", datadir);
+    if (n < 0 || (size_t)n >= sizeof(zcode_dir)) {
         free(wire);
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INVALID, "DATADIR_TOO_LONG",
@@ -1616,23 +1555,24 @@ void zcl_native_handle_zcode_package_attest_import(
         return;
     }
 
-    /* Idempotent: the attestation id is the content hash, so a same-name
-     * file holding identical bytes is a no-op success. A same-name file
-     * that does not read back identical is store corruption — fail
-     * closed. */
+    /* The single filer: mkdir -p, tmp+fsync+rename, idempotent on
+     * identical bytes, and fail-closed on a same-name object that does not
+     * read back identical. */
     bool filed = false;
     bool already_present = false;
-    struct stat st;
-    if (stat(dest, &st) == 0) {
-        uint8_t *have = NULL;
-        size_t have_len = 0;
-        bool same = zc_read_object(dest, VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES,
-                                   &have, &have_len) &&
-                    have_len == wire_len &&
-                    memcmp(have, wire, wire_len) == 0;
-        free(have);
-        if (!same) {
-            free(wire);
+    enum vcs_package_attest_transport_result tr =
+        vcs_package_attest_transport_file(zcode_dir, wire, wire_len, id,
+                                          &filed, &already_present);
+    free(wire);
+    if (tr != VCS_PACKAGE_ATTEST_TRANSPORT_OK) {
+        if (tr == VCS_PACKAGE_ATTEST_TRANSPORT_ERR_PATH) {
+            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                                   ZCL_COMMAND_EXIT_INVALID,
+                                   "DATADIR_TOO_LONG", "normalize", false,
+                                   false, "datadir path too long", datadir);
+            return;
+        }
+        if (tr == VCS_PACKAGE_ATTEST_TRANSPORT_ERR_CONFLICT) {
             zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                    ZCL_COMMAND_EXIT_INTERNAL,
                                    "STORE_CONFLICT", "execute", false, false,
@@ -1641,20 +1581,14 @@ void zcl_native_handle_zcode_package_attest_import(
                                    id_hex);
             return;
         }
-        already_present = true;
-    } else {
-        if (!zc_atomic_write(dest, wire, wire_len)) {
-            free(wire);
-            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                                   ZCL_COMMAND_EXIT_INTERNAL, "STORE_WRITE",
-                                   "execute", false, false,
-                                   "the attestation could not be filed",
-                                   dest);
-            return;
-        }
-        filed = true;
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "STORE_WRITE",
+                               "execute", false, false,
+                               "the attestation could not be filed",
+                               vcs_package_attest_transport_result_string(
+                                   tr));
+        return;
     }
-    free(wire);
 
     char signer_hex[67];
     zcl_hex_encode(att.verifier_pubkey, sizeof(att.verifier_pubkey),
