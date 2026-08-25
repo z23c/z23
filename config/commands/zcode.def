@@ -2145,7 +2145,7 @@ ZCL_COMMAND_READY_COMMAND(
 
 ZCL_COMMAND_READY_READ(
     "zcode.package.guide", "zcode.package", "",
-    "Show the exact package workflow and authority boundaries",
+    "Exact package workflow and authority boundaries",
     "Renders the bounded installed-node author, consumer and reproducer "
     "journeys, current target portability, preflight and named product "
     "limits over the pure live package-view surface. It reads no CAS, "
@@ -2211,7 +2211,7 @@ ZCL_COMMAND_READY_READ(
 
 ZCL_COMMAND_READY_READ(
     "zcode.package.show", "zcode.package", "",
-    "Release record and manifest summary for one package root",
+    "Release record and manifest for one package root",
     "The complete persisted release record (publisher, sequence, license, "
     "reward address, lineage, ZNAM pointer) plus the manifest summary "
     "(file/byte/chunk counts, LICENSE presence, executable count) for one "
@@ -2271,7 +2271,7 @@ ZCL_COMMAND_READY_READ(
 
 ZCL_COMMAND_READY_READ(
     "zcode.package.verify", "zcode.package", "",
-    "Verifier attestation quorum for one package root",
+    "Verifier attestation quorum for one root",
     "Evaluates every attestation in the local store's attestations/ dir "
     "against the approved-verifier allowlist for one 64-hex package "
     "`root`: verified=true exactly when 2+ distinct approved verifier keys "
@@ -2365,7 +2365,7 @@ ZCL_COMMAND_READY_READ(
 
 ZCL_COMMAND_READY_READ(
     "zcode.package.resolve", "zcode.package", "",
-    "Resolve a ZNAM package name to its release",
+    "Resolve a ZNAM name to its release",
     "Resolves a ZNAM name carrying a package pointer (zcode:kind=package) "
     "to the signed release it names, at call time. The output keeps the "
     "two kinds of fact apart: `pointer` (the mutable ZNAM record claims, "
@@ -2969,7 +2969,7 @@ ZCL_COMMAND_READY_COMMAND(
 
 ZCL_COMMAND_READY_READ(
     "zcode.package.peers", "zcode.package", "",
-    "Live swarm peers, local possession, pin, and transfer snapshot",
+    "Swarm peers, possession, pin, and transfer snapshot",
     "The live swarm engine's per-peer view for one 64-hex package `root`: "
     "peer id, the LOCAL session pseudo-key (0x02 || SHA3-256(domain || "
     "host identity) — a transport-session scope for the service book, "
@@ -2997,7 +2997,7 @@ ZCL_COMMAND_READY_READ(
 
 ZCL_COMMAND_READY_READ(
     "zcode.package.offered", "zcode.package", "",
-    "Roots peers have ANNOUNCEd this session that this node can fetch",
+    "Roots peers ANNOUNCEd this session that this node can fetch",
     "The live swarm engine's union of package roots peers have ANNOUNCEd "
     "this session, sorted by root. Each row is one 64-hex `root` with "
     "`advertisers` (how many known peers listed it — never an invented "
@@ -4063,7 +4063,7 @@ ZCL_COMMAND_READY_COMMAND(
 
 ZCL_COMMAND_READY_COMMAND(
     "zcode.package.rollback", "zcode.package", "",
-    "Re-activate the previous installed generation",
+    "Re-activate the previous generation",
     "Reads the append-only generation log for `name` "
     "(publisher/package) and re-activates the newest DISTINCT root older "
     "than the active one, by the same atomic rename-based symlink swap "
@@ -4086,3 +4086,37 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
     ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     zcl_native_handle_zcode_package_rollback)
+
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.package.reproduce", "zcode.package", "",
+    "Reproduce one installed package's build receipt",
+    "The installed-node reproduction step: for one ALREADY-INSTALLED "
+    "package (`name_or_root` is a 64-hex root, publisher/package, or "
+    "name@semver), re-verifies every committed input against the CAS, "
+    "re-materializes the source tree, and re-runs the fixed verifier worker "
+    "under the STANDARD build profile against the install receipt's own "
+    "dependency lock and committed dependency set (the same confined "
+    "zclassic23-package-verify --emit build add commit ran, one profile "
+    "stricter). Only when the rebuild receipt is BYTE-IDENTICAL on every "
+    "committed output (MATCH) and hashes to a DISTINCT receipt id is it "
+    "filed under <datadir>/zcode/receipts/<receipt-id-hex> — two distinct "
+    "receipt ids with byte-identical output sets is the reproduction fact "
+    "that makes the `reproduction` object of `zcode package verify` report "
+    "reproduced=true without any factory tooling. A rebuild that diverges, "
+    "a package that is not installed (`not-installed`), and a rebuild that "
+    "lands the install build's own id (`receipt-not-distinct`) are named "
+    "refusals that file nothing. Idempotent: a re-run re-files the same "
+    "deterministic receipt.",
+    0,
+    "zcode,package,reproduce,rebuild,receipt,match,install,verify",
+    "zcl.zcode_package_reproduce.input.v1", "zcl.zcode_package_reproduce.v1",
+    "name_or_root,datadir", "name_or_root",
+    "z23 zcode package reproduce --input='{\"name_or_root\":\"alice/ringbuffer\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_BACKGROUND, ZCL_COMMAND_COST_HIGH,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_zcode_package_reproduce)

@@ -1,16 +1,23 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * Private contract shared by the three ZCODE install-lifecycle translation
+ * Private contract shared by the four ZCODE install-lifecycle translation
  * units. NOT a public header — nothing outside app/services/src includes it.
  *
- *   package_lifecycle.c          the state machine (plan / commit / rollback)
- *   package_lifecycle_store.c    the READ adapter over <datadir>/zcode: CAS
- *                                bytes, release envelopes, manifests,
- *                                recipes, declared dependencies, and the
- *                                re-hash verification
- *   package_lifecycle_install.c  the WRITE adapter: the isolated build
- *                                worker, output re-hashing, atomic install,
- *                                generation log, atomic activation, pinning
+ *   package_lifecycle.c            the state machine (plan / commit /
+ *                                  rollback)
+ *   package_lifecycle_store.c      the READ adapter over <datadir>/zcode: CAS
+ *                                  bytes, release envelopes, manifests,
+ *                                  recipes, declared dependencies, the
+ *                                  re-hash verification, and source-tree
+ *                                  re-materialization
+ *   package_lifecycle_install.c    the WRITE adapter: the isolated build
+ *                                  worker, output re-hashing, atomic install,
+ *                                  generation log, atomic activation, pinning
+ *   package_lifecycle_reproduce.c  the second-receipt adapter: a
+ *                                  standard-profile rebuild of one installed
+ *                                  root, compared byte-for-byte against the
+ *                                  install receipt and filed under
+ *                                  receipts/ only on a distinct-id MATCH
  *
  * Every function here returns struct zcl_result: a failure always carries a
  * message, and the caller copies the named rule into its report. */
@@ -32,6 +39,11 @@
 
 #define PKGL_LOG "zcode.lifecycle"
 #define PKGL_PATH_MAX 4400u
+
+/* A confined build of a v1-sized package (static archive, no network, no
+ * generated build system) that has not finished in ten minutes is wedged.
+ * Shared by the install and the reproduce worker spawns. */
+#define PKGL_BUILD_TIMEOUT_MS 600000
 
 /* One open lifecycle context: the paths plus every persisted release
  * envelope, loaded once so a plan or a commit sees one consistent view. */
@@ -80,6 +92,16 @@ struct zcl_result pkgl_survey_package(const struct pkgl_ctx *ctx,
                                       uint64_t *bytes_out,
                                       uint32_t *chunks_out);
 
+/* Re-materialize a package's full source tree into `destination`: every
+ * manifest member is reassembled from the CAS with each chunk re-verified
+ * against the hash committed at its exact coordinate, and the manifest
+ * itself must re-hash to `root` before anything is written. Files land
+ * read-only. The caller owns the destination's lifecycle (creation and
+ * removal). */
+struct zcl_result pkgl_materialize_package(const struct pkgl_ctx *ctx,
+                                           const uint8_t root[32],
+                                           const char *destination);
+
 /* Full VERIFIED gate for one root: the release envelope verifies, the
  * manifest re-hashes to the root, the recipe root matches the envelope and
  * every recipe path is a manifest member, and EVERY chunk in the CAS
@@ -105,6 +127,20 @@ struct zcl_result pkgl_exists(const char *path, bool *out);
 struct zcl_result pkgl_installed_dir(const struct pkgl_ctx *ctx,
                                      const uint8_t root[32], char *out,
                                      size_t cap);
+
+/* The fixed package verifier, resolved from /proc/self/exe (never PATH),
+ * with the build tree's own build/bin as the one fallback. Shared by the
+ * install and reproduce spawns. */
+struct zcl_result pkgl_worker_path(char *out, size_t cap);
+
+/* Resolve `name_or_root` (64-hex identity, "publisher/package@semver", or
+ * "publisher/package" selecting the highest published semver) to the root
+ * every later step pins. Defined by the state machine; the reproduce adapter
+ * resolves through the exact same rule so a name can never select a
+ * different root between plan, install, and reproduce. */
+struct zcl_result pkgl_resolve_target(const struct pkgl_ctx *ctx,
+                                      const char *name_or_root,
+                                      uint8_t out_root[32]);
 
 /* ── the write half ─────────────────────────────────────────────────── */
 

@@ -74,15 +74,15 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 714 |
+| Registry entries (branches + leaves) | 715 |
 | Top-level roots | 12 |
 | Branches | 165 |
-| Leaves (dispatchable command paths) | 549 |
-| … `ready` (live handler in this build) | 496 |
+| Leaves (dispatchable command paths) | 550 |
+| … `ready` (live handler in this build) | 497 |
 | … `compat` (metadata only, names a fallback) | 25 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 28 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 24 |
-| Leaves with `effect=mutate` | 185 |
+| Leaves with `effect=mutate` | 186 |
 | Leaves with `effect=destructive` | 4 |
 | Leaves requiring **owner** authority | 112 |
 
@@ -100,7 +100,7 @@ Per source file:
 | `config/commands/code.def` | 17 | 2 | 15 |
 | `config/commands/accounts.def` | 11 | 2 | 9 |
 | `config/commands/vault.def` | 24 | 4 | 20 |
-| `config/commands/zcode.def` | 218 | 51 | 167 |
+| `config/commands/zcode.def` | 219 | 51 | 168 |
 | `config/commands/zcode_science.def` | 25 | 7 | 18 |
 | `config/commands/metaverse.def` | 30 | 7 | 23 |
 | `config/commands/yardsale.def` | 7 | 2 | 5 |
@@ -1264,21 +1264,22 @@ represented by its children's sections.
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
-| `zcode package guide` | ready | read / read / public · instant/tiny | none | `zcl.zcode_package_guide.v1` | `z23 zcode package guide` | Show the exact package workflow and authority boundaries |
+| `zcode package guide` | ready | read / read / public · instant/tiny | none | `zcl.zcode_package_guide.v1` | `z23 zcode package guide` | Exact package workflow and authority boundaries |
 | `zcode package search` | ready | read / read / operator · fast/low | `publisher`, `name_prefix`, `license`, `keyword`, `limit`, `datadir` | `zcl.zcode_package_search.v1` | `z23 zcode package search --input='{"keyword":"ring"}'` | Search locally committed packages |
 | `zcode package library` | ready | read / read / operator · fast/low | `limit`, `datadir` | `zcl.zcode_package_library.v1` | `z23 zcode package library` | List complete packages this node can seed |
-| `zcode package show` | ready | read / read / operator · fast/low | **`root`**, `datadir` | `zcl.zcode_package_show.v1` | `z23 zcode package show --input='{"root":"<64hex>"}'` | Release record and manifest summary for one package root |
+| `zcode package show` | ready | read / read / operator · fast/low | **`root`**, `datadir` | `zcl.zcode_package_show.v1` | `z23 zcode package show --input='{"root":"<64hex>"}'` | Release record and manifest for one package root |
 | `zcode package recipe` | ready | read / read / operator · fast/low | **`root`**, `datadir` | `zcl.zcode_package_recipe.v1` | `z23 zcode package recipe --input='{"root":"<64hex>"}'` | Declarative build recipe for one package root |
-| `zcode package verify` | ready | read / read / operator · fast/low | **`root`**, `datadir` | `zcl.zcode_package_verify.v1` | `z23 zcode package verify --input='{"root":"<64hex>"}'` | Verifier attestation quorum for one package root |
-| `zcode package resolve` | ready | read / read / operator · fast/low | **`name`**, `datadir` | `zcl.zcode_package_resolve.v1` | `z23 zcode package resolve --input='{"name":"ringbuffer"}'` | Resolve a ZNAM package name to its release |
+| `zcode package verify` | ready | read / read / operator · fast/low | **`root`**, `datadir` | `zcl.zcode_package_verify.v1` | `z23 zcode package verify --input='{"root":"<64hex>"}'` | Verifier attestation quorum for one root |
+| `zcode package resolve` | ready | read / read / operator · fast/low | **`name`**, `datadir` | `zcl.zcode_package_resolve.v1` | `z23 zcode package resolve --input='{"name":"ringbuffer"}'` | Resolve a ZNAM name to its release |
 | `zcode package fetch` | ready | mutate / app-write / operator · foreground/moderate | `root`, `name`, `day`, `datadir`, `namespace`, `maximum_bytes` | `zcl.zcode_package_fetch.v1` | `z23 zcode package fetch --input='{"name":"<local-library-name>"}'` | Fetch a package from the authenticated swarm |
 | `zcode package source reproduce` | ready | mutate / app-write / operator, plan-commit · foreground/high | **`mode`**, **`root`**, `namespace`, `sequence`, `not_before`, `expiry`, `plan_token`, `datadir` | `zcl.zcode_source_reproduce.v1` | `z23 zcode package source reproduce --input='{"mode":"plan","root":"<64hex>"}'` | Fetch, reconstruct, and attest one exact source package |
-| `zcode package peers` | ready | read / read / operator · fast/low | **`root`**, `datadir` | `zcl.zcode_package_peers.v1` | `z23 zcode package peers --input='{"root":"<64hex>"}'` | Live swarm peers, local possession, pin, and transfer snapshot |
-| `zcode package offered` | ready | read / read / operator · fast/low | `datadir` | `zcl.zcode_package_offered.v1` | `z23 zcode package offered` | Roots peers have ANNOUNCEd this session that this node can fetch |
+| `zcode package peers` | ready | read / read / operator · fast/low | **`root`**, `datadir` | `zcl.zcode_package_peers.v1` | `z23 zcode package peers --input='{"root":"<64hex>"}'` | Swarm peers, possession, pin, and transfer snapshot |
+| `zcode package offered` | ready | read / read / operator · fast/low | `datadir` | `zcl.zcode_package_offered.v1` | `z23 zcode package offered` | Roots peers ANNOUNCEd this session that this node can fetch |
 | `zcode package pin` | ready | mutate / app-write / operator, plan-commit · foreground/moderate | **`root`**, **`mode`**, `plan_token`, `datadir` | `zcl.zcode_package_pin.v1` | `z23 zcode package pin --input='{"root":"<64hex>","mode":"plan"}'` | Pin a tracked package (PINS pool, never evicted) |
 | `zcode package unpin` | ready | mutate / app-write / operator, plan-commit · foreground/moderate | **`root`**, **`mode`**, `plan_token`, `datadir` | `zcl.zcode_package_unpin.v1` | `z23 zcode package unpin --input='{"root":"<64hex>","mode":"plan"}'` | Release an operator pin |
 | `zcode package checkout` | ready | mutate / app-write / operator · foreground/moderate | **`root`**, **`destination`**, `datadir` | `zcl.zcode_package_checkout.v1` | `z23 zcode package checkout --input='{"root":"<64hex>","destination":"/tmp/package-source"}'` | Reconstruct one verified package tree without executing it |
-| `zcode package rollback` | ready | mutate / app-write / operator · fast/low | **`name`**, `now_unix`, `datadir` | `zcl.zcode_package_rollback.v1` | `z23 zcode package rollback --input='{"name":"alice/ringbuffer"}'` | Re-activate the previous installed generation |
+| `zcode package rollback` | ready | mutate / app-write / operator · fast/low | **`name`**, `now_unix`, `datadir` | `zcl.zcode_package_rollback.v1` | `z23 zcode package rollback --input='{"name":"alice/ringbuffer"}'` | Re-activate the previous generation |
+| `zcode package reproduce` | ready | mutate / app-write / operator · background/high | **`name_or_root`**, `datadir` | `zcl.zcode_package_reproduce.v1` | `z23 zcode package reproduce --input='{"name_or_root":"alice/ringbuffer"}'` | Reproduce one installed package's build receipt |
 
 #### `zcode.package.publish` — Commit a signed release into the local store (plan, then commit)
 
