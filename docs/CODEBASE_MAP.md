@@ -131,6 +131,20 @@ service that walks the adapter registry is
 <!-- claim: symbol-absent vcs_package_store_open lib/metaverse/src/adapter_content.c # the read path opens no store -->
 <!-- claim: symbol-present mv_cas_path lib/metaverse/src/manifest_read.c # CAS byte verification without a store handle -->
 
+### Reusable C23 packages — `packages/`
+
+The 76 Commons packages (`zhex`, `zbuf`, `zjson`, …), one directory per
+component: `zcode-package.json` manifest, `LICENSE`, `README.md`, one
+namespaced public header `include/<pkg>/<pkg>.h`, primary TU `src/<pkg>.c`,
+`tests/`. They are NOT compiled into the node by the Makefile (only the
+Arena shelf and the `jsonq` helpers are); they are built, published,
+fetched, and reproduced through the Commons machinery itself
+(`tools/package_factory.c`, the swarm tests). The format discipline is
+normative in [`spec/c23-package-format.md`](spec/c23-package-format.md) and
+enforced by `make check-package-anatomy`.
+<!-- claim: gate-passes check-package-anatomy # packages/ format discipline -->
+<!-- claim: file-present tools/package_factory.c # packages are built through the commons machinery -->
+
 ### Hexagonal seam — `ports/` + `adapters/`
 
 Outbound-only by design: 13 port interfaces in `ports/include/ports/*_port.h`

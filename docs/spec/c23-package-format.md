@@ -92,9 +92,14 @@ read, verify, and rebuild any package without knowing its author:
 - **C23 only.** `-std=c23` is in the frozen build profile; extensions are
   not part of the format.
 
-These rules are enforced, not aspirational: the anatomy lint gate scans
-every package under `packages/` and the public-serve shape refuses a
-package whose declared license text does not match its LICENSE bytes.
+These rules are enforced, not aspirational: `make check-package-anatomy`
+scans every package under `packages/` (manifest exactness, namespaced
+guarded header, no function-like macros, no inline bodies, declared
+internal TUs, no executable build logic), and the public-serve shape
+refuses a package whose declared license text does not match its LICENSE
+bytes.
+
+<!-- claim: gate-passes check-package-anatomy # anatomy discipline is a hard gate -->
 
 ## 3. Determinism: proven, not hoped
 

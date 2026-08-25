@@ -826,6 +826,7 @@ add/remove a gate.
 - `check-blob-read-bounds`
 - `check-byte-order-codec-single`
 - `check-zcode-package-registry`
+- `check-package-anatomy`
 - `check-api-reference-generated`
 - `check-before-save-hooks`
 - `check-build-epoch-integrity`
