@@ -4514,10 +4514,13 @@ bundle-bootstrap: $(BIN_DIR)/rom_bundle_sha3
 
 .PHONY: zcl-nodectl
 zcl-nodectl: $(ZCL_NODECTL_BIN)
+# zcl-nodectl is a portable-release product: opt into the fresh atomic link
+# so a host-built binary cannot pass the timestamp check into the ABI audit
+# (see C23_PORTABLE_RELINK at the top of this file).
 $(ZCL_NODECTL_BIN): tools/zcl-nodectl.c lib/util/include/util/rpc_paths.h \
 		lib/platform/include/platform/os_binary_slots.h \
 		lib/platform/src/os_binary_slots.c lib/platform/src/clock.c \
-		lib/base/src/log_level.c
+		lib/base/src/log_level.c $(C23_PORTABLE_RELINK)
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror \
 	    -Ilib/base/include -Ilib/util/include -Ilib/platform/include \
