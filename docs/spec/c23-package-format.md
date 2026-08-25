@@ -121,9 +121,12 @@ A Commons build is a confined observation, not an act of faith:
 
 - **The receipt is the build's identity.** Everything the artifact depends
   on is committed in the receipt wire: semantic triple, compiler id and
-  version, exact flags, isolation level, test verdict, and per-artifact
-  hashes. The install lifecycle re-hashes every emitted byte against the
-  receipt before anything is installed — a worker that lied cannot install.
+  version, exact flags, the toolchain capsule root (schema v2 — the gcc
+  driver/cc1/assembler/sysroot/ABI fingerprint, so "same toolchain" is a
+  receipt property, not a side-band comparison), isolation level, test
+  verdict, and per-artifact hashes. The install lifecycle re-hashes every
+  emitted byte against the receipt before anything is installed — a worker
+  that lied cannot install.
 - **Reproduction is quorum, not hope.** `vcs_package_reproduce_scan`
   requires at least two distinct matching receipts before a package may be
   called reproduced, and `--reproduce-against` names the first diverging
@@ -134,19 +137,18 @@ A Commons build is a confined observation, not an act of faith:
 - **Toolchain fingerprint.** The toolchain capsule
   (`vcs_toolchain_capsule_v1`) pins compiler driver bytes, backend bytes,
   assembler identity, sysroot, and ABI files into one root. Work-fabric
-  receipts already commit it; binding it into the install-lane build
-  receipt is open hardening (below).
+  receipts and schema-v2 build receipts both commit it; byte-identical
+  reproduction across DIFFERENT toolchains still counts — the comparator
+  deliberately judges output bytes, with the capsule as named evidence.
+
+<!-- claim: symbol-present vcs_package_build_set_toolchain_capsule lib/vcs/include/vcs/package_build.h # receipt v2 capsule binding -->
 
 ### Open hardening in this lane
 
 The following format rules are being landed; until each does, this section
 — not prose elsewhere — is their status:
 
-1. **Receipt pins the toolchain capsule root.** The `ZCLBLD` receipt grows
-   schema v2 carrying `toolchain_capsule_root`, so "same toolchain" is a
-   receipt property rather than a side-band comparison. v1 receipts remain
-   parseable and are never rewritten.
-2. **Publish requires two agreeing reproduction hashes.** Network
+1. **Publish requires two agreeing reproduction hashes.** Network
    publication (`zcode network publish`) refuses a package whose local
    store cannot show two distinct agreeing build receipts for the exact
    semantic triple. Local CAS admission (`zcode create` commit) stays free

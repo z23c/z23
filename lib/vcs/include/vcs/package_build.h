@@ -18,15 +18,25 @@
  * Canonical wire encoding (all integers little-endian, exactly one legal
  * encoding per receipt):
  *   [8  magic = "ZCLBLD\r\n"]
- *   [2  schema_version = 1]
+ *   [2  schema_version = 1|2]
  *   [32 package_root][32 recipe_root][32 lock_root]
  *   [2  dep_count]        count x [32 dependency root]   (ascending)
  *   [2  id_len][compiler id bytes]
  *   [2  version_len][compiler version bytes]
  *   [2  flags_len][flags bytes]
+ *   [32 toolchain_capsule_root]                  schema v2 only
  *   [1  result_class][1 isolation][1 test_ran][4 test_exit_code]
  *   [2  output_count]     count x ([2 path_len][path bytes][32 sha3]
  *                                  [8 bytes])            (ascending path)
+ *
+ * Schema v2 binds the toolchain capsule root (vcs/build_action.h —
+ * compiler driver bytes, cc1 backend bytes, assembler identity, sysroot,
+ * target probes, ABI files) into the receipt itself, so "same toolchain"
+ * is a receipt property rather than a side-band comparison. A receipt
+ * carries a capsule iff it is schema v2; v1 receipts remain parseable and
+ * are never rewritten or relabeled. The receipt id domain is unchanged —
+ * it names the receipt's purpose, and the schema version inside the wire
+ * distinguishes the grammar.
  *
  * Canonical-order rules: dependency roots strictly ascending (so
  * duplicate-free), output paths strictly ascending by path bytes. The
@@ -44,7 +54,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define VCS_PACKAGE_BUILD_VERSION 1u
+#define VCS_PACKAGE_BUILD_VERSION 2u
+/* Oldest schema the parser still accepts; older evidence is never
+ * rewritten, so v1 receipts on disk stay readable forever. */
+#define VCS_PACKAGE_BUILD_VERSION_MIN 1u
 #define VCS_PACKAGE_BUILD_RECEIPT_DOMAIN "zcl.zcode_build.v1"
 #define VCS_PACKAGE_BUILD_WIRE_MAGIC_BYTES 8u
 #define VCS_PACKAGE_BUILD_MAX_DEPS 64u
@@ -99,6 +112,7 @@ enum vcs_package_build_error {
     VCS_PACKAGE_BUILD_ERR_OUTPUT_ORDER,/* outputs unsorted or duplicated */
     VCS_PACKAGE_BUILD_ERR_OUTPUT_COUNT,
     VCS_PACKAGE_BUILD_ERR_OUTPUT_EMPTY,/* a passing build emitted nothing */
+    VCS_PACKAGE_BUILD_ERR_CAPSULE,     /* v2: missing/inconsistent capsule */
 };
 
 const char *vcs_package_build_error_string(enum vcs_package_build_error error);
@@ -124,6 +138,11 @@ struct vcs_package_build_receipt {
     char compiler_id[VCS_PACKAGE_BUILD_ID_MAX + 1u];
     char compiler_version[VCS_PACKAGE_BUILD_VERSION_MAX + 1u];
     char flags[VCS_PACKAGE_BUILD_FLAGS_MAX + 1u];
+    /* Schema v2: the toolchain capsule root this build ran under. Exactly
+     * when has_toolchain_capsule is true, schema_version is 2 and the wire
+     * carries the 32-byte root after the flags string. */
+    bool has_toolchain_capsule;
+    uint8_t toolchain_capsule_root[32];
     uint8_t result_class; /* enum vcs_package_build_result */
     uint8_t isolation;    /* enum vcs_package_build_isolation */
     bool test_ran;
@@ -133,6 +152,13 @@ struct vcs_package_build_receipt {
 };
 
 void vcs_package_build_receipt_init(struct vcs_package_build_receipt *r);
+
+/* Bind the toolchain capsule root (vcs/build_action.h) to the receipt:
+ * copies the root, sets has_toolchain_capsule, and bumps the schema to v2.
+ * A NULL or all-zero root is rejected (an all-zero root is the "no object"
+ * sentinel, never a real commitment) and the receipt is left unchanged. */
+enum vcs_package_build_error vcs_package_build_set_toolchain_capsule(
+    struct vcs_package_build_receipt *r, const uint8_t capsule_root[32]);
 
 /* Insert one dependency root in ascending order (duplicate = rejection). */
 enum vcs_package_build_error vcs_package_build_add_dep(

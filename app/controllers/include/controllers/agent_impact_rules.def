@@ -960,6 +960,9 @@ AGENT_IMPACT_RULE("lib/vcs/include/vcs/zcode_seed.h|lib/vcs/src/zcode_seed.c|lib
 AGENT_IMPACT_RULE("lib/vcs/include/vcs/zcode_dht*.h|lib/vcs/src/zcode_dht*.c|lib/test/src/test_zcode_dht*.c", "zcode_dht zcode_dht_delegation zcode_dht_msgs zcode_dht_record zcode_dht_service zcode_dht_lookup make_lint_gates")
 AGENT_IMPACT_RULE("lib/vcs/include/vcs/zcode_replication.h|lib/vcs/src/zcode_replication.c|config/src/boot_zcode_dht_replication_rpc.c|config/include/config/boot_zcode_dht_replication.h", "zcode_dht_record zcode_dht_service command_registry_catalog syncdiag_rpc make_lint_gates")
 AGENT_IMPACT_RULE("lib/vcs/include/vcs/package_store.h|lib/vcs/include/vcs/package_possession_scheduler.h|lib/vcs/src/package_store*.c|lib/vcs/src/package_possession_scheduler.c|lib/test/src/test_zcode_store.c", "zcode_store zcode_dht_service syncdiag_rpc make_lint_gates")
+/* The build-receipt codec (ZCLBLD wire, schema v1/v2) and the reproduction
+ * comparator: every emit, install, and reproduce path flows through these. */
+AGENT_IMPACT_RULE("lib/vcs/include/vcs/package_build.h|lib/vcs/src/package_build.c|lib/vcs/include/vcs/package_reproduce.h|lib/vcs/src/package_reproduce.c|lib/test/src/test_zcode_verify.c", "zcode_verify zcode_swarm_net zcode_dev_objects make_lint_gates")
 /* The rebuildable discovery-graph projection (lineage collapse, citation
  * edges, verified vote seeds) plus the discover/rank.snapshot commands:
  * the S5 adapter over the science index feeding the pure rank core. */

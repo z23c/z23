@@ -4114,6 +4114,30 @@ int main(int argc, char **argv)
         snprintf(rec.flags, sizeof(rec.flags), "%s",
                  standard_profile ? ZCL_C23_COMMONS_BUILD_FLAGS_STANDARD_V2
                                   : ZCL_C23_COMMONS_BUILD_FLAGS_QUICK_V2);
+        /* The receipt names its toolchain exactly: schema v2 carries the
+         * toolchain capsule root. The capsule capture is gcc-only today,
+         * so a clang-picked receipt honestly stays v1; on the gcc path a
+         * capture failure fails closed — no unpinned receipt. The capture
+         * is cached in-process, so this is cheap even when --fast-cache
+         * already captured it. */
+        if (pick == 1u) {
+            struct vcs_toolchain_capsule_v1 rec_capsule;
+            uint8_t rec_capsule_root[32];
+            memset(&rec_capsule, 0, sizeof(rec_capsule));
+            if (!vcs_toolchain_capsule_v1_capture_gcc(&rec_capsule) ||
+                !vcs_toolchain_capsule_v1_root(&rec_capsule,
+                                               rec_capsule_root) ||
+                vcs_package_build_set_toolchain_capsule(
+                    &rec, rec_capsule_root) != VCS_PACKAGE_BUILD_OK) {
+                fprintf(stderr, "%s: toolchain capsule capture failed — "
+                                "refusing to emit an unpinned receipt\n",
+                        PV_LOG);
+                pv_rm_rf(work);
+                vcs_package_recipe_free(&recipe);
+                vcs_package_manifest_free(&manifest);
+                return 5;
+            }
+        }
         rec.isolation = landlock
                             ? (uint8_t)VCS_PACKAGE_BUILD_ISOLATION_FULL
                             : (uint8_t)VCS_PACKAGE_BUILD_ISOLATION_DEGRADED;
