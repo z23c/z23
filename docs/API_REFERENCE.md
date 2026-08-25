@@ -74,15 +74,15 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 723 |
+| Registry entries (branches + leaves) | 724 |
 | Top-level roots | 12 |
 | Branches | 168 |
-| Leaves (dispatchable command paths) | 555 |
-| … `ready` (live handler in this build) | 502 |
+| Leaves (dispatchable command paths) | 556 |
+| … `ready` (live handler in this build) | 503 |
 | … `compat` (metadata only, names a fallback) | 25 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 28 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 24 |
-| Leaves with `effect=mutate` | 191 |
+| Leaves with `effect=mutate` | 192 |
 | Leaves with `effect=destructive` | 4 |
 | Leaves requiring **owner** authority | 112 |
 
@@ -100,7 +100,7 @@ Per source file:
 | `config/commands/code.def` | 17 | 2 | 15 |
 | `config/commands/accounts.def` | 11 | 2 | 9 |
 | `config/commands/vault.def` | 24 | 4 | 20 |
-| `config/commands/zcode.def` | 227 | 54 | 173 |
+| `config/commands/zcode.def` | 228 | 54 | 174 |
 | `config/commands/zcode_science.def` | 25 | 7 | 18 |
 | `config/commands/metaverse.def` | 30 | 7 | 23 |
 | `config/commands/yardsale.def` | 7 | 2 | 5 |
@@ -1291,6 +1291,7 @@ represented by its children's sections.
 | `zcode package attest import` | ready | mutate / app-write / operator · foreground/low | **`attestation_wire`**, `datadir` | `zcl.zcode_package_attest_import.v1` | `z23 zcode package attest import --input='{"attestation_wire":"<hex>"}'` | File a signed attestation wire into the local store |
 | `zcode package attest offer` | ready | mutate / app-write / operator · foreground/low | **`attestation_id`**, `datadir` | `zcl.zcode_package_attest_offer.v1` | `z23 zcode package attest offer --input='{"attestation_id":"<64hex>"}'` | Make one filed attestation reachable over the swarm |
 | `zcode package attest pull` | ready | mutate / app-write / operator · foreground/moderate | **`package_root`**, `datadir`, `maximum_records` | `zcl.zcode_package_attest_pull.v1` | `z23 zcode package attest pull --input='{"package_root":"<64hex>"}'` | Fetch and admit published attestations for one package root |
+| `zcode package attest admit` | ready | mutate / app-write / operator · foreground/low | **`transport_root`**, `package_root`, `datadir` | `zcl.zcode_package_attest_admit.v1` | `z23 zcode package attest admit --input='{"transport_root":"<64hex>"}'` | Admit one attestation blob this node already holds |
 
 #### `zcode.contributor` — Contributor identities
 

@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * Native handlers for the two `zcode package attest` transport leaves —
+ * Native handlers for the three `zcode package attest` transport leaves —
  * how a signed ZCLATT attestation MOVES between nodes:
  *
  *   zcode package attest offer  admit one locally-filed attestation into
@@ -12,6 +12,19 @@
  *                               POINTER for one package root, fetch each
  *                               distinct attestation blob over the frozen
  *                               swarm codec, and admit what arrives
+ *   zcode package attest admit  admit ONE attestation blob this node
+ *                               already holds, named by its transport
+ *                               root — no DHT involved at all
+ *
+ * admit exists because the transport must not be coupled to the DHT. A
+ * node that fetched the blob (zcode package fetch on the transport root,
+ * or the swarm delivering it some other way) had the evidence in its
+ * package store and no way in: import wants hex it does not hold, and pull
+ * wants an authenticated record layer that needs identity files and a
+ * delegation chain verified against real chain history. Where that is not
+ * up, a perfectly good fetched attestation was stranded. Its package_root
+ * is OPTIONAL where pull's is mandatory, and that asymmetry is argued in
+ * full at the handler — it is not a relaxation.
  *
  * NO NEW WIRE MESSAGE EXISTS HERE AND NONE MAY BE ADDED. A canonical
  * attestation is at most VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES (681), far
@@ -68,6 +81,7 @@
 #include "vcs/package_attest.h"
 #include "vcs/package_attest_transport.h"
 #include "vcs/package_store.h"
+#include "vcs/zcode_dht_record.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -80,11 +94,36 @@
 #define ZAT_ROWS_DEFAULT 16u
 #define ZAT_ROWS_CEILING 64u
 
-/* Validity window stamped into the two ready-to-run publish inputs. One
- * day: long enough that an operator is not republishing hourly, short
- * enough that a withdrawn attestation stops being advertised on its own.
- * The operator may edit either number before running the command. */
-#define ZAT_PUBLISH_WINDOW_S 86400u
+/* Validity window stamped into each ready-to-run publish input. PER KIND,
+ * and the provider's is DERIVED from the record layer's own ceiling rather
+ * than typed here, because the two kinds do not share one:
+ * VCS_ZCODE_DHT_PROVIDER_MAX_SECONDS is 7200 while
+ * VCS_ZCODE_DHT_POINTER_MAX_SECONDS is 604800.
+ *
+ * A single shared 86400 stamped into both looked harmless and was not: the
+ * POINTER published fine and the PROVIDER was refused by the record layer,
+ * so an operator who ran exactly what `offer` handed them ended up
+ * POINTER-only — a puller learns which blob to want and finds nobody
+ * serving it. That is precisely the silent no-op this file's header warns
+ * about, produced by the command whose job is to prevent it.
+ *
+ * A provider ad is short-lived on purpose: it is a claim about reachability
+ * right now. A pointer is a claim about content and stays true, so one day
+ * is a conservative refresh cadence rather than a limit. The operator may
+ * edit either number before running publish. */
+#define ZAT_PROVIDER_WINDOW_S VCS_ZCODE_DHT_PROVIDER_MAX_SECONDS
+#define ZAT_POINTER_WINDOW_S UINT64_C(86400)
+
+/* Fail the BUILD, not the operator's publish, if either ceiling moves
+ * under us. An unpublishable input handed out as "ready to run" is a
+ * defect that only shows up at the far end of a two-command sequence. */
+static_assert(ZAT_PROVIDER_WINDOW_S <= VCS_ZCODE_DHT_PROVIDER_MAX_SECONDS,
+              "the provider publish input must be publishable as a PROVIDER "
+              "record; an over-long window is refused and leaves the "
+              "operator pointer-only");
+static_assert(ZAT_POINTER_WINDOW_S <= VCS_ZCODE_DHT_POINTER_MAX_SECONDS,
+              "the pointer publish input must be publishable as a POINTER "
+              "record");
 
 /* ── small input helpers (the native_zcode_* pattern) ───────────────── */
 
@@ -194,7 +233,8 @@ static void zat_rule_string(
  * are the caller's; kind decides whether semantic_root is carried. */
 static void zat_publish_input(struct json_value *out, const char *kind,
                               const char *semantic_root_hex,
-                              const char *transport_root_hex, uint64_t now)
+                              const char *transport_root_hex, uint64_t now,
+                              uint64_t window_s)
 {
     json_set_object(out);
     (void)json_push_kv_str(out, "mode", "plan");
@@ -206,8 +246,7 @@ static void zat_publish_input(struct json_value *out, const char *kind,
     (void)json_push_kv_str(out, "transport_root", transport_root_hex);
     (void)json_push_kv_int(out, "sequence", (int64_t)now);
     (void)json_push_kv_int(out, "not_before", (int64_t)now);
-    (void)json_push_kv_int(out, "expiry",
-                           (int64_t)(now + ZAT_PUBLISH_WINDOW_S));
+    (void)json_push_kv_int(out, "expiry", (int64_t)(now + window_s));
 }
 
 /* ── zcode package attest offer ─────────────────────────────────────── */
@@ -314,11 +353,13 @@ void zcl_native_handle_zcode_package_attest_offer(
     uint64_t now = (uint64_t)platform_time_wall_unix();
     struct json_value publish;
     json_init(&publish);
-    zat_publish_input(&publish, "provider", NULL, transport_hex, now);
+    zat_publish_input(&publish, "provider", NULL, transport_hex, now,
+                      ZAT_PROVIDER_WINDOW_S);
     (void)json_push_kv(&reply->data, "provider_publish_input", &publish);
     json_free(&publish);
     json_init(&publish);
-    zat_publish_input(&publish, "pointer", package_hex, transport_hex, now);
+    zat_publish_input(&publish, "pointer", package_hex, transport_hex, now,
+                      ZAT_POINTER_WINDOW_S);
     (void)json_push_kv(&reply->data, "pointer_publish_input", &publish);
     json_free(&publish);
 
@@ -615,13 +656,24 @@ void zcl_native_handle_zcode_package_attest_pull(
         status = "NO_ATTESTATION_POINTERS";
         blocker = "no_pointer_record_names_an_attestation_for_this_package_"
                   "root";
-    } else if (fetched == 0) {
-        status = "ATTESTATION_BYTES_UNREACHABLE";
-        blocker = "pointers_exist_but_no_authenticated_provider_served_the_"
-                  "attestation_bytes";
     } else if (admitted == 0) {
-        status = "ATTESTATIONS_REFUSED";
-        blocker = "every_fetched_attestation_failed_a_named_admission_rule";
+        /* Only once NOTHING landed is it honest to name a dead end, and
+         * only then does it matter which one. admitted is tested BEFORE
+         * fetched because admission above is deliberately unconditional:
+         * a blob this node already holds is admitted and filed even when
+         * provider discovery served nothing. Testing fetched first would
+         * print "no authenticated provider served the attestation bytes"
+         * in a reply that also says filed=1, sending an operator to
+         * repair reachability that was never broken. */
+        if (fetched == 0) {
+            status = "ATTESTATION_BYTES_UNREACHABLE";
+            blocker = "pointers_exist_but_no_authenticated_provider_served_"
+                      "the_attestation_bytes";
+        } else {
+            status = "ATTESTATIONS_REFUSED";
+            blocker = "every_fetched_attestation_failed_a_named_admission_"
+                      "rule";
+        }
     }
 
     (void)json_push_kv_str(&reply->data, "package_root", package_hex);
@@ -690,4 +742,226 @@ void zcl_native_handle_zcode_package_attest_pull(
         "problem, or the publisher never ran the PROVIDER half of zcode "
         "package attest offer). Those are different problems and are "
         "never reported as one");
+}
+
+/* ── zcode package attest admit ─────────────────────────────────────── */
+
+/* The third leaf, and the one that decouples the transport from the DHT.
+ *
+ * offer puts bytes within reach; pull finds them for you. admit is for the
+ * node that ALREADY HAS the bytes — `zcode package fetch` was run on the
+ * transport root, or the swarm brought the blob in some other way — and
+ * therefore has a perfectly good attestation sitting in its package store
+ * with no way in. Before this leaf, `import` wanted hex that node does not
+ * hold and `pull` wanted a working authenticated DHT, so on any node where
+ * the identity files and the delegation chain are not up, fetched evidence
+ * was stranded. Nothing about carrying an attestation needs a DHT.
+ *
+ * THE package_root ASYMMETRY WITH pull IS DELIBERATE AND LOAD-BEARING.
+ * On pull, package_root is MANDATORY and is passed as expect_package_root
+ * on every admit, because pull resolved the blob FROM a POINTER keyed on
+ * that package root: it is answering a question about one specific
+ * package, so an unbound admit would let a hostile pointer in this
+ * namespace hand back an attestation for a DIFFERENT package and have it
+ * read as evidence about yours. Here the operator names a transport root
+ * DIRECTLY, so there is no pointer to lie and no package under question
+ * unless the caller says there is.
+ *
+ * Therefore: a caller who is asking "is this attestation evidence about
+ * package X?" MUST pass package_root. Omitting it is NOT the safe default
+ * and is not a detail — it is the strictly weaker "file these bytes, I am
+ * not asking about any one package" case, and the reply says which of the
+ * two happened rather than leaving the operator to guess. */
+
+void zcl_native_handle_zcode_package_attest_admit(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply)
+{
+    if (!request || !reply)
+        return;
+    char zcode_dir[4400];
+    if (!zat_zcode_dir(request, reply, "zcode.package.attest.admit",
+                       zcode_dir))
+        return;
+    uint8_t transport_root[32];
+    if (!zat_hex32(request, reply, "zcode.package.attest.admit",
+                   "transport_root", "BAD_TRANSPORT_ROOT",
+                   "transport_root must be 64 lowercase hex chars (the "
+                   "attestation BLOB root returned by zcode package attest "
+                   "offer, not the attestation id)", transport_root))
+        return;
+
+    /* OPTIONAL — and the asymmetry above is why. Present means "this
+     * attestation must be about THIS package or do not file it"; absent
+     * means the caller is filing bytes and asking about no package. A
+     * malformed value is never quietly treated as absent: that would turn
+     * a typo in the root the caller cares about into an unbound admit. */
+    uint8_t package_root[32];
+    const uint8_t *expect_package_root = NULL;
+    const char *want_hex = zat_input_str(request->input, "package_root");
+    if (want_hex && want_hex[0]) {
+        if (!zat_hex32(request, reply, "zcode.package.attest.admit",
+                       "package_root", "BAD_PACKAGE_ROOT",
+                       "package_root is optional, but when given it must be "
+                       "64 lowercase hex chars (the package root this "
+                       "attestation must be about); it is never silently "
+                       "ignored", package_root))
+            return;
+        expect_package_root = package_root;
+    }
+
+    bool own_store = false;
+    struct vcs_package_store *store = zat_open_store(request, &own_store);
+    if (!store) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "NO_STORE",
+                               "execute", false, false,
+                               "the package store could not be opened; the "
+                               "delivered attestation bytes cannot be read "
+                               "back without one",
+                               zcode_dir);
+        return;
+    }
+
+    /* The blob layer re-verifies the manifest, the root, and the chunk
+     * hash; then the wire is re-parsed, its embedded secp256k1 signature
+     * re-verified, and its id re-derived — the bytes are never trusted for
+     * having arrived. expect_package_root is the caller's binding or NULL,
+     * exactly as decided above; do not "simplify" it to NULL on the path
+     * where the caller supplied one. */
+    struct vcs_package_attest_transport_outcome outcome;
+    memset(&outcome, 0, sizeof(outcome));
+    enum vcs_package_attest_transport_result r =
+        vcs_package_attest_transport_admit(store, zcode_dir, transport_root,
+                                           expect_package_root, &outcome);
+    zat_close_store(store, own_store);
+
+    char rule[192];
+    zat_rule_string(&outcome, r, rule);
+    char transport_hex[65];
+    zcl_hex_encode(transport_root, 32, transport_hex);
+
+    if (r != VCS_PACKAGE_ATTEST_TRANSPORT_OK) {
+        /* One code per rule, never "something went wrong". */
+        const char *code = "ADMIT_REFUSED";
+        const char *why = "the delivered bytes were not admitted";
+        enum zcl_command_exit exit_code = ZCL_COMMAND_EXIT_INVALID;
+        if (r == VCS_PACKAGE_ATTEST_TRANSPORT_ERR_BLOB &&
+            outcome.blob_error == VCS_BLOB_ERR_ABSENT) {
+            code = "ATTESTATION_BYTES_ABSENT";
+            /* Kept under the 192-byte reply message bound: an operator
+             * instruction that truncates mid-word stops being an
+             * instruction. */
+            why = "this node holds no blob at that transport root; fetch it "
+                  "first with zcode package fetch, or use zcode package "
+                  "attest pull to discover and fetch it from a package root";
+        } else if (r == VCS_PACKAGE_ATTEST_TRANSPORT_ERR_BLOB) {
+            code = "BLOB_REFUSED";
+            why = "the blob layer refused the delivered bytes: the tracked "
+                  "root is not a one-file blob, does not hash back to its "
+                  "root, or exceeds the canonical attestation wire bound";
+        } else if (r == VCS_PACKAGE_ATTEST_TRANSPORT_ERR_ATTEST) {
+            code = "ATTESTATION_INVALID";
+            why = "the delivered bytes are not a canonical ZCLATT wire, or "
+                  "the embedded verifier signature does not verify";
+        /* Deliberately no ERR_ID branch: it is structurally unreachable
+         * here. ERR_ID comes only from the OFFER path, where the caller
+         * names the filename and it can disagree with the id recomputed
+         * from the bytes. This leaf calls _admit(), which derives the id
+         * from the wire and files at that same derived id, so there is
+         * nothing to mismatch. Naming an id check we do not perform would
+         * tell a reader this leaf verifies more than it does. */
+        } else if (r == VCS_PACKAGE_ATTEST_TRANSPORT_ERR_BINDING) {
+            code = "PACKAGE_ROOT_BINDING";
+            why = "the delivered attestation names a different package_root "
+                  "than the one you asked about, so nothing was filed: it is "
+                  "not evidence about your package";
+        } else if (r == VCS_PACKAGE_ATTEST_TRANSPORT_ERR_CONFLICT) {
+            code = "STORE_CONFLICT";
+            why = "a different or unreadable object already occupies this "
+                  "attestation id — impossible for honest wires, since the "
+                  "id is the content hash, so this fails closed";
+            exit_code = ZCL_COMMAND_EXIT_INTERNAL;
+        } else if (r == VCS_PACKAGE_ATTEST_TRANSPORT_ERR_STORE) {
+            code = "STORE_WRITE";
+            why = "the attestation could not be filed under "
+                  "<datadir>/zcode/attestations";
+            exit_code = ZCL_COMMAND_EXIT_INTERNAL;
+        } else if (r == VCS_PACKAGE_ATTEST_TRANSPORT_ERR_PATH) {
+            code = "DATADIR_TOO_LONG";
+            why = "datadir path too long";
+        } else if (r == VCS_PACKAGE_ATTEST_TRANSPORT_ERR_ALLOC) {
+            code = "ALLOC";
+            why = "attestation wire buffer";
+            exit_code = ZCL_COMMAND_EXIT_INTERNAL;
+        }
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, exit_code,
+                               code, "execute", false, false, why, rule);
+        return;
+    }
+
+    char id_hex[65], package_hex[65], release_hex[65], recipe_hex[65];
+    char signer_hex[VCS_PACKAGE_ATTEST_PUBKEY_BYTES * 2 + 1];
+    zcl_hex_encode(outcome.attestation_id, sizeof(outcome.attestation_id),
+                   id_hex);
+    zcl_hex_encode(outcome.attestation.package_root, 32, package_hex);
+    zcl_hex_encode(outcome.attestation.release_id, 32, release_hex);
+    zcl_hex_encode(outcome.attestation.recipe_root, 32, recipe_hex);
+    zcl_hex_encode(outcome.attestation.verifier_pubkey,
+                   sizeof(outcome.attestation.verifier_pubkey), signer_hex);
+
+    (void)json_push_kv_str(&reply->data, "transport_root", transport_hex);
+    (void)json_push_kv_str(&reply->data, "attestation_id", id_hex);
+    (void)json_push_kv_str(&reply->data, "package_root", package_hex);
+    (void)json_push_kv_str(&reply->data, "release_id", release_hex);
+    (void)json_push_kv_str(&reply->data, "recipe_root", recipe_hex);
+    (void)json_push_kv_str(&reply->data, "signer_pubkey", signer_hex);
+    (void)json_push_kv_str(&reply->data, "result_class",
+                           vcs_package_attest_result_string(
+                               outcome.attestation.result_class));
+    (void)json_push_kv_bool(&reply->data, "filed", outcome.filed);
+    (void)json_push_kv_bool(&reply->data, "already_present",
+                            outcome.already_present);
+    (void)json_push_kv_str(&reply->data, "admit_result", rule);
+
+    (void)json_push_kv_str(
+        &reply->data, "note",
+        expect_package_root
+            ? "admitting is NOT accepting. The bytes were read back out of "
+              "the package store (the blob layer re-verified the manifest, "
+              "the root, and the chunk hash), re-parsed as a canonical "
+              "ZCLATT wire, their embedded verifier signature re-verified, "
+              "their id re-derived, and — because you passed package_root — "
+              "checked to name exactly that package root before anything was "
+              "filed. Nothing here consults the approved-verifier allowlist: "
+              "this command deliberately files attestations from signers you "
+              "have never approved, with failure result classes, for "
+              "packages this node does not hold, because a quorum you can "
+              "only observe when you already agree with it proves nothing. "
+              "The quorum is applied later by zcode package verify. This "
+              "leaf touches no DHT: it admits bytes you already have, so a "
+              "node whose authenticated record layer is not up can still "
+              "take in evidence it fetched"
+            : "admitting is NOT accepting, and this admission was NOT BOUND "
+              "TO ANY PACKAGE. The bytes were read back out of the package "
+              "store (the blob layer re-verified the manifest, the root, and "
+              "the chunk hash), re-parsed as a canonical ZCLATT wire, their "
+              "embedded verifier signature re-verified, and their id "
+              "re-derived — but you did not pass package_root, so this "
+              "command filed whatever package the wire itself names and made "
+              "NO claim that it is evidence about any package you care "
+              "about. package_root is optional here ONLY because an operator "
+              "may be filing bytes they already hold without asking a "
+              "question about one package; if you are asking whether this "
+              "attestation is evidence about a specific package, RE-RUN WITH "
+              "package_root, and the reply's package_root field is what you "
+              "would have had to compare by hand. zcode package attest pull "
+              "makes that binding mandatory because it resolved the blob "
+              "from a POINTER keyed on a package root, where an unbound "
+              "admit would let a hostile pointer deliver an attestation for "
+              "a DIFFERENT package as if it were evidence about yours. "
+              "Nothing here consults the approved-verifier allowlist: "
+              "unapproved signers and failure result classes are filed on "
+              "purpose, and the quorum is applied later by zcode package "
+              "verify");
 }

@@ -1063,6 +1063,29 @@ void zcl_native_handle_zcode_package_attest_pull(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 
+/* zcode attestation admit — the third transport leaf, and the one that
+ * decouples carriage from the DHT. It admits ONE attestation blob this
+ * node ALREADY HOLDS, named directly by its transport root: the bytes are
+ * read back out of the package store, re-parsed, their embedded signature
+ * re-verified, their id re-derived, and filed. Before it, a node that had
+ * fetched the blob had no way to admit it — import wants hex it does not
+ * hold, pull wants a working authenticated DHT — so fetched evidence was
+ * stranded on every node whose record layer is not up.
+ *
+ * package_root is OPTIONAL here and MANDATORY on pull. That asymmetry is
+ * deliberate: pull resolved the blob FROM a POINTER keyed on a package
+ * root, so it is answering a question about one specific package and must
+ * bind, or a hostile pointer could deliver an attestation for a DIFFERENT
+ * package as evidence about yours. admit is handed a transport root
+ * directly, so a caller who IS asking about a package MUST pass
+ * package_root — omitting it is the strictly weaker "file these bytes, I
+ * am not asking about one package" case, never a safe default. Admitting
+ * is not accepting: the quorum belongs to zcode package verify. Bound by
+ * config/commands/zcode.def. */
+void zcl_native_handle_zcode_package_attest_admit(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+
 /* zcode slice 4 — contributor identity + ZNAM pointers. The publisher key
  * is the only identity; ZNAM records resolve through the canonical model
  * with an explicit binding proof. Bound by config/commands/zcode.def. */

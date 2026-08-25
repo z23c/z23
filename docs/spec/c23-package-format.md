@@ -191,8 +191,8 @@ Two evidence lanes exist, and they are not interchangeable:
   `zcode package verify`. They are portable: `zcode package attest import`
   files a third party's signed wire into the local store (filing is not
   acceptance — the local approved-verifier policy applies at evaluation),
-  and `zcode package attest offer` / `pull` move them between nodes over
-  the existing swarm with no human carrying bytes (§4.1).
+  and `zcode package attest offer` / `pull` / `admit` move them between
+  nodes over the existing swarm with no human carrying bytes (§4.1).
 
 <!-- claim: symbol-present VCS_PACKAGE_ATTEST_ID_DOMAIN lib/vcs/include/vcs/package_attest.h # attestation id domain -->
 
@@ -251,6 +251,14 @@ blob, and admits what arrives. N independent verifiers for one package are
 N records at one key, each in its own signed sequence stream; none can
 overwrite another.
 
+Carriage does not depend on that discovery layer. A node that ALREADY
+holds the bytes — `zcode package fetch` on the transport root, or the swarm
+delivering the blob some other way — admits them with
+`zcode package attest admit`, naming the transport root directly and
+contacting no network. Without it, fetched evidence is stranded wherever
+the authenticated record layer is not up, since `import` wants hex the node
+does not hold and `pull` wants a working DHT.
+
 <!-- claim: symbol-present VCS_PACKAGE_ATTEST_DHT_NAMESPACE config/src/boot_zcode_dht_rpc.c # the publish path gates on this exact namespace -->
 
 **The publish-side gate is hygiene; the receiver-side binding check is the
@@ -259,14 +267,22 @@ bytes it does not hold, bytes that are not a canonical `ZCLATT` wire, a
 wire whose signature does not verify, or a wire attesting a different
 package than the pointer claims. That rule constrains only the node
 applying it. A hostile node runs its own build and can publish any pointer
-it likes. What protects a reader is that every admission passes the root it
-was asking about as `expect_package_root`: an attestation whose own
-`package_root` differs is refused `package-root-binding` and never filed.
-`zcode package attest pull` always passes that root, and so must any future
-puller. Do not treat a published attestation pointer as trustworthy because
-the publish gate exists.
+it likes. What protects a reader is that every admission made in answer to
+a question about a package passes that package's root as
+`expect_package_root`: an attestation whose own `package_root` differs is
+refused `package-root-binding` and never filed. `zcode package attest pull`
+always passes that root — it resolved the blob FROM a pointer keyed on it,
+so an unbound admission there would let a hostile pointer deliver an
+attestation for a DIFFERENT package as evidence about yours — and so must
+any future puller. `zcode package attest admit` takes `package_root` as an
+OPTIONAL input for the deliberately narrower case where the caller names a
+transport root directly and is asking about no package; a caller who IS
+asking about one MUST pass it, and omitting it is not a safe default but a
+strictly weaker act that asserts nothing about any package. Do not treat a
+published attestation pointer as trustworthy because the publish gate
+exists.
 
-**Admitting is not accepting.** Both transport commands deliberately file
+**Admitting is not accepting.** The transport commands deliberately file
 attestations signed by keys this node has never approved, carrying failure
 result classes, for packages it does not hold. Refusing evidence at intake
 would let a node's own allowlist decide what it is allowed to SEE, and a

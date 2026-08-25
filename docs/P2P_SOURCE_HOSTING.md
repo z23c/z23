@@ -385,6 +385,39 @@ a verifier), while `ATTESTATION_BYTES_UNREACHABLE` means pointers exist but
 no authenticated provider served the bytes (a reachability problem, or a
 publisher who skipped the PROVIDER half of `offer`).
 
+Both dead ends are reported only when **nothing was admitted**. Admission is
+deliberately unconditional — the blob layer, not the fetch, is the authority
+on whether the bytes are actually present — so a node that already holds an
+attestation admits and files it even when provider discovery served nothing.
+Such a pull reports `ATTESTATIONS_ADMITTED` and names no blocker, because
+the evidence landed. A status that said the bytes were unreachable in the
+same reply that reported `filed` greater than zero would send an operator to
+repair reachability that was never broken.
+
+**Carriage must not depend on the DHT.** A node that already holds the
+attestation bytes — it ran `zcode package fetch` on the transport root, or
+the swarm delivered the blob some other way — admits them with
+`zcode package attest admit --input='{"transport_root":"<64hex>"}'`, which
+contacts no network at all. Without it the bytes were stranded: `import`
+wants hex that node does not hold, and `pull` wants an authenticated record
+layer, which needs identity files and a delegation chain verified against
+real chain history. Evidence you have already fetched must not become
+unusable because your DHT is not up.
+
+`admit` takes an **optional** `package_root`, and that is a deliberate
+asymmetry with `pull`, where it is mandatory. `pull` resolved the blob
+*from* a POINTER keyed on a package root, so it is answering a question
+about one specific package and must bind — an unbound admission there would
+let a hostile pointer in this namespace deliver an attestation for a
+different package and have it read as evidence about yours. `admit` is
+handed a transport root directly. So **if you are asking whether this
+attestation is evidence about a particular package, pass `package_root`**:
+a wire naming a different root is then refused `PACKAGE_ROOT_BINDING` and
+nothing is filed. Omitting it is not the safe default — it is the strictly
+weaker "file these bytes, I am not asking about one package" case, in which
+the command files whatever package the wire itself names and asserts
+nothing about yours.
+
 **Where the trust actually sits.** The publish-side gate refuses to
 advertise a pointer this node cannot stand behind — bytes it does not hold,
 bytes that are not a canonical `ZCLATT` wire, a signature that does not
@@ -396,11 +429,13 @@ the claim being made, since publishing the pointer IS asserting this node
 holds the attestation. That is hygiene, and it constrains only the node
 applying it: a hostile node runs its own build and can publish any pointer
 it likes. What protects a
-reader is the receiver-side binding check — every admission passes the root
-the reader asked about as `expect_package_root`, and an attestation whose
-own `package_root` differs is refused `package-root-binding` and never
-filed. Do not treat a published attestation pointer as trustworthy because
-the publish gate exists.
+reader is the receiver-side binding check — every admission on the pull
+path passes the root the reader asked about as `expect_package_root`, and
+an attestation whose own `package_root` differs is refused
+`package-root-binding` and never filed. `admit` gives the same check to a
+caller who names the package they are asking about, and skips it only for
+the caller who is asking about none. Do not treat a published attestation
+pointer as trustworthy because the publish gate exists.
 
 **Pulling is not accepting.** `pull` files attestations signed by keys this
 node has never approved, carrying failure result classes, for packages it

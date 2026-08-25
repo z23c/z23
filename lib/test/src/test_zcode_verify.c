@@ -34,6 +34,28 @@
  *      the signature rule, a non-canonical wire names the parse rule, and
  *      an unseen package's attestation still files (filing is not
  *      acceptance — verify names UNKNOWN_PACKAGE).
+ *   3d. The zcode package attest offer/pull COMMAND layer (the transport
+ *      library itself is test_zcode_attest_transport's): offer returns
+ *      BOTH the provider and the pointer publish input — publishing one
+ *      without the other is a silent no-op at pull time — over a
+ *      transport root that equals the blob root of the exact wire, is
+ *      idempotent, and names ATTESTATION_ABSENT / BAD_ATTESTATION_ID;
+ *      pull keeps NO_ATTESTATION_POINTERS and
+ *      ATTESTATION_BYTES_UNREACHABLE distinct, and one hostile pointer
+ *      (a binding mismatch) plus one unheld root do NOT abort the sweep
+ *      — the honest verifier's attestation still lands filed while both
+ *      failures stay in the rows naming their rule, with the totals
+ *      counted from those rows. The DHT lookup runs behind
+ *      node_rpc_client's test hook and the per-blob fetch behind
+ *      zcl_native_zcode_discovery_test_backend: no socket, no daemon.
+ *   3e. The attestation POINTER publish gate
+ *      (config/src/boot_zcode_dht_publish_gate.c): NO_PACKAGE_STORE,
+ *      ATTESTATION_NOT_HELD, ATTESTATION_INVALID,
+ *      ATTESTATION_BINDING_MISMATCH (a pointer whose semantic_root is
+ *      not the attestation's package_root, refused before anything is
+ *      filed) and ATTESTATION_STORE_CONFLICT, each reached by
+ *      construction and asserted by its named code plus the exact
+ *      transport rule; the happy path passes and files the attestation.
  *   4. End-to-end external verifier: a tiny real C package is published
  *      into a fixture store, build/bin/zclassic23-package-verify runs it
  *      (gcc + clang, plain + ASan/UBSan), and the signed attestation is
@@ -53,14 +75,23 @@
 #include "test/test_core.h"
 
 #include "command/native_command.h"
+#include "command/native_zcode_discovery.h"
 
+#include "base/safe_alloc.h"
+#include "config/boot_zcode_dht_publish_gate.h"
+#include "controllers/rpc_client.h"
 #include "core/uint256.h"
 #include "crypto/sha3.h"
 #include "json/json.h"
 #include "keys/key.h"
 #include "keys/pubkey.h"
 #include "util/spawn.h"
+#include "util/util.h"
+#include "vcs/blob_store.h"
 #include "vcs/package_attest.h"
+#include "vcs/package_attest_transport.h"
+#include "vcs/package_store.h"
+#include "vcs/zcode_dht_record.h"
 #include "vcs/package_build.h"
 #include "vcs/package_eligible.h"
 #include "vcs/package_manifest.h"
@@ -2000,6 +2031,1021 @@ static int t_attest_import(void)
     return failures;
 }
 
+/* ── 3d. zcode package attest offer/pull: the COMMAND layer ────────────
+ * The transport library beneath these two leaves is covered by
+ * test_zcode_attest_transport. What is covered HERE is the operator
+ * surface built on top of it: the two publish inputs `offer` must return
+ * together, and the row discipline `pull` must keep when one pointer in a
+ * set is hostile or unreachable.
+ *
+ * Neither leaf may open the live datadir: every case runs on a
+ * ./test-tmp tree from the harness helper. `pull` reaches the network
+ * through two existing seams and no socket — the DHT record lookup goes
+ * through node_rpc_client's test hook, and the per-blob fetch through
+ * zcl_native_zcode_discovery_test_backend. */
+
+/* The pointer records the stubbed DHT lookup answers with, and what the
+ * stub observed about the query it was asked. */
+static const char *g_zv_pointer_records = "[]";
+static bool g_zv_pointer_query_exact;
+static unsigned g_zv_record_begin_calls;
+
+static char *zv_pull_rpc_hook(const char *method, const char *params_json)
+{
+    if (strcmp(method, "zcode_dht_record_begin") == 0) {
+        g_zv_record_begin_calls++;
+        /* The pull must ask the ONE key that means "who attested this
+         * package": kind=pointer in the attestation namespace, at the
+         * caller's package root. A stub that answered any query would
+         * let a wrong lookup pass. */
+        g_zv_pointer_query_exact =
+            params_json != NULL &&
+            strstr(params_json, "\"kind\":\"pointer\"") != NULL &&
+            strstr(params_json,
+                   "\"namespace\":\"" VCS_PACKAGE_ATTEST_DHT_NAMESPACE
+                   "\"") != NULL;
+        return zcl_strdup("{\"ok\":true,"
+                          "\"lookup_id\":"
+                          "\"0123456789abcdef0123456789abcdef\","
+                          "\"owner_token\":"
+                          "\"fedcba9876543210fedcba9876543210\"}",
+                          "test.zcode_verify.record_begin");
+    }
+    if (strcmp(method, "zcode_dht_record_poll") == 0) {
+        char body[8192];
+        int n = snprintf(body, sizeof(body),
+                         "{\"ok\":true,\"state\":\"complete\","
+                         "\"records\":%s}", g_zv_pointer_records);
+        return (n > 0 && (size_t)n < sizeof(body))
+            ? zcl_strdup(body, "test.zcode_verify.record_poll") : NULL;
+    }
+    if (strcmp(method, "zcode_dht_record_cancel") == 0)
+        return zcl_strdup("{\"ok\":true}",
+                          "test.zcode_verify.record_cancel");
+    return zcl_strdup("{\"ok\":false,\"code\":\"UNEXPECTED_RPC\"}",
+                      "test.zcode_verify.unexpected_rpc");
+}
+
+/* The daemon-side fetch seam: one authenticated provider answers for any
+ * canonical transport root in the attestation namespace, and the bytes
+ * are already here. The blob layer — not this stub — remains the
+ * authority on whether the bytes actually exist locally. */
+static bool zv_discover_attest_provider(struct json_value *selector,
+                                        struct json_value *result)
+{
+    const char *kind = json_get_str(json_get(selector, "kind"));
+    const char *ns = json_get_str(json_get(selector, "namespace"));
+    const char *root = json_get_str(json_get(selector, "transport_root"));
+    if (!kind || strcmp(kind, "provider") != 0 ||
+        !ns || strcmp(ns, VCS_PACKAGE_ATTEST_DHT_NAMESPACE) != 0 ||
+        !root || strlen(root) != 64)
+        return false;
+    json_set_object(result);
+    (void)json_push_kv_bool(result, "ok", true);
+    (void)json_push_kv_int(result, "count", 1);
+    return true;
+}
+
+static bool zv_route_attest_provider(struct json_value *selector,
+                                     struct json_value *result)
+{
+    (void)selector;
+    json_set_object(result);
+    (void)json_push_kv_bool(result, "ok", true);
+    (void)json_push_kv_int(result, "authenticated_providers", 1);
+    (void)json_push_kv_str(result, "fetch_result", "already-complete");
+    (void)json_push_kv_bool(result, "restricted", true);
+    return true;
+}
+
+/* Nobody serves these bytes: discovery finds no provider record at all.
+ * This is the "pointers exist, bytes unreachable" half of the split the
+ * pull report is required to keep distinct from "nobody attested". */
+static bool zv_discover_no_provider(struct json_value *selector,
+                                    struct json_value *result)
+{
+    (void)selector;
+    json_set_object(result);
+    (void)json_push_kv_bool(result, "ok", true);
+    (void)json_push_kv_int(result, "count", 0);
+    return false;
+}
+
+/* One pull row, found by the transport root it names. */
+static const struct json_value *zv_row_for(const struct json_value *rows,
+                                           const char *transport_hex)
+{
+    if (!rows || rows->type != JSON_ARR)
+        return NULL;
+    for (size_t i = 0; i < json_size(rows); i++) {
+        const struct json_value *row = json_at(rows, i);
+        const char *r = row ? json_get_str(json_get(row, "transport_root"))
+                            : NULL;
+        if (r && strcmp(r, transport_hex) == 0)
+            return row;
+    }
+    return NULL;
+}
+
+static bool zv_str_is(const struct json_value *v, const char *key,
+                      const char *want)
+{
+    const char *s = json_get_str(json_get(v, key));
+    return s && strcmp(s, want) == 0;
+}
+
+static bool zv_str_has(const struct json_value *v, const char *key,
+                       const char *needle)
+{
+    const char *s = json_get_str(json_get(v, key));
+    return s && strstr(s, needle) != NULL;
+}
+
+/* File one signed attestation, then run the OFFER handler over it so its
+ * exact bytes become a blob in the datadir store. Hands back the id and
+ * the transport root the handler reported, and (deliberately) removes the
+ * local attestations/ copy afterwards when `unfile` is set — that is the
+ * state a receiving node is really in: the blob is reachable, the
+ * attestation is not yet filed. */
+static bool zv_offer_attestation(const char *datadir, const char *store,
+                                 uint8_t cls, const uint8_t package_root[32],
+                                 const uint8_t release_id[32],
+                                 const uint8_t recipe_root[32],
+                                 uint8_t signer_seed, bool unfile,
+                                 char id_hex_out[65],
+                                 char transport_hex_out[65])
+{
+    struct vcs_package_attest a;
+    if (!zv_attest(&a, cls, package_root, release_id, recipe_root,
+                   signer_seed))
+        return false;
+    uint8_t id[32];
+    if (vcs_package_attest_id(&a, id) != VCS_PACKAGE_ATTEST_OK)
+        return false;
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    if (vcs_package_attest_serialize(&a, &wire, &wire_len) !=
+        VCS_PACKAGE_ATTEST_OK)
+        return false;
+    zv_hex_enc(id, 32, id_hex_out);
+    char path[4400];
+    snprintf(path, sizeof(path), "%s/attestations/%s", store, id_hex_out);
+    bool ok = zv_write_file(path, wire, wire_len, 0600);
+    free(wire);
+    if (!ok)
+        return false;
+
+    struct zv_cmd c;
+    zv_cmd_init(&c, datadir, "");
+    (void)json_push_kv_str(&c.input, "attestation_id", id_hex_out);
+    zcl_native_handle_zcode_package_attest_offer(&c.request, &c.reply);
+    const char *tr = json_get_str(json_get(&c.reply.data, "transport_root"));
+    ok = c.reply.status == ZCL_COMMAND_STATUS_PASSED && tr &&
+         strlen(tr) == 64;
+    if (ok)
+        snprintf(transport_hex_out, 65, "%s", tr);
+    zv_cmd_free(&c);
+    if (ok && unfile)
+        ok = unlink(path) == 0;
+    return ok;
+}
+
+static int t_attest_offer(void)
+{
+    int failures = 0;
+    char datadir[1024];
+    test_make_tmpdir(datadir, sizeof(datadir), "zcode_verify", "attest-offer");
+    char store[4400];
+    snprintf(store, sizeof(store), "%s/zcode", datadir);
+
+    uint8_t package_root[32], release_id[32], recipe_root[32];
+    bool fixture = zv_publish_fixture(
+        store,
+        "#include \"add.h\"\nint add(int a, int b) { return a + b; }\n",
+        "#include \"add.h\"\nint main(void) { return add(2, 3) == 5 ? 0 : 1; }\n",
+        package_root, release_id, recipe_root);
+    ZV_CHECK("offer: fixture store publishes", fixture);
+    if (!fixture) {
+        test_rm_rf_recursive(datadir);
+        return failures + 1;
+    }
+    char package_hex[65];
+    zv_hex_enc(package_root, 32, package_hex);
+
+    /* One filed attestation, written by the fixture — the handler is the
+     * only thing that turns it into a reachable blob. */
+    struct vcs_package_attest a;
+    uint8_t id[32];
+    bool built = zv_attest(&a, VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
+                           package_root, release_id, recipe_root, 0x22) &&
+                 vcs_package_attest_id(&a, id) == VCS_PACKAGE_ATTEST_OK;
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    built = built && vcs_package_attest_serialize(&a, &wire, &wire_len) ==
+                         VCS_PACKAGE_ATTEST_OK;
+    char id_hex[65] = "";
+    char expect_transport_hex[65] = "";
+    if (built) {
+        zv_hex_enc(id, 32, id_hex);
+        char path[4400];
+        snprintf(path, sizeof(path), "%s/attestations/%s", store, id_hex);
+        built = zv_write_file(path, wire, wire_len, 0600);
+        /* The transport root is the BLOB root of these exact bytes,
+         * derived here independently of the transport layer. */
+        uint8_t expect[32];
+        built = built && vcs_blob_root(wire, wire_len, expect);
+        if (built)
+            zv_hex_enc(expect, 32, expect_transport_hex);
+    }
+    free(wire);
+    ZV_CHECK("offer: filed attestation fixture builds", built);
+    if (!built) {
+        test_rm_rf_recursive(datadir);
+        return failures + 1;
+    }
+
+    char first_transport_hex[65] = "";
+    /* (a) The happy path returns BOTH publish inputs. Publishing only one
+     * is a silent no-op at pull time — pointer-only means a puller learns
+     * which blob to want and finds nobody serving it, provider-only means
+     * the bytes are reachable and nobody knows to ask — so a test that
+     * accepted one would prove nothing this pairing exists to prevent. */
+    {
+        struct zv_cmd c;
+        zv_cmd_init(&c, datadir, "");
+        (void)json_push_kv_str(&c.input, "attestation_id", id_hex);
+        zcl_native_handle_zcode_package_attest_offer(&c.request, &c.reply);
+        const char *transport =
+            json_get_str(json_get(&c.reply.data, "transport_root"));
+        if (transport && strlen(transport) == 64)
+            snprintf(first_transport_hex, sizeof(first_transport_hex), "%s",
+                     transport);
+        const struct json_value *provider =
+            json_get(&c.reply.data, "provider_publish_input");
+        const struct json_value *pointer =
+            json_get(&c.reply.data, "pointer_publish_input");
+        ZV_CHECK("offer: identifies the attestation and its transport root",
+                 c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
+                 zv_str_is(&c.reply.data, "attestation_id", id_hex) &&
+                 zv_str_is(&c.reply.data, "package_root", package_hex) &&
+                 zv_str_is(&c.reply.data, "result_class", "test-pass") &&
+                 zv_str_is(&c.reply.data, "namespace",
+                           VCS_PACKAGE_ATTEST_DHT_NAMESPACE));
+        ZV_CHECK("offer: transport_root is the blob root of the exact wire",
+                 transport && strcmp(transport, expect_transport_hex) == 0 &&
+                 strcmp(transport, id_hex) != 0);
+        ZV_CHECK("offer: BOTH publish inputs are returned",
+                 provider != NULL && pointer != NULL);
+        ZV_CHECK("offer: the provider input says 'ask me for these bytes'",
+                 provider && zv_str_is(provider, "mode", "plan") &&
+                 zv_str_is(provider, "kind", "provider") &&
+                 zv_str_is(provider, "namespace",
+                           VCS_PACKAGE_ATTEST_DHT_NAMESPACE) &&
+                 transport &&
+                 zv_str_is(provider, "transport_root", transport) &&
+                 json_get(provider, "semantic_root") == NULL);
+        ZV_CHECK("offer: the pointer input binds the package to the blob",
+                 pointer && zv_str_is(pointer, "mode", "plan") &&
+                 zv_str_is(pointer, "kind", "pointer") &&
+                 zv_str_is(pointer, "namespace",
+                           VCS_PACKAGE_ATTEST_DHT_NAMESPACE) &&
+                 zv_str_is(pointer, "semantic_root", package_hex) &&
+                 transport &&
+                 zv_str_is(pointer, "transport_root", transport));
+        /* NOT the same window. The two kinds have different ceilings, and
+         * a shared one is a real defect: a live seven-daemon flight caught
+         * `offer` handing back a PROVIDER input whose 86400s window is over
+         * the 7200s provider maximum, so an operator running exactly what
+         * offer produced got the pointer published and the provider
+         * refused — pointer-only, the silent no-op offer exists to
+         * prevent. Each input must be publishable AS ITS OWN KIND. */
+        ZV_CHECK("offer: each input's window is legal for its own record "
+                 "kind, so running both actually publishes both",
+                 provider && pointer &&
+                 json_get_int(json_get(provider, "expiry")) -
+                     json_get_int(json_get(provider, "not_before")) <=
+                         (int64_t)VCS_ZCODE_DHT_PROVIDER_MAX_SECONDS &&
+                 json_get_int(json_get(pointer, "expiry")) -
+                     json_get_int(json_get(pointer, "not_before")) <=
+                         (int64_t)VCS_ZCODE_DHT_POINTER_MAX_SECONDS);
+        ZV_CHECK("offer: both windows are bounded and non-empty",
+                 provider && pointer &&
+                 json_get_int(json_get(provider, "expiry")) >
+                     json_get_int(json_get(provider, "not_before")) &&
+                 json_get_int(json_get(pointer, "expiry")) >
+                     json_get_int(json_get(pointer, "not_before")));
+        zv_cmd_free(&c);
+    }
+
+    /* (b) Idempotent: the transport root is a pure function of the exact
+     * signed bytes, so offering twice yields the identical root. */
+    {
+        struct zv_cmd c;
+        zv_cmd_init(&c, datadir, "");
+        (void)json_push_kv_str(&c.input, "attestation_id", id_hex);
+        zcl_native_handle_zcode_package_attest_offer(&c.request, &c.reply);
+        ZV_CHECK("offer: re-offering yields the identical transport root",
+                 c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
+                 first_transport_hex[0] &&
+                 zv_str_is(&c.reply.data, "transport_root",
+                           first_transport_hex));
+        zv_cmd_free(&c);
+    }
+
+    /* (c) An id nothing is filed under names the missing prerequisite,
+     * and does not crash. */
+    {
+        uint8_t ghost[32];
+        zv_pattern_root(0x5c, ghost);
+        char ghost_hex[65];
+        zv_hex_enc(ghost, 32, ghost_hex);
+        struct zv_cmd c;
+        zv_cmd_init(&c, datadir, "");
+        (void)json_push_kv_str(&c.input, "attestation_id", ghost_hex);
+        zcl_native_handle_zcode_package_attest_offer(&c.request, &c.reply);
+        ZV_CHECK("offer: an unfiled id names ATTESTATION_ABSENT",
+                 c.reply.status == ZCL_COMMAND_STATUS_FAILED &&
+                 strcmp(c.reply.error.code, "ATTESTATION_ABSENT") == 0 &&
+                 strstr(c.reply.error.evidence,
+                        vcs_package_attest_transport_result_string(
+                            VCS_PACKAGE_ATTEST_TRANSPORT_ERR_ABSENT)) != NULL);
+        zv_cmd_free(&c);
+    }
+
+    /* (d) A malformed id is refused at normalize, by name, before any
+     * store is opened. */
+    {
+        static const char *const bad[] = {
+            "",                       /* absent */
+            "deadbeef",               /* too short */
+            "zz00000000000000000000000000000000000000000000000000000000000000",
+            "DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF",
+        };
+        for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            struct zv_cmd c;
+            zv_cmd_init(&c, datadir, "");
+            if (bad[i][0])
+                (void)json_push_kv_str(&c.input, "attestation_id", bad[i]);
+            zcl_native_handle_zcode_package_attest_offer(&c.request,
+                                                         &c.reply);
+            char label[128];
+            snprintf(label, sizeof(label),
+                     "offer: malformed attestation_id [%zu] names "
+                     "BAD_ATTESTATION_ID", i);
+            ZV_CHECK(label,
+                     c.reply.status == ZCL_COMMAND_STATUS_FAILED &&
+                     strcmp(c.reply.error.code, "BAD_ATTESTATION_ID") == 0 &&
+                     c.reply.error.message[0] != '\0');
+            zv_cmd_free(&c);
+        }
+    }
+
+    test_rm_rf_recursive(datadir);
+    return failures;
+}
+
+static int t_attest_pull(void)
+{
+    int failures = 0;
+    char datadir[1024];
+    test_make_tmpdir(datadir, sizeof(datadir), "zcode_verify", "attest-pull");
+    char store[4400];
+    snprintf(store, sizeof(store), "%s/zcode", datadir);
+
+    uint8_t package_root[32], release_id[32], recipe_root[32];
+    bool fixture = zv_publish_fixture(
+        store,
+        "#include \"add.h\"\nint add(int a, int b) { return a + b; }\n",
+        "#include \"add.h\"\nint main(void) { return add(2, 3) == 5 ? 0 : 1; }\n",
+        package_root, release_id, recipe_root);
+    ZV_CHECK("pull: fixture store publishes", fixture);
+    if (!fixture) {
+        test_rm_rf_recursive(datadir);
+        return failures + 1;
+    }
+    char package_hex[65];
+    zv_hex_enc(package_root, 32, package_hex);
+    /* Function-scoped so the stub's record text outlives the block that
+     * builds it — the pointer set is read again by the later cases. */
+    char records_one[1024];
+    char records_all[2048];
+
+    node_rpc_client_set_test_hook(zv_pull_rpc_hook);
+
+    /* (a) Nobody has attested this package. That is NOT "the bytes could
+     * not be reached", and the two must never collapse into one
+     * not-found: the operator's next step differs completely — wait for a
+     * verifier, versus fix reachability. */
+    g_zv_pointer_records = "[]";
+    {
+        struct zv_cmd c;
+        zv_cmd_init(&c, datadir, "");
+        (void)json_push_kv_str(&c.input, "package_root", package_hex);
+        zcl_native_handle_zcode_package_attest_pull(&c.request, &c.reply);
+        const struct json_value *rows = json_get(&c.reply.data, "rows");
+        ZV_CHECK("pull: an empty pointer set is NO_ATTESTATION_POINTERS",
+                 c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
+                 zv_str_is(&c.reply.data, "status",
+                           "NO_ATTESTATION_POINTERS") &&
+                 zv_str_has(&c.reply.data, "blocker", "no_pointer_record") &&
+                 json_get_int(json_get(&c.reply.data, "pointers_seen")) == 0 &&
+                 json_get_int(json_get(&c.reply.data,
+                                       "distinct_transport_roots")) == 0 &&
+                 rows && rows->type == JSON_ARR && json_size(rows) == 0);
+        ZV_CHECK("pull: the lookup asks the attestation pointer key",
+                 g_zv_record_begin_calls > 0 && g_zv_pointer_query_exact);
+        zv_cmd_free(&c);
+    }
+
+    /* Three blobs, one honest and two that must fail named rules:
+     *   GOOD    a signed attestation of THIS package, bytes in the store
+     *   FOREIGN a signed attestation of ANOTHER package, bytes in the
+     *           store — the hostile pointer this namespace must survive
+     *   ABSENT  a canonical root nothing is stored under
+     * The two real ones are offered (so the bytes are reachable) and then
+     * their attestations/ copies are removed, which is exactly the state
+     * a receiving node is in before a pull. */
+    char good_id[65] = "", good_transport[65] = "";
+    char foreign_id[65] = "", foreign_transport[65] = "";
+    bool offered = zv_offer_attestation(datadir, store,
+                                        VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
+                                        package_root, release_id, recipe_root,
+                                        0x22, true, good_id, good_transport);
+    uint8_t foreign_pkg[32], foreign_rel[32], foreign_recipe[32];
+    zv_pattern_root(0xa1, foreign_pkg);
+    zv_pattern_root(0xa2, foreign_rel);
+    zv_pattern_root(0xa3, foreign_recipe);
+    offered = offered &&
+        zv_offer_attestation(datadir, store,
+                             VCS_PACKAGE_ATTEST_RESULT_TEST_PASS, foreign_pkg,
+                             foreign_rel, foreign_recipe, 0x33, true,
+                             foreign_id, foreign_transport);
+    ZV_CHECK("pull: two attestation blobs offered into the store", offered);
+    if (!offered) {
+        node_rpc_client_set_test_hook(NULL);
+        test_rm_rf_recursive(datadir);
+        return failures + 1;
+    }
+    uint8_t absent_root[32];
+    zv_pattern_root(0xc7, absent_root);
+    char absent_transport[65];
+    zv_hex_enc(absent_root, 32, absent_transport);
+
+    char good_path[4400], foreign_path[4400];
+    snprintf(good_path, sizeof(good_path), "%s/attestations/%s", store,
+             good_id);
+    snprintf(foreign_path, sizeof(foreign_path), "%s/attestations/%s", store,
+             foreign_id);
+
+    /* (b) A pointer exists, nobody serves the bytes, and this node does
+     * not already hold them. Distinct status, distinct blocker, and it is
+     * NOT the empty-set status: "nobody has attested this" and "the bytes
+     * are out of reach" send the operator to two different next steps. */
+    {
+        snprintf(records_one, sizeof(records_one),
+                 "[{\"kind\":\"pointer\",\"transport_root\":\"%s\"}]",
+                 absent_transport);
+        g_zv_pointer_records = records_one;
+        zcl_native_zcode_discovery_test_backend(zv_discover_no_provider,
+                                                zv_route_attest_provider);
+        struct zv_cmd c;
+        zv_cmd_init(&c, datadir, "");
+        (void)json_push_kv_str(&c.input, "package_root", package_hex);
+        zcl_native_handle_zcode_package_attest_pull(&c.request, &c.reply);
+        const struct json_value *rows = json_get(&c.reply.data, "rows");
+        const struct json_value *row = zv_row_for(rows, absent_transport);
+        ZV_CHECK("pull: unreachable bytes are NOT reported as no pointers",
+                 c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
+                 zv_str_is(&c.reply.data, "status",
+                           "ATTESTATION_BYTES_UNREACHABLE") &&
+                 !zv_str_is(&c.reply.data, "status",
+                            "NO_ATTESTATION_POINTERS") &&
+                 zv_str_has(&c.reply.data, "blocker",
+                            "no_authenticated_provider") &&
+                 json_get_int(json_get(&c.reply.data, "pointers_seen")) == 1 &&
+                 json_get_int(json_get(&c.reply.data, "fetched")) == 0 &&
+                 json_get_int(json_get(&c.reply.data, "admitted")) == 0 &&
+                 json_get_int(json_get(&c.reply.data, "refused")) == 1);
+        ZV_CHECK("pull: the unreachable row names the discovery refusal",
+                 row != NULL &&
+                 zv_str_is(row, "fetch_outcome",
+                           "PROVIDER_DISCOVERY_FAILED") &&
+                 json_get(row, "fetched") &&
+                 !json_get_bool(json_get(row, "fetched")) &&
+                 !json_get_bool(json_get(row, "admitted")) &&
+                 zv_str_has(row, "admit_result",
+                            vcs_blob_result_string(VCS_BLOB_ERR_ABSENT)));
+        zv_cmd_free(&c);
+        zcl_native_zcode_discovery_test_backend(NULL, NULL);
+    }
+    /* Nothing was filed for a row whose bytes never arrived. */
+    {
+        struct stat st;
+        ZV_CHECK("pull: an unreachable row files nothing",
+                 stat(good_path, &st) != 0);
+    }
+
+    /* (c) THE case: one hostile pointer and one unreachable pointer in the
+     * same set must not cost the honest verifier's attestation. All three
+     * rows survive, each naming its own rule, and the good one lands
+     * FILED. A sweep that aborted on the first failure would lose exactly
+     * the evidence this command exists to collect. */
+    {
+        snprintf(records_all, sizeof(records_all),
+                 "[{\"kind\":\"pointer\",\"transport_root\":\"%s\"},"
+                 "{\"kind\":\"pointer\",\"transport_root\":\"%s\"},"
+                 "{\"kind\":\"pointer\",\"transport_root\":\"%s\"},"
+                 "{\"kind\":\"pointer\",\"transport_root\":\"%s\"}]",
+                 foreign_transport, absent_transport, good_transport,
+                 good_transport /* a republished duplicate */);
+        g_zv_pointer_records = records_all;
+        zcl_native_zcode_discovery_test_backend(zv_discover_attest_provider,
+                                                zv_route_attest_provider);
+        struct zv_cmd c;
+        zv_cmd_init(&c, datadir, "");
+        (void)json_push_kv_str(&c.input, "package_root", package_hex);
+        zcl_native_handle_zcode_package_attest_pull(&c.request, &c.reply);
+        const struct json_value *rows = json_get(&c.reply.data, "rows");
+        const struct json_value *good = zv_row_for(rows, good_transport);
+        const struct json_value *foreign = zv_row_for(rows,
+                                                      foreign_transport);
+        const struct json_value *absent = zv_row_for(rows, absent_transport);
+
+        ZV_CHECK("pull: one bad row does not abort the sweep — the good "
+                 "attestation still lands filed",
+                 c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
+                 good != NULL &&
+                 json_get_bool(json_get(good, "admitted")) &&
+                 json_get_bool(json_get(good, "filed")) &&
+                 zv_str_is(good, "attestation_id", good_id) &&
+                 zv_str_is(good, "result_class", "test-pass") &&
+                 zv_str_is(good, "admit_result",
+                           "ok (blob=ok, attestation=ok)"));
+        ZV_CHECK("pull: the hostile pointer is refused naming the binding "
+                 "rule, and stays in the report",
+                 foreign != NULL &&
+                 !json_get_bool(json_get(foreign, "admitted")) &&
+                 !json_get_bool(json_get(foreign, "filed")) &&
+                 zv_str_has(foreign, "admit_result",
+                            vcs_package_attest_transport_result_string(
+                                VCS_PACKAGE_ATTEST_TRANSPORT_ERR_BINDING)));
+        ZV_CHECK("pull: a pointer to bytes this node does not hold names "
+                 "the blob rule, not the fetch stub's optimism",
+                 absent != NULL &&
+                 json_get_bool(json_get(absent, "fetched")) &&
+                 !json_get_bool(json_get(absent, "admitted")) &&
+                 zv_str_has(absent, "admit_result",
+                            vcs_package_attest_transport_result_string(
+                                VCS_PACKAGE_ATTEST_TRANSPORT_ERR_BLOB)) &&
+                 zv_str_has(absent, "admit_result",
+                            vcs_blob_result_string(VCS_BLOB_ERR_ABSENT)));
+        ZV_CHECK("pull: every row carries a named admit_result",
+                 rows && json_size(rows) == 3 &&
+                 zv_str_has(json_at(rows, 0), "admit_result", "(blob=") &&
+                 zv_str_has(json_at(rows, 1), "admit_result", "(blob=") &&
+                 zv_str_has(json_at(rows, 2), "admit_result", "(blob="));
+
+        /* Totals must be the rows, counted. A report whose headline
+         * numbers disagree with its own rows is worse than no report. */
+        int64_t admitted_rows = 0, filed_rows = 0, fetched_rows = 0;
+        for (size_t i = 0; rows && i < json_size(rows); i++) {
+            const struct json_value *row = json_at(rows, i);
+            admitted_rows += json_get_bool(json_get(row, "admitted")) ? 1 : 0;
+            filed_rows += json_get_bool(json_get(row, "filed")) ? 1 : 0;
+            fetched_rows += json_get_bool(json_get(row, "fetched")) ? 1 : 0;
+        }
+        ZV_CHECK("pull: totals are internally consistent with the rows",
+                 json_get_int(json_get(&c.reply.data, "pointers_seen")) == 4 &&
+                 json_get_int(json_get(&c.reply.data,
+                                       "distinct_transport_roots")) == 3 &&
+                 json_get_int(json_get(&c.reply.data, "admitted")) ==
+                     admitted_rows &&
+                 json_get_int(json_get(&c.reply.data, "filed")) ==
+                     filed_rows &&
+                 json_get_int(json_get(&c.reply.data, "fetched")) ==
+                     fetched_rows &&
+                 json_get_int(json_get(&c.reply.data, "admitted")) == 1 &&
+                 json_get_int(json_get(&c.reply.data, "refused")) == 2 &&
+                 json_get_int(json_get(&c.reply.data, "admitted")) +
+                     json_get_int(json_get(&c.reply.data, "refused")) ==
+                     json_get_int(json_get(&c.reply.data,
+                                           "distinct_transport_roots")) &&
+                 !json_get_bool(json_get(&c.reply.data, "rows_truncated")));
+        ZV_CHECK("pull: admitted evidence sets the admitted status",
+                 zv_str_is(&c.reply.data, "status", "ATTESTATIONS_ADMITTED") &&
+                 json_get(&c.reply.data, "blocker") == NULL);
+        zv_cmd_free(&c);
+        zcl_native_zcode_discovery_test_backend(NULL, NULL);
+    }
+
+    /* The filesystem agrees with the report: the honest attestation is
+     * filed, and the one that failed the binding check is not. Refusing
+     * BEFORE filing is the whole security property on this path. */
+    {
+        struct stat st;
+        ZV_CHECK("pull: the admitted attestation is on disk",
+                 stat(good_path, &st) == 0 && st.st_size > 0);
+        ZV_CHECK("pull: the binding-mismatched attestation is NOT on disk",
+                 stat(foreign_path, &st) != 0);
+    }
+
+    /* (d) Re-pulling the same set is idempotent: already_present, not
+     * re-filed, and the totals still add up. */
+    {
+        zcl_native_zcode_discovery_test_backend(zv_discover_attest_provider,
+                                                zv_route_attest_provider);
+        struct zv_cmd c;
+        zv_cmd_init(&c, datadir, "");
+        (void)json_push_kv_str(&c.input, "package_root", package_hex);
+        zcl_native_handle_zcode_package_attest_pull(&c.request, &c.reply);
+        const struct json_value *good =
+            zv_row_for(json_get(&c.reply.data, "rows"), good_transport);
+        ZV_CHECK("pull: re-pulling an already-filed attestation is "
+                 "idempotent",
+                 good != NULL &&
+                 json_get_bool(json_get(good, "admitted")) &&
+                 !json_get_bool(json_get(good, "filed")) &&
+                 json_get_bool(json_get(good, "already_present")) &&
+                 json_get_int(json_get(&c.reply.data, "filed")) == 0 &&
+                 json_get_int(json_get(&c.reply.data, "admitted")) == 1);
+        zv_cmd_free(&c);
+        zcl_native_zcode_discovery_test_backend(NULL, NULL);
+    }
+
+    /* (d2) The status ladder must not contradict its own totals.
+     * Admission is deliberately unconditional, so a blob this node
+     * ALREADY HOLDS is admitted and filed even when provider discovery
+     * serves nothing. A ladder that tested fetched before admitted
+     * printed ATTESTATION_BYTES_UNREACHABLE — "no authenticated provider
+     * served the attestation bytes" — in the same reply that reported
+     * filed=1, sending an operator to repair reachability that was never
+     * broken. The evidence landed; the status has to say so. */
+    {
+        char held_id[65] = "", held_transport[65] = "";
+        bool held = zv_offer_attestation(
+            datadir, store, VCS_PACKAGE_ATTEST_RESULT_TEST_PASS, package_root,
+            release_id, recipe_root, 0x44, true, held_id, held_transport);
+        ZV_CHECK("pull: a third attestation is offered but not yet filed",
+                 held);
+        char held_path[4400];
+        snprintf(held_path, sizeof(held_path), "%s/attestations/%s", store,
+                 held_id);
+        char records_held[1024];
+        snprintf(records_held, sizeof(records_held),
+                 "[{\"kind\":\"pointer\",\"transport_root\":\"%s\"}]",
+                 held_transport);
+        const char *saved_records = g_zv_pointer_records;
+        g_zv_pointer_records = records_held;
+        /* Discovery fails. The bytes are here anyway. */
+        zcl_native_zcode_discovery_test_backend(zv_discover_no_provider,
+                                                zv_route_attest_provider);
+        struct zv_cmd c;
+        zv_cmd_init(&c, datadir, "");
+        (void)json_push_kv_str(&c.input, "package_root", package_hex);
+        zcl_native_handle_zcode_package_attest_pull(&c.request, &c.reply);
+        ZV_CHECK("pull: an attestation admitted from bytes already held is "
+                 "NOT reported as unreachable",
+                 c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
+                 zv_str_is(&c.reply.data, "status", "ATTESTATIONS_ADMITTED") &&
+                 !zv_str_is(&c.reply.data, "status",
+                            "ATTESTATION_BYTES_UNREACHABLE"));
+        ZV_CHECK("pull: no blocker is named when evidence actually landed",
+                 json_get(&c.reply.data, "blocker") == NULL);
+        ZV_CHECK("pull: the totals that contradicted the old status are the "
+                 "ones asserted here",
+                 json_get_int(json_get(&c.reply.data, "fetched")) == 0 &&
+                 json_get_int(json_get(&c.reply.data, "admitted")) == 1 &&
+                 json_get_int(json_get(&c.reply.data, "filed")) == 1 &&
+                 json_get_int(json_get(&c.reply.data, "refused")) == 0);
+        struct stat st;
+        ZV_CHECK("pull: the already-held attestation is on disk", held &&
+                 stat(held_path, &st) == 0 && st.st_size > 0);
+        zv_cmd_free(&c);
+        zcl_native_zcode_discovery_test_backend(NULL, NULL);
+        g_zv_pointer_records = saved_records;
+    }
+
+    /* (e) The row cap is reported honestly rather than truncating in
+     * silence, and it bounds the rows actually produced. */
+    {
+        zcl_native_zcode_discovery_test_backend(zv_discover_attest_provider,
+                                                zv_route_attest_provider);
+        struct zv_cmd c;
+        zv_cmd_init(&c, datadir, "");
+        (void)json_push_kv_str(&c.input, "package_root", package_hex);
+        (void)json_push_kv_int(&c.input, "maximum_records", 1);
+        zcl_native_handle_zcode_package_attest_pull(&c.request, &c.reply);
+        const struct json_value *rows = json_get(&c.reply.data, "rows");
+        ZV_CHECK("pull: rows_truncated is honest at the cap",
+                 c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
+                 json_get_bool(json_get(&c.reply.data, "rows_truncated")) &&
+                 json_get_int(json_get(&c.reply.data, "maximum_records")) ==
+                     1 &&
+                 json_get_int(json_get(&c.reply.data,
+                                       "distinct_transport_roots")) == 1 &&
+                 rows && json_size(rows) == 1 &&
+                 json_get_int(json_get(&c.reply.data, "pointers_seen")) == 4);
+        zv_cmd_free(&c);
+        zcl_native_zcode_discovery_test_backend(NULL, NULL);
+    }
+
+    /* (f) Bad inputs are refused at normalize, by name. */
+    {
+        struct zv_cmd c;
+        zv_cmd_init(&c, datadir, "");
+        (void)json_push_kv_str(&c.input, "package_root", "not-a-root");
+        zcl_native_handle_zcode_package_attest_pull(&c.request, &c.reply);
+        ZV_CHECK("pull: a malformed package_root names BAD_PACKAGE_ROOT",
+                 c.reply.status == ZCL_COMMAND_STATUS_FAILED &&
+                 strcmp(c.reply.error.code, "BAD_PACKAGE_ROOT") == 0);
+        zv_cmd_free(&c);
+
+        zv_cmd_init(&c, datadir, "");
+        (void)json_push_kv_str(&c.input, "package_root", package_hex);
+        (void)json_push_kv_int(&c.input, "maximum_records", 0);
+        zcl_native_handle_zcode_package_attest_pull(&c.request, &c.reply);
+        ZV_CHECK("pull: maximum_records=0 names BAD_MAXIMUM_RECORDS",
+                 c.reply.status == ZCL_COMMAND_STATUS_FAILED &&
+                 strcmp(c.reply.error.code, "BAD_MAXIMUM_RECORDS") == 0);
+        zv_cmd_free(&c);
+    }
+
+    node_rpc_client_set_test_hook(NULL);
+    g_zv_pointer_records = "[]";
+    test_rm_rf_recursive(datadir);
+    return failures;
+}
+
+/* ── 3e. the attestation POINTER publish gate ──────────────────────────
+ * boot_zcode_dht_attestation_pointer_publish_gate stops THIS node from
+ * advertising an attestation pointer it cannot stand behind. Every
+ * refusal below is reached by construction and asserted by its named
+ * code plus the exact transport rule — "it refused" would pass when the
+ * gate refuses for the wrong reason, which is how a fail-closed design
+ * rots into a fail-random one.
+ *
+ * This case owns process-global state (the -packagehost flags, the
+ * datadir, and the node-global package store), so it opens them on a
+ * ./test-tmp tree and restores all three before returning. */
+
+static void zv_gate_spec(struct vcs_zcode_dht_publish_spec *spec,
+                         const uint8_t semantic_root[32],
+                         const uint8_t transport_root[32])
+{
+    memset(spec, 0, sizeof(*spec));
+    spec->kind = VCS_ZCODE_DHT_RECORD_POINTER;
+    snprintf(spec->namespace_name, sizeof(spec->namespace_name), "%s",
+             VCS_PACKAGE_ATTEST_DHT_NAMESPACE);
+    memcpy(spec->semantic_root, semantic_root, 32);
+    memcpy(spec->transport_root, transport_root, 32);
+    spec->sequence = 1;
+    spec->not_before = 1000;
+    spec->expiry = 1000 + 86400;
+}
+
+/* Signed attestation bytes for one package, plus the id and blob root
+ * they hash to. Nothing is stored. */
+static bool zv_gate_wire(uint8_t cls, const uint8_t package_root[32],
+                         uint8_t signer_seed, uint8_t **wire_out,
+                         size_t *wire_len_out, uint8_t id_out[32],
+                         uint8_t transport_root_out[32])
+{
+    uint8_t release_id[32], recipe_root[32];
+    zv_pattern_root((uint8_t)(signer_seed + 1u), release_id);
+    zv_pattern_root((uint8_t)(signer_seed + 2u), recipe_root);
+    struct vcs_package_attest a;
+    if (!zv_attest(&a, cls, package_root, release_id, recipe_root,
+                   signer_seed))
+        return false;
+    if (vcs_package_attest_id(&a, id_out) != VCS_PACKAGE_ATTEST_OK)
+        return false;
+    *wire_out = NULL;
+    *wire_len_out = 0;
+    if (vcs_package_attest_serialize(&a, wire_out, wire_len_out) !=
+        VCS_PACKAGE_ATTEST_OK)
+        return false;
+    if (!vcs_blob_root(*wire_out, *wire_len_out, transport_root_out)) {
+        free(*wire_out);
+        *wire_out = NULL;
+        return false;
+    }
+    return true;
+}
+
+static bool zv_gate_refused(struct json_value *result, const char *code,
+                            const char *rule)
+{
+    return json_get(result, "ok") && !json_get_bool(json_get(result, "ok")) &&
+           zv_str_is(result, "code", code) &&
+           zv_str_has(result, "message", rule);
+}
+
+static int t_attest_publish_gate(void)
+{
+    int failures = 0;
+    uint8_t package_root[32], other_root[32];
+    zv_pattern_root(0x31, package_root);
+    zv_pattern_root(0x71, other_root);
+
+    /* (a) No package store at all: the prerequisite is named, and the
+     * gate never dereferences one. */
+    vcs_package_store_close_global();
+    {
+        uint8_t bogus[32];
+        zv_pattern_root(0x0d, bogus);
+        struct vcs_zcode_dht_publish_spec spec;
+        zv_gate_spec(&spec, package_root, bogus);
+        struct json_value result;
+        json_init(&result);
+        bool allowed =
+            boot_zcode_dht_attestation_pointer_publish_gate(&spec, &result);
+        ZV_CHECK("gate: no package store names NO_PACKAGE_STORE",
+                 !allowed &&
+                 json_get(&result, "ok") &&
+                 !json_get_bool(json_get(&result, "ok")) &&
+                 zv_str_is(&result, "code", "NO_PACKAGE_STORE"));
+        json_free(&result);
+    }
+
+    const char *argv[] = { "zclassic23-test", "-packagehost=1",
+                           "-packagequota=100000000" };
+    ParseParameters(3, argv);
+    char dd[1024];
+    test_make_tmpdir(dd, sizeof(dd), "zcode_verify", "attest-gate");
+    SetDataDir(dd);
+    bool opened = vcs_package_store_open_global() &&
+                  vcs_package_store_global() != NULL;
+    ZV_CHECK("gate: node-global package store opens on the temp datadir",
+             opened);
+    if (!opened) {
+        vcs_package_store_close_global();
+        const char *reset[] = { "zclassic23-test" };
+        ParseParameters(1, reset);
+        SetDataDir("");
+        test_rm_rf_recursive(dd);
+        return failures + 1;
+    }
+    struct vcs_package_store *store = vcs_package_store_global();
+    const char *zcode_dir = vcs_package_store_root_dir(store);
+
+    /* (b) A pointer to bytes this node does not hold. */
+    {
+        uint8_t missing[32];
+        zv_pattern_root(0x4e, missing);
+        struct vcs_zcode_dht_publish_spec spec;
+        zv_gate_spec(&spec, package_root, missing);
+        struct json_value result;
+        json_init(&result);
+        bool allowed =
+            boot_zcode_dht_attestation_pointer_publish_gate(&spec, &result);
+        ZV_CHECK("gate: unheld bytes name ATTESTATION_NOT_HELD",
+                 !allowed &&
+                 zv_gate_refused(&result, "ATTESTATION_NOT_HELD",
+                                 vcs_blob_result_string(VCS_BLOB_ERR_ABSENT)));
+        json_free(&result);
+    }
+
+    /* (c) Bytes this node DOES hold that are not an attestation at all.
+     * Possession is not evidence. */
+    {
+        static const uint8_t junk[96] = { 0x6e, 0x6f, 0x74, 0x2d, 0x61,
+                                          0x2d, 0x77, 0x69, 0x72, 0x65 };
+        uint8_t junk_root[32] = { 0 };
+        bool put = vcs_blob_put_to(store, junk, sizeof(junk), junk_root) ==
+                   VCS_BLOB_OK;
+        struct vcs_zcode_dht_publish_spec spec;
+        zv_gate_spec(&spec, package_root, junk_root);
+        struct json_value result;
+        json_init(&result);
+        bool allowed =
+            put && boot_zcode_dht_attestation_pointer_publish_gate(&spec,
+                                                                   &result);
+        ZV_CHECK("gate: held non-attestation bytes name ATTESTATION_INVALID",
+                 put && !allowed &&
+                 zv_gate_refused(&result, "ATTESTATION_INVALID",
+                                 vcs_package_attest_transport_result_string(
+                                     VCS_PACKAGE_ATTEST_TRANSPORT_ERR_ATTEST)));
+        json_free(&result);
+    }
+
+    /* (d) THE one that matters: a valid, held attestation whose
+     * package_root is NOT the pointer's semantic_root. The pointer would
+     * be advertising evidence about a package the wire never mentions. It
+     * must be refused, and — because the binding is checked BEFORE the
+     * filer runs — nothing may be written. */
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    uint8_t attest_id[32], transport_root[32];
+    bool built = zv_gate_wire(VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
+                              package_root, 0x22, &wire, &wire_len, attest_id,
+                              transport_root);
+    bool stored = built && vcs_blob_put_to(store, wire, wire_len, NULL) ==
+                               VCS_BLOB_OK;
+    free(wire);
+    ZV_CHECK("gate: a signed attestation blob is held by this node",
+             built && stored);
+    char attest_path[4400] = "";
+    if (built) {
+        char id_hex[65];
+        zv_hex_enc(attest_id, 32, id_hex);
+        snprintf(attest_path, sizeof(attest_path), "%s/attestations/%s",
+                 zcode_dir, id_hex);
+    }
+    if (stored) {
+        struct vcs_zcode_dht_publish_spec spec;
+        zv_gate_spec(&spec, other_root, transport_root);
+        struct json_value result;
+        json_init(&result);
+        bool allowed =
+            boot_zcode_dht_attestation_pointer_publish_gate(&spec, &result);
+        struct stat st;
+        ZV_CHECK("gate: a pointer whose semantic_root is not the "
+                 "attestation's package_root names "
+                 "ATTESTATION_BINDING_MISMATCH",
+                 !allowed &&
+                 zv_gate_refused(&result, "ATTESTATION_BINDING_MISMATCH",
+                                 vcs_package_attest_transport_result_string(
+                                     VCS_PACKAGE_ATTEST_TRANSPORT_ERR_BINDING)));
+        ZV_CHECK("gate: a binding mismatch files nothing",
+                 stat(attest_path, &st) != 0);
+        json_free(&result);
+    }
+
+    /* (e) The happy path: held, valid, correctly bound. It passes, and —
+     * as the header documents — it FILES the attestation even on a plan,
+     * because _admit() is the single filer. */
+    if (stored) {
+        struct vcs_zcode_dht_publish_spec spec;
+        zv_gate_spec(&spec, package_root, transport_root);
+        struct json_value result;
+        json_init(&result);
+        bool allowed =
+            boot_zcode_dht_attestation_pointer_publish_gate(&spec, &result);
+        struct stat st;
+        ZV_CHECK("gate: a held, valid, correctly-bound attestation passes",
+                 allowed);
+        ZV_CHECK("gate: passing files the attestation locally (documented, "
+                 "not read-only)",
+                 stat(attest_path, &st) == 0 &&
+                 (size_t)st.st_size == wire_len);
+        json_free(&result);
+
+        json_init(&result);
+        bool again =
+            boot_zcode_dht_attestation_pointer_publish_gate(&spec, &result);
+        ZV_CHECK("gate: re-running the same publish is idempotent", again);
+        json_free(&result);
+    }
+
+    /* (f) A different object already occupying the attestation id. The id
+     * IS the content hash, so this is impossible for honest wires and
+     * fails closed rather than overwriting. */
+    {
+        uint8_t *w2 = NULL;
+        size_t w2_len = 0;
+        uint8_t id2[32], root2[32];
+        bool b2 = zv_gate_wire(VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
+                               package_root, 0x33, &w2, &w2_len, id2, root2);
+        bool s2 = b2 && vcs_blob_put_to(store, w2, w2_len, NULL) ==
+                            VCS_BLOB_OK;
+        free(w2);
+        char id2_hex[65] = "", path2[4400] = "";
+        if (b2) {
+            zv_hex_enc(id2, 32, id2_hex);
+            snprintf(path2, sizeof(path2), "%s/attestations/%s", zcode_dir,
+                     id2_hex);
+        }
+        static const char squatter[] = "not the attestation these bytes are";
+        bool squatted = s2 &&
+            zv_write_file(path2, squatter, sizeof(squatter) - 1, 0600);
+        struct vcs_zcode_dht_publish_spec spec;
+        memset(&spec, 0, sizeof(spec));
+        if (b2)
+            zv_gate_spec(&spec, package_root, root2);
+        struct json_value result;
+        json_init(&result);
+        bool allowed = squatted &&
+            boot_zcode_dht_attestation_pointer_publish_gate(&spec, &result);
+        ZV_CHECK("gate: a squatted attestation id names "
+                 "ATTESTATION_STORE_CONFLICT",
+                 squatted && !allowed &&
+                 zv_gate_refused(&result, "ATTESTATION_STORE_CONFLICT",
+                                 vcs_package_attest_transport_result_string(
+                                     VCS_PACKAGE_ATTEST_TRANSPORT_ERR_CONFLICT)));
+        json_free(&result);
+    }
+
+    /* Restore the process globals this case borrowed. */
+    vcs_package_store_close_global();
+    ZV_CHECK("gate: the node-global store is closed again",
+             vcs_package_store_global() == NULL);
+    const char *reset[] = { "zclassic23-test" };
+    ParseParameters(1, reset);
+    SetDataDir("");
+    test_rm_rf_recursive(dd);
+    return failures;
+}
+
 /* ── 4. end-to-end external verifier ────────────────────────────────── */
 
 static bool zv_dir_is_empty(const char *path)
@@ -2363,6 +3409,9 @@ int test_zcode_verify(void)
     failures += t_reproduce();
     failures += t_command();
     failures += t_attest_import();
+    failures += t_attest_offer();
+    failures += t_attest_pull();
+    failures += t_attest_publish_gate();
     failures += t_verifier_e2e();
     printf("=== zcode_verify complete: %d failure(s) ===\n", failures);
     return failures;
