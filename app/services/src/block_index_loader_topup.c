@@ -369,7 +369,8 @@ bool block_index_projection_topup_with(struct block_index_projection *bip,
         LOG_FAIL("block_index", "topup: projection catch_up failed");
 
     struct topup_ctx ctx = { .ms = ms };
-    if (block_index_projection_iterate(bip, topup_row_cb, &ctx) != 0 ||
+    if (block_index_projection_iterate_storage_order(
+            bip, topup_row_cb, &ctx) != 0 ||
         ctx.failed) {
         free(ctx.new_entries);
         LOG_FAIL("block_index", "topup: projection iterate failed after "
@@ -377,8 +378,8 @@ bool block_index_projection_topup_with(struct block_index_projection *bip,
     }
 
     if (ctx.inserted > 0 || ctx.stubs_hydrated > 0) {
-        if (block_index_projection_iterate(bip, topup_link_pprev_cb, ms)
-                != 0) {
+        if (block_index_projection_iterate_storage_order(
+                bip, topup_link_pprev_cb, ms) != 0) {
             free(ctx.new_entries);
             LOG_FAIL("block_index", "topup: pprev link iterate failed");
         }

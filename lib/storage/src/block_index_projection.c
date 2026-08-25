@@ -617,17 +617,14 @@ bool block_index_projection_get_by_height(block_index_projection_t *p,
     return found;
 }
 
-int block_index_projection_iterate(block_index_projection_t *p,
-                                   block_index_projection_cb cb,
-                                   void *user)
+static int iterate_query(block_index_projection_t *p,
+                         block_index_projection_cb cb, void *user,
+                         const char *sql)
 {
-    if (!p || !p->db || !cb) return -1;
+    if (!p || !p->db || !cb || !sql) return -1;
     pthread_mutex_lock(&p->mu);
     sqlite3_stmt *stmt = NULL;
-    int rc = sqlite3_prepare_v2(p->db,
-            "SELECT hash, blob FROM block_index "
-            "ORDER BY height ASC, hash ASC",
-            -1, &stmt, NULL);
+    int rc = sqlite3_prepare_v2(p->db, sql, -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
         pthread_mutex_unlock(&p->mu);
         return -1;
@@ -654,6 +651,21 @@ int block_index_projection_iterate(block_index_projection_t *p,
         result = -1;
     pthread_mutex_unlock(&p->mu);
     return result;
+}
+
+int block_index_projection_iterate(block_index_projection_t *p,
+                                   block_index_projection_cb cb,
+                                   void *user)
+{
+    return iterate_query(p, cb, user,
+        "SELECT hash, blob FROM block_index "
+        "ORDER BY height ASC, hash ASC");
+}
+
+int block_index_projection_iterate_storage_order(
+    block_index_projection_t *p, block_index_projection_cb cb, void *user)
+{
+    return iterate_query(p, cb, user, "SELECT hash, blob FROM block_index");
 }
 
 uint64_t block_index_projection_count(block_index_projection_t *p)

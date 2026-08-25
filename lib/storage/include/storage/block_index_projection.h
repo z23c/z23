@@ -91,6 +91,12 @@ int block_index_projection_iterate(block_index_projection_t *p,
                                    block_index_projection_cb cb,
                                    void *user);
 
+/* Iterate every entry in storage order. This avoids one table lookup per row
+ * on spinning disks. Callers must not derive order-sensitive evidence from
+ * this traversal. Stops if `cb` returns false; returns 0 on success. */
+int block_index_projection_iterate_storage_order(
+    block_index_projection_t *p, block_index_projection_cb cb, void *user);
+
 /* Row count. */
 uint64_t block_index_projection_count(block_index_projection_t *p);
 
