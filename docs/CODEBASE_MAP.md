@@ -194,6 +194,9 @@ and are installed by `tools/scripts/install_z23.sh` from any node URL or
 local directory. The checksummed runtime set contains `z23`, its
 `zclassic23` daemon alias, and the confined `zclassic23-package-verify` worker
 that the daemon resolves beside itself (SHA256SUMS fail-closed; no registry).
+`make release-deploy Z23_RELEASE_HOSTS='host1 host2'` builds that portable set
+once locally, then bootstraps and process-qualifies fresh hosts sequentially;
+the remote hosts never run a compiler or `make`.
 
 The unified local loop is `tools/dev/watch-dev-lane.sh` (`make dev-watch`): it
 classifies a coalesced save, runs the shared impact plan, and selects check,
