@@ -8,25 +8,19 @@
  *   - node_health_verdict_publish(): called once at the end of every
  *     node_health_collect() — health ring, RPC handlers, soak service;
  *     last writer wins.
- *   - node_health_last_verdict(): read by the dedicated sd-watchdog pet
- *     thread (config/src/boot_sd_watchdog.c), which must decide
- *     ping/no-ping from CHEAP ATOMICS ONLY — never by running a collect
- *     inline, because a collect can block for minutes on reducer-held
- *     locks during bulk ingest, and that blocking was the pet-starvation
- *     source behind the 2026-08-02 systemd watchdog kill loop.
+ *   - node_health_last_verdict(): exposes the latest publication timestamp to
+ *     cheap non-blocking observers. It is diagnostic evidence only: a collect
+ *     can block for minutes on reducer-held locks during bulk ingest, so its
+ *     freshness must not decide process liveness.
  *
- * The pet consumes only the publication timestamp. The verdict itself stays
- * authoritative for serving, conditions, remedies, and operator action, but
- * a fresh negative verdict is evidence of a live collector—not a hung process.
- * This separation prevents restart-proof named degradations from becoming
- * systemd crash loops. */
+ * The verdict itself stays authoritative for serving, conditions, remedies,
+ * and operator action. Neither verdict content nor publication cadence is a
+ * process-hang signal. */
 
 // one-result-type-ok:verdict-atomics-no-fallible-surface — E2 (one way
 // out): this unit owns no fallible service surface. node_health_last_verdict's
-// bool is a PRESENCE flag ("has any verdict been published yet"), read by
-// the sd pet's pure decision function — there is no failure reason to carry
-// (an absent verdict is data, not an error; the pet treats it as
-// have_verdict=false and falls through to its boot-progress grace).
+// bool is a PRESENCE flag ("has any verdict been published yet") — there is
+// no failure reason to carry because an absent verdict is data, not an error.
 // node_health_verdict_publish returns void and cannot fail (atomic stores
 // only). Nothing here can produce a zcl_result a caller could act on.
 

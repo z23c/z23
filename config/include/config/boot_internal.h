@@ -454,11 +454,7 @@ void boot_ready_legs_describe(const struct boot_ready_legs *l,
 
 #ifdef ZCL_TESTING
 /* Test seam for the pure pet decision (lib/test/src/test_sd_notify.c). */
-bool boot_sd_watchdog_test_pet_decide(bool supervisor_alive, bool have_verdict,
-                                      int64_t verdict_age_us,
-                                      bool recent_progress,
-                                      int64_t grace_left_us,
-                                      int64_t verdict_bound_us);
+bool boot_sd_watchdog_test_pet_decide(bool runtime_gate_alive);
 bool boot_sd_watchdog_test_keepalive_supervisor(bool runtime_alive,
                                                 bool sweep_alive,
                                                 bool recent_progress);
