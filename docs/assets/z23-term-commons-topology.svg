@@ -1,9 +1,9 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="888" height="483" viewBox="0 0 888 483" role="img" aria-label="how the bytes travel">
-<rect width="888" height="483" rx="12" fill="#0b0f16"/>
-<rect x="0.5" y="0.5" width="887" height="482" rx="11.5" fill="none" stroke="#243044"/>
-<path d="M0 44 h888" stroke="#1a2432"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="905" height="588" viewBox="0 0 905 588" role="img" aria-label="how the bytes travel">
+<rect width="905" height="588" rx="12" fill="#0b0f16"/>
+<rect x="0.5" y="0.5" width="904" height="587" rx="11.5" fill="none" stroke="#243044"/>
+<path d="M0 44 h905" stroke="#1a2432"/>
 <circle cx="26" cy="22" r="5.5" fill="#ff6b5e"/><circle cx="46" cy="22" r="5.5" fill="#f2c14e"/><circle cx="66" cy="22" r="5.5" fill="#6bd18a"/>
-<text x="444" y="27" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" fill="#66788c" text-anchor="middle">how the bytes travel</text>
+<text x="452" y="27" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" fill="#66788c" text-anchor="middle">how the bytes travel</text>
 <text y="76" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" xml:space="preserve"><tspan x="24.0" textLength="747.6" lengthAdjust="spacing" fill="#c3d2e2">  NODE A — the person's workshop                NODE B — a second node, nothing installed</tspan></text>
 <text y="97" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" xml:space="preserve"><tspan x="24.0" textLength="714.0" lengthAdjust="spacing" fill="#c3d2e2">  ┌───────────────────────────────────┐         ┌───────────────────────────────────┐</tspan></text>
 <text y="118" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" xml:space="preserve"><tspan x="24.0" textLength="714.0" lengthAdjust="spacing" fill="#c3d2e2">  │ workspace  the accepted work      │         │ store      empty at boot          │</tspan></text>
@@ -22,5 +22,10 @@
 <text y="391" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" xml:space="preserve"><tspan x="24.0" textLength="781.2" lengthAdjust="spacing" fill="#c3d2e2">                                                 carrier → accepted source → the program runs</tspan></text>
 <text y="412" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" xml:space="preserve"><tspan x="24.0" textLength="730.8" lengthAdjust="spacing" fill="#c3d2e2">   8 SERVE      node B answers for the same roots, so the next peer need not ask node A</tspan></text>
 <text y="433" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" xml:space="preserve"></text>
-<text y="454" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" xml:space="preserve"><tspan x="24.0" textLength="697.2" lengthAdjust="spacing" fill="#c3d2e2">  no registry · no coordinator · no privileged node · central services contacted: 0</tspan></text>
+<text y="454" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" xml:space="preserve"><tspan x="24.0" textLength="856.8" lengthAdjust="spacing" fill="#c3d2e2">   9 EXPORT     zcode.package.fastobj.export     node B's compile cache leaves as one ordinary package</tspan></text>
+<text y="475" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" xml:space="preserve"><tspan x="24.0" textLength="856.8" lengthAdjust="spacing" fill="#c3d2e2">  10 CARRY      zcode.package.fetch              the carrier crosses B → C, the publisher already gone</tspan></text>
+<text y="496" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" xml:space="preserve"><tspan x="24.0" textLength="747.6" lengthAdjust="spacing" fill="#c3d2e2">  11 ADMIT      zcode.package.fastobj.admit      node C unpacks a cache it never compiled</tspan></text>
+<text y="517" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" xml:space="preserve"><tspan x="24.0" textLength="730.8" lengthAdjust="spacing" fill="#c3d2e2">  12 REBUILD    zcode.package.reproduce          zero compilers, byte-identical receipt</tspan></text>
+<text y="538" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" xml:space="preserve"></text>
+<text y="559" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" xml:space="preserve"><tspan x="24.0" textLength="697.2" lengthAdjust="spacing" fill="#c3d2e2">  no registry · no coordinator · no privileged node · central services contacted: 0</tspan></text>
 </svg>

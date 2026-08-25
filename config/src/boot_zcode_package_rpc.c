@@ -84,6 +84,59 @@ static bool package_unpin(const struct json_value *params, bool help,
     return package_pin_rpc(params, help, result, false);
 }
 
+/* The fastobj carrier export writes the store, and a serving engine
+ * answers from its in-memory table: an export executed outside the
+ * resident would leave the daemon announcing-by-record a root it refuses
+ * as not-tracked until restart. The export executes here, on the same
+ * store object the engine borrows. */
+static bool package_fastobj_export(const struct json_value *params,
+                                   bool help, struct json_value *result)
+{
+    if (help) {
+        json_set_str(result,
+                     "zcode_package_fastobj_export {cache_dir}");
+        return true;
+    }
+    const struct json_value *input = package_rpc_input(params);
+    if (!input || json_get(input, "datadir")) {
+        json_set_object(result);
+        json_push_kv_bool(result, "ok", false);
+        json_push_kv_str(result, "code", "INVALID_INPUT");
+        json_push_kv_str(result, "phase", "validate");
+        json_push_kv_str(result, "message",
+                         "one input object without datadir is required "
+                         "(cache_dir; the resident datadir is implicit)");
+        return true;
+    }
+
+    struct zcl_command_request request = { .input = input };
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.zcode_package_fastobj_export.v1");
+    zcl_native_handle_zcode_package_fastobj_export(&request, &reply);
+
+    bool passed = reply.status == ZCL_COMMAND_STATUS_PASSED &&
+                  reply.exit_code == ZCL_COMMAND_EXIT_OK;
+    json_set_object(result);
+    json_push_kv_bool(result, "ok", passed);
+    if (passed) {
+        json_push_kv(result, "data", &reply.data);
+    } else {
+        json_push_kv_str(result, "code", reply.error.code[0]
+                                            ? reply.error.code
+                                            : "EXPORT_REFUSED");
+        json_push_kv_str(result, "phase", reply.error.phase[0]
+                                             ? reply.error.phase
+                                             : "execute");
+        json_push_kv_str(result, "message", reply.error.message[0]
+                                               ? reply.error.message
+                                               : "resident export failed");
+        json_push_kv_bool(result, "retryable", reply.error.retryable);
+        json_push_kv_bool(result, "mutated", reply.error.mutated);
+    }
+    zcl_command_reply_free(&reply);
+    return true;
+}
+
 /* Read-only exact-root observation for native instruments.  This reuses the
  * resident store and swarm engine; it neither starts a fetch nor opens the
  * live store from a second process. */
@@ -136,6 +189,7 @@ void boot_zcode_package_register_rpc(struct rpc_table *table)
     const struct rpc_command commands[] = {
         { "zcode", "zcode_package_pin", package_pin, true },
         { "zcode", "zcode_package_unpin", package_unpin, true },
+        { "zcode", "zcode_package_fastobj_export", package_fastobj_export, true },
         { "zcode", "zcode_package_status", package_status, true },
     };
     for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); i++)

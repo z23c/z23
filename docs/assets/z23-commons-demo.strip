@@ -1,22 +1,24 @@
   [1mYOU ASKED[0m → [1mREUSED FROM PEER[0m → [1mCREATED MISSING BEHAVIOR[0m → [1mVISIBLE RESULT[0m →
   [1mREPRODUCED ON NODE B[0m → [1mTAMPER REFUSED[0m → [1mACCEPTED[0m → [1mUSED[0m →
-  [1mPUBLISHER GONE[0m
+  [1mCACHE TRAVELED[0m → [1mPUBLISHER GONE[0m
 
   [1;36mYOU ASKED                 [0muse z23/textstat and report the longest line of a text file
   [1;36mREUSED FROM PEER          [0mz23/textstat 7ef559096071… — 14960 bytes from node A, no registry
   [1;36mCREATED MISSING BEHAVIOR  [0mwordcount_longest_line() — the only code this journey wrote
   [1;36mVISIBLE RESULT            [0mbuilt and tested on node A 48s after the ask, bound to the exact source
-  [1;36mREPRODUCED ON NODE B      [0mre-derived 94078abdcae7… in 29s and signed for it
+  [1;36mREPRODUCED ON NODE B      [0mre-derived a2e563bc8c42… in 29s and signed for it
   [1;36mTAMPER REFUSED            [0maltered source · unknown dependency · stale acceptance · altered bytes
                             [2meach by name: LANE_NOT_ACCEPTED · TARGET_UNRESOLVED[0m
                             [2mCONFIRMATION_IDENTITY_STALE · SOURCE_PACKAGE_CHECKOUT_REFUSED[0m
   [1;36mACCEPTED                  [0mone exact version, by hand — PROVEN, published as you/wordcount
   [1;36mUSED                      [0mwordcount sample.txt → lines 3 words 26 bytes 124 longest_line 49
+  [1;36mCACHE TRAVELED            [0m1 objects node-B → node-C as one ordinary package
+                            [2mnode C rebuilt with zero compilers — same receipt c8b63280adab…[0m
 
   [1;36mCHANGED WHAT EXISTED      [0mzdogfight — a package this journey did not write, under another key
                             [2m"make the aircraft turn faster" — one number, measured twice:[0m
                             [2m143 deg/s on node A before → 239 deg/s on node B after[0m
-                            [2mits own root 813908f544c8… — the original is still exactly itself[0m
+                            [2mits own root b71a0863de31… — the original is still exactly itself[0m
 
   [1;36mPUBLISHER GONE            [0mnode A killed; node C fetched, reproduced and ran the exact bytes from B
 

@@ -948,6 +948,8 @@ static void handle_want(struct vcs_swarm_engine *engine,
      * use fresh ids). No service, no credit, named offence. */
     for (size_t i = 0; i < peer->seen_count; i++) {
         if (peer->seen[i] == want->request_id) {
+            LOG_WARN(SWARM_LOG, "duplicate want %llu refused",
+                     (unsigned long long)want->request_id);
             book_offence(engine, peer,
                          VCS_POLICY_OFFENCE_DUPLICATE_REQUEST, day);
             book_no_credit(engine, peer,
@@ -966,6 +968,8 @@ static void handle_want(struct vcs_swarm_engine *engine,
     struct vcs_policy_decision d =
         vcs_policy_check_request_burst(peer->tier, peer->burst_count);
     if (!d.allow) {
+        LOG_WARN(SWARM_LOG, "want refused: %s (burst window hot)",
+                 d.rule);
         uint32_t total = book_offence(engine, peer,
                                       VCS_POLICY_OFFENCE_REQUEST_FLOOD,
                                       day);
@@ -984,9 +988,14 @@ static void handle_want(struct vcs_swarm_engine *engine,
         return;
     /* Public-hosting admission. Refusing is not an offence: the requester
      * has no way to know what this node will host, so it costs them
-     * nothing but gets a named rule instead of silence. */
+     * nothing but gets a named rule instead of silence. The rule is also
+     * the operator's only clue when a fetch stalls against this node, so
+     * it reaches the log too — the wire stays silent, the log does not. */
     const char *rule = NULL;
     if (!vcs_swarm_public_serveable(engine, want->package_root, &rule)) {
+        char root_hex[65];
+        zcl_hex_encode(want->package_root, 32, root_hex);
+        LOG_WARN(SWARM_LOG, "refused want for %.16s: %s", root_hex, rule);
         res->rule = rule;
         return;
     }
@@ -1528,6 +1537,8 @@ struct vcs_swarm_frame_result vcs_swarm_engine_handle_frame(
     int slot = peer_slot(engine, peer);
     if (slot < 0) {
         pthread_mutex_unlock(&engine->lock);
+        LOG_WARN(SWARM_LOG, "dropped frame from unregistered peer %llu",
+                 (unsigned long long)peer);
         res.rule = "unknown-peer";
         return res;
     }

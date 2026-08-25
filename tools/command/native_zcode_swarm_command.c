@@ -1037,6 +1037,91 @@ static void zw_push_carrier_stats(struct json_value *obj,
     (void)json_push_kv_int(obj, "total_bytes", (int64_t)st->total_bytes);
 }
 
+/* The export writes the store, and a serving engine answers wants from
+ * the in-memory table of ITS store object. A one-shot CLI export opens a
+ * second handle and the bytes land on disk where the resident never
+ * looks — it would refuse the very root its own record advertises, as
+ * "not-tracked", until restart. Route the export to the resident (same
+ * rule as pin): no store in this process, a live cookie at the target
+ * datadir, and the input datadir — if any — is that same datadir rather
+ * than a deliberate offline copy. The forwarded input drops datadir; the
+ * resident contributes its own. */
+static bool zw_export_via_resident(const struct zcl_command_request *request,
+                                   struct zcl_command_reply *reply,
+                                   const char *cache_dir)
+{
+    if (vcs_package_store_global())
+        return false;
+    const char *input_dd = zw_input_str(request->input, "datadir");
+    const char *cli_dd = zcl_native_command_datadir();
+    if (input_dd && input_dd[0]) {
+        if (!cli_dd || !cli_dd[0] || strcmp(input_dd, cli_dd) != 0)
+            return false;
+    }
+    const char *datadir = input_dd && input_dd[0] ? input_dd : cli_dd;
+    if (!datadir || !datadir[0])
+        return false;
+    char cookie[4400];
+    int n = snprintf(cookie, sizeof(cookie), "%s/.cookie", datadir);
+    if (n <= 0 || (size_t)n >= sizeof(cookie) || access(cookie, F_OK) != 0)
+        return false;
+
+    struct json_value fwd;
+    json_init(&fwd);
+    json_set_object(&fwd);
+    (void)json_push_kv_str(&fwd, "cache_dir", cache_dir);
+    struct rpc_arg_builder args;
+    rpc_arg_builder_init(&args);
+    rpc_arg_builder_push_value(&args, &fwd);
+    char *params = rpc_arg_builder_to_json(&args);
+    json_free(&fwd);
+    zcl_native_bridge_ensure_rpc();
+    char *raw = params ? node_rpc_call(
+        "zcode_package_fastobj_export", params) : NULL;
+    free(params);
+    if (!raw)
+        return false; /* the exclusive store lock makes fallback fail safe */
+
+    struct json_value body;
+    json_init(&body);
+    bool parsed = json_read(&body, raw, strlen(raw)) &&
+                  body.type == JSON_OBJ;
+    free(raw);
+    if (!parsed) {
+        json_free(&body);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "BAD_RPC_BODY",
+                               "serialize", false, false,
+                               "resident returned an unreadable export "
+                               "response",
+                               "zcode.package.fastobj.export");
+        return true;
+    }
+    const struct json_value *data = json_get(&body, "data");
+    if (json_get_bool_or(&body, "ok", false) && data &&
+        data->type == JSON_OBJ) {
+        json_free(&reply->data);
+        json_init(&reply->data);
+        json_copy(&reply->data, data);
+        json_free(&body);
+        return true;
+    }
+    const char *code = json_get_str(json_get(&body, "code"));
+    const char *phase = json_get_str(json_get(&body, "phase"));
+    const char *message = json_get_str(json_get(&body, "message"));
+    zcl_command_reply_fail(
+        reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+        code && code[0] ? code : "EXPORT_RPC_REFUSED",
+        phase && phase[0] ? phase : "execute",
+        json_get_bool_or(&body, "retryable", false),
+        json_get_bool_or(&body, "mutated", false),
+        message && message[0] ? message
+                              : "resident refused carrier export",
+        "zcode.package.fastobj.export");
+    json_free(&body);
+    return true;
+}
+
 void zcl_native_handle_zcode_package_fastobj_export(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
@@ -1044,9 +1129,19 @@ void zcl_native_handle_zcode_package_fastobj_export(
     if (!request || !reply)
         return;
     static const char *const command = "zcode.package.fastobj.export";
+    /* A resident handler already owns its store directory; only a one-shot
+     * CLI (or an explicit offline datadir) must spell it out — the bridge
+     * datadir context does not exist inside the daemon. */
+    struct vcs_package_store *resident = vcs_package_store_global();
     char zcode_dir[4400];
-    if (!zw_zcode_dir(request, reply, command, zcode_dir))
+    if (resident) {
+        const char *root_dir = vcs_package_store_root_dir(resident);
+        (void)snprintf(zcode_dir, sizeof(zcode_dir), "%s",
+                       root_dir && root_dir[0] ? root_dir
+                                               : "resident-package-store");
+    } else if (!zw_zcode_dir(request, reply, command, zcode_dir)) {
         return;
+    }
     const char *cache_dir = zw_input_str(request->input, "cache_dir");
     if (!cache_dir || !cache_dir[0]) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
@@ -1057,6 +1152,8 @@ void zcl_native_handle_zcode_package_fastobj_export(
                                command);
         return;
     }
+    if (zw_export_via_resident(request, reply, cache_dir))
+        return;
 
     /* The publish-commit store rule: writes go through the resident
      * handle when it owns exactly this <datadir>/zcode — a running host
@@ -1064,7 +1161,6 @@ void zcl_native_handle_zcode_package_fastobj_export(
      * through a second handle would leave its engine announcing a root it
      * cannot send until restart. Any other datadir keeps the one-shot
      * owned-store path (which may create the store). */
-    struct vcs_package_store *resident = vcs_package_store_global();
     const char *resident_root = vcs_package_store_root_dir(resident);
     bool own_store = !(resident_root && strcmp(resident_root, zcode_dir) == 0);
     struct vcs_package_store *store = own_store

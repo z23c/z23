@@ -1226,13 +1226,18 @@ cj_connect_authenticated() {
 
 cj_overlay() {
     cj_step "the authenticated overlay the two nodes share"
-    # Three service types cross this overlay: package bytes, one immutable
-    # work action, and the signed source-reproduction evidence node B
-    # publishes after it rebuilds what node A accepted.
+    # Four service types cross this overlay: package bytes, one immutable
+    # work action, the signed source-reproduction evidence node B publishes
+    # after it rebuilds what node A accepted, and the fastobj carrier node B
+    # exports in step 10. Sovereignty denies everything but discovery unless
+    # a rule says otherwise, so a node storing or serving a new service type
+    # is always an explicit opt-in made here — before the restart below,
+    # because a policy mutation only governs after the DHT restarts.
     cj_allow_policy a zclassic23.package; cj_allow_policy a zclassic23.work
     cj_allow_policy a zclassic23.source
     cj_allow_policy b zclassic23.package; cj_allow_policy b zclassic23.work
     cj_allow_policy b zclassic23.source
+    cj_allow_policy b zclassic23.fastobj
     dht_kill_group "$DHT_PGID_B"; DHT_PGID_B=""
     dht_kill_group "$DHT_PGID_A"; DHT_PGID_A=""
     DHT_BUILDWORKERS=1
@@ -1507,25 +1512,31 @@ cj_journey_use_app() {
 
 # ── 10/12  the object-set carrier: the compile cache itself travels ───────
 # Steps 1-9 moved source. This step moves the WORK: node B's confined rebuild
-# of the accepted application fills a fastobj cache (one object + one sidecar
+# of the z23/textstat library fills a fastobj cache (one object + one sidecar
 # per translation unit, each keyed by content the cache itself re-derives),
 # the cache leaves as ONE ordinary content.v2 package, and node C — which has
-# never compiled this application — reproduces it with ZERO compiler spawns
-# and files the byte-identical receipt. The carrier rides its own namespace
-# (zclassic23.fastobj): a fetch under zclassic23.package would force the
-# transport-import path on a root that is not a transport.
+# never compiled this library — reproduces it with ZERO compiler spawns and
+# files the byte-identical receipt. The library, not the accepted application,
+# is the reproduce leaf's vehicle: `zcode package reproduce` re-runs the
+# package's own committed recipe under the standard profile, which signs
+# evidence only for recipes with declared tests — the accepted application is
+# a source transport whose recipe carries no tests, while the library's
+# recipe (tests/test_textstat.c) is exactly what the standard profile is for.
+# The carrier rides its own namespace (zclassic23.fastobj): a fetch under
+# zclassic23.package would force the transport-import path on a root that is
+# not a transport.
 cj_journey_object_set_carrier() {
-    cj_step "10/12  object-set carrier — a node that never compiled it rebuilds with zero compilers"
-    local cache_b cache_c cold cold_id carrier export_out shape admit_out warm warm_id
-    local cold_misses cold_hits warm_misses warm_hits plan deadline complete=False
+    cj_step "10/12  object-set carrier — the compile cache leaves node B as one ordinary package"
+    local cache_b cold cold_id carrier export_out shape
+    local cold_misses cold_hits
 
-    # Node B already installed the accepted application in step 9. Its
-    # reproduce build now runs with a fastobj cache attached: every TU it
-    # compiles lands in the cache; nothing is reused yet.
+    # Node B admitted z23/textstat explicitly in step 3. Its reproduce build
+    # now runs with a fastobj cache attached: every TU it compiles lands in
+    # the cache; nothing is reused yet.
     cache_b="$(cj_node_dir b)/fastobj-cache"
     cj_on b rm -rf "$cache_b"
     cold="$("cj_b" zcode package reproduce \
-        --input="{\"name_or_root\":\"$CJ_APP_ROOT\",\"datadir\":\"$DHT_DD_B\",\"fast_cache\":\"$cache_b\"}")"
+        --input="{\"name_or_root\":\"$CJ_TEXTSTAT_ROOT\",\"datadir\":\"$DHT_DD_B\",\"fast_cache\":\"$cache_b\"}")"
     cj_require_ok "node B cached reproduce (cold)" "$cold"
     printf '%s\n' "$cold" >"$DHT_WORK/carrier-reproduce-cold.json"
     [ "$(cj_field data.reproduced "$cold" False)" = True ] ||
@@ -1555,45 +1566,14 @@ cj_journey_object_set_carrier() {
         cj_die "the carrier is not publicly serveable (shape=$shape): $export_out"
     cj_publish_record b zclassic23.fastobj provider "$carrier" "$carrier" 1
 
-    # Node C admits the application explicitly — the install build is C's
-    # own, cache or no cache — then fetches the CARRIER by root through the
-    # overlay from B and unpacks it into a fresh cache.
-    cj_use_package c "$CJ_APP_ROOT"
-    cj_fetch_fastobj_carrier c "$carrier"
-    cache_c="$(cj_node_dir c)/fastobj-cache"
-    cj_on c rm -rf "$cache_c"
-    admit_out="$("cj_c" zcode package fastobj admit \
-        --input="{\"datadir\":\"$DHT_DD_C\",\"package_root\":\"$carrier\",\"cache_dir\":\"$cache_c\"}")"
-    cj_require_ok "node C admitted the carrier into a fresh cache" "$admit_out"
-    printf '%s\n' "$admit_out" >"$DHT_WORK/carrier-admit.json"
-    [ "$(cj_field data.entries "$admit_out" 0)" = "$cold_misses" ] ||
-        cj_die "node C admitted a different entry count than node B compiled: $admit_out"
-
-    # The zero-spawn rebuild. Node C reproduces the application it just
-    # installed, with the carried cache attached: every TU is a hit, no
-    # compiler runs, and the filed receipt is the same bytes node B filed.
-    warm="$("cj_c" zcode package reproduce \
-        --input="{\"name_or_root\":\"$CJ_APP_ROOT\",\"datadir\":\"$DHT_DD_C\",\"fast_cache\":\"$cache_c\"}")"
-    cj_require_ok "node C cached reproduce (warm)" "$warm"
-    printf '%s\n' "$warm" >"$DHT_WORK/carrier-reproduce-warm.json"
-    [ "$(cj_field data.reproduced "$warm" False)" = True ] ||
-        cj_die "node C's warm rebuild did not match its install build: $warm"
-    warm_misses="$(cj_field data.fast_cache.misses "$warm" -1)"
-    warm_hits="$(cj_field data.fast_cache.hits "$warm" -1)"
-    [ "$warm_misses" = 0 ] 2>/dev/null ||
-        cj_die "node C spawned compilers (misses=$warm_misses) on a full cache: $warm"
-    [ "$warm_hits" = "$cold_misses" ] 2>/dev/null ||
-        cj_die "node C hit $warm_hits of $cold_misses carried objects — the caches disagree: $warm"
-    warm_id="$(cj_field data.receipt_id "$warm")"
-    [ "$warm_id" = "$cold_id" ] ||
-        cj_die "the two nodes filed different receipts for the same rebuild: $cold_id vs $warm_id"
-    [ "$(cj_sha3_on b "$DHT_DD_B/zcode/receipts/$cold_id")" = \
-      "$(cj_sha3_on c "$DHT_DD_C/zcode/receipts/$warm_id")" ] ||
-        cj_die "the filed receipts are not byte-identical across nodes"
+    # The CARRY, ADMIT and zero-compiler REBUILD live in the survival step,
+    # where they are the stronger fact: node C only exists there, and it
+    # fetches the carrier from B after the publisher has disappeared, when B
+    # is the only node that ever held the cache.
     CJ_CARRIER_ROOT="$carrier"
     CJ_CARRIER_ENTRIES="$cold_misses"
-    cj_note "carrier ${carrier:0:16}… carried $CJ_CARRIER_ENTRIES objects node-B → node-C"
-    cj_note "node C rebuilt with zero compilers: hits=$warm_hits misses=0, identical receipt ${warm_id:0:16}…"
+    CJ_CARRIER_RECEIPT="$cold_id"
+    cj_note "carrier ${carrier:0:16}… holds $CJ_CARRIER_ENTRIES objects in node B's store under zclassic23.fastobj"
 }
 
 # A carrier is fetched by root through the live daemon like any package, but
@@ -2109,6 +2089,10 @@ cj_journey_publisher_disappears() {
     cj_note "node C identity: ${CJ_NODE_C:0:16}…"
     cj_allow_policy c zclassic23.package
     cj_allow_policy c zclassic23.source
+    # The fastobj carrier is a fourth service type C must be allowed to
+    # discover, store and serve onward — the same opt-in B made in the
+    # overlay step, paid before this restart so the rule governs.
+    cj_allow_policy c zclassic23.fastobj
     # Policies persist in the datadir; restart C so they govern what it serves
     # and accepts, exactly as the A/B policy restart did.
     dht_kill_group "$DHT_PGID_C"; DHT_PGID_C=""
@@ -2201,6 +2185,46 @@ cj_journey_publisher_disappears() {
     cj_use_package c "$CJ_APP_ROOT"
     cj_on c test -d "$DHT_DD_C/zcode/installed/$CJ_APP_ROOT" ||
         cj_die "node C admitted the accepted application but installed nothing"
+
+    # Step 10's carrier crosses the same disappearing-publisher rule the
+    # source did: A never knew the cache existed, B is the only node that
+    # ever held it, and C — which never compiled this library — fetches it
+    # as one ordinary package, unpacks a cache it never filled, and rebuilds
+    # with zero compilers and node B's exact receipt.
+    cj_fetch_fastobj_carrier c "$CJ_CARRIER_ROOT"
+    local cache_c admit_out warm warm_id warm_misses warm_hits
+    cache_c="$(cj_node_dir c)/fastobj-cache"
+    cj_on c rm -rf "$cache_c"
+    admit_out="$("cj_c" zcode package fastobj admit \
+        --input="{\"datadir\":\"$DHT_DD_C\",\"package_root\":\"$CJ_CARRIER_ROOT\",\"cache_dir\":\"$cache_c\"}")"
+    cj_require_ok "node C admitted the carrier into a fresh cache" "$admit_out"
+    printf '%s\n' "$admit_out" >"$DHT_WORK/carrier-admit.json"
+    [ "$(cj_field data.entries "$admit_out" 0)" = "$CJ_CARRIER_ENTRIES" ] ||
+        cj_die "node C admitted a different entry count than node B compiled: $admit_out"
+
+    # The zero-spawn rebuild. C reproduces the library it holds with the
+    # carried cache attached: every TU is a hit, no compiler runs, and the
+    # filed receipt is the same bytes node B filed in step 10.
+    warm="$("cj_c" zcode package reproduce \
+        --input="{\"name_or_root\":\"$CJ_TEXTSTAT_ROOT\",\"datadir\":\"$DHT_DD_C\",\"fast_cache\":\"$cache_c\"}")"
+    cj_require_ok "node C cached reproduce (warm, publisher gone)" "$warm"
+    printf '%s\n' "$warm" >"$DHT_WORK/carrier-reproduce-warm.json"
+    [ "$(cj_field data.reproduced "$warm" False)" = True ] ||
+        cj_die "node C's warm rebuild did not match its install build: $warm"
+    warm_misses="$(cj_field data.fast_cache.misses "$warm" -1)"
+    warm_hits="$(cj_field data.fast_cache.hits "$warm" -1)"
+    [ "$warm_misses" = 0 ] 2>/dev/null ||
+        cj_die "node C spawned compilers (misses=$warm_misses) on a full cache: $warm"
+    [ "$warm_hits" = "$CJ_CARRIER_ENTRIES" ] 2>/dev/null ||
+        cj_die "node C hit $warm_hits of $CJ_CARRIER_ENTRIES carried objects — the caches disagree: $warm"
+    warm_id="$(cj_field data.receipt_id "$warm")"
+    [ "$warm_id" = "$CJ_CARRIER_RECEIPT" ] ||
+        cj_die "the two nodes filed different receipts for the same rebuild: $CJ_CARRIER_RECEIPT vs $warm_id"
+    [ "$(cj_sha3_on b "$DHT_DD_B/zcode/receipts/$CJ_CARRIER_RECEIPT")" = \
+      "$(cj_sha3_on c "$DHT_DD_C/zcode/receipts/$warm_id")" ] ||
+        cj_die "the filed carrier receipts are not byte-identical across nodes"
+    cj_note "carrier ${CJ_CARRIER_ROOT:0:16}… carried $CJ_CARRIER_ENTRIES objects node-B → node-C — publisher gone"
+    cj_note "node C rebuilt with zero compilers: hits=$warm_hits misses=0, identical receipt ${warm_id:0:16}…"
 
     local src_c bin_c sample_c out_c cc_b cc_c ts_c
     src_c="$(cj_node_dir c)/checkout-c"
