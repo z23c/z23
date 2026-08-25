@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 #
-# build_release.sh — pack stripped x86_64-linux node binaries + SHA256SUMS.
+# build_release.sh — pack stripped x86_64-linux runtime binaries + SHA256SUMS.
 #
 # A stranger must not compile 550K lines of C to run Z23. This script packages
 # an already-built node (make && make tor-full) into a directory any node URL
@@ -12,7 +12,8 @@
 #   packaging/release/build_release.sh --selftest
 #
 # Default --bin is <repo>/build/bin; default --out is
-# <repo>/build/release/z23-x86_64-linux. Requires z23 or zclassic23 in --bin.
+# <repo>/build/release/z23-x86_64-linux. Requires z23 or zclassic23 and the
+# confined zclassic23-package-verify worker in --bin.
 # Honors the documented glibc/GLIBCXX floor (ci_symbol_floor_gate +
 # check_c23_node_binary). Exit 0 on PASS, 1 on refusal.
 set -euo pipefail
@@ -36,13 +37,13 @@ write_sha256sums() {
     (
         cd "$dir" || exit 1
         # GNU sha256sum two-space format; sorted so the file is deterministic.
-        sha256sum z23 zclassic23 | sort -k2 >SHA256SUMS
+        sha256sum z23 zclassic23 zclassic23-package-verify | sort -k2 >SHA256SUMS
     ) || die "could not write SHA256SUMS in $dir"
 }
 
 package_from_bin() {
     local bin_dir="$1" out_dir="$2"
-    local src=""
+    local src="" verifier_src="$bin_dir/zclassic23-package-verify"
     [ -d "$bin_dir" ] || die "binary dir missing: $bin_dir"
     if [ -x "$bin_dir/z23" ]; then
         src="$bin_dir/z23"
@@ -51,6 +52,8 @@ package_from_bin() {
     else
         die "no z23/zclassic23 in $bin_dir — build first: make && make tor-full"
     fi
+    [ -x "$verifier_src" ] \
+        || die "no zclassic23-package-verify in $bin_dir — build first: make zclassic23-package-verify"
     case "$(uname -s)-$(uname -m)" in
         Linux-x86_64) ;;
         *) die "this packager produces x86_64-linux only (host is $(uname -s)-$(uname -m))" ;;
@@ -60,11 +63,15 @@ package_from_bin() {
     [ -x "$NODE_AUDIT" ] || die "missing $NODE_AUDIT"
 
     mkdir -p "$out_dir"
-    rm -f "$out_dir/z23" "$out_dir/zclassic23" "$out_dir/SHA256SUMS"
+    rm -f "$out_dir/z23" "$out_dir/zclassic23" \
+        "$out_dir/zclassic23-package-verify" "$out_dir/SHA256SUMS"
     strip --strip-unneeded -o "$out_dir/z23" "$src" || die "strip failed"
     chmod 755 "$out_dir/z23"
     cp -f -- "$out_dir/z23" "$out_dir/zclassic23"
     chmod 755 "$out_dir/zclassic23"
+    strip --strip-unneeded -o "$out_dir/zclassic23-package-verify" "$verifier_src" \
+        || die "strip failed for zclassic23-package-verify"
+    chmod 755 "$out_dir/zclassic23-package-verify"
     write_sha256sums "$out_dir"
 
     ZCL_SYMBOL_FLOOR_BIN="$out_dir/z23" bash "$FLOOR_GATE" \
@@ -73,7 +80,7 @@ package_from_bin() {
         || die "stripped z23 failed the C23 node ABI audit"
     (cd "$out_dir" && sha256sum -c --strict SHA256SUMS >/dev/null) \
         || die "SHA256SUMS does not match packaged files"
-    say "packed $out_dir (z23, zclassic23, SHA256SUMS)"
+    say "packed $out_dir (z23, zclassic23, zclassic23-package-verify, SHA256SUMS)"
 }
 
 selftest() {
@@ -89,15 +96,30 @@ selftest() {
     grep -q 'no z23/zclassic23' "$tmp/missing.err" \
         || die "selftest: missing-bin must name the refusal"
 
-    # SHA256SUMS writer: two payload files, then sha256sum -c --strict.
+    # A daemon without its confined reproduction worker is not a complete
+    # runtime artifact set. This refusal occurs before strip/audit work.
+    mkdir -p "$tmp/no-verifier"
+    printf '#!/bin/sh\nexit 0\n' >"$tmp/no-verifier/z23"
+    chmod 755 "$tmp/no-verifier/z23"
+    rc=0
+    (package_from_bin "$tmp/no-verifier" "$tmp/out") \
+        >/dev/null 2>"$tmp/verifier.err" || rc=$?
+    [ "$rc" -eq 1 ] || die "selftest: missing verifier must exit 1, got $rc"
+    grep -q 'no zclassic23-package-verify' "$tmp/verifier.err" \
+        || die "selftest: missing verifier must name the refusal"
+
+    # SHA256SUMS writer: the complete runtime set, then strict verification.
     mkdir -p "$tmp/sums"
     printf 'alpha\n' >"$tmp/sums/z23"
     printf 'alpha\n' >"$tmp/sums/zclassic23"
+    printf 'verifier\n' >"$tmp/sums/zclassic23-package-verify"
     write_sha256sums "$tmp/sums"
     [ -s "$tmp/sums/SHA256SUMS" ] || die "selftest: SHA256SUMS empty"
     grep -q '  z23$' "$tmp/sums/SHA256SUMS" || die "selftest: SHA256SUMS missing z23"
     grep -q '  zclassic23$' "$tmp/sums/SHA256SUMS" \
         || die "selftest: SHA256SUMS missing zclassic23"
+    grep -q '  zclassic23-package-verify$' "$tmp/sums/SHA256SUMS" \
+        || die "selftest: SHA256SUMS missing zclassic23-package-verify"
     (cd "$tmp/sums" && sha256sum -c --strict SHA256SUMS >/dev/null) \
         || die "selftest: SHA256SUMS must verify the files it names"
     printf 'tamper\n' >"$tmp/sums/z23"

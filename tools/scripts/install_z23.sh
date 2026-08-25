@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 #
-# install_z23.sh — fetch a packaged Z23 release, verify SHA256SUMS fail-closed,
-# install to ~/.local/bin, write a systemd --user unit, print ONE next command.
+# install_z23.sh — fetch a packaged Z23 runtime set, verify SHA256SUMS
+# fail-closed, install to ~/.local/bin, write a systemd --user unit, and print
+# ONE next command.
 #
 # Artifact source is taken from the first argument or Z23_RELEASE_SOURCE
 # (a node URL or a local directory). Never hardcoded: any node that serves
-# z23, zclassic23, and SHA256SUMS is a valid source. There is no registry.
+# z23, zclassic23, zclassic23-package-verify, and SHA256SUMS is a valid source.
+# There is no registry.
 #
 # Checksum mismatch is a loud refusal. Nothing is copied to the destination
 # until SHA256SUMS --strict passes.
@@ -43,7 +45,7 @@ fetch_into() {
             while read -r _ name; do
                 [ -n "${name:-}" ] || continue
                 case "$name" in
-                    z23|zclassic23) ;;
+                    z23|zclassic23|zclassic23-package-verify) ;;
                     *) die "SHA256SUMS names unexpected file: $name" ;;
                 esac
                 curl -fsSL "$src/$name" -o "$dest/$name" \
@@ -58,7 +60,7 @@ fetch_into() {
             while read -r _ name; do
                 [ -n "${name:-}" ] || continue
                 case "$name" in
-                    z23|zclassic23) ;;
+                    z23|zclassic23|zclassic23-package-verify) ;;
                     *) die "SHA256SUMS names unexpected file: $name" ;;
                 esac
                 [ -f "$src/$name" ] || die "listed file missing: $src/$name"
@@ -81,8 +83,12 @@ install_payload() {
     mkdir -p "$bindir"
     [ -f "$stage/z23" ] || die "verified payload missing z23"
     [ -f "$stage/zclassic23" ] || die "verified payload missing zclassic23"
+    [ -f "$stage/zclassic23-package-verify" ] \
+        || die "verified payload missing zclassic23-package-verify"
     install -m 755 "$stage/z23" "$bindir/z23"
     install -m 755 "$stage/zclassic23" "$bindir/zclassic23"
+    install -m 755 "$stage/zclassic23-package-verify" \
+        "$bindir/zclassic23-package-verify"
 }
 
 write_unit() {
@@ -151,7 +157,9 @@ selftest() {
 
     printf 'payload-a\n' >"$tmp/good/z23"
     printf 'payload-a\n' >"$tmp/good/zclassic23"
-    (cd "$tmp/good" && sha256sum z23 zclassic23 >SHA256SUMS)
+    printf 'confined-verifier\n' >"$tmp/good/zclassic23-package-verify"
+    (cd "$tmp/good" && \
+        sha256sum z23 zclassic23 zclassic23-package-verify >SHA256SUMS)
 
     # Missing source refuses.
     rc=0
@@ -174,6 +182,8 @@ selftest() {
     # Mismatch: dest must stay empty.
     cp -f -- "$tmp/good/z23" "$tmp/bad/z23"
     cp -f -- "$tmp/good/zclassic23" "$tmp/bad/zclassic23"
+    cp -f -- "$tmp/good/zclassic23-package-verify" \
+        "$tmp/bad/zclassic23-package-verify"
     cp -f -- "$tmp/good/SHA256SUMS" "$tmp/bad/SHA256SUMS"
     printf 'TAMPERED\n' >"$tmp/bad/z23"
     rc=0
@@ -193,6 +203,25 @@ selftest() {
     cmp -s "$tmp/good/z23" "$tmp/prefix/bin/z23" || die "selftest: installed z23 bytes differ"
     cmp -s "$tmp/good/zclassic23" "$tmp/prefix/bin/zclassic23" \
         || die "selftest: installed zclassic23 bytes differ"
+    cmp -s "$tmp/good/zclassic23-package-verify" \
+        "$tmp/prefix/bin/zclassic23-package-verify" \
+        || die "selftest: installed zclassic23-package-verify bytes differ"
+
+    # A valid checksum manifest that omits the worker is still an incomplete
+    # release and must refuse before any payload reaches a fresh destination.
+    mkdir -p "$tmp/no-verifier"
+    cp -f -- "$tmp/good/z23" "$tmp/no-verifier/z23"
+    cp -f -- "$tmp/good/zclassic23" "$tmp/no-verifier/zclassic23"
+    (cd "$tmp/no-verifier" && sha256sum z23 zclassic23 >SHA256SUMS)
+    rc=0
+    run_install "$tmp/no-verifier-dest" "$tmp/units" "$tmp/no-verifier" \
+        >/dev/null 2>"$tmp/no-verifier.err" || rc=$?
+    [ "$rc" -eq 1 ] || die "selftest: missing verifier must exit 1"
+    grep -q 'payload missing zclassic23-package-verify' "$tmp/no-verifier.err" \
+        || die "selftest: missing verifier must name the refusal"
+    if [ -e "$tmp/no-verifier-dest/bin/z23" ]; then
+        die "selftest: incomplete release installed z23 anyway"
+    fi
 
     # Idempotent re-run.
     out="$(run_install "$tmp/prefix" "$tmp/units" "$tmp/good" 2>"$tmp/ok2.err")" \
@@ -219,8 +248,10 @@ selftest() {
     mkdir -p "$tmp/extra"
     printf 'x\n' >"$tmp/extra/z23"
     printf 'x\n' >"$tmp/extra/zclassic23"
+    printf 'x\n' >"$tmp/extra/zclassic23-package-verify"
     printf 'x\n' >"$tmp/extra/evil"
-    (cd "$tmp/extra" && sha256sum z23 zclassic23 evil >SHA256SUMS)
+    (cd "$tmp/extra" && \
+        sha256sum z23 zclassic23 zclassic23-package-verify evil >SHA256SUMS)
     rc=0
     run_install "$tmp/prefix2" "$tmp/units" "$tmp/extra" \
         >/dev/null 2>"$tmp/extra.err" || rc=$?

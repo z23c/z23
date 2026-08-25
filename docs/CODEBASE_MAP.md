@@ -191,7 +191,9 @@ shell scripts), `fuzz/`, `soak/`, `sim/` (deterministic replay), `dev/`,
 `githooks/`, `scripts/`, `data/` (fixtures). Stripped x86_64-linux node
 packages land under `build/release/` from `packaging/release/build_release.sh`
 and are installed by `tools/scripts/install_z23.sh` from any node URL or
-local directory (SHA256SUMS fail-closed; no registry).
+local directory. The checksummed runtime set contains `z23`, its
+`zclassic23` daemon alias, and the confined `zclassic23-package-verify` worker
+that the daemon resolves beside itself (SHA256SUMS fail-closed; no registry).
 
 The unified local loop is `tools/dev/watch-dev-lane.sh` (`make dev-watch`): it
 classifies a coalesced save, runs the shared impact plan, and selects check,
