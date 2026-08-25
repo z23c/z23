@@ -81,6 +81,7 @@
 #include "vcs/package_attest.h"
 #include "vcs/package_attest_transport.h"
 #include "vcs/package_store.h"
+#include "vcs/zcode_dht_record.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -93,11 +94,36 @@
 #define ZAT_ROWS_DEFAULT 16u
 #define ZAT_ROWS_CEILING 64u
 
-/* Validity window stamped into the two ready-to-run publish inputs. One
- * day: long enough that an operator is not republishing hourly, short
- * enough that a withdrawn attestation stops being advertised on its own.
- * The operator may edit either number before running the command. */
-#define ZAT_PUBLISH_WINDOW_S 86400u
+/* Validity window stamped into each ready-to-run publish input. PER KIND,
+ * and the provider's is DERIVED from the record layer's own ceiling rather
+ * than typed here, because the two kinds do not share one:
+ * VCS_ZCODE_DHT_PROVIDER_MAX_SECONDS is 7200 while
+ * VCS_ZCODE_DHT_POINTER_MAX_SECONDS is 604800.
+ *
+ * A single shared 86400 stamped into both looked harmless and was not: the
+ * POINTER published fine and the PROVIDER was refused by the record layer,
+ * so an operator who ran exactly what `offer` handed them ended up
+ * POINTER-only — a puller learns which blob to want and finds nobody
+ * serving it. That is precisely the silent no-op this file's header warns
+ * about, produced by the command whose job is to prevent it.
+ *
+ * A provider ad is short-lived on purpose: it is a claim about reachability
+ * right now. A pointer is a claim about content and stays true, so one day
+ * is a conservative refresh cadence rather than a limit. The operator may
+ * edit either number before running publish. */
+#define ZAT_PROVIDER_WINDOW_S VCS_ZCODE_DHT_PROVIDER_MAX_SECONDS
+#define ZAT_POINTER_WINDOW_S UINT64_C(86400)
+
+/* Fail the BUILD, not the operator's publish, if either ceiling moves
+ * under us. An unpublishable input handed out as "ready to run" is a
+ * defect that only shows up at the far end of a two-command sequence. */
+static_assert(ZAT_PROVIDER_WINDOW_S <= VCS_ZCODE_DHT_PROVIDER_MAX_SECONDS,
+              "the provider publish input must be publishable as a PROVIDER "
+              "record; an over-long window is refused and leaves the "
+              "operator pointer-only");
+static_assert(ZAT_POINTER_WINDOW_S <= VCS_ZCODE_DHT_POINTER_MAX_SECONDS,
+              "the pointer publish input must be publishable as a POINTER "
+              "record");
 
 /* ── small input helpers (the native_zcode_* pattern) ───────────────── */
 
@@ -207,7 +233,8 @@ static void zat_rule_string(
  * are the caller's; kind decides whether semantic_root is carried. */
 static void zat_publish_input(struct json_value *out, const char *kind,
                               const char *semantic_root_hex,
-                              const char *transport_root_hex, uint64_t now)
+                              const char *transport_root_hex, uint64_t now,
+                              uint64_t window_s)
 {
     json_set_object(out);
     (void)json_push_kv_str(out, "mode", "plan");
@@ -219,8 +246,7 @@ static void zat_publish_input(struct json_value *out, const char *kind,
     (void)json_push_kv_str(out, "transport_root", transport_root_hex);
     (void)json_push_kv_int(out, "sequence", (int64_t)now);
     (void)json_push_kv_int(out, "not_before", (int64_t)now);
-    (void)json_push_kv_int(out, "expiry",
-                           (int64_t)(now + ZAT_PUBLISH_WINDOW_S));
+    (void)json_push_kv_int(out, "expiry", (int64_t)(now + window_s));
 }
 
 /* ── zcode package attest offer ─────────────────────────────────────── */
@@ -327,11 +353,13 @@ void zcl_native_handle_zcode_package_attest_offer(
     uint64_t now = (uint64_t)platform_time_wall_unix();
     struct json_value publish;
     json_init(&publish);
-    zat_publish_input(&publish, "provider", NULL, transport_hex, now);
+    zat_publish_input(&publish, "provider", NULL, transport_hex, now,
+                      ZAT_PROVIDER_WINDOW_S);
     (void)json_push_kv(&reply->data, "provider_publish_input", &publish);
     json_free(&publish);
     json_init(&publish);
-    zat_publish_input(&publish, "pointer", package_hex, transport_hex, now);
+    zat_publish_input(&publish, "pointer", package_hex, transport_hex, now,
+                      ZAT_POINTER_WINDOW_S);
     (void)json_push_kv(&reply->data, "pointer_publish_input", &publish);
     json_free(&publish);
 

@@ -2312,12 +2312,28 @@ static int t_attest_offer(void)
                  zv_str_is(pointer, "semantic_root", package_hex) &&
                  transport &&
                  zv_str_is(pointer, "transport_root", transport));
-        ZV_CHECK("offer: both inputs carry the same bounded validity window",
+        /* NOT the same window. The two kinds have different ceilings, and
+         * a shared one is a real defect: a live seven-daemon flight caught
+         * `offer` handing back a PROVIDER input whose 86400s window is over
+         * the 7200s provider maximum, so an operator running exactly what
+         * offer produced got the pointer published and the provider
+         * refused — pointer-only, the silent no-op offer exists to
+         * prevent. Each input must be publishable AS ITS OWN KIND. */
+        ZV_CHECK("offer: each input's window is legal for its own record "
+                 "kind, so running both actually publishes both",
                  provider && pointer &&
-                 json_get_int(json_get(provider, "expiry")) ==
-                     json_get_int(json_get(provider, "not_before")) + 86400 &&
-                 json_get_int(json_get(pointer, "expiry")) ==
-                     json_get_int(json_get(pointer, "not_before")) + 86400);
+                 json_get_int(json_get(provider, "expiry")) -
+                     json_get_int(json_get(provider, "not_before")) <=
+                         (int64_t)VCS_ZCODE_DHT_PROVIDER_MAX_SECONDS &&
+                 json_get_int(json_get(pointer, "expiry")) -
+                     json_get_int(json_get(pointer, "not_before")) <=
+                         (int64_t)VCS_ZCODE_DHT_POINTER_MAX_SECONDS);
+        ZV_CHECK("offer: both windows are bounded and non-empty",
+                 provider && pointer &&
+                 json_get_int(json_get(provider, "expiry")) >
+                     json_get_int(json_get(provider, "not_before")) &&
+                 json_get_int(json_get(pointer, "expiry")) >
+                     json_get_int(json_get(pointer, "not_before")));
         zv_cmd_free(&c);
     }
 
