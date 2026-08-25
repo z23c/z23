@@ -1,6 +1,8 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * ZClassic full node — pure C23 implementation.
  *
+ * For my lovely wife, Donatella.
+ *
  * One binary, three operator modes:
  *   z23 [node options]                — run as full node / linger service
  *   z23 api                           — API discovery from running node
