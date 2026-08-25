@@ -74,15 +74,15 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 719 |
+| Registry entries (branches + leaves) | 721 |
 | Top-level roots | 12 |
-| Branches | 167 |
-| Leaves (dispatchable command paths) | 552 |
-| … `ready` (live handler in this build) | 499 |
+| Branches | 168 |
+| Leaves (dispatchable command paths) | 553 |
+| … `ready` (live handler in this build) | 500 |
 | … `compat` (metadata only, names a fallback) | 25 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 28 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 24 |
-| Leaves with `effect=mutate` | 188 |
+| Leaves with `effect=mutate` | 189 |
 | Leaves with `effect=destructive` | 4 |
 | Leaves requiring **owner** authority | 112 |
 
@@ -100,7 +100,7 @@ Per source file:
 | `config/commands/code.def` | 17 | 2 | 15 |
 | `config/commands/accounts.def` | 11 | 2 | 9 |
 | `config/commands/vault.def` | 24 | 4 | 20 |
-| `config/commands/zcode.def` | 223 | 53 | 170 |
+| `config/commands/zcode.def` | 225 | 54 | 171 |
 | `config/commands/zcode_science.def` | 25 | 7 | 18 |
 | `config/commands/metaverse.def` | 30 | 7 | 23 |
 | `config/commands/yardsale.def` | 7 | 2 | 5 |
@@ -1283,6 +1283,12 @@ represented by its children's sections.
 |---|---|---|---|---|---|---|
 | `zcode package publish plan` | ready | read / read / operator · foreground/moderate | `release_hex`, `manifest_hex`, `recipe_hex`, `dir`, `datadir` | `zcl.zcode_publish_plan.v1` | `z23 zcode package publish plan --input='{"release_hex":"..","manifest_hex":"..","recipe_hex":"..","dir":"/tmp/pkg"}'` | Validate a candidate release without persisting anything |
 | `zcode package publish commit` | ready | mutate / app-write / operator · foreground/moderate | `release_hex`, `manifest_hex`, `recipe_hex`, `dir`, `day`, `datadir` | `zcl.zcode_publish_commit.v1` | `z23 zcode package publish commit --input='{"release_hex":"..","manifest_hex":"..","recipe_hex":"..","dir":"/tmp/pkg"}'` | Re-validate and persist a candidate release into the local store |
+
+#### `zcode.package.attest` — File signed third-party verifier attestations
+
+| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
+|---|---|---|---|---|---|---|
+| `zcode package attest import` | ready | mutate / app-write / operator · foreground/low | **`attestation_wire`**, `datadir` | `zcl.zcode_package_attest_import.v1` | `z23 zcode package attest import --input='{"attestation_wire":"<hex>"}'` | File a signed attestation wire into the local store |
 
 #### `zcode.contributor` — Contributor identities
 

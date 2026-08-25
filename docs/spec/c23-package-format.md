@@ -188,7 +188,9 @@ Two evidence lanes exist, and they are not interchangeable:
   `zclassic23-package-verify` program signs them; the node never compiles
   or executes downloaded code. Attestations are filed under
   `attestations/<attestation-id-hex>` and evaluated by
-  `zcode package verify`.
+  `zcode package verify`. They are portable: `zcode package attest import`
+  files a third party's signed wire into the local store (filing is not
+  acceptance — the local approved-verifier policy applies at evaluation).
 
 <!-- claim: symbol-present VCS_PACKAGE_ATTEST_ID_DOMAIN lib/vcs/include/vcs/package_attest.h # attestation id domain -->
 

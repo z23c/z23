@@ -2306,6 +2306,51 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_zcode_package_verify)
 
+/* ── attestation import: closing the third-party evidence loop ─────────
+ * An attestation is signed, self-verifying, PORTABLE evidence, but the
+ * only writer into a store's attestations/ dir was the verifier program
+ * itself, on its own filesystem. import files any third party's wire into
+ * the local store. Filing is NOT acceptance: import validates only the
+ * wire's internal consistency and embedded signature — the local
+ * approved-verifier quorum policy applies at evaluation time (zcode
+ * package verify), never at import. */
+ZCL_COMMAND_BRANCH("zcode.package.attest", "zcode.package",
+                   "File signed third-party verifier attestations",
+                   ZCL_COMMAND_LAYER_APP)
+
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.package.attest.import", "zcode.package.attest", "",
+    "File a signed attestation wire into the local store",
+    "Hex-decodes attestation_wire (bound "
+    "VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES), parses the canonical ZCLATT wire "
+    "(every grammar and consistency rule named on rejection), verifies the "
+    "embedded secp256k1 signature over the attestation id (bad/low-S "
+    "signatures named), and files the exact bytes at "
+    "<datadir>/zcode/attestations/<attestation-id-hex> with tmp+rename "
+    "discipline. Idempotent: re-importing the identical wire succeeds with "
+    "filed=false, already_present=true; a same-name file that does not "
+    "read back identical is a fail-closed STORE_CONFLICT (impossible for "
+    "honest wires — the id is the content hash). Filing is NOT acceptance: "
+    "the approved-verifier quorum policy is applied by zcode package "
+    "verify at evaluation time, and the attested package/release/recipe "
+    "need not be locally present. The response carries filed, "
+    "already_present, attestation_id, signer_pubkey, result_class, and a "
+    "note stating the filing/acceptance boundary.",
+    0,
+    "zcode,package,attest,import,attestation,verifier,portable,file",
+    "zcl.zcode_package_attest_import.input.v1",
+    "zcl.zcode_package_attest_import.v1",
+    "attestation_wire,datadir", "attestation_wire",
+    "z23 zcode package attest import --input='{\"attestation_wire\":\"<hex>\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_zcode_package_attest_import)
+
 /* ── slice 4: contributor identity + ZNAM pointers ─────────────────────
  * The secp256k1 publisher key is the only authoritative identity; ZNAM
  * records are mutable pointers resolved through the canonical ZNAM model

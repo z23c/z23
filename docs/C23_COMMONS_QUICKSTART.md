@@ -242,6 +242,13 @@ z23 zcode work toolchain
 z23 zcode package verify --input='{"root":"<package_root>","datadir":"/tmp/z23-commons"}'
 ```
 
+`zcode package verify` evaluates the attestations filed in the local store.
+Attestations are portable signed wires: when another machine's verifier
+produced one, file it with `zcode package attest import
+--input='{"attestation_wire":"<hex>"}'`. Filing validates only the wire and
+its signature — it is not acceptance; the local approved-verifier quorum
+policy applies at evaluation.
+
 `zcode work toolchain` reports this node's `capsule_root`, whether
 `zclassic23-package-verify` sits next to the binary (`verifier_present` /
 `can_prove`), whether this process has joined independent compile work

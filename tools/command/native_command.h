@@ -1033,6 +1033,15 @@ void zcl_native_handle_zcode_package_verify(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 
+/* zcode attestation import — files a signed third-party ZCLATT wire into
+ * <datadir>/zcode/attestations/<attestation-id-hex> (idempotent,
+ * tmp+rename). Import validates only the wire's internal consistency and
+ * embedded signature; filing is NOT acceptance — the approved-verifier
+ * quorum policy applies at evaluation time (zcode package verify). */
+void zcl_native_handle_zcode_package_attest_import(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+
 /* zcode slice 4 — contributor identity + ZNAM pointers. The publisher key
  * is the only identity; ZNAM records resolve through the canonical model
  * with an explicit binding proof. Bound by config/commands/zcode.def. */

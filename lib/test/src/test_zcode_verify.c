@@ -28,6 +28,12 @@
  *      events agreeing byte-for-byte reproduce; one receipt does not; a
  *      tampered output is reported loudly), and the eligibility gates
  *      passing on a recorded reproduction with no quorum at all.
+ *   3c. zcode package attest import: a signed wire files into
+ *      attestations/ through the handler (idempotent re-import), verify
+ *      then counts the imported wires, a tampered wire is refused naming
+ *      the signature rule, a non-canonical wire names the parse rule, and
+ *      an unseen package's attestation still files (filing is not
+ *      acceptance — verify names UNKNOWN_PACKAGE).
  *   4. End-to-end external verifier: a tiny real C package is published
  *      into a fixture store, build/bin/zclassic23-package-verify runs it
  *      (gcc + clang, plain + ASan/UBSan), and the signed attestation is
@@ -1684,6 +1690,215 @@ static int t_command(void)
     return failures;
 }
 
+/* ── 3c. zcode package attest import: the third-party evidence loop ────
+ * The only writer into attestations/ was the verifier program itself, on
+ * its own filesystem. import closes the loop: a signed wire arrives as
+ * hex input and is filed locally. Filing is NOT acceptance. */
+
+/* Serialize + hex-encode one signed attestation for the import input. */
+static bool zv_attest_wire_hex(struct vcs_package_attest *a, uint8_t cls,
+                               const uint8_t package_root[32],
+                               const uint8_t release_id[32],
+                               const uint8_t recipe_root[32],
+                               uint8_t signer_seed, char *hex_out,
+                               uint8_t id_out[32])
+{
+    if (!zv_attest(a, cls, package_root, release_id, recipe_root,
+                   signer_seed))
+        return false;
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    bool ok = vcs_package_attest_serialize(a, &wire, &wire_len) ==
+                  VCS_PACKAGE_ATTEST_OK &&
+              vcs_package_attest_id(a, id_out) == VCS_PACKAGE_ATTEST_OK;
+    if (ok)
+        zv_hex_enc(wire, wire_len, hex_out);
+    free(wire);
+    return ok;
+}
+
+static int t_attest_import(void)
+{
+    int failures = 0;
+    char datadir[4400];
+    snprintf(datadir, sizeof(datadir), "test-tmp/zv_import_%ld",
+             (long)getpid());
+    char store[4400];
+    snprintf(store, sizeof(store), "%s/zcode", datadir);
+    zv_rm_rf(datadir);
+
+    uint8_t package_root[32], release_id[32], recipe_root[32];
+    bool fixture = zv_publish_fixture(
+        store,
+        "#include \"add.h\"\nint add(int a, int b) { return a + b; }\n",
+        "#include \"add.h\"\nint main(void) { return add(2, 3) == 5 ? 0 : 1; }\n",
+        package_root, release_id, recipe_root);
+    ZV_CHECK("import: fixture store publishes", fixture);
+    if (!fixture)
+        return failures + 1;
+    char root_hex[65];
+    zv_hex_enc(package_root, 32, root_hex);
+    ZV_CHECK("import: allowlist writes", zv_write_policy(store));
+
+    /* (a) A third party's signed wire imports and is then counted by
+     * verify. The attestation bytes are built in-memory here — the handler
+     * is the ONLY writer into attestations/ in this test. */
+    struct vcs_package_attest a;
+    uint8_t id_a[32];
+    char wire_hex[2 * VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES + 1];
+    ZV_CHECK("import: attestation A wire builds",
+             zv_attest_wire_hex(&a, VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
+                                package_root, release_id, recipe_root, 0x22,
+                                wire_hex, id_a));
+    char id_a_hex[65];
+    zv_hex_enc(id_a, 32, id_a_hex);
+    char signer_a_hex[67];
+    zv_hex_enc(a.verifier_pubkey, 33, signer_a_hex);
+    {
+        struct zv_cmd c;
+        zv_cmd_init(&c, datadir, "");
+        (void)json_push_kv_str(&c.input, "attestation_wire", wire_hex);
+        zcl_native_handle_zcode_package_attest_import(&c.request, &c.reply);
+        const char *aid =
+            json_get_str(json_get(&c.reply.data, "attestation_id"));
+        const char *signer =
+            json_get_str(json_get(&c.reply.data, "signer_pubkey"));
+        const char *class_name =
+            json_get_str(json_get(&c.reply.data, "result_class"));
+        const char *note = json_get_str(json_get(&c.reply.data, "note"));
+        ZV_CHECK("import: valid wire files",
+                 c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
+                 json_get_bool(json_get(&c.reply.data, "filed")) &&
+                 !json_get_bool(json_get(&c.reply.data, "already_present")) &&
+                 aid && strcmp(aid, id_a_hex) == 0 &&
+                 signer && strcmp(signer, signer_a_hex) == 0 &&
+                 class_name && strcmp(class_name, "test-pass") == 0 &&
+                 note && strstr(note, "filing is not acceptance") != NULL);
+        zv_cmd_free(&c);
+    }
+
+    /* (b) Re-importing the identical wire is an idempotent no-op success. */
+    {
+        struct zv_cmd c;
+        zv_cmd_init(&c, datadir, "");
+        (void)json_push_kv_str(&c.input, "attestation_wire", wire_hex);
+        zcl_native_handle_zcode_package_attest_import(&c.request, &c.reply);
+        ZV_CHECK("import: re-import is idempotent",
+                 c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
+                 !json_get_bool(json_get(&c.reply.data, "filed")) &&
+                 json_get_bool(json_get(&c.reply.data, "already_present")));
+        zv_cmd_free(&c);
+    }
+
+    /* A second approved signer's wire imported the same way completes the
+     * quorum — import is the ONLY way these bytes reached the store. */
+    struct vcs_package_attest b;
+    uint8_t id_b[32];
+    char wire_b_hex[2 * VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES + 1];
+    ZV_CHECK("import: attestation B wire builds",
+             zv_attest_wire_hex(&b, VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
+                                package_root, release_id, recipe_root, 0x33,
+                                wire_b_hex, id_b));
+    {
+        struct zv_cmd c;
+        zv_cmd_init(&c, datadir, "");
+        (void)json_push_kv_str(&c.input, "attestation_wire", wire_b_hex);
+        zcl_native_handle_zcode_package_attest_import(&c.request, &c.reply);
+        ZV_CHECK("import: second wire files",
+                 c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
+                 json_get_bool(json_get(&c.reply.data, "filed")));
+        zv_cmd_free(&c);
+    }
+    {
+        struct zv_cmd c;
+        zv_cmd_init(&c, datadir, root_hex);
+        zcl_native_handle_zcode_package_verify(&c.request, &c.reply);
+        ZV_CHECK("import: verify counts the imported wires",
+                 json_get_bool(json_get(&c.reply.data, "verified")) &&
+                 json_get_int(json_get(&c.reply.data, "quorum_signers")) == 2 &&
+                 json_get_int(json_get(&c.reply.data,
+                                       "attestations_scanned")) == 2);
+        zv_cmd_free(&c);
+    }
+
+    /* (c) A wire tampered inside the signed region fails the signature
+     * check with the rule named. */
+    {
+        char tampered[2 * VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES + 1];
+        snprintf(tampered, sizeof(tampered), "%s", wire_hex);
+        /* byte 20 sits inside package_root (offset 10..42) — signed. */
+        tampered[2 * 20] = tampered[2 * 20] == '0' ? '1' : '0';
+        struct zv_cmd c;
+        zv_cmd_init(&c, datadir, "");
+        (void)json_push_kv_str(&c.input, "attestation_wire", tampered);
+        zcl_native_handle_zcode_package_attest_import(&c.request, &c.reply);
+        ZV_CHECK("import: tampered wire refused naming the signature rule",
+                 c.reply.status == ZCL_COMMAND_STATUS_FAILED &&
+                 strcmp(c.reply.error.code, "ATTEST_SIGNATURE") == 0 &&
+                 strcmp(c.reply.error.evidence,
+                        vcs_package_attest_error_string(
+                            VCS_PACKAGE_ATTEST_ERR_SIG_VERIFY)) == 0);
+        zv_cmd_free(&c);
+    }
+
+    /* (d) A structurally invalid wire (corrupted magic) fails the parse
+     * with the grammar rule named. */
+    {
+        char broken[2 * VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES + 1];
+        snprintf(broken, sizeof(broken), "%s", wire_hex);
+        broken[0] = wire_hex[0] == '5' ? '6' : '5'; /* 'Z' -> something else */
+        struct zv_cmd c;
+        zv_cmd_init(&c, datadir, "");
+        (void)json_push_kv_str(&c.input, "attestation_wire", broken);
+        zcl_native_handle_zcode_package_attest_import(&c.request, &c.reply);
+        ZV_CHECK("import: non-canonical wire refused naming the parse rule",
+                 c.reply.status == ZCL_COMMAND_STATUS_FAILED &&
+                 strcmp(c.reply.error.code, "ATTEST_INVALID") == 0 &&
+                 strcmp(c.reply.error.evidence,
+                        vcs_package_attest_error_string(
+                            VCS_PACKAGE_ATTEST_ERR_WIRE_MAGIC)) == 0);
+        zv_cmd_free(&c);
+    }
+
+    /* (e) Filing is not acceptance: an attestation for a package this node
+     * has never seen still files (the wire is self-consistent and signed);
+     * verify then names the unknown package rather than crashing. */
+    {
+        uint8_t ghost_pkg[32], ghost_rel[32], ghost_recipe[32];
+        zv_pattern_root(0x91, ghost_pkg);
+        zv_pattern_root(0x92, ghost_rel);
+        zv_pattern_root(0x93, ghost_recipe);
+        struct vcs_package_attest g;
+        uint8_t id_g[32];
+        char wire_g_hex[2 * VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES + 1];
+        ZV_CHECK("import: ghost attestation wire builds",
+                 zv_attest_wire_hex(&g, VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
+                                    ghost_pkg, ghost_rel, ghost_recipe, 0x22,
+                                    wire_g_hex, id_g));
+        struct zv_cmd c;
+        zv_cmd_init(&c, datadir, "");
+        (void)json_push_kv_str(&c.input, "attestation_wire", wire_g_hex);
+        zcl_native_handle_zcode_package_attest_import(&c.request, &c.reply);
+        ZV_CHECK("import: unseen package's attestation still files",
+                 c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
+                 json_get_bool(json_get(&c.reply.data, "filed")));
+        zv_cmd_free(&c);
+
+        char ghost_hex[65];
+        zv_hex_enc(ghost_pkg, 32, ghost_hex);
+        struct zv_cmd c2;
+        zv_cmd_init(&c2, datadir, ghost_hex);
+        zcl_native_handle_zcode_package_verify(&c2.request, &c2.reply);
+        ZV_CHECK("import: verify names the unknown package",
+                 c2.reply.status == ZCL_COMMAND_STATUS_FAILED &&
+                 strcmp(c2.reply.error.code, "UNKNOWN_PACKAGE") == 0);
+        zv_cmd_free(&c2);
+    }
+
+    zv_rm_rf(datadir);
+    return failures;
+}
+
 /* ── 4. end-to-end external verifier ────────────────────────────────── */
 
 static bool zv_dir_is_empty(const char *path)
@@ -2046,6 +2261,7 @@ int test_zcode_verify(void)
     failures += t_build_receipt_v2();
     failures += t_reproduce();
     failures += t_command();
+    failures += t_attest_import();
     failures += t_verifier_e2e();
     printf("=== zcode_verify complete: %d failure(s) ===\n", failures);
     return failures;

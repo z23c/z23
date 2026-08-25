@@ -28,6 +28,10 @@
  *                                 the LOCAL approved-verifier allowlist —
  *                                 the node reads attestations, it never
  *                                 compiles or executes downloaded code
+ *   zcode package attest import   files a signed third-party attestation
+ *                                 wire into attestations/ (idempotent;
+ *                                 filing is not acceptance — the quorum
+ *                                 policy applies at verify time)
  *
  * Slice 11 adds the LOCAL publish-frequency policy checkpoint to commit:
  * a FRESH release (acceptance OK — a redelivery classifying DUPLICATE
@@ -91,9 +95,12 @@
 #include "vcs/package_verify_policy.h"
 
 #include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #define ZC_LOG "zcode.command"
 
@@ -1428,6 +1435,241 @@ void zcl_native_handle_zcode_package_verify(
         "reproduction, never a substitute for it; attestations are "
         "produced by the external zclassic23-package-verify program — the "
         "node never compiles or executes downloaded code");
+}
+
+/* ── zcode package attest import ────────────────────────────────────── */
+
+/* mkdir -p: the attestations dir need not exist on a fresh datadir. */
+static bool zc_mkdir_p(const char *path)
+{
+    char buf[4400];
+    size_t len = strlen(path);
+    if (len == 0 || len >= sizeof(buf))
+        return false;
+    memcpy(buf, path, len + 1);
+    for (char *p = buf + 1; *p; p++) {
+        if (*p != '/')
+            continue;
+        *p = '\0';
+        if (mkdir(buf, 0700) != 0 && errno != EEXIST)
+            return false;
+        *p = '/';
+    }
+    return mkdir(buf, 0700) == 0 || errno == EEXIST;
+}
+
+/* tmp+fsync+rename — the same atomic-write discipline the verifier uses
+ * when it files an attestation (pv_atomic_write, tools/package_verify.c):
+ * a crash mid-write leaves a temp file, never partial visibility. */
+static bool zc_atomic_write(const char *path, const uint8_t *data,
+                            size_t data_len)
+{
+    char tmp[4400];
+    int tn = snprintf(tmp, sizeof(tmp), "%s.zvtmp.%ld", path,
+                      (long)getpid());
+    if (tn <= 0 || (size_t)tn >= sizeof(tmp))
+        return false;
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd < 0)
+        return false;
+    size_t off = 0;
+    while (off < data_len) {
+        ssize_t w = write(fd, data + off, data_len - off);
+        if (w < 0) {
+            if (errno == EINTR)
+                continue;
+            close(fd);
+            unlink(tmp);
+            return false;
+        }
+        off += (size_t)w;
+    }
+    if (fsync(fd) != 0 || close(fd) != 0 || rename(tmp, path) != 0) {
+        close(fd);
+        unlink(tmp);
+        return false;
+    }
+    return true;
+}
+
+void zcl_native_handle_zcode_package_attest_import(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply)
+{
+    if (!request || !reply)
+        return;
+    const char *datadir = zc_datadir(request);
+    if (!datadir) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "MISSING_DATADIR",
+                               "normalize", false, false,
+                               "no datadir given (input datadir or --datadir)",
+                               "zcode.package.attest.import");
+        return;
+    }
+    const char *wire_hex = zc_input_str(request->input, "attestation_wire");
+    if (!wire_hex || !wire_hex[0]) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "MISSING_WIRE",
+                               "normalize", false, false,
+                               "no attestation_wire given",
+                               "zcode.package.attest.import");
+        return;
+    }
+    if (strlen(wire_hex) / 2 > VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "WIRE_OVERSIZE",
+                               "normalize", false, false,
+                               "attestation_wire exceeds the canonical wire "
+                               "bound",
+                               vcs_package_attest_error_string(
+                                   VCS_PACKAGE_ATTEST_ERR_WIRE_OVERSIZE));
+        return;
+    }
+    uint8_t *wire =
+        zcl_malloc(VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES, "zc_attest_wire");
+    if (!wire) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "ALLOC",
+                               "normalize", false, false,
+                               "attestation wire buffer",
+                               "zcode.package.attest.import");
+        return;
+    }
+    size_t wire_len = 0;
+    if (!zcl_hex_decode_n(wire_hex, wire, VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES,
+                          &wire_len)) {
+        free(wire);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "BAD_WIRE_HEX",
+                               "normalize", false, false,
+                               "attestation_wire must be even, non-empty hex "
+                               "within the wire bound",
+                               "zcode.package.attest.import");
+        return;
+    }
+
+    /* The codec names the failed rule: grammar/consistency first, then the
+     * embedded secp256k1 signature over the attestation id. */
+    struct vcs_package_attest att;
+    enum vcs_package_attest_error aerr =
+        vcs_package_attest_parse(wire, wire_len, &att);
+    if (aerr != VCS_PACKAGE_ATTEST_OK) {
+        free(wire);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "ATTEST_INVALID",
+                               "execute", false, false,
+                               "the wire is not a canonical attestation",
+                               vcs_package_attest_error_string(aerr));
+        return;
+    }
+    aerr = vcs_package_attest_verify(&att);
+    if (aerr != VCS_PACKAGE_ATTEST_OK) {
+        free(wire);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "ATTEST_SIGNATURE",
+                               "execute", false, false,
+                               "the embedded verifier signature does not "
+                               "verify",
+                               vcs_package_attest_error_string(aerr));
+        return;
+    }
+    uint8_t id[VCS_PACKAGE_ATTEST_ID_BYTES];
+    aerr = vcs_package_attest_id(&att, id);
+    if (aerr != VCS_PACKAGE_ATTEST_OK) {
+        free(wire);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "ATTEST_ID",
+                               "execute", false, false,
+                               "a verified attestation has no id",
+                               vcs_package_attest_error_string(aerr));
+        return;
+    }
+    char id_hex[65];
+    zcl_hex_encode(id, sizeof(id), id_hex);
+
+    char attest_dir[4400];
+    int n = snprintf(attest_dir, sizeof(attest_dir), "%s/zcode/attestations",
+                     datadir);
+    if (n < 0 || (size_t)n >= sizeof(attest_dir) ||
+        !zc_mkdir_p(attest_dir)) {
+        free(wire);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "STORE_WRITE",
+                               "execute", false, false,
+                               "the attestations directory cannot be created",
+                               datadir);
+        return;
+    }
+    char dest[4400];
+    n = snprintf(dest, sizeof(dest), "%s/%s", attest_dir, id_hex);
+    if (n < 0 || (size_t)n >= sizeof(dest)) {
+        free(wire);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "DATADIR_TOO_LONG",
+                               "normalize", false, false,
+                               "datadir path too long", datadir);
+        return;
+    }
+
+    /* Idempotent: the attestation id is the content hash, so a same-name
+     * file holding identical bytes is a no-op success. A same-name file
+     * that does not read back identical is store corruption — fail
+     * closed. */
+    bool filed = false;
+    bool already_present = false;
+    struct stat st;
+    if (stat(dest, &st) == 0) {
+        uint8_t *have = NULL;
+        size_t have_len = 0;
+        bool same = zc_read_object(dest, VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES,
+                                   &have, &have_len) &&
+                    have_len == wire_len &&
+                    memcmp(have, wire, wire_len) == 0;
+        free(have);
+        if (!same) {
+            free(wire);
+            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                                   ZCL_COMMAND_EXIT_INTERNAL,
+                                   "STORE_CONFLICT", "execute", false, false,
+                                   "a different or unreadable object already "
+                                   "occupies this attestation id",
+                                   id_hex);
+            return;
+        }
+        already_present = true;
+    } else {
+        if (!zc_atomic_write(dest, wire, wire_len)) {
+            free(wire);
+            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                                   ZCL_COMMAND_EXIT_INTERNAL, "STORE_WRITE",
+                                   "execute", false, false,
+                                   "the attestation could not be filed",
+                                   dest);
+            return;
+        }
+        filed = true;
+    }
+    free(wire);
+
+    char signer_hex[67];
+    zcl_hex_encode(att.verifier_pubkey, sizeof(att.verifier_pubkey),
+                   signer_hex);
+    (void)json_push_kv_bool(&reply->data, "filed", filed);
+    (void)json_push_kv_bool(&reply->data, "already_present",
+                            already_present);
+    (void)json_push_kv_str(&reply->data, "attestation_id", id_hex);
+    (void)json_push_kv_str(&reply->data, "signer_pubkey", signer_hex);
+    (void)json_push_kv_str(&reply->data, "result_class",
+                           vcs_package_attest_result_string(
+                               att.result_class));
+    (void)json_push_kv_str(
+        &reply->data, "note",
+        "filing is not acceptance: import validates only the wire's "
+        "internal consistency and embedded signature — the local "
+        "approved-verifier quorum policy applies at evaluation time "
+        "(zcode package verify), and the attested package need not be "
+        "locally present");
 }
 
 /* ── zcode package search ───────────────────────────────────────────── */
