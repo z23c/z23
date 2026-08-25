@@ -27,6 +27,50 @@ env at `~/.config/zclassic23-fleetsync/<box>.env` (see below). The
   liveness, peer count, last action, named error if any.
 - `<box>.status` — on-demand evidence (for example cross-host round-trip
   results), written by whoever ran the drill.
+- `<box>.identity` — which installation this box is, so a reader can ask
+  whether two publications came from the same machine. `INSTALL_ID` is the
+  pin, derived from the box's SSH host public keys; `MACHINE_TAG` separates
+  two installs sharing a copied host key; `BOOT_TAG` changes every reboot and
+  is what explains a heartbeat gap. Written by `tools/dev/fleet-identity.sh`.
+
+## Install identity
+
+Every value in `<box>.identity` is `sha256(SALT || raw)`. The raw name would be
+a hash of the box's SSH host public keys, and publishing that raw is a locator:
+internet scan services index host key blobs, so anyone holding scan data could
+test a scanned address against the committed file and place a box. Committing
+onions instead of clearnet addresses exists to prevent exactly that, and a raw
+hostkey hash would quietly undo it. Salting keeps the file a stable pin for
+whoever holds the salt and opaque to everyone else.
+
+The salt lives beside the fleet addresses in the uncommitted operator env, and
+is applied on the operator's own box — remote boxes never need it:
+
+```sh
+# ~/.config/zclassic23-fleetsync/fleet.env   (mode 0600, never committed)
+ZCL_FLEET_ID_SALT=<hex>
+ZCL_FLEET_NODE1_ADDR=<ssh destination>
+```
+
+```bash
+tools/dev/fleet-identity.sh init             # once: create the salt
+tools/dev/fleet-identity.sh gather --node N  # publish a box
+tools/dev/fleet-identity.sh status           # check the whole fleet
+```
+
+Pinning is trust on first use: the committed file IS the pin. A changed
+`INSTALL_ID` or `MACHINE_TAG` is an `IDENTITY_EVENT` that exits 3 and leaves
+the pin untouched — silently rewriting it would erase the one fact worth
+reporting. `status` exits 4 when a box was unreachable, so an unchecked fleet
+never reports as an agreeing one. Rotating the salt renames every box and
+lands as an event on all of them; the salt is configuration, not a secret whose
+loss is dangerous.
+
+The claim stays small on purpose: **same install — not same chip, not safe
+machine.** It is convenience tier, and nothing in consensus, custody, datadir
+handling, or deployment may depend on it. `METAL_TIER` is an optional
+owner-gated field that would need a one-time root TPM enrolment; nothing
+creates it, nothing waits on it, and its absence is normal.
 
 ## Local env (uncommitted)
 
