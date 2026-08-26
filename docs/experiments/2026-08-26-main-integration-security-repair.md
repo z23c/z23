@@ -36,6 +36,12 @@ leave stale or internally inconsistent state.
   records that counter before joining the pump threads and publishing the
   final inactive snapshot; the test no longer treats that valid interval as
   a teardown failure.
+- Hot-swap package runs use private scratch directories and prove that the
+  immutable object supplying `source_tu` and leaves re-links byte-identically
+  to the artifact being receipted. The seal-root generator validates every
+  character of the 64-digit lowercase hexadecimal root. Documentation now
+  states that a post-`dlopen` consensus pin prevents stale leaf publication,
+  not ELF constructor execution.
 
 ## Evidence
 
@@ -57,6 +63,9 @@ test_metaverse_agent_broker  PASS  self_skips=0
 test_zcode_dht_record        PASS  self_skips=0
 test_zcode_dht_service       PASS  self_skips=0
 test_onion_bridge            PASS  self_skips=0; strict profile, two runs
+hotswap package verify       PASS  two concurrent processes
+hotswap artifact substitution REFUSED before receipt
+core seal root selftest      PASS
 check-hex-codec-single       PASS
 git diff --check             PASS
 ```

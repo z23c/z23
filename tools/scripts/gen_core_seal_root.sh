@@ -7,6 +7,7 @@
 #
 #   tools/scripts/gen_core_seal_root.sh          write the header
 #   tools/scripts/gen_core_seal_root.sh --check  exit 1 if it would change
+#   tools/scripts/gen_core_seal_root.sh --selftest prove exact ROOT validation
 #
 # The header is committed on purpose. Baking the value through a -D flag would
 # mean every build profile, every module recipe and the standalone verifier each
@@ -22,17 +23,24 @@ cd "$ROOT_DIR"
 MANIFEST="core/MANIFEST.sha3"
 OUT="lib/hotswap/include/hotswap/core_seal_root.h"
 
+valid_root() { [[ "$1" =~ ^[0-9a-f]{64}$ ]]; }
+
+if [ "${1:-}" = "--selftest" ]; then
+    valid_root "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ! valid_root "aaaaaaaaZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ"
+    ! valid_root "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ! valid_root "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    echo "core_seal_root: selftest PASS — exact 64-character lowercase hex validation"
+    exit 0
+fi
+
 [ -r "$MANIFEST" ] || {
     echo "gen_core_seal_root: $MANIFEST is not readable" >&2
     exit 2
 }
 
 root="$(awk '$1 == "ROOT" { print $2; exit }' "$MANIFEST")"
-case "$root" in
-    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*)
-        [ "${#root}" -eq 64 ] || root="" ;;
-    *) root="" ;;
-esac
+valid_root "$root" || root=""
 [ -n "$root" ] || {
     echo "gen_core_seal_root: $MANIFEST has no 64-hex ROOT line" >&2
     echo "  Run 'make core-seal' first — a missing ROOT would disarm the pin." >&2
@@ -75,7 +83,7 @@ cat <<EOF
  * Pinning the SEAL ROOT rather than a whole-tree build id is what keeps the
  * fast loop fast: editing a controller does not move this value, so the module
  * just built still mounts. Editing consensus does move it, and then every
- * module compiled against the old core is refused at the door.
+ * module compiled against the old core is refused before leaf publication.
  *
  * SCOPE OF THE GUARANTEE. This is a generated, checked-in mirror, and nothing
  * in the BUILD forces it to be current: the hotswap-module-so recipe does not

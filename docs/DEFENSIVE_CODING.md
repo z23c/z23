@@ -445,7 +445,9 @@ assert green).
   ran its stale copy. `lib/hotswap/include/hotswap/core_seal_root.h` mirrors
   `core/MANIFEST.sha3`'s ROOT, the module emitter stamps it into every artifact
   as `zcl_hotswap_module_core_seal_root`, and `hotswap_activate.c` compares it
-  on BOTH dlsym paths (resident mount and offline verifier) before admit. The
+  on BOTH dlsym paths (resident mount and offline verifier) before admit. This
+  prevents stale leaf publication; it is not a pre-execution sandbox because
+  `dlopen` may run ELF constructors before a symbol can be checked. The
   gate proves all three: current, exported, enforced. Regenerate the mirror with
   `make core-seal`. The pin is the seal ROOT and NOT a whole-tree build id on
   purpose — a controller edit must not invalidate a module (that is the fast
