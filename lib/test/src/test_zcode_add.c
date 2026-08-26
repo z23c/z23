@@ -195,6 +195,27 @@ struct za_fake_src {
     size_t count;
 };
 
+/* SHA3-256 of a file's bytes. Byte-exact identity of an installed artifact
+ * is the whole claim a rollback makes, so the test hashes rather than
+ * checking that "something is there". */
+static bool za_file_sha3(const char *path, uint8_t out[32])
+{
+    memset(out, 0, 32);
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return false;
+    struct sha3_256_ctx ctx;
+    sha3_256_init(&ctx);
+    uint8_t buf[4096];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
+        sha3_256_write(&ctx, buf, n);
+    bool ok = ferror(f) == 0;
+    fclose(f);
+    sha3_256_finalize(&ctx, out);
+    return ok;
+}
+
 static void za_fake_root(uint8_t out[32], uint8_t tag)
 {
     memset(out, 0, 32);
@@ -411,6 +432,64 @@ static int t_generations(void)
                      VCS_PACKAGE_INSTALL_OK);
     }
     free(wire);
+
+    /* --- retention is bounded by EVICTION, never by refusal --------------
+     * A log that refused its own append once full would deny the next
+     * install AND the next rollback, bricking the package at the moment
+     * going back matters most. So the policy is explicit and asserted here:
+     * FIFO, oldest first, KEEP retained, append never fails on count, and
+     * the rollback target always survives. */
+    struct vcs_package_generations e;
+    vcs_package_generations_init(&e);
+    const size_t overrun = VCS_PACKAGE_GENERATION_KEEP + 37u;
+    bool every_append_ok = true;
+    for (size_t i = 0; i < overrun; i++) {
+        uint8_t r[32];
+        za_fake_root(r, (uint8_t)(0x40u + (i & 0x7fu)));
+        /* za_fake_root's tag byte wraps; make every root distinct. */
+        r[1] = (uint8_t)(i & 0xffu);
+        r[2] = (uint8_t)((i >> 8) & 0xffu);
+        if (vcs_package_generations_append(&e, r, 1000 + (int64_t)i) !=
+            VCS_PACKAGE_INSTALL_OK)
+            every_append_ok = false;
+    }
+    ZA_CHECK("a full generation log never refuses an append (it evicts)",
+             every_append_ok);
+    ZA_CHECK("retention is bounded to the KEEP newest generations",
+             e.count == VCS_PACKAGE_GENERATION_KEEP);
+    ZA_CHECK("eviction is FIFO: the surviving oldest is the KEEP-th newest",
+             e.items[0].activated_unix ==
+                 1000 + (int64_t)(overrun - VCS_PACKAGE_GENERATION_KEEP));
+    ZA_CHECK("the newest generation is never the one evicted",
+             e.items[e.count - 1u].activated_unix ==
+                 1000 + (int64_t)(overrun - 1u));
+    ZA_CHECK("a rollback target survives eviction",
+             vcs_package_generations_previous(&e, out) &&
+                 memcmp(out, e.items[e.count - 2u].root, 32) == 0);
+    ZA_CHECK("an evicted log still serializes inside the wire bound",
+             vcs_package_generations_serialize(&e, &wire, &len) ==
+                     VCS_PACKAGE_INSTALL_OK &&
+                 len <= VCS_PACKAGE_GENERATION_MAX_WIRE_BYTES);
+    free(wire);
+    wire = NULL;
+
+    /* trim is the one eviction primitive, so assert it directly. */
+    struct vcs_package_generations t;
+    vcs_package_generations_init(&t);
+    for (size_t i = 0; i < 5u; i++) {
+        uint8_t r[32];
+        za_fake_root(r, 0x50);
+        r[1] = (uint8_t)i;
+        (void)vcs_package_generations_append(&t, r, 2000 + (int64_t)i);
+    }
+    ZA_CHECK("trim drops exactly the oldest entries and reports the count",
+             vcs_package_generations_trim(&t, 2u) == 3u && t.count == 2u &&
+                 t.items[0].activated_unix == 2003 &&
+                 t.items[1].activated_unix == 2004);
+    ZA_CHECK("trim never empties a non-empty log",
+             vcs_package_generations_trim(&t, 0) == 1u && t.count == 1u);
+    ZA_CHECK("trim of a log already within the bound is a no-op",
+             vcs_package_generations_trim(&t, 8u) == 0 && t.count == 1u);
 
     char pub[VCS_PACKAGE_RELEASE_NAME_MAX + 1u];
     char pkg[VCS_PACKAGE_RELEASE_NAME_MAX + 1u];
@@ -758,6 +837,16 @@ static int t_e2e(void)
     snprintf(receipt, sizeof(receipt), "%s/build-report", installed_dir);
     ZA_CHECK("the reproducible build receipt travels with the install",
              za_exists(receipt));
+
+    /* Fingerprint version A's artifacts NOW, while A is the version the
+     * user is running. The rollback below has to land back on exactly these
+     * bytes — "a working build of roughly the old thing" is not the
+     * property being claimed. */
+    uint8_t a_archive_sha[32], a_header_sha[32];
+    bool a_fingerprinted = za_file_sha3(archive, a_archive_sha) &&
+                           za_file_sha3(header, a_header_sha);
+    ZA_CHECK("version A's installed artifacts are fingerprinted",
+             a_fingerprinted);
     ZA_CHECK("the step reached PINNED (seedable) or names why not",
              commit.step_count == 1 &&
                  (commit.steps[0].state == VCS_PACKAGE_LIFECYCLE_PINNED ||
@@ -1339,10 +1428,43 @@ static int t_e2e(void)
     ZA_CHECK("BOTH generations are on disk after the upgrade",
              za_exists(installed_dir) && za_exists(installed2));
 
+    /* --- NOW BREAK B, then go back ---------------------------------------
+     * Reverting a version that still works proves almost nothing. The whole
+     * reason to keep the old version is that the new one failed, so the
+     * revert is exercised against a version that is not merely broken but
+     * GONE: B's entire install tree is destroyed, leaving the active
+     * symlink dangling. Nothing about going back may depend on B. */
+    ZA_CHECK("version B's install tree is destroyed to stage the failure",
+             za_rm_rf(installed2) && !za_exists(installed2));
+    char blink[4400];
+    char bresolved[4400];
+    snprintf(blink, sizeof(blink), "%s/active/alice/ringbuffer", zcode);
+    ssize_t bln = readlink(blink, bresolved, sizeof(bresolved) - 1u);
+    if (bln > 0)
+        bresolved[bln] = '\0';
+    else
+        bresolved[0] = '\0';
+    ZA_CHECK("the active version is now a dangling pointer (B is broken)",
+             bln > 0 && strcmp(bresolved, installed2) == 0 &&
+                 !za_exists(bresolved));
+
+    /* And go back with NO NAME: the user knows only that they want the
+     * thing they were running before, not an identifier or a hash. */
+    char last_name[VCS_PACKAGE_RELEASE_NAME_MAX + 1u];
+    bool last_present = false;
+    struct zcl_result lar = package_lifecycle_last_activated(
+        base, last_name, sizeof(last_name), &last_present);
+    ZA_CHECK("the most recently changed package is named without being asked",
+             lar.ok && last_present &&
+                 strcmp(last_name, "alice/ringbuffer") == 0);
+
     struct package_lifecycle_rollback_report rb;
     struct zcl_result rbr =
-        package_lifecycle_rollback(base, "alice/ringbuffer", t0 + 4, &rb);
-    ZA_CHECK("rollback re-activates the previous root",
+        package_lifecycle_rollback(base, NULL, t0 + 4, &rb);
+    ZA_CHECK("rollback with no name goes back one step on that package",
+             rbr.ok && rb.selected_by_default &&
+                 strcmp(rb.name, "alice/ringbuffer") == 0);
+    ZA_CHECK("rollback re-activates the previous root even though B is gone",
              rbr.ok && memcmp(rb.from_root, ring2_root, 32) == 0 &&
                  memcmp(rb.to_root, ring_root, 32) == 0);
     ar = package_lifecycle_active(base, "alice/ringbuffer", active, &gens,
@@ -1360,6 +1482,25 @@ static int t_e2e(void)
         resolved[0] = '\0';
     ZA_CHECK("the active symlink points at A's install tree",
              ln > 0 && strcmp(resolved, installed_dir) == 0);
+
+    /* The claim is byte-exactness, so assert byte-exactness: hash what the
+     * active pointer resolves to TODAY and compare against the fingerprint
+     * taken while A was the running version. Identity, not liveness. */
+    char back_archive[4600];
+    char back_header[4600];
+    snprintf(back_archive, sizeof(back_archive), "%s/lib/libringbuffer.a",
+             resolved);
+    snprintf(back_header, sizeof(back_header), "%s/include/ring.h", resolved);
+    uint8_t back_archive_sha[32], back_header_sha[32];
+    bool back_hashed = za_file_sha3(back_archive, back_archive_sha) &&
+                       za_file_sha3(back_header, back_header_sha);
+    ZA_CHECK("the user is running BYTE-EXACTLY version A again",
+             a_fingerprinted && back_hashed &&
+                 memcmp(back_archive_sha, a_archive_sha, 32) == 0 &&
+                 memcmp(back_header_sha, a_header_sha, 32) == 0);
+    ZA_CHECK("and the root it went back to is A's exact identity",
+             memcmp(rb.to_root, ring_root, 32) == 0 &&
+                 memcmp(active, ring_root, 32) == 0);
 
     /* --- a dependent package, locked to its dependency's root ----------- */
     char deps_json[256];

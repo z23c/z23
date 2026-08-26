@@ -181,12 +181,35 @@
 #define E9_SCRIPT_REL    "tools/scripts/check_operator_needed_sink.sh"
 #define SYSMEM_SCRIPT_REL "tools/scripts/check_systemd_memory_budget.sh"
 #define QUALITY_GUARD_TEST_REL "tools/scripts/test_quality_job_guard.sh"
+/* ── the two hermetic copy-prove selftests, and how their bound is derived ──
+ * Both are driven through run_gate_script_watched(), whose bound is on
+ * SILENCE, not on runtime — see the long rationale on that function. Neither
+ * number below is a runtime budget, and neither may be raised to make a
+ * failing assertion pass; a failure from these scripts is a logic verdict,
+ * reported with its own distinct exit status.
+ *
+ * DERIVATION (identical for both, so they share one value):
+ *   Each script prints a line per hermetic assertion, so the only silent
+ *   stretches are the driver's own polling windows. The longest one either
+ *   script contains is a 20 s sample/deadline window with no intervening
+ *   output (fresh-boot-weld's --deadline=20 positive leg; import-copy-prove's
+ *   --deadline=15 phase with 5 s polls). Silent stretches are built from
+ *   `sleep N`, which does not stretch under CPU load, so the elastic part is
+ *   only the fork/exec around them. 120 s = 6x the longest deliberate
+ *   silence. Measured on this 32-cpu box at loadavg ~22, the whole
+ *   fresh-boot-weld selftest runs in ~75 s wall with a longest observed
+ *   silence well under 25 s.
+ *   Raise this ONLY if a script gains a genuinely longer silent poll — and
+ *   prefer making that poll emit progress instead. */
+#define GATE_SELFTEST_MAX_SILENT_SECS 120
+#define GATE_SELFTEST_SILENCE_DERIVATION \
+    "Derivation: the script prints a line per assertion; its longest " \
+    "deliberate silent window is a ~20s poll loop, so the bound is 6x that. " \
+    "It is a silence bound, never a runtime budget."
 #define IMPORT_COPY_PROVE_SELFTEST_REL \
     "tools/scripts/import-copy-prove-selftest.sh"
-#define IMPORT_COPY_PROVE_SELFTEST_TIMEOUT_SECS "180"
 #define FRESH_BOOT_WELD_PROVE_SELFTEST_REL \
     "tools/scripts/fresh-boot-weld-prove-selftest.sh"
-#define FRESH_BOOT_WELD_PROVE_SELFTEST_TIMEOUT_SECS "180"
 /* Gate E14 — condition cooldown re-arm (a page-loop bug class).
  * The script's own selftest plants an isolated tmp-dir fixture (never the
  * real app/conditions/src tree) proving a network-dependent COND_CRITICAL
@@ -402,8 +425,14 @@ int t_no_writer_below_sealed_frontier(void);
 int t_e9_operator_needed_sink(void);
 int t_systemd_memory_budget(void);
 int t_quality_job_guard(void);
-int run_gate_script_timeout(const char *script_rel,
-                                   const char *timeout_secs);
+/* Returned by run_gate_script_watched when the script was killed for making
+ * no progress. Deliberately not 1 and not any exit status a gate script can
+ * produce: a HANG and a failed assertion are different findings, and a caller
+ * must be able to say which one it saw. */
+#define GATE_SCRIPT_WEDGED (-2)
+void lint_gate_loadavg(char *out, size_t outsz);
+int run_gate_script_watched(const char *script_rel, int max_silent_secs,
+                            const char *why_bound);
 int t_import_copy_prove_selftest(void);
 int t_fresh_boot_weld_prove_selftest(void);
 int t_e14_condition_cooldown_gate(void);

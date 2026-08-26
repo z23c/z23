@@ -12,6 +12,7 @@
 #include "services/build_fabric_package_executor.h"
 #include "services/build_fabric_service.h"
 #include "services/build_fabric_worker_evidence.h"
+#include "services/build_fabric_worker_report.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 #include "util/file_tree_ops.h"
@@ -616,13 +617,12 @@ struct zcl_result build_fabric_worker_execute(
                                  : test_action ? "zbuild-test-ok=1"
                                                : "zbuild-ok=1";
     if (rc != 0 || strstr(capture, success_marker) == NULL) {
-        for (size_t i = 0; capture[i]; i++)
-            if ((unsigned char)capture[i] < 0x20 ||
-                (unsigned char)capture[i] > 0x7e)
-                capture[i] = ' ';
+        /* A HOST out of process table for this uid is a wedge, not a verdict
+         * about the input; the two must never reach the log looking alike.
+         * See services/build_fabric_worker_report.h. */
         char detail[BUILD_FABRIC_ERROR_MAX + 1];
-        (void)snprintf(detail, sizeof(detail), "sandbox-exit-%d: %.180s", rc,
-                       capture[0] ? capture : "no-report");
+        (void)build_fabric_worker_classify_report(
+            capture, rc, detail, sizeof(detail));
         bfw_paths_cleanup(&paths);
         return bfw_fail(ndb, action_id, lease_id, detail);
     }

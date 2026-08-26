@@ -16,6 +16,7 @@
 #ifdef ZCL_TESTING
 
 #include "lint_gate_selftests.h"
+#include "platform/clock.h"
 
 /* Per-process scratch path under the (possibly sandboxed) repo root.
  *
@@ -638,15 +639,66 @@ int run_gate_script_with_env2(const char *script_rel,
     return -1;
 }
 
-/* Like run_gate_script but execs the script under `timeout -k 5 <secs>`.
- * import-copy-prove-selftest.sh drives ~24 hermetic assertions with more
- * fork/subshell overhead than the rest of the lint-gate scripts (~40s wall
- * on a normal box); a bounded ceiling turns a regression in the driver (an
- * infinite loop, a hung fixture) into a failing test instead of a stalled
- * parallel run. `/usr/bin/timeout` is coreutils, already relied on by
- * tools/scripts/check_condition_cooldown.sh — no new dependency. */
-int run_gate_script_timeout(const char *script_rel,
-                                   const char *timeout_secs)
+/* Snapshot the 1/5/15-minute load average into `out`. Best effort: a machine
+ * without /proc/loadavg reports "unknown" rather than failing anything. This
+ * is DIAGNOSTIC ONLY — nothing in this file branches on it. */
+void lint_gate_loadavg(char *out, size_t outsz)
+{
+    if (!out || outsz == 0) return;
+    out[0] = '\0';
+    FILE *fp = fopen("/proc/loadavg", "rb");
+    if (!fp) { snprintf(out, outsz, "unknown"); return; }
+    char buf[128] = {0};
+    size_t n = fread(buf, 1, sizeof(buf) - 1, fp);
+    fclose(fp);
+    buf[n] = '\0';
+    /* Keep the first three fields (1m 5m 15m); drop the rest. */
+    int fields = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (buf[i] == ' ' && ++fields == 3) { buf[i] = '\0'; break; }
+        if (buf[i] == '\n') { buf[i] = '\0'; break; }
+    }
+    snprintf(out, outsz, "%s", buf[0] ? buf : "unknown");
+}
+
+/* ── run_gate_script_watched — a PROGRESS watchdog, not a stopwatch ────────
+ *
+ * WHY THIS IS NOT `timeout <N> <script>`.
+ *
+ * This helper used to exec the script under `timeout -k 5 180`. That grades
+ * the MACHINE, not the script: a total-duration ceiling fires on a saturated
+ * or slow-disk box running perfectly correct code, and the resulting failure
+ * is indistinguishable from a real defect. It is the same defect class as a
+ * systemd WatchdogSec that SIGABRTs a healthy node because concurrent builds
+ * saturated the box — measured on this project's own fleet. A bigger ceiling
+ * does not fix it; it only lengthens the fuse and delays a genuine hang.
+ *
+ * What actually distinguishes a wedged script from a slow one is PROGRESS. A
+ * gate script under test emits a line per assertion, so:
+ *
+ *   * a slow box emits the same lines, further apart  -> keep waiting;
+ *   * a wedged script emits nothing at all            -> kill and report.
+ *
+ * So the bound here is on SILENCE, not on elapsed time, and the parent resets
+ * it every time the child's output file grows. A box that is 20x slower still
+ * passes, which is the point: this project wants slow machines on the network
+ * and in CI, because they are the only instrument that finds the places where
+ * the code assumes fast storage.
+ *
+ * `max_silent_secs` must be derived from the LONGEST DELIBERATE SILENCE in
+ * the script being run (its own poll windows), not from its total runtime;
+ * the caller passes that derivation in `why_bound` and it is printed on every
+ * timeout so the next reader can check the arithmetic.
+ *
+ * Returns the script's exit status, or GATE_SCRIPT_WEDGED when it was killed
+ * for going silent (diagnosed on stderr, with the measured silence, the total
+ * elapsed and the load average), or -1 on a harness error. GATE_SCRIPT_WEDGED
+ * is deliberately NOT 1: a hang and a failed assertion are different findings
+ * and must never share an exit code.
+ *
+ * No `/usr/bin/timeout` dependency remains; the watchdog is this loop. */
+int run_gate_script_watched(const char *script_rel, int max_silent_secs,
+                            const char *why_bound)
 {
     char script[PATH_MAX];
     if (repo_path(script, sizeof(script), script_rel) != 0)
@@ -654,6 +706,8 @@ int run_gate_script_timeout(const char *script_rel,
 
     char out_path[PATH_MAX];
     if (lint_gate_out_path(out_path, sizeof(out_path)) != 0)
+        return -1;
+    if (max_silent_secs <= 0)
         return -1;
 
     struct sigaction old_chld;
@@ -675,27 +729,87 @@ int run_gate_script_timeout(const char *script_rel,
         return -1;
     }
     if (pid == 0) {
+        /* Own process group, so a wedged script's grandchildren (a fixture
+         * node left spinning) go down with it instead of outliving the run. */
+        (void)setpgid(0, 0);
         int fd = open(out_path, O_CREAT | O_WRONLY | O_TRUNC, 0600);
         if (fd >= 0) {
             (void)dup2(fd, STDOUT_FILENO);
             (void)dup2(fd, STDERR_FILENO);
             close(fd);
         }
-        execl("/usr/bin/timeout", "timeout", "-k", "5", timeout_secs,
-              script, (char *)NULL);
+        execl(script, script, (char *)NULL);
         _exit(127);
     }
+    (void)setpgid(pid, pid);  /* race-free: both sides set it */
 
+    const int64_t started_ns = clock_now_monotonic_ns();
+    int64_t last_progress_ns = started_ns;
+    off_t last_size = -1;
     int rc = 0;
-    while (waitpid(pid, &rc, 0) < 0) {
-        if (errno == EINTR)
-            continue;
-        if (restore_chld)
-            (void)sigaction(SIGCHLD, &old_chld, NULL);
-        return -1;
+    int wedged = 0;
+
+    for (;;) {
+        pid_t w = waitpid(pid, &rc, WNOHANG);
+        if (w == pid) break;
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            if (restore_chld) (void)sigaction(SIGCHLD, &old_chld, NULL);
+            return -1;
+        }
+
+        struct stat st;
+        if (stat(out_path, &st) == 0 && st.st_size != last_size) {
+            last_size = st.st_size;
+            last_progress_ns = clock_now_monotonic_ns();
+        }
+
+        int64_t silent_ns = clock_now_monotonic_ns() - last_progress_ns;
+        if (silent_ns > (int64_t)max_silent_secs * 1000000000LL) {
+            char load[64];
+            lint_gate_loadavg(load, sizeof(load));
+            long long silent_s = (long long)(silent_ns / 1000000000LL);
+            long long total_s =
+                (long long)((clock_now_monotonic_ns() - started_ns) / 1000000000LL);
+            fprintf(stderr,
+                "\n[gate-watchdog] WEDGED: %s produced no output for %llds.\n"
+                "[gate-watchdog]   measured: %llds of silence; %llds total elapsed;"
+                " loadavg %s.\n"
+                "[gate-watchdog]   bound: %ds of SILENCE (not of runtime). %s\n"
+                "[gate-watchdog]   This is a HANG report, not a failed assertion."
+                " A busy or slow-disk\n"
+                "[gate-watchdog]   box does not land here: it still emits its"
+                " progress lines, just\n"
+                "[gate-watchdog]   further apart, and every line resets this"
+                " bound. Silence for this\n"
+                "[gate-watchdog]   long means the script stopped making progress"
+                " altogether.\n"
+                "[gate-watchdog]   Partial output: %s\n",
+                script_rel, silent_s, silent_s, total_s, load,
+                max_silent_secs, why_bound ? why_bound : "(no derivation given)",
+                out_path);
+            /* SIGTERM the group first so the script's own EXIT trap runs and
+             * tears down its fixture processes; SIGKILL only as a backstop. */
+            (void)kill(-pid, SIGTERM);
+            for (int i = 0; i < 50; i++) {
+                if (waitpid(pid, &rc, WNOHANG) == pid) { wedged = 1; goto done; }
+                struct timespec ts = {0, 100 * 1000 * 1000};
+                (void)nanosleep(&ts, NULL);
+            }
+            (void)kill(-pid, SIGKILL);
+            while (waitpid(pid, &rc, 0) < 0 && errno == EINTR) { }
+            wedged = 1;
+            goto done;
+        }
+
+        struct timespec ts = {0, 250 * 1000 * 1000};  /* 250 ms poll */
+        (void)nanosleep(&ts, NULL);
     }
+
+done:
     if (restore_chld)
         (void)sigaction(SIGCHLD, &old_chld, NULL);
+    if (wedged) return GATE_SCRIPT_WEDGED;
     if (WIFEXITED(rc)) return WEXITSTATUS(rc);
     return -1;
 }

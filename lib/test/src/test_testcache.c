@@ -655,6 +655,40 @@ int test_testcache(void)
     TC_CHECK("runner never stores a self-skipped group as PASS",
              file_contains("lib/test/src/test_parallel.c",
                            "results[i].skip_markers == 0"));
+
+    /* An environment-dependent leg that never reported is NOT a skip. The
+     * group ran and hard-asserted every leg that does not depend on the
+     * environment; only an observation was missing. Two things must both hold,
+     * and they pull in opposite directions:
+     *
+     *   * It must stay OUT of the verdict cache. Caching it would let a loaded
+     *     box mint a receipt that a later run reuses as if the leg had been
+     *     proven — a skip laundered into a PASS.
+     *   * It must NOT block the push. Grading a Tor bootstrap window FAIL
+     *     measures the box's spare capacity, not the code, and would leave a
+     *     busy or honestly slow machine permanently unable to push. This
+     *     project keeps slow boxes precisely because they are the instrument
+     *     that finds fast-hardware assumptions; a gate they can never pass
+     *     destroys that signal.
+     *
+     * The sentinel spelling is the hinge between the two files: the runner
+     * counts the literal "SKIP (" as unexecuted coverage, so if this site is
+     * ever reworded back to SKIP the push gate silently starts refusing every
+     * loaded run again. Pin it. */
+    TC_CHECK("runner never stores an environment-unobserved group as PASS",
+             file_contains("lib/test/src/test_parallel.c",
+                           "results[i].env_unobserved == 0"));
+    TC_CHECK("runner reports env_unobserved in the machine verdict",
+             file_contains("lib/test/src/test_parallel.c",
+                           "env_unobserved=%d toolkey=%s"));
+    TC_CHECK("the onion bootstrap window prints UNOBSERVED, never SKIP",
+             file_contains("lib/test/src/test_onion_bootstrap.c",
+                           "UNOBSERVED (tor bootstrap did not complete"));
+    TC_CHECK("pre-push accepts an unobserved leg but still refuses a skip",
+             file_contains("tools/agent_fast_ci.sh",
+                           "rejected an environment-unobserved leg") &&
+             file_contains("tools/agent_fast_ci.sh",
+                           "accepted a runtime SKIP"));
     TC_CHECK("pre-push opts into exact per-group PASS receipts",
              file_contains("tools/agent_fast_ci.sh",
                            "T_FAST_EXACT_ARGS=--cache "

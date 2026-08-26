@@ -50,8 +50,15 @@ RAN_MARKER="$WORK/watcher-ran"
     ": > '$HOLD_MARKER'; while [ ! -e '$HOLD_RELEASE' ]; do sleep 0.01; done" &
 FG_PID=$!
 CHILD_PIDS+=("$FG_PID")
-for _ in $(seq 1 500); do
-    [ -e "$HOLD_MARKER" ] && break
+# Wait for the foreground holder to actually take the lock, guarded by the
+# holder being alive rather than by a 5s iteration budget. A just-forked
+# `flock` holder needs to be scheduled and to create a file; on a loaded box
+# that can take longer than 5s while nothing at all is wrong, and the
+# assertion below would then blame the lock implementation. Exhaustion is no
+# longer reachable: this ends on the marker (success) or on the holder dying
+# without it (a real defect). A holder that neither takes the lock nor exits
+# is a hang, and is reported as one by the runner-level progress watchdog.
+while [ ! -e "$HOLD_MARKER" ]; do
     kill -0 "$FG_PID" 2>/dev/null || break
     sleep 0.01
 done

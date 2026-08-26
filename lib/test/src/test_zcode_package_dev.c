@@ -96,6 +96,47 @@ static bool zpd_next_is(const struct zcl_command_reply *reply,
     return ok;
 }
 
+static bool zpd_plant_build_output(const char *root)
+{
+    char path[320];
+    (void)snprintf(path, sizeof(path), "%s/build", root);
+    if (mkdir(path, 0700) != 0) return false;
+    (void)snprintf(path, sizeof(path), "%s/build/obj.o", root);
+    return zpd_write(path, "not source\n");
+}
+
+static bool zpd_next_init_plan_is(const struct zcl_command_reply *reply,
+                                  const char *workspace)
+{
+    if (!reply || reply->next_count != 1 ||
+        strcmp(reply->next[0].command, "zcode.project.init.plan") != 0)
+        return false;
+    struct json_value input;
+    json_init(&input);
+    bool ok = json_read(&input, reply->next[0].input_json,
+                        strlen(reply->next[0].input_json)) &&
+        input.type == JSON_OBJ &&
+        strcmp(json_get_str(json_get(&input, "workspace")), workspace) == 0 &&
+        json_get(&input, "work") == NULL &&
+        json_get(&input, "task_root") == NULL &&
+        json_get(&input, "package_root") == NULL;
+    const struct zcl_command_spec *spec = ok
+        ? zcl_command_registry_find(zcl_command_catalog(),
+                                    "zcode.project.init.plan", NULL)
+        : NULL;
+    char why[160] = {0};
+    ok = ok && spec && zcl_command_registry_input_validate(
+        spec, &input, why, sizeof(why));
+    if (!ok)
+        printf("init-plan next mismatch: count=%zu command=%s input=%s why=%s\n",
+               reply->next_count,
+               reply->next_count ? reply->next[0].command : "<none>",
+               reply->next_count ? reply->next[0].input_json : "<none>",
+               why);
+    json_free(&input);
+    return ok;
+}
+
 static bool zpd_next_datadir_is(const struct zcl_command_reply *reply,
                                 const char *command, const char *workspace,
                                 const char *work_id, const char *datadir)
@@ -138,7 +179,7 @@ static void zpd_fixture_cleanup(const char *root)
     static const char *const files[] = {
         "link", "special", "LICENSE", "zcode-package.json", "src/x.c",
         "src/unused.c", "include/x.h", "tests/test.c", ".zvcs/control",
-        ".codeindex/control",
+        ".codeindex/control", "build/obj.o",
     };
     char path[512];
     for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
@@ -146,7 +187,7 @@ static void zpd_fixture_cleanup(const char *root)
         (void)unlink(path);
     }
     static const char *const dirs[] = {
-        "src", "include", "tests", ".zvcs", ".codeindex",
+        "src", "include", "tests", ".zvcs", ".codeindex", "build",
     };
     for (size_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
         (void)snprintf(path, sizeof(path), "%s/%s", root, dirs[i]);
@@ -564,6 +605,7 @@ static int zpd_test_control_stores(const uint8_t pubkey[33])
         ASSERT(mkdir(path, 0700) == 0);
         (void)snprintf(path, sizeof(path), "%s/.codeindex/control", root);
         ASSERT(zpd_write(path, "derived index state\n"));
+        ASSERT(zpd_plant_build_output(root));
         ASSERT(vcs_package_prepare(&options, &after, detail,
                                    sizeof(detail)) == VCS_PACKAGE_PREPARE_OK);
         ASSERT(memcmp(before.package_root, after.package_root, 32) == 0);
@@ -706,6 +748,12 @@ static int zpd_test_fail_closed(const uint8_t pubkey[33])
         struct vcs_package_prepared prepared;
         char detail[256];
         (void)snprintf(path, sizeof(path), "%s/.zvcs", root);
+        ASSERT(symlink("src", path) == 0);
+        ASSERT(vcs_package_prepare(&options, &prepared, detail,
+                                   sizeof(detail)) ==
+               VCS_PACKAGE_PREPARE_ERR_FILE_TYPE);
+        ASSERT(unlink(path) == 0);
+        (void)snprintf(path, sizeof(path), "%s/build", root);
         ASSERT(symlink("src", path) == 0);
         ASSERT(vcs_package_prepare(&options, &prepared, detail,
                                    sizeof(detail)) ==
@@ -1014,6 +1062,74 @@ static int zpd_test_reuse_plan(void)
         ASSERT(plan.disposition == VCS_PACKAGE_REUSE_AMBIGUOUS);
         ASSERT(plan.new_code_required);
         ASSERT(plan.selected_count == 2);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int zpd_test_work_start_package_bounds(void)
+{
+    int failures = 0;
+    TEST("zcode work start: missing package config names init; local build output is ignored") {
+        char root[256];
+        (void)snprintf(root, sizeof(root),
+                       "test-tmp/zcode-work-init-%ld", (long)getpid());
+        zpd_fixture_cleanup(root);
+        ASSERT(mkdir(root, 0700) == 0);
+        char path[320];
+        (void)snprintf(path, sizeof(path), "%s/src", root);
+        ASSERT(mkdir(path, 0700) == 0);
+        (void)snprintf(path, sizeof(path), "%s/src/x.c", root);
+        ASSERT(zpd_write(path, "int x(void) { return 1; }\n"));
+        ASSERT(zpd_plant_build_output(root));
+
+        struct json_value input;
+        json_init(&input); json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "workspace", root));
+        ASSERT(json_push_kv_str(&input, "goal", "Fix x"));
+        struct zcl_command_request request = { .input = &input };
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.zcode_work_start_init_test.v1");
+        zcl_native_handle_zcode_work_start(&request, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(strcmp(json_get_str(json_get(&reply.data, "work_id")), "") == 0);
+        ASSERT(strcmp(json_get_str(json_get(&reply.data, "goal")),
+                      "Fix x") == 0);
+        ASSERT(strcmp(json_get_str(json_get(&reply.data, "state")),
+                      "INITIALIZATION_REQUIRED") == 0);
+        ASSERT(strcmp(json_get_str(json_get(&reply.data, "stage")),
+                      "Initialize C23 package") == 0);
+        ASSERT(strcmp(json_get_str(json_get(&reply.data, "next_safe_command")),
+                      "zcode project init plan") == 0);
+        ASSERT(strcmp(json_get_str(json_get(
+                          &reply.data, "authoritative_workspace")),
+                      "unchanged") == 0);
+        ASSERT(json_get(&reply.data, "details_available") &&
+               !json_get_bool(json_get(&reply.data, "details_available")));
+        ASSERT(zpd_next_init_plan_is(&reply, root));
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+        zpd_fixture_cleanup(root);
+
+        (void)snprintf(root, sizeof(root),
+                       "test-tmp/zcode-work-build-%ld", (long)getpid());
+        ASSERT(zpd_fixture(root, false));
+        ASSERT(zpd_plant_build_output(root));
+        json_init(&input); json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "workspace", root));
+        ASSERT(json_push_kv_str(&input, "goal", "Fix x"));
+        ASSERT(json_push_kv_str(&input, "profile", "quick"));
+        request.input = &input;
+        zcl_command_reply_init(&reply, "zcl.zcode_work_start_build_test.v1");
+        zcl_native_handle_zcode_work_start(&request, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(strcmp(json_get_str(json_get(&reply.data, "state")),
+                      "AWAITING_CANDIDATE") == 0);
+        ASSERT(strcmp(json_get_str(json_get(&reply.data, "next_safe_command")),
+                      "zcode work run") == 0);
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+        zpd_fixture_cleanup(root);
         PASS();
     } _test_next:;
     return failures;
@@ -2531,6 +2647,7 @@ int test_zcode_package_dev(void)
                    zpd_test_project_inspect() +
                    zpd_test_project_init() +
                    zpd_test_reuse_plan() +
+                   zpd_test_work_start_package_bounds() +
                    zpd_test_work_start() +
                    zpd_test_work_toolchain() +
                    zpd_test_commons_join_front_doors() +

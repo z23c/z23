@@ -221,6 +221,30 @@ for each compile when a rebuild is slower than it should be. See
 [`BUILD.md`](./BUILD.md#the-compile-cache-is-in-the-repository) for how a hit
 is kept honest and how to clear or audit the cache.
 
+### Proving a permissionless cold join
+
+One claim gets asserted often enough in prose that it earned a single command:
+that someone with no account, no domain name and no certificate authority can
+install this node and have it start validating.
+
+```bash
+make prove-cold-join
+```
+
+It runs one test group, hermetically — no peer is dialled, no name is resolved,
+no parameter file is read, and the datadir it starts from is wiped — so it
+answers the same on an airgapped box as on a connected one. Read its two result
+lines: `COLD_JOIN_VERDICT=JOINED` (every proposition asserted there holds),
+`SLOW` (they all hold and this machine is slow), or `BROKEN` (a proposition is
+false — the only red). Elapsed time never decides the exit status.
+
+Read the `UNPROVEN` lines too. They are neither passes nor failures, and they
+are the reason the target prints propositions instead of a checkmark: the
+narrow, true form of each claim is asserted, and where the flattering form does
+not hold the transcript says so instead of asserting it away. The propositions,
+and which are narrower than the story, are enumerated at the top of
+[`lib/test/src/test_cold_join_sovereign.c`](../lib/test/src/test_cold_join_sovereign.c).
+
 For a push checkpoint:
 
 ```bash

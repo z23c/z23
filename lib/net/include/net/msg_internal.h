@@ -243,7 +243,23 @@ enum tx_accept_result {
     TX_ACCEPT_NONFINAL,         /* nLockTime policy rejection */
     TX_ACCEPT_EXPIRING_SOON,    /* expiry-height policy rejection */
     TX_ACCEPT_INTERNAL_ERROR,   /* mempool full / OOM */
+    /* We could not verify it — our shielded verifying keys are not
+     * installed yet, or the verification context could not be allocated.
+     * Rejected and never relayed, but NEVER scored: the sender did
+     * nothing wrong. See enum contextual_check_verdict. */
+    TX_ACCEPT_UNVERIFIABLE,
 };
+
+/* Per-peer bound on unverifiable transactions, mirroring the addr rate
+ * limit in msgprocessor_inv.c. An unverifiable outcome costs the sender
+ * no ban-score, so on its own it would let a peer replay shielded traffic
+ * for free for as long as our keys are missing. Past this many in one
+ * window the offence stops being "we couldn't check it" and becomes
+ * volume — which IS the peer's doing — and is scored as FLOOD.
+ * Deliberately generous: a node with keys missing sees every honest
+ * shielded tx on the network land here too. */
+#define TX_UNVERIFIABLE_WINDOW_SECS 60
+#define TX_UNVERIFIABLE_WINDOW_MAX  200
 
 /* Classify + add-or-reject a transaction, applying peer scoring for
  * malicious outcomes. Does NOT dedupe against the tx_already_seen
@@ -282,6 +298,9 @@ void block_mark_seen(const struct uint256 *hash);
 void block_clear_seen(const struct uint256 *hash);
 bool tx_already_seen(const struct uint256 *hash);
 void tx_mark_seen(const struct uint256 *hash);
+/* Undo tx_mark_seen — see msgprocessor.c. Called when a transaction was
+ * processed but not judged, so a later re-announcement is reconsidered. */
+void tx_clear_seen(const struct uint256 *hash);
 
 /* decide whether a freshly processed block may safely be added to the dedup
  * ring. Historically, every received block was marked seen BEFORE the

@@ -16,6 +16,7 @@
 
 #include "util/log_macros.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -1181,6 +1182,109 @@ struct zcl_result os_sandbox_set_rlimits(const struct os_sandbox_rlimits *lim)
     return ZCL_OK;
 }
 
+
+/* ── process budget ────────────────────────────────────────────────────── */
+
+uint64_t os_sandbox_uid_task_count(void)
+{
+    DIR *proc = opendir("/proc");
+    if (!proc) return 0;
+    const uid_t me = getuid();
+    uint64_t total = 0;
+    struct dirent *ent;
+    while ((ent = readdir(proc)) != NULL) {
+        char *end = NULL;
+        long pid = strtol(ent->d_name, &end, 10);
+        if (!end || *end != '\0' || pid <= 0) continue;
+        char tpath[64];
+        int n = snprintf(tpath, sizeof(tpath), "/proc/%ld/task", pid);
+        if (n <= 0 || (size_t)n >= sizeof(tpath)) continue;
+        struct stat st;
+        if (stat(tpath, &st) != 0 || st.st_uid != me) continue;
+        DIR *tasks = opendir(tpath);
+        if (!tasks) continue;
+        struct dirent *te;
+        while ((te = readdir(tasks)) != NULL)
+            if (te->d_name[0] >= '0' && te->d_name[0] <= '9') total++;
+        closedir(tasks);
+    }
+    closedir(proc);
+    return total;
+}
+
+uint64_t os_sandbox_nproc_hard_limit(void)
+{
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_NPROC, &rl) != 0 || rl.rlim_max == RLIM_INFINITY)
+        return OS_SANDBOX_RLIMIT_KEEP;
+    return (uint64_t)rl.rlim_max;
+}
+
+struct os_sandbox_process_budget os_sandbox_process_budget_at(
+    uint64_t requested_ceiling, uint64_t required,
+    uint64_t uid_tasks, uint64_t hard)
+{
+    struct os_sandbox_process_budget b = {
+        .ceiling   = requested_ceiling,
+        .requested = requested_ceiling,
+        .hard      = hard,
+        .uid_tasks = uid_tasks,
+        .headroom  = 0,
+        .required  = required,
+        .admitted  = false,
+    };
+    /* setrlimit cannot RAISE a hard limit, so the uid's static NPROC hard
+     * limit is the only thing allowed to lower the ceiling. That is host
+     * CONFIGURATION, not host LOAD: it does not move while a suite runs. */
+    if (hard != OS_SANDBOX_RLIMIT_KEEP && hard < b.ceiling)
+        b.ceiling = hard;
+    b.headroom = b.ceiling > uid_tasks ? b.ceiling - uid_tasks : 0;
+    b.admitted = b.headroom >= required;
+    return b;
+}
+
+struct os_sandbox_process_budget os_sandbox_process_budget_live(
+    uint64_t requested_ceiling, uint64_t required)
+{
+    return os_sandbox_process_budget_at(requested_ceiling, required,
+                                        os_sandbox_uid_task_count(),
+                                        os_sandbox_nproc_hard_limit());
+}
+
+uint64_t os_sandbox_process_group_census(pid_t pgid)
+{
+    if (pgid <= 0) return 0;
+    DIR *proc = opendir("/proc");
+    if (!proc) return 0;
+    uint64_t total = 0;
+    struct dirent *ent;
+    while ((ent = readdir(proc)) != NULL) {
+        char *end = NULL;
+        long pid = strtol(ent->d_name, &end, 10);
+        if (!end || *end != '\0' || pid <= 0) continue;
+        char spath[64];
+        int n = snprintf(spath, sizeof(spath), "/proc/%ld/stat", pid);
+        if (n <= 0 || (size_t)n >= sizeof(spath)) continue;
+        int fd = open(spath, O_RDONLY | O_CLOEXEC);
+        if (fd < 0) continue;
+        char buf[512];
+        ssize_t got = read(fd, buf, sizeof(buf) - 1);
+        (void)close(fd);
+        if (got <= 0) continue;
+        buf[got] = '\0';
+        /* This file is "pid (comm) state ppid pgrp ...". comm may contain
+         * spaces AND parentheses, so anchor on the LAST ')'. */
+        const char *after_comm = strrchr(buf, ')');
+        if (!after_comm) continue;
+        char state = 0;
+        long ppid = 0, pgrp = 0;
+        if (sscanf(after_comm + 1, " %c %ld %ld", &state, &ppid, &pgrp) == 3 &&
+            pgrp == (long)pgid)
+            total++;
+    }
+    closedir(proc);
+    return total;
+}
 /* ── namespaces ────────────────────────────────────────────────────────── */
 
 int os_sandbox_session_ns_flags(void)
