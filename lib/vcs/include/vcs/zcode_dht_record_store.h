@@ -63,6 +63,13 @@ enum vcs_zcode_dht_record_store_result vcs_zcode_dht_record_store_put(
     struct vcs_zcode_dht_record_store *store,
     const struct vcs_zcode_dht_record *record, uint64_t now_unix);
 
+/* Drop every record whose expiry has passed, in place, preserving the
+ * canonical order load() verifies; returns how many rows were freed.
+ * Same predicate load() applies on restart, so this is a mid-session
+ * reload of exactly the live set. */
+size_t vcs_zcode_dht_record_store_collect(
+    struct vcs_zcode_dht_record_store *store, uint64_t now_unix);
+
 size_t vcs_zcode_dht_record_store_count(
     const struct vcs_zcode_dht_record_store *store);
 size_t vcs_zcode_dht_record_store_query(

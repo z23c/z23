@@ -143,36 +143,25 @@ static int entry_compare(const void *left, const void *right)
   return memcmp(a->wire, b->wire, VCS_ZCODE_DHT_RECORD_WIRE_BYTES);
 }
 
-static size_t count_root_after_removal(
-    const struct vcs_zcode_dht_record_store *store,
-    const struct vcs_zcode_dht_record *incoming, bool remove_older)
+/* Drop every record whose expiry has passed, in place and order-preserving
+ * (whole elements move, so the canonical wire sort load() verifies is kept),
+ * returning how many rows were freed. This mirrors exactly what load()
+ * already prunes on restart — same predicate, no format or digest change —
+ * so reclaiming early is semantically "reload happened now". */
+size_t vcs_zcode_dht_record_store_collect(
+    struct vcs_zcode_dht_record_store *store, uint64_t now_unix)
 {
-  size_t count = 0;
+  if (!store)
+    return 0;
+  size_t write_index = 0;
   for (size_t i = 0; i < store->count; i++) {
-    const struct vcs_zcode_dht_record *record = &store->entries[i].record;
-    if (remove_older && vcs_zcode_dht_record_stream_equal(record, incoming) &&
-        record->sequence < incoming->sequence)
-      continue;
-    if (memcmp(record_root(record), record_root(incoming), 32) == 0)
-      count++;
+    if (now_unix >= store->entries[i].record.expiry)
+      continue; /* counted by subtraction below */
+    store->entries[write_index++] = store->entries[i];
   }
-  return count;
-}
-
-static size_t count_provider_after_removal(
-    const struct vcs_zcode_dht_record_store *store,
-    const struct vcs_zcode_dht_record *incoming, bool remove_older)
-{
-  size_t count = 0;
-  for (size_t i = 0; i < store->count; i++) {
-    const struct vcs_zcode_dht_record *record = &store->entries[i].record;
-    if (remove_older && vcs_zcode_dht_record_stream_equal(record, incoming) &&
-        record->sequence < incoming->sequence)
-      continue;
-    if (memcmp(record->provider_node_id, incoming->provider_node_id, 32) == 0)
-      count++;
-  }
-  return count;
+  size_t removed = store->count - write_index;
+  store->count = write_index;
+  return removed;
 }
 
 enum vcs_zcode_dht_record_store_result vcs_zcode_dht_record_store_put(
@@ -191,19 +180,53 @@ enum vcs_zcode_dht_record_store_result vcs_zcode_dht_record_store_put(
       VCS_ZCODE_DHT_RECORD_OK)
     return VCS_ZCODE_DHT_RECORD_STORE_INVALID;
 
+  /* One pass over the table gathers everything the admission decision
+   * needs. Sequence history (max_sequence / conflicts / duplicate) stays
+   * EXPIRY-BLIND on purpose: an expired higher-sequence row still anchors
+   * staleness and conflict evidence exactly as before. Capacity accounting
+   * alone is expiry-aware — dead rows stop consuming slots, which is what
+   * load() already does at restart — and each live counter carries its own
+   * would-be-superseded drop so post-removal arithmetic needs no second
+   * scan. Every same-stream-older row shares root and provider with the
+   * incoming record (stream equality implies both), so one superseded flag
+   * feeds all three drops. */
   uint64_t max_sequence = 0;
-  size_t conflicts = 0, remove_count = 0;
+  size_t conflicts = 0;
+  size_t glob_live = 0, glob_drop = 0;
+  size_t root_live = 0, root_drop = 0;
+  size_t provider_live = 0, provider_drop = 0;
   for (size_t i = 0; i < store->count; i++) {
     const struct record_store_entry *entry = &store->entries[i];
-    if (!vcs_zcode_dht_record_stream_equal(&entry->record, record))
-      continue;
-    if (entry->record.sequence > max_sequence)
-      max_sequence = entry->record.sequence;
-    if (entry->record.sequence == record->sequence) {
-      conflicts++;
-      if (memcmp(entry->wire, wire, sizeof(wire)) == 0)
-        return VCS_ZCODE_DHT_RECORD_STORE_DUPLICATE;
+    const struct vcs_zcode_dht_record *existing = &entry->record;
+    bool same_stream =
+        vcs_zcode_dht_record_stream_equal(existing, record);
+    bool superseded = false;
+    if (same_stream) {
+      if (existing->sequence > max_sequence)
+        max_sequence = existing->sequence;
+      if (existing->sequence == record->sequence) {
+        conflicts++;
+        if (memcmp(entry->wire, wire, sizeof(wire)) == 0)
+          return VCS_ZCODE_DHT_RECORD_STORE_DUPLICATE;
+      }
+      superseded = existing->sequence < record->sequence;
     }
+    if (now_unix >= existing->expiry)
+      continue; /* past here the pass counts LIVE capacity only */
+    glob_live++;
+    if (memcmp(record_root(existing), record_root(record), 32) == 0) {
+      root_live++;
+      if (superseded)
+        root_drop++;
+    }
+    if (memcmp(existing->provider_node_id, record->provider_node_id,
+               32) == 0) {
+      provider_live++;
+      if (superseded)
+        provider_drop++;
+    }
+    if (superseded)
+      glob_drop++;
   }
   if (max_sequence > record->sequence)
     return VCS_ZCODE_DHT_RECORD_STORE_STALE;
@@ -211,31 +234,31 @@ enum vcs_zcode_dht_record_store_result vcs_zcode_dht_record_store_put(
       conflicts >= VCS_ZCODE_DHT_RECORD_STORE_MAX_CONFLICTS)
     return VCS_ZCODE_DHT_RECORD_STORE_CONFLICT_CAP;
   bool newer = max_sequence && record->sequence > max_sequence;
-  if (newer) {
-    for (size_t i = 0; i < store->count; i++)
-      if (vcs_zcode_dht_record_stream_equal(&store->entries[i].record, record) &&
-          store->entries[i].record.sequence < record->sequence)
-        remove_count++;
-  }
-  if (store->count - remove_count >= VCS_ZCODE_DHT_RECORD_STORE_MAX_RECORDS)
+  if (glob_live - (newer ? glob_drop : 0) >=
+      VCS_ZCODE_DHT_RECORD_STORE_MAX_RECORDS)
     return VCS_ZCODE_DHT_RECORD_STORE_GLOBAL_CAP;
-  if (count_root_after_removal(store, record, newer) >=
+  if (root_live - (newer ? root_drop : 0) >=
       VCS_ZCODE_DHT_RECORD_STORE_MAX_PER_ROOT)
     return VCS_ZCODE_DHT_RECORD_STORE_ROOT_CAP;
-  if (count_provider_after_removal(store, record, newer) >=
+  if (provider_live - (newer ? provider_drop : 0) >=
       VCS_ZCODE_DHT_RECORD_STORE_MAX_PER_PROVIDER)
     return VCS_ZCODE_DHT_RECORD_STORE_PROVIDER_CAP;
 
-  if (remove_count) {
-    size_t write_index = 0;
-    for (size_t i = 0; i < store->count; i++) {
-      bool remove = vcs_zcode_dht_record_stream_equal(&store->entries[i].record, record) &&
-                    store->entries[i].record.sequence < record->sequence;
-      if (!remove)
-        store->entries[write_index++] = store->entries[i];
-    }
-    store->count = write_index;
+  /* Physical reclaim mirrors the live-capacity view: expired rows go when
+   * this admission lands, so a stored image after any successful put
+   * matches what a reload would have produced. */
+  size_t write_index = 0;
+  for (size_t i = 0; i < store->count; i++) {
+    struct record_store_entry *entry = &store->entries[i];
+    bool remove = now_unix >= entry->record.expiry ||
+                  (newer &&
+                   vcs_zcode_dht_record_stream_equal(&entry->record,
+                                                     record) &&
+                   entry->record.sequence < record->sequence);
+    if (!remove)
+      store->entries[write_index++] = *entry;
   }
+  store->count = write_index;
   struct record_store_entry *entry = &store->entries[store->count++];
   entry->record = *record;
   memcpy(entry->wire, wire, sizeof(entry->wire));

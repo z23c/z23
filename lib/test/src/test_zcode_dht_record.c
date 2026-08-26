@@ -700,6 +700,179 @@ static int test_record_store_sequence_and_expiry(void)
   return failures;
 }
 
+/* Capacity accounting is expiry-aware while stream history stays
+ * expiry-blind, mirroring what load() prunes on restart. These pins hold
+ * that split against drift in either direction: dead rows must free room
+ * without erasing staleness/conflict evidence, and reclaim must produce
+ * exactly the image a cold reload would have built. */
+static int test_record_store_expiry_reclaim(void)
+{
+  int failures = 0;
+  TEST("zcode dht records: dead rows free capacity yet still anchor evidence") {
+    struct record_fixture f;
+    int chain_calls = 0;
+    ASSERT(rf_init(&f, &chain_calls));
+
+    /* A full root bucket refuses a new stream, then admits the identical
+     * record once its neighbours expire; the healing admission's own
+     * reclaim pass leaves exactly one live row behind. */
+    struct vcs_zcode_dht_record_store *store =
+        vcs_zcode_dht_record_store_create(f.verify.network_genesis);
+    ASSERT(store != NULL);
+    struct vcs_zcode_dht_record record;
+    for (size_t i = 0; i < VCS_ZCODE_DHT_RECORD_STORE_MAX_PER_ROOT; i++) {
+      rf_record(&f, &record, VCS_ZCODE_DHT_RECORD_POINTER);
+      (void)snprintf(record.namespace_name, sizeof(record.namespace_name),
+                     "science.cap.%zu", i);
+      ASSERT_EQ(vcs_zcode_dht_record_sign(&record, f.online_seed),
+                VCS_ZCODE_DHT_RECORD_OK);
+      ASSERT_EQ(vcs_zcode_dht_record_store_put(store, &record, 1500),
+                VCS_ZCODE_DHT_RECORD_STORE_ADDED);
+    }
+    struct vcs_zcode_dht_record heal;
+    rf_record(&f, &heal, VCS_ZCODE_DHT_RECORD_POINTER);
+    (void)snprintf(heal.namespace_name, sizeof(heal.namespace_name),
+                   "science.heal");
+    heal.expiry = 2900;
+    ASSERT_EQ(vcs_zcode_dht_record_sign(&heal, f.online_seed),
+              VCS_ZCODE_DHT_RECORD_OK);
+    ASSERT_EQ(vcs_zcode_dht_record_store_put(store, &heal, 1500),
+              VCS_ZCODE_DHT_RECORD_STORE_ROOT_CAP);
+    ASSERT_EQ(vcs_zcode_dht_record_store_count(store),
+              VCS_ZCODE_DHT_RECORD_STORE_MAX_PER_ROOT);
+    uint8_t bucket_root[32], served_root[32];
+    memset(bucket_root, 0x61, sizeof(bucket_root));
+    memcpy(served_root, heal.semantic_root, 32);
+    struct vcs_zcode_dht_record served[4];
+    ASSERT_EQ(vcs_zcode_dht_record_store_query(
+                  store, VCS_ZCODE_DHT_RECORD_POINTER, "science.cap.0",
+                  bucket_root, 1900, served, 4),
+              0);
+    ASSERT_EQ(vcs_zcode_dht_record_store_put(store, &heal, 1900),
+              VCS_ZCODE_DHT_RECORD_STORE_ADDED);
+    ASSERT_EQ(vcs_zcode_dht_record_store_count(store), 1);
+    ASSERT_EQ(vcs_zcode_dht_record_store_query(
+                  store, VCS_ZCODE_DHT_RECORD_POINTER, "science.heal",
+                  served_root, 1900, served, 4),
+              1);
+    vcs_zcode_dht_record_store_free(store);
+
+    /* Sequence history ignores expiry on purpose: an expired high anchor
+     * still forces STALE for older sequences and still counts toward
+     * conflict evidence, while capacity never counted it. */
+    store = vcs_zcode_dht_record_store_create(f.verify.network_genesis);
+    ASSERT(store != NULL);
+    struct vcs_zcode_dht_record current, next, tie_a, stale, tie_b;
+    rf_record(&f, &current, VCS_ZCODE_DHT_RECORD_POINTER);
+    current.transport_root[0] = 0x41;
+    next = current;
+    next.sequence = 12;
+    tie_a = next;
+    tie_a.transport_root[0] ^= 1;
+    ASSERT_EQ(vcs_zcode_dht_record_sign(&current, f.online_seed),
+              VCS_ZCODE_DHT_RECORD_OK);
+    ASSERT_EQ(vcs_zcode_dht_record_sign(&next, f.online_seed),
+              VCS_ZCODE_DHT_RECORD_OK);
+    ASSERT_EQ(vcs_zcode_dht_record_sign(&tie_a, f.online_seed),
+              VCS_ZCODE_DHT_RECORD_OK);
+    ASSERT_EQ(vcs_zcode_dht_record_store_put(store, &current, 1500),
+              VCS_ZCODE_DHT_RECORD_STORE_ADDED);
+    ASSERT_EQ(vcs_zcode_dht_record_store_put(store, &next, 1500),
+              VCS_ZCODE_DHT_RECORD_STORE_ADDED);
+    ASSERT_EQ(vcs_zcode_dht_record_store_count(store), 1);
+    ASSERT_EQ(vcs_zcode_dht_record_store_put(store, &tie_a, 1500),
+              VCS_ZCODE_DHT_RECORD_STORE_CONFLICT);
+    stale = current;
+    stale.transport_root[0] = 0x43;
+    stale.expiry = 2900;
+    ASSERT_EQ(vcs_zcode_dht_record_sign(&stale, f.online_seed),
+              VCS_ZCODE_DHT_RECORD_OK);
+    tie_b = tie_a;
+    tie_b.transport_root[0] ^= 2;
+    tie_b.expiry = 2900;
+    ASSERT_EQ(vcs_zcode_dht_record_sign(&tie_b, f.online_seed),
+              VCS_ZCODE_DHT_RECORD_OK);
+    /* Both stored rows have expired here; neither may consume capacity or
+     * vanish the verdicts below. A refused put leaves the image untouched,
+     * and a successful conflicting admission compacts the dead pair itself,
+     * leaving exactly what a restart would have rebuilt. */
+    ASSERT_EQ(vcs_zcode_dht_record_store_count(store), 2);
+    ASSERT_EQ(vcs_zcode_dht_record_store_put(store, &stale, 1900),
+              VCS_ZCODE_DHT_RECORD_STORE_STALE);
+    ASSERT_EQ(vcs_zcode_dht_record_store_count(store), 2);
+    ASSERT_EQ(vcs_zcode_dht_record_store_put(store, &tie_b, 1900),
+              VCS_ZCODE_DHT_RECORD_STORE_CONFLICT);
+    ASSERT_EQ(vcs_zcode_dht_record_store_collect(store, 1900), 0);
+    ASSERT_EQ(vcs_zcode_dht_record_store_count(store), 1);
+    ASSERT_EQ(vcs_zcode_dht_record_store_query(
+                  store, VCS_ZCODE_DHT_RECORD_POINTER, "science.study",
+                  bucket_root, 1900, served, 4),
+              1);
+    ASSERT(served[0].transport_root[0] ==
+           (uint8_t)(0x41 ^ 1 ^ 2));
+    ASSERT_EQ(vcs_zcode_dht_record_store_put(store, &stale, 1900),
+              VCS_ZCODE_DHT_RECORD_STORE_STALE);
+    vcs_zcode_dht_record_store_free(store);
+
+    /* Reclaim of a mixed store equals a fresh build of the survivors, and
+     * a reclaimed image survives save/load byte-for-byte. */
+    store = vcs_zcode_dht_record_store_create(f.verify.network_genesis);
+    struct vcs_zcode_dht_record_store *rebuilt =
+        vcs_zcode_dht_record_store_create(f.verify.network_genesis);
+    ASSERT(store != NULL && rebuilt != NULL);
+    for (size_t i = 0; i < 4; i++) {
+      rf_record(&f, &record, VCS_ZCODE_DHT_RECORD_POINTER);
+      (void)snprintf(record.namespace_name, sizeof(record.namespace_name),
+                     "science.mix.%zu", i);
+      ASSERT_EQ(vcs_zcode_dht_record_sign(&record, f.online_seed),
+                VCS_ZCODE_DHT_RECORD_OK);
+      ASSERT_EQ(vcs_zcode_dht_record_store_put(store, &record, 1500),
+                VCS_ZCODE_DHT_RECORD_STORE_ADDED);
+    }
+    for (size_t i = 0; i < 3; i++) {
+      rf_record(&f, &record, VCS_ZCODE_DHT_RECORD_POINTER);
+      (void)snprintf(record.namespace_name, sizeof(record.namespace_name),
+                     "science.keep.%zu", i);
+      record.expiry = 2900;
+      ASSERT_EQ(vcs_zcode_dht_record_sign(&record, f.online_seed),
+                VCS_ZCODE_DHT_RECORD_OK);
+      ASSERT_EQ(vcs_zcode_dht_record_store_put(store, &record, 1500),
+                VCS_ZCODE_DHT_RECORD_STORE_ADDED);
+      ASSERT_EQ(vcs_zcode_dht_record_store_put(rebuilt, &record, 1500),
+                VCS_ZCODE_DHT_RECORD_STORE_ADDED);
+    }
+    ASSERT_EQ(vcs_zcode_dht_record_store_count(store), 7);
+    ASSERT_EQ(vcs_zcode_dht_record_store_collect(store, 1900), 4);
+    ASSERT_EQ(vcs_zcode_dht_record_store_count(store), 3);
+    ASSERT_EQ(vcs_zcode_dht_record_store_collect(store, 1900), 0);
+    uint8_t collected_digest[32], rebuilt_digest[32];
+    vcs_zcode_dht_record_store_digest(store, collected_digest);
+    vcs_zcode_dht_record_store_digest(rebuilt, rebuilt_digest);
+    ASSERT(memcmp(collected_digest, rebuilt_digest, 32) == 0);
+
+    char datadir[] = "test-tmp/zcode_dht_records_reclaim_XXXXXX";
+    ASSERT(mkdtemp(datadir) != NULL);
+    char error[160] = {0};
+    ASSERT_EQ(vcs_zcode_dht_record_store_save(store, datadir, error,
+                                              sizeof(error)),
+              VCS_ZCODE_DHT_RECORD_STORE_OK);
+    struct vcs_zcode_dht_record_verify_context verify = f.verify;
+    verify.now_unix = 1900;
+    ASSERT_EQ(vcs_zcode_dht_record_store_load(rebuilt, datadir, &verify,
+                                              error, sizeof(error)),
+              VCS_ZCODE_DHT_RECORD_STORE_OK);
+    ASSERT_EQ(vcs_zcode_dht_record_store_count(rebuilt), 3);
+    vcs_zcode_dht_record_store_digest(rebuilt, rebuilt_digest);
+    ASSERT(memcmp(collected_digest, rebuilt_digest, 32) == 0);
+    vcs_zcode_dht_record_store_free(rebuilt);
+    vcs_zcode_dht_record_store_free(store);
+    rf_cleanup_store(datadir);
+    PASS();
+  }
+  _test_next:;
+  return failures;
+}
+
 static int test_declared_replication(void)
 {
   int failures = 0;
@@ -1328,6 +1501,7 @@ int test_zcode_dht_record(void)
   failures += test_record_store_restart();
   failures += test_record_store_sequence_and_expiry();
   failures += test_record_store_caps();
+  failures += test_record_store_expiry_reclaim();
   failures += test_declared_replication();
 #ifdef ZCL_TESTING
   failures += test_science_pointer_ranking();
