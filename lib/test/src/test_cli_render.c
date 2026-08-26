@@ -517,6 +517,28 @@ static int test_guide_tree_render(void)
                != NULL);
         PASS();
     }
+    TEST("offered renders vantage and one next action, not JSON keys") {
+        const char *doc =
+            "{\"schema\":\"zcl.result.v1\","
+            "\"command\":\"zcode.package.offered\","
+            "\"ok\":true,\"status\":\"passed\",\"data\":{"
+            "\"live\":false,\"serving_ready\":false,\"peer_count\":0,"
+            "\"next_command\":\"z23 join -datadir=/tmp/x\"}}";
+        struct zcl_cli_render_env e = cr_env(80, false);
+        char out[8192];
+        size_t n = zcl_cli_render_doc(doc, strlen(doc),
+                                      "zcode.package.offered", &e, out,
+                                      sizeof(out));
+        ASSERT(n > 0);
+        ASSERT(strstr(out, "offered") != NULL);
+        ASSERT(strstr(out, "this CLI is not the hosting engine") != NULL);
+        ASSERT(strstr(out, "z23 join -datadir=/tmp/x") != NULL);
+        ASSERT(strstr(out, "not ready") != NULL);
+        ASSERT(strstr(out, "\"live\"") == NULL);
+        ASSERT(strstr(out, "\"schema\"") == NULL);
+        ASSERT(cr_max_line_width(out) <= 80);
+        PASS();
+    }
     TEST("code.guide renders a four-step recipe, not JSON keys") {
         const char *doc =
             "{\"schema\":\"zcl.result.v1\",\"command\":\"code.guide\","

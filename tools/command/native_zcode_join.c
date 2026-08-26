@@ -25,9 +25,13 @@ bool zcl_zcode_join_posture_fill(struct zcl_zcode_join_posture *out)
     out->joined = out->package_hosting && out->build_worker;
     out->join_flags = ZCL_ZCODE_JOIN_FLAGS;
     out->hosting_requirement = ZCL_ZCODE_HOSTING_REQUIREMENT;
-    out->offline_next_command =
-        "restart this node with " ZCL_ZCODE_JOIN_FLAGS
-        ", then z23 zcode package offered";
+    /* One next action: write the file if it is not yet hosting, otherwise
+     * name the restart. Repeating the flag list after `z23 join` already
+     * wrote them reads as "you have not joined". */
+    out->offline_next_command = out->package_hosting
+        ? "systemctl --user restart zclassic23, then "
+          "z23 zcode package offered"
+        : "z23 join";
     return true;
 }
 

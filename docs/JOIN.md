@@ -98,7 +98,10 @@ z23 zcode package offered -datadir="$HOME/.zclassic-c23"
 
 `serving_ready=true` means the resident package engine is live and has at
 least one eligible NODE_ZCL23 peer. `peer_count` is the measured session count;
-zero is never rewritten as a successful join.
+zero is never rewritten as a successful join. A one-shot CLI has no engine, so
+`package offered` names one next action instead of pretending to serve:
+`z23 join` if this process is not hosting yet, or the restart if
+`packagehost` is already on.
 
 ### The two tiers
 
