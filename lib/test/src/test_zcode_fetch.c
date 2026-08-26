@@ -17,8 +17,10 @@
  *                          (complete, operator-pinned, public-serveable /
  *                          would_serve) is still reported, fail closed
  *   zcode package offered  one-shot: live:false, empty items, still
- *                          PASSED; live engine: one ANNOUNCE row with
- *                          engine advertisers and store-side have_local.
+ *                          PASSED; next is `z23 join` until this process
+ *                          is hosting, then the named restart. live
+ *                          engine: one ANNOUNCE row with engine
+ *                          advertisers and store-side have_local.
  *                          Replica counts are never invented.
  *   zcode package pin      UNKNOWN_PACKAGE names the untracked root; a
  *                          tracked package pins (operator path, never
@@ -64,6 +66,7 @@
 #include "vcs/package_swarm.h"
 #include "vcs/package_swarm_node.h"
 #include "util/safe_alloc.h"
+#include "util/util.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -875,8 +878,9 @@ static int zf_t_offered_one_shot(void)
         {
             const char *next =
                 json_get_str(json_get(&c.reply.data, "next_command"));
-            ASSERT(next != NULL &&
-                   strstr(next, "-packagehost=1 -buildworker=1") != NULL);
+            ASSERT(next != NULL && strstr(next, "z23 join") != NULL);
+            ASSERT(strstr(next, dd) != NULL);
+            ASSERT(strstr(next, "-packagehost=1 -buildworker=1") == NULL);
             ASSERT(strcmp(json_get_str(json_get(&c.reply.data, "join_flags")),
                           "-packagehost=1 -buildworker=1") == 0);
             ASSERT(!json_get_bool(json_get(&c.reply.data, "joined")));
@@ -887,6 +891,40 @@ static int zf_t_offered_one_shot(void)
         zf_cmd_free(&c);
         PASS();
     } _test_next:;
+    return failures;
+}
+
+static int zf_t_offered_one_shot_hosting(void)
+{
+    int failures = 0;
+    TEST("zcode package offered (one-shot, hosting already in this process): "
+         "next is restart, not another join") {
+        char dd[1024];
+        test_make_tmpdir(dd, sizeof(dd), "zcode_fetch", "offered-hosting");
+        const char *argv[] = { "z23", "-packagehost=1" };
+        ParseParameters(2, argv);
+        struct zf_cmd c;
+        zf_cmd_init(&c, dd);
+        zcl_native_handle_zcode_package_offered(&c.request, &c.reply);
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(!json_get_bool(json_get(&c.reply.data, "live")));
+        ASSERT(json_get_bool(json_get(&c.reply.data, "package_hosting")));
+        {
+            const char *next =
+                json_get_str(json_get(&c.reply.data, "next_command"));
+            ASSERT(next != NULL);
+            ASSERT(strstr(next, "restart") != NULL);
+            ASSERT(strstr(next, "z23 zcode package offered") != NULL);
+            ASSERT(strstr(next, dd) != NULL);
+            ASSERT(strstr(next, "z23 join") == NULL);
+        }
+        zf_cmd_free(&c);
+        PASS();
+    } _test_next:;
+    {
+        const char *reset[] = { "z23" };
+        ParseParameters(1, reset);
+    }
     return failures;
 }
 
@@ -1323,6 +1361,7 @@ int test_zcode_fetch(void)
     failures += zf_t_peers_possession();
     failures += zf_t_pin_roundtrip();
     failures += zf_t_offered_one_shot();
+    failures += zf_t_offered_one_shot_hosting();
     failures += zf_t_offered_live();
     failures += zf_t_fastobj_export_admit();
     failures += zf_t_fastobj_refusals();

@@ -981,6 +981,30 @@ static void render_zcode_join(struct buf *b, const struct zcl_cli_render_env *e,
     emit_kv(b, e, 4, "then", "z23 zcode package offered");
 }
 
+/* Join's typed next command. A one-shot CLI has no engine, so the JSON
+ * used to dump live:false / serving_ready:false as if join had failed.
+ * The recipe names that vantage and the one next action. */
+static void render_zcode_offered(struct buf *b, const struct zcl_cli_render_env *e,
+                                 const struct json_value *root)
+{
+    emit_header(b, e, "offered");
+    buf_putc(b, '\n');
+    const struct json_value *data = json_get(root, "data");
+    bool live = json_get_bool(json_get(data, "live"));
+    bool serving = json_get_bool(json_get(data, "serving_ready"));
+    char peers[32];
+    (void)snprintf(peers, sizeof(peers), "%lld",
+                   (long long)json_get_int(json_get(data, "peer_count")));
+    emit_kv(b, e, 6, "live", live ? "yes" : "no");
+    emit_kv(b, e, 6, "serve", serving ? "ready" : "not ready");
+    emit_kv(b, e, 6, "peers", peers);
+    emit_kv(b, e, 6, "now",
+            live ? "resident engine is up"
+                 : "this CLI is not the hosting engine");
+    emit_kv(b, e, 6, "next",
+            json_get_str(json_get(data, "next_command")));
+}
+
 /* zcode.guide is a recipe: one next action, one copyable start, the journey. */
 static void render_zcode_guide(struct buf *b, const struct zcl_cli_render_env *e,
                                const struct json_value *root)
@@ -1203,6 +1227,9 @@ size_t zcl_cli_render_doc(const char *doc, size_t doc_len,
                  (strcmp(command_path, "zcode.node.join") == 0 ||
                   strcmp(command_path, "join") == 0))
             render_zcode_join(&b, env, &root);
+        else if (command_path &&
+                 strcmp(command_path, "zcode.package.offered") == 0)
+            render_zcode_offered(&b, env, &root);
         else if (command_path &&
                  strcmp(command_path, "zcode.guide") == 0)
             render_zcode_guide(&b, env, &root);

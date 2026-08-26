@@ -2551,8 +2551,7 @@ static int zpd_test_commons_join_front_doors(void)
         ASSERT(!join.package_hosting);
         ASSERT(!join.build_worker);
         ASSERT(join.offline_next_command &&
-               strstr(join.offline_next_command,
-                      "-packagehost=1 -buildworker=1"));
+               strcmp(join.offline_next_command, "z23 join") == 0);
 
         struct zcl_command_request request = { .input = NULL };
         struct zcl_command_reply toolchain;
@@ -2592,8 +2591,9 @@ static int zpd_test_commons_join_front_doors(void)
         {
             const char *next =
                 json_get_str(json_get(&offered.data, "next_command"));
-            ASSERT(next && strstr(next, "-packagehost=1 -buildworker=1"));
-            ASSERT(strstr(next, "z23 zcode package offered"));
+            ASSERT(next && strstr(next, "z23 join") != NULL);
+            ASSERT(strstr(next, dd) != NULL);
+            ASSERT(strstr(next, "-packagehost=1 -buildworker=1") == NULL);
         }
 
         struct json_value guide_input;

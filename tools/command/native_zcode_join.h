@@ -22,6 +22,8 @@ struct zcl_zcode_join_posture {
     bool joined;
     const char *join_flags;
     const char *hosting_requirement;
+    /* `z23 join` until this process is hosting; otherwise the named restart.
+     * Not a second source of flag truth — join_flags stay the full pair. */
     const char *offline_next_command;
 };
 
