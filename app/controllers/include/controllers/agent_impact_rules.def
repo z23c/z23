@@ -1220,4 +1220,4 @@ AGENT_IMPACT_RULE("lib/sapling/src/params_vk_embedded.c|lib/sapling/include/sapl
  * peers silently stopped being persisted at all; changing the bootstrap gate
  * without it is how a node quietly goes back to depending on a seed array
  * whose only entry may already be dead. */
-AGENT_IMPACT_RULE("lib/net/src/addrman.c|lib/net/include/net/addrman.h|lib/net/src/anchor_peers.c|lib/net/include/net/anchor_peers.h|lib/net/src/connman.c|lib/net/src/connman_dialer.c|lib/net/include/net/connman.h|lib/test/src/test_peer_memory.c", "peer_memory anchor_peers addrman_rebalance addrman_integrity net")
+AGENT_IMPACT_RULE("lib/net/src/addrman.c|lib/net/src/addrman_codec.c|lib/net/src/addrman_internal.h|lib/net/include/net/addrman.h|lib/net/src/anchor_peers.c|lib/net/include/net/anchor_peers.h|lib/net/src/connman.c|lib/net/src/connman_dialer.c|lib/net/include/net/connman.h|lib/test/src/test_peer_memory.c", "peer_memory anchor_peers addrman_rebalance addrman_integrity net")
