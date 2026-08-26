@@ -13,12 +13,20 @@
  * Each verifier is fail-closed on a NULL key: "not ready, so reject". That
  * makes the set of published pointers the process's answer to "is shielded
  * validation armed?", and the four must agree on it. They did not. phgr_vk
- * lived in a function-local static inside each of the two load paths, out of
+ * lived in a function-local static inside each of the two load bodies, out of
  * reach of the teardown helper, so after sapling_free_params() three verifiers
- * disarmed and sprout_verify_phgr13 was still verifying pre-Sapling JoinSplits
- * (blocks 0-581876) against a key the process had declared released — and each
- * reload dropped the previous ic[] allocation, because ppzksnark_vk_read()
- * memsets its output struct before parsing.
+ * disarmed while sprout_verify_phgr13 stayed armed against a key the process
+ * had declared released — and each reload dropped the previous ic[]
+ * allocation, because ppzksnark_vk_read() memsets its output struct before
+ * parsing.
+ *
+ * That disagreement is reportable outside params_init.c: sprout_phgr_vk_loaded()
+ * is a production accessor, and contextual_check_tx_proofs_unverifiable()
+ * (lib/validation/src/contextual_check_tx.c) reads it to decide whether a
+ * pre-Sapling JoinSplit is checkable at all — deliberately, because PHGR13 is
+ * NOT covered by the params_loaded latch. So this group asserts through that
+ * accessor, not only through the test-only pointer peek, and asserts the two
+ * agree with each other.
  *
  * What this group pins:
  *
@@ -32,13 +40,13 @@
  *   5. Reload cycles do not accumulate allocations — driven repeatedly so a
  *      dropped ic[] is a finding for any leak-checking run of this group,
  *      and asserted structurally here.
- *   6. The pre-publication release sites cannot disarm a live key set. Every
- *      params_release_groth16_vks() call inside the two loaders sits above
- *      that loader's publish point AND behind the params_loaded early return,
- *      so a load attempted while keys are installed is a no-op that leaves all
- *      four armed. Adding the PHGR13 release to those failure paths would break
- *      exactly this: a node running on the compiled-in keys would lose its
- *      pre-Sapling verifier the first time a directory load failed.
+ *   6. A refused LATE proving load leaves all four armed. This is the live
+ *      counterpart to 3: params_load_late_proving_locked() runs with the keys
+ *      published and verifiers reading them unlocked, and holds to ONCE
+ *      PUBLISHED, NEVER REPLACED by containing no release call at all. It is
+ *      why params_release_phgr_vk() must never be added to a failure path — a
+ *      node on the compiled-in keys that refuses an arriving parameter
+ *      directory must lose the proving capability and nothing else.
  *
  * Needs no parameter directory and touches no datadir: the compiled-in
  * verifying keys are the whole fixture.
@@ -63,15 +71,28 @@
 
 /* How many of the four verifiers are armed right now. The four must never
  * disagree, so the interesting assertions are on 0 and 4 — a 3 is precisely
- * the defect this group exists to catch. */
+ * the defect this group exists to catch.
+ *
+ * The PHGR13 leg is read through sprout_phgr_vk_loaded(), the PRODUCTION
+ * accessor, not only the test-only pointer peek. contextual_check_tx.c reads
+ * that function to decide whether a pre-Sapling JoinSplit is checkable at all,
+ * so a disagreement here is reportable outside this file, not internal
+ * bookkeeping. Both are asserted, and they must agree with each other. */
 static int armed_verifier_count(void)
 {
     int n = 0;
     if (sapling_test_published_spend_vk() != NULL) n++;
     if (sapling_test_published_output_vk() != NULL) n++;
     if (sprout_test_published_vk() != NULL) n++;
-    if (sprout_test_published_phgr_vk() != NULL) n++;
+    if (sprout_phgr_vk_loaded()) n++;
     return n;
+}
+
+/* The production accessor and the published pointer are the same fact seen two
+ * ways; if they ever part company, one of the two is lying to consensus. */
+static bool phgr_accessor_agrees_with_pointer(void)
+{
+    return sprout_phgr_vk_loaded() == (sprout_test_published_phgr_vk() != NULL);
 }
 
 int test_params_vk_publish_symmetry(void);
@@ -103,6 +124,8 @@ int test_params_vk_publish_symmetry(void)
               sprout_test_published_vk() != NULL);
     SYM_CHECK("install arms the PHGR13 verifier",
               sprout_test_published_phgr_vk() != NULL);
+    SYM_CHECK("install arms it as the production accessor reports it",
+              sprout_phgr_vk_loaded() && phgr_accessor_agrees_with_pointer());
     SYM_CHECK("all four verifiers agree: armed", armed_verifier_count() == 4);
 
     const struct ppzksnark_vk *phgr_first = sprout_test_published_phgr_vk();
@@ -124,6 +147,9 @@ int test_params_vk_publish_symmetry(void)
     SYM_CHECK("free_params disarms the PHGR13 verifier "
               "(no manual sprout_phgr_set_vk(NULL))",
               sprout_test_published_phgr_vk() == NULL);
+    SYM_CHECK("free_params makes the production accessor "
+              "sprout_phgr_vk_loaded() report false too",
+              !sprout_phgr_vk_loaded() && phgr_accessor_agrees_with_pointer());
     SYM_CHECK("all four verifiers agree: disarmed",
               armed_verifier_count() == 0);
     SYM_CHECK("free_params reports params NOT loaded",
@@ -168,27 +194,38 @@ int test_params_vk_publish_symmetry(void)
               sprout_test_published_phgr_vk() != NULL &&
               sprout_test_published_phgr_vk()->ic_len == phgr_ic_len);
 
-    /* ── 6. A failed load cannot disarm a live key set ────────────────── */
-    /* The keys are installed, so sapling_init_params() returns on its
-     * params_loaded early return without opening anything — which is why every
-     * params_release_groth16_vks() call inside it is provably pre-publication.
-     * The path names a directory that does not exist precisely so that a
-     * regression removing that early return would attempt a real load and
-     * fail, and the assertions below would then catch the disarm.
+    /* ── 6. A refused LATE load cannot disarm a live key set ──────────── */
+    /* This is the scenario the whole call-site split exists for, and on this
+     * tree it is reachable, not hypothetical. The keys are installed but no
+     * proving parameters are, so proving_params_loaded is clear and
+     * sapling_init_params() does NOT short-circuit: params_init_locked() sees
+     * params_loaded set and routes to params_load_late_proving_locked(), the
+     * path a node takes when its proving parameters finally arrive.
+     *
+     * Here they have not arrived — the directory does not exist — so the late
+     * load must refuse. Refusing costs the proving capability and NOTHING
+     * else: all four verifying keys stay published, because that path contains
+     * no release call at all. Had params_release_phgr_vk() been added to the
+     * failure paths, this is where a node running on the compiled-in keys
+     * would have lost its pre-Sapling verifier.
      *
      * No datadir is involved: this is a parameter directory, read-only, and it
      * does not exist. */
-    SYM_CHECK("a directory load with keys already installed is a no-op",
-              sapling_init_params("/nonexistent/params-vk-publish-symmetry"));
-    SYM_CHECK("the failed-load path left the spend verifier armed",
+    SYM_CHECK("a refused late proving load returns false",
+              !sapling_init_params("/nonexistent/params-vk-publish-symmetry"));
+    SYM_CHECK("the refused late load left the spend verifier armed",
               sapling_test_published_spend_vk() != NULL);
-    SYM_CHECK("the failed-load path left the output verifier armed",
+    SYM_CHECK("the refused late load left the output verifier armed",
               sapling_test_published_output_vk() != NULL);
-    SYM_CHECK("the failed-load path left the sprout-groth16 verifier armed",
+    SYM_CHECK("the refused late load left the sprout-groth16 verifier armed",
               sprout_test_published_vk() != NULL);
-    SYM_CHECK("the failed-load path left the PHGR13 verifier armed "
+    SYM_CHECK("the refused late load left the PHGR13 verifier armed "
               "(blocks 0-581876 stay validatable)",
               sprout_test_published_phgr_vk() != NULL);
+    SYM_CHECK("the refused late load left sprout_phgr_vk_loaded() true",
+              sprout_phgr_vk_loaded());
+    SYM_CHECK("params still report loaded after a refused late load",
+              sapling_params_loaded());
     SYM_CHECK("all four verifiers still agree: armed",
               armed_verifier_count() == 4);
 

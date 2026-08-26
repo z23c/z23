@@ -96,7 +96,7 @@ bool vcs_zcode_dht_record_key(
       !record_nonzero(network_genesis, 32) || !record_nonzero(root, 32) ||
       !namespace_valid(namespace_name, NULL) ||
       kind < VCS_ZCODE_DHT_RECORD_PROVIDER ||
-      kind > VCS_ZCODE_DHT_RECORD_SOURCE_REPRODUCTION_ACK)
+      kind > VCS_ZCODE_DHT_RECORD_AGENT_SCOPE)
     return false;
   struct sha3_256_ctx hash;
   const uint8_t kind_byte = (uint8_t)kind;

@@ -341,6 +341,12 @@ static int test_native_catalog_resolution(void)
         ASSERT(zcl_test_group_proof_contract(
                    "test_shielded_payment_gate") == ZCL_TEST_PROOF_STRESS);
         ASSERT(zcl_test_group_proof_contract(
+                   "test_shielded_receive_persist") == ZCL_TEST_PROOF_STRESS);
+        ASSERT(zcl_test_group_proof_contract(
+                   "test_shielded_receive_slice") == ZCL_TEST_PROOF_STRESS);
+        ASSERT(zcl_test_group_proof_contract(
+                   "test_shielded_spend_slice") == ZCL_TEST_PROOF_STRESS);
+        ASSERT(zcl_test_group_proof_contract(
                    "test_chain_advance_atomicity") == ZCL_TEST_PROOF_STRESS);
         ASSERT(zcl_test_group_proof_contract(
                    "test_reducer_block_ingest_gate") == ZCL_TEST_PROOF_STRESS);

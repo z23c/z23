@@ -418,3 +418,14 @@ void zclassic_init_zksnark_params(
     atomic_store(&g_native_params_initialized, true);
     atomic_store(&g_native_state, NATIVE_PROVER_INITIALIZED);
 }
+
+#ifdef ZCL_TESTING
+void zclassic_test_prover_reset(void)
+{
+    /* Order matters even here: clear readiness first, so no window exists in
+     * which the state says READY while the parameter latch says "not
+     * initialized". */
+    atomic_store(&g_native_state, NATIVE_PROVER_UNINITIALIZED);
+    atomic_store(&g_native_params_initialized, false);
+}
+#endif

@@ -441,23 +441,33 @@ bool check_block_coinbase_height_matches(const struct transaction *coinbase,
 
 /* ── ContextualCheckBlock (3 checks) ──────────────────────────── */
 
-bool contextual_check_block(const struct block *block,
-                            struct validation_state *state,
-                            const struct chain_params *params,
-                            const struct block_index *pindex_prev,
-                            bool is_ibd)
+/* Bool-returning body so REJECT_UNLESS / LOG_FAIL (both expand to
+ * `return false`) stay correct; *local_fault distinguishes "this block is
+ * invalid" from "we could not check it". See enum contextual_check_verdict. */
+static bool contextual_check_block_impl(const struct block *block,
+                                        struct validation_state *state,
+                                        const struct chain_params *params,
+                                        const struct block_index *pindex_prev,
+                                        bool is_ibd,
+                                        bool *local_fault)
 {
     int nHeight = pindex_prev == NULL ? 0 : pindex_prev->nHeight + 1;
+
+    *local_fault = false;
 
     for (size_t i = 0; i < block->num_vtx; i++) {
         /* zclassicd's IBD short-circuit lives INSIDE
          * ContextualCheckTransaction (main.cpp:941), so only the per-tx
          * rules are gated; finality + BIP34 below run unconditionally. */
         if (!is_ibd) {
-            if (!contextual_check_transaction(&block->vtx[i], state,
-                                              &params->consensus, nHeight,
-                                              100))
+            enum contextual_check_verdict v =
+                contextual_check_transaction_verdict(&block->vtx[i], state,
+                                                     &params->consensus,
+                                                     nHeight, 100);
+            if (v != CONTEXTUAL_CHECK_PASS) {
+                *local_fault = (v == CONTEXTUAL_CHECK_UNVERIFIABLE);
                 LOG_FAIL("check_block", "contextual_check_transaction failed for tx[%zu] at height %d", i, nHeight);
+            }
         }
 
         /* Block-connect finality cutoff = the block's OWN header timestamp,
@@ -480,4 +490,29 @@ bool contextual_check_block(const struct block *block,
     }
 
     return true;
+}
+
+enum contextual_check_verdict contextual_check_block_verdict(
+                            const struct block *block,
+                            struct validation_state *state,
+                            const struct chain_params *params,
+                            const struct block_index *pindex_prev,
+                            bool is_ibd)
+{
+    bool local_fault = false;
+    if (contextual_check_block_impl(block, state, params, pindex_prev,
+                                    is_ibd, &local_fault))
+        return CONTEXTUAL_CHECK_PASS;
+    return local_fault ? CONTEXTUAL_CHECK_UNVERIFIABLE
+                       : CONTEXTUAL_CHECK_REJECT;
+}
+
+bool contextual_check_block(const struct block *block,
+                            struct validation_state *state,
+                            const struct chain_params *params,
+                            const struct block_index *pindex_prev,
+                            bool is_ibd)
+{
+    return contextual_check_block_verdict(block, state, params, pindex_prev,
+                                          is_ibd) == CONTEXTUAL_CHECK_PASS;
 }

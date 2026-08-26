@@ -412,15 +412,10 @@ void zcl_native_handle_zcode_package_rollback(
     const char *datadir = za_datadir(request, reply, command);
     if (!datadir)
         return;
+    /* `name` is OPTIONAL: with no name this goes back one step on whichever
+     * package the user most recently changed. Going back must not require
+     * knowing an identifier — the caller is here because something broke. */
     const char *name = za_input_str(request->input, "name");
-    if (!name || !name[0]) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INVALID, "MISSING_NAME",
-                               "normalize", false, false,
-                               "name is required (publisher/package)",
-                               command);
-        return;
-    }
 
     struct package_lifecycle_rollback_report report;
     struct zcl_result r = package_lifecycle_rollback(datadir, name,
@@ -432,6 +427,8 @@ void zcl_native_handle_zcode_package_rollback(
         return;
     }
     (void)json_push_kv_str(&reply->data, "name", report.name);
+    (void)json_push_kv_bool(&reply->data, "selected_by_default",
+                            report.selected_by_default);
     za_push_hex(&reply->data, "from_root", report.from_root);
     za_push_hex(&reply->data, "to_root", report.to_root);
     (void)json_push_kv_int(&reply->data, "generation_count",
@@ -439,7 +436,9 @@ void zcl_native_handle_zcode_package_rollback(
     (void)json_push_kv_str(
         &reply->data, "note",
         "rollback appends a new generation naming the older root — history "
-        "is never rewritten and both installs remain on disk");
+        "is never rewritten and both installs remain on disk. to_root is the "
+        "exact 32-byte identity now active, not 'roughly the previous "
+        "build'");
 }
 
 /* ── zcode package reproduce ────────────────────────────────────────── */

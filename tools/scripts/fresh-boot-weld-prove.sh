@@ -115,6 +115,17 @@ NEGATIVE_ONLY=0
 POSITIVE_ONLY=0
 CLEAN=0
 SAMPLE_SECS=5
+# ── MIN_SAMPLES — why a deadline may never cut the observation short ───────
+# The POSITIVE predicate is a TWO-POINT observation: H* must be seen landing
+# exactly at the checkpoint, and then seen ABOVE it. Fewer than two successful
+# samples cannot decide it either way. So a deadline that expires before two
+# samples have been taken is not measuring the node at all — it is measuring
+# how much spare capacity the box had, and on a saturated or 7200rpm-disk box
+# it manufactures a FAIL out of a perfectly healthy node. This floor makes the
+# loop take its samples FIRST and consult the clock second: the deadline
+# bounds how long we are willing to WAIT, never how much we are willing to
+# OBSERVE. Same reasoning applies to the negative leg's marker poll below.
+MIN_SAMPLES=2
 
 DENYLIST="$HOME/.zclassic-c23 $HOME/.zclassic-c23-prod2 $HOME/.zclassic-c23-dev \
 $HOME/.zclassic-c23-serve1 $HOME/.zclassic-c23-soak $HOME/.zclassic \
@@ -242,6 +253,16 @@ jget() { # jget JSON KEY -> integer or empty
         grep -oE -- '-?[0-9]+$'
 }
 
+# ── Wall time is REPORTED, never asserted on ──────────────────────────────
+# Every leg below prints how long it took and what the machine load looked
+# like. Nothing branches on either number. The point is that when a leg does
+# report a problem, the reader can tell "this node is broken" from "this box
+# was saturated" in one glance instead of guessing.
+loadavg_now() { cut -d' ' -f1-3 /proc/loadavg 2>/dev/null || echo "unknown"; }
+report_timing() { # report_timing LABEL START_EPOCH
+    echo "  timing: $1 took $(( $(date +%s) - $2 ))s  (loadavg $(loadavg_now), $(nproc 2>/dev/null || echo '?') cpus) — reported, not asserted"
+}
+
 # ── NEGATIVE case: a one-byte-tampered bundle must fail closed on ANY datadir
 #    shape (a fresh empty one included) — the digest/manifest check runs at
 #    admission, strictly before the chain-binding decision, so it needs no
@@ -291,12 +312,23 @@ run_negative() {
 
     # Poll for the .failed never-stuck marker OR deadline; the node keeps
     # running normally throughout (never-stuck property under test too).
-    _deadline=$(( $(date +%s) + NEGATIVE_DEADLINE ))
+    # MIN_SAMPLES polls happen unconditionally (see MIN_SAMPLES above): a
+    # busy box must not be able to skip the observation entirely and have
+    # that scored as a refusal failure.
+    NEG_STARTED=$(date +%s)
+    _deadline=$(( NEG_STARTED + NEGATIVE_DEADLINE ))
     failed_marker=0
-    while [ "$(date +%s)" -lt "$_deadline" ]; do
+    _polls=0
+    while [ "$_polls" -lt "$MIN_SAMPLES" ] || [ "$(date +%s)" -lt "$_deadline" ]; do
+        _polls=$((_polls + 1))
         if [ -f "$NEG_DD/bundles/$NEG_BUNDLE_NAME.failed" ]; then
             failed_marker=1; break
         fi
+        # An INSTALLED marker is a decision too — the wrong one. Waiting out
+        # the rest of the window after the node has already decided buys no
+        # information and just makes the run longer on every box. Leave on
+        # the EVENT, not on the clock.
+        [ -f "$NEG_DD/consensus-bundle-installed.marker" ] && break
         kill -0 "$NEG_PID" 2>/dev/null || break
         sleep 2
     done
@@ -315,16 +347,32 @@ run_negative() {
     fj=$(rpc_frontier "$NEG_DD" "$RPCPORT")
     hs=$(jget "$fj" hstar); [ -z "$hs" ] && hs="-1"
 
-    echo "  failed_marker=$failed_marker marker=$marker hstar=$hs"
+    echo "  failed_marker=$failed_marker marker=$marker hstar=$hs polls=$_polls"
     [ -n "$refusal_line" ] && echo "    log: $refusal_line"
+    report_timing "negative leg" "$NEG_STARTED"
 
     if [ "$failed_marker" = "1" ] && [ "$marker" = "0" ] && \
        { [ "$hs" = "-1" ] || [ "$hs" -lt "$CHECKPOINT" ] 2>/dev/null; }; then
         echo "  NEGATIVE PASS — tamper REFUSED, marked .failed, no state installed,"
         echo "                  H* never reached the checkpoint on borrowed state."
         NEG_VERDICT=PASS
+    elif [ "$failed_marker" = "0" ] && [ "$marker" = "0" ] && [ -z "$refusal_line" ]; then
+        # The node produced NO admission decision at all: no .failed, no
+        # installed marker, no refusal line. That is not evidence the tamper
+        # was accepted — it is evidence we stopped watching too early. A
+        # saturated or slow-disk box lands here, and calling it FAIL would be
+        # grading the machine instead of the code. It is still NOT a pass.
+        echo "  NEGATIVE INCONCLUSIVE — the node never reached a bundle-admission"
+        echo "  decision within ${NEGATIVE_DEADLINE}s ($_polls polls): no .failed marker, no"
+        echo "  installed marker, no refusal line. Nothing here says the tamper was"
+        echo "  accepted; it says the observation window closed first. Re-run with a"
+        echo "  larger --negative-deadline on a slow/loaded box. See $NEG_LOG."
+        NEG_VERDICT=INCONCLUSIVE
     else
         echo "  NEGATIVE FAIL — tamper was not cleanly rejected (see $NEG_LOG)."
+        echo "  (failed_marker=$failed_marker marker=$marker hstar=$hs — the node reached an"
+        echo "   admission decision and it was the wrong one; this is a code verdict,"
+        echo "   not a timing one.)"
         grep -E 'REFUSED|admission/validation failed|mismatch|chain binding' "$NEG_LOG" 2>/dev/null | \
             tail -5 | sed 's/^/    /'
         NEG_VERDICT=FAIL
@@ -389,9 +437,16 @@ run_positive() {
         > "$NODE_LOG" 2>&1 &
     NODE_PID=$!
 
-    _deadline=$(( $(date +%s) + DEADLINE ))
-    seen_checkpoint=0; climbed=0; seen_rpc=0; chain_binding_blocked=0
-    while [ "$(date +%s)" -lt "$_deadline" ]; do
+    POS_STARTED=$(date +%s)
+    _deadline=$(( POS_STARTED + DEADLINE ))
+    seen_checkpoint=0; climbed=0; seen_rpc=0; chain_binding_blocked=0; _samples=0
+    # MIN_SAMPLES iterations run unconditionally before the clock is allowed
+    # to end the loop — see MIN_SAMPLES at the top of this file. Without that
+    # floor the deadline can expire between the node coming up and the first
+    # dumpstate, and a healthy node scores INCONCLUSIVE purely because the box
+    # was busy.
+    while [ "$_samples" -lt "$MIN_SAMPLES" ] || [ "$(date +%s)" -lt "$_deadline" ]; do
+        _samples=$((_samples + 1))
         kill -0 "$NODE_PID" 2>/dev/null || { echo "  node exited early (see $NODE_LOG)"; break; }
         fj=$(rpc_frontier "$WORK" "$RPCPORT")
         hs=$(jget "$fj" hstar)
@@ -416,9 +471,13 @@ run_positive() {
     kill -9 "$NODE_PID" 2>/dev/null
     wait "$NODE_PID" 2>/dev/null
 
-    echo "  first=$POS_FIRST max=$POS_MAX seen_rpc=$seen_rpc seen_checkpoint=$seen_checkpoint climbed=$climbed"
+    echo "  first=$POS_FIRST max=$POS_MAX seen_rpc=$seen_rpc seen_checkpoint=$seen_checkpoint climbed=$climbed samples=$_samples"
+    report_timing "positive leg" "$POS_STARTED"
     if [ "$seen_rpc" = "0" ]; then
-        echo "  POSITIVE INCONCLUSIVE — node never answered RPC in ${DEADLINE}s (see $NODE_LOG)."
+        echo "  POSITIVE INCONCLUSIVE — node never answered RPC across $_samples samples in"
+        echo "  ${DEADLINE}s (see $NODE_LOG). INCONCLUSIVE, not FAIL: a node that never"
+        echo "  answered told us nothing about the weld. On a slow/loaded box raise"
+        echo "  --deadline; the sample count above says how many chances it got."
         POS_VERDICT=INCONCLUSIVE
     elif [ "$climbed" = "1" ]; then
         echo "  POSITIVE PASS — zero-flag boot welded the checkpoint bundle and H* CLIMBED"
@@ -441,10 +500,24 @@ run_positive() {
         grep -E 'REFUSED|did not install|admission/validation failed' "$NODE_LOG" 2>/dev/null | \
             tail -5 | sed 's/^/    /'
         POS_VERDICT=FAIL
+    elif [ "$POS_MAX" -gt "$CHECKPOINT" ] 2>/dev/null; then
+        # It IS climbing — it just has not reached the (raised) target yet.
+        # Grading that FAIL would be grading the machine: a 7200rpm box climbs
+        # the same heights, slower. Progress across samples is the load-free
+        # signal, and it says "moving", so the honest verdict is INCONCLUSIVE.
+        echo "  POSITIVE INCONCLUSIVE — H* landed at the checkpoint and IS climbing"
+        echo "  ($CHECKPOINT -> $POS_MAX over $_samples samples) but had not passed"
+        echo "  $EXPECT_CLIMB_PAST when the ${DEADLINE}s window closed. Progress is the"
+        echo "  load-free signal and it is positive; this is a short window, not a"
+        echo "  stuck node. Re-run with a larger --deadline."
+        POS_VERDICT=INCONCLUSIVE
     else
-        echo "  POSITIVE FAIL — landed at the checkpoint but H* did not climb past"
-        echo "  $EXPECT_CLIMB_PAST within ${DEADLINE}s (ensure --src carries block bodies"
-        echo "  above the checkpoint, or pass --connect=IP:PORT to fetch the tail live)."
+        echo "  POSITIVE FAIL — landed at the checkpoint and NEVER moved: H* read"
+        echo "  $POS_MAX on every one of $_samples samples across ${DEADLINE}s. Zero"
+        echo "  progress over N samples is a load-free observation — a slow box still"
+        echo "  advances, it just advances slowly — so this is a stuck node, not a"
+        echo "  busy one. (Ensure --src carries block bodies above the checkpoint, or"
+        echo "  pass --connect=IP:PORT to fetch the tail live.)"
         POS_VERDICT=FAIL
     fi
     echo "  work copy left at $WORK (remove with: rm -rf '$WORK')"
@@ -477,13 +550,22 @@ echo "========================================================================"
 echo "  SUMMARY   negative=$NEG_VERDICT   positive=$POS_VERDICT"
 
 if [ "$NEGATIVE_ONLY" = "1" ]; then
-    [ "$NEG_VERDICT" = "PASS" ] && { echo "  VERDICT: PASS — fail-closed proven (negative-only)."; exit 0; }
-    echo "  VERDICT: FAIL — negative leg did not pass."; exit 1
+    case "$NEG_VERDICT" in
+        PASS)          echo "  VERDICT: PASS — fail-closed proven (negative-only)."; exit 0 ;;
+        INCONCLUSIVE)  echo "  VERDICT: FAIL — negative leg INCONCLUSIVE (observation window"
+                       echo "           closed before the node decided; NOT evidence of a bad"
+                       echo "           refusal). Never a pass, but do not read it as a defect."
+                       exit 1 ;;
+        *)             echo "  VERDICT: FAIL — negative leg did not pass."; exit 1 ;;
+    esac
 fi
 if [ "$POSITIVE_ONLY" = "1" ]; then
     case "$POS_VERDICT" in
         PASS)                  echo "  VERDICT: PASS — zero-flag weld install+climb proven (positive-only)."; exit 0 ;;
         BLOCKED_CHAIN_BINDING)  echo "  VERDICT: BLOCKED — see chain-binding diagnosis above."; exit 3 ;;
+        INCONCLUSIVE)          echo "  VERDICT: FAIL — positive leg INCONCLUSIVE (see the diagnosis"
+                               echo "           above for whether the window or the node was short)."
+                               exit 1 ;;
         *)                      echo "  VERDICT: FAIL — positive leg did not pass."; exit 1 ;;
     esac
 fi

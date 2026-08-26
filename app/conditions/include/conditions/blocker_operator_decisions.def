@@ -59,6 +59,19 @@
 #error "define ZCL_BLOCKER_DECISION(id_or_pattern, text) before including blocker_operator_decisions.def"
 #endif
 
+/* ── Optional shielded proving capability (config/src/boot_params_gate.c).
+ * Consensus validation remains armed from embedded verifying keys; only
+ * transaction creation requiring the large proving parameters is absent. */
+ZCL_BLOCKER_DECISION(shielded_spend_unavailable,
+    "A person must choose whether this node needs to create shielded "
+    "transactions. OPTION A - install the four pinned proving-parameter files "
+    "using tools/scripts/zcash_params.sh as documented in docs/PARAMS.md. "
+    "Cost: several GiB of trusted local storage and an explicit verified "
+    "installation. OPTION B - leave them absent. The node continues validating "
+    "and serving shielded consensus data, but refuses every operation that "
+    "would require creating a shielded proof. Consensus sync and transparent "
+    "transactions are unaffected.")
+
 /* ── Projection index coverage floor (app/services/src/index_fold_guard.c,
  * raised for address_index / txindex / op_return_index). Live on the
  * canonical node since the snapshot seeding; 11k+ fires each. ─────────── */

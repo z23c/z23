@@ -222,6 +222,13 @@ static int test_record_roundtrip(void)
       uint8_t record_id[32];
       ASSERT_EQ(vcs_zcode_dht_record_id(&record, record_id),
                 VCS_ZCODE_DHT_RECORD_OK);
+      uint8_t routing_key[32];
+      const uint8_t *root = kind == VCS_ZCODE_DHT_RECORD_POINTER
+                                ? record.semantic_root
+                                : record.transport_root;
+      ASSERT(vcs_zcode_dht_record_key(
+          record.network_genesis, record.kind, record.namespace_name, root,
+          routing_key));
       if (kind == VCS_ZCODE_DHT_RECORD_PROVIDER) {
         uint8_t digest[32];
         char digest_hex[65], record_id_hex[65];

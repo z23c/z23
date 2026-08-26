@@ -70,11 +70,11 @@ const char *vcs_zcode_dht_record_error_string(
  * STORAGE_ACK address transport_root directly and require semantic_root=0.
  * POINTER binds semantic_root -> transport_root. SOURCE_REPRODUCTION_ACK
  * binds the re-derived source semantic_root to its complete transport_root.
- * AGENT_SCOPE grants one record-signing key (transport_root) authority to
- * publish inside namespace_name under the grantor's master; semantic_root
- * and owner_group are zero. owner_group is present on both ACK kinds and is
- * explicitly declared diversity, never physical-host or separate-operator
- * proof. */
+ * AGENT_SCOPE reserves transport_root for a future namespace-authority key;
+ * its codec is stable but service admission remains fail-closed until a
+ * master-signed namespace credential exists. semantic_root and owner_group
+ * are zero. owner_group is present on both ACK kinds and is explicitly
+ * declared diversity, never physical-host or separate-operator proof. */
 struct vcs_zcode_dht_record {
   enum vcs_zcode_dht_record_kind kind;
   char namespace_name[VCS_ZCODE_DHT_RECORD_NAMESPACE_BYTES];

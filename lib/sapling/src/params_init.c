@@ -15,6 +15,7 @@
 #include "encoding/utilstrencodings.h"
 #include "util/file_io.h"
 #include "util/log_macros.h"
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -103,12 +104,14 @@ static struct groth16_vk output_vk;
 static struct groth16_vk sprout_groth16_vk;
 /* Sprout PHGR13 verifying key (pre-Sapling JoinSplits, blocks 0-581876).
  * ONE instance, at file scope beside the three Groth16 VKs, deliberately:
- * both load paths — sapling_init_params() from a parameter directory and
- * sapling_install_embedded_vks() from the compiled-in blobs — parse into this
- * struct, and sapling_free_params() frees it. It used to be a function-local
- * static in each of those two functions, which put it out of reach of the
- * teardown helper and made it the one key of the four that stayed armed after
- * sapling_free_params() and leaked its ic[] on every reload. */
+ * both load paths — params_load_first_locked() from a parameter directory and
+ * params_install_embedded_locked() from the compiled-in blobs — parse into
+ * this struct, and sapling_free_params() releases it. It used to be a
+ * function-local static in each of those two bodies, which put it out of reach
+ * of the teardown helper and made it the one key of the four that stayed armed
+ * after sapling_free_params() — visible as sprout_phgr_vk_loaded() returning
+ * true while the other three reported disarmed — and leaked its ic[] on every
+ * reload. */
 static struct ppzksnark_vk phgr_vk;
 static _Atomic bool params_loaded = false;
 /* True when the running key set came from the compiled-in blobs rather than
@@ -116,10 +119,48 @@ static _Atomic bool params_loaded = false;
  * sapling_free_params() clears both. */
 static _Atomic bool vks_embedded = false;
 
+/* params_loaded says the VERIFYING keys are published, and the compiled-in
+ * fallback sets it too. This says the PROVING keys are loaded as well — a
+ * strictly stronger claim, and the one sapling_init_params() has to gate on.
+ * A node that came up on the fallback has params_loaded set and not one byte
+ * of proving key, and gating the loader on params_loaded turned that node away
+ * when its parameters finally arrived: shielded sending stayed dead, with a
+ * fully verified parameter set sitting on disk, until the process restarted. */
+static _Atomic bool proving_params_loaded = false;
+
 static uint8_t *spend_pk_data = NULL;
 static size_t spend_pk_len = 0;
 static uint8_t *output_pk_data = NULL;
 static size_t output_pk_len = 0;
+
+/* ── Serialising the loaders ─────────────────────────────────────────────
+ *
+ * sapling_init_params(), sapling_install_embedded_vks() and
+ * sapling_free_params() all move the same globals, and on a live node they are
+ * reached from different threads: the boot loader thread, the parameter
+ * fetcher's completion path once a download verifies, and shutdown. This mutex
+ * makes each of those transitions run to completion alone, so no two of them
+ * can interleave a publish with a free.
+ *
+ * It deliberately does NOT cover the consensus verifiers. They read the
+ * published VK pointers with no lock, on the hot path, and must keep doing so.
+ * What keeps them safe is the publish/free invariant below plus one rule this
+ * file now obeys without exception:
+ *
+ *   ONCE PUBLISHED, NEVER REPLACED. After a verifying key becomes visible to
+ *   the verifiers, no later call re-parses it, points the global somewhere
+ *   else, or frees it. A second load only ever ADDS the proving keys. The one
+ *   unpublish is sapling_free_params(), at shutdown.
+ *
+ * That rule is what makes a late upgrade safe without an RCU grace period:
+ * there is nothing for a verifier to be reading that anybody is about to
+ * change.
+ *
+ * LOG_FAIL expands to `return`, so anything holding this mutex would leak it
+ * on the first failure. Every entry point is therefore a thin wrapper that
+ * locks, calls a _locked() body, and unlocks — the wrapper is the only place
+ * that unlocks, and the body is free to use LOG_FAIL. */
+static pthread_mutex_t params_mu = PTHREAD_MUTEX_INITIALIZER;
 
 static uint8_t *read_file(const char *path, size_t *len)
 {
@@ -163,7 +204,8 @@ static uint8_t *read_file(const char *path, size_t *len)
  *
  * The four keys split across two publish/release pairs because their storage
  * is parsed at two different points in the load, not because their rules
- * differ. Both pairs obey PUBLISH LAST and UNPUBLISH FIRST.
+ * differ. Both pairs obey PUBLISH LAST and UNPUBLISH FIRST, and both are
+ * called only with params_mu held.
  *
  *   trio   spend_vk, output_vk, sprout_groth16_vk
  *          params_publish_groth16_vks() / params_release_groth16_vks()
@@ -171,27 +213,32 @@ static uint8_t *read_file(const char *path, size_t *len)
  *          params_publish_phgr_vk()     / params_release_phgr_vk()
  *
  * PRE-PUBLICATION release sites (abandoning a load that never published):
- *   every params_release_groth16_vks() call inside sapling_init_params() and
- *   sapling_install_embedded_vks(). Each one sits above that function's single
- *   publish point, and — the part that makes it provable rather than a reading
- *   of the current line order — BOTH entry points return early when
- *   params_loaded is set, and params_loaded is stored true in the same
- *   straight-line run that publishes, with nothing fallible in between. So
- *   "published" and "params_loaded" are the same state, and a function that
- *   reaches a release site necessarily entered with nothing of ours published.
- *   Those releases are therefore free-only in effect; their unpublish half is
- *   defence in depth.
+ *   every params_release_groth16_vks() call inside params_load_first_locked()
+ *   and params_install_embedded_locked(). Both bodies run only when nothing of
+ *   ours is published — params_load_first_locked() is selected by
+ *   params_init_locked() precisely on !params_loaded, and
+ *   params_install_embedded_locked() returns early when params_loaded is set —
+ *   so a release reached from either one cannot be unpublishing a live key.
+ *   Their unpublish half is defence in depth.
+ *
+ * THE LATE PATH RELEASES NOTHING. params_load_late_proving_locked() runs with
+ * all four keys published and live verifiers reading them unlocked. It holds
+ * to ONCE PUBLISHED, NEVER REPLACED by containing no release call at all: every
+ * one of its failures is a LOG_FAIL that frees only its own local buffers and
+ * leaves the published keys exactly as it found them. That is what makes a
+ * refused late upgrade cost nothing but the proving capability.
  *
  * POST-PUBLICATION release site: sapling_free_params(), and only that. It is
  * the one place that runs with keys live, so it is the one place that releases
  * all four.
  *
- * DO NOT add params_release_phgr_vk() to the pre-publication sites. A node that
- * came up on the compiled-in keys and later ran a failing load would then
- * disarm a working PHGR13 verifier and lose the ability to validate blocks
- * 0-581876 — turning a recoverable load failure into a validation regression.
- * The early-return above means that sequence cannot happen today; keeping the
- * failure paths off phgr_vk means it still cannot if that changes. */
+ * DO NOT add params_release_phgr_vk() to the pre-publication sites, and above
+ * all not to the late path. A node that came up on the compiled-in keys and
+ * later refused an arriving parameter directory would then disarm a working
+ * PHGR13 verifier and lose the ability to validate blocks 0-581876 — turning a
+ * recoverable, expected refusal into a validation regression. That sequence is
+ * exactly what the late path exists to serve, so it is reachable, not
+ * hypothetical. */
 static void params_publish_groth16_vks(void)
 {
     sapling_set_spend_vk(&spend_vk);
@@ -225,7 +272,8 @@ static void params_release_groth16_vks(void)
 }
 
 /* Same two rules as the trio, for the fourth key. Call ONLY from
- * sapling_free_params() — see the call-site split documented above.
+ * sapling_free_params() — see the call-site split documented above. Caller
+ * holds params_mu.
  *
  * The free is not optional bookkeeping: ppzksnark_vk_read() memsets its output
  * struct before parsing (bn254.c), so a reload that did not free first would
@@ -239,62 +287,145 @@ static void params_release_phgr_vk(void)
     memset(&phgr_vk, 0, sizeof(phgr_vk));
 }
 
-bool sapling_init_params(const char *params_dir)
+/* Read `name` out of `params_dir` and verify its pinned SHA-512 BEFORE the
+ * bytes are handed back. Returns NULL — having freed whatever it read — when
+ * the file is unreadable or fails its pin, so no caller can be given bytes
+ * that did not match. */
+static uint8_t *params_read_pinned(const char *params_dir, const char *name,
+                                   const char *want_sha512, size_t *len)
 {
-    if (atomic_load(&params_loaded)) return true;
-
-    char path[1024];
-    size_t len;
-    uint8_t *data;
-
-    /* Sapling spend VK */
-    snprintf(path, sizeof(path), "%s/sapling-spend.params", params_dir);
-    data = read_file(path, &len);
+    char path[1400];
+    snprintf(path, sizeof(path), "%s/%s", params_dir, name);
+    uint8_t *data = read_file(path, len);
     if (!data)
-        LOG_FAIL("sapling_params", "init: read_file failed for sapling-spend.params");
-    if (!params_sha512_matches(data, len, SAPLING_SPEND_PARAMS_SHA512, path)) {
+        LOG_NULL("sapling_params", "init: read_file failed for %s", name);
+    if (!params_sha512_matches(data, *len, want_sha512, path)) {
         free(data);
-        LOG_FAIL("sapling_params", "init: SHA-512 mismatch on sapling-spend.params");
+        LOG_NULL("sapling_params", "init: SHA-512 mismatch on %s", name);
     }
-    bool ok = groth16_vk_read(&spend_vk, data, len);
-    free(data);
-    if (!ok)
-        LOG_FAIL("sapling_params", "init: groth16_vk_read failed for spend VK");
+    return data;
+}
 
-    /* Sapling output VK */
-    snprintf(path, sizeof(path), "%s/sapling-output.params", params_dir);
-    data = read_file(path, &len);
-    if (!data) {
+/* Install the proving keys and arm the proving backend. Takes ownership of
+ * both buffers, which have already passed their pinned SHA-512.
+ *
+ * Nothing here is a consensus input, so nothing here can fail the load: a node
+ * whose proving backend does not arm still validates every shielded proof.
+ * What it must never do is arm on incomplete input.
+ * zclassic_init_zksnark_params() refuses when either proving key is absent,
+ * and zclassic_sapling_prover_is_ready() turns true only after the self-test
+ * has produced a real Spend + Output + binding bundle and had THIS node's
+ * consensus verifier accept it — against the verifying keys published above.
+ * A proving key that did not belong to the published verifying key therefore
+ * cannot arm sending; it fails the gate.
+ *
+ * Ordering is load-bearing for the reader. The two pointer stores happen
+ * before the sequentially-consistent store that moves the prover to READY, and
+ * every consumer of sapling_get_spend_pk()/_output_pk() reaches them only
+ * through a caller that checked zclassic_sapling_prover_is_ready() first
+ * (wallet_shielded_send.c, wallet_shielded_send_shielded.c). That
+ * store/load pair is what publishes these bytes to another thread.
+ *
+ * Reached only with no proving key resident — the caller returns early once
+ * proving_params_loaded is set, and that flag is set whenever these two
+ * pointers are — so this deliberately does not free the old values. Assigning
+ * over a live proving-key pointer would be the free-while-published bug in
+ * another shape. */
+static void params_arm_proving_locked(const char *params_dir,
+                                      uint8_t *spend_bytes, size_t spend_len,
+                                      uint8_t *output_bytes, size_t output_len)
+{
+    spend_pk_data = spend_bytes;
+    spend_pk_len = spend_len;
+    output_pk_data = output_bytes;
+    output_pk_len = output_len;
+
+    LOG_INFO("sapling_params",
+             "Loaded sapling-output proving key: %zu bytes", output_pk_len);
+    LOG_INFO("sapling_params",
+             "Loaded sapling-spend proving key: %zu bytes", spend_pk_len);
+
+    char spend_path[1400], output_path[1400], sprout_path[1400];
+    snprintf(spend_path, sizeof(spend_path),
+             "%s/sapling-spend.params", params_dir);
+    snprintf(output_path, sizeof(output_path),
+             "%s/sapling-output.params", params_dir);
+    snprintf(sprout_path, sizeof(sprout_path),
+             "%s/sprout-groth16.params", params_dir);
+
+    zclassic_init_zksnark_params(
+        (const uint8_t *)spend_path, strlen(spend_path),
+        SAPLING_SPEND_PARAMS_BLAKE2B,
+        (const uint8_t *)output_path, strlen(output_path),
+        SAPLING_OUTPUT_PARAMS_BLAKE2B,
+        (const uint8_t *)sprout_path, strlen(sprout_path),
+        SPROUT_GROTH16_PARAMS_BLAKE2B);
+
+    if (!zclassic_sapling_prover_run_self_test())
+        LOG_WARN("sapling_params",
+                 "proving capability unavailable: backend=%s status=%s; "
+                 "consensus verification remains active",
+                 zclassic_sapling_prover_backend(),
+                 zclassic_sapling_prover_status());
+}
+
+/* The FIRST load: nothing of ours is published yet, so this parses every key,
+ * publishes the three Groth16 VKs at the single publish point, and then arms
+ * proving. Caller holds params_mu. */
+static bool params_load_first_locked(const char *params_dir)
+{
+    size_t len = 0;
+
+    /* Sapling spend. The verifying key is the leading prefix of this same
+     * buffer, so it is read once and then kept as the proving key rather than
+     * read a second time. */
+    size_t spend_len = 0;
+    uint8_t *spend_bytes = params_read_pinned(params_dir,
+                                              "sapling-spend.params",
+                                              SAPLING_SPEND_PARAMS_SHA512,
+                                              &spend_len);
+    if (!spend_bytes)
+        LOG_FAIL("sapling_params", "init: sapling-spend.params unusable");
+    if (!groth16_vk_read(&spend_vk, spend_bytes, spend_len)) {
+        free(spend_bytes);
+        LOG_FAIL("sapling_params", "init: groth16_vk_read failed for spend VK");
+    }
+
+    /* Sapling output */
+    size_t output_len = 0;
+    uint8_t *output_bytes = params_read_pinned(params_dir,
+                                               "sapling-output.params",
+                                               SAPLING_OUTPUT_PARAMS_SHA512,
+                                               &output_len);
+    if (!output_bytes) {
+        free(spend_bytes);
         params_release_groth16_vks();
-        LOG_FAIL("sapling_params", "init: read_file failed for sapling-output.params");
+        LOG_FAIL("sapling_params", "init: sapling-output.params unusable");
     }
-    if (!params_sha512_matches(data, len, SAPLING_OUTPUT_PARAMS_SHA512, path)) {
-        free(data); params_release_groth16_vks();
-        LOG_FAIL("sapling_params", "init: SHA-512 mismatch on sapling-output.params");
-    }
-    ok = groth16_vk_read(&output_vk, data, len);
-    free(data);
-    if (!ok) {
+    if (!groth16_vk_read(&output_vk, output_bytes, output_len)) {
+        free(spend_bytes); free(output_bytes);
         params_release_groth16_vks();
         LOG_FAIL("sapling_params", "init: groth16_vk_read failed for output VK");
     }
 
-    /* Sprout Groth16 VK */
-    snprintf(path, sizeof(path), "%s/sprout-groth16.params", params_dir);
-    data = read_file(path, &len);
-    if (!data) {
-        params_release_groth16_vks();
-        LOG_FAIL("sapling_params", "init: read_file failed for sprout-groth16.params");
-    }
-    if (!params_sha512_matches(data, len, SPROUT_GROTH16_PARAMS_SHA512, path)) {
-        free(data); params_release_groth16_vks();
-        LOG_FAIL("sapling_params", "init: SHA-512 mismatch on sprout-groth16.params");
-    }
-    ok = groth16_vk_read(&sprout_groth16_vk, data, len);
-    free(data);
-    if (!ok) {
-        params_release_groth16_vks();
-        LOG_FAIL("sapling_params", "init: groth16_vk_read failed for sprout-groth16 VK");
+    /* Sprout Groth16. Only its verifying key is retained; the proving half is
+     * reached through the path handed to the backend, so the buffer goes. */
+    {
+        uint8_t *data = params_read_pinned(params_dir, "sprout-groth16.params",
+                                           SPROUT_GROTH16_PARAMS_SHA512, &len);
+        if (!data) {
+            free(spend_bytes); free(output_bytes);
+            params_release_groth16_vks();
+            LOG_FAIL("sapling_params", "init: sprout-groth16.params unusable");
+        }
+        bool ok = groth16_vk_read(&sprout_groth16_vk, data, len);
+        free(data);
+        if (!ok) {
+            free(spend_bytes); free(output_bytes);
+            params_release_groth16_vks();
+            LOG_FAIL("sapling_params",
+                     "init: groth16_vk_read failed for sprout-groth16 VK");
+        }
     }
 
     /* Precompute the windowed tables over each VK's constant IC[] points, so a
@@ -318,23 +449,14 @@ bool sapling_init_params(const char *params_dir)
      * publish/free invariant above. Publication happens after it. */
 
     /* Sprout PHGR13 VK (pre-Sapling proofs, blocks 0-581876). Parses into the
-     * file-scope phgr_vk; published below with the trio, released by
-     * sapling_free_params(). */
+     * file-scope phgr_vk; published below with the trio at the single publish
+     * point, released by sapling_free_params(). */
     bool phgr_ok = false;
     {
-        char phgr_path[1024];
-        snprintf(phgr_path, sizeof(phgr_path),
-                 "%s/sprout-verifying.key", params_dir);
-        uint8_t *phgr_data = read_file(phgr_path, &len);
-        if (phgr_data &&
-            !params_sha512_matches(phgr_data, len,
-                                   SPROUT_VERIFYING_KEY_SHA512, phgr_path)) {
-            /* Integrity failed. Drop the bytes and fall through to the
-             * not-loaded path below, which hard-fails on mainnet. Never parse
-             * key material that did not match its pin. */
-            free(phgr_data);
-            phgr_data = NULL;
-        }
+        uint8_t *phgr_data = params_read_pinned(params_dir,
+                                                "sprout-verifying.key",
+                                                SPROUT_VERIFYING_KEY_SHA512,
+                                                &len);
         if (phgr_data) {
             /* Parsed, not published: publication is deferred to the single
              * publish point below, with the three Groth16 VKs. */
@@ -349,13 +471,14 @@ bool sapling_init_params(const char *params_dir)
             }
             free(phgr_data);
         } else {
-            /* Unreadable, or present but failed its SHA-512 pin — the pin
-             * check above logs the expected/actual digests itself, so do not
-             * claim "not found" here for what may have been tampering. */
+            /* Unreadable, or present but failed its SHA-512 pin —
+             * params_read_pinned logs the expected/actual digests itself, so
+             * do not claim "not found" here for what may have been
+             * tampering. */
             LOG_WARN("sapling_params",
-                     "ERROR: sprout-verifying.key unusable at %s "
+                     "ERROR: sprout-verifying.key unusable in %s "
                      "(missing/unreadable, or failed its pinned SHA-512)",
-                     phgr_path);
+                     params_dir);
         }
 
         /* Hard-fail on mainnet — PHGR13 proofs are consensus-critical for
@@ -368,6 +491,7 @@ bool sapling_init_params(const char *params_dir)
                  * helper still clears the globals first and NULLs every field
                  * it frees, so the invariant holds by construction rather than
                  * by this call site happening to sit above the publish. */
+                free(spend_bytes); free(output_bytes);
                 params_release_groth16_vks();
                 LOG_FAIL("sapling_params",
                          "FATAL: Sprout PHGR13 verification key failed to load.\n"
@@ -383,58 +507,150 @@ bool sapling_init_params(const char *params_dir)
     /* ── The single publish point ────────────────────────────────────────
      * Every fallible step is above this line, so from here on nothing can
      * free what is about to become visible to the verifiers. Everything
-     * below (proving-key reads, the prover self-test) is best-effort and
+     * below (the proving keys, the prover self-test) is best-effort and
      * cannot fail the function. The prover self-test verifies through
      * sapling_check_spend/_output, so it must run after this. */
     params_publish_groth16_vks();
     if (phgr_ok)
         params_publish_phgr_vk();
+    atomic_store(&params_loaded, true);
 
-    /* Keep raw PK data for proving (VK is a subset of PK data) */
-    snprintf(path, sizeof(path), "%s/sapling-spend.params", params_dir);
-    spend_pk_data = read_file(path, &spend_pk_len);
+    params_arm_proving_locked(params_dir, spend_bytes, spend_len,
+                              output_bytes, output_len);
+    return true;
+}
 
-    snprintf(path, sizeof(path), "%s/sapling-output.params", params_dir);
-    output_pk_data = read_file(path, &output_pk_len);
+/* The LATE load: the verifying keys are already published — by the compiled-in
+ * fallback (the common case: a node booted with no ~/.zcash-params, and the
+ * proving parameters arrived afterwards) or by an earlier load of a directory.
+ *
+ * This adds the proving keys and NOTHING else. It does not parse, replace or
+ * free a single published verifying key, which is what makes it safe to run on
+ * a background thread while consensus verifiers are reading those keys with no
+ * lock: there is nothing for them to be reading that this is about to change.
+ *
+ * The whole pinned set is still checked, not just the two files whose bytes it
+ * keeps. A directory is accepted as a proving parameter set only if every file
+ * in it matches its compiled-in digest, exactly as on the first load — the
+ * claim being made is "these are the ceremony parameters", and half a set does
+ * not support it. Cheapest pin first, so a refusal need not cost 777 MB of
+ * hashing.
+ *
+ * Caller holds params_mu. */
+static bool params_load_late_proving_locked(const char *params_dir)
+{
+    size_t len = 0;
 
-    if (output_pk_data)
-        LOG_INFO("sapling_params",
-                 "Loaded sapling-output proving key: %zu bytes",
-                 output_pk_len);
-    if (spend_pk_data)
-        LOG_INFO("sapling_params",
-                 "Loaded sapling-spend proving key: %zu bytes",
-                 spend_pk_len);
-
-    /* Initialize the pinned canonical proving backend. Consensus verification
-     * has already installed the independent C23 VKs above. */
+    /* sprout-verifying.key: 1449 bytes, and the whole reason to start here.
+     * Its verifying key is already published and is not re-parsed; only its
+     * integrity is confirmed. */
     {
-        char spend_path[1024], output_path2[1024], sprout_path[1024];
-        snprintf(spend_path, sizeof(spend_path),
-                 "%s/sapling-spend.params", params_dir);
-        snprintf(output_path2, sizeof(output_path2),
-                 "%s/sapling-output.params", params_dir);
-        snprintf(sprout_path, sizeof(sprout_path),
-                 "%s/sprout-groth16.params", params_dir);
+        uint8_t *data = params_read_pinned(params_dir, "sprout-verifying.key",
+                                           SPROUT_VERIFYING_KEY_SHA512, &len);
+        if (!data)
+            LOG_FAIL("sapling_params",
+                     "late proving load: sprout-verifying.key unusable in %s "
+                     "— refusing the directory; the published verifying keys "
+                     "are untouched and validation continues",
+                     params_dir);
+        free(data);
+    }
 
-        zclassic_init_zksnark_params(
-            (const uint8_t *)spend_path, strlen(spend_path),
-            SAPLING_SPEND_PARAMS_BLAKE2B,
-            (const uint8_t *)output_path2, strlen(output_path2),
-            SAPLING_OUTPUT_PARAMS_BLAKE2B,
-            (const uint8_t *)sprout_path, strlen(sprout_path),
-            SPROUT_GROTH16_PARAMS_BLAKE2B);
+    /* Sapling output, then spend: read once, pinned, and kept as the proving
+     * keys. The verifying key each one starts with is already published. */
+    size_t output_len = 0;
+    uint8_t *output_bytes = params_read_pinned(params_dir,
+                                               "sapling-output.params",
+                                               SAPLING_OUTPUT_PARAMS_SHA512,
+                                               &output_len);
+    if (!output_bytes)
+        LOG_FAIL("sapling_params",
+                 "late proving load: sapling-output.params unusable");
 
-        if (!zclassic_sapling_prover_run_self_test()) {
-            LOG_WARN("sapling_params",
-                     "proving capability unavailable: backend=%s status=%s; consensus verification remains active",
-                     zclassic_sapling_prover_backend(),
-                     zclassic_sapling_prover_status());
+    size_t spend_len = 0;
+    uint8_t *spend_bytes = params_read_pinned(params_dir,
+                                              "sapling-spend.params",
+                                              SAPLING_SPEND_PARAMS_SHA512,
+                                              &spend_len);
+    if (!spend_bytes) {
+        free(output_bytes);
+        LOG_FAIL("sapling_params",
+                 "late proving load: sapling-spend.params unusable");
+    }
+
+    /* sprout-groth16.params: 725 MB, hashed but not retained — the backend is
+     * given its path. Last, because it is the most expensive check. */
+    {
+        uint8_t *data = params_read_pinned(params_dir, "sprout-groth16.params",
+                                           SPROUT_GROTH16_PARAMS_SHA512, &len);
+        if (!data) {
+            free(output_bytes); free(spend_bytes);
+            LOG_FAIL("sapling_params",
+                     "late proving load: sprout-groth16.params unusable");
+        }
+        free(data);
+    }
+
+    /* The published verifying keys have to belong to these proving keys. Two
+     * independent pins already imply it — the file matched its SHA-512 and the
+     * compiled-in blob matched its SHA-256, and the blob is that file's
+     * prefix — but the bytes are in hand, so check it rather than infer it.
+     * Only meaningful when the published keys came from the blobs; when they
+     * came from a directory they came from a file with this same pinned
+     * digest, so they are the same bytes by the pin alone. */
+    if (atomic_load(&vks_embedded)) {
+        const struct zcl_embedded_vk *es = &zcl_embedded_vks[0];
+        const struct zcl_embedded_vk *eo = &zcl_embedded_vks[1];
+        if (spend_len < es->len || output_len < eo->len ||
+            memcmp(spend_bytes, es->bytes, es->len) != 0 ||
+            memcmp(output_bytes, eo->bytes, eo->len) != 0) {
+            free(output_bytes); free(spend_bytes);
+            LOG_FAIL("sapling_params",
+                     "late proving load: the parameter files do not begin with "
+                     "this build's compiled-in verifying keys — refusing to "
+                     "prove against a key set the verifier does not hold");
         }
     }
 
-    atomic_store(&params_loaded, true);
+    params_arm_proving_locked(params_dir, spend_bytes, spend_len,
+                              output_bytes, output_len);
     return true;
+}
+
+static bool params_init_locked(const char *params_dir)
+{
+    /* Re-checked under the mutex: two threads can both have seen this clear. */
+    if (atomic_load(&proving_params_loaded)) return true;
+
+    /* THE GUARD THAT USED TO BE WRONG. It read params_loaded, which the
+     * compiled-in fallback sets, so on the one node this call exists for — a
+     * node running on verifying keys alone, whose proving parameters have just
+     * arrived — it returned true without reading a byte. Gating on the
+     * stronger flag is strictly stricter: every case that used to reach the
+     * loader still reaches it, and the case that used to be turned away now
+     * gets the load it asked for. Nothing new is claimed ready. */
+    bool ok = atomic_load(&params_loaded)
+                  ? params_load_late_proving_locked(params_dir)
+                  : params_load_first_locked(params_dir);
+    if (!ok) return false;
+
+    /* Set last, and only with both proving keys resident. It is what stops the
+     * next call re-reading 777 MB, so it must not be set by a path that left
+     * the proving keys absent. A prover whose self-test failed still sets it:
+     * the parameters ARE loaded, re-reading the identical bytes cannot change
+     * the verdict, and zclassic_sapling_prover_status() reports the failure. */
+    if (spend_pk_data && output_pk_data)
+        atomic_store(&proving_params_loaded, true);
+    return true;
+}
+
+bool sapling_init_params(const char *params_dir)
+{
+    if (atomic_load(&proving_params_loaded)) return true;
+    pthread_mutex_lock(&params_mu);
+    bool ok = params_init_locked(params_dir);
+    pthread_mutex_unlock(&params_mu);
+    return ok;
 }
 
 bool sapling_params_loaded(void)
@@ -456,26 +672,38 @@ const uint8_t *sapling_get_spend_pk(size_t *len)
 
 void sapling_free_params(void)
 {
-    if (!atomic_load(&params_loaded)) return;
+    pthread_mutex_lock(&params_mu);
+    if (!atomic_load(&params_loaded)) {
+        pthread_mutex_unlock(&params_mu);
+        return;
+    }
     /* Unpublish-then-free, in that order: this used to free the ic[] arrays
      * and comb tables and only then clear the globals, which is the same
      * published-pointer-to-freed-storage window the loader used to leave
      * behind. params_release_groth16_vks() does both halves in the safe
      * order.
      *
-     * All FOUR keys, not three. This is the only post-publication release site
-     * in the file, so it is the only one that may touch phgr_vk; leaving it out
-     * used to disarm three of the four shielded verifiers and leave
-     * sprout_verify_phgr13 still verifying pre-Sapling JoinSplits against a key
-     * the process had declared released. */
+     * This is the ONE unpublish. It runs at shutdown, when no verifier is
+     * running; the mutex only keeps it from interleaving with a loader on
+     * another thread.
+     *
+     * All FOUR keys, not three. This being the only post-publication release
+     * site is exactly why it is the only one that may touch phgr_vk. Leaving it
+     * out disarmed three of the four shielded verifiers and left
+     * sprout_verify_phgr13 armed with a key the process had declared released
+     * — reportable through sprout_phgr_vk_loaded(), which
+     * contextual_check_tx_proofs_unverifiable() reads to decide whether a
+     * pre-Sapling JoinSplit is checkable at all. */
     params_release_phgr_vk();
     params_release_groth16_vks();
     free(spend_pk_data);
     free(output_pk_data);
     spend_pk_data = NULL; spend_pk_len = 0;
     output_pk_data = NULL; output_pk_len = 0;
+    atomic_store(&proving_params_loaded, false);
     atomic_store(&vks_embedded, false);
     atomic_store(&params_loaded, false);
+    pthread_mutex_unlock(&params_mu);
 }
 
 /* ── Embedded verifying keys ─────────────────────────────────────────────
@@ -529,10 +757,12 @@ static bool embedded_vk_sha256_ok(const struct zcl_embedded_vk *e)
 
 bool sapling_vks_are_embedded(void) { return atomic_load(&vks_embedded); }
 
-bool sapling_install_embedded_vks(void)
+static bool params_install_embedded_locked(void)
 {
-    /* Full parameters win: if they are already loaded the process has both
-     * verifying and proving keys, and re-installing would be a downgrade. */
+    /* Any published key wins. If a directory was loaded the process already
+     * has verifying and proving keys, and re-installing would be a downgrade;
+     * if the blobs are already installed there is nothing to do. Either way
+     * the ONCE PUBLISHED, NEVER REPLACED rule forbids touching them. */
     if (atomic_load(&params_loaded)) return true;
 
     /* Verify every digest before installing any of them, so a failure cannot
@@ -605,6 +835,14 @@ bool sapling_install_embedded_vks(void)
              zcl_embedded_vks[0].len, zcl_embedded_vks[1].len,
              zcl_embedded_vks[2].len, zcl_embedded_vks[3].len);
     return true;
+}
+
+bool sapling_install_embedded_vks(void)
+{
+    pthread_mutex_lock(&params_mu);
+    bool ok = params_install_embedded_locked();
+    pthread_mutex_unlock(&params_mu);
+    return ok;
 }
 
 #ifdef ZCL_TESTING
