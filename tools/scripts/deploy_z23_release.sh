@@ -3,7 +3,8 @@
 #
 # Bootstrap one checksummed Z23 release on fresh remote hosts, sequentially.
 # The release is built elsewhere; remote hosts only verify, install, activate,
-# and qualify the exact transferred runtime bytes.
+# and qualify the exact transferred runtime bytes. Each host receives the
+# complete runtime set in one bounded archive stream, not five SSH handshakes.
 #
 # Usage:
 #   deploy_z23_release.sh --hosts='host1 host2' [--release-dir=DIR]
@@ -18,8 +19,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 INSTALLER="$SCRIPT_DIR/install_z23.sh"
 SSH_BIN="${Z23_DEPLOY_SSH:-ssh}"
-SCP_BIN="${Z23_DEPLOY_SCP:-scp}"
-SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15)
+# The remote activation can spend five minutes qualifying a cold spinning-disk
+# host without writing stdout. Keepalives prove the encrypted peer is alive;
+# forty missed 15-second replies still bound a genuinely dead connection, but
+# transient disk/CPU starvation no longer tears down a healthy activation.
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15
+          -o ServerAliveCountMax=40)
 
 die() { printf 'deploy_z23_release: REFUSE: %s\n' "$*" >&2; exit 1; }
 say() { printf 'deploy_z23_release: %s\n' "$*" >&2; }
@@ -76,13 +81,16 @@ REMOTE_PREPARE
 }
 
 copy_release() {
-    local host="$1" incoming="$2" release_dir="$3" name
-    for name in SHA256SUMS z23 zclassic23 zclassic23-package-verify; do
-        "$SCP_BIN" -q "${SSH_OPTS[@]}" "$release_dir/$name" \
-            "$host:$incoming/$name"
-    done
-    "$SCP_BIN" -q "${SSH_OPTS[@]}" "$INSTALLER" \
-        "$host:$incoming/install_z23.sh"
+    local host="$1" incoming="$2" release_dir="$3"
+    command -v tar >/dev/null 2>&1 || die "tar is required for release transfer"
+    # Exact, fixed member names only. The receiving directory was minted and
+    # path-checked by prepare_host; activate_host independently re-hashes the
+    # manifest, installer, and every extracted payload before installation.
+    tar -C "$release_dir" -cf - \
+        SHA256SUMS z23 zclassic23 zclassic23-package-verify \
+        -C "$SCRIPT_DIR" install_z23.sh \
+        | "$SSH_BIN" "${SSH_OPTS[@]}" "$host" \
+            tar -C "$incoming" -xf -
 }
 
 discard_incoming() {
@@ -271,22 +279,6 @@ PATH="$Z23_DEPLOY_TEST_ROOT/mockbin:$PATH" "$@"
 EOF
 }
 
-selftest_make_scp_mock() {
-    local tmp="$1"
-    cat >"$tmp/mockbin/scp" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-while [ "${1:-}" = -q ] || [ "${1:-}" = -o ]; do
-    [ "$1" != -o ] || shift
-    shift
-done
-src="$1"; remote="$2"; host="${remote%%:*}"; dst="${remote#*:}"
-mkdir -p "$(dirname "$dst")"
-cp "$src" "$dst"
-printf 'scp %s %s\n' "$host" "$dst" >>"$Z23_DEPLOY_TEST_ROOT/transport.log"
-EOF
-}
-
 selftest_make_systemctl_mock() {
     local tmp="$1"
     cat >"$tmp/mockbin/systemctl" <<'EOF'
@@ -331,9 +323,8 @@ selftest_make_fixtures() {
     mkdir -p "$tmp/release" "$tmp/mockbin" "$tmp/hosts"
     selftest_make_release "$tmp"
     selftest_make_ssh_mock "$tmp"
-    selftest_make_scp_mock "$tmp"
     selftest_make_systemctl_mock "$tmp"
-    chmod 755 "$tmp/mockbin/ssh" "$tmp/mockbin/scp" "$tmp/mockbin/systemctl"
+    chmod 755 "$tmp/mockbin/ssh" "$tmp/mockbin/systemctl"
 }
 
 SELFTEST_TMP=""
@@ -342,7 +333,6 @@ selftest_run_deploy() {
     Z23_DEPLOY_TEST_ROOT="$SELFTEST_TMP" \
     Z23_DEPLOY_TEST_FAIL_HOST="${Z23_DEPLOY_TEST_FAIL_HOST:-}" \
     Z23_DEPLOY_SSH="$SELFTEST_TMP/mockbin/ssh" \
-    Z23_DEPLOY_SCP="$SELFTEST_TMP/mockbin/scp" \
     Z23_RELEASE_HEALTH_SECONDS=5 \
         "$0" --release-dir="$SELFTEST_TMP/release" --hosts="$1"
 }
@@ -364,10 +354,13 @@ selftest_assert_success() {
     [ "$alpha_line" -lt "$beta_line" ] \
         || die "selftest: hosts were not activated sequentially"
     transfer_count="$(awk -v manifest="$manifest" \
-        '$1 == "scp" && index($0, manifest) { count++ } END { print count + 0 }' \
+        '$1 == "ssh" && $3 == "tar" && index($0, manifest) \
+            { count++ } END { print count + 0 }' \
         "$tmp/transport.log")"
-    [ "$transfer_count" -eq 10 ] \
-        || die "selftest: transfers did not share one manifest-addressed release"
+    [ "$transfer_count" -eq 2 ] \
+        || die "selftest: each host did not receive one manifest-addressed archive stream"
+    ! grep -q '^scp ' "$tmp/transport.log" \
+        || die "selftest: release transfer opened per-file scp sessions"
     ! grep -Eq '(^| )(make|cc)( |$)' "$tmp/transport.log" \
         || die "selftest: remote build command observed"
 }

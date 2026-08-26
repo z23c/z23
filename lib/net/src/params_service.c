@@ -230,8 +230,16 @@ static int64_t now_secs(void)
 static bool fetch_advance_locked(void)
 {
     if (g_fetch.session) {
-        zcl_param_fetch_close(g_fetch.session);
+        /* Unpublish, THEN free. Nothing may hold a pointer into a session
+         * that is being torn down — the same ordering lib/sapling's parameter
+         * loader is held to for its verifying-key globals, for the same
+         * reason: a reader that observes the pointer after the free reads
+         * freed heap. Everything here is under g_fetch_lock, so this is
+         * belt-and-braces rather than the only thing preventing it, which is
+         * exactly how it should read. */
+        struct zcl_param_fetch *dying = g_fetch.session;
         g_fetch.session = NULL;
+        zcl_param_fetch_close(dying);
     }
     memset(g_fetch.inflight, 0, sizeof(g_fetch.inflight));
     g_fetch.manifest_deadline = 0;
@@ -281,8 +289,16 @@ void param_service_end_fetch(void)
 {
     pthread_mutex_lock(&g_fetch_lock);
     if (g_fetch.session) {
-        zcl_param_fetch_close(g_fetch.session);
+        /* Unpublish, THEN free. Nothing may hold a pointer into a session
+         * that is being torn down — the same ordering lib/sapling's parameter
+         * loader is held to for its verifying-key globals, for the same
+         * reason: a reader that observes the pointer after the free reads
+         * freed heap. Everything here is under g_fetch_lock, so this is
+         * belt-and-braces rather than the only thing preventing it, which is
+         * exactly how it should read. */
+        struct zcl_param_fetch *dying = g_fetch.session;
         g_fetch.session = NULL;
+        zcl_param_fetch_close(dying);
     }
     g_fetch.active = false;
     g_fetch.file_idx = -1;

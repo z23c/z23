@@ -120,6 +120,14 @@ void compact_block_derive_key(const struct block_header *header,
  * On partial success: out_block is populated with available txs,
  *   missing_indices/num_missing are set, returns false.
  *   Caller should send getblocktxn for the missing indices.
+ * On hard failure (bad tx count, allocation failure, out-of-range
+ *   prefilled index, short-txid underrun): returns false with
+ *   num_missing == 0.
+ *
+ * out_block is block_init()ed on EVERY return, including every hard
+ * failure, so block_free(out_block) is always safe and never inspects
+ * the caller's prior stack contents. Callers rely on this: an unhandled
+ * early return here becomes a wild free in the caller.
  *
  * Caller must block_free(out_block) on success.
  * Caller must free(missing_indices) if num_missing > 0. */

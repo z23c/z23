@@ -229,9 +229,20 @@ enum vcs_zcode_dht_record_operation_state {
   VCS_ZCODE_DHT_RECORD_OPERATION_REJECTED,
 };
 
+/* A terminal direct-record result remains pollable until this many monotonic
+ * seconds after its transition out of PENDING. Polling consumes the result;
+ * an unpolled result is released when service_tick observes age >= this
+ * bound. This is the public operation contract, independent of any RPC
+ * wrapper's shorter owner lease. */
+#define VCS_ZCODE_DHT_RECORD_OPERATION_RESULT_RETENTION_S 60u
+
 struct vcs_zcode_dht_record_operation_result {
   enum vcs_zcode_dht_record_operation_state state;
   enum vcs_zcode_dht_store_status store_status;
+  /* Zero while pending. For a terminal result, the first monotonic second at
+   * which an unpolled result is no longer available, saturated at UINT64_MAX
+   * when that deadline is not representable. */
+  uint64_t expires_mono;
   uint8_t page_offset;
   uint8_t next_offset;
   uint32_t record_count;
@@ -315,7 +326,10 @@ bool vcs_zcode_dht_service_lookup_cancel(
 
 /* Direct record operations share the service's authenticated query slots,
  * replay ledgers, rate bucket, deadline, outbound queue and Noise session.
- * Higher-level iterative discovery may issue these against DHT results. */
+ * Higher-level iterative discovery may issue these against DHT results.
+ * Terminal results follow
+ * VCS_ZCODE_DHT_RECORD_OPERATION_RESULT_RETENTION_S; poll consumes a result
+ * before that deadline and returns false once service_tick has released it. */
 bool vcs_zcode_dht_service_record_query_begin(
     struct vcs_zcode_dht_service *service, uint64_t peer_id,
     const struct vcs_zcode_dht_record_selector *selector,
@@ -339,7 +353,13 @@ bool vcs_zcode_dht_service_record_operation_cancel(
 /* Iterative discovery derives the routing target from the selector, walks the
  * S6 closest-node frontier, then queries up to k freshly authenticated nodes
  * under the same global alpha/query budget. Signed responses are merged
- * deterministically; records.v1 is an optional local cache, never authority. */
+ * deterministically; records.v1 is an optional local cache, never authority.
+ *
+ * Lifecycle contract: the service tick never drives a discovery. Its slots
+ * free only when a poller calls _poll to completion, _cancel runs, or the
+ * caller's own lease cleanup cancels it. A discovery begun without a driving
+ * poller is therefore orphaned until service restart — every production
+ * caller sits its discoveries behind an expiring lease that reaps them. */
 bool vcs_zcode_dht_service_record_discovery_begin(
     struct vcs_zcode_dht_service *service,
     const struct vcs_zcode_dht_record_selector *selector,

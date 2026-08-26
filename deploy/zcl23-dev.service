@@ -17,6 +17,14 @@ Wants=network-online.target
 StartLimitIntervalSec=60
 StartLimitBurst=3
 
+# Peer discovery carries no clearnet -addnode entries. Four used to sit in the
+# ExecStart below; all four were refused on :8033, 0/3 attempts each, when
+# probed 2026-08-26. A dead addnode costs a starting node the same dial budget
+# a live one would earn it, and an address pinned in a committed unit rots
+# silently. The compiled-in seeds are re-probed before each release and addrman
+# gossip finds the rest; an operator who wants specific peers names them in
+# their own env file, where a correction costs no commit. The loopback entries
+# that remain point at other daemons on the same machine.
 [Service]
 # Exercise the same external hang-supervision contract developers will ship:
 # systemd waits for the node's READY=1 before arming the watchdog, then the
@@ -48,10 +56,6 @@ ExecStart=%h/.local/lib/zclassic23-dev/current/zclassic23-dev \
     -addnode=127.0.0.1:8034 \
     -addnode=127.0.0.1:8033 \
     -addnode=127.0.0.1:8043 \
-    -addnode=37.187.76.79 \
-    -addnode=162.55.92.62 \
-    -addnode=157.90.223.151 \
-    -addnode=85.239.232.93 \
     $ZCL_LANE_SNAPSHOT_LOADER_FLAG \
     -hotswap-activate \
     -showmetrics=0

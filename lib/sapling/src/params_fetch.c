@@ -952,13 +952,20 @@ void zcl_param_serve_shutdown(void)
 {
     pthread_mutex_lock(&g_serve_lock);
     for (int i = 0; i < ZCL_PARAM_FILE_COUNT; i++) {
+        /* Disarm, unpublish, and only then release. A serve path that has
+         * already passed the armed check must never be able to reach a
+         * pointer or descriptor this loop has freed, so the flag is cleared
+         * first and every field is detached before anything is handed back
+         * to the allocator or to close(). */
         atomic_store(&g_served_armed[i], false);
-        free(g_served[i].manifest);
+        uint8_t *dying = g_served[i].manifest;
+        int dying_fd = g_served[i].fd;
         g_served[i].manifest = NULL;
         g_served[i].count = 0;
-        if (g_served[i].fd > 0)
-            close(g_served[i].fd);
         g_served[i].fd = -1;
+        free(dying);
+        if (dying_fd > 0)
+            close(dying_fd);
     }
     pthread_mutex_unlock(&g_serve_lock);
 }

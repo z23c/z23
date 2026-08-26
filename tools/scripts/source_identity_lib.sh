@@ -4,6 +4,36 @@
 # source_identity_lib.sh — the ONE reader for a build's baked source
 # identity ("source_id_sha256"), and the ONE sha256-string validator.
 #
+# TWO QUESTIONS, ONE KEY NAME — read this before adding a caller.
+#
+# The string `source_id_sha256` answers two DIFFERENT questions in this tree,
+# and every reporting surface spells both of them with that same key:
+#
+#   Q1. "What source tree was this BINARY built from?"
+#       A property of the executable. Baked in at compile time by
+#       -DZCL_BUILD_SOURCE_ID (Makefile BUILD_IDENTITY_CPPFLAGS, scoped to the
+#       single TU lib/util/src/clientversion.c) and returned by
+#       zcl_build_source_id_sha256(). CONSTANT wherever you run the binary
+#       from: it does not read the filesystem, the cwd, or any environment.
+#
+#   Q2. "What source tree is in THIS DIRECTORY right now?"
+#       A property of a working tree. Computed by tools/dev/source-identity.sh
+#       over the files under the current repository root and surfaced as
+#       $(BUILD_SOURCE_ID), as `make agent-plan`'s green_input_cache
+#       .source_id_sha256, and inside the background-quality lane status
+#       files. It VARIES BY DIRECTORY, by design.
+#
+# Both are useful and neither is wrong. Reporting one under the other's name
+# is the defect. A freshness check — "is the running daemon the build I
+# expect?" — must read Q1, because a cwd-derived answer can pass a stale
+# daemon (its own tree looks current) or fail a fresh one (checked out
+# somewhere else). Q2 belongs only to questions about a checkout.
+#
+# THIS LIBRARY ANSWERS Q1 ONLY. There is deliberately no Q2 reader here, so a
+# caller cannot pick the wrong one out of the same namespace by accident; if
+# you want Q2, run tools/dev/source-identity.sh against the tree you mean and
+# name the variable after the tree, not after "the source id".
+#
 # WHY THIS EXISTS — read before touching any function below.
 #
 # `z23 agentbuild` emits the key `source_id_sha256` SEVERAL times on a
@@ -30,6 +60,22 @@
 # baked_source_id() (predates this library, deliberately left as the
 # tools/dev/ in-tree reference and NOT migrated here — see the lane's
 # handoff notes) for the sibling implementation this library generalizes.
+#
+# FIRST-MATCH IS A HEURISTIC, NOT AN ADMISSION RULE. "The first occurrence"
+# only lands on the Q1 value while the Q1 value happens to be printed first;
+# it is one key-ordering change away from silently returning a Q2 value under
+# a Q1 caller's variable name — the same class of failure as the greedy sed,
+# just with a longer fuse. So the readers that feed a freshness DECISION do
+# not use it:
+#   * agentbuild payloads  -> zcl_agentbuild_v2_top_source_id(), which binds
+#     schema, api_version, status, field position and the following field, so
+#     only the canonical top-level value can ever be returned.
+#   * healthcheck payloads -> zcl_healthcheck_v1_running_source_id(), which
+#     binds the schema and then requires UNANIMITY: if the document offers two
+#     different values under this key, it refuses instead of guessing which
+#     question the document was answering.
+# zcl_json_first_string()/zcl_json_first_sha256() remain for display and for
+# non-identity keys. Do not introduce a new freshness caller on top of them.
 #
 # Sourcing contract: THE CALLER resolves this file's own path before sourcing
 # it — this library does not locate itself. That is deliberate, not an
@@ -96,6 +142,82 @@ zcl_json_first_sha256() {
         grep -oE '[0-9a-f]{64}' || true
 }
 
+# zcl_json_all_sha256 <json-text> <key> — every well-formed 64-lowercase-hex
+# value carried by "key", one per line, in document order. Zero matches is a
+# normal answer (empty output, success status). This is the raw material for
+# an ambiguity check; it is NOT an identity reader — never pick a line out of
+# it by position.
+zcl_json_all_sha256() {
+    local body="${1:-}" key="${2:?zcl_json_all_sha256: key required}"
+    printf '%s\n' "$body" |
+        grep -oE "\"${key}\"[[:space:]]*:[[:space:]]*\"[0-9a-f]{64}\"" 2>/dev/null |
+        grep -oE '[0-9a-f]{64}' || true
+}
+
+# zcl_json_sha256_is_ambiguous <json-text> <key> — TRUE when "key" carries two
+# or more DIFFERENT 64-hex values in one document, i.e. the document answers
+# two different questions under one name and no positional rule can say which
+# one a caller meant. Repeats of the SAME value are not ambiguous. Status
+# only, no output; callers turn a true here into a fail-closed diagnostic.
+zcl_json_sha256_is_ambiguous() {
+    local body="${1:-}" key="${2:?zcl_json_sha256_is_ambiguous: key required}"
+    local values distinct
+    values="$(zcl_json_all_sha256 "$body" "$key")"
+    [ -n "$values" ] || return 1
+    distinct="$(printf '%s\n' "$values" | sort -u | wc -l | tr -d ' ')"
+    [ "$distinct" -gt 1 ]
+}
+
+# zcl_json_unanimous_sha256 <json-text> <key> — the value of "key" when the
+# document is unanimous about it, and NOTHING when it is absent, malformed, or
+# ambiguous. Refusal is deliberate: a freshness authority that guesses between
+# two candidate answers is exactly the check that passes a stale deploy.
+zcl_json_unanimous_sha256() {
+    local body="${1:-}" key="${2:?zcl_json_unanimous_sha256: key required}"
+    local values
+    values="$(zcl_json_all_sha256 "$body" "$key")"
+    [ -n "$values" ] || return 0
+    if zcl_json_sha256_is_ambiguous "$body" "$key"; then
+        return 0
+    fi
+    printf '%s\n' "$values" | head -1
+}
+
+# zcl_healthcheck_v1_running_source_id <json-text> — the Q1 identity of the
+# process that answered a `healthcheck` RPC: the source tree ITS OWN
+# executable was built from (app/controllers/src/event_healthcheck_controller.c
+# publishes zcl_build_source_id_sha256() at the top level of both the bounded
+# and the full payload; the nested `agent` block repeats the same value, and
+# the nested `runtime_build` block deliberately uses the distinct names
+# running_source_id_sha256/expected_source_id_sha256 so it cannot collide).
+#
+# Admission binds the schema and then requires unanimity — a payload that ever
+# grows a nested `source_id_sha256` describing a WORKING TREE (Q2) rather than
+# this executable makes the answer ambiguous, and this returns nothing so the
+# caller refuses instead of comparing the wrong value. Invalid/refused input
+# yields empty output and success; the caller applies its own diagnostic.
+#
+# The schema bind is a CONTAINS, not the exact leading prefix the agentbuild
+# reader above uses. That is deliberate: a caller may hand over the raw
+# JSON-RPC envelope (`{"result":{...},"error":null,...}`) rather than the
+# unwrapped result, and an over-tight prefix would refuse a perfectly good
+# deploy — a freshness check that fails a FRESH binary is its own outage.
+# Unanimity, not field position, is what does the work here.
+#
+# `grep -c` rather than `grep -q`: under `set -o pipefail` a quiet grep in a
+# pipeline reports a MATCH as 141, which inverts the decision. Callers of this
+# library do run with pipefail.
+zcl_healthcheck_v1_running_source_id() {
+    local body="${1:-}" schema_hits
+    schema_hits="$(printf '%s\n' "$body" |
+        grep -cE '"schema"[[:space:]]*:[[:space:]]*"zcl\.healthcheck\.v1"' \
+        2>/dev/null || true)"
+    case "${schema_hits:-0}" in
+        ''|0) return 0 ;;
+    esac
+    zcl_json_unanimous_sha256 "$body" source_id_sha256
+}
+
 # zcl_agentbuild_v2_top_source_id <json-text> — admit only the canonical
 # top-level prefix of a successful v1 agentbuild response. This is stronger
 # than zcl_json_first_sha256(): nested runtime objects legitimately reuse the
@@ -140,15 +262,29 @@ zcl_agentbuild_v2_top_build_commit() {
     printf '%s\n' "${rest%%\"*}"
 }
 
-# zcl_binary_source_id <path-to-binary> — the BAKED source identity of a
-# binary: runs `<path> agentbuild` and returns its first source_id_sha256
-# via zcl_json_first_sha256. Preserves dev_lib.sh's baked_source_id()
-# control flow exactly: a non-executable (or missing) path is a normal
-# "nothing to report" case, not a failure — it returns SUCCESS with empty
-# output, so a caller doing `id="$(zcl_binary_source_id "$bin")"` never has
-# to fork error handling for "binary absent" vs. "binary present but silent".
+# zcl_binary_source_id <path-to-binary> — Q1 ONLY: the source tree THAT
+# BINARY was compiled from, read out of the binary itself by running
+# `<path> agentbuild` and admitting the canonical top-level identity through
+# zcl_agentbuild_v2_top_source_id(). The answer is a property of the file at
+# <path> and is therefore the same from every working directory; nothing here
+# consults the cwd, and the schema-anchored admission means a nested runtime
+# (Q2) value can never be returned in its place even if the payload's key
+# order changes. Pass /proc/<pid>/exe to ask it of a running process.
+#
+# It used to admit via zcl_json_first_sha256() — the positional heuristic.
+# That returned the right value only for as long as the baked identity stayed
+# the first `source_id_sha256` in the document; the strict reader removes the
+# ordering dependency entirely.
+#
+# Preserves dev_lib.sh's baked_source_id() control flow exactly: a
+# non-executable (or missing) path is a normal "nothing to report" case, not a
+# failure — it returns SUCCESS with empty output, so a caller doing
+# `id="$(zcl_binary_source_id "$bin")"` never has to fork error handling for
+# "binary absent" vs. "binary present but silent". A binary whose agentbuild
+# output is not a canonical successful zcl.agent_build.v2 reads the same way:
+# empty, i.e. "this binary did not state its identity", never a guess.
 zcl_binary_source_id() {
     local bin="${1:-}"
     [ -x "$bin" ] || return 0
-    zcl_json_first_sha256 "$(timeout 20 "$bin" agentbuild 2>/dev/null)" source_id_sha256
+    zcl_agentbuild_v2_top_source_id "$(timeout 20 "$bin" agentbuild 2>/dev/null)"
 }

@@ -1522,6 +1522,84 @@ _test_next:;
   return failures;
 }
 
+/* One poisoned entry must not cost the other streams their renewal. A
+ * record can go bad between save and reboot without the file being
+ * corrupt — its delegation expires, or the datadir is inherited by a new
+ * identity — and the whole-file checksum says nothing about either. Load
+ * used to reject the ENTIRE file on the first such entry, dropping every
+ * intent on boot: the node kept serving what peers had stored, but it
+ * stopped re-announcing all sixteen streams because one had died. */
+static int test_publication_load_skips_poisoned_entry(void) {
+  int failures = 0;
+  TEST("zcode dht service: one poisoned intent entry does not drop the rest") {
+    char dir[] = "/tmp/zcl_dht_pub_skip_XXXXXX";
+    char other_dir[] = "/tmp/zcl_dht_pub_skip_other_XXXXXX";
+    ASSERT(mkdtemp(dir) != NULL && mkdtemp(other_dir) != NULL);
+    uint8_t genesis[32], noise[32];
+    memset(genesis, 0x11, sizeof(genesis));
+    memset(noise, 0x43, sizeof(noise));
+    ASSERT(fixture_identity(dir, 0x75, genesis, noise));
+    ASSERT(fixture_identity(other_dir, 0x76, genesis, noise));
+    struct vcs_zcode_dht_service *service =
+        fixture_service_at(dir, genesis, noise, 1000);
+    ASSERT(service != NULL);
+    struct vcs_zcode_dht_time now = test_time(1000);
+    struct vcs_zcode_dht_publish_spec spec;
+    uint8_t token[32];
+    struct vcs_zcode_dht_record record;
+    struct vcs_zcode_dht_service_status status;
+    memset(&spec, 0, sizeof(spec));
+    spec.kind = VCS_ZCODE_DHT_RECORD_POINTER;
+    (void)snprintf(spec.namespace_name, sizeof(spec.namespace_name),
+                   "science");
+    memset(spec.semantic_root, 0xa3, 32);
+    memset(spec.transport_root, 0xa4, 32);
+    spec.sequence = 1;
+    spec.not_before = 1000;
+    spec.expiry = 1301;
+    ASSERT(vcs_zcode_dht_service_record_publish_plan(
+        service, &spec, token, &record, NULL));
+    ASSERT_EQ(vcs_zcode_dht_service_record_publish_commit(
+                  service, &spec, token, now, &record, NULL),
+              VCS_ZCODE_DHT_RECORD_STORE_ADDED);
+
+    /* A second slot whose record belongs to a DIFFERENT node: the file
+     * checksum covers it like any other entry, but the provider check must
+     * reject it per-entry — the shape of a datadir inherited by a new
+     * identity. Only the record and lifetime reach the file. */
+    struct vcs_zcode_dht_record foreign;
+    ASSERT(fixture_pointer_record(other_dir, genesis, 0xa5, 0xa6, &foreign));
+    size_t free_slot = VCS_ZCODE_DHT_SERVICE_MAX_PUBLICATIONS;
+    for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_PUBLICATIONS; i++)
+      if (!service->publications[i].used) {
+        free_slot = i;
+        break;
+      }
+    ASSERT(free_slot < VCS_ZCODE_DHT_SERVICE_MAX_PUBLICATIONS);
+    service->publications[free_slot].used = true;
+    service->publications[free_slot].record = foreign;
+    service->publications[free_slot].lifetime_s = 300;
+    publication_mark_dirty(service, now.monotonic_s);
+    vcs_zcode_dht_service_status(service, &status);
+    ASSERT_EQ(status.publication_intents, 2);
+
+    /* Reboot through the same file a real host reboots through: the good
+     * stream's intent survives its poisoned neighbor. */
+    vcs_zcode_dht_service_free(service, now);
+    service = fixture_service_at(dir, genesis, noise, 1000);
+    ASSERT(service != NULL);
+    vcs_zcode_dht_service_status(service, &status);
+    ASSERT_EQ(status.publication_intents, 1);
+
+    vcs_zcode_dht_service_free(service, now);
+    cleanup_fixture(dir);
+    cleanup_fixture(other_dir);
+    PASS();
+  }
+_test_next:;
+  return failures;
+}
+
 /* Superseding a slot mid-cycle must cancel the cycle, not just overwrite it.
  * A slot mid-ROUTING holds a live lookup id (and mid-STORING holds child
  * operation ids); the lookup and operation tables free only when their owner
@@ -1613,6 +1691,123 @@ static int test_publication_supersede_cancels_children(void) {
 
     vcs_zcode_dht_service_free(a, test_time(1006));
     vcs_zcode_dht_service_free(b, test_time(1006));
+    cleanup_fixture(adir);
+    cleanup_fixture(bdir);
+    PASS();
+  }
+_test_next:;
+  return failures;
+}
+
+/* Terminal results have one public retention rule regardless of their owner.
+ * This pins its inclusive sweep boundary and the valid monotonic-zero case. */
+static int test_record_operation_terminal_swept(void) {
+  int failures = 0;
+  TEST("zcode dht service: unpolled terminal operations are swept") {
+    char adir[] = "/tmp/zcl_dht_sweep_a_XXXXXX";
+    char bdir[] = "/tmp/zcl_dht_sweep_b_XXXXXX";
+    ASSERT(mkdtemp(adir) != NULL && mkdtemp(bdir) != NULL);
+    uint8_t genesis[32], anoise[32], bnoise[32], transcript[32];
+    memset(genesis, 0x11, 32);
+    memset(anoise, 0x28, 32);
+    memset(bnoise, 0x29, 32);
+    memset(transcript, 0x5f, 32);
+    ASSERT(fixture_identity(adir, 0x72, genesis, anoise));
+    ASSERT(fixture_identity(bdir, 0x73, genesis, bnoise));
+    struct vcs_zcode_dht_service *a =
+        fixture_service_at(adir, genesis, anoise, 1000);
+    struct vcs_zcode_dht_service *b =
+        fixture_service_at(bdir, genesis, bnoise, 1000);
+    ASSERT(a != NULL && b != NULL);
+    struct vcs_zcode_dht_session as = {.established = true,
+                                       .generation = 9,
+                                       .connection_serial = 1};
+    struct vcs_zcode_dht_session bs = as;
+    bs.connection_serial = 2;
+    memcpy(as.remote_static, bnoise, 32);
+    memcpy(bs.remote_static, anoise, 32);
+    memcpy(as.transcript_hash, transcript, 32);
+    memcpy(bs.transcript_hash, transcript, 32);
+    ASSERT(vcs_zcode_dht_service_session_open(a, 2, &as, test_time(1001)));
+    ASSERT(vcs_zcode_dht_service_session_open(b, 1, &bs, test_time(1001)));
+    ASSERT(pump(a, b, 2, 1, 1001, NULL, NULL));
+    ASSERT(pump(b, a, 1, 2, 1001, NULL, NULL));
+    ASSERT(pump(a, b, 2, 1, 1001, NULL, NULL));
+
+    /* Store and deliver the result but never poll: the operation went
+     * terminal at 1002 and its owner is gone. */
+    struct vcs_zcode_dht_record record;
+    ASSERT(fixture_pointer_record(adir, genesis, 0x74, 0x75, &record));
+    uint64_t operation = 0;
+    ASSERT(vcs_zcode_dht_service_record_store_begin(
+        a, 2, &record, test_time(1002), &operation));
+    ASSERT(pump(a, b, 2, 1, 1002, NULL, NULL));
+    ASSERT(pump(b, a, 1, 2, 1002, NULL, NULL));
+    struct vcs_zcode_dht_service_status status;
+    vcs_zcode_dht_service_status(a, &status);
+    ASSERT_EQ(status.active_record_operations, 1u);
+
+    /* The result remains available immediately before its public boundary. */
+    vcs_zcode_dht_service_tick(
+        a, test_time(1002 +
+                     VCS_ZCODE_DHT_RECORD_OPERATION_RESULT_RETENTION_S - 1u));
+    vcs_zcode_dht_service_status(a, &status);
+    ASSERT_EQ(status.active_record_operations, 1u);
+    struct vcs_zcode_dht_record_operation_result result;
+    ASSERT(vcs_zcode_dht_service_record_operation_poll(
+        a, operation,
+        test_time(1002 +
+                  VCS_ZCODE_DHT_RECORD_OPERATION_RESULT_RETENTION_S - 1u),
+        &result));
+    ASSERT_EQ(result.state, VCS_ZCODE_DHT_RECORD_OPERATION_COMPLETE);
+    ASSERT_EQ(result.expires_mono,
+              1002u + VCS_ZCODE_DHT_RECORD_OPERATION_RESULT_RETENTION_S);
+
+    /* A rejected operation stamped during monotonic second zero must not be
+     * confused with PENDING. It survives through age retention-1 and is
+     * released at the exact boundary. */
+    struct vcs_zcode_dht_record_selector selector = {
+        .kind = VCS_ZCODE_DHT_RECORD_POINTER};
+    (void)snprintf(selector.namespace_name, sizeof(selector.namespace_name),
+                   "science.zero");
+    memset(selector.root, 0x76, sizeof(selector.root));
+    uint64_t rejected = 0;
+    ASSERT(vcs_zcode_dht_service_record_query_begin(
+        a, 2, &selector,
+        (struct vcs_zcode_dht_time){.wall_unix = 1100, .monotonic_s = 0},
+        &rejected));
+    struct service_query *query = NULL;
+    for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_ACTIVE_QUERIES; i++)
+      if (a->queries[i].used &&
+          a->queries[i].record_operation_id == rejected)
+        query = &a->queries[i];
+    ASSERT(query != NULL);
+    vcs_zcode_dht_service_query_finish(
+        a, query, QUERY_OUTCOME_FAILED,
+        (struct vcs_zcode_dht_time){.wall_unix = 1100, .monotonic_s = 0});
+    struct service_record_operation *rejected_operation =
+        vcs_zcode_dht_records_operation_find(a, rejected);
+    ASSERT(rejected_operation != NULL);
+    ASSERT_EQ(rejected_operation->state,
+              VCS_ZCODE_DHT_RECORD_OPERATION_REJECTED);
+    ASSERT_EQ(rejected_operation->terminal_mono, 0u);
+    vcs_zcode_dht_service_tick(
+        a, (struct vcs_zcode_dht_time){
+               .wall_unix = 1159,
+               .monotonic_s =
+                   VCS_ZCODE_DHT_RECORD_OPERATION_RESULT_RETENTION_S - 1u});
+    vcs_zcode_dht_service_status(a, &status);
+    ASSERT_EQ(status.active_record_operations, 1u);
+    vcs_zcode_dht_service_tick(
+        a, (struct vcs_zcode_dht_time){
+               .wall_unix = 1160,
+               .monotonic_s =
+                   VCS_ZCODE_DHT_RECORD_OPERATION_RESULT_RETENTION_S});
+    vcs_zcode_dht_service_status(a, &status);
+    ASSERT_EQ(status.active_record_operations, 0u);
+
+    vcs_zcode_dht_service_free(a, test_time(1100));
+    vcs_zcode_dht_service_free(b, test_time(1100));
     cleanup_fixture(adir);
     cleanup_fixture(bdir);
     PASS();
@@ -2397,6 +2592,136 @@ static int test_record_transport_and_restart(void) {
     test_rm_rf_recursive(ack_dir);
     vcs_zcode_dht_service_free(a, test_time(2001));
     vcs_zcode_dht_service_free(b, test_time(1004));
+    cleanup_fixture(adir);
+    cleanup_fixture(bdir);
+    PASS();
+  }
+_test_next:;
+  return failures;
+}
+
+/* The operation table's eight slots are shared by every record stream the
+ * node runs — publication drives, RPC discoveries, direct CLI operations.
+ * A PENDING operation also holds one of only three query slots, so the cap
+ * is reachable the moment answered-but-unpolled operations start stacking:
+ * those release their query slot but hold their operation slot until the
+ * owner collects the result. This pins the whole ladder — six stacked
+ * completes, two in flight, the ninth refused by the operation table while
+ * a query slot is provably still free — and orphan retention recovers it. */
+static int test_record_operation_table_cap(void) {
+  int failures = 0;
+  TEST("zcode dht service: record operations are capped at eight slots") {
+    char adir[] = "/tmp/zcl_dht_recop_a_XXXXXX";
+    char bdir[] = "/tmp/zcl_dht_recop_b_XXXXXX";
+    ASSERT(mkdtemp(adir) != NULL && mkdtemp(bdir) != NULL);
+    uint8_t genesis[32], anoise[32], bnoise[32], transcript[32];
+    memset(genesis, 0x11, 32);
+    memset(anoise, 0x22, 32);
+    memset(bnoise, 0x33, 32);
+    memset(transcript, 0x55, 32);
+    ASSERT(fixture_identity(adir, 0x64, genesis, anoise));
+    ASSERT(fixture_identity(bdir, 0x65, genesis, bnoise));
+    struct vcs_zcode_dht_service *a =
+        fixture_service_at(adir, genesis, anoise, 1000);
+    struct vcs_zcode_dht_service *b =
+        fixture_service_at(bdir, genesis, bnoise, 1000);
+    ASSERT(a != NULL && b != NULL);
+    struct vcs_zcode_dht_session as = {.established = true,
+                                       .generation = 42,
+                                       .connection_serial = 1};
+    struct vcs_zcode_dht_session bs = as;
+    bs.connection_serial = 2;
+    memcpy(as.remote_static, bnoise, 32);
+    memcpy(bs.remote_static, anoise, 32);
+    memcpy(as.transcript_hash, transcript, 32);
+    memcpy(bs.transcript_hash, transcript, 32);
+    ASSERT(vcs_zcode_dht_service_session_open(a, 2, &as, test_time(1001)));
+    ASSERT(vcs_zcode_dht_service_session_open(b, 1, &bs, test_time(1001)));
+    ASSERT(pump(a, b, 2, 1, 1001, NULL, NULL));
+    ASSERT(pump(b, a, 1, 2, 1001, NULL, NULL));
+    ASSERT(pump(a, b, 2, 1, 1001, NULL, NULL));
+    struct vcs_zcode_dht_service_status st;
+    vcs_zcode_dht_service_status(a, &st);
+    ASSERT_EQ(st.active_record_operations, 0u);
+    ASSERT_EQ(st.active_queries, 0u);
+
+    /* Two pumped rounds of three stack six answered operations; each round
+     * empties the query table again, so round two is not the query cap. */
+    struct vcs_zcode_dht_record_selector selector = {
+        .kind = VCS_ZCODE_DHT_RECORD_POINTER};
+    (void)snprintf(selector.namespace_name, sizeof(selector.namespace_name),
+                   "science.ops");
+    uint64_t ops[VCS_ZCODE_DHT_SERVICE_MAX_RECORD_OPERATIONS];
+    struct vcs_zcode_dht_record_operation_result result;
+    for (size_t round = 0; round < 2; round++) {
+      for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_ACTIVE_QUERIES; i++) {
+        uint8_t root = (uint8_t)(0x91 + round * 3 + i);
+        memset(selector.root, root, 32);
+        ASSERT(vcs_zcode_dht_service_record_query_begin(
+            a, 2, &selector, test_time(1002 + round),
+            &ops[round * VCS_ZCODE_DHT_SERVICE_MAX_ACTIVE_QUERIES + i]));
+      }
+      ASSERT(pump(a, b, 2, 1, 1002 + round, NULL, NULL));
+      ASSERT(pump(b, a, 1, 2, 1002 + round, NULL, NULL));
+      vcs_zcode_dht_service_status(a, &st);
+      ASSERT_EQ(st.active_record_operations,
+                (uint32_t)((round + 1) *
+                           VCS_ZCODE_DHT_SERVICE_MAX_ACTIVE_QUERIES));
+      ASSERT_EQ(st.active_queries, 0u);
+    }
+
+    /* Two genuinely in-flight operations fill the table to eight. The ninth
+     * begin is refused by the eight-slot operation table, not by the query
+     * table, which still has an open slot. */
+    memset(selector.root, 0x97, 32);
+    ASSERT(vcs_zcode_dht_service_record_query_begin(a, 2, &selector,
+                                                    test_time(1004), &ops[6]));
+    memset(selector.root, 0x98, 32);
+    ASSERT(vcs_zcode_dht_service_record_query_begin(a, 2, &selector,
+                                                    test_time(1004), &ops[7]));
+    vcs_zcode_dht_service_status(a, &st);
+    ASSERT_EQ(st.active_record_operations, 8u);
+    ASSERT_EQ(st.active_queries, 2u);
+    memset(selector.root, 0x99, 32);
+    uint64_t refused = 77;
+    ASSERT(!vcs_zcode_dht_service_record_query_begin(a, 2, &selector,
+                                                     test_time(1004),
+                                                     &refused));
+    ASSERT_EQ(refused, 0u);
+    vcs_zcode_dht_service_status(a, &st);
+    ASSERT_EQ(st.active_record_operations, 8u);
+
+    /* Complete the last two but abandon all eight results. At the newest
+     * result's exact retention boundary, the whole bounded table recovers. */
+    ASSERT(pump(a, b, 2, 1, 1004, NULL, NULL));
+    ASSERT(pump(b, a, 1, 2, 1004, NULL, NULL));
+    vcs_zcode_dht_service_status(a, &st);
+    ASSERT_EQ(st.active_record_operations, 8u);
+    ASSERT_EQ(st.active_queries, 0u);
+    vcs_zcode_dht_service_tick(
+        a, test_time(1004 +
+                     VCS_ZCODE_DHT_RECORD_OPERATION_RESULT_RETENTION_S));
+    vcs_zcode_dht_service_status(a, &st);
+    ASSERT_EQ(st.active_record_operations, 0u);
+    ASSERT_EQ(st.active_queries, 0u);
+
+    /* The recovered table accepts fresh work end to end. */
+    memset(selector.root, 0x9a, 32);
+    uint64_t fresh = 0;
+    const uint64_t recovered_at =
+        1004 + VCS_ZCODE_DHT_RECORD_OPERATION_RESULT_RETENTION_S;
+    ASSERT(vcs_zcode_dht_service_record_query_begin(
+        a, 2, &selector, test_time(recovered_at), &fresh));
+    ASSERT(pump(a, b, 2, 1, recovered_at, NULL, NULL));
+    ASSERT(pump(b, a, 1, 2, recovered_at, NULL, NULL));
+    ASSERT(vcs_zcode_dht_service_record_operation_poll(
+        a, fresh, test_time(recovered_at), &result));
+    ASSERT_EQ(result.state, VCS_ZCODE_DHT_RECORD_OPERATION_COMPLETE);
+    vcs_zcode_dht_service_status(a, &st);
+    ASSERT_EQ(st.active_record_operations, 0u);
+
+    vcs_zcode_dht_service_free(a, test_time(recovered_at));
+    vcs_zcode_dht_service_free(b, test_time(recovered_at));
     cleanup_fixture(adir);
     cleanup_fixture(bdir);
     PASS();
@@ -3954,12 +4279,15 @@ int test_zcode_dht_service(void) {
   failures += test_publication_slot_supersede();
   failures += test_publication_slot_superseded_freed();
   failures += test_publication_heal_survives_restart();
+  failures += test_publication_load_skips_poisoned_entry();
   failures += test_publication_supersede_cancels_children();
+  failures += test_record_operation_terminal_swept();
   failures += test_publication_ceiling_hosts_a_real_node();
   failures += test_record_churn_fallback();
   failures += test_deep_ancestry();
   failures += test_peer_admission_order();
   failures += test_record_transport_and_restart();
+  failures += test_record_operation_table_cap();
   failures += test_sparse_iterative_network();
   failures += test_sparse_space16_network();
   TEST("zcode dht service: Noise-authenticated two-node lookup and restart") {

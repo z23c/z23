@@ -748,7 +748,7 @@ static int test_block_piece_hash_deterministic(void)
 static int test_block_piece_manifest_active_chain(void)
 {
     int failures = 0;
-    TEST("block_piece_manifest_build_active_chain uses trusted active chain") {
+    TEST("block manifest publishes trusted active data and fails closed on a gap") {
         struct active_chain chain;
         active_chain_init(&chain);
 
@@ -789,6 +789,7 @@ static int test_block_piece_manifest_active_chain(void)
 
         idx[2].nStatus &= ~BLOCK_HAVE_DATA;
         ASSERT(!block_piece_manifest_build_active_chain(&chain, 1, 3, &m));
+        ASSERT(m.piece_hashes == NULL);
         active_chain_free(&chain);
         PASS();
     } _test_next:;

@@ -200,36 +200,47 @@ bool vcs_zcode_dht_publications_load(struct vcs_zcode_dht_service *service,
   memcpy(verify.network_genesis, service->genesis, 32);
   struct service_publication loaded[VCS_ZCODE_DHT_SERVICE_MAX_PUBLICATIONS];
   memset(loaded, 0, sizeof(loaded));
+  size_t restored = 0, skipped = 0;
   size_t offset = PUBLICATION_STORE_HEADER_BYTES;
   for (uint16_t i = 0; i < count; i++) {
     bool expired = false;
+    struct service_publication entry;
+    memset(&entry, 0, sizeof(entry));
     enum vcs_zcode_dht_record_error parsed =
         vcs_zcode_dht_record_parse_persisted(
             wire + offset, VCS_ZCODE_DHT_RECORD_WIRE_BYTES, &verify,
-            &expired, &loaded[i].record);
+            &expired, &entry.record);
     (void)expired;
     offset += VCS_ZCODE_DHT_RECORD_WIRE_BYTES;
     uint64_t lifetime = zcl_read_u64_le(wire + offset);
     offset += 8;
+    /* One stream's record going bad between save and reboot — a delegation
+     * that expired, a datadir inherited by a new identity — must not cost
+     * the OTHER streams their renewal. The checksum already vouched for the
+     * file as a whole, so a per-entry failure indicts the record, not the
+     * file: skip the entry and keep the rest. */
     if (parsed != VCS_ZCODE_DHT_RECORD_OK || !lifetime ||
-        lifetime > publication_lifetime_max(loaded[i].record.kind) ||
-        memcmp(loaded[i].record.provider_node_id, service->self_id, 32) != 0) {
-      vcs_zcode_dht_service_set_error(service,
-                                      "publication intent record invalid");
-      return false;
+        lifetime > publication_lifetime_max(entry.record.kind) ||
+        memcmp(entry.record.provider_node_id, service->self_id, 32) != 0) {
+      skipped++;
+      continue;
     }
-    loaded[i].used = true;
-    if (loaded[i].record.kind == VCS_ZCODE_DHT_RECORD_STORAGE_ACK) {
+    entry.used = true;
+    if (entry.record.kind == VCS_ZCODE_DHT_RECORD_STORAGE_ACK) {
       service->next_possession_proof_epoch++;
       if (!service->next_possession_proof_epoch)
         service->next_possession_proof_epoch++;
-      loaded[i].possession_proof_epoch =
+      entry.possession_proof_epoch =
           service->next_possession_proof_epoch;
     }
-    loaded[i].lifetime_s = lifetime;
-    loaded[i].backoff_s = 30;
-    loaded[i].phase = SERVICE_PUBLICATION_NEEDS_LOOKUP;
+    entry.lifetime_s = lifetime;
+    entry.backoff_s = 30;
+    entry.phase = SERVICE_PUBLICATION_NEEDS_LOOKUP;
+    loaded[restored++] = entry;
   }
+  if (skipped)
+    vcs_zcode_dht_service_set_error(
+        service, "publication intents restored with entries skipped");
   memcpy(service->publications, loaded, sizeof(loaded));
   return true;
 }
