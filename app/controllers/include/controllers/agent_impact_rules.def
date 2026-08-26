@@ -1272,3 +1272,14 @@ AGENT_IMPACT_RULE("tools/scripts/source_identity_lib.sh|tools/deploy_verify.sh|l
  * noticing, would leave the claim standing with nothing behind it. Mapped to
  * the lint-gate group that owns the Makefile-vs-docs parity assertions. */
 AGENT_IMPACT_RULE("tools/scripts/repro_build.sh|tools/scripts/repro-verify.sh|tools/lint/check_tu_random_seed.sh|docs/DEFENSIVE_CODING.md", "make_lint_gates")
+/* LANE peer-memory: a node that has EVER met this network must be able to get
+ * back on it without a hardcoded seed. The addrman store and its on-disk
+ * format, the anchor set the dial scheduler writes the moment the healthy
+ * outbound set changes, the bootstrap path that decides whether the shipped
+ * seed list is still needed, and the test that holds all three to account.
+ * They move together because they encode ONE claim: self-measured experience
+ * outranks hearsay. Changing the record format without the group is how onion
+ * peers silently stopped being persisted at all; changing the bootstrap gate
+ * without it is how a node quietly goes back to depending on a seed array
+ * whose only entry may already be dead. */
+AGENT_IMPACT_RULE("lib/net/src/addrman.c|lib/net/src/addrman_codec.c|lib/net/src/addrman_internal.h|lib/net/include/net/addrman.h|lib/net/src/anchor_peers.c|lib/net/include/net/anchor_peers.h|lib/net/src/connman.c|lib/net/src/connman_dialer.c|lib/net/include/net/connman.h|lib/test/src/test_peer_memory.c", "peer_memory anchor_peers addrman_rebalance addrman_integrity net")

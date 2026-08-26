@@ -15,6 +15,7 @@
 #include "net/connman_onion_dial_policy.h"
 #include "net/onion_stream.h"
 #include "net/addrman.h"
+#include "net/anchor_peers.h"
 #include "net/peer_lifecycle.h"
 #include "net/port_policy.h"
 #include "core/random.h"
@@ -628,6 +629,26 @@ void *thread_open_connections(void *arg)
          * timed out, BEFORE counting slots — feelers never count toward the
          * outbound floor/slot budget. */
         connman_sweep_feelers(cm);
+
+        /* REMEMBER: the moment the healthy outbound set changes, put it on
+         * disk. The addrman flush is twelve minutes apart, which meant a node
+         * that met a peer and was then killed nine minutes later lost it and
+         * went back to the shipped seed list on the next boot. Self-measured
+         * experience has to outlive an unclean stop or it is not memory.
+         *
+         * This sits ABOVE the slot-budget early-outs below on purpose. Those
+         * `continue` when the outbound set is FULL — which is precisely the
+         * state whose peer list is most worth keeping. Putting the flush
+         * after them would have meant a node at its peer ceiling never wrote
+         * an anchor from this loop at all.
+         *
+         * Interval-bounded (ZCL_ANCHOR_PROMPT_FLUSH_SECS) and a no-op when
+         * nothing changed, so the ordinary iteration costs one small compare
+         * and the write itself is a few hundred bytes. The loop restamps
+         * dial_scheduler_last_progress_us at the top of every pass, including
+         * the one-second early-out passes, so a write here cannot be mistaken
+         * for a stalled scheduler. */
+        (void)connman_flush_anchors_if_changed(cm);
 
         size_t outbound_slot = 0;
         size_t outbound_healthy = 0;

@@ -739,14 +739,46 @@ static void *thread_dns_seed(void *arg)
         return NULL;
     }
 
-    /* Add fixed seeds immediately — don't wait */
-    seed_from_fixed(cm);
+    /* ── SELF-MEASURED EXPERIENCE OUTRANKS A SHIPPED LIST ────────────────
+     *
+     * This used to call seed_from_fixed() unconditionally on every boot, so a
+     * node holding a full peers.dat still injected the hardcoded seed set
+     * into addrman before it had tried a single peer it actually knew. That
+     * is backwards, and it is how a dead seed goes unnoticed: every node
+     * keeps reaching for the shipped list whether or not it needs it, so the
+     * list being dead looks exactly like the list being fine.
+     *
+     * A node that has EVER met this network dials what it remembers first.
+     * The seeds are not removed, only deferred — if memory produces no peer
+     * the retry below fires within ~15 s with the full seed set, and
+     * connman_gather_dial_candidates() is already dialing the anchors loaded
+     * from anchors.dat ahead of everything on the other thread.
+     *
+     * `proven` counts only addresses we have completed a connection with
+     * (last_success != 0), never table size: hearsay and previously-injected
+     * seeds both live in peers.dat and neither is evidence that we can get
+     * back on the network without help. */
+    size_t proven = addrman_proven_count(&cm->manager.addrman);
+    size_t remembered = proven + cm->anchors.count;
 
-    /* DNS seeds after 3 seconds (not 11). The wait is shutdown-aware: a
-     * healthy node must not turn this optional delay into an unclean stop. */
-    (void)connman_wait_for_stop(3);
-    if (!g_stop)
-        dns_seed_resolve(cm);
+    if (remembered == 0) {
+        /* Cold node, or one that has never completed a handshake. The shipped
+         * list is the only door it has; open it immediately. */
+        seed_from_fixed(cm);
+
+        /* DNS seeds after 3 seconds (not 11). The wait is shutdown-aware: a
+         * healthy node must not turn this optional delay into an unclean
+         * stop. */
+        (void)connman_wait_for_stop(3);
+        if (!g_stop)
+            dns_seed_resolve(cm);
+    } else {
+        LOG_INFO("connman",
+                 "bootstrap: %zu remembered peer(s) (%zu proven addresses, "
+                 "%zu anchors) — hardcoded seeds deferred until memory fails",
+                 remembered, proven, cm->anchors.count);
+        (void)connman_wait_for_stop(3);
+    }
 
     /* Onion peer discovery, ADD-only: the ZDIR on-chain directory projection
      * merged with the legacy wallet scrape (controllers/blog_controller.h). */
@@ -777,9 +809,16 @@ static void *thread_dns_seed(void *arg)
      * one edit.) run_onion_seed_pass() checks tor_integration_is_dial_ready()
      * and g_stop/g_connect_only itself. Gated on "few peers" so a fresh
      * boot that already found peers via DNS/fixed seeds skips the
-     * (up to 60s-per-seed, blocking) Tor round-trips. */
-    if (!g_stop && connman_seed_discovery_needed(
-                       connman_outbound_healthy_count(cm)))
+     * (up to 60s-per-seed, blocking) Tor round-trips.
+     *
+     * Also gated on having nothing remembered. Each onion seed costs a
+     * blocking Tor round-trip of up to 60 s, and a node with anchors is
+     * three seconds into dialing peers it has already met — spending minutes
+     * on the shipped list before those attempts have had a chance to land is
+     * exactly the reflex that let a dead seed sit unnoticed. If memory fails,
+     * the retry below runs this same pass. */
+    if (!g_stop && remembered == 0 &&
+        connman_seed_discovery_needed(connman_outbound_healthy_count(cm)))
         run_onion_seed_pass(cm);
 
     /* Only NOW fetch from the .onion peers the projection named. This used
@@ -796,12 +835,18 @@ static void *thread_dns_seed(void *arg)
             try_onion_seed_fetch(cm, discovered[i].hostname);
     }
 
-    /* If still no peers after 15s, retry everything. */
+    /* If still no peers after 15s, retry everything.
+     *
+     * This is also the backstop for the deferral above: a node with remembered
+     * peers skipped the shipped seed list entirely, and this is where the list
+     * arrives if those remembered peers did not produce a connection. Memory
+     * gets first refusal, never the only word. */
     (void)connman_wait_for_stop(12);
     if (!g_stop && connman_outbound_healthy_count(cm) == 0) {
         printf("No peers found, retrying all discovery methods...\n");
         seed_from_fixed(cm);
         dns_seed_resolve(cm);
+        run_onion_seed_pass(cm);
     }
 
     /* Adaptive peer discovery:
@@ -2636,6 +2681,80 @@ void connman_stop(struct connman *cm)
     }
 }
 
+/* One anchor equals another when it names the same endpoint. last_height and
+ * last_success move on their own as a peer keeps talking to us; rewriting the
+ * file every time a height ticked would be a write loop, and neither field
+ * changes WHICH peer the next boot dials. */
+static bool anchor_same_endpoint(const struct anchor_peer *a,
+                                 const struct anchor_peer *b)
+{
+    return a->port == b->port && net_addr_eq(&a->addr, &b->addr);
+}
+
+bool connman_anchor_sets_equivalent(const struct anchor_peer_set *a,
+                                    const struct anchor_peer_set *b)
+{
+    if (!a || !b)
+        return a == b;
+    if (a->count != b->count)
+        return false;
+    /* Membership, not order: connman_collect_healthy_anchors walks the live
+     * node array, and that array reorders whenever a peer is dropped. An
+     * order-sensitive compare would report "changed" on every eviction and
+     * write anchors.dat for no reason. Sets are at most ANCHOR_PEERS_MAX (8),
+     * so the quadratic scan is trivial. */
+    for (size_t i = 0; i < a->count && i < ANCHOR_PEERS_MAX; i++) {
+        bool found = false;
+        for (size_t j = 0; j < b->count && j < ANCHOR_PEERS_MAX; j++) {
+            if (anchor_same_endpoint(&a->peers[i], &b->peers[j])) {
+                found = true;
+                break;
+            }
+        }
+        if (!found)
+            return false;
+    }
+    return true;
+}
+
+bool connman_flush_anchors_if_changed(struct connman *cm)
+{
+    if (!cm || !cm->datadir)
+        return false;
+
+    int64_t now = (int64_t)platform_time_wall_time_t();
+    if (cm->last_anchor_flush_ts != 0 &&
+        now - cm->last_anchor_flush_ts < ZCL_ANCHOR_PROMPT_FLUSH_SECS)
+        return false;
+
+    struct anchor_peer_set current;
+    connman_collect_healthy_anchors(cm, &current);
+
+    /* An empty set is normal early in boot and during a reconnect gap. Do not
+     * overwrite a good anchors.dat with nothing just because we are between
+     * peers — the whole point of the file is to survive exactly that. The
+     * shutdown/flush path still writes the empty set when it means it. */
+    if (current.count == 0)
+        return false;
+
+    if (connman_anchor_sets_equivalent(&current, &cm->last_saved_anchors))
+        return false;
+
+    struct zcl_result r = anchor_peers_save(cm->datadir, &current);
+    if (!r.ok) {
+        LOG_WARN("anchor_peers", "prompt anchors save failed: %s", r.message);
+        /* Retry on the next interval rather than immediately. */
+        cm->last_anchor_flush_ts = now;
+        return false;
+    }
+    cm->last_saved_anchors = current;
+    cm->last_anchor_flush_ts = now;
+    LOG_INFO("anchor_peers",
+             "persisted %zu healthy peer(s) to anchors.dat (prompt flush)",
+             current.count);
+    return true;
+}
+
 void connman_save_addrman(struct connman *cm)
 {
     if (!cm->datadir) return;
@@ -2693,8 +2812,15 @@ void connman_save_addrman(struct connman *cm)
     struct anchor_peer_set anchors;
     connman_collect_healthy_anchors(cm, &anchors);
     struct zcl_result ar = anchor_peers_save(cm->datadir, &anchors);
-    if (!ar.ok)
+    if (!ar.ok) {
         LOG_WARN("anchor_peers", "anchors save failed: %s", ar.message);
+    } else {
+        /* Record what is now on disk so the dial scheduler's prompt flush
+         * (connman_flush_anchors_if_changed) does not immediately rewrite the
+         * same set. The two paths share one notion of "already persisted". */
+        cm->last_saved_anchors = anchors;
+        cm->last_anchor_flush_ts = (int64_t)platform_time_wall_time_t();
+    }
 }
 
 void connman_load_addrman(struct connman *cm)
@@ -2768,6 +2894,11 @@ void connman_load_addrman(struct connman *cm)
      * the tried flags so every loaded anchor gets its one priority attempt. */
     memset(cm->anchors_tried, 0, sizeof(cm->anchors_tried));
     enum anchor_load_status as = anchor_peers_load(cm->datadir, &cm->anchors);
+    /* What we just read IS what is on disk, so the dial scheduler's prompt
+     * flush starts from the truth instead of rewriting an identical file on
+     * its first pass. */
+    cm->last_saved_anchors = cm->anchors;
+    cm->last_anchor_flush_ts = 0;
     if (cm->anchors.count > 0)
         printf("Loaded %zu anchor peer(s) from anchors.dat (%s)\n",
                cm->anchors.count, anchor_load_status_name(as));

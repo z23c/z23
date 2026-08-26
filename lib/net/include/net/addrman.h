@@ -126,6 +126,17 @@ void addrman_free(struct addr_man *am);
 void addrman_clear(struct addr_man *am);
 size_t addrman_size(const struct addr_man *am);
 
+/* How many stored addresses this node has actually completed a connection
+ * with at least once (last_success != 0).
+ *
+ * This is deliberately NOT addrman_size(). The table also holds hearsay —
+ * addresses other peers told us about — and the hardcoded seed list, which
+ * seed_from_fixed() injects on a cold boot and which then persists in
+ * peers.dat forever. Only last_success distinguishes "a peer I have spoken
+ * to" from "an address somebody handed me", and the bootstrap decision (do I
+ * still need the shipped seed list?) must be made on the former. Takes `cs`. */
+size_t addrman_proven_count(struct addr_man *am);
+
 bool addrman_add(struct addr_man *am, const struct net_address *addr,
                  const struct net_addr *source, int64_t time_penalty);
 
