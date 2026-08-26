@@ -4,7 +4,7 @@ If you have installed a Z23 node and want it to take part rather than just
 follow along, this page is the whole story. One command does the work:
 
 ```bash
-z23 join
+z23 join --datadir="$HOME/.zclassic-c23"
 ```
 
 It is safe to run twice. It starts nothing, stops nothing, and signals nothing.
@@ -42,7 +42,7 @@ Substitute your own unit name if you run the node some other way. After the
 restart, confirm the node came back with the flags applied:
 
 ```bash
-z23 zcode work toolchain
+z23 zcode work toolchain --datadir="$HOME/.zclassic-c23"
 ```
 
 ## The two tiers
@@ -59,8 +59,9 @@ connections your node already makes.
 - **No on-chain identity.** Nothing is registered.
 - **No invitation.** Nobody approves you.
 
-If you only ever run `z23 join`, you are a full member of the swarm. Your node
-hosts and serves package content to peers exactly like any other.
+If you only ever run `z23 join --datadir="$HOME/.zclassic-c23"`, you are a
+full member of the swarm. Your node hosts and serves package content to peers
+exactly like any other.
 
 ### DHT — an optional upgrade, never a blocker
 
@@ -130,8 +131,8 @@ deny — any of them. It says so rather than guessing in either direction. Ask
 the running node instead:
 
 ```bash
-z23 status
-z23 core network onion health
+z23 status --datadir="$HOME/.zclassic-c23"
+z23 core network onion health --datadir="$HOME/.zclassic-c23"
 ```
 
 `joined` in the reply is a **configuration** fact — both flags are set — not a
@@ -144,7 +145,8 @@ z23 update
 ```
 
 reports what this node would update to. It and the other update commands
-(`z23 zcode node update check`, `z23 zcode node update apply`) are **declared
+(`z23 zcode node update check --datadir="$HOME/.zclassic-c23"`,
+`z23 zcode node update apply --datadir="$HOME/.zclassic-c23"`) are **declared
 but refused by name** today: there is no verified node-release feed yet, so
 nothing on your node can prove a candidate build is the genuine newer release.
 An unproven update channel is a remote code-execution path, so these refuse

@@ -4,6 +4,7 @@
 #include "config/consensus_state_producer_receipt.h"
 #include "consensus_state_producer_receipt_internal.h"
 
+#include "base/hex.h"
 #include "storage/progress_store.h"
 #include "util/log_macros.h"
 
@@ -14,16 +15,6 @@
  * the act stays attributable in progress.kv after the row is gone. */
 static const char k_retired_binary_meta_key[] =
     "consensus_state.producer_session_retired_binary_digest";
-
-static void hex32(const uint8_t in[32], char out[65])
-{
-    static const char digits[] = "0123456789abcdef";
-    for (size_t i = 0; i < 32; i++) {
-        out[i * 2] = digits[in[i] >> 4];
-        out[i * 2 + 1] = digits[in[i] & 0x0f];
-    }
-    out[64] = '\0';
-}
 
 static bool set_err(char *err, size_t err_size, const char *msg)
 {
@@ -129,9 +120,12 @@ consensus_state_producer_session_retire(
     }
 
     if (out) {
-        hex32(stored.running_binary_digest, out->running_binary_digest);
-        hex32(stored.claim.source_tree_root, out->source_tree_root);
-        hex32(stored.source_epoch_digest, out->source_epoch_digest);
+        zcl_hex_encode(stored.running_binary_digest, 32,
+                       out->running_binary_digest);
+        zcl_hex_encode(stored.claim.source_tree_root, 32,
+                       out->source_tree_root);
+        zcl_hex_encode(stored.source_epoch_digest, 32,
+                       out->source_epoch_digest);
         out->validation_profile = stored.claim.validation_profile;
         out->started_us = stored.started_us;
     }

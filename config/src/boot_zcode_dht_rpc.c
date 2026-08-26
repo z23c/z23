@@ -463,13 +463,16 @@ static bool parse_publish_spec(const struct json_value *in,
                                enum vcs_zcode_dht_record_kind forced_kind) {
   memset(spec, 0, sizeof(*spec));
   spec->kind = forced_kind ? forced_kind : input_record_kind(in);
-  /* Absent (-1) and explicit 0 both mean "derive the sequence server-side":
+  /* Absent and explicit 0 both mean "derive the sequence server-side":
    * the plan takes max+1 from the service's own store under its lock. Renewal
    * callers should always use this — deriving max+1 client-side races the
    * store's visibility lag and can commit a duplicate sequence, which turns
    * BOTH records conflicted and unusable. An explicit sequence >= 1 still
    * pins it (first-publication and replay flows). */
-  int64_t sequence = input_int(in, "sequence", -1);
+  const struct json_value *sequence_value = in ? json_get(in, "sequence") : NULL;
+  if (sequence_value && sequence_value->type != JSON_INT)
+    return false;
+  int64_t sequence = sequence_value ? json_get_int(sequence_value) : 0;
   int64_t not_before = input_int(in, "not_before", -1);
   int64_t expiry = input_int(in, "expiry", -1);
   if (!spec->kind || !input_namespace(in, spec->namespace_name) ||

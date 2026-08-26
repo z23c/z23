@@ -3365,6 +3365,38 @@ static void gate_publish_input(struct json_value *input, const char *mode,
                      transport);
 }
 
+static struct json_value *gate_mutable_field(struct json_value *input,
+                                             const char *key) {
+  if (!input || input->type != JSON_OBJ || !key)
+    return NULL;
+  for (size_t i = 0; i < input->num_children; i++)
+    if (input->keys[i] && strcmp(input->keys[i], key) == 0)
+      return &input->children[i];
+  return NULL;
+}
+
+static void gate_publish_without_sequence(struct json_value *input,
+                                          const char *mode,
+                                          const uint8_t semantic_root[32]) {
+  char semantic_hex[65], transport_hex[65], owner_hex[65];
+  uint8_t transport[32], owner[32];
+  memset(transport, 0xb2, sizeof(transport));
+  memset(owner, 0xa7, sizeof(owner));
+  zcl_hex_encode(semantic_root, 32, semantic_hex);
+  zcl_hex_encode(transport, 32, transport_hex);
+  zcl_hex_encode(owner, 32, owner_hex);
+  json_set_object(input);
+  json_push_kv_str(input, "operation", "publish");
+  json_push_kv_str(input, "mode", mode);
+  json_push_kv_str(input, "kind", "pointer");
+  json_push_kv_str(input, "namespace", "zclassic23.package");
+  json_push_kv_str(input, "semantic_root", semantic_hex);
+  json_push_kv_str(input, "transport_root", transport_hex);
+  json_push_kv_str(input, "owner_group", owner_hex);
+  json_push_kv_int(input, "not_before", 1000);
+  json_push_kv_int(input, "expiry", 2000);
+}
+
 /* A real signed transport carrier, stored complete in the resident global
  * store: prepare the checked-in source package, sign its release with the
  * fixture key (the registry-pinned sibling of this flow lives in
@@ -3477,8 +3509,49 @@ static int test_publish_reproduction_gate(void) {
     memset(foreign_root, 0xc3, 32);
     struct json_value input, result;
 
-    /* No resident store: the refusal names the missing prerequisite. */
+    /* Sequence omission and integer zero are the only auto-sequence forms.
+     * A present value of any other JSON type is malformed, never omission. */
     vcs_package_store_close_global();
+    json_init(&input);
+    gate_publish_without_sequence(&input, "plan", package_root);
+    ASSERT(gate_rpc(&table, "zcode_dht_status", &input, &result));
+    ASSERT_STR_EQ(gate_code(&result), "NO_PACKAGE_STORE");
+    json_free(&result);
+    json_free(&input);
+
+    json_init(&input);
+    gate_publish_input(&input, "plan", "pointer", "zclassic23.package",
+                       package_root);
+    struct json_value *sequence = gate_mutable_field(&input, "sequence");
+    ASSERT(sequence != NULL);
+    json_set_int(sequence, 0);
+    ASSERT(gate_rpc(&table, "zcode_dht_status", &input, &result));
+    ASSERT_STR_EQ(gate_code(&result), "NO_PACKAGE_STORE");
+    json_free(&result);
+    json_free(&input);
+
+    static const char *modes[] = {"plan", "commit"};
+    for (size_t mode = 0; mode < sizeof(modes) / sizeof(modes[0]); mode++) {
+      for (int malformed = 0; malformed < 3; malformed++) {
+        json_init(&input);
+        gate_publish_input(&input, modes[mode], "pointer",
+                           "zclassic23.package", package_root);
+        sequence = gate_mutable_field(&input, "sequence");
+        ASSERT(sequence != NULL);
+        if (malformed == 0)
+          json_set_str(sequence, "7");
+        else if (malformed == 1)
+          json_set_bool(sequence, true);
+        else
+          json_set_null(sequence);
+        ASSERT(gate_rpc(&table, "zcode_dht_status", &input, &result));
+        ASSERT_STR_EQ(gate_code(&result), "INVALID_PUBLISH");
+        json_free(&result);
+        json_free(&input);
+      }
+    }
+
+    /* No resident store: the refusal names the missing prerequisite. */
     json_init(&input);
     gate_publish_input(&input, "plan", "pointer", "zclassic23.package",
                        package_root);
