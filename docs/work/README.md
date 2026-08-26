@@ -192,7 +192,7 @@ Each assignment lives at `docs/work/wt<N>-<slug>.md` and contains:
 |---|---|---|
 | [`C23_LIVING_COMMONS_V2.md`](./C23_LIVING_COMMONS_V2.md) | DESIGN | additive pre-genesis protocol foundation: family commons + evidence economics objects and commands |
 | [`C23_P2P_CORE_INVENTORY.md`](./C23_P2P_CORE_INVENTORY.md) | DESIGN | reviewed P2P core-consolidation code inventory (2026-08-12); a map, not a plan |
-| [`canonical-unit-reconciliation.md`](./canonical-unit-reconciliation.md) | DESIGN | canonical unit reconciliation — explicitly PREPARED, NOT APPLIED; nothing here is live |
+| [`canonical-unit-reconciliation.md`](./canonical-unit-reconciliation.md) | DESIGN | canonical unit reconciliation. Its header says PREPARED, NOT APPLIED, but its own §0 records that another actor applied part of it while the page was being written — so the header understates what is live. Re-read the units with `systemctl --user cat` before acting on any section; never trust this page's inventory as current |
 | [`LIVE_TRANSACTION_DEMONSTRATIONS.md`](./LIVE_TRANSACTION_DEMONSTRATIONS.md) | LIVE | runbook: which cataloged transaction shapes are demonstrated live, and how |
 | [`REFLEX_REACTOR.md`](./REFLEX_REACTOR.md) | LIVE | local zero-wait reflex reactor: edit C23, receive first exact next-build result |
 | [`REFLEX_SUBSTRATE_AUDIT.md`](./REFLEX_SUBSTRATE_AUDIT.md) | EVIDENCE | measured coverage/latency audit of the merged reflex implementation (2026-08-12) |
