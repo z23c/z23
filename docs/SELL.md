@@ -31,6 +31,7 @@ C23 package fetch are the same journey at different abstraction levels.
 | Mint a 1/1 NFT analog | `app tokens create` with `decimals:0`, `supply:"1"` | same leaf, `confirm:true` / returned `plan_id` |
 | Sell it on yardsale | `yardsale.seller.arm` without `confirm` | same leaf with `confirm:true` |
 | Buy a live yardsale ad | `yardsale.buy` without `confirm` | same leaf with `confirm:true` |
+| Buy it from the web yard (`POST /yardsale/buy`) | same form without `confirm` — the reply renders the saved plan terms | resubmit the identical form with `&confirm=true`; changed terms plan anew and never arm |
 | Sell a file (torrent analog) | `app market offer` without `confirm` | same leaf with `confirm:true` |
 | Fetch exact package bytes | `zcode package fetch --datadir=/tmp/z23-sell` | inert: no build or install |
 | Onion shop | `app shop init --datadir=/tmp/z23-sell` without `confirm` | `confirm:true` |
