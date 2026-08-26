@@ -26,10 +26,11 @@ it as your only mainnet node yet.
   `cmake`, for the one-time vendored-library build.
 - No Rust toolchain or library. Shielded proving and verification are native
   C23 code in this repository.
-- **The Zcash zero-knowledge parameter files.** A mainnet node refuses to
-  start without them and this repository neither ships nor downloads them.
-  See ["The proving parameters"](#the-proving-parameters-required-before-the-first-mainnet-start)
-  below — read that section before your first `build/bin/z23` run, not after.
+- **Nothing else.** In particular you do *not* need the Zcash parameter files
+  to run a node: the verifying keys are compiled in, so a fresh build syncs
+  and validates shielded proofs out of the box. You need them only to *send*
+  shielded — see ["The proving parameters"](#the-proving-parameters-optional--a-node-syncs-and-validates-without-them)
+  below.
 
 No other external dependencies: everything else is stock `cc`/`ld`/`make`
 and libc.
@@ -119,30 +120,32 @@ detail is [`work/ZCODE_DEVELOPMENT_WALKTHROUGH.md`](work/ZCODE_DEVELOPMENT_WALKT
 
 ---
 
-## The proving parameters (required before the first mainnet start)
+## The proving parameters (optional — a node syncs and validates without them)
 
-Mainnet blocks contain shielded transactions, and validating them needs the
-Zcash zero-knowledge parameter files. **This repository does not ship them and
-has no target that downloads them.** You have to put them on the machine
-yourself. There is no way around this and no flag that skips it: a mainnet node
-that cannot read all four files stops during boot with a named blocker rather
-than syncing:
+Mainnet blocks contain shielded transactions, and **validating** them needs the
+zero-knowledge verifying keys. Those keys are compiled into the binary: they
+are 6,357 bytes in total, each pinned by hash and checked before use, and a
+node that fails that check refuses to start rather than pretending it can
+validate. So a fresh clone syncs, validates every shielded proof, and serves
+peers with nothing installed.
+
+**Creating** a shielded transaction is different. That needs the proving keys,
+which are roughly 777 MB and live in the four Zcash parameter files below.
+This repository does not ship them and has no target that downloads them. A
+node without them starts normally and reports one named capability blocker:
 
 ```
-[crypto.params] mainnet requires zk params but 'sapling-spend.params' is
-missing/unreadable (dir=$HOME/.zcash-params) — NOT advancing CRYPTO_READY;
-parking alive-degraded after paging the operator
-[boot] PARKED alive-degraded at gate 'crypto_params_missing'
+[crypto.params] shielded send unavailable — proving parameters not installed
 ```
 
-A parked node opens no P2P listener, accepts no RPC, and connects to no peers.
-It is not a crash loop — it stays up, states the reason, and waits for a
-shutdown signal. If your very first run ends at that line, this section is what
-you skipped.
+You will see it in `z23 ops status`. Nothing else is affected: the node still
+follows the chain, validates shielded proofs, and relays. If you only run a
+node, you can stop reading here.
 
-The node looks in `$HOME/.zcash-params` by default; `-paramsdir=<dir>` points
-it somewhere else. Exactly four files are required (the fifth file some
-distributions ship, `sprout-proving.key`, is not):
+To send shielded, put the files on the machine yourself. The node looks in
+`$HOME/.zcash-params` by default; `-paramsdir=<dir>` points it somewhere else.
+Four files are required (the fifth some distributions ship,
+`sprout-proving.key`, is not):
 
 | file | bytes | sha256 |
 | --- | --- | --- |
@@ -151,9 +154,9 @@ distributions ship, `sprout-proving.key`, is not):
 | `sprout-groth16.params` | 725523612 | `b685d700c60328498fbde589c8c7c484c722b788b265b72af448a5bf0ee55b50` |
 | `sprout-verifying.key` | 1449 | `4bd498dae0aacfd8e98dc306338d017d9c08dd0918ead18172bd0aec2fc5df82` |
 
-They total roughly 777 MB. They are the public outputs of the Zcash
-multi-party parameter ceremonies — the *same* files any Zcash-family node
-uses, not something specific to this project. Consequences of that, both good:
+They are the public outputs of the Zcash multi-party parameter ceremonies —
+the *same* files any Zcash-family node uses, not something specific to this
+project. Consequences of that, both good:
 
 - If this machine already runs `zcashd` or `zclassicd`, the files are already
   at `~/.zcash-params` and you are done — check, don't re-download.
@@ -172,7 +175,9 @@ b685d700c60328498fbde589c8c7c484c722b788b265b72af448a5bf0ee55b50  sprout-groth16
 EOF
 ```
 
-Regtest and testnet do not enforce this gate; mainnet does.
+`tools/scripts/zcash_params.sh` does the same check, and refuses to install a
+file whose hash does not match. [`PARAMS.md`](PARAMS.md) explains why the
+verifying keys are compiled in and the proving keys are not.
 
 ---
 
@@ -471,11 +476,13 @@ SIGPIPE false-block). Read it before making any code change.
 ## Troubleshooting
 
 **The node came up but nothing works — no RPC, no peers, no height.** Read the
-last line it printed. If it says `PARKED alive-degraded at gate
-'crypto_params_missing'`, the proving parameters are not installed; see
-["The proving parameters"](#the-proving-parameters-required-before-the-first-mainnet-start).
-A parked node is not a crash and not a hang — it is a stated refusal, and
-every other symptom you might chase is downstream of it.
+last line it printed. A parked node is not a crash and not a hang — it is a
+stated refusal, and every other symptom you might chase is downstream of it.
+Missing proving parameters are *not* a cause: since they became optional, a
+node without them boots normally and reports a capability blocker instead. If
+the gate name is `crypto_params_missing`, the compiled-in verifying keys
+failed their integrity check, which means the binary itself is damaged —
+rebuild it rather than installing anything.
 
 **No peers** (`peer_count` stays at `0`):
 
