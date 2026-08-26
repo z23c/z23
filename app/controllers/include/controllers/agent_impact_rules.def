@@ -1325,3 +1325,13 @@ AGENT_IMPACT_RULE("tools/lint/check_source_identity_authority.sh|tools/lint/sour
  * the hardened builders, so an edit here can never reach the push gate having
  * run zero test groups. */
 AGENT_IMPACT_RULE("tools/lint/check_outparam_init_before_return.sh|tools/lint/outparam_init_baseline.txt|app/services/src/swap_settlement_service.c|app/services/include/services/swap_settlement_service.h", "make_lint_gates swap_settlement api rpc_safety")
+
+/* LANE moderation-node-signoff: the signed per-node moderation sign-off
+ * (zcl.moderation.node_attestation.v1) and the local composition that reads
+ * many nodes' sign-offs without any of them being an authority. Mapped to its
+ * own group plus the marketplace moderation group, because the attestation's
+ * profile name and verdict vocabulary are bound by assertion to
+ * general-audience.v1 / market_review_state on the hosting path: a rename on
+ * either side must fail a test, not drift into a signed statement that no
+ * longer means what the node does. */
+AGENT_IMPACT_RULE("lib/vcs/src/moderation_attestation_object.c|lib/vcs/src/moderation_attestation_compose.c|lib/vcs/include/vcs/moderation_attestation.h|lib/test/src/test_zcode_moderation_attestation.c", "zcode_moderation_attestation file_market_moderation")
