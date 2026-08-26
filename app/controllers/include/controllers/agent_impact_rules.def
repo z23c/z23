@@ -1210,3 +1210,14 @@ AGENT_IMPACT_RULE("core/chainparams/src/chainparams.c|lib/net/src/connman.c|lib/
  * and softening the boot gate without the group would let the node advance
  * CRYPTO_READY on keys that never passed their digest. */
 AGENT_IMPACT_RULE("lib/sapling/src/params_vk_embedded.c|lib/sapling/include/sapling/params_vk_embedded.h|lib/sapling/src/params_init.c|lib/test/src/test_params_vk_embedded.c|config/src/boot_params_gate.c|config/include/config/boot_params_gate.h|tools/scripts/zcash_params.sh|docs/PARAMS.md", "params_vk_embedded")
+/* LANE peer-memory: a node that has EVER met this network must be able to get
+ * back on it without a hardcoded seed. The addrman store and its on-disk
+ * format, the anchor set the dial scheduler writes the moment the healthy
+ * outbound set changes, the bootstrap path that decides whether the shipped
+ * seed list is still needed, and the test that holds all three to account.
+ * They move together because they encode ONE claim: self-measured experience
+ * outranks hearsay. Changing the record format without the group is how onion
+ * peers silently stopped being persisted at all; changing the bootstrap gate
+ * without it is how a node quietly goes back to depending on a seed array
+ * whose only entry may already be dead. */
+AGENT_IMPACT_RULE("lib/net/src/addrman.c|lib/net/include/net/addrman.h|lib/net/src/anchor_peers.c|lib/net/include/net/anchor_peers.h|lib/net/src/connman.c|lib/net/src/connman_dialer.c|lib/net/include/net/connman.h|lib/test/src/test_peer_memory.c", "peer_memory anchor_peers addrman_rebalance addrman_integrity net")
