@@ -12,9 +12,20 @@
 #      shipping recipe: same compiler, same DEV_LIVE_CFLAGS, same
 #      -DZCL_HOTSWAP_MODULE_GEN, same island unity-include);
 #   2. re-links the resulting object with -Wl,-z,lazy into a scratch,
-#      verification-only artifact (see the LAZY-BINDING NOTE in
-#      tools/dev/hotswap_verify_so.c for why this is sound and what it costs);
-#   3. dlopens it and runs the REAL hotswap_module_admit() gauntlet.
+#      verification-only artifact. The small verifier process does not export
+#      the node kernel symbols a module binds against, so a -z now dlopen
+#      would fail there for reasons that say nothing about the module. Lazy
+#      binding defers those to first call, which is what lets the manifest be
+#      judged at all -- and is also its cost: an UNRESOLVABLE symbol sails
+#      through. The shipped artifact links -z now, so this check is LOOSER
+#      than production in exactly the dimension that decides whether the
+#      module loads. tools/dev/hotswap-symbols.sh closes that gap against a
+#      real node binary, and step 4 runs it whenever one is built;
+#   3. dlopens it and runs the REAL hotswap_module_admit() gauntlet;
+#   4. when a dev node binary exists, resolves the SHIPPED artifact's strong
+#      undefined symbols against it, which is the check step 2 cannot make.
+#      Absent a node this step reports that it did not run -- it never counts
+#      as a pass, and it never fails a row for the node's absence.
 #
 # Exit 0 only if every requested row is ADMITTED. This is deliberately NOT the
 # activation path: no registry commit, no live probe, no datadir, no node.
@@ -34,6 +45,8 @@ mkdir -p "$SCRATCH" || { echo "hotswap-verify: cannot create $SCRATCH" >&2; exit
 
 MANIFEST="${ZCL_HOTSWAP_SWAPPABLE_MANIFEST:-config/hotswap_swappable.def}"
 FLAGS_ENV="build/hotswap/fast/flags.env"
+# The node a module will be dlopen'd into. Step 4 resolves against it.
+SYMBOL_NODE="${ZCL_HOTSWAP_NODE_BINARY:-build/bin/zclassic23-dev}"
 
 # Rows of the swappable manifest, one source_tu per line. Same COLUMN-1,
 # paren-depth, string-literal-aware walk the lint gates use, so the macro
@@ -145,11 +158,30 @@ for tu in "${TARGETS[@]}"; do
         continue
     fi
 
-    if "$SCRATCH/hotswap_verify_so" "$lazy_so" "$tu" 2>&1 | sed 's/^/    /'; then
-        pass=$((pass + 1))
-    else
-        fail=$((fail + 1)); failed_rows="${failed_rows}  $tu (admit)"$'\n'
+    # A row passes only if BOTH checks pass, and is counted exactly once.
+    row_ok=1
+    if ! "$SCRATCH/hotswap_verify_so" "$lazy_so" "$tu" 2>&1 | sed 's/^/    /'; then
+        row_ok=0; failed_rows="${failed_rows}  $tu (admit)"$'\n'
     fi
+
+    # Step 4. The admit check above ran against the LAZY re-link; the artifact
+    # that actually ships is this one, linked -z now. Resolve its symbols
+    # against a real node so an unresolvable one cannot reach a mount attempt.
+    # NOT `tail -1`: make appends its own "Leaving directory" line after the
+    # recipe's output, so the artifact path is not last.
+    shipped="$(LC_ALL=C grep -oE '^build/hotswap/[^ ]+\.so$' "$SCRATCH/build.log" | tail -1)"
+    if [ -n "$shipped" ] && [ -f "$shipped" ]; then
+        if [ -r "$SYMBOL_NODE" ]; then
+            if ! tools/dev/hotswap-symbols.sh "$shipped" "$SYMBOL_NODE" 2>&1 |
+                    sed -n 's/^  /    /p'; then
+                row_ok=0; failed_rows="${failed_rows}  $tu (symbols)"$'\n'
+            fi
+        else
+            echo "    symbols     : NOT CHECKED (no node at $SYMBOL_NODE; make fast-rebuild)"
+        fi
+    fi
+
+    if [ "$row_ok" -eq 1 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); fi
 done
 
 echo
@@ -162,5 +194,13 @@ if [ "$pass" -eq 0 ]; then
     echo "hotswap-verify: FATAL — zero rows verified; refusing to report success." >&2
     exit 2
 fi
-echo "OK: $pass swappable row(s) dlopen'd and ADMITTED by hotswap_module_admit()"
+if [ -r "$SYMBOL_NODE" ]; then
+    echo "OK: $pass swappable row(s) ADMITTED by hotswap_module_admit(), and every"
+    echo "    shipped artifact resolves its symbols against $SYMBOL_NODE"
+else
+    echo "OK: $pass swappable row(s) dlopen'd and ADMITTED by hotswap_module_admit()"
+    echo "    NOTE: symbol resolution was NOT checked -- no node at $SYMBOL_NODE."
+    echo "    Admission runs against a -z lazy re-link, so an unresolvable symbol"
+    echo "    is not caught here. Build a node (make fast-rebuild) for that leg."
+fi
 exit 0
