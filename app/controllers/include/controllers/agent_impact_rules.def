@@ -1251,3 +1251,12 @@ AGENT_IMPACT_RULE("docs/CODE_FEARLESSLY.md|AGENTS.md", "make_lint_gates")
  * nothing looking. Mapped so an edit here can never reach the push gate
  * having run zero test groups. */
 AGENT_IMPACT_RULE("tools/scripts/source_identity_lib.sh|tools/deploy_verify.sh|lib/util/src/clientversion.c|lib/util/include/util/clientversion.h|app/controllers/src/agent_runtime_controller.c|lib/test/src/test_source_identity_authority.c", "source_identity_authority make_lint_gates")
+/* LANE reproducible-build: the flag that makes a compile repeat, the gate that
+ * keeps it wired, and the end-to-end proof that a second builder gets the same
+ * bytes. They move together because each one is half of the same claim: a node
+ * announces its source id on the wire, and that announcement is only checkable
+ * if the same source rebuilds to the same binary. Removing the per-TU random
+ * seed without the gate, or narrowing the proof script without the lint gate
+ * noticing, would leave the claim standing with nothing behind it. Mapped to
+ * the lint-gate group that owns the Makefile-vs-docs parity assertions. */
+AGENT_IMPACT_RULE("tools/scripts/repro_build.sh|tools/scripts/repro-verify.sh|tools/lint/check_tu_random_seed.sh|docs/DEFENSIVE_CODING.md", "make_lint_gates")
