@@ -34,11 +34,18 @@ sudo -u "$USER" z23-ram-dev path
 ```
 
 `path` prints the exact RAM checkout to use as an external agent's working
-directory. Neither measured host currently has a `grok` executable. If an
-agent later provides a CLI, launch its actual command through `run --`.
-Temporary files, the checkout, build output,
-ZCC entries, and XDG caches stay within the single tmpfs cap. Home-directory
-credentials and the persistent source checkout remain outside it.
+directory. Launch an interactive Grok session in the bounded scope with normal
+terminal scrollback:
+
+```bash
+z23-ram-dev run -- grok --minimal --no-alt-screen
+```
+
+Interactive commands receive a pseudo-terminal; non-interactive commands keep
+pipe semantics. Temporary files, the checkout, build output, ZCC entries, and
+XDG caches stay within the single tmpfs cap. Home-directory credentials, Grok
+session transcripts, and the persistent source checkout remain durable outside
+it.
 
 RAM work is lost at shutdown. Commit all files, push the commit to `main`, and
 then record and verify the checkpoint:
