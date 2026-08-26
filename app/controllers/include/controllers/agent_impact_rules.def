@@ -1325,3 +1325,15 @@ AGENT_IMPACT_RULE("tools/lint/check_source_identity_authority.sh|tools/lint/sour
  * the hardened builders, so an edit here can never reach the push gate having
  * run zero test groups. */
 AGENT_IMPACT_RULE("tools/lint/check_outparam_init_before_return.sh|tools/lint/outparam_init_baseline.txt|app/services/src/swap_settlement_service.c|app/services/include/services/swap_settlement_service.h", "make_lint_gates swap_settlement api rpc_safety")
+
+/* LANE hotswap-leaf-denylist: the owner ruling that core.chain.block.get and
+ * core.chain.transaction.get are NEVER hot-swappable, and the gate that
+ * enforces it. The names and their per-leaf reasons are DATA in
+ * config/hotswap_denied_leaves.def; the gate is the only consumer. They must
+ * move together — a denylist edit with no gate run is how the rule quietly
+ * stops being enforced, and a gate edit with no denylist re-read is how a
+ * fail-closed path turns into a hollow pass. The scanned manifests are listed
+ * too: a leaf added to any of them is exactly the event this rule exists to
+ * put a test group behind. Mapped to the lint-gate group that owns the
+ * Makefile-LINT_GATES / run_lint.sh-table / docs parity assertions. */
+AGENT_IMPACT_RULE("config/hotswap_denied_leaves.def|tools/lint/check_hotswap_denied_leaves.sh|config/hotswap_eligible.def|config/hotswap_swappable.def|config/hotswap_probe_cases.def|config/hotswap_services.def|config/hotswap_islands.def", "make_lint_gates hotswap_module_v2")

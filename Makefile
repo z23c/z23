@@ -7959,6 +7959,19 @@ check-hotswap-dev-only:
 check-hotswap-eligible-scope:
 	@tools/lint/check_hotswap_eligible_scope.sh
 
+# LEAF-level denial, which the path-level scope gate above structurally cannot
+# express: core.chain.block.get and core.chain.transaction.get are owned by an
+# app-layer controller that is legitimately eligible and already admitted, and
+# both are ZCL_COMMAND_READY_READ, so every generic check passes them. They
+# RENDER BLOCK AND TRANSACTION BYTES — a swapped generation misreports the
+# chain to every RPC reader with validation untouched. The names and the
+# per-leaf reason are DATA in config/hotswap_denied_leaves.def, never in the
+# script. Fails closed: a missing or empty denylist is exit 2, not a pass.
+# --selftest runs first and proves the gate fires on a seeded fixture.
+check-hotswap-denied-leaves:
+	@tools/lint/check_hotswap_denied_leaves.sh --selftest
+	@tools/lint/check_hotswap_denied_leaves.sh
+
 # Scans the UNION of config/hotswap_eligible.def and
 # config/hotswap_swappable.def: every TU either manifest can recompile into a
 # .so must be free of mutable file-scope statics.
@@ -9408,6 +9421,7 @@ LINT_GATES := \
     check-package-anatomy \
     check-hotswap-dev-only \
     check-hotswap-eligible-scope \
+    check-hotswap-denied-leaves \
     check-hotswap-static-state \
     check-hotswap-service-islands \
     check-hotswap-swappable-shape \

@@ -970,6 +970,7 @@ add/remove a gate.
 - `check-wire-harness-security-gate`
 - `check-hotswap-dev-only`
 - `check-hotswap-eligible-scope`
+- `check-hotswap-denied-leaves`
 - `check-hotswap-static-state`
 - `check-hotswap-service-islands`
 - `check-hotswap-swappable-shape`
