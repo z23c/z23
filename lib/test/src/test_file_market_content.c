@@ -207,6 +207,39 @@ int file_market_content_tests(void)
         memcmp(loaded.data, payload, sizeof(payload)) == 0);
     free(loaded.data);
 
+    /* Slice-serving calls load once per <=60 KiB slice of the same
+     * immutable chunk, so the second load rides the verified-digest table:
+     * same inode identity, same bytes, and a plain-memory copy instead of
+     * another full-file SHA3. */
+    struct zcl_result warm_result = file_market_content_load_chunk(
+        &ndb, offer.offer_id, 0, &loaded);
+    CONTENT_CHECK("warm slice load repeats the exact verified chunk",
+        warm_result.ok && loaded.size == sizeof(payload) &&
+        memcmp(loaded.data, payload, sizeof(payload)) == 0 &&
+        memcmp(loaded.sha3, chunk_sha3, 32) == 0);
+    free(loaded.data);
+
+    /* An in-place rewrite that restores its old mtime with utimensat(2)
+     * must still refuse: ctime cannot be set backwards, so the key misses,
+     * the bytes are re-hashed, and the registration digest disagrees. */
+    struct stat before_rewrite;
+    bool captured = stat(filepath, &before_rewrite) == 0;
+    int rewrite_fd = open(filepath, O_WRONLY | O_CLOEXEC);
+    uint8_t swapped = (uint8_t)(payload[0] ^ 0xffu);
+    bool rewrote = captured && rewrite_fd >= 0 &&
+        pwrite(rewrite_fd, &swapped, 1, 0) == 1;
+    if (rewrite_fd >= 0)
+        close(rewrite_fd);
+    const struct timespec keep_times[2] = {
+        before_rewrite.st_atim, before_rewrite.st_mtim,
+    };
+    bool clock_frozen = rewrote &&
+        utimensat(AT_FDCWD, filepath, keep_times, 0) == 0;
+    load_result = file_market_content_load_chunk(
+        &ndb, offer.offer_id, 0, &loaded);
+    CONTENT_CHECK("mtime-frozen rewrite cannot ride the digest table",
+                  clock_frozen && !load_result.ok && loaded.data == NULL);
+
     int mutate_fd = open(filepath, O_WRONLY | O_CLOEXEC);
     uint8_t changed = (uint8_t)(payload[0] ^ 0xffu);
     bool mutated = mutate_fd >= 0 && pwrite(mutate_fd, &changed, 1, 0) == 1;
