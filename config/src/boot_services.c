@@ -475,42 +475,12 @@ static void boot_register_core_liveness_and_reducer(
     int seeded = block_index_loader_seed_tip_from_finalized(
         svc->state, params, progress_store_db());
     (void)seeded;  /* logs its own success line; benign no-op otherwise */
-    /* B2 1c — torn-import AUTO-ARM is now the DEFAULT self-heal. On EVERY
-     * boot we consult the PURE detect predicate
-     * (block_index_loader_torn_import_detect, no side-effects); if it finds a
-     * durable tear (a prevout_unresolved hole ABOVE the compiled anchor
-     * h=3056758 plus a coin_backfill.refused.<h>.<hash> marker), arm_if_torn
-     * re-seeds coins_kv from the SHA3-verified anchor snapshot (uss_open
-     * verify_full_sha3=true bound to cp->sha3_hash) and HARD-ASSERTS the
-     * re-seeded set == checkpoint (commitment + count==1354769; FATAL on
-     * mismatch). It then folds forward from the proven anchor. If it arms (or
-     * a from-anchor refold is already in progress — explicit flag at boot.c,
-     * or a mid-fold restart), SKIP the cold-import seed.
-     *
-     * NO FLAG REQUIRED: a normal boot of a TORN datadir now self-heals. On a
-     * HEALTHY (untorn) datadir the detect predicate returns false, arm_if_torn
-     * does NOT reset, and the cold-import seed runs UNCHANGED — additive,
-     * safe; a synced node never re-folds. The reset path itself is the
-     * load-bearing safety net: it can only ever stamp the SHA3-verified anchor
-     * set (or FATAL), never an unproven one.
-     *
-     * The explicit -refold-from-anchor flag and the -load-verify-boot route
-     * (which armed the from-anchor signal in app_init when the verified
-     * snapshot probe passed) are still honored — both surface here as
-     * refold_from_anchor_active() == TRUE, which arm_if_torn short-circuits to
-     * true without re-resetting. */
-    /* -load-snapshot-at-own-height=PATH: the loader at boot.c already
-     * RE-SEEDED coins_kv from a self-SHA3-verified snapshot at the snapshot's
-     * OWN height, forced the 8 stage cursors to that height, and seeded the
-     * tip_finalize trusted base there (raise-only). It is the authoritative
-     * seed for THIS boot. loader_owns_seed short-circuits EVERY fallback seeder
-     * below so none can CLOBBER it: arm_if_torn (the loader's coins-dependent
-     * cursors at seed_h look like a "torn" prevout hole), the W1-L1 cold-start
-     * arm (they are NOT empty — the loader populated them), and the cold-import
-     * seed. Any of those would otherwise re-seed coins_kv from the COMPILED
-     * checkpoint (3,056,758) or re-stamp cursors off it, dropping the trusted
-     * base and pinning H*. So on a loader boot skip them all — the loader owns
-     * the seed and the staged pipeline folds forward from seed_h. */
+    /* Torn-import recovery is detect-gated and may stamp only the full-SHA3
+     * verified compiled anchor set; mismatch is fatal. Explicit refold and
+     * verified-load routes remain authoritative and skip cold-import seeding.
+     * A healthy synced node never resets or re-folds. */
+    /* A verified snapshot loaded at its own height owns the seed. Skip every
+     * fallback seeder so none can lower its trusted base or stage cursors. */
     bool loader_owns_seed = boot_loader_owns_seed(svc->app_ctx);
     bool armed_from_anchor =
         loader_owns_seed ||                      /* loader at boot.c re-seeded + armed the stages */
@@ -548,6 +518,36 @@ static void boot_register_core_liveness_and_reducer(
 }
 
 /* ── Runtime service startup (called from app_init) ────────── */
+
+bool boot_wallet_rebuild_probe(sqlite3 *db, bool *has_utxos,
+                               bool *has_keys);
+
+/* Decide whether the ground-truth wallet join is useful without touching the
+ * global UTXO corpus. A probe failure withholds the optional rebuild. */
+bool boot_wallet_rebuild_probe(sqlite3 *db, bool *has_utxos,
+                               bool *has_keys)
+{
+    sqlite3_stmt *stmt = NULL;
+    if (!db || !has_utxos || !has_keys) {
+        fprintf(stderr, "wallet_utxos: ownership probe received invalid input\n");
+        return false;
+    }
+    *has_utxos = false;
+    *has_keys = false;
+    const char *sql = "SELECT EXISTS(SELECT 1 FROM wallet_utxos "
+        "WHERE spent_txid IS NULL), EXISTS(SELECT 1 FROM wallet_keys)";
+    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    if (rc == SQLITE_OK && stmt && AR_STEP_ROW_READONLY(stmt) == SQLITE_ROW) {
+        *has_utxos = sqlite3_column_int(stmt, 0) != 0;
+        *has_keys = sqlite3_column_int(stmt, 1) != 0;
+        sqlite3_finalize(stmt);
+        return true;
+    }
+    fprintf(stderr, "wallet_utxos: ownership probe failed: %s\n",
+            sqlite3_errmsg(db));
+    sqlite3_finalize(stmt);
+    return false;
+}
 
 bool app_init_services(struct app_context *ctx,
                         const struct chain_params *params,
@@ -643,18 +643,18 @@ bool app_init_services(struct app_context *ctx,
         struct node_db *ndb = boot_node_db(svc);
         if (ndb && ndb->open) {
             int64_t t0 = (int64_t)platform_time_wall_time_t();
-            sqlite3_stmt *chk = NULL;
-            int existing = 0;
-            if (sqlite3_prepare_v2(ndb->db,
-                    "SELECT count(*) FROM wallet_utxos WHERE spent_txid IS NULL",
-                    -1, &chk, NULL) == SQLITE_OK) {
-                if (AR_STEP_ROW_READONLY(chk) == SQLITE_ROW)
-                    existing = sqlite3_column_int(chk, 0);
-                sqlite3_finalize(chk);
-            }
-            if (existing > 0) {
-                printf("wallet_utxos: keeping %d existing UTXOs (synced from zclassicd)\n",
-                    existing);
+            bool has_utxos = false;
+            bool has_keys = false;
+            bool ownership_known = boot_wallet_rebuild_probe(
+                ndb->db, &has_utxos, &has_keys);
+            if (!ownership_known) {
+                fprintf(stderr, "wallet_utxos: rebuild withheld because "
+                        "wallet ownership is unknown\n");
+            } else if (has_utxos) {
+                printf("wallet_utxos: keeping existing UTXOs "
+                       "(synced from zclassicd)\n");
+            } else if (!has_keys) {
+                printf("wallet_utxos: no wallet keys; ground-truth rebuild skipped\n");
             } else {
                 int rc = sqlite3_exec(ndb->db, "BEGIN", NULL, NULL, NULL);
                 if (rc != SQLITE_OK) {

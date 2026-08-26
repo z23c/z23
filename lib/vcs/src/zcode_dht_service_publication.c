@@ -182,6 +182,8 @@ vcs_zcode_dht_service_record_publish_commit(
     difference |= expected[i] ^ plan_token[i];
   if (difference)
     return VCS_ZCODE_DHT_RECORD_STORE_STALE;
+  if (record.kind == VCS_ZCODE_DHT_RECORD_AGENT_SCOPE)
+    return VCS_ZCODE_DHT_RECORD_STORE_SCOPE;
   struct service_publication *publication =
       publication_claim(service, &record);
   if (!publication)

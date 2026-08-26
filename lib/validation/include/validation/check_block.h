@@ -11,6 +11,7 @@
 #include "chain/chainparams.h"
 #include "consensus/validation.h"
 #include "primitives/block.h"
+#include "validation/contextual_check_tx.h"  /* enum contextual_check_verdict */
 #include <stdbool.h>
 
 #define MIN_BLOCK_VERSION 4
@@ -156,6 +157,22 @@ bool contextual_check_block_header(const struct block_header *header,
  * gate); those callers do not invoke this function at all rather than
  * passing a flag to weaken it. */
 bool contextual_check_block(const struct block *block,
+                            struct validation_state *state,
+                            const struct chain_params *params,
+                            const struct block_index *pindex_prev,
+                            bool is_ibd);
+
+/* Typed form of the same gate. Identical consensus behaviour — it just
+ * says WHY the answer was not PASS, so a caller recording a permanent
+ * reject can tell a genuinely invalid block from one it merely lacked the
+ * verifying keys (or the memory) to judge. Callers that persist a verdict
+ * or attribute blame MUST use this rather than inspecting reject-reason
+ * strings; the strings are diagnostics and will drift.
+ *
+ * UNVERIFIABLE is not an acceptance — contextual_check_block() still
+ * answers false for it. */
+enum contextual_check_verdict contextual_check_block_verdict(
+                            const struct block *block,
                             struct validation_state *state,
                             const struct chain_params *params,
                             const struct block_index *pindex_prev,
