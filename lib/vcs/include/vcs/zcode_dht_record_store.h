@@ -29,6 +29,11 @@ enum vcs_zcode_dht_record_store_result {
   VCS_ZCODE_DHT_RECORD_STORE_PROVIDER_CAP,
   VCS_ZCODE_DHT_RECORD_STORE_CONFLICT_CAP,
   VCS_ZCODE_DHT_RECORD_STORE_GLOBAL_CAP,
+  /* Not a record-store condition at all: the service's publication intent
+   * table is full of streams this publish neither belongs to nor beats.
+   * Distinct from GLOBAL_CAP so an operator reading a refusal is sent to
+   * the 16-slot intent table, not the 4096-record store cap. */
+  VCS_ZCODE_DHT_RECORD_STORE_NO_SLOT,
   VCS_ZCODE_DHT_RECORD_STORE_IO,
   VCS_ZCODE_DHT_RECORD_STORE_CORRUPT,
 };

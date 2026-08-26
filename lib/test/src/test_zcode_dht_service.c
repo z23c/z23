@@ -1307,7 +1307,8 @@ static int test_publication_slot_supersede(void) {
     ASSERT_EQ(status.publication_intents,
               VCS_ZCODE_DHT_SERVICE_MAX_PUBLICATIONS);
 
-    /* The ceiling is still a ceiling for a genuinely new stream. */
+    /* The ceiling is still a ceiling for a genuinely new stream — and it
+     * names the table that is actually full. */
     memset(&spec, 0, sizeof(spec));
     spec.kind = VCS_ZCODE_DHT_RECORD_POINTER;
     (void)snprintf(spec.namespace_name, sizeof(spec.namespace_name),
@@ -1321,7 +1322,10 @@ static int test_publication_slot_supersede(void) {
         service, &spec, token, &record, NULL));
     ASSERT_EQ(vcs_zcode_dht_service_record_publish_commit(
                   service, &spec, token, now, &record, NULL),
-              VCS_ZCODE_DHT_RECORD_STORE_GLOBAL_CAP);
+              VCS_ZCODE_DHT_RECORD_STORE_NO_SLOT);
+    ASSERT_STR_EQ(vcs_zcode_dht_record_store_result_string(
+                      VCS_ZCODE_DHT_RECORD_STORE_NO_SLOT),
+                  "no free publication slot");
 
     vcs_zcode_dht_service_free(service, now);
     cleanup_fixture(dir);
@@ -1457,7 +1461,9 @@ static int test_publication_ceiling_hosts_a_real_node(void) {
                     service, &spec, token, now, &record, NULL),
                 VCS_ZCODE_DHT_RECORD_STORE_ADDED);
     }
-    /* The ceiling is still a ceiling, and it still says so by name. */
+    /* The ceiling is still a ceiling, and it says so by name: NO_SLOT, the
+     * intent table — not GLOBAL_CAP, which names the record store's much
+     * higher cap and sends an operator to the wrong table. */
     struct vcs_zcode_dht_publish_spec over;
     uint8_t over_token[32];
     struct vcs_zcode_dht_record over_record;
@@ -1474,10 +1480,10 @@ static int test_publication_ceiling_hosts_a_real_node(void) {
         service, &over, over_token, &over_record, NULL));
     ASSERT_EQ(vcs_zcode_dht_service_record_publish_commit(
                   service, &over, over_token, now, &over_record, NULL),
-              VCS_ZCODE_DHT_RECORD_STORE_GLOBAL_CAP);
+              VCS_ZCODE_DHT_RECORD_STORE_NO_SLOT);
     ASSERT_STR_EQ(vcs_zcode_dht_record_store_result_string(
-                      VCS_ZCODE_DHT_RECORD_STORE_GLOBAL_CAP),
-                  "global-cap");
+                      VCS_ZCODE_DHT_RECORD_STORE_NO_SLOT),
+                  "no free publication slot");
 
     vcs_zcode_dht_service_free(service, now);
     cleanup_fixture(dir);

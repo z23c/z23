@@ -151,7 +151,9 @@ static struct service_publication *publication_slot_for_stream(
 
 /* The slot a commit claims: the same stream's existing intention when the
  * incoming record supersedes it, otherwise a fresh free slot. NULL only when
- * the table is full of streams this record neither belongs to nor beats. */
+ * the table is full of streams this record neither belongs to nor beats —
+ * reported as NO_SLOT, because "global-cap" (the record store's 4096 cap)
+ * sent the first operator diagnosing this condition to the wrong table. */
 static struct service_publication *publication_claim(
     struct vcs_zcode_dht_service *service,
     const struct vcs_zcode_dht_record *record)
@@ -183,7 +185,7 @@ vcs_zcode_dht_service_record_publish_commit(
   struct service_publication *publication =
       publication_claim(service, &record);
   if (!publication)
-    return VCS_ZCODE_DHT_RECORD_STORE_GLOBAL_CAP;
+    return VCS_ZCODE_DHT_RECORD_STORE_NO_SLOT;
   enum vcs_zcode_dht_record_store_result result =
       vcs_zcode_dht_service_record_admit(service, &record, now);
   if (record_out && (result == VCS_ZCODE_DHT_RECORD_STORE_ADDED ||
@@ -312,7 +314,7 @@ vcs_zcode_dht_storage_ack_commit_verified(
   struct service_publication *publication =
       publication_claim(service, &record);
   if (!publication)
-    return VCS_ZCODE_DHT_RECORD_STORE_GLOBAL_CAP;
+    return VCS_ZCODE_DHT_RECORD_STORE_NO_SLOT;
   enum vcs_zcode_dht_record_store_result result =
       vcs_zcode_dht_service_record_admit(service, &record, now);
   if (record_out && (result == VCS_ZCODE_DHT_RECORD_STORE_ADDED ||
@@ -360,7 +362,7 @@ vcs_zcode_dht_source_reproduction_ack_commit_verified(
   struct service_publication *publication =
       publication_claim(service, &record);
   if (!publication)
-    return VCS_ZCODE_DHT_RECORD_STORE_GLOBAL_CAP;
+    return VCS_ZCODE_DHT_RECORD_STORE_NO_SLOT;
   enum vcs_zcode_dht_record_store_result result =
       vcs_zcode_dht_service_record_admit(service, &record, now);
   if (record_out && (result == VCS_ZCODE_DHT_RECORD_STORE_ADDED ||
