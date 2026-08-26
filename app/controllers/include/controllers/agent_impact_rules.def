@@ -1172,3 +1172,11 @@ AGENT_IMPACT_RULE("tools/corpus_census.c|tools/package_factory.c|corpus/scopes.d
  * it teaches the opposite. The .env.example templates were mapped to no rule
  * at all, so an edit to one could reach the push gate having run nothing. */
 AGENT_IMPACT_RULE("deploy/*.env.example|deploy/examples/*.env.example", "make_lint_gates")
+
+/* LANE: no-unattended-publish. The gate that keeps a background loop from
+ * writing to the shared remote. Its scan set is derived from git ls-files, so
+ * it covers scripts it has never been told about — which also means its own
+ * correctness depends on the lint driver and the gate library, not just on
+ * itself. Its selftest plants both forbidden shapes, so an edit that hollows
+ * the gate trips the same group that proves it. */
+AGENT_IMPACT_RULE("tools/lint/check_no_unattended_publish.sh", "make_lint_gates")

@@ -9246,6 +9246,16 @@ check-no-operator-paths:
 	@./tools/lint/check_no_operator_paths.sh --selftest
 	@./tools/lint/check_no_operator_paths.sh
 
+# Publishing is a deliberate act a person performs, never a side effect of a
+# background loop. A timer that can move `main` moves it for every checkout
+# that fast-forwards from it, with nobody reviewing what went out. Closed
+# allowlist with a mandatory reason per entry; the selftest plants both the
+# push and the commit-tree shape so the gate is never trusted unproven.
+check-no-unattended-publish:
+	@echo "══ LINT: no script writes to the shared remote ══"
+	@./tools/lint/check_no_unattended_publish.sh --selftest
+	@./tools/lint/check_no_unattended_publish.sh
+
 # The public installed-Commons target must run with every optional variable
 # unset. The DHT harness refuses to start until each binary it names is
 # executable; this proves the installed lane puts every one of those in the
@@ -9451,7 +9461,8 @@ LINT_GATES := \
     check-live-datadir-isolation \
     check-installed-acceptance-tools \
     check-standalone-tools-link \
-    check-no-operator-paths
+    check-no-operator-paths \
+    check-no-unattended-publish
 
 # The driver execs gate scripts directly, so the two gates backed by a built
 # tool (check-core-seal, check-observability-pairing, and the package root
