@@ -43,6 +43,15 @@
 #   PAIR_WATCH_ONION_WAIT     seconds to wait for A's hostname (default 60)
 #   PAIR_WATCH_RPC_WAIT       seconds to wait for RPC (default 60)
 #   PAIR_WATCH_POLL           seconds to poll getconnectioncount (default 150)
+#   ZCL_MESH_PORTS_DIR        optional: directory of "<name>.txt" files, one
+#                             per long-lived peer the operator runs, each
+#                             containing a "P2P_PORT=<port>" line. Consumed
+#                             by isolated_node_env.sh so this probe's own
+#                             throwaway quads never collide with one of an
+#                             operator's real peers. Unset by default: this
+#                             probe is fully self-contained (it spawns both
+#                             of its own nodes) and does not require any
+#                             mesh to be named to run.
 #
 # No Python, no jq. No `| grep -q` under pipefail.
 
@@ -64,7 +73,9 @@ PROBE_PORT_BASE=${PAIR_WATCH_PORT_BASE:-39250}
 PROBE_PORT_QUAD_ATTEMPTS=${PAIR_WATCH_PORT_QUAD_ATTEMPTS:-32}
 ISO_PORT_BASE=$PROBE_PORT_BASE
 ISO_PEER_PORT_BASE=""
-ISO_FLEET_DIR="$REPO_ROOT/deploy/devfleet"
+# ZCL_MESH_PORTS_DIR passes through as-is: isolated_node_env.sh reads it
+# directly and no-ops when it is unset, so this script names no default
+# directory of its own.
 SELFTEST=0
 LIVE_PROBE_DEFAULT="${XDG_STATE_HOME:-$HOME/.local/state}/zclassic23-referee/pair_probe.jsonl"
 
@@ -293,6 +304,15 @@ if [ "$SELFTEST" = 1 ]; then
     if [ -z "$PROBE_FILE" ]; then
         PROBE_FILE=$(mktemp "${TMPDIR:-/tmp}/zcl23-pairwatch-selftest-XXXXXX.jsonl")
     fi
+    # Own fixture, not our real boxes: a throwaway ZCL_MESH_PORTS_DIR with
+    # two synthetic "<name>.txt" peer-port files, so the reserved-port
+    # assertions below exercise the mechanism without depending on any
+    # operator's actual mesh membership.
+    MESH_FIXTURE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/zcl23-pairwatch-meshfixture-XXXXXX")
+    trap 'rm -rf "$MESH_FIXTURE_DIR"' EXIT
+    printf 'P2P_PORT=45601\n' >"$MESH_FIXTURE_DIR/fixture-peer-a.txt"
+    printf 'P2P_PORT=45602\n' >"$MESH_FIXTURE_DIR/fixture-peer-b.txt"
+    ZCL_MESH_PORTS_DIR="$MESH_FIXTURE_DIR"
 else
     PROBE_FILE=${PAIR_PROBE_FILE:-"$LIVE_PROBE_DEFAULT"}
 fi
@@ -302,10 +322,11 @@ fi
 # shellcheck source=tools/scripts/isolated_node_env.sh
 . "$REPO_ROOT/tools/scripts/isolated_node_env.sh"
 
-# Unit files own their published P2P_PORT values even while stopped. Add
-# those ports to the same refuse-set used by the bounded quad allocator
-# before inspecting any candidate.
-iso_append_published_fleet_ports
+# An operator-named mesh's units own their published P2P_PORT values even
+# while stopped. Add those ports to the same refuse-set used by the
+# bounded quad allocator before inspecting any candidate (no-op when
+# ZCL_MESH_PORTS_DIR is unset).
+iso_append_published_mesh_ports
 
 probe_port_is_listening() {
     local p=$1
@@ -435,21 +456,21 @@ if [ "$SELFTEST" = 1 ]; then
         echo "  FAIL: probe quad floor is $PROBE_QUAD_FLOOR (want 39250)"
         st_fail=1
     fi
-    if probe_port_is_reserved 39360; then
-        echo "  ok: published node2 P2P 39360 is reserved"
+    if probe_port_is_reserved 45601; then
+        echo "  ok: fixture mesh peer-a P2P 45601 is reserved"
     else
-        echo "  FAIL: published node2 P2P 39360 must never be a bind candidate"
+        echo "  FAIL: fixture mesh peer-a P2P 45601 must never be a bind candidate"
         st_fail=1
     fi
-    if probe_port_is_reserved 39150; then
-        echo "  ok: published node3 P2P 39150 is reserved"
+    if probe_port_is_reserved 45602; then
+        echo "  ok: fixture mesh peer-b P2P 45602 is reserved"
     else
-        echo "  FAIL: published node3 P2P 39150 must never be a bind candidate"
+        echo "  FAIL: fixture mesh peer-b P2P 45602 must never be a bind candidate"
         st_fail=1
     fi
     if [ "$PROBE_QUAD_FLOOR" -ge 39250 ] &&
        ! probe_port_is_reserved 39250; then
-        echo "  ok: documented probe base 39250 is not fleet-owned"
+        echo "  ok: documented probe base 39250 is not mesh-owned"
     else
         echo "  FAIL: documented probe base 39250 is forbidden"
         st_fail=1

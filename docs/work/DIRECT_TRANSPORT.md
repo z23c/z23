@@ -63,7 +63,7 @@ privacy, but it leaves "discover peers by IP" with no primitive at all.
 `zses:v1` memo schema carried by the existing ZMSG p2p channel:
 `{endpoints:{udp,tcp,onion}, app, psk}`, signed by the sender identity.
 
-- Signaling is censorship-proof (rides the same path as fleet chat);
+- Signaling is censorship-proof (rides the same path as ordinary p2p chat);
 - Media dials the fastest endpoint the INVITE discloses, racing
   UDP → TCP → onion;
 - A hermit can share exactly one direct endpoint with exactly one friend
@@ -99,17 +99,18 @@ Rules:
 ## Measurement
 
 RTT sampled per session and surfaced in census/status columns; the drill
-publishes `{udp_rtt, loss%, tcp_rtt, onion_rtt}` triples per host pair to
-`deploy/devfleet/session_clock.jsonl`, alongside the existing join-clock
-ledger. UX and speed are managed numbers on main, not adjectives.
+publishes `{udp_rtt, loss%, tcp_rtt, onion_rtt}` triples per host pair to an
+operator-local JSONL ledger (same XDG-state convention as the existing
+join-clock ledger). UX and speed are managed numbers on main, not
+adjectives.
 
 ## Lanes, risks, and gates
 
 | Lane | Owner | Owns | Gate |
 |---|---|---|---|
-| A | node2 | `lib/net/udp_transport.*`, noise handshake, PEX msg + posture hook | M1 loopback handshake prints RTT |
-| B | node3 | announce plumbing, directory/ZDIR fields, census RTT column | M2 PEX learning + hermit capture-test |
-| C | node4 | `zses:v1` schema, invite/accept leaves, drill script, truth card | M3 real-internet session <100 ms recorded |
+| A | dev-1 | `lib/net/udp_transport.*`, noise handshake, PEX msg + posture hook | M1 loopback handshake prints RTT |
+| B | dev-2 | announce plumbing, directory/ZDIR fields, census RTT column | M2 PEX learning + hermit capture-test |
+| C | dev-3 | `zses:v1` schema, invite/accept leaves, drill script, truth card | M3 real-internet session <100 ms recorded |
 
 Merge order A→B→C. Named risks, documented not hidden: strict-NAT pairs
 fall back until mapping/UPnP lands (rung 2); amplification blocked by
@@ -139,5 +140,5 @@ Mechanisms, in dependency order:
 
 Security envelope unchanged: candidates confirmed by echo before use,
 identity checks unchanged, unsolicited packets confer no authority.
-Fleet acceptance extends the pair ledger: `path=direct|onion`,
+Mesh acceptance extends the pair ledger: `path=direct|onion`,
 punch attempts/successes per cycle.

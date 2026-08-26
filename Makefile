@@ -4941,7 +4941,7 @@ $(JSONQ_BIN): tools/jsonq.c \
 check-onion-pair-watch: jsonq
 	@tools/scripts/check_onion_pair_watch.sh
 
-# Hermetic Git-history fixtures for the devfleet CURRENT/STALE classifier.
+# Hermetic Git-history fixtures for the mesh-source CURRENT/STALE classifier.
 # Does not access a node, production datadir, or network peer.
 .PHONY: check-fleet-source-status
 check-fleet-source-status:
@@ -6062,7 +6062,7 @@ mvp-coldstart-to-tip-triple: zclassic23
 #     one-node-per-loopback case.
 # Pinning the invocation keeps the remote run repeatable instead of folklore.
 #
-# ZCL_REMOTE_PEER=HOST:PORT is REQUIRED (no default): fleet endpoints are
+# ZCL_REMOTE_PEER=HOST:PORT is REQUIRED (no default): peer endpoints are
 # operator-local and are not committed to the public source. ZCL_BIN /
 # ZCL_BUDGET_SECS / ZCL_SAMPLE_SECS pass through. Same isolation as the
 # sibling target (fresh /tmp datadir, isolated $$HOME, ports 39170-39173,
@@ -6078,7 +6078,7 @@ mvp-coldstart-to-tip-triple: zclassic23
 .PHONY: mvp-coldstart-to-tip-remote
 mvp-coldstart-to-tip-remote: zclassic23
 	@if [ -z "$(ZCL_REMOTE_PEER)" ]; then \
-	 echo "mvp-coldstart-to-tip-remote: set ZCL_REMOTE_PEER=<host:port> locally; fleet endpoints are operator-local and not committed"; \
+	 echo "mvp-coldstart-to-tip-remote: set ZCL_REMOTE_PEER=<host:port> locally; peer endpoints are operator-local and not committed"; \
 	 exit 1; \
 	fi
 	@bash -c 'set -uo pipefail; \
@@ -7119,13 +7119,14 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 # boot — see tools/seed_anchor_snapshot.sh. Standalone so an operator can run it
 # without a full deploy: `make seed-anchor-snapshot`.
 #   ZCL_DATADIR=<dir> ZCL_ANCHOR_SNAPSHOT_SRC=<file> make seed-anchor-snapshot
-# Ship one production binary to every node in the fleet. `deploy` above installs
-# to THIS host only; `ship` builds one candidate, proves it, and puts those exact
-# bytes on each host, verifying every one against the source id its running
-# daemon reports and rolling that host back if it does not come back healthy.
-# Build-once/ship-many is deliberate: a per-host rebuild both costs a full
-# whole-program link per host and produces different bytes per host, which makes
-# "is the fleet running the same code" unanswerable by comparison.
+# Ship one production binary to every host the operator names. `deploy` above
+# installs to THIS host only; `ship` builds one candidate, proves it, and puts
+# those exact bytes on each host, verifying every one against the source id
+# its running daemon reports and rolling that host back if it does not come
+# back healthy. Build-once/ship-many is deliberate: a per-host rebuild both
+# costs a full whole-program link per host and produces different bytes per
+# host, which makes "is every host running the same code" unanswerable by
+# comparison.
 #   make ship                   # gate, build, then local + remote
 #   make ship SHIP_ARGS=--dry-run
 #   make ship SHIP_ARGS=--targets=remote

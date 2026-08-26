@@ -1,5 +1,16 @@
 #!/bin/sh
 # Start one persistent, isolated regtest node for machine-local agent work.
+#
+# Environment:
+#   ZCL_DEVBOX_PEERS_DIR   optional: directory of "<name>.txt" peer files,
+#                          one per long-lived mesh member the operator wants
+#                          this devbox node to onion-dial on startup. Each
+#                          file: BOX=<name> ONION_ADDRESS=<v3.onion>
+#                          P2P_PORT=<port> SOURCE_SHA=<commit this repo
+#                          must contain as an ancestor>. Unset by default:
+#                          no directory means no mesh is configured, and
+#                          this script starts a fully standalone isolated
+#                          node instead of refusing or crashing.
 
 set -u
 umask 077
@@ -101,7 +112,12 @@ db_valid_port() {
     [ "$port" -ge 1 ] && [ "$port" -le 65535 ]
 }
 
-db_configure_fleet_peers() {
+# Onion-dial every peer named in ZCL_DEVBOX_PEERS_DIR (one "<name>.txt" file
+# per peer; see the header comment for the field schema). An operator who
+# names no directory gets a standalone node: this is a documented no-op,
+# never a refusal and never a silent false pass — the pass line below always
+# reports how many peer files were seen.
+db_configure_mesh_peers() {
     control=$1
     repo_root=$2
     datadir=$3
@@ -110,65 +126,76 @@ db_configure_fleet_peers() {
     requested_count=0
     deferred_count=0
 
-    for fleet_file in "$repo_root"/deploy/devfleet/*.txt; do
-        [ -e "$fleet_file" ] || continue
-        [ -f "$fleet_file" ] && [ ! -L "$fleet_file" ] || {
-            db_write_failure "$control" fleet_file unsafe_file
+    peers_dir="${ZCL_DEVBOX_PEERS_DIR:-}"
+    if [ -z "$peers_dir" ]; then
+        db_pass "mesh_peers_not_configured_set_ZCL_DEVBOX_PEERS_DIR_to_enable"
+        return 0
+    fi
+    if [ ! -d "$peers_dir" ]; then
+        db_write_failure "$control" mesh_peers_dir \
+            "ZCL_DEVBOX_PEERS_DIR does not exist: $peers_dir"
+        return 1
+    fi
+
+    for peer_file in "$peers_dir"/*.txt; do
+        [ -e "$peer_file" ] || continue
+        [ -f "$peer_file" ] && [ ! -L "$peer_file" ] || {
+            db_write_failure "$control" peer_file unsafe_file
             return 1
         }
-        fleet_box=$(db_field BOX "$fleet_file")
-        fleet_onion=$(db_field ONION_ADDRESS "$fleet_file")
-        fleet_port=$(db_field P2P_PORT "$fleet_file")
-        fleet_source=$(db_field SOURCE_SHA "$fleet_file")
-        [ -n "$fleet_box" ] || {
-            db_write_failure "$control" fleet_file missing_box
+        peer_name=$(db_field BOX "$peer_file")
+        peer_onion=$(db_field ONION_ADDRESS "$peer_file")
+        peer_port=$(db_field P2P_PORT "$peer_file")
+        peer_source=$(db_field SOURCE_SHA "$peer_file")
+        [ -n "$peer_name" ] || {
+            db_write_failure "$control" peer_file missing_box
             return 1
         }
-        case $fleet_box in *[!a-zA-Z0-9_-]*|'')
-            db_write_failure "$control" fleet_file invalid_box
+        case $peer_name in *[!a-zA-Z0-9_-]*|'')
+            db_write_failure "$control" peer_file invalid_box
             return 1
             ;;
         esac
-        db_valid_onion_address "$fleet_onion" || {
-            db_write_failure "$control" fleet_onion invalid_onion_address
+        db_valid_onion_address "$peer_onion" || {
+            db_write_failure "$control" peer_onion invalid_onion_address
             return 1
         }
-        db_valid_port "$fleet_port" || {
-            db_write_failure "$control" fleet_port invalid_p2p_port
+        db_valid_port "$peer_port" || {
+            db_write_failure "$control" peer_port invalid_p2p_port
             return 1
         }
-        if [ "$fleet_onion" = "$local_onion" ]; then
-            db_pass "fleet_self_skipped_$fleet_box"
+        if [ "$peer_onion" = "$local_onion" ]; then
+            db_pass "mesh_peer_self_skipped_$peer_name"
             continue
         fi
         resolved_source=$(git -C "$repo_root" rev-parse --verify \
-            "${fleet_source}^{commit}" 2>/dev/null) || {
-            db_write_failure "$control" fleet_source source_not_found
+            "${peer_source}^{commit}" 2>/dev/null) || {
+            db_write_failure "$control" peer_source source_not_found
             return 1
         }
-        [ "$resolved_source" = "$fleet_source" ] || {
-            db_write_failure "$control" fleet_source source_not_exact_sha
+        [ "$resolved_source" = "$peer_source" ] || {
+            db_write_failure "$control" peer_source source_not_exact_sha
             return 1
         }
-        git -C "$repo_root" merge-base --is-ancestor "$fleet_source" HEAD \
+        git -C "$repo_root" merge-base --is-ancestor "$peer_source" HEAD \
             2>/dev/null || {
-            db_write_failure "$control" fleet_source source_not_ancestor
+            db_write_failure "$control" peer_source source_not_ancestor
             return 1
         }
         peer_result=$("$Z23_BIN" -datadir="$datadir" -rpcport="$rpcport" \
-            core network peers add --address="$fleet_onion" 2>&1)
+            core network peers add --address="$peer_onion" 2>&1)
         peer_exit=$?
         if [ "$peer_exit" -ne 0 ] \
             || ! printf '%s' "$peer_result" | grep -q '"ok":true'; then
             deferred_count=$((deferred_count + 1))
-            db_defer "fleet_peer_unavailable_$fleet_box" \
+            db_defer "mesh_peer_unavailable_$peer_name" \
                 onion_rendezvous_failed
             continue
         fi
         requested_count=$((requested_count + 1))
-        db_pass "fleet_peer_requested_$fleet_box"
+        db_pass "mesh_peer_requested_$peer_name"
     done
-    db_pass "fleet_peers_scanned_requested_${requested_count}_deferred_${deferred_count}"
+    db_pass "mesh_peers_scanned_requested_${requested_count}_deferred_${deferred_count}"
     return 0
 }
 
@@ -270,7 +297,7 @@ db_supervisor() {
     p2p_endpoint="$external_ip:$ISO_PORT"
     db_pass p2p_endpoint_listening
 
-    db_configure_fleet_peers "$control" "$repo_root" "$ISO_DD" \
+    db_configure_mesh_peers "$control" "$repo_root" "$ISO_DD" \
         "$ISO_RPCPORT" "$onion_address" || exit 1
 
     state_tmp="$control/state.$$"
@@ -361,9 +388,9 @@ if [ -e "$CONTROL/state" ] || [ -e "$CONTROL/ready" ]; then
         local_onion=$(printf '%s' "$status" | db_status_field onion_address)
         db_valid_onion_address "$local_onion" \
             || db_fail existing_instance invalid_onion_address
-        db_configure_fleet_peers "$CONTROL" "$REPO_ROOT" "$datadir" \
+        db_configure_mesh_peers "$CONTROL" "$REPO_ROOT" "$datadir" \
             "$rpcport" "$local_onion" \
-            || db_fail existing_instance fleet_peer_configuration_failed
+            || db_fail existing_instance mesh_peer_configuration_failed
         db_pass existing_instance_ready
         cat "$CONTROL/ready"
         exit 0
