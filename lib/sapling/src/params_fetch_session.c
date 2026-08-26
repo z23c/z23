@@ -26,6 +26,7 @@
 #include "params_fetch_internal.h"
 
 #include "base/safe_alloc.h"
+#include "base/serialize_le.h"
 #include "crypto/sha256.h"
 #include "util/log_macros.h"
 
@@ -84,9 +85,9 @@ static void state_write(struct zcl_param_fetch *s)
     uint8_t hdr[ZPART_MAGIC_LEN + 4 + 4 + 8 + ZCL_PARAM_HASH_BYTES];
     memcpy(hdr, ZPART_MAGIC, ZPART_MAGIC_LEN);
     uint32_t fi = (uint32_t)s->file_idx;
-    memcpy(hdr + 8, &fi, 4);
-    memcpy(hdr + 12, &s->chunk_count, 4);
-    memcpy(hdr + 16, &p->bytes, 8);
+    zcl_write_u32_le(hdr + 8, fi);
+    zcl_write_u32_le(hdr + 12, s->chunk_count);
+    zcl_write_u64_le(hdr + 16, p->bytes);
     uint8_t pinned[ZCL_PARAM_HASH_BYTES];
     if (!zcl_pf_hex_to_32(p->sha256_hex, pinned)) {
         fclose(f);
@@ -143,9 +144,9 @@ static void state_load_and_reverify(struct zcl_param_fetch *s)
     if (ok) {
         uint32_t fi = 0, cc = 0;
         uint64_t bytes = 0;
-        memcpy(&fi, hdr + 8, 4);
-        memcpy(&cc, hdr + 12, 4);
-        memcpy(&bytes, hdr + 16, 8);
+        fi = zcl_read_u32_le(hdr + 8);
+        cc = zcl_read_u32_le(hdr + 12);
+        bytes = zcl_read_u64_le(hdr + 16);
         uint8_t pinned[ZCL_PARAM_HASH_BYTES];
         ok = fi == (uint32_t)s->file_idx && cc == s->chunk_count &&
              bytes == p->bytes && zcl_pf_hex_to_32(p->sha256_hex, pinned) &&

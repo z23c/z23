@@ -3,9 +3,13 @@
 #
 # This guards the host-level OOM class from recurring. It parses committed
 # systemd units plus drop-ins, sums finite MemoryMax and MemorySwapMax values,
-# and fails when the aggregate budget reaches/exceeds the configured host
-# budget. Explicit MemoryMax=infinity is a hard failure because it disables a
-# cap deliberately; absent MemoryMax remains allowed for lightweight units.
+# and fails when the aggregate budget reaches/exceeds the configured reference
+# host budget. The shipped profiles target the measured 96 GiB operator-host
+# class; lint must not change verdict merely because a developer builds on a
+# smaller machine. Deploy validation can override the reference through
+# ZCL_SYSTEMD_MEMORY_BUDGET_MEMTOTAL_BYTES. Explicit MemoryMax=infinity is a
+# hard failure because it disables a cap deliberately; absent MemoryMax remains
+# allowed for lightweight units.
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -57,8 +61,7 @@ memtotal_bytes() {
         printf '%s\n' "$ZCL_SYSTEMD_MEMORY_BUDGET_MEMTOTAL_BYTES"
         return 0
     fi
-    awk '/^MemTotal:/ {printf "%d\n", $2 * 1024; found=1} END {exit found?0:1}' \
-        /proc/meminfo
+    printf '%s\n' $((96 * 1024 * 1024 * 1024))
 }
 
 budget_bytes() {
