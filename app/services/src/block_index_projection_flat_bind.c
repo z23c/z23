@@ -1,4 +1,6 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * purpose: Fail-closed coverage predicate for binding a complete flat
+ * block-index snapshot. */
 // one-result-type-ok:flat-projection-coverage — the sole bool export is a
 // fail-closed semantic predicate over already-persisted shutdown state.
 /* Semantic coverage proof for binding a complete flat block-index snapshot

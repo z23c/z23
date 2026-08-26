@@ -431,6 +431,26 @@ assert green).
   `.core-unseal-token`). Tool: `tools/core_seal.c` (no external deps: links the
   in-tree FIPS-202 SHA3-256).
 
+- **Gate #52: `check-core-seal-root-mirror`** (HARD) — the hot-swap consensus
+  pin. A Tier-2 module .so is compiled from ONE shape-leaf TU and mounts into a
+  resident that supplies every other body it calls, so the two halves must agree
+  about the sealed consensus core they share. `hotswap_module_admit()` checks
+  abi_version, fields, capacity, the allowlist row, duplicates and the probe
+  leaf — six stages, none of them about consensus. That gap was reachable: the
+  sealed headers ship `static inline` consensus arithmetic
+  (`consensus_last_founders_reward_height()`,
+  `consensus_subsidy_slow_start_shift()`, the compact-size sizing in
+  `core/serialize.h`), and a controller including one compiles a PRIVATE COPY
+  into its .so — so a module built before a seal re-cut still mounted and still
+  ran its stale copy. `lib/hotswap/include/hotswap/core_seal_root.h` mirrors
+  `core/MANIFEST.sha3`'s ROOT, the module emitter stamps it into every artifact
+  as `zcl_hotswap_module_core_seal_root`, and `hotswap_activate.c` compares it
+  on BOTH dlsym paths (resident mount and offline verifier) before admit. The
+  gate proves all three: current, exported, enforced. Regenerate the mirror with
+  `make core-seal`. The pin is the seal ROOT and NOT a whole-tree build id on
+  purpose — a controller edit must not invalidate a module (that is the fast
+  loop), a consensus edit must invalidate every one of them.
+
 - **Gate #48: `check-privileged-transition-receipt`** (RATCHET — Law 7, OS-A1) —
   every native command leaf whose spec is `ZCL_COMMAND_AUTH_OWNER` **and** effect
   `ZCL_COMMAND_EFFECT_MUTATE`/`ZCL_COMMAND_EFFECT_DESTRUCTIVE` is a candidate
@@ -866,6 +886,7 @@ add/remove a gate.
 - `check-consensus-parity`
 - `check-core-include-boundary`
 - `check-core-seal`
+- `check-core-seal-root-mirror`
 - `check-doc-accuracy`
 - `check-doc-claims`
 - `check-doc-counts`

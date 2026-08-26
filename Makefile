@@ -8427,7 +8427,7 @@ check-observability-pairing: tools/check_observability_pairing
 # in-tree FIPS-202 SHA3-256 + memory_cleanse) that reads the file list on stdin
 # (git ls-files -z) and writes/verifies core/MANIFEST.sha3. See tools/core_seal.c
 # and core/UNSEAL.md for the ritual.
-.PHONY: core-seal core-seal-check core-unseal check-core-seal check-core-include-boundary check-accel-oracle-pinned check-no-adx-overclaim check-simd-os-support
+.PHONY: core-seal core-seal-check core-unseal check-core-seal check-core-seal-root-mirror check-core-include-boundary check-accel-oracle-pinned check-no-adx-overclaim check-simd-os-support
 CORE_MANIFEST := core/MANIFEST.sha3
 CORE_UNSEAL_TOKEN := .core-unseal-token
 # The sealed set: every tracked file under core/ (consensus predicates +
@@ -8457,6 +8457,7 @@ core-seal: tools/core_seal
 	@echo "══ core: sealing consensus core → $(CORE_MANIFEST) ══"
 	@git ls-files -z $(CORE_SEAL_PATHS) | $(BIN_DIR)/core_seal seal $(CORE_MANIFEST)
 	@rm -f $(CORE_UNSEAL_TOKEN)
+	@./tools/scripts/gen_core_seal_root.sh
 
 # Verify the seal: fail LOUD if any sealed path drifts from core/MANIFEST.sha3.
 # Honors an active .core-unseal-token (owner-run unseal ritual) for exactly one commit.
@@ -8533,6 +8534,15 @@ check-core-seal: tools/core_seal
 check-core-include-boundary:
 	@echo "══ LINT: sealed consensus-core include boundary ══"
 	@./tools/scripts/check_core_include_boundary.sh
+
+# The hot-swap consensus pin: lib/hotswap/include/hotswap/core_seal_root.h must
+# mirror core/MANIFEST.sha3's ROOT, the module emitter must stamp it into every
+# .so, and hotswap_activate.c must compare it on BOTH dlsym paths. A seal re-cut
+# that lands without regenerating the mirror leaves every module claiming the OLD
+# root, and the pin silently stops meaning anything.
+check-core-seal-root-mirror:
+	@echo "══ LINT: hot-swap consensus pin (sealed-core ROOT mirror) ══"
+	@./tools/lint/check_core_seal_root_mirror.sh
 
 # Accelerator-oracle pin: the core/ seal covers the TEXT of the consensus
 # predicates, not the ISA-dispatched arithmetic they call (SHA-256, batched
@@ -9860,6 +9870,7 @@ LINT_GATES := \
     check-domain-purity \
     check-core-include-boundary \
     check-core-seal \
+    check-core-seal-root-mirror \
     check-accel-oracle-pinned \
     check-no-adx-overclaim \
     check-simd-os-support \

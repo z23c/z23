@@ -834,6 +834,65 @@ static void retire_handle(void *handle, int fd,
              queued ? "queued" : "NOT queued (pending table full)");
 }
 
+/* ── the consensus pin ─────────────────────────────────────────────────────
+ *
+ * A module .so is compiled from ONE shape-leaf TU; the resident supplies every
+ * other body it calls. The admit gauntlet below checks abi_version, fields,
+ * capacity, the allowlist row, duplicates and the probe leaf — six stages, none
+ * of which is about the consensus layer the two halves share. Nothing was.
+ *
+ * That matters because the sealed core ships `static inline` bodies, consensus
+ * arithmetic among them (consensus_last_founders_reward_height(),
+ * consensus_subsidy_slow_start_shift(), the compact-size sizing in
+ * core/serialize.h). A controller that includes one of those headers compiles a
+ * PRIVATE COPY into its .so. Re-cut the seal, rebuild the node, and a module
+ * built before the change still mounted, still passed all six stages, and still
+ * ran its stale copy — a cloned ledger reached through a dlopen.
+ *
+ * So the artifact carries the ZCL_CORE_SEAL_ROOT its compile saw, and the
+ * resident compares it to its own before admitting anything. The pin is the
+ * SEAL ROOT, deliberately, not a whole-tree build id: editing a controller must
+ * not invalidate a module — that is the fast loop — while editing consensus
+ * must invalidate every one of them.
+ *
+ * A missing symbol is a rejection, not a pass. Absence is exactly what an
+ * artifact built before the pin existed looks like, and those are the ones
+ * whose consensus vintage cannot be established. */
+static bool module_consensus_pin_ok(void *handle, char *stage, size_t stage_cap,
+                                    char *err, size_t err_cap)
+{
+    const char *host = ZCL_CORE_SEAL_ROOT;
+    if (strlen(host) != 64) {
+        act_copy(stage, stage_cap, "consensus");
+        (void)snprintf(err, err_cap,
+                       "resident has no sealed-core ROOT to pin against "
+                       "(run 'make core-seal')");
+        return false;
+    }
+    (void)dlerror();
+    const char *mod =
+        (const char *)dlsym(handle, ZCL_HOTSWAP_MODULE_CORE_SEAL_ROOT_SYMBOL);
+    const char *sym_err = dlerror();
+    if (!mod || sym_err) {
+        act_copy(stage, stage_cap, "consensus");
+        (void)snprintf(err, err_cap,
+                       "artifact exports no %s — built before the consensus "
+                       "pin existed; rebuild it",
+                       ZCL_HOTSWAP_MODULE_CORE_SEAL_ROOT_SYMBOL);
+        return false;
+    }
+    if (strncmp(mod, host, 65) != 0) {
+        act_copy(stage, stage_cap, "consensus");
+        (void)snprintf(err, err_cap,
+                       "sealed-core ROOT mismatch: artifact=%.64s resident=%s "
+                       "(the module was compiled against a different consensus "
+                       "core; rebuild it)",
+                       mod, host);
+        return false;
+    }
+    return true;
+}
+
 /* The dlopen half: confinement, authorization, pin+hash, dlopen/dlsym. The
  * admit -> probe -> ONE batch commit half is hotswap_module_publish(), which
  * compiles in every build and is unit-tested directly with fabricated modules
@@ -890,6 +949,18 @@ static bool activate_run(const char *so_path, const char *resolved_datadir,
         dlclose(handle);
         close(fd);
         return act_reject(report, "abi", "%s", msg);
+    }
+
+    /* Consensus pin BEFORE admit: a module compiled against a different sealed
+     * core never reaches a stage that could publish a leaf. */
+    {
+        char pin_stage[32], pin_err[256];
+        if (!module_consensus_pin_ok(handle, pin_stage, sizeof(pin_stage),
+                                     pin_err, sizeof(pin_err))) {
+            dlclose(handle);
+            close(fd);
+            return act_reject(report, pin_stage, "%s", pin_err);
+        }
     }
 
     /* admit -> probe -> ONE all-or-nothing batch replace. ZERO leaves publish
@@ -1045,6 +1116,16 @@ bool hotswap_verify_module_so(const char *so_path, const char *expect_tu,
         snprintf(report->error, sizeof(report->error),
                  "artifact declares '%s', expected '%s'",
                  module->source_tu ? module->source_tu : "(null)", expect_tu);
+        dlclose(handle);
+        return false;
+    }
+
+    /* The same consensus pin the resident enforces. Verification must not be
+     * looser than the mount it stands in for — the -z lazy re-link this path
+     * dlopens already costs it the unresolved-symbol check (hotswap-symbols.sh
+     * covers that separately); it does not get to skip this one too. */
+    if (!module_consensus_pin_ok(handle, report->stage, sizeof(report->stage),
+                                 report->error, sizeof(report->error))) {
         dlclose(handle);
         return false;
     }

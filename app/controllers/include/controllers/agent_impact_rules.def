@@ -925,8 +925,13 @@ AGENT_IMPACT_RULE("lib/test/src/test_code_capsule.c", "code_capsule make_lint_ga
  * atomic registry batch, plus probe-before-publish. Covers the v2 admit/publish
  * core, the per-FILE swappable allowlist, the two lint gates that keep that
  * allowlist honest (shape + READY-read-only; static-state over the UNION of both
- * manifests), their seeded-violation fixtures, and the module build paths. */
-AGENT_IMPACT_RULE("lib/test/src/test_hotswap_module_v2.c|lib/hotswap/include/hotswap/hotswap_module.h|lib/hotswap/src/hotswap_activate.c|config/hotswap_swappable.def|config/hotswap_islands.def|config/hotfork_capsules.def|tools/lint/check_hotswap_swappable_shape.sh|tools/lint/check_hotswap_static_state.sh|tools/dev/hotswap-module-fast.sh|tools/dev/devloop_hotswap_build.c|tools/dev/hotswap-resident-bench.sh|lib/test/fixtures/hotswap_swappable_not_ready_read.def|lib/test/fixtures/hotswap_swappable_dup_leaf.def|lib/test/fixtures/hotswap_swappable_bad_static.def|lib/test/fixtures/hotswap_islands_*.def", "hotswap_module_v2 hotswap_module hotswap_loader hotswap_simnet command_handler_snapshot dev_platform make_lint_gates")
+ * manifests), their seeded-violation fixtures, and the module build paths.
+ *
+ * ALSO the consensus pin: core_seal_root.h mirrors core/MANIFEST.sha3's ROOT so a
+ * module and the resident it mounts into can prove they were compiled against
+ * the same sealed consensus core. Touching the mirror, its generator, its lint
+ * gate, or the manifest itself changes what every module is admitted against. */
+AGENT_IMPACT_RULE("lib/test/src/test_hotswap_module_v2.c|lib/hotswap/include/hotswap/hotswap_module.h|lib/hotswap/src/hotswap_activate.c|config/hotswap_swappable.def|config/hotswap_islands.def|config/hotfork_capsules.def|tools/lint/check_hotswap_swappable_shape.sh|tools/lint/check_hotswap_static_state.sh|tools/dev/hotswap-module-fast.sh|tools/dev/devloop_hotswap_build.c|tools/dev/hotswap-resident-bench.sh|lib/test/fixtures/hotswap_swappable_not_ready_read.def|lib/test/fixtures/hotswap_swappable_dup_leaf.def|lib/test/fixtures/hotswap_swappable_bad_static.def|lib/test/fixtures/hotswap_islands_*.def|lib/hotswap/include/hotswap/core_seal_root.h|tools/scripts/gen_core_seal_root.sh|tools/lint/check_core_seal_root_mirror.sh|core/MANIFEST.sha3", "hotswap_module_v2 hotswap_module hotswap_loader hotswap_simnet command_handler_snapshot dev_platform make_lint_gates")
 /* Pure C23 service calculations are admitted by the service manifest, but
  * their direct behavioral owner is the commons suite. Keep that path-floor
  * proof independent of whether the current reverse-call graph can reach the
