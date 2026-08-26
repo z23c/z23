@@ -995,6 +995,8 @@ last_progress_ts="$START_TS"
 progress_advances=0
 elapsed=0
 silent_for=0
+pid_unstable=0
+PID_CONFIRM_SAMPLES="${ZCL_DEPLOY_VERIFY_PID_SAMPLES:-3}"
 
 while :; do
     attempt=$((attempt + 1))
@@ -1030,14 +1032,25 @@ while :; do
     # A candidate that crashed and was restarted underneath us is a FAULT, and
     # it is one no amount of waiting fixes. Naming it here keeps it out of the
     # slowness verdict entirely: it has its own message and its own latency.
-    if ! service_pid_is_stable; then
-        silent_for=$(( now - last_progress_ts ))
-        echo "DEPLOY FAILED: the candidate process did not stay up —" \
-             "canonical MainPID/executable/start-time changed" \
-             "${elapsed}s into verification (attempts=$attempt)." \
-             "This is a crash or a restart loop, NOT a slow machine."
-        report_evidence
-        exit 1
+    #
+    # Confirmed across consecutive samples, never on one. This check shells out
+    # to `systemctl show`, and a single hiccup there — an empty answer under
+    # load on a busy box — is not evidence that a process died. Convicting on
+    # one sample is the same defect as the deadline this file just removed.
+    if service_pid_is_stable; then
+        pid_unstable=0
+    else
+        pid_unstable=$(( pid_unstable + 1 ))
+        if [ "$pid_unstable" -ge "$PID_CONFIRM_SAMPLES" ]; then
+            silent_for=$(( now - last_progress_ts ))
+            echo "DEPLOY FAILED: the candidate process did not stay up —" \
+                 "canonical MainPID/executable/start-time changed and stayed" \
+                 "changed across $pid_unstable consecutive samples," \
+                 "${elapsed}s into verification (attempts=$attempt)." \
+                 "This is a crash or a restart loop, NOT a slow machine."
+            report_evidence
+            exit 1
+        fi
     fi
 
     cur_token=$(progress_token)

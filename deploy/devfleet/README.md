@@ -173,3 +173,12 @@ systemctl --user show zclassic23.service -p WatchdogUSec
 
 This changes neither `TimeoutStartSec` nor restart policy. Do not use it to
 hide a process whose disk counters and named boot stage have stopped moving.
+
+`WatchdogSec` is a pure duration and measures nothing about the node, so treat
+the drop-in as an absolute ceiling — a wedge backstop that turns a genuine
+freeze into a bounded restart. What renews the deadline underneath it is the
+`WATCHDOG=1` heartbeat in `config/src/boot_sd_watchdog.c`, sent every
+`WatchdogSec/4` while `boot_progress_last_us()` is fresh; a node that keeps
+publishing a named boot-stage marker never reaches the ceiling however slow its
+disk. If a slow host is still being killed, the answer is renewal on an
+observed disk-progress signal, not a larger ceiling.

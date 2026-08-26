@@ -471,7 +471,9 @@ case "${prev_unreachable:-}" in ''|*[!0-9]*) prev_unreachable=0 ;; esac
 answered="$(probe_rpc)"
 token="$(node_progress_token)"
 exists=0
-[ -n "$token" ] && exists=1
+if [ -n "$token" ]; then
+    exists=1
+fi
 
 # "Moved" is only meaningful against a previous observation. The first ever
 # cycle has nothing to compare, so it is credited as moving: a watchdog must

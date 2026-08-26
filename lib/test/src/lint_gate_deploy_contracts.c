@@ -1134,6 +1134,7 @@ int t_slow_disk_progress_verdicts_contract(void)
     char *cutover = NULL;
     char *watchdog = NULL;
     char *watchdog_unit = NULL;
+    char *disk_watchdog = NULL;
     char *makefile = NULL;
     TEST("deploy verdicts separate slow boxes from wedged ones") {
         char path[PATH_MAX];
@@ -1159,6 +1160,10 @@ int t_slow_disk_progress_verdicts_contract(void)
          * into the slowness verdict. */
         ASSERT(strstr(verify, "did not stay up") != NULL);
         ASSERT(strstr(verify, "NOT a slow machine") != NULL);
+        /* ...and even THAT fault is confirmed across samples. A `systemctl
+         * show` hiccup on a loaded box must not convict a live process. */
+        ASSERT(strstr(verify, "PID_CONFIRM_SAMPLES") != NULL);
+        ASSERT(strstr(verify, "consecutive samples") != NULL);
         /* The duration verdict must not come back. */
         ASSERT(strstr(verify, "did not become ready within") == NULL);
         ASSERT(run_gate_script_with_env("tools/deploy_verify.sh",
@@ -1215,12 +1220,30 @@ int t_slow_disk_progress_verdicts_contract(void)
         ASSERT(read_entire_file(path, &watchdog_unit) == 0);
         ASSERT(strstr(watchdog_unit, "TimeoutStartSec=100") != NULL);
         ASSERT(strstr(watchdog_unit, "TimeoutStartSec=30\n") == NULL);
+
+        /* ── the rotating-disk WatchdogSec drop-in ──────────────────────── */
+        /* WatchdogSec is a pure duration and measures nothing. The drop-in is
+         * a legitimate absolute CEILING, but it must say so and must name the
+         * progress-based renewal that sits under it (the WATCHDOG=1 pet in
+         * config/src/boot_sd_watchdog.c, gated on boot_progress freshness) —
+         * otherwise the next slow box gets "fixed" by raising the number
+         * again, which is the same defect with a bigger one. */
+        ASSERT(repo_path(path, sizeof(path),
+                         "deploy/zclassic23-spinning-disk-watchdog.conf") == 0);
+        ASSERT(read_entire_file(path, &disk_watchdog) == 0);
+        ASSERT(strstr(disk_watchdog, "WatchdogSec=10min") != NULL);
+        ASSERT(strstr(disk_watchdog, "CEILING") != NULL);
+        ASSERT(strstr(disk_watchdog, "measures nothing") != NULL);
+        ASSERT(strstr(disk_watchdog, "boot_progress_last_us()") != NULL);
+        ASSERT(strstr(disk_watchdog, "config/src/boot_sd_watchdog.c") != NULL);
+        ASSERT(strstr(disk_watchdog, "same defect with a bigger") != NULL);
         PASS();
     } _test_next:;
     free(verify);
     free(cutover);
     free(watchdog);
     free(watchdog_unit);
+    free(disk_watchdog);
     free(makefile);
     return failures;
 }
