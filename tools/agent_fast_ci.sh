@@ -440,7 +440,12 @@ cache_manifest() {
     printf 'fast_schema\t%s\n' "$SCHEMA"
     printf 'proof_scope\t%s\n' "$PROOF_SCOPE"
     printf 'source_identity_schema\tzcl.dev_source_identity.v2\n'
-    printf 'source_id_sha256\t%s\n' "$CACHE_SOURCE_ID"
+    # This is the WORKING-TREE identity (Q2: what is in this directory right
+    # now, from tools/dev/source-identity.sh), not the baked build identity
+    # (Q1: what a binary was compiled from). The key names that distinction
+    # explicitly so a positional or naive reader can never report one under
+    # the other's name — see tools/scripts/source_identity_lib.sh's header.
+    printf 'working_tree_source_id_sha256\t%s\n' "$CACHE_SOURCE_ID"
     printf 'source_mutation_token\t%s\n' "$CACHE_SOURCE_MUTATION"
     printf 'fast_base\t%s\n' "${ZCL_FAST_BASE:-}"
     printf 'fast_cc\t%s\n' "$FAST_CC"
@@ -591,8 +596,8 @@ cache_authority_selftest() {
         rm -rf "$sandbox"
         return 1
     }
-    first_source="$(printf '%s\n' "$first" | sed -n 's/^source_id_sha256[[:space:]]*//p')"
-    third_source="$(printf '%s\n' "$third" | sed -n 's/^source_id_sha256[[:space:]]*//p')"
+    first_source="$(printf '%s\n' "$first" | sed -n 's/^working_tree_source_id_sha256[[:space:]]*//p')"
+    third_source="$(printf '%s\n' "$third" | sed -n 's/^working_tree_source_id_sha256[[:space:]]*//p')"
     first_mutation="$(printf '%s\n' "$first" | sed -n 's/^source_mutation_token[[:space:]]*//p')"
     third_mutation="$(printf '%s\n' "$third" | sed -n 's/^source_mutation_token[[:space:]]*//p')"
     if [ "$first_source" != "$third_source" ] ||
@@ -812,8 +817,8 @@ emit_plan_json() {
     printf '  },\n'
     printf '  "green_input_cache": {\n'
     printf '    "schema": "%s",\n' "$CACHE_SCHEMA"
-    printf '    "authority": "source_id_sha256_plus_mutation_token",\n'
-    printf '    "source_id_sha256": "%s",\n' \
+    printf '    "authority": "working_tree_source_id_sha256_plus_mutation_token",\n'
+    printf '    "working_tree_source_id_sha256": "%s",\n' \
         "$(json_escape "$CACHE_SOURCE_ID")"
     printf '    "source_mutation_token": "%s",\n' \
         "$(json_escape "$CACHE_SOURCE_MUTATION")"

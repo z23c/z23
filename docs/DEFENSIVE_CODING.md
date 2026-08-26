@@ -955,6 +955,7 @@ add/remove a gate.
 - `check-verification-coverage`
 - `check-ship-remote-transaction`
 - `check-identity-parser-single`
+- `check-source-identity-authority`
 - `check-status-reason-single`
 - `check-pipefail-status-pipe`
 - `check-blocker-remedy`

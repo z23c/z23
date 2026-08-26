@@ -1296,3 +1296,12 @@ AGENT_IMPACT_RULE("lib/net/src/addrman.c|lib/net/src/addrman_codec.c|lib/net/src
  * that recomputes the pins from the real files and replays the refusals. */
 AGENT_IMPACT_RULE("lib/sapling/src/params_fetch.c|lib/sapling/src/params_fetch_session.c|lib/sapling/src/params_fetch_internal.h|lib/sapling/include/sapling/params_fetch.h|lib/net/src/params_service.c|lib/net/include/net/params_service.h|lib/net/src/msgprocessor.c|lib/test/src/test_params_fetch.c", "params_fetch")
 
+/* LANE source-identity-q1q2: the ratchet that stops a working-tree
+ * (directory-derived) source_id_sha256 reading from being published under
+ * the bare Q1-shaped key a baked-build identity uses, and from being read
+ * positionally out of an agentbuild response where the schema-anchored
+ * zcl_agentbuild_v2_top_source_id reader (tools/scripts/source_identity_lib.sh)
+ * applies. The gate script and its shrink-only baseline move together: a
+ * baseline edit with no gate change, or a gate change with no baseline
+ * update, is exactly how this ratchet would rust shut silently. */
+AGENT_IMPACT_RULE("tools/lint/check_source_identity_authority.sh|tools/lint/source_identity_authority_baseline.txt", "make_lint_gates")
