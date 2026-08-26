@@ -35,8 +35,8 @@
 # Environment overrides:
 #   ZCL_CLI               z23 binary        (default <repo>/build/bin/z23)
 #   ZCL_JSONQ             jsonq binary      (default <repo>/build/bin/jsonq)
-#   ZCL_ROUNDTRIP_DATADIR this node's datadir (default ~/.zclassic-c23)
-#   ZCL_ROUNDTRIP_RPCPORT RPC port          (default 18232)
+#   ZCL_ROUNDTRIP_DATADIR isolated datadir  (required; canonical refused)
+#   ZCL_ROUNDTRIP_RPCPORT isolated RPC port (required)
 #   ZCL_ROUNDTRIP_LOG     node stdout log   (default <datadir>/node.log)
 #   ZCL_ROUNDTRIP_TIMEOUT total budget, sec (default 300)
 
@@ -54,8 +54,23 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
 ZCL_CLI=${ZCL_CLI:-"$REPO_ROOT/build/bin/z23"}
 ZCL_JSONQ=${ZCL_JSONQ:-"$REPO_ROOT/build/bin/jsonq"}
-DATADIR=${ZCL_ROUNDTRIP_DATADIR:-"$HOME/.zclassic-c23"}
-RPCPORT=${ZCL_ROUNDTRIP_RPCPORT:-18232}
+if [ -z "${ZCL_ROUNDTRIP_DATADIR:-}" ] || \
+   [ -z "${ZCL_ROUNDTRIP_RPCPORT:-}" ]; then
+    echo "ROUNDTRIP=fail ASSERTION=ENV WALL_SECONDS=0 DETAIL=explicit_isolated_datadir_and_rpcport_required" >&2
+    exit 2
+fi
+DATADIR=$ZCL_ROUNDTRIP_DATADIR
+RPCPORT=$ZCL_ROUNDTRIP_RPCPORT
+case $RPCPORT in
+    *[!0-9]*|'')
+        echo "ROUNDTRIP=fail ASSERTION=ENV WALL_SECONDS=0 DETAIL=invalid_isolated_rpcport:$RPCPORT" >&2
+        exit 2
+        ;;
+esac
+if [ "$RPCPORT" -lt 1 ] || [ "$RPCPORT" -gt 65535 ]; then
+    echo "ROUNDTRIP=fail ASSERTION=ENV WALL_SECONDS=0 DETAIL=invalid_isolated_rpcport:$RPCPORT" >&2
+    exit 2
+fi
 NODE_LOG=${ZCL_ROUNDTRIP_LOG:-"$DATADIR/node.log"}
 TIMEOUT=${ZCL_ROUNDTRIP_TIMEOUT:-300}
 ONION_HOSTNAME_FILE="$DATADIR/tor_data/onion_service/hostname"
@@ -67,6 +82,20 @@ fi
 if [ ! -d "$DATADIR" ]; then
     echo "ROUNDTRIP=fail ASSERTION=ENV WALL_SECONDS=0 DETAIL=datadir_absent:$DATADIR"
     exit 2
+fi
+# An explicit spelling or symlink does not make the canonical datadir a test
+# fixture. This script adds peers, sends a confirmed message, and marks an
+# inbox row read, so it must never silently target the operator's live node.
+DATADIR_PHYS=$(CDPATH= cd -- "$DATADIR" 2>/dev/null && pwd -P) || {
+    echo "ROUNDTRIP=fail ASSERTION=ENV WALL_SECONDS=0 DETAIL=datadir_unresolvable:$DATADIR" >&2
+    exit 2
+}
+if [ -d "$HOME/.zclassic-c23" ]; then
+    CANONICAL_PHYS=$(CDPATH= cd -- "$HOME/.zclassic-c23" 2>/dev/null && pwd -P) || CANONICAL_PHYS=""
+    if [ -n "$CANONICAL_PHYS" ] && [ "$DATADIR_PHYS" = "$CANONICAL_PHYS" ]; then
+        echo "ROUNDTRIP=fail ASSERTION=ENV WALL_SECONDS=0 DETAIL=canonical_datadir_refused:$DATADIR" >&2
+        exit 2
+    fi
 fi
 
 T0=$(date +%s)

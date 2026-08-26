@@ -356,6 +356,20 @@ bool vcs_zcode_dht_service_record_operation_poll(
   return true;
 }
 
+/* Drop an operation and any query still carrying its id. Both cancel and the
+ * terminal sweep need exactly this; a swept operation normally has no live
+ * query left, but releasing one that does is cheaper than proving it can't. */
+static void records_operation_release(
+    struct vcs_zcode_dht_service *service, uint64_t operation_id,
+    struct service_record_operation *operation)
+{
+  for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_ACTIVE_QUERIES; i++)
+    if (service->queries[i].used &&
+        service->queries[i].record_operation_id == operation_id)
+      memset(&service->queries[i], 0, sizeof(service->queries[i]));
+  memset(operation, 0, sizeof(*operation));
+}
+
 bool vcs_zcode_dht_service_record_operation_cancel(
     struct vcs_zcode_dht_service *service, uint64_t operation_id)
 {
@@ -365,12 +379,28 @@ bool vcs_zcode_dht_service_record_operation_cancel(
       vcs_zcode_dht_records_operation_find(service, operation_id);
   if (!operation)
     return false;
-  for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_ACTIVE_QUERIES; i++)
-    if (service->queries[i].used &&
-        service->queries[i].record_operation_id == operation_id)
-      memset(&service->queries[i], 0, sizeof(service->queries[i]));
-  memset(operation, 0, sizeof(*operation));
+  records_operation_release(service, operation_id, operation);
   return true;
+}
+
+/* A terminal operation holds one of eight slots until its owner collects it.
+ * Every live owner collects promptly: the publication drive reaps its
+ * children on every schedule pass, and an RPC discovery's lease cancels its
+ * children when it expires. An operation still sitting terminal past that
+ * horizon belongs to an owner that is gone — free it. The result was either
+ * already reaped or never will be; the store, not the slot, is the record's
+ * home. */
+void vcs_zcode_dht_records_sweep(struct vcs_zcode_dht_service *service,
+                                 uint64_t now_mono)
+{
+  for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_RECORD_OPERATIONS; i++) {
+    struct service_record_operation *operation =
+        &service->record_operations[i];
+    if (operation->used && operation->terminal_mono &&
+        operation->terminal_mono + VCS_ZCODE_DHT_RECORD_OPERATION_SWEEP_S <=
+            now_mono)
+      records_operation_release(service, operation->id, operation);
+  }
 }
 
 enum vcs_zcode_dht_record_store_result vcs_zcode_dht_service_record_admit(
@@ -554,6 +584,7 @@ bool vcs_zcode_dht_service_records_handle(
     memcpy(operation->records, message->records.records,
            operation->record_count * sizeof(*operation->records));
     operation->state = VCS_ZCODE_DHT_RECORD_OPERATION_COMPLETE;
+    operation->terminal_mono = now.monotonic_s;
     service->records_received++;
     return true;
   }
@@ -570,6 +601,7 @@ bool vcs_zcode_dht_service_records_handle(
                                VCS_ZCODE_DHT_STORE_REJECTED
                            ? VCS_ZCODE_DHT_RECORD_OPERATION_REJECTED
                            : VCS_ZCODE_DHT_RECORD_OPERATION_COMPLETE;
+    operation->terminal_mono = now.monotonic_s;
     service->store_result_received++;
     return true;
   }
@@ -578,7 +610,7 @@ bool vcs_zcode_dht_service_records_handle(
 
 void vcs_zcode_dht_service_record_query_finish(
     struct vcs_zcode_dht_service *service, const struct service_query *query,
-    enum query_outcome outcome)
+    enum query_outcome outcome, struct vcs_zcode_dht_time now)
 {
   if (!service || !query ||
       (query->kind != QUERY_RECORD_LOOKUP &&
@@ -588,8 +620,10 @@ void vcs_zcode_dht_service_record_query_finish(
   struct service_record_operation *operation =
       vcs_zcode_dht_records_operation_find(service,
                                             query->record_operation_id);
-  if (operation)
+  if (operation) {
     operation->state = outcome == QUERY_OUTCOME_EXPIRED
                            ? VCS_ZCODE_DHT_RECORD_OPERATION_TIMEOUT
                            : VCS_ZCODE_DHT_RECORD_OPERATION_REJECTED;
+    operation->terminal_mono = now.monotonic_s;
+  }
 }

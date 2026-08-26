@@ -771,8 +771,6 @@ bool process_block_msg(struct msg_processor *mp, struct p2p_node *node,
                     memset(&new_m, 0, sizeof(new_m));
                     if (block_piece_manifest_build_active_chain(
                             &mp->main_state->chain_active, 1,
-                            new_tip->nHeight, &new_m) ||
-                        block_piece_manifest_build(mp->datadir, 1,
                             new_tip->nHeight, &new_m)) {
                         uint32_t num_pieces = new_m.num_pieces;
                         msg_processor_publish_block_manifest(

@@ -1621,6 +1621,87 @@ _test_next:;
   return failures;
 }
 
+/* A terminal-but-unpolled operation is the operation table's slow leak: an
+ * owner that began a store, received its result, and then vanished — RPC
+ * lease expired, CLI killed — left an entry only owner poll or owner cancel
+ * could free. Eight such operations and the ninth begin fails; the slot
+ * outlived every purpose the result could still serve. The tick sweeper
+ * frees a terminal entry once the RPC lease horizon has passed: later than
+ * that, no legitimate owner can still come back for the result. */
+static int test_record_operation_terminal_swept(void) {
+  int failures = 0;
+  TEST("zcode dht service: unpolled terminal operations are swept") {
+    char adir[] = "/tmp/zcl_dht_sweep_a_XXXXXX";
+    char bdir[] = "/tmp/zcl_dht_sweep_b_XXXXXX";
+    ASSERT(mkdtemp(adir) != NULL && mkdtemp(bdir) != NULL);
+    uint8_t genesis[32], anoise[32], bnoise[32], transcript[32];
+    memset(genesis, 0x11, 32);
+    memset(anoise, 0x28, 32);
+    memset(bnoise, 0x29, 32);
+    memset(transcript, 0x5f, 32);
+    ASSERT(fixture_identity(adir, 0x72, genesis, anoise));
+    ASSERT(fixture_identity(bdir, 0x73, genesis, bnoise));
+    struct vcs_zcode_dht_service *a =
+        fixture_service_at(adir, genesis, anoise, 1000);
+    struct vcs_zcode_dht_service *b =
+        fixture_service_at(bdir, genesis, bnoise, 1000);
+    ASSERT(a != NULL && b != NULL);
+    struct vcs_zcode_dht_session as = {.established = true,
+                                       .generation = 9,
+                                       .connection_serial = 1};
+    struct vcs_zcode_dht_session bs = as;
+    bs.connection_serial = 2;
+    memcpy(as.remote_static, bnoise, 32);
+    memcpy(bs.remote_static, anoise, 32);
+    memcpy(as.transcript_hash, transcript, 32);
+    memcpy(bs.transcript_hash, transcript, 32);
+    ASSERT(vcs_zcode_dht_service_session_open(a, 2, &as, test_time(1001)));
+    ASSERT(vcs_zcode_dht_service_session_open(b, 1, &bs, test_time(1001)));
+    ASSERT(pump(a, b, 2, 1, 1001, NULL, NULL));
+    ASSERT(pump(b, a, 1, 2, 1001, NULL, NULL));
+    ASSERT(pump(a, b, 2, 1, 1001, NULL, NULL));
+
+    /* Store and deliver the result but never poll: the operation went
+     * terminal at 1002 and its owner is gone. */
+    struct vcs_zcode_dht_record record;
+    ASSERT(fixture_pointer_record(adir, genesis, 0x74, 0x75, &record));
+    uint64_t operation = 0;
+    ASSERT(vcs_zcode_dht_service_record_store_begin(
+        a, 2, &record, test_time(1002), &operation));
+    ASSERT(pump(a, b, 2, 1, 1002, NULL, NULL));
+    ASSERT(pump(b, a, 1, 2, 1002, NULL, NULL));
+    struct vcs_zcode_dht_service_status status;
+    vcs_zcode_dht_service_status(a, &status);
+    ASSERT_EQ(status.active_record_operations, 1u);
+
+    /* Inside the lease horizon the slot still belongs to its owner — a live
+     * owner may legitimately poll this late for the result. */
+    vcs_zcode_dht_service_tick(
+        a, test_time(1002 + VCS_ZCODE_DHT_RECORD_OPERATION_SWEEP_S - 1u));
+    vcs_zcode_dht_service_status(a, &status);
+    ASSERT_EQ(status.active_record_operations, 1u);
+
+    /* Past the horizon the entry is provably ownerless. The sweep frees it
+     * and the table takes fresh work again. */
+    vcs_zcode_dht_service_tick(
+        a, test_time(1002 + VCS_ZCODE_DHT_RECORD_OPERATION_SWEEP_S));
+    vcs_zcode_dht_service_status(a, &status);
+    ASSERT_EQ(status.active_record_operations, 0u);
+    uint64_t fresh = 0;
+    ASSERT(vcs_zcode_dht_service_record_store_begin(
+        a, 2, &record, test_time(1002 + VCS_ZCODE_DHT_RECORD_OPERATION_SWEEP_S),
+        &fresh));
+
+    vcs_zcode_dht_service_free(a, test_time(1100));
+    vcs_zcode_dht_service_free(b, test_time(1100));
+    cleanup_fixture(adir);
+    cleanup_fixture(bdir);
+    PASS();
+  }
+_test_next:;
+  return failures;
+}
+
 /* The ceiling on how many records ONE node keeps announced is not an abstract
  * number: it decides whether a node can host the product's own demo. The
  * multi-host commons journey measured the floor at eleven records for five
@@ -2397,6 +2478,143 @@ static int test_record_transport_and_restart(void) {
     test_rm_rf_recursive(ack_dir);
     vcs_zcode_dht_service_free(a, test_time(2001));
     vcs_zcode_dht_service_free(b, test_time(1004));
+    cleanup_fixture(adir);
+    cleanup_fixture(bdir);
+    PASS();
+  }
+_test_next:;
+  return failures;
+}
+
+/* The operation table's eight slots are shared by every record stream the
+ * node runs — publication drives, RPC discoveries, direct CLI operations.
+ * A PENDING operation also holds one of only three query slots, so the cap
+ * is reachable the moment answered-but-unpolled operations start stacking:
+ * those release their query slot but hold their operation slot until the
+ * owner collects the result. This pins the whole ladder — six stacked
+ * completes, two in flight, the ninth refused by the operation table while
+ * a query slot is provably still free — and that polling drains it all. */
+static int test_record_operation_table_cap(void) {
+  int failures = 0;
+  TEST("zcode dht service: record operations are capped at eight slots") {
+    char adir[] = "/tmp/zcl_dht_recop_a_XXXXXX";
+    char bdir[] = "/tmp/zcl_dht_recop_b_XXXXXX";
+    ASSERT(mkdtemp(adir) != NULL && mkdtemp(bdir) != NULL);
+    uint8_t genesis[32], anoise[32], bnoise[32], transcript[32];
+    memset(genesis, 0x11, 32);
+    memset(anoise, 0x22, 32);
+    memset(bnoise, 0x33, 32);
+    memset(transcript, 0x55, 32);
+    ASSERT(fixture_identity(adir, 0x64, genesis, anoise));
+    ASSERT(fixture_identity(bdir, 0x65, genesis, bnoise));
+    struct vcs_zcode_dht_service *a =
+        fixture_service_at(adir, genesis, anoise, 1000);
+    struct vcs_zcode_dht_service *b =
+        fixture_service_at(bdir, genesis, bnoise, 1000);
+    ASSERT(a != NULL && b != NULL);
+    struct vcs_zcode_dht_session as = {.established = true,
+                                       .generation = 42,
+                                       .connection_serial = 1};
+    struct vcs_zcode_dht_session bs = as;
+    bs.connection_serial = 2;
+    memcpy(as.remote_static, bnoise, 32);
+    memcpy(bs.remote_static, anoise, 32);
+    memcpy(as.transcript_hash, transcript, 32);
+    memcpy(bs.transcript_hash, transcript, 32);
+    ASSERT(vcs_zcode_dht_service_session_open(a, 2, &as, test_time(1001)));
+    ASSERT(vcs_zcode_dht_service_session_open(b, 1, &bs, test_time(1001)));
+    ASSERT(pump(a, b, 2, 1, 1001, NULL, NULL));
+    ASSERT(pump(b, a, 1, 2, 1001, NULL, NULL));
+    ASSERT(pump(a, b, 2, 1, 1001, NULL, NULL));
+    struct vcs_zcode_dht_service_status st;
+    vcs_zcode_dht_service_status(a, &st);
+    ASSERT_EQ(st.active_record_operations, 0u);
+    ASSERT_EQ(st.active_queries, 0u);
+
+    /* Two pumped rounds of three stack six answered operations; each round
+     * empties the query table again, so round two is not the query cap. */
+    struct vcs_zcode_dht_record_selector selector = {
+        .kind = VCS_ZCODE_DHT_RECORD_POINTER};
+    (void)snprintf(selector.namespace_name, sizeof(selector.namespace_name),
+                   "science.ops");
+    uint64_t ops[VCS_ZCODE_DHT_SERVICE_MAX_RECORD_OPERATIONS];
+    struct vcs_zcode_dht_record_operation_result result;
+    for (size_t round = 0; round < 2; round++) {
+      for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_ACTIVE_QUERIES; i++) {
+        uint8_t root = (uint8_t)(0x91 + round * 3 + i);
+        memset(selector.root, root, 32);
+        ASSERT(vcs_zcode_dht_service_record_query_begin(
+            a, 2, &selector, test_time(1002 + round),
+            &ops[round * VCS_ZCODE_DHT_SERVICE_MAX_ACTIVE_QUERIES + i]));
+      }
+      ASSERT(pump(a, b, 2, 1, 1002 + round, NULL, NULL));
+      ASSERT(pump(b, a, 1, 2, 1002 + round, NULL, NULL));
+      vcs_zcode_dht_service_status(a, &st);
+      ASSERT_EQ(st.active_record_operations,
+                (uint32_t)((round + 1) *
+                           VCS_ZCODE_DHT_SERVICE_MAX_ACTIVE_QUERIES));
+      ASSERT_EQ(st.active_queries, 0u);
+    }
+
+    /* Two genuinely in-flight operations fill the table to eight. The ninth
+     * begin is refused by the eight-slot operation table, not by the query
+     * table, which still has an open slot. */
+    memset(selector.root, 0x97, 32);
+    ASSERT(vcs_zcode_dht_service_record_query_begin(a, 2, &selector,
+                                                    test_time(1004), &ops[6]));
+    memset(selector.root, 0x98, 32);
+    ASSERT(vcs_zcode_dht_service_record_query_begin(a, 2, &selector,
+                                                    test_time(1004), &ops[7]));
+    vcs_zcode_dht_service_status(a, &st);
+    ASSERT_EQ(st.active_record_operations, 8u);
+    ASSERT_EQ(st.active_queries, 2u);
+    memset(selector.root, 0x99, 32);
+    uint64_t refused = 77;
+    ASSERT(!vcs_zcode_dht_service_record_query_begin(a, 2, &selector,
+                                                     test_time(1004),
+                                                     &refused));
+    ASSERT_EQ(refused, 0u);
+    vcs_zcode_dht_service_status(a, &st);
+    ASSERT_EQ(st.active_record_operations, 8u);
+
+    /* Polling a terminal operation is what releases its slot: the six
+     * answered ones poll COMPLETE, the two in-flight ones time out once the
+     * poll's own tick passes their query deadline. */
+    for (size_t i = 0; i < 2 * VCS_ZCODE_DHT_SERVICE_MAX_ACTIVE_QUERIES; i++) {
+      ASSERT(vcs_zcode_dht_service_record_operation_poll(
+          a, ops[i], test_time(1005), &result));
+      ASSERT_EQ(result.state, VCS_ZCODE_DHT_RECORD_OPERATION_COMPLETE);
+    }
+    vcs_zcode_dht_service_status(a, &st);
+    ASSERT_EQ(st.active_record_operations, 2u);
+    for (size_t i = 2 * VCS_ZCODE_DHT_SERVICE_MAX_ACTIVE_QUERIES;
+         i < VCS_ZCODE_DHT_SERVICE_MAX_RECORD_OPERATIONS; i++) {
+      ASSERT(vcs_zcode_dht_service_record_operation_poll(
+          a, ops[i], test_time(1010), &result));
+      ASSERT_EQ(result.state, VCS_ZCODE_DHT_RECORD_OPERATION_TIMEOUT);
+    }
+    vcs_zcode_dht_service_status(a, &st);
+    ASSERT_EQ(st.active_record_operations, 0u);
+    ASSERT_EQ(st.active_queries, 0u);
+
+    /* The drained table accepts new work end to end again. The two frames
+     * that kept the last operations in flight were never delivered; discard
+     * them so the late replies cannot be mistaken for the fresh exchange. */
+    ASSERT_EQ(drain(a), 2u);
+    memset(selector.root, 0x9a, 32);
+    uint64_t fresh = 0;
+    ASSERT(vcs_zcode_dht_service_record_query_begin(a, 2, &selector,
+                                                    test_time(1010), &fresh));
+    ASSERT(pump(a, b, 2, 1, 1010, NULL, NULL));
+    ASSERT(pump(b, a, 1, 2, 1010, NULL, NULL));
+    ASSERT(vcs_zcode_dht_service_record_operation_poll(
+        a, fresh, test_time(1010), &result));
+    ASSERT_EQ(result.state, VCS_ZCODE_DHT_RECORD_OPERATION_COMPLETE);
+    vcs_zcode_dht_service_status(a, &st);
+    ASSERT_EQ(st.active_record_operations, 0u);
+
+    vcs_zcode_dht_service_free(a, test_time(1010));
+    vcs_zcode_dht_service_free(b, test_time(1010));
     cleanup_fixture(adir);
     cleanup_fixture(bdir);
     PASS();
@@ -3955,11 +4173,13 @@ int test_zcode_dht_service(void) {
   failures += test_publication_slot_superseded_freed();
   failures += test_publication_heal_survives_restart();
   failures += test_publication_supersede_cancels_children();
+  failures += test_record_operation_terminal_swept();
   failures += test_publication_ceiling_hosts_a_real_node();
   failures += test_record_churn_fallback();
   failures += test_deep_ancestry();
   failures += test_peer_admission_order();
   failures += test_record_transport_and_restart();
+  failures += test_record_operation_table_cap();
   failures += test_sparse_iterative_network();
   failures += test_sparse_space16_network();
   TEST("zcode dht service: Noise-authenticated two-node lookup and restart") {
