@@ -26,6 +26,10 @@ leave stale or internally inconsistent state.
 - The Sprout Groth16 KAT installs the embedded verification-key set before
   exercising contextual proof verification, matching the runtime readiness
   invariant without modifying consensus behavior.
+- DHT expiry collection now applies the same live-row predicate to sequence,
+  conflict, duplicate, and capacity decisions that a restart applies while
+  loading the store. The periodic collector marks the complete persistence
+  dirty state when it removes a row.
 
 ## Evidence
 
@@ -44,6 +48,8 @@ test_qr                      PASS  self_skips=0
 test_chain_segment           PASS  self_skips=0
 test_chain_evidence_controller PASS self_skips=0
 test_metaverse_agent_broker  PASS  self_skips=0
+test_zcode_dht_record        PASS  self_skips=0
+test_zcode_dht_service       PASS  self_skips=0
 git diff --check             PASS
 ```
 
@@ -52,6 +58,11 @@ The Yardsale acceptance specifically proved that `?confirm=true`,
 escape cannot arm or broadcast a purchase. The CLI acceptance reconstructed
 both commands byte-for-byte at width 40, including a long unbroken datadir
 token.
+
+The DHT acceptance proved identical admission and digest results before and
+after restart-equivalent collection. Its service test retained a row that
+expired inside the 300-second debounce interval, then removed it exactly at
+the boundary and observed the dirty flag, generation, and persistence timer.
 
 ## Remaining acceptance
 

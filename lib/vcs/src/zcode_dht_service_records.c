@@ -461,24 +461,6 @@ enum vcs_zcode_dht_record_store_result vcs_zcode_dht_service_record_admit(
   enum vcs_zcode_dht_record_store_result result =
       vcs_zcode_dht_record_store_put(service->record_store, record,
                                      now.wall_unix);
-  /* A cap verdict computed against rows that have expired since they were
-   * stored is stale on arrival. Reclaim the dead rows once and retry
-   * before reporting a refusal — a record store that only heals at restart
-   * is a slow outage for every publisher behind it. */
-  if (result == VCS_ZCODE_DHT_RECORD_STORE_GLOBAL_CAP ||
-      result == VCS_ZCODE_DHT_RECORD_STORE_ROOT_CAP ||
-      result == VCS_ZCODE_DHT_RECORD_STORE_PROVIDER_CAP) {
-    size_t collected = vcs_zcode_dht_record_store_collect(
-        service->record_store, now.wall_unix);
-    if (collected > 0) {
-      service->records_dirty = true;
-      if (!service->persistence_dirty)
-        service->dirty_since_mono = now.monotonic_s;
-      service->persistence_generation++;
-      result = vcs_zcode_dht_record_store_put(service->record_store,
-                                              record, now.wall_unix);
-    }
-  }
   if (result == VCS_ZCODE_DHT_RECORD_STORE_ADDED ||
       result == VCS_ZCODE_DHT_RECORD_STORE_CONFLICT) {
     service->records_dirty = true;

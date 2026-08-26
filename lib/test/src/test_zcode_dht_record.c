@@ -700,15 +700,13 @@ static int test_record_store_sequence_and_expiry(void)
   return failures;
 }
 
-/* Capacity accounting is expiry-aware while stream history stays
- * expiry-blind, mirroring what load() prunes on restart. These pins hold
- * that split against drift in either direction: dead rows must free room
- * without erasing staleness/conflict evidence, and reclaim must produce
- * exactly the image a cold reload would have built. */
+/* Expired rows influence neither capacity nor stream verdicts, exactly as
+ * if load() had rebuilt the store at the same wall time. Reclaim produces
+ * the same canonical image as a fresh build of the survivors. */
 static int test_record_store_expiry_reclaim(void)
 {
   int failures = 0;
-  TEST("zcode dht records: dead rows free capacity yet still anchor evidence") {
+  TEST("zcode dht records: expiry reclaim matches restart semantics") {
     struct record_fixture f;
     int chain_calls = 0;
     ASSERT(rf_init(&f, &chain_calls));
@@ -757,9 +755,8 @@ static int test_record_store_expiry_reclaim(void)
               1);
     vcs_zcode_dht_record_store_free(store);
 
-    /* Sequence history ignores expiry on purpose: an expired high anchor
-     * still forces STALE for older sequences and still counts toward
-     * conflict evidence, while capacity never counted it. */
+    /* Runtime admission and a collected/reloaded view must agree: expired
+     * high-sequence and conflict rows are absent from both verdicts. */
     store = vcs_zcode_dht_record_store_create(f.verify.network_genesis);
     ASSERT(store != NULL);
     struct vcs_zcode_dht_record current, next, tie_a, stale, tie_b;
@@ -792,18 +789,27 @@ static int test_record_store_expiry_reclaim(void)
     tie_b.expiry = 2900;
     ASSERT_EQ(vcs_zcode_dht_record_sign(&tie_b, f.online_seed),
               VCS_ZCODE_DHT_RECORD_OK);
-    /* Both stored rows have expired here; neither may consume capacity or
-     * vanish the verdicts below. A refused put leaves the image untouched,
-     * and a successful conflicting admission compacts the dead pair itself,
-     * leaving exactly what a restart would have rebuilt. */
+    /* Both stored rows have expired. A restart-equivalent collected clone
+     * and the still-physical runtime image must admit the same lower live
+     * record and converge to the same digest. */
     ASSERT_EQ(vcs_zcode_dht_record_store_count(store), 2);
+    struct vcs_zcode_dht_record_store *restarted =
+        vcs_zcode_dht_record_store_clone(store);
+    ASSERT(restarted != NULL);
+    ASSERT_EQ(vcs_zcode_dht_record_store_collect(restarted, 1900), 2);
     ASSERT_EQ(vcs_zcode_dht_record_store_put(store, &stale, 1900),
-              VCS_ZCODE_DHT_RECORD_STORE_STALE);
-    ASSERT_EQ(vcs_zcode_dht_record_store_count(store), 2);
-    ASSERT_EQ(vcs_zcode_dht_record_store_put(store, &tie_b, 1900),
-              VCS_ZCODE_DHT_RECORD_STORE_CONFLICT);
-    ASSERT_EQ(vcs_zcode_dht_record_store_collect(store, 1900), 0);
+              VCS_ZCODE_DHT_RECORD_STORE_ADDED);
+    ASSERT_EQ(vcs_zcode_dht_record_store_put(restarted, &stale, 1900),
+              VCS_ZCODE_DHT_RECORD_STORE_ADDED);
     ASSERT_EQ(vcs_zcode_dht_record_store_count(store), 1);
+    uint8_t runtime_digest[32], restarted_digest[32];
+    vcs_zcode_dht_record_store_digest(store, runtime_digest);
+    vcs_zcode_dht_record_store_digest(restarted, restarted_digest);
+    ASSERT(memcmp(runtime_digest, restarted_digest, 32) == 0);
+
+    /* Once a higher live row is admitted, it remains the real stale anchor. */
+    ASSERT_EQ(vcs_zcode_dht_record_store_put(store, &tie_b, 1900),
+              VCS_ZCODE_DHT_RECORD_STORE_ADDED);
     ASSERT_EQ(vcs_zcode_dht_record_store_query(
                   store, VCS_ZCODE_DHT_RECORD_POINTER, "science.study",
                   bucket_root, 1900, served, 4),
@@ -812,6 +818,7 @@ static int test_record_store_expiry_reclaim(void)
            (uint8_t)(0x41 ^ 1 ^ 2));
     ASSERT_EQ(vcs_zcode_dht_record_store_put(store, &stale, 1900),
               VCS_ZCODE_DHT_RECORD_STORE_STALE);
+    vcs_zcode_dht_record_store_free(restarted);
     vcs_zcode_dht_record_store_free(store);
 
     /* Reclaim of a mixed store equals a fresh build of the survivors, and

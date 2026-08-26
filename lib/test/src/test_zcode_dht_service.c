@@ -4469,12 +4469,12 @@ _test_next:;
 
 /* The debounced tick reclaim is the mid-session stand-in for load()'s
  * expiry prune: first tick runs immediately, idle ticks inside the interval
- * persist nothing, and once dead rows are gone a previously refused
- * admission lands on the retry. */
+ * preserve a row that expires between them, and the boundary tick removes
+ * it while arming the complete persistence dirty state. */
 static int test_record_collect_tick_debounce(void)
 {
   int failures = 0;
-  TEST("zcode dht service: tick reclaim debounces and heals refusals") {
+  TEST("zcode dht service: tick reclaim debounces and persists expiry") {
     char adir[] = "/tmp/zcl_dht_collect_XXXXXX";
     ASSERT(mkdtemp(adir) != NULL);
     uint8_t genesis[32], noise[32];
@@ -4490,7 +4490,7 @@ static int test_record_collect_tick_debounce(void)
 
     uint8_t semantic_root[32];
     memset(semantic_root, 0x7e, 32);
-    struct vcs_zcode_dht_record record, refill;
+    struct vcs_zcode_dht_record record, refill, short_lived;
     for (size_t i = 0; i <= VCS_ZCODE_DHT_RECORD_STORE_MAX_PER_ROOT; i++) {
       memset(&record, 0, sizeof(record));
       record.kind = VCS_ZCODE_DHT_RECORD_POINTER;
@@ -4514,28 +4514,50 @@ static int test_record_collect_tick_debounce(void)
                       a, &record, test_time(1000)),
                   VCS_ZCODE_DHT_RECORD_STORE_ADDED);
     }
+    short_lived = refill;
+    (void)snprintf(short_lived.namespace_name,
+                   sizeof(short_lived.namespace_name),
+                   "svc.collect.short");
+    short_lived.transport_root[0] ^= 0x7f;
+    short_lived.expiry = 2300;
+    ASSERT_EQ(vcs_zcode_dht_record_sign(&short_lived, seed),
+              VCS_ZCODE_DHT_RECORD_OK);
     memory_cleanse(seed, sizeof(seed));
     ASSERT_EQ(vcs_zcode_dht_service_record_admit(a, &refill,
                                                  test_time(1000)),
               VCS_ZCODE_DHT_RECORD_STORE_ROOT_CAP);
 
     uint64_t generation = a->persistence_generation;
-    /* First tick adopts the watermark and prunes every expired row in the
-     * same pass, so the refused refill goes through afterwards. */
+    /* First tick adopts the watermark and prunes every expired row, so a
+     * fresh admission sees the same capacity as a restart at wall=2100. */
     vcs_zcode_dht_service_tick(a, test_time(2100));
     ASSERT_EQ(vcs_zcode_dht_service_record_admit(a, &refill,
                                                  test_time(2100)),
               VCS_ZCODE_DHT_RECORD_STORE_ADDED);
+    ASSERT_EQ(vcs_zcode_dht_service_record_admit(a, &short_lived,
+                                                 test_time(2100)),
+              VCS_ZCODE_DHT_RECORD_STORE_ADDED);
+    ASSERT_EQ(vcs_zcode_dht_record_store_count(a->record_store), 2);
     ASSERT(a->records_dirty && a->persistence_dirty);
     ASSERT(a->persistence_generation > generation);
+    ASSERT(vcs_zcode_dht_service_persistence_save(a));
+    ASSERT(!a->records_dirty && !a->persistence_dirty);
 
-    /* Idle ticks inside the interval leave the persisted state alone. */
+    /* The short row expires at wall=2300, but the 300-second monotonic
+     * debounce keeps it physical through tick 2399. Tick 2400 collects it
+     * and marks that exact deletion for persistence. */
     generation = a->persistence_generation;
     vcs_zcode_dht_service_tick(a, test_time(2200));
+    ASSERT_EQ(vcs_zcode_dht_record_store_count(a->record_store), 2);
     vcs_zcode_dht_service_tick(a, test_time(2399));
+    ASSERT_EQ(vcs_zcode_dht_record_store_count(a->record_store), 2);
     ASSERT_EQ(a->persistence_generation, generation);
+    ASSERT(!a->records_dirty && !a->persistence_dirty);
     vcs_zcode_dht_service_tick(a, test_time(2400));
-    ASSERT_EQ(a->persistence_generation, generation);
+    ASSERT_EQ(vcs_zcode_dht_record_store_count(a->record_store), 1);
+    ASSERT_EQ(a->persistence_generation, generation + 1);
+    ASSERT(a->records_dirty && a->persistence_dirty);
+    ASSERT_EQ(a->dirty_since_mono, 2400);
 
     vcs_zcode_dht_service_free(a, test_time(2400));
     cleanup_fixture(adir);

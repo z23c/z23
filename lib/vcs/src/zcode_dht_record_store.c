@@ -180,13 +180,10 @@ enum vcs_zcode_dht_record_store_result vcs_zcode_dht_record_store_put(
       VCS_ZCODE_DHT_RECORD_OK)
     return VCS_ZCODE_DHT_RECORD_STORE_INVALID;
 
-  /* One pass over the table gathers everything the admission decision
-   * needs. Sequence history (max_sequence / conflicts / duplicate) stays
-   * EXPIRY-BLIND on purpose: an expired higher-sequence row still anchors
-   * staleness and conflict evidence exactly as before. Capacity accounting
-   * alone is expiry-aware — dead rows stop consuming slots, which is what
-   * load() already does at restart — and each live counter carries its own
-   * would-be-superseded drop so post-removal arithmetic needs no second
+  /* One pass gathers the complete admission decision over the same live
+   * set load() would rebuild at now_unix. Expired rows influence neither
+   * sequence/conflict verdicts nor capacity. Each live counter carries its
+   * own would-be-superseded drop so post-removal arithmetic needs no second
    * scan. Every same-stream-older row shares root and provider with the
    * incoming record (stream equality implies both), so one superseded flag
    * feeds all three drops. */
@@ -198,6 +195,8 @@ enum vcs_zcode_dht_record_store_result vcs_zcode_dht_record_store_put(
   for (size_t i = 0; i < store->count; i++) {
     const struct record_store_entry *entry = &store->entries[i];
     const struct vcs_zcode_dht_record *existing = &entry->record;
+    if (now_unix >= existing->expiry)
+      continue;
     bool same_stream =
         vcs_zcode_dht_record_stream_equal(existing, record);
     bool superseded = false;
@@ -211,8 +210,6 @@ enum vcs_zcode_dht_record_store_result vcs_zcode_dht_record_store_put(
       }
       superseded = existing->sequence < record->sequence;
     }
-    if (now_unix >= existing->expiry)
-      continue; /* past here the pass counts LIVE capacity only */
     glob_live++;
     if (memcmp(record_root(existing), record_root(record), 32) == 0) {
       root_live++;
