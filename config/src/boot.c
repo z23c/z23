@@ -1471,8 +1471,31 @@ bool app_init(struct app_context *ctx)
 
     boot_stale_locks_preflight(ctx->datadir);
 
-    /* Open SQLite node database */
+    /* Open SQLite node database.
+     *
+     * This is the single most expensive uninstrumented step in boot, and
+     * until now it reported NOTHING while it ran. Measured from this
+     * node's own node.log over 33 boots: `sqlite_open_migrate` cost
+     * 12 ms when the last shutdown was clean, and 214_354-985_360 ms when
+     * it was not — the cost tracking the size of the WAL left behind
+     * (27.6-115.8 GB) at roughly 8 s per GB on NVMe. Two legs, both
+     * single blocking calls inside libsqlite3 with no seam to report
+     * from: WAL recovery inside the open itself (311_483-435_727 ms
+     * measured on the two boots that skipped quick_check entirely) and
+     * `PRAGMA quick_check` (59_512-550_868 ms). During that window the
+     * process printed nothing at all and renewed no clock.
+     *
+     * boot_step_enter gets the heartbeat sweeper reporting it from a
+     * thread this one does not own, and buys an immediate start-timeout
+     * extension; the process-I/O probe is what lets each subsequent
+     * 30 s window earn another one while the disk is visibly working,
+     * so a slow box is never killed for being honest. The probe is
+     * scoped to this step and cleared when it closes — including on the
+     * exit(1) / early-return paths below, which is why this is
+     * boot_step_enter and not boot_phase_begin (see boot_phase.h). */
     t_phase = boot_clock_ms();
+    boot_step_enter("db.open_migrate");
+    boot_step_set_evidence_probe(boot_evidence_probe_process_io, NULL);
     if (node_db_sync_init(&g_node_db, ctx->datadir)) {
         int migrate_rc = node_db_migrate(&g_node_db, ctx->datadir);
         if (migrate_rc == -2) {
@@ -1509,6 +1532,7 @@ bool app_init(struct app_context *ctx)
          * CONTINUE booting RAM-only. See boot_node_db_gate.c. */
         return boot_node_db_open_failed_gate(ctx->datadir);
     }
+    boot_step_done();
     boot_topmark("sqlite_open_migrate", t_phase);
 
     if (!boot_wallet_identity_ensure(&g_node_db, params->consensus.hashGenesisBlock.data, app_operator_lane_name(ctx->operator_lane))) return false;

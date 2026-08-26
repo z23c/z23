@@ -242,6 +242,59 @@ void boot_step_enter(const char *name);
  * calls boot_progress_note() needs nothing extra. */
 void boot_step_note(void);
 
+/* ── Out-of-band evidence for an OPAQUE step ──────────────────────
+ *
+ * boot_step_note() only works for a step that owns its own loop. The
+ * most expensive boot steps on this node do not: SQLite WAL recovery
+ * inside sqlite3_open() and `PRAGMA quick_check` are single blocking
+ * calls inside libsqlite3 with no seam to call anything from. Measured
+ * on this node's own node.log, that pair costs 311_000-985_000 ms of
+ * boot on an NVMe box with a 39-116 GB WAL, during which the boot
+ * thread cannot report and the process is completely silent.
+ *
+ * Such a step still classifies STUCK (over budget, zero progress) and
+ * therefore earns no start budget — correct given no evidence, wrong
+ * given that the disk is visibly working. The fix is evidence gathered
+ * from OUTSIDE the blocked thread: the heartbeat sweeper calls this
+ * probe once per report window and treats a changed return value as
+ * one unit of progress, exactly like boot_step_note().
+ *
+ * CONTRACT for `fn`:
+ *   - Called from the shared heartbeat sweeper thread, never from the
+ *     blocked step. It MUST NOT block, allocate, take a lock the boot
+ *     thread can hold, or touch the filesystem the step is stalled on —
+ *     wedging the sweeper would remove the only reporter that is left.
+ *   - Return any value that CHANGES while the step is advancing and
+ *     STAYS PUT while it is frozen. Monotonicity is not required.
+ *
+ * Scope is the step: boot_step_enter() clears any installed probe, so a
+ * probe never leaks into the next step, and an early `return false` out
+ * of the boot path cannot leave one armed. Install it immediately AFTER
+ * entering the step. NULL `fn` clears. */
+typedef uint64_t (*boot_evidence_probe_fn)(void *ctx);
+void boot_step_set_evidence_probe(boot_evidence_probe_fn fn, void *ctx);
+
+/* At least this much block I/O in a report window counts as "the disk
+ * is working". Sized to be unreachable by noise and unmissable by real
+ * work: the reporter's own one-line fprintf to node.log is a few
+ * hundred bytes, while the slowest box in this fleet was measured
+ * sustaining ~2 MB/s — 60x this floor. It is a NOISE GATE, not a speed
+ * grade: nothing here ever converts "slow" into "failed". */
+#define BOOT_EVIDENCE_IO_QUANTUM_BYTES (1024 * 1024)
+
+/* Ready-made probe: this process's cumulative block-device I/O, from
+ * getrusage(RUSAGE_SELF) — a pure syscall that reads kernel-resident
+ * accounting and so cannot block on the device the step is stalled on.
+ * Quantised by BOOT_EVIDENCE_IO_QUANTUM_BYTES.
+ *
+ * Scope warning: RUSAGE_SELF is process-wide, so this is only honest
+ * evidence for a step that is the process's ONLY substantial source of
+ * I/O. That holds for the node.db open ceremony (it runs after the
+ * verification-key load has finished and before embedded Tor, the
+ * connman threads and the services start), and it is why this is an
+ * opt-in probe rather than a global evidence source. `ctx` is unused. */
+uint64_t boot_evidence_probe_process_io(void *ctx);
+
 /* Close the current step with `done`. Safe when no step is open. */
 void boot_step_done(void);
 
@@ -257,6 +310,15 @@ void boot_step_done(void);
 bool boot_step_fail(const char *reason);
 
 #ifdef ZCL_TESTING
+/* Run exactly ONE stall report for the open step, synchronously, on the
+ * calling thread — the same code path boot_step_on_stall runs from the
+ * heartbeat sweeper, with `elapsed_ms` supplied instead of read from the
+ * clock so a test does not have to wait out BOOT_STEP_BUDGET_MS. Returns
+ * the state that was reported, or BOOT_STEP_STATE__MAX when no step is
+ * open. Production must not call this: elapsed time is the step's own
+ * property and nothing outside it may assert one. */
+enum boot_step_state boot_step_stall_report_for_testing(int64_t elapsed_ms);
+
 /* Test-only escape hatch: reset the global stage back to INIT so unit
  * tests can exercise the advance state machine without polluting the
  * stage observed by later tests in the same process. Production code
