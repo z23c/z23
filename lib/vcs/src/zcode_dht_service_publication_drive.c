@@ -40,6 +40,15 @@ void publication_cancel_active(struct vcs_zcode_dht_service *service,
   publication->phase = SERVICE_PUBLICATION_NEEDS_LOOKUP;
 }
 
+void publication_release(struct vcs_zcode_dht_service *service,
+                         struct service_publication *publication,
+                         uint64_t monotonic_s)
+{
+  publication_cancel_active(service, publication);
+  memset(publication, 0, sizeof(*publication));
+  publication_mark_dirty(service, monotonic_s);
+}
+
 static void publication_reset_cycle(struct service_publication *publication)
 {
   memset(publication->node_ids, 0, sizeof(publication->node_ids));
@@ -249,17 +258,13 @@ void publication_drive(struct vcs_zcode_dht_service *service,
   if (vcs_zcode_dht_record_store_max_sequence(service->record_store,
                                               &publication->record) >
       publication->record.sequence) {
-    publication_cancel_active(service, publication);
-    memset(publication, 0, sizeof(*publication));
-    publication_mark_dirty(service, now.monotonic_s);
+    publication_release(service, publication, now.monotonic_s);
     return;
   }
   if (publication->record.kind ==
           VCS_ZCODE_DHT_RECORD_SOURCE_REPRODUCTION_ACK &&
       now.wall_unix >= publication->record.expiry) {
-    publication_cancel_active(service, publication);
-    memset(publication, 0, sizeof(*publication));
-    publication_mark_dirty(service, now.monotonic_s);
+    publication_release(service, publication, now.monotonic_s);
     return;
   }
   if (publication->record.kind ==
@@ -286,6 +291,21 @@ void publication_drive(struct vcs_zcode_dht_service *service,
   }
   if (publication->record.kind == VCS_ZCODE_DHT_RECORD_STORAGE_ACK &&
       !publication->possession_current) {
+    /* Gated custody gets bounded residency: a slot that can never re-verify
+     * would otherwise hold its intent (and its renewal demand) forever,
+     * since only SOURCE_REPRODUCTION_ACK records carry an expiry-based
+     * release and POINTER/PROVIDER-style resume cannot apply when the
+     * record's precondition, not its delegation, is broken. The stamp arms
+     * on the first gated tick; custody regained in validation() clears it.
+     * Monotonic arithmetic keeps wall-clock jumps inert. */
+    if (!publication->possession_stall_since_mono)
+      publication->possession_stall_since_mono = now.monotonic_s;
+    if (now.monotonic_s - publication->possession_stall_since_mono >=
+        PUBLICATION_POSSESSION_STALL_MAX_S) {
+      service->possession_stall_releases++;
+      publication_release(service, publication, now.monotonic_s);
+      return;
+    }
     publication_cancel_active(service, publication);
     return;
   }

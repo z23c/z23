@@ -2589,6 +2589,30 @@ static int test_record_transport_and_restart(void) {
               0);
     vcs_zcode_dht_service_status(a, &publication_status);
     ASSERT_EQ(publication_status.publication_intents, 2);
+    /* Gated custody is bounded residency: the reloaded ACK comes back
+     * non-current, arms its stall clock on the first gated tick, and the
+     * slot is released once the PROCESS-monotonic clock passes the cap
+     * while the wall clock stays inside the record's own window. Only a
+     * hand-built decoupled time can express that — real elapsed wall can
+     * never reach the residency bound before the record's expiry lane
+     * preempts it. */
+    vcs_zcode_dht_service_status(a, &publication_status);
+    ASSERT_EQ(publication_status.stalled_possessions, 1);
+    ASSERT_EQ(publication_status.possession_stall_releases, 0);
+    struct vcs_zcode_dht_time stall_breach = {
+        .wall_unix = 1999,
+        .monotonic_s = test_time(2001).monotonic_s +
+                       PUBLICATION_POSSESSION_STALL_MAX_S};
+    vcs_zcode_dht_service_tick(a, stall_breach);
+    vcs_zcode_dht_service_status(a, &publication_status);
+    ASSERT_EQ(publication_status.publication_intents, 1);
+    ASSERT_EQ(publication_status.stalled_possessions, 0);
+    ASSERT_EQ(publication_status.possession_stall_releases, 1);
+    /* Releasing the intent frees the slot, not the signed evidence: the
+     * stored record stays locally queryable until its own expiry. */
+    ASSERT_EQ(vcs_zcode_dht_service_record_local_query(
+                  a, 2001, &ack_selector, local, 1),
+              1);
     vcs_package_store_close(ack_store);
     test_rm_rf_recursive(ack_dir);
     vcs_zcode_dht_service_free(a, test_time(2001));

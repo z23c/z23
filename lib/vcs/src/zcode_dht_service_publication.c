@@ -486,6 +486,11 @@ void vcs_zcode_dht_service_storage_ack_validation(
         publication->renewal_proof_ready = false;
       if (valid && publication->renewal_proof_required)
         publication->renewal_proof_ready = true;
+      /* Custody regained: stop any running stall clock BEFORE driving, or
+       * a long outage that recovered inside its budget would still release.
+       * Commit paths wipe the stamp implicitly via their slot memsets. */
+      if (valid)
+        publication->possession_stall_since_mono = 0;
       publication_drive(service, publication, now);
     }
   }
