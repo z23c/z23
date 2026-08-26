@@ -142,9 +142,6 @@ HOTSWAP_SWAPPABLE("app/controllers/src/shop_native_handler.c",
  * plan, commit and retrieve move money or bytes and are withheld. */
 HOTSWAP_SWAPPABLE("app/controllers/src/market_purchase_native_handler.c",
                   "app.market.purchase.guide app.market.purchase.status")
-/* Read-only WANT projections. post, cancel and review are withheld. */
-HOTSWAP_SWAPPABLE("app/controllers/src/shop_native_want.c",
-                  "app.shop.want.list app.shop.want.status")
 /* Read-only FULFILMENT projections. post and withdraw are withheld. */
 HOTSWAP_SWAPPABLE("app/controllers/src/shop_native_fulfill.c",
                   "app.shop.want.fulfill.list app.shop.want.fulfill.status")
