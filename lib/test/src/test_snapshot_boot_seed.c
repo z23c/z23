@@ -42,6 +42,7 @@
 #include "storage/coins_kv.h"
 #include "storage/progress_store.h"
 #include "util/blocker.h"
+#include "util/boot_progress.h"
 #include "validation/main_state.h"
 
 #include <errno.h>
@@ -264,9 +265,15 @@ int test_snapshot_boot_seed(void)
     /* ── DRIVE THE REAL BOOT ENTRY POINT. */
     int64_t out_count = -1, out_height = -1;
     uint8_t out_best[32] = {0};
+    int64_t progress_before = boot_progress_last_us();
     bool imported = boot_import_snapshot_db(&ndb, snap_path,
                                             &out_count, &out_height, out_best);
     SB_CHECK("import: boot_import_snapshot_db returns true", imported);
+    SB_CHECK("import: SQLite work advances boot progress",
+             boot_progress_last_us() > progress_before &&
+             boot_progress_last_label() != NULL &&
+             strcmp(boot_progress_last_label(),
+                    "snapshot_import_bulk_insert") == 0);
     SB_CHECK("import: out_utxo_count == fixture count",
              out_count == SB_UTXO_COUNT);
     SB_CHECK("import: out_snap_height == snapshot height",

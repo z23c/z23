@@ -16,8 +16,6 @@
 #include "util/log_macros.h"
 
 #include <errno.h>
-#include <pthread.h>
-#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,38 +25,15 @@
 
 #include <sqlite3.h>
 
-/* Pump thread that ticks boot_progress every second during the bulk
- * INSERT. The INSERT can take tens of seconds on slower disks; without
- * this, systemd WatchdogSec=120 would fire SIGABRT mid-write. The
- * thread exits as soon as the import path sets the stop flag. */
-struct progress_pump {
-    _Atomic bool stop;
-    pthread_t tid;
-};
-
-static void *progress_pump_run(void *arg)
+/* SQLite calls this only after executing more virtual-machine instructions.
+ * Unlike a timer thread, it cannot claim progress while a disk operation is
+ * hung. Returning zero preserves the statement; the callback records only a
+ * cheap lock-free liveness timestamp. */
+static int snapshot_import_progress(void *unused)
 {
-    struct progress_pump *p = arg;
-    while (!atomic_load_explicit(&p->stop, memory_order_acquire)) {
-        boot_progress_tick("snapshot_import_bulk_insert");
-        struct timespec ts = { .tv_sec = 1, .tv_nsec = 0 };
-        nanosleep(&ts, NULL);
-    }
-    return NULL;
-}
-
-static void progress_pump_start(struct progress_pump *p)
-{
-    atomic_store_explicit(&p->stop, false, memory_order_release);
-    if (pthread_create(&p->tid, NULL, progress_pump_run, p) != 0)  // raw-pthread-ok:boot-time-pump-no-thread-registry-dep
-        p->tid = 0;
-}
-
-static void progress_pump_stop(struct progress_pump *p)
-{
-    atomic_store_explicit(&p->stop, true, memory_order_release);
-    if (p->tid)
-        pthread_join(p->tid, NULL);
+    (void)unused;
+    boot_progress_tick("snapshot_import_bulk_insert");
+    return 0;
 }
 
 bool boot_import_snapshot_db(struct node_db *ndb,
@@ -220,13 +195,11 @@ bool boot_import_snapshot_db(struct node_db *ndb,
         sqlite3_exec(ndb->db, "DETACH DATABASE snapsrc", NULL, NULL, NULL);
         LOG_FAIL("boot_snapshot_import", "BEGIN failed: %s", msg);
     }
-    /* Pump systemd watchdog liveness while the bulk copy runs.
-     * The single INSERT statement holds the main thread for tens of
-     * seconds on snapshots with millions of UTXOs; without this pump
-     * the unit's WatchdogSec=120 timer would expire and SIGABRT the
-     * process mid-write. */
-    struct progress_pump pump = {0};
-    progress_pump_start(&pump);
+    /* Report only measured SQLite VM progress while the bulk copy and
+     * commitment scan run. A timer-based pump falsely kept a genuinely hung
+     * INSERT alive forever once watchdog progress exemptions became active. */
+    sqlite3_progress_handler(ndb->db, 50000,
+                             snapshot_import_progress, NULL);
     if (ok && ar_exec_write_sql(ndb->db, "DELETE FROM main.utxos")
                   != SQLITE_OK) {
         fprintf(stderr, "[boot_snapshot_import] clear utxos: %s\n",  // obs-ok:bulk-import-failure
@@ -245,8 +218,9 @@ bool boot_import_snapshot_db(struct node_db *ndb,
      * compiled checkpoint height there is a cryptographic ground truth, so
      * REJECT unless (root,count) byte-match it — a peer's per-chunk transport
      * SHA3 only proves the file matches the SERVING PEER's manifest, NOT that
-     * the coin set is the real consensus set. Runs while the watchdog pump is
-     * still ticking (the walk is O(set)). Above the checkpoint there is no
+     * the coin set is the real consensus set. Runs while the SQLite progress
+     * handler remains active (the walk is O(set)). Above the checkpoint there
+     * is no
      * compiled root to verify against; that non-checkpoint provenance gap (the
      * snapshot path writes no cold-import seed, so the boot torn-gate cannot
      * see it) is a documented follow-up — the checkpoint reject is the
@@ -288,7 +262,7 @@ bool boot_import_snapshot_db(struct node_db *ndb,
         sqlite3_exec(ndb->db, "ROLLBACK", NULL, NULL, NULL);
     }
     sqlite3_exec(ndb->db, "DETACH DATABASE snapsrc", NULL, NULL, NULL);
-    progress_pump_stop(&pump);
+    sqlite3_progress_handler(ndb->db, 0, NULL, NULL);
 
     if (!ok) {
         LOG_FAIL("boot_snapshot_import",

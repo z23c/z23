@@ -372,6 +372,14 @@ int test_sd_notify(void)
             !boot_sd_watchdog_test_keepalive_supervisor(false, true, false));
         SDN_CHECK("keepalive: runtime-alive keeps without progress",
             boot_sd_watchdog_test_keepalive_supervisor(true, true, false));
+        SDN_CHECK("runtime pillars: all three live",
+            boot_sd_watchdog_test_runtime_pillars(true, true, true));
+        SDN_CHECK("runtime pillars: wedged tick runner stops the ping",
+            !boot_sd_watchdog_test_runtime_pillars(true, false, true));
+        SDN_CHECK("runtime pillars: frozen sweep stops the ping",
+            !boot_sd_watchdog_test_runtime_pillars(false, true, true));
+        SDN_CHECK("runtime pillars: stale connman stops the ping",
+            !boot_sd_watchdog_test_runtime_pillars(true, true, false));
     }
 
     /* ── the backstop must be WEAKER than the policy it backs ──

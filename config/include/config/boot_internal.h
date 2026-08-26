@@ -466,6 +466,9 @@ bool boot_sd_watchdog_test_pet_decide(bool runtime_gate_alive);
 bool boot_sd_watchdog_test_keepalive_supervisor(bool runtime_alive,
                                                 bool sweep_alive,
                                                 bool recent_progress);
+bool boot_sd_watchdog_test_runtime_pillars(bool sweep_alive,
+                                           bool tick_alive,
+                                           bool connman_alive);
 #endif
 
 /* ── boot_supervisor_backstop.c ──────────────────────────────────
