@@ -1107,3 +1107,30 @@ AGENT_IMPACT_RULE("lib/test/fuzz_seeds/ARTIFACT_VERDICTS.txt|lib/test/fuzz_seeds
  * gates read both the deploy tree and the root file list, so a change to
  * either must run them. */
 AGENT_IMPACT_RULE(".gitignore|deploy/devfleet/*|deploy/devfleet/*.example", "make_lint_gates")
+
+/* LANE referee-retirement audit (2026-08-26). The mesh_observation surface is
+ * what REPLACED the box that used to judge the other boxes: instead of one
+ * machine grading the fleet and publishing a scalar verdict, every node
+ * publishes only what IT observed and any reader folds those records against
+ * its own validated chain. The rule above maps that surface's service sources,
+ * its two controllers and its two test files. It does not map the two places
+ * that decide whether the surface exists on a running node at all:
+ *
+ *   - config/src/boot_network_monitor.c and its header hold the ONLY
+ *     registration of the sampler and of the reader-side collector
+ *     (boot_register_mesh_observation_service). They matched only the
+ *     network_monitor rule, so an edit that unregistered either half ran
+ *     network_monitor and condition_engine and never touched mesh_observation
+ *     or mesh_observation_compose.
+ *   - app/controllers/include/controllers/diagnostics_dumpers_network.def is
+ *     where mesh_observation_dump_state_json and
+ *     mesh_observation_compose_dump_state_json are published to readers. It
+ *     matched the generic diagnostics_*.def rule (syncdiag_rpc, rpc,
+ *     make_lint_gates) — the registry shape was covered, the mesh behaviour
+ *     behind it was not.
+ *
+ * Registration and publication ARE the replacement: a reader that cannot
+ * collect anything falls back to trusting somebody else's conclusion, which is
+ * the authority that was just removed. Both mesh groups therefore ride the
+ * wiring, not only the implementation. */
+AGENT_IMPACT_RULE("config/src/boot_network_monitor.c|config/include/config/boot_network_monitor.h|app/controllers/include/controllers/diagnostics_dumpers_network.def", "mesh_observation mesh_observation_compose network_monitor syncdiag_rpc make_lint_gates")
