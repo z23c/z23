@@ -57,6 +57,7 @@
 #include "base/hex.h"
 #include "json/json.h"
 #include "platform/os_proc.h"
+#include "util/safe_alloc.h"
 #include "sha3/sha3.h"
 #include "util/clientversion.h"
 #include "util/spawn.h"
@@ -196,7 +197,7 @@ static size_t nv_elf_comment(const char *path, unsigned char *out, size_t cap)
     uint64_t strsz = nv_le64(sh + 0x20);
     if (strsz == 0 || strsz > (1u << 20))
         goto done;
-    char *strtab = malloc((size_t)strsz + 1);
+    char *strtab = zcl_malloc((size_t)strsz + 1, "node_verify_strtab");
     if (!strtab)
         goto done;
     if (!nv_read_at(f, stroff, strtab, (size_t)strsz, fsz)) {
