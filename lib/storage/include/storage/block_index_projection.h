@@ -110,6 +110,15 @@ bool block_index_projection_bind_flat(block_index_projection_t *p,
                                       uint64_t payload_size,
                                       uint64_t row_count);
 
+/* Bind a flat snapshot whose rows may be a strict superset of this event
+ * projection. `covered` must prove that skipping each current projection row
+ * has exactly the same in-memory result as applying it to the saved flat.
+ * The proof and dirty-set clear run under the projection mutex. */
+bool block_index_projection_bind_flat_if_covered(
+    block_index_projection_t *p, const uint8_t payload_sha3[32],
+    uint64_t payload_size, uint64_t row_count,
+    block_index_projection_cb covered, void *user);
+
 /* Iterate only hashes replaced after the bound flat snapshot. Returns 1 when
  * the exact identity matched, 0 when the caller must use the full scan, and
  * -1 on a storage error. */

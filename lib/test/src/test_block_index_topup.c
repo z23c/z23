@@ -147,14 +147,16 @@ static int run_bound_topup_integration(void)
     struct main_state source, loaded;
     main_state_init(&source);
     main_state_init(&loaded);
-    struct uint256 h10 = {0}, h11 = {0}, h12 = {0};
-    h10.data[0] = 10; h11.data[0] = 11; h12.data[0] = 12;
+    struct uint256 h9 = {0}, h10 = {0}, h11 = {0}, h12 = {0};
+    h9.data[0] = 9; h10.data[0] = 10; h11.data[0] = 11; h12.data[0] = 12;
+    struct block_index *s9 = topup_insert_entry(&source, &h9, 9);
     struct block_index *s10 = topup_insert_entry(&source, &h10, 10);
     struct block_index *s11 = topup_insert_entry(&source, &h11, 11);
+    if (s9) s9->nBits = 0x1f07ffffu;
     if (s10) s10->nBits = 0x1f07ffffu;
     if (s11) s11->nBits = 0x1f07ffffu;
     if (s11) s11->pprev = s10;
-    bool emitted = log && bip && s10 && s11 &&
+    bool emitted = log && bip && s9 && s10 && s11 &&
         topup_emit_row(log, &h10, NULL, 10, BLOCK_VALID_TREE, -1, 0, 0) &&
         topup_emit_row(log, &h11, &h10, 11, BLOCK_VALID_TREE, -1, 0, 0) &&
         block_index_projection_catch_up(bip) != UINT64_MAX;
@@ -163,9 +165,17 @@ static int run_bound_topup_integration(void)
     bool saved = emitted && save_block_index_flat_identity(
         dir, &source, &identity).ok;
     TOPUP_CHECK("bound: verified flat saved", saved);
-    TOPUP_CHECK("bound: exact flat/projection identity binds",
-                saved && block_index_projection_bind_saved_flat(bip,
-                                                                 &identity));
+    TOPUP_CHECK("bound: strict row equality refuses a flat superset",
+                saved && !block_index_projection_bind_saved_flat(
+                    bip, &identity));
+    if (s10) s10->nStatus = 0;
+    TOPUP_CHECK("bound: uncovered projection state refuses subset bind",
+                saved && !block_index_projection_bind_saved_flat_state(
+                    bip, &identity, &source));
+    if (s10) s10->nStatus = BLOCK_VALID_TREE;
+    TOPUP_CHECK("bound: verified projection subset binds to flat superset",
+                saved && block_index_projection_bind_saved_flat_state(
+                    bip, &identity, &source));
     TOPUP_CHECK("bound: verified flat loads",
                 saved && load_block_index_flat(dir, &loaded).ok);
 
@@ -212,6 +222,9 @@ static int run_bound_topup_integration(void)
     bool tip_delta = topup_emit_row(
         log, &h12, &h11, 12, BLOCK_VALID_TREE, -1, 0, 0) &&
         block_index_projection_catch_up(bip) != UINT64_MAX;
+    TOPUP_CHECK("bound: projection row absent from flat refuses subset bind",
+                tip_delta && !block_index_projection_bind_saved_flat_state(
+                    bip, &identity, &source));
     TOPUP_CHECK("bound: stale flat tip is covered by exact dirty row",
                 tip_delta && block_index_projection_bound_covers_tip(
                     bip, dir, h12.data, 12));

@@ -60,6 +60,10 @@ bool block_index_flat_verified_identity(
 bool block_index_projection_bind_saved_flat(
     struct block_index_projection *bip,
     const struct block_index_flat_identity *identity);
+bool block_index_projection_bind_saved_flat_state(
+    struct block_index_projection *bip,
+    const struct block_index_flat_identity *identity,
+    struct main_state *state);
 /* True only when the verified flat identity is projection-bound and its
  * dirty journal contains a well-formed row for hash at height. Used by the
  * boot ladder to distinguish a recoverable stale flat tip from corruption. */
