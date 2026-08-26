@@ -1100,3 +1100,13 @@ AGENT_IMPACT_RULE("app/controllers/src/transaction_type_catalog.c|app/controller
  * to the lint gates. The replay itself needs the sanitizer binaries and lives
  * in `make fuzz-replay`, not here. */
 AGENT_IMPACT_RULE("lib/test/fuzz_seeds/ARTIFACT_VERDICTS.txt|lib/test/fuzz_seeds/p2p/*|lib/test/fuzz_seeds/*/*.bin", "make_lint_gates")
+/* [lane: docs/work + tools/dev cruft purge] The work-directory index and every
+ * page it lists. check_markdown_links.sh scans ALL tracked Markdown and fails
+ * on a relative link that does not resolve, and docs/work/README.md is the
+ * index that must name every tracked file in this directory — so deleting or
+ * renaming a page here breaks the gate from a file nobody edited. Only a
+ * handful of individual docs/work pages were mapped before (fast-path,
+ * fail-safe-architecture, UX_PLAN, WIRE_COMPILE_CACHE), which meant a lane
+ * that retired any OTHER page could take a green targeted run and a red
+ * `make lint`. The whole directory maps to the lint group for that reason. */
+AGENT_IMPACT_RULE("docs/work/README.md|docs/work/*.md|docs/work/*/*.md", "make_lint_gates")

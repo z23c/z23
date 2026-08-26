@@ -52,7 +52,7 @@ citation, `git log --follow -- docs/work/<name>.md` recovers older intent.
 | [`MARKETPLACE_PLAN.md`](./MARKETPLACE_PLAN.md) | PLAN | owner directive: on-chain P2P ZSLP/ZCL marketplace (same-chain single-tx swap + cross-chain HTLC) over the existing ZSWP/ZSLP primitives; application protocol only, no consensus surface |
 | [`MARKETPLACE_NEXT.md`](./MARKETPLACE_NEXT.md) | PLAN | post-metaverse-MVP ordered checklist: two-laptop Tor market test, `zmarket_buy` end-to-end settlement wiring, ZC23 distribution design (owner decision gate) |
 | [`MARKET_ONION_DELIVERY.md`](./MARKET_ONION_DELIVERY.md) | DESIGN | B5 onion-routed chunk delivery: offer v2 endpoint_type=onion wire, `/market/chunk` onion route, session-binding replacement, stub fail-closed policy, and the honest non-goals (timing, gossip metadata) |
-| [`ZC23_DISTRIBUTION_OPTIONS.md`](./ZC23_DISTRIBUTION_OPTIONS.md) | DESIGN | Phase C1 owner-decision options: PoP naming, distribution model, earn-for-publishing mechanics, supply shape, and the six-point C2 decision list; decides nothing itself |
+| [`ZC23_DISTRIBUTION_OPTIONS.md`](./ZC23_DISTRIBUTION_OPTIONS.md) | RETAINED | the Phase C1 menu; C2 chose from it and `ZC23_DISTRIBUTION_RULES.md` §2 cites option **2A** by number, so the numbering stays as-is |
 | [`shielded-history-importer.md`](./shielded-history-importer.md) | LIVE | reference for the shipped `-import-complete-shielded` operational cure; operational-vs-sovereign trust-mode split |
 | [`CONSENSUS-STATE-BUNDLE.md`](./CONSENSUS-STATE-BUNDLE.md) | LIVE | naming/ownership authority for `zcl.consensus_state_bundle.v1` |
 | [`fresh-start-seam.md`](./fresh-start-seam.md) | DESIGN | why a genuinely bare boot (empty datadir, isolated `$HOME`, no flags) reaches no state source and folds zero blocks: the two independent seams, every state source and the exact predicate that refuses it, and why the install gate is NOT circular at HEAD |
@@ -66,11 +66,10 @@ citation, `git log --follow -- docs/work/<name>.md` recovers older intent.
 | [`refold-fold-rate-bottlenecks.md`](./refold-fold-rate-bottlenecks.md) | DESIGN | from-genesis refold fold-rate bottlenecks + fix order |
 | [`tip-durability-collapse.md`](./tip-durability-collapse.md) | DESIGN | rationale of record for `coins_kv` as sole live UTXO author |
 | [`wt-rom-fetch-engine.md`](./wt-rom-fetch-engine.md) | DESIGN | ROM-bundle fetch engine (client side of ROM delivery): trust model + open items |
-| [`wt-s7-2-1-metaverse.md`](./wt-s7-2-1-metaverse.md) | PLAN | owner-directed S7.2.1 usability and consolidation lane over the existing Space/Scout foundation |
 | [`os-substrate-plan.md`](./os-substrate-plan.md) | DESIGN | OS-substrate three-rung plan (shell-out removal, `os_proc` shim, sandbox facade) |
 | [`os/A1-authority-receipt-idiom.md`](./os/A1-authority-receipt-idiom.md) | DESIGN | the Law-7 privileged-transition authority-receipt idiom, cited by `tools/lint/check_privileged_transition_receipt.sh` |
 | [`os/A4-noise-transport-p1.md`](./os/A4-noise-transport-p1.md) | DESIGN | the Noise v2 P2P transport implementation contract |
-| [`os/A6-adaptive-client-puzzle.md`](./os/A6-adaptive-client-puzzle.md) | DESIGN | load-adaptive client-puzzle primitive design (not yet built) |
+| [`os/A6-adaptive-client-puzzle.md`](./os/A6-adaptive-client-puzzle.md) | LIVE | the load-adaptive client-puzzle admission primitive, shipped as `lib/net/src/puzzle.c` + `lib/net/include/net/puzzle.h` (test group `puzzle`) |
 | [`NAT_AND_ONION_TRANSPORT.md`](./NAT_AND_ONION_TRANSPORT.md) | DESIGN | onion-as-universal-rendezvous / clearnet-as-fast-path transport design notes (NAT traversal, onion hosting, package swarm); P2P-layer policy only, no consensus surface |
 | [`DIRECT_TRANSPORT.md`](./DIRECT_TRANSPORT.md) | DESIGN | UDP datagram fast path + PEX-lite clearnet discovery + disclosure posture (`onion`\|`clearnet`\|`none`) + `zses:v1` session invites; application plane only, no consensus surface; complements NAT_AND_ONION_TRANSPORT |
 | [`palace-design.md`](./palace-design.md) | DESIGN | code-legibility layer: file/group purpose, `code room`, the three P1/P2/P3 lint gates (§3 cited by `test_make_lint_gates.c`) |
@@ -112,26 +111,34 @@ means still-open, RETAINED means deliberately kept for a by-name citation);
 `check-error-doc-refs` (it only reads string literals) but it is still a
 load-bearing pointer for the next reader.
 
-That third check is not theoretical. Seven files already deleted from this
-directory are still named from code, tests, and other docs, and nothing fired:
+That third check is not theoretical. Files already deleted from this directory
+are still named from code, tests, `.def` tables and other docs, and no gate
+fires on any of them. Run this and read the output — never a count written
+here, which rots the moment someone deletes or repoints one:
 
 ```sh
-git grep -ho 'docs/work/[A-Za-z0-9_./-]*\.md' -- '*.c' '*.h' '*.md' '*.sh' Makefile |
+git grep -ho 'docs/work/[A-Za-z0-9_./-]*\.md' \
+    -- '*.c' '*.h' '*.md' '*.sh' '*.def' '*.txt' Makefile |
   sort -u | while read -r p; do
     git ls-files --error-unmatch "$p" >/dev/null 2>&1 || echo "DANGLING: $p"
   done
 ```
 
-At the time of writing that prints seven names — two under a since-removed
-`archive/` subdirectory (lb1-wiring-design, sovereign-service-roadmap) plus
-`coin-backfill-repair.md`, `parallel-state-compiler.md`,
-`sync-organism-map.md`, `worktree-cleanup-2026-07-16.md` and
-`wt-phase4c-block-index-projection.md` — cited from
-`app/jobs/src/stage_repair_coin_backfill*.c`,
-`app/jobs/include/jobs/psc_range_fold.h`,
-`lib/storage/include/storage/coins_kv.h`, `tools/scripts/worktree_gc.sh`,
-`docs/AGENT_TRAPS.md` and six test files. Run the check before deleting, and
-repoint or drop the citation in the same commit.
+`.def` and `.txt` matter: `app/controllers/include/controllers/agent_impact_rules.def`
+and the `tools/lint/*_baseline.txt` files cite these paths too, and a grep
+limited to the C, header, Markdown and shell suffixes misses them.
+
+Two kinds come back, and only one is a defect:
+
+- **Deliberate** — a deleted file named so the reader can recover it with
+  `git log --follow`, or a trap note naming a doc so nobody re-creates it.
+  These read as recovery hints and carry their reason inline; leave them.
+- **Load-bearing and broken** — a source or test comment that points the next
+  reader at a design section by number for a file that is gone. The section
+  numbers survive only in git history, so the pointer is now a dead end.
+
+Run the check before deleting, and repoint or drop the citation in the same
+commit — retiring a doc is not finished until its callers are gone too.
 
 ## Active control documents
 
@@ -198,6 +205,9 @@ Each assignment lives at `docs/work/wt<N>-<slug>.md` and contains:
 | [`zcode-selfhost-validation-ledger.json`](./zcode-selfhost-validation-ledger.json) | EVIDENCE | zcl.zcode_selfhost_validation_ledger.v1 snapshot |
 | [`zcode-selfhost-evidence/`](./zcode-selfhost-evidence/) | EVIDENCE | frozen born-red replay artifacts: 15 paired json+log files (foundation-replay, codec-cursor, package-dev, package-registry, score-receipt, sha3-foundation) |
 | [`zcode-selfhost-evidence/born-red-base-foundation-replay.json`](./zcode-selfhost-evidence/born-red-base-foundation-replay.json) | EVIDENCE | born-red replay artifact (base-foundation-replay json half of paired proof) |
+| [`WIRE_COMPILE_CACHE.md`](./WIRE_COMPILE_CACHE.md) | DESIGN | Commons WIRE lane working note: transfer framing, POINTER/PROVIDER discovery records, and the cross-node compile cache; subordinate to `../spec/c23-package-format.md`, which wins on any disagreement |
+| [`CODEX_HANDOFF.md`](./CODEX_HANDOFF.md) | LIVE | the executor contract Codex works under: division of authority, ownership, and the never-do list; read cold alongside `../../AGENTS.md` and `../DEVELOPING.md` |
+| [`READY1_DESCRIPTOR_GATE.md`](./READY1_DESCRIPTOR_GATE.md) | DESIGN | READY=1 and onion descriptor publication: the cycle-3 ordered-loop halt investigation, not a threshold change |
 | [`zcode-selfhost-evidence/born-red-base-foundation-replay.log`](./zcode-selfhost-evidence/born-red-base-foundation-replay.log) | EVIDENCE | born-red replay artifact (base-foundation-replay log half of paired proof) |
 | [`zcode-selfhost-evidence/born-red-codec-cursor.json`](./zcode-selfhost-evidence/born-red-codec-cursor.json) | EVIDENCE | born-red replay artifact (codec-cursor json half of paired proof) |
 | [`zcode-selfhost-evidence/born-red-codec-cursor.log`](./zcode-selfhost-evidence/born-red-codec-cursor.log) | EVIDENCE | born-red replay artifact (codec-cursor log half of paired proof) |
