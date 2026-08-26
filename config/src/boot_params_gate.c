@@ -123,3 +123,77 @@ boot_params_gate_evaluate(const struct app_context *ctx,
              missing, ctx->params_dir ? ctx->params_dir : "(unset)");
     return BOOT_PARAMS_GATE_EMBEDDED;
 }
+
+bool boot_params_gate_on_load_refused(const char *params_dir)
+{
+    /* The files WERE present, so the gate above said PRESENT and the loader
+     * ran; it then refused them for a pinned SHA-512 mismatch or a parse
+     * failure. sapling_init_params has already dropped every refused byte —
+     * nothing that failed its pin is parsed or installed — and that does not
+     * change here.
+     *
+     * What changes is the conclusion. The loader used to declare a PERMANENT
+     * params_missing blocker meaning "proof validation cannot proceed" for the
+     * life of the process, conflating the same two capabilities this file
+     * separates for the absent case. VALIDATION reads only the verifying-key
+     * prefix, compiled in and SHA-256 pinned; it was never on disk, so a
+     * corrupt download cannot touch it. PROVING needs the ~777 MB only the
+     * file carries. A refused file therefore costs exactly what an absent one
+     * costs and is named the same way — with a reason saying REFUSED rather
+     * than absent, because an operator re-fetches for one and installs for the
+     * other.
+     *
+     * Consensus-safe: the installed keys equal the verifying-key prefix a good
+     * file would have yielded (pinned by test_params_vk_embedded), so no proof
+     * is accepted that a fully-parameterised node would reject. */
+    const char *dir = params_dir ? params_dir : "(unset)";
+    const struct chain_params *cp = chain_params_get();
+    bool mainnet = cp && strcmp(cp->strNetworkID, "main") == 0;
+
+    if (sapling_install_embedded_vks()) {
+        if (mainnet) {
+            struct blocker_record rec;
+            if (blocker_init(&rec, "shielded_spend_unavailable", "crypto.params",
+                             BLOCKER_PERMANENT,
+                             "zk proving parameters were REFUSED (failed their "
+                             "pinned SHA-512, or did not parse) — this node "
+                             "validates every shielded proof from its "
+                             "compiled-in verifying keys but cannot create "
+                             "shielded transactions; re-fetch the parameter "
+                             "files, see docs/PARAMS.md") &&
+                blocker_set(&rec) == 0)
+                event_emitf(EV_OPERATOR_NEEDED, 0,
+                            "check=shielded_spend_unavailable reason=params_refused dir=%s",
+                            dir);
+        }
+        LOG_WARN("crypto.params",
+                 "[crypto.params] zk parameter files in %s were REFUSED "
+                 "(pinned SHA-512 mismatch or parse failure); none of their "
+                 "bytes were used. Falling back to the compiled-in verifying "
+                 "keys: shielded proof VALIDATION is active and this node "
+                 "syncs and serves normally. Creating shielded transactions "
+                 "needs the files re-fetched (docs/PARAMS.md).", dir);
+        return true;
+    }
+
+    /* Disk parameters refused AND the compiled-in keys failed their own
+     * integrity check: no key material this process is willing to verify
+     * against. Here "proof validation cannot proceed" is literally true. */
+    if (mainnet) {
+        struct blocker_record rec;
+        if (blocker_init(&rec, "params_missing", "crypto.params",
+                         BLOCKER_PERMANENT,
+                         "mainnet zk parameters were refused AND the compiled-in "
+                         "verifying keys failed their integrity check — proof "
+                         "validation cannot proceed") &&
+            blocker_set(&rec) == 0)
+            event_emitf(EV_OPERATOR_NEEDED, 0,
+                        "check=params_missing reason=disk_refused_and_embedded_bad dir=%s",
+                        dir);
+    }
+    LOG_WARN("crypto.params",
+             "[crypto.params] zk params refused from %s and the compiled-in "
+             "verifying keys also failed integrity — proof validation BLOCKED "
+             "(params_missing); operator paged once", dir);
+    return false;
+}

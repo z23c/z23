@@ -17,21 +17,47 @@
  *      a patched binary and proofs being verified against an attacker's key,
  *      so it is tested against the production comparison, not a copy of it.
  *
- * Test 1 needs a real parameter directory and SKIPs cleanly without one —
- * which is the normal case on a machine that never had them, and the whole
- * point of the change under test. Tests 2-4 need nothing.
+ *   1b. A parameter directory that is PRESENT but corrupt is refused whole,
+ *      strands no published key, and falls back to the compiled-in ones.
+ *      Section 1b builds a real planted-corruption fixture (one flipped byte
+ *      in a private copy of sprout-verifying.key, the three big files by
+ *      symlink) and drives the production loader over it.
+ *
+ * Sections 1 and 1b need a real parameter directory and SKIP cleanly without
+ * one — which is the normal case on a machine that never had them, and the
+ * whole point of the change under test. Sections 2-4 need nothing.
  */
 
 #include "test/test_core.h"
 
+#include "chain/chainparams.h"
+#include "chain/chainparamsbase.h"
+#include "core/serialize.h"
+#include "primitives/transaction.h"
+#include "sapling/bls12_381.h"
+#include "sapling/bn254.h"
+#include "sapling/constants.h"
 #include "sapling/params_init.h"
 #include "sapling/params_vk_embedded.h"
+#include "sapling/sapling.h"
 #include "sapling/sapling_prover.h"
+#include "sapling/sprout.h"
+#include "validation/check_transaction.h"
+#include "validation/contextual_check_tx.h"
 
+#include <errno.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
+
+/* Canonical mainnet height-241 JoinSplit transaction (txid 55c6c3a2…48fd),
+ * shared with test_sprout_phgr13_kat.c. A real pre-Sapling shielded proof from
+ * the real chain — the strongest positive available without a prover. */
+extern const unsigned char g_fixture_tx_sprout_241[];
+extern const size_t g_fixture_tx_sprout_241_len;
 
 #define VK_CHECK(name, expr) do { \
     printf("params_vk_embedded: %s... ", (name)); \
@@ -59,6 +85,119 @@ static const char *const vk_source_file[ZCL_EMBEDDED_VK_COUNT] = {
     "sprout-groth16.params",
     "sprout-verifying.key",
 };
+
+/* Scratch root. Never /tmp when a project scratch dir is available, and never
+ * inside a parameter directory or a datadir. */
+static bool vk_scratch_root(char *out, size_t cap)
+{
+    const char *t = getenv("TMPDIR");
+    if (t && *t) { snprintf(out, cap, "%s", t); return true; }
+    const char *home = getenv("HOME");
+    if (home && *home) {
+        snprintf(out, cap, "%s/.local/state/zclassic23/scratch", home);
+        /* Best-effort mkdir -p of the two leaf components. */
+        char p[1024];
+        snprintf(p, sizeof(p), "%s/.local/state/zclassic23", home);
+        (void)mkdir(p, 0700);
+        (void)mkdir(out, 0700);
+        return access(out, W_OK) == 0;
+    }
+    snprintf(out, cap, "/tmp");
+    return true;
+}
+
+/* Compare two verifying keys for exact equality, ic[] included. ic_combs is a
+ * derived precompute and deliberately not compared. */
+static bool vk_equal(const struct groth16_vk *a, const struct groth16_vk *b)
+{
+    if (!a || !b) return false;
+    if (a->ic_len != b->ic_len) return false;
+    if (memcmp(&a->alpha_g1, &b->alpha_g1, sizeof(a->alpha_g1)) != 0) return false;
+    if (memcmp(&a->beta_g2,  &b->beta_g2,  sizeof(a->beta_g2))  != 0) return false;
+    if (memcmp(&a->gamma_g2, &b->gamma_g2, sizeof(a->gamma_g2)) != 0) return false;
+    if (memcmp(&a->delta_g2, &b->delta_g2, sizeof(a->delta_g2)) != 0) return false;
+    if (a->ic_len && (!a->ic || !b->ic)) return false;
+    for (size_t i = 0; i < a->ic_len; i++)
+        if (memcmp(&a->ic[i], &b->ic[i], sizeof(a->ic[i])) != 0) return false;
+    return true;
+}
+
+/* Parse the verifying-key prefix out of a real parameter file, so the test can
+ * compare what a good directory WOULD have installed against what the fallback
+ * did install. Reads only the prefix — never the ~777 MB of proving key. */
+static bool vk_from_real_file(struct groth16_vk *out, const char *path,
+                              size_t prefix_len)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    uint8_t *buf = malloc(prefix_len);
+    if (!buf) { fclose(f); return false; }
+    size_t got = fread(buf, 1, prefix_len, f);
+    fclose(f);
+    bool ok = (got == prefix_len) && groth16_vk_read(out, buf, prefix_len);
+    free(buf);
+    return ok;
+}
+
+/* The PHGR13 public inputs of the canonical fixture's single JoinSplit, lifted
+ * off the parsed transaction so a direct-verifier negative control uses the
+ * same values the consensus path used. */
+struct vk_js_inputs {
+    uint8_t proof[PHGR_PROOF_SIZE];
+    uint8_t rt[32], h_sig[32], mac1[32], mac2[32];
+    uint8_t nf1[32], nf2[32], cm1[32], cm2[32];
+    uint64_t vpub_old, vpub_new;
+    bool valid;
+};
+
+/* Run the canonical mainnet height-241 JoinSplit transaction through the
+ * production contextual consensus entry point and return its verdict.
+ * Requires chain_params_select(CHAIN_MAIN). Optionally hands back the
+ * JoinSplit's public inputs. */
+static bool vk_contextual_ok(struct vk_js_inputs *js_out)
+{
+    if (js_out) js_out->valid = false;
+
+    struct byte_stream stream;
+    stream_init_from_data(&stream, g_fixture_tx_sprout_241,
+                          g_fixture_tx_sprout_241_len);
+    struct transaction tx;
+    transaction_init(&tx);
+    if (!transaction_deserialize(&tx, &stream)) {
+        transaction_free(&tx);
+        return false;
+    }
+
+    const struct chain_params *cp = chain_params_get();
+    /* The local deferral policy would otherwise skip shielded proofs below a
+     * height; this test is about whether the proof verifies, so run it. */
+    int saved = atomic_exchange(&g_deferred_proof_validation_below_height, -1);
+    struct validation_state st;
+    validation_state_init(&st);
+    bool ok = cp && contextual_check_transaction(&tx, &st, &cp->consensus,
+                                                 241, 100);
+    atomic_store(&g_deferred_proof_validation_below_height, saved);
+
+    if (js_out && tx.num_joinsplit > 0 && tx.v_joinsplit) {
+        const struct js_description *js = &tx.v_joinsplit[0];
+        memcpy(js_out->proof, js->proof, PHGR_PROOF_SIZE);
+        memcpy(js_out->rt, js->anchor.data, 32);
+        memcpy(js_out->mac1, js->macs[0].data, 32);
+        memcpy(js_out->mac2, js->macs[1].data, 32);
+        memcpy(js_out->nf1, js->nullifiers[0].data, 32);
+        memcpy(js_out->nf2, js->nullifiers[1].data, 32);
+        memcpy(js_out->cm1, js->commitments[0].data, 32);
+        memcpy(js_out->cm2, js->commitments[1].data, 32);
+        js_out->vpub_old = (uint64_t)js->vpub_old;
+        js_out->vpub_new = (uint64_t)js->vpub_new;
+        sprout_h_sig(js->random_seed.data, js->nullifiers[0].data,
+                     js->nullifiers[1].data, tx.joinsplit_pubkey.data,
+                     js_out->h_sig);
+        js_out->valid = true;
+    }
+    transaction_free(&tx);
+    return ok;
+}
 
 int test_params_vk_embedded(void);
 int test_params_vk_embedded(void)
@@ -133,6 +272,265 @@ int test_params_vk_embedded(void)
                                memcmp(buf, e->bytes, e->len) == 0);
                 free(buf);
             }
+        }
+    }
+
+    /* ── 1b. A REFUSED parameter directory falls back, strands nothing ──
+     *
+     * The case this section exists for: the four files are present, so the
+     * boot gate says PRESENT and the loader runs, but one of them is corrupt.
+     * Two separate things then have to hold.
+     *
+     *   Refusal is total. sapling_init_params returns false and NOTHING it
+     *   parsed is left published. The fail-closed guards in
+     *   sapling_check_spend/_output/sprout_verify_groth16 read "a NULL VK
+     *   means not ready", so a failure path that leaves a non-NULL pointer to
+     *   freed storage is not a leak — it is a verifier reading freed heap and
+     *   returning whatever that heap says. The pointer is the observable, so
+     *   this asserts on the pointer.
+     *
+     *   Validation survives it. The verifying keys are compiled in and were
+     *   never on disk, so a corrupt download costs the PROVING capability and
+     *   nothing else.
+     *
+     * The scratch directory symlinks the three big files (read-only, and no
+     * copy of 777 MB) and plants ONE flipped bit in a private copy of
+     * sprout-verifying.key. That specific file is the only one whose failure
+     * lands AFTER the three Groth16 keys are parsed, which is exactly the
+     * ordering that used to strand them. ~/.zcash-params is never written. */
+    {
+        const char *home = getenv("HOME");
+        char real_dir[1024];
+        snprintf(real_dir, sizeof(real_dir), "%s/.zcash-params", home ? home : "");
+
+        char probe[1200];
+        snprintf(probe, sizeof(probe), "%s/sprout-verifying.key", real_dir);
+        char scratch_root[1024], scratch[1200];
+        bool have_root = vk_scratch_root(scratch_root, sizeof(scratch_root));
+        snprintf(scratch, sizeof(scratch), "%s/zcl_vk_refused_params_XXXXXX",
+                 scratch_root);
+
+        if (!home || access(probe, R_OK) != 0 || !have_root ||
+            mkdtemp(scratch) == NULL) {
+            printf("params_vk_embedded: refused-directory fallback... SKIP "
+                   "(needs a readable %s to build the planted-corruption "
+                   "fixture)\n", real_dir);
+        } else {
+            /* Three good files by symlink; one corrupt file by copy. */
+            static const char *const link_me[] = {
+                "sapling-spend.params", "sapling-output.params",
+                "sprout-groth16.params",
+            };
+            bool staged = true;
+            for (size_t i = 0; i < 3 && staged; i++) {
+                char src[1200], dst[1400];
+                snprintf(src, sizeof(src), "%s/%s", real_dir, link_me[i]);
+                snprintf(dst, sizeof(dst), "%s/%s", scratch, link_me[i]);
+                staged = (symlink(src, dst) == 0);
+            }
+
+            uint8_t phgr[1449];
+            size_t phgr_len = 0;
+            if (staged) {
+                FILE *f = fopen(probe, "rb");
+                staged = (f != NULL);
+                if (f) { phgr_len = fread(phgr, 1, sizeof(phgr), f); fclose(f); }
+                staged = staged && phgr_len == sizeof(phgr);
+            }
+            if (staged) {
+                /* ONE flipped bit, in the middle of the key material. */
+                phgr[phgr_len / 2] ^= 0x01u;
+                char dst[1400];
+                snprintf(dst, sizeof(dst), "%s/sprout-verifying.key", scratch);
+                FILE *f = fopen(dst, "wb");
+                staged = (f != NULL);
+                if (f) {
+                    staged = (fwrite(phgr, 1, phgr_len, f) == phgr_len);
+                    staged = (fclose(f) == 0) && staged;
+                }
+            }
+            VK_CHECK("planted-corruption fixture staged", staged);
+
+            if (staged) {
+                /* Mainnet: the network where a PHGR13 failure is fatal to the
+                 * load, which is the ordering under test. Restored below so
+                 * this section cannot change the network another group in this
+                 * process is running on. */
+                const struct chain_params *prev = chain_params_get();
+                bool had_prev = (prev != NULL);
+                enum chain_network prev_net = CHAIN_MAIN;
+                if (had_prev) {
+                    if (strcmp(prev->strNetworkID, "test") == 0)
+                        prev_net = CHAIN_TESTNET;
+                    else if (strcmp(prev->strNetworkID, "regtest") == 0)
+                        prev_net = CHAIN_REGTEST;
+                }
+                chain_params_select(CHAIN_MAIN);
+
+                /* Deterministic baseline. Another group in this process may
+                 * have loaded parameters or installed a PHGR13 fixture VK. */
+                sapling_free_params();
+                sprout_phgr_set_vk(NULL);
+
+                VK_CHECK("a corrupt sprout-verifying.key is REFUSED",
+                         !sapling_init_params(scratch));
+                VK_CHECK("a refused directory reports params as NOT loaded",
+                         !sapling_params_loaded());
+
+                /* The publish/free invariant: nothing is published. */
+                VK_CHECK("refused load publishes NO spend VK",
+                         sapling_test_published_spend_vk() == NULL);
+                VK_CHECK("refused load publishes NO output VK",
+                         sapling_test_published_output_vk() == NULL);
+                VK_CHECK("refused load publishes NO sprout-groth16 VK",
+                         sprout_test_published_vk() == NULL);
+                VK_CHECK("refused load publishes NO PHGR13 VK",
+                         sprout_test_published_phgr_vk() == NULL);
+
+#ifdef ZCL_UAF_PROBE
+                /* Opt-in reproducer for the defect the assertions above pin.
+                 * Build with -DZCL_UAF_PROBE and run under valgrind or ASan:
+                 * it drives the exact dereference the production verifier
+                 * performs (bls12_381.c groth16_verify, "struct g1_point vk_x
+                 * = vk->ic[0];") against whatever the refused load left
+                 * published. Against the current code the pointer is NULL and
+                 * nothing is dereferenced; against the pre-fix ordering it
+                 * reported "Invalid read of size 32 ... free'd by
+                 * sapling_init_params", which is a consensus verifier reading
+                 * freed heap. Off by default — a plain run must not depend on
+                 * a checker being present. */
+                {
+                    const struct groth16_vk *pub_vk =
+                        sapling_test_published_spend_vk();
+                    fprintf(stderr, "[uaf-probe] published spend vk=%p\n",
+                            (const void *)pub_vk);
+                    if (pub_vk) {
+                        struct groth16_proof pr;
+                        memset(&pr, 0, sizeof(pr));
+                        uint64_t pub[7][4];
+                        memset(pub, 0, sizeof(pub));
+                        pub[0][0] = 1;
+                        fprintf(stderr, "[uaf-probe] groth16_verify -> %d\n",
+                                (int)groth16_verify(pub_vk, &pr, pub, 7));
+                    }
+                }
+#endif
+
+                /* Fail-closed is therefore still reachable: with nothing
+                 * published the consensus entry points reject. */
+                {
+                    struct sapling_verification_ctx vctx;
+                    sapling_verification_ctx_init(&vctx);
+                    uint8_t cv[32], cm[32], epk[32], zk[192];
+                    memset(cv, 0x11, 32); memset(cm, 0x22, 32);
+                    memset(epk, 0x33, 32); memset(zk, 0x44, 192);
+                    VK_CHECK("with nothing published, check_output rejects",
+                             !sapling_check_output(&vctx, cv, cm, epk, zk));
+                }
+
+                /* The A side of the A/B below: the SAME real mainnet shielded
+                 * transaction, through the SAME production entry point, is
+                 * REJECTED while no verifying key is published. Without this,
+                 * the acceptance after the fallback would not prove that the
+                 * fallback is what made validation work. */
+                VK_CHECK("before the fallback, a real mainnet shielded proof "
+                         "is REJECTED (fail-closed)",
+                         !vk_contextual_ok(NULL));
+
+                /* Now the fallback. */
+                VK_CHECK("embedded VKs install after a refused directory",
+                         sapling_install_embedded_vks());
+                VK_CHECK("fallback arms proof validation",
+                         sapling_params_loaded());
+                VK_CHECK("fallback reports keys as compiled-in",
+                         sapling_vks_are_embedded());
+                VK_CHECK("fallback does NOT arm proving",
+                         !zclassic_sapling_prover_is_ready());
+
+                /* The installed Sapling keys are the SAME keys a good
+                 * parameter directory would have installed — parsed here from
+                 * the real files' prefixes and compared field by field. This
+                 * is the property that makes the fallback consensus-safe: no
+                 * proof is accepted that a fully-parameterised node would
+                 * reject, because the verifier is bit-for-bit identical. */
+                {
+                    struct groth16_vk from_file = {0};
+                    char p[1200];
+                    snprintf(p, sizeof(p), "%s/sapling-spend.params", real_dir);
+                    bool ok = vk_from_real_file(&from_file, p,
+                                                zcl_embedded_vks[0].len);
+                    VK_CHECK("real sapling-spend VK prefix parses", ok);
+                    VK_CHECK("published spend VK == the real file's spend VK",
+                             ok && vk_equal(sapling_test_published_spend_vk(),
+                                            &from_file));
+                    free(from_file.ic);
+
+                    struct groth16_vk out_file = {0};
+                    snprintf(p, sizeof(p), "%s/sapling-output.params", real_dir);
+                    ok = vk_from_real_file(&out_file, p,
+                                           zcl_embedded_vks[1].len);
+                    VK_CHECK("real sapling-output VK prefix parses", ok);
+                    VK_CHECK("published output VK == the real file's output VK",
+                             ok && vk_equal(sapling_test_published_output_vk(),
+                                            &out_file));
+                    free(out_file.ic);
+                }
+
+                /* The B side: the SAME transaction, the SAME entry point, now
+                 * ACCEPTED — against the compiled-in PHGR13 key, which is the
+                 * very key whose file was the one corrupted above. A/B against
+                 * the rejection asserted before the install, so acceptance
+                 * here is attributable to the fallback and nothing else. */
+                {
+                    struct vk_js_inputs js;
+                    VK_CHECK("a REAL mainnet shielded proof validates on the "
+                             "fallback keys", vk_contextual_ok(&js));
+
+                    /* And the verifier is not a rubber stamp: one flipped
+                     * proof byte, same public inputs, must be rejected. Driven
+                     * through sprout_verify_phgr13 rather than the contextual
+                     * path because every byte of the transaction is covered by
+                     * the JoinSplit signature, so a tampered tx would be
+                     * rejected for its signature before the proof was ever
+                     * checked — which would test nothing about the key. */
+                    VK_CHECK("fixture JoinSplit public inputs recovered",
+                             js.valid);
+                    if (js.valid) {
+                        VK_CHECK("the fallback PHGR13 key accepts the real "
+                                 "proof directly",
+                                 sprout_verify_phgr13(js.proof, js.rt,
+                                     js.h_sig, js.mac1, js.mac2, js.nf1,
+                                     js.nf2, js.cm1, js.cm2,
+                                     js.vpub_old, js.vpub_new));
+                        uint8_t bad_proof[PHGR_PROOF_SIZE];
+                        memcpy(bad_proof, js.proof, sizeof(bad_proof));
+                        bad_proof[17] ^= 0x01u;
+                        VK_CHECK("one flipped proof byte is REJECTED by the "
+                                 "fallback PHGR13 key",
+                                 !sprout_verify_phgr13(bad_proof, js.rt,
+                                     js.h_sig, js.mac1, js.mac2, js.nf1,
+                                     js.nf2, js.cm1, js.cm2,
+                                     js.vpub_old, js.vpub_new));
+                    }
+                }
+
+                /* Leave the process as this section found it: nothing loaded,
+                 * so a later group's sapling_init_params does a real load. */
+                sapling_free_params();
+                sprout_phgr_set_vk(NULL);
+                if (had_prev) chain_params_select(prev_net);
+            }
+
+            /* Remove the fixture. Only files this section created. */
+            for (size_t i = 0; i < 3; i++) {
+                char dst[1400];
+                snprintf(dst, sizeof(dst), "%s/%s", scratch, link_me[i]);
+                (void)unlink(dst);
+            }
+            char dst[1400];
+            snprintf(dst, sizeof(dst), "%s/sprout-verifying.key", scratch);
+            (void)unlink(dst);
+            (void)rmdir(scratch);
         }
     }
 

@@ -12,6 +12,11 @@ struct groth16_vk;
 
 void sprout_set_vk(struct groth16_vk *vk);
 
+#ifdef ZCL_TESTING
+/* See sapling_test_published_spend_vk in sapling.h. */
+const struct groth16_vk *sprout_test_published_vk(void);
+#endif
+
 /* Compute h_sig = BLAKE2b-256("ZcashComputehSig", randomSeed || nf0 || nf1 || joinSplitPubKey) */
 void sprout_h_sig(const uint8_t random_seed[32],
                   const uint8_t nf0[32],

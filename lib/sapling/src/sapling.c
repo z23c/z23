@@ -530,6 +530,10 @@ void sapling_set_spend_vk(struct groth16_vk *vk) { sapling_spend_vk = vk; }
 void sapling_set_output_vk(struct groth16_vk *vk) { sapling_output_vk = vk; }
 
 #ifdef ZCL_TESTING
+/* Published-VK read-back (see sapling.h). */
+const struct groth16_vk *sapling_test_published_spend_vk(void) { return sapling_spend_vk; }
+const struct groth16_vk *sapling_test_published_output_vk(void) { return sapling_output_vk; }
+
 /* ── Test-ONLY deterministic RNG hook (see sapling.h) ─────────────
  *
  * Compiled ONLY under -DZCL_TESTING. The production node binary does

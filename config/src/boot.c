@@ -306,32 +306,12 @@ void *load_params_thread(void *arg)
         printf("Verification keys loaded.\n");
         return NULL;
     }
-
-    /* A failed background param load must NOT silently downgrade to a
-     * one-line warning while proof_validate idles forever. The synchronous
-     * pre-check in boot_step_init_crypto_and_state already confirmed the files
-     * EXIST before CRYPTO_READY advanced, so reaching here on mainnet means the
-     * files are present-but-corrupt (SHA-512/parse failure). Name a PERMANENT
-     * blocker and page the operator ONCE; the running node then surfaces this
-     * named blocker via proof_validate's params gate (JOB_BLOCKED) instead of a
-     * silent JOB_IDLE — a stall that is always named, never a quiet stop. */
-    const struct chain_params *cp = chain_params_get();
-    if (cp && strcmp(cp->strNetworkID, "main") == 0) {
-        struct blocker_record rec;
-        if (blocker_init(&rec, "params_missing", "crypto.params",
-                         BLOCKER_PERMANENT,
-                         "mainnet zk verification keys present but failed to load "
-                         "(SHA-512/parse) — proof validation cannot proceed") &&
-            blocker_set(&rec) == 0)
-            event_emitf(EV_OPERATOR_NEEDED, 0,
-                        "check=params_missing dir=%s", g_params_dir_buf);
-        LOG_WARN("crypto.params",
-                 "[crypto.params] zk params failed to load from %s — proof "
-                 "validation BLOCKED (params_missing); operator paged once",
-                 g_params_dir_buf);
-    } else {
-        fprintf(stderr, "Warning: Failed to load ZK params (non-mainnet)\n");
-    }
+    /* Present-but-refused. Absent and refused cost the same one capability,
+     * so both are decided in boot_params_gate.c; it installs the compiled-in
+     * verifying keys, names the capability, and tells us whether shielded
+     * proof VALIDATION is armed. */
+    if (boot_params_gate_on_load_refused(g_params_dir_buf))
+        atomic_store(&g_params_loaded, true);
     return NULL;
 }
 
