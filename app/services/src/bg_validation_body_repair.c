@@ -4,6 +4,16 @@
  * Disk damage is handed to the existing condition engine, while this reader
  * stays on the same height until an independently hash-checked body arrives. */
 
+// repair-rung-ok:test_bg_validation_reverify — physical media can corrupt an
+// already-written block body, so there is no producing writer to fix. The
+// cited test corrupts the indexed position and proves that progress resumes
+// only after a real replacement body deserializes and matches the active hash.
+//
+// one-result-type-ok:validation-state-and-durable-repair-note — this file adds
+// no independent service result. A read either yields the exact active block,
+// or publishes BG_VALIDATION_PAUSED plus a generation/hash-bound durable note;
+// invalid arguments and unprovable active identity are logged fail-closed.
+
 #include "bg_validation_internal.h"
 
 #include "jobs/reducer_frontier.h"
