@@ -1090,3 +1090,7 @@ AGENT_IMPACT_RULE("lib/util/src/util.c|lib/util/include/util/util.h|lib/test/src
  * native-API groups ride along because a new root ALIAS plus a new `zcode`
  * child move both the root and branch menu budgets. */
 AGENT_IMPACT_RULE("tools/command/native_zcode_node_command.c|tools/command/native_zcode_join.c|tools/command/native_zcode_join.h|lib/util/src/util.c|lib/util/include/util/util.h|lib/test/src/test_zcode_node_command.c", "zcode_node_command command_registry_catalog native_api_contract encoding make_lint_gates")
+/* Transaction-type catalog: the chain-shaped/non-chain classification every
+ * READY mutating leaf must carry, its two .def tables, and the contract test
+ * that refuses an unclassified one. */
+AGENT_IMPACT_RULE("app/controllers/src/transaction_type_catalog.c|app/controllers/include/controllers/transaction_type_catalog.h|app/controllers/include/controllers/transaction_type_nonchain_commands.def|app/controllers/include/controllers/transaction_type*.def|lib/test/src/test_api_transaction_types.c", "api command_registry_catalog native_api_contract make_lint_gates")
