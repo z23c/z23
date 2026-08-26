@@ -880,6 +880,99 @@ int t_no_stray_root_files(void)
     return failures;
 }
 
+/* check-lint-gate-wiring — the umbrella's two files must agree. Adding a lint
+ * gate is a TWO-FILE operation (Makefile target + LINT_GATES line; then the
+ * gate_command() case entry in tools/lint/run_lint.sh, because the parallel
+ * driver execs each gate's script directly and never reads the Make recipe).
+ * Three gates landed with only the first half on 2026-08-26 and `make lint`
+ * was FATAL (exit 2) tree-wide, reporting NO gate results at all, until they
+ * were wired. Proof here:
+ * (1) the real tree passes — the umbrella is fully wired right now;
+ * (2) the gate's own --selftest passes, which is what proves it can still FAIL:
+ *     it plants a listed-but-unwired gate, a wired-but-unlisted one, a listed
+ *     name with no Make target, a table entry naming a missing script, and an
+ *     unreadable LINT_GATES, and asserts each is rejected AND named, plus a
+ *     positive control so none of that can be an unconditional failure;
+ * (3) pointed at a tree with no run_lint.sh it FAILS rather than reporting a
+ *     vacuous clean — the direction that matters for a gate that reads two
+ *     files and could find neither;
+ * (4) the gate is itself in the Makefile LINT_GATES list, in run_lint.sh's own
+ *     case table, and in DEFENSIVE_CODING.md's canonical block. (1) cannot
+ *     cover this: a lane that drops the gate from the list removes the only
+ *     thing that would have noticed. */
+int t_lint_gate_wiring_gate(void)
+{
+    int failures = 0;
+    char path[PATH_MAX];
+    char *makefile_buf = NULL;
+    char *doc_buf = NULL;
+    char *driver_buf = NULL;
+
+    int baseline_rc = run_gate_script(LINT_GATE_WIRING_SCRIPT_REL, NULL);
+    int selftest_rc = run_gate_script_selftest(LINT_GATE_WIRING_SCRIPT_REL);
+
+    /* An empty directory has neither Makefile nor driver. Fail-closed means
+     * this is an error, never "nothing to check, therefore clean".
+     * Deliberately mkdtemp and NOT repo_path("test-tmp/..."): this check runs
+     * in the pooled REALROOT lane, so it must not write into the worktree
+     * another lane's gate is scanning. */
+    char empty_dir[PATH_MAX];
+    const char *tmp_root = getenv("TMPDIR");
+    if (tmp_root == NULL || tmp_root[0] == '\0') {
+        tmp_root = "/tmp";
+    }
+    int empty_ready = -1;
+    if ((size_t)snprintf(empty_dir, sizeof(empty_dir),
+                         "%s/_lint_gate_wiring_empty_XXXXXX",
+                         tmp_root) < sizeof(empty_dir) &&
+        mkdtemp(empty_dir) != NULL) {
+        empty_ready = 0;
+    }
+    int no_tree_rc =
+        empty_ready == 0
+            ? run_gate_script_with_env(LINT_GATE_WIRING_SCRIPT_REL,
+                                       "ZCL_GATE_WIRING_ROOT", empty_dir)
+            : -1;
+    if (empty_ready == 0) {
+        (void)rmdir(empty_dir);
+    }
+
+    int makefile_wired = 0;
+    if (repo_path(path, sizeof(path), "Makefile") == 0 &&
+        read_entire_file(path, &makefile_buf) == 0) {
+        makefile_wired =
+            strstr(makefile_buf, "check-lint-gate-wiring:") != NULL &&
+            strstr(makefile_buf, "check-lint-gate-wiring \\") != NULL;
+    }
+    int driver_wired = 0;
+    if (repo_path(path, sizeof(path), "tools/lint/run_lint.sh") == 0 &&
+        read_entire_file(path, &driver_buf) == 0) {
+        driver_wired = strstr(driver_buf, "check-lint-gate-wiring)") != NULL;
+    }
+    int doc_wired = 0;
+    if (repo_path(path, sizeof(path), "docs/DEFENSIVE_CODING.md") == 0 &&
+        read_entire_file(path, &doc_buf) == 0) {
+        doc_wired = strstr(doc_buf, "check-lint-gate-wiring") != NULL;
+    }
+
+    TEST("[lint-gate] check-lint-gate-wiring: real umbrella is fully wired, "
+         "selftest proves each desync class trips, missing tree fails closed, "
+         "gate is itself in LINT_GATES + the case table + the doc block") {
+        ASSERT(baseline_rc == 0);
+        ASSERT(selftest_rc == 0);
+        ASSERT(empty_ready == 0);
+        ASSERT(no_tree_rc != 0);
+        ASSERT(makefile_wired);
+        ASSERT(driver_wired);
+        ASSERT(doc_wired);
+        PASS();
+    } _test_next:;
+    free(makefile_buf);
+    free(driver_buf);
+    free(doc_buf);
+    return failures;
+}
+
 #else  /* !ZCL_TESTING */
 
 /* Without ZCL_TESTING the lint-gate self-tests compile to nothing; this
