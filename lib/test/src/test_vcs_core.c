@@ -24,12 +24,14 @@
  * All work happens under ./test-tmp/ (project no-/tmp convention). */
 
 #include "test/test_core.h"
+#include "test/public_shape_fixture.h"
 
 #include "vcs/vcs.h"
 #include "vcs/vcs_commit.h"
 #include "vcs/vcs_index.h"
 #include "vcs/vcs_manifest.h"
 #include "vcs/vcs_object.h"
+#include "vcs/package_content.h"
 #include "vcs/package_manifest.h"
 #include "vcs/package_recipe.h"
 #include "vcs/package_swarm.h"
@@ -154,19 +156,81 @@ static bool vc_transport_file(
     return false;
 }
 
+/* Store the same carrier with only its root-committed LICENSE bytes replaced.
+ * This constructs a hostile-but-content-valid download that creation now
+ * refuses, so checkout must independently enforce local license policy. */
+static bool vc_store_transport_with_license(
+    struct vcs_package_store *store,
+    const struct vcs_source_package_transport *transport,
+    const uint8_t *license, size_t license_len, uint8_t root_out[32])
+{
+    struct vcs_package_manifest manifest;
+    vcs_package_manifest_init(&manifest);
+    size_t count = vcs_source_package_transport_file_count(transport);
+    bool ok = true;
+    for (size_t i = 0; ok && i < count; i++) {
+        const char *path = NULL;
+        const uint8_t *bytes = NULL;
+        size_t len = 0;
+        ok = vcs_source_package_transport_file_at(
+            transport, i, &path, &bytes, &len);
+        if (ok && strcmp(path, VCS_SOURCE_PACKAGE_LICENSE_PATH) == 0) {
+            bytes = license;
+            len = license_len;
+        }
+        if (ok)
+            ok = vcs_package_content_add_file(
+                &manifest, path, VCS_PACKAGE_MODE_FILE, bytes, len);
+    }
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    uint8_t admitted[32];
+    ok = ok && vcs_package_manifest_root(&manifest, root_out) &&
+         vcs_package_manifest_serialize(&manifest, &wire, &wire_len) &&
+         vcs_package_store_put_manifest(store, wire, wire_len, admitted) ==
+             VCS_PACKAGE_STORE_OK &&
+         memcmp(admitted, root_out, 32) == 0;
+    free(wire);
+    for (size_t i = 0; ok && i < manifest.count; i++) {
+        const struct vcs_package_file *file = &manifest.files[i];
+        const uint8_t *bytes = NULL;
+        size_t len = 0;
+        if (strcmp(file->path, VCS_SOURCE_PACKAGE_LICENSE_PATH) == 0) {
+            bytes = license;
+            len = license_len;
+        } else {
+            ok = vc_transport_file(transport, file->path, &bytes, &len);
+        }
+        for (uint32_t chunk = 0; ok && chunk < file->chunk_count; chunk++) {
+            size_t off = (size_t)chunk * VCS_PACKAGE_CHUNK_BYTES;
+            size_t take = len - off;
+            if (take > VCS_PACKAGE_CHUNK_BYTES)
+                take = VCS_PACKAGE_CHUNK_BYTES;
+            ok = vcs_package_store_put_chunk(
+                     store, root_out, file->path, chunk, bytes + off, take) ==
+                 VCS_PACKAGE_STORE_OK;
+        }
+    }
+    vcs_package_manifest_free(&manifest);
+    return ok;
+}
+
 static bool vc_file_matches(const char *dir, const char *rel,
                             const char *expect);
 
 static int t_source_bundle(void)
 {
     int failures = 0;
-    char source[512], consumer[512], sharded_consumer[512];
+    char source[512], unlicensed_source[512], consumer[512];
+    char sharded_consumer[512];
     char package_datadir[512], incomplete_datadir[512];
     char package_workspace[512];
     char package_destination[512], refused_destination[512];
     char incomplete_destination[512];
     char materialized[512], marker[512];
     test_make_tmpdir(source, sizeof(source), "vcs_core", "bundle-source");
+    test_make_tmpdir(unlicensed_source, sizeof(unlicensed_source),
+                     "vcs_core", "bundle-unlicensed-source");
     test_make_tmpdir(consumer, sizeof(consumer), "vcs_core", "bundle-consumer");
     test_make_tmpdir(sharded_consumer, sizeof(sharded_consumer),
                      "vcs_core", "bundle-sharded-consumer");
@@ -188,7 +252,7 @@ static int t_source_bundle(void)
                    package_destination);
 
     VC_CHECK("source bundle fixture files",
-             vc_write(source, "LICENSE", "Apache-2.0\n") &&
+             vc_write(source, "LICENSE", TEST_LICENSE_TEXT_MIT) &&
              vc_write(source, "src/a.c", "int a(void) { return 1; }\n") &&
              vc_write(source, "include/a.h", "int a(void);\n") &&
              vc_write(source, "run.sh", "#!/bin/sh\ntouch should-not-exist\n") &&
@@ -287,6 +351,38 @@ static int t_source_bundle(void)
         vcs_zcode_lane_receipt_serialize(&lane, lane_wire) ==
             VCS_ZCODE_DEV_OK;
     memset(lane_secret, 0, sizeof(lane_secret));
+
+    uint8_t unlicensed_root[32];
+    VC_CHECK("source package proprietary-license fixture captures",
+             vc_write(unlicensed_source, "LICENSE",
+                      "Copyright 2026. All rights reserved.\n") &&
+                 vc_write(unlicensed_source, "src/a.c",
+                          "int a(void) { return 9; }\n") &&
+                 vcs_tree_capture_path(unlicensed_source, unlicensed_root) ==
+                     VCS_OK);
+    struct vcs_zcode_lane_receipt_v1 unlicensed_lane = lane;
+    memcpy(unlicensed_lane.source_root, unlicensed_root, 32);
+    unlicensed_lane.created_unix = 2;
+    uint8_t unlicensed_seed[32], unlicensed_secret[32];
+    uint8_t unlicensed_pubkey[32], unlicensed_lane_wire[
+        VCS_ZCODE_LANE_WIRE_BYTES];
+    memset(unlicensed_seed, 0x67, sizeof(unlicensed_seed));
+    ed25519_keypair(unlicensed_pubkey, unlicensed_secret, unlicensed_seed);
+    bool unlicensed_lane_ok = vcs_zcode_lane_receipt_seal(
+            &unlicensed_lane, unlicensed_secret, unlicensed_pubkey) ==
+            VCS_ZCODE_DEV_OK &&
+        vcs_zcode_lane_receipt_serialize(
+            &unlicensed_lane, unlicensed_lane_wire) == VCS_ZCODE_DEV_OK;
+    memset(unlicensed_secret, 0, sizeof(unlicensed_secret));
+    struct vcs_source_package_transport unlicensed_transport;
+    vcs_source_package_transport_init(&unlicensed_transport);
+    VC_CHECK("source package creation refuses proprietary LICENSE text",
+             unlicensed_lane_ok &&
+                 !vcs_source_package_transport_build(
+                     unlicensed_source, unlicensed_root, unlicensed_pubkey,
+                     unlicensed_lane_wire, sizeof(unlicensed_lane_wire),
+                     &unlicensed_transport));
+    vcs_source_package_transport_free(&unlicensed_transport);
     uint8_t wrong_signer[32];
     memset(wrong_signer, 0x77, sizeof(wrong_signer));
     struct vcs_source_package_transport unauthorized_transport;
@@ -400,6 +496,18 @@ static int t_source_bundle(void)
     }
     VC_CHECK("source carrier chunks complete through the ordinary store",
              stored);
+    static const uint8_t proprietary_license[] =
+        "Copyright 2026. All rights reserved.\n";
+    uint8_t proprietary_root[32];
+    VC_CHECK("source carrier hostile license fixture enters inert CAS",
+             vc_store_transport_with_license(
+                 carrier_store, &transport, proprietary_license,
+                 sizeof(proprietary_license) - 1u, proprietary_root));
+    VC_CHECK("source carrier checkout independently refuses proprietary text",
+             vcs_source_package_checkout(
+                 carrier_store, proprietary_root, first_root, lane_pubkey,
+                 package_workspace, refused_destination, NULL) ==
+                 VCS_SOURCE_PACKAGE_CHECKOUT_SHAPE);
     struct vcs_source_package_checkout_metrics checkout_metrics;
     VC_CHECK("source carrier reconstructs source and offline inputs without Git",
              vcs_source_package_checkout(
@@ -555,6 +663,7 @@ static int t_source_bundle(void)
     test_rm_rf_recursive(package_workspace);
     test_rm_rf_recursive(package_datadir);
     test_rm_rf_recursive(consumer);
+    test_rm_rf_recursive(unlicensed_source);
     test_rm_rf_recursive(source);
     return failures;
 }

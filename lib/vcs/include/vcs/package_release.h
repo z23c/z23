@@ -178,6 +178,14 @@ bool vcs_package_release_license_allowed(const char *license);
 bool vcs_package_release_license_text_matches(const char *license,
                                               const uint8_t *text, size_t len);
 
+/* True when `text` matches at least one member of the frozen permissive
+ * allowlist. Source carriers have root-committed LICENSE bytes but no
+ * separate release-envelope SPDX field, so their creation, public-hosting,
+ * and checkout gates use this shared authority rather than duplicating or
+ * weakening the release policy. Pure query; never logs. */
+bool vcs_package_release_license_text_allowed(const uint8_t *text,
+                                              size_t len);
+
 /* Validate every field against the v1 grammars above. Does NOT look at the
  * signature. Returns VCS_PACKAGE_RELEASE_OK or the first failed rule. */
 enum vcs_package_release_error vcs_package_release_validate(

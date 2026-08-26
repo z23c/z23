@@ -44,6 +44,7 @@
 #include "base/hex.h"
 #include "chain/chainparams.h"
 #include "core/uint256.h"
+#include "crypto/ed25519.h"
 #include "keys/key.h"
 #include "keys/key_io.h"
 #include "script/standard.h"
@@ -55,6 +56,8 @@
 #include "vcs/package_service.h"
 #include "vcs/package_store.h"
 #include "vcs/package_swarm_node.h"
+#include "vcs/source_package_transport.h"
+#include "vcs/zcode_lane.h"
 #include "vcs/zcode_work_context.h"
 
 #include <stdint.h>
@@ -70,6 +73,7 @@
 } while (0)
 
 #define PS_MAX_FILES 6u
+#define PS_DAY 20500
 
 /* Apache-2.0's own opening, which contains nothing MIT says. Enough to
  * prove the rule reads the text rather than the filename. */
@@ -159,6 +163,33 @@ static bool ps_keypair(uint8_t seed, struct privkey *sk, struct pubkey *pk)
     sk->fCompressed = true;
     return privkey_get_pubkey(sk, pk) &&
            pk->size == COMPRESSED_PUBLIC_KEY_SIZE;
+}
+
+static void ps_key(uint8_t seed, uint8_t out[33]);
+
+static bool ps_lane_wire(uint8_t seed,
+                         uint8_t wire[VCS_ZCODE_LANE_WIRE_BYTES])
+{
+    struct vcs_zcode_lane_receipt_v1 lane = {
+        .schema_version = VCS_ZCODE_DEV_VERSION,
+        .lane = VCS_ZCODE_LANE_PROVEN,
+        .created_unix = 1,
+    };
+    memset(lane.source_root, 0x11, sizeof(lane.source_root));
+    memset(lane.task_root, 0x22, sizeof(lane.task_root));
+    memset(lane.candidate_root, 0x33, sizeof(lane.candidate_root));
+    memset(lane.proof_policy_root, 0x44, sizeof(lane.proof_policy_root));
+    memset(lane.proof_set_root, 0x55, sizeof(lane.proof_set_root));
+    memset(lane.prior_receipt_root, 0x66, sizeof(lane.prior_receipt_root));
+    uint8_t key_seed[32], secret[32], pubkey[32];
+    memset(key_seed, seed, sizeof(key_seed));
+    ed25519_keypair(pubkey, secret, key_seed);
+    bool ok = vcs_zcode_lane_receipt_seal(&lane, secret, pubkey) ==
+                  VCS_ZCODE_DEV_OK &&
+              vcs_zcode_lane_receipt_serialize(&lane, wire) ==
+                  VCS_ZCODE_DEV_OK;
+    memset(secret, 0, sizeof(secret));
+    return ok;
 }
 
 static bool ps_reward_address(char *out, size_t out_size)
@@ -469,6 +500,107 @@ static int t_ps_license_text(void)
     PS_CHECK("SPDX identifiers off the frozen allowlist cannot be released",
              all_rejected);
 
+    ps_node_close(&n);
+    test_rm_rf_recursive(n.datadir);
+    return failures;
+}
+
+/* Source carriers do not have a release-envelope SPDX field. Their
+ * root-committed LICENSE bytes must therefore match the same frozen
+ * permissive policy directly; a valid self-signed lane receipt must not turn
+ * proprietary or copyleft source into public swarm content. */
+static int t_ps_source_bundle_license(void)
+{
+    int failures = 0;
+    struct ps_node n;
+    if (!ps_node_open(&n, "source-license")) {
+        printf("  zcode_public_shape: source-license node open... FAIL\n");
+        return 1;
+    }
+
+    uint8_t lane_wire[VCS_ZCODE_LANE_WIRE_BYTES];
+    size_t marker_len = 0;
+    const uint8_t *marker =
+        vcs_source_package_transport_marker(&marker_len);
+    PS_CHECK("source bundle: valid PROVEN lane fixture",
+             ps_lane_wire(0x91, lane_wire));
+
+    static const struct {
+        const char *name;
+        const char *text;
+    } refused[] = {
+        {"GPL", "GNU GENERAL PUBLIC LICENSE\nVersion 3, 29 June 2007\n"},
+        {"proprietary", "Copyright 2026. All rights reserved.\n"},
+        {"placeholder", "MIT\n"},
+    };
+    uint8_t refused_root[32] = {0};
+    for (size_t i = 0; i < sizeof(refused) / sizeof(refused[0]); i++) {
+        const struct ps_file files[] = {
+            {VCS_SOURCE_PACKAGE_LICENSE_PATH, refused[i].text, 0},
+            {VCS_SOURCE_PACKAGE_AUTHORITY_PATH, "authority", 0},
+            {VCS_SOURCE_PACKAGE_LANE_PATH, (const char *)lane_wire,
+             sizeof(lane_wire)},
+            {VCS_SOURCE_PACKAGE_MARKER_PATH, (const char *)marker, marker_len},
+        };
+        struct ps_pkg p;
+        char label[160];
+        bool stored = ps_pkg_build(&p, files, 4) &&
+                      ps_pkg_store(n.store, &p, NULL);
+        if (i == 0 && stored)
+            memcpy(refused_root, p.root, sizeof(refused_root));
+        snprintf(label, sizeof(label),
+                 "source bundle: %s LICENSE is refused by name",
+                 refused[i].name);
+        PS_CHECK(label, stored && ps_refused(
+            n.store, p.root, "license-text-not-allowlisted"));
+        ps_pkg_free(&p);
+    }
+
+    uint8_t key[33];
+    ps_key(0x19, key);
+    const uint64_t peer = 9019u;
+    PS_CHECK("source bundle: engine peer added",
+             vcs_swarm_engine_peer_add(n.engine, peer, key));
+    PS_CHECK("source bundle: refused roots are absent from ANNOUNCE",
+             vcs_swarm_engine_announce_to(n.engine, peer) == 0);
+
+    struct vcs_package_swarm_message want;
+    memset(&want, 0, sizeof(want));
+    want.type = VCS_PACKAGE_SWARM_WANT;
+    memcpy(want.body.want.package_root, refused_root, sizeof(refused_root));
+    want.body.want.object_kind = VCS_PACKAGE_SWARM_OBJECT_MANIFEST;
+    want.body.want.file_index = UINT32_MAX;
+    want.body.want.chunk_index = UINT32_MAX;
+    want.body.want.request_id = 0x616161u;
+    uint8_t frame[256];
+    size_t frame_len = 0;
+    PS_CHECK("source bundle: refused WANT serializes",
+             vcs_package_swarm_serialize(&want, frame, sizeof(frame),
+                                         &frame_len));
+    struct vcs_swarm_frame_result res = vcs_swarm_engine_handle_frame(
+        n.engine, peer, frame, frame_len, PS_DAY, 1);
+    PS_CHECK("source bundle: refused WANT yields no bytes and no peer penalty",
+             res.reply == NULL && !res.disconnect_peer &&
+                 res.penalty == VCS_SWARM_PENALTY_NONE && res.rule &&
+                 strcmp(res.rule, "license-text-not-allowlisted") == 0);
+    free(res.reply);
+
+    const struct ps_file allowed_files[] = {
+        {VCS_SOURCE_PACKAGE_LICENSE_PATH, TEST_LICENSE_TEXT_MIT, 0},
+        {VCS_SOURCE_PACKAGE_AUTHORITY_PATH, "authority", 0},
+        {VCS_SOURCE_PACKAGE_LANE_PATH, (const char *)lane_wire,
+         sizeof(lane_wire)},
+        {VCS_SOURCE_PACKAGE_MARKER_PATH, (const char *)marker, marker_len},
+    };
+    struct ps_pkg allowed;
+    PS_CHECK("source bundle: allowlisted MIT carrier remains public",
+             ps_pkg_build(&allowed, allowed_files, 4) &&
+                 ps_pkg_store(n.store, &allowed, NULL) &&
+                 ps_is_shape(n.store, allowed.root,
+                             VCS_PACKAGE_PUBLIC_SOURCE_BUNDLE));
+    PS_CHECK("source bundle: allowlisted carrier reaches ANNOUNCE",
+             vcs_swarm_engine_announce_to(n.engine, peer) >= 1);
+    ps_pkg_free(&allowed);
     ps_node_close(&n);
     test_rm_rf_recursive(n.datadir);
     return failures;
@@ -798,8 +930,6 @@ static int t_ps_dependency_cycle(void)
 
 /* ── 8. the same rule, through a real engine ──────────────────────── */
 
-#define PS_DAY 20500
-
 static void ps_key(uint8_t seed, uint8_t out[33])
 {
     memset(out, 0, 33);
@@ -901,6 +1031,7 @@ int test_zcode_public_shape(void)
     int failures = 0;
     failures += t_ps_release_binding();
     failures += t_ps_license_text();
+    failures += t_ps_source_bundle_license();
     failures += t_ps_stale_and_mutated();
     failures += t_ps_dependency_closure();
     failures += t_ps_dependency_cycle();
