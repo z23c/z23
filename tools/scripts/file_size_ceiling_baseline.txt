@@ -74,7 +74,7 @@ app/views/src/explorer_pages_view.c 819
 # the phrase, minting one, printing it once) landed in its own
 # config/src/boot_wallet_phrase.c instead of here, and took 25 lines of
 # existing wiring out of boot.c with it.
-config/src/boot.c 4331
+config/src/boot.c 4278
 config/src/boot_bundle_fetch.c 905
 config/src/boot_index.c 851
 config/src/boot_mint_anchor.c 808
