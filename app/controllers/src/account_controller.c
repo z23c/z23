@@ -340,49 +340,15 @@ void zcl_native_handle_account_unsuspend(const struct zcl_command_request *reque
 }
 
 /* ── Hot-swappable leaves ──────────────────────────────────────────────────
- * Read-only ACCOUNT projections: one account, the index, and who the caller is.
- *
- * The mutating siblings in this file are absent from both tables. Their
- * bytes are compiled into the module, but the loader refuses to re-point
- * any leaf missing from this file's row in config/hotswap_swappable.def. */
-#ifdef ZCL_HOTSWAP_GEN
+ * Read-only ACCOUNT projections: one account, the index, and the caller. Every mutating sibling in this file is
+ * absent from the table; the loader refuses to re-point a leaf that is
+ * missing from this file's row in config/hotswap_swappable.def. */
+#if defined(ZCL_HOTSWAP_GEN) || defined(ZCL_HOTSWAP_MODULE_GEN)
 #define ZCL_HOTSWAP_PROBE_LEAF "app.account.list"
-#include "hotswap/hotswap.h"
-static const struct zcl_hotswap_leaf_replacement k_account_leaves[] = {
-    { "app.account.show", zcl_native_handle_account_show },
-    { "app.account.list", zcl_native_handle_account_list },
-    { "app.account.whoami", zcl_native_handle_account_whoami },
-};
-ZCL_HOTSWAP_EXPORT_LEAVES(k_account_leaves,
-                          sizeof(k_account_leaves) / sizeof(k_account_leaves[0]))
-#endif /* ZCL_HOTSWAP_GEN */
-
-#ifdef ZCL_HOTSWAP_MODULE_GEN
-#include "hotswap/hotswap_module.h"
-#include <stdio.h>
-static const struct zcl_hotswap_leaf k_account_module_leaves[] = {
-    { "app.account.show", zcl_native_handle_account_show },
-    { "app.account.list", zcl_native_handle_account_list },
-    { "app.account.whoami", zcl_native_handle_account_whoami },
-};
-/* Structural health hook: a table that lost a name or a body would
- * otherwise publish a leaf that dispatches into nothing. */
-static bool account_module_selftest(char *error, size_t error_cap)
-{
-    const size_t n = sizeof(k_account_module_leaves) /
-                     sizeof(k_account_module_leaves[0]);
-    for (size_t i = 0; i < n; i++) {
-        if (!k_account_module_leaves[i].name ||
-            !k_account_module_leaves[i].name[0] ||
-            !k_account_module_leaves[i].fn) {
-            if (error && error_cap)
-                (void)snprintf(error, error_cap,
-                               "account leaf %zu has no name or no body",
-                               i);
-            return false;
-        }
-    }
-    return true;
-}
-ZCL_HOTSWAP_MODULE_LEAVES(k_account_module_leaves, account_module_selftest)
-#endif /* ZCL_HOTSWAP_MODULE_GEN */
+#include "hotswap/hotswap_register.h"
+ZCL_HOTSWAP_LEAVES_BEGIN(account)
+ZCL_HOTSWAP_LEAF("app.account.show", zcl_native_handle_account_show)
+ZCL_HOTSWAP_LEAF("app.account.list", zcl_native_handle_account_list)
+ZCL_HOTSWAP_LEAF("app.account.whoami", zcl_native_handle_account_whoami)
+ZCL_HOTSWAP_LEAVES_END(account)
+#endif

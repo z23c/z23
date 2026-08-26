@@ -402,55 +402,14 @@ void zcl_native_handle_store_collect(
 }
 
 /* ── Hot-swappable leaves ──────────────────────────────────────────────────
- * The two READ-ONLY buyer projections: what this node's store sells, and this
- * buyer's own purchase ledger. Both handlers already carry the command
- * registry's request/reply signature, so they are bound directly and no
- * bridge trampoline is involved.
- *
- * The three mutating siblings in this file — app.store.order, .pay and
- * .collect — are deliberately absent from both tables. Their recompiled
- * bytes still ride along inside the module, but the loader refuses to
- * re-point any leaf that is missing from this file's row in
- * config/hotswap_swappable.def, so a swap can never reach them. */
-#ifdef ZCL_HOTSWAP_GEN
+ * Read-only STORE BUYER projections: the catalog and this buyer's ledger. Every mutating sibling in this file is
+ * absent from the table; the loader refuses to re-point a leaf that is
+ * missing from this file's row in config/hotswap_swappable.def. */
+#if defined(ZCL_HOTSWAP_GEN) || defined(ZCL_HOTSWAP_MODULE_GEN)
 #define ZCL_HOTSWAP_PROBE_LEAF "app.store.catalog"
-#include "hotswap/hotswap.h"
-static const struct zcl_hotswap_leaf_replacement k_store_buyer_leaves[] = {
-    { "app.store.catalog", zcl_native_handle_store_catalog },
-    { "app.store.purchases", zcl_native_handle_store_purchases },
-};
-ZCL_HOTSWAP_EXPORT_LEAVES(
-    k_store_buyer_leaves,
-    sizeof(k_store_buyer_leaves) / sizeof(k_store_buyer_leaves[0]))
-#endif /* ZCL_HOTSWAP_GEN */
-
-#ifdef ZCL_HOTSWAP_MODULE_GEN
-#include "hotswap/hotswap_module.h"
-#include <stdio.h>
-static const struct zcl_hotswap_leaf k_store_buyer_module_leaves[] = {
-    { "app.store.catalog", zcl_native_handle_store_catalog },
-    { "app.store.purchases", zcl_native_handle_store_purchases },
-};
-/* Structural health hook, run before the loader publishes this module. A
- * table that lost a name or a body would otherwise publish a leaf that
- * dispatches into nothing. */
-static bool store_buyer_module_selftest(char *error, size_t error_cap)
-{
-    const size_t n = sizeof(k_store_buyer_module_leaves) /
-                     sizeof(k_store_buyer_module_leaves[0]);
-    for (size_t i = 0; i < n; i++) {
-        if (!k_store_buyer_module_leaves[i].name ||
-            !k_store_buyer_module_leaves[i].name[0] ||
-            !k_store_buyer_module_leaves[i].fn) {
-            if (error && error_cap)
-                (void)snprintf(error, error_cap,
-                               "store buyer leaf %zu has no name or no body",
-                               i);
-            return false;
-        }
-    }
-    return true;
-}
-ZCL_HOTSWAP_MODULE_LEAVES(k_store_buyer_module_leaves,
-                          store_buyer_module_selftest)
-#endif /* ZCL_HOTSWAP_MODULE_GEN */
+#include "hotswap/hotswap_register.h"
+ZCL_HOTSWAP_LEAVES_BEGIN(store_buyer)
+ZCL_HOTSWAP_LEAF("app.store.catalog", zcl_native_handle_store_catalog)
+ZCL_HOTSWAP_LEAF("app.store.purchases", zcl_native_handle_store_purchases)
+ZCL_HOTSWAP_LEAVES_END(store_buyer)
+#endif

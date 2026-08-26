@@ -627,45 +627,13 @@ void zcl_native_handle_shop_init(const struct zcl_command_request *request,
 }
 
 /* ── Hot-swappable leaves ──────────────────────────────────────────────────
- * Read-only SHOP status projection.
- *
- * The mutating siblings in this file are absent from both tables. Their
- * bytes are compiled into the module, but the loader refuses to re-point
- * any leaf missing from this file's row in config/hotswap_swappable.def. */
-#ifdef ZCL_HOTSWAP_GEN
+ * Read-only SHOP status projection. Every mutating sibling in this file is
+ * absent from the table; the loader refuses to re-point a leaf that is
+ * missing from this file's row in config/hotswap_swappable.def. */
+#if defined(ZCL_HOTSWAP_GEN) || defined(ZCL_HOTSWAP_MODULE_GEN)
 #define ZCL_HOTSWAP_PROBE_LEAF "app.shop.status"
-#include "hotswap/hotswap.h"
-static const struct zcl_hotswap_leaf_replacement k_shop_leaves[] = {
-    { "app.shop.status", zcl_native_handle_shop_status },
-};
-ZCL_HOTSWAP_EXPORT_LEAVES(k_shop_leaves,
-                          sizeof(k_shop_leaves) / sizeof(k_shop_leaves[0]))
-#endif /* ZCL_HOTSWAP_GEN */
-
-#ifdef ZCL_HOTSWAP_MODULE_GEN
-#include "hotswap/hotswap_module.h"
-#include <stdio.h>
-static const struct zcl_hotswap_leaf k_shop_module_leaves[] = {
-    { "app.shop.status", zcl_native_handle_shop_status },
-};
-/* Structural health hook: a table that lost a name or a body would
- * otherwise publish a leaf that dispatches into nothing. */
-static bool shop_module_selftest(char *error, size_t error_cap)
-{
-    const size_t n = sizeof(k_shop_module_leaves) /
-                     sizeof(k_shop_module_leaves[0]);
-    for (size_t i = 0; i < n; i++) {
-        if (!k_shop_module_leaves[i].name ||
-            !k_shop_module_leaves[i].name[0] ||
-            !k_shop_module_leaves[i].fn) {
-            if (error && error_cap)
-                (void)snprintf(error, error_cap,
-                               "shop leaf %zu has no name or no body",
-                               i);
-            return false;
-        }
-    }
-    return true;
-}
-ZCL_HOTSWAP_MODULE_LEAVES(k_shop_module_leaves, shop_module_selftest)
-#endif /* ZCL_HOTSWAP_MODULE_GEN */
+#include "hotswap/hotswap_register.h"
+ZCL_HOTSWAP_LEAVES_BEGIN(shop)
+ZCL_HOTSWAP_LEAF("app.shop.status", zcl_native_handle_shop_status)
+ZCL_HOTSWAP_LEAVES_END(shop)
+#endif
