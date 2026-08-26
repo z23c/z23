@@ -7,6 +7,10 @@ changing the repository. Detailed procedure belongs in
 maintainer's hosted node belongs only in
 [`docs/HANDOFF.md`](./docs/HANDOFF.md).
 
+The disposition this repository expects from an agent — act when the rails
+hold, and build the missing rail rather than remembering to avoid it — is
+[`docs/CODE_FEARLESSLY.md`](./docs/CODE_FEARLESSLY.md).
+
 ## North Star
 
 Z23 exists to make useful software abundant without taking control away from
