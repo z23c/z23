@@ -59,6 +59,8 @@
 #include "net/onion_service.h"
 #include "net/onion_peer_merge.h"
 #include "net/onion_ratelimit.h"
+#include "net/tor_integration.h"
+#include "json/json.h"
 #include "util/path_check.h"
 #include "znam/znam.h"
 
@@ -84,6 +86,8 @@
 #define HOST_A "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion"
 #define HOST_B "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.onion"
 #define HOST_C "cccccccccccccccccccccccccccccccccccccccccccccccccccccccc.onion"
+#define PH_HOST_UNKNOWN "22222222222222222222222222222222222222222222222222222222.onion"
+#define PH_HOST_STATED  "33333333333333333333333333333333333333333333333333333333.onion"
 #define HOST_SELF "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz.onion"
 
 #define OD_CHECK(label, cond) do { \
@@ -177,6 +181,40 @@ static int od_parse_relay_hints(void)
     OD_CHECK("each entry keeps its OWN apps advertisement, as CSV",
              n == 2 && strcmp(hints[0].apps, "yardsale,blog") == 0 &&
              hints[1].apps[0] == '\0');
+
+    /* THE SCHEMA HELD. A node that does not know a peer's port or height
+     * now emits JSON null for it (net/onion_service.h) rather than the
+     * mainnet literal it used to invent. The key stays in place, so this
+     * parser — the tree's own consumer of the document, and the one that
+     * decides whether an absence gets re-laundered into a fact when we
+     * re-serve the row — reads it back as 0 = UNKNOWN and stores nothing.
+     * The clearnet_ip -> clearnet_port adjacency connman's string scan
+     * depends on is untouched by the change and is asserted below. */
+    static const char NULLS[] =
+        "{\"nodes\":["
+        "{\"onion\":\"" OD_HOST_A "\",\"name\":\"\",\"apps\":[\"blog\"],"
+        "\"port\":null,\"services\":0,"
+        "\"height\":null,\"last_seen\":1799999000,\"version\":\"relay\","
+        "\"self\":false,\"clearnet_ip\":\"\",\"clearnet_port\":0},"
+        "{\"onion\":\"" OD_HOST_B "\",\"name\":\"\",\"apps\":[],"
+        "\"port\":39150,\"services\":0,"
+        "\"height\":7,\"last_seen\":1799998000,\"version\":\"relay\","
+        "\"self\":false,\"clearnet_ip\":\"\",\"clearnet_port\":0}"
+        "],\"count\":2}";
+    memset(hints, 0, sizeof(hints));
+    n = onion_directory_parse_relay_hints(NULLS, NULL, hints, 16);
+    OD_CHECK("a null port/height does not truncate the scan",
+             n == 2 && strcmp(hints[0].hostname, OD_HOST_A) == 0 &&
+             strcmp(hints[1].hostname, OD_HOST_B) == 0);
+    OD_CHECK("a null port reads back as UNKNOWN, never as a number",
+             n == 2 && hints[0].port == 0);
+    OD_CHECK("a null height reads back as UNKNOWN",
+             n == 2 && hints[0].height == 0);
+    OD_CHECK("a null neighbour does not bleed into the next object",
+             n == 2 && hints[1].port == 39150 && hints[1].height == 7);
+    OD_CHECK("everything else on a null-carrying row still parses",
+             n == 2 && hints[0].last_seen == 1799999000 &&
+             strcmp(hints[0].apps, "blog") == 0);
 
     /* Junk app ids are dropped, never fatal — the hostname and the honest
      * ids around the junk survive, exactly the hostname scan's posture. */
@@ -1093,6 +1131,199 @@ static int od_test_self_clearnet(const char *datadir)
     return failures;
 }
 
+/* ── 8c. the two fields a stranger ACTS on: port and height ────── */
+
+/* MEASURED LIVE, 2026-08-26, from the first-party onion seed that
+ * core/chainparams/src/chainparams.c hardcodes as the door for a Tor-only
+ * stranger with no contacts. Its own self row said:
+ *
+ *   {"onion":"5wvfod...cqd.onion","port":8033,"height":0,"self":true}
+ *
+ * The node was listening on :8055 (`-port=8055` in its own /proc cmdline)
+ * and its landing page reported height 3,229,378 in the same minute, and
+ * every peer row in that document also said port 8033, height 0 — so the
+ * defect was systemic across the list, not a quirk of the self row. (The
+ * landing page's number is itself the unfiltered MAX(height); the
+ * connected tip was two lower. Both are pinned below.)
+ *
+ * Both fields were compiled-in constants: the self INSERT bound the
+ * literals `8033` and `0`, and learn() substituted 8033 for any
+ * advertisement that carried no port. Nothing measured either.
+ *
+ * The cost is asymmetric and that is why absence beats a default: each
+ * onion dial costs a cold node up to 60 s of blocking Tor round-trip, so
+ * one wrong port spends a stranger's whole bootstrap budget proving the
+ * only door it had is dead — while an honest null costs nothing and
+ * leaves the hostname, which is what actually bootstraps, intact.
+ *
+ * Four links, each pinned separately: the pure port rule, the height
+ * read, what register_self WRITES (including over an existing row — the
+ * clause whose absence would have made every source fix invisible on a
+ * live seed), and what learn() stores for an absence. What the renderers
+ * EMIT is pinned end-to-end through the real router in section 10. */
+static int od_test_port_and_height(const char *datadir)
+{
+    int failures = 0;
+
+    /* ── the pure port rule ── */
+    struct tor_onion_port_map pm;
+
+    memset(&pm, 0, sizeof(pm));
+    pm.p2p_route_installed = true;
+    pm.p2p_virtual_port = 8055;
+    OD_CHECK("an installed P2P route publishes the port it forwards",
+             onion_directory_self_port_rule(&pm) == 8055);
+
+    /* The exact live case: the node is NOT on the mainnet default. */
+    OD_CHECK("the published port is the node's own, never nDefaultPort",
+             onion_directory_self_port_rule(&pm) != 8033);
+
+    memset(&pm, 0, sizeof(pm));
+    pm.p2p_route_installed = false;
+    pm.p2p_route_expected = true;
+    pm.p2p_virtual_port = 8055;
+    OD_CHECK("a P2P route that is not installed publishes no port",
+             onion_directory_self_port_rule(&pm) == 0);
+
+    /* An ephemeral (no -onion-persist) identity gets no second port
+     * mapping at all, so there is nothing on this onion to dial. */
+    memset(&pm, 0, sizeof(pm));
+    pm.persistent_identity = false;
+    pm.p2p_virtual_port = 8055;
+    OD_CHECK("an ephemeral identity has no dialable P2P port to offer",
+             onion_directory_self_port_rule(&pm) == 0);
+
+    memset(&pm, 0, sizeof(pm));
+    pm.p2p_route_installed = true;
+    pm.p2p_virtual_port = 80;
+    OD_CHECK("the HTTP virtual port is never published as a P2P port",
+             onion_directory_self_port_rule(&pm) == 0);
+
+    memset(&pm, 0, sizeof(pm));
+    pm.p2p_route_installed = true;
+    pm.p2p_virtual_port = 0;
+    OD_CHECK("a zero virtual port is unknown, not a port",
+             onion_directory_self_port_rule(&pm) == 0);
+
+    OD_CHECK("a NULL snapshot is unknown, never a default",
+             onion_directory_self_port_rule(NULL) == 0);
+
+    /* ── the height read ── */
+    sqlite3 *db = od_open(datadir);
+    if (!db) { printf("onion_directory: cannot open fixture db\n"); return 1; }
+
+    OD_CHECK("a node with no blocks table reports UNKNOWN, not zero",
+             onion_directory_chain_height_db(db) == -1);
+    OD_CHECK("a NULL handle reports UNKNOWN",
+             onion_directory_chain_height_db(NULL) == -1);
+
+    /* The production schema (app/models/src/database_schema.c), including
+     * the partial index this read is meant to use. */
+    sqlite3_exec(db,
+        "CREATE TABLE IF NOT EXISTS blocks ("
+        "hash BLOB PRIMARY KEY,height INTEGER NOT NULL,"
+        "prev_hash BLOB NOT NULL,version INTEGER NOT NULL,"
+        "merkle_root BLOB NOT NULL,time INTEGER NOT NULL,"
+        "bits INTEGER NOT NULL,nonce BLOB NOT NULL,"
+        "solution BLOB NOT NULL,chain_work BLOB NOT NULL,"
+        "status INTEGER NOT NULL DEFAULT 0)",
+        NULL, NULL, NULL);
+    sqlite3_exec(db,
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_blocks_height"
+        " ON blocks(height) WHERE status >= 3", NULL, NULL, NULL);
+
+    OD_CHECK("an empty blocks table is UNKNOWN, not height zero",
+             onion_directory_chain_height_db(db) == -1);
+
+    sqlite3_exec(db,
+        "INSERT INTO blocks VALUES(x'01',0,x'',4,x'',0,0,x'',x'',x'',3),"
+        "                        (x'02',1,x'',4,x'',0,0,x'',x'',x'',5),"
+        "                        (x'03',2,x'',4,x'',0,0,x'',x'',x'',3)",
+        NULL, NULL, NULL);
+    OD_CHECK("the height is the highest CONNECTED block",
+             onion_directory_chain_height_db(db) == 2);
+
+    /* Headers we hold but have not connected are not a height anyone can
+     * be SERVED from. The live seed's landing page reported 3229378 off an
+     * unfiltered MAX(height) while the node's connected tip was two lower;
+     * this is that gap, pinned. */
+    sqlite3_exec(db,
+        "INSERT INTO blocks VALUES(x'04',9,x'',4,x'',0,0,x'',x'',x'',1)",
+        NULL, NULL, NULL);
+    OD_CHECK("an unconnected header does NOT raise the published height",
+             onion_directory_chain_height_db(db) == 2);
+    /* Same one answer for every page and document this onion serves —
+     * /status.json reads it through the same function. */
+    OD_CHECK("an unconnected header is not counted twice over",
+             od_scalar(db, "SELECT MAX(height) FROM blocks", -1) == 9);
+
+    /* ── what register_self WRITES ── */
+    onion_service_set_address(HOST_SELF);   /* publishes our own row */
+
+    OD_CHECK("the self row publishes the node's REAL connected height",
+             od_scalar(db, "SELECT height FROM peer_directory WHERE "
+                           "onion_address='" HOST_SELF "'", -1) == 2);
+    /* With no Tor process there is no installed P2P route, so there is no
+     * port to publish — and the row says so instead of guessing 8033. */
+    OD_CHECK("the self row publishes no port rather than the old literal",
+             od_scalar(db, "SELECT port FROM peer_directory WHERE "
+                           "onion_address='" HOST_SELF "'", -1) == 0);
+
+    /* THE CLAUSE THAT MAKES THE FIX REACH A LIVE SEED. port/height used to
+     * be INSERT-only, and the self row never expires, so on any node past
+     * its first refresh round a corrected value could never land. Move the
+     * chain forward and re-run the round: the EXISTING row must follow. */
+    sqlite3_exec(db,
+        "INSERT INTO blocks VALUES(x'05',3,x'',4,x'',0,0,x'',x'',x'',3)",
+        NULL, NULL, NULL);
+    struct onion_directory_refresh_stats st;
+    OD_CHECK("a second round completes",
+             onion_service_directory_refresh(&st));
+    OD_CHECK("the UPSERT carries the new height onto the EXISTING self row",
+             od_scalar(db, "SELECT height FROM peer_directory WHERE "
+                           "onion_address='" HOST_SELF "'", -1) == 3);
+
+    /* ── what learn() stores for an ABSENCE ── */
+    OD_CHECK("hearsay with no port is accepted",
+             onion_service_directory_learn(PH_HOST_UNKNOWN, 0, 0, 0, NULL));
+    OD_CHECK("hearsay with no port stores UNKNOWN, not the mainnet literal",
+             od_scalar(db, "SELECT port FROM peer_directory WHERE "
+                           "onion_address='" PH_HOST_UNKNOWN "'", -1) == 0);
+    OD_CHECK("hearsay with no height stores UNKNOWN",
+             od_scalar(db, "SELECT height FROM peer_directory WHERE "
+                           "onion_address='" PH_HOST_UNKNOWN "'", -1) == 0);
+    /* A port a peer actually stated is kept, whatever its value: the rule
+     * is "do not invent", not "do not believe". */
+    OD_CHECK("a stated port is stored as stated",
+             onion_service_directory_learn(PH_HOST_STATED, 39150, 77, 0, NULL) &&
+             od_scalar(db, "SELECT port FROM peer_directory WHERE "
+                           "onion_address='" PH_HOST_STATED "'", -1) == 39150);
+
+    /* The dial-candidate reader's own documented contract — "the advertised
+     * P2P port; 0 when unknown" — was violated by the 8033 substitution
+     * upstream of it. */
+    struct onion_dial_candidate cand[8];
+    memset(cand, 0, sizeof(cand));
+    int nc = onion_service_directory_dial_candidates(cand, 8);
+    int unknown_port_rows = 0, stated_port_rows = 0;
+    for (int i = 0; i < nc; i++) {
+        if (strcmp(cand[i].hostname, PH_HOST_UNKNOWN) == 0 &&
+            cand[i].port == 0)
+            unknown_port_rows++;
+        if (strcmp(cand[i].hostname, PH_HOST_STATED) == 0 &&
+            cand[i].port == 39150)
+            stated_port_rows++;
+    }
+    OD_CHECK("a dial candidate with no known port reports 0, as documented",
+             unknown_port_rows == 1);
+    OD_CHECK("a dial candidate with a stated port keeps it",
+             stated_port_rows == 1);
+
+    sqlite3_close(db);
+    onion_service_set_address(NULL);
+    return failures;
+}
+
 /* ── 5. the ZNAM join ──────────────────────────────────────────── */
 
 static int od_test_name_join(const char *datadir)
@@ -1291,6 +1522,108 @@ static int od_test_served_pages(const char *datadir)
     OD_CHECK("directory.json serves the self row's app advertisement",
              strstr(js, "\"apps\":[\"blog\",\"yardsale\"]") != NULL);
 
+    /* ── THE TWO FIELDS A STRANGER ACTS ON, end to end ──
+     *
+     * Through the REAL router, on the REAL document. The live first-party
+     * seed served {"port":8033,"height":0,"self":true} while listening on
+     * :8055 at height 3,229,378, and every peer row said the same — so
+     * these assert both halves: the self row reports what the node
+     * measured, and a row it knows nothing about says so. */
+    /* The self row sorts first (ORDER BY self DESC), so row 0 is ours.
+     * Bound the self assertions to that object: other rows in this
+     * fixture legitimately carry a port a peer STATED, including 8033,
+     * and the rule being pinned is "never INVENT", not "never report". */
+    char selfobj[1400] = "";
+    {
+        const char *o = strchr(js, '{');            /* envelope */
+        o = o ? strchr(o + 1, '{') : NULL;          /* row 0 */
+        const char *e = o ? strchr(o, '}') : NULL;
+        if (o && e) {
+            size_t len = (size_t)(e - o) + 1;
+            if (len < sizeof(selfobj)) {
+                memcpy(selfobj, o, len);
+                selfobj[len] = '\0';
+            }
+        }
+    }
+    OD_CHECK("the self row is the one under assertion",
+             strstr(selfobj, "\"self\":true") != NULL);
+    OD_CHECK("the self row reports the node's REAL connected height",
+             strstr(selfobj, "\"height\":3,") != NULL);
+    OD_CHECK("the self row never re-publishes the literal height 0",
+             strstr(selfobj, "\"height\":0,") == NULL);
+    OD_CHECK("the self row never invents the mainnet default port",
+             strstr(selfobj, "\"port\":8033") == NULL);
+    OD_CHECK("with no installed P2P route the self row says so, in null",
+             strstr(selfobj, "\"port\":null,") != NULL);
+
+    OD_CHECK("no row in the document claims a confident height of zero",
+             strstr(js, "\"height\":0,") == NULL);
+    /* A port a peer actually stated is served as stated. */
+    OD_CHECK("a stated peer port is served verbatim",
+             strstr(js, "\"port\":39150,") != NULL);
+    /* And a height nobody has told us is an honest null, distinguishable
+     * from a real zero by any reader. */
+    OD_CHECK("an unknown peer height is served as null",
+             strstr(js, "\"height\":null,") != NULL);
+    /* THE SCHEMA HELD, for all three classes of consumer in the tree.
+     *
+     * 1. connman's clearnet STRING SCAN (try_onion_seed_fetch_depth) reads
+     *    clearnet_port within 50 chars of clearnet_ip. Untouched, and
+     *    clearnet_port stays a number. */
+    {
+        const char *cip = strstr(js, "\"clearnet_ip\":");
+        const char *cpt = cip ? strstr(cip, "\"clearnet_port\":") : NULL;
+        OD_CHECK("clearnet_ip is still immediately followed by clearnet_port",
+                 cip && cpt && (size_t)(cpt - cip) < 50);
+        OD_CHECK("clearnet_port is still a number, not a null",
+                 cpt && strncmp(cpt, "\"clearnet_port\":null", 20) != 0);
+    }
+    /* 2. The relay-hint scanner reads the document we just served and gets
+     *    UNKNOWN back for the nulls — an absence relayed onward stays an
+     *    absence instead of being re-minted as a fact at every hop. */
+    {
+        struct onion_relay_hint back[16];
+        memset(back, 0, sizeof(back));
+        int nb = onion_directory_parse_relay_hints(js, NULL, back, 16);
+        bool null_row_read_unknown = false, stated_row_kept = false;
+        for (int i = 0; i < nb; i++) {
+            if (strcmp(back[i].hostname, PH_HOST_UNKNOWN) == 0)
+                null_row_read_unknown =
+                    (back[i].port == 0 && back[i].height == 0);
+            if (strcmp(back[i].hostname, PH_HOST_STATED) == 0)
+                stated_row_kept = (back[i].port == 39150);
+        }
+        OD_CHECK("our own learner reads the served document back",
+                 nb > 0);
+        OD_CHECK("a null we published reads back as UNKNOWN, not a default",
+                 null_row_read_unknown);
+        OD_CHECK("a stated port we published survives the round trip",
+                 stated_row_kept);
+    }
+    /* 3. The STRICT JSON parser (lib/json), which rom_fetch_parse_directory
+     *    runs over this whole document to reach its "artifacts" array.
+     *    Emitting null rather than omitting the key keeps that parse valid
+     *    AND keeps the field readable as an explicit unknown. */
+    {
+        const char *body = strstr(js, "\r\n\r\n");
+        body = body ? body + 4 : NULL;
+        struct json_value root;
+        json_init(&root);
+        bool parsed = body && json_read(&root, body, strlen(body));
+        OD_CHECK("the strict JSON parser accepts the served document",
+                 parsed);
+        const struct json_value *nodes = json_get(&root, "nodes");
+        const struct json_value *row0 =
+            (nodes && nodes->num_children > 0) ? &nodes->children[0] : NULL;
+        OD_CHECK("the strict parser sees an unknown port as an explicit null",
+                 row0 && json_is_null(json_get(row0, "port")));
+        OD_CHECK("the key is PRESENT, not omitted — the shape is unchanged",
+                 row0 && json_get(row0, "port") != NULL &&
+                 json_get(row0, "height") != NULL);
+        json_free(&root);
+    }
+
     /* DIRECTORY HTML — name as the heading, address still rendered. */
     onion_ratelimit_test_reset();
     memset(resp, 0, sizeof(resp));
@@ -1304,6 +1637,13 @@ static int od_test_served_pages(const char *datadir)
              strstr(html, HOST_A) != NULL);
     OD_CHECK("directory html reports our contact record",
              strstr(html, "Reached") != NULL);
+    /* One page must never show what the other refuses to serve: the same
+     * unknown the JSON emits as null is an em dash here, never a number a
+     * visitor would copy into an -addnode line. */
+    const char *self_tr = strstr(html, "<tr class='self'>");
+    OD_CHECK("directory html marks the self row", self_tr != NULL);
+    OD_CHECK("the self row shows an unknown port and the REAL height",
+             self_tr && strstr(self_tr, "<td>&mdash;</td><td>3</td>") != NULL);
 
     onion_service_stop();
 
@@ -1348,6 +1688,10 @@ int test_onion_directory(void)
     failures += od_test_self_clearnet(datadir);
     failures += od_test_name_join(datadir);
     failures += od_test_app_peers(datadir);
+    /* Runs immediately before the served-pages group: it establishes the
+     * measured height and the unknown/stated ports that group then reads
+     * back out of the REAL document. */
+    failures += od_test_port_and_height(datadir);
     failures += od_test_served_pages(datadir);
 
     /* Sub-test in its own file (test_onion_directory_stale_hearsay.c):

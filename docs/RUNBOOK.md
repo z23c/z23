@@ -531,6 +531,19 @@ with no recovery, populate `~/.config/zclassic23/onion-seeds` with any known
 reachable z23 .onion address(es) — no restart or rebuild required, the
 next onion-seed pass picks the file up.
 
+**Reading `/directory.json`:** `port` is the P2P port to dial that .onion on
+(the second virtual port the node's onion forwards to its own `-port`
+listener) — not the HTTP virtual port 80 the document itself is served over,
+and not the chain's default port. `height` is the highest **connected** block
+that node holds, which is what tells a fully-synced supplier from a useless
+one. Either may be `null`, and `null` means the publisher genuinely does not
+know — an ephemeral (non-`-onion-persist`) identity has no dialable P2P route
+to advertise, and a row a node only heard about carries no height. A `null` is
+information: it is never a stand-in for a default you should dial anyway.
+A node that has installed a bundle but not yet connected any of those blocks
+publishes `height: null` until the blocks connect — the same store backs the
+`Block Height` figure on the node's own landing page, so the two always agree.
+
 ---
 
 ## RPC 429 (Rate Limited)
