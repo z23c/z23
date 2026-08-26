@@ -194,6 +194,10 @@ vcs_zcode_dht_service_record_publish_commit(
     *record_out = record;
   if (result == VCS_ZCODE_DHT_RECORD_STORE_ADDED ||
       result == VCS_ZCODE_DHT_RECORD_STORE_CONFLICT) {
+    /* The claimed slot may be the same stream's live intention mid-cycle:
+     * cancel its lookup and children before overwriting, or those ids
+     * leave their owner and the bounded tables they live in never free. */
+    publication_cancel_active(service, publication);
     memset(publication, 0, sizeof(*publication));
     publication->used = true;
     publication->record = record;
@@ -323,6 +327,7 @@ vcs_zcode_dht_storage_ack_commit_verified(
     *record_out = record;
   if (result == VCS_ZCODE_DHT_RECORD_STORE_ADDED ||
       result == VCS_ZCODE_DHT_RECORD_STORE_CONFLICT) {
+    publication_cancel_active(service, publication);
     memset(publication, 0, sizeof(*publication));
     publication->used = true;
     publication->possession_current = true;
@@ -371,6 +376,7 @@ vcs_zcode_dht_source_reproduction_ack_commit_verified(
     *record_out = record;
   if (result == VCS_ZCODE_DHT_RECORD_STORE_ADDED ||
       result == VCS_ZCODE_DHT_RECORD_STORE_CONFLICT) {
+    publication_cancel_active(service, publication);
     memset(publication, 0, sizeof(*publication));
     publication->used = true;
     publication->record = record;
