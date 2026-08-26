@@ -161,82 +161,127 @@ static void init_main_params(void)
      * only when a live ZCL DNS seeder exists. */
     p->nSeeds = 0;
 
-    /* Hardcoded seed nodes — re-verified reachable on the live ZCL mainnet
-     * 2026-06-28 (TCP :8033). The 2026-04 set had churned: 7 of 10 were dead,
-     * which (with DNS seeds disabled, nSeeds=0) wastes a fresh node's whole
-     * bootstrap on connect timeouts and can leave it unable to find any peer.
-     * Keep ONLY currently-reachable IPs here and re-verify before each release;
-     * one live seed is enough — the rest of the network is discovered via its
-     * addrman gossip, the .onion directory seeds, and the runtime onion-seeds
-     * file. Re-verify with: for ip in <list>; do timeout 4 bash -c "</dev/tcp/$ip/8033"; done */
+    /* Hardcoded seed nodes — every entry re-probed 2026-08-26T03:25Z from
+     * three consecutive TCP connects each, mainnet P2P port :8033 only.
+     *
+     * TWO defects were removed here, both of which spent a cold node's dial
+     * budget on addresses that cannot answer:
+     *
+     * 1. Every IP used to be added TWICE — once at :8033 and once at
+     *    :18033 — so half of nFixedSeeds was dead BY CONSTRUCTION, not by
+     *    churn. :18033 is testnet/regtest's nDefaultPort (see the testnet
+     *    and regtest blocks below), and a testnet listener carries a
+     *    different pchMessageStart, so even a live :18033 peer could never
+     *    complete a mainnet handshake. Measured 2026-08-26T03:25Z: all four
+     *    :18033 probes were REFUSED (RST) at the same RTT as the :8033
+     *    probe to the same host — 3/3 attempts each. There is exactly one
+     *    mainnet P2P port and it is nDefaultPort.
+     *
+     * 2. 142.54.184.106 was refused on BOTH ports, 3/3 attempts, 32 ms RTT
+     *    (host up, nothing listening). Its "reachable 2026-06-28" comment
+     *    had gone stale exactly the way the paragraph below warns about.
+     *
+     * Keep ONLY currently-reachable IPs here and re-verify before each
+     * release. A dead seed is worse than a short array. One live seed is
+     * enough to start: the rest of the network is discovered via that
+     * peer's addrman gossip, the .onion directory seeds, the operator
+     * onion-seeds file, and this node's own persisted onion directory.
+     * Re-verify with:
+     *   for ip in <list>; do timeout 6 bash -c "exec 3<>/dev/tcp/$ip/8033"; done */
     p->nFixedSeeds = 0;
     static const uint8_t fixed_ip4[][4] = {
-        {205,209,104,118},  /* reachable 2026-06-28 */
-        {140,174,189, 17},  /* reachable 2026-06-28 */
-        { 51,178,179, 75},  /* reachable 2026-06-28 */
-        {142, 54,184,106},  /* reachable 2026-06-28 */
+        {205,209,104,118},  /* :8033 open 3/3, 2026-08-26T03:25Z */
+        {140,174,189, 17},  /* :8033 open 3/3, 2026-08-26T03:25Z */
+        { 51,178,179, 75},  /* :8033 open 3/3, 2026-08-26T03:25Z */
     };
     for (size_t i = 0; i < sizeof(fixed_ip4)/sizeof(fixed_ip4[0]); i++) {
-        if (p->nFixedSeeds + 2 > MAX_FIXED_SEEDS) break;
+        if (p->nFixedSeeds + 1 > MAX_FIXED_SEEDS) break;
         struct seed_spec6 *s = &p->vFixedSeeds[p->nFixedSeeds];
         memset(s, 0, sizeof(*s));
         s->addr[10] = 0xFF;
         s->addr[11] = 0xFF;
         memcpy(s->addr + 12, fixed_ip4[i], 4);
-        s->port = 8033;
-        p->nFixedSeeds++;
-        /* Also add zclassic23 port for each */
-        s = &p->vFixedSeeds[p->nFixedSeeds];
-        memset(s, 0, sizeof(*s));
-        s->addr[10] = 0xFF;
-        s->addr[11] = 0xFF;
-        memcpy(s->addr + 12, fixed_ip4[i], 4);
-        s->port = 18033;
+        s->port = (uint16_t)p->nDefaultPort;
         p->nFixedSeeds++;
     }
 
     /* Tor .onion seed nodes — bootstrap without DNS. Each serves
-     * /directory.json (its own .onion + advertised clearnet IP/height),
-     * so even ONE reachable onion seed re-seeds clearnet addrman. More
-     * than one removes the single-point-of-failure: a recovering or
-     * partitioned node still finds a supplier if any one seed is up.
+     * /directory.json (its own .onion + the onions and clearnet endpoints
+     * it has met), so ONE reachable onion seed re-seeds both the clearnet
+     * addrman and this node's own persisted onion directory. More than one
+     * removes the single point of failure: a recovering or partitioned node
+     * still finds a supplier if any one seed is up.
      *
-     * KNOWN GAP (docs/work/sticky-node-plan.md P1 #9b, re-verified
-     * 2026-07-10): this array carries exactly ONE first-party seed today.
-     * No second verified, currently-reachable first-party .onion address
-     * exists anywhere in this repo/docs/deploy/ as of this check — do not
-     * fabricate one here; a made-up hostname is worse than a short array
-     * (it wastes a recovering node's bootstrap budget on a dead lookup).
-     * Add a second entry ONLY after confirming (a) it is a zclassic23
-     * onion-directory node the project controls and (b) it answers
-     * /directory.json over Tor at the time of the change — re-verify
-     * before every release, same discipline as the fixed_ip4[] set above.
+     * DISCIPLINE, unchanged and non-negotiable: an entry goes in ONLY after
+     * confirming (a) it is a zclassic23 onion-directory node the project
+     * controls and (b) it answers /directory.json over Tor AT THE TIME OF
+     * THE CHANGE. Never invent a hostname — a dead or fabricated seed is
+     * strictly worse than a short array, because each depth-0 seed fetch
+     * costs a cold node up to 60 s of blocking Tor round-trip
+     * (try_onion_seed_fetch_depth, lib/net/src/connman.c) before it can
+     * move on. Re-verify EVERY entry before each release with an
+     * independent Tor client, e.g.
+     *   curl --socks5-hostname <tor-socks> http://<host>:80/directory.json
      *
-     * Zero-rebuild path in the meantime (works today, no code change):
-     * operators — including a second/third project node — list additional
-     * .onion hosts, one per line ('#' comments allowed, blank lines
-     * skipped, 32-line cap), in ~/.config/zclassic23/onion-seeds. It is
-     * loaded before this hardcoded array by both the boot-time discovery
-     * pass and the peer-of-last-resort kick
-     * (connman_kick_onion_seeds() <- app/conditions/src/peer_floor_violated.c,
-     * run_onion_seed_pass() in lib/net/src/connman.c). See "Onion-Seed
-     * Bootstrap" in docs/RUNBOOK.md for the operator-facing writeup. */
+     * 2026-08-26T03:27-03:30Z re-verification, two independent Tor clients:
+     *
+     *   REMOVED zc23kenfdqqkgamthif3m7lbbdsyrotsl2dlw35qrh3iuzopozmpjnad
+     *     — 5/5 attempts failed with SOCKS5 reply 4 (host unreachable: no
+     *       descriptor), ~6 s each, from two separate Tor clients. It was
+     *       the array's ONLY entry, so until this change a Tor-only
+     *       stranger had NO working hardcoded door into the network and
+     *       paid the full 60 s timeout to find that out.
+     *
+     *   ADDED 5wvfod4ikluv4w3lqe3whn2k7xdsympxxu2qkqw452thtjxbar5hrcqd
+     *     — HTTP 200, 5528-byte /directory.json, 3/3 attempts in ~1.0 s.
+     *       First-party, onion-persisted (-onion-persist), and its address
+     *       has never rotated.
+     *
+     * PORT: onionSeedPorts[] is a genuine per-entry array, but NOTHING
+     * READS IT — grep the tree: chainparams.c writes it and no other
+     * translation unit ever loads it. The seed path reaches a seed by
+     * hostname alone over the onion service's HTTP virtual port 80
+     * (tor_integration.c pins application_virtual_port = 80), and
+     * tor_integration_fetch_onion_blocking() takes no port argument at
+     * all. So the value here is documentation, not behaviour: it records
+     * the seed's P2P virtual port for whoever wires a direct onion P2P
+     * dial later. It is set PER ENTRY and must stay that way — the two
+     * seeds below do NOT share a port, so any future consumer that
+     * assumes one shared port would dial the wrong one.
+     *
+     * ZERO-REBUILD PATH — THE PRIMARY, NOT A FALLBACK. This array is a
+     * compiled-in constant that ages the moment it is written; the two
+     * runtime sources below outrank it and are consulted FIRST by
+     * run_onion_seed_pass() (lib/net/src/connman.c):
+     *   1. ~/.config/zclassic23/onion-seeds — operator-curated, one .onion
+     *      per line ('#' comments, blank lines skipped, 32-line cap). An
+     *      operator (or a second/third project node) adds a supplier with
+     *      no code change, no rebuild and no restart of anyone else.
+     *   2. This node's own persisted onion directory — every host it has
+     *      ever learned from a peer's /directory.json or measured itself.
+     * See "Onion-Seed Bootstrap" in docs/RUNBOOK.md. */
     {
-        static const char *const kOnionSeeds[] = {
-            "zc23kenfdqqkgamthif3m7lbbdsyrotsl2dlw35qrh3iuzopozmpjnad.onion",
+        static const struct { const char *host; uint16_t p2p_port; }
+        kOnionSeeds[] = {
+            /* node1 — verified 2026-08-26T03:27:21Z, HTTP 200 3/3. Its
+             * P2P virtual port is 8055, NOT the mainnet default. */
+            { "5wvfod4ikluv4w3lqe3whn2k7xdsympxxu2qkqw452thtjxbar5hrcqd.onion",
+              8055 },
             /* Additional first-party onion-directory seeds are appended
-             * here as they come online; the operator-seed file above is
-             * the zero-rebuild path for community-run directory nodes. */
+             * here as they come online, each with its own P2P port and its
+             * own reachability evidence in the block above. Until a second
+             * one lands, a Tor-only stranger with an empty onion-seeds file
+             * and an empty directory depends on this single box. */
         };
         size_t n = 0;
         for (size_t i = 0;
              i < sizeof(kOnionSeeds) / sizeof(kOnionSeeds[0]) &&
              n < MAX_FIXED_SEEDS; i++) {
-            size_t len = strlen(kOnionSeeds[i]);
+            size_t len = strlen(kOnionSeeds[i].host);
             if (len >= sizeof(p->onionSeeds[0])) continue;
-            memcpy(p->onionSeeds[n], kOnionSeeds[i], len);
+            memcpy(p->onionSeeds[n], kOnionSeeds[i].host, len);
             p->onionSeeds[n][len] = '\0';
-            p->onionSeedPorts[n] = 18033;
+            p->onionSeedPorts[n] = kOnionSeeds[i].p2p_port;
             n++;
         }
         p->nOnionSeeds = n;

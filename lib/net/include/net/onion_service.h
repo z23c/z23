@@ -295,6 +295,29 @@ void onion_directory_reset_relay_follow(void);
 bool onion_service_directory_learn(const char *hostname, int port, int height,
                                    int64_t peer_last_seen, const char *apps);
 
+/* ── Our own directory as a BOOTSTRAP SOURCE (read side) ────────────
+ *
+ * The node learns onion hostnames from every /directory.json it fetches
+ * (onion_service_directory_learn), persists them, and re-serves them.
+ * This is the reader that lets it also DIAL them again on a later boot,
+ * so the compiled-in chainparams onionSeeds[] array stops being the only
+ * door into the network: reach any peer once and its neighbourhood is
+ * reachable forever without a rebuild.
+ *
+ * FRESH, non-self rows only (last_seen within ONION_DIR_STALE_SECS),
+ * ranked measured-contact-first so hearsay can never displace a host we
+ * have actually reached, bounded by `max`. Returns the row count; 0 when
+ * the datadir or table is absent, which is a normal fresh-node state and
+ * never an error. Every hostname is re-validated on the way out. */
+struct onion_dial_candidate {
+    char hostname[64];
+    int  port;       /* the advertised P2P port; 0 when unknown */
+    bool contacted;  /* true when WE measured it, not pure hearsay */
+};
+
+int onion_service_directory_dial_candidates(struct onion_dial_candidate *out,
+                                            int max);
+
 /* ── Seller/app discovery (read side) ───────────────────────────────
  *
  * The /yardsale landing page (and any app mount that wants "who else
