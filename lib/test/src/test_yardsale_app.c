@@ -1282,6 +1282,52 @@ static int t_webbuy_plan_gate(void)
                   n > 0 && strstr((const char *)resp, "400") != NULL &&
                   flood.count == 0);
 
+        char disguised_confirm[1360];
+        snprintf(disguised_confirm, sizeof(disguised_confirm),
+                 "%s&memo=x?confirm=true", base_form);
+        memset(resp, 0, sizeof(resp));
+        n = yardsale_site_handle_request(
+            "POST", "/yardsale/buy", (const uint8_t *)disguised_confirm,
+            strlen(disguised_confirm), resp, sizeof(resp) - 1);
+        YSA_CHECK("webbuy: question mark inside a value cannot arm money",
+                  n > 0 &&
+                  strstr((const char *)resp, "Accept planned") != NULL &&
+                  flood.count == 0);
+
+        char spaced_confirm[1360];
+        snprintf(spaced_confirm, sizeof(spaced_confirm),
+                 "%s&confirm=true anything", base_form);
+        memset(resp, 0, sizeof(resp));
+        n = yardsale_site_handle_request(
+            "POST", "/yardsale/buy", (const uint8_t *)spaced_confirm,
+            strlen(spaced_confirm), resp, sizeof(resp) - 1);
+        YSA_CHECK("webbuy: a true prefix followed by space cannot arm money",
+                  n > 0 &&
+                  strstr((const char *)resp, "Accept planned") != NULL &&
+                  flood.count == 0);
+
+        char nul_confirm[1360];
+        snprintf(nul_confirm, sizeof(nul_confirm),
+                 "%s&confirm=true%%00false", base_form);
+        memset(resp, 0, sizeof(resp));
+        n = yardsale_site_handle_request(
+            "POST", "/yardsale/buy", (const uint8_t *)nul_confirm,
+            strlen(nul_confirm), resp, sizeof(resp) - 1);
+        YSA_CHECK("webbuy: a decoded NUL cannot hide confirm suffix bytes",
+                  n > 0 && strstr((const char *)resp, "400") != NULL &&
+                  flood.count == 0);
+
+        char malformed_confirm[1360];
+        snprintf(malformed_confirm, sizeof(malformed_confirm),
+                 "%s&confirm=true%%", base_form);
+        memset(resp, 0, sizeof(resp));
+        n = yardsale_site_handle_request(
+            "POST", "/yardsale/buy", (const uint8_t *)malformed_confirm,
+            strlen(malformed_confirm), resp, sizeof(resp) - 1);
+        YSA_CHECK("webbuy: malformed escape cannot arm money",
+                  n > 0 && strstr((const char *)resp, "400") != NULL &&
+                  flood.count == 0);
+
         memset(resp, 0, sizeof(resp));
         n = yardsale_site_handle_request(
             "POST", "/yardsale/buy", (const uint8_t *)variant_form,

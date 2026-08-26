@@ -4,6 +4,7 @@
 #include "test/test_core.h"
 #include "coins/undo.h"
 #include "controllers/store_controller.h"
+#include "controllers/web_form.h"
 #include "controllers/zslp_controller.h"
 #include "services/zslp_command_service.h"
 #include "services/zslp_service.h"
@@ -465,6 +466,55 @@ int test_store(void)
                  (strstr((char *)resp, "Invalid address") != NULL) &&
                  (strstr((char *)resp, "Order #") == NULL);
         }
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+
+    printf("store: shared form scanner uses ampersand boundaries only... ");
+    {
+        static const char body[] =
+            "memo=x?confirm=true&literal=true anything";
+        char confirm[16] = "dirty", literal[32] = "dirty";
+        bool ok = !web_form_field(body, sizeof(body) - 1, "confirm",
+                                  confirm, sizeof(confirm)) &&
+            confirm[0] == '\0' &&
+            web_form_field(body, sizeof(body) - 1, "literal", literal,
+                           sizeof(literal)) &&
+            strcmp(literal, "true anything") == 0;
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+
+    printf("store: shared form scanner refuses NUL and malformed escapes... ");
+    {
+        static const char raw_nul[] = {'f','e','e','=','1','\0','2'};
+        static const char encoded_nul[] = "fee=1%00junk";
+        static const char bad_hex[] = "fee=1%XZ";
+        static const char short_hex[] = "fee=1%2";
+        char out[16] = "dirty";
+        bool ok = !web_form_field(raw_nul, sizeof(raw_nul), "fee", out,
+                                  sizeof(out)) && out[0] == '\0';
+        snprintf(out, sizeof(out), "dirty");
+        ok = ok && !web_form_field(encoded_nul, sizeof(encoded_nul) - 1,
+                                   "fee", out, sizeof(out)) && out[0] == '\0';
+        snprintf(out, sizeof(out), "dirty");
+        ok = ok && !web_form_field(bad_hex, sizeof(bad_hex) - 1, "fee",
+                                   out, sizeof(out)) && out[0] == '\0';
+        snprintf(out, sizeof(out), "dirty");
+        ok = ok && !web_form_field(short_hex, sizeof(short_hex) - 1, "fee",
+                                   out, sizeof(out)) && out[0] == '\0';
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+
+    printf("store: shared form scanner refuses output truncation... ");
+    {
+        static const char body[] = "fee=1234";
+        char exact[5] = "", short_out[4] = "bad";
+        bool ok = web_form_field(body, sizeof(body) - 1, "fee", exact,
+                                 sizeof(exact)) && strcmp(exact, "1234") == 0;
+        ok = ok && !web_form_field(body, sizeof(body) - 1, "fee", short_out,
+                                   sizeof(short_out)) && short_out[0] == '\0';
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }

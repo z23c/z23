@@ -291,14 +291,11 @@ enum chain_evidence_controller_state chain_evidence_controller_load_state(
     return authority->state;
 }
 
-/* Residual durability failure after every retry is not silence: emit one
- * operator-visible sync event naming the key that would not hold. */
-static void cec_freeze_undurable(const char *key, struct zcl_result r)
+static void cec_freeze_undurable(const char *reason)
 {
-    event_emitf(EV_SYNC_STATE_CHANGE, 0, "cec_freeze_not_durable "
-                "key=%s code=%d msg=%s", key, r.code, r.message);
+    event_emitf(EV_SYNC_STATE_CHANGE, 0, "cec_freeze_not_durable reason=%s",
+                reason);
 }
-
 void chain_evidence_controller_freeze(struct chain_evidence_controller *authority,
                            const char *reason)
 {
@@ -309,26 +306,29 @@ void chain_evidence_controller_freeze(struct chain_evidence_controller *authorit
      * violates the no-silent-halt mandate. Coalesce NULL and "" alike. */
     snprintf(authority->contradiction_reason, sizeof(authority->contradiction_reason),
              "%s", (reason && reason[0]) ? reason : "unspecified_contradiction");
-    if (authority->ndb) {
-        /* Only durable form of the freeze: RAM un-freezes into the same
-         * contradiction at restart. Bounded-retry lane; residue fails loud. */
-        const char *name = chain_evidence_controller_state_name(
-            CEC_CONTRADICTION_FROZEN);
-        struct zcl_result r = chain_evidence_state_set_retry(authority->ndb,
-            "cec.contradiction_reason", authority->contradiction_reason,
-            strlen(authority->contradiction_reason) + 1, "cec_freeze");
-        if (!r.ok)
-            cec_freeze_undurable("cec.contradiction_reason", r);
-        r = chain_evidence_state_set_retry(authority->ndb,
-            "cec.sync_state", name, strlen(name) + 1, "cec_freeze");
-        if (!r.ok)
-            cec_freeze_undurable("cec.sync_state", r);
-        r = chain_evidence_state_set_int_retry(authority->ndb,
-            "cec.publish_state", CEC_PUBLISH_FROZEN_CONTRADICTION,
-            "cec_freeze");
-        if (!r.ok)
-            cec_freeze_undurable("cec.publish_state", r);
+    if (!authority->ndb) {
+        cec_freeze_undurable("node_db_unavailable");
+        return;
     }
+    struct node_db_status status = {0}; node_db_get_status(authority->ndb, &status);
+    if (status.tx_open) {
+        /* A caller-owned rollback cannot attest this freeze as durable. */
+        cec_freeze_undurable("caller_transaction_open");
+        return;
+    }
+    DB_TXN_SCOPE(txn, authority->ndb, "cec.freeze");
+    const char *name = "contradiction_frozen";
+    bool ok = txn &&
+        node_db_state_set(authority->ndb, "cec.contradiction_reason",
+            authority->contradiction_reason,
+            strlen(authority->contradiction_reason) + 1) &&
+        node_db_state_set(authority->ndb, "cec.sync_state", name,
+                          strlen(name) + 1) &&
+        node_db_state_set_int(authority->ndb, "cec.publish_state",
+                              CEC_PUBLISH_FROZEN_CONTRADICTION) &&
+        db_txn_commit(txn);
+    if (!ok)
+        cec_freeze_undurable("atomic_transaction_failed");
 }
 
 enum chain_evidence_controller_result chain_evidence_controller_import_snapshot_evidence(

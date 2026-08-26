@@ -233,64 +233,78 @@ static void emit_kv(struct buf *b, const struct zcl_cli_render_env *e,
     buf_putc(b, '\n');
 }
 
-/* Same key column as emit_kv, but wrap the value at `width` instead of
- * ellipsizing. The copyable next command must appear in full: a truncated
- * restart-and-datadir line is not an action the operator can run. */
-static void emit_kv_wrap(struct buf *b, const struct zcl_cli_render_env *e,
-                         size_t kw, const char *key, const char *value)
+/* Bytes spanning at most cols displayed code points, without splitting a
+ * UTF-8 sequence. Command continuations remove the following newline, so a
+ * token may safely continue at column zero on the next physical line. */
+static size_t command_chunk_bytes(const char *s, size_t len, size_t cols)
 {
-    if (!value)
-        value = "";
-    size_t used = 2 + kw + 2;
-    size_t room = (size_t)e->width > used ? (size_t)e->width - used : 8;
-    if (room < 8)
-        room = 8;
-
-    const char *p = value;
-    bool first = true;
-    while (*p) {
-        while (*p == ' ')
-            p++;
-        if (!*p)
-            break;
-        if (first) {
-            buf_puts(b, "  ");
-            size_t klen = strlen(key);
-            char kpadded[64];
-            if (klen < sizeof(kpadded)) {
-                memcpy(kpadded, key, klen + 1);
-                while (klen < kw && klen < sizeof(kpadded) - 1) {
-                    kpadded[klen] = ' ';
-                    kpadded[++klen] = '\0';
-                }
-                ansi_dim(b, e, kpadded);
-            } else {
-                ansi_dim(b, e, key);
-            }
-            buf_puts(b, "  ");
-            first = false;
-        } else {
-            buf_puts(b, "  ");
-            for (size_t i = 0; i < kw; i++)
-                buf_putc(b, ' ');
-            buf_puts(b, "  ");
-        }
-        size_t n = 0;
-        size_t last_sp = 0;
-        while (p[n] && n < room) {
-            if (p[n] == ' ')
-                last_sp = n;
-            n++;
-        }
-        size_t take = (p[n] && last_sp > 0) ? last_sp : n;
-        if (take == 0)
-            take = n ? n : 1;
-        buf_putn(b, p, take);
-        buf_putc(b, '\n');
-        p += take;
+    size_t bytes = 0, width = 0;
+    while (bytes < len && width < cols) {
+        const unsigned char c = (unsigned char)s[bytes];
+        size_t sequence = 1;
+        if ((c & 0xE0) == 0xC0) sequence = 2;
+        else if ((c & 0xF0) == 0xE0) sequence = 3;
+        else if ((c & 0xF8) == 0xF0) sequence = 4;
+        if (sequence > len - bytes)
+            sequence = 1;
+        bytes += sequence;
+        width++;
     }
-    if (first)
+    return bytes;
+}
+
+/* Render one command span in full. Every non-final physical line ends in a
+ * shell continuation and the next starts at column zero: selecting the value
+ * and pasting it into a POSIX shell reconstructs the exact original bytes,
+ * even when a datadir token itself exceeds the terminal width. */
+static void emit_kv_command_n(struct buf *b,
+                              const struct zcl_cli_render_env *e, size_t kw,
+                              const char *key, const char *value, size_t len)
+{
+    if (!value || len == 0) {
         emit_kv(b, e, kw, key, "");
+        return;
+    }
+    buf_puts(b, "  ");
+    size_t klen = strlen(key);
+    char kpadded[64];
+    (void)snprintf(kpadded, sizeof(kpadded), "%s", key);
+    while (klen < kw && klen < sizeof(kpadded) - 1)
+        kpadded[klen++] = ' ';
+    kpadded[klen] = '\0';
+    ansi_dim(b, e, kpadded);
+    buf_puts(b, "  ");
+
+    size_t prefix = 2 + kw + 2;
+    while (len > 0) {
+        size_t reserve = len > 1 ? 1 : 0;
+        size_t room = (size_t)e->width > prefix + reserve
+            ? (size_t)e->width - prefix - reserve : 1;
+        size_t take = command_chunk_bytes(value, len, room);
+        if (take == 0)
+            take = 1;
+        /* Do not put an inserted continuation after an existing backslash:
+         * two adjacent backslashes would quote each other and leave the
+         * newline active. Move that source byte to the next physical line. */
+        while (take > 1 && take < len && value[take - 1] == '\\')
+            take--;
+        buf_putn(b, value, take);
+        value += take;
+        len -= take;
+        if (len > 0)
+            buf_puts(b, "\\\n");
+        else
+            buf_putc(b, '\n');
+        prefix = 0;
+    }
+}
+
+static void emit_kv_command(struct buf *b,
+                            const struct zcl_cli_render_env *e, size_t kw,
+                            const char *key, const char *value)
+{
+    emit_kv_command_n(b, e, kw, key, value ? value : "",
+                      value ? strlen(value) : 0);
 }
 
 /* A table: headers[ncols], cells row-major rows*ncols (borrowed pointers).
@@ -1036,9 +1050,9 @@ static void render_zcode_join(struct buf *b, const struct zcl_cli_render_env *e,
             process_joined
                 ? "this process already has the join flags"
                 : "this process has not loaded those flags yet");
-    emit_kv_wrap(b, e, 4, "next",
-                 json_get_str(json_get(data, "restart_command")));
-    emit_kv_wrap(b, e, 4, "then", "z23 zcode package offered");
+    emit_kv_command(b, e, 4, "next",
+                    json_get_str(json_get(data, "restart_command")));
+    emit_kv_command(b, e, 4, "then", "z23 zcode package offered");
 }
 
 /* Join's typed next command. A one-shot CLI has no engine, so the JSON
@@ -1061,8 +1075,14 @@ static void render_zcode_offered(struct buf *b, const struct zcl_cli_render_env 
     emit_kv(b, e, 6, "now",
             live ? "resident engine is up"
                  : "this CLI is not the hosting engine");
-    emit_kv_wrap(b, e, 6, "next",
-                 json_get_str(json_get(data, "next_command")));
+    const char *next = json_get_str(json_get(data, "next_command"));
+    const char *then = next ? strstr(next, ", then ") : NULL;
+    if (then) {
+        emit_kv_command_n(b, e, 6, "next", next, (size_t)(then - next));
+        emit_kv_command(b, e, 6, "then", then + strlen(", then "));
+    } else {
+        emit_kv_command(b, e, 6, "next", next);
+    }
 }
 
 /* zcode.guide is a recipe: one next action, one copyable start, the journey. */

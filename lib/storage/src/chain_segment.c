@@ -12,6 +12,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -90,6 +91,10 @@ static void manifest_path(char *buf, size_t buflen, const char *dir)
  * staging area, and fails closed. A stage left behind by a crash carries
  * a name parse_seg_name() ignores, so scans never mistake it for data. */
 static _Atomic uint32_t g_stage_seq;
+static pthread_mutex_t g_publish_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static enum cseg_status chain_segment_manifest_rebuild_unlocked(
+    const char *dir, char *err, size_t errlen);
 
 static enum cseg_status atomic_write_ro(const char *path,
                                         const uint8_t *buf, size_t len,
@@ -238,6 +243,13 @@ enum cseg_status chain_segment_seal_range(const char *dir,
         return CSEG_ERR_EMPTY_RANGE;
     }
 
+    int lock_rc = pthread_mutex_lock(&g_publish_mutex);
+    if (lock_rc != 0) {
+        set_err(err, errlen, "segment publish lock: %s", strerror(lock_rc));
+        return CSEG_ERR_IO;
+    }
+
+    enum cseg_status result = CSEG_OK;
     uint32_t done = 0;
     while (done < count) {
         uint32_t chunk = count - done;
@@ -245,10 +257,17 @@ enum cseg_status chain_segment_seal_range(const char *dir,
         uint8_t digest[32];
         enum cseg_status st = seal_one(dir, body, user, first_height + done,
                                        chunk, digest, err, errlen);
-        if (st != CSEG_OK) return st;
+        if (st != CSEG_OK) {
+            result = st;
+            goto unlock;
+        }
         done += chunk;
     }
-    return chain_segment_manifest_rebuild(dir, err, errlen);
+    result = chain_segment_manifest_rebuild_unlocked(dir, err, errlen);
+
+unlock:
+    pthread_mutex_unlock(&g_publish_mutex);
+    return result;
 }
 
 /* ── Reader ──────────────────────────────────────────────────────────── */
@@ -516,8 +535,8 @@ static enum cseg_status collect_segments(const char *dir,
     return CSEG_OK;
 }
 
-enum cseg_status chain_segment_manifest_rebuild(const char *dir,
-                                                char *err, size_t errlen)
+static enum cseg_status chain_segment_manifest_rebuild_unlocked(
+    const char *dir, char *err, size_t errlen)
 {
     if (!dir) { set_err(err, errlen, "null dir"); return CSEG_ERR_ARG; }
 
@@ -548,6 +567,20 @@ enum cseg_status chain_segment_manifest_rebuild(const char *dir,
     manifest_path(path, sizeof(path), dir);
     st = atomic_write_ro(path, buf, total, err, errlen);
     free(buf);
+    return st;
+}
+
+enum cseg_status chain_segment_manifest_rebuild(const char *dir,
+                                                char *err, size_t errlen)
+{
+    int lock_rc = pthread_mutex_lock(&g_publish_mutex);
+    if (lock_rc != 0) {
+        set_err(err, errlen, "manifest publish lock: %s", strerror(lock_rc));
+        return CSEG_ERR_IO;
+    }
+    enum cseg_status st =
+        chain_segment_manifest_rebuild_unlocked(dir, err, errlen);
+    pthread_mutex_unlock(&g_publish_mutex);
     return st;
 }
 

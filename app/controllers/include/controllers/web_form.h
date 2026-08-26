@@ -8,13 +8,11 @@
  * length-delimited slices [body, body+len) carved out of HTTP dispatch.
  * They are NOT NUL-terminated, so nothing here may call strstr,
  * strncmp, or any sentinel-based scan — every read below stays inside
- * the slice by index arithmetic. A field matches at the slice start or
- * directly after '&' or '?'; its value runs to the next '&', ' ', an
- * embedded NUL, or the end of the slice; decoded output is clamped
- * into [out, out+out_max) exactly as the parsers these helpers
- * replaced did. A name that appears twice in one body is refused, not
- * disambiguated. Downstream validators (address checks, CSRF compares,
- * PoW echoes) still own acceptance of truncated values. */
+ * the slice by index arithmetic. A field matches only as a complete
+ * ampersand-delimited segment; its value runs to the next '&' or the
+ * end of the slice. Embedded NULs, malformed percent escapes, decoded
+ * NULs, duplicate names, and values that do not fit the destination
+ * are refused with an empty output. */
 
 #ifndef ZCL_CONTROLLERS_WEB_FORM_H
 #define ZCL_CONTROLLERS_WEB_FORM_H
@@ -23,33 +21,66 @@
 #include <stddef.h>
 #include <string.h>
 
-/* Decode `%XX` and `+` escapes from src[0..srclen), writing at most
- * dstmax-1 bytes plus a terminator into dst. Reads only srclen bytes
- * of src regardless of its contents. */
-static inline void web_form_url_decode(char *dst, size_t dstmax,
+static inline int web_form_hex_nibble(unsigned char c)
+{
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'a' && c <= 'f')
+        return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F')
+        return c - 'A' + 10;
+    return -1;
+}
+
+static inline bool web_form_encoding_valid(const char *body, size_t len)
+{
+    if (!body)
+        return false;
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)body[i];
+        if (c == '\0')
+            return false;
+        if (c != '%')
+            continue;
+        if (i + 2 >= len)
+            return false;
+        int hi = web_form_hex_nibble((unsigned char)body[i + 1]);
+        int lo = web_form_hex_nibble((unsigned char)body[i + 2]);
+        if (hi < 0 || lo < 0 || (hi == 0 && lo == 0))
+            return false;
+        i += 2;
+    }
+    return true;
+}
+
+/* Decode one already bounded value. Failure always clears dst. */
+static inline bool web_form_url_decode(char *dst, size_t dstmax,
                                        const char *src, size_t srclen)
 {
     size_t di = 0;
-    if (!dst || !dstmax || !src)
-        return;
-    for (size_t si = 0; si < srclen && di < dstmax - 1; si++) {
-        char c = src[si];
-        if (c == '%' && si + 2 < srclen) {
-            int hi = (src[si + 1] >= '0' && src[si + 1] <= '9') ? src[si + 1] - '0' :
-                     (src[si + 1] >= 'a' && src[si + 1] <= 'f') ? src[si + 1] - 'a' + 10 :
-                     (src[si + 1] >= 'A' && src[si + 1] <= 'F') ? src[si + 1] - 'A' + 10 : -1;
-            int lo = (src[si + 2] >= '0' && src[si + 2] <= '9') ? src[si + 2] - '0' :
-                     (src[si + 2] >= 'a' && src[si + 2] <= 'f') ? src[si + 2] - 'a' + 10 :
-                     (src[si + 2] >= 'A' && src[si + 2] <= 'F') ? src[si + 2] - 'A' + 10 : -1;
-            if (hi >= 0 && lo >= 0) {
-                dst[di++] = (char)((hi << 4) | lo);
-                si += 2;
-                continue;
-            }
+    if (!dst || dstmax == 0)
+        return false;
+    dst[0] = '\0';
+    if (!src || !web_form_encoding_valid(src, srclen))
+        return false;
+    for (size_t si = 0; si < srclen; si++) {
+        unsigned char c = (unsigned char)src[si];
+        if (c == '%') {
+            int hi = web_form_hex_nibble((unsigned char)src[si + 1]);
+            int lo = web_form_hex_nibble((unsigned char)src[si + 2]);
+            c = (unsigned char)((hi << 4) | lo);
+            si += 2;
+        } else if (c == '+') {
+            c = ' ';
         }
-        dst[di++] = (c == '+') ? ' ' : c;
+        if (di + 1 >= dstmax) {
+            dst[0] = '\0';
+            return false;
+        }
+        dst[di++] = (char)c;
     }
     dst[di] = '\0';
+    return di > 0;
 }
 
 /* Find `field=value` in the slice body[0..len) and URL-decode the value
@@ -68,40 +99,33 @@ static inline bool web_form_field(const char *body, size_t len,
     if (!out || out_max == 0)
         return false;
     out[0] = '\0';
-    if (!body || !len || !field)
+    if (!body || !len || !field || !web_form_encoding_valid(body, len))
         return false;
     size_t klen = strlen(field);
-    if (klen == 0 || klen + 1 > len)
+    if (klen == 0 || klen >= len)
         return false;
 
     size_t occurrences = 0;
-    for (size_t i = 0; i + klen < len; i++) {
-        bool at_boundary =
-            (i == 0 || body[i - 1] == '&' || body[i - 1] == '?');
-        if (!at_boundary)
-            continue;
-        if (memcmp(body + i, field, klen) != 0)
-            continue;
-        if (body[i + klen] != '=')
-            continue;
-
-        occurrences++;
-        if (occurrences > 1)
-            break;              /* ambiguity needs no second opinion */
-        size_t vstart = i + klen + 1;
-        size_t vlen = 0;
-        while (vstart + vlen < len && body[vstart + vlen] != '&' &&
-               body[vstart + vlen] != ' ' && body[vstart + vlen] != '\0')
-            vlen++;
-        if (vlen > 0)
-            web_form_url_decode(out, out_max, body + vstart, vlen);
+    size_t value_start = 0;
+    size_t value_len = 0;
+    for (size_t pos = 0; pos < len;) {
+        size_t end = pos;
+        while (end < len && body[end] != '&')
+            end++;
+        size_t segment_len = end - pos;
+        if (segment_len > klen && body[pos + klen] == '=' &&
+            memcmp(body + pos, field, klen) == 0) {
+            occurrences++;
+            value_start = pos + klen + 1;
+            value_len = end - value_start;
+        }
+        pos = end < len ? end + 1 : len;
     }
-    if (occurrences != 1) {
-        out[0] = '\0';      /* leave no survivor for ignore-the-bool callers */
+    if (occurrences != 1 || value_len == 0 ||
+        !web_form_url_decode(out, out_max, body + value_start, value_len)) {
+        out[0] = '\0';
         return false;
     }
-    if (out[0] == '\0')     /* the lone occurrence carried no value */
-        return false;
     return true;
 }
 

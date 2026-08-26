@@ -28,29 +28,82 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 
 #define BROKER_TAG "agent.broker"
 
-/* A custody document describes THIS session's custody, so a copy left
- * standing from an earlier session reads as today's fact. Every exit that
- * cannot attest what custody is held right now must retire the standing
- * document rather than leave the stale claim where an operator will read
- * it. Best-effort by construction: ENOENT already is the goal. */
-static void retire_private_money_bindings(const char *dir)
+static _Atomic uint32_t g_broker_stage_seq;
+
+static bool broker_sync_dir(const char *dir)
+{
+    int fd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0)
+        return false;
+    bool ok = fsync(fd) == 0;
+    if (close(fd) != 0)
+        ok = false;
+    return ok;
+}
+
+static void broker_retire_document(const char *dir, const char *name)
 {
     char path[512];
-    int n;
-    if (!dir)
+    if (!dir || !name)
         return;
-    n = snprintf(path, sizeof(path), "%s/money-bindings.json", dir);
+    int n = snprintf(path, sizeof(path), "%s/%s", dir, name);
     if (n < 0 || (size_t)n >= sizeof(path))
         return;
-    if (unlink(path) != 0 && errno != ENOENT)
-        LOG_WARN(BROKER_TAG, "cannot retire private custody bindings: %s",
-                 strerror(errno));
+    if (unlink(path) == 0) {
+        if (!broker_sync_dir(dir))
+            LOG_WARN(BROKER_TAG, "cannot sync retirement of %s", path);
+    } else if (errno != ENOENT) {
+        LOG_WARN(BROKER_TAG, "cannot retire %s: %s", path, strerror(errno));
+    }
+}
+
+static bool broker_write_document(const char *dir, const char *name,
+                                  const uint8_t *buf, size_t len)
+{
+    char path[512], tmp[512];
+    int pn = snprintf(path, sizeof(path), "%s/%s", dir, name);
+    int tn = snprintf(tmp, sizeof(tmp), "%s/.%s.%ld-%u.tmp", dir, name,
+                      (long)getpid(),
+                      (unsigned)atomic_fetch_add(&g_broker_stage_seq, 1));
+    if (pn < 0 || tn < 0 || (size_t)pn >= sizeof(path) ||
+        (size_t)tn >= sizeof(tmp)) {
+        broker_retire_document(dir, name);
+        return false;
+    }
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                  0600);
+    bool ok = fd >= 0;
+    size_t off = 0;
+    while (ok && off < len) {
+        ssize_t n = write(fd, buf + off, len - off);
+        if (n > 0)
+            off += (size_t)n;
+        else if (n < 0 && errno == EINTR)
+            continue;
+        else
+            ok = false;
+    }
+    if (ok && fsync(fd) != 0)
+        ok = false;
+    if (fd >= 0 && close(fd) != 0)
+        ok = false;
+    if (ok && rename(tmp, path) != 0)
+        ok = false;
+    if (ok && !broker_sync_dir(dir))
+        ok = false;
+    if (!ok) {
+        (void)unlink(tmp);
+        broker_retire_document(dir, name);
+        LOG_WARN(BROKER_TAG, "cannot atomically persist %s", name);
+    }
+    return ok;
 }
 
 static void agent_broker_write_private_money_bindings(
@@ -61,7 +114,7 @@ static void agent_broker_write_private_money_bindings(
         return;
     if (!a || !a->bound || !a->provider ||
         !a->provider->money_bindings) {
-        retire_private_money_bindings(dir);
+        broker_retire_document(dir, "money-bindings.json");
         return;
     }
     struct agent_money_binding bindings[AGENT_MONEY_BINDINGS_MAX];
@@ -70,7 +123,7 @@ static void agent_broker_write_private_money_bindings(
     if (!a->provider->money_bindings(a->provider_ctx, bindings,
                                      AGENT_MONEY_BINDINGS_MAX, &count)) {
         LOG_WARN(BROKER_TAG, "custody binding provider failed");
-        retire_private_money_bindings(dir);
+        broker_retire_document(dir, "money-bindings.json");
         return;
     }
     struct json_value doc, wallets;
@@ -103,25 +156,11 @@ static void agent_broker_write_private_money_bindings(
     if (n == 0 || n >= sizeof(buf)) {
         LOG_WARN(BROKER_TAG, "private custody bindings did not fit (%zu)",
                  n);
-        retire_private_money_bindings(dir);
+        broker_retire_document(dir, "money-bindings.json");
         return;
     }
-    char path[512];
-    (void)snprintf(path, sizeof(path), "%s/money-bindings.json", dir);
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-    if (fd < 0) {
-        LOG_WARN(BROKER_TAG, "cannot write private custody bindings: %s",
-                 strerror(errno));
-        retire_private_money_bindings(dir);
-        return;
-    }
-    if (write(fd, buf, n) != (ssize_t)n || fsync(fd) != 0) {
-        LOG_WARN(BROKER_TAG, "private custody binding write did not persist");
-        /* A short write under O_TRUNC leaves HALF a document claiming
-         * custody; that half is worse than none. */
-        retire_private_money_bindings(dir);
-    }
-    (void)close(fd);
+    (void)broker_write_document(dir, "money-bindings.json",
+                                (const uint8_t *)buf, n);
 }
 
 /* ── status document ────────────────────────────────────────────────────── */
@@ -237,19 +276,10 @@ void agent_broker_write_status(const char *dir,
      * status document parses as nothing. Refuse rather than write it. */
     if (n == 0 || n >= sizeof(buf)) {
         LOG_WARN(BROKER_TAG, "broker status did not fit (%zu)", n);
+        broker_retire_document(dir, "broker.json");
         return;
     }
-
-    char path[512];
-    snprintf(path, sizeof(path), "%s/broker.json", dir);
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-    if (fd < 0) {
-        LOG_WARN(BROKER_TAG, "cannot write %s: %s", path, strerror(errno));
-        return;
-    }
-    if (write(fd, buf, n) != (ssize_t)n)
-        LOG_WARN(BROKER_TAG, "short write of %s", path);
-    (void)close(fd);
+    (void)broker_write_document(dir, "broker.json", (const uint8_t *)buf, n);
 }
 
 size_t agent_broker_render_status_json(const char *dir, char *out,
