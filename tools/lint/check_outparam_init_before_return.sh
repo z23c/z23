@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Copyright 2026 Rhett Creighton - Apache License 2.0
 # check-outparam-init-before-return: a function that hands back a struct the
 # caller will free MUST initialize that struct before the first thing that can
 # fail.
