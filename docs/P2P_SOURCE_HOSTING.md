@@ -123,6 +123,40 @@ persist the exact signed bytes and independently reconstruct `record_root`
 after restart. Provider discovery does not expose the wire or its delegation;
 it remains a compact routing view.
 
+## Scoped agent authority
+
+A fifth record kind, `agent_scope` (wire name for the publish RPC), lets one
+node operator delegate namespace-scoped publish authority to other record-
+signing keys - the shape an autonomous worker holds. An `agent_scope` record's
+`transport_root` is the granted key; it is signed by the grantor's own online
+key and, like every record, carries a master-signed delegation, so the grant
+itself is ordinary signed evidence any node can verify and serve.
+
+Governance is decided entirely from grants a node's record store already
+holds, per (namespace, master key):
+
+- A namespace is **governed** while the store holds at least one live
+  `agent_scope` grant under that master, and reverts to ungoverned when every
+  grant in it has lapsed - the same bounded-time authority model as every
+  other DHT record. Keeping governance alive means keeping a grant renewed;
+  publication intents renew grants like any other record.
+- While governed, a record is admitted only if its signing key is the
+  **founder** - the signer of the lowest-sequence live grant, the operator
+  key that founded governance - or a key some live grant names. The founder
+  keeps its own publishing authority without a self-grant.
+- Only the founder may mint further grants, so a granted key can never widen
+  authority, not even by granting itself. Revoking an agent is re-minting its
+  grant stream with a shorter window, or letting it lapse; the per-key grant
+  is its own record stream, superseded by sequence like any other.
+
+The master key remains the trust root throughout: a key the master never
+delegated still fails signature verification before governance is even
+consulted, and a delegated key never governed away from a namespace it could
+publish in before the first grant existed. What governance adds is the
+receiver-side rule - every honest node enforcing admission from its own store
+stops accepting a dropped key's new records in that namespace once the
+operator's grants say so.
+
 The asynchronous developer publication job records an additive
 `PROVIDER_ANNOUNCED` phase only after reloading the signed workspace manifest
 and signed package release from ZVCS, deriving the release's `content.v2`
