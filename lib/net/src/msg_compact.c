@@ -192,8 +192,12 @@ bool process_cmpctblock(struct msg_processor *mp, struct p2p_node *node,
     }
     free(mp_hashes);
 
-    /* Attempt reconstruction */
+    /* Attempt reconstruction. out_block is initialized here as well as in
+     * compact_block_reconstruct(): the block_free() calls below run on
+     * every reconstruction outcome, so this frame must never carry an
+     * uninitialized struct block past a peer-controlled call. */
     struct block out_block;
+    block_init(&out_block);
     uint64_t *missing_indices = NULL;
     size_t num_missing = 0;
 
