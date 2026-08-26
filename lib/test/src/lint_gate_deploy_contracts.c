@@ -154,6 +154,20 @@ int t_canonical_deploy_proof_binding_contract(void)
         ASSERT(strstr(verify_buf, "${ZCL_DATADIR:-") == NULL);
         ASSERT(strstr(verify_buf, "${ZCL_RPCPORT:-") == NULL);
         ASSERT(strstr(verify_buf, "${ZCL_RPCCONNECT:-") == NULL);
+        /* Published build identity (lib/net/include/net/version.h). The gate
+         * must classify the advertised subversion rather than compare it to
+         * one frozen string: before this rule existed it demanded the exact
+         * pre-change "/ZClassic23:0.1.0/", so the first stamped build to be
+         * deployed would have failed its own deploy verification. Both native
+         * forms are accepted and only a token naming a DIFFERENT build is
+         * refused — absence must never become a deploy failure. */
+        ASSERT(strstr(verify_buf, "advertised_subver_verdict") != NULL);
+        ASSERT(strstr(verify_buf,
+                      "\"/ZClassic23:0.1.0(src:$adv_want)/\"") != NULL);
+        ASSERT(strstr(verify_buf, "            deployed|unstamped) ;;") != NULL);
+        ASSERT(strstr(verify_buf,
+                      "grep -q '\"advertised_subver\"[[:space:]]*:"
+                      "[[:space:]]*\"/ZClassic23:0\\.1\\.0/\"'") == NULL);
         ASSERT(strstr(verify_buf, "ZCL_DEPLOY_VERIFY_SELFTEST") != NULL);
         ASSERT(strstr(verify_buf, "ZCL_DEPLOY_STAGE") != NULL);
         ASSERT(strstr(verify_buf, "CHALLENGER_ACTIVE (unqualified)") != NULL);

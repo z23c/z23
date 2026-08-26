@@ -9,6 +9,7 @@
 #include "net/peer_lifecycle.h"
 #include "net/port_policy.h"
 #include "net/version.h"
+#include "util/clientversion.h"
 
 #include <time.h>
 #include <unistd.h>
@@ -97,14 +98,74 @@ static const struct json_value *find_lifecycle_obj_str(
     return NULL;
 }
 
+/* The expected advertised subversion, derived here INDEPENDENTLY of
+ * msg_version.c: this test formats it from the build-identity accessor
+ * itself, so an implementation that hard-codes, caches, or invents a value
+ * cannot satisfy it. Mirrors the shape documented in net/version.h. */
+static bool lifecycle_id_is_exact_hex64(const char *s)
+{
+    if (!s)
+        return false;
+    for (size_t i = 0; i < 64; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+            return false;
+    }
+    return s[64] == '\0';
+}
+
 static int test_peer_lifecycle_user_agent(void)
 {
     int failures = 0;
     TEST_CASE("peer_lifecycle: version user agent advertises ZClassic23")
     {
         const char *ua = msg_version_user_agent();
-        ASSERT(strcmp(ua, "/ZClassic23:0.1.0/") == 0);
+        const char *baked = zcl_build_source_id_sha256();
+        char expect[MAX_SUBVERSION_LENGTH];
+
+        /* A binary carrying an exact baked source identity must publish it;
+         * an unstamped one must publish the bare product identity rather than
+         * a token naming a build it cannot name. Either way the string is
+         * fixed by the build, never by anything at run time. */
+        if (lifecycle_id_is_exact_hex64(baked))
+            snprintf(expect, sizeof(expect), "/ZClassic23:0.1.0(src:%s)/",
+                     baked);
+        else
+            snprintf(expect, sizeof(expect), "/ZClassic23:0.1.0/");
+
+        ASSERT(strcmp(ua, expect) == 0);
+        ASSERT(strncmp(ua, "/ZClassic23:0.1.0", 17) == 0);
+        ASSERT(ua[strlen(ua) - 1] == '/');
+        ASSERT(strlen(ua) < MAX_SUBVERSION_LENGTH);
         ASSERT(strstr(ua, "MagicBean") == NULL);
+
+        /* The published token round-trips through the peer-side reader that
+         * every OTHER node uses to learn what we run. */
+        char parsed[ZCL_BUILD_IDENTITY_BUFSIZE];
+        char local[ZCL_BUILD_IDENTITY_BUFSIZE];
+        bool have_local = msg_version_local_build_identity(local,
+                                                           sizeof(local));
+        ASSERT(have_local == lifecycle_id_is_exact_hex64(baked));
+        ASSERT(msg_version_parse_build_identity(ua, parsed, sizeof(parsed)) ==
+               have_local);
+        if (have_local) {
+            ASSERT(strcmp(local, baked) == 0);
+            ASSERT(strcmp(parsed, baked) == 0);
+        } else {
+            ASSERT(local[0] == '\0');
+            ASSERT(parsed[0] == '\0');
+        }
+
+        /* Privacy: a build identity names a BUILD, never its operator. The
+         * advertised string is the product name, a version, and hex. */
+        for (const char *p = ua; *p; p++) {
+            bool allowed = (*p >= '0' && *p <= '9') ||
+                           (*p >= 'a' && *p <= 'z') ||
+                           (*p >= 'A' && *p <= 'Z') ||
+                           *p == '/' || *p == ':' || *p == '.' ||
+                           *p == '(' || *p == ')';
+            ASSERT(allowed);
+        }
     } TEST_END
     return failures;
 }

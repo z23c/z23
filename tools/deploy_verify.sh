@@ -118,6 +118,33 @@ proc_exec_arg_values() {
         sed -n "s/^-${proc_key}=//p"
 }
 
+# Classify the subversion a running node advertises. Since
+# lib/net/include/net/version.h, a node states which build it is running by
+# appending its baked source identity: "/ZClassic23:0.1.0(src:<64 hex>)/".
+# An unstamped build publishes the bare "/ZClassic23:0.1.0/" instead, and that
+# is a normal answer, never a deploy failure. The one failure this can see is
+# a node advertising a build that is NOT the one we just deployed.
+# Echoes exactly one of: deployed | unstamped | stale | foreign.
+advertised_subver_verdict() {
+    adv_subver="$1"
+    adv_want="$2"
+    if [ "$adv_subver" = "/ZClassic23:0.1.0/" ]; then
+        echo unstamped
+        return 0
+    fi
+    if [ "$adv_subver" = "/ZClassic23:0.1.0(src:$adv_want)/" ]; then
+        echo deployed
+        return 0
+    fi
+    adv_id=$(printf '%s\n' "$adv_subver" |
+        sed -n 's|^/ZClassic23:0\.1\.0(src:\([0-9a-f]\{64\}\))/$|\1|p')
+    if [ -n "$adv_id" ]; then
+        echo stale
+        return 0
+    fi
+    echo foreign
+}
+
 deploy_verify_selftest() {
     # Hostile inherited lane selectors must have no role in the result.
     ZCL_DATADIR="/attacker/datadir"
@@ -152,6 +179,21 @@ deploy_verify_selftest() {
     fixture_direct_argv=$(exec_argv_values_from_text "$fixture_direct")
     [ "$(printf '%s\n' "$fixture_direct_argv" | sed -n '1p')" = "/canonical/bin/zclassic23" ] || return 1
     [ "$(printf '%s\n' "$fixture_direct_argv" | sed -n '2p')" = "-datadir=/canonical/data" ] || return 1
+    # Published build identity. Both native forms must be accepted — a build
+    # that carries no baked identity publishes the bare product string, and
+    # refusing it here would turn "unknown" into a failure. The one refusal is
+    # a well-formed token naming a build other than the deployed one.
+    sv_want=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    sv_other=fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+    [ "$(advertised_subver_verdict "/ZClassic23:0.1.0(src:$sv_want)/" \
+        "$sv_want")" = deployed ] || return 1
+    [ "$(advertised_subver_verdict "/ZClassic23:0.1.0/" "$sv_want")" \
+        = unstamped ] || return 1
+    [ "$(advertised_subver_verdict "/ZClassic23:0.1.0(src:$sv_other)/" \
+        "$sv_want")" = stale ] || return 1
+    [ "$(advertised_subver_verdict "/MagicBean:2.1.2/" "$sv_want")" \
+        = foreign ] || return 1
+    [ "$(advertised_subver_verdict "" "$sv_want")" = foreign ] || return 1
     echo "deploy_verify selftest: PASS"
 }
 
@@ -553,8 +595,18 @@ verify_contract() {
             json_has_key "$net" "$key" ||
                 { last_err="getnetworkinfo missing $key: $net"; return 1; }
         done
-        printf '%s\n' "$net" | grep -q '"advertised_subver"[[:space:]]*:[[:space:]]*"/ZClassic23:0\.1\.0/"' ||
-            { last_err="node is not advertising native ZClassic23 subver: $net"; return 1; }
+        net_subver=$(printf '%s\n' "$net" |
+            sed -n 's/.*"advertised_subver"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' |
+            sed -n '1p')
+        case "$(advertised_subver_verdict "$net_subver" "$EXPECT_SOURCE_ID")" in
+            deployed|unstamped) ;;
+            stale)
+                last_err="STALE DEPLOY: node advertises build '$net_subver', not the deployed source id '$EXPECT_SOURCE_ID'"
+                return 1 ;;
+            *)
+                last_err="node is not advertising native ZClassic23 subver: $net"
+                return 1 ;;
+        esac
         network_verified=1
     fi
 

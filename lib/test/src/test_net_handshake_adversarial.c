@@ -39,6 +39,7 @@
 #include "platform/time_compat.h"
 #include "sync/sync_state.h"
 #include "storage/topology_store.h"
+#include "util/clientversion.h"
 #include "util/safe_alloc.h"
 
 #include <stdio.h>
@@ -1031,6 +1032,301 @@ static int test_mempool_not_requested_during_ibd(void)
     return failures;
 }
 
+/* ── Published build identity ──────────────────────────────────────────
+ *
+ * A node states which build it is running by appending `(src:<64 hex>)` to
+ * its subversion string. These cases pin the three properties that make that
+ * safe to have on a network with no referee:
+ *
+ *   1. what we publish is the source identity the BUILD baked in, not
+ *      anything a running process was handed;
+ *   2. a peer that publishes nothing readable is "unknown" — never an error,
+ *      never a penalty, never a reason to treat it differently;
+ *   3. the handshake itself is unchanged, so a peer running the previous
+ *      build still connects in both directions.
+ *
+ * See net/version.h for the contract, including why this is INFORMATION and
+ * must never become a gate. */
+
+#define HS_ID_A "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+#define HS_ID_B "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+#define HS_ID_63 "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde"
+#define HS_ID_UPPER "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"
+#define HS_ID_NONHEX "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg"
+
+/* 1. What this binary publishes comes from the source identity the build
+ * baked into it — the same value zcl_build_source_id_sha256() reports and
+ * tools/scripts/source_identity_lib.sh reads back out of the executable.
+ * Nothing at run time can move it: it is a compile-time constant reached
+ * through the one accessor, with no environment, config, or RPC input. */
+static int test_published_build_identity_is_the_baked_source_id(void)
+{
+    int failures = 0;
+    TEST("build identity: the version message publishes this build's baked source id") {
+        struct hs_fixture f;
+        ASSERT(hs_fixture_setup(&f, false));
+
+        struct version_message ver;
+        msg_version_build(&ver, &f.mp, &f.node, 100);
+
+        /* What goes on the wire is exactly the advertised user agent. */
+        ASSERT(strcmp(ver.sub_version, msg_version_user_agent()) == 0);
+        ASSERT(strlen(ver.sub_version) < MAX_SUBVER_LENGTH);
+        ASSERT(strncmp(ver.sub_version, "/ZClassic23:0.1.0", 17) == 0);
+
+        char local[ZCL_BUILD_IDENTITY_BUFSIZE];
+        char wire[ZCL_BUILD_IDENTITY_BUFSIZE];
+        bool stamped = msg_version_local_build_identity(local, sizeof(local));
+        bool on_wire = msg_version_parse_build_identity(ver.sub_version, wire,
+                                                        sizeof(wire));
+
+        /* A stamped binary MUST publish its identity, and it must be the
+         * baked one verbatim. An unstamped binary publishes nothing rather
+         * than a token naming a build it cannot name. */
+        ASSERT_EQ(on_wire, stamped);
+        if (stamped) {
+            ASSERT(strcmp(local, zcl_build_source_id_sha256()) == 0);
+            ASSERT(strcmp(wire, zcl_build_source_id_sha256()) == 0);
+            ASSERT(strlen(wire) == ZCL_BUILD_IDENTITY_HEX_LEN);
+            printf("[published src:%s] ", wire);
+        } else {
+            ASSERT(strcmp(ver.sub_version, "/ZClassic23:0.1.0/") == 0);
+            ASSERT(local[0] == '\0');
+            ASSERT(wire[0] == '\0');
+            printf("[unstamped build: publishes no identity] ");
+        }
+
+        hs_fixture_teardown(&f);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* 2. Reader contract, driven directly. The parser sees untrusted remote
+ * bytes, so its refusals matter as much as its acceptances: every refusal
+ * must leave the caller with an empty string and a false, never a partial
+ * value the caller might print as if a peer had claimed it. */
+static int test_build_identity_reader_refuses_cleanly(void)
+{
+    int failures = 0;
+    TEST("build identity: reader refusals leave an empty value, never a partial one") {
+        char out[ZCL_BUILD_IDENTITY_BUFSIZE];
+        char small[ZCL_BUILD_IDENTITY_HEX_LEN]; /* one byte short */
+
+        memset(out, 'x', sizeof(out));
+        ASSERT(!msg_version_parse_build_identity(NULL, out, sizeof(out)));
+        ASSERT(out[0] == '\0');
+
+        ASSERT(!msg_version_parse_build_identity(
+            "/ZClassic23:0.1.0(src:" HS_ID_A ")/", NULL, 64));
+
+        memset(small, 'x', sizeof(small));
+        ASSERT(!msg_version_parse_build_identity(
+            "/ZClassic23:0.1.0(src:" HS_ID_A ")/", small, sizeof(small)));
+
+        memset(out, 'x', sizeof(out));
+        ASSERT(msg_version_parse_build_identity(
+            "/ZClassic23:0.1.0(src:" HS_ID_A ")/", out, sizeof(out)));
+        ASSERT(strcmp(out, HS_ID_A) == 0);
+
+        /* Local reader: same refusal shape on a too-small buffer. */
+        memset(out, 'x', sizeof(out));
+        ASSERT(!msg_version_local_build_identity(out, 8));
+        ASSERT(!msg_version_local_build_identity(NULL,
+                                                 ZCL_BUILD_IDENTITY_BUFSIZE));
+
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* 3. THE NON-GATING PROOF. Every one of these peers — two on different
+ * builds, one on today's build that publishes nothing, a legacy zcashd, a
+ * foreign implementation, and ten deliberately malformed tokens — must reach
+ * EXACTLY the same handshake outcome: connected, zero misbehaviour, no
+ * disconnect. The identity is read and reported; it decides nothing. The
+ * moment one of these rows diverges, the field has become a whitelist and
+ * this assertion fails. */
+
+struct hs_build_id_case {
+    const char *name;
+    const char *subver;
+    bool expect_known;
+    const char *expect_id;
+};
+
+static int test_peer_build_identity_is_read_but_never_gates(void)
+{
+    int failures = 0;
+    TEST("build identity: absent/malformed reads as unknown and is never penalised") {
+        char long_junk[220];
+        memset(long_junk, 'A', sizeof(long_junk) - 1);
+        long_junk[sizeof(long_junk) - 1] = '\0';
+
+        const struct hs_build_id_case cases[] = {
+            { "peer on some other build",
+              "/ZClassic23:0.1.0(src:" HS_ID_A ")/", true, HS_ID_A },
+            { "peer on yet another build",
+              "/ZClassic23:0.1.0(src:" HS_ID_B ")/", true, HS_ID_B },
+            { "today's build, publishes no identity",
+              "/ZClassic23:0.1.0/", false, NULL },
+            { "legacy zcashd", "/MagicBean:2.1.2/", false, NULL },
+            { "foreign implementation", "/Satoshi:0.11.2/", false, NULL },
+            { "empty token", "/ZClassic23:0.1.0(src:)/", false, NULL },
+            { "63 hex digits",
+              "/ZClassic23:0.1.0(src:" HS_ID_63 ")/", false, NULL },
+            { "65 hex digits",
+              "/ZClassic23:0.1.0(src:" HS_ID_A "0)/", false, NULL },
+            { "uppercase hex",
+              "/ZClassic23:0.1.0(src:" HS_ID_UPPER ")/", false, NULL },
+            { "non-hex payload",
+              "/ZClassic23:0.1.0(src:" HS_ID_NONHEX ")/", false, NULL },
+            { "unterminated token",
+              "/ZClassic23:0.1.0(src:" HS_ID_A "/", false, NULL },
+            { "token truncated at end of string",
+              "/ZClassic23:0.1.0(src:", false, NULL },
+            { "repeated opener", "(src:(src:(src:(src:", false, NULL },
+            { "malformed token followed by a good one",
+              "/ZClassic23:0.1.0(src:nope)(src:" HS_ID_B ")/", true, HS_ID_B },
+            { "long junk subversion", long_junk, false, NULL },
+        };
+
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+            struct hs_fixture f;
+            ASSERT(hs_fixture_setup(&f, true));
+
+            struct byte_stream payload;
+            hs_build_version_payload(&payload, PROTOCOL_VERSION,
+                                     0x9999999999999999ULL, cases[i].subver);
+            bool handled = hs_drive_message(&f.mp, &f.node, "version",
+                                            &payload);
+            stream_free(&payload);
+
+            char id[ZCL_BUILD_IDENTITY_BUFSIZE];
+            bool known = msg_version_parse_build_identity(f.node.clean_sub_ver,
+                                                          id, sizeof(id));
+
+            /* Identical outcome for every row — that is the whole claim. */
+            bool row_ok = handled &&
+                          !f.node.disconnect &&
+                          f.node.misbehavior == 0 &&
+                          f.node.state == PEER_HANDSHAKE_COMPLETE &&
+                          f.node.version == PROTOCOL_VERSION &&
+                          known == cases[i].expect_known &&
+                          (cases[i].expect_known
+                               ? strcmp(id, cases[i].expect_id) == 0
+                               : id[0] == '\0');
+            if (!row_ok)
+                printf("\n  row \"%s\": handled=%d disconnect=%d "
+                       "misbehavior=%d state=%d known=%d id=\"%s\"\n",
+                       cases[i].name, (int)handled, (int)f.node.disconnect,
+                       (int)f.node.misbehavior, (int)f.node.state, (int)known,
+                       id);
+
+            hs_fixture_teardown(&f);
+            ASSERT(row_ok);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* 4. WIRE COMPATIBILITY. The longer subversion must survive the exact
+ * version-message codec an older peer runs — the same compact-size length
+ * prefix and the same MAX_SUBVER_LENGTH bound, neither of which this change
+ * touches — and must still classify as a ZClassic23 peer through the same
+ * unmodified classifier. Driving our OWN advertised string through our own
+ * inbound handshake exercises serialize -> deserialize -> classify end to
+ * end, because that reader code is byte-for-byte the reader an older build
+ * is already running. */
+static int test_peer_advertising_the_new_subversion_still_handshakes(void)
+{
+    int failures = 0;
+    TEST("build identity: a peer advertising the stamped subversion handshakes unchanged") {
+        struct hs_fixture f;
+        ASSERT(hs_fixture_setup(&f, true));
+        const char *ua = msg_version_user_agent();
+
+        struct byte_stream payload;
+        hs_build_version_payload(&payload, PROTOCOL_VERSION,
+                                 0x9999999999999999ULL, ua);
+        ASSERT(hs_drive_message(&f.mp, &f.node, "version", &payload));
+        stream_free(&payload);
+
+        ASSERT(!f.node.disconnect);
+        ASSERT_EQ(f.node.misbehavior, 0);
+        ASSERT(f.node.state == PEER_HANDSHAKE_COMPLETE);
+
+        /* The string survived the wire codec byte for byte. */
+        ASSERT(strcmp(f.node.sub_ver, ua) == 0);
+        ASSERT(strcmp(f.node.clean_sub_ver, ua) == 0);
+
+        /* And the untouched classifier still recognises it. */
+        bool mb = true, z23 = false;
+        msg_version_classify_peer(f.node.sub_ver, NODE_NETWORK, &mb, &z23);
+        ASSERT(!mb);
+        ASSERT(z23);
+
+        struct hs_capture cap;
+        hs_capture_sent(f.peer_fd, &cap);
+        ASSERT(hs_captured_has_command(&cap, "version"));
+        ASSERT(hs_captured_has_command(&cap, "verack"));
+
+        hs_fixture_teardown(&f);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* 5. The reverse direction: a peer running TODAY's build sends exactly the
+ * subversion today's build sends, and must get the ordinary handshake plus a
+ * version message it can parse. Its deserializer bound is MAX_SUBVER_LENGTH
+ * and its length field is a compact size; assert what we put on the wire
+ * satisfies both. */
+static int test_previous_build_peer_still_interoperates(void)
+{
+    int failures = 0;
+    TEST("build identity: a peer on the previous build handshakes and gets a parseable version") {
+        struct hs_fixture f;
+        ASSERT(hs_fixture_setup(&f, true));
+
+        struct byte_stream payload;
+        hs_build_version_payload(&payload, PROTOCOL_VERSION,
+                                 0x9999999999999999ULL, "/ZClassic23:0.1.0/");
+        ASSERT(hs_drive_message(&f.mp, &f.node, "version", &payload));
+        stream_free(&payload);
+
+        ASSERT(!f.node.disconnect);
+        ASSERT_EQ(f.node.misbehavior, 0);
+        ASSERT(f.node.state == PEER_HANDSHAKE_COMPLETE);
+
+        struct hs_capture cap;
+        hs_capture_sent(f.peer_fd, &cap);
+        ASSERT(hs_find_command_header(&cap, "version") >= 0);
+
+        const char *ua = msg_version_user_agent();
+        size_t ua_len = strlen(ua);
+        ASSERT(ua_len < MAX_SUBVER_LENGTH);
+        /* A compact size below 253 is a single byte; anything larger would
+         * change the framing an old peer expects at this offset. */
+        ASSERT(ua_len < 253);
+
+        /* The advertised string appears verbatim on the wire, immediately
+         * preceded by its one-byte compact-size length. */
+        bool found = false;
+        for (size_t i = 1; i + ua_len <= cap.len && !found; i++) {
+            if (memcmp(cap.buf + i, ua, ua_len) != 0)
+                continue;
+            found = cap.buf[i - 1] == (uint8_t)ua_len;
+        }
+        ASSERT(found);
+
+        hs_fixture_teardown(&f);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* ── Entry point ───────────────────────────────────────────────── */
 
 int test_net_handshake_adversarial(void);
@@ -1055,6 +1351,11 @@ int test_net_handshake_adversarial(void)
     failures += test_mempool_requested_once_for_relay_peer();
     failures += test_mempool_not_requested_for_non_relay_peer();
     failures += test_mempool_not_requested_during_ibd();
+    failures += test_published_build_identity_is_the_baked_source_id();
+    failures += test_build_identity_reader_refuses_cleanly();
+    failures += test_peer_build_identity_is_read_but_never_gates();
+    failures += test_peer_advertising_the_new_subversion_still_handshakes();
+    failures += test_previous_build_peer_still_interoperates();
 
     return failures;
 }

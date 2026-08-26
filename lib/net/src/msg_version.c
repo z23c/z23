@@ -22,9 +22,11 @@
 #include "core/serialize.h"
 #include "util/timedata.h"
 #include "event/event.h"
+#include "util/clientversion.h"
 #include "util/log_macros.h"
 #include "jobs/reducer_frontier.h"  // lib-layer-ok:provable-tip-served-to-peers
 #include <errno.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -152,9 +154,113 @@ void msg_version_clear_external_ip_for_test(void)
 }
 #endif
 
+/* ── Published build identity ─────────────────────────────────────────
+ * See net/version.h for the contract and its limits. Nothing here allocates
+ * or logs, and the one piece of state is written exactly once under
+ * pthread_once and never mutated again, so any thread may call any of it at
+ * any point in the handshake. */
+
+#define ZCL_PRODUCT_UA_BASE "/ZClassic23:0.1.0"
+#define ZCL_BUILD_ID_OPEN "(src:"
+#define ZCL_BUILD_ID_OPEN_LEN (sizeof(ZCL_BUILD_ID_OPEN) - 1)
+
+/* The stamped form is 88 bytes; both forms must fit the wire field a peer
+ * reads them back into. Pin the bound instead of trusting it. */
+_Static_assert(sizeof(ZCL_PRODUCT_UA_BASE ZCL_BUILD_ID_OPEN ")/") +
+                   ZCL_BUILD_IDENTITY_HEX_LEN <= MAX_SUBVERSION_LENGTH,
+               "advertised subversion must fit MAX_SUBVERSION_LENGTH");
+
+/* Exactly ZCL_BUILD_IDENTITY_HEX_LEN lowercase hex characters starting at
+ * `s`, with no read past the terminator: '\0' is not a hex digit, so a short
+ * string fails on its own NUL. Uppercase is deliberately rejected — one
+ * spelling keeps peer values directly comparable to the local one. */
+static bool build_identity_hex_run(const char *s)
+{
+    if (!s)
+        return false;
+    for (size_t i = 0; i < ZCL_BUILD_IDENTITY_HEX_LEN; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+            return false;
+    }
+    return true;
+}
+
+static bool build_identity_is_exact(const char *s)
+{
+    return build_identity_hex_run(s) && s[ZCL_BUILD_IDENTITY_HEX_LEN] == '\0';
+}
+
+/* Formatted once, then immutable for the process lifetime. It cannot be a
+ * compile-time concatenation of ZCL_BUILD_SOURCE_ID: the Makefile passes that
+ * define to lib/util/src/clientversion.c ALONE (CACHED_CFLAGS filters it out
+ * of the shared flags so the object cache may reuse every other object across
+ * source epochs), so a second TU baking the macro would read "unknown" in a
+ * test build and could disagree with the one authority inside a single binary
+ * — exactly what util/clientversion.h warns about. Read the accessor. */
+static char g_advertised_subver[MAX_SUBVERSION_LENGTH];
+static pthread_once_t g_advertised_subver_once = PTHREAD_ONCE_INIT;
+
+static void advertised_subver_init_once(void)
+{
+    char id[ZCL_BUILD_IDENTITY_BUFSIZE];
+
+    /* An unstamped build publishes the bare product identity rather than a
+     * token naming a build it cannot name. The exactness check also means a
+     * malformed identity can never inject a '/' or ')' into the string. */
+    if (msg_version_local_build_identity(id, sizeof(id)))
+        snprintf(g_advertised_subver, sizeof(g_advertised_subver),
+                 ZCL_PRODUCT_UA_BASE ZCL_BUILD_ID_OPEN "%s)/", id);
+    else
+        snprintf(g_advertised_subver, sizeof(g_advertised_subver),
+                 ZCL_PRODUCT_UA_BASE "/");
+}
+
 const char *msg_version_user_agent(void)
 {
-    return "/ZClassic23:0.1.0/";
+    pthread_once(&g_advertised_subver_once, advertised_subver_init_once);
+    return g_advertised_subver;
+}
+
+bool msg_version_local_build_identity(char *out, size_t outlen)
+{
+    const char *id = zcl_build_source_id_sha256();
+
+    if (!out || outlen < ZCL_BUILD_IDENTITY_BUFSIZE)
+        return false;
+    out[0] = '\0';
+    if (!build_identity_is_exact(id))
+        return false;
+    memcpy(out, id, ZCL_BUILD_IDENTITY_HEX_LEN + 1u);
+    return true;
+}
+
+bool msg_version_parse_build_identity(const char *subver, char *out,
+                                      size_t outlen)
+{
+    const char *scan;
+
+    if (!out || outlen < ZCL_BUILD_IDENTITY_BUFSIZE)
+        return false;
+    out[0] = '\0';
+    if (!subver)
+        return false;
+
+    /* `subver` is a NUL-terminated copy of remote input (node->clean_sub_ver
+     * is always terminated, see process_version). strstr therefore cannot run
+     * off the end, and build_identity_hex_run stops at the terminator. */
+    for (scan = strstr(subver, ZCL_BUILD_ID_OPEN); scan != NULL;
+         scan = strstr(scan + 1, ZCL_BUILD_ID_OPEN)) {
+        const char *hex = scan + ZCL_BUILD_ID_OPEN_LEN;
+        if (!build_identity_hex_run(hex))
+            continue;
+        if (hex[ZCL_BUILD_IDENTITY_HEX_LEN] != ')')
+            continue;
+        memcpy(out, hex, ZCL_BUILD_IDENTITY_HEX_LEN);
+        out[ZCL_BUILD_IDENTITY_HEX_LEN] = '\0';
+        return true;
+    }
+    return false;
 }
 
 static bool msg_version_subver_is_zcl23(const char *subver)

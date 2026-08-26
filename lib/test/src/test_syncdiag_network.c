@@ -7,6 +7,12 @@
 #include "net/onion_stream.h"
 #include "net/tor_integration.h"
 
+/* A fixed 64-hex stand-in for some other node's baked source identity. It is
+ * deliberately NOT this binary's own: the point of the field is that a
+ * stranger's node can name a build it is not itself running. */
+#define SYNCDIAG_PEER_SRC_ID \
+    "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
+
 int syncdiag_cases_network(void)
 {
     int failures = 0;
@@ -1014,6 +1020,17 @@ int syncdiag_cases_network(void)
         ok = ok && outbound != NULL && inbound != NULL;
         if (inbound)
             inbound->accepted_local_port = 8055;
+        /* One peer publishes a build identity in its subversion, one does
+         * not (the fixture's default is the pre-change string an older node
+         * still sends). getpeerinfo must report both — the identity for the
+         * first, "unknown" for the second — so a stranger can ask their own
+         * node what its peers are running without logging into any of them. */
+        if (outbound) {
+            snprintf(outbound->sub_ver, sizeof(outbound->sub_ver), "%s",
+                     "/ZClassic23:0.1.0(src:" SYNCDIAG_PEER_SRC_ID ")/");
+            snprintf(outbound->clean_sub_ver, sizeof(outbound->clean_sub_ver),
+                     "%s", outbound->sub_ver);
+        }
         if (!ok)
             goto syncdiag_net_split_done;
         if (ok) {
@@ -1172,6 +1189,17 @@ int syncdiag_cases_network(void)
              !json_get_bool(json_get(peer1, "source_is_loopback"));
         ok = ok && peer1 &&
              !json_get_bool(json_get(peer1, "onion_ingress_candidate"));
+        /* Published build identity, read back by a stranger's own node. */
+        ok = ok && peer0 && json_get_bool(json_get(peer0, "source_id_known"));
+        ok = ok && peer0 &&
+             strcmp(json_get_str(json_get(peer0, "source_id_sha256")),
+                    SYNCDIAG_PEER_SRC_ID) == 0;
+        /* Absence is a normal answer, spelled the same way an unstamped
+         * local build spells it in getnetworkinfo — never an error. */
+        ok = ok && peer1 && !json_get_bool(json_get(peer1, "source_id_known"));
+        ok = ok && peer1 &&
+             strcmp(json_get_str(json_get(peer1, "source_id_sha256")),
+                    "unknown") == 0;
 
 syncdiag_net_split_done:
         json_free(&params);
