@@ -411,58 +411,22 @@ void vcs_zcode_dht_records_sweep(struct vcs_zcode_dht_service *service,
   }
 }
 
-/* Namespace governance, decided entirely from signed grants the store
- * already holds. A namespace under one master key becomes governed the
- * moment the store holds a live AGENT_SCOPE grant for it and reverts to
- * ungoverned only when every grant in it has lapsed — the bounded-time
- * authority model the rest of the DHT already uses. While governed, only
- * the founder (the signer of the lowest-sequence live grant — the operator
- * key that founded governance) and the keys its live grants name may
- * publish there, and only the founder may mint further grants, so a
- * granted agent can never widen authority, its own included. The master
- * stays the trust root: a key it never delegated still fails signature
- * verification before this check runs. */
-#define SERVICE_SCOPE_GRANTED_MAX 32u
-
-static bool records_scope_allows(
-    const struct vcs_zcode_dht_service *service,
-    const struct vcs_zcode_dht_record *record, uint64_t now_unix)
-{
-  uint8_t founder[32], granted[SERVICE_SCOPE_GRANTED_MAX][32];
-  size_t live = vcs_zcode_dht_record_store_scope_grants(
-      service->record_store, record->namespace_name,
-      record->delegation.doc.master_pubkey, now_unix, founder,
-      &granted[0][0], SERVICE_SCOPE_GRANTED_MAX);
-  if (!live)
-    return true;
-  if (memcmp(record->delegation.online_pubkey, founder, 32) == 0)
-    return true;
-  /* More live grants than the table holds: the founder still governs, but
-   * membership past the table is unknowable — fail closed rather than
-   * admit an unproven key. */
-  if (live > SERVICE_SCOPE_GRANTED_MAX)
-    return false;
-  if (record->kind == VCS_ZCODE_DHT_RECORD_AGENT_SCOPE)
-    return false;
-  for (size_t i = 0; i < live; i++)
-    if (memcmp(record->delegation.online_pubkey, granted[i], 32) == 0)
-      return true;
-  return false;
-}
-
 enum vcs_zcode_dht_record_store_result vcs_zcode_dht_service_record_admit(
     struct vcs_zcode_dht_service *service,
     const struct vcs_zcode_dht_record *record, struct vcs_zcode_dht_time now)
 {
   if (!service || !service->enabled || !service->record_store)
     return VCS_ZCODE_DHT_RECORD_STORE_INVALID;
+  /* A generic online delegation does not prove that its holder may create
+   * namespace governance. Keep the reserved wire kind inert until a
+   * master-signed namespace credential supplies that missing authority. */
+  if (record && record->kind == VCS_ZCODE_DHT_RECORD_AGENT_SCOPE)
+    return VCS_ZCODE_DHT_RECORD_STORE_SCOPE;
   if (!vcs_zcode_dht_records_policy_allows(
           service, VCS_ZCODE_SOVEREIGNTY_STORE, record) ||
       !vcs_zcode_dht_records_policy_allows(
           service, VCS_ZCODE_SOVEREIGNTY_INDEX, record))
     return VCS_ZCODE_DHT_RECORD_STORE_INVALID;
-  if (!records_scope_allows(service, record, now.wall_unix))
-    return VCS_ZCODE_DHT_RECORD_STORE_SCOPE;
   enum vcs_zcode_dht_record_store_result result =
       vcs_zcode_dht_record_store_put(service->record_store, record,
                                      now.wall_unix);

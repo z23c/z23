@@ -389,6 +389,14 @@ static bool rpc_sendrawtransaction(const struct json_value *params, bool help,
                 msg = "TX rejected: non-final lock time"; break;
             case MEMPOOL_ACCEPT_EXPIRING_SOON:
                 msg = "TX rejected: expiry height is too close"; break;
+            case MEMPOOL_ACCEPT_UNVERIFIABLE:
+                /* Say what actually happened. Reporting this as "bad
+                 * signature, proof, or structure" would send an operator
+                 * hunting a defect in a transaction that is probably fine. */
+                msg = "TX not accepted: shielded proof verification is "
+                      "unavailable right now (verifying keys still loading). "
+                      "The transaction was not judged invalid — retry shortly";
+                break;
             default:
                 msg = "TX rejected: failed to add to mempool"; break;
             }

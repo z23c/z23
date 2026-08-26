@@ -205,16 +205,25 @@ int t_quality_job_guard(void)
  * zclassicd, no real chainstate/bundle, no network ports. It does not (and
  * cannot) prove anything about the real importer/installer — only that the
  * driver gates correctly the moment a real cure runs. See the script's own
- * header for the full rationale. Bounded at 180s (see
- * run_gate_script_timeout). */
+ * header for the full rationale.
+ *
+ * Watched for PROGRESS, not runtime (run_gate_script_watched): a saturated or
+ * slow-disk box takes longer and still passes, and a genuine wedge is
+ * reported as a distinct finding from a failed assertion. */
 int t_import_copy_prove_selftest(void)
 {
     int failures = 0;
     TEST("[tooling] import-copy-prove driver gates import+bundle modes "
          "correctly (hermetic)") {
-        ASSERT(run_gate_script_timeout(IMPORT_COPY_PROVE_SELFTEST_REL,
-                                       IMPORT_COPY_PROVE_SELFTEST_TIMEOUT_SECS)
-               == 0);
+        int rc = run_gate_script_watched(IMPORT_COPY_PROVE_SELFTEST_REL,
+                                         GATE_SELFTEST_MAX_SILENT_SECS,
+                                         GATE_SELFTEST_SILENCE_DERIVATION);
+        /* Two assertions, on purpose: the first names a HANG (diagnosed above
+         * with the measured silence and the load average), the second names a
+         * LOGIC failure. One combined assertion could not tell them apart,
+         * and "probably just the flake" starts exactly there. */
+        ASSERT(rc != GATE_SCRIPT_WEDGED);
+        ASSERT(rc == 0);
         PASS();
     } _test_next:;
     return failures;
@@ -227,15 +236,34 @@ int t_import_copy_prove_selftest(void)
  * RPC-never-answers, a denylisted work dir) into the correct verdict and exit
  * code, using a faked $ZCL_NODE_BIN fixture script: no real node binary, no
  * real chain state, no live checkpoint bundle. Mirrors
- * t_import_copy_prove_selftest's run_gate_script_timeout convention. */
+ * t_import_copy_prove_selftest's run_gate_script_watched convention.
+ *
+ * ── THIS TEST USED TO BE LOAD-SENSITIVE. IT IS NOT ANY MORE. ──────────────
+ * Measured on the same commit and the same binary: FAILED at 48s inside a
+ * 32-worker suite run, PASSED at 64.0s run standalone immediately afterwards.
+ * The only variable was machine load. Two independent causes, both fixed at
+ * the source rather than by widening a bound:
+ *   1. the fixture published H* on a wall clock (one height per real second)
+ *      while the driver asserts it saw H* land exactly at the checkpoint, so
+ *      a slow first sample missed the window forever. The fixture now
+ *      advances one height per OBSERVED SAMPLE — a count, not a duration.
+ *   2. the driver's sample loop consulted its deadline before taking any
+ *      sample, so a busy box could skip the observation entirely. It now
+ *      takes the two samples its predicate needs first (MIN_SAMPLES) and
+ *      consults the clock second.
+ * The script's own selftest now carries an assertion that pins this: a run
+ * with an ALREADY-EXPIRED window (--deadline=0) must still PASS in exactly
+ * two samples. That is the regression test for the flake. */
 int t_fresh_boot_weld_prove_selftest(void)
 {
     int failures = 0;
     TEST("[tooling] fresh-boot-weld-prove driver gates the zero-flag weld "
          "boot outcomes correctly (hermetic)") {
-        ASSERT(run_gate_script_timeout(FRESH_BOOT_WELD_PROVE_SELFTEST_REL,
-                                       FRESH_BOOT_WELD_PROVE_SELFTEST_TIMEOUT_SECS)
-               == 0);
+        int rc = run_gate_script_watched(FRESH_BOOT_WELD_PROVE_SELFTEST_REL,
+                                         GATE_SELFTEST_MAX_SILENT_SECS,
+                                         GATE_SELFTEST_SILENCE_DERIVATION);
+        ASSERT(rc != GATE_SCRIPT_WEDGED);  /* a hang — diagnosed on stderr */
+        ASSERT(rc == 0);                   /* a logic verdict */
         PASS();
     } _test_next:;
     return failures;

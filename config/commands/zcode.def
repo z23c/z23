@@ -4367,21 +4367,29 @@ ZCL_COMMAND_READY_COMMAND(
 
 ZCL_COMMAND_READY_COMMAND(
     "zcode.package.rollback", "zcode.package", "",
-    "Re-activate the previous generation",
-    "Reads the append-only generation log for `name` "
-    "(publisher/package) and re-activates the newest DISTINCT root older "
-    "than the active one, by the same atomic rename-based symlink swap "
-    "install uses. History is never rewritten: the rollback appends a new "
-    "generation naming the older root, and BOTH installed trees stay on "
-    "disk. `no-previous-generation` means only one generation was ever "
-    "active; `never-installed` means this name has no generation log "
-    "here. Rollback re-points the active symlink only — it never rebuilds "
-    "and never re-runs the worker, so it is instant.",
+    "Go back one step: re-activate the previous generation",
+    "Reads the append-only generation log and re-activates the newest "
+    "DISTINCT root older than the active one, by the same atomic "
+    "rename-based symlink swap install uses. `name` is OPTIONAL: with no "
+    "name this goes back one step on the package whose active version "
+    "changed most recently, so undoing a change never requires knowing a "
+    "name, a hash, or a path (`selected_by_default` reports that it chose). "
+    "`to_root` is the exact 32-byte identity now active. History is never "
+    "rewritten: the rollback appends a new generation naming the older "
+    "root, and BOTH installed trees stay on disk. The log keeps its newest "
+    "64 generations, evicting oldest-first, so it is bounded and a full log "
+    "can never refuse a rollback. `no-previous-generation` means only one "
+    "generation was ever active; `never-installed` means this name has no "
+    "generation log here; `nothing-installed` means no package has ever "
+    "been activated. Rollback re-points the active symlink only — it never "
+    "rebuilds, never re-runs the worker, never uses the network, and never "
+    "reads the version it is leaving, so it works when that version is "
+    "broken or deleted outright.",
     0,
-    "zcode,package,rollback,revert,generation,activate,previous",
+    "zcode,package,rollback,revert,undo,generation,activate,previous",
     "zcl.zcode_package_rollback.input.v1", "zcl.zcode_package_rollback.v1",
-    "name,now_unix,datadir", "name",
-    "z23 zcode package rollback --input='{\"name\":\"alice/ringbuffer\"}'",
+    "name,now_unix,datadir", "",
+    "z23 zcode package rollback --input='{}'",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
@@ -4488,6 +4496,60 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
     ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     zcl_native_handle_zcode_node_join)
+
+/* ── zcode.node.verify — "the same bytes", checked, not taken on faith ──
+ *
+ * The one command a user runs to answer: did I get the same bytes as the
+ * publisher, produced by MY OWN machine? It rebuilds the node here and
+ * byte-compares. It NEVER checks a published hash against the file it was
+ * published beside — lib/vcs/node_reproduce.c refuses to compare unless one
+ * receipt is RECEIVED and the other LOCAL_REBUILD, so no argument list
+ * makes it grade a publisher against themselves.
+ *
+ * `partial` is a first-class verdict, not a softened pass: the vendored
+ * static archives under vendor/lib/ are not rebuilt by this run, so today
+ * the honest ceiling for the shipped node is PARTIAL with every uncovered
+ * component named. Silently dropping them to print `match` is exactly how
+ * a green result stops meaning anything. */
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.node.verify", "zcode.node", "",
+    "Rebuild this node here and compare bytes",
+    "Answers ONE question: are the bytes you are running the bytes YOUR "
+    "machine builds from source? It hashes the artifact you have (by "
+    "default this process's own executable), rebuilds z23 from "
+    "`source_dir` in an isolated tree under `scratch_dir` via "
+    "tools/scripts/node_reproduce.sh, and byte-compares. It asks no "
+    "server, and it never compares a published hash against the file it "
+    "was published beside — that check has one participant and proves "
+    "nothing, so the comparator refuses it by construction. `verdict` is "
+    "the answer, never the envelope status: `match` (every artifact "
+    "byte-identical, nothing uncovered), `partial` (everything comparable "
+    "matched, and the named `unverified` components were NOT rebuilt here "
+    "— NOT a pass), `source-differs` (this checkout is not the source that "
+    "binary came from, which says nothing about the publisher), "
+    "`toolchain-differs` (same source, different compiler — the ordinary "
+    "reason two honest builds differ), `claim-false` (same source AND the "
+    "same recorded toolchain, different bytes: the artifact is not what "
+    "this source and toolchain produce), `undiagnosed` (bytes differ and "
+    "an identity is missing, so it names neither rather than guessing). "
+    "The toolchain of BOTH sides is read the same way, from each ELF's "
+    ".comment section. Refusals name the rule: ARTIFACT_MISSING, "
+    "ARTIFACT_UNREADABLE, NO_SOURCE_TREE, BAD_PROFILE, REBUILD_FAILED, "
+    "REBUILD_RECEIPT_INVALID. Costs a full node build; it starts, stops "
+    "and signals nothing.",
+    16384,
+    "verify,reproduce,bytes,rebuild,supply-chain,trust,artifact,toolchain",
+    "zcl.zcode_node_verify.input.v1", "zcl.zcode_node_verify.v1",
+    "artifact,source_dir,scratch_dir,profile,jobs,timeout_seconds", "",
+    "z23 zcode node verify --input='{\"source_dir\":\"/path/to/zclassic23\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_BACKGROUND, ZCL_COMMAND_COST_HIGH,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_zcode_node_verify)
 
 ZCL_COMMAND_PLANNED_COMMAND(
     "zcode.node.update.status", "zcode.node.update", "update",

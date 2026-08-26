@@ -2086,6 +2086,10 @@ void sprout_phgr_set_vk(struct ppzksnark_vk *vk)
 #ifdef ZCL_TESTING
 const struct ppzksnark_vk *sprout_test_published_phgr_vk(void) { return phgr_vk; }
 #endif
+bool sprout_phgr_vk_loaded(void)
+{
+    return phgr_vk != NULL;
+}
 
 /* Pack bits (MSB-first) into Fr scalars (253 bits per scalar).
  * Matches libsnark's pack_bit_vector_into_field_element_vector

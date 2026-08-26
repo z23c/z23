@@ -1270,6 +1270,24 @@ AGENT_IMPACT_RULE("docs/CODE_FEARLESSLY.md|AGENTS.md", "make_lint_gates")
  * nothing looking. Mapped so an edit here can never reach the push gate
  * having run zero test groups. */
 AGENT_IMPACT_RULE("tools/scripts/source_identity_lib.sh|tools/deploy_verify.sh|lib/util/src/clientversion.c|lib/util/include/util/clientversion.h|app/controllers/src/agent_runtime_controller.c|lib/test/src/test_source_identity_authority.c", "source_identity_authority make_lint_gates")
+/* LANE anti-flake / load-independent verdicts. A test graded on wall-clock
+ * duration reports on the MACHINE, not the code — measured on this tree, the
+ * same commit and binary FAILED at 48s under a 32-worker run and PASSED at
+ * 64.0s standalone. Three things move together here and none of them can be
+ * changed safely alone:
+ *   * the two fixture/driver pairs whose verdicts are now count-graded rather
+ *     than clock-graded (a fixture that publishes state on a wall clock, and
+ *     a driver whose deadline must never cut off the observation the verdict
+ *     needs — MIN_SAMPLES);
+ *   * the two PROGRESS watchdogs that replaced total-duration ceilings, one
+ *     per-gate-script and one per-test-group. They bound SILENCE, so a slow
+ *     or saturated box keeps passing and a real wedge is still reported —
+ *     as a wedge, distinctly from a failed assertion;
+ *   * the lint gate that refuses NEW clock-graded assertions, plus its closed
+ *     allowlist.
+ * Mapped so an edit to any of them re-runs the groups that would notice a
+ * regression, instead of reaching the push gate having run nothing. */
+AGENT_IMPACT_RULE("tools/lint/check_no_wallclock_assertion.sh|tools/lint/wallclock_assertion_allowlist.txt|tools/scripts/fresh-boot-weld-prove.sh|tools/scripts/fresh-boot-weld-prove-selftest.sh|lib/test/src/lint_gate_helpers.c|lib/test/src/lint_gate_selftests.h|lib/test/src/lint_gate_hygiene_selftests.c|lib/test/src/test_parallel.c|lib/test/src/test_binary_ab_fallback.c|lib/test/src/test_self_backtrace.c|lib/test/src/test_onion_bootstrap.c|tools/dev/build-epoch-selftest.sh|tools/dev/checkout-lock-selftest.sh", "make_lint_gates binary_ab_fallback self_backtrace onion_bootstrap")
 /* LANE reproducible-build: the flag that makes a compile repeat, the gate that
  * keeps it wired, and the end-to-end proof that a second builder gets the same
  * bytes. They move together because each one is half of the same claim: a node
@@ -1337,3 +1355,70 @@ AGENT_IMPACT_RULE("tools/lint/check_outparam_init_before_return.sh|tools/lint/ou
  * bridge, and the lint-gate group because check_hotswap_swappable_shape.sh
  * carries a per-file island admission that its self-test fixtures pin. */
 AGENT_IMPACT_RULE("app/controllers/src/policy_native_handlers.c|app/controllers/include/controllers/policy_native_handlers.h|app/controllers/src/policy_native_resident.c|app/controllers/include/controllers/policy_native_resident.h|lib/vcs/src/package_policy.c|lib/vcs/include/vcs/package_policy.h|lib/test/src/test_hotswap_policy_module.c|config/hotswap_islands.def|config/hotswap_probe_cases.def|tools/lint/check_hotswap_swappable_shape.sh", "hotswap_policy_module hotswap_module_v2 hotswap_module hotswap_loader command_registry_catalog native_api_contract make_lint_gates")
+
+/* LANE late-proving-params: the seam that lets a node which booted on the
+ * compiled-in verifying keys pick up the PROVING parameters later, without a
+ * restart. Three files move together and must be tested together:
+ * params_init.c owns the guard that used to turn that node away and the
+ * once-published-never-replaced rule that makes a late load safe beside live
+ * consensus verifiers; sapling_prover_native.c owns the readiness latch that
+ * gates every shielded send, including its test-only reset; params_init.h
+ * states the contract a fetcher calls. Changing the readiness latch without
+ * re-running the group is exactly how a fail-closed send guard turns into a
+ * 192-byte all-zero proof. */
+AGENT_IMPACT_RULE("lib/sapling/src/params_init.c|lib/sapling/include/sapling/params_init.h|lib/sapling/src/sapling_prover_native.c|lib/sapling/include/sapling/sapling_prover.h|lib/test/src/test_params_vk_embedded.c", "params_vk_embedded native_spend_proof sapling_prover_rng_determinism shielded_payment_gate")
+/* LANE dos-fairness: "this transaction is invalid" and "I could not check
+ * this transaction" are two different answers, and every shielded verifier
+ * below fail-closes to the same `false` for both. While the verifying keys
+ * are absent — they load on a background boot thread, and sapling_free_params
+ * clears them again — a peer relaying a perfectly good shielded transaction
+ * was charged ban-score for our own startup state. enum
+ * contextual_check_verdict carries the distinction from the site that knows
+ * it out to the two sites that act on it: peer scoring in the relay path, and
+ * the block job's permanent-vs-resurrectable reject status (which previously
+ * decided it by string-comparing reject reasons — a hand-written list that
+ * would silently rot the moment a reason was reworded or added).
+ *
+ * These files move together because they are one chain of custody for that
+ * distinction: the predicate that answers "do we hold the key material"
+ * (bn254.c for PHGR13, whose key is NOT covered by sapling_params_loaded),
+ * the check that produces the verdict, the two enums that carry it across
+ * layers, and the consumers that must never turn UNVERIFIABLE into either an
+ * acceptance or an offence. Change one without re-running the group and the
+ * node can silently go back to punishing honest peers — or, far worse, start
+ * accepting a transaction it never verified. */
+AGENT_IMPACT_RULE("lib/validation/src/contextual_check_tx.c|lib/validation/include/validation/contextual_check_tx.h|lib/validation/src/accept_to_mempool.c|lib/validation/include/validation/accept_to_mempool.h|lib/validation/src/check_block.c|lib/validation/include/validation/check_block.h|lib/net/src/msg_tx.c|lib/net/src/msgprocessor.c|lib/net/src/net.c|lib/net/src/msg_headers.c|lib/net/include/net/msg_internal.h|lib/net/include/net/net.h|lib/sapling/src/bn254.c|lib/sapling/include/sapling/bn254.h|app/jobs/src/script_validate_contextual.c|lib/wallet/src/wallet.c|lib/wallet/src/wallet_reaccept.c|app/controllers/src/transaction_controller.c|lib/test/src/test_peer_dos_fairness.c", "peer_dos_fairness peer_scoring mempool accept_to_mempool validation transaction net make_lint_gates")
+/* LANE undo-one-step: the accept-and-go-back path. The generation log is the
+ * SOLE record of which version a user was running before the one they are
+ * running now, so its codec, the service that appends and walks it, the
+ * typed command that exposes "go back one step", and the test that breaks a
+ * version before reverting it all move together. Split them and a change to
+ * the retention bound can reach the push gate without the failure-case
+ * rollback ever running — which is the only test that proves the property. */
+AGENT_IMPACT_RULE("lib/vcs/include/vcs/package_install.h|lib/vcs/src/package_install.c|app/services/src/package_lifecycle.c|app/services/include/services/package_lifecycle.h|tools/command/native_zcode_add_command.c|lib/test/src/test_zcode_add.c|config/commands/zcode.def", "zcode_add zcode_verify command_registry_catalog native_api_contract make_lint_gates")
+/* LANE node-byte-verification: `z23 zcode node verify` — the one command a
+ * user runs to answer "did I get the same bytes as the publisher, produced
+ * by my own machine?". These files move together because they are one
+ * claim split three ways and each half is worthless alone: the pure
+ * comparator that REFUSES to grade a publisher against themselves, the
+ * shell driver that produces local bytes and names every component it could
+ * not rebuild, and the typed leaf that reads both toolchain identities the
+ * SAME way. Loosen the comparator's producer rule, or let the driver stop
+ * emitting an `unverified` row, and the command keeps printing a verdict
+ * that no longer means anything — which is exactly the failure the lane
+ * exists to prevent, so an edit here must never reach the push gate having
+ * run zero test groups. */
+AGENT_IMPACT_RULE("lib/vcs/src/node_reproduce.c|lib/vcs/include/vcs/node_reproduce.h|tools/command/native_zcode_node_verify_command.c|tools/scripts/node_reproduce.sh|lib/test/src/test_node_reproduce.c|lib/test/src/test_zcode_node_verify.c", "node_reproduce zcode_node_verify zcode_node_command command_registry_catalog native_api_contract make_lint_gates")
+/* LANE cold-join sovereignty: the one gate that turns "a stranger can join
+ * with no account, no DNS name and no certificate authority" from six
+ * scattered facts into a single runnable proof. It reads the compiled-in
+ * bootstrap set (core/chainparams), the embedded Sapling verifying keys
+ * (validation armed, proving deliberately absent), the baked ROM keystone,
+ * and the MUST-NEVER-FORK consensus entry point. Those files move together
+ * because emptying any one of them silently converts a permissionless join
+ * into a network dependency, and the assertion that would have caught it
+ * lives here. connman.c is named because it holds the two getaddrinfo call
+ * sites the P1 assertion reasons about — the DNS-seed loop that mainnet
+ * keeps at zero entries, and the .onion guard that returns before the
+ * resolver. */
+AGENT_IMPACT_RULE("lib/test/src/test_cold_join_sovereign.c|core/chainparams/src/chainparams.c|core/chainparams/src/checkpoints.c|lib/sapling/src/params_vk_embedded.c|lib/net/src/connman.c", "cold_join_sovereign seed_bootstrap_doors params_vk_embedded net make_lint_gates")

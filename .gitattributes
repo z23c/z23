@@ -60,3 +60,8 @@ vendor/typography/stb_truetype.h -whitespace
 *.timer      linguist-generated
 *.scenario   linguist-generated
 *.fixture    linguist-generated
+
+# Impact rules are an unordered SET of independent mappings that every lane
+# appends to. Concurrent appends are not semantically conflicting, so take the
+# union rather than stopping the merge on a textual collision at EOF.
+app/controllers/include/controllers/agent_impact_rules.def merge=union

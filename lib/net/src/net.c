@@ -309,14 +309,23 @@ int net_message_read_data(struct net_message *msg,
         size_t prev = atomic_fetch_add(&g_recv_total_bytes, delta);
         if (prev + delta > cap) {
             atomic_fetch_sub(&g_recv_total_bytes, delta);
-            LOG_ERR("net",
-                    "recv queue budget exhausted: cap=%zu used=%zu add=%zu",
-                    cap, prev, delta);
+            /* NET_FRAME_ERR_LOCAL, not LOG_ERR's -1: this budget is
+             * process-wide, so it can be full because of OTHER connections
+             * or because this box is busy. The message itself was legal.
+             * Refuse the frame (the resource bound holds) but do not tell
+             * the peer scorer that this peer sent something bad. */
+            ZCL_LOG_EMIT_AT(ZCL_LOG_ERROR,
+                    "[net] recv queue budget exhausted: cap=%zu used=%zu "
+                    "add=%zu\n", cap, prev, delta);
+            return NET_FRAME_ERR_LOCAL;
         }
         uint8_t *tmp = zcl_realloc(msg->recv_data, alloc, "msg_recv_data");
         if (!tmp) {
             atomic_fetch_sub(&g_recv_total_bytes, delta);
-            LOG_ERR("net", "realloc failed for recv_data: size=%zu", alloc);
+            /* Allocation failure is a fact about this machine. */
+            ZCL_LOG_EMIT_AT(ZCL_LOG_ERROR,
+                    "[net] realloc failed for recv_data: size=%zu\n", alloc);
+            return NET_FRAME_ERR_LOCAL;
         }
         msg->recv_data = tmp;
         msg->recv_alloc = alloc;
@@ -662,12 +671,21 @@ bool p2p_node_receive_bytes(struct p2p_node *node, const char *data,
              * from the message phase: read_header returns -1 BEFORE setting
              * msg->in_data (bad start-magic / size > MAX_SIZE => a header-level
              * offence, weight 50), whereas read_data returns -1 with in_data
-             * already set (payload over MAX_PROTOCOL_MESSAGE_LENGTH / budget /
-             * realloc => a payload offence, weight 20). The connman receive
-             * caller drains + scores this exactly once. */
-            atomic_store(&node->framing_offence,
-                         msg->in_data ? (int)PEER_OFFENCE_INVALID_PAYLOAD
-                                      : (int)PEER_OFFENCE_INVALID_HEADER);
+             * already set (payload over MAX_PROTOCOL_MESSAGE_LENGTH => a
+             * payload offence, weight 20). The connman receive caller drains +
+             * scores this exactly once.
+             *
+             * NET_FRAME_ERR_LOCAL is deliberately NOT tagged: the recv budget
+             * is shared process-wide and realloc answers to the whole machine,
+             * so those two failures say something about this box, not about
+             * this peer. Previously they were folded in here, and a node under
+             * memory pressure — or simply one with many busy connections —
+             * handed INVALID_PAYLOAD to whichever honest peers happened to be
+             * mid-message. The frame is still refused either way. */
+            if (handled != NET_FRAME_ERR_LOCAL)
+                atomic_store(&node->framing_offence,
+                             msg->in_data ? (int)PEER_OFFENCE_INVALID_PAYLOAD
+                                          : (int)PEER_OFFENCE_INVALID_HEADER);
             printf("  PARSE FAIL at msg_idx=%d offset=%u/%u in_data=%d "
                    "hdr_pos=%u data_pos=%u nMessageSize=%u "
                    "next4: %02x%02x%02x%02x\n",
@@ -1501,15 +1519,19 @@ static bool is_trusted_peer(const struct p2p_node *node)
  * gets the ordinary full-length ban: this predicate is false the moment a
  * second peer exists.
  *
- * TRYLOCK, deliberately. peer_misbehaving() has a caller that is already
- * holding cs_nodes while it walks the node table — the header-span timeout
- * sweep in msg_headers.c (`peer_scoring_record(..., PEER_OFFENCE_TIMEOUT,
- * "header span deadline missed")`) — so a blocking acquire here would
- * self-deadlock the message thread the first time accumulated timeouts
- * crossed the ban threshold. Failing to acquire yields `false`, i.e. the
- * ORDINARY full-length ban: this function can only ever soften the outcome,
- * never harden it, so a missed acquire is exactly the pre-change behaviour
- * and never a new failure mode. */
+ * TRYLOCK, deliberately. peer_misbehaving() can be reached from a caller
+ * that is already holding cs_nodes while it walks the node table, so a
+ * blocking acquire here would self-deadlock the message thread the first
+ * time accumulated score crossed the ban threshold. Failing to acquire
+ * yields `false`, i.e. the ORDINARY full-length ban: this function can only
+ * ever soften the outcome, never harden it, so a missed acquire is exactly
+ * the pre-change behaviour and never a new failure mode.
+ *
+ * (The example this comment used to name — the header-span timeout sweep in
+ * msg_headers.c — no longer scores at all: missing a wall-clock deadline is
+ * slowness, not misbehaviour, and is now handled by reclaiming the span. The
+ * trylock stays because the hazard is structural, not specific to that one
+ * caller.) */
 static bool ban_would_strand_us(struct net_manager *nm,
                                 const struct p2p_node *node)
 {

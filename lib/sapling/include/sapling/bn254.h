@@ -184,6 +184,17 @@ void sprout_phgr_set_vk(struct ppzksnark_vk *vk);
 /* See sapling_test_published_spend_vk in sapling.h. */
 const struct ppzksnark_vk *sprout_test_published_phgr_vk(void);
 #endif
+/* True iff a PHGR13 verification key is installed, i.e. iff a PHGR13
+ * JoinSplit proof can actually be CHECKED right now.
+ *
+ * This is deliberately separate from sapling_params_loaded(): the PHGR13
+ * key lives in its own file (sprout-verifying.key) and, off mainnet, a
+ * failure to load it is non-fatal — params_init.c still publishes
+ * sapling_params_loaded()==true with this key absent. Without this
+ * predicate a caller cannot distinguish "this PHGR13 proof is forged"
+ * from "we hold no key to judge it with", because sprout_verify_phgr13()
+ * fail-closes to the same `false` in both cases. */
+bool sprout_phgr_vk_loaded(void);
 
 /* Verify a Sprout PHGR13 JoinSplit proof.
  * proof: 296-byte serialized PHGR13 proof
