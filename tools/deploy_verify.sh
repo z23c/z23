@@ -155,7 +155,7 @@ select_bound_value() {
 
 proc_start_ticks_from_text() {
     printf '%s\n' "$1" |
-        sed 's/^[0-9][0-9]* ([^)]*) //' |
+        sed 's/^[0-9][0-9]* (.*) //' |
         awk 'NF >= 20 && !seen { print $20; seen = 1 }'
 }
 
@@ -176,7 +176,7 @@ proc_io_bytes_from_text() {
 
 proc_cpu_ticks_from_text() {
     printf '%s\n' "$1" |
-        sed 's/^[0-9][0-9]* ([^)]*) //' |
+        sed 's/^[0-9][0-9]* (.*) //' |
         awk 'NF >= 13 && !seen { printf "%.0f\n", $12 + $13; seen = 1 }
              END { if (!seen) print 0 }'
 }
@@ -187,7 +187,7 @@ proc_cpu_ticks_from_text() {
 # neither this nor CPU; that difference is the whole verdict.
 proc_blkio_ticks_from_text() {
     printf '%s\n' "$1" |
-        sed 's/^[0-9][0-9]* ([^)]*) //' |
+        sed 's/^[0-9][0-9]* (.*) //' |
         awk 'NF >= 40 && !seen { printf "%.0f\n", $40; seen = 1 }
              END { if (!seen) print 0 }'
 }
@@ -360,6 +360,18 @@ cancelled_write_bytes: 999999'
     [ "$(proc_cpu_ticks_from_text "$selftest_stat")" = "33" ] || return 1
     [ "$(proc_blkio_ticks_from_text "$selftest_stat")" = "777" ] || return 1
     [ "$(proc_start_ticks_from_text "$selftest_stat")" = "987654" ] || return 1
+
+    # A comm containing ')'. The kernel permits it, and a non-greedy strip
+    # stops at the FIRST ')' and shifts every field after it. blkio then reads
+    # 0 — which is not merely wrong, it is indistinguishable from "made no
+    # progress", so a healthy box blocked on a slow platter gets convicted as
+    # WEDGED and rolled back. comm is the LAST parenthesised group in
+    # /proc/<pid>/stat, so the strip must be greedy. Measured before the fix:
+    # this returned 0 instead of 777.
+    selftest_paren_stat="4242 (z23) node) S 1 4242 4242 0 -1 4194560 100 0 0 0 11 22 0 0 20 0 9 0 987654 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 777 0 0"
+    [ "$(proc_blkio_ticks_from_text "$selftest_paren_stat")" = "777" ] || return 1
+    [ "$(proc_cpu_ticks_from_text "$selftest_paren_stat")" = "33" ] || return 1
+    [ "$(proc_start_ticks_from_text "$selftest_paren_stat")" = "987654" ] || return 1
     [ "$(proc_cpu_ticks_from_text "")" = "0" ] || return 1
     [ "$(proc_blkio_ticks_from_text "")" = "0" ] || return 1
 
