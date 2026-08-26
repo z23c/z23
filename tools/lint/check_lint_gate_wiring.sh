@@ -218,8 +218,11 @@ make_fixture() {
     chmod +x "$d/tools/lint/run_lint.sh"
     # Strip the real table down to nothing so only the sentinels below are in
     # it — otherwise every real gate would read as an orphan in the fixture.
+    # The pattern must be the SAME one --list uses, or a reformatted entry
+    # survives the strip and shows up as a phantom orphan in the fixture (an
+    # earlier fixed-8-space version let exactly that happen).
     awk '
-        /^        check-[a-z0-9-]+\)/ { next }
+        /^[[:space:]]+check-[a-z0-9-]+\)[[:space:]]+echo[[:space:]]/ { next }
         { print }
     ' "$REPO_ROOT/tools/lint/run_lint.sh" > "$d/tools/lint/run_lint.sh.tmp"
     mv "$d/tools/lint/run_lint.sh.tmp" "$d/tools/lint/run_lint.sh"
