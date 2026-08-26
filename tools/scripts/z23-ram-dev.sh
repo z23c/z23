@@ -23,6 +23,9 @@ bootstrap() {
     url="$(git -C "$Z23_PERSISTENT_REPO" remote get-url origin)" || die "persistent checkout has no origin"
     git -C "$Z23_PERSISTENT_REPO" fetch --no-tags origin main
     git -C "$Z23_PERSISTENT_REPO" merge --ff-only origin/main || die "persistent main cannot fast-forward to origin/main"
+    head="$(git -C "$Z23_PERSISTENT_REPO" rev-parse HEAD)"
+    upstream="$(git -C "$Z23_PERSISTENT_REPO" rev-parse origin/main)"
+    [ "$head" = "$upstream" ] || die "persistent main has unpublished commits; push them before bootstrap"
     saved="$(git -C "$Z23_PERSISTENT_REPO" rev-parse --verify -q "$checkpoint_ref" || true)"
     if [ -n "$saved" ] && ! git -C "$Z23_PERSISTENT_REPO" merge-base --is-ancestor "$saved" origin/main; then die "unpublished persistent checkpoint $saved must be recovered and pushed before bootstrap"; fi
     mkdir -p "$cache"; git clone --no-hardlinks --branch main -- "$Z23_PERSISTENT_REPO" "$workspace"; git -C "$workspace" remote set-url origin "$url"
