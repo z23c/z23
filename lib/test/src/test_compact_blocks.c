@@ -225,6 +225,99 @@ int test_compact_blocks(void)
         block_free(&blk);
     }
 
+    /* ── Regression: hard-failure returns must still initialize out_block ──
+     *
+     * lib/test/fuzz_seeds/p2p/crash-478b30c0482cf3e2842fa459987a7a2e5374e708.bin
+     * is a 152-byte cmpctblock from an unauthenticated peer whose payload
+     * decodes to a well-formed header, a nonce, and then a short-txid count
+     * of 0 and a prefilled count of 0. total == 0 takes the very first
+     * failure return in compact_block_reconstruct(). Before the fix that
+     * return ran BEFORE block_init(out_block), so process_cmpctblock()'s
+     * `else { block_free(&out_block); }` walked whatever the stack held at
+     * that frame offset: transaction_free() over a stale pointer for a
+     * stale count. The background fuzzer caught it as an ASan
+     * heap-buffer-overflow in transaction_free <- block_free <-
+     * process_cmpctblock; it only ever fires in a long-lived process,
+     * because a freshly-mapped stack reads back as zero.
+     *
+     * The poison below is what a long-lived process supplies for free.
+     * Without the fix these assertions fail; with the assertions removed
+     * the block_free() at the end walks 2^40 transaction slots. */
+    printf("compact_block_reconstruct hard failure leaves out_block freeable... ");
+    {
+        static struct transaction stale_slot;
+        transaction_init(&stale_slot);
+
+        int local_failures = 0;
+
+        /* Case 1: total == 0 — the exact shape of the fuzz artifact. */
+        {
+            struct compact_block_msg cb;
+            compact_block_msg_init(&cb);
+
+            struct block out;
+            out.vtx = &stale_slot;          /* stale pointer from an earlier frame */
+            out.num_vtx = (size_t)1 << 40;  /* stale count from an earlier frame */
+
+            uint64_t *missing = NULL;
+            size_t num_missing = 0;
+            bool complete = compact_block_reconstruct(&cb, NULL, 0, NULL, 0,
+                                                      &out, &missing,
+                                                      &num_missing);
+            if (complete || num_missing != 0 ||
+                out.vtx != NULL || out.num_vtx != 0) {
+                local_failures++;
+                /* Do NOT block_free() a struct still holding the poison:
+                 * that is the wild walk this test exists to prevent, and
+                 * it would abort the whole group instead of reporting. */
+                block_init(&out);
+            }
+            block_free(&out);   /* must be a no-op, not a wild walk */
+            free(missing);
+            compact_block_msg_free(&cb);
+        }
+
+        /* Case 2: total > MAX_COMPACT_BLOCK_TXNS. Each count is capped at
+         * MAX individually by compact_block_msg_deserialize, so their sum
+         * can still exceed it and reach the same early return. */
+        {
+            struct compact_block_msg cb;
+            compact_block_msg_init(&cb);
+            cb.num_short_txids = MAX_COMPACT_BLOCK_TXNS;
+            cb.num_prefilled = 1;
+            /* No backing arrays: the count check must reject before any
+             * read of cb.short_txids / cb.prefilled. */
+
+            struct block out;
+            out.vtx = &stale_slot;
+            out.num_vtx = (size_t)1 << 40;
+
+            uint64_t *missing = NULL;
+            size_t num_missing = 0;
+            bool complete = compact_block_reconstruct(&cb, NULL, 0, NULL, 0,
+                                                      &out, &missing,
+                                                      &num_missing);
+            if (complete || num_missing != 0 ||
+                out.vtx != NULL || out.num_vtx != 0) {
+                local_failures++;
+                block_init(&out);
+            }
+            block_free(&out);
+            free(missing);
+            cb.num_short_txids = 0;
+            cb.num_prefilled = 0;
+            compact_block_msg_free(&cb);
+        }
+
+        if (local_failures == 0)
+            printf("OK\n");
+        else {
+            printf("FAIL (%d of 2 hard-failure returns left out_block "
+                   "holding the caller's stale stack)\n", local_failures);
+            failures += local_failures;
+        }
+    }
+
     /* ── Reconstruction with full mempool match ─────────────────── */
     printf("compact_block_reconstruct full match... ");
     {
