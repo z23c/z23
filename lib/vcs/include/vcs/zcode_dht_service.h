@@ -339,7 +339,13 @@ bool vcs_zcode_dht_service_record_operation_cancel(
 /* Iterative discovery derives the routing target from the selector, walks the
  * S6 closest-node frontier, then queries up to k freshly authenticated nodes
  * under the same global alpha/query budget. Signed responses are merged
- * deterministically; records.v1 is an optional local cache, never authority. */
+ * deterministically; records.v1 is an optional local cache, never authority.
+ *
+ * Lifecycle contract: the service tick never drives a discovery. Its slots
+ * free only when a poller calls _poll to completion, _cancel runs, or the
+ * caller's own lease cleanup cancels it. A discovery begun without a driving
+ * poller is therefore orphaned until service restart — every production
+ * caller sits its discoveries behind an expiring lease that reaps them. */
 bool vcs_zcode_dht_service_record_discovery_begin(
     struct vcs_zcode_dht_service *service,
     const struct vcs_zcode_dht_record_selector *selector,
