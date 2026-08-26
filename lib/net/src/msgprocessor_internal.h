@@ -78,13 +78,8 @@ bool mp_handle_zcode_swarm(struct msg_processor *mp,
                            struct p2p_node *node,
                            struct byte_stream *s);
 
-/* msgprocessor_snapshot.c lifecycle hooks invoked from
- * msg_processor_init and msg_send_messages. Encapsulate the heavy
- * snapshot/swarm/fast-sync state machine. */
-
-/* Initialize fast-sync state and (best-effort) build the initial block
- * piece manifest. Called once from msg_processor_init. */
-void mp_snapshot_init(struct msg_processor *mp);
+/* msgprocessor_snapshot.c lifecycle hook invoked from msg_send_messages.
+ * Encapsulates the heavy snapshot/swarm/fast-sync state machine. */
 
 /* Per-peer trickle tick: snapshot serving stream, swarm coordinator,
  * block-swarm coordinator. Operates only on the supplied node and only

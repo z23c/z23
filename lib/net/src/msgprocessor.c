@@ -1661,9 +1661,11 @@ void msg_processor_init(struct msg_processor *mp,
         g_dandelion_init = true;
     }
 
-    /* Snapshot/fast-sync init: builds the initial block piece manifest
-     * if we have a chain to publish. */
-    mp_snapshot_init(mp);
+    /* Fast-sync serving state is deliberately absent here. Constructing a
+     * block manifest walks the active chain and may scan node.db; neither
+     * optional peer service belongs on the synchronous consensus/P2P boot
+     * path. The supervised snapshot-offer worker publishes trusted state
+     * later without delaying message-processor initialization. */
 }
 
 void msg_processor_set_compact_block_submit(
