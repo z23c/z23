@@ -32,6 +32,8 @@
 #include "net/onion_service.h"
 #include "net/onion_peer_merge.h"
 #include "net/site_routes.h"
+#include "net/tor_integration.h"
+#include "chain/chain.h"
 #include "znam/znam.h"
 #include "util/log_json.h"
 #include "util/log_macros.h"
@@ -329,9 +331,17 @@ static void ensure_directory_table(sqlite3 *db)
 {
     char *err = NULL;
     int rc = sqlite3_exec(db,
+        /* port/height DEFAULT 0 = UNKNOWN, never a plausible-looking
+         * guess. `port` used to default to the mainnet literal 8033, so
+         * every row this node had never measured — which is every row,
+         * since nothing in the tree measures a peer's P2P port — was
+         * served to strangers as a confident 8033. See the field contract
+         * in net/onion_service.h. An existing database keeps its old
+         * DEFAULT (SQLite cannot alter one), which is inert: every INSERT
+         * path below now binds both columns explicitly. */
         "CREATE TABLE IF NOT EXISTS peer_directory ("
         "onion_address TEXT PRIMARY KEY,"
-        "port INTEGER NOT NULL DEFAULT 8033,"
+        "port INTEGER NOT NULL DEFAULT 0,"
         "services INTEGER NOT NULL DEFAULT 0,"
         "height INTEGER NOT NULL DEFAULT 0,"
         "last_seen INTEGER NOT NULL,"
@@ -429,9 +439,14 @@ static int populate_directory_from_chain(sqlite3 *db)
 
     sqlite3_stmt *ins = NULL;
     if (sqlite3_prepare_v2(db,
+        /* `port` is bound explicitly to 0 rather than left to the column
+         * DEFAULT: struct onion_peer is a hostname and a height, so the
+         * discovery sources know no port, and an old database's DEFAULT
+         * 8033 would otherwise invent one on every insert. */
         "INSERT INTO peer_directory "
-        "(onion_address, height, first_seen, last_seen, version, source) "
-        "VALUES (?, ?, ?, ?, 'chain', 'discovery') "
+        "(onion_address, port, height, first_seen, last_seen, version,"
+        " source) "
+        "VALUES (?, 0, ?, ?, ?, 'chain', 'discovery') "
         "ON CONFLICT(onion_address) DO UPDATE SET "
         "  last_seen = excluded.last_seen,"
         "  height = MAX(peer_directory.height, excluded.height),"
@@ -639,6 +654,96 @@ void onion_directory_reset_self_clearnet(void)
     pthread_mutex_unlock(&g_self_ep_mutex);
 }
 
+/* ── This node's own height, as a SUPPLIER would answer it ────────
+ *
+ * The self row used to publish a literal 0 (the INSERT below bound the
+ * constant), so in the document a stranger reads to pick a supplier a
+ * fully-synced seed and a node that has never connected a block were
+ * indistinguishable.
+ *
+ * The honest answer is the highest CONNECTED block — status >=
+ * BLOCK_VALID_TRANSACTIONS, the same filter every other reader of the
+ * blocks table uses, and the one that table already keeps a partial
+ * unique index for (idx_blocks_height ... WHERE status >= 3 in
+ * app/models/src/database_schema.c). So this is an index max lookup, not
+ * a scan, which is what makes it safe on the supervisor tick runner that
+ * drives the refresh round. Headers we hold but have not connected are
+ * NOT a height anyone can be served from, so they are not counted.
+ *
+ * Returns -1 for UNKNOWN — no blocks table (a node whose chain has not
+ * booted), a failed read, or no connected block at all. -1 is never a
+ * height, so a caller can tell "we do not know" from "genesis". */
+int onion_directory_chain_height_db(sqlite3 *db)
+{
+    /* The literal in the SQL below. Pinned to the enum rather than
+     * trusted to stay in step with it — same reason app/services spells
+     * the filter `status>=3`: the partial index is written with a literal
+     * and SQLite will not accept a symbol. */
+    _Static_assert(BLOCK_VALID_TRANSACTIONS == 3,
+                   "peer height filter must track BLOCK_VALID_TRANSACTIONS");
+    if (!db)
+        return -1;
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT MAX(height) FROM blocks "
+                               "WHERE status >= 3",
+                           -1, &s, NULL) != SQLITE_OK || !s) {
+        if (s) sqlite3_finalize(s);
+        return -1;              /* no chain yet is normal, never an error */
+    }
+    int h = -1;
+    if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW &&
+        sqlite3_column_type(s, 0) != SQLITE_NULL)
+        h = sqlite3_column_int(s, 0);
+    sqlite3_finalize(s);
+    return h < 0 ? -1 : h;
+}
+
+/* ── The P2P port a peer would dial US on ─────────────────────────
+ *
+ * THREE different ports are in play around this document and only one of
+ * them belongs in the `port` field:
+ *
+ *   80    — the onion's HTTP virtual port, where /directory.json itself
+ *           is served (tor_integration.c pins application_virtual_port =
+ *           80, and tor_integration_fetch_onion_blocking takes no port
+ *           argument at all). Never published in this field.
+ *   8033  — the chain's nDefaultPort. A compiled-in guess about a
+ *           STRANGER's configuration. It was what the self row published,
+ *           and it was wrong for every node not left on the default.
+ *   <-port> — the node's own P2P listener, which tor_integration installs
+ *           as a SECOND virtual port on the same onion, forwarded to
+ *           127.0.0.1:<port>. This is the only one a reader can act on,
+ *           so this is what `port` means.
+ *
+ * Claimed only when that mapping is actually INSTALLED. An ephemeral
+ * (non -onion-persist) identity gets no P2P route at all
+ * (install_persistent_identity adds the second port config only on the
+ * persistent path), so on such a node there IS no dialable P2P port on
+ * this onion and the honest answer is "unknown", not the listener port we
+ * happen to have open on loopback. 0 = unknown, matching the contract
+ * struct onion_dial_candidate already states.
+ *
+ * A PURE rule over the snapshot, the same way freshness is a pure rule
+ * over (last_seen, now, self): it is the decision that has to be right,
+ * and it is testable exhaustively without a Tor process. */
+int onion_directory_self_port_rule(const struct tor_onion_port_map *pm)
+{
+    if (!pm || !pm->p2p_route_installed)
+        return 0;
+    /* 80 is the HTTP route; it is never a P2P port, and tor_integration
+     * refuses to install it as one. Belt and braces. */
+    if (pm->p2p_virtual_port == 0 || pm->p2p_virtual_port == 80)
+        return 0;
+    return (int)pm->p2p_virtual_port;
+}
+
+static int self_p2p_port(void)
+{
+    struct tor_onion_port_map pm;
+    tor_integration_port_map_snapshot(&pm);
+    return onion_directory_self_port_rule(&pm);
+}
+
 /* Register our own .onion address with clearnet IP if known. Returns true
  * when a row was written — the refresh round counts that as real work,
  * because it is what keeps THIS node's served row current. */
@@ -656,8 +761,23 @@ static bool register_self(sqlite3 *db)
     char apps[ONION_DIR_APPS_CSV_MAX + 1];
     self_apps_csv(apps, sizeof(apps));
 
+    /* Our own dialable P2P port and our own connected height — MEASURED
+     * every round, never literals. Both were compiled-in constants (8033
+     * and 0) bound straight into the VALUES list below. */
+    int p2p_port = self_p2p_port();
+    int height = onion_directory_chain_height_db(db);
+    if (height < 0)
+        height = 0;             /* 0 = unknown; the renderers serve null */
+
     /* UPSERT rather than INSERT OR REPLACE: replacing the row would reset
-     * first_seen, losing how long this node has been announcing itself. */
+     * first_seen, losing how long this node has been announcing itself.
+     *
+     * port/height/services/version are in the DO UPDATE list, not just
+     * the VALUES list. They used to be INSERT-only, so on any node whose
+     * self row already existed — which is every node past its first
+     * refresh round, and the self row NEVER expires — a corrected value
+     * could never reach the served document. Getting the sources right
+     * without this clause would have fixed nothing on a live seed. */
     sqlite3_stmt *ins = NULL;
     if (sqlite3_prepare_v2(db,
         "INSERT INTO peer_directory "
@@ -665,9 +785,13 @@ static bool register_self(sqlite3 *db)
         " last_probe, last_success, probe_ok, dial_success_count,"
         " fail_count, version, self, clearnet_ip, clearnet_port, source,"
         " apps) "
-        "VALUES (?, 8033, 1029, 0, ?, ?, ?, ?, 1, 0, 0, '0.1.0', 1, ?, ?,"
-        " 'self', ?) "
+        "VALUES (?1, ?2, 1029, ?3, ?4, ?4, ?4, ?4, 1, 0, 0, '0.1.0', 1,"
+        " ?5, ?6, 'self', ?7) "
         "ON CONFLICT(onion_address) DO UPDATE SET "
+        "  port = excluded.port,"
+        "  height = excluded.height,"
+        "  services = excluded.services,"
+        "  version = excluded.version,"
         "  last_seen = excluded.last_seen,"
         "  last_probe = excluded.last_probe,"
         "  last_success = excluded.last_success,"
@@ -682,13 +806,12 @@ static bool register_self(sqlite3 *db)
     }
     int64_t now = (int64_t)platform_time_wall_time_t();
     sqlite3_bind_text(ins, 1, self_addr, -1, SQLITE_STATIC);
-    sqlite3_bind_int64(ins, 2, now);
-    sqlite3_bind_int64(ins, 3, now);
+    sqlite3_bind_int(ins, 2, p2p_port);
+    sqlite3_bind_int(ins, 3, height);
     sqlite3_bind_int64(ins, 4, now);
-    sqlite3_bind_int64(ins, 5, now);
-    sqlite3_bind_text(ins, 6, ip_str[0] ? ip_str : "", -1, SQLITE_STATIC);
-    sqlite3_bind_int(ins, 7, ip_str[0] ? (int)ip_port : 0);
-    sqlite3_bind_text(ins, 8, apps, -1, SQLITE_STATIC);
+    sqlite3_bind_text(ins, 5, ip_str[0] ? ip_str : "", -1, SQLITE_STATIC);
+    sqlite3_bind_int(ins, 6, ip_str[0] ? (int)ip_port : 0);
+    sqlite3_bind_text(ins, 7, apps, -1, SQLITE_STATIC);
     bool ok = (AR_STEP_WRITE(ins) == SQLITE_DONE);
     sqlite3_finalize(ins);
     return ok;
@@ -1075,8 +1198,15 @@ bool onion_service_directory_learn(const char *hostname, int port, int height,
         sqlite3_close(db);
         return false;
     }
+    /* An advertisement that carried no port is stored as 0 = UNKNOWN, not
+     * as the mainnet literal. Substituting 8033 here manufactured a
+     * confident wrong number out of an absence and then re-served it: the
+     * -addnode set on this very network runs on :39040/:39150/:39360, so
+     * the guess is wrong far more often than it is right, and each wrong
+     * onion port costs a cold reader a blocking Tor round-trip. Same rule
+     * for height: what we were not told, we do not claim. */
     sqlite3_bind_text(ins, 1, hostname, -1, SQLITE_STATIC);
-    sqlite3_bind_int(ins, 2, (port > 0 && port <= 65535) ? port : 8033);
+    sqlite3_bind_int(ins, 2, (port > 0 && port <= 65535) ? port : 0);
     sqlite3_bind_int(ins, 3, height > 0 ? height : 0);
     sqlite3_bind_int64(ins, 4, now);
     sqlite3_bind_int64(ins, 5, stamp);

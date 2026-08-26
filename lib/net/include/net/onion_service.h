@@ -77,6 +77,49 @@ enum onion_dir_freshness {
 #define ONION_DIR_STR_(x) #x
 #define ONION_DIR_STR(x)  ONION_DIR_STR_(x)
 
+/* ── What `port` and `height` MEAN in a directory row ───────────────
+ *
+ * These two are the fields a stranger with no other way in acts on, and
+ * both used to be published as compiled-in constants: the self row bound
+ * the literals 8033 and 0 straight into its INSERT, and a hearsay row
+ * with no port was stored as 8033 too. A first-party seed listening on
+ * :8055 at height ~3.23M therefore advertised itself, to the only readers
+ * who had no way to check, as :8033 at height 0 — and so did every peer
+ * row it relayed.
+ *
+ *   port   — THE P2P PORT A PEER WOULD DIAL THIS ONION ON: the second
+ *            virtual port tor_integration installs on the service,
+ *            forwarded to the node's own -port listener. It is NOT the
+ *            HTTP virtual port (always 80) that /directory.json is served
+ *            over, and it is NOT the chain's nDefaultPort. Claimed only
+ *            when that route is actually installed — an ephemeral
+ *            identity has no P2P route, so it has no port to publish.
+ *   height — THE HIGHEST CONNECTED BLOCK (status >=
+ *            BLOCK_VALID_TRANSACTIONS), which is what a reader ranking
+ *            suppliers needs. Not the header tip; headers we have not
+ *            connected cannot be served to anyone.
+ *
+ * UNKNOWN IS SAID, NOT FILLED IN. 0 in the column means "we do not know",
+ * for both, and both renderers emit JSON null (and an em dash in the HTML
+ * table) rather than a number a reader would act on. The key stays in
+ * place in the JSON object so column order and every string-scanning
+ * consumer are unaffected, and the tree's own learner already degrades
+ * correctly: a non-numeric value reads back as its default, 0 = unknown,
+ * so an absence is never laundered into a fact by relaying it.
+ *
+ * A wrong port is worse than an absent one. Each onion dial costs a cold
+ * node up to 60 s of blocking Tor round-trip, so a confident default
+ * spends a stranger's whole bootstrap budget proving itself wrong, while
+ * an honest null costs nothing and still leaves the row's hostname — the
+ * thing that actually bootstraps — intact. */
+
+/* The `port` half of that contract as a PURE rule over the onion's live
+ * virtual-port snapshot (net/tor_integration.h), so the decision a
+ * stranger acts on is testable without a Tor process. Returns the port to
+ * publish, or 0 for "we have no dialable P2P port to offer". */
+struct tor_onion_port_map;
+int onion_directory_self_port_rule(const struct tor_onion_port_map *pm);
+
 /* `self` rows are always FRESH: this node's own presence is not hearsay.
  * A non-self row with last_seen <= 0 has no provenance at all and is
  * EXPIRED. A last_seen in the future (peer clock skew, or a hearsay
@@ -291,7 +334,11 @@ void onion_directory_reset_relay_follow(void);
  * list is a what-they-serve hint, never identity, so a fresher
  * advertisement may replace it — but an empty one never clears it, and no
  * other column is touched. The string is re-normalized here, so callers
- * may hand in an unvalidated CSV. */
+ * may hand in an unvalidated CSV.
+ *
+ * `port` and `height` outside their valid ranges are stored as 0 =
+ * UNKNOWN and re-served as null, never substituted with a default — see
+ * the field contract above. */
 bool onion_service_directory_learn(const char *hostname, int port, int height,
                                    int64_t peer_last_seen, const char *apps);
 
