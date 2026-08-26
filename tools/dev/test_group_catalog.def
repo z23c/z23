@@ -941,6 +941,10 @@ ZCL_TEST_GROUP(seed_bootstrap_doors)
 /* params-sovereignty lane: compiled-in verifying keys, and the boundary
  * between validating shielded proofs and creating them. */
 ZCL_TEST_GROUP(params_vk_embedded)
+/* params-sovereignty lane: obtaining the PROVING parameters over the peer
+ * network, with every chunk checked against compiled-in digests. Keep both
+ * sides on conflict. */
+ZCL_TEST_GROUP(params_fetch)
 ZCL_SPEC_GROUP(wallet_dashboard)
 ZCL_SPEC_GROUP(wallet_send)
 ZCL_SPEC_GROUP(wallet_receive)

@@ -1283,3 +1283,16 @@ AGENT_IMPACT_RULE("tools/scripts/repro_build.sh|tools/scripts/repro-verify.sh|to
  * without it is how a node quietly goes back to depending on a seed array
  * whose only entry may already be dead. */
 AGENT_IMPACT_RULE("lib/net/src/addrman.c|lib/net/src/addrman_codec.c|lib/net/src/addrman_internal.h|lib/net/include/net/addrman.h|lib/net/src/anchor_peers.c|lib/net/include/net/anchor_peers.h|lib/net/src/connman.c|lib/net/src/connman_dialer.c|lib/net/include/net/connman.h|lib/test/src/test_peer_memory.c", "peer_memory anchor_peers addrman_rebalance addrman_integrity net")
+
+/* LANE params-fetch: obtaining the ~777 MB of zk PROVING parameters from the
+ * peer network instead of from a web host. The pin table is the trust root —
+ * ceremony-published lengths and SHA-256 digests, plus a chunk Merkle root
+ * derived from them — and the verifier, the wire commands, the dispatch-table
+ * rows that expose those commands, and the adversarial test all encode the
+ * same claim: a peer supplies candidate bytes and nothing else. Changing the
+ * chunk size or the Merkle construction in params_fetch.c invalidates every
+ * pinned root, and changing params_service.c can widen what an unverified
+ * peer is allowed to make this node do; neither may land without the group
+ * that recomputes the pins from the real files and replays the refusals. */
+AGENT_IMPACT_RULE("lib/sapling/src/params_fetch.c|lib/sapling/src/params_fetch_session.c|lib/sapling/src/params_fetch_internal.h|lib/sapling/include/sapling/params_fetch.h|lib/net/src/params_service.c|lib/net/include/net/params_service.h|lib/net/src/msgprocessor.c|lib/test/src/test_params_fetch.c", "params_fetch")
+
