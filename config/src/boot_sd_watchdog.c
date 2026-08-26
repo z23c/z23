@@ -301,10 +301,18 @@ static bool boot_sd_watchdog_runtime_alive(void)
 {
     if (!boot_sd_watchdog_supervisor_alive())
         return false;
+    /* The tick-runner heartbeat is deliberately NOT a leg here. It only
+     * advances BETWEEN children (run_due_ticks in lib/util/src/supervisor.c),
+     * so one slow child's on_tick freezes it, and the supervisor already says
+     * what that means: runner_on_stall names
+     * `supervisor.tick_runner_wedged` as BLOCKER_TRANSIENT with the text
+     * "the sweep heartbeat is unaffected (node stays alive) but one child's
+     * periodic work is wedged". Killing the process contradicted that
+     * contract. Measured on a live mesh node: 192.7 s of heartbeat age
+     * against a 120 s bound while the sweep was 90 us fresh, across four
+     * different children on separate incarnations. The wedge stays visible
+     * as a typed blocker; it no longer costs the whole node. */
     int64_t bound_us = boot_sd_watchdog_freshness_bound_us();
-    if (supervisor_tick_runner_running() &&
-        supervisor_tick_runner_last_hb_age_us() >= bound_us)
-        return false;
     return !g_sd_watchdog_ctx ||
            connman_runtime_progress_fresh(g_sd_watchdog_ctx->connman,
                                           bound_us);
@@ -381,7 +389,35 @@ static void *boot_sd_watchdog_pet_main(void *arg)
             boot_sd_watchdog_supervisor_alive(),
             recent);
         boot_sd_watchdog_maybe_notify_ready();
-        if (boot_sd_watchdog_pet_decide(runtime_gate_alive)) {
+        bool pet = boot_sd_watchdog_pet_decide(runtime_gate_alive);
+        /* Say it out loud, on the edge only. Withholding the ping asks
+         * systemd to SIGABRT this process WatchdogSec later, and until now it
+         * happened in total silence: the only trace was `status=134` in the
+         * journal, with nothing anywhere naming which leg refused. Diagnosing
+         * one instance cost hours of archive archaeology that a single line
+         * here would have answered. Edge-triggered, so a long refusal logs
+         * once, not once per period. */
+        static bool s_last_pet = true;
+        if (pet != s_last_pet) {
+            if (pet) {
+                LOG_INFO("boot",
+                         "[sd_watchdog] pinging again: sweep=%d runtime=%d "
+                         "recent_progress=%d",
+                         (int)boot_sd_watchdog_supervisor_alive(),
+                         (int)boot_sd_watchdog_runtime_alive(),
+                         (int)recent);
+            } else {
+                LOG_WARN("boot",
+                         "[sd_watchdog] WITHHOLDING the watchdog ping — "
+                         "systemd will kill this process unless it resumes: "
+                         "sweep=%d runtime=%d recent_progress=%d",
+                         (int)boot_sd_watchdog_supervisor_alive(),
+                         (int)boot_sd_watchdog_runtime_alive(),
+                         (int)recent);
+            }
+            s_last_pet = pet;
+        }
+        if (pet) {
             sd_notify_watchdog_ping();
         }
         int64_t left_us = period_us;
@@ -471,10 +507,22 @@ bool boot_sd_watchdog_start(void *ctx)
                                                 boot_sd_watchdog_tick, svc);
     if (g_sd_watchdog_id == HEALTH_INVALID_ID)
         return false;
-    /* Defense-in-depth: sd_notify_watchdog_ping() itself now refuses to
-     * send WATCHDOG=1 whenever the root supervisor sweep is stale, even
-     * if some future call site forgets the explicit check above. */
-    sd_notify_set_health_check(boot_sd_watchdog_runtime_alive);
+    /* Defense-in-depth: sd_notify_watchdog_ping() itself refuses to send
+     * WATCHDOG=1 whenever the root supervisor sweep is stale, even if some
+     * future call site forgets the explicit check above.
+     *
+     * It registers the SWEEP check, which is what the guarantee in this
+     * file's header is about, and NOT boot_sd_watchdog_runtime_alive. That
+     * distinction is load-bearing. The pet's policy is the disjunction
+     * boot_sd_watchdog_keepalive_supervisor computes — runtime_alive OR
+     * (recent_progress AND sweep_alive) — whose second half exists so that a
+     * snapshot import, a block-by-block catchup or a UTXO replay is not
+     * killed mid-write. Registering runtime_alive here made the effective
+     * gate `A || B` on the outside and `A` on the inside, which is `A`: the
+     * carve-out could never fire, and a node writing at full rate was killed
+     * anyway. A backstop must be WEAKER than the policy it backs, or it
+     * silently replaces it. */
+    sd_notify_set_health_check(boot_sd_watchdog_supervisor_alive);
     atomic_store(&g_notify_ready_sent, false);
     /* Composed readiness: the call names every unconfirmed leg in the
      * status line and in node.log, and holds READY until all of them are
