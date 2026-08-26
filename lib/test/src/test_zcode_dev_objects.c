@@ -3,6 +3,8 @@
 
 #include "test/test_core.h"
 
+#include "test/public_shape_fixture.h"
+
 #include "base/hex.h"
 #include "codeindex/codeindex_merkle.h"
 #include "command/native_command.h"
@@ -2236,7 +2238,7 @@ static int test_zd_improve_command(void)
         char license_path[4352];
         (void)snprintf(license_path, sizeof(license_path), "%s/LICENSE",
                        workspace);
-        ASSERT(zd_write_text(license_path, "Apache License 2.0\n"));
+        ASSERT(zd_write_text(license_path, TEST_LICENSE_TEXT_APACHE_2_0));
         static const char package_meta[] =
             "{\"schema\":1,\"name\":\"fixture/accepted\","
             "\"semver\":\"1.0.0\",\"language\":\"c23\","
@@ -2280,7 +2282,7 @@ static int test_zd_improve_command(void)
         ASSERT(fclose(source_file) == 0);
         (void)snprintf(license_path, sizeof(license_path), "%s/LICENSE",
                        candidate_workspace);
-        ASSERT(zd_write_text(license_path, "Apache License 2.0\n"));
+        ASSERT(zd_write_text(license_path, TEST_LICENSE_TEXT_APACHE_2_0));
         (void)snprintf(package_meta_path, sizeof(package_meta_path),
                        "%s/zcode-package.json", candidate_workspace);
         ASSERT(zd_write_text(package_meta_path, package_meta));
