@@ -1034,12 +1034,13 @@ static int test_mempool_not_requested_during_ibd(void)
 
 /* ── Published build identity ──────────────────────────────────────────
  *
- * A node states which build it is running by appending `(src:<64 hex>)` to
- * its subversion string. These cases pin the three properties that make that
+ * A node states which build family it is running by appending a stable
+ * `(src:<12 hex>)` prefix to its subversion string. These cases pin the three
+ * properties that make that
  * safe to have on a network with no referee:
  *
- *   1. what we publish is the source identity the BUILD baked in, not
- *      anything a running process was handed;
+ *   1. what we publish is a prefix of the source identity the BUILD baked in,
+ *      not anything a running process was handed;
  *   2. a peer that publishes nothing readable is "unknown" — never an error,
  *      never a penalty, never a reason to treat it differently;
  *   3. the handshake itself is unchanged, so a peer running the previous
@@ -1062,7 +1063,7 @@ static int test_mempool_not_requested_during_ibd(void)
 static int test_published_build_identity_is_the_baked_source_id(void)
 {
     int failures = 0;
-    TEST("build identity: the version message publishes this build's baked source id") {
+    TEST("build identity: version publishes this build's baked source prefix") {
         struct hs_fixture f;
         ASSERT(hs_fixture_setup(&f, false));
 
@@ -1075,19 +1076,20 @@ static int test_published_build_identity_is_the_baked_source_id(void)
         ASSERT(strncmp(ver.sub_version, "/ZClassic23:0.1.0", 17) == 0);
 
         char local[ZCL_BUILD_IDENTITY_BUFSIZE];
-        char wire[ZCL_BUILD_IDENTITY_BUFSIZE];
+        char wire[ZCL_BUILD_IDENTITY_PREFIX_BUFSIZE];
         bool stamped = msg_version_local_build_identity(local, sizeof(local));
-        bool on_wire = msg_version_parse_build_identity(ver.sub_version, wire,
-                                                        sizeof(wire));
+        bool on_wire = msg_version_parse_build_identity_prefix(
+            ver.sub_version, wire, sizeof(wire));
 
-        /* A stamped binary MUST publish its identity, and it must be the
-         * baked one verbatim. An unstamped binary publishes nothing rather
-         * than a token naming a build it cannot name. */
+        /* A stamped binary MUST publish the prefix of its baked identity.
+         * An unstamped binary publishes nothing rather than a token naming a
+         * build it cannot name. */
         ASSERT_EQ(on_wire, stamped);
         if (stamped) {
             ASSERT(strcmp(local, zcl_build_source_id_sha256()) == 0);
-            ASSERT(strcmp(wire, zcl_build_source_id_sha256()) == 0);
-            ASSERT(strlen(wire) == ZCL_BUILD_IDENTITY_HEX_LEN);
+            ASSERT(strncmp(wire, zcl_build_source_id_sha256(),
+                           ZCL_BUILD_IDENTITY_PREFIX_HEX_LEN) == 0);
+            ASSERT(strlen(wire) == ZCL_BUILD_IDENTITY_PREFIX_HEX_LEN);
             printf("[published src:%s] ", wire);
         } else {
             ASSERT(strcmp(ver.sub_version, "/ZClassic23:0.1.0/") == 0);
@@ -1129,6 +1131,19 @@ static int test_build_identity_reader_refuses_cleanly(void)
             "/ZClassic23:0.1.0(src:" HS_ID_A ")/", out, sizeof(out)));
         ASSERT(strcmp(out, HS_ID_A) == 0);
 
+        char prefix[ZCL_BUILD_IDENTITY_PREFIX_BUFSIZE];
+        ASSERT(msg_version_parse_build_identity_prefix(
+            "/ZClassic23:0.1.0(src:0123456789ab)/", prefix,
+            sizeof(prefix)));
+        ASSERT(strcmp(prefix, "0123456789ab") == 0);
+        ASSERT(msg_version_parse_build_identity_prefix(
+            "/ZClassic23:0.1.0(src:" HS_ID_A ")/", prefix,
+            sizeof(prefix)));
+        ASSERT(strcmp(prefix, "0123456789ab") == 0);
+        ASSERT(!msg_version_parse_build_identity_prefix(
+            "/ZClassic23:0.1.0(src:0123456789a)/", prefix,
+            sizeof(prefix)));
+
         /* Local reader: same refusal shape on a too-small buffer. */
         memset(out, 'x', sizeof(out));
         ASSERT(!msg_version_local_build_identity(out, 8));
@@ -1164,6 +1179,8 @@ static int test_peer_build_identity_is_read_but_never_gates(void)
         long_junk[sizeof(long_junk) - 1] = '\0';
 
         const struct hs_build_id_case cases[] = {
+            { "peer with compact source prefix",
+              "/ZClassic23:0.1.0(src:0123456789ab)/", false, NULL },
             { "peer on some other build",
               "/ZClassic23:0.1.0(src:" HS_ID_A ")/", true, HS_ID_A },
             { "peer on yet another build",

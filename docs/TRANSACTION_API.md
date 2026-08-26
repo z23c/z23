@@ -562,8 +562,9 @@ logs, or the notebook. A public mainnet txid may be recorded after broadcast.
   is never presented as a completed download before that final state.
   Paid offer ingress and exact confirmed Sapling-payment reconciliation are
   network-bound, expiry-checked, durable, and reorg-aware. The session-bound
-  `zfileget.v2` delivery request verifies the buyer and authorizes before
-  invoking the owner-private content reader; paid payload bytes use a separate
+  `zfileget.v3` delivery request verifies the buyer, refuses stamps outside
+  its signed 900-second freshness window, and authorizes before invoking the
+  owner-private content reader; paid payload bytes use a separate
   authenticated-encryption channel rather than the public-data chunk path.
   `app market content register` binds a signed offer to exact local bytes;
   restart reconstructs that binding and file mutation revokes delivery. See

@@ -98,6 +98,7 @@
 #include <dirent.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include "cli_lane_defaults.h"
 #include "config/args.h"                /* print_usage (moved to args.c) */
 
 /* ════════════════════════════════════════════════════════════════
@@ -1269,7 +1270,7 @@ int bench_mode_main(int argc, char **argv)
  * ════════════════════════════════════════════════════════════════ */
 
 static char cli_cookie[256];
-static int cli_port = 18232;
+static int cli_port = ZCL_CLI_DEFAULT_RPC_PORT;
 static int cli_p2p_port = 0;
 static int cli_https_port = 0;
 static int cli_fs_port = 0;
@@ -1302,7 +1303,7 @@ static bool cli_service_exec_arg(const char *key, char *out, size_t out_size)
      * stdout via the no-shell spawn primitive. stderr is discarded by
      * zcl_spawn_capture; the exit code is not needed. */
     const char *const argv[] = {
-        "systemctl", "--user", "show", "zclassic23",
+        "systemctl", "--user", "show", ZCL_CLI_DEFAULT_UNIT,
         "-p", "ExecStart", "--value", NULL
     };
     char buf[8192];
@@ -2346,8 +2347,7 @@ int cli_main(int argc, char **argv)
         return argrc;
     const char *home = getenv("HOME");
     char datadir[512];
-    if (home) snprintf(datadir, sizeof(datadir), "%s/.zclassic-c23", home);
-    else      snprintf(datadir, sizeof(datadir), ".zclassic-c23");
+    zcl_cli_lane_default_datadir(datadir, sizeof(datadir), home);
     bool datadir_set = false;
     bool rpcport_set = false;
     bool p2pport_set = false;

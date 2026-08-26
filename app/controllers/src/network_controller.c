@@ -635,20 +635,26 @@ static bool rpc_getpeerinfo(const struct json_value *params, bool help,
             json_push_kv_real(&entry, "avg_latency_ms",
                                (double)node->avg_latency_us / 1000.0);
 
-        /* What build is this peer running? Read straight out of the
-         * subversion string it published in its version message — see
-         * net/version.h. A peer that published nothing readable is
-         * "unknown", the same spelling an unstamped local build uses in
-         * getnetworkinfo's source_id_sha256, so the two are directly
-         * comparable. Absence is a normal answer: it is reported and never
-         * scored, never gated, and never acted on. */
+        /* Read only what this peer published. Current peers expose a compact
+         * source prefix; legacy peers may expose the full identity. Never
+         * promote a prefix into source_id_sha256. Absence is a normal answer:
+         * it is reported and never scored, gated, or acted on. */
         {
             char peer_source_id[ZCL_BUILD_IDENTITY_BUFSIZE];
+            char peer_source_prefix[ZCL_BUILD_IDENTITY_PREFIX_BUFSIZE];
             bool source_id_known = msg_version_parse_build_identity(
                 node->clean_sub_ver, peer_source_id, sizeof(peer_source_id));
+            bool source_prefix_known = msg_version_parse_build_identity_prefix(
+                node->clean_sub_ver, peer_source_prefix,
+                sizeof(peer_source_prefix));
             json_push_kv_str(&entry, "source_id_sha256",
                              source_id_known ? peer_source_id : "unknown");
             json_push_kv_bool(&entry, "source_id_known", source_id_known);
+            json_push_kv_str(&entry, "source_id_prefix",
+                             source_prefix_known ? peer_source_prefix :
+                                                   "unknown");
+            json_push_kv_bool(&entry, "source_id_prefix_known",
+                              source_prefix_known);
         }
 
         /* Keep classification here; full lifecycle stays in its dumpstate so

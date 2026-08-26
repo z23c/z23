@@ -8,19 +8,27 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define FILE_MARKET_DELIVERY_VERSION 2u
-#define FILE_MARKET_DELIVERY_BODY_BYTES 142u
-#define FILE_MARKET_DELIVERY_WIRE_BYTES 206u
+#define FILE_MARKET_DELIVERY_VERSION 3u
+#define FILE_MARKET_DELIVERY_BODY_BYTES 150u
+#define FILE_MARKET_DELIVERY_WIRE_BYTES 214u
+/* The seal helper stamps issued_unix and the server refuses a request whose
+ * signed stamp sits outside this window in either direction. This bounds a
+ * leaked or logged request to a short bearer lifetime instead of the life of
+ * the offer. */
+#define FILE_MARKET_DELIVERY_MAX_AGE_SECS 900
 #define FILE_MARKET_DELIVERY_REPLY_BYTES 84u
 #define FS_MARKET_REPLY 0x07u
 
 struct fs_session;
 
-/* zfileget.v2 names one encrypted chunk from one signed offer. session_id is derived
- * from network genesis plus the initiator/responder handshake nonces. The
- * buyer signature therefore cannot be copied onto another file-service
- * connection. The buyer seed is accepted only by the seal helper and never
- * enters this struct, the wire, persistence, logs, or public output. */
+/* zfileget.v3 names one encrypted chunk from one signed offer. session_id is
+ * derived from network genesis plus the initiator/responder handshake nonces.
+ * issued_unix makes the whole wire a short-lived bearer: the onion route logs
+ * full request lines to tor.log, so an unexpiring credential there would let
+ * any log reader re-fetch paid chunks forever. The buyer signature therefore
+ * cannot be copied onto another file-service connection or reused after the
+ * freshness window. The buyer seed is accepted only by the seal helper and
+ * never enters this struct, the wire, persistence, logs, or public output. */
 struct file_market_delivery_request {
     uint16_t version;
     uint8_t network_genesis[32];
@@ -28,6 +36,7 @@ struct file_market_delivery_request {
     uint32_t chunk_index;
     uint8_t buyer_pubkey[32];
     uint8_t session_id[32];
+    int64_t issued_unix;
     uint8_t buyer_signature[64];
 };
 
@@ -43,6 +52,7 @@ enum file_market_delivery_error {
     FILE_MARKET_DELIVERY_ERR_SESSION,
     FILE_MARKET_DELIVERY_ERR_SIGNATURE,
     FILE_MARKET_DELIVERY_ERR_KEY_MISMATCH,
+    FILE_MARKET_DELIVERY_ERR_EXPIRED,
 };
 
 const char *file_market_delivery_error_string(
@@ -216,7 +226,7 @@ enum file_market_delivery_status file_market_delivery_fetch_endpoint_until(
 
 /* ── Onion delivery (offer endpoint_type == FILE_MARKET_ENDPOINT_ONION) ──
  *
- * Transport: GET /market/chunk/<412-hex-char signed zfileget request> with
+ * Transport: GET /market/chunk/<full hex of the signed zfileget.v3 request> with
  * an optional ?slice=k query. The GET-hex-in-path shape exists so the
  * vendored dynhost client (GET-only) needs no change. Responses carry a
  * fixed binary header followed by one chunk slice; the dynhost webserver

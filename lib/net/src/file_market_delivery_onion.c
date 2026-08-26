@@ -29,7 +29,7 @@ static const uint8_t k_onion_reply_magic[8] =
     {'Z','F','O','C','K','S','1','\n'};
 #define ONION_REPLY_VERSION 1u
 
-/* "/market/chunk/" + 412 lowercase hex chars of the 206-byte signed
+/* "/market/chunk/" + 428 lowercase hex chars of the 214-byte signed
  * request, then end-of-path or "?slice=<digits>". */
 #define ONION_REQUEST_HEX_CHARS (2u * FILE_MARKET_DELIVERY_WIRE_BYTES)
 

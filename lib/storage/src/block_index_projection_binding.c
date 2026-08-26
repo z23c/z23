@@ -133,6 +133,29 @@ static bool binding_blob_parse(const void *blob, int len,
     return true;
 }
 
+static bool binding_commit(block_index_projection_t *p,
+                           const char digest_hex[65], uint64_t size,
+                           uint64_t rows)
+{
+    char number[32];
+    bool ok = sqlite3_exec(p->db, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK;
+    snprintf(number, sizeof(number), "%" PRIu64, p->last_consumed_offset);
+    if (ok)
+        ok = binding_meta_set(p->db, "flat_payload_sha3", digest_hex) &&
+             binding_meta_set_u64(p->db, "flat_payload_size", size) &&
+             binding_meta_set_u64(p->db, "flat_row_count", rows) &&
+             binding_meta_set(p->db, "flat_covered_offset", number) &&
+             sqlite3_exec(p->db, "DELETE FROM block_index_dirty", NULL,
+                          NULL, NULL) == SQLITE_OK;
+    ok = ok && sqlite3_exec(p->db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK;
+    if (!ok) (void)sqlite3_exec(p->db, "ROLLBACK", NULL, NULL, NULL);
+    if (!ok)
+        fprintf(stderr, // obs-ok:block-index-projection-storage-boundary
+                "[block_index_projection] flat bind transaction "
+                "failed: %s\n", sqlite3_errmsg(p->db));
+    return ok;
+}
+
 bool block_index_projection_bind_flat(block_index_projection_t *p,
                                       const uint8_t digest[32],
                                       uint64_t size, uint64_t rows)
@@ -142,7 +165,7 @@ bool block_index_projection_bind_flat(block_index_projection_t *p,
                 "[block_index_projection] flat bind invalid argument\n");
         return false;
     }
-    char digest_hex[65], number[32];
+    char digest_hex[65];
     zcl_hex_encode(digest, 32, digest_hex);
     pthread_mutex_lock(&p->mu);
     uint64_t projection_rows = UINT64_MAX;
@@ -163,21 +186,56 @@ bool block_index_projection_bind_flat(block_index_projection_t *p,
         pthread_mutex_unlock(&p->mu);
         return false;
     }
-    bool ok = sqlite3_exec(p->db, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK;
-    snprintf(number, sizeof(number), "%" PRIu64, p->last_consumed_offset);
-    if (ok)
-        ok = binding_meta_set(p->db, "flat_payload_sha3", digest_hex) &&
-             binding_meta_set_u64(p->db, "flat_payload_size", size) &&
-             binding_meta_set_u64(p->db, "flat_row_count", rows) &&
-             binding_meta_set(p->db, "flat_covered_offset", number) &&
-             sqlite3_exec(p->db, "DELETE FROM block_index_dirty", NULL,
-                          NULL, NULL) == SQLITE_OK;
-    ok = ok && sqlite3_exec(p->db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK;
-    if (!ok) (void)sqlite3_exec(p->db, "ROLLBACK", NULL, NULL, NULL);
-    if (!ok)
+    bool ok = binding_commit(p, digest_hex, size, rows);
+    pthread_mutex_unlock(&p->mu);
+    return ok;
+}
+
+bool block_index_projection_bind_flat_if_covered(
+    block_index_projection_t *p, const uint8_t digest[32], uint64_t size,
+    uint64_t rows, block_index_projection_cb covered, void *user)
+{
+    if (!p || !p->db || !digest || !covered) {
         fprintf(stderr, // obs-ok:block-index-projection-storage-boundary
-                "[block_index_projection] flat bind transaction "
-                "failed: %s\n", sqlite3_errmsg(p->db));
+                "[block_index_projection] covered flat bind invalid argument\n");
+        return false;
+    }
+
+    char digest_hex[65];
+    zcl_hex_encode(digest, 32, digest_hex);
+    pthread_mutex_lock(&p->mu);
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(p->db,
+        "SELECT hash,blob FROM block_index", -1, &stmt, NULL);
+    uint64_t projection_rows = 0;
+    bool ok = rc == SQLITE_OK;
+    while (ok && (rc = sqlite3_step(stmt)) == SQLITE_ROW) { // raw-sql-ok:kernel-primitive
+        const void *hash = sqlite3_column_blob(stmt, 0);
+        int hash_len = sqlite3_column_bytes(stmt, 0);
+        struct disk_block_index idx;
+        uint8_t hash_copy[32];
+        if (!hash || hash_len != 32 || !binding_blob_parse(
+                sqlite3_column_blob(stmt, 1), sqlite3_column_bytes(stmt, 1),
+                &idx)) {
+            ok = false;
+            break;
+        }
+        memcpy(hash_copy, hash, sizeof(hash_copy));
+        projection_rows++;
+        ok = projection_rows <= rows && covered(hash_copy, &idx, user);
+    }
+    if (rc != SQLITE_DONE && rc != SQLITE_ROW)
+        ok = false;
+    sqlite3_finalize(stmt);
+    if (!ok) {
+        fprintf(stderr, // obs-ok:block-index-projection-storage-boundary
+                "[block_index_projection] covered flat bind refused "
+                "projection=%" PRIu64 " flat=%" PRIu64 " rc=%d\n",
+                projection_rows, rows, rc);
+        pthread_mutex_unlock(&p->mu);
+        return false;
+    }
+    ok = binding_commit(p, digest_hex, size, rows);
     pthread_mutex_unlock(&p->mu);
     return ok;
 }

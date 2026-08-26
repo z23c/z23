@@ -1,5 +1,5 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * zfileget.v2 encrypted delivery and authorize-before-read proofs. */
+ * zfileget.v3 encrypted delivery and authorize-before-read proofs. */
 
 #include "test/test_core.h"
 
@@ -1088,6 +1088,43 @@ int file_market_delivery_tests(void)
         file_market_delivery_request_verify(
             &tampered, request.network_genesis, expected_session) ==
         FILE_MARKET_DELIVERY_ERR_SIGNATURE);
+
+    /* Freshness runs before signature work: an aged or future-dated copy of
+     * a real request must die with the dedicated expiry error even though
+     * its signature bytes are still valid. */
+    struct file_market_delivery_request stale = decoded;
+    stale.issued_unix = (int64_t)platform_time_wall_time_t() -
+        FILE_MARKET_DELIVERY_MAX_AGE_SECS - 1;
+    DELIVERY_CHECK("stale signed stamp refuses on freshness",
+        file_market_delivery_request_verify(
+            &stale, request.network_genesis, expected_session) ==
+        FILE_MARKET_DELIVERY_ERR_EXPIRED);
+
+    struct file_market_delivery_request premature = decoded;
+    premature.issued_unix = (int64_t)platform_time_wall_time_t() +
+        FILE_MARKET_DELIVERY_MAX_AGE_SECS + 1;
+    DELIVERY_CHECK("forged future stamp refuses on freshness",
+        file_market_delivery_request_verify(
+            &premature, request.network_genesis, expected_session) ==
+        FILE_MARKET_DELIVERY_ERR_EXPIRED);
+
+    struct file_market_delivery_request unstamped = decoded;
+    unstamped.issued_unix = 0;
+    uint8_t refused_wire[FILE_MARKET_DELIVERY_WIRE_BYTES];
+    DELIVERY_CHECK("zero stamp cannot encode or verify",
+        file_market_delivery_request_encode(&unstamped, refused_wire) ==
+            FILE_MARKET_DELIVERY_ERR_EXPIRED &&
+        file_market_delivery_request_verify(
+            &unstamped, request.network_genesis, expected_session) ==
+        FILE_MARKET_DELIVERY_ERR_EXPIRED);
+
+    /* Coordinated-fleet cutover honesty: a legacy v2-length wire gets one
+     * structured size refusal, never a misparse into v3 fields. */
+    struct file_market_delivery_request legacy_probe;
+    DELIVERY_CHECK("legacy zfileget.v2 wire length refuses cleanly",
+        file_market_delivery_request_decode(
+            wire, FILE_MARKET_DELIVERY_WIRE_BYTES - 8u, &legacy_probe) ==
+        FILE_MARKET_DELIVERY_ERR_WIRE_SIZE);
 
     struct delivery_fixture fixture = {
         .authorization = FILE_MARKET_DELIVERY_PENDING,

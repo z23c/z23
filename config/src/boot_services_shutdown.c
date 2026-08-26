@@ -69,7 +69,8 @@ static void shutdown_persist_fast_restart_state(struct boot_svc_ctx *svc)
             LOG_WARN("shutdown", "projection catch-up failed; flat saved "
                      "without binding so next boot uses the full scan");
         if (saved.ok && bip && covered != UINT64_MAX &&
-            !block_index_projection_bind_saved_flat(bip, &identity))
+            !block_index_projection_bind_saved_flat_state(
+                bip, &identity, svc->state))
             LOG_WARN("shutdown", "block index flat/projection bind refused; "
                      "next boot will use the full integrity scan");
     }

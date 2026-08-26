@@ -2,7 +2,7 @@
 
 This page is the developer and agent map for paid file offers and purchases.
 The seller-authenticated offer ingress, durable buyer payment plan/commit, and
-exact confirmed-payment authority are implemented. The encrypted `zfileget.v2`
+exact confirmed-payment authority are implemented. The encrypted `zfileget.v3`
 request, encrypted paid-chunk channel, and authorize-before-read gate are
 implemented. Owner-private paid-content registration and verified chunk
 loading are implemented. Local paid-offer signing/announcement remains
@@ -234,25 +234,33 @@ State meanings are strict:
 
 ## Buyer-authenticated delivery request
 
-`zfileget.v2` rides an encrypted `FS_REQUEST` frame and is exactly 206 bytes.
+`zfileget.v3` rides an encrypted `FS_REQUEST` frame and is exactly 214 bytes.
 Integers are little-endian.
 
 | Offset | Bytes | Field |
 |---:|---:|---|
-| 0 | 8 | `ZFGETV2\n` magic |
-| 8 | 2 | version (`2`) |
+| 0 | 8 | `ZFGETV3\n` magic |
+| 8 | 2 | version (`3`) |
 | 10 | 32 | ZClassic network genesis hash |
 | 42 | 32 | exact signed `offer_id` |
 | 74 | 4 | requested chunk index |
 | 78 | 32 | buyer Ed25519 public key from the payment memo |
 | 110 | 32 | session ID |
-| 142 | 64 | buyer Ed25519 signature |
+| 142 | 8 | Unix issuance stamp of the whole request |
+| 150 | 64 | buyer Ed25519 signature |
 
 The session ID is domain-separated SHA3-256 over network genesis, the
 initiator handshake nonce, and the responder handshake nonce. The signature
-covers a domain-separated root of bytes `0..141`. A captured request therefore
-cannot be moved onto another file-service session, and changing the offer,
-chunk, buyer, network, or session invalidates the signature.
+covers a domain-separated root of bytes `0..149`, including the issuance
+stamp. A captured request therefore cannot be moved onto another file-service
+session, and changing the offer, chunk, buyer, network, session, or stamp
+invalidates the signature. The stamp also bounds the wire to a short-lived
+bearer credential — vendored dynhost logs full onion request lines to
+`tor.log`, so a copied request used to stay valid for the life of the offer.
+The seal helper stamps at signing time; verify refuses any stamp older or
+newer than `FILE_MARKET_DELIVERY_MAX_AGE_SECS` (900 seconds) before doing
+signature work, so refreshing always requires re-signing. Legacy v2-length
+wires fail closed with a structured size error rather than a misparse.
 
 Every request receives one encrypted 84-byte `zfileget.reply.v2` before any
 chunk bytes. Its fixed fields are reply magic, version, typed status, offer
@@ -426,8 +434,9 @@ Do not build a payment by copying structs or invoking an RPC from memory:
 8. Keep the buyer private key and wallet keys behind their signing boundaries.
 9. Treat a txid or `PENDING` claim as locked. Only the seller's synchronous
    `CONFIRMED` authorization permits bytes to leave the paid file service.
-10. Sign each `zfileget.v2` request for the current encrypted session. Do not
-   reuse a request body across reconnects or expose the ephemeral buyer seed.
+10. Sign each `zfileget.v3` request fresh for the current encrypted session;
+   the server refuses stamps outside its 900-second window. Do not reuse a
+   request body across reconnects or expose the ephemeral buyer seed.
 11. Accept bytes only after the typed `READY` reply and verify the announced
    chunk SHA3. `CONTENT_UNAVAILABLE` means the seller has not registered the
    content locally; it is not permission to try a filesystem path.

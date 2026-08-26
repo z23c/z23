@@ -20,6 +20,38 @@ build/bin/z23 yardsale guide
 build/bin/z23 discover help
 ```
 
+## The onion lives inside this binary
+
+There is no second program to install. These facts are load-bearing for
+anyone touching `lib/net/src/tor_integration.c`, `onion_service.c`, or
+`onion_stream.c`:
+
+- **In-process, not a spawned daemon.** The vendored dynhost Tor fork is
+  linked into z23 and its `tor_run_main()` loop runs on a thread we own
+  (`g_tor_thread`; `lib/net/src/tor_integration.c`). Nothing ever forks,
+  execs, or supervises an external `tor` binary. Supervisor liveness
+  watches a proxy signal from our monitor poll — it does not instrument
+  the vendored loop.
+- **Hosting needs no egress machinery.** Default mode mints a fresh
+  ephemeral onion service every boot; `-onion-persist` keeps one address
+  across restarts (its second port mapping forwards `<onion>:<p2p_port>`
+  to the local P2P listener, which is how peers dial us inbound);
+  `-onion-rotate` deliberately archives the old identity. Hermetic onion
+  tests (`test_onion_stream`, `test_onion_persistence`,
+  `test_onion_directory`, …) pass on a host with zero network egress.
+- **No SOCKS exists anywhere in this architecture** (owner decision,
+  2026-08-22). Outbound onion dials open raw dynhost streams that a
+  socketpair bridge presents to connman as ordinary connected fds
+  (`lib/net/src/onion_stream.c`), so reactor, handshake, and message
+  layers are transport-unaware.
+- **Onion peers are operator-directed only.** They are parsed locally,
+  never DNS-resolved, never dialed clearnet, and never gossiped.
+- **One honest boundary.** "No egress" above means hosting and hermetic
+  testing run offline. Reaching a *remote* `.onion` across the internet
+  still rides Tor-network circuits, so wide-area claims belong to
+  `make mvp-onion-local`, which SKIPs loudly — never false-greens — when
+  the binary links the offline stub or the host has no egress.
+
 ## Hash split (do not mix these)
 
 | Surface | Digest / KDF | Why |
@@ -132,6 +164,8 @@ build/bin/z23 code map
 Primary files:
 
 - `lib/crypto/src/{hmac_sha3,hkdf_sha3}.c` — overlay HMAC / HKDF
+- `lib/net/src/tor_integration.c` — in-process Tor thread, identity persistence
+- `lib/net/src/onion_stream.c` — dynhost raw stream ↔ socketpair bridge
 - `lib/net/src/file_service_handshake.c` — X25519 + HKDF-SHA3-256
 - `lib/net/src/fast_sync.c` — snapshot / piece manifests (SHA3 ids)
 - `lib/net/src/flyclient.c` — FlyClient challenge / proof

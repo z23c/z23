@@ -15,20 +15,21 @@
 #include "crypto/ed25519.h"
 #include "crypto/sha3.h"
 #include "net/file_market.h"
+#include "net/file_market_delivery_internal.h"
 #include "net/file_service.h"
 #include "platform/time_compat.h"
+#include "util/log_macros.h"
 #include "support/cleanse.h"
 
 #include <pthread.h>
-#include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
 
 static const uint8_t k_request_magic[8] =
-    {'Z','F','G','E','T','V','2','\n'};
+    {'Z','F','G','E','T','V','3','\n'};
 static const uint8_t k_reply_magic[8] =
     {'Z','F','R','E','P','V','2','\n'};
-static const char k_request_domain[] = "zcl.file.market.delivery.request.v2";
+static const char k_request_domain[] = "zcl.file.market.delivery.request.v3";
 static const char k_session_domain[] = "zcl.file.market.delivery.session.v1";
 
 struct file_market_delivery_handlers {
@@ -72,6 +73,8 @@ static enum file_market_delivery_error delivery_fields(
     if (require_signature &&
         !delivery_bytes_nonzero(request->buyer_signature, 64))
         return FILE_MARKET_DELIVERY_ERR_SIGNATURE;
+    if (require_signature && request->issued_unix <= 0)
+        return FILE_MARKET_DELIVERY_ERR_EXPIRED;
     return FILE_MARKET_DELIVERY_OK;
 }
 
@@ -97,6 +100,8 @@ static enum file_market_delivery_error delivery_body(
     off += 32;
     memcpy(out + off, request->session_id, 32);
     off += 32;
+    zcl_write_u64_le(out + off, (uint64_t)request->issued_unix);
+    off += 8;
     return off == FILE_MARKET_DELIVERY_BODY_BYTES
         ? FILE_MARKET_DELIVERY_OK : FILE_MARKET_DELIVERY_ERR_WIRE_SIZE;
 }
@@ -134,6 +139,7 @@ const char *file_market_delivery_error_string(
     case FILE_MARKET_DELIVERY_ERR_SESSION: return "session-binding";
     case FILE_MARKET_DELIVERY_ERR_SIGNATURE: return "signature";
     case FILE_MARKET_DELIVERY_ERR_KEY_MISMATCH: return "buyer-key-mismatch";
+    case FILE_MARKET_DELIVERY_ERR_EXPIRED: return "request-expired";
     }
     return "unknown";
 }
@@ -221,6 +227,8 @@ enum file_market_delivery_error file_market_delivery_request_decode(
     off += 32;
     memcpy(out->session_id, wire + off, 32);
     off += 32;
+    out->issued_unix = (int64_t)zcl_read_u64_le(wire + off);
+    off += 8;
     memcpy(out->buyer_signature, wire + off, 64);
     off += 64;
     enum file_market_delivery_error error =
@@ -239,6 +247,7 @@ enum file_market_delivery_error file_market_delivery_request_seal(
     if (!request || !buyer_seed)
         return FILE_MARKET_DELIVERY_ERR_NULL;
     uint8_t derived_pk[32], secret_copy[32], root[32];
+    request->issued_unix = (int64_t)platform_time_wall_time_t();
     ed25519_keypair(derived_pk, secret_copy, buyer_seed);
     if (memcmp(derived_pk, request->buyer_pubkey, 32) != 0) {
         memory_cleanse(secret_copy, sizeof(secret_copy));
@@ -267,6 +276,23 @@ enum file_market_delivery_error file_market_delivery_request_verify(
     if (!expected_session_id ||
         memcmp(request->session_id, expected_session_id, 32) != 0)
         return FILE_MARKET_DELIVERY_ERR_SESSION;
+    /* Freshness closes the bearer hole the onion route opens: vendored
+     * dynhost writes every request line (the full signed credential) into
+     * tor.log, and a copied onion request used to stay valid for the life
+     * of the offer. Reject stamps outside the window in both directions so
+     * a forged future stamp cannot outlive it either. */
+    int64_t now_unix = (int64_t)platform_time_wall_time_t();
+    int64_t age_unix = now_unix - request->issued_unix;
+    if (request->issued_unix <= 0 ||
+        age_unix < -FILE_MARKET_DELIVERY_MAX_AGE_SECS ||
+        age_unix > FILE_MARKET_DELIVERY_MAX_AGE_SECS) {
+        LOG_WARN("market",
+                 "paid delivery request rejected on freshness: "
+                 "issued=%lld now=%lld max_age=%ds",
+                 (long long)request->issued_unix, (long long)now_unix,
+                 FILE_MARKET_DELIVERY_MAX_AGE_SECS);
+        return FILE_MARKET_DELIVERY_ERR_EXPIRED;
+    }
     uint8_t root[32];
     error = delivery_body_root(request, root);
     bool signature_ok = error == FILE_MARKET_DELIVERY_OK &&

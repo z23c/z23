@@ -238,7 +238,7 @@ proc_exec_arg_values() {
 
 # Classify the subversion a running node advertises. Since
 # lib/net/include/net/version.h, a node states which build it is running by
-# appending its baked source identity: "/ZClassic23:0.1.0(src:<64 hex>)/".
+# appending its baked source prefix: "/ZClassic23:0.1.0(src:<12 hex>)/".
 # An unstamped build publishes the bare "/ZClassic23:0.1.0/" instead, and that
 # is a normal answer, never a deploy failure. The one failure this can see is
 # a node advertising a build that is NOT the one we just deployed.
@@ -246,16 +246,22 @@ proc_exec_arg_values() {
 advertised_subver_verdict() {
     adv_subver="$1"
     adv_want="$2"
+    adv_want_prefix=$(printf '%.12s' "$adv_want")
     if [ "$adv_subver" = "/ZClassic23:0.1.0/" ]; then
         echo unstamped
         return 0
     fi
-    if [ "$adv_subver" = "/ZClassic23:0.1.0(src:$adv_want)/" ]; then
+    if [ "$adv_subver" = "/ZClassic23:0.1.0(src:$adv_want_prefix)/" ] ||
+       [ "$adv_subver" = "/ZClassic23:0.1.0(src:$adv_want)/" ]; then
         echo deployed
         return 0
     fi
     adv_id=$(printf '%s\n' "$adv_subver" |
-        sed -n 's|^/ZClassic23:0\.1\.0(src:\([0-9a-f]\{64\}\))/$|\1|p')
+        sed -n 's|^/ZClassic23:0\.1\.0(src:\([0-9a-f]\{12\}\))/$|\1|p')
+    if [ -z "$adv_id" ]; then
+        adv_id=$(printf '%s\n' "$adv_subver" |
+            sed -n 's|^/ZClassic23:0\.1\.0(src:\([0-9a-f]\{64\}\))/$|\1|p')
+    fi
     if [ -n "$adv_id" ]; then
         echo stale
         return 0
@@ -303,10 +309,14 @@ deploy_verify_selftest() {
     # a well-formed token naming a build other than the deployed one.
     sv_want=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
     sv_other=fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+    [ "$(advertised_subver_verdict "/ZClassic23:0.1.0(src:0123456789ab)/" \
+        "$sv_want")" = deployed ] || return 1
     [ "$(advertised_subver_verdict "/ZClassic23:0.1.0(src:$sv_want)/" \
         "$sv_want")" = deployed ] || return 1
     [ "$(advertised_subver_verdict "/ZClassic23:0.1.0/" "$sv_want")" \
         = unstamped ] || return 1
+    [ "$(advertised_subver_verdict "/ZClassic23:0.1.0(src:fedcba987654)/" \
+        "$sv_want")" = stale ] || return 1
     [ "$(advertised_subver_verdict "/ZClassic23:0.1.0(src:$sv_other)/" \
         "$sv_want")" = stale ] || return 1
     [ "$(advertised_subver_verdict "/MagicBean:2.1.2/" "$sv_want")" \
