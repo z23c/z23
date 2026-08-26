@@ -404,6 +404,11 @@ static bool group_reads_external_inputs(const char *name)
         "secrets_hygiene",
         "self_folded_anchor",
         "shielded_payment_gate",
+        /* sources tools/scripts/source_identity_lib.sh and execs a shell
+         * fixture: the reader whose behaviour it pins is a repo file outside
+         * this group's C include closure, so a stored PASS would survive an
+         * edit to that reader. */
+        "source_identity_authority",
         "syncdiag_rpc",
         "utxo_root_ladder",
         "verify_bench_selftest",

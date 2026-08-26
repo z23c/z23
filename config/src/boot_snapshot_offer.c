@@ -154,10 +154,9 @@ static void boot_try_publish_block_swarm(struct boot_svc_ctx *svc,
 
     printf("Building block piece manifest...\n");
     memset(&block_manifest, 0, sizeof(block_manifest));
-    if ((svc && svc->state &&
-         block_piece_manifest_build_active_chain(&svc->state->chain_active, 1,
-                                                 body_h, &block_manifest)) ||
-        block_piece_manifest_build(datadir, 1, body_h, &block_manifest)) {
+    if (svc && svc->state &&
+        block_piece_manifest_build_active_chain(&svc->state->chain_active, 1,
+                                                body_h, &block_manifest)) {
         int32_t start_height = block_manifest.start_height;
         int32_t end_height = block_manifest.end_height;
         uint32_t num_pieces = block_manifest.num_pieces;
@@ -165,7 +164,10 @@ static void boot_try_publish_block_swarm(struct boot_svc_ctx *svc,
         printf("Block manifest ready: h=%d..%d, %u pieces\n",
                start_height, end_height, num_pieces);
     } else {
-        printf("Block manifest: build failed\n");
+        /* SQLite's blocks table is a derived corpus, not active-chain trust
+         * authority. Missing trusted bodies leave the optional service
+         * unavailable; boot and ordinary P2P continue independently. */
+        printf("Block manifest: trusted active-chain build unavailable\n");
     }
 }
 

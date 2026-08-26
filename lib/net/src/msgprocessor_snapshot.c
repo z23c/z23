@@ -767,31 +767,6 @@ bool mp_snapshot_check_stall(void)
     return snapsync_check_stall();
 }
 
-void mp_snapshot_init(struct msg_processor *mp)
-{
-    /* Build initial block piece manifest for swarm sync.
-     * This enables serving block pieces to peers immediately. */
-    if (mp->main_state && mp->datadir) {
-        int tip = active_chain_height(&mp->main_state->chain_active);
-        struct block_piece_manifest header;
-        if (tip > 1000 &&
-            !msg_processor_get_block_manifest_header(&header, NULL)) {
-            struct block_piece_manifest manifest;
-            memset(&manifest, 0, sizeof(manifest));
-            if (block_piece_manifest_build_active_chain(&mp->main_state->chain_active, 1,
-                                                        tip, &manifest) ||
-                block_piece_manifest_build(mp->datadir, 1, tip, &manifest)) {
-                uint32_t num_pieces = manifest.num_pieces;
-                int32_t start_height = manifest.start_height;
-                int32_t end_height = manifest.end_height;
-                msg_processor_publish_block_manifest(&manifest, tip);
-                printf("Block manifest built: h=%d..%d (%u pieces, SHA3 verified)\n",
-                       start_height, end_height, num_pieces);
-            }
-        }
-    }
-}
-
 /* D1: aggregate SHA3 UTXO-snapshot verify for the swarm chunk-download
  * path. Was previously a silent-accept: FAILED printed, then fell
  * through into the same cleanup as PASSED (no offence, no blocker) —

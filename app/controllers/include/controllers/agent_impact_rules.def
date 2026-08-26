@@ -97,6 +97,12 @@ AGENT_IMPACT_RULE("lib/net/src/addnode_file.c|lib/net/include/net/addnode_file.h
 AGENT_IMPACT_RULE("lib/net/include/net/msg_internal.h|lib/net/include/net/peer_lifecycle.h|lib/net/include/net/port_policy.h|lib/net/include/net/version.h", "peer_lifecycle")
 AGENT_IMPACT_RULE("lib/net/src/msg_blocks.c|lib/net/src/msgprocessor.c|lib/net/include/net/msgprocessor.h|lib/test/src/test_msg_handlers.c", "msg_handlers net download body_fetch_missing_have_data_condition sync_watchdog_conditions make_lint_gates")
 AGENT_IMPACT_RULE("lib/net/src/msgprocessor_inv.c|lib/net/src/msgprocessor_internal.h|lib/net/src/msg_bounds_guard.c|lib/net/include/net/msg_bounds_guard.h|lib/test/src/test_net_msg_dos.c", "net_msg_dos net msg_handlers process_headers_adversarial make_lint_gates")
+/* BIP152 compact block relay. msg_compact.c is the inbound cmpctblock /
+ * getblocktxn / blocktxn dispatch, compact_blocks.c the (de)serializers and
+ * the reconstructor; both are reachable by any connected peer, so a change
+ * here must run the compact_blocks group and the p2p message-handler groups
+ * that share the dispatch table. */
+AGENT_IMPACT_RULE("lib/net/src/compact_blocks.c|lib/net/src/msg_compact.c|lib/net/include/net/compact_blocks.h|lib/test/src/test_compact_blocks.c", "compact_blocks msg_handlers net net_msg_dos make_lint_gates")
 AGENT_IMPACT_RULE("lib/net/src/download.c|lib/net/include/net/download.h|lib/test/src/test_download.c", "download syncdiag_rpc api block_swarm_loopback")
 AGENT_IMPACT_RULE("lib/net/src/tor_integration.c|lib/net/src/tor_config_log.c|lib/net/src/tor_fetch.c|lib/net/src/tor_request_state.c|lib/net/src/onion_identity.c|lib/net/src/onion_service.c|lib/net/include/net/tor_integration.h|lib/net/include/net/tor_request_state.h|config/src/boot_frontend_services.c|config/include/config/boot_internal.h|lib/test/src/test_tor.c|lib/test/src/test_onion_persistence.c|tools/scripts/install_z23.sh", "test_tor onion_persistence make_lint_gates")
 /* Raw dynhost-stream onion P2P dialer (no SOCKS): the socketpair bridge,
@@ -1222,3 +1228,38 @@ AGENT_IMPACT_RULE("lib/sapling/src/params_vk_embedded.c|lib/sapling/include/sapl
  * change to any one of these five is never left to an implicit catch-all to
  * notice. */
 AGENT_IMPACT_RULE("tools/scripts/promote_fuzz_artifacts.sh|tools/scripts/fuzz_verdict_lib.sh|tools/lint/check_fuzz_artifact_replay.sh|tools/scripts/background_quality_lane.sh|tools/scripts/check_quality_lane_freshness.sh|lib/test/fuzz_seeds/ARTIFACT_VERDICTS.txt", "make_lint_gates")
+/* Lane: published build identity (peer build identity on the wire).
+ * ONE slice: the advertised subversion and its reader (msg_version.c +
+ * net/version.h), the getpeerinfo field that republishes what each peer
+ * said, and the two groups that pin the contract — net_handshake_adversarial
+ * owns "absent/malformed is unknown and is never penalised", peer_lifecycle
+ * owns "what we publish is the baked source identity". Change any one of
+ * them and a node can start advertising a build it is not running, or a
+ * peer's silence can start costing it something.
+ *
+ * tools/deploy_verify.sh rides the same rule because it is the one consumer
+ * OUTSIDE the network layer that reads the advertised string as data: it had
+ * a frozen grep for the exact pre-change "/ZClassic23:0.1.0/", so the first
+ * stamped build to be deployed would have failed its own deploy gate from a
+ * file nobody in this lane had touched. Its acceptance set and what
+ * msg_version_user_agent() emits are one contract; the make_lint_gates case
+ * in lint_gate_deploy_contracts.c is where that contract is asserted, and it
+ * must move with the format. */
+AGENT_IMPACT_RULE("lib/net/src/msg_version.c|lib/net/include/net/version.h|app/controllers/src/network_controller.c|tools/deploy_verify.sh|lib/test/src/lint_gate_deploy_contracts.c|lib/test/src/test_net_handshake_adversarial.c|lib/test/src/test_peer_lifecycle.c|lib/test/src/test_syncdiag_network.c", "net_handshake_adversarial peer_lifecycle net syncdiag_rpc make_lint_gates")
+/* The doctrine page an agent reads before it decides whether to act or ask,
+ * plus the entry point that links it. Doc-only, but it is contract text: the
+ * doc gates check its links, its inline paths, and its claims. */
+AGENT_IMPACT_RULE("docs/CODE_FEARLESSLY.md|AGENTS.md", "make_lint_gates")
+/* LANE source-identity-authority: the deploy freshness authority and the two
+ * questions its key name conflates. `source_id_sha256` names both "what
+ * source tree was this BINARY built from" (baked into the executable,
+ * identical from every working directory) and "what source tree is in this
+ * DIRECTORY right now" (different in every checkout). Only the first is a
+ * freshness answer; reading the second under its name passes a stale daemon
+ * whose own checkout happens to look current. These files move together
+ * because they are the one reader, its two consumers, and the constant they
+ * all resolve to: change the reader's admission rule without re-running the
+ * group and a deploy check can start comparing a directory to a daemon with
+ * nothing looking. Mapped so an edit here can never reach the push gate
+ * having run zero test groups. */
+AGENT_IMPACT_RULE("tools/scripts/source_identity_lib.sh|tools/deploy_verify.sh|lib/util/src/clientversion.c|lib/util/include/util/clientversion.h|app/controllers/src/agent_runtime_controller.c|lib/test/src/test_source_identity_authority.c", "source_identity_authority make_lint_gates")

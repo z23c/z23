@@ -346,6 +346,13 @@ bool vcs_zcode_dht_service_record_operation_poll(
   memset(out, 0, sizeof(*out));
   out->state = operation->state;
   out->store_status = operation->store_status;
+  if (operation->state != VCS_ZCODE_DHT_RECORD_OPERATION_PENDING) {
+    const uint64_t retention =
+        VCS_ZCODE_DHT_RECORD_OPERATION_RESULT_RETENTION_S;
+    out->expires_mono = operation->terminal_mono > UINT64_MAX - retention
+                            ? UINT64_MAX
+                            : operation->terminal_mono + retention;
+  }
   out->page_offset = operation->page_offset;
   out->next_offset = operation->next_offset;
   out->record_count = operation->record_count;
@@ -354,6 +361,20 @@ bool vcs_zcode_dht_service_record_operation_poll(
   if (operation->state != VCS_ZCODE_DHT_RECORD_OPERATION_PENDING)
     memset(operation, 0, sizeof(*operation));
   return true;
+}
+
+/* Drop an operation and any query still carrying its id. Both cancel and the
+ * terminal sweep need exactly this; a swept operation normally has no live
+ * query left, but releasing one that does is cheaper than proving it can't. */
+static void records_operation_release(
+    struct vcs_zcode_dht_service *service, uint64_t operation_id,
+    struct service_record_operation *operation)
+{
+  for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_ACTIVE_QUERIES; i++)
+    if (service->queries[i].used &&
+        service->queries[i].record_operation_id == operation_id)
+      memset(&service->queries[i], 0, sizeof(service->queries[i]));
+  memset(operation, 0, sizeof(*operation));
 }
 
 bool vcs_zcode_dht_service_record_operation_cancel(
@@ -365,12 +386,29 @@ bool vcs_zcode_dht_service_record_operation_cancel(
       vcs_zcode_dht_records_operation_find(service, operation_id);
   if (!operation)
     return false;
-  for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_ACTIVE_QUERIES; i++)
-    if (service->queries[i].used &&
-        service->queries[i].record_operation_id == operation_id)
-      memset(&service->queries[i], 0, sizeof(service->queries[i]));
-  memset(operation, 0, sizeof(*operation));
+  records_operation_release(service, operation_id, operation);
   return true;
+}
+
+/* A terminal operation holds one of eight slots until its owner collects it.
+ * The public API gives every owner the same explicit retention interval;
+ * after it, an unpolled result is no longer part of the contract and the slot
+ * is reusable. State is the terminal discriminator because zero is a valid
+ * monotonic timestamp. Subtraction avoids timestamp-addition overflow and a
+ * backwards clock step retains the result until the clock catches up. */
+void vcs_zcode_dht_records_sweep(struct vcs_zcode_dht_service *service,
+                                 uint64_t now_mono)
+{
+  for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_RECORD_OPERATIONS; i++) {
+    struct service_record_operation *operation =
+        &service->record_operations[i];
+    if (operation->used &&
+        operation->state != VCS_ZCODE_DHT_RECORD_OPERATION_PENDING &&
+        now_mono >= operation->terminal_mono &&
+        now_mono - operation->terminal_mono >=
+            VCS_ZCODE_DHT_RECORD_OPERATION_RESULT_RETENTION_S)
+      records_operation_release(service, operation->id, operation);
+  }
 }
 
 enum vcs_zcode_dht_record_store_result vcs_zcode_dht_service_record_admit(
@@ -554,6 +592,7 @@ bool vcs_zcode_dht_service_records_handle(
     memcpy(operation->records, message->records.records,
            operation->record_count * sizeof(*operation->records));
     operation->state = VCS_ZCODE_DHT_RECORD_OPERATION_COMPLETE;
+    operation->terminal_mono = now.monotonic_s;
     service->records_received++;
     return true;
   }
@@ -570,6 +609,7 @@ bool vcs_zcode_dht_service_records_handle(
                                VCS_ZCODE_DHT_STORE_REJECTED
                            ? VCS_ZCODE_DHT_RECORD_OPERATION_REJECTED
                            : VCS_ZCODE_DHT_RECORD_OPERATION_COMPLETE;
+    operation->terminal_mono = now.monotonic_s;
     service->store_result_received++;
     return true;
   }
@@ -578,7 +618,7 @@ bool vcs_zcode_dht_service_records_handle(
 
 void vcs_zcode_dht_service_record_query_finish(
     struct vcs_zcode_dht_service *service, const struct service_query *query,
-    enum query_outcome outcome)
+    enum query_outcome outcome, struct vcs_zcode_dht_time now)
 {
   if (!service || !query ||
       (query->kind != QUERY_RECORD_LOOKUP &&
@@ -588,8 +628,10 @@ void vcs_zcode_dht_service_record_query_finish(
   struct service_record_operation *operation =
       vcs_zcode_dht_records_operation_find(service,
                                             query->record_operation_id);
-  if (operation)
+  if (operation) {
     operation->state = outcome == QUERY_OUTCOME_EXPIRED
                            ? VCS_ZCODE_DHT_RECORD_OPERATION_TIMEOUT
                            : VCS_ZCODE_DHT_RECORD_OPERATION_REJECTED;
+    operation->terminal_mono = now.monotonic_s;
+  }
 }

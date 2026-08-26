@@ -146,56 +146,55 @@ block/timeout-bd48a7ad437e7b2d2a8f4dc974974220f7b99a4f.bin  regression-seed  202
 block/timeout-c568b1ad05236138d5a6ebb39aa08ed5165d04fe.bin  regression-seed  2026-07-29  # spurious -timeout=2 trip on a loaded box; 0 ms today, fuzz_block.c byte-identical since filing
 block/timeout-d12c40f723c88ca59a6471aaa6af2b99d69eca0d.bin  regression-seed  2026-07-29  # spurious -timeout=2 trip on a loaded box; 0 ms today, fuzz_block.c byte-identical since filing
 
-# ── p2p — 4 artifacts: 3 lane noise, 1 a LIVE remote memory-safety bug ──────
-# The three timeout- artifacts are lane noise (audit below, unchanged from
-# 2026-07-29). The crash- artifact is NOT: the 2026-08-26 entry that called it
-# "replayed clean ... NOT explained, only unreproducible" was WRONG. That
-# verdict rested on a single stock replay and a misread of the parse path (the
-# claimed "prefilled-tx parse runs out of stream" is false — the 151-byte
-# payload parses completely; there is nothing left to run out of). It is a
-# real, remotely-triggerable wild-pointer read, currently UNFIXED on this
-# branch, and this entry replaces the earlier one rather than patching around
-# it — see fuzz_verdict_lib.sh's rule: a crash-/leak- artifact cannot close on
-# "it replayed clean" alone.
+# ── p2p — 5 artifacts: 3 lane noise, 2 the SAME real remote bug ─────────────
+#
+# The three timeout- artifacts are lane noise (audit below). The two crash-
+# artifacts are not, and the 2026-08-26 entry that called the first of them
+# "not explained, only unreproducible" was WRONG on both counts. It is now
+# explained, it was a real bug reachable by any peer, and it is fixed.
+#
+# The two crash- files are byte-identical except for one byte at offset 0x90,
+# inside the BIP152 siphash nonce (0x31 vs 0x32) — libFuzzer's own log records
+# the second as `MS: 1 ChangeASCIIInt-; base unit: e3fef02e...`. The nonce
+# feeds only compact_block_derive_key(), and both files carry zero short
+# txids, so the two take a byte-for-byte identical path. They are one finding.
 #
 # What the 152 bytes do: byte 0 = 0xf9; 0xf9 % 46 == 19, which selects
-# `cmpctblock` from g_inbound_commands[] in tools/fuzz/fuzz_p2p.c. The
-# remaining 151 bytes are a complete BIP152 cmpctblock payload — a 140-byte
-# block header, a 1-byte solution size of 0, an 8-byte compact-block nonce,
-# then a short-txid count of 0 and a prefilled-tx count of 0 — fully consumed.
+# `cmpctblock` from g_inbound_commands[]. The remaining 151 bytes are the
+# payload: a 140-byte block header (nVersion=0x040000f1, three 32-byte
+# hashes, nTime=nBits=0x1e1e1e1e, 32-byte nNonce) + a 1-byte solution size of
+# 0, then the 8-byte compact-block nonce, then a short-txid count of 0 and a
+# prefilled-tx count of 0. Exactly 151 bytes, fully consumed — the payload
+# PARSES CLEANLY. (The superseded entry claimed the prefilled-tx parse runs
+# out of stream. It does not; there is nothing left to parse.) Confirmed
+# under gdb: the artifact clears block_already_seen() and CheckProofOfWork()
+# and reaches compact_block_reconstruct() with num_prefilled == 0 and
+# num_short_txids == 0.
 #
-# The bug: total (= num_prefilled + num_short_txids) == 0 takes the first
-# hard-failure return in compact_block_reconstruct()
-# (lib/net/src/compact_blocks.c:318-319, `LOG_FAIL` — which expands to
-# `return false`), and on this branch that return sits ABOVE
-# `block_init(out_block)` (line 321). process_cmpctblock()
-# (lib/net/src/msg_compact.c:245) then runs `block_free(&out_block)` on
-# every reconstruction outcome, which walks whatever pointer and count the
-# caller's stack frame happened to hold at that offset — a wild read in
-# transaction_free(). Remote and effectively pre-authentication: any
-# connected peer, one valid block header plus two zero bytes.
+# The bug: total = 0 hit the first failure return in
+# compact_block_reconstruct(), and that return sat ABOVE block_init(out_block).
+# LOG_FAIL expands to `return false`, so out_block was handed back untouched,
+# and process_cmpctblock()'s `else { block_free(&out_block); }` then ran
+# transaction_free() over whatever pointer and count the caller's stack
+# happened to hold. Remote, pre-authentication in effect (any peer past the
+# handshake), and a peer needs only a valid header plus two zero bytes.
 #
-# Why a plain replay reads clean: a freshly-mapped stack is zero, so the wild
-# walk touches address 0 and (on this harness/build) the process exits
-# cleanly — 25/25 stock replays clean, matching the superseded entry's
-# finding. Rebuilt with -ftrivial-auto-var-init=pattern (poisons every
-# uninitialized stack slot instead of leaving it zero), the SAME bytes crash
-# 25/25 times, deterministically:
-#   AddressSanitizer: SEGV on unknown address ... READ memory access
-#   #0 transaction_free  lib/primitives/src/transaction.c:56
-#   #1 block_free        lib/primitives/include/primitives/block.h:139
-#   #2 process_cmpctblock lib/net/src/msg_compact.c:245
-#   #3 msg_process_messages lib/net/src/msgprocessor.c:2213
-# rdi/rbx/r12/r14 = 0xaaaaaaaaaaaaaaaa (clang's pattern-init poison byte,
-# confirming the read is of the never-initialized out_block.vtx/num_vtx, not
-# of anything the fuzz harness itself supplied).
+# Why it looked unreproducible: a freshly-mapped stack reads back as zero, so
+# a one-shot replay frees nothing and exits 0. It only fires in a long-lived
+# process. Measured: 140 single-artifact replays clean, and a 240 s /
+# 1,265,835-exec fuzz session clean — while the background lane hit it twice
+# in an hour. Rebuilding the pre-fix tree with -ftrivial-auto-var-init=pattern
+# makes it deterministic and reproduces the lane's exact stack:
+#   transaction_free <- block_free <- process_cmpctblock <- msg_process_messages
+# Both crash- files reproduce that way pre-fix and are clean post-fix.
 #
-# NOT FIXED on this branch: lib/net/src/compact_blocks.c is owned by another
-# lane (lib/net/** is out of scope here) and still has block_init(out_block)
-# below the total==0/total>MAX check as of this filing. `open`, not
-# `regression-seed` — this does not suppress the failure, it names it.
-# Logs: /home/rhett/.local/state/zclassic23/scratch/fuzztriage/crash_logs/,
-# /home/rhett/.local/state/zclassic23/scratch/fuzztriage/symbolized/.
+# Fixed by moving block_init(out_block) above the count check in
+# compact_block_reconstruct() (+ block_init at the process_cmpctblock call
+# site + the post-condition written into compact_blocks.h). Regression test:
+# "compact_block_reconstruct hard failure leaves out_block freeable" in
+# lib/test/src/test_compact_blocks.c, which poisons out_block the way a
+# long-lived stack does and covers both early returns (total == 0 and
+# total > MAX_COMPACT_BLOCK_TXNS). Reverting the fix fails it 2 of 2.
 #
 # ── the three timeout- artifacts ────────────────────────────────────────────
 # Same audit, same verdict, 2026-07-29: 0-1 ms each. tools/fuzz/fuzz_p2p.c is
@@ -213,7 +212,8 @@ block/timeout-d12c40f723c88ca59a6471aaa6af2b99d69eca0d.bin  regression-seed  202
 p2p/timeout-08ce3c74fb75d9f1303d3d1d5b51aff52c74591d.bin  regression-seed  2026-07-29  # spurious -timeout=2 trip on a loaded box; 0 ms today, fuzz_p2p.c byte-identical since filing
 p2p/timeout-101ccf625fc29d20a76da38c78456260553cb59a.bin  regression-seed  2026-07-29  # spurious -timeout=2 trip on a loaded box; 0 ms today, fuzz_p2p.c byte-identical since filing
 p2p/timeout-4ef00610e20bbb48f0d3f94a57fe217c12a6a260.bin  regression-seed  2026-07-29  # spurious -timeout=2 trip on a loaded box; 0 ms today, fuzz_p2p.c byte-identical since filing
-p2p/crash-e3fef02ed5b5b9239b2d68e94fc48f7fc76879ea.bin  open  2026-08-26  # SUPERSEDES the same-day 'regression-seed' entry, which rested on a single clean stock replay and a wrong parse-path claim. Remote wild-pointer read: cmpctblock with 0 short txids + 0 prefilled -> total==0 -> compact_block_reconstruct's first failure return sits above block_init(out_block) -> process_cmpctblock's block_free() walks the caller's stale stack. stock: clean (25x, freshly-mapped stack reads as zero); pattern-init: CRASHES (25/25, deterministic SEGV in transaction_free <- block_free <- process_cmpctblock <- msg_process_messages, poison register values 0xaaaaaaaaaaaaaaaa confirm an uninitialized read). NOT fixed on this branch (lib/net/src/compact_blocks.c, out of scope for this lane) — open until it is
+p2p/crash-e3fef02ed5b5b9239b2d68e94fc48f7fc76879ea.bin  regression-seed  2026-08-26  # SUPERSEDES the same-day entry that called this unexplained-but-unreproducible: it was a REAL remote bug, the same one as crash-478b30c0 (the two differ by one nonce byte and take an identical path). cmpctblock with 0 short txids + 0 prefilled -> total==0 -> compact_block_reconstruct returned above block_init(out_block) -> process_cmpctblock block_free'd the caller's stale stack. Clean now because it is FIXED, not because it was never a bug; verified pre-fix under -ftrivial-auto-var-init=pattern (SEGV in transaction_free) and clean post-fix
+p2p/crash-478b30c0482cf3e2842fa459987a7a2e5374e708.bin  regression-seed  2026-08-26  # attacker-reachable wild free in process_cmpctblock, found by the background lane as an ASan heap-buffer-overflow in transaction_free and FIXED here; 152-byte cmpctblock (byte0 0xf9 -> index 19) whose payload parses cleanly to 0 short txids + 0 prefilled, so total==0 took compact_block_reconstruct's first failure return, which sat above block_init(out_block); clean in 140 stock replays only because a fresh stack is zero — deterministic pre-fix under -ftrivial-auto-var-init=pattern, clean post-fix, regression test in test_compact_blocks.c
 
 # ── accepted ────────────────────────────────────────────────────────────────
 # Empty, deliberately. `accepted` is the only verdict that lets a reproducing

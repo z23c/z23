@@ -35,6 +35,7 @@
 # your choice; whether they are the right bytes is not negotiable.
 
 set -euo pipefail
+umask 077
 
 # ── Pinned digests ──────────────────────────────────────────────────────
 # These are the public outputs of the Zcash multi-party parameter
@@ -140,20 +141,47 @@ cmd_install() {
     [ "$rc" -eq 0 ] || die "source set is not trustworthy; refusing to install"
 
     mkdir -p "$dst"
+    local stage name failed_name
+    stage=$(mktemp -d "$dst/.zcash-params.install.XXXXXX") || \
+        die "could not create a private staging directory in $dst"
     for i in "${!PARAM_FILES[@]}"; do
-        local name="${PARAM_FILES[$i]}"
+        name="${PARAM_FILES[$i]}"
         note "copying $name"
-        cp -f -- "$src/$name" "$dst/$name.partial"
-        mv -f -- "$dst/$name.partial" "$dst/$name"
+        if ! cp -- "$src/$name" "$stage/$name"; then
+            failed_name="$name"
+            for name in "${PARAM_FILES[@]}"; do rm -f -- "$stage/$name"; done
+            rmdir -- "$stage" 2>/dev/null || true
+            die "copy failed while staging $failed_name"
+        fi
     done
 
-    note "re-verifying destination $dst after copy"
+    note "verifying private staging directory before installation"
+    rc=0
+    for i in "${!PARAM_FILES[@]}"; do
+        verify_one "$stage" "$i" || rc=1
+    done
+    if [ "$rc" -ne 0 ]; then
+        for name in "${PARAM_FILES[@]}"; do rm -f -- "$stage/$name"; done
+        rmdir -- "$stage" 2>/dev/null || true
+        die "staged copy failed verification; nothing was installed"
+    fi
+    for i in "${!PARAM_FILES[@]}"; do
+        name="${PARAM_FILES[$i]}"
+        if [ -d "$dst/$name" ] || ! mv -f -- "$stage/$name" "$dst/$name"; then
+            failed_name="$name"
+            for name in "${PARAM_FILES[@]}"; do rm -f -- "$stage/$name"; done
+            rmdir -- "$stage" 2>/dev/null || true
+            die "could not install $failed_name"
+        fi
+    done
+    rmdir -- "$stage"
+
+    note "re-verifying destination $dst after installation"
     rc=0
     for i in "${!PARAM_FILES[@]}"; do
         verify_one "$dst" "$i" || rc=1
     done
-    [ "$rc" -eq 0 ] || die "destination failed verification after copy; \
-the copy is corrupt and must not be used"
+    [ "$rc" -eq 0 ] || die "destination failed verification after install"
     note "installed and verified in $dst — shielded spend capability available"
 }
 
@@ -189,7 +217,14 @@ cmd_vk_extract() {
     [ "$rc" -eq 0 ] || die "refusing to extract verifying keys from an \
 unverified parameter set"
 
-    local tmp="$out.tmp.$$"
+    [ ! -d "$out" ] || die "output path is a directory: $out"
+    local out_dir out_base tmp
+    out_dir=$(dirname -- "$out")
+    out_base=$(basename -- "$out")
+    [ -d "$out_dir" ] || die "output directory does not exist: $out_dir"
+    tmp=$(mktemp "$out_dir/.${out_base}.tmp.XXXXXX") || \
+        die "could not create a private output file in $out_dir"
+    trap 'rm -f -- "${tmp:-}"' EXIT
     {
         cat <<'HEADER'
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
@@ -283,6 +318,7 @@ ACCESS
     } > "$tmp"
 
     mv -f -- "$tmp" "$out"
+    trap - EXIT
     note "wrote $out ($(file_size "$out") bytes of generated C)"
 }
 

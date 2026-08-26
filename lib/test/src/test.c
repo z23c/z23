@@ -1295,6 +1295,7 @@ int main(int argc, char **argv)
     failures += test_long_op();
     failures += test_agent_copy_prove();
     failures += test_agent_test();
+    failures += test_source_identity_authority();
     failures += test_recovery_policy();
     failures += test_oracle_policy();
     failures += test_quorum_oracle();

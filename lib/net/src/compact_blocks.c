@@ -313,12 +313,21 @@ bool compact_block_reconstruct(const struct compact_block_msg *cb,
     *missing_indices = NULL;
     *num_missing = 0;
 
+    /* Initialize out_block BEFORE the first thing that can fail. Every
+     * caller block_free()s it on the not-complete/no-missing path, so a
+     * return that leaves it untouched hands block_free() whatever the
+     * caller's stack happened to hold — a stale pointer plus a stale
+     * count, i.e. a wild walk through transaction_free(). That is not
+     * theoretical: a peer-supplied cmpctblock carrying zero short txids
+     * and zero prefilled txs makes total == 0 and takes exactly this
+     * return. See lib/test/fuzz_seeds/p2p/crash-478b30c0...bin. */
+    block_init(out_block);
+
     /* Total txs = prefilled + short_txids */
     size_t total = cb->num_prefilled + cb->num_short_txids;
     if (total == 0 || total > MAX_COMPACT_BLOCK_TXNS)
         LOG_FAIL("compact", "invalid compact block tx count: %zu", total);
 
-    block_init(out_block);
     out_block->header = cb->header;
     out_block->num_vtx = total;
     out_block->vtx = zcl_calloc(total, sizeof(struct transaction), "compact_reconstruct");
