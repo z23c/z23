@@ -1094,3 +1094,9 @@ AGENT_IMPACT_RULE("tools/command/native_zcode_node_command.c|tools/command/nativ
  * READY mutating leaf must carry, its two .def tables, and the contract test
  * that refuses an unclassified one. */
 AGENT_IMPACT_RULE("app/controllers/src/transaction_type_catalog.c|app/controllers/include/controllers/transaction_type_catalog.h|app/controllers/include/controllers/transaction_type_nonchain_commands.def|app/controllers/include/controllers/transaction_type*.def|lib/test/src/test_api_transaction_types.c", "api command_registry_catalog native_api_contract make_lint_gates")
+/* Saved fuzz findings and the verdicts that explain them. `make lint` runs
+ * check_fuzz_artifact_replay.sh --ledger-only, which refuses an artifact with
+ * no verdict and a verdict with no artifact, so both sides of the corpus map
+ * to the lint gates. The replay itself needs the sanitizer binaries and lives
+ * in `make fuzz-replay`, not here. */
+AGENT_IMPACT_RULE("lib/test/fuzz_seeds/ARTIFACT_VERDICTS.txt|lib/test/fuzz_seeds/p2p/*|lib/test/fuzz_seeds/*/*.bin", "make_lint_gates")
