@@ -34,19 +34,43 @@
 
 #define BROKER_TAG "agent.broker"
 
+/* A custody document describes THIS session's custody, so a copy left
+ * standing from an earlier session reads as today's fact. Every exit that
+ * cannot attest what custody is held right now must retire the standing
+ * document rather than leave the stale claim where an operator will read
+ * it. Best-effort by construction: ENOENT already is the goal. */
+static void retire_private_money_bindings(const char *dir)
+{
+    char path[512];
+    int n;
+    if (!dir)
+        return;
+    n = snprintf(path, sizeof(path), "%s/money-bindings.json", dir);
+    if (n < 0 || (size_t)n >= sizeof(path))
+        return;
+    if (unlink(path) != 0 && errno != ENOENT)
+        LOG_WARN(BROKER_TAG, "cannot retire private custody bindings: %s",
+                 strerror(errno));
+}
+
 static void agent_broker_write_private_money_bindings(
     const char *dir, const struct agent_broker_session *s)
 {
     const struct agent_authority_ref *a = s ? s->authority : NULL;
-    if (!dir || !a || !a->bound || !a->provider ||
-        !a->provider->money_bindings)
+    if (!dir)
         return;
+    if (!a || !a->bound || !a->provider ||
+        !a->provider->money_bindings) {
+        retire_private_money_bindings(dir);
+        return;
+    }
     struct agent_money_binding bindings[AGENT_MONEY_BINDINGS_MAX];
     size_t count = 0;
     memset(bindings, 0, sizeof(bindings));
     if (!a->provider->money_bindings(a->provider_ctx, bindings,
                                      AGENT_MONEY_BINDINGS_MAX, &count)) {
         LOG_WARN(BROKER_TAG, "custody binding provider failed");
+        retire_private_money_bindings(dir);
         return;
     }
     struct json_value doc, wallets;
@@ -72,18 +96,31 @@ static void agent_broker_write_private_money_bindings(
     char buf[4096];
     size_t n = json_write(&doc, buf, sizeof(buf));
     json_free(&doc);
-    if (n == 0)
+    /* json_write reports the WOULD-BE total; anything at or past the
+     * buffer size means the buffer holds a truncated prefix. A truncated
+     * custody document is not a smaller document — it is a different,
+     * false one — so it never reaches the disk. */
+    if (n == 0 || n >= sizeof(buf)) {
+        LOG_WARN(BROKER_TAG, "private custody bindings did not fit (%zu)",
+                 n);
+        retire_private_money_bindings(dir);
         return;
+    }
     char path[512];
     (void)snprintf(path, sizeof(path), "%s/money-bindings.json", dir);
     int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     if (fd < 0) {
         LOG_WARN(BROKER_TAG, "cannot write private custody bindings: %s",
                  strerror(errno));
+        retire_private_money_bindings(dir);
         return;
     }
-    if (write(fd, buf, n) != (ssize_t)n || fsync(fd) != 0)
+    if (write(fd, buf, n) != (ssize_t)n || fsync(fd) != 0) {
         LOG_WARN(BROKER_TAG, "private custody binding write did not persist");
+        /* A short write under O_TRUNC leaves HALF a document claiming
+         * custody; that half is worse than none. */
+        retire_private_money_bindings(dir);
+    }
     (void)close(fd);
 }
 
@@ -195,8 +232,13 @@ void agent_broker_write_status(const char *dir,
     char buf[4096];
     size_t n = json_write(&doc, buf, sizeof(buf));
     json_free(&doc);
-    if (n == 0)
+    /* Same would-be-length contract as the custody writer: at or past the
+     * buffer size the buffer holds a truncated prefix, and a truncated
+     * status document parses as nothing. Refuse rather than write it. */
+    if (n == 0 || n >= sizeof(buf)) {
+        LOG_WARN(BROKER_TAG, "broker status did not fit (%zu)", n);
         return;
+    }
 
     char path[512];
     snprintf(path, sizeof(path), "%s/broker.json", dir);
