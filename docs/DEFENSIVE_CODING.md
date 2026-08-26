@@ -431,6 +431,60 @@ assert green).
   `.core-unseal-token`). Tool: `tools/core_seal.c` (no external deps: links the
   in-tree FIPS-202 SHA3-256).
 
+- **Gate #52: `check-core-seal-root-mirror`** (HARD) — the hot-swap consensus
+  pin. A Tier-2 module .so is compiled from ONE shape-leaf TU and mounts into a
+  resident that supplies every other body it calls, so the two halves must agree
+  about the sealed consensus core they share. `hotswap_module_admit()` checks
+  abi_version, fields, capacity, the allowlist row, duplicates and the probe
+  leaf — six stages, none of them about consensus. That gap was reachable: the
+  sealed headers ship `static inline` consensus arithmetic
+  (`consensus_last_founders_reward_height()`,
+  `consensus_subsidy_slow_start_shift()`, the compact-size sizing in
+  `core/serialize.h`), and a controller including one compiles a PRIVATE COPY
+  into its .so — so a module built before a seal re-cut still mounted and still
+  ran its stale copy. `lib/hotswap/include/hotswap/core_seal_root.h` mirrors
+  `core/MANIFEST.sha3`'s ROOT, the module emitter stamps it into every artifact
+  as `zcl_hotswap_module_core_seal_root`, and `hotswap_activate.c` compares it
+  on BOTH dlsym paths (resident mount and offline verifier) before admit. The
+  gate proves all three: current, exported, enforced. Regenerate the mirror with
+  `make core-seal`. The pin is the seal ROOT and NOT a whole-tree build id on
+  purpose — a controller edit must not invalidate a module (that is the fast
+  loop), a consensus edit must invalidate every one of them.
+
+- **Gate #53: `check-hotswap-package-receipt-is-not-authority`** (HARD) — a
+  packaged module ships a `<artifact>.manifest` receipt (schema
+  `zcl.hotswap_package.v1`, written by `tools/dev/hotswap-package.sh`) recording
+  its SHA3-256, source TU, leaves, `abi_version` and `core_seal_root`. That file
+  is a receipt for a HUMAN, never an admission input, and the gate keeps the
+  resident from ever growing a fast path that reads one. Be precise about what
+  that buys, because the obvious stronger sentence is false: an attacker who
+  can write the .so can also write the sidecar, and can stamp the correct
+  `core_seal_root` into their own module — `ZCL_CORE_SEAL_ROOT` is a
+  checked-in public constant, not a secret. Against *that* attacker neither
+  mechanism helps, and `dlopen` has already run the module's `.init_array`
+  constructors before any stage is consulted. What the gate actually enforces
+  is that admission RE-DERIVES its facts from the artifact instead of caching
+  them in a file: the dlsym'd `zcl_hotswap_module_core_seal_root`/`abi_version`
+  and an fd-pinned digest hashed from the same descriptor that is then dlopened
+  through `/proc/self/fd/N`. The fd discipline makes the load
+  **redirect-proof** — the loader cannot be pointed at a different inode
+  between hash and map — but NOT tamper-proof: an in-place overwrite of the
+  same inode still swaps the mapped bytes (measured; see
+  `hotswap/hotswap_artifact_digest.h` for the memfd-seal fix that would close
+  it). The pin's real job is staleness — a module compiled against a
+  superseded sealed core cannot mount — and that it does completely. The gate
+  proves the resident never opens, stats or parses a manifest: no quoted
+  `".manifest"` literal, no `zcl.hotswap_package` schema string, and no
+  `fopen`/`open`/`openat`/`stat`/`lstat`/`access`/`opendir`/`readlink` on a line
+  mentioning a manifest, anywhere under the loader and activation sources.
+  `dlsym` is deliberately excluded — reading the artifact's own symbols is the
+  behaviour this gate is protecting. It also refuses to report a clean scan of
+  a tree containing no sources, and names the directories and file counts it
+  actually scanned in its OK line. `--selftest` mirrors those directories into
+  scratch, plants a violating TU in the COPY, and asserts the gate trips and
+  then recovers — never writing into `lib/hotswap/`, because a fixture living
+  briefly in the real tree races the other gates under `make -j24 lint`.
+
 - **Gate #48: `check-privileged-transition-receipt`** (RATCHET — Law 7, OS-A1) —
   every native command leaf whose spec is `ZCL_COMMAND_AUTH_OWNER` **and** effect
   `ZCL_COMMAND_EFFECT_MUTATE`/`ZCL_COMMAND_EFFECT_DESTRUCTIVE` is a candidate
@@ -866,6 +920,7 @@ add/remove a gate.
 - `check-consensus-parity`
 - `check-core-include-boundary`
 - `check-core-seal`
+- `check-core-seal-root-mirror`
 - `check-doc-accuracy`
 - `check-doc-claims`
 - `check-doc-counts`
@@ -977,6 +1032,7 @@ add/remove a gate.
 - `check-hotswap-service-islands`
 - `check-hotswap-swappable-shape`
 - `check-hotswap-candidates-ledger`
+- `check-hotswap-package-receipt-is-not-authority`
 - `check-release-no-dev-symbols`
 - `check-vcs-no-git`
 - `check-vcs-no-sha1`

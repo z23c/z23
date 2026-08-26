@@ -16,7 +16,10 @@
  *   - an old-ABI (v1) module is refused LOUDLY at stage=abi;
  *   - a module exceeding the 64-leaf cap is refused at stage=capacity;
  *   - generation numbers stay monotonic across repeated publishes;
- *   - a probe schema mismatch publishes NOTHING.
+ *   - a probe schema mismatch publishes NOTHING;
+ *   - the compile-time consensus pin is a well-formed, CURRENT sealed-core ROOT
+ *     (a stale one silently admits modules built against a consensus core the
+ *     node no longer runs).
  */
 
 #include "test/test_helpers.h"
@@ -430,6 +433,57 @@ static int t_probe_mismatch_publishes_nothing(void)
 
 /* ── The def-derived surface the whole batch rests on ──────────────────── */
 
+/* The consensus pin the resident compares against a module's stamped copy.
+ *
+ * The comparison itself lives in module_consensus_pin_ok(), reachable only with
+ * a dlopen handle, so what a fabricated-struct test CAN prove is the property
+ * the comparison depends on: that the compile-time constant is a well-formed
+ * seal ROOT and that it still names the seal actually in the tree. Both failure
+ * modes are silent and severe. A malformed constant makes the resident refuse
+ * EVERY module (the pin rejects a host root that is not 64 hex), and a stale
+ * one makes it accept modules compiled against a consensus core the node no
+ * longer runs — the exact hazard the pin exists to close.
+ *
+ * This re-derives the ROOT from core/MANIFEST.sha3 in C, independently of
+ * tools/lint/check_core_seal_root_mirror.sh's shell parse, so the two would
+ * have to be wrong the same way to agree wrongly. */
+static int t_consensus_pin_matches_the_seal(void)
+{
+    int failures = 0;
+    TEST("hot-swap consensus pin is a well-formed, current sealed-core ROOT") {
+        const char *pin = ZCL_CORE_SEAL_ROOT;
+        ASSERT_EQ(strlen(pin), (size_t)64);
+        for (size_t i = 0; i < 64; i++) {
+            char c = pin[i];
+            ASSERT((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'));
+        }
+
+        FILE *manifest = fopen("core/MANIFEST.sha3", "r");
+        ASSERT(manifest != NULL);
+        char line[512];
+        char root[65];
+        root[0] = '\0';
+        while (fgets(line, sizeof(line), manifest)) {
+            if (strncmp(line, "ROOT", 4) != 0)
+                continue;
+            const char *p = line + 4;
+            while (*p == ' ' || *p == '\t') p++;
+            size_t n = strspn(p, "0123456789abcdef");
+            if (n == 64) {
+                memcpy(root, p, 64);
+                root[64] = '\0';
+            }
+            break;
+        }
+        fclose(manifest);
+
+        /* No ROOT line at all would make the assertion below vacuous. */
+        ASSERT_EQ(strlen(root), (size_t)64);
+        ASSERT_STR_EQ(pin, root);
+    } _test_next:;
+    return failures;
+}
+
 static int t_allowlist_is_per_file(void)
 {
     int failures = 0;
@@ -537,6 +591,7 @@ int test_hotswap_module_v2(void)
     failures += t_leaf_cap_refused();
     failures += t_generation_monotonic();
     failures += t_probe_mismatch_publishes_nothing();
+    failures += t_consensus_pin_matches_the_seal();
     zcl_command_registry_reset_overrides();
     zcl_command_registry_set_active(NULL);
     printf("=== hotswap_module_v2: %d failures ===\n", failures);

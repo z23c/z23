@@ -98,6 +98,7 @@ gate_command() {
         check-hotswap-service-islands)     echo 'tools/lint/check_hotswap_service_islands.sh' ;;
         check-hotswap-swappable-shape)     echo 'tools/lint/check_hotswap_swappable_shape.sh' ;;
         check-hotswap-candidates-ledger)   echo 'tools/lint/check_hotswap_candidates_ledger.sh --selftest && tools/lint/check_hotswap_candidates_ledger.sh' ;;
+        check-hotswap-package-receipt-is-not-authority) echo 'tools/lint/check_hotswap_package_receipt_is_not_authority.sh --selftest && tools/lint/check_hotswap_package_receipt_is_not_authority.sh' ;;
         check-release-no-dev-symbols)      echo 'tools/lint/check_release_no_dev_symbols.sh' ;;
         check-stable-publish-contained)    echo 'bash tools/scripts/check_stable_publish_containment.sh --self-test && bash tools/scripts/check_stable_publish_containment.sh' ;;
         check-raw-sqlite)                  echo 'tools/scripts/check_raw_sqlite.sh' ;;
@@ -131,6 +132,7 @@ gate_command() {
         check-domain-purity)               echo './tools/scripts/check_domain_purity.sh' ;;
         check-core-include-boundary)       echo './tools/scripts/check_core_include_boundary.sh' ;;
         check-core-seal)                   echo '__core_seal__' ;;
+        check-core-seal-root-mirror)       echo './tools/lint/check_core_seal_root_mirror.sh' ;;
         check-accel-oracle-pinned)         echo './tools/lint/check_accel_oracle_pinned.sh' ;;
         check-no-adx-overclaim)            echo './tools/lint/check_no_adx_overclaim.sh && ./tools/lint/check_asan_adx_exception.sh --selftest && ./tools/lint/check_asan_adx_exception.sh' ;;
         check-simd-os-support)             echo './tools/lint/check_simd_os_support.sh' ;;

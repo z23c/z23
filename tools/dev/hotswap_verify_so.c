@@ -23,16 +23,56 @@
  * hotswap/hotswap_module.h. Driver: tools/dev/hotswap-verify.sh.
  */
 
+#include "hotswap/hotswap_artifact_digest.h"
 #include "hotswap/hotswap_module.h"
 
+#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
+
+/* `--sha3 <file>` — print ONLY `artifact_sha3 : <64 hex>` for a file, with no
+ * dlopen and no admission claim whatsoever.
+ *
+ * WHY THIS MODE EXISTS. The shipped artifact links -Wl,-z,now, so this small
+ * process cannot dlopen it at all (it never defines the resident kernel
+ * symbols the module imports); the verification lane therefore admits a
+ * -z lazy RE-LINK of the same object, whose bytes are NOT the shipped bytes.
+ * A packaging receipt must record the digest of the file that will actually
+ * ship, so that digest has to be readable without loading anything. This mode
+ * is exactly that: open, hash the descriptor, print. It is the in-tree
+ * FIPS-202 implementation (lib/sha3) reached through the fd-pinned primitive,
+ * so no host `sha3sum`/`openssl` needs to exist for a module to be packaged.
+ *
+ * It proves integrity of bytes, never that they are safe to load — see
+ * hotswap/hotswap_artifact_digest.h. */
+static int sha3_only(const char *path)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        fprintf(stderr, "hotswap-verify: cannot open %s\n", path);
+        return 1;
+    }
+    char hex[65];
+    bool ok = hotswap_artifact_sha3_fd(fd, hex);
+    (void)close(fd);
+    if (!ok) {
+        fprintf(stderr, "hotswap-verify: SHA3-256 of %s failed\n", path);
+        return 1;
+    }
+    printf("artifact_sha3 : %s\n", hex);
+    return 0;
+}
 
 int main(int argc, char **argv)
 {
+    if (argc == 3 && strcmp(argv[1], "--sha3") == 0)
+        return sha3_only(argv[2]);
+
     if (argc < 2 || argc > 3) {
         fprintf(stderr,
-                "usage: hotswap_verify_so <module.so> [expected_source_tu]\n");
+                "usage: hotswap_verify_so <module.so> [expected_source_tu]\n"
+                "       hotswap_verify_so --sha3 <file>\n");
         return 2;
     }
 
@@ -41,6 +81,8 @@ int main(int argc, char **argv)
                                        (argc == 3) ? argv[2] : NULL, &report);
 
     printf("module      : %s\n", argv[1]);
+    printf("artifact_sha3 : %s\n",
+           report.artifact_sha3_256[0] ? report.artifact_sha3_256 : "(unread)");
     printf("source_tu   : %s\n", report.source_tu);
     printf("leaf_count  : %u (ceiling %u)\n", report.leaf_count,
            ZCL_HOTSWAP_MODULE_MAX_LEAVES);
@@ -80,7 +122,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    printf("VERDICT     : ADMITTED (dlopen + symbol + abi + fields + capacity "
-           "+ allowlist + duplicate + probe + self_test)\n");
+    printf("VERDICT     : ADMITTED (dlopen + symbol + consensus + abi + fields "
+           "+ capacity + allowlist + duplicate + probe + self_test)\n");
     return 0;
 }

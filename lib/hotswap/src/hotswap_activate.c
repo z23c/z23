@@ -655,6 +655,7 @@ bool hotswap_module_publish(const struct zcl_hotswap_module *module,
 #include <unistd.h>
 
 #include "crypto/sha256.h"
+#include "hotswap/hotswap_artifact_digest.h"
 
 static bool artifact_sha256_fd(int fd, char hex_out[65])
 {
@@ -834,6 +835,65 @@ static void retire_handle(void *handle, int fd,
              queued ? "queued" : "NOT queued (pending table full)");
 }
 
+/* ── the consensus pin ─────────────────────────────────────────────────────
+ *
+ * A module .so is compiled from ONE shape-leaf TU; the resident supplies every
+ * other body it calls. The admit gauntlet below checks abi_version, fields,
+ * capacity, the allowlist row, duplicates and the probe leaf — six stages, none
+ * of which is about the consensus layer the two halves share. Nothing was.
+ *
+ * That matters because the sealed core ships `static inline` bodies, consensus
+ * arithmetic among them (consensus_last_founders_reward_height(),
+ * consensus_subsidy_slow_start_shift(), the compact-size sizing in
+ * core/serialize.h). A controller that includes one of those headers compiles a
+ * PRIVATE COPY into its .so. Re-cut the seal, rebuild the node, and a module
+ * built before the change still mounted, still passed all six stages, and still
+ * ran its stale copy — a cloned ledger reached through a dlopen.
+ *
+ * So the artifact carries the ZCL_CORE_SEAL_ROOT its compile saw, and the
+ * resident compares it to its own before admitting anything. The pin is the
+ * SEAL ROOT, deliberately, not a whole-tree build id: editing a controller must
+ * not invalidate a module — that is the fast loop — while editing consensus
+ * must invalidate every one of them.
+ *
+ * A missing symbol is a rejection, not a pass. Absence is exactly what an
+ * artifact built before the pin existed looks like, and those are the ones
+ * whose consensus vintage cannot be established. */
+static bool module_consensus_pin_ok(void *handle, char *stage, size_t stage_cap,
+                                    char *err, size_t err_cap)
+{
+    const char *host = ZCL_CORE_SEAL_ROOT;
+    if (strlen(host) != 64) {
+        act_copy(stage, stage_cap, "consensus");
+        (void)snprintf(err, err_cap,
+                       "resident has no sealed-core ROOT to pin against "
+                       "(run 'make core-seal')");
+        return false;
+    }
+    (void)dlerror();
+    const char *mod =
+        (const char *)dlsym(handle, ZCL_HOTSWAP_MODULE_CORE_SEAL_ROOT_SYMBOL);
+    const char *sym_err = dlerror();
+    if (!mod || sym_err) {
+        act_copy(stage, stage_cap, "consensus");
+        (void)snprintf(err, err_cap,
+                       "artifact exports no %s — built before the consensus "
+                       "pin existed; rebuild it",
+                       ZCL_HOTSWAP_MODULE_CORE_SEAL_ROOT_SYMBOL);
+        return false;
+    }
+    if (strncmp(mod, host, 65) != 0) {
+        act_copy(stage, stage_cap, "consensus");
+        (void)snprintf(err, err_cap,
+                       "sealed-core ROOT mismatch: artifact=%.64s resident=%s "
+                       "(the module was compiled against a different consensus "
+                       "core; rebuild it)",
+                       mod, host);
+        return false;
+    }
+    return true;
+}
+
 /* The dlopen half: confinement, authorization, pin+hash, dlopen/dlsym. The
  * admit -> probe -> ONE batch commit half is hotswap_module_publish(), which
  * compiles in every build and is unit-tested directly with fabricated modules
@@ -863,7 +923,13 @@ static bool activate_run(const char *so_path, const char *resolved_datadir,
     int fd = open(so_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     struct stat st;
     if (fd < 0 || fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
-        !artifact_sha256_fd(fd, report->artifact_sha256)) {
+        !artifact_sha256_fd(fd, report->artifact_sha256) ||
+        !hotswap_artifact_sha3_fd(fd, report->artifact_sha3_256)) {
+        /* BOTH digests come off THIS fd, and the dlopen below maps that same
+         * fd through /proc/self/fd/N — never a re-opened path. Each hasher
+         * seeks to 0 itself and leaves the offset at 0, so they compose in
+         * either order over identical bytes. Fail closed: a module whose
+         * bytes cannot be hashed twice is never mapped. */
         if (fd >= 0) close(fd);
         return act_reject(report, "dlopen",
                           "could not pin and hash a regular module artifact");
@@ -890,6 +956,18 @@ static bool activate_run(const char *so_path, const char *resolved_datadir,
         dlclose(handle);
         close(fd);
         return act_reject(report, "abi", "%s", msg);
+    }
+
+    /* Consensus pin BEFORE admit: a module compiled against a different sealed
+     * core never reaches a stage that could publish a leaf. */
+    {
+        char pin_stage[32], pin_err[256];
+        if (!module_consensus_pin_ok(handle, pin_stage, sizeof(pin_stage),
+                                     pin_err, sizeof(pin_err))) {
+            dlclose(handle);
+            close(fd);
+            return act_reject(report, pin_stage, "%s", pin_err);
+        }
     }
 
     /* admit -> probe -> ONE all-or-nothing batch replace. ZERO leaves publish
@@ -982,6 +1060,35 @@ bool hotswap_verify_module_so(const char *so_path, const char *expect_tu,
         return false;
     }
 
+    /* Same fd discipline as activate_run(): open ONCE, hash that descriptor,
+     * and dlopen the identical descriptor through /proc/self/fd/N, so the
+     * digest describes the inode that is actually mapped rather than whatever
+     * the path resolves to a moment later. The descriptor is closed as soon as
+     * dlopen has mapped it — the mapping outlives the fd, and unlike the
+     * resident path there is no later retire step here that needs it.
+     *
+     * SHA3-256 ONLY on this path, deliberately. report->artifact_sha256 stays
+     * empty here: this verifier is linked standalone by tools/dev/
+     * hotswap-verify.sh and tools/dev/hotswap-package.sh from a handful of
+     * sources plus --gc-sections, and pulling in lib/crypto's SHA-256 (with
+     * its CPU-dispatch table and logging macros) to fill a field nothing in
+     * the verification or packaging lane reads would buy nothing for a real
+     * dependency cost. The RESIDENT loader still computes BOTH over its own
+     * fd — see activate_run(). */
+    int fd = open(so_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat vst;
+    if (fd < 0 || fstat(fd, &vst) != 0 || !S_ISREG(vst.st_mode) ||
+        !hotswap_artifact_sha3_fd(fd, report->artifact_sha3_256)) {
+        if (fd >= 0)
+            (void)close(fd);
+        act_copy(report->stage, sizeof(report->stage), "dlopen");
+        act_copy(report->error, sizeof(report->error),
+                 "could not open and SHA3-hash a regular module artifact");
+        return false;
+    }
+    char vpinned[64];
+    (void)snprintf(vpinned, sizeof(vpinned), "/proc/self/fd/%d", fd);
+
     /* RTLD_LOCAL so the candidate's symbols never join the global scope and
      * interpose on anything the verifying process later resolves. RTLD_LAZY
      * because this call deliberately does NOT run module code: function
@@ -991,7 +1098,8 @@ bool hotswap_verify_module_so(const char *so_path, const char *expect_tu,
      * that references a body defined in a TU outside its own island still
      * fails here — correctly, since re-pointing such a leaf would dispatch
      * into resident code and the swap would silently do nothing for it. */
-    void *handle = dlopen(so_path, RTLD_LAZY | RTLD_LOCAL);
+    void *handle = dlopen(vpinned, RTLD_LAZY | RTLD_LOCAL);
+    (void)close(fd);
     if (!handle) {
         const char *e = dlerror();
         act_copy(report->stage, sizeof(report->stage), "dlopen");
@@ -1045,6 +1153,16 @@ bool hotswap_verify_module_so(const char *so_path, const char *expect_tu,
         snprintf(report->error, sizeof(report->error),
                  "artifact declares '%s', expected '%s'",
                  module->source_tu ? module->source_tu : "(null)", expect_tu);
+        dlclose(handle);
+        return false;
+    }
+
+    /* The same consensus pin the resident enforces. Verification must not be
+     * looser than the mount it stands in for — the -z lazy re-link this path
+     * dlopens already costs it the unresolved-symbol check (hotswap-symbols.sh
+     * covers that separately); it does not get to skip this one too. */
+    if (!module_consensus_pin_ok(handle, report->stage, sizeof(report->stage),
+                                 report->error, sizeof(report->error))) {
         dlclose(handle);
         return false;
     }

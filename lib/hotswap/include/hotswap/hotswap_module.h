@@ -41,6 +41,9 @@
 #ifndef ZCL_HOTSWAP_MODULE_H
 #define ZCL_HOTSWAP_MODULE_H
 
+/* Supplies ZCL_CORE_SEAL_ROOT — the consensus pin both halves compare. */
+#include "hotswap/core_seal_root.h"
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -71,8 +74,21 @@ typedef void (*zcl_hotswap_handler_fn)(const struct zcl_command_request *request
  * single all-or-nothing batch replace can carry. */
 #define ZCL_HOTSWAP_MODULE_MAX_LEAVES 64U
 
-/* The single data symbol every swappable module .so must export. */
+/* The descriptor symbol every swappable module .so must export. */
 #define ZCL_HOTSWAP_MODULE_SYMBOL "zcl_hotswap_module"
+
+/* The consensus pin. A module .so ALSO exports this string: the ZCL_CORE_SEAL_ROOT
+ * its compile saw. The resident compares it to its own before any leaf is
+ * admitted, so a module built against a different sealed consensus core is
+ * refused at the door instead of running a private, stale copy of the inline
+ * consensus arithmetic it compiled in. See hotswap/core_seal_root.h for why the
+ * pin is the seal ROOT and not a whole-tree build id — a controller edit must
+ * not invalidate a module, a consensus edit must.
+ *
+ * A module missing this symbol is refused too: absence is what a pre-pin
+ * artifact looks like, and those are exactly the ones whose consensus vintage
+ * is unknown. */
+#define ZCL_HOTSWAP_MODULE_CORE_SEAL_ROOT_SYMBOL "zcl_hotswap_module_core_seal_root"
 
 /* One re-pointed command leaf. */
 struct zcl_hotswap_leaf {
@@ -114,6 +130,7 @@ struct zcl_hotswap_module {
 
 #ifdef ZCL_HOTSWAP_MODULE_GEN
 #define ZCL_HOTSWAP_MODULE_LEAVES(leaves_, self_test_)                       \
+    const char zcl_hotswap_module_core_seal_root[] = ZCL_CORE_SEAL_ROOT;     \
     const struct zcl_hotswap_module zcl_hotswap_module = {                   \
         .abi_version = ZCL_HOTSWAP_MODULE_ABI_V2,                            \
         .source_tu = ZCL_HOTSWAP_MODULE_SOURCE_TU,                           \
@@ -155,6 +172,18 @@ struct hotswap_activate_report {
     char handler_name[128]; /* first leaf — the pre-multi-leaf report field */
     char leaves[512];     /* comma-joined admitted leaf paths (may be clipped) */
     char artifact_sha256[65];
+    /* SHA3-256 over the SAME descriptor the loader maps. A second,
+     * structurally different hash family over identical bytes: a collision
+     * engineered against SHA-256 is not a collision against Keccak. Integrity
+     * only, never authorization — see hotswap/hotswap_artifact_digest.h for
+     * exactly what the fd pin does and does not guarantee.
+     *
+     * hotswap_activate() fills this AND artifact_sha256 above from one fd.
+     * hotswap_verify_module_so() (the standalone build-time verifier) fills
+     * only this one and leaves artifact_sha256 empty — it links neither
+     * lib/crypto nor its dispatch table. Either field is "" on any path that
+     * failed before reaching the artifact's bytes; test both before use. */
+    char artifact_sha3_256[65];
     /* precheck|authorize|dlopen|abi|fields|capacity|allowlist|duplicate|
      * probe|self_test|commit|verified|activated|release */
     char stage[64];

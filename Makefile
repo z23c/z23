@@ -8365,6 +8365,20 @@ check-hotswap-candidates-ledger:
 	@tools/lint/check_hotswap_candidates_ledger.sh --selftest
 	@tools/lint/check_hotswap_candidates_ledger.sh
 
+# A packaged module carries a `<artifact>.manifest` receipt (schema
+# zcl.hotswap_package.v1) recording its SHA3-256, source TU, leaves, abi_version
+# and core_seal_root. That file is a HUMAN receipt, never an admission input:
+# it sits beside the artifact, is written by the same hand that could tamper
+# with the artifact, and a loader that trusted it would be trusting the
+# attacker's own note. Admission must keep reading the .so's OWN bytes —
+# dlsym'd symbols and the fd-pinned digest. This gate proves the resident
+# never opens, stats, or parses a .manifest: no quoted ".manifest" literal, no
+# `zcl.hotswap_package` schema string, and no file-opening call on a line
+# mentioning a manifest, anywhere under the loader/activation sources.
+check-hotswap-package-receipt-is-not-authority:
+	@tools/lint/check_hotswap_package_receipt_is_not_authority.sh --selftest
+	@tools/lint/check_hotswap_package_receipt_is_not_authority.sh
+
 # Prove the RELEASE binary links none of the dev-only mutation entry points
 # (dispatcher, cycle, watcher, subprocess runner) NOR the native dev-lane
 # activation engine (tools/dev/dev_activation*.c: stop/start the unit, flip
@@ -8427,7 +8441,7 @@ check-observability-pairing: tools/check_observability_pairing
 # in-tree FIPS-202 SHA3-256 + memory_cleanse) that reads the file list on stdin
 # (git ls-files -z) and writes/verifies core/MANIFEST.sha3. See tools/core_seal.c
 # and core/UNSEAL.md for the ritual.
-.PHONY: core-seal core-seal-check core-unseal check-core-seal check-core-include-boundary check-accel-oracle-pinned check-no-adx-overclaim check-simd-os-support
+.PHONY: core-seal core-seal-check core-unseal check-core-seal check-core-seal-root-mirror check-hotswap-package-receipt-is-not-authority check-core-include-boundary check-accel-oracle-pinned check-no-adx-overclaim check-simd-os-support
 CORE_MANIFEST := core/MANIFEST.sha3
 CORE_UNSEAL_TOKEN := .core-unseal-token
 # The sealed set: every tracked file under core/ (consensus predicates +
@@ -8457,6 +8471,7 @@ core-seal: tools/core_seal
 	@echo "══ core: sealing consensus core → $(CORE_MANIFEST) ══"
 	@git ls-files -z $(CORE_SEAL_PATHS) | $(BIN_DIR)/core_seal seal $(CORE_MANIFEST)
 	@rm -f $(CORE_UNSEAL_TOKEN)
+	@./tools/scripts/gen_core_seal_root.sh
 
 # Verify the seal: fail LOUD if any sealed path drifts from core/MANIFEST.sha3.
 # Honors an active .core-unseal-token (owner-run unseal ritual) for exactly one commit.
@@ -8533,6 +8548,15 @@ check-core-seal: tools/core_seal
 check-core-include-boundary:
 	@echo "══ LINT: sealed consensus-core include boundary ══"
 	@./tools/scripts/check_core_include_boundary.sh
+
+# The hot-swap consensus pin: lib/hotswap/include/hotswap/core_seal_root.h must
+# mirror core/MANIFEST.sha3's ROOT, the module emitter must stamp it into every
+# .so, and hotswap_activate.c must compare it on BOTH dlsym paths. A seal re-cut
+# that lands without regenerating the mirror leaves every module claiming the OLD
+# root, and the pin silently stops meaning anything.
+check-core-seal-root-mirror:
+	@echo "══ LINT: hot-swap consensus pin (sealed-core ROOT mirror) ══"
+	@./tools/lint/check_core_seal_root_mirror.sh
 
 # Accelerator-oracle pin: the core/ seal covers the TEXT of the consensus
 # predicates, not the ISA-dispatched arithmetic they call (SHA-256, batched
@@ -9827,6 +9851,7 @@ LINT_GATES := \
     check-hotswap-service-islands \
     check-hotswap-swappable-shape \
     check-hotswap-candidates-ledger \
+    check-hotswap-package-receipt-is-not-authority \
     check-release-no-dev-symbols \
     check-stable-publish-contained \
     check-raw-sqlite \
@@ -9860,6 +9885,7 @@ LINT_GATES := \
     check-domain-purity \
     check-core-include-boundary \
     check-core-seal \
+    check-core-seal-root-mirror \
     check-accel-oracle-pinned \
     check-no-adx-overclaim \
     check-simd-os-support \

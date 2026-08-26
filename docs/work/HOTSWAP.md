@@ -475,6 +475,68 @@ publish"). This narrow read-only dev authority does not reopen executable
 relinking, canonical-node publication, or releases; those still require the
 full durable proof and exact-prior-generation rollback transaction.
 
+## The two lanes: dev-built vs. ship-packaged artifacts
+
+The mental model for a module `.so` is a disk for the running node-machine.
+Today every disk is built in place, on the machine that mounts it. The
+longer-term shape is a disk that can arrive pre-tested and fingerprinted, so a
+machine that never compiled it can still mount it.
+
+**DEV LANE (exists today).** Build, verify, mount, all on one machine, every
+time: `hotswap_path_is_acceptable()` confines the path,
+`hotswap_datadir_is_dev()` confines the datadir to the exact
+`~/.zclassic-c23-dev`, `-hotswap-activate` plus `ZCL_HOTSWAP_ACTIVATE=1`
+authorize the process, the artifact is opened `O_RDONLY|O_CLOEXEC|O_NOFOLLOW`,
+SHA-256'd, and `dlopen`'d from that same descriptor's `/proc/self/fd/N` path so
+the bytes hashed are provably the bytes mapped, the consensus pin
+(`zcl_hotswap_module_core_seal_root` against the resident's
+`ZCL_CORE_SEAL_ROOT`) is checked, the admit gauntlet runs, the declared probe
+leaf is dispatched and its reply checked against its declared output schema
+before anything publishes, the module's own `self_test` runs, and the whole
+file's leaf set lands in one all-or-nothing registry batch — a partial admit
+publishes zero leaves. The superseded `.so` is `dlclose`'d only after
+in-flight dispatch has drained. Every one of those checks runs on every mount,
+and there is no allowlist of already-approved artifact digests anywhere in
+that path. That is deliberate here: one edit mints one new digest, and gating
+this lane on a digest allowlist would kill the fast edit loop the rest of this
+document measures.
+
+**SHIP LANE (not built).** A `.so` becomes a real package: content-addressed,
+carrying a manifest, mountable by a node that has no compiler at all. This is
+the lane that can serve boxes too slow, or too resource-constrained, to build
+from source. The dividing line between the two lanes is exactly whether the
+mounting machine has a compiler: if it does, it builds and verifies its own
+artifact through the dev lane above; if it does not, it can only ever receive
+one already built and fingerprinted elsewhere.
+
+The digest machinery for this already exists on one side and is unconnected on
+the other. The dev-lane loader computes and records the artifact's SHA-256
+today — `report->artifact_sha256`, surfaced in the slot table and in the
+`dumpstate hotswap` JSON — but nothing in the activation path compares that
+digest against any list of approved artifacts. The comparison primitive itself
+exists (`zcl_hotswap_hotfork_visit_so()` in
+`lib/hotswap/src/hotswap_activate.c`, which hashes an artifact and refuses to
+proceed unless it matches a caller-supplied expected digest); today only the
+disposable HOT_FORK capsule path (`tools/dev/devloop_hotswap_build.c`) calls
+it. The module-mount path never does.
+
+### The safety rule
+
+A manifest is a record of what was tested, never an authorization to load. The
+loader must never read it. If it ever did, forging a manifest would become
+equivalent to mounting arbitrary code — the label would be authorizing the
+disk.
+
+More generally: the digest is not where the safety lives. A digest proves only
+that the bytes are the ones someone recorded, never that they are safe. The
+safety comes from the confinement built up over this whole document —
+shape-leaf translation units only, READY read-only leaves, probe-before-publish,
+all-or-nothing publish. If a digest manifest ever becomes the *reason* to
+relax any of those, it has made the system strictly worse, not better.
+tools/lint/check_hotswap_package_receipt_is_not_authority.sh is the gate
+that enforces this: a package receipt may describe an artifact, and may never
+be read by the loader as a reason to accept one.
+
 ## Native-leaf manifest and staging
 
 The in-tree staging mechanism builds an eligible stateless native controller
@@ -663,15 +725,13 @@ bound state, 7–8 bound the artifact, 9 bounds behaviour.
 
 **1. It is a shape LEAF, never an authority.**
 The source TU must live under `app/controllers/`, `app/views/`, or
-`app/conditions/`, and must never resolve under `core/`, `core/consensus/`,
+`app/conditions/`, and must never resolve under `core/`, `lib/consensus/`, <!-- doc-path-ok: lib/consensus/ mirrors the gate's FORBIDDEN regex; it does not exist and is listed so it is forbidden the day it does -->
 `lib/validation/`, `lib/storage/`, `lib/net/`, `lib/coins/`, `lib/chain/`,
-`lib/mining/`, `app/jobs/`, `lib/kernel/`, `lib/util/src/supervisor.c`,
-`app/supervisors/`, or `core/consensus/include/domain/consensus/`. A dlopen'd
-module of any of those could silently diverge the node's consensus state or the
-reducer fold — a live code swap that can change a consensus rule is a
-chain-split mechanism.
+`lib/mining/`, `app/jobs/`, `lib/kernel/`, `lib/supervisor/`, <!-- doc-path-ok: lib/supervisor/ mirrors the gate's FORBIDDEN regex; it does not exist and is listed so it is forbidden the day it does -->
+`app/supervisors/`, or `domain/consensus/`. A dlopen'd module of any of those <!-- doc-path-ok: domain/consensus/ was absorbed into core/consensus by the seal split; the gate still forbids the old root on purpose -->
+could silently diverge the node's consensus state or the reducer fold — a live
+code swap that can change a consensus rule is a chain-split mechanism.
 Enforced by `check-hotswap-swappable-shape`.
-
 **2. Every leaf it re-points is READY and read-only.**
 Each leaf must be declared `ZCL_COMMAND_READY_READ` in `config/commands/*.def`
 — the READY, `EFFECT_READ`, non-alias macro form. A leaf declared with any
