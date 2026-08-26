@@ -37,3 +37,13 @@ temporary directory, default ELF versions expose both their exact version and
 unversioned alias while non-default versions remain exact-only, and an absent
 artifact fails the row. The symbol-version self-test, one real module check
 against `zclassic23-dev`, shell syntax checks, and `make lint-fast` passed.
+
+## Shielded KAT fixture intersection
+
+The complete release suite then found one failure in
+`test_sprout_groth16_kat`: direct proof verification passed, but contextual
+verification returned `shielded-verify-unavailable`. The test predated the
+fail-closed rule requiring the complete verification-key set to be published
+and had injected only its independently decoded Sprout key. The fixture now
+installs the compiled, hash-pinned verification set first and then overrides
+only its Sprout member. This changes test setup, not a consensus predicate.

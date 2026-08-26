@@ -15,6 +15,8 @@
 #include "core/serialize.h"
 #include "primitives/transaction.h"
 #include "sapling/bls12_381.h"
+#include "sapling/params_init.h"
+#include "sapling/params_vk_embedded.h"
 #include "sapling/sprout.h"
 #include "validation/check_transaction.h"
 #include "validation/contextual_check_tx.h"
@@ -207,6 +209,15 @@ int test_sprout_groth16_kat(void)
               fixture_vk_loaded && fixture_vk.ic_len == 10);
     if (!fixture_vk_loaded)
         return failures;
+    bool verification_set_ready = sapling_params_loaded() ||
+                                  sapling_install_embedded_vks();
+    KAT_CHECK("hash-pinned shielded verification set is published",
+              verification_set_ready);
+    if (!verification_set_ready)
+        return failures;
+    /* The contextual verifier now correctly requires the complete published
+     * key set. Override only its Sprout member with this independently decoded
+     * canonical fixture after satisfying that production precondition. */
     sprout_set_vk(&fixture_vk);
 
     struct byte_stream stream;
