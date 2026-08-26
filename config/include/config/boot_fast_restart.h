@@ -74,6 +74,12 @@ void boot_fast_restart_arm_quick_check_skip_probe(void);
  * `datadir` locates node.db. */
 void boot_fast_restart_start_bg_quick_check(const char *datadir);
 
+#ifdef ZCL_TESTING
+/* Execute a real SQLite VM under the production cancellation hook. The caller
+ * requests registry shutdown first; true proves SQLite returned INTERRUPT. */
+bool boot_fast_restart_bg_quick_check_cancel_for_test(void);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

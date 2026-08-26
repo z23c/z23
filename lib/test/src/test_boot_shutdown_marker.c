@@ -5,6 +5,7 @@
 #include "config/boot_shutdown_marker.h"
 #include "config/boot_fast_restart.h"
 #include "event/event.h"
+#include "util/thread_registry.h"
 
 #include <stdatomic.h>
 #include <stdio.h>
@@ -141,6 +142,15 @@ int test_boot_shutdown_marker(void)
     BSM_CHECK("invalid datadir fails closed",
               !boot_shutdown_marker_detect_unclean(NULL) &&
               !boot_shutdown_marker_write_clean(""));
+
+    /* A deferred multi-minute quick_check is registry-owned. Shutdown must
+     * interrupt its SQLite VM so worker-drain can reach persistence without
+     * weakening the process watchdog or treating cancellation as corruption. */
+    thread_registry_reset_for_test();
+    thread_registry_request_shutdown();
+    BSM_CHECK("background quick_check cooperatively interrupts on shutdown",
+              boot_fast_restart_bg_quick_check_cancel_for_test());
+    thread_registry_reset_for_test();
 
     /* ── Tier-2 P2 fast-restart binding: format/parse round-trip ───────── */
     {
