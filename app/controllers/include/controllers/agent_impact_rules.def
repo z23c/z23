@@ -1100,3 +1100,13 @@ AGENT_IMPACT_RULE("app/controllers/src/transaction_type_catalog.c|app/controller
  * to the lint gates. The replay itself needs the sanitizer binaries and lives
  * in `make fuzz-replay`, not here. */
 AGENT_IMPACT_RULE("lib/test/fuzz_seeds/ARTIFACT_VERDICTS.txt|lib/test/fuzz_seeds/p2p/*|lib/test/fuzz_seeds/*/*.bin", "make_lint_gates")
+/* LANE corpus-operator-paths: committed files carry no local filesystem
+ * path, operator username, or hostname. The two producers that used to write
+ * an absolute package-store datadir into tracked evidence (corpus_census's
+ * scopes.def parser and package_factory's corpus registration + report), the
+ * def they read and write, and the ratchet gate that backstops every other
+ * route a path could take into a commit. They move together: relaxing the
+ * label rule in one producer while the other still refuses a path splits the
+ * def format in half, and a baseline edited without re-running the gate is
+ * how a shrink-only ledger silently starts growing. */
+AGENT_IMPACT_RULE("tools/corpus_census.c|tools/package_factory.c|corpus/scopes.def|tools/lint/check_no_operator_paths.sh|tools/lint/operator_paths_baseline.txt", "make_lint_gates")
