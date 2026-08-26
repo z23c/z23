@@ -752,12 +752,51 @@ static void *rfrl_csmain_holder(void *arg)
     return NULL;
 }
 
+/* The OTHER direction, and the one the cs_main-holder probe above is blind
+ * to. The reducer drive owns progress_store_tx_lock for the whole of
+ * STAGE_DRAIN_IMPL and takes cs_main inside it (body_fetch's step), so the
+ * live steady-state nesting is progress OUTER -> cs_main INNER. A reconcile
+ * that BLOCKS on the progress store while holding cs_main is the other half
+ * of that cycle. This holder stands in for a drain in flight. */
+static bool g_order_progress_held;
+
+static void *rfrl_progress_holder(void *arg)
+{
+    (void)arg;
+    progress_store_tx_lock();
+    pthread_mutex_lock(&g_order_mu);
+    g_order_progress_held = true;
+    pthread_cond_broadcast(&g_order_cv);
+    while (!g_order_release)
+        pthread_cond_wait(&g_order_cv, &g_order_mu);
+    pthread_mutex_unlock(&g_order_mu);
+    progress_store_tx_unlock();
+    return NULL;
+}
+
 static void *rfrl_reconcile_worker(void *arg)
 {
     struct rfrl_order_probe *p = arg;
     struct stage_reducer_frontier_reconcile_result rr;
     memset(&rr, 0, sizeof(rr));
     p->ok = stage_reducer_frontier_reconcile_light(p->db, p->ms, &rr);
+    __atomic_store_n(&p->finished, true, __ATOMIC_RELEASE);
+    return NULL;
+}
+
+/* Enters reconcile_block_index_flags directly. The public entry point takes
+ * and releases the progress store in read_frontier_snapshot() BEFORE it ever
+ * reaches the section that holds both locks, so a test that contends the
+ * progress store just parks the worker in that safe prologue and never
+ * exercises the ordering at all — it passes with a blocking acquire as
+ * happily as with a trylock. This worker skips the prologue. */
+static void *rfrl_flags_worker(void *arg)
+{
+    struct rfrl_order_probe *p = arg;
+    struct stage_reducer_frontier_reconcile_result rr;
+    memset(&rr, 0, sizeof(rr));
+    p->ok = stage_reducer_frontier_reconcile_flags_for_testing(
+        p->db, p->ms, false, &rr);
     __atomic_store_n(&p->finished, true, __ATOMIC_RELEASE);
     return NULL;
 }
@@ -2451,6 +2490,101 @@ int test_reducer_frontier_reconcile_light(void)
                 RFRL_CHECK("lock-order: reconcile completes after release",
                            probe.ok);
             }
+            pthread_join(holder, NULL);
+        }
+
+        teardown_fixture(&fx);
+    }
+
+    /* ── ABBA regression, the other direction: a reducer drain owns the
+     * progress store and the reconcile must DECLINE rather than park on it.
+     *
+     * STAGE_DRAIN_IMPL holds progress_store_tx_lock across every step and
+     * body_fetch takes cs_main inside it, so blocking here while holding
+     * cs_main is the exact counterpart edge. The case above cannot see this:
+     * it only ever holds cs_main, so a reconcile that blocks on the progress
+     * store still looks well-behaved to it.
+     *
+     * The property is NOT "returns quickly": the reconcile legitimately
+     * blocks on the progress store in read_frontier_snapshot(), which holds
+     * no cs_main and so cannot be half of a cycle. What must never happen is
+     * parking on the progress store while OWNING cs_main. So the assertion
+     * is the exact mirror of the case above: with the progress store held,
+     * cs_main must stay free. */
+    {
+        struct rfrl_fixture fx;
+        RFRL_CHECK("lock-order: setup fixture (progress-held)",
+                   setup_fixture(&fx, "lock_order_progress"));
+        sqlite3 *db = progress_store_db();
+        stage_reducer_frontier_reset_detect_memo_for_testing();
+
+        pthread_mutex_lock(&g_order_mu);
+        g_order_progress_held = false;
+        g_order_release = false;
+        pthread_mutex_unlock(&g_order_mu);
+
+        struct rfrl_order_probe probe = { .db = db, .ms = &fx.ms,
+                                          .finished = false, .ok = false };
+        pthread_t holder;
+        bool holder_started =
+            pthread_create(&holder, NULL, rfrl_progress_holder, NULL) == 0;
+        RFRL_CHECK("lock-order: progress holder starts", holder_started);
+
+        if (holder_started) {
+            pthread_mutex_lock(&g_order_mu);
+            while (!g_order_progress_held)
+                pthread_cond_wait(&g_order_cv, &g_order_mu);
+            pthread_mutex_unlock(&g_order_mu);
+
+            pthread_t worker;
+            bool worker_started =
+                pthread_create(&worker, NULL, rfrl_flags_worker,
+                               &probe) == 0;
+            RFRL_CHECK("lock-order: flags worker starts (progress-held)",
+                       worker_started);
+
+            /* No "did it park?" probe-validity step is needed here: the seam
+             * calls reconcile_block_index_flags directly, so entry into the
+             * both-locks section is structural rather than hoped for.
+             *
+             * Both assertions below fail against a BLOCKING acquire, which is
+             * what makes this test worth having: that version parks inside
+             * the section still owning cs_main, so it neither returns nor
+             * releases cs_main until the drain lets go. */
+            bool declined = false;
+            bool csmain_free = false;
+            if (worker_started) {
+                for (int i = 0; i < 250 && !declined; i++) {
+                    if (__atomic_load_n(&probe.finished, __ATOMIC_ACQUIRE)) {
+                        declined = true;
+                        break;
+                    }
+                    rfrl_order_sleep_ms(20);
+                }
+                for (int i = 0; i < 250 && !csmain_free; i++) {
+                    if (zcl_mutex_trylock(&fx.ms.cs_main)) {
+                        zcl_mutex_unlock(&fx.ms.cs_main);
+                        csmain_free = true;
+                        break;
+                    }
+                    rfrl_order_sleep_ms(20);
+                }
+            }
+
+            RFRL_CHECK("lock-order: reconcile DECLINES rather than blocking "
+                       "on a progress store held by a drain",
+                       declined);
+            RFRL_CHECK("lock-order: cs_main NOT held while the drain owns the "
+                       "progress store",
+                       csmain_free);
+
+            pthread_mutex_lock(&g_order_mu);
+            g_order_release = true;
+            pthread_cond_broadcast(&g_order_cv);
+            pthread_mutex_unlock(&g_order_mu);
+
+            if (worker_started)
+                pthread_join(worker, NULL);
             pthread_join(holder, NULL);
         }
 

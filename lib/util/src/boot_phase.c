@@ -14,12 +14,26 @@
  * coins. WatchdogSec does not run until READY=1. */
 #define BOOT_PHASE_EXTEND_TIMEOUT_USEC (3600ULL * 1000000ULL)
 
-static void boot_phase_notify_progress(const char *status)
+/* Say where we are WITHOUT buying more start budget.
+ *
+ * An extension must be EARNED by an observable change; the passage of
+ * time is not evidence of progress. Splitting the status line from the
+ * deadline push is what lets a stalled reporter keep narrating (which is
+ * this module's whole purpose) without also making the unit's own
+ * TimeoutStartSec unreachable. */
+static void boot_phase_notify_status_only(const char *status)
 {
     (void)sd_notify_init();
     if (!sd_notify_is_active())
         return;
     (void)sd_notify_status(status ? status : "booting");
+}
+
+static void boot_phase_notify_progress(const char *status)
+{
+    boot_phase_notify_status_only(status);
+    if (!sd_notify_is_active())
+        return;
     (void)sd_notify_extend_timeout_usec(BOOT_PHASE_EXTEND_TIMEOUT_USEC);
 }
 
@@ -68,6 +82,11 @@ const char *boot_step_state_verdict(enum boot_step_state s)
 bool boot_step_state_is_failure(enum boot_step_state s)
 {
     return s == BOOT_STEP_FAILED;
+}
+
+bool boot_step_state_earns_budget(enum boot_step_state s)
+{
+    return s == BOOT_STEP_RUNNING || s == BOOT_STEP_SLOW;
 }
 
 enum boot_step_state boot_step_classify(int64_t elapsed_ms,
@@ -157,13 +176,31 @@ static void boot_step_emit(const char *name, enum boot_step_state st,
     if (st == BOOT_STEP_FAILED)
         return;
 
-    /* A step that is merely slow must buy MORE start budget by saying so,
+    /* A step that is merely SLOW must buy MORE start budget by saying so,
      * never less. This is what keeps a 7200 rpm box from being killed for
-     * being honest about its disk. */
+     * being honest about its disk.
+     *
+     * A STUCK step must NOT. STUCK is precisely "over budget AND zero
+     * progress this window" (boot_step_classify), and boot_step_on_stall
+     * re-arms the health ring every BOOT_PHASE_STALL_SECS, so extending
+     * here would push TimeoutStartSec out by an hour every 30 s for as
+     * long as the wedge lasts — making the deadline unreachable and the
+     * unit's own Restart=always unable to ever recover a wedged boot.
+     * That is the failure this file exists to make visible, so it must
+     * not be the failure this file makes permanent.
+     *
+     * Withholding the extension does not kill anything: the deadline
+     * simply stays where the last real progress put it, which leaves a
+     * full BOOT_PHASE_EXTEND_TIMEOUT_USEC of grace measured from that
+     * progress. The record above is still emitted either way — telemetry
+     * is unconditional, budget is earned. */
     char status[200];
     snprintf(status, sizeof(status), "boot %s %s %llds",
              nm, boot_step_state_name(st), (long long)(elapsed_ms / 1000));
-    boot_phase_notify_progress(status);
+    if (boot_step_state_earns_budget(st))
+        boot_phase_notify_progress(status);
+    else
+        boot_phase_notify_status_only(status);
     boot_status_heartbeat();
 }
 
