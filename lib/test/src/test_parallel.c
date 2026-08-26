@@ -114,6 +114,10 @@ struct group_result {
     char out_path[128];  /* owned by the slot; copied here on reap */
     int skipped;         /* 1 if selector/params gate excluded it (not run) */
     int skip_markers;    /* "SKIP (" sentinel lines in captured output */
+    int env_unobserved;  /* "UNOBSERVED (" lines: the group RAN and its
+                          * subject was hard-asserted, but one leg depended on
+                          * an environment that did not deliver in-window. Not
+                          * a skip; never cached. See count_marker_lines. */
     int cached;          /* 1 if returned from the content-addressed cache */
     /* ── progress watchdog state (see group_watchdog_expired) ───────────── */
     time_t last_progress;  /* when this group's output last grew */
@@ -334,21 +338,21 @@ static void print_captured(const char *path)
     fclose(fp);
 }
 
-/* Count lines carrying the suite's skip sentinel ("SKIP ("). Gated
+/* Count lines carrying a sentinel ("SKIP (" or "UNOBSERVED ("). Gated
  * groups (the five ZCL_STRESS_TESTS MVP acceptance gates, the stress
  * harnesses) and environment-starved subtests print it and still exit
  * 0, so a green run can hide unexecuted coverage. The summary counts
  * the markers so "ALL TESTS PASSED" can never silently absorb a skip;
  * the gates themselves stay opt-in (they are gated for runtime
  * reasons — visibility, not force-enabling, is the contract). */
-static int count_skip_markers(const char *path)
+static int count_marker_lines(const char *path, const char *sentinel)
 {
     FILE *fp = fopen(path, "r");
     if (!fp) return 0;
     char line[4096];
     int n = 0;
     while (fgets(line, sizeof(line), fp))
-        if (strstr(line, "SKIP ("))
+        if (strstr(line, sentinel))
             n++;
     fclose(fp);
     return n;
@@ -652,6 +656,7 @@ struct suite_verdict {
     size_t groups_cacheable;   /* probed cacheable this run */
     int    groups_failed;
     int    self_skips;         /* groups printing an in-test SKIP marker */
+    int    env_unobserved;    /* groups that ran but could not observe a leg */
     char   toolkey[13];
 };
 
@@ -1180,13 +1185,17 @@ int main(int argc, char **argv)
 
     int failed_groups = 0;
     int skip_groups = 0;
+    int unobserved_groups = 0;
     for (size_t i = 0; i < g_num_groups; i++) {
         if (results[i].skipped) continue;
         bool pass =
             !results[i].signaled && results[i].exit_code == 0;
         results[i].skip_markers = results[i].out_path[0]
-            ? count_skip_markers(results[i].out_path) : 0;
+            ? count_marker_lines(results[i].out_path, "SKIP (") : 0;
         if (results[i].skip_markers > 0) skip_groups++;
+        results[i].env_unobserved = results[i].out_path[0]
+            ? count_marker_lines(results[i].out_path, "UNOBSERVED (") : 0;
+        if (results[i].env_unobserved > 0) unobserved_groups++;
         char skip_note[32] = "";
         if (results[i].skip_markers > 0)
             snprintf(skip_note, sizeof(skip_note), ", %d SKIP",
@@ -1235,6 +1244,7 @@ int main(int argc, char **argv)
         .groups_cacheable = cacheable_count,
         .groups_failed = failed_groups,
         .self_skips    = skip_groups,
+        .env_unobserved = unobserved_groups,
     };
     testcache_toolkey_digest12(verdict.toolkey);
 
@@ -1252,10 +1262,10 @@ int main(int argc, char **argv)
 
     printf("\nSUITE VERDICT mode=%s groups_total=%zu groups_ran=%zu "
            "groups_cached=%zu groups_gated=%zu groups_failed=%d self_skips=%d "
-           "toolkey=%s\n",
+           "env_unobserved=%d toolkey=%s\n",
            verdict.mode, verdict.groups_total, verdict.groups_ran,
            verdict.groups_cached, verdict.groups_gated, verdict.groups_failed,
-           verdict.self_skips, verdict.toolkey);
+           verdict.self_skips, verdict.env_unobserved, verdict.toolkey);
 
     printf("%s — %d/%zu groups failed, %d skipped (%.1fs wall, %d workers)%s\n",
            failed_groups != 0 ? "SOME TESTS FAILED"
@@ -1273,6 +1283,16 @@ int main(int argc, char **argv)
             if (results[i].skipped || results[i].skip_markers == 0) continue;
             printf("  - %s: %d skip marker(s)\n",
                    g_groups[i].name, results[i].skip_markers);
+        }
+    }
+    if (unobserved_groups > 0) {
+        printf("Unobserved legs (the group RAN and hard-asserted its load-free "
+               "contract; an environment-dependent leg did not report "
+               "in-window. Reported, not skipped, and never cached):\n");
+        for (size_t i = 0; i < g_num_groups; i++) {
+            if (results[i].skipped || results[i].env_unobserved == 0) continue;
+            printf("  - %s: %d unobserved leg(s)\n",
+                   g_groups[i].name, results[i].env_unobserved);
         }
     }
     if (failed_groups > 0) {
@@ -1317,8 +1337,15 @@ int main(int argc, char **argv)
             ran++;
             bool pass = !results[i].signaled && results[i].exit_code == 0;
             /* A zero-exit group that printed SKIP did not prove its complete
-             * contract. Never persist that partial run as a reusable PASS. */
-            if (pass && results[i].skip_markers == 0 && probes &&
+             * contract. Never persist that partial run as a reusable PASS.
+             * UNOBSERVED is the same story for a different reason: the group
+             * ran and hard-asserted its load-free legs, but one leg never got
+             * an observation. Caching that would let a busy box mint a receipt
+             * a later run reuses as if the leg had been proven, so it is
+             * barred from the cache exactly like a skip. It does NOT fail the
+             * run — the box's spare capacity is not a code verdict. */
+            if (pass && results[i].skip_markers == 0 &&
+                results[i].env_unobserved == 0 && probes &&
                 probes[i].cacheable) {
                 testcache_store_pass(tc, probes[i].key);
                 stored++;

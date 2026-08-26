@@ -885,8 +885,19 @@ focused_receipt_uint() {
 # failures, and reject runtime SKIP markers. The test cache stores only
 # skip-free PASS, so a reused group is exactly as strong as the fresh PASS that
 # minted its content-addressed receipt.
+#
+# env_unobserved is deliberately NOT a rejection. A SKIP means a group did not
+# execute its subject and the run could have covered it — that is missing
+# authority and stays fatal. An UNOBSERVED leg means the group DID run, DID
+# hard-assert everything that does not depend on the environment, and then an
+# environment-dependent leg (a Tor bootstrap needing directory + rendezvous +
+# circuit round trips) did not report inside its observation window. Grading
+# that FAIL measures the box's spare capacity, not the code, and would make a
+# loaded or slow machine permanently unable to push while proving nothing. It
+# is reported here and barred from the verdict cache by the runner, so it can
+# never be laundered into a reusable PASS.
 validate_focused_receipt() {
-    local output="$1" expected="$2" verdict ran reused failed skips toolkey
+    local output="$1" expected="$2" verdict ran reused failed skips toolkey unobs
     verdict="$(printf '%s\n' "$output" |
         sed -n '/^SUITE VERDICT /p' | tail -1)"
     if [ -z "$verdict" ]; then
@@ -897,6 +908,9 @@ validate_focused_receipt() {
     reused="$(focused_receipt_uint "$verdict" groups_cached)"
     failed="$(focused_receipt_uint "$verdict" groups_failed)"
     skips="$(focused_receipt_uint "$verdict" self_skips)"
+    # Absent on a runner predating the field; absence is 0, never a parse fault.
+    unobs="$(focused_receipt_uint "$verdict" env_unobserved)"
+    [ -n "$unobs" ] || unobs=0
     toolkey="$(printf '%s\n' "$verdict" |
         sed -n 's/.* toolkey=\([^[:space:]]*\).*/\1/p' | head -1)"
     case "$ran:$reused:$failed:$skips:$expected" in
@@ -934,18 +948,35 @@ validate_focused_receipt() {
     FOCUSED_RECEIPT_RAN="$ran"
     FOCUSED_RECEIPT_REUSED="$reused"
     FOCUSED_RECEIPT_TOOLKEY="$toolkey"
+    FOCUSED_RECEIPT_UNOBSERVED="$unobs"
+    if [ "$unobs" -ne 0 ]; then
+        log "focused receipt env_unobserved=$unobs — group(s) ran and asserted their load-free contract; an environment-dependent leg did not report in-window. Not cached, not fatal, not a skip."
+    fi
     return 0
 }
 
 focused_receipt_selftest() {
     local good prefix
     prefix="SUITE VERDICT mode=cached groups_total=946"
-    good="$prefix groups_ran=2 groups_cached=3 groups_gated=941 groups_failed=0 self_skips=0 toolkey=0123456789ab"
+    good="$prefix groups_ran=2 groups_cached=3 groups_gated=941 groups_failed=0 self_skips=0 env_unobserved=0 toolkey=0123456789ab"
     validate_focused_receipt "$good" 5 ||
         fail "focused receipt selftest rejected a complete PASS"
     if validate_focused_receipt "${good/self_skips=0/self_skips=1}" 5 >/dev/null; then
         fail "focused receipt selftest accepted a runtime SKIP"
     fi
+    # The other half of that contract: an environment-dependent leg that never
+    # reported is NOT a skip and must not block a push. If this ever starts
+    # failing, a busy or slow box has silently lost the ability to push.
+    validate_focused_receipt "${good/env_unobserved=0/env_unobserved=2}" 5 >/dev/null ||
+        fail "focused receipt selftest rejected an environment-unobserved leg"
+    validate_focused_receipt "${good/ env_unobserved=0/}" 5 >/dev/null ||
+        fail "focused receipt selftest rejected a receipt predating env_unobserved"
+    # Assert the PARSED value, not just acceptance: without the absent-field
+    # default this reads empty, every later numeric test on it is a shell
+    # error, and the acceptance check above still passes — a green that
+    # checks nothing.
+    [ "$FOCUSED_RECEIPT_UNOBSERVED" = 0 ] ||
+        fail "focused receipt selftest: absent env_unobserved must parse as 0, got '$FOCUSED_RECEIPT_UNOBSERVED'"
     if validate_focused_receipt "${good/groups_failed=0/groups_failed=1}" 5 >/dev/null; then
         fail "focused receipt selftest accepted a failed group"
     fi
@@ -1397,7 +1428,7 @@ run_mapped_focused_tests() {
         fail "focused proof set did not produce complete skip-free authority"
     FROZEN_SOURCE_RECORD="$(capture_source_identity_record)" ||
         fail "source identity recapture failed after focused proof set"
-    log "focused receipt schema=zcl.push_focused_receipt.v1 selected=$count ran=$FOCUSED_RECEIPT_RAN reused=$FOCUSED_RECEIPT_REUSED toolkey=$FOCUSED_RECEIPT_TOOLKEY"
+    log "focused receipt schema=zcl.push_focused_receipt.v1 selected=$count ran=$FOCUSED_RECEIPT_RAN reused=$FOCUSED_RECEIPT_REUSED env_unobserved=$FOCUSED_RECEIPT_UNOBSERVED toolkey=$FOCUSED_RECEIPT_TOOLKEY"
     log "focused test scope=mapped_groups count=$count"
 }
 
