@@ -39,10 +39,9 @@ esac
     exit 2
 }
 
-tmp="$(mktemp "${OUT}.XXXXXX")"
-trap 'rm -f "$tmp"' EXIT HUP INT TERM
 
-cat > "$tmp" <<EOF
+emit_header() {
+cat <<EOF
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * ZCL_CORE_SEAL_ROOT — the sealed consensus core's identity, as a compile-time
@@ -77,6 +76,17 @@ cat > "$tmp" <<EOF
  * fast loop fast: editing a controller does not move this value, so the module
  * just built still mounts. Editing consensus does move it, and then every
  * module compiled against the old core is refused at the door.
+ *
+ * SCOPE OF THE GUARANTEE. This is a generated, checked-in mirror, and nothing
+ * in the BUILD forces it to be current: the hotswap-module-so recipe does not
+ * depend on the core-seal target, so between a core/ edit and the next
+ * 'make lint' the node and the module stamp the same STALE root and the pin
+ * passes without meaning anything. check_core_seal_root_mirror.sh is the only
+ * thing that catches that drift. The pin is therefore exactly as strong as
+ * lint having run -- which is the intended design, lint being the backstop,
+ * but it is the reason a seal re-cut must be followed by 'make core-seal' and
+ * not merely by a successful build.
+ *
  */
 
 #ifndef ZCL_HOTSWAP_CORE_SEAL_ROOT_H
@@ -88,9 +98,26 @@ cat > "$tmp" <<EOF
 
 #endif /* ZCL_HOTSWAP_CORE_SEAL_ROOT_H */
 EOF
+}
 
+# WHERE THE TEMP FILE GOES, AND WHY IT MATTERS.
+#
+# --check is run by check_core_seal_root_mirror.sh on EVERY `make lint`. If it
+# mktemps beside $OUT, every lint run briefly creates an untracked file inside
+# lib/hotswap/include/hotswap/. tools/dev/source-identity.sh inventories
+# untracked files and fails closed with "source mutated during identity
+# capture" when the tree changes under it, so that temp file randomly reds
+# whichever gate happens to be capturing at the time (observed as
+# check-zcode-package-registry: "empty package or monolith source projection",
+# which names the symptom and not the cause). --check never renames anything,
+# so it has no reason to be on the output's filesystem at all: it compares
+# from a pipe-free process substitution and touches the repo zero times.
+#
+# The WRITE path still needs a temp beside $OUT — same filesystem is what
+# makes the final mv atomic — but that path runs only from an explicit
+# `make core-seal`, not from lint.
 if [ "${1:-}" = "--check" ]; then
-    if [ -r "$OUT" ] && cmp -s "$tmp" "$OUT"; then
+    if [ -r "$OUT" ] && cmp -s <(emit_header) "$OUT"; then
         echo "core_seal_root: OK — mirror matches $MANIFEST ROOT $root"
         exit 0
     fi
@@ -100,7 +127,13 @@ if [ "${1:-}" = "--check" ]; then
     exit 1
 fi
 
+tmp="$(mktemp "${OUT}.XXXXXX")"
+trap 'rm -f "$tmp"' EXIT HUP INT TERM
+emit_header > "$tmp"
+
 if [ -r "$OUT" ] && cmp -s "$tmp" "$OUT"; then
+    rm -f "$tmp"
+    trap - EXIT HUP INT TERM
     echo "core_seal_root: unchanged ($root)"
     exit 0
 fi
