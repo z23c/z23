@@ -233,6 +233,66 @@ static void emit_kv(struct buf *b, const struct zcl_cli_render_env *e,
     buf_putc(b, '\n');
 }
 
+/* Same key column as emit_kv, but wrap the value at `width` instead of
+ * ellipsizing. The copyable next command must appear in full: a truncated
+ * restart-and-datadir line is not an action the operator can run. */
+static void emit_kv_wrap(struct buf *b, const struct zcl_cli_render_env *e,
+                         size_t kw, const char *key, const char *value)
+{
+    if (!value)
+        value = "";
+    size_t used = 2 + kw + 2;
+    size_t room = (size_t)e->width > used ? (size_t)e->width - used : 8;
+    if (room < 8)
+        room = 8;
+
+    const char *p = value;
+    bool first = true;
+    while (*p) {
+        while (*p == ' ')
+            p++;
+        if (!*p)
+            break;
+        if (first) {
+            buf_puts(b, "  ");
+            size_t klen = strlen(key);
+            char kpadded[64];
+            if (klen < sizeof(kpadded)) {
+                memcpy(kpadded, key, klen + 1);
+                while (klen < kw && klen < sizeof(kpadded) - 1) {
+                    kpadded[klen] = ' ';
+                    kpadded[++klen] = '\0';
+                }
+                ansi_dim(b, e, kpadded);
+            } else {
+                ansi_dim(b, e, key);
+            }
+            buf_puts(b, "  ");
+            first = false;
+        } else {
+            buf_puts(b, "  ");
+            for (size_t i = 0; i < kw; i++)
+                buf_putc(b, ' ');
+            buf_puts(b, "  ");
+        }
+        size_t n = 0;
+        size_t last_sp = 0;
+        while (p[n] && n < room) {
+            if (p[n] == ' ')
+                last_sp = n;
+            n++;
+        }
+        size_t take = (p[n] && last_sp > 0) ? last_sp : n;
+        if (take == 0)
+            take = n ? n : 1;
+        buf_putn(b, p, take);
+        buf_putc(b, '\n');
+        p += take;
+    }
+    if (first)
+        emit_kv(b, e, kw, key, "");
+}
+
 /* A table: headers[ncols], cells row-major rows*ncols (borrowed pointers).
  * When the natural widths exceed the terminal, the widest column yields one
  * column at a time (floor 6) until everything fits — the long
@@ -976,9 +1036,9 @@ static void render_zcode_join(struct buf *b, const struct zcl_cli_render_env *e,
             process_joined
                 ? "this process already has the join flags"
                 : "this process has not loaded those flags yet");
-    emit_kv(b, e, 4, "next",
-            json_get_str(json_get(data, "restart_command")));
-    emit_kv(b, e, 4, "then", "z23 zcode package offered");
+    emit_kv_wrap(b, e, 4, "next",
+                 json_get_str(json_get(data, "restart_command")));
+    emit_kv_wrap(b, e, 4, "then", "z23 zcode package offered");
 }
 
 /* Join's typed next command. A one-shot CLI has no engine, so the JSON
@@ -1001,8 +1061,8 @@ static void render_zcode_offered(struct buf *b, const struct zcl_cli_render_env 
     emit_kv(b, e, 6, "now",
             live ? "resident engine is up"
                  : "this CLI is not the hosting engine");
-    emit_kv(b, e, 6, "next",
-            json_get_str(json_get(data, "next_command")));
+    emit_kv_wrap(b, e, 6, "next",
+                 json_get_str(json_get(data, "next_command")));
 }
 
 /* zcode.guide is a recipe: one next action, one copyable start, the journey. */

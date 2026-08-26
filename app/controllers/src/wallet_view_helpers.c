@@ -5,6 +5,7 @@
 
 #include "platform/time_compat.h"
 #include "controllers/wallet_view_internal.h"
+#include "controllers/web_form.h"
 /* CSS is now in app/views/css/wallet.ccss, compiled as CSS_WALLET */
 #include "models/contact.h"
 #include "models/shared_validators.h"
@@ -554,51 +555,18 @@ int wv_shield_check_status(void) {
 }
 
 
-/* ── URL decoding + form parsing ───────────────────────────── */
+/* ── Form parsing ──────────────────────────────────────────── */
 
-static void url_decode(char *dst, size_t dstmax, const char *src) {
-    size_t di = 0;
-    for (size_t si = 0; src[si] && di < dstmax - 1; si++) {
-        if (src[si] == '%' && src[si+1] && src[si+2]) {
-            char hex[3] = { src[si+1], src[si+2], '\0' };
-            dst[di++] = (char)strtol(hex, NULL, 16);
-            si += 2;
-        } else if (src[si] == '+') {
-            dst[di++] = ' ';
-        } else {
-            dst[di++] = src[si];
-        }
-    }
-    dst[di] = '\0';
-}
-
+/* Bodies are length-delimited slices without a NUL sentinel, so the
+ * bounded scanner in web_form.h owns field lookup and decoding here.
+ * A miss logs and returns false; empty values count as absent. */
 bool wv_parse_form_field(const uint8_t *body, size_t body_len,
                           const char *key, char *out, size_t outmax) {
-    if (!body || !key || !out || outmax == 0)
-        LOG_FAIL("wallet_view", "parse_form_field: NULL arg (body=%p key=%p out=%p outmax=%zu)",
-                 (const void *)body, (const void *)key, (void *)out, outmax);
-    size_t klen = strlen(key);
-    const char *p = (const char *)body;
-    const char *end = p + body_len;
-    while (p < end) {
-        if (strncmp(p, key, klen) == 0 && p[klen] == '=') {
-            p += klen + 1;
-            const char *ve = p;
-            while (ve < end && *ve != '&') ve++;
-            size_t vlen = (size_t)(ve - p);
-            if (vlen >= outmax) vlen = outmax - 1;
-            char encoded[512];
-            if (vlen >= sizeof(encoded)) vlen = sizeof(encoded) - 1;
-            memcpy(encoded, p, vlen);
-            encoded[vlen] = '\0';
-            url_decode(out, outmax, encoded);
-            return true;
-        }
-        while (p < end && *p != '&') p++;
-        if (p < end) p++;
-    }
-    out[0] = '\0';
-    LOG_FAIL("wallet_view", "parse_form_field: key '%s' not found in body (%zu bytes)", key, body_len);
+    if (!web_form_field((const char *)body, body_len, key, out, outmax))
+        LOG_FAIL("wallet_view",
+                 "parse_form_field: key '%s' not found or empty (%zu bytes)",
+                 key ? key : "(null)", body_len);
+    return true;
 }
 
 /* ── Address validation ────────────────────────────────────── */

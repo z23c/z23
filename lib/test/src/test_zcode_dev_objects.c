@@ -1835,7 +1835,8 @@ static int test_zd_work_node(void)
         ASSERT(requester_dumped && worker_dumped);
         ASSERT_EQ(requester_capable, 1);
         ASSERT(!requester_enabled);
-        ASSERT(strstr(requester_next, "-buildworker=1") != NULL);
+        ASSERT(strstr(requester_next, "z23 join") != NULL);
+        ASSERT(strstr(requester_next, "-buildworker=1") == NULL);
         ASSERT(worker_enabled);
         ASSERT(strstr(worker_next, "zcode work toolchain") != NULL);
 

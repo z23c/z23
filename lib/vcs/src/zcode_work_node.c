@@ -188,9 +188,7 @@ bool vcs_zcode_work_node_dump_state_json(struct json_value *out,
         json_push_kv_int(out, "worker_active", 0);
         json_push_kv_int(out, "worker_available", 0);
         json_push_kv_int(out, "capable_peers", 0);
-        json_push_kv_str(out, "next_action",
-            "restart this node with -packagehost=1 -buildworker=1 to join "
-            "independent compile work");
+        json_push_kv_str(out, "next_action", "z23 join");
         return true;
     }
     pthread_mutex_lock(&node->lock);
@@ -213,8 +211,7 @@ bool vcs_zcode_work_node_dump_state_json(struct json_value *out,
     json_push_kv_str(out, "next_action",
         node->has_local_capability
             ? "zcode work toolchain"
-            : "restart this node with -packagehost=1 -buildworker=1 to join "
-              "independent compile work");
+            : "z23 join");
     pthread_mutex_unlock(&node->lock);
     return true;
 }
