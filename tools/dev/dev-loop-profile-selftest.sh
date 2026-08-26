@@ -89,6 +89,23 @@ git -C "$ROOT" grep -q '^$(DEV_PACKAGE_VERIFY_BIN):' -- Makefile ||
     fail 'development package verifier target is missing'
 git -C "$ROOT" grep -q '\$(CC) \$(DEV_RESTART_CFLAGS) \$(DEV_RESTART_LDFLAGS).*' -- Makefile ||
     fail 'development package verifier is not owned by DEV_RESTART'
+git -C "$ROOT" grep -q 'NODE_C23_PACKAGE_VERIFY_LINK_RSP = .*$(BUILD_INVOCATION_ID)' -- \
+    Makefile ||
+    fail 'release package verifier response file is not invocation-local'
+git -C "$ROOT" grep -q '\$(file >\$(NODE_C23_PACKAGE_VERIFY_LINK_RSP),\$(NODE_C23_PACKAGE_VERIFY_OBJ) \$(NODE_C23_PACKAGE_VERIFY_NODE_OBJS))' -- \
+    Makefile ||
+    fail 'release package verifier response file does not own its complete object graph'
+git -C "$ROOT" grep -q '"@\$(NODE_C23_PACKAGE_VERIFY_LINK_RSP)"' -- Makefile ||
+    fail 'release package verifier does not link through its shared-object response file'
+git -C "$ROOT" grep -q 'rm -f .*\$(NODE_C23_PACKAGE_VERIFY_LINK_RSP)' -- Makefile ||
+    fail 'release package verifier does not remove its invocation-local response file'
+git -C "$ROOT" grep -q '\$(BUILD_EPOCH_SESSION_TOOL) verify "\$(NODE_C23_SESSION)" "\$(NODE_C23_LEASE)"' -- \
+    Makefile ||
+    fail 'release object-graph links do not verify their build epoch before publication'
+if git -C "$ROOT" grep -q '^\t\t$(BUILD_IDENTITY_STAMP) tools/package_verify.c $(ALL_SRCS)' -- \
+        Makefile; then
+    fail 'release package verifier recompiles the complete source tree'
+fi
 git -C "$ROOT" grep -q 'zclassic23-package-verify-dev' -- \
     app/services/src/build_fabric_worker.c ||
     fail 'fixed worker does not resolve the development package verifier'

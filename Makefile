@@ -194,7 +194,7 @@ else ifeq ($(words $(MAKECMDGOALS)),1)
 ZCL_EPOCH_SINGLE_GOAL := $(firstword $(MAKECMDGOALS))
 ifneq ($(filter build-only,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := build-only
-else ifneq ($(filter zclassic23 z23,$(ZCL_EPOCH_SINGLE_GOAL)),)
+else ifneq ($(filter zclassic23 z23 zclassic23-package-verify,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := node-c23
 else ifneq ($(filter fast-compile dev-build-only,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := dev
@@ -1011,7 +1011,14 @@ NODE_C23_OBJ_DIR = $(NODE_C23_OBJ_ROOT)/epochs/$(NODE_C23_COMPILE_EPOCH)
 # input order. patsubst preserves it.
 NODE_C23_SRCS = $(NODE_ENTRY_SRCS) $(ALL_SRCS)
 NODE_C23_OBJS = $(patsubst %.c,$(NODE_C23_OBJ_DIR)/%.o,$(NODE_C23_SRCS))
-NODE_C23_LINK_RSP = $(NODE_C23_OBJ_DIR)/link-inputs.rsp
+NODE_C23_LINK_RSP = $(NODE_C23_OBJ_DIR)/link-inputs.$(BUILD_INVOCATION_ID).rsp
+# The external package verifier shares the node's exact C23 compile profile
+# for every common translation unit. Compile only its distinct main() and
+# reuse the already proven per-TU graph; recompiling all of ALL_SRCS in one
+# second compiler invocation made slow hosts pay the full frontend cost twice.
+NODE_C23_PACKAGE_VERIFY_OBJ = $(NODE_C23_OBJ_DIR)/tools/package_verify.o
+NODE_C23_PACKAGE_VERIFY_NODE_OBJS = $(patsubst %.c,$(NODE_C23_OBJ_DIR)/%.o,$(ALL_SRCS))
+NODE_C23_PACKAGE_VERIFY_LINK_RSP = $(NODE_C23_OBJ_DIR)/package-verify-link-inputs.$(BUILD_INVOCATION_ID).rsp
 NODE_C23_PROFILE = node-c23-v1
 NODE_C23_SESSION = $(NODE_C23_OBJ_DIR)/.build-session
 NODE_C23_LEASE = $(NODE_C23_OBJ_DIR)/.leases/$(BUILD_INVOCATION_ID)
@@ -1082,7 +1089,7 @@ else ifeq ($(words $(MAKECMDGOALS)),1)
 ZCL_DEPFILE_SINGLE_GOAL := $(firstword $(MAKECMDGOALS))
 ifneq ($(filter build-only,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := build-only
-else ifneq ($(filter zclassic23 z23,$(ZCL_DEPFILE_SINGLE_GOAL)),)
+else ifneq ($(filter zclassic23 z23 zclassic23-package-verify,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := node-c23
 else ifneq ($(filter fast-compile dev-build-only,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := dev
@@ -1115,7 +1122,7 @@ ifneq ($(filter build-only,$(ZCL_DEPFILE_PROFILES)),)
 -include $(ALL_OBJS:.o=.d)
 endif
 ifneq ($(filter node-c23,$(ZCL_DEPFILE_PROFILES)),)
--include $(NODE_C23_OBJS:.o=.d)
+-include $(NODE_C23_OBJS:.o=.d) $(NODE_C23_PACKAGE_VERIFY_OBJ:.o=.d)
 endif
 ifneq ($(filter dev,$(ZCL_DEPFILE_PROFILES)),)
 -include $(DEV_OBJS:.o=.d)
@@ -3820,20 +3827,27 @@ $(eval $(call BUILD_NODE_TOOL,rebuild_recent,tools/rebuild_recent.c,-lm,-fopenmp
 .PHONY: zclassic23-package-verify
 zclassic23-package-verify: $(BIN_DIR)/zclassic23-package-verify
 $(BIN_DIR)/zclassic23-package-verify: $(VIEW_GEN_HEADERS) \
-		$(BUILD_IDENTITY_STAMP) tools/package_verify.c $(ALL_SRCS) \
+		$(BUILD_IDENTITY_STAMP) $(NODE_C23_PACKAGE_VERIFY_OBJ) \
+		$(NODE_C23_PACKAGE_VERIFY_NODE_OBJS) \
 		$(COMMAND_CATALOG_DEFS) $(C23_PORTABLE_RELINK) | $(NODE_VENDOR_LIBS)
 	@mkdir -p $(dir $@)
-	@set -eu; \
+	@$(if $(ZCL_MAKE_NO_EXEC),,$(file >$(NODE_C23_PACKAGE_VERIFY_LINK_RSP),$(NODE_C23_PACKAGE_VERIFY_OBJ) $(NODE_C23_PACKAGE_VERIFY_NODE_OBJS))) set -eu; \
 	tmp="$$(mktemp "$@.link.XXXXXX")"; \
-	trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
+	test -s "$(NODE_C23_PACKAGE_VERIFY_LINK_RSP)"; \
+	trap 'rm -f "$$tmp" "$(NODE_C23_PACKAGE_VERIFY_LINK_RSP)"' EXIT HUP INT TERM; \
 	$(CC) $(NODE_C23_CFLAGS) -Wno-deprecated-declarations $(LDFLAGS) \
-		-o "$$tmp" \
-		$(filter-out $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) \
-			$(COMMAND_CATALOG_DEFS) $(C23_PORTABLE_RELINK),$^) \
+		-o "$$tmp" "@$(NODE_C23_PACKAGE_VERIFY_LINK_RSP)" \
 		vendor/lib/libtor_stub.a $(NODE_C23_LIBS); \
+	$(BUILD_EPOCH_SESSION_TOOL) verify "$(NODE_C23_SESSION)" "$(NODE_C23_LEASE)" \
+	  "$(NODE_C23_OBJ_ROOT)" - "$(BUILD_EPOCH_KEEP)" "$(BUILD_SOURCE_ID)" \
+	  "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" "$(BUILD_COMPILER_ID)" \
+	  "$(NODE_C23_COMPILE_EPOCH)" "$(NODE_C23_PROFILE)" \
+	  "$(NODE_C23_EPOCH_COMPILE_FLAGS)" "$(NODE_C23_EPOCH_LINK_FLAGS)" \
+	  "$(CC)" "$(CXX)" "$$PPID" >/dev/null; \
 	tools/dev/source-identity.sh verify-record "$(BUILD_SOURCE_ID)" \
 		"$(BUILD_CLEAN)" "$(BUILD_MUTATION)" >/dev/null; \
 	mv -f -- "$$tmp" "$@"; \
+	rm -f -- "$(NODE_C23_PACKAGE_VERIFY_LINK_RSP)"; \
 	trap - EXIT HUP INT TERM
 # Opt-in C23 development adapter. This small front process enters Landlock and
 # scrubs credentials before it invokes the fixed Codex CLI; the node handler
@@ -3959,15 +3973,22 @@ release-deploy:
 # dir under its final basename because --add-gnu-debuglink reads the file
 # (stored name + CRC32) at link time.
 $(ZCLASSIC23_BIN): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) \
-		$(NODE_C23_OBJS) $(NODE_C23_LINK_RSP) $(COMMAND_CATALOG_DEFS) \
+		$(NODE_C23_OBJS) $(COMMAND_CATALOG_DEFS) \
 		$(C23_PORTABLE_RELINK) | $(NODE_VENDOR_LIBS)
 	@mkdir -p $(dir $@)
-	@set -eu; \
+	@$(if $(ZCL_MAKE_NO_EXEC),,$(file >$(NODE_C23_LINK_RSP),$(NODE_C23_OBJS))) set -eu; \
 	tmp="$$(mktemp "$@.link.XXXXXX")"; \
 	dbg="$@.debug"; \
 	dbgdir="$$(mktemp -d "$@.dbgdir.XXXXXX")"; \
-	trap 'rm -rf "$$tmp" "$$dbgdir"' EXIT HUP INT TERM; \
+	test -s "$(NODE_C23_LINK_RSP)"; \
+	trap 'rm -rf "$$tmp" "$$dbgdir" "$(NODE_C23_LINK_RSP)"' EXIT HUP INT TERM; \
 	$(CC) $(NODE_C23_CFLAGS) -Wno-deprecated-declarations $(LDFLAGS) -o "$$tmp" "@$(NODE_C23_LINK_RSP)" $(NODE_C23_TOR_LIBS) $(NODE_C23_LIBS); \
+	$(BUILD_EPOCH_SESSION_TOOL) verify "$(NODE_C23_SESSION)" "$(NODE_C23_LEASE)" \
+	  "$(NODE_C23_OBJ_ROOT)" - "$(BUILD_EPOCH_KEEP)" "$(BUILD_SOURCE_ID)" \
+	  "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" "$(BUILD_COMPILER_ID)" \
+	  "$(NODE_C23_COMPILE_EPOCH)" "$(NODE_C23_PROFILE)" \
+	  "$(NODE_C23_EPOCH_COMPILE_FLAGS)" "$(NODE_C23_EPOCH_LINK_FLAGS)" \
+	  "$(CC)" "$(CXX)" "$$PPID" >/dev/null; \
 	objcopy --only-keep-debug "$$tmp" "$$dbgdir/$$(basename "$$dbg")"; \
 	strip -s "$$tmp"; \
 	objcopy --add-gnu-debuglink="$$dbgdir/$$(basename "$$dbg")" "$$tmp"; \
@@ -3976,6 +3997,7 @@ $(ZCLASSIC23_BIN): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) \
 	mv -f -- "$$tmp" "$@"; \
 	mv -f -- "$$dbgdir/$$(basename "$$dbg")" "$$dbg"; \
 	rmdir "$$dbgdir"; \
+	rm -f -- "$(NODE_C23_LINK_RSP)"; \
 	trap - EXIT HUP INT TERM
 
 .PHONY: zclassic-cli
@@ -6786,9 +6808,6 @@ $(NODE_C23_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) | $(
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
 	  "$(NODE_C23_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(NODE_C23_SESSION)" -- \
 	  $(CC) $(NODE_C23_OBJECT_CFLAGS) $(ZCL_TU_RANDOM_SEED)
-
-$(NODE_C23_LINK_RSP): $(NODE_C23_OBJS)
-	@$(if $(ZCL_MAKE_NO_EXEC),,$(file >$@,$(NODE_C23_OBJS))) test -s "$@"
 
 # Dev-bin keeps most TUs at -Og for quick debug compiles, but leaves the
 # consensus/crypto/script/validation hot paths at a configurable optimized

@@ -65,7 +65,7 @@ PROBE_MK="$WORK/probe.mk"
     done
     printf '\n'
     printf 'fast-compile build-only t-fast t dev-failure-execution-id: $(ZCL_DEP_PROBE_OBJECTS)\n'
-    printf 'zclassic23 z23: $(ZCL_DEP_PROBE_OBJECTS)\n'
+    printf 'zclassic23 z23 zclassic23-package-verify: $(ZCL_DEP_PROBE_OBJECTS)\n'
     printf 'zcl-depfile-unknown zcl-depfile-default: $(ZCL_DEP_PROBE_OBJECTS)\n'
     printf '\t@:\n'
     printf '.DEFAULT_GOAL := zcl-depfile-default\n'
@@ -94,6 +94,7 @@ run_probe()
             TEST_PARALLEL_REL_CANDIDATE="$WORK/test-strict.candidate" \
             TEST_PARALLEL_REL_LINK_RSP="$WORK/test-strict.rsp" \
             NODE_C23_OBJS="$WORK/node-c23.o" \
+            NODE_C23_PACKAGE_VERIFY_OBJ="$WORK/node-c23.o" \
             NODE_C23_LINK_RSP="$WORK/node-c23.rsp" \
             "$@"
     ) > "$output" 2>&1 || {
@@ -141,6 +142,8 @@ run_probe "$WORK/node.out" zclassic23
 assert_exact_profiles "$WORK/node.out" node-c23
 run_probe "$WORK/node-alias.out" z23
 assert_exact_profiles "$WORK/node-alias.out" node-c23
+run_probe "$WORK/verifier.out" zclassic23-package-verify
+assert_exact_profiles "$WORK/verifier.out" node-c23
 
 # Two goals, an unknown goal, and no explicit goal are all ambiguous.  They
 # must import every depfile, so all four newer headers schedule rebuilds.
