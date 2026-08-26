@@ -1,5 +1,7 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Semantic coverage proof for binding a complete flat block-index snapshot
+/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+// one-result-type-ok:flat-projection-coverage — the sole bool export is a
+// fail-closed semantic predicate over already-persisted shutdown state.
+/* Semantic coverage proof for binding a complete flat block-index snapshot
  * to the event-derived projection's dirty journal. */
 
 #include "services/block_index_loader.h"
