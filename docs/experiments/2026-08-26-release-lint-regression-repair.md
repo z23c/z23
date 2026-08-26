@@ -26,3 +26,14 @@ source fixture proved both UTC spellings produce the same value. The registered
 `test_importblockindex_cli_dispatch` group passed with zero skips after the
 header move. No node was restarted and no production datadir was modified by
 this experiment.
+
+## Incoming hot-swap intersection
+
+The subsequent main integration added a pre-mount ELF symbol check. Review
+found that concurrent invocations shared mutable scratch filenames, symbol
+versions were discarded, and an absent shipped-artifact path skipped the check
+while the summary could still claim success. Each run now owns a private
+temporary directory, default ELF versions expose both their exact version and
+unversioned alias while non-default versions remain exact-only, and an absent
+artifact fails the row. The symbol-version self-test, one real module check
+against `zclassic23-dev`, shell syntax checks, and `make lint-fast` passed.

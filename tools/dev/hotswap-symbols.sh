@@ -55,8 +55,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$ROOT"
 
-SCRATCH="${ZCL_HOTSWAP_SYMBOLS_DIR:-$HOME/.local/state/zclassic23/scratch/hotswap-symbols}"
-mkdir -p "$SCRATCH" || { echo "hotswap-symbols: cannot create $SCRATCH" >&2; exit 2; }
+SCRATCH_ROOT="${ZCL_HOTSWAP_SYMBOLS_DIR:-$HOME/.local/state/zclassic23/scratch/hotswap-symbols}"
+mkdir -p "$SCRATCH_ROOT" || {
+    echo "hotswap-symbols: cannot create $SCRATCH_ROOT" >&2
+    exit 2
+}
+SCRATCH="$(mktemp -d "$SCRATCH_ROOT/run.XXXXXX")" || {
+    echo "hotswap-symbols: cannot create an isolated scratch directory" >&2
+    exit 2
+}
+trap 'rm -rf -- "$SCRATCH"' EXIT HUP INT TERM
 
 usage() {
     echo "usage: tools/dev/hotswap-symbols.sh <module.so> [node-binary]" >&2
@@ -73,11 +81,25 @@ command -v nm >/dev/null 2>&1 || {
 # Built once per run and reused. `ldd` is the honest source for the library
 # list: it is the same set the dynamic linker will have mapped when the module
 # is dlopen'd into that process.
+defined_names() {
+    awk 'NF >= 2 {
+        name = $NF
+        if (name ~ /@@/) {
+            exact = name
+            sub(/@@/, "@", exact)
+            print exact
+            sub(/@@.*/, "", name)
+            print name
+        } else {
+            print name
+        }
+    }'
+}
+
 build_resolution_set() {
     local node="$1" out="$2" lib
     : > "$out"
-    nm -D --defined-only "$node" 2>/dev/null |
-        awk 'NF >= 2 { print $NF }' | sed 's/@.*//' >> "$out"
+    nm -D --defined-only "$node" 2>/dev/null | defined_names >> "$out"
     local n_node
     n_node="$(wc -l < "$out")"
     if [ "$n_node" -lt 1000 ]; then
@@ -91,8 +113,7 @@ build_resolution_set() {
     fi
     while IFS= read -r lib; do
         [ -n "$lib" ] && [ -r "$lib" ] || continue
-        nm -D --defined-only "$lib" 2>/dev/null |
-            awk 'NF >= 2 { print $NF }' | sed 's/@.*//' >> "$out"
+        nm -D --defined-only "$lib" 2>/dev/null | defined_names >> "$out"
     done < <(ldd "$node" 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i ~ /^\//) { print $i; break }}')
     LC_ALL=C sort -u -o "$out" "$out"
     return 0
@@ -102,14 +123,30 @@ build_resolution_set() {
 # the name; 'U' is a strong undefined, 'w' a weak one that may resolve to zero.
 module_needs() {
     nm -D "$1" 2>/dev/null |
-        awk 'NF >= 2 && $(NF - 1) == "U" { print $NF }' | sed 's/@.*//' |
+        awk 'NF >= 2 && $(NF - 1) == "U" { print $NF }' |
         LC_ALL=C sort -u
+}
+
+symbol_version_selftest() {
+    local got expected
+    got="$(printf '%s\n' \
+        '0001 T defaulted@@ABI_2' \
+        '0002 T legacy@ABI_1' \
+        '0003 T plain' | defined_names)"
+    expected="$(printf '%s\n' \
+        'defaulted@ABI_2' 'defaulted' 'legacy@ABI_1' 'plain')"
+    [ "$got" = "$expected" ] || {
+        echo "hotswap-symbols: symbol-version selftest failed" >&2
+        return 1
+    }
+    echo "hotswap-symbols: selftest PASS (default alias; exact versions)"
 }
 
 NODE_ARG=""
 TARGETS=()
 case "${1:-}" in
     -h|--help|"") usage; exit 2 ;;
+    --selftest) symbol_version_selftest; exit $? ;;
     --all)
         NODE_ARG="${2:-}"
         mapfile -t TARGETS < <(ls -1 build/hotswap/*.so 2>/dev/null)
