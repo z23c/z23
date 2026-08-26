@@ -123,6 +123,8 @@ static uint64_t max_window(enum vcs_zcode_dht_record_kind kind)
     return VCS_ZCODE_DHT_STORAGE_ACK_MAX_SECONDS;
   case VCS_ZCODE_DHT_RECORD_SOURCE_REPRODUCTION_ACK:
     return VCS_ZCODE_DHT_SOURCE_REPRODUCTION_ACK_MAX_SECONDS;
+  case VCS_ZCODE_DHT_RECORD_AGENT_SCOPE:
+    return VCS_ZCODE_DHT_AGENT_SCOPE_MAX_SECONDS;
   }
   return 0;
 }

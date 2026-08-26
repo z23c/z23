@@ -37,6 +37,12 @@ enum vcs_zcode_dht_record_store_result {
    * the 16-slot intent table, not the 4096-record store cap. Appended last
    * so the values ahead of it stay stable for any future numeric use. */
   VCS_ZCODE_DHT_RECORD_STORE_NO_SLOT,
+  /* The record is well-formed and signature-valid but its signing key holds
+   * no live grant in a namespace whose grants already govern it. Distinct
+   * from INVALID so an operator reading the refusal mints or renews a
+   * grant instead of reshaping the record. Appended last so the values
+   * ahead of it stay stable for any future numeric use. */
+  VCS_ZCODE_DHT_RECORD_STORE_SCOPE,
 };
 
 const char *vcs_zcode_dht_record_store_result_string(
@@ -65,6 +71,23 @@ size_t vcs_zcode_dht_record_store_query(
     enum vcs_zcode_dht_record_kind kind, const char *namespace_name,
     const uint8_t root[32], uint64_t now_unix,
     struct vcs_zcode_dht_record *out, size_t out_capacity);
+
+/* Namespace governance snapshot: every live AGENT_SCOPE grant one master
+ * key holds in one namespace, regardless of content root (each granted key
+ * is its own stream, so a root-filtered query cannot enumerate them).
+ * Grants live at `now_unix` the same way store_query windows records.
+ * `founder_out` (zeroed when none exists) receives the signing key of the
+ * lowest-sequence live grant — the operator key that founded governance;
+ * equal sequences resolve by the store's canonical order, so the answer is
+ * deterministic for one store state. `granted` collects the granted keys
+ * (each grant's transport_root) up to `granted_capacity`. The return value
+ * is the TOTAL live grant count, so a caller seeing count > capacity knows
+ * the membership list is partial and must fail closed. */
+size_t vcs_zcode_dht_record_store_scope_grants(
+    const struct vcs_zcode_dht_record_store *store,
+    const char namespace_name[VCS_ZCODE_DHT_RECORD_NAMESPACE_BYTES],
+    const uint8_t master_pubkey[32], uint64_t now_unix,
+    uint8_t founder_out[32], uint8_t *granted, size_t granted_capacity);
 void vcs_zcode_dht_record_store_digest(
     const struct vcs_zcode_dht_record_store *store, uint8_t out[32]);
 
