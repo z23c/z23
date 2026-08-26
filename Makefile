@@ -9422,6 +9422,22 @@ check-outparam-init-before-return:
 	@bash tools/lint/check_outparam_init_before_return.sh --selftest
 	@bash tools/lint/check_outparam_init_before_return.sh
 
+# Adding a lint gate is a TWO-FILE operation and nothing enforced the second
+# file: the Makefile gets a `check-*:` target plus a LINT_GATES line, and
+# tools/lint/run_lint.sh's gate_command() case table gets the invocation,
+# because the parallel driver execs each gate's script directly and never reads
+# the Make recipe. On 2026-08-26 three gates landed with the first half and
+# without the second in one session and `make lint` was FATAL (exit 2) tree-wide
+# until they were wired. The driver already errors loudly, but only when
+# somebody runs the umbrella, and it takes the whole run down — no gate results
+# at all. This asserts the same parity as a gate, both directions, plus a Make
+# target for every listed name (ZCL_LINT_SERIAL=1 needs it) and an existing
+# script behind every table entry.
+check-lint-gate-wiring:
+	@echo "══ LINT: every listed gate is wired in run_lint.sh, and back ══"
+	@./tools/lint/check_lint_gate_wiring.sh --selftest
+	@./tools/lint/check_lint_gate_wiring.sh
+
 # ── Lint umbrella ────────────────────────────────────────────────────────
 # LINT_GATES is the single ordered source of truth for the lint umbrella
 # (E11 check-doc-accuracy cross-checks it against DEFENSIVE_CODING.md).
@@ -9457,6 +9473,7 @@ ZCL_LINT_JOBS ?= $(shell j=$$(( $(ZCL_LINT_NPROC) * 3 / 4 )); \
                    if [ "$$j" -lt 8 ]; then j=8; fi; \
                    if [ "$$j" -gt 24 ]; then j=24; fi; echo "$$j")
 LINT_GATES := \
+    check-lint-gate-wiring \
     check-no-retired-agent-protocol \
     check-build-epoch-integrity \
     check-checkout-lock \
@@ -9605,7 +9622,9 @@ LINT_GATES := \
     check-installed-acceptance-tools \
     check-standalone-tools-link \
     check-no-operator-paths \
-    check-no-unattended-publish
+    check-no-unattended-publish \
+    check-tor-dial-prewarm \
+    check-fleet-source-status
 
 # The driver execs gate scripts directly, so the two gates backed by a built
 # tool (check-core-seal, check-observability-pairing, and the package root

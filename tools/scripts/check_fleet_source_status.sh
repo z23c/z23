@@ -6,10 +6,17 @@ umask 077
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$SCRIPT_DIR/fleet_source_status.sh"
 
-TMP_REPO=$(mktemp -d "${TMPDIR:-/tmp}/z23-fleet-source-status-XXXXXX")
+TMP_ROOT=${TMPDIR:-/tmp}
+TMP_ROOT=${TMP_ROOT%/}
+TMP_REPO=$(mktemp -d "$TMP_ROOT/z23-fleet-source-status-XXXXXX")
+# The guard is against `rm -rf` on anything this script did not create, so it
+# must key on the template mktemp was ACTUALLY given. Hardcoding /tmp made a
+# host with TMPDIR set take the refusal branch every run: correct on the
+# dangerous side, but it leaked a temp git repo per invocation and printed a
+# scary line for a directory it had just made itself.
 cleanup() {
     case "$TMP_REPO" in
-        /tmp/z23-fleet-source-status-*) rm -rf "$TMP_REPO" ;;
+        "$TMP_ROOT"/z23-fleet-source-status-??????) rm -rf "$TMP_REPO" ;;
         *) printf 'check_fleet_source_status: refusing cleanup of %s\n' "$TMP_REPO" >&2 ;;
     esac
 }

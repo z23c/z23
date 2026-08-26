@@ -122,6 +122,12 @@
 #define GIT_HOOKS_PRECOMMIT_REL "tools/githooks/pre-commit"
 #define GIT_HOOKS_PRECOMMIT_FIXTURE_REL \
     "test-tmp/_pre_commit_hook_fixture_tmp"
+/* Gate — the lint umbrella's two files (Makefile LINT_GATES and
+ * run_lint.sh's gate_command() case table) must agree in both directions.
+ * Hermetic: its --selftest builds throwaway fixture trees under TMPDIR and it
+ * never writes into the worktree, so it belongs to the REALROOT lane. */
+#define LINT_GATE_WIRING_SCRIPT_REL \
+    "tools/lint/check_lint_gate_wiring.sh"
 #define NO_DEV_HISTORY_SCRIPT_REL \
     "tools/scripts/check_no_dev_history_in_contracts.sh"
 #define NO_DEV_HISTORY_FIXTURE_DST \
@@ -481,6 +487,7 @@ int t_dumper_never_blocks_gate(void);
 int t_no_trust_state_ordering_gate(void);
 int t_blocker_escape_registered_gate(void);
 int t_lint_gates_fail_loud_on_empty_scan(void);
+int t_lint_gate_wiring_gate(void);
 void unlink_lint_fixtures(void);
 int t_raw_malloc_fixture_trips_gate(void);
 int t_raw_malloc_zcl_fixture_passes(void);
