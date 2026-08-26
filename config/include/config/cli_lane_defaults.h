@@ -1,10 +1,10 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * Lane-specific unflagged targets for the release and development clients.
+ * Compile-time unflagged targets for the release and development CLI lanes.
  */
 
-#ifndef ZCL_CLI_LANE_DEFAULTS_H
-#define ZCL_CLI_LANE_DEFAULTS_H
+#ifndef ZCL_CONFIG_CLI_LANE_DEFAULTS_H
+#define ZCL_CONFIG_CLI_LANE_DEFAULTS_H
 
 #include <stddef.h>
 #include <stdio.h>

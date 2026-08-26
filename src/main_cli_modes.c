@@ -98,7 +98,7 @@
 #include <dirent.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include "cli_lane_defaults.h"
+#include "config/cli_lane_defaults.h"
 #include "config/args.h"                /* print_usage (moved to args.c) */
 
 /* ════════════════════════════════════════════════════════════════

@@ -54,6 +54,11 @@ expect() {
     fi
 }
 
+expect utc_z_normalized 2026-08-21T02:03:04+00:00 \
+    "$(fleet_source_normalize_commit_date 2026-08-21T02:03:04Z)"
+expect utc_offset_stable 2026-08-21T02:03:04+00:00 \
+    "$(fleet_source_normalize_commit_date 2026-08-21T02:03:04+00:00)"
+
 fleet_source_status_audit "$TMP_REPO" "$HEAD_COMMIT" "$FLOOR" "$FLOOR" "$FLOOR"
 expect direct_git_status CURRENT "$FLEET_SOURCE_STATUS"
 expect direct_git_commit "$FLOOR" "$FLEET_SOURCE_COMMIT"

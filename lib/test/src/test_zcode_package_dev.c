@@ -14,6 +14,7 @@
 #include "services/build_fabric_service.h"
 #include "services/zcode_lane_service.h"
 #include "util/file_tree_ops.h"
+#include "util/util.h"
 #include "chain/chainparams.h"
 #include "vcs/package_accept.h"
 #include "vcs/package_capsule.h"
@@ -2528,12 +2529,38 @@ static int zpd_test_work_toolchain(void)
         ASSERT(strcmp(json_get_str(json_get(&reply.data, "join_flags")),
                       "-packagehost=1 -buildworker=1") == 0);
         ASSERT(!json_get_bool(json_get(&reply.data, "joined")));
-        ASSERT(next && strstr(next, "-packagehost=1 -buildworker=1") != NULL);
+        ASSERT(next && strstr(next, "z23 join") != NULL);
+        ASSERT(strstr(next, "-packagehost=1 -buildworker=1") == NULL);
         if (!present)
             ASSERT(strcmp(blocker, "VERIFIER_MISSING") == 0);
         zcl_command_reply_free(&reply);
         PASS();
+    }
+    TEST("zcode work toolchain: swarm-only host is told to restart, not "
+         "to advertise compile work") {
+        const char *argv[] = { "z23", "-packagehost=1" };
+        ParseParameters(2, argv);
+        struct zcl_command_request request = { .input = NULL };
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.zcode_toolchain_show.v1");
+        zcl_native_handle_zcode_toolchain_show(&request, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(json_get_bool(json_get(&reply.data, "package_hosting")));
+        ASSERT(!json_get_bool(json_get(&reply.data, "joined")));
+        {
+            const char *next =
+                json_get_str(json_get(&reply.data, "next_action"));
+            ASSERT(next && strstr(next, "restart") != NULL);
+            ASSERT(strstr(next, "z23 join") == NULL);
+            ASSERT(strstr(next, "-buildworker=1") == NULL);
+        }
+        zcl_command_reply_free(&reply);
+        PASS();
     } _test_next:;
+    {
+        const char *reset[] = { "z23" };
+        ParseParameters(1, reset);
+    }
     return failures;
 }
 
@@ -2551,8 +2578,7 @@ static int zpd_test_commons_join_front_doors(void)
         ASSERT(!join.package_hosting);
         ASSERT(!join.build_worker);
         ASSERT(join.offline_next_command &&
-               strstr(join.offline_next_command,
-                      "-packagehost=1 -buildworker=1"));
+               strcmp(join.offline_next_command, "z23 join") == 0);
 
         struct zcl_command_request request = { .input = NULL };
         struct zcl_command_reply toolchain;
@@ -2567,7 +2593,10 @@ static int zpd_test_commons_join_front_doors(void)
         {
             const char *next =
                 json_get_str(json_get(&toolchain.data, "next_action"));
-            ASSERT(next && strstr(next, "-packagehost=1 -buildworker=1"));
+            ASSERT(next && strcmp(next, "z23 join") == 0);
+            ASSERT(strcmp(json_get_str(json_get(&toolchain.data,
+                                                "next_safe_command")),
+                          "join") == 0);
         }
 
         char dd[1024];
@@ -2592,8 +2621,9 @@ static int zpd_test_commons_join_front_doors(void)
         {
             const char *next =
                 json_get_str(json_get(&offered.data, "next_command"));
-            ASSERT(next && strstr(next, "-packagehost=1 -buildworker=1"));
-            ASSERT(strstr(next, "z23 zcode package offered"));
+            ASSERT(next && strstr(next, "z23 join") != NULL);
+            ASSERT(strstr(next, dd) != NULL);
+            ASSERT(strstr(next, "-packagehost=1 -buildworker=1") == NULL);
         }
 
         struct json_value guide_input;

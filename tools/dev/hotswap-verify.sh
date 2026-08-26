@@ -170,7 +170,11 @@ for tu in "${TARGETS[@]}"; do
     # NOT `tail -1`: make appends its own "Leaving directory" line after the
     # recipe's output, so the artifact path is not last.
     shipped="$(LC_ALL=C grep -oE '^build/hotswap/[^ ]+\.so$' "$SCRATCH/build.log" | tail -1)"
-    if [ -n "$shipped" ] && [ -f "$shipped" ]; then
+    if [ -z "$shipped" ] || [ ! -f "$shipped" ]; then
+        echo "    symbols     : REFUSED (shipped artifact path absent)"
+        row_ok=0
+        failed_rows="${failed_rows}  $tu (shipped artifact absent)"$'\n'
+    else
         if [ -r "$SYMBOL_NODE" ]; then
             if ! tools/dev/hotswap-symbols.sh "$shipped" "$SYMBOL_NODE" 2>&1 |
                     sed -n 's/^  /    /p'; then

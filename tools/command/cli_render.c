@@ -233,6 +233,66 @@ static void emit_kv(struct buf *b, const struct zcl_cli_render_env *e,
     buf_putc(b, '\n');
 }
 
+/* Same key column as emit_kv, but wrap the value at `width` instead of
+ * ellipsizing. The copyable next command must appear in full: a truncated
+ * restart-and-datadir line is not an action the operator can run. */
+static void emit_kv_wrap(struct buf *b, const struct zcl_cli_render_env *e,
+                         size_t kw, const char *key, const char *value)
+{
+    if (!value)
+        value = "";
+    size_t used = 2 + kw + 2;
+    size_t room = (size_t)e->width > used ? (size_t)e->width - used : 8;
+    if (room < 8)
+        room = 8;
+
+    const char *p = value;
+    bool first = true;
+    while (*p) {
+        while (*p == ' ')
+            p++;
+        if (!*p)
+            break;
+        if (first) {
+            buf_puts(b, "  ");
+            size_t klen = strlen(key);
+            char kpadded[64];
+            if (klen < sizeof(kpadded)) {
+                memcpy(kpadded, key, klen + 1);
+                while (klen < kw && klen < sizeof(kpadded) - 1) {
+                    kpadded[klen] = ' ';
+                    kpadded[++klen] = '\0';
+                }
+                ansi_dim(b, e, kpadded);
+            } else {
+                ansi_dim(b, e, key);
+            }
+            buf_puts(b, "  ");
+            first = false;
+        } else {
+            buf_puts(b, "  ");
+            for (size_t i = 0; i < kw; i++)
+                buf_putc(b, ' ');
+            buf_puts(b, "  ");
+        }
+        size_t n = 0;
+        size_t last_sp = 0;
+        while (p[n] && n < room) {
+            if (p[n] == ' ')
+                last_sp = n;
+            n++;
+        }
+        size_t take = (p[n] && last_sp > 0) ? last_sp : n;
+        if (take == 0)
+            take = n ? n : 1;
+        buf_putn(b, p, take);
+        buf_putc(b, '\n');
+        p += take;
+    }
+    if (first)
+        emit_kv(b, e, kw, key, "");
+}
+
 /* A table: headers[ncols], cells row-major rows*ncols (borrowed pointers).
  * When the natural widths exceed the terminal, the widest column yields one
  * column at a time (floor 6) until everything fits — the long
@@ -955,6 +1015,56 @@ static bool tree_render_leaf(const char *command_path)
             strcmp(command_path, "ops.logs") == 0);
 }
 
+/* `z23 join` is the first command a stranger runs after install. The
+ * canonical JSON keeps `joined` as this process's flags (often false);
+ * the TTY recipe names the FILE fact and the one next action instead of
+ * dumping a wall of keys that reads like failure. */
+static void render_zcode_join(struct buf *b, const struct zcl_cli_render_env *e,
+                              const struct json_value *root)
+{
+    emit_header(b, e, "join");
+    buf_putc(b, '\n');
+    const struct json_value *data = json_get(root, "data");
+    bool swarm = json_get_bool(json_get(data, "swarm_member"));
+    bool process_joined = json_get_bool(json_get(data, "joined"));
+    emit_kv(b, e, 4, "do",
+            swarm ? "this node will host C23 packages after restart"
+                  : "package hosting was not written");
+    emit_kv(b, e, 4, "file",
+            json_get_str(json_get(data, "wrote_flags")));
+    emit_kv(b, e, 4, "now",
+            process_joined
+                ? "this process already has the join flags"
+                : "this process has not loaded those flags yet");
+    emit_kv_wrap(b, e, 4, "next",
+                 json_get_str(json_get(data, "restart_command")));
+    emit_kv_wrap(b, e, 4, "then", "z23 zcode package offered");
+}
+
+/* Join's typed next command. A one-shot CLI has no engine, so the JSON
+ * used to dump live:false / serving_ready:false as if join had failed.
+ * The recipe names that vantage and the one next action. */
+static void render_zcode_offered(struct buf *b, const struct zcl_cli_render_env *e,
+                                 const struct json_value *root)
+{
+    emit_header(b, e, "offered");
+    buf_putc(b, '\n');
+    const struct json_value *data = json_get(root, "data");
+    bool live = json_get_bool(json_get(data, "live"));
+    bool serving = json_get_bool(json_get(data, "serving_ready"));
+    char peers[32];
+    (void)snprintf(peers, sizeof(peers), "%lld",
+                   (long long)json_get_int(json_get(data, "peer_count")));
+    emit_kv(b, e, 6, "live", live ? "yes" : "no");
+    emit_kv(b, e, 6, "serve", serving ? "ready" : "not ready");
+    emit_kv(b, e, 6, "peers", peers);
+    emit_kv(b, e, 6, "now",
+            live ? "resident engine is up"
+                 : "this CLI is not the hosting engine");
+    emit_kv_wrap(b, e, 6, "next",
+                 json_get_str(json_get(data, "next_command")));
+}
+
 /* zcode.guide is a recipe: one next action, one copyable start, the journey. */
 static void render_zcode_guide(struct buf *b, const struct zcl_cli_render_env *e,
                                const struct json_value *root)
@@ -1173,6 +1283,13 @@ size_t zcl_cli_render_doc(const char *doc, size_t doc_len,
         else if (command_path &&
                  strcmp(command_path, "code.guide") == 0)
             render_code_guide(&b, env, &root);
+        else if (command_path &&
+                 (strcmp(command_path, "zcode.node.join") == 0 ||
+                  strcmp(command_path, "join") == 0))
+            render_zcode_join(&b, env, &root);
+        else if (command_path &&
+                 strcmp(command_path, "zcode.package.offered") == 0)
+            render_zcode_offered(&b, env, &root);
         else if (command_path &&
                  strcmp(command_path, "zcode.guide") == 0)
             render_zcode_guide(&b, env, &root);

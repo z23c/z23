@@ -130,12 +130,14 @@ void zcl_native_handle_zcode_toolchain_show(
     (void)json_push_kv_str(&reply->data, "blocker", blocker);
     if (verifier_present && verifier_name[0])
         (void)json_push_kv_str(&reply->data, "verifier_name", verifier_name);
+    /* Same ladder as package offered: do not recite the flag list after
+     * `z23 join` already wrote them. Compile work still needs both flags
+     * (`joined`); swarm-only hosts are told the restart, not -buildworker=1
+     * they cannot keep. */
     (void)json_push_kv_str(
         &reply->data, "next_action",
         !join.joined
-            ? "Restart this node with " ZCL_ZCODE_JOIN_FLAGS " to join "
-              "independent C23 compile work. Then compare capsule_root with "
-              "zcode work toolchain on the proving node."
+            ? join.offline_next_command
             : !verifier_present
             ? "Place zclassic23-package-verify next to this binary, then rerun "
               "zcode work toolchain. A worker cannot prove without the "
@@ -143,5 +145,8 @@ void zcl_native_handle_zcode_toolchain_show(
             : "Compare capsule_root with zcode work toolchain on the proving "
               "node. Independent compile evidence needs the same capsule.");
     (void)json_push_kv_str(&reply->data, "next_safe_command",
-                           "zcode work toolchain");
+                           !join.joined
+                               ? (join.package_hosting ? "zcode.package.offered"
+                                                       : "join")
+                               : "zcode work toolchain");
 }

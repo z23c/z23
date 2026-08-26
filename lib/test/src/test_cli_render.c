@@ -486,6 +486,64 @@ static int test_guide_tree_render(void)
         ASSERT(cr_max_line_width(out) <= 80);
         PASS();
     }
+    TEST("join renders the file fact and one next action, not JSON keys") {
+        const char *doc =
+            "{\"schema\":\"zcl.result.v1\",\"command\":\"zcode.node.join\","
+            "\"ok\":true,\"status\":\"passed\",\"data\":{"
+            "\"joined\":false,"
+            "\"swarm_member\":true,"
+            "\"wrote_flags\":\"packagehost=1 buildworker=1\","
+            "\"restart_command\":\"systemctl --user restart zclassic23\"}}";
+        struct zcl_cli_render_env e = cr_env(80, false);
+        char out[8192];
+        size_t n = zcl_cli_render_doc(doc, strlen(doc), "zcode.node.join",
+                                      &e, out, sizeof(out));
+        ASSERT(n > 0);
+        ASSERT(strstr(out, "join") != NULL);
+        ASSERT(strstr(out, "this node will host C23 packages after restart")
+               != NULL);
+        ASSERT(strstr(out, "packagehost=1 buildworker=1") != NULL);
+        ASSERT(strstr(out, "this process has not loaded those flags yet")
+               != NULL);
+        ASSERT(strstr(out, "systemctl --user restart zclassic23") != NULL);
+        ASSERT(strstr(out, "z23 zcode package offered") != NULL);
+        ASSERT(strstr(out, "\"joined\"") == NULL);
+        ASSERT(strstr(out, "\"schema\"") == NULL);
+        ASSERT(cr_max_line_width(out) <= 80);
+        n = zcl_cli_render_doc(doc, strlen(doc), "join", &e, out,
+                               sizeof(out));
+        ASSERT(n > 0);
+        ASSERT(strstr(out, "this node will host C23 packages after restart")
+               != NULL);
+        PASS();
+    }
+    TEST("offered renders vantage and one next action, not JSON keys") {
+        const char *doc =
+            "{\"schema\":\"zcl.result.v1\","
+            "\"command\":\"zcode.package.offered\","
+            "\"ok\":true,\"status\":\"passed\",\"data\":{"
+            "\"live\":false,\"serving_ready\":false,\"peer_count\":0,"
+            "\"next_command\":\"systemctl --user restart zclassic23, then "
+            "z23 zcode package offered "
+            "-datadir=./test-tmp/offered-ux-copyable\"}}";
+        struct zcl_cli_render_env e = cr_env(80, false);
+        char out[8192];
+        size_t n = zcl_cli_render_doc(doc, strlen(doc),
+                                      "zcode.package.offered", &e, out,
+                                      sizeof(out));
+        ASSERT(n > 0);
+        ASSERT(strstr(out, "offered") != NULL);
+        ASSERT(strstr(out, "this CLI is not the hosting engine") != NULL);
+        ASSERT(strstr(out, "systemctl --user restart zclassic23") != NULL);
+        ASSERT(strstr(out, "z23 zcode package offered") != NULL);
+        ASSERT(strstr(out, "./test-tmp/offered-ux-copyable") != NULL);
+        ASSERT(strstr(out, "not ready") != NULL);
+        ASSERT(strstr(out, "…") == NULL);
+        ASSERT(strstr(out, "\"live\"") == NULL);
+        ASSERT(strstr(out, "\"schema\"") == NULL);
+        ASSERT(cr_max_line_width(out) <= 80);
+        PASS();
+    }
     TEST("code.guide renders a four-step recipe, not JSON keys") {
         const char *doc =
             "{\"schema\":\"zcl.result.v1\",\"command\":\"code.guide\","

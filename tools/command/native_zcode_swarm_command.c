@@ -785,7 +785,23 @@ void zcl_native_handle_zcode_package_offered(
 
     char next[384];
     if (!live) {
-        (void)snprintf(next, sizeof(next), "%s", join.offline_next_command);
+        int wn;
+        if (join.package_hosting && datadir && datadir[0])
+            wn = snprintf(next, sizeof(next),
+                          "systemctl --user restart zclassic23, then "
+                          "z23 zcode package offered -datadir=%s",
+                          datadir);
+        else if (join.package_hosting)
+            wn = snprintf(next, sizeof(next), "%s",
+                          join.offline_next_command);
+        else if (datadir && datadir[0])
+            wn = snprintf(next, sizeof(next), "z23 join -datadir=%s",
+                          datadir);
+        else
+            wn = snprintf(next, sizeof(next), "z23 join");
+        if (wn < 0 || (size_t)wn >= sizeof(next))
+            (void)snprintf(next, sizeof(next), "%s",
+                           join.offline_next_command);
     } else if (peer_count == 0) {
         (void)snprintf(next, sizeof(next),
                        "wait for an eligible NODE_ZCL23 peer");

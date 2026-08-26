@@ -21,7 +21,6 @@ examples/09_seed_replay.c
 examples/10_wire_adversaries.c
 examples/11_collectible_market.c
 src/cli.c
-src/cli_lane_defaults.h
 src/main.c
 src/main_cli_modes.c
 src/main_cli_modes.h
