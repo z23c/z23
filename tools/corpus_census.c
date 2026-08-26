@@ -65,10 +65,19 @@
  * PACKAGE SCOPES (second def line form — a published Commons package bound
  * to its EXACT published bytes):
  *
- *   package <name> | root <64hex package root> | store <datadir path> \
+ *   package <name> | root <64hex package root> | store <label> \
  *       | kind <human|ai|import> | spdx <id>
  *
- * Enumeration reads the package store at <datadir>/zcode instead of git:
+ * `store` is a LABEL — one path component, never a path. It resolves to
+ * <store-root>/<label> where store-root is --store-root, else
+ * $ZCL_CORPUS_STORE_ROOT, else $HOME. The def line is copied verbatim into
+ * every evidence record and hashed into assignment_evidence_root, so an
+ * absolute datadir there would publish the operator's home directory in
+ * every committed artifact; the bytes are bound by the def `root`, not by
+ * where they happen to sit on one host.
+ *
+ * Enumeration reads the package store at <store-root>/<label>/zcode
+ * instead of git:
  * the committed manifest (manifests/<root-hex>) is parsed and re-rooted
  * (fail closed on mismatch with the def root), the release envelope naming
  * that package root is found under releases/ (signature re-verified,
@@ -87,7 +96,7 @@
  *                     wire present under recipes/ and re-rooted (fail
  *                     closed on mismatch).
  *   REPRODUCIBLE    — vcs_package_reproduce_scan() over
- *                     <datadir>/zcode/receipts reports reproduced (>= 2
+ *                     <store>/zcode/receipts reports reproduced (>= 2
  *                     DISTINCT build receipt ids committing byte-identical
  *                     output sets); the matching receipt ids are recorded
  *                     in the report. Method literal
@@ -514,8 +523,38 @@ static bool kind_parse(const char *value, uint16_t *kind_out)
     return true;
 }
 
+/* store_label_valid — the `store` field of a package def line is a LABEL,
+ * not a path: one path component drawn from [A-Za-z0-9._-], never '.' or
+ * '..', never containing '/' or '~'.
+ *
+ * WHY A LABEL AND NOT A PATH. The census copies the def line verbatim into
+ * every evidence record (`scopes_def_line`) and hashes it into
+ * assignment_evidence_root, and emits the store field again as `"store"` in
+ * both the evidence and the KPI report. When that field held an absolute
+ * datadir, 2,302 copies of the operator's home directory shipped in the
+ * committed corpus artifacts — a clearnet locator in a repository whose
+ * privacy rule is that committed files carry no local filesystem paths,
+ * usernames, or hostnames. The path was never what the evidence was ABOUT:
+ * every root is computed over content hashes, and the def `root` (the
+ * package manifest root, re-derived from the store and refused on mismatch)
+ * is what actually binds the bytes. The store field only says WHICH local
+ * store to read, so it is now a stable name that means the same thing on
+ * every host, resolved through --store-root / $ZCL_CORPUS_STORE_ROOT / $HOME
+ * at run time. */
+static bool store_label_valid(const char *s)
+{
+    if (!s || !*s) return false;
+    if (strcmp(s, ".") == 0 || strcmp(s, "..") == 0) return false;
+    for (const char *p = s; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (!(isalnum(c) || c == '.' || c == '_' || c == '-'))
+            return false;
+    }
+    return true;
+}
+
 /* The package line form:
- *   package <name> | root <64hex> | store <datadir> | kind <k> | spdx <id>
+ *   package <name> | root <64hex> | store <label> | kind <k> | spdx <id>
  */
 static bool def_parse_package_line(struct scope_def *def, const char *line,
                                    size_t line_no)
@@ -549,9 +588,16 @@ static bool def_parse_package_line(struct scope_def *def, const char *line,
                 goto done;
             }
         } else if (field == 2 && key_value(t, "store", &value)) {
-            if (!shell_safe(value) ||
+            if (!store_label_valid(value) ||
                 !(def->store = dup_str(value, "corpus.store"))) {
-                LOG_ERROR(CENSUS_LOG, "line %zu: bad store path", line_no);
+                LOG_ERROR(CENSUS_LOG,
+                          "line %zu: store must be a LABEL — one path "
+                          "component, [A-Za-z0-9._-], not '.' or '..' — "
+                          "not a path (got '%s'). The label resolves to "
+                          "<store-root>/<label> at run time; an absolute "
+                          "path here would publish the operator's home "
+                          "directory in every committed census artifact",
+                          line_no, value ? value : "");
                 goto done;
             }
         } else if (field == 3 && key_value(t, "kind", &value)) {
@@ -1038,7 +1084,7 @@ static bool file_load(const char *root, const char *relpath,
 
 /* ── package-scope store reads (READ-ONLY observer) ───────────────────
  *
- * A package scope reads <datadir>/zcode directly: the committed manifest,
+ * A package scope reads <store-root>/<label>/zcode directly: the manifest,
  * the release envelope, the recipe wire, and CAS chunks. Every object is
  * re-parsed and re-hashed on read (chunk bytes must equal the hash committed
  * at their manifest coordinates), so a corrupted or tampered store fails the
@@ -1299,14 +1345,28 @@ static bool package_file_load(const struct package_ctx *ctx,
 /* Load the manifest and release for one package scope (fail closed). Also
  * cross-checks the def spdx against the release envelope's license. */
 static bool package_ctx_load(struct package_ctx *ctx,
-                             const struct scope_def *def)
+                             const struct scope_def *def,
+                             const char *store_root)
 {
     memset(ctx, 0, sizeof(*ctx));
-    size_t len = strlen(def->store) + sizeof("/zcode");
+    /* The def carries a LABEL; the operator-local root that it hangs off is
+     * a run-time coordinate (--store-root / $ZCL_CORPUS_STORE_ROOT / $HOME)
+     * and is deliberately absent from every committed artifact. */
+    if (!store_root || !*store_root) {
+        LOG_ERROR(CENSUS_LOG,
+                  "package scope %s needs a store root: pass --store-root "
+                  "<dir> (or set ZCL_CORPUS_STORE_ROOT / HOME); the store "
+                  "label '%s' resolves to <store-root>/%s",
+                  def->name, def->store, def->store);
+        return false;
+    }
+    size_t len = strlen(store_root) + 1u + strlen(def->store) +
+                 sizeof("/zcode");
     ctx->zcode_dir = zcl_malloc(len, "corpus.pkg.zcode");
     if (!ctx->zcode_dir)
         LOG_FAIL(CENSUS_LOG, "zcode dir alloc");
-    (void)snprintf(ctx->zcode_dir, len, "%s/zcode", def->store);
+    (void)snprintf(ctx->zcode_dir, len, "%s/%s/zcode", store_root,
+                   def->store);
     if (!package_manifest_load(ctx, def->package_root) ||
         !package_release_find(ctx, def->package_root)) {
         package_ctx_free(ctx);
@@ -2491,6 +2551,11 @@ struct census_args {
     const char *seed_path;
     const char *install_datadir;
     const char *previous_report;
+    /* Where package-store LABELS resolve. scopes.def carries a label, never
+     * a path (see store_label_valid), so the committed def and every
+     * artifact derived from it stay free of the operator's home directory.
+     * --store-root, else $ZCL_CORPUS_STORE_ROOT, else $HOME. */
+    const char *store_root;
     uint64_t cutoff_height;
     int64_t cutoff_mtp;
     uint64_t sequence;
@@ -2530,6 +2595,10 @@ static void usage(FILE *stream)
         "       [--sequence N] [--predecessor-root HEX64] "
         "[--quality-attested 0|1]\n"
         "       [--install <datadir>] [--previous-report PATH]\n"
+        "       [--store-root DIR]   package-store labels in scopes.def "
+        "resolve to\n"
+        "                            <DIR>/<label>; default "
+        "$ZCL_CORPUS_STORE_ROOT else $HOME\n"
         "       (sequence >1 auto-discovers the predecessor root and the\n"
         "       previous report from <out>/report-<seq-1>.json)\n");
 }
@@ -2580,10 +2649,17 @@ static bool args_parse(int argc, char **argv, struct census_args *args)
             args->install_datadir = value;
         } else if (strcmp(key, "--previous-report") == 0) {
             args->previous_report = value;
+        } else if (strcmp(key, "--store-root") == 0) {
+            args->store_root = value;
         } else {
             return false;
         }
     }
+    /* Package-store label resolution root. Never committed anywhere: it is
+     * an operator-local coordinate, which is exactly why it is a flag/env
+     * and not a field in scopes.def. */
+    if (!args->store_root) args->store_root = getenv("ZCL_CORPUS_STORE_ROOT");
+    if (!args->store_root) args->store_root = getenv("HOME");
     if (!args->repo || !args->def || !args->out || !args->cutoff_height ||
         args->cutoff_mtp <= 0 || !args->sequence)
         return false;
@@ -2762,12 +2838,14 @@ int main(int argc, char **argv)
      * manifest's canonical file list. */
     for (size_t s = 0; s < scope_count; s++) {
         if (!defs[s].is_package) continue;
-        if (!package_ctx_load(&runs[s].pkg, &defs[s]))
+        if (!package_ctx_load(&runs[s].pkg, &defs[s], args.store_root))
             return 1;
         runs[s].pkg_loaded = true;
         if (!package_scope_enumerate(&runs[s].pkg, &files[s]))
             return 1;
-        LOG_INFO(CENSUS_LOG, "package scope %s: %zu files from store %s",
+        /* The LABEL, not the resolved directory: this line is read from
+         * captured build logs that get pasted into issues. */
+        LOG_INFO(CENSUS_LOG, "package scope %s: %zu files from store '%s'",
                  defs[s].name, files[s].n, defs[s].store);
     }
 
@@ -3538,6 +3616,8 @@ int main(int argc, char **argv)
                 json_push_root(&pobj, "release_id", pk->release_id);
                 json_push_root(&pobj, "recipe_root",
                                pk->release.recipe_root);
+                /* The store LABEL, never the resolved directory: this
+                 * record is committed. */
                 (void)json_push_kv_str(&pobj, "store", defs[s].store);
                 (void)json_push_kv_str(&pobj, "release_name",
                                        pk->release.name);
@@ -3868,6 +3948,8 @@ int main(int argc, char **argv)
                 struct json_value pobj;
                 json_init(&pobj);
                 json_set_object(&pobj);
+                /* The store LABEL, never the resolved directory: this
+                 * record is committed. */
                 (void)json_push_kv_str(&pobj, "store", defs[s].store);
                 json_push_root(&pobj, "release_id", run->pkg.release_id);
                 (void)json_push_kv_str(&pobj, "publisher_pubkey",

@@ -9237,6 +9237,15 @@ check-live-datadir-isolation:
 	@./tools/lint/check_live_datadir_isolation.sh --selftest
 	@./tools/lint/check_live_datadir_isolation.sh
 
+# No committed file names a local filesystem path, operator username, or
+# hostname. The repository ships no operator identity: a stranger cloning it
+# must not learn where our machines are. Shrink-only ratchet; the selftest
+# plants a violation per prong so the gate is never trusted unproven.
+check-no-operator-paths:
+	@echo "══ LINT: no operator path/username/hostname in tracked files ══"
+	@./tools/lint/check_no_operator_paths.sh --selftest
+	@./tools/lint/check_no_operator_paths.sh
+
 # The public installed-Commons target must run with every optional variable
 # unset. The DHT harness refuses to start until each binary it names is
 # executable; this proves the installed lane puts every one of those in the
@@ -9441,7 +9450,8 @@ LINT_GATES := \
     check-fuzz-artifact-ledger \
     check-live-datadir-isolation \
     check-installed-acceptance-tools \
-    check-standalone-tools-link
+    check-standalone-tools-link \
+    check-no-operator-paths
 
 # The driver execs gate scripts directly, so the two gates backed by a built
 # tool (check-core-seal, check-observability-pairing, and the package root

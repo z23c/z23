@@ -51,8 +51,11 @@ NotifyAccess=main
 
 # P5.2: operator-specific flags (externalip + addnodes) live in
 # ~/.config/zclassic23/env, NOT here. The `-` prefix makes the file
-# optional: a fresh clone without the env file still starts cleanly
-# and falls back to DNS seeds + addrman for peer discovery. See
+# optional: a fresh clone without the env file still starts cleanly and
+# discovers peers through the compiled-in seeds, the .onion directory
+# seeds and addrman gossip. There is no DNS fallback: chainparams sets
+# nSeeds = 0 and the node resolves no hostname and trusts no certificate
+# authority. See
 # deploy/zclassic23.env.example for the expected variable shape.
 # Explicit empty defaults keep the optional-file path genuinely silent: a
 # braced ${ZCL_CHECKPOINT_BUNDLE_SOURCE} in ExecStartPre otherwise makes

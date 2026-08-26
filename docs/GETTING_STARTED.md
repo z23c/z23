@@ -26,6 +26,10 @@ it as your only mainnet node yet.
   `cmake`, for the one-time vendored-library build.
 - No Rust toolchain or library. Shielded proving and verification are native
   C23 code in this repository.
+- **The Zcash zero-knowledge parameter files.** A mainnet node refuses to
+  start without them and this repository neither ships nor downloads them.
+  See ["The proving parameters"](#the-proving-parameters-required-before-the-first-mainnet-start)
+  below — read that section before your first `build/bin/z23` run, not after.
 
 No other external dependencies: everything else is stock `cc`/`ld`/`make`
 and libc.
@@ -115,6 +119,63 @@ detail is [`work/ZCODE_DEVELOPMENT_WALKTHROUGH.md`](work/ZCODE_DEVELOPMENT_WALKT
 
 ---
 
+## The proving parameters (required before the first mainnet start)
+
+Mainnet blocks contain shielded transactions, and validating them needs the
+Zcash zero-knowledge parameter files. **This repository does not ship them and
+has no target that downloads them.** You have to put them on the machine
+yourself. There is no way around this and no flag that skips it: a mainnet node
+that cannot read all four files stops during boot with a named blocker rather
+than syncing:
+
+```
+[crypto.params] mainnet requires zk params but 'sapling-spend.params' is
+missing/unreadable (dir=$HOME/.zcash-params) — NOT advancing CRYPTO_READY;
+parking alive-degraded after paging the operator
+[boot] PARKED alive-degraded at gate 'crypto_params_missing'
+```
+
+A parked node opens no P2P listener, accepts no RPC, and connects to no peers.
+It is not a crash loop — it stays up, states the reason, and waits for a
+shutdown signal. If your very first run ends at that line, this section is what
+you skipped.
+
+The node looks in `$HOME/.zcash-params` by default; `-paramsdir=<dir>` points
+it somewhere else. Exactly four files are required (the fifth file some
+distributions ship, `sprout-proving.key`, is not):
+
+| file | bytes | sha256 |
+| --- | --- | --- |
+| `sapling-spend.params` | 47958396 | `8e48ffd23abb3a5fd9c5589204f32d9c31285a04b78096ba40a79b75677efc13` |
+| `sapling-output.params` | 3592860 | `2f0ebbcbb9bb0bcffe95a397e7eba89c29eb4dde6191c339db88570e3f3fb0e4` |
+| `sprout-groth16.params` | 725523612 | `b685d700c60328498fbde589c8c7c484c722b788b265b72af448a5bf0ee55b50` |
+| `sprout-verifying.key` | 1449 | `4bd498dae0aacfd8e98dc306338d017d9c08dd0918ead18172bd0aec2fc5df82` |
+
+They total roughly 777 MB. They are the public outputs of the Zcash
+multi-party parameter ceremonies — the *same* files any Zcash-family node
+uses, not something specific to this project. Consequences of that, both good:
+
+- If this machine already runs `zcashd` or `zclassicd`, the files are already
+  at `~/.zcash-params` and you are done — check, don't re-download.
+- Otherwise get them however you can (a copy from another machine you control,
+  a mirror, whatever your distribution packages) and then **verify the hashes
+  above before starting the node**. The hashes are the trust anchor; where the
+  bytes came from is not. This project pins no download host and trusts no
+  certificate authority, which is exactly why the check is on you:
+
+```bash
+cd ~/.zcash-params && sha256sum -c <<'EOF'
+8e48ffd23abb3a5fd9c5589204f32d9c31285a04b78096ba40a79b75677efc13  sapling-spend.params
+2f0ebbcbb9bb0bcffe95a397e7eba89c29eb4dde6191c339db88570e3f3fb0e4  sapling-output.params
+b685d700c60328498fbde589c8c7c484c722b788b265b72af448a5bf0ee55b50  sprout-groth16.params
+4bd498dae0aacfd8e98dc306338d017d9c08dd0918ead18172bd0aec2fc5df82  sprout-verifying.key
+EOF
+```
+
+Regtest and testnet do not enforce this gate; mainnet does.
+
+---
+
 ## Run in production
 
 Start a full node with the default datadir (`~/.zclassic-c23`) and default
@@ -135,10 +196,22 @@ build/bin/z23 status
 ### Syncing to the chain tip
 
 Judge success by height **climbing toward the network tip**, never just "the
-process stayed up." The easy path for a new Z23 node is instant-on from a
-serving Z23 peer. Genesis IBD and a `zclassicd` datadir import remain available.
+process stayed up." Three paths exist. Which one is available to you depends
+on what you already have, so read the first line of each before picking:
 
-1. **Instant-on from serving Z23 peers** (the easy new-node path). Name one
+- **Path 2, plain P2P from genesis, is the only one that needs nothing you
+  do not already have.** It is what you get by typing `build/bin/z23` with no
+  peer flags at all, and it is the path this page assumes for a first node.
+- Paths 1 and 3 are faster but each needs an input you must obtain
+  separately: path 1 needs the address of a serving peer that you learned
+  from somewhere outside the software, and path 3 needs a `zclassicd` datadir
+  already on the machine. Neither is a step you can follow from a clean clone
+  with no prior contacts, and the node does not discover a file-service host
+  on its own — with no `-fileservice`, it names the blocker
+  `bootstrap.no_state_source` in the log and proceeds with path 2.
+
+1. **Instant-on from serving Z23 peers** (fastest, but you must already know
+   a peer address). Name one
    or more reachable Z23 peers with `-addnode`. Pair that with
    `-fileservice=HOST` so the node also fetches the header-chain seed plus
    complete-state bundle from that host's file service on port 18034,
@@ -162,15 +235,44 @@ serving Z23 peer. Genesis IBD and a `zclassicd` datadir import remain available.
    The install path still re-derives checkpoint authority; staging is only
    a courier.
 
-2. **Plain P2P from genesis** (the sovereignty-preserving fallback). Start on
-   an empty datadir with no `-connect` / no file-service seed; the node
-   discovers peers (hardcoded legacy IP seeds plus a Tor `.onion` directory
-   seed — no DNS seeders) and fully validates every block body itself. This
-   is the most conservative path but is **slow**: a full from-genesis sync
-   validates the entire chain's Equihash PoW, scripts, and Sapling/Sprout
-   proofs, which takes on the order of hours depending on hardware. Use this
-   when you want a node whose state is entirely self-derived and don't need
-   it useful within minutes.
+2. **Plain P2P from genesis** (no prior contacts needed; this is the default).
+   Start on an empty datadir with no `-connect` and no file-service seed. The
+   node bootstraps from compiled-in seeds, then learns the rest of the network
+   by gossip from whoever answers, and fully validates every block body
+   itself. On its first boot it prints its own bootstrap inventory, which is
+   the line to read if you want to know where its peers can come from:
+
+   ```
+   [net] bootstrap sources: dns_seeds=0 fixed_seeds=N onion_seeds=M
+         operator_onion_seed_file=0 addrman_loaded_peers=0 total_sources=...
+   ```
+
+   `dns_seeds=0` is deliberate and permanent: this project resolves no
+   hostnames and trusts no certificate authority, so there is no DNS seeder
+   to be censored or spoofed. The compiled-in fixed seeds are raw IP
+   addresses; the onion seeds are `.onion` directory nodes and are only
+   dialled if you built the real Tor fork (`make tor-full`) and passed `-tor`
+   — on a default (Tor-stub) build the fixed IP seeds are the whole bootstrap.
+   Either way, the seeds are a starting point, not the network: within the
+   first minute or two the node's peer set normally contains addresses that
+   are not in the compiled list at all, because peers gossip addresses to each
+   other.
+
+   This is the most conservative path but is **slow**: a full from-genesis
+   sync validates the entire chain's Equihash PoW, scripts, and
+   Sapling/Sprout proofs. Headers arrive fast; block bodies are the long
+   pole, and a full validation runs for many hours on ordinary hardware. Use
+   this when you want a node whose state is entirely self-derived and don't
+   need it useful within minutes.
+
+   Two honest caveats about the compiled-in seeds. They are plain IP
+   addresses baked into a release, so they go stale as machines churn — some
+   fraction of them will be unreachable by the time you build. And a node
+   whose only reachable seed is one host is trusting that host for its first
+   view of the chain until gossip widens the peer set. If you already know
+   any reachable peer, `-addnode=HOST:8033` short-circuits both problems, and
+   `~/.config/zclassic23/onion-seeds` (one `.onion` per line) adds directory
+   nodes without a rebuild.
 
 3. **Two-step import from an existing `zclassicd` datadir** (fast, requires
    you already run the legacy C++ node). Import headers first, then boot
@@ -368,6 +470,13 @@ SIGPIPE false-block). Read it before making any code change.
 
 ## Troubleshooting
 
+**The node came up but nothing works — no RPC, no peers, no height.** Read the
+last line it printed. If it says `PARKED alive-degraded at gate
+'crypto_params_missing'`, the proving parameters are not installed; see
+["The proving parameters"](#the-proving-parameters-required-before-the-first-mainnet-start).
+A parked node is not a crash and not a hang — it is a stated refusal, and
+every other symptom you might chase is downstream of it.
+
 **No peers** (`peer_count` stays at `0`):
 
 ```bash
@@ -376,8 +485,22 @@ build/bin/zclassic-cli getnetworkinfo
 build/bin/zclassic-cli addnode "IP:PORT" "onetry"
 ```
 
-Add custom onion seeds (one `.onion` per line, `#` comments allowed) at
-`~/.config/zclassic23/onion-seeds` so the node can harvest peers without DNS.
+First find out what the node had to work with. Its first-boot log line
+`[net] bootstrap sources: ...` names every source it knows, and
+`Added N hardcoded seed nodes` confirms the compiled seeds went into the
+address manager. If `fixed_seeds` is non-zero and you still have no peers,
+the seeds themselves are unreachable from where you are — outbound TCP to
+port `8033` is a good thing to test directly before blaming the node.
+
+Two ways to fix it without waiting for a new release, both permanent for that
+machine:
+
+- `-addnode=HOST:8033` (repeatable) or the live `addnode ... onetry` above,
+  for any peer address you can get hold of.
+- `~/.config/zclassic23/onion-seeds`, one `.onion` directory node per line
+  (`#` comments allowed), which the node re-reads on every seed round. This
+  needs a Tor-capable build (`make tor-full`) and `-tor`; on a Tor-stub build
+  the file is read but nothing can be dialled.
 
 **Stuck height** (not climbing toward tip): a stall is never silent — it is
 always a growing gap or a named blocker.
