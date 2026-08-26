@@ -211,7 +211,7 @@ static int test_record_roundtrip(void)
     int chain_calls = 0;
     ASSERT(rf_init(&f, &chain_calls));
     for (int kind = VCS_ZCODE_DHT_RECORD_PROVIDER;
-         kind <= VCS_ZCODE_DHT_RECORD_SOURCE_REPRODUCTION_ACK; kind++) {
+         kind <= VCS_ZCODE_DHT_RECORD_AGENT_SCOPE; kind++) {
       struct vcs_zcode_dht_record record, parsed;
       rf_record(&f, &record, (enum vcs_zcode_dht_record_kind)kind);
       ASSERT_EQ(vcs_zcode_dht_record_sign(&record, f.online_seed),
@@ -260,7 +260,7 @@ static int test_record_roundtrip(void)
       ASSERT(memcmp(parsed.provider_node_id, f.node_id, 32) == 0);
       ASSERT(strcmp(parsed.namespace_name, "science.study") == 0);
     }
-    ASSERT_EQ(chain_calls, 4);
+    ASSERT_EQ(chain_calls, 5);
     PASS();
   }
   _test_next:;
@@ -374,6 +374,24 @@ static int test_record_shape_and_windows(void)
     record.sequence = (uint64_t)INT64_MAX + 1;
     ASSERT_EQ(vcs_zcode_dht_record_sign(&record, f.online_seed),
               VCS_ZCODE_DHT_RECORD_SEQUENCE);
+    /* A scope grant addresses exactly one key: any semantic or owner
+     * content rides out of band, and its window is bounded like a
+     * pointer's. */
+    rf_record(&f, &record, VCS_ZCODE_DHT_RECORD_AGENT_SCOPE);
+    record.semantic_root[0] = 1;
+    ASSERT_EQ(vcs_zcode_dht_record_sign(&record, f.online_seed),
+              VCS_ZCODE_DHT_RECORD_ROOT);
+    rf_record(&f, &record, VCS_ZCODE_DHT_RECORD_AGENT_SCOPE);
+    record.owner_group[0] = 1;
+    ASSERT_EQ(vcs_zcode_dht_record_sign(&record, f.online_seed),
+              VCS_ZCODE_DHT_RECORD_OWNER_GROUP);
+    rf_record(&f, &record, VCS_ZCODE_DHT_RECORD_AGENT_SCOPE);
+    record.expiry = record.not_before + VCS_ZCODE_DHT_AGENT_SCOPE_MAX_SECONDS + 1;
+    ASSERT_EQ(vcs_zcode_dht_record_sign(&record, f.online_seed),
+              VCS_ZCODE_DHT_RECORD_WINDOW);
+    rf_record(&f, &record, VCS_ZCODE_DHT_RECORD_AGENT_SCOPE);
+    ASSERT_EQ(vcs_zcode_dht_record_sign(&record, f.online_seed),
+              VCS_ZCODE_DHT_RECORD_OK);
     PASS();
   }
   _test_next:;
