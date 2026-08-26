@@ -1,7 +1,55 @@
 # Joining the network
 
-If you have installed a Z23 node and want it to take part rather than just
-follow along, this page is the whole story. One command does the work:
+"Joining" means two different things, and they are independent. Read the first
+section if you want your node on the blockchain network; read the rest if you
+also want it to take part in the C23 software commons.
+
+## 1. Joining the blockchain P2P network — nothing to run
+
+There is no join command for the chain, no registration, no invitation, and
+nobody who can approve or refuse you. A node that starts is on the network.
+Peer discovery is automatic and is described in
+[`GETTING_STARTED.md`](GETTING_STARTED.md#syncing-to-the-chain-tip); the short
+version is:
+
+- The binary carries a small set of compiled-in seed addresses. It puts them
+  in its address manager at boot, dials them, and from then on learns peers by
+  gossip from whoever answers. Peers that are not in the compiled list show up
+  in the peer set within a couple of minutes.
+- **No DNS seeder is used — ever.** The node resolves no hostnames for peer
+  discovery and trusts no certificate authority. `dns_seeds=0` in the
+  `[net] bootstrap sources:` line the node prints on first boot is the
+  deliberate, permanent value, not a misconfiguration.
+- `.onion` directory seeds are the second bootstrap channel, used only on a
+  build that links the real Tor fork (`make tor-full`) and is started with
+  `-tor`.
+- `-addnode=HOST:8033` and `~/.config/zclassic23/onion-seeds` let you add
+  peers yourself. Neither is required.
+
+The one genuine prerequisite is not a network thing at all: a mainnet node
+will not start until the Zcash proving parameters are installed, and this
+repository does not ship or download them. That is
+["The proving parameters"](GETTING_STARTED.md#the-proving-parameters-required-before-the-first-mainnet-start)
+in the getting-started page. Do that first; a node parked at
+`crypto_params_missing` opens no listener and connects to nobody.
+
+Two things a fresh node does *not* get by itself, so you know what you are
+choosing when you type nothing:
+
+- **No fast start.** The instant-on path needs a `-fileservice=HOST` you
+  supply. Without it the node logs the named blocker
+  `bootstrap.no_state_source` and syncs from genesis, which is correct and
+  slow.
+- **No inbound reachability** unless you pass `-listen` and your port is
+  actually reachable from outside, or you run the Tor build and publish an
+  onion service. An outbound-only node syncs and relays fine; it just is not
+  somewhere other people can bootstrap from.
+
+## 2. Joining the C23 software commons — `z23 join`
+
+The rest of this page is about the package commons, which is a separate,
+optional layer riding on the peer connections your node already has. One
+command does the work:
 
 ```bash
 z23 join
@@ -9,7 +57,7 @@ z23 join
 
 It is safe to run twice. It starts nothing, stops nothing, and signals nothing.
 
-## What `join` actually does
+### What `join` actually does
 
 Three things, and it reports all three:
 
@@ -27,30 +75,35 @@ Three things, and it reports all three:
 Command-line flags always beat the config file, so a service unit that passes
 an explicit flag stays in charge.
 
-## Then restart the node yourself
+### Then restart the node yourself
 
 `join` deliberately does not restart anything. The service manager owns the
 node process, and a second node process on one data directory corrupts it, so
-there is no launcher hidden inside this command. The reply tells you the
-restart to run — for the unit the installer writes, that is:
+there is no launcher hidden inside this command.
+
+The unit that [`deploy/setup.sh`](../deploy/setup.sh) installs is named
+`zclassic23`, so the restart is:
 
 ```bash
-systemctl --user restart z23
+systemctl --user restart zclassic23
 ```
 
-Substitute your own unit name if you run the node some other way. After the
-restart, confirm the node came back with the flags applied:
+Note that the command's own `restart_command` field currently prints
+`systemctl --user restart z23`, which does not match the installed unit name.
+Trust the unit you actually installed — `systemctl --user list-units 'z*'`
+will show it. If you run the node some other way, substitute your own unit
+name. After the restart, confirm the node came back with the flags applied:
 
 ```bash
 z23 zcode work toolchain
 ```
 
-## The two tiers
+### The two tiers
 
 Joining is not one thing. There are two named tiers, and only the first is
 required.
 
-### SWARM — this is what `join` gives you
+#### SWARM — this is what `join` gives you
 
 Needs `-packagehost=1` and nothing else. It works over the ordinary peer
 connections your node already makes.
@@ -62,7 +115,7 @@ connections your node already makes.
 If you only ever run `z23 join`, you are a full member of the swarm. Your node
 hosts and serves package content to peers exactly like any other.
 
-### DHT — an optional upgrade, never a blocker
+#### DHT — an optional upgrade, never a blocker
 
 The distributed hash table is a second, stronger discovery layer. It
 additionally needs:
@@ -75,7 +128,7 @@ That is a real cost, so it is stated plainly and it is optional. A node with no
 anchor is not second-class and is not "not joined" — it simply is not in the
 DHT. Nothing in the swarm tier depends on it.
 
-## Reading the verdict
+### Reading the verdict
 
 `join` reports a **tuple**, not a pass/fail, and speed is never one of its
 terms:
@@ -98,7 +151,7 @@ it yourself from the tuple and own that choice.
 
 `latency_ms: -1` means **not measured**. That is not the same as fast.
 
-### `announcement`, and why `ready` is strict
+#### `announcement`, and why `ready` is strict
 
 Announcing yourself to the network is a promise, so the announcement state is
 `ready` only when **all four** of these are confirmed:
@@ -137,7 +190,7 @@ z23 core network onion health
 `joined` in the reply is a **configuration** fact — both flags are set — not a
 reachability verdict. Read the tuple for that.
 
-## Keeping the node current
+### Keeping the node current
 
 ```bash
 z23 update

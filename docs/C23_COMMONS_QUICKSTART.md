@@ -28,7 +28,7 @@ remember the table.
 
 | Step | Command | Section |
 | --- | --- | --- |
-| Join the network | `z23 join` | [`JOIN.md`](JOIN.md) |
+| Join the package commons | `z23 join` | [`JOIN.md`](JOIN.md) |
 | Describe the behavior you want | `z23 zcode guide` | above |
 | Reuse existing C23 first, create only what is missing | `z23 zcode work start --datadir=/tmp/z23-work` | [`work walkthrough`](work/ZCODE_DEVELOPMENT_WALKTHROUGH.md) |
 | Build and test it, contained | `z23 zcode work run --datadir=/tmp/z23-work` | [`work walkthrough`](work/ZCODE_DEVELOPMENT_WALKTHROUGH.md) |
@@ -48,7 +48,15 @@ disappears.
 
 ## One-time node preflight
 
-The network path requires a running full node started with
+This page assumes a full node that already starts and syncs. If you have not
+run one on this machine yet, do
+[`GETTING_STARTED.md`](GETTING_STARTED.md) first — in particular the proving
+parameters, without which a mainnet node parks during boot and never reaches
+the network. `z23 join` below is about the package commons only; joining the
+blockchain network itself takes no command at all
+([`JOIN.md`](JOIN.md#1-joining-the-blockchain-p2p-network--nothing-to-run)).
+
+The commons network path requires a running full node started with
 `-packagehost=1 -buildworker=1`. One command sets that up:
 
 ```bash
