@@ -42,9 +42,9 @@
 /* Pinned known answers. A change to either is a WIRE CHANGE and must be a
  * deliberate schema bump, never a quiet edit. */
 static const char attestation_root_kat[] =
-    "0000000000000000000000000000000000000000000000000000000000000000";
+    "1f2104e5527ddf3a2579b51cca99ba1df8e0189161a8e53fc59833b1587bf639";
 static const char composition_root_kat[] =
-    "0000000000000000000000000000000000000000000000000000000000000000";
+    "5c7e9652f000569358f9f3055fbb68e16643ff0f4f873ff279d995f2d7741bb0";
 
 #define MOD_NOW_MTP INT64_C(1700000000)
 #define MOD_REVIEWED_MTP INT64_C(1699990000)
