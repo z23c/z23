@@ -164,8 +164,19 @@ enum mempool_accept_result accept_to_mempool_detailed(
      *    relay path was missing. dosLevel 100 mirrors the relay-time
      *    contextual check in zclassicd's AcceptToMemoryPool. */
     validation_state_init(&state);
-    if (!contextual_check_transaction(tx, &state, &params->consensus,
-                                      next_height, 100)) {
+    switch (contextual_check_transaction_verdict(tx, &state,
+                                                 &params->consensus,
+                                                 next_height, 100)) {
+    case CONTEXTUAL_CHECK_PASS:
+        break;
+    case CONTEXTUAL_CHECK_UNVERIFIABLE:
+        /* We hold no verdict on this transaction — we could not form one.
+         * Reject it (never relay an unverified shielded tx) but report the
+         * distinct result so the caller does not blame the sender for our
+         * own missing keys / failed allocation. */
+        mempool_accept_detail(detail_out, detail_cap, state.reject_reason);
+        return MEMPOOL_ACCEPT_UNVERIFIABLE;
+    case CONTEXTUAL_CHECK_REJECT:
         mempool_accept_detail(detail_out, detail_cap, state.reject_reason);
         return MEMPOOL_ACCEPT_INVALID;
     }

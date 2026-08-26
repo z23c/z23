@@ -1251,3 +1251,24 @@ AGENT_IMPACT_RULE("docs/CODE_FEARLESSLY.md|AGENTS.md", "make_lint_gates")
  * nothing looking. Mapped so an edit here can never reach the push gate
  * having run zero test groups. */
 AGENT_IMPACT_RULE("tools/scripts/source_identity_lib.sh|tools/deploy_verify.sh|lib/util/src/clientversion.c|lib/util/include/util/clientversion.h|app/controllers/src/agent_runtime_controller.c|lib/test/src/test_source_identity_authority.c", "source_identity_authority make_lint_gates")
+/* LANE dos-fairness: "this transaction is invalid" and "I could not check
+ * this transaction" are two different answers, and every shielded verifier
+ * below fail-closes to the same `false` for both. While the verifying keys
+ * are absent — they load on a background boot thread, and sapling_free_params
+ * clears them again — a peer relaying a perfectly good shielded transaction
+ * was charged ban-score for our own startup state. enum
+ * contextual_check_verdict carries the distinction from the site that knows
+ * it out to the two sites that act on it: peer scoring in the relay path, and
+ * the block job's permanent-vs-resurrectable reject status (which previously
+ * decided it by string-comparing reject reasons — a hand-written list that
+ * would silently rot the moment a reason was reworded or added).
+ *
+ * These files move together because they are one chain of custody for that
+ * distinction: the predicate that answers "do we hold the key material"
+ * (bn254.c for PHGR13, whose key is NOT covered by sapling_params_loaded),
+ * the check that produces the verdict, the two enums that carry it across
+ * layers, and the consumers that must never turn UNVERIFIABLE into either an
+ * acceptance or an offence. Change one without re-running the group and the
+ * node can silently go back to punishing honest peers — or, far worse, start
+ * accepting a transaction it never verified. */
+AGENT_IMPACT_RULE("lib/validation/src/contextual_check_tx.c|lib/validation/include/validation/contextual_check_tx.h|lib/validation/src/accept_to_mempool.c|lib/validation/include/validation/accept_to_mempool.h|lib/validation/src/check_block.c|lib/validation/include/validation/check_block.h|lib/net/src/msg_tx.c|lib/net/src/msgprocessor.c|lib/net/src/net.c|lib/net/src/msg_headers.c|lib/net/include/net/msg_internal.h|lib/net/include/net/net.h|lib/sapling/src/bn254.c|lib/sapling/include/sapling/bn254.h|app/jobs/src/script_validate_contextual.c|lib/wallet/src/wallet.c|lib/wallet/src/wallet_reaccept.c|app/controllers/src/transaction_controller.c|lib/test/src/test_peer_dos_fairness.c", "peer_dos_fairness peer_scoring mempool accept_to_mempool validation transaction net make_lint_gates")

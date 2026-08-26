@@ -171,6 +171,23 @@ void tx_mark_seen(const struct uint256 *hash) {
     g_recent_tx_count++;
 }
 
+/* Undo tx_mark_seen. Used when we handled a transaction but reached no
+ * verdict on it (TX_ACCEPT_UNVERIFIABLE): leaving it marked seen would
+ * make us ignore every re-announcement until the ring rolled over, so a
+ * valid transaction that arrived while our verifying keys were loading
+ * would stay unjudged long after the keys were installed. Mirrors
+ * block_clear_seen. */
+void tx_clear_seen(const struct uint256 *hash) {
+    int limit = g_recent_tx_count < MAX_RECENT_TXS
+                ? g_recent_tx_count : MAX_RECENT_TXS;
+    for (int i = 0; i < limit; i++) {
+        if (uint256_eq(hash, &g_recent_txs[i])) {
+            memset(&g_recent_txs[i], 0, sizeof(struct uint256));
+            return;
+        }
+    }
+}
+
 /* Expose internals for unit testing via weak-linked test helpers. */
 bool msgprocessor_test_block_already_seen(const struct uint256 *hash) {
     return block_already_seen(hash);

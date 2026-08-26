@@ -2083,6 +2083,11 @@ void sprout_phgr_set_vk(struct ppzksnark_vk *vk)
     phgr_vk = vk;
 }
 
+bool sprout_phgr_vk_loaded(void)
+{
+    return phgr_vk != NULL;
+}
+
 /* Pack bits (MSB-first) into Fr scalars (253 bits per scalar).
  * Matches libsnark's pack_bit_vector_into_field_element_vector
  * with big-endian bit ordering (Zcash Sprout convention). */
