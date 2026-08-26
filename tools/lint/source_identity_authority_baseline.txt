@@ -1,0 +1,75 @@
+# check_source_identity_authority baseline — reviewed exceptions to the
+# Q1 (baked build)/Q2 (working tree) source_id_sha256 naming and reader
+# ratchet. See tools/lint/check_source_identity_authority.sh's header for
+# class R (positional agentbuild read) and class P (bare-key working-tree
+# producer).
+#
+# Format: <path> <count>.  COUNTS MAY ONLY SHRINK.
+#
+# Every row below predates this gate (introduced 2026-08-26, the same lane
+# that renamed tools/agent_fast_ci.sh's green_input_cache.source_id_sha256
+# to working_tree_source_id_sha256 — the one hazard where Q1 and Q2 were
+# spelled IDENTICALLY) and was reviewed at introduction time, not merely
+# grandfathered:
+#
+#   tools/dev/agent-dev-status.sh 1 — class R. file_state_json() extracts
+#     source_id_sha256 from `<bin> agentbuild` with a GREEDY `sed 's/.*"key"
+#     .../'  — the exact "returns the LAST occurrence, not the first" defect
+#     source_identity_lib.sh's header warns about. Already tracked as
+#     unmigrated debt (its own is_source_id_sha256(), Class A) in
+#     tools/lint/identity_parser_baseline.txt; converting the read to
+#     zcl_agentbuild_v2_top_source_id is real, live-bug-fixing follow-up
+#     work, deliberately left to that same migration rather than done
+#     ad hoc here.
+#
+#   tools/dev/deploy-dev-lane.sh 1 — class R.
+#     import_existing_binary_as_generation()'s json_first_string_field call,
+#     NOT preflight_candidate_default()'s (which now uses
+#     zcl_agentbuild_v2_top_source_id — see the code comment at that call
+#     site). The remaining site reads a pre-existing "legacy" binary with no
+#     schema check beforehand; the schema-anchored reader would silently
+#     return empty on anything not byte-for-byte today's v2 shape, turning a
+#     recoverable legacy rollback into a refused one. Reviewed and kept
+#     positional on purpose — see the code comment there.
+#
+#   tools/dev/dev_lib.sh 1 — class R. baked_source_id() is the pre-existing
+#     tools/dev/ in-tree reference implementation source_identity_lib.sh's
+#     own header names as "predates this library, deliberately left ... and
+#     NOT migrated here — see the lane's handoff notes". Not this lane's to
+#     touch.
+#
+#   tools/scripts/background_quality_lane.sh 1 — class P.
+#     capture_quality_source_record() captures a Q2 (working-tree) reading
+#     via tools/dev/source-identity.sh capture-record, and write_status()
+#     later publishes it under the bare source_id_sha256 key. Reviewed and
+#     judged NOT the same hazard as tools/agent_fast_ci.sh's fixed defect:
+#     this Q2 reading is captured ONCE per lane run and frozen as that run's
+#     own recorded identity (source_record_stable / observed_source_id_sha256
+#     exist specifically to detect if the tree moved after capture), and its
+#     one real consumer (tools/dev/agent-dev-status.sh's
+#     quality_freshness_json) compares it against the CURRENT built dev
+#     binary's OWN baked source_id_sha256 — valid because this project's dev
+#     build defines a binary's baked Q1 as the Q2 tree-epoch hash at the
+#     moment it was compiled (-DZCL_BUILD_SOURCE_ID from
+#     tools/dev/source-identity.sh), so the two are the same quantity by
+#     construction, not two different questions collapsed under one name.
+#     Left on the allowlist rather than renamed because the rename's blast
+#     radius (agent-dev-status.sh's consumer, its own selftest, and
+#     test_syncdiag_agent_ops.c's "freshness_authority":"source_id_sha256"
+#     assertion) is outside this lane's scoped file list — flagged in the
+#     lane report for the owning lane to weigh.
+#
+#   tools/scripts/replay_canary.sh 1 — class R. capture_binary_identity()
+#     extracts source_id_sha256 from `<bin> agentbuild` with the same greedy
+#     `sed 's/.*"key".../'` pattern as agent-dev-status.sh above — a real,
+#     live instance of the defect class, not merely theoretical risk. Not in
+#     this lane's scoped conversion list; already tracked as unmigrated
+#     debt (1 copy) in tools/lint/identity_parser_baseline.txt. Left for a
+#     follow-up conversion to zcl_agentbuild_v2_top_source_id.
+#
+# Regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_source_identity_authority.sh
+tools/dev/agent-dev-status.sh 1
+tools/dev/deploy-dev-lane.sh 1
+tools/dev/dev_lib.sh 1
+tools/scripts/background_quality_lane.sh 1
+tools/scripts/replay_canary.sh 1

@@ -298,6 +298,19 @@ struct groth16_vk;
 void sapling_set_spend_vk(struct groth16_vk *vk);
 void sapling_set_output_vk(struct groth16_vk *vk);
 
+#ifdef ZCL_TESTING
+/* Read back what is currently PUBLISHED to the consensus verifiers.
+ *
+ * Exists so a test can assert the publish/free invariant in params_init.c
+ * directly — "every failure path leaves the verifier VKs NULL" — rather than
+ * inferring it from a verdict. Inference does not work here: the fail-closed
+ * guards above only ask whether the pointer is NULL, so a pointer left aimed
+ * at freed storage passes them, and the verdict that follows is whatever the
+ * freed heap happens to say. The pointer itself is the observable. */
+const struct groth16_vk *sapling_test_published_spend_vk(void);
+const struct groth16_vk *sapling_test_published_output_vk(void);
+#endif
+
 /* Verify one Sapling SpendDescription and fold it into the bundle balance.
  * On success (`true`) this asserts ALL of:
  *   - cv and rk deserialize to valid Jubjub points and are NOT small-order

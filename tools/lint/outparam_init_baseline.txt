@@ -1,0 +1,149 @@
+# outparam_init_baseline.txt — the CLOSED allowlist for
+# tools/lint/check_outparam_init_before_return.sh.
+#
+# Each key is  <function>|<out-param>|<struct type>  and means: this function
+# has a failure return ABOVE the initialization of that out-parameter, the
+# return is reachable with entirely non-NULL arguments, and the struct is the
+# kind a caller frees — BUT a reviewer walked every call site and confirmed
+# that no caller frees the out-parameter on that return. The reason is
+# mandatory and names the mechanism that makes it safe.
+#
+# THIS FILE IS NOT A LIST OF ACCEPTED BUGS. Every entry is one refactor away
+# from becoming the bug that was found in compact_block_reconstruct() on
+# 2026-08-26: a peer-supplied cmpctblock with zero transaction ids took a
+# failure return above block_init(out_block), and process_cmpctblock()'s
+# block_free(&out_block) then walked whatever the caller's stack was holding.
+# Remote, any connected peer, 152 bytes. A fresh stack reads as zero, so it
+# survived 140 replays and a 1.26M-exec fuzz session; rebuilding with
+# -ftrivial-auto-var-init=pattern made it deterministic
+# (transaction_free <- block_free <- process_cmpctblock <- msg_process_messages).
+#
+# So: prefer FIXING an entry — move the *_init()/memset() above the first
+# thing that can fail and state the post-condition in the header — over adding
+# a new one. A new key without a reviewed reason is not admissible.
+#
+# Line numbers are deliberately NOT part of the key: they churn on every edit
+# and would turn this ratchet into noise. `bash
+# tools/lint/check_outparam_init_before_return.sh --print-findings` prints the
+# current file+line for each key.
+
+# ── examples/ — single-caller demo programs ─────────────────────────────
+# Each builds a spending tx into a caller-declared `struct transaction`. The
+# early return is a script/amount shape check. Every call site is a
+# must()/assert()/`if (!...) return` that aborts or returns without ever
+# reaching a transaction_free(), so no free runs on the failing return.
+build_htlc_deed_spend|tx|transaction
+build_htlc_redeem|tx|transaction
+build_htlc_spend|tx|transaction
+
+# ── lib/net ─────────────────────────────────────────────────────────────
+# compact_block_from_block(): LOG_FAIL on an empty block sits above
+# compact_block_msg_init(cb) — the exact shape of the fixed bug, in the same
+# file. Its ONE production caller (msg_blocks.c, the BIP152 announce path)
+# writes `if (compact_block_from_block(&cb, &blk_cmp, nonce)) { ... ;
+# compact_block_msg_free(&cb); }`, so the free is inside the success branch
+# and never runs on the failing return. It is safe only because that caller
+# happens to gate; a second caller written the natural way would be a wild
+# free. lib/net/src/compact_blocks.c is owned by another lane as of this
+# sweep, which is why it is recorded here rather than fixed.
+compact_block_from_block|cb|compact_block_msg
+
+# ── lib/storage ─────────────────────────────────────────────────────────
+# bpc_segment_try(): several returns above block_init(out) (bad datadir,
+# segment store miss, short/failed segment read). Its only caller,
+# block_parse_cache.c's lookup, runs block_init(&loaded) BEFORE the call —
+# belt-and-braces already present at the call site.
+bpc_segment_try|out|block
+# bpc_detached_from(): `loaded` is CONSUMED (moved into entry->body) and then
+# re-initialized. The `return NULL` above that move is an allocation failure
+# and leaves `loaded` exactly as the caller handed it over — still the
+# caller's, still valid, and the caller block_free()s it either way.
+bpc_detached_from|loaded|block
+# read_block() (static, ldb sstable reader): three returns above
+# ldb_block_init(out) — handle out of range, crc32c mismatch, compressed
+# block. Caller 1 (ldb_table_open) passes &t->index of a memset(0) struct and
+# free()s the table without ldb_block_free on failure. Caller 2 (ti_open_data)
+# passes &ti->data_blk and its failure path runs ti_fail -> ti_close_data,
+# which is gated on ti->data_open — set false by the ti_close_data at the top
+# of ti_open_data. Neither frees the block on a failing read.
+read_block|out|ldb_block
+
+# ── config/ ─────────────────────────────────────────────────────────────
+# reindex_chainstate(): `return false` on "no active chain" and on the
+# unreadable-genesis-side probe both sit above coins_view_cache_init(cvtip).
+# The one caller (boot.c) passes &g_coins_tip, a file-scope global that is
+# zero at program start, and the function's own coins_view_cache_free(cvtip)
+# at the flush step is likewise reading a caller-owned, already-live cache.
+# No caller frees on the early returns.
+reindex_chainstate|cvtip|coins_view_cache
+
+# ── app/ ────────────────────────────────────────────────────────────────
+# Two rawtx lookup helpers return early (negative node-db locator, block-hash
+# mismatch against the active chain) above transaction_init(tx). Their single
+# caller, rpc_getrawtransaction, runs transaction_init(&tx) at the top of its
+# own frame before the first lookup — belt-and-braces already present. (The
+# third, rawtx_find_in_recent_chain, guards only on NULL arguments and is
+# therefore out of scope for this gate.)
+rawtx_find_in_node_db|tx|transaction
+rawtx_find_by_wallet_note|tx|transaction
+# wallet_db_tx_deserialize(): LOG_FAIL on an empty/absent raw blob sits above
+# transaction_init(tx). All five callers (wallet history, diagnostics, health)
+# use the `if (!wallet_db_tx_deserialize(&dbtx, &tx)) { db_wallet_tx_free(...);
+# continue; }` shape — they free the DB ROW, never the transaction, on failure.
+wallet_db_tx_deserialize|tx|transaction
+# snapshot_deserialize_index_block(): `return false` on empty payload above
+# block_init(blk). Both callers `continue` the scan loop without block_free.
+snapshot_deserialize_index_block|blk|block
+# db_store_blob_find(): the pre-memset return is a bounded-length check on the
+# hash argument. Both callers (store_view.c, test_store_listing.c) use the
+# result as an `if (found) { ... free ... }` gate.
+db_store_blob_find|out|db_store_blob
+
+# ── tools/corpus_census.c — offline census tool ─────────────────────────
+# def_parse_line(): field-count/shape refusal above the memset. Caller drops
+# the whole defs[] row on false without freeing it.
+def_parse_line|def|scope_def
+# dep_closure_bind(): size refusal above json_init(m). Both callers treat the
+# false as "measure this scope as unbound" and do not free m on that path.
+dep_closure_bind|m|scope_measure
+
+# ── lib/sim — deterministic simulator, no peer input ────────────────────
+# finish_block()/build_oversize_vtx build a byzantine block case into a
+# caller-declared struct; simnet_chain_capture_undo/store_entry build undo
+# data. Every caller checks the bool and returns/goto's out WITHOUT calling
+# the corresponding _free on the failing path.
+finish_block|out|simnet_byzantine_block_case
+simnet_chain_capture_undo|out_undo|block_undo
+simnet_chain_store_entry|undo|block_undo
+
+# ── lib/vcs ─────────────────────────────────────────────────────────────
+# blob_build_manifest(): blob_check_input() and the chunk-hash LOG_RETURN sit
+# above vcs_package_manifest_init(out). Both callers (vcs_blob_root_of,
+# vcs_blob_put_to) write `if (vr != VCS_BLOB_OK) return vr;` and reach
+# vcs_package_manifest_free(&manifest) only after VCS_BLOB_OK.
+blob_build_manifest|out|vcs_package_manifest
+
+# ── lib/test — fixtures and harnesses ───────────────────────────────────
+# Each of these builds a fixture into a caller-declared struct and returns
+# false on a shape/parameter refusal placed above the init. Every call site
+# gates its teardown on the returned bool (`if (built) transaction_free(&tx)`,
+# `if (..._ok) ..._free(&x)`, ASSERT-then-abort), so no free runs on the
+# failing return. They are listed rather than fixed because the gating is
+# explicit and local in each case.
+adv_body_reader|out|block
+cg_arm|ms|main_state
+p11_6_build_paid_output_tx|tx|transaction
+srp_build_received_output_tx|tx|transaction
+srs_build_received_output_tx|tx|transaction
+transaction_lab_simnet_mine_owned_op_return_at|out|transaction_lab_simnet_receipt
+txk_build_multisig_spend|tx|transaction
+wfs_make_view_note|out|db_sapling_note
+zwn_prepare_package_transport|prepared|vcs_package_prepared
+
+# db_utxo_find(): `if (!ndb->open) return false;` and the no-row AR_STEP_ROW
+# refusal both sit above memset(out, 0, ...). All four callers
+# (transaction_controller_sign, wallet_controller_keys x2, wallet_controller)
+# use the `if (db_utxo_find(...)) { ...; db_utxo_free(&u); }` /
+# `if (!db_utxo_find(...)) continue;` shape, so db_utxo_free never runs on a
+# failing lookup.
+db_utxo_find|out|db_utxo

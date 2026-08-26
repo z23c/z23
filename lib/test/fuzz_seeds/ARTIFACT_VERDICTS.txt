@@ -39,13 +39,45 @@
 #                      verdict that lets a reproducing artifact pass, and it is
 #                      printed by name on EVERY run so it can never go quiet.
 #                      If it stops reproducing -> FAIL (reclassify).
-#     unaudited        NOT a verdict. Written automatically by
-#                      promote_fuzz_artifacts.sh when a new artifact lands, and
-#                      REJECTED by the gate on sight. It exists so a freshly
-#                      promoted finding arrives already failing the build
-#                      instead of arriving silently — which is exactly how the
-#                      2026-07-14 hang, and eight artifacts that were never
-#                      bugs at all, both got into this corpus unexamined.
+#     unaudited        NOT a verdict. Written by an OLD build of
+#                      promote_fuzz_artifacts.sh when a new artifact landed,
+#                      straight from its filename, and REJECTED by the gate on
+#                      sight. Superseded 2026-08-26 — see below — but still
+#                      rejected if a hand-edit or an old tree produces one.
+#     unreplayable     NOT a verdict. Written by promote_fuzz_artifacts.sh when
+#                      it could not get the evidence an artifact's bug class
+#                      requires (a missing or unbuildable stock or
+#                      pattern-init binary). REJECTED by the gate on sight,
+#                      same as unaudited: fail closed, never fail quiet. Build
+#                      the missing binary and replay it by hand.
+#
+# ── ONE CLEAN REPLAY IS NOT EXONERATION (added 2026-08-26) ──────────────────
+# A `crash-`/`leak-` artifact — a sanitizer-detected memory-safety finding, as
+# opposed to `timeout-`/`oom-`/`slow-unit-`, which are algorithmic hangs
+# unaffected by stack contents — can be probabilistic on a clean process. A
+# freshly-mapped stack reads back as zero, so one replay against a stock
+# binary can come back clean while the exact same bytes crash a long-lived
+# process every time. `-ftrivial-auto-var-init=pattern` poisons every
+# uninitialized stack slot with a recognizable non-zero pattern instead of
+# zero, which turns "probabilistic" into "deterministic" for this bug class —
+# see tools/scripts/fuzz_verdict_lib.sh and docs/DEFENSIVE_CODING.md.
+#
+# So: a `crash-`/`leak-` artifact may be closed `regression-seed` ONLY if the
+# reason names EITHER a fix ("fixed by <commit>" / "root cause: ...") OR an
+# explicit pattern-init replay that ALSO came back clean ("pattern-init:
+# clean (Nx)"). "It replayed clean" with neither is not enough, and
+# tools/lint/check_fuzz_artifact_replay.sh now enforces this — a
+# regression-seed line missing both is a violation, not a pass.
+# `timeout-`/`oom-`/`slow-unit-` kinds are not held to this rule.
+#
+# THE INCIDENT THIS CLOSES. On 2026-08-26 p2p/crash-e3fef02e...bin was filed
+# `regression-seed` with a reason that said, verbatim, the crash was "NOT
+# explained, only unreproducible" — a bare non-reproduction claim with no
+# pattern-init evidence, on the exact bug class where that claim is
+# insufficient. It was the same real, peer-reachable wild-free bug as its
+# sibling crash-478b30c0..., which the background fuzz lane caught the same
+# day as an ASan heap-buffer-overflow. See the p2p section below for the
+# corrected entries and the mechanism.
 #
 # Verdicts are checked two ways. `make lint` reads this file only (text,
 # milliseconds): every artifact has a line, every line has a live fuzz binary

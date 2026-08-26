@@ -54,7 +54,17 @@ struct swap_settle_ctx {
  * with `key`/`pub` over the contract scriptCode and embeds `secret`.
  * `out_tx` is initialized by the callee; the caller owns it and must
  * transaction_free() it. Returns a non-ok result on any failure (bad
- * money range, sign failure, scriptSig overflow). */
+ * money range, sign failure, scriptSig overflow).
+ *
+ * POST-CONDITION, both builders: out_tx is transaction_init()ed on EVERY
+ * return, including every failure, whenever out_tx itself is non-NULL. So
+ * transaction_free(out_tx) is always safe and never walks the caller's prior
+ * stack contents. Do not add a failure return above that init — a caller's
+ * `struct transaction tx;` is uninitialized garbage until this call touches
+ * it, and freeing garbage is a wild walk through transaction_free(). This is
+ * the class that made compact_block_reconstruct() remotely exploitable
+ * (bce343876): a fresh stack reads as zero, so it only fires once the frame
+ * has been dirtied by earlier work. */
 struct zcl_result swap_settlement_build_redeem(const struct swap_settle_ctx *c,
                                                const struct privkey *key,
                                                const struct pubkey *pub,

@@ -7,6 +7,8 @@
 #ifndef ZCL_CONFIG_BOOT_PARAMS_GATE_H
 #define ZCL_CONFIG_BOOT_PARAMS_GATE_H
 
+#include <stdbool.h>
+
 struct app_context;
 struct chain_params;
 
@@ -31,5 +33,15 @@ enum boot_params_gate_result
 boot_params_gate_evaluate(const struct app_context *ctx,
                           const struct chain_params *params,
                           const char *params_dir);
+
+/* The other half of the same question: the files WERE there, so the loader
+ * ran, and it refused them (pinned SHA-512 mismatch or parse failure). Absent
+ * and refused cost the same one capability, so they are decided in the same
+ * place. Installs the compiled-in verifying keys, emits the blocker and log
+ * lines, and returns true when shielded proof VALIDATION is armed — the caller
+ * publishes its own params-loaded flag on true. Returns false only when the
+ * compiled-in keys ALSO failed their integrity check, which is the one case
+ * where validation really cannot proceed. */
+bool boot_params_gate_on_load_refused(const char *params_dir);
 
 #endif /* ZCL_CONFIG_BOOT_PARAMS_GATE_H */

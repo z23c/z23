@@ -83,7 +83,7 @@ done
 
 SOURCE_AFTER="$($REPO_ROOT/tools/dev/source-identity.sh capture)"
 agentbuild="$("$REPO_ROOT/build/bin/zclassic23" agentbuild)"
-BAKED_SOURCE="$(zcl_json_first_sha256 "$agentbuild" source_id_sha256)"
+BAKED_SOURCE="$(zcl_agentbuild_v2_top_source_id "$agentbuild")"
 verify_source_epoch "$SOURCE_BEFORE" "$SOURCE_AFTER" "$BAKED_SOURCE"
 
 # Symbol inspection is necessary but execution under the actual old loader is

@@ -29,6 +29,7 @@
 #include "net/dandelion.h"
 #include "net/download.h"
 #include "net/fast_sync.h"
+#include "net/params_service.h"
 #include "net/file_manifest.h"
 #include "net/file_market.h"
 #include "net/rom_seed.h"
@@ -1536,6 +1537,17 @@ static const struct msg_dispatch_entry g_msg_dispatch[] = {
     { "zgame",        handle_game_msg,       true,  true,  "game" },
     /* ── ZCODE package swarm (slice 12; engine above net via hooks) ── */
     { "zpkgswm",      mp_handle_zcode_swarm, true,  true,  "zcode" },
+    /* ── zk proving-parameter transfer (lib/net/src/params_service.c) ──
+     * Serving is off until a node has verified its own copy against the
+     * compiled-in digests, so a node with no parameters answers the two
+     * request commands with nothing. The three response commands are inert
+     * unless this node has an armed fetch in progress. */
+    { "zparaminfo",   mp_handle_param_info_req,  true, true, "params" },
+    { "zparamhave",   mp_handle_param_info,      true, true, "params" },
+    { "zparammreq",   mp_handle_param_man_req,   true, true, "params" },
+    { "zparamman",    mp_handle_param_manifest,  true, true, "params" },
+    { "zparamcreq",   mp_handle_param_chunk_req, true, true, "params" },
+    { "zparamdata",   mp_handle_param_chunk,     true, true, "params" },
     /* sentinel */
     { "",             NULL,                  false, false, NULL }
 };

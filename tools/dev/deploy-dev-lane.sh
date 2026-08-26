@@ -21,6 +21,8 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO"
+# shellcheck source=tools/scripts/source_identity_lib.sh
+. "$REPO/tools/scripts/source_identity_lib.sh"  # zcl_agentbuild_v2_top_source_id
 
 MODE="activate"
 ACTIVATION_SELFTEST=0
@@ -603,6 +605,15 @@ import_existing_binary_as_generation() {
         tmp="$(mktemp -d "$GEN_ROOT/.legacy.XXXXXX")"
         install -m 555 "$existing" "$tmp/zclassic23-dev"
         agentbuild="$($existing agentbuild 2>/dev/null || true)"
+        # Deliberately NOT zcl_agentbuild_v2_top_source_id here: $existing is
+        # a pre-existing "legacy" binary this function exists to import, with
+        # no schema check above (unlike preflight_candidate_default()) — it
+        # may predate today's exact zcl.agent_build.v2 field order/prefix.
+        # The schema-anchored reader would silently return empty on anything
+        # that doesn't match byte-for-byte, turning a recoverable legacy
+        # rollback into a refused one. The generic first-occurrence reader
+        # plus the 64-hex check right below is the correct, looser contract
+        # for this one call site.
         source_id="$(json_first_string_field "$agentbuild" source_id_sha256)"
         [[ "$source_id" =~ ^[0-9a-f]{64}$ ]] || {
             chmod 755 "$tmp" 2>/dev/null || true
@@ -650,7 +661,12 @@ preflight_candidate_default() {
     local timeout_s="${ZCL_DEV_PREFLIGHT_TIMEOUT:-30}" agentbuild tools selftest observed
     agentbuild="$(timeout "$timeout_s" "$CANDIDATE_BIN" agentbuild 2>&1)" || return 1
     printf '%s' "$agentbuild" | grep -q '"schema"[[:space:]]*:[[:space:]]*"zcl.agent_build.v2"' || return 1
-    observed="$(json_first_string_field "$agentbuild" source_id_sha256)"
+    # This is a freshly-built candidate binary, always the current v2
+    # contract (unlike import_existing_binary_as_generation()'s legacy
+    # import below, which may face an older/differently-shaped agentbuild
+    # and deliberately keeps the looser positional reader) — so the
+    # schema/field-position/prefix-anchored reader applies cleanly here.
+    observed="$(zcl_agentbuild_v2_top_source_id "$agentbuild")"
     if [ -z "$observed" ]; then
         echo "candidate agentbuild omitted source_id_sha256" >&2
         return 1

@@ -16,6 +16,10 @@ void sprout_set_vk(struct groth16_vk *vk)
     sprout_vk = vk;
 }
 
+#ifdef ZCL_TESTING
+const struct groth16_vk *sprout_test_published_vk(void) { return sprout_vk; }
+#endif
+
 static const uint8_t HSIG_PERSONAL[16] = {
     'Z','c','a','s','h','C','o','m','p','u','t','e','h','S','i','g'
 };

@@ -180,6 +180,11 @@ bool ppzksnark_verify(const struct ppzksnark_vk *vk,
 /* Set the PHGR13 verification key (loaded at boot) */
 void sprout_phgr_set_vk(struct ppzksnark_vk *vk);
 
+#ifdef ZCL_TESTING
+/* See sapling_test_published_spend_vk in sapling.h. */
+const struct ppzksnark_vk *sprout_test_published_phgr_vk(void);
+#endif
+
 /* Verify a Sprout PHGR13 JoinSplit proof.
  * proof: 296-byte serialized PHGR13 proof
  * Public inputs: rt, h_sig, {nf,mac}x2, {cm}x2, vpub_old, vpub_new */

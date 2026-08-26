@@ -747,13 +747,39 @@ current green tree.
 | **`check-clang-portability`** | RATCHET | Second-compiler portability: a whole-tree `clang -std=c23 -Wall -Wextra -Werror -pedantic -fsyntax-only` over the same source set the node binary is built from, ratcheted against `tools/lint/portability_baseline.clang.txt` (counts may only go DOWN). The node ships as one whole-program GCC build, so nothing had ever asked a second compiler whether the tree is even well-formed — and GCC-only spellings landed invisibly, including genuine undefined behaviour in `lib/net/src/p2p_game.c` where a `#undef` sat inside a function call's argument list (GCC tolerates it; clang rejects it and every use fails). Measured 3.0 s wall at 32 workers over 1174 translation units. **SKIP contract:** prints a loud SKIP and exits 0 when clang is absent, exactly like `check-ci-symbol-floor` without objdump — an outside contributor must never be blocked by a gate whose tool they do not have. |
 | **`check-result-discard`** | RATCHET | Shrink-only ratchet over `(void)` casts that discard a `struct zcl_result`, baseline `tools/lint/result_discard_baseline.txt`. Exists because C23 lets an explicit cast suppress `[[nodiscard]]`: annotating the type (done — see `lib/util/include/util/result.h`) fences off NEW silent discards but cannot excavate the existing population, measured at 94 cast discards versus ~67 bare ones. Fix a site with `ZCL_IGNORE_RESULT(expr, "why the failure is safe to drop")`, which requires a non-empty reason at compile time via `static_assert` — the point being to make the discard *expressible* rather than merely tolerated. |
 | **`check-no-warning-suppression`** | HARD | A blanket warning suppression may not sit on a build surface unexplained. `-Wno-unused-result` and `-Wno-stringop-overflow` — in flag form, or as `#pragma GCC diagnostic ignored` — fail on any tracked makefile, `*.c`/`*.h`, or `*.sh` unless the line, or the line above it, carries `suppression-ok: <reason>` with a non-empty reason. `-Wno-unused-result` matters most: it is the SAME diagnostic GCC and Clang use to report `[[nodiscard]]`, so leaving it on silently voids the result-type discipline the repository is built around — a result type could be annotated and nothing would change. Both flags entered in the first commit as copy-forward defaults and had spread to seven compile rules; each now has one named definition (`ZCL_WARN_UNUSED_RESULT`, `ZCL_WARN_STRINGOP_OVERFLOW`) carrying the reason and the command to re-derive its blocking sites. `vendor/` (third-party recipes) and `.clangd` (editor diagnostics, never emitted code) are out of scope. Hermetic detector fixtures run BEFORE the tree scan on every invocation, so the gate cannot report clean while its matcher is broken, and an empty scan set exits 2. `--self-test`. No baseline. |
-| **`check-fuzz-artifact-ledger`** | HARD | Every saved fuzz finding under `lib/test/fuzz_seeds/` carries a written verdict, and the cheap half of that contract runs in `make lint` (21 ms, text + git only). Exists because on 2026-07-14 a fuzzer found that a five-byte script from any peer hangs the node forever, the bytes were committed as `script/timeout-689f73ac…bin`, and nobody read them for two weeks — while THREE mechanisms had already replayed them and already gone red (`make fuzz-ci`, reachable only from `make ci` which nothing automatic runs; the hourly `background_quality_lane.sh`, whose verdict lands in a JSON file nothing gates on; and `promote_fuzz_artifacts.sh`, which exits 0 by design). The replay capability was never missing — the verdict had nowhere to go. This gate checks: every file matching a libFuzzer artifact prefix (`timeout-`/`crash-`/`leak-`/`oom-`/`slow-unit-`) has exactly one line in `lib/test/fuzz_seeds/ARTIFACT_VERDICTS.txt` with a valid verdict, an ISO date and a reason; no orphan ledger lines; no untracked repro sitting uncommitted in the corpus; and the corpus↔binary map is 1:1, DERIVED from the Makefile's `$(BIN_DIR)/fuzz_<kind>:` rules so a new target is covered the day it lands. The actual replay is `make fuzz-replay` (in `make ci`, plus its own CI job) — separated because the replay is 18.3 s at `-P6` while building the nine fuzz binaries it needs is 34 s cold at `-j6`. Verdicts are `regression-seed` (audited clean; reproducing again FAILS), `open` (a real unfixed bug — this does NOT suppress the failure, it only names it), and `accepted` (the only pass-while-reproducing path: per-file, dated, reason ≥ 30 chars, reprinted by name every run; **zero entries today**). An entry that stops being true fails in both directions, so the ledger cannot rot. Never cached (it reads untracked worktree state). `--selftest` plants an untriaged artifact and asserts the gate trips AND names the file. No baseline, no directory-wide exemption. |
+| **`check-fuzz-artifact-ledger`** | HARD | Every saved fuzz finding under `lib/test/fuzz_seeds/` carries a written verdict, and the cheap half of that contract runs in `make lint` (21 ms, text + git only). Exists because on 2026-07-14 a fuzzer found that a five-byte script from any peer hangs the node forever, the bytes were committed as `script/timeout-689f73ac…bin`, and nobody read them for two weeks — while THREE mechanisms had already replayed them and already gone red (`make fuzz-ci`, reachable only from `make ci` which nothing automatic runs; the hourly `background_quality_lane.sh`, whose verdict lands in a JSON file nothing gates on; and `promote_fuzz_artifacts.sh`, which exits 0 by design). The replay capability was never missing — the verdict had nowhere to go. This gate checks: every file matching a libFuzzer artifact prefix (`timeout-`/`crash-`/`leak-`/`oom-`/`slow-unit-`) has exactly one line in `lib/test/fuzz_seeds/ARTIFACT_VERDICTS.txt` with a valid verdict, an ISO date and a reason; no orphan ledger lines; no untracked repro sitting uncommitted in the corpus; and the corpus↔binary map is 1:1, DERIVED from the Makefile's `$(BIN_DIR)/fuzz_<kind>:` rules so a new target is covered the day it lands. The actual replay is `make fuzz-replay` (in `make ci`, plus its own CI job) — separated because the replay is 18.3 s at `-P6` while building the nine fuzz binaries it needs is 34 s cold at `-j6`. Verdicts are `regression-seed` (audited clean; reproducing again FAILS), `open` (a real unfixed bug — this does NOT suppress the failure, it only names it), and `accepted` (the only pass-while-reproducing path: per-file, dated, reason ≥ 30 chars, reprinted by name every run; **zero entries today**). An entry that stops being true fails in both directions, so the ledger cannot rot. Added 2026-08-26: a `crash-`/`leak-` artifact cannot close `regression-seed` on "it replayed clean" alone — the reason must name a fix (`fixed by <commit>`) or record a pattern-init replay (`pattern-init: clean (Nx)`), enforced via `tools/scripts/fuzz_verdict_lib.sh`; see the pattern-init section below. `promote_fuzz_artifacts.sh` no longer files a verdict from the filename either — it replays the artifact (stock, and pattern-init for `crash-`/`leak-` kinds) before writing anything, and files `unreplayable` (also rejected on sight, same as `unaudited`) rather than a false clean when it cannot get that evidence. Never cached (it reads untracked worktree state). `--selftest` plants an untriaged artifact and asserts the gate trips AND names the file. No baseline, no directory-wide exemption. |
 | **`check-standalone-tools-link`** | HARD | Every standalone tool rule in the Makefile must actually BUILD. `make lint`, `make test-parallel` and `make ci` between them build the node, the test runners, the fuzzers and two lint helpers — and nothing else, so every other `$(BIN_DIR)/<tool>` rule was reachable from no gate and rotted unobserved. When `lib/base` absorbed logging and allocation behind forwarding headers, SIX standalone rules broke at once (missing `-I` paths, missing `lib/base/src/log_level.c`, missing `lib/platform/src/clock.c`) and every gate stayed green through it. The tool list is DERIVED from the Makefile — both the literal `$(BIN_DIR)/<name>:` spelling and the `$(SOME_BIN):` spelling resolved through its `SOME_BIN = $(BIN_DIR)/<name>` definition — never hand-written, so a newly added tool is covered the day it lands and an unknown tool is NOT exempt (fail-closed). Per-epoch CANDIDATE staging paths are skipped. The exempt set is closed and carries a mandatory reason per entry: already built by lint/ci (`gen_templates`, `core_seal`, `check_observability_pairing`, the nine `fuzz_*`, `crash_recovery_test`, `zcl-rpc`), whole-program relinks (`z23` + dev/asan/tsan variants, the test runners, `session`, `bot`), or outside the base toolchain (`zcl-blog` needs webkit2gtk). Covered tools are single-translation-unit builds: ~9 s warm, and a no-op once built. No baseline. |
 | **`check-no-operator-paths`** | HARD (shrink-only ratchet) | No tracked file may name an absolute home path, the operator username, or the host name. A stranger who clones this repository must not learn where the machines that run it are: onion addresses are the committed network identity precisely because they carry no location, and an absolute `/home/<user>/...` path in a committed artifact silently undoes that. Three prongs: **A** absolute `/home/<x>` or `/Users/<x>` (universal, works on any checkout), **B** the operator username from `id -un`, **C** the host name — B and C are host-derived, so the PASS line says so rather than implying coverage they cannot have on someone else's machine. Keyed `<prong> <path> <occurrences>`, not lines: the corpus evidence records are single-line JSON, so a per-line ratchet would score a file holding sixty leaks as one. A new pair fails hard; a count above baseline fails; a count that has fallen to zero fails as a stale row so the baseline can only shrink. The gate runs a planted-violation selftest per prong first — a lint gate here has silently inverted before, and one that has never been seen to fail is not evidence. It is deliberately not exempt from itself. |
 | **`check-no-unattended-publish`** | HARD (closed allowlist) | No script in the repository writes to the shared remote. Publishing is a deliberate act a person performs, never a side effect of a background loop: a timer that can move `main` moves it for every checkout that fast-forwards from it, with nobody reviewing what went out. **What motivated it:** a sync script ran on cron every ten minutes on four machines and pushed a per-box heartbeat commit to `origin/main` each cycle, carrying that box's onion address, P2P port, running-binary source hash, peer count, liveness and last error — filling public history with machine chatter, shipping live operator state to every reader, and making a project anyone can join look like it had a designated in-crowd. Two patterns are refused: `git push`, and `git commit-tree` — the subtle one, because it builds a commit object without touching the index or working tree, so `git commit-tree … \| git push origin <sha>:main` moves a branch from a detached HEAD while the checkout still looks untouched, and a reviewer scanning for `git commit` would never see it. A line whose first non-blank character is `#` cannot execute and is not matched, so an explanation of the rule is not itself a violation. The scan set is derived from `git ls-files`, never hand-listed, so a script added tomorrow is covered the day it lands, and an unknown file is refused rather than assumed benign. The allowlist is closed and every entry carries a mandatory reason: the operator-run deploy path, two hooks that only print advice naming the command, two lint fixtures whose input is the forbidden string, and this gate itself — listed rather than skipped, because a gate exempt from itself is a place to hide. Scan-floor guarded, so a scan set that silently emptied exits 2 instead of reporting a clean pass. No baseline. |
 
 
 E10 = the WARN→RATCHET graduation of #18 and #20 (above).
+
+### Closing a `crash-`/`leak-` fuzz finding: one clean replay is not exoneration
+
+A `LOG_*` macro in this codebase expands to `return` (see §4 above). A hard
+failure return that runs before a caller's output struct is initialized hands
+that caller a `free()`/`_free()` call over whatever the stack held on entry.
+On a freshly-mapped stack that is zero, so the call is a no-op; on a
+long-lived process it is a stale pointer and a stale count. The bug is real
+either way — the replay result is not.
+
+`-ftrivial-auto-var-init=pattern` is the tool that turns this from
+probabilistic into deterministic: it poisons every uninitialized stack slot
+with a recognizable non-zero pattern instead of leaving it zero, so a stale
+read fails the same way on the first replay that it would on the thousandth
+in a live process.
+
+Rule: a `crash-`/`leak-` fuzz artifact closes `regression-seed` only with a
+named fix (`fixed by <commit>`) or an explicit pattern-init replay recorded
+in the reason (`pattern-init: clean (Nx)`). "It replayed clean" by itself
+names nothing and proves nothing about this bug class. `tools/lint/check_
+fuzz_artifact_replay.sh` enforces this (`tools/scripts/fuzz_verdict_lib.sh`
+holds the shared rule); `tools/scripts/promote_fuzz_artifacts.sh` runs both
+replays before it ever writes a verdict, and files `unreplayable` — never a
+clean verdict — when it cannot get the evidence this bug class requires.
+`timeout-`/`oom-`/`slow-unit-` findings are algorithmic, not stack-state, and
+are not held to this rule.
 
 ### Binding a document claim to a predicate (`check-doc-claims`)
 
@@ -929,6 +955,7 @@ add/remove a gate.
 - `check-verification-coverage`
 - `check-ship-remote-transaction`
 - `check-identity-parser-single`
+- `check-source-identity-authority`
 - `check-status-reason-single`
 - `check-pipefail-status-pipe`
 - `check-blocker-remedy`
@@ -969,6 +996,8 @@ add/remove a gate.
 - `check-no-operator-paths`
 - `check-no-unattended-publish`
 - `check-zcc-cache`
+- `check-tu-random-seed`
+- `check-outparam-init-before-return`
 - `check-equihash-params`
 <!-- LINT-GATES-END -->
 
@@ -1011,6 +1040,138 @@ manifests, and rejects duplicate tracked notebook paths. Reproducible simnet
 evidence and public consensus fixtures remain allowed in the canonical broad
 lab baseline. Both recorders independently refuse any ledger path inside the
 repository, even when a developer supplies an environment override.
+
+### `check-outparam-init-before-return` — what a later reader will free must never be a stale value
+
+Two remote-reachable memory-safety bugs were found on the same day, 2026-08-26,
+and they are one class: **the thing a later reader will free or dereference was
+left in a state that reader's guard cannot see.**
+
+`compact_block_reconstruct()` took `struct block *out_block` and refused an
+empty announcement *above* `block_init(out_block)`. Its caller
+`process_cmpctblock()` ran `block_free(&out_block)` on that outcome, so
+`transaction_free()` walked whatever pointer and count the caller's own stack
+happened to hold. Any connected peer could reach it with a valid header plus
+two zero bytes (`bce343876`).
+
+`sapling_init_params()` published the three Groth16 verifying keys into the
+module globals the verifiers read, and a later Sprout failure path freed their
+`ic[]` arrays and comb tables *without* storing `NULL` back into those globals.
+Every verifier's fail-closed guard asks only "is the pointer NULL?", so the
+guard passed and `groth16_verify()` read freed heap, reachable from
+`accept_to_mempool` (`69518f2f3`).
+
+Two things make this class hard to see, and the gate is shaped around both.
+First, `LOG_FAIL` and the other `LOG_*` macros in this tree **expand to a
+return**, so a line that reads like logging is a control-flow exit and a human
+scanning for `return` above the init sees nothing. Second, a freshly mapped
+stack reads back as zero, so a one-shot replay frees nothing and exits clean;
+140 stock replays and a 1,265,835-execution fuzz session all missed the
+compact-block bug. Rebuilding with `-ftrivial-auto-var-init=pattern` makes it
+deterministic, and that is the way to reproduce anything in this family:
+pre-fix it reproduces the lane's exact stack (`transaction_free <- block_free
+<- process_cmpctblock <- msg_process_messages`), post-fix it is clean.
+
+The rules, both required:
+
+- **Initialize before anything can fail.** A function that hands back a struct
+  the caller frees must `*_init()`/`memset()` it above the first thing that can
+  fail, and the header must state that post-condition as a rule rather than a
+  description.
+- **Publish last, unpublish first.** A pointer stored into a module global is
+  published only below every fallible step, and any teardown clears the global
+  *before* freeing what it points at.
+
+`tools/lint/check_outparam_init_before_return.sh` holds both closed. It runs
+two legs over every tracked `.c` file:
+
+1. **Out-parameter leg.** For each function it extracts the `struct T *name`
+   parameters, finds the first `*_init(name)`/`memset(name, …)` in the body,
+   and reports the pair when a `return` or a `LOG_*(` precedes it. It reports
+   only when a `T_free` exists somewhere in the tree — the struct must be the
+   kind a caller frees — and only when the pre-init exit is reachable with
+   well-formed arguments. It walks *every* exit above the init, not just the
+   first, because the first is very often `if (!a || !b) return false;`, which
+   a caller that then frees the out-param cannot reach. Surviving cases are
+   listed in `tools/lint/outparam_init_baseline.txt`, each with the caller-side
+   mechanism that makes it safe; the allowlist is **closed**, so a new instance
+   fails rather than joining a list, and a *stale* entry fails too, so fixing
+   the code means deleting the waiver.
+2. **Published-global leg.** It derives the set of publisher functions from the
+   code — a function that stores a caller-supplied pointer into a file-scope
+   variable — never from the name, so a `*_set_*` that merely writes *through*
+   the pointer is not a publisher and a publisher spelled otherwise still is
+   one. It then reports a publish of `&obj` followed, in the same function, by
+   a free touching `obj` with no unpublish between. This leg is
+   **zero-tolerance and has no allowlist**: production code has none today.
+
+What it cannot check, stated so nobody over-trusts it: it is a line-order
+scanner over C text, not a compiler. It does not follow control flow, so
+`if (x) { init(out); } … return` reads as initialized. It does not resolve
+macros, so a wrapper that expands to `return` and is not named `LOG_*` is
+invisible. It does not prove the *caller* frees — that leg is the reviewer's,
+recorded per baseline entry. It only recognizes `T_init(out)`/`memset(out, …)`
+as initialization, so a field-by-field init over-reports and an init done by a
+helper it cannot see is a miss. Multi-declarator declarations and
+`struct T **out` owner-outs are out of scope. On the published-global leg it
+sees only the first `free(` on a line, and it is scoped to production sources:
+test harnesses legitimately hand a stage module a `&main_state` and free it at
+case teardown, which is the same text about 870 times over and would bury the
+one shape that actually shipped a use-after-free.
+
+`--selftest` plants a clean function and a violating one for each leg and
+asserts the verdict on each, including that a `set_*` which only writes through
+its pointer is *not* read as a publisher. Both legs refuse to report clean off a
+scan that found nothing (`gate_require_scanned` floors on the file set, the
+derived `*_free` set, the publisher set, and the number of function bodies
+actually walked).
+
+### `check-tu-random-seed` and `make repro-build` — the build repeats
+
+A node states which source it is running in its version handshake. That
+statement is only worth anything if a second person holding the same source can
+rebuild the same bytes and compare. Two things keep that true.
+
+`check-tu-random-seed` (`tools/lint/check_tu_random_seed.sh`) is the cheap
+guard, and it runs in `make lint`. GCC derives its default random seed from the
+name of the object file it is writing. Every object in this tree is compiled
+into a fresh temporary staging directory and published atomically, so that name
+— and therefore the seed — differed on every single compile. Under `-flto` the
+seed becomes the `.gnu.lto_*.<suffix>` section-name suffix, and the shipped
+profile's objects stopped repeating even twice in the same directory. Measured
+on GCC 14.2 over a representative sample of node translation units at the
+shipped release flags: with the default seed every sampled object differed
+between two compiles of unchanged source, and the object *size* moved too,
+because GCC trims leading zeros from that suffix. With `$(ZCL_TU_RANDOM_SEED)`
+pinning the seed to the relative source path, none did. The gate requires every
+per-TU object recipe to carry that flag and requires the seed to be per-TU; the
+coverage recipe is the one exemption, because gcov pairs a `.gcno` note with
+the object that will emit the `.gcda`, and the gate asserts that exemption is
+the only one.
+
+`make repro-build` (`tools/scripts/repro_build.sh`) is the end-to-end proof.
+It is opt-in — three whole-program LTO builds — and it reports four properties
+separately rather than collapsing them into one verdict:
+
+| | property | status |
+|---|---|---|
+| P1 | `build/bin/z23` identical across two builders at different absolute paths | asserted |
+| P2 | `build/bin/z23.debug` identical across the same two builders | asserted |
+| P3 | every per-TU object identical when one directory builds twice | asserted |
+| N1 | per-TU objects identical across two directories | **not** asserted |
+
+N1 is printed on success as well as on failure, with the measured count of
+objects that differ. GCC streams absolute source and header paths into the
+`.gnu.lto_*` IR and `-ffile-prefix-map` does not reach inside it; there is no
+GCC 14 flag that fixes it. It does not touch P1 or P2, because that IR is
+consumed at link time and never reaches the shipped output — which is why P1
+measures the shipped artifact directly instead of inferring it from the
+intermediates. A gate that quietly narrowed its scope to whatever happened to
+pass would not be evidence, so this one names what it cannot prove.
+
+`make repro-verify` remains the two-builder gate for the shipped binary alone;
+`make ci-reproducible` builds twice in one source directory under the release
+flag profile shared with `tools/release.sh`.
 
 ---
 
