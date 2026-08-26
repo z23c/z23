@@ -32,6 +32,17 @@
  * fast loop fast: editing a controller does not move this value, so the module
  * just built still mounts. Editing consensus does move it, and then every
  * module compiled against the old core is refused at the door.
+ *
+ * SCOPE OF THE GUARANTEE. This is a generated, checked-in mirror, and nothing
+ * in the BUILD forces it to be current: the hotswap-module-so recipe does not
+ * depend on the core-seal target, so between a core/ edit and the next
+ * 'make lint' the node and the module stamp the same STALE root and the pin
+ * passes without meaning anything. check_core_seal_root_mirror.sh is the only
+ * thing that catches that drift. The pin is therefore exactly as strong as
+ * lint having run -- which is the intended design, lint being the backstop,
+ * but it is the reason a seal re-cut must be followed by 'make core-seal' and
+ * not merely by a successful build.
+ *
  */
 
 #ifndef ZCL_HOTSWAP_CORE_SEAL_ROOT_H

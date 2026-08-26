@@ -95,8 +95,10 @@ fi
 
 # The verifier itself is built once, against the real lib/hotswap admission
 # code. --gc-sections drops hotswap_activate()'s dlopen core and its json /
-# sha256 / logging imports, which the admit path never reaches; without it the
-# link would drag most of the node in for a pure predicate.
+# logging imports, which the admit path never reaches; without it the link
+# would drag most of the node in for a pure predicate. The SHA-256 and
+# SHA3-256 hashers deliberately survive: the verify path fd-pins and records
+# both artifact digests, so lib/sha3 is linked in on purpose, not by accident.
 build_verifier() {
     [ -r "$FLAGS_ENV" ] || {
         echo "hotswap-verify: $FLAGS_ENV missing — run 'make hotswap-module-so FILE=<tu>' once first." >&2
@@ -115,6 +117,8 @@ build_verifier() {
         tools/dev/hotswap_verify_so.c \
         lib/hotswap/src/hotswap_activate.c \
         lib/hotswap/src/hotswap_islands.c \
+        lib/hotswap/src/hotswap_artifact_digest.c \
+        lib/sha3/src/sha3.c \
         -Wl,--gc-sections -ldl || return 1
     return 0
 }

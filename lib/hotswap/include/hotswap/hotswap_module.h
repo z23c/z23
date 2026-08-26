@@ -172,6 +172,18 @@ struct hotswap_activate_report {
     char handler_name[128]; /* first leaf — the pre-multi-leaf report field */
     char leaves[512];     /* comma-joined admitted leaf paths (may be clipped) */
     char artifact_sha256[65];
+    /* SHA3-256 over the SAME descriptor the loader maps. A second,
+     * structurally different hash family over identical bytes: a collision
+     * engineered against SHA-256 is not a collision against Keccak. Integrity
+     * only, never authorization — see hotswap/hotswap_artifact_digest.h for
+     * exactly what the fd pin does and does not guarantee.
+     *
+     * hotswap_activate() fills this AND artifact_sha256 above from one fd.
+     * hotswap_verify_module_so() (the standalone build-time verifier) fills
+     * only this one and leaves artifact_sha256 empty — it links neither
+     * lib/crypto nor its dispatch table. Either field is "" on any path that
+     * failed before reaching the artifact's bytes; test both before use. */
+    char artifact_sha3_256[65];
     /* precheck|authorize|dlopen|abi|fields|capacity|allowlist|duplicate|
      * probe|self_test|commit|verified|activated|release */
     char stage[64];

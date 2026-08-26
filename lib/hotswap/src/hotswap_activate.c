@@ -655,6 +655,7 @@ bool hotswap_module_publish(const struct zcl_hotswap_module *module,
 #include <unistd.h>
 
 #include "crypto/sha256.h"
+#include "hotswap/hotswap_artifact_digest.h"
 
 static bool artifact_sha256_fd(int fd, char hex_out[65])
 {
@@ -922,7 +923,13 @@ static bool activate_run(const char *so_path, const char *resolved_datadir,
     int fd = open(so_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     struct stat st;
     if (fd < 0 || fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
-        !artifact_sha256_fd(fd, report->artifact_sha256)) {
+        !artifact_sha256_fd(fd, report->artifact_sha256) ||
+        !hotswap_artifact_sha3_fd(fd, report->artifact_sha3_256)) {
+        /* BOTH digests come off THIS fd, and the dlopen below maps that same
+         * fd through /proc/self/fd/N — never a re-opened path. Each hasher
+         * seeks to 0 itself and leaves the offset at 0, so they compose in
+         * either order over identical bytes. Fail closed: a module whose
+         * bytes cannot be hashed twice is never mapped. */
         if (fd >= 0) close(fd);
         return act_reject(report, "dlopen",
                           "could not pin and hash a regular module artifact");
@@ -1053,6 +1060,35 @@ bool hotswap_verify_module_so(const char *so_path, const char *expect_tu,
         return false;
     }
 
+    /* Same fd discipline as activate_run(): open ONCE, hash that descriptor,
+     * and dlopen the identical descriptor through /proc/self/fd/N, so the
+     * digest describes the inode that is actually mapped rather than whatever
+     * the path resolves to a moment later. The descriptor is closed as soon as
+     * dlopen has mapped it — the mapping outlives the fd, and unlike the
+     * resident path there is no later retire step here that needs it.
+     *
+     * SHA3-256 ONLY on this path, deliberately. report->artifact_sha256 stays
+     * empty here: this verifier is linked standalone by tools/dev/
+     * hotswap-verify.sh and tools/dev/hotswap-package.sh from a handful of
+     * sources plus --gc-sections, and pulling in lib/crypto's SHA-256 (with
+     * its CPU-dispatch table and logging macros) to fill a field nothing in
+     * the verification or packaging lane reads would buy nothing for a real
+     * dependency cost. The RESIDENT loader still computes BOTH over its own
+     * fd — see activate_run(). */
+    int fd = open(so_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat vst;
+    if (fd < 0 || fstat(fd, &vst) != 0 || !S_ISREG(vst.st_mode) ||
+        !hotswap_artifact_sha3_fd(fd, report->artifact_sha3_256)) {
+        if (fd >= 0)
+            (void)close(fd);
+        act_copy(report->stage, sizeof(report->stage), "dlopen");
+        act_copy(report->error, sizeof(report->error),
+                 "could not open and SHA3-hash a regular module artifact");
+        return false;
+    }
+    char vpinned[64];
+    (void)snprintf(vpinned, sizeof(vpinned), "/proc/self/fd/%d", fd);
+
     /* RTLD_LOCAL so the candidate's symbols never join the global scope and
      * interpose on anything the verifying process later resolves. RTLD_LAZY
      * because this call deliberately does NOT run module code: function
@@ -1062,7 +1098,8 @@ bool hotswap_verify_module_so(const char *so_path, const char *expect_tu,
      * that references a body defined in a TU outside its own island still
      * fails here — correctly, since re-pointing such a leaf would dispatch
      * into resident code and the swap would silently do nothing for it. */
-    void *handle = dlopen(so_path, RTLD_LAZY | RTLD_LOCAL);
+    void *handle = dlopen(vpinned, RTLD_LAZY | RTLD_LOCAL);
+    (void)close(fd);
     if (!handle) {
         const char *e = dlerror();
         act_copy(report->stage, sizeof(report->stage), "dlopen");
