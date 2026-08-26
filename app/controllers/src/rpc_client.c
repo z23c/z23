@@ -225,6 +225,24 @@ const char *node_rpc_client_datadir(void)
     return g_datadir;
 }
 
+bool node_rpc_port_listening(int rpc_port, long connect_ms)
+{
+    if (rpc_port < 1 || rpc_port > 65535)
+        return false;
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0)
+        return false;
+    struct sockaddr_in addr = {
+        .sin_family = AF_INET,
+        .sin_port = htons((uint16_t)rpc_port),
+    };
+    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+    int rc = rpc_connect_deadline(sock, &addr,
+                                  rpc_clamp_ms(connect_ms, 1, 60000));
+    close(sock);
+    return rc == 0;
+}
+
 /* Shared implementation behind both the env-defaulted node_rpc_call_http
  * and the explicit-deadline node_rpc_call_http_deadline. `connect_ms`/
  * `total_ms` are already-resolved budgets (env defaults or a caller's tight
