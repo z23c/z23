@@ -130,6 +130,7 @@ block/timeout-d12c40f723c88ca59a6471aaa6af2b99d69eca0d.bin  regression-seed  202
 p2p/timeout-08ce3c74fb75d9f1303d3d1d5b51aff52c74591d.bin  regression-seed  2026-07-29  # spurious -timeout=2 trip on a loaded box; 0 ms today, fuzz_p2p.c byte-identical since filing
 p2p/timeout-101ccf625fc29d20a76da38c78456260553cb59a.bin  regression-seed  2026-07-29  # spurious -timeout=2 trip on a loaded box; 0 ms today, fuzz_p2p.c byte-identical since filing
 p2p/timeout-4ef00610e20bbb48f0d3f94a57fe217c12a6a260.bin  regression-seed  2026-07-29  # spurious -timeout=2 trip on a loaded box; 0 ms today, fuzz_p2p.c byte-identical since filing
+p2p/crash-e3fef02ed5b5b9239b2d68e94fc48f7fc76879ea.bin  regression-seed  2026-08-26  # replayed clean under ASan+UBSan in 0-1 ms, at -timeout=2 and =5, leak-detect on and off; byte0=0xf9 dispatches it as cmpctblock, where the prefilled-tx parse runs out of stream and stream_read's bounds check refuses it; every file on that path unchanged since well before the 2026-08-24 filing, so nothing was fixed since — what libFuzzer originally classified as a crash is NOT explained, only unreproducible
 
 # ── accepted ────────────────────────────────────────────────────────────────
 # Empty, deliberately. `accepted` is the only verdict that lets a reproducing
