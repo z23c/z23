@@ -113,17 +113,9 @@ char *zcl_native_consensus_report_body(const struct json_value *args,
 #include "kernel/command_registry.h"
 #include "command/native_command.h"
 
-static void tramp_consensus_report(const struct zcl_command_request *request,
-                                   struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_consensus_report_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(tramp_consensus_report, zcl_native_consensus_report_body)
 
-static void tramp_metrics(const struct zcl_command_request *request,
-                          struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_metrics_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(tramp_metrics, zcl_native_metrics_body)
 
 static const struct zcl_hotswap_leaf_replacement k_leaves[] = {
     { "core.consensus.report", tramp_consensus_report },
@@ -144,11 +136,7 @@ ZCL_HOTSWAP_EXPORT_LEAVES(k_leaves, sizeof(k_leaves) / sizeof(k_leaves[0]))
 #include "kernel/command_registry.h"
 #include "command/native_command.h"
 
-static void module_tramp_metrics(const struct zcl_command_request *request,
-                                 struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_metrics_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_metrics, zcl_native_metrics_body)
 
 /* The module's own health hook — runs before the loader publishes it. Kept
  * node-independent (no RPC): a structural OK. */
@@ -164,11 +152,7 @@ static bool module_selftest_metrics(char *err, size_t cap)
  * it decides no consensus rule, validates no block, and touches no state root
  * — structurally the same class as ops.metrics beside it. The sealed consensus
  * tree stays unswappable; this is its observability projection. */
-static void module_tramp_consensus_report(
-    const struct zcl_command_request *request, struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_consensus_report_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_consensus_report, zcl_native_consensus_report_body)
 
 static const struct zcl_hotswap_leaf k_module_leaves[] = {
     { "ops.metrics",           module_tramp_metrics },

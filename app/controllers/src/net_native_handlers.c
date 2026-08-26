@@ -216,17 +216,9 @@ char *zcl_native_onion_health_body(const struct json_value *args,
 #include "kernel/command_registry.h"
 #include "command/native_command.h"
 
-static void tramp_peer_incidents(const struct zcl_command_request *request,
-                                 struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_peer_incidents_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(tramp_peer_incidents, zcl_native_peer_incidents_body)
 
-static void tramp_onion_health(const struct zcl_command_request *request,
-                               struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_onion_health_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(tramp_onion_health, zcl_native_onion_health_body)
 
 static const struct zcl_hotswap_leaf_replacement k_leaves[] = {
     { "core.network.peers.incidents", tramp_peer_incidents },
@@ -247,11 +239,7 @@ ZCL_HOTSWAP_EXPORT_LEAVES(k_leaves, sizeof(k_leaves) / sizeof(k_leaves[0]))
 #include "kernel/command_registry.h"
 #include "command/native_command.h"
 
-static void module_tramp_peer_incidents(
-    const struct zcl_command_request *request, struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_peer_incidents_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_peer_incidents, zcl_native_peer_incidents_body)
 
 /* The module's own health hook — runs before the loader publishes it. Kept
  * node-independent (no RPC): a structural OK. */
@@ -262,11 +250,7 @@ static bool module_selftest_peer_incidents(char *err, size_t cap)
     return true;
 }
 
-static void module_tramp_onion_health(const struct zcl_command_request *request,
-                                      struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_onion_health_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_onion_health, zcl_native_onion_health_body)
 
 /* Mirrors k_leaves above — both leaves this controller owns, published in ONE
  * all-or-nothing batch. Batch size, not authority: both are READY read-only

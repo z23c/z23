@@ -77,11 +77,7 @@ char *zcl_native_node_log_body(const struct json_value *args,
 #include "kernel/command_registry.h"
 #include "command/native_command.h"
 
-static void tramp_node_logs(const struct zcl_command_request *request,
-                            struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_node_log_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(tramp_node_logs, zcl_native_node_log_body)
 
 static const struct zcl_hotswap_leaf_replacement k_leaves[] = {
     { "ops.logs", tramp_node_logs },
@@ -103,11 +99,7 @@ ZCL_HOTSWAP_EXPORT_LEAVES(k_leaves, sizeof(k_leaves) / sizeof(k_leaves[0]))
 #include "kernel/command_registry.h"
 #include "command/native_command.h"
 
-static void module_tramp_node_logs(const struct zcl_command_request *request,
-                                   struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_node_log_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_node_logs, zcl_native_node_log_body)
 
 /* The module's own health hook — runs before the loader publishes it. Kept
  * node-independent (no RPC): a structural OK. */
@@ -122,11 +114,7 @@ static bool module_selftest_node_logs(char *err, size_t cap)
  * composes getnodelog: the SQL text and row limit are forwarded as arguments
  * and the resident RPC handler keeps the database access and its
  * authorization. The swappable body owns request composition only. */
-static void module_tramp_storage_query(
-    const struct zcl_command_request *request, struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_sql_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_storage_query, zcl_native_sql_body)
 
 static const struct zcl_hotswap_leaf k_module_leaves[] = {
     { "ops.logs",           module_tramp_node_logs },

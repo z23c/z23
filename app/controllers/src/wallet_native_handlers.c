@@ -720,29 +720,13 @@ void zcl_native_handle_wallet_shielded_send(
 #include "kernel/command_registry.h"
 #include "command/native_command.h"
 
-static void tramp_listaddresses(const struct zcl_command_request *request,
-                                struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_listaddresses_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(tramp_listaddresses, zcl_native_listaddresses_body)
 
-static void tramp_listunspent(const struct zcl_command_request *request,
-                              struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_listunspent_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(tramp_listunspent, zcl_native_listunspent_body)
 
-static void tramp_listtransactions(const struct zcl_command_request *request,
-                                   struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_listtransactions_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(tramp_listtransactions, zcl_native_listtransactions_body)
 
-static void tramp_gettransaction(const struct zcl_command_request *request,
-                                 struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_gettransaction_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(tramp_gettransaction, zcl_native_gettransaction_body)
 
 static const struct zcl_hotswap_leaf_replacement k_leaves[] = {
     { "core.wallet.address.list",      tramp_listaddresses },
@@ -765,11 +749,7 @@ ZCL_HOTSWAP_EXPORT_LEAVES(k_leaves, sizeof(k_leaves) / sizeof(k_leaves[0]))
 #include "kernel/command_registry.h"
 #include "command/native_command.h"
 
-static void module_tramp_listaddresses(
-    const struct zcl_command_request *request, struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_listaddresses_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_listaddresses, zcl_native_listaddresses_body)
 
 /* The module's own health hook — runs before the loader publishes it. Kept
  * node-independent (no RPC): a structural OK. */
@@ -780,23 +760,11 @@ static bool module_selftest_listaddresses(char *err, size_t cap)
     return true;
 }
 
-static void module_tramp_listunspent(
-    const struct zcl_command_request *request, struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_listunspent_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_listunspent, zcl_native_listunspent_body)
 
-static void module_tramp_listtransactions(
-    const struct zcl_command_request *request, struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_listtransactions_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_listtransactions, zcl_native_listtransactions_body)
 
-static void module_tramp_gettransaction(
-    const struct zcl_command_request *request, struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_gettransaction_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_gettransaction, zcl_native_gettransaction_body)
 
 /* Mirrors k_leaves above — all four READ projections this controller owns.
  * These render WALLET state (addresses, this wallet's own unspent outputs and
@@ -806,17 +774,9 @@ static void module_tramp_gettransaction(
  * already an island member, so they are genuinely recompiled by the swap.
  * These render balances and note metadata the wallet already holds; the
  * viewing keys, the note decryption, and every spend path stay resident. */
-static void module_tramp_z_getbalance(
-    const struct zcl_command_request *request, struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_z_getbalance_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_z_getbalance, zcl_native_z_getbalance_body)
 
-static void module_tramp_z_listunspent(
-    const struct zcl_command_request *request, struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_z_listunspent_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_z_listunspent, zcl_native_z_listunspent_body)
 
 static const struct zcl_hotswap_leaf k_module_leaves[] = {
     { "core.wallet.address.list",      module_tramp_listaddresses },

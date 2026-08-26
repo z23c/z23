@@ -144,35 +144,15 @@ char *zcl_native_self_heal_stats_body(const struct json_value *args,
 #include "kernel/command_registry.h"
 #include "command/native_command.h"
 
-static void tramp_operator_snapshot(const struct zcl_command_request *request,
-                                    struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_operator_snapshot_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(tramp_operator_snapshot, zcl_native_operator_snapshot_body)
 
-static void tramp_operator_summary(const struct zcl_command_request *request,
-                                   struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_operator_summary_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(tramp_operator_summary, zcl_native_operator_summary_body)
 
-static void tramp_milestone(const struct zcl_command_request *request,
-                            struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_milestone_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(tramp_milestone, zcl_native_milestone_body)
 
-static void tramp_mirror_status(const struct zcl_command_request *request,
-                                struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_mirror_status_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(tramp_mirror_status, zcl_native_mirror_status_body)
 
-static void tramp_self_heal_stats(const struct zcl_command_request *request,
-                                  struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_self_heal_stats_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(tramp_self_heal_stats, zcl_native_self_heal_stats_body)
 
 static const struct zcl_hotswap_leaf_replacement k_leaves[] = {
     { "ops.debug.dash.snapshot",  tramp_operator_snapshot },
@@ -194,35 +174,15 @@ ZCL_HOTSWAP_EXPORT_LEAVES(k_leaves, sizeof(k_leaves) / sizeof(k_leaves[0]))
 #include "kernel/command_registry.h"
 #include "command/native_command.h"
 
-static void module_tramp_operator_snapshot(
-    const struct zcl_command_request *request, struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_operator_snapshot_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_operator_snapshot, zcl_native_operator_snapshot_body)
 
-static void module_tramp_operator_summary(
-    const struct zcl_command_request *request, struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_operator_summary_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_operator_summary, zcl_native_operator_summary_body)
 
-static void module_tramp_milestone(
-    const struct zcl_command_request *request, struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_milestone_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_milestone, zcl_native_milestone_body)
 
-static void module_tramp_mirror_status(
-    const struct zcl_command_request *request, struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_mirror_status_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_mirror_status, zcl_native_mirror_status_body)
 
-static void module_tramp_self_heal_stats(
-    const struct zcl_command_request *request, struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_self_heal_stats_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_self_heal_stats, zcl_native_self_heal_stats_body)
 
 /* The module's own health hook — runs before the loader publishes it. Kept
  * node-independent (no RPC): a structural OK. */

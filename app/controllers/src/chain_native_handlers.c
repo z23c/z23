@@ -311,11 +311,7 @@ char *zcl_native_utxo_audit_body(const struct json_value *args,
 #include "kernel/command_registry.h"
 #include "command/native_command.h"
 
-static void tramp_utxo_audit(const struct zcl_command_request *request,
-                             struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_utxo_audit_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(tramp_utxo_audit, zcl_native_utxo_audit_body)
 
 static const struct zcl_hotswap_leaf_replacement k_leaves[] = {
     { "core.consensus.utxo.audit",  tramp_utxo_audit },
@@ -338,11 +334,7 @@ ZCL_HOTSWAP_EXPORT_LEAVES(k_leaves, sizeof(k_leaves) / sizeof(k_leaves[0]))
 #include "kernel/command_registry.h"
 #include "command/native_command.h"
 
-static void module_tramp_utxo_audit(
-    const struct zcl_command_request *request, struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_utxo_audit_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_utxo_audit, zcl_native_utxo_audit_body)
 
 /* The module's own health hook — runs before the loader publishes it. Kept
  * node-independent (no RPC): a structural OK. */

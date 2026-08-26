@@ -165,11 +165,7 @@ char *zcl_native_policy_limits_body(const struct json_value *args,
 #include "kernel/command_registry.h"
 #include "command/native_command.h"
 
-static void tramp_policy_limits(const struct zcl_command_request *request,
-                                struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_policy_limits_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(tramp_policy_limits, zcl_native_policy_limits_body)
 
 static const struct zcl_hotswap_leaf_replacement k_leaves[] = {
     { "zcode.package.policy.limits", tramp_policy_limits },
@@ -192,12 +188,7 @@ ZCL_HOTSWAP_EXPORT_LEAVES(k_leaves, sizeof(k_leaves) / sizeof(k_leaves[0]))
 #include "kernel/command_registry.h"
 #include "command/native_command.h"
 
-static void module_tramp_policy_limits(
-    const struct zcl_command_request *request,
-    struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_policy_limits_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_policy_limits, zcl_native_policy_limits_body)
 
 /* Structural health hook, run before the loader publishes this module. It is
  * a real check here rather than a bare `return true`: the projection is pure,
