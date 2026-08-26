@@ -31,7 +31,7 @@
 # A sandbox that commits inside its own throwaway repo is not a publish and
 # is not matched: only pushes and the low-level commit-tree plumbing are.
 #
-# WHY THESE TWO PATTERNS. `git push` is the obvious one. `git commit-tree` is
+# WHY THESE TWO COMMANDS. `git push` is the obvious one. `git commit-tree` is
 # the subtle one: it builds a commit object without touching the index or the
 # working tree, so `git commit-tree ... | git push origin <sha>:main` moves a
 # branch from a detached HEAD while leaving the checkout looking untouched.
@@ -104,13 +104,30 @@ if [ "${1:-}" = "--selftest" ]; then
     printf '#!/bin/sh\ngit push origin main --quiet\n' > "$tmp/push.sh"
     st_run 1 "a script that pushes to the shared remote" "$tmp/push.sh"
 
-    # 3. The plumbing shape a reviewer scanning for "git commit" misses:
+    # 3. Git accepts global options before the subcommand. -C and -c are
+    # common in scripts and must not turn a publish into an invisible one.
+    printf '#!/bin/sh\ngit -C "$repo" push origin main\n' > "$tmp/push_cwd.sh"
+    st_run 1 "git -C cannot hide a push" "$tmp/push_cwd.sh"
+    printf '#!/bin/sh\ngit -c core.hooksPath=/dev/null push origin main\n' \
+        > "$tmp/push_config.sh"
+    st_run 1 "git -c cannot hide a push" "$tmp/push_config.sh"
+    printf '#!/bin/sh\ngit --git-dir="$repo/.git" commit-tree "$t"\n' \
+        > "$tmp/tree_gitdir.sh"
+    st_run 1 "a long global option cannot hide commit-tree" \
+        "$tmp/tree_gitdir.sh"
+
+    # 4. The plumbing shape a reviewer scanning for "git commit" misses:
     #    commit-tree builds a commit object without touching the index, so
     #    the checkout still looks untouched afterwards.
     printf '#!/bin/sh\nc=$(git commit-tree "$t" -p "$b" -m heartbeat)\n' > "$tmp/tree.sh"
     st_run 1 "a script that builds a commit object out of band" "$tmp/tree.sh"
 
-    # 4. A comment naming the command is documentation, not a publish. If
+    # 5. A real grep error is fatal, not silently translated into no-match.
+    printf '#!/bin/sh\necho clean\n' > "$tmp/grep_error.sh"
+    ZCL_UNATTENDED_PUBLISH_TEST_REGEX='[' \
+        st_run 2 "a scan error fails loud" "$tmp/grep_error.sh"
+
+    # 6. A comment naming the command is documentation, not a publish. If
     #    this failed, authors would delete the explanations that keep the
     #    rule legible in order to get past the gate.
     printf '#!/bin/sh\n# there is no git push path here any more\necho ok\n' > "$tmp/comment.sh"
@@ -140,6 +157,11 @@ fi
 
 scanned=0
 violations=0
+PUBLISH_RE='(^|[^[:alnum:]_-])git([[:space:]]+(-C|-c|--git-dir|--work-tree|--namespace|--config-env)[[:space:]]+[^[:space:]]+|[[:space:]]+--(git-dir|work-tree|namespace|config-env|exec-path)=[^[:space:]]+|[[:space:]]+(-p|-P|--paginate|--no-pager|--no-replace-objects|--bare))*[[:space:]]+(push|commit-tree)([^[:alnum:]_-]|$)'
+if [ -n "${ZCL_UNATTENDED_PUBLISH_SCAN_FILES:-}" ] && \
+   [ -n "${ZCL_UNATTENDED_PUBLISH_TEST_REGEX:-}" ]; then
+    PUBLISH_RE=$ZCL_UNATTENDED_PUBLISH_TEST_REGEX
+fi
 for f in "${FILES[@]}"; do
     [ -n "$f" ] || continue
     [ -f "$f" ] || continue
@@ -150,10 +172,14 @@ for f in "${FILES[@]}"; do
     # script or in a systemd unit. A comment saying "there is no git push here"
     # is documentation, not a publish, and matching it would push authors to
     # delete the very explanation that keeps the rule legible.
-    hits="$(gate_grep -nE '(^|[^[:alnum:]_-])git[[:space:]]+(push|commit-tree)([^[:alnum:]_-]|$)' "$f" | grep -vE '^[0-9]+:[[:space:]]*#')"
-    rc=$?
-    [ "$rc" -ge 2 ] && exit 2
-    [ "$rc" -ne 0 ] && continue
+    raw_hits="$(gate_grep -nE "$PUBLISH_RE" "$f")"
+    scan_rc=$?
+    [ "$scan_rc" -ge 2 ] && exit 2
+    [ "$scan_rc" -ne 0 ] && continue
+    hits="$(printf '%s\n' "$raw_hits" | grep -vE '^[0-9]+:[[:space:]]*#')"
+    filter_rc=$?
+    [ "$filter_rc" -ge 2 ] && exit 2
+    [ "$filter_rc" -ne 0 ] && continue
 
     if reason="$(allow_reason "$f")"; then
         continue
