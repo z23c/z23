@@ -1262,5 +1262,5 @@ AGENT_IMPACT_RULE("tools/scripts/source_identity_lib.sh|tools/deploy_verify.sh|l
  * pinned root, and changing params_service.c can widen what an unverified
  * peer is allowed to make this node do; neither may land without the group
  * that recomputes the pins from the real files and replays the refusals. */
-AGENT_IMPACT_RULE("lib/sapling/src/params_fetch.c|lib/sapling/include/sapling/params_fetch.h|lib/net/src/params_service.c|lib/net/include/net/params_service.h|lib/net/src/msgprocessor.c|lib/test/src/test_params_fetch.c", "params_fetch")
+AGENT_IMPACT_RULE("lib/sapling/src/params_fetch.c|lib/sapling/src/params_fetch_session.c|lib/sapling/src/params_fetch_internal.h|lib/sapling/include/sapling/params_fetch.h|lib/net/src/params_service.c|lib/net/include/net/params_service.h|lib/net/src/msgprocessor.c|lib/test/src/test_params_fetch.c", "params_fetch")
 
