@@ -37,8 +37,13 @@ SHIP_LIB_TEXT="$(cat "$ROOT/tools/scripts/ship_progress_lib.sh")"
 SANDBOX="$(mktemp -d "${ZCL_SCRATCH_DIR:-${TMPDIR:-/tmp}}/zcl-ship-selftest.XXXXXX")"
 FAILS=0
 cleanup() {
-    if [ -s "$SANDBOX/fixture.pid" ]; then
-        kill "$(cat "$SANDBOX/fixture.pid")" 2>/dev/null || true
+    # Kill by RECORDED pid, never by `pkill -f <pattern>`: pgrep/pkill -f match
+    # the shell that is running them, and that has wedged a wait loop on this
+    # box before.
+    if [ -s "$SANDBOX/fixture.pids" ]; then
+        while IFS= read -r p; do
+            [ -n "$p" ] && kill "$p" 2>/dev/null
+        done < "$SANDBOX/fixture.pids"
     fi
     rm -rf "$SANDBOX"
 }
@@ -261,18 +266,53 @@ mk_observer no-identity <<EOF
 echo "observed=1 exists=1 pid=9 start=5 sha=$WANT_SHA ident=no rpc=ok cpu=7 blkio=7 io=7"
 EOF
 
-# run_await <want-verdict> <want-rc> <observer> <window> <silence> <crash-n>
-#           <unknown-n> [poll]
-run_await() {
-    local want_v="$1" want_rc="$2" obs="$3"
-    local rc=0 out
-    rm -f "$SANDBOX/counter"
-    out="$(COUNTER="$SANDBOX/counter" \
-        SHIP_AWAIT_WINDOW="$4" SHIP_AWAIT_SILENCE="$5" \
-        SHIP_AWAIT_CRASH_SAMPLES="$6" SHIP_AWAIT_UNKNOWN_SAMPLES="$7" \
-        SHIP_AWAIT_POLL="${8:-1}" SHIP_AWAIT_RPC_BUDGETS="1 1 1" \
-        bash -c '. "$1"; ship_await fixture "$2" "$3"' _ \
-            "$ROOT/tools/scripts/ship_progress_lib.sh" "$SANDBOX/$obs" "$WANT_SHA" 2>&1)" || rc=$?
+# Every scenario below waits on a real clock, because the thing under test IS
+# a clock policy. Run sequentially they add up to most of the gate's runtime,
+# and they are completely independent of each other — separate observer,
+# separate counter, separate shell. So they are started together and judged
+# afterwards; the wall time becomes the longest one rather than their sum.
+#
+# A bare `wait` is WRONG here and was a real bug for one revision: it also
+# waits on the long-lived fixture daemons started with `&` further down, which
+# never exit, so the harness hung instead of finishing. Every spawn records
+# its pid and the collection phase waits on exactly those.
+AWAIT_N=0
+AWAIT_PIDS=""
+
+# spawn_await <tag> <want-verdict> <want-rc> <observer> <window> <silence>
+#             <crash-n> <unknown-n> [poll]
+spawn_await() {
+    local tag="$1"
+    printf '%s\n' "$2 $3 $4" > "$SANDBOX/$tag.want"
+    rm -f "$SANDBOX/$tag.counter"
+    (
+        rc=0
+        out="$(COUNTER="$SANDBOX/$tag.counter" \
+            SHIP_AWAIT_WINDOW="$5" SHIP_AWAIT_SILENCE="$6" \
+            SHIP_AWAIT_CRASH_SAMPLES="$7" SHIP_AWAIT_UNKNOWN_SAMPLES="$8" \
+            SHIP_AWAIT_POLL="${9:-1}" SHIP_AWAIT_RPC_BUDGETS="1 1 1" \
+            bash -c '. "$1"; ship_await fixture "$2" "$3"' _ \
+                "$ROOT/tools/scripts/ship_progress_lib.sh" \
+                "$SANDBOX/$4" "$WANT_SHA" 2>&1)" || rc=$?
+        printf '%s\n' "$rc" > "$SANDBOX/$tag.rc"
+        printf '%s\n' "$out" > "$SANDBOX/$tag.out"
+    ) &
+    AWAIT_PIDS="$AWAIT_PIDS $!"
+    AWAIT_N=$((AWAIT_N + 1))
+}
+
+# wait_await_pids — waits on the recorded scenario pids only, never bare.
+wait_await_pids() {
+    local p
+    for p in $AWAIT_PIDS; do wait "$p" 2>/dev/null || true; done
+    AWAIT_PIDS=""
+}
+
+judge_await() {
+    local tag="$1" want_v want_rc obs rc out
+    read -r want_v want_rc obs < "$SANDBOX/$tag.want"
+    rc="$(cat "$SANDBOX/$tag.rc" 2>/dev/null || echo missing)"
+    out="$(cat "$SANDBOX/$tag.out" 2>/dev/null || true)"
     # NEVER judge through a pipe, and never grep a captured transcript for a
     # decision: str_contains is a case pattern and cannot invert under pipefail.
     if [ "$rc" = "$want_rc" ] && str_contains "$out" ": $want_v after"; then
@@ -292,28 +332,31 @@ run_await() {
 . "$ROOT/tools/scripts/sh_str.sh"
 
 printf '\nship-selftest: 5. the loop, end to end, through the observer seam\n'
-#          verdict     rc  observer          window silence crash unknown poll
-run_await  QUALIFIED   0   fast-healthy         30     10      3     5     1
-run_await  QUALIFIED   0   late-answer          30     10      3     5     1
+#          tag    verdict     rc  observer        window silence crash unknown poll
+spawn_await s1    QUALIFIED   0   fast-healthy       30     10      3     5     1
+spawn_await s2    QUALIFIED   0   late-answer        30     10      3     5     1
 # ── BAR 1 ── a slow-but-progressing box must NEVER be rolled back. The window
 # expires at 3s while blkio climbs; the verdict is SLOW and the exit code is
 # 3, which no destructive branch in ship.sh reads.
-run_await  SLOW        3   blocked-on-disk       3     60      3     5     1
-run_await  SLOW        3   io-only-kernel        3     60      3     5     1
+spawn_await s3    SLOW        3   blocked-on-disk     3     60      3     5     1
+spawn_await s4    SLOW        3   io-only-kernel      3     60      3     5     1
 # ── BAR 2 ── a genuinely wedged box must STILL be rolled back. Same observer
 # shape, nothing moving: WEDGED, exit 1.
-run_await  WEDGED      1   wedged               60      3      3     5     1
+spawn_await s5    WEDGED      1   wedged             60      3      3     5     1
 # A crash loop and a vanished process are both faults, and both are named.
-run_await  CRASHED     1   restart-loop         60     60      3     5     1
-run_await  CRASHED     1   no-process           60     60      3     5     1
+spawn_await s6    CRASHED     1   restart-loop       60     60      3     5     1
+spawn_await s7    CRASHED     1   no-process         60     60      3     5     1
 # ── BAR 5 ── evidence unavailable must NOT default to rolling back.
-run_await  UNKNOWN     4   no-evidence          60     60      3     3     1
+spawn_await s8    UNKNOWN     4   no-evidence        60     60      3     3     1
 # Window expired with nothing observed either way: refuse to guess, and still
 # do not roll back.
-run_await  UNVERIFIED  3   wedged                3    600      3     5     1
+spawn_await s9    UNVERIFIED  3   wedged              3    600      3     5     1
 # Qualification stayed exact: wrong bytes or a missing identity never pass.
-run_await  UNVERIFIED  3   wrong-bytes           3    600      3     5     1
-run_await  UNVERIFIED  3   no-identity           3    600      3     5     1
+spawn_await s10   UNVERIFIED  3   wrong-bytes         3    600      3     5     1
+spawn_await s11   UNVERIFIED  3   no-identity         3    600      3     5     1
+wait_await_pids
+for tag in s1 s2 s3 s4 s5 s6 s7 s8 s9 s10 s11; do judge_await "$tag"; done
+[ "$AWAIT_N" -eq 11 ] || fail "expected 11 loop scenarios, spawned $AWAIT_N"
 
 # ── 6. the two-machine loop, with no second machine ─────────────────────────
 # This is the leg that had a hard-coded 300 and no override: ship.sh polling a
@@ -398,85 +441,93 @@ exit 0
 EOF
 chmod +x "$SANDBOX/fake-ssh"
 
-# start_fixture_daemon [busy]
+# Each scenario gets its OWN fixture daemon and its own MainPID file, so they
+# are independent and can be observed at the same time. `busy` decides whether
+# the daemon moves I/O — the difference between a box working through a cold
+# datadir and a wedged one.
+# start_fixture_daemon <tag> [busy]
 start_fixture_daemon() {
-    ZCL_SHIP_TEST_BUSY="${1:-}" "$SANDBOX/node" >/dev/null 2>&1 &
-    echo $! > "$SANDBOX/fixture.pid"
-    printf '%s\n' "$!" > "$SANDBOX/mainpid"
+    ZCL_SHIP_TEST_BUSY="${2:-}" "$SANDBOX/node" >/dev/null 2>&1 &
+    echo "$!" >> "$SANDBOX/fixture.pids"
+    printf '%s\n' "$!" > "$SANDBOX/mainpid.$1"
 }
-stop_fixture_daemon() {
-    if [ -s "$SANDBOX/fixture.pid" ]; then
-        kill "$(cat "$SANDBOX/fixture.pid")" 2>/dev/null || true
-        : > "$SANDBOX/fixture.pid"
+
+# spawn_remote_await <tag> <want-verdict> <want-rc> <transport> <window>
+#                    <silence> <crash-n> <unknown-n> <want-sha> [status-ok]
+spawn_remote_await() {
+    local tag="$1"
+    printf '%s\n' "$2 $3 $4" > "$SANDBOX/r.$tag.want"
+    (
+        rc=0
+        out="$(FIXTURE_TRANSPORT="$4" \
+            FIXTURE_MOCKBIN="$SANDBOX/mockbin" \
+            FIXTURE_PIDFILE="$SANDBOX/mainpid.$tag" \
+            FIXTURE_STATUS_OK="${10:-}" \
+            ZCL_SHIP_REMOTE_EXEC="$SANDBOX/fake-ssh" \
+            SHIP_LIB_TEXT="$SHIP_LIB_TEXT" \
+            SHIP_OBS_UNIT=zclassic23 SHIP_OBS_SHA="$9" \
+            SHIP_OBS_SRC= SHIP_OBS_COMMIT= \
+            SHIP_SSH_OPTS= SHIP_REMOTE_HOST=fixture-host \
+            SHIP_AWAIT_WINDOW="$5" SHIP_AWAIT_SILENCE="$6" \
+            SHIP_AWAIT_CRASH_SAMPLES="$7" SHIP_AWAIT_UNKNOWN_SAMPLES="$8" \
+            SHIP_AWAIT_POLL=1 SHIP_AWAIT_RPC_BUDGETS="1 2 3" \
+            bash -c '. "$1"; ship_await fixture-host ship_remote_observe "$2"' _ \
+                "$ROOT/tools/scripts/ship_progress_lib.sh" "$9" 2>&1)" || rc=$?
+        printf '%s\n' "$rc" > "$SANDBOX/r.$tag.rc"
+        printf '%s\n' "$out" > "$SANDBOX/r.$tag.out"
+    ) &
+    AWAIT_PIDS="$AWAIT_PIDS $!"
+}
+
+judge_remote_await() {
+    local tag="$1" want_v want_rc transport rc out
+    read -r want_v want_rc transport < "$SANDBOX/r.$tag.want"
+    rc="$(cat "$SANDBOX/r.$tag.rc" 2>/dev/null || echo missing)"
+    out="$(cat "$SANDBOX/r.$tag.out" 2>/dev/null || true)"
+    if [ "$rc" = "$want_rc" ] && str_contains "$out" ": $want_v after"; then
+        pass "remote leg / $tag (transport=$transport) -> $want_v (exit $rc)"
+    else
+        fail "remote leg / $tag (transport=$transport) wanted $want_v/exit $want_rc, got exit $rc: $out"
     fi
 }
 
-# run_remote_await <want-verdict> <want-rc> <transport> <window> <silence>
-#                  <crash-n> <unknown-n>
-run_remote_await() {
-    local want_v="$1" want_rc="$2" transport="$3"
-    local rc=0 out
-    out="$(FIXTURE_TRANSPORT="$transport" \
-        FIXTURE_MOCKBIN="$SANDBOX/mockbin" \
-        FIXTURE_PIDFILE="$SANDBOX/mainpid" \
-        FIXTURE_STATUS_OK="${FIXTURE_STATUS_OK:-}" \
-        ZCL_SHIP_REMOTE_EXEC="$SANDBOX/fake-ssh" \
-        SHIP_LIB_TEXT="$SHIP_LIB_TEXT" \
-        SHIP_OBS_UNIT=zclassic23 SHIP_OBS_SHA="$8" \
-        SHIP_OBS_SRC= SHIP_OBS_COMMIT= \
-        SHIP_SSH_OPTS= SHIP_REMOTE_HOST=fixture-host \
-        SHIP_AWAIT_WINDOW="$4" SHIP_AWAIT_SILENCE="$5" \
-        SHIP_AWAIT_CRASH_SAMPLES="$6" SHIP_AWAIT_UNKNOWN_SAMPLES="$7" \
-        SHIP_AWAIT_POLL=1 SHIP_AWAIT_RPC_BUDGETS="1 2 3" \
-        bash -c '. "$1"; ship_await fixture-host ship_remote_observe "$2"' _ \
-            "$ROOT/tools/scripts/ship_progress_lib.sh" "$8" 2>&1)" || rc=$?
-    if [ "$rc" = "$want_rc" ] && str_contains "$out" ": $want_v after"; then
-        pass "remote leg / transport=$transport -> $want_v (exit $rc)"
-    else
-        fail "remote leg / transport=$transport wanted $want_v/exit $want_rc, got exit $rc: $out"
-    fi
-}
+FIXTURE_SHA="$(sha256sum < "$SANDBOX/node" | awk '{print $1}')"
+: > "$SANDBOX/fixture.pids"
+start_fixture_daemon healthy
+start_fixture_daemon slow busy
+start_fixture_daemon quiet
+start_fixture_daemon frozen
+# The far side's service names a MainPID that no longer exists.
+printf '999999\n' > "$SANDBOX/mainpid.gone"
+# The transport-failure cases never reach a daemon at all.
+printf '1\n' > "$SANDBOX/mainpid.down"
+printf '1\n' > "$SANDBOX/mainpid.empty"
 
 # The observer program really does travel over the seam and really is executed
 # on the far side, against a real process and a real /proc: a live fixture
 # daemon whose exact bytes match and which answers `status` QUALIFIES.
-FIXTURE_SHA="$(sha256sum < "$SANDBOX/node" | awk '{print $1}')"
-stop_fixture_daemon
-start_fixture_daemon
-FIXTURE_STATUS_OK=1 run_remote_await QUALIFIED 0 up 30 20 3 5 "$FIXTURE_SHA"
-
+#            tag     verdict     rc transport window silence crash unknown sha            status-ok
+spawn_remote_await healthy QUALIFIED  0  up        30     20      3     5   "$FIXTURE_SHA" 1
 # ── BAR 5, over the wire ── ssh cannot connect. The old code read that as
 # "did not come back healthy" and ROLLED BACK. It is UNKNOWN, and UNKNOWN is
-# not a failed deploy.
-FIXTURE_STATUS_OK= run_remote_await UNKNOWN 4 down 60 60 3 3 "$FIXTURE_SHA"
-# Connected but silent is also not evidence.
-FIXTURE_STATUS_OK= run_remote_await UNKNOWN 4 empty 60 60 3 3 "$FIXTURE_SHA"
-
+# not a failed deploy. Connected-but-silent is not evidence either.
+spawn_remote_await down    UNKNOWN    4  down      60     60      3     3   "$FIXTURE_SHA"
+spawn_remote_await empty   UNKNOWN    4  empty     60     60      3     3   "$FIXTURE_SHA"
 # ── BAR 1, over the wire, against a REAL process ── the far side is up, has
-# the right bytes, is moving I/O, and its `status` never answers — a node
+# the right bytes, is moving I/O, and its `status` never answers: a node
 # working through a cold datadir with its RPC front door still shut. The old
 # local loop timed out on exactly this and rolled the fleet back. It is SLOW.
-stop_fixture_daemon
-start_fixture_daemon busy
-FIXTURE_STATUS_OK= run_remote_await SLOW 3 up 4 600 3 5 "$FIXTURE_SHA"
-
+spawn_remote_await slow    SLOW       3  up         4    600      3     5   "$FIXTURE_SHA"
 # The same box with nothing moving at all, judged before silence is
 # established: the window produces UNVERIFIED, which is still not a rollback.
-stop_fixture_daemon
-start_fixture_daemon
-FIXTURE_STATUS_OK= run_remote_await UNVERIFIED 3 up 4 600 3 5 "$FIXTURE_SHA"
-
+spawn_remote_await quiet   UNVERIFIED 3  up         4    600      3     5   "$FIXTURE_SHA"
 # ── BAR 2, over the wire ── nothing moving for the whole silence limit on a
 # process that demonstrably exists. That is a wedge and it MUST roll back.
-stop_fixture_daemon
-start_fixture_daemon
-FIXTURE_STATUS_OK= run_remote_await WEDGED 1 up 600 4 3 5 "$FIXTURE_SHA"
-
-# The service names a MainPID that no longer exists: the far side LOOKED and
-# found no process. That is a fault, and it is reachable over the seam.
-stop_fixture_daemon
-printf '999999\n' > "$SANDBOX/mainpid"
-FIXTURE_STATUS_OK= run_remote_await CRASHED 1 up 60 600 3 5 "$FIXTURE_SHA"
+spawn_remote_await frozen  WEDGED     1  up       600      4      3     5   "$FIXTURE_SHA"
+# The far side LOOKED and found no process. A fault, reachable over the seam.
+spawn_remote_await gone    CRASHED    1  up        60    600      3     5   "$FIXTURE_SHA"
+wait_await_pids
+for tag in healthy down empty slow quiet frozen gone; do judge_remote_await "$tag"; done
 
 # ── 7. the shipped script text ──────────────────────────────────────────────
 # ship.sh's two remote scripts are extracted the same way

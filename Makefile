@@ -7213,17 +7213,41 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 # Ship one production binary to every host the operator names. `deploy` above
 # installs to THIS host only; `ship` builds one candidate, proves it, and puts
 # those exact bytes on each host, verifying every one against the source id
-# its running daemon reports and rolling that host back if it does not come
-# back healthy. Build-once/ship-many is deliberate: a per-host rebuild both
-# costs a full whole-program link per host and produces different bytes per
-# host, which makes "is every host running the same code" unanswerable by
-# comparison.
+# its running daemon reports. Build-once/ship-many is deliberate: a per-host
+# rebuild both costs a full whole-program link per host and produces DIFFERENT
+# bytes per host, which makes "is every host running the same code"
+# unanswerable by comparison.
+#
+# A host is rolled back only when ship PROVES a fault there: its candidate
+# process stopped moving entirely (no bytes, no CPU, no blocked-on-disk ticks)
+# or would not stay up. It is NOT rolled back for being slow. ship.sh used to
+# gate that rollback on four stopwatches, and a 7200rpm box booting a ~22 GB
+# datadir missed them routinely — across the whole fleet in one command.
+#
+#   exit 0  every named target qualified
+#   exit 1  a proven fault; that host was rolled back, with evidence printed
+#   exit 3  a target was still demonstrably progressing when its reporting
+#           window closed. NOT A FAILURE. Its candidate is installed and
+#           nothing was rolled back — re-run ship to re-check.
+#   exit 4  a target could not be observed at all. An unreachable host is an
+#           UNKNOWN, not a failed deploy; nothing was rolled back.
+#
 #   make ship                   # gate, build, then local + remote
 #   make ship SHIP_ARGS=--dry-run
 #   make ship SHIP_ARGS=--targets=remote
 .PHONY: ship
 ship:
-	@./tools/ship.sh $(SHIP_ARGS)
+	@set +e; ./tools/ship.sh $(SHIP_ARGS); ship_rc=$$?; set -e; \
+	case "$$ship_rc" in \
+	    0) ;; \
+	    3) echo "ship: SLOW BOX — a target was still making observable progress when its" >&2; \
+	       echo "      reporting window closed. Its candidate is INSTALLED and nothing was" >&2; \
+	       echo "      rolled back: a slow disk is not a failed deploy. Re-run 'make ship" >&2; \
+	       echo "      SHIP_ARGS=--targets=<that host>' to finish verifying it." >&2 ;; \
+	    4) echo "ship: UNKNOWN HOST — a target could not be observed. Its candidate is" >&2; \
+	       echo "      installed and nothing was rolled back; go look at the host." >&2 ;; \
+	esac; \
+	exit "$$ship_rc"
 
 .PHONY: seed-anchor-snapshot
 seed-anchor-snapshot:

@@ -469,6 +469,14 @@ ship_remote_script() {
 # The exact text executed on the target box for one observation: this whole
 # library, then one call. The box has no checkout, so the library travels with
 # the question. Always exits 0 — see ship_observe.
+#
+# It goes over as ONE ssh argv word, which Linux caps at 128 KB per argument.
+# This file is a small fraction of that and a poll is once every few seconds,
+# so the cost is noise — but if it ever approaches that ceiling the fix is to
+# send it on stdin to `sh -s`, NOT to trim the observer. Note that a naive
+# `printf ... | ssh` would report printf's SIGPIPE (141) instead of ssh's
+# status under pipefail, which is precisely the inversion that must not decide
+# whether a host gets rolled back; write it to a temp file and redirect.
 ship_observer_program() {
     printf '%s\n' "$1"
     printf "ship_observe '%s' '%s' '%s' '%s' '%s'\nexit 0\n" \
