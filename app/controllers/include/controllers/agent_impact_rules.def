@@ -998,7 +998,7 @@ AGENT_IMPACT_RULE("lib/vcs/include/vcs/fastobj.h|lib/vcs/src/fastobj.c|lib/vcs/i
  * created, classified for ANNOUNCE/WANT, and checked out. Any change to the
  * shared permissive-text authority or one of those boundaries must select
  * both the hostile public-shape proof and the end-to-end carrier proof. */
-AGENT_IMPACT_RULE("lib/vcs/include/vcs/package_public_shape.h|lib/vcs/include/vcs/package_release.h|lib/vcs/src/package_public_shape.c|lib/vcs/src/package_release.c|lib/vcs/src/source_package_checkout.c|lib/vcs/src/source_package_transport.c|lib/test/src/test_zcode_public_shape.c|lib/test/src/test_vcs_core.c|docs/P2P_SOURCE_HOSTING.md", "zcode_public_shape vcs_core make_lint_gates")
+AGENT_IMPACT_RULE("lib/vcs/include/vcs/package_public_shape.h|lib/vcs/include/vcs/package_release.h|lib/vcs/src/package_public_shape.c|lib/vcs/src/package_release.c|lib/vcs/src/source_package_checkout.c|lib/vcs/src/source_package_transport.c|lib/test/include/test/public_shape_fixture.h|lib/test/src/test_zcode_public_shape.c|lib/test/src/test_vcs_core.c|docs/P2P_SOURCE_HOSTING.md", "zcode_public_shape vcs_core zcode_dev_objects make_lint_gates")
 /* The build-receipt codec (ZCLBLD wire, schema v1/v2) and the reproduction
  * comparator: every emit, install, and reproduce path flows through these. */
 AGENT_IMPACT_RULE("lib/vcs/include/vcs/package_build.h|lib/vcs/src/package_build.c|lib/vcs/include/vcs/package_reproduce.h|lib/vcs/src/package_reproduce.c|lib/test/src/test_zcode_verify.c", "zcode_verify zcode_swarm_net zcode_dev_objects make_lint_gates")
