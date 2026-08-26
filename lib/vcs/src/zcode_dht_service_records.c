@@ -346,6 +346,13 @@ bool vcs_zcode_dht_service_record_operation_poll(
   memset(out, 0, sizeof(*out));
   out->state = operation->state;
   out->store_status = operation->store_status;
+  if (operation->state != VCS_ZCODE_DHT_RECORD_OPERATION_PENDING) {
+    const uint64_t retention =
+        VCS_ZCODE_DHT_RECORD_OPERATION_RESULT_RETENTION_S;
+    out->expires_mono = operation->terminal_mono > UINT64_MAX - retention
+                            ? UINT64_MAX
+                            : operation->terminal_mono + retention;
+  }
   out->page_offset = operation->page_offset;
   out->next_offset = operation->next_offset;
   out->record_count = operation->record_count;
@@ -384,21 +391,22 @@ bool vcs_zcode_dht_service_record_operation_cancel(
 }
 
 /* A terminal operation holds one of eight slots until its owner collects it.
- * Every live owner collects promptly: the publication drive reaps its
- * children on every schedule pass, and an RPC discovery's lease cancels its
- * children when it expires. An operation still sitting terminal past that
- * horizon belongs to an owner that is gone — free it. The result was either
- * already reaped or never will be; the store, not the slot, is the record's
- * home. */
+ * The public API gives every owner the same explicit retention interval;
+ * after it, an unpolled result is no longer part of the contract and the slot
+ * is reusable. State is the terminal discriminator because zero is a valid
+ * monotonic timestamp. Subtraction avoids timestamp-addition overflow and a
+ * backwards clock step retains the result until the clock catches up. */
 void vcs_zcode_dht_records_sweep(struct vcs_zcode_dht_service *service,
                                  uint64_t now_mono)
 {
   for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_RECORD_OPERATIONS; i++) {
     struct service_record_operation *operation =
         &service->record_operations[i];
-    if (operation->used && operation->terminal_mono &&
-        operation->terminal_mono + VCS_ZCODE_DHT_RECORD_OPERATION_SWEEP_S <=
-            now_mono)
+    if (operation->used &&
+        operation->state != VCS_ZCODE_DHT_RECORD_OPERATION_PENDING &&
+        now_mono >= operation->terminal_mono &&
+        now_mono - operation->terminal_mono >=
+            VCS_ZCODE_DHT_RECORD_OPERATION_RESULT_RETENTION_S)
       records_operation_release(service, operation->id, operation);
   }
 }
