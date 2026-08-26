@@ -147,6 +147,40 @@ static struct service_publication *publication_slot(
   return NULL;
 }
 
+/* The slot a commit REPLACES rather than grows past. A used slot holding the
+ * same publication stream at a sequence the incoming record supersedes is
+ * the same intention, refreshed out-of-band: reusing it keeps a manual
+ * re-publish from leaking a second permanent slot. Without this, every
+ * out-of-band renewal of a live stream consumed a fresh slot, the old slot
+ * spun forever on renewals the store refused as STALE, and the intent table
+ * filled with historical sequences of one stream until every new commit on
+ * the node was refused "global-cap" — on a real host, at 16/16. */
+static struct service_publication *publication_slot_for_stream(
+    struct vcs_zcode_dht_service *service,
+    const struct vcs_zcode_dht_record *record)
+{
+  for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_PUBLICATIONS; i++) {
+    struct service_publication *slot = &service->publications[i];
+    if (slot->used &&
+        vcs_zcode_dht_record_stream_equal(&slot->record, record) &&
+        slot->record.sequence <= record->sequence)
+      return slot;
+  }
+  return NULL;
+}
+
+/* The slot a commit claims: the same stream's existing intention when the
+ * incoming record supersedes it, otherwise a fresh free slot. NULL only when
+ * the table is full of streams this record neither belongs to nor beats. */
+static struct service_publication *publication_claim(
+    struct vcs_zcode_dht_service *service,
+    const struct vcs_zcode_dht_record *record)
+{
+  struct service_publication *slot =
+      publication_slot_for_stream(service, record);
+  return slot ? slot : publication_slot(service);
+}
+
 enum vcs_zcode_dht_record_store_result
 vcs_zcode_dht_service_record_publish_commit(
     struct vcs_zcode_dht_service *service,
@@ -157,11 +191,8 @@ vcs_zcode_dht_service_record_publish_commit(
 {
   uint8_t expected[32], difference = 0;
   struct vcs_zcode_dht_record record;
-  struct service_publication *publication = publication_slot(service);
   if (reason)
     *reason = VCS_ZCODE_DHT_RECORD_OK;
-  if (!publication)
-    return VCS_ZCODE_DHT_RECORD_STORE_GLOBAL_CAP;
   if (!plan_token ||
       !publication_build(service, spec, &record, expected, false, reason))
     return VCS_ZCODE_DHT_RECORD_STORE_INVALID;
@@ -169,6 +200,10 @@ vcs_zcode_dht_service_record_publish_commit(
     difference |= expected[i] ^ plan_token[i];
   if (difference)
     return VCS_ZCODE_DHT_RECORD_STORE_STALE;
+  struct service_publication *publication =
+      publication_claim(service, &record);
+  if (!publication)
+    return VCS_ZCODE_DHT_RECORD_STORE_GLOBAL_CAP;
   enum vcs_zcode_dht_record_store_result result =
       vcs_zcode_dht_service_record_admit(service, &record, now);
   if (record_out && (result == VCS_ZCODE_DHT_RECORD_STORE_ADDED ||
@@ -286,9 +321,6 @@ vcs_zcode_dht_storage_ack_commit_verified(
 {
   uint8_t expected[32], difference = 0;
   struct vcs_zcode_dht_record record;
-  struct service_publication *publication = publication_slot(service);
-  if (!publication)
-    return VCS_ZCODE_DHT_RECORD_STORE_GLOBAL_CAP;
   if (!spec || spec->kind != VCS_ZCODE_DHT_RECORD_STORAGE_ACK ||
       !plan_token ||
       !publication_build(service, spec, &record, expected, true, NULL))
@@ -297,6 +329,10 @@ vcs_zcode_dht_storage_ack_commit_verified(
     difference |= expected[i] ^ plan_token[i];
   if (difference)
     return VCS_ZCODE_DHT_RECORD_STORE_STALE;
+  struct service_publication *publication =
+      publication_claim(service, &record);
+  if (!publication)
+    return VCS_ZCODE_DHT_RECORD_STORE_GLOBAL_CAP;
   enum vcs_zcode_dht_record_store_result result =
       vcs_zcode_dht_service_record_admit(service, &record, now);
   if (record_out && (result == VCS_ZCODE_DHT_RECORD_STORE_ADDED ||
@@ -330,9 +366,6 @@ vcs_zcode_dht_source_reproduction_ack_commit_verified(
   uint8_t expected[32], difference = 0;
   struct vcs_zcode_dht_record record;
   struct vcs_zcode_dht_publish_spec normalized;
-  struct service_publication *publication = publication_slot(service);
-  if (!publication)
-    return VCS_ZCODE_DHT_RECORD_STORE_GLOBAL_CAP;
   if (!plan_token ||
       !publication_evidence_spec(
           service, spec, VCS_ZCODE_DHT_RECORD_SOURCE_REPRODUCTION_ACK,
@@ -344,6 +377,10 @@ vcs_zcode_dht_source_reproduction_ack_commit_verified(
     difference |= expected[i] ^ plan_token[i];
   if (difference)
     return VCS_ZCODE_DHT_RECORD_STORE_STALE;
+  struct service_publication *publication =
+      publication_claim(service, &record);
+  if (!publication)
+    return VCS_ZCODE_DHT_RECORD_STORE_GLOBAL_CAP;
   enum vcs_zcode_dht_record_store_result result =
       vcs_zcode_dht_service_record_admit(service, &record, now);
   if (record_out && (result == VCS_ZCODE_DHT_RECORD_STORE_ADDED ||
@@ -679,6 +716,20 @@ static void publication_drive(struct vcs_zcode_dht_service *service,
                               struct vcs_zcode_dht_time now)
 {
   uint64_t renew_at = publication_renew_at(publication);
+  /* A superseded intention can never renew: the record store already holds a
+   * higher sequence for this stream, so every renewal re-signs a record the
+   * store refuses as STALE, forever. Free the slot instead of letting it
+   * spin — this is also what heals an intent table polluted before commits
+   * learned to supersede in place: the first schedule after boot frees the
+   * historical sequences the persisted file restored. */
+  if (vcs_zcode_dht_record_store_max_sequence(service->record_store,
+                                              &publication->record) >
+      publication->record.sequence) {
+    publication_cancel_active(service, publication);
+    memset(publication, 0, sizeof(*publication));
+    publication_mark_dirty(service, now.monotonic_s);
+    return;
+  }
   if (publication->record.kind ==
           VCS_ZCODE_DHT_RECORD_SOURCE_REPRODUCTION_ACK &&
       now.wall_unix >= publication->record.expiry) {

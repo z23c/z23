@@ -119,8 +119,8 @@ static const uint8_t *record_root(const struct vcs_zcode_dht_record *record)
              : record->transport_root;
 }
 
-static bool record_stream_equal(const struct vcs_zcode_dht_record *a,
-                                const struct vcs_zcode_dht_record *b)
+bool vcs_zcode_dht_record_stream_equal(const struct vcs_zcode_dht_record *a,
+                                       const struct vcs_zcode_dht_record *b)
 {
   if (a->kind != b->kind ||
       strcmp(a->namespace_name, b->namespace_name) != 0 ||
@@ -146,7 +146,7 @@ static size_t count_root_after_removal(
   size_t count = 0;
   for (size_t i = 0; i < store->count; i++) {
     const struct vcs_zcode_dht_record *record = &store->entries[i].record;
-    if (remove_older && record_stream_equal(record, incoming) &&
+    if (remove_older && vcs_zcode_dht_record_stream_equal(record, incoming) &&
         record->sequence < incoming->sequence)
       continue;
     if (memcmp(record_root(record), record_root(incoming), 32) == 0)
@@ -162,7 +162,7 @@ static size_t count_provider_after_removal(
   size_t count = 0;
   for (size_t i = 0; i < store->count; i++) {
     const struct vcs_zcode_dht_record *record = &store->entries[i].record;
-    if (remove_older && record_stream_equal(record, incoming) &&
+    if (remove_older && vcs_zcode_dht_record_stream_equal(record, incoming) &&
         record->sequence < incoming->sequence)
       continue;
     if (memcmp(record->provider_node_id, incoming->provider_node_id, 32) == 0)
@@ -191,7 +191,7 @@ enum vcs_zcode_dht_record_store_result vcs_zcode_dht_record_store_put(
   size_t conflicts = 0, remove_count = 0;
   for (size_t i = 0; i < store->count; i++) {
     const struct record_store_entry *entry = &store->entries[i];
-    if (!record_stream_equal(&entry->record, record))
+    if (!vcs_zcode_dht_record_stream_equal(&entry->record, record))
       continue;
     if (entry->record.sequence > max_sequence)
       max_sequence = entry->record.sequence;
@@ -209,7 +209,7 @@ enum vcs_zcode_dht_record_store_result vcs_zcode_dht_record_store_put(
   bool newer = max_sequence && record->sequence > max_sequence;
   if (newer) {
     for (size_t i = 0; i < store->count; i++)
-      if (record_stream_equal(&store->entries[i].record, record) &&
+      if (vcs_zcode_dht_record_stream_equal(&store->entries[i].record, record) &&
           store->entries[i].record.sequence < record->sequence)
         remove_count++;
   }
@@ -225,7 +225,7 @@ enum vcs_zcode_dht_record_store_result vcs_zcode_dht_record_store_put(
   if (remove_count) {
     size_t write_index = 0;
     for (size_t i = 0; i < store->count; i++) {
-      bool remove = record_stream_equal(&store->entries[i].record, record) &&
+      bool remove = vcs_zcode_dht_record_stream_equal(&store->entries[i].record, record) &&
                     store->entries[i].record.sequence < record->sequence;
       if (!remove)
         store->entries[write_index++] = store->entries[i];
@@ -307,7 +307,7 @@ void vcs_zcode_dht_record_store_stream_digest(
     return;
   uint32_t count = 0;
   for (size_t i = 0; i < store->count; i++)
-    if (record_stream_equal(&store->entries[i].record, record))
+    if (vcs_zcode_dht_record_stream_equal(&store->entries[i].record, record))
       count++;
   struct sha3_256_ctx sha;
   sha3_256_init(&sha);
@@ -318,7 +318,7 @@ void vcs_zcode_dht_record_store_stream_digest(
   sha3_256_write(&sha, count_wire, sizeof(count_wire));
   /* entries is globally wire-sorted, so filtering preserves canonical order. */
   for (size_t i = 0; i < store->count; i++)
-    if (record_stream_equal(&store->entries[i].record, record))
+    if (vcs_zcode_dht_record_stream_equal(&store->entries[i].record, record))
       sha3_256_write(&sha, store->entries[i].wire,
                      VCS_ZCODE_DHT_RECORD_WIRE_BYTES);
   sha3_256_finalize(&sha, out);
@@ -332,7 +332,7 @@ uint64_t vcs_zcode_dht_record_store_max_sequence(
     return 0;
   uint64_t max_sequence = 0;
   for (size_t i = 0; i < store->count; i++)
-    if (record_stream_equal(&store->entries[i].record, record) &&
+    if (vcs_zcode_dht_record_stream_equal(&store->entries[i].record, record) &&
         store->entries[i].record.sequence > max_sequence)
       max_sequence = store->entries[i].record.sequence;
   return max_sequence;
