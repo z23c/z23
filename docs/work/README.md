@@ -200,14 +200,14 @@ Each assignment lives at `docs/work/wt<N>-<slug>.md` and contains:
 | [`TRANSACTION_LAB.md`](./TRANSACTION_LAB.md) | LIVE | transaction laboratory notebook; keeps its two questions separate |
 | [`TRANSACTION_MICRO_LAB.md`](./TRANSACTION_MICRO_LAB.md) | PLAN | owner-visible 100-transaction micro lab demonstration plan |
 | [`ZC23_DISTRIBUTION_RULES.md`](./ZC23_DISTRIBUTION_RULES.md) | PLAN | ZC23 distribution rules — phase C2, owner-decided 2026-08-09 |
+| [`WIRE_COMPILE_CACHE.md`](./WIRE_COMPILE_CACHE.md) | DESIGN | Commons WIRE lane working note: transfer framing, POINTER/PROVIDER discovery records, and the cross-node compile cache; subordinate to `../spec/c23-package-format.md`, which wins on any disagreement |
+| [`CODEX_HANDOFF.md`](./CODEX_HANDOFF.md) | LIVE | the executor contract Codex works under: division of authority, what it owns, and its never-do list; read cold alongside `../../AGENTS.md` and `../DEVELOPING.md` |
+| [`READY1_DESCRIPTOR_GATE.md`](./READY1_DESCRIPTOR_GATE.md) | DESIGN | READY=1 and onion descriptor publication: the cycle-3 ordered-loop halt investigation, not a threshold change |
 | [`transaction-lab-events.jsonl`](./transaction-lab-events.jsonl) | EVIDENCE | event ledger backing TRANSACTION_LAB |
 | [`transaction-micro-lab-events.jsonl`](./transaction-micro-lab-events.jsonl) | EVIDENCE | event ledger backing TRANSACTION_MICRO_LAB |
 | [`zcode-selfhost-validation-ledger.json`](./zcode-selfhost-validation-ledger.json) | EVIDENCE | zcl.zcode_selfhost_validation_ledger.v1 snapshot |
 | [`zcode-selfhost-evidence/`](./zcode-selfhost-evidence/) | EVIDENCE | frozen born-red replay artifacts: 15 paired json+log files (foundation-replay, codec-cursor, package-dev, package-registry, score-receipt, sha3-foundation) |
 | [`zcode-selfhost-evidence/born-red-base-foundation-replay.json`](./zcode-selfhost-evidence/born-red-base-foundation-replay.json) | EVIDENCE | born-red replay artifact (base-foundation-replay json half of paired proof) |
-| [`WIRE_COMPILE_CACHE.md`](./WIRE_COMPILE_CACHE.md) | DESIGN | Commons WIRE lane working note: transfer framing, POINTER/PROVIDER discovery records, and the cross-node compile cache; subordinate to `../spec/c23-package-format.md`, which wins on any disagreement |
-| [`CODEX_HANDOFF.md`](./CODEX_HANDOFF.md) | LIVE | the executor contract Codex works under: division of authority, ownership, and the never-do list; read cold alongside `../../AGENTS.md` and `../DEVELOPING.md` |
-| [`READY1_DESCRIPTOR_GATE.md`](./READY1_DESCRIPTOR_GATE.md) | DESIGN | READY=1 and onion descriptor publication: the cycle-3 ordered-loop halt investigation, not a threshold change |
 | [`zcode-selfhost-evidence/born-red-base-foundation-replay.log`](./zcode-selfhost-evidence/born-red-base-foundation-replay.log) | EVIDENCE | born-red replay artifact (base-foundation-replay log half of paired proof) |
 | [`zcode-selfhost-evidence/born-red-codec-cursor.json`](./zcode-selfhost-evidence/born-red-codec-cursor.json) | EVIDENCE | born-red replay artifact (codec-cursor json half of paired proof) |
 | [`zcode-selfhost-evidence/born-red-codec-cursor.log`](./zcode-selfhost-evidence/born-red-codec-cursor.log) | EVIDENCE | born-red replay artifact (codec-cursor log half of paired proof) |
