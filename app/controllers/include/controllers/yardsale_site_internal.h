@@ -119,17 +119,31 @@ static inline const char *parse_form_field(const char *body, size_t len,
 {
     if (!body || !len || !field || !out || outmax == 0)
         return NULL;
-    char search[96];
-    snprintf(search, sizeof(search), "%s=", field);
-    const char *p = strstr(body, search);
-    if (!p)
+    size_t field_len = strlen(field);
+    const char *found = NULL;
+    size_t found_len = 0;
+    size_t pos = 0;
+    while (pos < len) {
+        size_t end = pos;
+        while (end < len && body[end] != '&')
+            end++;
+        size_t eq = pos;
+        while (eq < end && body[eq] != '=')
+            eq++;
+        if (eq < end && eq - pos == field_len &&
+            memcmp(body + pos, field, field_len) == 0) {
+            if (found) {
+                out[0] = '\0';
+                return NULL;
+            }
+            found = body + eq + 1;
+            found_len = end - eq - 1;
+        }
+        pos = end + (end < len);
+    }
+    if (!found)
         return NULL;
-    p += strlen(search);
-    size_t remaining = len - (size_t)(p - body);
-    size_t vlen = 0;
-    while (vlen < remaining && p[vlen] && p[vlen] != '&' && p[vlen] != ' ')
-        vlen++;
-    url_decode(out, outmax, p, vlen);
+    url_decode(out, outmax, found, found_len);
     return out;
 }
 

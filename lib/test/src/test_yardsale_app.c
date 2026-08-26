@@ -28,6 +28,7 @@
 #include "keys/key_io.h"
 #include "keys/pubkey.h"
 #include "models/database.h"
+#include "models/yardsale_plan.h"
 #include "net/onion_service.h"
 #include "platform/time_compat.h"
 #include "script/standard.h"
@@ -1204,6 +1205,82 @@ static int t_webbuy_plan_gate(void)
         sqlite3_finalize(q);
         YSA_CHECK("webbuy: phase A stored exactly one PLANNED row",
                   planned_rows == 1);
+
+        char webbuy_request[65] = {0};
+        q = NULL;
+        if (sqlite3_prepare_v2(ndb.db,
+                "SELECT request_hash FROM yardsale_plans LIMIT 1",
+                -1, &q, NULL) == SQLITE_OK &&
+            sqlite3_step(q) == SQLITE_ROW) {
+            const unsigned char *text = sqlite3_column_text(q, 0);
+            if (text)
+                snprintf(webbuy_request, sizeof(webbuy_request), "%s",
+                         (const char *)text);
+        }
+        sqlite3_finalize(q);
+
+        struct db_yardsale_plan claim_a, claim_b;
+        memset(&claim_a, 0, sizeof(claim_a));
+        memset(&claim_b, 0, sizeof(claim_b));
+        bool found_a = db_yardsale_plan_find_by_request(
+            &ndb, webbuy_request, &claim_a);
+        bool found_b = db_yardsale_plan_find_by_request(
+            &ndb, webbuy_request, &claim_b);
+        enum db_yardsale_plan_claim_result won_a = found_a
+            ? db_yardsale_plan_claim(&ndb, &claim_a, now)
+            : DB_YARDSALE_PLAN_CLAIM_ERROR;
+        enum db_yardsale_plan_claim_result won_b = found_b
+            ? db_yardsale_plan_claim(&ndb, &claim_b, now)
+            : DB_YARDSALE_PLAN_CLAIM_ERROR;
+        YSA_CHECK("webbuy: only one claimant can cross PLANNED to ARMING",
+                  won_a == DB_YARDSALE_PLAN_CLAIMED &&
+                  won_b == DB_YARDSALE_PLAN_CLAIM_REFUSED);
+        memset(resp, 0, sizeof(resp));
+        n = yardsale_site_handle_request(
+            "POST", "/yardsale/buy", (const uint8_t *)confirm_form,
+            strlen(confirm_form), resp, sizeof(resp) - 1);
+        YSA_CHECK("webbuy: an uncertain ARMING row never replays",
+                  n > 0 && strstr((const char *)resp, "400") != NULL &&
+                  flood.count == 0);
+        snprintf(claim_a.state, sizeof(claim_a.state), "%s",
+                 YARDSALE_PLAN_STATE_PLANNED);
+        claim_a.result[0] = '\0';
+        YSA_CHECK("webbuy: fixture releases the claimed row",
+                  db_yardsale_plan_save(&ndb, &claim_a));
+        snprintf(claim_a.state, sizeof(claim_a.state), "%s",
+                 YARDSALE_PLAN_STATE_EXPIRED);
+        YSA_CHECK("webbuy: fixture expires the live-terms plan",
+                  db_yardsale_plan_save(&ndb, &claim_a));
+        memset(resp, 0, sizeof(resp));
+        n = yardsale_site_handle_request(
+            "POST", "/yardsale/buy", (const uint8_t *)base_form,
+            strlen(base_form), resp, sizeof(resp) - 1);
+        memset(&claim_a, 0, sizeof(claim_a));
+        bool renewed = db_yardsale_plan_find_by_request(
+            &ndb, webbuy_request, &claim_a);
+        YSA_CHECK("webbuy: inspecting live terms renews an expired plan",
+                  n > 0 && renewed &&
+                  strcmp(claim_a.state, YARDSALE_PLAN_STATE_PLANNED) == 0);
+
+        char alias_form[1340], junk_fee_form[1340];
+        snprintf(alias_form, sizeof(alias_form), "%s&xconfirm=true",
+                 base_form);
+        memset(resp, 0, sizeof(resp));
+        n = yardsale_site_handle_request(
+            "POST", "/yardsale/buy", (const uint8_t *)alias_form,
+            strlen(alias_form), resp, sizeof(resp) - 1);
+        YSA_CHECK("webbuy: a field-name suffix cannot confirm",
+                  n > 0 && strstr((const char *)resp, "Accept planned") &&
+                  flood.count == 0);
+        snprintf(junk_fee_form, sizeof(junk_fee_form), "%s&fee=1junk",
+                 base_form);
+        memset(resp, 0, sizeof(resp));
+        n = yardsale_site_handle_request(
+            "POST", "/yardsale/buy", (const uint8_t *)junk_fee_form,
+            strlen(junk_fee_form), resp, sizeof(resp) - 1);
+        YSA_CHECK("webbuy: duplicate or junk money fields never confirm",
+                  n > 0 && strstr((const char *)resp, "400") != NULL &&
+                  flood.count == 0);
 
         memset(resp, 0, sizeof(resp));
         n = yardsale_site_handle_request(

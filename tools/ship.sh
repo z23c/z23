@@ -290,7 +290,11 @@ else
     say "gate       make test-parallel"
     suite_log="$(mktemp)"
     make test-parallel >"$suite_log" 2>&1 || true
-    if grep -q 'ALL TESTS PASSED' "$suite_log" && \
+    if grep -Eq 'hotswap_module=|HOTSWAP MODULE' "$suite_log"; then
+        grep -E 'SUITE VERDICT|HOTSWAP MODULE' "$suite_log" | head -5 >&2
+        rm -f "$suite_log"
+        die "full suite used a hot-swap module — linked candidate remains unproven"
+    elif grep -q 'ALL TESTS PASSED' "$suite_log" && \
        ! grep -q 'SOME TESTS FAILED' "$suite_log"; then
         say "gate       $(grep -m1 'ALL TESTS PASSED' "$suite_log")"
         mkdir -p "$GATE_CACHE_DIR"

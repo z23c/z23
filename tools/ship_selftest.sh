@@ -600,6 +600,12 @@ if str_contains "$SHIP_TEXT" 'remote did not come back healthy'; then
 else
     pass "an unanswered host is no longer a failed deploy"
 fi
+if str_contains "$SHIP_TEXT" 'hotswap_module=|HOTSWAP MODULE' &&
+   str_contains "$SHIP_TEXT" 'linked candidate remains unproven'; then
+    pass "shipping rejects a hot-swap-stamped suite transcript"
+else
+    fail "shipping can mistake a hot-swap module run for linked-binary proof"
+fi
 
 printf '\n'
 if [ "$FAILS" -eq 0 ]; then

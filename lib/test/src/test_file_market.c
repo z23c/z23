@@ -49,6 +49,14 @@ static bool market_test_signed_offer(struct file_offer *offer,
     return file_offer_auth_seal(offer, seed) == FILE_OFFER_AUTH_OK;
 }
 
+static bool market_test_refuse_persist(const struct file_offer *offer,
+                                       void *ctx)
+{
+    (void)offer;
+    (void)ctx;
+    return false;
+}
+
 int test_file_market(void)
 {
     int failures = 0;
@@ -185,7 +193,7 @@ int test_file_market(void)
         else { printf("FAIL\n"); failures++; }
     }
 
-    printf("signed paid offer ingress: newer contract replaces same content... ");
+    printf("signed paid offer ingress: seller refresh replaces, takeover and replay refuse... ");
     {
         struct file_offer first_offer, refreshed, found;
         uint8_t first_wire[FILE_MARKET_OFFER_WIRE_BYTES];
@@ -205,13 +213,86 @@ int test_file_market(void)
         enum file_market_offer_ingest refresh = file_market_ingest_offer_wire(
             refresh_wire, sizeof(refresh_wire), refreshed.network_genesis,
             88, 4003, NULL);
+        enum file_market_offer_ingest replay = file_market_ingest_offer_wire(
+            first_wire, sizeof(first_wire), first_offer.network_genesis,
+            89, 4004, NULL);
+        struct file_offer attacker;
+        uint8_t attacker_wire[FILE_MARKET_OFFER_WIRE_BYTES];
+        uint8_t attacker_seed[32];
+        bool made_attacker = market_test_signed_offer(
+            &attacker, 0x36, 107, 4002);
+        memcpy(attacker.root_hash, refreshed.root_hash,
+               sizeof(attacker.root_hash));
+        memset(attacker_seed, 0x36 ^ 0x5a, sizeof(attacker_seed));
+        bool attacker_sealed = made_attacker &&
+            file_offer_auth_seal(&attacker, attacker_seed) ==
+                FILE_OFFER_AUTH_OK &&
+            file_offer_auth_encode(&attacker, attacker_wire) ==
+                FILE_OFFER_AUTH_OK;
+        enum file_market_offer_ingest takeover =
+            file_market_ingest_offer_wire(
+                attacker_wire, sizeof(attacker_wire),
+                attacker.network_genesis, 90, 4004, NULL);
         bool current = file_market_find_offer(refreshed.root_hash, &found) &&
             memcmp(found.offer_id, refreshed.offer_id, 32) == 0;
         if (made_first && made_refresh && encoded &&
             first == FILE_MARKET_INGEST_NEW &&
-            refresh == FILE_MARKET_INGEST_NEW && current)
+            refresh == FILE_MARKET_INGEST_NEW && attacker_sealed &&
+            replay == FILE_MARKET_INGEST_CONFLICT &&
+            takeover == FILE_MARKET_INGEST_CONFLICT && current)
             printf("OK\n");
         else { printf("FAIL\n"); failures++; }
+    }
+
+    printf("signed paid offer ingress: persistence refusal never enters cache... ");
+    {
+        struct file_offer offer, found;
+        uint8_t wire[FILE_MARKET_OFFER_WIRE_BYTES];
+        bool ready = market_test_signed_offer(&offer, 0x37, 108, 4200) &&
+            file_offer_auth_encode(&offer, wire) == FILE_OFFER_AUTH_OK;
+        enum file_market_offer_ingest got =
+            file_market_ingest_offer_wire_persist(
+                wire, sizeof(wire), offer.network_genesis, 91, 4201, NULL,
+                market_test_refuse_persist, NULL);
+        bool absent = !file_market_find_offer(offer.root_hash, &found);
+        if (ready && got == FILE_MARKET_INGEST_PERSIST_FAILED && absent)
+            printf("OK\n");
+        else { printf("FAIL (result=%d absent=%d)\n", got, absent); failures++; }
+    }
+
+    printf("unsigned offer ownership: only freshness and port may change... ");
+    {
+        struct file_offer base = {0}, changed;
+        memset(base.root_hash, 0x38, sizeof(base.root_hash));
+        snprintf(base.filename, sizeof(base.filename), "free.dat");
+        base.size_bytes = 1;
+        base.num_chunks = 1;
+        base.ttl = 2;
+        bool immutable = true;
+#define MARKET_UNSIGNED_REFUSES(field_change) do { \
+            changed = base; \
+            field_change; \
+            immutable = immutable && \
+                !file_market_offer_can_replace(&base, &changed); \
+        } while (0)
+        MARKET_UNSIGNED_REFUSES(changed.peer_ip[0] = 1);
+        MARKET_UNSIGNED_REFUSES(changed.endpoint_type = 1);
+        MARKET_UNSIGNED_REFUSES(changed.onion_pubkey[0] = 1);
+        MARKET_UNSIGNED_REFUSES(changed.network_genesis[0] = 1);
+        MARKET_UNSIGNED_REFUSES(changed.seller_pubkey[0] = 1);
+        MARKET_UNSIGNED_REFUSES(changed.nonce = 1);
+        MARKET_UNSIGNED_REFUSES(changed.issued_unix = 1);
+        MARKET_UNSIGNED_REFUSES(changed.expires_unix = 1);
+        MARKET_UNSIGNED_REFUSES(changed.seller_signature[0] = 1);
+        MARKET_UNSIGNED_REFUSES(changed.offer_id[0] = 1);
+#undef MARKET_UNSIGNED_REFUSES
+        changed = base;
+        changed.peer_port = 18034;
+        changed.last_seen = 10;
+        changed.ttl = 3;
+        bool refresh = file_market_offer_can_replace(&base, &changed);
+        if (immutable && refresh) printf("OK\n");
+        else { printf("FAIL (immutable=%d refresh=%d)\n", immutable, refresh); failures++; }
     }
 
     printf("signed paid offer ingress: bounded fresh offers per peer... ");
@@ -542,8 +623,9 @@ int test_file_market(void)
     {
         struct file_offer offer = {0};
         memset(offer.root_hash, 0x01, 32);
-        snprintf(offer.filename, sizeof(offer.filename), "updated.dat");
+        snprintf(offer.filename, sizeof(offer.filename), "cached.dat");
         offer.num_chunks = 1;
+        offer.peer_port = 18034;
         offer.ttl = 3;
 
         bool is_new = file_market_add_offer(&offer);
@@ -552,7 +634,8 @@ int test_file_market(void)
             uint8_t hash[32];
             memset(hash, 0x01, 32);
             file_market_find_offer(hash, &found);
-            if (strcmp(found.filename, "updated.dat") == 0)
+            if (strcmp(found.filename, "cached.dat") == 0 &&
+                found.peer_port == 18034 && found.ttl == 3)
                 printf("OK\n");
             else { printf("FAIL (not updated)\n"); failures++; }
         } else { printf("FAIL (should not be new)\n"); failures++; }

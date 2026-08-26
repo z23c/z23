@@ -1116,6 +1116,13 @@ int file_market_delivery_tests(void)
             FILE_MARKET_DELIVERY_ERR_EXPIRED &&
         file_market_delivery_request_verify(
             &unstamped, request.network_genesis, expected_session) ==
+            FILE_MARKET_DELIVERY_ERR_EXPIRED);
+
+    struct file_market_delivery_request extreme_stamp = decoded;
+    extreme_stamp.issued_unix = INT64_MIN;
+    DELIVERY_CHECK("minimum signed stamp refuses without overflow",
+        file_market_delivery_request_verify(
+            &extreme_stamp, request.network_genesis, expected_session) ==
         FILE_MARKET_DELIVERY_ERR_EXPIRED);
 
     /* Coordinated-fleet cutover honesty: a legacy v2-length wire gets one

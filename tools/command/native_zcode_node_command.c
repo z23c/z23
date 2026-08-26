@@ -83,12 +83,18 @@ static const char *znj_detect_compiler(const char *workdir, char *version,
 
     char probe_path[4700];
     int pn = snprintf(probe_path, sizeof(probe_path),
-                      "%s/.z23-join-c23-probe.c", workdir);
+                      "%s/.z23-join-c23-probe.XXXXXX", workdir);
     if (pn <= 0 || (size_t)pn >= sizeof(probe_path))
         return NULL;
-    FILE *pf = fopen(probe_path, "we");
-    if (!pf)
+    int probe_fd = mkstemp(probe_path);
+    if (probe_fd < 0)
         return NULL;
+    FILE *pf = fdopen(probe_fd, "w");
+    if (!pf) {
+        (void)close(probe_fd);
+        (void)unlink(probe_path);
+        return NULL;
+    }
     bool wrote = fputs("typedef int z23_c23_probe;\n", pf) >= 0;
     if (fclose(pf) != 0)
         wrote = false;

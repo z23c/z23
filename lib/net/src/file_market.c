@@ -150,6 +150,47 @@ bool file_proof_deserialize(struct file_proof *proof,
 
 /* ── Offer Cache ────────────────────────────────────────────────── */
 
+bool file_market_offer_can_replace(const struct file_offer *existing,
+                                   const struct file_offer *candidate)
+{
+    if (!existing || !candidate)
+        return false;
+    if (existing->auth_version >= FILE_MARKET_OFFER_VERSION &&
+        candidate->auth_version >= FILE_MARKET_OFFER_VERSION)
+        return memcmp(existing->seller_pubkey, candidate->seller_pubkey,
+                      sizeof(existing->seller_pubkey)) == 0 &&
+            (memcmp(existing->offer_id, candidate->offer_id,
+                    sizeof(existing->offer_id)) == 0 ||
+             candidate->issued_unix > existing->issued_unix ||
+             (candidate->issued_unix == existing->issued_unix &&
+              candidate->nonce > existing->nonce));
+    return existing->auth_version == 0 && candidate->auth_version == 0 &&
+        memcmp(existing->root_hash, candidate->root_hash,
+               sizeof(existing->root_hash)) == 0 &&
+        strcmp(existing->filename, candidate->filename) == 0 &&
+        existing->size_bytes == candidate->size_bytes &&
+        existing->num_chunks == candidate->num_chunks &&
+        existing->price_per_mb == candidate->price_per_mb &&
+        memcmp(existing->z_addr, candidate->z_addr,
+               sizeof(existing->z_addr)) == 0 &&
+        memcmp(existing->peer_ip, candidate->peer_ip,
+               sizeof(existing->peer_ip)) == 0 &&
+        existing->endpoint_type == candidate->endpoint_type &&
+        memcmp(existing->onion_pubkey, candidate->onion_pubkey,
+               sizeof(existing->onion_pubkey)) == 0 &&
+        memcmp(existing->network_genesis, candidate->network_genesis,
+               sizeof(existing->network_genesis)) == 0 &&
+        memcmp(existing->seller_pubkey, candidate->seller_pubkey,
+               sizeof(existing->seller_pubkey)) == 0 &&
+        existing->nonce == candidate->nonce &&
+        existing->issued_unix == candidate->issued_unix &&
+        existing->expires_unix == candidate->expires_unix &&
+        memcmp(existing->seller_signature, candidate->seller_signature,
+               sizeof(existing->seller_signature)) == 0 &&
+        memcmp(existing->offer_id, candidate->offer_id,
+               sizeof(existing->offer_id)) == 0;
+}
+
 bool file_market_add_offer(const struct file_offer *offer)
 {
     if (!offer || offer->ttl == 0 || offer->num_chunks == 0)
@@ -169,6 +210,11 @@ bool file_market_add_offer(const struct file_offer *offer)
     /* Check for existing offer with same root_hash — update if newer */
     for (int i = 0; i < g_offer_count; i++) {
         if (memcmp(g_offers[i].root_hash, offer->root_hash, 32) == 0) {
+            if (!file_market_offer_can_replace(&g_offers[i], offer)) {
+                pthread_mutex_unlock(&g_market_mutex);
+                LOG_FAIL("market",
+                         "add_offer: listing takeover refused on root conflict");
+            }
             g_offers[i] = *offer;
             g_offers[i].last_seen = (int64_t)platform_time_wall_time_t();
             pthread_mutex_unlock(&g_market_mutex);
@@ -251,10 +297,11 @@ static bool offer_peer_admit_locked(int64_t peer_id, int64_t now_unix)
     return true;
 }
 
-enum file_market_offer_ingest file_market_ingest_offer_wire(
+enum file_market_offer_ingest file_market_ingest_offer_wire_persist(
     const uint8_t *wire, size_t wire_len,
     const uint8_t expected_network_genesis[32],
-    int64_t peer_id, int64_t now_unix, struct file_offer *out_offer)
+    int64_t peer_id, int64_t now_unix, struct file_offer *out_offer,
+    file_market_offer_persist_fn persist, void *persist_ctx)
 {
     struct file_offer offer;
     pthread_mutex_lock(&g_market_mutex);
@@ -280,6 +327,10 @@ enum file_market_offer_ingest file_market_ingest_offer_wire(
     for (int i = 0; i < g_offer_count; i++) {
         if (file_offer_auth_version_supported(g_offers[i].auth_version) &&
             memcmp(g_offers[i].offer_id, offer.offer_id, 32) == 0) {
+            if (persist && !persist(&offer, persist_ctx)) {
+                pthread_mutex_unlock(&g_market_mutex);
+                return FILE_MARKET_INGEST_PERSIST_FAILED;
+            }
             g_offers[i].last_seen = now_unix;
             if (out_offer)
                 *out_offer = g_offers[i];
@@ -287,21 +338,37 @@ enum file_market_offer_ingest file_market_ingest_offer_wire(
             return FILE_MARKET_INGEST_DEDUP;
         }
     }
-    if (!offer_peer_admit_locked(peer_id, now_unix)) {
-        pthread_mutex_unlock(&g_market_mutex);
-        return FILE_MARKET_INGEST_RATE_LIMITED;
-    }
-
-    /* One current signed contract per content root. A fresh nonce/price is a
-     * new signed wire and replaces the stale terms, then is forwarded once. */
+    /* One seller owns the live contract for a content root. A fresh contract
+     * from that seller may replace its stale terms; another seller cannot
+     * enter cache, persistence, or relay state. */
     for (int i = 0; i < g_offer_count; i++) {
         if (memcmp(g_offers[i].root_hash, offer.root_hash, 32) == 0) {
+            if (!file_market_offer_can_replace(&g_offers[i], &offer)) {
+                pthread_mutex_unlock(&g_market_mutex);
+                return FILE_MARKET_INGEST_CONFLICT;
+            }
+            if (!offer_peer_admit_locked(peer_id, now_unix)) {
+                pthread_mutex_unlock(&g_market_mutex);
+                return FILE_MARKET_INGEST_RATE_LIMITED;
+            }
+            if (persist && !persist(&offer, persist_ctx)) {
+                pthread_mutex_unlock(&g_market_mutex);
+                return FILE_MARKET_INGEST_PERSIST_FAILED;
+            }
             g_offers[i] = offer;
             if (out_offer)
                 *out_offer = offer;
             pthread_mutex_unlock(&g_market_mutex);
             return FILE_MARKET_INGEST_NEW;
         }
+    }
+    if (!offer_peer_admit_locked(peer_id, now_unix)) {
+        pthread_mutex_unlock(&g_market_mutex);
+        return FILE_MARKET_INGEST_RATE_LIMITED;
+    }
+    if (persist && !persist(&offer, persist_ctx)) {
+        pthread_mutex_unlock(&g_market_mutex);
+        return FILE_MARKET_INGEST_PERSIST_FAILED;
     }
     if (g_offer_count >= FILE_MARKET_MAX_OFFERS) {
         int oldest = 0;
@@ -317,6 +384,16 @@ enum file_market_offer_ingest file_market_ingest_offer_wire(
         *out_offer = offer;
     pthread_mutex_unlock(&g_market_mutex);
     return FILE_MARKET_INGEST_NEW;
+}
+
+enum file_market_offer_ingest file_market_ingest_offer_wire(
+    const uint8_t *wire, size_t wire_len,
+    const uint8_t expected_network_genesis[32],
+    int64_t peer_id, int64_t now_unix, struct file_offer *out_offer)
+{
+    return file_market_ingest_offer_wire_persist(
+        wire, wire_len, expected_network_genesis, peer_id, now_unix,
+        out_offer, NULL, NULL);
 }
 
 int file_market_get_offers(struct file_offer *out, size_t max)

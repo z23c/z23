@@ -1271,15 +1271,15 @@ static bool handle_zfileoffer(struct msg_processor *mp,
         return true;
 
     struct file_offer offer;
-    enum file_market_offer_ingest result = file_market_ingest_offer_wire(
+    enum file_market_offer_ingest result =
+        file_market_ingest_offer_wire_persist(
         wire, remaining, mp->params->consensus.hashGenesisBlock.data,
-        (int64_t)node->id, (int64_t)platform_time_wall_time_t(), &offer);
+        (int64_t)node->id, (int64_t)platform_time_wall_time_t(), &offer,
+        mp->file_offer_save, mp->file_offer_save_ctx);
     if (result != FILE_MARKET_INGEST_NEW &&
         result != FILE_MARKET_INGEST_DEDUP)
         return true;
 
-    if (mp->file_offer_save)
-        (void)mp->file_offer_save(&offer, mp->file_offer_save_ctx);
     /* Same rule as the zfilelist re-gossip: ingested and stored either
      * way, rebroadcast unless this node's own relay rule says otherwise. */
     if (result == FILE_MARKET_INGEST_NEW && mp->net_mgr &&

@@ -36,6 +36,11 @@ C23 package fetch are the same journey at different abstraction levels.
 | Fetch exact package bytes | `zcode package fetch --datadir=/tmp/z23-sell` | inert: no build or install |
 | Onion shop | `app shop init --datadir=/tmp/z23-sell` without `confirm` | `confirm:true` |
 
+Web-yard confirmation atomically advances the saved row from `PLANNED` to
+`ARMING` before gossip. A concurrent confirmation or an uncertain interrupted
+outcome cannot replay automatically; only a completed ceremony becomes
+`COMMITTED`. Expired terms must be planned again.
+
 Discover current keys instead of copying remembered ones:
 
 ```bash

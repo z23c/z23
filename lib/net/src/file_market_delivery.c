@@ -280,10 +280,14 @@ enum file_market_delivery_error file_market_delivery_request_verify(
      * of the offer. Reject stamps outside the window in both directions so
      * a forged future stamp cannot outlive it either. */
     int64_t now_unix = (int64_t)platform_time_wall_time_t();
-    int64_t age_unix = now_unix - request->issued_unix;
-    if (request->issued_unix <= 0 ||
-        age_unix < -FILE_MARKET_DELIVERY_MAX_AGE_SECS ||
-        age_unix > FILE_MARKET_DELIVERY_MAX_AGE_SECS) {
+    bool stamp_expired = request->issued_unix <= 0 || now_unix <= 0;
+    if (!stamp_expired && request->issued_unix > now_unix)
+        stamp_expired = request->issued_unix - now_unix >
+            FILE_MARKET_DELIVERY_MAX_AGE_SECS;
+    else if (!stamp_expired)
+        stamp_expired = now_unix - request->issued_unix >
+            FILE_MARKET_DELIVERY_MAX_AGE_SECS;
+    if (stamp_expired) {
         LOG_WARN("market",
                  "paid delivery request rejected on freshness: "
                  "issued=%lld now=%lld max_age=%ds",

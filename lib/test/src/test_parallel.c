@@ -822,6 +822,15 @@ static bool hotswap_module_mode_begin(void)
     const char *so_path = getenv("ZCL_HOTSWAP_TEST_MODULE");
     if (!so_path || !so_path[0])
         return true; /* ordinary run against the linked binary */
+    const char *authorization = getenv("ZCL_HOTSWAP_TEST_AUTH");
+    if (!authorization ||
+        strcmp(authorization, "explicit-t-hotswap-v1") != 0) {
+        fprintf(stderr,
+                "test_parallel: ZCL_HOTSWAP_TEST_MODULE requires the "
+                "explicit t-hotswap authorization marker — refusing an "
+                "inherited module in a linked-binary gate\n");
+        return false;
+    }
 
     const char *epoch = ZCL_TEST_COMPILE_EPOCH;
     if (!epoch[0]) {

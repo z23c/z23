@@ -24,6 +24,9 @@
 #include "util/safe_alloc.h"
 #include "zswap/zswap_assembly.h"
 
+#include <errno.h>
+#include <stdlib.h>
+
 /* Parse one "txid:vout:value:scripthex" form field. */
 static bool parse_input_field(const char *text, struct zswap_swap_input *in)
 {
@@ -53,8 +56,15 @@ static bool parse_input_field(const char *text, struct zswap_swap_input *in)
         script_hex_len > 2 * ZSWAP_MAX_INPUT_SCRIPT_BYTES)
         return false;
     memcpy(script_hex, c3 + 1, script_hex_len + 1);
-    vout = strtoul(vout_s, NULL, 10);
-    value = strtoull(value_s, NULL, 10);
+    char *end = NULL;
+    errno = 0;
+    vout = strtoul(vout_s, &end, 10);
+    if (errno != 0 || !end || *end != '\0')
+        return false;
+    errno = 0;
+    value = strtoull(value_s, &end, 10);
+    if (errno != 0 || !end || *end != '\0')
+        return false;
     if (vout > UINT32_MAX || value == 0 || value > INT64_MAX)
         return false;
     if (!zcl_hex_decode_lower(txid_hex, in->txid, 32))
@@ -251,7 +261,7 @@ size_t yardsale_site_handle_buy_post(const uint8_t *body, size_t body_len,
     const unsigned char *sec_pfx =
         chain_params_base58_prefix(cp, B58_SECRET_KEY, &sec_pfx_len);
     for (size_t i = 1; i <= 4 && !bad; i++) {
-        char fname[8], kname[8], in_s[640], wif_s[128];
+        char fname[8], kname[8], in_s[640] = {0}, wif_s[128] = {0};
         snprintf(fname, sizeof(fname), "in%zu", i);
         snprintf(kname, sizeof(kname), "key%zu", i);
         bool have_in = parse_form_field(form, body_len, fname, in_s,
@@ -261,11 +271,13 @@ size_t yardsale_site_handle_buy_post(const uint8_t *body, size_t body_len,
         if (!have_in && !have_key)
             continue;
         if (have_in != have_key) {
+            memory_cleanse(wif_s, sizeof(wif_s));
             bad = "every input needs its WIF, and every WIF its input";
             break;
         }
         struct zswap_swap_input *in = &buyer.inputs[buyer.num_inputs];
         if (!parse_input_field(in_s, in)) {
+            memory_cleanse(wif_s, sizeof(wif_s));
             bad = "an input is not txid:vout:value:scripthex";
             break;
         }
@@ -283,8 +295,10 @@ size_t yardsale_site_handle_buy_post(const uint8_t *body, size_t body_len,
     if (!bad) {
         if (buyer.num_inputs == 0)
             bad = "at least one ZCL input is required";
-        fee = strtoull(fee_s, NULL, 10);
-        if (fee == 0)
+        char *end = NULL;
+        errno = 0;
+        fee = strtoull(fee_s, &end, 10);
+        if (errno != 0 || !end || *end != '\0' || fee == 0)
             bad = "fee must be positive sats";
     }
 
@@ -341,8 +355,17 @@ size_t yardsale_site_handle_buy_post(const uint8_t *body, size_t body_len,
                     if (strcmp(plan.state, YARDSALE_PLAN_STATE_COMMITTED)
                         == 0)
                         already_begun = true;
-                    else if (!confirm)
-                        ; /* plain re-inspection of the same terms */
+                    else if (!confirm &&
+                             (strcmp(plan.state,
+                                     YARDSALE_PLAN_STATE_EXPIRED) == 0 ||
+                              now > plan.expires_unix)) {
+                        webbuy_plan_row(&plan, request_hex, plan_root_hex,
+                                        payload_hex, ad.quote.expires_unix,
+                                        now);
+                        if (!db_yardsale_plan_save(ndb, &plan))
+                            bad = "renewing the planned accept failed";
+                    } else if (!confirm)
+                        ; /* plain re-inspection of live terms */
                     else if (strcmp(plan.state,
                                     YARDSALE_PLAN_STATE_PLANNED) != 0)
                         bad = "these planned terms expired — submit "
@@ -355,8 +378,18 @@ size_t yardsale_site_handle_buy_post(const uint8_t *body, size_t body_len,
                                     "web-buy expiry save failed");
                         bad = "these planned terms expired — submit "
                               "without confirm to plan again";
-                    } else
-                        arm_now = true;
+                    } else {
+                        enum db_yardsale_plan_claim_result claim =
+                            db_yardsale_plan_claim(ndb, &plan, now);
+                        if (claim == DB_YARDSALE_PLAN_CLAIMED)
+                            arm_now = true;
+                        else if (claim == DB_YARDSALE_PLAN_CLAIM_REFUSED)
+                            bad = "these terms are already being armed or "
+                                  "changed state — inspect before retrying";
+                        else
+                            bad = "the plan ledger could not claim these "
+                                  "terms — nothing was armed";
+                    }
                 } else if (!bad && confirm && !have_plan) {
                     bad = "no plan names these exact terms — submit "
                           "without confirm first and inspect them";
@@ -385,9 +418,19 @@ size_t yardsale_site_handle_buy_post(const uint8_t *body, size_t body_len,
             snprintf(plan.state, sizeof(plan.state), "%s",
                      YARDSALE_PLAN_STATE_COMMITTED);
             snprintf(plan.result, sizeof(plan.result), "begun");
-            if (!db_yardsale_plan_save(ndb, &plan))
+            if (!db_yardsale_plan_save(ndb, &plan)) {
                 LOG_ERR("yardsale",
-                        "armed accept did not mark its plan COMMITTED");
+                        "armed accept remains ARMING after commit save failed");
+                bad = "the accept left the node but its durable outcome is "
+                      "uncertain — automatic replay is blocked";
+            }
+        } else if (result != YARDSALE_OK) {
+            snprintf(plan.state, sizeof(plan.state), "%s",
+                     YARDSALE_PLAN_STATE_PLANNED);
+            plan.result[0] = '\0';
+            if (!db_yardsale_plan_save(ndb, &plan))
+                bad = "the ceremony refused and the plan could not be "
+                      "released — inspect before retrying";
         }
     }
     memory_cleanse(keys, sizeof(keys));

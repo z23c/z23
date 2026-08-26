@@ -2010,13 +2010,16 @@ $(TEST_TSAN_LINK_RSP): $(TEST_TSAN_OBJS)
 # verifier. Build that exact in-tree helper here, not only on the public
 # test-parallel wrapper: fast-ci/pre-push invokes the active fast runner
 # directly, and a clean checkout must not depend on a leftover binary.
+LINKED_TEST_ENV := env -u ZCL_HOTSWAP_TEST_MODULE \
+	-u ZCL_HOTSWAP_TEST_AUTH
+
 test-parallel-active:
 	@mkdir -p "$(BUILD_DIR)"
 	@$(CHECKOUT_LOCK_TOOL) foreground "$(CHECKOUT_LOCK)" -- \
 	  $(MAKE) --no-print-directory test-parallel-active-locked
 
 test-parallel-active-locked: $(TEST_PARALLEL_REL_CANDIDATE) dev-package-verifier-ensure
-	ulimit -s unlimited && $(TEST_PARALLEL_REL_ACTIVE)
+	ulimit -s unlimited && $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE)
 
 test-parallel-fast-active:
 	@mkdir -p "$(BUILD_DIR)"
@@ -2024,7 +2027,7 @@ test-parallel-fast-active:
 	  $(MAKE) --no-print-directory test-parallel-fast-active-locked
 
 test-parallel-fast-active-locked: $(TEST_PARALLEL_FAST_CANDIDATE) dev-package-verifier-ensure
-	ulimit -s unlimited && $(TEST_PARALLEL_FAST_ACTIVE)
+	ulimit -s unlimited && $(LINKED_TEST_ENV) $(TEST_PARALLEL_FAST_ACTIVE)
 
 .PHONY: test-parallel
 # Checkout-locked (see CHECKOUT_LOCK above): the make_lint_gates exclusive lane
@@ -2052,7 +2055,7 @@ test-parallel:
 
 .PHONY: test-parallel-locked
 test-parallel-locked: $(TEST_PARALLEL_REL_CANDIDATE) dev-package-verifier-ensure
-	ulimit -s unlimited && $(TEST_PARALLEL_REL_ACTIVE) $(TEST_PARALLEL_ARGS)
+	ulimit -s unlimited && $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE) $(TEST_PARALLEL_ARGS)
 
 # ── prove-cold-join — the one command a stranger can run ─────────────────
 #
@@ -2085,7 +2088,7 @@ prove-cold-join: $(TEST_PARALLEL_REL_CANDIDATE)
 	 mkdir -p "$(BUILD_DIR)"; \
 	 echo "== proving a permissionless cold join (no network, wiped datadir) =="; \
 	 ulimit -s unlimited; \
-	 ZCL_STRESS_TESTS=1 $(TEST_PARALLEL_REL_ACTIVE) \
+	 ZCL_STRESS_TESTS=1 $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE) \
 	     --exact=test_cold_join_sovereign $(TEST_PARALLEL_ARGS) >"$$log" 2>&1; \
 	 rc=$$?; \
 	 cat "$$log"; \
@@ -2496,7 +2499,7 @@ t:
 	  $(MAKE) --no-print-directory t-locked ONLY='$(ONLY)'
 
 t-locked: $(TEST_PARALLEL_REL_CANDIDATE) dev-package-verifier-ensure
-	ulimit -s unlimited && $(TEST_PARALLEL_REL_ACTIVE) --only=$(ONLY)
+	ulimit -s unlimited && $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE) --only=$(ONLY)
 
 # Hot-path variant for edit loops. It resolves the complete source inventory in
 # a cached, stable (toolchain+flags-keyed) per-file epoch and links a non-LTO harness; use strict `make t`
@@ -2508,7 +2511,7 @@ t-fast:
 	  $(MAKE) --no-print-directory t-fast-locked ONLY='$(ONLY)'
 
 t-fast-locked: $(TEST_PARALLEL_FAST_CANDIDATE) dev-package-verifier-ensure
-	ulimit -s unlimited && $(TEST_PARALLEL_FAST_ACTIVE) --only=$(ONLY)
+	ulimit -s unlimited && $(LINKED_TEST_ENV) $(TEST_PARALLEL_FAST_ACTIVE) --only=$(ONLY)
 
 # Proof-facing sibling of t-fast. The human convenience target above keeps its
 # documented substring behavior; impact plans and durable receipts use this
@@ -2521,7 +2524,7 @@ t-fast-exact:
 
 t-fast-exact-locked: $(TEST_PARALLEL_FAST_CANDIDATE) dev-package-verifier-ensure
 	ulimit -s unlimited && \
-	  $(TEST_PARALLEL_FAST_ACTIVE) --exact=$(EXACT_ONLY_MATCHED) $(T_FAST_EXACT_ARGS)
+	  $(LINKED_TEST_ENV) $(TEST_PARALLEL_FAST_ACTIVE) --exact=$(EXACT_ONLY_MATCHED) $(T_FAST_EXACT_ARGS)
 
 # Closed historical-failure corpus required by build_release_confirmation.v2.
 # This focused physical gate is uncached and exact; release qualification also
@@ -2538,7 +2541,7 @@ secure-release-regressions:
 secure-release-regressions-locked: $(TEST_PARALLEL_REL_CANDIDATE) dev-package-verifier-ensure
 	@tools/dev/secure-release-regressions-selftest.sh \
 	  '$(SECURE_RELEASE_REGRESSION_GROUPS)'
-	ulimit -s unlimited && $(TEST_PARALLEL_REL_ACTIVE) \
+	ulimit -s unlimited && $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE) \
 	  --exact=$(SECURE_RELEASE_REGRESSION_GROUPS) --no-cache
 
 # ── the front door ───────────────────────────────────────────────────────
@@ -3627,7 +3630,8 @@ t-hotswap:
 	[ -n "$$so" ] && [ -f "$$so" ] || { \
 	  echo "t-hotswap: module build did not yield a .so (see stderr)" >&2; exit 3; }; \
 	echo "t-hotswap: running $(ONLY) against $$so" >&2; \
-	ulimit -s unlimited && ZCL_HOTSWAP_TEST_MODULE="$$so" \
+	ulimit -s unlimited && ZCL_HOTSWAP_TEST_AUTH=explicit-t-hotswap-v1 \
+	  ZCL_HOTSWAP_TEST_MODULE="$$so" \
 	  $(TEST_PARALLEL_FAST_ACTIVE) --only=$(ONLY) --no-cache
 
 # Full no-link syntax check across every TU in one shot (no incremental state).
@@ -3759,7 +3763,7 @@ dev-loop-bench-selftest:
 # multiple peers plus an in-flight old-generation call; sim-fast remains the
 # broader seeded P2P suite.
 hotswap-sim: $(TEST_PARALLEL_FAST_CANDIDATE)
-	@ulimit -s unlimited && $(TEST_PARALLEL_FAST_ACTIVE) --only=hotswap_simnet
+	@ulimit -s unlimited && $(LINKED_TEST_ENV) $(TEST_PARALLEL_FAST_ACTIVE) --only=hotswap_simnet
 
 native-dev-loop-wait-selftest: dev-bin
 	@tools/dev/native-dev-loop-wait-selftest.sh
@@ -4883,7 +4887,7 @@ test:
 
 .PHONY: test-locked
 test-locked: $(TEST_PARALLEL_REL_CANDIDATE) dev-package-verifier-ensure
-	ulimit -s unlimited && $(TEST_PARALLEL_REL_ACTIVE) $(TEST_PARALLEL_ARGS)
+	ulimit -s unlimited && $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE) $(TEST_PARALLEL_ARGS)
 
 test-full: test_zcl
 	ulimit -s unlimited && $(TEST_ZCL_BIN)
@@ -4907,7 +4911,7 @@ chaos: zclassic23-chaos
 sim-fast: $(TEST_PARALLEL_REL_CANDIDATE) zclassic23-chaos
 	@set -eu; \
 	echo "==> chaos harness unit slice"; \
-	ulimit -s unlimited && $(TEST_PARALLEL_REL_ACTIVE) --only=chaos_harness; \
+	ulimit -s unlimited && $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE) --only=chaos_harness; \
 	echo "==> checked-in chaos scenarios"; \
 	$(MAKE) --no-print-directory chaos; \
 	echo "==> bounded chaos seed sweep ($(CHAOS_SEEDS) seeds via $(CHAOS_SWEEP_SCENARIO))"; \
@@ -5110,15 +5114,15 @@ simnet-nightly: $(TEST_PARALLEL_REL_CANDIDATE)
 	        if ! $(ZCLASSIC23_CHAOS_BIN) --scenario="$$s"; then step4=FAIL; fi; \
 	    done; \
 	    echo "  ==> ZCL_SIMNET_PERF=1 mixed smoke (simnet_fuzz + simnet_byzantine_cluster)"; \
-	    if ! ZCL_SIMNET_PERF=1 $(TEST_PARALLEL_REL_ACTIVE) --only=simnet_fuzz; then step4=FAIL; fi; \
-	    if ! ZCL_SIMNET_PERF=1 $(TEST_PARALLEL_REL_ACTIVE) --only=simnet_byzantine_cluster; then step4=FAIL; fi; \
+	    if ! ZCL_SIMNET_PERF=1 $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE) --only=simnet_fuzz; then step4=FAIL; fi; \
+	    if ! ZCL_SIMNET_PERF=1 $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE) --only=simnet_byzantine_cluster; then step4=FAIL; fi; \
 	else \
 	    step4=FAIL; \
 	fi; \
 	echo "══ simnet-nightly: step 5/6 — ZCL_UTXO_LADDER_HEAVY dense-MMB recompute ══"; \
 	if [ -f "$(UTXO_LADDER_LEAF_STORE)" ]; then \
 	    if ZCL_UTXO_LADDER_HEAVY=1 ZCL_UTXO_LADDER_LEAF_STORE="$(UTXO_LADDER_LEAF_STORE)" \
-	        $(TEST_PARALLEL_REL_ACTIVE) --only=utxo_root_ladder; then \
+	        $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE) --only=utxo_root_ladder; then \
 	        step5=PASS; \
 	    else \
 	        step5=FAIL; \
@@ -10118,9 +10122,9 @@ ci: vendor-ready lint bench-regress zclassic23 $(TEST_PARALLEL_REL_CANDIDATE)
 	@# gets lucky and stores its own PASS — after which G is skipped forever.
 	@# The retry would launder a flake into a permanent cached green. Forcing
 	@# the retry cold keeps it the independent second opinion it claims to be.
-	@ulimit -s unlimited; if $(TEST_PARALLEL_REL_ACTIVE); then :; else \
+	@ulimit -s unlimited; if $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE); then :; else \
 		echo "[ci] !! test_parallel FAILED first pass — retrying ONCE, COLD (--no-cache: a cached retry would re-run only the failing group and launder a flake into a stored PASS) !!"; \
-		ulimit -s unlimited; $(TEST_PARALLEL_REL_ACTIVE) --no-cache; \
+		ulimit -s unlimited; $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE) --no-cache; \
 	fi
 	@echo ""
 	@echo "══ CI: mvp-gates (hermetic MVP acceptance #3/#5/#7) ══"

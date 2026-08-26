@@ -63,6 +63,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
 #include <sys/stat.h>
 
 #define ZNJ_CHECK(name, expr) do {                                        \
@@ -302,11 +303,17 @@ static int t_join_writes_config(void)
     ZNJ_CHECK("join writes buildworker=1 rather than a false empty-TU 0",
               znt_has_line(text, "buildworker=1"));
     {
-        char probe[512];
-        struct stat probe_st;
-        snprintf(probe, sizeof(probe), "%s/.z23-join-c23-probe.c", dd);
-        ZNJ_CHECK("the C23 probe source is not left in the datadir",
-                  stat(probe, &probe_st) != 0);
+        static const char probe_prefix[] = ".z23-join-c23-probe.";
+        bool probe_left = false;
+        DIR *dir = opendir(dd);
+        struct dirent *entry = NULL;
+        while (dir && (entry = readdir(dir)) != NULL)
+            if (strncmp(entry->d_name, probe_prefix,
+                        sizeof(probe_prefix) - 1) == 0)
+                probe_left = true;
+        if (dir)
+            closedir(dir);
+        ZNJ_CHECK("the private C23 probe source is removed", !probe_left);
     }
     /* The one claim that must never drift: what the reply SAYS about the
      * compiler and what the file DOES about the worker are the same fact. */
