@@ -49,7 +49,7 @@ run_command() {
     rm -f -- "$safe_marker"; mkdir -p "$workspace/build/tmp" "$cache/zcc" "$cache/xdg"
     export TMPDIR="$workspace/build/tmp" ZCC_DIR="$cache/zcc" ZCC_MAX_MB="$Z23_ZCC_MAX_MB" XDG_CACHE_HOME="$cache/xdg"
     if [ -t 0 ] && [ -t 1 ]; then transport=--pty; else transport=--pipe; fi
-    exec systemd-run --user --scope --wait --collect "$transport" --quiet --property=CPUWeight=25 --property=IOWeight=25 --property="MemoryHigh=$Z23_DEV_MEMORY_HIGH" --property="MemoryMax=$Z23_DEV_MEMORY_MAX" --working-directory="$workspace" -- "$@"
+    exec systemd-run --user --wait --collect "$transport" --quiet --property=CPUWeight=25 --property=IOWeight=25 --property="MemoryHigh=$Z23_DEV_MEMORY_HIGH" --property="MemoryMax=$Z23_DEV_MEMORY_MAX" --working-directory="$workspace" -- "$@"
 }
 action="${1:-}"; shift || true
 case "$action" in bootstrap) [ $# -eq 0 ] || die "bootstrap takes no arguments"; bootstrap;; status) status_workspace;; path) workspace_path;; checkpoint) checkpoint;; can-discard) can_discard;; run) [ "${1:-}" = -- ] && shift; run_command "$@";; *) die "usage: $0 bootstrap|status|path|checkpoint|run -- COMMAND [ARG...]";; esac
