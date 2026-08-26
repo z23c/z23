@@ -1210,3 +1210,21 @@ AGENT_IMPACT_RULE("core/chainparams/src/chainparams.c|lib/net/src/connman.c|lib/
  * and softening the boot gate without the group would let the node advance
  * CRYPTO_READY on keys that never passed their digest. */
 AGENT_IMPACT_RULE("lib/sapling/src/params_vk_embedded.c|lib/sapling/include/sapling/params_vk_embedded.h|lib/sapling/src/params_init.c|lib/test/src/test_params_vk_embedded.c|config/src/boot_params_gate.c|config/include/config/boot_params_gate.h|tools/scripts/zcash_params.sh|docs/PARAMS.md", "params_vk_embedded")
+/* Lane: published build identity (peer build identity on the wire).
+ * ONE slice: the advertised subversion and its reader (msg_version.c +
+ * net/version.h), the getpeerinfo field that republishes what each peer
+ * said, and the two groups that pin the contract — net_handshake_adversarial
+ * owns "absent/malformed is unknown and is never penalised", peer_lifecycle
+ * owns "what we publish is the baked source identity". Change any one of
+ * them and a node can start advertising a build it is not running, or a
+ * peer's silence can start costing it something.
+ *
+ * tools/deploy_verify.sh rides the same rule because it is the one consumer
+ * OUTSIDE the network layer that reads the advertised string as data: it had
+ * a frozen grep for the exact pre-change "/ZClassic23:0.1.0/", so the first
+ * stamped build to be deployed would have failed its own deploy gate from a
+ * file nobody in this lane had touched. Its acceptance set and what
+ * msg_version_user_agent() emits are one contract; the make_lint_gates case
+ * in lint_gate_deploy_contracts.c is where that contract is asserted, and it
+ * must move with the format. */
+AGENT_IMPACT_RULE("lib/net/src/msg_version.c|lib/net/include/net/version.h|app/controllers/src/network_controller.c|tools/deploy_verify.sh|lib/test/src/lint_gate_deploy_contracts.c|lib/test/src/test_net_handshake_adversarial.c|lib/test/src/test_peer_lifecycle.c|lib/test/src/test_syncdiag_network.c", "net_handshake_adversarial peer_lifecycle net syncdiag_rpc make_lint_gates")
