@@ -147,8 +147,8 @@ static int run_bound_topup_integration(void)
     struct main_state source, loaded;
     main_state_init(&source);
     main_state_init(&loaded);
-    struct uint256 h10 = {0}, h11 = {0};
-    h10.data[0] = 10; h11.data[0] = 11;
+    struct uint256 h10 = {0}, h11 = {0}, h12 = {0};
+    h10.data[0] = 10; h11.data[0] = 11; h12.data[0] = 12;
     struct block_index *s10 = topup_insert_entry(&source, &h10, 10);
     struct block_index *s11 = topup_insert_entry(&source, &h11, 11);
     if (s10) s10->nBits = 0x1f07ffffu;
@@ -208,6 +208,21 @@ static int run_bound_topup_integration(void)
     TOPUP_CHECK("bound: only dirty status hash applied",
                 l10 && l10->nTx == 0 && l11 && l11->nTx == 7 &&
                 l11->nFile == 5);
+
+    bool tip_delta = topup_emit_row(
+        log, &h12, &h11, 12, BLOCK_VALID_TREE, -1, 0, 0) &&
+        block_index_projection_catch_up(bip) != UINT64_MAX;
+    TOPUP_CHECK("bound: stale flat tip is covered by exact dirty row",
+                tip_delta && block_index_projection_bound_covers_tip(
+                    bip, dir, h12.data, 12));
+    TOPUP_CHECK("bound: wrong-height dirty tip is not covered",
+                !block_index_projection_bound_covers_tip(
+                    bip, dir, h12.data, 13));
+    TOPUP_CHECK("bound: covered stale tip topup succeeds",
+                block_index_projection_topup_with(bip, &loaded, dir));
+    struct block_index *l12 = block_map_find(&loaded.map_block_index, &h12);
+    TOPUP_CHECK("bound: covered stale tip inserted from delta",
+                l12 && l12->nHeight == 12 && l12->pprev == l11);
 
     if (s10) s10->nTx = 1; /* publish a different, deliberately unbound SHA3 */
     TOPUP_CHECK("bound: replacement flat identity saved",

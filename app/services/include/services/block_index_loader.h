@@ -60,6 +60,12 @@ bool block_index_flat_verified_identity(
 bool block_index_projection_bind_saved_flat(
     struct block_index_projection *bip,
     const struct block_index_flat_identity *identity);
+/* True only when the verified flat identity is projection-bound and its
+ * dirty journal contains a well-formed row for hash at height. Used by the
+ * boot ladder to distinguish a recoverable stale flat tip from corruption. */
+bool block_index_projection_bound_covers_tip(
+    struct block_index_projection *bip, const char *datadir,
+    const uint8_t hash[32], int32_t height);
 
 /* Load block_index.bin via mmap.  Returns .ok=true if >= 1 entry loaded.
  * Allocates a contiguous arena for all entries, links pprev by hash,

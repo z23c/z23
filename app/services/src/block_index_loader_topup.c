@@ -480,6 +480,37 @@ bool block_index_projection_bind_saved_flat(
         identity->row_count);
 }
 
+struct bound_tip_ctx {
+    const uint8_t *hash;
+    int32_t height;
+    bool found;
+};
+
+static bool bound_tip_cb(const uint8_t hash[32],
+                         const struct disk_block_index *idx, void *user)
+{
+    struct bound_tip_ctx *ctx = user;
+    if (memcmp(hash, ctx->hash, 32) == 0 && idx->nHeight == ctx->height)
+        ctx->found = true;
+    return true;
+}
+
+bool block_index_projection_bound_covers_tip(
+    struct block_index_projection *bip, const char *datadir,
+    const uint8_t hash[32], int32_t height)
+{
+    if (!bip || !datadir || !hash || height < 0)
+        return false;
+    struct block_index_flat_identity identity;
+    if (!block_index_flat_verified_identity(datadir, &identity))
+        return false; // raw-return-ok:unverified flat is an expected cache miss
+    struct bound_tip_ctx ctx = { .hash = hash, .height = height };
+    int rc = block_index_projection_iterate_dirty_if_bound(
+        bip, identity.payload_sha3, identity.payload_size,
+        identity.row_count, bound_tip_cb, &ctx);
+    return rc == 1 && ctx.found;
+}
+
 bool block_index_projection_topup(struct main_state *ms, const char *datadir)
 {
     return block_index_projection_topup_with(
