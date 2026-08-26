@@ -1,3 +1,4 @@
+# Copyright 2026 Rhett Creighton - Apache License 2.0
 # check_source_identity_authority baseline — reviewed exceptions to the
 # Q1 (baked build)/Q2 (working tree) source_id_sha256 naming and reader
 # ratchet. See tools/lint/check_source_identity_authority.sh's header for

@@ -25,7 +25,8 @@
 #include "validation/process_block.h"
 
 #include <stdatomic.h>
-#include <string.h>
+/* <string.h> is gone with the reject-reason strcmp it existed for: the
+ * transient-vs-consensus distinction is a type now, not a string match. */
 
 /* Blocks rejected by the at-tip contextual gate (#26): per-tx contextual
  * rules / finality / BIP34 via contextual_check_block before script verify.
@@ -48,16 +49,20 @@ static bool block_has_shielded_proofs(const struct block *blk)
 }
 
 /* Infra failures inside contextual_check_transaction — transient alloc /
- * sighash plumbing, NOT consensus verdicts. They must never persist as a
- * permanent reject: the stale-script-hole repair only resurrects the
- * 'internal_error'/'prevout_unresolved'/'block_decode_failed' statuses
- * (stage_repair_reducer_frontier_coin.c), so a misclassified transient
- * failure would wedge a valid canonical block forever. */
-static bool contextual_reason_is_internal(const char *reason)
-{
-    return strcmp(reason, "sapling-verification-ctx-init-failed") == 0 ||
-           strcmp(reason, "error-computing-signature-hash") == 0;
-}
+ * sighash plumbing / absent verifying keys, NOT consensus verdicts. They
+ * must never persist as a permanent reject: the stale-script-hole repair
+ * only resurrects the 'internal_error'/'prevout_unresolved'/
+ * 'block_decode_failed' statuses (stage_repair_reducer_frontier_coin.c),
+ * so a misclassified transient failure would wedge a valid canonical
+ * block forever.
+ *
+ * This used to be decided by string-comparing reject reasons. That test
+ * was silent rot waiting to happen: it enumerated two reason strings by
+ * hand, so any new transient failure — or any rewording of an existing
+ * one — would have been filed as a permanent consensus reject with no
+ * compiler complaint. The distinction is now carried by
+ * enum contextual_check_verdict, produced at the site that actually knows
+ * which kind of failure occurred. */
 
 enum script_validate_ctx_verdict script_validate_contextual_gate(
     struct main_state *ms, sqlite3 *db, int next_h,
@@ -105,7 +110,9 @@ enum script_validate_ctx_verdict script_validate_contextual_gate(
 
     struct validation_state cstate;
     validation_state_init(&cstate);
-    if (contextual_check_block(blk, &cstate, cp, bi->pprev, is_ibd))
+    enum contextual_check_verdict cv =
+        contextual_check_block_verdict(blk, &cstate, cp, bi->pprev, is_ibd);
+    if (cv == CONTEXTUAL_CHECK_PASS)
         return SV_CTX_PASS;
 
     const char *reason = cstate.reject_reason[0] ? cstate.reject_reason
@@ -113,7 +120,7 @@ enum script_validate_ctx_verdict script_validate_contextual_gate(
     /* Transient infra failures persist under the resurrectable
      * "internal_error" status (repair re-attempts them); genuine
      * consensus verdicts keep their typed reason and stay final. */
-    bool internal = contextual_reason_is_internal(reason);
+    bool internal = (cv == CONTEXTUAL_CHECK_UNVERIFIABLE);
     const char *status = internal ? "internal_error" : reason;
     if (out_internal)
         *out_internal = internal;

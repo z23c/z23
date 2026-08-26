@@ -4344,85 +4344,112 @@ static bool fixture_scope_grant(
          VCS_ZCODE_DHT_RECORD_OK;
 }
 
-static int test_agent_scope_governance(void) {
+static int test_agent_scope_dormant(void) {
   int failures = 0;
-  TEST("zcode dht service: agent grants govern namespace admission") {
-    char dir[] = "/tmp/zcl_dht_scope_gov_XXXXXX";
-    ASSERT(mkdtemp(dir) != NULL);
+  TEST("zcode dht service: agent scope is fail-closed and inert") {
+    char adir[] = "/tmp/zcl_dht_scope_dormant_a_XXXXXX";
+    char bdir[] = "/tmp/zcl_dht_scope_dormant_b_XXXXXX";
+    ASSERT(mkdtemp(adir) != NULL && mkdtemp(bdir) != NULL);
     uint8_t genesis[32], noise[32];
     memset(genesis, 0x11, sizeof(genesis));
     memset(noise, 0x42, sizeof(noise));
-    ASSERT(fixture_identity(dir, 0x7c, genesis, noise));
-    struct vcs_zcode_dht_service *service =
-        fixture_service_at(dir, genesis, noise, 1000);
-    ASSERT(service != NULL);
-    struct vcs_zcode_dht_delegation founder;
+    ASSERT(fixture_identity(adir, 0x7c, genesis, noise));
+    ASSERT(fixture_identity(bdir, 0x7c, genesis, noise));
+    struct vcs_zcode_dht_service *a =
+        fixture_service_at(adir, genesis, noise, 1000);
+    struct vcs_zcode_dht_service *b =
+        fixture_service_at(bdir, genesis, noise, 1000);
+    ASSERT(a != NULL && b != NULL);
+    struct vcs_zcode_dht_delegation operator_delegation;
     uint8_t founder_seed[32], node_id[32];
-    ASSERT(fixture_material(dir, &founder, founder_seed, node_id));
+    ASSERT(fixture_material(adir, &operator_delegation, founder_seed,
+                            node_id));
     uint8_t agent1_pub[32], agent2_pub[32];
     struct vcs_zcode_dht_delegation agent1, agent2;
-    ASSERT(fixture_agent_delegation(0x7c, 0xa1, genesis, noise, &agent1, agent1_pub));
-    ASSERT(fixture_agent_delegation(0x7c, 0xa2, genesis, noise, &agent2, agent2_pub));
-    struct vcs_zcode_dht_record record;
-
-    /* Before any grant the namespace is ungoverned: any master-delegated
-     * key publishes there. */
-    ASSERT(fixture_agent_pointer(&agent1, 0xa1, genesis, "agent.ops", 0x51, 1,
-                                 node_id, &record));
-    ASSERT_EQ(vcs_zcode_dht_service_record_admit(service, &record,
-                                                 test_time(1000)),
-              VCS_ZCODE_DHT_RECORD_STORE_ADDED);
-
-    /* The founder mints a grant for one agent key. */
-    ASSERT(fixture_scope_grant(&founder, founder_seed, genesis, "agent.ops",
-                               agent1_pub, 1000, 4000, &record));
-    ASSERT_EQ(vcs_zcode_dht_service_record_admit(service, &record,
-                                                 test_time(1000)),
-              VCS_ZCODE_DHT_RECORD_STORE_ADDED);
-
-    /* The granted key keeps publishing in the governed namespace. */
-    ASSERT(fixture_agent_pointer(&agent1, 0xa1, genesis, "agent.ops", 0x52, 1,
-                                 node_id, &record));
-    ASSERT_EQ(vcs_zcode_dht_service_record_admit(service, &record,
-                                                 test_time(1000)),
-              VCS_ZCODE_DHT_RECORD_STORE_ADDED);
-
-    /* A master-delegated key with no grant is refused there. */
-    ASSERT(fixture_agent_pointer(&agent2, 0xa2, genesis, "agent.ops", 0x53, 1,
-                                 node_id, &record));
-    ASSERT_EQ(vcs_zcode_dht_service_record_admit(service, &record,
-                                                 test_time(1000)),
-              VCS_ZCODE_DHT_RECORD_STORE_SCOPE);
-
-    /* The founder keeps its own authority while governance is live. */
-    uint8_t founder_semantic[32];
-    memset(founder_semantic, 0x56, sizeof(founder_semantic));
-    ASSERT(fixture_pointer_record_named(dir, genesis, "agent.ops",
-                                        founder_semantic, 0x54, 1, &record));
-    ASSERT_EQ(vcs_zcode_dht_service_record_admit(service, &record,
-                                                 test_time(1000)),
-              VCS_ZCODE_DHT_RECORD_STORE_ADDED);
-
-    /* A granted agent cannot widen authority, its own namespace included. */
+    ASSERT(fixture_agent_delegation(0x7c, 0xa1, genesis, noise, &agent1,
+                                    agent1_pub));
+    ASSERT(fixture_agent_delegation(0x7c, 0xa2, genesis, noise, &agent2,
+                                    agent2_pub));
     uint8_t agent1_seed[32];
     memset(agent1_seed, 0xa1, sizeof(agent1_seed));
+    struct vcs_zcode_dht_record agent_grant, operator_grant;
     ASSERT(fixture_scope_grant(&agent1, agent1_seed, genesis, "agent.ops",
-                               agent2_pub, 1000, 4000, &record));
+                               agent1_pub, 1000, 4000, &agent_grant));
     memory_cleanse(agent1_seed, sizeof(agent1_seed));
-    ASSERT_EQ(vcs_zcode_dht_service_record_admit(service, &record,
-                                                 test_time(1000)),
+    ASSERT(fixture_scope_grant(&operator_delegation, founder_seed, genesis,
+                               "agent.ops", agent2_pub, 1000, 4000,
+                               &operator_grant));
+
+    /* Generic delegations carry no namespace-governance capability. Both
+     * possible first grants are refused, independent of arrival order. */
+    ASSERT_EQ(vcs_zcode_dht_service_record_admit(
+                  a, &agent_grant, test_time(1000)),
+              VCS_ZCODE_DHT_RECORD_STORE_SCOPE);
+    ASSERT_EQ(vcs_zcode_dht_service_record_admit(
+                  a, &operator_grant, test_time(1000)),
+              VCS_ZCODE_DHT_RECORD_STORE_SCOPE);
+    ASSERT_EQ(vcs_zcode_dht_service_record_admit(
+                  b, &operator_grant, test_time(1000)),
+              VCS_ZCODE_DHT_RECORD_STORE_SCOPE);
+    ASSERT_EQ(vcs_zcode_dht_service_record_admit(
+                  b, &agent_grant, test_time(1000)),
+              VCS_ZCODE_DHT_RECORD_STORE_SCOPE);
+    uint8_t adigest[32], bdigest[32];
+    vcs_zcode_dht_record_store_digest(a->record_store, adigest);
+    vcs_zcode_dht_record_store_digest(b->record_store, bdigest);
+    ASSERT(memcmp(adigest, bdigest, sizeof(adigest)) == 0);
+
+    /* Foreign storage maps the same typed refusal to unauthorized. */
+    struct vcs_zcode_dht_msg foreign = {
+        .kind = VCS_ZCODE_DHT_MSG_STORE_RECORD};
+    foreign.store_record.record = agent_grant;
+    struct service_peer peer = {0};
+    enum vcs_zcode_dht_reject_reason rejected = VCS_ZCODE_DHT_REJECT_CAP;
+    ASSERT(!vcs_zcode_dht_service_records_handle(
+        a, &peer, NULL, &foreign, test_time(1000), &rejected));
+    ASSERT_EQ(rejected, VCS_ZCODE_DHT_REJECT_UNAUTHORIZED);
+
+    /* A local publication may be inspected as a plan, but commit cannot
+     * create an authority record or consume a publication slot. */
+    struct vcs_zcode_dht_publish_spec spec = {
+        .kind = VCS_ZCODE_DHT_RECORD_AGENT_SCOPE,
+        .not_before = 1000,
+        .expiry = 4000};
+    (void)snprintf(spec.namespace_name, sizeof(spec.namespace_name),
+                   "agent.ops");
+    memcpy(spec.transport_root, agent1_pub, 32);
+    uint8_t token[32];
+    struct vcs_zcode_dht_record planned;
+    enum vcs_zcode_dht_record_error record_error;
+    ASSERT(vcs_zcode_dht_service_record_publish_plan(
+        a, &spec, token, &planned, &record_error));
+    ASSERT_EQ(vcs_zcode_dht_service_record_publish_commit(
+                  a, &spec, token, test_time(1000), NULL, &record_error),
               VCS_ZCODE_DHT_RECORD_STORE_SCOPE);
 
-    /* Governance is per namespace: the ungranted key publishes freely
-     * where no grant exists. */
-    ASSERT(fixture_agent_pointer(&agent2, 0xa2, genesis, "science.study", 0x55,
+    /* Ordinary records remain independent of rejected or legacy stored
+     * scope records, and therefore converge under either attempt order. */
+    struct vcs_zcode_dht_record record;
+    ASSERT(fixture_agent_pointer(&agent1, 0xa1, genesis, "agent.ops", 0x51,
                                  1, node_id, &record));
-    ASSERT_EQ(vcs_zcode_dht_service_record_admit(service, &record,
-                                                 test_time(1000)),
+    ASSERT_EQ(vcs_zcode_dht_service_record_admit(a, &record, test_time(1000)),
+              VCS_ZCODE_DHT_RECORD_STORE_ADDED);
+    ASSERT_EQ(vcs_zcode_dht_service_record_admit(b, &record, test_time(1000)),
+              VCS_ZCODE_DHT_RECORD_STORE_ADDED);
+    vcs_zcode_dht_record_store_digest(a->record_store, adigest);
+    vcs_zcode_dht_record_store_digest(b->record_store, bdigest);
+    ASSERT(memcmp(adigest, bdigest, sizeof(adigest)) == 0);
+    ASSERT_EQ(vcs_zcode_dht_record_store_put(
+                  a->record_store, &agent_grant, 1000),
+              VCS_ZCODE_DHT_RECORD_STORE_ADDED);
+    ASSERT(fixture_agent_pointer(&agent2, 0xa2, genesis, "agent.ops", 0x52,
+                                 1, node_id, &record));
+    ASSERT_EQ(vcs_zcode_dht_service_record_admit(a, &record, test_time(1000)),
+              VCS_ZCODE_DHT_RECORD_STORE_ADDED);
+    ASSERT_EQ(vcs_zcode_dht_service_record_admit(b, &record, test_time(1000)),
               VCS_ZCODE_DHT_RECORD_STORE_ADDED);
 
-    /* The publish RPC mints grants through the same kind-name codec as
-     * every other record. */
+    /* The dormant name remains stable for canonical wire tooling. */
     ASSERT_STR_EQ(boot_zcode_dht_record_kind_name(
                       VCS_ZCODE_DHT_RECORD_AGENT_SCOPE),
                   "agent_scope");
@@ -4430,63 +4457,10 @@ static int test_agent_scope_governance(void) {
            VCS_ZCODE_DHT_RECORD_AGENT_SCOPE);
 
     memory_cleanse(founder_seed, sizeof(founder_seed));
-    vcs_zcode_dht_service_free(service, test_time(1000));
-    cleanup_fixture(dir);
-    PASS();
-  }
-_test_next:;
-  return failures;
-}
-
-static int test_agent_scope_expiry_reverts(void) {
-  int failures = 0;
-  TEST("zcode dht service: governance lapses when every grant expires") {
-    char dir[] = "/tmp/zcl_dht_scope_exp_XXXXXX";
-    ASSERT(mkdtemp(dir) != NULL);
-    uint8_t genesis[32], noise[32];
-    memset(genesis, 0x11, sizeof(genesis));
-    memset(noise, 0x42, sizeof(noise));
-    ASSERT(fixture_identity(dir, 0x7d, genesis, noise));
-    struct vcs_zcode_dht_service *service =
-        fixture_service_at(dir, genesis, noise, 1000);
-    ASSERT(service != NULL);
-    struct vcs_zcode_dht_delegation founder;
-    uint8_t founder_seed[32], node_id[32];
-    ASSERT(fixture_material(dir, &founder, founder_seed, node_id));
-    uint8_t agent1_pub[32], agent2_pub[32];
-    struct vcs_zcode_dht_delegation agent1, agent2;
-    ASSERT(fixture_agent_delegation(0x7d, 0xa1, genesis, noise, &agent1, agent1_pub));
-    ASSERT(fixture_agent_delegation(0x7d, 0xa2, genesis, noise, &agent2, agent2_pub));
-    struct vcs_zcode_dht_record record;
-
-    /* A short grant governs the namespace only while it is live. */
-    ASSERT(fixture_scope_grant(&founder, founder_seed, genesis, "agent.ops",
-                               agent1_pub, 1000, 1400, &record));
-    ASSERT_EQ(vcs_zcode_dht_service_record_admit(service, &record,
-                                                 test_time(1000)),
-              VCS_ZCODE_DHT_RECORD_STORE_ADDED);
-    ASSERT(fixture_agent_pointer(&agent1, 0xa1, genesis, "agent.ops", 0x61, 1,
-                                 node_id, &record));
-    ASSERT_EQ(vcs_zcode_dht_service_record_admit(service, &record,
-                                                 test_time(1200)),
-              VCS_ZCODE_DHT_RECORD_STORE_ADDED);
-    ASSERT(fixture_agent_pointer(&agent2, 0xa2, genesis, "agent.ops", 0x62, 1,
-                                 node_id, &record));
-    ASSERT_EQ(vcs_zcode_dht_service_record_admit(service, &record,
-                                                 test_time(1200)),
-              VCS_ZCODE_DHT_RECORD_STORE_SCOPE);
-
-    /* Past the last grant's expiry the namespace reverts to ungoverned —
-     * the same bounded-time authority lapse every DHT record has. */
-    ASSERT(fixture_agent_pointer(&agent2, 0xa2, genesis, "agent.ops", 0x62, 1,
-                                 node_id, &record));
-    ASSERT_EQ(vcs_zcode_dht_service_record_admit(service, &record,
-                                                 test_time(1500)),
-              VCS_ZCODE_DHT_RECORD_STORE_ADDED);
-
-    memory_cleanse(founder_seed, sizeof(founder_seed));
-    vcs_zcode_dht_service_free(service, test_time(1000));
-    cleanup_fixture(dir);
+    vcs_zcode_dht_service_free(a, test_time(1000));
+    vcs_zcode_dht_service_free(b, test_time(1000));
+    cleanup_fixture(adir);
+    cleanup_fixture(bdir);
     PASS();
   }
 _test_next:;
@@ -4511,8 +4485,7 @@ int test_zcode_dht_service(void) {
   failures += test_peer_admission_order();
   failures += test_record_transport_and_restart();
   failures += test_record_operation_table_cap();
-  failures += test_agent_scope_governance();
-  failures += test_agent_scope_expiry_reverts();
+  failures += test_agent_scope_dormant();
   failures += test_sparse_iterative_network();
   failures += test_sparse_space16_network();
   TEST("zcode dht service: Noise-authenticated two-node lookup and restart") {

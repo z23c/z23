@@ -67,6 +67,19 @@ enum mempool_accept_result {
     MEMPOOL_ACCEPT_NONFINAL,        /* nLockTime not final for next block */
     MEMPOOL_ACCEPT_EXPIRING_SOON,   /* expiry falls inside relay horizon */
     MEMPOOL_ACCEPT_INTERNAL_ERROR,  /* mempool full / OOM / bad args */
+    /* We could not CHECK it — the shielded verifying keys are not
+     * installed, or the verification context could not be allocated.
+     * NOT an acceptance: the transaction is rejected and never relayed.
+     * It is simply not the sender's fault, so it must never be scored.
+     *
+     * Un-steerable by a peer: every condition behind this result is a
+     * property of THIS node (a boot-time key latch, an allocation), not
+     * of the bytes the peer sent, so a peer cannot craft a transaction
+     * that lands here while another lands on MEMPOOL_ACCEPT_INVALID.
+     * Either every shielded transaction is unverifiable right now or
+     * none is. Volume abuse during such a window is bounded separately
+     * by the relay layer's per-peer rate limit, not by this enum. */
+    MEMPOOL_ACCEPT_UNVERIFIABLE,
 };
 
 struct tx_mempool;

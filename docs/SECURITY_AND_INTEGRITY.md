@@ -238,11 +238,60 @@ log/error text is unchanged. Source `file:line` crash symbolization
 `DW_AT_name` entries stay relative and the line program is unchanged; only the
 (already-unresolvable-post-deploy) `comp_dir` source-root hint moves.
 `__DATE__`/`__TIME__` are absent from the tree; the link-order source list is a
-sorted `$(wildcard)` glob; the vendored static archives are fixed committed
-inputs (identical bytes on both builders), so archive-timestamp determinism is
-moot for this gate. The content-derived `--build-id=sha1` is kept (not forced to
-`none`) because, once `comp_dir` is canonical, it is itself reproducible and
-remains a useful integrity anchor.
+sorted `$(wildcard)` glob; the vendored static archives under `vendor/lib/` are
+the same files on both of this gate's builders — it snapshots one working tree
+— so archive-timestamp determinism is moot *for this gate*. That is a narrower
+statement than it looks: `vendor/lib/` is `.gitignore`d apart from
+`libsecp256k1.a`, so on a genuinely different machine those archives are
+rebuilt by `tools/scripts/build_vendor.sh` from checksum-pinned sources and
+their byte identity is **not** asserted anywhere. `z23 zcode node verify` names
+each one as an `unverified` component for exactly this reason. The
+content-derived `--build-id=sha1` is kept (not forced to `none`) because, once
+`comp_dir` is canonical, it is itself reproducible and remains a useful
+integrity anchor.
+
+### The user-facing check: `z23 zcode node verify`
+
+`make repro-verify` is a maintainer gate: it proves this *source tree* builds
+deterministically here. It does not answer the question an ordinary user has,
+which is narrower and more important — *are the bytes I am running the bytes my
+own machine builds?* `z23 zcode node verify` answers that one. It hashes the
+artifact you have (by default this process's own executable), rebuilds `z23`
+from `source_dir` in an isolated tree via `tools/scripts/node_reproduce.sh`,
+and byte-compares. It contacts nothing.
+
+It structurally cannot perform the worthless check. Comparing a published hash
+against the file it was published beside has one participant; the comparator
+(`lib/vcs/src/node_reproduce.c`) refuses unless one receipt carries producer
+`received` and the other `local-rebuild`, so no argument list reaches that
+comparison, and no input key accepts a hash or someone else's receipt.
+
+The `verdict` is the answer, never the envelope status:
+
+| verdict | what it means |
+| --- | --- |
+| `match` | every artifact byte-identical, nothing left uncovered |
+| `partial` | everything comparable matched, and the named `unverified` components were not rebuilt here. **Not a pass** |
+| `source-differs` | this checkout is not the source that binary came from. Says nothing about the publisher |
+| `toolchain-differs` | same source, different compiler — the ordinary reason two honest builds differ. Not evidence against anyone |
+| `claim-false` | same source *and* the same recorded toolchain, different bytes: the artifact is not what this source and toolchain produce |
+| `undiagnosed` | the bytes differ and an identity is missing, so it names neither rather than guessing |
+
+Both sides' toolchain identity is read the same way — SHA3-256 over each ELF's
+`.comment` section, by one implementation — because measuring the two sides
+differently would grade every honest build a toolchain mismatch.
+
+**What it covers today, exactly:** the linked `bin/z23` artifact. **What it
+does not:** the vendored static archives under `vendor/lib/` (consumed as
+prebuilt inputs, not rebuilt — and `libsecp256k1.a` is a binary committed to
+the tree whose own `vendor/provenance/` manifest records
+`source_status=legacy-import-source-unresolved`), the per-translation-unit LTO
+intermediates (gcc streams absolute paths into the compressed LTO IR where
+`-ffile-prefix-map` cannot reach), and the host toolchain itself. Each is
+emitted by name in the reply's `unverified` list, and the presence of even one
+makes the verdict `partial` rather than `match`. That is the honest ceiling for
+the shipped node today; dropping those components to print a green `match` is
+how a verified result stops meaning anything.
 
 **The honest report on residual divergence:** the gate strips nothing itself —
 it compares the artifacts exactly as shipped. If a future toolchain change
@@ -279,6 +328,7 @@ The README states these properties; this is where each one names the mechanism
 | **Crash recovery is executed, not claimed** - a node is kill-9ed mid-write on an isolated datadir and must fold back to its tip with no manual repair. | `make test-crash-bootstrap` |
 | **Read-only queries are constrained by construction** - SELECT-only, semicolons rejected, auto-`LIMIT`, a wall-clock budget, and wallet-secret tables denied by name. | `build/bin/z23 core storage query` |
 | **Public hosting default-refuses** - a node announces and serves only packages it can classify into a named public shape, and the licensed shapes require a verified author signature, an allowlisted SPDX identifier and real `LICENSE` text before a byte moves ([`P2P_SOURCE_HOSTING.md`](./P2P_SOURCE_HOSTING.md)). Anything unrecognised is refused by name. | `make -j"$(nproc)" t-fast ONLY=zcode_swarm` |
+| **The bytes you run are the bytes your own machine builds** - not "signed by someone reputable", and not a published hash checked against the file it was published beside. The command rebuilds locally and compares, names what it did *not* cover, and reports `partial` rather than `match` while anything is uncovered. | `z23 zcode node verify --input='{"source_dir":"."}'` |
 | **The gates run on your machine**, with no hosted CI service in the loop. | `make lint && make ci` |
 
 And the boundaries, stated plainly. Z23 has no central coordinator and no

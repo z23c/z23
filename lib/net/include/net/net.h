@@ -146,13 +146,33 @@ int net_message_read_header(struct net_message *msg,
 int net_message_read_data(struct net_message *msg,
                           const char *pch, unsigned int nbytes);
 
+/* Framing-layer failure codes. Both abort the frame; they differ only in
+ * WHOSE fault it was.
+ *
+ *   -1 (NET_FRAME_ERR_PEER)  the bytes on the wire were wrong: bad start
+ *                            magic, or a declared size over the protocol
+ *                            cap. The peer's doing — score it.
+ *   -2 (NET_FRAME_ERR_LOCAL) we could not stage a frame that was legal on
+ *                            the wire: the process-wide recv budget was
+ *                            already full, or realloc failed. Neither is
+ *                            evidence about this peer.
+ *
+ * The recv budget is shared across every connection and the allocator
+ * answers to whatever else the machine is doing, so charging either to the
+ * sender means a busy or memory-pressured box hands out ban-score to the
+ * honest peers that happen to be talking to it at the time. The resource
+ * defence is unchanged — the frame is still refused and the connection
+ * still fails — we simply stop calling it misbehaviour. */
+#define NET_FRAME_ERR_PEER  (-1)
+#define NET_FRAME_ERR_LOCAL (-2)
+
 /* process-wide recv queue byte budget. net_recv_total_bytes
  * returns the current sum of outstanding msg->recv_alloc across every
  * net_message. net_recv_total_bytes_cap() returns the configured
  * ceiling (env ZCL_MAX_RECVBUFFER_TOTAL_BYTES, default 256 MiB). When
  * adding a new message's allocation would exceed the cap,
- * net_message_read_data fails with -1 instead of triggering the
- * allocation. */
+ * net_message_read_data fails with NET_FRAME_ERR_LOCAL instead of
+ * triggering the allocation. */
 size_t net_recv_total_bytes(void);
 size_t net_recv_total_bytes_cap(void);
 
@@ -330,6 +350,16 @@ struct p2p_node {
      * window yet" on the very first addr message. */
     int64_t addr_rate_window_start;
     uint32_t addr_rate_window_count;
+
+    /* Per-peer bound on transactions we could not verify
+     * (msg_tx.c::msg_tx_accept, TX_ACCEPT_UNVERIFIABLE). Same fixed-window
+     * shape as the addr limit above. An unverifiable transaction is our
+     * failure, not the sender's, so it earns no ban-score — this counter is
+     * what stops "no ban-score" from meaning "unlimited free traffic" while
+     * our verifying keys are absent. Zero-initialised by p2p_node_create
+     * (calloc), so window_start==0 reads as "no window yet". */
+    int64_t unverifiable_tx_window_start;
+    uint32_t unverifiable_tx_window_count;
 
     struct inv_item *inventory_to_send;
     size_t inventory_to_send_count;

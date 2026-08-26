@@ -330,6 +330,21 @@ enum vcs_package_install_error vcs_package_plan_id(
 
 /* ── generation log ─────────────────────────────────────────────────── */
 
+size_t vcs_package_generations_trim(struct vcs_package_generations *g,
+                                    size_t keep)
+{
+    if (!g)
+        return 0;
+    if (keep < 1u)
+        keep = 1u;
+    if (g->count <= keep)
+        return 0;
+    size_t drop = g->count - keep;
+    memmove(g->items, g->items + drop, keep * sizeof(g->items[0]));
+    g->count = keep;
+    return drop;
+}
+
 enum vcs_package_install_error vcs_package_generations_append(
     struct vcs_package_generations *g, const uint8_t root[32],
     int64_t activated_unix)
@@ -339,11 +354,15 @@ enum vcs_package_install_error vcs_package_generations_append(
                    "null argument appending a generation");
     if (install_root_is_zero(root))
         return VCS_PACKAGE_INSTALL_ERR_ROOT;
-    if (g->count >= VCS_PACKAGE_GENERATION_MAX)
-        return VCS_PACKAGE_INSTALL_ERR_GEN_COUNT;
+    /* Rejections leave the log untouched, so the duplicate check comes
+     * before any eviction. */
     if (g->count > 0 &&
         memcmp(g->items[g->count - 1u].root, root, 32) == 0)
         return VCS_PACKAGE_INSTALL_ERR_ROOT; /* already active: no-op */
+    /* Make room by evicting the OLDEST entries rather than refusing. A
+     * refusal here would deny both the next install and the next rollback
+     * — bricking the package at the moment going back matters most. */
+    (void)vcs_package_generations_trim(g, VCS_PACKAGE_GENERATION_KEEP - 1u);
     g->items[g->count].activated_unix = activated_unix;
     memcpy(g->items[g->count].root, root, 32);
     g->count++;

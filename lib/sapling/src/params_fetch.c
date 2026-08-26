@@ -371,4 +371,3 @@ bool zcl_params_all_installed_verified(const char *dir)
             return false;
     return true;
 }
-
