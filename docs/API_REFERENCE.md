@@ -74,15 +74,15 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 731 |
+| Registry entries (branches + leaves) | 734 |
 | Top-level roots | 12 |
-| Branches | 170 |
-| Leaves (dispatchable command paths) | 561 |
-| … `ready` (live handler in this build) | 505 |
+| Branches | 171 |
+| Leaves (dispatchable command paths) | 563 |
+| … `ready` (live handler in this build) | 507 |
 | … `compat` (metadata only, names a fallback) | 25 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 24 |
-| Leaves with `effect=mutate` | 195 |
+| Leaves with `effect=mutate` | 196 |
 | Leaves with `effect=destructive` | 4 |
 | Leaves requiring **owner** authority | 112 |
 
@@ -100,7 +100,7 @@ Per source file:
 | `config/commands/code.def` | 17 | 2 | 15 |
 | `config/commands/accounts.def` | 11 | 2 | 9 |
 | `config/commands/vault.def` | 24 | 4 | 20 |
-| `config/commands/zcode.def` | 234 | 56 | 178 |
+| `config/commands/zcode.def` | 237 | 57 | 180 |
 | `config/commands/zcode_science.def` | 25 | 7 | 18 |
 | `config/commands/metaverse.def` | 30 | 7 | 23 |
 | `config/commands/yardsale.def` | 7 | 2 | 5 |
@@ -1433,6 +1433,7 @@ represented by its children's sections.
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
 | `zcode node join` (aliases: `join`) | ready | mutate / app-write / operator · foreground/moderate | `datadir` | `zcl.zcode_node_join.v1` | `z23 join` | Join this node to the C23 network |
+| `zcode node verify` | ready | mutate / app-write / operator · background/high | `artifact`, `source_dir`, `scratch_dir`, `profile`, `jobs`, `timeout_seconds` | `zcl.zcode_node_verify.v1` | `z23 zcode node verify --input='{"source_dir":"/path/to/zclassic23"}'` | Rebuild this node here and compare bytes |
 
 #### `zcode.node.update` — Node self-update
 
@@ -1441,6 +1442,12 @@ represented by its children's sections.
 | `zcode node update status` (aliases: `update`) | planned | read / read / operator · fast/low | `datadir` | `zcl.zcode_node_update_status.v1` | `z23 update` | Show what this node would update to — *no verified node-release feed exists yet: nothing on this node can prove a candidate build is the real newer release, and an unproven update channel is a remote code-execution path* |
 | `zcode node update check` | planned | read / read / operator · foreground/moderate | `datadir` | `zcl.zcode_node_update_check.v1` | `z23 zcode node update check` | Look for a newer verified node release — *no verified node-release feed exists yet: there is no signed release wire to fetch and no reproducible-build evidence to check it against* |
 | `zcode node update apply` | planned | mutate / app-write / operator · background/high | `datadir`, `release_root` | `zcl.zcode_node_update_apply.v1` | `z23 zcode node update apply --input='{"release_root":"<64hex>"}'` | Stage a verified newer node release — *no verified node-release feed exists yet: staging an unverified binary next to the running node would be a self-inflicted supply-chain compromise, so this stays refused until check can prove a candidate* |
+
+#### `zcode.package.policy` — Local ratio and anti-spam policy
+
+| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
+|---|---|---|---|---|---|---|
+| `zcode package policy limits` | ready | read / read / public · instant/tiny | `tier`, `earned_score`, `uploaded_bytes`, `downloaded_bytes` | `zcl.zcode_package_policy_limits.v1` | `z23 zcode package policy limits --input='{"earned_score":600}'` | Show the frozen local P2P policy limits for one contributor tier |
 
 #### `zcode.science` — Scientific evidence
 

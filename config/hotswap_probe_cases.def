@@ -71,3 +71,9 @@ HOTSWAP_PROBE_CASE("service.shop.want.list.default.v1", "service",
 HOTSWAP_PROBE_CASE("service.vault.intent.decision.story.v1", "service",
     "dev.test.story", "{\"owner\":\"transaction_intent\"}",
     "zcl.vault_intent_decision_story.v1", 2048)
+/* The hermetic case. Unlike every command case above, dispatching this one
+ * needs no resident node and no datadir: the empty input derives the NEW_USER
+ * row — the free allowance — from compiled-in constants alone. */
+HOTSWAP_PROBE_CASE("command.zcode.package.policy.limits.free.v1", "command",
+    "zcode.package.policy.limits", "{}",
+    "zcl.zcode_package_policy_limits.v1", 4096)
