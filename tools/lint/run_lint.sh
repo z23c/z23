@@ -153,6 +153,7 @@ gate_command() {
         check-standalone-tools-link)       echo './tools/lint/check_standalone_tools_link.sh' ;;
         check-live-datadir-isolation)      echo './tools/lint/check_live_datadir_isolation.sh --selftest && ./tools/lint/check_live_datadir_isolation.sh' ;;
         check-no-operator-paths)           echo './tools/lint/check_no_operator_paths.sh --selftest && ./tools/lint/check_no_operator_paths.sh' ;;
+        check-no-unattended-publish)       echo './tools/lint/check_no_unattended_publish.sh --selftest && ./tools/lint/check_no_unattended_publish.sh' ;;
         check-installed-acceptance-tools)  echo './tools/lint/check_installed_acceptance_tools.sh' ;;
         check-no-writer-below-sealed-frontier) echo './tools/lint/check_no_writer_below_sealed_frontier.sh' ;;
         check-peer-floor-single-source)    echo './tools/lint/check_peer_floor_single_source.sh' ;;
