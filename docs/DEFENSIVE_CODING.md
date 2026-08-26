@@ -931,6 +931,7 @@ add/remove a gate.
 - `check-identity-parser-single`
 - `check-status-reason-single`
 - `check-pipefail-status-pipe`
+- `check-no-wallclock-assertion`
 - `check-blocker-remedy`
 - `check-vendor-provenance`
 - `check-doc-no-false-deleted`

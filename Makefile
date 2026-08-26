@@ -8886,6 +8886,17 @@ check-pipefail-status-pipe:
 	@./tools/lint/check_pipefail_status_pipe.sh --selftest
 	@./tools/lint/check_pipefail_status_pipe.sh
 
+# Anti-flake ratchet: no NEW test assertion graded on a measured wall-clock
+# interval. A verdict a busy box can flip is measuring the box, not the code —
+# and this project keeps slow machines on purpose, because a slow box is the
+# only instrument that shows where the code assumes fast storage. Closed,
+# shrink-only allowlist at tools/lint/wallclock_assertion_allowlist.txt; no
+# per-line escape hatch. See the script header for what it can and cannot see.
+check-no-wallclock-assertion:
+	@echo "══ LINT: no test assertion graded on a wall-clock interval ══"
+	@./tools/lint/check_no_wallclock_assertion.sh --selftest
+	@./tools/lint/check_no_wallclock_assertion.sh
+
 # Anti-stale forbid gate: no hand-pinned rot-prone facts in the docs. Two
 # classes — a "<N> MB … binary" size claim (HARD; the size has a live source,
 # tools/scripts/binary_size.sh — de-pin to size-agnostic prose) and a live-state
@@ -9385,6 +9396,7 @@ LINT_GATES := \
     check-identity-parser-single \
     check-status-reason-single \
     check-pipefail-status-pipe \
+    check-no-wallclock-assertion \
     check-framework-shape \
     check-framework-filename-suffix \
     check-no-raw-clock-outside-platform \

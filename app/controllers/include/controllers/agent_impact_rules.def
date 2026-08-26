@@ -1251,3 +1251,21 @@ AGENT_IMPACT_RULE("docs/CODE_FEARLESSLY.md|AGENTS.md", "make_lint_gates")
  * nothing looking. Mapped so an edit here can never reach the push gate
  * having run zero test groups. */
 AGENT_IMPACT_RULE("tools/scripts/source_identity_lib.sh|tools/deploy_verify.sh|lib/util/src/clientversion.c|lib/util/include/util/clientversion.h|app/controllers/src/agent_runtime_controller.c|lib/test/src/test_source_identity_authority.c", "source_identity_authority make_lint_gates")
+/* LANE anti-flake / load-independent verdicts. A test graded on wall-clock
+ * duration reports on the MACHINE, not the code — measured on this tree, the
+ * same commit and binary FAILED at 48s under a 32-worker run and PASSED at
+ * 64.0s standalone. Three things move together here and none of them can be
+ * changed safely alone:
+ *   * the two fixture/driver pairs whose verdicts are now count-graded rather
+ *     than clock-graded (a fixture that publishes state on a wall clock, and
+ *     a driver whose deadline must never cut off the observation the verdict
+ *     needs — MIN_SAMPLES);
+ *   * the two PROGRESS watchdogs that replaced total-duration ceilings, one
+ *     per-gate-script and one per-test-group. They bound SILENCE, so a slow
+ *     or saturated box keeps passing and a real wedge is still reported —
+ *     as a wedge, distinctly from a failed assertion;
+ *   * the lint gate that refuses NEW clock-graded assertions, plus its closed
+ *     allowlist.
+ * Mapped so an edit to any of them re-runs the groups that would notice a
+ * regression, instead of reaching the push gate having run nothing. */
+AGENT_IMPACT_RULE("tools/lint/check_no_wallclock_assertion.sh|tools/lint/wallclock_assertion_allowlist.txt|tools/scripts/fresh-boot-weld-prove.sh|tools/scripts/fresh-boot-weld-prove-selftest.sh|lib/test/src/lint_gate_helpers.c|lib/test/src/lint_gate_selftests.h|lib/test/src/lint_gate_hygiene_selftests.c|lib/test/src/test_parallel.c|lib/test/src/test_binary_ab_fallback.c|lib/test/src/test_self_backtrace.c|lib/test/src/test_onion_bootstrap.c|tools/dev/build-epoch-selftest.sh|tools/dev/checkout-lock-selftest.sh", "make_lint_gates binary_ab_fallback self_backtrace onion_bootstrap")
