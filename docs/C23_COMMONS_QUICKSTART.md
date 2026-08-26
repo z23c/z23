@@ -30,14 +30,14 @@ remember the table.
 | --- | --- | --- |
 | Join the package commons | `z23 join` | [`JOIN.md`](JOIN.md) |
 | Describe the behavior you want | `z23 zcode guide` | above |
-| Reuse existing C23 first, create only what is missing | `z23 zcode work start --datadir=/tmp/z23-work` | [`work walkthrough`](work/ZCODE_DEVELOPMENT_WALKTHROUGH.md) |
-| Build and test it, contained | `z23 zcode work run --datadir=/tmp/z23-work` | [`work walkthrough`](work/ZCODE_DEVELOPMENT_WALKTHROUGH.md) |
-| See the real consequence | `z23 zcode work show --datadir=/tmp/z23-work` | [`work walkthrough`](work/ZCODE_DEVELOPMENT_WALKTHROUGH.md) |
-| Publish the exact source and release | `z23 zcode create --datadir=/tmp/z23-commons` | [Author](#author) |
-| Announce only what this node itself installed and rebuilt byte-identically | `z23 zcode package reproduce --datadir=/tmp/z23-commons` | [Author](#author) |
-| Fetch inert bytes on another node | `z23 zcode package fetch --datadir=/tmp/z23-commons` | [Consumer](#consumer) |
-| Reproduce it independently | `z23 zcode package source reproduce --datadir=/tmp/z23-commons` | [Reproducer](#reproducer) |
-| Accept and use that exact version | `z23 zcode use --datadir=/tmp/z23-commons` | [Consumer](#consumer) |
+| Reuse existing C23 first, create only what is missing | `z23 zcode work start -datadir=/tmp/z23-work` | [`work walkthrough`](work/ZCODE_DEVELOPMENT_WALKTHROUGH.md) |
+| Build and test it, contained | `z23 zcode work run -datadir=/tmp/z23-work` | [`work walkthrough`](work/ZCODE_DEVELOPMENT_WALKTHROUGH.md) |
+| See the real consequence | `z23 zcode work show -datadir=/tmp/z23-work` | [`work walkthrough`](work/ZCODE_DEVELOPMENT_WALKTHROUGH.md) |
+| Publish the exact source and release | `z23 zcode create -datadir=/tmp/z23-commons` | [Author](#author) |
+| Announce only what this node itself installed and rebuilt byte-identically | `z23 zcode package reproduce -datadir=/tmp/z23-commons` | [Author](#author) |
+| Fetch inert bytes on another node | `z23 zcode package fetch -datadir=/tmp/z23-commons` | [Consumer](#consumer) |
+| Reproduce it independently | `z23 zcode package source reproduce -datadir=/tmp/z23-commons` | [Reproducer](#reproducer) |
+| Accept and use that exact version | `z23 zcode use -datadir=/tmp/z23-commons` | [Consumer](#consumer) |
 
 ![z23 zcode guide — the one obvious next action](assets/z23-term-guide.svg)
 
@@ -74,7 +74,7 @@ Then inspect join status and the live DHT:
 ```bash
 z23 zcode work toolchain
 z23 zcode package guide
-z23 zcode network status --datadir=/tmp/z23-commons
+z23 zcode network status -datadir=/tmp/z23-commons
 ```
 
 `zcode work toolchain` and `zcode package guide` share the same `join_flags`,
@@ -94,9 +94,9 @@ and inspect this once, commit the exact returned token, then restart so the
 running DHT loads the policy:
 
 ```bash
-z23 zcode network policy mutate --datadir=/tmp/z23-commons \
+z23 zcode network policy mutate -datadir=/tmp/z23-commons \
   --input='{"mode":"plan","operation":"add","source":"local","effect":"allow","scope":"service_type","action_mask":63,"value":"zclassic23.package"}'
-z23 zcode network policy mutate --datadir=/tmp/z23-commons \
+z23 zcode network policy mutate -datadir=/tmp/z23-commons \
   --input='{"mode":"commit","operation":"add","source":"local","effect":"allow","scope":"service_type","action_mask":63,"value":"zclassic23.package","plan_token":"<returned token>"}'
 ```
 
@@ -119,7 +119,7 @@ input spelling with `z23 discover schema <leaf>`.
    without writing to the node:
 
    ```bash
-   z23 zcode package dev prepare --datadir=/tmp/z23-commons \
+   z23 zcode package dev prepare -datadir=/tmp/z23-commons \
      --input='{"dir":"/absolute/path/to/package","publisher_pubkey":"<66hex>","publisher_sequence":1}'
    ```
 
@@ -131,7 +131,7 @@ input spelling with `z23 discover schema <leaf>`.
    zclassic23-package-sign --sign-digest <64hex-digest> --key-fd 7
    exec 7<&-
 
-   z23 zcode package dev seal --datadir=/tmp/z23-commons \
+   z23 zcode package dev seal -datadir=/tmp/z23-commons \
      --input='{"release_body_hex":"<prepare value>","signature_hex":"<128hex signature>"}'
    ```
 
@@ -160,11 +160,11 @@ input spelling with `z23 discover schema <leaf>`.
    deterministically and files the distinct second:
 
    ```bash
-   z23 zcode use --datadir=/tmp/z23-commons \
+   z23 zcode use -datadir=/tmp/z23-commons \
      --input='{"name_or_root":"<package_root>"}'
-   z23 zcode use --datadir=/tmp/z23-commons \
+   z23 zcode use -datadir=/tmp/z23-commons \
      --input='{"plan_id":"<returned plan_id>"}'
-   z23 zcode package reproduce --datadir=/tmp/z23-commons \
+   z23 zcode package reproduce -datadir=/tmp/z23-commons \
      --input='{"name_or_root":"<package_root>"}'
    ```
 
@@ -175,14 +175,14 @@ input spelling with `z23 discover schema <leaf>`.
    signed availability evidence, not correctness evidence.
 
    ```bash
-   z23 zcode network publish --datadir=/tmp/z23-commons \
+   z23 zcode network publish -datadir=/tmp/z23-commons \
      --input='{"mode":"plan","kind":"pointer","namespace":"zclassic23.package","semantic_root":"<package_root>","transport_root":"<transport_root>","sequence":1,"not_before":<unix>,"expiry":<unix>}'
-   z23 zcode network publish --datadir=/tmp/z23-commons \
+   z23 zcode network publish -datadir=/tmp/z23-commons \
      --input='{"mode":"commit","kind":"pointer","namespace":"zclassic23.package","semantic_root":"<same package_root>","transport_root":"<same transport_root>","sequence":1,"not_before":<same>,"expiry":<same>,"plan_token":"<returned token>"}'
 
-   z23 zcode network publish --datadir=/tmp/z23-commons \
+   z23 zcode network publish -datadir=/tmp/z23-commons \
      --input='{"mode":"plan","kind":"provider","namespace":"zclassic23.package","transport_root":"<transport_root>","sequence":1,"not_before":<unix>,"expiry":<unix>}'
-   z23 zcode network publish --datadir=/tmp/z23-commons \
+   z23 zcode network publish -datadir=/tmp/z23-commons \
      --input='{"mode":"commit","kind":"provider","namespace":"zclassic23.package","transport_root":"<same transport_root>","sequence":1,"not_before":<same>,"expiry":<same>,"plan_token":"<returned token>"}'
    ```
 
@@ -216,9 +216,9 @@ persisted release in the rebuildable index names a root, that `name` is
 enough to fetch without copying 64 hex by hand:
 
 ```bash
-z23 zcode package library --datadir=/tmp/z23-commons
-z23 zcode package offered --datadir=/tmp/z23-commons
-z23 zcode package fetch --datadir=/tmp/z23-commons \
+z23 zcode package library -datadir=/tmp/z23-commons
+z23 zcode package offered -datadir=/tmp/z23-commons
+z23 zcode package fetch -datadir=/tmp/z23-commons \
   --input='{"name":"<library name>"}'
 ```
 
@@ -242,10 +242,10 @@ do not trust the announcer.
    execute downloaded code.
 
    ```bash
-   z23 zcode network records --datadir=/tmp/z23-commons \
+   z23 zcode network records -datadir=/tmp/z23-commons \
      --input='{"kind":"pointer","namespace":"zclassic23.package","semantic_root":"<package_root>","include_evidence_wires":true}'
 
-   z23 zcode package fetch --datadir=/tmp/z23-commons \
+   z23 zcode package fetch -datadir=/tmp/z23-commons \
      --input='{"root":"<transport_root>","namespace":"zclassic23.package","maximum_bytes":268435456}'
    ```
 
@@ -256,7 +256,7 @@ do not trust the announcer.
 2. Inspect the imported release and its exact dependencies:
 
    ```bash
-   z23 zcode package show --datadir=/tmp/z23-commons \
+   z23 zcode package show -datadir=/tmp/z23-commons \
      --input='{"root":"<package_root>"}'
    ```
 

@@ -2,8 +2,8 @@
 #
 # Format: <prong> <path> <occurrences>
 #   A  absolute home path (/home/<x>, /Users/<x>) — universal
-#   B  the operator's username as a standalone word (host-derived)
-#   C  the host's name as a standalone word (host-derived)
+#   B  an account token exposed by prong A (source-derived)
+#   C  an explicit structured host identity (source-derived)
 #
 # Counts may only DECREASE. A new path/prong pair fails HARD; a row
 # whose count reaches zero is STALE and must be deleted — that is
@@ -336,7 +336,6 @@ B corpus/report-000040.json 66
 B corpus/report-000041.json 73
 B corpus/report-000042.json 73
 B deploy/install-host-watchdog.sh 1
-B deploy/release-candidates.jsonl 1
 B deploy/zclassic23-host-watchdog.sh 1
 B deploy/zclassic23-standby.env.example 1
 B docs/agent/EXAMPLE_LANE_PROMPT.md 2

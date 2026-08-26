@@ -42,24 +42,18 @@
 #    buy nothing and cost 14 baseline rows that teach a reader to ignore the
 #    gate.
 #
-# B. THE OPERATOR'S USERNAME as a standalone word, derived at run time from
-#    `id -un`. This catches the shapes prong A cannot: `<user>@host` in a
-#    documented ssh command, `${ZCL_HOST_WATCHDOG_USER:-<user>}` as a shell
-#    default, `"host":"<user>-dev"` in a release ledger.
+# B. AN ACCOUNT TOKEN exposed by prong A, as a standalone word elsewhere in
+#    the tree. The token is derived from tracked bytes, never from the runner.
+#    This catches the shapes prong A cannot: `<user>@host` in a documented ssh
+#    command or `${ZCL_HOST_WATCHDOG_USER:-<user>}` as a shell default.
 #
-# C. THE HOST'S NAME, from `hostname` and `hostname -s`, as standalone words.
+# C. AN EXPLICIT HOST IDENTITY in a structured host field. Generic
+#    fixture values, documentation-only example domains, localhost, and onion
+#    identities are excluded deterministically.
 #
-#    HONEST LIMIT on B and C, stated because it decides how to read a green
-#    run: they are HOST-DERIVED, so this gate is only as wide as the machine
-#    it runs on. It cannot know another contributor's username or hostname.
-#    That is not a reason to skip them — the leak this repository actually
-#    ships is the maintainer's — but a green B/C on a CI runner named
-#    `runner` proves nothing about the maintainer's identity, and a reviewer
-#    must not read it as if it did. Prong A is the one that travels. Both are
-#    skipped (loudly, in the PASS line) when the derived token is shorter
-#    than 3 characters or is a common word that would fire on ordinary
-#    prose — a username of `dev` or `test` would otherwise flag hundreds of
-#    files and the gate would be turned off within a day.
+#    B and C are deliberately SOURCE-DERIVED. A checkout produces the same
+#    result under every account and hostname. Short and generic tokens are
+#    skipped because matching ordinary prose would make the signal useless.
 #
 # ── RATCHET ────────────────────────────────────────────────────────────────
 # tools/lint/operator_paths_baseline.txt records, per prong and path, the
@@ -79,8 +73,8 @@
 # THIS SCRIPT, however, IS scanned like any other tracked file, and that is
 # deliberate — a gate exempt from itself is a place to hide. It therefore
 # writes no literal identity token anywhere: the prong A regex is assembled
-# from the HOME_ROOT_* tokens below, the prong B/C tokens come from `id -un`
-# and `hostname`, and every doc example spells the operator `<user>`. This is
+# from the HOME_ROOT_* tokens below, and prongs B/C derive their tokens from
+# tracked content. Every doc example spells the operator `<user>`. This is
 # not hypothetical: the first commit of this gate used a real username in the
 # prong B example three lines above, and the gate failed on itself the moment
 # the file became tracked.
@@ -120,8 +114,8 @@ HOME_ROOT_B="Users"
 RE_ABS="/(${HOME_ROOT_A}|${HOME_ROOT_B})/[A-Za-z0-9][A-Za-z0-9._-]*"
 
 # Words too generic to match as an identity token. A username or hostname in
-# this set disables its prong rather than flooding the baseline.
-GENERIC_TOKENS=" dev test build user admin node home root local host runner \
+# this set is ignored rather than flooding the baseline.
+GENERIC_TOKENS=" dev test build user you fred admin node home root local host runner \
 ubuntu debian docker ci app main src lib bin tmp data work "
 
 # ── --selftest: a gate nobody has seen FAIL is not a gate ──────────────────
@@ -134,7 +128,6 @@ ubuntu debian docker ci app main src lib bin tmp data work "
 if [ "${1:-}" = "--selftest" ]; then
     tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' EXIT
-    st_user="$(id -un 2>/dev/null || true)"
     fails=0
 
     st_run() {  # st_run <expect-rc> <label> <file>...
@@ -158,6 +151,19 @@ if [ "${1:-}" = "--selftest" ]; then
         > "$tmp/clean.txt"
     st_run 0 "clean file" "$tmp/clean.txt"
 
+    # Runner-local names are ordinary data. This assertion makes portability
+    # explicit: neither the current login nor hostname can arm a prong.
+    printf 'actors = bob, runner, t14\nfixture host = build\n' \
+        > "$tmp/runner_names.txt"
+    st_run 0 "runner username and hostname are not policy" \
+        "$tmp/runner_names.txt"
+
+    printf '{"%s":"%s"}\n{"%s":"%s"}\n{"%s":"%s"}\n' \
+        "host" "h" "host" "peer.example.com" "host" \
+        "abcdefghijklmnop.onion" > "$tmp/public_hosts.txt"
+    st_run 0 "generic, example, and onion host fields" \
+        "$tmp/public_hosts.txt"
+
     # Assertion 2 (prong A): an absolute home path is REJECTED. The literal
     # is assembled here so this script never itself contains one.
     printf 'datadir = /%s/%s/.zclassic-c23-commons-factory-a\n' \
@@ -169,18 +175,19 @@ if [ "${1:-}" = "--selftest" ]; then
         > "$tmp/planted_a2.txt"
     st_run 1 "prong A — planted /Users path" "$tmp/planted_a2.txt"
 
-    # Assertion 4 (prong B): the operator's username as a bare word, when
-    # this host's username is specific enough for the prong to be armed.
-    if [ -n "$st_user" ] && [ "${#st_user}" -ge 3 ] && \
-       str_lacks "$GENERIC_TOKENS" " $st_user "; then
-        printf 'ssh %s@some-box\n' "$st_user" > "$tmp/planted_b.txt"
+    # Assertion 4 (prong B): a source-derived account token spreading beyond
+    # its absolute path is rejected. The test-only seed is accepted only for
+    # a sandbox scan, so it cannot alter policy for the tracked tree.
+    printf 'ssh planted-operator@some-box\n' > "$tmp/planted_b.txt"
+    ZCL_OPERATOR_PATHS_TEST_IDENTITIES="planted-operator" \
         st_run 1 "prong B — planted operator username" "$tmp/planted_b.txt"
-    else
-        echo "[$GATE]   selftest skip: prong B (username '$st_user' is" \
-             "generic or too short on this host — the prong is disarmed)"
-    fi
 
-    # Assertion 5: removing the violation restores PASS, so the failures
+    # Assertion 5 (prong C): a structured explicit hostname is rejected.
+    printf '{"%s":"%s"}\n' "host" "private-operator-box" \
+        > "$tmp/planted_c.txt"
+    st_run 1 "prong C — planted explicit hostname" "$tmp/planted_c.txt"
+
+    # Assertion 6: removing the violation restores PASS, so the failures
     # above were caused by the planted bytes and nothing else.
     printf 'datadir = $HOME/.zclassic-c23-commons-factory-a\n' \
         > "$tmp/planted_a.txt"
@@ -239,6 +246,53 @@ word_regex() {
     printf '(^|[^A-Za-z0-9_])%s([^A-Za-z0-9_]|$)' "$esc"
 }
 
+# abs_account_tokens — source identities exposed by absolute home paths.
+# A test seed exists solely so --selftest can isolate prong B from prong A.
+abs_account_tokens() {
+    local out
+    if [ -n "$SCAN_OVERRIDE" ]; then
+        out="$(printf '%s\n' "$SCAN_OVERRIDE" \
+               | while IFS= read -r f; do
+                     [ -n "$f" ] && [ -f "$f" ] || continue
+                     grep -oIE -e "$RE_ABS" "$f" 2>/dev/null
+                 done)"
+        if [ -n "${ZCL_OPERATOR_PATHS_TEST_IDENTITIES:-}" ]; then
+            printf '%s\n' "$ZCL_OPERATOR_PATHS_TEST_IDENTITIES"
+        fi
+    else
+        out="$(git grep -ohIE -e "$RE_ABS" -- . ':!'"$BASELINE" \
+               2>/dev/null)"
+    fi
+    printf '%s\n' "$out" | sed -E 's#^/(home|Users)/##' | sort -u
+}
+
+# explicit_host_tokens — structured host identities, not runner state.
+explicit_host_tokens() {
+    local re='"(host|hostname)"[[:space:]]*:[[:space:]]*"[A-Za-z0-9][A-Za-z0-9._-]*"' out
+    if [ -n "$SCAN_OVERRIDE" ]; then
+        out="$(printf '%s\n' "$SCAN_OVERRIDE" \
+               | while IFS= read -r f; do
+                     [ -n "$f" ] && [ -f "$f" ] || continue
+                     grep -ohIE -e "$re" "$f" 2>/dev/null
+                 done)"
+    else
+        out="$(git grep -ohIE -e "$re" -- . ':!'"$BASELINE" 2>/dev/null)"
+    fi
+    printf '%s\n' "$out" \
+        | sed -E 's#^.*:[[:space:]]*"([A-Za-z0-9][A-Za-z0-9._-]*)"$#\1#' \
+        | sort -u
+}
+
+host_token_usable() {
+    local t="$1"
+    token_usable "$t" || return 1
+    case "$t" in
+        localhost|*.localhost|*.onion|example|*.example|example.*|*.example.*)
+            return 1 ;;
+    esac
+    return 0
+}
+
 # token_usable <token> — true when the token is long enough and not generic.
 token_usable() {
     local t="$1"
@@ -247,50 +301,36 @@ token_usable() {
     str_lacks "$GENERIC_TOKENS" " $t "
 }
 
-OP_USER="$(id -un 2>/dev/null || true)"
-HOST_FQDN="$(hostname 2>/dev/null || true)"
-HOST_SHORT="$(hostname -s 2>/dev/null || true)"
-
 declare -A CUR=()
-prong_note_b="skipped"
-prong_note_c="skipped"
+prong_note_b="source-derived account tokens"
+prong_note_c="structured explicit host identities"
 
 while IFS= read -r row; do
     [ -n "$row" ] || continue
     CUR["A ${row% *}"]="${row##* }"
 done < <(count_hits "$RE_ABS")
 
-if token_usable "$OP_USER"; then
-    prong_note_b="username '$OP_USER'"
+while IFS= read -r t; do
+    token_usable "$t" || continue
     while IFS= read -r row; do
         [ -n "$row" ] || continue
-        CUR["B ${row% *}"]="${row##* }"
-    done < <(count_hits "$(word_regex "$OP_USER")")
-fi
+        key="B ${row% *}"
+        n="${row##* }"
+        CUR["$key"]=$(( ${CUR["$key"]:-0} + n ))
+    done < <(count_hits "$(word_regex "$t")")
+done < <(abs_account_tokens)
 
-# Prong C tokens, deduped against the username (a host commonly shares it).
-c_tokens=()
-for t in "$HOST_FQDN" "$HOST_SHORT"; do
-    token_usable "$t" || continue
-    [ "$t" = "$OP_USER" ] && continue
-    already=0
-    for seen in ${c_tokens[@]+"${c_tokens[@]}"}; do
-        [ "$seen" = "$t" ] && already=1
-    done
-    [ "$already" = "1" ] && continue
-    c_tokens+=("$t")
-done
-if [ "${#c_tokens[@]}" -gt 0 ]; then
-    prong_note_c="hostname $(printf "'%s' " "${c_tokens[@]}")"
-    for t in "${c_tokens[@]}"; do
-        while IFS= read -r row; do
-            [ -n "$row" ] || continue
-            key="C ${row% *}"
-            n="${row##* }"
-            CUR["$key"]=$(( ${CUR["$key"]:-0} + n ))
-        done < <(count_hits "$(word_regex "$t")")
-    done
-fi
+while IFS= read -r t; do
+    host_token_usable "$t" || continue
+    esc="$(printf '%s' "$t" | sed 's|[][\\.^$*+?(){}|/-]|\\&|g')"
+    re="\"(host|hostname)\"[[:space:]]*:[[:space:]]*\"$esc\""
+    while IFS= read -r row; do
+        [ -n "$row" ] || continue
+        key="C ${row% *}"
+        n="${row##* }"
+        CUR["$key"]=$(( ${CUR["$key"]:-0} + n ))
+    done < <(count_hits "$re")
+done < <(explicit_host_tokens)
 
 # ── fail-loud: the scan set must not have silently emptied ─────────────────
 if [ -z "$SCAN_OVERRIDE" ]; then
@@ -306,8 +346,8 @@ if [ "$MODE" = "UPDATE" ]; then
         echo "#"
         echo "# Format: <prong> <path> <occurrences>"
         echo "#   A  absolute home path (/home/<x>, /Users/<x>) — universal"
-        echo "#   B  the operator's username as a standalone word (host-derived)"
-        echo "#   C  the host's name as a standalone word (host-derived)"
+        echo "#   B  an account token exposed by prong A (source-derived)"
+        echo "#   C  an explicit structured host identity (source-derived)"
         echo "#"
         echo "# Counts may only DECREASE. A new path/prong pair fails HARD; a row"
         echo "# whose count reaches zero is STALE and must be deleted — that is"
