@@ -1449,3 +1449,17 @@ AGENT_IMPACT_RULE("lib/vcs/src/moderation_attestation_object.c|lib/vcs/src/moder
  * asserts those leaves are still ZCL_COMMAND_READY_READ and still dispatch
  * through the registry's public contract. */
 AGENT_IMPACT_RULE("tools/dev/hotswap_verify_so.c|tools/dev/hotswap-verify.sh|config/hotswap_probe_cases.def|app/controllers/src/ops_native_handlers.c|app/controllers/src/net_native_handlers.c|app/controllers/src/meta_native_handlers.c|app/controllers/src/wallet_native_handlers.c|app/controllers/src/app_native_handlers.c|app/controllers/src/chain_native_handlers.c|app/controllers/src/diagnostics_native_handlers.c|app/controllers/src/status_brief_native_handler.c", "hotswap_module hotswap_module_v2 hotswap_loader hotswap_simnet command_registry_catalog command_handler_snapshot native_api_contract make_lint_gates")
+/* LANE slow-disk-verdicts: the production and deploy paths where a wrong
+ * verdict does real damage, and where every check used to be a stopwatch.
+ * deploy_verify.sh had already been widened 120s -> 600s after a healthy
+ * deploy false-FAILed; the host watchdog wrote NODE-DOWN off ONE missed 5s
+ * probe; the cutover REVERSED a live datadir promotion if the promoted node
+ * had not reached the pre-cutover H* in 300s. Each now fails only on OBSERVED
+ * SILENCE — including delayacct_blkio_ticks, the counter that climbs while a
+ * process is blocked on a slow disk — and reports "still progressing" as its
+ * own non-failure outcome. The three scripts, the systemd drop-ins that cap
+ * their patience, the Makefile branches that must not roll back a progressing
+ * candidate, and the gate that pins all of it move together: an edit to any
+ * one of them with no change to the gate is how a duration verdict comes back
+ * in without anyone noticing. */
+AGENT_IMPACT_RULE("tools/deploy_verify.sh|deploy/zclassic23-cutover.sh|deploy/zclassic23-cutover-selftest.sh|deploy/zclassic23-host-watchdog.sh|deploy/install-host-watchdog.sh|deploy/system/zclassic23-host-watchdog.service|deploy/system/zclassic23-host-watchdog.timer|deploy/zclassic23-spinning-disk-watchdog.conf|lib/test/src/lint_gate_deploy_contracts.c", "make_lint_gates make_lint_gates_realroot")

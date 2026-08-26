@@ -1106,6 +1106,148 @@ int t_agent_fast_ci_contract(void)
     return failures;
 }
 
+/* Every automated verdict on the deploy surface must distinguish a SLOW box
+ * from a BROKEN one, and must never reach a failure by the clock alone.
+ *
+ * The three sites here each used to answer "did it finish inside N seconds?".
+ * That question has no honest answer: N encodes an assumption about the disk.
+ * deploy_verify.sh had already been widened 120s -> 600s after a healthy
+ * deploy false-FAILed, which is the same defect with a bigger number; the
+ * host watchdog wrote NODE-DOWN off ONE missed 5s probe; and the cutover
+ * REVERSED a live datadir promotion if the promoted node had not reached the
+ * pre-cutover H* in 300s. On a 7200rpm box measured under 2 MB/s all three
+ * grade an honest machine broken, and a fleet that does that keeps only its
+ * fast-storage boxes.
+ *
+ * This gate pins the replacement mechanism as TEXT, so reintroducing a
+ * duration verdict fails here instead of on someone's slow box:
+ *   - a fault requires OBSERVED SILENCE, not elapsed time,
+ *   - the observable includes delayacct_blkio_ticks, which is the one counter
+ *     that climbs while a process is BLOCKED on a slow disk,
+ *   - slow and wedged never share an exit code or a message,
+ *   - and each script proves it on itself with a hermetic selftest, run below.
+ */
+int t_slow_disk_progress_verdicts_contract(void)
+{
+    int failures = 0;
+    char *verify = NULL;
+    char *cutover = NULL;
+    char *watchdog = NULL;
+    char *watchdog_unit = NULL;
+    char *disk_watchdog = NULL;
+    char *makefile = NULL;
+    TEST("deploy verdicts separate slow boxes from wedged ones") {
+        char path[PATH_MAX];
+
+        /* ── tools/deploy_verify.sh ─────────────────────────────────────── */
+        ASSERT(repo_path(path, sizeof(path), "tools/deploy_verify.sh") == 0);
+        ASSERT(read_entire_file(path, &verify) == 0);
+        /* The only clock allowed to call a fault is observed silence. */
+        ASSERT(strstr(verify, "SILENCE_LIMIT") != NULL);
+        ASSERT(strstr(verify, "ZCL_DEPLOY_VERIFY_SILENCE") != NULL);
+        ASSERT(strstr(verify, "progress_verdict") != NULL);
+        ASSERT(strstr(verify, "window_outcome") != NULL);
+        /* The slow-disk observable, and the pure parsers the selftest pins. */
+        ASSERT(strstr(verify, "proc_blkio_ticks_from_text") != NULL);
+        ASSERT(strstr(verify, "proc_cpu_ticks_from_text") != NULL);
+        ASSERT(strstr(verify, "proc_io_bytes_from_text") != NULL);
+        ASSERT(strstr(verify, "delayacct_blkio_ticks") != NULL);
+        /* Window expiry while still advancing is its own outcome, exit 3. */
+        ASSERT(strstr(verify, "unverified_progressing") != NULL);
+        ASSERT(strstr(verify, "DEPLOY UNVERIFIED (still progressing)") != NULL);
+        ASSERT(strstr(verify, "exit 3") != NULL);
+        /* A crashed candidate is a fault with its OWN message, never folded
+         * into the slowness verdict. */
+        ASSERT(strstr(verify, "did not stay up") != NULL);
+        ASSERT(strstr(verify, "NOT a slow machine") != NULL);
+        /* ...and even THAT fault is confirmed across samples. A `systemctl
+         * show` hiccup on a loaded box must not convict a live process. */
+        ASSERT(strstr(verify, "PID_CONFIRM_SAMPLES") != NULL);
+        ASSERT(strstr(verify, "consecutive samples") != NULL);
+        /* The duration verdict must not come back. */
+        ASSERT(strstr(verify, "did not become ready within") == NULL);
+        ASSERT(run_gate_script_with_env("tools/deploy_verify.sh",
+                                        "ZCL_DEPLOY_VERIFY_SELFTEST", "1") == 0);
+
+        /* ── the deploy recipe must not roll back a still-progressing box ── */
+        ASSERT(repo_path(path, sizeof(path), "Makefile") == 0);
+        ASSERT(read_entire_file(path, &makefile) == 0);
+        const char *slow_branch = strstr(makefile, "deploy: SLOW BOX");
+        ASSERT(slow_branch != NULL);
+        ASSERT(strstr(makefile, "[ \"$$verify_rc\" -eq 3 ]") != NULL);
+        ASSERT(strstr(slow_branch, "rollback_armed=0") != NULL);
+        ASSERT(strstr(makefile,
+                      "deploy: ROLLED_BACK (verification still in progress)")
+               != NULL);
+
+        /* ── deploy/zclassic23-cutover.sh ───────────────────────────────── */
+        ASSERT(repo_path(path, sizeof(path),
+                         "deploy/zclassic23-cutover.sh") == 0);
+        ASSERT(read_entire_file(path, &cutover) == 0);
+        ASSERT(strstr(cutover, "READY_STALL_TIMEOUT") != NULL);
+        ASSERT(strstr(cutover, "delayacct_blkio_ticks") != NULL);
+        ASSERT(strstr(cutover, "CUTOVER: PROMOTED-CATCHING-UP") != NULL);
+        ASSERT(strstr(cutover, "went SILENT") != NULL);
+        /* The rollback must print the evidence that justified firing. */
+        ASSERT(strstr(cutover, "last progress token=") != NULL);
+        /* No elapsed-time rollback, in any spelling of the old line. */
+        ASSERT(strstr(cutover, "did not reach H* >= $BAR within") == NULL);
+        ASSERT(run_gate_script("deploy/zclassic23-cutover-selftest.sh", NULL)
+               == 0);
+
+        /* ── deploy/zclassic23-host-watchdog.sh ─────────────────────────── */
+        ASSERT(repo_path(path, sizeof(path),
+                         "deploy/zclassic23-host-watchdog.sh") == 0);
+        ASSERT(read_entire_file(path, &watchdog) == 0);
+        ASSERT(strstr(watchdog, "classify_node") != NULL);
+        ASSERT(strstr(watchdog, "PROBE_TIMEOUTS") != NULL);
+        ASSERT(strstr(watchdog, "NODE-SLOW") != NULL);
+        ASSERT(strstr(watchdog, "NODE-BUSY") != NULL);
+        ASSERT(strstr(watchdog, "NODE-UNRESPONSIVE") != NULL);
+        ASSERT(strstr(watchdog, "NODE-RPC-WEDGED") != NULL);
+        ASSERT(strstr(watchdog, "DOWN_CYCLES") != NULL);
+        ASSERT(strstr(watchdog, "delayacct_blkio_ticks") != NULL);
+        /* NODE-DOWN may only be written with the evidence behind it. */
+        ASSERT(strstr(watchdog, "evidence=frozen_for_") != NULL);
+        ASSERT(strstr(watchdog, "evidence=no-canonical-node-process") != NULL);
+        ASSERT(run_gate_script_arg("deploy/zclassic23-host-watchdog.sh", NULL,
+                                   "--selftest") == 0);
+
+        /* The unit's own start timeout must not silently truncate the
+         * watchdog's escalating probe schedule back to one impatient probe. */
+        ASSERT(repo_path(path, sizeof(path),
+                         "deploy/system/zclassic23-host-watchdog.service") == 0);
+        ASSERT(read_entire_file(path, &watchdog_unit) == 0);
+        ASSERT(strstr(watchdog_unit, "TimeoutStartSec=100") != NULL);
+        ASSERT(strstr(watchdog_unit, "TimeoutStartSec=30\n") == NULL);
+
+        /* ── the rotating-disk WatchdogSec drop-in ──────────────────────── */
+        /* WatchdogSec is a pure duration and measures nothing. The drop-in is
+         * a legitimate absolute CEILING, but it must say so and must name the
+         * progress-based renewal that sits under it (the WATCHDOG=1 pet in
+         * config/src/boot_sd_watchdog.c, gated on boot_progress freshness) —
+         * otherwise the next slow box gets "fixed" by raising the number
+         * again, which is the same defect with a bigger one. */
+        ASSERT(repo_path(path, sizeof(path),
+                         "deploy/zclassic23-spinning-disk-watchdog.conf") == 0);
+        ASSERT(read_entire_file(path, &disk_watchdog) == 0);
+        ASSERT(strstr(disk_watchdog, "WatchdogSec=10min") != NULL);
+        ASSERT(strstr(disk_watchdog, "CEILING") != NULL);
+        ASSERT(strstr(disk_watchdog, "measures nothing") != NULL);
+        ASSERT(strstr(disk_watchdog, "boot_progress_last_us()") != NULL);
+        ASSERT(strstr(disk_watchdog, "config/src/boot_sd_watchdog.c") != NULL);
+        ASSERT(strstr(disk_watchdog, "same defect with a bigger") != NULL);
+        PASS();
+    } _test_next:;
+    free(verify);
+    free(cutover);
+    free(watchdog);
+    free(watchdog_unit);
+    free(disk_watchdog);
+    free(makefile);
+    return failures;
+}
+
 #else  /* !ZCL_TESTING */
 
 /* Without ZCL_TESTING the lint-gate self-tests compile to nothing; this
