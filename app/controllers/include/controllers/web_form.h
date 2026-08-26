@@ -17,20 +17,11 @@
 #ifndef ZCL_CONTROLLERS_WEB_FORM_H
 #define ZCL_CONTROLLERS_WEB_FORM_H
 
+#include "base/hex.h"
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <string.h>
-
-static inline int web_form_hex_nibble(unsigned char c)
-{
-    if (c >= '0' && c <= '9')
-        return c - '0';
-    if (c >= 'a' && c <= 'f')
-        return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F')
-        return c - 'A' + 10;
-    return -1;
-}
 
 static inline bool web_form_encoding_valid(const char *body, size_t len)
 {
@@ -44,8 +35,8 @@ static inline bool web_form_encoding_valid(const char *body, size_t len)
             continue;
         if (i + 2 >= len)
             return false;
-        int hi = web_form_hex_nibble((unsigned char)body[i + 1]);
-        int lo = web_form_hex_nibble((unsigned char)body[i + 2]);
+        int hi = zcl_hex_nibble(body[i + 1], true);
+        int lo = zcl_hex_nibble(body[i + 2], true);
         if (hi < 0 || lo < 0 || (hi == 0 && lo == 0))
             return false;
         i += 2;
@@ -66,8 +57,8 @@ static inline bool web_form_url_decode(char *dst, size_t dstmax,
     for (size_t si = 0; si < srclen; si++) {
         unsigned char c = (unsigned char)src[si];
         if (c == '%') {
-            int hi = web_form_hex_nibble((unsigned char)src[si + 1]);
-            int lo = web_form_hex_nibble((unsigned char)src[si + 2]);
+            int hi = zcl_hex_nibble(src[si + 1], true);
+            int lo = zcl_hex_nibble(src[si + 2], true);
             c = (unsigned char)((hi << 4) | lo);
             si += 2;
         } else if (c == '+') {

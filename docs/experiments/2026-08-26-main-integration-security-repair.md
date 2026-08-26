@@ -14,7 +14,8 @@ leave stale or internally inconsistent state.
 
 - The shared form scanner accepts only ampersand-delimited fields and rejects
   raw or decoded NUL, malformed percent escapes, duplicate names, empty
-  values, and destination overflow.
+  values, and destination overflow. Percent decoding reuses the canonical
+  length-delimited nibble helper from `base/hex.h`.
 - Narrow command output uses shell continuations and preserves every command
   byte. Package-host-only state recommends the idempotent `z23 join` command
   instead of assuming that a restart will enable a build worker.
@@ -50,6 +51,7 @@ test_chain_evidence_controller PASS self_skips=0
 test_metaverse_agent_broker  PASS  self_skips=0
 test_zcode_dht_record        PASS  self_skips=0
 test_zcode_dht_service       PASS  self_skips=0
+check-hex-codec-single       PASS
 git diff --check             PASS
 ```
 
