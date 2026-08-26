@@ -132,10 +132,18 @@ static bool rpc_safety_build_chain(struct main_state *ms,
                                    int count)
 {
     static struct uint256 hashes[16];
+
+    /* Initialize ms BEFORE the count check: every caller declares
+     * `struct main_state ms;` uninitialized and runs main_state_free(&ms)
+     * unconditionally at the end of the case, so a return above this line
+     * would hand main_state_free() the caller's stale stack. Same reasoning
+     * as api_test_build_chain() in test_api_fixtures.c; see
+     * tools/lint/check_outparam_init_before_return.sh. */
+    main_state_init(ms);
+
     if (count <= 0 || count > (int)(sizeof(hashes) / sizeof(hashes[0])))
         return false;
 
-    main_state_init(ms);
     struct block_index *prev = NULL;
     for (int h = 0; h < count; h++) {
         out[h] = rpc_safety_insert_block(ms, &hashes[h], h, prev);
