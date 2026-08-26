@@ -213,6 +213,23 @@ const char *boot_step_state_verdict(enum boot_step_state s);
 /* True for BOOT_STEP_FAILED and nothing else. */
 bool boot_step_state_is_failure(enum boot_step_state s);
 
+/* Pure: does a step in this state EARN more systemd start budget?
+ *
+ * An extension has to be paid for with an observable change, because the
+ * stall reporter re-arms itself every budget window: a state that always
+ * extends pushes TimeoutStartSec out by an hour every 30 s, so the
+ * deadline never arrives and the unit's own Restart=always can never
+ * recover a wedged boot.
+ *
+ *   RUNNING / SLOW — yes. Progress was observed; being slow on a 7200 rpm
+ *                    disk is honest and must never be graded as failure.
+ *   STUCK          — no. Zero progress this window is exactly the wedge
+ *                    the deadline exists to catch. It is still REPORTED
+ *                    (verdict=telemetry); it just stops buying time.
+ *   FAILED         — no. It is already terminal.
+ *   DONE           — no. Nothing left to wait for. */
+bool boot_step_state_earns_budget(enum boot_step_state s);
+
 /* Enter a named step. Ends any step already open (as `done`) and starts
  * reporting this one. NULL-safe. Idempotent per name is NOT assumed —
  * each call restarts the clock. */

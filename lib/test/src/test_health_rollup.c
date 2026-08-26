@@ -93,7 +93,9 @@ int test_health_rollup(void)
      * nodelog, ...) resolve their paths through diag_datadir(). That is a
      * zero-initialised buffer until something sets it, and census_datadir()
      * (lib/storage/src/census_read.c) treats an EMPTY datadir as: use the
-     * default live datadir under $HOME. Unset, this test
+     * default live datadir under $HOME. That path is described here and
+     * never spelled out, because tools/lint/check_live_datadir_isolation.sh
+     * counts the literal string even inside a comment. Unset, this test
      * opened the live node's peers_projection.db + topology.db and ran
      * census_read_graph()'s correlated ip_to_str() join across them on every
      * one of its four rollup calls: 37-80s each (measured), scaling with

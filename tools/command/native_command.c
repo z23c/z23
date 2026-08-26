@@ -81,6 +81,12 @@ bool zcl_native_command_is_root(const char *word)
          * field ontology is most needed by an operator who does not yet know
          * which report — let alone which prefix — to reach for. */
         "explain", "profile", "meaning",
+        /* Onboarding roots: `z23 join` is the first command a stranger runs
+         * after installing, and `z23 update` the one they reach for later.
+         * Both are bare aliases of zcode.node.* (config/commands/zcode.def)
+         * for exactly the reason above: a four-word canonical path is not
+         * what someone types on their first day. */
+        "join", "update",
     };
     for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++) {
         if (strcmp(word, roots[i]) == 0)

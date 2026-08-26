@@ -468,6 +468,18 @@ int test_testcache(void)
     setenv("ZCL_STRESS_TESTS", "tc-phase-h-sentinel", 1);
     tc_env_capture(&phase_stress, "ZCL_STRESS_TESTS");
 
+    /* Drop every verdict the earlier phases stored. They ran under the
+     * CALLER's ZCL_STRESS_TESTS, so when the suite itself is invoked with
+     * ZCL_STRESS_TESTS=1 their keys are exactly the stress key this phase is
+     * about to probe, and the "MISSES the non-stress PASS" assertion HITS one
+     * of their records instead of missing. Restoring the pristine fixture
+     * rewrites the sources but not the CAS, so the records outlive it. This
+     * phase is the one place that needs an empty verdict store rather than an
+     * empty source tree, and clearing it is what makes the assertion mean the
+     * same thing under `make t-fast` and under ZCL_STRESS_TESTS=1. */
+    TC_CHECK("clear verdicts stored by earlier phases",
+             system("rm -rf " TC_FIX "/.zvcs/objects") == 0);
+
     uint8_t key_nostress[32];
     bool have_nostress = false;
     unsetenv("ZCL_STRESS_TESTS");

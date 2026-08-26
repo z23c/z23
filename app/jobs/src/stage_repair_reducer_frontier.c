@@ -23,126 +23,6 @@
 #include <stdint.h>
 #include <string.h>
 
-static bool block_pos_readable_hash(const struct block_index *bi,
-                                    const char *datadir)
-{
-    if (!bi || !bi->phashBlock || !datadir || bi->nFile < 0)
-        return false;
-
-    struct disk_block_pos pos;
-    disk_block_pos_init(&pos);
-    pos.nFile = bi->nFile;
-    pos.nPos = bi->nDataPos;
-
-    struct block blk;
-    block_init(&blk);
-    bool ok = read_block_from_disk_pread(&blk, &pos, datadir);
-    if (ok) {
-        struct uint256 got;
-        block_get_hash(&blk, &got);
-        ok = uint256_cmp(&got, bi->phashBlock) == 0;
-    }
-    block_free(&blk);
-    return ok;
-}
-
-static bool read_frontier_snapshot(sqlite3 *db,
-                                   struct stage_reducer_frontier_reconcile_result *out)
-{
-    progress_store_tx_lock();
-
-    int32_t hstar = 0;
-    int32_t served_floor = 0;
-    if (!reducer_frontier_compute_hstar(db, &hstar, &served_floor)) {
-        progress_store_tx_unlock();
-        LOG_WARN("stage_repair",
-                 "[stage_repair] reducer_frontier_compute_hstar failed");
-        return false;
-    }
-
-    int32_t coins_applied = 0;
-    bool coins_found = false;
-    if (!coins_kv_get_applied_height(db, &coins_applied, &coins_found)) {
-        progress_store_tx_unlock();
-        LOG_WARN("stage_repair",
-                 "[stage_repair] coins_applied_height read failed");
-        return false;
-    }
-
-    /* utxo_apply's OWN contiguous applied frontier — the coin-tear test
-     * compares coins_applied against THIS, never the tip_finalize-pinned global
-     * MIN H*. coins_applied tracks the utxo_apply cursor by construction
-     * (co-committed in one BEGIN IMMEDIATE), so a real tear is coins applied
-     * above utxo_apply's own ok=1 prefix; coins legitimately leading the
-     * slower-to-finalize H* is pipeline depth, not a tear. Read under the lock
-     * already held; reducer_frontier_log_frontier re-takes the recursive lock
-     * safely. */
-    int32_t utxo_apply_contig = hstar;
-    if (!reducer_frontier_log_frontier(db, "utxo_apply_log", "utxo_apply",
-                                       &utxo_apply_contig)) {
-        progress_store_tx_unlock();
-        LOG_WARN("stage_repair",
-                 "[stage_repair] utxo_apply frontier read failed");
-        return false;
-    }
-
-    /* One read per stage cursor: the named indices below feed the result
-     * fields, every cursor feeds sweep_top. */
-    static const char *const stages[] = {
-        "validate_headers", /* [0] */
-        "body_fetch",       /* [1] */
-        "body_persist",     /* [2] */
-        "script_validate",
-        "proof_validate",
-        "utxo_apply",
-        "tip_finalize",     /* [6] */
-    };
-    int cursors[sizeof(stages) / sizeof(stages[0])];
-    int sweep_top = served_floor;
-    for (size_t i = 0; i < sizeof(stages) / sizeof(stages[0]); i++) {
-        cursors[i] = -1;
-        if (!stage_repair_cursor_at_unlocked(db, stages[i], &cursors[i])) {
-            progress_store_tx_unlock();
-            return false;
-        }
-        if (cursors[i] > 0 && cursors[i] - 1 > sweep_top)
-            sweep_top = cursors[i] - 1;
-    }
-
-    progress_store_tx_unlock();
-
-    out->hstar = hstar;
-    out->served_floor = served_floor;
-    out->validate_headers_cursor_before = cursors[0];
-    out->validate_headers_cursor_after = cursors[0];
-    out->body_fetch_cursor_before = cursors[1];
-    out->body_fetch_cursor_after = cursors[1];
-    out->body_persist_cursor_before = cursors[2];
-    out->body_persist_cursor_after = cursors[2];
-    out->tip_finalize_cursor_before = cursors[6];
-    out->tip_finalize_cursor_after = cursors[6];
-    out->sweep_top = sweep_top;
-    out->lowest_have_data_cleared = -1;
-    out->lowest_validate_headers_refill_hole = -1;
-    out->lowest_validate_headers_hash_split = -1;
-    out->lowest_body_fetch_refill_hole = -1;
-    out->lowest_body_persist_refill_hole = -1;
-    out->lowest_script_validate_refill_hole = -1;
-    out->lowest_proof_validate_refill_hole = -1;
-    out->script_validate_cursor_before = -1;
-    out->script_validate_cursor_after = -1;
-    out->proof_validate_cursor_before = -1;
-    out->proof_validate_cursor_after = -1;
-    out->tipfin_backfill_height = -1;
-    out->coins_applied_found = coins_found;
-    out->coins_applied_height = coins_found ? coins_applied : -1;
-    if (!coins_found)
-        out->refused_coin_unknown = true;
-    else if (coins_applied > utxo_apply_contig + 1)
-        out->refused_coin_tear = true;
-    return true;
-}
-
 static bool maybe_emit_header(struct block_index *bi, bool apply,
                               const char *why,
                               struct stage_reducer_frontier_reconcile_result *out)
@@ -163,8 +43,38 @@ static bool reconcile_block_index_flags(
     char datadir[2048];
     GetDataDir(true, datadir, sizeof(datadir));
 
-    zcl_mutex_lock(&ms->cs_main);  /* LOCK ORDER: cs_main OUTER, */
-    progress_store_tx_lock();      /* progress store INNER (stage_repair.h). */
+    /* LOCK ORDER: cs_main OUTER, progress store INNER — but the inner one
+     * is a TRYLOCK, and that is the whole point.
+     *
+     * The tree holds BOTH nesting orders and cannot be made to hold only
+     * one:
+     *   - Before tip_finalize_stage_init registers the height authority,
+     *     active_chain_height() reads the progress store internally
+     *     (lib/validation/src/chainstate.c), so every cs_main holder is
+     *     cs_main -> progress. That boot window is where the observed
+     *     startup wedge lived.
+     *   - After it, is_authoritative() returns true unconditionally
+     *     (app/jobs/src/tip_finalize_stage.c) so that edge disappears —
+     *     while the reducer drive runs the opposite way for the whole
+     *     process lifetime: STAGE_DRAIN_IMPL (app/jobs/include/jobs/job.h)
+     *     holds progress across every step, and body_fetch's step takes
+     *     cs_main inside it (app/jobs/src/body_fetch_stage.c).
+     * A repair that BLOCKS on the second lock therefore closes a cycle
+     * against one phase or the other no matter which order it picks.
+     *
+     * So it blocks on neither. This is a self-heal observer on the
+     * condition-engine thread, not a correctness-critical path, and the
+     * codebase already names this shape: progress_store_tx_trylock() is
+     * the "non-blocking counterpart for observational surfaces", used the
+     * same way by app/conditions/src/reducer_drive_watchdog.c. Losing the
+     * race costs one tick — the condition re-runs — and it can never
+     * wait-for a lock while holding cs_main, so it cannot be half of a
+     * deadlock. Skipped, not blocked. */
+    zcl_mutex_lock(&ms->cs_main);
+    if (!progress_store_tx_trylock()) {
+        zcl_mutex_unlock(&ms->cs_main);
+        return false;
+    }
 
     struct rf_evidence_stmts es;
     if (!rf_evidence_stmts_prepare(db, &es)) {
@@ -196,7 +106,7 @@ static bool reconcile_block_index_flags(
         bool readable = false;
         if ((bi->nStatus & BLOCK_HAVE_DATA) ||
             (ev.validate_ok_hash && ev.body_ok))
-            readable = block_pos_readable_hash(bi, datadir);
+            readable = stage_reducer_frontier_block_pos_readable_hash(bi, datadir);
 
         if (ev.script_ok_hash &&
             (bi->nStatus & BLOCK_VALID_MASK) < BLOCK_VALID_SCRIPTS) {
@@ -460,6 +370,15 @@ void stage_reducer_frontier_reset_detect_memo_for_testing(void)
     memset(&g_tip_finalize_rewind_churn_memo, 0,
            sizeof(g_tip_finalize_rewind_churn_memo));
 }
+
+bool stage_reducer_frontier_reconcile_flags_for_testing(
+    sqlite3 *db,
+    struct main_state *ms,
+    bool apply,
+    struct stage_reducer_frontier_reconcile_result *out)
+{
+    return reconcile_block_index_flags(db, ms, apply, out);
+}
 #endif
 
 static bool reducer_frontier_reconcile_light_impl(
@@ -525,8 +444,8 @@ static bool reducer_frontier_reconcile_light_impl(
 
     if (!stage_table_ensure(db))
         return false;
-    if (!read_frontier_snapshot(db, &local))
-        return false;
+    if (!stage_reducer_frontier_read_snapshot(db, &local))
+        return false;  // raw-return-ok:callee LOG_WARNs every failure path
 
     /* Label-splice re-bind runs BEFORE every coin arm: a NULL-block_hash
      * proof/script suffix at the utxo_apply frontier pins H* on
@@ -557,14 +476,14 @@ static bool reducer_frontier_reconcile_light_impl(
         /* Rows were deleted and cursors may have moved; re-read the
          * snapshot so every gate below sees the post-purge frontier and
          * cursors, not the pre-purge world. Counters / clamp flags are
-         * preserved (read_frontier_snapshot rewrites only the frontier /
-         * cursor fields). The refusal flags are LATCHED (the snapshot only
-         * ever SETS them true), so clear them first — the re-read
-         * re-derives them from the post-purge store. */
+         * preserved (stage_reducer_frontier_read_snapshot rewrites only
+         * the frontier / cursor fields). The refusal flags are LATCHED
+         * (the snapshot only ever SETS them true), so clear them first —
+         * the re-read re-derives them from the post-purge store. */
         local.refused_coin_tear = false;
         local.refused_coin_unknown = false;
-        if (!read_frontier_snapshot(db, &local))
-            return false;
+        if (!stage_reducer_frontier_read_snapshot(db, &local))
+            return false;  // raw-return-ok:callee LOG_WARNs every failure path
     }
 
     /* FIX-A — stale reorg-residue tip_finalize verdict replacement. A depth-N
@@ -587,14 +506,14 @@ static bool reducer_frontier_reconcile_light_impl(
         /* The replacement moved H* (and may have cleared the tear); re-read
          * the snapshot so every gate below sees the lifted frontier. The
          * accumulated *_found / *_purged / *_replaced counters and `repaired`
-         * are preserved (read_frontier_snapshot rewrites only the frontier /
-         * cursor fields, never these). The refusal flags are LATCHED (the
-         * snapshot only ever SETS them true), so clear them first — the
-         * re-read re-derives them from the lifted H*. */
+         * are preserved (stage_reducer_frontier_read_snapshot rewrites only
+         * the frontier / cursor fields, never these). The refusal flags
+         * are LATCHED (the snapshot only ever SETS them true), so clear
+         * them first — the re-read re-derives them from the lifted H*. */
         local.refused_coin_tear = false;
         local.refused_coin_unknown = false;
-        if (!read_frontier_snapshot(db, &local))
-            return false;
+        if (!stage_reducer_frontier_read_snapshot(db, &local))
+            return false;  // raw-return-ok:callee LOG_WARNs every failure path
     }
 
     if (local.refused_coin_unknown) {

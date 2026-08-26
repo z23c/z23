@@ -257,6 +257,37 @@ static int test_network_records_leaf_input(void)
     return failures;
 }
 
+static int test_producer_session_retire_rpc_port_input(void)
+{
+    int failures = 0;
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    TEST("producer-session retire accepts an explicit integer RPC port") {
+        const struct zcl_command_spec *spec =
+            find_spec(reg, "core.consensus.producer-session.retire");
+        ASSERT(spec != NULL);
+        char why[160];
+        struct json_value input;
+        json_init(&input);
+        json_set_object(&input);
+        json_push_kv_str(&input, "datadir", "/tmp/stopped-node");
+        json_push_kv_int(&input, "rpc_port", 18260);
+        ASSERT(zcl_command_registry_input_validate(spec, &input, why,
+                                                   sizeof(why)));
+        json_free(&input);
+
+        json_init(&input);
+        json_set_object(&input);
+        json_push_kv_str(&input, "datadir", "/tmp/stopped-node");
+        json_push_kv_str(&input, "rpc_port", "18260");
+        ASSERT(!zcl_command_registry_input_validate(spec, &input, why,
+                                                    sizeof(why)));
+        ASSERT(strstr(why, "rpc_port") != NULL);
+        json_free(&input);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_code_guide_leaf(void)
 {
     int failures = 0;
@@ -3963,6 +3994,7 @@ int test_command_registry_catalog(void)
     int failures = 0;
     failures += test_catalog_wellformed();
     failures += test_network_records_leaf_input();
+    failures += test_producer_session_retire_rpc_port_input();
     failures += test_ops_statecatalog_matches_registry();
     failures += test_ops_statecatalog_paging_and_lookup();
     failures += test_ops_statecatalog_paging_covers_all();

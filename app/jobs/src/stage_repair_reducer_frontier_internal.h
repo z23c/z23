@@ -8,10 +8,33 @@
 #include <stdbool.h>
 
 struct block;
+struct block_index;
 struct main_state;
 struct sqlite3;
 struct stage_reducer_frontier_reconcile_result;
 struct uint256;
+
+/* Reducer-frontier OBSERVATION helpers (stage_reducer_frontier_snapshot.c).
+ * Both are pure reads: they touch the progress store and the block files and
+ * report into `out` / their return value. Neither mutates a cursor, a row, a
+ * coin, or a block index entry — the repairs that act on what they see live
+ * in stage_repair_reducer_frontier.c and its siblings. */
+
+/* True when `bi`'s recorded (nFile, nDataPos) reads back a body from
+ * `datadir` whose re-computed hash equals bi->phashBlock. Any missing field,
+ * unreadable position, or hash mismatch is false. Takes no lock. */
+bool stage_reducer_frontier_block_pos_readable_hash(
+    const struct block_index *bi, const char *datadir);
+
+/* Populate `out` with one consistent reducer-frontier snapshot: H*, the
+ * served floor, every stage cursor (before == after), the sweep top, and the
+ * coins-applied height. Latches out->refused_coin_unknown when no
+ * coins-applied height is recorded, and out->refused_coin_tear when coins are
+ * applied above utxo_apply's own contiguous ok=1 prefix. Takes and releases
+ * progress_store_tx_lock() itself; the caller must NOT hold it. Returns false
+ * (logged) only on a store read error. */
+bool stage_reducer_frontier_read_snapshot(
+    struct sqlite3 *db, struct stage_reducer_frontier_reconcile_result *out);
 
 /* Hash-verified active-chain block read: resolves `height` on the ACTIVE
  * chain under cs_main (requires BLOCK_HAVE_DATA), reads the body from disk
