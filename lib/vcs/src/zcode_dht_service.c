@@ -207,7 +207,7 @@ bool vcs_zcode_dht_service_send_find(struct vcs_zcode_dht_service *s,
 void vcs_zcode_dht_service_query_finish(
     struct vcs_zcode_dht_service *s, struct service_query *q,
     enum query_outcome outcome, struct vcs_zcode_dht_time now) {
-  vcs_zcode_dht_service_record_query_finish(s, q, outcome);
+  vcs_zcode_dht_service_record_query_finish(s, q, outcome, now);
   if (q->kind == QUERY_LOOKUP) {
     struct service_lookup *l = vcs_zcode_dht_lookup_find(s, q->lookup_id);
     struct service_peer *p = peer_find(s, q->peer_id);
@@ -701,6 +701,7 @@ void vcs_zcode_dht_service_tick(struct vcs_zcode_dht_service *s,
     if (s->queries[i].used &&
         s->queries[i].deadline_mono <= now.monotonic_s)
       query_expire(s, &s->queries[i], now);
+  vcs_zcode_dht_records_sweep(s, now.monotonic_s);
   for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_REPLAY_PER_PEER; i++)
     if (s->expired[i].used &&
         now.monotonic_s - s->expired[i].expired_at_mono >
