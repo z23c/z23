@@ -1533,3 +1533,9 @@ AGENT_IMPACT_RULE("lib/test/src/test_parallel.c", "hotswap_module hotswap_module
  * together — an edit to the publish or release side with no group run is how
  * the asymmetry would come back. */
 AGENT_IMPACT_RULE("lib/sapling/src/params_init.c|lib/sapling/src/bn254.c|lib/sapling/src/sprout.c|lib/sapling/src/sapling.c|lib/sapling/include/sapling/bn254.h|lib/test/src/test_params_vk_publish_symmetry.c", "params_vk_publish_symmetry params_vk_embedded sprout_phgr13_kat")
+
+/* test_sprout_phgr13_kat.c is the known-answer test for the Sprout PHGR13
+ * verifying path. It arrived with the PHGR publish lane but named no groups,
+ * so the push gate saw it as unmapped code and failed closed — correctly. Its
+ * own group plus the two params surfaces it shares a verifying key with. */
+AGENT_IMPACT_RULE("lib/test/src/test_sprout_phgr13_kat.c", "sprout_phgr13_kat params_vk_publish_symmetry params_vk_embedded")
