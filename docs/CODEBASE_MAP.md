@@ -191,7 +191,16 @@ shell scripts), `fuzz/`, `soak/`, `sim/` (deterministic replay), `dev/`,
 `githooks/`, `scripts/`, `data/` (fixtures). Stripped x86_64-linux node
 packages land under `build/release/` from `packaging/release/build_release.sh`
 and are installed by `tools/scripts/install_z23.sh` from any node URL or
-local directory. The checksummed runtime set contains `z23`, its
+local directory. A remote URL requires the independently obtained SHA-256 of
+its `SHA256SUMS`; the installer verifies that digest before downloading any
+executable payload, so the serving mirror is not the authority for its own
+manifest. Remote URL installs require curl 8.4.0 or newer because that is the
+first release where `--max-filesize` also aborts transfers whose size was not
+known in advance. Remote transfers use a 10-second connect deadline, a
+30-second and 1-KiB checksum-manifest budget, and per-payload 300-second
+deadlines with 64-MiB node/alias and 128-MiB verifier ceilings. The manifest
+must contain exactly one strict lowercase SHA-256 row for each required payload. The
+checksummed runtime set contains `z23`, its
 `zclassic23` daemon alias, and the confined `zclassic23-package-verify` worker
 that the daemon resolves beside itself (SHA256SUMS fail-closed; no registry).
 `make release-deploy Z23_RELEASE_HOSTS='host1 host2'` builds that portable set
