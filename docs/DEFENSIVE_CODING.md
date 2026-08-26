@@ -976,6 +976,7 @@ add/remove a gate.
 - `check-hotswap-static-state`
 - `check-hotswap-service-islands`
 - `check-hotswap-swappable-shape`
+- `check-hotswap-candidates-ledger`
 - `check-release-no-dev-symbols`
 - `check-vcs-no-git`
 - `check-vcs-no-sha1`
