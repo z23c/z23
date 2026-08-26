@@ -115,7 +115,88 @@ struct group_result {
     int skipped;         /* 1 if selector/params gate excluded it (not run) */
     int skip_markers;    /* "SKIP (" sentinel lines in captured output */
     int cached;          /* 1 if returned from the content-addressed cache */
+    /* ── progress watchdog state (see group_watchdog_expired) ───────────── */
+    time_t last_progress;  /* when this group's output last grew */
+    long long last_size;   /* bytes of captured output at that moment */
+    int wedged;            /* 1 if WE killed it for going silent */
+    int silent_seconds;    /* how long it had been silent when we killed it */
 };
+
+/* ── The per-group watchdog is on SILENCE, not on runtime ──────────────────
+ *
+ * This used to be `now - start > timeout_secs`, i.e. SIGKILL any group that
+ * ran longer than 300 s of wall time. That grades the machine, not the code.
+ * With 32 workers on 32 cores every group is contending, and a box with a
+ * 7200rpm disk — measured under 2 MB/s on this project's own fleet — takes
+ * several times longer to do exactly the same, correct work. A duration
+ * ceiling turns those machines into red builds, which is both a lie about the
+ * code and a reason people stop keeping slow machines around. This project
+ * wants them: they are the only instrument that finds where the code assumes
+ * fast storage.
+ *
+ * Raising 300 s would not fix it, it would just move the cliff and make a
+ * genuine hang take longer to surface. What separates a wedged group from a
+ * slow one is not how long it has run — it is whether it is still PRODUCING
+ * ANYTHING. Every group streams its assertions to its capture file, so:
+ *
+ *   * slow box  -> same lines, further apart -> the timer keeps resetting;
+ *   * deadlock  -> the file stops growing entirely -> killed and reported.
+ *
+ * The number below is therefore unchanged in value and completely changed in
+ * meaning: 300 s of continuous SILENCE. The longest legitimately silent
+ * stretch in the suite is a single long-running assertion inside one group
+ * (test_merkle_tree's ~110 s standalone body is the measured worst case), so
+ * 300 s is ~2.7x that on an idle box and scales with nothing — a box 10x
+ * slower still passes as long as it is still emitting.
+ *
+ * Returns true when the group has been silent for longer than the bound, and
+ * fills in how long it had been silent so the report can say so.
+ */
+static bool group_watchdog_expired(struct group_result *r, const char *out_path,
+                                   time_t now, int max_silent_secs)
+{
+    struct stat st;
+    long long size = (stat(out_path, &st) == 0) ? (long long)st.st_size : -1;
+    if (r->last_progress == 0) {
+        r->last_progress = r->start;
+        r->last_size = size;
+    }
+    if (size != r->last_size) {
+        r->last_size = size;
+        r->last_progress = now;
+        return false;
+    }
+    if (now - r->last_progress <= max_silent_secs)
+        return false;
+    r->silent_seconds = (int)(now - r->last_progress);
+    return true;
+}
+
+/* One line of load context beside a watchdog kill, so a reader can tell a
+ * hung test from a saturated box without re-running anything. */
+static void print_watchdog_kill(size_t idx, const char *name,
+                                const struct group_result *r, time_t now,
+                                int max_silent_secs)
+{
+    char load[80] = "unknown";
+    FILE *fp = fopen("/proc/loadavg", "rb");
+    if (fp) {
+        if (fgets(load, sizeof(load), fp)) {
+            char *nl = strchr(load, '\n');
+            if (nl) *nl = '\0';
+        }
+        fclose(fp);
+    }
+    printf("[wedged  ] [%zu] %s — NO OUTPUT for %ds (bound: %ds of silence, "
+           "not of runtime); %llds total elapsed; loadavg %s.\n"
+           "           This is a HANG report, not a failed assertion: a slow "
+           "or loaded box keeps\n"
+           "           emitting and never lands here. Captured output so far: "
+           "%s\n",
+           idx, name, r->silent_seconds, max_silent_secs,
+           (long long)(now - r->start), load, r->out_path[0] ? r->out_path : "(none)");
+    fflush(stdout);
+}
 
 static int get_nproc(void)
 {
@@ -395,6 +476,9 @@ static void run_group_exclusive(size_t idx, pid_t parent_pid,
         child_run(idx, out_path, activate_proof_contracts);
         _exit(2); /* unreachable */
     }
+    if (verbose)
+        printf("[exclusive] [%zu] %s pid=%d\n", idx, g_groups[idx].name,
+               (int)pid);
 
     int status = 0;
     bool killed = false;
@@ -408,10 +492,13 @@ static void run_group_exclusive(size_t idx, pid_t parent_pid,
             break;
         }
         time_t now = platform_time_wall_time_t();
-        if (!killed && now - results[idx].start > timeout_secs) {
-            if (verbose)
-                printf("[timeout ] [%zu] %s (after %ds)\n",
-                       idx, g_groups[idx].name, timeout_secs);
+        if (!killed &&
+            group_watchdog_expired(&results[idx], out_path, now, timeout_secs)) {
+            memcpy(results[idx].out_path, out_path,
+                   sizeof(results[idx].out_path));
+            results[idx].wedged = 1;
+            print_watchdog_kill(idx, g_groups[idx].name, &results[idx], now,
+                                timeout_secs);
             (void)kill(pid, SIGKILL);
             killed = true;
         }
@@ -497,10 +584,15 @@ static bool run_parallel_phase(
         for (int i = 0; i < jobs; i++) {
             if (slots[i].pid == 0) continue;
             size_t idx = slots[i].group_idx;
-            if (now_tick - results[idx].start <= timeout_secs) continue;
-            if (verbose)
-                printf("[timeout ] [%zu] %s (after %ds)\n",
-                       idx, g_groups[idx].name, timeout_secs);
+            if (results[idx].wedged) continue;   /* already killed, awaiting reap */
+            if (!group_watchdog_expired(&results[idx], slots[i].out_path,
+                                        now_tick, timeout_secs))
+                continue;
+            memcpy(results[idx].out_path, slots[i].out_path,
+                   sizeof(results[idx].out_path));
+            results[idx].wedged = 1;
+            print_watchdog_kill(idx, g_groups[idx].name, &results[idx],
+                                now_tick, timeout_secs);
             (void)kill(slots[i].pid, SIGKILL);
         }
 
@@ -537,6 +629,7 @@ static bool run_parallel_phase(
         if (verbose)
             printf("[done    ] [%zu] %s (%s, %.0fs)\n",
                    idx, g_groups[idx].name,
+                   results[idx].wedged ? "WEDGED (no output)" :
                    results[idx].signaled ? "SIGNALED" :
                    (results[idx].exit_code == 0 ? "PASS" : "FAIL"),
                    results[idx].wall_seconds);
@@ -702,10 +795,12 @@ int main(int argc, char **argv)
     }
 
     int jobs = get_nproc();
-    int timeout_secs = 300; /* per-group; generous so slow groups like
-                             * test_merkle_tree (~110s standalone) don't
-                             * get cut off the first time a machine is
-                             * loaded. */
+    /* Per-group bound on SILENCE, not on runtime — see group_watchdog_expired
+     * for the full rationale and the derivation. A group may run for as long
+     * as it likes provided it keeps emitting; 300 s of a group producing
+     * literally nothing is a hang. (--timeout= keeps its name for callers,
+     * but it has never been a runtime budget since this changed.) */
+    int timeout_secs = 300;
     bool verbose = false;
     bool list_only = false;
     const char *only = NULL; /* --only=SUBSTR or --exact=FULL_ID[,FULL...] */
@@ -1100,6 +1195,7 @@ int main(int argc, char **argv)
         if (verbose || only || !pass) {
             printf("\n==================== %s (%s%s, %.0fs) ====================\n",
                    g_groups[i].name,
+                   results[i].wedged ? "WEDGED-NO-OUTPUT" :
                    results[i].signaled ? "SIGNALED" :
                    (pass ? "PASS" : "FAIL"),
                    skip_note, results[i].wall_seconds);
