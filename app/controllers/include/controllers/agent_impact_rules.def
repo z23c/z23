@@ -1210,3 +1210,14 @@ AGENT_IMPACT_RULE("core/chainparams/src/chainparams.c|lib/net/src/connman.c|lib/
  * and softening the boot gate without the group would let the node advance
  * CRYPTO_READY on keys that never passed their digest. */
 AGENT_IMPACT_RULE("lib/sapling/src/params_vk_embedded.c|lib/sapling/include/sapling/params_vk_embedded.h|lib/sapling/src/params_init.c|lib/test/src/test_params_vk_embedded.c|config/src/boot_params_gate.c|config/include/config/boot_params_gate.h|tools/scripts/zcash_params.sh|docs/PARAMS.md", "params_vk_embedded")
+/* LANE params-fetch: obtaining the ~777 MB of zk PROVING parameters from the
+ * peer network instead of from a web host. The pin table is the trust root —
+ * ceremony-published lengths and SHA-256 digests, plus a chunk Merkle root
+ * derived from them — and the verifier, the wire commands, the dispatch-table
+ * rows that expose those commands, and the adversarial test all encode the
+ * same claim: a peer supplies candidate bytes and nothing else. Changing the
+ * chunk size or the Merkle construction in params_fetch.c invalidates every
+ * pinned root, and changing params_service.c can widen what an unverified
+ * peer is allowed to make this node do; neither may land without the group
+ * that recomputes the pins from the real files and replays the refusals. */
+AGENT_IMPACT_RULE("lib/sapling/src/params_fetch.c|lib/sapling/include/sapling/params_fetch.h|lib/net/src/params_service.c|lib/net/include/net/params_service.h|lib/net/src/msgprocessor.c|lib/test/src/test_params_fetch.c", "params_fetch")
