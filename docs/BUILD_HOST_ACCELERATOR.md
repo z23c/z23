@@ -4,7 +4,7 @@
 The provisioner creates one disposable 6 GiB tmpfs checkout for an agent,
 keeps the authoritative source checkout on persistent storage, and preserves
 an existing zram swap. It does not inspect or control a node service, wallet,
-or canonical datadir. Commands run in a user systemd scope with 8 GiB
+or canonical datadir. Commands run in a transient user service with 8 GiB
 `MemoryHigh`, 10 GiB `MemoryMax`, and reduced CPU and I/O weights.
 
 ## Measured baseline
@@ -34,7 +34,7 @@ sudo -u "$USER" z23-ram-dev path
 ```
 
 `path` prints the exact RAM checkout to use as an external agent's working
-directory. Launch an interactive Grok session in the bounded scope with normal
+directory. Launch an interactive Grok session in the bounded service with normal
 terminal scrollback:
 
 ```bash
