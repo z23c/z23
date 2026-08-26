@@ -10,12 +10,14 @@
 #include "test/test_core.h"
 
 #include "controllers/api_controller.h"
+#include "models/hodl_wave.h"
 #include "supervisors/domains.h"
 #include "util/blocker.h"
 #include "util/supervisor.h"
 #include "../../../app/controllers/src/api_controller_internal.h"
 
 #include <stdio.h>
+#include <stdatomic.h>
 #include <string.h>
 
 #define ACS_CHECK(name, expr) do { \
@@ -41,6 +43,35 @@ int api_controller_supervision_focused_tests(void)
 {
     printf("\n=== api_controller supervision-coverage tests (#13) ===\n");
     int failures = 0;
+
+    /* A cache stop must interrupt a long read without allowing the rows read
+     * before SQLITE_INTERRUPT to become a seemingly valid partial snapshot. */
+    {
+        bool ok = true;
+        sqlite3 *db = NULL;
+        ok = ok && sqlite3_open(":memory:", &db) == SQLITE_OK;
+        ok = ok && sqlite3_exec(db,
+            "CREATE TABLE utxos(height INTEGER, value INTEGER);"
+            "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL "
+            "SELECT x+1 FROM n WHERE x<5000) "
+            "INSERT INTO utxos SELECT x, x FROM n;",
+            NULL, NULL, NULL) == SQLITE_OK;
+
+        _Atomic int running = 1;
+        ok = ok && api_cache_test_sqlite_progress(&running) == 0;
+        atomic_store(&running, 0);
+        ok = ok && api_cache_test_sqlite_progress(&running) == 1;
+        sqlite3_progress_handler(db, 1000, api_cache_test_sqlite_progress,
+                                 &running);
+        struct hodl_wave_snapshot hodl;
+        bool scanned = hodl_wave_scan_current_utxos(db, 5000, &hodl);
+        sqlite3_progress_handler(db, 0, NULL, NULL);
+        ok = ok && !scanned &&
+             strcmp(hodl.status, "UTXO index scan interrupted") == 0;
+        if (db)
+            sqlite3_close(db);
+        ACS_CHECK("cache stop interrupts UTXO scan without partial success", ok);
+    }
 
     /* ── Cache-refresh thread ─────────────────────────────────────── */
     {
