@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 #
-# Systemd helper for z23-build-accelerator.service. It never replaces an
+# Systemd helper for z23-build-zram.service. It never replaces an
 # existing zram swap and stops only the device it recorded as self-created.
 set -euo pipefail
 
-CONFIG=/etc/z23-build-accelerator.conf
-STATE=/run/z23-build-accelerator.zram
+CONFIG=/etc/z23-ram-dev.conf
+STATE=/run/z23-build-zram.state
 
 die() { printf 'z23-build-zram: REFUSE: %s\n' "$*" >&2; exit 1; }
 [ "$(id -u)" -eq 0 ] || die "root is required"
