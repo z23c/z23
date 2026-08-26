@@ -1,7 +1,8 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * stage_repair_coin_backfill_scan — chunked, resumable, CHAIN-BOUND
- * no-spend scan (guard G9 of docs/work/coin-backfill-repair.md).
+ * no-spend scan (guard G9 of the coin-backfill guard ladder; see
+ * stage_repair_coin_backfill.c's top-of-file comment for G0-G10).
  *
  * Proves that none of the candidate backfill outpoints U is spent by any
  * applied active-chain block in [floor .. frontier_at_start-1] (the creator
@@ -15,7 +16,9 @@
  * terminal window: a spend in the unapplied [frontier..H-1] band is *correct*
  * coins state at the frontier snapshot — utxo_apply will consume the coin
  * forward at the spend height and then genuinely reject block H's re-spend
- * (verified forward semantics; see design §2 "Terminal linkage").
+ * (verified forward semantics — see the insert transaction's re-checks in
+ * stage_repair_coin_backfill.c, which re-bind this scan's CLEAN verdict to
+ * the insert-time active chain before it is trusted).
  *
  * Chain binding: the persisted record carries a running
  * last-scanned hash. EVERY block processed — chunk start, kill-9 resume,
