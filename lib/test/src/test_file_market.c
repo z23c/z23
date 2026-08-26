@@ -696,6 +696,67 @@ int test_file_market(void)
                 failures++;
             }
 
+            printf("file_market DB signed listing refuses cross-seller takeover... ");
+            struct file_offer honest, attacker;
+            uint8_t rogue_seed[32], rogue_secret[32];
+            memset(rogue_seed, 0x77, sizeof(rogue_seed));
+            bool pair_made = market_test_signed_offer(&honest, 0xC1, 501, now) &&
+                market_test_signed_offer(&attacker, 0xC2, 502, now) &&
+                db_file_offer_save(&ndb, &honest);
+            /* Same content root, attacker's own signature and payment
+             * address: a perfectly valid offer that must not re-key a root
+             * an accepted listing already owns. */
+            memcpy(attacker.root_hash, honest.root_hash, 32);
+            snprintf(attacker.filename, sizeof(attacker.filename), "%s",
+                     honest.filename);
+            ed25519_keypair(attacker.seller_pubkey, rogue_secret, rogue_seed);
+            bool attack_refused = pair_made &&
+                file_offer_auth_seal(&attacker, rogue_seed) ==
+                    FILE_OFFER_AUTH_OK &&
+                !db_file_offer_save(&ndb, &attacker);
+            struct file_offer listing = {0};
+            bool listing_intact = attack_refused &&
+                db_file_offer_find(&ndb, honest.root_hash, &listing) &&
+                memcmp(listing.seller_pubkey, honest.seller_pubkey,
+                       32) == 0 &&
+                memcmp(listing.offer_id, honest.offer_id, 32) == 0;
+            if (attack_refused && listing_intact) {
+                printf("OK\n");
+            } else {
+                printf("FAIL (refused=%d intact=%d)\n", attack_refused,
+                       listing_intact);
+                failures++;
+            }
+
+            printf("file_market DB unsigned rows take only byte-identical refreshes... ");
+            struct file_offer free_row;
+            memset(&free_row, 0, sizeof(free_row));
+            memset(free_row.root_hash, 0xE1, sizeof(free_row.root_hash));
+            snprintf(free_row.filename, sizeof(free_row.filename),
+                     "free.dat");
+            free_row.size_bytes = 101;
+            free_row.num_chunks = 1;
+            free_row.ttl = FILE_MARKET_MAX_TTL;
+            free_row.last_seen = now;
+            bool free_saved = db_file_offer_save(&ndb, &free_row);
+            struct file_offer free_poison = free_row;
+            snprintf(free_poison.filename,
+                     sizeof(free_poison.filename), "evil.dat");
+            bool poison_refused = free_saved &&
+                !db_file_offer_save(&ndb, &free_poison);
+            struct file_offer free_refresh = free_row;
+            free_refresh.last_seen = now + 5;
+            free_refresh.peer_port = 19001;
+            bool refresh_allowed = poison_refused &&
+                db_file_offer_save(&ndb, &free_refresh);
+            if (poison_refused && refresh_allowed) {
+                printf("OK\n");
+            } else {
+                printf("FAIL (poison=%d refresh=%d)\n", poison_refused,
+                       refresh_allowed);
+                failures++;
+            }
+
             /* Prune old entries */
             printf("file_market DB prune... ");
             offer.last_seen = 1;  /* very old */
