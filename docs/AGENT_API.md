@@ -637,7 +637,14 @@ never-healthy multi-RPC compatibility projection.
 The first-call packet also includes `runtime_build` (`zcl.runtime_build.v2`),
 which exact-compares the running
 binary's SHA-256 source identity against deploy-installed intent
-(`ZCL_AGENT_EXPECT_SOURCE_ID`). `running_build_commit` and
+(`ZCL_AGENT_EXPECT_SOURCE_ID`). `running_source_id_scope` and
+`expected_source_id_scope` name which question each identity answers.
+`running_source_id_sha256` is baked into the executable at compile time and is
+the same value from every working directory, which is what makes it usable as a
+freshness authority; a source identity computed from a checkout answers a
+different question — "what is in this directory right now" — and must never be
+compared here, because a directory-derived answer looks current on a host whose
+daemon is stale. `running_build_commit` and
 `expected_build_commit` remain display-only GitHub trace metadata and never
 participate in the freshness decision. Canonical post-restart verification
 also compares `ZCL_DEPLOY_EXPECT_ARTIFACT_SHA256` with the SHA-256 of the

@@ -28,7 +28,25 @@ set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=tools/scripts/source_identity_lib.sh
-. "$SCRIPT_DIR/scripts/source_identity_lib.sh"  # zcl_json_first_string, zcl_is_sha256
+. "$SCRIPT_DIR/scripts/source_identity_lib.sh"  # zcl_healthcheck_v1_running_source_id, zcl_is_sha256
+
+# The ONE question this script is allowed to ask about source identity:
+# "what source tree was the RUNNING daemon's own executable built from?"
+# That is a property of the executable behind /proc/<MainPID>/exe, baked in at
+# compile time, and it is the same value no matter which directory anything
+# here runs from. It is emphatically NOT "what source tree is in the current
+# checkout" — a cwd-derived answer would look current on a box whose daemon is
+# months stale, which is precisely how a deploy check passes a stale binary.
+# See the TWO QUESTIONS block at the top of source_identity_lib.sh.
+#
+# The reader binds the healthcheck schema and refuses a payload that carries
+# two different values under `source_id_sha256`, so this can never silently
+# start comparing a working-tree identity. Empty output means "the daemon did
+# not state an unambiguous identity", and every caller below treats that as
+# STALE DEPLOY, never as a pass.
+running_daemon_baked_source_id() {
+    zcl_healthcheck_v1_running_source_id "$1"
+}
 
 RPC_TOOL="${1:-./build/bin/zclassic-cli}"
 TIMEOUT="${2:-${ZCL_DEPLOY_VERIFY_TIMEOUT:-600}}"
@@ -152,6 +170,33 @@ deploy_verify_selftest() {
     fixture_direct_argv=$(exec_argv_values_from_text "$fixture_direct")
     [ "$(printf '%s\n' "$fixture_direct_argv" | sed -n '1p')" = "/canonical/bin/zclassic23" ] || return 1
     [ "$(printf '%s\n' "$fixture_direct_argv" | sed -n '2p')" = "-datadir=/canonical/data" ] || return 1
+
+    # The freshness reader must answer Q1 (the running executable's baked
+    # identity) and must refuse rather than guess when a payload offers a
+    # second, different value under the same key.
+    selftest_baked="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    selftest_worktree="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    # Shape of the real payload: the baked value at the top level, repeated
+    # verbatim inside the nested agent block, with runtime_build using its own
+    # distinct running_/expected_ names.
+    selftest_health='{"schema":"zcl.healthcheck.v1","api_version":"v1","status":"ok","source_id_sha256":"'"$selftest_baked"'","runtime_build":{"running_source_id_sha256":"'"$selftest_baked"'","expected_source_id_sha256":"'"$selftest_worktree"'"},"agent":{"source_id_sha256":"'"$selftest_baked"'"}}'
+    [ "$(running_daemon_baked_source_id "$selftest_health")" = "$selftest_baked" ] || return 1
+    # The RPC tool may hand back the whole JSON-RPC envelope. Refusing that
+    # would fail a FRESH deploy, so the reader must see through it.
+    selftest_wrapped='{"result":'"$selftest_health"',"error":null,"id":1}'
+    [ "$(running_daemon_baked_source_id "$selftest_wrapped")" = "$selftest_baked" ] || return 1
+    if zcl_json_sha256_is_ambiguous "$selftest_health" source_id_sha256; then
+        return 1
+    fi
+    # A nested working-tree (Q2) value published under the SAME key makes the
+    # document ambiguous: refuse, do not fall back to a positional pick.
+    selftest_conflicted='{"schema":"zcl.healthcheck.v1","api_version":"v1","status":"ok","source_id_sha256":"'"$selftest_baked"'","lane":{"source_id_sha256":"'"$selftest_worktree"'"}}'
+    zcl_json_sha256_is_ambiguous "$selftest_conflicted" source_id_sha256 || return 1
+    [ -z "$(running_daemon_baked_source_id "$selftest_conflicted")" ] || return 1
+    # Wrong schema is not a healthcheck and states nothing about the daemon.
+    selftest_foreign='{"schema":"zcl.agent_build.v2","api_version":"v1","status":"ok","source_id_sha256":"'"$selftest_baked"'"}'
+    [ -z "$(running_daemon_baked_source_id "$selftest_foreign")" ] || return 1
+
     echo "deploy_verify selftest: PASS"
 }
 
@@ -407,10 +452,6 @@ extract_build_commit() {
         sed -E 's/.*"build_commit"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/'
 }
 
-extract_source_id_sha256() {
-    zcl_json_first_string "$1" source_id_sha256
-}
-
 sha256_file() {
     if command -v sha256sum >/dev/null 2>&1; then
         sha256sum -- "$1" | awk '{print $1}'
@@ -655,10 +696,14 @@ verify_contract() {
     # by RPC and the exact SHA-256 of /proc/<MainPID>/exe. The second check
     # distinguishes two compiler outputs built from the same source bytes.
     # Git commit metadata is deliberately excluded from both decisions.
-    running_source_id=$(extract_source_id_sha256 "$health" || true)
+    running_source_id=$(running_daemon_baked_source_id "$health" || true)
     running_commit=$(extract_build_commit "$health" || true)
     if ! zcl_is_sha256 "$running_source_id"; then
-        last_err="STALE DEPLOY: running daemon exposes no valid source_id_sha256"
+        if zcl_json_sha256_is_ambiguous "$health" source_id_sha256; then
+            last_err="STALE DEPLOY: healthcheck reports more than one source_id_sha256 — the payload is answering two different questions under one key and no freshness verdict can be drawn from it: $health"
+        else
+            last_err="STALE DEPLOY: running daemon exposes no valid baked source_id_sha256"
+        fi
         return 1
     fi
     if [ "$running_source_id" != "$EXPECT_SOURCE_ID" ]; then

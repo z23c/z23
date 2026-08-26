@@ -1210,3 +1210,16 @@ AGENT_IMPACT_RULE("core/chainparams/src/chainparams.c|lib/net/src/connman.c|lib/
  * and softening the boot gate without the group would let the node advance
  * CRYPTO_READY on keys that never passed their digest. */
 AGENT_IMPACT_RULE("lib/sapling/src/params_vk_embedded.c|lib/sapling/include/sapling/params_vk_embedded.h|lib/sapling/src/params_init.c|lib/test/src/test_params_vk_embedded.c|config/src/boot_params_gate.c|config/include/config/boot_params_gate.h|tools/scripts/zcash_params.sh|docs/PARAMS.md", "params_vk_embedded")
+/* LANE source-identity-authority: the deploy freshness authority and the two
+ * questions its key name conflates. `source_id_sha256` names both "what
+ * source tree was this BINARY built from" (baked into the executable,
+ * identical from every working directory) and "what source tree is in this
+ * DIRECTORY right now" (different in every checkout). Only the first is a
+ * freshness answer; reading the second under its name passes a stale daemon
+ * whose own checkout happens to look current. These files move together
+ * because they are the one reader, its two consumers, and the constant they
+ * all resolve to: change the reader's admission rule without re-running the
+ * group and a deploy check can start comparing a directory to a daemon with
+ * nothing looking. Mapped so an edit here can never reach the push gate
+ * having run zero test groups. */
+AGENT_IMPACT_RULE("tools/scripts/source_identity_lib.sh|tools/deploy_verify.sh|lib/util/src/clientversion.c|lib/util/include/util/clientversion.h|app/controllers/src/agent_runtime_controller.c|lib/test/src/test_source_identity_authority.c", "source_identity_authority make_lint_gates")
