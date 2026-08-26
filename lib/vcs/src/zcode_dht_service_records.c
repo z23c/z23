@@ -555,8 +555,6 @@ bool vcs_zcode_dht_service_records_handle(
            operation->record_count * sizeof(*operation->records));
     operation->state = VCS_ZCODE_DHT_RECORD_OPERATION_COMPLETE;
     service->records_received++;
-    if (operation->detached)
-      memset(operation, 0, sizeof(*operation));
     return true;
   }
   if (message->kind == VCS_ZCODE_DHT_MSG_STORE_RESULT) {
@@ -573,8 +571,6 @@ bool vcs_zcode_dht_service_records_handle(
                            ? VCS_ZCODE_DHT_RECORD_OPERATION_REJECTED
                            : VCS_ZCODE_DHT_RECORD_OPERATION_COMPLETE;
     service->store_result_received++;
-    if (operation->detached)
-      memset(operation, 0, sizeof(*operation));
     return true;
   }
   return false;
@@ -592,12 +588,8 @@ void vcs_zcode_dht_service_record_query_finish(
   struct service_record_operation *operation =
       vcs_zcode_dht_records_operation_find(service,
                                             query->record_operation_id);
-  if (operation) {
-    if (operation->detached)
-      memset(operation, 0, sizeof(*operation));
-    else
-      operation->state = outcome == QUERY_OUTCOME_EXPIRED
-                             ? VCS_ZCODE_DHT_RECORD_OPERATION_TIMEOUT
-                             : VCS_ZCODE_DHT_RECORD_OPERATION_REJECTED;
-  }
+  if (operation)
+    operation->state = outcome == QUERY_OUTCOME_EXPIRED
+                           ? VCS_ZCODE_DHT_RECORD_OPERATION_TIMEOUT
+                           : VCS_ZCODE_DHT_RECORD_OPERATION_REJECTED;
 }

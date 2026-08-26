@@ -62,6 +62,8 @@ const char *vcs_zcode_dht_record_store_result_string(
   case VCS_ZCODE_DHT_RECORD_STORE_PROVIDER_CAP: return "provider-cap";
   case VCS_ZCODE_DHT_RECORD_STORE_CONFLICT_CAP: return "conflict-cap";
   case VCS_ZCODE_DHT_RECORD_STORE_GLOBAL_CAP: return "global-cap";
+  case VCS_ZCODE_DHT_RECORD_STORE_NO_SLOT:
+    return "no free publication slot";
   case VCS_ZCODE_DHT_RECORD_STORE_IO: return "io";
   case VCS_ZCODE_DHT_RECORD_STORE_CORRUPT: return "corrupt";
   }
