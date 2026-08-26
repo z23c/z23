@@ -4467,6 +4467,84 @@ _test_next:;
   return failures;
 }
 
+/* The debounced tick reclaim is the mid-session stand-in for load()'s
+ * expiry prune: first tick runs immediately, idle ticks inside the interval
+ * persist nothing, and once dead rows are gone a previously refused
+ * admission lands on the retry. */
+static int test_record_collect_tick_debounce(void)
+{
+  int failures = 0;
+  TEST("zcode dht service: tick reclaim debounces and heals refusals") {
+    char adir[] = "/tmp/zcl_dht_collect_XXXXXX";
+    ASSERT(mkdtemp(adir) != NULL);
+    uint8_t genesis[32], noise[32];
+    memset(genesis, 0x11, sizeof(genesis));
+    memset(noise, 0x42, sizeof(noise));
+    ASSERT(fixture_identity(adir, 0x6d, genesis, noise));
+    struct vcs_zcode_dht_service *a =
+        fixture_service_at(adir, genesis, noise, 1000);
+    ASSERT(a != NULL);
+    uint8_t seed[32], node_id[32];
+    struct vcs_zcode_dht_delegation delegation;
+    ASSERT(fixture_material(adir, &delegation, seed, node_id));
+
+    uint8_t semantic_root[32];
+    memset(semantic_root, 0x7e, 32);
+    struct vcs_zcode_dht_record record, refill;
+    for (size_t i = 0; i <= VCS_ZCODE_DHT_RECORD_STORE_MAX_PER_ROOT; i++) {
+      memset(&record, 0, sizeof(record));
+      record.kind = VCS_ZCODE_DHT_RECORD_POINTER;
+      (void)snprintf(record.namespace_name, sizeof(record.namespace_name),
+                     "svc.collect.%zu", i);
+      memcpy(record.network_genesis, genesis, 32);
+      memcpy(record.semantic_root, semantic_root, 32);
+      memset(record.transport_root, (uint8_t)(0x50 + i), 32);
+      memcpy(record.provider_node_id, node_id, 32);
+      record.sequence = 1;
+      record.not_before = 1000;
+      record.expiry = i < VCS_ZCODE_DHT_RECORD_STORE_MAX_PER_ROOT ? 2000
+                                                                  : 10600;
+      record.delegation = delegation;
+      ASSERT_EQ(vcs_zcode_dht_record_sign(&record, seed),
+                VCS_ZCODE_DHT_RECORD_OK);
+      if (i == VCS_ZCODE_DHT_RECORD_STORE_MAX_PER_ROOT)
+        refill = record;
+      else
+        ASSERT_EQ(vcs_zcode_dht_service_record_admit(
+                      a, &record, test_time(1000)),
+                  VCS_ZCODE_DHT_RECORD_STORE_ADDED);
+    }
+    memory_cleanse(seed, sizeof(seed));
+    ASSERT_EQ(vcs_zcode_dht_service_record_admit(a, &refill,
+                                                 test_time(1000)),
+              VCS_ZCODE_DHT_RECORD_STORE_ROOT_CAP);
+
+    uint64_t generation = a->persistence_generation;
+    /* First tick adopts the watermark and prunes every expired row in the
+     * same pass, so the refused refill goes through afterwards. */
+    vcs_zcode_dht_service_tick(a, test_time(2100));
+    ASSERT_EQ(vcs_zcode_dht_service_record_admit(a, &refill,
+                                                 test_time(2100)),
+              VCS_ZCODE_DHT_RECORD_STORE_ADDED);
+    ASSERT(a->records_dirty && a->persistence_dirty);
+    ASSERT(a->persistence_generation > generation);
+
+    /* Idle ticks inside the interval leave the persisted state alone. */
+    generation = a->persistence_generation;
+    vcs_zcode_dht_service_tick(a, test_time(2200));
+    vcs_zcode_dht_service_tick(a, test_time(2399));
+    ASSERT_EQ(a->persistence_generation, generation);
+    vcs_zcode_dht_service_tick(a, test_time(2400));
+    ASSERT_EQ(a->persistence_generation, generation);
+
+    vcs_zcode_dht_service_free(a, test_time(2400));
+    cleanup_fixture(adir);
+    PASS();
+  }
+_test_next:;
+  return failures;
+}
+
 int test_zcode_dht_service(void) {
   int failures = test_disabled_diagnostics();
   failures += test_publish_reproduction_gate();
@@ -4486,6 +4564,7 @@ int test_zcode_dht_service(void) {
   failures += test_record_transport_and_restart();
   failures += test_record_operation_table_cap();
   failures += test_agent_scope_dormant();
+  failures += test_record_collect_tick_debounce();
   failures += test_sparse_iterative_network();
   failures += test_sparse_space16_network();
   TEST("zcode dht service: Noise-authenticated two-node lookup and restart") {

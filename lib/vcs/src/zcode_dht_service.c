@@ -702,6 +702,7 @@ void vcs_zcode_dht_service_tick(struct vcs_zcode_dht_service *s,
         s->queries[i].deadline_mono <= now.monotonic_s)
       query_expire(s, &s->queries[i], now);
   vcs_zcode_dht_records_sweep(s, now.monotonic_s);
+  vcs_zcode_dht_records_collect_expired(s, now);
   for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_REPLAY_PER_PEER; i++)
     if (s->expired[i].used &&
         now.monotonic_s - s->expired[i].expired_at_mono >

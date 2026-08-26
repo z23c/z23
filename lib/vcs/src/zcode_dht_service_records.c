@@ -411,6 +411,37 @@ void vcs_zcode_dht_records_sweep(struct vcs_zcode_dht_service *service,
   }
 }
 
+/* Reclaim expired rows from the record store on a debounced tick. Water-
+ * marked on the service so an idle swarm pays one pass per interval, not
+ * one per tick; anything collected marks the store dirty exactly like an
+ * admission would, so the next debounced save persists the freed image.
+ * The reclaim is a mid-session version of what load() already does —
+ * without it, capacity refusals and per-put cost grow with dead history
+ * until the next restart. */
+void vcs_zcode_dht_records_collect_expired(
+    struct vcs_zcode_dht_service *service, struct vcs_zcode_dht_time now)
+{
+  if (!service || !service->enabled || !service->record_store)
+    return;
+  if (now.monotonic_s < service->record_collect_watermark_mono)
+    return; /* monotonic arithmetic keeps wall-clock jumps inert */
+  if (service->record_collect_watermark_mono &&
+      now.monotonic_s - service->record_collect_watermark_mono <
+          VCS_ZCODE_DHT_RECORD_COLLECT_INTERVAL_S)
+    return;
+  service->record_collect_watermark_mono = now.monotonic_s;
+  size_t collected =
+      vcs_zcode_dht_record_store_collect(service->record_store,
+                                         now.wall_unix);
+  if (collected == 0)
+    return;
+  service->records_dirty = true;
+  if (!service->persistence_dirty)
+    service->dirty_since_mono = now.monotonic_s;
+  service->persistence_dirty = true;
+  service->persistence_generation++;
+}
+
 enum vcs_zcode_dht_record_store_result vcs_zcode_dht_service_record_admit(
     struct vcs_zcode_dht_service *service,
     const struct vcs_zcode_dht_record *record, struct vcs_zcode_dht_time now)
@@ -430,6 +461,24 @@ enum vcs_zcode_dht_record_store_result vcs_zcode_dht_service_record_admit(
   enum vcs_zcode_dht_record_store_result result =
       vcs_zcode_dht_record_store_put(service->record_store, record,
                                      now.wall_unix);
+  /* A cap verdict computed against rows that have expired since they were
+   * stored is stale on arrival. Reclaim the dead rows once and retry
+   * before reporting a refusal — a record store that only heals at restart
+   * is a slow outage for every publisher behind it. */
+  if (result == VCS_ZCODE_DHT_RECORD_STORE_GLOBAL_CAP ||
+      result == VCS_ZCODE_DHT_RECORD_STORE_ROOT_CAP ||
+      result == VCS_ZCODE_DHT_RECORD_STORE_PROVIDER_CAP) {
+    size_t collected = vcs_zcode_dht_record_store_collect(
+        service->record_store, now.wall_unix);
+    if (collected > 0) {
+      service->records_dirty = true;
+      if (!service->persistence_dirty)
+        service->dirty_since_mono = now.monotonic_s;
+      service->persistence_generation++;
+      result = vcs_zcode_dht_record_store_put(service->record_store,
+                                              record, now.wall_unix);
+    }
+  }
   if (result == VCS_ZCODE_DHT_RECORD_STORE_ADDED ||
       result == VCS_ZCODE_DHT_RECORD_STORE_CONFLICT) {
     service->records_dirty = true;
