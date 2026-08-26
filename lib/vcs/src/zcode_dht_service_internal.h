@@ -259,6 +259,20 @@ bool vcs_zcode_dht_publications_load(struct vcs_zcode_dht_service *service,
 bool vcs_zcode_dht_publications_save(
     const char *datadir, const struct service_publication *publications,
     char *error_out, size_t error_capacity);
+
+/* Publication retry policy and the pieces the plan/commit unit and the
+ * drive state machine (zcode_dht_service_publication_drive.c) share. */
+#define PUBLICATION_RETRY_MIN_S 30u
+#define PUBLICATION_RETRY_MAX_S 3600u
+#define PUBLICATION_RENEW_FLOOR_S 60u
+void publication_mark_dirty(struct vcs_zcode_dht_service *service,
+                            uint64_t monotonic_s);
+uint64_t publication_next_proof_epoch(
+    struct vcs_zcode_dht_service *service);
+uint64_t publication_renew_at(const struct service_publication *publication);
+void publication_drive(struct vcs_zcode_dht_service *service,
+                       struct service_publication *publication,
+                       struct vcs_zcode_dht_time now);
 struct service_record_operation *vcs_zcode_dht_records_operation_find(
     struct vcs_zcode_dht_service *service, uint64_t id);
 bool vcs_zcode_dht_message_is_request(enum vcs_zcode_dht_msg_kind kind);
