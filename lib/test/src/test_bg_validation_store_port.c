@@ -25,6 +25,7 @@
 #include "adapters/outbound/persistence/bg_validation_store_sqlite.h"
 #include "ports/bg_validation_store_port.h"
 #include "models/database.h"
+#include "services/bg_validation_service.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -38,6 +39,11 @@
 int test_bg_validation_store_port(void)
 {
     int failures = 0;
+
+    BGV_CHECK("legacy coverage cannot short-circuit validation",
+              !bg_validation_test_coverage_version_current(0));
+    BGV_CHECK("current coverage resumes from the persisted cursor",
+              bg_validation_test_coverage_version_current(1));
 
     /* ---- Round-trip through the port over an in-memory node DB ---- */
     {

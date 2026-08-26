@@ -840,7 +840,7 @@ int test_script_validate_stage(void)
         /* A torn ancestor body at h=0 (below the held height) — armed exactly
          * as read_active_block_checked would on a failed disk read. */
         reducer_frontier_body_read_note_record(
-            0, 12, 34, REDUCER_FRONTIER_BODY_READ_DISK);
+            0, 12, 34, REDUCER_FRONTIER_BODY_READ_DISK, &sc.hashes[0]);
         /* Reach the named-blocker path on the first held tick (no 10-min wait). */
         script_validate_stage_unresolved_budget_set_for_test(0);
 
@@ -869,7 +869,9 @@ int test_script_validate_stage(void)
         /* Restore: the torn body is refetched + revalidated (clear the note)
          * and the missing coin resolves — H* climbs and the blocker clears via
          * the normal advance path (sv_unresolved_clear). */
-        reducer_frontier_body_read_note_clear_at(0);
+        struct reducer_frontier_body_read_note completed_note;
+        if (reducer_frontier_body_read_note_snapshot(&completed_note))
+            (void)reducer_frontier_body_read_note_clear_if(&completed_note);
         sc.missing_prevout_height = -1;
         SV_CHECK("torn_cause: cursor advances once the body revalidates",
                  script_validate_stage_drain(100) == 2 &&

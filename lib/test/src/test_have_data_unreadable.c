@@ -711,7 +711,8 @@ int test_have_data_unreadable(void)
          * NAMED typed blocker BEFORE any condition tick. */
         for (int i = 0; i < REDUCER_FRONTIER_BODY_READ_QUARANTINE_MAX; i++)
             reducer_frontier_body_read_note_record(
-                5, 49, 129998574, REDUCER_FRONTIER_BODY_READ_DISK);
+                5, 49, 129998574, REDUCER_FRONTIER_BODY_READ_DISK,
+                &hashes[5]);
 
         bool pre = blocker_exists("reducer_frontier.body_read_torn") &&
                    reducer_frontier_body_read_note_active() &&
@@ -721,7 +722,7 @@ int test_have_data_unreadable(void)
                   "still set pre-heal", pre);
 
         int64_t now = platform_time_wall_unix();
-        sync_monitor_test_set_tip_advance_ts(now - 120); /* tip stalled */
+        sync_monitor_test_set_tip_advance_ts(now); /* live tip still advancing */
 
         struct condition_runtime_snapshot presnap;
         int cleared_before = 0;
@@ -729,9 +730,9 @@ int test_have_data_unreadable(void)
                                                       &presnap))
             cleared_before = presnap.cleared_count;
 
-        /* One tick: candidate 3 detects h=5 from the note, remedy DROPS
-         * HAVE_DATA (arming body_fetch's refetch), the witness (block no longer
-         * falsely HAVE_DATA → healed) retires the note + typed blocker. */
+        /* Explicit disk-failure evidence bypasses the speculative 60-second
+         * tip-stall guard. The note must survive HAVE_DATA clearing so the
+         * sibling condition can queue the exact peer refetch. */
         condition_engine_tick();
 
         bool ok = have_data_unreadable_test_remedy_calls() == 1;
@@ -743,12 +744,26 @@ int test_have_data_unreadable(void)
         struct condition_runtime_snapshot post;
         bool ok2 = condition_engine_get_registered_snapshot(
             "have_data_unreadable", &post);
-        ok2 = ok2 && condition_engine_get_active_count() == 0;
-        ok2 = ok2 && post.cleared_count == cleared_before + 1;
-        /* Revalidation flow: the note + typed blocker are retired on heal. */
-        ok2 = ok2 && !blocker_exists("reducer_frontier.body_read_torn");
-        ok2 = ok2 && !reducer_frontier_body_read_note_active();
-        HDU_CHECK("body_read_torn: heal retires the note + typed blocker", ok2);
+        ok2 = ok2 && condition_engine_get_active_count() == 1;
+        ok2 = ok2 && post.cleared_count == cleared_before;
+        ok2 = ok2 && blocker_exists("reducer_frontier.body_read_torn");
+        ok2 = ok2 && reducer_frontier_body_read_note_active();
+        HDU_CHECK("body_read_torn: clear retains refetch handoff note", ok2);
+
+        /* The exact body reader clears the note only after a hash-verified
+         * replacement is readable. Drive that authoritative completion
+         * signal, then prove the condition and typed blocker retire. */
+        struct reducer_frontier_body_read_note completed_note;
+        bool ok3 = reducer_frontier_body_read_note_snapshot(&completed_note) &&
+                   reducer_frontier_body_read_note_clear_if(&completed_note);
+        condition_engine_tick();
+        ok3 = ok3 && condition_engine_get_registered_snapshot(
+            "have_data_unreadable", &post);
+        ok3 = ok3 && condition_engine_get_active_count() == 0;
+        ok3 = ok3 && post.cleared_count == cleared_before + 1;
+        ok3 = ok3 && !blocker_exists("reducer_frontier.body_read_torn");
+        HDU_CHECK("body_read_torn: verified reader completion clears episode",
+                  ok3);
 
         /* Only the torn height healed — every other block stays HAVE_DATA. */
         bool others = true;
@@ -765,6 +780,46 @@ int test_have_data_unreadable(void)
         have_data_unreadable_test_reset();
         reducer_frontier_body_read_note_reset_for_testing();
         blocker_reset_for_testing();
+        sync_monitor_test_set_tip_advance_ts(0);
+        main_state_free(&ms);
+    }
+
+    /* A same-height orphan note cannot authorize mutation of the active
+     * block. The generation/hash binding leaves the stale note intact for
+     * its writer to replace or retire after observing the reorg. */
+    {
+        condition_engine_reset_for_testing();
+        have_data_unreadable_test_reset();
+        reducer_frontier_body_read_note_reset_for_testing();
+
+        struct main_state ms;
+        main_state_init(&ms);
+        hdu_build_chain(&ms, 10, hashes);
+        condition_engine_set_main_state(&ms);
+        register_have_data_unreadable();
+
+        struct uint256 orphan_hash;
+        struct block_index *prev =
+            block_map_find(&ms.map_block_index, &hashes[4]);
+        struct block_index *orphan = hdu_insert_torn_variant(
+            &ms, 5, 0x7e, &orphan_hash, prev);
+        reducer_frontier_body_read_note_record(
+            5, -1, 0, REDUCER_FRONTIER_BODY_READ_DISK, &orphan_hash);
+        sync_monitor_test_set_tip_advance_ts(platform_time_wall_unix());
+
+        condition_engine_tick();
+
+        struct block_index *active = active_chain_at(&ms.chain_active, 5);
+        bool ok = orphan && active && active != orphan;
+        ok = ok && have_data_unreadable_test_remedy_calls() == 0;
+        ok = ok && (block_index_status_load(active) & BLOCK_HAVE_DATA) != 0;
+        ok = ok && reducer_frontier_body_read_note_active();
+        HDU_CHECK("same-height orphan note cannot clear active block", ok);
+
+        condition_engine_set_main_state(NULL);
+        condition_engine_reset_for_testing();
+        have_data_unreadable_test_reset();
+        reducer_frontier_body_read_note_reset_for_testing();
         sync_monitor_test_set_tip_advance_ts(0);
         main_state_free(&ms);
     }

@@ -9,6 +9,7 @@
 #include "jobs/stage_repair.h"
 #include "net/download.h"
 #include "net/msgprocessor.h"
+#include "platform/time_compat.h"
 #include "services/sync_monitor.h"
 #include "storage/progress_store.h"
 #include "validation/chainstate.h"
@@ -578,6 +579,42 @@ int test_body_fetch_missing_have_data_condition(void)
                     "cursor) is targeted over the frontier candidate", ok);
 
         g_bfmhd_stub_height = -1;
+        teardown_fixture(&fx);
+    }
+
+    /* Background validation can discover old disk damage while the live tip
+     * is still advancing. Its explicit reducer note must survive HAVE_DATA
+     * clearing and queue that exact active-chain hash without waiting for the
+     * speculative 60-second stall guard. */
+    {
+        struct bfmhd_fixture fx;
+        bool ok = setup_fixture(&fx, "background_read_note");
+
+        fx.tip->nStatus &= ~(unsigned)BLOCK_HAVE_DATA;
+        fx.tip->nFile = -1;
+        fx.tip->nDataPos = 0;
+        ok = ok && seed_body_row(
+            progress_store_db(), fx.tip_h, fx.tip->phashBlock);
+        reducer_frontier_body_read_note_record(
+            fx.tip_h, 49, 46754837, REDUCER_FRONTIER_BODY_READ_DISK,
+            fx.tip->phashBlock);
+        sync_monitor_test_set_tip_advance_ts(platform_time_wall_unix());
+
+        condition_engine_tick();
+
+        uint64_t queued = 0;
+        dl_get_stats(&fx.dm, NULL, NULL, NULL, NULL, &queued);
+        ok = ok && body_fetch_missing_have_data_test_remedy_calls() == 1;
+        ok = ok && condition_engine_get_active_count() == 1;
+        ok = ok && queued == 1 && fx.dm.queue_len == 1;
+        ok = ok && fx.dm.queue_heights[0] == fx.tip_h;
+        ok = ok && uint256_eq(&fx.dm.queue[0], fx.tip->phashBlock);
+        ok = ok && reducer_frontier_body_read_note_active();
+        BFMHD_CHECK("explicit background-read note ignores stale fetch row "
+                    "and queues exact active hash while tip advances", ok);
+
+        reducer_frontier_body_read_note_reset_for_testing();
+        sync_monitor_test_set_tip_advance_ts(0);
         teardown_fixture(&fx);
     }
 

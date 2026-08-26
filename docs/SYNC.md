@@ -260,6 +260,16 @@ disk, stale `coins_best_block`, download stall) are documented in
 [`validation/VALIDATION_MATRIX.md`](validation/VALIDATION_MATRIX.md) → "Self-Healing
 Mechanisms".
 
+Background validation also repairs a block index that claims `HAVE_DATA` when
+the indexed body cannot be hash-verified from disk. The validator pauses at
+that exact height, records the existing reducer body-read note, and remains
+stop-responsive while the condition engine clears only the false disk claim
+and queues the exact active-chain hash from peers. A prior fetch-log row is not
+proof of repair; validation resumes only after the replacement body itself is
+readable and hash-correct. Persisted cursor reuse likewise requires the
+current coverage schema, so missing legacy coverage metadata cannot authorize
+a completed walk.
+
 ---
 
 ## Data Directory

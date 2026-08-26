@@ -171,11 +171,15 @@ bool stage_repair_read_active_block_checked(struct main_state *ms, int height,
 
     char datadir[2048];
     GetDataDir(true, datadir, sizeof(datadir));
+    struct reducer_frontier_body_read_note note_before_read;
+    bool had_note = reducer_frontier_body_read_note_snapshot(
+        &note_before_read);
     if (!read_block_from_disk_pread(blk, &pos, datadir)) {
         /* Arm the off-lock HAVE_DATA drop + peer refetch (lane E3) — not a
          * side-channel write under the caller's progress lock. */
         reducer_frontier_body_read_note_record(
-            height, pos.nFile, (int64_t)pos.nPos, REDUCER_FRONTIER_BODY_READ_DISK);
+            height, pos.nFile, (int64_t)pos.nPos,
+            REDUCER_FRONTIER_BODY_READ_DISK, block_hash);
         LOG_WARN("stage_repair",
                  "[stage_repair] read_active_block_checked: disk read failed "
                  "h=%d (nFile=%d pos=%d) — HAVE_DATA drop + refetch armed",
@@ -192,7 +196,8 @@ bool stage_repair_read_active_block_checked(struct main_state *ms, int height,
         uint256_get_hex(&got, got_hex);
         /* Wrong block under HAVE_DATA: same route as a torn read (lane E3). */
         reducer_frontier_body_read_note_record(
-            height, pos.nFile, (int64_t)pos.nPos, REDUCER_FRONTIER_BODY_READ_WRONG);
+            height, pos.nFile, (int64_t)pos.nPos,
+            REDUCER_FRONTIER_BODY_READ_WRONG, block_hash);
         LOG_WARN("stage_repair",
                  "[stage_repair] repair read wrong block h=%d want=%s got=%s "
                  "— HAVE_DATA drop + refetch armed",
@@ -200,7 +205,9 @@ bool stage_repair_read_active_block_checked(struct main_state *ms, int height,
         return false;
     }
     /* Read + hash-verified: retire any stale torn-read note (+ blocker). */
-    reducer_frontier_body_read_note_clear_at(height);
+    if (had_note && note_before_read.height == height &&
+        uint256_eq(&note_before_read.block_hash, block_hash))
+        (void)reducer_frontier_body_read_note_clear_if(&note_before_read);
     return true;
 }
 

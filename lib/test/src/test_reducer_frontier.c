@@ -27,7 +27,9 @@
 #include "util/blocker.h"
 
 #include <sqlite3.h>
+#include <pthread.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -37,6 +39,58 @@
     if (expr) { printf("OK\n"); }                                  \
     else { printf("FAIL\n"); failures++; }                         \
 } while (0)
+
+struct body_note_writer_args {
+    struct uint256 hashes[2];
+    int file;
+    int64_t pos;
+    enum reducer_frontier_body_read_reason reason;
+    bool alternate_hashes;
+};
+
+static _Atomic bool g_body_note_threads_go;
+static _Atomic bool g_body_note_raise_done;
+
+static void *body_note_writer(void *arg)
+{
+    struct body_note_writer_args *a = arg;
+    while (!atomic_load(&g_body_note_threads_go)) {
+    }
+    for (int i = 0; i < 1000; i++)
+        reducer_frontier_body_read_note_record(
+            42, a->file, a->pos, a->reason,
+            &a->hashes[a->alternate_hashes ? i % 2 : 0]);
+    return NULL;
+}
+
+static void *body_note_clearer(void *arg)
+{
+    (void)arg;
+    while (!atomic_load(&g_body_note_threads_go)) {
+    }
+    while (!atomic_load(&g_body_note_raise_done)) {
+    }
+    for (int i = 0; i < 1000; i++) {
+        struct reducer_frontier_body_read_note note;
+        if (reducer_frontier_body_read_note_snapshot(&note))
+            (void)reducer_frontier_body_read_note_clear_if(&note);
+    }
+    return NULL;
+}
+
+static void *body_note_raise_writer(void *arg)
+{
+    struct body_note_writer_args *a = arg;
+    while (!atomic_load(&g_body_note_threads_go)) {
+    }
+    reducer_frontier_body_read_note_record(
+        42, a->file, a->pos, a->reason, &a->hashes[0]);
+    atomic_store(&g_body_note_raise_done, true);
+    for (int i = 1; i < 1000; i++)
+        reducer_frontier_body_read_note_record(
+            42, a->file, a->pos, a->reason, &a->hashes[0]);
+    return NULL;
+}
 
 /* reducer_frontier_nearest_self_verified_base() and its result struct are
  * declared only in the PRIVATE header app/jobs/src/reducer_frontier_rewind_
@@ -2038,6 +2092,9 @@ static int case_body_read_repair_note(void)
     blocker_reset_for_testing();
     blocker_set_rate_limit_ms_for_testing(0); /* re-sets always replace */
     reducer_frontier_body_read_note_reset_for_testing();
+    struct uint256 hash_a = {{1}};
+    struct uint256 hash_low = {{2}};
+    struct uint256 hash_high = {{3}};
 
     RF_CHECK("body_read_note: inactive at start",
              !reducer_frontier_body_read_note_active() &&
@@ -2045,9 +2102,9 @@ static int case_body_read_repair_note(void)
 
     /* Below the quarantine bound: note recorded, no blocker yet. */
     reducer_frontier_body_read_note_record(
-        3143721, 49, 129998574, REDUCER_FRONTIER_BODY_READ_DISK);
+        3143721, 49, 129998574, REDUCER_FRONTIER_BODY_READ_DISK, &hash_a);
     reducer_frontier_body_read_note_record(
-        3143721, 49, 129998574, REDUCER_FRONTIER_BODY_READ_DISK);
+        3143721, 49, 129998574, REDUCER_FRONTIER_BODY_READ_DISK, &hash_a);
     RF_CHECK("body_read_note: height/file/pos exposed",
              reducer_frontier_body_read_note_active() &&
              reducer_frontier_body_read_note_height() == 3143721 &&
@@ -2062,7 +2119,7 @@ static int case_body_read_repair_note(void)
      * TRANSIENT blocker naming height/nFile/reason — a NAMED blocker, never a
      * silent defer. */
     reducer_frontier_body_read_note_record(
-        3143721, 49, 129998574, REDUCER_FRONTIER_BODY_READ_DISK);
+        3143721, 49, 129998574, REDUCER_FRONTIER_BODY_READ_DISK, &hash_a);
     RF_CHECK("body_read_note: quarantine raises typed blocker",
              blocker_exists("reducer_frontier.body_read_torn"));
     {
@@ -2084,7 +2141,10 @@ static int case_body_read_repair_note(void)
     /* Revalidation flow: a successful read of the noted height retires the
      * note AND its blocker (this is exactly the clear_at() call the
      * read_active_block_checked success path makes). */
-    reducer_frontier_body_read_note_clear_at(3143721);
+    struct reducer_frontier_body_read_note completed_note;
+    bool captured = reducer_frontier_body_read_note_snapshot(&completed_note);
+    if (captured)
+        (void)reducer_frontier_body_read_note_clear_if(&completed_note);
     RF_CHECK("body_read_note: matching clear retires note + blocker",
              !reducer_frontier_body_read_note_active() &&
              !blocker_exists("reducer_frontier.body_read_torn"));
@@ -2093,20 +2153,114 @@ static int case_body_read_repair_note(void)
      * count (it must heal first so the frontier climbs); a HIGHER failing
      * height never displaces a lower pending one. */
     reducer_frontier_body_read_note_record(
-        3100000, 7, 42, REDUCER_FRONTIER_BODY_READ_WRONG);
+        3100000, 7, 42, REDUCER_FRONTIER_BODY_READ_WRONG, &hash_low);
     RF_CHECK("body_read_note: fresh lower note counts from 1",
              reducer_frontier_body_read_note_height() == 3100000 &&
              reducer_frontier_body_read_note_count_for_testing() == 1);
+    struct reducer_frontier_body_read_note low_note;
+    bool have_low = reducer_frontier_body_read_note_snapshot(&low_note);
     reducer_frontier_body_read_note_record(
-        3300000, 9, 9, REDUCER_FRONTIER_BODY_READ_DISK);
+        3100000, 8, 43, REDUCER_FRONTIER_BODY_READ_WRONG, &hash_high);
+    struct reducer_frontier_body_read_note replacement_note;
+    bool have_replacement =
+        reducer_frontier_body_read_note_snapshot(&replacement_note);
+    bool stale_clear = reducer_frontier_body_read_note_clear_if(&low_note);
+    RF_CHECK("body_read_note: same-height reorg replaces identity and rejects "
+             "stale clear",
+             have_low && have_replacement && !stale_clear &&
+             replacement_note.generation > low_note.generation &&
+             uint256_eq(&replacement_note.block_hash, &hash_high) &&
+             reducer_frontier_body_read_note_active());
+    reducer_frontier_body_read_note_record(
+        3300000, 9, 9, REDUCER_FRONTIER_BODY_READ_DISK, &hash_high);
     RF_CHECK("body_read_note: higher height does not displace the lower one",
              reducer_frontier_body_read_note_height() == 3100000 &&
              reducer_frontier_body_read_note_count_for_testing() == 1);
 
     /* clear_at only fires for the currently-noted height. */
-    reducer_frontier_body_read_note_clear_at(3300000);
+    struct reducer_frontier_body_read_note wrong_note;
+    bool have_wrong = reducer_frontier_body_read_note_snapshot(&wrong_note);
+    wrong_note.height = 3300000;
+    if (have_wrong)
+        (void)reducer_frontier_body_read_note_clear_if(&wrong_note);
     RF_CHECK("body_read_note: clear_at(non-noted height) is a no-op",
              reducer_frontier_body_read_note_height() == 3100000);
+
+    reducer_frontier_body_read_note_reset_for_testing();
+    struct body_note_writer_args wa = {
+        .hashes = {{{0x11}}, {{0x12}}},
+        .file = 11,
+        .pos = 111,
+        .reason = REDUCER_FRONTIER_BODY_READ_DISK,
+        .alternate_hashes = true,
+    };
+    struct body_note_writer_args wb = {
+        .hashes = {{{0x21}}, {{0x22}}},
+        .file = 22,
+        .pos = 222,
+        .reason = REDUCER_FRONTIER_BODY_READ_WRONG,
+        .alternate_hashes = true,
+    };
+    pthread_t ta;
+    pthread_t tb;
+    atomic_store(&g_body_note_threads_go, false);
+    bool ta_started = pthread_create(&ta, NULL, body_note_writer, &wa) == 0;
+    bool tb_started = pthread_create(&tb, NULL, body_note_writer, &wb) == 0;
+    atomic_store(&g_body_note_threads_go, true);
+    if (ta_started)
+        pthread_join(ta, NULL);
+    if (tb_started)
+        pthread_join(tb, NULL);
+    bool threads = ta_started && tb_started;
+    struct reducer_frontier_body_read_note concurrent_note;
+    bool coherent = threads &&
+        reducer_frontier_body_read_note_snapshot(&concurrent_note);
+    bool from_a = concurrent_note.file == wa.file &&
+        concurrent_note.pos == wa.pos && concurrent_note.reason == wa.reason &&
+        (uint256_eq(&concurrent_note.block_hash, &wa.hashes[0]) ||
+         uint256_eq(&concurrent_note.block_hash, &wa.hashes[1]));
+    bool from_b = concurrent_note.file == wb.file &&
+        concurrent_note.pos == wb.pos && concurrent_note.reason == wb.reason &&
+        (uint256_eq(&concurrent_note.block_hash, &wb.hashes[0]) ||
+         uint256_eq(&concurrent_note.block_hash, &wb.hashes[1]));
+    RF_CHECK("body_read_note: concurrent writers publish one coherent record",
+             coherent && (from_a || from_b));
+
+    reducer_frontier_body_read_note_reset_for_testing();
+    struct body_note_writer_args wc = wa;
+    wc.alternate_hashes = false;
+    reducer_frontier_body_read_note_record(
+        42, wc.file, wc.pos, wc.reason, &wc.hashes[0]);
+    reducer_frontier_body_read_note_record(
+        42, wc.file, wc.pos, wc.reason, &wc.hashes[0]);
+    RF_CHECK("body_read_note: concurrent fixture starts below threshold",
+             !blocker_exists("reducer_frontier.body_read_torn"));
+    pthread_t writer;
+    pthread_t clearer;
+    atomic_store(&g_body_note_threads_go, false);
+    atomic_store(&g_body_note_raise_done, false);
+    bool writer_started =
+        pthread_create(&writer, NULL, body_note_raise_writer, &wc) == 0;
+    bool clearer_started =
+        pthread_create(&clearer, NULL, body_note_clearer, NULL) == 0;
+    atomic_store(&g_body_note_threads_go, true);
+    if (writer_started)
+        pthread_join(writer, NULL);
+    if (clearer_started)
+        pthread_join(clearer, NULL);
+    struct reducer_frontier_body_read_note final_note;
+    bool final_active = reducer_frontier_body_read_note_snapshot(&final_note);
+    bool final_blocker =
+        blocker_exists("reducer_frontier.body_read_torn");
+    RF_CHECK("body_read_note: concurrent set/clear keeps blocker generation "
+             "coherent",
+             writer_started && clearer_started &&
+             atomic_load(&g_body_note_raise_done) &&
+             ((!final_active && !final_blocker) ||
+              (final_active &&
+               ((final_note.count >=
+                 REDUCER_FRONTIER_BODY_READ_QUARANTINE_MAX) ==
+                final_blocker))));
 
     reducer_frontier_body_read_note_reset_for_testing();
     blocker_reset_for_testing();

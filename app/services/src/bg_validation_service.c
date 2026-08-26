@@ -118,6 +118,11 @@ struct bg_validation_service *g_bg_validation = NULL;
  * verify time. Respects the same stop_requested wake as the main walk. */
 #define BG_REVERIFY_IDLE_SECS  30
 
+static bool bg_validation_coverage_version_current(int64_t version)
+{
+    return version == BG_VALIDATION_COVERAGE_VERSION;
+}
+
 static _Atomic supervisor_child_id g_bg_validation_supervisor_id =
     SUPERVISOR_INVALID_ID;
 static struct liveness_contract g_bg_validation_contract;
@@ -131,7 +136,7 @@ static int64_t bg_validation_progress_marker(
     return atomic_load(&svc->progress.verified_height);
 }
 
-static void bg_validation_supervisor_heartbeat(
+void bg_validation_supervisor_heartbeat(
     const struct bg_validation_service *svc)
 {
     supervisor_child_id id = atomic_load(&g_bg_validation_supervisor_id);
@@ -295,28 +300,25 @@ static void bg_validation_sampled_reverify_loop(
             ceiling = chain_height;
         int h = 1 + (int)(rng_u64() % (uint64_t)ceiling);
 
-        struct block_index *pindex = active_chain_at(&ms->chain_active, h);
-        if (pindex) {
-            struct disk_block_pos pos;
-            disk_block_pos_init(&pos);
-            if (block_index_disk_pos_snapshot(pindex, &pos, NULL)) {
-                struct block blk;
-                block_init(&blk);
-                if (read_block_from_disk_index_pread(&blk, pindex, datadir)) {
+        struct block_index *pindex = NULL;
+        struct block blk;
+        block_init(&blk);
+        if (bg_validation_read_body_resilient(
+                svc, h, datadir, BG_VALIDATION_COMPLETE, &blk, &pindex)) {
                     int64_t s = 0, p = 0, k = 0;
-                    bool ok = bg_validation_validate_block_proofs(&blk, pindex, datadir,
-                                                    params, num_workers,
-                                                    svc->max_script_batch,
-                                                    &s, &p, &k);
+                    enum bg_validation_block_outcome outcome =
+                        bg_validation_validate_canonical_block(
+                            ms, h, &blk, pindex, datadir, params, num_workers,
+                            svc->max_script_batch, &s, &p, &k);
                     block_free(&blk);
-                    if (!bg_validation_record_reverify(svc, h, ok)) {
+                    if (outcome == BG_VALIDATION_BLOCK_ORPHAN)
+                        continue;
+                    if (!bg_validation_record_reverify(
+                            svc, h, outcome == BG_VALIDATION_BLOCK_VALID)) {
                         /* Re-verify FAILED — blocker raised, state FAILED. */
                         atomic_store(&svc->progress.reverify_active, false);
                         return;
                     }
-                }
-                /* Block not on disk (post-snapshot gap): skip this sample. */
-            }
         }
 
         /* Idle between samples; wake promptly on stop. */
@@ -366,9 +368,22 @@ static void *bg_validation_thread(void *arg)
                         "bg_validation seed_floor from=%d", seed_floor);
         }
     } else {
-        coverage_complete = load_coverage_version(&svc->progress_store) ==
-                            BG_VALIDATION_COVERAGE_VERSION;
-        start_height++; /* Resume from next unverified block */
+        coverage_complete = bg_validation_coverage_version_current(
+            load_coverage_version(&svc->progress_store));
+        if (coverage_complete) {
+            start_height++; /* Resume from next unverified block. */
+        } else {
+            bool cursor_cleared = svc->progress_store.save_progress &&
+                svc->progress_store.save_progress(
+                    svc->progress_store.self, -1);
+            coverage_complete = cursor_cleared && save_coverage_version(
+                &svc->progress_store, BG_VALIDATION_COVERAGE_VERSION);
+            start_height = external_seeded ? seed_floor + 1 : 0;
+            LOG_WARN("bg_validation",
+                     "[bg-valid] legacy coverage cursor refused; restarting "
+                     "walk from h=%d",
+                     start_height);
+        }
     }
 
     int chain_height = active_chain_height(&ms->chain_active);
@@ -414,26 +429,26 @@ static void *bg_validation_thread(void *arg)
             atomic_store(&svc->progress.verified_height, 0);
             continue;
         }
-        struct disk_block_pos pos;
-        disk_block_pos_init(&pos);
-        if (!block_index_disk_pos_snapshot(pindex, &pos, NULL)) {
-            coverage_complete = false;
-            LOG_WARN("bg_validation", "[bg-valid] coverage gap: no disk position h=%d", h);
-            break;
-        }
-
         struct block blk;
         block_init(&blk);
-        if (!read_block_from_disk_index_pread(&blk, pindex, datadir)) {
+        if (!bg_validation_read_body_resilient(
+                svc, h, datadir, BG_VALIDATION_RUNNING, &blk, &pindex)) {
             coverage_complete = false;
-            LOG_WARN("bg_validation", "[bg-valid] coverage gap: unreadable body h=%d", h);
             break;
         }
 
         int64_t block_sigs = 0, block_proofs = 0, block_skips = 0;
-        if (!bg_validation_validate_block_proofs(&blk, pindex, datadir, params,
-                                    num_workers, svc->max_script_batch,
-                                    &block_sigs, &block_proofs, &block_skips)) {
+        enum bg_validation_block_outcome outcome =
+            bg_validation_validate_canonical_block(
+                ms, h, &blk, pindex, datadir, params, num_workers,
+                svc->max_script_batch, &block_sigs, &block_proofs,
+                &block_skips);
+        if (outcome == BG_VALIDATION_BLOCK_ORPHAN) {
+            block_free(&blk);
+            h--;
+            continue;
+        }
+        if (outcome == BG_VALIDATION_BLOCK_INVALID) {
             fprintf(stderr, "[bg-valid] VALIDATION FAILURE at height %d\n", h);
             atomic_store(&svc->progress.state, BG_VALIDATION_FAILED);
             block_free(&blk);
@@ -625,43 +640,21 @@ bool bg_validation_start(struct bg_validation_service *svc)
     if (!svc || svc->thread_started)
         LOG_FAIL("bg_validation", "bg_validation_start: null svc or thread already started");
 
-    /* Don't start if already fully validated */
-    int saved = load_progress(&svc->progress_store);
     int chain_h = active_chain_height(&svc->ms->chain_active);
-    if (saved >= chain_h && chain_h > 0 &&
-        load_coverage_version(&svc->progress_store) !=
-            BG_VALIDATION_COVERAGE_VERSION) {
-        printf("[bg-valid] Already fully validated to height %d\n", saved);
-        atomic_store(&svc->progress.state, BG_VALIDATION_COMPLETE);
-        atomic_store(&svc->progress.verified_height, saved);
-        atomic_store(&svc->progress.chain_height, chain_h);
-        /* Only reset deferred-proof-validation if we've actually
-         * validated PAST the checkpoint. Without this check, a fresh
-         * datadir at chain_h=0 trivially satisfies saved>=chain_h,
-         * marks bg-validation "complete", clears the deferred flag,
-         * and then the very first peer block (e.g. h=737) fails
-         * phgr13 verify because the chain hasn't caught up to where
-         * proofs are expected to verify cleanly (and PHGR13 keys may
-         * not even be loaded). Keep the boot-time deferred floor in
-         * place until we actually cross it. */
-        if (chain_h >= g_deferred_proof_validation_below_height)
-            g_deferred_proof_validation_below_height = -1;
-        return true;
-    }
-
     /* Safety check: verify active_chain has valid entries at h=0 and h=1.
      * After block_map_grow, phashBlock pointers may be stale (fixed by
-     * re-linking at boot). If entries are still bad, skip safely. */
+     * re-linking at boot). Never publish completion when entries remain
+     * unusable: defer the worker and leave authority fail-closed. */
     if (chain_h > 1000) {
         struct block_index *h0 = active_chain_at(&svc->ms->chain_active, 0);
         struct block_index *h1 = active_chain_at(&svc->ms->chain_active, 1);
         if (!h0 || !h1 || !(block_index_status_load(h0) & BLOCK_HAVE_DATA)) {
             printf("[bg-valid] Deferred — chain[0] or chain[1] not valid "
                    "(tip=%d)\n", chain_h);
-            atomic_store(&svc->progress.state, BG_VALIDATION_COMPLETE);
-            atomic_store(&svc->progress.verified_height, chain_h);
+            atomic_store(&svc->progress.state, BG_VALIDATION_PAUSED);
+            atomic_store(&svc->progress.verified_height, -1);
             atomic_store(&svc->progress.chain_height, chain_h);
-            return true;
+            return false;
         }
     }
 
@@ -762,6 +755,13 @@ bool bg_validation_record_reverify(struct bg_validation_service *svc,
     LOG_WARN("bg_validation", "[bg-valid] %s", reason);
     return false;
 }
+
+#ifdef ZCL_TESTING
+bool bg_validation_test_coverage_version_current(int64_t version)
+{
+    return bg_validation_coverage_version_current(version);
+}
+#endif
 
 void bg_validation_reset(struct bg_validation_service *svc)
 {

@@ -191,7 +191,7 @@ ZCL_BLOCKER_REMEDY(reducer_frontier.script_undetermined,       OWNER)
 /* Lane E3: raised when stage_repair_read_active_block_checked cannot read a
  * torn/wrong canonical body (quarantine). have_data_unreadable detects the
  * noted height (candidate 3), drops BLOCK_HAVE_DATA for a body_fetch refetch,
- * and its witness clears this blocker (reducer_frontier_body_read_note_clear_at). */
+ * and its witness clears this blocker (reducer_frontier_body_read_note_clear_if). */
 ZCL_BLOCKER_REMEDY(reducer_frontier.body_read_torn,            have_data_unreadable)
 ZCL_BLOCKER_REMEDY(body_fetch.header_solution_missing,         OWNER)
 ZCL_BLOCKER_REMEDY(validate_headers.window_resolve_miss,       OWNER)
