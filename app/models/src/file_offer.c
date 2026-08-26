@@ -88,6 +88,34 @@ bool db_file_offer_save(struct node_db *ndb,
     if (!ndb || !ndb->open) LOG_FAIL("market", "db_file_offer_save: db not open");
     if (!offer) LOG_FAIL("market", "db_file_offer_save: offer is NULL");
 
+    /* file_offers is keyed by content root, so an upsert that ignored the
+     * signer would let any peer who holds the same bytes re-key someone
+     * else's listing under their own signature, payment address, and
+     * metadata. The root belongs to its first accepted listing: only the
+     * same seller may rewrite a signed listing, and unsigned legacy rows
+     * accept only byte-identical refreshes (last_seen, port, ttl). */
+    struct file_offer existing;
+    if (db_file_offer_find(ndb, offer->root_hash, &existing)) {
+        bool identical_unsigned_refresh =
+            existing.auth_version == 0 && offer->auth_version == 0 &&
+            strcmp(existing.filename, offer->filename) == 0 &&
+            existing.size_bytes == offer->size_bytes &&
+            existing.num_chunks == offer->num_chunks &&
+            existing.price_per_mb == offer->price_per_mb &&
+            memcmp(existing.z_addr, offer->z_addr,
+                   sizeof(existing.z_addr)) == 0;
+        bool same_seller_update =
+            existing.auth_version >= FILE_MARKET_OFFER_VERSION &&
+            offer->auth_version >= FILE_MARKET_OFFER_VERSION &&
+            memcmp(existing.seller_pubkey, offer->seller_pubkey,
+                   sizeof(existing.seller_pubkey)) == 0;
+        if (!identical_unsigned_refresh && !same_seller_update) {
+            LOG_FAIL("market",
+                     "file_offers listing takeover refused on root conflict");
+            return false;
+        }
+    }
+
     struct ar_callbacks *cbs = db_file_offer_callbacks();
     sqlite3_stmt *s = NULL;
     AR_ADHOC_SAVE(ndb, s,
