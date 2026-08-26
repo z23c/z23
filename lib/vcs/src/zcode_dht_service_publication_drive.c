@@ -20,9 +20,9 @@ static uint64_t publication_max_window(enum vcs_zcode_dht_record_kind kind)
              ? VCS_ZCODE_DHT_SOURCE_REPRODUCTION_ACK_MAX_SECONDS : 0;
 }
 
-static void publication_cancel_active(
-    struct vcs_zcode_dht_service *service,
-    struct service_publication *publication)
+/* Also the pre-overwrite hook for superseding commits (see internal.h). */
+void publication_cancel_active(struct vcs_zcode_dht_service *service,
+                               struct service_publication *publication)
 {
   if (publication->phase == SERVICE_PUBLICATION_ROUTING &&
       publication->lookup_id)

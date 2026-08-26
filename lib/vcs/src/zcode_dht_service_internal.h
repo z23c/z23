@@ -96,7 +96,7 @@ enum service_record_operation_kind {
 };
 
 struct service_record_operation {
-  bool used, detached;
+  bool used;
   enum service_record_operation_kind kind;
   uint64_t id;
   enum vcs_zcode_dht_record_operation_state state;
@@ -270,6 +270,12 @@ void publication_mark_dirty(struct vcs_zcode_dht_service *service,
 uint64_t publication_next_proof_epoch(
     struct vcs_zcode_dht_service *service);
 uint64_t publication_renew_at(const struct service_publication *publication);
+/* Cancel a slot's live lookup and child operations. A commit that supersedes
+ * an existing same-stream slot MUST call this before overwriting it: the
+ * lookup/operation tables have no sweeper, so ids wiped from their owner's
+ * slot leak those entries until service restart. A no-op on a fresh slot. */
+void publication_cancel_active(struct vcs_zcode_dht_service *service,
+                               struct service_publication *publication);
 void publication_drive(struct vcs_zcode_dht_service *service,
                        struct service_publication *publication,
                        struct vcs_zcode_dht_time now);

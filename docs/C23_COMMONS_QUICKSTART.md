@@ -186,6 +186,18 @@ input spelling with `z23 discover schema <leaf>`.
      --input='{"mode":"commit","kind":"provider","namespace":"zclassic23.package","transport_root":"<same transport_root>","sequence":1,"not_before":<same>,"expiry":<same>,"plan_token":"<returned token>"}'
    ```
 
+   Publication is a renewal contract, not a one-shot. Omit `sequence` (or
+   send `0`) on every plan after the first: the node derives `max+1` for the
+   stream under its own lock, which is what keeps two operators renewing one
+   stream through one node from minting the same sequence and conflicting
+   both records into unusability. A commit for a stream the node already
+   announces replaces that stream's renewal intention in place — the intent
+   table holds one slot per stream, sixteen streams per node, and a
+   seventeenth distinct stream is refused `no free publication slot`. The
+   node re-signs each held record on its own schedule before expiry and the
+   intentions survive restarts, so renewal is normally hands-off; `zcode
+   network status` reports how many intents are live.
+
 ## Consumer
 
 A name is only a local label. Exact identity remains `package_root`. There is

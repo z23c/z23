@@ -151,7 +151,9 @@ static struct service_publication *publication_slot_for_stream(
 
 /* The slot a commit claims: the same stream's existing intention when the
  * incoming record supersedes it, otherwise a fresh free slot. NULL only when
- * the table is full of streams this record neither belongs to nor beats. */
+ * the table is full of streams this record neither belongs to nor beats —
+ * reported as NO_SLOT, because "global-cap" (the record store's 4096 cap)
+ * sent the first operator diagnosing this condition to the wrong table. */
 static struct service_publication *publication_claim(
     struct vcs_zcode_dht_service *service,
     const struct vcs_zcode_dht_record *record)
@@ -183,7 +185,7 @@ vcs_zcode_dht_service_record_publish_commit(
   struct service_publication *publication =
       publication_claim(service, &record);
   if (!publication)
-    return VCS_ZCODE_DHT_RECORD_STORE_GLOBAL_CAP;
+    return VCS_ZCODE_DHT_RECORD_STORE_NO_SLOT;
   enum vcs_zcode_dht_record_store_result result =
       vcs_zcode_dht_service_record_admit(service, &record, now);
   if (record_out && (result == VCS_ZCODE_DHT_RECORD_STORE_ADDED ||
@@ -192,6 +194,10 @@ vcs_zcode_dht_service_record_publish_commit(
     *record_out = record;
   if (result == VCS_ZCODE_DHT_RECORD_STORE_ADDED ||
       result == VCS_ZCODE_DHT_RECORD_STORE_CONFLICT) {
+    /* The claimed slot may be the same stream's live intention mid-cycle:
+     * cancel its lookup and children before overwriting, or those ids
+     * leave their owner and the bounded tables they live in never free. */
+    publication_cancel_active(service, publication);
     memset(publication, 0, sizeof(*publication));
     publication->used = true;
     publication->record = record;
@@ -269,6 +275,11 @@ static void storage_ack_plan_apply(void *opaque, bool current)
         apply->service, apply->spec, apply->plan_token, apply->record_out);
 }
 
+/* Lock order: this wrapper (and its commit twin below) takes the package
+ * store's possession section and calls INTO the service from inside it —
+ * the opposite of the composition root, which takes the service lock first.
+ * Only tests call these today; a production caller that already holds the
+ * service lock must use the _verified entry points instead. */
 bool vcs_zcode_dht_service_storage_ack_plan(
     struct vcs_zcode_dht_service *service,
     struct vcs_package_store *package_store,
@@ -312,7 +323,7 @@ vcs_zcode_dht_storage_ack_commit_verified(
   struct service_publication *publication =
       publication_claim(service, &record);
   if (!publication)
-    return VCS_ZCODE_DHT_RECORD_STORE_GLOBAL_CAP;
+    return VCS_ZCODE_DHT_RECORD_STORE_NO_SLOT;
   enum vcs_zcode_dht_record_store_result result =
       vcs_zcode_dht_service_record_admit(service, &record, now);
   if (record_out && (result == VCS_ZCODE_DHT_RECORD_STORE_ADDED ||
@@ -321,6 +332,7 @@ vcs_zcode_dht_storage_ack_commit_verified(
     *record_out = record;
   if (result == VCS_ZCODE_DHT_RECORD_STORE_ADDED ||
       result == VCS_ZCODE_DHT_RECORD_STORE_CONFLICT) {
+    publication_cancel_active(service, publication);
     memset(publication, 0, sizeof(*publication));
     publication->used = true;
     publication->possession_current = true;
@@ -360,7 +372,7 @@ vcs_zcode_dht_source_reproduction_ack_commit_verified(
   struct service_publication *publication =
       publication_claim(service, &record);
   if (!publication)
-    return VCS_ZCODE_DHT_RECORD_STORE_GLOBAL_CAP;
+    return VCS_ZCODE_DHT_RECORD_STORE_NO_SLOT;
   enum vcs_zcode_dht_record_store_result result =
       vcs_zcode_dht_service_record_admit(service, &record, now);
   if (record_out && (result == VCS_ZCODE_DHT_RECORD_STORE_ADDED ||
@@ -369,6 +381,7 @@ vcs_zcode_dht_source_reproduction_ack_commit_verified(
     *record_out = record;
   if (result == VCS_ZCODE_DHT_RECORD_STORE_ADDED ||
       result == VCS_ZCODE_DHT_RECORD_STORE_CONFLICT) {
+    publication_cancel_active(service, publication);
     memset(publication, 0, sizeof(*publication));
     publication->used = true;
     publication->record = record;

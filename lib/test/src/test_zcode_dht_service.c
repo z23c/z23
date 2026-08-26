@@ -1307,7 +1307,8 @@ static int test_publication_slot_supersede(void) {
     ASSERT_EQ(status.publication_intents,
               VCS_ZCODE_DHT_SERVICE_MAX_PUBLICATIONS);
 
-    /* The ceiling is still a ceiling for a genuinely new stream. */
+    /* The ceiling is still a ceiling for a genuinely new stream — and it
+     * names the table that is actually full. */
     memset(&spec, 0, sizeof(spec));
     spec.kind = VCS_ZCODE_DHT_RECORD_POINTER;
     (void)snprintf(spec.namespace_name, sizeof(spec.namespace_name),
@@ -1321,7 +1322,10 @@ static int test_publication_slot_supersede(void) {
         service, &spec, token, &record, NULL));
     ASSERT_EQ(vcs_zcode_dht_service_record_publish_commit(
                   service, &spec, token, now, &record, NULL),
-              VCS_ZCODE_DHT_RECORD_STORE_GLOBAL_CAP);
+              VCS_ZCODE_DHT_RECORD_STORE_NO_SLOT);
+    ASSERT_STR_EQ(vcs_zcode_dht_record_store_result_string(
+                      VCS_ZCODE_DHT_RECORD_STORE_NO_SLOT),
+                  "no free publication slot");
 
     vcs_zcode_dht_service_free(service, now);
     cleanup_fixture(dir);
@@ -1409,6 +1413,105 @@ _test_next:;
   return failures;
 }
 
+/* Superseding a slot mid-cycle must cancel the cycle, not just overwrite it.
+ * A slot mid-ROUTING holds a live lookup id (and mid-STORING holds child
+ * operation ids); the lookup and operation tables free only when their owner
+ * polls or cancels — an id wiped from its owner's slot is neither, so the
+ * entry strands until restart. Eight stranded lookups wedge the lookup table
+ * exactly the way publication slots used to wedge. With one authenticated
+ * peer, a commit's routing lookup is genuinely live (its FIND_NODE is
+ * outstanding), which is the real incident state: renew out-of-band while
+ * the cycle is routing. */
+static int test_publication_supersede_cancels_children(void) {
+  int failures = 0;
+  TEST("zcode dht service: superseding a live cycle frees its lookup") {
+    char adir[] = "/tmp/zcl_dht_pub_cancel_a_XXXXXX";
+    char bdir[] = "/tmp/zcl_dht_pub_cancel_b_XXXXXX";
+    ASSERT(mkdtemp(adir) != NULL && mkdtemp(bdir) != NULL);
+    uint8_t genesis[32], anoise[32], bnoise[32], transcript[32];
+    memset(genesis, 0x11, 32);
+    memset(anoise, 0x26, 32);
+    memset(bnoise, 0x27, 32);
+    memset(transcript, 0x5e, 32);
+    ASSERT(fixture_identity(adir, 0x6e, genesis, anoise));
+    ASSERT(fixture_identity(bdir, 0x6f, genesis, bnoise));
+    struct vcs_zcode_dht_service *a =
+        fixture_service_at(adir, genesis, anoise, 1000);
+    struct vcs_zcode_dht_service *b =
+        fixture_service_at(bdir, genesis, bnoise, 1000);
+    ASSERT(a != NULL && b != NULL);
+    struct vcs_zcode_dht_session as = {.established = true,
+                                       .generation = 7,
+                                       .connection_serial = 1};
+    struct vcs_zcode_dht_session bs = as;
+    bs.connection_serial = 2;
+    memcpy(as.remote_static, bnoise, 32);
+    memcpy(bs.remote_static, anoise, 32);
+    memcpy(as.transcript_hash, transcript, 32);
+    memcpy(bs.transcript_hash, transcript, 32);
+    ASSERT(vcs_zcode_dht_service_session_open(a, 2, &as, test_time(1001)));
+    ASSERT(vcs_zcode_dht_service_session_open(b, 1, &bs, test_time(1001)));
+    ASSERT(pump(a, b, 2, 1, 1001, NULL, NULL));
+    ASSERT(pump(b, a, 1, 2, 1001, NULL, NULL));
+    ASSERT(pump(a, b, 2, 1, 1001, NULL, NULL));
+
+    struct vcs_zcode_dht_publish_spec spec;
+    uint8_t token[32];
+    struct vcs_zcode_dht_record record;
+    struct vcs_zcode_dht_service_status status;
+    memset(&spec, 0, sizeof(spec));
+    spec.kind = VCS_ZCODE_DHT_RECORD_POINTER;
+    (void)snprintf(spec.namespace_name, sizeof(spec.namespace_name),
+                   "science");
+    memset(spec.semantic_root, 0x7d, 32);
+    memset(spec.transport_root, 0x7e, 32);
+    spec.sequence = 1;
+    spec.not_before = 1001;
+    spec.expiry = 1301;
+    ASSERT(vcs_zcode_dht_service_record_publish_plan(
+        a, &spec, token, &record, NULL));
+    ASSERT_EQ(vcs_zcode_dht_service_record_publish_commit(
+                  a, &spec, token, test_time(1001), &record, NULL),
+              VCS_ZCODE_DHT_RECORD_STORE_ADDED);
+    vcs_zcode_dht_service_status(a, &status);
+    ASSERT_EQ(status.publication_intents, 1);
+    /* The commit's own schedule left the intent mid-ROUTING: one live
+     * lookup whose FIND_NODE to the peer is still outstanding. */
+    ASSERT_EQ(status.queued_lookups, 1u);
+    ASSERT_EQ(status.active_record_operations, 0u);
+
+    /* Renew out-of-band while that cycle is live. The overwritten slot must
+     * hand its lookup back; the successor then begins exactly one of its
+     * own. A stranded predecessor makes this two. */
+    spec.sequence = 2;
+    ASSERT(vcs_zcode_dht_service_record_publish_plan(
+        a, &spec, token, &record, NULL));
+    ASSERT_EQ(vcs_zcode_dht_service_record_publish_commit(
+                  a, &spec, token, test_time(1002), &record, NULL),
+              VCS_ZCODE_DHT_RECORD_STORE_ADDED);
+    vcs_zcode_dht_service_status(a, &status);
+    ASSERT_EQ(status.publication_intents, 1);
+    ASSERT_EQ(status.queued_lookups, 1u);
+    ASSERT_EQ(status.active_record_operations, 0u);
+
+    /* And it holds across ticks — a lookup nothing polls keeps its slot
+     * forever, so a stranded one would resurface here as 2. */
+    for (unsigned i = 0; i < 3; i++)
+      vcs_zcode_dht_service_tick(a, test_time(1003 + i));
+    vcs_zcode_dht_service_status(a, &status);
+    ASSERT_EQ(status.queued_lookups, 1u);
+    ASSERT_EQ(status.active_record_operations, 0u);
+
+    vcs_zcode_dht_service_free(a, test_time(1006));
+    vcs_zcode_dht_service_free(b, test_time(1006));
+    cleanup_fixture(adir);
+    cleanup_fixture(bdir);
+    PASS();
+  }
+_test_next:;
+  return failures;
+}
+
 /* The ceiling on how many records ONE node keeps announced is not an abstract
  * number: it decides whether a node can host the product's own demo. The
  * multi-host commons journey measured the floor at eleven records for five
@@ -1457,7 +1560,9 @@ static int test_publication_ceiling_hosts_a_real_node(void) {
                     service, &spec, token, now, &record, NULL),
                 VCS_ZCODE_DHT_RECORD_STORE_ADDED);
     }
-    /* The ceiling is still a ceiling, and it still says so by name. */
+    /* The ceiling is still a ceiling, and it says so by name: NO_SLOT, the
+     * intent table — not GLOBAL_CAP, which names the record store's much
+     * higher cap and sends an operator to the wrong table. */
     struct vcs_zcode_dht_publish_spec over;
     uint8_t over_token[32];
     struct vcs_zcode_dht_record over_record;
@@ -1474,10 +1579,10 @@ static int test_publication_ceiling_hosts_a_real_node(void) {
         service, &over, over_token, &over_record, NULL));
     ASSERT_EQ(vcs_zcode_dht_service_record_publish_commit(
                   service, &over, over_token, now, &over_record, NULL),
-              VCS_ZCODE_DHT_RECORD_STORE_GLOBAL_CAP);
+              VCS_ZCODE_DHT_RECORD_STORE_NO_SLOT);
     ASSERT_STR_EQ(vcs_zcode_dht_record_store_result_string(
-                      VCS_ZCODE_DHT_RECORD_STORE_GLOBAL_CAP),
-                  "global-cap");
+                      VCS_ZCODE_DHT_RECORD_STORE_NO_SLOT),
+                  "no free publication slot");
 
     vcs_zcode_dht_service_free(service, now);
     cleanup_fixture(dir);
@@ -3739,6 +3844,7 @@ int test_zcode_dht_service(void) {
   failures += test_publication_auto_sequence();
   failures += test_publication_slot_supersede();
   failures += test_publication_slot_superseded_freed();
+  failures += test_publication_supersede_cancels_children();
   failures += test_publication_ceiling_hosts_a_real_node();
   failures += test_record_churn_fallback();
   failures += test_deep_ancestry();
