@@ -364,7 +364,16 @@ void zcl_native_handle_zcode_node_join(
         json_push_kv_str(data, "wrote_flags",
                          compiler ? "packagehost=1 buildworker=1"
                                   : "packagehost=1 buildworker=0") &&
-        json_push_kv_bool(data, "config_changed", changed);
+        json_push_kv_bool(data, "config_changed", changed) &&
+        /* File facts, distinct from this process's flags. Swarm needs only
+         * packagehost=1; `joined` stays "both flags on THIS process". */
+        json_push_kv_bool(data, "config_package_hosting", true) &&
+        json_push_kv_bool(data, "config_build_worker", compiler != NULL) &&
+        json_push_kv_bool(data, "swarm_member", true) &&
+        json_push_kv_str(
+            data, "swarm_member_means",
+            "swarm_member is the written file (packagehost=1); joined is "
+            "this process's flags, not the file");
     if (!compiler)
         ok = ok && json_push_kv_str(
                        data, "build_worker_note",

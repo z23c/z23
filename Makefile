@@ -3445,6 +3445,17 @@ hotswap-module-so: $(VIEW_GEN_HEADERS) $(HOTSWAP_ACTION_PLAN)
 # row whose TU emits no module symbol, or whose leaf body lives in a TU outside
 # its island, passed every gate and failed the first time a human tried it.
 # This is the gate that can see that. Needs no node and no datadir.
+
+.PHONY: hotswap-symbols
+# make hotswap-symbols [FILE=<module.so>]
+# Will a built module actually MOUNT? Resolves every strong undefined symbol
+# in the SHIPPED artifact against the dev node it would be dlopen'd into.
+# hotswap-verify admits a -z lazy re-link, which cannot catch an unresolvable
+# symbol; the shipped artifact links -z now, where one is a hard dlopen
+# failure. Needs a node: make fast-rebuild.
+hotswap-symbols:
+	@tools/dev/hotswap-symbols.sh $(if $(FILE),$(FILE),--all)
+
 hotswap-verify:
 	@tools/dev/hotswap-verify.sh $(if $(FILE),$(FILE),--all)
 
