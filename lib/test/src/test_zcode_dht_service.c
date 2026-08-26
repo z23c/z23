@@ -1621,13 +1621,8 @@ _test_next:;
   return failures;
 }
 
-/* A terminal-but-unpolled operation is the operation table's slow leak: an
- * owner that began a store, received its result, and then vanished — RPC
- * lease expired, CLI killed — left an entry only owner poll or owner cancel
- * could free. Eight such operations and the ninth begin fails; the slot
- * outlived every purpose the result could still serve. The tick sweeper
- * frees a terminal entry once the RPC lease horizon has passed: later than
- * that, no legitimate owner can still come back for the result. */
+/* Terminal results have one public retention rule regardless of their owner.
+ * This pins its inclusive sweep boundary and the valid monotonic-zero case. */
 static int test_record_operation_terminal_swept(void) {
   int failures = 0;
   TEST("zcode dht service: unpolled terminal operations are swept") {
@@ -1674,23 +1669,64 @@ static int test_record_operation_terminal_swept(void) {
     vcs_zcode_dht_service_status(a, &status);
     ASSERT_EQ(status.active_record_operations, 1u);
 
-    /* Inside the lease horizon the slot still belongs to its owner — a live
-     * owner may legitimately poll this late for the result. */
+    /* The result remains available immediately before its public boundary. */
     vcs_zcode_dht_service_tick(
-        a, test_time(1002 + VCS_ZCODE_DHT_RECORD_OPERATION_SWEEP_S - 1u));
+        a, test_time(1002 +
+                     VCS_ZCODE_DHT_RECORD_OPERATION_RESULT_RETENTION_S - 1u));
     vcs_zcode_dht_service_status(a, &status);
     ASSERT_EQ(status.active_record_operations, 1u);
+    struct vcs_zcode_dht_record_operation_result result;
+    ASSERT(vcs_zcode_dht_service_record_operation_poll(
+        a, operation,
+        test_time(1002 +
+                  VCS_ZCODE_DHT_RECORD_OPERATION_RESULT_RETENTION_S - 1u),
+        &result));
+    ASSERT_EQ(result.state, VCS_ZCODE_DHT_RECORD_OPERATION_COMPLETE);
+    ASSERT_EQ(result.expires_mono,
+              1002u + VCS_ZCODE_DHT_RECORD_OPERATION_RESULT_RETENTION_S);
 
-    /* Past the horizon the entry is provably ownerless. The sweep frees it
-     * and the table takes fresh work again. */
+    /* A rejected operation stamped during monotonic second zero must not be
+     * confused with PENDING. It survives through age retention-1 and is
+     * released at the exact boundary. */
+    struct vcs_zcode_dht_record_selector selector = {
+        .kind = VCS_ZCODE_DHT_RECORD_POINTER};
+    (void)snprintf(selector.namespace_name, sizeof(selector.namespace_name),
+                   "science.zero");
+    memset(selector.root, 0x76, sizeof(selector.root));
+    uint64_t rejected = 0;
+    ASSERT(vcs_zcode_dht_service_record_query_begin(
+        a, 2, &selector,
+        (struct vcs_zcode_dht_time){.wall_unix = 1100, .monotonic_s = 0},
+        &rejected));
+    struct service_query *query = NULL;
+    for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_ACTIVE_QUERIES; i++)
+      if (a->queries[i].used &&
+          a->queries[i].record_operation_id == rejected)
+        query = &a->queries[i];
+    ASSERT(query != NULL);
+    vcs_zcode_dht_service_query_finish(
+        a, query, QUERY_OUTCOME_FAILED,
+        (struct vcs_zcode_dht_time){.wall_unix = 1100, .monotonic_s = 0});
+    struct service_record_operation *rejected_operation =
+        vcs_zcode_dht_records_operation_find(a, rejected);
+    ASSERT(rejected_operation != NULL);
+    ASSERT_EQ(rejected_operation->state,
+              VCS_ZCODE_DHT_RECORD_OPERATION_REJECTED);
+    ASSERT_EQ(rejected_operation->terminal_mono, 0u);
     vcs_zcode_dht_service_tick(
-        a, test_time(1002 + VCS_ZCODE_DHT_RECORD_OPERATION_SWEEP_S));
+        a, (struct vcs_zcode_dht_time){
+               .wall_unix = 1159,
+               .monotonic_s =
+                   VCS_ZCODE_DHT_RECORD_OPERATION_RESULT_RETENTION_S - 1u});
+    vcs_zcode_dht_service_status(a, &status);
+    ASSERT_EQ(status.active_record_operations, 1u);
+    vcs_zcode_dht_service_tick(
+        a, (struct vcs_zcode_dht_time){
+               .wall_unix = 1160,
+               .monotonic_s =
+                   VCS_ZCODE_DHT_RECORD_OPERATION_RESULT_RETENTION_S});
     vcs_zcode_dht_service_status(a, &status);
     ASSERT_EQ(status.active_record_operations, 0u);
-    uint64_t fresh = 0;
-    ASSERT(vcs_zcode_dht_service_record_store_begin(
-        a, 2, &record, test_time(1002 + VCS_ZCODE_DHT_RECORD_OPERATION_SWEEP_S),
-        &fresh));
 
     vcs_zcode_dht_service_free(a, test_time(1100));
     vcs_zcode_dht_service_free(b, test_time(1100));
@@ -2493,7 +2529,7 @@ _test_next:;
  * those release their query slot but hold their operation slot until the
  * owner collects the result. This pins the whole ladder — six stacked
  * completes, two in flight, the ninth refused by the operation table while
- * a query slot is provably still free — and that polling drains it all. */
+ * a query slot is provably still free — and orphan retention recovers it. */
 static int test_record_operation_table_cap(void) {
   int failures = 0;
   TEST("zcode dht service: record operations are capped at eight slots") {
@@ -2577,44 +2613,37 @@ static int test_record_operation_table_cap(void) {
     vcs_zcode_dht_service_status(a, &st);
     ASSERT_EQ(st.active_record_operations, 8u);
 
-    /* Polling a terminal operation is what releases its slot: the six
-     * answered ones poll COMPLETE, the two in-flight ones time out once the
-     * poll's own tick passes their query deadline. */
-    for (size_t i = 0; i < 2 * VCS_ZCODE_DHT_SERVICE_MAX_ACTIVE_QUERIES; i++) {
-      ASSERT(vcs_zcode_dht_service_record_operation_poll(
-          a, ops[i], test_time(1005), &result));
-      ASSERT_EQ(result.state, VCS_ZCODE_DHT_RECORD_OPERATION_COMPLETE);
-    }
+    /* Complete the last two but abandon all eight results. At the newest
+     * result's exact retention boundary, the whole bounded table recovers. */
+    ASSERT(pump(a, b, 2, 1, 1004, NULL, NULL));
+    ASSERT(pump(b, a, 1, 2, 1004, NULL, NULL));
     vcs_zcode_dht_service_status(a, &st);
-    ASSERT_EQ(st.active_record_operations, 2u);
-    for (size_t i = 2 * VCS_ZCODE_DHT_SERVICE_MAX_ACTIVE_QUERIES;
-         i < VCS_ZCODE_DHT_SERVICE_MAX_RECORD_OPERATIONS; i++) {
-      ASSERT(vcs_zcode_dht_service_record_operation_poll(
-          a, ops[i], test_time(1010), &result));
-      ASSERT_EQ(result.state, VCS_ZCODE_DHT_RECORD_OPERATION_TIMEOUT);
-    }
+    ASSERT_EQ(st.active_record_operations, 8u);
+    ASSERT_EQ(st.active_queries, 0u);
+    vcs_zcode_dht_service_tick(
+        a, test_time(1004 +
+                     VCS_ZCODE_DHT_RECORD_OPERATION_RESULT_RETENTION_S));
     vcs_zcode_dht_service_status(a, &st);
     ASSERT_EQ(st.active_record_operations, 0u);
     ASSERT_EQ(st.active_queries, 0u);
 
-    /* The drained table accepts new work end to end again. The two frames
-     * that kept the last operations in flight were never delivered; discard
-     * them so the late replies cannot be mistaken for the fresh exchange. */
-    ASSERT_EQ(drain(a), 2u);
+    /* The recovered table accepts fresh work end to end. */
     memset(selector.root, 0x9a, 32);
     uint64_t fresh = 0;
-    ASSERT(vcs_zcode_dht_service_record_query_begin(a, 2, &selector,
-                                                    test_time(1010), &fresh));
-    ASSERT(pump(a, b, 2, 1, 1010, NULL, NULL));
-    ASSERT(pump(b, a, 1, 2, 1010, NULL, NULL));
+    const uint64_t recovered_at =
+        1004 + VCS_ZCODE_DHT_RECORD_OPERATION_RESULT_RETENTION_S;
+    ASSERT(vcs_zcode_dht_service_record_query_begin(
+        a, 2, &selector, test_time(recovered_at), &fresh));
+    ASSERT(pump(a, b, 2, 1, recovered_at, NULL, NULL));
+    ASSERT(pump(b, a, 1, 2, recovered_at, NULL, NULL));
     ASSERT(vcs_zcode_dht_service_record_operation_poll(
-        a, fresh, test_time(1010), &result));
+        a, fresh, test_time(recovered_at), &result));
     ASSERT_EQ(result.state, VCS_ZCODE_DHT_RECORD_OPERATION_COMPLETE);
     vcs_zcode_dht_service_status(a, &st);
     ASSERT_EQ(st.active_record_operations, 0u);
 
-    vcs_zcode_dht_service_free(a, test_time(1010));
-    vcs_zcode_dht_service_free(b, test_time(1010));
+    vcs_zcode_dht_service_free(a, test_time(recovered_at));
+    vcs_zcode_dht_service_free(b, test_time(recovered_at));
     cleanup_fixture(adir);
     cleanup_fixture(bdir);
     PASS();
