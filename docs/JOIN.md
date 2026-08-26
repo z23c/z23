@@ -190,8 +190,12 @@ z23 status -datadir="$HOME/.zclassic-c23"
 z23 core network onion health -datadir="$HOME/.zclassic-c23"
 ```
 
-`joined` in the reply is a **configuration** fact — both flags are set — not a
-reachability verdict. Read the tuple for that.
+`joined` in the reply is a **this-process** fact — both flags are set on
+the CLI that just ran — not a reachability verdict and not the file just
+written. `swarm_member` is the **file** fact: `packagehost=1` is in
+`z23.conf`, which is the swarm tier. A first `z23 join` therefore reports
+`swarm_member=true` and often `joined=false`; that is success, not a failed
+join. Read the tuple for reachability.
 
 ### Keeping the node current
 

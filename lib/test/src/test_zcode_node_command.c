@@ -302,6 +302,21 @@ static int t_join_writes_config(void)
               compiler_present);
     ZNJ_CHECK("join writes buildworker=1 rather than a false empty-TU 0",
               znt_has_line(text, "buildworker=1"));
+    /* The file is the swarm-tier fact. `joined` stays this process's flags
+     * and must not be inverted just because the write succeeded. */
+    ZNJ_CHECK("swarm_member is true once packagehost=1 is written",
+              json_get_bool(json_get(&c.reply.data, "swarm_member")));
+    ZNJ_CHECK("config_package_hosting reflects the written file",
+              json_get_bool(json_get(&c.reply.data,
+                                     "config_package_hosting")));
+    ZNJ_CHECK("config_build_worker agrees with the compiler probe",
+              json_get_bool(json_get(&c.reply.data, "config_build_worker"))
+                  == compiler_present);
+    ZNJ_CHECK("joined stays this process's flags, not the file just written",
+              json_get_str(json_get(&c.reply.data, "swarm_member_means"))
+                  && strstr(json_get_str(json_get(&c.reply.data,
+                                                  "swarm_member_means")),
+                            "this process") != NULL);
     {
         static const char probe_prefix[] = ".z23-join-c23-probe.";
         bool probe_left = false;
