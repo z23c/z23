@@ -103,6 +103,23 @@ bool onion_directory_name_for(const char *datadir, const char *onion,
 bool onion_directory_name_for_db(struct sqlite3 *db, const char *onion,
                                  char *out, size_t out_len);
 
+/* ── This node's own chain height, as a SUPPLIER answers it ─────────
+ *
+ * The highest CONNECTED block (status >= BLOCK_VALID_TRANSACTIONS) in
+ * `db`. Headers held but not connected are not a height anyone can be
+ * served from, so they do not count — which is also why this is not the
+ * same number as an unfiltered MAX(height) over the blocks table.
+ *
+ * Returns -1 for UNKNOWN: no blocks table, a failed read, or no connected
+ * block. -1 is never a height, so the caller can tell "we do not know"
+ * from "genesis". ONE answer to this question for every page and document
+ * the onion serves — a second one would drift, and two heights on one
+ * node is exactly the difference a reader cannot resolve.
+ *
+ * Takes an already-open handle: the callers are renderers and the
+ * directory refresh round, all of which already hold one. */
+int onion_directory_chain_height_db(struct sqlite3 *db);
+
 /* ── the rich endpoint, alongside the narrow peer ───────────────────
  *
  * `struct onion_peer` is a hostname and a height: no port, no

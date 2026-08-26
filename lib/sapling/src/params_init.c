@@ -102,6 +102,10 @@ static struct groth16_vk spend_vk;
 static struct groth16_vk output_vk;
 static struct groth16_vk sprout_groth16_vk;
 static _Atomic bool params_loaded = false;
+/* True when the running key set came from the compiled-in blobs rather than
+ * a parameter directory. Declared here, beside params_loaded, because
+ * sapling_free_params() clears both. */
+static _Atomic bool vks_embedded = false;
 
 static uint8_t *spend_pk_data = NULL;
 static size_t spend_pk_len = 0;
@@ -118,6 +122,58 @@ static uint8_t *read_file(const char *path, size_t *len)
         LOG_NULL("sapling_params", "read_file: %s is empty", path);
     *len = n;
     return buf;
+}
+
+/* ── The publish/free invariant ──────────────────────────────────────────
+ *
+ * INVARIANT: a verifying key is visible to the verifiers — sapling_spend_vk,
+ * sapling_output_vk (sapling.c), sprout_vk (sprout.c), phgr_vk (bn254.c) —
+ * only while its storage is fully built and no later step can free it.
+ *
+ * Two rules enforce it, and BOTH are required:
+ *
+ *   PUBLISH LAST     params_publish_groth16_vks() runs only after the last
+ *                    step that can fail. No failure path can therefore leave
+ *                    a pointer published.
+ *   UNPUBLISH FIRST  params_release_groth16_vks() clears the globals BEFORE
+ *                    it frees anything, and NULLs every freed field, so a
+ *                    teardown never leaves a published pointer aimed at freed
+ *                    storage — not even for an instant.
+ *
+ * This is load-bearing, not hygiene. The fail-closed guards in
+ * sapling_check_spend / sapling_check_output / sprout_verify_groth16 all read
+ * "a NULL VK means the keys are not ready, so reject". That reading is only
+ * true while every failure path actually produces NULL. Publishing at the top
+ * of the Sprout PHGR13 section and freeing at the bottom of it — which is what
+ * this file used to do — made the guards blind to a struct whose ic[] and comb
+ * tables had already been freed: non-NULL, so the guard passed, and
+ * groth16_verify then read freed heap. Keep the publish below every fallible
+ * step. */
+static void params_publish_groth16_vks(void)
+{
+    sapling_set_spend_vk(&spend_vk);
+    sapling_set_output_vk(&output_vk);
+    sprout_set_vk(&sprout_groth16_vk);
+}
+
+static void params_release_groth16_vks(void)
+{
+    /* Unpublish first: after these three stores no verifier can be inside
+     * groth16_verify with one of these pointers on a path it entered after
+     * the store, and the guards reject rather than dereference. */
+    sapling_set_spend_vk(NULL);
+    sapling_set_output_vk(NULL);
+    sprout_set_vk(NULL);
+
+    groth16_vk_free_combs(&spend_vk);
+    groth16_vk_free_combs(&output_vk);
+    groth16_vk_free_combs(&sprout_groth16_vk);
+    free(spend_vk.ic);
+    free(output_vk.ic);
+    free(sprout_groth16_vk.ic);
+    memset(&spend_vk, 0, sizeof(spend_vk));
+    memset(&output_vk, 0, sizeof(output_vk));
+    memset(&sprout_groth16_vk, 0, sizeof(sprout_groth16_vk));
 }
 
 bool sapling_init_params(const char *params_dir)
@@ -146,17 +202,17 @@ bool sapling_init_params(const char *params_dir)
     snprintf(path, sizeof(path), "%s/sapling-output.params", params_dir);
     data = read_file(path, &len);
     if (!data) {
-        free(spend_vk.ic);
+        params_release_groth16_vks();
         LOG_FAIL("sapling_params", "init: read_file failed for sapling-output.params");
     }
     if (!params_sha512_matches(data, len, SAPLING_OUTPUT_PARAMS_SHA512, path)) {
-        free(data); free(spend_vk.ic);
+        free(data); params_release_groth16_vks();
         LOG_FAIL("sapling_params", "init: SHA-512 mismatch on sapling-output.params");
     }
     ok = groth16_vk_read(&output_vk, data, len);
     free(data);
     if (!ok) {
-        free(spend_vk.ic);
+        params_release_groth16_vks();
         LOG_FAIL("sapling_params", "init: groth16_vk_read failed for output VK");
     }
 
@@ -164,17 +220,17 @@ bool sapling_init_params(const char *params_dir)
     snprintf(path, sizeof(path), "%s/sprout-groth16.params", params_dir);
     data = read_file(path, &len);
     if (!data) {
-        free(spend_vk.ic); free(output_vk.ic);
+        params_release_groth16_vks();
         LOG_FAIL("sapling_params", "init: read_file failed for sprout-groth16.params");
     }
     if (!params_sha512_matches(data, len, SPROUT_GROTH16_PARAMS_SHA512, path)) {
-        free(data); free(spend_vk.ic); free(output_vk.ic);
+        free(data); params_release_groth16_vks();
         LOG_FAIL("sapling_params", "init: SHA-512 mismatch on sprout-groth16.params");
     }
     ok = groth16_vk_read(&sprout_groth16_vk, data, len);
     free(data);
     if (!ok) {
-        free(spend_vk.ic); free(output_vk.ic);
+        params_release_groth16_vks();
         LOG_FAIL("sapling_params", "init: groth16_vk_read failed for sprout-groth16 VK");
     }
 
@@ -194,18 +250,18 @@ bool sapling_init_params(const char *params_dir)
         LOG_WARN("sapling_params",
                  "sprout-groth16 VK IC precompute unavailable; using naive scalar-mul");
 
-    sapling_set_spend_vk(&spend_vk);
-    sapling_set_output_vk(&output_vk);
-    sprout_set_vk(&sprout_groth16_vk);
+    /* NOT published here. The Sprout PHGR13 section below can still fail, and
+     * its mainnet failure path frees these three structs — see the
+     * publish/free invariant above. Publication happens after it. */
 
     /* Sprout PHGR13 VK (pre-Sapling proofs, blocks 0-581876) */
+    static struct ppzksnark_vk phgr_vk;
+    bool phgr_ok = false;
     {
-        static struct ppzksnark_vk phgr_vk;
         char phgr_path[1024];
         snprintf(phgr_path, sizeof(phgr_path),
                  "%s/sprout-verifying.key", params_dir);
         uint8_t *phgr_data = read_file(phgr_path, &len);
-        bool phgr_ok = false;
         if (phgr_data &&
             !params_sha512_matches(phgr_data, len,
                                    SPROUT_VERIFYING_KEY_SHA512, phgr_path)) {
@@ -216,8 +272,9 @@ bool sapling_init_params(const char *params_dir)
             phgr_data = NULL;
         }
         if (phgr_data) {
+            /* Parsed, not published: publication is deferred to the single
+             * publish point below, with the three Groth16 VKs. */
             if (ppzksnark_vk_read(&phgr_vk, phgr_data, len)) {
-                sprout_phgr_set_vk(&phgr_vk);
                 LOG_INFO("sapling_params",
                          "Loaded Sprout PHGR13 verification key: %zu bytes "
                          "(%zu IC points)", len, phgr_vk.ic_len);
@@ -243,11 +300,11 @@ bool sapling_init_params(const char *params_dir)
         if (!phgr_ok) {
             const struct chain_params *cp = chain_params_get();
             if (cp && strcmp(cp->strNetworkID, "main") == 0) {
-                groth16_vk_free_combs(&spend_vk);
-                groth16_vk_free_combs(&output_vk);
-                groth16_vk_free_combs(&sprout_groth16_vk);
-                free(spend_vk.ic); free(output_vk.ic);
-                free(sprout_groth16_vk.ic);
+                /* Nothing is published yet, so this only frees. The release
+                 * helper still clears the globals first and NULLs every field
+                 * it frees, so the invariant holds by construction rather than
+                 * by this call site happening to sit above the publish. */
+                params_release_groth16_vks();
                 LOG_FAIL("sapling_params",
                          "FATAL: Sprout PHGR13 verification key failed to load.\n"
                          "Mainnet requires this key to validate pre-Sapling blocks.\n"
@@ -258,6 +315,16 @@ bool sapling_init_params(const char *params_dir)
                      "WARNING: PHGR13 VK not loaded (non-mainnet, continuing)");
         }
     }
+
+    /* ── The single publish point ────────────────────────────────────────
+     * Every fallible step is above this line, so from here on nothing can
+     * free what is about to become visible to the verifiers. Everything
+     * below (proving-key reads, the prover self-test) is best-effort and
+     * cannot fail the function. The prover self-test verifies through
+     * sapling_check_spend/_output, so it must run after this. */
+    params_publish_groth16_vks();
+    if (phgr_ok)
+        sprout_phgr_set_vk(&phgr_vk);
 
     /* Keep raw PK data for proving (VK is a subset of PK data) */
     snprintf(path, sizeof(path), "%s/sapling-spend.params", params_dir);
@@ -326,22 +393,17 @@ const uint8_t *sapling_get_spend_pk(size_t *len)
 void sapling_free_params(void)
 {
     if (!atomic_load(&params_loaded)) return;
-    groth16_vk_free_combs(&spend_vk);
-    groth16_vk_free_combs(&output_vk);
-    groth16_vk_free_combs(&sprout_groth16_vk);
-    free(spend_vk.ic);
-    free(output_vk.ic);
-    free(sprout_groth16_vk.ic);
+    /* Unpublish-then-free, in that order: this used to free the ic[] arrays
+     * and comb tables and only then clear the globals, which is the same
+     * published-pointer-to-freed-storage window the loader used to leave
+     * behind. params_release_groth16_vks() does both halves in the safe
+     * order. */
+    params_release_groth16_vks();
     free(spend_pk_data);
     free(output_pk_data);
-    memset(&spend_vk, 0, sizeof(spend_vk));
-    memset(&output_vk, 0, sizeof(output_vk));
-    memset(&sprout_groth16_vk, 0, sizeof(sprout_groth16_vk));
     spend_pk_data = NULL; spend_pk_len = 0;
     output_pk_data = NULL; output_pk_len = 0;
-    sapling_set_spend_vk(NULL);
-    sapling_set_output_vk(NULL);
-    sprout_set_vk(NULL);
+    atomic_store(&vks_embedded, false);
     atomic_store(&params_loaded, false);
 }
 
@@ -359,8 +421,6 @@ void sapling_free_params(void)
  * point that would build a shielded output refuses on
  * zclassic_sapling_prover_is_ready(). Validation is whole; proving is absent
  * and says so. */
-
-static _Atomic bool vks_embedded = false;
 
 /* Hash one embedded blob and compare against its pinned digest. A build whose
  * key material has been patched must fail here, before the bytes are parsed
@@ -415,14 +475,16 @@ bool sapling_install_embedded_vks(void)
     }
 
     if (!groth16_vk_read(&spend_vk, zcl_embedded_vks[0].bytes,
-                         zcl_embedded_vks[0].len))
+                         zcl_embedded_vks[0].len)) {
+        params_release_groth16_vks();
         LOG_FAIL("sapling_params",
                  "embedded spend VK failed to parse (%zu bytes)",
                  zcl_embedded_vks[0].len);
+    }
 
     if (!groth16_vk_read(&output_vk, zcl_embedded_vks[1].bytes,
                          zcl_embedded_vks[1].len)) {
-        free(spend_vk.ic); spend_vk.ic = NULL;
+        params_release_groth16_vks();
         LOG_FAIL("sapling_params",
                  "embedded output VK failed to parse (%zu bytes)",
                  zcl_embedded_vks[1].len);
@@ -430,8 +492,7 @@ bool sapling_install_embedded_vks(void)
 
     if (!groth16_vk_read(&sprout_groth16_vk, zcl_embedded_vks[2].bytes,
                          zcl_embedded_vks[2].len)) {
-        free(spend_vk.ic); spend_vk.ic = NULL;
-        free(output_vk.ic); output_vk.ic = NULL;
+        params_release_groth16_vks();
         LOG_FAIL("sapling_params",
                  "embedded sprout-groth16 VK failed to parse (%zu bytes)",
                  zcl_embedded_vks[2].len);
@@ -440,9 +501,7 @@ bool sapling_install_embedded_vks(void)
     static struct ppzksnark_vk phgr_vk;
     if (!ppzksnark_vk_read(&phgr_vk, zcl_embedded_vks[3].bytes,
                            zcl_embedded_vks[3].len)) {
-        free(spend_vk.ic); spend_vk.ic = NULL;
-        free(output_vk.ic); output_vk.ic = NULL;
-        free(sprout_groth16_vk.ic); sprout_groth16_vk.ic = NULL;
+        params_release_groth16_vks();
         LOG_FAIL("sapling_params",
                  "embedded Sprout PHGR13 VK failed to parse (%zu bytes) — "
                  "pre-Sapling blocks could not be validated",
@@ -462,9 +521,8 @@ bool sapling_install_embedded_vks(void)
         LOG_WARN("sapling_params",
                  "sprout-groth16 VK IC precompute unavailable; using naive scalar-mul");
 
-    sapling_set_spend_vk(&spend_vk);
-    sapling_set_output_vk(&output_vk);
-    sprout_set_vk(&sprout_groth16_vk);
+    /* Publish last: every fallible step is above. */
+    params_publish_groth16_vks();
     sprout_phgr_set_vk(&phgr_vk);
 
     atomic_store(&vks_embedded, true);

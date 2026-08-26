@@ -3,7 +3,7 @@
 #
 # Two-builder reproducible-build gate for the zclassic23 node binary.
 #
-# Builds build/bin/zclassic23 TWICE from the current working tree, in two
+# Builds build/bin/z23 TWICE from the current working tree, in two
 # isolated build directories whose absolute paths differ in both value AND
 # length (to expose any embedded absolute-path or padding nondeterminism), then
 # SHA3-256- and byte-compares the two shipped (stripped) binaries.
@@ -134,13 +134,18 @@ build_one "$A" "$BASE/build-a.log"
 echo "repro-verify: building B ..."
 build_one "$B" "$BASE/build-b.log"
 
-BA="$A/build/bin/zclassic23"
-BB="$B/build/bin/zclassic23"
+# build/bin/zclassic23 is a SYMLINK to the real artifact, build/bin/z23 (a
+# migration alias, see the Makefile). cmp and openssl follow it, so the
+# verdict was always about the real bytes — but `stat -c%s` does not, and this
+# gate spent its life printing "size=3", the length of the string "z23".
+# Compare the real file by name and dereference for the reported size.
+BA="$A/build/bin/z23"
+BB="$B/build/bin/z23"
 [ -f "$BA" ] && [ -f "$BB" ] || { echo "repro-verify: FAIL — a node binary is missing" >&2; exit 1; }
 
 HA="$(openssl dgst -sha3-256 "$BA" | awk '{print $NF}')"
 HB="$(openssl dgst -sha3-256 "$BB" | awk '{print $NF}')"
-SA="$(stat -c%s "$BA")"; SB="$(stat -c%s "$BB")"
+SA="$(stat -Lc%s "$BA")"; SB="$(stat -Lc%s "$BB")"
 
 echo "repro-verify: A  sha3-256=$HA  size=$SA"
 echo "repro-verify: B  sha3-256=$HB  size=$SB"
@@ -164,7 +169,7 @@ if cmp -s "$BA" "$BB"; then
         }
     fi
     echo "repro-verify: github_contacted=false"
-    echo "repro-verify: PASS — build/bin/zclassic23 is byte-identical across two builders (sha3-256=$HA)"
+    echo "repro-verify: PASS — build/bin/z23 is byte-identical across two builders (sha3-256=$HA)"
     exit 0
 fi
 

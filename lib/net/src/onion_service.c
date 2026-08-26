@@ -188,14 +188,16 @@ static void query_node_stats(int *out_height, int *out_peers)
     /* 5s timeout — allows reads even during heavy block sync */
     sqlite3_busy_timeout(db, 5000);
 
+    /* ONE answer to "how high is this node" for every page and document
+     * this onion serves (onion_directory_chain_height_db). This used to
+     * be its own unfiltered `SELECT MAX(height) FROM blocks`, which
+     * counts headers we hold but have not connected — so the landing page
+     * and /status.json reported a height the node cannot actually serve
+     * anyone from, and a second, looser answer than the directory's. */
+    int connected = onion_directory_chain_height_db(db);
+    *out_height = connected > 0 ? connected : 0;
+
     sqlite3_stmt *s = NULL;
-    if (sqlite3_prepare_v2(db,
-            "SELECT MAX(height) FROM blocks", -1, &s, NULL) == SQLITE_OK && s) {
-        if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW)
-            *out_height = sqlite3_column_int(s, 0);
-        sqlite3_finalize(s);
-    }
-    s = NULL;
     if (sqlite3_prepare_v2(db,
             "SELECT COUNT(*) FROM peers WHERE last_seen > strftime('%s','now') - 3600",
             -1, &s, NULL) == SQLITE_OK && s) {
@@ -691,16 +693,41 @@ static size_t serve_directory_json(uint8_t *response, size_t max)
         }
         (void)snprintf(apps_json + aj, sizeof(apps_json) - aj, "]");
 
+        /* HONEST ABSENCE, not a plausible-looking default. `port` is the
+         * P2P virtual port a reader would DIAL this onion on (never the
+         * HTTP virtual port 80 this document is served over, and never
+         * the chain's nDefaultPort); `height` is the highest CONNECTED
+         * block. Where the node does not know one, it emits JSON null —
+         * the KEY stays, in place, so column order and every existing
+         * string-scanning consumer are untouched, and the value cannot be
+         * mistaken for a measurement. Our own learner degrades correctly
+         * on it: odir_json_int() returns its default for any value that
+         * does not start a number, so null reads back as 0 = unknown and
+         * nothing re-launders it into a fact.
+         *
+         * Height 0 reads as unknown too. A node at genesis is no one's
+         * supplier, and every row an older binary wrote stored "unknown"
+         * as 0 — publishing those as a confident zero is the defect. */
+        char port_json[16], height_json[24];
+        if (port > 0 && port <= 65535)
+            snprintf(port_json, sizeof(port_json), "%d", port);
+        else
+            snprintf(port_json, sizeof(port_json), "null");
+        if (h > 0)
+            snprintf(height_json, sizeof(height_json), "%d", h);
+        else
+            snprintf(height_json, sizeof(height_json), "null");
+
         if (count > 0) off += (size_t)snprintf(body + off, sizeof(body) - off, ",");
         off += (size_t)snprintf(body + off, sizeof(body) - off,
-            "{\"onion\":\"%s\",\"name\":\"%s\",%s,\"port\":%d,\"services\":%d,"
-            "\"height\":%d,\"last_seen\":%lld,\"version\":\"%s\",\"self\":%s,"
+            "{\"onion\":\"%s\",\"name\":\"%s\",%s,\"port\":%s,\"services\":%d,"
+            "\"height\":%s,\"last_seen\":%lld,\"version\":\"%s\",\"self\":%s,"
             "\"clearnet_ip\":\"%s\",\"clearnet_port\":%d,"
             "\"age_secs\":%lld,\"stale\":%s,\"first_seen\":%lld,"
             "\"last_probe\":%lld,\"probe_ok\":%s,\"fail_count\":%d,"
             "\"last_success\":%lld,\"dial_success_count\":%lld,"
             "\"source\":\"%s\"}",
-            addr_esc, name_esc, apps_json, port, svc, h,
+            addr_esc, name_esc, apps_json, port_json, svc, height_json,
             (long long)ls, ver_esc,
             self ? "true" : "false",
             cip_esc, cport,
@@ -849,19 +876,32 @@ static size_t serve_directory_html(uint8_t *response, size_t max)
                      (long long)(sage / 3600), (long long)ok_n);
         }
 
+        /* One page must never show what the other refuses to serve: the
+         * same unknown that /directory.json emits as null is printed here
+         * as an em dash, never as a number. */
+        char port_str[16], height_str[24];
+        if (port > 0 && port <= 65535)
+            snprintf(port_str, sizeof(port_str), "%d", port);
+        else
+            snprintf(port_str, sizeof(port_str), "&mdash;");
+        if (h > 0)
+            snprintf(height_str, sizeof(height_str), "%d", h);
+        else
+            snprintf(height_str, sizeof(height_str), "&mdash;");
+
         /* The name is a LABEL for the address, never a substitute: the raw
          * .onion a visitor would actually connect to is always printed
          * beneath it, and it is what the link resolves to. */
         off += (size_t)snprintf(body + off, sizeof(body) - off,
             "<tr%s><td><a href='http://%s/'>%s</a>%s"
             "<div class='desc'>%s</div></td>"
-            "<td>%d</td><td>%d</td><td>%s%s</td><td>%s</td><td>%s</td></tr>",
+            "<td>%s</td><td>%s</td><td>%s%s</td><td>%s</td><td>%s</td></tr>",
             self ? " class='self'" : "",
             addr_esc,
             name[0] ? name_esc : addr_esc,
             self ? " (this node)" : "",
             addr_esc,
-            port, h, age_str,
+            port_str, height_str, age_str,
             fresh == ONION_DIR_STALE ? " (stale)" : "",
             reach_str, ver_esc);
         count++;

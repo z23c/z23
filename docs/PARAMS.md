@@ -89,6 +89,36 @@ shielded funds.
 Regtest and testnet never enforced the old params gate and still do not;
 none of the above is new for those networks.
 
+## If the parameter files are present but corrupt
+
+A file that is there but wrong is a different situation from a file that is
+absent, and the node reports it as one.
+
+Each of the four files has a pinned SHA-512 checked before any of its bytes
+are parsed. If a file fails that check — a truncated or interrupted download,
+disk damage, tampering — the node **refuses the whole directory**. No byte of
+a file that failed its pin is ever parsed or installed, on any network,
+including the one file that had no pin until recently.
+
+Refusing the directory does not stop the node. Verifying keys are compiled
+in, so validation runs from those instead and the node syncs, validates and
+serves exactly as before. What the corrupt file was carrying that the binary
+does not is the proving key, so the node reports the same single capability
+blocker a node with no parameter directory reports,
+`shielded_spend_unavailable` under `crypto.params` — with a reason that says
+the parameters were REFUSED rather than missing, so you know to re-fetch
+rather than to install for the first time. Re-run
+`tools/scripts/zcash_params.sh verify` to see which file failed.
+
+A corrupt parameter file therefore costs you the ability to *send* shielded
+funds until you re-fetch it, and nothing else. It is not a reason for a node
+to stop validating the chain.
+
+The one condition that does stop the node is the compiled-in verifying keys
+failing *their* SHA-256 check. That means the binary itself cannot verify
+shielded proofs, and a node that cannot do that must not pretend to validate;
+it names `params_missing` and parks alive-degraded.
+
 ## Installing the proving parameters (if you want to send shielded)
 
 Use `tools/scripts/zcash_params.sh`. It has two subcommands you need:

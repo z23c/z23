@@ -564,6 +564,36 @@ DEV_SOURCE_RECEIPT_CPPFLAGS = -DZCL_BUILD_SOURCE_MUTATION=\"$(BUILD_MUTATION)\"
 ZCL_REPRO_ROOT ?= /zclassic23
 REPRO_CFLAGS = -ffile-prefix-map=$(CURDIR)=$(ZCL_REPRO_ROOT) -gno-record-gcc-switches
 
+# ── Per-TU random seed (object-level determinism) ─────────────────────────
+# GCC derives its default random seed from the OUTPUT file name. Every object
+# in this tree is compiled into a fresh mktemp staging directory and published
+# atomically (tools/dev/compile-epoch-object.sh), so that name — and therefore
+# the seed — was different on every single compile. Under -flto the seed
+# becomes the `.gnu.lto_*.<suffix>` section-name suffix, which made the
+# release-profile objects non-reproducible even TWICE IN THE SAME DIRECTORY.
+#
+# MEASURED on cc (Ubuntu 14.2.0-4ubuntu2~24.04.1), 31 representative node TUs
+# at the shipped release flags, compiled twice in ONE directory:
+#   default seed : 31/31 objects differed (238-1999 differing bytes each; the
+#                  object SIZE moved too, because GCC trims leading zeros from
+#                  the suffix, so the section-name strings change length)
+#   pinned seed  : 0/31 differed
+#
+# The seed is the RELATIVE source path: unique per translation unit (what GCC
+# asks for) and identical on every builder (what reproducibility asks for).
+# It changes no code generation — only symbol/section naming.
+#
+# What this does NOT fix, and what GCC 14 has no flag for: an -flto object is
+# still not byte-identical ACROSS two build directories. The streamed
+# .gnu.lto_* IR embeds absolute source/header paths that -ffile-prefix-map
+# does not reach. Measured with the seed pinned: two build roots of EQUAL
+# path length still produced 6649 differing bytes in one 16 KB object, while
+# the same TU compiled -fno-lto came out byte-identical. The SHIPPED artifact
+# is unaffected — that IR is consumed at link time and never reaches the
+# output — and `make repro-build` proves exactly that.
+# check-tu-random-seed keeps every per-TU object recipe carrying this.
+ZCL_TU_RANDOM_SEED = -frandom-seed=$<
+
 # ── The two blanket warning suppressions, each defined exactly ONCE ───────
 # Both arrived in the first commit as unexplained copy-forward defaults and
 # had since been copy-pasted into seven separate compile rules, so there was
@@ -1468,6 +1498,7 @@ $(filter-out vendor/lib/libsecp256k1.a,$(VENDOR_LIBS)):
         check-silent-errors-jobs check-silent-errors-conditions check-silent-errors-bool \
         check-log-macro-return-type \
         check-wallet-raw-prepare-log check-blob-read-bounds \
+        check-outparam-init-before-return \
         check-before-save-hooks check-pthread-create check-model-validation \
         check-long-functions check-rpc-registrar check-lag-slo-observable \
         check-file-size-ceiling check-framework-filename-suffix \
@@ -1478,6 +1509,7 @@ $(filter-out vendor/lib/libsecp256k1.a,$(VENDOR_LIBS)):
         check-ship-remote-transaction \
         check-z23-release-install \
         check-identity-parser-single \
+        check-source-identity-authority \
         check-status-reason-single \
         check-operator-needed-sink check-systemd-memory-budget check-doc-accuracy check-doc-counts check-doc-claims check-no-stale-pinned-facts check-markdown-links check-doc-inline-paths \
         check-api-reference-generated check-describe-budget \
@@ -6258,6 +6290,17 @@ mvp: test_zcl zclassic23 zcl-rpc
 # anywhere. Both loops point it at the per-target /tmp work dir they already
 # create and delete.
 FUZZ_CC ?= clang
+# ZCL_FUZZ_EXTRA_CFLAGS is a deliberate hook, not dead weight: it is how
+# tools/scripts/promote_fuzz_artifacts.sh and tools/lint/check_fuzz_artifact_
+# replay.sh build the pattern-init variant of a harness (-ftrivial-auto-var-
+# init=pattern) without forking FUZZ_CFLAGS or the link rules below. Combined
+# with `make BUILD_DIR=build/fuzz-patterninit ZCL_FUZZ_EXTRA_CFLAGS=-ftrivial-
+# auto-var-init=pattern fuzz_<kind>` this produces a fully isolated object
+# tree and binary (BIN_DIR and FUZZ_OBJ_DIR both derive from BUILD_DIR), so a
+# pattern-init rebuild can never silently overwrite the plain-stock objects
+# that `make fuzz-ci` / `make fuzz-replay` rely on. Empty by default: a plain
+# `make fuzz` is unaffected.
+ZCL_FUZZ_EXTRA_CFLAGS ?=
 FUZZ_CFLAGS = -std=c23 -O1 -g -Wall -Wextra \
 	-Wno-deprecated-declarations \
 	$(APP_INCLUDES) $(CONFIG_INCLUDES) $(LIB_INCLUDES) $(CORE_INCLUDES) \
@@ -6267,7 +6310,7 @@ FUZZ_CFLAGS = -std=c23 -O1 -g -Wall -Wextra \
 	-D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE \
 	-DZCL_FUZZ_QUIET_LOG_MACROS -Ivendor/include \
 	-fsanitize=fuzzer,address,undefined \
-	-fno-sanitize=alignment
+	-fno-sanitize=alignment $(ZCL_FUZZ_EXTRA_CFLAGS)
 FUZZ_LIBS = $(TOR_LIBS) $(LIBS)
 
 FUZZ_TARGETS = $(BIN_DIR)/fuzz_block $(BIN_DIR)/fuzz_script $(BIN_DIR)/fuzz_p2p $(BIN_DIR)/fuzz_http $(BIN_DIR)/fuzz_compactblock $(BIN_DIR)/fuzz_snapshot $(BIN_DIR)/fuzz_tx_bundle $(BIN_DIR)/fuzz_rom_manifest $(BIN_DIR)/fuzz_overlay $(BIN_DIR)/fuzz_ecdsa $(BIN_DIR)/fuzz_zcode_commons $(BIN_DIR)/fuzz_zcode_dht $(BIN_DIR)/fuzz_zcode_science
@@ -6672,7 +6715,7 @@ $(OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) | $(BUILD_ONL
 	@$(BUILD_EPOCH_OBJECT_TOOL) dep "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
 	  "$(BUILD_ONLY_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(BUILD_ONLY_SESSION)" -- \
-	  $(CC) $(BUILD_ONLY_OBJECT_CFLAGS)
+	  $(CC) $(BUILD_ONLY_OBJECT_CFLAGS) $(ZCL_TU_RANDOM_SEED)
 
 # The one TU that bakes display + source identity — see the stamp above.
 $(OBJ_DIR)/lib/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
@@ -6691,7 +6734,7 @@ $(NODE_C23_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) | $(
 	@$(BUILD_EPOCH_OBJECT_TOOL) dep "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
 	  "$(NODE_C23_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(NODE_C23_SESSION)" -- \
-	  $(CC) $(NODE_C23_OBJECT_CFLAGS)
+	  $(CC) $(NODE_C23_OBJECT_CFLAGS) $(ZCL_TU_RANDOM_SEED)
 
 $(NODE_C23_LINK_RSP): $(NODE_C23_OBJS)
 	@$(if $(ZCL_MAKE_NO_EXEC),,$(file >$@,$(NODE_C23_OBJS))) test -s "$@"
@@ -6715,7 +6758,7 @@ $(DEV_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) $(BUILD_E
 	@$(BUILD_EPOCH_OBJECT_TOOL) dep "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
 	  "$(DEV_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(DEV_SESSION)" -- \
-	  $(CC) $(DEV_COMPILE_CFLAGS)
+	  $(CC) $(DEV_COMPILE_CFLAGS) $(ZCL_TU_RANDOM_SEED)
 
 # The dev object tree also needs the identity TU refreshed when its stamp changes.
 $(DEV_OBJ_DIR)/lib/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
@@ -6754,7 +6797,7 @@ $(TEST_FAST_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) | $
 	@$(BUILD_EPOCH_OBJECT_TOOL) dep "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
 	  "$(TEST_FAST_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(TEST_FAST_SESSION)" -- \
-	  $(CC) $(TEST_FAST_OBJECT_CFLAGS)
+	  $(CC) $(TEST_FAST_OBJECT_CFLAGS) $(ZCL_TU_RANDOM_SEED)
 
 # The fast test harness has its own object tree and identity stamp.
 $(TEST_FAST_OBJ_DIR)/lib/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
@@ -6770,7 +6813,7 @@ $(TEST_REL_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) | $(
 	@$(BUILD_EPOCH_OBJECT_TOOL) dep "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
 	  "$(TEST_REL_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(TEST_REL_SESSION)" -- \
-	  $(CC) $(TEST_REL_OBJECT_CFLAGS)
+	  $(CC) $(TEST_REL_OBJECT_CFLAGS) $(ZCL_TU_RANDOM_SEED)
 
 # The strict test tree also needs the identity TU refreshed with its stamp.
 $(TEST_REL_OBJ_DIR)/lib/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
@@ -6791,7 +6834,7 @@ $(TEST_ASAN_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) | $
 	@$(BUILD_EPOCH_OBJECT_TOOL) dep "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
 	  "$(TEST_ASAN_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(TEST_ASAN_SESSION)" -- \
-	  $(CC) $(TEST_ASAN_OBJECT_CFLAGS)
+	  $(CC) $(TEST_ASAN_OBJECT_CFLAGS) $(ZCL_TU_RANDOM_SEED)
 
 # The asan test tree also needs the identity TU refreshed with its stamp.
 $(TEST_ASAN_OBJ_DIR)/lib/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
@@ -6806,7 +6849,7 @@ $(DEV_ASAN_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) | $(
 	@$(BUILD_EPOCH_OBJECT_TOOL) dep "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
 	  "$(DEV_ASAN_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(DEV_ASAN_SESSION)" -- \
-	  $(CC) $(DEV_ASAN_OBJECT_CFLAGS)
+	  $(CC) $(DEV_ASAN_OBJECT_CFLAGS) $(ZCL_TU_RANDOM_SEED)
 
 # The dev-asan tree also needs the identity TU refreshed with its stamp.
 $(DEV_ASAN_OBJ_DIR)/lib/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
@@ -6820,7 +6863,7 @@ $(TEST_TSAN_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) | $
 	@$(BUILD_EPOCH_OBJECT_TOOL) dep "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
 	  "$(TEST_TSAN_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(TEST_TSAN_SESSION)" -- \
-	  $(CC) $(TEST_TSAN_OBJECT_CFLAGS)
+	  $(CC) $(TEST_TSAN_OBJECT_CFLAGS) $(ZCL_TU_RANDOM_SEED)
 
 # The tsan test tree also needs the identity TU refreshed with its stamp.
 $(TEST_TSAN_OBJ_DIR)/lib/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
@@ -6833,7 +6876,7 @@ $(DEV_TSAN_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) | $(
 	@$(BUILD_EPOCH_OBJECT_TOOL) dep "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
 	  "$(DEV_TSAN_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(DEV_TSAN_SESSION)" -- \
-	  $(CC) $(DEV_TSAN_OBJECT_CFLAGS)
+	  $(CC) $(DEV_TSAN_OBJECT_CFLAGS) $(ZCL_TU_RANDOM_SEED)
 
 # The dev-tsan tree also needs the identity TU refreshed with its stamp.
 $(DEV_TSAN_OBJ_DIR)/lib/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
@@ -6939,6 +6982,7 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	@# one candidate, prove its baked source identity against the outer record,
 	@# install those exact bytes, and pass that same artifact hash to the verifier.
 	@set -eu; \
+	. tools/scripts/source_identity_lib.sh; \
 	command -v timeout >/dev/null 2>&1 || { \
 	    echo "deploy: timeout is required for candidate preflight" >&2; exit 1; }; \
 	candidate="$$(mktemp "$(dir $(ZCLASSIC23_BIN)).zclassic23.deploy.XXXXXX")"; \
@@ -6995,9 +7039,7 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	printf '%s\n' "$$candidate_agentbuild" | \
 	    grep -q '"schema"[[:space:]]*:[[:space:]]*"zcl.agent_build.v2"' || { \
 	    echo "deploy: frozen candidate has no agentbuild v1 contract" >&2; exit 1; }; \
-	candidate_source_id="$$(printf '%s\n' "$$candidate_agentbuild" | \
-	    grep -oE '"source_id_sha256"[[:space:]]*:[[:space:]]*"[^"]*"' | \
-	    head -1 | sed -E 's/.*"source_id_sha256"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/')"; \
+	candidate_source_id="$$(zcl_agentbuild_v2_top_source_id "$$candidate_agentbuild")"; \
 	[ "$${#candidate_source_id}" -eq 64 ] || { \
 	    echo "deploy: frozen candidate omitted exact source_id_sha256" >&2; exit 1; }; \
 	case "$$candidate_source_id" in *[!0-9a-f]*) \
@@ -7064,9 +7106,7 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	rollback_artifact_sha256="$$(sha256sum < "$$rollback_bin" | awk '{print $$1}')"; \
 	rollback_agentbuild="$$(timeout 30 "$$rollback_bin" agentbuild 2>&1)" || { \
 	    echo "deploy: prior executable agentbuild preflight failed" >&2; exit 1; }; \
-	rollback_source_id="$$(printf '%s\n' "$$rollback_agentbuild" | \
-	    grep -oE '"source_id_sha256"[[:space:]]*:[[:space:]]*"[^"]*"' | \
-	    head -1 | sed -E 's/.*"source_id_sha256"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/')"; \
+	rollback_source_id="$$(zcl_agentbuild_v2_top_source_id "$$rollback_agentbuild")"; \
 	[ "$${#rollback_source_id}" -eq 64 ] || { \
 	    echo "deploy: prior executable omitted exact source_id_sha256" >&2; exit 1; }; \
 	case "$$rollback_source_id$$rollback_artifact_sha256" in *[!0-9a-f]*) \
@@ -8856,6 +8896,20 @@ check-identity-parser-single:
 	@./tools/lint/check_identity_parser_single.sh --selftest
 	@./tools/lint/check_identity_parser_single.sh
 
+# Gate — the JSON key "source_id_sha256" answers two different questions in
+# this tree (what a BINARY was built from, baked in and constant, vs. what a
+# DIRECTORY holds right now, which varies) — see
+# tools/scripts/source_identity_lib.sh's header. Reporting one under the
+# other's name is the defect tools/agent_fast_ci.sh's green_input_cache had
+# (fixed by renaming to working_tree_source_id_sha256); reading an
+# agentbuild response positionally instead of through the schema-anchored
+# zcl_agentbuild_v2_top_source_id is the same class of bug with a longer
+# fuse. Shrink-only ratchet over tools/lint/source_identity_authority_baseline.txt.
+check-source-identity-authority:
+	@echo "══ LINT: source_id_sha256 producer/reader authority stays Q1/Q2-honest ══"
+	@./tools/lint/check_source_identity_authority.sh --selftest
+	@./tools/lint/check_source_identity_authority.sh
+
 # Anti-rot ratchet: exactly ONE place decides whether a node status reason
 # means an operator has to intervene. Two operator surfaces (the public REST
 # /api/status endpoint and the agent first-call summary) each carried their own
@@ -9295,6 +9349,28 @@ check-zcc-cache:
 	@echo "══ LINT: compile cache serves correct bytes ══"
 	@./tools/lint/check_zcc_cache.sh
 
+# A build whose objects do not repeat cannot be shown to anyone. GCC seeds
+# itself from the object's output name, and every object here is written into
+# a fresh mktemp staging directory, so the shipped profile's -flto objects did
+# not repeat even twice in one directory. $(ZCL_TU_RANDOM_SEED) pins the seed
+# per TU; this gate keeps every per-TU object recipe carrying it (coverage is
+# the one documented exemption). `make repro-build` is the end-to-end proof.
+check-tu-random-seed:
+	@echo "══ LINT: per-TU object recipes pin GCC's random seed ══"
+	@./tools/lint/check_tu_random_seed.sh
+
+# A function that hands back a struct the caller frees must initialize it above
+# the first thing that can fail, and a pointer published into a module global
+# must be unpublished before its storage is freed. Both halves are the same
+# class: the thing a later reader will free or dereference is left in a state
+# its guard cannot see. Found live twice on 2026-08-26 —
+# compact_block_reconstruct() (remote, any peer, bce343876) and
+# sapling_init_params() (69518f2f3).
+check-outparam-init-before-return:
+	@echo "══ LINT: out-parameters initialized before any failure return ══"
+	@bash tools/lint/check_outparam_init_before_return.sh --selftest
+	@bash tools/lint/check_outparam_init_before_return.sh
+
 # ── Lint umbrella ────────────────────────────────────────────────────────
 # LINT_GATES is the single ordered source of truth for the lint umbrella
 # (E11 check-doc-accuracy cross-checks it against DEFENSIVE_CODING.md).
@@ -9363,6 +9439,8 @@ LINT_GATES := \
     check-no-runtime-abort \
     check-wallet-raw-prepare-log \
     check-zcc-cache \
+    check-tu-random-seed \
+    check-outparam-init-before-return \
     check-equihash-params \
     check-before-save-hooks \
     check-pthread-create \
@@ -9394,6 +9472,7 @@ LINT_GATES := \
     check-ship-remote-transaction \
     check-z23-release-install \
     check-identity-parser-single \
+    check-source-identity-authority \
     check-status-reason-single \
     check-pipefail-status-pipe \
     check-no-wallclock-assertion \
@@ -9591,6 +9670,31 @@ ci-reproducible:
 .PHONY: repro-verify
 repro-verify:
 	@bash tools/scripts/repro-verify.sh
+
+# repro-build: the standing byte-identity PROOF, and the one to run when the
+# question is "can a second person check what this node says it is running?".
+# A node announces its source id on the wire; that announcement is only
+# checkable if the same source rebuilds to the same bytes.
+#
+# It builds the node THREE times and names FOUR properties separately instead
+# of collapsing them into one verdict:
+#   P1  build/bin/z23 identical across two builders at different absolute
+#       paths                                                     ASSERTED
+#   P2  build/bin/z23.debug identical across the same two         ASSERTED
+#   P3  every per-TU object identical when ONE directory builds
+#       twice — the property $(ZCL_TU_RANDOM_SEED) buys           ASSERTED
+#   N1  per-TU objects across two directories                     REPORTED,
+#       not asserted: GCC streams absolute paths into the .gnu.lto_* IR that
+#       -ffile-prefix-map cannot reach, and no GCC 14 flag fixes it. Printed
+#       on success as well as failure — a gate that narrows its own scope to
+#       whatever passes is not evidence.
+#
+# Opt-in, NOT in `make ci` / `make lint`: three whole-program LTO builds. The
+# cheap standing guard for the flag it depends on is check-tu-random-seed,
+# which does run in `make lint`.
+.PHONY: repro-build
+repro-build:
+	@bash tools/scripts/repro_build.sh
 
 ci: vendor-ready lint bench-regress zclassic23 $(TEST_PARALLEL_REL_CANDIDATE)
 	@echo "══ CI: portability symbol-floor (C1) ══"

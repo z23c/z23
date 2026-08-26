@@ -2,6 +2,7 @@
  * purpose: Capability-owned public lifecycle for iterative DHT records. */
 
 #include "config/boot_zcode_dht.h"
+#include "config/boot_zcode_dht_record_kind.h"
 
 #include "base/hex.h"
 #include "crypto/random_secret.h"
@@ -138,16 +139,7 @@ static bool record_input_namespace(const struct json_value *in, char out[32]) {
 
 static enum vcs_zcode_dht_record_kind record_input_kind(
     const struct json_value *in) {
-  const char *kind = record_input_str(in, "kind");
-  if (kind && strcmp(kind, "provider") == 0)
-    return VCS_ZCODE_DHT_RECORD_PROVIDER;
-  if (kind && strcmp(kind, "pointer") == 0)
-    return VCS_ZCODE_DHT_RECORD_POINTER;
-  if (kind && strcmp(kind, "storage_ack") == 0)
-    return VCS_ZCODE_DHT_RECORD_STORAGE_ACK;
-  if (kind && strcmp(kind, "source_reproduction_ack") == 0)
-    return VCS_ZCODE_DHT_RECORD_SOURCE_REPRODUCTION_ACK;
-  return 0;
+  return boot_zcode_dht_record_kind_from_name(record_input_str(in, "kind"));
 }
 
 static bool record_parse_selector(
@@ -186,17 +178,6 @@ static void record_rpc_error(struct json_value *result, const char *code,
   json_push_kv_str(result, "message", message);
 }
 
-static const char *record_kind_name(enum vcs_zcode_dht_record_kind kind) {
-  if (kind == VCS_ZCODE_DHT_RECORD_PROVIDER)
-    return "provider";
-  if (kind == VCS_ZCODE_DHT_RECORD_POINTER)
-    return "pointer";
-  if (kind == VCS_ZCODE_DHT_RECORD_STORAGE_ACK)
-    return "storage_ack";
-  return kind == VCS_ZCODE_DHT_RECORD_SOURCE_REPRODUCTION_ACK
-             ? "source_reproduction_ack" : "unknown";
-}
-
 static void record_row_json(struct json_value *row,
                             const struct vcs_zcode_dht_record *record,
                             bool conflicted, bool superseded,
@@ -214,7 +195,8 @@ static void record_row_json(struct json_value *row,
   zcl_hex_encode(record->owner_group, 32, owner);
   zcl_hex_encode(record->delegation.doc.master_pubkey, 32, publisher);
   json_set_object(row);
-  json_push_kv_str(row, "kind", record_kind_name(record->kind));
+  json_push_kv_str(
+        row, "kind", boot_zcode_dht_record_kind_name(record->kind));
   json_push_kv_str(row, "record_root", record_root);
   json_push_kv_str(row, "namespace", record->namespace_name);
   json_push_kv_str(row, "semantic_root", semantic);

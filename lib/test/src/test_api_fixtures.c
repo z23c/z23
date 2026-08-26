@@ -487,10 +487,20 @@ bool api_test_build_chain(struct main_state *ms,
                                  int count)
 {
     static struct uint256 hashes[16];
+
+    /* Initialize ms BEFORE the count check. Every caller declares
+     * `struct main_state ms;` uninitialized and runs main_state_free(&ms)
+     * unconditionally at the end of the case, so a return above this line
+     * hands main_state_free() whatever the caller's stack was holding.
+     * test_api_health_gates.c passes a COMPUTED count
+     * (ZCL_NODE_HEALTH_LAG_WARN_BLOCKS + 1 and + 3), so this refusal is one
+     * constant bump away from firing. Same shape as the peer-reachable wild
+     * free fixed in compact_block_reconstruct() (bce343876). */
+    main_state_init(ms);
+
     if (count <= 0 || count > (int)(sizeof(hashes) / sizeof(hashes[0])))
         return false;
 
-    main_state_init(ms);
     struct block_index *prev = NULL;
     for (int h = 0; h < count; h++) {
         out[h] = api_test_insert_block(ms, &hashes[h], h, prev);

@@ -15,6 +15,8 @@ enum vcs_zcode_dht_record_kind boot_zcode_dht_record_kind_from_name(
     return VCS_ZCODE_DHT_RECORD_STORAGE_ACK;
   if (name && strcmp(name, "source_reproduction_ack") == 0)
     return VCS_ZCODE_DHT_RECORD_SOURCE_REPRODUCTION_ACK;
+  if (name && strcmp(name, "agent_scope") == 0)
+    return VCS_ZCODE_DHT_RECORD_AGENT_SCOPE;
   return 0;
 }
 
@@ -26,6 +28,8 @@ const char *boot_zcode_dht_record_kind_name(
     return "pointer";
   if (kind == VCS_ZCODE_DHT_RECORD_STORAGE_ACK)
     return "storage_ack";
+  if (kind == VCS_ZCODE_DHT_RECORD_AGENT_SCOPE)
+    return "agent_scope";
   return kind == VCS_ZCODE_DHT_RECORD_SOURCE_REPRODUCTION_ACK
       ? "source_reproduction_ack" : "unknown";
 }

@@ -173,6 +173,25 @@ run_fuzz() {
     timeout="${ZCL_FUZZ_TIMEOUT:-2}"
     leak_detect="${ZCL_FUZZ_DETECT_LEAKS:-0}"
 
+    # prepare_lane_tree (below) faithfully re-points the isolated lane
+    # worktree at $ROOT's CURRENT HEAD every run — but that only helps if
+    # $ROOT itself is following `main`. A $ROOT pinned in detached HEAD (or
+    # simply never fast-forwarded) makes every lane run refresh against a
+    # HEAD that never moves: the fuzz lane re-fuzzes and re-reports an
+    # already-fixed bug forever, exactly the "judged from a stale pinned
+    # checkout" shape this repo has been bitten by before. Best-effort,
+    # never fails the lane: a refresh that cannot proceed (dirty tree,
+    # diverged history, no network) is logged loudly and the lane continues
+    # against whatever HEAD $ROOT actually has, same as it always did.
+    local freshness_tool="$SCRIPT_DIR/check_quality_lane_freshness.sh"
+    if [ -x "$freshness_tool" ]; then
+        {
+            echo "background_quality: checking whether \$ROOT ($ROOT) is pinned behind main..."
+            "$freshness_tool" --refresh --root="$ROOT" --ref=main
+        } >>"$log" 2>&1 || \
+            echo "background_quality: WARNING — \$ROOT freshness refresh did not complete cleanly; see $log. Proceeding with whatever HEAD \$ROOT currently has." | tee -a "$log"
+    fi
+
     local tree
     if ! tree="$(prepare_lane_tree fuzz)"; then
         QUALITY_TREE="$ROOT"

@@ -28,6 +28,19 @@ static struct zcl_result swap_settle_build(const struct swap_settle_ctx *c,
 {
     if (!c || !key || !pub || !out)
         return ZCL_ERR(-1, "swap_settle: NULL argument");
+
+    /* Initialize out BEFORE the first thing that can fail. The public header
+     * already promises "out_tx is initialized by the callee", and a caller
+     * that believes it will transaction_free(out_tx) on the error path — over
+     * whatever pointer and count its own stack happened to hold, since a
+     * struct transaction declared in the caller's frame is uninitialized
+     * until this call touches it. Five of the returns below are reachable
+     * with entirely non-NULL arguments (contract length, funding value, fee,
+     * fee >= funding), so the promise has to hold on every return, not only
+     * on the ones past this line. Same shape as the peer-reachable wild free
+     * fixed in compact_block_reconstruct() (bce343876). */
+    transaction_init(out);
+
     if (!c->contract || c->contract_len == 0 || c->contract_len > 256)
         return ZCL_ERR(-2, "swap_settle: bad contract length %zu",
                        c->contract_len);
@@ -42,7 +55,6 @@ static struct zcl_result swap_settle_build(const struct swap_settle_ctx *c,
         return ZCL_ERR(-5, "swap_settle: fee %" PRId64 " leaves no value "
                        "(funding %" PRId64 ")", c->fee, c->funding_value);
 
-    transaction_init(out);
     if (!transaction_alloc(out, 1, 1))
         return ZCL_ERR(-6, "swap_settle: transaction_alloc(1,1) failed");
 
