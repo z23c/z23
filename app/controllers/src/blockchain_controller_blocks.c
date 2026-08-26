@@ -307,6 +307,21 @@ bool rpc_getblockheader(const struct json_value *params, bool help,
     return true;
 }
 
+/* `getblock` historically accepted numeric verbosity, while JSON-RPC clients
+ * conventionally send a boolean. Keep the numeric parser's existing integer,
+ * real, string, and null compatibility, adding only the canonical bool form.
+ * Other RPC integers must not silently start accepting booleans. */
+static int rpc_permit_getblock_verbose(struct rpc_params *p, size_t idx,
+                                       int default_value)
+{
+    if (p->valid && json_size(p->raw) > idx) {
+        const struct json_value *value = json_at(p->raw, idx);
+        if (value->type == JSON_BOOL)
+            return json_get_bool(value) ? 1 : 0;
+    }
+    return (int)rpc_permit_int(p, idx, "verbose", default_value);
+}
+
 bool rpc_getblock(const struct json_value *params, bool help,
                           struct json_value *result)
 {
@@ -318,7 +333,7 @@ bool rpc_getblock(const struct json_value *params, bool help,
     rpc_params_init(&p, params);
     rpc_params_expect(&p, 1, 2);
     const char *hash_str = rpc_require_str(&p, 0, "hash");
-    int verbose = (int)rpc_permit_int(&p, 1, "verbose", 1);
+    int verbose = rpc_permit_getblock_verbose(&p, 1, 1);
     if (rpc_params_invalid(&p)) {
         rpc_params_error(&p, result);
         LOG_FAIL("blockchain", "getblock: invalid params");

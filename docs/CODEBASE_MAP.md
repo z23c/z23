@@ -205,7 +205,11 @@ checksummed runtime set contains `z23`, its
 that the daemon resolves beside itself (SHA256SUMS fail-closed; no registry).
 `make release-deploy Z23_RELEASE_HOSTS='host1 host2'` builds that portable set
 once locally, then bootstraps and process-qualifies fresh hosts sequentially;
-the remote hosts never run a compiler or `make`.
+the remote hosts never run a compiler or `make`. Each host receives the five
+fixed release members through one SSH archive stream instead of five separate
+SCP sessions, then independently verifies the exact manifest and payloads
+before installation. The deploy selftest proves one stream per host, strict
+post-transfer verification, sequential activation, and stop-on-first-failure.
 
 The unified local loop is `tools/dev/watch-dev-lane.sh` (`make dev-watch`): it
 classifies a coalesced save, runs the shared impact plan, and selects check,
