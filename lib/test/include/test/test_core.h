@@ -732,6 +732,17 @@ int spec_consensus_compat(void);
     if (strcmp((a), (b)) != 0) { printf("FAIL (\"%s\" != \"%s\")\n", (a), (b)); failures++; goto _test_next; } \
 } while(0)
 
+/* Assert a `struct zcl_result` lvalue is ok, PRINTING its message.
+ * `ASSERT(r.ok)` discards the one field that says what went wrong, so a
+ * confinement wedge and a genuine defect reach the transcript as the same
+ * bare line — which is how the build-sandbox process-budget defect survived
+ * three gate cycles. Takes an lvalue (not a call) so the message is read
+ * from the same evaluation the predicate tested. */
+#define ASSERT_RESULT_OK(r) do { \
+    if (!(r).ok) { printf("FAIL (%s not ok): %s\n", #r, (r).message); \
+                   failures++; goto _test_next; } \
+} while(0)
+
 #define PASS() do { printf("OK\n"); } while(0)
 
 /* Block-scoped test with automatic PASS at end and goto label.

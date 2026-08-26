@@ -362,6 +362,77 @@ struct os_sandbox_rlimits os_sandbox_session_rlimits(void);
  * skipped). Returns non-ok on the first setrlimit failure. */
 struct zcl_result os_sandbox_set_rlimits(const struct os_sandbox_rlimits *lim);
 
+/* ── process budget ────────────────────────────────────────────────────────
+ *
+ * RLIMIT_NPROC is charged against the REAL UID, kernel-wide — never against
+ * the calling process's subtree. It therefore CANNOT express "this confined
+ * child tree may create at most K tasks":
+ *
+ *   - an absolute value N bounds the subtree at (N - the uid's current task
+ *     count), which shrinks as unrelated work of the same uid starts, and
+ *     reaches zero (fork -> EAGAIN before the child does anything) on a busy
+ *     operator host;
+ *   - a value rebased on a snapshot, (uid task count at time T) + margin, is
+ *     the SAME load-dependent quantity, merely sampled at a different instant,
+ *     and additionally races: every task the uid starts between T and the
+ *     child's fork consumes the margin.
+ *
+ * There is no third option: with a per-uid counter, the subtree's real budget
+ * is always (installed limit - concurrent uid load). So RLIMIT_NPROC is a
+ * BACKSTOP here, not the action's process budget, and this API keeps the two
+ * apart:
+ *
+ *   - the installed backstop is an ABSOLUTE ceiling that does not sample load
+ *     (only the uid's static NPROC hard limit clamps it, since setrlimit
+ *     cannot raise a hard limit);
+ *   - whether the host has enough headroom left to launch at all is a separate
+ *     ADMISSION decision, reported as resource exhaustion rather than folded
+ *     into the child's exit status;
+ *   - the action's actual process budget is enforced subtree-scoped by the
+ *     parent, via os_sandbox_process_group_census() over the child's process
+ *     group (a group id is inherited across fork and survives double-fork
+ *     reparenting, so a fork bomb cannot escape the census).
+ */
+struct os_sandbox_process_budget {
+    uint64_t ceiling;    /* absolute value to install on RLIMIT_NPROC        */
+    uint64_t requested;  /* ceiling the caller asked for, before the clamp   */
+    uint64_t hard;       /* the uid's RLIMIT_NPROC hard limit (static)       */
+    uint64_t uid_tasks;  /* real uid's task count measured at admission      */
+    uint64_t headroom;   /* ceiling - uid_tasks, saturating at 0             */
+    uint64_t required;   /* headroom the action needs to launch at all       */
+    bool     admitted;   /* headroom >= required                             */
+};
+
+/* Current task (thread) count of the real uid — RLIMIT_NPROC's accounting
+ * unit. Best-effort /proc scan; entries that vanish mid-scan are skipped, so
+ * the result can undercount. Returns 0 when /proc is unreadable. */
+uint64_t os_sandbox_uid_task_count(void);
+
+/* The calling process's RLIMIT_NPROC hard limit, or OS_SANDBOX_RLIMIT_KEEP
+ * (== UINT64_MAX, i.e. RLIM_INFINITY) when it is unlimited or unreadable. */
+uint64_t os_sandbox_nproc_hard_limit(void);
+
+/* Pure policy: decide the backstop and the admission from explicit inputs.
+ *
+ * INVARIANT (the one the regression test pins): the returned `ceiling` is
+ * min(requested, hard) and is INDEPENDENT of `uid_tasks`. Concurrent load of
+ * the same uid moves `headroom`/`admitted` — never the installed limit. */
+struct os_sandbox_process_budget os_sandbox_process_budget_at(
+    uint64_t requested_ceiling, uint64_t required,
+    uint64_t uid_tasks, uint64_t hard);
+
+/* os_sandbox_process_budget_at() with the live uid task count and hard
+ * limit measured now. */
+struct os_sandbox_process_budget os_sandbox_process_budget_live(
+    uint64_t requested_ceiling, uint64_t required);
+
+/* Count the live processes whose process GROUP id is `pgid`. Subtree-scoped
+ * and load-independent: unrelated work of the same uid is not counted. Used
+ * by a parent that put its confined child in its own group (setpgid(0,0)
+ * before execve) to enforce the action's real process budget. Returns 0 when
+ * /proc is unreadable or the group is empty. */
+uint64_t os_sandbox_process_group_census(pid_t pgid);
+
 /* The CLONE_* flag set a session child is cloned with (== SANDBOX_SESSION_NS_
  * FLAGS). Provided as an accessor so callers need not pull in <sched.h>. */
 int os_sandbox_session_ns_flags(void);

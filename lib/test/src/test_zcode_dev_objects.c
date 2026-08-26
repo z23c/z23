@@ -3069,9 +3069,10 @@ static int test_zd_improve_command(void)
                                   300, &action, &claimed).ok);
         ASSERT(claimed);
         struct db_build_receipt receipt;
-        ASSERT(build_fabric_worker_execute(
+        struct zcl_result executed_compile = build_fabric_worker_execute(
             &ndb, workspace, workspace, action_id, lease_hex, worker_secret,
-            worker_key, &receipt, NULL).ok);
+            worker_key, &receipt, NULL);
+        ASSERT_RESULT_OK(executed_compile);
         ASSERT(build_fabric_receipt_admit(
             &ndb, workspace, receipt.receipt_id, now + 1).ok);
         ASSERT(strlen(receipt.work_receipt_sha3) == 64);
@@ -3403,9 +3404,10 @@ static int test_zd_improve_command(void)
                                   now, 300, &local_test_action, &claimed).ok);
         ASSERT(claimed);
         struct db_build_receipt local_test_receipt;
-        ASSERT(build_fabric_worker_execute(
+        struct zcl_result executed_test = build_fabric_worker_execute(
             &ndb, workspace, workspace, test_action_id, test_lease_hex,
-            worker_secret, worker_key, &local_test_receipt, NULL).ok);
+            worker_secret, worker_key, &local_test_receipt, NULL);
+        ASSERT_RESULT_OK(executed_test);
         uint8_t local_test_receipt_root[32];
         ASSERT(zcl_hex_decode_lower(local_test_receipt.work_receipt_sha3,
                                     local_test_receipt_root, 32));
@@ -3455,9 +3457,10 @@ static int test_zd_improve_command(void)
                                   now, 300, &local_fuzz_action, &claimed).ok);
         ASSERT(claimed);
         struct db_build_receipt local_fuzz_receipt;
-        ASSERT(build_fabric_worker_execute(
+        struct zcl_result executed_fuzz = build_fabric_worker_execute(
             &ndb, workspace, workspace, local_fuzz_action_id, fuzz_lease_hex,
-            worker_secret, worker_key, &local_fuzz_receipt, NULL).ok);
+            worker_secret, worker_key, &local_fuzz_receipt, NULL);
+        ASSERT_RESULT_OK(executed_fuzz);
         uint8_t local_fuzz_receipt_root[32];
         ASSERT(zcl_hex_decode_lower(local_fuzz_receipt.work_receipt_sha3,
                                     local_fuzz_receipt_root, 32));
@@ -3496,9 +3499,10 @@ static int test_zd_improve_command(void)
                                   now, 300, &fuzz_fail_action, &claimed).ok);
         ASSERT(claimed);
         struct db_build_receipt fuzz_fail_receipt;
-        ASSERT(build_fabric_worker_execute(
+        struct zcl_result executed_fuzz_fail = build_fabric_worker_execute(
             &ndb, workspace, workspace, fuzz_fail_action_id, fail_lease_hex,
-            worker_secret, worker_key, &fuzz_fail_receipt, NULL).ok);
+            worker_secret, worker_key, &fuzz_fail_receipt, NULL);
+        ASSERT_RESULT_OK(executed_fuzz_fail);
         ASSERT_EQ(fuzz_fail_receipt.exit_status, 1);
         ASSERT(db_build_action_find(&ndb, fuzz_fail_action_id,
                                     &fuzz_fail_action));

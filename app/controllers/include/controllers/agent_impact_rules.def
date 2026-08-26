@@ -1325,3 +1325,14 @@ AGENT_IMPACT_RULE("tools/lint/check_source_identity_authority.sh|tools/lint/sour
  * the hardened builders, so an edit here can never reach the push gate having
  * run zero test groups. */
 AGENT_IMPACT_RULE("tools/lint/check_outparam_init_before_return.sh|tools/lint/outparam_init_baseline.txt|app/services/src/swap_settlement_service.c|app/services/include/services/swap_settlement_service.h", "make_lint_gates swap_settlement api rpc_safety")
+
+/* The confined-build process budget. RLIMIT_NPROC is charged per REAL UID,
+ * so a limit derived from a snapshot of the uid's task count is not a budget
+ * for the sandboxed subtree at all — it shrinks as unrelated work of the same
+ * account starts, and it made test_zcode_dev_objects fail roughly one run in
+ * three under a 32-worker suite while passing standalone. The budget is now
+ * an absolute backstop plus a subtree process-group census; an edit to any of
+ * these files must run the group that pins that invariant, the sandbox
+ * builders, and the two build-fabric groups that execute a real confined
+ * compile. */
+AGENT_IMPACT_RULE("lib/platform/src/os_sandbox_linux.c|lib/platform/include/platform/os_sandbox.h|lib/test/src/test_sandbox_process_budget.c|tools/package_verify.c|tools/zcode_adapter_runner.c|app/services/src/build_fabric_worker.c", "sandbox_process_budget os_sandbox build_fabric zcode_dev_objects make_lint_gates")
