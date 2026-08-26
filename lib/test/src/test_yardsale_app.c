@@ -28,10 +28,12 @@
 #include "keys/key_io.h"
 #include "keys/pubkey.h"
 #include "models/database.h"
+#include "models/yardsale_plan.h"
 #include "net/onion_service.h"
 #include "platform/time_compat.h"
 #include "script/standard.h"
 #include "sim/simnet.h"
+#include "support/cleanse.h"
 #include "znam/znam.h"
 #include "zswap/zswap_assembly.h"
 #include "zswap/zswap_ceremony.h"
@@ -1061,6 +1063,282 @@ static int t_known_sellers(void)
     return failures;
 }
 
+/* ── The /yardsale/buy plan gate ─────────────────────────────────── */
+
+static int t_webbuy_plan_gate(void)
+{
+    int failures = 0;
+    ysa_reset_all();
+
+    /* A live ad at the real wall clock, so the plan row's expiry and
+     * the ceremony's deadline share one coherent window (a quote may
+     * live only ZSWAP_QUOTE_MAX_LIFETIME_SECS). */
+    struct zswap_quote_v1 ad;
+    int64_t now = (int64_t)platform_time_wall_time_t();
+    if (!ysa_ad_at(&ad, now - 5, now + ZSWAP_QUOTE_MAX_LIFETIME_SECS - 5)) {
+        printf("  yardsale_app: webbuy fixture ad... FAIL\n");
+        return 1;
+    }
+    uint8_t quote_root[32];
+    if (!ysa_ingest_ad(&ad, now, quote_root)) {
+        printf("  yardsale_app: webbuy ad ingest... FAIL\n");
+        ysa_reset_all();
+        return 1;
+    }
+    char root_hex[65];
+    ysa_hex(quote_root, 32, root_hex);
+
+    /* Runtime db so the plan ledger exists behind the mount. */
+    static char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "yardsale_site", "webbuy");
+    char dbpath[320];
+    snprintf(dbpath, sizeof(dbpath), "%s/node.db", dir);
+    struct node_db ndb;
+    memset(&ndb, 0, sizeof(ndb));
+    if (!node_db_open(&ndb, dbpath)) {
+        printf("  yardsale_app: webbuy node_db_open... FAIL\n");
+        test_cleanup_tmpdir(dir);
+        ysa_reset_all();
+        return 1;
+    }
+    struct db_service dbsvc;
+    struct app_runtime_context rt;
+    memset(&dbsvc, 0, sizeof(dbsvc));
+    memset(&rt, 0, sizeof(rt));
+    db_service_init(&dbsvc);
+    if (!db_service_attach(&dbsvc, &ndb) || !db_service_start(&dbsvc)) {
+        printf("  yardsale_app: webbuy db_service... FAIL\n");
+        node_db_close(&ndb);
+        test_cleanup_tmpdir(dir);
+        ysa_reset_all();
+        return 1;
+    }
+    rt.db_service = &dbsvc;
+    app_runtime_set_current(&rt);
+
+    /* One real p2pkh coin whose WIF the form carries, mirroring the
+     * KAT buyer (the same 0x42 key funds the script and signs). */
+    bool made = true;
+    uint8_t script[25];
+    struct privkey coin_key;
+    ysa_key(&coin_key, 0x42);
+    made = ysa_p2pkh_script(&coin_key, script) == 25;
+    const struct chain_params *cp = chain_params_get();
+    size_t sec_len = 0;
+    const unsigned char *sec_pfx =
+        chain_params_base58_prefix(cp, B58_SECRET_KEY, &sec_len);
+    char wif[128] = { 0 };
+    made = made && encode_secret(&coin_key, sec_pfx, sec_len, wif,
+                                 sizeof(wif));
+    char addr_recv[ZSWAP_ADDRESS_FIELD_BYTES];
+    char addr_change[ZSWAP_ADDRESS_FIELD_BYTES];
+    struct privkey recv_key, change_key;
+    ysa_key(&recv_key, 0x42);
+    ysa_key(&change_key, 0x43);
+    made = made && ysa_address(&recv_key, addr_recv) &&
+           ysa_address(&change_key, addr_change);
+
+    char txid_b_hex[65] = "", txid_a_hex[65] = "";
+    uint8_t txid_pat[32];
+    ysa_pattern32(txid_pat, 0x60);
+    ysa_hex(txid_pat, 32, txid_b_hex);
+    ysa_pattern32(txid_pat, 0x50);
+    ysa_hex(txid_pat, 32, txid_a_hex);
+    char script_hex[64] = "";
+    ysa_hex(script, 25, script_hex);
+
+    /* Both KAT coins and the shared WIF: the same key funds and signs. */
+    char base_form[1280], confirm_form[1320], variant_form[1320];
+    snprintf(base_form, sizeof(base_form),
+             "root=%s&token_recv=%s&change=%s&fee=%llu"
+             "&in1=%s:0:%lld:%s&key1=%s&in2=%s:1:%lld:%s&key2=%s",
+             root_hex, addr_recv, addr_change,
+             (unsigned long long)YSA_FEE_SATS,
+             txid_b_hex, (long long)YSA_BUYER_IN_B_VALUE, script_hex,
+             wif,
+             txid_a_hex, (long long)YSA_BUYER_IN_A_VALUE, script_hex,
+             wif);
+    snprintf(confirm_form, sizeof(confirm_form),
+             "%s&confirm=true", base_form);
+    /* Changed terms under confirm get their own plan identity — refuse
+     * instead of arming on lookalike terms. */
+    snprintf(variant_form, sizeof(variant_form),
+             "root=%s&token_recv=%s&change=%s&fee=%llu"
+             "&in1=%s:0:%lld:%s&key1=%s&in2=%s:1:%lld:%s&key2=%s"
+             "&confirm=true",
+             root_hex, addr_recv, addr_change,
+             (unsigned long long)(YSA_FEE_SATS + 1),
+             txid_b_hex, (long long)YSA_BUYER_IN_B_VALUE, script_hex,
+             wif,
+             txid_a_hex, (long long)YSA_BUYER_IN_A_VALUE, script_hex,
+             wif);
+    memory_cleanse(wif, sizeof(wif)); /* never leaves this stack dirty */
+
+    static uint8_t resp[16384];
+
+    /* Wire the ceremony's outbound gossip like the KAT roundtrip so
+     * begin() can run; the capture also proves how many times the form
+     * armed. */
+    struct ysa_flood_capture flood = {0};
+    yardsale_ceremony_set_flood(ysa_flood_capture_fn, &flood);
+
+    if (made) {
+        /* Phase A — no confirm field: exact terms get a PLANNED row and
+         * the reply is a plan page, not an armed accept. */
+        memset(resp, 0, sizeof(resp));
+        size_t n = yardsale_site_handle_request(
+            "POST", "/yardsale/buy", (const uint8_t *)base_form,
+            strlen(base_form), resp, sizeof(resp) - 1);
+        YSA_CHECK("webbuy: plan page renders before anything arms",
+                  n > 0 &&
+                  strstr((const char *)resp, "Accept planned") != NULL &&
+                  strstr((const char *)resp, "confirm=true") != NULL);
+        YSA_CHECK("webbuy: planning gossips nothing",
+                  flood.count == 0);
+        int planned_rows = 0;
+        sqlite3_stmt *q = NULL;
+        if (sqlite3_prepare_v2(ndb.db,
+                "SELECT COUNT(*) FROM yardsale_plans WHERE state='PLANNED'",
+                -1, &q, NULL) == SQLITE_OK &&
+            sqlite3_step(q) == SQLITE_ROW)
+            planned_rows = sqlite3_column_int(q, 0);
+        sqlite3_finalize(q);
+        YSA_CHECK("webbuy: phase A stored exactly one PLANNED row",
+                  planned_rows == 1);
+
+        char webbuy_request[65] = {0};
+        q = NULL;
+        if (sqlite3_prepare_v2(ndb.db,
+                "SELECT request_hash FROM yardsale_plans LIMIT 1",
+                -1, &q, NULL) == SQLITE_OK &&
+            sqlite3_step(q) == SQLITE_ROW) {
+            const unsigned char *text = sqlite3_column_text(q, 0);
+            if (text)
+                snprintf(webbuy_request, sizeof(webbuy_request), "%s",
+                         (const char *)text);
+        }
+        sqlite3_finalize(q);
+
+        struct db_yardsale_plan claim_a, claim_b;
+        memset(&claim_a, 0, sizeof(claim_a));
+        memset(&claim_b, 0, sizeof(claim_b));
+        bool found_a = db_yardsale_plan_find_by_request(
+            &ndb, webbuy_request, &claim_a);
+        bool found_b = db_yardsale_plan_find_by_request(
+            &ndb, webbuy_request, &claim_b);
+        enum db_yardsale_plan_claim_result won_a = found_a
+            ? db_yardsale_plan_claim(&ndb, &claim_a, now)
+            : DB_YARDSALE_PLAN_CLAIM_ERROR;
+        enum db_yardsale_plan_claim_result won_b = found_b
+            ? db_yardsale_plan_claim(&ndb, &claim_b, now)
+            : DB_YARDSALE_PLAN_CLAIM_ERROR;
+        YSA_CHECK("webbuy: only one claimant can cross PLANNED to ARMING",
+                  won_a == DB_YARDSALE_PLAN_CLAIMED &&
+                  won_b == DB_YARDSALE_PLAN_CLAIM_REFUSED);
+        memset(resp, 0, sizeof(resp));
+        n = yardsale_site_handle_request(
+            "POST", "/yardsale/buy", (const uint8_t *)confirm_form,
+            strlen(confirm_form), resp, sizeof(resp) - 1);
+        YSA_CHECK("webbuy: an uncertain ARMING row never replays",
+                  n > 0 && strstr((const char *)resp, "400") != NULL &&
+                  flood.count == 0);
+        snprintf(claim_a.state, sizeof(claim_a.state), "%s",
+                 YARDSALE_PLAN_STATE_PLANNED);
+        claim_a.result[0] = '\0';
+        YSA_CHECK("webbuy: fixture releases the claimed row",
+                  db_yardsale_plan_save(&ndb, &claim_a));
+        snprintf(claim_a.state, sizeof(claim_a.state), "%s",
+                 YARDSALE_PLAN_STATE_EXPIRED);
+        YSA_CHECK("webbuy: fixture expires the live-terms plan",
+                  db_yardsale_plan_save(&ndb, &claim_a));
+        memset(resp, 0, sizeof(resp));
+        n = yardsale_site_handle_request(
+            "POST", "/yardsale/buy", (const uint8_t *)base_form,
+            strlen(base_form), resp, sizeof(resp) - 1);
+        memset(&claim_a, 0, sizeof(claim_a));
+        bool renewed = db_yardsale_plan_find_by_request(
+            &ndb, webbuy_request, &claim_a);
+        YSA_CHECK("webbuy: inspecting live terms renews an expired plan",
+                  n > 0 && renewed &&
+                  strcmp(claim_a.state, YARDSALE_PLAN_STATE_PLANNED) == 0);
+
+        char alias_form[1340], junk_fee_form[1340];
+        snprintf(alias_form, sizeof(alias_form), "%s&xconfirm=true",
+                 base_form);
+        memset(resp, 0, sizeof(resp));
+        n = yardsale_site_handle_request(
+            "POST", "/yardsale/buy", (const uint8_t *)alias_form,
+            strlen(alias_form), resp, sizeof(resp) - 1);
+        YSA_CHECK("webbuy: a field-name suffix cannot confirm",
+                  n > 0 && strstr((const char *)resp, "Accept planned") &&
+                  flood.count == 0);
+        snprintf(junk_fee_form, sizeof(junk_fee_form), "%s&fee=1junk",
+                 base_form);
+        memset(resp, 0, sizeof(resp));
+        n = yardsale_site_handle_request(
+            "POST", "/yardsale/buy", (const uint8_t *)junk_fee_form,
+            strlen(junk_fee_form), resp, sizeof(resp) - 1);
+        YSA_CHECK("webbuy: duplicate or junk money fields never confirm",
+                  n > 0 && strstr((const char *)resp, "400") != NULL &&
+                  flood.count == 0);
+
+        memset(resp, 0, sizeof(resp));
+        n = yardsale_site_handle_request(
+            "POST", "/yardsale/buy", (const uint8_t *)variant_form,
+            strlen(variant_form), resp, sizeof(resp) - 1);
+        YSA_CHECK(
+            "webbuy: confirm on unplanned terms names the inspection gap",
+            n > 0 && strstr((const char *)resp, "400") != NULL &&
+                     strstr((const char *)resp,
+                            "no plan names these exact terms") != NULL);
+
+        /* Phase B — the same stored terms plus confirm=true arm once. */
+        memset(resp, 0, sizeof(resp));
+        n = yardsale_site_handle_request(
+            "POST", "/yardsale/buy", (const uint8_t *)confirm_form,
+            strlen(confirm_form), resp, sizeof(resp) - 1);
+        YSA_CHECK("webbuy: confirm on stored terms pins the accept",
+                  n > 0 &&
+                  strstr((const char *)resp, "pinned on the seller") !=
+                      NULL);
+        YSA_CHECK("webbuy: arming gossips the accept exactly once",
+                  flood.count == 1 &&
+                  strcmp(flood.last_command, ZSWAP_MSG_ACCEPT) == 0);
+        int committed_rows = 0;
+        q = NULL;
+        if (sqlite3_prepare_v2(ndb.db,
+                "SELECT COUNT(*) FROM yardsale_plans "
+                "WHERE state='COMMITTED' AND result='begun'",
+                -1, &q, NULL) == SQLITE_OK &&
+            sqlite3_step(q) == SQLITE_ROW)
+            committed_rows = sqlite3_column_int(q, 0);
+        sqlite3_finalize(q);
+        YSA_CHECK("webbuy: armed row is COMMITTED exactly once",
+                  committed_rows == 1 && planned_rows == 1);
+
+        /* Phase B replay: identical resubmit answers idempotently from
+         * the ledger instead of arming again. */
+        memset(resp, 0, sizeof(resp));
+        n = yardsale_site_handle_request(
+            "POST", "/yardsale/buy", (const uint8_t *)confirm_form,
+            strlen(confirm_form), resp, sizeof(resp) - 1);
+        YSA_CHECK("webbuy: committed replay changes nothing",
+                  n > 0 &&
+                  strstr((const char *)resp, "already pinned") != NULL &&
+                  flood.count == 1);
+    } else {
+        printf("  yardsale_app: webbuy fixture build... FAIL\n");
+        failures++;
+    }
+
+    app_runtime_set_current(NULL);
+    db_service_stop(&dbsvc);
+    node_db_close(&ndb);
+    test_cleanup_tmpdir(dir);
+    ysa_reset_all();
+    return failures;
+}
+
 int test_yardsale_app(void)
 {
     printf("\n=== yardsale_app: manifest + ceremony through the controller ===\n");
@@ -1068,6 +1346,7 @@ int test_yardsale_app(void)
     failures += t_manifest();
     failures += t_ceremony_roundtrip();
     failures += t_simnet_atomic_purchase();
+    failures += t_webbuy_plan_gate();
     failures += t_ingress_negatives();
     failures += t_peer_clamp();
     failures += t_seller_web_endpoint();

@@ -287,6 +287,37 @@ int node_db_migrate_features_v67_up(struct node_db *ndb, int *version)
         current_ver = 74;
         applied++;
     }
+    if (current_ver < 75) {
+        /* v75: an in-flight Yardsale confirmation is durable before its
+         * outbound accept can leave the node. ARMING is intentionally sticky
+         * across an uncertain process exit, preventing automatic replay. */
+        if (!node_db_exec(ndb,
+                "CREATE TABLE yardsale_plans_v75("
+                "plan_root TEXT PRIMARY KEY CHECK(length(plan_root)=64),"
+                "kind TEXT NOT NULL CHECK(kind IN ('arm','buy')),"
+                "request_hash TEXT NOT NULL UNIQUE CHECK(length(request_hash)=64),"
+                "payload_hex TEXT NOT NULL,result TEXT NOT NULL,"
+                "state TEXT NOT NULL CHECK(state IN "
+                "('PLANNED','ARMING','COMMITTED','EXPIRED')),"
+                "expires_unix INTEGER NOT NULL CHECK(expires_unix>0),"
+                "created_at INTEGER NOT NULL)"))
+            LOG_ERR("db", "migrate v75: replacement table failed");
+        if (!node_db_exec(ndb,
+                "INSERT INTO yardsale_plans_v75 SELECT * FROM yardsale_plans"))
+            LOG_ERR("db", "migrate v75: plan copy failed");
+        if (!node_db_exec(ndb, "DROP TABLE yardsale_plans"))
+            LOG_ERR("db", "migrate v75: prior table drop failed");
+        if (!node_db_exec(ndb,
+                "ALTER TABLE yardsale_plans_v75 RENAME TO yardsale_plans"))
+            LOG_ERR("db", "migrate v75: replacement rename failed");
+        if (!node_db_exec(ndb,
+                "INSERT OR IGNORE INTO schema_migrations(version) "
+                "VALUES('075')"))
+            LOG_ERR("db", "migrate v75: migration stamp failed");
+        DB_MIGRATE_PERSIST_VERSION(ndb, 75);
+        current_ver = 75;
+        applied++;
+    }
     *version = current_ver;
     return applied;
 }

@@ -115,3 +115,25 @@ HOTSWAP_SWAPPABLE("app/controllers/src/wallet_security_native_handlers.c",
  * is the same line core.status already sits on. */
 HOTSWAP_SWAPPABLE("app/controllers/src/status_journey_native_handler.c",
                   "status")
+
+/* Read-only ACCOUNT projections: one account, the index, and who the caller
+ * is. Every mutating sibling (add, role, suspend, unsuspend) and the auth
+ * challenge/verify pair are withheld. */
+HOTSWAP_SWAPPABLE("app/controllers/src/account_controller.c",
+                  "app.account.show app.account.list app.account.whoami")
+/* Read-only MODERATION POSTURE: what this node chooses to serve and to relay,
+ * and the guide explaining it. This is local policy a node applies to its own
+ * offers -- it decides nothing about consensus. The three setters
+ * (profile.set, relay.set, review.set) are withheld. */
+HOTSWAP_SWAPPABLE("app/controllers/src/market_moderation_native_handler.c",
+                  "app.market.moderation.profile.show app.market.moderation.guide app.market.moderation.status")
+/* Read-only ROM FETCH diagnostics. The bundle fetch itself is withheld. */
+HOTSWAP_SWAPPABLE("app/controllers/src/rom_fetch_controller.c",
+                  "ops.debug.rom_fetch.status")
+/* Read-only ROM SEED diagnostics: seeding posture and the artifact list.
+ * enable, disable and publish are withheld. */
+HOTSWAP_SWAPPABLE("app/controllers/src/rom_seed_controller.c",
+                  "ops.debug.rom_seed.status ops.debug.rom_seed.artifacts")
+/* Read-only SHOP status projection. shop init is withheld. */
+HOTSWAP_SWAPPABLE("app/controllers/src/shop_native_handler.c",
+                  "app.shop.status")

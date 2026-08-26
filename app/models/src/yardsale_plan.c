@@ -40,8 +40,56 @@ static bool yardsale_state_valid(const char *state)
 {
     return state &&
            (strcmp(state, YARDSALE_PLAN_STATE_PLANNED) == 0 ||
+            strcmp(state, YARDSALE_PLAN_STATE_ARMING) == 0 ||
             strcmp(state, YARDSALE_PLAN_STATE_COMMITTED) == 0 ||
             strcmp(state, YARDSALE_PLAN_STATE_EXPIRED) == 0);
+}
+
+static bool yardsale_plan_claim_write(
+    struct node_db *ndb, struct db_yardsale_plan *claimed,
+    int64_t now_unix, bool *completed)
+{
+    sqlite3_stmt *st = NULL;
+    struct ar_callbacks *cbs = db_yardsale_plan_callbacks();
+    AR_BEGIN_SAVE(cbs, "yardsale_plan", claimed,
+                  db_yardsale_plan_validate);
+    AR_PREPARE_BOOL(ndb, st,
+        "UPDATE yardsale_plans SET state='ARMING',result='' "
+        "WHERE request_hash=? AND payload_hex=? AND state='PLANNED' "
+        "AND expires_unix>=? RETURNING 1");
+    AR_BIND_TEXT(st, 1, claimed->request_hash);
+    AR_BIND_TEXT(st, 2, claimed->payload_hex);
+    AR_BIND_INT(st, 3, now_unix);
+    int rc = sqlite3_step(st); // raw-sql-ok:atomic-plan-claim
+    bool won = rc == SQLITE_ROW && sqlite3_column_int(st, 0) == 1;
+    if (won)
+        rc = sqlite3_step(st); // raw-sql-ok:finish-returning-claim
+    *completed = rc == SQLITE_DONE;
+    if (!*completed)
+        LOG_ERROR("model", "yardsale plan claim failed: %s",
+                  sqlite3_errmsg(ndb->db));
+    AR_FINALIZE(st);
+    AR_FINISH_SAVE(cbs, claimed, won && *completed);
+}
+
+enum db_yardsale_plan_claim_result db_yardsale_plan_claim(
+    struct node_db *ndb, struct db_yardsale_plan *row, int64_t now_unix)
+{
+    if (!ndb || !ndb->open || !row || now_unix < 0)
+        LOG_RETURN(DB_YARDSALE_PLAN_CLAIM_ERROR, "model",
+                   "yardsale plan claim: bad args");
+    struct db_yardsale_plan claimed = *row;
+    snprintf(claimed.state, sizeof(claimed.state), "%s",
+             YARDSALE_PLAN_STATE_ARMING);
+    claimed.result[0] = '\0';
+    bool completed = false;
+    if (yardsale_plan_claim_write(ndb, &claimed, now_unix, &completed)) {
+        *row = claimed;
+        return DB_YARDSALE_PLAN_CLAIMED;
+    }
+    if (!completed)
+        return DB_YARDSALE_PLAN_CLAIM_ERROR;
+    return DB_YARDSALE_PLAN_CLAIM_REFUSED;
 }
 
 bool db_yardsale_plan_validate(
@@ -63,7 +111,7 @@ bool db_yardsale_plan_validate(
     validates_custom(errors, yardsale_payload_hex_valid(row->payload_hex),
                      "payload_hex", "must be even-length lowercase hex");
     validates_custom(errors, yardsale_state_valid(row->state), "state",
-                     "must be PLANNED, COMMITTED, or EXPIRED");
+                     "must be PLANNED, ARMING, COMMITTED, or EXPIRED");
     validates_custom(errors,
                      (strcmp(row->state, YARDSALE_PLAN_STATE_COMMITTED) ==
                       0) == (row->result[0] != '\0'),
