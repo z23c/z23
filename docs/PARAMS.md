@@ -157,6 +157,20 @@ starting the node with shielded sending in mind. There is deliberately no
 flag to override a hash mismatch: these are cryptographic keys, and wrong
 bytes are a security failure, not an inconvenience.
 
+### The node does not have to be restarted for them
+
+A node that started with no proving parameters is running on the compiled-in
+verifying keys. When the parameters arrive it picks them up in place: the
+loader re-runs against the directory, checks all four pins, loads the proving
+keys and proves a test Spend + Output bundle against its own verifier before
+`shielded_spend_unavailable` clears. Nothing already in use is replaced, so
+the node keeps validating and serving throughout.
+
+What that costs you is one nudge. The node re-runs the loader when a
+parameter fetch it started completes; it does not watch the directory. If you
+copy the files in by hand while the node is up, restart it — or start the
+node after installing them, which is simpler.
+
 Be clear about what this script does and does not do: it moves and checks
 bytes you already obtained. It pins no download host, no DNS name, and no
 certificate authority, and it does not fetch anything for you. The project

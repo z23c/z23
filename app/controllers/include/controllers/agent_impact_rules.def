@@ -1305,3 +1305,15 @@ AGENT_IMPACT_RULE("lib/sapling/src/params_fetch.c|lib/sapling/src/params_fetch_s
  * baseline edit with no gate change, or a gate change with no baseline
  * update, is exactly how this ratchet would rust shut silently. */
 AGENT_IMPACT_RULE("tools/lint/check_source_identity_authority.sh|tools/lint/source_identity_authority_baseline.txt", "make_lint_gates")
+
+/* LANE late-proving-params: the seam that lets a node which booted on the
+ * compiled-in verifying keys pick up the PROVING parameters later, without a
+ * restart. Three files move together and must be tested together:
+ * params_init.c owns the guard that used to turn that node away and the
+ * once-published-never-replaced rule that makes a late load safe beside live
+ * consensus verifiers; sapling_prover_native.c owns the readiness latch that
+ * gates every shielded send, including its test-only reset; params_init.h
+ * states the contract a fetcher calls. Changing the readiness latch without
+ * re-running the group is exactly how a fail-closed send guard turns into a
+ * 192-byte all-zero proof. */
+AGENT_IMPACT_RULE("lib/sapling/src/params_init.c|lib/sapling/include/sapling/params_init.h|lib/sapling/src/sapling_prover_native.c|lib/sapling/include/sapling/sapling_prover.h|lib/test/src/test_params_vk_embedded.c", "params_vk_embedded native_spend_proof sapling_prover_rng_determinism shielded_payment_gate")

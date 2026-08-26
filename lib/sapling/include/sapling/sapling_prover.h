@@ -30,6 +30,16 @@ bool zclassic_sapling_prover_is_ready(void);
 const char *zclassic_sapling_prover_status(void);
 const char *zclassic_sapling_prover_backend(void);
 
+#ifdef ZCL_TESTING
+/* Return the proving backend to its process-start state (no parameters, not
+ * ready). Test-only: production has no un-ready transition, because a node
+ * that has proved once has the keys resident for the life of the process.
+ * A test that asserts "verifying keys alone do NOT arm proving" needs a
+ * deterministic starting point even when an earlier group in the same
+ * process already loaded a full parameter directory. */
+void zclassic_test_prover_reset(void);
+#endif
+
 /* Verification context */
 void *zclassic_sapling_verification_ctx_init(void);
 void zclassic_sapling_verification_ctx_free(void *ctx);
