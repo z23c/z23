@@ -4898,16 +4898,17 @@ skip_parallel_tests:
                failures++; }
     }
 
-    /* ── P4 (docs/work/coin-backfill-repair.md §4): backstop
-     * reachability + honest queued accounting + re-arm latch ────
+    /* ── P4: download-backpressure backstop reachability + honest
+     * queued accounting + re-arm latch (peer-retention sibling P1-P3
+     * live in test_header_sync_stall.c) ────
      *
      * The estimate is in_flight × BACKPRESSURE_AVG_BLOCK_BYTES +
      * queued × DL_QUEUED_ENTRY_BYTES.  The OOM backstop must be
      * STRUCTURALLY reachable in both download regimes: the trigger
      * is strict (bytes > DOWNLOAD_QUEUE_HIGH_WATER), so the
      * worst-case estimate at each in-flight cap must strictly
-     * exceed the high-water mark with margin (design B3 — under
-     * the rev-1 constants 1024 × 256 KiB == HIGH_WATER exactly and
+     * exceed the high-water mark with margin (under the rev-1
+     * constants 1024 × 256 KiB == HIGH_WATER exactly and
      * enter_active was arithmetically dead at tip).  Queued entries
      * are hash+bookkeeping only (~64 B), so a queued-only backlog
      * must NEVER activate (kills the observed false trigger: 3,066

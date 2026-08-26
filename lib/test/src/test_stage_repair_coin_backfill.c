@@ -1,8 +1,12 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * Tests for stage_repair_coin_backfill — the guarded multi-coin backfill for
- * prevout_unresolved frontier holes (docs/work/coin-backfill-repair.md §5,
- * cases 1-13).
+ * prevout_unresolved frontier holes. Cases 1-13 (numbered in the per-case
+ * comments below) cover the happy path plus every adversarial guard: a
+ * spent-mid-range prevout, an off-chain creator, a delta-window creator, a
+ * scan gap, a present-but-unusable coin, coinbase immaturity, a multi-coin
+ * block, resume/frontier-race integrity, the owner gate + value bounds +
+ * round cap, and chain-rebind-on-reorg/terminal-linkage.
  *
  * Fixture model (mirrors test_stage_reducer_unwedge.c): a synthetic
  * progress.kv (hole row, cursors, coins_applied frontier, utxo_apply_log +

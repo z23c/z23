@@ -6,10 +6,10 @@
  * Every event routes to shard = hash(outpoint) mod S, so ALL events for one
  * outpoint land in the same shard. Per shard we sort by (outpoint, seq) and
  * replay each outpoint's event run: the valid history is a strict alternation
- * CREATE, SPEND, CREATE, SPEND … starting with a CREATE (docs/work/
- * parallel-state-compiler.md §1b). A CREATE while already LIVE is a duplicate
- * outpoint / BIP30 reuse ("utxo_collision"); a SPEND while ABSENT is a spend of
- * an unknown/already-spent coin ("spend_unknown_utxo"). An outpoint whose
+ * CREATE, SPEND, CREATE, SPEND … starting with a CREATE. A CREATE while
+ * already LIVE is a duplicate outpoint / BIP30 reuse ("utxo_collision"); a
+ * SPEND while ABSENT is a spend of an unknown/already-spent coin
+ * ("spend_unknown_utxo"). An outpoint whose
  * TERMINAL event is a CREATE is a live coin; its fields come from that last
  * CREATE (value/height/is_coinbase/script) — the same coin the serial fold's
  * adds-before-spends walk would leave in coins_kv.

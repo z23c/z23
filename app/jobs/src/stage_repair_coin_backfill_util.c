@@ -2,9 +2,9 @@
  *
  * stage_repair_coin_backfill_util — read-only progress.kv helpers, key
  * builders, direct refusal paging, and the native dump-state snapshot for the
- * frontier coin backfill (docs/work/coin-backfill-repair.md §2). The
- * orchestration + the single write transaction live in
- * stage_repair_coin_backfill.c; this TU never writes consensus state. */
+ * frontier coin backfill. The orchestration + the single write transaction
+ * live in stage_repair_coin_backfill.c; this TU never writes consensus
+ * state. */
 
 #include "stage_repair_coin_backfill_util.h"
 

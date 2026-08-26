@@ -344,11 +344,11 @@ coins_kv_seed_checkpoint_verdict(struct sqlite3 *db);
  *
  * A single progress_meta key recording the contiguous applied frontier of the
  * coins_kv UTXO set: it ALWAYS equals the utxo_apply stage cursor by
- * construction (see docs/work/sync-organism-map.md). The frontier is
- * co-committed inside the SAME transaction as every WRITE that moves the
- * utxo_apply cursor — never lagging it — unlike MAX(coins.height), which is only
- * the most-recent surviving coin's creation height and cannot see an interior
- * hole. The complete set of utxo_apply cursor writers, each co-writing this
+ * construction — every writer below co-commits it inside the SAME
+ * transaction as every WRITE that moves the utxo_apply cursor, never lagging
+ * it — unlike MAX(coins.height), which is only the most-recent surviving
+ * coin's creation height and cannot see an interior hole. The complete set
+ * of utxo_apply cursor writers, each co-writing this
  * frontier in its own transaction:
  *   (a) forward apply (utxo_apply_stage.c step_apply): successful applies only
  *       write frontier = cursor+1. Failed verdicts return JOB_BLOCKED with the

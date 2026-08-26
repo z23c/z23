@@ -7,8 +7,10 @@
  * chain, and inserts it ONLY after a chain-bound no-spend proof over every
  * applied active-chain block in (creator, frontier). The inverse-delta horizon
  * is observability, not an eligibility boundary: recent-window holes still
- * require active-chain proof and unprovable cases refuse loudly. Design + guard
- * ladder: docs/work/coin-backfill-repair.md */
+ * require active-chain proof and unprovable cases refuse loudly. The guard
+ * ladder (G0-G10) is inlined in stage_repair_coin_backfill.c; the write
+ * transaction it gates is the sole consensus mutation (coins_kv insert only —
+ * never a cursor, a *_log row, or tip_finalize_log). */
 
 #ifndef ZCL_JOBS_STAGE_REPAIR_COIN_BACKFILL_H
 #define ZCL_JOBS_STAGE_REPAIR_COIN_BACKFILL_H
