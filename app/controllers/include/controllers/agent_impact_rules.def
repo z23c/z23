@@ -725,7 +725,7 @@ AGENT_IMPACT_RULE("app/controllers/src/snapshot_controller_import.c|app/services
 /* --importblockindex round-trip: both call shapes of
  * snapshot_import_block_index (CLI header-only + bundle-loader full-position). */
 AGENT_IMPACT_RULE("lib/test/src/test_importblockindex_roundtrip.c", "importblockindex_roundtrip block_index_integrity make_lint_gates")
-AGENT_IMPACT_RULE("src/main_cli_modes.c|src/cli_lane_defaults.h|lib/test/src/test_importblockindex_cli_dispatch.c", "importblockindex_cli_dispatch importblockindex_roundtrip cli_auth_robust cli_argv_strict make_lint_gates")
+AGENT_IMPACT_RULE("src/main_cli_modes.c|config/include/config/cli_lane_defaults.h|lib/test/src/test_importblockindex_cli_dispatch.c", "importblockindex_cli_dispatch importblockindex_roundtrip cli_auth_robust cli_argv_strict make_lint_gates")
 /* D4 (wf/cli-harness-honesty): -rpcport= datadir auto-discovery match-by-port
  * + refuse-on-ambiguous/no-match — the CLI-mode taxonomy proof lives in
  * test_cli_auth_robust.c (real-binary end-to-end, not the static helpers

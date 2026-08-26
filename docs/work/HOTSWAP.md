@@ -663,12 +663,13 @@ bound state, 7–8 bound the artifact, 9 bounds behaviour.
 
 **1. It is a shape LEAF, never an authority.**
 The source TU must live under `app/controllers/`, `app/views/`, or
-`app/conditions/`, and must never resolve under `core/`, `lib/consensus/`,
+`app/conditions/`, and must never resolve under `core/`, `core/consensus/`,
 `lib/validation/`, `lib/storage/`, `lib/net/`, `lib/coins/`, `lib/chain/`,
-`lib/mining/`, `app/jobs/`, `lib/kernel/`, `lib/supervisor/`,
-`app/supervisors/`, or `domain/consensus/`. A dlopen'd module of any of those
-could silently diverge the node's consensus state or the reducer fold — a live
-code swap that can change a consensus rule is a chain-split mechanism.
+`lib/mining/`, `app/jobs/`, `lib/kernel/`, `lib/util/src/supervisor.c`,
+`app/supervisors/`, or `core/consensus/include/domain/consensus/`. A dlopen'd
+module of any of those could silently diverge the node's consensus state or the
+reducer fold — a live code swap that can change a consensus rule is a
+chain-split mechanism.
 Enforced by `check-hotswap-swappable-shape`.
 
 **2. Every leaf it re-points is READY and read-only.**

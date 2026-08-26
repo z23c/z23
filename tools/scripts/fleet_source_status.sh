@@ -89,6 +89,19 @@ fleet_source_status_reset() {
     FLEET_SOURCE_REQUIRED_FLOOR=no
 }
 
+fleet_source_normalize_commit_date() {
+    local stamp=$1
+
+    case "$stamp" in
+        ????-??-??T??:??:??Z)
+            printf '%s+00:00' "${stamp%Z}"
+            ;;
+        *)
+            printf '%s' "$stamp"
+            ;;
+    esac
+}
+
 fleet_source_status_audit() {
     local repo=$1 observed_head=$2 source_sha=$3 git_sha=$4 floor=$5
     local commit date behind
@@ -115,7 +128,9 @@ fleet_source_status_audit() {
     fi
 
     date=$(git -C "$repo" show -s --format=%cI "$commit" 2>/dev/null || true)
-    [ -n "$date" ] && FLEET_SOURCE_COMMIT_DATE=$date
+    if [ -n "$date" ]; then
+        FLEET_SOURCE_COMMIT_DATE=$(fleet_source_normalize_commit_date "$date")
+    fi
 
     if ! git -C "$repo" merge-base --is-ancestor "$commit" "$observed_head";
     then
