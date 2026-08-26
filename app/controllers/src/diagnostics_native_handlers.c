@@ -88,4 +88,50 @@ static const struct zcl_hotswap_leaf_replacement k_leaves[] = {
 };
 
 ZCL_HOTSWAP_EXPORT_LEAVES(k_leaves, sizeof(k_leaves) / sizeof(k_leaves[0]))
-#endif
+#endif /* ZCL_HOTSWAP_GEN */
+
+/* REAL (activatable) module ABI export. This TU has been a row in
+ * config/hotswap_swappable.def since that manifest was written, but carried
+ * only the generation-loader block above — so `make hotswap-module-so
+ * FILE=.../diagnostics_native_handlers.c` produced a .so with no
+ * `zcl_hotswap_module` symbol and the loader refused it at stage=symbol. The
+ * allowlist row was a claim, not an admission; nothing in the tree ever
+ * dlopen'd an artifact, so no gate could see it. tools/dev/hotswap-verify.sh
+ * now does, and this block is what makes the row true. */
+#ifdef ZCL_HOTSWAP_MODULE_GEN
+#include "hotswap/hotswap_module.h"
+#include "kernel/command_registry.h"
+#include "command/native_command.h"
+
+static void module_tramp_node_logs(const struct zcl_command_request *request,
+                                   struct zcl_command_reply *reply)
+{
+    zcl_native_bridge_run(request, zcl_native_node_log_body, reply);
+}
+
+/* The module's own health hook — runs before the loader publishes it. Kept
+ * node-independent (no RPC): a structural OK. */
+static bool module_selftest_node_logs(char *err, size_t cap)
+{
+    (void)err;
+    (void)cap;
+    return true;
+}
+
+/* core.storage.query composes a bounded dbquery RPC request exactly as ops.logs
+ * composes getnodelog: the SQL text and row limit are forwarded as arguments
+ * and the resident RPC handler keeps the database access and its
+ * authorization. The swappable body owns request composition only. */
+static void module_tramp_storage_query(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    zcl_native_bridge_run(request, zcl_native_sql_body, reply);
+}
+
+static const struct zcl_hotswap_leaf k_module_leaves[] = {
+    { "ops.logs",           module_tramp_node_logs },
+    { "core.storage.query", module_tramp_storage_query },
+};
+
+ZCL_HOTSWAP_MODULE_LEAVES(k_module_leaves, module_selftest_node_logs)
+#endif /* ZCL_HOTSWAP_MODULE_GEN */

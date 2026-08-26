@@ -159,6 +159,21 @@ static bool module_selftest_metrics(char *err, size_t cap)
     return true;
 }
 
-ZCL_HOTSWAP_MODULE("ops.metrics", module_tramp_metrics,
-                   module_selftest_metrics)
+/* core.consensus.report renders metrics_prometheus_consensus_report_json()
+ * into a fixed buffer and ignores `args`. It READS a Prometheus counter table;
+ * it decides no consensus rule, validates no block, and touches no state root
+ * — structurally the same class as ops.metrics beside it. The sealed consensus
+ * tree stays unswappable; this is its observability projection. */
+static void module_tramp_consensus_report(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    zcl_native_bridge_run(request, zcl_native_consensus_report_body, reply);
+}
+
+static const struct zcl_hotswap_leaf k_module_leaves[] = {
+    { "ops.metrics",           module_tramp_metrics },
+    { "core.consensus.report", module_tramp_consensus_report },
+};
+
+ZCL_HOTSWAP_MODULE_LEAVES(k_module_leaves, module_selftest_metrics)
 #endif /* ZCL_HOTSWAP_MODULE_GEN */

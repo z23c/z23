@@ -780,7 +780,52 @@ static bool module_selftest_listaddresses(char *err, size_t cap)
     return true;
 }
 
-ZCL_HOTSWAP_MODULE("core.wallet.address.list",
-                   module_tramp_listaddresses,
-                   module_selftest_listaddresses)
+static void module_tramp_listunspent(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    zcl_native_bridge_run(request, zcl_native_listunspent_body, reply);
+}
+
+static void module_tramp_listtransactions(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    zcl_native_bridge_run(request, zcl_native_listtransactions_body, reply);
+}
+
+static void module_tramp_gettransaction(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    zcl_native_bridge_run(request, zcl_native_gettransaction_body, reply);
+}
+
+/* Mirrors k_leaves above — all four READ projections this controller owns.
+ * These render WALLET state (addresses, this wallet's own unspent outputs and
+ * transaction history); they neither sign, spend, nor mutate the keystore, and
+ * every one is ZCL_COMMAND_READY_READ. Wallet WRITE leaves stay resident. */
+/* Shielded READ projections. Both bodies live in wallet_native_read_bodies.c,
+ * already an island member, so they are genuinely recompiled by the swap.
+ * These render balances and note metadata the wallet already holds; the
+ * viewing keys, the note decryption, and every spend path stay resident. */
+static void module_tramp_z_getbalance(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    zcl_native_bridge_run(request, zcl_native_z_getbalance_body, reply);
+}
+
+static void module_tramp_z_listunspent(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    zcl_native_bridge_run(request, zcl_native_z_listunspent_body, reply);
+}
+
+static const struct zcl_hotswap_leaf k_module_leaves[] = {
+    { "core.wallet.address.list",      module_tramp_listaddresses },
+    { "core.wallet.utxo.list",         module_tramp_listunspent },
+    { "core.wallet.transaction.list",  module_tramp_listtransactions },
+    { "core.wallet.transaction.get",   module_tramp_gettransaction },
+    { "core.wallet.shielded.balance",  module_tramp_z_getbalance },
+    { "core.wallet.shielded.notes",    module_tramp_z_listunspent },
+};
+
+ZCL_HOTSWAP_MODULE_LEAVES(k_module_leaves, module_selftest_listaddresses)
 #endif /* ZCL_HOTSWAP_MODULE_GEN */

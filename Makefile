@@ -447,8 +447,14 @@ DEVLOOP_INCLUDES = -Itools/dev
 # hot-swap/reload cycle, the persistent inotify watcher, and the subprocess
 # runner) are DEV_ONLY_SRCS: linked only into the DEV binary, never the release
 # binary. `check-release-no-dev-symbols` proves their entry points are absent.
+# Standalone dev CLIs under tools/dev own their own main() and are compiled
+# directly by their driver script, never linked into the node binary, the dev
+# binary, or the test harness. They must leave the wildcard BEFORE the
+# DEV_ONLY_SRCS split, because DEV_ONLY_SRCS is still linked (into the dev
+# binary) — filtering there would only move the duplicate-`main` link error.
+DEV_STANDALONE_SRCS = tools/dev/hotswap_verify_so.c
 DEVLOOP_ALL_SRCS = $(call zcl_filter_ephemeral_sources,\
-	$(wildcard tools/dev/*.c))
+	$(filter-out $(DEV_STANDALONE_SRCS),$(wildcard tools/dev/*.c)))
 DEV_ONLY_SRCS = tools/dev/devloop_cli.c tools/dev/devloop_cycle.c \
 	tools/dev/devloop_watch.c tools/dev/devloop_process.c \
 	tools/dev/devloop_hotswap_build.c tools/dev/devloop_restart_build.c \
@@ -3396,6 +3402,23 @@ hotswap-module-so: $(VIEW_GEN_HEADERS) $(HOTSWAP_ACTION_PLAN)
 	trap - EXIT HUP INT TERM; \
 	echo "hotswap-module-so: linked multi-leaf module candidate $$so ($$src)" >&2; \
 	echo "$$so"
+
+.PHONY: hotswap-verify
+# make hotswap-verify                  (every row of hotswap_swappable.def)
+# make hotswap-verify FILE=<tu.c>      (one row)
+#
+# Prove an allowlist row is LOADABLE, not merely listed: build the module .so
+# with the shipping recipe, then dlopen it and run the REAL
+# hotswap_module_admit() gauntlet against the REAL, compiler-emitted
+# `zcl_hotswap_module` (hotswap_verify_module_so, lib/hotswap, dev-only).
+#
+# Every hot-swap test in lib/test drives the gauntlet with a struct FABRICATED
+# in the test's own TU, so nothing in the tree ever loaded a real artifact. A
+# row whose TU emits no module symbol, or whose leaf body lives in a TU outside
+# its island, passed every gate and failed the first time a human tried it.
+# This is the gate that can see that. Needs no node and no datadir.
+hotswap-verify:
+	@tools/dev/hotswap-verify.sh $(if $(FILE),$(FILE),--all)
 
 .PHONY: hotswap-apply
 # make hotswap-apply HANDLER=core.status

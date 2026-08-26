@@ -1437,3 +1437,15 @@ AGENT_IMPACT_RULE("app/services/include/services/build_fabric_worker_report.h|ap
  * either side must fail a test, not drift into a signed statement that no
  * longer means what the node does. */
 AGENT_IMPACT_RULE("lib/vcs/src/moderation_attestation_object.c|lib/vcs/src/moderation_attestation_compose.c|lib/vcs/include/vcs/moderation_attestation.h|lib/test/src/test_zcode_moderation_attestation.c", "zcode_moderation_attestation file_market_moderation")
+/* LANE hot-swap reach: the load-verification path and the controller TUs whose
+ * module leaf tables it made honest. Before tools/dev/hotswap_verify_so.c
+ * every hot-swap test drove hotswap_module_admit() with a struct FABRICATED in
+ * the test's own TU, so no artifact was ever dlopen'd and an allowlist row
+ * could name a TU that emits no `zcl_hotswap_module` symbol at all
+ * (diagnostics_native_handlers.c was exactly that) or whose leaf body lives in
+ * a TU outside its island (core.status.brief was exactly that). Both classes
+ * pass every text gate and fail at load. Mapped to the module/loader groups
+ * plus the catalog and native-contract groups, because widening a leaf table
+ * asserts those leaves are still ZCL_COMMAND_READY_READ and still dispatch
+ * through the registry's public contract. */
+AGENT_IMPACT_RULE("tools/dev/hotswap_verify_so.c|tools/dev/hotswap-verify.sh|config/hotswap_probe_cases.def|app/controllers/src/ops_native_handlers.c|app/controllers/src/net_native_handlers.c|app/controllers/src/meta_native_handlers.c|app/controllers/src/wallet_native_handlers.c|app/controllers/src/app_native_handlers.c|app/controllers/src/chain_native_handlers.c|app/controllers/src/diagnostics_native_handlers.c|app/controllers/src/status_brief_native_handler.c", "hotswap_module hotswap_module_v2 hotswap_loader hotswap_simnet command_registry_catalog command_handler_snapshot native_api_contract make_lint_gates")

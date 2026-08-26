@@ -23,6 +23,8 @@ HOTSWAP_PROBE_CASE("command.names.list.default.v1", "command",
     "app.names.list", "{}", "zcl.app_name_index.v1", 8192)
 HOTSWAP_PROBE_CASE("command.metaverse.property.list.default.v1", "command",
     "metaverse.property.list", "{}", "zcl.metaverse_property_list.v1", 8192)
+HOTSWAP_PROBE_CASE("command.ops.dash.summary.default.v1", "command",
+    "ops.debug.dash.summary", "{}", "zcl.operator_summary.v1", 8192)
 HOTSWAP_PROBE_CASE("command.ops.logs.bounded.v1", "command",
     "ops.logs",
     "{\"level\":\"all\",\"max_lines\":1,\"pattern\":\"hotswap\",\"since_secs\":1}",

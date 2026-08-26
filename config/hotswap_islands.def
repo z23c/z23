@@ -8,8 +8,16 @@
  * are forbidden here.
  */
 
+/* status_brief_native_handler.c defines zcl_native_status_brief_body, the body
+ * behind the core.status.brief leaf. A body that lives OUTSIDE the module is
+ * imported from the resident node at dlopen, so re-pointing the leaf would
+ * dispatch into the OLD code and the swap would silently do nothing for that
+ * leaf. Pulling the body TU into the island is what makes core.status.brief
+ * genuinely recompiled rather than merely re-dispatched. Verified free of
+ * mutable file-scope statics (check-hotswap-static-state scans island members
+ * too). */
 HOTSWAP_ISLAND("app/controllers/src/status_native_handlers.c",
-               "app/controllers/src/status_native_helpers.c")
+               "app/controllers/src/status_native_helpers.c app/controllers/src/status_brief_native_handler.c")
 HOTSWAP_ISLAND("app/controllers/src/wallet_native_handlers.c",
                "app/controllers/src/wallet_native_read_bodies.c")
 HOTSWAP_ISLAND("app/controllers/src/metaverse_controller.c",

@@ -262,7 +262,19 @@ static bool module_selftest_peer_incidents(char *err, size_t cap)
     return true;
 }
 
-ZCL_HOTSWAP_MODULE("core.network.peers.incidents",
-                   module_tramp_peer_incidents,
-                   module_selftest_peer_incidents)
+static void module_tramp_onion_health(const struct zcl_command_request *request,
+                                      struct zcl_command_reply *reply)
+{
+    zcl_native_bridge_run(request, zcl_native_onion_health_body, reply);
+}
+
+/* Mirrors k_leaves above — both leaves this controller owns, published in ONE
+ * all-or-nothing batch. Batch size, not authority: both are READY read-only
+ * leaves of this same allowlisted TU. */
+static const struct zcl_hotswap_leaf k_module_leaves[] = {
+    { "core.network.peers.incidents", module_tramp_peer_incidents },
+    { "core.network.onion.health",    module_tramp_onion_health },
+};
+
+ZCL_HOTSWAP_MODULE_LEAVES(k_module_leaves, module_selftest_peer_incidents)
 #endif /* ZCL_HOTSWAP_MODULE_GEN */
