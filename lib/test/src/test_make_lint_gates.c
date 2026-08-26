@@ -339,6 +339,9 @@ static const struct lint_gate_entry g_lint_gate_entries[] = {
      * (the gate greps --untracked, which needs the real .git). */
     X_(t_no_trust_state_ordering_gate),
     S_(t_lint_gates_fail_loud_on_empty_scan),
+    /* Hermetic: builds its fixture trees under TMPDIR and reads Makefile /
+     * run_lint.sh, never writing into the worktree. */
+    N_(t_lint_gate_wiring_gate),
     S_(t_no_dev_history_in_contracts),
     S_(t_no_uncited_victory),
     /* Plants a stray file at the REAL repo root. */

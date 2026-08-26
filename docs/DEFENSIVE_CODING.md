@@ -851,6 +851,7 @@ against the Makefile `lint:` target. Keep it sorted; edit it whenever you
 add/remove a gate.
 
 <!-- LINT-GATES-BEGIN -->
+- `check-lint-gate-wiring`
 - `check-accel-oracle-pinned`
 - `check-blob-read-bounds`
 - `check-byte-order-codec-single`
@@ -997,6 +998,8 @@ add/remove a gate.
 - `check-standalone-tools-link`
 - `check-no-operator-paths`
 - `check-no-unattended-publish`
+- `check-tor-dial-prewarm`
+- `check-fleet-source-status`
 - `check-zcc-cache`
 - `check-tu-random-seed`
 - `check-outparam-init-before-return`
@@ -1007,6 +1010,24 @@ add/remove a gate.
 `docs/CONSENSUS_PARITY_DOCTRINE.md`], `check-no-new-repair-rung`, and
 `check-stage-advances-or-blocks` appear in the canonical block and run in `make
 lint`; they are documented in their own docs rather than expanded here.)
+
+`check-lint-gate-wiring` (`tools/lint/check_lint_gate_wiring.sh`) keeps the two
+halves of a lint gate in step. **Adding a gate is a two-file operation**: the
+Makefile gets a `check-*:` target plus a line in `LINT_GATES`, and
+`tools/lint/run_lint.sh` gets an entry in `gate_command()`'s case table —
+because the parallel driver execs each gate's script directly and never reads
+the Make recipe. Nothing enforced the second file, so gates shipped with only
+the first half and `make lint` went FATAL (exit 2) for the whole tree,
+reporting no gate results at all, until somebody wired them by hand. This gate
+asserts the parity in both directions (a listed gate with no table entry, and a
+table entry no list names), plus a real Make target behind every listed name
+(the `ZCL_LINT_SERIAL=1` fallback runs the list as prerequisites) and an
+existing script behind every table entry. It reads the lists with the same awk
+extractor `check-doc-accuracy` uses and reads the case table through
+`run_lint.sh --list`, which greps its own case labels — never a second parser
+of either file. Its `--selftest` plants each defect class in a throwaway
+fixture tree and asserts the gate rejects it *and names the offender*, with a
+correctly-wired fixture as the positive control.
 
 `check-no-retired-agent-protocol` rejects the retired agent-transport token in
 tracked paths and filenames while explicitly allowing ordinary `memcpy` usage.
