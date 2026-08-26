@@ -56,3 +56,7 @@ later lane flips it HARD.
 - 2026-08-12T23:12:15Z — REASON: Bound reindex UTXO cache memory and account validation cache growth
   old ROOT: 0b33151affcd213878211c48cffdc4d959b1bbb03cccc9ff4051c8bc0c7257ca
   by: owner unseal ritual (make core-unseal)
+
+- 2026-08-26T04:13:44Z — REASON: seed bootstrap: the only hardcoded onion seed was down (5/5 no-descriptor from two independent Tor clients, re-confirmed by the integrator); replace with a re-verified first-party seed, drop clearnet seeds booked at the testnet port and one dead address
+  old ROOT: 140f4b8914457b24b9ae9d412b58bc961032a736718672fe4475ee4fb5f1c1e6
+  by: owner unseal ritual (make core-unseal)
