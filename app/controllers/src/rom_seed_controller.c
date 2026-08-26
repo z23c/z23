@@ -272,3 +272,49 @@ void zcl_native_handle_rom_seed_publish(
             "ROM-seed serving is DISABLED (-noromseed / ops debug rom_seed "
             "disable); registered artifacts are not served until it is enabled");
 }
+
+/* ── Hot-swappable leaves ──────────────────────────────────────────────────
+ * Read-only ROM SEED diagnostics: seeding posture and published artifacts.
+ *
+ * The mutating siblings in this file are absent from both tables. Their
+ * bytes are compiled into the module, but the loader refuses to re-point
+ * any leaf missing from this file's row in config/hotswap_swappable.def. */
+#ifdef ZCL_HOTSWAP_GEN
+#define ZCL_HOTSWAP_PROBE_LEAF "ops.debug.rom_seed.status"
+#include "hotswap/hotswap.h"
+static const struct zcl_hotswap_leaf_replacement k_rom_seed_leaves[] = {
+    { "ops.debug.rom_seed.status", zcl_native_handle_rom_seed_status },
+    { "ops.debug.rom_seed.artifacts", zcl_native_handle_rom_seed_artifacts },
+};
+ZCL_HOTSWAP_EXPORT_LEAVES(k_rom_seed_leaves,
+                          sizeof(k_rom_seed_leaves) / sizeof(k_rom_seed_leaves[0]))
+#endif /* ZCL_HOTSWAP_GEN */
+
+#ifdef ZCL_HOTSWAP_MODULE_GEN
+#include "hotswap/hotswap_module.h"
+#include <stdio.h>
+static const struct zcl_hotswap_leaf k_rom_seed_module_leaves[] = {
+    { "ops.debug.rom_seed.status", zcl_native_handle_rom_seed_status },
+    { "ops.debug.rom_seed.artifacts", zcl_native_handle_rom_seed_artifacts },
+};
+/* Structural health hook: a table that lost a name or a body would
+ * otherwise publish a leaf that dispatches into nothing. */
+static bool rom_seed_module_selftest(char *error, size_t error_cap)
+{
+    const size_t n = sizeof(k_rom_seed_module_leaves) /
+                     sizeof(k_rom_seed_module_leaves[0]);
+    for (size_t i = 0; i < n; i++) {
+        if (!k_rom_seed_module_leaves[i].name ||
+            !k_rom_seed_module_leaves[i].name[0] ||
+            !k_rom_seed_module_leaves[i].fn) {
+            if (error && error_cap)
+                (void)snprintf(error, error_cap,
+                               "rom_seed leaf %zu has no name or no body",
+                               i);
+            return false;
+        }
+    }
+    return true;
+}
+ZCL_HOTSWAP_MODULE_LEAVES(k_rom_seed_module_leaves, rom_seed_module_selftest)
+#endif /* ZCL_HOTSWAP_MODULE_GEN */

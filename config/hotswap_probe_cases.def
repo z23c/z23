@@ -86,3 +86,13 @@ HOTSWAP_PROBE_CASE("command.wallet.security.status.default.v1", "command",
     "core.wallet.security.status", "{}", "zcl.wallet_security.v1", 2048)
 HOTSWAP_PROBE_CASE("command.status.journey.default.v1", "command",
     "status", "{}", "zcl.status_journey.v1", 4096)
+/* Wave 3 probes. Every one dispatches a leaf whose catalog row declares
+ * zcl.command.empty_input.v1, so {} is the only input it accepts. */
+HOTSWAP_PROBE_CASE("command.account.list.default.v1", "command",
+    "app.account.list", "{}", "zcl.account_index.v1", 8192)
+HOTSWAP_PROBE_CASE("command.market.moderation.status.default.v1", "command",
+    "app.market.moderation.status", "{}", "zcl.market_moderation_status.v1", 4096)
+HOTSWAP_PROBE_CASE("command.rom_fetch.status.default.v1", "command",
+    "ops.debug.rom_fetch.status", "{}", "zcl.rom_fetch_status.v1", 4096)
+HOTSWAP_PROBE_CASE("command.rom_seed.status.default.v1", "command",
+    "ops.debug.rom_seed.status", "{}", "zcl.rom_seed_status.v1", 4096)

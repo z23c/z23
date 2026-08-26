@@ -59,6 +59,15 @@ HOTSWAP_ELIGIBLE("app/controllers/src/store_buyer_native_handlers.c") HOTSWAP_PR
 HOTSWAP_ELIGIBLE("app/controllers/src/wallet_security_native_handlers.c") HOTSWAP_PROBE("core.wallet.security.status")
 HOTSWAP_ELIGIBLE("app/controllers/src/status_journey_native_handler.c") HOTSWAP_PROBE("status")
 
+/* Wave 3: read-only ACCOUNT, MODERATION-POSTURE, ROM-DIAGNOSTIC and SHOP
+ * projections. None of these reads or renders block or transaction bytes;
+ * they project app-layer records and this node's own operating posture. */
+HOTSWAP_ELIGIBLE("app/controllers/src/account_controller.c") HOTSWAP_PROBE("app.account.list")
+HOTSWAP_ELIGIBLE("app/controllers/src/market_moderation_native_handler.c") HOTSWAP_PROBE("app.market.moderation.status")
+HOTSWAP_ELIGIBLE("app/controllers/src/rom_fetch_controller.c") HOTSWAP_PROBE("ops.debug.rom_fetch.status")
+HOTSWAP_ELIGIBLE("app/controllers/src/rom_seed_controller.c") HOTSWAP_PROBE("ops.debug.rom_seed.status")
+HOTSWAP_ELIGIBLE("app/controllers/src/shop_native_handler.c") HOTSWAP_PROBE("app.shop.status")
+
 /* Still reload-required (NOT eligible), by design:
  *   - REST (app/controllers/src/api_controller_routes.c) and diagnostics
  *     (diagnostics_registry.c) use independent provider atomics that cannot

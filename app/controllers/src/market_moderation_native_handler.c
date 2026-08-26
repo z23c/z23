@@ -460,3 +460,51 @@ void zcl_native_handle_market_moderation_review_set(
     reply->error.mutated = true;
     json_free(&body);
 }
+
+/* ── Hot-swappable leaves ──────────────────────────────────────────────────
+ * Read-only MODERATION POSTURE: what this node chooses to serve and relay.
+ *
+ * The mutating siblings in this file are absent from both tables. Their
+ * bytes are compiled into the module, but the loader refuses to re-point
+ * any leaf missing from this file's row in config/hotswap_swappable.def. */
+#ifdef ZCL_HOTSWAP_GEN
+#define ZCL_HOTSWAP_PROBE_LEAF "app.market.moderation.status"
+#include "hotswap/hotswap.h"
+static const struct zcl_hotswap_leaf_replacement k_market_moderation_leaves[] = {
+    { "app.market.moderation.profile.show", zcl_native_handle_market_moderation_profile_show },
+    { "app.market.moderation.guide", zcl_native_handle_market_moderation_guide },
+    { "app.market.moderation.status", zcl_native_handle_market_moderation_status },
+};
+ZCL_HOTSWAP_EXPORT_LEAVES(k_market_moderation_leaves,
+                          sizeof(k_market_moderation_leaves) / sizeof(k_market_moderation_leaves[0]))
+#endif /* ZCL_HOTSWAP_GEN */
+
+#ifdef ZCL_HOTSWAP_MODULE_GEN
+#include "hotswap/hotswap_module.h"
+#include <stdio.h>
+static const struct zcl_hotswap_leaf k_market_moderation_module_leaves[] = {
+    { "app.market.moderation.profile.show", zcl_native_handle_market_moderation_profile_show },
+    { "app.market.moderation.guide", zcl_native_handle_market_moderation_guide },
+    { "app.market.moderation.status", zcl_native_handle_market_moderation_status },
+};
+/* Structural health hook: a table that lost a name or a body would
+ * otherwise publish a leaf that dispatches into nothing. */
+static bool market_moderation_module_selftest(char *error, size_t error_cap)
+{
+    const size_t n = sizeof(k_market_moderation_module_leaves) /
+                     sizeof(k_market_moderation_module_leaves[0]);
+    for (size_t i = 0; i < n; i++) {
+        if (!k_market_moderation_module_leaves[i].name ||
+            !k_market_moderation_module_leaves[i].name[0] ||
+            !k_market_moderation_module_leaves[i].fn) {
+            if (error && error_cap)
+                (void)snprintf(error, error_cap,
+                               "market_moderation leaf %zu has no name or no body",
+                               i);
+            return false;
+        }
+    }
+    return true;
+}
+ZCL_HOTSWAP_MODULE_LEAVES(k_market_moderation_module_leaves, market_moderation_module_selftest)
+#endif /* ZCL_HOTSWAP_MODULE_GEN */
