@@ -67,18 +67,20 @@ IP there too unless that row is suppressed.
    ~568 bytes. `offer_id`/body-root chain stays self-consistent
    automatically (payment memo and delivery request key on `offer_id`).
 2. **Seller route**: one onion-only FAILCLOSED row `/market/chunk` in
-   `site_routes.def`; handler decodes the signed delivery-v2 request,
+   `site_routes.def`; handler decodes the signed delivery-v3 request,
    computes the onion-derived `expected_session_id` =
    `SHA3(session_domain || genesis || "onion" || offer_id || buyer_pubkey)`,
    then reuses `file_market_delivery_request_verify` + the existing injected
    authorize/load ports. The weakening vs per-connection nonces is named
-   here: a copied v2 request only re-serves an already-paid chunk to the
-   buyer's own key over an encrypted channel.
+   here: a copied v3 request only re-serves an already-paid chunk to the
+   buyer's own key over an encrypted channel, and only within its signed
+   900-second freshness window — relevant because this webserver logs full
+   request lines to `tor.log`.
 3. **Buyer**: branch on `offer.endpoint_type` in
    `file_market_purchase_retrieval_service.c:348-354` — onion →
    `tor_integration_fetch_onion_blocking`; clearnet → existing `rt->fetch`.
    Staging/root re-derivation unchanged.
-4. **Request transport**: GET with the 206-byte request hex-encoded in the
+4. **Request transport**: GET with the 214-byte request hex-encoded in the
    path (`/market/chunk/<hex>`) — avoids touching `vendor/tor` (which stays
    intentionally dirty). POST in `dynhost_client` is the cleaner follow-up.
 5. **Chunk slicing**: onion responses cap at 64 KiB
