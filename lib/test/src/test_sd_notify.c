@@ -374,6 +374,72 @@ int test_sd_notify(void)
             boot_sd_watchdog_test_keepalive_supervisor(true, true, false));
     }
 
+    /* ── the backstop must be WEAKER than the policy it backs ──
+     *
+     * The pet decides with the disjunction above and then calls
+     * sd_notify_watchdog_ping(), which consults whatever predicate
+     * sd_notify_set_health_check() registered and sends nothing when it says
+     * no. So the registered predicate is ANDed onto the pet's decision, and
+     * registering a STRONGER one silently replaces the policy: with
+     * boot_sd_watchdog_runtime_alive registered, the effective gate was
+     * `A || B` outside and `A` inside, which is `A`. The
+     * (recent_progress && sweep_alive) carve-out — the one that exists so a
+     * snapshot import, a catchup or a UTXO replay is not killed mid-write —
+     * could never fire, and a node writing at full rate was SIGABRTed anyway.
+     *
+     * This drives the real send path with the real registration contract: for
+     * every triple the pet keeps alive, a WATCHDOG=1 datagram must actually
+     * leave the process. The row that fails when the strong predicate is
+     * registered is (runtime=0, sweep=1, progress=1). */
+    {
+        char path[128];
+        int fd = sdn_bind_path_socket(path, sizeof(path));
+        SDN_CHECK("backstop-test socket bound", fd >= 0);
+        if (fd >= 0) {
+            setenv("NOTIFY_SOCKET", path, 1);
+            sd_notify_reset_for_testing();
+            SDN_CHECK("init succeeds for backstop test", sd_notify_init());
+
+            static const struct {
+                bool runtime, sweep, progress;
+                const char *why;
+            } rows[] = {
+                { true,  true,  false, "runtime alive, no progress" },
+                { false, true,  true,  "stale connman, bulk write in flight" },
+                { true,  true,  true,  "everything live" },
+            };
+            for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+                bool keep = boot_sd_watchdog_test_keepalive_supervisor(
+                    rows[i].runtime, rows[i].sweep, rows[i].progress);
+                if (!keep)
+                    continue;
+                /* Register the SWEEP leg, which is what production registers
+                 * and what this file's guarantee is about. */
+                g_fake_health_healthy = rows[i].sweep;
+                sd_notify_set_health_check(fake_health_check);
+                bool sent = boot_sd_watchdog_test_pet_decide(keep) &&
+                            sd_notify_watchdog_ping();
+                char buf[64];
+                ssize_t n = sent ? sdn_try_recv(fd, buf, sizeof(buf)) : -1;
+                SDN_CHECK(rows[i].why,
+                    sent && n > 0 && strcmp(buf, "WATCHDOG=1\n") == 0);
+            }
+
+            /* And the backstop still bites when the thing it backs is gone:
+             * a stale sweep silences the ping no matter what the pet said. */
+            g_fake_health_healthy = false;
+            sd_notify_set_health_check(fake_health_check);
+            SDN_CHECK("a stale sweep still silences the ping",
+                !sd_notify_watchdog_ping() && sdn_confirm_silence(fd));
+
+            sd_notify_set_health_check(NULL);
+            close(fd);
+            unlink(path);
+            unsetenv("NOTIFY_SOCKET");
+            sd_notify_reset_for_testing();
+        }
+    }
+
     /* ── earned readiness: every leg confirmed on its own evidence ──
      *
      * The defect under regression: READY=1 rested on onion descriptor
