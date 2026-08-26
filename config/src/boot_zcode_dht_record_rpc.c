@@ -619,9 +619,11 @@ static bool rpc_record_board(const struct json_value *params, bool help,
   json_push_kv_int(result, "seen_total", (int64_t)seen_total);
   json_push_kv_bool(result, "truncated", seen_total > count);
   struct json_value rows;
+  json_init(&rows);
   json_set_array(&rows);
   for (size_t i = 0; i < count; i++) {
     struct json_value row;
+    json_init(&row);
     record_row_json(&row, &records[i], false, false, false, false);
     json_push_back(&rows, &row);
     json_free(&row);
