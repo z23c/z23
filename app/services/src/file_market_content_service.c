@@ -11,6 +11,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -223,6 +224,116 @@ struct zcl_result file_market_content_register(
     return ZCL_OK;
 }
 
+/* Slice-serving runs one GET per <=60 KiB slice, and each call used to
+ * re-hash the whole chunk (up to FILE_MARKET_CHUNK_SIZE = 50 MiB) only to
+ * compare against the same immutable record.chunk_sha3. The digest table
+ * below caches ONLY that computed digest, keyed on everything the chunk
+ * read already proved about the backing inode (identity, size, mtime) and
+ * the registered record it must match. The full read and pre/post
+ * stability checks stay on every path, and the key includes st_ctim:
+ * mtime alone can be restored with futimens(2) after an in-place rewrite,
+ * but no userspace call sets ctime backwards — any rewrite of the backing
+ * bytes therefore forces a full re-hash here against the actual bytes, so
+ * a stale digest can never pass for changed content. This is a
+ * derived projection of verification already performed, not a second
+ * source of truth: entries are replaced by exact key match and never
+ * trusted past the next full read. */
+struct market_content_digest_entry {
+    bool used;
+    uint8_t offer_id[32];
+    uint32_t chunk_index;
+    dev_t dev;
+    ino_t ino;
+    off_t size;
+    struct timespec mtim;
+    struct timespec ctim;
+    uint8_t sha3[32];
+};
+
+#define MARKET_CONTENT_DIGEST_SLOTS 4
+static struct market_content_digest_entry
+    g_content_digests[MARKET_CONTENT_DIGEST_SLOTS];
+static pthread_mutex_t g_content_digests_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static void content_digest_slot_stage(struct market_content_digest_entry *staged,
+                                      const uint8_t offer_id[32],
+                                      uint32_t chunk_index,
+                                      const struct stat *st,
+                                      const uint8_t sha3[32])
+{
+    memset(staged, 0, sizeof(*staged));
+    staged->used = true;
+    memcpy(staged->offer_id, offer_id, 32);
+    staged->chunk_index = chunk_index;
+    staged->dev = st->st_dev;
+    staged->ino = st->st_ino;
+    staged->size = st->st_size;
+    staged->mtim = st->st_mtim;
+    staged->ctim = st->st_ctim;
+    memcpy(staged->sha3, sha3, 32);
+}
+
+static bool content_digest_lookup(const uint8_t offer_id[32],
+                                  uint32_t chunk_index,
+                                  uint32_t want,
+                                  const struct stat *st,
+                                  const uint8_t chunk_sha3[32],
+                                  uint8_t digest_out[32])
+{
+    /* The key must pin both the exact bytes observed this call and the
+     * registration the digest will be compared against; anything less
+     * reruns the hash. */
+    if ((uint64_t)st->st_size != (uint64_t)want)
+        return false;
+    pthread_mutex_lock(&g_content_digests_mutex);
+    for (size_t i = 0; i < MARKET_CONTENT_DIGEST_SLOTS; i++) {
+        struct market_content_digest_entry *e = &g_content_digests[i];
+        if (!e->used || e->dev != st->st_dev || e->ino != st->st_ino ||
+            e->mtim.tv_sec != st->st_mtim.tv_sec ||
+            e->mtim.tv_nsec != st->st_mtim.tv_nsec ||
+            e->ctim.tv_sec != st->st_ctim.tv_sec ||
+            e->ctim.tv_nsec != st->st_ctim.tv_nsec ||
+            memcmp(e->offer_id, offer_id, 32) != 0 ||
+            e->chunk_index != chunk_index ||
+            memcmp(e->sha3, chunk_sha3, 32) != 0)
+            continue;
+        memcpy(digest_out, e->sha3, 32);
+        pthread_mutex_unlock(&g_content_digests_mutex);
+        return true;
+    }
+    pthread_mutex_unlock(&g_content_digests_mutex);
+    return false;
+}
+
+static void content_digest_store(const uint8_t offer_id[32],
+                                 uint32_t chunk_index,
+                                 uint32_t want,
+                                 const struct stat *st,
+                                 const uint8_t digest[32])
+{
+    if ((uint64_t)st->st_size != (uint64_t)want)
+        return;
+    struct market_content_digest_entry staged;
+    content_digest_slot_stage(&staged, offer_id, chunk_index, st, digest);
+    pthread_mutex_lock(&g_content_digests_mutex);
+    struct market_content_digest_entry *chosen = &g_content_digests[0];
+    for (size_t i = 0; i < MARKET_CONTENT_DIGEST_SLOTS; i++) {
+        struct market_content_digest_entry *e = &g_content_digests[i];
+        if (!e->used) {
+            chosen = e; /* prefer a genuinely free slot */
+            break;
+        }
+        if (e->dev == st->st_dev && e->ino == st->st_ino &&
+            memcmp(e->offer_id, offer_id, 32) == 0 &&
+            e->chunk_index == chunk_index) {
+            chosen = e; /* same identity, stats moved: replace in place */
+            break;
+        }
+    }
+    *chosen = staged;
+    pthread_mutex_unlock(&g_content_digests_mutex);
+}
+
 struct zcl_result file_market_content_load_chunk(
     struct node_db *ndb, const uint8_t offer_id[32], uint32_t chunk_index,
     struct file_market_delivery_chunk *out)
@@ -263,9 +374,17 @@ struct zcl_result file_market_content_load_chunk(
         after.st_ino == st.st_ino && after.st_size == st.st_size;
     close(fd);
     uint8_t digest[32];
-    if (read_ok)
+    if (!read_ok || !stable) {
+        free(data);
+        return ZCL_ERR(MARKET_CONTENT_ERR_IO,
+                       "registered private content read was not stable");
+    }
+    if (!content_digest_lookup(offer_id, chunk_index, want, &after,
+                               record.chunk_sha3, digest)) {
         sha3_256(data, want, digest);
-    if (!read_ok || !stable || memcmp(digest, record.chunk_sha3, 32) != 0) {
+        content_digest_store(offer_id, chunk_index, want, &after, digest);
+    }
+    if (memcmp(digest, record.chunk_sha3, 32) != 0) {
         free(data);
         return ZCL_ERR(MARKET_CONTENT_ERR_ROOT,
                        "registered private content chunk digest mismatch");
