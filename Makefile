@@ -447,8 +447,14 @@ DEVLOOP_INCLUDES = -Itools/dev
 # hot-swap/reload cycle, the persistent inotify watcher, and the subprocess
 # runner) are DEV_ONLY_SRCS: linked only into the DEV binary, never the release
 # binary. `check-release-no-dev-symbols` proves their entry points are absent.
+# Standalone dev CLIs under tools/dev own their own main() and are compiled
+# directly by their driver script, never linked into the node binary, the dev
+# binary, or the test harness. They must leave the wildcard BEFORE the
+# DEV_ONLY_SRCS split, because DEV_ONLY_SRCS is still linked (into the dev
+# binary) — filtering there would only move the duplicate-`main` link error.
+DEV_STANDALONE_SRCS = tools/dev/hotswap_verify_so.c
 DEVLOOP_ALL_SRCS = $(call zcl_filter_ephemeral_sources,\
-	$(wildcard tools/dev/*.c))
+	$(filter-out $(DEV_STANDALONE_SRCS),$(wildcard tools/dev/*.c)))
 DEV_ONLY_SRCS = tools/dev/devloop_cli.c tools/dev/devloop_cycle.c \
 	tools/dev/devloop_watch.c tools/dev/devloop_process.c \
 	tools/dev/devloop_hotswap_build.c tools/dev/devloop_restart_build.c \

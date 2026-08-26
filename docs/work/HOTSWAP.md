@@ -837,6 +837,38 @@ would pass every gate, but they render block and transaction bytes — the
 block/transaction path. Read-only is not the test there; admitting them is an
 owner decision, not a lint pass.
 
+#### Probe shape: which rows can activate with no node
+
+Probe-before-publish dispatches the declared probe leaf and demands a
+schema-valid reply. That makes the probe leaf's *shape* — not the TU's — decide
+whether a row can be activated hermetically, with no running node and no
+datadir. Almost every admitted TU is an RPC front door: its bodies call
+`node_rpc_call()`, so its probe needs a live node and
+`hotswap_activate_local()` refuses at `stage=probe` without one. That refusal is
+the gate working, and must not be suppressed.
+
+**`app/controllers/src/meta_native_handlers.c` is the exception, and it is
+already admitted.** The TU contains **zero** `node_rpc_call` — its only
+functional include is `metrics/prometheus_metrics.h`. Its declared probe
+`ops.metrics` runs `zcl_native_metrics_body`, which ignores `args`, calls
+`metrics_prometheus_render_prometheus()` — process-local counters and atomics
+under a static mutex, needing no init — and *unconditionally* wraps the result
+in `{"format":"prometheus","text":"…"}` with no top-level `"error"` key. Its
+sibling leaf `core.consensus.report` is equally RPC-free but *does* fail closed
+when the render is empty, so `ops.metrics` is the one to probe against.
+
+Two honest caveats, neither measured here:
+
+- The render's dependency closure reaches `blocker_*`, `event_*` and
+  `metrics_stage_render_prometheus`. All are process-local reads that return
+  zeros uninitialized — none is an RPC — but that closure is large enough that
+  I did not link it standalone to measure the rendered size.
+- The `ops.metrics` probe case budget is **8192 bytes**. A bare process renders
+  a nearly-empty registry and should fit easily; a busy resident node renders
+  much more and could exceed it. If a hermetic harness trips the budget, that is
+  a byte ceiling to raise in `config/hotswap_probe_cases.def`, not a schema
+  failure.
+
 #### Proving a row, rather than claiming it
 
 An allowlist row that has never been loaded is a claim, not an admission. Every
