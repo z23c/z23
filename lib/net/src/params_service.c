@@ -25,11 +25,13 @@
 #include "msgprocessor_internal.h"
 
 #include "net/fast_sync.h"
+#include "net/connman.h"
 #include "net/msg_bounds_guard.h"
 #include "net/net.h"
 #include "net/peer_scoring.h"
 #include "sapling/params_fetch.h"
 #include "base/safe_alloc.h"
+#include "base/serialize_le.h"
 #include "core/serialize.h"
 #include "platform/time_compat.h"
 #include "util/log_macros.h"
@@ -46,6 +48,17 @@ static _Atomic bool g_serving = false;
 static struct fast_sync_rate_limiter g_param_chunk_limiter;
 static struct fast_sync_rate_limiter g_param_manifest_limiter;
 static pthread_mutex_t g_serve_limiter_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* fast_sync_rate_limiter accepts an opaque 16-byte bucket key despite its
+ * historical `ip` spelling. Onion peers have an all-zero IP placeholder, so
+ * key them by the stable torv3 identity head, matching the peer census. */
+static void serve_rate_key(const struct net_addr *addr, uint8_t out[16])
+{
+    if (addr->has_torv3)
+        memcpy(out, addr->torv3, 16);
+    else
+        memcpy(out, addr->ip, 16);
+}
 
 int param_service_arm_serving(const char *params_dir)
 {
@@ -64,8 +77,10 @@ static bool serve_rate_ok(struct fast_sync_rate_limiter *rl,
                           uint64_t global)
 {
     bool ok;
+    uint8_t key[16];
+    serve_rate_key(&node->addr.svc.addr, key);
     pthread_mutex_lock(&g_serve_limiter_lock);
-    ok = fast_sync_rate_check_n(rl, node->addr.svc.addr.ip, per_ip, global);
+    ok = fast_sync_rate_check_n(rl, key, per_ip, global);
     pthread_mutex_unlock(&g_serve_limiter_lock);
     return ok;
 }
@@ -80,6 +95,21 @@ static void push_msg(struct msg_processor *mp, struct p2p_node *node,
     if (body && len)
         p2p_node_write_message_data(node, body, len);
     (void)p2p_node_end_message(node);
+}
+
+static void wire_entry_encode(uint8_t idx, uint64_t bytes, uint32_t chunks,
+                              uint8_t out[13])
+{
+    out[0] = idx;
+    zcl_write_u64_le(out + 1, bytes);
+    zcl_write_u32_le(out + 9, chunks);
+}
+
+static void wire_chunk_request_encode(uint8_t idx, uint32_t chunk,
+                                      uint8_t out[5])
+{
+    out[0] = idx;
+    zcl_write_u32_le(out + 1, chunk);
 }
 
 /* "Which parameter files can you serve?" — answered with the pinned index,
@@ -97,13 +127,8 @@ bool mp_handle_param_info_req(struct msg_processor *mp, struct p2p_node *node,
         if (!zcl_param_serve_ready(i))
             continue;
         const struct zcl_param_pin *p = &zcl_param_pins[i];
-        body[w++] = (uint8_t)i;
-        uint64_t bytes = p->bytes;
-        memcpy(body + w, &bytes, 8);
-        w += 8;
-        uint32_t cc = p->chunk_count;
-        memcpy(body + w, &cc, 4);
-        w += 4;
+        wire_entry_encode((uint8_t)i, p->bytes, p->chunk_count, body + w);
+        w += 13;
         count++;
     }
     body[0] = count;
@@ -213,10 +238,13 @@ static struct {
     char                     dir[1024];
     int                      file_idx;      /* pinned index in flight, -1 idle */
     struct zcl_param_fetch  *session;
-    struct peer_waste        waste[64];
+    struct peer_waste        waste[PARAM_PEER_ACCOUNTING_SLOTS];
     struct inflight          inflight[64];
     int64_t                  manifest_deadline;
 } g_fetch = { .file_idx = -1 };
+
+static_assert(PARAM_PEER_ACCOUNTING_SLOTS >= REACTOR_MAX_FDS,
+              "parameter peer accounting must cover reactor capacity");
 
 static pthread_mutex_t g_fetch_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -339,7 +367,9 @@ static struct peer_waste *waste_slot_locked(node_id_t id)
 static bool peer_written_off_locked(node_id_t id)
 {
     struct peer_waste *w = waste_slot_locked(id);
-    return w && w->wasted >= PARAM_PEER_WASTE_BUDGET_BYTES;
+    /* The table covers every admitted connection. If that invariant is ever
+     * broken, fail closed rather than grant an unaccounted peer free hashing. */
+    return !w || w->wasted >= PARAM_PEER_WASTE_BUDGET_BYTES;
 }
 
 static void peer_charge_locked(node_id_t id, uint64_t bytes)
@@ -366,7 +396,23 @@ static bool inflight_has_locked(uint32_t chunk)
     return false;
 }
 
-static void inflight_add_locked(node_id_t id, uint32_t chunk, int64_t now)
+static bool inflight_has_peer_locked(node_id_t id, uint32_t chunk)
+{
+    for (size_t i = 0; i < sizeof(g_fetch.inflight) / sizeof(g_fetch.inflight[0]); i++)
+        if (g_fetch.inflight[i].used && g_fetch.inflight[i].id == id &&
+            g_fetch.inflight[i].chunk == chunk)
+            return true;
+    return false;
+}
+
+/* The last gate before zcl_param_fetch_accept_chunk hashes or writes bytes. */
+static bool chunk_admitted_locked(node_id_t id, uint32_t chunk)
+{
+    return !peer_written_off_locked(id) &&
+           inflight_has_peer_locked(id, chunk);
+}
+
+static bool inflight_add_locked(node_id_t id, uint32_t chunk, int64_t now)
 {
     for (size_t i = 0; i < sizeof(g_fetch.inflight) / sizeof(g_fetch.inflight[0]); i++) {
         if (g_fetch.inflight[i].used)
@@ -375,8 +421,9 @@ static void inflight_add_locked(node_id_t id, uint32_t chunk, int64_t now)
         g_fetch.inflight[i].id = id;
         g_fetch.inflight[i].chunk = chunk;
         g_fetch.inflight[i].deadline = now + PARAM_REQUEST_TIMEOUT_SECS;
-        return;
+        return true;
     }
+    return false;
 }
 
 static void inflight_clear_locked(uint32_t chunk)
@@ -409,11 +456,10 @@ static void request_chunks_locked(struct msg_processor *mp,
         if (inflight_has_locked(picks[i]))
             continue;
         uint8_t body[5];
-        body[0] = (uint8_t)g_fetch.file_idx;
-        uint32_t c = picks[i];
-        memcpy(body + 1, &c, 4);
+        wire_chunk_request_encode((uint8_t)g_fetch.file_idx, picks[i], body);
+        if (!inflight_add_locked(node->id, picks[i], now))
+            break;
         push_msg(mp, node, MSG_PARAM_CHUNK_REQ, body, sizeof(body));
-        inflight_add_locked(node->id, picks[i], now);
         sent++;
     }
 }
@@ -557,6 +603,15 @@ bool mp_handle_param_chunk(struct msg_processor *mp, struct p2p_node *node,
         pthread_mutex_unlock(&g_fetch_lock);
         return true;
     }
+    /* A response has authority to consume CPU and touch the partial file only
+     * when this node requested this exact chunk from this exact peer. Check
+     * both predicates before the chunk hash in zcl_param_fetch_accept_chunk.
+     * Unsolicited traffic and peers that exhausted their waste budget are
+     * discarded at constant cost. */
+    if (!chunk_admitted_locked(node->id, chunk)) {
+        pthread_mutex_unlock(&g_fetch_lock);
+        return true;
+    }
     enum zcl_param_chunk_result r =
         zcl_param_fetch_accept_chunk(g_fetch.session, chunk, buf, want);
     if (r == ZCL_PARAM_CHUNK_OK) {
@@ -605,6 +660,59 @@ void param_service_tick(struct msg_processor *mp, int64_t now)
 }
 
 #ifdef ZCL_TESTING
+void param_service_test_rate_key(const uint8_t ip[16], bool has_torv3,
+                                 const uint8_t torv3[32], uint8_t out[16])
+{
+    struct net_addr addr = {0};
+    memcpy(addr.ip, ip, 16);
+    addr.has_torv3 = has_torv3;
+    memcpy(addr.torv3, torv3, 32);
+    serve_rate_key(&addr, out);
+}
+
+void param_service_test_wire_entry(uint8_t idx, uint64_t bytes,
+                                   uint32_t chunks, uint8_t out[13])
+{
+    wire_entry_encode(idx, bytes, chunks, out);
+}
+
+void param_service_test_wire_chunk_request(uint8_t idx, uint32_t chunk,
+                                           uint8_t out[5])
+{
+    wire_chunk_request_encode(idx, chunk, out);
+}
+
+void param_service_test_peer_guard_reset(void)
+{
+    pthread_mutex_lock(&g_fetch_lock);
+    memset(g_fetch.waste, 0, sizeof(g_fetch.waste));
+    memset(g_fetch.inflight, 0, sizeof(g_fetch.inflight));
+    pthread_mutex_unlock(&g_fetch_lock);
+}
+
+bool param_service_test_mark_requested(int32_t id, uint32_t chunk)
+{
+    pthread_mutex_lock(&g_fetch_lock);
+    bool ok = inflight_add_locked(id, chunk, now_secs());
+    pthread_mutex_unlock(&g_fetch_lock);
+    return ok;
+}
+
+void param_service_test_charge_peer(int32_t id, uint64_t bytes)
+{
+    pthread_mutex_lock(&g_fetch_lock);
+    peer_charge_locked(id, bytes);
+    pthread_mutex_unlock(&g_fetch_lock);
+}
+
+bool param_service_test_chunk_admitted(int32_t id, uint32_t chunk)
+{
+    pthread_mutex_lock(&g_fetch_lock);
+    bool ok = chunk_admitted_locked(id, chunk);
+    pthread_mutex_unlock(&g_fetch_lock);
+    return ok;
+}
+
 int param_service_test_accept_chunk(uint32_t file_idx, uint32_t chunk_idx,
                                     const uint8_t *data, size_t len)
 {
