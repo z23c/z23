@@ -57,3 +57,14 @@ HOTSWAP_ELIGIBLE("app/controllers/src/diagnostics_native_handlers.c") HOTSWAP_PR
  *   - diagnostics_registry.c holds mutable file-scope statics
  *     (g_state_subsystems_csv, non-const p_state[]).
  * Re-enable REST/diagnostics only behind one unified resident provider table. */
+
+/* The PURE decision leaf — and the only row here whose declared probe is
+ * computable IN-PROCESS: no running node, no datadir, no RPC, no wall-clock.
+ * Every row above is an RPC front door whose module trampoline calls
+ * zcl_native_bridge_run() into a body that issues a loopback RPC, so
+ * probe-before-publish for those rows needs a resident node and correctly
+ * refuses at stage=probe without one. This row is the hermetic case: its body
+ * answers from `args` plus compiled-in constants, so the identical gauntlet
+ * runs to completion in a throwaway CLI process. See
+ * app/controllers/src/policy_native_handlers.c. */
+HOTSWAP_ELIGIBLE("app/controllers/src/policy_native_handlers.c") HOTSWAP_PROBE("zcode.package.policy.limits")

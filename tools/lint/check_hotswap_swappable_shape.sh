@@ -133,7 +133,18 @@ fi
 
 # A shape LEAF the module ABI may re-point.
 ALLOWED='^(app/controllers|app/views|app/conditions)/'
-ISLAND_ALLOWED='^(app/(controllers|views|conditions|services)|lib/(metaverse|encoding))/.+\.c$'
+# Island membership widens the CODE a module carries, never its authority.
+# The roots below are folder-wide because everything under them is already a
+# stateless shape/codec surface. A pure DECISION leaf that lives under a
+# mixed-shape library root is admitted ONE FILE AT A TIME instead, so widening
+# never happens by accident:
+#   lib/vcs/src/package_policy.c  the frozen ZCODE local P2P ratio + anti-spam
+#       policy table. Pure decision functions over explicit facts — no
+#       wall-clock, no filesystem, no network, no mutable file-scope statics
+#       (check_hotswap_static_state re-proves the last clause every run). The
+#       rest of lib/vcs (stores, swarm sessions, DHT services) stays out.
+# FORBIDDEN below is unchanged and still applies to every entry here.
+ISLAND_ALLOWED='^(app/(controllers|views|conditions|services)|lib/(metaverse|encoding))/.+\.c$|^lib/vcs/src/package_policy\.c$'
 # Belt-and-suspenders: never under any of these, even if mislabeled a shape.
 FORBIDDEN='^(core|lib/consensus|lib/validation|lib/storage|lib/net|lib/coins|lib/chain|lib/mining|app/jobs|lib/kernel|lib/supervisor|app/supervisors|domain/consensus)/'
 

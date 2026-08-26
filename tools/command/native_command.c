@@ -47,6 +47,8 @@
 #include "controllers/meta_native_handlers.h"
 #include "controllers/ops_native_handlers.h"
 #include "controllers/explain_native_handlers.h"
+#include "controllers/policy_native_handlers.h"
+#include "controllers/policy_native_resident.h"
 #include "config/consensus_state_producer_receipt.h"
 #include "command/rom_compile_render.h"
 #include "command/rom_compile_offline.h"
@@ -151,6 +153,9 @@ static const struct {
     { "app.market.list", zcl_native_zmarket_list_body },
     { "app.market.status", zcl_native_zmarket_status_body },
     { "app.market.content.list", zcl_native_zmarket_content_list_body },
+    /* The pure decision leaf. Its body reaches no RPC and no datadir, which
+     * is what makes it dispatchable in-process as a hot-swap probe case. */
+    { "zcode.package.policy.limits", zcl_native_policy_limits_body },
     { "app.swap.chains", zcl_native_swap_chains_body },
     { "app.swap.list", zcl_native_swap_list_body },
 };
@@ -3540,6 +3545,10 @@ int zcl_native_command_main(const char *root_word, const char *const *args,
     g_native_datadir_explicit = datadir_explicit;
     chain_params_select(network);
     zcl_native_bridge_bind_rpc(datadir, rpc_port);
+    /* Stamp the resident half of the hot-swappable package-policy surface
+     * BEFORE any module .so can be dlopen'd below. The swappable leaf reports
+     * this flag: a generation that had cloned the state would answer false. */
+    zcl_native_policy_resident_mark_boot();
 
     const struct zcl_command_registry *reg = catalog();
     char why[128];

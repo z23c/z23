@@ -71,3 +71,10 @@ HOTSWAP_SWAPPABLE("app/controllers/src/diagnostics_native_handlers.c",
  * its pure service/view/codec/adapter closure is one reloadable island. */
 HOTSWAP_SWAPPABLE("app/controllers/src/metaverse_controller.c",
                   "metaverse.agent.status metaverse.agent.money metaverse.agent.liquidity metaverse.agent.audit metaverse.property.list metaverse.property.show")
+/* The pure decision leaf. Its body and the frozen policy table it reads are
+ * both inside this module's island, so a re-pointed dispatch enters freshly
+ * compiled code; the resident counters it reports live in the NON-island
+ * sibling app/controllers/src/policy_native_resident.c and are imported from
+ * the -rdynamic host at dlopen, so the swap never clones process state. */
+HOTSWAP_SWAPPABLE("app/controllers/src/policy_native_handlers.c",
+                  "zcode.package.policy.limits")

@@ -4561,3 +4561,38 @@ ZCL_COMMAND_PLANNED_COMMAND(
     "no verified node-release feed exists yet: staging an unverified "
     "binary next to the running node would be a self-inflicted supply-chain "
     "compromise, so this stays refused until check can prove a candidate")
+
+/* ── Local P2P policy projection (hot-swap pilot leaf) ─────────────────────
+ * The ONE swappable leaf whose body is a pure decision over its arguments and
+ * compiled-in constants: no node, no datadir, no RPC, no wall-clock. That is
+ * what lets the hot-swap loader dispatch it as its own probe-before-publish
+ * case in-process. See config/hotswap_swappable.def and docs/work/HOTSWAP.md.
+ */
+ZCL_COMMAND_BRANCH("zcode.package.policy", "zcode.package",
+                   "Local ratio and anti-spam policy",
+                   ZCL_COMMAND_LAYER_APP)
+
+ZCL_COMMAND_READY_READ(
+    "zcode.package.policy.limits", "zcode.package.policy", "",
+    "Show the frozen local P2P policy limits for one contributor tier",
+    "The compiled policy table for the tier this node would apply, either the "
+    "tier named in `tier` or the one derived from the supplied earned score "
+    "and verified byte counters. Every number is a local rate limit, never a "
+    "ban: the new-user row is the free allowance an unscored peer always "
+    "keeps. `ratio_milli` is this node's own local upload/download accounting "
+    "in thousandths, never a ledger fact. `resident_booted` and "
+    "`resident_dispatches` report the resident process counters, which a "
+    "reloaded generation of this leaf reads rather than copies.",
+    4096,
+    "zcode,package,policy,tier,ratio,allowance,limits,quota,anti-spam,seeder",
+    "zcl.zcode_package_policy_limits.input.v1",
+    "zcl.zcode_package_policy_limits.v1",
+    "tier,earned_score,uploaded_bytes,downloaded_bytes", "",
+    "z23 zcode package policy limits --input='{\"earned_score\":600}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_INSTANT,
+    ZCL_COMMAND_COST_TINY,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)

@@ -1325,3 +1325,15 @@ AGENT_IMPACT_RULE("tools/lint/check_source_identity_authority.sh|tools/lint/sour
  * the hardened builders, so an edit here can never reach the push gate having
  * run zero test groups. */
 AGENT_IMPACT_RULE("tools/lint/check_outparam_init_before_return.sh|tools/lint/outparam_init_baseline.txt|app/services/src/swap_settlement_service.c|app/services/include/services/swap_settlement_service.h", "make_lint_gates swap_settlement api rpc_safety")
+/* LANE hotswap-trampoline: the first LOW-LEVEL hot-swappable surface, split
+ * across a pure decision leaf and its resident sibling. Any edit to either
+ * half, to the frozen policy table that travels inside the module island, to
+ * the four manifests that must agree about the split, or to the shape gate
+ * that admits the island member, has to re-prove the same four properties:
+ * the leaf stays a pure in-process probe case, the resident counters stay
+ * singular, the manifests stay consistent, and the admit gauntlet still
+ * refuses a misdeclared module. It also rides the command-catalog groups
+ * because the leaf is a READY read-only catalog row bound through the native
+ * bridge, and the lint-gate group because check_hotswap_swappable_shape.sh
+ * carries a per-file island admission that its self-test fixtures pin. */
+AGENT_IMPACT_RULE("app/controllers/src/policy_native_handlers.c|app/controllers/include/controllers/policy_native_handlers.h|app/controllers/src/policy_native_resident.c|app/controllers/include/controllers/policy_native_resident.h|lib/vcs/src/package_policy.c|lib/vcs/include/vcs/package_policy.h|lib/test/src/test_hotswap_policy_module.c|config/hotswap_islands.def|config/hotswap_probe_cases.def|tools/lint/check_hotswap_swappable_shape.sh", "hotswap_policy_module hotswap_module_v2 hotswap_module hotswap_loader command_registry_catalog native_api_contract make_lint_gates")

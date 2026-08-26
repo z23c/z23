@@ -14,3 +14,11 @@ HOTSWAP_ISLAND("app/controllers/src/wallet_native_handlers.c",
                "app/controllers/src/wallet_native_read_bodies.c")
 HOTSWAP_ISLAND("app/controllers/src/metaverse_controller.c",
                "app/services/src/metaverse_agent_service.c app/services/src/property_catalog_service.c lib/metaverse/src/property_id.c lib/metaverse/src/property_view.c lib/metaverse/src/property_work.c lib/metaverse/src/property_action.c lib/metaverse/src/adapter_registry.c lib/metaverse/src/manifest_read.c lib/metaverse/src/adapter_content.c lib/metaverse/src/adapter_zcode.c lib/metaverse/src/adapter_znam.c lib/metaverse/src/adapter_zslp.c")
+
+/* The frozen ZCODE local P2P ratio + anti-spam policy table. A genuinely pure
+ * decision TU: no wall-clock, no filesystem, no network, and no mutable
+ * file-scope statics (the lint gate re-checks that on every run). It joins the
+ * island so that editing the POLICY RULE itself — not just its projection —
+ * takes effect from a single-TU module rebuild with no relink. */
+HOTSWAP_ISLAND("app/controllers/src/policy_native_handlers.c",
+               "lib/vcs/src/package_policy.c")
