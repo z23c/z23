@@ -54,19 +54,21 @@ set -euo pipefail
 ISO_LIVE_PORTS="8023 8033 8034 8035 8043 8044 8045 8046 8232 8443 \
 18034 18232 18234 18243 18244 18245 18246"
 
-# Published fleet P2P ports (deploy/devfleet/node*.txt) are owned by their
-# units. Isolated instances must never bind them — node2's 39360 is the
-# collision that bit a pair-probe peer quad at base 39350.
-iso_append_published_fleet_ports() {
-    local dir="${ISO_FLEET_DIR:-}" f p
-    if [ -z "$dir" ] || [ ! -d "$dir" ]; then
-        if [ -d deploy/devfleet ]; then
-            dir=deploy/devfleet
-        else
-            return 0
-        fi
-    fi
-    for f in "$dir"/node*.txt; do
+# An operator running a named mesh (any number of long-lived peers, each
+# with a published P2P port) can point ZCL_MESH_PORTS_DIR at a directory of
+# "<name>.txt" files containing a "P2P_PORT=<port>" line, one per peer.
+# Isolated/throwaway instances must never bind a port one of those peers
+# owns — a real collision has bitten a pair-probe peer quad before, once,
+# when an isolated base landed on a running peer's published port. With
+# ZCL_MESH_PORTS_DIR unset (the default), this check is a no-op: the
+# static live-port refuse-set plus the ss(8) LISTEN preflight below are
+# still the authoritative collision guards, so an operator who names no
+# mesh gets safe (if slightly less specific) isolation, never a crash and
+# never a false pass.
+iso_append_published_mesh_ports() {
+    local dir="${ZCL_MESH_PORTS_DIR:-}" f p
+    [ -n "$dir" ] && [ -d "$dir" ] || return 0
+    for f in "$dir"/*.txt; do
         [ -f "$f" ] || continue
         p=$(sed -n 's/^P2P_PORT=//p' "$f" | head -1)
         case $p in
@@ -209,7 +211,7 @@ iso_init() {
     [ -x "$ISO_NODE_BIN" ] || iso_die "$ISO_NODE_BIN not built — run make first"
     [ -x "$ISO_RPC_BIN" ]  || iso_die "$ISO_RPC_BIN not built — run make zcl-rpc"
 
-    iso_append_published_fleet_ports
+    iso_append_published_mesh_ports
 
     # 1) Derive + validate the 39xxx port quad FIRST (no datadir yet, so
     #    a bad base or a live-set member aborts before we create anything).

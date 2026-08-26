@@ -1,18 +1,18 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * stage_repair_coin_backfill — orchestration for the guarded frontier coin
- * backfill (docs/work/coin-backfill-repair.md §2). Repairs the lowest
- * `prevout_unresolved` reducer hole by re-deriving the missing coin(s) from
- * the raw creating block (hash-verified on the active chain) and inserting
- * them ONLY after the chain-bound no-spend scan (G9, the sibling
- * stage_repair_coin_backfill_scan.c TU) returns CLEAN. Guard ladder G0-G10;
+ * backfill. Repairs the lowest `prevout_unresolved` reducer hole by
+ * re-deriving the missing coin(s) from the raw creating block (hash-verified
+ * on the active chain) and inserting them ONLY after the chain-bound
+ * no-spend scan (G9, the sibling stage_repair_coin_backfill_scan.c TU)
+ * returns CLEAN. Guard ladder G0-G10 (see the per-guard comments below);
  * refusals are whole-set and every refusal status pages directly (typed
  * blocker + EV_OPERATOR_NEEDED, once-latched per (H,holehash,status) — see
  * stage_repair_coin_backfill_util.c).
  *
- * The ONLY consensus mutation is the coins_kv insert transaction (§2 "The
- * write transaction"): no cursor, no *_log row, no coins_applied_height,
- * never tip_finalize_log. */
+ * The ONLY consensus mutation is the coins_kv insert transaction
+ * (coin_backfill_insert_tx below): no cursor, no *_log row, no
+ * coins_applied_height, never tip_finalize_log. */
 
 #include "jobs/stage_repair_coin_backfill.h"
 #include "stage_repair_coin_backfill_internal.h"

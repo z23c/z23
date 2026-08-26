@@ -690,7 +690,7 @@ static int test_network_peer_add_binding(void)
         json_set_object(&input);
         (void)json_push_kv_str(
             &input, "address",
-            "5wvfod4ikluv4w3lqe3whn2k7xdsympxxu2qkqw452thtjxbar5hrcqd.onion:8055");
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion:8055");
         request.input = &input;
         zcl_command_reply_init(&reply, spec->output_schema);
         zcl_native_handle_network_peer_add(&request, &reply);

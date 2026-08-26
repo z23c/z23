@@ -120,6 +120,7 @@
 #include "wallet/wallet_canary.h"
 #include "wallet/wallet_db.h"
 #include "sapling/params_init.h"
+#include "config/boot_params_gate.h"
 #include "metrics/metrics.h"
 #include "chain/pow.h"
 #include "controllers/sync_controller.h"
@@ -738,61 +739,27 @@ static bool boot_step_init_crypto_and_state(struct app_context *ctx,
     if (ctx->params_dir)
         snprintf(g_params_dir_buf, sizeof(g_params_dir_buf), "%s", ctx->params_dir);
 
-    /* On mainnet, the zk verification keys are consensus-critical — a
-     * node with no ~/.zcash-params cannot validate shielded proofs, and the
-     * deferred background loader would just fail while proof_validate idles
-     * forever (the old silent-halt). Synchronously confirm the required files
-     * EXIST + are readable BEFORE advancing CRYPTO_READY. If any is missing:
-     * name a PERMANENT blocker, page the operator ONCE, do NOT advance
-     * CRYPTO_READY (params genuinely failed to load), and PARK alive-degraded
-     * so a missing-params install is a NAMED blocker — never a silent idle and
-     * never a systemd Restart=always crash-loop.
-     *
-     * EXEMPTION: -mint-anchor-fast passes the crypto stages through without
-     * running (jobs/mint_skip_crypto.h), so that offline self-mint legitimately
-     * needs no zk params — do not park it for missing params. */
-    if (params && strcmp(params->strNetworkID, "main") == 0 &&
-        !ctx->mint_anchor_fast) {
-        static const char *const req[] = {
-            "sapling-spend.params", "sapling-output.params",
-            "sprout-groth16.params", "sprout-verifying.key",
-        };
-        const char *missing = NULL;
-        char missing_path[1100] = {0};
-        if (!ctx->params_dir) {
-            missing = "(no -paramsdir configured)";
-        } else {
-            for (size_t i = 0; i < sizeof(req) / sizeof(req[0]); i++) {
-                char p[1100];
-                snprintf(p, sizeof(p), "%s/%s", g_params_dir_buf, req[i]);
-                if (access(p, R_OK) != 0) {
-                    missing = req[i];
-                    snprintf(missing_path, sizeof(missing_path), "%s", p);
-                    break;
-                }
-            }
-        }
-        if (missing) {
-            struct blocker_record rec;
-            if (blocker_init(&rec, "params_missing", "crypto.params",
-                             BLOCKER_PERMANENT,
-                             "mainnet zk verification keys are missing/unreadable "
-                             "— proof validation cannot run; install ~/.zcash-params") &&
-                blocker_set(&rec) == 0)
-                event_emitf(EV_OPERATOR_NEEDED, 0,
-                            "check=params_missing file=%s path=%s", missing,
-                            missing_path[0] ? missing_path : "");
-            LOG_WARN("crypto.params",
-                     "[crypto.params] mainnet requires zk params but '%s' is "
-                     "missing/unreadable (dir=%s) — NOT advancing CRYPTO_READY; "
-                     "parking alive-degraded after paging the operator",
-                     missing, ctx->params_dir ? ctx->params_dir : "(unset)");
-            /* Do NOT advance CRYPTO_READY: the params actually failed to load. */
-            return boot_park_until_shutdown("crypto_params_missing");
-        }
+    /* zk-parameter gate. A missing ~/.zcash-params costs exactly one
+     * capability — creating shielded transactions — because validation reads
+     * only the compiled-in verifying keys. See config/src/boot_params_gate.c
+     * for the full argument and docs/PARAMS.md for the operator view. */
+    bool params_files_present = true;
+    switch (boot_params_gate_evaluate(ctx, params, g_params_dir_buf)) {
+    case BOOT_PARAMS_GATE_PARK:
+        /* This binary cannot verify shielded proofs at all. */
+        return boot_park_until_shutdown("crypto_params_missing");
+    case BOOT_PARAMS_GATE_EMBEDDED:
+        params_files_present = false;
+        break;
+    case BOOT_PARAMS_GATE_PRESENT:
+        break;
     }
 
-    if (ctx->params_dir) {
+    /* Only start the loader when the files are actually there. With them
+     * missing we already installed the compiled-in verifying keys above, and
+     * running the loader would do nothing but fail and re-page the operator
+     * for a condition already named as shielded_spend_unavailable. */
+    if (ctx->params_dir && params_files_present) {
         /* One-shot ZK params loader; joined at shutdown via
          * app_shutdown's params_thread field. raw-pthread-ok */
         if (pthread_create(&g_params_thread, NULL, load_params_thread, NULL) == 0)

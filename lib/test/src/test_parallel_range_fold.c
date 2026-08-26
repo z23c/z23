@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * test_parallel_range_fold — the differential oracle for the Parallel State
- * Compiler P0 core (app/jobs/src/psc_*.c, docs/work/parallel-state-compiler.md).
+ * Compiler P0 core (app/jobs/src/psc_*.c).
  *
  * WHAT IT PROVES
  *   (1) EQUIVALENCE: fold a synthetic ~N-block chain (coinbases + cross-block

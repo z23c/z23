@@ -42,8 +42,10 @@ exact packages without a central registry.
 
 - [`../README.md`](../README.md) — what the product is and what users can do.
 - [`GETTING_STARTED.md`](GETTING_STARTED.md) — build and run it on a fresh
-  machine, including the one prerequisite this repository cannot ship for you
-  (the Zcash proving parameters) and what peer discovery does with no flags.
+  machine, and what peer discovery does with no flags.
+- [`PARAMS.md`](PARAMS.md) — why a node validates shielded proofs out of the
+  box but cannot create a shielded payment until you supply the proving
+  parameters yourself, and how to check the bytes you were given.
 - [`JOIN.md`](JOIN.md) — the two independent senses of "joining": the
   blockchain P2P network (automatic, no command, no DNS seeder) and the C23
   software commons (`z23 join`, the swarm and DHT tiers, reading the verdict).

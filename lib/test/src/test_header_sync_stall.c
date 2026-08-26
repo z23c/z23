@@ -1,7 +1,8 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Tests for header sync stall detection and recovery:
- * per-peer tracking, stall detection, inbound fallback, and the
- * peer-retention rules from docs/work/coin-backfill-repair.md §4:
+ * per-peer tracking, stall detection, inbound fallback, and these
+ * peer-retention rules (P1-P3; a P4 sibling covers download backpressure
+ * and lives in test_net.c):
  *   P1 — usefulness is credited from newly_added (new-to-index
  *        headers), NOT accepted: a known-header replay neither
  *        refreshes last_useful_headers_time (rule A) nor inflates

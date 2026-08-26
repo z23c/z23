@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
-# onion_pair_probe.sh — node3's always-on pair-probe ledger entry point.
+# onion_pair_probe.sh — an operator's always-on pair-probe ledger entry
+# point, run from any box that wants a recurring onion-pairing health
+# signal.
 #
 # Runs the isolated two-node onion pair from ANY checkout. Isolation is sourced,
 # not executed. Recurring telemetry is JSONL under XDG state — this
-# script does not commit, push, or write deploy/devfleet/. The client Tor can
-# bootstrap target-free in parallel; its onion dial is gated on observed
-# descriptor upload and client readiness, not on hostname-file presence.
+# script does not commit, push, or write into the tracked source tree.
+# The client Tor can bootstrap target-free in parallel; its onion dial is
+# gated on observed descriptor upload and client readiness, not on
+# hostname-file presence.
 #
 # Usage:
 #   tools/scripts/onion_pair_probe.sh

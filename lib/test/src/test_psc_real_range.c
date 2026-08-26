@@ -2,7 +2,7 @@
  *
  * test_psc_real_range — the P1 DIFFERENTIAL PARITY ORACLE for the Parallel
  * State Compiler over a REAL on-disk datadir (app/jobs/src/psc_block_source.c,
- * psc_audit.c; docs/work/parallel-state-compiler.md).
+ * psc_audit.c).
  *
  * The P0 oracle (test_parallel_range_fold.c) proved the parallel fold
  * bit-identical to a serial replay of utxo_apply_compute_block_delta over an

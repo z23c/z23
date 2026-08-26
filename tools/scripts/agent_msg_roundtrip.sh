@@ -1,6 +1,6 @@
 #!/bin/sh
 # agent_msg_roundtrip.sh — prove a ZMSG agent-message round-trip from this
-# box's isolated node to one fleet peer and back.
+# box's node to one operator-named peer and back.
 #
 #   agent_msg_roundtrip.sh <peer_endpoint host:port> <text>
 #
@@ -35,8 +35,8 @@
 # Environment overrides:
 #   ZCL_CLI               z23 binary        (default <repo>/build/bin/z23)
 #   ZCL_JSONQ             jsonq binary      (default <repo>/build/bin/jsonq)
-#   ZCL_ROUNDTRIP_DATADIR isolated datadir  (default ~/.zclassic-c23-devfleet)
-#   ZCL_ROUNDTRIP_RPCPORT RPC port          (default 18255)
+#   ZCL_ROUNDTRIP_DATADIR this node's datadir (default ~/.zclassic-c23)
+#   ZCL_ROUNDTRIP_RPCPORT RPC port          (default 18232)
 #   ZCL_ROUNDTRIP_LOG     node stdout log   (default <datadir>/node.log)
 #   ZCL_ROUNDTRIP_TIMEOUT total budget, sec (default 300)
 
@@ -54,8 +54,8 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
 ZCL_CLI=${ZCL_CLI:-"$REPO_ROOT/build/bin/z23"}
 ZCL_JSONQ=${ZCL_JSONQ:-"$REPO_ROOT/build/bin/jsonq"}
-DATADIR=${ZCL_ROUNDTRIP_DATADIR:-"$HOME/.zclassic-c23-devfleet"}
-RPCPORT=${ZCL_ROUNDTRIP_RPCPORT:-18255}
+DATADIR=${ZCL_ROUNDTRIP_DATADIR:-"$HOME/.zclassic-c23"}
+RPCPORT=${ZCL_ROUNDTRIP_RPCPORT:-18232}
 NODE_LOG=${ZCL_ROUNDTRIP_LOG:-"$DATADIR/node.log"}
 TIMEOUT=${ZCL_ROUNDTRIP_TIMEOUT:-300}
 ONION_HOSTNAME_FILE="$DATADIR/tor_data/onion_service/hostname"

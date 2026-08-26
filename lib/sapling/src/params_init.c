@@ -9,7 +9,9 @@
 #include "sapling/sapling_prover.h"
 #include "sapling/sprout.h"
 #include "chain/chainparams.h"
+#include "crypto/sha256.h"
 #include "crypto/sha512.h"
+#include "sapling/params_vk_embedded.h"
 #include "encoding/utilstrencodings.h"
 #include "util/file_io.h"
 #include "util/log_macros.h"
@@ -34,6 +36,15 @@
 #define SPROUT_GROTH16_PARAMS_SHA512                                         \
     "20bc1f6bd89d0321b90a3f1b7e2050a7dafb427e86e7ef33b0b7a5c06077f5bf"       \
     "5695846952eac2b6231222df633e258682e9b6e2545f732c30fd76ae230ac65d"
+/* sprout-verifying.key was the ONE required file with no integrity pin: it
+ * was read and handed straight to ppzksnark_vk_read with only a parse check,
+ * and a parse check is not an integrity check. A tampered key that still
+ * parses would have been installed as the PHGR13 verifying key and used to
+ * validate every pre-Sapling JoinSplit proof (blocks 0-581876). Pinned here
+ * so all four required files are checked the same way. */
+#define SPROUT_VERIFYING_KEY_SHA512                                          \
+    "2fe237bd39739b17e1d078931a5ccfc1f5ab81ea6457738fc5f0a1a487af994f"       \
+    "f4e3323792ff657e79d833f320b87a015e3939d3d9af246af1c46d207ab1a797"
 
 /* Canonical BLAKE2b-512 ceremony-file digests retained for the optional
  * reference oracle ABI. They are intentionally separate from the mandatory
@@ -195,6 +206,15 @@ bool sapling_init_params(const char *params_dir)
                  "%s/sprout-verifying.key", params_dir);
         uint8_t *phgr_data = read_file(phgr_path, &len);
         bool phgr_ok = false;
+        if (phgr_data &&
+            !params_sha512_matches(phgr_data, len,
+                                   SPROUT_VERIFYING_KEY_SHA512, phgr_path)) {
+            /* Integrity failed. Drop the bytes and fall through to the
+             * not-loaded path below, which hard-fails on mainnet. Never parse
+             * key material that did not match its pin. */
+            free(phgr_data);
+            phgr_data = NULL;
+        }
         if (phgr_data) {
             if (ppzksnark_vk_read(&phgr_vk, phgr_data, len)) {
                 sprout_phgr_set_vk(&phgr_vk);
@@ -208,8 +228,12 @@ bool sapling_init_params(const char *params_dir)
             }
             free(phgr_data);
         } else {
+            /* Unreadable, or present but failed its SHA-512 pin — the pin
+             * check above logs the expected/actual digests itself, so do not
+             * claim "not found" here for what may have been tampering. */
             LOG_WARN("sapling_params",
-                     "ERROR: sprout-verifying.key not found at %s",
+                     "ERROR: sprout-verifying.key unusable at %s "
+                     "(missing/unreadable, or failed its pinned SHA-512)",
                      phgr_path);
         }
 
@@ -320,3 +344,149 @@ void sapling_free_params(void)
     sprout_set_vk(NULL);
     atomic_store(&params_loaded, false);
 }
+
+/* ── Embedded verifying keys ─────────────────────────────────────────────
+ *
+ * A validating node needs the verifying keys and nothing else. Those are the
+ * leading 868 + ic_len*96 bytes of each Groth16 parameter file plus the
+ * standalone PHGR13 key — 6357 bytes against 777 MB — so they are compiled in
+ * (params_vk_embedded.c) rather than acquired at runtime.
+ *
+ * This path installs exactly the values sapling_init_params() would install
+ * from a full parameter directory, and deliberately installs nothing else:
+ * no proving keys are loaded, so zclassic_init_zksnark_params() never runs,
+ * the native prover stays NATIVE_PROVER_UNINITIALIZED, and every wallet entry
+ * point that would build a shielded output refuses on
+ * zclassic_sapling_prover_is_ready(). Validation is whole; proving is absent
+ * and says so. */
+
+static _Atomic bool vks_embedded = false;
+
+/* Hash one embedded blob and compare against its pinned digest. A build whose
+ * key material has been patched must fail here, before the bytes are parsed
+ * and long before a proof is checked against them. */
+static bool embedded_vk_sha256_ok(const struct zcl_embedded_vk *e)
+{
+    uint8_t got[32];
+    struct sha256_ctx ctx;
+    sha256_init(&ctx);
+    sha256_write(&ctx, e->bytes, e->len);
+    sha256_finalize(&ctx, got);
+
+    uint8_t want[32];
+    if (ParseHex(e->sha256_hex, want, 32) != 32)
+        LOG_FAIL("sapling_params",
+                 "internal: malformed embedded VK digest literal for %s",
+                 e->name);
+
+    uint32_t diff = 0;
+    for (int i = 0; i < 32; i++) diff |= (uint32_t)(got[i] ^ want[i]);
+    if (diff != 0) {
+        char got_hex[65];
+        for (int i = 0; i < 32; i++)
+            snprintf(got_hex + 2 * i, 3, "%02x", got[i]);
+        LOG_FAIL("sapling_params",
+                 "embedded verifying key SHA-256 mismatch: name=%s\n"
+                 "  expected=%s\n  actual  =%s\n"
+                 "  This build's compiled-in verifying keys are not the ones "
+                 "this source tree pins. Refusing to validate shielded proofs "
+                 "against unknown key material.",
+                 e->name, e->sha256_hex, got_hex);
+    }
+    return true;
+}
+
+bool sapling_vks_are_embedded(void) { return atomic_load(&vks_embedded); }
+
+bool sapling_install_embedded_vks(void)
+{
+    /* Full parameters win: if they are already loaded the process has both
+     * verifying and proving keys, and re-installing would be a downgrade. */
+    if (atomic_load(&params_loaded)) return true;
+
+    /* Verify every digest before installing any of them, so a failure cannot
+     * leave a half-installed key set behind. */
+    for (size_t i = 0; i < ZCL_EMBEDDED_VK_COUNT; i++) {
+        if (!embedded_vk_sha256_ok(&zcl_embedded_vks[i]))
+            LOG_FAIL("sapling_params",
+                     "embedded verifying keys failed integrity check "
+                     "(blob %zu: %s) — not installing any",
+                     i, zcl_embedded_vks[i].name);
+    }
+
+    if (!groth16_vk_read(&spend_vk, zcl_embedded_vks[0].bytes,
+                         zcl_embedded_vks[0].len))
+        LOG_FAIL("sapling_params",
+                 "embedded spend VK failed to parse (%zu bytes)",
+                 zcl_embedded_vks[0].len);
+
+    if (!groth16_vk_read(&output_vk, zcl_embedded_vks[1].bytes,
+                         zcl_embedded_vks[1].len)) {
+        free(spend_vk.ic); spend_vk.ic = NULL;
+        LOG_FAIL("sapling_params",
+                 "embedded output VK failed to parse (%zu bytes)",
+                 zcl_embedded_vks[1].len);
+    }
+
+    if (!groth16_vk_read(&sprout_groth16_vk, zcl_embedded_vks[2].bytes,
+                         zcl_embedded_vks[2].len)) {
+        free(spend_vk.ic); spend_vk.ic = NULL;
+        free(output_vk.ic); output_vk.ic = NULL;
+        LOG_FAIL("sapling_params",
+                 "embedded sprout-groth16 VK failed to parse (%zu bytes)",
+                 zcl_embedded_vks[2].len);
+    }
+
+    static struct ppzksnark_vk phgr_vk;
+    if (!ppzksnark_vk_read(&phgr_vk, zcl_embedded_vks[3].bytes,
+                           zcl_embedded_vks[3].len)) {
+        free(spend_vk.ic); spend_vk.ic = NULL;
+        free(output_vk.ic); output_vk.ic = NULL;
+        free(sprout_groth16_vk.ic); sprout_groth16_vk.ic = NULL;
+        LOG_FAIL("sapling_params",
+                 "embedded Sprout PHGR13 VK failed to parse (%zu bytes) — "
+                 "pre-Sapling blocks could not be validated",
+                 zcl_embedded_vks[3].len);
+    }
+
+    /* Same precompute the full-parameter path performs; value-identical, so a
+     * failure only costs speed. Built before publication so verifier threads
+     * never observe a half-built table. */
+    if (!groth16_vk_build_combs(&spend_vk))
+        LOG_WARN("sapling_params",
+                 "spend VK IC precompute unavailable; using naive scalar-mul");
+    if (!groth16_vk_build_combs(&output_vk))
+        LOG_WARN("sapling_params",
+                 "output VK IC precompute unavailable; using naive scalar-mul");
+    if (!groth16_vk_build_combs(&sprout_groth16_vk))
+        LOG_WARN("sapling_params",
+                 "sprout-groth16 VK IC precompute unavailable; using naive scalar-mul");
+
+    sapling_set_spend_vk(&spend_vk);
+    sapling_set_output_vk(&output_vk);
+    sprout_set_vk(&sprout_groth16_vk);
+    sprout_phgr_set_vk(&phgr_vk);
+
+    atomic_store(&vks_embedded, true);
+    atomic_store(&params_loaded, true);
+
+    LOG_INFO("sapling_params",
+             "installed compiled-in verifying keys (%zu+%zu+%zu+%zu bytes): "
+             "shielded proof VALIDATION active; shielded spend CREATION "
+             "unavailable until proving parameters are installed",
+             zcl_embedded_vks[0].len, zcl_embedded_vks[1].len,
+             zcl_embedded_vks[2].len, zcl_embedded_vks[3].len);
+    return true;
+}
+
+#ifdef ZCL_TESTING
+/* Exposes the embedded-blob integrity check so a test can hand it a planted
+ * bad blob and prove the refusal is real, rather than asserting on a
+ * reimplementation of the same comparison. */
+bool sapling_test_embedded_vk_sha256_ok(const char *name, const uint8_t *bytes,
+                                        size_t len, const char *sha256_hex)
+{
+    struct zcl_embedded_vk e = { name, bytes, len, sha256_hex };
+    return embedded_vk_sha256_ok(&e);
+}
+#endif

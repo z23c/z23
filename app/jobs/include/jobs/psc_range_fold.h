@@ -4,10 +4,10 @@
  *
  * PURPOSE: compute the terminal TRANSPARENT UTXO set of a FINALIZED height
  * range [lo,hi] as an order-independent parallel function of the block bodies,
- * instead of the serial per-height utxo_apply walk. This is the P0 core of
- * docs/work/parallel-state-compiler.md: (a) K parallel per-block delta
- * extraction workers over disjoint contiguous height sub-ranges, and (b) a
- * sharded outpoint sort-merge join that reconstructs the terminal coin set and
+ * instead of the serial per-height utxo_apply walk. This P0 core has two
+ * phases: (a) K parallel per-block delta extraction workers over disjoint
+ * contiguous height sub-ranges (psc_extract.c), and (b) a sharded outpoint
+ * sort-merge join (psc_join.c) that reconstructs the terminal coin set and
  * validates the order-dependent consensus properties (existence, no duplicate
  * outpoint / BIP30, create-before-spend) as an ORDERING property per shard.
  *

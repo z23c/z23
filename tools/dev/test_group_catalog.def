@@ -933,6 +933,12 @@ ZCL_TEST_GROUP(make_lint_gates_realroot)
 ZCL_TEST_GROUP(make_lint_gates_partition)
 ZCL_TEST_GROUP(make_lint_gates_heavy_01)
 ZCL_TEST_GROUP(make_lint_gates_heavy_02)
+/* lane: seed-doors + onion gossip — appended at the end of the
+ * ZCL_TEST_GROUP block; keep both sides on conflict. */
+ZCL_TEST_GROUP(seed_bootstrap_doors)
+/* params-sovereignty lane: compiled-in verifying keys, and the boundary
+ * between validating shielded proofs and creating them. */
+ZCL_TEST_GROUP(params_vk_embedded)
 ZCL_SPEC_GROUP(wallet_dashboard)
 ZCL_SPEC_GROUP(wallet_send)
 ZCL_SPEC_GROUP(wallet_receive)

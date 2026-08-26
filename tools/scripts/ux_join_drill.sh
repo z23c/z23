@@ -1,18 +1,22 @@
 #!/usr/bin/env bash
-# ux_join_drill.sh — one stranger-join clock from a throwaway /tmp datadir.
+# ux_join_drill.sh — one stranger-join clock from a throwaway /tmp datadir,
+# joining ONE operator-named peer on the operator's own network.
 #
 # Fully scripted: t0 → iso_init (audited isolation) → spawn -tor
-# -onion-persist → onion ready → addnode node1's committed onion:port.
+# -onion-persist → onion ready → addnode the named peer's onion:port.
 # Records seconds-to PEERED (verack), SYNCED (tip parity with that peer),
 # FIRST_MSG (ZMSG sent + delivery ack over the P2P channel).
 #
 # Usage: tools/scripts/ux_join_drill.sh
+#   (name the target peer via UX_JOIN_PEER_ONION/UX_JOIN_PEER_PORT, or via
+#   UX_JOIN_PEER_FILE — see Environment below. Naming no peer is a clear,
+#   named refusal, never a crash and never a false pass.)
 #
 # Isolation is sourced, not copied: tools/scripts/isolated_node_env.sh.
 # iso_spawn_node is a *regtest* harness helper and is not used — a
-# stranger joining the fleet mesh must speak node1's network. iso_init
-# still owns the /tmp datadir, 39xxx ports, live-port refusal, LISTEN
-# preflight, and EXIT cleanup.
+# stranger joining a real peer's network must speak that peer's network.
+# iso_init still owns the /tmp datadir, 39xxx ports, live-port refusal,
+# LISTEN preflight, and EXIT cleanup.
 #
 # Any named step that needs >60s, or that cannot complete without a
 # human hand, is a UX DEFECT. Defects are printed as
@@ -20,13 +24,21 @@
 # and never worked around. The JSONL line still lands with nulls for
 # unfinished clocks.
 #
-# Appends one JSONL object to deploy/devfleet/ux_join_clock.jsonl:
-#   {"ts":"...","box":"node3","peered_s":N|null,"synced_s":N|null,
+# Appends one JSONL object to the clock file (see UX_JOIN_CLOCK below):
+#   {"ts":"...","box":"<UX_JOIN_BOX>","peered_s":N|null,"synced_s":N|null,
 #    "first_msg_s":N|null,"sha":"..."}
 #
 # Environment:
 #   ZCL_CLI, ZCL_JSONQ          binaries (default <repo>/build/bin/...)
-#   UX_JOIN_CLOCK               JSONL path (default deploy/devfleet/ux_join_clock.jsonl)
+#   UX_JOIN_PEER_ONION          target peer's v3 onion address (no default)
+#   UX_JOIN_PEER_PORT           target peer's P2P port (no default)
+#   UX_JOIN_PEER_FILE           alternative to the two above: a file with
+#                               ONION_ADDRESS=... and P2P_PORT=... lines
+#                               naming the target peer (no default)
+#   UX_JOIN_BOX                 label for this run's JSONL "box" field
+#                               (default: this host's hostname)
+#   UX_JOIN_CLOCK               JSONL path (default
+#                               ~/.local/state/zclassic23-referee/ux_join_clock.jsonl)
 #   UX_JOIN_PORT_BASE           isolated 39xxx P2P port (default 39150)
 #   UX_JOIN_STEP_BUDGET         seconds before a step is a UX DEFECT (default 60)
 #   UX_JOIN_PEER_WAIT           extra wait for onion circuit after the 60s defect
@@ -43,8 +55,8 @@ ZCL_CLI=${ZCL_CLI:-"$REPO_ROOT/build/bin/z23"}
 ZCL_JSONQ=${ZCL_JSONQ:-"$REPO_ROOT/build/bin/jsonq"}
 ISO_NODE_BIN=${ISO_NODE_BIN:-"$REPO_ROOT/build/bin/zclassic23"}
 ISO_RPC_BIN=${ISO_RPC_BIN:-"$REPO_ROOT/build/bin/zcl-rpc"}
-CLOCK_FILE=${UX_JOIN_CLOCK:-"$REPO_ROOT/deploy/devfleet/ux_join_clock.jsonl"}
-NODE1_FILE="$REPO_ROOT/deploy/devfleet/node1.txt"
+CLOCK_FILE=${UX_JOIN_CLOCK:-"${XDG_STATE_HOME:-$HOME/.local/state}/zclassic23-referee/ux_join_clock.jsonl"}
+UX_JOIN_BOX=${UX_JOIN_BOX:-"$(hostname 2>/dev/null || echo unspecified)"}
 STEP_BUDGET=${UX_JOIN_STEP_BUDGET:-60}
 PEER_WAIT=${UX_JOIN_PEER_WAIT:-120}
 ISO_KIND=uxjoin
@@ -97,8 +109,9 @@ write_clock() {
     case " ${DEFECTS:-} " in
         *" first_msg_over_60s "*) extra=',"defect":"first_msg_over_60s","dial_cap_s":120' ;;
     esac
-    printf '{"ts":"%s","box":"node3","peered_s":%s,"synced_s":%s,"first_msg_s":%s,"sha":"%s"%s}\n' \
+    printf '{"ts":"%s","box":"%s","peered_s":%s,"synced_s":%s,"first_msg_s":%s,"sha":"%s"%s}\n' \
         "$TS" \
+        "$UX_JOIN_BOX" \
         "$(num_or_null "$PEERED_S")" \
         "$(num_or_null "$SYNCED_S")" \
         "$(num_or_null "$FIRST_MSG_S")" \
@@ -135,18 +148,29 @@ if [ ! -x "$ZCL_CLI" ] || [ ! -x "$ZCL_JSONQ" ] || [ ! -x "$ISO_NODE_BIN" ]; the
     echo "UX_JOIN=fail STEP=ENV WALL_SECONDS=0 DETAIL=missing_binary"
     exit 2
 fi
-if [ ! -f "$NODE1_FILE" ]; then
-    echo "UX_JOIN=fail STEP=ENV WALL_SECONDS=0 DETAIL=missing_node1_identity"
+
+# Resolve the target peer: direct UX_JOIN_PEER_ONION/UX_JOIN_PEER_PORT win
+# over UX_JOIN_PEER_FILE. Naming none is a clear, named refusal — never a
+# crash, never a false pass on a peer nobody chose.
+PEER_ONION=${UX_JOIN_PEER_ONION:-}
+PEER_PORT=${UX_JOIN_PEER_PORT:-}
+if [ -z "$PEER_ONION" ] && [ -n "${UX_JOIN_PEER_FILE:-}" ]; then
+    if [ ! -f "$UX_JOIN_PEER_FILE" ]; then
+        echo "UX_JOIN=fail STEP=ENV WALL_SECONDS=0 DETAIL=UX_JOIN_PEER_FILE_not_found:$UX_JOIN_PEER_FILE"
+        exit 2
+    fi
+    PEER_ONION=$(field ONION_ADDRESS "$UX_JOIN_PEER_FILE")
+    PEER_PORT=$(field P2P_PORT "$UX_JOIN_PEER_FILE")
+fi
+if [ -z "$PEER_ONION" ] && [ -z "$PEER_PORT" ]; then
+    echo "UX_JOIN=fail STEP=ENV WALL_SECONDS=0 DETAIL=no_mesh_configured:set_UX_JOIN_PEER_ONION+UX_JOIN_PEER_PORT_or_UX_JOIN_PEER_FILE"
     exit 2
 fi
-
-PEER_ONION=$(field ONION_ADDRESS "$NODE1_FILE")
-PEER_PORT=$(field P2P_PORT "$NODE1_FILE")
 case $PEER_ONION in
-    *[!a-z2-7.]*|'' ) echo "UX_JOIN=fail STEP=ENV WALL_SECONDS=0 DETAIL=invalid_node1_onion"; exit 2 ;;
+    *[!a-z2-7.]*|'' ) echo "UX_JOIN=fail STEP=ENV WALL_SECONDS=0 DETAIL=invalid_peer_onion"; exit 2 ;;
 esac
 case $PEER_PORT in
-    ''|*[!0-9]*) echo "UX_JOIN=fail STEP=ENV WALL_SECONDS=0 DETAIL=invalid_node1_port"; exit 2 ;;
+    ''|*[!0-9]*) echo "UX_JOIN=fail STEP=ENV WALL_SECONDS=0 DETAIL=invalid_peer_port"; exit 2 ;;
 esac
 PEER_ENDPOINT="$PEER_ONION:$PEER_PORT"
 SHA=$(git -C "$REPO_ROOT" rev-parse HEAD)
@@ -164,8 +188,8 @@ T0=$(now_s)
 . "$REPO_ROOT/tools/scripts/isolated_node_env.sh"
 iso_init
 
-# Spawn a stranger node on the fleet network. iso_spawn_node hardcodes
-# -regtest and is the wrong network for node1; isolation (datadir, ports,
+# Spawn a stranger node on the target peer's network. iso_spawn_node
+# hardcodes -regtest and is the wrong network here; isolation (datadir, ports,
 # trap) still comes from iso_init above.
 setsid "$ISO_NODE_BIN" \
     -datadir="$ISO_DD" \
@@ -232,7 +256,7 @@ case $ONION_ADDR in
         ;;
 esac
 
-# ── addnode node1 ───────────────────────────────────────────────────
+# ── addnode the target peer ─────────────────────────────────────────
 # The typed native wrapper is the stranger-facing command. Its 250ms
 # budget has already been observed to expire while the node is still
 # finishing Tor bootstrap; that is a named UX defect, not a reason to

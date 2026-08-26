@@ -1176,6 +1176,104 @@ int onion_directory_app_peers_db(sqlite3 *db, const char *app_id,
     return kept;
 }
 
+/* ── Our own directory as a BOOTSTRAP SOURCE ───────────────────────
+ *
+ * Closes an open loop. Until this existed the node LEARNED onion
+ * hostnames (onion_service_directory_learn, from every /directory.json it
+ * fetched), PERSISTED them here, and RE-SERVED them to whoever asked —
+ * but no code path anywhere read peer_directory back as a place to DIAL.
+ * The only dial-candidate reader in the tree,
+ * blog_discover_onion_peers_chain(), reads a DIFFERENT table
+ * (`onion_directory`, the on-chain ZDIR projection) via
+ * db_onion_directory_list_active(). So a node that met fifty onions
+ * yesterday still cold-booted knowing only the compiled-in seed array,
+ * and if that array was dead it had nowhere to go — which is exactly the
+ * state the network was in.
+ *
+ * With this, the hardcoded array stops being the only door: reach ANY
+ * peer once, and every host that peer knew is a door on every later boot,
+ * with no rebuild and no operator edit.
+ *
+ * Bounded and ranked, because each returned host costs a blocking Tor
+ * fetch on the discovery thread:
+ *   - FRESH only (last_seen within ONION_DIR_STALE_SECS). An expired row
+ *     is already dropped by the refresh round; a stale one is a host
+ *     nobody has confirmed in six hours and is not worth a cold node's
+ *     seconds.
+ *   - self rows excluded: dialling ourselves discovers nothing.
+ *   - MEASURED CONTACT FIRST. probe_ok / last_success / dial_success_count
+ *     are only ever written by an outcome WE observed
+ *     (onion_service_directory_observe); `source` is 'relay' for pure
+ *     hearsay. Ordering by them means a host we have actually reached
+ *     outranks one a stranger merely told us about, so a hostile
+ *     directory that floods us with plausible hostnames cannot displace
+ *     our own working contacts — it can only occupy the tail of a
+ *     already-bounded list.
+ *   - LIMIT `max`, capped by the caller.
+ * Every hostname is re-validated on the way out: rows written by
+ * pre-validation binaries may be hostile.
+ *
+ * Read-only handle, opened and closed per call: this runs a handful of
+ * times per boot, never on the supervisor tick runner, and a read-only
+ * open cannot create the WAL sidecars a read must never leave behind.
+ * Returns the row count; 0 when the table or datadir is absent — "none
+ * known" is a normal state on a fresh node, never an error. */
+int onion_service_directory_dial_candidates(struct onion_dial_candidate *out,
+                                            int max)
+{
+    if (!out || max <= 0) return 0;
+
+    const char *datadir = onion_service_datadir();
+    if (!datadir) return 0;
+
+    char db_path[1024];
+    zcl_node_db_path(db_path, sizeof(db_path), datadir);
+
+    sqlite3 *db = NULL;
+    if (sqlite3_open_v2(db_path, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
+        if (db) sqlite3_close(db);
+        return 0;
+    }
+    sqlite3_busy_timeout(db, 2000);
+
+    int64_t now = (int64_t)platform_time_wall_time_t();
+
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(db,
+        "SELECT onion_address, COALESCE(port,0), "
+        "       COALESCE(source,''), COALESCE(last_success,0) "
+        "FROM peer_directory "
+        "WHERE self = 0 AND last_seen > 0 AND last_seen > ?1 "
+        "ORDER BY probe_ok DESC, last_success DESC, "
+        "         dial_success_count DESC, last_seen DESC "
+        "LIMIT ?2",
+        -1, &s, NULL) != SQLITE_OK || !s) {
+        if (s) sqlite3_finalize(s);
+        sqlite3_close(db);
+        return 0;
+    }
+    sqlite3_bind_int64(s, 1, now - ONION_DIR_STALE_SECS);
+    sqlite3_bind_int(s, 2, max);
+
+    int kept = 0;
+    while (kept < max && AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
+        const char *addr = (const char *)sqlite3_column_text(s, 0);
+        if (!onion_hostname_valid(addr))
+            continue;   /* refuse, never sanitize — about to be dialed */
+        snprintf(out[kept].hostname, sizeof(out[kept].hostname), "%s", addr);
+        out[kept].port = sqlite3_column_int(s, 1);
+        {
+            const char *src = (const char *)sqlite3_column_text(s, 2);
+            out[kept].contacted = sqlite3_column_int64(s, 3) > 0 ||
+                                  (src && strcmp(src, "relay") != 0);
+        }
+        kept++;
+    }
+    sqlite3_finalize(s);
+    sqlite3_close(db);
+    return kept;
+}
+
 /* ── Supervised refresh (no dedicated thread) ─────────────── */
 
 /* Four missed rounds. Long enough that a transient busy database or a

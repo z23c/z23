@@ -127,39 +127,37 @@ no new command route or schema.
   Storage Adapter are real and enforced, Supervisor is partial, Controller/Service
   still carry legacy debt.
 
-**Being deleted (transient, ≈3330 production lines per the plan):** today the coin
-set can be seeded on boot from a near-tip snapshot minted by an external
-`zclassicd`. Its payload SHA3 authenticates the file bytes and its anchor hash
-must match a validated local header. That proves the selected chain location,
-not the derivation of UTXO or shielded state: ZClassic headers commit none of
-the UTXO, Sapling/Sprout frontier, or nullifier roots. The state is therefore
-**borrowed**, not consensus-bound or re-derived from genesis. The plan
-(`docs/work/self-verified-tip-plan.md`; the ordered-steps predecessor
-`sync-fix-plan-2026-06-21.md` was removed from the tree — recover with
-`git log --follow --diff-filter=D -- 'docs/work/archive/sync-fix-plan-*'`)
-replaces it with a **self-verified UTXO anchor rebuild**:
-the internal boot path is `-refold-from-anchor`
-(`app/jobs/src/refold_progress.c`, `app/services/src/anchor_selfmint.c`), which
-rebuilds the coin set from that compiled checkpoint forward, then deletes the
-borrowed-seed path and the older recovery-import code that fed it (≈3330 LOC
-production fully deletable, plus PRUNE-not-delete tear paths that keep their
-crash-recovery slice). A complete atomic state install and copy proof must
-precede live cutover on any borrowed-state node. Whether canonical is
-currently wedged, cured, or holding tip on self-verified state is a live
-fact this page does not carry — verify the live H\* and cure status via
-`z23 status` / `z23 dumpstate reducer_frontier` and
-`docs/HANDOFF.md` §0-LATEST; do not assume from this page.
+**Being replaced:** today the coin set can be seeded on boot from a near-tip
+snapshot minted by an external `zclassicd`. Its payload SHA3 authenticates the
+file bytes and its anchor hash must match a validated local header. That
+proves the selected chain location, not the derivation of UTXO or shielded
+state: ZClassic headers commit none of the UTXO, Sapling/Sprout frontier, or
+nullifier roots. The state is therefore **borrowed**, not consensus-bound or
+re-derived from genesis.
 
-## 5. START HERE — fresh agent
+The direction (`docs/work/self-verified-tip-plan.md`) is a **self-verified
+UTXO anchor rebuild**: the internal boot path is `-refold-from-anchor`
+(`app/jobs/src/refold_progress.c`, `app/services/src/anchor_selfmint.c`),
+which rebuilds the coin set forward from a compiled checkpoint instead of
+borrowing it. Landing this removes the older recovery-import code that feeds
+the borrowed-seed path. A complete atomic state install and copy proof must
+precede any live cutover away from a borrowed-state node.
 
-1. `pwd` — confirm which worktree you are in (`main`, `wt2`, `wt3`).
-2. Read, in order: **`docs/HANDOFF.md`** (current live state, what is fixed, what
-   is in flight) → **`docs/MVP.md`** (the v1 acceptance bar) →
-   **`docs/work/FORWARD_PLAN.md`** (the plan). `docs/FRAMEWORK.md` is the canonical
+Your own node's live status — wedged, cured, or holding tip on self-verified
+state — is not something this page can tell you: check it with `z23 status`
+and `z23 dumpstate reducer_frontier`.
+
+## 5. Where to start
+
+1. Read, in order: **`docs/work/FORWARD_PLAN.md`** (the current plan) →
+   **`docs/MVP.md`** (the v1 acceptance bar). `docs/FRAMEWORK.md` is the canonical
    architecture; this page is its plain-language summary. **`docs/AGENT_TRAPS.md`**
    lists things that look broken but are not (don't re-chase them);
    **`docs/CODEBASE_MAP.md`** is where-things-live + how-to-do-each-thing.
-3. Look at the live node before trusting any doc: start with
+   `docs/HANDOFF.md` records one maintainer's hosted-node state — read it only
+   if you are operating that specific node; it says nothing about a node you
+   run yourself.
+2. Look at the live node before trusting any doc: start with
    `z23 agentmap` for the code/docs/test map, `z23 agentlanes` for
    canonical/soak/dev safety, `z23 agentliveness` for the current lane's
    listener/supervisor/quality rollup, `z23 agentbuild` for the cached
@@ -169,7 +167,7 @@ fact this page does not carry — verify the live H\* and cure status via
    Drill down with `z23 core status` and `z23 dumpstate
    reducer_frontier` only if needed. A doc can be stale;
    the node cannot.
-4. To understand one stage, open its file — `app/jobs/src/<stage>_stage.c`. Each is
+3. To understand one stage, open its file — `app/jobs/src/<stage>_stage.c`. Each is
    one `step_*` function that does exactly the advance-or-name-a-blocker contract
    described in section 2.
 

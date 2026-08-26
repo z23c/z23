@@ -26,12 +26,12 @@ version is:
 - `-addnode=HOST:8033` and `~/.config/zclassic23/onion-seeds` let you add
   peers yourself. Neither is required.
 
-The one genuine prerequisite is not a network thing at all: a mainnet node
-will not start until the Zcash proving parameters are installed, and this
-repository does not ship or download them. That is
-["The proving parameters"](GETTING_STARTED.md#the-proving-parameters-required-before-the-first-mainnet-start)
-in the getting-started page. Do that first; a node parked at
-`crypto_params_missing` opens no listener and connects to nobody.
+There is no prerequisite. A fresh node validates every shielded proof it sees
+using verifying keys compiled into the binary, so it syncs and serves with
+nothing installed. The one thing it cannot do is *create* a shielded payment,
+which needs the Zcash proving parameters — this repository neither ships nor
+downloads those, and a node without them says so as a named capability rather
+than refusing to run. See [`PARAMS.md`](PARAMS.md) if you intend to send.
 
 Two things a fresh node does *not* get by itself, so you know what you are
 choosing when you type nothing:

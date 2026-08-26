@@ -3,7 +3,7 @@
  * Unit tests for the Phase 4c block_index_projection
  * (lib/storage/src/block_index_projection.c).
  *
- * Coverage matrix (per docs/work/wt-phase4c-block-index-projection.md):
+ * Coverage matrix (one run_* function below per numbered case):
  *   1. open_close_clean       — open empty, close, reopen, offset=0
  *   2. single_header_consumed — emit 1 header event; catch_up; get() returns it
  *   3. get_by_height          — insert 3 entries at heights 100/200/300
@@ -17,6 +17,14 @@
  *   8. resume_from_partial    — emit 1000 events; rewind last_consumed_offset
  *                                to mid-stream; reopen; catch_up consumes only
  *                                the suffix
+ *   9. collision_accounting_cached_stmt — re-inserting the SAME hash bumps
+ *                                replace_collisions_total; a fresh distinct
+ *                                hash right after does NOT (proves the
+ *                                was_present check isn't stuck on a stale
+ *                                cached statement)
+ *  10. payload_roundtrip     — EV_BLOCK_HEADER serialize/parse preserves
+ *                                every field, including the variable-length
+ *                                solution bytes
  *
  * Scratch files live under ./test-tmp/bip_<pid>_<tag>/ in line with the
  * project's no-/tmp convention. */

@@ -5,14 +5,14 @@
 # CORE_SEAL_PATHS (an ordering bug forks exactly as hard as a
 # predicate bug — see docs/adr/0002-sealed-consensus-core.md).
 # Format: <sha3-256 hex>  <path>, one per sealed file (sorted), then a final ROOT line.
-2d19b58ee799c0f5f99c200681f67fbc0b89f784b41b72a2721f3dc22671d341  core/UNSEAL.md
+1449f017be0e301b124db897eef806aafe1836ca16f015c769afc6c48f37f5bc  core/UNSEAL.md
 0154dee8b452e80f28e6d9c915483ab19cf93ee834518edc355885204dad4119  core/chainparams/include/chain/chainparams.h
 76417939b54d9b0d0b2309c66b90fd20a510de3492bb6f97a11f4198292aa01f  core/chainparams/include/chain/chainparamsbase.h
 26353d48226b7cbcbb13503f871e06116ca466f3f247775c1ea3d3d5ccd168a0  core/chainparams/include/chain/checkpoints.h
 70a619096c7c98fb5bbb315b44916b4641ab50e4938b99e5be0e8a1e0b1306d7  core/chainparams/include/chain/equihash.h
 b26d0eeb2d74adef629479a9006a23954f057a795d970f2dd5b71a816ff75fa9  core/chainparams/include/chain/pow.h
 3235d5e1c2e14b9533c7016628e5ff89ee6e45456e7ff9b569afb0feb2f15fcc  core/chainparams/include/chain/subsidy.h
-5f21b5bab441bc94a7ca8cffdbf630afe55b8749d6a615b9324bbc51c5999e7f  core/chainparams/src/chainparams.c
+235eab6ddd42a4b7f15deab9637b26065279529f5db9fce39b315495ed3fcdf5  core/chainparams/src/chainparams.c
 3a5d6b4243f758fdd4024614000e2d5ca30695abfc60f62db13c9a90791fa2da  core/chainparams/src/chainparamsbase.c
 7b135c0b2481db8a274cfb8d7bb9b6866d61a5e7ae68c4083a165dede029f9a7  core/chainparams/src/checkpoints.c
 5edbb212e7fb9a1a559508766bae03d060e79d9b6411c553db108253d440f08c  core/chainparams/src/equihash.c
@@ -75,4 +75,4 @@ d602d82043a31d2231b1c5710a2d63af557c26fc89e67c951cfb89350ddb9596  lib/validation
 cb9cf3ae1c84a7eb23e7a74f6b9f5856b803b2b43840ad5f0c91d7ec662980ad  lib/validation/include/validation/connect_block.h
 21c02a6fbd7a95df7ab8b3f00cc1a311f7fb133df250d4bb055e1568ef17e95c  lib/validation/src/chainstate.c
 4f650f8f3b844519f751fb06a4fc8dab9db0ec46a226ca269da17653fa5589af  lib/validation/src/connect_block.c
-ROOT  140f4b8914457b24b9ae9d412b58bc961032a736718672fe4475ee4fb5f1c1e6
+ROOT  a1533630bda2379889f9db262f81cd6e265ad474f642a1ee7d1de9523ac3b1aa
