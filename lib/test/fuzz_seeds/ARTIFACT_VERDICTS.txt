@@ -39,13 +39,45 @@
 #                      verdict that lets a reproducing artifact pass, and it is
 #                      printed by name on EVERY run so it can never go quiet.
 #                      If it stops reproducing -> FAIL (reclassify).
-#     unaudited        NOT a verdict. Written automatically by
-#                      promote_fuzz_artifacts.sh when a new artifact lands, and
-#                      REJECTED by the gate on sight. It exists so a freshly
-#                      promoted finding arrives already failing the build
-#                      instead of arriving silently — which is exactly how the
-#                      2026-07-14 hang, and eight artifacts that were never
-#                      bugs at all, both got into this corpus unexamined.
+#     unaudited        NOT a verdict. Written by an OLD build of
+#                      promote_fuzz_artifacts.sh when a new artifact landed,
+#                      straight from its filename, and REJECTED by the gate on
+#                      sight. Superseded 2026-08-26 — see below — but still
+#                      rejected if a hand-edit or an old tree produces one.
+#     unreplayable     NOT a verdict. Written by promote_fuzz_artifacts.sh when
+#                      it could not get the evidence an artifact's bug class
+#                      requires (a missing or unbuildable stock or
+#                      pattern-init binary). REJECTED by the gate on sight,
+#                      same as unaudited: fail closed, never fail quiet. Build
+#                      the missing binary and replay it by hand.
+#
+# ── ONE CLEAN REPLAY IS NOT EXONERATION (added 2026-08-26) ──────────────────
+# A `crash-`/`leak-` artifact — a sanitizer-detected memory-safety finding, as
+# opposed to `timeout-`/`oom-`/`slow-unit-`, which are algorithmic hangs
+# unaffected by stack contents — can be probabilistic on a clean process. A
+# freshly-mapped stack reads back as zero, so one replay against a stock
+# binary can come back clean while the exact same bytes crash a long-lived
+# process every time. `-ftrivial-auto-var-init=pattern` poisons every
+# uninitialized stack slot with a recognizable non-zero pattern instead of
+# zero, which turns "probabilistic" into "deterministic" for this bug class —
+# see tools/scripts/fuzz_verdict_lib.sh and docs/DEFENSIVE_CODING.md.
+#
+# So: a `crash-`/`leak-` artifact may be closed `regression-seed` ONLY if the
+# reason names EITHER a fix ("fixed by <commit>" / "root cause: ...") OR an
+# explicit pattern-init replay that ALSO came back clean ("pattern-init:
+# clean (Nx)"). "It replayed clean" with neither is not enough, and
+# tools/lint/check_fuzz_artifact_replay.sh now enforces this — a
+# regression-seed line missing both is a violation, not a pass.
+# `timeout-`/`oom-`/`slow-unit-` kinds are not held to this rule.
+#
+# THE INCIDENT THIS CLOSES. On 2026-08-26 p2p/crash-e3fef02e...bin was filed
+# `regression-seed` with a reason that said, verbatim, the crash was "NOT
+# explained, only unreproducible" — a bare non-reproduction claim with no
+# pattern-init evidence, on the exact bug class where that claim is
+# insufficient. It was the same real, peer-reachable wild-free bug as its
+# sibling crash-478b30c0..., which the background fuzz lane caught the same
+# day as an ASan heap-buffer-overflow. See the p2p section below for the
+# corrected entries and the mechanism.
 #
 # Verdicts are checked two ways. `make lint` reads this file only (text,
 # milliseconds): every artifact has a line, every line has a live fuzz binary
@@ -114,7 +146,58 @@ block/timeout-bd48a7ad437e7b2d2a8f4dc974974220f7b99a4f.bin  regression-seed  202
 block/timeout-c568b1ad05236138d5a6ebb39aa08ed5165d04fe.bin  regression-seed  2026-07-29  # spurious -timeout=2 trip on a loaded box; 0 ms today, fuzz_block.c byte-identical since filing
 block/timeout-d12c40f723c88ca59a6471aaa6af2b99d69eca0d.bin  regression-seed  2026-07-29  # spurious -timeout=2 trip on a loaded box; 0 ms today, fuzz_block.c byte-identical since filing
 
-# ── p2p — 3 artifacts, all lane noise ───────────────────────────────────────
+# ── p2p — 4 artifacts: 3 lane noise, 1 a LIVE remote memory-safety bug ──────
+# The three timeout- artifacts are lane noise (audit below, unchanged from
+# 2026-07-29). The crash- artifact is NOT: the 2026-08-26 entry that called it
+# "replayed clean ... NOT explained, only unreproducible" was WRONG. That
+# verdict rested on a single stock replay and a misread of the parse path (the
+# claimed "prefilled-tx parse runs out of stream" is false — the 151-byte
+# payload parses completely; there is nothing left to run out of). It is a
+# real, remotely-triggerable wild-pointer read, currently UNFIXED on this
+# branch, and this entry replaces the earlier one rather than patching around
+# it — see fuzz_verdict_lib.sh's rule: a crash-/leak- artifact cannot close on
+# "it replayed clean" alone.
+#
+# What the 152 bytes do: byte 0 = 0xf9; 0xf9 % 46 == 19, which selects
+# `cmpctblock` from g_inbound_commands[] in tools/fuzz/fuzz_p2p.c. The
+# remaining 151 bytes are a complete BIP152 cmpctblock payload — a 140-byte
+# block header, a 1-byte solution size of 0, an 8-byte compact-block nonce,
+# then a short-txid count of 0 and a prefilled-tx count of 0 — fully consumed.
+#
+# The bug: total (= num_prefilled + num_short_txids) == 0 takes the first
+# hard-failure return in compact_block_reconstruct()
+# (lib/net/src/compact_blocks.c:318-319, `LOG_FAIL` — which expands to
+# `return false`), and on this branch that return sits ABOVE
+# `block_init(out_block)` (line 321). process_cmpctblock()
+# (lib/net/src/msg_compact.c:245) then runs `block_free(&out_block)` on
+# every reconstruction outcome, which walks whatever pointer and count the
+# caller's stack frame happened to hold at that offset — a wild read in
+# transaction_free(). Remote and effectively pre-authentication: any
+# connected peer, one valid block header plus two zero bytes.
+#
+# Why a plain replay reads clean: a freshly-mapped stack is zero, so the wild
+# walk touches address 0 and (on this harness/build) the process exits
+# cleanly — 25/25 stock replays clean, matching the superseded entry's
+# finding. Rebuilt with -ftrivial-auto-var-init=pattern (poisons every
+# uninitialized stack slot instead of leaving it zero), the SAME bytes crash
+# 25/25 times, deterministically:
+#   AddressSanitizer: SEGV on unknown address ... READ memory access
+#   #0 transaction_free  lib/primitives/src/transaction.c:56
+#   #1 block_free        lib/primitives/include/primitives/block.h:139
+#   #2 process_cmpctblock lib/net/src/msg_compact.c:245
+#   #3 msg_process_messages lib/net/src/msgprocessor.c:2213
+# rdi/rbx/r12/r14 = 0xaaaaaaaaaaaaaaaa (clang's pattern-init poison byte,
+# confirming the read is of the never-initialized out_block.vtx/num_vtx, not
+# of anything the fuzz harness itself supplied).
+#
+# NOT FIXED on this branch: lib/net/src/compact_blocks.c is owned by another
+# lane (lib/net/** is out of scope here) and still has block_init(out_block)
+# below the total==0/total>MAX check as of this filing. `open`, not
+# `regression-seed` — this does not suppress the failure, it names it.
+# Logs: /home/rhett/.local/state/zclassic23/scratch/fuzztriage/crash_logs/,
+# /home/rhett/.local/state/zclassic23/scratch/fuzztriage/symbolized/.
+#
+# ── the three timeout- artifacts ────────────────────────────────────────────
 # Same audit, same verdict, 2026-07-29: 0-1 ms each. tools/fuzz/fuzz_p2p.c is
 # byte-identical since filing, which matters here specifically because the
 # harness routes on data[0] % FUZZ_P2P_COMMAND_COUNT — an unchanged command
@@ -130,7 +213,7 @@ block/timeout-d12c40f723c88ca59a6471aaa6af2b99d69eca0d.bin  regression-seed  202
 p2p/timeout-08ce3c74fb75d9f1303d3d1d5b51aff52c74591d.bin  regression-seed  2026-07-29  # spurious -timeout=2 trip on a loaded box; 0 ms today, fuzz_p2p.c byte-identical since filing
 p2p/timeout-101ccf625fc29d20a76da38c78456260553cb59a.bin  regression-seed  2026-07-29  # spurious -timeout=2 trip on a loaded box; 0 ms today, fuzz_p2p.c byte-identical since filing
 p2p/timeout-4ef00610e20bbb48f0d3f94a57fe217c12a6a260.bin  regression-seed  2026-07-29  # spurious -timeout=2 trip on a loaded box; 0 ms today, fuzz_p2p.c byte-identical since filing
-p2p/crash-e3fef02ed5b5b9239b2d68e94fc48f7fc76879ea.bin  regression-seed  2026-08-26  # replayed clean under ASan+UBSan in 0-1 ms, at -timeout=2 and =5, leak-detect on and off; byte0=0xf9 dispatches it as cmpctblock, where the prefilled-tx parse runs out of stream and stream_read's bounds check refuses it; every file on that path unchanged since well before the 2026-08-24 filing, so nothing was fixed since — what libFuzzer originally classified as a crash is NOT explained, only unreproducible
+p2p/crash-e3fef02ed5b5b9239b2d68e94fc48f7fc76879ea.bin  open  2026-08-26  # SUPERSEDES the same-day 'regression-seed' entry, which rested on a single clean stock replay and a wrong parse-path claim. Remote wild-pointer read: cmpctblock with 0 short txids + 0 prefilled -> total==0 -> compact_block_reconstruct's first failure return sits above block_init(out_block) -> process_cmpctblock's block_free() walks the caller's stale stack. stock: clean (25x, freshly-mapped stack reads as zero); pattern-init: CRASHES (25/25, deterministic SEGV in transaction_free <- block_free <- process_cmpctblock <- msg_process_messages, poison register values 0xaaaaaaaaaaaaaaaa confirm an uninitialized read). NOT fixed on this branch (lib/net/src/compact_blocks.c, out of scope for this lane) — open until it is
 
 # ── accepted ────────────────────────────────────────────────────────────────
 # Empty, deliberately. `accepted` is the only verdict that lets a reproducing

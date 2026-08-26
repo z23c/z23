@@ -134,6 +134,10 @@ source "$SCRIPT_DIR/gate_lib.sh"
 # the hollow PASS this file exists to prevent. See tools/scripts/sh_str.sh.
 # shellcheck source=tools/scripts/sh_str.sh
 . "$ROOT/tools/scripts/sh_str.sh" || { echo "$0: cannot source tools/scripts/sh_str.sh" >&2; exit 2; }
+# Shared with tools/scripts/promote_fuzz_artifacts.sh: what phrase in a
+# ledger reason counts as "names a fix" or "records a pattern-init replay".
+# shellcheck source=tools/scripts/fuzz_verdict_lib.sh
+. "$ROOT/tools/scripts/fuzz_verdict_lib.sh" || { echo "$0: cannot source tools/scripts/fuzz_verdict_lib.sh" >&2; exit 2; }
 
 SEED_ROOT="lib/test/fuzz_seeds"
 LEDGER="$SEED_ROOT/ARTIFACT_VERDICTS.txt"
@@ -182,6 +186,13 @@ REPLAY_TIMEOUT="${ZCL_FUZZ_REPLAY_TIMEOUT:-5}"
 CONFIRM_TIMEOUT="${ZCL_FUZZ_REPLAY_CONFIRM_TIMEOUT:-15}"
 JOBS="${ZCL_FUZZ_REPLAY_JOBS:-6}"
 BIN_DIR="${ZCL_LINT_BIN_DIR:-build/bin}"
+# Where promote_fuzz_artifacts.sh builds the pattern-init variant (see its
+# ensure_binary()/the Makefile's ZCL_FUZZ_EXTRA_CFLAGS hook). Only consulted
+# below for the one case where getting it wrong would push a real "open"
+# finding back to a false "regression-seed": a crash-/leak- artifact whose
+# STOCK replay just came back clean. Never required to exist — a missing
+# pattern-init binary here means "cannot confirm", not "clean".
+PI_BIN_DIR="${ZCL_LINT_PATTERNINIT_BIN_DIR:-build/fuzz-patterninit/bin}"
 
 # Env equivalents of the two flags, so the C selftest registry in
 # lib/test/src/test_make_lint_gates.c can drive this gate through
@@ -312,7 +323,7 @@ done < "$LEDGER"
 # violation: commit it with a verdict, or delete it.
 artifacts=()
 nearmiss=()
-declare -A UNTRACKED=() ENUMERATED=()
+declare -A UNTRACKED=() ENUMERATED=() KIND_OF=()
 scanned=0
 
 # Classify one repo-relative path found under $SEED_ROOT. Shared by all three
@@ -332,6 +343,7 @@ consider_path() {
     ENUMERATED["$rel"]=1
     if [[ "$base" =~ $ARTIFACT_RE ]]; then
         artifacts+=("$rel")
+        KIND_OF["$rel"]="${BASH_REMATCH[1]}"
         if [[ "$origin" == untracked ]]; then UNTRACKED["$rel"]=1; fi
         scanned=$((scanned + 1))
         return 0
@@ -466,10 +478,13 @@ for rel in "${artifacts[@]}"; do
         *" $v "*) ;;
         *)
             if [[ "$v" == "unaudited" ]]; then
-                # Written by promote_fuzz_artifacts.sh when it files a new
-                # artifact. Deliberately not a verdict: it is a placeholder that
-                # keeps the build red until a human has actually replayed the
-                # thing and decided something. Rejecting it here IS the feature.
+                # Written by the OLD promote_fuzz_artifacts.sh when it filed a
+                # new artifact straight from its filename. Deliberately not a
+                # verdict: it is a placeholder that keeps the build red until
+                # a human has actually replayed the thing and decided
+                # something. Rejecting it here IS the feature. The current
+                # promoter no longer writes this — it replays before it files
+                # — but old trees or a hand-edit can still produce one.
                 report "$SEED_ROOT/$rel [UNAUDITED — auto-filed on ${LEDGER_DATE[$rel]:-?}, nobody has triaged it]"
                 note "Replay it:  ASAN_OPTIONS=detect_leaks=0:symbolize=0 \\"
                 note "  timeout -k 5 $((REPLAY_TIMEOUT + 10)) $BIN_DIR/fuzz_$corpus -timeout=$REPLAY_TIMEOUT \\"
@@ -477,6 +492,17 @@ for rel in "${artifacts[@]}"; do
                 note "Then replace its line in $LEDGER with a real"
                 note "verdict: regression-seed (it is clean), open (it is a bug you"
                 note "have not fixed), or accepted (it is genuinely not a bug, +why)."
+            elif [[ "$v" == "unreplayable" ]]; then
+                # Written by promote_fuzz_artifacts.sh when it could not get
+                # the evidence this artifact's bug class requires (missing or
+                # unbuildable stock or pattern-init binary). Fail-closed by
+                # design: an artifact nobody could replay is never allowed to
+                # read as clean just because nothing contradicted it.
+                report "$SEED_ROOT/$rel [UNREPLAYABLE — filed ${LEDGER_DATE[$rel]:-?}, promoter could not get a verdict]"
+                note "${LEDGER_REASON[$rel]:-}"
+                note "Build the missing binary (stock: 'make fuzz_$corpus'; pattern-init:"
+                note "  'make BUILD_DIR=build/fuzz-patterninit ZCL_FUZZ_EXTRA_CFLAGS=-ftrivial-auto-var-init=pattern fuzz_$corpus')"
+                note "then re-run promote_fuzz_artifacts.sh or replay it by hand and write a real verdict."
             else
                 report "$LEDGER: '$rel' has unknown verdict '$v' (want regression-seed | open | accepted)"
             fi ;;
@@ -492,6 +518,32 @@ for rel in "${artifacts[@]}"; do
         note "'accepted' is the ONLY verdict that lets a reproducing artifact"
         note "pass a build. It costs a real sentence. A bug you have not"
         note "fixed is 'open', not 'accepted'."
+    fi
+
+    # "It did not reproduce" is not, by itself, enough to close a crash-/leak-
+    # kind artifact. A stale-stack bug can be probabilistic on a clean
+    # process (a freshly-mapped stack reads back as zero), so ONE clean
+    # replay proves nothing about it — see fuzz_verdict_lib.sh's header for
+    # the incident this closes: a real remote memory-safety bug was once
+    # filed 'regression-seed' with a reason that said, in so many words,
+    # "not explained, only unreproducible". Closing it requires either a
+    # named fix ("fixed by ..." / "root cause: ...") or an explicit
+    # pattern-init replay that ALSO came back clean. timeout-/oom-/slow-unit-
+    # kinds are a different, algorithmic bug class and are not held to this.
+    if [[ "$v" == "regression-seed" && -n "$r" ]]; then
+        kind="${KIND_OF[$rel]:-}"
+        if ! regression_seed_reason_is_sufficient "$kind" "$r"; then
+            report "$LEDGER: '$rel' ($kind) closed 'regression-seed' on non-reproduction alone"
+            note "reason: $r"
+            note "A $kind finding needs a named fix ('fixed by <commit>') or an"
+            note "explicit pattern-init replay recorded in the reason ('pattern-init:"
+            note "clean (Nx)') before it can close. 'it replayed clean' by itself is"
+            note "not exoneration — a freshly-mapped stack reads as zero, so one"
+            note "clean run proves nothing about a stale-stack bug. Rebuild under"
+            note "  make BUILD_DIR=build/fuzz-patterninit \\"
+            note "    ZCL_FUZZ_EXTRA_CFLAGS=-ftrivial-auto-var-init=pattern fuzz_$corpus"
+            note "and replay against that binary too, then record what it did."
+        fi
     fi
 done
 
@@ -701,10 +753,43 @@ for rel in "${selected[@]}"; do
         case "$v" in
         regression-seed) ;;   # the good case
         open)
-            report "$SEED_ROOT/$rel [ledger says 'open' but it no longer reproduces]"
-            note "Fixed? Then say so — reclassify to 'regression-seed' in"
-            note "$LEDGER with today's date and the commit that fixed it."
-            note "A stale 'open' is how a ledger rots into decoration." ;;
+            kind="${KIND_OF[$rel]:-}"
+            pi_bin="$ROOT/$PI_BIN_DIR/fuzz_$corpus"
+            pi_status=""
+            if verdict_kind_needs_pattern_init_evidence "$kind"; then
+                if [[ -x "$pi_bin" ]]; then
+                    pi_rc=0
+                    ( cd "$work" && ASAN_OPTIONS=detect_leaks=0:symbolize=0 \
+                      UBSAN_OPTIONS=print_stacktrace=0 \
+                      timeout -k 5 "$((CONFIRM_TIMEOUT + 10))" "$pi_bin" \
+                        -timeout="$CONFIRM_TIMEOUT" -rss_limit_mb=2048 -runs=1 \
+                        -timeout_exitcode=70 -error_exitcode=77 \
+                        -artifact_prefix="$work/" \
+                        "$ROOT/$SEED_ROOT/$rel" >/dev/null 2>&1 ) || pi_rc=$?
+                    [[ "$pi_rc" -ne 0 ]] && pi_status="reproduces" || pi_status="clean"
+                fi
+            fi
+            case "$pi_status" in
+            reproduces)
+                echo "[$GATE] $rel: stock replay is clean but pattern-init still" \
+                     "reproduces — 'open' stands, this is NOT a stale verdict" ;;
+            clean|"")
+                # kind does not need pattern-init evidence (timeout/oom/slow-unit),
+                # OR it does and pattern-init ALSO came back clean, OR there is no
+                # pattern-init binary to ask (ambiguous — reported as its own,
+                # distinct violation below rather than silently assumed clean).
+                if [[ "$pi_status" == "" ]] && verdict_kind_needs_pattern_init_evidence "$kind"; then
+                    report "$SEED_ROOT/$rel [ledger says 'open', stock replay is clean, and there is no pattern-init binary to confirm it — cannot tell]"
+                    note "Build it:  make BUILD_DIR=$PI_BIN_DIR/.. ZCL_FUZZ_EXTRA_CFLAGS=-ftrivial-auto-var-init=pattern fuzz_$corpus"
+                    note "then re-run. Neither reclassifying nor leaving this stale is"
+                    note "safe without that answer for a $kind finding."
+                else
+                    report "$SEED_ROOT/$rel [ledger says 'open' but it no longer reproduces]"
+                    note "Fixed? Then say so — reclassify to 'regression-seed' in"
+                    note "$LEDGER with today's date and the commit that fixed it."
+                    note "A stale 'open' is how a ledger rots into decoration."
+                fi ;;
+            esac ;;
         accepted)
             report "$SEED_ROOT/$rel [ledger says 'accepted' but it no longer reproduces]"
             note "Reclassify to 'regression-seed' — an 'accepted' entry that"
