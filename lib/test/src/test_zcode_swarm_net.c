@@ -2894,6 +2894,30 @@ static int zwn_t_sovereign_source_build(const struct chain_params *params)
                0);
         ASSERT(memcmp(consumer_assignment.assignment_evidence_root,
                       discovered_accepted_root, 32) == 0);
+        /* Work-solution admission on the FETCHED package — the receiver-
+         * side binding check a work puller runs after the swarm delivered
+         * bytes this node never held before. The package's own chain
+         * names the task; a flipped expected root is refused. */
+        uint8_t work_task_root[32], work_source_root[32];
+        uint8_t work_accepted_root[32];
+        ASSERT_EQ(vcs_zcode_work_solution_admit(
+                      b.store, discovered_package_root,
+                      consumer_accepted.task_root, work_task_root,
+                      work_source_root, work_accepted_root),
+                  VCS_ZCODE_WORK_ADMIT_OK);
+        ASSERT(memcmp(work_task_root, consumer_accepted.task_root, 32) ==
+               0);
+        ASSERT(memcmp(work_source_root,
+                      consumer_assignment.source_root, 32) == 0);
+        ASSERT(memcmp(work_accepted_root, discovered_accepted_root, 32) ==
+               0);
+        uint8_t work_flipped[32];
+        memcpy(work_flipped, consumer_accepted.task_root, 32);
+        work_flipped[0] ^= 1u;
+        ASSERT_EQ(vcs_zcode_work_solution_admit(
+                      b.store, discovered_package_root, work_flipped,
+                      NULL, NULL, NULL),
+                  VCS_ZCODE_WORK_ADMIT_TASK_MISMATCH);
 
         char consumer_source[1400], consumer_binary[1400];
         ASSERT(snprintf(consumer_source, sizeof(consumer_source),

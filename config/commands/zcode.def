@@ -632,6 +632,80 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     zcl_native_handle_zcode_work_accept)
 
+/* ── work transport: solutions move between nodes, keyed by task ──────
+ * A task is content-addressed (task_root); a solution is the source
+ * package whose accepted-work chain verifies against exactly that root.
+ * Discovery in zclassic23.work is keyed by the PROBLEM, not by author or
+ * package name. Both leaves ride only existing wires: the frozen swarm
+ * codec for bytes, signed POINTER/PROVIDER records for discovery. */
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.work.offer", "zcode.work", "",
+    "Make one accepted solution discoverable by its task",
+    "Verifies the source package at package_root is held complete and "
+    "reconstructs to a verified accepted-work chain (task, candidate, "
+    "proof policy, every receipt, PROVEN lane), DERIVES the task root it "
+    "solves — the task root is an output of verification, never an input "
+    "— and returns TWO ready-to-run zcode network publish inputs for "
+    "zclassic23.work: provider_publish_input (\"ask me for these bytes\", "
+    "the record the fetch path routes on) and pointer_publish_input "
+    "(\"this package solves this task\", what a puller looks up when all "
+    "it knows is the task root). Both are required; either alone is a "
+    "silent no-op at pull time. WORK_NOT_RECONSTRUCTIBLE names a package "
+    "that is not held or does not verify. Offering announces NOTHING: "
+    "publishing is the separate second act.",
+    0,
+    "zcode,work,offer,solution,task,dht,provider,pointer,swarm",
+    "zcl.zcode_work_offer.input.v1",
+    "zcl.zcode_work_offer.v1",
+    "package_root,datadir", "package_root",
+    "z23 zcode work offer --input='{\"package_root\":\"<64hex>\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_zcode_work_offer)
+
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.work.pull", "zcode.work", "",
+    "Fetch and verify published solutions for one task root",
+    "Resolves every zclassic23.work POINTER record at "
+    "semantic_root=task_root, drives the ordinary swarm fetch for each "
+    "DISTINCT source package, and verifies each with "
+    "vcs_zcode_work_solution_admit — reconstruction from stored bytes "
+    "re-verifying the package's own accepted-work chain, with "
+    "expect_task_root ALWAYS set to the caller's root. That "
+    "receiver-side binding check — never the publish gate — is the "
+    "security property: a package that proves a DIFFERENT task is refused "
+    "task-mismatch and stays unverified. Bounded rows carry "
+    "transport_root, fetch_outcome, admit_result (the NAMED rule), "
+    "source_root and accepted_work_root (verified rows only), plus "
+    "totals pointers_seen, distinct_transport_roots, fetched, admitted, "
+    "refused and rows_truncated. A row that fails STAYS in the report "
+    "naming its rule; one bad pointer never aborts the sweep. status "
+    "separates the dead ends that must never be merged: NO_WORK_POINTERS "
+    "(nobody has solved this task yet) versus WORK_BYTES_UNREACHABLE "
+    "(solutions exist, no authenticated provider served the bytes). "
+    "Pulling is NOT accepting and NOTHING is executed: reconstruction "
+    "runs in fresh private scratch removed before returning, and choosing "
+    "what to do with the source is a separate explicit act.",
+    0,
+    "zcode,work,pull,solution,task,dht,pointer,swarm,verify",
+    "zcl.zcode_work_pull.input.v1",
+    "zcl.zcode_work_pull.v1",
+    "task_root,datadir,maximum_records", "task_root",
+    "z23 zcode work pull --input='{\"task_root\":\"<64hex>\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_zcode_work_pull)
+
 ZCL_COMMAND_READY_COMMAND(
     "zcode.work.review", "zcode.work", "", "Review one exact candidate",
     "Reloads the exact candidate and its trusted non-review proof set, stores "

@@ -66,4 +66,25 @@ bool boot_zcode_dht_package_pointer_publish_gate(
 bool boot_zcode_dht_attestation_pointer_publish_gate(
     const struct vcs_zcode_dht_publish_spec *spec, struct json_value *result);
 
+/* A work-solution POINTER in VCS_ZCODE_WORK_DHT_NAMESPACE claims "the source
+ * package at transport_root is a fully proven, accepted solution to the task
+ * whose root is semantic_root, and this node holds the bytes". This gate
+ * refuses the publish unless vcs_zcode_work_solution_admit(store,
+ * transport_root, semantic_root, ...) returns OK — one call that proves the
+ * carrier is present and complete, that it reconstructs to a verified
+ * accepted-work chain (task, candidate, proof policy, every receipt), and
+ * that the task the package itself proves equals the pointer's
+ * semantic_root. Refusals carry the named code (NO_PACKAGE_STORE,
+ * WORK_NOT_RECONSTRUCTIBLE with the checkout rule string, TASK_ROOT_NOT_BOUND)
+ * in the ok/code/message shape every RPC refusal in this layer uses.
+ *
+ * Read the attestation gate's doctrine above: it applies word for word. This
+ * gate stops THIS node from advertising a solution pointer it cannot stand
+ * behind; it makes nobody else honest. The property a reader may rely on is
+ * the RECEIVER-side check — vcs_zcode_work_solution_admit() with a non-NULL
+ * expect_task_root, which every puller passes. PROVIDER records in this
+ * namespace are deliberately ungated, same reasoning as attestation's. */
+bool boot_zcode_dht_work_pointer_publish_gate(
+    const struct vcs_zcode_dht_publish_spec *spec, struct json_value *result);
+
 #endif /* ZCL_CONFIG_BOOT_ZCODE_DHT_PUBLISH_GATE_H */

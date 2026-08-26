@@ -462,6 +462,60 @@ own allowlist decide what it is allowed to see, and a quorum you can only
 observe when you already agree with it proves nothing. The
 approved-verifier quorum is applied afterwards, by `zcode package verify`.
 
+## Work solutions are discovered by task
+
+Attestations answer "is this package any good?" A different question moves
+the development loop itself: *I know the problem — who has solved it?* A
+task is content-addressed (`task_root`, the signed task object's root), and
+a solution is the source package whose accepted-work chain — task →
+candidate → proof policy → proof receipts → PROVEN lane — verifies against
+exactly that root. The `zclassic23.work` namespace keys discovery by the
+**problem**, not by author or package name: a stranger who knows only the
+task asks for `semantic_root` = the task root and learns every carrier
+claiming to solve it.
+
+The records are the same two ordinary signed DHT records the attestation
+lane uses, with the same two-must-be-published rule:
+
+- **PROVIDER** on the source package root — "ask me for these bytes"; the
+  record the fetch path routes on.
+- **POINTER** binding `semantic_root` = the task root to `transport_root`
+  = the source package root — "this package solves this task"; what a
+  puller looks up.
+
+`zcode work offer --input='{"package_root":"<64hex>"}'` verifies the held
+package reconstructs to a proven accepted work, **derives** the task root
+from the package's own chain — the task root is an output of verification,
+never typed by the operator — and returns both ready-to-run publish
+inputs, provider first, exactly as `attest offer` does. The publish path
+gates the POINTER with the same hygiene doctrine as the attestation gate:
+this node may not advertise a solution pointer whose package it does not
+hold, does not verify, or that proves a different task than the pointer
+names (`WORK_NOT_RECONSTRUCTIBLE`, `TASK_ROOT_NOT_BOUND`). And with the
+same limit: the gate constrains only the node applying it.
+
+On the other side, `zcode work pull --input='{"task_root":"<64hex>"}'`
+resolves every POINTER at that key, fetches each distinct package over the
+ordinary swarm codec, and admits each with
+`vcs_zcode_work_solution_admit(expect_task_root)` — reconstruction from
+stored bytes re-verifying the whole accepted-work chain, then a refusal
+unless the task the package itself proves equals the root the reader
+asked about. That receiver-side binding check is the security property:
+a hostile pointer in this namespace cannot deliver a solution to a
+different problem. The report shape follows `attest pull` — bounded rows
+naming each rule, failures never abort the sweep, and the two dead ends
+stay separate (`NO_WORK_POINTERS` versus `WORK_BYTES_UNREACHABLE`).
+
+**Pulling is not accepting, and nothing is executed.** Reconstruction
+runs in fresh private scratch that is removed before returning; a
+verified row means "this package genuinely solves this task, and this
+node holds the bytes" — nothing more. It does not say the solution is
+good, and it does not run one instruction of it. Choosing what to do
+with the source is the separate, explicit acts the operator already has
+(checkout, reproduce). The scoped-agent governance of the previous
+section applies here as anywhere: once a master key's grants govern this
+namespace, only the founder and live grantees can publish into it.
+
 ## Ratio and optional ZCL burn credits
 
 The primary ratio should be earned by serving verified bytes:

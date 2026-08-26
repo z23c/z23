@@ -29,6 +29,10 @@ struct vcs_source_package_checkout_metrics {
     uint32_t authority_objects;
     uint32_t work_receipts;
     uint8_t accepted_signer[32];
+    /* The task root the verified accepted-work chain proves this package
+     * solves. Filled only on the accepted-work path (the signer is too);
+     * never an input, never learned from a lone lane receipt. */
+    uint8_t task_root[32];
 };
 
 const char *vcs_source_package_checkout_result_string(
@@ -77,5 +81,39 @@ vcs_source_package_reconstruct_verify(
     struct vcs_package_store *store, const uint8_t package_root[32],
     uint8_t source_root_out[32], uint8_t accepted_work_root_out[32],
     struct vcs_source_package_checkout_metrics *metrics);
+
+/* Work-solution discovery namespace. A POINTER record here claims: "the
+ * source package at transport_root is a fully proven, accepted solution to
+ * the task whose root is semantic_root." Solutions are found by task, not
+ * by author or package name — a stranger who knows only the problem asks
+ * the DHT for this key and learns every carrier that claims to solve it. */
+#define VCS_ZCODE_WORK_DHT_NAMESPACE "zclassic23.work"
+
+enum vcs_zcode_work_admit_result {
+    VCS_ZCODE_WORK_ADMIT_OK = 0,
+    VCS_ZCODE_WORK_ADMIT_NULL,
+    VCS_ZCODE_WORK_ADMIT_NOT_RECONSTRUCTIBLE,
+    VCS_ZCODE_WORK_ADMIT_TASK_MISMATCH,
+};
+
+const char *vcs_zcode_work_admit_result_string(
+    enum vcs_zcode_work_admit_result result);
+
+/* Receiver-side binding check for a work-solution POINTER — the property a
+ * READER may rely on, as opposed to the publisher gate, which is local
+ * hygiene only. Reconstructs the package from stored bytes (verifying the
+ * complete task/candidate/policy/receipt chain), then, when expect_task_root
+ * is non-NULL, refuses unless the task the package itself proves equals the
+ * root the reader was asking about. This is the one-place rule: a puller
+ * that skipped it would be trusting the record's word for the binding, and
+ * the record is just a signed claim. Passing NULL for expect_task_root
+ * skips the binding check for callers who only want the derived roots —
+ * an offer derives the task root instead of checking one. All three out
+ * roots are optional (NULL leaves them untouched) and are filled only on
+ * OK; task_root_out is the task the package's own chain proves. */
+enum vcs_zcode_work_admit_result vcs_zcode_work_solution_admit(
+    struct vcs_package_store *store, const uint8_t package_root[32],
+    const uint8_t expect_task_root[32], uint8_t task_root_out[32],
+    uint8_t source_root_out[32], uint8_t accepted_work_root_out[32]);
 
 #endif /* ZCL_VCS_SOURCE_PACKAGE_CHECKOUT_H */

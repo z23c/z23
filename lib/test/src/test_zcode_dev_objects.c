@@ -4275,6 +4275,39 @@ static int test_zd_improve_command(void)
         ASSERT(reconstruction_metrics.source.file_count > 0);
         ASSERT(reconstruction_metrics.authority_objects >= 9);
         ASSERT(reconstruction_metrics.work_receipts >= 2);
+        /* Work-solution admission: the same reconstruction, keyed by the
+         * task the package's own chain proves. expect == the derived task
+         * root verifies; a flipped root is refused task-mismatch — a
+         * hostile pointer binding this package to a different task can
+         * never survive the receiver-side check. */
+        uint8_t admit_task_root[32], admit_source_root[32];
+        uint8_t admit_work_root[32];
+        ASSERT_EQ(vcs_zcode_work_solution_admit(
+                      published_store, published_package_root, NULL,
+                      admit_task_root, admit_source_root,
+                      admit_work_root),
+                  VCS_ZCODE_WORK_ADMIT_OK);
+        ASSERT(memcmp(admit_task_root,
+                      reconstruction_metrics.task_root, 32) == 0);
+        ASSERT(memcmp(admit_source_root, candidate_source_root, 32) == 0);
+        ASSERT(memcmp(admit_work_root, accepted_lane_root, 32) == 0);
+        ASSERT_EQ(vcs_zcode_work_solution_admit(
+                      published_store, published_package_root,
+                      reconstruction_metrics.task_root, NULL, NULL, NULL),
+                  VCS_ZCODE_WORK_ADMIT_OK);
+        uint8_t flipped_task[32];
+        memcpy(flipped_task, reconstruction_metrics.task_root, 32);
+        flipped_task[0] ^= 1u;
+        ASSERT_EQ(vcs_zcode_work_solution_admit(
+                      published_store, published_package_root, flipped_task,
+                      NULL, NULL, NULL),
+                  VCS_ZCODE_WORK_ADMIT_TASK_MISMATCH);
+        uint8_t bogus_package[32];
+        memset(bogus_package, 0xb0, sizeof(bogus_package));
+        ASSERT_EQ(vcs_zcode_work_solution_admit(
+                      published_store, bogus_package,
+                      reconstruction_metrics.task_root, NULL, NULL, NULL),
+                  VCS_ZCODE_WORK_ADMIT_NOT_RECONSTRUCTIBLE);
         vcs_package_store_close(published_store);
 
         struct zcl_command_reply duplicate_publish_reply;
@@ -4306,6 +4339,11 @@ static int test_zd_improve_command(void)
                       accepted_lane_wire, accepted_lane_wire_len,
                       &accepted_lane), VCS_ZCODE_DEV_OK);
         free(accepted_lane_wire);
+        /* The task root surfaced by reconstruction is the one the lane
+         * receipt itself carries — the metrics field is filled from the
+         * verified chain, not from a neighboring field. */
+        ASSERT(memcmp(reconstruction_metrics.task_root,
+                      accepted_lane.task_root, 32) == 0);
         zd_root(publication_passport.stable_api_root, 0x81);
         ASSERT(zcl_hex_decode_lower(planned_recipe_saved,
                                     publication_passport.recipe_root, 32));

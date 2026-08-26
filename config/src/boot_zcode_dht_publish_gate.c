@@ -16,6 +16,7 @@
 #include "vcs/package_reproduce.h"
 #include "vcs/package_store.h"
 #include "vcs/package_transport.h"
+#include "vcs/source_package_checkout.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -321,5 +322,69 @@ bool boot_zcode_dht_attestation_pointer_publish_gate(
                  vcs_blob_result_string(outcome.blob_error),
                  vcs_package_attest_error_string(outcome.attest_error));
   gate_error(result, code, message);
+  return false;
+}
+
+/* ── work-solution POINTER gate ─────────────────────────────────────────
+ *
+ * The full doctrine is written at the attestation gate above and applies
+ * unchanged; this comment records only what differs.
+ *
+ * A POINTER in VCS_ZCODE_WORK_DHT_NAMESPACE claims "the package at
+ * transport_root SOLVES the task at semantic_root". The claim is honest
+ * from this node only when the package is held complete AND reconstructs
+ * to a verified accepted-work chain whose own task root is the pointer's
+ * semantic_root. vcs_zcode_work_solution_admit carries every one of those
+ * rules in one call; unlike the attestation gate it writes nothing —
+ * reconstruction happens in fresh private scratch that is removed before
+ * returning — so plan and commit are gated identically and read-only.
+ *
+ * A hostile node publishes any pointer it likes; the DHT carries it; the
+ * puller's vcs_zcode_work_solution_admit(expect_task_root) refusal is the
+ * only thing that has ever stopped a lying solution pointer. */
+bool boot_zcode_dht_work_pointer_publish_gate(
+    const struct vcs_zcode_dht_publish_spec *spec,
+    struct json_value *result) {
+  struct vcs_package_store *store = vcs_package_store_global();
+  if (!store) {
+    gate_error(result, "NO_PACKAGE_STORE",
+               "package hosting is disabled on this node; enable -packagehost=1"
+               " and hold the accepted source package before publishing its"
+               " work pointer");
+    return false;
+  }
+  uint8_t task_root[32], source_root[32], accepted_work_root[32];
+  enum vcs_zcode_work_admit_result admitted = vcs_zcode_work_solution_admit(
+      store, spec->transport_root, spec->semantic_root, task_root,
+      source_root, accepted_work_root);
+  if (admitted == VCS_ZCODE_WORK_ADMIT_OK)
+    return true;
+  char root_hex[65];
+  zcl_hex_encode(spec->transport_root, 32, root_hex);
+  if (admitted == VCS_ZCODE_WORK_ADMIT_TASK_MISMATCH) {
+    LOG_ERROR("net.zcode_dht",
+              "publish gate: package %s solves a different task than the"
+              " pointer names",
+              root_hex);
+    gate_error(result, "TASK_ROOT_NOT_BOUND",
+               "the package at transport_root reconstructs to a proven"
+               " accepted work for a DIFFERENT task than this pointer's"
+               " semantic_root; publish the package built from exactly this"
+               " task");
+    return false;
+  }
+  /* NOT_RECONSTRUCTIBLE and the never-in-practice NULL arm both land here:
+   * the checkout layer already names the exact rule, and the operator's
+   * next step is the same for every one of them — get the real package
+   * into this node's store first. */
+  LOG_ERROR("net.zcode_dht",
+            "publish gate: package %s does not reconstruct to a proven"
+            " accepted work",
+            root_hex);
+  gate_error(result, "WORK_NOT_RECONSTRUCTIBLE",
+             "the package at transport_root is not held complete, or does"
+             " not reconstruct to a verified accepted-work chain; accept the"
+             " work on this node (zcode work accept) and publish the"
+             " resulting source package root");
   return false;
 }

@@ -91,6 +91,7 @@
 #include "vcs/package_attest.h"
 #include "vcs/package_attest_transport.h"
 #include "vcs/package_store.h"
+#include "vcs/source_package_checkout.h"
 #include "vcs/zcode_dht_record.h"
 #include "vcs/package_build.h"
 #include "vcs/package_eligible.h"
@@ -3059,6 +3060,120 @@ static int t_attest_publish_gate(void)
     return failures;
 }
 
+/* boot_zcode_dht_work_pointer_publish_gate stops THIS node from
+ * advertising a work-solution pointer it cannot stand behind. The arms
+ * this suite can reach without the full accepted-work chain fixture are
+ * the store and shape arms; the binding arms (a real package proving a
+ * different task) belong to vcs_zcode_work_solution_admit and are proven
+ * against a real reconstructed chain by the dev-objects suite — the gate
+ * delegates to that one call, so its mapping of TASK_MISMATCH is the only
+ * uncovered line and is a four-line if. Owns the same process globals the
+ * attestation gate case does; same open/restore discipline. */
+static void zv_work_gate_spec(struct vcs_zcode_dht_publish_spec *spec,
+                              const uint8_t semantic_root[32],
+                              const uint8_t transport_root[32])
+{
+    memset(spec, 0, sizeof(*spec));
+    spec->kind = VCS_ZCODE_DHT_RECORD_POINTER;
+    snprintf(spec->namespace_name, sizeof(spec->namespace_name), "%s",
+             VCS_ZCODE_WORK_DHT_NAMESPACE);
+    memcpy(spec->semantic_root, semantic_root, 32);
+    memcpy(spec->transport_root, transport_root, 32);
+    spec->sequence = 1;
+    spec->not_before = 1000;
+    spec->expiry = 1000 + 86400;
+}
+
+static int t_work_publish_gate(void)
+{
+    int failures = 0;
+    uint8_t task_root[32], transport_root[32];
+    zv_pattern_root(0x51, task_root);
+    zv_pattern_root(0x52, transport_root);
+
+    /* (a) No package store at all. */
+    vcs_package_store_close_global();
+    {
+        struct vcs_zcode_dht_publish_spec spec;
+        zv_work_gate_spec(&spec, task_root, transport_root);
+        struct json_value result;
+        json_init(&result);
+        bool allowed =
+            boot_zcode_dht_work_pointer_publish_gate(&spec, &result);
+        ZV_CHECK("work gate: no package store names NO_PACKAGE_STORE",
+                 !allowed &&
+                 zv_str_is(&result, "code", "NO_PACKAGE_STORE"));
+        json_free(&result);
+    }
+
+    const char *argv[] = { "zclassic23-test", "-packagehost=1",
+                           "-packagequota=100000000" };
+    ParseParameters(3, argv);
+    char dd[1024];
+    test_make_tmpdir(dd, sizeof(dd), "zcode_verify", "work-gate");
+    SetDataDir(dd);
+    bool opened = vcs_package_store_open_global() &&
+                  vcs_package_store_global() != NULL;
+    ZV_CHECK("work gate: node-global package store opens on the temp"
+             " datadir",
+             opened);
+    if (!opened) {
+        vcs_package_store_close_global();
+        const char *reset[] = { "zclassic23-test" };
+        ParseParameters(1, reset);
+        SetDataDir("");
+        test_rm_rf_recursive(dd);
+        return failures + 1;
+    }
+    struct vcs_package_store *store = vcs_package_store_global();
+
+    /* (b) A package root this node does not hold at all. */
+    {
+        struct vcs_zcode_dht_publish_spec spec;
+        zv_work_gate_spec(&spec, task_root, transport_root);
+        struct json_value result;
+        json_init(&result);
+        bool allowed =
+            boot_zcode_dht_work_pointer_publish_gate(&spec, &result);
+        ZV_CHECK("work gate: an unheld package names"
+                 " WORK_NOT_RECONSTRUCTIBLE",
+                 !allowed &&
+                 zv_str_is(&result, "code", "WORK_NOT_RECONSTRUCTIBLE"));
+        json_free(&result);
+    }
+
+    /* (c) Bytes this node DOES hold that are not a source package.
+     * Possession is not a solution: the blob root reconstructs to
+     * nothing. */
+    {
+        static const uint8_t junk[96] = { 0x6e, 0x6f, 0x74, 0x2d, 0x61,
+                                          0x2d, 0x63, 0x61, 0x72, 0x72,
+                                          0x69, 0x65, 0x72 };
+        uint8_t junk_root[32] = { 0 };
+        bool put = vcs_blob_put_to(store, junk, sizeof(junk), junk_root) ==
+                   VCS_BLOB_OK;
+        struct vcs_zcode_dht_publish_spec spec;
+        zv_work_gate_spec(&spec, task_root, junk_root);
+        struct json_value result;
+        json_init(&result);
+        bool allowed =
+            put && boot_zcode_dht_work_pointer_publish_gate(&spec, &result);
+        ZV_CHECK("work gate: held non-package bytes name"
+                 " WORK_NOT_RECONSTRUCTIBLE",
+                 put && !allowed &&
+                 zv_str_is(&result, "code", "WORK_NOT_RECONSTRUCTIBLE"));
+        json_free(&result);
+    }
+
+    /* Restore the process globals this case borrowed. */
+    vcs_package_store_close_global();
+    const char *reset[] = { "zclassic23-test" };
+    ParseParameters(1, reset);
+    SetDataDir("");
+    test_rm_rf_recursive(dd);
+    return failures;
+}
+
 /* ── 4. end-to-end external verifier ────────────────────────────────── */
 
 static bool zv_dir_is_empty(const char *path)
@@ -3425,6 +3540,7 @@ int test_zcode_verify(void)
     failures += t_attest_offer();
     failures += t_attest_pull();
     failures += t_attest_publish_gate();
+    failures += t_work_publish_gate();
     failures += t_verifier_e2e();
     printf("=== zcode_verify complete: %d failure(s) ===\n", failures);
     return failures;

@@ -1126,6 +1126,25 @@ void zcl_native_handle_zcode_package_attest_pull(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 
+/* zcode work transport leaves — how a proven accepted solution MOVES
+ * between nodes, keyed by the task it solves (native_zcode_work_transport_
+ * command.c). offer verifies one held source package reconstructs to a
+ * proven accepted work, derives the task root it solves, and returns the
+ * two ready-to-run publish inputs (PROVIDER on the package root, POINTER
+ * binding task root to it). pull resolves every published work-solution
+ * POINTER for one task root, fetches each distinct package, and re-derives
+ * each package's own task chain with expect_task_root ALWAYS set — that
+ * receiver-side binding check, not the publish gate, is what stops a
+ * hostile pointer delivering a solution to a different problem. Pulling is
+ * not accepting, and nothing is executed. Bound by config/commands/
+ * zcode.def. */
+void zcl_native_handle_zcode_work_offer(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_zcode_work_pull(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+
 /* zcode attestation admit — the third transport leaf, and the one that
  * decouples carriage from the DHT. It admits ONE attestation blob this
  * node ALREADY HOLDS, named directly by its transport root: the bytes are
