@@ -1463,3 +1463,14 @@ AGENT_IMPACT_RULE("tools/dev/hotswap_verify_so.c|tools/dev/hotswap-verify.sh|con
  * one of them with no change to the gate is how a duration verdict comes back
  * in without anyone noticing. */
 AGENT_IMPACT_RULE("tools/deploy_verify.sh|deploy/zclassic23-cutover.sh|deploy/zclassic23-cutover-selftest.sh|deploy/zclassic23-host-watchdog.sh|deploy/install-host-watchdog.sh|deploy/system/zclassic23-host-watchdog.service|deploy/system/zclassic23-host-watchdog.timer|deploy/zclassic23-spinning-disk-watchdog.conf|lib/test/src/lint_gate_deploy_contracts.c", "make_lint_gates make_lint_gates_realroot")
+/* LANE hotswap-leaf-denylist: the owner ruling that core.chain.block.get and
+ * core.chain.transaction.get are NEVER hot-swappable, and the gate that
+ * enforces it. The names and their per-leaf reasons are DATA in
+ * config/hotswap_denied_leaves.def; the gate is the only consumer. They must
+ * move together — a denylist edit with no gate run is how the rule quietly
+ * stops being enforced, and a gate edit with no denylist re-read is how a
+ * fail-closed path turns into a hollow pass. The scanned manifests are listed
+ * too: a leaf added to any of them is exactly the event this rule exists to
+ * put a test group behind. Mapped to the lint-gate group that owns the
+ * Makefile-LINT_GATES / run_lint.sh-table / docs parity assertions. */
+AGENT_IMPACT_RULE("config/hotswap_denied_leaves.def|tools/lint/check_hotswap_denied_leaves.sh|config/hotswap_eligible.def|config/hotswap_swappable.def|config/hotswap_probe_cases.def|config/hotswap_services.def|config/hotswap_islands.def", "make_lint_gates hotswap_module_v2")
