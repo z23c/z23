@@ -1379,3 +1379,16 @@ AGENT_IMPACT_RULE("lib/vcs/include/vcs/package_install.h|lib/vcs/src/package_ins
  * exists to prevent, so an edit here must never reach the push gate having
  * run zero test groups. */
 AGENT_IMPACT_RULE("lib/vcs/src/node_reproduce.c|lib/vcs/include/vcs/node_reproduce.h|tools/command/native_zcode_node_verify_command.c|tools/scripts/node_reproduce.sh|lib/test/src/test_node_reproduce.c|lib/test/src/test_zcode_node_verify.c", "node_reproduce zcode_node_verify zcode_node_command command_registry_catalog native_api_contract make_lint_gates")
+/* LANE cold-join sovereignty: the one gate that turns "a stranger can join
+ * with no account, no DNS name and no certificate authority" from six
+ * scattered facts into a single runnable proof. It reads the compiled-in
+ * bootstrap set (core/chainparams), the embedded Sapling verifying keys
+ * (validation armed, proving deliberately absent), the baked ROM keystone,
+ * and the MUST-NEVER-FORK consensus entry point. Those files move together
+ * because emptying any one of them silently converts a permissionless join
+ * into a network dependency, and the assertion that would have caught it
+ * lives here. connman.c is named because it holds the two getaddrinfo call
+ * sites the P1 assertion reasons about — the DNS-seed loop that mainnet
+ * keeps at zero entries, and the .onion guard that returns before the
+ * resolver. */
+AGENT_IMPACT_RULE("lib/test/src/test_cold_join_sovereign.c|core/chainparams/src/chainparams.c|core/chainparams/src/checkpoints.c|lib/sapling/src/params_vk_embedded.c|lib/net/src/connman.c", "cold_join_sovereign seed_bootstrap_doors params_vk_embedded net make_lint_gates")
