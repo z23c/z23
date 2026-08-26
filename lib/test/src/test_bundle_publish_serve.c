@@ -403,8 +403,8 @@ static int test_bx_rotation_deregister_unlink(void)
  * A fresh progress store has no proven coins authority, so bx_qualified refuses
  * here for its own (equally real) reason and the exporter comes up degraded —
  * the exact state under test. The assertion is that the degradation is NAMED,
- * carries the staleness numbers an operator needs, and is RESOURCE-class so the
- * transient TTL sweep cannot retire it back into silence. */
+ * carries the staleness numbers an operator needs, and is DEPENDENCY-class so
+ * it remains visible without hard-gating the node's unrelated public serving. */
 static int test_bx_degraded_names_a_blocker(void)
 {
     int failures = 0;
@@ -430,10 +430,10 @@ static int test_bx_degraded_names_a_blocker(void)
         /* RED without the fix: the registry stays empty and found == -1. */
         ASSERT(found >= 0);
         ASSERT(strcmp(snap[found].owner_subsystem, "bundle_exporter") == 0);
-        /* RESOURCE, not TRANSIENT: nothing in this process re-runs the gates,
-         * so a TTL-retired record would restore exactly the silence this test
-         * exists to prevent. */
-        ASSERT(snap[found].class == BLOCKER_RESOURCE);
+        /* DEPENDENCY, not TRANSIENT: nothing in this process re-runs the gates,
+         * so the record persists, but optional export failure stays a warning
+         * rather than a false public-serving refusal. */
+        ASSERT(snap[found].class == BLOCKER_DEPENDENCY);
         /* The reason has to be actionable on its own, not a bare label: it says
          * no bundle exists to serve and that no in-process retry will fix it. */
         ASSERT(strstr(snap[found].reason, "consensus-state bundle") != NULL);
