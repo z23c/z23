@@ -8,7 +8,6 @@
 #include "sha3/sha3.h"
 #include "util/result.h"
 
-#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -107,34 +106,36 @@ static void adapter_rule_add(struct os_sandbox_path_rule *rules,
     (*count)++;
 }
 
-/* RLIMIT_NPROC is charged across the real uid, not just this adapter. Rebase
- * the adapter's 128-task allowance over the already-running development
- * account so an unrelated node or compiler cannot make the fixed adapter
- * fail at startup. As with package_verify, an unreadable procfs fails closed. */
+/* The adapter's process budget. RLIMIT_NPROC is charged across the real uid,
+ * not this adapter's subtree, so neither an absolute allowance nor one
+ * rebased on a snapshot of the uid's task count is a budget for the adapter:
+ * both are (limit − whatever else this account happens to be running), and
+ * the snapshot form additionally races every task started between the sample
+ * and the adapter's own forks. See platform/os_sandbox.h "process budget".
+ *
+ * So: install a STATIC absolute backstop (clamped only by the uid's NPROC
+ * hard limit, which is host configuration, not host load), and treat "this
+ * host has no process table left" as its own refusal with the numbers in it
+ * — never as an adapter failure. */
+#define ADAPTER_NPROC_BACKSTOP 65536u
+#define ADAPTER_NPROC_REQUIRED 128u
 static bool adapter_nproc_limit(uint64_t *out)
 {
-    DIR *proc = opendir("/proc");
-    if (!proc) return false;
-    const uid_t me = getuid();
-    uint64_t total = 0;
-    struct dirent *entry;
-    while ((entry = readdir(proc)) != NULL) {
-        if (entry->d_name[0] < '0' || entry->d_name[0] > '9') continue;
-        char path[64];
-        int n = snprintf(path, sizeof(path), "/proc/%s/task", entry->d_name);
-        if (n <= 0 || (size_t)n >= sizeof(path)) continue;
-        struct stat st;
-        if (stat(path, &st) != 0 || st.st_uid != me) continue;
-        DIR *tasks = opendir(path);
-        if (!tasks) continue;
-        struct dirent *task;
-        while ((task = readdir(tasks)) != NULL)
-            if (task->d_name[0] >= '0' && task->d_name[0] <= '9') total++;
-        closedir(tasks);
+    struct os_sandbox_process_budget budget = os_sandbox_process_budget_live(
+        ADAPTER_NPROC_BACKSTOP, ADAPTER_NPROC_REQUIRED);
+    if (!budget.admitted) {
+        fprintf(stderr,
+                "adapter_runner: process-headroom-exhausted "
+                "nproc_backstop=%llu uid_tasks=%llu hard=%llu headroom=%llu "
+                "required=%llu\n",
+                (unsigned long long)budget.ceiling,
+                (unsigned long long)budget.uid_tasks,
+                (unsigned long long)budget.hard,
+                (unsigned long long)budget.headroom,
+                (unsigned long long)budget.required);
+        return false;
     }
-    closedir(proc);
-    if (total > UINT64_MAX - 128u) return false;
-    *out = total + 128u;
+    *out = budget.ceiling;
     return true;
 }
 

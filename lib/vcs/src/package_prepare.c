@@ -225,10 +225,14 @@ static bool prepare_regular(struct prepare_walk *walk, int parent_fd,
     return ok;
 }
 
+/* Root-level local control and generated-output directories do not enter
+ * package identity. Nested same-named directories stay visible. A symlink
+ * or special file with these names is refused by the walk caller. */
 static bool prepare_local_control_dir(const char *prefix, const char *name)
 {
     return prefix[0] == '\0' &&
-           (strcmp(name, ".zvcs") == 0 || strcmp(name, ".codeindex") == 0);
+           (strcmp(name, ".zvcs") == 0 || strcmp(name, ".codeindex") == 0 ||
+            strcmp(name, "build") == 0);
 }
 
 static bool prepare_walk_dir(struct prepare_walk *walk, int dir_fd,
