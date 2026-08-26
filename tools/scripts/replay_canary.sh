@@ -244,6 +244,11 @@ write_verdict() {
             "${R_REJECTS:-0}" "${R_LOCAL_SHA3:-}" "$EXPECTED_SHA3"
         printf '"legacy_sha3":"%s","exact_tier":"%s",' \
             "${R_LEGACY_SHA3:-}" "${R_EXACT_TIER:-not_run}"
+        printf '"params_dir_empty":%s,' \
+            "$([ -n "${ISO_PARAMS_DIR:-}" ] && \
+                 [ -d "$ISO_PARAMS_DIR" ] && \
+                 [ -z "$(find "$ISO_PARAMS_DIR" -mindepth 1 -print -quit 2>/dev/null)" ] && \
+                 printf true || printf false)"
         printf '"txouts":%s,"zd_txouts":%s,"supply":"%s","zd_supply":"%s",' \
             "${R_TXOUTS:-0}" "${R_ZD_TXOUTS:-0}" "${R_SUPPLY:-}" "${R_ZD_SUPPLY:-}"
         printf '"reason":"%s","elapsed_sec":%s}\n' \
@@ -576,6 +581,17 @@ evaluate_verdict() {
         fi
     elif [ -z "${SELFTEST}" ] && [ "${ZCL_CANARY_NO_EXACT:-0}" != "1" ]; then
         R_EXACT_TIER="unusable"; fail "exact_reference_unusable"
+    fi
+
+    # A live replay qualifies embedded validation only while its explicit
+    # -paramsdir remains empty. Any file here means the replay no longer
+    # proves that this exact binary can validate shielded history from its
+    # compiled-in verifying keys.
+    if [ -z "${SELFTEST}" ]; then
+        [ -n "${ISO_PARAMS_DIR:-}" ] && [ -d "$ISO_PARAMS_DIR" ] \
+            || fail "isolated_paramsdir_missing"
+        [ -z "$(find "$ISO_PARAMS_DIR" -mindepth 1 -print -quit 2>/dev/null)" ] \
+            || fail "isolated_paramsdir_not_empty"
     fi
 
     pass

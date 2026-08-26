@@ -10,10 +10,16 @@
  * branch the loop depends on without needing an on-disk historical chain. */
 
 #include "test/test_core.h"
+#include "chain/chainparams.h"
+#include "consensus/upgrades.h"
 #include "core/arith_uint256.h"
+#include "core/serialize.h"
 #include "jobs/reducer_frontier.h"
 #include "platform/time_compat.h"
 #include "primitives/block.h"
+#include "primitives/transaction.h"
+#include "sapling/bn254.h"
+#include "sapling/params_vk_embedded.h"
 #include "services/bg_validation_authority.h"
 #include "services/bg_validation_service.h"
 #include "storage/disk_block_io.h"
@@ -24,6 +30,16 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+
+extern const unsigned char g_fixture_tx_sprout_241[];
+extern const size_t g_fixture_tx_sprout_241_len;
+
+/* Sibling-private production helper. It is intentionally absent from the
+ * public service header; this group drives the exact background verifier. */
+bool bg_validation_verify_shielded_proofs(const struct transaction *tx,
+                                          int height, size_t tx_idx,
+                                          uint32_t branch_id,
+                                          int64_t *proofs_out);
 
 static _Atomic int g_body_read_calls;
 static struct bg_validation_service *g_body_repair_svc;
@@ -241,6 +257,63 @@ static bool find_reverify_blocker(struct blocker_snapshot *out)
         }
     }
     return false;
+}
+
+static int test_bg_validation_phgr13_verdict_is_terminal(void)
+{
+    int failures = 0;
+
+    TEST("bg_validation: loaded PHGR13 verifier rejection is terminal") {
+        struct byte_stream stream;
+        stream_init_from_data(&stream, g_fixture_tx_sprout_241,
+                              g_fixture_tx_sprout_241_len);
+        struct transaction tx;
+        transaction_init(&tx);
+        ASSERT(transaction_deserialize(&tx, &stream));
+        ASSERT(stream_remaining(&stream) == 0);
+        ASSERT(tx.num_joinsplit == 1 && tx.v_joinsplit != NULL);
+        ASSERT(!tx.v_joinsplit[0].use_groth);
+
+        const struct zcl_embedded_vk *embedded = &zcl_embedded_vks[3];
+        struct ppzksnark_vk vk = {0};
+        ASSERT(strcmp(embedded->name, "sprout-phgr") == 0);
+        ASSERT(ppzksnark_vk_read(&vk, embedded->bytes, embedded->len));
+        sprout_phgr_set_vk(&vk);
+        ASSERT(sprout_phgr_vk_loaded());
+
+        chain_params_select(CHAIN_MAIN);
+        const struct chain_params *params = chain_params_get();
+        ASSERT(params != NULL);
+        uint32_t branch_id = consensus_current_epoch_branch_id(
+            241, &params->consensus);
+
+        int64_t proofs = 0;
+        ASSERT(bg_validation_verify_shielded_proofs(
+            &tx, 241, 0, branch_id, &proofs));
+        ASSERT(proofs == 1);
+
+        /* Keep the signed transaction byte-exact and damage the installed
+         * verifier instead. This reaches the PHGR13 false-verdict branch;
+         * changing the proof bytes would be rejected earlier by the
+         * transaction's JoinSplit signature and would not cover this bug. */
+        bn_g1_identity(&vk.ic[0]);
+        proofs = 0;
+        ASSERT(!bg_validation_verify_shielded_proofs(
+            &tx, 241, 0, branch_id, &proofs));
+        ASSERT(proofs == 0);
+
+        sprout_phgr_set_vk(NULL);
+        ASSERT(!sprout_phgr_vk_loaded());
+        proofs = 0;
+        ASSERT(bg_validation_verify_shielded_proofs(
+            &tx, 241, 0, branch_id, &proofs));
+        ASSERT(proofs == 0);
+
+        ppzksnark_vk_free(&vk);
+        transaction_free(&tx);
+        PASS();
+    } _test_next:;
+    return failures;
 }
 
 static int test_bg_validation_reverify_healthy_advances(void)
@@ -641,6 +714,7 @@ static int test_bg_validation_authority_requires_complete_coverage(void)
 int test_bg_validation_reverify(void)
 {
     int failures = 0;
+    failures += test_bg_validation_phgr13_verdict_is_terminal();
     failures += test_bg_validation_reverify_healthy_advances();
     failures += test_bg_validation_reverify_failure_raises_blocker();
     failures += test_bg_validation_body_repair_retries_exact_height();

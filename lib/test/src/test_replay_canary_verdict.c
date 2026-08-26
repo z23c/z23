@@ -1135,6 +1135,53 @@ static int test_source_guard_iso_die_routes_through_blocked(void)
     return failures;
 }
 
+static int test_source_guard_replay_uses_empty_paramsdir(void)
+{
+    int failures = 0;
+    TEST("replay-canary: child uses and rechecks an explicit empty paramsdir") {
+        const char *root = repo_root();
+        if (!root) { printf("SKIP (repo root not found)\n"); break; }
+
+        static char env_body[65536];
+        static char canary_body[65536];
+        ASSERT(read_script_source(root,
+            "tools/scripts/isolated_mainnet_env.sh", env_body,
+            sizeof(env_body)));
+        ASSERT(read_script_source(root, CANARY_REL, canary_body,
+                                  sizeof(canary_body)));
+        ASSERT(strstr(env_body,
+                      "ISO_PARAMS_DIR=\"$ISO_DD/empty-params\"") != NULL);
+        ASSERT(strstr(env_body,
+                      "-paramsdir=\"$ISO_PARAMS_DIR\"") != NULL);
+        ASSERT(strstr(canary_body,
+                      "fail \"isolated_paramsdir_not_empty\"") != NULL);
+        ASSERT(strstr(canary_body, "\"params_dir_empty\":%s") != NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_source_guard_mvp_binds_canary_to_running_binary(void)
+{
+    int failures = 0;
+    TEST("mvp gate: C8 PASS requires replay identity to match running bytes") {
+        const char *root = repo_root();
+        if (!root) { printf("SKIP (repo root not found)\n"); break; }
+
+        static char body[65536];
+        ASSERT(read_script_source(root, "tools/mvp_gate.sh", body,
+                                  sizeof(body)));
+        ASSERT(strstr(body, "exe=\"/proc/$pid/exe\"") != NULL);
+        ASSERT(strstr(body, "zcl_binary_source_id \"$exe\"") != NULL);
+        ASSERT(strstr(body, "C_ARTIFACT=\"$(json_str \"$blob\" artifact_sha256)\"") != NULL);
+        ASSERT(strstr(body, "\"$G_ARTIFACT\" == \"$LIVE_ARTIFACT\"") != NULL);
+        ASSERT(strstr(body,
+                      "PASS belongs to different or unreadable bytes") != NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* ── Registration ───────────────────────────────────────────────── */
 
 int test_replay_canary_verdict(void)
@@ -1162,5 +1209,7 @@ int test_replay_canary_verdict(void)
     failures += test_source_guard_missing_prereqs_route_through_blocked();
     failures += test_source_guard_genesis_uses_connect_not_addnode();
     failures += test_source_guard_iso_die_routes_through_blocked();
+    failures += test_source_guard_replay_uses_empty_paramsdir();
+    failures += test_source_guard_mvp_binds_canary_to_running_binary();
     return failures;
 }
