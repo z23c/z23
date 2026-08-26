@@ -1251,3 +1251,11 @@ AGENT_IMPACT_RULE("docs/CODE_FEARLESSLY.md|AGENTS.md", "make_lint_gates")
  * nothing looking. Mapped so an edit here can never reach the push gate
  * having run zero test groups. */
 AGENT_IMPACT_RULE("tools/scripts/source_identity_lib.sh|tools/deploy_verify.sh|lib/util/src/clientversion.c|lib/util/include/util/clientversion.h|app/controllers/src/agent_runtime_controller.c|lib/test/src/test_source_identity_authority.c", "source_identity_authority make_lint_gates")
+/* LANE undo-one-step: the accept-and-go-back path. The generation log is the
+ * SOLE record of which version a user was running before the one they are
+ * running now, so its codec, the service that appends and walks it, the
+ * typed command that exposes "go back one step", and the test that breaks a
+ * version before reverting it all move together. Split them and a change to
+ * the retention bound can reach the push gate without the failure-case
+ * rollback ever running — which is the only test that proves the property. */
+AGENT_IMPACT_RULE("lib/vcs/include/vcs/package_install.h|lib/vcs/src/package_install.c|app/services/src/package_lifecycle.c|app/services/include/services/package_lifecycle.h|tools/command/native_zcode_add_command.c|lib/test/src/test_zcode_add.c|config/commands/zcode.def", "zcode_add zcode_verify command_registry_catalog native_api_contract make_lint_gates")
