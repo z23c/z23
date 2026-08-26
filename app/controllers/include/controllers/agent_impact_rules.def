@@ -1144,3 +1144,12 @@ AGENT_IMPACT_RULE("config/src/boot_network_monitor.c|config/include/config/boot_
  * that retired any OTHER page could take a green targeted run and a red
  * `make lint`. The whole directory maps to the lint group for that reason. */
 AGENT_IMPACT_RULE("docs/work/README.md|docs/work/*.md|docs/work/*/*.md", "make_lint_gates")
+/* Lane: stranger-join docs (docs/JOIN.md, GETTING_STARTED, README, commons
+ * quickstart). These four pages are the whole path a person with one fresh
+ * clone and no contacts follows to get a node onto the network, so a change
+ * to any of them is a claim about behavior the lint gates check (doc accuracy,
+ * link targets, and the public-docs-stay-generic rules). GETTING_STARTED.md is
+ * already mapped above for its build/ops role; the other three had no rule at
+ * all, which meant a doc edit could reach the push gate having run zero test
+ * groups. */
+AGENT_IMPACT_RULE("docs/JOIN.md|docs/README.md|docs/C23_COMMONS_QUICKSTART.md", "make_lint_gates")
