@@ -88,11 +88,9 @@ The unit that [`deploy/setup.sh`](../deploy/setup.sh) installs is named
 systemctl --user restart zclassic23
 ```
 
-Note that the command's own `restart_command` field currently prints
-`systemctl --user restart z23`, which does not match the installed unit name.
-Trust the unit you actually installed — `systemctl --user list-units 'z*'`
-will show it. If you run the node some other way, substitute your own unit
-name. After the restart, confirm the node came back with the flags applied:
+The command's `restart_command` field prints this installed unit name. If you
+run the node some other way, substitute your own unit name. After the restart,
+confirm the node came back with the flags applied:
 
 ```bash
 z23 zcode work toolchain -datadir="$HOME/.zclassic-c23"

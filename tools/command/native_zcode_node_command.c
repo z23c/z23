@@ -64,8 +64,10 @@ static void znj_fail(struct zcl_command_reply *reply, const char *code,
                            evidence ? evidence : "zcode.node.join");
 }
 
-/* First line of `<compiler> --version`, or NULL. argv[0] is resolved by
- * execvp's own PATH search — no shell is involved (util/spawn.h). */
+/* First line of `<compiler> --version`, or NULL, but only after that same
+ * driver successfully enters strict C23 mode. A version banner proves that
+ * a program exists; it does not prove the node can fulfill C23 build work.
+ * argv[0] is resolved by execvp's PATH search; no shell is involved. */
 static const char *znj_detect_compiler(char *version, size_t version_cap)
 {
     static const char *const drivers[] = { "cc", "gcc" };
@@ -73,8 +75,16 @@ static const char *znj_detect_compiler(char *version, size_t version_cap)
         version[0] = '\0';
     for (size_t i = 0; i < sizeof(drivers) / sizeof(drivers[0]); i++) {
         const char *argv[] = { drivers[i], "--version", NULL };
+        const char *probe_argv[] = {
+            drivers[i], "-std=c23", "-pedantic-errors", "-fsyntax-only",
+            "-x", "c", "/dev/null", NULL,
+        };
         char out[512];
         if (zcl_spawn_capture(argv, out, sizeof(out), 10000) != 0 || !out[0])
+            continue;
+        char probe_out[512];
+        if (zcl_spawn_capture(probe_argv, probe_out, sizeof(probe_out),
+                              10000) != 0)
             continue;
         out[strcspn(out, "\r\n")] = '\0';
         if (!out[0])
@@ -390,11 +400,12 @@ void zcl_native_handle_zcode_node_join(
     ok = ok &&
          json_push_kv_bool(data, "restart_required", true) &&
          json_push_kv_str(data, "restart_command",
-                          "systemctl --user restart z23") &&
+                          "systemctl --user restart zclassic23") &&
          json_push_kv_str(data, "restart_note",
                           "the service manager owns the node process; this "
                           "command started, stopped and signalled nothing. "
-                          "Substitute your own unit name if it is not z23.");
+                          "Substitute your own unit name if it is not "
+                          "zclassic23.");
 
     if (!ok) {
         znj_fail(reply, "JOIN_REPLY_REFUSED",
