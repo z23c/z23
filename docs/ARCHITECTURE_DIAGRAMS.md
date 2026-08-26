@@ -64,7 +64,7 @@ flowchart TD
 ```mermaid
 flowchart TD
     subgraph Discovery
-        SEEDS[DNS seeds /<br/>hardcoded .onion seeds]
+        SEEDS[Hardcoded .onion seeds<br/>no DNS seeder is used]
         DIRECTORY[Fetch /directory.json<br/>from .onion peers]
         ADDNODE[Manual addnode]
     end
