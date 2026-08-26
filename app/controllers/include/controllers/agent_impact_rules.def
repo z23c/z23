@@ -1520,3 +1520,16 @@ AGENT_IMPACT_RULE("tools/command/native_dev_hotswap.c|tools/command/native_dev_h
  * harness every group runs inside, so keep it on the loader groups plus the
  * runner's own selector/catalog gates. */
 AGENT_IMPACT_RULE("lib/test/src/test_parallel.c", "hotswap_module hotswap_module_v2 hotswap_loader hotswap_simnet test_test_group_selector make_lint_gates")
+/* LANE params-sovereignty, publish/release symmetry: the four shielded
+ * verifying keys must arm and disarm together, because every one of the four
+ * verifiers is fail-closed on a NULL key and the published-pointer set is
+ * therefore the process's single answer to "is shielded validation armed?".
+ * phgr_vk (bn254.c) was the odd one out: function-local static storage in each
+ * of the two load paths, out of reach of sapling_free_params(), so three
+ * verifiers disarmed and sprout_verify_phgr13 kept validating pre-Sapling
+ * JoinSplits against a released key while each reload dropped an ic[]
+ * allocation. params_init.c, the two publishing sinks it writes through
+ * (sapling.c, sprout.c, bn254.c), and the group that pins the symmetry move
+ * together — an edit to the publish or release side with no group run is how
+ * the asymmetry would come back. */
+AGENT_IMPACT_RULE("lib/sapling/src/params_init.c|lib/sapling/src/bn254.c|lib/sapling/src/sprout.c|lib/sapling/src/sapling.c|lib/sapling/include/sapling/bn254.h|lib/test/src/test_params_vk_publish_symmetry.c", "params_vk_publish_symmetry params_vk_embedded sprout_phgr13_kat")

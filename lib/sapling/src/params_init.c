@@ -102,6 +102,8 @@ static bool params_sha512_matches(const uint8_t *data, size_t len,
 static struct groth16_vk spend_vk;
 static struct groth16_vk output_vk;
 static struct groth16_vk sprout_groth16_vk;
+/* Sprout PHGR13 VK. ONE file-scope instance so teardown can reach it. */
+static struct ppzksnark_vk phgr_vk;
 static _Atomic bool params_loaded = false;
 /* True when the running key set came from the compiled-in blobs rather than
  * a parameter directory. Declared here, beside params_loaded, because
@@ -180,14 +182,23 @@ static uint8_t *read_file(const char *path, size_t *len)
  *                    storage — not even for an instant.
  *
  * This is load-bearing, not hygiene. The fail-closed guards in
- * sapling_check_spend / sapling_check_output / sprout_verify_groth16 all read
- * "a NULL VK means the keys are not ready, so reject". That reading is only
- * true while every failure path actually produces NULL. Publishing at the top
- * of the Sprout PHGR13 section and freeing at the bottom of it — which is what
- * this file used to do — made the guards blind to a struct whose ic[] and comb
- * tables had already been freed: non-NULL, so the guard passed, and
- * groth16_verify then read freed heap. Keep the publish below every fallible
- * step. */
+ * sapling_check_spend / sapling_check_output / sprout_verify_groth16 /
+ * sprout_verify_phgr13 all read "a NULL VK means the keys are not ready, so
+ * reject". That reading is only true while every failure path actually
+ * produces NULL. Publishing at the top of the Sprout PHGR13 section and
+ * freeing at the bottom of it — which is what this file used to do — made the
+ * guards blind to a struct whose ic[] and comb tables had already been freed:
+ * non-NULL, so the guard passed, and groth16_verify then read freed heap.
+ * Keep the publish below every fallible step.
+ *
+ * FOUR keys. sapling_free_params() is the ONLY post-publication release site,
+ * so it alone releases all four (trio: params_release_groth16_vks(); phgr_vk:
+ * params_release_phgr_vk()). Every other release abandons a load that never
+ * published, and params_load_late_proving_locked() releases NOTHING — that is
+ * how it honours ONCE PUBLISHED, NEVER REPLACED while verifiers read unlocked.
+ * NEVER add params_release_phgr_vk() to a failure path, above all not the late
+ * path: a node on the compiled-in keys refusing an arriving directory would
+ * lose blocks 0-581876. Proof: the params_vk_publish_symmetry group. */
 static void params_publish_groth16_vks(void)
 {
     sapling_set_spend_vk(&spend_vk);
@@ -213,6 +224,15 @@ static void params_release_groth16_vks(void)
     memset(&spend_vk, 0, sizeof(spend_vk));
     memset(&output_vk, 0, sizeof(output_vk));
     memset(&sprout_groth16_vk, 0, sizeof(sprout_groth16_vk));
+}
+
+/* Call ONLY from sapling_free_params() — see the rule above; caller holds
+ * params_mu. ppzksnark_vk_read() memsets before parsing, so a reload that did
+ * not free first would drop the previous ic[]. */
+static void params_release_phgr_vk(void)
+{
+    sprout_phgr_set_vk(NULL);
+    ppzksnark_vk_free(&phgr_vk);
 }
 
 /* Read `name` out of `params_dir` and verify its pinned SHA-512 BEFORE the
@@ -377,7 +397,6 @@ static bool params_load_first_locked(const char *params_dir)
      * publish/free invariant above. Publication happens after it. */
 
     /* Sprout PHGR13 VK (pre-Sapling proofs, blocks 0-581876) */
-    static struct ppzksnark_vk phgr_vk;
     bool phgr_ok = false;
     {
         uint8_t *phgr_data = params_read_pinned(params_dir,
@@ -612,7 +631,11 @@ void sapling_free_params(void)
      *
      * This is the ONE unpublish. It runs at shutdown, when no verifier is
      * running; the mutex only keeps it from interleaving with a loader on
-     * another thread. */
+     * another thread.
+     *
+     * All FOUR keys: omitting phgr_vk left sprout_verify_phgr13 armed with a
+     * released key, reportable via sprout_phgr_vk_loaded(). */
+    params_release_phgr_vk();
     params_release_groth16_vks();
     free(spend_pk_data);
     free(output_pk_data);
@@ -717,7 +740,6 @@ static bool params_install_embedded_locked(void)
                  zcl_embedded_vks[2].len);
     }
 
-    static struct ppzksnark_vk phgr_vk;
     if (!ppzksnark_vk_read(&phgr_vk, zcl_embedded_vks[3].bytes,
                            zcl_embedded_vks[3].len)) {
         params_release_groth16_vks();
