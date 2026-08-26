@@ -66,6 +66,10 @@ struct byte_stream;
  * lifetime of the connection. */
 #define PARAM_PEER_WASTE_BUDGET_BYTES (8ull * 1024ull * 1024ull)
 
+/* Must cover the connection reactor's full admitted peer set. The production
+ * translation unit asserts this against REACTOR_MAX_FDS. */
+#define PARAM_PEER_ACCOUNTING_SLOTS 1024u
+
 /* A chunk request that has gone unanswered this long is reissued, possibly
  * to a different peer. Generous because the transport may be Tor on a
  * 7200rpm box doing under 2 MB/s. */
@@ -139,6 +143,18 @@ void param_service_progress(int *out_file, uint32_t *out_have,
                             uint32_t *out_total);
 
 #ifdef ZCL_TESTING
+/* Byte-shape, peer-identity, and pre-hash admission seams. */
+void param_service_test_rate_key(const uint8_t ip[16], bool has_torv3,
+                                 const uint8_t torv3[32], uint8_t out[16]);
+void param_service_test_wire_entry(uint8_t idx, uint64_t bytes,
+                                   uint32_t chunks, uint8_t out[13]);
+void param_service_test_wire_chunk_request(uint8_t idx, uint32_t chunk,
+                                           uint8_t out[5]);
+void param_service_test_peer_guard_reset(void);
+bool param_service_test_mark_requested(int32_t id, uint32_t chunk);
+void param_service_test_charge_peer(int32_t id, uint64_t bytes);
+bool param_service_test_chunk_admitted(int32_t id, uint32_t chunk);
+
 /* Test seam: drive the requester's accept path without a socket. Returns the
  * same verdict the message handler would reach. */
 int param_service_test_accept_chunk(uint32_t file_idx, uint32_t chunk_idx,

@@ -15,12 +15,52 @@
 #include "test/test_core.h"
 #include "config/boot.h"
 #include "util/boot_phase.h"
+#include <sqlite3.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <signal.h>
 #include <sys/wait.h>
 #include <fcntl.h>
+
+bool boot_wallet_rebuild_probe(sqlite3 *db, bool *has_utxos,
+                               bool *has_keys);
+
+static int test_wallet_rebuild_probe(void)
+{
+    sqlite3 *db = NULL;
+    bool has_utxos = false;
+    bool has_keys = false;
+    int failed = 0;
+
+    if (sqlite3_open(":memory:", &db) != SQLITE_OK)
+        return 1;
+    failed |= sqlite3_exec(db,
+        "CREATE TABLE wallet_utxos (spent_txid BLOB);"
+        "CREATE TABLE wallet_keys (pubkey_hash BLOB);",
+        NULL, NULL, NULL) != SQLITE_OK;
+    failed |= !boot_wallet_rebuild_probe(db, &has_utxos, &has_keys);
+    failed |= has_utxos || has_keys;
+
+    failed |= sqlite3_exec(db,
+        "INSERT INTO wallet_keys VALUES (X'01')", NULL, NULL, NULL) !=
+        SQLITE_OK;
+    failed |= !boot_wallet_rebuild_probe(db, &has_utxos, &has_keys);
+    failed |= has_utxos || !has_keys;
+
+    failed |= sqlite3_exec(db,
+        "DELETE FROM wallet_keys; INSERT INTO wallet_utxos VALUES (NULL);",
+        NULL, NULL, NULL) != SQLITE_OK;
+    failed |= !boot_wallet_rebuild_probe(db, &has_utxos, &has_keys);
+    failed |= !has_utxos || has_keys;
+
+    failed |= sqlite3_exec(db,
+        "DELETE FROM wallet_utxos; DROP TABLE wallet_keys",
+        NULL, NULL, NULL) != SQLITE_OK;
+    failed |= boot_wallet_rebuild_probe(db, &has_utxos, &has_keys);
+    failed |= sqlite3_close(db) != SQLITE_OK;
+    return failed;
+}
 
 #define BP_CHECK(name, expr) do { \
     printf("boot_phase: %s... ", (name)); \
@@ -34,6 +74,10 @@ int test_boot_phase(void)
     int failures = 0;
 
     boot_stage_reset_for_testing();
+
+    BP_CHECK("wallet rebuild skips no-key wallets, preserves keyed wallets, "
+             "and fails closed",
+        test_wallet_rebuild_probe() == 0);
 
     /* ── name lookup ────────────────────────────────────────────── */
     BP_CHECK("name(INIT) is \"init\"",

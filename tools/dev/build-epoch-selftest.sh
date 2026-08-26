@@ -265,8 +265,18 @@ start_session "$SOURCE_A" "$MUTATION_A2" >/dev/null
         "$COMPILER_WRAPPER" -std=c23 -O2 -Wall -Wextra -Werror &
 OBJECT_PID_1=$!
 CHILD_PIDS+=("$OBJECT_PID_1")
-for _ in $(seq 1 500); do
-    [ -e "$COMPILER_BLOCK_MARKER" ] && break
+# Wait for the wrapper to REACH its rendezvous, guarded by the child being
+# alive — not by a 5s iteration budget. The old fixed 500-iteration poll gave
+# a just-forked compiler wrapper 5 wall-clock seconds to get scheduled and
+# create a file; on a loaded or slow-disk box that budget expires while the
+# child is perfectly healthy and still starting, and the assertion below
+# then reports a code defect that does not exist. Exhaustion is no longer a
+# possible outcome: this loop ends when the marker appears (success) or when
+# the child dies without it (a real defect, and load-independent). A child
+# that neither writes nor dies is a genuine hang, and is caught by the
+# runner-level progress watchdog in test_parallel.c, which reports it AS a
+# hang instead of disguising it as a failed assertion.
+while [ ! -e "$COMPILER_BLOCK_MARKER" ]; do
     kill -0 "$OBJECT_PID_1" 2>/dev/null || break
     sleep 0.01
 done
@@ -410,8 +420,9 @@ STATE_FILE="$STATE" BLOCK_SOURCE="$SOURCE_A" \
 STALE_PID=$!
 CHILD_PIDS+=("$STALE_PID")
 
-for _ in $(seq 1 500); do
-    [ -e "$BLOCK_MARKER" ] && break
+# Same liveness-guarded wait as the compiler rendezvous above: ends on the
+# marker or on the child dying, never on a wall-clock budget.
+while [ ! -e "$BLOCK_MARKER" ]; do
     kill -0 "$STALE_PID" 2>/dev/null || break
     sleep 0.01
 done

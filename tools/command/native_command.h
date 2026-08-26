@@ -548,6 +548,28 @@ void zcl_native_handle_zcode_toolchain_show(
 void zcl_native_handle_zcode_node_join(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+/* zcode.node.verify — tools/command/native_zcode_node_verify_command.c.
+ * Rebuilds the node HERE from a local checkout and byte-compares the result
+ * against the artifact the user was handed (by default this process's own
+ * executable). It never checks a published hash against the file it was
+ * published beside: the comparator in lib/vcs/node_reproduce.c refuses
+ * unless one side is RECEIVED and the other LOCAL_REBUILD. */
+void zcl_native_handle_zcode_node_verify(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+/* Test-only seam for the leaf above: substitutes the local rebuild driver so
+ * the parse/compare/render path is provable without paying for a
+ * whole-program LTO link. Precedent:
+ * consensus_state_producer_receipt_test_set_identity(). Returns a process-
+ * style status (0 = a receipt was written to out_path). There is deliberately
+ * no input field and no environment variable that reaches this — a receipt
+ * handed in from outside is the publisher's claim, which is the one thing
+ * this command must never accept as evidence. */
+typedef int (*zcl_node_verify_driver_fn)(const char *source_dir,
+                                         const char *scratch_dir,
+                                         const char *out_path,
+                                         const char *profile, int jobs);
+void zcl_native_node_verify_test_set_driver(zcl_node_verify_driver_fn fn);
 bool zcl_native_zcode_workspace_is_explicit_scratch(const char *workspace);
 void zcl_native_handle_zcode_commons_status(
     const struct zcl_command_request *request,

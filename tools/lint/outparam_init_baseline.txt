@@ -1,3 +1,4 @@
+# Copyright 2026 Rhett Creighton - Apache License 2.0
 # outparam_init_baseline.txt — the CLOSED allowlist for
 # tools/lint/check_outparam_init_before_return.sh.
 #

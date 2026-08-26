@@ -7,6 +7,9 @@
  */
 
 ZCL_TEST_PROOF_CONTRACT("test_shielded_payment_gate", ZCL_TEST_PROOF_STRESS)
+ZCL_TEST_PROOF_CONTRACT("test_shielded_receive_persist", ZCL_TEST_PROOF_STRESS)
+ZCL_TEST_PROOF_CONTRACT("test_shielded_receive_slice", ZCL_TEST_PROOF_STRESS)
+ZCL_TEST_PROOF_CONTRACT("test_shielded_spend_slice", ZCL_TEST_PROOF_STRESS)
 ZCL_TEST_PROOF_CONTRACT("test_chain_advance_atomicity", ZCL_TEST_PROOF_STRESS)
 ZCL_TEST_PROOF_CONTRACT("test_reducer_block_ingest_gate", ZCL_TEST_PROOF_STRESS)
 ZCL_TEST_PROOF_CONTRACT("test_reducer_forward_progress_gate", ZCL_TEST_PROOF_STRESS)

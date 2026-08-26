@@ -2036,6 +2036,57 @@ test-parallel:
 test-parallel-locked: $(TEST_PARALLEL_REL_CANDIDATE) dev-package-verifier-ensure
 	ulimit -s unlimited && $(TEST_PARALLEL_REL_ACTIVE) $(TEST_PARALLEL_ARGS)
 
+# ── prove-cold-join — the one command a stranger can run ─────────────────
+#
+# "I can join this network with no account, no domain name and no certificate
+# authority, and it starts validating" was six separate facts in six separate
+# places and no single way to check it. This is the single way. It runs the
+# cold_join_sovereign group and nothing else, hermetically: no peer is dialled,
+# no name is resolved, no parameter file is read, and the datadir it starts
+# from is wiped. It needs no network, so it answers the same on an airgapped
+# box as on this one.
+#
+# NOT a lint gate and deliberately not in `lint:` — it is a proof someone runs
+# because they want to know, and it stays runnable by a person who has one
+# checkout and no lanes.
+#
+# Read the two result lines it prints:
+#   COLD_JOIN_VERDICT=JOINED   every proposition asserted here holds
+#   COLD_JOIN_VERDICT=SLOW     every proposition holds; this box is slow
+#   COLD_JOIN_VERDICT=BROKEN   a proposition is FALSE — this is the only red
+# and the UNPROVEN lines, which are neither passes nor failures and are the
+# whole reason this target exists rather than a green checkmark.
+#
+# Elapsed time never decides the exit status. A slow disk is a machine this
+# network wants, and the only way to keep learning where the code assumes fast
+# storage is to let a slow box run the proof and still say what it found.
+.PHONY: prove-cold-join
+prove-cold-join: $(TEST_PARALLEL_REL_CANDIDATE)
+	@bash -c 'set -uo pipefail; \
+	 log="$(BUILD_DIR)/prove-cold-join.log"; \
+	 mkdir -p "$(BUILD_DIR)"; \
+	 echo "== proving a permissionless cold join (no network, wiped datadir) =="; \
+	 ulimit -s unlimited; \
+	 ZCL_STRESS_TESTS=1 $(TEST_PARALLEL_REL_ACTIVE) \
+	     --exact=test_cold_join_sovereign $(TEST_PARALLEL_ARGS) >"$$log" 2>&1; \
+	 rc=$$?; \
+	 cat "$$log"; \
+	 if ! grep -qF "ALL TESTS PASSED" "$$log"; then \
+	     echo "prove-cold-join: FAIL — no ALL TESTS PASSED token (exit $$rc)"; exit 1; fi; \
+	 if grep -qF "SOME TESTS FAILED" "$$log"; then \
+	     echo "prove-cold-join: FAIL — SOME TESTS FAILED present"; exit 1; fi; \
+	 if grep -qE "groups_ran=0" "$$log"; then \
+	     echo "prove-cold-join: FAIL — groups_ran=0, the proof ran nothing"; exit 1; fi; \
+	 if grep -qF "ALL TESTS PASSED (CACHED)" "$$log"; then \
+	     echo "prove-cold-join: NOTE served from the content cache — the"; \
+	     echo "  propositions were proven by an earlier identical build, not"; \
+	     echo "  re-executed now. Re-run with TEST_PARALLEL_ARGS=--no-cache"; \
+	     echo "  to force a cold proof."; fi; \
+	 if grep -qF "UNPROVEN" "$$log"; then \
+	     echo "prove-cold-join: some propositions are UNPROVEN (see above)."; \
+	     echo "  They are neither passes nor failures. Read them."; fi; \
+	 echo "prove-cold-join: proven (full transcript in $$log)"'
+
 # ── Fast inner loop ──────────────────────────────────────────────────────
 # The edit -> check -> test loop runs dozens of times per session. Use these,
 # NOT `make` + `build/bin/test_zcl` (8-15 min) and NOT a bare `build/bin/test_parallel`.
@@ -8940,6 +8991,17 @@ check-pipefail-status-pipe:
 	@./tools/lint/check_pipefail_status_pipe.sh --selftest
 	@./tools/lint/check_pipefail_status_pipe.sh
 
+# Anti-flake ratchet: no NEW test assertion graded on a measured wall-clock
+# interval. A verdict a busy box can flip is measuring the box, not the code —
+# and this project keeps slow machines on purpose, because a slow box is the
+# only instrument that shows where the code assumes fast storage. Closed,
+# shrink-only allowlist at tools/lint/wallclock_assertion_allowlist.txt; no
+# per-line escape hatch. See the script header for what it can and cannot see.
+check-no-wallclock-assertion:
+	@echo "══ LINT: no test assertion graded on a wall-clock interval ══"
+	@./tools/lint/check_no_wallclock_assertion.sh --selftest
+	@./tools/lint/check_no_wallclock_assertion.sh
+
 # Anti-stale forbid gate: no hand-pinned rot-prone facts in the docs. Two
 # classes — a "<N> MB … binary" size claim (HARD; the size has a live source,
 # tools/scripts/binary_size.sh — de-pin to size-agnostic prose) and a live-state
@@ -9481,6 +9543,7 @@ LINT_GATES := \
     check-source-identity-authority \
     check-status-reason-single \
     check-pipefail-status-pipe \
+    check-no-wallclock-assertion \
     check-framework-shape \
     check-framework-filename-suffix \
     check-no-raw-clock-outside-platform \

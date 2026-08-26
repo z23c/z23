@@ -106,6 +106,74 @@ static bool vk_scratch_root(char *out, size_t cap)
     return true;
 }
 
+/* The three large files a planted-corruption fixture links rather than copies.
+ * sprout-verifying.key is the one it corrupts, so it is not in this list. */
+static const char *const vk_planted_links[] = {
+    "sapling-spend.params", "sapling-output.params", "sprout-groth16.params",
+};
+
+/* Remove a staged fixture. Only files vk_stage_planted_dir() created. */
+static void vk_unstage_planted_dir(const char *scratch)
+{
+    char dst[1400];
+    for (size_t i = 0; i < 3; i++) {
+        snprintf(dst, sizeof(dst), "%s/%s", scratch, vk_planted_links[i]);
+        (void)unlink(dst);
+    }
+    snprintf(dst, sizeof(dst), "%s/sprout-verifying.key", scratch);
+    (void)unlink(dst);
+    (void)rmdir(scratch);
+}
+
+/* Stage a parameter directory that is COMPLETE but corrupt: the three large
+ * files by symlink (read-only, and no copy of 777 MB) and ONE flipped bit in
+ * a private copy of sprout-verifying.key. `real_dir` is never written.
+ * Returns false having left nothing behind. */
+static bool vk_stage_planted_dir(const char *real_dir, char *scratch,
+                                 size_t cap)
+{
+    char scratch_root[1024];
+    if (!vk_scratch_root(scratch_root, sizeof(scratch_root)))
+        return false;
+    snprintf(scratch, cap, "%s/zcl_vk_refused_params_XXXXXX", scratch_root);
+    if (mkdtemp(scratch) == NULL)
+        return false;
+
+    bool staged = true;
+    for (size_t i = 0; i < 3 && staged; i++) {
+        char src[1200], dst[1400];
+        snprintf(src, sizeof(src), "%s/%s", real_dir, vk_planted_links[i]);
+        snprintf(dst, sizeof(dst), "%s/%s", scratch, vk_planted_links[i]);
+        staged = (symlink(src, dst) == 0);
+    }
+
+    uint8_t phgr[1449];
+    size_t phgr_len = 0;
+    if (staged) {
+        char src[1200];
+        snprintf(src, sizeof(src), "%s/sprout-verifying.key", real_dir);
+        FILE *f = fopen(src, "rb");
+        staged = (f != NULL);
+        if (f) { phgr_len = fread(phgr, 1, sizeof(phgr), f); fclose(f); }
+        staged = staged && phgr_len == sizeof(phgr);
+    }
+    if (staged) {
+        /* ONE flipped bit, in the middle of the key material. */
+        phgr[phgr_len / 2] ^= 0x01u;
+        char dst[1400];
+        snprintf(dst, sizeof(dst), "%s/sprout-verifying.key", scratch);
+        FILE *f = fopen(dst, "wb");
+        staged = (f != NULL);
+        if (f) {
+            staged = (fwrite(phgr, 1, phgr_len, f) == phgr_len);
+            staged = (fclose(f) == 0) && staged;
+        }
+    }
+    if (!staged)
+        vk_unstage_planted_dir(scratch);
+    return staged;
+}
+
 /* Compare two verifying keys for exact equality, ic[] included. ic_combs is a
  * derived precompute and deliberately not compared. */
 static bool vk_equal(const struct groth16_vk *a, const struct groth16_vk *b)
@@ -305,53 +373,21 @@ int test_params_vk_embedded(void)
 
         char probe[1200];
         snprintf(probe, sizeof(probe), "%s/sprout-verifying.key", real_dir);
-        char scratch_root[1024], scratch[1200];
-        bool have_root = vk_scratch_root(scratch_root, sizeof(scratch_root));
-        snprintf(scratch, sizeof(scratch), "%s/zcl_vk_refused_params_XXXXXX",
-                 scratch_root);
-
-        if (!home || access(probe, R_OK) != 0 || !have_root ||
-            mkdtemp(scratch) == NULL) {
+        char scratch[1200];
+        bool staged = false;
+        if (!home || access(probe, R_OK) != 0) {
             printf("params_vk_embedded: refused-directory fallback... SKIP "
                    "(needs a readable %s to build the planted-corruption "
                    "fixture)\n", real_dir);
         } else {
-            /* Three good files by symlink; one corrupt file by copy. */
-            static const char *const link_me[] = {
-                "sapling-spend.params", "sapling-output.params",
-                "sprout-groth16.params",
-            };
-            bool staged = true;
-            for (size_t i = 0; i < 3 && staged; i++) {
-                char src[1200], dst[1400];
-                snprintf(src, sizeof(src), "%s/%s", real_dir, link_me[i]);
-                snprintf(dst, sizeof(dst), "%s/%s", scratch, link_me[i]);
-                staged = (symlink(src, dst) == 0);
-            }
-
-            uint8_t phgr[1449];
-            size_t phgr_len = 0;
-            if (staged) {
-                FILE *f = fopen(probe, "rb");
-                staged = (f != NULL);
-                if (f) { phgr_len = fread(phgr, 1, sizeof(phgr), f); fclose(f); }
-                staged = staged && phgr_len == sizeof(phgr);
-            }
-            if (staged) {
-                /* ONE flipped bit, in the middle of the key material. */
-                phgr[phgr_len / 2] ^= 0x01u;
-                char dst[1400];
-                snprintf(dst, sizeof(dst), "%s/sprout-verifying.key", scratch);
-                FILE *f = fopen(dst, "wb");
-                staged = (f != NULL);
-                if (f) {
-                    staged = (fwrite(phgr, 1, phgr_len, f) == phgr_len);
-                    staged = (fclose(f) == 0) && staged;
-                }
-            }
+            /* The machine HAS the files, so a staging failure is a failure,
+             * not a skip. */
+            staged = vk_stage_planted_dir(real_dir, scratch, sizeof(scratch));
             VK_CHECK("planted-corruption fixture staged", staged);
+        }
 
-            if (staged) {
+        if (staged) {
+            {
                 /* Mainnet: the network where a PHGR13 failure is fatal to the
                  * load, which is the ordering under test. Restored below so
                  * this section cannot change the network another group in this
@@ -521,16 +557,7 @@ int test_params_vk_embedded(void)
                 if (had_prev) chain_params_select(prev_net);
             }
 
-            /* Remove the fixture. Only files this section created. */
-            for (size_t i = 0; i < 3; i++) {
-                char dst[1400];
-                snprintf(dst, sizeof(dst), "%s/%s", scratch, link_me[i]);
-                (void)unlink(dst);
-            }
-            char dst[1400];
-            snprintf(dst, sizeof(dst), "%s/sprout-verifying.key", scratch);
-            (void)unlink(dst);
-            (void)rmdir(scratch);
+            vk_unstage_planted_dir(scratch);
         }
     }
 
@@ -608,6 +635,177 @@ int test_params_vk_embedded(void)
                  !sapling_test_embedded_vk_sha256_ok(
                      zcl_embedded_vks[0].name, zcl_embedded_vks[0].bytes,
                      zcl_embedded_vks[0].len, zcl_embedded_vks[1].sha256_hex));
+    }
+
+    /* ── 5. Proving parameters that arrive AFTER the fallback ──────────
+     *
+     * The whole point of the fallback is that the missing capability can come
+     * back. A node boots with no ~/.zcash-params, installs the compiled-in
+     * verifying keys, syncs and validates; later the proving parameters are
+     * fetched (lib/sapling/params_fetch.c) and sapling_init_params() is called
+     * on the directory that now holds them. Shielded sending has to work from
+     * that moment, without a restart.
+     *
+     * Three states are asserted in one sequence, because only the sequence
+     * shows the transitions:
+     *
+     *   verifying keys only  → prover NOT ready, sending refused
+     *   a directory that FAILS its pin → still NOT ready, still refused, and
+     *                          nothing published or freed from those bytes
+     *   the real directory   → ready, and the readiness is earned by a real
+     *                          Spend+Output+binding bundle that the node's own
+     *                          consensus verifier accepted
+     *
+     * This section runs last on purpose: it leaves proving parameters resident
+     * in the process, and sections 2-4 assert the opposite. It restores the
+     * process to "nothing loaded" on the way out anyway.
+     *
+     * Needs a real parameter directory; SKIPs cleanly without one. */
+    {
+        const char *home = getenv("HOME");
+        char real_dir[1024];
+        snprintf(real_dir, sizeof(real_dir), "%s/.zcash-params",
+                 home ? home : "");
+        char probe[1200];
+        snprintf(probe, sizeof(probe), "%s/sprout-verifying.key", real_dir);
+
+        char scratch[1200];
+        bool staged = false;
+        if (!home || access(probe, R_OK) != 0) {
+            printf("params_vk_embedded: late proving parameters... SKIP "
+                   "(needs a readable %s — the upgrade is only meaningful "
+                   "against the real trusted-setup files)\n", real_dir);
+        } else {
+            staged = vk_stage_planted_dir(real_dir, scratch, sizeof(scratch));
+            VK_CHECK("late-load fixture staged", staged);
+        }
+
+        if (staged) {
+            const struct chain_params *prev = chain_params_get();
+            bool had_prev = (prev != NULL);
+            enum chain_network prev_net = CHAIN_MAIN;
+            if (had_prev) {
+                if (strcmp(prev->strNetworkID, "test") == 0)
+                    prev_net = CHAIN_TESTNET;
+                else if (strcmp(prev->strNetworkID, "regtest") == 0)
+                    prev_net = CHAIN_REGTEST;
+            }
+            chain_params_select(CHAIN_MAIN);
+
+            /* Deterministic baseline: no keys, no proving backend. Another
+             * group in this process may have done a full load already. */
+            sapling_free_params();
+            sprout_phgr_set_vk(NULL);
+            zclassic_test_prover_reset();
+
+            /* ── State A: verifying keys only ─────────────────────────── */
+            VK_CHECK("A: the fallback installs", sapling_install_embedded_vks());
+            VK_CHECK("A: validation is armed", sapling_params_loaded());
+            VK_CHECK("A: proving is NOT armed — sending is refused",
+                     !zclassic_sapling_prover_is_ready());
+            VK_CHECK("A: no proving key is resident",
+                     sapling_get_spend_pk(NULL) == NULL &&
+                     sapling_get_output_pk(NULL) == NULL);
+
+            /* The exact pointers the consensus verifiers are reading. A later
+             * load must not swap or free what these point at while validation
+             * is running — this process's verifiers hold no lock. */
+            const struct groth16_vk *spend_pub =
+                sapling_test_published_spend_vk();
+            const struct groth16_vk *output_pub =
+                sapling_test_published_output_vk();
+            const struct groth16_vk *sprout_pub = sprout_test_published_vk();
+            VK_CHECK("A: all three Groth16 VKs are published",
+                     spend_pub && output_pub && sprout_pub);
+
+            /* ── State B: a directory that fails its pin ───────────────── */
+            VK_CHECK("B: a directory failing its SHA-512 pin is REFUSED",
+                     !sapling_init_params(scratch));
+            VK_CHECK("B: proving is still NOT armed",
+                     !zclassic_sapling_prover_is_ready());
+            VK_CHECK("B: no proving key was published from refused bytes",
+                     sapling_get_spend_pk(NULL) == NULL &&
+                     sapling_get_output_pk(NULL) == NULL);
+            /* And the refusal did not cost the node its validation. The
+             * published pointers are the SAME objects, not merely non-NULL:
+             * a refused upgrade that freed and reinstalled them would be a
+             * verifier reading freed heap. */
+            VK_CHECK("B: validation survives the refusal, same VK objects",
+                     sapling_test_published_spend_vk() == spend_pub &&
+                     sapling_test_published_output_vk() == output_pub &&
+                     sprout_test_published_vk() == sprout_pub);
+            {
+                struct vk_js_inputs js;
+                VK_CHECK("B: a real mainnet shielded proof still validates",
+                         vk_contextual_ok(&js));
+            }
+
+            /* ── State C: the real directory ──────────────────────────── */
+            VK_CHECK("C: the late proving parameters LOAD",
+                     sapling_init_params(real_dir));
+
+            /* THE regression. Before the fix, sapling_init_params() saw the
+             * params_loaded flag that the fallback had set and returned true
+             * without reading a byte, so this stayed false forever and
+             * shielded sending stayed dead until the process restarted. */
+            VK_CHECK("C: proving is armed — sending is possible",
+                     zclassic_sapling_prover_is_ready());
+            VK_CHECK("C: the proving keys are resident",
+                     sapling_get_spend_pk(NULL) != NULL &&
+                     sapling_get_output_pk(NULL) != NULL);
+            {
+                size_t sn = 0, on = 0;
+                (void)sapling_get_spend_pk(&sn);
+                (void)sapling_get_output_pk(&on);
+                VK_CHECK("C: the proving keys are whole files, not prefixes",
+                         sn > zcl_embedded_vks[0].len &&
+                         on > zcl_embedded_vks[1].len);
+            }
+            /* Readiness is not a flag someone set: the backend reached READY
+             * only by proving a Spend + Output + binding bundle and having
+             * this node's own consensus verifier accept it. Re-running the
+             * gate from the READY state must agree. */
+            VK_CHECK("C: the prover->verifier gate agrees",
+                     zclassic_sapling_prover_run_self_test());
+            VK_CHECK("C: status says ready",
+                     strcmp(zclassic_sapling_prover_status(), "ready") == 0);
+
+            /* The upgrade must not have touched the keys the verifiers are
+             * reading. Same objects, same values, no window. */
+            VK_CHECK("C: the upgrade did NOT republish the verifying keys",
+                     sapling_test_published_spend_vk() == spend_pub &&
+                     sapling_test_published_output_vk() == output_pub &&
+                     sprout_test_published_vk() == sprout_pub);
+            {
+                struct groth16_vk from_file = {0};
+                char p[1200];
+                snprintf(p, sizeof(p), "%s/sapling-spend.params", real_dir);
+                bool ok = vk_from_real_file(&from_file, p,
+                                            zcl_embedded_vks[0].len);
+                VK_CHECK("C: published spend VK still equals the real file's",
+                         ok && vk_equal(sapling_test_published_spend_vk(),
+                                        &from_file));
+                free(from_file.ic);
+            }
+            {
+                struct vk_js_inputs js;
+                VK_CHECK("C: a real mainnet shielded proof still validates",
+                         vk_contextual_ok(&js));
+            }
+
+            /* Idempotent: a second call after a full load does nothing and
+             * says so, rather than re-reading 777 MB or re-publishing. */
+            VK_CHECK("C: a repeat call is a no-op that still reports loaded",
+                     sapling_init_params(real_dir) &&
+                     sapling_test_published_spend_vk() == spend_pub);
+
+            /* Leave the process as this section found it. */
+            sapling_free_params();
+            sprout_phgr_set_vk(NULL);
+            zclassic_test_prover_reset();
+            if (had_prev) chain_params_select(prev_net);
+            vk_unstage_planted_dir(scratch);
+        }
     }
 
     printf("params_vk_embedded tests: %s\n", failures ? "FAILED" : "PASSED");
