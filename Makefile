@@ -50,7 +50,12 @@ ZCL_ZERO_SHA256 = 00000000000000000000000000000000000000000000000000000000000000
 # authoritative parse. The standalone presentation package has the same
 # property: its explicit, tiny dependency graph neither consumes nor stamps a
 # whole-node source identity, so visual relaunches share this lean parse path.
-ZCL_HOTSWAP_LOOP_GOALS := hotswap-try hotswap-apply \
+# `hotswap` (the candidate ledger) joins them for the same reason and then
+# some: its recipe is a pure read-only text pass over config/*.def and builds,
+# stamps and links nothing at all, so every parse-time input this set skips is
+# input it could not consume. It is the first command an agent types about the
+# loop, so it has to answer in ~2 s, not ~13 s.
+ZCL_HOTSWAP_LOOP_GOALS := hotswap-try hotswap-apply hotswap \
 	presentation-lib presentation-demo presentation-relaunch \
 	presentation-desktop-install presentation-portability
 ZCL_HOTSWAP_LOOP_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_HOTSWAP_LOOP_GOALS),$(MAKECMDGOALS))),,1),)
@@ -3278,15 +3283,28 @@ hotswap-so: $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP)
 	echo "hotswap-so: linked read-only, unpublishable candidate $$so" >&2; \
 	echo "$$so"
 
-# make hotswap FILES="..." [PROBE=core.status]
-# Build the generation .so, then hand it to the native hot-swap path. NOTE: a
-# The dev-only `dev_hotswap` RPC executes inside the already-running isolated
-# dev node, so the committed router generation persists until its next process
-# restart.  This target never starts/stops any service and can never target the
-# canonical or soak lane.
-hotswap: $(VIEW_GEN_HEADERS)
-	@echo "hotswap: REFUSING — runtime publication and resident probing are contained; use make hotswap-so plus build/test verification" >&2
-	@exit 3
+# make hotswap                 the candidate ledger + coverage summary
+# make hotswap FILE=<tu.c>     that TU's verdict and its exact next command
+# make hotswap LEAF=<leaf>     the verdict for the TU owning a command leaf
+#
+# THE REFUSAL IS UNCHANGED for the thing it was refusing. `make hotswap
+# FILES="..."` (and its PROBE=) was the RUNTIME PUBLICATION form: build a
+# generation .so and hand it to the resident dev_hotswap RPC for in-process
+# publication plus resident probing. That is still refused with exit 3, and
+# nothing below activates, dlopens, publishes, or contacts a node — the
+# ledger is a read-only text pass over the config/*.def manifests.
+#
+# What changed is the bare goal. `make hotswap` — the single most obvious
+# thing an agent types — used to be a dead end that printed a refusal and
+# exited 3, so the ~9 second module loop went unused and everyone paid the
+# ~4m45s whole-program LTO rebuild instead. It now answers the question the
+# agent actually had: is this file hot-swappable, and if not, why?
+hotswap:
+	@if [ -n "$(FILES)$(PROBE)" ]; then \
+	  echo "hotswap: REFUSING — runtime publication and resident probing are contained; use make hotswap-so plus build/test verification" >&2; \
+	  exit 3; fi
+	@tools/dev/hotswap-candidates.sh \
+	  $(if $(FILE),$(FILE),$(if $(LEAF),--leaf $(LEAF),--all))
 
 .PHONY: hotswap-module-so
 # make hotswap-module-so FILE=app/controllers/src/status_native_handlers.c
@@ -8316,6 +8334,22 @@ check-hotswap-service-islands:
 check-hotswap-swappable-shape:
 	@tools/lint/check_hotswap_swappable_shape.sh
 
+# The agent-facing hot-swap ledger (tools/dev/hotswap-candidates.sh) re-parses
+# the same config/*.def manifests the gates above parse, with its OWN awk
+# walkers, and an agent picks the ~9s module loop or the ~4m45s relink on what
+# it says. Two independent parsers of one manifest set rot quietly: a drifted
+# walk does not crash, it UNDER-REPORTS. This gate holds the tool to the counts
+# check-hotswap-swappable-shape already publishes, proves every
+# config/hotswap_denied_leaves.def leaf still comes back BLOCKED from the tool
+# (the denylist has to hold in the ADVICE, not just in the manifests), and
+# proves `make hotswap FILES=/PROBE=` still hits its refusal + exit 3 — that
+# runtime-publication form must stay unreachable now that the bare goal prints
+# a ledger. --selftest runs first and proves the gate fires on seeded
+# violations of both classes.
+check-hotswap-candidates-ledger:
+	@tools/lint/check_hotswap_candidates_ledger.sh --selftest
+	@tools/lint/check_hotswap_candidates_ledger.sh
+
 # Prove the RELEASE binary links none of the dev-only mutation entry points
 # (dispatcher, cycle, watcher, subprocess runner) NOR the native dev-lane
 # activation engine (tools/dev/dev_activation*.c: stop/start the unit, flip
@@ -9777,6 +9811,7 @@ LINT_GATES := \
     check-hotswap-static-state \
     check-hotswap-service-islands \
     check-hotswap-swappable-shape \
+    check-hotswap-candidates-ledger \
     check-release-no-dev-symbols \
     check-stable-publish-contained \
     check-raw-sqlite \
