@@ -373,7 +373,12 @@ bool vcs_zcode_dht_service_provider_route(
 
 /* Operator-authored publication is a stale-plan-safe mutation.  The plan
  * token binds the exact deterministic signed record and the current canonical
- * record-store digest.  No seed or delegation wire is returned to callers. */
+ * record-store digest.  No seed or delegation wire is returned to callers.
+ * spec.sequence == 0 means "derive it": the plan (and, deterministically, the
+ * commit rebuild) picks max+1 from the service's own record store under the
+ * service lock, so concurrent renewals of one stream through one node cannot
+ * commit duplicate sequences — the loser's token goes STALE.  An explicit
+ * sequence >= 1 pins the sequence as before. */
 struct vcs_zcode_dht_publish_spec {
   enum vcs_zcode_dht_record_kind kind;
   char namespace_name[VCS_ZCODE_DHT_RECORD_NAMESPACE_BYTES];

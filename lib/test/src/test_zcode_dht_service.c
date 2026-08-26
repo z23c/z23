@@ -1111,6 +1111,106 @@ _test_next:;
   return failures;
 }
 
+/* Auto-sequencing: spec.sequence == 0 means "the service picks max+1 from
+ * its own store, under its lock". Two renewals of one stream planned from
+ * the same store state both derive the same next sequence, but only the
+ * first commit can land: the second commit's rebuild sees the advanced
+ * store, derives one higher, and the token comparison refuses STALE before
+ * anything is admitted. Client-side max+1 derivations raced the store's
+ * visibility lag instead, committed duplicate sequences, and left BOTH
+ * records of a real provider stream conflicted and unusable. */
+static int test_publication_auto_sequence(void) {
+  int failures = 0;
+  TEST("zcode dht service: publish plan derives sequence server-side") {
+    char dir[] = "/tmp/zcl_dht_publication_autoseq_XXXXXX";
+    ASSERT(mkdtemp(dir) != NULL);
+    uint8_t genesis[32], noise[32];
+    memset(genesis, 0x11, sizeof(genesis));
+    memset(noise, 0x42, sizeof(noise));
+    ASSERT(fixture_identity(dir, 0x6b, genesis, noise));
+    struct vcs_zcode_dht_service *service =
+        fixture_service_at(dir, genesis, noise, 1000);
+    ASSERT(service != NULL);
+    struct vcs_zcode_dht_publish_spec spec;
+    memset(&spec, 0, sizeof(spec));
+    spec.kind = VCS_ZCODE_DHT_RECORD_POINTER;
+    (void)snprintf(spec.namespace_name, sizeof(spec.namespace_name),
+                   "science");
+    memset(spec.semantic_root, 0x75, 32);
+    memset(spec.transport_root, 0x76, 32);
+    spec.not_before = 1000;
+    spec.expiry = 1400;
+    struct vcs_zcode_dht_time now = test_time(1000);
+    uint8_t token[32], raced_token[32];
+    struct vcs_zcode_dht_record record;
+
+    /* An empty stream derives sequence 1, and the plan's record_out reports
+     * the derived number so an operator sees exactly what was signed. */
+    ASSERT(vcs_zcode_dht_service_record_publish_plan(
+        service, &spec, token, &record, NULL));
+    ASSERT_EQ(record.sequence, 1);
+    ASSERT_EQ(vcs_zcode_dht_service_record_publish_commit(
+                  service, &spec, token, now, &record, NULL),
+              VCS_ZCODE_DHT_RECORD_STORE_ADDED);
+
+    /* A second auto publication derives max+1 = 2. */
+    ASSERT(vcs_zcode_dht_service_record_publish_plan(
+        service, &spec, token, &record, NULL));
+    ASSERT_EQ(record.sequence, 2);
+    ASSERT_EQ(vcs_zcode_dht_service_record_publish_commit(
+                  service, &spec, token, now, &record, NULL),
+              VCS_ZCODE_DHT_RECORD_STORE_ADDED);
+
+    /* The incident: two plans from the same store state both derive 3. The
+     * first commit lands; the second one's rebuild sees the advanced store,
+     * derives 4, and its plan token no longer matches — STALE, refused
+     * before the store ever sees a second sequence-3 record. */
+    ASSERT(vcs_zcode_dht_service_record_publish_plan(
+        service, &spec, token, &record, NULL));
+    ASSERT_EQ(record.sequence, 3);
+    memcpy(raced_token, token, 32);
+    ASSERT(vcs_zcode_dht_service_record_publish_plan(
+        service, &spec, token, &record, NULL));
+    ASSERT_EQ(record.sequence, 3);
+    ASSERT_EQ(vcs_zcode_dht_service_record_publish_commit(
+                  service, &spec, raced_token, now, &record, NULL),
+              VCS_ZCODE_DHT_RECORD_STORE_ADDED);
+    ASSERT_EQ(vcs_zcode_dht_service_record_publish_commit(
+                  service, &spec, raced_token, now, &record, NULL),
+              VCS_ZCODE_DHT_RECORD_STORE_STALE);
+
+    /* The losing operator replans — against the advanced store that now
+     * holds 3, so the fresh plan derives 4 and commits cleanly. No
+     * duplicate-sequence conflict is ever admitted. */
+    ASSERT(vcs_zcode_dht_service_record_publish_plan(
+        service, &spec, token, &record, NULL));
+    ASSERT_EQ(record.sequence, 4);
+    ASSERT_EQ(vcs_zcode_dht_service_record_publish_commit(
+                  service, &spec, token, now, &record, NULL),
+              VCS_ZCODE_DHT_RECORD_STORE_ADDED);
+
+    /* Explicit pinning still works and still supersedes by number. */
+    spec.sequence = 9;
+    ASSERT(vcs_zcode_dht_service_record_publish_plan(
+        service, &spec, token, &record, NULL));
+    ASSERT_EQ(record.sequence, 9);
+    ASSERT_EQ(vcs_zcode_dht_service_record_publish_commit(
+                  service, &spec, token, now, &record, NULL),
+              VCS_ZCODE_DHT_RECORD_STORE_ADDED);
+    /* After sequence 9, auto derives 10 — the store max, not plan count. */
+    spec.sequence = 0;
+    ASSERT(vcs_zcode_dht_service_record_publish_plan(
+        service, &spec, token, &record, NULL));
+    ASSERT_EQ(record.sequence, 10);
+
+    vcs_zcode_dht_service_free(service, now);
+    cleanup_fixture(dir);
+    PASS();
+  }
+_test_next:;
+  return failures;
+}
+
 /* The ceiling on how many records ONE node keeps announced is not an abstract
  * number: it decides whether a node can host the product's own demo. The
  * multi-host commons journey measured the floor at eleven records for five
@@ -3365,6 +3465,7 @@ int test_zcode_dht_service(void) {
   failures += test_publish_reproduction_gate();
   failures += test_publication_monotonic_retry();
   failures += test_publication_delegation_window();
+  failures += test_publication_auto_sequence();
   failures += test_publication_ceiling_hosts_a_real_node();
   failures += test_record_churn_fallback();
   failures += test_deep_ancestry();

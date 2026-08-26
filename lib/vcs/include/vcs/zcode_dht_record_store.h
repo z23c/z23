@@ -70,6 +70,17 @@ void vcs_zcode_dht_record_store_stream_digest(
     const struct vcs_zcode_dht_record_store *store,
     const struct vcs_zcode_dht_record *record, uint8_t out[32]);
 
+/* Highest sequence currently held in `record`'s stream (0 when the stream is
+ * empty). Publish-plan auto-sequencing derives max+1 from THIS, under the
+ * caller's service lock, so two operators renewing the same stream through
+ * one node can never both commit the same derived sequence: the second
+ * commit's rebuild lands on a different token and refuses STALE. Client-side
+ * max+1 derivations raced the store's visibility lag and produced exactly
+ * that duplicate-sequence collision (both records conflicted, zero usable). */
+uint64_t vcs_zcode_dht_record_store_max_sequence(
+    const struct vcs_zcode_dht_record_store *store,
+    const struct vcs_zcode_dht_record *record);
+
 /* Save is temp + file fsync + rename + directory fsync, mode 0600. Load
  * verifies the complete image into a temporary store before replacing the
  * destination, so malformed/cross-network/torn images leave memory intact. */

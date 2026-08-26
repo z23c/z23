@@ -324,6 +324,20 @@ void vcs_zcode_dht_record_store_stream_digest(
   sha3_256_finalize(&sha, out);
 }
 
+uint64_t vcs_zcode_dht_record_store_max_sequence(
+    const struct vcs_zcode_dht_record_store *store,
+    const struct vcs_zcode_dht_record *record)
+{
+  if (!store || !record)
+    return 0;
+  uint64_t max_sequence = 0;
+  for (size_t i = 0; i < store->count; i++)
+    if (record_stream_equal(&store->entries[i].record, record) &&
+        store->entries[i].record.sequence > max_sequence)
+      max_sequence = store->entries[i].record.sequence;
+  return max_sequence;
+}
+
 static bool store_paths(const char *datadir, char directory[1400],
                         char path[1500], char *error, size_t error_capacity)
 {

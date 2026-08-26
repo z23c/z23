@@ -463,16 +463,22 @@ static bool parse_publish_spec(const struct json_value *in,
                                enum vcs_zcode_dht_record_kind forced_kind) {
   memset(spec, 0, sizeof(*spec));
   spec->kind = forced_kind ? forced_kind : input_record_kind(in);
+  /* Absent (-1) and explicit 0 both mean "derive the sequence server-side":
+   * the plan takes max+1 from the service's own store under its lock. Renewal
+   * callers should always use this — deriving max+1 client-side races the
+   * store's visibility lag and can commit a duplicate sequence, which turns
+   * BOTH records conflicted and unusable. An explicit sequence >= 1 still
+   * pins it (first-publication and replay flows). */
   int64_t sequence = input_int(in, "sequence", -1);
   int64_t not_before = input_int(in, "not_before", -1);
   int64_t expiry = input_int(in, "expiry", -1);
   if (!spec->kind || !input_namespace(in, spec->namespace_name) ||
-      sequence < 1 || not_before < 0 || expiry <= not_before ||
+      sequence < 0 || not_before < 0 || expiry <= not_before ||
       !input_root(in, "semantic_root", spec->semantic_root, true) ||
       !input_root(in, "transport_root", spec->transport_root, false) ||
       !input_root(in, "owner_group", spec->owner_group, true))
     return false;
-  spec->sequence = (uint64_t)sequence;
+  spec->sequence = sequence > 0 ? (uint64_t)sequence : 0;
   spec->not_before = (uint64_t)not_before;
   spec->expiry = (uint64_t)expiry;
   return true;
@@ -502,7 +508,7 @@ static bool rpc_publish_impl(
     const struct json_value *params, bool help, struct json_value *result,
     enum vcs_zcode_dht_record_kind evidence_kind) {
   if (help) {
-    json_set_str(result, "zcode_dht_publish {mode,kind,namespace,roots,sequence,not_before,expiry,plan_token?}");
+    json_set_str(result, "zcode_dht_publish {mode,kind,namespace,roots,sequence?,not_before,expiry,plan_token?} — omit sequence (or 0) to derive max+1 server-side");
     return true;
   }
   const struct json_value *in = rpc_input(params);
@@ -511,7 +517,8 @@ static bool rpc_publish_impl(
   if (!mode || (strcmp(mode, "plan") != 0 && strcmp(mode, "commit") != 0) ||
       !parse_publish_spec(in, &spec, evidence_kind)) {
     rpc_error(result, "INVALID_PUBLISH",
-              "exact mode, kind, namespace, roots, sequence and window required");
+              "exact mode, kind, namespace, roots and window required; "
+              "sequence is optional (omitted/0 = derived server-side)");
     return true;
   }
   bool special = spec.kind == VCS_ZCODE_DHT_RECORD_STORAGE_ACK ||

@@ -5,6 +5,7 @@
 
 #include "crypto/sha3.h"
 #include "vcs/package_store.h"
+#include "vcs/zcode_dht_record_store.h"
 
 #include <string.h>
 
@@ -81,6 +82,19 @@ static bool publication_build(
   record->not_before = spec->not_before;
   record->expiry = spec->expiry;
   record->delegation = service->delegation;
+  /* sequence 0 means "derive it": max+1 read from THIS store under the
+   * caller's service lock. Two operators renewing the same stream through
+   * one node can then never both commit the same derived sequence — the
+   * loser's commit rebuild lands on a different stream digest and refuses
+   * STALE, exactly the protection a concurrent renewal needs. Client-side
+   * max+1 derivations raced the store's visibility lag instead and produced
+   * duplicate sequences whose records conflicted into unusability. The
+   * derivation is deterministic per store state, so an uncontended plan and
+   * its commit rebuild the identical record and token. */
+  if (record->sequence == 0)
+    record->sequence = vcs_zcode_dht_record_store_max_sequence(
+                            service->record_store, record) +
+                       1;
   enum vcs_zcode_dht_record_error signed_error =
       vcs_zcode_dht_record_sign(record, service->online_seed);
   if (signed_error != VCS_ZCODE_DHT_RECORD_OK) {
