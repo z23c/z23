@@ -1366,3 +1366,16 @@ AGENT_IMPACT_RULE("lib/validation/src/contextual_check_tx.c|lib/validation/inclu
  * the retention bound can reach the push gate without the failure-case
  * rollback ever running — which is the only test that proves the property. */
 AGENT_IMPACT_RULE("lib/vcs/include/vcs/package_install.h|lib/vcs/src/package_install.c|app/services/src/package_lifecycle.c|app/services/include/services/package_lifecycle.h|tools/command/native_zcode_add_command.c|lib/test/src/test_zcode_add.c|config/commands/zcode.def", "zcode_add zcode_verify command_registry_catalog native_api_contract make_lint_gates")
+/* LANE node-byte-verification: `z23 zcode node verify` — the one command a
+ * user runs to answer "did I get the same bytes as the publisher, produced
+ * by my own machine?". These files move together because they are one
+ * claim split three ways and each half is worthless alone: the pure
+ * comparator that REFUSES to grade a publisher against themselves, the
+ * shell driver that produces local bytes and names every component it could
+ * not rebuild, and the typed leaf that reads both toolchain identities the
+ * SAME way. Loosen the comparator's producer rule, or let the driver stop
+ * emitting an `unverified` row, and the command keeps printing a verdict
+ * that no longer means anything — which is exactly the failure the lane
+ * exists to prevent, so an edit here must never reach the push gate having
+ * run zero test groups. */
+AGENT_IMPACT_RULE("lib/vcs/src/node_reproduce.c|lib/vcs/include/vcs/node_reproduce.h|tools/command/native_zcode_node_verify_command.c|tools/scripts/node_reproduce.sh|lib/test/src/test_node_reproduce.c|lib/test/src/test_zcode_node_verify.c", "node_reproduce zcode_node_verify zcode_node_command command_registry_catalog native_api_contract make_lint_gates")
