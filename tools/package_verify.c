@@ -141,16 +141,48 @@ volatile sig_atomic_t g_shutdown_requested = 0;
 /* Fixed compile-time resource caps (the recipe bounds the TEST run). */
 #define PV_COMPILE_AS_BYTES (UINT64_C(4) * 1024u * 1024u * 1024u)
 #define PV_COMPILE_FSIZE_BYTES (UINT64_C(256) * 1024u * 1024u)
-/* RLIMIT_NPROC is per-REAL-UID and counts every task the uid already runs
- * session-wide, so an absolute value breaks on any busy operator host
- * (fork → EAGAIN). These constants are MARGINS: the child limit is set to
- * (uid's current task count) + margin, which bounds what the child tree can
- * add without depending on the host's background load. */
+/* Process budgets. These constants are the SUBTREE budget of one confined
+ * action: how many processes that action's own child tree may hold at once.
+ *
+ * They are NOT the value installed on RLIMIT_NPROC. RLIMIT_NPROC is charged
+ * per REAL UID, kernel-wide, so it cannot express a subtree budget at all:
+ * an absolute value bounds the subtree at (value − the uid's concurrent task
+ * count), and rebasing it on a snapshot, (task count at time T) + margin, is
+ * the same load-dependent quantity sampled a moment earlier — every task the
+ * uid starts between T and the child's fork silently eats the margin. A
+ * 32-worker suite starts and reaps hundreds of tasks a second, so a 16-task
+ * margin bought nothing and the compiler died with
+ * "posix_spawn: Resource temporarily unavailable" reported as a COMPILE
+ * ERROR. See platform/os_sandbox.h "process budget".
+ *
+ * So the budget below is enforced where it is actually meaningful — by the
+ * parent, as a census of the child's own process GROUP (a group id is
+ * inherited across fork and survives double-fork reparenting) — and
+ * RLIMIT_NPROC is demoted to a static absolute backstop that never samples
+ * load. Whether the host has process table left at all is a separate
+ * ADMISSION decision, reported as a wedge, never as a build verdict. */
 #define PV_COMPILE_NPROC 256u
+/* The absolute RLIMIT_NPROC backstop, clamped down only by the uid's static
+ * NPROC hard limit (host CONFIGURATION, which does not move while a suite
+ * runs — not host LOAD). Deliberately generous: it exists so a runaway
+ * subtree cannot exhaust the machine between two censuses, not as the
+ * action's budget. */
+#define PV_NPROC_BACKSTOP 65536u
+/* Process-table headroom an action needs beyond its own subtree budget
+ * before it is admitted at all (pipes, the fork itself, the exec). */
+#define PV_NPROC_LAUNCH_SLACK 16u
+/* How often the parent censuses the child's process group, in the 1 ms
+ * ticks of its drain loop. */
+#define PV_NPROC_CENSUS_TICKS 20
+/* Exit code for "this host had no process table left" at the zbuild entry
+ * points. Distinct from 5 (internal/sandbox failure) and from every build
+ * verdict: EX_TEMPFAIL, i.e. retry this action, do not blame the input. */
+#define PV_EXIT_RESOURCE_WEDGE 75
 #define PV_COMPILE_NOFILE 1024u
 /* The exact one-TU build action has a much smaller, action-keyed budget than
  * the general package verifier (which may run multi-source compiler and
  * sanitizer matrices). Keep the two policies distinct. */
+/* cc forks cc1 and as; 16 concurrent processes is generous for one TU. */
 #define PV_ZBUILD_COMPILE_NPROC 16u
 #define PV_ZBUILD_COMPILE_NOFILE 64u
 /* Test-run fixed caps beyond the recipe's AS/CPU. */
@@ -464,6 +496,17 @@ struct pv_run {
     int term_signal;
     bool timed_out;
     bool sandbox_fail; /* the child could not arm its own confinement */
+    /* Process-accounting outcomes. These are DISJOINT from every build
+     * verdict above: `headroom_exhausted` is the HOST being out of process
+     * table for this uid (a wedge — retry it), `budget_exceeded` is the
+     * confined subtree spending more processes than the action declares (a
+     * defect in the input — never retry it). A build error is neither. */
+    bool headroom_exhausted;
+    bool budget_exceeded;
+    uint64_t nproc_backstop;   /* absolute RLIMIT_NPROC actually installed */
+    uint64_t uid_tasks;        /* real uid's task count at admission       */
+    uint64_t subtree_budget;   /* the action's declared process budget     */
+    uint64_t subtree_peak;     /* largest census of the child's group      */
     bool stdout_truncated;
     bool stderr_truncated;
     size_t stdout_len;
@@ -471,6 +514,70 @@ struct pv_run {
     char stdout_buf[PV_STDOUT_CAP];
     char stderr_buf[PV_STDERR_CAP];
 };
+
+/* One line naming a process-accounting outcome, or NULL when the run had
+ * none. Callers print this INSTEAD of a build-failure line so a wedge and a
+ * real defect never share a message (or, at the zbuild entry points, an exit
+ * code — see PV_EXIT_RESOURCE_WEDGE). */
+static const char *pv_run_process_failure(const struct pv_run *r)
+{
+    if (!r) return NULL;
+    if (r->headroom_exhausted) return "process-headroom-exhausted";
+    if (r->budget_exceeded) return "process-budget-exceeded";
+    return NULL;
+}
+
+/* gcc reports a fork/posix_spawn EAGAIN as its own FATAL ERROR on stderr, so
+ * a host that ran out of process table for this uid is otherwise
+ * indistinguishable from source the compiler rejected — which is exactly how
+ * this defect hid. Recognise it and re-class the run.
+ *
+ * Applied ONLY where the child is the FIXED trusted compiler. Untrusted test
+ * code must never be able to type this string on stderr and have its failure
+ * re-labelled a host wedge. */
+static bool pv_stderr_is_process_exhaustion(const char *stderr_buf)
+{
+    return stderr_buf &&
+        (strstr(stderr_buf, "Resource temporarily unavailable") != NULL ||
+         strstr(stderr_buf, "fork: retry:") != NULL);
+}
+
+/* If `run` failed on process accounting, print ONE line naming which of the
+ * two it was — with the installed backstop, the uid task count at admission,
+ * the uid task count now, and the subtree budget and peak — and return the
+ * exit code for it. Returns 0 when the run had no process-accounting
+ * failure, so a caller writes:
+ *
+ *     int wedged = pv_report_process_failure(&run, "zbuild-error", true);
+ *     if (wedged) return wedged;
+ *
+ * The two outcomes never share an exit code: a HOST out of process table is
+ * PV_EXIT_RESOURCE_WEDGE (retry the action), a SUBTREE over its declared
+ * budget is 5 (the input is at fault). Set `trusted_child` only where the
+ * child is the fixed compiler — see pv_stderr_is_process_exhaustion. */
+static int pv_report_process_failure(const struct pv_run *run,
+                                     const char *prefix, bool trusted_child)
+{
+    if (!run || !prefix) return 0;
+    const char *cls = pv_run_process_failure(run);
+    if (!cls && trusted_child && run->nproc_backstop && !run->timed_out &&
+        !run->sandbox_fail && run->exited && run->exit_code != 0 &&
+        pv_stderr_is_process_exhaustion(run->stderr_buf))
+        cls = "process-headroom-exhausted";  /* the backstop itself bit */
+    if (!cls) return 0;
+    fprintf(stdout,
+            "%s=%s nproc_backstop=%llu uid_tasks_at_admission=%llu "
+            "uid_tasks_now=%llu subtree_budget=%llu subtree_peak=%llu "
+            "diagnostics=%.256s\n",
+            prefix, cls,
+            (unsigned long long)run->nproc_backstop,
+            (unsigned long long)run->uid_tasks,
+            (unsigned long long)os_sandbox_uid_task_count(),
+            (unsigned long long)run->subtree_budget,
+            (unsigned long long)run->subtree_peak,
+            run->stderr_buf);
+    return run->budget_exceeded ? 5 : PV_EXIT_RESOURCE_WEDGE;
+}
 
 struct pv_perf_metrics {
     uint64_t processes;
@@ -569,7 +676,7 @@ static size_t pv_child_grants(const char *src_dir, const char *build_dir,
  * space this verifier binary's own text/data/bss already occupy — the
  * child dies with SIGSEGV growing its stack during rlimit/Landlock/seccomp
  * setup, before it ever reaches execve(). Best-effort: an unreadable
- * VmSize yields 0, same fallback as pv_uid_task_count below. */
+ * VmSize yields 0. */
 static uint64_t pv_process_vsize_bytes(void)
 {
     struct os_proc_mem mem;
@@ -578,39 +685,6 @@ static uint64_t pv_process_vsize_bytes(void)
     return (uint64_t)mem.vsize_bytes;
 }
 
-/* Current task count of the real uid (RLIMIT_NPROC's accounting unit).
- * Best-effort: a /proc scan; unreadable entries are skipped, so the result
- * can be an undercount — the margin in PV_*_NPROC absorbs that. */
-static uint64_t pv_uid_task_count(void)
-{
-    DIR *proc = opendir("/proc");
-    if (!proc)
-        return 0;
-    const uid_t me = getuid();
-    uint64_t total = 0;
-    struct dirent *ent;
-    while ((ent = readdir(proc)) != NULL) {
-        char *end = NULL;
-        long pid = strtol(ent->d_name, &end, 10);
-        if (!end || *end != '\0' || pid <= 0)
-            continue;
-        char tpath[64];
-        snprintf(tpath, sizeof(tpath), "/proc/%ld/task", pid);
-        struct stat st;
-        if (stat(tpath, &st) != 0 || st.st_uid != me)
-            continue;
-        DIR *tasks = opendir(tpath);
-        if (!tasks)
-            continue;
-        struct dirent *te;
-        while ((te = readdir(tasks)) != NULL)
-            if (te->d_name[0] >= '0' && te->d_name[0] <= '9')
-                total++;
-        closedir(tasks);
-    }
-    closedir(proc);
-    return total;
-}
 
 /* Fork and run argv[0] confined. The child: stderr/stdout captured,
  * optional chdir, rlimits, no_new_privs, Landlock (when landlock=true),
@@ -637,18 +711,49 @@ static struct pv_run pv_run_child(const char *const argv[],
         return r;
     }
     int64_t perf_started_ns = clock_now_monotonic_ns();
-    /* Rebase absolute caps into "current usage + the caller's budget": NPROC
-     * is session-wide per uid (see the PV_COMPILE_NPROC comment), and AS is
-     * this very process's own mapping (see pv_process_vsize_bytes) — a fork
-     * child starts from that same mapping, so the recipe's byte budget must
-     * land on top of it, not replace it. */
+    /* AS is rebased onto this very process's own mapping (see
+     * pv_process_vsize_bytes) — a fork child starts from that same mapping,
+     * so the recipe's byte budget must land on top of it, not replace it.
+     *
+     * NPROC is NOT rebased. The caller's nproc is the action's SUBTREE
+     * budget, enforced below by a census of the child's process group; the
+     * value installed on RLIMIT_NPROC is the static PV_NPROC_BACKSTOP
+     * (clamped only by the uid's hard limit). See the PV_COMPILE_NPROC
+     * comment for why any load-sampled value is a coin flip here. */
     struct os_sandbox_rlimits rebased;
     if (limits && (limits->nproc != OS_SANDBOX_RLIMIT_KEEP ||
                    limits->as_bytes != OS_SANDBOX_RLIMIT_KEEP ||
                    g_pv_cpu_budget_us != 0)) {
         rebased = *limits;
-        if (limits->nproc != OS_SANDBOX_RLIMIT_KEEP)
-            rebased.nproc = pv_uid_task_count() + limits->nproc;
+        if (limits->nproc != OS_SANDBOX_RLIMIT_KEEP) {
+            struct os_sandbox_process_budget budget =
+                os_sandbox_process_budget_live(
+                    PV_NPROC_BACKSTOP,
+                    limits->nproc + PV_NPROC_LAUNCH_SLACK);
+            r.subtree_budget = limits->nproc;
+            r.nproc_backstop = budget.ceiling;
+            r.uid_tasks = budget.uid_tasks;
+            if (!budget.admitted) {
+                /* The HOST is out of process table for this uid. Refusing
+                 * here — before the fork — is what keeps this out of the
+                 * child's exit status, where it would be indistinguishable
+                 * from the compiler rejecting the input. */
+                r.headroom_exhausted = true;
+                (void)snprintf(r.stderr_buf, sizeof(r.stderr_buf),
+                    "process-headroom-exhausted: uid tasks=%llu of "
+                    "RLIMIT_NPROC backstop=%llu (hard=%llu), headroom=%llu "
+                    "< required=%llu for a subtree budget of %llu",
+                    (unsigned long long)budget.uid_tasks,
+                    (unsigned long long)budget.ceiling,
+                    (unsigned long long)budget.hard,
+                    (unsigned long long)budget.headroom,
+                    (unsigned long long)budget.required,
+                    (unsigned long long)limits->nproc);
+                r.stderr_len = strlen(r.stderr_buf);
+                return r;
+            }
+            rebased.nproc = budget.ceiling;
+        }
         if (limits->as_bytes != OS_SANDBOX_RLIMIT_KEEP)
             rebased.as_bytes = pv_process_vsize_bytes() + limits->as_bytes;
         if (g_pv_cpu_budget_us) {
@@ -674,6 +779,13 @@ static struct pv_run pv_run_child(const char *const argv[],
     if (pid == 0) {
         /* Child: single-threaded standalone CLI, so the pre-exec calls
          * below are safe here (no other thread holds a lock). */
+        /* Own process group FIRST: it is what makes the action's process
+         * budget enforceable (the parent censuses this group) and what makes
+         * the deadline kill reach the WHOLE subtree instead of just this
+         * process. A group id is inherited across fork and is not lost when a
+         * grandchild is reparented, so nothing in the tree can escape it.
+         * Raced with the parent's identical call so neither ordering loses. */
+        (void)setpgid(0, 0);
         close(out_pipe[0]);
         close(err_pipe[0]);
         (void)dup2(out_pipe[1], STDOUT_FILENO);
@@ -733,6 +845,10 @@ static struct pv_run pv_run_child(const char *const argv[],
         execvp(argv[0], (char *const *)argv);
         _exit(PV_CHILD_EXEC_FAIL);
     }
+    /* Same call as the child's, so the group exists no matter which side
+     * runs first. EACCES here means the child already exec'd — it set the
+     * group itself before doing so, which is the outcome we wanted. */
+    (void)setpgid(pid, pid);
     close(out_pipe[1]);
     close(err_pipe[1]);
     /* Nonblocking read ends: the poll loop drains without hanging. */
@@ -745,11 +861,21 @@ static struct pv_run pv_run_child(const char *const argv[],
     size_t out_len = 0, err_len = 0;
     int status = 0;
     bool reaped = false;
+    int census_tick = 0;
     struct rusage usage;
     memset(&usage, 0, sizeof(usage));
     for (;;) {
-        pid_t w = wait4(pid, &status, WNOHANG, &usage);
-        if (w == pid) {
+        /* PEEK with WNOWAIT: the child stays an unreaped zombie, which keeps
+         * its pid reserved and its process group bound to that pid. Only then
+         * is kill(-pid) safe — reaping first would let the pid be recycled
+         * and the group signal land on somebody else's tree. */
+        siginfo_t si;
+        memset(&si, 0, sizeof(si));
+        int peeked = waitid(P_PID, (id_t)pid, &si,
+                            WEXITED | WNOHANG | WNOWAIT);
+        if (peeked == 0 && si.si_pid == pid) {
+            kill(-pid, SIGKILL);           /* nothing outlives the action */
+            (void)wait4(pid, &status, 0, &usage);
             reaped = true;
             break;
         }
@@ -772,7 +898,26 @@ static struct pv_run pv_run_child(const char *const argv[],
             err_len += take;
             if (take < (size_t)got) r.stderr_truncated = true;
         }
+        /* The action's process budget, enforced where it is meaningful: over
+         * the child's own process GROUP, so concurrent work of the same uid
+         * is neither counted against this action nor punished by it. */
+        if (r.subtree_budget && ++census_tick >= PV_NPROC_CENSUS_TICKS) {
+            census_tick = 0;
+            uint64_t live = os_sandbox_process_group_census(pid);
+            if (live > r.subtree_peak) r.subtree_peak = live;
+            if (live > r.subtree_budget) {
+                kill(-pid, SIGKILL);
+                kill(pid, SIGKILL);
+                (void)wait4(pid, &status, 0, &usage);
+                reaped = true;
+                r.budget_exceeded = true;
+                break;
+            }
+        }
         if (clock_now_monotonic_ns() >= deadline) {
+            /* Kill the GROUP, not just the direct child: a descendant that
+             * outlived its parent would otherwise survive the deadline. */
+            kill(-pid, SIGKILL);
             kill(pid, SIGKILL);
             (void)wait4(pid, &status, 0, &usage);
             reaped = true;
@@ -2479,6 +2624,11 @@ static int pv_zbuild_compile_mode(int argc, char **argv)
     struct pv_run run = pv_run_child(cc_argv, build_dir, &limits, true,
                                      rules, n_rules, env,
                                      PV_COMPILE_TIMEOUT_MS);
+    int wedged = pv_report_process_failure(&run, "zbuild-error", true);
+    if (wedged) {
+        (void)unlink(output);
+        return wedged;
+    }
     if (!run.launched || run.timed_out || run.sandbox_fail || !run.exited ||
         run.exit_code != 0) {
         fprintf(stdout, "zbuild-error=%s exit=%d signal=%d diagnostics=%.512s\n",
@@ -2643,6 +2793,16 @@ static int pv_zbuild_test_mode(int argc, char **argv)
     struct pv_run run = pv_run_child(
         test_argv, build_dir, &limits, true, rules, n_rules, env,
         PV_ZBUILD_TEST_TIMEOUT_MS);
+    /* Untrusted child: never sniff its stderr for a wedge (trusted_child
+     * false). A SUBTREE over budget is real evidence about this binary and
+     * is written as a fail verdict below; only the pre-fork host refusal
+     * short-circuits, because then nothing ran and there is no evidence. */
+    if (run.headroom_exhausted) {
+        int wedged = pv_report_process_failure(
+            &run, "zbuild-test-error", false);
+        (void)unlink(output);
+        return wedged;
+    }
     if (!run.launched || run.sandbox_fail ||
         !pv_zbuild_test_write_evidence(output, &run)) {
         (void)unlink(output);
@@ -2781,6 +2941,9 @@ static int pv_zbuild_fuzz_mode(int argc, char **argv)
         struct pv_run run = pv_run_child(
             fuzz_argv, build_dir, &limits, true, rules, n_rules, env,
             per_seed_timeout);
+        /* See the test-mode note: a host refusal is not fuzz evidence. */
+        if (run.headroom_exhausted)
+            return pv_report_process_failure(&run, "zbuild-fuzz-error", false);
         if (!run.launched || run.sandbox_fail) return 5;
         uint8_t meta[8];
         zcl_write_u32_le(meta, seed);
