@@ -1189,3 +1189,13 @@ AGENT_IMPACT_RULE("tools/lint/check_no_unattended_publish.sh", "make_lint_gates"
  * above). These are public docs subject to the same doc-accuracy,
  * no-stale-pinned-facts, no-operator-paths, and markdown-link lint gates. */
 AGENT_IMPACT_RULE("docs/ARCHITECTURE_DIAGRAMS.md|docs/ARCH_QUEST_BOARD.md|docs/DEVELOPING.md", "make_lint_gates")
+/* LANE seed-bootstrap-doors: the ways a cold node can reach the network at
+ * all. The chainparams seed arrays, the onion-directory bootstrap pass that
+ * walks them (plus the operator seed file and this node's own learned
+ * directory), and the store that reader reads. They move together: adding a
+ * seed without re-running the door checks is how a dead address ships, and
+ * changing the reader's freshness or ranking rule without them is how hearsay
+ * quietly displaces a contact we measured. Mapped to the group that owns the
+ * assertions, so a seed edit can never reach the push gate having run zero
+ * test groups — which is exactly how the last three dead seeds got in. */
+AGENT_IMPACT_RULE("core/chainparams/src/chainparams.c|lib/net/src/connman.c|lib/net/src/onion_directory.c|lib/net/include/net/onion_service.h|lib/test/src/test_seed_bootstrap_doors.c", "seed_bootstrap_doors")
