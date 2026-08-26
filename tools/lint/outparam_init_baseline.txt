@@ -79,6 +79,11 @@ read_block|out|ldb_block
 reindex_chainstate|cvtip|coins_view_cache
 
 # ── app/ ────────────────────────────────────────────────────────────────
+# bg_validation_read_body_resilient(): `block` is caller-owned in/out
+# storage. Every production and test caller block_init()s it before the call;
+# the retry path frees and reinitializes that live storage, while an early
+# argument/shutdown refusal leaves ownership with the caller.
+bg_validation_read_body_resilient|block|block
 # Two rawtx lookup helpers return early (negative node-db locator, block-hash
 # mismatch against the active chain) above transaction_init(tx). Their single
 # caller, rpc_getrawtransaction, runs transaction_init(&tx) at the top of its

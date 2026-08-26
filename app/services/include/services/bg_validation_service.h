@@ -160,6 +160,8 @@ enum bg_validation_block_outcome bg_validation_validate_canonical_block(
     const struct chain_params *params, int num_workers,
     size_t max_script_batch, int64_t *sigs_out, int64_t *proofs_out,
     int64_t *skips_out);
+/* `block` is caller-initialized in/out storage and remains caller-owned on
+ * every return; see the sibling-private declaration for the retry contract. */
 bool bg_validation_read_body_resilient(
     struct bg_validation_service *svc, int height, const char *datadir,
     enum bg_validation_state ready_state, struct block *block,

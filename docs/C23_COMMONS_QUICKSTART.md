@@ -72,7 +72,7 @@ in [`JOIN.md`](JOIN.md).
 Then inspect join status and the live DHT:
 
 ```bash
-z23 zcode package offered
+z23 zcode package offered -datadir=/tmp/z23-commons
 z23 zcode package guide
 z23 zcode network status -datadir=/tmp/z23-commons
 ```

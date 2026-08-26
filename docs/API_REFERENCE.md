@@ -74,15 +74,15 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 731 |
+| Registry entries (branches + leaves) | 732 |
 | Top-level roots | 12 |
 | Branches | 170 |
-| Leaves (dispatchable command paths) | 561 |
-| … `ready` (live handler in this build) | 505 |
+| Leaves (dispatchable command paths) | 562 |
+| … `ready` (live handler in this build) | 506 |
 | … `compat` (metadata only, names a fallback) | 25 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 24 |
-| Leaves with `effect=mutate` | 195 |
+| Leaves with `effect=mutate` | 196 |
 | Leaves with `effect=destructive` | 4 |
 | Leaves requiring **owner** authority | 112 |
 
@@ -100,7 +100,7 @@ Per source file:
 | `config/commands/code.def` | 17 | 2 | 15 |
 | `config/commands/accounts.def` | 11 | 2 | 9 |
 | `config/commands/vault.def` | 24 | 4 | 20 |
-| `config/commands/zcode.def` | 234 | 56 | 178 |
+| `config/commands/zcode.def` | 235 | 56 | 179 |
 | `config/commands/zcode_science.def` | 25 | 7 | 18 |
 | `config/commands/metaverse.def` | 30 | 7 | 23 |
 | `config/commands/yardsale.def` | 7 | 2 | 5 |
@@ -1433,6 +1433,7 @@ represented by its children's sections.
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
 | `zcode node join` (aliases: `join`) | ready | mutate / app-write / operator · foreground/moderate | `datadir` | `zcl.zcode_node_join.v1` | `z23 join` | Join this node to the C23 network |
+| `zcode node verify` | ready | mutate / app-write / operator · background/high | `artifact`, `source_dir`, `scratch_dir`, `profile`, `jobs`, `timeout_seconds` | `zcl.zcode_node_verify.v1` | `z23 zcode node verify --input='{"source_dir":"/path/to/zclassic23"}'` | Rebuild this node here and compare bytes |
 
 #### `zcode.node.update` — Node self-update
 

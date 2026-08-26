@@ -20,9 +20,12 @@ struct block;
 struct block_index;
 struct chain_params;
 
-/* Read one exact active-chain body. A torn or falsely flagged disk position
- * enters the shared condition-driven repair rail and is retried at the same
- * height until a hash-verified replacement is readable or shutdown begins. */
+/* Read one exact active-chain body. `block` is caller-initialized in/out
+ * storage: the retry path frees and reinitializes it, while an argument or
+ * shutdown refusal leaves its existing ownership unchanged. A torn or falsely
+ * flagged disk position enters the shared condition-driven repair rail and is
+ * retried at the same height until a hash-verified replacement is readable or
+ * shutdown begins. */
 bool bg_validation_read_body_resilient(
     struct bg_validation_service *svc, int height, const char *datadir,
     enum bg_validation_state ready_state, struct block *block,
