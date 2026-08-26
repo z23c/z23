@@ -86,6 +86,12 @@ struct file_offer {
     uint8_t  offer_id[32];       /* SHA3 of the complete signed wire */
 };
 
+/* A content root belongs to its first accepted listing. Signed refreshes
+ * retain that seller; unsigned legacy refreshes may change only transport
+ * freshness fields. */
+bool file_market_offer_can_replace(const struct file_offer *existing,
+                                   const struct file_offer *candidate);
+
 enum file_offer_auth_error {
     FILE_OFFER_AUTH_OK = 0,
     FILE_OFFER_AUTH_ERR_NULL,
@@ -163,7 +169,12 @@ enum file_market_offer_ingest {
     FILE_MARKET_INGEST_INVALID,
     FILE_MARKET_INGEST_EXPIRED,
     FILE_MARKET_INGEST_RATE_LIMITED,
+    FILE_MARKET_INGEST_CONFLICT,
+    FILE_MARKET_INGEST_PERSIST_FAILED,
 };
+
+typedef bool (*file_market_offer_persist_fn)(
+    const struct file_offer *offer, void *ctx);
 
 /* Verify a paid offer before it enters cache/persistence. The exact signed
  * wire is network-bound, expiry-checked, deduplicated, and peer-rate-limited.
@@ -172,6 +183,15 @@ enum file_market_offer_ingest file_market_ingest_offer_wire(
     const uint8_t *wire, size_t wire_len,
     const uint8_t expected_network_genesis[32],
     int64_t peer_id, int64_t now_unix, struct file_offer *out_offer);
+
+/* The network ingress uses this form so persistence succeeds before the
+ * cache changes or the wire becomes relay-eligible. The callback runs while
+ * the bounded offer-cache lock is held and must not call file-market APIs. */
+enum file_market_offer_ingest file_market_ingest_offer_wire_persist(
+    const uint8_t *wire, size_t wire_len,
+    const uint8_t expected_network_genesis[32],
+    int64_t peer_id, int64_t now_unix, struct file_offer *out_offer,
+    file_market_offer_persist_fn persist, void *persist_ctx);
 
 /* ── Chunk Challenge ────────────────────────────────────────────── */
 

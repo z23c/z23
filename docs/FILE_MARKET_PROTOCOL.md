@@ -5,9 +5,12 @@ The seller-authenticated offer ingress, durable buyer payment plan/commit, and
 exact confirmed-payment authority are implemented. The encrypted `zfileget.v3`
 request, encrypted paid-chunk channel, and authorize-before-read gate are
 implemented. `file_offers` is keyed by content root, and the root belongs to
-its first accepted listing: only the same seller may rewrite a signed
-listing, and unsigned legacy rows accept only byte-identical refreshes, so a
-peer holding identical bytes can never re-key someone else's listing.
+its first accepted listing: only a strictly newer `(issued_unix, nonce)`
+contract from the same
+seller may rewrite a signed listing, and unsigned legacy rows accept only
+transport-freshness refreshes. Cache, persistence, and relay admission share
+that rule, so a peer holding identical bytes cannot re-key or replay stale
+terms over someone else's listing.
 Owner-private paid-content registration and verified chunk
 loading are implemented. Local paid-offer signing/announcement remains
 deliberately unavailable. The buyer client

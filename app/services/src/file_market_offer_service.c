@@ -278,6 +278,20 @@ struct zcl_result file_market_offer_commit(
     offer.nonce = nonce & (uint64_t)INT64_MAX;
     if (offer.nonce == 0)
         offer.nonce = 1;
+    struct file_offer previous;
+    if (db_file_offer_find(rt->node_db, offer.root_hash, &previous) &&
+        previous.auth_version >= FILE_MARKET_OFFER_VERSION &&
+        memcmp(previous.seller_pubkey, offer.seller_pubkey,
+               sizeof(previous.seller_pubkey)) == 0 &&
+        previous.issued_unix == rt->now_unix &&
+        offer.nonce <= previous.nonce) {
+        if (previous.nonce == (uint64_t)INT64_MAX) {
+            memory_cleanse(seed, sizeof(seed));
+            return ZCL_ERR(MARKET_OFFER_ERR_SEAL,
+                           "same-second offer sequence is exhausted");
+        }
+        offer.nonce = previous.nonce + 1;
+    }
     offer.issued_unix = rt->now_unix;
     offer.expires_unix = rt->now_unix + FILE_MARKET_OFFER_MAX_LIFETIME_SECS;
 

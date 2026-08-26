@@ -639,6 +639,7 @@ int file_market_purchase_tests(void)
         onion_offer.peer_port = 0;
         onion_offer.auth_version = FILE_MARKET_OFFER_VERSION_V2;
         onion_offer.endpoint_type = FILE_MARKET_ENDPOINT_ONION;
+        onion_offer.nonce++;
         memset(onion_offer.onion_pubkey, 0xab,
                sizeof(onion_offer.onion_pubkey));
         onion_ready = file_offer_auth_seal(&onion_offer, onion_seed) ==

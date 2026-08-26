@@ -94,31 +94,10 @@ bool db_file_offer_save(struct node_db *ndb,
      * metadata. The root belongs to its first accepted listing: only the
      * same seller may rewrite a signed listing, and unsigned legacy rows
      * accept only byte-identical refreshes (last_seen, port, ttl). */
-    struct file_offer existing;
-    if (db_file_offer_find(ndb, offer->root_hash, &existing)) {
-        bool identical_unsigned_refresh =
-            existing.auth_version == 0 && offer->auth_version == 0 &&
-            strcmp(existing.filename, offer->filename) == 0 &&
-            existing.size_bytes == offer->size_bytes &&
-            existing.num_chunks == offer->num_chunks &&
-            existing.price_per_mb == offer->price_per_mb &&
-            memcmp(existing.z_addr, offer->z_addr,
-                   sizeof(existing.z_addr)) == 0;
-        bool same_seller_update =
-            existing.auth_version >= FILE_MARKET_OFFER_VERSION &&
-            offer->auth_version >= FILE_MARKET_OFFER_VERSION &&
-            memcmp(existing.seller_pubkey, offer->seller_pubkey,
-                   sizeof(existing.seller_pubkey)) == 0;
-        if (!identical_unsigned_refresh && !same_seller_update) {
-            LOG_FAIL("market",
-                     "file_offers listing takeover refused on root conflict");
-            return false;
-        }
-    }
-
     struct ar_callbacks *cbs = db_file_offer_callbacks();
     sqlite3_stmt *s = NULL;
-    AR_ADHOC_SAVE(ndb, s,
+    AR_BEGIN_SAVE(cbs, "file_offer", offer, db_file_offer_validate);
+    AR_PREPARE_BOOL(ndb, s,
         "INSERT OR REPLACE INTO file_offers"
         "(root_hash,filename,size_bytes,num_chunks,price_per_mb,"
         "z_addr,peer_ip,peer_port,last_seen,ttl,auth_version,"
@@ -136,29 +115,64 @@ bool db_file_offer_save(struct node_db *ndb,
         "issued_unix=excluded.issued_unix,expires_unix=excluded.expires_unix,"
         "seller_signature=excluded.seller_signature,offer_id=excluded.offer_id,"
         "endpoint_type=excluded.endpoint_type,"
-        "onion_pubkey=excluded.onion_pubkey",
-        cbs, "file_offer", offer, db_file_offer_validate,
-        AR_BIND_BLOB(s, 1, offer->root_hash, 32);
-        AR_BIND_TEXT(s, 2, offer->filename);
-        AR_BIND_INT(s, 3, (int64_t)offer->size_bytes);
-        AR_BIND_INT(s, 4, offer->num_chunks);
-        AR_BIND_INT(s, 5, offer->price_per_mb);
-        AR_BIND_BLOB(s, 6, offer->z_addr, 43);
-        AR_BIND_BLOB(s, 7, offer->peer_ip, 16);
-        AR_BIND_INT(s, 8, offer->peer_port);
-        AR_BIND_INT(s, 9, offer->last_seen
-            ? offer->last_seen : (int64_t)platform_time_wall_time_t());
-        AR_BIND_INT(s, 10, offer->ttl);
-        AR_BIND_INT(s, 11, offer->auth_version);
-        AR_BIND_BLOB(s, 12, offer->network_genesis, 32);
-        AR_BIND_BLOB(s, 13, offer->seller_pubkey, 32);
-        AR_BIND_INT(s, 14, (int64_t)offer->nonce);
-        AR_BIND_INT(s, 15, offer->issued_unix);
-        AR_BIND_INT(s, 16, offer->expires_unix);
-        AR_BIND_BLOB(s, 17, offer->seller_signature, 64);
-        AR_BIND_BLOB(s, 18, offer->offer_id, 32);
-        AR_BIND_INT(s, 19, offer->endpoint_type);
-        AR_BIND_BLOB(s, 20, offer->onion_pubkey, 32));
+        "onion_pubkey=excluded.onion_pubkey "
+        "WHERE (file_offers.auth_version>=1 AND excluded.auth_version>=1 "
+        "AND file_offers.seller_pubkey=excluded.seller_pubkey "
+        "AND (file_offers.offer_id=excluded.offer_id "
+        "OR excluded.issued_unix>file_offers.issued_unix "
+        "OR (excluded.issued_unix=file_offers.issued_unix "
+        "AND excluded.nonce>file_offers.nonce))) OR "
+        "(file_offers.auth_version=0 AND excluded.auth_version=0 "
+        "AND file_offers.filename=excluded.filename "
+        "AND file_offers.size_bytes=excluded.size_bytes "
+        "AND file_offers.num_chunks=excluded.num_chunks "
+        "AND file_offers.price_per_mb=excluded.price_per_mb "
+        "AND file_offers.z_addr=excluded.z_addr "
+        "AND file_offers.peer_ip=excluded.peer_ip "
+        "AND file_offers.endpoint_type=excluded.endpoint_type "
+        "AND file_offers.onion_pubkey=excluded.onion_pubkey "
+        "AND file_offers.network_genesis=excluded.network_genesis "
+        "AND file_offers.seller_pubkey=excluded.seller_pubkey "
+        "AND file_offers.nonce=excluded.nonce "
+        "AND file_offers.issued_unix=excluded.issued_unix "
+        "AND file_offers.expires_unix=excluded.expires_unix "
+        "AND file_offers.seller_signature=excluded.seller_signature "
+        "AND file_offers.offer_id=excluded.offer_id) RETURNING 1");
+    AR_BIND_BLOB(s, 1, offer->root_hash, 32);
+    AR_BIND_TEXT(s, 2, offer->filename);
+    AR_BIND_INT(s, 3, (int64_t)offer->size_bytes);
+    AR_BIND_INT(s, 4, offer->num_chunks);
+    AR_BIND_INT(s, 5, offer->price_per_mb);
+    AR_BIND_BLOB(s, 6, offer->z_addr, 43);
+    AR_BIND_BLOB(s, 7, offer->peer_ip, 16);
+    AR_BIND_INT(s, 8, offer->peer_port);
+    AR_BIND_INT(s, 9, offer->last_seen
+        ? offer->last_seen : (int64_t)platform_time_wall_time_t());
+    AR_BIND_INT(s, 10, offer->ttl);
+    AR_BIND_INT(s, 11, offer->auth_version);
+    AR_BIND_BLOB(s, 12, offer->network_genesis, 32);
+    AR_BIND_BLOB(s, 13, offer->seller_pubkey, 32);
+    AR_BIND_INT(s, 14, (int64_t)offer->nonce);
+    AR_BIND_INT(s, 15, offer->issued_unix);
+    AR_BIND_INT(s, 16, offer->expires_unix);
+    AR_BIND_BLOB(s, 17, offer->seller_signature, 64);
+    AR_BIND_BLOB(s, 18, offer->offer_id, 32);
+    AR_BIND_INT(s, 19, offer->endpoint_type);
+    AR_BIND_BLOB(s, 20, offer->onion_pubkey, 32);
+
+    bool saved = AR_STEP_ROW(s) && sqlite3_column_int(s, 0) == 1;
+    bool completed = saved ? AR_STEP_DONE(s) :
+        sqlite3_errcode(ndb->db) == SQLITE_OK;
+    if (!completed) {
+        LOG_ERROR("market", "file_offers atomic save failed: error=%s",
+                  sqlite3_errmsg(ndb->db));
+        saved = false;
+    }
+    AR_FINALIZE(s);
+    if (!saved)
+        LOG_WARN("market",
+                 "file_offers listing update refused by atomic root policy");
+    AR_FINISH_SAVE(cbs, offer, saved);
 }
 
 static bool row_to_file_offer(sqlite3_stmt *s, struct file_offer *out)
