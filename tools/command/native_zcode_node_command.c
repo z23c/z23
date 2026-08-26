@@ -67,17 +67,41 @@ static void znj_fail(struct zcl_command_reply *reply, const char *code,
 /* First line of `<compiler> --version`, or NULL, but only after that same
  * driver successfully enters strict C23 mode. A version banner proves that
  * a program exists; it does not prove the node can fulfill C23 build work.
+ * The C23 probe compiles a one-declaration translation unit under `workdir`
+ * rather than `/dev/null`: `-pedantic-errors` rejects an empty TU, which
+ * used to report no compiler on hosts whose driver just built this tree.
  * argv[0] is resolved by execvp's PATH search; no shell is involved. */
-static const char *znj_detect_compiler(char *version, size_t version_cap)
+static const char *znj_detect_compiler(const char *workdir, char *version,
+                                       size_t version_cap)
 {
     static const char *const drivers[] = { "cc", "gcc" };
+    const char *found = NULL;
     if (version && version_cap)
         version[0] = '\0';
+    if (!workdir || !workdir[0])
+        return NULL;
+
+    char probe_path[4700];
+    int pn = snprintf(probe_path, sizeof(probe_path),
+                      "%s/.z23-join-c23-probe.c", workdir);
+    if (pn <= 0 || (size_t)pn >= sizeof(probe_path))
+        return NULL;
+    FILE *pf = fopen(probe_path, "we");
+    if (!pf)
+        return NULL;
+    bool wrote = fputs("typedef int z23_c23_probe;\n", pf) >= 0;
+    if (fclose(pf) != 0)
+        wrote = false;
+    if (!wrote) {
+        (void)unlink(probe_path);
+        return NULL;
+    }
+
     for (size_t i = 0; i < sizeof(drivers) / sizeof(drivers[0]); i++) {
         const char *argv[] = { drivers[i], "--version", NULL };
         const char *probe_argv[] = {
             drivers[i], "-std=c23", "-pedantic-errors", "-fsyntax-only",
-            "-x", "c", "/dev/null", NULL,
+            "-x", "c", probe_path, NULL,
         };
         char out[512];
         if (zcl_spawn_capture(argv, out, sizeof(out), 10000) != 0 || !out[0])
@@ -91,9 +115,11 @@ static const char *znj_detect_compiler(char *version, size_t version_cap)
             continue;
         if (version && version_cap)
             snprintf(version, version_cap, "%s", out);
-        return drivers[i];
+        found = drivers[i];
+        break;
     }
-    return NULL;
+    (void)unlink(probe_path);
+    return found;
 }
 
 /* `line` is already trimmed of its newline. Recognises every spelling
@@ -305,7 +331,8 @@ void zcl_native_handle_zcode_node_join(
 
     char compiler_version[256];
     const char *compiler =
-        znj_detect_compiler(compiler_version, sizeof(compiler_version));
+        znj_detect_compiler(datadir, compiler_version,
+                            sizeof(compiler_version));
 
     char why[256] = {0};
     bool changed = false;

@@ -292,6 +292,22 @@ static int t_join_writes_config(void)
     ZNJ_CHECK("the config file exists after join", text != NULL);
     ZNJ_CHECK("packagehost=1 is written unconditionally",
               znt_has_line(text, "packagehost=1"));
+    /* This group only runs after the tree compiled as C23, so a working
+     * driver is on PATH. Probing `/dev/null` with -pedantic-errors rejects
+     * an empty translation unit and used to report compiler_present=false
+     * / buildworker=0 on exactly those hosts — advertising no compile
+     * capacity the box can deliver. The handler itself is the detector. */
+    ZNJ_CHECK("join reports compiler_present on a host that built this C23 tree",
+              compiler_present);
+    ZNJ_CHECK("join writes buildworker=1 rather than a false empty-TU 0",
+              znt_has_line(text, "buildworker=1"));
+    {
+        char probe[512];
+        struct stat probe_st;
+        snprintf(probe, sizeof(probe), "%s/.z23-join-c23-probe.c", dd);
+        ZNJ_CHECK("the C23 probe source is not left in the datadir",
+                  stat(probe, &probe_st) != 0);
+    }
     /* The one claim that must never drift: what the reply SAYS about the
      * compiler and what the file DOES about the worker are the same fact. */
     ZNJ_CHECK("buildworker agrees with the reported compiler",
