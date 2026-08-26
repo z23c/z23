@@ -969,6 +969,7 @@ add/remove a gate.
 - `check-no-operator-paths`
 - `check-no-unattended-publish`
 - `check-zcc-cache`
+- `check-tu-random-seed`
 - `check-equihash-params`
 <!-- LINT-GATES-END -->
 
@@ -1011,6 +1012,53 @@ manifests, and rejects duplicate tracked notebook paths. Reproducible simnet
 evidence and public consensus fixtures remain allowed in the canonical broad
 lab baseline. Both recorders independently refuse any ledger path inside the
 repository, even when a developer supplies an environment override.
+
+### `check-tu-random-seed` and `make repro-build` — the build repeats
+
+A node states which source it is running in its version handshake. That
+statement is only worth anything if a second person holding the same source can
+rebuild the same bytes and compare. Two things keep that true.
+
+`check-tu-random-seed` (`tools/lint/check_tu_random_seed.sh`) is the cheap
+guard, and it runs in `make lint`. GCC derives its default random seed from the
+name of the object file it is writing. Every object in this tree is compiled
+into a fresh temporary staging directory and published atomically, so that name
+— and therefore the seed — differed on every single compile. Under `-flto` the
+seed becomes the `.gnu.lto_*.<suffix>` section-name suffix, and the shipped
+profile's objects stopped repeating even twice in the same directory. Measured
+on GCC 14.2 over a representative sample of node translation units at the
+shipped release flags: with the default seed every sampled object differed
+between two compiles of unchanged source, and the object *size* moved too,
+because GCC trims leading zeros from that suffix. With `$(ZCL_TU_RANDOM_SEED)`
+pinning the seed to the relative source path, none did. The gate requires every
+per-TU object recipe to carry that flag and requires the seed to be per-TU; the
+coverage recipe is the one exemption, because gcov pairs a `.gcno` note with
+the object that will emit the `.gcda`, and the gate asserts that exemption is
+the only one.
+
+`make repro-build` (`tools/scripts/repro_build.sh`) is the end-to-end proof.
+It is opt-in — three whole-program LTO builds — and it reports four properties
+separately rather than collapsing them into one verdict:
+
+| | property | status |
+|---|---|---|
+| P1 | `build/bin/z23` identical across two builders at different absolute paths | asserted |
+| P2 | `build/bin/z23.debug` identical across the same two builders | asserted |
+| P3 | every per-TU object identical when one directory builds twice | asserted |
+| N1 | per-TU objects identical across two directories | **not** asserted |
+
+N1 is printed on success as well as on failure, with the measured count of
+objects that differ. GCC streams absolute source and header paths into the
+`.gnu.lto_*` IR and `-ffile-prefix-map` does not reach inside it; there is no
+GCC 14 flag that fixes it. It does not touch P1 or P2, because that IR is
+consumed at link time and never reaches the shipped output — which is why P1
+measures the shipped artifact directly instead of inferring it from the
+intermediates. A gate that quietly narrowed its scope to whatever happened to
+pass would not be evidence, so this one names what it cannot prove.
+
+`make repro-verify` remains the two-builder gate for the shipped binary alone;
+`make ci-reproducible` builds twice in one source directory under the release
+flag profile shared with `tools/release.sh`.
 
 ---
 

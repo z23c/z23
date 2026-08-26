@@ -1210,3 +1210,12 @@ AGENT_IMPACT_RULE("core/chainparams/src/chainparams.c|lib/net/src/connman.c|lib/
  * and softening the boot gate without the group would let the node advance
  * CRYPTO_READY on keys that never passed their digest. */
 AGENT_IMPACT_RULE("lib/sapling/src/params_vk_embedded.c|lib/sapling/include/sapling/params_vk_embedded.h|lib/sapling/src/params_init.c|lib/test/src/test_params_vk_embedded.c|config/src/boot_params_gate.c|config/include/config/boot_params_gate.h|tools/scripts/zcash_params.sh|docs/PARAMS.md", "params_vk_embedded")
+/* LANE reproducible-build: the flag that makes a compile repeat, the gate that
+ * keeps it wired, and the end-to-end proof that a second builder gets the same
+ * bytes. They move together because each one is half of the same claim: a node
+ * announces its source id on the wire, and that announcement is only checkable
+ * if the same source rebuilds to the same binary. Removing the per-TU random
+ * seed without the gate, or narrowing the proof script without the lint gate
+ * noticing, would leave the claim standing with nothing behind it. Mapped to
+ * the lint-gate group that owns the Makefile-vs-docs parity assertions. */
+AGENT_IMPACT_RULE("tools/scripts/repro_build.sh|tools/scripts/repro-verify.sh|tools/lint/check_tu_random_seed.sh|docs/DEFENSIVE_CODING.md", "make_lint_gates")
