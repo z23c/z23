@@ -407,7 +407,9 @@ vcs_zcode_dht_service_record_publish_commit(
 
 /* STORAGE_ACK has a separate authorship path. Both plan and commit require a
  * complete, pinned package and re-hash its manifest and every chunk. Generic
- * publication cannot author an ACK. */
+ * publication cannot author an ACK. These two run the service calls INSIDE
+ * the package store's possession section; never call them while holding the
+ * service lock — use the _verified pair below instead. */
 bool vcs_zcode_dht_service_storage_ack_plan(
     struct vcs_zcode_dht_service *service,
     struct vcs_package_store *package_store,

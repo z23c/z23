@@ -275,6 +275,11 @@ static void storage_ack_plan_apply(void *opaque, bool current)
         apply->service, apply->spec, apply->plan_token, apply->record_out);
 }
 
+/* Lock order: this wrapper (and its commit twin below) takes the package
+ * store's possession section and calls INTO the service from inside it —
+ * the opposite of the composition root, which takes the service lock first.
+ * Only tests call these today; a production caller that already holds the
+ * service lock must use the _verified entry points instead. */
 bool vcs_zcode_dht_service_storage_ack_plan(
     struct vcs_zcode_dht_service *service,
     struct vcs_package_store *package_store,
