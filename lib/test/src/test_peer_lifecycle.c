@@ -128,8 +128,8 @@ static int test_peer_lifecycle_user_agent(void)
          * a token naming a build it cannot name. Either way the string is
          * fixed by the build, never by anything at run time. */
         if (lifecycle_id_is_exact_hex64(baked))
-            snprintf(expect, sizeof(expect), "/ZClassic23:0.1.0(src:%s)/",
-                     baked);
+            snprintf(expect, sizeof(expect), "/ZClassic23:0.1.0(src:%.*s)/",
+                     ZCL_BUILD_IDENTITY_PREFIX_HEX_LEN, baked);
         else
             snprintf(expect, sizeof(expect), "/ZClassic23:0.1.0/");
 
@@ -141,16 +141,18 @@ static int test_peer_lifecycle_user_agent(void)
 
         /* The published token round-trips through the peer-side reader that
          * every OTHER node uses to learn what we run. */
-        char parsed[ZCL_BUILD_IDENTITY_BUFSIZE];
+        char parsed[ZCL_BUILD_IDENTITY_PREFIX_BUFSIZE];
         char local[ZCL_BUILD_IDENTITY_BUFSIZE];
         bool have_local = msg_version_local_build_identity(local,
                                                            sizeof(local));
         ASSERT(have_local == lifecycle_id_is_exact_hex64(baked));
-        ASSERT(msg_version_parse_build_identity(ua, parsed, sizeof(parsed)) ==
+        ASSERT(msg_version_parse_build_identity_prefix(ua, parsed,
+                                                       sizeof(parsed)) ==
                have_local);
         if (have_local) {
             ASSERT(strcmp(local, baked) == 0);
-            ASSERT(strcmp(parsed, baked) == 0);
+            ASSERT(strncmp(parsed, baked,
+                           ZCL_BUILD_IDENTITY_PREFIX_HEX_LEN) == 0);
         } else {
             ASSERT(local[0] == '\0');
             ASSERT(parsed[0] == '\0');

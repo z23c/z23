@@ -28,13 +28,16 @@ void msg_version_clear_external_ip_for_test(void);
 #endif
 /* ── Published build identity ──────────────────────────────────────────
  *
- * A node states which build it is running by appending a `(src:<64 hex>)`
+ * A node states which build family it is running by appending a stable
+ * `(src:<12 hex>)` source-identity prefix
  * comment to its P2P subversion string, e.g.
  *
- *     /ZClassic23:0.1.0(src:3f2a...c1)/
+ *     /ZClassic23:0.1.0(src:3f2a91c8d507)/
  *
- * The value is zcl_build_source_id_sha256() — the SHA-256 the build system
- * baked into this executable from the source tree that produced it. It is a
+ * The value is the first 12 hexadecimal digits of
+ * zcl_build_source_id_sha256() — the SHA-256 the build system baked into this
+ * executable from the source tree that produced it. The full value remains
+ * available through machine-readable local binary identity. The prefix is a
  * compile-time constant: no environment variable, config file, or RPC can
  * change what a running node publishes. It is also content-only (relative
  * paths, file modes, file digests), so it names a BUILD and never an
@@ -56,15 +59,18 @@ void msg_version_clear_external_ip_for_test(void);
  * is to run a build other people also run — never a switch that lets a node
  * claim one, which would turn this field from a fact into a lie.
  *
- * All three entry points below are thread-safe and never allocate or log.
- * The two readers are pure; msg_version_user_agent() returns a pointer to a
+ * All four entry points below are thread-safe and never allocate or log.
+ * The three readers are pure; msg_version_user_agent() returns a pointer to a
  * buffer formatted exactly once under pthread_once and never mutated after,
  * so it is safe to call from any thread at any point in the handshake. */
 #define ZCL_BUILD_IDENTITY_HEX_LEN 64
 #define ZCL_BUILD_IDENTITY_BUFSIZE (ZCL_BUILD_IDENTITY_HEX_LEN + 1)
+#define ZCL_BUILD_IDENTITY_PREFIX_HEX_LEN 12
+#define ZCL_BUILD_IDENTITY_PREFIX_BUFSIZE \
+    (ZCL_BUILD_IDENTITY_PREFIX_HEX_LEN + 1)
 
 /* The subversion string this node advertises in every version message. It is
- * "/ZClassic23:0.1.0(src:<64 hex>)/" when this binary carries an exact baked
+ * "/ZClassic23:0.1.0(src:<12 hex>)/" when this binary carries an exact baked
  * source identity, and the bare "/ZClassic23:0.1.0/" when it does not (an
  * unstamped standalone build). Never NULL; always shorter than
  * MAX_SUBVERSION_LENGTH. */
@@ -76,7 +82,8 @@ const char *msg_version_user_agent(void);
  * A false return is "this build is not stamped", never an error. */
 bool msg_version_local_build_identity(char *out, size_t outlen);
 
-/* Read a PEER's published build identity out of the subversion string it sent.
+/* Read a PEER's legacy full build identity out of the subversion string it
+ * sent.
  * Returns true and writes 64 lowercase hex + NUL into `out` when the peer
  * published a well-formed identity; returns false and writes "" when it did
  * not — an absent, empty, or malformed token is "unknown", which is a normal
@@ -87,6 +94,12 @@ bool msg_version_local_build_identity(char *out, size_t outlen);
  * tools/scripts/source_identity_lib.sh documents for the JSON reader). */
 bool msg_version_parse_build_identity(const char *subver, char *out,
                                       size_t outlen);
+
+/* Read the compact source prefix a peer publishes. The current 12-hex wire
+ * form is accepted directly; the first 12 digits of the legacy 64-hex form
+ * are also returned so mixed-version fleets remain comparable. */
+bool msg_version_parse_build_identity_prefix(const char *subver, char *out,
+                                             size_t outlen);
 
 bool msg_version_classify_peer(const char *subver, uint64_t services,
                                bool *is_magicbean, bool *is_zcl23);

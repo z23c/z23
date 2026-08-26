@@ -164,10 +164,10 @@ void msg_version_clear_external_ip_for_test(void)
 #define ZCL_BUILD_ID_OPEN "(src:"
 #define ZCL_BUILD_ID_OPEN_LEN (sizeof(ZCL_BUILD_ID_OPEN) - 1)
 
-/* The stamped form is 88 bytes; both forms must fit the wire field a peer
+/* The stamped form is compact; both forms must fit the wire field a peer
  * reads them back into. Pin the bound instead of trusting it. */
 _Static_assert(sizeof(ZCL_PRODUCT_UA_BASE ZCL_BUILD_ID_OPEN ")/") +
-                   ZCL_BUILD_IDENTITY_HEX_LEN <= MAX_SUBVERSION_LENGTH,
+                   ZCL_BUILD_IDENTITY_PREFIX_HEX_LEN <= MAX_SUBVERSION_LENGTH,
                "advertised subversion must fit MAX_SUBVERSION_LENGTH");
 
 /* Exactly ZCL_BUILD_IDENTITY_HEX_LEN lowercase hex characters starting at
@@ -210,7 +210,8 @@ static void advertised_subver_init_once(void)
      * malformed identity can never inject a '/' or ')' into the string. */
     if (msg_version_local_build_identity(id, sizeof(id)))
         snprintf(g_advertised_subver, sizeof(g_advertised_subver),
-                 ZCL_PRODUCT_UA_BASE ZCL_BUILD_ID_OPEN "%s)/", id);
+                 ZCL_PRODUCT_UA_BASE ZCL_BUILD_ID_OPEN "%.*s)/",
+                 ZCL_BUILD_IDENTITY_PREFIX_HEX_LEN, id);
     else
         snprintf(g_advertised_subver, sizeof(g_advertised_subver),
                  ZCL_PRODUCT_UA_BASE "/");
@@ -258,6 +259,45 @@ bool msg_version_parse_build_identity(const char *subver, char *out,
             continue;
         memcpy(out, hex, ZCL_BUILD_IDENTITY_HEX_LEN);
         out[ZCL_BUILD_IDENTITY_HEX_LEN] = '\0';
+        return true;
+    }
+    return false;
+}
+
+bool msg_version_parse_build_identity_prefix(const char *subver, char *out,
+                                             size_t outlen)
+{
+    const char *scan;
+
+    if (!out || outlen < ZCL_BUILD_IDENTITY_PREFIX_BUFSIZE)
+        return false;
+    out[0] = '\0';
+    if (!subver)
+        return false;
+
+    for (scan = strstr(subver, ZCL_BUILD_ID_OPEN); scan != NULL;
+         scan = strstr(scan + 1, ZCL_BUILD_ID_OPEN)) {
+        const char *hex = scan + ZCL_BUILD_ID_OPEN_LEN;
+        size_t remaining = strlen(hex);
+        bool prefix_is_hex = true;
+        if (remaining <= ZCL_BUILD_IDENTITY_PREFIX_HEX_LEN)
+            continue;
+        for (size_t i = 0; i < ZCL_BUILD_IDENTITY_PREFIX_HEX_LEN; i++) {
+            char c = hex[i];
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+                prefix_is_hex = false;
+                break;
+            }
+        }
+        if (!prefix_is_hex)
+            continue;
+        if (hex[ZCL_BUILD_IDENTITY_PREFIX_HEX_LEN] != ')' &&
+            !(remaining > ZCL_BUILD_IDENTITY_HEX_LEN &&
+              build_identity_hex_run(hex) &&
+              hex[ZCL_BUILD_IDENTITY_HEX_LEN] == ')'))
+            continue;
+        memcpy(out, hex, ZCL_BUILD_IDENTITY_PREFIX_HEX_LEN);
+        out[ZCL_BUILD_IDENTITY_PREFIX_HEX_LEN] = '\0';
         return true;
     }
     return false;

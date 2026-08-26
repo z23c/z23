@@ -163,7 +163,7 @@ int t_canonical_deploy_proof_binding_contract(void)
          * refused — absence must never become a deploy failure. */
         ASSERT(strstr(verify_buf, "advertised_subver_verdict") != NULL);
         ASSERT(strstr(verify_buf,
-                      "\"/ZClassic23:0.1.0(src:$adv_want)/\"") != NULL);
+                      "\"/ZClassic23:0.1.0(src:$adv_want_prefix)/\"") != NULL);
         ASSERT(strstr(verify_buf, "            deployed|unstamped) ;;") != NULL);
         ASSERT(strstr(verify_buf,
                       "grep -q '\"advertised_subver\"[[:space:]]*:"
