@@ -96,3 +96,9 @@ HOTSWAP_PROBE_CASE("command.rom_fetch.status.default.v1", "command",
     "ops.debug.rom_fetch.status", "{}", "zcl.rom_fetch_status.v1", 4096)
 HOTSWAP_PROBE_CASE("command.rom_seed.status.default.v1", "command",
     "ops.debug.rom_seed.status", "{}", "zcl.rom_seed_status.v1", 4096)
+/* Wave 4 probes. purchase.guide and want.list already had resident cases and
+ * are deliberately not duplicated here -- the rule wants exactly one. */
+HOTSWAP_PROBE_CASE("command.shop.want.fulfill.list.default.v1", "command",
+    "app.shop.want.fulfill.list", "{}", "zcl.shop_fulfill_list.v1", 8192)
+HOTSWAP_PROBE_CASE("command.wallet.recovery.status.default.v1", "command",
+    "core.wallet.recovery.status", "{}", "zcl.wallet_recovery_status.v1", 4096)

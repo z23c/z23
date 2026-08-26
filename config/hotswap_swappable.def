@@ -137,3 +137,21 @@ HOTSWAP_SWAPPABLE("app/controllers/src/rom_seed_controller.c",
 /* Read-only SHOP status projection. shop init is withheld. */
 HOTSWAP_SWAPPABLE("app/controllers/src/shop_native_handler.c",
                   "app.shop.status")
+
+/* Read-only PURCHASE projections: the buyer guide and one purchase's state.
+ * plan, commit and retrieve move money or bytes and are withheld. */
+HOTSWAP_SWAPPABLE("app/controllers/src/market_purchase_native_handler.c",
+                  "app.market.purchase.guide app.market.purchase.status")
+/* Read-only WANT projections. post, cancel and review are withheld. */
+HOTSWAP_SWAPPABLE("app/controllers/src/shop_native_want.c",
+                  "app.shop.want.list app.shop.want.status")
+/* Read-only FULFILMENT projections. post and withdraw are withheld. */
+HOTSWAP_SWAPPABLE("app/controllers/src/shop_native_fulfill.c",
+                  "app.shop.want.fulfill.list app.shop.want.fulfill.status")
+/* Read-only REPUTATION projection over completed shop trades. */
+HOTSWAP_SWAPPABLE("app/controllers/src/shop_native_reputation.c",
+                  "app.shop.reputation")
+/* Read-only RECOVERY POSTURE: whether a recovery is available and its state.
+ * The restore path writes and is withheld. */
+HOTSWAP_SWAPPABLE("app/controllers/src/wallet_recovery_native_handlers.c",
+                  "core.wallet.recovery.status")
