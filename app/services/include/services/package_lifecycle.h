@@ -18,8 +18,20 @@
  *                              CAS), build+test in the isolated worker,
  *                              re-hash every emitted artifact, install
  *                              atomically, and pin so the package can seed.
- *   zcode package rollback     re-activate the previous generation of one
- *                              package name. Both generations stay on disk.
+ *   zcode package rollback     go back one step: re-activate the previous
+ *                              generation. Both generations stay on disk,
+ *                              and with no name given it picks the package
+ *                              whose version changed most recently.
+ *
+ * THE VERSION A USER WAS RUNNING STAYS INTACT AND RE-SELECTABLE. Installing
+ * a new version never destroys the old one — it appends a generation and
+ * swaps a symlink, leaving the previous install tree untouched on disk. The
+ * way back is one action, needs no identifier, lands on an exact 32-byte
+ * root rather than "roughly the previous build", and depends on nothing the
+ * new version could have broken: no network, no rebuild, and not one byte
+ * read from the version being left. History is bounded by evicting the
+ * oldest generations, never by refusing an append, so a long-lived install
+ * cannot reach a state where going back is denied.
  *
  * BOUNDARIES THIS LAYER NEVER CROSSES:
  *  - A downloaded or built library is NEVER loaded into this process. It is
@@ -99,6 +111,9 @@ struct package_lifecycle_rollback_report {
     uint8_t from_root[32];
     uint8_t to_root[32];
     size_t generation_count;
+    /* True when the caller named no package and `name` was resolved to the
+     * one whose active version changed most recently. */
+    bool selected_by_default;
     char rule[PACKAGE_LIFECYCLE_RULE_MAX + 1u];
     char detail[PACKAGE_LIFECYCLE_DETAIL_MAX + 1u];
 };
@@ -177,9 +192,26 @@ struct zcl_result package_lifecycle_reproduce(
     const char *datadir, const char *name_or_root, const char *fast_cache,
     struct package_lifecycle_reproduce_report *out);
 
+/* Re-activate the generation before the active one. `name` NULL or empty
+ * means GO BACK ONE STEP: the package whose active version changed most
+ * recently is resolved from the local generation logs and reported in
+ * `out->name` with `selected_by_default` set.
+ *
+ * This path deliberately depends on NOTHING that the new version could have
+ * broken. It reads the generation log and re-points a symlink; it does not
+ * run, link, load, build, or even open the package that is being left, and
+ * it never touches the network. So a version that crashes, corrupts its own
+ * install tree, or was deleted outright is still one action away from being
+ * undone. */
 struct zcl_result package_lifecycle_rollback(
     const char *datadir, const char *name, int64_t now_unix,
     struct package_lifecycle_rollback_report *out);
+
+/* Name the package whose active version changed most recently — what
+ * `package_lifecycle_rollback` picks when given no name. *present is false
+ * when nothing has ever been activated under this datadir. */
+struct zcl_result package_lifecycle_last_activated(
+    const char *datadir, char *name_out, size_t name_cap, bool *present_out);
 
 /* Read-only: the root currently active for `name` (and how many generations
  * the log holds). *present is false when the name was never installed. */

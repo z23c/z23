@@ -182,6 +182,7 @@ ZCL_BLOCKER_REMEDY(utxo_apply.upstream_evidence_mode,          OWNER)
 ZCL_BLOCKER_REMEDY(utxo_apply.stale_upstream_hash,             OWNER)
 ZCL_BLOCKER_REMEDY(proof_validate.internal_error,              OWNER) /* D2 */
 ZCL_BLOCKER_REMEDY(params_missing,                             OWNER)
+ZCL_BLOCKER_REMEDY(shielded_spend_unavailable,                 OWNER)
 ZCL_BLOCKER_REMEDY(proof_validate.stale_upstream_hash,         OWNER)
 ZCL_BLOCKER_REMEDY(proof_validate.invalid_upstream_verdict,    OWNER)
 ZCL_BLOCKER_REMEDY(proof_validate.upstream_evidence_mode,      OWNER)

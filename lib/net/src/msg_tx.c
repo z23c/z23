@@ -64,8 +64,27 @@ static enum tx_accept_result msg_tx_classify(struct msg_processor *mp,
     case MEMPOOL_ACCEPT_NONFINAL:       return TX_ACCEPT_NONFINAL;
     case MEMPOOL_ACCEPT_EXPIRING_SOON:  return TX_ACCEPT_EXPIRING_SOON;
     case MEMPOOL_ACCEPT_INTERNAL_ERROR: return TX_ACCEPT_INTERNAL_ERROR;
+    case MEMPOOL_ACCEPT_UNVERIFIABLE:   return TX_ACCEPT_UNVERIFIABLE;
     }
     return TX_ACCEPT_INTERNAL_ERROR;
+}
+
+/* Volume bound for the one outcome that carries no ban-score.
+ * Returns true when this peer has sent more unverifiable transactions in
+ * the current window than the cap, i.e. when the complaint has stopped
+ * being about our missing keys and started being about their send rate. */
+static bool msg_tx_unverifiable_rate_exceeded(struct p2p_node *node)
+{
+    int64_t now = (int64_t)platform_time_wall_time_t();
+
+    if (node->unverifiable_tx_window_start == 0 ||
+        now - node->unverifiable_tx_window_start >=
+            TX_UNVERIFIABLE_WINDOW_SECS) {
+        node->unverifiable_tx_window_start = now;
+        node->unverifiable_tx_window_count = 0;
+    }
+    node->unverifiable_tx_window_count++;
+    return node->unverifiable_tx_window_count > TX_UNVERIFIABLE_WINDOW_MAX;
 }
 
 enum tx_accept_result msg_tx_accept(struct msg_processor *mp,
@@ -76,7 +95,14 @@ enum tx_accept_result msg_tx_accept(struct msg_processor *mp,
 
     /* Peer scoring: only clearly-malicious outcomes get ban-score.
      * Missing inputs (orphan), duplicates, and below-relay-fee are
-     * either our problem or a rate-limit, not misbehaviour. */
+     * either our problem or a rate-limit, not misbehaviour.
+     *
+     * TX_ACCEPT_UNVERIFIABLE is the third category the comment above
+     * always implied but the code could not express: the transaction may
+     * be perfectly valid, we simply hold no verifying key to judge it.
+     * Charging that to the sender punishes an honest peer for OUR boot
+     * state, so it is unscored — up to the per-peer volume cap below,
+     * past which the send RATE is the peer's own doing. */
     if (mp && node && mp->net_mgr) {
         switch (ar) {
         case TX_ACCEPT_INVALID:
@@ -88,6 +114,11 @@ enum tx_accept_result msg_tx_accept(struct msg_processor *mp,
             peer_scoring_record(mp->net_mgr, node,
                                 PEER_OFFENCE_INVALID_MESSAGE,
                                 "double-spend");
+            break;
+        case TX_ACCEPT_UNVERIFIABLE:
+            if (msg_tx_unverifiable_rate_exceeded(node))
+                peer_scoring_record(mp->net_mgr, node, PEER_OFFENCE_FLOOD,
+                                    "unverifiable tx rate");
             break;
         case TX_ACCEPT_OK:
         case TX_ACCEPT_DUPLICATE:
@@ -247,6 +278,16 @@ bool process_tx_msg(struct msg_processor *mp, struct p2p_node *node,
     tx_mark_seen(&hash);
 
     enum tx_accept_result ar = msg_tx_accept(mp, node, &tx);
+
+    /* We reached no verdict on this transaction, so we have not really
+     * "seen" it. Drop the dedupe mark: once the verifying keys are
+     * installed, the next ordinary re-announcement gets a real answer
+     * instead of being silently swallowed. Bounded work — the mark only
+     * costs a re-run of the cheap structural checks, and the shielded
+     * availability gate short-circuits ahead of any proof arithmetic —
+     * and the per-peer rate cap in msg_tx_accept bounds the volume. */
+    if (ar == TX_ACCEPT_UNVERIFIABLE)
+        tx_clear_seen(&hash);
 
     if (ar == TX_ACCEPT_OK) {
         node->last_tx_time = (int64_t)platform_time_wall_time_t();

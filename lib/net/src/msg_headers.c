@@ -2166,26 +2166,38 @@ bool msg_try_range_parallel_getheaders(struct msg_processor *mp,
      * correctly demotes every owner it evicted, including itself. */
     int32_t stalled_ids[HRS_MAX_SPANS];
     size_t n_stalled = hrs_sweep_expired(sched, now_us, stalled_ids, HRS_MAX_SPANS);
-    if (n_stalled > 0) {
-        zcl_mutex_lock(&mp->net_mgr->cs_nodes);
-        for (size_t si = 0; si < n_stalled; si++) {
-            int32_t sid = stalled_ids[si];
-            bool dup = false;
-            for (size_t sj = 0; sj < si; sj++) {
-                if (stalled_ids[sj] == sid) { dup = true; break; }
-            }
-            if (dup)
-                continue;
-            for (size_t pi = 0; pi < mp->net_mgr->num_nodes; pi++) {
-                struct p2p_node *sn = mp->net_mgr->nodes[pi];
-                if (sn && sn->id == sid) {
-                    peer_scoring_record(mp->net_mgr, sn, PEER_OFFENCE_TIMEOUT,
-                                        "header span deadline missed");
-                    break;
-                }
-            }
+    /* The sweep above is the entire remedy, and it has already happened:
+     * every expired span is back in the free pool and will be handed to
+     * whichever peer asks next. That is a resource action — it bounds how
+     * long one span can be held — and it deprioritises a slow peer
+     * naturally, by giving its work to someone else.
+     *
+     * This used to ALSO charge PEER_OFFENCE_TIMEOUT to every swept owner.
+     * That was a punishment for being slow, not for misbehaving. The
+     * deadline is 30 seconds of wall clock for a span of up to ~2000
+     * headers, which is an assumption about the peer's disk and link, not
+     * a protocol rule: an honest node on a 7200rpm disk moving under
+     * 2 MB/s misses it routinely, and so does a fast peer whose reply we
+     * were too busy to read. Scoring it made ban-score a measure of
+     * hardware, which pushes the network toward whoever has the fastest
+     * storage — the opposite of what a full node should require.
+     *
+     * The signal is kept, not discarded: the stall is still reported, so
+     * an operator can still see which peers are slow and we can still
+     * learn where the code assumes fast storage. It just no longer counts
+     * toward a ban. */
+    for (size_t si = 0; si < n_stalled; si++) {
+        int32_t sid = stalled_ids[si];
+        bool dup = false;
+        for (size_t sj = 0; sj < si; sj++) {
+            if (stalled_ids[sj] == sid) { dup = true; break; }
         }
-        zcl_mutex_unlock(&mp->net_mgr->cs_nodes);
+        if (dup)
+            continue;
+        event_emitf(EV_HEADERS_REJECTED, (uint32_t)sid,
+                    "header span reclaimed from slow peer %d "
+                    "(deadline missed; span reassigned, not scored)",
+                    (int)sid);
     }
 
     /* This peer's span: keep an existing live one, else claim a free span. */

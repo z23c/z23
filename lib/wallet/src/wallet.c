@@ -996,6 +996,7 @@ static const char *wallet_mempool_result_name(enum mempool_accept_result r)
     case MEMPOOL_ACCEPT_NONFINAL:       return "nonfinal";
     case MEMPOOL_ACCEPT_EXPIRING_SOON:  return "expiring_soon";
     case MEMPOOL_ACCEPT_INTERNAL_ERROR: return "internal_error";
+    case MEMPOOL_ACCEPT_UNVERIFIABLE:   return "unverifiable";
     }
     return "unknown";
 }

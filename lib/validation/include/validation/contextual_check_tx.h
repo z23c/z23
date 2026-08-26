@@ -50,6 +50,59 @@ static inline bool is_final_tx(const struct transaction *tx,
     return domain_consensus_tx_is_final(tx, nBlockHeight, nBlockTime);
 }
 
+/* ── "invalid" vs "could not check" ──────────────────────────────
+ *
+ * contextual_check_transaction() answers a bool, and a bool cannot say
+ * which of two very different things happened:
+ *
+ *   - the transaction is bad          → the SENDER is at fault
+ *   - we were unable to judge it      → WE are at fault
+ *
+ * Every shielded verifier below this point fail-closes to the same
+ * `false` in both cases. sprout_verify_groth16() returns false when the
+ * proof is forged AND when sprout_vk is NULL because the boot loader
+ * thread has not installed it yet (lib/sapling/src/sprout.c); the
+ * Sapling spend/output verifiers do the same on a NULL VK
+ * (lib/sapling/src/sapling.c), and the verification context allocation
+ * returns NULL under memory pressure. Collapsed into one bool, the P2P
+ * relay path could not tell them apart, so it charged ban-score to a
+ * peer that had relayed a perfectly valid transaction while OUR keys
+ * were still loading.
+ *
+ * The verdict form below separates them at the source. Callers that
+ * attribute blame (peer scoring, block-reject bookkeeping) MUST use it
+ * rather than matching on reject-reason strings: a reason string is a
+ * diagnostic that will drift, while this is a type the compiler checks.
+ *
+ * Fail-closed by construction: UNVERIFIABLE is NOT an acceptance. The
+ * transaction is still rejected and still never relayed. The only thing
+ * that changes is whose fault it was. */
+enum contextual_check_verdict {
+    CONTEXTUAL_CHECK_PASS = 0,      /* every applicable rule verified OK */
+    CONTEXTUAL_CHECK_REJECT,        /* a rule genuinely failed — sender's fault */
+    CONTEXTUAL_CHECK_UNVERIFIABLE,  /* we could not check — OUR fault, never score */
+};
+
+/* True iff `tx` carries shielded components whose proofs must be verified
+ * at `nHeight`, but the verifying key material needed to judge them is not
+ * installed. Purely a function of LOCAL state and the tx's shape — never of
+ * attacker-chosen proof bytes — which is what makes UNVERIFIABLE
+ * un-steerable by a peer (see the abuse note in accept_to_mempool.h). */
+bool contextual_check_tx_proofs_unverifiable(const struct transaction *tx,
+                                             int nHeight);
+
+/* Typed form. Reject reasons and DoS scores are byte-identical to the
+ * bool form for every genuine consensus failure. */
+enum contextual_check_verdict contextual_check_transaction_verdict(
+    const struct transaction *tx,
+    struct validation_state *state,
+    const struct consensus_params *params,
+    int nHeight,
+    int dosLevel);
+
+/* Fail-closed bool wrapper, unchanged for every caller that only needs
+ * accept/reject: BOTH reject and unverifiable answer false. Callers that
+ * blame someone for the false must use the verdict form above. */
 bool contextual_check_transaction(const struct transaction *tx,
                                    struct validation_state *state,
                                    const struct consensus_params *params,

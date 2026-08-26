@@ -37,7 +37,19 @@
  * Append-only history of which root was made active, oldest first; the LAST
  * entry is the currently intended active root. A rollback appends a new
  * entry naming the older root — history is never rewritten, and the older
- * install stays on disk until explicitly pruned. */
+ * install stays on disk until explicitly pruned.
+ *
+ * RETENTION IS BOUNDED BY EVICTION, NEVER BY REFUSAL. The log keeps the
+ * newest VCS_PACKAGE_GENERATION_KEEP entries; appending to a full log drops
+ * the OLDEST entries first (FIFO) and always succeeds. That policy is the
+ * whole point: a log that refuses its own append once full would brick the
+ * package — no further install AND no further rollback — which is the exact
+ * moment a user most needs to go back. Eviction only ever discards DISTANT
+ * history, so the rollback target (the newest distinct root older than the
+ * active one) is retained for any KEEP >= 2.
+ *
+ * VCS_PACKAGE_GENERATION_MAX stays the WIRE bound, above KEEP, so a log
+ * written before this policy still parses. */
 
 #ifndef ZCL_VCS_PACKAGE_INSTALL_H
 #define ZCL_VCS_PACKAGE_INSTALL_H
@@ -60,7 +72,12 @@
 
 #define VCS_PACKAGE_GENERATION_VERSION 1u
 #define VCS_PACKAGE_GENERATION_WIRE_MAGIC_BYTES 8u
+/* Wire bound: the most entries a log on disk may carry. */
 #define VCS_PACKAGE_GENERATION_MAX 256u
+/* Retention depth: how many generations an append keeps. Strictly below the
+ * wire bound, so a pre-policy log parses and is trimmed by its next append.
+ * Must be >= 2 for a rollback target to survive eviction. */
+#define VCS_PACKAGE_GENERATION_KEEP 64u
 #define VCS_PACKAGE_GENERATION_MAX_WIRE_BYTES \
     (VCS_PACKAGE_GENERATION_WIRE_MAGIC_BYTES + 4u + \
      VCS_PACKAGE_GENERATION_MAX * 40u)
@@ -153,8 +170,18 @@ struct vcs_package_generations {
 
 void vcs_package_generations_init(struct vcs_package_generations *g);
 
-/* Append one activation. Rejects an all-zero root and the bound; the same
- * root activated twice in a row is rejected (nothing changed). */
+/* Drop the oldest entries until at most `keep` remain, and return how many
+ * were dropped. `keep` is clamped to at least 1 so a trim never empties a
+ * non-empty log. This is the ONE eviction policy — FIFO, oldest first —
+ * and it is exported so it can be asserted directly. */
+size_t vcs_package_generations_trim(struct vcs_package_generations *g,
+                                    size_t keep);
+
+/* Append one activation. Rejects an all-zero root; the same root activated
+ * twice in a row is rejected (nothing changed). A FULL log is NOT an error:
+ * the append first evicts oldest-first down to
+ * VCS_PACKAGE_GENERATION_KEEP - 1 entries, so it always has room and can
+ * never brick the package. */
 enum vcs_package_install_error vcs_package_generations_append(
     struct vcs_package_generations *g, const uint8_t root[32],
     int64_t activated_unix);
