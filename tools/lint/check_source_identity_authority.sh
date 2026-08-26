@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Copyright 2026 Rhett Creighton - Apache License 2.0
 # check_source_identity_authority.sh — the JSON key "source_id_sha256"
 # answers two different questions in this tree, and a script that spells
 # both the same way, or reads one positionally instead of through the

@@ -16,6 +16,7 @@
  */
 
 #include "sapling/params_fetch.h"
+#include "net/params_service.h"
 #include "crypto/sha256.h"
 #include "base/safe_alloc.h"
 
@@ -137,6 +138,75 @@ static uint8_t *build_manifest(int idx, const uint8_t *body, uint32_t *out_count
     }
     *out_count = n;
     return man;
+}
+
+/* ── 0. Wire bytes and pre-hash peer admission ───────────────────── */
+
+static int test_transport_boundaries(void)
+{
+    int failures = 0;
+    printf("  [transport] canonical bytes and requested-peer authority\n");
+
+    uint8_t entry[13];
+    static const uint8_t entry_want[13] = {
+        0x7a, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01,
+        0x0d, 0x0c, 0x0b, 0x0a,
+    };
+    param_service_test_wire_entry(0x7a, UINT64_C(0x0102030405060708),
+                                  UINT32_C(0x0a0b0c0d), entry);
+    CHECK(memcmp(entry, entry_want, sizeof(entry)) == 0,
+          "zparamhave entry is canonical little-endian bytes");
+
+    uint8_t request[5];
+    static const uint8_t request_want[5] = {
+        0x39, 0x44, 0x33, 0x22, 0x11,
+    };
+    param_service_test_wire_chunk_request(0x39, UINT32_C(0x11223344),
+                                          request);
+    CHECK(memcmp(request, request_want, sizeof(request)) == 0,
+          "zparamcreq is canonical little-endian bytes");
+
+    uint8_t zero_ip[16] = {0};
+    uint8_t tor_a[32] = {0}, tor_b[32] = {0};
+    uint8_t key_a[16], key_b[16], key_ip[16];
+    tor_a[0] = 0x41;
+    tor_b[0] = 0x42;
+    param_service_test_rate_key(zero_ip, true, tor_a, key_a);
+    param_service_test_rate_key(zero_ip, true, tor_b, key_b);
+    param_service_test_rate_key(zero_ip, false, tor_a, key_ip);
+    CHECK(memcmp(key_a, tor_a, sizeof(key_a)) == 0,
+          "Tor limiter key comes from the stable onion identity");
+    CHECK(memcmp(key_a, key_b, sizeof(key_a)) != 0,
+          "different Tor peers have different limiter buckets");
+    CHECK(memcmp(key_ip, zero_ip, sizeof(key_ip)) == 0,
+          "clearnet limiter key remains the connected IP");
+
+    param_service_test_peer_guard_reset();
+    CHECK(!param_service_test_chunk_admitted(7, 11),
+          "an unsolicited chunk is refused before verification");
+    CHECK(param_service_test_mark_requested(7, 11),
+          "an outstanding peer/chunk request is recorded");
+    CHECK(param_service_test_chunk_admitted(7, 11),
+          "the exact requested peer/chunk is admitted");
+    CHECK(!param_service_test_chunk_admitted(8, 11),
+          "the right chunk from the wrong peer is refused");
+    CHECK(!param_service_test_chunk_admitted(7, 12),
+          "an unrequested chunk from the right peer is refused");
+    param_service_test_charge_peer(7, PARAM_PEER_WASTE_BUDGET_BYTES);
+    CHECK(!param_service_test_chunk_admitted(7, 11),
+          "a written-off peer is refused despite an outstanding request");
+
+    /* Fill the accounting table to its reactor-sized ceiling. A hypothetical
+     * peer beyond that ceiling must fail closed, never receive free hashes. */
+    param_service_test_peer_guard_reset();
+    for (int32_t id = 0; id < (int32_t)PARAM_PEER_ACCOUNTING_SLOTS; id++)
+        param_service_test_charge_peer(id, 0);
+    CHECK(param_service_test_mark_requested(2048, 19),
+          "guard fixture records a request after accounting fills");
+    CHECK(!param_service_test_chunk_admitted(2048, 19),
+          "an unaccounted peer fails closed when accounting is full");
+
+    return failures;
 }
 
 /* ── 1. The pin table is internally consistent ─────────────────────── */
@@ -371,6 +441,29 @@ static int test_session_roundtrip(void)
     CHECK(zcl_param_fetch_has_manifest(s), "manifest is installed");
     CHECK(zcl_param_fetch_chunks_total(s) == n, "chunk total matches the pin");
     CHECK(zcl_param_fetch_next_needed(s) == 0, "chunk 0 is wanted first");
+
+    /* The resume header is a disk protocol, not a host-ABI struct. Inspect
+     * its exact bytes so a little-endian round trip cannot hide a native-
+     * endian writer/reader pair. File 3 is one 1449-byte chunk. */
+    char state_path[900];
+    snprintf(state_path, sizeof(state_path), "%s/%s.zpart", g_dir,
+             zcl_param_pins[3].name);
+    FILE *state_file = fopen(state_path, "rb");
+    CHECK(state_file != NULL, "resume state opens for byte-shape check");
+    if (state_file) {
+        uint8_t header[24];
+        static const uint8_t header_want[24] = {
+            'Z', 'P', 'A', 'R', 'T', '0', '0', '1',
+            0x03, 0x00, 0x00, 0x00,
+            0x01, 0x00, 0x00, 0x00,
+            0xa9, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        };
+        CHECK(fread(header, 1, sizeof(header), state_file) == sizeof(header),
+              "resume header reads completely");
+        CHECK(memcmp(header, header_want, sizeof(header)) == 0,
+              "resume numeric fields are canonical little-endian bytes");
+        fclose(state_file);
+    }
 
     /* An oversized length field is refused. The session compares it to the
      * pin-derived length before touching `data`, so nothing is allocated and
@@ -875,6 +968,7 @@ int test_params_fetch(void)
     }
 
     failures += test_pins_consistent();
+    failures += test_transport_boundaries();
     failures += test_merkle();
     failures += test_manifest_rejection();
     failures += test_session_roundtrip();

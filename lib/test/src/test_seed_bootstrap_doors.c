@@ -52,6 +52,7 @@
 #include "chain/chainparams.h"
 #include "net/onion_service.h"
 #include "net/onion_peer_merge.h"
+#include "platform/time_compat.h"
 #include "util/path_check.h"
 
 #include <sqlite3.h>
@@ -59,7 +60,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 #include <unistd.h>
 
 #define DOOR_CHECK(name, expr) do {                         \
@@ -298,7 +298,7 @@ static int check_directory_is_a_door(void)
     bool opened = sqlite3_open(db_path, &db) == SQLITE_OK && db != NULL;
     DOOR_CHECK("the persisted directory is openable", opened);
 
-    int64_t now = (int64_t)time(NULL);
+    int64_t now = (int64_t)platform_time_wall_time_t();
     bool seeded = opened;
     if (opened) {
         /* One host we MEASURED, one we only heard about (already inserted

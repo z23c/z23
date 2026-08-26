@@ -159,3 +159,17 @@ only in `Exec*` lines — in `ReadWritePaths=` and `StandardOutput=` a variable
 is silently dropped, which yields no sandbox and a silent fallback to the
 journal. Verify with
 `systemctl --user show <unit> -p ReadWritePaths -p StandardOutput`.
+
+On a rotating-disk host, first measure whether bounded integrity work exceeds
+the default two-minute watchdog. If it does, install the supplied ten-minute
+drop-in instead of allowing systemd to kill work that is still advancing:
+
+```bash
+install -D -m644 deploy/zclassic23-spinning-disk-watchdog.conf \
+  ~/.config/systemd/user/zclassic23.service.d/95-spinning-disk-watchdog.conf
+systemctl --user daemon-reload
+systemctl --user show zclassic23.service -p WatchdogUSec
+```
+
+This changes neither `TimeoutStartSec` nor restart policy. Do not use it to
+hide a process whose disk counters and named boot stage have stopped moving.
