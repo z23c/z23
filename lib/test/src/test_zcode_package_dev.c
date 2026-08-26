@@ -2536,8 +2536,8 @@ static int zpd_test_work_toolchain(void)
         zcl_command_reply_free(&reply);
         PASS();
     }
-    TEST("zcode work toolchain: swarm-only host is told to restart, not "
-         "to advertise compile work") {
+    TEST("zcode work toolchain: package hosting alone does not prove a "
+         "restart will enable compile work") {
         const char *argv[] = { "z23", "-packagehost=1" };
         ParseParameters(2, argv);
         struct zcl_command_request request = { .input = NULL };
@@ -2550,9 +2550,12 @@ static int zpd_test_work_toolchain(void)
         {
             const char *next =
                 json_get_str(json_get(&reply.data, "next_action"));
-            ASSERT(next && strstr(next, "restart") != NULL);
-            ASSERT(strstr(next, "z23 join") == NULL);
+            ASSERT(next && strcmp(next, "z23 join") == 0);
+            ASSERT(strstr(next, "restart") == NULL);
             ASSERT(strstr(next, "-buildworker=1") == NULL);
+            ASSERT(strcmp(json_get_str(json_get(&reply.data,
+                                                "next_safe_command")),
+                          "join") == 0);
         }
         zcl_command_reply_free(&reply);
         PASS();

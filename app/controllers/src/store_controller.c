@@ -4,6 +4,7 @@
 
 
 #include "controllers/store_controller_internal.h"
+#include "controllers/web_form.h"
 #include "controllers/zslp_controller.h"
 /* store_confirmed_payment tells a shielded order address from a transparent
  * one (wallet_addr_is_sapling), and turns a t-address into the hash160 that
@@ -336,58 +337,9 @@ void store_csrf_context(char *out, size_t outmax, int64_t product_id)
  * file-size ceiling) and declared in store_controller_internal.h. See
  * that file for the full design rationale. */
 
-/* Decode `%XX` and `+` escapes in an x-www-form-urlencoded value.
- * Ported from app/controllers/src/wallet_view_helpers.c. Without
- * this, "a%20b" in a form field is stored literally as the four bytes
- * '%','2','0','b' in the DB and rendered back to the user unchanged —
- * breaking display, search, and anything downstream that interprets
- * the stored value. */
-static void store_url_decode(char *dst, size_t dstmax, const char *src, size_t srclen)
-{
-    size_t di = 0;
-    if (!dstmax) return;
-    for (size_t si = 0; si < srclen && di < dstmax - 1; si++) {
-        char c = src[si];
-        if (c == '%' && si + 2 < srclen) {
-            char h1 = src[si + 1], h2 = src[si + 2];
-            int hi = (h1 >= '0' && h1 <= '9') ? h1 - '0' :
-                     (h1 >= 'a' && h1 <= 'f') ? h1 - 'a' + 10 :
-                     (h1 >= 'A' && h1 <= 'F') ? h1 - 'A' + 10 : -1;
-            int lo = (h2 >= '0' && h2 <= '9') ? h2 - '0' :
-                     (h2 >= 'a' && h2 <= 'f') ? h2 - 'a' + 10 :
-                     (h2 >= 'A' && h2 <= 'F') ? h2 - 'A' + 10 : -1;
-            if (hi >= 0 && lo >= 0) {
-                dst[di++] = (char)((hi << 4) | lo);
-                si += 2;
-                continue;
-            }
-        }
-        dst[di++] = (c == '+') ? ' ' : c;
-    }
-    dst[di] = '\0';
-}
-
-/* Parse x-www-form-urlencoded body for `field=value` and URL-decode
- * the value into `out`. */
-static const char *parse_form_field(const char *body, size_t len,
-                                     const char *field, char *out, size_t outmax)
-{
-    if (!body || !len || !field || !out || outmax == 0)
-        LOG_NULL("store", "parse_form_field: null args body=%p len=%zu field=%s",
-                 (void *)body, len, field ? field : "(null)");
-    char search[128];
-    snprintf(search, sizeof(search), "%s=", field);
-    const char *p = strstr(body, search);
-    if (!p) return NULL;
-    p += strlen(search);
-    /* Value ends at &, space, or end of body. */
-    size_t remaining = len - (size_t)(p - body);
-    size_t vlen = 0;
-    while (vlen < remaining && p[vlen] && p[vlen] != '&' && p[vlen] != ' ')
-        vlen++;
-    store_url_decode(out, outmax, p, vlen);
-    return out;
-}
+/* Form fields are parsed by web_form.h: bodies are length-delimited
+ * slices without a NUL sentinel, so a bounded scan (not strstr) is the
+ * only safe reader here. */
 
 static bool parse_positive_form_id(const char *body, size_t body_len,
                                    const char *field, int64_t *id_out)
@@ -399,7 +351,7 @@ static bool parse_positive_form_id(const char *body, size_t body_len,
     if (!id_out)
         return false;
     *id_out = -1;
-    if (!parse_form_field(body, body_len, field, raw, sizeof(raw)))
+    if (!web_form_field(body, body_len, field, raw, sizeof(raw)))
         return false; // raw-return-ok:form-field-absent-not-a-server-error
     value = strtoll(raw, &end, 10);
     if (!end || *end != '\0' || value <= 0)
@@ -453,18 +405,18 @@ size_t store_handle_request(const char *method, const char *path,
         char pow_nonce[32] = "";
         char pay_kind[16] = "";
         if (body && body_len > 0) {
-            parse_form_field((const char *)body, body_len,
+            web_form_field((const char *)body, body_len,
                              "customer_addr", addr, sizeof(addr));
-            parse_form_field((const char *)body, body_len,
+            web_form_field((const char *)body, body_len,
                              "csrf_token", csrf, sizeof(csrf));
-            parse_form_field((const char *)body, body_len,
+            web_form_field((const char *)body, body_len,
                              "pow_ts", pow_ts, sizeof(pow_ts));
-            parse_form_field((const char *)body, body_len,
+            web_form_field((const char *)body, body_len,
                              "pow_nonce", pow_nonce, sizeof(pow_nonce));
             /* Absent ⇒ shielded, so every existing caller and the HTML form
              * keep the shielded default. Only the exact string "transparent"
              * opts in; anything else is shielded rather than a guess. */
-            parse_form_field((const char *)body, body_len,
+            web_form_field((const char *)body, body_len,
                              "payment_kind", pay_kind, sizeof(pay_kind));
         }
         bool want_transparent = (strcmp(pay_kind, "transparent") == 0);

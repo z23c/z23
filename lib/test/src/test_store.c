@@ -4,6 +4,7 @@
 #include "test/test_core.h"
 #include "coins/undo.h"
 #include "controllers/store_controller.h"
+#include "controllers/web_form.h"
 #include "controllers/zslp_controller.h"
 #include "services/zslp_command_service.h"
 #include "services/zslp_service.h"
@@ -335,6 +336,185 @@ int test_store(void)
         ok = ok && (strstr((char *)resp, "200 OK") != NULL);
         ok = ok && (strstr((char *)resp, "Order #") != NULL);
         ok = ok && (strstr((char *)resp, "t1YRBXKYLhrb4X8sTkBeRysAzBTMMHpUXrn") != NULL);
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+
+    /* ── Length-delimited form parsing ────────────────────────────
+     * HTTP dispatch hands store_handle_request body slices WITHOUT a
+     * NUL terminator, so the form scanner may not rely on any sentinel
+     * and may not read past body_len. Each fixture below plants a live
+     * non-NUL byte exactly AT body_len: a sentinel-based scanner reads
+     * it (and whatever follows) and misparses; the bounded scanner in
+     * controllers/web_form.h must ignore it completely. */
+    printf("store: sentinel-free body with trailing customer_addr parses... ");
+    {
+        char pow_ts[32] = "", pow_nonce[32] = "";
+        bool have_pow = solve_store_pow_fields(1, pow_ts, sizeof(pow_ts),
+                                               pow_nonce, sizeof(pow_nonce));
+        char body[320];
+        int blen = snprintf(body, sizeof(body),
+            "product_id=1&csrf_token=%s&pow_ts=%s&pow_nonce=%s"
+            "&customer_addr=t1YRBXKYLhrb4X8sTkBeRysAzBTMMHpUXrn",
+            csrf1, pow_ts, pow_nonce);
+        bool ok = blen > 0;
+        if (ok) {
+            body[blen] = 'X';      /* garbage where a sentinel would sit */
+            body[blen + 1] = '\0';
+            size_t n = store_handle_request("POST", "/store/orders",
+                                             (const uint8_t *)body,
+                                             (size_t)blen,
+                                             resp, sizeof(resp),
+                                             test_datadir);
+            memset(&body[blen], 0, sizeof(body) - (size_t)blen);
+            ok = have_pow && (n > 0) &&
+                 (strstr((char *)resp, "200 OK") != NULL) &&
+                 (strstr((char *)resp, "Order #") != NULL) &&
+                 (strstr((char *)resp, "t1YRBXKYLhrb4X8sTkBeRysAzBTMMHpUXrn") != NULL);
+        }
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+
+    printf("store: body missing customer_addr names the refusal (no sentinel luck)... ");
+    {
+        char pow_ts[32] = "", pow_nonce[32] = "";
+        /* The gate never runs — address validation precedes it in
+         * serve_create_order — so the solve's outcome is not consulted. */
+        (void)solve_store_pow_fields(1, pow_ts, sizeof(pow_ts),
+                                     pow_nonce, sizeof(pow_nonce));
+        char body[256];
+        int blen = snprintf(body, sizeof(body),
+            "product_id=1&csrf_token=%s&pow_ts=%s&pow_nonce=%s",
+            csrf1, pow_ts, pow_nonce);
+        bool ok = blen > 0;
+        if (ok) {
+            body[blen] = 'G';
+            body[blen + 1] = '\0';
+            size_t n = store_handle_request("POST", "/store/orders",
+                                             (const uint8_t *)body,
+                                             (size_t)blen,
+                                             resp, sizeof(resp),
+                                             test_datadir);
+            memset(&body[blen], 0, sizeof(body) - (size_t)blen);
+            ok = (n > 0) &&
+                 (strstr((char *)resp, "400 Bad Request") != NULL) &&
+                 (strstr((char *)resp, "Invalid address") != NULL) &&
+                 (strstr((char *)resp, "Order #") == NULL);
+        }
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+
+    printf("store: decoy prefix cannot shadow a properly delimited field... ");
+    {
+        char pow_ts[32] = "", pow_nonce[32] = "";
+        bool have_pow = solve_store_pow_fields(1, pow_ts, sizeof(pow_ts),
+                                               pow_nonce, sizeof(pow_nonce));
+        /* A value containing "customer_addr=x" used to win a plain
+         * substring search before the real field ever matched; the
+         * bounded scanner requires '&' boundaries and must pick the
+         * real, valid address from the properly delimited slot. */
+        char body[400];
+        int blen = snprintf(body, sizeof(body),
+            "product_id=1&note=ecustomer_addr=x&csrf_token=%s&pow_ts=%s"
+            "&pow_nonce=%s&customer_addr=t1YRBXKYLhrb4X8sTkBeRysAzBTMMHpUXrn",
+            csrf1, pow_ts, pow_nonce);
+        bool ok = blen > 0;
+        if (ok) {
+            body[blen] = 'Y';
+            body[blen + 1] = '\0';
+            size_t n = store_handle_request("POST", "/store/orders",
+                                             (const uint8_t *)body,
+                                             (size_t)blen,
+                                             resp, sizeof(resp),
+                                             test_datadir);
+            memset(&body[blen], 0, sizeof(body) - (size_t)blen);
+            ok = have_pow && (n > 0) &&
+                 (strstr((char *)resp, "200 OK") != NULL) &&
+                 (strstr((char *)resp, "Order #") != NULL);
+        }
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+
+    printf("store: duplicate customer_addr field refuses ambiguity... ");
+    {
+        char pow_ts[32] = "", pow_nonce[32] = "";
+        bool have_pow = solve_store_pow_fields(1, pow_ts, sizeof(pow_ts),
+                                               pow_nonce, sizeof(pow_nonce));
+        char body[384];
+        int blen = snprintf(body, sizeof(body),
+            "product_id=1&csrf_token=%s&pow_ts=%s&pow_nonce=%s"
+            "&customer_addr=t1YRBXKYLhrb4X8sTkBeRysAzBTMMHpUXrn"
+            "&customer_addr=t1FloodFakeSecond9PzqT4VdKh5sYVnQnSm",
+            csrf1, pow_ts, pow_nonce);
+        bool ok = blen > 0;
+        if (ok) {
+            body[blen] = 'D';    /* live byte where a sentinel would sit */
+            body[blen + 1] = '\0';
+            size_t n = store_handle_request("POST", "/store/orders",
+                                             (const uint8_t *)body,
+                                             (size_t)blen,
+                                             resp, sizeof(resp),
+                                             test_datadir);
+            memset(&body[blen], 0, sizeof(body) - (size_t)blen);
+            /* A name supplied twice is ambiguous input: neither value is
+             * trusted — not first-wins, not last-wins. */
+            ok = have_pow && (n > 0) &&
+                 (strstr((char *)resp, "400 Bad Request") != NULL) &&
+                 (strstr((char *)resp, "Invalid address") != NULL) &&
+                 (strstr((char *)resp, "Order #") == NULL);
+        }
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+
+    printf("store: shared form scanner uses ampersand boundaries only... ");
+    {
+        static const char body[] =
+            "memo=x?confirm=true&literal=true anything";
+        char confirm[16] = "dirty", literal[32] = "dirty";
+        bool ok = !web_form_field(body, sizeof(body) - 1, "confirm",
+                                  confirm, sizeof(confirm)) &&
+            confirm[0] == '\0' &&
+            web_form_field(body, sizeof(body) - 1, "literal", literal,
+                           sizeof(literal)) &&
+            strcmp(literal, "true anything") == 0;
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+
+    printf("store: shared form scanner refuses NUL and malformed escapes... ");
+    {
+        static const char raw_nul[] = {'f','e','e','=','1','\0','2'};
+        static const char encoded_nul[] = "fee=1%00junk";
+        static const char bad_hex[] = "fee=1%XZ";
+        static const char short_hex[] = "fee=1%2";
+        char out[16] = "dirty";
+        bool ok = !web_form_field(raw_nul, sizeof(raw_nul), "fee", out,
+                                  sizeof(out)) && out[0] == '\0';
+        snprintf(out, sizeof(out), "dirty");
+        ok = ok && !web_form_field(encoded_nul, sizeof(encoded_nul) - 1,
+                                   "fee", out, sizeof(out)) && out[0] == '\0';
+        snprintf(out, sizeof(out), "dirty");
+        ok = ok && !web_form_field(bad_hex, sizeof(bad_hex) - 1, "fee",
+                                   out, sizeof(out)) && out[0] == '\0';
+        snprintf(out, sizeof(out), "dirty");
+        ok = ok && !web_form_field(short_hex, sizeof(short_hex) - 1, "fee",
+                                   out, sizeof(out)) && out[0] == '\0';
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+
+    printf("store: shared form scanner refuses output truncation... ");
+    {
+        static const char body[] = "fee=1234";
+        char exact[5] = "", short_out[4] = "bad";
+        bool ok = web_form_field(body, sizeof(body) - 1, "fee", exact,
+                                 sizeof(exact)) && strcmp(exact, "1234") == 0;
+        ok = ok && !web_form_field(body, sizeof(body) - 1, "fee", short_out,
+                                   sizeof(short_out)) && short_out[0] == '\0';
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }

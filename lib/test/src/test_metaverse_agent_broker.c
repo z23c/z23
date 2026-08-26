@@ -1119,6 +1119,27 @@ static int mb_run_child(const char *self_exe, const char *leaf,
     MB_CHECK("the kernel named the exact process the broker forked",
              s.peer.valid && s.peer.pid == sres.pid && s.peer.uid == getuid());
 
+    /* Fail-closed custody documents: a session that cannot attest what it
+     * holds must RETIRE any bindings file left standing, not leave a prior
+     * session's grants readable as today's fact. The demo authority carries
+     * no money_bindings provider, so this exercise takes exactly the
+     * cannot-attest branch the retirement was added for. */
+    {
+        char mpath[512];
+        snprintf(mpath, sizeof(mpath), "%s/money-bindings.json", broker_dir);
+        FILE *mf = fopen(mpath, "we");
+        if (mf) {
+            (void)fprintf(mf,
+                          "{\"schema\":\"zcl.agent_money_bindings.v1\","
+                          "\"wallets\":[]}");
+            (void)fclose(mf);
+        }
+        agent_broker_write_status(broker_dir, &s, sres.pid, NULL);
+        struct stat mst;
+        MB_CHECK("unattestable custody retires the standing bindings doc",
+                 stat(mpath, &mst) != 0 && errno == ENOENT);
+    }
+
     if (strcmp(script, "inspect") == 0) {
         MB_CHECK("the confined agent's requests were served",
                  s.requests_served >= 3);

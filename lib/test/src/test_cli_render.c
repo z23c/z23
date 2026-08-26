@@ -104,6 +104,30 @@ static struct zcl_cli_render_env cr_env(int width, bool ansi)
     return e;
 }
 
+/* Recover one emit_kv_command value by removing only its shell continuation
+ * pairs. Continuation lines begin at column zero, so no presentation bytes
+ * can leak into the command being tested. */
+static bool cr_recover_command(const char *rendered, const char *prefix,
+                               char *out, size_t out_cap)
+{
+    const char *p = strstr(rendered, prefix);
+    if (!p || !out || out_cap == 0)
+        return false;
+    p += strlen(prefix);
+    size_t used = 0;
+    while (*p && *p != '\n') {
+        if (p[0] == '\\' && p[1] == '\n') {
+            p += 2;
+            continue;
+        }
+        if (used + 1 >= out_cap)
+            return false;
+        out[used++] = *p++;
+    }
+    out[used] = '\0';
+    return *p == '\n';
+}
+
 /* Save/restore the four variables zcl_cli_render_resolve reads, so the
  * resolution tests are hermetic regardless of the harness environment. */
 struct cr_saved_env {
@@ -517,7 +541,13 @@ static int test_guide_tree_render(void)
                != NULL);
         PASS();
     }
-    TEST("offered renders vantage and one next action, not JSON keys") {
+    TEST("offered renders two reconstructable commands at narrow width") {
+        static const char restart[] =
+            "systemctl --user restart zclassic23";
+        static const char offered[] =
+            "z23 zcode package offered "
+            "-datadir=./test-tmp/offered-ux-copyable-"
+            "0123456789abcdefghijklmnopqrstuvwxyz";
         const char *doc =
             "{\"schema\":\"zcl.result.v1\","
             "\"command\":\"zcode.package.offered\","
@@ -525,23 +555,33 @@ static int test_guide_tree_render(void)
             "\"live\":false,\"serving_ready\":false,\"peer_count\":0,"
             "\"next_command\":\"systemctl --user restart zclassic23, then "
             "z23 zcode package offered "
-            "-datadir=./test-tmp/offered-ux-copyable\"}}";
-        struct zcl_cli_render_env e = cr_env(80, false);
+            "-datadir=./test-tmp/offered-ux-copyable-"
+            "0123456789abcdefghijklmnopqrstuvwxyz\"}}";
+        struct zcl_cli_render_env e = cr_env(40, false);
         char out[8192];
         size_t n = zcl_cli_render_doc(doc, strlen(doc),
                                       "zcode.package.offered", &e, out,
                                       sizeof(out));
         ASSERT(n > 0);
         ASSERT(strstr(out, "offered") != NULL);
-        ASSERT(strstr(out, "this CLI is not the hosting engine") != NULL);
-        ASSERT(strstr(out, "systemctl --user restart zclassic23") != NULL);
+        ASSERT(strstr(out, "this CLI is not the") != NULL);
+        char recovered_restart[128], recovered_offered[256];
+        ASSERT(cr_recover_command(out, "  next    ", recovered_restart,
+                                  sizeof(recovered_restart)));
+        ASSERT(cr_recover_command(out, "  then    ", recovered_offered,
+                                  sizeof(recovered_offered)));
+        ASSERT(strcmp(recovered_restart, restart) == 0);
+        ASSERT(strcmp(recovered_offered, offered) == 0);
+        ASSERT(strstr(out, "systemctl --user restart") != NULL);
         ASSERT(strstr(out, "z23 zcode package offered") != NULL);
-        ASSERT(strstr(out, "./test-tmp/offered-ux-copyable") != NULL);
+        ASSERT(strstr(out, "offered-ux-copyable") != NULL);
+        ASSERT(strstr(out, "\\\n") != NULL);
         ASSERT(strstr(out, "not ready") != NULL);
-        ASSERT(strstr(out, "…") == NULL);
+        ASSERT(strstr(recovered_restart, "…") == NULL);
+        ASSERT(strstr(recovered_offered, "…") == NULL);
         ASSERT(strstr(out, "\"live\"") == NULL);
         ASSERT(strstr(out, "\"schema\"") == NULL);
-        ASSERT(cr_max_line_width(out) <= 80);
+        ASSERT(cr_max_line_width(out) <= 40);
         PASS();
     }
     TEST("code.guide renders a four-step recipe, not JSON keys") {

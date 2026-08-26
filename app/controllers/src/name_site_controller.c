@@ -24,6 +24,7 @@
  */
 
 #include "controllers/name_site_controller.h"
+#include "controllers/web_form.h"
 #include "controllers/name_controller.h"
 #include "controllers/name_resolver.h"
 #include "controllers/name_gateway_controller.h"
@@ -229,51 +230,6 @@ static size_t name_redirect(uint8_t *resp, size_t max, const char *location)
         "HTTP/1.1 302 Found\r\n"
         "Location: %s\r\n"
         "Connection: close\r\n\r\n", safe);
-}
-
-/* Percent/`+` decode an x-www-form-urlencoded value. */
-static void url_decode(char *dst, size_t dstmax, const char *src, size_t srclen)
-{
-    size_t di = 0;
-    if (!dstmax) return;
-    for (size_t si = 0; si < srclen && di < dstmax - 1; si++) {
-        char c = src[si];
-        if (c == '%' && si + 2 < srclen) {
-            char h1 = src[si + 1], h2 = src[si + 2];
-            int hi = (h1 >= '0' && h1 <= '9') ? h1 - '0' :
-                     (h1 >= 'a' && h1 <= 'f') ? h1 - 'a' + 10 :
-                     (h1 >= 'A' && h1 <= 'F') ? h1 - 'A' + 10 : -1;
-            int lo = (h2 >= '0' && h2 <= '9') ? h2 - '0' :
-                     (h2 >= 'a' && h2 <= 'f') ? h2 - 'a' + 10 :
-                     (h2 >= 'A' && h2 <= 'F') ? h2 - 'A' + 10 : -1;
-            if (hi >= 0 && lo >= 0) {
-                dst[di++] = (char)((hi << 4) | lo);
-                si += 2;
-                continue;
-            }
-        }
-        dst[di++] = (c == '+') ? ' ' : c;
-    }
-    dst[di] = '\0';
-}
-
-/* Parse `field=value` out of an urlencoded body into `out`. Returns out on
- * hit, NULL if the field is absent. */
-static const char *parse_form_field(const char *body, size_t len,
-                                    const char *field, char *out, size_t outmax)
-{
-    if (!body || !len || !field || !out || outmax == 0) return NULL;
-    char search[96];
-    snprintf(search, sizeof(search), "%s=", field);
-    const char *p = strstr(body, search);
-    if (!p) return NULL;
-    p += strlen(search);
-    size_t remaining = len - (size_t)(p - body);
-    size_t vlen = 0;
-    while (vlen < remaining && p[vlen] && p[vlen] != '&' && p[vlen] != ' ')
-        vlen++;
-    url_decode(out, outmax, p, vlen);
-    return out;
 }
 
 /* ── CSRF (mirrors store_controller.c) ──────────────────────────── */
@@ -547,12 +503,12 @@ static size_t name_handle_register_post(const uint8_t *body, size_t body_len,
     char name[128] = "", type_s[32] = "", value[256] = "";
     char csrf[64] = "", pow_ts[32] = "", pow_nonce[32] = "";
     if (body && body_len > 0) {
-        parse_form_field((const char *)body, body_len, "name", name, sizeof(name));
-        parse_form_field((const char *)body, body_len, "type", type_s, sizeof(type_s));
-        parse_form_field((const char *)body, body_len, "value", value, sizeof(value));
-        parse_form_field((const char *)body, body_len, "csrf_token", csrf, sizeof(csrf));
-        parse_form_field((const char *)body, body_len, "pow_ts", pow_ts, sizeof(pow_ts));
-        parse_form_field((const char *)body, body_len, "pow_nonce", pow_nonce, sizeof(pow_nonce));
+        web_form_field((const char *)body, body_len, "name", name, sizeof(name));
+        web_form_field((const char *)body, body_len, "type", type_s, sizeof(type_s));
+        web_form_field((const char *)body, body_len, "value", value, sizeof(value));
+        web_form_field((const char *)body, body_len, "csrf_token", csrf, sizeof(csrf));
+        web_form_field((const char *)body, body_len, "pow_ts", pow_ts, sizeof(pow_ts));
+        web_form_field((const char *)body, body_len, "pow_nonce", pow_nonce, sizeof(pow_nonce));
     }
 
     /* CSRF first (cheapest, stops tricked-browser submissions). */
@@ -619,7 +575,7 @@ size_t name_site_handle_request(const char *method, const char *path,
         char *cut = strpbrk(name, "/?");
         if (cut) *cut = '\0';
         if (q)
-            parse_form_field(q + 1, strlen(q + 1), "type",
+            web_form_field(q + 1, strlen(q + 1), "type",
                              type_q, sizeof(type_q));
         return name_resolve_site(ndb, name, type_q, response, response_max);
     }

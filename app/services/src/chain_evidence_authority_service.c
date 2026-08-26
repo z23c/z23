@@ -291,6 +291,11 @@ enum chain_evidence_controller_state chain_evidence_controller_load_state(
     return authority->state;
 }
 
+static void cec_freeze_undurable(const char *reason)
+{
+    event_emitf(EV_SYNC_STATE_CHANGE, 0, "cec_freeze_not_durable reason=%s",
+                reason);
+}
 void chain_evidence_controller_freeze(struct chain_evidence_controller *authority,
                            const char *reason)
 {
@@ -301,14 +306,29 @@ void chain_evidence_controller_freeze(struct chain_evidence_controller *authorit
      * violates the no-silent-halt mandate. Coalesce NULL and "" alike. */
     snprintf(authority->contradiction_reason, sizeof(authority->contradiction_reason),
              "%s", (reason && reason[0]) ? reason : "unspecified_contradiction");
-    if (authority->ndb) {
-        (void)node_db_state_set(authority->ndb, "cec.contradiction_reason",
-                                authority->contradiction_reason,
-                                strlen(authority->contradiction_reason) + 1);
-        (void)persist_state(authority, CEC_CONTRADICTION_FROZEN);
-        (void)node_db_state_set_int(authority->ndb, "cec.publish_state",
-                                    CEC_PUBLISH_FROZEN_CONTRADICTION);
+    if (!authority->ndb) {
+        cec_freeze_undurable("node_db_unavailable");
+        return;
     }
+    struct node_db_status status = {0}; node_db_get_status(authority->ndb, &status);
+    if (status.tx_open) {
+        /* A caller-owned rollback cannot attest this freeze as durable. */
+        cec_freeze_undurable("caller_transaction_open");
+        return;
+    }
+    DB_TXN_SCOPE(txn, authority->ndb, "cec.freeze");
+    const char *name = "contradiction_frozen";
+    bool ok = txn &&
+        node_db_state_set(authority->ndb, "cec.contradiction_reason",
+            authority->contradiction_reason,
+            strlen(authority->contradiction_reason) + 1) &&
+        node_db_state_set(authority->ndb, "cec.sync_state", name,
+                          strlen(name) + 1) &&
+        node_db_state_set_int(authority->ndb, "cec.publish_state",
+                              CEC_PUBLISH_FROZEN_CONTRADICTION) &&
+        db_txn_commit(txn);
+    if (!ok)
+        cec_freeze_undurable("atomic_transaction_failed");
 }
 
 enum chain_evidence_controller_result chain_evidence_controller_import_snapshot_evidence(

@@ -158,6 +158,7 @@ struct service_record_discovery {
 
 struct vcs_zcode_dht_service {
   bool enabled;
+  uint64_t record_collect_watermark_mono; /* last expired-row reclaim */
   char disabled_reason[96], last_error[160], datadir[1024];
   uint8_t genesis[32], self_id[32], online_seed[32], local_noise_static[32];
   struct vcs_zcode_dht_delegation delegation;
@@ -269,6 +270,11 @@ bool vcs_zcode_dht_publications_save(
 #define PUBLICATION_RETRY_MIN_S 30u
 #define PUBLICATION_RETRY_MAX_S 3600u
 #define PUBLICATION_RENEW_FLOOR_S 60u
+
+/* Expired-row reclaim cadence for the signed-record store. Dead rows stop
+ * consuming capacity the moment put() or collect() sees them, but the
+ * periodic sweep is what frees them without waiting for an admission. */
+#define VCS_ZCODE_DHT_RECORD_COLLECT_INTERVAL_S 300u
 void publication_mark_dirty(struct vcs_zcode_dht_service *service,
                             uint64_t monotonic_s);
 uint64_t publication_next_proof_epoch(
@@ -287,6 +293,8 @@ struct service_record_operation *vcs_zcode_dht_records_operation_find(
     struct vcs_zcode_dht_service *service, uint64_t id);
 void vcs_zcode_dht_records_sweep(struct vcs_zcode_dht_service *service,
                                  uint64_t now_mono);
+void vcs_zcode_dht_records_collect_expired(
+    struct vcs_zcode_dht_service *service, struct vcs_zcode_dht_time now);
 bool vcs_zcode_dht_message_is_request(enum vcs_zcode_dht_msg_kind kind);
 const uint8_t *vcs_zcode_dht_message_query_id(
     const struct vcs_zcode_dht_msg *message);

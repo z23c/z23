@@ -14,6 +14,7 @@
 #include <stdint.h>
 
 #include "base/hex.h"
+#include "controllers/web_form.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -89,63 +90,10 @@ static inline void hex_short(const uint8_t *bytes, size_t len, size_t keep,
     memcpy(out + 2 * keep, "...", 4);
 }
 
-/* ── Form parsing (name_site_controller.c idiom) ─────────────────── */
-
-static inline void url_decode(char *dst, size_t dstmax, const char *src,
-                              size_t srclen)
-{
-    size_t di = 0;
-    if (!dstmax)
-        return;
-    for (size_t si = 0; si < srclen && di < dstmax - 1; si++) {
-        char c = src[si];
-        if (c == '%' && si + 2 < srclen) {
-            int hi = zcl_hex_nibble(src[si + 1], true);
-            int lo = zcl_hex_nibble(src[si + 2], true);
-            if (hi >= 0 && lo >= 0) {
-                dst[di++] = (char)((hi << 4) | lo);
-                si += 2;
-                continue;
-            }
-        }
-        dst[di++] = (c == '+') ? ' ' : c;
-    }
-    dst[di] = '\0';
-}
-
-static inline const char *parse_form_field(const char *body, size_t len,
-                                           const char *field, char *out,
-                                           size_t outmax)
-{
-    if (!body || !len || !field || !out || outmax == 0)
-        return NULL;
-    size_t field_len = strlen(field);
-    const char *found = NULL;
-    size_t found_len = 0;
-    size_t pos = 0;
-    while (pos < len) {
-        size_t end = pos;
-        while (end < len && body[end] != '&')
-            end++;
-        size_t eq = pos;
-        while (eq < end && body[eq] != '=')
-            eq++;
-        if (eq < end && eq - pos == field_len &&
-            memcmp(body + pos, field, field_len) == 0) {
-            if (found) {
-                out[0] = '\0';
-                return NULL;
-            }
-            found = body + eq + 1;
-            found_len = end - eq - 1;
-        }
-        pos = end + (end < len);
-    }
-    if (!found)
-        return NULL;
-    url_decode(out, outmax, found, found_len);
-    return out;
-}
+/* ── Form parsing ─────────────────────────────────────────────────
+ *
+ * Bodies are length-delimited slices without a NUL sentinel; form
+ * fields go through the shared bounded scanner in web_form.h. */
 
 /* The plan-gated buy route (yardsale_site_controller_buy.c). */
 size_t yardsale_site_handle_buy_post(const uint8_t *body, size_t body_len,
