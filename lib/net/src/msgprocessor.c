@@ -938,11 +938,13 @@ static bool handle_zmsgack(struct msg_processor *mp, struct p2p_node *node,
 /* ── ZCL Market: file sharing handlers ─────────────────────────── */
 
 /* May this node rebroadcast a third party's offer? Storing it is always
- * fine — moderation never deletes — but handing its operator-written
- * filename on to further peers is this node's own hosting decision, taken
- * through the injected profile port. An unwired port answers no: a node
- * that cannot ask its own profile rebroadcasts nothing. Every refusal is
- * counted, never silently dropped.
+ * fine — moderation never deletes. Forwarding it is decided by the node's
+ * own RELAY rule through the injected port, which is a separate setting
+ * from the serve gate and permissive by default (see the port's contract
+ * in msgprocessor.h). An unwired port answers no, because a node that
+ * cannot ask its own policy takes the strict side. Every refusal is
+ * counted, never silently dropped — which is what makes an operator's
+ * strict-relay opt-in observable instead of invisible.
  *
  * This returns a plain bool on purpose and MUST NOT use LOG_FAIL/REJECT_IF
  * here: those macros expand to `return`, and an early return from the
@@ -999,7 +1001,7 @@ static bool handle_zfilelist(struct msg_processor *mp, struct p2p_node *node,
             (void)mp->file_offer_save(&offer, mp->file_offer_save_ctx);
 
         /* Re-gossip to other peers if new, TTL > 1, and this node's own
-         * listing-visibility profile will host it. A refusal keeps the
+         * relay rule allows it (it does by default). A refusal keeps the
          * stored copy and only stops the rebroadcast. */
         if (is_new && offer.ttl > 1 && mp->net_mgr &&
             mp_offer_relay_allowed(mp, &offer)) {
@@ -1279,7 +1281,7 @@ static bool handle_zfileoffer(struct msg_processor *mp,
     if (mp->file_offer_save)
         (void)mp->file_offer_save(&offer, mp->file_offer_save_ctx);
     /* Same rule as the zfilelist re-gossip: ingested and stored either
-     * way, rebroadcast only when this node's own profile will host it. */
+     * way, rebroadcast unless this node's own relay rule says otherwise. */
     if (result == FILE_MARKET_INGEST_NEW && mp->net_mgr &&
         mp_offer_relay_allowed(mp, &offer))
         mp_flood_wire(mp, MSG_FILE_OFFER, wire, remaining,

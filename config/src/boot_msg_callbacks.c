@@ -421,19 +421,25 @@ int boot_ingest_file_payment(const struct file_payment *payment,
     return FILE_PAYMENT_INGEST_REJECTED;
 }
 
-/* Relay gate adapter: the node's own listing-visibility profile decides
- * whether a third party's offer is rebroadcast from here. The offer row is
- * keyed by root_hash in the review store, which is the id the free
- * (zfilelist) carrier also has, so the root is the key both callers share.
- * market_moderation_may_serve_root() is fail-closed for every failure
- * class, so this adapter adds no policy of its own. */
+/* Relay gate adapter — the RELAY leg, which is a different question from
+ * the serve leg and answers from its own setting. Under the boot default
+ * relay-all.v1 this forwards every valid offer, because refusing to pass
+ * on a pointer would cut an honest seller's reach down to this node's own
+ * peers and hand discovery to whoever has operators awake. An operator who
+ * opts in to relay-reviewed-only.v1 gets the strict answer, fail-closed in
+ * every class the serve leg is.
+ *
+ * The offer row is keyed by root_hash in the review store, which is the id
+ * the free (zfilelist) carrier also has, so the root is the key both
+ * callers share. market_moderation_may_relay_root() owns the whole
+ * decision; this adapter adds no policy of its own. */
 static bool boot_offer_relay_allowed(const struct file_offer *offer,
                                      void *ctx)
 {
     (void)ctx;
     if (!offer)
         return false;
-    return market_moderation_may_serve_root(offer->root_hash);
+    return market_moderation_may_relay_root(offer->root_hash);
 }
 
 void boot_wire_file_market(struct msg_processor *mp,

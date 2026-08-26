@@ -50,16 +50,26 @@ typedef void (*msg_peer_save_fn)(const struct p2p_node *node, void *ctx);
 typedef bool (*msg_zmsg_save_fn)(const struct zmsg_message *msg, void *ctx);
 typedef bool (*msg_file_offer_save_fn)(const struct file_offer *offer,
                                        void *ctx);
-/* Port seam for this node's own listing-visibility profile: may this node
- * hand a third party's offer — its operator-written filename included — on
- * to another peer? Answered by app/services/market_moderation_service
- * (general-audience.v1 by default), which lib/net must not name directly.
+/* Port seam for this node's own RELAY rule: may this node pass a third
+ * party's offer — its operator-written filename included — on to another
+ * peer? Answered by app/services/market_moderation_service, which lib/net
+ * must not name directly.
  *
- * Relay only. An offer that answers false is still received, validated,
- * stored, listed under an operator-chosen open-view profile, and reachable
- * from the seller directly; this node simply does not rebroadcast it. The
- * decision is local, binds no other node, and never touches block or
- * transaction acceptance. An unwired port answers "do not relay". */
+ * This is NOT the serve gate and does not share its default. Relaying
+ * forwards a POINTER, not content, and the boot default relay-all.v1
+ * forwards everything valid: gating relay by default would collapse offer
+ * gossip to one hop from the seller on every node until a human acted,
+ * which is a centralization pressure. Strict relay is an operator opt-in.
+ *
+ * An offer that answers false is still received, validated, and stored;
+ * this node simply does not rebroadcast it. The decision is local, binds
+ * no other node, and never touches block or transaction acceptance.
+ *
+ * An unwired port answers "do not relay". That is not the default leaking
+ * through — it is the same rule the policy loader uses: a node that cannot
+ * ask its own policy is not a node with no policy, so it takes the strict
+ * side rather than assume the permissive one. Production wires this
+ * unconditionally in boot_wire_file_market(). */
 typedef bool (*msg_offer_relay_allowed_fn)(const struct file_offer *offer,
                                            void *ctx);
 typedef int (*msg_file_payment_ingest_fn)(

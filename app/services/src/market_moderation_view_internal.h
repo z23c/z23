@@ -11,7 +11,7 @@
     "this node's own profile neither lists nor hosts this offer"
 #define MMV_GENERAL_SHOWS "offers the node itself marked reviewed_ok"
 #define MMV_GENERAL_HIDES \
-    "unreviewed and sensitive offers (kept and never deleted; not listed, not served, not relayed)"
+    "unreviewed and sensitive offers (kept and never deleted; not listed and not served — relay is a separate rule)"
 #define MMV_OPEN_SHOWS \
     "every offer the node ingested, annotated with local review_state"
 #define MMV_LIVE_SURFACE \

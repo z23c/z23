@@ -1430,16 +1430,19 @@ AGENT_IMPACT_RULE("lib/vcs/src/node_reproduce.c|lib/vcs/include/vcs/node_reprodu
  * keeps at zero entries, and the .onion guard that returns before the
  * resolver. */
 AGENT_IMPACT_RULE("lib/test/src/test_cold_join_sovereign.c|core/chainparams/src/chainparams.c|core/chainparams/src/checkpoints.c|lib/sapling/src/params_vk_embedded.c|lib/net/src/connman.c", "cold_join_sovereign seed_bootstrap_doors params_vk_embedded net make_lint_gates")
-/* LANE moderated hosting: the node's own listing-visibility profile now
- * decides what it SERVES, not only what it lists. These files move
- * together because the decision is one answer reached from four places —
- * the profile and its fail-closed store, the injected port the P2P chunk
- * delivery gate asks before payment or content read, the injected port the
- * offer re-gossip asks before rebroadcasting somebody else's filename, and
- * the registered-content index that must never advertise what the delivery
- * gate would refuse. Widen any one of them alone and the node advertises a
- * protection it does not provide, which is worse than having none. The
- * boot adapters are named because an unwired port is the CLOSED state: a
- * missing wire-up is a silent serving outage, and a permissive default
- * would be a silent moderation outage. */
-AGENT_IMPACT_RULE("app/services/src/market_moderation_service.c|app/services/include/services/market_moderation_service.h|app/services/src/market_moderation_view_service.c|lib/net/src/file_market_delivery.c|lib/net/include/net/file_market_delivery.h|config/src/boot_file_market_delivery.c|config/src/boot_msg_callbacks.c|lib/test/src/test_file_market_moderation.c|lib/test/src/test_file_market_delivery.c", "file_market_moderation file_market make_lint_gates")
+/* LANE moderated hosting: the node's own moderation policy decides what it
+ * SERVES and what it RELAYS, as two settings with two different defaults.
+ * These files move together because both legs are answered from one policy
+ * file and one decide(): the store that resolves them, the injected port
+ * the P2P chunk delivery gate asks before payment or content read, the
+ * injected port the offer re-gossip asks, the registered-content index that
+ * must never advertise what the delivery gate would refuse, and the typed
+ * surfaces that must keep reporting the two rules as separately-valued
+ * things. Widen any one alone and the node advertises a protection it does
+ * not provide, which is worse than having none; couple them back together
+ * and a relay default meant to protect permissionless discovery silently
+ * becomes a hosting rule, or the reverse. The boot adapters are named
+ * because an unwired port is the CLOSED state on both legs: a missing
+ * wire-up is a silent outage, and a permissive default would be a silent
+ * moderation outage. */
+AGENT_IMPACT_RULE("app/services/src/market_moderation_service.c|app/services/include/services/market_moderation_service.h|app/services/src/market_moderation_view_service.c|lib/net/src/file_market_delivery.c|lib/net/include/net/file_market_delivery.h|config/src/boot_file_market_delivery.c|config/src/boot_msg_callbacks.c|lib/test/src/test_file_market_moderation.c|lib/test/src/test_file_market_delivery.c|app/controllers/src/market_moderation_native_handler.c|app/services/src/market_moderation_view_internal.h", "file_market_moderation file_market command_registry_catalog native_api_contract make_lint_gates")

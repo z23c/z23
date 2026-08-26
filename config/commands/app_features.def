@@ -45,6 +45,8 @@ ZCL_COMMAND_BRANCH("app.market.moderation", "app.market", "Moderation",
                    ZCL_COMMAND_LAYER_APP)
 ZCL_COMMAND_BRANCH("app.market.moderation.profile", "app.market.moderation",
                    "Profiles", ZCL_COMMAND_LAYER_APP)
+ZCL_COMMAND_BRANCH("app.market.moderation.relay", "app.market.moderation",
+                   "Relay rule", ZCL_COMMAND_LAYER_APP)
 ZCL_COMMAND_BRANCH("app.market.moderation.review", "app.market.moderation",
                    "Review marks", ZCL_COMMAND_LAYER_APP)
 ZCL_COMMAND_BRANCH("app.store", "app", "Store", ZCL_COMMAND_LAYER_APP)
@@ -662,8 +664,8 @@ ZCL_COMMAND_READY_READ(
     "app.market.list", "app.market", "", "List files on the ZCL Market",
     "The admitted file offers in the bounded live cache, filtered through "
     "this node's own listing-visibility profile (per-node moderation: a "
-    "hidden offer is kept and never deleted, but is not listed, served, or "
-    "relayed from here). "
+    "hidden offer is kept and never deleted, but is neither listed nor "
+    "served from here; relay is a separate rule). "
     "Every row carries its local review_state; the reply carries an honest "
     "hidden_count. The optional profile key (\"open\") is the explicit "
     "per-request override showing everything ingested. Paid rows have a "
@@ -877,13 +879,16 @@ ZCL_COMMAND_READY_READ(
 ZCL_COMMAND_READY_READ(
     "app.market.moderation.status", "app.market.moderation", "",
     "Show this node's market moderation posture",
-    "The node's own listing-visibility state: the active immutable profile, "
-    "the available profiles, and local review_state counts over stored "
-    "offers. The profile decides what this node lists and what it hands to "
-    "another party — there are no network-wide bans and no deletion "
-    "authority: a hidden offer stays stored with its signed wire intact and "
-    "stays reachable from any node that does host it, and moderation never "
-    "reaches block or transaction acceptance.", 0,
+    "The node's own moderation posture: local review_state counts over "
+    "stored offers plus the TWO independently-valued rules — serve_rule "
+    "(what this node hands out; default general-audience.v1, reviewed_ok "
+    "only) and relay_rule (whether it forwards other people's offer "
+    "announcements; default relay-all.v1, yes). They have separate defaults "
+    "and separate set commands, and neither moves the other. No "
+    "network-wide bans and no deletion authority: a hidden offer stays "
+    "stored with its signed wire intact and stays reachable from any node "
+    "that does host it, and neither rule reaches block or transaction "
+    "acceptance.", 0,
     "market,moderation,status,profile,review",
     "zcl.command.empty_input.v1", "zcl.market_moderation_status.v1",
     "", "", "z23 app market moderation status",
@@ -918,9 +923,11 @@ ZCL_COMMAND_READY_COMMAND(
     "to the current active profile and the target; mode=commit requires "
     "that token (STALE_PLAN after any concurrent change). Boot default is "
     "the immutable general-audience.v1 (unreviewed and sensitive offers are "
-    "kept but neither listed, served, nor relayed from here); open-view is "
-    "the named opt-in showing and hosting everything ingested. A local "
-    "decision that binds no other node and never touches consensus.", 0,
+    "kept but neither listed nor served from here); open-view is the named "
+    "opt-in showing and hosting everything ingested. This is the SERVE leg "
+    "only — relay is a separate rule with its own default, set by "
+    "app.market.moderation.relay.set, and this command never moves it. A "
+    "local decision that binds no other node and never touches consensus.", 0,
     "market,moderation,profile,set,policy",
     "zcl.app_market_moderation_profile_set.input.v1",
     "zcl.market_moderation_profile_set.v1",
@@ -934,6 +941,34 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
     ZCL_COMMAND_CAP_P2P_TOPIC, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     zcl_native_handle_market_moderation_profile_set)
+
+ZCL_COMMAND_READY_COMMAND(
+    "app.market.moderation.relay.set", "app.market.moderation.relay",
+    "", "Set this node's offer-relay rule",
+    "Exact plan/commit over the node's own RELAY rule, persisted to "
+    "<datadir>/market/moderation.v1 alongside, and independent of, the "
+    "serve profile — setting one leg never moves the other, and their plan "
+    "tokens are not interchangeable. Boot default is relay-all.v1: forward "
+    "every valid offer announcement. Relaying passes on a POINTER, not "
+    "content, so gating it by default would cut an honest seller's reach to "
+    "one hop and hand discovery to whoever has operators awake. "
+    "relay-reviewed-only.v1 is the opt-in that forwards only offers this "
+    "node marked reviewed_ok; refusals stay counted, never silently "
+    "dropped. A local decision that binds no other node and never touches "
+    "consensus.", 0,
+    "market,moderation,relay,gossip,set,policy",
+    "zcl.app_market_moderation_relay_set.input.v1",
+    "zcl.market_moderation_relay_set.v1",
+    "relay_rule,mode,plan_token", "relay_rule,mode",
+    "z23 app market moderation relay set --input='{\"relay_rule\":\"relay-reviewed-only.v1\",\"mode\":\"plan\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_P2P_TOPIC, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_market_moderation_relay_set)
 
 ZCL_COMMAND_READY_COMMAND(
     "app.market.moderation.review.set", "app.market.moderation.review", "",

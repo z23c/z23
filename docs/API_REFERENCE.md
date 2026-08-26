@@ -74,17 +74,17 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 731 |
+| Registry entries (branches + leaves) | 734 |
 | Top-level roots | 12 |
-| Branches | 170 |
-| Leaves (dispatchable command paths) | 561 |
-| … `ready` (live handler in this build) | 505 |
+| Branches | 171 |
+| Leaves (dispatchable command paths) | 563 |
+| … `ready` (live handler in this build) | 507 |
 | … `compat` (metadata only, names a fallback) | 25 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 24 |
-| Leaves with `effect=mutate` | 195 |
+| Leaves with `effect=mutate` | 197 |
 | Leaves with `effect=destructive` | 4 |
-| Leaves requiring **owner** authority | 112 |
+| Leaves requiring **owner** authority | 113 |
 
 Per source file:
 
@@ -93,14 +93,14 @@ Per source file:
 | `config/commands/root.def` | 10 | 5 | 5 |
 | `config/commands/core.def` | 121 | 29 | 92 |
 | `config/commands/apps.def` | 16 | 3 | 13 |
-| `config/commands/app_features.def` | 71 | 19 | 52 |
+| `config/commands/app_features.def` | 73 | 20 | 53 |
 | `config/commands/store.def` | 18 | 0 | 18 |
 | `config/commands/ops.def` | 48 | 9 | 39 |
 | `config/commands/dev.def` | 55 | 13 | 42 |
 | `config/commands/code.def` | 17 | 2 | 15 |
 | `config/commands/accounts.def` | 11 | 2 | 9 |
 | `config/commands/vault.def` | 24 | 4 | 20 |
-| `config/commands/zcode.def` | 234 | 56 | 178 |
+| `config/commands/zcode.def` | 235 | 56 | 179 |
 | `config/commands/zcode_science.def` | 25 | 7 | 18 |
 | `config/commands/metaverse.def` | 30 | 7 | 23 |
 | `config/commands/yardsale.def` | 7 | 2 | 5 |
@@ -526,6 +526,12 @@ represented by its children's sections.
 |---|---|---|---|---|---|---|
 | `app market moderation profile show` | ready | read / read / operator · fast/low | **`profile`** | `zcl.market_moderation_profile.v1` | `z23 app market moderation profile show --input='{"profile":"open-view"}'` | Describe one immutable moderation profile |
 | `app market moderation profile set` | ready | mutate / app-write / **owner**, plan-commit · fast/low | **`profile`**, **`mode`**, `plan_token` | `zcl.market_moderation_profile_set.v1` | `z23 app market moderation profile set --input='{"profile":"open-view","mode":"plan"}'` | Set this node's listing-visibility profile |
+
+#### `app.market.moderation.relay` — Relay rule
+
+| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
+|---|---|---|---|---|---|---|
+| `app market moderation relay set` | ready | mutate / app-write / **owner**, plan-commit · fast/low | **`relay_rule`**, **`mode`**, `plan_token` | `zcl.market_moderation_relay_set.v1` | `z23 app market moderation relay set --input='{"relay_rule":"relay-reviewed-only.v1","mode":"plan"}'` | Set this node's offer-relay rule |
 
 #### `app.market.moderation.review` — Review marks
 
@@ -1433,6 +1439,7 @@ represented by its children's sections.
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
 | `zcode node join` (aliases: `join`) | ready | mutate / app-write / operator · foreground/moderate | `datadir` | `zcl.zcode_node_join.v1` | `z23 join` | Join this node to the C23 network |
+| `zcode node verify` | ready | mutate / app-write / operator · background/high | `artifact`, `source_dir`, `scratch_dir`, `profile`, `jobs`, `timeout_seconds` | `zcl.zcode_node_verify.v1` | `z23 zcode node verify --input='{"source_dir":"/path/to/zclassic23"}'` | Rebuild this node here and compare bytes |
 
 #### `zcode.node.update` — Node self-update
 

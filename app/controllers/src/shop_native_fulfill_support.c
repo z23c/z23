@@ -218,7 +218,7 @@ bool shf_resolve_profile(const struct zcl_command_request *request,
     bool ok = false;
     char err[160] = "";
     enum market_moderation_profile active =
-        market_moderation_profile_load(datadir, &ok, err, sizeof(err));
+        market_moderation_profile_load(datadir, NULL, &ok, err, sizeof(err));
     if (!ok) {
         shf_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
                  "MODERATION_POLICY_UNREADABLE", "moderate",

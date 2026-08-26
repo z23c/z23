@@ -1924,6 +1924,9 @@ void zcl_native_handle_market_moderation_profile_show(
 void zcl_native_handle_market_moderation_profile_set(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+void zcl_native_handle_market_moderation_relay_set(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 void zcl_native_handle_market_moderation_review_set(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
