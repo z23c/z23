@@ -245,6 +245,17 @@ struct connman {
      * dialer falls into the normal addnode/addrman flow. */
     struct anchor_peer_set anchors;
     bool                   anchors_tried[ANCHOR_PEERS_MAX];
+    /* PROMPT ANCHOR DURABILITY. The addrman flush cadence is twelve minutes,
+     * so a node that met a peer and was killed nine minutes later used to
+     * forget it entirely and go back to the shipped seed list on the next
+     * boot. The dial scheduler re-collects the healthy outbound set every
+     * pass and writes anchors.dat as soon as that set CHANGES — bounded by
+     * ZCL_ANCHOR_PROMPT_FLUSH_SECS so a churning peer set cannot turn into a
+     * write storm. `last_saved_anchors` is what is currently on disk; it is
+     * also refreshed by connman_save_addrman() so the two writers never
+     * duplicate each other's work. */
+    struct anchor_peer_set last_saved_anchors;
+    int64_t                last_anchor_flush_ts;
     /* Address-free ZCODE NODES hints resolve through signed ZENDP records,
      * then land here for one priority dial by the existing non-blocking
      * dialer. They are also added to addrman; this queue is merely urgency,
@@ -495,6 +506,24 @@ int connman_seed_discovery_interval_for_test(size_t healthy_outbound);
  * what gets persisted to anchors.dat. Exposed for tests. */
 void connman_collect_healthy_anchors(struct connman *cm,
                                      struct anchor_peer_set *set);
+
+/* Shortest interval between two prompt anchor writes. anchors.dat is a few
+ * hundred bytes, so the cost is one small fsync; this bound exists so a peer
+ * set that flaps cannot turn into a write loop. */
+#define ZCL_ANCHOR_PROMPT_FLUSH_SECS 20
+
+/* True when the two sets name the same peers, regardless of the order the
+ * node list happened to produce them in. Exposed for tests. */
+bool connman_anchor_sets_equivalent(const struct anchor_peer_set *a,
+                                    const struct anchor_peer_set *b);
+
+/* Write anchors.dat if the healthy outbound set has changed since the last
+ * write AND at least ZCL_ANCHOR_PROMPT_FLUSH_SECS have passed. Called from
+ * the dial-scheduler loop, which runs far more often than the twelve-minute
+ * addrman flush; this is what makes "a peer we completed a handshake with is
+ * remembered even if we are killed" true in seconds rather than minutes.
+ * Returns true when a write was performed. */
+bool connman_flush_anchors_if_changed(struct connman *cm);
 
 /* addnode reconnection backoff trio. All three stamp
  * addnode_last_attempt[i] with wall time so the dialer's cooldown can

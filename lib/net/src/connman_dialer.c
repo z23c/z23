@@ -15,6 +15,7 @@
 #include "net/connman_onion_dial_policy.h"
 #include "net/onion_stream.h"
 #include "net/addrman.h"
+#include "net/anchor_peers.h"
 #include "net/peer_lifecycle.h"
 #include "net/port_policy.h"
 #include "core/random.h"
@@ -101,6 +102,80 @@ void connman_collect_healthy_anchors(struct connman *cm,
         a->last_success = n->time_connected;
     }
     zcl_mutex_unlock(&cm->manager.cs_nodes);
+}
+
+/* One anchor equals another when it names the same endpoint. last_height and
+ * last_success move on their own as a peer keeps talking to us; rewriting the
+ * file every time a height ticked would be a write loop, and neither field
+ * changes WHICH peer the next boot dials. */
+static bool anchor_same_endpoint(const struct anchor_peer *a,
+                                 const struct anchor_peer *b)
+{
+    return a->port == b->port && net_addr_eq(&a->addr, &b->addr);
+}
+
+bool connman_anchor_sets_equivalent(const struct anchor_peer_set *a,
+                                    const struct anchor_peer_set *b)
+{
+    if (!a || !b)
+        return a == b;
+    if (a->count != b->count)
+        return false;
+    /* Membership, not order: connman_collect_healthy_anchors walks the live
+     * node array, and that array reorders whenever a peer is dropped. An
+     * order-sensitive compare would report "changed" on every eviction and
+     * write anchors.dat for no reason. Sets are at most ANCHOR_PEERS_MAX (8),
+     * so the quadratic scan is trivial. */
+    for (size_t i = 0; i < a->count && i < ANCHOR_PEERS_MAX; i++) {
+        bool found = false;
+        for (size_t j = 0; j < b->count && j < ANCHOR_PEERS_MAX; j++) {
+            if (anchor_same_endpoint(&a->peers[i], &b->peers[j])) {
+                found = true;
+                break;
+            }
+        }
+        if (!found)
+            return false;
+    }
+    return true;
+}
+
+bool connman_flush_anchors_if_changed(struct connman *cm)
+{
+    if (!cm || !cm->datadir)
+        return false;
+
+    int64_t now = (int64_t)platform_time_wall_time_t();
+    if (cm->last_anchor_flush_ts != 0 &&
+        now - cm->last_anchor_flush_ts < ZCL_ANCHOR_PROMPT_FLUSH_SECS)
+        return false;
+
+    struct anchor_peer_set current;
+    connman_collect_healthy_anchors(cm, &current);
+
+    /* An empty set is normal early in boot and during a reconnect gap. Do not
+     * overwrite a good anchors.dat with nothing just because we are between
+     * peers — the whole point of the file is to survive exactly that. The
+     * shutdown/flush path still writes the empty set when it means it. */
+    if (current.count == 0)
+        return false;
+
+    if (connman_anchor_sets_equivalent(&current, &cm->last_saved_anchors))
+        return false;
+
+    struct zcl_result r = anchor_peers_save(cm->datadir, &current);
+    if (!r.ok) {
+        LOG_WARN("anchor_peers", "prompt anchors save failed: %s", r.message);
+        /* Retry on the next interval rather than immediately. */
+        cm->last_anchor_flush_ts = now;
+        return false;
+    }
+    cm->last_saved_anchors = current;
+    cm->last_anchor_flush_ts = now;
+    LOG_INFO("anchor_peers",
+             "persisted %zu healthy peer(s) to anchors.dat (prompt flush)",
+             current.count);
+    return true;
 }
 
 /* Dialable right now: reachable ZClassic port, not one of OUR own addresses,
@@ -628,6 +703,26 @@ void *thread_open_connections(void *arg)
          * timed out, BEFORE counting slots — feelers never count toward the
          * outbound floor/slot budget. */
         connman_sweep_feelers(cm);
+
+        /* REMEMBER: the moment the healthy outbound set changes, put it on
+         * disk. The addrman flush is twelve minutes apart, which meant a node
+         * that met a peer and was then killed nine minutes later lost it and
+         * went back to the shipped seed list on the next boot. Self-measured
+         * experience has to outlive an unclean stop or it is not memory.
+         *
+         * This sits ABOVE the slot-budget early-outs below on purpose. Those
+         * `continue` when the outbound set is FULL — which is precisely the
+         * state whose peer list is most worth keeping. Putting the flush
+         * after them would have meant a node at its peer ceiling never wrote
+         * an anchor from this loop at all.
+         *
+         * Interval-bounded (ZCL_ANCHOR_PROMPT_FLUSH_SECS) and a no-op when
+         * nothing changed, so the ordinary iteration costs one small compare
+         * and the write itself is a few hundred bytes. The loop restamps
+         * dial_scheduler_last_progress_us at the top of every pass, including
+         * the one-second early-out passes, so a write here cannot be mistaken
+         * for a stalled scheduler. */
+        (void)connman_flush_anchors_if_changed(cm);
 
         size_t outbound_slot = 0;
         size_t outbound_healthy = 0;
