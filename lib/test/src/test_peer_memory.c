@@ -206,6 +206,7 @@ struct pm_forged {
     int64_t  last_success;
     int32_t  attempts;
     int64_t  last_try;
+    int      bucket_count;    /* 0 == this build's ADDRMAN_NEW_BUCKET_COUNT */
 };
 
 static bool pm_forge_store(struct byte_stream *s, const struct pm_forged *f)
@@ -216,12 +217,14 @@ static bool pm_forge_store(struct byte_stream *s, const struct pm_forged *f)
     memset(zero16, 0, sizeof(zero16));
     unsigned char zero32[TORV3_ADDR_SIZE];
     memset(zero32, 0, sizeof(zero32));
+    const int nbuckets = f->bucket_count > 0 ? f->bucket_count
+                                             : ADDRMAN_NEW_BUCKET_COUNT;
 
     bool ok = stream_write_u8(s, f->version) && stream_write_u8(s, 32) &&
               stream_write_bytes(s, key, 32) &&
               stream_write_i32_le(s, 1) &&              /* nNew   */
               stream_write_i32_le(s, 0) &&              /* nTried */
-              stream_write_i32_le(s, 1024 ^ (1 << 30));
+              stream_write_i32_le(s, nbuckets ^ (1 << 30));
 
     ok = ok && stream_write_bytes(s, f->addr.ip, 16) &&
          stream_write_u16_le(s, f->port) &&
@@ -238,7 +241,7 @@ static bool pm_forge_store(struct byte_stream *s, const struct pm_forged *f)
              stream_write_u8(s, 0) &&
              stream_write_i64_le(s, f->last_try);
     }
-    for (int b = 0; ok && b < 1024; b++)
+    for (int b = 0; ok && b < nbuckets; b++)
         ok = stream_write_i32_le(s, 0);
     return ok;
 }
@@ -602,6 +605,93 @@ int test_peer_memory(void)
             addrman_free(&am);
         }
         stream_free(&s);
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+
+    /* ── 4e. a bucket table we cannot use costs the LAYOUT, not the peers ─
+     *
+     * The table at the tail of the store says where the writer had each
+     * address bucketed. If that hint is unusable — a build with different
+     * table geometry, or the file truncated inside the table — the addresses
+     * themselves are still perfectly good and we can recompute their buckets
+     * from the addresses under our own key. Throwing away the whole address
+     * book over the hint would leave the node with nothing but the shipped
+     * seeds, which is the failure this store exists to prevent.
+     *
+     * An address must not merely load: it must land in a bucket, because an
+     * address in no bucket can never be selected for a dial. */
+    printf("peer_memory: an unusable bucket table keeps the addresses... ");
+    {
+        bool ok = true;
+        const int geometries[] = { 512, 2048, ADDRMAN_NEW_BUCKET_COUNT };
+        for (size_t k = 0; ok && k < sizeof(geometries) / sizeof(geometries[0]);
+             k++) {
+            struct pm_forged f;
+            memset(&f, 0, sizeof(f));
+            f.version = 2;
+            pm_set_onion(&f.addr, 0xc0);
+            f.addr_flag = 1;
+            f.port = 8033;
+            f.last_success = (int64_t)time(NULL) - 300;
+            f.bucket_count = geometries[k];
+
+            struct byte_stream s;
+            stream_init(&s, 32768);
+            ok = pm_forge_store(&s, &f);
+            if (ok) {
+                struct addr_man am;
+                addrman_init(&am);
+                struct byte_stream r;
+                stream_init_from_data(&r, s.data, s.size);
+                ok = addrman_deserialize(&am, &r);
+                ok = ok && addrman_size(&am) == 1;
+                /* Present AND dialable: in a bucket, so selection can find it. */
+                ok = ok && am.id_count == 1 && am.entries[0].ref_count > 0;
+                struct net_service want = { .addr = f.addr, .port = 8033 };
+                struct addr_info got;
+                ok = ok && addrman_find_info(&am, &want, &got);
+                char err[256];
+                ok = ok && addrman_consistency_check(&am, err, sizeof(err)) == 0;
+                ok = ok && addrman_index_verify(&am, err, sizeof(err)) == 0;
+                stream_free(&r);
+                addrman_free(&am);
+            }
+            stream_free(&s);
+            if (!ok)
+                printf("[geometry=%d] ", geometries[k]);
+        }
+
+        /* Same claim when the table is cut off partway through. */
+        if (ok) {
+            struct pm_forged f;
+            memset(&f, 0, sizeof(f));
+            f.version = 2;
+            pm_set_onion(&f.addr, 0xd0);
+            f.addr_flag = 1;
+            f.port = 8033;
+            f.last_success = (int64_t)time(NULL) - 300;
+
+            struct byte_stream s;
+            stream_init(&s, 32768);
+            ok = pm_forge_store(&s, &f);
+            if (ok) {
+                /* Keep the header and the record, drop most of the table. */
+                size_t cut = s.size - 2000;
+                struct addr_man am;
+                addrman_init(&am);
+                struct byte_stream r;
+                stream_init_from_data(&r, s.data, cut);
+                ok = addrman_deserialize(&am, &r);
+                ok = ok && addrman_size(&am) == 1;
+                ok = ok && am.id_count == 1 && am.entries[0].ref_count > 0;
+                char err[256];
+                ok = ok && addrman_consistency_check(&am, err, sizeof(err)) == 0;
+                stream_free(&r);
+                addrman_free(&am);
+            }
+            stream_free(&s);
+        }
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }

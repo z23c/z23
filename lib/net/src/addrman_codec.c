@@ -116,6 +116,13 @@ static void addrman_sanitize_addr(struct net_addr *a, uint8_t flag_byte)
  * cannot drift apart. */
 static bool addrman_record_is_dead(const struct addr_info *e, int64_t now)
 {
+    /* addr_info_is_terrible()'s first clause, kept in step: an address tried
+     * within the last minute is never written off, whatever its history says.
+     * Version 2 persists last_try, so this clause now means something across
+     * a restart — without it the loader could discard a record the running
+     * node would have protected one second earlier. */
+    if (e->last_try && e->last_try >= now - 60)
+        return false;
     if (e->last_success == 0)
         return e->attempts >= ADDRMAN_RETRIES;
     return e->attempts >= ADDRMAN_MAX_FAILURES &&
@@ -290,12 +297,20 @@ bool addrman_deserialize(struct addr_man *am, struct byte_stream *s)
         LOG_FAIL("addrman", "deserialize: nTried=%d out of range", nTried);
         return false;
     }
-    /* The bucket table is walked positionally below; a count we do not
-     * recognise cannot be walked safely. */
-    if (nUBuckets < 0 || nUBuckets > ADDRMAN_NEW_BUCKET_COUNT) {
-        LOG_FAIL("addrman", "deserialize: nUBuckets=%d out of range", nUBuckets);
-        return false;
-    }
+    /* nUBuckets is NOT a reason to refuse the file. The bucket table is a
+     * HINT about where addresses sat in the writer's table; the addresses
+     * themselves are the thing worth keeping, and anything the hint fails to
+     * place is re-bucketed below from its own address under our own nKey.
+     * Rejecting the whole store because one word does not match this build's
+     * table geometry would throw away the entire address book — the exact
+     * outcome this store exists to prevent — over something we can recompute.
+     * Clamp the walk instead; nothing is read after the table, so stopping
+     * early costs nothing. */
+    int table_buckets = nUBuckets;
+    if (table_buckets < 0)
+        table_buckets = 0;
+    if (table_buckets > ADDRMAN_NEW_BUCKET_COUNT)
+        table_buckets = ADDRMAN_NEW_BUCKET_COUNT;
 
     size_t need = (size_t)(nNew + nTried);
     if (need > am->entries_cap) {
@@ -344,18 +359,8 @@ bool addrman_deserialize(struct addr_man *am, struct byte_stream *s)
         struct addr_info *stored = &am->entries[id];
         stored->random_pos = (int)am->random_size;
         addrman_random_push_locked(am, id);
-
-        if (nVersion < ADDRMAN_SER_VERSION_LEGACY ||
-            nUBuckets != ADDRMAN_NEW_BUCKET_COUNT) {
-            int nUBucket = addr_info_get_new_bucket(stored, &am->nKey,
-                                                     &stored->source);
-            int nUBucketPos = addr_info_get_bucket_position(stored, &am->nKey,
-                                                             true, nUBucket);
-            if (am->vvNew[nUBucket][nUBucketPos] == -1) {
-                am->vvNew[nUBucket][nUBucketPos] = id;
-                stored->ref_count++;
-            }
-        }
+        /* Bucket placement happens after the table is read, in one pass that
+         * handles both "the table placed it" and "nothing did". */
     }
     am->id_count = placed;
     am->new_count = placed;
@@ -402,14 +407,31 @@ bool addrman_deserialize(struct addr_man *am, struct byte_stream *s)
     }
     am->tried_count = nTried - nLost;
 
-    for (int bucket = 0; bucket < nUBuckets; bucket++) {
+    /* Apply the bucket table. Every failure here ABANDONS THE TABLE and keeps
+     * the addresses: a truncated or nonsensical hint costs us the writer's
+     * layout, which the pass below recomputes, and never the address book. */
+    bool table_usable = (nVersion >= ADDRMAN_SER_VERSION_LEGACY &&
+                         nUBuckets == ADDRMAN_NEW_BUCKET_COUNT);
+    for (int bucket = 0; table_usable && bucket < table_buckets; bucket++) {
         int32_t nSize;
-        if (!stream_read_i32_le(s, &nSize)) { free(remap); LOG_FAIL("addrman", "deserialize: failed to read bucket size bucket=%d", bucket); }
-        if (nSize < 0 || nSize > ADDRMAN_BUCKET_SIZE) { free(remap); LOG_FAIL("addrman", "deserialize: bucket=%d size=%d out of range", bucket, (int)nSize); }
+        if (!stream_read_i32_le(s, &nSize) ||
+            nSize < 0 || nSize > ADDRMAN_BUCKET_SIZE) {
+            LOG_WARN("addrman",
+                     "load: bucket table unreadable at bucket=%d — "
+                     "re-bucketing the remaining addresses ourselves", bucket);
+            break;
+        }
         for (int n = 0; n < nSize; n++) {
             int32_t nIndex;
-            if (!stream_read_i32_le(s, &nIndex)) { free(remap); LOG_FAIL("addrman", "deserialize: failed to read bucket index bucket=%d n=%d", bucket, n); }
-            if (nIndex < 0 || nIndex >= nNew || bucket >= ADDRMAN_NEW_BUCKET_COUNT)
+            if (!stream_read_i32_le(s, &nIndex)) {
+                LOG_WARN("addrman",
+                         "load: bucket table truncated at bucket=%d — "
+                         "re-bucketing the remaining addresses ourselves",
+                         bucket);
+                bucket = table_buckets;   /* stop the outer walk too */
+                break;
+            }
+            if (nIndex < 0 || nIndex >= nNew)
                 continue;
             int id = remap ? remap[nIndex] : -1;
             if (id < 0 || (size_t)id >= am->entries_cap)
@@ -417,9 +439,7 @@ bool addrman_deserialize(struct addr_man *am, struct byte_stream *s)
             struct addr_info *info = &am->entries[id];
             int nUBucketPos = addr_info_get_bucket_position(
                 info, &am->nKey, true, bucket);
-            if (nVersion >= ADDRMAN_SER_VERSION_LEGACY &&
-                nUBuckets == ADDRMAN_NEW_BUCKET_COUNT &&
-                am->vvNew[bucket][nUBucketPos] == -1 &&
+            if (am->vvNew[bucket][nUBucketPos] == -1 &&
                 info->ref_count < ADDRMAN_NEW_BUCKETS_PER_ADDRESS) {
                 info->ref_count++;
                 am->vvNew[bucket][nUBucketPos] = id;
@@ -428,6 +448,32 @@ bool addrman_deserialize(struct addr_man *am, struct byte_stream *s)
     }
 
     free(remap);
+    remap = NULL;
+
+    /* Anything the table did not place — because there was no usable table,
+     * because it came from a build with different table geometry, or because
+     * it ran out partway — is bucketed here from its own address under OUR
+     * nKey. An address that loads into no bucket can never be selected, so
+     * leaving it unplaced would be memory we kept and could not use. Deriving
+     * the position ourselves is also the safer reading of an untrusted hint. */
+    int rebucketed = 0;
+    for (int i = 0; i < placed; i++) {
+        struct addr_info *info = &am->entries[i];
+        if (!info->used || info->in_tried || info->ref_count > 0)
+            continue;
+        int nUBucket = addr_info_get_new_bucket(info, &am->nKey,
+                                                 &info->source);
+        int nUBucketPos = addr_info_get_bucket_position(info, &am->nKey,
+                                                         true, nUBucket);
+        if (am->vvNew[nUBucket][nUBucketPos] == -1) {
+            am->vvNew[nUBucket][nUBucketPos] = i;
+            info->ref_count++;
+            rebucketed++;
+        }
+    }
+    if (rebucketed > 0)
+        LOG_INFO("addrman", "load: re-bucketed %d address(es) from their own "
+                            "addresses", rebucketed);
 
     if (nDropped > 0)
         LOG_WARN("addrman",
