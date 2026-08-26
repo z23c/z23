@@ -120,6 +120,15 @@ struct buf {
     size_t cap;
 };
 
+/* zcc is bootstrapped before the node platform library exists and links only
+ * its hashing and allocation primitives. Keep its filesystem-age clock read
+ * in one named boundary so cache eviction cannot acquire a hidden platform
+ * link dependency. */
+static time_t zcc_wall_time(void)
+{
+    return time(NULL); // platform-ok: standalone bootstrap filesystem clock
+}
+
 static bool buf_reserve(struct buf *b, size_t extra)
 {
     if (b->len + extra <= b->cap)
@@ -1276,7 +1285,7 @@ static void grow(const struct cache *c, long long bytes)
  * stale, so a fully warm rebuild of 41 907 objects performs zero writes. */
 static void touch_if_stale(const char *path, time_t mtime)
 {
-    time_t now = time(NULL);
+    time_t now = zcc_wall_time();
     if (now == (time_t)-1 || now - mtime < ZCC_TOUCH_AFTER_SEC)
         return;
     (void)utimensat(AT_FDCWD, path, NULL, 0);
@@ -1409,7 +1418,7 @@ static long long scan_entries(const struct cache *c, struct evict_list *l)
 {
     static const char kinds[] = { 'o', 'm' };
     static const char *const dirs[] = { "obj", "man" };
-    time_t now = time(NULL);
+    time_t now = zcc_wall_time();
     long long total = sweep_tmp(c, now);
     struct filerec *fr = NULL;
     size_t fr_cap = 0;
@@ -1624,7 +1633,7 @@ static void maybe_trim(const struct cache *c, const struct plan *pl)
      * ceiling finished at 7 560 KB having trimmed exactly zero times. One
      * byte of content is the difference between the two states. */
     struct stat st;
-    time_t now = time(NULL);
+    time_t now = zcc_wall_time();
     bool stamped = fstat(fd, &st) == 0 && st.st_size > 0;
     if (stamped && now != (time_t)-1 &&
         now - st.st_mtime < ZCC_TRIM_FLOOR_SEC) {

@@ -81,6 +81,15 @@ uint64_t vcs_zcode_dht_record_store_max_sequence(
     const struct vcs_zcode_dht_record_store *store,
     const struct vcs_zcode_dht_record *record);
 
+/* Stream identity: same kind, namespace, genesis, provider, delegation
+ * master key, and content root (transport for provider records, semantic
+ * for pointers). Records of one stream supersede each other by sequence;
+ * records of different streams never do. Publication slots key on this so
+ * an out-of-band renewal of a live stream replaces its intention instead
+ * of leaking a second permanent slot. */
+bool vcs_zcode_dht_record_stream_equal(const struct vcs_zcode_dht_record *a,
+                                       const struct vcs_zcode_dht_record *b);
+
 /* Save is temp + file fsync + rename + directory fsync, mode 0600. Load
  * verifies the complete image into a temporary store before replacing the
  * destination, so malformed/cross-network/torn images leave memory intact. */

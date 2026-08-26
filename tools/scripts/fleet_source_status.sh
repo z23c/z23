@@ -1,16 +1,83 @@
 #!/usr/bin/env bash
-# Shared fail-closed source ancestry classifier for the devfleet referee.
+# Shared fail-closed source ancestry classifier, plus the one resolver for
+# where an operator's LOCAL mesh state lives.
+#
+# This repository ships no fleet. Anyone may run one box or twenty and have
+# them coordinate; no box is privileged, and no box's observations are ever
+# committed. Per-box state lives under
+#   ${XDG_STATE_HOME:-$HOME/.local/state}/zclassic23/fleet/
+# which is outside the checkout on purpose: a clone must look identical to a
+# stranger and to someone who happens to run several machines.
 #
 # SOURCE_SHA remains the byte-authoritative runtime identity.  Git provenance
 # is a separate mandatory GIT_SHA field; no runtime hash, including a 40-hex
 # legacy value, is ever reinterpreted as a Git commit.
 #
 # Source this file, then call:
+#   fleet_state_dir                                  -> local mesh state path
+#   fleet_state_configured                           -> 0 if any box publishes
+#   fleet_state_boxes                                -> one box label per line
+#   fleet_state_field FILE KEY                       -> one value, "" if absent
 #   fleet_source_status_audit REPO OBSERVED_HEAD SOURCE_SHA GIT_SHA FLOOR
 #
-# Results are returned in FLEET_SOURCE_* globals.  STATUS is always exactly
-# CURRENT or STALE; missing, malformed, foreign, and pre-floor identities are
-# STALE rather than an ambiguous third state.
+# Audit results are returned in FLEET_SOURCE_* globals.  STATUS is always
+# exactly CURRENT or STALE; missing, malformed, foreign, and pre-floor
+# identities are STALE rather than an ambiguous third state.
+
+# The single definition of the local mesh state directory. Everything a box
+# observes about itself, or reads about a peer, is a file in here. It is never
+# inside the repository: state written into the checkout is exactly how
+# operator-specific values ended up in public history, and how a project that
+# anyone can join grew the appearance of a designated in-crowd.
+fleet_state_dir() {
+    if [ -n "${ZCL_FLEET_STATE_DIR:-}" ]; then
+        printf '%s' "$ZCL_FLEET_STATE_DIR"
+        return 0
+    fi
+    printf '%s/zclassic23/fleet' "${XDG_STATE_HOME:-$HOME/.local/state}"
+}
+
+# No local mesh is the NORMAL state of a fresh clone, not an error. Callers
+# use this to report "no local mesh configured" and exit 0 rather than dying.
+fleet_state_configured() {
+    local dir f
+    dir="$(fleet_state_dir)"
+    [ -d "$dir" ] || return 1
+    # Written as an `if`, not `[ -f "$f" ] && return 0`: a caller running
+    # under `set -e` would exit on the failing AND-list of the last iteration
+    # instead of reaching the honest `return 1` below.
+    for f in "$dir"/*.txt "$dir"/*.identity "$dir"/*.sync; do
+        if [ -f "$f" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Box labels this operator publishes locally, one per line, deduplicated.
+# A label is whatever the operator named the box; nothing here assumes a
+# numbering scheme, a count, or that any particular box exists.
+fleet_state_boxes() {
+    local dir f b
+    dir="$(fleet_state_dir)"
+    [ -d "$dir" ] || return 0
+    for f in "$dir"/*.txt "$dir"/*.identity "$dir"/*.sync "$dir"/*.status; do
+        [ -f "$f" ] || continue
+        b="${f##*/}"
+        printf '%s\n' "${b%.*}"
+    done | LC_ALL=C sort -u
+}
+
+# Read one KEY=value field out of a local mesh state file. An absent file and
+# an absent key are both "" — an empty state, never a failure. Parsed, never
+# sourced: state is data, not code to execute.
+fleet_state_field() {
+    local file="$1" key="$2"
+    [ -f "$file" ] || return 0
+    awk -F= -v k="$key" \
+        '$0 !~ /^[[:space:]]*#/ && $1==k { sub(/^[^=]*=/, ""); print; exit }' \
+        "$file"
+}
 
 fleet_source_status_reset() {
     FLEET_SOURCE_KIND=invalid
@@ -79,5 +146,33 @@ fleet_source_status_audit() {
     FLEET_SOURCE_STATUS=CURRENT
     FLEET_SOURCE_REQUIRED_FLOOR=no
     FLEET_SOURCE_DETAIL="ancestor_of_observed_main:behind=$behind"
+    return 0
+}
+
+# Report every locally published box's source status against this checkout's
+# observed head. Prints one line per box and exits 0 with a single explanatory
+# line when there is no local mesh at all, which is what a fresh clone sees.
+fleet_source_status_report() {
+    local repo="${1:-.}" observed_head="${2:-HEAD}" floor="${3:-}"
+    local dir box f src git_sha
+
+    dir="$(fleet_state_dir)"
+    if ! fleet_state_configured; then
+        printf 'no local mesh configured (%s)\n' "$dir"
+        return 0
+    fi
+    observed_head="$(git -C "$repo" rev-parse "$observed_head" 2>/dev/null \
+        || printf '%s' "$observed_head")"
+    while read -r box; do
+        [ -n "$box" ] || continue
+        f="$dir/$box.txt"
+        src="$(fleet_state_field "$f" SOURCE_SHA)"
+        git_sha="$(fleet_state_field "$f" GIT_SHA)"
+        fleet_source_status_audit "$repo" "$observed_head" "$src" \
+            "$git_sha" "$floor"
+        printf 'box=%s status=%s behind=%s detail=%s\n' \
+            "$box" "$FLEET_SOURCE_STATUS" "$FLEET_SOURCE_BEHIND" \
+            "$FLEET_SOURCE_DETAIL"
+    done <<<"$(fleet_state_boxes)"
     return 0
 }

@@ -293,29 +293,32 @@ static int64_t boot_sd_watchdog_freshness_bound_us(void)
     return wd_us > 0 ? (int64_t)wd_us : 120LL * 1000000;
 }
 
+static bool boot_sd_watchdog_runtime_pillars(bool sweep_alive,
+                                             bool tick_alive,
+                                             bool connman_alive)
+{
+    return sweep_alive && tick_alive && connman_alive;
+}
+
 /* A healthy sweep alone is insufficient: the sweep intentionally runs apart
  * from child callbacks, the message handler, and the dial scheduler. Gate the
  * keepalive on all three execution pillars so a frozen worker cannot be hidden
  * by an otherwise-live monitoring thread. */
 static bool boot_sd_watchdog_runtime_alive(void)
 {
-    if (!boot_sd_watchdog_supervisor_alive())
-        return false;
-    /* The tick-runner heartbeat is deliberately NOT a leg here. It only
-     * advances BETWEEN children (run_due_ticks in lib/util/src/supervisor.c),
-     * so one slow child's on_tick freezes it, and the supervisor already says
-     * what that means: runner_on_stall names
-     * `supervisor.tick_runner_wedged` as BLOCKER_TRANSIENT with the text
-     * "the sweep heartbeat is unaffected (node stays alive) but one child's
-     * periodic work is wedged". Killing the process contradicted that
-     * contract. Measured on a live mesh node: 192.7 s of heartbeat age
-     * against a 120 s bound while the sweep was 90 us fresh, across four
-     * different children on separate incarnations. The wedge stays visible
-     * as a typed blocker; it no longer costs the whole node. */
     int64_t bound_us = boot_sd_watchdog_freshness_bound_us();
-    return !g_sd_watchdog_ctx ||
-           connman_runtime_progress_fresh(g_sd_watchdog_ctx->connman,
-                                          bound_us);
+    /* run_due_ticks() is serial. A permanently wedged callback starves every
+     * later periodic callback, so the runner remains a runtime pillar. Slow
+     * but useful bulk work is admitted by the separate
+     * recent_progress && sweep_alive path below; removing this check would
+     * let a dead runner live forever whenever connman remained responsive. */
+    bool tick_alive = !supervisor_tick_runner_running() ||
+                      supervisor_tick_runner_last_hb_age_us() < bound_us;
+    bool connman_alive = !g_sd_watchdog_ctx ||
+                         connman_runtime_progress_fresh(
+                             g_sd_watchdog_ctx->connman, bound_us);
+    return boot_sd_watchdog_runtime_pillars(
+        boot_sd_watchdog_supervisor_alive(), tick_alive, connman_alive);
 }
 
 /* boot_progress freshness, shared by the collect tick (STATUS label) and
@@ -368,6 +371,14 @@ bool boot_sd_watchdog_test_keepalive_supervisor(bool runtime_alive,
 {
     return boot_sd_watchdog_keepalive_supervisor(runtime_alive, sweep_alive,
                                                  recent_progress);
+}
+
+bool boot_sd_watchdog_test_runtime_pillars(bool sweep_alive,
+                                           bool tick_alive,
+                                           bool connman_alive)
+{
+    return boot_sd_watchdog_runtime_pillars(sweep_alive, tick_alive,
+                                            connman_alive);
 }
 #endif
 

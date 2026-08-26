@@ -1,5 +1,0 @@
-BOX=node4
-ONION_ADDRESS=v6yb3oukjnri3oa7jyejfy7mgzttfz2yvtiedbb4gq2oasnawsbbq7yd.onion
-P2P_PORT=39040
-SOURCE_SHA=7978731a06e5702d592ac4912b7c22dcbabf55baabdf033e16ee76ee6aacf29c
-GIT_SHA=f1647489579f7fece12cff3cea06965d436bc7d5
