@@ -202,7 +202,7 @@ AGENT_IMPACT_RULE("app/jobs/src/rewind_driver.c|app/jobs/include/jobs/rewind_dri
 /* Consensus-state serving evidence: keep every extracted helper/header and its
  * regression fixture owned by the smallest directly relevant lane. */
 AGENT_IMPACT_RULE("app/jobs/src/reducer_frontier_evidence.h", "reducer_frontier make_lint_gates")
-AGENT_IMPACT_RULE("app/jobs/src/stage_repair_reducer_frontier.c|app/jobs/src/stage_repair_reducer_frontier_evidence.h", "stage_repair reducer_frontier_reconcile_light reducer_reconcile_witness validate_script_hash_split_repair make_lint_gates")
+AGENT_IMPACT_RULE("app/jobs/src/stage_repair_reducer_frontier.c|app/jobs/src/stage_reducer_frontier_snapshot.c|app/jobs/src/stage_repair_reducer_frontier_internal.h|app/jobs/src/stage_repair_reducer_frontier_evidence.h", "stage_repair reducer_frontier_reconcile_light reducer_reconcile_witness validate_script_hash_split_repair make_lint_gates")
 AGENT_IMPACT_RULE("app/conditions/src/reducer_frontier_reconcile_light.c|app/conditions/src/reducer_frontier_light_observe.c|app/conditions/src/reducer_frontier_light_observe.h|app/conditions/include/conditions/reducer_frontier_reconcile_light.h", "reducer_frontier_reconcile_light reducer_reconcile_witness make_lint_gates")
 AGENT_IMPACT_RULE("app/jobs/src/tip_finalize_anchor.c|app/jobs/src/tip_finalize_evidence.c|app/jobs/src/tip_finalize_evidence.h|app/jobs/src/tip_finalize_log_store.c|app/jobs/src/tip_finalize_log_store.h", "tip_finalize_stage reducer_frontier reorg_residue_tipfin_replace stage_anchor_frontier_cap make_lint_gates")
 AGENT_IMPACT_RULE("app/jobs/src/script_validate_stage.c|app/jobs/src/script_validate_stage_drain.c|lib/test/src/test_script_validate_stage.c", "script_validate_stage mint_skip_crypto make_lint_gates")
@@ -1083,3 +1083,14 @@ AGENT_IMPACT_RULE("lib/net/include/net/site_routes.def|lib/test/src/test_site_ro
  * already mapped elsewhere for its other roles; this rule exists so the
  * settings-precedence group runs whenever the reader itself moves. */
 AGENT_IMPACT_RULE("lib/util/src/util.c|lib/util/include/util/util.h|lib/test/src/test_node_config_file.c", "node_config_file make_lint_gates")
+/* `z23 join` / `z23 update`. The declarative surface, the handler, the shared
+ * join-posture reader, the config-file reader that makes the written flags
+ * mean anything, and the boot call site are ONE slice: change any of them and
+ * the command can silently write a file the node never reads. The catalog and
+ * native-API groups ride along because a new root ALIAS plus a new `zcode`
+ * child move both the root and branch menu budgets. */
+AGENT_IMPACT_RULE("tools/command/native_zcode_node_command.c|tools/command/native_zcode_join.c|tools/command/native_zcode_join.h|lib/util/src/util.c|lib/util/include/util/util.h|lib/test/src/test_zcode_node_command.c", "zcode_node_command command_registry_catalog native_api_contract encoding make_lint_gates")
+/* Transaction-type catalog: the chain-shaped/non-chain classification every
+ * READY mutating leaf must carry, its two .def tables, and the contract test
+ * that refuses an unclassified one. */
+AGENT_IMPACT_RULE("app/controllers/src/transaction_type_catalog.c|app/controllers/include/controllers/transaction_type_catalog.h|app/controllers/include/controllers/transaction_type_nonchain_commands.def|app/controllers/include/controllers/transaction_type*.def|lib/test/src/test_api_transaction_types.c", "api command_registry_catalog native_api_contract make_lint_gates")

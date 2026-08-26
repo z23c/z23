@@ -243,14 +243,29 @@ struct block_index *body_fetch_exact_authority_resolve(
     if (bi || *out_state != BODY_FETCH_EXACT_PARENT_ABSENT || height == 0)
         return bi;
 
-    /* Durable read outside cs_main. NOT a lock-order requirement: the tree's
-     * order is cs_main OUTER, progress_store_tx_lock INNER — active_chain_height
-     * and active_chain_tip take the progress lock internally, so every cs_main
-     * holder that calls them already nests that way, and
-     * reconcile_block_index_flags (stage_repair_reducer_frontier.c), the only
-     * site that needs both, matches. This split exists for correctness and
-     * latency instead: no pointer or verdict from the first pass may cross the
-     * lock gap, and the sqlite read stays off cs_main. */
+    /* Durable read outside cs_main, and this one IS load-bearing for lock
+     * order — do not fold it back under the lock.
+     *
+     * This function runs inside the reducer drive, and STAGE_DRAIN_IMPL
+     * (app/jobs/include/jobs/job.h) holds progress_store_tx_lock across the
+     * whole drain. So on this thread the live nesting is
+     * progress OUTER -> cs_main INNER, every advancing step. Reading the
+     * durable parent hash here, before cs_main is taken, keeps the sqlite
+     * work off cs_main; taking cs_main first and then reaching for the
+     * progress store from under it would add the reverse edge on the
+     * hottest path in the node.
+     *
+     * The tree genuinely contains BOTH orders and no single global order
+     * can be declared: before the height authority is registered,
+     * active_chain_height()/active_chain_tip() read the progress store
+     * internally, so early cs_main holders nest cs_main -> progress; after
+     * registration that edge vanishes and only this one remains. The
+     * self-heal repair that needs both resolves it by never blocking on
+     * the second lock (see reconcile_block_index_flags in
+     * app/jobs/src/stage_repair_reducer_frontier.c).
+     *
+     * The split also serves correctness and latency: no pointer or verdict
+     * from the first pass may cross the lock gap. */
     struct uint256 durable_parent_hash;
     if (!body_fetch_durable_parent_hash_at(db, height - 1,
                                            &durable_parent_hash))

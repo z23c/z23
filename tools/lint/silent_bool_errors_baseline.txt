@@ -10,7 +10,6 @@ app/jobs/src/reducer_frontier_dump.c::table_exists
 app/jobs/src/stage_repair.c::stage_table_ensure
 app/jobs/src/stage_repair_reducer_frontier_coin.c::maybe_repair_value_overflow
 app/jobs/src/stage_repair_reducer_frontier_coin.c::stage_repair_coin_backfill_try
-app/jobs/src/stage_repair_reducer_frontier.c::read_frontier_snapshot
 app/jobs/src/stage_repair_reducer_frontier.c::reconcile_tip_finalize_cursor
 app/jobs/src/stage_repair_reducer_frontier.c::stage_reducer_frontier_purge_noncanonical
 app/jobs/src/stage_repair_reducer_frontier.c::stage_reducer_frontier_purge_stale_reorg_tipfin

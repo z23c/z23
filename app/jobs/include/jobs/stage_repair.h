@@ -412,24 +412,42 @@ bool stage_repair_tipfin_refusal_is_pending_forward(
  * never mutates coins. If coins_applied_height is absent or present above H*,
  * the helper refuses (unknown/L2 coin-tear domain).
  *
- * LOCK ORDER — main_state.cs_main is the OUTER lock, progress_store_tx_lock
- * the INNER one, and this reconcile is the only site in the tree that holds
- * both. That direction is forced by the rest of the tree, not chosen here:
- * active_chain_height() and active_chain_tip() (lib/validation/src/chainstate.c)
- * take the progress-store lock internally whenever no chain-height authority
- * is registered, and roughly two dozen cs_main holders call them —
- * sync_monitor.c, sticky_escalator_trigger.c, body_backfill_service.c,
- * gap_fill_service.c, accept_to_mempool.c and several self-heal Conditions
- * among them. Taking the progress-store lock first here made this function the
- * single edge that closed an ABBA cycle: the reconcile runs both on the
- * self-heal condition thread and, via sticky_escalator, on the supervisor
- * sweep thread, so it could park holding the progress lock while it waited for
- * cs_main while a supervisor tick parked holding cs_main waiting for the
- * progress lock. Everything that then reached for the progress store blocked
- * for the life of the process — including script_validate_stage_init on the
- * boot thread, which is how a node wedges partway through startup with its
- * P2P port open and its RPC port never opening. Regression cover: the
- * "lock-order" cases in lib/test/src/test_reducer_frontier_reconcile_light.c. */
+ * LOCK ORDER — cs_main OUTER, progress store INNER, and the inner acquire is
+ * a TRYLOCK. This function holds both, and it is the only one that may, at
+ * the cost of never being allowed to WAIT for the second one.
+ *
+ * There is no single global order available to conform to, because the tree
+ * changes order partway through boot:
+ *   - Before the height authority is registered, active_chain_height() and
+ *     active_chain_tip() (lib/validation/src/chainstate.c) read the progress
+ *     store internally, so the ~two dozen cs_main holders that call them —
+ *     sync_monitor.c, sticky_escalator_trigger.c, body_backfill_service.c,
+ *     gap_fill_service.c, accept_to_mempool.c, several self-heal Conditions —
+ *     all nest cs_main -> progress.
+ *   - After tip_finalize_stage_init registers it, is_authoritative() returns
+ *     true unconditionally (app/jobs/src/tip_finalize_stage.c) and that edge
+ *     disappears for the rest of the process. What remains is the reducer
+ *     drive running the OPPOSITE way on every advancing block:
+ *     STAGE_DRAIN_IMPL (app/jobs/include/jobs/job.h) holds
+ *     progress_store_tx_lock across the entire drain and body_fetch's step
+ *     takes cs_main inside it (app/jobs/src/body_fetch_stage.c).
+ *
+ * A blocking acquire here closes an ABBA cycle against whichever phase it
+ * does not match — progress-first deadlocked the boot window (a node wedged
+ * partway through startup, P2P port open, RPC port never opening, because
+ * script_validate_stage_init blocked forever on the progress store);
+ * cs_main-first deadlocks the steady state against the drive. Both are the
+ * same bug wearing different clothes, and neither is fixed by reordering.
+ *
+ * The resolution is to stop waiting. This reconcile is a self-heal observer
+ * on the condition-engine thread (and via sticky_escalator the supervisor
+ * sweep thread), so progress_store_tx_trylock() — the progress store's
+ * documented "non-blocking counterpart for observational surfaces", used the
+ * same way by app/conditions/src/reducer_drive_watchdog.c — lets it decline
+ * and retry on the next tick. A path that never waits-for cannot be half of
+ * a deadlock, whichever way the rest of the tree happens to be nesting.
+ * Regression cover: the "lock-order" cases in
+ * lib/test/src/test_reducer_frontier_reconcile_light.c. */
 bool stage_reducer_frontier_reconcile_light_needed(
     struct sqlite3 *db,
     struct main_state *ms,
@@ -444,6 +462,23 @@ bool stage_reducer_frontier_reconcile_light(
 /* Test-only: drop the dry-run detect memo so the next reconcile re-sweeps. Call
  * between fixtures that close+reopen progress.kv (see the definition comment). */
 void stage_reducer_frontier_reset_detect_memo_for_testing(void);
+
+/* Test-only: enter reconcile_block_index_flags DIRECTLY — the one function
+ * that holds cs_main and the progress store at the same time.
+ *
+ * The public entry point cannot stage the lock-order race: it calls
+ * read_frontier_snapshot() first, which takes the progress store on its own
+ * (holding no cs_main, so it is safe), and a test that contends the progress
+ * store simply parks the caller there and never reaches the section that
+ * matters. A regression test written against the public path therefore passes
+ * whether the acquire below is a trylock or a blocking lock — it proves
+ * nothing. This seam skips the prologue so the test can hold the progress
+ * store, call in, and observe whether cs_main is held while waiting. */
+bool stage_reducer_frontier_reconcile_flags_for_testing(
+    struct sqlite3 *db,
+    struct main_state *ms,
+    bool apply,
+    struct stage_reducer_frontier_reconcile_result *out);
 
 /* Test-only witness for the proof_validate internal_error symmetry
  * (self-verified-tip-plan Act 1). The caller seeds the script/proof/utxo log +

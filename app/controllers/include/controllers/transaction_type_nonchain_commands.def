@@ -73,3 +73,5 @@ TX_NONCHAIN_COMMAND("app.presentation.publication-status", "local_presentation",
     "Shows exact package publication facts without committing, publishing, fetching, or creating a chain transaction.")
 TX_NONCHAIN_COMMAND("app.market.offer", "p2p_market_offer",
     "Builds, signs, persists, and gossips one self-authenticating paid file offer; settlement is the buyer's separate payment transaction, so this command creates no chain transaction.")
+TX_NONCHAIN_COMMAND("zcode.node.join", "local_node_config",
+    "Reads this node's join posture and writes the join flags into <datadir>/z23.conf; it starts nothing, signals nothing, and creates, signs, submits, and confirms no chain transaction. The optional DHT tier it reports does need an on-chain ZID anchor, but registering that anchor is a separate command with its own fee.")

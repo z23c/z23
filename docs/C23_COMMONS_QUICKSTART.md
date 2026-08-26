@@ -28,6 +28,7 @@ remember the table.
 
 | Step | Command | Section |
 | --- | --- | --- |
+| Join the network | `z23 join` | [`JOIN.md`](JOIN.md) |
 | Describe the behavior you want | `z23 zcode guide` | above |
 | Reuse existing C23 first, create only what is missing | `z23 zcode work start --datadir=/tmp/z23-work` | [`work walkthrough`](work/ZCODE_DEVELOPMENT_WALKTHROUGH.md) |
 | Build and test it, contained | `z23 zcode work run --datadir=/tmp/z23-work` | [`work walkthrough`](work/ZCODE_DEVELOPMENT_WALKTHROUGH.md) |
@@ -48,7 +49,19 @@ disappears.
 ## One-time node preflight
 
 The network path requires a running full node started with
-`-packagehost=1 -buildworker=1`. Inspect join status, then the live DHT:
+`-packagehost=1 -buildworker=1`. One command sets that up:
+
+```bash
+z23 join
+```
+
+`join` writes those flags into your node's own `z23.conf`, adding
+`buildworker=1` only when this machine actually has a C23 compiler. It starts,
+stops and signals nothing — restart the node yourself with the command it
+names. Full details, including the two tiers and how to read the verdict, are
+in [`JOIN.md`](JOIN.md).
+
+Then inspect join status and the live DHT:
 
 ```bash
 z23 zcode work toolchain
@@ -57,9 +70,14 @@ z23 zcode network status --datadir=/tmp/z23-commons
 ```
 
 `zcode work toolchain` and `zcode package guide` share the same `join_flags`,
-`package_hosting`, `build_worker`, and `joined` fields. An ordinary full node
-joins by restarting with those flags. `zcode package offered` names the same
-restart recipe when this process has no live hosting engine.
+`package_hosting`, `build_worker`, and `joined` fields. `zcode package offered`
+names the same recipe when this process has no live hosting engine.
+
+The swarm tier — hosting and serving package content over ordinary peers —
+needs only `-packagehost=1`: no coins, no on-chain identity, no invitation. The
+DHT below is a separate, optional upgrade that additionally needs
+`-v2transport` and an active on-chain ZID anchor whose registration spends a
+fee. Not having one is not a blocker.
 
 If the DHT is disabled, `zcode network delegate` names the required active,
 finalized ZID master input; do not pretend a local key is network admission.
@@ -258,8 +276,8 @@ policy applies at evaluation.
 `can_prove`), whether this process has joined independent compile work
 (`package_hosting` / `build_worker` / `joined`), the copy-paste `join_flags`
 (`-packagehost=1 -buildworker=1`), and a named `blocker` (`NONE`,
-`VERIFIER_MISSING`, or `NOT_JOINED`). An ordinary full node joins by restarting
-with those flags. Independent compile evidence needs the same capsule on the
+`VERIFIER_MISSING`, or `NOT_JOINED`). `z23 join` writes those flags for you;
+see [`JOIN.md`](JOIN.md). Independent compile evidence needs the same capsule on the
 requester and the proving worker, and the confined verifier next to the worker.
 A mismatch is evidence and must remain visible; never pick one result because
 it arrived first or came from a preferred signer. Signed asynchronous worker

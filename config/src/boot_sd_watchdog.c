@@ -135,6 +135,14 @@ bool boot_ready_legs_all_confirmed(const struct boot_ready_legs *l)
     return l && l->descriptor && l->listener && l->pump && l->sweep;
 }
 
+unsigned boot_ready_legs_confirmed_count(const struct boot_ready_legs *l)
+{
+    if (!l)
+        return 0;
+    return (unsigned)(l->descriptor ? 1 : 0) + (unsigned)(l->listener ? 1 : 0) +
+           (unsigned)(l->pump ? 1 : 0) + (unsigned)(l->sweep ? 1 : 0);
+}
+
 void boot_ready_legs_describe(const struct boot_ready_legs *l,
                               char *out, size_t cap)
 {
@@ -206,7 +214,38 @@ static void boot_sd_watchdog_maybe_notify_ready(void)
         char status[256];
         snprintf(status, sizeof(status), "holding READY: %s", desc);
         sd_notify_status(status);
-        (void)sd_notify_extend_timeout_usec(BOOT_READY_EXTEND_TIMEOUT_USEC);
+
+        /* Buy more start budget ONLY when a leg newly confirmed.
+         *
+         * Extending on every pet period made TimeoutStartSec unreachable:
+         * the deadline moved out an hour faster than it could ever
+         * arrive, so a leg that would never confirm (a failed bind, a
+         * pump that never started) hung the boot forever instead of
+         * letting Restart=always retry it — and a restart is frequently
+         * the thing that actually clears a stuck descriptor.
+         *
+         * The high-water mark makes the signal monotonic, so at most one
+         * extension is granted per leg (four in a boot's life) and a leg
+         * that flaps yes/no/yes cannot buy time by oscillating. Slowness
+         * is still generously tolerated: the deadline sits a full
+         * BOOT_READY_EXTEND_TIMEOUT_USEC past the last real confirmation,
+         * which is an hour to publish a descriptor after everything else
+         * is up. */
+        static _Atomic unsigned s_best_legs;
+        unsigned confirmed = boot_ready_legs_confirmed_count(&legs);
+        unsigned prev = atomic_load(&s_best_legs);
+        bool new_high = false;
+        while (confirmed > prev) {
+            /* On failure the CAS reloads `prev` with the current value,
+             * so the loop re-tests against whoever raced us. */
+            if (atomic_compare_exchange_weak(&s_best_legs, &prev, confirmed)) {
+                new_high = true;
+                break;
+            }
+        }
+        if (new_high)
+            (void)sd_notify_extend_timeout_usec(BOOT_READY_EXTEND_TIMEOUT_USEC);
+
         /* Log only when the leg set changes, so a long hold costs one
          * line per transition rather than one per pet period. Compared
          * as a hash through one atomic: this runs on both the service
