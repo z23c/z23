@@ -110,7 +110,7 @@ static int64_t g_api_hodl_cache_height = -1;
 static char   g_api_deep_stats_cache[API_DEEP_STATS_CACHE_SIZE];
 static size_t g_api_deep_stats_cache_len = 0;
 
-static _Atomic int g_api_cache_thread_running = 0;
+_Atomic int g_api_cache_thread_running = 0;
 static bool g_api_cache_thread_active = false;
 static pthread_mutex_t g_api_cache_lifecycle_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_api_cache_lifecycle_cond = PTHREAD_COND_INITIALIZER;
@@ -416,7 +416,8 @@ static void *api_cache_refresh_thread(void *arg)
         if (iteration % 6 == 0) {
             uint8_t *tmp = zcl_malloc(API_HODL_CACHE_SIZE, "api_hodl_tmp");
             if (tmp) {
-                size_t len = compute_hodl(tmp, API_HODL_CACHE_SIZE);
+                size_t len = compute_hodl_cache_refresh(
+                    tmp, API_HODL_CACHE_SIZE);
                 if (len > 0 && len < API_HODL_CACHE_SIZE &&
                     api_response_cacheable(tmp, len)) {
                     int64_t height = api_response_height(tmp, len);
@@ -434,7 +435,8 @@ static void *api_cache_refresh_thread(void *arg)
         if (iteration % 30 == 0) {
             uint8_t *tmp = zcl_malloc(API_DEEP_STATS_CACHE_SIZE, "api_deep_stats_tmp");
             if (tmp) {
-                size_t len = compute_deep_stats(tmp, API_DEEP_STATS_CACHE_SIZE);
+                size_t len = compute_deep_stats_cache_refresh(
+                    tmp, API_DEEP_STATS_CACHE_SIZE);
                 if (len > 0 && len < API_DEEP_STATS_CACHE_SIZE &&
                     api_response_cacheable(tmp, len)) {
                     pthread_mutex_lock(&g_api_cache_mutex);

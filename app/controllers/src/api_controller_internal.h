@@ -20,7 +20,10 @@
 #include <pthread.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdatomic.h>
 #include <stdint.h>
+
+extern _Atomic int g_api_cache_thread_running;
 
 /* Public serving is a chain-authority claim, not a statement that every
  * optional worker or peer is currently perfect.  Permanent consensus/store
@@ -419,11 +422,17 @@ size_t compute_stats(uint8_t *r, size_t max);
 size_t compute_supply(uint8_t *r, size_t max);
 size_t compute_supply_legacy(uint8_t *r, size_t max);
 size_t compute_hodl(uint8_t *r, size_t max);
+size_t compute_hodl_cache_refresh(uint8_t *r, size_t max);
 int64_t api_hodl_index_tip_height(void);
 int64_t api_hodl_current_tip_height(void);
 bool api_hodl_index_ahead_of_served(int64_t *index_tip_out,
                                     int64_t *served_tip_out);
 size_t compute_deep_stats(uint8_t *r, size_t max);
+size_t compute_deep_stats_cache_refresh(uint8_t *r, size_t max);
+
+#ifdef ZCL_TESTING
+int api_cache_test_sqlite_progress(void *ctx);
+#endif
 
 /* ── Lookup handlers (defined in api_controller_lookup.c) ── */
 

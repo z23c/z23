@@ -61,6 +61,36 @@
 
 /* Cached endpoints: blocks, stats, supply, hodl, deep_stats. Called only from background refresh thread. */
 
+enum { API_CACHE_SQLITE_PROGRESS_OPS = 1000 };
+
+static int api_cache_sqlite_progress(void *ctx)
+{
+    const _Atomic int *running = ctx ? ctx : &g_api_cache_thread_running;
+    return atomic_load(running) ? 0 : 1;
+}
+
+static void api_cache_sqlite_guard(sqlite3 *db, bool cancellable)
+{
+    if (db && cancellable)
+        sqlite3_progress_handler(db, API_CACHE_SQLITE_PROGRESS_OPS,
+                                 api_cache_sqlite_progress, NULL);
+}
+
+static void api_cache_sqlite_close(sqlite3 *db, bool cancellable)
+{
+    if (db && cancellable)
+        sqlite3_progress_handler(db, 0, NULL, NULL);
+    if (db)
+        sqlite3_close(db);
+}
+
+#ifdef ZCL_TESTING
+int api_cache_test_sqlite_progress(void *ctx)
+{
+    return api_cache_sqlite_progress(ctx);
+}
+#endif
+
 static int64_t api_hodl_cap_to_served_tip(int64_t index_tip)
 {
     if (index_tip < 0)
@@ -308,7 +338,7 @@ size_t compute_supply_legacy(uint8_t *r, size_t max)
     return (size_t)snprintf((char *)r, max,
         "%s%.8f", JSON_HEADERS, supply);
 }
-size_t compute_hodl(uint8_t *r, size_t max)
+static size_t compute_hodl_impl(uint8_t *r, size_t max, bool cancellable)
 {
     if (!g_api_ctx.datadir)
         return api_json_error(r, max, JSON_503_HEADERS,
@@ -322,6 +352,7 @@ size_t compute_hodl(uint8_t *r, size_t max)
             sqlite3_close(db);
         return api_json_error(r, max, JSON_500_HEADERS, "Database unavailable");
     }
+    api_cache_sqlite_guard(db, cancellable);
 
     int64_t block_tip = 0;
     int64_t utxo_tip = 0;
@@ -330,10 +361,10 @@ size_t compute_hodl(uint8_t *r, size_t max)
 
     struct hodl_wave_snapshot hodl;
     if (!hodl_wave_scan_current_utxos(db, tip, &hodl)) {
-        sqlite3_close(db);
+        api_cache_sqlite_close(db, cancellable);
         return api_json_error(r, max, JSON_503_HEADERS, hodl.status);
     }
-    sqlite3_close(db);
+    api_cache_sqlite_close(db, cancellable);
 
     double over_1y_pct = hodl_wave_older_than_1y_percent(&hodl);
 
@@ -392,7 +423,19 @@ size_t compute_hodl(uint8_t *r, size_t max)
     json_free(&body);
     return n;
 }
-size_t compute_deep_stats(uint8_t *r, size_t max)
+
+size_t compute_hodl(uint8_t *r, size_t max)
+{
+    return compute_hodl_impl(r, max, false);
+}
+
+size_t compute_hodl_cache_refresh(uint8_t *r, size_t max)
+{
+    return compute_hodl_impl(r, max, true);
+}
+
+static size_t compute_deep_stats_impl(uint8_t *r, size_t max,
+                                      bool cancellable)
 {
     if (!g_api_ctx.datadir)
         return api_json_error(r, max, JSON_500_HEADERS, "No datadir");
@@ -401,6 +444,7 @@ size_t compute_deep_stats(uint8_t *r, size_t max)
     if (!explorer_open_readonly_db(g_api_ctx.datadir, &db)) {
         return api_json_error(r, max, JSON_500_HEADERS, "Cannot open database");
     }
+    api_cache_sqlite_guard(db, cancellable);
 
     struct explorer_chain_stats chain_stats = {0};
     explorer_query_chain_stats(db, &chain_stats);
@@ -410,6 +454,11 @@ size_t compute_deep_stats(uint8_t *r, size_t max)
         current_height = chain_stats.height;
     struct explorer_history_validation history;
     explorer_validate_block_history(db, current_height, &history);
+    if (cancellable && !atomic_load(&g_api_cache_thread_running)) {
+        api_cache_sqlite_close(db, true);
+        return api_json_error(r, max, JSON_503_HEADERS,
+                              "Deep statistics refresh cancelled");
+    }
     if (!history.usable) {
         int64_t block_rows = sql_query_i64(db, "SELECT count(*) FROM blocks");
         int64_t tx_rows = sql_query_i64(db, "SELECT count(*) FROM transactions");
@@ -417,7 +466,12 @@ size_t compute_deep_stats(uint8_t *r, size_t max)
         int64_t utxo_value = sql_query_i64(db,
             "SELECT COALESCE(SUM(value),0) FROM utxos");
         int64_t supply_sat = zcl_total_supply_zatoshi(current_height);
-        sqlite3_close(db);
+        if (cancellable && !atomic_load(&g_api_cache_thread_running)) {
+            api_cache_sqlite_close(db, true);
+            return api_json_error(r, max, JSON_503_HEADERS,
+                                  "Deep statistics refresh cancelled");
+        }
+        api_cache_sqlite_close(db, cancellable);
 
         struct json_value body;
         struct json_value utxo;
@@ -478,7 +532,12 @@ size_t compute_deep_stats(uint8_t *r, size_t max)
         "SELECT hex(hash) FROM blocks WHERE height = (SELECT MAX(height) FROM blocks)",
         latest_hash, sizeof(latest_hash));
 
-    sqlite3_close(db);
+    if (cancellable && !atomic_load(&g_api_cache_thread_running)) {
+        api_cache_sqlite_close(db, true);
+        return api_json_error(r, max, JSON_503_HEADERS,
+                              "Deep statistics refresh cancelled");
+    }
+    api_cache_sqlite_close(db, cancellable);
 
     struct json_value body;
     struct json_value sprout;
@@ -551,4 +610,14 @@ size_t compute_deep_stats(uint8_t *r, size_t max)
     size_t n = api_json_ok(r, max, &body);
     json_free(&body);
     return n;
+}
+
+size_t compute_deep_stats(uint8_t *r, size_t max)
+{
+    return compute_deep_stats_impl(r, max, false);
+}
+
+size_t compute_deep_stats_cache_refresh(uint8_t *r, size_t max)
+{
+    return compute_deep_stats_impl(r, max, true);
 }

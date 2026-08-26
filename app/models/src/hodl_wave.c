@@ -137,7 +137,8 @@ bool hodl_wave_scan_current_utxos(sqlite3 *db, int64_t tip_height,
         return false;
     }
 
-    while (AR_STEP_ROW_READONLY(stmt) == SQLITE_ROW) {
+    int rc;
+    while ((rc = AR_STEP_ROW_READONLY(stmt)) == SQLITE_ROW) {
         int64_t height = sqlite3_column_int64(stmt, 0);
         int64_t value = sqlite3_column_int64(stmt, 1);
         /* Reject impossible UTXOs: pre-genesis, after-tip (future-dated rows
@@ -161,6 +162,13 @@ bool hodl_wave_scan_current_utxos(sqlite3 *db, int64_t tip_height,
         }
     }
     sqlite3_finalize(stmt);
+
+    if (rc != SQLITE_DONE) {
+        snprintf(out->status, sizeof(out->status), "%s",
+                 rc == SQLITE_INTERRUPT ? "UTXO index scan interrupted" :
+                                          "UTXO index scan failed");
+        return false;
+    }
 
     snprintf(out->status, sizeof(out->status), "ok");
     struct ar_errors errors;
