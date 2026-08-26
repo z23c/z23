@@ -1199,3 +1199,14 @@ AGENT_IMPACT_RULE("docs/ARCHITECTURE_DIAGRAMS.md|docs/ARCH_QUEST_BOARD.md|docs/D
  * assertions, so a seed edit can never reach the push gate having run zero
  * test groups — which is exactly how the last three dead seeds got in. */
 AGENT_IMPACT_RULE("core/chainparams/src/chainparams.c|lib/net/src/connman.c|lib/net/src/onion_directory.c|lib/net/include/net/onion_service.h|lib/test/src/test_seed_bootstrap_doors.c", "seed_bootstrap_doors")
+/* LANE params-sovereignty: the boundary between validating shielded proofs
+ * and creating them. The compiled-in verifying keys, the generator that
+ * derives them, the boot gate that used to park a node for their absence, and
+ * the operator page describing the split. They move together because each one
+ * encodes the same claim: consensus needs only the 6357-byte verifying-key
+ * prefix, and the ~777 MB of proving parameters buys exactly one capability.
+ * Regenerating params_vk_embedded.c without re-running the group would let a
+ * key blob change with nothing checking it against the real parameter files,
+ * and softening the boot gate without the group would let the node advance
+ * CRYPTO_READY on keys that never passed their digest. */
+AGENT_IMPACT_RULE("lib/sapling/src/params_vk_embedded.c|lib/sapling/include/sapling/params_vk_embedded.h|lib/sapling/src/params_init.c|lib/test/src/test_params_vk_embedded.c|config/src/boot_params_gate.c|config/include/config/boot_params_gate.h|tools/scripts/zcash_params.sh|docs/PARAMS.md", "params_vk_embedded")
