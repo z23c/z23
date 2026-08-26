@@ -68,7 +68,7 @@ SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SELF="$SELF_DIR/$(basename "${BASH_SOURCE[0]}")"
 
 # shellcheck source=tools/scripts/source_identity_lib.sh
-. "$SELF_DIR/source_identity_lib.sh"  # zcl_is_sha256, zcl_json_first_sha256
+. "$SELF_DIR/source_identity_lib.sh"  # zcl_is_sha256, zcl_agentbuild_v2_top_source_id
 
 # choose_tag_name — pick a proof-server/* tag name that does not exist yet.
 #
@@ -192,8 +192,8 @@ EOF
     esac
 
     local running_source
-    running_source="$(zcl_json_first_sha256 "$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" \
-        "timeout 20 '${svc_bin}' agentbuild" 2>/dev/null)" source_id_sha256)"
+    running_source="$(zcl_agentbuild_v2_top_source_id "$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" \
+        "timeout 20 '${svc_bin}' agentbuild" 2>/dev/null)")"
 
     if ! zcl_is_sha256 "$running_source"; then
         echo "proof_server_pin: UNREACHABLE — ${host} did not report a usable source_id_sha256" >&2

@@ -1478,6 +1478,7 @@ $(filter-out vendor/lib/libsecp256k1.a,$(VENDOR_LIBS)):
         check-ship-remote-transaction \
         check-z23-release-install \
         check-identity-parser-single \
+        check-source-identity-authority \
         check-status-reason-single \
         check-operator-needed-sink check-systemd-memory-budget check-doc-accuracy check-doc-counts check-doc-claims check-no-stale-pinned-facts check-markdown-links check-doc-inline-paths \
         check-api-reference-generated check-describe-budget \
@@ -6939,6 +6940,7 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	@# one candidate, prove its baked source identity against the outer record,
 	@# install those exact bytes, and pass that same artifact hash to the verifier.
 	@set -eu; \
+	. tools/scripts/source_identity_lib.sh; \
 	command -v timeout >/dev/null 2>&1 || { \
 	    echo "deploy: timeout is required for candidate preflight" >&2; exit 1; }; \
 	candidate="$$(mktemp "$(dir $(ZCLASSIC23_BIN)).zclassic23.deploy.XXXXXX")"; \
@@ -6995,9 +6997,7 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	printf '%s\n' "$$candidate_agentbuild" | \
 	    grep -q '"schema"[[:space:]]*:[[:space:]]*"zcl.agent_build.v2"' || { \
 	    echo "deploy: frozen candidate has no agentbuild v1 contract" >&2; exit 1; }; \
-	candidate_source_id="$$(printf '%s\n' "$$candidate_agentbuild" | \
-	    grep -oE '"source_id_sha256"[[:space:]]*:[[:space:]]*"[^"]*"' | \
-	    head -1 | sed -E 's/.*"source_id_sha256"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/')"; \
+	candidate_source_id="$$(zcl_agentbuild_v2_top_source_id "$$candidate_agentbuild")"; \
 	[ "$${#candidate_source_id}" -eq 64 ] || { \
 	    echo "deploy: frozen candidate omitted exact source_id_sha256" >&2; exit 1; }; \
 	case "$$candidate_source_id" in *[!0-9a-f]*) \
@@ -7064,9 +7064,7 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	rollback_artifact_sha256="$$(sha256sum < "$$rollback_bin" | awk '{print $$1}')"; \
 	rollback_agentbuild="$$(timeout 30 "$$rollback_bin" agentbuild 2>&1)" || { \
 	    echo "deploy: prior executable agentbuild preflight failed" >&2; exit 1; }; \
-	rollback_source_id="$$(printf '%s\n' "$$rollback_agentbuild" | \
-	    grep -oE '"source_id_sha256"[[:space:]]*:[[:space:]]*"[^"]*"' | \
-	    head -1 | sed -E 's/.*"source_id_sha256"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/')"; \
+	rollback_source_id="$$(zcl_agentbuild_v2_top_source_id "$$rollback_agentbuild")"; \
 	[ "$${#rollback_source_id}" -eq 64 ] || { \
 	    echo "deploy: prior executable omitted exact source_id_sha256" >&2; exit 1; }; \
 	case "$$rollback_source_id$$rollback_artifact_sha256" in *[!0-9a-f]*) \
@@ -8856,6 +8854,20 @@ check-identity-parser-single:
 	@./tools/lint/check_identity_parser_single.sh --selftest
 	@./tools/lint/check_identity_parser_single.sh
 
+# Gate — the JSON key "source_id_sha256" answers two different questions in
+# this tree (what a BINARY was built from, baked in and constant, vs. what a
+# DIRECTORY holds right now, which varies) — see
+# tools/scripts/source_identity_lib.sh's header. Reporting one under the
+# other's name is the defect tools/agent_fast_ci.sh's green_input_cache had
+# (fixed by renaming to working_tree_source_id_sha256); reading an
+# agentbuild response positionally instead of through the schema-anchored
+# zcl_agentbuild_v2_top_source_id is the same class of bug with a longer
+# fuse. Shrink-only ratchet over tools/lint/source_identity_authority_baseline.txt.
+check-source-identity-authority:
+	@echo "══ LINT: source_id_sha256 producer/reader authority stays Q1/Q2-honest ══"
+	@./tools/lint/check_source_identity_authority.sh --selftest
+	@./tools/lint/check_source_identity_authority.sh
+
 # Anti-rot ratchet: exactly ONE place decides whether a node status reason
 # means an operator has to intervene. Two operator surfaces (the public REST
 # /api/status endpoint and the agent first-call summary) each carried their own
@@ -9383,6 +9395,7 @@ LINT_GATES := \
     check-ship-remote-transaction \
     check-z23-release-install \
     check-identity-parser-single \
+    check-source-identity-authority \
     check-status-reason-single \
     check-pipefail-status-pipe \
     check-framework-shape \

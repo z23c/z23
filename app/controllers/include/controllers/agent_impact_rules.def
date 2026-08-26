@@ -1210,3 +1210,12 @@ AGENT_IMPACT_RULE("core/chainparams/src/chainparams.c|lib/net/src/connman.c|lib/
  * and softening the boot gate without the group would let the node advance
  * CRYPTO_READY on keys that never passed their digest. */
 AGENT_IMPACT_RULE("lib/sapling/src/params_vk_embedded.c|lib/sapling/include/sapling/params_vk_embedded.h|lib/sapling/src/params_init.c|lib/test/src/test_params_vk_embedded.c|config/src/boot_params_gate.c|config/include/config/boot_params_gate.h|tools/scripts/zcash_params.sh|docs/PARAMS.md", "params_vk_embedded")
+/* LANE source-identity-q1q2: the ratchet that stops a working-tree
+ * (directory-derived) source_id_sha256 reading from being published under
+ * the bare Q1-shaped key a baked-build identity uses, and from being read
+ * positionally out of an agentbuild response where the schema-anchored
+ * zcl_agentbuild_v2_top_source_id reader (tools/scripts/source_identity_lib.sh)
+ * applies. The gate script and its shrink-only baseline move together: a
+ * baseline edit with no gate change, or a gate change with no baseline
+ * update, is exactly how this ratchet would rust shut silently. */
+AGENT_IMPACT_RULE("tools/lint/check_source_identity_authority.sh|tools/lint/source_identity_authority_baseline.txt", "make_lint_gates")

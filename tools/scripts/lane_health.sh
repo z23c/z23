@@ -380,6 +380,15 @@ report_lane() {
         fi
         agent_contract_trust_reason="agent_rpc_${agent_rpc_state}"
         if [ "$agent_rpc_state" = "ok" ]; then
+            # Positional (zcl_json_first_string), not the schema-anchored
+            # zcl_agentbuild_v2_top_source_id reader: $agent_json comes from
+            # the `agent` RPC's zcl.public_status.v2/v3 contract, not
+            # agentbuild's zcl.agent_build.v2 — no strict top-anchored reader
+            # exists for this schema in source_identity_lib.sh. Left as-is
+            # deliberately: this only feeds agent_contract_trusted/
+            # agent_contract_trust_reason, an advisory trust flag, never a
+            # freshness verdict (see the line-132 selftest for the same
+            # schema). Lowest priority of the sites this lane reviewed.
             agent_source_id_sha256="$(zcl_json_first_string "$agent_json" "source_id_sha256")"
             agent_build_commit="$(zcl_json_first_string "$agent_json" "build_commit")"
             if zcl_is_sha256 "$agent_source_id_sha256"; then
