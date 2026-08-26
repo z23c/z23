@@ -197,6 +197,197 @@ END { printf "STATS\t%s\t%d\t%d\n", FILENAME, nfuncs, nparams }
 AWK_EOF
 }
 
+# ── leg 2: the same class with a PUBLISHED GLOBAL as the out-parameter ────
+#
+# lib/sapling/src/params_init.c (fixed in 69518f2f3) published the three
+# Groth16 verifying keys — sapling_set_spend_vk(&spend_vk) and friends store
+# the pointer in a file-scope variable the verifiers read — and then a later
+# Sprout failure path freed their ic[] arrays and comb tables WITHOUT storing
+# NULL back into those variables. Every reader's fail-closed guard asks only
+# "is the pointer NULL?", so the guard passed and groth16_verify() read freed
+# heap, reachable from accept_to_mempool. Same class as leg 1: the thing a
+# later reader will use is left in a state its guard cannot see. The
+# out-parameter is just a module global instead of a stack slot.
+#
+# write_publisher_finder emits, for each function, whether it stores a
+# caller-supplied pointer into a file-scope variable. That is DERIVED from the
+# code, never from the name: a `*_set_*` that only writes through the pointer
+# is not a publisher, and a publisher that is not spelled `set` still is one.
+write_publisher_finder() {
+    cat > "$1" <<'AWK_EOF'
+function emit(   i, np, parts, p, nm, j, line, o, c, plist, sink) {
+    if (sig == "" || nbody == 0) return
+    o = index(sig, "(")
+    if (o == 0) return
+    plist = substr(sig, o + 1)
+    c = length(plist)
+    while (c > 0 && substr(plist, c, 1) != ")") c--
+    if (c == 0) return
+    plist = substr(plist, 1, c - 1)
+    np = split(plist, parts, ",")
+    for (i = 1; i <= np; i++) {
+        p = parts[i]
+        gsub(/^[ \t]+|[ \t]+$/, "", p)
+        if (p !~ /\*/) continue
+        if (!match(p, /[A-Za-z_][A-Za-z0-9_]*$/)) continue
+        nm = substr(p, RSTART, RLENGTH)
+        for (j = 1; j <= nbody; j++) {
+            line = body[j]
+            if (match(line, "(^|[^A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*)[ \t]*=[ \t]*" nm "[ \t]*;")) {
+                sink = substr(line, RSTART, RLENGTH)
+                sub(/^[^A-Za-z_]*/, "", sink); sub(/[ \t]*=.*$/, "", sink)
+                # The sink must OUTLIVE the call: a file-scope object, never a
+                # local. `struct worker *w = arg;` at the top of a pthread
+                # entry point is not a publish.
+                if (sink != nm && (sink in fileobj)) { print fnname; return }
+            }
+            if (line ~ ("atomic_store[ \t]*\\([ \t]*&[A-Za-z_][A-Za-z0-9_]*[ \t]*,[ \t]*" nm "[ \t]*\\)")) {
+                print fnname; return
+            }
+        }
+    }
+}
+BEGIN { depth = 0; nbody = 0 }
+{
+    line = $0
+    gsub(/"([^"\\]|\\.)*"/, "\"\"", line)
+    sub(/\/\/.*$/, "", line)
+    if (incomment) { if (line ~ /\*\//) { sub(/^.*\*\//, "", line); incomment = 0 } else next }
+    while (match(line, /\/\*/)) {
+        pre = substr(line, 1, RSTART - 1); rest = substr(line, RSTART)
+        if (match(rest, /\*\//)) line = pre substr(rest, RSTART + 2)
+        else { line = pre; incomment = 1; break }
+    }
+    nb = gsub(/\{/, "{", line); ne = gsub(/\}/, "}", line)
+    if (depth == 0 && nb == 0 && line ~ /;[ \t]*$/) {
+        d = line
+        sub(/[ \t]*=.*$/, "", d); sub(/[ \t]*;.*$/, "", d)
+        if (match(d, /[A-Za-z_][A-Za-z0-9_]*[ \t]*(\[[^]]*\])?$/)) {
+            g = substr(d, RSTART, RLENGTH); gsub(/[ \t]/, "", g); sub(/\[.*\]$/, "", g)
+            if (g != "" && d ~ /\*/) fileobj[g] = 1
+        }
+    }
+    if (depth == 0) {
+        if (nb == 0) {
+            if (line ~ /[^ \t]/) { if (line ~ /;[ \t]*$/) sig = ""; else sig = sig " " line }
+            next
+        }
+        sigfull = sig " " line
+        gsub(/[ \t]+/, " ", sigfull); sub(/^ +/, "", sigfull)
+        depth = nb - ne
+        if (sigfull !~ /\(/ || sigfull ~ /^(typedef|struct |union |enum )/) {
+            sig = ""; nbody = 0; if (depth < 0) depth = 0; next
+        }
+        if (match(sigfull, /[A-Za-z_][A-Za-z0-9_]*[ \t]*\(/)) {
+            fnname = substr(sigfull, RSTART, RLENGTH); sub(/[ \t]*\(/, "", fnname)
+        } else fnname = "?"
+        sig = sigfull
+        if (depth <= 0) {   # one-line definition: body is on this line
+            nbody = 1; body[1] = line
+            emit(); sig = ""; nbody = 0; depth = 0
+            next
+        }
+        nbody = 0
+        next
+    }
+    depth += nb - ne
+    nbody++; body[nbody] = line
+    if (depth > 0) next
+    emit(); sig = ""; nbody = 0; depth = 0
+}
+AWK_EOF
+}
+
+# Reports a publish of &obj followed, in the SAME function body, by a free
+# touching obj with no unpublish in between. Function-scoped and order-aware
+# on purpose: a file-level check is not enough, because the pre-fix
+# params_init.c had a CORRECT sapling_free_params() next to the broken
+# sapling_init_params().
+write_pubfree_analyzer() {
+    cat > "$1" <<'AWK_EOF'
+function base(v) { sub(/^&/, "", v); sub(/[.[].*$/, "", v); return v }
+function flushfn(   j, line, call, setter, arg, v, obj, k, a, rest, td, mod) {
+    if (nbody == 0) return
+    nfuncs++
+    delete pubat; delete clearedat; delete teardown
+    for (j = 1; j <= nbody; j++) {
+        line = body[j]
+        rest = line
+        while (match(rest, /[A-Za-z_][A-Za-z0-9_]*[ \t]*\([ \t]*[^(),]*\)/)) {
+            call = substr(rest, RSTART, RLENGTH)
+            rest = substr(rest, RSTART + RLENGTH)
+            setter = call; sub(/[ \t]*\(.*$/, "", setter)
+            if (!(setter in PUB)) continue
+            arg = call; sub(/^[^(]*\([ \t]*/, "", arg); sub(/[ \t]*\).*$/, "", arg)
+            if (arg == "NULL" || arg == "0") clearedat[setter] = j
+            else if (arg ~ /^&/) { obj = base(arg); pubat[setter SUBSEP obj] = j }
+        }
+        # A module teardown named for the same module is an unpublish too:
+        # tip_finalize_stage_init(&ms) is undone by
+        # tip_finalize_stage_shutdown(), not by passing NULL.
+        if (match(line, /[A-Za-z_][A-Za-z0-9_]*_(shutdown|reset|clear|close|free)[ \t]*\(/)) {
+            td = substr(line, RSTART, RLENGTH); sub(/[ \t]*\($/, "", td)
+            sub(/_(shutdown|reset|clear|close|free)$/, "", td)
+            teardown[td] = j
+        }
+        if (match(line, /(^|[^A-Za-z0-9_])([a-z0-9_]*_)?free[ \t]*\([ \t]*&?[A-Za-z_][A-Za-z0-9_.]*/)) {
+            v = substr(line, RSTART, RLENGTH)
+            sub(/^.*free[ \t]*\([ \t]*/, "", v)
+            v = base(v)
+            for (k in pubat) {
+                split(k, a, SUBSEP)
+                if (a[2] != v) continue
+                if (pubat[k] >= j) continue
+                if ((a[1] in clearedat) && clearedat[a[1]] > pubat[k] && clearedat[a[1]] < j) continue
+                mod = a[1]; sub(/_(init|set_[A-Za-z0-9_]*)$/, "", mod)
+                if ((mod in teardown) && teardown[mod] > pubat[k] && teardown[mod] < j) continue
+                printf "PUBFREE\t%s\t%s\t%s\t%s\tpublish=L%d\tfree=L%d\n",
+                    FILENAME, fnname, a[1], v, bodyline[pubat[k]], bodyline[j]
+                nhit++
+            }
+        }
+    }
+}
+BEGIN {
+    depth = 0; nbody = 0; nfuncs = 0; nhit = 0
+    if (PUBFILE != "") while ((getline pl < PUBFILE) > 0) if (pl != "") PUB[pl] = 1
+}
+{
+    line = $0
+    gsub(/"([^"\\]|\\.)*"/, "\"\"", line)
+    sub(/\/\/.*$/, "", line)
+    if (incomment) { if (line ~ /\*\//) { sub(/^.*\*\//, "", line); incomment = 0 } else next }
+    while (match(line, /\/\*/)) {
+        pre = substr(line, 1, RSTART - 1); rest = substr(line, RSTART)
+        if (match(rest, /\*\//)) line = pre substr(rest, RSTART + 2)
+        else { line = pre; incomment = 1; break }
+    }
+    nb = gsub(/\{/, "{", line); ne = gsub(/\}/, "}", line)
+    if (depth == 0) {
+        if (nb == 0) {
+            if (line ~ /[^ \t]/) { if (line ~ /;[ \t]*$/) sig = ""; else sig = sig " " line }
+            next
+        }
+        sigfull = sig " " line
+        gsub(/[ \t]+/, " ", sigfull); sub(/^ +/, "", sigfull)
+        depth = nb - ne
+        if (depth <= 0) { sig = ""; depth = 0; next }
+        if (sigfull !~ /\(/ || sigfull ~ /^(typedef|struct |union |enum )/) { sig = ""; nbody = 0; next }
+        if (match(sigfull, /[A-Za-z_][A-Za-z0-9_]*[ \t]*\(/)) {
+            fnname = substr(sigfull, RSTART, RLENGTH); sub(/[ \t]*\(/, "", fnname)
+        } else fnname = "?"
+        sig = sigfull; nbody = 0
+        next
+    }
+    depth += nb - ne
+    nbody++; body[nbody] = line; bodyline[nbody] = FNR
+    if (depth > 0) next
+    flushfn(); sig = ""; nbody = 0; depth = 0
+}
+END { printf "PSTATS\t%s\t%d\t%d\n", FILENAME, nfuncs, nhit }
+AWK_EOF
+}
+
 # ── selftest ──────────────────────────────────────────────────────────────
 # Plants a CLEAN function (init above every exit) and a VIOLATING function
 # (LOG_FAIL above the init, exactly the compact-block shape) and asserts the
@@ -261,6 +452,71 @@ C_EOF
         printf '%s\n' "$out" >&2
         rc=1
     fi
+    # ── leg 2: published global freed without unpublishing ────────────────
+    write_publisher_finder "$tmp/pub.awk"
+    write_pubfree_analyzer "$tmp/pubfree.awk"
+    cat > "$tmp/sink.c" <<'C_EOF'
+static struct groth16_vk *sapling_spend_vk = NULL;
+void sapling_set_spend_vk(struct groth16_vk *vk) { sapling_spend_vk = vk; }
+void set_by_value(struct groth16_vk *vk) { vk->n = 0; }
+C_EOF
+    cat > "$tmp/loader.c" <<'C_EOF'
+static struct groth16_vk spend_vk;
+
+/* VIOLATING: publishes, then a later failure path frees the published
+ * storage without ever storing NULL back into the sink. */
+bool dirty_init(const char *dir)
+{
+    sapling_set_spend_vk(&spend_vk);
+    if (!read_sprout(dir)) {
+        free(spend_vk.ic);
+        return false;
+    }
+    return true;
+}
+
+/* CLEAN: unpublishes before freeing. */
+bool clean_init(const char *dir)
+{
+    sapling_set_spend_vk(&spend_vk);
+    if (!read_sprout(dir)) {
+        sapling_set_spend_vk(NULL);
+        free(spend_vk.ic);
+        return false;
+    }
+    return true;
+}
+C_EOF
+    awk -f "$tmp/pub.awk" "$tmp/sink.c" | sort -u > "$tmp/pubnames.txt"
+    pubout="$(awk -v PUBFILE="$tmp/pubnames.txt" -f "$tmp/pubfree.awk" "$tmp/loader.c")"
+    if str_contains "$(cat "$tmp/pubnames.txt")" "sapling_set_spend_vk"; then
+        echo "  selftest: publisher DERIVED from the store, not the name — ok"
+    else
+        echo "  selftest: FAIL — the publisher was not derived" >&2
+        cat "$tmp/pubnames.txt" >&2
+        rc=1
+    fi
+    if str_lacks "$(cat "$tmp/pubnames.txt")" "set_by_value"; then
+        echo "  selftest: a set_* that only writes THROUGH the pointer is not a publisher — ok"
+    else
+        echo "  selftest: FAIL — set_by_value was misread as a publisher" >&2
+        rc=1
+    fi
+    if str_contains "$pubout" "PUBFREE${tab}${tmp}/loader.c${tab}dirty_init"; then
+        echo "  selftest: publish-then-free-without-unpublish DETECTED — ok"
+    else
+        echo "  selftest: FAIL — the published-global violation was NOT detected" >&2
+        printf '%s\n' "$pubout" >&2
+        rc=1
+    fi
+    if str_contains "$pubout" "clean_init"; then
+        echo "  selftest: FAIL — the unpublish-first case was reported" >&2
+        printf '%s\n' "$pubout" >&2
+        rc=1
+    else
+        echo "  selftest: unpublish-first case NOT reported — ok"
+    fi
+
     if [ "$rc" -eq 0 ]; then
         echo "check_outparam_init_before_return --selftest: PASS"
     else
@@ -298,6 +554,52 @@ printf '%s\0' "${SRCS[@]}" | xargs -0 awk -f "$WORK/scan.awk" > "$WORK/raw.txt" 
 scanned_funcs=$(awk -F'\t' '$1=="STATS"{n+=$3} END{print n+0}' "$WORK/raw.txt")
 gate_require_scanned "$scanned_funcs" 10000 check-outparam-init-before-return \
     "the analyzer walked almost no function bodies — its C parser is broken"
+
+# ── leg 2: published global freed without unpublishing ───────────────────
+# Zero-tolerance, no allowlist: the tree has none today, so the first one to
+# land fails here. Scoped to PRODUCTION sources. Test harnesses legitimately
+# hand a stage module a &main_state and then free it at case teardown, which
+# is the same textual shape and ~870 occurrences; baselining those would bury
+# the one shape that actually shipped a use-after-free.
+write_publisher_finder "$WORK/pub.awk"
+write_pubfree_analyzer "$WORK/pubfree.awk"
+
+printf '%s\0' "${SRCS[@]}" | xargs -0 awk -f "$WORK/pub.awk" 2>/dev/null \
+    | sort -u > "$WORK/publishers.txt" || true
+pub_count=$(wc -l < "$WORK/publishers.txt")
+gate_require_scanned "$pub_count" 20 check-outparam-init-before-return \
+    "expected >=20 publisher functions (a store of a caller pointer into a file-scope var); the derivation is empty"
+
+mapfile -t PROD_SRCS < <(printf '%s\n' "${SRCS[@]}" \
+    | grep -vE '^(lib/test/|tests/|tools/fuzz/|examples/|lib/vcs/tests/)' || true)
+gate_require_scanned "${#PROD_SRCS[@]}" 1000 check-outparam-init-before-return \
+    "expected >=1000 production .c files after excluding harnesses"
+
+printf '%s\0' "${PROD_SRCS[@]}" | xargs -0 \
+    awk -v PUBFILE="$WORK/publishers.txt" -f "$WORK/pubfree.awk" \
+    > "$WORK/pubraw.txt" 2>/dev/null || true
+pub_scanned=$(awk -F'\t' '$1=="PSTATS"{n+=$3} END{print n+0}' "$WORK/pubraw.txt")
+gate_require_scanned "$pub_scanned" 5000 check-outparam-init-before-return \
+    "the publish/free analyzer walked almost no function bodies"
+
+pubfree_hits=$(grep -c '^PUBFREE' "$WORK/pubraw.txt" || true)
+if [ "${pubfree_hits:-0}" -gt 0 ]; then
+    {
+        echo "check-outparam-init-before-return: ${pubfree_hits} PUBLISHED pointer(s) freed"
+        echo "  without being unpublished first:"
+        grep '^PUBFREE' "$WORK/pubraw.txt" \
+            | awk -F'\t' '{printf "    %s: %s() published %s via %s at %s, freed at %s\n", $2, $3, $5, $4, $6, $7}'
+        echo
+        echo "  Every reader's fail-closed guard asks only whether the published"
+        echo "  pointer is NULL. That reading is true only while every failure path"
+        echo "  actually produces NULL. Publish BELOW every fallible step, and"
+        echo "  unpublish BEFORE freeing — see the invariant comment in"
+        echo "  lib/sapling/src/params_init.c."
+    } >&2
+    pubfree_failed=1
+else
+    pubfree_failed=0
+fi
 
 # Keep only in-scope findings: freeable type, data-dependent pre-init exit,
 # and not the type's own <type>_init / <type>_free / <type>_reset (where the
@@ -345,7 +647,7 @@ stale=()
 for key in "${!ALLOWED[@]}"; do
     grep -qxF "$key" "$WORK/keys.txt" || stale+=("$key")
 done
-failed=0
+failed="$pubfree_failed"
 
 # NEW findings are reported FIRST and unconditionally: a stale-baseline
 # complaint must never pre-empt the report of an actual new violation.
@@ -386,4 +688,4 @@ fi
 
 [ "$failed" -eq 0 ] || exit 1
 
-echo "check-outparam-init-before-return: clean — ${scanned_funcs} function bodies scanned, ${found} in-scope out-param(s), all ${baseline_count} reviewed"
+echo "check-outparam-init-before-return: clean — ${scanned_funcs} function bodies scanned, ${found} in-scope out-param(s), all ${baseline_count} reviewed; ${pub_scanned} bodies checked for publish-before-free over ${pub_count} publishers, 0 dangling"

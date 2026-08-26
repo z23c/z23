@@ -970,6 +970,7 @@ add/remove a gate.
 - `check-no-unattended-publish`
 - `check-zcc-cache`
 - `check-tu-random-seed`
+- `check-outparam-init-before-return`
 - `check-equihash-params`
 <!-- LINT-GATES-END -->
 
@@ -1012,6 +1013,91 @@ manifests, and rejects duplicate tracked notebook paths. Reproducible simnet
 evidence and public consensus fixtures remain allowed in the canonical broad
 lab baseline. Both recorders independently refuse any ledger path inside the
 repository, even when a developer supplies an environment override.
+
+### `check-outparam-init-before-return` — what a later reader will free must never be a stale value
+
+Two remote-reachable memory-safety bugs were found on the same day, 2026-08-26,
+and they are one class: **the thing a later reader will free or dereference was
+left in a state that reader's guard cannot see.**
+
+`compact_block_reconstruct()` took `struct block *out_block` and refused an
+empty announcement *above* `block_init(out_block)`. Its caller
+`process_cmpctblock()` ran `block_free(&out_block)` on that outcome, so
+`transaction_free()` walked whatever pointer and count the caller's own stack
+happened to hold. Any connected peer could reach it with a valid header plus
+two zero bytes (`bce343876`).
+
+`sapling_init_params()` published the three Groth16 verifying keys into the
+module globals the verifiers read, and a later Sprout failure path freed their
+`ic[]` arrays and comb tables *without* storing `NULL` back into those globals.
+Every verifier's fail-closed guard asks only "is the pointer NULL?", so the
+guard passed and `groth16_verify()` read freed heap, reachable from
+`accept_to_mempool` (`69518f2f3`).
+
+Two things make this class hard to see, and the gate is shaped around both.
+First, `LOG_FAIL` and the other `LOG_*` macros in this tree **expand to a
+return**, so a line that reads like logging is a control-flow exit and a human
+scanning for `return` above the init sees nothing. Second, a freshly mapped
+stack reads back as zero, so a one-shot replay frees nothing and exits clean;
+140 stock replays and a 1,265,835-execution fuzz session all missed the
+compact-block bug. Rebuilding with `-ftrivial-auto-var-init=pattern` makes it
+deterministic, and that is the way to reproduce anything in this family:
+pre-fix it reproduces the lane's exact stack (`transaction_free <- block_free
+<- process_cmpctblock <- msg_process_messages`), post-fix it is clean.
+
+The rules, both required:
+
+- **Initialize before anything can fail.** A function that hands back a struct
+  the caller frees must `*_init()`/`memset()` it above the first thing that can
+  fail, and the header must state that post-condition as a rule rather than a
+  description.
+- **Publish last, unpublish first.** A pointer stored into a module global is
+  published only below every fallible step, and any teardown clears the global
+  *before* freeing what it points at.
+
+`tools/lint/check_outparam_init_before_return.sh` holds both closed. It runs
+two legs over every tracked `.c` file:
+
+1. **Out-parameter leg.** For each function it extracts the `struct T *name`
+   parameters, finds the first `*_init(name)`/`memset(name, …)` in the body,
+   and reports the pair when a `return` or a `LOG_*(` precedes it. It reports
+   only when a `T_free` exists somewhere in the tree — the struct must be the
+   kind a caller frees — and only when the pre-init exit is reachable with
+   well-formed arguments. It walks *every* exit above the init, not just the
+   first, because the first is very often `if (!a || !b) return false;`, which
+   a caller that then frees the out-param cannot reach. Surviving cases are
+   listed in `tools/lint/outparam_init_baseline.txt`, each with the caller-side
+   mechanism that makes it safe; the allowlist is **closed**, so a new instance
+   fails rather than joining a list, and a *stale* entry fails too, so fixing
+   the code means deleting the waiver.
+2. **Published-global leg.** It derives the set of publisher functions from the
+   code — a function that stores a caller-supplied pointer into a file-scope
+   variable — never from the name, so a `*_set_*` that merely writes *through*
+   the pointer is not a publisher and a publisher spelled otherwise still is
+   one. It then reports a publish of `&obj` followed, in the same function, by
+   a free touching `obj` with no unpublish between. This leg is
+   **zero-tolerance and has no allowlist**: production code has none today.
+
+What it cannot check, stated so nobody over-trusts it: it is a line-order
+scanner over C text, not a compiler. It does not follow control flow, so
+`if (x) { init(out); } … return` reads as initialized. It does not resolve
+macros, so a wrapper that expands to `return` and is not named `LOG_*` is
+invisible. It does not prove the *caller* frees — that leg is the reviewer's,
+recorded per baseline entry. It only recognizes `T_init(out)`/`memset(out, …)`
+as initialization, so a field-by-field init over-reports and an init done by a
+helper it cannot see is a miss. Multi-declarator declarations and
+`struct T **out` owner-outs are out of scope. On the published-global leg it
+sees only the first `free(` on a line, and it is scoped to production sources:
+test harnesses legitimately hand a stage module a `&main_state` and free it at
+case teardown, which is the same text about 870 times over and would bury the
+one shape that actually shipped a use-after-free.
+
+`--selftest` plants a clean function and a violating one for each leg and
+asserts the verdict on each, including that a `set_*` which only writes through
+its pointer is *not* read as a publisher. Both legs refuse to report clean off a
+scan that found nothing (`gate_require_scanned` floors on the file set, the
+derived `*_free` set, the publisher set, and the number of function bodies
+actually walked).
 
 ### `check-tu-random-seed` and `make repro-build` — the build repeats
 

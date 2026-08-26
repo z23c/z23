@@ -1260,3 +1260,16 @@ AGENT_IMPACT_RULE("tools/scripts/source_identity_lib.sh|tools/deploy_verify.sh|l
  * noticing, would leave the claim standing with nothing behind it. Mapped to
  * the lint-gate group that owns the Makefile-vs-docs parity assertions. */
 AGENT_IMPACT_RULE("tools/scripts/repro_build.sh|tools/scripts/repro-verify.sh|tools/lint/check_tu_random_seed.sh|docs/DEFENSIVE_CODING.md", "make_lint_gates")
+/* LANE outparam-init: the gate that keeps a caller's free from walking a stale
+ * value, its closed allowlist, and the three call sites hardened by the sweep
+ * that produced it. Two remote-reachable bugs on 2026-08-26 were the same
+ * class — compact_block_reconstruct() returned above block_init(out_block) and
+ * its caller freed anyway (bce343876), and sapling_init_params() freed the
+ * storage behind three published verifying keys without clearing the globals
+ * the verifiers read (69518f2f3). The gate's two legs cover both halves, and
+ * its baseline records every remaining case with the caller-side mechanism
+ * that makes it safe. Mapped to the lint-gate group that owns the
+ * Makefile-vs-docs parity assertions, plus the groups that actually exercise
+ * the hardened builders, so an edit here can never reach the push gate having
+ * run zero test groups. */
+AGENT_IMPACT_RULE("tools/lint/check_outparam_init_before_return.sh|tools/lint/outparam_init_baseline.txt|app/services/src/swap_settlement_service.c|app/services/include/services/swap_settlement_service.h", "make_lint_gates swap_settlement api rpc_safety")
