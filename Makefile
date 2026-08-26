@@ -6890,8 +6890,17 @@ $(DEV_TSAN_OBJ_DIR)/lib/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
 #   2. `wal_checkpoint` — truncate WAL before SIGTERM so SQLite doesn't
 #      recover a half-checkpointed journal on boot.
 #   3. `tools/deploy_verify.sh` — poll `zclassic-cli getblockcount` until the
-#      node answers and diagnostics are ready, with a startup-sized deadline;
-#      freshness is exact source SHA-256 plus the running executable SHA-256.
+#      node answers and diagnostics are ready; freshness is exact source
+#      SHA-256 plus the running executable SHA-256.
+#
+# deploy_verify.sh has no deadline that means failure. It fails only on PROVEN
+# SILENCE — the candidate's /proc I/O, CPU and blocked-on-disk ticks (and, once
+# RPC opens, its height and verification receipts) all frozen for the full
+# silence limit — or on the candidate process not staying up. When its
+# reporting window expires while the node is still advancing it exits 3, and
+# THAT IS NOT A FAILED DEPLOY: this recipe leaves the candidate installed and
+# performs no rollback. Rolling a good binary back off a 7200rpm box because a
+# clock ran out is how a network becomes SSD-only.
 #
 # The wal_checkpoint step calls the in-tree tools/wal_checkpoint binary
 # (P12.4 — was an inline `sqlite3(1)` CLI invocation before, which failed
@@ -7018,6 +7027,8 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	        fi; \
 	        if [ "$$rollback_verify_rc" -eq 0 ]; then \
 	            echo "deploy: ROLLED_BACK — prior executable/config restored and verified" >&2; \
+	        elif [ "$$rollback_verify_rc" -eq 3 ]; then \
+	            echo "deploy: ROLLED_BACK (verification still in progress) — prior executable/config restored and demonstrably booting; the verification window expired while it was still advancing, which is a slow disk, not a failed rollback" >&2; \
 	        else \
 	            echo "deploy: CRITICAL — rollback verification failed; automation stopped" >&2; \
 	        fi; \
@@ -7144,10 +7155,22 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	    echo "deploy: refreshed PATH shadow $(HOME)/bin/zclassic23 -> $$SERVICE_BIN"; \
 	fi; \
 	systemctl --user restart zclassic23; \
+	set +e; \
 	ZCL_DEPLOY_STAGE="$(DEPLOY_VERIFY_STAGE)" \
 	ZCL_DEPLOY_EXPECT_SOURCE_ID="$(BUILD_SOURCE_ID)" \
 	ZCL_DEPLOY_EXPECT_ARTIFACT_SHA256="$$artifact_sha256" \
 	    ./tools/deploy_verify.sh; \
+	verify_rc=$$?; \
+	set -e; \
+	if [ "$$verify_rc" -eq 3 ]; then \
+	    echo "deploy: SLOW BOX — verification window expired while the new node was still making observable progress. The candidate stays installed and NOTHING is rolled back: a slow disk is not a failed deploy. Keep watching with ZCL_DEPLOY_VERIFY_WAIT=1 ZCL_DEPLOY_EXPECT_SOURCE_ID=$(BUILD_SOURCE_ID) ZCL_DEPLOY_EXPECT_ARTIFACT_SHA256=$$artifact_sha256 ./tools/deploy_verify.sh" >&2; \
+	    rollback_armed=0; \
+	    rm -f "$$candidate"; candidate=""; \
+	    rm -f "$$rollback_bin" "$$rollback_dropin"; rollback_bin=""; rollback_dropin=""; \
+	    trap - EXIT HUP INT TERM; \
+	    exit 3; \
+	fi; \
+	[ "$$verify_rc" -eq 0 ] || exit "$$verify_rc"; \
 	rollback_armed=0; \
 	rm -f "$$candidate"; candidate=""; \
 	rm -f "$$rollback_bin" "$$rollback_dropin"; rollback_bin=""; rollback_dropin=""; \
@@ -7467,7 +7490,7 @@ evidence-selftest:
 # failover. install-standby installs the always-warm understudy unit; cutover
 # promotes a healthy candidate to canonical with a hard preflight + auto-
 # rollback. See deploy/zclassic23-standby.service and deploy/zclassic23-cutover.sh.
-.PHONY: install-standby cutover cutover-selftest migrate-role-names-selftest
+.PHONY: install-standby cutover cutover-selftest host-watchdog-selftest migrate-role-names-selftest
 
 install-standby:
 	@install -d "$(HOME)/.config/systemd/user"
@@ -7480,15 +7503,25 @@ install-standby:
 	@echo "installed zclassic23-standby.service. To arm the understudy:"
 	@echo "  systemctl --user daemon-reload && systemctl --user enable --now zclassic23-standby"
 
-# make cutover CANDIDATE_DATADIR=<path> [YES=1] [TIMEOUT=<secs>] [CANDIDATE_RPCPORT=<n>]
+# make cutover CANDIDATE_DATADIR=<path> [YES=1] [TIMEOUT=<secs>]
+#              [STALL_TIMEOUT=<secs>] [CANDIDATE_RPCPORT=<n>]
 # Owner-gated by design: without YES=1 the script prints the height comparison
 # and REFUSES. It never edits the canonical unit; it swaps datadirs underneath
-# it and auto-rolls-back if the promoted node does not reach the pre-cutover H*.
+# it.
+#
+# The auto-rollback fires ONLY on observed SILENCE (STALL_TIMEOUT, default 900s
+# with nothing about the promoted node changing — not H*, not its CPU, not the
+# ticks it spends blocked on the disk), never on elapsed time. TIMEOUT is a
+# REPORTING window: when it expires while the node is still advancing the
+# script exits 3 with CUTOVER: PROMOTED-CATCHING-UP and the promotion STANDS.
+# Exit 3 is not a failure. Reversing a live datadir promotion because a slow
+# disk missed a stopwatch is how a fleet loses its slow machines.
 cutover:
 	@[ -n "$(CANDIDATE_DATADIR)" ] || { echo "usage: make cutover CANDIDATE_DATADIR=<path> [YES=1]"; exit 2; }
 	@CANDIDATE_DATADIR="$(CANDIDATE_DATADIR)" \
 	 $(if $(CANDIDATE_RPCPORT),CANDIDATE_RPCPORT="$(CANDIDATE_RPCPORT)",) \
 	 $(if $(TIMEOUT),READY_TIMEOUT="$(TIMEOUT)",) \
+	 $(if $(STALL_TIMEOUT),READY_STALL_TIMEOUT="$(STALL_TIMEOUT)",) \
 	 ./deploy/zclassic23-cutover.sh $(if $(filter 1 yes YES true,$(YES)),--yes,)
 
 # cutover-selftest: hermetic fixture proof of the preflight comparison + the
@@ -7498,8 +7531,22 @@ cutover-selftest:
 	@bash -c 'set -uo pipefail; \
 	 set +e; out=$$(bash deploy/zclassic23-cutover-selftest.sh 2>&1); rc=$$?; set -e; \
 	 echo "$$out"; \
-	 if [ "$$rc" != "0" ] || ! echo "$$out" | grep -q "^cutover-selftest: PASS"; then \
+	 pass=1; case "$$out" in *"cutover-selftest: PASS"*) pass=0;; esac; \
+	 if [ "$$rc" != "0" ] || [ "$$pass" != "0" ]; then \
 	     echo "cutover-selftest: FAIL (rc=$$rc; no PASS line)"; \
+	     exit 1; \
+	 fi'
+
+# host-watchdog-selftest: hermetic proof that the SYSTEM-level watchdog never
+# turns one missed probe into NODE-DOWN. Injected probe/progress/manager hooks,
+# a sandbox state file, no root and no node.
+host-watchdog-selftest:
+	@bash -c 'set -uo pipefail; \
+	 set +e; out=$$(bash deploy/zclassic23-host-watchdog.sh --selftest 2>&1); rc=$$?; set -e; \
+	 echo "$$out"; \
+	 pass=1; case "$$out" in *"host-watchdog-selftest: PASS"*) pass=0;; esac; \
+	 if [ "$$rc" != "0" ] || [ "$$pass" != "0" ]; then \
+	     echo "host-watchdog-selftest: FAIL (rc=$$rc; no PASS line)"; \
 	     exit 1; \
 	 fi'
 

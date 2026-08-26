@@ -10,15 +10,45 @@
 # height and the public-node hardening diagnostics are registered by the
 # running daemon.
 #
-# The default deadline must absorb a full cold boot of a ~22 GB datadir:
-# block-file scan + pprev repair + index reconcile routinely exceed two
-# minutes, and a slow boot is not a failed deploy (120s false-FAILed a
-# healthy deploy on 2026-06-10).
+# ── Why there is no "deadline that means failure" any more ─────────────────
+# This check used to answer "did the node get ready inside N seconds?", and
+# that question has no honest answer: N encodes an assumption about the disk
+# under the node. 120s false-FAILed a healthy deploy on 2026-06-10 and the
+# bound was widened to 600s, which is the same defect with a bigger number —
+# on a 7200rpm box a cold boot of a ~22 GB datadir (block-file scan + pprev
+# repair + index reconcile) routinely runs far past ten minutes. Grading that
+# box "DEPLOY FAILED" makes `make deploy` roll a perfectly good binary back,
+# which is how a network quietly becomes SSD-only.
+#
+# The property the old deadline was standing in for is "is the candidate
+# making progress?", and that is directly observable and costs nothing:
+#
+#   before RPC opens — /proc/<MainPID>/{io,stat}: bytes moved, CPU ticks
+#                      burned, and delayacct_blkio_ticks, which climbs
+#                      precisely while the process is BLOCKED on a slow disk.
+#   after  RPC opens — the reported height, plus the sticky per-class
+#                      verification receipts. A node catching up legitimately
+#                      fails `healthy` while its height climbs.
+#
+# A wedge is SILENCE, not slowness. So the only failure clock is time spent
+# with none of those observables changing, and the window is a REPORTING
+# window: when it expires while the node is still advancing, that is reported
+# as its own outcome and is NOT a failure.
 #
 # Exit codes:
 #   0  — RPC live, block count observed, diagnostic contract present
-#   1  — RPC/diagnostic contract did not come up within the deadline
+#   1  — real fault: the candidate stopped making observable progress (or its
+#        process did not stay up). Never returned merely because time passed.
 #   2  — identity inputs or canonical service binding are malformed
+#   3  — UNVERIFIED, STILL PROGRESSING: the reporting window expired while the
+#        node was demonstrably still advancing. Not a failure, not a success;
+#        `make deploy` leaves the candidate installed and does NOT roll back.
+#        Re-run this script, or set ZCL_DEPLOY_VERIFY_WAIT=1, to keep watching.
+#
+# Knobs:
+#   ZCL_DEPLOY_VERIFY_TIMEOUT   reporting window, seconds (default 600)
+#   ZCL_DEPLOY_VERIFY_SILENCE   observed silence that means fault (default 300)
+#   ZCL_DEPLOY_VERIFY_WAIT=1    never exit 3; wait until ready or silent
 #
 # Deployment acceptance always requires both environment variables:
 #   ZCL_DEPLOY_EXPECT_SOURCE_ID=<64 lowercase hex>
@@ -49,7 +79,14 @@ running_daemon_baked_source_id() {
 }
 
 RPC_TOOL="${1:-./build/bin/zclassic-cli}"
+# REPORTING window, not a failure window. See the header: expiry while the
+# candidate is still advancing exits 3, never 1.
 TIMEOUT="${2:-${ZCL_DEPLOY_VERIFY_TIMEOUT:-600}}"
+# The one clock that can call a fault: consecutive seconds during which NOTHING
+# observable about the candidate changed. Deliberately large relative to any
+# honest slow-disk step, because its job is to catch a wedge, not a slow box.
+SILENCE_LIMIT="${ZCL_DEPLOY_VERIFY_SILENCE:-300}"
+WAIT_FOREVER="${ZCL_DEPLOY_VERIFY_WAIT:-0}"
 RPC_CALL_TIMEOUT="${ZCL_DEPLOY_RPC_TIMEOUT:-20}"
 INTERVAL=2
 RPC_CONNECT="127.0.0.1"
@@ -116,9 +153,72 @@ select_bound_value() {
     fi
 }
 
+proc_start_ticks_from_text() {
+    printf '%s\n' "$1" |
+        sed 's/^[0-9][0-9]* ([^)]*) //' |
+        awk 'NF >= 20 && !seen { print $20; seen = 1 }'
+}
+
 proc_start_ticks() {
-    sed 's/^[0-9][0-9]* ([^)]*) //' "/proc/$1/stat" 2>/dev/null |
-        awk 'NF >= 20 { print $20; exit }'
+    proc_start_ticks_from_text "$(cat "/proc/$1/stat" 2>/dev/null || true)"
+}
+
+# ── observable progress, read from /proc only ───────────────────────────────
+# These are pure text parsers so the selftest can pin them without a live node.
+# Field numbering is post-`sed`: "pid (comm) " is stripped first, so the kernel
+# proc(5) fields shift down by two — utime(14)/stime(15) become $12/$13 and
+# delayacct_blkio_ticks(42) becomes $40, matching proc_start_ticks above.
+proc_io_bytes_from_text() {
+    printf '%s\n' "$1" |
+        awk '/^(rchar|wchar|read_bytes|write_bytes):[ \t]*[0-9]+$/ { total += $2 }
+             END { printf "%.0f\n", total + 0 }'
+}
+
+proc_cpu_ticks_from_text() {
+    printf '%s\n' "$1" |
+        sed 's/^[0-9][0-9]* ([^)]*) //' |
+        awk 'NF >= 13 && !seen { printf "%.0f\n", $12 + $13; seen = 1 }
+             END { if (!seen) print 0 }'
+}
+
+# delayacct_blkio_ticks is the signal that makes a slow disk legible: it climbs
+# while the process is BLOCKED waiting on I/O, i.e. exactly when a 7200rpm box
+# is doing honest work and burning almost no CPU. A node wedged on a lock moves
+# neither this nor CPU; that difference is the whole verdict.
+proc_blkio_ticks_from_text() {
+    printf '%s\n' "$1" |
+        sed 's/^[0-9][0-9]* ([^)]*) //' |
+        awk 'NF >= 40 && !seen { printf "%.0f\n", $40; seen = 1 }
+             END { if (!seen) print 0 }'
+}
+
+# progress_verdict <previous-token> <current-token> -> advancing | silent
+# The ONLY thing that may call a fault is `silent`, sustained for SILENCE_LIMIT.
+progress_verdict() {
+    if [ "$1" = "$2" ]; then
+        echo silent
+    else
+        echo advancing
+    fi
+}
+
+# window_outcome <advances-seen> <silent-for> <silence-limit>
+#   -> fault | unverified_progressing | unverified_unobserved
+#
+# What the expiry of the REPORTING window means. Expiry alone decides nothing.
+# A fault requires PROVEN silence — the full silence limit with no observable
+# change — and nothing else may produce it. If the window is shorter than the
+# silence limit and nothing has been observed to move yet, neither verdict has
+# been earned, and saying so is the honest third answer rather than picking the
+# convenient one. A hang and a slow-but-healthy box never share an exit code.
+window_outcome() {
+    if [ "$2" -ge "$3" ]; then
+        echo fault
+    elif [ "$1" -gt 0 ]; then
+        echo unverified_progressing
+    else
+        echo unverified_unobserved
+    fi
 }
 
 service_pid_is_stable() {
@@ -238,6 +338,61 @@ deploy_verify_selftest() {
     # Wrong schema is not a healthcheck and states nothing about the daemon.
     selftest_foreign='{"schema":"zcl.agent_build.v2","api_version":"v1","status":"ok","source_id_sha256":"'"$selftest_baked"'"}'
     [ -z "$(running_daemon_baked_source_id "$selftest_foreign")" ] || return 1
+
+    # ── progress observables: a slow box must be legible as SLOW, never DOWN ──
+    # /proc/<pid>/io — every counted field summed, unknown lines ignored.
+    selftest_io='rchar: 100
+wchar: 20
+syscr: 7
+syscw: 3
+read_bytes: 4096
+write_bytes: 8192
+cancelled_write_bytes: 999999'
+    [ "$(proc_io_bytes_from_text "$selftest_io")" = "12408" ] || return 1
+    # A kernel without task IO accounting yields no readable payload; that must
+    # be 0 rather than empty, so the token stays comparable.
+    [ "$(proc_io_bytes_from_text "")" = "0" ] || return 1
+
+    # /proc/<pid>/stat with a comm containing spaces and parentheses — the
+    # exact shape that makes positional parsing wrong if the prefix is not
+    # stripped first. utime=11 stime=22 -> 33; delayacct_blkio_ticks=777.
+    selftest_stat="4242 (z23 node) S 1 4242 4242 0 -1 4194560 100 0 0 0 11 22 0 0 20 0 9 0 987654 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 777 0 0"
+    [ "$(proc_cpu_ticks_from_text "$selftest_stat")" = "33" ] || return 1
+    [ "$(proc_blkio_ticks_from_text "$selftest_stat")" = "777" ] || return 1
+    [ "$(proc_start_ticks_from_text "$selftest_stat")" = "987654" ] || return 1
+    [ "$(proc_cpu_ticks_from_text "")" = "0" ] || return 1
+    [ "$(proc_blkio_ticks_from_text "")" = "0" ] || return 1
+
+    # THE CASE THIS WHOLE MECHANISM EXISTS FOR: a box that burns no CPU and
+    # answers no RPC, but whose blkio ticks climb, is making progress. Under a
+    # duration-only verdict it was indistinguishable from a wedge.
+    selftest_blocked_a="1 (z23 node) S 1 1 1 0 -1 0 0 0 0 0 5 5 0 0 20 0 9 0 100 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1000 0 0"
+    selftest_blocked_b="1 (z23 node) S 1 1 1 0 -1 0 0 0 0 0 5 5 0 0 20 0 9 0 100 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 4000 0 0"
+    selftest_slow_a="io=0 cpu=$(proc_cpu_ticks_from_text "$selftest_blocked_a") blkio=$(proc_blkio_ticks_from_text "$selftest_blocked_a")"
+    selftest_slow_b="io=0 cpu=$(proc_cpu_ticks_from_text "$selftest_blocked_b") blkio=$(proc_blkio_ticks_from_text "$selftest_blocked_b")"
+    [ "$(progress_verdict "$selftest_slow_a" "$selftest_slow_b")" = advancing ] || return 1
+    # A genuinely wedged process repeats its token byte for byte.
+    [ "$(progress_verdict "$selftest_slow_a" "$selftest_slow_a")" = silent ] || return 1
+
+    # After RPC opens, the observables change: a node whose height climbs while
+    # `healthy` is still false is CATCHING UP, not broken.
+    [ "$(progress_verdict "height=100 receipts=11000" "height=101 receipts=11000")" = advancing ] || return 1
+    # Contract convergence is progress too, even at a frozen height.
+    [ "$(progress_verdict "height=100 receipts=11000" "height=100 receipts=11100")" = advancing ] || return 1
+    # Neither moving is the only shape that may ever be called a fault.
+    [ "$(progress_verdict "height=100 receipts=11000" "height=100 receipts=11000")" = silent ] || return 1
+
+    # ── the window-expiry classifier ────────────────────────────────────────
+    # THE CASE THE OLD 600s BOUND GOT WRONG: the window expired while the box
+    # was still advancing. That must not be a failure.
+    [ "$(window_outcome 42 4 300)" = unverified_progressing ] || return 1
+    # Even one observed advance is enough; slowness is not evidence of a wedge.
+    [ "$(window_outcome 1 299 300)" = unverified_progressing ] || return 1
+    # A fault requires PROVEN silence — the full limit with nothing moving.
+    [ "$(window_outcome 0 300 300)" = fault ] || return 1
+    [ "$(window_outcome 99 301 300)" = fault ] || return 1
+    # A window shorter than the silence limit has earned NEITHER verdict.
+    [ "$(window_outcome 0 60 300)" = unverified_unobserved ] || return 1
 
     echo "deploy_verify selftest: PASS"
 }
@@ -413,7 +568,8 @@ rpc_call() {
     esac
 }
 
-deadline=$(( $(date +%s) + TIMEOUT ))
+START_TS=$(date +%s)
+deadline=$(( START_TS + TIMEOUT ))
 attempt=0
 last_err=""
 chain_advance_verified=0
@@ -421,6 +577,37 @@ chain_evidence_verified=0
 network_verified=0
 peer_lifecycle_verified=0
 legacy_mirror_verified=0
+RPC_READY=0
+LAST_HEIGHT=none
+
+# The composed observable this script watches instead of a clock. It reports
+# two different regimes because the honest evidence differs between them, and
+# collapsing them would put a booting box and a broken contract under one
+# verdict:
+#
+#   RPC_READY=0 — the node has not answered yet. Only the kernel can say
+#                 whether it is working: bytes moved, CPU burned, and ticks
+#                 spent BLOCKED on the disk. On a 7200rpm box the third of
+#                 those is usually the only one moving, and it is enough.
+#   RPC_READY=1 — the node is up, so "slow" no longer explains a failing
+#                 contract. Progress is now the height it serves plus the
+#                 sticky per-class receipts below; a node catching up
+#                 legitimately fails `healthy` while its height climbs.
+progress_token() {
+    if [ "$RPC_READY" -eq 1 ]; then
+        printf 'height=%s receipts=%s%s%s%s%s\n' "$LAST_HEIGHT" \
+            "$chain_advance_verified" "$chain_evidence_verified" \
+            "$network_verified" "$peer_lifecycle_verified" \
+            "$legacy_mirror_verified"
+        return 0
+    fi
+    token_stat=$(cat "/proc/$SERVICE_MAIN_PID/stat" 2>/dev/null || true)
+    token_io=$(cat "/proc/$SERVICE_MAIN_PID/io" 2>/dev/null || true)
+    printf 'io=%s cpu=%s blkio=%s\n' \
+        "$(proc_io_bytes_from_text "$token_io")" \
+        "$(proc_cpu_ticks_from_text "$token_stat")" \
+        "$(proc_blkio_ticks_from_text "$token_stat")"
+}
 
 json_has_key() {
     printf '%s\n' "$1" | grep -q "\"$2\"[[:space:]]*:"
@@ -787,33 +974,113 @@ verify_contract() {
     return 0
 }
 
-while [ "$(date +%s)" -lt "$deadline" ]; do
+report_evidence() {
+    if [ -n "$last_err" ]; then
+        echo "last error: $last_err"
+    fi
+    echo "progress evidence: samples=$progress_advances attempts=$attempt" \
+         "elapsed=${elapsed}s silent_for=${silent_for}s" \
+         "first_token=[$first_token] last_token=[$prev_token]"
+    boot_status=$(pre_rpc_boot_status || true)
+    if [ -n "$boot_status" ]; then
+        echo "typed boot status: $boot_status"
+    else
+        echo "typed boot status: unavailable (captured service process changed)"
+    fi
+}
+
+prev_token=$(progress_token)
+first_token="$prev_token"
+last_progress_ts="$START_TS"
+progress_advances=0
+elapsed=0
+silent_for=0
+
+while :; do
     attempt=$((attempt + 1))
     if out=$(rpc_call getblockcount 2>&1); then
         # Accept either a plain integer (zclassic-cli) or a JSON
         # envelope with "result":<integer> (build/bin/zcl-rpc). Any other
         # output keeps the loop polling.
         height=$(extract_height "$out")
-        if [ -n "$height" ] && verify_contract "$height"; then
-            exit 0
-        fi
-        if [ -z "$height" ]; then
+        if [ -n "$height" ]; then
+            LAST_HEIGHT="$height"
+            if [ "$RPC_READY" -eq 0 ]; then
+                # Regime change. The observable set is now a different one, so
+                # the silence clock restarts rather than comparing tokens that
+                # were never comparable.
+                RPC_READY=1
+                prev_token=$(progress_token)
+                last_progress_ts=$(date +%s)
+                progress_advances=$((progress_advances + 1))
+            fi
+            if verify_contract "$height"; then
+                exit 0
+            fi
+        else
             last_err="$out"
         fi
     else
         last_err="$out"
     fi
+
+    now=$(date +%s)
+    elapsed=$(( now - START_TS ))
+
+    # A candidate that crashed and was restarted underneath us is a FAULT, and
+    # it is one no amount of waiting fixes. Naming it here keeps it out of the
+    # slowness verdict entirely: it has its own message and its own latency.
+    if ! service_pid_is_stable; then
+        silent_for=$(( now - last_progress_ts ))
+        echo "DEPLOY FAILED: the candidate process did not stay up —" \
+             "canonical MainPID/executable/start-time changed" \
+             "${elapsed}s into verification (attempts=$attempt)." \
+             "This is a crash or a restart loop, NOT a slow machine."
+        report_evidence
+        exit 1
+    fi
+
+    cur_token=$(progress_token)
+    if [ "$(progress_verdict "$prev_token" "$cur_token")" = advancing ]; then
+        prev_token="$cur_token"
+        last_progress_ts="$now"
+        progress_advances=$((progress_advances + 1))
+    fi
+    silent_for=$(( now - last_progress_ts ))
+
+    # The ONLY clock allowed to call a fault.
+    if [ "$silent_for" -ge "$SILENCE_LIMIT" ]; then
+        echo "DEPLOY FAILED: the candidate stopped making observable progress —" \
+             "nothing changed for ${silent_for}s (limit ${SILENCE_LIMIT}s)" \
+             "after ${elapsed}s and $attempt attempts." \
+             "A wedge is silence; slowness alone never reaches this line."
+        report_evidence
+        exit 1
+    fi
+
+    if [ "$WAIT_FOREVER" != "1" ] && [ "$now" -ge "$deadline" ]; then
+        case "$(window_outcome "$progress_advances" "$silent_for" "$SILENCE_LIMIT")" in
+            unverified_progressing)
+                echo "DEPLOY UNVERIFIED (still progressing): the ${TIMEOUT}s reporting" \
+                     "window expired while the node was demonstrably still advancing" \
+                     "($progress_advances observed advances, last change ${silent_for}s ago)." \
+                     "This is NOT a deploy failure and NOT a reason to roll back;" \
+                     "the candidate is installed and working. Keep watching with" \
+                     "ZCL_DEPLOY_VERIFY_WAIT=1 ./tools/deploy_verify.sh, or raise" \
+                     "ZCL_DEPLOY_VERIFY_TIMEOUT for this box."
+                report_evidence
+                exit 3
+                ;;
+            unverified_unobserved)
+                echo "DEPLOY UNVERIFIED (no verdict earned): the ${TIMEOUT}s reporting" \
+                     "window expired with no observed progress, but silence has only" \
+                     "been established for ${silent_for}s of the ${SILENCE_LIMIT}s" \
+                     "needed to call a fault. Refusing to guess either way."
+                report_evidence
+                exit 3
+                ;;
+        esac
+    fi
+
     sleep "$INTERVAL"
 done
-
-echo "DEPLOY FAILED: RPC/diagnostic contract did not become ready within ${TIMEOUT}s (attempts=$attempt)"
-if [ -n "$last_err" ]; then
-    echo "last error: $last_err"
-fi
-boot_status=$(pre_rpc_boot_status || true)
-if [ -n "$boot_status" ]; then
-    echo "typed boot status: $boot_status"
-else
-    echo "typed boot status: unavailable (captured service process changed)"
-fi
-exit 1

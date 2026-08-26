@@ -465,6 +465,7 @@ int t_legacy_candidate_source_has_no_override_scope(void);
 int t_canonical_deploy_proof_binding_contract(void);
 int t_dev_lane_deploy_contract(void);
 int t_agent_fast_ci_contract(void);
+int t_slow_disk_progress_verdicts_contract(void);
 int t_native_operator_docs_contract(void);
 int t_remote_node_update_contract(void);
 int t_native_agent_api_contract(void);
