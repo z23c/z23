@@ -9,9 +9,10 @@ to exercise a real but fully isolated node. For the isolation contract, build
 caveat, output/verdict reading, and the operational forms (`make soak-7day` =
 MVP #6, C7 `--with-peer` = MVP #7), see [`CHAOS_HARNESS.md`](./CHAOS_HARNESS.md).
 
-### Nightly simulator sweep (Wave-2 lane B2)
+### Nightly simulator sweep
 
-`make chaos` (the 13-file `tools/sim/scenarios/*.scenario` corpus) is
+`make chaos` (the `tools/sim/scenarios/*.scenario` corpus — count with
+`ls tools/sim/scenarios/*.scenario | wc -l`) is
 deliberately NOT part of `make ci` — see the comment beside the `ci:` target
 in the Makefile for the measured build-cost reasoning (the corpus itself
 replays in ~1.6s once built; the cost is the extra whole-program LTO link,
