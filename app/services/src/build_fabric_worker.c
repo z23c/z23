@@ -12,6 +12,7 @@
 #include "services/build_fabric_package_executor.h"
 #include "services/build_fabric_service.h"
 #include "services/build_fabric_worker_evidence.h"
+#include "services/build_fabric_worker_report.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 #include "util/file_tree_ops.h"
@@ -616,38 +617,12 @@ struct zcl_result build_fabric_worker_execute(
                                  : test_action ? "zbuild-test-ok=1"
                                                : "zbuild-ok=1";
     if (rc != 0 || strstr(capture, success_marker) == NULL) {
-        /* Classify BEFORE sanitizing — the markers are plain ASCII. A HOST
-         * out of process table for this uid is a wedge, not a verdict about
-         * the input, and the two must never reach the log looking alike:
-         * this defect cost three gate cycles precisely because a fork EAGAIN
-         * surfaced as an ordinary compile failure behind a bare `.ok`
-         * assertion. The verifier's line carries the installed limit and the
-         * uid task count on both sides of the run; carry it through
-         * verbatim. */
-        bool process_wedge =
-            strstr(capture, "process-headroom-exhausted") != NULL;
-        bool process_budget =
-            strstr(capture, "process-budget-exceeded") != NULL;
-        for (size_t i = 0; capture[i]; i++)
-            if ((unsigned char)capture[i] < 0x20 ||
-                (unsigned char)capture[i] > 0x7e)
-                capture[i] = ' ';
-        if (process_wedge)
-            LOG_WARN("build.fabric",
-                     "confined action refused: this HOST has no process "
-                     "table left for the uid — a resource wedge, not a build "
-                     "failure; retry the action: %.400s", capture);
-        else if (process_budget)
-            LOG_WARN("build.fabric",
-                     "confined action killed: its process subtree exceeded "
-                     "the budget the action declares — a defect in the "
-                     "input, not a host condition: %.400s", capture);
+        /* A HOST out of process table for this uid is a wedge, not a verdict
+         * about the input; the two must never reach the log looking alike.
+         * See services/build_fabric_worker_report.h. */
         char detail[BUILD_FABRIC_ERROR_MAX + 1];
-        (void)snprintf(detail, sizeof(detail), "%s%d: %.180s",
-                       process_wedge ? "process-headroom-exhausted rc="
-                       : process_budget ? "process-budget-exceeded rc="
-                                        : "sandbox-exit-",
-                       rc, capture[0] ? capture : "no-report");
+        (void)build_fabric_worker_classify_report(
+            capture, rc, detail, sizeof(detail));
         bfw_paths_cleanup(&paths);
         return bfw_fail(ndb, action_id, lease_id, detail);
     }
