@@ -49,6 +49,7 @@ HOTSWAP_ELIGIBLE("app/controllers/src/chain_native_handlers.c") HOTSWAP_PROBE("c
 HOTSWAP_ELIGIBLE("app/controllers/src/app_native_handlers.c") HOTSWAP_PROBE("app.names.list")
 HOTSWAP_ELIGIBLE("app/controllers/src/metaverse_controller.c") HOTSWAP_PROBE("metaverse.property.list")
 HOTSWAP_ELIGIBLE("app/controllers/src/diagnostics_native_handlers.c") HOTSWAP_PROBE("ops.logs")
+HOTSWAP_ELIGIBLE("app/controllers/src/ops_native_handlers.c") HOTSWAP_PROBE("ops.debug.dash.summary")
 
 /* Still reload-required (NOT eligible), by design:
  *   - REST (app/controllers/src/api_controller_routes.c) and diagnostics

@@ -1325,3 +1325,15 @@ AGENT_IMPACT_RULE("tools/lint/check_source_identity_authority.sh|tools/lint/sour
  * the hardened builders, so an edit here can never reach the push gate having
  * run zero test groups. */
 AGENT_IMPACT_RULE("tools/lint/check_outparam_init_before_return.sh|tools/lint/outparam_init_baseline.txt|app/services/src/swap_settlement_service.c|app/services/include/services/swap_settlement_service.h", "make_lint_gates swap_settlement api rpc_safety")
+/* LANE hot-swap reach: the load-verification path and the controller TUs whose
+ * module leaf tables it made honest. Before tools/dev/hotswap_verify_so.c
+ * every hot-swap test drove hotswap_module_admit() with a struct FABRICATED in
+ * the test's own TU, so no artifact was ever dlopen'd and an allowlist row
+ * could name a TU that emits no `zcl_hotswap_module` symbol at all
+ * (diagnostics_native_handlers.c was exactly that) or whose leaf body lives in
+ * a TU outside its island (core.status.brief was exactly that). Both classes
+ * pass every text gate and fail at load. Mapped to the module/loader groups
+ * plus the catalog and native-contract groups, because widening a leaf table
+ * asserts those leaves are still ZCL_COMMAND_READY_READ and still dispatch
+ * through the registry's public contract. */
+AGENT_IMPACT_RULE("tools/dev/hotswap_verify_so.c|tools/dev/hotswap-verify.sh|config/hotswap_probe_cases.def|app/controllers/src/ops_native_handlers.c|app/controllers/src/net_native_handlers.c|app/controllers/src/meta_native_handlers.c|app/controllers/src/wallet_native_handlers.c|app/controllers/src/app_native_handlers.c|app/controllers/src/chain_native_handlers.c|app/controllers/src/diagnostics_native_handlers.c|app/controllers/src/status_brief_native_handler.c", "hotswap_module hotswap_module_v2 hotswap_loader hotswap_simnet command_registry_catalog command_handler_snapshot native_api_contract make_lint_gates")

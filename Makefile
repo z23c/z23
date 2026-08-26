@@ -3346,6 +3346,23 @@ hotswap-module-so: $(VIEW_GEN_HEADERS) $(HOTSWAP_ACTION_PLAN)
 	echo "hotswap-module-so: linked multi-leaf module candidate $$so ($$src)" >&2; \
 	echo "$$so"
 
+.PHONY: hotswap-verify
+# make hotswap-verify                  (every row of hotswap_swappable.def)
+# make hotswap-verify FILE=<tu.c>      (one row)
+#
+# Prove an allowlist row is LOADABLE, not merely listed: build the module .so
+# with the shipping recipe, then dlopen it and run the REAL
+# hotswap_module_admit() gauntlet against the REAL, compiler-emitted
+# `zcl_hotswap_module` (hotswap_verify_module_so, lib/hotswap, dev-only).
+#
+# Every hot-swap test in lib/test drives the gauntlet with a struct FABRICATED
+# in the test's own TU, so nothing in the tree ever loaded a real artifact. A
+# row whose TU emits no module symbol, or whose leaf body lives in a TU outside
+# its island, passed every gate and failed the first time a human tried it.
+# This is the gate that can see that. Needs no node and no datadir.
+hotswap-verify:
+	@tools/dev/hotswap-verify.sh $(if $(FILE),$(FILE),--all)
+
 .PHONY: hotswap-apply
 # make hotswap-apply HANDLER=core.status
 # make hotswap-apply FILE=app/controllers/src/status_native_handlers.c

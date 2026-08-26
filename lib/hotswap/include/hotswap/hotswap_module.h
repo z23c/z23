@@ -253,6 +253,27 @@ bool hotswap_activate_local(const char *so_path,
                             const struct hotswap_publish_hooks *hooks,
                             struct hotswap_activate_report *report);
 
+/* BUILD-TIME LOAD VERIFICATION. dlopen `so_path`, resolve
+ * ZCL_HOTSWAP_MODULE_SYMBOL, and run the full hotswap_module_admit() gauntlet
+ * against the REAL, compiler-emitted module struct. Needs no node, no datadir
+ * and no registry: it never commits, never probes a live leaf, and never calls
+ * a trampoline.
+ *
+ * This exists because every hot-swap test in the tree drives
+ * hotswap_module_admit() with a struct FABRICATED in the test's own TU, which
+ * proves the gauntlet's logic and nothing about any real artifact. A row in
+ * config/hotswap_swappable.def whose TU never emits `zcl_hotswap_module` at
+ * all passed every gate in the repo and failed at stage=symbol the first time
+ * a human tried it. An allowlist entry that has never been loaded is a claim,
+ * not an admission; this is what turns one into the other.
+ *
+ * `expect_tu` (optional) is compared against the module's stamped source_tu.
+ * `report` is always populated: stage is one of precheck|dlopen|symbol|
+ * source_tu|<any hotswap_module_admit stage>|verified.
+ * DEV-ONLY: the release build links a refusal stub. Returns report->ok. */
+bool hotswap_verify_module_so(const char *so_path, const char *expect_tu,
+                              struct hotswap_activate_report *report);
+
 /* Pure admission check for a resolved module: ABI version, required fields,
  * the leaf-count ceiling, the swappable file+leaf allowlist, intra-module leaf
  * uniqueness, the presence of the file's declared probe leaf, and the module's

@@ -349,6 +349,69 @@ static bool module_selftest_name_list(char *err, size_t cap)
     return true;
 }
 
-ZCL_HOTSWAP_MODULE("app.names.list", module_tramp_name_list,
-                   module_selftest_name_list)
+static void module_tramp_name_resolve(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    zcl_native_bridge_run(request, zcl_native_name_resolve_body, reply);
+}
+
+static void module_tramp_tokens(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    zcl_native_bridge_run(request, zcl_native_zslp_listtokens_body, reply);
+}
+
+static void module_tramp_msg_inbox(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    zcl_native_bridge_run(request, zcl_native_msg_inbox_body, reply);
+}
+
+static void module_tramp_market_list(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    zcl_native_bridge_run(request, zcl_native_zmarket_list_body, reply);
+}
+
+static void module_tramp_market_status(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    zcl_native_bridge_run(request, zcl_native_zmarket_status_body, reply);
+}
+
+static void module_tramp_market_content_list(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    zcl_native_bridge_run(request, zcl_native_zmarket_content_list_body, reply);
+}
+
+static void module_tramp_swap_chains(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    zcl_native_bridge_run(request, zcl_native_swap_chains_body, reply);
+}
+
+static void module_tramp_swap_list(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    zcl_native_bridge_run(request, zcl_native_swap_list_body, reply);
+}
+
+/* Mirrors k_leaves above — all nine app-layer READ projections (ZNAM names,
+ * ZSLP tokens, messaging inbox, market listings, swap views) in ONE batch.
+ * None of these is consensus-bearing: each renders an index or catalog the
+ * node already holds. */
+static const struct zcl_hotswap_leaf k_module_leaves[] = {
+    { "app.names.list",          module_tramp_name_list },
+    { "app.names.resolve",       module_tramp_name_resolve },
+    { "app.tokens.list",         module_tramp_tokens },
+    { "app.messaging.inbox",     module_tramp_msg_inbox },
+    { "app.market.list",         module_tramp_market_list },
+    { "app.market.status",       module_tramp_market_status },
+    { "app.market.content.list", module_tramp_market_content_list },
+    { "app.swap.chains",         module_tramp_swap_chains },
+    { "app.swap.list",           module_tramp_swap_list },
+};
+
+ZCL_HOTSWAP_MODULE_LEAVES(k_module_leaves, module_selftest_name_list)
 #endif /* ZCL_HOTSWAP_MODULE_GEN */
