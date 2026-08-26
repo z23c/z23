@@ -848,7 +848,7 @@ AGENT_IMPACT_RULE("app/services/src/consensus_snapshot_export_service.c|app/serv
 AGENT_IMPACT_RULE("app/services/src/snapshot_verify.c|app/services/src/snapshot_apply.c|app/services/src/snapshot_sync_internal.h", "snapshot_sync_service snapshot_apply_coins_kv utxo_snapshot_loader peer_snapshot_conditions make_lint_gates")
 AGENT_IMPACT_RULE("app/conditions/src/snapshot_complete_resume.c|lib/test/src/test_snapshot_complete_resume_condition.c", "snapshot_complete_resume_condition condition_engine make_lint_gates")
 AGENT_IMPACT_RULE("app/services/src/chain_evidence_authority_service.c", "chain_evidence_controller chain_evidence_live_advance node_health_service make_lint_gates")
-AGENT_IMPACT_RULE("app/services/src/block_index_loader_topup.c|lib/storage/src/block_index_db.c|lib/test/src/test_block_index_topup.c", "block_index_topup block_index_loader block_index_rebuild block_index_integrity load_verify_boot make_lint_gates")
+AGENT_IMPACT_RULE("app/services/src/block_index_loader_topup.c|config/src/boot_blkidx_ladder.c|lib/storage/src/block_index_db.c|lib/test/src/test_block_index_topup.c", "block_index_topup block_index_loader block_index_rebuild block_index_integrity load_verify_boot make_lint_gates")
 AGENT_IMPACT_RULE("config/include/config/boot_snapshot_offer.h", "api syncdiag_rpc snapshot_sync_service supervisor make_lint_gates")
 AGENT_IMPACT_RULE("lib/test/src/test_chain.c", "chain")
 AGENT_IMPACT_RULE("lib/test/src/test_chain_evidence_controller.c", "chain_evidence_controller")
