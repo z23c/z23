@@ -99,6 +99,7 @@ gate_command() {
         check-raw-malloc)                  echo 'tools/scripts/check_raw_malloc.sh' ;;
         check-json-value-init)             echo 'bash tools/scripts/check_json_value_init.sh --self-test && bash tools/scripts/check_json_value_init.sh' ;;
         check-blob-read-bounds)            echo 'bash tools/lint/check_blob_read_bounds.sh' ;;
+        check-outparam-init-before-return) echo 'bash tools/lint/check_outparam_init_before_return.sh --selftest && bash tools/lint/check_outparam_init_before_return.sh' ;;
         check-byte-order-codec-single)     echo './tools/lint/check_byte_order_codec_single.sh --selftest && ./tools/lint/check_byte_order_codec_single.sh' ;;
         check-zcode-package-registry)      echo './tools/lint/check_zcode_package_registry.sh' ;;
         check-package-anatomy)             echo './tools/lint/check_package_anatomy.sh --selftest && ./tools/lint/check_package_anatomy.sh' ;;

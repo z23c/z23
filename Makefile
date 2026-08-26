@@ -1498,6 +1498,7 @@ $(filter-out vendor/lib/libsecp256k1.a,$(VENDOR_LIBS)):
         check-silent-errors-jobs check-silent-errors-conditions check-silent-errors-bool \
         check-log-macro-return-type \
         check-wallet-raw-prepare-log check-blob-read-bounds \
+        check-outparam-init-before-return \
         check-before-save-hooks check-pthread-create check-model-validation \
         check-long-functions check-rpc-registrar check-lag-slo-observable \
         check-file-size-ceiling check-framework-filename-suffix \
@@ -9347,6 +9348,18 @@ check-tu-random-seed:
 	@echo "══ LINT: per-TU object recipes pin GCC's random seed ══"
 	@./tools/lint/check_tu_random_seed.sh
 
+# A function that hands back a struct the caller frees must initialize it above
+# the first thing that can fail, and a pointer published into a module global
+# must be unpublished before its storage is freed. Both halves are the same
+# class: the thing a later reader will free or dereference is left in a state
+# its guard cannot see. Found live twice on 2026-08-26 —
+# compact_block_reconstruct() (remote, any peer, bce343876) and
+# sapling_init_params() (69518f2f3).
+check-outparam-init-before-return:
+	@echo "══ LINT: out-parameters initialized before any failure return ══"
+	@bash tools/lint/check_outparam_init_before_return.sh --selftest
+	@bash tools/lint/check_outparam_init_before_return.sh
+
 # ── Lint umbrella ────────────────────────────────────────────────────────
 # LINT_GATES is the single ordered source of truth for the lint umbrella
 # (E11 check-doc-accuracy cross-checks it against DEFENSIVE_CODING.md).
@@ -9416,6 +9429,7 @@ LINT_GATES := \
     check-wallet-raw-prepare-log \
     check-zcc-cache \
     check-tu-random-seed \
+    check-outparam-init-before-return \
     check-equihash-params \
     check-before-save-hooks \
     check-pthread-create \
