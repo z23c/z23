@@ -722,6 +722,51 @@ int test_rpc_safety(void)
         json_free(&result);
         json_free(&txid_arg);
         json_free(&verbose_arg);
+
+        /* Internal callers use JSON booleans; legacy clients use numeric
+         * 0/1. Both forms select the same object/raw modes. Unrelated JSON
+         * types remain a named parameter refusal. */
+        static const struct {
+            bool boolean;
+            int value;
+            bool invalid_object;
+            bool expect_ok;
+            enum json_type expect_type;
+        } verbose_cases[] = {
+            {true,  1, false, true,  JSON_OBJ},
+            {true,  0, false, true,  JSON_STR},
+            {false, 1, false, true,  JSON_OBJ},
+            {false, 0, false, true,  JSON_STR},
+            {false, 0, true,  false, JSON_STR},
+        };
+        for (size_t i = 0; ok && i < sizeof(verbose_cases) /
+                                      sizeof(verbose_cases[0]); i++) {
+            json_init(&params);
+            json_set_array(&params);
+            json_init(&result);
+            json_init(&txid_arg);
+            json_init(&verbose_arg);
+            json_set_str(&txid_arg, block_hex);
+            if (verbose_cases[i].invalid_object)
+                json_set_object(&verbose_arg);
+            else if (verbose_cases[i].boolean)
+                json_set_bool(&verbose_arg, verbose_cases[i].value != 0);
+            else
+                json_set_int(&verbose_arg, verbose_cases[i].value);
+            (void)json_push_back(&params, &txid_arg);
+            (void)json_push_back(&params, &verbose_arg);
+            bool called = rpc_table_execute(&tbl, "getblock", &params,
+                                            &result);
+            ok = called == verbose_cases[i].expect_ok &&
+                 result.type == verbose_cases[i].expect_type;
+            if (verbose_cases[i].invalid_object)
+                ok = ok && strstr(json_get_str(&result),
+                                  "must be numeric") != NULL;
+            json_free(&params);
+            json_free(&result);
+            json_free(&txid_arg);
+            json_free(&verbose_arg);
+        }
         reducer_frontier_provable_tip_reset();
 
         wallet_rpc_context_set_node_db(NULL);
