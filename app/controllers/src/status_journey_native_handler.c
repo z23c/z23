@@ -396,64 +396,21 @@ char *zcl_native_status_journey_body(const struct json_value *args,
 
 /* ── Hot-swappable leaf ────────────────────────────────────────────────────
  * `status` is a bridged BODY leaf, not a direct handler: it returns rendered
- * JSON and the kernel's request/reply plumbing is supplied by
- * zcl_native_bridge_run. ZCL_HOTSWAP_TRAMPOLINE wraps it into the shape the
- * leaf table needs. The macro lives in native_command.h because both
- * generation tiers include that file and only one of them includes
- * hotswap.h.
+ * JSON and the kernel's request/reply plumbing comes from
+ * zcl_native_bridge_run, so it needs a trampoline.
  *
- * The body being IN THIS FILE is what makes the swap real. A leaf whose body
- * lived in another translation unit would bind to the resident node's copy at
- * dlopen, and the swap would report success while changing nothing. Note the
- * matching limit: zcl_native_status_journey_render lives in
- * tools/command/native_command.c, so edits to the TEXT rendering are outside
- * this module and still need a rebuild. */
-#ifdef ZCL_HOTSWAP_GEN
+ * The body being IN THIS FILE is what makes the swap real. A body in another
+ * translation unit binds to the resident node at dlopen and the swap reports
+ * success while changing nothing. The matching limit:
+ * zcl_native_status_journey_render lives in tools/command/native_command.c,
+ * so edits to the TEXT rendering are outside this module. */
+#if defined(ZCL_HOTSWAP_GEN) || defined(ZCL_HOTSWAP_MODULE_GEN)
 #define ZCL_HOTSWAP_PROBE_LEAF "status"
-#include "hotswap/hotswap.h"
+#include "hotswap/hotswap_register.h"
 #include "kernel/command_registry.h"
 #include "command/native_command.h"
-
 ZCL_HOTSWAP_TRAMPOLINE(tramp_status_journey, zcl_native_status_journey_body)
-
-static const struct zcl_hotswap_leaf_replacement k_status_journey_leaves[] = {
-    { "status", tramp_status_journey },
-};
-ZCL_HOTSWAP_EXPORT_LEAVES(
-    k_status_journey_leaves,
-    sizeof(k_status_journey_leaves) / sizeof(k_status_journey_leaves[0]))
-#endif /* ZCL_HOTSWAP_GEN */
-
-#ifdef ZCL_HOTSWAP_MODULE_GEN
-#include "hotswap/hotswap_module.h"
-#include <stdio.h>
-#include "kernel/command_registry.h"
-#include "command/native_command.h"
-
-ZCL_HOTSWAP_TRAMPOLINE(module_tramp_status_journey,
-                       zcl_native_status_journey_body)
-
-static const struct zcl_hotswap_leaf k_status_journey_module_leaves[] = {
-    { "status", module_tramp_status_journey },
-};
-static bool status_journey_module_selftest(char *error, size_t error_cap)
-{
-    const size_t n = sizeof(k_status_journey_module_leaves) /
-                     sizeof(k_status_journey_module_leaves[0]);
-    for (size_t i = 0; i < n; i++) {
-        if (!k_status_journey_module_leaves[i].name ||
-            !k_status_journey_module_leaves[i].name[0] ||
-            !k_status_journey_module_leaves[i].fn) {
-            if (error && error_cap)
-                (void)snprintf(error, error_cap,
-                               "status journey leaf %zu has no name or no "
-                               "body",
-                               i);
-            return false;
-        }
-    }
-    return true;
-}
-ZCL_HOTSWAP_MODULE_LEAVES(k_status_journey_module_leaves,
-                          status_journey_module_selftest)
-#endif /* ZCL_HOTSWAP_MODULE_GEN */
+ZCL_HOTSWAP_LEAVES_BEGIN(status_journey)
+ZCL_HOTSWAP_LEAF("status", tramp_status_journey)
+ZCL_HOTSWAP_LEAVES_END(status_journey)
+#endif

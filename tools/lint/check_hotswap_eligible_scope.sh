@@ -98,8 +98,11 @@ for p in "${PATHS[@]}"; do
     # zcl_hotswap_gen_init / zcl_hotswap_manifest_v2 and the loader would
     # reject it at the manifest stage — a silently-unswapabble entry. Guards
     # the multi-TU expansion.
-    if ! grep -qE '(^|[^_])ZCL_HOTSWAP_EXPORT_LEAVES[[:space:]]*\(' "$p"; then
-        violations="${violations}  $p (eligible TU does not invoke ZCL_HOTSWAP_EXPORT_LEAVES)"$'\n'
+    # Either spelling counts: the explicit emitter, or ZCL_HOTSWAP_LEAVES_END
+    # from hotswap_register.h, which expands to it. The property being checked
+    # is that the TU exports leaves, not which macro it typed to do so.
+    if ! grep -qE '(^|[^_])(ZCL_HOTSWAP_EXPORT_LEAVES|ZCL_HOTSWAP_LEAVES_END)[[:space:]]*\(' "$p"; then
+        violations="${violations}  $p (eligible TU exports no leaves: neither ZCL_HOTSWAP_EXPORT_LEAVES nor ZCL_HOTSWAP_LEAVES_END)"$'\n'
     fi
 done
 
