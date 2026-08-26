@@ -68,6 +68,12 @@ HOTSWAP_ELIGIBLE("app/controllers/src/rom_fetch_controller.c") HOTSWAP_PROBE("op
 HOTSWAP_ELIGIBLE("app/controllers/src/rom_seed_controller.c") HOTSWAP_PROBE("ops.debug.rom_seed.status")
 HOTSWAP_ELIGIBLE("app/controllers/src/shop_native_handler.c") HOTSWAP_PROBE("app.shop.status")
 
+/* Wave 4: read-only MARKETPLACE, SHOP and WALLET-LOOKUP projections. */
+HOTSWAP_ELIGIBLE("app/controllers/src/market_purchase_native_handler.c") HOTSWAP_PROBE("app.market.purchase.guide")
+HOTSWAP_ELIGIBLE("app/controllers/src/shop_native_fulfill.c") HOTSWAP_PROBE("app.shop.want.fulfill.list")
+HOTSWAP_ELIGIBLE("app/controllers/src/shop_native_reputation.c") HOTSWAP_PROBE("app.shop.reputation")
+HOTSWAP_ELIGIBLE("app/controllers/src/wallet_recovery_native_handlers.c") HOTSWAP_PROBE("core.wallet.recovery.status")
+
 /* Still reload-required (NOT eligible), by design:
  *   - REST (app/controllers/src/api_controller_routes.c) and diagnostics
  *     (diagnostics_registry.c) use independent provider atomics that cannot

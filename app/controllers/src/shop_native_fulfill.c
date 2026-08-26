@@ -653,3 +653,48 @@ void zcl_native_handle_shop_want_fulfill_withdraw(
     (void)json_push_kv_str(&reply->data, "terms_note", SHF_TERMS_NOTE);
     reply->error.mutated = !already;
 }
+
+/* ── Hot-swappable leaves ──────────────────────────────────────────────────
+ * Read-only FULFILMENT projections: offers against a want, and one offer's state.
+ *
+ * The mutating siblings in this file are absent from both tables. Their
+ * bytes are compiled into the module, but the loader refuses to re-point
+ * any leaf missing from this file's row in config/hotswap_swappable.def. */
+#ifdef ZCL_HOTSWAP_GEN
+#define ZCL_HOTSWAP_PROBE_LEAF "app.shop.want.fulfill.list"
+#include "hotswap/hotswap.h"
+static const struct zcl_hotswap_leaf_replacement k_shop_fulfill_leaves[] = {
+    { "app.shop.want.fulfill.list", zcl_native_handle_shop_want_fulfill_list },
+    { "app.shop.want.fulfill.status", zcl_native_handle_shop_want_fulfill_status },
+};
+ZCL_HOTSWAP_EXPORT_LEAVES(k_shop_fulfill_leaves,
+                          sizeof(k_shop_fulfill_leaves) / sizeof(k_shop_fulfill_leaves[0]))
+#endif /* ZCL_HOTSWAP_GEN */
+
+#ifdef ZCL_HOTSWAP_MODULE_GEN
+#include "hotswap/hotswap_module.h"
+#include <stdio.h>
+static const struct zcl_hotswap_leaf k_shop_fulfill_module_leaves[] = {
+    { "app.shop.want.fulfill.list", zcl_native_handle_shop_want_fulfill_list },
+    { "app.shop.want.fulfill.status", zcl_native_handle_shop_want_fulfill_status },
+};
+/* Structural health hook: a table that lost a name or a body would
+ * otherwise publish a leaf that dispatches into nothing. */
+static bool shop_fulfill_module_selftest(char *error, size_t error_cap)
+{
+    const size_t n = sizeof(k_shop_fulfill_module_leaves) /
+                     sizeof(k_shop_fulfill_module_leaves[0]);
+    for (size_t i = 0; i < n; i++) {
+        if (!k_shop_fulfill_module_leaves[i].name ||
+            !k_shop_fulfill_module_leaves[i].name[0] ||
+            !k_shop_fulfill_module_leaves[i].fn) {
+            if (error && error_cap)
+                (void)snprintf(error, error_cap,
+                               "shop_fulfill leaf %zu has no name or no body", i);
+            return false;
+        }
+    }
+    return true;
+}
+ZCL_HOTSWAP_MODULE_LEAVES(k_shop_fulfill_module_leaves, shop_fulfill_module_selftest)
+#endif /* ZCL_HOTSWAP_MODULE_GEN */
