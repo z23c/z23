@@ -3,18 +3,20 @@
  * Tests for the REAL (activatable) Tier-1 hot-swap module ABI + the
  * command-registry epoch/refcount drain that makes dlclose-after-swap safe.
  *
- * The test binary is built WITHOUT ZCL_DEV_BUILD, so hotswap_activate()'s
- * dlopen core is the release stub (refuses) — that release containment is
- * asserted. The behaviours the dlopen path would exercise (ABI-version
- * mismatch, missing/incomplete fields, the swappable allowlist hard line, and
- * a failing module self_test) are all factored into the pure, always-compiled
+ * The test binary compiles ONE translation unit — the loader,
+ * lib/hotswap/src/hotswap_activate.c — with -DZCL_DEV_BUILD, so `make
+ * t-hotswap` can run a real test group against a hot-swapped module through
+ * the same loader the dev node runs. Every other TU stays release-shaped. The
+ * refusals asserted below are therefore the REAL loader's prechecks (path
+ * confinement, dev-datadir classification), not a release stub.
+ *
+ * The behaviours the dlopen path would exercise (ABI-version mismatch,
+ * missing/incomplete fields, the swappable allowlist hard line, and a failing
+ * module self_test) are all factored into the pure, always-compiled
  * hotswap_module_admit(), which is unit-tested here with fabricated modules —
  * no dlopen required. The live swap + epoch-quiesce drain is proven against
  * the real command-registry override layer with function-pointer handlers
- * (the same mechanism hotswap_activate's commit_cb publishes into).
- *
- * A real end-to-end dlopen swap is a ZCL_DEV_BUILD/manual path (dev node +
- * `dev hotswap` command); it cannot run in the -DZCL_TESTING harness. */
+ * (the same mechanism hotswap_activate's commit_cb publishes into). */
 
 #include "test/test_core.h"
 
@@ -258,17 +260,49 @@ static int test_activation_gate(void)
     return failures;
 }
 
-static int test_release_stub_refuses(void)
+/* The loader TU (lib/hotswap/src/hotswap_activate.c) is compiled into the test
+ * binaries with -DZCL_DEV_BUILD — and ONLY that TU — so `make t-hotswap` can
+ * run a test group against a hot-swapped module through the SAME loader the
+ * dev node runs, instead of relinking the whole harness for a one-file edit.
+ * See the module-mode block in the Makefile beside TEST_FAST_OBJECT_CFLAGS.
+ *
+ * Every OTHER TU stays release-shaped, so the "this binary is not a dev build"
+ * assertions elsewhere in the suite remain true.
+ *
+ * What must stay proven here is that the REAL loader still refuses before it
+ * touches anything: a path outside the confinement set never reaches dlopen,
+ * and a non-dev datadir is refused ahead of the authorization gate. */
+static int test_loader_refuses_unconfined_input(void)
 {
     int failures = 0;
-    TEST("hotswap_activate is the release stub in the non-dev test binary") {
+    TEST("the real loader refuses an unconfined so_path at precheck") {
+        struct hotswap_activate_report report;
+        /* Absolute, .so-suffixed, but neither /tmp nor build/hotswap, and
+         * nonexistent — refused before dlopen, with nothing published. */
+        bool ok = hotswap_activate("/nonexistent/module.so", "/tmp", true,
+                                   NULL, &report);
+        ASSERT(!ok);
+        ASSERT(!report.ok);
+        ASSERT(!report.activated);
+        ASSERT_EQ(strcmp(report.stage, "precheck"), 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_loader_refuses_non_dev_datadir(void)
+{
+    int failures = 0;
+    TEST("the real loader refuses a datadir that is not the dev lane") {
         struct hotswap_activate_report report;
         bool ok = hotswap_activate("/tmp/whatever.so", "/tmp", true, NULL,
                                    &report);
         ASSERT(!ok);
         ASSERT(!report.ok);
-        ASSERT_EQ(strcmp(report.stage, "release"), 0);
-        ASSERT(strstr(report.error, "release build") != NULL);
+        ASSERT(!report.activated);
+        /* Either gate may speak first depending on whether the path exists;
+         * both are precheck refusals and both publish zero leaves. */
+        ASSERT_EQ(strcmp(report.stage, "precheck"), 0);
         PASS();
     } _test_next:;
     return failures;
@@ -447,7 +481,8 @@ int test_hotswap_module(void)
     failures += test_module_admit();
     failures += test_swappable_allowlist();
     failures += test_activation_gate();
-    failures += test_release_stub_refuses();
+    failures += test_loader_refuses_unconfined_input();
+    failures += test_loader_refuses_non_dev_datadir();
     failures += test_live_swap_and_quiesce();
     failures += test_concurrent_swap_hammer();
     zcl_command_registry_reset_overrides();

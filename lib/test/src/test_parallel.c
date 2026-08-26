@@ -38,6 +38,11 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "platform/time_compat.h"
+#include "command/native_dev_hotswap.h"
+#include "config/command_catalog.h"
+#include "hotswap/hotswap.h"
+#include "hotswap/hotswap_module.h"
+#include "kernel/command_registry.h"
 #include "session/agent_broker.h"
 #include "test/test_group_selector.h"
 #include "test_group_catalog.h"
@@ -48,6 +53,7 @@
 #include "util/clientversion.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
@@ -775,6 +781,114 @@ static void write_test_timing_json(const struct group_result *results,
         perror("test_parallel: rename timing artifact");
 }
 
+/* ── Module mode: run the real groups against a hot-swapped .so ────────────
+ *
+ * ZCL_HOTSWAP_TEST_MODULE=<abs path to module .so> makes this harness load the
+ * module through THE production loader — hotswap_activate_local() in
+ * lib/hotswap/src/hotswap_activate.c, with the publish hooks from
+ * tools/command/native_dev_hotswap.c — exactly as `zclassic23-dev` does for
+ * ZCL_HOTSWAP_PRELOAD. Every production gate applies: path confinement, the
+ * dev-datadir classification, ABI version, the config/hotswap_swappable.def
+ * allowlist, leaf uniqueness, the module self_test, probe-before-publish
+ * against the leaf's declared output schema, and the all-or-nothing registry
+ * batch that re-checks READY + EFFECT_READ. There is NO test-only loader: a
+ * module that would be refused in production is refused here, and this harness
+ * then refuses to run at all rather than silently testing resident code.
+ *
+ * Divergence containment (see docs/DEVELOPING.md "Module mode"):
+ *   - the .so must live under the compile epoch this binary was built in
+ *     (ZCL_TEST_COMPILE_EPOCH — a digest of the exact compiler, CFLAGS and
+ *     LDFLAGS). Different flags => different epoch => refused, so the module's
+ *     translation unit cannot have been compiled differently from the one the
+ *     linked binary carries;
+ *   - the run is never cached and never stores a cache entry;
+ *   - the mode is stamped on the banner, the SUITE VERDICT line, and the
+ *     headline, so module output can never be mistaken for a linked-binary run.
+ *
+ * Activation happens in the parent before any group is forked, so every worker
+ * inherits both the mapping and the published overrides. */
+#ifndef ZCL_TEST_COMPILE_EPOCH
+#define ZCL_TEST_COMPILE_EPOCH ""
+#endif
+
+static bool g_hotswap_module_active;
+static char g_hotswap_module_sha[65];
+static char g_hotswap_module_source[256];
+
+/* Returns false when module mode was requested but could not be honored — the
+ * caller must exit non-zero rather than run against resident code. */
+static bool hotswap_module_mode_begin(void)
+{
+    const char *so_path = getenv("ZCL_HOTSWAP_TEST_MODULE");
+    if (!so_path || !so_path[0])
+        return true; /* ordinary run against the linked binary */
+
+    const char *epoch = ZCL_TEST_COMPILE_EPOCH;
+    if (!epoch[0]) {
+        fprintf(stderr,
+                "test_parallel: ZCL_HOTSWAP_TEST_MODULE set but this binary "
+                "carries no compile epoch — refusing module mode\n");
+        return false;
+    }
+    char needle[160];
+    (void)snprintf(needle, sizeof(needle), "/%s/", epoch);
+    if (!strstr(so_path, needle)) {
+        fprintf(stderr,
+                "test_parallel: module '%s' is not under this binary's compile "
+                "epoch %s — its translation unit was built with different "
+                "flags, so it could diverge from the linked binary. Refusing.\n"
+                "  rebuild with: make hotswap-test-so FILE=<tu.c>\n",
+                so_path, epoch);
+        return false;
+    }
+
+    /* The loader classifies the datadir as a pure string (it is never opened
+     * on this path — activate_run() only calls hotswap_datadir_is_dev on it).
+     * Name the dev lane's path so the classification matches what production
+     * requires; no datadir is created, read, or written by this harness. */
+    const char *home = getenv("HOME");
+    char dev_datadir[PATH_MAX];
+    (void)snprintf(dev_datadir, sizeof(dev_datadir), "%s/.zclassic-c23-dev",
+                   home && home[0] ? home : "");
+
+    zcl_command_registry_set_active(zcl_command_catalog());
+
+    struct hotswap_publish_hooks hooks;
+    zcl_native_hotswap_publish_hooks(&hooks, /*with_quiesce=*/false);
+    struct hotswap_activate_report report;
+    bool ok = hotswap_activate_local(so_path, dev_datadir, &hooks, &report);
+    zcl_native_hotswap_probe_rendered_clear();
+    if (!ok || !report.activated) {
+        fprintf(stderr,
+                "test_parallel: HOT-SWAP REFUSED stage=%s error=%s module=%s\n",
+                report.stage[0] ? report.stage : "activate",
+                report.error[0] ? report.error : "(none)", so_path);
+        return false;
+    }
+
+    g_hotswap_module_active = true;
+    (void)snprintf(g_hotswap_module_sha, sizeof(g_hotswap_module_sha), "%s",
+                   report.artifact_sha256);
+    (void)snprintf(g_hotswap_module_source, sizeof(g_hotswap_module_source),
+                   "%s", report.source_tu);
+    printf("\n"
+           "══════════════════ HOT-SWAP MODULE MODE ══════════════════\n"
+           "  source_tu   %s\n"
+           "  leaves      %s (%u)\n"
+           "  probe_leaf  %s (probed=%s)\n"
+           "  artifact    %s\n"
+           "  sha256      %s\n"
+           "  generation  %u\n"
+           "  NOT a linked-binary run: these groups execute the module's\n"
+           "  freshly compiled bodies. Re-run `make t-fast ONLY=<group>`\n"
+           "  before treating any verdict as a gate.\n"
+           "══════════════════════════════════════════════════════════\n\n",
+           report.source_tu, report.leaves, report.leaf_count,
+           report.probe_leaf, report.probed ? "yes" : "no", so_path,
+           report.artifact_sha256, report.generation);
+    return true;
+}
+
 int main(int argc, char **argv)
 {
     struct timespec process_start;
@@ -923,6 +1037,16 @@ int main(int argc, char **argv)
         else if (cli_no_cache)   cache_mode = CACHE_OFF;
         else if (cli_cache || env_on) cache_mode = CACHE_ON;
         else                     cache_mode = CACHE_OFF;
+    }
+
+    if (!list_only) {
+        if (!hotswap_module_mode_begin())
+            return 2;
+        /* A verdict produced against a hot-swapped module must never be
+         * reusable as a cached PASS for the linked binary, and must never be
+         * served from one. */
+        if (g_hotswap_module_active)
+            cache_mode = CACHE_OFF;
     }
 
     if (list_only) {
@@ -1260,18 +1384,33 @@ int main(int argc, char **argv)
            (long long)(startup_wall * 1000.0),
            (long long)(wall * 1000.0));
 
+    /* A hot-swapped run is stamped on the machine-greppable verdict line and
+     * on the headline. It ran the module's bodies, not the linked binary's:
+     * nothing downstream may read it as an ordinary run. */
+    char hotswap_verdict[128] = "";
+    char hotswap_headline[128] = "";
+    if (g_hotswap_module_active) {
+        (void)snprintf(hotswap_verdict, sizeof(hotswap_verdict),
+                       " hotswap_module=%.12s hotswap_source=%s",
+                       g_hotswap_module_sha, g_hotswap_module_source);
+        (void)snprintf(hotswap_headline, sizeof(hotswap_headline),
+                       " (HOTSWAP MODULE %.12s)", g_hotswap_module_sha);
+    }
+
     printf("\nSUITE VERDICT mode=%s groups_total=%zu groups_ran=%zu "
            "groups_cached=%zu groups_gated=%zu groups_failed=%d self_skips=%d "
-           "env_unobserved=%d toolkey=%s\n",
+           "env_unobserved=%d toolkey=%s%s\n",
            verdict.mode, verdict.groups_total, verdict.groups_ran,
            verdict.groups_cached, verdict.groups_gated, verdict.groups_failed,
-           verdict.self_skips, verdict.env_unobserved, verdict.toolkey);
+           verdict.self_skips, verdict.env_unobserved, verdict.toolkey,
+           hotswap_verdict);
 
-    printf("%s — %d/%zu groups failed, %d skipped (%.1fs wall, %d workers)%s\n",
+    printf("%s%s — %d/%zu groups failed, %d skipped (%.1fs wall, %d workers)%s\n",
            failed_groups != 0 ? "SOME TESTS FAILED"
                               : (served_from_cache
                                      ? "ALL TESTS PASSED (CACHED)"
                                      : "ALL TESTS PASSED"),
+           hotswap_headline,
            failed_groups, g_num_groups - pre_skipped, skip_groups, wall, jobs,
            only ? (only_exact ? " [--exact filtered]"
                               : " [--only filtered]")

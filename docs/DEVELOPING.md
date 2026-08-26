@@ -213,6 +213,66 @@ make lint-fast
 or unknown selector. `lint-fast` is the inner lint (~7s). Never run `test_zcl`
 directly. Do not run full `make lint` on an ordinary slice.
 
+### Module mode — run a test group without relinking
+
+Changing one file and running one group still recompiles that translation unit
+and relinks the whole test harness. The link, not the compile, is the cost: the
+harness is one binary over thousands of objects, and it is paid again for every
+one-line edit.
+
+For a translation unit on `config/hotswap_swappable.def`, module mode skips the
+relink. It compiles that one TU into a module `.so` and loads it into the
+already-linked harness through the hot-swap loader, then runs the real group:
+
+```bash
+make t-hotswap ONLY=<group> FILE=<path/to/tu.c>
+make t-hotswap ONLY=<group> HANDLER=<leaf>      # same thing, addressed by leaf
+```
+
+The first run in a checkout needs a harness to load into, so build one once
+with `make t-fast ONLY=<group>`; after that every edit to a swappable TU is a
+module build only. `make hotswap-test-so FILE=<tu.c>` builds the module without
+running anything and prints its path.
+
+This is not a test-only shortcut. The module is loaded by
+`hotswap_activate_local()` — the same function the development node runs for
+`ZCL_HOTSWAP_PRELOAD`, with the same publish hooks — so a module that would be
+refused in production is refused here, and the harness then exits rather than
+quietly testing the resident code. Every gate applies: path confinement, ABI
+version, the swappable allowlist, leaf uniqueness, the module self-test,
+probe-before-publish against the leaf's declared output schema, and the
+all-or-nothing registry batch that re-checks READY plus read-only per leaf.
+
+Two things keep a module run from being mistaken for a real one:
+
+- the module is compiled with the harness's exact flags and published under the
+  harness's compile-epoch directory. A `.so` from any other epoch is refused by
+  name, so "same source, same flags" is mechanical rather than a convention;
+- the run is never served from the test cache and never stores one, and the
+  mode is stamped on the banner, on the `SUITE VERDICT` line
+  (`hotswap_module=<sha12> hotswap_source=<tu>`), and on the headline
+  (`ALL TESTS PASSED (HOTSWAP MODULE <sha12>)`).
+
+**Module mode is an edit loop, not a gate.** It re-points command leaves in the
+registry, so it changes behavior only for what a group dispatches *through the
+registry*; a group that calls the TU's functions directly still runs the linked
+copy. Before you treat any verdict as proof, re-run `make t-fast ONLY=<group>`
+(or `make t`) against the linked binary.
+
+What it cannot cover, and why:
+
+- **Anything not on `config/hotswap_swappable.def`.** That allowlist is
+  restricted to controller/view/condition shape leaves; reducers, consensus,
+  validation, storage, networking, wallet state and supervisors can never be
+  swapped, so groups covering them are always a rebuild.
+- **Leaves whose probe needs a running node.** Probe-before-publish dispatches
+  the TU's declared probe leaf and requires a schema-valid reply. A leaf that is
+  an RPC front door cannot answer inside a hermetic harness, so module mode
+  refuses it at `stage=probe`. That refusal is the gate working; the fix is a
+  swappable TU whose probe leaf is computable in-process, not a weaker probe.
+- **Header and cross-TU changes.** A module is one translation unit. Editing a
+  header, or anything that changes another TU, is a rebuild.
+
 Every compile here goes through the in-tree compile cache (`tools/zcc.c`),
 which the Makefile builds and wires in front of `$(CC)` by itself — there is
 nothing to install and nothing to enable. `make cc-cache-stats` shows whether
