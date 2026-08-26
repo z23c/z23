@@ -20,6 +20,14 @@
 #define MARKET_MODERATION_VIEW_KAT_FINGERPRINT \
     "b3bb4162ded56964518aca6175fba41521ed9b121029a5eb38dd893267f80f26"
 
+/* One decision, asked by every surface that lists or hands out an offer.
+ * `visible` means "this node shows AND serves it"; a false answer is a
+ * local refusal, never a deletion and never a claim about the offer.
+ * `local_view_only` says the decision stays on this node: it is not
+ * gossiped, binds no peer, and no peer's decision binds this one — which
+ * is what keeps a per-node profile from becoming a network-wide ban.
+ * `wire_unchanged` says the signed offer bytes are untouched by it, which
+ * is what keeps it out of consensus. */
 struct market_moderation_decision_result_v1 {
     bool valid;
     bool visible;

@@ -13,6 +13,7 @@
 #include "platform/time_compat.h"
 #include "sapling/sapling.h"
 #include "services/file_market_content_service.h"
+#include "services/market_moderation_service.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -185,6 +186,30 @@ int file_market_content_tests(void)
                   wrong_offer_ready && !result.ok);
 
     rpc_market_set_state(&ndb);
+    /* The registered-content index is a serving surface: it names what
+     * this node holds bytes for. Under the boot-default profile a node
+     * has not signed off on anything yet, so the index lists nothing and
+     * says how much it withheld — it never lists a row the chunk-delivery
+     * gate would then refuse. */
+    struct json_value hidden_index;
+    json_init(&hidden_index);
+    bool hidden_indexed = api_market_content_list(&hidden_index);
+    char hidden_rendered[4096];
+    size_t hidden_len = json_write(&hidden_index, hidden_rendered,
+                                   sizeof(hidden_rendered));
+    const struct json_value *hidden_count =
+        json_get(&hidden_index, "hidden_by_profile");
+    CONTENT_CHECK("unreviewed content is withheld and counted, not listed",
+        hidden_indexed && hidden_len > 0 &&
+        !strstr(hidden_rendered, "offer_id") &&
+        hidden_count && hidden_count->type == JSON_INT &&
+        json_get_int(hidden_count) >= 1);
+    json_free(&hidden_index);
+
+    /* After this node signs off on its own content the row appears — and
+     * the private filesystem path is still never returned. */
+    struct zcl_result signed_off = market_moderation_set_review_state(
+        offer.offer_id, MARKET_REVIEW_REVIEWED_OK);
     struct json_value public_index;
     json_init(&public_index);
     bool indexed = api_market_content_list(&public_index);
@@ -192,7 +217,8 @@ int file_market_content_tests(void)
     size_t rendered_len = json_write(&public_index, rendered,
                                      sizeof(rendered));
     CONTENT_CHECK("private REST index omits filesystem references",
-        indexed && rendered_len > 0 && strstr(rendered, "offer_id") &&
+        signed_off.ok && indexed && rendered_len > 0 &&
+        strstr(rendered, "offer_id") &&
         !strstr(rendered, "private_path") && !strstr(rendered, filepath));
     json_free(&public_index);
 

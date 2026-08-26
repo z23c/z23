@@ -49,11 +49,12 @@ int db_file_offer_prune(struct node_db *ndb, int64_t max_age);
  * failed (e.g. private content binding). Returns false on a DB error. */
 bool db_file_offer_delete(struct node_db *ndb, const uint8_t root_hash[32]);
 
-/* Local-only listing moderation (schema v65 review_state column). This
+/* Local-only moderation state (schema v65 review_state column). This
  * metadata is per-node curation state: never gossiped, never part of the
- * signed offer wire, and never a deletion — a hidden offer stays stored,
- * served, and tradable. Values: unreviewed (ingest default), reviewed_ok,
- * sensitive. */
+ * signed offer wire, and never a deletion — a hidden offer stays stored
+ * and keeps its signed wire; under the boot-default profile the node just
+ * neither lists, serves, nor relays it. Values: unreviewed (ingest
+ * default), reviewed_ok, sensitive. */
 bool db_file_offer_get_review_state(struct node_db *ndb,
                                     const uint8_t root_hash[32],
                                     char *out, size_t out_len);

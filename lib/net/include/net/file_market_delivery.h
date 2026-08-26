@@ -103,6 +103,16 @@ typedef bool (*file_market_delivery_load_fn)(
     const uint8_t offer_id[32], uint32_t chunk_index,
     struct file_market_delivery_chunk *out, void *ctx);
 
+/* The node's own hosting decision for these bytes, asked BEFORE payment
+ * authorization and therefore before any content read. true = this node
+ * will hand the bytes out; false = it will not. The app layer answers it
+ * from the active listing-visibility profile (general-audience.v1 by
+ * default) — see app/services/include/services/market_moderation_service.h.
+ * A NULL callback is a REFUSAL, not a bypass: an unwired node serves no
+ * paid content, exactly as a NULL load callback already means. */
+typedef bool (*file_market_delivery_moderation_fn)(
+    const uint8_t offer_id[32], void *ctx);
+
 enum file_market_delivery_status {
     FILE_MARKET_DELIVERY_READY = 0,
     FILE_MARKET_DELIVERY_MALFORMED,
@@ -113,6 +123,10 @@ enum file_market_delivery_status {
     FILE_MARKET_DELIVERY_PAYMENT_REJECTED,
     FILE_MARKET_DELIVERY_CONTENT_UNAVAILABLE,
     FILE_MARKET_DELIVERY_RESOURCE_LIMIT,
+    /* This node's own listing-visibility profile declines to host these
+     * bytes. Local and per-node: it says nothing about the offer's
+     * validity and binds no other node, which may serve the same chunk. */
+    FILE_MARKET_DELIVERY_MODERATION_HIDDEN,
 };
 
 struct file_market_delivery_reply {
@@ -134,11 +148,15 @@ bool file_market_delivery_reply_decode(
     struct file_market_delivery_reply *out);
 
 /* Immutable-after-boot dependency injection. A NULL load callback keeps the
- * production path fail-closed until owner-registered seller content exists. */
+ * production path fail-closed until owner-registered seller content exists,
+ * and a NULL moderation callback keeps it fail-closed until the node's own
+ * listing-visibility profile is reachable. Both are required parameters so
+ * every caller states its choice — there is no permissive default. */
 void file_market_delivery_set_handlers(
     const uint8_t expected_network_genesis[32],
     file_market_delivery_authorize_fn authorize,
-    file_market_delivery_load_fn load, void *ctx);
+    file_market_delivery_load_fn load,
+    file_market_delivery_moderation_fn moderation, void *ctx);
 void file_market_delivery_reset_handlers(void);
 
 /* Purely recognizes the zfileget magic, including malformed/truncated bodies

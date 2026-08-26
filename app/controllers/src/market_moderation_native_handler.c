@@ -1,12 +1,14 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Owner-only typed adapters for per-node marketplace listing moderation.
  *
- * Moderation here is view filtering ONLY: the active profile decides which
- * locally-ingested offers the node's own listing surfaces show. There are
- * no network-wide bans and no deletion authority — a hidden offer stays
- * stored, served, and tradable, and protocol validity (the signed offer
- * wire) is never filtered. Each handler proxies one zmarket_* RPC so the
- * policy file and node.db stay single-writer in the node process. */
+ * The active profile decides which locally-ingested offers this node
+ * lists AND which ones it hands to another party. There are no
+ * network-wide bans and no deletion authority — a hidden offer stays
+ * stored, keeps its signed wire, and stays reachable from any node that
+ * does host it — and protocol validity is never filtered: moderation
+ * never reaches block or transaction acceptance. Each handler proxies one
+ * zmarket_* RPC so the policy file and node.db stay single-writer in the
+ * node process. */
 
 #include "controllers/rpc_client.h"
 #include "controllers/rpc_params.h"
@@ -265,6 +267,12 @@ void zcl_native_handle_market_moderation_status(
     (void)json_push_kv_str(&reply->data, "schema",
                            "zcl.market_moderation_status.v1");
     mmn_copy_str(&reply->data, &body, "active_profile");
+    /* Both legs reach the typed surface as two separately-valued keys.
+     * A reader must never have to derive the relay posture from the
+     * serve rule, or from a key being absent. */
+    mmn_copy_str(&reply->data, &body, "serve_rule");
+    mmn_copy_str(&reply->data, &body, "relay_rule");
+    mmn_copy_bool(&reply->data, &body, "relay_gated");
     mmn_copy_str(&reply->data, &body, "policy_file");
     mmn_copy_int(&reply->data, &body, "offers_cached");
     mmn_copy_bool(&reply->data, &body, "review_counts_live");
@@ -332,6 +340,8 @@ void zcl_native_handle_market_moderation_profile_show(
     mmn_copy_bool(&reply->data, &body, "active");
     mmn_copy_str(&reply->data, &body, "shows");
     mmn_copy_str(&reply->data, &body, "hides");
+    mmn_copy_str(&reply->data, &body, "leg");
+    mmn_copy_str(&reply->data, &body, "active_relay_rule");
     mmn_copy_str(&reply->data, &body, "policy_file");
     json_free(&body);
 }
@@ -366,6 +376,53 @@ void zcl_native_handle_market_moderation_profile_set(
     mmn_copy_str(&reply->data, &body, "plan_token");
     mmn_copy_str(&reply->data, &body, "profile");
     mmn_copy_str(&reply->data, &body, "previous_profile");
+    /* Echo the leg this command did NOT touch, so the operator can see
+     * that moving the serve profile left relay where it was. */
+    mmn_copy_str(&reply->data, &body, "relay_rule");
+    mmn_copy_bool(&reply->data, &body, "relay_rule_unchanged");
+    mmn_copy_str(&reply->data, &body, "policy_file");
+    const struct json_value *committed = json_get(&body, "committed");
+    if (committed && committed->type == JSON_BOOL &&
+        json_get_bool(committed))
+        reply->error.mutated = true;
+    json_free(&body);
+}
+
+/* The RELAY leg's typed setter: a command of its own, never a flag on
+ * the profile setter, because the two legs have different defaults and
+ * changing what this node HOSTS must not move what it FORWARDS. */
+void zcl_native_handle_market_moderation_relay_set(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    if (!request || !reply)
+        return;
+    const char *relay_rule = mmn_str(request->input, "relay_rule");
+    const char *mode = mmn_str(request->input, "mode");
+    const char *plan_token = mmn_str(request->input, "plan_token");
+    if (!relay_rule || !relay_rule[0] || !mode ||
+        (strcmp(mode, "plan") != 0 && strcmp(mode, "commit") != 0) ||
+        (strcmp(mode, "commit") == 0 && (!plan_token || !plan_token[0]))) {
+        mmn_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                 ZCL_COMMAND_EXIT_INVALID, "MISSING_INPUT", "normalize",
+                 "relay_rule plus mode (plan|commit) are required; commit "
+                 "also requires the plan_token minted by the plan step",
+                 "zmarket_moderation_relay_set");
+        return;
+    }
+    const char *const args[] = { relay_rule, mode,
+                                 plan_token ? plan_token : "" };
+    struct json_value body;
+    if (!mmn_call("zmarket_moderation_relay_set", args, 3, &body, reply))
+        return;
+    (void)json_push_kv_str(&reply->data, "schema",
+                           "zcl.market_moderation_relay_set.v1");
+    mmn_copy_str(&reply->data, &body, "mode");
+    mmn_copy_bool(&reply->data, &body, "committed");
+    mmn_copy_str(&reply->data, &body, "plan_token");
+    mmn_copy_str(&reply->data, &body, "relay_rule");
+    mmn_copy_str(&reply->data, &body, "previous_relay_rule");
+    mmn_copy_str(&reply->data, &body, "profile");
+    mmn_copy_bool(&reply->data, &body, "profile_unchanged");
     mmn_copy_str(&reply->data, &body, "policy_file");
     const struct json_value *committed = json_get(&body, "committed");
     if (committed && committed->type == JSON_BOOL &&

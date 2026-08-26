@@ -67,10 +67,12 @@ void rpc_market_set_state(struct node_db *ndb)
 
 /* ── zmarket_list ───────────────────────────────────────────────── */
 
-/* The listing view filter: every cached offer is annotated with its
- * LOCAL review_state; the active per-node profile decides visibility.
- * Protocol validity, hosting, and trading are unaffected — a hidden
- * offer is still stored, served, and tradable. */
+/* The listing filter: every cached offer is annotated with its LOCAL
+ * review_state; the active per-node profile decides visibility. The same
+ * profile decides what this node hands out (chunk delivery, offer
+ * re-gossip), so what it lists and what it serves can never disagree.
+ * Protocol validity is unaffected and a hidden offer is still stored,
+ * never deleted, and reachable from any node that does host it. */
 static bool market_list_json(const char *profile_override,
                              struct json_value *result)
 {
@@ -657,10 +659,20 @@ static bool rpc_zmarket_status(const struct json_value *params, bool help,
 
 /* ── private paid-content registry ───────────────────────────────── */
 
+/* The registered-content index is a serving surface: it tells a caller —
+ * including a remote one over GET /api/market-contents — exactly which
+ * content this node holds bytes for and will hand out. It therefore asks
+ * the same profile the chunk-delivery gate asks, so the two can never
+ * disagree about what this node hosts. Hidden rows are counted, never
+ * deleted, and the private filesystem path is still never returned. */
 static bool market_content_index_json(struct json_value *result)
 {
     json_set_object(result);
     json_push_kv_str(result, "schema", "zcl.market_contents.index.v1");
+    json_push_kv_str(result, "profile",
+                     market_moderation_profile_string(
+                         market_moderation_active_profile()));
+    int64_t hidden = 0;
     struct json_value rows = {0};
     json_set_array(&rows);
     if (g_market_ndb && g_market_ndb->open) {
@@ -668,6 +680,10 @@ static bool market_content_index_json(struct json_value *result)
         int count = db_market_content_list(g_market_ndb, content,
                                            FILE_MARKET_MAX_OFFERS);
         for (int i = 0; i < count; i++) {
+            if (!market_moderation_may_serve_root(content[i].root_hash)) {
+                hidden++;
+                continue;
+            }
             struct json_value row = {0};
             json_set_object(&row);
             char offer_hex[65], root_hex[65];
@@ -688,6 +704,7 @@ static bool market_content_index_json(struct json_value *result)
     }
     json_push_kv(result, "contents", &rows);
     json_free(&rows);
+    json_push_kv_int(result, "hidden_by_profile", hidden);
     return true;
 }
 
@@ -868,290 +885,6 @@ bool api_market_content_list(struct json_value *result)
     return market_content_index_json(result);
 }
 
-/* ── Per-node listing moderation (view filter only) ─────────────── */
-
-static bool rpc_zmarket_moderation_status(const struct json_value *params,
-                                          bool help,
-                                          struct json_value *result)
-{
-    if (help) {
-        json_set_str(result,
-            "zmarket_moderation_status\n"
-            "\nThe node's own marketplace listing-visibility posture: active\n"
-            "profile, available immutable profiles, and local review_state\n"
-            "counts. Moderation filters listing views only; it never deletes\n"
-            "or bans — hidden offers stay stored, served, and tradable.\n");
-        return true;
-    }
-    (void)params;
-
-    enum market_moderation_profile active =
-        market_moderation_active_profile();
-    json_set_object(result);
-    json_push_kv_str(result, "active_profile",
-                     market_moderation_profile_string(active));
-    struct json_value profiles;
-    json_init(&profiles);
-    json_set_array(&profiles);
-    for (int i = 0; i < MARKET_MODERATION_PROFILE_COUNT; i++) {
-        struct json_value p;
-        json_init(&p);
-        json_set_str(&p, market_moderation_profile_string(
-                             (enum market_moderation_profile)i));
-        json_push_back(&profiles, &p);
-        json_free(&p);
-    }
-    json_push_kv(result, "available_profiles", &profiles);
-    json_free(&profiles);
-
-    int64_t counts[MARKET_REVIEW_STATE_COUNT] = {0, 0, 0};
-    struct zcl_result counted = market_moderation_review_counts(counts);
-    struct json_value by_state;
-    json_init(&by_state);
-    json_set_object(&by_state);
-    for (int i = 0; i < MARKET_REVIEW_STATE_COUNT; i++)
-        json_push_kv_int(&by_state,
-                         market_review_state_string(
-                             (enum market_review_state)i),
-                         counted.ok ? counts[i] : 0);
-    json_push_kv(result, "review_counts", &by_state);
-    json_free(&by_state);
-    json_push_kv_bool(result, "review_counts_live", counted.ok);
-    json_push_kv_int(result, "offers_cached", file_market_count());
-    json_push_kv_str(result, "policy_file", MARKET_MODERATION_POLICY_FILE);
-    json_push_kv_bool(result, "view_filter_only", true);
-    return true;
-}
-
-static bool rpc_zmarket_moderation_profile_show(
-    const struct json_value *params, bool help, struct json_value *result)
-{
-    if (help || !params || json_size(params) < 1) {
-        json_set_str(result,
-            "zmarket_moderation_profile_show \"profile\"\n"
-            "\nDescribe one immutable named listing-visibility profile:\n"
-            "what it shows, what it hides, and whether it is active here.\n"
-            "\nArguments:\n"
-            "1. profile   (string, required) \"general-audience.v1\" or "
-            "\"open-view\"\n");
-        return true;
-    }
-    const struct json_value *arg0 = json_at(params, 0);
-    const char *name =
-        arg0 && arg0->type == JSON_STR ? json_get_str(arg0) : NULL;
-    int profile = market_moderation_profile_from_string(name);
-    if (profile < 0) {
-        json_set_str(result,
-            "unknown market moderation profile — available: "
-            "general-audience.v1, open-view");
-        return false;
-    }
-    struct zcl_hotswap_service_lease lease = {0};
-    const struct market_moderation_view_service_v1 *service = zcl_hotswap_service_acquire(MARKET_MODERATION_VIEW_SERVICE_ID, &lease);
-    if (!service) service = market_moderation_view_service_builtin();
-    struct market_moderation_profile_result_v1 rendered;
-    if (!service->render_profile(profile, &rendered) || !rendered.valid) {
-        zcl_hotswap_service_release(&lease);
-        json_set_str(result, "market moderation profile rendering failed");
-        return false;
-    }
-    json_set_object(result);
-    json_push_kv_str(result, "profile", rendered.profile);
-    json_push_kv_bool(result, "immutable", true);
-    json_push_kv_bool(result, "active", (int)market_moderation_active_profile() == profile);
-    json_push_kv_str(result, "shows", rendered.shows);
-    json_push_kv_str(result, "hides", rendered.hides);
-    json_push_kv_str(result, "policy_file", MARKET_MODERATION_POLICY_FILE);
-    zcl_hotswap_service_release(&lease);
-    return true;
-}
-
-static void market_profile_plan_token(const char *active_name,
-                                      const char *target_name,
-                                      uint8_t out[32])
-{
-    struct sha3_256_ctx sha;
-    static const char domain[] = "zcl.market.moderation.plan.v1";
-    sha3_256_init(&sha);
-    sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
-    sha3_256_write(&sha, (const uint8_t *)active_name,
-                   strlen(active_name) + 1u);
-    sha3_256_write(&sha, (const uint8_t *)target_name,
-                   strlen(target_name) + 1u);
-    sha3_256_finalize(&sha, out);
-}
-
-static bool rpc_zmarket_moderation_profile_set(
-    const struct json_value *params, bool help, struct json_value *result)
-{
-    if (help || !params || json_size(params) < 2) {
-        json_set_str(result,
-            "zmarket_moderation_profile_set \"profile\" \"mode\" "
-            "[\"plan_token\"]\n"
-            "\nSet the node's own listing-visibility profile, persisted to\n"
-            "<datadir>/market/moderation.v1. Exact two-step: mode \"plan\"\n"
-            "mints a plan_token bound to the current active profile and the\n"
-            "target; mode \"commit\" requires that token (STALE_PLAN if the\n"
-            "active profile moved in between). Local view filtering only.\n"
-            "\nArguments:\n"
-            "1. profile   (string, required) \"general-audience.v1\" or "
-            "\"open-view\"\n"
-            "2. mode      (string, required) \"plan\" or \"commit\"\n"
-            "3. plan_token (string, required for commit) 64-hex plan token\n");
-        return true;
-    }
-    const struct json_value *arg0 = json_at(params, 0);
-    const struct json_value *arg1 = json_at(params, 1);
-    const char *name =
-        arg0 && arg0->type == JSON_STR ? json_get_str(arg0) : NULL;
-    const char *mode =
-        arg1 && arg1->type == JSON_STR ? json_get_str(arg1) : NULL;
-    int profile = market_moderation_profile_from_string(name);
-    if (profile < 0) {
-        json_set_str(result,
-            "unknown market moderation profile — available: "
-            "general-audience.v1, open-view");
-        return false;
-    }
-    if (!mode || (strcmp(mode, "plan") != 0 && strcmp(mode, "commit") != 0)) {
-        json_set_str(result, "mode must be \"plan\" or \"commit\"");
-        return false;
-    }
-
-    const char *active_name = market_moderation_profile_string(
-        market_moderation_active_profile());
-    uint8_t token[32];
-    market_profile_plan_token(active_name, name, token);
-
-    bool committed = false;
-    if (strcmp(mode, "commit") == 0) {
-        const struct json_value *arg2 = json_at(params, 2);
-        const char *hex =
-            arg2 && arg2->type == JSON_STR ? json_get_str(arg2) : NULL;
-        uint8_t supplied[32], difference = 0;
-        if (!hex || strlen(hex) != 64 ||
-            !zcl_hex_decode_lower(hex, supplied, 32)) {
-            json_set_str(result,
-                "INVALID_PLAN_TOKEN: commit requires the canonical 64-hex "
-                "plan_token minted by mode \"plan\"");
-            return false;
-        }
-        for (size_t i = 0; i < 32; i++)
-            difference |= supplied[i] ^ token[i];
-        if (difference) {
-            json_set_str(result,
-                "STALE_PLAN: the active moderation profile moved after the "
-                "plan was minted — re-plan and commit again");
-            return false;
-        }
-        struct zcl_result set = market_moderation_set_active_profile(
-            (enum market_moderation_profile)profile);
-        if (!set.ok) {
-            char message[300];
-            snprintf(message, sizeof(message), "POLICY_REFUSED: %s",
-                     set.message[0] ? set.message : "profile save failed");
-            json_set_str(result, message);
-            return false;
-        }
-        committed = true;
-    }
-
-    char token_hex[65];
-    zcl_hex_encode(token, 32, token_hex);
-    json_set_object(result);
-    json_push_kv_str(result, "mode", mode);
-    json_push_kv_bool(result, "committed", committed);
-    json_push_kv_str(result, "plan_token", token_hex);
-    json_push_kv_str(result, "profile", name);
-    json_push_kv_str(result, "previous_profile", active_name);
-    json_push_kv_str(result, "policy_file", MARKET_MODERATION_POLICY_FILE);
-    return true;
-}
-
-static bool rpc_zmarket_review_set(const struct json_value *params, bool help,
-                                   struct json_value *result)
-{
-    if (help || !params || json_size(params) < 2) {
-        json_set_str(result,
-            "zmarket_review_set \"offer_id\" \"review_state\"\n"
-            "\nThe node's OWN curation mark on one signed offer: sets the\n"
-            "local-only review_state (unreviewed / reviewed_ok / sensitive).\n"
-            "Never gossiped, never in the signed wire, never a deletion —\n"
-            "the offer stays stored, served, and tradable; only the local\n"
-            "listing view changes. One audit log line is written per mark.\n"
-            "\nArguments:\n"
-            "1. offer_id     (string, required) 64-hex signed offer id\n"
-            "2. review_state (string, required) unreviewed | reviewed_ok | "
-            "sensitive\n");
-        return true;
-    }
-    if (!g_market_ndb || !g_market_ndb->open) {
-        json_set_str(result,
-            "NODE_UNAVAILABLE: the market store is not open on this node");
-        return false;
-    }
-    const struct json_value *arg0 = json_at(params, 0);
-    const struct json_value *arg1 = json_at(params, 1);
-    const char *id_hex =
-        arg0 && arg0->type == JSON_STR ? json_get_str(arg0) : NULL;
-    const char *state_text =
-        arg1 && arg1->type == JSON_STR ? json_get_str(arg1) : NULL;
-    uint8_t offer_id[32];
-    if (!id_hex || strlen(id_hex) != 64 ||
-        !zcl_hex_decode_lower(id_hex, offer_id, 32)) {
-        json_set_str(result,
-            "INVALID_OFFER_ID: offer_id must be the 64-hex signed offer id");
-        return false;
-    }
-    int state = market_review_state_from_string(state_text);
-    if (state < 0) {
-        json_set_str(result,
-            "INVALID_REVIEW_STATE: use unreviewed, reviewed_ok, or "
-            "sensitive");
-        return false;
-    }
-
-    struct file_offer offer;
-    if (!db_file_offer_find_by_id(g_market_ndb, offer_id, &offer)) {
-        json_set_str(result,
-            "OFFER_NOT_FOUND: no signed offer with that offer_id is stored "
-            "on this node");
-        return false;
-    }
-    char previous[16] = {0};
-    const char *previous_state =
-        db_file_offer_get_review_state(g_market_ndb, offer.root_hash,
-                                       previous, sizeof(previous))
-            ? previous : "unreviewed";
-    struct zcl_result marked = market_moderation_set_review_state(
-        offer_id, (enum market_review_state)state);
-    if (!marked.ok) {
-        char message[300];
-        snprintf(message, sizeof(message), "REVIEW_REFUSED: %s",
-                 marked.message[0] ? marked.message
-                                   : "the mark could not persist");
-        json_set_str(result, message);
-        return false;
-    }
-    /* Local curation audit trail: one line per mark, node.log only. */
-    LOG_INFO("market",
-             "moderation review set: offer_id=%s review_state=%s previous=%s",
-             id_hex, market_review_state_string(
-                         (enum market_review_state)state),
-             previous_state);
-
-    json_set_object(result);
-    json_push_kv_str(result, "status", "marked");
-    json_push_kv_str(result, "offer_id", id_hex);
-    json_push_kv_str(result, "review_state",
-                     market_review_state_string(
-                         (enum market_review_state)state));
-    json_push_kv_str(result, "previous_review_state", previous_state);
-    json_push_kv_bool(result, "local_only", true);
-    json_push_kv_bool(result, "gossiped", false);
-    return true;
-}
-
 /* ── Registration ───────────────────────────────────────────────── */
 
 void register_market_rpc_commands(struct rpc_table *t)
@@ -1175,15 +908,12 @@ void register_market_rpc_commands(struct rpc_table *t)
           rpc_zmarket_purchase_retrieve, false },
         { "market", "romseed_register", rpc_romseed_register, true },
         { "market", "romseed_list",     rpc_romseed_list,     true },
-        { "market", "zmarket_moderation_status",
-          rpc_zmarket_moderation_status, true },
-        { "market", "zmarket_moderation_profile_show",
-          rpc_zmarket_moderation_profile_show, true },
-        { "market", "zmarket_moderation_profile_set",
-          rpc_zmarket_moderation_profile_set, false },
-        { "market", "zmarket_review_set", rpc_zmarket_review_set, false },
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)
         rpc_table_must_append(t, &cmds[i]);
     register_market_offer_rpc_commands(t);
+    /* The moderation posture lives in market_moderation_rpc.c — a policy
+     * surface, not a marketplace one — but registers here so this table
+     * stays the single list of market RPC names. */
+    register_market_moderation_rpc_commands(t);
 }

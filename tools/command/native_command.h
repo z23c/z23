@@ -1908,9 +1908,9 @@ void zcl_native_handle_message_read(
 void zcl_native_handle_market_content_register(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
-/* Per-node marketplace listing moderation (view filtering only — no
- * network-wide bans, no deletion): the node's own visibility profile plus
- * its local-only review_state curation marks.
+/* Per-node marketplace moderation (no network-wide bans, no deletion, no
+ * consensus effect): the node's own profile decides what it lists and what
+ * it hands out, from its local-only review_state curation marks.
  * app/controllers/src/market_moderation_native_handler.c. */
 void zcl_native_handle_market_moderation_status(
     const struct zcl_command_request *request,
@@ -1922,6 +1922,9 @@ void zcl_native_handle_market_moderation_profile_show(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 void zcl_native_handle_market_moderation_profile_set(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_market_moderation_relay_set(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 void zcl_native_handle_market_moderation_review_set(

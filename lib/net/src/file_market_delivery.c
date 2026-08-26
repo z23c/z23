@@ -1,9 +1,15 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Buyer-authenticated paid-file delivery gate. Payment authority is injected
- * from app/services; lib/net verifies the request and enforces authorize-before-
- * read ordering without depending on wallet, database, or chain internals. */
+ * Buyer-authenticated paid-file delivery gate, SERVING side. Payment and
+ * hosting-policy authority are both injected from app/services; lib/net
+ * verifies the request and enforces moderation-before-authorize-before-read
+ * ordering without depending on wallet, database, or chain internals.
+ *
+ * The buying side lives in file_market_delivery_fetch.c — see
+ * file_market_delivery_internal.h for why the split runs along the wire. */
 
 #include "net/file_market_delivery.h"
+
+#include "file_market_delivery_internal.h"
 
 #include "base/serialize_le.h"
 #include "crypto/ed25519.h"
@@ -14,12 +20,6 @@
 #include "support/cleanse.h"
 
 #include <pthread.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <netinet/in.h>
-#include <sys/select.h>
-#include <sys/socket.h>
-#include <sys/time.h>
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,21 +36,12 @@ struct file_market_delivery_handlers {
     uint8_t network_genesis[32];
     file_market_delivery_authorize_fn authorize;
     file_market_delivery_load_fn load;
+    file_market_delivery_moderation_fn moderation;
     void *ctx;
 };
 
 static struct file_market_delivery_handlers g_handlers;
 static pthread_mutex_t g_handlers_mutex = PTHREAD_MUTEX_INITIALIZER;
-
-static bool delivery_bytes_nonzero(const uint8_t *bytes, size_t len)
-{
-    uint8_t any = 0;
-    if (!bytes)
-        return false;
-    for (size_t i = 0; i < len; i++)
-        any |= bytes[i];
-    return any != 0;
-}
 
 static void delivery_chunk_discard(struct file_market_delivery_chunk *chunk)
 {
@@ -299,8 +290,22 @@ const char *file_market_delivery_status_string(
     case FILE_MARKET_DELIVERY_PAYMENT_REJECTED: return "REJECTED";
     case FILE_MARKET_DELIVERY_CONTENT_UNAVAILABLE: return "CONTENT_UNAVAILABLE";
     case FILE_MARKET_DELIVERY_RESOURCE_LIMIT: return "RESOURCE_LIMIT";
+    case FILE_MARKET_DELIVERY_MODERATION_HIDDEN: return "MODERATION_HIDDEN";
     }
     return "MALFORMED";
+}
+
+/* This node's own hosting decision, asked before payment state is even
+ * consulted so a declined chunk never reveals it and never reaches a
+ * content read. An unwired port is a refusal: a node that cannot ask its
+ * own profile hands out nothing. */
+static bool delivery_moderation_allows(
+    const struct file_market_delivery_handlers *handlers,
+    const uint8_t offer_id[32])
+{
+    if (!handlers || !handlers->moderation)
+        return false;
+    return handlers->moderation(offer_id, handlers->ctx);
 }
 
 bool file_market_delivery_reply_encode(
@@ -308,7 +313,7 @@ bool file_market_delivery_reply_encode(
     uint8_t out[FILE_MARKET_DELIVERY_REPLY_BYTES])
 {
     if (!reply || !out || reply->version != FILE_MARKET_DELIVERY_VERSION ||
-        reply->status > FILE_MARKET_DELIVERY_RESOURCE_LIMIT)
+        reply->status > FILE_MARKET_DELIVERY_MODERATION_HIDDEN)
         return false;
     size_t off = 0;
     memcpy(out + off, k_reply_magic, sizeof(k_reply_magic));
@@ -352,7 +357,7 @@ bool file_market_delivery_reply_decode(
     off += 32;
     if (off != FILE_MARKET_DELIVERY_REPLY_BYTES ||
         out->version != FILE_MARKET_DELIVERY_VERSION ||
-        out->status > FILE_MARKET_DELIVERY_RESOURCE_LIMIT) {
+        out->status > FILE_MARKET_DELIVERY_MODERATION_HIDDEN) {
         memset(out, 0, sizeof(*out));
         return false;
     }
@@ -362,7 +367,8 @@ bool file_market_delivery_reply_decode(
 void file_market_delivery_set_handlers(
     const uint8_t expected_network_genesis[32],
     file_market_delivery_authorize_fn authorize,
-    file_market_delivery_load_fn load, void *ctx)
+    file_market_delivery_load_fn load,
+    file_market_delivery_moderation_fn moderation, void *ctx)
 {
     pthread_mutex_lock(&g_handlers_mutex);
     memset(&g_handlers, 0, sizeof(g_handlers));
@@ -371,6 +377,7 @@ void file_market_delivery_set_handlers(
         g_handlers.configured = true;
         g_handlers.authorize = authorize;
         g_handlers.load = load;
+        g_handlers.moderation = moderation;
         g_handlers.ctx = ctx;
     }
     pthread_mutex_unlock(&g_handlers_mutex);
@@ -378,7 +385,7 @@ void file_market_delivery_set_handlers(
 
 void file_market_delivery_reset_handlers(void)
 {
-    file_market_delivery_set_handlers(NULL, NULL, NULL, NULL);
+    file_market_delivery_set_handlers(NULL, NULL, NULL, NULL, NULL);
 }
 
 bool file_market_delivery_is_request(const uint8_t *payload, uint32_t plen)
@@ -432,6 +439,15 @@ enum file_market_delivery_status file_market_delivery_prepare(
     pthread_mutex_unlock(&g_handlers_mutex);
     if (!handlers.configured || !handlers.authorize) {
         out_reply->status = FILE_MARKET_DELIVERY_PAYMENT_UNKNOWN;
+        return out_reply->status;
+    }
+
+    /* Hosting decision first. Asked before authentication and payment so a
+     * chunk this node will not host never causes a signature check, a
+     * payment lookup, or a content read, and the answer leaks nothing
+     * about either. */
+    if (!delivery_moderation_allows(&handlers, request.offer_id)) {
+        out_reply->status = FILE_MARKET_DELIVERY_MODERATION_HIDDEN;
         return out_reply->status;
     }
 
@@ -504,6 +520,14 @@ enum file_market_delivery_status file_market_delivery_prepare_onion(
     pthread_mutex_unlock(&g_handlers_mutex);
     if (!handlers.configured || !handlers.authorize) {
         out_reply->status = FILE_MARKET_DELIVERY_PAYMENT_UNKNOWN;
+        return out_reply->status;
+    }
+
+    /* Same hosting decision as the clearnet path, asked at the same point.
+     * An onion buyer gets exactly the moderation posture a clearnet buyer
+     * gets — the transport never widens what this node will host. */
+    if (!delivery_moderation_allows(&handlers, request.offer_id)) {
+        out_reply->status = FILE_MARKET_DELIVERY_MODERATION_HIDDEN;
         return out_reply->status;
     }
 
@@ -582,216 +606,4 @@ bool file_market_delivery_serve(
     }
     delivery_chunk_discard(&chunk);
     return true;
-}
-
-static bool delivery_deadline_active(int64_t deadline_ms)
-{
-    if (deadline_ms == INT64_MAX)
-        return true;
-    int64_t now_ms = platform_time_monotonic_ms();
-    return now_ms > 0 && now_ms < deadline_ms;
-}
-
-enum file_market_delivery_status file_market_delivery_fetch_session_until(
-    struct fs_session *session, const uint8_t network_genesis[32],
-    const uint8_t offer_id[32], uint32_t chunk_index,
-    const uint8_t buyer_pubkey[32], const uint8_t buyer_seed[32],
-    int64_t deadline_ms, struct file_market_delivery_chunk *out_chunk)
-{
-    if (out_chunk)
-        memset(out_chunk, 0, sizeof(*out_chunk));
-    if (!session || !session->key_established || !network_genesis ||
-        !offer_id || !buyer_pubkey || !buyer_seed || !out_chunk)
-        return FILE_MARKET_DELIVERY_MALFORMED;
-    if (!delivery_deadline_active(deadline_ms))
-        return FILE_MARKET_DELIVERY_RESOURCE_LIMIT;
-
-    struct file_market_delivery_request request;
-    memset(&request, 0, sizeof(request));
-    request.version = FILE_MARKET_DELIVERY_VERSION;
-    memcpy(request.network_genesis, network_genesis, 32);
-    memcpy(request.offer_id, offer_id, 32);
-    request.chunk_index = chunk_index;
-    memcpy(request.buyer_pubkey, buyer_pubkey, 32);
-    file_market_delivery_session_id(network_genesis, session->our_nonce,
-                                    session->peer_nonce,
-                                    request.session_id);
-    if (file_market_delivery_request_seal(&request, buyer_seed) !=
-        FILE_MARKET_DELIVERY_OK)
-        return FILE_MARKET_DELIVERY_UNAUTHENTICATED;
-    uint8_t request_wire[FILE_MARKET_DELIVERY_WIRE_BYTES];
-    if (file_market_delivery_request_encode(&request, request_wire) !=
-            FILE_MARKET_DELIVERY_OK ||
-        !fs_send_frame_until(session, FS_REQUEST, request_wire,
-                             sizeof(request_wire), deadline_ms))
-        return delivery_deadline_active(deadline_ms)
-            ? FILE_MARKET_DELIVERY_PAYMENT_UNKNOWN
-            : FILE_MARKET_DELIVERY_RESOURCE_LIMIT;
-
-    uint8_t frame_type = 0;
-    const uint8_t *payload = NULL;
-    uint32_t payload_len = 0;
-    struct file_market_delivery_reply reply;
-    if (!fs_recv_frame_until(session, &frame_type, &payload, &payload_len,
-                             deadline_ms))
-        return delivery_deadline_active(deadline_ms)
-            ? FILE_MARKET_DELIVERY_PAYMENT_UNKNOWN
-            : FILE_MARKET_DELIVERY_RESOURCE_LIMIT;
-    if (!delivery_deadline_active(deadline_ms))
-        return FILE_MARKET_DELIVERY_RESOURCE_LIMIT;
-    if (frame_type != FS_MARKET_REPLY ||
-        !file_market_delivery_reply_decode(payload, payload_len, &reply) ||
-        memcmp(reply.offer_id, offer_id, 32) != 0 ||
-        reply.chunk_index != chunk_index)
-        return FILE_MARKET_DELIVERY_PAYMENT_UNKNOWN;
-    if (reply.status != FILE_MARKET_DELIVERY_READY)
-        return reply.status;
-    if (reply.size == 0 || reply.size > FILE_MARKET_CHUNK_SIZE ||
-        !delivery_bytes_nonzero(reply.sha3, 32))
-        return FILE_MARKET_DELIVERY_MALFORMED;
-
-    uint8_t *data = NULL;
-    uint32_t size = 0;
-    if (!fs_recv_chunk_private_until(session, &data, &size, reply.size,
-                                     reply.sha3, deadline_ms) ||
-        !data || size != reply.size) {
-        if (data && size > 0)
-            memory_cleanse(data, size);
-        free(data);
-        return delivery_deadline_active(deadline_ms)
-            ? FILE_MARKET_DELIVERY_PAYMENT_UNKNOWN
-            : FILE_MARKET_DELIVERY_RESOURCE_LIMIT;
-    }
-    if (!delivery_deadline_active(deadline_ms)) {
-        memory_cleanse(data, size);
-        free(data);
-        return FILE_MARKET_DELIVERY_RESOURCE_LIMIT;
-    }
-    out_chunk->data = data;
-    out_chunk->size = size;
-    memcpy(out_chunk->sha3, reply.sha3, 32);
-    return FILE_MARKET_DELIVERY_READY;
-}
-
-enum file_market_delivery_status file_market_delivery_fetch_session(
-    struct fs_session *session, const uint8_t network_genesis[32],
-    const uint8_t offer_id[32], uint32_t chunk_index,
-    const uint8_t buyer_pubkey[32], const uint8_t buyer_seed[32],
-    struct file_market_delivery_chunk *out_chunk)
-{
-    return file_market_delivery_fetch_session_until(
-        session, network_genesis, offer_id, chunk_index, buyer_pubkey,
-        buyer_seed, INT64_MAX, out_chunk);
-}
-
-static int delivery_connect_endpoint(const uint8_t peer_ip[16],
-                                     uint16_t peer_port,
-                                     int64_t deadline_ms)
-{
-    if (!peer_ip || !delivery_bytes_nonzero(peer_ip, 16) || peer_port == 0)
-        return -1;
-    int64_t now_ms = platform_time_monotonic_ms();
-    if (deadline_ms != INT64_MAX &&
-        (now_ms <= 0 || now_ms >= deadline_ms))
-        return -1;
-    int fd = socket(AF_INET6, SOCK_STREAM, 0);
-    if (fd < 0)
-        return -1;
-    struct sockaddr_in6 addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin6_family = AF_INET6;
-    addr.sin6_port = htons(peer_port);
-    memcpy(&addr.sin6_addr, peer_ip, 16);
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) {
-        close(fd);
-        return -1;
-    }
-    int rc = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
-    if (rc < 0 && errno == EINPROGRESS) {
-        fd_set writefds;
-        FD_ZERO(&writefds);
-        FD_SET(fd, &writefds);
-        struct timeval timeout = { .tv_sec = 10, .tv_usec = 0 };
-        if (deadline_ms != INT64_MAX) {
-            now_ms = platform_time_monotonic_ms();
-            if (now_ms <= 0 || now_ms >= deadline_ms) {
-                close(fd);
-                return -1;
-            }
-            int64_t remain_ms = deadline_ms - now_ms;
-            if (remain_ms < 10000) {
-                timeout.tv_sec = (time_t)(remain_ms / 1000);
-                timeout.tv_usec = (suseconds_t)((remain_ms % 1000) * 1000);
-            }
-        }
-        rc = select(fd + 1, NULL, &writefds, NULL, &timeout);
-        int socket_error = 0;
-        socklen_t error_len = sizeof(socket_error);
-        if (rc <= 0 || getsockopt(fd, SOL_SOCKET, SO_ERROR,
-                                  &socket_error, &error_len) != 0 ||
-            socket_error != 0 || !delivery_deadline_active(deadline_ms)) {
-            close(fd);
-            return -1;
-        }
-    } else if (rc < 0) {
-        close(fd);
-        return -1;
-    }
-    if (fcntl(fd, F_SETFL, flags) != 0) {
-        close(fd);
-        return -1;
-    }
-    struct timeval io_timeout = { .tv_sec = 30, .tv_usec = 0 };
-    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO,
-                     &io_timeout, sizeof(io_timeout));
-    (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO,
-                     &io_timeout, sizeof(io_timeout));
-    return fd;
-}
-
-enum file_market_delivery_status file_market_delivery_fetch_endpoint(
-    const uint8_t peer_ip[16], uint16_t peer_port,
-    const uint8_t network_genesis[32], const uint8_t offer_id[32],
-    uint32_t chunk_index, const uint8_t buyer_pubkey[32],
-    const uint8_t buyer_seed[32],
-    struct file_market_delivery_chunk *out_chunk)
-{
-    return file_market_delivery_fetch_endpoint_until(
-        peer_ip, peer_port, network_genesis, offer_id, chunk_index,
-        buyer_pubkey, buyer_seed, INT64_MAX, out_chunk);
-}
-
-enum file_market_delivery_status file_market_delivery_fetch_endpoint_until(
-    const uint8_t peer_ip[16], uint16_t peer_port,
-    const uint8_t network_genesis[32], const uint8_t offer_id[32],
-    uint32_t chunk_index, const uint8_t buyer_pubkey[32],
-    const uint8_t buyer_seed[32], int64_t deadline_ms,
-    struct file_market_delivery_chunk *out_chunk)
-{
-    if (out_chunk)
-        memset(out_chunk, 0, sizeof(*out_chunk));
-    int fd = delivery_connect_endpoint(peer_ip, peer_port, deadline_ms);
-    if (fd < 0)
-        return delivery_deadline_active(deadline_ms)
-            ? FILE_MARKET_DELIVERY_PAYMENT_UNKNOWN
-            : FILE_MARKET_DELIVERY_RESOURCE_LIMIT;
-    struct fs_session session;
-    fs_session_init(&session, fd);
-    /* The existing file-service responder derives its transport key from the
-     * zero root. Paid-file authenticity comes from the signed offer/request,
-     * exact payment authority, session MAC, and complete content manifest;
-     * do not invent a different handshake secret in this sibling client. */
-    uint8_t transport_root[32] = {0};
-    enum file_market_delivery_status status =
-        FILE_MARKET_DELIVERY_PAYMENT_UNKNOWN;
-    if (fs_handshake_until(&session, transport_root, true, deadline_ms))
-        status = file_market_delivery_fetch_session_until(
-            &session, network_genesis, offer_id, chunk_index,
-            buyer_pubkey, buyer_seed, deadline_ms, out_chunk);
-    else if (!delivery_deadline_active(deadline_ms))
-        status = FILE_MARKET_DELIVERY_RESOURCE_LIMIT;
-    fs_session_cleanup(&session);
-    close(fd);
-    return status;
 }

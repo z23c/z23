@@ -38,7 +38,22 @@ struct delivery_fixture {
     int load_calls;
     bool load_ok;
     bool corrupt_hash;
+    /* This node's own hosting decision. The cases below are about payment
+     * and codec behaviour, so they state "this node hosts it" explicitly
+     * rather than inheriting a permissive default — there is none. */
+    bool moderation_hidden;
+    int moderation_calls;
 };
+
+static bool delivery_moderation(const uint8_t offer_id[32], void *ctx)
+{
+    struct delivery_fixture *fixture = ctx;
+    (void)offer_id;
+    if (!fixture)
+        return false;
+    fixture->moderation_calls++;
+    return !fixture->moderation_hidden;
+}
 
 static enum file_market_delivery_authorization delivery_authorize(
     const uint8_t offer_id[32], const uint8_t buyer_pubkey[32],
@@ -1079,7 +1094,8 @@ int file_market_delivery_tests(void)
         .load_ok = true,
     };
     file_market_delivery_set_handlers(
-        request.network_genesis, delivery_authorize, delivery_load, &fixture);
+        request.network_genesis, delivery_authorize, delivery_load,
+        delivery_moderation, &fixture);
     struct file_market_delivery_reply reply, reply_roundtrip;
     struct file_market_delivery_chunk chunk;
     enum file_market_delivery_status status = file_market_delivery_prepare(
@@ -1133,6 +1149,58 @@ int file_market_delivery_tests(void)
         status == FILE_MARKET_DELIVERY_CONTENT_UNAVAILABLE &&
         chunk.data == NULL);
     fixture.corrupt_hash = false;
+
+    /* ── The node's own hosting decision ─────────────────────────────
+     * A declined chunk must cost the requester everything: no payment
+     * lookup, no content read, no bytes. And an unwired profile port is
+     * a refusal, not a bypass — the closed state is the unconfigured
+     * one, so a node that cannot ask its own profile serves nothing. */
+    fixture.moderation_hidden = true;
+    int auth_calls_before_hidden = fixture.authorize_calls;
+    int load_calls_before_hidden = fixture.load_calls;
+    status = file_market_delivery_prepare(
+        &server, wire, sizeof(wire), &reply, &chunk);
+    DELIVERY_CHECK("profile refusal reaches neither payment nor content",
+        status == FILE_MARKET_DELIVERY_MODERATION_HIDDEN &&
+        fixture.authorize_calls == auth_calls_before_hidden &&
+        fixture.load_calls == load_calls_before_hidden &&
+        chunk.data == NULL && reply.size == 0);
+    DELIVERY_CHECK("a refused reply still round-trips on the wire",
+        file_market_delivery_reply_encode(&reply, tampered_wire) &&
+        file_market_delivery_reply_decode(
+            tampered_wire, FILE_MARKET_DELIVERY_REPLY_BYTES,
+            &reply_roundtrip) &&
+        reply_roundtrip.status == FILE_MARKET_DELIVERY_MODERATION_HIDDEN);
+    fixture.moderation_hidden = false;
+
+    /* Onion transport gets the identical answer: no transport widens what
+     * this node will host. */
+    status = file_market_delivery_prepare_onion(
+        wire, sizeof(wire), &reply, &chunk);
+    bool onion_hidden_when_unwired =
+        status == FILE_MARKET_DELIVERY_MODERATION_HIDDEN ||
+        status == FILE_MARKET_DELIVERY_UNAUTHENTICATED;
+    DELIVERY_CHECK("onion prepare never serves without a hosting decision",
+        onion_hidden_when_unwired && chunk.data == NULL);
+
+    file_market_delivery_set_handlers(
+        request.network_genesis, delivery_authorize, delivery_load, NULL,
+        &fixture);
+    int auth_calls_before_unwired = fixture.authorize_calls;
+    status = file_market_delivery_prepare(
+        &server, wire, sizeof(wire), &reply, &chunk);
+    DELIVERY_CHECK("an unwired profile port refuses rather than serves",
+        status == FILE_MARKET_DELIVERY_MODERATION_HIDDEN &&
+        fixture.authorize_calls == auth_calls_before_unwired &&
+        chunk.data == NULL);
+    status = file_market_delivery_prepare_onion(
+        wire, sizeof(wire), &reply, &chunk);
+    DELIVERY_CHECK("an unwired profile port refuses on onion too",
+        status == FILE_MARKET_DELIVERY_MODERATION_HIDDEN &&
+        chunk.data == NULL);
+    file_market_delivery_set_handlers(
+        request.network_genesis, delivery_authorize, delivery_load,
+        delivery_moderation, &fixture);
 
     int sockets[2] = {-1, -1};
     bool socket_ready = socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0;
@@ -1369,7 +1437,7 @@ int file_market_delivery_tests(void)
     fixture.corrupt_hash = false;
     file_market_delivery_set_handlers(
         request.network_genesis, delivery_authorize, delivery_load,
-        &fixture);
+        delivery_moderation, &fixture);
     struct file_market_delivery_chunk null_get_chunk;
     memset(&null_get_chunk, 0xA5, sizeof(null_get_chunk));
     enum file_market_delivery_status null_get_status =
@@ -1396,7 +1464,7 @@ int file_market_delivery_tests(void)
 
     file_market_delivery_set_handlers(
         request.network_genesis, delivery_authorize, delivery_load_big,
-        &fixture);
+        delivery_moderation, &fixture);
     loop.calls = 0;
     struct file_market_delivery_chunk multi = {0};
     enum file_market_delivery_status multi_status =
