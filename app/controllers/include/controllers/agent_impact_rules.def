@@ -1428,3 +1428,22 @@ AGENT_IMPACT_RULE("lib/test/src/test_cold_join_sovereign.c|core/chainparams/src/
  * subtree that exceeded its declared budget (a real defect). It moves with the
  * sandbox budget and build_fabric groups because it names their exit codes. */
 AGENT_IMPACT_RULE("app/services/include/services/build_fabric_worker_report.h|app/services/src/build_fabric_worker_report.c", "sandbox_process_budget os_sandbox build_fabric zcode_dev_objects make_lint_gates")
+/* LANE ship-progress-verdicts: the fleet-wide deploy path and the health
+ * verdicts that decide whether it destroys anything. tools/ship.sh had FOUR
+ * stopwatches in front of a remote, destructive rollback across every host in
+ * one command — 300s for a candidate to qualify on the remote leg, a
+ * hard-coded 300 with no override at all on the local leg, and 60s twice on
+ * the restore path — and all four demanded that a `status` call answer. A box
+ * booting a ~22 GB datadir on a 7200rpm disk exceeds that routinely and got
+ * its correctly-shipped binary restored. tools/scripts/ship_progress_lib.sh
+ * replaces every one of them with observed-progress verdicts (/proc io bytes,
+ * CPU ticks, and delayacct_blkio_ticks, which climbs while a process is
+ * BLOCKED on the disk), and only PROVEN silence or a process that will not
+ * stay up may now reach the rollback.
+ *
+ * The library, the script that ships it over the wire, the hermetic harness
+ * and the gate that runs both move together: this is the one place in the
+ * tree where a wrong verdict is remote, destructive and fleet-wide, and a
+ * library edit with no harness run is exactly how a duration verdict comes
+ * back in. tools/ship.sh had no selftest of any kind before this lane. */
+AGENT_IMPACT_RULE("tools/ship.sh|tools/ship_selftest.sh|tools/scripts/ship_progress_lib.sh|tools/lint/check_ship_remote_transaction.sh", "make_lint_gates")
