@@ -93,8 +93,8 @@ to a focused test group in
 `app/controllers/include/controllers/agent_impact_rules.def`. If it does not,
 add the mapping — do not reach for `--no-verify`.
 
-**Committed fleet files carry onion addresses only.** Never a clearnet IP, a
-hostname, a username, or a local path.
+**Committed peer-identity files carry onion addresses only.** Never a
+clearnet IP, a hostname, a username, or a local path.
 
 ## 4. Definition of done
 
@@ -217,8 +217,9 @@ Also fixed: a peer that sends `sendheaders` receives one verified current-tip
 header on that connection. When that peer later supplies a block which becomes
 our tip, full/compact payload relay still excludes it, but the small verified
 header is echoed back to refresh its expiring chain vote. This lets a mesh
-observer remain current even when it is node2's recurring block source;
-duplicate `sendheaders` messages still produce no extra negotiation proof.
+observer remain current even when one specific peer is its recurring block
+source; duplicate `sendheaders` messages still produce no extra negotiation
+proof.
 
 *Deliberately not done:* the 64-probe guard was left alone. Shortening it on
 the first `no-header-bytes` would break the real case of scattered bodies, and
@@ -307,13 +308,13 @@ verdict rather than a log to be read by eye.
 ### Track D — Peer connectivity  *(P1)*
 
 **D1. Judge peers on current height, not handshake height.** *(P1, medium — in review)*
-The fleet acceptance gate compared a peer's `startingheight` — a value fixed at
+The mesh acceptance gate compared a peer's `startingheight` — a value fixed at
 handshake — against our advancing tip, so a healthy peer could never pass. Same
 class as an earlier bug in the same file that required a peer state a syncing
 peer never reaches.
 *Standing lesson for Codex:* when a gate never passes, suspect the gate.
 
-**D2. Identity stability is a fleet property.** *(done)*
+**D2. Identity stability is a mesh property.** *(done)*
 The node's default onion identity is ephemeral — a new address every boot —
 while the mesh addresses peers by committed address. `-onion-persist` is now
 set in the supervised unit itself. Retained here because the diagnostic rule

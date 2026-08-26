@@ -135,10 +135,10 @@ if ! grep -F 'PROBE_QUAD_FLOOR=39250' "$WATCH" >/dev/null 2>&1; then
     die "onion_pair_watch.sh must bind only the documented 39250+ probe quad"
 fi
 if grep -E 'PAIR_WATCH_PORT_BASE:-[0-9]*39350' "$WATCH" >/dev/null 2>&1; then
-    die "onion_pair_watch.sh default must not be 39350 (peer quad binds node2 P2P 39360)"
+    die "onion_pair_watch.sh default must not be 39350 (a real published mesh peer's P2P port has landed at 39360, one quad away)"
 fi
 if ! grep -F 'P2P_PORT=' "$HELPER" >/dev/null 2>&1; then
-    die "isolation helper must read published P2P_PORT from deploy/devfleet/node*.txt"
+    die "isolation helper must read published P2P_PORT from an operator-named ZCL_MESH_PORTS_DIR"
 fi
 if grep -E 'for b in 39350' "$LOOP" >/dev/null 2>&1; then
     die "onion_pair_watch_loop.sh must not prefer 39350 as a bind candidate"

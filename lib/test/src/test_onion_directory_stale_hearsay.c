@@ -22,15 +22,15 @@
  *     its apparent age reset at every hop. The refusal terminates that
  *     chain.
  *
- *  2. THE REFUSAL IS BOUNDED IN THE LOG. Live evidence (devfleet node1,
- *     2026-08-23): the seeds it dials serve directories whose rows froze
- *     ~45 days ago, so every discovery pass re-offered the same expired
- *     records and the per-record ERROR line took 707 of the node's last
- *     3000 log lines — 23% of the log volume spent restating an EXPECTED
- *     condition, at a level that means this node is broken. A flood of
- *     stale records must now cost at most one line per report, the report
- *     must still happen (bounded is not silent), and the retired
- *     per-record wording must not come back.
+ *  2. THE REFUSAL IS BOUNDED IN THE LOG. Live evidence (a mesh operator's
+ *     node, 2026-08-23): the seeds it dials serve directories whose rows
+ *     froze ~45 days ago, so every discovery pass re-offered the same
+ *     expired records and the per-record ERROR line took 707 of the node's
+ *     last 3000 log lines — 23% of the log volume spent restating an
+ *     EXPECTED condition, at a level that means this node is broken. A
+ *     flood of stale records must now cost at most one line per report,
+ *     the report must still happen (bounded is not silent), and the
+ *     retired per-record wording must not come back.
  *
  * The negative assertions are the load-bearing ones: nothing here may
  * make an expired record usable, and nothing here may make the refusal
@@ -181,8 +181,9 @@ static int sh_learn_boundary(sqlite3 *db)
     SH_CHECK("the refused threshold stamp left no row behind",
              sh_row_last_seen(db, SH_HOST_EDGE) == -1);
 
-    /* 3914217s is a real age off devfleet node1 on 2026-08-23 — a stamp
-     * from 2026-07-09 that a live seed was still relaying as current. */
+    /* 3914217s is a real age observed on a mesh operator's node on
+     * 2026-08-23 — a stamp from 2026-07-09 that a live seed was still
+     * relaying as current. */
     SH_CHECK("a relayed stamp 45 days past expiry is refused",
              !onion_service_directory_learn(SH_HOST_GONE, 8033, 5,
                                             now - 3914217, NULL));
@@ -252,7 +253,7 @@ static bool sh_capture(void (*fn)(void), char *out, size_t out_len)
 }
 
 /* Distinct hosts, every one of them relaying a ~45-day-old stamp: the
- * shape node1 meets on every discovery pass against a seed whose
+ * shape any node meets on every discovery pass against a seed whose
  * directory froze at first sighting, only compressed into one burst. */
 #define SH_FLOOD_N 600
 static int g_flood_accepted;

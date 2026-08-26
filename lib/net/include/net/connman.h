@@ -336,9 +336,10 @@ void connman_kick_onion_seeds(struct connman *cm);
 /* Resolve one operator-selected v3 onion through /directory.json, add every
  * advertised numeric endpoint to the persistent addnode set, and schedule an
  * immediate P2P dial. Unlike the background seed pass, this explicit path is
- * allowed in -connect mode so isolated/devfleet nodes can use Tor rendezvous
- * without opening the general seed universe. Returns endpoints scheduled,
- * 0 when the directory carried none, or -1 on validation/fetch failure. */
+ * allowed in -connect mode so an operator running an isolated node can use
+ * Tor rendezvous without opening the general seed universe. Returns
+ * endpoints scheduled, 0 when the directory carried none, or -1 on
+ * validation/fetch failure. */
 int connman_add_onion_seed(struct connman *cm, const char *onion);
 
 void connman_set_onion_peer_discovery(struct connman *cm,
