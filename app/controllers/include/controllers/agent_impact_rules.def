@@ -1100,3 +1100,10 @@ AGENT_IMPACT_RULE("app/controllers/src/transaction_type_catalog.c|app/controller
  * to the lint gates. The replay itself needs the sanitizer binaries and lives
  * in `make fuzz-replay`, not here. */
 AGENT_IMPACT_RULE("lib/test/fuzz_seeds/ARTIFACT_VERDICTS.txt|lib/test/fuzz_seeds/p2p/*|lib/test/fuzz_seeds/*/*.bin", "make_lint_gates")
+/* LANE: generic-repo / no-designated-fleet. Operator mesh state is local and
+ * untracked; the only tracked things under deploy/devfleet/ are the operator
+ * guide and the .example templates. .gitignore is what keeps a stray copy of
+ * a box's onion address, ports or heartbeat from coming back, and the lint
+ * gates read both the deploy tree and the root file list, so a change to
+ * either must run them. */
+AGENT_IMPACT_RULE(".gitignore|deploy/devfleet/*|deploy/devfleet/*.example", "make_lint_gates")
