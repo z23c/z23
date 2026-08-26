@@ -2207,8 +2207,70 @@ static bool factory_admission(const struct run_args *args,
     return true;
 }
 
+/* pf_store_label — the committed name of a package store.
+ *
+ * The factory is handed ABSOLUTE store datadirs (--store-a/--store-b) because
+ * it has to read and write them. Nothing it COMMITS may carry that path: the
+ * census def line it registers is hashed verbatim into every evidence record,
+ * and corpus/factory/<name>.report.json is a tracked file. This repository's
+ * privacy rule is that committed files contain no clearnet address, hostname,
+ * username, or local filesystem path, and while these two fields held raw
+ * datadirs the operator's home directory shipped in all 73 factory reports and
+ * all 73 def lines.
+ *
+ * The label is the store's final path component, which is the part that
+ * actually identifies the store; the census resolves it back to a directory
+ * through --store-root / $ZCL_CORPUS_STORE_ROOT / $HOME. It must be one path
+ * component of [A-Za-z0-9._-], never '.' or '..' — the same predicate
+ * store_label_valid() applies in tools/corpus_census.c. Refusing here is what
+ * makes the leak unable to recur, rather than relying on a lint gate to catch
+ * bytes that were already written.
+ *
+ * Returns false (with `error` set) when the basename is not label-shaped. */
+static bool pf_store_label(const char *store_dir, char *out, size_t out_cap,
+                           char *error, size_t error_cap)
+{
+    if (!store_dir || !*store_dir) {
+        (void)snprintf(error, error_cap, "empty store path");
+        return false;
+    }
+    const char *base = strrchr(store_dir, '/');
+    base = base ? base + 1 : store_dir;
+    /* A trailing slash ("…/store-a/") leaves an empty basename. */
+    if (!*base) {
+        (void)snprintf(error, error_cap,
+                       "store path '%s' ends in '/': name the store "
+                       "directory itself", store_dir);
+        return false;
+    }
+    if (strcmp(base, ".") == 0 || strcmp(base, "..") == 0) {
+        (void)snprintf(error, error_cap,
+                       "store path '%s' has no usable name component",
+                       store_dir);
+        return false;
+    }
+    for (const char *p = base; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (!(isalnum(c) || c == '.' || c == '_' || c == '-')) {
+            (void)snprintf(error, error_cap,
+                           "store name '%s' is not label-shaped "
+                           "([A-Za-z0-9._-]); the label is committed, so it "
+                           "must not need quoting", base);
+            return false;
+        }
+    }
+    if (snprintf(out, out_cap, "%s", base) >= (int)out_cap) {
+        (void)snprintf(error, error_cap, "store label '%s' too long", base);
+        return false;
+    }
+    return true;
+}
+
 /* Idempotent corpus registration: replace the existing `package <name> |`
- * line in the census def, else append. Atomic rewrite. */
+ * line in the census def, else append. Atomic rewrite.
+ *
+ * `store_a` arrives as the absolute store datadir; only its LABEL is written
+ * (pf_store_label), because the def line is committed and hashed. */
 static bool factory_register_corpus(const char *def_path, const char *name,
                                     const char *root_hex, const char *store_a,
                                     const char *kind, const char *spdx,
@@ -2221,13 +2283,20 @@ static bool factory_register_corpus(const char *def_path, const char *name,
         (void)snprintf(error, error_cap, "cannot read %s", def_path);
         return false;
     }
-    size_t line_cap = strlen(name) + strlen(root_hex) + strlen(store_a) +
+    char store_label[PF_PATH_CAP];
+    if (!pf_store_label(store_a, store_label, sizeof(store_label), error,
+                        error_cap)) {
+        free(text);
+        return false;
+    }
+    size_t line_cap = strlen(name) + strlen(root_hex) + strlen(store_label) +
                       strlen(kind) + strlen(spdx) + 64u;
     char *line = zcl_malloc(line_cap, "factory.defline");
     if (!line)
         LOG_FAIL(PF_LOG, "def line alloc");
     (void)snprintf(line, line_cap, "package %s | root %s | store %s | "
-                   "kind %s | spdx %s", name, root_hex, store_a, kind, spdx);
+                   "kind %s | spdx %s", name, root_hex, store_label, kind,
+                   spdx);
     struct buf out = {0};
     bool replaced = false;
     bool ok = true;
@@ -2583,7 +2652,18 @@ admission_done:
             struct json_value so;
             json_init(&so);
             json_set_object(&so);
-            (void)json_push_kv_str(&so, "datadir", rows[i].dir);
+            /* The store LABEL, not the datadir. This report is a tracked
+             * file under corpus/factory/; an absolute datadir here published
+             * the operator's home directory in every one of them. The label
+             * is the store's identity — where it lives is operator-local and
+             * is supplied at run time by --store-a/--store-b. */
+            {
+                char label[PF_PATH_CAP];
+                char lerr[PF_ERROR_CAP] = {0};
+                (void)json_push_kv_str(&so, "store",
+                    pf_store_label(rows[i].dir, label, sizeof(label), lerr,
+                                   sizeof(lerr)) ? label : "unnamed");
+            }
             (void)json_push_kv_bool(&so, "published", rows[i].sr->publish_ok);
             (void)json_push_kv_bool(&so, "installed", rows[i].sr->add_ok);
             (void)json_push_kv_str(&so, "plan_id", rows[i].sr->plan_id);
@@ -2639,7 +2719,16 @@ admission_done:
         json_init(&fc);
         json_set_object(&fc);
         (void)json_push_kv_str(&fc, "schema", "zcl.fastobj.v1");
-        (void)json_push_kv_str(&fc, "dir", args->fast_cache_dir);
+        /* Name only — this report is committed and the cache is a local
+         * build-scratch directory whose absolute path identifies the
+         * operator's account, never the evidence. */
+        {
+            char label[PF_PATH_CAP];
+            char lerr[PF_ERROR_CAP] = {0};
+            (void)json_push_kv_str(&fc, "dir",
+                pf_store_label(args->fast_cache_dir, label, sizeof(label),
+                               lerr, sizeof(lerr)) ? label : "unnamed");
+        }
         (void)json_push_kv_int(&fc, "hits", (int64_t)fast_stats.hits);
         (void)json_push_kv_int(&fc, "misses", (int64_t)fast_stats.misses);
         (void)json_push_kv_int(&fc, "objects_reused_bytes",
@@ -3085,14 +3174,32 @@ static int cmd_selftest(const char *repo, const char *scratch,
         snprintf(census_out, sizeof(census_out), "%s/census", scratch) >=
             (int)sizeof(census_out))
         LOG_ERR(PF_LOG, "selftest path overflow");
+    /* The def carries the store LABEL; the directory it hangs off is passed
+     * to the census as --store-root. This is the end-to-end proof that the
+     * label form resolves — and that no absolute path is ever written into a
+     * scopes.def, not even a scratch one. */
+    char store_a_label[PF_PATH_CAP];
+    char store_a_root[PF_PATH_CAP];
     {
-        size_t line_cap = strlen(store_a_abs) + 160u;
+        char lerr[PF_ERROR_CAP] = {0};
+        if (!pf_store_label(store_a_abs, store_a_label,
+                            sizeof(store_a_label), lerr, sizeof(lerr)))
+            LOG_ERR(PF_LOG, "selftest: store label: %s", lerr);
+        size_t root_len = strlen(store_a_abs) - strlen(store_a_label);
+        if (root_len < 2u || root_len >= sizeof(store_a_root))
+            LOG_ERR(PF_LOG, "selftest: store '%s' has no parent directory",
+                    store_a_abs);
+        memcpy(store_a_root, store_a_abs, root_len - 1u); /* drop the '/' */
+        store_a_root[root_len - 1u] = '\0';
+    }
+    {
+        size_t line_cap = strlen(store_a_label) + 160u;
         char *line = zcl_malloc(line_cap, "factory.selftest.def");
         if (!line)
             LOG_ERR(PF_LOG, "def line alloc");
         int n = snprintf(line, line_cap,
                          "package fixture/tiny-lines | root %s | store %s | "
-                         "kind ai | spdx MIT\n", root_hex_, store_a_abs);
+                         "kind ai | spdx MIT\n", root_hex_, store_a_label);
         if (n <= 0 || (size_t)n >= line_cap ||
             !pf_write_atomic(def_path, (const uint8_t *)line, (size_t)n)) {
             free(line);
@@ -3109,6 +3216,7 @@ static int cmd_selftest(const char *repo, const char *scratch,
                         (char *)"--repo", (char *)repo,
                         (char *)"--def", def_path,
                         (char *)"--out", census_out,
+                        (char *)"--store-root", store_a_root,
                         (char *)"--cutoff-height", (char *)"1",
                         (char *)"--cutoff-mtp", (char *)"1700000000",
                         NULL};

@@ -76,12 +76,43 @@ fail-closed: anything malformed is rejected with a named reason.
 Commons package store:
 
 ```
-package <name> | root <64hex> | store <datadir> | kind <human|ai|import> | spdx <id>
+package <name> | root <64hex> | store <label> | kind <human|ai|import> | spdx <id>
 ```
 
+`store` is a **label**, not a path: one path component of `[A-Za-z0-9._-]`
+(never `.`, `..`, `/` or `~`). The census resolves it to
+`<store-root>/<label>/zcode`, where store-root comes from `--store-root`,
+else `$ZCL_CORPUS_STORE_ROOT`, else `$HOME`. Both producers refuse a
+path-shaped store field outright — `store_label_valid()` in
+`tools/corpus_census.c` and `pf_store_label()` in `tools/package_factory.c` —
+so an absolute datadir cannot reach a commit through either of them.
+
+It is a label because this def line is copied **verbatim** into every
+evidence record (`scopes_def_line`) and hashed into
+`assignment_evidence_root`. While the field held an absolute datadir, the
+operator's home directory shipped in 162 tracked files: 2,302 copies as
+`"store"` in the evidence and KPI reports, 1,151 more inside
+`scopes_def_line`, and 146 as `"datadir"` in `corpus/factory/*.report.json`.
+None of it was load-bearing — every root is computed over content hashes,
+and `root` (the package manifest root, re-derived from the store and refused
+on mismatch) is what binds the bytes. Where those bytes sit on one host is an
+operator-local coordinate and belongs in a flag.
+
+> **Flag day.** Package def lines carried `store /home/<user>/<label>`
+> through sequence 42. Sequence 43 onward hashes the label form, so the
+> sequence-42 `assignment_evidence_root` values are **not** reproducible from
+> today's `scopes.def`. The committed sequence-42 checkpoints and shards
+> still verify (the readers decode and re-validate the wires; they do not
+> re-read `scopes.def`), and the sequence chain is unaffected — the
+> predecessor root is discovered from `report-000042.json`, which does not
+> depend on the def. The pre-migration artifacts under `corpus/` therefore
+> still contain the old paths; they are grandfathered in
+> `tools/lint/operator_paths_baseline.txt`, which is shrink-only. See
+> "Regenerating the committed artifacts" below.
+
 Unlike repo scopes (enumerated via `git ls-files`), a package scope is
-enumerated from the **package store** at `<datadir>/zcode`, so every
-evidence bit binds the exact published bytes, not a working tree:
+enumerated from the **package store** at `<store-root>/<label>/zcode`, so
+every evidence bit binds the exact published bytes, not a working tree:
 
 - `root` is the package manifest root. The census loads the stored manifest
   and re-derives the root; a mismatch refuses the scope.
@@ -111,6 +142,24 @@ make package-factory-selftest
 
 After registering a package scope, re-run the census (above) so the signed
 checkpoint binds the new package evidence.
+
+## Regenerating the committed artifacts
+
+The 162 pre-migration artifacts still carry the old absolute store paths.
+They are **not** hand-editable: `evidence-NNNNNN.json` and
+`report-NNNNNN.json` are the recorded inputs and outputs of a signed run, and
+rewriting their bytes to look clean would forge evidence that no census
+produced. The only honest way to retire that debt is to re-run the census on
+the label-form def and let it emit a new sequence.
+
+That is blocked today, and the block is worth recording: the package stores
+those 73 lines name (`.zclassic-c23-commons-factory-a`, `-c`, …) **no longer
+exist on the maintainer host**, so a package scope fails closed on a missing
+manifest. Advancing the sequence therefore requires republishing the packages
+through `make package-factory-selftest` / the factory pipeline first. Until
+then the old bytes stay, grandfathered and shrink-only — which is also why
+this is the last set of artifacts that can contain such a path: both
+producers now refuse one.
 
 ## Honesty disclosures (carried in every report)
 
