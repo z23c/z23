@@ -9811,3 +9811,13 @@ build-bench:
 
 build-bench-selftest:
 	@tools/scripts/build_bench.sh --self-test
+
+# ── Zcash proving parameters ───────────────────────────────────────────
+# A validating node needs none of these: the verifying keys are compiled in
+# (lib/sapling/src/params_vk_embedded.c). This target checks a parameter
+# directory for the operator who wants to CREATE shielded transactions, which
+# is the only capability the files buy. PARAMSDIR overrides the default.
+# See docs/PARAMS.md.
+.PHONY: params-verify
+params-verify:
+	@tools/scripts/zcash_params.sh verify $(PARAMSDIR)
