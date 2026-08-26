@@ -1,12 +1,14 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Owner-only typed adapters for per-node marketplace listing moderation.
  *
- * Moderation here is view filtering ONLY: the active profile decides which
- * locally-ingested offers the node's own listing surfaces show. There are
- * no network-wide bans and no deletion authority — a hidden offer stays
- * stored, served, and tradable, and protocol validity (the signed offer
- * wire) is never filtered. Each handler proxies one zmarket_* RPC so the
- * policy file and node.db stay single-writer in the node process. */
+ * The active profile decides which locally-ingested offers this node
+ * lists AND which ones it hands to another party. There are no
+ * network-wide bans and no deletion authority — a hidden offer stays
+ * stored, keeps its signed wire, and stays reachable from any node that
+ * does host it — and protocol validity is never filtered: moderation
+ * never reaches block or transaction acceptance. Each handler proxies one
+ * zmarket_* RPC so the policy file and node.db stay single-writer in the
+ * node process. */
 
 #include "controllers/rpc_client.h"
 #include "controllers/rpc_params.h"

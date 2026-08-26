@@ -1,9 +1,10 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * Per-node community content moderation for marketplace listings:
- * local listing-visibility profiles, per-datadir persistence, and the
- * local-only review_state store. View filtering only — ingest,
- * hosting, and trading are untouched (see the header). */
+ * Per-node community content moderation for the marketplace: the local
+ * visibility profile, its per-datadir persistence, the local-only
+ * review_state store, and the serving gate every surface that hands
+ * content to another party asks. Ingest and storage are untouched and
+ * nothing is ever deleted; consensus is never consulted (see header). */
 
 #include "services/market_moderation_service.h"
 #include "services/market_moderation_view_service.h"
@@ -436,6 +437,10 @@ bool market_moderation_dump_state_json(struct json_value *out,
     json_push_kv(out, "review_counts", &by_state);
     json_free(&by_state);
     json_push_kv_bool(out, "review_counts_live", counted.ok);
-    json_push_kv_bool(out, "view_filter_only", true);
+    /* See the same key on zmarket_moderation_status: the profile now also
+     * gates what this node hands to another party, so reporting
+     * view-filtering-only would understate its effect. */
+    json_push_kv_bool(out, "view_filter_only", false);
+    json_push_kv_bool(out, "serving_gated", true);
     return true;
 }

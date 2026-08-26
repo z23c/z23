@@ -67,10 +67,12 @@ void rpc_market_set_state(struct node_db *ndb)
 
 /* ── zmarket_list ───────────────────────────────────────────────── */
 
-/* The listing view filter: every cached offer is annotated with its
- * LOCAL review_state; the active per-node profile decides visibility.
- * Protocol validity, hosting, and trading are unaffected — a hidden
- * offer is still stored, served, and tradable. */
+/* The listing filter: every cached offer is annotated with its LOCAL
+ * review_state; the active per-node profile decides visibility. The same
+ * profile decides what this node hands out (chunk delivery, offer
+ * re-gossip), so what it lists and what it serves can never disagree.
+ * Protocol validity is unaffected and a hidden offer is still stored,
+ * never deleted, and reachable from any node that does host it. */
 static bool market_list_json(const char *profile_override,
                              struct json_value *result)
 {
@@ -894,8 +896,12 @@ static bool rpc_zmarket_moderation_status(const struct json_value *params,
             "zmarket_moderation_status\n"
             "\nThe node's own marketplace listing-visibility posture: active\n"
             "profile, available immutable profiles, and local review_state\n"
-            "counts. Moderation filters listing views only; it never deletes\n"
-            "or bans — hidden offers stay stored, served, and tradable.\n");
+            "counts. The profile decides what this node lists AND what it\n"
+            "hands to another party: hidden offers are not listed, not\n"
+            "served, and not relayed from here. It never deletes and never\n"
+            "bans — a hidden offer stays stored, keeps its signed wire, and\n"
+            "stays reachable from any node that does host it. It has no\n"
+            "effect on block or transaction acceptance.\n");
         return true;
     }
     (void)params;
@@ -934,7 +940,13 @@ static bool rpc_zmarket_moderation_status(const struct json_value *params,
     json_push_kv_bool(result, "review_counts_live", counted.ok);
     json_push_kv_int(result, "offers_cached", file_market_count());
     json_push_kv_str(result, "policy_file", MARKET_MODERATION_POLICY_FILE);
-    json_push_kv_bool(result, "view_filter_only", true);
+    /* False since the profile started deciding what this node HANDS OUT,
+     * not only what it lists: chunk delivery, offer re-gossip, and the
+     * registered-content index all ask it now. Reporting it as
+     * view-filtering-only would advertise a narrower effect than the
+     * node actually has. What is still untouched: ingest, storage,
+     * deletion (there is none), the signed wire, and consensus. */
+    json_push_kv_bool(result, "view_filter_only", false);
     return true;
 }
 
@@ -1092,8 +1104,10 @@ static bool rpc_zmarket_review_set(const struct json_value *params, bool help,
             "\nThe node's OWN curation mark on one signed offer: sets the\n"
             "local-only review_state (unreviewed / reviewed_ok / sensitive).\n"
             "Never gossiped, never in the signed wire, never a deletion —\n"
-            "the offer stays stored, served, and tradable; only the local\n"
-            "listing view changes. One audit log line is written per mark.\n"
+            "the offer stays stored either way. This is how this node signs\n"
+            "off: under the boot-default general-audience.v1 profile only a\n"
+            "reviewed_ok offer is listed, served, and relayed from here.\n"
+            "One audit log line is written per mark.\n"
             "\nArguments:\n"
             "1. offer_id     (string, required) 64-hex signed offer id\n"
             "2. review_state (string, required) unreviewed | reviewed_ok | "

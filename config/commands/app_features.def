@@ -661,8 +661,9 @@ ZCL_COMMAND_READY_COMMAND(
 ZCL_COMMAND_READY_READ(
     "app.market.list", "app.market", "", "List files on the ZCL Market",
     "The admitted file offers in the bounded live cache, filtered through "
-    "this node's own listing-visibility profile (per-node moderation, view "
-    "filtering only — hidden offers stay stored, served, and tradable). "
+    "this node's own listing-visibility profile (per-node moderation: a "
+    "hidden offer is kept and never deleted, but is not listed, served, or "
+    "relayed from here). "
     "Every row carries its local review_state; the reply carries an honest "
     "hidden_count. The optional profile key (\"open\") is the explicit "
     "per-request override showing everything ingested. Paid rows have a "
@@ -854,7 +855,7 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_CAP_P2P_TOPIC, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     zcl_native_handle_market_offer)
 
-/* ── Per-node listing moderation (view filtering only) ─────────────── */
+/* ── Per-node hosting + listing moderation ─────────────────────────── */
 
 ZCL_COMMAND_READY_READ(
     "app.market.moderation.guide", "app.market.moderation", "",
@@ -878,9 +879,11 @@ ZCL_COMMAND_READY_READ(
     "Show this node's market moderation posture",
     "The node's own listing-visibility state: the active immutable profile, "
     "the available profiles, and local review_state counts over stored "
-    "offers. Moderation filters listing views only — there are no "
-    "network-wide bans and no deletion authority; hidden offers stay "
-    "stored, served, and tradable.", 0,
+    "offers. The profile decides what this node lists and what it hands to "
+    "another party — there are no network-wide bans and no deletion "
+    "authority: a hidden offer stays stored with its signed wire intact and "
+    "stays reachable from any node that does host it, and moderation never "
+    "reaches block or transaction acceptance.", 0,
     "market,moderation,status,profile,review",
     "zcl.command.empty_input.v1", "zcl.market_moderation_status.v1",
     "", "", "z23 app market moderation status",
@@ -914,9 +917,10 @@ ZCL_COMMAND_READY_COMMAND(
     "to <datadir>/market/moderation.v1. mode=plan mints a plan_token bound "
     "to the current active profile and the target; mode=commit requires "
     "that token (STALE_PLAN after any concurrent change). Boot default is "
-    "the immutable general-audience.v1 (hides unreviewed and sensitive "
-    "offers from listing surfaces); open-view is the named opt-in showing "
-    "everything ingested. Local view filtering only.", 0,
+    "the immutable general-audience.v1 (unreviewed and sensitive offers are "
+    "kept but neither listed, served, nor relayed from here); open-view is "
+    "the named opt-in showing and hosting everything ingested. A local "
+    "decision that binds no other node and never touches consensus.", 0,
     "market,moderation,profile,set,policy",
     "zcl.app_market_moderation_profile_set.input.v1",
     "zcl.market_moderation_profile_set.v1",
