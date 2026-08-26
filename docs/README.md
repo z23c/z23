@@ -43,6 +43,8 @@ exact packages without a central registry.
 - [`../README.md`](../README.md) — what the product is and what users can do.
 - [`GETTING_STARTED.md`](GETTING_STARTED.md) — build and run it on a fresh
   machine.
+- [`JOIN.md`](JOIN.md) — take part rather than just follow along: `z23 join`,
+  the swarm and DHT tiers, and how to read the join verdict.
 - [`C23_COMMONS_QUICKSTART.md`](C23_COMMONS_QUICKSTART.md) — installed-node
   author, consumer, and reproducer journey for exact third-party C23 packages.
 - [`MVP.md`](MVP.md) — public-node V1 acceptance contract; `make mvp` reports

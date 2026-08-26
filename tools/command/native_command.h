@@ -541,6 +541,13 @@ void zcl_native_handle_zcode_guide(
 void zcl_native_handle_zcode_toolchain_show(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+/* zcode.node.join (bare alias `join`) — tools/command/native_zcode_node_command.c.
+ * Reports the current join posture, detects a local C23 compiler, and writes
+ * the join flags into <datadir>/z23.conf. Starts, stops, signals and restarts
+ * NOTHING: the service manager owns the node process. */
+void zcl_native_handle_zcode_node_join(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 bool zcl_native_zcode_workspace_is_explicit_scratch(const char *workspace);
 void zcl_native_handle_zcode_commons_status(
     const struct zcl_command_request *request,
