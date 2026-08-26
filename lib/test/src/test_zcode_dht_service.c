@@ -35,6 +35,10 @@
 #include "vcs/zcode_dht_service.h"
 #include "vcs/zcode_sovereignty_policy.h"
 
+/* The slot-superseding tests reach the private intent table to stage the
+ * polluted state the public API can no longer produce. */
+#include "../../vcs/src/zcode_dht_service_internal.h"
+
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1202,6 +1206,200 @@ static int test_publication_auto_sequence(void) {
     ASSERT(vcs_zcode_dht_service_record_publish_plan(
         service, &spec, token, &record, NULL));
     ASSERT_EQ(record.sequence, 10);
+
+    vcs_zcode_dht_service_free(service, now);
+    cleanup_fixture(dir);
+    PASS();
+  }
+_test_next:;
+  return failures;
+}
+
+/* Publication slots are the node's renewal intentions, capped at
+ * VCS_ZCODE_DHT_SERVICE_MAX_PUBLICATIONS. Two leaks once filled the whole
+ * table with historical sequences of streams still alive elsewhere in it:
+ * a commit always claimed a FRESH slot even when the same stream already
+ * had one — every out-of-band renewal of a live stream cost a slot
+ * forever — and a superseded slot kept retrying renewals the store refuses
+ * as STALE, never noticing another record of its stream had won. On a real
+ * host the table hit 16/16 and every NEW publish on the node was refused
+ * "global-cap" while the dead slots spun on futile retries. */
+static int test_publication_slot_supersede(void) {
+  int failures = 0;
+  TEST("zcode dht service: a renewal replaces its slot even at a full table") {
+    char dir[] = "/tmp/zcl_dht_publication_slots_XXXXXX";
+    ASSERT(mkdtemp(dir) != NULL);
+    uint8_t genesis[32], noise[32];
+    memset(genesis, 0x11, sizeof(genesis));
+    memset(noise, 0x42, sizeof(noise));
+    ASSERT(fixture_identity(dir, 0x6c, genesis, noise));
+    struct vcs_zcode_dht_service *service =
+        fixture_service_at(dir, genesis, noise, 1000);
+    ASSERT(service != NULL);
+    struct vcs_zcode_dht_time now = test_time(1000);
+    struct vcs_zcode_dht_publish_spec spec;
+    uint8_t token[32];
+    struct vcs_zcode_dht_record record;
+    struct vcs_zcode_dht_service_status status;
+
+    /* One live stream, renewed out-of-band the way an operator's script
+     * does. Every commit must REPLACE the stream's intention, never add a
+     * second one beside it. */
+    for (uint64_t seq = 1; seq <= 3; seq++) {
+      memset(&spec, 0, sizeof(spec));
+      spec.kind = VCS_ZCODE_DHT_RECORD_POINTER;
+      (void)snprintf(spec.namespace_name, sizeof(spec.namespace_name),
+                     "science");
+      memset(spec.semantic_root, 0x77, 32);
+      memset(spec.transport_root, 0x78, 32);
+      spec.sequence = seq;
+      spec.not_before = 1000;
+      spec.expiry = 1300;
+      ASSERT(vcs_zcode_dht_service_record_publish_plan(
+          service, &spec, token, &record, NULL));
+      ASSERT_EQ(vcs_zcode_dht_service_record_publish_commit(
+                    service, &spec, token, now, &record, NULL),
+                VCS_ZCODE_DHT_RECORD_STORE_ADDED);
+      vcs_zcode_dht_service_status(service, &status);
+      ASSERT_EQ(status.publication_intents, 1);
+    }
+
+    /* Fill every remaining slot with its OWN stream — the table a busy
+     * host actually runs. */
+    for (unsigned i = 1; i < VCS_ZCODE_DHT_SERVICE_MAX_PUBLICATIONS; i++) {
+      memset(&spec, 0, sizeof(spec));
+      spec.kind = VCS_ZCODE_DHT_RECORD_POINTER;
+      (void)snprintf(spec.namespace_name, sizeof(spec.namespace_name),
+                     "science");
+      memset(spec.semantic_root, (int)(0x90u + i), 32);
+      memset(spec.transport_root, (int)(0xb0u + i), 32);
+      spec.sequence = 1;
+      spec.not_before = 1000;
+      spec.expiry = 1300;
+      ASSERT(vcs_zcode_dht_service_record_publish_plan(
+          service, &spec, token, &record, NULL));
+      ASSERT_EQ(vcs_zcode_dht_service_record_publish_commit(
+                    service, &spec, token, now, &record, NULL),
+                VCS_ZCODE_DHT_RECORD_STORE_ADDED);
+    }
+    vcs_zcode_dht_service_status(service, &status);
+    ASSERT_EQ(status.publication_intents,
+              VCS_ZCODE_DHT_SERVICE_MAX_PUBLICATIONS);
+
+    /* The incident state: a full table must still accept a renewal of a
+     * stream it already holds. Before slot superseding, this was the
+     * "global-cap" refusal that left a full host unable to re-publish. */
+    memset(&spec, 0, sizeof(spec));
+    spec.kind = VCS_ZCODE_DHT_RECORD_POINTER;
+    (void)snprintf(spec.namespace_name, sizeof(spec.namespace_name),
+                   "science");
+    memset(spec.semantic_root, 0x77, 32);
+    memset(spec.transport_root, 0x78, 32);
+    spec.sequence = 4;
+    spec.not_before = 1000;
+    spec.expiry = 1300;
+    ASSERT(vcs_zcode_dht_service_record_publish_plan(
+        service, &spec, token, &record, NULL));
+    ASSERT_EQ(vcs_zcode_dht_service_record_publish_commit(
+                  service, &spec, token, now, &record, NULL),
+              VCS_ZCODE_DHT_RECORD_STORE_ADDED);
+    vcs_zcode_dht_service_status(service, &status);
+    ASSERT_EQ(status.publication_intents,
+              VCS_ZCODE_DHT_SERVICE_MAX_PUBLICATIONS);
+
+    /* The ceiling is still a ceiling for a genuinely new stream. */
+    memset(&spec, 0, sizeof(spec));
+    spec.kind = VCS_ZCODE_DHT_RECORD_POINTER;
+    (void)snprintf(spec.namespace_name, sizeof(spec.namespace_name),
+                   "science");
+    memset(spec.semantic_root, 0x7a, 32);
+    memset(spec.transport_root, 0x7b, 32);
+    spec.sequence = 1;
+    spec.not_before = 1000;
+    spec.expiry = 1300;
+    ASSERT(vcs_zcode_dht_service_record_publish_plan(
+        service, &spec, token, &record, NULL));
+    ASSERT_EQ(vcs_zcode_dht_service_record_publish_commit(
+                  service, &spec, token, now, &record, NULL),
+              VCS_ZCODE_DHT_RECORD_STORE_GLOBAL_CAP);
+
+    vcs_zcode_dht_service_free(service, now);
+    cleanup_fixture(dir);
+    PASS();
+  }
+_test_next:;
+  return failures;
+}
+
+/* A slot superseded by a higher sequence of its own stream is dead weight:
+ * every renewal it can attempt is STALE by definition. The drive loop must
+ * free it — which is also what heals an intent file polluted before commits
+ * learned to supersede in place: the first tick after boot drops the
+ * historical sequences the persisted file restored. */
+static int test_publication_slot_superseded_freed(void) {
+  int failures = 0;
+  TEST("zcode dht service: a superseded intention frees on the next tick") {
+    char dir[] = "/tmp/zcl_dht_publication_heal_XXXXXX";
+    ASSERT(mkdtemp(dir) != NULL);
+    uint8_t genesis[32], noise[32];
+    memset(genesis, 0x11, sizeof(genesis));
+    memset(noise, 0x42, sizeof(noise));
+    ASSERT(fixture_identity(dir, 0x6d, genesis, noise));
+    struct vcs_zcode_dht_service *service =
+        fixture_service_at(dir, genesis, noise, 1000);
+    ASSERT(service != NULL);
+    struct vcs_zcode_dht_time now = test_time(1000);
+    struct vcs_zcode_dht_publish_spec spec;
+    uint8_t token[32];
+    struct vcs_zcode_dht_record record;
+    struct vcs_zcode_dht_service_status status;
+    memset(&spec, 0, sizeof(spec));
+    spec.kind = VCS_ZCODE_DHT_RECORD_POINTER;
+    (void)snprintf(spec.namespace_name, sizeof(spec.namespace_name),
+                   "science");
+    memset(spec.semantic_root, 0x79, 32);
+    memset(spec.transport_root, 0x7c, 32);
+    spec.sequence = 1;
+    spec.not_before = 1000;
+    spec.expiry = 1300;
+    ASSERT(vcs_zcode_dht_service_record_publish_plan(
+        service, &spec, token, &record, NULL));
+    ASSERT_EQ(vcs_zcode_dht_service_record_publish_commit(
+                  service, &spec, token, now, &record, NULL),
+              VCS_ZCODE_DHT_RECORD_STORE_ADDED);
+    vcs_zcode_dht_service_status(service, &status);
+    ASSERT_EQ(status.publication_intents, 1);
+
+    /* Reproduce the polluted table the old commit path and the persisted
+     * file produced: a second slot holding the SAME stream at the older
+     * sequence, parked where no API can displace it. */
+    size_t live = VCS_ZCODE_DHT_SERVICE_MAX_PUBLICATIONS,
+           twin = VCS_ZCODE_DHT_SERVICE_MAX_PUBLICATIONS;
+    for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_PUBLICATIONS; i++)
+      if (service->publications[i].used)
+        live = i;
+    ASSERT(live < VCS_ZCODE_DHT_SERVICE_MAX_PUBLICATIONS);
+    for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_PUBLICATIONS; i++)
+      if (!service->publications[i].used) {
+        twin = i;
+        break;
+      }
+    ASSERT(twin < VCS_ZCODE_DHT_SERVICE_MAX_PUBLICATIONS);
+    service->publications[twin] = service->publications[live];
+    vcs_zcode_dht_service_status(service, &status);
+    ASSERT_EQ(status.publication_intents, 2);
+
+    /* A higher sequence of the stream lands through the normal path; the
+     * stale twin cannot survive the tick that follows. */
+    spec.sequence = 2;
+    ASSERT(vcs_zcode_dht_service_record_publish_plan(
+        service, &spec, token, &record, NULL));
+    ASSERT_EQ(vcs_zcode_dht_service_record_publish_commit(
+                  service, &spec, token, now, &record, NULL),
+              VCS_ZCODE_DHT_RECORD_STORE_ADDED);
+    vcs_zcode_dht_service_tick(service, now);
+    vcs_zcode_dht_service_status(service, &status);
+    ASSERT_EQ(status.publication_intents, 1);
 
     vcs_zcode_dht_service_free(service, now);
     cleanup_fixture(dir);
@@ -3539,6 +3737,8 @@ int test_zcode_dht_service(void) {
   failures += test_publication_monotonic_retry();
   failures += test_publication_delegation_window();
   failures += test_publication_auto_sequence();
+  failures += test_publication_slot_supersede();
+  failures += test_publication_slot_superseded_freed();
   failures += test_publication_ceiling_hosts_a_real_node();
   failures += test_record_churn_fallback();
   failures += test_deep_ancestry();
