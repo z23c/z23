@@ -552,6 +552,19 @@ void agent_push_runtime_build_json(struct json_value *out,
     json_push_kv_str(&obj, "running_source_id_sha256", running_source_id);
     json_push_kv_str(&obj, "expected_source_id_sha256",
                      expected_source_id);
+    /* Name the QUESTION each identity answers, not just the value. The key
+     * `source_id_sha256` is used in this tree for two different things: the
+     * source tree a BINARY was compiled from (a constant baked into the
+     * executable, identical from every working directory) and the source tree
+     * that is in SOME DIRECTORY right now (varies by directory, by design).
+     * A freshness verdict is only meaningful over the first. These two scope
+     * strings state which one each field is, so a reader consuming this block
+     * cannot mistake one for the other, and so a future field that carries a
+     * working-tree identity has to declare itself as such. */
+    json_push_kv_str(&obj, "running_source_id_scope",
+                     "baked_into_this_executable_constant_across_working_directories");
+    json_push_kv_str(&obj, "expected_source_id_scope",
+                     "deploy_installed_intent_from_ZCL_AGENT_EXPECT_SOURCE_ID");
     json_push_kv_bool(&obj, "running_source_id_valid", running_valid);
     json_push_kv_bool(&obj, "expected_source_id_valid", expected_valid);
     json_push_kv_str(&obj, "running_build_commit", running_commit);
@@ -570,7 +583,7 @@ void agent_push_runtime_build_json(struct json_value *out,
     json_push_kv_str(&obj, "dirty_build_state", "unknown");
     json_push_kv_str(&obj, "freshness", freshness);
     json_push_kv_str(&obj, "semantics",
-                     "expected_source_id_sha256 is deploy-installed runtime intent; exact SHA-256 mismatch means this process is not the expected source build; build_commit is display-only; source equality does not prove identical linked artifacts or toolchains");
+                     "running_source_id_sha256 is baked into this executable and is the same value from every working directory, so it is the only identity a freshness check may read; expected_source_id_sha256 is deploy-installed runtime intent; exact SHA-256 mismatch means this process is not the expected source build; a working-tree identity computed from a checkout answers a different question and must never be compared here; build_commit is display-only; source equality does not prove identical linked artifacts or toolchains");
     json_push_kv(out, key && key[0] ? key : "runtime_build", &obj);
     json_free(&obj);
 }

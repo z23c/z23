@@ -1238,3 +1238,16 @@ AGENT_IMPACT_RULE("lib/net/src/msg_version.c|lib/net/include/net/version.h|app/c
  * plus the entry point that links it. Doc-only, but it is contract text: the
  * doc gates check its links, its inline paths, and its claims. */
 AGENT_IMPACT_RULE("docs/CODE_FEARLESSLY.md|AGENTS.md", "make_lint_gates")
+/* LANE source-identity-authority: the deploy freshness authority and the two
+ * questions its key name conflates. `source_id_sha256` names both "what
+ * source tree was this BINARY built from" (baked into the executable,
+ * identical from every working directory) and "what source tree is in this
+ * DIRECTORY right now" (different in every checkout). Only the first is a
+ * freshness answer; reading the second under its name passes a stale daemon
+ * whose own checkout happens to look current. These files move together
+ * because they are the one reader, its two consumers, and the constant they
+ * all resolve to: change the reader's admission rule without re-running the
+ * group and a deploy check can start comparing a directory to a daemon with
+ * nothing looking. Mapped so an edit here can never reach the push gate
+ * having run zero test groups. */
+AGENT_IMPACT_RULE("tools/scripts/source_identity_lib.sh|tools/deploy_verify.sh|lib/util/src/clientversion.c|lib/util/include/util/clientversion.h|app/controllers/src/agent_runtime_controller.c|lib/test/src/test_source_identity_authority.c", "source_identity_authority make_lint_gates")

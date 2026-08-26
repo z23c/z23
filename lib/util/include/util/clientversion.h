@@ -40,7 +40,25 @@ const char *zcl_build_commit_full(void);
  * tools/dev/source-identity.sh capture (zcl.dev_source_identity.v2), or
  * "unknown" when the build was not source-stamped. This is the authoritative
  * source-tree input for producer receipt v2; Git/GitHub commit metadata is not
- * part of that receipt's digests. */
+ * part of that receipt's digests.
+ *
+ * SCOPE — this answers exactly one question: "what source tree was THIS
+ * EXECUTABLE compiled from?" It is the compile-time constant ZCL_BUILD_SOURCE_ID
+ * and nothing else: it reads no file, no environment variable, and no working
+ * directory, so it returns the same bytes no matter where the process is run
+ * from or what is checked out around it. That property is what makes it usable
+ * as the deploy freshness authority — a running daemon can be compared against
+ * the build that was supposed to be installed.
+ *
+ * It is NOT "what source tree is in this directory right now". That is a
+ * different question with a different, directory-dependent answer, computed by
+ * tools/dev/source-identity.sh over a checkout and surfaced as the Makefile's
+ * $(BUILD_SOURCE_ID). Reporting that one under this one's name would let a
+ * freshness check pass a stale daemon whose own checkout happens to be current.
+ * Anything that must stay directory-independent belongs here; anything derived
+ * from a checkout must be named after the checkout. See the TWO QUESTIONS block
+ * at the top of tools/scripts/source_identity_lib.sh for the shell-side rule and
+ * the readers that enforce it. */
 const char *zcl_build_source_id_sha256(void);
 
 /* Dev/test-only build-session ABA receipt, or "unknown" in reproducible
