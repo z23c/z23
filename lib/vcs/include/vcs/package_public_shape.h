@@ -12,10 +12,7 @@
  * matching one of the closed set of shapes below; everything else is
  * refused by name.
  *
- *   TRANSPORT     a zcode package transport carrier. This is the only
- *                 shape that carries source for other people to build and
- *                 run, so it is the one that must prove who wrote it and
- *                 under what terms: the carrier's own
+ *   TRANSPORT     a zcode package transport carrier. Its own
  *                 zcl.zcode_release.v1 envelope must verify against the
  *                 publisher key it names, its SPDX identifier must be on
  *                 the frozen v1 allowlist, its sources must carry LICENSE
@@ -33,9 +30,10 @@
  *                 filed these bytes under IS the root the publisher
  *                 signed.
  *   SOURCE_BUNDLE the ZVCS source carrier an accepted work publishes. It
- *                 carries its own top-level LICENSE and a lane receipt
- *                 signed by the key that receipt names, both of which are
- *                 checked here. The full accepted-work authority chain is
+ *                 carries root-committed top-level LICENSE text matching
+ *                 the frozen permissive allowlist and a lane receipt signed
+ *                 by the key that receipt names, both checked here. The full
+ *                 accepted-work authority chain is
  *                 NOT re-derived at serve time — proving it means
  *                 reconstructing the tree
  *                 (vcs_source_package_reconstruct_verify), which is the
@@ -67,7 +65,7 @@
  * the work node's own admission is what governs them. Stated plainly so
  * nobody reads this rule as more than it is.
  *
- * TWO RULES APPLY TO BOTH LICENSED SHAPES.
+ * TWO RULES APPLY TO BOTH ENVELOPE-LICENSED PACKAGE SHAPES.
  *
  * The license text must be the license. A LICENSE path in a manifest is
  * not license text: an empty file, a placeholder, or a proprietary EULA
@@ -75,7 +73,9 @@
  * identifier the signed envelope declares
  * (vcs_package_release_license_text_matches). That does not prove the
  * copy is unmodified — no substring test could — but "declares MIT,
- * ships something that cannot be MIT" no longer passes.
+ * ships something that cannot be MIT" no longer passes. SOURCE_BUNDLE has
+ * no separate envelope SPDX field, so its committed LICENSE bytes must match
+ * at least one profile from that same authority.
  *
  * PERMISSIVE-LICENSE CLOSURE. Offering an application publicly is a claim
  * that a stranger can reproduce it, and nobody can reproduce what this
@@ -119,9 +119,8 @@ enum vcs_package_public_shape {
 const char *vcs_package_public_shape_string(
     enum vcs_package_public_shape shape);
 
-/* The shapes that carry source under a license: TRANSPORT and RELEASE.
- * These are the two the license and closure rules apply to, and the two a
- * dependency must be for its dependent to stay publicly hostable. */
+/* The two dependency-bearing package shapes. Source bundles enforce the same
+ * permissive text authority but do not satisfy package dependency edges. */
 bool vcs_package_public_shape_licensed(enum vcs_package_public_shape shape);
 
 struct vcs_package_public_verdict {

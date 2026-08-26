@@ -278,7 +278,7 @@ requirement that failed rather than going quiet:
 | --- | --- |
 | package transport carrier | the whole carrier closure is re-derived from the stored bytes with `vcs_package_transport_build()` and must hash back to this exact root: signature verified against the key the envelope names, SPDX identifier on the frozen allowlist, `LICENSE` text present, and release/recipe/inner-manifest bound to each other |
 | released package | a persisted envelope names this exact root, verifies, and carries an allowlisted identifier; the manifest carries top-level `LICENSE` |
-| ZVCS source bundle | top-level `LICENSE` plus a lane receipt that parses, validates, and verifies against the signer key it names |
+| ZVCS source bundle | top-level `LICENSE` text matching the frozen permissive allowlist, plus a lane receipt that parses, validates, and verifies against the signer key it names; creation, hosting, and checkout each repeat the license check |
 | blob | the frozen one-file bytes-only shape, which by contract carries no authorship claim and cannot carry a source tree |
 | work context / work output | moved between peers that already accepted each other's signed work frames, and fetched directly from that sender |
 
@@ -294,6 +294,14 @@ strength of the work node's own signed admission, not because they are licensed
 content. And the source bundle's full accepted-work authority chain is verified
 by the consumer on checkout (`vcs_source_package_reconstruct_verify`), not on
 every WANT - proving it means reconstructing the tree.
+
+Source carriers do not carry a separate release-envelope SPDX field. Their
+root-committed top-level `LICENSE` bytes must therefore match at least one text
+profile owned by the same frozen permissive-license authority as ordinary
+releases. A missing, empty, placeholder, copyleft, or proprietary license is
+refused before carrier creation, before public ANNOUNCE/WANT service, and again
+by the receiving checkout. The repeated checks are independent policy gates;
+successful transport never grants checkout authority.
 
 ## Swarm flow
 

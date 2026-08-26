@@ -7,6 +7,7 @@
 #include "vcs/package_manifest.h"
 #include "vcs/package_content.h"
 #include "vcs/package_recipe.h"
+#include "vcs/package_release.h"
 #include "vcs/package_store.h"
 #include "vcs/vcs.h"
 #include "vcs/vcs_object.h"
@@ -170,10 +171,18 @@ static bool source_package_load_license(
             break;
         }
     }
-    return license && license->size <= SIZE_MAX &&
+    bool loaded = license &&
+        license->size <= VCS_PACKAGE_RELEASE_LICENSE_TEXT_MAX_BYTES &&
         vcs_object_get(workspace, license->blob, VCS_TAG_BLOB,
                        bytes_out, len_out) == 0 &&
         *len_out == (size_t)license->size;
+    if (loaded && vcs_package_release_license_text_allowed(
+                      *bytes_out, *len_out))
+        return true;
+    free(*bytes_out);
+    *bytes_out = NULL;
+    *len_out = 0;
+    return false;
 }
 
 static bool source_package_read_file(const char *workspace, const char *path,

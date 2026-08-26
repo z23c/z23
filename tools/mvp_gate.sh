@@ -46,6 +46,10 @@
 
 set -uo pipefail
 
+MVP_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tools/scripts/source_identity_lib.sh
+. "$MVP_REPO_ROOT/tools/scripts/source_identity_lib.sh"
+
 ZCL_RPC_BIN="${ZCL_RPC_BIN:-build/bin/zcl-rpc}"
 ZCL_NODE_BIN="${ZCL_NODE_BIN:-build/bin/zclassic23}"
 ZCL_SOAK_UNIT="${ZCL_SOAK_UNIT:-zclassic23}"
@@ -312,23 +316,55 @@ CANARY_DIR="${ZCL_CANARY_VERDICT_DIR:-$HOME/.local/state/zclassic23-canary}"
 CANARY_MAX_AGE_S="${CANARY_MAX_AGE_S:-604800}"
 NOW_TS="$(date +%s)"
 
-# canary_read <track> → sets C_VERDICT C_TS C_AGE C_FRESH(1/0) C_SRC
+# canary_read <track> → sets verdict, freshness, and exact binary identity.
 canary_read() {
     local f="$CANARY_DIR/replay_canary_$1.json"
-    C_VERDICT="absent"; C_TS=0; C_AGE=-1; C_FRESH=0; C_SRC=""
+    C_VERDICT="absent"; C_TS=0; C_AGE=-1; C_FRESH=0; C_SRC=""; C_ARTIFACT=""
     [[ -f "$f" ]] || return 0
     local blob; blob="$(cat "$f" 2>/dev/null)"
     C_VERDICT="$(json_str "$blob" verdict)"; C_VERDICT="${C_VERDICT:-unreadable}"
     C_TS="$(json_num "$blob" ts)"; C_TS="${C_TS:-0}"
     C_SRC="$(json_str "$blob" source_id_sha256)"
+    C_ARTIFACT="$(json_str "$blob" artifact_sha256)"
     if [[ "$C_TS" =~ ^[0-9]+$ && "$C_TS" -gt 0 ]]; then
         C_AGE=$(( NOW_TS - C_TS ))
         [[ "$C_AGE" -le "$CANARY_MAX_AGE_S" ]] && C_FRESH=1
     fi
 }
 
-canary_read genesis;  G_VERDICT="$C_VERDICT"; G_AGE="$C_AGE"; G_FRESH="$C_FRESH"
-canary_read anchor;   A_VERDICT="$C_VERDICT"; A_AGE="$C_AGE"; A_FRESH="$C_FRESH"
+canary_read genesis
+G_VERDICT="$C_VERDICT"; G_AGE="$C_AGE"; G_FRESH="$C_FRESH"
+G_SRC="$C_SRC"; G_ARTIFACT="$C_ARTIFACT"
+canary_read anchor
+A_VERDICT="$C_VERDICT"; A_AGE="$C_AGE"; A_FRESH="$C_FRESH"
+A_SRC="$C_SRC"; A_ARTIFACT="$C_ARTIFACT"
+
+# Bind release evidence to the executable actually serving this unit. A PASS
+# minted by any other checkout or artifact is useful history, but cannot
+# qualify the currently running node.
+LIVE_SOURCE_ID=""; LIVE_ARTIFACT=""; LIVE_ID_DETAIL="running binary identity unavailable"
+capture_running_identity() {
+    local pid exe before after
+    pid="$(systemctl --user show "$ZCL_NODE_UNIT" -p MainPID --value 2>/dev/null)"
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+    exe="/proc/$pid/exe"
+    [[ -x "$exe" ]] || return 1
+    before="$(sha256sum -- "$exe" 2>/dev/null | awk '{print $1}')"
+    [[ "$before" =~ ^[0-9a-f]{64}$ ]] || return 1
+    LIVE_SOURCE_ID="$(zcl_binary_source_id "$exe")"
+    after="$(sha256sum -- "$exe" 2>/dev/null | awk '{print $1}')"
+    [[ "$before" == "$after" ]] || return 1
+    zcl_is_sha256 "$LIVE_SOURCE_ID" || return 1
+    LIVE_ARTIFACT="$before"
+    LIVE_ID_DETAIL="running source=$LIVE_SOURCE_ID artifact=$LIVE_ARTIFACT"
+}
+capture_running_identity || true
+
+G_ID_MATCH=0
+if [[ -n "$LIVE_SOURCE_ID" && "$G_SRC" == "$LIVE_SOURCE_ID" &&
+      "$G_ARTIFACT" == "$LIVE_ARTIFACT" ]]; then
+    G_ID_MATCH=1
+fi
 
 CANARY_LEDGER="canary[genesis=$G_VERDICT age=${G_AGE}s anchor=$A_VERDICT age=${A_AGE}s max_age=${CANARY_MAX_AGE_S}s]"
 
@@ -364,6 +400,8 @@ elif [[ "$A_FRESH" == 1 && "$A_VERDICT" == "FAIL" ]]; then
     set_v 8 "FAIL" "replay canary (anchor) FAIL — replay parity alarm; $CANARY_LEDGER" 0
 elif [[ "$COARSE" == "diverged" ]]; then
     set_v 8 "FAIL" "$COARSE_DETAIL; $CANARY_LEDGER" 0
+elif [[ "$G_FRESH" == 1 && "$G_VERDICT" == "PASS" && "$G_ID_MATCH" != 1 ]]; then
+    set_v 8 "BLOCKED" "replay-canary (genesis) PASS belongs to different or unreadable bytes (sentinel source=${G_SRC:-missing} artifact=${G_ARTIFACT:-missing}; $LIVE_ID_DETAIL); exact running-binary qualification is unearned" 0
 elif [[ "$G_FRESH" == 1 && "$G_VERDICT" == "PASS" && "$COARSE" == "match" ]]; then
     set_v 8 "PASS" "EXACT parity: replay-canary (genesis) PASS — 0 consensus rejects over full history, byte-exact UTXO SHA3 at anchor 3056758, tip bestblock/txouts/supply == zclassicd — plus live $COARSE_DETAIL" 1
 elif [[ "$G_FRESH" == 1 && "$G_VERDICT" == "PASS" ]]; then

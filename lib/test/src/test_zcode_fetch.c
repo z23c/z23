@@ -861,6 +861,8 @@ static int zf_t_offered_one_shot(void)
         ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
         ASSERT(json_get(&c.reply.data, "live") &&
                !json_get_bool(json_get(&c.reply.data, "live")));
+        ASSERT_EQ(json_get_int(json_get(&c.reply.data, "peer_count")), 0);
+        ASSERT(!json_get_bool(json_get(&c.reply.data, "serving_ready")));
         ASSERT_EQ(json_get_int(json_get(&c.reply.data, "offered_count")), 0);
         {
             const struct json_value *items =
@@ -908,11 +910,6 @@ static int zf_t_offered_live(void)
 
         engine = vcs_swarm_engine_create(NULL, NULL, NULL, NULL, NULL);
         ASSERT(engine != NULL);
-        uint8_t key[33];
-        memset(key, 0, sizeof(key));
-        key[0] = 0x02;
-        key[1] = 0x11;
-        ASSERT(vcs_swarm_engine_peer_add(engine, 7, key));
         vcs_swarm_engine_set_global(engine);
 
         struct zf_cmd c;
@@ -920,6 +917,27 @@ static int zf_t_offered_live(void)
         zcl_native_handle_zcode_package_offered(&c.request, &c.reply);
         ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
         ASSERT(json_get_bool(json_get(&c.reply.data, "live")));
+        ASSERT_EQ(json_get_int(json_get(&c.reply.data, "peer_count")), 0);
+        ASSERT(!json_get_bool(json_get(&c.reply.data, "serving_ready")));
+        {
+            const char *next =
+                json_get_str(json_get(&c.reply.data, "next_command"));
+            ASSERT(next != NULL && strstr(next, "NODE_ZCL23") != NULL);
+        }
+        zf_cmd_free(&c);
+
+        uint8_t key[33];
+        memset(key, 0, sizeof(key));
+        key[0] = 0x02;
+        key[1] = 0x11;
+        ASSERT(vcs_swarm_engine_peer_add(engine, 7, key));
+
+        zf_cmd_init(&c, dd);
+        zcl_native_handle_zcode_package_offered(&c.request, &c.reply);
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(json_get_bool(json_get(&c.reply.data, "live")));
+        ASSERT_EQ(json_get_int(json_get(&c.reply.data, "peer_count")), 1);
+        ASSERT(json_get_bool(json_get(&c.reply.data, "serving_ready")));
         ASSERT_EQ(json_get_int(json_get(&c.reply.data, "offered_count")), 0);
         {
             const char *next =

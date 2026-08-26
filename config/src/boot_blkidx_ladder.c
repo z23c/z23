@@ -13,6 +13,7 @@
 
 #include "config/boot.h"                     /* app_context, boot_dispatch_blocks_table_hydrate */
 #include "services/block_index_loader.h"     /* load_block_index* / rebuild / save_block_index_flat */
+#include "storage/block_index_projection.h"  /* verified bound-delta preflight */
 #include "models/block.h"                     /* db_block, db_block_find_by_height, db_block_max_height */
 #include "controllers/sync_controller.h"      /* node_db_sync_get_tip_height / _hash */
 #include "validation/main_state.h"            /* struct main_state, map_block_index */
@@ -139,14 +140,25 @@ static bool rung_taint_load(struct boot_blkidx_load_ctx *c)
             struct block_index *flat_tip =
                 block_map_find(&c->st->map_block_index, &tip_hash);
             if (!flat_tip || (int64_t)flat_tip->nHeight != db_height) {
-                fprintf(stderr,
-                    "Block index flat: tip hash maps to wrong "
-                    "height (%d vs SQLite %lld). Corrupt flat "
-                    "file — reloading from SQLite.\n",
-                    flat_tip ? flat_tip->nHeight : -1,
-                    (long long)db_height);
-                c->loaded = false;
-                c->flat_union_tainted = true;
+                bool absent_and_journaled = !flat_tip &&
+                    db_height <= INT32_MAX &&
+                    block_index_projection_bound_covers_tip(
+                        block_index_projection_singleton(), c->ctx->datadir,
+                        tip_hash_raw, (int32_t)db_height);
+                if (absent_and_journaled) {
+                    printf("Block index flat: authenticated snapshot predates "
+                           "SQLite tip %lld; verified projection delta covers "
+                           "the tip\n", (long long)db_height);
+                } else {
+                    fprintf(stderr,
+                        "Block index flat: tip hash maps to wrong "
+                        "height (%d vs SQLite %lld). Corrupt flat "
+                        "file — reloading from SQLite.\n",
+                        flat_tip ? flat_tip->nHeight : -1,
+                        (long long)db_height);
+                    c->loaded = false;
+                    c->flat_union_tainted = true;
+                }
             }
         } else {
             struct db_block tip_blk;
@@ -156,14 +168,27 @@ static bool rung_taint_load(struct boot_blkidx_load_ctx *c)
                 struct block_index *flat_tip =
                     block_map_find(&c->st->map_block_index, &tip_hash);
                 if (!flat_tip || (int64_t)flat_tip->nHeight != db_height) {
-                    fprintf(stderr,
-                        "Block index flat: tip hash maps to wrong "
-                        "height (%d vs SQLite %lld). Corrupt flat "
-                        "file — reloading from SQLite.\n",
-                        flat_tip ? flat_tip->nHeight : -1,
-                        (long long)db_height);
-                    c->loaded = false;
-                    c->flat_union_tainted = true;
+                    bool absent_and_journaled = !flat_tip &&
+                        db_height <= INT32_MAX &&
+                        block_index_projection_bound_covers_tip(
+                            block_index_projection_singleton(),
+                            c->ctx->datadir, tip_blk.hash,
+                            (int32_t)db_height);
+                    if (absent_and_journaled) {
+                        printf("Block index flat: authenticated snapshot "
+                               "predates SQLite tip %lld; verified projection "
+                               "delta covers the tip\n",
+                               (long long)db_height);
+                    } else {
+                        fprintf(stderr,
+                            "Block index flat: tip hash maps to wrong "
+                            "height (%d vs SQLite %lld). Corrupt flat "
+                            "file — reloading from SQLite.\n",
+                            flat_tip ? flat_tip->nHeight : -1,
+                            (long long)db_height);
+                        c->loaded = false;
+                        c->flat_union_tainted = true;
+                    }
                 }
             }
         }

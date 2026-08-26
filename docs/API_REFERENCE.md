@@ -74,17 +74,17 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 736 |
+| Registry entries (branches + leaves) | 732 |
 | Top-level roots | 12 |
-| Branches | 172 |
-| Leaves (dispatchable command paths) | 564 |
-| … `ready` (live handler in this build) | 508 |
+| Branches | 170 |
+| Leaves (dispatchable command paths) | 562 |
+| … `ready` (live handler in this build) | 506 |
 | … `compat` (metadata only, names a fallback) | 25 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 24 |
-| Leaves with `effect=mutate` | 197 |
+| Leaves with `effect=mutate` | 196 |
 | Leaves with `effect=destructive` | 4 |
-| Leaves requiring **owner** authority | 113 |
+| Leaves requiring **owner** authority | 112 |
 
 Per source file:
 
@@ -93,14 +93,14 @@ Per source file:
 | `config/commands/root.def` | 10 | 5 | 5 |
 | `config/commands/core.def` | 121 | 29 | 92 |
 | `config/commands/apps.def` | 16 | 3 | 13 |
-| `config/commands/app_features.def` | 73 | 20 | 53 |
+| `config/commands/app_features.def` | 71 | 19 | 52 |
 | `config/commands/store.def` | 18 | 0 | 18 |
 | `config/commands/ops.def` | 48 | 9 | 39 |
 | `config/commands/dev.def` | 55 | 13 | 42 |
 | `config/commands/code.def` | 17 | 2 | 15 |
 | `config/commands/accounts.def` | 11 | 2 | 9 |
 | `config/commands/vault.def` | 24 | 4 | 20 |
-| `config/commands/zcode.def` | 237 | 57 | 180 |
+| `config/commands/zcode.def` | 235 | 56 | 179 |
 | `config/commands/zcode_science.def` | 25 | 7 | 18 |
 | `config/commands/metaverse.def` | 30 | 7 | 23 |
 | `config/commands/yardsale.def` | 7 | 2 | 5 |
@@ -526,12 +526,6 @@ represented by its children's sections.
 |---|---|---|---|---|---|---|
 | `app market moderation profile show` | ready | read / read / operator · fast/low | **`profile`** | `zcl.market_moderation_profile.v1` | `z23 app market moderation profile show --input='{"profile":"open-view"}'` | Describe one immutable moderation profile |
 | `app market moderation profile set` | ready | mutate / app-write / **owner**, plan-commit · fast/low | **`profile`**, **`mode`**, `plan_token` | `zcl.market_moderation_profile_set.v1` | `z23 app market moderation profile set --input='{"profile":"open-view","mode":"plan"}'` | Set this node's listing-visibility profile |
-
-#### `app.market.moderation.relay` — Relay rule
-
-| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
-|---|---|---|---|---|---|---|
-| `app market moderation relay set` | ready | mutate / app-write / **owner**, plan-commit · fast/low | **`relay_rule`**, **`mode`**, `plan_token` | `zcl.market_moderation_relay_set.v1` | `z23 app market moderation relay set --input='{"relay_rule":"relay-reviewed-only.v1","mode":"plan"}'` | Set this node's offer-relay rule |
 
 #### `app.market.moderation.review` — Review marks
 
@@ -1448,12 +1442,6 @@ represented by its children's sections.
 | `zcode node update status` (aliases: `update`) | planned | read / read / operator · fast/low | `datadir` | `zcl.zcode_node_update_status.v1` | `z23 update` | Show what this node would update to — *no verified node-release feed exists yet: nothing on this node can prove a candidate build is the real newer release, and an unproven update channel is a remote code-execution path* |
 | `zcode node update check` | planned | read / read / operator · foreground/moderate | `datadir` | `zcl.zcode_node_update_check.v1` | `z23 zcode node update check` | Look for a newer verified node release — *no verified node-release feed exists yet: there is no signed release wire to fetch and no reproducible-build evidence to check it against* |
 | `zcode node update apply` | planned | mutate / app-write / operator · background/high | `datadir`, `release_root` | `zcl.zcode_node_update_apply.v1` | `z23 zcode node update apply --input='{"release_root":"<64hex>"}'` | Stage a verified newer node release — *no verified node-release feed exists yet: staging an unverified binary next to the running node would be a self-inflicted supply-chain compromise, so this stays refused until check can prove a candidate* |
-
-#### `zcode.package.policy` — Local ratio and anti-spam policy
-
-| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
-|---|---|---|---|---|---|---|
-| `zcode package policy limits` | ready | read / read / public · instant/tiny | `tier`, `earned_score`, `uploaded_bytes`, `downloaded_bytes` | `zcl.zcode_package_policy_limits.v1` | `z23 zcode package policy limits --input='{"earned_score":600}'` | Show the frozen local P2P policy limits for one contributor tier |
 
 #### `zcode.science` — Scientific evidence
 

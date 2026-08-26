@@ -6,6 +6,7 @@
 #include "util/file_tree_ops.h"
 #include "util/safe_alloc.h"
 #include "vcs/package_manifest.h"
+#include "vcs/package_release.h"
 #include "vcs/source_package_transport.h"
 #include "vcs/vcs.h"
 #include "vcs/zcode_accepted_work_bundle.h"
@@ -207,9 +208,11 @@ static enum vcs_source_package_checkout_result source_checkout_load_fixed(
         &loaded->package, VCS_SOURCE_PACKAGE_LICENSE_PATH);
     if (!source_checkout_read_file(
             store, package_root, &loaded->package, (size_t)license_index,
-            &loaded->license, &loaded->license_len) ||
-        loaded->license_len == 0)
+            &loaded->license, &loaded->license_len))
         return VCS_SOURCE_PACKAGE_CHECKOUT_CHUNK;
+    if (!vcs_package_release_license_text_allowed(
+            loaded->license, loaded->license_len))
+        return VCS_SOURCE_PACKAGE_CHECKOUT_SHAPE;
     int lane_index = source_checkout_file_index(
         &loaded->package, VCS_SOURCE_PACKAGE_LANE_PATH);
     const struct vcs_package_file *lane = &loaded->package.files[lane_index];

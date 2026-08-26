@@ -26,7 +26,6 @@
 #include "platform/time_compat.h"
 #include "storage/block_index_projection.h"
 #include "block_index_projection_internal.h"
-
 #include "storage/event_log_payloads.h"
 #include "event/event.h"
 #include "json/json.h"
@@ -34,7 +33,6 @@
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 #include "crypto/sha3.h"
-
 #include <inttypes.h>
 #include <pthread.h>
 #include <sqlite3.h>
@@ -43,7 +41,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-
 #define BIP_SCHEMA_VERSION  1
 
 /* struct block_index_projection / struct catch_up_ctx / BIP_BATCH_EVENTS
@@ -132,6 +129,8 @@ static bool create_schema(sqlite3 *db)
         ") WITHOUT ROWID",
         "CREATE INDEX IF NOT EXISTS block_index_height_idx "
         "  ON block_index(height)",
+        "CREATE TABLE IF NOT EXISTS block_index_dirty (hash BLOB PRIMARY KEY) "
+        "WITHOUT ROWID",
         "CREATE TABLE IF NOT EXISTS projection_meta ("
         "  k TEXT PRIMARY KEY,"
         "  v TEXT NOT NULL"
@@ -397,10 +396,18 @@ static bool catch_up_cb(uint64_t offset, enum event_log_type type,
     sqlite3_bind_blob (c->ins_stmt,11, payload, (int)len, SQLITE_TRANSIENT);
 
     int rc = sqlite3_step(c->ins_stmt);  // raw-sql-ok:kernel-primitive
-    if (rc != SQLITE_DONE) {
-        fprintf(stderr,  // obs-ok:block-index-projection-catch-up-failure
-                "[block_index_projection] INSERT step rc=%d (%s)\n",
-                rc, sqlite3_errstr(rc));
+    bool dirty_ok = rc == SQLITE_DONE &&
+                    block_index_projection_mark_dirty(c, h.hash);
+    if (rc != SQLITE_DONE || !dirty_ok) {
+        if (rc != SQLITE_DONE)
+            fprintf(stderr,  // obs-ok:block-index-projection-catch-up-failure
+                    "[block_index_projection] INSERT step rc=%d (%s)\n",
+                    rc, sqlite3_errstr(rc));
+        else
+            fprintf(stderr,  // obs-ok:block-index-projection-catch-up-failure
+                    "[block_index_projection] dirty mark failed for header "
+                    "height=%d offset=%" PRIu64 ": %s\n", h.height, offset,
+                    sqlite3_errmsg(c->p->db));
         char *err = NULL;
         sqlite3_exec(c->p->db, "ROLLBACK", NULL, NULL, &err);
         if (err) sqlite3_free(err);
@@ -484,6 +491,14 @@ uint64_t block_index_projection_catch_up(block_index_projection_t *p)
         return (uint64_t)-1;
     }
 
+    if (!block_index_projection_prepare_dirty(&c)) {
+        sqlite3_finalize(c.ins_stmt);
+        sqlite3_finalize(c.exists_stmt);
+        sqlite3_finalize(c.blob_stmt);
+        pthread_mutex_unlock(&p->mu);
+        return (uint64_t)-1;
+    }
+
     int rc = event_log_stream(p->log, p->last_consumed_offset,
                               catch_up_cb, &c);
     /* Flush trailing batch (if any) — must run even on stream error
@@ -497,6 +512,7 @@ uint64_t block_index_projection_catch_up(block_index_projection_t *p)
     sqlite3_finalize(c.ins_stmt);
     sqlite3_finalize(c.exists_stmt);
     sqlite3_finalize(c.blob_stmt);
+    sqlite3_finalize(c.dirty_stmt);
 
     if (c.status_orphans > 0)
         fprintf(stderr,  // obs-ok:block-index-projection-status-orphans
@@ -666,22 +682,6 @@ int block_index_projection_iterate_storage_order(
     block_index_projection_t *p, block_index_projection_cb cb, void *user)
 {
     return iterate_query(p, cb, user, "SELECT hash, blob FROM block_index");
-}
-
-uint64_t block_index_projection_count(block_index_projection_t *p)
-{
-    if (!p || !p->db) return 0;
-    pthread_mutex_lock(&p->mu);
-    sqlite3_stmt *stmt = NULL;
-    uint64_t n = 0;
-    if (sqlite3_prepare_v2(p->db,
-            "SELECT COUNT(*) FROM block_index", -1, &stmt, NULL) == SQLITE_OK) {
-        if (sqlite3_step(stmt) == SQLITE_ROW)  // raw-sql-ok:kernel-primitive
-            n = (uint64_t)sqlite3_column_int64(stmt, 0);
-        sqlite3_finalize(stmt);
-    }
-    pthread_mutex_unlock(&p->mu);
-    return n;
 }
 
 /* SHA3-256 over (height, hash) canonical order, absorbing for each

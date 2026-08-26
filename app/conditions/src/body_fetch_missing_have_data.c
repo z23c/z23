@@ -4,6 +4,7 @@
 
 #include "framework/condition.h"
 #include "jobs/body_fetch_stage.h"
+#include "jobs/reducer_frontier.h"
 #include "jobs/stage_repair.h"
 #include "jobs/utxo_apply_stage.h"
 #include "services/sync_monitor.h"
@@ -142,8 +143,7 @@ static bool active_target_missing_data(struct main_state *ms, int target,
 static bool detect_body_fetch_missing_have_data(void)
 {
     int64_t tip_age = sync_monitor_tip_advance_age();
-    if (tip_age >= 0 && tip_age < 60)
-        return false;
+    bool tip_recent = tip_age >= 0 && tip_age < 60;
 
     sqlite3 *db = progress_store_db();
     struct main_state *ms = sync_monitor_main_state();
@@ -159,7 +159,8 @@ static bool detect_body_fetch_missing_have_data(void)
      * this Condition originally healed (validate_headers led body_fetch with
      * no observed body). */
     struct stage_repair_body_fetch_gap gap;
-    if (stage_repair_body_fetch_missing_have_data_frontier_candidate(
+    if (!tip_recent &&
+        stage_repair_body_fetch_missing_have_data_frontier_candidate(
             db, &gap) && !gap.body_observed) {
         bool missing = false;
         enum body_fetch_exact_authority_state exact_state =
@@ -192,11 +193,29 @@ static bool detect_body_fetch_missing_have_data(void)
      * candidate above never matches it (body_fetch's own cursor has long
      * since passed that height), so this is the path that re-queues the P2P
      * fetch for it. Prefer the lower of the two candidates. */
-    if (g_select_idle_is_read_failure_fn()) {
+    if (!tip_recent && g_select_idle_is_read_failure_fn()) {
         int64_t ua_h = g_select_idle_height_fn();
         if (ua_h >= 0 && (target < 0 || ua_h < target) &&
             active_target_missing_data(ms, (int)ua_h, &target_hash)) {
             target = (int)ua_h;
+            route = BFMHD_TARGET_ACTIVE_FRONTIER;
+        }
+    }
+
+    /* Candidate 3: a canonical read failure explicitly recorded by the
+     * reducer or background full validator. The sibling
+     * have_data_unreadable Condition retains this note after clearing the
+     * false HAVE_DATA flag, so it is the durable handoff to peer refetch.
+     * Unlike speculative frontier repair, explicit disk-failure evidence is
+     * actionable even while the live tip is advancing. */
+    struct reducer_frontier_body_read_note note;
+    if (reducer_frontier_body_read_note_snapshot(&note)) {
+        struct uint256 active_hash;
+        if (note.height >= 0 && (target < 0 || note.height < target) &&
+            active_target_missing_data(ms, note.height, &active_hash) &&
+            uint256_eq(&active_hash, &note.block_hash)) {
+            target = note.height;
+            target_hash = note.block_hash;
             route = BFMHD_TARGET_ACTIVE_FRONTIER;
         }
     }
@@ -270,7 +289,8 @@ static bool witness_body_fetch_missing_have_data(int64_t target_at_detect)
     enum bfmhd_target_route route =
         (enum bfmhd_target_route)atomic_load(&g_target_route);
     sqlite3 *db = progress_store_db();
-    if (db && target >= 0 && atomic_load(&g_target_hash_valid) &&
+    if (route == BFMHD_TARGET_BEST_HEADER && db && target >= 0 &&
+        atomic_load(&g_target_hash_valid) &&
         stage_repair_body_fetch_observed_hash(
             db, target, &g_target_hash))
         return true;

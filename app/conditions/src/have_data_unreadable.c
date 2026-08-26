@@ -21,6 +21,9 @@ static _Atomic int g_target_at_detect = -1;
 static _Atomic int g_file_at_detect = -1;
 static _Atomic unsigned g_pos_at_detect = 0;
 static _Atomic int g_remedy_calls = 0;
+static _Atomic bool g_target_from_note;
+static struct uint256 g_target_hash;
+static struct reducer_frontier_body_read_note g_note_at_detect;
 
 /* Test seam: the mid-chain candidate reads utxo_apply's own select-idle
  * record (see jobs/utxo_apply_stage.h) — real side effects a unit test
@@ -49,6 +52,23 @@ static struct block_index *target_index(struct main_state *ms, int target)
     return NULL;
 }
 
+static struct block_index *exact_target_index(
+    struct main_state *ms, int target, const struct uint256 *hash,
+    bool require_active)
+{
+    if (!ms || target < 0 || !hash)
+        return NULL;
+    struct block_index *p = require_active
+        ? active_chain_at(&ms->chain_active, target)
+        : block_map_find(&ms->map_block_index, hash);
+    if (!p || p->nHeight != target || !p->phashBlock ||
+        !uint256_eq(p->phashBlock, hash) ||
+        !(block_index_status_load(p) & BLOCK_HAVE_DATA) ||
+        block_has_any_failure(p))
+        return NULL;
+    return p;
+}
+
 /* `h` as a candidate iff a block there is HAVE_DATA-flagged but not actually
  * readable from disk (the provably-bogus flag this Condition heals). */
 static struct block_index *unreadable_at(struct main_state *ms, int h,
@@ -65,8 +85,7 @@ static struct block_index *unreadable_at(struct main_state *ms, int h,
 static bool detect_have_data_unreadable(void)
 {
     int64_t tip_age = sync_monitor_tip_advance_age();
-    if (tip_age >= 0 && tip_age < 60)
-        return false;
+    bool tip_recent = tip_age >= 0 && tip_age < 60;
 
     struct main_state *ms = condition_engine_main_state();
     if (!ms)
@@ -81,7 +100,8 @@ static bool detect_have_data_unreadable(void)
     /* Candidate 1: the live tip's immediate next block — the class this
      * Condition originally healed (a torn HAVE_DATA flag wedging the tip). */
     int target = tip + 1;
-    struct block_index *p = unreadable_at(ms, target, datadir);
+    struct block_index *p = tip_recent
+        ? NULL : unreadable_at(ms, target, datadir);
 
     /* Candidate 2: the LOWEST read-failed height across the reducer stages,
      * NOT necessarily tip+1 — utxo_apply's own select-idle record of the
@@ -93,7 +113,7 @@ static bool detect_have_data_unreadable(void)
      * of the two candidates so the earliest blocker heals first; re-verified
      * against the live block_index (the atomic is a sticky "last observed"
      * value, not necessarily still pending). */
-    if (g_select_idle_is_read_failure_fn()) {
+    if (!tip_recent && g_select_idle_is_read_failure_fn()) {
         int64_t ua_h = g_select_idle_height_fn();
         if (ua_h >= 0 && (p == NULL || ua_h < target)) {
             struct block_index *ua_p = unreadable_at(ms, (int)ua_h, datadir);
@@ -111,13 +131,17 @@ static bool detect_have_data_unreadable(void)
      * because the replay defers first (the live "read_active_block_checked:
      * disk read failed h=3143721 ... repair defers" wedge). Re-verify against
      * the live index and prefer the lowest candidate, same as candidate 2. */
-    if (reducer_frontier_body_read_note_active()) {
-        int64_t rf_h = reducer_frontier_body_read_note_height();
+    struct reducer_frontier_body_read_note note;
+    bool from_note = false;
+    if (reducer_frontier_body_read_note_snapshot(&note)) {
+        int rf_h = note.height;
         if (rf_h >= 0 && (p == NULL || rf_h < target)) {
-            struct block_index *rf_p = unreadable_at(ms, (int)rf_h, datadir);
-            if (rf_p) {
-                target = (int)rf_h;
+            struct block_index *rf_p = exact_target_index(
+                ms, rf_h, &note.block_hash, true);
+            if (rf_p && !block_index_have_data_readable(rf_p, datadir)) {
+                target = rf_h;
                 p = rf_p;
+                from_note = true;
             }
         }
     }
@@ -128,6 +152,10 @@ static bool detect_have_data_unreadable(void)
     atomic_store(&g_target_at_detect, target);
     atomic_store(&g_file_at_detect, p->nFile);
     atomic_store(&g_pos_at_detect, p->nDataPos);
+    g_target_hash = *p->phashBlock;
+    atomic_store(&g_target_from_note, from_note);
+    if (from_note)
+        g_note_at_detect = note;
     return true;
 }
 
@@ -135,7 +163,13 @@ static enum condition_remedy_result remedy_have_data_unreadable(void)
 {
     struct main_state *ms = condition_engine_main_state();
     int target = atomic_load(&g_target_at_detect);
-    struct block_index *p = target_index(ms, target);
+    if (!ms)
+        return COND_REMEDY_FAILED;
+    bool from_note = atomic_load(&g_target_from_note);
+    zcl_mutex_lock(&ms->cs_main);
+    struct block_index *p = exact_target_index(
+        ms, target, &g_target_hash, from_note);
+    zcl_mutex_unlock(&ms->cs_main);
     if (!p)
         return COND_REMEDY_SKIP;
 
@@ -164,13 +198,22 @@ static enum condition_remedy_result remedy_have_data_unreadable(void)
         }
     }
 
-    LOG_WARN("condition", "[condition:have_data_unreadable] clearing h=%d file=%d pos=%u", target, p->nFile, p->nDataPos);
+    zcl_mutex_lock(&ms->cs_main);
+    struct block_index *current = exact_target_index(
+        ms, target, &g_target_hash, from_note);
+    if (current != p) {
+        zcl_mutex_unlock(&ms->cs_main);
+        return COND_REMEDY_SKIP;
+    }
+    int file = block_index_file_load(p);
+    unsigned pos = block_index_data_pos_load(p);
+    (void)block_index_status_clear_bits(p, (unsigned)BLOCK_HAVE_DATA);
+    block_index_disk_pos_store(p, -1, 0);
+    zcl_mutex_unlock(&ms->cs_main);
+    LOG_WARN("condition", "[condition:have_data_unreadable] clearing h=%d file=%d pos=%u", target, file, pos);
     event_emitf(EV_BLOCK_REJECTED, 0,
                 "HAVE_DATA_UNREADABLE h=%d file=%d pos=%u",
-                target, p->nFile, p->nDataPos);
-    p->nStatus &= ~(unsigned)BLOCK_HAVE_DATA;
-    p->nFile = -1;
-    p->nDataPos = 0;
+                target, file, pos);
     return COND_REMEDY_OK;
 }
 
@@ -182,9 +225,20 @@ static bool witness_have_data_unreadable(int64_t target_at_detect)
     if (!ms || target < 0)
         return false;
 
-    struct block_index *p = target_index(ms, target);
+    bool note_target = atomic_load(&g_target_from_note);
+    struct reducer_frontier_body_read_note current_note;
+    bool same_note = note_target &&
+        reducer_frontier_body_read_note_snapshot(&current_note) &&
+        current_note.generation == g_note_at_detect.generation &&
+        uint256_eq(&current_note.block_hash, &g_note_at_detect.block_hash);
+    struct block_index *p = note_target
+        ? active_chain_at(&ms->chain_active, target)
+        : target_index(ms, target);
     bool healed;
-    if (!p) {
+    if (note_target && !same_note) {
+        healed = true;
+    } else if (!p || (note_target && (!p->phashBlock ||
+               !uint256_eq(p->phashBlock, &g_target_hash)))) {
         healed = true;
     } else {
         char datadir[2048];
@@ -197,15 +251,16 @@ static bool witness_have_data_unreadable(int64_t target_at_detect)
          * Covers the tip+1 case too — once the block is re-fetched and applied,
          * the cursor advances to target+1. */
         healed = block_index_have_data_readable(p, datadir) ||
-                 (int64_t)utxo_apply_stage_cursor() > (int64_t)target;
+                 (!note_target &&
+                  (int64_t)utxo_apply_stage_cursor() > (int64_t)target);
     }
 
     /* When the torn body at `target` is readable/advanced again, retire the
      * stage_repair body-read note + its typed blocker (lane E3) so the
      * refetch+revalidate chain terminates even if the replay path itself does
      * not re-read the height. No-op unless the note currently names target. */
-    if (healed)
-        reducer_frontier_body_read_note_clear_at(target);
+    if (healed && same_note)
+        (void)reducer_frontier_body_read_note_clear_if(&current_note);
     return healed;
 }
 
@@ -246,6 +301,7 @@ void have_data_unreadable_test_reset(void)
     atomic_store(&g_file_at_detect, -1);
     atomic_store(&g_pos_at_detect, 0);
     atomic_store(&g_remedy_calls, 0);
+    atomic_store(&g_target_from_note, false);
     g_select_idle_height_fn = hdu_test_no_select_idle_height;
     g_select_idle_is_read_failure_fn = hdu_test_no_select_idle_read_failure;
     condition_reset_state(&c_have_data_unreadable);

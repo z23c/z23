@@ -7,6 +7,7 @@
 #ifndef ZCL_BG_VALIDATION_INTERNAL_H
 #define ZCL_BG_VALIDATION_INTERNAL_H
 
+#include "services/bg_validation_service.h"
 #include "script/script.h"
 #include "validation/sighash.h"
 
@@ -18,6 +19,27 @@ struct transaction;
 struct block;
 struct block_index;
 struct chain_params;
+
+/* Read one exact active-chain body. `block` is caller-initialized in/out
+ * storage: the retry path frees and reinitializes it, while an argument or
+ * shutdown refusal leaves its existing ownership unchanged. A torn or falsely
+ * flagged disk position enters the shared condition-driven repair rail and is
+ * retried at the same height until a hash-verified replacement is readable or
+ * shutdown begins. */
+bool bg_validation_read_body_resilient(
+    struct bg_validation_service *svc, int height, const char *datadir,
+    enum bg_validation_state ready_state, struct block *block,
+    struct block_index **index_out);
+bool bg_validation_index_is_active(
+    struct main_state *ms, int height, const struct block_index *expected);
+enum bg_validation_block_outcome bg_validation_validate_canonical_block(
+    struct main_state *ms, int height, const struct block *block,
+    struct block_index *index, const char *datadir,
+    const struct chain_params *params, int num_workers,
+    size_t max_script_batch, int64_t *sigs_out, int64_t *proofs_out,
+    int64_t *skips_out);
+void bg_validation_supervisor_heartbeat(
+    const struct bg_validation_service *svc);
 
 /* ── Single-block read-only full validation (bg_validation_verify_block.c) ──
  * Verifies Equihash + PoW, structure, contextual header, all shielded proofs,

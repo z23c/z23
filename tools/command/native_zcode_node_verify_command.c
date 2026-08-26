@@ -55,6 +55,7 @@
 #include "command/native_command.h"
 
 #include "base/hex.h"
+#include "base/serialize_le.h"
 #include "json/json.h"
 #include "platform/os_proc.h"
 #include "util/safe_alloc.h"
@@ -145,22 +146,6 @@ static bool nv_read_at(FILE *f, uint64_t off, void *dst, size_t len,
     return fread(dst, 1, len, f) == len;
 }
 
-static uint16_t nv_le16(const unsigned char *p)
-{
-    return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
-}
-
-static uint32_t nv_le32(const unsigned char *p)
-{
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
-           ((uint32_t)p[3] << 24);
-}
-
-static uint64_t nv_le64(const unsigned char *p)
-{
-    return (uint64_t)nv_le32(p) | ((uint64_t)nv_le32(p + 4) << 32);
-}
-
 /* Copy the raw `.comment` bytes of the ELF at `path` into `out`. Returns
  * the byte count, or 0 when the file is not an ELF64-LE or has no
  * `.comment`. */
@@ -181,10 +166,10 @@ static size_t nv_elf_comment(const char *path, unsigned char *out, size_t cap)
     if (memcmp(eh, "\x7f" "ELF", 4) != 0 || eh[4] != 2 || eh[5] != 1)
         goto done; /* not ELF64 little-endian */
 
-    uint64_t shoff = nv_le64(eh + 0x28);
-    uint16_t shentsize = nv_le16(eh + 0x3A);
-    uint16_t shnum = nv_le16(eh + 0x3C);
-    uint16_t shstrndx = nv_le16(eh + 0x3E);
+    uint64_t shoff = zcl_read_u64_le(eh + 0x28);
+    uint16_t shentsize = zcl_read_u16_le(eh + 0x3A);
+    uint16_t shnum = zcl_read_u16_le(eh + 0x3C);
+    uint16_t shstrndx = zcl_read_u16_le(eh + 0x3E);
     if (shentsize < 64 || shnum == 0 || shstrndx >= shnum)
         goto done;
 
@@ -193,8 +178,8 @@ static size_t nv_elf_comment(const char *path, unsigned char *out, size_t cap)
     if (!nv_read_at(f, shoff + (uint64_t)shstrndx * shentsize, sh, sizeof(sh),
                     fsz))
         goto done;
-    uint64_t stroff = nv_le64(sh + 0x18);
-    uint64_t strsz = nv_le64(sh + 0x20);
+    uint64_t stroff = zcl_read_u64_le(sh + 0x18);
+    uint64_t strsz = zcl_read_u64_le(sh + 0x20);
     if (strsz == 0 || strsz > (1u << 20))
         goto done;
     char *strtab = zcl_malloc((size_t)strsz + 1, "node_verify_strtab");
@@ -210,11 +195,11 @@ static size_t nv_elf_comment(const char *path, unsigned char *out, size_t cap)
         if (!nv_read_at(f, shoff + (uint64_t)i * shentsize, sh, sizeof(sh),
                         fsz))
             break;
-        uint32_t name = nv_le32(sh + 0x00);
+        uint32_t name = zcl_read_u32_le(sh + 0x00);
         if (name >= strsz || strcmp(strtab + name, ".comment") != 0)
             continue;
-        uint64_t off = nv_le64(sh + 0x18);
-        uint64_t size = nv_le64(sh + 0x20);
+        uint64_t off = zcl_read_u64_le(sh + 0x18);
+        uint64_t size = zcl_read_u64_le(sh + 0x20);
         if (size == 0 || size > cap)
             break;
         if (nv_read_at(f, off, out, (size_t)size, fsz))

@@ -706,7 +706,15 @@ void zcl_native_handle_zcode_package_offered(
 
     struct vcs_swarm_engine *engine = vcs_swarm_engine_global();
     bool live = engine != NULL;
+    uint64_t peer_ids[VCS_SWARM_MAX_PEERS];
+    size_t peer_count = live ? vcs_swarm_engine_peer_ids(
+                                   engine, peer_ids, VCS_SWARM_MAX_PEERS)
+                             : 0;
     (void)json_push_kv_bool(&reply->data, "live", live);
+    (void)json_push_kv_int(&reply->data, "peer_count",
+                           (int64_t)peer_count);
+    (void)json_push_kv_bool(&reply->data, "serving_ready",
+                            live && peer_count > 0);
     struct zcl_zcode_join_posture join;
     if (!zcl_zcode_join_posture_fill(&join) ||
         !zcl_zcode_join_posture_push_json(&reply->data, &join)) {
@@ -778,6 +786,9 @@ void zcl_native_handle_zcode_package_offered(
     char next[384];
     if (!live) {
         (void)snprintf(next, sizeof(next), "%s", join.offline_next_command);
+    } else if (peer_count == 0) {
+        (void)snprintf(next, sizeof(next),
+                       "wait for an eligible NODE_ZCL23 peer");
     } else if (offered == 0) {
         (void)snprintf(
             next, sizeof(next),

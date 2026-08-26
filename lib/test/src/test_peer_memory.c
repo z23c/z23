@@ -43,6 +43,7 @@
 #include "net/connman.h"
 #include "net/netaddr.h"
 #include "core/serialize.h"
+#include "platform/time_compat.h"
 #include "test/setup_result.h"
 
 #include <dirent.h>
@@ -229,7 +230,7 @@ static bool pm_forge_store(struct byte_stream *s, const struct pm_forged *f)
     ok = ok && stream_write_bytes(s, f->addr.ip, 16) &&
          stream_write_u16_le(s, f->port) &&
          stream_write_u64_le(s, 1) &&
-         stream_write_u32_le(s, (uint32_t)time(NULL)) &&
+         stream_write_u32_le(s, (uint32_t)platform_time_wall_time_t()) &&
          stream_write_bytes(s, zero16, 16) &&
          stream_write_i64_le(s, f->last_success) &&
          stream_write_i32_le(s, f->attempts);
@@ -266,13 +267,13 @@ int test_peer_memory(void)
         pm_set_onion(&a1.svc.addr, 0x11);
         a1.svc.port = 8033;
         a1.nServices = 1;
-        a1.nTime = (uint32_t)time(NULL);
+        a1.nTime = (uint32_t)platform_time_wall_time_t();
 
         net_address_init(&a2);
         pm_set_onion(&a2.svc.addr, 0x77);
         a2.svc.port = 8034;
         a2.nServices = 1;
-        a2.nTime = (uint32_t)time(NULL);
+        a2.nTime = (uint32_t)platform_time_wall_time_t();
 
         bool ok = addrman_add(&am, &a1, &src, 0);
         ok = ok && addrman_add(&am, &a2, &src, 0);
@@ -317,10 +318,10 @@ int test_peer_memory(void)
         net_address_init(&a);
         pm_set_onion(&a.svc.addr, 0x33);
         a.svc.port = 8033;
-        a.nTime = (uint32_t)time(NULL);
+        a.nTime = (uint32_t)platform_time_wall_time_t();
 
-        int64_t t_ok = (int64_t)time(NULL) - 900;   /* connected 15 min ago */
-        int64_t t_try = (int64_t)time(NULL) - 120;  /* tried 2 min ago      */
+        int64_t t_ok = (int64_t)platform_time_wall_time_t() - 900;
+        int64_t t_try = (int64_t)platform_time_wall_time_t() - 120;
 
         bool ok = addrman_add(&am, &a, &src, 0);
         addrman_good(&am, &a.svc, t_ok);      /* promotes to the tried table */
@@ -373,9 +374,9 @@ int test_peer_memory(void)
             net_address_init(&a);
             a.svc.addr = onion;
             a.svc.port = 8033;
-            a.nTime = (uint32_t)time(NULL);
+            a.nTime = (uint32_t)platform_time_wall_time_t();
             if (!addrman_add(&am, &a, &src, 0)) _exit(2);
-            addrman_good(&am, &a.svc, (int64_t)time(NULL));
+            addrman_good(&am, &a.svc, (int64_t)platform_time_wall_time_t());
             if (!pm_write_peers_dat(dir, &am)) _exit(3);
 
             struct anchor_peer_set set;
@@ -385,7 +386,7 @@ int test_peer_memory(void)
             set.peers[0].port = 8033;
             set.peers[0].services = 1;
             set.peers[0].last_height = 3117000;
-            set.peers[0].last_success = (int64_t)time(NULL);
+            set.peers[0].last_success = (int64_t)platform_time_wall_time_t();
             if (!anchor_peers_save(dir, &set).ok) _exit(4);
 
             raise(SIGKILL);
@@ -437,7 +438,7 @@ int test_peer_memory(void)
             net_address_init(&a);
             pm_set_onion(&a.svc.addr, (unsigned char)(0x20 + i));
             a.svc.port = (uint16_t)(8033 + i);
-            a.nTime = (uint32_t)time(NULL);
+            a.nTime = (uint32_t)platform_time_wall_time_t();
             (void)addrman_add(&am, &a, &src, 0);
         }
         struct byte_stream s;
@@ -498,11 +499,11 @@ int test_peer_memory(void)
         memset(&bomb, 0, sizeof(bomb));
         pm_set_ipv4(&bomb.addr.svc.addr, 198, 51, 100, 4);
         bomb.addr.svc.port = 8033;
-        bomb.addr.nTime = (uint32_t)time(NULL);
+        bomb.addr.nTime = (uint32_t)platform_time_wall_time_t();
         bomb.used = true;
         bomb.attempts = -100;
 
-        int64_t now = (int64_t)time(NULL);
+        int64_t now = (int64_t)platform_time_wall_time_t();
         double chance = addr_info_get_chance(NULL, &bomb, now);
         bool ok = isfinite(chance) && chance <= 1.0;
 
@@ -584,7 +585,7 @@ int test_peer_memory(void)
         f.version = 1;
         net_addr_init(&f.addr);
         f.port = 8033;
-        f.last_success = (int64_t)time(NULL);
+        f.last_success = (int64_t)platform_time_wall_time_t();
 
         struct byte_stream s;
         stream_init(&s, 8192);
@@ -633,7 +634,7 @@ int test_peer_memory(void)
             pm_set_onion(&f.addr, 0xc0);
             f.addr_flag = 1;
             f.port = 8033;
-            f.last_success = (int64_t)time(NULL) - 300;
+            f.last_success = (int64_t)platform_time_wall_time_t() - 300;
             f.bucket_count = geometries[k];
 
             struct byte_stream s;
@@ -670,7 +671,7 @@ int test_peer_memory(void)
             pm_set_onion(&f.addr, 0xd0);
             f.addr_flag = 1;
             f.port = 8033;
-            f.last_success = (int64_t)time(NULL) - 300;
+            f.last_success = (int64_t)platform_time_wall_time_t() - 300;
 
             struct byte_stream s;
             stream_init(&s, 32768);
@@ -703,7 +704,7 @@ int test_peer_memory(void)
         addrman_init(&am);
         struct net_addr src;
         pm_set_ipv4(&src, 5, 5, 5, 5);
-        int64_t now = (int64_t)time(NULL);
+        int64_t now = (int64_t)platform_time_wall_time_t();
 
         /* dead: never reached, tried past the retry budget */
         struct net_address dead;
@@ -745,7 +746,7 @@ int test_peer_memory(void)
     /* ── 5b. repeated failure is deprioritised, not retried at full rate ─ */
     printf("peer_memory: repeated failures lower the dial chance... ");
     {
-        int64_t now = (int64_t)time(NULL);
+        int64_t now = (int64_t)platform_time_wall_time_t();
         struct addr_info fresh, failing;
         memset(&fresh, 0, sizeof(fresh));
         memset(&failing, 0, sizeof(failing));
@@ -787,7 +788,7 @@ int test_peer_memory(void)
         addrman_init(&am);
         struct net_addr src;
         pm_set_ipv4(&src, 5, 5, 5, 5);
-        int64_t now = (int64_t)time(NULL);
+        int64_t now = (int64_t)platform_time_wall_time_t();
 
         /* Routable addresses on purpose: addrman_add() refuses the RFC 5737
          * documentation ranges (192.0.2/24, 198.51.100/24, 203.0.113/24)

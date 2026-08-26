@@ -79,6 +79,7 @@ ISO_CONNECT_SINK=39999
 ISO_NODE_PID=""
 ISO_PGID=""
 ISO_CLEANED=0
+ISO_PARAMS_DIR=""
 ISO_NODE_BIN="${ISO_NODE_BIN:-./build/bin/zclassic23}"
 ISO_RPC_BIN="${ISO_RPC_BIN:-./build/bin/zcl-rpc}"
 
@@ -196,6 +197,13 @@ iso_init() {
             "$HOME"/.zclassic*) iso_die "datadir resolved under the live ~/.zclassic* — refusing" ;;
         esac
     fi
+    # Validation must prove the binary's embedded verifying keys. An explicit
+    # empty directory prevents the child from inheriting operator proving or
+    # verifying files from $HOME/.zcash-params. The replay node never writes
+    # here; replay_canary.sh rechecks that it remained empty before PASS.
+    ISO_PARAMS_DIR="$ISO_DD/empty-params"
+    mkdir -m 0700 "$ISO_PARAMS_DIR" \
+        || iso_die "could not create isolated empty params directory"
 
     # 3) ARM THE CLEANUP TRAP NOW — before any further abortable step.
     trap iso_cleanup EXIT INT TERM
@@ -293,6 +301,7 @@ iso_spawn_mainnet_node() {
         -datadir="$ISO_DD" \
         -port="$ISO_PORT" -rpcport="$ISO_RPCPORT" \
         -fsport="$ISO_FSPORT" -httpsport="$ISO_HTTPSPORT" \
+        -paramsdir="$ISO_PARAMS_DIR" \
         -showmetrics=0 \
         -allow-plaintext-wallet \
         -wallet-no-phrase-backup \

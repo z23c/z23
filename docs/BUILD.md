@@ -712,6 +712,24 @@ make deploy         # rebuild + restart; verify exact source ID and running exec
 make deploy DEPLOY_VERIFY_STAGE=challenger  # owner-only: activate exact bytes without claiming stable health
 ```
 
+Warm fleet upgrades build and gate once, then activate the exact frozen daemon
+and package-verifier bytes sequentially. Every remote must already run the
+canonical `zclassic23` user service:
+
+```bash
+ZCL_SHIP_HOSTS='user@node1 user@node2 user@node3 user@node4' make ship
+```
+
+All remotes are ordinary serving peers unless one exact destination is named
+with `ZCL_SHIP_PROOF_SERVER`. That host is skipped by default; an intentional
+promotion additionally requires `ZCL_SHIP_ALLOW_PROOF_SERVER=1`. Preflight
+requires the complete x86-64-v3 CPU feature set. After the candidate is built,
+its maximum required GLIBC symbol version must be no newer than every target's
+installed glibc; target versions need not equal the build host. Each activation
+qualifies the running `/proc/<pid>/exe` bytes and status before the next host is
+touched. A failure restores that host's prior daemon, identity, and workers and
+stops the rollout.
+
 This page deliberately does not state how many defensive-coding gates exist.
 That number changes whenever a gate lands, and every copy of it in prose has
 gone stale within weeks. The authoritative list is the `LINT_GATES` variable in

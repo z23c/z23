@@ -34,6 +34,7 @@
 
 #include "crypto/blake3.h"
 
+#include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -41,8 +42,10 @@
 #define KAT_MAX_INPUT 102400
 #define EXT_LEN       131
 
-static const uint8_t kat_key[BLAKE3_KEY_LEN] =
+static const uint8_t kat_key[] =
     "whats the Elvish word for friend";
+static_assert(sizeof(kat_key) == BLAKE3_KEY_LEN + 1u,
+              "official BLAKE3 test-vector key must be exactly 32 bytes");
 static const char kat_context[] =
     "BLAKE3 2019-12-27 16:29:52 test vectors context";
 

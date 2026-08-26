@@ -31,6 +31,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "core/uint256.h"
+
 struct json_value;
 
 /* The compiled-in SHA3 UTXO checkpoint height — the irreversible floor H*
@@ -422,15 +424,30 @@ enum reducer_frontier_body_read_reason {
  * Called by stage_repair_read_active_block_checked (and, in tests, to simulate
  * it). Lowest-height-first — a higher failing height never displaces a lower
  * pending one — and raises the typed blocker once the quarantine bound is
- * crossed. Lock-free atomics: safe whether or not progress_store_tx_lock is
- * held. Implemented in reducer_frontier_body_read_note.c. */
-void reducer_frontier_body_read_note_record(
+ * crossed. A short independent mutex publishes height, hash, position,
+ * reason, count, and generation as one coherent record even when validation
+ * and reducer readers fail concurrently. */
+struct reducer_frontier_body_read_note {
+    bool active;
+    int height;
+    int file;
+    int64_t pos;
+    int count;
+    enum reducer_frontier_body_read_reason reason;
+    struct uint256 block_hash;
+    uint64_t generation;
+};
+
+uint64_t reducer_frontier_body_read_note_record(
     int height, int nFile, int64_t pos,
-    enum reducer_frontier_body_read_reason reason);
+    enum reducer_frontier_body_read_reason reason,
+    const struct uint256 *block_hash);
+bool reducer_frontier_body_read_note_snapshot(
+    struct reducer_frontier_body_read_note *out);
 
 /* Lowest height a canonical body read is currently failing at, or -1 if none.
- * have_data_unreadable reads these (lock-free atomic loads) as a repair
- * candidate; never takes progress_store_tx_lock(). */
+ * Compatibility accessors each read a coherent snapshot; repair consumers
+ * use reducer_frontier_body_read_note_snapshot directly. */
 int64_t reducer_frontier_body_read_note_height(void);
 bool    reducer_frontier_body_read_note_active(void);
 int     reducer_frontier_body_read_note_file(void);
@@ -438,10 +455,11 @@ int64_t reducer_frontier_body_read_note_pos(void);
 const char *reducer_frontier_body_read_reason_name(
     enum reducer_frontier_body_read_reason r);
 
-/* Clear the note (and its typed blocker) for `height` — called on a successful
- * read of that height, and by have_data_unreadable's witness once the body is
- * readable/advanced again. No-op unless the note currently names `height`. */
-void reducer_frontier_body_read_note_clear_at(int height);
+/* Clear only the exact generation and block hash that a successful read or
+ * witness observed. A same-height reorg or newer concurrent failure cannot be
+ * cleared through an older snapshot. */
+bool reducer_frontier_body_read_note_clear_if(
+    const struct reducer_frontier_body_read_note *expected);
 
 #ifdef ZCL_TESTING
 /* Test seams: reset all note state; observe the consecutive-failure counter.

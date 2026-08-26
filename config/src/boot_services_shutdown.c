@@ -36,6 +36,7 @@
 #include "storage/txdb.h"
 #include "storage/coins_view_sqlite.h"
 #include "storage/progress_store.h"
+#include "storage/block_index_projection.h"
 #include "coins/utxo_commitment.h"
 #include "coins/coins_view.h"
 #include "kernel/service_kernel.h"
@@ -59,7 +60,18 @@ static void shutdown_persist_fast_restart_state(struct boot_svc_ctx *svc)
     if (svc->state->map_block_index.size > 1) {
         printf("Saving block index flat file (%zu entries)...\n",
                svc->state->map_block_index.size);
-        save_block_index_flat(svc->datadir, svc->state);
+        block_index_projection_t *bip = block_index_projection_singleton();
+        struct block_index_flat_identity identity;
+        uint64_t covered = bip ? block_index_projection_catch_up(bip) : 0;
+        struct zcl_result saved = save_block_index_flat_identity(
+            svc->datadir, svc->state, &identity);
+        if (bip && covered == UINT64_MAX)
+            LOG_WARN("shutdown", "projection catch-up failed; flat saved "
+                     "without binding so next boot uses the full scan");
+        if (saved.ok && bip && covered != UINT64_MAX &&
+            !block_index_projection_bind_saved_flat(bip, &identity))
+            LOG_WARN("shutdown", "block index flat/projection bind refused; "
+                     "next boot will use the full integrity scan");
     }
     printf("[shutdown] fast restart state persisted\n");
 }

@@ -72,14 +72,16 @@ in [`JOIN.md`](JOIN.md).
 Then inspect join status and the live DHT:
 
 ```bash
-z23 zcode work toolchain
+z23 zcode package offered -datadir=/tmp/z23-commons
 z23 zcode package guide
 z23 zcode network status -datadir=/tmp/z23-commons
 ```
 
-`zcode work toolchain` and `zcode package guide` share the same `join_flags`,
-`package_hosting`, `build_worker`, and `joined` fields. `zcode package offered`
-names the same recipe when this process has no live hosting engine.
+`zcode package offered` reports the shared `join_flags`, `package_hosting`,
+`build_worker`, and `joined` fields. Its `live`, `peer_count`, and
+`serving_ready` fields distinguish configured hosting from a resident engine
+that can exchange packages with at least one eligible NODE_ZCL23 peer. It
+names the same join recipe when this process has no live hosting engine.
 
 The swarm tier — hosting and serving package content over ordinary peers —
 needs only `-packagehost=1`: no coins, no on-chain identity, no invitation. The

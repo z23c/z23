@@ -73,20 +73,24 @@ bool bg_validation_verify_shielded_proofs(const struct transaction *tx,
 
         if (!js->use_groth) {
             /* PHGR13 proof (pre-Sapling Sprout, blocks 0-581876) */
+            if (!sprout_phgr_vk_loaded()) {
+                static _Atomic int phgr_warn = 0;
+                if (atomic_load(&phgr_warn) < 3) {
+                    atomic_fetch_add(&phgr_warn, 1);
+                    LOG_WARN("bg-valid", "SKIPPED h=%d tx=%zu js=%zu "
+                             "(PHGR13 VK not loaded)", height, tx_idx, j);
+                }
+                continue;
+            }
             if (!sprout_verify_phgr13(js->proof,
                     js->anchor.data, h_sig,
                     js->macs[0].data, js->macs[1].data,
                     js->nullifiers[0].data, js->nullifiers[1].data,
                     js->commitments[0].data, js->commitments[1].data,
                     (uint64_t)js->vpub_old, (uint64_t)js->vpub_new)) {
-                /* Non-fatal when VK not loaded — sprout_verify_phgr13
-                 * returns false when phgr_vk==NULL. */
-                static _Atomic int phgr_warn = 0;
-                if (atomic_load(&phgr_warn) < 3) {
-                    atomic_fetch_add(&phgr_warn, 1);
-                    LOG_WARN("bg-valid", "SKIPPED h=%d tx=%zu js=%zu (VK not " "loaded)", height, tx_idx, j);
-                }
-                continue;
+                fprintf(stderr, "[bg-valid] Sprout PHGR13 proof FAILED "
+                        "h=%d tx=%zu js=%zu\n", height, tx_idx, j);
+                return false;
             }
         } else {
             if (!sprout_verify_groth16(js->proof,

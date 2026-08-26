@@ -101,6 +101,7 @@
  */
 
 #include "test/test_core.h"
+#include "platform/time_compat.h"
 
 #include "bloom/merkle.h"
 #include "chain/chainparams.h"
@@ -202,7 +203,7 @@ static int unproven;
 static double cj_monotonic_secs(void)
 {
     struct timespec ts;
-    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+    if (platform_time_monotonic_timespec(&ts) != 0)
         return 0.0;
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
 }

@@ -12,6 +12,7 @@
 #include "vcs/package_deps.h"
 #include "vcs/package_manifest.h"
 #include "vcs/package_publish.h"
+#include "vcs/package_release.h"
 #include "vcs/package_store.h"
 #include "vcs/package_transport.h"
 #include "vcs/source_package_transport.h"
@@ -307,9 +308,9 @@ static bool shape_release_signs(struct vcs_package_store *store,
     return signed_here;
 }
 
-/* The ZVCS source carrier: LICENSE text plus a lane receipt signed by the
- * key it names. Signature-against-embedded-key is the same standard the
- * release envelope is held to; what this does NOT do is walk the
+/* The ZVCS source carrier: permissive LICENSE text plus a lane receipt signed
+ * by the key it names. Signature-against-embedded-key is the same standard
+ * the release envelope is held to; what this does NOT do is walk the
  * accepted-work authority chain, which the consumer verifies on checkout. */
 static bool shape_source_bundle(struct vcs_package_store *store,
                                 const uint8_t root[32],
@@ -324,6 +325,21 @@ static bool shape_source_bundle(struct vcs_package_store *store,
     long license = shape_find(m, VCS_SOURCE_PACKAGE_LICENSE_PATH);
     if (license < 0 || m->files[license].size == 0) {
         *rule_out = "license-text-missing";
+        return false;
+    }
+    size_t license_len = 0;
+    uint8_t *license_text = shape_read_file(
+        store, root, m, (size_t)license,
+        VCS_PACKAGE_RELEASE_LICENSE_TEXT_MAX_BYTES, &license_len);
+    if (!license_text) {
+        *rule_out = "license-text-unreadable";
+        return false;
+    }
+    bool license_ok = vcs_package_release_license_text_allowed(
+        license_text, license_len);
+    free(license_text);
+    if (!license_ok) {
+        *rule_out = "license-text-not-allowlisted";
         return false;
     }
     size_t lane_len = 0;

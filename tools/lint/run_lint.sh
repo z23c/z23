@@ -144,12 +144,13 @@ gate_command() {
         check-proof-server-pin)            echo './tools/lint/check_proof_server_pin.sh' ;;
         check-promotion-receipt-chain)     echo './tools/lint/check_promotion_receipt_chain.sh' ;;
         check-verification-coverage)       echo './tools/lint/check_verification_coverage.sh' ;;
-        check-ship-remote-transaction)     echo './tools/lint/check_ship_remote_transaction.sh' ;;
+        check-ship-remote-transaction)     echo './tools/ship.sh --selftest && ./tools/lint/check_ship_remote_transaction.sh' ;;
         check-z23-release-install)         echo 'bash packaging/release/build_release.sh --selftest && bash tools/scripts/install_z23.sh --selftest' ;;
         check-identity-parser-single)      echo './tools/lint/check_identity_parser_single.sh --selftest && ./tools/lint/check_identity_parser_single.sh' ;;
         check-source-identity-authority)   echo './tools/lint/check_source_identity_authority.sh --selftest && ./tools/lint/check_source_identity_authority.sh' ;;
         check-status-reason-single)        echo './tools/lint/check_status_reason_single.sh --selftest && ./tools/lint/check_status_reason_single.sh' ;;
         check-pipefail-status-pipe)        echo './tools/lint/check_pipefail_status_pipe.sh --selftest && ./tools/lint/check_pipefail_status_pipe.sh' ;;
+        check-no-wallclock-assertion)      echo './tools/lint/check_no_wallclock_assertion.sh --selftest && ./tools/lint/check_no_wallclock_assertion.sh' ;;
         check-framework-shape)             echo 'ZCL_LINT_MODE=RATCHET ./tools/lint/framework_shape_check.sh' ;;
         check-framework-filename-suffix)   echo './tools/lint/check_framework_filename_suffix.sh' ;;
         check-no-raw-clock-outside-platform) echo './tools/lint/check_no_raw_clock_outside_platform.sh' ;;

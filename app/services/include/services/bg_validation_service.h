@@ -42,6 +42,8 @@ struct coins_view_cache;
 struct node_db;
 struct active_chain;
 struct chain_params;
+struct block;
+struct block_index;
 
 enum bg_validation_state {
     BG_VALIDATION_IDLE = 0,      /* not started */
@@ -49,6 +51,12 @@ enum bg_validation_state {
     BG_VALIDATION_PAUSED,        /* paused (e.g. during reorg) */
     BG_VALIDATION_COMPLETE,      /* all blocks fully verified */
     BG_VALIDATION_FAILED,        /* validation failure detected */
+};
+
+enum bg_validation_block_outcome {
+    BG_VALIDATION_BLOCK_VALID = 0,
+    BG_VALIDATION_BLOCK_INVALID,
+    BG_VALIDATION_BLOCK_ORPHAN,
 };
 
 struct bg_validation_progress {
@@ -130,6 +138,35 @@ const char *bg_validation_state_name(enum bg_validation_state state);
  * previously-proven consensus history must never regress. Exposed for tests. */
 bool bg_validation_record_reverify(struct bg_validation_service *svc,
                                    int height, bool verify_ok);
+
+#ifdef ZCL_TESTING
+/* Proves the restart shortcut accepts only the current coverage schema. */
+bool bg_validation_test_coverage_version_current(int64_t version);
+typedef bool (*bg_validation_test_body_read_fn)(
+    struct block *, const struct block_index *, const char *);
+typedef void (*bg_validation_test_sleep_fn)(int);
+void bg_validation_test_set_body_repair_stubs(
+    bg_validation_test_body_read_fn read_fn,
+    bg_validation_test_sleep_fn sleep_fn);
+typedef bool (*bg_validation_test_validate_fn)(
+    const struct block *, struct block_index *, const char *,
+    const struct chain_params *, int, size_t,
+    int64_t *, int64_t *, int64_t *);
+void bg_validation_test_set_validate_stub(
+    bg_validation_test_validate_fn validate_fn);
+enum bg_validation_block_outcome bg_validation_validate_canonical_block(
+    struct main_state *ms, int height, const struct block *block,
+    struct block_index *index, const char *datadir,
+    const struct chain_params *params, int num_workers,
+    size_t max_script_batch, int64_t *sigs_out, int64_t *proofs_out,
+    int64_t *skips_out);
+/* `block` is caller-initialized in/out storage and remains caller-owned on
+ * every return; see the sibling-private declaration for the retry contract. */
+bool bg_validation_read_body_resilient(
+    struct bg_validation_service *svc, int height, const char *datadir,
+    enum bg_validation_state ready_state, struct block *block,
+    struct block_index **index_out);
+#endif
 
 /* Reset validation progress and restart from block 0. */
 void bg_validation_reset(struct bg_validation_service *svc);

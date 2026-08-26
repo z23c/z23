@@ -9,24 +9,25 @@
  * scan) so the have_data_unreadable Condition clears BLOCK_HAVE_DATA OFF-LOCK
  * and body_fetch re-downloads the body. Deliberately does NOT clear HAVE_DATA
  * from inside the progress-locked replay (a side-channel write racing the
- * reducer's single writer). Single-slot, lowest-height-first (mirrors the
- * reducer's re-derive-lowest-hole discipline); lock-free atomics so the note is
- * safe to record whether or not the caller holds progress_store_tx_lock. */
+ * reducer's single writer). The single-slot, lowest-height-first record uses a
+ * short independent mutex and generation-bound hash identity, so concurrent
+ * readers never observe mixed fields and stale witnesses cannot clear a newer
+ * same-height failure. */
 
-#include "base/text_fit.h"
 #include "jobs/reducer_frontier.h"
 
 #include "util/blocker.h"
+#include "util/sync.h"
 
-#include <stdatomic.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
-static _Atomic int64_t g_body_read_fail_height = -1;
-static _Atomic int     g_body_read_fail_file   = -1;
-static _Atomic int64_t g_body_read_fail_pos    = 0;
-static _Atomic int     g_body_read_fail_count  = 0;
-static _Atomic int     g_body_read_fail_reason = REDUCER_FRONTIER_BODY_READ_OK;
+static zcl_mutex_t g_body_read_note_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct reducer_frontier_body_read_note g_body_read_note = {
+    .height = -1,
+};
 
 const char *reducer_frontier_body_read_reason_name(
     enum reducer_frontier_body_read_reason r)
@@ -41,22 +42,37 @@ const char *reducer_frontier_body_read_reason_name(
 
 int64_t reducer_frontier_body_read_note_height(void)
 {
-    return atomic_load(&g_body_read_fail_height);
+    struct reducer_frontier_body_read_note note;
+    return reducer_frontier_body_read_note_snapshot(&note) ? note.height : -1;
 }
 
 bool reducer_frontier_body_read_note_active(void)
 {
-    return atomic_load(&g_body_read_fail_height) >= 0;
+    struct reducer_frontier_body_read_note note;
+    return reducer_frontier_body_read_note_snapshot(&note);
 }
 
 int reducer_frontier_body_read_note_file(void)
 {
-    return atomic_load(&g_body_read_fail_file);
+    struct reducer_frontier_body_read_note note;
+    return reducer_frontier_body_read_note_snapshot(&note) ? note.file : -1;
 }
 
 int64_t reducer_frontier_body_read_note_pos(void)
 {
-    return atomic_load(&g_body_read_fail_pos);
+    struct reducer_frontier_body_read_note note;
+    return reducer_frontier_body_read_note_snapshot(&note) ? note.pos : 0;
+}
+
+bool reducer_frontier_body_read_note_snapshot(
+    struct reducer_frontier_body_read_note *out)
+{
+    if (!out)
+        return false;
+    zcl_mutex_lock(&g_body_read_note_lock);
+    *out = g_body_read_note;
+    zcl_mutex_unlock(&g_body_read_note_lock);
+    return out->active;
 }
 
 /* Name ONE typed TRANSIENT blocker once the per-height failure count crosses
@@ -67,75 +83,90 @@ static void body_read_repair_raise_blocker(
     int height, int nFile, int64_t pos,
     enum reducer_frontier_body_read_reason reason, int count)
 {
-    /* 271 bytes with every value empty, 297 on a live fire — over
-     * BLOCKER_REASON_MAX either way, and the clause that got cut was the one
-     * saying what makes H* move again. Build whole, then mark and log the cut. */
-    char full[BLOCKER_REASON_MAX * 2];
-    snprintf(full, sizeof(full),
-             "body torn read height=%d nFile=%d pos=%lld reason=%s failed %d "
-             "times: on-disk block bytes are torn/corrupt after body_persist "
-             "verified them — HAVE_DATA dropped for a peer refetch "
-             "(have_data_unreadable); H* cannot advance until the body "
-             "re-downloads and the stages revalidate it",
+    char reason_s[BLOCKER_REASON_MAX];
+    snprintf(reason_s, sizeof(reason_s),
+             "body read failed height=%d nFile=%d pos=%lld reason=%s count=%d; "
+             "indexed bytes cannot be hash-verified; clear HAVE_DATA, "
+             "refetch the exact active hash, and revalidate before serving",
              height, nFile, (long long)pos,
              reducer_frontier_body_read_reason_name(reason), count);
-    char reason_s[BLOCKER_REASON_MAX];
-    (void)zcl_text_fit(reason_s, sizeof(reason_s), full, "stage_repair",
-                       "reducer_frontier.body_read_torn.reason");
     struct blocker_record b;
     if (blocker_init(&b, "reducer_frontier.body_read_torn", "stage_repair",
                      BLOCKER_TRANSIENT, reason_s))
         (void)blocker_set(&b);
 }
 
-void reducer_frontier_body_read_note_record(
+uint64_t reducer_frontier_body_read_note_record(
     int height, int nFile, int64_t pos,
-    enum reducer_frontier_body_read_reason reason)
+    enum reducer_frontier_body_read_reason reason,
+    const struct uint256 *block_hash)
 {
-    if (height < 0)
-        return;
-    int64_t cur = atomic_load(&g_body_read_fail_height);
-    if (cur >= 0 && (int64_t)height > cur)
-        return; /* a lower failing height must heal first (lowest-first) */
-    int count;
-    if (cur == (int64_t)height) {
-        count = atomic_fetch_add(&g_body_read_fail_count, 1) + 1;
-    } else {
-        atomic_store(&g_body_read_fail_height, (int64_t)height);
-        atomic_store(&g_body_read_fail_count, 1);
-        count = 1;
+    if (height < 0 || !block_hash)
+        return 0;
+    zcl_mutex_lock(&g_body_read_note_lock);
+    if (g_body_read_note.active && height > g_body_read_note.height) {
+        uint64_t generation = g_body_read_note.generation;
+        zcl_mutex_unlock(&g_body_read_note_lock);
+        return generation;
     }
-    atomic_store(&g_body_read_fail_file, nFile);
-    atomic_store(&g_body_read_fail_pos, pos);
-    atomic_store(&g_body_read_fail_reason, (int)reason);
+    bool same = g_body_read_note.active &&
+        height == g_body_read_note.height &&
+        uint256_eq(block_hash, &g_body_read_note.block_hash);
+    if (same) {
+        g_body_read_note.count++;
+    } else {
+        g_body_read_note.active = true;
+        g_body_read_note.height = height;
+        g_body_read_note.count = 1;
+    }
+    g_body_read_note.file = nFile;
+    g_body_read_note.pos = pos;
+    g_body_read_note.reason = reason;
+    g_body_read_note.block_hash = *block_hash;
+    g_body_read_note.generation++;
+    int count = g_body_read_note.count;
+    uint64_t generation = g_body_read_note.generation;
     if (count >= REDUCER_FRONTIER_BODY_READ_QUARANTINE_MAX)
         body_read_repair_raise_blocker(height, nFile, pos, reason, count);
+    zcl_mutex_unlock(&g_body_read_note_lock);
+    return generation;
 }
 
-void reducer_frontier_body_read_note_clear_at(int height)
+bool reducer_frontier_body_read_note_clear_if(
+    const struct reducer_frontier_body_read_note *expected)
 {
-    int64_t cur = atomic_load(&g_body_read_fail_height);
-    if (cur < 0 || cur != (int64_t)height)
-        return;
-    atomic_store(&g_body_read_fail_height, (int64_t)-1);
-    atomic_store(&g_body_read_fail_count, 0);
-    atomic_store(&g_body_read_fail_reason, (int)REDUCER_FRONTIER_BODY_READ_OK);
-    blocker_clear("reducer_frontier.body_read_torn");
+    if (!expected || !expected->active)
+        return false;
+    zcl_mutex_lock(&g_body_read_note_lock);
+    bool match = g_body_read_note.active &&
+        g_body_read_note.generation == expected->generation &&
+        g_body_read_note.height == expected->height &&
+        uint256_eq(&g_body_read_note.block_hash, &expected->block_hash);
+    if (match) {
+        uint64_t generation = g_body_read_note.generation;
+        memset(&g_body_read_note, 0, sizeof(g_body_read_note));
+        g_body_read_note.height = -1;
+        g_body_read_note.generation = generation;
+    }
+    if (match)
+        blocker_clear("reducer_frontier.body_read_torn");
+    zcl_mutex_unlock(&g_body_read_note_lock);
+    return match;
 }
 
 #ifdef ZCL_TESTING
 void reducer_frontier_body_read_note_reset_for_testing(void)
 {
-    atomic_store(&g_body_read_fail_height, (int64_t)-1);
-    atomic_store(&g_body_read_fail_file, -1);
-    atomic_store(&g_body_read_fail_pos, (int64_t)0);
-    atomic_store(&g_body_read_fail_count, 0);
-    atomic_store(&g_body_read_fail_reason, (int)REDUCER_FRONTIER_BODY_READ_OK);
+    zcl_mutex_lock(&g_body_read_note_lock);
+    memset(&g_body_read_note, 0, sizeof(g_body_read_note));
+    g_body_read_note.height = -1;
+    zcl_mutex_unlock(&g_body_read_note_lock);
     blocker_clear("reducer_frontier.body_read_torn");
 }
 
 int reducer_frontier_body_read_note_count_for_testing(void)
 {
-    return atomic_load(&g_body_read_fail_count);
+    struct reducer_frontier_body_read_note note;
+    return reducer_frontier_body_read_note_snapshot(&note) ? note.count : 0;
 }
 #endif

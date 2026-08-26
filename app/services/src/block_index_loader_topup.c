@@ -369,17 +369,36 @@ bool block_index_projection_topup_with(struct block_index_projection *bip,
         LOG_FAIL("block_index", "topup: projection catch_up failed");
 
     struct topup_ctx ctx = { .ms = ms };
-    if (block_index_projection_iterate_storage_order(
-            bip, topup_row_cb, &ctx) != 0 ||
-        ctx.failed) {
+    struct block_index_flat_identity identity;
+    bool have_identity = block_index_flat_verified_identity(datadir,
+                                                             &identity);
+    int iter_rc = 0;
+    bool bounded = false;
+    if (have_identity) {
+        iter_rc = block_index_projection_iterate_dirty_if_bound(
+            bip, identity.payload_sha3, identity.payload_size,
+            identity.row_count, topup_row_cb, &ctx);
+        bounded = iter_rc == 1;
+    }
+    if (!bounded && iter_rc >= 0)
+        iter_rc = block_index_projection_iterate_storage_order(
+            bip, topup_row_cb, &ctx);
+    if (iter_rc < 0 || ctx.failed) {
         free(ctx.new_entries);
         LOG_FAIL("block_index", "topup: projection iterate failed after "
                  "%zu rows", ctx.rows);
     }
+    printf("[boot] block index projection top-up source=%s rows=%zu\n",
+           bounded ? "bound-delta" : "full", ctx.rows);
 
     if (ctx.inserted > 0 || ctx.stubs_hydrated > 0) {
-        if (block_index_projection_iterate_storage_order(
-                bip, topup_link_pprev_cb, ms) != 0) {
+        int link_rc = bounded
+            ? block_index_projection_iterate_dirty_if_bound(
+                bip, identity.payload_sha3, identity.payload_size,
+                identity.row_count, topup_link_pprev_cb, ms)
+            : block_index_projection_iterate_storage_order(
+                bip, topup_link_pprev_cb, ms);
+        if (link_rc < 0) {
             free(ctx.new_entries);
             LOG_FAIL("block_index", "topup: pprev link iterate failed");
         }
@@ -450,6 +469,46 @@ bool block_index_projection_topup_with(struct block_index_projection *bip,
                      TOPUP_NTX_RECOVERY_MAX, ntx_capped);
     }
     return true;
+}
+
+bool block_index_projection_bind_saved_flat(
+    struct block_index_projection *bip,
+    const struct block_index_flat_identity *identity)
+{
+    return bip && identity && block_index_projection_bind_flat(
+        bip, identity->payload_sha3, identity->payload_size,
+        identity->row_count);
+}
+
+struct bound_tip_ctx {
+    const uint8_t *hash;
+    int32_t height;
+    bool found;
+};
+
+static bool bound_tip_cb(const uint8_t hash[32],
+                         const struct disk_block_index *idx, void *user)
+{
+    struct bound_tip_ctx *ctx = user;
+    if (memcmp(hash, ctx->hash, 32) == 0 && idx->nHeight == ctx->height)
+        ctx->found = true;
+    return true;
+}
+
+bool block_index_projection_bound_covers_tip(
+    struct block_index_projection *bip, const char *datadir,
+    const uint8_t hash[32], int32_t height)
+{
+    if (!bip || !datadir || !hash || height < 0)
+        return false;
+    struct block_index_flat_identity identity;
+    if (!block_index_flat_verified_identity(datadir, &identity))
+        return false; // raw-return-ok:unverified flat is an expected cache miss
+    struct bound_tip_ctx ctx = { .hash = hash, .height = height };
+    int rc = block_index_projection_iterate_dirty_if_bound(
+        bip, identity.payload_sha3, identity.payload_size,
+        identity.row_count, bound_tip_cb, &ctx);
+    return rc == 1 && ctx.found;
 }
 
 bool block_index_projection_topup(struct main_state *ms, const char *datadir)

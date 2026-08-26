@@ -128,6 +128,18 @@ bool catch_up_apply_status(struct catch_up_ctx *c,
         c->error = true;
         return false;
     }
+    if (!block_index_projection_mark_dirty(c, h.hash)) {
+        fprintf(stderr,  // obs-ok:block-index-projection-catch-up-failure
+                "[block_index_projection] dirty mark failed for status "
+                "height=%d: %s\n", h.height, sqlite3_errmsg(c->p->db));
+        char *err = NULL;
+        sqlite3_exec(c->p->db, "ROLLBACK", NULL, NULL, &err);
+        if (err) sqlite3_free(err);
+        c->batch_count = 0;
+        c->collisions = 0;
+        c->error = true;
+        return false;
+    }
     c->batch_count++;
     c->collisions++;   /* a status update is always a replace by definition */
     boot_scan_bump(c->scan_ctr);

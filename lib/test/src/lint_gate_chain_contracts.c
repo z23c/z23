@@ -445,7 +445,7 @@ int t_block_index_flat_atomic_save_contract(void)
      * bii_write_sidecar_raw sidecar rename) — that shape is a bug
      * class: a crash between the two renames strands a fresh body under a
      * stale sidecar. The pin below enforces that:
-     *   - the writer streams a SHA3 over the payload in bif_emit_payload,
+     *   - the writer streams a SHA3 over the payload in emit_payload,
      *   - it publishes via bii_write_embedded (the shared
      *     placeholder-header → payload → back-patch → one-rename helper),
      *   - it does NOT fall back to the legacy two-file sidecar writer
@@ -455,13 +455,13 @@ int t_block_index_flat_atomic_save_contract(void)
     TEST("block index flat save is a single atomic embedded-header file") {
         char path[PATH_MAX];
         ASSERT(repo_path(path, sizeof(path),
-                         "app/services/src/block_index_loader.c") == 0);
+                         "app/services/src/block_index_flat_save.c") == 0);
         ASSERT(read_entire_file(path, &buf) == 0);
         /* Payload is streamed through SHA3 as it is written. */
-        char *stream_hash = strstr(buf, "sha3_256_init(&hctx)");
-        char *stream_fin  = strstr(buf, "sha3_256_finalize(&hctx, out_payload_sha3)");
+        char *stream_hash = strstr(buf, "sha3_256_init(&sha3)");
+        char *stream_fin  = strstr(buf, "sha3_256_finalize(&sha3, sha3_out)");
         /* Publish via the embedded single-file helper. */
-        char *embedded = strstr(buf, "bii_write_embedded(datadir, bif_emit_payload");
+        char *embedded = strstr(buf, "bii_write_embedded(datadir, emit_payload");
         /* The legacy two-file sidecar writer must NOT be on the save path. */
         char *legacy_sidecar = strstr(buf, "bii_write_sidecar_raw(datadir");
         ASSERT(stream_hash != NULL);

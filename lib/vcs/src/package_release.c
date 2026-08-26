@@ -363,6 +363,20 @@ bool vcs_package_release_license_text_matches(const char *license,
     return false; /* not on the allowlist: never "matching" */
 }
 
+bool vcs_package_release_license_text_allowed(const uint8_t *text, size_t len)
+{
+    if (!text || len == 0 ||
+        len > VCS_PACKAGE_RELEASE_LICENSE_TEXT_MAX_BYTES)
+        return false;
+    for (size_t i = 0; i < sizeof(release_license_texts) /
+                               sizeof(release_license_texts[0]); i++) {
+        if (vcs_package_release_license_text_matches(
+                release_license_texts[i].license, text, len))
+            return true;
+    }
+    return false;
+}
+
 /* ── validation ───────────────────────────────────────────────────── */
 
 enum vcs_package_release_error vcs_package_release_validate(
