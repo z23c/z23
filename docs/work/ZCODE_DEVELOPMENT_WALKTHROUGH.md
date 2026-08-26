@@ -41,7 +41,7 @@ resource ceilings, and proof profile. If `zcode-package.json` is absent, use
 ## 2. Start one goal
 
 ```bash
-z23-dev zcode work start --datadir=/tmp/z23-work \
+z23-dev zcode work start -datadir=/tmp/z23-work \
   --input='{"workspace":".","goal":"Make the parser reject overflowing lengths","profile":"quick"}'
 ```
 
@@ -54,7 +54,7 @@ weaker alternate proof system.
 The always-available path is manual and model-neutral:
 
 ```bash
-z23-dev zcode work run --datadir=/tmp/z23-work \
+z23-dev zcode work run -datadir=/tmp/z23-work \
   --input='{"workspace":".","work":"latest","adapter":"manual"}'
 ```
 
@@ -69,7 +69,7 @@ An installed Codex CLI is an opt-in convenience when exactly one documented
 single-run credential (`CODEX_API_KEY` or `CODEX_ACCESS_TOKEN`) is present:
 
 ```bash
-z23-dev zcode work run --datadir=/tmp/z23-work \
+z23-dev zcode work run -datadir=/tmp/z23-work \
   --input='{"workspace":".","work":"latest","adapter":"codex"}'
 ```
 
@@ -89,7 +89,7 @@ a bounded attempt-2 packet. At most three candidate attempts are admitted.
 Inspect the result at any time:
 
 ```bash
-z23-dev zcode work show --datadir=/tmp/z23-work \
+z23-dev zcode work show -datadir=/tmp/z23-work \
   --input='{"workspace":".","work":"latest"}'
 ```
 
@@ -101,7 +101,7 @@ When the selected profile requires a separate review, a human reviewer records
 bounded findings without editing or accepting the candidate:
 
 ```bash
-z23-dev zcode work review --datadir=/tmp/z23-work \
+z23-dev zcode work review -datadir=/tmp/z23-work \
   --input='{"workspace":".","work":"latest","adapter":"manual","verdict":"approve","findings":"No blocking findings."}'
 ```
 
@@ -115,7 +115,7 @@ named v0.1 blocker rather than silently replacing the first review.
 Acceptance is explicit and pins the exact candidate and evidence:
 
 ```bash
-z23-dev zcode work accept --datadir=/tmp/z23-work \
+z23-dev zcode work accept -datadir=/tmp/z23-work \
   --input='{"workspace":".","work":"latest"}'
 ```
 

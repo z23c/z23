@@ -19,14 +19,14 @@ The ordinary interaction is intentionally small:
 
 ```text
 z23-dev zcode project inspect --input='{"workspace":"."}'
-z23-dev zcode work start --datadir=/tmp/z23-work --input='{
+z23-dev zcode work start -datadir=/tmp/z23-work --input='{
   "workspace":".",
   "goal":"Make the parser reject overflowing lengths",
   "profile":"standard"
 }'
-z23-dev zcode work run --datadir=/tmp/z23-work --input='{"work":"latest","adapter":"manual"}'
-z23-dev zcode work status --datadir=/tmp/z23-work --input='{"work":"latest"}'
-z23-dev zcode work accept --datadir=/tmp/z23-work --input='{"work":"latest"}'
+z23-dev zcode work run -datadir=/tmp/z23-work --input='{"work":"latest","adapter":"manual"}'
+z23-dev zcode work status -datadir=/tmp/z23-work --input='{"work":"latest"}'
+z23-dev zcode work accept -datadir=/tmp/z23-work --input='{"work":"latest"}'
 ```
 
 The happy path accepts no raw roots, canonical wire hex, timestamps, toolchain
