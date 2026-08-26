@@ -197,8 +197,12 @@ static bool wait_bridge_closed(uint64_t want, int budget_ms)
     for (int waited = 0; waited < budget_ms; waited += 5) {
         struct onion_stream_stages st;
         onion_stream_get_stages(&st);
-        if (st.bridge_closed >= want)
-            return st.bridge_closed == want;
+        if (st.bridge_closed >= want) {
+            struct onion_stream_dial_snapshot recent[1];
+            size_t count = onion_stream_get_recent_dials(recent, 1);
+            if (count == 1 && !recent[0].active)
+                return st.bridge_closed == want;
+        }
         usleep(5 * 1000);
     }
     return false;

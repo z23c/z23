@@ -31,6 +31,11 @@ leave stale or internally inconsistent state.
   conflict, duplicate, and capacity decisions that a restart applies while
   loading the store. The periodic collector marks the complete persistence
   dirty state when it removes a row.
+- The onion bridge acceptance waits for the dial lifecycle to finish after
+  observing the bridge-closed counter. The production path deliberately
+  records that counter before joining the pump threads and publishing the
+  final inactive snapshot; the test no longer treats that valid interval as
+  a teardown failure.
 
 ## Evidence
 
@@ -51,6 +56,7 @@ test_chain_evidence_controller PASS self_skips=0
 test_metaverse_agent_broker  PASS  self_skips=0
 test_zcode_dht_record        PASS  self_skips=0
 test_zcode_dht_service       PASS  self_skips=0
+test_onion_bridge            PASS  self_skips=0; strict profile, two runs
 check-hex-codec-single       PASS
 git diff --check             PASS
 ```
@@ -68,6 +74,9 @@ the boundary and observed the dirty flag, generation, and persistence timer.
 
 ## Remaining acceptance
 
-The exact committed tree still requires the repository lint and release ship
-gate. Fleet health is established only after the running processes report the
-same shipped source identity and retain P2P synchronization.
+The repository's 154 lint gates passed. The first full release suite ran 961
+of 970 registered groups and exposed the strict-profile onion test race; the
+corrected test passed twice without cache. The exact committed tree still
+requires a complete release ship gate. Fleet health is established only after
+the running processes report the same shipped source identity and retain P2P
+synchronization.
