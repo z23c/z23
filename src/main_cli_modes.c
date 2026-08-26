@@ -672,9 +672,10 @@ static int bench_crypto_verify(void)
         char params_dir[512];
         snprintf(params_dir, sizeof(params_dir), "%s/.zcash-params",
                  (home && *home) ? home : ".");
+        /* No embedded-VK fallback: this bench PROVES before it times. */
         if (!sapling_init_params(params_dir)) {
-            printf("  groth16 verify: ~/.zcash-params absent -> SKIPPED "
-                   "(VK/proving keys not vendored)\n");
+            printf("  groth16 verify: %s unusable -> SKIPPED (absent, or "
+                   "present and REFUSED)\n", params_dir);
         } else {
             uint8_t diversifier[11];
             bool div_ok = bench_find_diversifier(diversifier);
@@ -1180,8 +1181,8 @@ static int bench_crypto_vs_rust(void)
         snprintf(params_dir, sizeof(params_dir), "%s/.zcash-params",
                  (home && *home) ? home : ".");
         if (!sapling_init_params(params_dir)) {
-            printf("  groth16-bls12-381-output verify: ~/.zcash-params absent "
-                   "-> SKIPPED (VK/proving keys not vendored)\n");
+            printf("  groth16-bls12-381-output verify: %s unusable -> SKIPPED "
+                   "(absent, or present and REFUSED)\n", params_dir);
         } else {
             uint8_t diversifier[11];
             bool div_ok = bench_find_diversifier(diversifier);
