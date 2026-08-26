@@ -67,11 +67,14 @@ void vcs_package_prepared_free(struct vcs_package_prepared *prepared);
 
 /* Opens the supplied directory without following symlinks, rejects every
  * non-regular/non-directory entry and any file that changes while read, then
- * derives all canonical wires. The closed metadata may carry an optional
- * strict, sorted `files` array; when present, only those exact paths (which
- * must include zcode-package.json) enter the manifest and build recipe. This
- * lets a real module expose a package subset without copying source bytes.
- * It creates and persists nothing. */
+ * derives all canonical wires. Root-level `.zvcs`, `.codeindex`, and `build`
+ * directories are local control/output stores and do not enter the package
+ * identity; a symlink or special file with those names is still refused. The
+ * closed metadata may carry an optional strict, sorted `files` array; when
+ * present, only those exact paths (which must include zcode-package.json)
+ * enter the manifest and build recipe. This lets a real module expose a
+ * package subset without copying source bytes. It creates and persists
+ * nothing. */
 enum vcs_package_prepare_error vcs_package_prepare(
     const struct vcs_package_prepare_options *options,
     struct vcs_package_prepared *out, char *detail, size_t detail_cap);
