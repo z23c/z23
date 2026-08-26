@@ -409,6 +409,9 @@ static int t_join_writes_config(void)
     ZNJ_CHECK("the next command verifies resident Commons service",
               c.reply.next_count == 1 &&
               strcmp(c.reply.next[0].command, "zcode.package.offered") == 0);
+    ZNJ_CHECK("the next command names the datadir join just wrote",
+              c.reply.next_count == 1 &&
+              strstr(c.reply.next[0].input_json, dd) != NULL);
     free(text);
     znt_cmd_free(&c);
 
@@ -552,6 +555,15 @@ static int t_join_envelope_next_is_registry_validated(void)
     const struct json_value *next = parsed ? json_get(&doc, "next") : NULL;
     ZNJ_CHECK("exactly one next entry survives registry validation",
               next && next->type == JSON_ARR && next->num_children == 1);
+    {
+        const struct json_value *n0 =
+            next && next->type == JSON_ARR && next->num_children == 1
+                ? json_at(next, 0) : NULL;
+        const char *next_dd =
+            json_get_str(json_get(json_get(n0, "input"), "datadir"));
+        ZNJ_CHECK("the envelope next input is the same datadir",
+                  next_dd && strcmp(next_dd, dd) == 0);
+    }
     json_free(&doc);
     json_free(&input);
 
