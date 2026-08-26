@@ -1251,3 +1251,16 @@ AGENT_IMPACT_RULE("docs/CODE_FEARLESSLY.md|AGENTS.md", "make_lint_gates")
  * nothing looking. Mapped so an edit here can never reach the push gate
  * having run zero test groups. */
 AGENT_IMPACT_RULE("tools/scripts/source_identity_lib.sh|tools/deploy_verify.sh|lib/util/src/clientversion.c|lib/util/include/util/clientversion.h|app/controllers/src/agent_runtime_controller.c|lib/test/src/test_source_identity_authority.c", "source_identity_authority make_lint_gates")
+/* LANE cold-join sovereignty: the one gate that turns "a stranger can join
+ * with no account, no DNS name and no certificate authority" from six
+ * scattered facts into a single runnable proof. It reads the compiled-in
+ * bootstrap set (core/chainparams), the embedded Sapling verifying keys
+ * (validation armed, proving deliberately absent), the baked ROM keystone,
+ * and the MUST-NEVER-FORK consensus entry point. Those files move together
+ * because emptying any one of them silently converts a permissionless join
+ * into a network dependency, and the assertion that would have caught it
+ * lives here. connman.c is named because it holds the two getaddrinfo call
+ * sites the P1 assertion reasons about — the DNS-seed loop that mainnet
+ * keeps at zero entries, and the .onion guard that returns before the
+ * resolver. */
+AGENT_IMPACT_RULE("lib/test/src/test_cold_join_sovereign.c|core/chainparams/src/chainparams.c|core/chainparams/src/checkpoints.c|lib/sapling/src/params_vk_embedded.c|lib/net/src/connman.c", "cold_join_sovereign seed_bootstrap_doors params_vk_embedded net make_lint_gates")
