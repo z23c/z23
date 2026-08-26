@@ -28,6 +28,39 @@
  * accessor, not only through the test-only pointer peek, and asserts the two
  * agree with each other.
  *
+ * ── Which release site may touch which key ──────────────────────────────
+ *
+ * params_init.c states the rule; the reasoning is here, because the file sits
+ * at the 800-line E1 ceiling with no room for it.
+ *
+ *   trio   spend_vk, output_vk, sprout_groth16_vk
+ *          params_publish_groth16_vks() / params_release_groth16_vks()
+ *   phgr   phgr_vk
+ *          sprout_phgr_set_vk(&phgr_vk) / params_release_phgr_vk()
+ *
+ * PRE-PUBLICATION releases — every params_release_groth16_vks() inside
+ * params_load_first_locked() and params_install_embedded_locked(). Both bodies
+ * run only with nothing of ours published: the first is selected by
+ * params_init_locked() precisely on !params_loaded, the second returns early
+ * when params_loaded is set. Neither can unpublish a live key, so their
+ * unpublish half is defence in depth rather than load-bearing.
+ *
+ * THE LATE PATH RELEASES NOTHING. params_load_late_proving_locked() runs with
+ * all four keys published and verifiers reading them unlocked — it is the path
+ * a node takes when its proving parameters finally arrive. It honours ONCE
+ * PUBLISHED, NEVER REPLACED by containing no release call at all: each failure
+ * frees only its own buffers. A refused late upgrade therefore costs the
+ * proving capability and nothing else. Section 6 drives exactly that.
+ *
+ * POST-PUBLICATION release: sapling_free_params(), and only that — the one
+ * place that runs with keys live, so the one place that releases all four.
+ *
+ * This is why params_release_phgr_vk() must never be added to a failure path:
+ * a node on the compiled-in keys that refused an arriving directory would lose
+ * its PHGR13 verifier and with it blocks 0-581876, turning an expected refusal
+ * into a validation regression. Serving that node is the late path's whole
+ * purpose, so the sequence is reachable, not hypothetical.
+ *
  * What this group pins:
  *
  *   1. Nothing is published before a load runs.

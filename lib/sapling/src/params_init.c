@@ -102,16 +102,7 @@ static bool params_sha512_matches(const uint8_t *data, size_t len,
 static struct groth16_vk spend_vk;
 static struct groth16_vk output_vk;
 static struct groth16_vk sprout_groth16_vk;
-/* Sprout PHGR13 verifying key (pre-Sapling JoinSplits, blocks 0-581876).
- * ONE instance, at file scope beside the three Groth16 VKs, deliberately:
- * both load paths — params_load_first_locked() from a parameter directory and
- * params_install_embedded_locked() from the compiled-in blobs — parse into
- * this struct, and sapling_free_params() releases it. It used to be a
- * function-local static in each of those two bodies, which put it out of reach
- * of the teardown helper and made it the one key of the four that stayed armed
- * after sapling_free_params() — visible as sprout_phgr_vk_loaded() returning
- * true while the other three reported disarmed — and leaked its ic[] on every
- * reload. */
+/* Sprout PHGR13 VK. ONE file-scope instance so teardown can reach it. */
 static struct ppzksnark_vk phgr_vk;
 static _Atomic bool params_loaded = false;
 /* True when the running key set came from the compiled-in blobs rather than
@@ -200,55 +191,19 @@ static uint8_t *read_file(const char *path, size_t *len)
  * non-NULL, so the guard passed, and groth16_verify then read freed heap.
  * Keep the publish below every fallible step.
  *
- * ── Which helper covers which key, and which call sites are which ───────
- *
- * The four keys split across two publish/release pairs because their storage
- * is parsed at two different points in the load, not because their rules
- * differ. Both pairs obey PUBLISH LAST and UNPUBLISH FIRST, and both are
- * called only with params_mu held.
- *
- *   trio   spend_vk, output_vk, sprout_groth16_vk
- *          params_publish_groth16_vks() / params_release_groth16_vks()
- *   phgr   phgr_vk
- *          params_publish_phgr_vk()     / params_release_phgr_vk()
- *
- * PRE-PUBLICATION release sites (abandoning a load that never published):
- *   every params_release_groth16_vks() call inside params_load_first_locked()
- *   and params_install_embedded_locked(). Both bodies run only when nothing of
- *   ours is published — params_load_first_locked() is selected by
- *   params_init_locked() precisely on !params_loaded, and
- *   params_install_embedded_locked() returns early when params_loaded is set —
- *   so a release reached from either one cannot be unpublishing a live key.
- *   Their unpublish half is defence in depth.
- *
- * THE LATE PATH RELEASES NOTHING. params_load_late_proving_locked() runs with
- * all four keys published and live verifiers reading them unlocked. It holds
- * to ONCE PUBLISHED, NEVER REPLACED by containing no release call at all: every
- * one of its failures is a LOG_FAIL that frees only its own local buffers and
- * leaves the published keys exactly as it found them. That is what makes a
- * refused late upgrade cost nothing but the proving capability.
- *
- * POST-PUBLICATION release site: sapling_free_params(), and only that. It is
- * the one place that runs with keys live, so it is the one place that releases
- * all four.
- *
- * DO NOT add params_release_phgr_vk() to the pre-publication sites, and above
- * all not to the late path. A node that came up on the compiled-in keys and
- * later refused an arriving parameter directory would then disarm a working
- * PHGR13 verifier and lose the ability to validate blocks 0-581876 — turning a
- * recoverable, expected refusal into a validation regression. That sequence is
- * exactly what the late path exists to serve, so it is reachable, not
- * hypothetical. */
+ * FOUR keys. sapling_free_params() is the ONLY post-publication release site,
+ * so it alone releases all four (trio: params_release_groth16_vks(); phgr_vk:
+ * params_release_phgr_vk()). Every other release abandons a load that never
+ * published, and params_load_late_proving_locked() releases NOTHING — that is
+ * how it honours ONCE PUBLISHED, NEVER REPLACED while verifiers read unlocked.
+ * NEVER add params_release_phgr_vk() to a failure path, above all not the late
+ * path: a node on the compiled-in keys refusing an arriving directory would
+ * lose blocks 0-581876. Proof: the params_vk_publish_symmetry group. */
 static void params_publish_groth16_vks(void)
 {
     sapling_set_spend_vk(&spend_vk);
     sapling_set_output_vk(&output_vk);
     sprout_set_vk(&sprout_groth16_vk);
-}
-
-static void params_publish_phgr_vk(void)
-{
-    sprout_phgr_set_vk(&phgr_vk);
 }
 
 static void params_release_groth16_vks(void)
@@ -271,20 +226,13 @@ static void params_release_groth16_vks(void)
     memset(&sprout_groth16_vk, 0, sizeof(sprout_groth16_vk));
 }
 
-/* Same two rules as the trio, for the fourth key. Call ONLY from
- * sapling_free_params() — see the call-site split documented above. Caller
- * holds params_mu.
- *
- * The free is not optional bookkeeping: ppzksnark_vk_read() memsets its output
- * struct before parsing (bn254.c), so a reload that did not free first would
- * drop the previous ic[] allocation on the floor. The trio avoids that because
- * params_release_groth16_vks() frees and memsets them; phgr_vk needs the same
- * treatment for the same reason. */
+/* Call ONLY from sapling_free_params() — see the rule above; caller holds
+ * params_mu. ppzksnark_vk_read() memsets before parsing, so a reload that did
+ * not free first would drop the previous ic[]. */
 static void params_release_phgr_vk(void)
 {
     sprout_phgr_set_vk(NULL);
     ppzksnark_vk_free(&phgr_vk);
-    memset(&phgr_vk, 0, sizeof(phgr_vk));
 }
 
 /* Read `name` out of `params_dir` and verify its pinned SHA-512 BEFORE the
@@ -448,9 +396,7 @@ static bool params_load_first_locked(const char *params_dir)
      * its mainnet failure path frees these three structs — see the
      * publish/free invariant above. Publication happens after it. */
 
-    /* Sprout PHGR13 VK (pre-Sapling proofs, blocks 0-581876). Parses into the
-     * file-scope phgr_vk; published below with the trio at the single publish
-     * point, released by sapling_free_params(). */
+    /* Sprout PHGR13 VK (pre-Sapling proofs, blocks 0-581876) */
     bool phgr_ok = false;
     {
         uint8_t *phgr_data = params_read_pinned(params_dir,
@@ -512,7 +458,7 @@ static bool params_load_first_locked(const char *params_dir)
      * sapling_check_spend/_output, so it must run after this. */
     params_publish_groth16_vks();
     if (phgr_ok)
-        params_publish_phgr_vk();
+        sprout_phgr_set_vk(&phgr_vk);
     atomic_store(&params_loaded, true);
 
     params_arm_proving_locked(params_dir, spend_bytes, spend_len,
@@ -687,13 +633,8 @@ void sapling_free_params(void)
      * running; the mutex only keeps it from interleaving with a loader on
      * another thread.
      *
-     * All FOUR keys, not three. This being the only post-publication release
-     * site is exactly why it is the only one that may touch phgr_vk. Leaving it
-     * out disarmed three of the four shielded verifiers and left
-     * sprout_verify_phgr13 armed with a key the process had declared released
-     * — reportable through sprout_phgr_vk_loaded(), which
-     * contextual_check_tx_proofs_unverifiable() reads to decide whether a
-     * pre-Sapling JoinSplit is checkable at all. */
+     * All FOUR keys: omitting phgr_vk left sprout_verify_phgr13 armed with a
+     * released key, reportable via sprout_phgr_vk_loaded(). */
     params_release_phgr_vk();
     params_release_groth16_vks();
     free(spend_pk_data);
@@ -823,7 +764,7 @@ static bool params_install_embedded_locked(void)
 
     /* Publish last: every fallible step is above. */
     params_publish_groth16_vks();
-    params_publish_phgr_vk();
+    sprout_phgr_set_vk(&phgr_vk);
 
     atomic_store(&vks_embedded, true);
     atomic_store(&params_loaded, true);
