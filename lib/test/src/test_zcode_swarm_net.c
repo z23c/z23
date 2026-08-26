@@ -2242,7 +2242,10 @@ static int zwn_t_sovereign_source_build(const struct chain_params *params)
         ASSERT(snprintf(path, sizeof(path), "%s/vendor/.cache", publisher) >
                0);
         ASSERT(mkdir(path, 0700) == 0);
-        static const char license[] = "Apache-2.0\n";
+        static const char license[] =
+            "                                 Apache License\n"
+            "                           Version 2.0, January 2004\n"
+            "                        http://www.apache.org/licenses/\n";
         static const char program[] =
             "#include <stdint.h>\n"
             "static uint32_t mix(uint32_t x) { return (x << 5) ^ (x >> 3); }\n"
