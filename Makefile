@@ -9211,6 +9211,7 @@ check-verification-coverage:
 check-ship-remote-transaction:
 	@echo "══ LINT: remote ship transaction rollback + process qualification ══"
 	@./tools/ship.sh --selftest
+	@./tools/ship_selftest.sh
 	@./tools/lint/check_ship_remote_transaction.sh
 
 # Fail-closed Z23 release packager + installer: checksum mismatch never
