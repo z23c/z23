@@ -98,3 +98,20 @@ HOTSWAP_SWAPPABLE("app/controllers/src/metaverse_controller.c",
  * the -rdynamic host at dlopen, so the swap never clones process state. */
 HOTSWAP_SWAPPABLE("app/controllers/src/policy_native_handlers.c",
                   "zcode.package.policy.limits")
+
+/* Read-only STORE BUYER projections: what this node's store sells, and this
+ * buyer's own purchase ledger. The three mutating siblings in that file
+ * (app.store.order / .pay / .collect) are withheld — they move money and
+ * drive a plan/commit handshake. */
+HOTSWAP_SWAPPABLE("app/controllers/src/store_buyer_native_handlers.c",
+                  "app.store.catalog app.store.purchases")
+/* The wallet's read-only SECURITY POSTURE: whether a keystore exists and
+ * whether it is locked. Every sibling in that file (lock, unlock, encrypt)
+ * changes keystore state and is withheld. No key material is read here. */
+HOTSWAP_SWAPPABLE("app/controllers/src/wallet_security_native_handlers.c",
+                  "core.wallet.security.status")
+/* The operator-facing status journey: a rendered projection over blockers and
+ * sync progress. It reads consensus state but decides nothing about it, which
+ * is the same line core.status already sits on. */
+HOTSWAP_SWAPPABLE("app/controllers/src/status_journey_native_handler.c",
+                  "status")

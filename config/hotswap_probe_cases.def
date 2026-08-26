@@ -77,3 +77,12 @@ HOTSWAP_PROBE_CASE("service.vault.intent.decision.story.v1", "service",
 HOTSWAP_PROBE_CASE("command.zcode.package.policy.limits.free.v1", "command",
     "zcode.package.policy.limits", "{}",
     "zcl.zcode_package_policy_limits.v1", 4096)
+/* Wave 2 probes. Each dispatches its file's declared probe leaf with the empty
+ * input its catalog row accepts, and is budgeted at or under that row's
+ * byte budget. */
+HOTSWAP_PROBE_CASE("command.store.catalog.default.v1", "command",
+    "app.store.catalog", "{}", "zcl.store_catalog.v1", 8192)
+HOTSWAP_PROBE_CASE("command.wallet.security.status.default.v1", "command",
+    "core.wallet.security.status", "{}", "zcl.wallet_security.v1", 2048)
+HOTSWAP_PROBE_CASE("command.status.journey.default.v1", "command",
+    "status", "{}", "zcl.status_journey.v1", 4096)
