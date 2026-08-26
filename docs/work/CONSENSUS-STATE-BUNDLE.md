@@ -1,3 +1,4 @@
+<!-- Copyright 2026 Rhett Creighton - Apache License 2.0 -->
 # Canonical Consensus-State Bundle
 
 This file is the naming and ownership authority for bootstrap artifacts. A
@@ -38,6 +39,12 @@ committed components:
   lane, acceptance receipt, and rollback generation.
 
 ## Implementation status
+
+An exporter qualification failure is a persistent dependency warning. It does
+not suppress validation, transaction relay, wallet use, or public serving by an
+otherwise ready node. The warning remains active until an operator restores a
+matching producer session and the exporter mints again; new joiners otherwise
+pay the growing distance from the newest bundle as block-download time.
 
 `consensus_state_snapshot_install()` is a deliberately contained, read-only
 admission validator. The name reserves the single future installation service;

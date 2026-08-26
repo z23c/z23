@@ -132,10 +132,10 @@ static void bx_note_refusal(const char *fmt, ...)
  * that staleness as crawl time, so the outage is named here with the numbers
  * that make it actionable.
  *
- * BLOCKER_RESOURCE, not TRANSIENT: nothing in this process can clear it (the
- * gates never re-run), so it must not be TTL-retired back into silence after
- * thirty quiet minutes. No escape_action — there is no safe automatic remedy;
- * re-minting needs an operator to restart the node on a matching build. */
+ * BLOCKER_DEPENDENCY: the gates never re-run, so nothing in this process can
+ * clear it and dependency blockers never TTL-retire. The optional exporter
+ * must not hard-gate validation, relay, or serving. Re-mint only after an
+ * operator restarts the node on a matching build. */
 static void bx_name_degraded(const char *degradation)
 {
     int32_t last_h = atomic_load(&g_bx_last_export_height);
@@ -161,7 +161,7 @@ static void bx_name_degraded(const char *degradation)
 
     struct blocker_record b;
     if (blocker_init(&b, "bundle_exporter.degraded", "bundle_exporter",
-                     BLOCKER_RESOURCE, reason))
+                     BLOCKER_DEPENDENCY, reason))
         (void)blocker_set(&b);
 }
 
