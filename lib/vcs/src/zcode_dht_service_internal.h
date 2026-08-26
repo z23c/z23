@@ -99,6 +99,10 @@ struct service_record_operation {
   bool used;
   enum service_record_operation_kind kind;
   uint64_t id;
+  /* Monotonic stamp of the transition out of PENDING; 0 while pending. A
+   * terminal operation holds one of eight slots until its owner collects
+   * it — the tick sweeper frees the ones whose owner provably never will. */
+  uint64_t terminal_mono;
   enum vcs_zcode_dht_record_operation_state state;
   enum vcs_zcode_dht_store_status store_status;
   struct vcs_zcode_dht_record_selector selector;
@@ -251,7 +255,7 @@ bool vcs_zcode_dht_service_records_handle(
     enum vcs_zcode_dht_reject_reason *rejected_out);
 void vcs_zcode_dht_service_record_query_finish(
     struct vcs_zcode_dht_service *service, const struct service_query *query,
-    enum query_outcome outcome);
+    enum query_outcome outcome, struct vcs_zcode_dht_time now);
 void vcs_zcode_dht_service_publication_schedule(
     struct vcs_zcode_dht_service *service, struct vcs_zcode_dht_time now);
 bool vcs_zcode_dht_publications_load(struct vcs_zcode_dht_service *service,
@@ -271,9 +275,9 @@ uint64_t publication_next_proof_epoch(
     struct vcs_zcode_dht_service *service);
 uint64_t publication_renew_at(const struct service_publication *publication);
 /* Cancel a slot's live lookup and child operations. A commit that supersedes
- * an existing same-stream slot MUST call this before overwriting it: the
- * lookup/operation tables have no sweeper, so ids wiped from their owner's
- * slot leak those entries until service restart. A no-op on a fresh slot. */
+ * an existing same-stream slot MUST call this before overwriting it: ids
+ * wiped from their owner's slot strand their entries until the tick sweeper
+ * (or service restart) reclaims them. A no-op on a fresh slot. */
 void publication_cancel_active(struct vcs_zcode_dht_service *service,
                                struct service_publication *publication);
 void publication_drive(struct vcs_zcode_dht_service *service,
@@ -281,6 +285,16 @@ void publication_drive(struct vcs_zcode_dht_service *service,
                        struct vcs_zcode_dht_time now);
 struct service_record_operation *vcs_zcode_dht_records_operation_find(
     struct vcs_zcode_dht_service *service, uint64_t id);
+/* Grace before the tick sweeper frees a terminal-but-unpolled record
+ * operation. A live owner's last legitimate read is bounded by the
+ * config-layer RPC lease — lookup ceiling + query timeout + lease grace +
+ * one public tick. The two named constants are lib-visible; the +11 covers
+ * the config grace (5) and public tick (1) with margin. */
+#define VCS_ZCODE_DHT_RECORD_OPERATION_SWEEP_S                                \
+  (VCS_ZCODE_DHT_LOOKUP_CEILING_S + VCS_ZCODE_DHT_SERVICE_QUERY_TIMEOUT_S +   \
+   11u)
+void vcs_zcode_dht_records_sweep(struct vcs_zcode_dht_service *service,
+                                 uint64_t now_mono);
 bool vcs_zcode_dht_message_is_request(enum vcs_zcode_dht_msg_kind kind);
 const uint8_t *vcs_zcode_dht_message_query_id(
     const struct vcs_zcode_dht_msg *message);
