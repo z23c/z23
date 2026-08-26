@@ -615,7 +615,7 @@ AGENT_IMPACT_RULE("app/services/src/network_crawler.c|app/services/src/network_c
 /* Unified transactional dev loop, status, indexing, and benchmark contracts. */
 AGENT_IMPACT_RULE("tools/dev/watch-dev-lane.sh|tools/dev/deploy-dev-lane.sh|tools/dev/deploy-dev-lane-selftest.sh|tools/dev/recover-dev-lane.sh|tools/dev/recover-dev-lane-selftest.sh|deploy/zcl23-dev.service", "syncdiag_rpc make_lint_gates")
 AGENT_IMPACT_RULE("tools/dev/agent-dev-status.sh|tools/dev/agent-doctor.sh|app/controllers/src/agent_controller.c", "syncdiag_rpc make_lint_gates")
-AGENT_IMPACT_RULE("tools/dev/generate-compdb.sh|tools/dev/dev-loop-bench.sh", "syncdiag_rpc make_lint_gates")
+AGENT_IMPACT_RULE("tools/dev/generate-compdb.sh|tools/dev/dev-loop-bench.sh|tools/dev/dev-loop-profile-selftest.sh", "syncdiag_rpc make_lint_gates")
 AGENT_IMPACT_RULE("tools/dev/hotswap-running-dev.sh", "hotswap_loader hotswap_simnet make_lint_gates")
 AGENT_IMPACT_RULE("config/src/boot_services.c", "hotswap_loader rpc make_lint_gates")
 AGENT_IMPACT_RULE("config/commands/*|config/include/config/command_catalog.h|config/include/config/command_handler_index.h|config/src/command_catalog.c|lib/kernel/src/command_registry.c|lib/kernel/include/kernel/command_registry.h|tools/command/*|lib/test/src/test_command_registry_catalog.c", "command_registry_catalog native_api_contract command_handler_snapshot hotswap_module dev_platform make_lint_gates")
