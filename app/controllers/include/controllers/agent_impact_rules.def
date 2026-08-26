@@ -1428,3 +1428,12 @@ AGENT_IMPACT_RULE("lib/test/src/test_cold_join_sovereign.c|core/chainparams/src/
  * subtree that exceeded its declared budget (a real defect). It moves with the
  * sandbox budget and build_fabric groups because it names their exit codes. */
 AGENT_IMPACT_RULE("app/services/include/services/build_fabric_worker_report.h|app/services/src/build_fabric_worker_report.c", "sandbox_process_budget os_sandbox build_fabric zcode_dev_objects make_lint_gates")
+/* LANE moderation-node-signoff: the signed per-node moderation sign-off
+ * (zcl.moderation.node_attestation.v1) and the local composition that reads
+ * many nodes' sign-offs without any of them being an authority. Mapped to its
+ * own group plus the marketplace moderation group, because the attestation's
+ * profile name and verdict vocabulary are bound by assertion to
+ * general-audience.v1 / market_review_state on the hosting path: a rename on
+ * either side must fail a test, not drift into a signed statement that no
+ * longer means what the node does. */
+AGENT_IMPACT_RULE("lib/vcs/src/moderation_attestation_object.c|lib/vcs/src/moderation_attestation_compose.c|lib/vcs/include/vcs/moderation_attestation.h|lib/test/src/test_zcode_moderation_attestation.c", "zcode_moderation_attestation file_market_moderation")
