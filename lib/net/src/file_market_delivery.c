@@ -9,8 +9,6 @@
 
 #include "net/file_market_delivery.h"
 
-#include "file_market_delivery_internal.h"
-
 #include "base/serialize_le.h"
 #include "crypto/ed25519.h"
 #include "crypto/sha3.h"
