@@ -9,6 +9,7 @@
 #include "platform/time_compat.h"
 #include "services/file_market_content_service.h"
 #include "services/file_market_payment_service.h"
+#include "services/market_moderation_service.h"
 #include "sync/sync_state.h"
 #include "util/log_macros.h"
 #include "wallet/wallet.h"
@@ -67,6 +68,20 @@ static bool boot_load_file_market_chunk(
     return loaded.ok;
 }
 
+/* This node's own hosting decision for one offer's bytes, answered by the
+ * node's active listing-visibility profile — general-audience.v1 unless the
+ * operator opted in to open-view. The profile lives in app/services; lib/net
+ * never names it, so it arrives here as an injected port like authorize and
+ * load. market_moderation_may_serve_offer_id() is fail-closed for every
+ * failure class (absent context, closed db, unknown offer id, unreadable
+ * mark, invalid profile), so this adapter adds no policy of its own. */
+static bool boot_moderation_may_serve_chunk(const uint8_t offer_id[32],
+                                            void *ctx)
+{
+    (void)ctx;
+    return market_moderation_may_serve_offer_id(offer_id);
+}
+
 void boot_wire_file_market_delivery(struct boot_svc_ctx *svc)
 {
     if (!svc || !svc->params) {
@@ -77,5 +92,6 @@ void boot_wire_file_market_delivery(struct boot_svc_ctx *svc)
         svc->params->consensus.hashGenesisBlock.data,
         boot_authorize_file_market_chunk,
         boot_load_file_market_chunk,
+        boot_moderation_may_serve_chunk,
         svc);
 }

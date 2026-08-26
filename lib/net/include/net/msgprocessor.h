@@ -50,6 +50,18 @@ typedef void (*msg_peer_save_fn)(const struct p2p_node *node, void *ctx);
 typedef bool (*msg_zmsg_save_fn)(const struct zmsg_message *msg, void *ctx);
 typedef bool (*msg_file_offer_save_fn)(const struct file_offer *offer,
                                        void *ctx);
+/* Port seam for this node's own listing-visibility profile: may this node
+ * hand a third party's offer — its operator-written filename included — on
+ * to another peer? Answered by app/services/market_moderation_service
+ * (general-audience.v1 by default), which lib/net must not name directly.
+ *
+ * Relay only. An offer that answers false is still received, validated,
+ * stored, listed under an operator-chosen open-view profile, and reachable
+ * from the seller directly; this node simply does not rebroadcast it. The
+ * decision is local, binds no other node, and never touches block or
+ * transaction acceptance. An unwired port answers "do not relay". */
+typedef bool (*msg_offer_relay_allowed_fn)(const struct file_offer *offer,
+                                           void *ctx);
 typedef int (*msg_file_payment_ingest_fn)(
     const struct file_payment *payment, int64_t peer_id,
     int64_t now_unix, void *ctx);
@@ -206,6 +218,11 @@ struct msg_processor {
     _Atomic int64_t zmsg_last_ack_unix;
     msg_file_offer_save_fn file_offer_save;
     void *file_offer_save_ctx;
+    msg_offer_relay_allowed_fn offer_relay_allowed;
+    void *offer_relay_allowed_ctx;
+    /* Offers this node received, stored, and declined to rebroadcast under
+     * its own profile. Reported, never silent — see dumpstate `market`. */
+    _Atomic uint64_t offer_relay_hidden_by_profile;
     msg_file_payment_ingest_fn file_payment_ingest;
     void *file_payment_ingest_ctx;
     msg_zswap_ad_save_fn zswap_ad_save;
@@ -320,6 +337,12 @@ void msg_processor_set_zmsg_save(struct msg_processor *mp,
 void msg_processor_set_file_offer_save(struct msg_processor *mp,
                                        msg_file_offer_save_fn save,
                                        void *ctx);
+/* Wire the relay gate. Until this is called the processor relays no
+ * third-party offer at all — the unconfigured state is the closed one. */
+void msg_processor_set_offer_relay_allowed(
+    struct msg_processor *mp, msg_offer_relay_allowed_fn allowed, void *ctx);
+/* Count of received offers this node declined to rebroadcast. */
+uint64_t msg_processor_offer_relay_hidden(const struct msg_processor *mp);
 void msg_processor_set_file_payment_ingest(
     struct msg_processor *mp, msg_file_payment_ingest_fn ingest, void *ctx);
 void msg_processor_set_zswap_ad_save(struct msg_processor *mp,

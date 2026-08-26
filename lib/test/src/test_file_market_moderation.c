@@ -472,6 +472,214 @@ static int test_mmt_view_filter(void)
     return failures;
 }
 
+/* ── The serving gate fails closed on every failure class ──────────
+ *
+ * The gate decides whether this node hands content to another party. A
+ * moderation system that answers "serve" on an error is worse than none,
+ * because it advertises a protection it does not provide. Every class of
+ * failure below is therefore asserted to answer "do not serve":
+ *
+ *   1. no bound node context at all (boot has not run / db closed)
+ *   2. a content id the review store has never heard of
+ *   3. an offer id no signed offer carries
+ *   4. a NULL id
+ *   5. an unreviewed mark under the boot-default profile
+ *   6. a sensitive mark under the boot-default profile
+ *   7. an unreadable / corrupt / foreign-owned policy file
+ *   8. a profile name that is not one of the immutable named profiles
+ *
+ * The only inputs that answer "serve" are an explicit reviewed_ok mark,
+ * or the operator's explicit open-view opt-in. */
+static int test_mmt_serving_gate_fails_closed(void)
+{
+    int failures = 0;
+    TEST("market moderation: the serving gate fails closed on every "
+         "failure class") {
+        uint8_t unknown_root[32], unknown_offer[32];
+        memset(unknown_root, 0x77, sizeof(unknown_root));
+        memset(unknown_offer, 0x88, sizeof(unknown_offer));
+
+        /* (1) No context bound: nothing is served. Detaching the db is
+         * the state a node is in before boot wires the market, and a
+         * node that cannot ask its own store must not hand bytes out. */
+        rpc_market_set_state(NULL);
+        ASSERT(market_moderation_set_active_profile(
+                   MARKET_MODERATION_PROFILE_DEFAULT).ok);
+        ASSERT(!market_moderation_may_serve_root(unknown_root));
+        ASSERT(!market_moderation_may_serve_offer_id(unknown_offer));
+        /* (4) A NULL id is a refusal, never a wildcard. */
+        ASSERT(!market_moderation_may_serve_root(NULL));
+        ASSERT(!market_moderation_may_serve_offer_id(NULL));
+
+        struct node_db ndb;
+        memset(&ndb, 0, sizeof(ndb));
+        ASSERT(node_db_open(&ndb, ":memory:") && ndb.open);
+        rpc_market_set_state(&ndb);
+        ASSERT(market_moderation_set_active_profile(
+                   MARKET_MODERATION_PROFILE_DEFAULT).ok);
+
+        /* (2)(3) Ids the store has never seen read as unreviewed, which
+         * the boot-default profile hides. An unknown id must never be a
+         * hole in the gate. */
+        ASSERT(!market_moderation_may_serve_root(unknown_root));
+        ASSERT(!market_moderation_may_serve_offer_id(unknown_offer));
+        ASSERT_EQ(market_moderation_review_state_for_offer_id(unknown_offer),
+                  MARKET_REVIEW_UNREVIEWED);
+
+        int64_t now = (int64_t)platform_time_wall_time_t();
+        struct file_offer offer_ok, offer_sensitive, offer_new;
+        ASSERT(mmt_signed_offer(&offer_ok, 0xd4, 44, now));
+        ASSERT(mmt_signed_offer(&offer_sensitive, 0xe5, 55, now));
+        ASSERT(mmt_signed_offer(&offer_new, 0xf6, 66, now));
+        ASSERT(db_file_offer_save(&ndb, &offer_ok));
+        ASSERT(db_file_offer_save(&ndb, &offer_sensitive));
+        ASSERT(db_file_offer_save(&ndb, &offer_new));
+
+        /* (5) Ingested but unreviewed: stored, and not served. */
+        ASSERT(!market_moderation_may_serve_root(offer_new.root_hash));
+        ASSERT(!market_moderation_may_serve_offer_id(offer_new.offer_id));
+
+        ASSERT(market_moderation_set_review_state(
+                   offer_ok.offer_id, MARKET_REVIEW_REVIEWED_OK).ok);
+        ASSERT(market_moderation_set_review_state(
+                   offer_sensitive.offer_id, MARKET_REVIEW_SENSITIVE).ok);
+
+        /* The one affirmative case: an explicit sign-off by this node. */
+        ASSERT(market_moderation_may_serve_root(offer_ok.root_hash));
+        ASSERT(market_moderation_may_serve_offer_id(offer_ok.offer_id));
+        ASSERT_EQ(market_moderation_review_state_for_offer_id(
+                      offer_ok.offer_id), MARKET_REVIEW_REVIEWED_OK);
+
+        /* (6) Marked sensitive: still stored, never served. */
+        ASSERT(!market_moderation_may_serve_root(offer_sensitive.root_hash));
+        ASSERT(!market_moderation_may_serve_offer_id(
+                   offer_sensitive.offer_id));
+        struct file_offer refetched;
+        ASSERT(db_file_offer_find(&ndb, offer_sensitive.root_hash,
+                                  &refetched));
+
+        /* The operator's explicit opt-in is the ONLY thing that widens
+         * the gate — and it widens it for every one of them. */
+        ASSERT(market_moderation_set_active_profile(
+                   MARKET_MODERATION_PROFILE_OPEN).ok);
+        ASSERT(market_moderation_may_serve_root(offer_sensitive.root_hash));
+        ASSERT(market_moderation_may_serve_root(offer_new.root_hash));
+        ASSERT(market_moderation_may_serve_root(unknown_root));
+        /* Even wide open, a NULL id is still a refusal. */
+        ASSERT(!market_moderation_may_serve_root(NULL));
+        ASSERT(market_moderation_set_active_profile(
+                   MARKET_MODERATION_PROFILE_DEFAULT).ok);
+
+        /* (8) A name that is not an immutable named profile never
+         * resolves, so it can never become the active profile. */
+        ASSERT(market_moderation_profile_from_string("open-viewer") < 0);
+        ASSERT(market_moderation_profile_from_string("") < 0);
+        ASSERT(market_moderation_profile_from_string(NULL) < 0);
+        ASSERT(!market_moderation_profile_valid(-1));
+        ASSERT(!market_moderation_profile_valid(
+                   MARKET_MODERATION_PROFILE_COUNT));
+        ASSERT(!market_moderation_set_active_profile(
+                   (enum market_moderation_profile)99).ok);
+        /* A refused set leaves the previous profile in force, not a
+         * half-applied one. */
+        ASSERT(market_moderation_active_profile() ==
+               MARKET_MODERATION_PROFILE_DEFAULT);
+
+        node_db_close(&ndb);
+        rpc_market_set_state(NULL);
+        PASS();
+    }
+    _test_next:;
+    return failures;
+}
+
+/* (7) An unreadable, corrupt, or wrong-moded policy file must not be
+ * able to widen the view. Load reports the failure AND answers the
+ * boot-default profile, so a tampered file loses the operator's
+ * open-view opt-in rather than silently keeping or forging one. */
+static int test_mmt_policy_file_fails_closed(void)
+{
+    int failures = 0;
+    TEST("market moderation: an unreadable policy file loses open-view") {
+        char datadir[] = "test-tmp/market_moderation_closed_XXXXXX";
+        ASSERT(mkdtemp(datadir) != NULL);
+        char market_dir[640], policy[768];
+        snprintf(market_dir, sizeof(market_dir), "%s/market", datadir);
+        snprintf(policy, sizeof(policy), "%s/market/moderation.v1", datadir);
+        (void)mkdir(market_dir, 0700);
+
+        bool ok = false;
+        char error[192];
+
+        /* Absent file: the documented first-boot case — default, and it
+         * is NOT an error. */
+        (void)unlink(policy);
+        ASSERT(market_moderation_profile_load(datadir, &ok, error,
+                                              sizeof(error)) ==
+               MARKET_MODERATION_PROFILE_DEFAULT);
+        ASSERT(ok);
+
+        /* A real open-view opt-in round-trips. */
+        ASSERT(market_moderation_profile_save(
+                   datadir, MARKET_MODERATION_PROFILE_OPEN).ok);
+        ASSERT(market_moderation_profile_load(datadir, &ok, error,
+                                              sizeof(error)) ==
+               MARKET_MODERATION_PROFILE_OPEN);
+        ASSERT(ok);
+
+        /* Corrupt content naming a profile that does not exist: refused,
+         * and the answer is the closed default rather than the last
+         * good value or the forged one. */
+        int fd = open(policy, O_WRONLY | O_TRUNC | O_CLOEXEC);
+        ASSERT(fd >= 0);
+        static const char forged[] =
+            "zcl.market.moderation.v1\nprofile=serve-everything\n";
+        ASSERT(write(fd, forged, sizeof(forged) - 1) ==
+               (ssize_t)(sizeof(forged) - 1));
+        ASSERT(close(fd) == 0);
+        ok = true;
+        ASSERT(market_moderation_profile_load(datadir, &ok, error,
+                                              sizeof(error)) ==
+               MARKET_MODERATION_PROFILE_DEFAULT);
+        ASSERT(!ok && error[0]);
+
+        /* A world-readable file is refused on mode alone: a policy an
+         * unprivileged process could rewrite is not a policy. */
+        ASSERT(market_moderation_profile_save(
+                   datadir, MARKET_MODERATION_PROFILE_OPEN).ok);
+        ASSERT(chmod(policy, 0644) == 0);
+        ok = true;
+        ASSERT(market_moderation_profile_load(datadir, &ok, error,
+                                              sizeof(error)) ==
+               MARKET_MODERATION_PROFILE_DEFAULT);
+        ASSERT(!ok);
+
+        /* An empty file is not "no opinion" — it is a refusal. */
+        ASSERT(chmod(policy, 0600) == 0);
+        fd = open(policy, O_WRONLY | O_TRUNC | O_CLOEXEC);
+        ASSERT(fd >= 0 && close(fd) == 0);
+        ok = true;
+        ASSERT(market_moderation_profile_load(datadir, &ok, error,
+                                              sizeof(error)) ==
+               MARKET_MODERATION_PROFILE_DEFAULT);
+        ASSERT(!ok);
+
+        /* A missing datadir cannot be read into a permissive answer. */
+        ok = true;
+        ASSERT(market_moderation_profile_load(NULL, &ok, error,
+                                              sizeof(error)) ==
+               MARKET_MODERATION_PROFILE_DEFAULT);
+        ASSERT(!ok);
+
+        (void)unlink(policy);
+        (void)rmdir(market_dir);
+        (void)rmdir(datadir);
+        PASS();
+    }
+    _test_next:;
+    return failures;
+}
+
 int test_file_market_moderation(void)
 {
     int failures = 0;
@@ -479,6 +687,8 @@ int test_file_market_moderation(void)
     failures += test_mmt_profile_matrix();
     failures += test_mmt_profile_persistence();
     failures += test_mmt_view_filter();
+    failures += test_mmt_serving_gate_fails_closed();
+    failures += test_mmt_policy_file_fails_closed();
     printf("=== file_market_moderation: %d failures ===\n", failures);
     return failures;
 }

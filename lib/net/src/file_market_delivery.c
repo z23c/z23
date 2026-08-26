@@ -36,6 +36,7 @@ struct file_market_delivery_handlers {
     uint8_t network_genesis[32];
     file_market_delivery_authorize_fn authorize;
     file_market_delivery_load_fn load;
+    file_market_delivery_moderation_fn moderation;
     void *ctx;
 };
 
@@ -299,8 +300,22 @@ const char *file_market_delivery_status_string(
     case FILE_MARKET_DELIVERY_PAYMENT_REJECTED: return "REJECTED";
     case FILE_MARKET_DELIVERY_CONTENT_UNAVAILABLE: return "CONTENT_UNAVAILABLE";
     case FILE_MARKET_DELIVERY_RESOURCE_LIMIT: return "RESOURCE_LIMIT";
+    case FILE_MARKET_DELIVERY_MODERATION_HIDDEN: return "MODERATION_HIDDEN";
     }
     return "MALFORMED";
+}
+
+/* This node's own hosting decision, asked before payment state is even
+ * consulted so a declined chunk never reveals it and never reaches a
+ * content read. An unwired port is a refusal: a node that cannot ask its
+ * own profile hands out nothing. */
+static bool delivery_moderation_allows(
+    const struct file_market_delivery_handlers *handlers,
+    const uint8_t offer_id[32])
+{
+    if (!handlers || !handlers->moderation)
+        return false;
+    return handlers->moderation(offer_id, handlers->ctx);
 }
 
 bool file_market_delivery_reply_encode(
@@ -308,7 +323,7 @@ bool file_market_delivery_reply_encode(
     uint8_t out[FILE_MARKET_DELIVERY_REPLY_BYTES])
 {
     if (!reply || !out || reply->version != FILE_MARKET_DELIVERY_VERSION ||
-        reply->status > FILE_MARKET_DELIVERY_RESOURCE_LIMIT)
+        reply->status > FILE_MARKET_DELIVERY_MODERATION_HIDDEN)
         return false;
     size_t off = 0;
     memcpy(out + off, k_reply_magic, sizeof(k_reply_magic));
@@ -352,7 +367,7 @@ bool file_market_delivery_reply_decode(
     off += 32;
     if (off != FILE_MARKET_DELIVERY_REPLY_BYTES ||
         out->version != FILE_MARKET_DELIVERY_VERSION ||
-        out->status > FILE_MARKET_DELIVERY_RESOURCE_LIMIT) {
+        out->status > FILE_MARKET_DELIVERY_MODERATION_HIDDEN) {
         memset(out, 0, sizeof(*out));
         return false;
     }
@@ -362,7 +377,8 @@ bool file_market_delivery_reply_decode(
 void file_market_delivery_set_handlers(
     const uint8_t expected_network_genesis[32],
     file_market_delivery_authorize_fn authorize,
-    file_market_delivery_load_fn load, void *ctx)
+    file_market_delivery_load_fn load,
+    file_market_delivery_moderation_fn moderation, void *ctx)
 {
     pthread_mutex_lock(&g_handlers_mutex);
     memset(&g_handlers, 0, sizeof(g_handlers));
@@ -371,6 +387,7 @@ void file_market_delivery_set_handlers(
         g_handlers.configured = true;
         g_handlers.authorize = authorize;
         g_handlers.load = load;
+        g_handlers.moderation = moderation;
         g_handlers.ctx = ctx;
     }
     pthread_mutex_unlock(&g_handlers_mutex);
@@ -378,7 +395,7 @@ void file_market_delivery_set_handlers(
 
 void file_market_delivery_reset_handlers(void)
 {
-    file_market_delivery_set_handlers(NULL, NULL, NULL, NULL);
+    file_market_delivery_set_handlers(NULL, NULL, NULL, NULL, NULL);
 }
 
 bool file_market_delivery_is_request(const uint8_t *payload, uint32_t plen)
@@ -432,6 +449,15 @@ enum file_market_delivery_status file_market_delivery_prepare(
     pthread_mutex_unlock(&g_handlers_mutex);
     if (!handlers.configured || !handlers.authorize) {
         out_reply->status = FILE_MARKET_DELIVERY_PAYMENT_UNKNOWN;
+        return out_reply->status;
+    }
+
+    /* Hosting decision first. Asked before authentication and payment so a
+     * chunk this node will not host never causes a signature check, a
+     * payment lookup, or a content read, and the answer leaks nothing
+     * about either. */
+    if (!delivery_moderation_allows(&handlers, request.offer_id)) {
+        out_reply->status = FILE_MARKET_DELIVERY_MODERATION_HIDDEN;
         return out_reply->status;
     }
 
@@ -504,6 +530,14 @@ enum file_market_delivery_status file_market_delivery_prepare_onion(
     pthread_mutex_unlock(&g_handlers_mutex);
     if (!handlers.configured || !handlers.authorize) {
         out_reply->status = FILE_MARKET_DELIVERY_PAYMENT_UNKNOWN;
+        return out_reply->status;
+    }
+
+    /* Same hosting decision as the clearnet path, asked at the same point.
+     * An onion buyer gets exactly the moderation posture a clearnet buyer
+     * gets — the transport never widens what this node will host. */
+    if (!delivery_moderation_allows(&handlers, request.offer_id)) {
+        out_reply->status = FILE_MARKET_DELIVERY_MODERATION_HIDDEN;
         return out_reply->status;
     }
 

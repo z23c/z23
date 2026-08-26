@@ -6,6 +6,7 @@
  * hosting, and trading are untouched (see the header). */
 
 #include "services/market_moderation_service.h"
+#include "services/market_moderation_view_service.h"
 
 #include "models/database.h"
 #include "models/file_offer.h"
@@ -283,6 +284,61 @@ int market_moderation_review_state_for_root(const uint8_t root_hash[32])
         return MARKET_REVIEW_UNREVIEWED;
     int state = market_review_state_from_string(text);
     return state >= 0 ? state : MARKET_REVIEW_UNREVIEWED;
+}
+
+int market_moderation_review_state_for_offer_id(const uint8_t offer_id[32])
+{
+    if (!offer_id) return MARKET_REVIEW_UNREVIEWED; // raw-return-ok:absent-id-is-unreviewed-which-the-default-profile-hides
+    pthread_mutex_lock(&g_mm_mutex);
+    struct node_db *ndb = g_mm_ndb;
+    pthread_mutex_unlock(&g_mm_mutex);
+    if (!ndb || !ndb->open) return MARKET_REVIEW_UNREVIEWED; // raw-return-ok:no-db-is-unreviewed-not-an-error
+    struct file_offer offer;
+    if (!db_file_offer_find_by_id(ndb, offer_id, &offer))
+        return MARKET_REVIEW_UNREVIEWED; // raw-return-ok:unknown-offer-is-unreviewed
+    return market_moderation_review_state_for_root(offer.root_hash);
+}
+
+/* ── The serving gate ───────────────────────────────────────────── */
+
+/* The single decision both public entry points share. Every failure
+ * path below answers false; there is no branch on which an error, an
+ * absent dependency, or an out-of-range value yields "serve". */
+static bool mm_may_serve_with_review(int review_state)
+{
+    int profile = (int)market_moderation_active_profile();
+    if (!market_moderation_profile_valid(profile)) {
+        LOG_ERROR(MM_TAG,
+                  "serving gate: active profile %d is out of range — hiding",
+                  profile);
+        return false;
+    }
+    const struct market_moderation_view_service_v1 *view =
+        market_moderation_view_service_builtin();
+    if (!view || !view->decide) {
+        LOG_ERROR(MM_TAG, "serving gate: view service unavailable — hiding");
+        return false;
+    }
+    struct market_moderation_decision_result_v1 decision;
+    if (!view->decide(profile, review_state, &decision)) {
+        LOG_ERROR(MM_TAG, "serving gate: decide() refused — hiding");
+        return false;
+    }
+    return decision.valid && decision.visible;
+}
+
+bool market_moderation_may_serve_root(const uint8_t root_hash[32])
+{
+    if (!root_hash) return false; // raw-return-ok:null-id-hides-fail-closed
+    return mm_may_serve_with_review(
+        market_moderation_review_state_for_root(root_hash));
+}
+
+bool market_moderation_may_serve_offer_id(const uint8_t offer_id[32])
+{
+    if (!offer_id) return false; // raw-return-ok:null-id-hides-fail-closed
+    return mm_may_serve_with_review(
+        market_moderation_review_state_for_offer_id(offer_id));
 }
 
 struct zcl_result market_moderation_review_counts(

@@ -657,10 +657,20 @@ static bool rpc_zmarket_status(const struct json_value *params, bool help,
 
 /* ── private paid-content registry ───────────────────────────────── */
 
+/* The registered-content index is a serving surface: it tells a caller —
+ * including a remote one over GET /api/market-contents — exactly which
+ * content this node holds bytes for and will hand out. It therefore asks
+ * the same profile the chunk-delivery gate asks, so the two can never
+ * disagree about what this node hosts. Hidden rows are counted, never
+ * deleted, and the private filesystem path is still never returned. */
 static bool market_content_index_json(struct json_value *result)
 {
     json_set_object(result);
     json_push_kv_str(result, "schema", "zcl.market_contents.index.v1");
+    json_push_kv_str(result, "profile",
+                     market_moderation_profile_string(
+                         market_moderation_active_profile()));
+    int64_t hidden = 0;
     struct json_value rows = {0};
     json_set_array(&rows);
     if (g_market_ndb && g_market_ndb->open) {
@@ -668,6 +678,10 @@ static bool market_content_index_json(struct json_value *result)
         int count = db_market_content_list(g_market_ndb, content,
                                            FILE_MARKET_MAX_OFFERS);
         for (int i = 0; i < count; i++) {
+            if (!market_moderation_may_serve_root(content[i].root_hash)) {
+                hidden++;
+                continue;
+            }
             struct json_value row = {0};
             json_set_object(&row);
             char offer_hex[65], root_hex[65];
@@ -688,6 +702,7 @@ static bool market_content_index_json(struct json_value *result)
     }
     json_push_kv(result, "contents", &rows);
     json_free(&rows);
+    json_push_kv_int(result, "hidden_by_profile", hidden);
     return true;
 }
 

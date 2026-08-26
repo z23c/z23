@@ -4,15 +4,19 @@
  *
  * Three layers stay separate:
  *   1. Protocol validity — the signed offer wire. Never filtered here.
- *   2. Local hosting policy — the node still stores, serves, and trades
- *      every valid offer it ingested. Moderation never deletes.
+ *      Moderation NEVER reaches block or transaction acceptance: a
+ *      consensus-affecting content rule is a chain-split mechanism and
+ *      is forbidden. A node may refuse to SERVE; it always VALIDATES.
+ *   2. Local hosting policy — the node still STORES every valid offer
+ *      it ingested and moderation never deletes. What it will hand to
+ *      another party is gated: see the serving gate below.
  *   3. View filtering — this module: each node applies its OWN local
  *      listing-visibility policy to its own listing surfaces
  *      (zmarket_list / app market list / GET /api/market).
  *
  * There are no network-wide bans and no deletion authority anywhere:
- * a profile only decides which locally-known offers the LOCAL listing
- * view shows. The active profile persists per datadir at
+ * a profile decides only what THIS node lists and hands out, and binds
+ * no other node. The active profile persists per datadir at
  * market/moderation.v1 (mode 0600, atomic rename) and defaults to the
  * immutable named profile general-audience.v1. The named opt-in
  * profile open-view shows everything ingested. Profiles are immutable
@@ -85,6 +89,32 @@ struct zcl_result market_moderation_review_counts(
  * Fails when the state is invalid or no signed offer carries that id. */
 struct zcl_result market_moderation_set_review_state(
     const uint8_t offer_id[32], enum market_review_state state);
+/* Same answer as _for_root, addressed by the signed offer id a delivery
+ * request carries. MARKET_REVIEW_UNREVIEWED when the db is absent, the
+ * id matches no signed offer, or the mark is unreadable. */
+int market_moderation_review_state_for_offer_id(const uint8_t offer_id[32]);
+
+/* ── The serving gate ───────────────────────────────────────────────
+ * A node serves a moderated, general-audience view BY DEFAULT, and its
+ * operator signs off on what it hands out. These two calls are the ONE
+ * gate every serving surface asks. They answer through the same
+ * immutable profile and the same view-service decide() the listing
+ * surfaces already use — there is no second policy engine, no second
+ * profile format, and no second store.
+ *
+ * FAIL CLOSED BY CONSTRUCTION. false ("do not serve") is the answer for
+ * every one of: a NULL id, an unbound node context, a closed database,
+ * an offer id no signed offer carries, an unreadable review mark, an
+ * out-of-range active profile, a view service that refuses to decide,
+ * and an unreviewed or sensitive mark under the default profile. There
+ * is no input for which an error yields "serve".
+ *
+ * BOUNDARY. false means only "this node does not hand these bytes to
+ * another party". It never deletes anything, it is a purely local
+ * decision that binds no other node, and it is never consulted by block
+ * or transaction validation — moderation must never touch consensus. */
+bool market_moderation_may_serve_root(const uint8_t root_hash[32]);
+bool market_moderation_may_serve_offer_id(const uint8_t offer_id[32]);
 
 struct json_value;
 /* See AGENTS.md "Adding state introspection". Reentrant-safe. */

@@ -920,6 +920,29 @@ static bool handle_zmsgack(struct msg_processor *mp, struct p2p_node *node,
 
 /* ── ZCL Market: file sharing handlers ─────────────────────────── */
 
+/* May this node rebroadcast a third party's offer? Storing it is always
+ * fine — moderation never deletes — but handing its operator-written
+ * filename on to further peers is this node's own hosting decision, taken
+ * through the injected profile port. An unwired port answers no: a node
+ * that cannot ask its own profile rebroadcasts nothing. Every refusal is
+ * counted, never silently dropped.
+ *
+ * This returns a plain bool on purpose and MUST NOT use LOG_FAIL/REJECT_IF
+ * here: those macros expand to `return`, and an early return from the
+ * caller's loop would skip the persistence and logging that follow. */
+static bool mp_offer_relay_allowed(struct msg_processor *mp,
+                                   const struct file_offer *offer)
+{
+    if (!mp || !offer)
+        return false;
+    bool allowed = mp->offer_relay_allowed &&
+                   mp->offer_relay_allowed(offer, mp->offer_relay_allowed_ctx);
+    if (!allowed)
+        atomic_fetch_add_explicit(&mp->offer_relay_hidden_by_profile, 1,
+                                  memory_order_relaxed);
+    return allowed;
+}
+
 static bool handle_zfilelist(struct msg_processor *mp, struct p2p_node *node,
                              struct byte_stream *s)
 {
@@ -958,8 +981,11 @@ static bool handle_zfilelist(struct msg_processor *mp, struct p2p_node *node,
         if (mp->file_offer_save)
             (void)mp->file_offer_save(&offer, mp->file_offer_save_ctx);
 
-        /* Re-gossip to other peers if new and TTL > 1 */
-        if (is_new && offer.ttl > 1 && mp->net_mgr) {
+        /* Re-gossip to other peers if new, TTL > 1, and this node's own
+         * listing-visibility profile will host it. A refusal keeps the
+         * stored copy and only stops the rebroadcast. */
+        if (is_new && offer.ttl > 1 && mp->net_mgr &&
+            mp_offer_relay_allowed(mp, &offer)) {
             struct file_offer fwd = offer;
             fwd.ttl--;
 
@@ -1235,7 +1261,10 @@ static bool handle_zfileoffer(struct msg_processor *mp,
 
     if (mp->file_offer_save)
         (void)mp->file_offer_save(&offer, mp->file_offer_save_ctx);
-    if (result == FILE_MARKET_INGEST_NEW && mp->net_mgr)
+    /* Same rule as the zfilelist re-gossip: ingested and stored either
+     * way, rebroadcast only when this node's own profile will host it. */
+    if (result == FILE_MARKET_INGEST_NEW && mp->net_mgr &&
+        mp_offer_relay_allowed(mp, &offer))
         mp_flood_wire(mp, MSG_FILE_OFFER, wire, remaining,
                       (int64_t)node->id);
     return true;
@@ -1752,6 +1781,23 @@ void msg_processor_set_file_offer_save(struct msg_processor *mp,
         return;
     mp->file_offer_save = save;
     mp->file_offer_save_ctx = ctx;
+}
+
+void msg_processor_set_offer_relay_allowed(
+    struct msg_processor *mp, msg_offer_relay_allowed_fn allowed, void *ctx)
+{
+    if (!mp)
+        return;
+    mp->offer_relay_allowed = allowed;
+    mp->offer_relay_allowed_ctx = ctx;
+}
+
+uint64_t msg_processor_offer_relay_hidden(const struct msg_processor *mp)
+{
+    if (!mp)
+        return 0;
+    return atomic_load_explicit(&mp->offer_relay_hidden_by_profile,
+                                memory_order_relaxed);
 }
 
 void msg_processor_set_file_payment_ingest(

@@ -21,6 +21,7 @@
 #include "services/network_monitor.h"
 #include "services/sync_monitor.h"
 #include "services/file_market_payment_service.h"
+#include "services/market_moderation_service.h"
 #include "controllers/sync_controller.h"
 #include "controllers/yardsale_controller.h"
 #include "models/peer.h"
@@ -420,11 +421,27 @@ int boot_ingest_file_payment(const struct file_payment *payment,
     return FILE_PAYMENT_INGEST_REJECTED;
 }
 
+/* Relay gate adapter: the node's own listing-visibility profile decides
+ * whether a third party's offer is rebroadcast from here. The offer row is
+ * keyed by root_hash in the review store, which is the id the free
+ * (zfilelist) carrier also has, so the root is the key both callers share.
+ * market_moderation_may_serve_root() is fail-closed for every failure
+ * class, so this adapter adds no policy of its own. */
+static bool boot_offer_relay_allowed(const struct file_offer *offer,
+                                     void *ctx)
+{
+    (void)ctx;
+    if (!offer)
+        return false;
+    return market_moderation_may_serve_root(offer->root_hash);
+}
+
 void boot_wire_file_market(struct msg_processor *mp,
                            struct boot_svc_ctx *svc)
 {
     msg_processor_set_file_offer_save(mp, boot_save_file_offer, svc);
     msg_processor_set_file_payment_ingest(mp, boot_ingest_file_payment, svc);
+    msg_processor_set_offer_relay_allowed(mp, boot_offer_relay_allowed, svc);
     boot_wire_file_market_delivery(svc);
 }
 
