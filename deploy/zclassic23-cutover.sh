@@ -34,7 +34,34 @@
 # It never deletes a datadir. The demoted old-canonical dir is preserved
 # (~/.zclassic-c23.pre-cutover-<ts>) for manual inspection/rollback.
 #
-# Exit codes: 0 PROMOTED, 1 ROLLED-BACK, 2 REFUSED (preflight / usage).
+# ── Why the readiness bar is not a stopwatch ───────────────────────────────
+# This used to auto-roll-back the promotion if the new canonical had not
+# reached the pre-cutover H* within 300 seconds. That is the most damaging
+# form of a duration verdict in this tree: on a 7200rpm box measured under
+# 2 MB/s, opening a ~22 GB datadir and replaying to tip takes far longer than
+# 300s, so a slow-but-perfectly-healthy machine got its promotion REVERSED —
+# the datadirs swapped back, both units bounced — for the sole offence of
+# having a cheap disk. Repeat that across a fleet and only fast-storage boxes
+# can ever hold the canonical identity.
+#
+# Nothing about the promoted node's HEALTH is knowable from elapsed time. What
+# the 300s was standing in for is "is it coming up, or is it wedged?", and
+# that is directly observable: H* climbing, H* becoming readable at all, or —
+# before RPC opens — the process burning CPU and, decisively, accumulating
+# delayacct_blkio_ticks, which climbs precisely while it is BLOCKED on the
+# disk. A wedge is SILENCE, not slowness.
+#
+# So the ONLY thing that can trigger the automatic rollback is a stretch of
+# OBSERVED SILENCE (READY_STALL_TIMEOUT, default 900s with nothing moving),
+# and the rollback message always prints the evidence that justified firing.
+# The old READY_TIMEOUT survives as a REPORTING window: when it expires while
+# the node is still advancing, the promotion STANDS and the script says so.
+# The candidate already proved H* >= bar at preflight, so a promoted node
+# still climbing is finishing a job whose inputs were verified, not failing.
+#
+# Exit codes: 0 PROMOTED, 1 ROLLED-BACK, 2 REFUSED (preflight / usage),
+#             3 PROMOTED-CATCHING-UP (promotion stands; not yet at the bar,
+#               still demonstrably advancing — NOT a failure).
 set -eu
 
 # ── knobs (all overridable; the test suite injects mocks through these) ─────
@@ -45,7 +72,15 @@ CANONICAL_DATADIR="${CANONICAL_DATADIR:-$HOME/.zclassic-c23}"
 CANONICAL_RPCPORT="${CANONICAL_RPCPORT:-18232}"
 CANDIDATE_DATADIR="${CANDIDATE_DATADIR:-}"
 CANDIDATE_RPCPORT="${CANDIDATE_RPCPORT:-18272}"   # standby default RPC port
-READY_TIMEOUT="${READY_TIMEOUT:-300}"             # seconds to reach the bar
+# REPORTING window: after this the script stops waiting and SAYS what it saw.
+# It is not a failure bound and never triggers the rollback.
+READY_TIMEOUT="${READY_TIMEOUT:-300}"
+# The one clock that may fire the automatic rollback: consecutive seconds with
+# NOTHING observable about the promoted node changing. Deliberately enormous
+# relative to any honest slow-disk step, because its job is to catch a wedge.
+READY_STALL_TIMEOUT="${READY_STALL_TIMEOUT:-900}"
+# How often to print a "still catching up" line while waiting.
+READY_HEARTBEAT="${READY_HEARTBEAT:-60}"
 POLL_INTERVAL="${POLL_INTERVAL:-5}"
 STOP_GRACE="${STOP_GRACE:-10}"                    # wait for a stopped node to release its datadir
 ALLOW_CROSS_FS="${ALLOW_CROSS_FS:-0}"
@@ -55,12 +90,21 @@ ASSUME_YES=0
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 RPC_BIN="${ZCL_RPC_BIN:-$SCRIPT_DIR/build/bin/zcl-rpc}"
 HSTAR_READER="${CUTOVER_HSTAR_READER:-_hstar_read_rpc}"
+PROGRESS_READER="${CUTOVER_PROGRESS_READER:-_progress_read_proc}"
 
 log()  { printf '[cutover] %s\n' "$*" >&2; }
 die()  { printf '[cutover] ERROR: %s\n' "$*" >&2; exit 2; }
 
 usage() {
-    sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
+    # Everything from the copyright line to the exit-code block, so --help
+    # always states what each exit code means. Anchored on the text, not on
+    # frozen line numbers, which is how this drifted before.
+    sed -n '2,/^# *Exit codes:/p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '/^# *Exit codes:/,/^set -eu$/p' "$0" |
+        sed '/^set -eu$/d; 1d' | sed 's/^# \{0,1\}//'
+    printf '\nOptions: --yes --candidate=<dir> --candidate-rpcport=<n>\n'
+    printf '         --timeout=<s> (reporting window) --stall-timeout=<s> (silence before rollback)\n'
+    printf '         --allow-cross-fs\n'
 }
 
 # ── H* reader ───────────────────────────────────────────────────────────────
@@ -81,6 +125,42 @@ _hstar_read_rpc() {
 
 hstar() { "$HSTAR_READER" "$1" "$2" "$3"; }
 
+# ── pre-RPC progress reader ─────────────────────────────────────────────────
+# A promoted node that has not opened its RPC port yet reports H*=-1, which is
+# indistinguishable from "wedged" if H* is the only thing you look at. The
+# kernel already knows the difference. delayacct_blkio_ticks (proc(5) field 42)
+# climbs while the process is BLOCKED on I/O, so a box crawling through a
+# block-file scan on a 7200rpm disk is visibly working even though it burns
+# almost no CPU and answers nothing. A wedged process moves none of these.
+#
+# Prints an opaque token; ANY change between polls is progress. Empty output
+# means "nothing observable", which is silence, not a fault on its own.
+_progress_read_proc() {
+    _pr_pid="$($SYSTEMCTL show "$CANONICAL_UNIT" -p MainPID --value 2>/dev/null || true)"
+    case "${_pr_pid:-}" in
+        ''|*[!0-9]*|0) return 0 ;;
+    esac
+    [ -r "/proc/$_pr_pid/stat" ] || return 0
+    _pr_stat="$(cat "/proc/$_pr_pid/stat" 2>/dev/null || true)"
+    [ -n "$_pr_stat" ] || return 0
+    _pr_io="$(cat "/proc/$_pr_pid/io" 2>/dev/null || true)"
+    # Fields are numbered AFTER the "pid (comm) " prefix is stripped, so
+    # proc(5) utime(14)/stime(15) become $12/$13 and blkio(42) becomes $40.
+    _pr_cpu="$(printf '%s\n' "$_pr_stat" | sed 's/^[0-9][0-9]* ([^)]*) //' |
+        awk 'NF >= 13 && !seen { printf "%.0f\n", $12 + $13; seen = 1 }
+             END { if (!seen) print 0 }')"
+    _pr_blk="$(printf '%s\n' "$_pr_stat" | sed 's/^[0-9][0-9]* ([^)]*) //' |
+        awk 'NF >= 40 && !seen { printf "%.0f\n", $40; seen = 1 }
+             END { if (!seen) print 0 }')"
+    _pr_bytes="$(printf '%s\n' "$_pr_io" |
+        awk '/^(rchar|wchar|read_bytes|write_bytes):[ \t]*[0-9]+$/ { total += $2 }
+             END { printf "%.0f\n", total + 0 }')"
+    printf 'pid=%s cpu=%s blkio=%s io=%s\n' \
+        "$_pr_pid" "$_pr_cpu" "$_pr_blk" "$_pr_bytes"
+}
+
+progress_token() { "$PROGRESS_READER"; }
+
 # ── unit control (SYSTEMCTL=echo in tests makes these visible no-ops) ────────
 unit_stop()  { log "stopping $1"; $SYSTEMCTL stop "$1" >/dev/null 2>&1 || $SYSTEMCTL stop "$1" || true; }
 unit_start() { log "starting $1"; $SYSTEMCTL start "$1"; }
@@ -92,6 +172,7 @@ while [ $# -gt 0 ]; do
         --candidate=*)        CANDIDATE_DATADIR="${1#--candidate=}" ;;
         --candidate-rpcport=*) CANDIDATE_RPCPORT="${1#--candidate-rpcport=}" ;;
         --timeout=*)          READY_TIMEOUT="${1#--timeout=}" ;;
+        --stall-timeout=*)    READY_STALL_TIMEOUT="${1#--stall-timeout=}" ;;
         --allow-cross-fs)     ALLOW_CROSS_FS=1 ;;
         -h|--help)            usage; exit 0 ;;
         --*)                  die "unknown option $1 (see --help)" ;;
@@ -237,17 +318,67 @@ log "promoted candidate -> $CANONICAL_DATADIR"
 unit_start "$CANONICAL_UNIT" || rollback "canonical unit failed to start on the promoted datadir"
 
 # ── verify: new canonical becomes ready AND reaches the pre-cutover bar ──────
-log "verifying promoted canonical reaches H* >= $BAR within ${READY_TIMEOUT}s"
-_deadline=$(( $(date +%s) + READY_TIMEOUT ))
+# The reporting window never ends before the stall detector has had its full
+# chance to fire; otherwise a short --timeout could exit while silence was
+# still unproven, and neither answer would have been earned.
+_report_window="$READY_TIMEOUT"
+if [ "$_report_window" -lt "$READY_STALL_TIMEOUT" ]; then
+    _report_window="$READY_STALL_TIMEOUT"
+    log "note: reporting window widened to ${_report_window}s so the ${READY_STALL_TIMEOUT}s stall detector can reach a verdict"
+fi
+log "verifying promoted canonical reaches H* >= $BAR"
+log "  rollback fires ONLY on ${READY_STALL_TIMEOUT}s of observed silence, never on elapsed time"
+_start="$(date +%s)"
+_report_deadline=$(( _start + _report_window ))
 NEW_H=-1
-while [ "$(date +%s)" -lt "$_deadline" ]; do
+_last_h=-2                       # -2 so the first reading always counts as news
+_last_token=""
+_last_progress="$_start"
+_advances=0
+_next_heartbeat=$(( _start + READY_HEARTBEAT ))
+while :; do
     NEW_H="$(hstar canonical-post "$CANONICAL_RPCPORT" "$CANONICAL_DATADIR")"
     if [ "$NEW_H" -ge "$BAR" ] 2>/dev/null; then
         printf 'CUTOVER: PROMOTED  old_canonical_H*=%s candidate_H*=%s new_canonical_H*=%s (bar=%s, demoted=%s)\n' \
             "$CANON_H" "$CAND_H" "$NEW_H" "$BAR" "$DEMOTED_DIR"
         exit 0
     fi
+
+    _token="$(progress_token || true)"
+    _now="$(date +%s)"
+    # Progress is ANY of: H* moved, H* became readable, or the kernel says the
+    # process is still doing work. Each is independently sufficient.
+    if [ "$NEW_H" != "$_last_h" ] || [ "$_token" != "$_last_token" ]; then
+        _last_h="$NEW_H"
+        _last_token="$_token"
+        _last_progress="$_now"
+        _advances=$(( _advances + 1 ))
+    fi
+    _silent_for=$(( _now - _last_progress ))
+    _elapsed=$(( _now - _start ))
+
+    if [ "$_now" -ge "$_next_heartbeat" ]; then
+        log "still catching up: H*=$NEW_H bar=$BAR elapsed=${_elapsed}s advances=$_advances last_change=${_silent_for}s ago progress=[$_last_token]"
+        _next_heartbeat=$(( _now + READY_HEARTBEAT ))
+    fi
+
+    # The ONLY path to an automatic rollback, and it prints its evidence.
+    if [ "$_silent_for" -ge "$READY_STALL_TIMEOUT" ]; then
+        rollback "promoted canonical went SILENT — nothing observable changed for ${_silent_for}s (limit ${READY_STALL_TIMEOUT}s) after ${_elapsed}s and $_advances observed advances; last H*=$NEW_H (bar=$BAR), last progress token=[$_last_token]. Slowness alone never reaches this line."
+    fi
+
+    if [ "$_now" -ge "$_report_deadline" ]; then
+        # Silence was NOT established (that branch is above), so the node is
+        # demonstrably still advancing. Reversing a live datadir promotion on
+        # this evidence is the damage; the promotion stands.
+        log "reporting window (${_report_window}s) expired while the promoted canonical was STILL ADVANCING — leaving the promotion in place. This is not a failure."
+        log "  watch it finish with: ZCL_DATADIR=$CANONICAL_DATADIR ZCL_RPCPORT=$CANONICAL_RPCPORT $RPC_BIN getblockcount"
+        log "  roll back by hand if you decide to: stop $CANONICAL_UNIT, mv $CANONICAL_DATADIR $CANDIDATE_DATADIR, mv $DEMOTED_DIR $CANONICAL_DATADIR, start $CANONICAL_UNIT"
+        printf 'CUTOVER: PROMOTED-CATCHING-UP  old_canonical_H*=%s candidate_H*=%s new_canonical_H*=%s (bar=%s, demoted=%s, elapsed=%ss, advances=%s, last_change=%ss ago)\n' \
+            "$CANON_H" "$CAND_H" "$NEW_H" "$BAR" "$DEMOTED_DIR" \
+            "$_elapsed" "$_advances" "$_silent_for"
+        exit 3
+    fi
+
     sleep "$POLL_INTERVAL"
 done
-
-rollback "promoted canonical did not reach H* >= $BAR within ${READY_TIMEOUT}s (last H*=$NEW_H)"

@@ -81,6 +81,37 @@ void zcl_native_bridge_run(const struct zcl_command_request *request,
                            zcl_native_body_fn body,
                            struct zcl_command_reply *reply);
 
+/* ── hot-swap leaf trampoline ──────────────────────────────────────────
+ *
+ * Every staged leaf needs a function carrying the command registry's handler
+ * signature that forwards to THIS TU's own body through the bridge above.
+ * Written out, that wrapper is five lines whose only variables are two names,
+ * repeated once per leaf per controller — and each controller carries the set
+ * TWICE, once for the Tier-1 (ZCL_HOTSWAP_GEN) block and once for the Tier-2
+ * module (ZCL_HOTSWAP_MODULE_GEN) block. That boilerplate is a standing tax on
+ * every hot-swap registration, and it pushed two controllers through their
+ * file-size ceiling the moment their trampolines landed. Declare it instead:
+ *
+ *     ZCL_HOTSWAP_TRAMPOLINE(tramp_metrics, zcl_native_metrics_body)
+ *
+ * (no trailing semicolon). `name` is the symbol the leaf table points at;
+ * `body` is this controller's own handler body. Parameters are prefixed so
+ * they cannot capture a name used in the body expression.
+ *
+ * It lives HERE, beside zcl_native_bridge_run, rather than in hotswap.h,
+ * because the two generation tiers include different headers — Tier-2 pulls
+ * hotswap_module.h, which does not include hotswap.h — and both include this
+ * file. Defined in only one of them, the macro silently stops expanding and
+ * the call reads as a function declaration: the compiler then reports an
+ * "unused parameter" named after your trampoline, which is a confusing way to
+ * learn the macro was invisible. */
+#define ZCL_HOTSWAP_TRAMPOLINE(name, body)                                   \
+    static void name(const struct zcl_command_request *zcl__tramp_request,   \
+                     struct zcl_command_reply *zcl__tramp_reply)             \
+    {                                                                        \
+        zcl_native_bridge_run(zcl__tramp_request, body, zcl__tramp_reply);   \
+    }
+
 /* Project a bridged command body into reply->data bounded by request->view
  * (summary|normal|full), request->budget_bytes, request->max_items, and
  * request->cursor, emitting an explicit `_page` descriptor and — when
@@ -1908,9 +1939,9 @@ void zcl_native_handle_message_read(
 void zcl_native_handle_market_content_register(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
-/* Per-node marketplace listing moderation (view filtering only — no
- * network-wide bans, no deletion): the node's own visibility profile plus
- * its local-only review_state curation marks.
+/* Per-node marketplace moderation (no network-wide bans, no deletion, no
+ * consensus effect): the node's own profile decides what it lists and what
+ * it hands out, from its local-only review_state curation marks.
  * app/controllers/src/market_moderation_native_handler.c. */
 void zcl_native_handle_market_moderation_status(
     const struct zcl_command_request *request,
@@ -1922,6 +1953,9 @@ void zcl_native_handle_market_moderation_profile_show(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 void zcl_native_handle_market_moderation_profile_set(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_market_moderation_relay_set(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 void zcl_native_handle_market_moderation_review_set(

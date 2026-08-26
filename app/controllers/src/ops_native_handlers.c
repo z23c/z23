@@ -126,3 +126,80 @@ char *zcl_native_self_heal_stats_body(const struct json_value *args,
         process_block_self_heal_scan_depth_limit());
     return out;
 }
+
+/* ── Tier-1 hot-swap: native.leaves generation entrypoint ──────────────────
+ * Dev-only (compiled only under -DZCL_HOTSWAP_GEN; expands to nothing in the
+ * node/release TU). Stages every native command leaf this controller owns.
+ *
+ * All five bodies are no-argument read projections ((void)args) over operator
+ * rollups the node already computes: four forward a read-only node RPC
+ * verbatim, and self-heal reads a counter snapshot. None decides a consensus
+ * rule, validates a block, or touches a state root — process_block's self-heal
+ * stats are observability counters reached through a snapshot accessor.
+ * ops.debug.dash.summary is the declared probe: it ignores args and its
+ * declared output schema is zcl.operator_summary.v1. */
+#ifdef ZCL_HOTSWAP_GEN
+#define ZCL_HOTSWAP_PROBE_LEAF "ops.debug.dash.summary"
+#include "hotswap/hotswap.h"
+#include "kernel/command_registry.h"
+#include "command/native_command.h"
+
+ZCL_HOTSWAP_TRAMPOLINE(tramp_operator_snapshot, zcl_native_operator_snapshot_body)
+
+ZCL_HOTSWAP_TRAMPOLINE(tramp_operator_summary, zcl_native_operator_summary_body)
+
+ZCL_HOTSWAP_TRAMPOLINE(tramp_milestone, zcl_native_milestone_body)
+
+ZCL_HOTSWAP_TRAMPOLINE(tramp_mirror_status, zcl_native_mirror_status_body)
+
+ZCL_HOTSWAP_TRAMPOLINE(tramp_self_heal_stats, zcl_native_self_heal_stats_body)
+
+static const struct zcl_hotswap_leaf_replacement k_leaves[] = {
+    { "ops.debug.dash.snapshot",  tramp_operator_snapshot },
+    { "ops.debug.dash.summary",   tramp_operator_summary },
+    { "ops.debug.dash.milestone", tramp_milestone },
+    { "ops.debug.dash.mirror",    tramp_mirror_status },
+    { "ops.debug.dash.selfheal",  tramp_self_heal_stats },
+};
+
+ZCL_HOTSWAP_EXPORT_LEAVES(k_leaves, sizeof(k_leaves) / sizeof(k_leaves[0]))
+#endif /* ZCL_HOTSWAP_GEN */
+
+/* REAL (activatable) multi-leaf module ABI export. All five leaves are
+ * re-pointed in ONE all-or-nothing registry batch; every body is defined in
+ * THIS TU, so each one is genuinely recompiled by the swap rather than merely
+ * re-dispatched into resident code. */
+#ifdef ZCL_HOTSWAP_MODULE_GEN
+#include "hotswap/hotswap_module.h"
+#include "kernel/command_registry.h"
+#include "command/native_command.h"
+
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_operator_snapshot, zcl_native_operator_snapshot_body)
+
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_operator_summary, zcl_native_operator_summary_body)
+
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_milestone, zcl_native_milestone_body)
+
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_mirror_status, zcl_native_mirror_status_body)
+
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_self_heal_stats, zcl_native_self_heal_stats_body)
+
+/* The module's own health hook — runs before the loader publishes it. Kept
+ * node-independent (no RPC): a structural OK. */
+static bool module_selftest_ops_dash(char *err, size_t cap)
+{
+    (void)err;
+    (void)cap;
+    return true;
+}
+
+static const struct zcl_hotswap_leaf k_module_leaves[] = {
+    { "ops.debug.dash.snapshot",  module_tramp_operator_snapshot },
+    { "ops.debug.dash.summary",   module_tramp_operator_summary },
+    { "ops.debug.dash.milestone", module_tramp_milestone },
+    { "ops.debug.dash.mirror",    module_tramp_mirror_status },
+    { "ops.debug.dash.selfheal",  module_tramp_self_heal_stats },
+};
+
+ZCL_HOTSWAP_MODULE_LEAVES(k_module_leaves, module_selftest_ops_dash)
+#endif /* ZCL_HOTSWAP_MODULE_GEN */

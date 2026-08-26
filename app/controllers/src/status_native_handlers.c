@@ -700,47 +700,19 @@ char *zcl_native_postmortem_list_body(const struct json_value *args,
 #include "kernel/command_registry.h"
 #include "command/native_command.h"
 
-static void tramp_status(const struct zcl_command_request *request,
-                         struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_status_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(tramp_status, zcl_native_status_body)
 
-static void tramp_status_brief(const struct zcl_command_request *request,
-                               struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_status_brief_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(tramp_status_brief, zcl_native_status_brief_body)
 
-static void tramp_syncdiag(const struct zcl_command_request *request,
-                           struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_syncdiag_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(tramp_syncdiag, zcl_native_syncdiag_body)
 
-static void tramp_blockers(const struct zcl_command_request *request,
-                           struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_blockers_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(tramp_blockers, zcl_native_blockers_body)
 
-static void tramp_timeline(const struct zcl_command_request *request,
-                           struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_timeline_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(tramp_timeline, zcl_native_timeline_body)
 
-static void tramp_agent_diagnose(const struct zcl_command_request *request,
-                                 struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_agent_diagnose_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(tramp_agent_diagnose, zcl_native_agent_diagnose_body)
 
-static void tramp_postmortem_list(const struct zcl_command_request *request,
-                                  struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_postmortem_list_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(tramp_postmortem_list, zcl_native_postmortem_list_body)
 
 static const struct zcl_hotswap_leaf_replacement k_leaves[] = {
     { "core.status",          tramp_status },
@@ -772,11 +744,42 @@ ZCL_HOTSWAP_EXPORT_LEAVES(k_leaves, sizeof(k_leaves) / sizeof(k_leaves[0]))
 static const char zcl_hotswap_bench_marker[] __attribute__((used)) =
     "ZCL_HOTSWAP_BENCH:00000000";
 
-static void module_tramp_status(const struct zcl_command_request *request,
-                                 struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_status_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_status, zcl_native_status_body)
+
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_status_brief, zcl_native_status_brief_body)
+
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_syncdiag, zcl_native_syncdiag_body)
+
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_blockers, zcl_native_blockers_body)
+
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_timeline, zcl_native_timeline_body)
+
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_agent_diagnose, zcl_native_agent_diagnose_body)
+
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_postmortem_list, zcl_native_postmortem_list_body)
+
+/* Every leaf this controller owns, re-pointed in ONE all-or-nothing registry
+ * batch. This mirrors k_leaves above: the generation loader has always staged
+ * all seven, so the module ABI carrying only core.status was pilot batch-size
+ * caution, not a safety boundary. Widening a leaf table widens BATCH SIZE, not
+ * authority — every entry is still a READY read-only leaf of this same
+ * allowlisted shape-leaf TU, and the registry batch commit re-checks
+ * READY + EFFECT_READ + non-alias for each one independently. */
+/* ops.debug.dash.kpi renders zcl_native_kpi_body, defined in THIS TU. It is
+ * absent from the generation table above only because that table predates the
+ * leaf; the module ABI carries it. */
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_kpi, zcl_native_kpi_body)
+
+static const struct zcl_hotswap_leaf k_module_leaves[] = {
+    { "core.status",         module_tramp_status },
+    { "ops.debug.dash.kpi",  module_tramp_kpi },
+    { "core.status.brief",   module_tramp_status_brief },
+    { "core.sync.diagnose",  module_tramp_syncdiag },
+    { "core.sync.blockers",  module_tramp_blockers },
+    { "ops.timeline",        module_tramp_timeline },
+    { "ops.diagnose",        module_tramp_agent_diagnose },
+    { "ops.postmortem.list", module_tramp_postmortem_list },
+};
 
 /* The module's own health hook — runs before the loader publishes it. Kept
  * node-independent (no RPC): a structural OK. A behavioral precommit probe is a
@@ -788,5 +791,5 @@ static bool module_selftest_status(char *err, size_t cap)
     return true;
 }
 
-ZCL_HOTSWAP_MODULE("core.status", module_tramp_status, module_selftest_status)
+ZCL_HOTSWAP_MODULE_LEAVES(k_module_leaves, module_selftest_status)
 #endif /* ZCL_HOTSWAP_MODULE_GEN */

@@ -234,6 +234,9 @@ static const struct lint_gate_entry g_lint_gate_entries[] = {
     S_(t_canonical_deploy_proof_binding_contract),
     S_(t_dev_lane_deploy_contract),
     S_(t_agent_fast_ci_contract),
+    /* Hermetic: each script proves itself inside its own mktemp sandbox and
+     * no tracked path is written, so this needs no worktree clone. */
+    N_(t_slow_disk_progress_verdicts_contract),
     S_(t_native_operator_docs_contract),
     S_(t_remote_node_update_contract),
     S_(t_native_agent_api_contract),
@@ -336,6 +339,9 @@ static const struct lint_gate_entry g_lint_gate_entries[] = {
      * (the gate greps --untracked, which needs the real .git). */
     X_(t_no_trust_state_ordering_gate),
     S_(t_lint_gates_fail_loud_on_empty_scan),
+    /* Hermetic: builds its fixture trees under TMPDIR and reads Makefile /
+     * run_lint.sh, never writing into the worktree. */
+    N_(t_lint_gate_wiring_gate),
     S_(t_no_dev_history_in_contracts),
     S_(t_no_uncited_victory),
     /* Plants a stray file at the REAL repo root. */
@@ -379,6 +385,9 @@ static int lint_entry_weight(lint_gate_fn fn)
     if (fn == t_silent_errors_bool_fixture)              return 59651;
     if (fn == t_no_dev_history_in_contracts)             return 51629;
     if (fn == t_agent_fast_ci_contract)                  return 26287;
+    /* Measured: the cutover selftest's slow-box cases poll real clocks
+     * (~14s), plus the host-watchdog and deploy_verify selftests. */
+    if (fn == t_slow_disk_progress_verdicts_contract)    return 15500;
     if (fn == t_lint_gates_fail_loud_on_empty_scan)      return 21827;
     if (fn == t_gate22_framework_filename_suffix)        return 12435;
     if (fn == t_e1_file_size_ceiling)                    return 10960;

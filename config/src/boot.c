@@ -1471,8 +1471,8 @@ bool app_init(struct app_context *ctx)
 
     boot_stale_locks_preflight(ctx->datadir);
 
-    /* Open SQLite node database */
     t_phase = boot_clock_ms();
+    boot_node_db_open_step_begin();  /* see boot_node_db_gate.c */
     if (node_db_sync_init(&g_node_db, ctx->datadir)) {
         int migrate_rc = node_db_migrate(&g_node_db, ctx->datadir);
         if (migrate_rc == -2) {
@@ -1499,8 +1499,7 @@ bool app_init(struct app_context *ctx)
             event_emitf(EV_BOOT_DB_OPEN, 0, "schema=%d tip=%d",
                         node_db_schema_version(&g_node_db), db_tip);
         }
-        /* Bake the current schema version into the next clean-shutdown marker
-         * (advisory field in the quick_check-skip binding). */
+        /* Schema version -> next clean-shutdown marker (advisory). */
         boot_shutdown_marker_set_schema_version(
             node_db_schema_version(&g_node_db));
     } else {
@@ -1509,6 +1508,7 @@ bool app_init(struct app_context *ctx)
          * CONTINUE booting RAM-only. See boot_node_db_gate.c. */
         return boot_node_db_open_failed_gate(ctx->datadir);
     }
+    boot_step_done();
     boot_topmark("sqlite_open_migrate", t_phase);
 
     if (!boot_wallet_identity_ensure(&g_node_db, params->consensus.hashGenesisBlock.data, app_operator_lane_name(ctx->operator_lane))) return false;

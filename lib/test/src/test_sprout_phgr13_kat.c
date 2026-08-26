@@ -13,6 +13,7 @@
 #include "core/serialize.h"
 #include "primitives/transaction.h"
 #include "sapling/bn254.h"
+#include "sapling/params_vk_embedded.h"
 #include "validation/check_transaction.h"
 #include "validation/contextual_check_tx.h"
 
@@ -206,6 +207,18 @@ int test_sprout_phgr13_kat(void)
         KAT_CHECK("canonical Sprout transaction passes structural consensus",
                   check_transaction(&tx, &structural));
 
+        /* contextual_check_transaction() now asks whether this process can
+         * verify a shielded proof AT ALL before it tries: on a NULL VK it sets
+         * local_fault and returns false with DoS 0, so an honest peer is not
+         * charged for our missing keys. That gate reads sapling_params_loaded(),
+         * which hand-publishing one PHGR13 fixture key does not set — so this
+         * KAT was asserting against a process state no real node is ever in,
+         * and read "the canonical proof fails consensus" when the truth was
+         * "this process holds no verifying keys". Install the compiled-in set,
+         * then re-pin the fixture key so the proof under test is still checked
+         * against THIS file's VK. */
+        (void)sapling_install_embedded_vks();
+        sprout_phgr_set_vk(&fixture_vk);
         chain_params_select(CHAIN_MAIN);
         const struct chain_params *params = chain_params_get();
         int saved_defer = atomic_exchange(

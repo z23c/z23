@@ -30,7 +30,7 @@ struct zcl_hotswap_service_report;
 bool register_dev_native_hotswap_rpc(struct rpc_table *table,
                                      const char *datadir, int rpc_port);
 
-#ifdef ZCL_DEV_BUILD
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
 /* Fill `out` with THE canonical publish hooks for the command registry in this
  * process: the all-or-nothing batch commit, the probe-before-publish dispatch
  * (public spec lookup + input validation + declared-output-schema check), and
@@ -38,13 +38,19 @@ bool register_dev_native_hotswap_rpc(struct rpc_table *table,
  *
  * `with_quiesce` is false for a one-shot CLI (nothing to reclaim; the process
  * exits) and true in the resident node. Shared by the resident RPC, the CLI
- * `dev hotswap probe`, and the ZCL_HOTSWAP_PRELOAD path in native_command.c so
- * exactly one implementation of "how a candidate is validated and published"
- * exists. DEV-ONLY, like every other symbol on this path. */
+ * `dev hotswap probe`, the ZCL_HOTSWAP_PRELOAD path in native_command.c, and
+ * the parallel test harness's module mode, so exactly one implementation of
+ * "how a candidate is validated and published" exists. These hooks perform no
+ * dynamic loading; a release build (neither macro) links none of them. */
 void zcl_native_hotswap_publish_hooks(struct hotswap_publish_hooks *out,
                                       bool with_quiesce);
 
-#endif /* ZCL_DEV_BUILD */
+/* Release the thread-local buffer registry_probe_cb retains for the activation
+ * receipt. The dev RPC path clears it as part of rendering the receipt; a
+ * caller that does not render one (the test harness) calls this instead. */
+void zcl_native_hotswap_probe_rendered_clear(void);
+
+#endif /* ZCL_DEV_BUILD || ZCL_TESTING */
 
 /* Verify one pure service module entirely inside the caller. This never
  * activates a generation and never reaches RPC/network/storage. It exists so

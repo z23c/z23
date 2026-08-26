@@ -44,30 +44,74 @@
  *
  * Keep this DATA ONLY (no C tokens beyond the macro invocations). */
 
-/* Read-only status projection (controller leaf; tolerates empty args). */
+/* Read-only status / sync-diagnosis / operator-timeline projections. All seven
+ * leaves tolerate empty args and surface field failures as nested
+ * "<field>_error" keys, never a top-level "error" — so the probe dispatch
+ * succeeds. core.status stays the declared probe. */
 HOTSWAP_SWAPPABLE("app/controllers/src/status_native_handlers.c",
-                  "core.status")
-/* Read-only peer-incident projection (controller leaf). */
+                  "core.status core.status.brief core.sync.diagnose core.sync.blockers ops.timeline ops.diagnose ops.postmortem.list ops.debug.dash.kpi")
+/* Read-only peer-incident and onion-health projections (controller leaves). */
 HOTSWAP_SWAPPABLE("app/controllers/src/net_native_handlers.c",
-                  "core.network.peers.incidents")
-/* Read-only operator metrics projection (controller leaf). */
+                  "core.network.peers.incidents core.network.onion.health")
+/* Read-only operator metrics projections. core.consensus.report renders a
+ * Prometheus counter table (metrics_prometheus_consensus_report_json) — an
+ * observability VIEW of consensus, never a consensus rule. */
 HOTSWAP_SWAPPABLE("app/controllers/src/meta_native_handlers.c",
-                  "ops.metrics")
-/* Read-only wallet address projection (controller leaf). */
+                  "ops.metrics core.consensus.report")
+/* Read-only WALLET projections: this wallet's addresses, its own unspent
+ * outputs, and its own transaction history. No signing, no spend, no keystore
+ * mutation — wallet WRITE leaves stay resident. */
 HOTSWAP_SWAPPABLE("app/controllers/src/wallet_native_handlers.c",
-                  "core.wallet.address.list")
+                  "core.wallet.address.list core.wallet.utxo.list core.wallet.transaction.list core.wallet.transaction.get core.wallet.shielded.balance core.wallet.shielded.notes")
 /* Read-only UTXO drift-audit projection (controller leaf; an audit VIEW, not
- * consensus validation — validation/state roots stay unswappable). */
+ * consensus validation — validation/state roots stay unswappable).
+ * DELIBERATELY WITHHELD from this row, though both are ZCL_COMMAND_READY_READ
+ * and would pass every gate: core.chain.block.get and
+ * core.chain.transaction.get. They render block and transaction bytes, i.e.
+ * they sit on the block/transaction path. Read-only is not the test there; the
+ * standing rule is that anything one cannot argue is off the consensus path is
+ * not eligible. Admitting them needs an explicit owner decision, not a lint
+ * pass. */
 HOTSWAP_SWAPPABLE("app/controllers/src/chain_native_handlers.c",
                   "core.consensus.utxo.audit")
-/* Read-only ZNAM name-index projection (controller leaf). */
+/* Read-only app-layer index/catalog projections: ZNAM names, ZSLP tokens,
+ * messaging inbox, market listings, cross-chain swap views. */
 HOTSWAP_SWAPPABLE("app/controllers/src/app_native_handlers.c",
-                  "app.names.list")
+                  "app.names.list app.names.resolve app.tokens.list app.messaging.inbox app.market.list app.market.status app.market.content.list app.swap.chains app.swap.list")
 /* Parsing, authorization and log I/O stay resident. The swappable body owns
  * request composition only and is qualified with a fixed one-row log case. */
 HOTSWAP_SWAPPABLE("app/controllers/src/diagnostics_native_handlers.c",
-                  "ops.logs")
+                  "ops.logs core.storage.query")
+/* Read-only operator rollup dashboards. Four leaves forward a no-argument
+ * read-only node RPC verbatim; selfheal renders a counter snapshot. Every body
+ * is defined in this same TU, so a swap genuinely recompiles all five. */
+HOTSWAP_SWAPPABLE("app/controllers/src/ops_native_handlers.c",
+                  "ops.debug.dash.snapshot ops.debug.dash.summary ops.debug.dash.milestone ops.debug.dash.mirror ops.debug.dash.selfheal")
 /* Project-neutral App/Metaverse property projection. The owner has no state;
  * its pure service/view/codec/adapter closure is one reloadable island. */
 HOTSWAP_SWAPPABLE("app/controllers/src/metaverse_controller.c",
                   "metaverse.agent.status metaverse.agent.money metaverse.agent.liquidity metaverse.agent.audit metaverse.property.list metaverse.property.show")
+/* The pure decision leaf. Its body and the frozen policy table it reads are
+ * both inside this module's island, so a re-pointed dispatch enters freshly
+ * compiled code; the resident counters it reports live in the NON-island
+ * sibling app/controllers/src/policy_native_resident.c and are imported from
+ * the -rdynamic host at dlopen, so the swap never clones process state. */
+HOTSWAP_SWAPPABLE("app/controllers/src/policy_native_handlers.c",
+                  "zcode.package.policy.limits")
+
+/* Read-only STORE BUYER projections: what this node's store sells, and this
+ * buyer's own purchase ledger. The three mutating siblings in that file
+ * (app.store.order / .pay / .collect) are withheld — they move money and
+ * drive a plan/commit handshake. */
+HOTSWAP_SWAPPABLE("app/controllers/src/store_buyer_native_handlers.c",
+                  "app.store.catalog app.store.purchases")
+/* The wallet's read-only SECURITY POSTURE: whether a keystore exists and
+ * whether it is locked. Every sibling in that file (lock, unlock, encrypt)
+ * changes keystore state and is withheld. No key material is read here. */
+HOTSWAP_SWAPPABLE("app/controllers/src/wallet_security_native_handlers.c",
+                  "core.wallet.security.status")
+/* The operator-facing status journey: a rendered projection over blockers and
+ * sync progress. It reads consensus state but decides nothing about it, which
+ * is the same line core.status already sits on. */
+HOTSWAP_SWAPPABLE("app/controllers/src/status_journey_native_handler.c",
+                  "status")

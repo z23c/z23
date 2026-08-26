@@ -50,7 +50,12 @@ ZCL_ZERO_SHA256 = 00000000000000000000000000000000000000000000000000000000000000
 # authoritative parse. The standalone presentation package has the same
 # property: its explicit, tiny dependency graph neither consumes nor stamps a
 # whole-node source identity, so visual relaunches share this lean parse path.
-ZCL_HOTSWAP_LOOP_GOALS := hotswap-try hotswap-apply \
+# `hotswap` (the candidate ledger) joins them for the same reason and then
+# some: its recipe is a pure read-only text pass over config/*.def and builds,
+# stamps and links nothing at all, so every parse-time input this set skips is
+# input it could not consume. It is the first command an agent types about the
+# loop, so it has to answer in ~2 s, not ~13 s.
+ZCL_HOTSWAP_LOOP_GOALS := hotswap-try hotswap-apply hotswap \
 	presentation-lib presentation-demo presentation-relaunch \
 	presentation-desktop-install presentation-portability
 ZCL_HOTSWAP_LOOP_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_HOTSWAP_LOOP_GOALS),$(MAKECMDGOALS))),,1),)
@@ -202,7 +207,7 @@ else ifneq ($(filter dev-bin z23-dev zclassic23-dev,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := dev test-fast
 else ifneq ($(filter dev-package-verifier,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := dev
-else ifneq ($(filter t-fast t-fast-exact test_parallel_fast test-parallel-fast-active test-parallel-fast-active-locked t-fast-locked t-fast-exact-locked,$(ZCL_EPOCH_SINGLE_GOAL)),)
+else ifneq ($(filter t-fast t-fast-exact t-hotswap hotswap-test-so test_parallel_fast test-parallel-fast-active test-parallel-fast-active-locked t-fast-locked t-fast-exact-locked,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := test-fast
 else ifneq ($(filter t test test_parallel test-parallel test-parallel-active test-parallel-active-locked test-parallel-locked t-locked test-locked secure-release-regressions secure-release-regressions-locked,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := test-strict
@@ -447,8 +452,14 @@ DEVLOOP_INCLUDES = -Itools/dev
 # hot-swap/reload cycle, the persistent inotify watcher, and the subprocess
 # runner) are DEV_ONLY_SRCS: linked only into the DEV binary, never the release
 # binary. `check-release-no-dev-symbols` proves their entry points are absent.
+# Standalone dev CLIs under tools/dev own their own main() and are compiled
+# directly by their driver script, never linked into the node binary, the dev
+# binary, or the test harness. They must leave the wildcard BEFORE the
+# DEV_ONLY_SRCS split, because DEV_ONLY_SRCS is still linked (into the dev
+# binary) — filtering there would only move the duplicate-`main` link error.
+DEV_STANDALONE_SRCS = tools/dev/hotswap_verify_so.c
 DEVLOOP_ALL_SRCS = $(call zcl_filter_ephemeral_sources,\
-	$(wildcard tools/dev/*.c))
+	$(filter-out $(DEV_STANDALONE_SRCS),$(wildcard tools/dev/*.c)))
 DEV_ONLY_SRCS = tools/dev/devloop_cli.c tools/dev/devloop_cycle.c \
 	tools/dev/devloop_watch.c tools/dev/devloop_process.c \
 	tools/dev/devloop_hotswap_build.c tools/dev/devloop_restart_build.c \
@@ -1095,7 +1106,7 @@ else ifneq ($(filter fast-compile dev-build-only,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := dev
 else ifneq ($(filter dev-bin z23-dev zclassic23-dev,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := dev test-fast
-else ifneq ($(filter t-fast t-fast-exact test_parallel_fast test-parallel-fast-active test-parallel-fast-active-locked t-fast-locked t-fast-exact-locked,$(ZCL_DEPFILE_SINGLE_GOAL)),)
+else ifneq ($(filter t-fast t-fast-exact t-hotswap hotswap-test-so test_parallel_fast test-parallel-fast-active test-parallel-fast-active-locked t-fast-locked t-fast-exact-locked,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := test-fast
 else ifneq ($(filter t test test_parallel test-parallel test-parallel-active test-parallel-active-locked test-parallel-locked t-locked test-locked secure-release-regressions secure-release-regressions-locked,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := test-strict
@@ -1999,13 +2010,16 @@ $(TEST_TSAN_LINK_RSP): $(TEST_TSAN_OBJS)
 # verifier. Build that exact in-tree helper here, not only on the public
 # test-parallel wrapper: fast-ci/pre-push invokes the active fast runner
 # directly, and a clean checkout must not depend on a leftover binary.
+LINKED_TEST_ENV := env -u ZCL_HOTSWAP_TEST_MODULE \
+	-u ZCL_HOTSWAP_TEST_AUTH
+
 test-parallel-active:
 	@mkdir -p "$(BUILD_DIR)"
 	@$(CHECKOUT_LOCK_TOOL) foreground "$(CHECKOUT_LOCK)" -- \
 	  $(MAKE) --no-print-directory test-parallel-active-locked
 
 test-parallel-active-locked: $(TEST_PARALLEL_REL_CANDIDATE) dev-package-verifier-ensure
-	ulimit -s unlimited && $(TEST_PARALLEL_REL_ACTIVE)
+	ulimit -s unlimited && $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE)
 
 test-parallel-fast-active:
 	@mkdir -p "$(BUILD_DIR)"
@@ -2013,7 +2027,7 @@ test-parallel-fast-active:
 	  $(MAKE) --no-print-directory test-parallel-fast-active-locked
 
 test-parallel-fast-active-locked: $(TEST_PARALLEL_FAST_CANDIDATE) dev-package-verifier-ensure
-	ulimit -s unlimited && $(TEST_PARALLEL_FAST_ACTIVE)
+	ulimit -s unlimited && $(LINKED_TEST_ENV) $(TEST_PARALLEL_FAST_ACTIVE)
 
 .PHONY: test-parallel
 # Checkout-locked (see CHECKOUT_LOCK above): the make_lint_gates exclusive lane
@@ -2041,7 +2055,7 @@ test-parallel:
 
 .PHONY: test-parallel-locked
 test-parallel-locked: $(TEST_PARALLEL_REL_CANDIDATE) dev-package-verifier-ensure
-	ulimit -s unlimited && $(TEST_PARALLEL_REL_ACTIVE) $(TEST_PARALLEL_ARGS)
+	ulimit -s unlimited && $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE) $(TEST_PARALLEL_ARGS)
 
 # ── prove-cold-join — the one command a stranger can run ─────────────────
 #
@@ -2074,7 +2088,7 @@ prove-cold-join: $(TEST_PARALLEL_REL_CANDIDATE)
 	 mkdir -p "$(BUILD_DIR)"; \
 	 echo "== proving a permissionless cold join (no network, wiped datadir) =="; \
 	 ulimit -s unlimited; \
-	 ZCL_STRESS_TESTS=1 $(TEST_PARALLEL_REL_ACTIVE) \
+	 ZCL_STRESS_TESTS=1 $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE) \
 	     --exact=test_cold_join_sovereign $(TEST_PARALLEL_ARGS) >"$$log" 2>&1; \
 	 rc=$$?; \
 	 cat "$$log"; \
@@ -2131,7 +2145,7 @@ prove-cold-join: $(TEST_PARALLEL_REL_CANDIDATE)
 # ONLY cannot contain a redirection, a quote, a space, or any other shell
 # metacharacter. `<substring>` never reaches sh at all.
 T_LIST_TOOL := tools/dev/test-group-list.sh
-ONLY_REQUIRED_GOALS := t t-fast t-tsan
+ONLY_REQUIRED_GOALS := t t-fast t-tsan t-hotswap
 ONLY_SELECTOR_GOALS := $(ONLY_REQUIRED_GOALS) t-asan
 ONLY_ACTIVE_GOALS := $(filter $(ONLY_SELECTOR_GOALS),$(MAKECMDGOALS))
 ifneq ($(ONLY_ACTIVE_GOALS),)
@@ -2485,7 +2499,7 @@ t:
 	  $(MAKE) --no-print-directory t-locked ONLY='$(ONLY)'
 
 t-locked: $(TEST_PARALLEL_REL_CANDIDATE) dev-package-verifier-ensure
-	ulimit -s unlimited && $(TEST_PARALLEL_REL_ACTIVE) --only=$(ONLY)
+	ulimit -s unlimited && $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE) --only=$(ONLY)
 
 # Hot-path variant for edit loops. It resolves the complete source inventory in
 # a cached, stable (toolchain+flags-keyed) per-file epoch and links a non-LTO harness; use strict `make t`
@@ -2497,7 +2511,7 @@ t-fast:
 	  $(MAKE) --no-print-directory t-fast-locked ONLY='$(ONLY)'
 
 t-fast-locked: $(TEST_PARALLEL_FAST_CANDIDATE) dev-package-verifier-ensure
-	ulimit -s unlimited && $(TEST_PARALLEL_FAST_ACTIVE) --only=$(ONLY)
+	ulimit -s unlimited && $(LINKED_TEST_ENV) $(TEST_PARALLEL_FAST_ACTIVE) --only=$(ONLY)
 
 # Proof-facing sibling of t-fast. The human convenience target above keeps its
 # documented substring behavior; impact plans and durable receipts use this
@@ -2510,7 +2524,7 @@ t-fast-exact:
 
 t-fast-exact-locked: $(TEST_PARALLEL_FAST_CANDIDATE) dev-package-verifier-ensure
 	ulimit -s unlimited && \
-	  $(TEST_PARALLEL_FAST_ACTIVE) --exact=$(EXACT_ONLY_MATCHED) $(T_FAST_EXACT_ARGS)
+	  $(LINKED_TEST_ENV) $(TEST_PARALLEL_FAST_ACTIVE) --exact=$(EXACT_ONLY_MATCHED) $(T_FAST_EXACT_ARGS)
 
 # Closed historical-failure corpus required by build_release_confirmation.v2.
 # This focused physical gate is uncached and exact; release qualification also
@@ -2527,7 +2541,7 @@ secure-release-regressions:
 secure-release-regressions-locked: $(TEST_PARALLEL_REL_CANDIDATE) dev-package-verifier-ensure
 	@tools/dev/secure-release-regressions-selftest.sh \
 	  '$(SECURE_RELEASE_REGRESSION_GROUPS)'
-	ulimit -s unlimited && $(TEST_PARALLEL_REL_ACTIVE) \
+	ulimit -s unlimited && $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE) \
 	  --exact=$(SECURE_RELEASE_REGRESSION_GROUPS) --no-cache
 
 # ── the front door ───────────────────────────────────────────────────────
@@ -3272,15 +3286,28 @@ hotswap-so: $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP)
 	echo "hotswap-so: linked read-only, unpublishable candidate $$so" >&2; \
 	echo "$$so"
 
-# make hotswap FILES="..." [PROBE=core.status]
-# Build the generation .so, then hand it to the native hot-swap path. NOTE: a
-# The dev-only `dev_hotswap` RPC executes inside the already-running isolated
-# dev node, so the committed router generation persists until its next process
-# restart.  This target never starts/stops any service and can never target the
-# canonical or soak lane.
-hotswap: $(VIEW_GEN_HEADERS)
-	@echo "hotswap: REFUSING — runtime publication and resident probing are contained; use make hotswap-so plus build/test verification" >&2
-	@exit 3
+# make hotswap                 the candidate ledger + coverage summary
+# make hotswap FILE=<tu.c>     that TU's verdict and its exact next command
+# make hotswap LEAF=<leaf>     the verdict for the TU owning a command leaf
+#
+# THE REFUSAL IS UNCHANGED for the thing it was refusing. `make hotswap
+# FILES="..."` (and its PROBE=) was the RUNTIME PUBLICATION form: build a
+# generation .so and hand it to the resident dev_hotswap RPC for in-process
+# publication plus resident probing. That is still refused with exit 3, and
+# nothing below activates, dlopens, publishes, or contacts a node — the
+# ledger is a read-only text pass over the config/*.def manifests.
+#
+# What changed is the bare goal. `make hotswap` — the single most obvious
+# thing an agent types — used to be a dead end that printed a refusal and
+# exited 3, so the ~9 second module loop went unused and everyone paid the
+# ~4m45s whole-program LTO rebuild instead. It now answers the question the
+# agent actually had: is this file hot-swappable, and if not, why?
+hotswap:
+	@if [ -n "$(FILES)$(PROBE)" ]; then \
+	  echo "hotswap: REFUSING — runtime publication and resident probing are contained; use make hotswap-so plus build/test verification" >&2; \
+	  exit 3; fi
+	@tools/dev/hotswap-candidates.sh \
+	  $(if $(FILE),$(FILE),$(if $(LEAF),--leaf $(LEAF),--all))
 
 .PHONY: hotswap-module-so
 # make hotswap-module-so FILE=app/controllers/src/status_native_handlers.c
@@ -3404,6 +3431,23 @@ hotswap-module-so: $(VIEW_GEN_HEADERS) $(HOTSWAP_ACTION_PLAN)
 	echo "hotswap-module-so: linked multi-leaf module candidate $$so ($$src)" >&2; \
 	echo "$$so"
 
+.PHONY: hotswap-verify
+# make hotswap-verify                  (every row of hotswap_swappable.def)
+# make hotswap-verify FILE=<tu.c>      (one row)
+#
+# Prove an allowlist row is LOADABLE, not merely listed: build the module .so
+# with the shipping recipe, then dlopen it and run the REAL
+# hotswap_module_admit() gauntlet against the REAL, compiler-emitted
+# `zcl_hotswap_module` (hotswap_verify_module_so, lib/hotswap, dev-only).
+#
+# Every hot-swap test in lib/test drives the gauntlet with a struct FABRICATED
+# in the test's own TU, so nothing in the tree ever loaded a real artifact. A
+# row whose TU emits no module symbol, or whose leaf body lives in a TU outside
+# its island, passed every gate and failed the first time a human tried it.
+# This is the gate that can see that. Needs no node and no datadir.
+hotswap-verify:
+	@tools/dev/hotswap-verify.sh $(if $(FILE),$(FILE),--all)
+
 .PHONY: hotswap-apply
 # make hotswap-apply HANDLER=core.status
 # make hotswap-apply FILE=app/controllers/src/status_native_handlers.c
@@ -3456,6 +3500,128 @@ hotswap-try:
 	  echo "hotswap-try: build/bin/zclassic23-dev missing — run make fast-rebuild first" >&2; exit 2; }; \
 	ZCL_HOTSWAP_PRELOAD="$$so" build/bin/zclassic23-dev \
 	  -datadir=$(HOME)/.zclassic-c23-dev -rpcport=18252 $(ARGS)
+
+# ── Module mode for the TEST SUITE ────────────────────────────────────────
+# `make t-hotswap ONLY=<group> FILE=<tu.c>` is the seconds-scale edit loop for
+# the real test suite: compile ONE swappable translation unit into a module
+# .so and run the group against the module through THE PRODUCTION LOADER,
+# instead of recompiling that TU into the test binary and relinking ~2,800
+# objects.
+#
+# What makes this trustworthy rather than a test-only shortcut:
+#   - the loader is hotswap_activate_local() in lib/hotswap/src/hotswap_activate.c
+#     — the same function ZCL_HOTSWAP_PRELOAD uses in zclassic23-dev — with the
+#     same publish hooks from tools/command/native_dev_hotswap.c. There is no
+#     second loader anywhere. Every production gate runs: path confinement, the
+#     dev-datadir classification, ABI version, the config/hotswap_swappable.def
+#     allowlist, leaf uniqueness, the module self_test, probe-before-publish
+#     against the leaf's declared output schema, and the all-or-nothing
+#     registry batch that re-checks READY + EFFECT_READ per leaf;
+#   - the module is compiled with $(TEST_FAST_CFLAGS) — byte-for-byte the flags
+#     that TU is compiled with INSIDE the test binary — and published under the
+#     harness's own compile-epoch directory. The harness refuses any .so from a
+#     different epoch, so "same source, same flags" is mechanical rather than a
+#     convention;
+#   - the run never reads or writes the test cache, and the mode is stamped on
+#     the banner, the SUITE VERDICT line and the headline.
+#
+# It is an EDIT LOOP, not a gate: `make t-fast ONLY=<group>` (or `make t`) is
+# still what proves the linked binary. See docs/DEVELOPING.md "Module mode".
+HOTSWAP_TEST_SO_DIR = $(BUILD_DIR)/hotswap/test-fast/$(TEST_FAST_COMPILE_EPOCH)
+
+.PHONY: hotswap-test-so
+# make hotswap-test-so FILE=app/controllers/src/status_native_handlers.c
+# make hotswap-test-so HANDLER=core.status
+# Compile one swappable TU (plus its config/hotswap_islands.def members) into a
+# module .so using the TEST harness's exact compile flags. Prints the .so path
+# as the LAST line. Never activates anything by itself.
+hotswap-test-so: $(VIEW_GEN_HEADERS)
+	@if [ -z "$(HANDLER)$(FILE)" ]; then \
+	  echo "usage: make hotswap-test-so FILE=app/controllers/src/status_native_handlers.c" >&2; \
+	  echo "   or: make hotswap-test-so HANDLER=core.status" >&2; exit 2; fi
+	@set -eu; \
+	rows="$$(tr '\n' ' ' < config/hotswap_swappable.def \
+	  | grep -oE 'HOTSWAP_SWAPPABLE\("[^"]*"[[:space:]]*,[[:space:]]*"[^"]*"\)')"; \
+	[ -n "$$rows" ] || { echo "hotswap-test-so: config/hotswap_swappable.def parsed to zero rows" >&2; exit 2; }; \
+	if [ -n "$(FILE)" ]; then \
+	  src="$(FILE)"; \
+	  printf '%s\n' "$$rows" | grep -Fq "HOTSWAP_SWAPPABLE(\"$$src\"" || { \
+	    echo "hotswap-test-so: reload_required: '$$src' is not a row in config/hotswap_swappable.def" >&2; \
+	    echo "  a TU outside that allowlist can only be proven by rebuilding: make t-fast ONLY=<group>" >&2; \
+	    exit 2; }; \
+	else \
+	  src="$$(printf '%s\n' "$$rows" | awk -v leaf='$(HANDLER)' -F '"' '{ n = split($$4, L, " "); for (i = 1; i <= n; i++) if (L[i] == leaf) { print $$2; exit } }')"; \
+	  [ -n "$$src" ] || { echo "hotswap-test-so: leaf '$(HANDLER)' is not on config/hotswap_swappable.def" >&2; exit 2; }; \
+	fi; \
+	[ -f "$$src" ] || { echo "hotswap-test-so: source does not exist: $$src" >&2; exit 2; }; \
+	mkdir -p "$(HOTSWAP_TEST_SO_DIR)"; \
+	safe="$$(printf '%s' "$$src" | tr -c 'A-Za-z0-9_.-' '_')"; \
+	compile_src="$$src"; \
+	island_rows="$$(tr '\n' ' ' < config/hotswap_islands.def \
+	  | grep -oE 'HOTSWAP_ISLAND\("[^"]*"[[:space:]]*,[[:space:]]*"[^"]*"\)' || true)"; \
+	members="$$(printf '%s\n' "$$island_rows" | awk -v owner="$$src" -F '"' '$$2 == owner { print $$4; exit }')"; \
+	if [ -n "$$members" ]; then \
+	  unity="$(HOTSWAP_TEST_SO_DIR)/$$safe.island.c"; \
+	  tmp_unity="$$(mktemp "$(HOTSWAP_TEST_SO_DIR)/.island.XXXXXX.c")"; \
+	  for member in $$members; do \
+	    [ -f "$$member" ] || { echo "hotswap-test-so: missing island member $$member" >&2; exit 2; }; \
+	    printf '#include "%s/%s"\n' '$(CURDIR)' "$$member" >> "$$tmp_unity"; \
+	  done; \
+	  printf '#include "%s/%s"\n' '$(CURDIR)' "$$src" >> "$$tmp_unity"; \
+	  if [ -f "$$unity" ] && cmp -s "$$tmp_unity" "$$unity"; then rm -f "$$tmp_unity"; \
+	  else mv -f "$$tmp_unity" "$$unity"; fi; \
+	  compile_src="$$unity"; \
+	fi; \
+	tmp_o="$$(mktemp "$(HOTSWAP_TEST_SO_DIR)/.module.XXXXXX.o")"; \
+	tmp_so="$$(mktemp "$(HOTSWAP_TEST_SO_DIR)/.module.XXXXXX.so")"; \
+	trap 'rm -f "$$tmp_o" "$$tmp_so"' EXIT HUP INT TERM; \
+	$(CC) $(TEST_FAST_CFLAGS) -fPIC -DZCL_HOTSWAP_MODULE_GEN \
+	  -DZCL_HOTSWAP_MODULE_SOURCE_TU=\"$$src\" \
+	  -c -o "$$tmp_o" "$$compile_src" >&2; \
+	$(CC) $(HOTSWAP_MODULE_LDFLAGS) -o "$$tmp_so" "$$tmp_o" >&2; \
+	so="$(HOTSWAP_TEST_SO_DIR)/$$safe.so"; \
+	mv -f -- "$$tmp_so" "$$so"; \
+	rm -f "$$tmp_o"; \
+	trap - EXIT HUP INT TERM; \
+	{ \
+	  printf '%s\n' 'schema=zcl.hotswap_test_module.v1'; \
+	  printf 'source_tu=%s\n' "$$src"; \
+	  printf 'epoch=%s\n' '$(TEST_FAST_COMPILE_EPOCH)'; \
+	  printf 'compiler=%s\n' '$(BUILD_COMPILER_ID)'; \
+	  printf 'cflags=%s\n' '$(TEST_FAST_CFLAGS) -fPIC -DZCL_HOTSWAP_MODULE_GEN'; \
+	  printf 'ldflags=%s\n' '$(HOTSWAP_MODULE_LDFLAGS)'; \
+	  printf 'artifact_sha256=%s\n' "$$(sha256sum "$$so" | awk '{print $$1}')"; \
+	} > "$$so.provenance"; \
+	echo "hotswap-test-so: linked test-profile module $$so ($$src)" >&2; \
+	echo "$$so"
+
+.PHONY: t-hotswap
+# make t-hotswap ONLY=<group> FILE=<tu.c>
+# make t-hotswap ONLY=<group> HANDLER=<leaf>
+# Build the module, then run the group against it in the ALREADY-LINKED test
+# harness. Deliberately does NOT depend on $(TEST_PARALLEL_FAST_CANDIDATE):
+# depending on it would relink the binary for the very edit the module exists
+# to avoid. If no harness has been built for this epoch yet it says so and
+# names the one command that builds one.
+t-hotswap:
+	@if [ -z "$(HANDLER)$(FILE)" ]; then \
+	  echo "usage: make t-hotswap ONLY=<group> FILE=<tu.c>" >&2; \
+	  echo "   or: make t-hotswap ONLY=<group> HANDLER=<leaf>" >&2; exit 2; fi
+	@[ -x "$(TEST_PARALLEL_FAST_CANDIDATE)" ] || { \
+	  echo "t-hotswap: no test harness for this compile epoch yet." >&2; \
+	  echo "  build one once:  make t-fast ONLY=$(ONLY)" >&2; \
+	  echo "  then every later edit to a swappable TU is a module build only." >&2; \
+	  exit 2; }
+	@set -eu; \
+	so="$$($(MAKE) --no-print-directory hotswap-test-so \
+	  $(if $(FILE),FILE=$(FILE),HANDLER=$(HANDLER)) | tail -1)"; \
+	case "$$so" in /*) ;; *) so="$(CURDIR)/$$so" ;; esac; \
+	[ -n "$$so" ] && [ -f "$$so" ] || { \
+	  echo "t-hotswap: module build did not yield a .so (see stderr)" >&2; exit 3; }; \
+	echo "t-hotswap: running $(ONLY) against $$so" >&2; \
+	ulimit -s unlimited && ZCL_HOTSWAP_TEST_AUTH=explicit-t-hotswap-v1 \
+	  ZCL_HOTSWAP_TEST_MODULE="$$so" \
+	  $(TEST_PARALLEL_FAST_ACTIVE) --only=$(ONLY) --no-cache
 
 # Full no-link syntax check across every TU in one shot (no incremental state).
 syntax-check: $(VIEW_GEN_HEADERS)
@@ -3586,7 +3752,7 @@ dev-loop-bench-selftest:
 # multiple peers plus an in-flight old-generation call; sim-fast remains the
 # broader seeded P2P suite.
 hotswap-sim: $(TEST_PARALLEL_FAST_CANDIDATE)
-	@ulimit -s unlimited && $(TEST_PARALLEL_FAST_ACTIVE) --only=hotswap_simnet
+	@ulimit -s unlimited && $(LINKED_TEST_ENV) $(TEST_PARALLEL_FAST_ACTIVE) --only=hotswap_simnet
 
 native-dev-loop-wait-selftest: dev-bin
 	@tools/dev/native-dev-loop-wait-selftest.sh
@@ -4710,7 +4876,7 @@ test:
 
 .PHONY: test-locked
 test-locked: $(TEST_PARALLEL_REL_CANDIDATE) dev-package-verifier-ensure
-	ulimit -s unlimited && $(TEST_PARALLEL_REL_ACTIVE) $(TEST_PARALLEL_ARGS)
+	ulimit -s unlimited && $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE) $(TEST_PARALLEL_ARGS)
 
 test-full: test_zcl
 	ulimit -s unlimited && $(TEST_ZCL_BIN)
@@ -4734,7 +4900,7 @@ chaos: zclassic23-chaos
 sim-fast: $(TEST_PARALLEL_REL_CANDIDATE) zclassic23-chaos
 	@set -eu; \
 	echo "==> chaos harness unit slice"; \
-	ulimit -s unlimited && $(TEST_PARALLEL_REL_ACTIVE) --only=chaos_harness; \
+	ulimit -s unlimited && $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE) --only=chaos_harness; \
 	echo "==> checked-in chaos scenarios"; \
 	$(MAKE) --no-print-directory chaos; \
 	echo "==> bounded chaos seed sweep ($(CHAOS_SEEDS) seeds via $(CHAOS_SWEEP_SCENARIO))"; \
@@ -4937,15 +5103,15 @@ simnet-nightly: $(TEST_PARALLEL_REL_CANDIDATE)
 	        if ! $(ZCLASSIC23_CHAOS_BIN) --scenario="$$s"; then step4=FAIL; fi; \
 	    done; \
 	    echo "  ==> ZCL_SIMNET_PERF=1 mixed smoke (simnet_fuzz + simnet_byzantine_cluster)"; \
-	    if ! ZCL_SIMNET_PERF=1 $(TEST_PARALLEL_REL_ACTIVE) --only=simnet_fuzz; then step4=FAIL; fi; \
-	    if ! ZCL_SIMNET_PERF=1 $(TEST_PARALLEL_REL_ACTIVE) --only=simnet_byzantine_cluster; then step4=FAIL; fi; \
+	    if ! ZCL_SIMNET_PERF=1 $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE) --only=simnet_fuzz; then step4=FAIL; fi; \
+	    if ! ZCL_SIMNET_PERF=1 $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE) --only=simnet_byzantine_cluster; then step4=FAIL; fi; \
 	else \
 	    step4=FAIL; \
 	fi; \
 	echo "══ simnet-nightly: step 5/6 — ZCL_UTXO_LADDER_HEAVY dense-MMB recompute ══"; \
 	if [ -f "$(UTXO_LADDER_LEAF_STORE)" ]; then \
 	    if ZCL_UTXO_LADDER_HEAVY=1 ZCL_UTXO_LADDER_LEAF_STORE="$(UTXO_LADDER_LEAF_STORE)" \
-	        $(TEST_PARALLEL_REL_ACTIVE) --only=utxo_root_ladder; then \
+	        $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE) --only=utxo_root_ladder; then \
 	        step5=PASS; \
 	    else \
 	        step5=FAIL; \
@@ -6859,7 +7025,29 @@ zcl_testcache_toolkey = $(strip $(shell printf '%s\0%s\0%s\0%s\0' \
 TESTCACHE_TOOLKEY_CPPFLAGS = \
   -DZCL_TESTCACHE_TOOLKEY=\"$(call zcl_testcache_toolkey,$(1),$(2))\"
 
+# ── Module mode: the test harness carries the REAL hot-swap loader ────────
+# Two per-object injections, and no other build is affected.
+#
+# (1) hotswap_activate.o gets -DZCL_DEV_BUILD. That TU is the ONLY place the
+#     dlopen/dlsym/dlclose activation core lives (everything else in it — the
+#     allowlist, the gate, admission, probe orchestration, telemetry — compiles
+#     in every build). Without this the test binary links the release refusal
+#     stub and `make t-hotswap` could not exist. Flipping the toggle for this
+#     one object keeps the loader source untouched (so check-hotswap-dev-only
+#     still sees `#ifdef ZCL_DEV_BUILD` verbatim) and keeps every OTHER TU
+#     release-shaped, so the "this binary is not a dev build" assertions in
+#     test_command_registry_catalog / test_golden_dev_cycle / test_hotswap_loader
+#     stay true. The activation gate itself is unchanged: a module still has to
+#     pass path confinement, the dev-datadir classification, the swappable
+#     allowlist, and probe-before-publish.
+# (2) test_parallel.o learns its own compile epoch, so the harness can REFUSE a
+#     module .so built under any other flag set. That is the mechanical half of
+#     "the module cannot diverge from the linked binary".
+HOTSWAP_TEST_LOADER_REL = lib/hotswap/src/hotswap_activate.o
 TEST_FAST_OBJECT_CFLAGS = $(TEST_FAST_CFLAGS)
+$(TEST_FAST_OBJ_DIR)/$(HOTSWAP_TEST_LOADER_REL): TEST_FAST_OBJECT_CFLAGS += -DZCL_DEV_BUILD
+$(TEST_FAST_OBJ_DIR)/lib/test/src/test_parallel.o: TEST_FAST_OBJECT_CFLAGS += \
+  -DZCL_TEST_COMPILE_EPOCH=\"$(TEST_FAST_COMPILE_EPOCH)\"
 $(TEST_FAST_OBJ_DIR)/lib/util/src/clientversion.o: TEST_FAST_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)
 $(TEST_FAST_OBJ_DIR)/lib/test/src/testcache.o: TEST_FAST_OBJECT_CFLAGS += \
   $(call TESTCACHE_TOOLKEY_CPPFLAGS,$(TEST_FAST_PROFILE),TEST_FAST_EPOCH_COMPILE_FLAGS)
@@ -6876,6 +7064,11 @@ $(TEST_FAST_OBJ_DIR)/lib/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
 # test_parallel minus -flto=auto (see the TEST_REL_* comment above). -MD -MP
 # records the complete include closure inside the exact epoch — no false green.
 TEST_REL_OBJECT_CFLAGS = $(TEST_REL_CFLAGS)
+# Same two module-mode injections as the fast tree (see above), so `make t` and
+# `make t-fast` agree about what the hot-swap loader is in a test binary.
+$(TEST_REL_OBJ_DIR)/$(HOTSWAP_TEST_LOADER_REL): TEST_REL_OBJECT_CFLAGS += -DZCL_DEV_BUILD
+$(TEST_REL_OBJ_DIR)/lib/test/src/test_parallel.o: TEST_REL_OBJECT_CFLAGS += \
+  -DZCL_TEST_COMPILE_EPOCH=\"$(TEST_REL_COMPILE_EPOCH)\"
 $(TEST_REL_OBJ_DIR)/lib/util/src/clientversion.o: TEST_REL_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)
 $(TEST_REL_OBJ_DIR)/lib/test/src/testcache.o: TEST_REL_OBJECT_CFLAGS += \
   $(call TESTCACHE_TOOLKEY_CPPFLAGS,$(TEST_REL_PROFILE),TEST_REL_EPOCH_COMPILE_FLAGS)
@@ -6960,8 +7153,17 @@ $(DEV_TSAN_OBJ_DIR)/lib/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
 #   2. `wal_checkpoint` — truncate WAL before SIGTERM so SQLite doesn't
 #      recover a half-checkpointed journal on boot.
 #   3. `tools/deploy_verify.sh` — poll `zclassic-cli getblockcount` until the
-#      node answers and diagnostics are ready, with a startup-sized deadline;
-#      freshness is exact source SHA-256 plus the running executable SHA-256.
+#      node answers and diagnostics are ready; freshness is exact source
+#      SHA-256 plus the running executable SHA-256.
+#
+# deploy_verify.sh has no deadline that means failure. It fails only on PROVEN
+# SILENCE — the candidate's /proc I/O, CPU and blocked-on-disk ticks (and, once
+# RPC opens, its height and verification receipts) all frozen for the full
+# silence limit — or on the candidate process not staying up. When its
+# reporting window expires while the node is still advancing it exits 3, and
+# THAT IS NOT A FAILED DEPLOY: this recipe leaves the candidate installed and
+# performs no rollback. Rolling a good binary back off a 7200rpm box because a
+# clock ran out is how a network becomes SSD-only.
 #
 # The wal_checkpoint step calls the in-tree tools/wal_checkpoint binary
 # (P12.4 — was an inline `sqlite3(1)` CLI invocation before, which failed
@@ -7098,6 +7300,8 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	        fi; \
 	        if [ "$$rollback_verify_rc" -eq 0 ]; then \
 	            echo "deploy: ROLLED_BACK — prior executable/config restored and verified" >&2; \
+	        elif [ "$$rollback_verify_rc" -eq 3 ]; then \
+	            echo "deploy: ROLLED_BACK (verification still in progress) — prior executable/config restored and demonstrably booting; the verification window expired while it was still advancing, which is a slow disk, not a failed rollback" >&2; \
 	        else \
 	            echo "deploy: CRITICAL — rollback verification failed; automation stopped" >&2; \
 	        fi; \
@@ -7224,10 +7428,22 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	    echo "deploy: refreshed PATH shadow $(HOME)/bin/zclassic23 -> $$SERVICE_BIN"; \
 	fi; \
 	systemctl --user restart zclassic23; \
+	set +e; \
 	ZCL_DEPLOY_STAGE="$(DEPLOY_VERIFY_STAGE)" \
 	ZCL_DEPLOY_EXPECT_SOURCE_ID="$(BUILD_SOURCE_ID)" \
 	ZCL_DEPLOY_EXPECT_ARTIFACT_SHA256="$$artifact_sha256" \
 	    ./tools/deploy_verify.sh; \
+	verify_rc=$$?; \
+	set -e; \
+	if [ "$$verify_rc" -eq 3 ]; then \
+	    echo "deploy: SLOW BOX — verification window expired while the new node was still making observable progress. The candidate stays installed and NOTHING is rolled back: a slow disk is not a failed deploy. Keep watching with ZCL_DEPLOY_VERIFY_WAIT=1 ZCL_DEPLOY_EXPECT_SOURCE_ID=$(BUILD_SOURCE_ID) ZCL_DEPLOY_EXPECT_ARTIFACT_SHA256=$$artifact_sha256 ./tools/deploy_verify.sh" >&2; \
+	    rollback_armed=0; \
+	    rm -f "$$candidate"; candidate=""; \
+	    rm -f "$$rollback_bin" "$$rollback_dropin"; rollback_bin=""; rollback_dropin=""; \
+	    trap - EXIT HUP INT TERM; \
+	    exit 3; \
+	fi; \
+	[ "$$verify_rc" -eq 0 ] || exit "$$verify_rc"; \
 	rollback_armed=0; \
 	rm -f "$$candidate"; candidate=""; \
 	rm -f "$$rollback_bin" "$$rollback_dropin"; rollback_bin=""; rollback_dropin=""; \
@@ -7242,17 +7458,41 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 # Ship one production binary to every host the operator names. `deploy` above
 # installs to THIS host only; `ship` builds one candidate, proves it, and puts
 # those exact bytes on each host, verifying every one against the source id
-# its running daemon reports and rolling that host back if it does not come
-# back healthy. Build-once/ship-many is deliberate: a per-host rebuild both
-# costs a full whole-program link per host and produces different bytes per
-# host, which makes "is every host running the same code" unanswerable by
-# comparison.
+# its running daemon reports. Build-once/ship-many is deliberate: a per-host
+# rebuild both costs a full whole-program link per host and produces DIFFERENT
+# bytes per host, which makes "is every host running the same code"
+# unanswerable by comparison.
+#
+# A host is rolled back only when ship PROVES a fault there: its candidate
+# process stopped moving entirely (no bytes, no CPU, no blocked-on-disk ticks)
+# or would not stay up. It is NOT rolled back for being slow. ship.sh used to
+# gate that rollback on four stopwatches, and a 7200rpm box booting a ~22 GB
+# datadir missed them routinely — across the whole fleet in one command.
+#
+#   exit 0  every named target qualified
+#   exit 1  a proven fault; that host was rolled back, with evidence printed
+#   exit 3  a target was still demonstrably progressing when its reporting
+#           window closed. NOT A FAILURE. Its candidate is installed and
+#           nothing was rolled back — re-run ship to re-check.
+#   exit 4  a target could not be observed at all. An unreachable host is an
+#           UNKNOWN, not a failed deploy; nothing was rolled back.
+#
 #   make ship                   # gate, build, then local + remote
 #   make ship SHIP_ARGS=--dry-run
 #   make ship SHIP_ARGS=--targets=remote
 .PHONY: ship
 ship:
-	@./tools/ship.sh $(SHIP_ARGS)
+	@set +e; ./tools/ship.sh $(SHIP_ARGS); ship_rc=$$?; set -e; \
+	case "$$ship_rc" in \
+	    0) ;; \
+	    3) echo "ship: SLOW BOX — a target was still making observable progress when its" >&2; \
+	       echo "      reporting window closed. Its candidate is INSTALLED and nothing was" >&2; \
+	       echo "      rolled back: a slow disk is not a failed deploy. Re-run 'make ship" >&2; \
+	       echo "      SHIP_ARGS=--targets=<that host>' to finish verifying it." >&2 ;; \
+	    4) echo "ship: UNKNOWN HOST — a target could not be observed. Its candidate is" >&2; \
+	       echo "      installed and nothing was rolled back; go look at the host." >&2 ;; \
+	esac; \
+	exit "$$ship_rc"
 
 .PHONY: seed-anchor-snapshot
 seed-anchor-snapshot:
@@ -7547,7 +7787,7 @@ evidence-selftest:
 # failover. install-standby installs the always-warm understudy unit; cutover
 # promotes a healthy candidate to canonical with a hard preflight + auto-
 # rollback. See deploy/zclassic23-standby.service and deploy/zclassic23-cutover.sh.
-.PHONY: install-standby cutover cutover-selftest migrate-role-names-selftest
+.PHONY: install-standby cutover cutover-selftest host-watchdog-selftest migrate-role-names-selftest
 
 install-standby:
 	@install -d "$(HOME)/.config/systemd/user"
@@ -7560,15 +7800,25 @@ install-standby:
 	@echo "installed zclassic23-standby.service. To arm the understudy:"
 	@echo "  systemctl --user daemon-reload && systemctl --user enable --now zclassic23-standby"
 
-# make cutover CANDIDATE_DATADIR=<path> [YES=1] [TIMEOUT=<secs>] [CANDIDATE_RPCPORT=<n>]
+# make cutover CANDIDATE_DATADIR=<path> [YES=1] [TIMEOUT=<secs>]
+#              [STALL_TIMEOUT=<secs>] [CANDIDATE_RPCPORT=<n>]
 # Owner-gated by design: without YES=1 the script prints the height comparison
 # and REFUSES. It never edits the canonical unit; it swaps datadirs underneath
-# it and auto-rolls-back if the promoted node does not reach the pre-cutover H*.
+# it.
+#
+# The auto-rollback fires ONLY on observed SILENCE (STALL_TIMEOUT, default 900s
+# with nothing about the promoted node changing — not H*, not its CPU, not the
+# ticks it spends blocked on the disk), never on elapsed time. TIMEOUT is a
+# REPORTING window: when it expires while the node is still advancing the
+# script exits 3 with CUTOVER: PROMOTED-CATCHING-UP and the promotion STANDS.
+# Exit 3 is not a failure. Reversing a live datadir promotion because a slow
+# disk missed a stopwatch is how a fleet loses its slow machines.
 cutover:
 	@[ -n "$(CANDIDATE_DATADIR)" ] || { echo "usage: make cutover CANDIDATE_DATADIR=<path> [YES=1]"; exit 2; }
 	@CANDIDATE_DATADIR="$(CANDIDATE_DATADIR)" \
 	 $(if $(CANDIDATE_RPCPORT),CANDIDATE_RPCPORT="$(CANDIDATE_RPCPORT)",) \
 	 $(if $(TIMEOUT),READY_TIMEOUT="$(TIMEOUT)",) \
+	 $(if $(STALL_TIMEOUT),READY_STALL_TIMEOUT="$(STALL_TIMEOUT)",) \
 	 ./deploy/zclassic23-cutover.sh $(if $(filter 1 yes YES true,$(YES)),--yes,)
 
 # cutover-selftest: hermetic fixture proof of the preflight comparison + the
@@ -7578,8 +7828,22 @@ cutover-selftest:
 	@bash -c 'set -uo pipefail; \
 	 set +e; out=$$(bash deploy/zclassic23-cutover-selftest.sh 2>&1); rc=$$?; set -e; \
 	 echo "$$out"; \
-	 if [ "$$rc" != "0" ] || ! echo "$$out" | grep -q "^cutover-selftest: PASS"; then \
+	 pass=1; case "$$out" in *"cutover-selftest: PASS"*) pass=0;; esac; \
+	 if [ "$$rc" != "0" ] || [ "$$pass" != "0" ]; then \
 	     echo "cutover-selftest: FAIL (rc=$$rc; no PASS line)"; \
+	     exit 1; \
+	 fi'
+
+# host-watchdog-selftest: hermetic proof that the SYSTEM-level watchdog never
+# turns one missed probe into NODE-DOWN. Injected probe/progress/manager hooks,
+# a sandbox state file, no root and no node.
+host-watchdog-selftest:
+	@bash -c 'set -uo pipefail; \
+	 set +e; out=$$(bash deploy/zclassic23-host-watchdog.sh --selftest 2>&1); rc=$$?; set -e; \
+	 echo "$$out"; \
+	 pass=1; case "$$out" in *"host-watchdog-selftest: PASS"*) pass=0;; esac; \
+	 if [ "$$rc" != "0" ] || [ "$$pass" != "0" ]; then \
+	     echo "host-watchdog-selftest: FAIL (rc=$$rc; no PASS line)"; \
 	     exit 1; \
 	 fi'
 
@@ -8039,6 +8303,19 @@ check-hotswap-dev-only:
 check-hotswap-eligible-scope:
 	@tools/lint/check_hotswap_eligible_scope.sh
 
+# LEAF-level denial, which the path-level scope gate above structurally cannot
+# express: core.chain.block.get and core.chain.transaction.get are owned by an
+# app-layer controller that is legitimately eligible and already admitted, and
+# both are ZCL_COMMAND_READY_READ, so every generic check passes them. They
+# RENDER BLOCK AND TRANSACTION BYTES — a swapped generation misreports the
+# chain to every RPC reader with validation untouched. The names and the
+# per-leaf reason are DATA in config/hotswap_denied_leaves.def, never in the
+# script. Fails closed: a missing or empty denylist is exit 2, not a pass.
+# --selftest runs first and proves the gate fires on a seeded fixture.
+check-hotswap-denied-leaves:
+	@tools/lint/check_hotswap_denied_leaves.sh --selftest
+	@tools/lint/check_hotswap_denied_leaves.sh
+
 # Scans the UNION of config/hotswap_eligible.def and
 # config/hotswap_swappable.def: every TU either manifest can recompile into a
 # .so must be free of mutable file-scope statics.
@@ -8060,6 +8337,22 @@ check-hotswap-service-islands:
 # test_make_lint_gates.c. See docs/work/HOTSWAP.md "Real module ABI".
 check-hotswap-swappable-shape:
 	@tools/lint/check_hotswap_swappable_shape.sh
+
+# The agent-facing hot-swap ledger (tools/dev/hotswap-candidates.sh) re-parses
+# the same config/*.def manifests the gates above parse, with its OWN awk
+# walkers, and an agent picks the ~9s module loop or the ~4m45s relink on what
+# it says. Two independent parsers of one manifest set rot quietly: a drifted
+# walk does not crash, it UNDER-REPORTS. This gate holds the tool to the counts
+# check-hotswap-swappable-shape already publishes, proves every
+# config/hotswap_denied_leaves.def leaf still comes back BLOCKED from the tool
+# (the denylist has to hold in the ADVICE, not just in the manifests), and
+# proves `make hotswap FILES=/PROBE=` still hits its refusal + exit 3 — that
+# runtime-publication form must stay unreachable now that the bare goal prints
+# a ledger. --selftest runs first and proves the gate fires on seeded
+# violations of both classes.
+check-hotswap-candidates-ledger:
+	@tools/lint/check_hotswap_candidates_ledger.sh --selftest
+	@tools/lint/check_hotswap_candidates_ledger.sh
 
 # Prove the RELEASE binary links none of the dev-only mutation entry points
 # (dispatcher, cycle, watcher, subprocess runner) NOR the native dev-lane
@@ -8956,6 +9249,7 @@ check-verification-coverage:
 check-ship-remote-transaction:
 	@echo "══ LINT: remote ship transaction rollback + process qualification ══"
 	@./tools/ship.sh --selftest
+	@./tools/ship_selftest.sh
 	@./tools/lint/check_ship_remote_transaction.sh
 
 # Fail-closed Z23 release packager + installer: checksum mismatch never
@@ -9452,6 +9746,22 @@ check-outparam-init-before-return:
 	@bash tools/lint/check_outparam_init_before_return.sh --selftest
 	@bash tools/lint/check_outparam_init_before_return.sh
 
+# Adding a lint gate is a TWO-FILE operation and nothing enforced the second
+# file: the Makefile gets a `check-*:` target plus a LINT_GATES line, and
+# tools/lint/run_lint.sh's gate_command() case table gets the invocation,
+# because the parallel driver execs each gate's script directly and never reads
+# the Make recipe. On 2026-08-26 three gates landed with the first half and
+# without the second in one session and `make lint` was FATAL (exit 2) tree-wide
+# until they were wired. The driver already errors loudly, but only when
+# somebody runs the umbrella, and it takes the whole run down — no gate results
+# at all. This asserts the same parity as a gate, both directions, plus a Make
+# target for every listed name (ZCL_LINT_SERIAL=1 needs it) and an existing
+# script behind every table entry.
+check-lint-gate-wiring:
+	@echo "══ LINT: every listed gate is wired in run_lint.sh, and back ══"
+	@./tools/lint/check_lint_gate_wiring.sh --selftest
+	@./tools/lint/check_lint_gate_wiring.sh
+
 # ── Lint umbrella ────────────────────────────────────────────────────────
 # LINT_GATES is the single ordered source of truth for the lint umbrella
 # (E11 check-doc-accuracy cross-checks it against DEFENSIVE_CODING.md).
@@ -9487,6 +9797,7 @@ ZCL_LINT_JOBS ?= $(shell j=$$(( $(ZCL_LINT_NPROC) * 3 / 4 )); \
                    if [ "$$j" -lt 8 ]; then j=8; fi; \
                    if [ "$$j" -gt 24 ]; then j=24; fi; echo "$$j")
 LINT_GATES := \
+    check-lint-gate-wiring \
     check-no-retired-agent-protocol \
     check-build-epoch-integrity \
     check-checkout-lock \
@@ -9500,9 +9811,11 @@ LINT_GATES := \
     check-package-anatomy \
     check-hotswap-dev-only \
     check-hotswap-eligible-scope \
+    check-hotswap-denied-leaves \
     check-hotswap-static-state \
     check-hotswap-service-islands \
     check-hotswap-swappable-shape \
+    check-hotswap-candidates-ledger \
     check-release-no-dev-symbols \
     check-stable-publish-contained \
     check-raw-sqlite \
@@ -9635,7 +9948,9 @@ LINT_GATES := \
     check-installed-acceptance-tools \
     check-standalone-tools-link \
     check-no-operator-paths \
-    check-no-unattended-publish
+    check-no-unattended-publish \
+    check-tor-dial-prewarm \
+    check-fleet-source-status
 
 # The driver execs gate scripts directly, so the two gates backed by a built
 # tool (check-core-seal, check-observability-pairing, and the package root
@@ -9796,9 +10111,9 @@ ci: vendor-ready lint bench-regress zclassic23 $(TEST_PARALLEL_REL_CANDIDATE)
 	@# gets lucky and stores its own PASS — after which G is skipped forever.
 	@# The retry would launder a flake into a permanent cached green. Forcing
 	@# the retry cold keeps it the independent second opinion it claims to be.
-	@ulimit -s unlimited; if $(TEST_PARALLEL_REL_ACTIVE); then :; else \
+	@ulimit -s unlimited; if $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE); then :; else \
 		echo "[ci] !! test_parallel FAILED first pass — retrying ONCE, COLD (--no-cache: a cached retry would re-run only the failing group and launder a flake into a stored PASS) !!"; \
-		ulimit -s unlimited; $(TEST_PARALLEL_REL_ACTIVE) --no-cache; \
+		ulimit -s unlimited; $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE) --no-cache; \
 	fi
 	@echo ""
 	@echo "══ CI: mvp-gates (hermetic MVP acceptance #3/#5/#7) ══"

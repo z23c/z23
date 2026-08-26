@@ -252,61 +252,23 @@ char *zcl_native_swap_list_body(const struct json_value *args,
 #include "kernel/command_registry.h"
 #include "command/native_command.h"
 
-static void tramp_name_list(const struct zcl_command_request *request,
-                            struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_name_list_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(tramp_name_list, zcl_native_name_list_body)
 
-static void tramp_name_resolve(const struct zcl_command_request *request,
-                               struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_name_resolve_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(tramp_name_resolve, zcl_native_name_resolve_body)
 
-static void tramp_tokens(const struct zcl_command_request *request,
-                         struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_zslp_listtokens_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(tramp_tokens, zcl_native_zslp_listtokens_body)
 
-static void tramp_msg_inbox(const struct zcl_command_request *request,
-                            struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_msg_inbox_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(tramp_msg_inbox, zcl_native_msg_inbox_body)
 
-static void tramp_market_list(const struct zcl_command_request *request,
-                              struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_zmarket_list_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(tramp_market_list, zcl_native_zmarket_list_body)
 
-static void tramp_market_status(const struct zcl_command_request *request,
-                                struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_zmarket_status_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(tramp_market_status, zcl_native_zmarket_status_body)
 
-static void tramp_market_content_list(
-    const struct zcl_command_request *request,
-    struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_zmarket_content_list_body,
-                          reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(tramp_market_content_list, zcl_native_zmarket_content_list_body)
 
-static void tramp_swap_chains(const struct zcl_command_request *request,
-                              struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_swap_chains_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(tramp_swap_chains, zcl_native_swap_chains_body)
 
-static void tramp_swap_list(const struct zcl_command_request *request,
-                            struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_swap_list_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(tramp_swap_list, zcl_native_swap_list_body)
 
 static const struct zcl_hotswap_leaf_replacement k_leaves[] = {
     { "app.names.list",      tramp_name_list },
@@ -334,11 +296,7 @@ ZCL_HOTSWAP_EXPORT_LEAVES(k_leaves, sizeof(k_leaves) / sizeof(k_leaves[0]))
 #include "kernel/command_registry.h"
 #include "command/native_command.h"
 
-static void module_tramp_name_list(
-    const struct zcl_command_request *request, struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_name_list_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_name_list, zcl_native_name_list_body)
 
 /* The module's own health hook — runs before the loader publishes it. Kept
  * node-independent (no RPC): a structural OK. */
@@ -349,6 +307,37 @@ static bool module_selftest_name_list(char *err, size_t cap)
     return true;
 }
 
-ZCL_HOTSWAP_MODULE("app.names.list", module_tramp_name_list,
-                   module_selftest_name_list)
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_name_resolve, zcl_native_name_resolve_body)
+
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_tokens, zcl_native_zslp_listtokens_body)
+
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_msg_inbox, zcl_native_msg_inbox_body)
+
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_market_list, zcl_native_zmarket_list_body)
+
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_market_status, zcl_native_zmarket_status_body)
+
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_market_content_list, zcl_native_zmarket_content_list_body)
+
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_swap_chains, zcl_native_swap_chains_body)
+
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_swap_list, zcl_native_swap_list_body)
+
+/* Mirrors k_leaves above — all nine app-layer READ projections (ZNAM names,
+ * ZSLP tokens, messaging inbox, market listings, swap views) in ONE batch.
+ * None of these is consensus-bearing: each renders an index or catalog the
+ * node already holds. */
+static const struct zcl_hotswap_leaf k_module_leaves[] = {
+    { "app.names.list",          module_tramp_name_list },
+    { "app.names.resolve",       module_tramp_name_resolve },
+    { "app.tokens.list",         module_tramp_tokens },
+    { "app.messaging.inbox",     module_tramp_msg_inbox },
+    { "app.market.list",         module_tramp_market_list },
+    { "app.market.status",       module_tramp_market_status },
+    { "app.market.content.list", module_tramp_market_content_list },
+    { "app.swap.chains",         module_tramp_swap_chains },
+    { "app.swap.list",           module_tramp_swap_list },
+};
+
+ZCL_HOTSWAP_MODULE_LEAVES(k_module_leaves, module_selftest_name_list)
 #endif /* ZCL_HOTSWAP_MODULE_GEN */

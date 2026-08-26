@@ -23,6 +23,8 @@ HOTSWAP_PROBE_CASE("command.names.list.default.v1", "command",
     "app.names.list", "{}", "zcl.app_name_index.v1", 8192)
 HOTSWAP_PROBE_CASE("command.metaverse.property.list.default.v1", "command",
     "metaverse.property.list", "{}", "zcl.metaverse_property_list.v1", 8192)
+HOTSWAP_PROBE_CASE("command.ops.dash.summary.default.v1", "command",
+    "ops.debug.dash.summary", "{}", "zcl.operator_summary.v1", 8192)
 HOTSWAP_PROBE_CASE("command.ops.logs.bounded.v1", "command",
     "ops.logs",
     "{\"level\":\"all\",\"max_lines\":1,\"pattern\":\"hotswap\",\"since_secs\":1}",
@@ -69,3 +71,18 @@ HOTSWAP_PROBE_CASE("service.shop.want.list.default.v1", "service",
 HOTSWAP_PROBE_CASE("service.vault.intent.decision.story.v1", "service",
     "dev.test.story", "{\"owner\":\"transaction_intent\"}",
     "zcl.vault_intent_decision_story.v1", 2048)
+/* The hermetic case. Unlike every command case above, dispatching this one
+ * needs no resident node and no datadir: the empty input derives the NEW_USER
+ * row — the free allowance — from compiled-in constants alone. */
+HOTSWAP_PROBE_CASE("command.zcode.package.policy.limits.free.v1", "command",
+    "zcode.package.policy.limits", "{}",
+    "zcl.zcode_package_policy_limits.v1", 4096)
+/* Wave 2 probes. Each dispatches its file's declared probe leaf with the empty
+ * input its catalog row accepts, and is budgeted at or under that row's
+ * byte budget. */
+HOTSWAP_PROBE_CASE("command.store.catalog.default.v1", "command",
+    "app.store.catalog", "{}", "zcl.store_catalog.v1", 8192)
+HOTSWAP_PROBE_CASE("command.wallet.security.status.default.v1", "command",
+    "core.wallet.security.status", "{}", "zcl.wallet_security.v1", 2048)
+HOTSWAP_PROBE_CASE("command.status.journey.default.v1", "command",
+    "status", "{}", "zcl.status_journey.v1", 4096)

@@ -1,0 +1,72 @@
+/* THE LEAF DENYLIST — command leaves that may NEVER be hot-swappable,
+ * for a reason no generic eligibility check can express.
+ *
+ * Consumer must define:
+ *   HOTSWAP_DENIED_LEAF(leaf, reason)
+ *
+ * `leaf`   the canonical dotted command-leaf path, exactly as declared in the
+ *          config/commands catalog.
+ * `reason` one line, present tense, saying what a swapped generation of that
+ *          leaf could misreport. The reason lives HERE, next to the name, on
+ *          purpose: a bare list of strings in a shell script is a list nobody
+ *          can defend, and the next lane deletes it as unexplained.
+ *
+ * ── WHY A SECOND, LEAF-LEVEL LIST EXISTS ───────────────────────────────────
+ * config/hotswap_eligible.def and config/hotswap_swappable.def are ALLOWLISTS
+ * of translation units, and check-hotswap-eligible-scope /
+ * check-hotswap-swappable-shape police them by PATH: nothing under core/,
+ * lib/consensus/, lib/validation/, lib/storage/, lib/net/, lib/coins/ or
+ * app/jobs/ may ever appear. That root check cannot express the rule below,
+ * because the owning TU here is app/controllers/src/chain_native_handlers.c —
+ * a legitimately eligible app-layer controller that is ALREADY admitted today
+ * (probe core.consensus.utxo.audit). What has to be denied is two LEAF NAMES
+ * inside an otherwise-eligible file, not a path.
+ *
+ * Nor does "READY + read-only" express it. Both leaves below are
+ * ZCL_COMMAND_READY_READ and would pass every existing eligibility gate
+ * cleanly. That is exactly the problem: they RENDER BLOCK AND TRANSACTION
+ * BYTES. A swapped renderer misreports chain data to every reader on the RPC
+ * surface — wallets, explorers, other nodes' operators — without touching one
+ * line of validation, and the node's own consensus state stays perfectly
+ * consistent while it lies about what it holds. "Read-only" is not the right
+ * test on a rendering path; "does a caller treat this output as the chain
+ * itself" is.
+ *
+ * Until 2026-08-26 these two were merely NOT LISTED anywhere, which is an
+ * accident rather than a decision: a future lane that passed the generic
+ * checks could have admitted them and no gate would have objected. This file
+ * is the decision, and check-hotswap-denied-leaves is its enforcement.
+ *
+ * ── HOW IT IS ENFORCED ─────────────────────────────────────────────────────
+ * check-hotswap-denied-leaves (make lint; --selftest proves it fires on a
+ * seeded fixture) refuses if any leaf below appears as a quoted token in ANY
+ * hot-swap manifest — config/hotswap_eligible.def probes,
+ * config/hotswap_swappable.def leaf lists, config/hotswap_probe_cases.def
+ * operations, config/hotswap_services.def probe leaves, and every other
+ * config/hotswap*.def / config/hotfork_capsules.def, including ones added
+ * after this file was written. The gate fails CLOSED: a missing, unreadable
+ * or empty denylist is exit 2, never "nothing is denied".
+ *
+ * It also scans the manifest that is written in C. The Tier-1 generation path
+ * stages whatever a TU's ZCL_HOTSWAP_EXPORT_LEAVES table exports and
+ * hotswap_leaf_stage_thunk() (lib/hotswap/src/hotswap_loader.c) applies NO
+ * per-leaf allowlist, so both leaves below were being re-pointed by a
+ * recompiled generation of app/controllers/src/chain_native_handlers.c while
+ * appearing in no .def at all. That is the state this file was written into,
+ * and the gate found it. The two trampolines are gone; the audit leaf remains.
+ *
+ * ── ADDING OR REMOVING A ROW ───────────────────────────────────────────────
+ * Adding: state the misreport in the reason. Removing: a row here encodes an
+ * OWNER decision, not a lint preference. Do not delete one to unblock a lane.
+ *
+ * Keep this DATA ONLY (no C tokens beyond the macro invocations). */
+
+HOTSWAP_DENIED_LEAF("core.chain.block.get",
+    "Renders a full block record (header + transactions) from the local block "
+    "index; a swapped renderer misreports chain contents to every RPC reader "
+    "without touching validation.")
+
+HOTSWAP_DENIED_LEAF("core.chain.transaction.get",
+    "Renders decoded transaction fields and bounded raw_hex pages from mempool "
+    "or the block index; a swapped renderer misreports transaction bytes a "
+    "caller treats as authoritative, again with validation untouched.")

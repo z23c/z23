@@ -49,6 +49,15 @@ HOTSWAP_ELIGIBLE("app/controllers/src/chain_native_handlers.c") HOTSWAP_PROBE("c
 HOTSWAP_ELIGIBLE("app/controllers/src/app_native_handlers.c") HOTSWAP_PROBE("app.names.list")
 HOTSWAP_ELIGIBLE("app/controllers/src/metaverse_controller.c") HOTSWAP_PROBE("metaverse.property.list")
 HOTSWAP_ELIGIBLE("app/controllers/src/diagnostics_native_handlers.c") HOTSWAP_PROBE("ops.logs")
+HOTSWAP_ELIGIBLE("app/controllers/src/ops_native_handlers.c") HOTSWAP_PROBE("ops.debug.dash.summary")
+
+/* Wave 2 of the swappable surface: read-only STORE, WALLET-SECURITY and
+ * STATUS-JOURNEY projections. Each of these files also owns leaves that
+ * mutate; those are absent from the file's row in hotswap_swappable.def and
+ * the loader refuses to re-point a leaf that is not on the row. */
+HOTSWAP_ELIGIBLE("app/controllers/src/store_buyer_native_handlers.c") HOTSWAP_PROBE("app.store.catalog")
+HOTSWAP_ELIGIBLE("app/controllers/src/wallet_security_native_handlers.c") HOTSWAP_PROBE("core.wallet.security.status")
+HOTSWAP_ELIGIBLE("app/controllers/src/status_journey_native_handler.c") HOTSWAP_PROBE("status")
 
 /* Still reload-required (NOT eligible), by design:
  *   - REST (app/controllers/src/api_controller_routes.c) and diagnostics
@@ -57,3 +66,14 @@ HOTSWAP_ELIGIBLE("app/controllers/src/diagnostics_native_handlers.c") HOTSWAP_PR
  *   - diagnostics_registry.c holds mutable file-scope statics
  *     (g_state_subsystems_csv, non-const p_state[]).
  * Re-enable REST/diagnostics only behind one unified resident provider table. */
+
+/* The PURE decision leaf — and the only row here whose declared probe is
+ * computable IN-PROCESS: no running node, no datadir, no RPC, no wall-clock.
+ * Every row above is an RPC front door whose module trampoline calls
+ * zcl_native_bridge_run() into a body that issues a loopback RPC, so
+ * probe-before-publish for those rows needs a resident node and correctly
+ * refuses at stage=probe without one. This row is the hermetic case: its body
+ * answers from `args` plus compiled-in constants, so the identical gauntlet
+ * runs to completion in a throwaway CLI process. See
+ * app/controllers/src/policy_native_handlers.c. */
+HOTSWAP_ELIGIBLE("app/controllers/src/policy_native_handlers.c") HOTSWAP_PROBE("zcode.package.policy.limits")

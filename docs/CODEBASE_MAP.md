@@ -167,7 +167,7 @@ page changing with it.
 <!--   app_shape_folders    = directories directly under app/                        -->
 <!-- Fix a mismatch with `tools/scripts/check_doc_counts.sh --fix`, never by hand.  -->
 
-test_groups: 967
+test_groups: 970
 port_interfaces: 13
 persistence_adapters: 14
 condition_registrations: 52
@@ -230,9 +230,13 @@ layer in `lib/hotswap/`; the dev-only hot-swap RPC and generation commit are
 registered by `tools/command/native_dev_hotswap.{c,h}` on the exact isolated
 dev datadir. `dev_hotswap` mutation is live on the armed `zcl23-dev` lane,
 gated on `-hotswap-activate` + `ZCL_HOTSWAP_ACTIVATE=1` + the exact dev
-datadir (canonical hard-refused); only the six read-only leaves on
-`config/hotswap_swappable.def` can ever activate. The release build keeps a
-refusal stub.
+datadir (canonical hard-refused); only the READY read-only leaves listed in
+`config/hotswap_swappable.def` can ever activate — read that file for the
+current set rather than a number quoted here. Each swappable file also names
+one probe leaf the loader dispatches before it publishes anything; most of
+them are RPC front doors and so need a running node to probe, while
+`zcode.package.policy.limits` is a pure decision leaf that probes in-process
+with no node and no datadir. The release build keeps a refusal stub.
 `tools/dev/hotswap-running-dev.sh` is a contained former persistent transport;
 it always refuses. There is no auto-reload fallback during containment.
 

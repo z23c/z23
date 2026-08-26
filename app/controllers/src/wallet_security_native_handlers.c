@@ -109,3 +109,47 @@ void zcl_native_handle_wallet_security_encrypt(
     free(params);
     reply->error.mutated = true;
 }
+
+/* ── Hot-swappable leaves ──────────────────────────────────────────────────
+ * The wallet's READ-ONLY security posture: whether a keystore exists and
+ * whether it is locked. Every other leaf in this file — lock, unlock,
+ * encrypt — changes keystore state and is deliberately absent from both
+ * tables. Read-only is the whole reason this one may move at runtime. */
+#ifdef ZCL_HOTSWAP_GEN
+#define ZCL_HOTSWAP_PROBE_LEAF "core.wallet.security.status"
+#include "hotswap/hotswap.h"
+static const struct zcl_hotswap_leaf_replacement k_wallet_security_leaves[] = {
+    { "core.wallet.security.status", zcl_native_handle_wallet_security_status },
+};
+ZCL_HOTSWAP_EXPORT_LEAVES(
+    k_wallet_security_leaves,
+    sizeof(k_wallet_security_leaves) / sizeof(k_wallet_security_leaves[0]))
+#endif /* ZCL_HOTSWAP_GEN */
+
+#ifdef ZCL_HOTSWAP_MODULE_GEN
+#include "hotswap/hotswap_module.h"
+#include <stdio.h>
+static const struct zcl_hotswap_leaf k_wallet_security_module_leaves[] = {
+    { "core.wallet.security.status", zcl_native_handle_wallet_security_status },
+};
+static bool wallet_security_module_selftest(char *error, size_t error_cap)
+{
+    const size_t n = sizeof(k_wallet_security_module_leaves) /
+                     sizeof(k_wallet_security_module_leaves[0]);
+    for (size_t i = 0; i < n; i++) {
+        if (!k_wallet_security_module_leaves[i].name ||
+            !k_wallet_security_module_leaves[i].name[0] ||
+            !k_wallet_security_module_leaves[i].fn) {
+            if (error && error_cap)
+                (void)snprintf(error, error_cap,
+                               "wallet security leaf %zu has no name or no "
+                               "body",
+                               i);
+            return false;
+        }
+    }
+    return true;
+}
+ZCL_HOTSWAP_MODULE_LEAVES(k_wallet_security_module_leaves,
+                          wallet_security_module_selftest)
+#endif /* ZCL_HOTSWAP_MODULE_GEN */

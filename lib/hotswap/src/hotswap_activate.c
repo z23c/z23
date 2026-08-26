@@ -967,7 +967,119 @@ bool hotswap_activate_local(const char *so_path, const char *resolved_datadir,
                         /*require_authorization=*/false, &local, report);
 }
 
+bool hotswap_verify_module_so(const char *so_path, const char *expect_tu,
+                              struct hotswap_activate_report *report)
+{
+    if (!report)
+        return false;
+    memset(report, 0, sizeof(*report));
+    report->verify_only = true;
+    report->rolled_back = true;
+
+    if (!so_path || !so_path[0]) {
+        act_copy(report->stage, sizeof(report->stage), "precheck");
+        act_copy(report->error, sizeof(report->error), "empty so_path");
+        return false;
+    }
+
+    /* RTLD_LOCAL so the candidate's symbols never join the global scope and
+     * interpose on anything the verifying process later resolves. RTLD_LAZY
+     * because this call deliberately does NOT run module code: function
+     * imports the resident node would satisfy stay unbound, which is exactly
+     * what lets a build-time verifier open an artifact with no node running.
+     * Data and address-taken relocations still resolve eagerly, so a module
+     * that references a body defined in a TU outside its own island still
+     * fails here — correctly, since re-pointing such a leaf would dispatch
+     * into resident code and the swap would silently do nothing for it. */
+    void *handle = dlopen(so_path, RTLD_LAZY | RTLD_LOCAL);
+    if (!handle) {
+        const char *e = dlerror();
+        act_copy(report->stage, sizeof(report->stage), "dlopen");
+        act_copy(report->error, sizeof(report->error), e ? e : "dlopen failed");
+        return false;
+    }
+
+    (void)dlerror();
+    const struct zcl_hotswap_module *module =
+        (const struct zcl_hotswap_module *)dlsym(handle,
+                                                 ZCL_HOTSWAP_MODULE_SYMBOL);
+    const char *sym_err = dlerror();
+    if (!module || sym_err) {
+        act_copy(report->stage, sizeof(report->stage), "symbol");
+        snprintf(report->error, sizeof(report->error),
+                 "'%s' not exported (%s)", ZCL_HOTSWAP_MODULE_SYMBOL,
+                 sym_err ? sym_err : "resolved to NULL");
+        dlclose(handle);
+        return false;
+    }
+
+    act_copy(report->source_tu, sizeof(report->source_tu),
+             module->source_tu ? module->source_tu : "");
+    report->leaf_count = module->leaf_count;
+    if (module->leaves) {
+        size_t used = 0;
+        for (uint32_t i = 0; i < module->leaf_count &&
+                             i < ZCL_HOTSWAP_MODULE_MAX_LEAVES; i++) {
+            const char *nm = module->leaves[i].name;
+            if (!nm)
+                continue;
+            int w = snprintf(report->leaves + used,
+                             sizeof(report->leaves) - used, "%s%s",
+                             used ? "," : "", nm);
+            if (w < 0 || (size_t)w >= sizeof(report->leaves) - used)
+                break;
+            used += (size_t)w;
+        }
+    }
+    const char *probe = hotswap_module_probe_leaf(
+        module->source_tu ? module->source_tu : "");
+    act_copy(report->probe_leaf, sizeof(report->probe_leaf),
+             probe ? probe : "");
+
+    /* A module cannot mislabel its allowlist row: the build recipe stamps
+     * -DZCL_HOTSWAP_MODULE_SOURCE_TU, so a mismatch means the artifact and the
+     * file the caller believes it built have diverged. */
+    if (expect_tu && expect_tu[0] &&
+        strcmp(expect_tu, module->source_tu ? module->source_tu : "") != 0) {
+        act_copy(report->stage, sizeof(report->stage), "source_tu");
+        snprintf(report->error, sizeof(report->error),
+                 "artifact declares '%s', expected '%s'",
+                 module->source_tu ? module->source_tu : "(null)", expect_tu);
+        dlclose(handle);
+        return false;
+    }
+
+    /* The REAL gauntlet the resident loader runs — not a copy of it. */
+    if (!hotswap_module_admit(module, report->stage, sizeof(report->stage),
+                              report->error, sizeof(report->error))) {
+        dlclose(handle);
+        return false;
+    }
+
+    act_copy(report->stage, sizeof(report->stage), "verified");
+    report->ok = true;
+    report->rolled_back = false;
+    dlclose(handle);
+    return true;
+}
+
 #else /* !ZCL_DEV_BUILD — release: no dynamic activation surface */
+
+bool hotswap_verify_module_so(const char *so_path, const char *expect_tu,
+                              struct hotswap_activate_report *report)
+{
+    (void)so_path;
+    (void)expect_tu;
+    if (!report)
+        return false;
+    memset(report, 0, sizeof(*report));
+    report->verify_only = true;
+    report->rolled_back = true;
+    act_copy(report->stage, sizeof(report->stage), "release");
+    act_copy(report->error, sizeof(report->error),
+             "hot-swap module load verification unavailable in release build");
+    return false;
+}
 
 bool zcl_hotswap_hotfork_visit_so(
     const char *so_path, const char *expected_sha256,

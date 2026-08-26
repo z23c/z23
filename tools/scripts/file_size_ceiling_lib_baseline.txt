@@ -92,3 +92,13 @@ lib/vcs/src/zcode_contributor_binding.c 983
 lib/vcs/src/zcode_discovery_projection.c 1112
 lib/vcs/src/zcode_science.c 1411
 lib/zswap/src/zswap_ceremony.c 853
+
+# Arrived on origin/main already oversized and unrecorded, so the WARN tier
+# reported them as NEW and returned non-zero, which in turn failed the E1
+# lib/domain self-test in test_make_lint_gates_shard_07. Recording them here
+# is what this file is for: it makes the growth visible and holds the line at
+# today's size. It is NOT a blessing — vcs_devloop.c is three times the
+# ceiling and wants a real split along a seam, not a shave.
+lib/vcs/src/vcs_devloop.c 2390
+lib/vcs/src/zcode_work_node.c 1334
+lib/vcs/src/zcode_workspace_manifest.c 846

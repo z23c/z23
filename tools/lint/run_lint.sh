@@ -33,6 +33,7 @@
 #
 # Usage:
 #   tools/lint/run_lint.sh [--jobs N] [--bin-dir DIR] [--list] GATE...
+#   tools/lint/run_lint.sh --print-command GATE   (one gate's exact command)
 #   tools/lint/run_lint.sh --cache GATE...       (opt in to the result cache)
 #   tools/lint/run_lint.sh --cold-audit GATE...  (run all fresh, verify hits)
 #   tools/lint/run_lint.sh --worker GATE         (internal: xargs child)
@@ -77,6 +78,7 @@ SERIAL_PROLOGUE=" check-git-hooks-installed "
 # entry is a LOUD driver error (exit 2), never a silent skip.
 gate_command() {
     case "$1" in
+        check-lint-gate-wiring)            echo './tools/lint/check_lint_gate_wiring.sh --selftest && ./tools/lint/check_lint_gate_wiring.sh' ;;
         check-fuzz-artifact-ledger)        echo './tools/lint/check_fuzz_artifact_replay.sh --ledger-only' ;;
         check-no-retired-agent-protocol)   echo './tools/lint/check_no_retired_agent_protocol.sh' ;;
         check-build-epoch-integrity)       echo 'tools/dev/build-epoch-integrity-cached.sh' ;;
@@ -91,9 +93,11 @@ gate_command() {
         check-malloc)                      echo './tools/lint/check_malloc.sh' ;;
         check-hotswap-dev-only)            echo './tools/lint/check_hotswap_dev_only.sh' ;;
         check-hotswap-eligible-scope)      echo 'tools/lint/check_hotswap_eligible_scope.sh' ;;
+        check-hotswap-denied-leaves)       echo 'tools/lint/check_hotswap_denied_leaves.sh --selftest && tools/lint/check_hotswap_denied_leaves.sh' ;;
         check-hotswap-static-state)        echo 'tools/lint/check_hotswap_static_state.sh' ;;
         check-hotswap-service-islands)     echo 'tools/lint/check_hotswap_service_islands.sh' ;;
         check-hotswap-swappable-shape)     echo 'tools/lint/check_hotswap_swappable_shape.sh' ;;
+        check-hotswap-candidates-ledger)   echo 'tools/lint/check_hotswap_candidates_ledger.sh --selftest && tools/lint/check_hotswap_candidates_ledger.sh' ;;
         check-release-no-dev-symbols)      echo 'tools/lint/check_release_no_dev_symbols.sh' ;;
         check-stable-publish-contained)    echo 'bash tools/scripts/check_stable_publish_containment.sh --self-test && bash tools/scripts/check_stable_publish_containment.sh' ;;
         check-raw-sqlite)                  echo 'tools/scripts/check_raw_sqlite.sh' ;;
@@ -141,7 +145,7 @@ gate_command() {
         check-proof-server-pin)            echo './tools/lint/check_proof_server_pin.sh' ;;
         check-promotion-receipt-chain)     echo './tools/lint/check_promotion_receipt_chain.sh' ;;
         check-verification-coverage)       echo './tools/lint/check_verification_coverage.sh' ;;
-        check-ship-remote-transaction)     echo './tools/ship.sh --selftest && ./tools/lint/check_ship_remote_transaction.sh' ;;
+        check-ship-remote-transaction)     echo './tools/ship.sh --selftest && ./tools/ship_selftest.sh && ./tools/lint/check_ship_remote_transaction.sh' ;;
         check-z23-release-install)         echo 'bash packaging/release/build_release.sh --selftest && bash tools/scripts/install_z23.sh --selftest' ;;
         check-identity-parser-single)      echo './tools/lint/check_identity_parser_single.sh --selftest && ./tools/lint/check_identity_parser_single.sh' ;;
         check-source-identity-authority)   echo './tools/lint/check_source_identity_authority.sh --selftest && ./tools/lint/check_source_identity_authority.sh' ;;
@@ -158,6 +162,9 @@ gate_command() {
         check-live-datadir-isolation)      echo './tools/lint/check_live_datadir_isolation.sh --selftest && ./tools/lint/check_live_datadir_isolation.sh' ;;
         check-no-operator-paths)           echo './tools/lint/check_no_operator_paths.sh --selftest && ./tools/lint/check_no_operator_paths.sh' ;;
         check-no-unattended-publish)       echo './tools/lint/check_no_unattended_publish.sh --selftest && ./tools/lint/check_no_unattended_publish.sh' ;;
+        check-no-wallclock-assertion)      echo './tools/lint/check_no_wallclock_assertion.sh --selftest && ./tools/lint/check_no_wallclock_assertion.sh' ;;
+        check-tor-dial-prewarm)            echo './tools/scripts/check_tor_dial_prewarm.sh' ;;
+        check-fleet-source-status)         echo './tools/scripts/check_fleet_source_status.sh' ;;
         check-installed-acceptance-tools)  echo './tools/lint/check_installed_acceptance_tools.sh' ;;
         check-no-writer-below-sealed-frontier) echo './tools/lint/check_no_writer_below_sealed_frontier.sh' ;;
         check-peer-floor-single-source)    echo './tools/lint/check_peer_floor_single_source.sh' ;;
@@ -356,8 +363,24 @@ main() {
             --list)
                 # Gate names = the case labels in gate_command() (read from
                 # this file so reformatting cannot desync the probe).
-                grep -oE '\bcheck-[a-z0-9-]+\)' "$0" | tr -d ')' | sort -u
+                # Anchored at the start of an indented line and required to be
+                # followed by the entry's `echo`, because the loose form
+                # (\bcheck-[a-z0-9-]+\)) also matched PROSE — the header
+                # sentence "...readers like check-core-seal)." was reported as
+                # a gate. It was invisible only because that name happens to be
+                # a real gate too; the next comment to end in a gate name and a
+                # paren would have invented one.
+                grep -oE '^[[:space:]]+check-[a-z0-9-]+\)[[:space:]]+echo[[:space:]]' "$0" \
+                    | grep -oE 'check-[a-z0-9-]+' | sort -u
                 exit 0 ;;
+            --print-command)
+                # The one supported reader of gate_command() from outside this
+                # file (check_lint_gate_wiring.sh audits the paths the table
+                # names). Exits 1 on an unknown gate — same polarity as
+                # gate_command itself, so a caller cannot mistake "no entry"
+                # for "empty command".
+                gate_command "${2:?--print-command needs a gate}"
+                exit $? ;;
             --help|-h) usage; exit 0 ;;
             check-*)   gates+=("$1"); shift ;;
             *) echo "run_lint.sh: unknown argument '$1'" >&2; exit 2 ;;

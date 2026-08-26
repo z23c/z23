@@ -42,6 +42,7 @@ static void boot_phase_notify_progress(const char *status)
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <time.h>
 
 #define BOOT_PHASE_STALL_SECS (BOOT_STEP_BUDGET_MS / 1000)
@@ -107,10 +108,64 @@ enum boot_step_state boot_step_classify(int64_t elapsed_ms,
  * source advancing proves the step is moving. */
 static _Atomic uint64_t g_step_notes = 0;
 
+/* ── out-of-band evidence probe (see util/boot_phase.h) ───────────
+ *
+ * Two atomics rather than a lock: this is read by the heartbeat sweeper
+ * while the boot thread installs or clears it, and the sweeper must
+ * never be able to block on the boot thread. The fn is loaded first and
+ * the ctx second; a probe whose ctx is NULL is still called (the stock
+ * process-I/O probe takes no ctx), so the only torn read possible is
+ * "fn from before the store, ctx from after" during the single install
+ * that happens immediately after boot_step_enter, on the boot thread,
+ * before the step has had 30 s to stall. Callers install a probe once
+ * per step and never re-point it. */
+static _Atomic(boot_evidence_probe_fn) g_evidence_fn  = NULL;
+static _Atomic(void *)                 g_evidence_ctx = NULL;
+
+static void boot_step_reseed_evidence_baseline(void);
+
+void boot_step_set_evidence_probe(boot_evidence_probe_fn fn, void *ctx)
+{
+    atomic_store_explicit(&g_evidence_ctx, ctx, memory_order_relaxed);
+    atomic_store_explicit(&g_evidence_fn, fn, memory_order_release);
+    /* Re-seed, or installing a probe would itself look like progress: the
+     * step's baseline was taken with no probe (contributing 0) and the
+     * first window would otherwise diff against the probe's whole absolute
+     * value and grade SLOW on the strength of I/O that predates the step.
+     * An extension has to be paid for by a change DURING the window. */
+    boot_step_reseed_evidence_baseline();
+}
+
+uint64_t boot_evidence_probe_process_io(void *ctx)
+{
+    (void)ctx;
+    struct rusage ru;
+    if (getrusage(RUSAGE_SELF, &ru) != 0)
+        return 0;
+    /* ru_inblock / ru_oublock are counted in 512-byte units. Reads AND
+     * writes both count: WAL recovery reads the log and writes the main
+     * database, and either half moving proves the device is serving us. */
+    int64_t in  = ru.ru_inblock > 0 ? ru.ru_inblock : 0;
+    int64_t out = ru.ru_oublock > 0 ? ru.ru_oublock : 0;
+    uint64_t bytes = ((uint64_t)in + (uint64_t)out) * 512u;
+    return bytes / (uint64_t)BOOT_EVIDENCE_IO_QUANTUM_BYTES;
+}
+
+static uint64_t boot_step_evidence_probe_value(void)
+{
+    boot_evidence_probe_fn fn =
+        atomic_load_explicit(&g_evidence_fn, memory_order_acquire);
+    if (!fn)
+        return 0;
+    void *ctx = atomic_load_explicit(&g_evidence_ctx, memory_order_relaxed);
+    return fn(ctx);
+}
+
 static uint64_t boot_step_evidence_count(void)
 {
     return boot_progress_marker() +
-           atomic_load_explicit(&g_step_notes, memory_order_relaxed);
+           atomic_load_explicit(&g_step_notes, memory_order_relaxed) +
+           boot_step_evidence_probe_value();
 }
 
 /* How much progress evidence appeared since the caller last looked.
@@ -224,6 +279,18 @@ static health_subsystem_id g_step_health_id    = HEALTH_INVALID_ID;
  * The critical section is a few stores and takes no other lock, so it
  * can never itself be the thing that wedges. */
 
+/* Re-take the open step's evidence baseline. Called when a probe is
+ * installed or cleared so the next window measures change since that
+ * moment. No-op when no step is open — a boot_phase seeds its own
+ * baseline in boot_phase_begin. */
+static void boot_step_reseed_evidence_baseline(void)
+{
+    pthread_mutex_lock(&g_step_mu);
+    if (g_step_active)
+        (void)boot_step_delta(&g_step_seen_count, &g_step_seen_tick_us);
+    pthread_mutex_unlock(&g_step_mu);
+}
+
 /* One consistent snapshot of the open step, advancing its bookkeeping.
  * Returns false when no step is open. */
 static bool boot_step_snapshot(char *name, size_t cap, int64_t *elapsed_ms,
@@ -242,24 +309,44 @@ static bool boot_step_snapshot(char *name, size_t cap, int64_t *elapsed_ms,
     return true;
 }
 
-static void boot_step_on_stall(void *ctx)
+/* One stall report for the open step. `elapsed_override_ms >= 0` reports
+ * that elapsed instead of the step's own clock — the ONLY caller that
+ * passes one is the test hook, so a test need not wait out the budget.
+ * Returns the state reported, or BOOT_STEP_STATE__MAX if no step is open. */
+static enum boot_step_state boot_step_stall_report(int64_t elapsed_override_ms)
 {
-    (void)ctx;
     char     name[BOOT_PHASE_NAME_MAX];
     int64_t  elapsed = 0;
     uint64_t delta   = 0;
     unsigned report  = 0;
     if (!boot_step_snapshot(name, sizeof(name), &elapsed, &delta, &report))
+        return BOOT_STEP_STATE__MAX;
+    if (elapsed_override_ms >= 0)
+        elapsed = elapsed_override_ms;
+    enum boot_step_state st =
+        boot_step_classify(elapsed, BOOT_STEP_BUDGET_MS, delta);
+    boot_step_emit(name, st, elapsed, BOOT_STEP_BUDGET_MS, delta, report, NULL);
+    return st;
+}
+
+static void boot_step_on_stall(void *ctx)
+{
+    (void)ctx;
+    if (boot_step_stall_report(-1) == BOOT_STEP_STATE__MAX)
         return;
-    boot_step_emit(name,
-                   boot_step_classify(elapsed, BOOT_STEP_BUDGET_MS, delta),
-                   elapsed, BOOT_STEP_BUDGET_MS, delta, report, NULL);
 
     /* Re-arm. The health ring is edge-triggered: without a fresh
      * heartbeat a stalled entry fires exactly once, which is how a
      * four-hour hang produced one line and then silence. */
     health_heartbeat(g_step_health_id);
 }
+
+#ifdef ZCL_TESTING
+enum boot_step_state boot_step_stall_report_for_testing(int64_t elapsed_ms)
+{
+    return boot_step_stall_report(elapsed_ms < 0 ? 0 : elapsed_ms);
+}
+#endif
 
 static void boot_step_close(enum boot_step_state st, const char *reason)
 {
@@ -281,6 +368,14 @@ static void boot_step_close(enum boot_step_state st, const char *reason)
     g_step_health_id = HEALTH_INVALID_ID;
     pthread_mutex_unlock(&g_step_mu);
 
+    /* Outside g_step_mu — the setter re-seeds the open step's baseline and
+     * takes that same non-recursive lock. Safe here because g_step_active
+     * is already false, so the re-seed is a no-op. The probe belongs to the
+     * step, not to boot: clearing it is what lets an early `return false`
+     * out of the boot path be safe, and stops one step's evidence from
+     * being read as the next step's. */
+    boot_step_set_evidence_probe(NULL, NULL);
+
     if (id != HEALTH_INVALID_ID)
         health_unregister(id);
     boot_step_emit(name, st, elapsed, BOOT_STEP_BUDGET_MS, 0, report, reason);
@@ -288,8 +383,11 @@ static void boot_step_close(enum boot_step_state st, const char *reason)
 
 void boot_step_enter(const char *name)
 {
-    /* A new step implicitly ends the previous one. */
+    /* A new step implicitly ends the previous one (which clears its
+     * evidence probe). Clear again so entering a step with none open
+     * also starts from a known-empty probe. */
     boot_step_close(BOOT_STEP_DONE, NULL);
+    boot_step_set_evidence_probe(NULL, NULL);
     (void)health_start();  /* idempotent; only the first call spawns it */
 
     char nm[BOOT_PHASE_NAME_MAX];

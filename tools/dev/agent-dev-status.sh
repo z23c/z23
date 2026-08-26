@@ -207,7 +207,7 @@ boot_status_result_is_valid() {
     esac
 }
 proc_start_ticks() {
-    sed 's/^[0-9][0-9]* ([^)]*) //' "/proc/$1/stat" 2>/dev/null |
+    sed 's/^[0-9][0-9]* (.*) //' "/proc/$1/stat" 2>/dev/null |
         awk 'NF >= 20 { print $20; exit }'
 }
 boot_status_json() {

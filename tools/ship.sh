@@ -55,7 +55,52 @@ REMOTE_HOSTS=()
 DEPLOY_HOSTS=()
 PROOF_SELECTED=0
 declare -A HOST_GLIBC=()
-SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15)
+# One source of truth for the ssh options. The library is POSIX sh and cannot
+# hold an array, so the STRING is canonical and the array is derived from it.
+# Every option is a single word, so the library's word-splitting is exact.
+SHIP_SSH_OPTS="-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15"
+read -r -a SSH_OPTS <<< "$SHIP_SSH_OPTS"
+
+# ── HEALTH VERDICTS ARE NOT STOPWATCHES ─────────────────────────────────────
+# Four loops in this file gated a REMOTE, DESTRUCTIVE rollback on a duration:
+# 300s for a candidate to qualify, 60s for a restore. All of them demanded that
+# `timeout 20 "/proc/$pid/exe" status` answer, and a box booting a large datadir
+# on a 7200rpm disk misses that routinely. Ship touches a whole fleet in one
+# command, so one SSD-shaped budget rolled correctly-shipped binaries off every
+# slow machine at once.
+#
+# ship_progress_lib.sh replaces them with observed-progress verdicts read from
+# /proc/<pid>/{io,stat}: bytes, CPU ticks, and delayacct_blkio_ticks — which
+# climbs precisely while the process is BLOCKED on the disk and is therefore
+# the one signal still alive on a box burning no CPU. A WEDGE IS SILENCE, NOT
+# SLOWNESS: only proven stillness, or a process that will not stay up, may
+# authorise a rollback.
+#
+# The absolute ceilings survive as REPORTING windows only. Exit codes:
+#   0  every named target qualified
+#   1  a real fault — proven wedged or would not stay up. Rolled back.
+#   3  UNVERIFIED, STILL PROGRESSING — window expired on a working box.
+#      NOT a failure. NOTHING was rolled back.
+#   4  UNKNOWN — host unobservable (ssh down, /proc unreadable). A human
+#      decides. NOTHING was rolled back.
+#
+# The SAME file is sourced here and shipped over the wire ahead of the remote
+# scripts, because the target box has no checkout: one implementation reaches
+# the same verdict on both machines.
+SHIP_LIB_PATH="$REPO_ROOT/tools/scripts/ship_progress_lib.sh"
+# shellcheck source=tools/scripts/ship_progress_lib.sh
+. "$SHIP_LIB_PATH"  # ship_await, ship_verdict, ship_remote_sh, ship_observe
+SHIP_LIB_TEXT="$(cat "$SHIP_LIB_PATH")"
+
+# Resolved once so the local leg and both remote scripts are configured
+# identically. Raising one never changes what a verdict MEANS.
+SHIP_REMOTE_WINDOW="${ZCL_SHIP_REMOTE_HEALTH_SECONDS:-900}"
+SHIP_REMOTE_SILENCE="${ZCL_SHIP_REMOTE_SILENCE_SECONDS:-300}"
+SHIP_ROLLBACK_WINDOW="${ZCL_SHIP_ROLLBACK_HEALTH_SECONDS:-600}"
+SHIP_ROLLBACK_SILENCE="${ZCL_SHIP_ROLLBACK_SILENCE_SECONDS:-180}"
+SHIP_CRASH_SAMPLES="${ZCL_SHIP_CRASH_SAMPLES:-3}"
+SHIP_UNKNOWN_SAMPLES="${ZCL_SHIP_UNKNOWN_SAMPLES:-5}"
+SHIP_RPC_BUDGETS="${ZCL_SHIP_RPC_BUDGETS:-5 20 60}"
 # Spawnable companions of the daemon, resolved BESIDE its executable at
 # reproduce time (pkgl_worker_path). Both ship with every candidate; the
 # index order here is the order the remote swap stages them.
@@ -245,7 +290,11 @@ else
     say "gate       make test-parallel"
     suite_log="$(mktemp)"
     make test-parallel >"$suite_log" 2>&1 || true
-    if grep -q 'ALL TESTS PASSED' "$suite_log" && \
+    if grep -Eq 'hotswap_module=|HOTSWAP MODULE' "$suite_log"; then
+        grep -E 'SUITE VERDICT|HOTSWAP MODULE' "$suite_log" | head -5 >&2
+        rm -f "$suite_log"
+        die "full suite used a hot-swap module — linked candidate remains unproven"
+    elif grep -q 'ALL TESTS PASSED' "$suite_log" && \
        ! grep -q 'SOME TESTS FAILED' "$suite_log"; then
         say "gate       $(grep -m1 'ALL TESTS PASSED' "$suite_log")"
         mkdir -p "$GATE_CACHE_DIR"
@@ -431,13 +480,24 @@ REMOTE_HASH
             die "could not copy ${WORKER_NAMES[$wi]} to $host"
     done
 
-    ssh "${SSH_OPTS[@]}" "$host" bash -s -- \
-        "$svc_bin" "$ARTIFACT_SHA" "$CAND_SOURCE_ID" "$CAND_BUILD_COMMIT" \
-        "${WORKER_SHAS[0]}" "${WORKER_SHAS[1]}" "$run_id" <<'REMOTE_SCRIPT'
+    local activate_rc=0
+    { printf '%s\n' "$SHIP_LIB_TEXT"; cat <<'REMOTE_SCRIPT'
 set -euo pipefail
 svc_bin="$1"; want_sha="$2"; want_src="$3"; want_commit="$4"
 want_worker_v="$5"; want_worker_d="$6"
 run_id="$7"
+# Health-verdict configuration, positional because ssh forwards no environment.
+# tools/scripts/ship_progress_lib.sh is prepended to this script on stdin: the
+# target box has no checkout, so the code that reaches the verdict has to
+# travel with the question.
+remote_window="$8"; remote_silence="$9"
+rollback_window="${10}"; rollback_silence="${11}"
+crash_samples="${12}"; unknown_samples="${13}"; rpc_budgets="${14}"
+# The two subjects this script judges, each wrapped to ship_await's
+# one-argument observer seam. Same observables, same classifier, same words as
+# the local side uses.
+observe_candidate() { ship_observe zclassic23 "$want_sha" "$want_src" "$want_commit" "$1"; }
+observe_restore()   { ship_observe zclassic23 "$prior_sha" "" "" "$1"; }
 worker_dir="$(dirname "$svc_bin")"
 worker_v="$worker_dir/zclassic23-package-verify"
 worker_d="$worker_dir/zclassic23-package-verify-dev"
@@ -503,22 +563,16 @@ restore_prior() {
     systemctl --user daemon-reload || return 1
     systemctl --user restart zclassic23 || return 1
 
-    restore_deadline=$(( $(date +%s) + ${ZCL_SHIP_ROLLBACK_HEALTH_SECONDS:-60} ))
-    while [ "$(date +%s)" -lt "$restore_deadline" ]; do
-        restore_pid="$(systemctl --user show zclassic23 -p MainPID --value 2>/dev/null || true)"
-        case "$restore_pid" in
-            ""|*[!0-9]*|0) ;;
-            *)
-                restore_sha="$(sha256sum < "/proc/$restore_pid/exe" 2>/dev/null | awk '{print $1}' || true)"
-                if [ "$restore_sha" = "$prior_sha" ] && \
-                   timeout 20 "/proc/$restore_pid/exe" status >/dev/null 2>&1; then
-                    return 0
-                fi
-                ;;
-        esac
-        sleep 2
-    done
-    return 1
+    SHIP_AWAIT_WINDOW="$rollback_window"
+    SHIP_AWAIT_SILENCE="$rollback_silence"
+    SHIP_AWAIT_POLL=2
+    SHIP_AWAIT_CRASH_SAMPLES="$crash_samples"
+    SHIP_AWAIT_UNKNOWN_SAMPLES="$unknown_samples"
+    SHIP_AWAIT_RPC_BUDGETS="$rpc_budgets"
+    restore_rc=0
+    ship_await "remote restore" observe_restore "$prior_sha" || restore_rc=$?
+    [ "$restore_rc" -eq 0 ] || return 1
+    return 0
 }
 
 restore_on_failure() {
@@ -591,70 +645,130 @@ systemctl --user daemon-reload
 mv -f "$node_incoming" "$svc_bin"
 systemctl --user restart zclassic23
 
-# Keep the rollback transaction armed until the new process proves both exact
-# bytes and useful RPC behavior. A successful `systemctl restart` only proves
-# that systemd accepted a request; it does not prove the daemon stayed alive.
-deadline=$(( $(date +%s) + ${ZCL_SHIP_REMOTE_HEALTH_SECONDS:-300} ))
-healthy=0
-while [ "$(date +%s)" -lt "$deadline" ]; do
-    new_pid="$(systemctl --user show zclassic23 -p MainPID --value 2>/dev/null || true)"
-    case "$new_pid" in
-        ""|*[!0-9]*|0) ;;
-        *)
-            running_sha="$(sha256sum < "/proc/$new_pid/exe" 2>/dev/null | awk '{print $1}' || true)"
-            identity_ok="$(tr '\000' '\n' < "/proc/$new_pid/environ" 2>/dev/null |
-                awk -v src="ZCL_AGENT_EXPECT_SOURCE_ID=$want_src" \
-                    -v commit="ZCL_AGENT_EXPECT_BUILD_COMMIT=$want_commit" \
-                    -v origin="ZCL_AGENT_EXPECT_BUILD_SOURCE=ship" '
-                        $0 == src { have_src=1 }
-                        $0 == commit { have_commit=1 }
-                        $0 == origin { have_origin=1 }
-                        END { if (have_src && have_commit && have_origin) print "yes" }
-                    ' || true)"
-            if [ "$running_sha" = "$want_sha" ] && \
-               [ "$identity_ok" = yes ] && \
-               timeout 20 "/proc/$new_pid/exe" status >/dev/null 2>&1; then
-                healthy=1
-                break
-            fi
-            ;;
-    esac
-    sleep 2
-done
-[ "$healthy" -eq 1 ] || { echo "remote: candidate failed process-byte/identity/RPC qualification" >&2; exit 1; }
+# The rollback stays armed until the candidate proves exact bytes, the expected
+# identity, and answering RPC. A successful `systemctl restart` only proves
+# systemd accepted a request. But the judgement is on the SUBJECT's progress,
+# never on the observer's patience: a 300s countdown convicted honest boxes
+# whose disks were still replaying, and rolling those back is how a network
+# quietly stops accepting slow hardware.
+SHIP_AWAIT_WINDOW="$remote_window"
+SHIP_AWAIT_SILENCE="$remote_silence"
+SHIP_AWAIT_POLL=2
+SHIP_AWAIT_CRASH_SAMPLES="$crash_samples"
+SHIP_AWAIT_UNKNOWN_SAMPLES="$unknown_samples"
+SHIP_AWAIT_RPC_BUDGETS="$rpc_budgets"
+cand_rc=0
+ship_await "remote candidate" observe_candidate "$want_sha" || cand_rc=$?
+case "$cand_rc" in
+    0) ;;
+    3|4)
+        # Not qualified, and not proven faulty either. Disarm the rollback and
+        # hand the word up: only the two fault verdicts may destroy anything.
+        rollback_armed=0
+        trap - EXIT HUP INT TERM
+        rmdir "$lock_dir"
+        lock_held=0
+        echo "remote: candidate is $SHIP_AWAIT_LAST_VERDICT — $SHIP_AWAIT_LAST_LINE" >&2
+        exit "$cand_rc"
+        ;;
+    *)
+        echo "remote: candidate is $SHIP_AWAIT_LAST_VERDICT — $SHIP_AWAIT_LAST_LINE" >&2
+        exit 1
+        ;;
+esac
 rollback_armed=0
 trap - EXIT HUP INT TERM
 rmdir "$lock_dir"
 lock_held=0
 echo "remote: installed, restarted, and process-qualified"
 REMOTE_SCRIPT
+    } | ssh "${SSH_OPTS[@]}" "$host" bash -s -- \
+        "$svc_bin" "$ARTIFACT_SHA" "$CAND_SOURCE_ID" "$CAND_BUILD_COMMIT" \
+        "${WORKER_SHAS[0]}" "${WORKER_SHAS[1]}" "$run_id" \
+        "$SHIP_REMOTE_WINDOW" "$SHIP_REMOTE_SILENCE" \
+        "$SHIP_ROLLBACK_WINDOW" "$SHIP_ROLLBACK_SILENCE" \
+        "$SHIP_CRASH_SAMPLES" "$SHIP_UNKNOWN_SAMPLES" "$SHIP_RPC_BUDGETS" \
+        || activate_rc=$?
+
+    # The remote reached a verdict with the same classifier the local side is
+    # about to use. Honour the two non-destructive words here rather than
+    # re-observing: a second opinion on a box that already said "still coming
+    # up" cannot turn that into a fault, and re-running the local await would
+    # only spend another window before saying the same thing.
+    case "$activate_rc" in
+        0) ;;
+        3)
+            say "$host is STILL PROGRESSING — the candidate is installed and working,"
+            say "  but had not finished coming up when the remote window closed."
+            say "  NOTHING was rolled back. Re-run ship to re-check."
+            return 3
+            ;;
+        4)
+            say "$host is UNKNOWN — the candidate is installed but the host could not"
+            say "  produce evidence. NOTHING was rolled back; a human decides."
+            return 4
+            ;;
+        *)
+            # The remote proved a fault and its own armed transaction already
+            # restored the prior executable before exiting.
+            die "$host: candidate failed remote qualification (rc=$activate_rc); remote rolled back"
+            ;;
+    esac
 
     # Verify the executable inode held by the RUNNING MainPID, not only the
     # pathname on disk. Exact process bytes bind the already-proven candidate
     # source id without another fallible JSON parser.
-    local deadline running_sha rollback_rc ok=0
-    deadline=$(( $(date +%s) + 300 ))
-    while [ "$(date +%s)" -lt "$deadline" ]; do
-        running_sha="$(ssh "${SSH_OPTS[@]}" "$host" \
-            'set -eu
-             pid="$(systemctl --user show zclassic23 -p MainPID --value)"
-             case "$pid" in ""|*[!0-9]*|0) exit 1 ;; esac
-             timeout 20 "/proc/$pid/exe" status >/dev/null 2>&1
-             sha256sum < "/proc/$pid/exe" | awk '\''{print $1}'\''' \
-            2>/dev/null || true)"
-        if [ "$running_sha" = "$ARTIFACT_SHA" ]; then
-            ok=1; break
-        fi
-        sleep 10
-    done
+    # The verdict, not a countdown, decides whether the rollback fires. Only a
+    # process proven still (WEDGED) or one that will not stay up (CRASHED) may
+    # authorise it; a box that is visibly working keeps its candidate.
+    local running_sha rollback_rc qual_rc=0
+    SHIP_OBS_UNIT=zclassic23
+    SHIP_OBS_SHA="$ARTIFACT_SHA"
+    SHIP_OBS_SRC="${CAND_SOURCE_ID:-}"
+    SHIP_OBS_COMMIT="${CAND_BUILD_COMMIT:-}"
+    SHIP_REMOTE_HOST="$host"
+    SHIP_AWAIT_WINDOW="$SHIP_REMOTE_WINDOW"
+    SHIP_AWAIT_SILENCE="$SHIP_REMOTE_SILENCE"
+    SHIP_AWAIT_POLL="${ZCL_SHIP_LOCAL_POLL_SECONDS:-10}"
+    SHIP_AWAIT_CRASH_SAMPLES="$SHIP_CRASH_SAMPLES"
+    SHIP_AWAIT_UNKNOWN_SAMPLES="$SHIP_UNKNOWN_SAMPLES"
+    SHIP_AWAIT_RPC_BUDGETS="$SHIP_RPC_BUDGETS"
+    ship_await "$host" ship_remote_observe "$ARTIFACT_SHA" || qual_rc=$?
+    running_sha="$(ship_field "$SHIP_AWAIT_LAST_LINE" sha)"
 
-    if [ "$ok" -ne 1 ]; then
-        say "remote did not come back healthy — ROLLING BACK"
+    case "$qual_rc" in
+        3)
+            say "$host is STILL PROGRESSING — $SHIP_AWAIT_LAST_ADVANCES observed advances,"
+            say "  last change ${SHIP_AWAIT_LAST_SILENT}s ago. The candidate stays installed"
+            say "  and NOTHING was rolled back: a slow disk is not a failed deploy."
+            return 3
+            ;;
+        4)
+            say "$host is UNKNOWN — no evidence could be gathered for"
+            say "  $SHIP_UNKNOWN_SAMPLES consecutive attempts (host unreachable, or /proc"
+            say "  unreadable). An unreachable host is not a failed deploy. NOTHING was"
+            say "  rolled back; a human decides."
+            return 4
+            ;;
+    esac
+
+    if [ "$qual_rc" -ne 0 ]; then
+        say "$host is $SHIP_AWAIT_LAST_VERDICT — ROLLING BACK. Evidence:"
+        say "  $SHIP_AWAIT_LAST_LINE"
         rollback_rc=0
-        ssh "${SSH_OPTS[@]}" "$host" bash -s -- "$svc_bin" "$run_id" <<'ROLLBACK_SCRIPT' || rollback_rc=$?
+        { printf '%s\n' "$SHIP_LIB_TEXT"; cat <<'ROLLBACK_SCRIPT'
 set -eu
 svc_bin="$1"
 run_id="$2"
+# Health-verdict configuration, positional because ssh forwards no environment.
+# tools/scripts/ship_progress_lib.sh is prepended to this script on stdin: the
+# target box has no checkout, so the code that reaches the verdict has to
+# travel with the question.
+rollback_window="$3"; rollback_silence="$4"
+crash_samples="$5"; unknown_samples="$6"; rpc_budgets="$7"
+# Wrapped to ship_await's one-argument observer seam. prior_sha is assigned
+# below, before the only call.
+observe_restore() { ship_observe zclassic23 "$prior_sha" "" "" "$1"; }
 dropin="$HOME/.config/systemd/user/zclassic23.service.d/90-build-identity.conf"
 if [ -f "${svc_bin}.rollback.${run_id}" ]; then
     prior_sha="$(sha256sum < "${svc_bin}.rollback.${run_id}" | awk '{print $1}')"
@@ -680,28 +794,32 @@ if [ -f "${svc_bin}.rollback.${run_id}" ]; then
         echo "remote: CRITICAL — rollback restart request failed" >&2
         exit 1
     fi
-    deadline=$(( $(date +%s) + ${ZCL_SHIP_ROLLBACK_HEALTH_SECONDS:-60} ))
-    while [ "$(date +%s)" -lt "$deadline" ]; do
-        pid="$(systemctl --user show zclassic23 -p MainPID --value 2>/dev/null || true)"
-        case "$pid" in
-            ""|*[!0-9]*|0) ;;
-            *)
-                running_sha="$(sha256sum < "/proc/$pid/exe" 2>/dev/null | awk '{print $1}' || true)"
-                if [ "$running_sha" = "$prior_sha" ] && \
-                   timeout 20 "/proc/$pid/exe" status >/dev/null 2>&1; then
-                    echo "remote: rollback executable and identity restored; old process qualified"
-                    exit 0
-                fi
-                ;;
-        esac
-        sleep 2
-    done
-    echo "remote: CRITICAL — rollback restart did not qualify the old process" >&2
-    exit 1
+    # Same rule as everywhere else in this file: the restored process is judged
+    # by whether it is MOVING, not by a countdown. The old 60s clock printed
+    # "rollback is unverified" — the most alarming words this tool can say —
+    # for a healthy node whose disk simply had not finished replaying yet.
+    SHIP_AWAIT_WINDOW="$rollback_window"
+    SHIP_AWAIT_SILENCE="$rollback_silence"
+    SHIP_AWAIT_POLL=2
+    SHIP_AWAIT_CRASH_SAMPLES="$crash_samples"
+    SHIP_AWAIT_UNKNOWN_SAMPLES="$unknown_samples"
+    SHIP_AWAIT_RPC_BUDGETS="$rpc_budgets"
+    restore_rc=0
+    ship_await "remote restore" observe_restore "$prior_sha" || restore_rc=$?
+    if [ "$restore_rc" -eq 0 ]; then
+        echo "remote: rollback executable and identity restored; old process qualified"
+        exit 0
+    fi
+    echo "remote: rollback restart is $SHIP_AWAIT_LAST_VERDICT — $SHIP_AWAIT_LAST_LINE" >&2
+    exit "$restore_rc"
 fi
 echo "remote: CRITICAL — rollback executable is missing" >&2
 exit 1
 ROLLBACK_SCRIPT
+        } | ssh "${SSH_OPTS[@]}" "$host" bash -s -- "$svc_bin" "$run_id" \
+            "$SHIP_ROLLBACK_WINDOW" "$SHIP_ROLLBACK_SILENCE" \
+            "$SHIP_CRASH_SAMPLES" "$SHIP_UNKNOWN_SAMPLES" "$SHIP_RPC_BUDGETS" \
+            || rollback_rc=$?
         if [ "$rollback_rc" -eq 0 ]; then
             die "remote deploy failed; rollback process-qualified"
         fi

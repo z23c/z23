@@ -583,6 +583,12 @@ bool boot_park_until_shutdown(const char *gate_name);
  * app_init does `return boot_node_db_open_failed_gate(ctx->datadir);`. */
 bool boot_node_db_open_failed_gate(const char *datadir);
 
+/* Opens the "db.open_migrate" boot step and arms its process-I/O evidence
+ * probe, so a slow disk keeps earning start-timeout extensions instead of
+ * being killed for being honest. Paired with boot_step_done() in app_init.
+ * The measured cost this exists for is recorded at the definition. */
+void boot_node_db_open_step_begin(void);
+
 /* ── config/src/boot_regtest_shielded.c ─────────────────────────────────
  * -regtestshielded: activate Overwinter+Sapling from genesis on a REGTEST
  * node's runtime chain params only (the zcashd -nuparams equivalent).

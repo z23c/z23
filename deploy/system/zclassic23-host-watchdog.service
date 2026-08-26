@@ -8,7 +8,15 @@ After=network.target
 # (runuser -u) for the localhost ssh login, per deploy/zclassic23-host-watchdog.sh.
 Type=oneshot
 ExecStart=/usr/local/sbin/zclassic23-host-watchdog.sh
-TimeoutStartSec=30
+# Must exceed the SUM of the script's escalating probe budgets
+# (ZCL_HOST_WATCHDOG_PROBE_TIMEOUTS, default 5+15+45 = 65s) plus the ~3s
+# user-manager revive sleep, and must stay under the timer's OnUnitActiveSec
+# (2min) so cycles never overlap. This is a containment ceiling on a bounded,
+# enumerated probe schedule — it is NOT a health verdict, and nothing about
+# the node's speed is inferred from it. At 30s it silently truncated the
+# watchdog's own patience, which would have re-created the one-missed-probe
+# verdict the script exists to avoid.
+TimeoutStartSec=100
 Nice=10
 IOSchedulingClass=idle
 StandardOutput=journal

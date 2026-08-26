@@ -201,6 +201,7 @@ ZCL_TEST_GROUP(hotswap_loader)
 ZCL_TEST_GROUP(hotswap_simnet)
 ZCL_TEST_GROUP(hotswap_module)
 ZCL_TEST_GROUP(hotswap_module_v2)
+ZCL_TEST_GROUP(hotswap_policy_module)
 ZCL_TEST_GROUP(hotswap_service_registry)
 ZCL_TEST_GROUP(dev_platform)
 ZCL_TEST_GROUP(impact_composition)
@@ -584,6 +585,7 @@ ZCL_TEST_GROUP(zcode_commons_v2)
 ZCL_TEST_GROUP(zcode_c23_corpus_projection)
 ZCL_TEST_GROUP(zcode_c23_corpus_census)
 ZCL_TEST_GROUP(zcode_family_admission)
+ZCL_TEST_GROUP(zcode_moderation_attestation)
 ZCL_TEST_GROUP(zcode_dht)
 ZCL_TEST_GROUP(zcode_dht_delegation)
 ZCL_TEST_GROUP(zcode_dht_msgs)
@@ -946,6 +948,10 @@ ZCL_TEST_GROUP(seed_bootstrap_doors)
 /* params-sovereignty lane: compiled-in verifying keys, and the boundary
  * between validating shielded proofs and creating them. */
 ZCL_TEST_GROUP(params_vk_embedded)
+/* params-sovereignty lane: the publish/release invariant for all FOUR
+ * shielded verifying keys — they must arm and disarm together, so the
+ * published-pointer set is one honest answer to "is validation armed?". */
+ZCL_TEST_GROUP(params_vk_publish_symmetry)
 /* params-sovereignty lane: obtaining the PROVING parameters over the peer
  * network, with every chunk checked against compiled-in digests. Keep both
  * sides on conflict. */

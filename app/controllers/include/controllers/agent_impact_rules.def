@@ -324,7 +324,7 @@ AGENT_IMPACT_RULE("lib/test/src/test_mint_anchor_fresh_datadir.c|config/src/boot
  * preflight + reducer_kick_unbudgeted entry points as the fresh-datadir
  * composition test above, so a change to either invalidates both groups. */
 AGENT_IMPACT_RULE("lib/test/src/test_boot_matrix.c|config/src/boot_mint_anchor_preflight.c|config/src/boot_mint_anchor.c|app/services/src/reducer_ingest_service.c|app/services/src/reducer_drain.c", "boot_matrix mint_anchor_fresh_datadir mint_skip_crypto mint_anchor_preflight make_lint_gates")
-AGENT_IMPACT_RULE("config/src/boot.c|config/src/boot_index.c|config/src/boot_refold*.c|config/include/config/boot_internal.h|config/include/config/boot.h|lib/test/src/test_load_verify_boot.c|lib/test/src/test_refold_from_anchor_artifact_reachable.c|lib/test/src/test_refold_body_span_contiguous.c", "boot_refold_window_extend chain_state_repo load_verify_boot refold_from_anchor_fatal refold_from_anchor_artifact_reachable refold_body_span_contiguous make_lint_gates")
+AGENT_IMPACT_RULE("config/src/boot.c|config/src/boot_node_db_gate.c|config/src/boot_index.c|config/src/boot_refold*.c|config/include/config/boot_internal.h|config/include/config/boot.h|lib/test/src/test_load_verify_boot.c|lib/test/src/test_refold_from_anchor_artifact_reachable.c|lib/test/src/test_refold_body_span_contiguous.c", "boot_refold_window_extend chain_state_repo load_verify_boot refold_from_anchor_fatal refold_from_anchor_artifact_reachable refold_body_span_contiguous make_lint_gates")
 AGENT_IMPACT_RULE("config/src/boot_refold_staged_containment.c|lib/test/src/test_boot_refold_window_extend.c", "boot_refold_window_extend make_lint_gates")
 AGENT_IMPACT_RULE("app/services/include/services/anchor_selfmint.h|app/services/src/anchor_selfmint.c|lib/test/src/test_anchor_selfmint.c", "anchor_selfmint refold_retro_validate refold_from_anchor_fatal reducer_frontier reducer_frontier_self_anchor make_lint_gates")
 AGENT_IMPACT_RULE("config/src/app_context.c|config/include/config/boot.h|lib/test/src/test_app_context.c", "app_context wallet_keystore net_bootstrap make_lint_gates")
@@ -562,6 +562,7 @@ AGENT_IMPACT_RULE("app/controllers/src/agent_test_controller.c|app/controllers/i
 
 /* Paid file-market contract: seller offer, buyer payment claim/memo,
  * durable locator, chain/note reconciliation, and P2P composition wiring. */
+AGENT_IMPACT_RULE("lib/net/include/net/file_market.h|lib/net/include/net/file_market_delivery.h|lib/net/include/net/onion_v3_address.h|lib/net/src/file_market.c|lib/net/src/file_market_offer.c|lib/net/src/file_market_payment.c|lib/net/src/file_market_delivery.c|lib/net/src/file_market_delivery_client.c|lib/net/include/net/file_market_delivery_internal.h|lib/net/src/file_market_delivery_onion.c|lib/net/src/file_service_private_chunk.c|lib/net/src/onion_v3_address.c|lib/net/src/file_service.c|lib/net/src/msgprocessor.c|lib/net/include/net/msgprocessor.h|app/models/src/file_offer.c|app/models/include/models/file_offer.h|app/models/src/market_payment_claim.c|app/models/include/models/market_payment_claim.h|app/services/src/file_market_payment_service.c|app/services/include/services/file_market_payment_service.h|app/services/src/market_purchase_view_service.c|app/services/include/services/market_purchase_view_service.h|config/src/boot_msg_callbacks.c|config/include/config/boot_msg_callbacks.h|config/src/boot_services.c|lib/test/src/test_file_market.c|lib/test/src/test_file_market_payment.c|lib/test/src/test_file_market_delivery.c|lib/test/src/test_hotswap_service_registry.c", "file_market hotswap_service_registry db_migration_idempotent make_lint_gates")
 AGENT_IMPACT_RULE("lib/net/include/net/file_market.h|lib/net/include/net/file_market_delivery.h|lib/net/include/net/file_market_delivery_internal.h|lib/net/include/net/onion_v3_address.h|lib/net/src/file_market.c|lib/net/src/file_market_offer.c|lib/net/src/file_market_payment.c|lib/net/src/file_market_delivery.c|lib/net/src/file_market_delivery_client.c|lib/net/src/file_market_delivery_onion.c|lib/net/src/file_service_private_chunk.c|lib/net/src/onion_v3_address.c|lib/net/src/file_service.c|lib/net/src/msgprocessor.c|lib/net/include/net/msgprocessor.h|app/models/src/file_offer.c|app/models/include/models/file_offer.h|app/models/src/market_payment_claim.c|app/models/include/models/market_payment_claim.h|app/services/src/file_market_payment_service.c|app/services/include/services/file_market_payment_service.h|app/services/src/market_purchase_view_service.c|app/services/include/services/market_purchase_view_service.h|config/src/boot_msg_callbacks.c|config/include/config/boot_msg_callbacks.h|config/src/boot_services.c|lib/test/src/test_file_market.c|lib/test/src/test_file_market_payment.c|lib/test/src/test_file_market_delivery.c|lib/test/src/test_hotswap_service_registry.c", "file_market hotswap_service_registry db_migration_idempotent make_lint_gates")
 AGENT_IMPACT_RULE("app/services/src/file_market_purchase_retrieval_service.c|app/services/include/services/file_market_purchase_service.h|lib/test/src/test_file_market_purchase.c", "file_market rpc_timeout rpc_frontdoor_slots native_api_contract test_group_selector make_lint_gates")
 /* Marketplace moderation keeps policy/state/enforcement static and swaps only
@@ -569,7 +570,7 @@ AGENT_IMPACT_RULE("app/services/src/file_market_purchase_retrieval_service.c|app
 AGENT_IMPACT_RULE("app/services/src/market_moderation_service.c|app/services/include/services/market_moderation_service.h|app/services/src/market_moderation_view_service.c|app/services/src/market_moderation_view_internal.h|app/services/include/services/market_moderation_view_service.h|app/controllers/src/market_moderation_native_handler.c|lib/test/src/test_file_market_moderation.c", "file_market_moderation hotswap_service_registry command_registry_catalog make_lint_gates")
 /* Paid seller-content resource: private persistence, verified reader, owner
  * native/RPC mutation, private REST index, and delivery composition. */
-AGENT_IMPACT_RULE("app/models/src/market_content.c|app/models/include/models/market_content.h|app/services/src/file_market_content_service.c|app/services/include/services/file_market_content_service.h|app/controllers/src/file_market_controller.c|app/controllers/include/controllers/file_market_controller.h|app/controllers/src/api_controller_routes.c|app/controllers/src/app_native_handlers.c|app/controllers/include/controllers/app_native_handlers.h|app/controllers/src/market_content_native_handler.c|config/src/boot_file_market_delivery.c|config/commands/app_features.def|tools/command/native_command.c|tools/command/native_command.h|lib/test/src/test_file_market_content.c", "file_market db_migration_idempotent native_api_contract command_registry_catalog api make_lint_gates")
+AGENT_IMPACT_RULE("app/models/src/market_content.c|app/models/include/models/market_content.h|app/services/src/file_market_content_service.c|app/services/include/services/file_market_content_service.h|app/controllers/src/file_market_controller.c|app/controllers/src/market_moderation_rpc.c|app/controllers/include/controllers/file_market_controller.h|app/controllers/src/api_controller_routes.c|app/controllers/src/app_native_handlers.c|app/controllers/include/controllers/app_native_handlers.h|app/controllers/src/market_content_native_handler.c|config/src/boot_file_market_delivery.c|config/commands/app_features.def|tools/command/native_command.c|tools/command/native_command.h|lib/test/src/test_file_market_content.c", "file_market db_migration_idempotent native_api_contract command_registry_catalog api make_lint_gates")
 /* Seller paid-offer origin: offer plan/commit service, owner signing-key
  * custody (v62 market_seller_key), native leaf, and origin announcement. */
 AGENT_IMPACT_RULE("app/models/src/market_seller_key.c|app/models/include/models/market_seller_key.h|app/models/src/database_migrate_features_v49_up.c|app/services/src/file_market_offer_service.c|app/services/include/services/file_market_offer_service.h|app/controllers/src/file_market_offer_controller.c|app/controllers/src/market_offer_native_handler.c|lib/test/src/test_file_market_offer.c", "file_market db_migration_idempotent schema_migration native_api_contract command_registry_catalog make_lint_gates")
@@ -998,7 +999,7 @@ AGENT_IMPACT_RULE("lib/vcs/include/vcs/fastobj.h|lib/vcs/src/fastobj.c|lib/vcs/i
  * created, classified for ANNOUNCE/WANT, and checked out. Any change to the
  * shared permissive-text authority or one of those boundaries must select
  * both the hostile public-shape proof and the end-to-end carrier proof. */
-AGENT_IMPACT_RULE("lib/vcs/include/vcs/package_public_shape.h|lib/vcs/include/vcs/package_release.h|lib/vcs/src/package_public_shape.c|lib/vcs/src/package_release.c|lib/vcs/src/source_package_checkout.c|lib/vcs/src/source_package_transport.c|lib/test/src/test_zcode_public_shape.c|lib/test/src/test_vcs_core.c|docs/P2P_SOURCE_HOSTING.md", "zcode_public_shape vcs_core make_lint_gates")
+AGENT_IMPACT_RULE("lib/vcs/include/vcs/package_public_shape.h|lib/vcs/include/vcs/package_release.h|lib/vcs/src/package_public_shape.c|lib/vcs/src/package_release.c|lib/vcs/src/source_package_checkout.c|lib/vcs/src/source_package_transport.c|lib/test/include/test/public_shape_fixture.h|lib/test/src/test_zcode_public_shape.c|lib/test/src/test_vcs_core.c|docs/P2P_SOURCE_HOSTING.md", "zcode_public_shape vcs_core zcode_dev_objects make_lint_gates")
 /* The build-receipt codec (ZCLBLD wire, schema v1/v2) and the reproduction
  * comparator: every emit, install, and reproduce path flows through these. */
 AGENT_IMPACT_RULE("lib/vcs/include/vcs/package_build.h|lib/vcs/src/package_build.c|lib/vcs/include/vcs/package_reproduce.h|lib/vcs/src/package_reproduce.c|lib/test/src/test_zcode_verify.c", "zcode_verify zcode_swarm_net zcode_dev_objects make_lint_gates")
@@ -1348,6 +1349,18 @@ AGENT_IMPACT_RULE("tools/lint/check_source_identity_authority.sh|tools/lint/sour
  * the hardened builders, so an edit here can never reach the push gate having
  * run zero test groups. */
 AGENT_IMPACT_RULE("tools/lint/check_outparam_init_before_return.sh|tools/lint/outparam_init_baseline.txt|app/services/src/swap_settlement_service.c|app/services/include/services/swap_settlement_service.h", "make_lint_gates swap_settlement api rpc_safety")
+/* LANE hotswap-trampoline: the first LOW-LEVEL hot-swappable surface, split
+ * across a pure decision leaf and its resident sibling. Any edit to either
+ * half, to the frozen policy table that travels inside the module island, to
+ * the four manifests that must agree about the split, or to the shape gate
+ * that admits the island member, has to re-prove the same four properties:
+ * the leaf stays a pure in-process probe case, the resident counters stay
+ * singular, the manifests stay consistent, and the admit gauntlet still
+ * refuses a misdeclared module. It also rides the command-catalog groups
+ * because the leaf is a READY read-only catalog row bound through the native
+ * bridge, and the lint-gate group because check_hotswap_swappable_shape.sh
+ * carries a per-file island admission that its self-test fixtures pin. */
+AGENT_IMPACT_RULE("app/controllers/src/policy_native_handlers.c|app/controllers/include/controllers/policy_native_handlers.h|app/controllers/src/policy_native_resident.c|app/controllers/include/controllers/policy_native_resident.h|lib/vcs/src/package_policy.c|lib/vcs/include/vcs/package_policy.h|lib/test/src/test_hotswap_policy_module.c|config/hotswap_islands.def|config/hotswap_probe_cases.def|tools/lint/check_hotswap_swappable_shape.sh", "hotswap_policy_module hotswap_module_v2 hotswap_module hotswap_loader command_registry_catalog native_api_contract make_lint_gates")
 
 /* The confined-build process budget. RLIMIT_NPROC is charged per REAL UID,
  * so a limit derived from a snapshot of the uid's task count is not a budget
@@ -1359,6 +1372,26 @@ AGENT_IMPACT_RULE("tools/lint/check_outparam_init_before_return.sh|tools/lint/ou
  * builders, and the two build-fabric groups that execute a real confined
  * compile. */
 AGENT_IMPACT_RULE("lib/platform/src/os_sandbox_linux.c|lib/platform/include/platform/os_sandbox.h|lib/test/src/test_sandbox_process_budget.c|tools/package_verify.c|tools/zcode_adapter_runner.c|app/services/src/build_fabric_worker.c", "sandbox_process_budget os_sandbox build_fabric zcode_dev_objects make_lint_gates")
+/* LANE lint-gate-wiring: adding a lint gate is a TWO-FILE operation — the
+ * Makefile gets a check-* target plus a LINT_GATES line, and
+ * tools/lint/run_lint.sh's gate_command() case table gets the invocation,
+ * because the parallel driver execs each gate's script directly and never
+ * reads the Make recipe. Nothing enforced the second file: three gates landed
+ * with only the first half on 2026-08-26 and `make lint` was FATAL (exit 2)
+ * tree-wide, reporting no gate results at all, until they were wired.
+ * check_lint_gate_wiring.sh is the rail; run_lint.sh is the file it reads
+ * (via that script's own --list / --print-command, the only supported readers
+ * of the case table). Mapped to make_lint_gates_realroot as well as the
+ * exclusive make_lint_gates group, because the check that proves this rail
+ * still fails lives in the REALROOT lane and an exact group name is what
+ * resolves. */
+AGENT_IMPACT_RULE("tools/lint/check_lint_gate_wiring.sh|tools/lint/run_lint.sh", "make_lint_gates_realroot make_lint_gates")
+/* LANE lint-gate-wiring (adopted orphans): two check-* targets that existed,
+ * passed, and were in NO gate list — nothing ever ran them. Both are pure
+ * structural/hermetic and sub-100ms, so they now ride the umbrella.
+ * check_tor_dial_prewarm.sh reads boot/Tor/connman source order, so a boot
+ * reorder must run the gate that encodes the invariant. */
+AGENT_IMPACT_RULE("tools/scripts/check_tor_dial_prewarm.sh|tools/scripts/check_fleet_source_status.sh|tools/scripts/fleet_source_status.sh", "make_lint_gates_realroot make_lint_gates")
 /* LANE late-proving-params: the seam that lets a node which booted on the
  * compiled-in verifying keys pick up the PROVING parameters later, without a
  * restart. Three files move together and must be tested together:
@@ -1425,6 +1458,22 @@ AGENT_IMPACT_RULE("lib/vcs/src/node_reproduce.c|lib/vcs/include/vcs/node_reprodu
  * keeps at zero entries, and the .onion guard that returns before the
  * resolver. */
 AGENT_IMPACT_RULE("lib/test/src/test_cold_join_sovereign.c|core/chainparams/src/chainparams.c|core/chainparams/src/checkpoints.c|lib/sapling/src/params_vk_embedded.c|lib/net/src/connman.c", "cold_join_sovereign seed_bootstrap_doors params_vk_embedded net make_lint_gates")
+/* LANE moderated hosting: the node's own moderation policy decides what it
+ * SERVES and what it RELAYS, as two settings with two different defaults.
+ * These files move together because both legs are answered from one policy
+ * file and one decide(): the store that resolves them, the injected port
+ * the P2P chunk delivery gate asks before payment or content read, the
+ * injected port the offer re-gossip asks, the registered-content index that
+ * must never advertise what the delivery gate would refuse, and the typed
+ * surfaces that must keep reporting the two rules as separately-valued
+ * things. Widen any one alone and the node advertises a protection it does
+ * not provide, which is worse than having none; couple them back together
+ * and a relay default meant to protect permissionless discovery silently
+ * becomes a hosting rule, or the reverse. The boot adapters are named
+ * because an unwired port is the CLOSED state on both legs: a missing
+ * wire-up is a silent outage, and a permissive default would be a silent
+ * moderation outage. */
+AGENT_IMPACT_RULE("app/services/src/market_moderation_service.c|app/services/include/services/market_moderation_service.h|app/services/src/market_moderation_view_service.c|lib/net/src/file_market_delivery.c|lib/net/src/file_market_delivery_client.c|lib/net/include/net/file_market_delivery_internal.h|lib/net/include/net/file_market_delivery.h|config/src/boot_file_market_delivery.c|config/src/boot_msg_callbacks.c|lib/test/src/test_file_market_moderation.c|lib/test/src/test_file_market_delivery.c|app/controllers/src/market_moderation_native_handler.c|app/controllers/src/market_moderation_rpc.c|app/services/src/market_moderation_view_internal.h", "file_market_moderation file_market command_registry_catalog native_api_contract make_lint_gates")
 
 /* build_fabric_worker_report is the process-budget failure classifier, split
  * out of build_fabric_worker.c so that file stays under its size ceiling. It
@@ -1433,3 +1482,101 @@ AGENT_IMPACT_RULE("lib/test/src/test_cold_join_sovereign.c|core/chainparams/src/
  * subtree that exceeded its declared budget (a real defect). It moves with the
  * sandbox budget and build_fabric groups because it names their exit codes. */
 AGENT_IMPACT_RULE("app/services/include/services/build_fabric_worker_report.h|app/services/src/build_fabric_worker_report.c", "sandbox_process_budget os_sandbox build_fabric zcode_dev_objects make_lint_gates")
+/* LANE moderation-node-signoff: the signed per-node moderation sign-off
+ * (zcl.moderation.node_attestation.v1) and the local composition that reads
+ * many nodes' sign-offs without any of them being an authority. Mapped to its
+ * own group plus the marketplace moderation group, because the attestation's
+ * profile name and verdict vocabulary are bound by assertion to
+ * general-audience.v1 / market_review_state on the hosting path: a rename on
+ * either side must fail a test, not drift into a signed statement that no
+ * longer means what the node does. */
+AGENT_IMPACT_RULE("lib/vcs/src/moderation_attestation_object.c|lib/vcs/src/moderation_attestation_compose.c|lib/vcs/include/vcs/moderation_attestation.h|lib/test/src/test_zcode_moderation_attestation.c", "zcode_moderation_attestation file_market_moderation")
+/* LANE hot-swap reach: the load-verification path and the controller TUs whose
+ * module leaf tables it made honest. Before tools/dev/hotswap_verify_so.c
+ * every hot-swap test drove hotswap_module_admit() with a struct FABRICATED in
+ * the test's own TU, so no artifact was ever dlopen'd and an allowlist row
+ * could name a TU that emits no `zcl_hotswap_module` symbol at all
+ * (diagnostics_native_handlers.c was exactly that) or whose leaf body lives in
+ * a TU outside its island (core.status.brief was exactly that). Both classes
+ * pass every text gate and fail at load. Mapped to the module/loader groups
+ * plus the catalog and native-contract groups, because widening a leaf table
+ * asserts those leaves are still ZCL_COMMAND_READY_READ and still dispatch
+ * through the registry's public contract. */
+AGENT_IMPACT_RULE("tools/dev/hotswap_verify_so.c|tools/dev/hotswap-verify.sh|config/hotswap_probe_cases.def|app/controllers/src/ops_native_handlers.c|app/controllers/src/net_native_handlers.c|app/controllers/src/meta_native_handlers.c|app/controllers/src/wallet_native_handlers.c|app/controllers/src/app_native_handlers.c|app/controllers/src/chain_native_handlers.c|app/controllers/src/diagnostics_native_handlers.c|app/controllers/src/status_brief_native_handler.c", "hotswap_module hotswap_module_v2 hotswap_loader hotswap_simnet command_registry_catalog command_handler_snapshot native_api_contract make_lint_gates")
+/* LANE slow-disk-verdicts: the production and deploy paths where a wrong
+ * verdict does real damage, and where every check used to be a stopwatch.
+ * deploy_verify.sh had already been widened 120s -> 600s after a healthy
+ * deploy false-FAILed; the host watchdog wrote NODE-DOWN off ONE missed 5s
+ * probe; the cutover REVERSED a live datadir promotion if the promoted node
+ * had not reached the pre-cutover H* in 300s. Each now fails only on OBSERVED
+ * SILENCE — including delayacct_blkio_ticks, the counter that climbs while a
+ * process is blocked on a slow disk — and reports "still progressing" as its
+ * own non-failure outcome. The three scripts, the systemd drop-ins that cap
+ * their patience, the Makefile branches that must not roll back a progressing
+ * candidate, and the gate that pins all of it move together: an edit to any
+ * one of them with no change to the gate is how a duration verdict comes back
+ * in without anyone noticing. */
+AGENT_IMPACT_RULE("tools/deploy_verify.sh|deploy/zclassic23-cutover.sh|deploy/zclassic23-cutover-selftest.sh|deploy/zclassic23-host-watchdog.sh|deploy/install-host-watchdog.sh|deploy/system/zclassic23-host-watchdog.service|deploy/system/zclassic23-host-watchdog.timer|deploy/zclassic23-spinning-disk-watchdog.conf|lib/test/src/lint_gate_deploy_contracts.c", "make_lint_gates make_lint_gates_realroot")
+/* LANE hotswap-leaf-denylist: the owner ruling that core.chain.block.get and
+ * core.chain.transaction.get are NEVER hot-swappable, and the gate that
+ * enforces it. The names and their per-leaf reasons are DATA in
+ * config/hotswap_denied_leaves.def; the gate is the only consumer. They must
+ * move together — a denylist edit with no gate run is how the rule quietly
+ * stops being enforced, and a gate edit with no denylist re-read is how a
+ * fail-closed path turns into a hollow pass. The scanned manifests are listed
+ * too: a leaf added to any of them is exactly the event this rule exists to
+ * put a test group behind. Mapped to the lint-gate group that owns the
+ * Makefile-LINT_GATES / run_lint.sh-table / docs parity assertions. */
+AGENT_IMPACT_RULE("config/hotswap_denied_leaves.def|tools/lint/check_hotswap_denied_leaves.sh|config/hotswap_eligible.def|config/hotswap_swappable.def|config/hotswap_probe_cases.def|config/hotswap_services.def|config/hotswap_islands.def", "make_lint_gates hotswap_module_v2")
+/* LANE test-suite module mode: the hot-swap loader's publish hooks moved out
+ * from behind ZCL_DEV_BUILD to ZCL_DEV_BUILD||ZCL_TESTING so the parallel test
+ * harness can load a freshly compiled module .so through THE production loader
+ * (make t-hotswap) instead of relinking ~2,800 objects for a one-file edit. An
+ * edit to either file changes what "validated and published" means for the dev
+ * node, the CLI preload path, AND the test harness at once, so it must run the
+ * hot-swap groups that own the loader gauntlet plus the registry/override
+ * groups the commit hook publishes into. */
+AGENT_IMPACT_RULE("tools/command/native_dev_hotswap.c|tools/command/native_dev_hotswap.h", "hotswap_module hotswap_module_v2 hotswap_loader hotswap_simnet command_handler_snapshot command_registry_catalog os_sandbox_hotswap_interaction make_lint_gates")
+/* The parallel runner itself now owns module-mode activation (the epoch guard,
+ * the cache disable, and the mode stamping on SUITE VERDICT). It is the
+ * harness every group runs inside, so keep it on the loader groups plus the
+ * runner's own selector/catalog gates. */
+AGENT_IMPACT_RULE("lib/test/src/test_parallel.c", "hotswap_module hotswap_module_v2 hotswap_loader hotswap_simnet test_test_group_selector make_lint_gates")
+/* LANE params-sovereignty, publish/release symmetry: the four shielded
+ * verifying keys must arm and disarm together, because every one of the four
+ * verifiers is fail-closed on a NULL key and the published-pointer set is
+ * therefore the process's single answer to "is shielded validation armed?".
+ * phgr_vk (bn254.c) was the odd one out: function-local static storage in each
+ * of the two load paths, out of reach of sapling_free_params(), so three
+ * verifiers disarmed and sprout_verify_phgr13 kept validating pre-Sapling
+ * JoinSplits against a released key while each reload dropped an ic[]
+ * allocation. params_init.c, the two publishing sinks it writes through
+ * (sapling.c, sprout.c, bn254.c), and the group that pins the symmetry move
+ * together — an edit to the publish or release side with no group run is how
+ * the asymmetry would come back. */
+AGENT_IMPACT_RULE("lib/sapling/src/params_init.c|lib/sapling/src/bn254.c|lib/sapling/src/sprout.c|lib/sapling/src/sapling.c|lib/sapling/include/sapling/bn254.h|lib/test/src/test_params_vk_publish_symmetry.c", "params_vk_publish_symmetry params_vk_embedded sprout_phgr13_kat")
+
+/* test_sprout_phgr13_kat.c is the known-answer test for the Sprout PHGR13
+ * verifying path. It arrived with the PHGR publish lane but named no groups,
+ * so the push gate saw it as unmapped code and failed closed — correctly. Its
+ * own group plus the two params surfaces it shares a verifying key with. */
+AGENT_IMPACT_RULE("lib/test/src/test_sprout_phgr13_kat.c", "sprout_phgr13_kat params_vk_publish_symmetry params_vk_embedded")
+/* LANE ship-progress-verdicts: the fleet-wide deploy path and the health
+ * verdicts that decide whether it destroys anything. tools/ship.sh had FOUR
+ * stopwatches in front of a remote, destructive rollback across every host in
+ * one command — 300s for a candidate to qualify on the remote leg, a
+ * hard-coded 300 with no override at all on the local leg, and 60s twice on
+ * the restore path — and all four demanded that a `status` call answer. A box
+ * booting a ~22 GB datadir on a 7200rpm disk exceeds that routinely and got
+ * its correctly-shipped binary restored. tools/scripts/ship_progress_lib.sh
+ * replaces every one of them with observed-progress verdicts (/proc io bytes,
+ * CPU ticks, and delayacct_blkio_ticks, which climbs while a process is
+ * BLOCKED on the disk), and only PROVEN silence or a process that will not
+ * stay up may now reach the rollback.
+ *
+ * The library, the script that ships it over the wire, the hermetic harness
+ * and the gate that runs both move together: this is the one place in the
+ * tree where a wrong verdict is remote, destructive and fleet-wide, and a
+ * library edit with no harness run is exactly how a duration verdict comes
+ * back in. tools/ship.sh had no selftest of any kind before this lane. */
+AGENT_IMPACT_RULE("tools/ship.sh|tools/ship_selftest.sh|tools/scripts/ship_progress_lib.sh|tools/lint/check_ship_remote_transaction.sh", "make_lint_gates")

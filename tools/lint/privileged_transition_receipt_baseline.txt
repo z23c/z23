@@ -72,6 +72,7 @@ app.market.content.register exempt: app-local AR content binding, no executable 
 app.market.purchase.plan   exempt: encrypted wallet-local reservation row, no privileged artifact install
 app.market.purchase.commit exempt: signs+broadcasts an exact Sapling-memo payment, no privileged artifact install
 app.market.moderation.profile.set exempt: rewrites only the node-local market/moderation.v1 view-policy file (per-datadir operator preference), no privileged artifact install
+app.market.moderation.relay.set exempt: rewrites only the node-local market/moderation.v1 policy file (per-datadir operator preference for whether this node forwards other people's offer announcements), no privileged artifact install
 app.market.moderation.review.set exempt: flips one node-local file_offers.review_state column + appends an audit line; local curation metadata only, never gossiped, no privileged artifact install
 app.store.list-product     exempt: app-local AR write (one products row + one content-addressed store_blobs row) into node.db; the payload is merchant-supplied storefront content the store re-hashes on every read, never an artifact the node executes or trusts
 app.shop.want.post         exempt: app-local AR write (one shop_wants row, buyer-signed want ad) into node.db; declares terms only, broadcasts nothing, no executable or consensus artifact install

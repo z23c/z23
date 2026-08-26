@@ -2231,6 +2231,14 @@ static bool dp_hotswap_cache_fixture_init(const char *root,
                      owner_v1) ||
         !dp_mk_write(root, "app/controllers/src/status_native_helpers.c",
                      "int zcl_hotswap_fixture_helper(void) { return 2; }\n") ||
+        /* Every island member of the owner TU must exist in the sandbox: the
+         * island wrapper #includes each one, and a member it cannot stat
+         * fails the build with "island member list is invalid or unwritable".
+         * config/hotswap_islands.def is the authority for this list — when a
+         * member is added there, add it here too, or this fixture breaks in a
+         * way whose message points at the wrapper rather than at the sandbox. */
+        !dp_mk_write(root, "app/controllers/src/status_brief_native_handler.c",
+                     "int zcl_hotswap_fixture_brief(void) { return 5; }\n") ||
         !dp_mk_write(root,
                      "app/services/src/zcode_c23_corpus_service.c",
                      "int zcl_hotswap_fixture_service(void) { return 3; }\n") ||

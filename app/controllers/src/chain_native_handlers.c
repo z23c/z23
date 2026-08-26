@@ -285,39 +285,35 @@ char *zcl_native_utxo_audit_body(const struct json_value *args,
  * core.consensus.utxo.audit: rpc_getutxoaudit (blockchain_controller_chain.c)
  * accepts 0..3 params (rpc_params_expect(&p, 0, 3)) and, with remote_sha3
  * absent, falls back to utxo_audit_local() — a genuine local-only audit, not
- * an error — so the empty-args self-test dispatch succeeds. core.chain.
- * block.get and core.chain.transaction.get are NOT probe candidates: both
- * require a caller-supplied id (block_id / txid); with no args they call
- * getblock/getrawtransaction with an empty hash and get back a top-level
- * {"error":...} envelope, which would make the self-test spuriously fail.
- * See config/hotswap_eligible.def. */
+ * an error — so the empty-args self-test dispatch succeeds.
+ * See config/hotswap_eligible.def.
+ *
+ * THE TABLE BELOW HOLDS ONE LEAF, AND THAT IS THE WHOLE RULE.
+ * core.chain.block.get and core.chain.transaction.get are NEVER hot-swappable
+ * — an owner decision recorded, with its reason, in
+ * config/hotswap_denied_leaves.def and enforced by
+ * check-hotswap-denied-leaves. They RENDER BLOCK AND TRANSACTION BYTES: a
+ * swapped renderer misreports chain data to every RPC reader without touching
+ * one line of validation, so "READY + read-only" (which both leaves are) is
+ * not the right test on that path.
+ *
+ * They used to be staged here, and that was not a theoretical hole:
+ * hotswap_leaf_stage_thunk() in lib/hotswap/src/hotswap_loader.c applies NO
+ * per-leaf allowlist to a Tier-1 generation — it accepts every row this table
+ * exports — so a recompiled generation of this TU re-pointed both of them
+ * even though neither leaf is named in any config/ manifest. The Tier-2
+ * module path was never exposed: hotswap_module_admit() checks each leaf
+ * against config/hotswap_swappable.def, which lists only the audit leaf.
+ * Do not add a trampoline back without the owner reversing the decision. */
 #ifdef ZCL_HOTSWAP_GEN
 #define ZCL_HOTSWAP_PROBE_LEAF "core.consensus.utxo.audit"
 #include "hotswap/hotswap.h"
 #include "kernel/command_registry.h"
 #include "command/native_command.h"
 
-static void tramp_getblock(const struct zcl_command_request *request,
-                           struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_getblock_body, reply);
-}
-
-static void tramp_getrawtransaction(const struct zcl_command_request *request,
-                                    struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_getrawtransaction_body, reply);
-}
-
-static void tramp_utxo_audit(const struct zcl_command_request *request,
-                             struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_utxo_audit_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(tramp_utxo_audit, zcl_native_utxo_audit_body)
 
 static const struct zcl_hotswap_leaf_replacement k_leaves[] = {
-    { "core.chain.block.get",       tramp_getblock },
-    { "core.chain.transaction.get", tramp_getrawtransaction },
     { "core.consensus.utxo.audit",  tramp_utxo_audit },
 };
 
@@ -338,11 +334,7 @@ ZCL_HOTSWAP_EXPORT_LEAVES(k_leaves, sizeof(k_leaves) / sizeof(k_leaves[0]))
 #include "kernel/command_registry.h"
 #include "command/native_command.h"
 
-static void module_tramp_utxo_audit(
-    const struct zcl_command_request *request, struct zcl_command_reply *reply)
-{
-    zcl_native_bridge_run(request, zcl_native_utxo_audit_body, reply);
-}
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_utxo_audit, zcl_native_utxo_audit_body)
 
 /* The module's own health hook — runs before the loader publishes it. Kept
  * node-independent (no RPC): a structural OK. */

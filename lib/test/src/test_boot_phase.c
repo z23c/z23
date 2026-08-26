@@ -16,11 +16,17 @@
 #include "config/boot.h"
 #include "util/boot_phase.h"
 #include <sqlite3.h>
+#include "util/sd_notify.h"
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <signal.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/wait.h>
+#include <unistd.h>
 #include <fcntl.h>
 
 bool boot_wallet_rebuild_probe(sqlite3 *db, bool *has_utxos,
@@ -60,6 +66,121 @@ static int test_wallet_rebuild_probe(void)
     failed |= boot_wallet_rebuild_probe(db, &has_utxos, &has_keys);
     failed |= sqlite3_close(db) != SQLITE_OK;
     return failed;
+}
+
+/* ── fixture for the out-of-band evidence probe ───────────────────
+ *
+ * An abstract-namespace socket (leading NUL) is used deliberately: it
+ * needs no filesystem path, so this fixture can never write into a
+ * datadir and needs no unlink on any exit path. */
+static int bp_bind_abstract_socket(char *name_out, size_t name_cap)
+{
+    static unsigned counter;
+    int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if (fd < 0)
+        return -1;
+
+    int n = snprintf(name_out, name_cap, "@zcl-bootphase-%d-%u",
+                     (int)getpid(), counter++);
+    if (n <= 0 || (size_t)n >= name_cap) {
+        close(fd);
+        return -1;
+    }
+    size_t name_len = strlen(name_out) - 1;   /* bytes after the '@' */
+
+    struct sockaddr_un sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sun_family = AF_UNIX;
+    sa.sun_path[0] = '\0';
+    memcpy(sa.sun_path + 1, name_out + 1, name_len);
+    socklen_t sa_len = (socklen_t)(offsetof(struct sockaddr_un, sun_path)
+                                    + 1 + name_len);
+    if (bind(fd, (struct sockaddr *)&sa, sa_len) != 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+/* Discard everything queued. The sends under test are synchronous local
+ * IPC on the calling thread, so by the time the call that produced them
+ * has returned the datagrams are already queued — there is nothing to
+ * wait for and no sleep here. */
+static void bp_drain(int fd)
+{
+    char buf[256];
+    while (recv(fd, buf, sizeof(buf), 0) >= 0)
+        ;
+}
+
+/* True iff an EXTEND_TIMEOUT_USEC datagram is among what is queued.
+ * Returning false is the assertion in the negative controls, so this
+ * drains the WHOLE queue rather than looking at only the first
+ * datagram: a STATUS= line arrives in both cases and must not be
+ * mistaken for the absence of an extension. */
+static bool bp_saw_extend(int fd)
+{
+    char buf[256];
+    bool seen = false;
+    for (;;) {
+        ssize_t n = recv(fd, buf, sizeof(buf) - 1, 0);
+        if (n < 0)
+            break;
+        buf[n] = '\0';
+        if (strncmp(buf, "EXTEND_TIMEOUT_USEC=", 20) == 0)
+            seen = true;
+    }
+    return seen;
+}
+
+/* Injectable evidence source: the mechanism under test is "the sweeper
+ * asks a probe whether anything changed", and a fake makes the moved /
+ * not-moved distinction exact instead of depending on what else this
+ * box happens to be doing. */
+static uint64_t g_bp_fake_evidence;
+static uint64_t bp_fake_evidence_probe(void *ctx)
+{
+    (void)ctx;
+    return g_bp_fake_evidence;
+}
+
+/* Force `bytes` of real, device-visible write I/O so the stock
+ * getrusage probe has something to observe. Uses the suite's own
+ * per-pid scratch helper — never a datadir, and never a fixed path two
+ * concurrent runs could collide on. Returns false if the fixture itself
+ * could not be built, so a fixture failure reads as a fixture failure
+ * and not as a probe defect. */
+static bool bp_burn_block_io(size_t bytes)
+{
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "bootphase", "io");
+
+    char path[320];
+    snprintf(path, sizeof(path), "%s/burn", dir);
+    bool ok = false;
+    int fd = open(path, O_CREAT | O_WRONLY | O_TRUNC, 0600);
+    if (fd >= 0) {
+        static char chunk[64 * 1024];
+        size_t written = 0;
+        ok = true;
+        while (written < bytes) {
+            size_t want = bytes - written;
+            if (want > sizeof(chunk))
+                want = sizeof(chunk);
+            /* Vary the bytes so no filesystem can collapse this to a
+             * hole and give us a write that never reaches the device. */
+            chunk[0] = (char)(written >> 16);
+            chunk[1] = (char)(written >> 8);
+            ssize_t w = write(fd, chunk, want);
+            if (w <= 0) { ok = false; break; }
+            written += (size_t)w;
+        }
+        if (ok && fsync(fd) != 0)
+            ok = false;
+        close(fd);
+    }
+    test_rm_rf(dir);
+    return ok;
 }
 
 #define BP_CHECK(name, expr) do { \
@@ -435,6 +556,123 @@ int test_boot_phase(void)
             strcmp(boot_step_state_verdict(BOOT_STEP_STUCK),
                    "telemetry") == 0 &&
             !boot_step_state_is_failure(BOOT_STEP_STUCK));
+    }
+
+    /* ── out-of-band evidence probe for an OPAQUE step ─────────────
+     *
+     * The defect: node.db's open ceremony (SQLite WAL recovery, then
+     * PRAGMA quick_check) is a pair of single blocking calls inside
+     * libsqlite3. Measured on this node's own node.log it cost between
+     * 214_354 ms and 985_360 ms whenever the previous shutdown was
+     * unclean, and nothing inside it can call boot_step_note(). It
+     * therefore graded STUCK — over budget, zero progress — and bought
+     * no start budget, even though the disk was working the whole time.
+     *
+     * Proven here end to end: the step is reported over the real
+     * NOTIFY_SOCKET path, and the EXTEND_TIMEOUT_USEC datagram appears
+     * ONLY when the probe's value actually changed during the window.
+     *
+     * Two negative controls, both required, because the claim has two
+     * halves. (1) no probe -> STUCK -> no datagram: without them a test
+     * that only checks the positive case passes just as well if the
+     * extension were unconditional. (2) probe installed but NOT moving
+     * -> still STUCK: without this, installing a probe could be granting
+     * the extension by its mere presence. */
+    {
+        boot_stage_reset_for_testing();
+
+        char sock_name[64];
+        int  fd = bp_bind_abstract_socket(sock_name, sizeof(sock_name));
+        BP_CHECK("evidence: notify socket bound", fd >= 0);
+
+        if (fd >= 0) {
+            setenv("NOTIFY_SOCKET", sock_name, 1);
+            sd_notify_reset_for_testing();
+            BP_CHECK("evidence: sd_notify active for this fixture",
+                sd_notify_init() && sd_notify_is_active());
+
+            /* ── NEGATIVE CONTROL 1: opaque step, no probe ───────── */
+            boot_step_enter("test.opaque_no_probe");
+            bp_drain(fd);   /* discard the BEGIN record's own traffic */
+            enum boot_step_state st =
+                boot_step_stall_report_for_testing(BOOT_STEP_BUDGET_MS * 2);
+            BP_CHECK("evidence[-]: opaque step with no probe grades STUCK",
+                st == BOOT_STEP_STUCK);
+            BP_CHECK("evidence[-]: STUCK sends NO EXTEND_TIMEOUT_USEC",
+                !bp_saw_extend(fd));
+            boot_step_done();
+
+            /* ── NEGATIVE CONTROL 2: probe installed, not moving ──── */
+            g_bp_fake_evidence = 7;
+            boot_step_enter("test.opaque_probe_frozen");
+            boot_step_set_evidence_probe(bp_fake_evidence_probe, NULL);
+            bp_drain(fd);
+            st = boot_step_stall_report_for_testing(BOOT_STEP_BUDGET_MS * 2);
+            BP_CHECK("evidence[-]: a probe that does NOT move still "
+                     "grades STUCK (presence is not evidence)",
+                st == BOOT_STEP_STUCK);
+            BP_CHECK("evidence[-]: frozen probe sends NO "
+                     "EXTEND_TIMEOUT_USEC",
+                !bp_saw_extend(fd));
+            boot_step_done();
+
+            /* ── POSITIVE: the same step, probe moving ───────────── */
+            boot_step_enter("test.opaque_probe_moving");
+            boot_step_set_evidence_probe(bp_fake_evidence_probe, NULL);
+            bp_drain(fd);
+            g_bp_fake_evidence++;   /* the disk did a unit of work */
+            st = boot_step_stall_report_for_testing(BOOT_STEP_BUDGET_MS * 2);
+            BP_CHECK("evidence[+]: a probe that MOVED grades SLOW, "
+                     "not STUCK",
+                st == BOOT_STEP_SLOW);
+            BP_CHECK("evidence[+]: SLOW sends EXTEND_TIMEOUT_USEC — the "
+                     "slow box keeps its start budget",
+                bp_saw_extend(fd));
+            boot_step_done();
+
+            /* ── the probe is scoped to the step ─────────────────── */
+            g_bp_fake_evidence = 0;
+            boot_step_enter("test.after_close");
+            bp_drain(fd);
+            g_bp_fake_evidence += 1000;  /* would be evidence if still armed */
+            st = boot_step_stall_report_for_testing(BOOT_STEP_BUDGET_MS * 2);
+            BP_CHECK("evidence: closing a step disarms its probe — it "
+                     "cannot leak into the next step",
+                st == BOOT_STEP_STUCK);
+            boot_step_done();
+
+            /* ── installing a probe is not itself progress ────────── */
+            g_bp_fake_evidence = 1000000;   /* large absolute history */
+            boot_step_enter("test.install_is_not_progress");
+            boot_step_set_evidence_probe(bp_fake_evidence_probe, NULL);
+            bp_drain(fd);
+            st = boot_step_stall_report_for_testing(BOOT_STEP_BUDGET_MS * 2);
+            BP_CHECK("evidence: installing a probe re-seeds the baseline "
+                     "— pre-step I/O is not this step's progress",
+                st == BOOT_STEP_STUCK);
+            boot_step_done();
+
+            close(fd);
+            unsetenv("NOTIFY_SOCKET");
+            sd_notify_reset_for_testing();
+        }
+
+        /* The stock probe must be real, non-blocking, and must observe
+         * this process's own block I/O. fsync forces the writes out to
+         * the device, so ru_oublock has to move; a page-cache-only write
+         * would not be evidence and must not be counted as any. */
+        {
+            uint64_t before = boot_evidence_probe_process_io(NULL);
+            BP_CHECK("evidence: stock process-io probe wrote real I/O",
+                bp_burn_block_io(4 * BOOT_EVIDENCE_IO_QUANTUM_BYTES));
+            uint64_t after = boot_evidence_probe_process_io(NULL);
+            BP_CHECK("evidence: stock process-io probe advances after "
+                     "≥1 MiB of fsynced block I/O",
+                after > before);
+        }
+
+        /* No step must be left open for the tests that run after this. */
+        boot_step_done();
     }
 
     /* Restore for any subsequent tests in this process. */

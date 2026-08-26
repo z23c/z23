@@ -30,6 +30,8 @@ awk '
     copying && /^ROLLBACK_SCRIPT$/ { exit }
     copying { print }
 ' "$ROOT/tools/ship.sh" > "$tmp/rollback.sh"
+cat "$ROOT/tools/scripts/ship_progress_lib.sh" "$tmp/activate.sh" > "$tmp/activate.full" && mv "$tmp/activate.full" "$tmp/activate.sh"
+cat "$ROOT/tools/scripts/ship_progress_lib.sh" "$tmp/rollback.sh" > "$tmp/rollback.full" && mv "$tmp/rollback.full" "$tmp/rollback.sh"
 bash -n "$tmp/activate.sh" "$tmp/rollback.sh"
 
 cat > "$tmp/node.c" <<'EOF'
@@ -48,8 +50,12 @@ int main(int argc, char **argv) {
 EOF
 cc -O0 -DVERSION='"old"' "$tmp/node.c" -o "$tmp/old"
 cc -O0 -DVERSION='"new"' "$tmp/node.c" -o "$tmp/new"
+# A candidate that installs perfectly and then never answers `status`. This is
+# the fault a countdown could not tell apart from a slow disk.
+cc -O0 -DVERSION='""' "$tmp/node.c" -o "$tmp/mute"
 old_sha="$(sha256sum < "$tmp/old" | awk '{print $1}')"
 new_sha="$(sha256sum < "$tmp/new" | awk '{print $1}')"
+mute_sha="$(sha256sum < "$tmp/mute" | awk '{print $1}')"
 [ "$old_sha" != "$new_sha" ]
 
 mkdir -p "$tmp/mockbin" "$tmp/home/.config/systemd/user/zclassic23.service.d"
@@ -120,11 +126,10 @@ invoke() {
     ZCL_SHIP_TEST_FAIL_MARKER="$tmp/fail.marker" \
     ZCL_SHIP_TEST_FAIL_ONCE="${1:-}" \
     ZCL_SHIP_TEST_FAIL_ALWAYS="${2:-}" \
-    ZCL_SHIP_REMOTE_HEALTH_SECONDS=5 \
-    ZCL_SHIP_ROLLBACK_HEALTH_SECONDS=5 \
         bash "$tmp/activate.sh" "$target" "$new_sha" \
             "$(printf 'a%.0s' {1..64})" candidate-commit \
-            "$new_sha" "$new_sha" "$run_id"
+            "$new_sha" "$new_sha" "$run_id" \
+            20 6 20 6 2 2 "2 4 6"
 }
 
 reset_transaction() {
@@ -164,6 +169,35 @@ for fault in reload restart; do
     fi
     assert_rolled_back
 done
+
+# A candidate that installs cleanly, restarts cleanly, presents exactly the
+# bytes and identity it promised — and then never answers `status`. Nothing in
+# the transaction itself failed, so every install-time fault check above stays
+# quiet; only the health verdict can catch this. It is also the exact shape a
+# slow box presents for its first few minutes, which is why the verdict is
+# allowed to convict on observed stillness and never on elapsed time.
+stop_current
+reset_transaction
+printf 'old identity\n' > "$dropin"
+start_old
+install -m 755 "$tmp/mute" "${target}.incoming.${run_id}"
+install -m 755 "$tmp/mute" "${worker_v}.incoming.${run_id}"
+install -m 755 "$tmp/mute" "${worker_d}.incoming.${run_id}"
+if HOME="$tmp/home" PATH="$tmp/mockbin:$PATH" \
+    ZCL_SHIP_TEST_PIDFILE="$pidfile" \
+    ZCL_SHIP_TEST_TARGET="$target" \
+    ZCL_SHIP_TEST_WANT_SOURCE="$(printf 'a%.0s' {1..64})" \
+    ZCL_SHIP_TEST_WANT_COMMIT=candidate-commit \
+    ZCL_SHIP_TEST_FAIL_MARKER="$tmp/fail.marker" \
+    ZCL_SHIP_TEST_FAIL_ONCE="" ZCL_SHIP_TEST_FAIL_ALWAYS="" \
+        bash "$tmp/activate.sh" "$target" "$mute_sha" \
+            "$(printf 'a%.0s' {1..64})" candidate-commit \
+            "$mute_sha" "$mute_sha" "$run_id" \
+            20 6 20 6 2 2 "2 4 6" >/dev/null 2>&1; then
+    echo "check_ship_remote_transaction: a candidate that never answers status was accepted" >&2
+    exit 1
+fi
+assert_rolled_back
 
 # A concurrent activation lock belongs to the other process. Refusal must not
 # remove that lock or mutate any installed byte.
@@ -238,8 +272,7 @@ ZCL_SHIP_TEST_PIDFILE="$pidfile" ZCL_SHIP_TEST_TARGET="$target" \
 ZCL_SHIP_TEST_WANT_SOURCE="$(printf 'a%.0s' {1..64})" \
 ZCL_SHIP_TEST_WANT_COMMIT=candidate-commit \
 ZCL_SHIP_TEST_FAIL_ONCE="" ZCL_SHIP_TEST_FAIL_ALWAYS="" \
-ZCL_SHIP_ROLLBACK_HEALTH_SECONDS=5 \
-    bash "$tmp/rollback.sh" "$target" "$run_id" >/dev/null
+    bash "$tmp/rollback.sh" "$target" "$run_id" 20 6 2 2 "2 4 6" >/dev/null
 assert_rolled_back
 
 # Re-activate new bytes, then deny the fallback restart. The fallback must
@@ -249,8 +282,7 @@ invoke "" >/dev/null
 if out="$(HOME="$tmp/home" PATH="$tmp/mockbin:$PATH" \
     ZCL_SHIP_TEST_PIDFILE="$pidfile" ZCL_SHIP_TEST_TARGET="$target" \
     ZCL_SHIP_TEST_FAIL_ONCE="" ZCL_SHIP_TEST_FAIL_ALWAYS=restart \
-    ZCL_SHIP_ROLLBACK_HEALTH_SECONDS=5 \
-    bash "$tmp/rollback.sh" "$target" "$run_id" 2>&1)"; then
+    bash "$tmp/rollback.sh" "$target" "$run_id" 20 6 2 2 "2 4 6" 2>&1)"; then
     echo "check_ship_remote_transaction: fallback survived persistent restart fault" >&2
     exit 1
 fi
