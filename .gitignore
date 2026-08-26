@@ -86,5 +86,18 @@ chaos-output/
 .core-unseal-token
 .codeindex/
 
-# devfleet: per-box operator config is local-only, never committed
+# Per-box operator config is local-only, never committed.
 deploy/devfleet/*.env
+
+# Operator mesh state is LOCAL, never committed. This repository ships no
+# fleet: the boxes an operator happens to run are their own business, and
+# their addresses, ports, running-source hashes, heartbeats, drill output and
+# install pins all live under
+# ${XDG_STATE_HOME:-$HOME/.local/state}/zclassic23/fleet/, not here. Only
+# deploy/devfleet/README.md and *.example templates are tracked. These
+# patterns exist so a stray copy in the working tree can never come back.
+deploy/devfleet/*.txt
+deploy/devfleet/*.sync
+deploy/devfleet/*.status
+deploy/devfleet/*.identity
+deploy/devfleet/*.jsonl
