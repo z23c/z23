@@ -93,8 +93,12 @@ run the node some other way, substitute your own unit name. After the restart,
 confirm the node came back with the flags applied:
 
 ```bash
-z23 zcode work toolchain -datadir="$HOME/.zclassic-c23"
+z23 zcode package offered -datadir="$HOME/.zclassic-c23"
 ```
+
+`serving_ready=true` means the resident package engine is live and has at
+least one eligible NODE_ZCL23 peer. `peer_count` is the measured session count;
+zero is never rewritten as a successful join.
 
 ### The two tiers
 

@@ -368,9 +368,9 @@ static int t_join_writes_config(void)
     /* The typed next command, counted and validated by the registry itself. */
     ZNJ_CHECK("join emits exactly one typed next command",
               c.reply.next_count == 1);
-    ZNJ_CHECK("the next command is the leaf that re-reads the join posture",
+    ZNJ_CHECK("the next command verifies resident Commons service",
               c.reply.next_count == 1 &&
-              strcmp(c.reply.next[0].command, "zcode.work.toolchain") == 0);
+              strcmp(c.reply.next[0].command, "zcode.package.offered") == 0);
     free(text);
     znt_cmd_free(&c);
 
@@ -506,7 +506,7 @@ static int t_join_envelope_next_is_registry_validated(void)
               n > 0 && code == ZCL_COMMAND_EXIT_OK &&
               strstr(out, "\"ok\":true") != NULL);
     ZNJ_CHECK("the rendered envelope carries the typed next command",
-              n > 0 && strstr(out, "zcode.work.toolchain") != NULL);
+              n > 0 && strstr(out, "zcode.package.offered") != NULL);
 
     struct json_value doc;
     json_init(&doc);

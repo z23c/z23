@@ -415,10 +415,10 @@ void zcl_native_handle_zcode_node_join(
 
     /* ONE typed next command, hard-validated against the registry
      * (lib/kernel/src/command_registry.c:1993-2034) rather than an untyped
-     * next_safe_command string: after the restart, `zcode work toolchain`
-     * is the leaf that re-reads exactly the posture fields above, so the
-     * operator can confirm the join instead of assuming it. */
+     * next_safe_command string: after the restart, `zcode package offered`
+     * reports the same posture plus the resident engine and eligible peer
+     * facts needed to distinguish configured hosting from live service. */
     (void)zcl_command_reply_add_next(
-        reply, "zcode.work.toolchain", "{}",
-        "after the restart above, re-read this node's join posture");
+        reply, "zcode.package.offered", "{}",
+        "after the restart above, verify resident Commons service");
 }
