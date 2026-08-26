@@ -69,6 +69,7 @@
 #include "base/log_macros.h"
 #include "base/safe_alloc.h"
 #include "command/native_command.h"
+#include "command/native_zcode_transport_leaves.h"
 
 #include "json/json.h"
 #include "platform/time_compat.h"
@@ -109,114 +110,6 @@ static_assert(ZWT_POINTER_WINDOW_S <= VCS_ZCODE_DHT_POINTER_MAX_SECONDS,
               "the pointer publish input must be publishable as a POINTER "
               "record");
 
-/* ── small input helpers (the native_zcode_* pattern) ───────────────── */
-
-static const char *zwt_input_str(const struct json_value *input,
-                                 const char *key)
-{
-    const struct json_value *v = json_get(input, key);
-    return v ? json_get_str(v) : NULL;
-}
-
-static const char *zwt_datadir(const struct zcl_command_request *request)
-{
-    const char *dd = zwt_input_str(request->input, "datadir");
-    if (dd && dd[0])
-        return dd;
-    dd = zcl_native_command_datadir();
-    return (dd && dd[0]) ? dd : NULL;
-}
-
-static bool zwt_zcode_dir(const struct zcl_command_request *request,
-                          struct zcl_command_reply *reply,
-                          const char *command, char out[4400])
-{
-    const char *datadir = zwt_datadir(request);
-    if (!datadir) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INVALID, "MISSING_DATADIR",
-                               "normalize", false, false,
-                               "no datadir given (input datadir or --datadir)",
-                               command);
-        return false;
-    }
-    int n = snprintf(out, 4400, "%s/zcode", datadir);
-    if (n < 0 || (size_t)n >= 4400) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INVALID, "DATADIR_TOO_LONG",
-                               "normalize", false, false,
-                               "datadir path too long", datadir);
-        return false;
-    }
-    return true;
-}
-
-/* One required canonical 64-hex root input. False with the error body set. */
-static bool zwt_hex32(const struct zcl_command_request *request,
-                      struct zcl_command_reply *reply, const char *command,
-                      const char *key, const char *code, const char *what,
-                      uint8_t out[32])
-{
-    const char *hex = zwt_input_str(request->input, key);
-    if (!hex || strlen(hex) != 64 || !zcl_hex_decode_lower(hex, out, 32)) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INVALID, code, "normalize",
-                               false, false, what,
-                               hex && hex[0] ? hex : command);
-        return false;
-    }
-    return true;
-}
-
-/* The store these leaves verify and fetch through. The node-global handle
- * when a hosting daemon owns this process; otherwise the datadir's own
- * store, exactly as zcode package fetch does for its one-shot path. pull
- * is MUTATE, so opening the store is not a read side-effect. */
-static struct vcs_package_store *zwt_open_store(
-    const struct zcl_command_request *request, bool *own_out)
-{
-    *own_out = false;
-    struct vcs_package_store *store = vcs_package_store_global();
-    if (store)
-        return store;
-    const char *datadir = zwt_datadir(request);
-    if (!datadir || !datadir[0])
-        return NULL;
-    store = vcs_package_store_open(datadir, vcs_package_store_quota_bytes());
-    if (!store) {
-        LOG_ERROR("zcode.work", "package store failed to open under %s",
-                  datadir);
-        return NULL;
-    }
-    *own_out = true;
-    return store;
-}
-
-static void zwt_close_store(struct vcs_package_store *store, bool own)
-{
-    if (own && store)
-        vcs_package_store_close(store);
-}
-
-/* Fill one ready-to-run `zcode network publish` input. kind decides
- * whether semantic_root (the task root) is carried. */
-static void zwt_publish_input(struct json_value *out, const char *kind,
-                              const char *semantic_root_hex,
-                              const char *transport_root_hex, uint64_t now,
-                              uint64_t window_s)
-{
-    json_set_object(out);
-    (void)json_push_kv_str(out, "mode", "plan");
-    (void)json_push_kv_str(out, "kind", kind);
-    (void)json_push_kv_str(out, "namespace", VCS_ZCODE_WORK_DHT_NAMESPACE);
-    if (semantic_root_hex)
-        (void)json_push_kv_str(out, "semantic_root", semantic_root_hex);
-    (void)json_push_kv_str(out, "transport_root", transport_root_hex);
-    (void)json_push_kv_int(out, "sequence", (int64_t)now);
-    (void)json_push_kv_int(out, "not_before", (int64_t)now);
-    (void)json_push_kv_int(out, "expiry", (int64_t)(now + window_s));
-}
-
 /* ── zcode work offer ───────────────────────────────────────────────── */
 
 void zcl_native_handle_zcode_work_offer(
@@ -226,17 +119,18 @@ void zcl_native_handle_zcode_work_offer(
     if (!request || !reply)
         return;
     char zcode_dir[4400];
-    if (!zwt_zcode_dir(request, reply, "zcode.work.offer", zcode_dir))
+    if (!ztl_zcode_dir(request, reply, "zcode.work.offer", zcode_dir))
         return;
     uint8_t package_root[32];
-    if (!zwt_hex32(request, reply, "zcode.work.offer", "package_root",
+    if (!ztl_hex32(request, reply, "zcode.work.offer", "package_root",
                    "BAD_PACKAGE_ROOT",
                    "package_root must be 64 lowercase hex chars (the "
                    "accepted source package root)", package_root))
         return;
 
     bool own_store = false;
-    struct vcs_package_store *store = zwt_open_store(request, &own_store);
+    struct vcs_package_store *store =
+        ztl_open_store(request, &own_store, "zcode.work");
     if (!store) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INTERNAL, "NO_STORE",
@@ -260,7 +154,7 @@ void zcl_native_handle_zcode_work_offer(
     enum vcs_zcode_work_admit_result r = vcs_zcode_work_solution_admit(
         store, package_root, NULL, task_root, source_root,
         accepted_work_root);
-    zwt_close_store(store, own_store);
+    ztl_close_store(store, own_store);
 
     char package_hex[65];
     zcl_hex_encode(package_root, 32, package_hex);
@@ -293,13 +187,13 @@ void zcl_native_handle_zcode_work_offer(
     uint64_t now = (uint64_t)platform_time_wall_unix();
     struct json_value publish;
     json_init(&publish);
-    zwt_publish_input(&publish, "provider", NULL, package_hex, now,
-                      ZWT_PROVIDER_WINDOW_S);
+    ztl_publish_input(&publish, "provider", VCS_ZCODE_WORK_DHT_NAMESPACE,
+                      NULL, package_hex, now, ZWT_PROVIDER_WINDOW_S);
     (void)json_push_kv(&reply->data, "provider_publish_input", &publish);
     json_free(&publish);
     json_init(&publish);
-    zwt_publish_input(&publish, "pointer", task_hex, package_hex, now,
-                      ZWT_POINTER_WINDOW_S);
+    ztl_publish_input(&publish, "pointer", VCS_ZCODE_WORK_DHT_NAMESPACE,
+                      task_hex, package_hex, now, ZWT_POINTER_WINDOW_S);
     (void)json_push_kv(&reply->data, "pointer_publish_input", &publish);
     json_free(&publish);
 
@@ -332,93 +226,6 @@ struct zwt_row {
     char accepted_work_root[65];
 };
 
-/* Drive the EXISTING record-discovery handler rather than reimplementing a
- * DHT query: {kind:"pointer", namespace, semantic_root} is exactly the
- * selector the records handler parses. Returns false with the error body
- * already set on the caller's reply. */
-static bool zwt_query_pointers(const struct zcl_command_request *request,
-                               struct zcl_command_reply *reply,
-                               const char *task_root_hex,
-                               struct json_value *records_out)
-{
-    struct json_value input;
-    json_init(&input);
-    json_set_object(&input);
-    (void)json_push_kv_str(&input, "kind", "pointer");
-    (void)json_push_kv_str(&input, "namespace", VCS_ZCODE_WORK_DHT_NAMESPACE);
-    (void)json_push_kv_str(&input, "semantic_root", task_root_hex);
-    const char *datadir = zwt_input_str(request->input, "datadir");
-    if (datadir && datadir[0])
-        (void)json_push_kv_str(&input, "datadir", datadir);
-    struct zcl_command_request forwarded = *request;
-    forwarded.input = &input;
-    struct zcl_command_reply records;
-    zcl_command_reply_init(&records, "zcl.zcode_network_records.v1");
-    zcl_native_handle_zcode_network_records(&forwarded, &records);
-    json_free(&input);
-    if (records.exit_code != ZCL_COMMAND_EXIT_OK) {
-        zcl_command_reply_fail(
-            reply, records.status, records.exit_code,
-            records.error.code[0] ? records.error.code
-                                  : "POINTER_LOOKUP_FAILED",
-            records.error.phase[0] ? records.error.phase : "discover",
-            records.error.retryable, false,
-            records.error.message[0]
-                ? records.error.message
-                : "the work pointer lookup did not complete",
-            records.error.evidence);
-        zcl_command_reply_free(&records);
-        return false;
-    }
-    const struct json_value *rows = json_get(&records.data, "records");
-    json_init(records_out);
-    if (rows && rows->type == JSON_ARR)
-        json_copy(records_out, rows);
-    else
-        json_set_array(records_out);
-    zcl_command_reply_free(&records);
-    return true;
-}
-
-/* Drive the EXISTING fetch handler for one source package root. Never
- * fails the caller: the row records whatever verdict came back. */
-static void zwt_fetch_one(const struct zcl_command_request *request,
-                          const char *transport_root_hex,
-                          struct zwt_row *row)
-{
-    struct json_value input;
-    json_init(&input);
-    json_set_object(&input);
-    (void)json_push_kv_str(&input, "root", transport_root_hex);
-    (void)json_push_kv_str(&input, "namespace", VCS_ZCODE_WORK_DHT_NAMESPACE);
-    const char *datadir = zwt_input_str(request->input, "datadir");
-    if (datadir && datadir[0])
-        (void)json_push_kv_str(&input, "datadir", datadir);
-    (void)json_push_kv_int(&input, "maximum_bytes",
-                           (int64_t)VCS_SOURCE_BUNDLE_MAX_SOURCE_BYTES);
-    struct zcl_command_request forwarded = *request;
-    forwarded.input = &input;
-    struct zcl_command_reply fetch;
-    zcl_command_reply_init(&fetch, "zcl.zcode_package_fetch.v1");
-    zcl_native_handle_zcode_package_fetch(&forwarded, &fetch);
-    json_free(&input);
-    if (fetch.exit_code != ZCL_COMMAND_EXIT_OK) {
-        (void)snprintf(row->fetch_outcome, sizeof(row->fetch_outcome), "%s",
-                       fetch.error.code[0] ? fetch.error.code
-                                           : "FETCH_FAILED");
-        zcl_command_reply_free(&fetch);
-        return;
-    }
-    const char *verdict = json_get_str(json_get(&fetch.data, "fetch_result"));
-    if (!verdict)
-        verdict = json_get_str(json_get(&fetch.data, "result"));
-    row->fetched = json_get_bool_or(&fetch.data, "already_complete", false) ||
-        (verdict && strcmp(verdict, "already-complete") == 0);
-    (void)snprintf(row->fetch_outcome, sizeof(row->fetch_outcome), "%s",
-                   verdict ? verdict : (row->fetched ? "already-complete"
-                                                     : "scheduled"));
-    zcl_command_reply_free(&fetch);
-}
 
 void zcl_native_handle_zcode_work_pull(
     const struct zcl_command_request *request,
@@ -427,10 +234,10 @@ void zcl_native_handle_zcode_work_pull(
     if (!request || !reply)
         return;
     char zcode_dir[4400];
-    if (!zwt_zcode_dir(request, reply, "zcode.work.pull", zcode_dir))
+    if (!ztl_zcode_dir(request, reply, "zcode.work.pull", zcode_dir))
         return;
     uint8_t task_root[32];
-    if (!zwt_hex32(request, reply, "zcode.work.pull", "task_root",
+    if (!ztl_hex32(request, reply, "zcode.work.pull", "task_root",
                    "BAD_TASK_ROOT",
                    "task_root must be 64 lowercase hex chars (the task the "
                    "packages must prove they solve)", task_root))
@@ -457,7 +264,8 @@ void zcl_native_handle_zcode_work_pull(
     }
 
     struct json_value pointers;
-    if (!zwt_query_pointers(request, reply, task_hex, &pointers))
+    if (!ztl_query_pointers(request, reply, VCS_ZCODE_WORK_DHT_NAMESPACE,
+                            task_hex, &pointers))
         return;
 
     /* Distinct transport roots, in discovery order, bounded. Two solvers
@@ -510,7 +318,7 @@ void zcl_native_handle_zcode_work_pull(
     bool own_store = false;
     struct vcs_package_store *store = NULL;
     if (distinct > 0) {
-        store = zwt_open_store(request, &own_store);
+        store = ztl_open_store(request, &own_store, "zcode.work");
         if (!store) {
             free(rows);
             zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
@@ -527,7 +335,11 @@ void zcl_native_handle_zcode_work_pull(
     uint32_t fetched = 0, admitted = 0, refused = 0;
     for (uint32_t i = 0; i < distinct; i++) {
         struct zwt_row *row = &rows[i];
-        zwt_fetch_one(request, row->transport_root, row);
+        ztl_fetch_one(request, VCS_ZCODE_WORK_DHT_NAMESPACE,
+                      row->transport_root,
+                      (int64_t)VCS_SOURCE_BUNDLE_MAX_SOURCE_BYTES,
+                      &row->fetched, row->fetch_outcome,
+                      sizeof(row->fetch_outcome));
         fetched += row->fetched ? 1u : 0u;
 
         /* expect_task_root is the caller's root and is NEVER NULL. This
@@ -563,7 +375,7 @@ void zcl_native_handle_zcode_work_pull(
         zcl_hex_encode(source_root, 32, row->source_root);
         zcl_hex_encode(accepted_work_root, 32, row->accepted_work_root);
     }
-    zwt_close_store(store, own_store);
+    ztl_close_store(store, own_store);
 
     /* Two very different dead ends, never merged into one "not found":
      * nobody has solved this task yet, versus somebody has and nobody

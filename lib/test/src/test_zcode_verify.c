@@ -85,6 +85,8 @@
 #include "json/json.h"
 #include "keys/key.h"
 #include "keys/pubkey.h"
+#include "platform/time_compat.h"
+#include "sha3/sha3.h"
 #include "util/spawn.h"
 #include "util/util.h"
 #include "vcs/blob_store.h"
@@ -93,6 +95,7 @@
 #include "vcs/package_store.h"
 #include "vcs/source_package_checkout.h"
 #include "vcs/zcode_dht_record.h"
+#include "vcs/zcode_task_context.h"
 #include "vcs/package_build.h"
 #include "vcs/package_eligible.h"
 #include "vcs/package_manifest.h"
@@ -3176,6 +3179,241 @@ static int t_work_publish_gate(void)
 
 /* ── 4. end-to-end external verifier ────────────────────────────────── */
 
+/* boot_zcode_dht_task_pointer_publish_gate stops THIS node from
+ * advertising a task posting it cannot stand behind. Unlike the work gate
+ * (whose binding arm needs the full accepted-work fixture), every arm is
+ * reachable here: building one real carrier is three small wires. Owns
+ * the same process globals the work gate case does; same open/restore
+ * discipline. */
+static void zv_task_gate_spec(struct vcs_zcode_dht_publish_spec *spec,
+                              const uint8_t semantic_root[32],
+                              const uint8_t transport_root[32])
+{
+    memset(spec, 0, sizeof(*spec));
+    spec->kind = VCS_ZCODE_DHT_RECORD_POINTER;
+    snprintf(spec->namespace_name, sizeof(spec->namespace_name), "%s",
+             VCS_ZCODE_TASK_DHT_NAMESPACE);
+    memcpy(spec->semantic_root, semantic_root, 32);
+    memcpy(spec->transport_root, transport_root, 32);
+    spec->sequence = 1;
+    spec->not_before = 1000;
+    spec->expiry = 1000 + 86400;
+}
+
+/* One real carrier exported into `store`: a valid policy, a task whose
+ * goal_root commits the goal text, live (or already expired) at gate
+ * time. Fills task_root/context_root and returns the export result. */
+static enum vcs_zcode_task_context_error zv_export_task_context(
+    struct vcs_package_store *store, int64_t expires_unix,
+    uint8_t task_root[32], uint8_t context_root[32])
+{
+    struct vcs_zcode_proof_policy_v1 policy;
+    memset(&policy, 0, sizeof(policy));
+    policy.schema_version = VCS_ZCODE_DEV_VERSION;
+    policy.required_proofs = VCS_ZCODE_PROOF_COMPILE |
+                             VCS_ZCODE_PROOF_TEST | VCS_ZCODE_PROOF_FUZZ |
+                             VCS_ZCODE_PROOF_REVIEW |
+                             VCS_ZCODE_PROOF_LOCAL_REPRODUCTION;
+    policy.minimum_compile_receipts = 2;
+    policy.minimum_test_receipts = 2;
+    policy.minimum_fuzz_receipts = 1;
+    policy.minimum_reviews = 1;
+    policy.minimum_matching_receipts = 2;
+    policy.flags = VCS_ZCODE_POLICY_INDEPENDENT_SIGNERS |
+                   VCS_ZCODE_POLICY_RELEASE_BYTE_IDENTITY;
+    policy.deterministic_fuzz_seeds = 64;
+    policy.audit_basis_points = 100;
+    policy.maximum_proof_age_seconds = 3600;
+    uint8_t policy_root[32];
+    if (vcs_zcode_proof_policy_root(&policy, policy_root) !=
+        VCS_ZCODE_DEV_OK)
+        return VCS_ZCODE_TASK_CONTEXT_POLICY_WIRE;
+    uint8_t policy_wire[VCS_ZCODE_PROOF_POLICY_WIRE_BYTES];
+    if (vcs_zcode_proof_policy_serialize(&policy, policy_wire) !=
+        VCS_ZCODE_DEV_OK)
+        return VCS_ZCODE_TASK_CONTEXT_POLICY_WIRE;
+
+    static const char goal[] = "post me: one task, three wires, one root";
+    struct vcs_zcode_task_v1 task;
+    memset(&task, 0, sizeof(task));
+    task.schema_version = VCS_ZCODE_DEV_VERSION;
+    /* Validation refuses zero roots, so every unconstrained root gets a
+     * distinct nonzero pattern. */
+    memset(task.source_root, 0x21, 32);
+    memset(task.dependency_lock_root, 0x22, 32);
+    memset(task.toolchain_capsule_root, 0x23, 32);
+    memset(task.write_scope_root, 0x24, 32);
+    memset(task.acceptance_tests_root, 0x25, 32);
+    memset(task.model_policy_root, 0x26, 32);
+    memcpy(task.proof_policy_root, policy_root, 32);
+    sha3_256((const uint8_t *)goal, sizeof(goal) - 1u, task.goal_root);
+    task.capabilities = VCS_ZCODE_TASK_CAP_V1_MASK;
+    task.max_changed_files = 32;
+    task.max_patch_bytes = 1024 * 1024;
+    task.max_context_bytes = 2 * 1024 * 1024;
+    task.max_cpu_seconds = 120;
+    task.max_memory_bytes = UINT64_C(512) * 1024 * 1024;
+    task.max_output_bytes = UINT64_C(64) * 1024 * 1024;
+    task.expires_unix = expires_unix;
+    uint8_t task_wire[VCS_ZCODE_TASK_WIRE_BYTES];
+    if (vcs_zcode_task_serialize(&task, task_wire) != VCS_ZCODE_DEV_OK ||
+        vcs_zcode_task_root(&task, task_root) != VCS_ZCODE_DEV_OK)
+        return VCS_ZCODE_TASK_CONTEXT_TASK_WIRE;
+    /* Export while the task is live (yesterday's clock) so an
+     * already-expired posting can still enter the store — exactly how a
+     * live posting looks after a week. */
+    return vcs_zcode_task_context_export(
+        task_wire, sizeof(task_wire), (const uint8_t *)goal,
+        sizeof(goal) - 1u, policy_wire, sizeof(policy_wire), store,
+        expires_unix - 86400, context_root);
+}
+
+static int t_task_publish_gate(void)
+{
+    int failures = 0;
+    uint8_t task_root[32], transport_root[32];
+    zv_pattern_root(0x61, task_root);
+    zv_pattern_root(0x62, transport_root);
+
+    /* (a) No package store at all. */
+    vcs_package_store_close_global();
+    {
+        struct vcs_zcode_dht_publish_spec spec;
+        zv_task_gate_spec(&spec, task_root, transport_root);
+        struct json_value result;
+        json_init(&result);
+        bool allowed =
+            boot_zcode_dht_task_pointer_publish_gate(&spec, &result);
+        ZV_CHECK("task gate: no package store names NO_PACKAGE_STORE",
+                 !allowed &&
+                 zv_str_is(&result, "code", "NO_PACKAGE_STORE"));
+        json_free(&result);
+    }
+
+    const char *argv[] = { "zclassic23-test", "-packagehost=1",
+                           "-packagequota=100000000" };
+    ParseParameters(3, argv);
+    char dd[1024];
+    test_make_tmpdir(dd, sizeof(dd), "zcode_verify", "task-gate");
+    SetDataDir(dd);
+    bool opened = vcs_package_store_open_global() &&
+                  vcs_package_store_global() != NULL;
+    ZV_CHECK("task gate: node-global package store opens on the temp"
+             " datadir",
+             opened);
+    if (!opened) {
+        vcs_package_store_close_global();
+        const char *reset[] = { "zclassic23-test" };
+        ParseParameters(1, reset);
+        SetDataDir("");
+        test_rm_rf_recursive(dd);
+        return failures + 1;
+    }
+    struct vcs_package_store *store = vcs_package_store_global();
+    int64_t now = (int64_t)platform_time_wall_unix();
+
+    /* (b) A context root this node does not hold at all. */
+    {
+        struct vcs_zcode_dht_publish_spec spec;
+        zv_task_gate_spec(&spec, task_root, transport_root);
+        struct json_value result;
+        json_init(&result);
+        bool allowed =
+            boot_zcode_dht_task_pointer_publish_gate(&spec, &result);
+        ZV_CHECK("task gate: an unheld context names"
+                 " TASK_CONTEXT_NOT_VERIFIABLE",
+                 !allowed &&
+                 zv_str_is(&result, "code",
+                           "TASK_CONTEXT_NOT_VERIFIABLE"));
+        json_free(&result);
+    }
+
+    /* (c) Held bytes that are not the fixed carrier. */
+    {
+        static const uint8_t junk[48] = "not-a-task-context-carrier-at-all";
+        uint8_t junk_root[32] = { 0 };
+        bool put = vcs_blob_put_to(store, junk, sizeof(junk), junk_root) ==
+                   VCS_BLOB_OK;
+        struct vcs_zcode_dht_publish_spec spec;
+        zv_task_gate_spec(&spec, task_root, junk_root);
+        struct json_value result;
+        json_init(&result);
+        bool allowed =
+            put && boot_zcode_dht_task_pointer_publish_gate(&spec, &result);
+        ZV_CHECK("task gate: held non-carrier bytes name"
+                 " TASK_CONTEXT_NOT_VERIFIABLE",
+                 put && !allowed &&
+                 zv_str_is(&result, "code",
+                           "TASK_CONTEXT_NOT_VERIFIABLE"));
+        json_free(&result);
+    }
+
+    /* (d) A REAL live posting whose context proves exactly the pointer's
+     * task root: the only arm that may pass. */
+    {
+        uint8_t live_task[32], live_context[32];
+        enum vcs_zcode_task_context_error exported = zv_export_task_context(
+            store, now + 86400, live_task, live_context);
+        struct vcs_zcode_dht_publish_spec spec;
+        zv_task_gate_spec(&spec, live_task, live_context);
+        struct json_value result;
+        json_init(&result);
+        bool allowed = exported == VCS_ZCODE_TASK_CONTEXT_OK &&
+                       boot_zcode_dht_task_pointer_publish_gate(&spec,
+                                                                &result);
+        ZV_CHECK("task gate: a live context proving the pointer's task"
+                 " root is publishable",
+                 exported == VCS_ZCODE_TASK_CONTEXT_OK && allowed);
+        json_free(&result);
+
+        /* (e) The same context behind a pointer naming a DIFFERENT task:
+         * the binding refusal. */
+        uint8_t flipped[32];
+        memcpy(flipped, live_task, 32);
+        flipped[0] ^= 1u;
+        zv_task_gate_spec(&spec, flipped, live_context);
+        json_init(&result);
+        allowed = boot_zcode_dht_task_pointer_publish_gate(&spec, &result);
+        ZV_CHECK("task gate: a context proving a different task names"
+                 " TASK_ROOT_NOT_BOUND",
+                 !allowed &&
+                 zv_str_is(&result, "code", "TASK_ROOT_NOT_BOUND"));
+        json_free(&result);
+    }
+
+    /* (f) A posting that was live when exported but has since expired:
+     * the gate re-checks liveness at publish time, so it refuses here
+     * exactly as it refuses at every puller. */
+    {
+        uint8_t stale_task[32], stale_context[32];
+        enum vcs_zcode_task_context_error exported = zv_export_task_context(
+            store, now - 60, stale_task, stale_context);
+        struct vcs_zcode_dht_publish_spec spec;
+        zv_task_gate_spec(&spec, stale_task, stale_context);
+        struct json_value result;
+        json_init(&result);
+        bool allowed = exported == VCS_ZCODE_TASK_CONTEXT_OK &&
+                       boot_zcode_dht_task_pointer_publish_gate(&spec,
+                                                                &result);
+        ZV_CHECK("task gate: an expired posting names"
+                 " TASK_CONTEXT_NOT_VERIFIABLE",
+                 exported == VCS_ZCODE_TASK_CONTEXT_OK && !allowed &&
+                 zv_str_is(&result, "code",
+                           "TASK_CONTEXT_NOT_VERIFIABLE"));
+        json_free(&result);
+    }
+
+    /* Restore the process globals this case borrowed. */
+    vcs_package_store_close_global();
+    const char *reset[] = { "zclassic23-test" };
+    ParseParameters(1, reset);
+    SetDataDir("");
+    test_rm_rf_recursive(dd);
+    return failures;
+}
+
+
+
 static bool zv_dir_is_empty(const char *path)
 {
     DIR *d = opendir(path);
@@ -3541,6 +3779,7 @@ int test_zcode_verify(void)
     failures += t_attest_pull();
     failures += t_attest_publish_gate();
     failures += t_work_publish_gate();
+    failures += t_task_publish_gate();
     failures += t_verifier_e2e();
     printf("=== zcode_verify complete: %d failure(s) ===\n", failures);
     return failures;

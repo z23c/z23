@@ -52,6 +52,11 @@
  * work command already refuses anything larger or embedded-NUL). */
 #define VCS_ZCODE_TASK_CONTEXT_GOAL_MAX 4096u
 
+/* Whole-carrier fetch bound: the three members plus a content.v2 manifest
+ * and chunk framing, orders of magnitude of headroom by design so the
+ * bound never silently splits a valid context from its fetch. */
+#define VCS_ZCODE_TASK_CONTEXT_MAX_PACKAGE_BYTES UINT64_C(65536)
+
 /* POINTER records here bind task root (semantic) -> context root
  * (transport); PROVIDER records on the context root say "ask me for these
  * bytes". The pair mirrors VCS_ZCODE_WORK_DHT_NAMESPACE. */

@@ -159,7 +159,7 @@ static bool ztl_query_pointers(const struct zcl_command_request *request,
             records.error.code[0] ? records.error.code
                                   : "POINTER_LOOKUP_FAILED",
             records.error.phase[0] ? records.error.phase : "discover",
-            records.retryable, false,
+            records.error.retryable, false,
             records.error.message[0]
                 ? records.error.message
                 : "the pointer lookup did not complete",
@@ -212,7 +212,7 @@ static void ztl_fetch_one(const struct zcl_command_request *request,
     const char *verdict = json_get_str(json_get(&fetch.data, "fetch_result"));
     if (!verdict)
         verdict = json_get_str(json_get(&fetch.data, "result"));
-    *fetched_out = json_get_bool_or(&fetch.data, "already_complete", false) ||
+    *fetched_out = json_get_bool(json_get(&fetch.data, "already_complete")) ||
         (verdict && strcmp(verdict, "already-complete") == 0);
     (void)snprintf(outcome, outcome_cap, "%s",
                    verdict ? verdict : (*fetched_out ? "already-complete"

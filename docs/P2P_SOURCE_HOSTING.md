@@ -516,7 +516,73 @@ with the source is the separate, explicit acts the operator already has
 section applies here as anywhere: once a master key's grants govern this
 namespace, only the founder and live grantees can publish into it.
 
-## Ratio and optional ZCL burn credits
+## Tasks are posted for strangers to pick up
+
+<!-- claim: symbol-present vcs_zcode_task_context_admit lib/vcs/src/zcode_task_context.c # the receiver-side binding check exists -->
+<!-- claim: symbol-present boot_zcode_dht_task_pointer_publish_gate config/src/boot_zcode_dht_publish_gate.c # the pointer hygiene gate exists -->
+<!-- claim: symbol-present zcl_native_handle_zcode_task_pull tools/command/native_zcode_task_transport_command.c # the pull leaf exists -->
+<!-- claim: symbol-present zcode.task.pull config/commands/zcode.def # the task lane is a bound command -->
+
+The work lane answers "who has solved this task?" — but a stranger on
+another node cannot even *start* from the task wire alone: the wire commits
+`goal_root` and `proof_policy_root`, and the preimages live in the author's
+workspace CAS. Task posting closes that gap. The `zcl-task-context.v1`
+carrier is one ordinary content.v2 package with a fixed three-file layout —
+`task.wire`, `goal.bin`, `proof-policy.wire` — so the goal text and the
+policy bytes cross the same frozen swarm codec as any other package, with
+no new CAS object and no new wire message. The same task context always
+roots to the same deterministic context root.
+
+A task object is deliberately **unsigned**. It is a content-addressed
+constraint set, not an identity claim: the authenticity of a *posting* is
+the signed POINTER/PROVIDER pair in the `zclassic23.task` namespace
+(governed by scoped-agent grants like every namespace); the integrity of
+the task is its root. The carrier contributes the cross-bindings a
+stranger cannot re-derive from the task wire alone — `sha3-256(goal.bin)`
+must equal `task.goal_root`, and the policy wire must root to
+`task.proof_policy_root`. Every rule runs identically at export and at
+admit.
+
+The records are the same pair every lane uses, and both are required:
+
+- **PROVIDER** on the context root — "ask me for these bytes".
+- **POINTER** binding `semantic_root` = the task root to
+  `transport_root` = the context root — "this context posts this task".
+
+`zcode task offer --input='{"task_root":"<64hex>"}'` loads the three wires
+from the workspace CAS — each re-hashed against its own address, since raw
+CAS loads do not verify — exports the carrier into the package store, and
+returns both publish inputs, provider first. The publish path gates the
+POINTER with the same hygiene doctrine as the work gate
+(`TASK_CONTEXT_NOT_VERIFIABLE`, `TASK_ROOT_NOT_BOUND`), plus one addition
+the work lane does not need: a liveness check, because an expired posting
+must not be advertised any more than it may be started on.
+
+`zcode task pull --input='{"task_root":"<64hex>"}'` resolves every POINTER
+at that key, fetches each distinct context, and admits each with
+`vcs_zcode_task_context_admit(expect_task_root)` — the receiver-side
+binding check, never the publish gate, is the security property. Verified
+rows carry `expires_unix` and the **goal text**: that is the problem
+statement a remote agent starts from, together with the proof policy the
+solution will be held to. Failed rows name their rule; one bad pointer
+never aborts the sweep; and the dead ends stay separate
+(`NO_TASK_POINTERS`, `TASK_BYTES_UNREACHABLE`, `TASKS_REFUSED`).
+**Pulling is not executing** — doing the work is the ordinary local
+journey, and offering its result is `zcode work offer`.
+
+`zcode task board` lists what *this node* has seen posted in the task
+namespace. It is a local projection of the node's own record store — a
+scan filtered by the sovereignty DISCOVER decision, never a peer query —
+because a namespace-wide DHT query would widen the frozen protocol.
+Records arrive through the ordinary paths (published here, exact-root
+discovery merges, replication), so an empty board means nothing seen yet,
+not nothing anywhere. Every row whose context is already held is
+re-verified and carries its goal; the rest name their rule and wait for
+`task pull`. Sovereignty applies as everywhere: with no matching policy
+rule, DISCOVER defaults to allow while storing stays governed by the
+node's own policy file.
+
+
 
 The primary ratio should be earned by serving verified bytes:
 

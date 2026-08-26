@@ -58,6 +58,7 @@
 #include "vcs/package_swarm_node.h"
 #include "vcs/source_package_transport.h"
 #include "vcs/zcode_lane.h"
+#include "vcs/zcode_task_context.h"
 #include "vcs/zcode_work_context.h"
 
 #include <stdint.h>
@@ -760,6 +761,22 @@ static int t_ps_dependency_closure(void)
                  ps_pkg_store(n.store, &work, NULL));
     PS_CHECK("a work object moves between peers on its own terms",
              ps_is_shape(n.store, work.root, VCS_PACKAGE_PUBLIC_WORK_CONTEXT));
+
+    /* A posted task is the unsigned three-file carrier: shape dispatch
+     * only — the proof that the bytes prove their task is the fetching
+     * stranger's admit, not this node's. */
+    const struct ps_file task_files[] = {
+        {VCS_ZCODE_TASK_CONTEXT_TASK_PATH, "task-wire-bytes", 0},
+        {VCS_ZCODE_TASK_CONTEXT_GOAL_PATH, "goal-bytes", 0},
+        {VCS_ZCODE_TASK_CONTEXT_POLICY_PATH, "policy-bytes", 0},
+    };
+    struct ps_pkg task;
+    PS_CHECK("task carrier stored",
+             ps_pkg_build(&task, task_files, 3) &&
+                 ps_pkg_store(n.store, &task, NULL));
+    PS_CHECK("a posted task moves between peers on its own terms",
+             ps_is_shape(n.store, task.root,
+                         VCS_PACKAGE_PUBLIC_TASK_CONTEXT));
 
     const uint8_t *work_roots[1] = {work.root};
     char work_json[512];

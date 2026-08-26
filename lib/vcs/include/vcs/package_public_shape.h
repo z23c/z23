@@ -44,6 +44,13 @@
  *                 inside is genuine, after the bytes arrive.
  *   WORK_CONTEXT  one fixed build action a requester sent to a worker.
  *   WORK_OUTPUT   the action-bound output a worker returned.
+ *   TASK_CONTEXT  one posted dev task: the unsigned three-file carrier
+ *                 (task.wire / goal.bin / proof-policy.wire). Like the
+ *                 work shapes, the serve-time proof is the consumer's own
+ *                 admit (vcs_zcode_task_context_admit): the fetched bytes
+ *                 re-derive the task root and hash-check the goal and
+ *                 policy, and the signed POINTER that led here is what
+ *                 carries authorship.
  *   FASTOBJ_CARRIER
  *                 a zcl.fastobj.v1 object-set carrier: DERIVED
  *                 compile-cache artifacts, not authored source, and
@@ -113,6 +120,7 @@ enum vcs_package_public_shape {
     VCS_PACKAGE_PUBLIC_BLOB,         /* one-file bytes-only object */
     VCS_PACKAGE_PUBLIC_WORK_CONTEXT, /* one fixed build action */
     VCS_PACKAGE_PUBLIC_WORK_OUTPUT,  /* action-bound work output */
+    VCS_PACKAGE_PUBLIC_TASK_CONTEXT, /* one posted dev task, unsigned */
     VCS_PACKAGE_PUBLIC_FASTOBJ_CARRIER, /* derived compile-cache objects */
 };
 

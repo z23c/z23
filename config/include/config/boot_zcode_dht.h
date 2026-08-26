@@ -62,6 +62,12 @@ bool boot_zcode_dht_peers(uint64_t wall_now,
 bool boot_zcode_dht_record_query(
     uint64_t wall_now, const struct vcs_zcode_dht_record_selector *selector,
     struct vcs_zcode_dht_record *out, size_t max, size_t *count_out);
+/* Synchronous namespace board: the local seen-set, never a peer query —
+ * see vcs_zcode_dht_service_record_local_scan. */
+bool boot_zcode_dht_record_board(
+    uint64_t wall_now, enum vcs_zcode_dht_record_kind kind,
+    const char *namespace_name, struct vcs_zcode_dht_record *out, size_t max,
+    size_t *count_out, size_t *seen_total_out);
 /* One lock-owned view for UI/status consumers that must not combine pointer
  * and provider records from different propagation instants. */
 bool boot_zcode_dht_publication_snapshot(

@@ -87,4 +87,27 @@ bool boot_zcode_dht_attestation_pointer_publish_gate(
 bool boot_zcode_dht_work_pointer_publish_gate(
     const struct vcs_zcode_dht_publish_spec *spec, struct json_value *result);
 
+/* A task-posting POINTER in VCS_ZCODE_TASK_DHT_NAMESPACE claims "the context
+ * package at transport_root posts the dev task whose root is semantic_root,
+ * and this node holds the bytes". This gate refuses the publish unless
+ * vcs_zcode_task_context_admit(store, transport_root, semantic_root, now,
+ * ...) returns OK — one read-only call that proves the carrier is present
+ * and complete, is exactly the fixed three-file shape, re-passes every
+ * cross-binding (goal preimage to task.goal_root, policy wire to
+ * task.proof_policy_root), and proves a task that is live at this instant
+ * (an expired task refuses here exactly as it refuses at every puller).
+ * Refusals carry the named code (NO_PACKAGE_STORE,
+ * TASK_CONTEXT_NOT_VERIFIABLE with the carrier rule string,
+ * TASK_ROOT_NOT_BOUND) in the ok/code/message shape every RPC refusal in
+ * this layer uses.
+ *
+ * Read the attestation gate's doctrine above: it applies word for word. This
+ * gate stops THIS node from advertising a task pointer it cannot stand
+ * behind; it makes nobody else honest. The property a reader may rely on is
+ * the RECEIVER-side check — vcs_zcode_task_context_admit() with a non-NULL
+ * expect_task_root, which every puller passes. PROVIDER records in this
+ * namespace are deliberately ungated, same reasoning as attestation's. */
+bool boot_zcode_dht_task_pointer_publish_gate(
+    const struct vcs_zcode_dht_publish_spec *spec, struct json_value *result);
+
 #endif /* ZCL_CONFIG_BOOT_ZCODE_DHT_PUBLISH_GATE_H */

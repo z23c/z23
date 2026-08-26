@@ -17,6 +17,7 @@
 #include "vcs/package_transport.h"
 #include "vcs/source_package_transport.h"
 #include "vcs/zcode_lane.h"
+#include "vcs/zcode_task_context.h"
 #include "vcs/zcode_work_context.h"
 #include "vcs/zcode_work_output.h"
 
@@ -54,6 +55,7 @@ const char *vcs_package_public_shape_string(
     case VCS_PACKAGE_PUBLIC_BLOB: return "blob";
     case VCS_PACKAGE_PUBLIC_WORK_CONTEXT: return "work-context";
     case VCS_PACKAGE_PUBLIC_WORK_OUTPUT: return "work-output";
+    case VCS_PACKAGE_PUBLIC_TASK_CONTEXT: return "task-context";
     case VCS_PACKAGE_PUBLIC_FASTOBJ_CARRIER: return "fastobj-carrier";
     }
     return "unknown";
@@ -378,6 +380,17 @@ static bool shape_is_work_output(const struct vcs_package_manifest *m)
            shape_find(m, VCS_ZCODE_WORK_OUTPUT_BYTES_PATH) >= 0;
 }
 
+/* The posted-task carrier: exactly the three fixed members, nothing else.
+ * Shape dispatch only — the proof is the consumer's admit, exactly like
+ * the work shapes above. */
+static bool shape_is_task_context(const struct vcs_package_manifest *m)
+{
+    return m->count == 3 &&
+           shape_find(m, VCS_ZCODE_TASK_CONTEXT_TASK_PATH) >= 0 &&
+           shape_find(m, VCS_ZCODE_TASK_CONTEXT_GOAL_PATH) >= 0 &&
+           shape_find(m, VCS_ZCODE_TASK_CONTEXT_POLICY_PATH) >= 0;
+}
+
 /* Every path under the fixed carrier directory picks the carrier branch.
  * The scan is only the dispatch: the bytes are then judged by the
  * consumer's own admit proof, so what this node announces is exactly what
@@ -446,6 +459,8 @@ static void shape_eval_local(struct vcs_package_store *store,
         out->shape = VCS_PACKAGE_PUBLIC_WORK_CONTEXT;
     } else if (shape_is_work_output(&m)) {
         out->shape = VCS_PACKAGE_PUBLIC_WORK_OUTPUT;
+    } else if (shape_is_task_context(&m)) {
+        out->shape = VCS_PACKAGE_PUBLIC_TASK_CONTEXT;
     } else if (shape_is_fastobj_carrier(&m)) {
         char detail[256]; /* verify's refusal text; the rule names the class */
         out->rule = "fastobj-carrier-unverified";

@@ -50,6 +50,7 @@
 #include "vcs/zcode_task_authority.h"
 #include "vcs/zcode_task_authority_bundle.h"
 #include "vcs/zcode_task_index.h"
+#include "vcs/zcode_task_context.h"
 #include "vcs/vcs.h"
 #include "config/boot_zcode_async_select.h"
 
@@ -5685,6 +5686,208 @@ static int test_zd_async_no_peer_next(void)
         ASSERT(strstr(next, "z23 join") != NULL);
         ASSERT(strstr(next, "-packagehost") == NULL);
         ASSERT(strstr(next, "-buildworker") == NULL);
+/* The task-context carrier: the same three wires (task, goal preimage,
+ * proof policy) verify at export, persist as one ordinary content.v2
+ * package, and re-verify from stored bytes at admit — with the goal text
+ * round-tripping and every named refusal actually refusing. */
+static int test_zd_task_context(void)
+{
+    int failures = 0;
+    TEST("zcode_dev: task-context carrier binds goal and policy to the task") {
+        char dir[256];
+        test_make_tmpdir(dir, sizeof(dir), "zcode_dev", "task-context");
+        struct vcs_package_store *store = vcs_package_store_open(
+            dir, UINT64_C(256) * 1024u * 1024u);
+        ASSERT(store != NULL);
+
+        struct vcs_zcode_proof_policy_v1 policy;
+        zd_policy(&policy);
+        uint8_t policy_root[32];
+        ASSERT_EQ(vcs_zcode_proof_policy_root(&policy, policy_root),
+                  VCS_ZCODE_DEV_OK);
+        uint8_t policy_wire[VCS_ZCODE_PROOF_POLICY_WIRE_BYTES];
+        ASSERT_EQ(vcs_zcode_proof_policy_serialize(&policy, policy_wire),
+                  VCS_ZCODE_DEV_OK);
+        struct vcs_zcode_task_v1 task;
+        zd_task(&task, policy_root);
+        static const char goal_text[] =
+            "Cut the stage-3 fold cost without weakening a single proof "
+            "rule; the deterministic suite stays green or the work is "
+            "worth nothing.";
+        sha3_256((const uint8_t *)goal_text, sizeof(goal_text) - 1u,
+                 task.goal_root);
+        uint8_t task_wire[VCS_ZCODE_TASK_WIRE_BYTES];
+        ASSERT_EQ(vcs_zcode_task_serialize(&task, task_wire),
+                  VCS_ZCODE_DEV_OK);
+        uint8_t task_root[32];
+        ASSERT_EQ(vcs_zcode_task_root(&task, task_root), VCS_ZCODE_DEV_OK);
+
+        /* verify_wires: the happy arm, then every named refusal. The task
+         * from zd_task expires at 2000, so 1500 is live and 2500 is not. */
+        struct vcs_zcode_task_v1 parsed;
+        uint8_t derived[32];
+        ASSERT_EQ(vcs_zcode_task_context_verify_wires(
+                      task_wire, sizeof(task_wire),
+                      (const uint8_t *)goal_text, sizeof(goal_text) - 1u,
+                      policy_wire, sizeof(policy_wire), 1500, &parsed, NULL,
+                      derived),
+                  VCS_ZCODE_TASK_CONTEXT_OK);
+        ASSERT(memcmp(derived, task_root, 32) == 0);
+        ASSERT(parsed.expires_unix == task.expires_unix);
+        ASSERT_EQ(vcs_zcode_task_context_verify_wires(
+                      task_wire, sizeof(task_wire),
+                      (const uint8_t *)goal_text, sizeof(goal_text) - 1u,
+                      policy_wire, sizeof(policy_wire), 2500, NULL, NULL,
+                      NULL),
+                  VCS_ZCODE_TASK_CONTEXT_TASK_EXPIRED);
+        static const char wrong_goal[] = "ship whatever, tests are for cowards";
+        ASSERT_EQ(vcs_zcode_task_context_verify_wires(
+                      task_wire, sizeof(task_wire),
+                      (const uint8_t *)wrong_goal, sizeof(wrong_goal) - 1u,
+                      policy_wire, sizeof(policy_wire), 1500, NULL, NULL,
+                      NULL),
+                  VCS_ZCODE_TASK_CONTEXT_GOAL);
+        static const char nul_goal[] = "a\0b";
+        ASSERT_EQ(vcs_zcode_task_context_verify_wires(
+                      task_wire, sizeof(task_wire), (const uint8_t *)nul_goal,
+                      sizeof(nul_goal) - 1u, policy_wire, sizeof(policy_wire),
+                      1500, NULL, NULL, NULL),
+                  VCS_ZCODE_TASK_CONTEXT_GOAL);
+        /* A valid but DIFFERENT policy roots to a mismatch, not a wire
+         * error: minimum_matching_receipts moves without breaking
+         * validate. */
+        struct vcs_zcode_proof_policy_v1 other_policy;
+        zd_policy(&other_policy);
+        other_policy.minimum_matching_receipts = 3;
+        uint8_t other_wire[VCS_ZCODE_PROOF_POLICY_WIRE_BYTES];
+        ASSERT_EQ(vcs_zcode_proof_policy_serialize(&other_policy,
+                                                   other_wire),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT_EQ(vcs_zcode_task_context_verify_wires(
+                      task_wire, sizeof(task_wire),
+                      (const uint8_t *)goal_text, sizeof(goal_text) - 1u,
+                      other_wire, sizeof(other_wire), 1500, NULL, NULL,
+                      NULL),
+                  VCS_ZCODE_TASK_CONTEXT_POLICY_MISMATCH);
+        uint8_t garbage_wire[VCS_ZCODE_TASK_WIRE_BYTES];
+        memset(garbage_wire, 0xa5, sizeof(garbage_wire));
+        ASSERT_EQ(vcs_zcode_task_context_verify_wires(
+                      garbage_wire, sizeof(garbage_wire),
+                      (const uint8_t *)goal_text, sizeof(goal_text) - 1u,
+                      policy_wire, sizeof(policy_wire), 1500, NULL, NULL,
+                      NULL),
+                  VCS_ZCODE_TASK_CONTEXT_TASK_WIRE);
+
+        /* export: deterministic root, refusal of the expired arm. */
+        uint8_t context_root[32], context_root_again[32];
+        ASSERT_EQ(vcs_zcode_task_context_export(
+                      task_wire, sizeof(task_wire),
+                      (const uint8_t *)goal_text, sizeof(goal_text) - 1u,
+                      policy_wire, sizeof(policy_wire), store, 1500,
+                      context_root),
+                  VCS_ZCODE_TASK_CONTEXT_OK);
+        ASSERT_EQ(vcs_zcode_task_context_export(
+                      task_wire, sizeof(task_wire),
+                      (const uint8_t *)goal_text, sizeof(goal_text) - 1u,
+                      policy_wire, sizeof(policy_wire), store, 1500,
+                      context_root_again),
+                  VCS_ZCODE_TASK_CONTEXT_OK);
+        ASSERT(memcmp(context_root, context_root_again, 32) == 0);
+        ASSERT_EQ(vcs_zcode_task_context_export(
+                      task_wire, sizeof(task_wire),
+                      (const uint8_t *)goal_text, sizeof(goal_text) - 1u,
+                      policy_wire, sizeof(policy_wire), store, 2500,
+                      context_root_again),
+                  VCS_ZCODE_TASK_CONTEXT_TASK_EXPIRED);
+
+        /* admit from stored bytes: goal round-trips, the derived root is
+         * the task's own, a short goal cap truncates but still reports
+         * the full length, and both the flipped expectation and the
+         * expired clock refuse. */
+        struct vcs_zcode_task_v1 admitted;
+        char goal_back[VCS_ZCODE_TASK_CONTEXT_GOAL_MAX + 1u];
+        size_t goal_back_len = 0;
+        uint8_t admit_root[32];
+        ASSERT_EQ(vcs_zcode_task_context_admit(
+                      store, context_root, task_root, 1500, &admitted, NULL,
+                      (uint8_t *)goal_back, sizeof(goal_back), &goal_back_len,
+                      admit_root),
+                  VCS_ZCODE_TASK_CONTEXT_OK);
+        ASSERT(goal_back_len == sizeof(goal_text) - 1u);
+        ASSERT(memcmp(goal_back, goal_text, goal_back_len) == 0);
+        ASSERT(memcmp(admit_root, task_root, 32) == 0);
+        ASSERT(admitted.max_cpu_seconds == task.max_cpu_seconds);
+        char tiny_goal[8];
+        size_t tiny_len = 0;
+        ASSERT_EQ(vcs_zcode_task_context_admit(
+                      store, context_root, NULL, 1500, NULL, NULL,
+                      (uint8_t *)tiny_goal, sizeof(tiny_goal), &tiny_len,
+                      NULL),
+                  VCS_ZCODE_TASK_CONTEXT_OK);
+        ASSERT(tiny_len == sizeof(goal_text) - 1u);
+        uint8_t flipped[32];
+        memcpy(flipped, task_root, 32);
+        flipped[0] ^= 1u;
+        ASSERT_EQ(vcs_zcode_task_context_admit(
+                      store, context_root, flipped, 1500, NULL, NULL, NULL, 0,
+                      NULL, NULL),
+                  VCS_ZCODE_TASK_CONTEXT_TASK_MISMATCH);
+        ASSERT_EQ(vcs_zcode_task_context_admit(
+                      store, context_root, task_root, 2500, NULL, NULL, NULL,
+                      0, NULL, NULL),
+                  VCS_ZCODE_TASK_CONTEXT_TASK_EXPIRED);
+
+        /* admit re-derives from PERSISTED bytes: a reopened store with no
+         * in-memory state from export verifies the same context. */
+        vcs_package_store_close(store);
+        store = vcs_package_store_open(dir, UINT64_C(256) * 1024u * 1024u);
+        ASSERT(store != NULL);
+        ASSERT_EQ(vcs_zcode_task_context_admit(
+                      store, context_root, task_root, 1500, NULL, NULL,
+                      (uint8_t *)goal_back, sizeof(goal_back) - 1u,
+                      &goal_back_len, NULL),
+                  VCS_ZCODE_TASK_CONTEXT_OK);
+        ASSERT(goal_back_len == sizeof(goal_text) - 1u);
+
+        /* A package that is not the fixed three-file carrier refuses on
+         * shape, and an absent root refuses on the store rule — the two
+         * confusions an operator can actually hit. */
+        struct vcs_package_manifest stray;
+        vcs_package_manifest_init(&stray);
+        ASSERT(vcs_package_content_add_file(
+            &stray, VCS_ZCODE_TASK_CONTEXT_TASK_PATH, VCS_PACKAGE_MODE_FILE,
+            task_wire, sizeof(task_wire)));
+        uint8_t *stray_wire = NULL;
+        size_t stray_wire_len = 0;
+        ASSERT(vcs_package_manifest_serialize(&stray, &stray_wire,
+                                              &stray_wire_len));
+        uint8_t stray_root[32];
+        ASSERT(vcs_package_manifest_root(&stray, stray_root));
+        uint8_t stored_stray[32];
+        ASSERT_EQ(vcs_package_store_put_manifest(store, stray_wire,
+                                                 stray_wire_len,
+                                                 stored_stray),
+                  VCS_PACKAGE_STORE_OK);
+        ASSERT(memcmp(stored_stray, stray_root, 32) == 0);
+        ASSERT_EQ(vcs_package_content_put_file(
+                      store, stray_root, VCS_ZCODE_TASK_CONTEXT_TASK_PATH,
+                      task_wire, sizeof(task_wire)),
+                  VCS_PACKAGE_STORE_OK);
+        ASSERT_EQ(vcs_zcode_task_context_admit(
+                      store, stray_root, NULL, 1500, NULL, NULL, NULL, 0,
+                      NULL, NULL),
+                  VCS_ZCODE_TASK_CONTEXT_MANIFEST);
+        uint8_t bogus_root[32];
+        memset(bogus_root, 0xb0, sizeof(bogus_root));
+        ASSERT_EQ(vcs_zcode_task_context_admit(
+                      store, bogus_root, NULL, 1500, NULL, NULL, NULL, 0,
+                      NULL, NULL),
+                  VCS_ZCODE_TASK_CONTEXT_STORE);
+        vcs_package_manifest_free(&stray);
+        free(stray_wire);
+
+        vcs_package_store_close(store);
+        test_rm_rf(dir);
         PASS();
     } _test_next:;
     return failures;
@@ -5695,6 +5898,7 @@ int test_zcode_dev_objects(void)
     int failures = 0;
     failures += test_zd_write_scope();
     failures += test_zd_patch();
+    failures += test_zd_task_context();
     failures += test_zd_agent_context();
     failures += test_zd_policy_and_task();
     failures += test_zd_candidate_review();

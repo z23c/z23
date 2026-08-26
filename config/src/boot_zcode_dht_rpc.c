@@ -16,6 +16,7 @@
 #include "vcs/package_attest_transport.h"
 #include "vcs/package_swarm_node.h"
 #include "vcs/source_package_checkout.h"
+#include "vcs/zcode_task_context.h"
 #include <stdatomic.h>
 #include <string.h>
 #define DHT_PUBLIC_LOOKUPS_MAX 32u
@@ -556,6 +557,17 @@ static bool rpc_publish_impl(
   if (!evidence_kind && spec.kind == VCS_ZCODE_DHT_RECORD_POINTER &&
       strcmp(spec.namespace_name, VCS_ZCODE_WORK_DHT_NAMESPACE) == 0 &&
       !boot_zcode_dht_work_pointer_publish_gate(&spec, result))
+    return true;
+  /* Task postings ride the same frozen publish path: a POINTER in
+   * VCS_ZCODE_TASK_DHT_NAMESPACE binds a task root (semantic) to the
+   * context package that carries its goal and proof policy (transport).
+   * Gate doctrine identical to the two lanes above — local hygiene
+   * publisher-side, the real property is the puller's
+   * vcs_zcode_task_context_admit. PROVIDER records here are deliberately
+   * ungated. */
+  if (!evidence_kind && spec.kind == VCS_ZCODE_DHT_RECORD_POINTER &&
+      strcmp(spec.namespace_name, VCS_ZCODE_TASK_DHT_NAMESPACE) == 0 &&
+      !boot_zcode_dht_task_pointer_publish_gate(&spec, result))
     return true;
   uint8_t token[32];
   struct vcs_zcode_dht_record record;

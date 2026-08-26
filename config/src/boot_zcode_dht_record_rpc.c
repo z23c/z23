@@ -577,11 +577,66 @@ static bool rpc_delegation_check(const struct json_value *params, bool help,
   return true;
 }
 
+/* Synchronous namespace board: what THIS node's record store holds in one
+ * namespace, sovereignty-filtered, never a peer query. Discovery answers
+ * "who names this root" asynchronously; a board answers "what has this
+ * node seen" immediately — the distinction an operator needs when reading
+ * an empty board (nothing seen yet, not nothing anywhere). */
+#define RECORD_BOARD_MAX 64u
+
+static bool rpc_record_board(const struct json_value *params, bool help,
+                             struct json_value *result) {
+  if (help) {
+    json_set_str(result,
+                 "zcode_dht_record_board {kind,namespace}");
+    return true;
+  }
+  const struct json_value *in = record_rpc_input(params);
+  enum vcs_zcode_dht_record_kind kind = record_input_kind(in);
+  char namespace_name[VCS_ZCODE_DHT_RECORD_NAMESPACE_BYTES];
+  if (!kind ||
+      !record_input_namespace(in, namespace_name)) {
+    record_rpc_error(
+        result, "INVALID_SELECTOR",
+        "kind and canonical namespace required (no root: a board is "
+        "namespace-wide by definition)");
+    return true;
+  }
+  struct vcs_zcode_dht_record records[RECORD_BOARD_MAX];
+  size_t count = 0, seen_total = 0;
+  uint64_t now = (uint64_t)platform_time_wall_time_t();
+  if (!boot_zcode_dht_record_board(now, kind, namespace_name, records,
+                                   RECORD_BOARD_MAX, &count, &seen_total)) {
+    record_rpc_error(result, "LOOKUP_UNAVAILABLE",
+                     "DHT is disabled on this node");
+    return true;
+  }
+  json_set_object(result);
+  json_push_kv_bool(result, "ok", true);
+  json_push_kv_str(result, "namespace", namespace_name);
+  json_push_kv_bool(result, "local_projection", true);
+  json_push_kv_int(result, "count", (int64_t)count);
+  json_push_kv_int(result, "seen_total", (int64_t)seen_total);
+  json_push_kv_bool(result, "truncated", seen_total > count);
+  struct json_value rows;
+  json_set_array(&rows);
+  for (size_t i = 0; i < count; i++) {
+    struct json_value row;
+    record_row_json(&row, &records[i], false, false, false, false);
+    json_push_back(&rows, &row);
+    json_free(&row);
+  }
+  json_push_kv(result, "records", &rows);
+  json_free(&rows);
+  return true;
+}
+
 void boot_zcode_dht_record_register_rpc(struct rpc_table *table) {
   const struct rpc_command commands[] = {
       {"zcode", "zcode_dht_record_begin", rpc_record_begin, true},
       {"zcode", "zcode_dht_record_poll", rpc_record_poll, true},
       {"zcode", "zcode_dht_record_cancel", rpc_record_cancel, true},
+      {"zcode", "zcode_dht_record_board", rpc_record_board, true},
       {"zcode", "zcode_dht_delegation_check", rpc_delegation_check, true},
   };
   for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); i++)

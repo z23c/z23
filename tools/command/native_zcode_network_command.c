@@ -600,6 +600,26 @@ void zcl_native_handle_zcode_network_find_cancel(
 void zcl_native_handle_zcode_network_records(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply) {
+  /* Board mode: a rootless, namespace-wide listing of what THIS node has
+   * seen. Served synchronously because it never begins a peer query —
+   * the async begin/poll machinery below exists to bound discovery, and
+   * there is nothing to discover. */
+  const struct json_value *board =
+      request->input ? json_get(request->input, "board") : NULL;
+  if (board && board->type == JSON_BOOL && json_get_bool(board)) {
+    struct json_value input;
+    json_init(&input);
+    if (request->input)
+      json_copy(&input, request->input);
+    else
+      json_set_object(&input);
+    json_push_kv_bool(&input, "board", true);
+    struct zcl_command_request forwarded = *request;
+    forwarded.input = &input;
+    zdn_forward(&forwarded, reply, "zcode_dht_record_board");
+    json_free(&input);
+    return;
+  }
   zdn_async_wrapper(request, reply, "zcode_dht_record_begin",
                     "zcode_dht_record_poll", "zcode_dht_record_cancel",
                     VCS_ZCODE_DHT_LOOKUP_CEILING_S +
