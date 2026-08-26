@@ -1420,3 +1420,11 @@ AGENT_IMPACT_RULE("lib/vcs/src/node_reproduce.c|lib/vcs/include/vcs/node_reprodu
  * keeps at zero entries, and the .onion guard that returns before the
  * resolver. */
 AGENT_IMPACT_RULE("lib/test/src/test_cold_join_sovereign.c|core/chainparams/src/chainparams.c|core/chainparams/src/checkpoints.c|lib/sapling/src/params_vk_embedded.c|lib/net/src/connman.c", "cold_join_sovereign seed_bootstrap_doors params_vk_embedded net make_lint_gates")
+
+/* build_fabric_worker_report is the process-budget failure classifier, split
+ * out of build_fabric_worker.c so that file stays under its size ceiling. It
+ * turns a sandbox process-limit outcome into distinct operator wording: a host
+ * that ran out of process headroom (retryable) must never read the same as a
+ * subtree that exceeded its declared budget (a real defect). It moves with the
+ * sandbox budget and build_fabric groups because it names their exit codes. */
+AGENT_IMPACT_RULE("app/services/include/services/build_fabric_worker_report.h|app/services/src/build_fabric_worker_report.c", "sandbox_process_budget os_sandbox build_fabric zcode_dev_objects make_lint_gates")
