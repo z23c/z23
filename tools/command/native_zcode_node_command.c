@@ -459,8 +459,18 @@ void zcl_native_handle_zcode_node_join(
      * (lib/kernel/src/command_registry.c:1993-2034) rather than an untyped
      * next_safe_command string: after the restart, `zcode package offered`
      * reports the same posture plus the resident engine and eligible peer
-     * facts needed to distinguish configured hosting from live service. */
+     * facts needed to distinguish configured hosting from live service.
+     * The next input must name THIS datadir: `{}` would inspect the
+     * canonical node instead of the file join just wrote. */
+    char next_in[512];
+    struct json_value ni;
+    json_init(&ni);
+    json_set_object(&ni);
+    bool nio = json_push_kv_str(&ni, "datadir", datadir);
+    size_t nn = nio ? json_write(&ni, next_in, sizeof(next_in)) : 0;
+    json_free(&ni);
     (void)zcl_command_reply_add_next(
-        reply, "zcode.package.offered", "{}",
+        reply, "zcode.package.offered",
+        (nn > 0 && nn < sizeof(next_in)) ? next_in : "{}",
         "after the restart above, verify resident Commons service");
 }

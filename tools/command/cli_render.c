@@ -1052,7 +1052,17 @@ static void render_zcode_join(struct buf *b, const struct zcl_cli_render_env *e,
                 : "this process has not loaded those flags yet");
     emit_kv_command(b, e, 4, "next",
                     json_get_str(json_get(data, "restart_command")));
-    emit_kv_command(b, e, 4, "then", "z23 zcode package offered");
+    {
+        const char *dd = json_get_str(json_get(data, "datadir"));
+        char then[4700];
+        if (dd && dd[0])
+            (void)snprintf(then, sizeof(then),
+                           "z23 zcode package offered -datadir=%s", dd);
+        else
+            (void)snprintf(then, sizeof(then),
+                           "z23 zcode package offered");
+        emit_kv_command(b, e, 4, "then", then);
+    }
 }
 
 /* Join's typed next command. A one-shot CLI has no engine, so the JSON
