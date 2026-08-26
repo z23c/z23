@@ -1413,6 +1413,115 @@ _test_next:;
   return failures;
 }
 
+/* The runtime twin of this heal (test_publication_slot_superseded_freed)
+ * crafts the polluted table in memory and ticks it. But the incident that
+ * mattered lived on disk: binaries from before commits learned to supersede
+ * in place wrote an intent file holding HISTORICAL sequences of streams
+ * still alive elsewhere in the table, and every restart faithfully restored
+ * the pollution. The first schedule after boot must heal what load actually
+ * produced — the file's bytes, not a runtime-crafted array. */
+static int test_publication_heal_survives_restart(void) {
+  int failures = 0;
+  TEST("zcode dht service: the intent file heals its pollution after restart") {
+    char dir[] = "/tmp/zcl_dht_publication_restart_XXXXXX";
+    ASSERT(mkdtemp(dir) != NULL);
+    uint8_t genesis[32], noise[32];
+    memset(genesis, 0x11, sizeof(genesis));
+    memset(noise, 0x42, sizeof(noise));
+    ASSERT(fixture_identity(dir, 0x6f, genesis, noise));
+    struct vcs_zcode_dht_service *service =
+        fixture_service_at(dir, genesis, noise, 1000);
+    ASSERT(service != NULL);
+    struct vcs_zcode_dht_time now = test_time(1000);
+    struct vcs_zcode_dht_publish_spec spec;
+    uint8_t token[32];
+    struct vcs_zcode_dht_record record, first;
+    struct vcs_zcode_dht_service_status status;
+    memset(&spec, 0, sizeof(spec));
+    spec.kind = VCS_ZCODE_DHT_RECORD_POINTER;
+    (void)snprintf(spec.namespace_name, sizeof(spec.namespace_name),
+                   "science");
+    memset(spec.semantic_root, 0xa1, 32);
+    memset(spec.transport_root, 0xa2, 32);
+    spec.sequence = 1;
+    spec.not_before = 1000;
+    spec.expiry = 1300;
+    ASSERT(vcs_zcode_dht_service_record_publish_plan(
+        service, &spec, token, &record, NULL));
+    ASSERT_EQ(vcs_zcode_dht_service_record_publish_commit(
+                  service, &spec, token, now, &record, NULL),
+              VCS_ZCODE_DHT_RECORD_STORE_ADDED);
+    first = record;
+    vcs_zcode_dht_service_status(service, &status);
+    ASSERT_EQ(status.publication_intents, 1);
+
+    /* The stream renews through the public path: the live slot now holds
+     * sequence 2 and the record store — persisted beside the intents by the
+     * same flush — holds max sequence 2 for the stream. */
+    spec.sequence = 2;
+    ASSERT(vcs_zcode_dht_service_record_publish_plan(
+        service, &spec, token, &record, NULL));
+    ASSERT_EQ(vcs_zcode_dht_service_record_publish_commit(
+                  service, &spec, token, now, &record, NULL),
+              VCS_ZCODE_DHT_RECORD_STORE_ADDED);
+    vcs_zcode_dht_service_status(service, &status);
+    ASSERT_EQ(status.publication_intents, 1);
+
+    /* Stage the file a pre-supersede binary would have written: a second
+     * slot of the SAME stream parked at the historical sequence 1, where no
+     * API can displace it (a commit reuses only a slot it supersedes). The
+     * struct copy bypasses the writer, so mark the intents dirty the way
+     * every real mutation does — free only flushes a dirty table. Only the
+     * record and lifetime reach the file; the copied cycle state does not,
+     * and load rebuilds each entry at NEEDS_LOOKUP. */
+    size_t live = VCS_ZCODE_DHT_SERVICE_MAX_PUBLICATIONS,
+           twin = VCS_ZCODE_DHT_SERVICE_MAX_PUBLICATIONS;
+    for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_PUBLICATIONS; i++)
+      if (service->publications[i].used)
+        live = i;
+    ASSERT(live < VCS_ZCODE_DHT_SERVICE_MAX_PUBLICATIONS);
+    for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_PUBLICATIONS; i++)
+      if (!service->publications[i].used) {
+        twin = i;
+        break;
+      }
+    ASSERT(twin < VCS_ZCODE_DHT_SERVICE_MAX_PUBLICATIONS);
+    service->publications[twin] = service->publications[live];
+    service->publications[twin].record = first;
+    publication_mark_dirty(service, now.monotonic_s);
+    vcs_zcode_dht_service_status(service, &status);
+    ASSERT_EQ(status.publication_intents, 2);
+
+    /* Restart on the same datadir: free flushes the polluted pair through
+     * the same publications.v1 a real host reboots through, and create
+     * restores BOTH records — load does not deduplicate a stream. */
+    vcs_zcode_dht_service_free(service, now);
+    service = fixture_service_at(dir, genesis, noise, 1000);
+    ASSERT(service != NULL);
+    vcs_zcode_dht_service_status(service, &status);
+    ASSERT_EQ(status.publication_intents, 2);
+
+    /* The first tick is also the first schedule since boot: the slot healed
+     * out must be the historical sequence the FILE restored, judged against
+     * the record store the same restart reloaded. */
+    vcs_zcode_dht_service_tick(service, now);
+    vcs_zcode_dht_service_status(service, &status);
+    ASSERT_EQ(status.publication_intents, 1);
+    size_t kept = VCS_ZCODE_DHT_SERVICE_MAX_PUBLICATIONS;
+    for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_PUBLICATIONS; i++)
+      if (service->publications[i].used)
+        kept = i;
+    ASSERT(kept < VCS_ZCODE_DHT_SERVICE_MAX_PUBLICATIONS);
+    ASSERT_EQ(service->publications[kept].record.sequence, 2);
+
+    vcs_zcode_dht_service_free(service, now);
+    cleanup_fixture(dir);
+    PASS();
+  }
+_test_next:;
+  return failures;
+}
+
 /* Superseding a slot mid-cycle must cancel the cycle, not just overwrite it.
  * A slot mid-ROUTING holds a live lookup id (and mid-STORING holds child
  * operation ids); the lookup and operation tables free only when their owner
@@ -3844,6 +3953,7 @@ int test_zcode_dht_service(void) {
   failures += test_publication_auto_sequence();
   failures += test_publication_slot_supersede();
   failures += test_publication_slot_superseded_freed();
+  failures += test_publication_heal_survives_restart();
   failures += test_publication_supersede_cancels_children();
   failures += test_publication_ceiling_hosts_a_real_node();
   failures += test_record_churn_fallback();
