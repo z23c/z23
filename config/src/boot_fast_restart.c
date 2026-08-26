@@ -211,10 +211,18 @@ void boot_fast_restart_arm_quick_check_skip_probe(void)
     node_db_set_quick_check_skip_probe(boot_shutdown_marker_quick_check_probe);
 }
 
+static int boot_bg_quick_check_progress(void *unused)
+{
+    (void)unused;
+    return thread_registry_shutdown_requested() ? 1 : 0;
+}
+
 /* Runs one quick_check on a fresh read-only connection (no contention with the
  * live write handle). A failure is raised LOUDLY via EV_DB_ERROR +
  * EV_OPERATOR_NEEDED (the latter latches DEGRADED in the health surface until
- * an operator acts) — never silent. */
+ * an operator acts) — never silent. The progress hook makes SQLite return
+ * SQLITE_INTERRUPT promptly after the registry's shutdown request; an
+ * intentionally cancelled background recheck is not an integrity failure. */
 static void *boot_bg_quick_check_entry(void *arg)
 {
     char *path = (char *)arg;
@@ -236,11 +244,15 @@ static void *boot_bg_quick_check_entry(void *arg)
     }
 
     sqlite3_busy_timeout(db, 5000);
+    sqlite3_progress_handler(db, 100, boot_bg_quick_check_progress, NULL);
     sqlite3_stmt *st = NULL;
     bool ok = false;
-    if (sqlite3_prepare_v2(db, "PRAGMA quick_check(1)", -1, &st, NULL) ==
-            SQLITE_OK &&
-        st && sqlite3_step(st) == SQLITE_ROW) {  // raw-sql-ok:read-only-introspection
+    int prepare_rc = sqlite3_prepare_v2(
+        db, "PRAGMA quick_check(1)", -1, &st, NULL);
+    int step_rc = prepare_rc == SQLITE_OK && st
+        ? sqlite3_step(st)  // raw-sql-ok:read-only-introspection
+        : prepare_rc;
+    if (step_rc == SQLITE_ROW) {
         const unsigned char *txt = sqlite3_column_text(st, 0);
         ok = txt && strcmp((const char *)txt, "ok") == 0;
         if (!ok) {
@@ -258,12 +270,17 @@ static void *boot_bg_quick_check_entry(void *arg)
             event_emitf(EV_OPERATOR_NEEDED, 0,
                         "condition=bg_quick_check_failed detail=node_db_integrity");
         }
+    } else if (step_rc == SQLITE_INTERRUPT &&
+               thread_registry_shutdown_requested()) {
+        printf("[shutdown] bg_quick_check cancelled cooperatively\n");
     } else {
         event_emitf(EV_DB_ERROR, 0,
-                    "bg_quick_check step failed: %s", sqlite3_errmsg(db));
+                    "bg_quick_check step failed rc=%d: %s",
+                    step_rc, sqlite3_errmsg(db));
     }
     if (st)
         sqlite3_finalize(st);
+    sqlite3_progress_handler(db, 0, NULL, NULL);
     sqlite3_close(db);
 
     if (ok) {
@@ -299,3 +316,24 @@ void boot_fast_restart_start_bg_quick_check(const char *datadir)
         free(path);
     }
 }
+
+#ifdef ZCL_TESTING
+bool boot_fast_restart_bg_quick_check_cancel_for_test(void)
+{
+    sqlite3 *db = NULL;
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_open(":memory:", &db) != SQLITE_OK) {
+        if (db) sqlite3_close(db);
+        return false;
+    }
+    sqlite3_progress_handler(db, 1, boot_bg_quick_check_progress, NULL);
+    int rc = sqlite3_prepare_v2(db,
+        "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n "
+        "WHERE x<1000000) SELECT sum(x) FROM n", -1, &st, NULL);
+    if (rc == SQLITE_OK)
+        rc = sqlite3_step(st); // raw-sql-ok:test-fixture-readonly
+    sqlite3_finalize(st);
+    sqlite3_close(db);
+    return rc == SQLITE_INTERRUPT;
+}
+#endif
