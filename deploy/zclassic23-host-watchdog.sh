@@ -383,7 +383,12 @@ EOF
     expect_cycle() {
         local want="$1"; shift
         local out
-        out="$(cycle "$@")"
+        if ! out="$(cycle "$@")"; then
+            printf '[host-watchdog-selftest] FAIL: cycle for %s exited nonzero: %s\n' \
+                   "$want" "$out" >&2
+            fails=$((fails + 1))
+            return 0
+        fi
         case "$out" in
             *"$want"*) printf '[host-watchdog-selftest] PASS: cycle -> %s\n' "$want" ;;
             *) printf '[host-watchdog-selftest] FAIL: cycle wanted %s, got: %s\n' \
@@ -439,7 +444,15 @@ if [ "$MODE" = selftest ]; then
     exit $?
 fi
 
-uid="$(id -u "$OPERATOR_USER" 2>/dev/null || echo 0)"
+if [ -n "$PROBE_HOOK" ] && [ -n "$PROGRESS_HOOK" ] &&
+   [ -n "$MANAGER_HOOK" ]; then
+    # A fully injected cycle is hermetic: none of its seams consults a real
+    # user manager, so requiring the production account would make the
+    # classifier selftest host-specific.
+    uid=1
+else
+    uid="$(id -u "$OPERATOR_USER" 2>/dev/null || echo 0)"
+fi
 [ "$uid" -gt 0 ] || { echo "ERROR: cannot resolve uid for '$OPERATOR_USER'" >&2; exit 1; }
 
 verdict="OK"

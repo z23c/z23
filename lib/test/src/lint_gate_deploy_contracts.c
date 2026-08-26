@@ -1210,8 +1210,20 @@ int t_slow_disk_progress_verdicts_contract(void)
         /* NODE-DOWN may only be written with the evidence behind it. */
         ASSERT(strstr(watchdog, "evidence=frozen_for_") != NULL);
         ASSERT(strstr(watchdog, "evidence=no-canonical-node-process") != NULL);
-        ASSERT(run_gate_script_arg("deploy/zclassic23-host-watchdog.sh", NULL,
-                                   "--selftest") == 0);
+        int watchdog_rc = run_gate_script_arg(
+            "deploy/zclassic23-host-watchdog.sh", NULL, "--selftest");
+        if (watchdog_rc != 0) {
+            char watchdog_out_path[PATH_MAX];
+            char *watchdog_out = NULL;
+            if (lint_gate_out_path(watchdog_out_path,
+                                   sizeof(watchdog_out_path)) == 0 &&
+                read_entire_file(watchdog_out_path, &watchdog_out) == 0) {
+                fprintf(stderr, "host-watchdog selftest rc=%d:\n%s\n",
+                        watchdog_rc, watchdog_out);
+                free(watchdog_out);
+            }
+        }
+        ASSERT(watchdog_rc == 0);
 
         /* The unit's own start timeout must not silently truncate the
          * watchdog's escalating probe schedule back to one impatient probe. */
