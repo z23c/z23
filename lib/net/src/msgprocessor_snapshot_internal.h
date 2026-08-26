@@ -9,8 +9,7 @@
  * as needed.
  *
  * The split is by responsibility:
- *   msgprocessor_snapshot.c       — lifecycle (mp_snapshot_init,
- *                                   mp_snapshot_maybe_offer,
+ *   msgprocessor_snapshot.c       — lifecycle (mp_snapshot_maybe_offer,
  *                                   mp_snapshot_send_tick's client-side
  *                                   swarm/block-swarm coordinators),
  *                                   the mp_handle_zcl23_sync dispatcher,
