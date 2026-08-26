@@ -5,6 +5,7 @@
 
 #include "platform/time_compat.h"
 #include "services/block_index_loader.h"
+#include "block_index_flat_internal.h"
 #include "services/block_index_flat_anchor.h"
 #include "services/block_row_verify.h"
 #include "services/block_index_integrity.h"
@@ -50,7 +51,6 @@
  * whole-artifact guards; failed rows are left for P2P to re-supply. */
 static _Atomic int64_t g_flat_row_quarantined = 0;
 static struct log_throttle g_flat_row_quarantine_log = LOG_THROTTLE_INIT;
-
 int64_t block_index_flat_row_quarantined(void)
 {
     return atomic_load_explicit(&g_flat_row_quarantined, memory_order_relaxed);
@@ -94,27 +94,6 @@ static void flat_quarantine_row(int32_t height, const uint8_t hash[32],
 }
 
 /* ── Flat file format ────────────────────────────────────── */
-
-/* Compact on-disk format: height-sorted, 172 bytes per entry (packed). The
- * size-on-disk math below uses sizeof(struct block_index_flat), so it tracks
- * this layout automatically. */
-struct __attribute__((packed)) block_index_flat {
-    uint8_t  hash[32];
-    uint8_t  prev_hash[32];
-    int32_t  height;
-    uint32_t n_bits;
-    uint32_t n_time;
-    int32_t  n_version;
-    uint32_t n_status;
-    int32_t  n_file;
-    uint32_t n_data_pos;
-    uint32_t n_undo_pos;
-    uint32_t n_tx;
-    uint32_t n_chain_tx;
-    uint8_t  chain_work[32];
-    uint32_t n_cached_branch_id;
-    uint8_t  sapling_root[32];
-};
 
 /* ── Persisted-FAILED-bit trust policy ───────────────────── */
 
@@ -328,133 +307,34 @@ void promote_best_header_after_load(struct main_state *ms,
     }
 }
 
-/* ── save_block_index_flat ───────────────────────────────── */
+/* ── save/load block_index_flat ──────────────────────────── */
 
-/* Stream "ZCLI"+count+entries after the integrity header while hashing the
- * exact payload. The shared helper back-patches its commitment and publishes
- * the whole file with one atomic rename. */
-struct bif_emit_ctx {
-    struct main_state  *ms;
-    struct block_index **sorted;
-    size_t               count;
-};
-static bool bif_emit_payload(FILE *f, void *vctx,
-                             uint64_t *out_payload_size,
-                             uint8_t out_payload_sha3[32])
+struct zcl_result save_block_index_flat_identity(
+    const char *datadir, struct main_state *ms,
+    struct block_index_flat_identity *out)
 {
-    struct bif_emit_ctx *c = (struct bif_emit_ctx *)vctx;
-    struct sha3_256_ctx hctx;
-    sha3_256_init(&hctx);
-    uint64_t bytes = 0;
-    uint32_t magic = 0x5A434C49; /* "ZCLI" payload magic */
-    uint32_t count32 = (uint32_t)c->count;
-    if (fwrite(&magic, 4, 1, f) != 1 || // disk-io-lock: private-fd (block index flat file)
-        fwrite(&count32, 4, 1, f) != 1) {
-        LOG_FAIL("block_index_flat",
-                 "save_block_index_flat: payload header write failed");
-    }
-    sha3_256_write(&hctx, (const uint8_t *)&magic, 4);
-    sha3_256_write(&hctx, (const uint8_t *)&count32, 4);
-    bytes += 8;
-
-    for (size_t i = 0; i < c->count; i++) {
-        struct block_index_flat entry;
-        memset(&entry, 0, sizeof(entry));
-        if (c->sorted[i]->phashBlock)
-            memcpy(entry.hash, c->sorted[i]->phashBlock->data, 32);
-        if (c->sorted[i]->pprev && c->sorted[i]->pprev->phashBlock)
-            memcpy(entry.prev_hash, c->sorted[i]->pprev->phashBlock->data, 32);
-        entry.height = c->sorted[i]->nHeight;
-        entry.n_bits = c->sorted[i]->nBits;
-        entry.n_time = c->sorted[i]->nTime;
-        entry.n_version = c->sorted[i]->nVersion;
-        entry.n_status = c->sorted[i]->nStatus;
-        entry.n_file = c->sorted[i]->nFile;
-        entry.n_data_pos = c->sorted[i]->nDataPos;
-        entry.n_undo_pos = c->sorted[i]->nUndoPos;
-        entry.n_tx = c->sorted[i]->nTx;
-        entry.n_chain_tx = c->sorted[i]->nChainTx;
-        memcpy(entry.chain_work, c->sorted[i]->nChainWork.pn, 32);
-        entry.n_cached_branch_id = (uint32_t)c->sorted[i]->nCachedBranchId;
-        memcpy(entry.sapling_root, c->sorted[i]->hashFinalSaplingRoot.data, 32);
-        if (fwrite(&entry, sizeof(entry), 1, f) != 1) { // disk-io-lock: private-fd
-            LOG_FAIL("block_index_flat",
-                     "save_block_index_flat: write failed at entry "
-                     "%zu/%zu: %s", i, c->count, strerror(errno));
-        }
-        sha3_256_write(&hctx, (const uint8_t *)&entry, sizeof(entry));
-        bytes += sizeof(entry);
-    }
-    uint8_t anchor[BIFA_TRAILER_MAX];
-    size_t anchor_len = 0;
-    struct zcl_result ar = block_index_flat_anchor_encode(
-        c->ms, c->sorted, c->count, anchor, sizeof(anchor), &anchor_len);
-    if (!ar.ok)
-        return false;
-    if (anchor_len) {
-        if (fwrite(anchor, anchor_len, 1, f) != 1) {
-            LOG_FAIL("block_index_flat",
-                     "save_block_index_flat: anchor trailer write failed");
-        }
-        sha3_256_write(&hctx, anchor, anchor_len);
-        bytes += anchor_len;
-    }
-    sha3_256_finalize(&hctx, out_payload_sha3);
-    *out_payload_size = bytes;
-    return true;
+    struct zcl_result result = block_index_flat_write_identity(
+        datadir, ms, out);
+    if (!result.ok)
+        LOG_WARN("block_index_flat", "save_block_index_flat failed: %s",
+                 result.message);
+    return result;
 }
 
 void save_block_index_flat(const char *datadir, struct main_state *ms)
 {
-    size_t count = ms->map_block_index.size;
-    struct block_index **sorted = zcl_malloc(count * sizeof(void *), "block_index sorted save");
-    if (!sorted) {
-        LOG_WARN("block_index_flat",
-                 "save_block_index_flat: malloc failed for %zu entries",
-                 count);
-        return;
-    }
-
-    size_t idx = 0, iter = 0;
-    struct block_index *p;
-    while (block_map_next(&ms->map_block_index, &iter, NULL, &p)) {
-        if (p && idx < count) sorted[idx++] = p;
-    }
-    count = idx;
-
-    qsort(sorted, count, sizeof(struct block_index *), cmp_height);
-
-    int64_t t0 = (int64_t)platform_time_wall_time_t();
-
-    /* ONE file, ONE rename. The 48-byte integrity header (magic
-     * "BIIE", version 2, payload size + SHA3-256) prefixes the body
-     * inside block_index.bin itself, so a kill anywhere before the
-     * single rename leaves only the old good file — there is no second
-     * sidecar file and therefore no inter-rename window that can strand
-     * a fresh body under a stale commitment. No lock is taken on this
-     * path (it only iterates the single-threaded block_map), so the
-     * shutdown/drive lock order is unaffected. */
-    struct bif_emit_ctx ectx = { .ms = ms, .sorted = sorted, .count = count };
-    struct zcl_result wr = bii_write_embedded(datadir, bif_emit_payload, &ectx);
-    free(sorted);
-    if (!wr.ok) {
-        LOG_WARN("save_block_index_flat",
-                 "save_block_index_flat: embedded write failed: %s",
-                 wr.message);
-        return;
-    }
-
-    int64_t elapsed = (int64_t)platform_time_wall_time_t() - t0;
-    LOG_INFO("block_index_flat",
-             "Block index flat file: %zu entries, %zuMB (%llds)",
-             count, count * sizeof(struct block_index_flat) / (1024*1024),
-             (long long)elapsed);
+    ZCL_IGNORE_RESULT(save_block_index_flat_identity(datadir, ms, NULL),
+                      "legacy shutdown wrapper logs write failure");
 }
-
-/* ── load_block_index_flat ───────────────────────────────── */
 
 struct zcl_result load_block_index_flat(const char *datadir, struct main_state *ms)
 {
+    /* Identity is authority for bounded projection startup. Invalidate it
+     * before every attempt so a legacy or failed second load cannot inherit
+     * an earlier embedded snapshot's verified identity. */
+    block_index_flat_identity_forget();
+    struct block_index_flat_identity verified_identity = {0};
+    bool have_verified_identity = false;
     char path[1024];
     snprintf(path, sizeof(path), "%s/block_index.bin", datadir);
 
@@ -500,6 +380,9 @@ struct zcl_result load_block_index_flat(const char *datadir, struct main_state *
                 return ZCL_ERR(-5, "block_index_flat: embedded integrity check "
                                "FAILED (verdict=%d) — refusing the body", ev);
             }
+            memcpy(verified_identity.payload_sha3, ehdr.body_sha3, 32);
+            verified_identity.payload_size = ehdr.body_size;
+            have_verified_identity = true;
         }
         /* Legacy ZCLI keeps payload_off=0; its sidecar gate is downstream. */
     }
@@ -530,7 +413,6 @@ struct zcl_result load_block_index_flat(const char *datadir, struct main_state *
         return ZCL_ERR(-9, "block_index_flat: truncated — %zu bytes < %zu "
                        "expected (%u entries)", file_size, expected, count);
     }
-
     int64_t t0 = (int64_t)platform_time_wall_time_t();
     int64_t t0_ms = platform_time_monotonic_ms();  /* ms-resolution split timer */
     const struct block_index_flat *entries =
@@ -731,6 +613,11 @@ struct zcl_result load_block_index_flat(const char *datadir, struct main_state *
              "Block index flat: loaded %u entries in %llds",
              count, (long long)elapsed);
 
+    if (have_verified_identity) {
+        verified_identity.row_count = count;
+        block_index_flat_identity_remember(datadir, &verified_identity);
+    }
+
     return ZCL_OK;
 }
 
@@ -815,7 +702,6 @@ struct zcl_result block_index_flat_header_at(const char *datadir,
                        "(%zu < %zu bytes for %u entries)",
                        file_size, expected, count);
     }
-
     /* Height-sorted rows: lower-bound binary search, exact-height test.
      * Siblings sharing a height return an arbitrary one — a caller binding
      * a shielded frontier against a foreign root fails CLOSED downstream

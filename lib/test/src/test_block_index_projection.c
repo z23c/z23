@@ -25,6 +25,8 @@
  *  10. payload_roundtrip     — EV_BLOCK_HEADER serialize/parse preserves
  *                                every field, including the variable-length
  *                                solution bytes
+ *  11. bound_dirty_delta     — exact flat identity admits only post-bind
+ *                                unique hashes; tamper falls back
  *
  * Scratch files live under ./test-tmp/bip_<pid>_<tag>/ in line with the
  * project's no-/tmp convention. */
@@ -116,6 +118,19 @@ static bool emit_header(event_log_t *log, const struct ev_block_header *h,
     if (!ev_block_header_serialize(h, solution, buf, bufcap, &written))
         return false;
     return event_log_append(log, EV_BLOCK_HEADER, buf, written) != UINT64_MAX;
+}
+
+static bool emit_status(event_log_t *log, const struct ev_block_header *h)
+{
+    struct ev_block_status status = {
+        .nStatus = h->nStatus, .nFile = h->nFile,
+        .nDataPos = h->nDataPos, .nUndoPos = h->nUndoPos, .nTx = h->nTx,
+    };
+    memcpy(status.hash, h->hash, 32);
+    uint8_t wire[EV_BLOCK_STATUS_WIRE_LEN];
+    return ev_block_status_serialize(&status, wire) &&
+           event_log_append(log, EV_BLOCK_STATUS, wire, sizeof(wire)) !=
+               UINT64_MAX;
 }
 
 /* ── Test 1: open_close_clean ──────────────────────────────────────── */
@@ -706,6 +721,146 @@ static int run_payload_roundtrip(int *failures)
     return *failures - start_failures;
 }
 
+struct dirty_count_ctx {
+    size_t count;
+};
+
+static bool count_dirty_cb(const uint8_t hash[32],
+                           const struct disk_block_index *idx, void *user)
+{
+    (void)hash;
+    (void)idx;
+    ((struct dirty_count_ctx *)user)->count++;
+    return true;
+}
+
+static int run_bound_dirty_delta(int *failures)
+{
+    int start_failures = *failures;
+    char dir[256]; test_make_tmpdir(dir, sizeof(dir), "bip", "dirty_delta");
+    char el_path[320]; snprintf(el_path, sizeof(el_path), "%s/log.bin", dir);
+    char db_path[320]; snprintf(db_path, sizeof(db_path), "%s/p.db", dir);
+    event_log_t *log = event_log_open(el_path);
+    block_index_projection_t *p = log
+        ? block_index_projection_open(db_path, log) : NULL;
+    if (!p) { *failures += 1; goto done; }
+
+    struct ev_block_header a, b, c;
+    uint8_t sol[8];
+    make_header(&a, sol, sizeof(sol), 101, 10, 1);
+    make_header(&b, sol, sizeof(sol), 102, 11, 1);
+    BIP_CHECK("dirty: initial headers emit",
+              emit_header(log, &a, sol) && emit_header(log, &b, sol));
+    BIP_CHECK("dirty: initial catch-up",
+              block_index_projection_catch_up(p) != UINT64_MAX);
+    uint8_t digest[32];
+    memset(digest, 0x5a, sizeof(digest));
+    BIP_CHECK("dirty: bind matching two-row flat",
+              block_index_projection_bind_flat(p, digest, 4096, 2));
+    struct dirty_count_ctx dc = {0};
+    BIP_CHECK("dirty: bound clean snapshot uses delta path",
+              block_index_projection_iterate_dirty_if_bound(
+                  p, digest, 4096, 2, count_dirty_cb, &dc) == 1 &&
+              dc.count == 0);
+    BIP_CHECK("dirty: size mismatch forces full fallback",
+              block_index_projection_iterate_dirty_if_bound(
+                  p, digest, 4097, 2, count_dirty_cb, &dc) == 0);
+    BIP_CHECK("dirty: count mismatch forces full fallback",
+              block_index_projection_iterate_dirty_if_bound(
+                  p, digest, 4096, 3, count_dirty_cb, &dc) == 0);
+
+    a.nStatus = 3;
+    make_header(&c, sol, sizeof(sol), 103, 12, 1);
+    BIP_CHECK("dirty: status patch and new header emit",
+              emit_status(log, &a) && emit_header(log, &c, sol));
+    BIP_CHECK("dirty: delta catch-up",
+              block_index_projection_catch_up(p) != UINT64_MAX);
+    dc.count = 0;
+    BIP_CHECK("dirty: two unique changed hashes iterated",
+              block_index_projection_iterate_dirty_if_bound(
+                  p, digest, 4096, 2, count_dirty_cb, &dc) == 1 &&
+              dc.count == 2);
+    uint8_t tampered[32];
+    memcpy(tampered, digest, sizeof(tampered));
+    tampered[0] ^= 1u;
+    BIP_CHECK("dirty: tampered flat identity falls back",
+              block_index_projection_iterate_dirty_if_bound(
+                  p, tampered, 4096, 2, count_dirty_cb, &dc) == 0);
+
+    block_index_projection_close(p);
+    p = block_index_projection_open(db_path, log);
+    dc.count = 0;
+    BIP_CHECK("dirty: delta survives reopen",
+              p && block_index_projection_iterate_dirty_if_bound(
+                  p, digest, 4096, 2, count_dirty_cb, &dc) == 1 &&
+              dc.count == 2);
+    if (p) block_index_projection_close(p);
+
+    sqlite3 *raw = NULL;
+    BIP_CHECK("dirty: raw handle opens for corruption probes",
+              sqlite3_open_v2(db_path, &raw, SQLITE_OPEN_READWRITE, NULL) ==
+                  SQLITE_OK);
+    if (raw) {
+        sqlite3_stmt *stmt = NULL;
+        int rc = sqlite3_prepare_v2(raw,
+            "UPDATE block_index SET blob=x'00' WHERE hash=?", -1,
+            &stmt, NULL);
+        if (rc == SQLITE_OK) {
+            sqlite3_bind_blob(stmt, 1, c.hash, 32, SQLITE_TRANSIENT);
+            rc = sqlite3_step(stmt); // raw-sql-ok:test-fixture-corruption
+        }
+        sqlite3_finalize(stmt);
+        BIP_CHECK("dirty: malformed dirty blob injected", rc == SQLITE_DONE);
+        sqlite3_close(raw);
+    }
+    p = block_index_projection_open(db_path, log);
+    dc.count = 0;
+    BIP_CHECK("dirty: malformed bound row fails hard",
+              p && block_index_projection_iterate_dirty_if_bound(
+                  p, digest, 4096, 2, count_dirty_cb, &dc) == -1);
+    if (p) block_index_projection_close(p);
+
+    raw = NULL;
+    int missing_rc = SQLITE_ERROR;
+    if (sqlite3_open_v2(db_path, &raw, SQLITE_OPEN_READWRITE, NULL) ==
+        SQLITE_OK) {
+        sqlite3_stmt *stmt = NULL;
+        missing_rc = sqlite3_prepare_v2(raw,
+            "DELETE FROM block_index WHERE hash=?", -1, &stmt, NULL);
+        if (missing_rc == SQLITE_OK) {
+            sqlite3_bind_blob(stmt, 1, c.hash, 32, SQLITE_TRANSIENT);
+            missing_rc = sqlite3_step(stmt); // raw-sql-ok:test-fixture-corruption
+        }
+        sqlite3_finalize(stmt);
+        sqlite3_close(raw);
+    }
+    BIP_CHECK("dirty: projection row deletion injected",
+              missing_rc == SQLITE_DONE);
+    p = block_index_projection_open(db_path, log);
+    dc.count = 0;
+    BIP_CHECK("dirty: missing bound projection row fails hard",
+              p && block_index_projection_iterate_dirty_if_bound(
+                  p, digest, 4096, 2, count_dirty_cb, &dc) == -1);
+    if (p) block_index_projection_close(p);
+
+    raw = NULL;
+    if (sqlite3_open_v2(db_path, &raw, SQLITE_OPEN_READWRITE, NULL) ==
+        SQLITE_OK) {
+        (void)sqlite3_exec(raw, "UPDATE projection_meta SET v='4096junk' "
+                          "WHERE k='flat_payload_size'", NULL, NULL, NULL);
+        sqlite3_close(raw);
+    }
+    p = block_index_projection_open(db_path, log);
+    BIP_CHECK("dirty: numeric metadata trailing junk forces fallback",
+              p && block_index_projection_iterate_dirty_if_bound(
+                  p, digest, 4096, 2, count_dirty_cb, &dc) == 0);
+    if (p) block_index_projection_close(p);
+done:
+    if (log) event_log_close(log);
+    bip_cleanup_dir(dir);
+    return *failures - start_failures;
+}
+
 int test_block_index_projection(void)
 {
     printf("\n=== block_index_projection tests ===\n");
@@ -722,6 +877,7 @@ int test_block_index_projection(void)
     run_commitment_canonical(&failures);
     run_resume_from_partial(&failures);
     run_collision_accounting_cached_stmt(&failures);
+    run_bound_dirty_delta(&failures);
 
     printf("block_index_projection: %d failures\n", failures);
     return failures;

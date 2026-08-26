@@ -97,6 +97,22 @@ static bool topup_emit_row(event_log_t *log, const struct uint256 *hash,
            != UINT64_MAX;
 }
 
+static bool topup_emit_status(event_log_t *log, const struct uint256 *hash,
+                              uint32_t status, int file, uint32_t data_pos,
+                              uint32_t ntx)
+{
+    if (!log || !hash)
+        return false;
+    struct ev_block_status ev = {
+        .nStatus = status, .nFile = file, .nDataPos = data_pos, .nTx = ntx,
+    };
+    memcpy(ev.hash, hash->data, 32);
+    uint8_t wire[EV_BLOCK_STATUS_WIRE_LEN];
+    return ev_block_status_serialize(&ev, wire) &&
+           event_log_append(log, EV_BLOCK_STATUS, wire, sizeof(wire)) !=
+               UINT64_MAX;
+}
+
 /* Insert a header-only in-memory entry (the stale-flat-file shape). */
 static struct block_index *topup_insert_entry(struct main_state *ms,
                                               const struct uint256 *hash,
@@ -115,6 +131,96 @@ static struct block_index *topup_insert_entry(struct main_state *ms,
     bi->nFile = -1;
     bi->nDataPos = 0;
     return bi;
+}
+
+static int run_bound_topup_integration(void)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "topup", "bound");
+    char log_path[320], db_path[320];
+    snprintf(log_path, sizeof(log_path), "%s/events", dir);
+    snprintf(db_path, sizeof(db_path), "%s/projection.db", dir);
+    event_log_t *log = event_log_open(log_path);
+    block_index_projection_t *bip = log
+        ? block_index_projection_open(db_path, log) : NULL;
+    struct main_state source, loaded;
+    main_state_init(&source);
+    main_state_init(&loaded);
+    struct uint256 h10 = {0}, h11 = {0};
+    h10.data[0] = 10; h11.data[0] = 11;
+    struct block_index *s10 = topup_insert_entry(&source, &h10, 10);
+    struct block_index *s11 = topup_insert_entry(&source, &h11, 11);
+    if (s10) s10->nBits = 0x1f07ffffu;
+    if (s11) s11->nBits = 0x1f07ffffu;
+    if (s11) s11->pprev = s10;
+    bool emitted = log && bip && s10 && s11 &&
+        topup_emit_row(log, &h10, NULL, 10, BLOCK_VALID_TREE, -1, 0, 0) &&
+        topup_emit_row(log, &h11, &h10, 11, BLOCK_VALID_TREE, -1, 0, 0) &&
+        block_index_projection_catch_up(bip) != UINT64_MAX;
+    TOPUP_CHECK("bound: exact projection setup", emitted);
+    struct block_index_flat_identity identity;
+    bool saved = emitted && save_block_index_flat_identity(
+        dir, &source, &identity).ok;
+    TOPUP_CHECK("bound: verified flat saved", saved);
+    TOPUP_CHECK("bound: exact flat/projection identity binds",
+                saved && block_index_projection_bind_saved_flat(bip,
+                                                                 &identity));
+    TOPUP_CHECK("bound: verified flat loads",
+                saved && load_block_index_flat(dir, &loaded).ok);
+
+    /* Install a valid projection-only probe without dirty membership. The
+     * bound clean path must visit zero rows and therefore leave it inert. */
+    struct ev_block_header probe = {0};
+    memcpy(probe.hash, h10.data, 32);
+    probe.height = 10; probe.nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
+    probe.nFile = 4; probe.nDataPos = 444; probe.nTime = 1700000010u;
+    probe.nBits = 0x2000ffffu; probe.nVersion = 4; probe.nTx = 9;
+    uint8_t blob[512]; size_t blob_len = 0;
+    bool probe_ok = ev_block_header_serialize(
+        &probe, NULL, blob, sizeof(blob), &blob_len);
+    sqlite3 *raw = NULL; sqlite3_stmt *stmt = NULL;
+    if (probe_ok && sqlite3_open_v2(db_path, &raw, SQLITE_OPEN_READWRITE,
+                                    NULL) == SQLITE_OK &&
+        sqlite3_prepare_v2(raw, "UPDATE block_index SET n_status=?,blob=? "
+                           "WHERE hash=?", -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(stmt, 1, probe.nStatus);
+        sqlite3_bind_blob(stmt, 2, blob, (int)blob_len, SQLITE_TRANSIENT);
+        sqlite3_bind_blob(stmt, 3, h10.data, 32, SQLITE_TRANSIENT);
+        probe_ok = sqlite3_step(stmt) == SQLITE_DONE; // raw-sql-ok:test-fixture-corruption
+    } else {
+        probe_ok = false;
+    }
+    sqlite3_finalize(stmt); if (raw) sqlite3_close(raw);
+    struct block_index *l10 = block_map_find(&loaded.map_block_index, &h10);
+    struct block_index *l11 = block_map_find(&loaded.map_block_index, &h11);
+    TOPUP_CHECK("bound: clean topup succeeds",
+                probe_ok && block_index_projection_topup_with(
+                    bip, &loaded, dir));
+    TOPUP_CHECK("bound: clean topup consumed zero rows",
+                l10 && l10->nTx == 0 && !(l10->nStatus & BLOCK_HAVE_DATA));
+
+    TOPUP_CHECK("bound: status delta emitted",
+                topup_emit_status(log, &h11,
+                    BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA, 5, 555, 7));
+    TOPUP_CHECK("bound: dirty-only topup succeeds",
+                block_index_projection_topup_with(bip, &loaded, dir));
+    TOPUP_CHECK("bound: only dirty status hash applied",
+                l10 && l10->nTx == 0 && l11 && l11->nTx == 7 &&
+                l11->nFile == 5);
+
+    if (s10) s10->nTx = 1; /* publish a different, deliberately unbound SHA3 */
+    TOPUP_CHECK("bound: replacement flat identity saved",
+                save_block_index_flat_identity(dir, &source, NULL).ok);
+    TOPUP_CHECK("bound: mismatched identity falls through full scan",
+                block_index_projection_topup_with(bip, &loaded, dir) &&
+                l10 && l10->nTx == 9 && l10->nFile == 4);
+
+    if (bip) block_index_projection_close(bip);
+    if (log) event_log_close(log);
+    main_state_free(&loaded); main_state_free(&source);
+    test_cleanup_tmpdir(dir);
+    return failures;
 }
 
 int test_block_index_topup(void)
@@ -340,5 +446,5 @@ int test_block_index_topup(void)
     block_index_projection_close(bip);
     event_log_close(log);
     main_state_free(&ms);
-    return failures;
+    return failures + run_bound_topup_integration();
 }

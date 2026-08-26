@@ -42,6 +42,7 @@ struct catch_up_ctx {
     sqlite3_stmt *ins_stmt;       /* prepared INSERT OR REPLACE */
     sqlite3_stmt *exists_stmt;    /* prepared SELECT 1 ... WHERE hash = ? */
     sqlite3_stmt *blob_stmt;      /* prepared SELECT blob ... WHERE hash = ? */
+    sqlite3_stmt *dirty_stmt;     /* prepared INSERT block_index_dirty(hash) */
     uint64_t batch_count;          /* events in current txn */
     uint64_t total_consumed;       /* across all batches this call */
     uint64_t collisions;           /* INSERT OR REPLACE that found a prior row */
@@ -55,6 +56,9 @@ struct catch_up_ctx {
  * transaction boundary + durable counters). */
 bool batch_begin(struct catch_up_ctx *c);
 bool batch_commit(struct catch_up_ctx *c);
+bool block_index_projection_prepare_dirty(struct catch_up_ctx *c);
+bool block_index_projection_mark_dirty(struct catch_up_ctx *c,
+                                       const uint8_t hash[32]);
 
 /* Defined in block_index_projection_status.c — the EV_BLOCK_STATUS consumer.
  * See its doc comment for the full contract. */

@@ -35,10 +35,15 @@
  *       k TEXT PRIMARY KEY,
  *       v TEXT NOT NULL
  *   );
+ *   CREATE TABLE block_index_dirty (
+ *       hash BLOB PRIMARY KEY
+ *   ) WITHOUT ROWID;
  *
  * `projection_meta` carries `last_consumed_offset` (decimal string),
  * `events_consumed_total`, `replace_collisions_total`, `last_catch_up_ms`,
- * and a schema_version sentinel.
+ * the bound flat payload SHA3/size/row-count/covered-offset, and a
+ * schema_version sentinel. Dirty membership and row replacement commit in
+ * the same transaction; binding clears dirty membership transactionally.
  */
 
 #ifndef ZCL_STORAGE_BLOCK_INDEX_PROJECTION_H
@@ -96,6 +101,22 @@ int block_index_projection_iterate(block_index_projection_t *p,
  * this traversal. Stops if `cb` returns false; returns 0 on success. */
 int block_index_projection_iterate_storage_order(
     block_index_projection_t *p, block_index_projection_cb cb, void *user);
+
+/* Bind a quiescent, SHA3-verified flat snapshot to the projection cursor and
+ * clear its dirty set atomically. The row count must equal the projection's
+ * current row count. */
+bool block_index_projection_bind_flat(block_index_projection_t *p,
+                                      const uint8_t payload_sha3[32],
+                                      uint64_t payload_size,
+                                      uint64_t row_count);
+
+/* Iterate only hashes replaced after the bound flat snapshot. Returns 1 when
+ * the exact identity matched, 0 when the caller must use the full scan, and
+ * -1 on a storage error. */
+int block_index_projection_iterate_dirty_if_bound(
+    block_index_projection_t *p, const uint8_t payload_sha3[32],
+    uint64_t payload_size, uint64_t row_count,
+    block_index_projection_cb cb, void *user);
 
 /* Row count. */
 uint64_t block_index_projection_count(block_index_projection_t *p);

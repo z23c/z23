@@ -959,13 +959,16 @@ int test_block_index_loader(void)
         bool loaded = legacy_ok && load_block_index_flat(tmpdir, &ms2).ok;
         bool count_ok = loaded &&
             (ms2.map_block_index.size == ms.map_block_index.size);
+        struct block_index_flat_identity stale_identity;
+        bool legacy_unbound = !block_index_flat_verified_identity(
+            tmpdir, &stale_identity);
 
         /* The legacy body verifies through the sidecar path. */
         bool verify_ok = count_ok &&
             (bii_verify(tmpdir, NULL, NULL, NULL, 0) == BII_OK);
 
         BIL_CHECK("bil: legacy two-file format still loads + verifies",
-                  count_ok && verify_ok);
+                  count_ok && verify_ok && legacy_unbound);
 
         char sidecar_path[512];
         snprintf(sidecar_path, sizeof(sidecar_path),

@@ -12,15 +12,16 @@
  *
  * On-disk flat format (block_index.bin)
  * -------------------------------------
- *   [4B magic "ZCLI" = 0x5A434C49]
+ *   [48B embedded "BIIE" version/size/SHA3 integrity header]
+ *   [4B payload magic "ZCLI" = 0x5A434C49]
  *   [4B count (LE)]
- *   [count * 192B block_index_flat entries, height-sorted]
+ *   [count * 172B block_index_flat entries, height-sorted]
  *
  * Each entry is a packed struct containing hash, prev_hash, height,
  * PoW metadata, chain_work, and Sapling root.
  *
- * Integrity is verified by the sibling block_index_integrity service
- * (bii_verify) using a SHA3-256 sidecar file.
+ * Integrity is verified before row admission by the sibling
+ * block_index_integrity service using the embedded SHA3-256 header.
  */
 
 #ifndef ZCL_SERVICES_BLOCK_INDEX_LOADER_H
@@ -44,7 +45,21 @@ struct sqlite3;
 
 /* Save all block_index entries to a height-sorted flat file.
  * Creates <datadir>/block_index.bin.  Overwrites if present. */
+struct block_index_flat_identity {
+    uint8_t payload_sha3[32];
+    uint64_t payload_size;
+    uint64_t row_count;
+};
+
 void save_block_index_flat(const char *datadir, struct main_state *ms);
+struct zcl_result save_block_index_flat_identity(
+    const char *datadir, struct main_state *ms,
+    struct block_index_flat_identity *out);
+bool block_index_flat_verified_identity(
+    const char *datadir, struct block_index_flat_identity *out);
+bool block_index_projection_bind_saved_flat(
+    struct block_index_projection *bip,
+    const struct block_index_flat_identity *identity);
 
 /* Load block_index.bin via mmap.  Returns .ok=true if >= 1 entry loaded.
  * Allocates a contiguous arena for all entries, links pprev by hash,
