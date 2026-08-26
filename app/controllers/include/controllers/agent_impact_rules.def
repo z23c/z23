@@ -1325,3 +1325,17 @@ AGENT_IMPACT_RULE("tools/lint/check_source_identity_authority.sh|tools/lint/sour
  * the hardened builders, so an edit here can never reach the push gate having
  * run zero test groups. */
 AGENT_IMPACT_RULE("tools/lint/check_outparam_init_before_return.sh|tools/lint/outparam_init_baseline.txt|app/services/src/swap_settlement_service.c|app/services/include/services/swap_settlement_service.h", "make_lint_gates swap_settlement api rpc_safety")
+/* LANE test-suite module mode: the hot-swap loader's publish hooks moved out
+ * from behind ZCL_DEV_BUILD to ZCL_DEV_BUILD||ZCL_TESTING so the parallel test
+ * harness can load a freshly compiled module .so through THE production loader
+ * (make t-hotswap) instead of relinking ~2,800 objects for a one-file edit. An
+ * edit to either file changes what "validated and published" means for the dev
+ * node, the CLI preload path, AND the test harness at once, so it must run the
+ * hot-swap groups that own the loader gauntlet plus the registry/override
+ * groups the commit hook publishes into. */
+AGENT_IMPACT_RULE("tools/command/native_dev_hotswap.c|tools/command/native_dev_hotswap.h", "hotswap_module hotswap_module_v2 hotswap_loader hotswap_simnet command_handler_snapshot command_registry_catalog os_sandbox_hotswap_interaction make_lint_gates")
+/* The parallel runner itself now owns module-mode activation (the epoch guard,
+ * the cache disable, and the mode stamping on SUITE VERDICT). It is the
+ * harness every group runs inside, so keep it on the loader groups plus the
+ * runner's own selector/catalog gates. */
+AGENT_IMPACT_RULE("lib/test/src/test_parallel.c", "hotswap_module hotswap_module_v2 hotswap_loader hotswap_simnet test_test_group_selector make_lint_gates")

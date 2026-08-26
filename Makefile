@@ -202,7 +202,7 @@ else ifneq ($(filter dev-bin z23-dev zclassic23-dev,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := dev test-fast
 else ifneq ($(filter dev-package-verifier,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := dev
-else ifneq ($(filter t-fast t-fast-exact test_parallel_fast test-parallel-fast-active test-parallel-fast-active-locked t-fast-locked t-fast-exact-locked,$(ZCL_EPOCH_SINGLE_GOAL)),)
+else ifneq ($(filter t-fast t-fast-exact t-hotswap hotswap-test-so test_parallel_fast test-parallel-fast-active test-parallel-fast-active-locked t-fast-locked t-fast-exact-locked,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := test-fast
 else ifneq ($(filter t test test_parallel test-parallel test-parallel-active test-parallel-active-locked test-parallel-locked t-locked test-locked secure-release-regressions secure-release-regressions-locked,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := test-strict
@@ -1088,7 +1088,7 @@ else ifneq ($(filter fast-compile dev-build-only,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := dev
 else ifneq ($(filter dev-bin z23-dev zclassic23-dev,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := dev test-fast
-else ifneq ($(filter t-fast t-fast-exact test_parallel_fast test-parallel-fast-active test-parallel-fast-active-locked t-fast-locked t-fast-exact-locked,$(ZCL_DEPFILE_SINGLE_GOAL)),)
+else ifneq ($(filter t-fast t-fast-exact t-hotswap hotswap-test-so test_parallel_fast test-parallel-fast-active test-parallel-fast-active-locked t-fast-locked t-fast-exact-locked,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := test-fast
 else ifneq ($(filter t test test_parallel test-parallel test-parallel-active test-parallel-active-locked test-parallel-locked t-locked test-locked secure-release-regressions secure-release-regressions-locked,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := test-strict
@@ -2073,7 +2073,7 @@ test-parallel-locked: $(TEST_PARALLEL_REL_CANDIDATE) dev-package-verifier-ensure
 # ONLY cannot contain a redirection, a quote, a space, or any other shell
 # metacharacter. `<substring>` never reaches sh at all.
 T_LIST_TOOL := tools/dev/test-group-list.sh
-ONLY_REQUIRED_GOALS := t t-fast t-tsan
+ONLY_REQUIRED_GOALS := t t-fast t-tsan t-hotswap
 ONLY_SELECTOR_GOALS := $(ONLY_REQUIRED_GOALS) t-asan
 ONLY_ACTIVE_GOALS := $(filter $(ONLY_SELECTOR_GOALS),$(MAKECMDGOALS))
 ifneq ($(ONLY_ACTIVE_GOALS),)
@@ -3398,6 +3398,127 @@ hotswap-try:
 	  echo "hotswap-try: build/bin/zclassic23-dev missing — run make fast-rebuild first" >&2; exit 2; }; \
 	ZCL_HOTSWAP_PRELOAD="$$so" build/bin/zclassic23-dev \
 	  -datadir=$(HOME)/.zclassic-c23-dev -rpcport=18252 $(ARGS)
+
+# ── Module mode for the TEST SUITE ────────────────────────────────────────
+# `make t-hotswap ONLY=<group> FILE=<tu.c>` is the seconds-scale edit loop for
+# the real test suite: compile ONE swappable translation unit into a module
+# .so and run the group against the module through THE PRODUCTION LOADER,
+# instead of recompiling that TU into the test binary and relinking ~2,800
+# objects.
+#
+# What makes this trustworthy rather than a test-only shortcut:
+#   - the loader is hotswap_activate_local() in lib/hotswap/src/hotswap_activate.c
+#     — the same function ZCL_HOTSWAP_PRELOAD uses in zclassic23-dev — with the
+#     same publish hooks from tools/command/native_dev_hotswap.c. There is no
+#     second loader anywhere. Every production gate runs: path confinement, the
+#     dev-datadir classification, ABI version, the config/hotswap_swappable.def
+#     allowlist, leaf uniqueness, the module self_test, probe-before-publish
+#     against the leaf's declared output schema, and the all-or-nothing
+#     registry batch that re-checks READY + EFFECT_READ per leaf;
+#   - the module is compiled with $(TEST_FAST_CFLAGS) — byte-for-byte the flags
+#     that TU is compiled with INSIDE the test binary — and published under the
+#     harness's own compile-epoch directory. The harness refuses any .so from a
+#     different epoch, so "same source, same flags" is mechanical rather than a
+#     convention;
+#   - the run never reads or writes the test cache, and the mode is stamped on
+#     the banner, the SUITE VERDICT line and the headline.
+#
+# It is an EDIT LOOP, not a gate: `make t-fast ONLY=<group>` (or `make t`) is
+# still what proves the linked binary. See docs/DEVELOPING.md "Module mode".
+HOTSWAP_TEST_SO_DIR = $(BUILD_DIR)/hotswap/test-fast/$(TEST_FAST_COMPILE_EPOCH)
+
+.PHONY: hotswap-test-so
+# make hotswap-test-so FILE=app/controllers/src/status_native_handlers.c
+# make hotswap-test-so HANDLER=core.status
+# Compile one swappable TU (plus its config/hotswap_islands.def members) into a
+# module .so using the TEST harness's exact compile flags. Prints the .so path
+# as the LAST line. Never activates anything by itself.
+hotswap-test-so: $(VIEW_GEN_HEADERS)
+	@if [ -z "$(HANDLER)$(FILE)" ]; then \
+	  echo "usage: make hotswap-test-so FILE=app/controllers/src/status_native_handlers.c" >&2; \
+	  echo "   or: make hotswap-test-so HANDLER=core.status" >&2; exit 2; fi
+	@set -eu; \
+	rows="$$(tr '\n' ' ' < config/hotswap_swappable.def \
+	  | grep -oE 'HOTSWAP_SWAPPABLE\("[^"]*"[[:space:]]*,[[:space:]]*"[^"]*"\)')"; \
+	[ -n "$$rows" ] || { echo "hotswap-test-so: config/hotswap_swappable.def parsed to zero rows" >&2; exit 2; }; \
+	if [ -n "$(FILE)" ]; then \
+	  src="$(FILE)"; \
+	  printf '%s\n' "$$rows" | grep -Fq "HOTSWAP_SWAPPABLE(\"$$src\"" || { \
+	    echo "hotswap-test-so: reload_required: '$$src' is not a row in config/hotswap_swappable.def" >&2; \
+	    echo "  a TU outside that allowlist can only be proven by rebuilding: make t-fast ONLY=<group>" >&2; \
+	    exit 2; }; \
+	else \
+	  src="$$(printf '%s\n' "$$rows" | awk -v leaf='$(HANDLER)' -F '"' '{ n = split($$4, L, " "); for (i = 1; i <= n; i++) if (L[i] == leaf) { print $$2; exit } }')"; \
+	  [ -n "$$src" ] || { echo "hotswap-test-so: leaf '$(HANDLER)' is not on config/hotswap_swappable.def" >&2; exit 2; }; \
+	fi; \
+	[ -f "$$src" ] || { echo "hotswap-test-so: source does not exist: $$src" >&2; exit 2; }; \
+	mkdir -p "$(HOTSWAP_TEST_SO_DIR)"; \
+	safe="$$(printf '%s' "$$src" | tr -c 'A-Za-z0-9_.-' '_')"; \
+	compile_src="$$src"; \
+	island_rows="$$(tr '\n' ' ' < config/hotswap_islands.def \
+	  | grep -oE 'HOTSWAP_ISLAND\("[^"]*"[[:space:]]*,[[:space:]]*"[^"]*"\)' || true)"; \
+	members="$$(printf '%s\n' "$$island_rows" | awk -v owner="$$src" -F '"' '$$2 == owner { print $$4; exit }')"; \
+	if [ -n "$$members" ]; then \
+	  unity="$(HOTSWAP_TEST_SO_DIR)/$$safe.island.c"; \
+	  tmp_unity="$$(mktemp "$(HOTSWAP_TEST_SO_DIR)/.island.XXXXXX.c")"; \
+	  for member in $$members; do \
+	    [ -f "$$member" ] || { echo "hotswap-test-so: missing island member $$member" >&2; exit 2; }; \
+	    printf '#include "%s/%s"\n' '$(CURDIR)' "$$member" >> "$$tmp_unity"; \
+	  done; \
+	  printf '#include "%s/%s"\n' '$(CURDIR)' "$$src" >> "$$tmp_unity"; \
+	  if [ -f "$$unity" ] && cmp -s "$$tmp_unity" "$$unity"; then rm -f "$$tmp_unity"; \
+	  else mv -f "$$tmp_unity" "$$unity"; fi; \
+	  compile_src="$$unity"; \
+	fi; \
+	tmp_o="$$(mktemp "$(HOTSWAP_TEST_SO_DIR)/.module.XXXXXX.o")"; \
+	tmp_so="$$(mktemp "$(HOTSWAP_TEST_SO_DIR)/.module.XXXXXX.so")"; \
+	trap 'rm -f "$$tmp_o" "$$tmp_so"' EXIT HUP INT TERM; \
+	$(CC) $(TEST_FAST_CFLAGS) -fPIC -DZCL_HOTSWAP_MODULE_GEN \
+	  -DZCL_HOTSWAP_MODULE_SOURCE_TU=\"$$src\" \
+	  -c -o "$$tmp_o" "$$compile_src" >&2; \
+	$(CC) $(HOTSWAP_MODULE_LDFLAGS) -o "$$tmp_so" "$$tmp_o" >&2; \
+	so="$(HOTSWAP_TEST_SO_DIR)/$$safe.so"; \
+	mv -f -- "$$tmp_so" "$$so"; \
+	rm -f "$$tmp_o"; \
+	trap - EXIT HUP INT TERM; \
+	{ \
+	  printf '%s\n' 'schema=zcl.hotswap_test_module.v1'; \
+	  printf 'source_tu=%s\n' "$$src"; \
+	  printf 'epoch=%s\n' '$(TEST_FAST_COMPILE_EPOCH)'; \
+	  printf 'compiler=%s\n' '$(BUILD_COMPILER_ID)'; \
+	  printf 'cflags=%s\n' '$(TEST_FAST_CFLAGS) -fPIC -DZCL_HOTSWAP_MODULE_GEN'; \
+	  printf 'ldflags=%s\n' '$(HOTSWAP_MODULE_LDFLAGS)'; \
+	  printf 'artifact_sha256=%s\n' "$$(sha256sum "$$so" | awk '{print $$1}')"; \
+	} > "$$so.provenance"; \
+	echo "hotswap-test-so: linked test-profile module $$so ($$src)" >&2; \
+	echo "$$so"
+
+.PHONY: t-hotswap
+# make t-hotswap ONLY=<group> FILE=<tu.c>
+# make t-hotswap ONLY=<group> HANDLER=<leaf>
+# Build the module, then run the group against it in the ALREADY-LINKED test
+# harness. Deliberately does NOT depend on $(TEST_PARALLEL_FAST_CANDIDATE):
+# depending on it would relink the binary for the very edit the module exists
+# to avoid. If no harness has been built for this epoch yet it says so and
+# names the one command that builds one.
+t-hotswap:
+	@if [ -z "$(HANDLER)$(FILE)" ]; then \
+	  echo "usage: make t-hotswap ONLY=<group> FILE=<tu.c>" >&2; \
+	  echo "   or: make t-hotswap ONLY=<group> HANDLER=<leaf>" >&2; exit 2; fi
+	@[ -x "$(TEST_PARALLEL_FAST_CANDIDATE)" ] || { \
+	  echo "t-hotswap: no test harness for this compile epoch yet." >&2; \
+	  echo "  build one once:  make t-fast ONLY=$(ONLY)" >&2; \
+	  echo "  then every later edit to a swappable TU is a module build only." >&2; \
+	  exit 2; }
+	@set -eu; \
+	so="$$($(MAKE) --no-print-directory hotswap-test-so \
+	  $(if $(FILE),FILE=$(FILE),HANDLER=$(HANDLER)) | tail -1)"; \
+	case "$$so" in /*) ;; *) so="$(CURDIR)/$$so" ;; esac; \
+	[ -n "$$so" ] && [ -f "$$so" ] || { \
+	  echo "t-hotswap: module build did not yield a .so (see stderr)" >&2; exit 3; }; \
+	echo "t-hotswap: running $(ONLY) against $$so" >&2; \
+	ulimit -s unlimited && ZCL_HOTSWAP_TEST_MODULE="$$so" \
+	  $(TEST_PARALLEL_FAST_ACTIVE) --only=$(ONLY) --no-cache
 
 # Full no-link syntax check across every TU in one shot (no incremental state).
 syntax-check: $(VIEW_GEN_HEADERS)
@@ -6789,7 +6910,29 @@ zcl_testcache_toolkey = $(strip $(shell printf '%s\0%s\0%s\0%s\0' \
 TESTCACHE_TOOLKEY_CPPFLAGS = \
   -DZCL_TESTCACHE_TOOLKEY=\"$(call zcl_testcache_toolkey,$(1),$(2))\"
 
+# ── Module mode: the test harness carries the REAL hot-swap loader ────────
+# Two per-object injections, and no other build is affected.
+#
+# (1) hotswap_activate.o gets -DZCL_DEV_BUILD. That TU is the ONLY place the
+#     dlopen/dlsym/dlclose activation core lives (everything else in it — the
+#     allowlist, the gate, admission, probe orchestration, telemetry — compiles
+#     in every build). Without this the test binary links the release refusal
+#     stub and `make t-hotswap` could not exist. Flipping the toggle for this
+#     one object keeps the loader source untouched (so check-hotswap-dev-only
+#     still sees `#ifdef ZCL_DEV_BUILD` verbatim) and keeps every OTHER TU
+#     release-shaped, so the "this binary is not a dev build" assertions in
+#     test_command_registry_catalog / test_golden_dev_cycle / test_hotswap_loader
+#     stay true. The activation gate itself is unchanged: a module still has to
+#     pass path confinement, the dev-datadir classification, the swappable
+#     allowlist, and probe-before-publish.
+# (2) test_parallel.o learns its own compile epoch, so the harness can REFUSE a
+#     module .so built under any other flag set. That is the mechanical half of
+#     "the module cannot diverge from the linked binary".
+HOTSWAP_TEST_LOADER_REL = lib/hotswap/src/hotswap_activate.o
 TEST_FAST_OBJECT_CFLAGS = $(TEST_FAST_CFLAGS)
+$(TEST_FAST_OBJ_DIR)/$(HOTSWAP_TEST_LOADER_REL): TEST_FAST_OBJECT_CFLAGS += -DZCL_DEV_BUILD
+$(TEST_FAST_OBJ_DIR)/lib/test/src/test_parallel.o: TEST_FAST_OBJECT_CFLAGS += \
+  -DZCL_TEST_COMPILE_EPOCH=\"$(TEST_FAST_COMPILE_EPOCH)\"
 $(TEST_FAST_OBJ_DIR)/lib/util/src/clientversion.o: TEST_FAST_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)
 $(TEST_FAST_OBJ_DIR)/lib/test/src/testcache.o: TEST_FAST_OBJECT_CFLAGS += \
   $(call TESTCACHE_TOOLKEY_CPPFLAGS,$(TEST_FAST_PROFILE),TEST_FAST_EPOCH_COMPILE_FLAGS)
@@ -6806,6 +6949,11 @@ $(TEST_FAST_OBJ_DIR)/lib/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
 # test_parallel minus -flto=auto (see the TEST_REL_* comment above). -MD -MP
 # records the complete include closure inside the exact epoch — no false green.
 TEST_REL_OBJECT_CFLAGS = $(TEST_REL_CFLAGS)
+# Same two module-mode injections as the fast tree (see above), so `make t` and
+# `make t-fast` agree about what the hot-swap loader is in a test binary.
+$(TEST_REL_OBJ_DIR)/$(HOTSWAP_TEST_LOADER_REL): TEST_REL_OBJECT_CFLAGS += -DZCL_DEV_BUILD
+$(TEST_REL_OBJ_DIR)/lib/test/src/test_parallel.o: TEST_REL_OBJECT_CFLAGS += \
+  -DZCL_TEST_COMPILE_EPOCH=\"$(TEST_REL_COMPILE_EPOCH)\"
 $(TEST_REL_OBJ_DIR)/lib/util/src/clientversion.o: TEST_REL_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)
 $(TEST_REL_OBJ_DIR)/lib/test/src/testcache.o: TEST_REL_OBJECT_CFLAGS += \
   $(call TESTCACHE_TOOLKEY_CPPFLAGS,$(TEST_REL_PROFILE),TEST_REL_EPOCH_COMPILE_FLAGS)

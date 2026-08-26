@@ -97,6 +97,27 @@ bool zcl_native_hotswap_service_probe_local(
  * stash is always the exact dev datadir (or empty before boot). */
 static char g_resident_datadir[512];
 
+#endif /* ZCL_DEV_BUILD — publish hooks continue below in every build that can
+        * publish a candidate into a command registry */
+
+/* ── Command-registry publish hooks — the ONE implementation ───────────────
+ *
+ * These three callbacks are "how a candidate is validated and published": the
+ * all-or-nothing batch commit, probe-before-publish, and the retired-snapshot
+ * quiesce poll that gates dlclose. They contain NO dynamic loading (no
+ * dlopen/dlsym/dlclose) — they only touch the command registry — so they are
+ * not part of the release-purity dl* containment and may compile wherever a
+ * registry exists.
+ *
+ * They are widened past ZCL_DEV_BUILD to ZCL_TESTING for one reason: the
+ * parallel test harness can load a freshly compiled module .so through the
+ * REAL loader (lib/hotswap/src/hotswap_activate.c) instead of relinking the
+ * whole test binary. If the harness re-implemented these hooks, a test would
+ * pass through a validation path production never runs — the exact divergence
+ * this facility exists to avoid. A release build (neither macro) still links
+ * none of it. See docs/DEVELOPING.md "Module mode". */
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+
 /* The probe executes on the activating RPC worker. Keep its rendered command
  * data in host-owned thread-local memory long enough to include it in the
  * activation receipt; modules never own or retain this state. */
@@ -108,6 +129,12 @@ static void probe_rendered_clear(void)
     g_probe_rendered = NULL;
 }
 
+void zcl_native_hotswap_probe_rendered_clear(void)
+{
+    probe_rendered_clear();
+}
+
+#ifdef ZCL_DEV_BUILD
 static void probe_rendered_append(struct json_value *out)
 {
     if (!out || !g_probe_rendered)
@@ -155,6 +182,8 @@ static void probe_rendered_append(struct json_value *out)
     }
     json_free(&data);
 }
+#endif /* ZCL_DEV_BUILD — probe_rendered_append feeds the dev activation
+        * receipt only; the hooks below do not use it */
 
 /* Publish a module's ENTIRE leaf set into the live command registry as ONE
  * all-or-nothing batch. zcl_command_registry_replace_batch pre-validates every
@@ -355,6 +384,10 @@ void zcl_native_hotswap_publish_hooks(struct hotswap_publish_hooks *out,
     out->quiesced = with_quiesce ? registry_quiesced_cb : NULL;
     out->ctx = NULL;
 }
+
+#endif /* ZCL_DEV_BUILD || ZCL_TESTING — end of the shared publish hooks */
+
+#ifdef ZCL_DEV_BUILD
 
 /* Render a hotswap_activate_report into an already-init'd reply. */
 static void report_to_reply(struct zcl_command_reply *reply,
