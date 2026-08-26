@@ -255,6 +255,17 @@ static uint64_t zwork_source_bytes(
 }
 
 #ifndef ZCL_HOTFORK_ZWORK_INPUT_CORE
+static bool zwork_regular_package_config(const char *workspace)
+{
+    char path[ZWORK_PATH_MAX];
+    int n = snprintf(path, sizeof(path), "%s/%s", workspace,
+                     VCS_PACKAGE_DEPS_META_PATH);
+    if (n <= 0 || (size_t)n >= sizeof(path))
+        return false;
+    struct stat st;
+    return lstat(path, &st) == 0 && S_ISREG(st.st_mode);
+}
+
 static bool zwork_prepare(const char *workspace,
                           struct vcs_package_prepared *prepared,
                           char *detail, size_t detail_cap)
@@ -959,6 +970,40 @@ void zcl_native_handle_zcode_work_start(
         zwork_fail(reply, "BAD_PROFILE", "validate",
                    "profile must be quick, standard, strong, or release",
                    false, false);
+        return;
+    }
+    struct stat workspace_st;
+    if (lstat(workspace, &workspace_st) != 0 || !S_ISDIR(workspace_st.st_mode)) {
+        zwork_fail(reply, "PROJECT_INSPECT_FAILED", "inspect",
+                   "workspace must be a real directory", false, false);
+        return;
+    }
+    if (!zwork_regular_package_config(workspace)) {
+        struct json_value next_input;
+        json_init(&next_input);
+        json_set_object(&next_input);
+        bool rendered =
+            json_push_kv_str(&next_input, "workspace", workspace) &&
+            json_push_kv_str(&reply->data, "work_id", "") &&
+            json_push_kv_str(&reply->data, "goal", goal) &&
+            json_push_kv_str(&reply->data, "state",
+                             "INITIALIZATION_REQUIRED") &&
+            json_push_kv_str(&reply->data, "stage",
+                             "Initialize C23 package") &&
+            json_push_kv_str(&reply->data, "profile", profile.name) &&
+            json_push_kv_str(&reply->data, "authoritative_workspace",
+                             "unchanged") &&
+            json_push_kv_str(&reply->data, "next_safe_command",
+                             "zcode project init plan") &&
+            json_push_kv_bool(&reply->data, "details_available", false) &&
+            zwork_add_next(
+                reply, "zcode.project.init.plan", &next_input,
+                "declare the C23 package before work can start");
+        json_free(&next_input);
+        if (!rendered)
+            zwork_fail(reply, "WORK_OUTPUT_FAILED", "render",
+                       "bounded initialization summary could not be rendered",
+                       false, false);
         return;
     }
     struct vcs_package_prepared prepared;
