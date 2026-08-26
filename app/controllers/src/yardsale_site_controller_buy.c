@@ -228,13 +228,13 @@ size_t yardsale_site_handle_buy_post(const uint8_t *body, size_t body_len,
     struct privkey keys[ZSWAP_MAX_BUYER_INPUTS];
     memset(keys, 0, sizeof(keys));
 
-    if (!parse_form_field(form, body_len, "root", root_hex,
+    if (!web_form_field(form, body_len, "root", root_hex,
                           sizeof(root_hex)) ||
-        !parse_form_field(form, body_len, "token_recv", token_recv,
+        !web_form_field(form, body_len, "token_recv", token_recv,
                           sizeof(token_recv)) ||
-        !parse_form_field(form, body_len, "change", change,
+        !web_form_field(form, body_len, "change", change,
                           sizeof(change)) ||
-        !parse_form_field(form, body_len, "fee", fee_s, sizeof(fee_s)))
+        !web_form_field(form, body_len, "fee", fee_s, sizeof(fee_s)))
         bad = "root, token_recv, change, and fee are required";
 
     /* Plan-first money on the form path too: without confirm=true this
@@ -242,7 +242,7 @@ size_t yardsale_site_handle_buy_post(const uint8_t *body, size_t body_len,
      * only against a stored PLANNED row whose terms match byte-for-byte. */
     char confirm_s[8];
     bool confirm = false;
-    if (!bad && parse_form_field(form, body_len, "confirm", confirm_s,
+    if (!bad && web_form_field(form, body_len, "confirm", confirm_s,
                                  sizeof(confirm_s))) {
         if (strcmp(confirm_s, "true") == 0 || strcmp(confirm_s, "1") == 0)
             confirm = true;
@@ -264,9 +264,9 @@ size_t yardsale_site_handle_buy_post(const uint8_t *body, size_t body_len,
         char fname[8], kname[8], in_s[640] = {0}, wif_s[128] = {0};
         snprintf(fname, sizeof(fname), "in%zu", i);
         snprintf(kname, sizeof(kname), "key%zu", i);
-        bool have_in = parse_form_field(form, body_len, fname, in_s,
+        bool have_in = web_form_field(form, body_len, fname, in_s,
                                         sizeof(in_s)) && in_s[0];
-        bool have_key = parse_form_field(form, body_len, kname, wif_s,
+        bool have_key = web_form_field(form, body_len, kname, wif_s,
                                          sizeof(wif_s)) && wif_s[0];
         if (!have_in && !have_key)
             continue;
