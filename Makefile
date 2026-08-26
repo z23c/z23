@@ -7044,10 +7044,20 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	@# whole-program cc over $(ALL_SRCS) with NO depfile tracking, so a
 	@# header-only edit leaves every .c mtime unchanged and `make` would skip
 	@# the relink and ship a STALE binary — the exact footgun behind a
-	@# multi-day stale-binary outage. Removing the binary forces the rebuild;
-	@# deploy_verify.sh below confirms the running source id and executable bytes.
-	rm -f $(ZCLASSIC23_BIN)
-	$(MAKE) BUILD_SOURCE_RECORD="$(BUILD_SOURCE_RECORD)" zclassic23
+	@# multi-day stale-binary outage. Removing the binary forces the rebuild.
+	@# Fleet ship may instead supply its already-frozen absolute candidate so
+	@# local activation uses the same bytes as every remote. deploy_verify.sh
+	@# below confirms the running source id and executable bytes in either case.
+	@if [ -n "$${ZCL_DEPLOY_FROZEN_CANDIDATE:-}" ]; then \
+	    case "$$ZCL_DEPLOY_FROZEN_CANDIDATE" in /*) ;; *) \
+	        echo "deploy: frozen candidate path must be absolute" >&2; exit 1;; esac; \
+	    test -x "$$ZCL_DEPLOY_FROZEN_CANDIDATE" || { \
+	        echo "deploy: frozen candidate is not executable" >&2; exit 1; }; \
+	    install -m 755 "$$ZCL_DEPLOY_FROZEN_CANDIDATE" $(ZCLASSIC23_BIN); \
+	else \
+	    rm -f $(ZCLASSIC23_BIN); \
+	    $(MAKE) BUILD_SOURCE_RECORD="$(BUILD_SOURCE_RECORD)" zclassic23; \
+	fi
 	@# From here through verification there are no recursive Make parses. Freeze
 	@# one candidate, prove its baked source identity against the outer record,
 	@# install those exact bytes, and pass that same artifact hash to the verifier.
@@ -8945,6 +8955,7 @@ check-verification-coverage:
 # executable bytes and status command before considering activation complete.
 check-ship-remote-transaction:
 	@echo "══ LINT: remote ship transaction rollback + process qualification ══"
+	@./tools/ship.sh --selftest
 	@./tools/lint/check_ship_remote_transaction.sh
 
 # Fail-closed Z23 release packager + installer: checksum mismatch never

@@ -30,16 +30,17 @@
 # next host is touched.
 #
 # Usage:
-#   tools/ship.sh                     # gate, build, deploy local, deploy remote
+#   tools/ship.sh                     # gate, build, deploy local + named hosts
 #   tools/ship.sh --targets=local     # one host
 #   tools/ship.sh --targets=remote
 #   tools/ship.sh --dry-run           # print the plan, touch nothing
 #   tools/ship.sh --skip-gate         # reuse a banked verdict for this source id
 #
 # Environment:
-#   ZCL_SHIP_REMOTE   ssh destination of the second node (required; fleet
-#                     endpoints are operator-local and not committed)
-#   ZCL_SHIP_HOSTS    override the whole fleet list, space separated
+#   ZCL_SHIP_HOSTS    SSH destinations, space separated (operator-local)
+#   ZCL_SHIP_REMOTE   compatibility fallback for one remote host
+#   ZCL_SHIP_PROOF_SERVER
+#                     optional immutable host; never inferred from remoteness
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -48,11 +49,12 @@ cd "$REPO_ROOT"
 # shellcheck source=tools/scripts/source_identity_lib.sh
 . "$REPO_ROOT/tools/scripts/source_identity_lib.sh"  # zcl_is_sha256, zcl_json_first_sha256
 
-if [ -z "${ZCL_SHIP_REMOTE:-}" ]; then
-    echo "set ZCL_SHIP_REMOTE=<host> locally; fleet endpoints are operator-local and not committed" >&2
-    exit 2
-fi
-REMOTE_HOST="$ZCL_SHIP_REMOTE"
+REMOTE_HOSTS_RAW="${ZCL_SHIP_HOSTS:-${ZCL_SHIP_REMOTE:-}}"
+PROOF_SERVER="${ZCL_SHIP_PROOF_SERVER:-}"
+REMOTE_HOSTS=()
+DEPLOY_HOSTS=()
+PROOF_SELECTED=0
+declare -A HOST_GLIBC=()
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15)
 # Spawnable companions of the daemon, resolved BESIDE its executable at
 # reproduce time (pkgl_worker_path). Both ship with every candidate; the
@@ -63,6 +65,43 @@ TARGETS_EXPLICIT=0
 DRY_RUN=0
 SKIP_GATE=0
 GATE_CACHE_DIR="${HOME}/.cache/zcl-ship"
+
+ship_valid_host() {
+    case "$1" in ''|-*|*[!A-Za-z0-9._@-]*) return 1 ;; *) return 0 ;; esac
+}
+
+ship_glibc_satisfies() {
+    local required="$1" available="$2"
+    case "$required" in [0-9]*.[0-9]*) ;; *) return 1 ;; esac
+    case "$available" in [0-9]*.[0-9]*) ;; *) return 1 ;; esac
+    case "$required$available" in *[!0-9.]*) return 1 ;; esac
+    [ "$(printf '%s\n%s\n' "$required" "$available" | sort -V | tail -1)" = "$available" ]
+}
+
+ship_is_proof_host() {
+    [ -n "$PROOF_SERVER" ] && [ "$1" = "$PROOF_SERVER" ]
+}
+
+if [ "${1:-}" = "--selftest" ]; then
+    test_fleet=(node1 node2 node3 node4)
+    test_order=""
+    for test_host in "${test_fleet[@]}"; do
+        test_order="${test_order}${test_order:+ }$test_host"
+    done
+    [ "$test_order" = "node1 node2 node3 node4" ]
+    ship_valid_host node1 && ship_valid_host user@node-4.example
+    ! ship_valid_host '-host'
+    ! ship_valid_host '-oProxyCommand=x' && ! ship_valid_host 'node;command'
+    ship_glibc_satisfies 2.31 2.31
+    ship_glibc_satisfies 2.31 2.35
+    ship_glibc_satisfies 2.31 2.36
+    ship_glibc_satisfies 2.31 2.39
+    ! ship_glibc_satisfies 2.40 2.39
+    PROOF_SERVER=node3
+    ! ship_is_proof_host node1 && ship_is_proof_host node3
+    printf 'ship: selftest PASS (four-host order; validation; GLIBC inequality; explicit proof host)\n'
+    exit 0
+fi
 
 for arg in "$@"; do
     case "$arg" in
@@ -79,21 +118,18 @@ step() { printf '\n\033[1m── %s\033[0m\n' "$*"; }
 die()  { printf '\033[1;31mship: REFUSE:\033[0m %s\n' "$*" >&2; exit 1; }
 
 # ── 0. The proof server is not a deploy target ──────────────────────────────
-# $REMOTE_HOST holds one immutable tagged release candidate and records the
+# ZCL_SHIP_PROOF_SERVER may identify one immutable tagged candidate and record
 # evidence that the candidate stayed up. Restarting it destroys the very thing
 # it exists to measure: an uptime and zero-intervention record is only worth
 # something if nothing quietly resets it.
 #
-# Until 2026-07-29 this script did exactly that. `remote` was in the DEFAULT
-# target list and the deploy step ran an unconditional `systemctl --user restart
-# zclassic23` on it, so a bare `tools/ship.sh` — the documented everyday
-# invocation — restarted the box that must not be restarted. The tooling and
-# the operating rule were in direct opposition and nothing said so.
+# Until 2026-07-29 a bare invocation could restart the host whose uninterrupted
+# uptime was the evidence being measured. The proof identity is now explicit;
+# ordinary remote nodes remain normal sequential rollout targets.
 #
 # Two different refusals on purpose, because the two mistakes are different:
-#   - Bare `ship.sh`: the operator asked to ship, not to touch the proof
-#     server. Drop `remote`, say so loudly, ship local. Refusing the whole run
-#     would punish the common case for a target the operator never named.
+#   - Bare `ship.sh`: skip only the explicitly identified proof host while
+#     continuing through ordinary serving peers.
 #   - Explicit `--targets=...remote`: the operator DID name it. Silently
 #     dropping it there would be worse than failing — they would believe the
 #     proof server had been updated. Refuse outright, non-zero.
@@ -107,29 +143,32 @@ die()  { printf '\033[1;31mship: REFUSE:\033[0m %s\n' "$*" >&2; exit 1; }
 # `tools/scripts/promotion_receipt.sh verify` checks the chain offline;
 # `tools/scripts/proof_server_pin.sh check` dials the box to see whether it
 # still runs what was pinned.
-case " $TARGETS " in *" remote "*)
-    if [ "${ZCL_SHIP_ALLOW_PROOF_SERVER:-0}" != "1" ]; then
-        if [ "$TARGETS_EXPLICIT" -eq 1 ]; then
-            die "--targets names 'remote', but $REMOTE_HOST is the immutable proof
-       server: it runs one tagged candidate and records the evidence that the
-       candidate held. Deploying restarts it and resets that record.
-       Promoting a new candidate is deliberate:
-           ZCL_SHIP_ALLOW_PROOF_SERVER=1 tools/ship.sh --targets=remote
-       A successful promotion appends a signed receipt to the tracked ledger
-       deploy/promotion-receipts.jsonl automatically (verify it any time with
-       'tools/scripts/promotion_receipt.sh verify', then COMMIT it so it
-       replicates); run 'tools/scripts/proof_server_pin.sh check' afterwards to
-       confirm the box still runs what was pinned."
+for target in $TARGETS; do
+    case "$target" in local|remote) ;; *) die "unknown target '$target' (want: local, remote)" ;; esac
+done
+if [[ " $TARGETS " == *" remote "* ]]; then
+    [ -n "$REMOTE_HOSTS_RAW" ] || die "remote target needs ZCL_SHIP_HOSTS='host1 host2'"
+    read -r -a REMOTE_HOSTS <<< "$REMOTE_HOSTS_RAW"
+    for host in "${REMOTE_HOSTS[@]}"; do
+        ship_valid_host "$host" || die "invalid SSH host '$host'"
+        for seen in "${DEPLOY_HOSTS[@]}"; do
+            [ "$seen" != "$host" ] || die "duplicate SSH host '$host'"
+        done
+        if ship_is_proof_host "$host" && \
+           [ "${ZCL_SHIP_ALLOW_PROOF_SERVER:-0}" != "1" ]; then
+            if [ "$TARGETS_EXPLICIT" -eq 1 ]; then
+                die "$host is the immutable proof server; promote deliberately with ZCL_SHIP_ALLOW_PROOF_SERVER=1"
+            fi
+            say "skipping $host — it is the explicitly named immutable proof server"
+            continue
         fi
-        TARGETS="${TARGETS//remote/}"
-        TARGETS="$(printf '%s' "$TARGETS" | tr -s ' ' | sed 's/^ *//; s/ *$//')"
-        say "skipping 'remote' — $REMOTE_HOST is the immutable proof server."
-        say "  to promote a candidate there: ZCL_SHIP_ALLOW_PROOF_SERVER=1 tools/ship.sh --targets=remote"
-        [ -n "$TARGETS" ] || die "no targets left to ship to"
-    else
-        say "ZCL_SHIP_ALLOW_PROOF_SERVER=1 — the proof server WILL be restarted and its evidence window reset"
+        DEPLOY_HOSTS+=("$host")
+        ship_is_proof_host "$host" && PROOF_SELECTED=1
+    done
+    if [ "$PROOF_SELECTED" -eq 1 ] && [ "${ZCL_SHIP_ALLOW_PROOF_SERVER:-0}" = "1" ]; then
+        say "ZCL_SHIP_ALLOW_PROOF_SERVER=1 — $PROOF_SERVER may be restarted"
     fi
-;; esac
+fi
 
 # ── 1. Preflight ────────────────────────────────────────────────────────────
 # Everything that can refuse cheaply refuses BEFORE the 200-second build, so a
@@ -157,36 +196,34 @@ say "source     $(git rev-parse --short HEAD)  $(git log -1 --format=%s | cut -c
 # binary is already installed and the service restarted. The production build
 # targets -march=x86-64-v3, so AVX2/FMA/BMI2 are load-bearing: shipping to a
 # host without them yields SIGILL on a public node.
-for target in $TARGETS; do
-    case "$target" in
-        local) continue ;;
-        remote) ;;
-        *) die "unknown target '$target' (want: local, remote)" ;;
-    esac
-    ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" true 2>/dev/null || \
-        die "remote $REMOTE_HOST is unreachable over ssh"
+for host in "${DEPLOY_HOSTS[@]}"; do
+    ssh "${SSH_OPTS[@]}" "$host" true 2>/dev/null || \
+        die "remote $host is unreachable over ssh"
     # libc version via awk, NOT `... | head -1 | grep ...`. head closes the pipe
     # after one line, ldd takes SIGPIPE, and `set -o pipefail` turns that into a
     # 141 exit that kills this script before a single host is touched. It is a
     # RACE — it survives only when ldd's whole output lands in one write, which
     # is why ship worked on 2026-07-27 and died here on 2026-07-28. awk consumes
     # the stream to EOF, so there is no early close and no signal.
-    remote_facts="$(ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" \
-        'printf "%s|%s|%s\n" "$(uname -m)" \
-             "$(grep -c -m1 avx2 /proc/cpuinfo)" \
+    remote_facts="$(ssh "${SSH_OPTS[@]}" "$host" '
+        flags="$(awk -F: '\''/^flags[[:space:]]*:/ { print " " $2 " "; exit }'\'' /proc/cpuinfo)"
+        missing=""
+        for flag in cx16 lahf_lm popcnt pni ssse3 sse4_1 sse4_2 \
+                    avx avx2 bmi1 bmi2 f16c fma abm movbe xsave; do
+            case "$flags" in *" $flag "*) ;; *) missing="${missing}${missing:+,}$flag" ;; esac
+        done
+        printf "%s|%s|%s\n" "$(uname -m)" "$missing" \
              "$(ldd --version 2>/dev/null | awk "NR==1 && match(\$0, /[0-9]+\.[0-9]+\$/) { print substr(\$0, RSTART, RLENGTH) }")"')"
     r_arch="${remote_facts%%|*}"; rest="${remote_facts#*|}"
-    r_avx2="${rest%%|*}"; r_libc="${rest##*|}"
+    r_missing="${rest%%|*}"; r_libc="${rest##*|}"
     l_arch="$(uname -m)"
-    l_libc="$(ldd --version 2>/dev/null |
-        awk 'NR==1 && match($0, /[0-9]+\.[0-9]+$/) { print substr($0, RSTART, RLENGTH) }')"
     [ "$r_arch" = "$l_arch" ] || \
         die "remote arch $r_arch != local $l_arch — cannot ship one binary to both"
-    [ "$r_avx2" -ge 1 ] || \
-        die "remote lacks AVX2 but the build targets x86-64-v3 — it would SIGILL"
-    [ "$r_libc" = "$l_libc" ] || \
-        die "remote glibc $r_libc != local $l_libc — build on the older host instead"
-    say "remote     $REMOTE_HOST  $r_arch  glibc $r_libc  avx2 ok"
+    [ -z "$r_missing" ] || \
+        die "$host lacks x86-64-v3 CPU flags: $r_missing"
+    case "$r_libc" in [0-9]*.[0-9]*) ;; *) die "$host returned no parseable glibc version" ;; esac
+    HOST_GLIBC["$host"]="$r_libc"
+    say "remote     $host  $r_arch  glibc $r_libc  x86-64-v3 ok"
 done
 
 # ── 2. Gate ─────────────────────────────────────────────────────────────────
@@ -279,6 +316,20 @@ else
         WORKER_SHAS+=("$s")
     done
     say "workers    zclassic23-package-verify ${WORKER_SHAS[0]:0:16}…  zclassic23-package-verify-dev ${WORKER_SHAS[1]:0:16}…  $(du -ch "${WORKER_FILES[@]}" | tail -1 | cut -f1)"
+
+    CAND_MAX_GLIBC="$(objdump -T "$CANDIDATE" 2>/dev/null |
+        grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' | sort -V | tail -1 || true)"
+    case "$CAND_MAX_GLIBC" in GLIBC_[0-9]*.[0-9]*) ;; *) die "candidate has no parseable GLIBC requirement" ;; esac
+    cand_glibc="${CAND_MAX_GLIBC#GLIBC_}"
+    # Qualify the complete fleet before the first restart. Runtime libc may be
+    # newer than the candidate's maximum required symbol; exact host/build
+    # version equality is neither necessary nor a portability proof.
+    for host in "${DEPLOY_HOSTS[@]}"; do
+        host_glibc="${HOST_GLIBC[$host]}"
+        ship_glibc_satisfies "$cand_glibc" "$host_glibc" || \
+            die "$host glibc $host_glibc cannot satisfy candidate $CAND_MAX_GLIBC"
+        say "abi        $host glibc $host_glibc >= required $cand_glibc"
+    done
 fi
 
 # ── 4. Deploy, host by host ─────────────────────────────────────────────────
@@ -306,22 +357,42 @@ install_local_workers() {
 
 deploy_local() {
     step "Deploy → local"
-    if [ "$DRY_RUN" -eq 1 ]; then say "would install workers + run make deploy"; return 0; fi
-    local pid svc_dir
+    if [ "$DRY_RUN" -eq 1 ]; then say "would install the frozen candidate + workers transactionally"; return 0; fi
+    local pid svc_dir worker_backup i rc=0
     pid="$(systemctl --user show zclassic23 -p MainPID --value 2>/dev/null || true)"
     case "$pid" in
         ""|*[!0-9]*|0) die "local canonical service must be running before ship" ;;
     esac
     svc_dir="$(dirname "$(readlink -f "/proc/$pid/exe")")"
+    worker_backup="$(mktemp -d "${TMPDIR:-/tmp}/z23-ship-local-workers.XXXXXX")"
+    for i in "${!WORKER_NAMES[@]}"; do
+        if [ -f "$svc_dir/${WORKER_NAMES[$i]}" ]; then
+            install -m 755 "$svc_dir/${WORKER_NAMES[$i]}" "$worker_backup/$i"
+        else
+            : > "$worker_backup/$i.absent"
+        fi
+    done
     install_local_workers "$svc_dir"
-    ZCL_DEPLOY_ALLOW_CANONICAL=1 make deploy 2>&1 | tail -6
-    return "${PIPESTATUS[0]}"
+    ZCL_DEPLOY_ALLOW_CANONICAL=1 \
+    ZCL_DEPLOY_FROZEN_CANDIDATE="$CANDIDATE" \
+        make deploy 2>&1 | tail -6 || rc="${PIPESTATUS[0]}"
+    if [ "$rc" -ne 0 ]; then
+        for i in "${!WORKER_NAMES[@]}"; do
+            if [ -f "$worker_backup/$i" ]; then
+                install -m 755 "$worker_backup/$i" "$svc_dir/${WORKER_NAMES[$i]}"
+            else
+                rm -f "$svc_dir/${WORKER_NAMES[$i]}"
+            fi
+        done
+    fi
+    find "$worker_backup" -depth -delete
+    return "$rc"
 }
 
 deploy_remote() {
-    step "Deploy → $REMOTE_HOST"
-    local svc_bin prev_sha
-    svc_bin="$(ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" \
+    local host="$1" svc_bin prev_sha run_id node_incoming
+    step "Deploy → $host"
+    svc_bin="$(ssh "${SSH_OPTS[@]}" "$host" \
         'set -eu
          pid="$(systemctl --user show zclassic23 -p MainPID --value)"
          case "$pid" in ""|*[!0-9]*|0) exit 1 ;; esac
@@ -330,17 +401,25 @@ deploy_remote() {
         /*) ;;
         *) die "remote running executable path is missing or not absolute: '$svc_bin'" ;;
     esac
+    case "$svc_bin" in /*[!A-Za-z0-9_./-]*|*..*) die "$host returned unsafe executable path: '$svc_bin'" ;; esac
     say "remote bin $svc_bin"
     if [ "$DRY_RUN" -eq 1 ]; then say "would install candidate + workers + restart + verify"; return 0; fi
 
-    prev_sha="$(ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" "sha256sum < '$svc_bin' | awk '{print \$1}'" 2>/dev/null || echo none)"
+    prev_sha="$(ssh "${SSH_OPTS[@]}" "$host" bash -s -- "$svc_bin" <<'REMOTE_HASH'
+set -eu
+sha256sum < "$1" | awk '{print $1}'
+REMOTE_HASH
+    )" || prev_sha=none
     say "remote now sha256 ${prev_sha:0:16}…"
+
+    run_id="${ARTIFACT_SHA:0:16}.$$"
+    node_incoming="${svc_bin}.incoming.$run_id"
 
     # Stage beside the target, keep the outgoing binary as the rollback copy,
     # then swap. The running process holds its inode open, so replacing the
     # path never disturbs the daemon still serving from the old bytes.
-    scp -q "${SSH_OPTS[@]}" "$CANDIDATE" "$REMOTE_HOST:${svc_bin}.incoming" || \
-        die "could not copy the candidate to $REMOTE_HOST"
+    scp -q "${SSH_OPTS[@]}" "$CANDIDATE" "$host:$node_incoming" || \
+        die "could not copy the candidate to $host"
 
     # Stage the workers beside the same executable: pkgl_worker_path resolves
     # them there, so that directory is the only location where worker bytes
@@ -348,56 +427,69 @@ deploy_remote() {
     local wi
     for wi in "${!WORKER_NAMES[@]}"; do
         scp -q "${SSH_OPTS[@]}" "${WORKER_FILES[$wi]}" \
-            "$REMOTE_HOST:${svc_bin%/*}/${WORKER_NAMES[$wi]}.incoming" || \
-            die "could not copy ${WORKER_NAMES[$wi]} to $REMOTE_HOST"
+            "$host:${svc_bin%/*}/${WORKER_NAMES[$wi]}.incoming.$run_id" || \
+            die "could not copy ${WORKER_NAMES[$wi]} to $host"
     done
 
-    ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" bash -s -- \
+    ssh "${SSH_OPTS[@]}" "$host" bash -s -- \
         "$svc_bin" "$ARTIFACT_SHA" "$CAND_SOURCE_ID" "$CAND_BUILD_COMMIT" \
-        "${WORKER_SHAS[0]}" "${WORKER_SHAS[1]}" <<'REMOTE_SCRIPT'
+        "${WORKER_SHAS[0]}" "${WORKER_SHAS[1]}" "$run_id" <<'REMOTE_SCRIPT'
 set -euo pipefail
 svc_bin="$1"; want_sha="$2"; want_src="$3"; want_commit="$4"
 want_worker_v="$5"; want_worker_d="$6"
+run_id="$7"
 worker_dir="$(dirname "$svc_bin")"
 worker_v="$worker_dir/zclassic23-package-verify"
 worker_d="$worker_dir/zclassic23-package-verify-dev"
 dropin_dir="$HOME/.config/systemd/user/zclassic23.service.d"
 dropin="$dropin_dir/90-build-identity.conf"
-rollback_bin="${svc_bin}.rollback"
-rollback_dropin="${dropin}.ship.rollback"
-dropin_absent="${dropin}.ship.absent"
+rollback_bin="${svc_bin}.rollback.${run_id}"
+rollback_dropin="${dropin}.ship.rollback.${run_id}"
+dropin_absent="${dropin}.ship.absent.${run_id}"
+node_incoming="${svc_bin}.incoming.${run_id}"
+lock_dir="$HOME/.cache/z23/ship-activation.lock"
 dropin_tmp=""
 prior_sha=""
 rollback_armed=0
+lock_held=0
 
-# Workers stage beside the service binary. Each swap verifies the exact
-# transferred bytes against the gated build, snapshots the outgoing file the
-# same way the daemon's rollback_bin does, and uses the same
-# present/absent marker pair as the dropin so restore_prior can undo a
-# worker that did not exist before the ship.
+# Workers stage beside the service binary. Both outgoing files are snapshotted
+# before either swap, using the same present/absent marker convention as the
+# drop-in, so a second-worker failure restores the complete prior set.
 stage_worker() {
     w_dst="$1"; w_sha="$2"
-    w_got="$(sha256sum < "${w_dst}.incoming" | awk '{print $1}')"
+    w_incoming="${w_dst}.incoming.${run_id}"
+    w_got="$(sha256sum < "$w_incoming" | awk '{print $1}')"
     [ "$w_got" = "$w_sha" ] || \
         { echo "remote: transferred worker bytes differ from candidate: $w_dst" >&2; exit 1; }
-    chmod 755 "${w_dst}.incoming"
+    chmod 755 "$w_incoming"
+    mv -f "$w_incoming" "$w_dst"
+}
+
+snapshot_worker() {
+    w_dst="$1"
     if [ -f "$w_dst" ]; then
-        install -m 755 "$w_dst" "${w_dst}.ship.rollback"
-        rm -f "${w_dst}.ship.absent"
+        install -m 755 "$w_dst" "${w_dst}.ship.rollback.${run_id}"
+        rm -f "${w_dst}.ship.absent.${run_id}"
     else
-        : > "${w_dst}.ship.absent"
-        rm -f "${w_dst}.ship.rollback"
+        : > "${w_dst}.ship.absent.${run_id}"
+        rm -f "${w_dst}.ship.rollback.${run_id}"
     fi
-    mv -f "${w_dst}.incoming" "$w_dst"
 }
 
 restore_worker() {
     r_dst="$1"
-    if [ -f "${r_dst}.ship.rollback" ]; then
-        install -m 755 "${r_dst}.ship.rollback" "$r_dst" || return 1
-    elif [ -f "${r_dst}.ship.absent" ]; then
+    if [ -f "${r_dst}.ship.rollback.${run_id}" ]; then
+        install -m 755 "${r_dst}.ship.rollback.${run_id}" "$r_dst" || return 1
+    elif [ -f "${r_dst}.ship.absent.${run_id}" ]; then
         rm -f "$r_dst" || return 1
     fi
+}
+
+cleanup_backups() {
+    rm -f "$rollback_bin" "$rollback_dropin" "$dropin_absent" \
+        "${worker_v}.ship.rollback.${run_id}" "${worker_v}.ship.absent.${run_id}" \
+        "${worker_d}.ship.rollback.${run_id}" "${worker_d}.ship.absent.${run_id}"
 }
 
 restore_prior() {
@@ -435,6 +527,7 @@ restore_on_failure() {
     if [ "$rollback_armed" -eq 1 ]; then
         echo "remote: activation failed; restoring prior executable and identity" >&2
         if restore_prior; then
+            cleanup_backups
             echo "remote: rollback process-qualified"
         else
             echo "remote: CRITICAL — rollback could not be process-qualified" >&2
@@ -442,22 +535,25 @@ restore_on_failure() {
         fi
     fi
     [ -z "$dropin_tmp" ] || rm -f "$dropin_tmp"
+    rm -f "$node_incoming" "${worker_v}.incoming.${run_id}" "${worker_d}.incoming.${run_id}"
+    [ "$lock_held" -eq 0 ] || rmdir "$lock_dir" 2>/dev/null || true
     exit "$rc"
 }
 trap restore_on_failure EXIT HUP INT TERM
 
-got="$(sha256sum < "${svc_bin}.incoming" | awk '{print $1}')"
+mkdir -p "$HOME/.cache/z23"
+mkdir "$lock_dir" || { echo "remote: another ship activation holds $lock_dir" >&2; exit 1; }
+lock_held=1
+
+got="$(sha256sum < "$node_incoming" | awk '{print $1}')"
 [ "$got" = "$want_sha" ] || { echo "remote: transferred bytes differ from candidate" >&2; exit 1; }
-chmod 755 "${svc_bin}.incoming"
+chmod 755 "$node_incoming"
 
 # Workers swap BEFORE the daemon. If a worker stage fails, the host still has
 # its old daemon and old workers — a consistent pair. Once the daemon swap
 # begins, restore_prior (armed below) undoes workers and binary together. The
 # brief old-daemon-spawns-new-worker window is the safe direction: worker
 # flags are only ever added, so the newer worker accepts the older CLI.
-stage_worker "$worker_v" "$want_worker_v"
-stage_worker "$worker_d" "$want_worker_d"
-
 # The transferred SHA-256 is the source binding. The local preflight already
 # asked these exact bytes for their baked source id; re-parsing the same large
 # JSON through a remote grep|head pipeline added no authority and could fail
@@ -466,6 +562,8 @@ pid="$(systemctl --user show zclassic23 -p MainPID --value)"
 case "$pid" in ""|*[!0-9]*|0) echo "remote: no running MainPID" >&2; exit 1 ;; esac
 install -m 755 "/proc/$pid/exe" "$rollback_bin"
 prior_sha="$(sha256sum < "$rollback_bin" | awk '{print $1}')"
+snapshot_worker "$worker_v"
+snapshot_worker "$worker_d"
 install -d "$dropin_dir"
 rm -f "$rollback_dropin" "$dropin_absent"
 if [ -f "$dropin" ]; then
@@ -478,6 +576,8 @@ fi
 # a failure in that small window could leave intent describing bytes that were
 # never activated.
 rollback_armed=1
+stage_worker "$worker_v" "$want_worker_v"
+stage_worker "$worker_d" "$want_worker_d"
 dropin_tmp="$(mktemp "${dropin}.tmp.XXXXXX")"
 {
     printf '[Service]\n'
@@ -488,7 +588,7 @@ dropin_tmp="$(mktemp "${dropin}.tmp.XXXXXX")"
 install -m 644 "$dropin_tmp" "$dropin"
 rm -f "$dropin_tmp"; dropin_tmp=""
 systemctl --user daemon-reload
-mv -f "${svc_bin}.incoming" "$svc_bin"
+mv -f "$node_incoming" "$svc_bin"
 systemctl --user restart zclassic23
 
 # Keep the rollback transaction armed until the new process proves both exact
@@ -524,6 +624,8 @@ done
 [ "$healthy" -eq 1 ] || { echo "remote: candidate failed process-byte/identity/RPC qualification" >&2; exit 1; }
 rollback_armed=0
 trap - EXIT HUP INT TERM
+rmdir "$lock_dir"
+lock_held=0
 echo "remote: installed, restarted, and process-qualified"
 REMOTE_SCRIPT
 
@@ -533,7 +635,7 @@ REMOTE_SCRIPT
     local deadline running_sha rollback_rc ok=0
     deadline=$(( $(date +%s) + 300 ))
     while [ "$(date +%s)" -lt "$deadline" ]; do
-        running_sha="$(ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" \
+        running_sha="$(ssh "${SSH_OPTS[@]}" "$host" \
             'set -eu
              pid="$(systemctl --user show zclassic23 -p MainPID --value)"
              case "$pid" in ""|*[!0-9]*|0) exit 1 ;; esac
@@ -549,24 +651,25 @@ REMOTE_SCRIPT
     if [ "$ok" -ne 1 ]; then
         say "remote did not come back healthy — ROLLING BACK"
         rollback_rc=0
-        ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" bash -s -- "$svc_bin" <<'ROLLBACK_SCRIPT' || rollback_rc=$?
+        ssh "${SSH_OPTS[@]}" "$host" bash -s -- "$svc_bin" "$run_id" <<'ROLLBACK_SCRIPT' || rollback_rc=$?
 set -eu
 svc_bin="$1"
+run_id="$2"
 dropin="$HOME/.config/systemd/user/zclassic23.service.d/90-build-identity.conf"
-if [ -f "${svc_bin}.rollback" ]; then
-    prior_sha="$(sha256sum < "${svc_bin}.rollback" | awk '{print $1}')"
-    install -m 755 "${svc_bin}.rollback" "$svc_bin"
+if [ -f "${svc_bin}.rollback.${run_id}" ]; then
+    prior_sha="$(sha256sum < "${svc_bin}.rollback.${run_id}" | awk '{print $1}')"
+    install -m 755 "${svc_bin}.rollback.${run_id}" "$svc_bin"
     rb_dir="$(dirname "$svc_bin")"
     for rb_w in "$rb_dir/zclassic23-package-verify" "$rb_dir/zclassic23-package-verify-dev"; do
-        if [ -f "${rb_w}.ship.rollback" ]; then
-            install -m 755 "${rb_w}.ship.rollback" "$rb_w"
-        elif [ -f "${rb_w}.ship.absent" ]; then
+        if [ -f "${rb_w}.ship.rollback.${run_id}" ]; then
+            install -m 755 "${rb_w}.ship.rollback.${run_id}" "$rb_w"
+        elif [ -f "${rb_w}.ship.absent.${run_id}" ]; then
             rm -f "$rb_w"
         fi
     done
-    if [ -f "${dropin}.ship.rollback" ]; then
-        install -m 644 "${dropin}.ship.rollback" "$dropin"
-    elif [ -f "${dropin}.ship.absent" ]; then
+    if [ -f "${dropin}.ship.rollback.${run_id}" ]; then
+        install -m 644 "${dropin}.ship.rollback.${run_id}" "$dropin"
+    elif [ -f "${dropin}.ship.absent.${run_id}" ]; then
         rm -f "$dropin"
     fi
     if ! systemctl --user daemon-reload; then
@@ -610,8 +713,9 @@ ROLLBACK_SCRIPT
     # binding: the running process just proved exact candidate bytes, deploy
     # identity, and status. A failure here must not undo or fail a successful
     # deploy — report it loudly and move on.
-    tools/scripts/proof_server_pin.sh record "$HEAD_SHA" "$CAND_SOURCE_ID" "$ARTIFACT_SHA" "$REMOTE_HOST" || \
-        say "WARNING: could not record the proof-server pin for $HEAD_SHA / ${CAND_SOURCE_ID:0:16}… on $REMOTE_HOST — the deploy itself succeeded; re-run by hand: tools/scripts/proof_server_pin.sh record $HEAD_SHA $CAND_SOURCE_ID $ARTIFACT_SHA $REMOTE_HOST"
+    if ship_is_proof_host "$host"; then
+        tools/scripts/proof_server_pin.sh record "$HEAD_SHA" "$CAND_SOURCE_ID" "$ARTIFACT_SHA" "$host" || \
+            say "WARNING: could not record the proof-server pin for $host"
 
     # The tag above is a local convenience index. THIS is the record that
     # matters: a signed, hash-chained line appended to a TRACKED ledger, so it
@@ -624,17 +728,39 @@ ROLLBACK_SCRIPT
     # without one rather than reaching for a default. See "Owner setup" in
     # docs/PROMOTION_RECEIPTS.md; the chain must also have been started with
     # `promotion_receipt.sh init` before the first append can land.
-    if tools/scripts/promotion_receipt.sh append "$HEAD_SHA" "$CAND_SOURCE_ID" "$ARTIFACT_SHA" "$REMOTE_HOST"; then
-        say "commit deploy/promotion-receipts.jsonl — until it is committed the receipt exists on this disk only, and ship's clean-tree preflight will refuse the next run"
-    else
-        say "WARNING: could not append the promotion receipt for $HEAD_SHA / ${CAND_SOURCE_ID:0:16}… on $REMOTE_HOST — the deploy itself succeeded; re-run by hand: tools/scripts/promotion_receipt.sh append $HEAD_SHA $CAND_SOURCE_ID $ARTIFACT_SHA $REMOTE_HOST"
+        if tools/scripts/promotion_receipt.sh append "$HEAD_SHA" "$CAND_SOURCE_ID" "$ARTIFACT_SHA" "$host"; then
+            say "commit deploy/promotion-receipts.jsonl — until committed the receipt is local only"
+        else
+            say "WARNING: could not append the promotion receipt for $host"
+        fi
     fi
+
+    # Qualification and any proof recording are complete; the run-addressed
+    # rollback set is no longer an authority and must not accumulate forever.
+    ssh "${SSH_OPTS[@]}" "$host" bash -s -- "$svc_bin" "$run_id" <<'REMOTE_CLEANUP' || \
+        say "WARNING: $host retained the qualified run's rollback files"
+set -eu
+svc_bin="$1"; run_id="$2"
+case "$run_id" in ''|*[!A-Za-z0-9.-]*) exit 2 ;; esac
+dropin="$HOME/.config/systemd/user/zclassic23.service.d/90-build-identity.conf"
+dir="$(dirname "$svc_bin")"
+rm -f "${svc_bin}.rollback.${run_id}" \
+    "$dir/zclassic23-package-verify.ship.rollback.${run_id}" \
+    "$dir/zclassic23-package-verify.ship.absent.${run_id}" \
+    "$dir/zclassic23-package-verify-dev.ship.rollback.${run_id}" \
+    "$dir/zclassic23-package-verify-dev.ship.absent.${run_id}" \
+    "${dropin}.ship.rollback.${run_id}" "${dropin}.ship.absent.${run_id}"
+REMOTE_CLEANUP
 }
 
 for target in $TARGETS; do
     case "$target" in
         local)  deploy_local  || die "local deploy failed" ;;
-        remote) deploy_remote ;;
+        remote)
+            for host in "${DEPLOY_HOSTS[@]}"; do
+                deploy_remote "$host"
+            done
+            ;;
     esac
 done
 
@@ -644,21 +770,27 @@ printf '%-22s %-18s %-12s %s\n' HOST SOURCE_ID HEIGHT STATE
 for target in $TARGETS; do
     case "$target" in
         local)
-            s="$(timeout 20 build/bin/z23 status 2>/dev/null || true)"
+            pid="$(systemctl --user show zclassic23 -p MainPID --value 2>/dev/null || true)"
+            s="$(timeout 20 "/proc/$pid/exe" status 2>/dev/null || true)"
             printf '%-22s %-18s %-12s %s\n' "local" "${CAND_SOURCE_ID:0:16}…" \
                 "$(printf '%s' "$s" | grep -oE 'hstar=[0-9]+' | cut -d= -f2)" \
                 "$(printf '%s' "$s" | grep -oE 'sync=[a-z_]+' | cut -d= -f2)" ;;
         remote)
-            s="$(ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" 'timeout 20 ~/bin/z23 status 2>/dev/null' || true)"
-            printf '%-22s %-18s %-12s %s\n' "$REMOTE_HOST" "${CAND_SOURCE_ID:0:16}…" \
-                "$(printf '%s' "$s" | grep -oE 'hstar=[0-9]+' | cut -d= -f2)" \
-                "$(printf '%s' "$s" | grep -oE 'sync=[a-z_]+' | cut -d= -f2)" ;;
+            for host in "${DEPLOY_HOSTS[@]}"; do
+                s="$(ssh "${SSH_OPTS[@]}" "$host" '
+                    pid="$(systemctl --user show zclassic23 -p MainPID --value)"
+                    case "$pid" in ""|*[!0-9]*|0) exit 1 ;; esac
+                    timeout 20 "/proc/$pid/exe" status 2>/dev/null' || true)"
+                printf '%-22s %-18s %-12s %s\n' "$host" "${CAND_SOURCE_ID:0:16}…" \
+                    "$(printf '%s' "$s" | grep -oE 'hstar=[0-9]+' | cut -d= -f2)" \
+                    "$(printf '%s' "$s" | grep -oE 'sync=[a-z_]+' | cut -d= -f2)"
+            done ;;
     esac
 done
 echo
 if [ "$DRY_RUN" -eq 1 ]; then
     say "DRY RUN — nothing was built, installed, restarted, or pushed."
-    say "plan was: $(git rev-parse --short HEAD) -> $TARGETS"
+    say "plan was: $(git rev-parse --short HEAD) -> targets=$TARGETS hosts=${DEPLOY_HOSTS[*]:-none}"
 else
-    say "shipped $(git rev-parse --short HEAD) to: $TARGETS"
+    say "shipped $(git rev-parse --short HEAD) to targets=$TARGETS hosts=${DEPLOY_HOSTS[*]:-none}"
 fi

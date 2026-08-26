@@ -94,6 +94,7 @@ target="$tmp/zclassic23"
 worker_v="$tmp/zclassic23-package-verify"
 worker_d="$tmp/zclassic23-package-verify-dev"
 dropin="$tmp/home/.config/systemd/user/zclassic23.service.d/90-build-identity.conf"
+run_id="test-run"
 
 start_old() {
     install -m 755 "$tmp/old" "$target"
@@ -123,7 +124,23 @@ invoke() {
     ZCL_SHIP_ROLLBACK_HEALTH_SECONDS=5 \
         bash "$tmp/activate.sh" "$target" "$new_sha" \
             "$(printf 'a%.0s' {1..64})" candidate-commit \
-            "$new_sha" "$new_sha"
+            "$new_sha" "$new_sha" "$run_id"
+}
+
+reset_transaction() {
+    rm -f "$tmp/fail.marker" "${target}.incoming.${run_id}" \
+        "${target}.rollback.${run_id}" "${dropin}.ship.rollback.${run_id}" \
+        "${dropin}.ship.absent.${run_id}" \
+        "${worker_v}.incoming.${run_id}" "${worker_d}.incoming.${run_id}" \
+        "${worker_v}.ship.rollback.${run_id}" "${worker_d}.ship.rollback.${run_id}" \
+        "${worker_v}.ship.absent.${run_id}" "${worker_d}.ship.absent.${run_id}"
+    rmdir "$tmp/home/.cache/z23/ship-activation.lock" 2>/dev/null || true
+}
+
+stage_new() {
+    install -m 755 "$tmp/new" "${target}.incoming.${run_id}"
+    install -m 755 "$tmp/new" "${worker_v}.incoming.${run_id}"
+    install -m 755 "$tmp/new" "${worker_d}.incoming.${run_id}"
 }
 
 assert_rolled_back() {
@@ -137,16 +154,10 @@ assert_rolled_back() {
 
 for fault in reload restart; do
     stop_current
-    rm -f "$tmp/fail.marker" "${target}.incoming" \
-        "${target}.rollback" "${dropin}.ship.rollback" "${dropin}.ship.absent" \
-        "${worker_v}.incoming" "${worker_d}.incoming" \
-        "${worker_v}.ship.rollback" "${worker_d}.ship.rollback" \
-        "${worker_v}.ship.absent" "${worker_d}.ship.absent"
+    reset_transaction
     printf 'old identity\n' > "$dropin"
     start_old
-    install -m 755 "$tmp/new" "${target}.incoming"
-    install -m 755 "$tmp/new" "${worker_v}.incoming"
-    install -m 755 "$tmp/new" "${worker_d}.incoming"
+    stage_new
     if invoke "$fault" >/dev/null 2>&1; then
         echo "check_ship_remote_transaction: activation unexpectedly survived $fault fault" >&2
         exit 1
@@ -154,21 +165,48 @@ for fault in reload restart; do
     assert_rolled_back
 done
 
+# A concurrent activation lock belongs to the other process. Refusal must not
+# remove that lock or mutate any installed byte.
+stop_current
+reset_transaction
+printf 'old identity\n' > "$dropin"
+start_old
+stage_new
+mkdir -p "$tmp/home/.cache/z23/ship-activation.lock"
+if invoke "" >/dev/null 2>&1; then
+    echo "check_ship_remote_transaction: concurrent activation lock passed" >&2
+    exit 1
+fi
+[ -d "$tmp/home/.cache/z23/ship-activation.lock" ] || {
+    echo "check_ship_remote_transaction: foreign activation lock was removed" >&2
+    exit 1
+}
+[ "$(sha256sum < "$target" | awk '{print $1}')" = "$old_sha" ]
+rmdir "$tmp/home/.cache/z23/ship-activation.lock"
+
+# A second-worker hash failure happens after the first worker swap. Rollback
+# must already be armed so the host cannot retain a mixed worker set.
+stop_current
+reset_transaction
+printf 'old identity\n' > "$dropin"
+start_old
+stage_new
+printf 'corrupt\n' > "${worker_d}.incoming.${run_id}"
+if invoke "" >/dev/null 2>&1; then
+    echo "check_ship_remote_transaction: second-worker corruption passed" >&2
+    exit 1
+fi
+assert_rolled_back
+
 # A rollback restart that also fails must never print a success claim. The
 # outgoing process is deliberately left alive by this injected systemctl
 # failure, allowing the test to prove the files were restored while the
 # transaction reports the rollback as unverified.
 stop_current
-rm -f "$tmp/fail.marker" "${target}.incoming" \
-    "${target}.rollback" "${dropin}.ship.rollback" "${dropin}.ship.absent" \
-    "${worker_v}.incoming" "${worker_d}.incoming" \
-    "${worker_v}.ship.rollback" "${worker_d}.ship.rollback" \
-    "${worker_v}.ship.absent" "${worker_d}.ship.absent"
+reset_transaction
 printf 'old identity\n' > "$dropin"
 start_old
-install -m 755 "$tmp/new" "${target}.incoming"
-install -m 755 "$tmp/new" "${worker_v}.incoming"
-install -m 755 "$tmp/new" "${worker_d}.incoming"
+stage_new
 if out="$(invoke "" restart 2>&1)"; then
     echo "check_ship_remote_transaction: activation survived persistent restart fault" >&2
     exit 1
@@ -180,16 +218,10 @@ esac
 assert_rolled_back
 
 stop_current
-rm -f "$tmp/fail.marker" "${target}.incoming" \
-    "${target}.rollback" "${dropin}.ship.rollback" "${dropin}.ship.absent" \
-    "${worker_v}.incoming" "${worker_d}.incoming" \
-    "${worker_v}.ship.rollback" "${worker_d}.ship.rollback" \
-    "${worker_v}.ship.absent" "${worker_d}.ship.absent"
+reset_transaction
 printf 'old identity\n' > "$dropin"
 start_old
-install -m 755 "$tmp/new" "${target}.incoming"
-install -m 755 "$tmp/new" "${worker_v}.incoming"
-install -m 755 "$tmp/new" "${worker_d}.incoming"
+stage_new
 invoke "" >/dev/null
 [ "$(sha256sum < "$target" | awk '{print $1}')" = "$new_sha" ]
 [ "$(sha256sum < "$worker_v" | awk '{print $1}')" = "$new_sha" ]
@@ -207,20 +239,18 @@ ZCL_SHIP_TEST_WANT_SOURCE="$(printf 'a%.0s' {1..64})" \
 ZCL_SHIP_TEST_WANT_COMMIT=candidate-commit \
 ZCL_SHIP_TEST_FAIL_ONCE="" ZCL_SHIP_TEST_FAIL_ALWAYS="" \
 ZCL_SHIP_ROLLBACK_HEALTH_SECONDS=5 \
-    bash "$tmp/rollback.sh" "$target" >/dev/null
+    bash "$tmp/rollback.sh" "$target" "$run_id" >/dev/null
 assert_rolled_back
 
 # Re-activate new bytes, then deny the fallback restart. The fallback must
 # return nonzero and call the rollback unqualified rather than claiming it.
-install -m 755 "$tmp/new" "${target}.incoming"
-install -m 755 "$tmp/new" "${worker_v}.incoming"
-install -m 755 "$tmp/new" "${worker_d}.incoming"
+stage_new
 invoke "" >/dev/null
 if out="$(HOME="$tmp/home" PATH="$tmp/mockbin:$PATH" \
     ZCL_SHIP_TEST_PIDFILE="$pidfile" ZCL_SHIP_TEST_TARGET="$target" \
     ZCL_SHIP_TEST_FAIL_ONCE="" ZCL_SHIP_TEST_FAIL_ALWAYS=restart \
     ZCL_SHIP_ROLLBACK_HEALTH_SECONDS=5 \
-    bash "$tmp/rollback.sh" "$target" 2>&1)"; then
+    bash "$tmp/rollback.sh" "$target" "$run_id" 2>&1)"; then
     echo "check_ship_remote_transaction: fallback survived persistent restart fault" >&2
     exit 1
 fi
@@ -229,4 +259,11 @@ case "$out" in
     *) echo "check_ship_remote_transaction: missing fallback rollback alarm" >&2; exit 1 ;;
 esac
 
-echo "check_ship_remote_transaction: PASS (activation/fallback faults rollback bytes+identity+workers; success and rollback process-qualified)"
+# Fleet-level anti-rot: local activation must consume the already-frozen bytes,
+# ordinary status checks must address the running inode, and remote deployment
+# must iterate the validated host array rather than one global endpoint.
+grep -q 'ZCL_DEPLOY_FROZEN_CANDIDATE="$CANDIDATE"' "$ROOT/tools/ship.sh"
+grep -q 'for host in "${DEPLOY_HOSTS\[@\]}"' "$ROOT/tools/ship.sh"
+grep -q 'timeout 20 "/proc/\$pid/exe" status' "$ROOT/tools/ship.sh"
+
+echo "check_ship_remote_transaction: PASS (four-host/frozen-byte wiring; concurrent/partial/fallback faults rollback; process-qualified)"

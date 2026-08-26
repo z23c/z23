@@ -141,7 +141,7 @@ gate_command() {
         check-proof-server-pin)            echo './tools/lint/check_proof_server_pin.sh' ;;
         check-promotion-receipt-chain)     echo './tools/lint/check_promotion_receipt_chain.sh' ;;
         check-verification-coverage)       echo './tools/lint/check_verification_coverage.sh' ;;
-        check-ship-remote-transaction)     echo './tools/lint/check_ship_remote_transaction.sh' ;;
+        check-ship-remote-transaction)     echo './tools/ship.sh --selftest && ./tools/lint/check_ship_remote_transaction.sh' ;;
         check-z23-release-install)         echo 'bash packaging/release/build_release.sh --selftest && bash tools/scripts/install_z23.sh --selftest' ;;
         check-identity-parser-single)      echo './tools/lint/check_identity_parser_single.sh --selftest && ./tools/lint/check_identity_parser_single.sh' ;;
         check-source-identity-authority)   echo './tools/lint/check_source_identity_authority.sh --selftest && ./tools/lint/check_source_identity_authority.sh' ;;
