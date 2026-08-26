@@ -1216,6 +1216,18 @@ AGENT_IMPACT_RULE("core/chainparams/src/chainparams.c|lib/net/src/connman.c|lib/
  * and softening the boot gate without the group would let the node advance
  * CRYPTO_READY on keys that never passed their digest. */
 AGENT_IMPACT_RULE("lib/sapling/src/params_vk_embedded.c|lib/sapling/include/sapling/params_vk_embedded.h|lib/sapling/src/params_init.c|lib/test/src/test_params_vk_embedded.c|config/src/boot_params_gate.c|config/include/config/boot_params_gate.h|tools/scripts/zcash_params.sh|docs/PARAMS.md", "params_vk_embedded")
+/* Fuzz-artifact triage tooling: promote_fuzz_artifacts.sh now REPLAYS an
+ * artifact (stock + pattern-init for crash-/leak- kinds) before it ever
+ * files a verdict, instead of labeling from the filename; the shared
+ * pattern-init/named-fix vocabulary that decision and check_fuzz_artifact_
+ * replay.sh's ledger enforcement both read lives in fuzz_verdict_lib.sh;
+ * background_quality_lane.sh's fuzz lane checks (and best-effort refreshes)
+ * whether its own checkout is pinned behind main via
+ * check_quality_lane_freshness.sh before it fuzzes anything. Already covered
+ * by the generic tools-scripts and tools glob rule above; listed explicitly
+ * so a change to any one of these five is never left to an implicit
+ * catch-all to notice. */
+AGENT_IMPACT_RULE("tools/scripts/promote_fuzz_artifacts.sh|tools/scripts/fuzz_verdict_lib.sh|tools/lint/check_fuzz_artifact_replay.sh|tools/scripts/background_quality_lane.sh|tools/scripts/check_quality_lane_freshness.sh|lib/test/fuzz_seeds/ARTIFACT_VERDICTS.txt", "make_lint_gates")
 /* Lane: published build identity (peer build identity on the wire).
  * ONE slice: the advertised subversion and its reader (msg_version.c +
  * net/version.h), the getpeerinfo field that republishes what each peer

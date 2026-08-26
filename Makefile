@@ -6288,6 +6288,17 @@ mvp: test_zcl zclassic23 zcl-rpc
 # anywhere. Both loops point it at the per-target /tmp work dir they already
 # create and delete.
 FUZZ_CC ?= clang
+# ZCL_FUZZ_EXTRA_CFLAGS is a deliberate hook, not dead weight: it is how
+# tools/scripts/promote_fuzz_artifacts.sh and tools/lint/check_fuzz_artifact_
+# replay.sh build the pattern-init variant of a harness (-ftrivial-auto-var-
+# init=pattern) without forking FUZZ_CFLAGS or the link rules below. Combined
+# with `make BUILD_DIR=build/fuzz-patterninit ZCL_FUZZ_EXTRA_CFLAGS=-ftrivial-
+# auto-var-init=pattern fuzz_<kind>` this produces a fully isolated object
+# tree and binary (BIN_DIR and FUZZ_OBJ_DIR both derive from BUILD_DIR), so a
+# pattern-init rebuild can never silently overwrite the plain-stock objects
+# that `make fuzz-ci` / `make fuzz-replay` rely on. Empty by default: a plain
+# `make fuzz` is unaffected.
+ZCL_FUZZ_EXTRA_CFLAGS ?=
 FUZZ_CFLAGS = -std=c23 -O1 -g -Wall -Wextra \
 	-Wno-deprecated-declarations \
 	$(APP_INCLUDES) $(CONFIG_INCLUDES) $(LIB_INCLUDES) $(CORE_INCLUDES) \
@@ -6297,7 +6308,7 @@ FUZZ_CFLAGS = -std=c23 -O1 -g -Wall -Wextra \
 	-D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE \
 	-DZCL_FUZZ_QUIET_LOG_MACROS -Ivendor/include \
 	-fsanitize=fuzzer,address,undefined \
-	-fno-sanitize=alignment
+	-fno-sanitize=alignment $(ZCL_FUZZ_EXTRA_CFLAGS)
 FUZZ_LIBS = $(TOR_LIBS) $(LIBS)
 
 FUZZ_TARGETS = $(BIN_DIR)/fuzz_block $(BIN_DIR)/fuzz_script $(BIN_DIR)/fuzz_p2p $(BIN_DIR)/fuzz_http $(BIN_DIR)/fuzz_compactblock $(BIN_DIR)/fuzz_snapshot $(BIN_DIR)/fuzz_tx_bundle $(BIN_DIR)/fuzz_rom_manifest $(BIN_DIR)/fuzz_overlay $(BIN_DIR)/fuzz_ecdsa $(BIN_DIR)/fuzz_zcode_commons $(BIN_DIR)/fuzz_zcode_dht $(BIN_DIR)/fuzz_zcode_science
