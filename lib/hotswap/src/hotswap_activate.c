@@ -656,6 +656,8 @@ bool hotswap_module_publish(const struct zcl_hotswap_module *module,
 
 #include "crypto/sha256.h"
 #include "hotswap/hotswap_artifact_digest.h"
+#include "hotswap/hotswap_elf_probe.h"
+#include "hotswap/hotswap_sealed_image.h"
 
 static bool artifact_sha256_fd(int fd, char hex_out[65])
 {
@@ -920,21 +922,134 @@ static bool activate_run(const char *so_path, const char *resolved_datadir,
         !hotswap_activation_authorized(resolved_datadir, why, sizeof(why)))
         return act_reject(report, "authorize", "%s", why);
 
-    int fd = open(so_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    /* ── LOAD ORDER IS THE SECURITY PROPERTY ───────────────────────────────
+     * seal -> probe -> hash -> map, and every step after the seal reads the
+     * SAME immutable image.
+     *
+     * Sealing first is what makes the rest meaningful. The previous order
+     * (open, hash the fd, dlopen /proc/self/fd/N) is redirect-proof but not
+     * tamper-proof: dlopen re-reads the inode, so a writer overwriting that
+     * inode in place between the hash and the map makes the node hash bytes A
+     * and run bytes B. Measured, not theorised. A sealed memfd cannot change
+     * after F_SEAL_WRITE, so "the bytes I checked" and "the bytes I ran" stop
+     * being two different questions.
+     *
+     * Probing before mapping fixes a second ordering defect. Every identity
+     * fact used to come from dlsym -- which means the module was already
+     * mapped and its ELF constructors had ALREADY RUN before a single
+     * admission stage was consulted. We lint our own sources for
+     * __attribute__((constructor)), but a packaged artifact built elsewhere
+     * never passed our lint. Reading the file's own claims first turns "run
+     * it, then check it" into "check it, then run it".
+     *
+     * What this does NOT buy: DT_INIT (the crt `_init` stub) is present on
+     * every clean module and still runs at dlopen, so a determined attacker
+     * who controls the artifact can still execute code inside this process.
+     * This raises the bar; it is not an isolation boundary. The only complete
+     * answer is a process boundary, which is a different design. */
+    int src_fd = open(so_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     struct stat st;
-    if (fd < 0 || fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
-        !artifact_sha256_fd(fd, report->artifact_sha256) ||
-        !hotswap_artifact_sha3_fd(fd, report->artifact_sha3_256)) {
-        /* BOTH digests come off THIS fd, and the dlopen below maps that same
-         * fd through /proc/self/fd/N — never a re-opened path. Each hasher
-         * seeks to 0 itself and leaves the offset at 0, so they compose in
-         * either order over identical bytes. Fail closed: a module whose
-         * bytes cannot be hashed twice is never mapped. */
-        if (fd >= 0) close(fd);
+    if (src_fd < 0 || fstat(src_fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+        if (src_fd >= 0) close(src_fd);
         return act_reject(report, "dlopen",
-                          "could not pin and hash a regular module artifact");
+                          "could not pin a regular module artifact");
     }
 
+    char seal_err[200];
+    int fd = hotswap_sealed_image_from_fd(src_fd, seal_err, sizeof(seal_err));
+    close(src_fd);              /* the on-disk inode is no longer load-bearing */
+    if (fd < 0)
+        return act_reject(report, "seal", "%s", seal_err);
+
+    /* Pre-map shape check, against the sealed image. */
+    {
+        struct hotswap_elf_facts facts;
+        char probe_err[200];
+        if (!hotswap_elf_probe_fd(fd, &facts, probe_err, sizeof(probe_err))) {
+            close(fd);
+            return act_reject(report, "shape", "%s", probe_err);
+        }
+        /* Baseline is 1, NOT 0: the C runtime's own frame_dummy always
+         * occupies one .init_array slot. Comparing against zero would refuse
+         * every clean module ever built here. */
+        if (facts.init_array_entries >
+            ZCL_HOTSWAP_ELF_PROBE_CLEAN_INIT_ARRAY_ENTRIES) {
+            close(fd);
+            return act_reject(report, "shape",
+                "module declares %zu .init_array entries (clean baseline %zu): "
+                "it runs its own code at dlopen, before any admission stage",
+                facts.init_array_entries,
+                ZCL_HOTSWAP_ELF_PROBE_CLEAN_INIT_ARRAY_ENTRIES);
+        }
+        if (facts.preinit_array_entries > 0) {
+            close(fd);
+            return act_reject(report, "shape",
+                "module declares %zu .preinit_array entries; no toolchain in "
+                "this tree emits one", facts.preinit_array_entries);
+        }
+        /* DT_NEEDED is the LARGEST pre-admission execution vector, larger than
+         * this object's own .init_array: ld.so loads every needed library and
+         * runs ITS constructors before ours. A module whose own init_array is
+         * a clean 1 can still name evil.so here and get arbitrary code run at
+         * dlopen. DT_RPATH/DT_RUNPATH is the same hole one level down — it
+         * redirects which file a baseline-looking name resolves to.
+         *
+         * Measured baseline across all 93 artifacts in this tree: exactly one
+         * entry, "libc.so.6", and no runpath. The allowlist below is therefore
+         * as tight as the evidence allows. If a module ever legitimately needs
+         * another library, widen THIS list deliberately — do not relax the
+         * check. */
+        static const char *const k_allowed_needed[] = {
+            "libc.so.6", "libm.so.6",
+        };
+        if (facts.has_runpath) {
+            close(fd);
+            return act_reject(report, "shape",
+                "module carries DT_RPATH/DT_RUNPATH, which redirects where its "
+                "dependencies load from");
+        }
+        if (facts.needed_truncated) {
+            close(fd);
+            return act_reject(report, "shape",
+                "module declares %zu DT_NEEDED libraries, more than this probe "
+                "can enumerate; refusing what cannot be audited",
+                facts.needed_count);
+        }
+        for (size_t i = 0; i < facts.needed_count; i++) {
+            bool allowed = false;
+            for (size_t k = 0;
+                 k < sizeof(k_allowed_needed) / sizeof(k_allowed_needed[0]); k++)
+                if (strcmp(facts.needed[i], k_allowed_needed[k]) == 0) {
+                    allowed = true;
+                    break;
+                }
+            if (!allowed) {
+                close(fd);
+                return act_reject(report, "shape",
+                    "module depends on '%s'; its constructors would run at "
+                    "dlopen before any admission stage",
+                    facts.needed[i]);
+            }
+        }
+        /* The pin is re-checked by dlsym after the map. Checking it here too
+         * is not redundant: this reads the FILE, that reads what the loader
+         * actually bound, and a disagreement between them means the artifact
+         * is lying about itself. */
+        if (facts.core_seal_root[0] &&
+            strncmp(facts.core_seal_root, ZCL_CORE_SEAL_ROOT, 65) != 0) {
+            close(fd);
+            return act_reject(report, "consensus",
+                "module was built against sealed core %.16s..., this node runs "
+                "%.16s...", facts.core_seal_root, ZCL_CORE_SEAL_ROOT);
+        }
+    }
+
+    if (!artifact_sha256_fd(fd, report->artifact_sha256) ||
+        !hotswap_artifact_sha3_fd(fd, report->artifact_sha3_256)) {
+        close(fd);
+        return act_reject(report, "dlopen",
+                          "could not hash the sealed module image");
+    }
     char pinned[64];
     (void)snprintf(pinned, sizeof(pinned), "/proc/self/fd/%d", fd);
     void *handle = dlopen(pinned, RTLD_NOW | RTLD_LOCAL);
@@ -1075,15 +1190,60 @@ bool hotswap_verify_module_so(const char *so_path, const char *expect_tu,
      * the verification or packaging lane reads would buy nothing for a real
      * dependency cost. The RESIDENT loader still computes BOTH over its own
      * fd — see activate_run(). */
-    int fd = open(so_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    /* Same seal -> probe -> hash -> map order as activate_run(); see the long
+     * comment there for why the order IS the property. The offline verifier
+     * matters here as much as the resident does: it is the tool a human runs
+     * to decide whether a packaged artifact is worth mounting, so it must not
+     * form that opinion by running the artifact's constructors first. */
+    int vsrc_fd = open(so_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     struct stat vst;
-    if (fd < 0 || fstat(fd, &vst) != 0 || !S_ISREG(vst.st_mode) ||
-        !hotswap_artifact_sha3_fd(fd, report->artifact_sha3_256)) {
-        if (fd >= 0)
-            (void)close(fd);
+    if (vsrc_fd < 0 || fstat(vsrc_fd, &vst) != 0 || !S_ISREG(vst.st_mode)) {
+        if (vsrc_fd >= 0)
+            (void)close(vsrc_fd);
         act_copy(report->stage, sizeof(report->stage), "dlopen");
         act_copy(report->error, sizeof(report->error),
-                 "could not open and SHA3-hash a regular module artifact");
+                 "not a regular readable module artifact");
+        return false;
+    }
+
+    char vseal_err[200];
+    int fd = hotswap_sealed_image_from_fd(vsrc_fd, vseal_err, sizeof(vseal_err));
+    (void)close(vsrc_fd);
+    if (fd < 0) {
+        act_copy(report->stage, sizeof(report->stage), "seal");
+        act_copy(report->error, sizeof(report->error), vseal_err);
+        return false;
+    }
+
+    {
+        struct hotswap_elf_facts vfacts;
+        char vprobe_err[200];
+        if (!hotswap_elf_probe_fd(fd, &vfacts, vprobe_err, sizeof(vprobe_err))) {
+            (void)close(fd);
+            act_copy(report->stage, sizeof(report->stage), "shape");
+            act_copy(report->error, sizeof(report->error), vprobe_err);
+            return false;
+        }
+        if (vfacts.init_array_entries >
+                ZCL_HOTSWAP_ELF_PROBE_CLEAN_INIT_ARRAY_ENTRIES ||
+            vfacts.preinit_array_entries > 0) {
+            (void)close(fd);
+            act_copy(report->stage, sizeof(report->stage), "shape");
+            snprintf(report->error, sizeof(report->error),
+                     "module runs its own code at dlopen "
+                     "(.init_array %zu, baseline %zu; .preinit_array %zu)",
+                     vfacts.init_array_entries,
+                     ZCL_HOTSWAP_ELF_PROBE_CLEAN_INIT_ARRAY_ENTRIES,
+                     vfacts.preinit_array_entries);
+            return false;
+        }
+    }
+
+    if (!hotswap_artifact_sha3_fd(fd, report->artifact_sha3_256)) {
+        (void)close(fd);
+        act_copy(report->stage, sizeof(report->stage), "dlopen");
+        act_copy(report->error, sizeof(report->error),
+                 "could not SHA3-hash the sealed module image");
         return false;
     }
     char vpinned[64];

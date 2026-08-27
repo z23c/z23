@@ -1,0 +1,504 @@
+/* THE DEVICE-DRIVER CONTRACT — what a hot-swap module .so may IMPORT.
+ *
+ * Consumer must define:
+ *   HOTSWAP_MODULE_IMPORT(symbol, group)
+ *
+ * symbol  A dynamic symbol name EXACTLY as it appears in a module's `.dynsym`
+ *         UNDEFINED set, with any `@GLIBC_x.y.z` version suffix REMOVED. The
+ *         version half is deliberately not part of the contract: a glibc bump
+ *         renames `strtol@GLIBC_2.17` to `__isoc23_strtol@GLIBC_2.38` and that
+ *         is a toolchain fact, not a widening of reach. The NAME is what says
+ *         what the module can touch.
+ * group   One of the closed set below. It is the REASON the symbol is allowed;
+ *         a row with no defensible group does not belong in this file.
+ *
+ * ── WHY THIS FILE EXISTS ───────────────────────────────────────────────────
+ * A Tier-2 hot-swap module is a .so compiled from ONE shape-leaf TU and
+ * dlopen'd into the LIVE node's address space. Every other body it calls is
+ * resolved out of the resident image at load time. That makes the module's
+ * UNDEFINED symbol set its complete, mechanically-derivable interface to the
+ * node — a device-driver contract in the literal sense: the set of node
+ * entry points a mounted module can reach.
+ *
+ * That contract already existed in practice and was enforced NOWHERE. Nothing
+ * stopped a controller edit from adding one `#include` and quietly acquiring
+ * a call into the reducer, the coins view, the wallet spend path, or the
+ * chain state — the module would still compile, still pass every existing
+ * hot-swap gate (they check the TU's PATH, its leaves' READY/read-only spec,
+ * its mutable statics, and the sealed-core pin — none of them look at what it
+ * LINKS AGAINST), and still mount. The reach would grow with no diff a
+ * reviewer could see as a reach change, because the change is one #include
+ * and a call.
+ *
+ * So the import set is declared here and gated by
+ * `check-hotswap-module-imports` (tools/lint/check_hotswap_module_imports.sh),
+ * which reads the UNDEFINED symbols out of every built module .so and refuses
+ * any name absent from this file. Widening the contract is now an explicit,
+ * reviewable edit to a data file with a rationale column.
+ *
+ * ── WHAT THIS FILE IS NOT ──────────────────────────────────────────────────
+ * It is NOT an authority and NOT a runtime admission input. It is a BUILD-TIME
+ * lint contract over artifacts a developer produced. An attacker who can write
+ * a module .so can also write this file. What it buys is the thing an attacker
+ * model cannot give you: a mounted module's reach cannot grow by accident, and
+ * it cannot grow deliberately without a line in a reviewed data file saying so.
+ * Runtime admission stays where it is — `hotswap_module_admit()`, the sealed
+ * `core_seal_root` pin, the fd-pinned artifact digest.
+ *
+ * ── THE GROUPS, AND WHICH ONE TO ACTUALLY THINK ABOUT ─────────────────────
+ *   TOOLCHAIN     Compiler/linker-emitted weak hooks the module never wrote:
+ *                 `__gmon_start__`, `_ITM_*TMCloneTable`, `__cxa_finalize`.
+ *                 Present in every -shared object gcc emits. Zero reach.
+ *   LIBC          Plain glibc: allocation, string/mem, stdio on a FILE the
+ *                 module owns, `getenv`, `qsort`, `_chk` fortify variants,
+ *                 `__stack_chk_fail`. Reach into the NODE: none — a module
+ *                 that calls `malloc` learns nothing about the chain. These
+ *                 rows exist so the gate has a complete picture, not because
+ *                 anybody must approve `strlen`.
+ *   JSON          The in-tree JSON document helpers (`json_*`,
+ *                 `zcl_json_value_to_body`). A command leaf's whole output is
+ *                 a JSON document, so this is the module's RETURN PATH. Pure
+ *                 value manipulation over a caller-owned tree; it reaches no
+ *                 node state.
+ *   LOG           `zcl_log_emit_at`, `zcl_log_level_get`, `zcl_build_commit`.
+ *                 Observability and build identity. Write-only into the log
+ *                 stream; reads nothing back out of the node.
+ *
+ *   Everything below this line is a REAL NODE ENTRY POINT, and this is the
+ *   part a reviewer has to think about. Each of these resolves to resident
+ *   node code, so each is a door a mounted module can walk through. The test
+ *   for a NEW row is not "does it link" — it is: could a swapped generation
+ *   calling this MISREPORT or MUTATE something a reader trusts?
+ *
+ *   NODE_COMMAND  Native-command plumbing: the RPC bridge (`node_rpc_call*`,
+ *                 `zcl_native_bridge_*`), the typed argument builder
+ *                 (`rpc_arg_builder_*`), reply/result construction
+ *                 (`zcl_command_reply_*`, `zcl_result_make`), the datadir and
+ *                 stdin accessors, and the per-controller `wnh_*`/`shf_*`
+ *                 failure helpers. This is HOW a leaf is invoked and how it
+ *                 answers. `node_rpc_call` is the widest door in the file: it
+ *                 dispatches an arbitrary RPC method by NAME, so the effect
+ *                 ceiling of this group is the effect ceiling of the RPC
+ *                 surface, not of the leaf. It is allowed because the leaf
+ *                 that reaches it is itself gated READY + EFFECT_READ by
+ *                 config/hotswap_swappable.def, and because removing it would
+ *                 mean no controller could be hot-swapped at all.
+ *   NODE_STATUS   Read-only projections and their formatters: status/brief
+ *                 readiness facts, blocker summaries and causal priority, boot
+ *                 stage, postmortem listing, peer-incident derivation,
+ *                 Prometheus metric rendering, self-heal counters, sync
+ *                 benchmark receipts, agent audit/broker renderers. These
+ *                 OBSERVE. A swapped generation here can misreport what the
+ *                 operator sees — which is exactly why the leaves that use
+ *                 them are read-only and why block/transaction rendering is
+ *                 denied outright in config/hotswap_denied_leaves.def.
+ *   NODE_DB       The node database: `node_db_open_runtime`/`_close`, the
+ *                 read-only wrappers (`zcl_native_node_db_*_readonly`), the
+ *                 app-domain row accessors (`db_*`), `store_ensure_schema`,
+ *                 and three raw `sqlite3_*` entry points. THIS GROUP IS NOT
+ *                 UNIFORMLY READ-ONLY: `db_*_save`, `db_shop_want_mark_*`,
+ *                 `db_shop_fulfill_mark_withdrawn` and
+ *                 `db_shop_want_set_review_state` WRITE. They are here because
+ *                 they are what the shop/market controller TUs already import;
+ *                 the read-only property is enforced one level up, by the
+ *                 leaf-spec gates, not by this list. Adding a row here that
+ *                 mutates CONSENSUS state (coins, chain, reducer) would be a
+ *                 different thing entirely and must be refused.
+ *   NODE_UTIL    Stateless helpers with no node state behind them: hex and
+ *                 fixed-point codecs, `arith_uint256_get_hex`, `memory_cleanse`,
+ *                 the monotonic/wall clocks, `path_check_url_arg`,
+ *                 `chain_params_select` (selects a compiled-in parameter
+ *                 table; it does not change chain state), SHA3-256, Ed25519
+ *                 keypair, Sapling address decode, `thread_registry_spawn`.
+ *   NODE_HOTSWAP  The module's own scaffolding: the service-handle
+ *                 acquire/release/generation triple a module uses to pin a
+ *                 resident service across a swap, the resident-policy dispatch
+ *                 notes, and `zcl_alloc_fault_should_fail` (the allocation
+ *                 fault-injection hook, dev builds only).
+ *   NODE_APP     App-domain read/verify services behind swappable controller
+ *                 leaves: shop want/fulfill sealing and verification, market
+ *                 moderation and purchase views, ROM fetch/seed/journal, VCS
+ *                 package manifest/index/attestation/reward, ZNAM/ZSLP asset
+ *                 views, onion identity/service accessors, principal and authz
+ *                 role tables, wallet recovery status. Same warning as
+ *                 NODE_DB: a handful of these are not pure readers
+ *                 (`rom_fetch_download*`, `rom_seed_policy_set_enabled`,
+ *                 `onion_identity_ensure`, `wallet_recovery_run`,
+ *                 `auth_login_verify`). They are recorded because modules
+ *                 built from those TUs really do import them; the leaf-effect
+ *                 gates, not this file, keep them off a swappable leaf.
+ *
+ * ── HOW THE INITIAL CONTENTS WERE DERIVED ──────────────────────────────────
+ * Mechanically, from the artifacts — not from anyone's idea of what a module
+ * ought to need:
+ *
+ *   for f in build/hotswap/*.so; do nm -D --undefined-only "$f"; done \
+ *     | awk '{print $NF}' | sed 's/@.*$//' | LC_ALL=C sort -u
+ *
+ * over every module .so present (93 artifacts spanning several build
+ * generations), which is why the file starts truthful and the gate is green
+ * on day one. It is a CEILING, not a wish list: shrinking it is always safe,
+ * growing it is the reviewed act.
+ *
+ * ── ADDING A ROW ───────────────────────────────────────────────────────────
+ * Append it under its group, keep the group blocks sorted, and say in the
+ * commit message which door you opened and why the leaf behind it still
+ * cannot misreport or mutate anything a reader trusts. If the honest answer
+ * is "it can", the fix is to not import it — move the call into the resident
+ * and reach it through an existing NODE_COMMAND door.
+ *
+ * Keep this DATA ONLY (no C tokens beyond the macro invocations). */
+
+/* ── TOOLCHAIN ─────────────────────────────────────────────────────────────
+ * Emitted by gcc/ld into every -shared object; weak-undefined, resolved to
+ * nothing when absent. Nobody wrote these calls and they reach no node state. */
+HOTSWAP_MODULE_IMPORT("_ITM_deregisterTMCloneTable", "TOOLCHAIN")
+HOTSWAP_MODULE_IMPORT("_ITM_registerTMCloneTable", "TOOLCHAIN")
+HOTSWAP_MODULE_IMPORT("__cxa_finalize", "TOOLCHAIN")
+HOTSWAP_MODULE_IMPORT("__gmon_start__", "TOOLCHAIN")
+
+/* ── LIBC ──────────────────────────────────────────────────────────────────
+ * Plain glibc. Allocation, string/memory, stdio over a FILE the module opened
+ * itself, environment lookup, sorting, and the fortify (`_chk`) / stack-guard
+ * variants gcc substitutes at -D_FORTIFY_SOURCE. Zero reach into node state:
+ * a module that calls `strlen` learns nothing about the chain. Listed so the
+ * gate can see a module's WHOLE import set, not because `memcpy` needs a
+ * reviewer. */
+HOTSWAP_MODULE_IMPORT("__ctype_b_loc", "LIBC")
+HOTSWAP_MODULE_IMPORT("__errno_location", "LIBC")
+HOTSWAP_MODULE_IMPORT("__fprintf_chk", "LIBC")
+HOTSWAP_MODULE_IMPORT("__isoc23_strtol", "LIBC")
+HOTSWAP_MODULE_IMPORT("__isoc23_strtoll", "LIBC")
+HOTSWAP_MODULE_IMPORT("__isoc23_strtoull", "LIBC")
+HOTSWAP_MODULE_IMPORT("__memcpy_chk", "LIBC")
+HOTSWAP_MODULE_IMPORT("__snprintf_chk", "LIBC")
+HOTSWAP_MODULE_IMPORT("__stack_chk_fail", "LIBC")
+HOTSWAP_MODULE_IMPORT("__vsnprintf_chk", "LIBC")
+HOTSWAP_MODULE_IMPORT("calloc", "LIBC")
+HOTSWAP_MODULE_IMPORT("close", "LIBC")
+HOTSWAP_MODULE_IMPORT("closedir", "LIBC")
+HOTSWAP_MODULE_IMPORT("fclose", "LIBC")
+HOTSWAP_MODULE_IMPORT("feof", "LIBC")
+HOTSWAP_MODULE_IMPORT("fgetc", "LIBC")
+HOTSWAP_MODULE_IMPORT("fopen", "LIBC")
+HOTSWAP_MODULE_IMPORT("fread", "LIBC")
+HOTSWAP_MODULE_IMPORT("free", "LIBC")
+HOTSWAP_MODULE_IMPORT("fstat", "LIBC")
+HOTSWAP_MODULE_IMPORT("getenv", "LIBC")
+HOTSWAP_MODULE_IMPORT("lstat", "LIBC")
+HOTSWAP_MODULE_IMPORT("malloc", "LIBC")
+HOTSWAP_MODULE_IMPORT("memcmp", "LIBC")
+HOTSWAP_MODULE_IMPORT("memcpy", "LIBC")
+HOTSWAP_MODULE_IMPORT("memset", "LIBC")
+HOTSWAP_MODULE_IMPORT("open", "LIBC")
+HOTSWAP_MODULE_IMPORT("opendir", "LIBC")
+HOTSWAP_MODULE_IMPORT("pthread_join", "LIBC")
+HOTSWAP_MODULE_IMPORT("qsort", "LIBC")
+HOTSWAP_MODULE_IMPORT("read", "LIBC")
+HOTSWAP_MODULE_IMPORT("readdir", "LIBC")
+HOTSWAP_MODULE_IMPORT("snprintf", "LIBC")
+HOTSWAP_MODULE_IMPORT("stat", "LIBC")
+HOTSWAP_MODULE_IMPORT("stderr", "LIBC")
+HOTSWAP_MODULE_IMPORT("strchr", "LIBC")
+HOTSWAP_MODULE_IMPORT("strcmp", "LIBC")
+HOTSWAP_MODULE_IMPORT("strdup", "LIBC")
+HOTSWAP_MODULE_IMPORT("strerror", "LIBC")
+HOTSWAP_MODULE_IMPORT("strlen", "LIBC")
+HOTSWAP_MODULE_IMPORT("strncmp", "LIBC")
+HOTSWAP_MODULE_IMPORT("strnlen", "LIBC")
+HOTSWAP_MODULE_IMPORT("strstr", "LIBC")
+HOTSWAP_MODULE_IMPORT("strtod", "LIBC")
+HOTSWAP_MODULE_IMPORT("strtok", "LIBC")
+
+/* ── JSON ──────────────────────────────────────────────────────────────────
+ * The in-tree JSON document helpers. A command leaf's entire output is a JSON
+ * document, so this group is the module's RETURN PATH. Pure value manipulation
+ * over a tree the caller owns; touches no node state. */
+HOTSWAP_MODULE_IMPORT("json_at", "JSON")
+HOTSWAP_MODULE_IMPORT("json_copy", "JSON")
+HOTSWAP_MODULE_IMPORT("json_free", "JSON")
+HOTSWAP_MODULE_IMPORT("json_get", "JSON")
+HOTSWAP_MODULE_IMPORT("json_get_bool", "JSON")
+HOTSWAP_MODULE_IMPORT("json_get_int", "JSON")
+HOTSWAP_MODULE_IMPORT("json_get_real", "JSON")
+HOTSWAP_MODULE_IMPORT("json_get_str", "JSON")
+HOTSWAP_MODULE_IMPORT("json_init", "JSON")
+HOTSWAP_MODULE_IMPORT("json_is_null", "JSON")
+HOTSWAP_MODULE_IMPORT("json_push_back", "JSON")
+HOTSWAP_MODULE_IMPORT("json_push_kv", "JSON")
+HOTSWAP_MODULE_IMPORT("json_push_kv_bool", "JSON")
+HOTSWAP_MODULE_IMPORT("json_push_kv_int", "JSON")
+HOTSWAP_MODULE_IMPORT("json_push_kv_real", "JSON")
+HOTSWAP_MODULE_IMPORT("json_push_kv_str", "JSON")
+HOTSWAP_MODULE_IMPORT("json_read", "JSON")
+HOTSWAP_MODULE_IMPORT("json_set_array", "JSON")
+HOTSWAP_MODULE_IMPORT("json_set_bool", "JSON")
+HOTSWAP_MODULE_IMPORT("json_set_null", "JSON")
+HOTSWAP_MODULE_IMPORT("json_set_object", "JSON")
+HOTSWAP_MODULE_IMPORT("json_set_str", "JSON")
+HOTSWAP_MODULE_IMPORT("json_size", "JSON")
+HOTSWAP_MODULE_IMPORT("json_write", "JSON")
+HOTSWAP_MODULE_IMPORT("zcl_json_value_to_body", "JSON")
+
+/* ── LOG ───────────────────────────────────────────────────────────────────
+ * Observability and build identity. Write-only into the log stream plus one
+ * read of the configured level; nothing flows back out of the node. */
+HOTSWAP_MODULE_IMPORT("zcl_build_commit", "LOG")
+HOTSWAP_MODULE_IMPORT("zcl_log_emit_at", "LOG")
+HOTSWAP_MODULE_IMPORT("zcl_log_level_get", "LOG")
+
+/* ═══ NODE ENTRY POINTS — the reviewed part ════════════════════════════════
+ * Everything below resolves into the RESIDENT node image. Each row is a door
+ * a mounted module can walk through. See the group notes in the header. */
+
+/* ── NODE_COMMAND ──────────────────────────────────────────────────────────
+ * How a leaf is invoked and how it answers: the RPC bridge, the typed argument
+ * builder, reply/result construction, datadir + stdin accessors, and the
+ * per-controller failure helpers. `node_rpc_call` is the widest door here — it
+ * dispatches an arbitrary RPC method by NAME — and it is allowed only because
+ * the leaf reaching it is independently pinned READY + EFFECT_READ by
+ * config/hotswap_swappable.def. */
+HOTSWAP_MODULE_IMPORT("node_rpc_call", "NODE_COMMAND")
+HOTSWAP_MODULE_IMPORT("node_rpc_call_at_deadline", "NODE_COMMAND")
+HOTSWAP_MODULE_IMPORT("node_rpc_call_deadline", "NODE_COMMAND")
+HOTSWAP_MODULE_IMPORT("rpc_arg_builder_init", "NODE_COMMAND")
+HOTSWAP_MODULE_IMPORT("rpc_arg_builder_push_int", "NODE_COMMAND")
+HOTSWAP_MODULE_IMPORT("rpc_arg_builder_push_real", "NODE_COMMAND")
+HOTSWAP_MODULE_IMPORT("rpc_arg_builder_push_str", "NODE_COMMAND")
+HOTSWAP_MODULE_IMPORT("rpc_arg_builder_push_value", "NODE_COMMAND")
+HOTSWAP_MODULE_IMPORT("rpc_arg_builder_to_json", "NODE_COMMAND")
+HOTSWAP_MODULE_IMPORT("shf_fail", "NODE_COMMAND")
+HOTSWAP_MODULE_IMPORT("wnh_call_rpc", "NODE_COMMAND")
+HOTSWAP_MODULE_IMPORT("wnh_fail", "NODE_COMMAND")
+HOTSWAP_MODULE_IMPORT("zcl_command_authority_name", "NODE_COMMAND")
+HOTSWAP_MODULE_IMPORT("zcl_command_reply_add_next", "NODE_COMMAND")
+HOTSWAP_MODULE_IMPORT("zcl_command_reply_fail", "NODE_COMMAND")
+HOTSWAP_MODULE_IMPORT("zcl_native_bridge_ensure_rpc", "NODE_COMMAND")
+HOTSWAP_MODULE_IMPORT("zcl_native_bridge_run", "NODE_COMMAND")
+HOTSWAP_MODULE_IMPORT("zcl_native_command_datadir", "NODE_COMMAND")
+HOTSWAP_MODULE_IMPORT("zcl_native_input_was_stdin", "NODE_COMMAND")
+HOTSWAP_MODULE_IMPORT("zcl_result_make", "NODE_COMMAND")
+
+/* ── NODE_STATUS ───────────────────────────────────────────────────────────
+ * Read-only projections and their formatters. These OBSERVE. A swapped
+ * generation here can misreport what an operator sees, which is precisely why
+ * the leaves that use them are read-only and why chain block/transaction
+ * rendering is denied outright in config/hotswap_denied_leaves.def. */
+HOTSWAP_MODULE_IMPORT("agent_audit_render_json", "NODE_STATUS")
+HOTSWAP_MODULE_IMPORT("agent_broker_render_status_json", "NODE_STATUS")
+HOTSWAP_MODULE_IMPORT("agent_runtime_context_datadir", "NODE_STATUS")
+HOTSWAP_MODULE_IMPORT("blocker_causal_priority", "NODE_STATUS")
+HOTSWAP_MODULE_IMPORT("boot_stage_current", "NODE_STATUS")
+HOTSWAP_MODULE_IMPORT("diag_datadir", "NODE_STATUS")
+HOTSWAP_MODULE_IMPORT("metrics_prometheus_consensus_report_json", "NODE_STATUS")
+HOTSWAP_MODULE_IMPORT("metrics_prometheus_render_prometheus", "NODE_STATUS")
+HOTSWAP_MODULE_IMPORT("node_status_reason_operator_needed", "NODE_STATUS")
+HOTSWAP_MODULE_IMPORT("node_status_reason_status", "NODE_STATUS")
+HOTSWAP_MODULE_IMPORT("node_status_reason_summary", "NODE_STATUS")
+HOTSWAP_MODULE_IMPORT("peer_incidents_from_dumpstate_result_json", "NODE_STATUS")
+HOTSWAP_MODULE_IMPORT("postmortem_list", "NODE_STATUS")
+HOTSWAP_MODULE_IMPORT("process_block_self_heal_scan_depth_limit", "NODE_STATUS")
+HOTSWAP_MODULE_IMPORT("process_block_self_heal_stats_snapshot", "NODE_STATUS")
+HOTSWAP_MODULE_IMPORT("status_brief_readiness_facts_read", "NODE_STATUS")
+HOTSWAP_MODULE_IMPORT("status_build_blocker_summary", "NODE_STATUS")
+HOTSWAP_MODULE_IMPORT("status_parse_rpc_json", "NODE_STATUS")
+HOTSWAP_MODULE_IMPORT("status_peer_array_is_valid", "NODE_STATUS")
+HOTSWAP_MODULE_IMPORT("status_peer_survey", "NODE_STATUS")
+HOTSWAP_MODULE_IMPORT("status_push_blocker_summary", "NODE_STATUS")
+HOTSWAP_MODULE_IMPORT("status_push_bool_if_known", "NODE_STATUS")
+HOTSWAP_MODULE_IMPORT("status_push_dumpstate_json", "NODE_STATUS")
+HOTSWAP_MODULE_IMPORT("status_push_int_if_known", "NODE_STATUS")
+HOTSWAP_MODULE_IMPORT("status_push_json_error", "NODE_STATUS")
+HOTSWAP_MODULE_IMPORT("status_push_rpc_json", "NODE_STATUS")
+HOTSWAP_MODULE_IMPORT("status_push_rpc_parse_error", "NODE_STATUS")
+HOTSWAP_MODULE_IMPORT("sync_benchmark_init", "NODE_STATUS")
+HOTSWAP_MODULE_IMPORT("sync_benchmark_note_downloaded", "NODE_STATUS")
+HOTSWAP_MODULE_IMPORT("sync_benchmark_note_reused", "NODE_STATUS")
+HOTSWAP_MODULE_IMPORT("sync_benchmark_phase_begin", "NODE_STATUS")
+HOTSWAP_MODULE_IMPORT("sync_benchmark_phase_end", "NODE_STATUS")
+HOTSWAP_MODULE_IMPORT("sync_benchmark_set_artifact", "NODE_STATUS")
+HOTSWAP_MODULE_IMPORT("sync_benchmark_write_receipt", "NODE_STATUS")
+HOTSWAP_MODULE_IMPORT("zcl_native_status_brief_body", "NODE_STATUS")
+HOTSWAP_MODULE_IMPORT("zcl_postmortem_default_dir", "NODE_STATUS")
+
+/* ── NODE_DB ───────────────────────────────────────────────────────────────
+ * The node database: open/close, the read-only wrappers, app-domain row
+ * accessors, schema ensure, and three raw sqlite3 entry points.
+ * NOT UNIFORMLY READ-ONLY — `db_*_save`, `db_shop_want_mark_cancelled`,
+ * `db_shop_fulfill_mark_withdrawn` and `db_shop_want_set_review_state` write.
+ * The read-only property is enforced one level up by the leaf-spec gates, not
+ * by this list. A future row that mutates CONSENSUS state (coins, chain,
+ * reducer) is a different kind of thing and must be refused here. */
+HOTSWAP_MODULE_IMPORT("app_runtime_node_db", "NODE_DB")
+HOTSWAP_MODULE_IMPORT("db_principal_count", "NODE_DB")
+HOTSWAP_MODULE_IMPORT("db_principal_find", "NODE_DB")
+HOTSWAP_MODULE_IMPORT("db_principal_list", "NODE_DB")
+HOTSWAP_MODULE_IMPORT("db_principal_save", "NODE_DB")
+HOTSWAP_MODULE_IMPORT("db_shop_fulfill_count_for_want", "NODE_DB")
+HOTSWAP_MODULE_IMPORT("db_shop_fulfill_find", "NODE_DB")
+HOTSWAP_MODULE_IMPORT("db_shop_fulfill_find_seller_nonce", "NODE_DB")
+HOTSWAP_MODULE_IMPORT("db_shop_fulfill_list_for_want", "NODE_DB")
+HOTSWAP_MODULE_IMPORT("db_shop_fulfill_mark_withdrawn", "NODE_DB")
+HOTSWAP_MODULE_IMPORT("db_shop_fulfill_save", "NODE_DB")
+HOTSWAP_MODULE_IMPORT("db_shop_want_find", "NODE_DB")
+HOTSWAP_MODULE_IMPORT("db_shop_want_list", "NODE_DB")
+HOTSWAP_MODULE_IMPORT("db_shop_want_mark_cancelled", "NODE_DB")
+HOTSWAP_MODULE_IMPORT("db_shop_want_save", "NODE_DB")
+HOTSWAP_MODULE_IMPORT("db_shop_want_set_review_state", "NODE_DB")
+HOTSWAP_MODULE_IMPORT("db_store_product_count", "NODE_DB")
+HOTSWAP_MODULE_IMPORT("db_znam_count", "NODE_DB")
+HOTSWAP_MODULE_IMPORT("db_znam_find_by_reg_txid", "NODE_DB")
+HOTSWAP_MODULE_IMPORT("db_znam_list", "NODE_DB")
+HOTSWAP_MODULE_IMPORT("db_zslp_asset_count", "NODE_DB")
+HOTSWAP_MODULE_IMPORT("db_zslp_asset_list", "NODE_DB")
+HOTSWAP_MODULE_IMPORT("db_zslp_asset_lookup", "NODE_DB")
+HOTSWAP_MODULE_IMPORT("node_db_close", "NODE_DB")
+HOTSWAP_MODULE_IMPORT("node_db_open_runtime", "NODE_DB")
+HOTSWAP_MODULE_IMPORT("node_db_schema_version", "NODE_DB")
+HOTSWAP_MODULE_IMPORT("sqlite3_finalize", "NODE_DB")
+HOTSWAP_MODULE_IMPORT("sqlite3_prepare_v2", "NODE_DB")
+HOTSWAP_MODULE_IMPORT("sqlite3_step", "NODE_DB")
+HOTSWAP_MODULE_IMPORT("store_ensure_schema", "NODE_DB")
+HOTSWAP_MODULE_IMPORT("zcl_native_node_db_close_readonly", "NODE_DB")
+HOTSWAP_MODULE_IMPORT("zcl_native_node_db_open_readonly", "NODE_DB")
+HOTSWAP_MODULE_IMPORT("zcl_native_node_db_require_readonly", "NODE_DB")
+
+/* ── NODE_UTIL ─────────────────────────────────────────────────────────────
+ * Stateless helpers with no node state behind them: hex/fixed-point codecs,
+ * uint256 hex rendering, `memory_cleanse`, the monotonic and wall clocks, URL
+ * argument validation, compiled-in chain-parameter selection (it selects a
+ * table; it does not change chain state), SHA3-256, Ed25519 keypair, Sapling
+ * address decode, and the thread-registry spawn wrapper. */
+HOTSWAP_MODULE_IMPORT("HexStr", "NODE_UTIL")
+HOTSWAP_MODULE_IMPORT("IsHex", "NODE_UTIL")
+HOTSWAP_MODULE_IMPORT("ParseFixedPoint", "NODE_UTIL")
+HOTSWAP_MODULE_IMPORT("ParseHex", "NODE_UTIL")
+HOTSWAP_MODULE_IMPORT("arith_uint256_get_hex", "NODE_UTIL")
+HOTSWAP_MODULE_IMPORT("chain_params_select", "NODE_UTIL")
+HOTSWAP_MODULE_IMPORT("clock_now_monotonic_ns", "NODE_UTIL")
+HOTSWAP_MODULE_IMPORT("clock_now_wall_ms", "NODE_UTIL")
+HOTSWAP_MODULE_IMPORT("memory_cleanse", "NODE_UTIL")
+HOTSWAP_MODULE_IMPORT("path_check_url_arg", "NODE_UTIL")
+HOTSWAP_MODULE_IMPORT("sapling_decode_payment_address", "NODE_UTIL")
+HOTSWAP_MODULE_IMPORT("sha3_256_finalize", "NODE_UTIL")
+HOTSWAP_MODULE_IMPORT("sha3_256_init", "NODE_UTIL")
+HOTSWAP_MODULE_IMPORT("sha3_256_write", "NODE_UTIL")
+HOTSWAP_MODULE_IMPORT("thread_registry_spawn", "NODE_UTIL")
+HOTSWAP_MODULE_IMPORT("zcl_ed25519_keypair", "NODE_UTIL")
+
+/* ── NODE_HOTSWAP ──────────────────────────────────────────────────────────
+ * The module's own scaffolding: the service-handle acquire/release/generation
+ * triple used to pin a resident service across a swap, the resident-policy
+ * dispatch notes, and the dev-only allocation fault-injection hook. */
+HOTSWAP_MODULE_IMPORT("zcl_alloc_fault_should_fail", "NODE_HOTSWAP")
+HOTSWAP_MODULE_IMPORT("zcl_hotswap_service_acquire", "NODE_HOTSWAP")
+HOTSWAP_MODULE_IMPORT("zcl_hotswap_service_generation", "NODE_HOTSWAP")
+HOTSWAP_MODULE_IMPORT("zcl_hotswap_service_release", "NODE_HOTSWAP")
+HOTSWAP_MODULE_IMPORT("zcl_native_policy_resident_booted", "NODE_HOTSWAP")
+HOTSWAP_MODULE_IMPORT("zcl_native_policy_resident_note_dispatch", "NODE_HOTSWAP")
+
+/* ── NODE_APP ──────────────────────────────────────────────────────────────
+ * App-domain read/verify services behind swappable controller leaves: shop
+ * want/fulfill sealing and verification, market moderation and purchase views,
+ * ROM fetch/seed/journal, VCS package manifest/index/attestation/reward,
+ * ZNAM/ZSLP asset views, onion identity and service accessors, principal and
+ * authz role tables, wallet recovery status.
+ * Same warning as NODE_DB: `rom_fetch_download*`, `rom_seed_policy_set_enabled`,
+ * `onion_identity_ensure`, `wallet_recovery_run` and `auth_login_verify` are
+ * not pure readers. They are recorded because modules built from those TUs
+ * really do import them; the leaf-effect gates, not this file, keep them off a
+ * swappable leaf. */
+HOTSWAP_MODULE_IMPORT("auth_login_challenge", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("auth_login_verify", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("authz_caps_for_role", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("authz_ceiling_for_role", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("market_moderation_profile_load", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("market_moderation_profile_string", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("market_moderation_view_service_builtin", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("market_purchase_view_service_builtin", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("onion_directory_extra_apps_csv", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("onion_identity_ensure", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("onion_service_get_address", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("onion_service_handle_request", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("principal_role_from_name", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("principal_role_name", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("principal_status_name", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("rom_fetch_download", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("rom_fetch_download_parallel", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("rom_fetch_download_verified", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("rom_fetch_download_verified_parallel", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("rom_fetch_dump_state_json", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("rom_fetch_get_manifest", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("rom_fetch_manifest_sane", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("rom_fetch_status_snapshot", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("rom_journal_close", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("rom_journal_is_done", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("rom_journal_open", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("rom_seed_enabled", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("rom_seed_ledger_artifact_stats", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("rom_seed_ledger_distinct_artifacts", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("rom_seed_ledger_global", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("rom_seed_ledger_row_count", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("rom_seed_list", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("rom_seed_policy_dump_state_json", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("rom_seed_policy_set_enabled", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("rom_seed_scan_datadir", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("shf_datadir", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("shf_derive_pubkey", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("shf_nonzero", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("shf_now", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("shf_open_readonly", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("shf_open_write", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("shf_optional_id", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("shf_required_id", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("shf_resolve_profile", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("shf_seller_secret", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("shop_announce_directory_app", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("shop_fulfill_artifact_verify", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("shop_fulfill_encode", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("shop_fulfill_error_string", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("shop_fulfill_receipt_kind_name", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("shop_fulfill_receipt_verify", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("shop_fulfill_root", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("shop_fulfill_seal", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("shop_fulfill_verify", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("shop_internal_path_join", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("shop_internal_read_identity", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("shop_probe_wallet_posture", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("shop_provision_products_json", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("shop_reputation_view_service_builtin", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("shop_status_view_service_builtin", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("shop_tor_real_build_linked", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("shop_wallet_posture_name", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("shop_want_error_string", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("shop_want_root", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("shop_want_seal", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("shop_want_verify", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("shop_want_view_service_builtin", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("vcs_package_attest_parse", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("vcs_package_attest_verify", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("vcs_package_chunk_hash", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("vcs_package_deps_parse_meta", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("vcs_package_index_at", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("vcs_package_index_build", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("vcs_package_index_count", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("vcs_package_index_find_root", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("vcs_package_index_free", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("vcs_package_manifest_free", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("vcs_package_manifest_parse", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("vcs_package_manifest_root", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("vcs_package_publish_load_releases", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("vcs_package_release_id", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("vcs_package_release_parse", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("vcs_package_release_verify", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("vcs_package_reproduce_scan", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("vcs_package_verify_chunk", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("vcs_reward_contributor_totals", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("vcs_reward_ledger_free", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("vcs_reward_ledger_load", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("wallet_money_scope_valid", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("wallet_recovery_run", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("wallet_recovery_status", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("wallet_recovery_status_preflight", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("zcl_shop_want_view_push_json", "NODE_APP")
+HOTSWAP_MODULE_IMPORT("zcl_shop_want_view_render", "NODE_APP")

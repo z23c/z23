@@ -485,6 +485,61 @@ assert green).
   then recovers — never writing into `lib/hotswap/`, because a fixture living
   briefly in the real tree races the other gates under `make -j24 lint`.
 
+- **Gate #54: `check-hotswap-module-imports`** (HARD) — a Tier-2 hot-swap
+  module is a `.so` compiled from ONE shape-leaf TU and `dlopen`'d into the
+  **live** node's address space, so every body it does not define itself is
+  resolved out of the resident image at load time. That makes the module's
+  UNDEFINED dynamic-symbol set its complete, mechanically-derivable interface
+  to the node — a device-driver contract in the literal sense. It existed in
+  practice and was enforced nowhere. None of the sibling gates looks at what a
+  module *links against*: Gate #52 checks the sealed-core pin, Gate #53 checks
+  that admission re-derives its facts from the artifact,
+  `check-hotswap-swappable-shape` checks the TU's path and its leaves'
+  READY/read-only spec, `check-hotswap-static-state` checks mutable file-scope
+  statics. So a controller edit that added one `#include` and one call could
+  acquire a door into the reducer, the coins view, the wallet spend path or
+  chain state, pass every one of them, and mount — with no diff a reviewer
+  could read as a reach change, because the change *is* an `#include`. The
+  declared contract is `config/hotswap_module_imports.def`: 282 rows derived
+  mechanically from the real undefined-symbol union across the 93 built module
+  artifacts (`nm -D --undefined-only`, `@GLIBC_x.y.z` version suffix stripped —
+  a glibc bump renames a symbol without widening reach), each row carrying the
+  group that says *why* it is allowed. Four groups are noise a reviewer should
+  not have to approve — `TOOLCHAIN` (gcc's weak `__gmon_start__`/`_ITM_*`
+  hooks), `LIBC`, `JSON` (the leaf's return path) and `LOG`. The remaining six
+  are real node entry points and are the part to think about: `NODE_COMMAND`
+  (the RPC bridge, argument builder and reply construction — `node_rpc_call`
+  dispatches an arbitrary method by NAME and is the widest door in the file,
+  allowed only because the leaf reaching it is independently pinned
+  READY + `EFFECT_READ`), `NODE_STATUS`, `NODE_DB`, `NODE_UTIL`,
+  `NODE_HOTSWAP` and `NODE_APP`. The `.def` is explicit that `NODE_DB` and
+  `NODE_APP` are **not** uniformly read-only (`db_*_save`,
+  `rom_seed_policy_set_enabled`, `wallet_recovery_run`, `auth_login_verify`
+  and friends write) — the read-only property is enforced one level up by the
+  leaf-spec gates, and a future row that mutates *consensus* state must be
+  refused outright. The list is a CEILING, not a wish list: shrinking it is
+  always safe, growing it is the reviewed act. Be precise about what this
+  buys: it is a build-time lint over developer-produced artifacts, not a
+  runtime authority — an attacker who can write the `.so` can write the
+  `.def` too. What it enforces is that a mounted module's reach cannot grow by
+  accident, and cannot grow deliberately without a line in a reviewed data
+  file saying so. Zero modules is never a pass: the contract leg (file parses,
+  ≥100 rows, every row classified, no duplicates) is fail-closed and needs no
+  build, a `build/hotswap` that **exists and holds no `.so`** is FATAL (a
+  producer that ran and emitted nothing is the hollow-scan shape), and a
+  `build/hotswap` that was **never produced** prints `UNOBSERVED` — exit 0 but
+  the word OK is never printed for the artifact leg, because making a fresh
+  clone red is how a gate gets deleted and the invariant goes back to being
+  enforced nowhere. `--selftest` compiles its own clean module plus a
+  violating one into a scratch sandbox, mirrors the real artifacts in beside
+  them, and asserts the gate trips naming both module and symbol and then
+  recovers — never writing into `build/hotswap`, because a fixture living
+  briefly in the real tree races the other gates under `make -j24 lint` and a
+  concurrent build would try to consume it. Two further selftest legs prove
+  the sandbox override is refused without the selftest marker and refused for
+  any path outside the scratch root, so a stray environment variable can never
+  redirect a real `make lint` scan.
+
 - **Gate #48: `check-privileged-transition-receipt`** (RATCHET — Law 7, OS-A1) —
   every native command leaf whose spec is `ZCL_COMMAND_AUTH_OWNER` **and** effect
   `ZCL_COMMAND_EFFECT_MUTATE`/`ZCL_COMMAND_EFFECT_DESTRUCTIVE` is a candidate
@@ -1033,6 +1088,7 @@ add/remove a gate.
 - `check-hotswap-swappable-shape`
 - `check-hotswap-candidates-ledger`
 - `check-hotswap-package-receipt-is-not-authority`
+- `check-hotswap-module-imports`
 - `check-release-no-dev-symbols`
 - `check-vcs-no-git`
 - `check-vcs-no-sha1`
