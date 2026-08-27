@@ -51,6 +51,34 @@ static int64_t g_restart_version = 1;
 static struct block_index *g_repair_index;
 static struct disk_block_pos g_repair_position;
 
+static int test_bg_validation_owns_datadir(void)
+{
+    int failures = 0;
+    char dir[512];
+    test_make_tmpdir(dir, sizeof(dir), "bg_validation", "datadir_owner");
+
+    TEST("bg_validation: worker owns the caller's datadir bytes") {
+        char caller_path[512];
+        snprintf(caller_path, sizeof(caller_path), "%s", dir);
+        struct bg_validation_service svc;
+        bg_validation_init(&svc, NULL, NULL, caller_path, NULL);
+        memset(caller_path, 0xA5, sizeof(caller_path));
+        ASSERT(svc.datadir == svc.datadir_storage);
+        ASSERT(strcmp(svc.datadir, dir) == 0);
+
+        char oversized[sizeof(svc.datadir_storage) + 1u];
+        memset(oversized, 'x', sizeof(oversized) - 1u);
+        oversized[sizeof(oversized) - 1u] = '\0';
+        bg_validation_init(&svc, NULL, NULL, oversized, NULL);
+        ASSERT(svc.datadir == NULL);
+        ASSERT(svc.datadir_storage[0] == '\0');
+        ASSERT(!bg_validation_start(&svc));
+        PASS();
+    } _test_next:;
+    test_rm_rf(dir);
+    return failures;
+}
+
 static bool validation_reorgs_then_fails(
     const struct block *block, struct block_index *index, const char *datadir,
     const struct chain_params *params, int num_workers,
@@ -714,6 +742,7 @@ static int test_bg_validation_authority_requires_complete_coverage(void)
 int test_bg_validation_reverify(void)
 {
     int failures = 0;
+    failures += test_bg_validation_owns_datadir();
     failures += test_bg_validation_phgr13_verdict_is_terminal();
     failures += test_bg_validation_reverify_healthy_advances();
     failures += test_bg_validation_reverify_failure_raises_blocker();

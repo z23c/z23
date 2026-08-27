@@ -100,9 +100,34 @@ The final lint and cold registered suite completed at `2026-08-27T11:00:49Z`
 parameter-file-heavy groups and reported 20 explicit stress/live-fixture skip
 markers; every eligible group passed without an unobserved environment.
 
-## Remaining acceptance
+## Fleet acceptance and live-path repair
 
-The committed source still requires an immutable candidate build, process
-qualification on each host, and four-way verified-tip agreement. Node 4
-requires copy-first protection before its one-way schema migration. No wallet
-or canonical database surgery is part of this procedure.
+At `2026-08-27T12:47:00Z` (`2026-08-27T08:47:00-04:00`), all four canonical
+services were active, reported `synced=yes`, and held the same immutable daemon
+bytes (`sha256:eb59b4ae7948739f1259e103f81cb8a82b4d0654c478c82498c638ef8e22d0f2`).
+The processes reported source identity
+`6b7f7106db1f2d75db685bf4085c315494c24955ff6d2bc89cc23481183be0da`
+and build commit `1db9879fb3c003887592cd9f667c9a6affa0db4a`. Nodes 1--3
+independently reported active height 3,230,860 and exact tip hash
+`00000a6e04cc073ea91705110cbed8520b0cc6a0d70ee6fd1d3c2db7e97cb22e`.
+Node 4 subsequently advanced through height 3,230,868 and announced verified
+height 3,230,869.
+
+Node 4's schema migration was preceded by a clean offline copy of its
+5,154,942,976-byte `node.db`. Source and copy both hashed to
+`dc80570815a0683057e31af5b30105c3e3d1fef596227c12444aee1453cb4f69`.
+The migrated process opened schema v75. Its receipt-less 942,141,440-byte
+projection required a real SQLite quick check on rotational storage; the check
+completed in 965,565 ms without a timeout or rollback.
+
+Live qualification exposed a separate background-validation lifetime defect.
+The boot adapter resolved the network datadir into a stack buffer, while the
+long-lived validation service retained that borrowed pointer. Stack reuse made
+body reads attempt `/blocks/...` or a corrupted-prefix path. The service now
+owns a bounded copy, refuses empty or oversized paths before starting, and a
+regression clobbers the caller buffer after initialization. Focused acceptance
+passed for `bg_validation_reverify` (1/1), `have_data_unreadable` (1/1), and
+the integrity selection (6/6), with zero failures or skips.
+
+Wallet policy remained unchanged and no custody operation or canonical
+database surgery was performed.

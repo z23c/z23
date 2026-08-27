@@ -75,15 +75,12 @@
 #include "sapling/bn254.h"
 #include "sapling/sapling_prover.h"
 #include "models/database.h"
-#include "adapters/outbound/persistence/bg_validation_store_sqlite.h"
 #include "ports/bg_validation_store_port.h"
 #include "jobs/reducer_frontier.h"           /* reducer_seed_floor_height_read */
 #include "storage/progress_store.h"          /* progress_store_db */
 #include "event/event.h"
 #include "platform/rng.h"
 #include "util/blocker.h"
-#include "util/hw_bench.h"
-#include "util/hw_profile.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -578,63 +575,11 @@ static void *bg_validation_thread(void *arg)
 
 /* ── Public API ──────────────────────────────────────────────── */
 
-void bg_validation_init(struct bg_validation_service *svc,
-                        struct main_state *ms,
-                        struct node_db *ndb,
-                        const char *datadir,
-                        const struct chain_params *params)
-{
-    memset(svc, 0, sizeof(*svc));
-    svc->ms = ms;
-    svc->ndb = ndb;
-    svc->datadir = datadir;
-    svc->params = params;
-    svc->thread_started = false;
-    atomic_store(&svc->stop_requested, false);
-
-    /* Bind the crash-resume cursor store to the (already-open) node DB.
-     * The sqlite adapter is the only code that names the DB for this
-     * subsystem; the cursor key/semantics are unchanged. */
-    bg_validation_store_sqlite_bind(ndb, &svc->progress_store);
-
-    /* Worker count + per-block script batch cap both come from the
-     * hw_profile organ (lib/util/src/hw_profile.c) — measured physical
-     * core count and measured RAM instead of ad hoc sysconf() calls
-     * duplicated in this file. Same clamps as before ([2,4] workers;
-     * batch capped at 10000 below 8 GiB, unlimited at/above it) — this is
-     * a re-source, not a behavior change, on any machine with >=8 physical
-     * cores (the clamp already dominated the old nproc/2 formula there).
-     * pread()-based disk I/O is fully thread-safe, so multiple workers
-     * can read blocks concurrently without the old FILE* cache races.
-     *
-     * hw_bench_verify_workers then refines the topology-derived worker
-     * count with a MEASURED random-read latency (lib/util/src/hw_bench.c):
-     * unchanged when unmeasured or on fast storage, scaled down (never
-     * below 1, never above the topology count) when the boot-time 4KB
-     * pread probe found slow/contended storage — fewer concurrent
-     * verify workers means less I/O thrashing on that class of disk. */
-    hw_profile_init(svc->datadir);
-    hw_bench_init(svc->datadir);
-    svc->num_workers =
-        hw_bench_verify_workers(hw_profile_verify_workers(hw_profile_physical_cores()));
-    svc->max_script_batch = hw_profile_script_batch_cap(hw_profile_ram_bytes());
-
-    atomic_store(&svc->progress.state, BG_VALIDATION_IDLE);
-    atomic_store(&svc->progress.verified_height, -1);
-    atomic_store(&svc->progress.chain_height, 0);
-    atomic_store(&svc->progress.sigs_verified, 0);
-    atomic_store(&svc->progress.proofs_verified, 0);
-    atomic_store(&svc->progress.blocks_per_sec, 0);
-    atomic_store(&svc->progress.reverify_active, false);
-    atomic_store(&svc->progress.reverify_passes, 0);
-    atomic_store(&svc->progress.reverify_fails, 0);
-    atomic_store(&svc->progress.reverify_height, 0);
-}
-
 bool bg_validation_start(struct bg_validation_service *svc)
 {
-    if (!svc || svc->thread_started)
-        LOG_FAIL("bg_validation", "bg_validation_start: null svc or thread already started");
+    if (!svc || !svc->ms || !svc->datadir || svc->thread_started)
+        LOG_FAIL("bg_validation",
+                 "bg_validation_start: invalid svc/ms/datadir or thread already started");
 
     int chain_h = active_chain_height(&svc->ms->chain_active);
     /* Safety check: verify active_chain has valid entries at h=0 and h=1.
