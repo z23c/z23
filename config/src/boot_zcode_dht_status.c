@@ -5,6 +5,7 @@
 
 #include "base/hex.h"
 #include "config/boot_zcode_dht_chain.h"
+#include "config/boot_zcode_dht_frame_auth.h"
 #include "config/boot_zcode_dht_reachability.h"
 #include "json/json.h"
 
@@ -74,6 +75,12 @@ void boot_zcode_dht_status_json(
                      (int64_t)status.frames_rejected[i]);
   json_push_kv(out, "frames_rejected", &rejected);
   json_free(&rejected);
+  /* Frames this composition layer dropped without ever turning into
+   * scoring evidence (service absent/disabled/stale/sessionless). Kept
+   * beside frames_rejected because the two populations are disjoint:
+   * counted rejections have a live service behind them; these do not. */
+  json_push_kv_int(out, "frames_dropped_local",
+                   (int64_t)boot_zcode_dht_frame_auth_local_drops());
   json_push_kv_int(out, "find_node_received",
                    (int64_t)status.find_node_received);
   json_push_kv_int(out, "nodes_received", (int64_t)status.nodes_received);
