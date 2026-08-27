@@ -52,7 +52,7 @@ struct reachability_state {
   uint64_t index_generation;
   uint64_t cache_hits, rebuilds, lookups, misses;
   uint64_t requests_enqueued, request_deduplicated, request_overflow;
-  uint64_t backoff_skips, dials_queued, dial_rejected;
+  uint64_t backoff_skips, backoff_full, dials_queued, dial_rejected;
 };
 
 static zcl_mutex_t g_reach_lock;
@@ -294,8 +294,15 @@ void boot_zcode_dht_reachability_drive(
     if (!peers[i].authenticated)
       continue;
     reach_lock();
+    /* Ladder credit only exists to hand a re-dialable directory member
+     * one clean probe on reconnect; every dial below refuses ids outside
+     * the projection, so a ladder for a non-member is dead state that
+     * lets transient authenticated sessions consume the fixed pool a
+     * member's next disconnect-reconnect depends on. */
     struct reachability_backoff *backoff =
-        backoff_for_locked(peers[i].node_id);
+        entry_index_locked(peers[i].node_id) >= 0
+            ? backoff_for_locked(peers[i].node_id)
+            : NULL;
     if (backoff && !backoff->was_authenticated) {
       backoff->attempts = 0;
       backoff->next_mono = 0;
@@ -346,6 +353,11 @@ void boot_zcode_dht_reachability_drive(
       dial = true;
     } else if (at >= 0 && backoff) {
       g_reach.backoff_skips++;
+    } else if (at >= 0) {
+      /* A member that cannot get a pool slot is a starved dial, not a
+       * backed-off one; count it so exhaustion is observable instead of
+       * indistinguishable from quiet. */
+      g_reach.backoff_full++;
     }
     zcl_mutex_unlock(&g_reach_lock);
     if (!dial)
@@ -384,6 +396,7 @@ void boot_zcode_dht_reachability_dump_json(struct json_value *out) {
   json_push_kv_int(out, "request_overflow",
                    (int64_t)g_reach.request_overflow);
   json_push_kv_int(out, "backoff_skips", (int64_t)g_reach.backoff_skips);
+  json_push_kv_int(out, "backoff_full", (int64_t)g_reach.backoff_full);
   json_push_kv_int(out, "dials_queued", (int64_t)g_reach.dials_queued);
   json_push_kv_int(out, "dial_rejected", (int64_t)g_reach.dial_rejected);
   zcl_mutex_unlock(&g_reach_lock);
