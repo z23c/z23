@@ -36,10 +36,7 @@
  *     Walks the registry, pthread_timedjoin_np's each entry with
  *     `timeout_sec` seconds, and returns the count that failed to
  *     exit in time. Diagnostic output names any stragglers so the
- *     operator can see which subsystem is hanging shutdown. A worker
- *     that is joined only after the deadline expired (on hosts whose
- *     join is untimed, see platform/thread_compat.h) still counts as a
- *     straggler, and its row is already reaped when the sweep returns.
+ *     operator can see which subsystem is hanging shutdown.
  *
  * Ownership is explicit at spawn: NULL out_tid means the registry owns the
  * join and retains a finished thread until join_all reaps it. A non-NULL

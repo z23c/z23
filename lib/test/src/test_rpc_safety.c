@@ -269,6 +269,11 @@ int test_rpc_safety(void)
          * runs inside every host's default main-thread stack. */
         struct wallet *wallet = zcl_calloc(1, sizeof(*wallet),
                                            "rpc-safety-wallet");
+        if (!wallet) {
+            printf("FAIL (wallet allocation)\n");
+            failures++;
+            return failures;
+        }
         wallet_init(wallet);
         wallet->best_block_height = 1;
         wallet->map_wallet[0].used = true;
@@ -303,6 +308,11 @@ int test_rpc_safety(void)
         ensure_rpc_warmup_finished_once();
         struct wallet *wallet = zcl_calloc(1, sizeof(*wallet),
                                            "rpc-safety-wallet");
+        if (!wallet) {
+            printf("FAIL (wallet allocation)\n");
+            failures++;
+            return failures;
+        }
         wallet_init(wallet);
         struct main_state ms; main_state_init(&ms);
         struct rpc_table tbl; rpc_table_init(&tbl);
@@ -633,8 +643,11 @@ int test_rpc_safety(void)
          * Prove lookup remains exact in that smaller projection window too.
          * Heap like the other wallets here: struct wallet is ~40 MB and this
          * host's main stack cannot carry it. */
-        struct wallet *owned_wallet = calloc(1, sizeof(*owned_wallet));
-        wallet_init(owned_wallet);
+        struct wallet *owned_wallet = zcl_calloc(1, sizeof(*owned_wallet),
+                                                 "rpc-safety-owned-wallet");
+        ok = ok && owned_wallet != NULL;
+        if (owned_wallet)
+            wallet_init(owned_wallet);
         struct wallet_tx owned_wtx;
         memset(&owned_wtx, 0, sizeof(owned_wtx));
         if (ok) {
@@ -795,7 +808,10 @@ int test_rpc_safety(void)
         main_state_free(&ms);
         block_free(&body);
         transaction_free(&shielded);
-        wallet_free(owned_wallet); free(owned_wallet);
+        if (owned_wallet) {
+            wallet_free(owned_wallet);
+            free(owned_wallet);
+        }
         test_rm_rf(dir);
 
         if (ok) printf("OK\n");

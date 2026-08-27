@@ -398,7 +398,9 @@ if [ "$DRY_RUN" -eq 1 ]; then
     say "build      (dry run — would rebuild and freeze one candidate + both workers)"
     CANDIDATE=""; ARTIFACT_SHA=""; CAND_SOURCE_ID="$SOURCE_ID"
 else
-    rm -f build/bin/zclassic23 build/bin/zclassic23-package-verify build/bin/zclassic23-package-verify-dev
+    rm -f build/bin/z23 build/bin/zclassic23 \
+        build/bin/zclassic23-package-verify \
+        build/bin/zclassic23-package-verify-dev
     make -j"$(nproc)" zclassic23 zclassic23-package-verify dev-package-verifier >/dev/null || \
         die "production build failed"
     CANDIDATE="$(mktemp "${TMPDIR:-/tmp}/zclassic23.ship.XXXXXX")"

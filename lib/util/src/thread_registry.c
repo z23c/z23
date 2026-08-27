@@ -161,22 +161,6 @@ static bool thread_registry_tid_is_excluded(
     return false;
 }
 
-/* True when the clock has moved past the join deadline that was handed to
- * platform_thread_join_until(). Measured on the SAME clock the deadline was
- * built from, so on Linux — where the timed join enforces that abstime
- * itself — a 0 return already implies the worker finished inside the budget
- * and this check cannot fire; it only means something on hosts whose join is
- * untimed (platform/thread_compat.h) and only blocked through the deadline. */
-static bool thread_registry_join_overran(const struct timespec *deadline)
-{
-    struct timespec now;
-    if (platform_time_realtime_timespec(&now) != 0)
-        return false;
-    if (now.tv_sec != deadline->tv_sec)
-        return now.tv_sec > deadline->tv_sec;
-    return now.tv_nsec > deadline->tv_nsec;
-}
-
 int thread_registry_join_all_except(int timeout_sec,
                                     const pthread_t *excluded,
                                     size_t excluded_count)
@@ -205,20 +189,6 @@ int thread_registry_join_all_except(int timeout_sec,
         ts.tv_sec += timeout_sec;
 
         int rc = platform_thread_join_until(tid, NULL, &ts);
-        if (rc == 0 && thread_registry_join_overran(&ts)) {
-            /* The join succeeded, but only after the caller's deadline had
-             * already passed (untimed join on a non-Linux host). The safety
-             * contract held — no live worker was abandoned — yet the worker
-             * still exceeded its budget, so account it exactly as the
-             * ETIMEDOUT path below would. The pthread is reaped either way:
-             * the row must be cleared, or a later join_all_owned() would
-             * pthread_join an already-joined tid. */
-            fprintf(stderr,  // obs-ok:registry-join-overran-budget-diagnostic
-                    "[thread_registry] straggler after %ds: "
-                    "'%s' (joined after the deadline expired)\n",
-                    timeout_sec, name);
-            failed++;
-        }
         if (rc == 0) {
             pthread_mutex_lock(&g_mu);
             memset(&g_entries[i], 0, sizeof(g_entries[i]));
