@@ -113,9 +113,17 @@ struct zcl_result yardsale_prevout_fetch_confirmed(void *ctx,
                                                    uint64_t token_amount,
                                                    struct transaction *tx_out)
 {
+    if (!txid || !tx_out)
+        return ZCL_ERR(-1, "prevout fetch: unwired chain view");
+    /* Post-condition: on EVERY return *tx_out is an initialized (empty)
+     * transaction the caller owns and may free — init sits above the
+     * first failure path so no exit hands back raw storage. */
+    transaction_free(tx_out);
+    transaction_init(tx_out);
+
     const struct yardsale_prevout_view *view = ctx;
     if (!view || !view->state || !view->node_db || !view->node_db->open ||
-        !view->datadir || !txid || !token_id || !tx_out)
+        !view->datadir || !token_id)
         return ZCL_ERR(-1, "prevout fetch: unwired chain view");
 
     struct db_tx_index row;

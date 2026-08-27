@@ -268,13 +268,17 @@ static struct zcl_result ysa_prevout_fetch_fn(void *ctx,
     (void)vout;
     (void)token_id;
     (void)token_amount;
-    if (!ysa_prevout_serve || !out ||
-        memcmp(txid, ysa_prevout_tx.hash.data, 32) != 0)
+    if (!out)
         return ZCL_ERR(-1, "fake: no confirmed body for this txid");
+    /* Same post-condition as the production port: on every return *out is
+     * an initialized transaction the caller owns and may free. */
     transaction_free(out);
     transaction_init(out);
+    if (!ysa_prevout_serve ||
+        memcmp(txid, ysa_prevout_tx.hash.data, 32) != 0)
+        return ZCL_ERR(-2, "fake: no confirmed body for this txid");
     if (!transaction_copy(out, &ysa_prevout_tx))
-        return ZCL_ERR(-2, "fake: body copy failed");
+        return ZCL_ERR(-3, "fake: body copy failed");
     return ZCL_OK;
 }
 
