@@ -193,7 +193,7 @@ static void publication_drive_stores(
       publication->successes++;
     }
     if (operation)
-      memset(operation, 0, sizeof(*operation));
+      vcs_zcode_dht_records_operation_release(service, child_id, operation);
     publication->child_operation_ids[i] = 0;
     publication->node_complete[i] = true;
     if (publication->active_children)

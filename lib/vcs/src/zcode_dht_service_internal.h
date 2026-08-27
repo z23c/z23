@@ -310,6 +310,16 @@ void publication_drive(struct vcs_zcode_dht_service *service,
                        struct vcs_zcode_dht_time now);
 struct service_record_operation *vcs_zcode_dht_records_operation_find(
     struct vcs_zcode_dht_service *service, uint64_t id);
+/* Drop one record operation and any query still carrying its id — the one
+ * retire path for a terminal or abandoned operation. Cancel, the retention
+ * sweep, poll-collect, and the publication drive's harvest all mean the same
+ * thing and must not re-derive it. (The begin-path failure unwinds are
+ * different: they tear down a just-minted operation beside its own fresh
+ * query, in a strict order.) A retired operation normally has no live query
+ * left, but releasing one that does is cheaper than proving it can't. */
+void vcs_zcode_dht_records_operation_release(
+    struct vcs_zcode_dht_service *service, uint64_t operation_id,
+    struct service_record_operation *operation);
 void vcs_zcode_dht_records_sweep(struct vcs_zcode_dht_service *service,
                                  uint64_t now_mono);
 void vcs_zcode_dht_records_collect_expired(

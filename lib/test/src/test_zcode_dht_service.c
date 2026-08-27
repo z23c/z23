@@ -1977,6 +1977,127 @@ _test_next:;
   return failures;
 }
 
+/* Plant a query slot that outlives its operation: normally impossible, and
+ * exactly what the release path exists to forgive. */
+static struct service_query *fixture_dangling_query(
+    struct vcs_zcode_dht_service *service, uint64_t operation_id) {
+  for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_ACTIVE_QUERIES; i++)
+    if (!service->queries[i].used) {
+      struct service_query *query = &service->queries[i];
+      memset(query, 0, sizeof(*query));
+      query->used = true;
+      query->record_operation_id = operation_id;
+      return query;
+    }
+  return NULL;
+}
+
+/* Cancel and the retention sweep pin their own retire behavior elsewhere.
+ * This pins the two collectors that historically wiped only the operation —
+ * poll-collect and the publication drive's harvest — now riding the one
+ * release path: a query slot still carrying the operation's id must not
+ * survive either, and the operation slot itself must be freed. */
+static int test_record_operation_release_paths(void) {
+  int failures = 0;
+  TEST("zcode dht service: terminal collectors release dangling queries") {
+    char adir[] = "/tmp/zcl_dht_release_a_XXXXXX";
+    char bdir[] = "/tmp/zcl_dht_release_b_XXXXXX";
+    ASSERT(mkdtemp(adir) != NULL && mkdtemp(bdir) != NULL);
+    uint8_t genesis[32], anoise[32], bnoise[32], transcript[32];
+    memset(genesis, 0x11, 32);
+    memset(anoise, 0x2a, 32);
+    memset(bnoise, 0x2b, 32);
+    memset(transcript, 0x5e, 32);
+    ASSERT(fixture_identity(adir, 0x76, genesis, anoise));
+    ASSERT(fixture_identity(bdir, 0x77, genesis, bnoise));
+    struct vcs_zcode_dht_service *a =
+        fixture_service_at(adir, genesis, anoise, 1000);
+    struct vcs_zcode_dht_service *b =
+        fixture_service_at(bdir, genesis, bnoise, 1000);
+    ASSERT(a != NULL && b != NULL);
+    struct vcs_zcode_dht_session as = {.established = true,
+                                       .generation = 9,
+                                       .connection_serial = 1};
+    struct vcs_zcode_dht_session bs = as;
+    bs.connection_serial = 2;
+    memcpy(as.remote_static, bnoise, 32);
+    memcpy(bs.remote_static, anoise, 32);
+    memcpy(as.transcript_hash, transcript, 32);
+    memcpy(bs.transcript_hash, transcript, 32);
+    ASSERT(vcs_zcode_dht_service_session_open(a, 2, &as, test_time(1001)));
+    ASSERT(vcs_zcode_dht_service_session_open(b, 1, &bs, test_time(1001)));
+    ASSERT(pump(a, b, 2, 1, 1001, NULL, NULL));
+    ASSERT(pump(b, a, 1, 2, 1001, NULL, NULL));
+    ASSERT(pump(a, b, 2, 1, 1001, NULL, NULL));
+
+    struct vcs_zcode_dht_service_status status;
+
+    /* Poll-collect: the owner finally polls a terminal operation whose
+     * query slot was resurrected behind the transport's back. */
+    struct vcs_zcode_dht_record polled_record;
+    ASSERT(fixture_pointer_record(adir, genesis, 0x78, 0x79,
+                                  &polled_record));
+    uint64_t polled = 0;
+    ASSERT(vcs_zcode_dht_service_record_store_begin(
+        a, 2, &polled_record, test_time(1002), &polled));
+    ASSERT(pump(a, b, 2, 1, 1002, NULL, NULL));
+    ASSERT(pump(b, a, 1, 2, 1002, NULL, NULL));
+    struct service_query *dangling = fixture_dangling_query(a, polled);
+    ASSERT(dangling != NULL);
+    struct vcs_zcode_dht_record_operation_result result;
+    ASSERT(vcs_zcode_dht_service_record_operation_poll(
+        a, polled, test_time(1003), &result));
+    ASSERT_EQ(result.state, VCS_ZCODE_DHT_RECORD_OPERATION_COMPLETE);
+    ASSERT(!dangling->used);
+    vcs_zcode_dht_service_status(a, &status);
+    ASSERT_EQ(status.active_record_operations, 0u);
+
+    /* Drive harvest: a publication in STORING collects a terminal store
+     * child; the slot and the query are both gone, the cycle completes. */
+    struct vcs_zcode_dht_record pub_record;
+    ASSERT(fixture_pointer_record(adir, genesis, 0x7a, 0x7b, &pub_record));
+    uint64_t harvested = 0;
+    ASSERT(vcs_zcode_dht_service_record_store_begin(
+        a, 2, &pub_record, test_time(1004), &harvested));
+    ASSERT(pump(a, b, 2, 1, 1004, NULL, NULL));
+    ASSERT(pump(b, a, 1, 2, 1004, NULL, NULL));
+
+    struct service_publication *publication = NULL;
+    for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_PUBLICATIONS; i++)
+      if (!a->publications[i].used) {
+        publication = &a->publications[i];
+        break;
+      }
+    ASSERT(publication != NULL);
+    memset(publication, 0, sizeof(*publication));
+    publication->used = true;
+    publication->phase = SERVICE_PUBLICATION_STORING;
+    publication->record = pub_record;
+    publication->lifetime_s = 300;
+    memcpy(publication->node_ids[0], b->self_id, 32);
+    publication->node_count = 1;
+    publication->child_operation_ids[0] = harvested;
+    publication->active_children = 1;
+    dangling = fixture_dangling_query(a, harvested);
+    ASSERT(dangling != NULL);
+
+    publication_drive(a, publication, test_time(1005));
+    ASSERT(!dangling->used);
+    ASSERT_EQ(publication->phase, SERVICE_PUBLICATION_WAITING);
+    ASSERT_EQ(publication->successes, 1u);
+    vcs_zcode_dht_service_status(a, &status);
+    ASSERT_EQ(status.active_record_operations, 0u);
+
+    vcs_zcode_dht_service_free(a, test_time(1100));
+    vcs_zcode_dht_service_free(b, test_time(1100));
+    cleanup_fixture(adir);
+    cleanup_fixture(bdir);
+    PASS();
+  }
+_test_next:;
+  return failures;
+}
+
 /* The ceiling on how many records ONE node keeps announced is not an abstract
  * number: it decides whether a node can host the product's own demo. The
  * multi-host commons journey measured the floor at eleven records for five
@@ -4792,6 +4913,7 @@ int test_zcode_dht_service(void) {
   failures += test_publication_load_skips_poisoned_entry();
   failures += test_publication_supersede_cancels_children();
   failures += test_record_operation_terminal_swept();
+  failures += test_record_operation_release_paths();
   failures += test_publication_ceiling_hosts_a_real_node();
   failures += test_record_churn_fallback();
   failures += test_deep_ancestry();
