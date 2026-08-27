@@ -9,7 +9,7 @@
  * kind of cloned authority this codebase removes on sight.
  *
  * Hardware tier per ISA, always runtime-gated and self-checked before use:
- * SSE4.2 `_mm_crc32_u*` on x86, `__builtin_arm_crc32c*` (FEAT_CRC32) on
+ * SSE4.2 `_mm_crc32_u*` on x86, Arm C Language Extensions (FEAT_CRC32) on
  * arm64. See util/crc32c.h for the contract.
  */
 
@@ -23,6 +23,7 @@
 #include <nmmintrin.h>
 #endif
 #if defined(__aarch64__)
+#include <arm_acle.h>
 #if defined(__APPLE__)
 #include <sys/sysctl.h>
 #endif
@@ -111,7 +112,7 @@ static bool crc32c_arm_feat_crc32_present(void)
  * RUNTIME — never behind a compile-time feature predicate, which would
  * delete the hardware tier from the shipped binary on every CPU that has
  * the extension (the Darwin build passes no -march at all). */
-__attribute__((target("crc")))
+__attribute__((target("+crc")))
 static uint32_t crc32c_hw(const void *data, size_t len)
 {
     const uint8_t *p = (const uint8_t *)data;
@@ -119,19 +120,19 @@ static uint32_t crc32c_hw(const void *data, size_t len)
     while (len >= 8) {
         uint64_t v;
         memcpy(&v, p, sizeof(v));
-        crc = (uint32_t)__builtin_arm_crc32cd(crc, v);
+        crc = __crc32cd(crc, v);
         p += 8;
         len -= 8;
     }
     while (len >= 4) {
         uint32_t v;
         memcpy(&v, p, sizeof(v));
-        crc = __builtin_arm_crc32cw(crc, v);
+        crc = __crc32cw(crc, v);
         p += 4;
         len -= 4;
     }
     while (len > 0) {
-        crc = __builtin_arm_crc32cb(crc, *p++);
+        crc = __crc32cb(crc, *p++);
         len--;
     }
     return crc ^ 0xFFFFFFFFu;
