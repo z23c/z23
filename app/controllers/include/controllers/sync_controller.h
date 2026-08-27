@@ -59,7 +59,14 @@ struct node_db_sync_catchup_job {
         struct node_db *ndb;
         const struct active_chain *chain;
         struct wallet *w;
+        /* Points only into datadir_storage below, never at the starter's
+         * argument. node_db_sync_catchup_job_start() spawns the worker and
+         * RETURNS: a caller that resolved the network datadir into its own
+         * stack buffer (catchup_lifecycle_start does exactly that) is gone
+         * before the worker first reads it, and the worker would then build
+         * block paths out of whatever later reused that stack. */
         const char *datadir;
+        char datadir_storage[4096];
     } args;
 };
 
