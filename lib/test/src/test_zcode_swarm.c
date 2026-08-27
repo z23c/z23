@@ -2528,13 +2528,24 @@ static int t_swarm_peer_offer(void)
     SW_CHECK("stalled before evidence",
              sw_drain_wants(&n, pid, quiet, 2) == 0);
 
+    /* The discovery fallback's work list names exactly this root while
+     * nothing advertises it. */
+    uint8_t stalled[4][32];
+    SW_CHECK("stall work list names the root",
+             vcs_swarm_engine_unadvertised_roots(n.engine, stalled, 4) == 1 &&
+             memcmp(stalled[0], p.root, 32) == 0);
+
     /* Locally verified DHT-style evidence becomes an offer; the event
      * edge wakes scheduling and the manifest WANT goes to this peer. */
     SW_CHECK("offer accepted",
              vcs_swarm_engine_peer_offer(n.engine, pid, p.root));
-    vcs_swarm_engine_schedule_ready(n.engine, SW_DAY, 3);
+    vcs_swarm_engine_tick(n.engine, SW_DAY, 3);
     struct vcs_package_swarm_object wants[2];
     SW_CHECK("want after offer", sw_drain_wants(&n, pid, wants, 2) == 1);
+
+    /* Advertised again: the root leaves the work list. */
+    SW_CHECK("work list drains once advertised",
+             vcs_swarm_engine_unadvertised_roots(n.engine, stalled, 4) == 0);
 
     /* Idempotent: still true, consumes no further ad inventory. */
     SW_CHECK("idempotent offer",
