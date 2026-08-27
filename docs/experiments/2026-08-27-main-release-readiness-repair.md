@@ -260,3 +260,24 @@ test_consensus_state_snapshot_export groups_failed=0 self_skips=0
 test_consensus_state_snapshot_install groups_failed=0 self_skips=0
 check-zcode-package-registry PASS (10 roots rederived)
 ```
+
+## Confined platform package acceptance
+
+The platform package smoke test had begun requiring live process
+introspection. That contract is invalid inside the bounded package builder:
+Linux process information is optional there, and the package API documents
+those probes as fallible. The portable package test now covers its deterministic
+memory-observation seam; live process behavior remains covered by the dedicated
+platform group. The platform package row was re-derived from the corrected
+source.
+
+Measured at `2026-08-27T19:41:14-04:00`
+(`2026-08-27T23:41:14Z`):
+
+```text
+test_zcode_package_registry groups_failed=0 self_skips=0
+test_zcode_swarm_net groups_failed=0 self_skips=0
+test_dev_platform groups_failed=0 self_skips=0
+check-zcode-package-registry PASS (10 roots rederived)
+lint-fast PASS
+```
