@@ -1440,16 +1440,22 @@ void vcs_swarm_engine_peer_drop(struct vcs_swarm_engine *engine,
         pthread_mutex_unlock(&engine->lock);
         return;
     }
-    /* Disconnect requeue: in-flight work returns to the scheduler, which
-     * reassigns it with fresh request ids. No attempts are consumed —
+    /* Disconnect requeue: this peer's outstanding work returns to the
+     * scheduler, which reassigns it with fresh request ids. Tombstone
+     * the freed wants as cancelled, exactly like dl_fail: frames already
+     * past the wire when we dropped the peer are an honest race when the
+     * node reconnects, not unrequested bytes. No CANCEL frame is queued
+     * — the route to this peer is going away. No attempts are consumed —
      * a disconnect is not a failure. */
     for (size_t i = 0; i < VCS_SWARM_MAX_DOWNLOADS; i++) {
         struct swarm_download *dl = &engine->dls[i];
         if (!dl->used)
             continue;
-        for (size_t r = 0; r < SWARM_DL_INFLIGHT_MAX; r++)
-            if (dl->reqs[r].used && dl->reqs[r].peer == peer)
-                dl->reqs[r].used = false;
+        for (size_t r = 0; r < SWARM_DL_INFLIGHT_MAX; r++) {
+            struct swarm_req *req = &dl->reqs[r];
+            if (req->used && req->peer == peer)
+                req_finish(engine, dl, req, true, false);
+        }
     }
     engine->peers[slot].used = false;
     pthread_mutex_unlock(&engine->lock);

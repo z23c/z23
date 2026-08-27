@@ -15,7 +15,9 @@
  *   4. Duplicate response replay (DATA twice for one fulfilled id):
  *      the first copy earns, the replay is a DUPLICATE_REQUEST offence
  *      with no credit. Late DATA for a CANCELLED id is the honest race:
- *      no credit, NO offence.
+ *      no credit, NO offence — and peer_drop tombstones a disconnected
+ *      peer's wants the same way, so its straggler after reconnect is
+ *      also the honest race.
  *   5. Announce-only peers earn nothing (no-credit ANNOUNCEMENT on every
  *      announce); keep-alive repeats of a root already advertised do not
  *      consume the unique-root inventory bound; a new-user (zero-score)
@@ -805,6 +807,106 @@ static int t_swarm_cancel_race(void)
     SW_CHECK("re-fetch after cancel",
              vcs_swarm_engine_fetch(n.engine, p.root, SW_DAY, 5) ==
                  VCS_SWARM_FETCH_OK);
+    sw_free_package(&p);
+    sw_node_close(&n);
+    test_rm_rf_recursive(n.datadir);
+    return failures;
+}
+
+/* ── 4b: peer-drop straggler races ────────────────────────────────── */
+/* A mid-transfer disconnect frees the peer's outstanding wants with no
+ * CANCEL frame (the route is gone). When the same node id reconnects,
+ * frames it had already queued before the drop must read as the
+ * cancelled honest race peer_drop tombstones — never as unrequested
+ * bytes with a disconnect. */
+static int t_swarm_drop_race(void)
+{
+    int failures = 0;
+    struct sw_node n;
+    struct sw_pkg p;
+    uint8_t key[33];
+    sw_key(11, key);
+    if (!sw_node_open(&n, "droprace", sw_score_contributor) ||
+        !sw_make_package(&p, 4, 33))
+        return 1;
+    const uint64_t peer = 3501;
+    SW_CHECK("peer add", vcs_swarm_engine_peer_add(n.engine, peer, key));
+    sw_announce(n.engine, peer, &p);
+    SW_CHECK("fetch ok", vcs_swarm_engine_fetch(n.engine, p.root, SW_DAY,
+                                                1) == VCS_SWARM_FETCH_OK);
+    vcs_swarm_engine_tick(n.engine, SW_DAY, 2);
+    struct sw_pump_stats st;
+    memset(&st, 0, sizeof(st));
+    sw_pump(&n, peer, &p, SW_SERVE_HONEST, false, 2, &st); /* manifest */
+    vcs_swarm_engine_tick(n.engine, SW_DAY, 3);            /* chunk wants */
+    /* Capture one still-outstanding chunk WANT, unanswered. */
+    uint64_t stranded_id = 0;
+    uint64_t target = 0;
+    uint8_t frame[VCS_SWARM_OUTBOUND_FRAME_MAX];
+    size_t frame_len = 0;
+    while (vcs_swarm_engine_next_outbound(n.engine, peer, &target, frame,
+                                          &frame_len)) {
+        struct vcs_package_swarm_message msg;
+        if (!vcs_package_swarm_parse(frame, frame_len, &msg))
+            continue;
+        if (msg.type == VCS_PACKAGE_SWARM_WANT)
+            stranded_id = msg.body.want.request_id;
+    }
+    SW_CHECK("chunk want was outstanding", stranded_id != 0);
+
+    /* Drop mid-transfer; the same node reconnects under its id and key.
+     * Its straggler now matches no outstanding req, so the only thing
+     * standing between it and an UNREQUESTED offence is the cancelled
+     * tombstone peer_drop writes. */
+    vcs_swarm_engine_peer_drop(n.engine, peer);
+    SW_CHECK("reconnect re-registers",
+             vcs_swarm_engine_peer_add(n.engine, peer, key));
+    /* A reconnecting node re-advertises: the fresh slot carries no ads,
+     * and the scheduler pulls only from known advertisers. */
+    sw_announce(n.engine, peer, &p);
+
+    struct vcs_package_swarm_message late;
+    memset(&late, 0, sizeof(late));
+    late.type = VCS_PACKAGE_SWARM_DATA;
+    late.body.data.object.request_id = stranded_id;
+    memcpy(late.body.data.object.package_root, p.root, 32);
+    late.body.data.object.object_kind = VCS_PACKAGE_SWARM_OBJECT_CHUNK;
+    late.body.data.object.file_index = 0;
+    late.body.data.object.chunk_index = 0;
+    memcpy(late.body.data.object.expected_hash,
+           p.manifest.files[0].chunk_hashes, 32);
+    size_t len = 0;
+    late.body.data.bytes = sw_chunk_bytes(&p, 0, &len);
+    late.body.data.bytes_len = (uint32_t)len;
+    uint8_t dframe[8 + 96 + SW_MAX_FILE];
+    size_t dlen = 0;
+    SW_CHECK("straggler data serializes",
+             vcs_package_swarm_serialize(&late, dframe, sizeof(dframe),
+                                         &dlen));
+    struct vcs_swarm_frame_result res = vcs_swarm_engine_handle_frame(
+        n.engine, peer, dframe, dlen, SW_DAY, 4);
+    SW_CHECK("dropped-peer straggler: no penalty",
+             res.penalty == VCS_SWARM_PENALTY_NONE);
+    struct vcs_service_key_totals totals;
+    /* The manifest was honestly served pre-drop (credited); the
+     * straggler adds NO offence and NO further credit — no-credit still
+     * books once, as for any cancelled-id arrival. */
+    SW_CHECK("dropped-peer straggler: no offence, no credit",
+             vcs_service_key_totals(n.book, key, SW_DAY, &totals) &&
+             totals.offences[VCS_POLICY_OFFENCE_UNREQUESTED_BYTES] == 0 &&
+             totals.offence_total == 0 &&
+             totals.no_credit_events[VCS_POLICY_NO_CREDIT_UNREQUESTED] ==
+                 1 &&
+             totals.verified_bytes_downloaded == p.wire_len);
+
+    /* The download itself survived the drop and finishes through the
+     * reconnected peer (req_finish also balanced in-flight accounting). */
+    uint32_t max_inflight = 0;
+    const uint64_t peers[1] = { peer };
+    SW_CHECK("completes via reconnected peer",
+             sw_drive_complete(&n, peers, 1, &p, &max_inflight));
+    SW_CHECK("in-flight bound honored", max_inflight > 0 &&
+             max_inflight <= VCS_SWARM_PEER_INFLIGHT_MAX);
     sw_free_package(&p);
     sw_node_close(&n);
     test_rm_rf_recursive(n.datadir);
@@ -2591,6 +2693,7 @@ int test_zcode_swarm(void)
     failures += t_swarm_invalid_data();
     failures += t_swarm_unsolicited_and_replay();
     failures += t_swarm_cancel_race();
+    failures += t_swarm_drop_race();
     failures += t_swarm_announce_policy();
     failures += t_swarm_c23_shelf_announce();
     failures += t_swarm_scheduler_order();
