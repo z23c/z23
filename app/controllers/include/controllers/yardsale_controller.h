@@ -75,6 +75,18 @@ typedef bool (*yardsale_broadcast_fn)(const struct transaction *tx,
 void yardsale_ceremony_set_broadcast(yardsale_broadcast_fn fn, void *ctx);
 bool yardsale_broadcast_default(const struct transaction *tx, void *ctx);
 
+/* Chain-content port: fetch a CONFIRMED transaction body by txid (internal
+ * byte order) so the buyer can re-classify the seller's claimed token
+ * input before signing — the ad's token leg is a claim, and only this
+ * port checks it against the chain the buyer actually has. Implemented by
+ * the prevout service over node.db + the active chain; tests inject a
+ * fake. Fail-closed: while unwired, every partial ingest is refused
+ * (nothing is signed, nothing is broadcast). */
+typedef bool (*yardsale_prevout_fetch_fn)(void *ctx, const uint8_t txid[32],
+                                          struct transaction *tx_out);
+void yardsale_ceremony_set_prevout_fetch(yardsale_prevout_fetch_fn fn,
+                                         void *ctx);
+
 /* Outbound gossip port: flood one ceremony wire to every fast-sync peer.
  * Wired at boot to the msg_processor flood; an unwired port makes
  * yardsale_buyer_begin return YARDSALE_ERR_NOT_CONFIGURED. */

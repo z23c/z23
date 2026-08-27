@@ -16,6 +16,7 @@
 #include "util/log_macros.h"
 #include "validation/accept_to_mempool.h"
 #include "validation/chainstate.h"
+#include "zslp/slp.h"
 #include "zswap/zswap_yardsale.h"
 
 #include <pthread.h>
@@ -50,11 +51,20 @@ static yardsale_flood_fn g_flood;
 static void *g_flood_ctx;
 static yardsale_branch_id_fn g_branch_id;
 static void *g_branch_id_ctx;
+static yardsale_prevout_fetch_fn g_prevout_fetch;
+static void *g_prevout_fetch_ctx;
 
 void yardsale_ceremony_set_broadcast(yardsale_broadcast_fn fn, void *ctx)
 {
     g_broadcast = fn;
     g_broadcast_ctx = ctx;
+}
+
+void yardsale_ceremony_set_prevout_fetch(yardsale_prevout_fetch_fn fn,
+                                         void *ctx)
+{
+    g_prevout_fetch = fn;
+    g_prevout_fetch_ctx = ctx;
 }
 
 void yardsale_ceremony_set_flood(yardsale_flood_fn fn, void *ctx)
@@ -534,6 +544,52 @@ int yardsale_ceremony_partial_ingest(const uint8_t *wire, size_t wire_len,
                  "no transaction exists and nothing was lost",
                  zswap_ceremony_error_string(e));
         memory_cleanse(buy.input_keys, sizeof(buy.input_keys));
+        return ZSWAP_CEREMONY_WIRE_DROP;
+    }
+
+    /* The ad's token leg was a CLAIM: now that the cryptography holds,
+     * check the chain content it named — the buyer-side half of the duty
+     * zswap_assembly.h states ("classify the seller's token input via
+     * slp_classify_tx_output before accepting"), mirroring the seller
+     * arm's own recheck at plan time. Fail-closed: an unwired port
+     * refuses the ceremony entirely — a buyer must never sign an input
+     * nobody chain-checked. */
+    if (!g_prevout_fetch) {
+        LOG_WARN("yardsale", "prevout port unwired — refusing to sign a "
+                 "swap whose token input was never chain-checked");
+        memory_cleanse(buy.input_keys, sizeof(buy.input_keys));
+        transaction_free(&tx);
+        return ZSWAP_CEREMONY_WIRE_DROP;
+    }
+    struct transaction token_tx;
+    memset(&token_tx, 0, sizeof(token_tx));
+    bool token_ok = g_prevout_fetch(g_prevout_fetch_ctx,
+                                    partial.seller.token_input.txid,
+                                    &token_tx) &&
+        partial.seller.token_input.vout < token_tx.num_vout;
+    const struct tx_out *claimed =
+        token_ok ? &token_tx.vout[partial.seller.token_input.vout] : NULL;
+    struct slp_output_metadata meta;
+    memset(&meta, 0, sizeof(meta));
+    token_ok = token_ok && claimed &&
+        slp_classify_tx_output(&token_tx,
+                               partial.seller.token_input.vout, &meta) &&
+        meta.role == SLP_OUTPUT_TOKEN &&
+        memcmp(meta.token_id, buy.ad.token_id, 32) == 0 &&
+        meta.amount == buy.ad.token_amount &&
+        claimed->value == partial.seller.token_input.value_sats &&
+        claimed->script_pub_key.size ==
+            partial.seller.token_input.script_len &&
+        memcmp(claimed->script_pub_key.data,
+               partial.seller.token_input.script_pub_key,
+               partial.seller.token_input.script_len) == 0;
+    transaction_free(&token_tx);
+    if (!token_ok) {
+        LOG_WARN("yardsale", "seller token input is not the confirmed "
+                 "holder of the ad's exact token — the swap names money "
+                 "this chain does not hold; the buy is off");
+        memory_cleanse(buy.input_keys, sizeof(buy.input_keys));
+        transaction_free(&tx);
         return ZSWAP_CEREMONY_WIRE_DROP;
     }
 

@@ -35,6 +35,7 @@
 #include "sim/simnet.h"
 #include "support/cleanse.h"
 #include "znam/znam.h"
+#include "zslp/slp.h"
 #include "zswap/zswap_assembly.h"
 #include "zswap/zswap_ceremony.h"
 #include "zswap/zswap_quote.h"
@@ -175,6 +176,92 @@ static void ysa_fill_exact_input(struct zswap_swap_input *in,
     memcpy(in->script_pub_key, script, script_len);
 }
 
+/* ── The buyer's chain-content port (faked) ──────────────────────── */
+
+/* Production wires the prevout service (node.db + active chain). Tests
+ * serve one fabricated "confirmed" body instead; the fake reproduces the
+ * real port's contract — the requested txid (internal byte order) must
+ * match, and the caller receives a private copy — so the buyer-side
+ * check is exercised against exactly the shape production hands it. */
+static struct transaction ysa_prevout_tx;
+static bool ysa_prevout_serve;
+
+static void ysa_prevout_clear(void)
+{
+    transaction_free(&ysa_prevout_tx);
+    transaction_init(&ysa_prevout_tx);
+    ysa_prevout_serve = false;
+}
+
+/* Serve a copy of `body`, keyed by its own hash — the honest path (the
+ * simnet test mints a real SLP SEND on the sim chain and serves it). */
+static bool ysa_prevout_serve_body(const struct transaction *body)
+{
+    ysa_prevout_clear();
+    transaction_init(&ysa_prevout_tx);
+    ysa_prevout_serve = transaction_copy(&ysa_prevout_tx, body);
+    return ysa_prevout_serve;
+}
+
+/* Fabricate a token-send body keyed by `key_txid`: vout[0] an SLP SEND
+ * op-return declaring the ad's token with `amount` on vout[2] (the vout
+ * the KAT terms claim), vout[2] paying (value, script). Field mutators
+ * at the call sites corrupt exactly one claim per negative case. */
+static bool ysa_prevout_build(const uint8_t key_txid[32],
+                              const uint8_t internal_token_id[32],
+                              uint64_t amount, int64_t value,
+                              const uint8_t *script, uint16_t script_len)
+{
+    ysa_prevout_clear();
+    transaction_init(&ysa_prevout_tx);
+    if (!transaction_alloc(&ysa_prevout_tx, 1, 3))
+        return false;
+    struct uint256 wire_id;
+    for (int i = 0; i < 32; i++)
+        wire_id.data[i] = internal_token_id[31 - i];
+    uint64_t quantities[2] = { 1, amount };
+    uint8_t opret[256];
+    size_t olen = slp_build_send(opret, sizeof(opret), &wire_id,
+                                 quantities, 2);
+    if (olen == 0 ||
+        olen > sizeof(ysa_prevout_tx.vout[0].script_pub_key.data))
+        return false;
+    ysa_prevout_tx.vout[0].script_pub_key.size = olen;
+    memcpy(ysa_prevout_tx.vout[0].script_pub_key.data, opret, olen);
+    ysa_prevout_tx.vout[2].value = value;
+    ysa_prevout_tx.vout[2].script_pub_key.size = script_len;
+    memcpy(ysa_prevout_tx.vout[2].script_pub_key.data, script,
+           script_len);
+    transaction_compute_hash(&ysa_prevout_tx);
+    memcpy(ysa_prevout_tx.hash.data, key_txid, 32);
+    ysa_prevout_serve = true;
+    return true;
+}
+
+/* Arm the fake with exactly what the seller's terms claim: the confirmed
+ * body a passing check must find. */
+static bool ysa_prevout_arm(const struct zswap_quote_v1 *ad,
+                            const struct zswap_seller_accept *seller)
+{
+    return ysa_prevout_build(seller->token_input.txid, ad->token_id,
+                             ad->token_amount,
+                             seller->token_input.value_sats,
+                             seller->token_input.script_pub_key,
+                             seller->token_input.script_len);
+}
+
+static bool ysa_prevout_fetch_fn(void *ctx, const uint8_t txid[32],
+                                 struct transaction *out)
+{
+    (void)ctx;
+    if (!ysa_prevout_serve || !out ||
+        memcmp(txid, ysa_prevout_tx.hash.data, 32) != 0)
+        return false;
+    transaction_free(out);
+    transaction_init(out);
+    return transaction_copy(out, &ysa_prevout_tx);
+}
+
 /* The buyer accept; input B (txid 0x60..) is listed FIRST so the canonical
  * sort is exercised, exactly like the Stage-3 fixture. */
 static bool ysa_buyer_dl(struct zswap_buyer_accept *buyer, int64_t deadline)
@@ -299,6 +386,8 @@ static void ysa_reset_all(void)
     yardsale_seller_profile_clear();
     yardsale_ceremony_set_flood(NULL, NULL);
     yardsale_ceremony_set_broadcast(NULL, NULL);
+    yardsale_ceremony_set_prevout_fetch(NULL, NULL);
+    ysa_prevout_clear();
     yardsale_ceremony_set_branch_id_source(ysa_branch_id, NULL);
 }
 
@@ -431,9 +520,14 @@ static int t_ceremony_roundtrip(void)
               verdict == ZSWAP_CEREMONY_WIRE_DROP);
 
     /* BUYER: the partial arrives — the pending buy completes, signs, and
-     * hands the fully-signed swap to the broadcast port. */
+     * hands the fully-signed swap to the broadcast port. The chain-
+     * content port serves the confirmed body the KAT terms claim; the
+     * golden broadcast may only fire after it passes. */
     struct ysa_broadcast_capture broadcast = {0};
     yardsale_ceremony_set_broadcast(ysa_broadcast_capture_fn, &broadcast);
+    YSA_CHECK("ceremony: prevout fixture armed",
+              ysa_prevout_arm(&ad, &seller));
+    yardsale_ceremony_set_prevout_fetch(ysa_prevout_fetch_fn, NULL);
     verdict = yardsale_ceremony_partial_ingest(partial_wire, saved_len,
                                                7, YSA_NOW);
     YSA_CHECK("ceremony: partial ingress consumes the pending buy",
@@ -480,33 +574,96 @@ static int t_simnet_atomic_purchase(void)
     }
     YSA_CHECK("simnet: seller and buyer funding scripts derive", scripts_ok);
 
-    struct uint256 seller_fund, buyer_fund_a, buyer_fund_b;
-    bool funded = scripts_ok &&
+    struct zswap_quote_v1 ad;
+    uint8_t quote_root[32];
+    bool ad_ok = ysa_ingest_kat_ad(&ad, quote_root);
+    YSA_CHECK("simnet: signed Yardsale ad enters the app cache", ad_ok);
+
+    /* The seller's token input becomes an honest confirmed SLP SEND on
+     * the sim chain: vin[0] a matured fixture coinbase, vout[0] the
+     * op-return paying the ad's token amount to vout[1], vout[1] the
+     * exact (value, script) the terms claim. The chain-content port
+     * serves this body — a real confirmed classification target, not a
+     * fixture stub. */
+
+    /* Fixture-only funding coinbase the token send consumes; the 100
+     * filler blocks minted below satisfy its coinbase maturity before
+     * the send lands. */
+    struct uint256 junk_fund;
+    bool junk_ok = scripts_ok &&
         simnet_mint_coinbase_to(&sim, &seller_spk,
-                                YSA_SELLER_INPUT_VALUE, &seller_fund) &&
+                                YSA_SELLER_INPUT_VALUE * 10, &junk_fund);
+
+    struct uint256 buyer_fund_a, buyer_fund_b;
+    bool funded = junk_ok &&
         simnet_mint_coinbase_to(&sim, &buyer_spk,
                                 YSA_BUYER_IN_A_VALUE, &buyer_fund_a) &&
         simnet_mint_coinbase_to(&sim, &buyer_spk,
                                 YSA_BUYER_IN_B_VALUE, &buyer_fund_b) &&
         simnet_mint_to_height(&sim, 201);
-    YSA_CHECK("simnet: three exact funding outputs mature", funded);
+    YSA_CHECK("simnet: funding outputs mature", funded);
     if (!funded) {
         simnet_free(&sim);
         ysa_reset_all();
         return failures;
     }
 
-    struct zswap_quote_v1 ad;
-    uint8_t quote_root[32];
-    bool ad_ok = ysa_ingest_kat_ad(&ad, quote_root);
-    YSA_CHECK("simnet: signed Yardsale ad enters the app cache", ad_ok);
+    struct transaction token_tx;
+    memset(&token_tx, 0, sizeof(token_tx));
+    transaction_init(&token_tx);
+    uint64_t token_send_q = ad_ok ? ad.token_amount : 0;
+    bool token_built = ad_ok && transaction_alloc(&token_tx, 1, 2);
+    if (token_built) {
+        uint8_t opret[256];
+        struct uint256 wire_id;
+        for (int i = 0; i < 32; i++)
+            wire_id.data[i] = ad.token_id[31 - i];
+        size_t olen = slp_build_send(opret, sizeof(opret), &wire_id,
+                                     &token_send_q, 1);
+        uint8_t sig[] = {0x00, 0x00};
+        script_set(&token_tx.vin[0].script_sig, sig, sizeof(sig));
+        token_tx.vin[0].prevout.hash = junk_fund;
+        token_tx.vin[0].prevout.n = 0;
+        token_tx.vin[0].sequence = 0xFFFFFFFF;
+        token_tx.vout[0].value = 0; /* op-return output */
+        token_tx.vout[0].script_pub_key.size = olen;
+        memcpy(token_tx.vout[0].script_pub_key.data, opret, olen);
+        token_tx.vout[1].value = YSA_SELLER_INPUT_VALUE;
+        token_tx.vout[1].script_pub_key.size = 25;
+        memcpy(token_tx.vout[1].script_pub_key.data, seller_spk_bytes,
+               25);
+        transaction_compute_hash(&token_tx);
+        token_built = olen > 0;
+    }
+    YSA_CHECK("simnet: seller token send body builds", token_built);
+
+    uint8_t token_txid[32];
+    memset(token_txid, 0, sizeof(token_txid));
+    struct uint256 token_out;
+    uint256_set_null(&token_out);
+    bool token_served = false;
+    if (token_built) {
+        memcpy(token_txid, token_tx.hash.data, 32);
+        memcpy(token_out.data, token_txid, 32);
+        token_served = ysa_prevout_serve_body(&token_tx) &&
+            simnet_mint_txs(&sim, &token_tx, 1); /* ownership -> sim */
+        transaction_init(&token_tx); /* the sim owns the minted body */
+    }
+    YSA_CHECK("simnet: token send confirms; chain-content port serves it",
+              token_served);
+    if (!token_served) {
+        simnet_free(&sim);
+        ysa_reset_all();
+        return failures;
+    }
 
     struct zswap_seller_accept seller;
     bool seller_ok = ysa_seller(&seller);
     if (seller_ok)
-        ysa_fill_exact_input(&seller.token_input, seller_fund.data, 0,
+        ysa_fill_exact_input(&seller.token_input, token_txid, 1,
                              YSA_SELLER_INPUT_VALUE, seller_spk_bytes, 25);
-    YSA_CHECK("simnet: seller terms name the isolated token input", seller_ok);
+    YSA_CHECK("simnet: seller terms name the confirmed token send",
+              seller_ok);
     if (seller_ok)
         yardsale_seller_profile_configure(&seller, &seller_key);
 
@@ -545,6 +702,7 @@ static int t_simnet_atomic_purchase(void)
 
     struct ysa_transaction_capture broadcast = {0};
     yardsale_ceremony_set_broadcast(ysa_transaction_capture_fn, &broadcast);
+    yardsale_ceremony_set_prevout_fetch(ysa_prevout_fetch_fn, NULL);
     int buyer_verdict = seller_verdict == ZSWAP_CEREMONY_WIRE_RESPOND
         ? yardsale_ceremony_partial_ingest(partial_wire, partial_len, 17,
                                            YSA_NOW)
@@ -555,7 +713,7 @@ static int t_simnet_atomic_purchase(void)
               zswap_ceremony_all_inputs_signed(&broadcast.tx));
 
     bool exact_inputs = broadcast.copied && broadcast.tx.num_vin == 3 &&
-        simnet_coin_value(&sim, &seller_fund, 0, NULL) &&
+        simnet_coin_value(&sim, &token_out, 1, NULL) &&
         simnet_coin_value(&sim, &buyer_fund_a, 0, NULL) &&
         simnet_coin_value(&sim, &buyer_fund_b, 0, NULL);
     YSA_CHECK("simnet: captured broadcast spends the three live inputs",
@@ -571,12 +729,12 @@ static int t_simnet_atomic_purchase(void)
     if (mined)
         broadcast.copied = false; /* ownership transferred to simnet */
     YSA_CHECK("simnet: exact controller broadcast passes connect_block",
-              mined && simnet_tip_height(&sim) == 202);
+              mined && simnet_tip_height(&sim) == 203);
 
     int64_t token_dust = 0, seller_paid = 0;
     int64_t seller_change = 0, buyer_change = 0;
     bool settled = mined &&
-        !simnet_coin_value(&sim, &seller_fund, 0, NULL) &&
+        !simnet_coin_value(&sim, &token_out, 1, NULL) &&
         !simnet_coin_value(&sim, &buyer_fund_a, 0, NULL) &&
         !simnet_coin_value(&sim, &buyer_fund_b, 0, NULL) &&
         simnet_coin_value(&sim, &final_txid, 1, &token_dust) &&
@@ -718,6 +876,161 @@ static int t_ingress_negatives(void)
                   YARDSALE_ERR_NOT_CONFIGURED);
     YSA_CHECK("neg: refused begin leaves no pending buy",
               yardsale_pending_count(YSA_NOW) == 0);
+
+    ysa_reset_all();
+    return failures;
+}
+
+/* ── The buyer's chain-content guard ─────────────────────────────── */
+
+/* One ceremony round per case, driven to the buyer's partial-ingest
+ * verdict. Fresh buyer keys per round keep the accept wire distinct, so
+ * the dedup table never swallows a later case's ceremony. */
+static bool ysa_guard_setup(int case_i, struct zswap_quote_v1 *ad,
+                            uint8_t partial_wire[], size_t *partial_len)
+{
+    uint8_t quote_root[32];
+    if (!ysa_ingest_kat_ad(ad, quote_root))
+        return false;
+    struct zswap_seller_accept seller;
+    struct privkey seller_key;
+    if (!ysa_seller(&seller))
+        return false;
+    ysa_key(&seller_key, 0x31);
+    yardsale_seller_profile_configure(&seller, &seller_key);
+    struct zswap_buyer_accept buyer;
+    if (!ysa_buyer(&buyer))
+        return false;
+    struct privkey keys[2];
+    ysa_key(&keys[0], (uint8_t)(0x42 + case_i));
+    ysa_key(&keys[1], (uint8_t)(0x42 + case_i));
+    struct ysa_flood_capture flood = {0};
+    yardsale_ceremony_set_flood(ysa_flood_capture_fn, &flood);
+    uint8_t accept_wire[ZSWAP_ACCEPT_WIRE_MAX_BYTES];
+    size_t accept_len = 0;
+    if (yardsale_buyer_begin(ad, &buyer, keys, 2, YSA_NOW, accept_wire,
+                             sizeof(accept_wire), &accept_len) !=
+        YARDSALE_OK)
+        return false;
+    return yardsale_ceremony_accept_ingest(
+               accept_wire, accept_len, (int64_t)(100 + case_i), YSA_NOW,
+               partial_wire, ZSWAP_PARTIAL_WIRE_MAX_BYTES,
+               partial_len) == ZSWAP_CEREMONY_WIRE_RESPOND;
+}
+
+static int t_prevout_guard(void)
+{
+    int failures = 0;
+    enum {
+        PV_SERVE = 0,   /* honest body: the positive control */
+        PV_UNWIRED,     /* port left NULL */
+        PV_MISS,        /* fetcher finds nothing confirmed */
+        PV_WRONG_TOKEN, /* body holds a different token id */
+        PV_WRONG_AMT,   /* body holds less than the ad's amount */
+        PV_WRONG_VAL,   /* claimed sat value does not match the body */
+        PV_WRONG_SPK,   /* claimed script does not match the body */
+        PV_CASES
+    };
+    static const char *const names[PV_CASES] = {
+        "guard: honest token input signs and broadcasts",
+        "guard: unwired port refuses to sign",
+        "guard: unconfirmed token input refuses",
+        "guard: wrong token id refuses",
+        "guard: short token amount refuses",
+        "guard: wrong sat value refuses",
+        "guard: wrong output script refuses",
+    };
+
+    for (int c = 0; c < PV_CASES; c++) {
+        ysa_reset_all();
+        struct zswap_quote_v1 ad;
+        uint8_t partial_wire[ZSWAP_PARTIAL_WIRE_MAX_BYTES];
+        size_t partial_len = 0;
+        bool ready = ysa_guard_setup(c, &ad, partial_wire, &partial_len);
+
+        struct zswap_seller_accept seller;
+        bool have_seller = ysa_seller(&seller);
+        struct zswap_buyer_accept buyer;
+        bool have_buyer = ysa_buyer(&buyer);
+        bool armed = ready && have_seller && have_buyer;
+        if (armed) {
+            uint8_t spk[25];
+            struct privkey bk;
+            ysa_key(&bk, 0x42);
+            size_t spk_len =
+                ysa_p2pkh_script(&bk, spk) == 25 ? 25 : 0;
+            switch (c) {
+            case PV_SERVE:
+                armed = ysa_prevout_arm(&ad, &seller);
+                break;
+            case PV_UNWIRED:
+                armed = ysa_prevout_arm(&ad, &seller);
+                break;
+            case PV_MISS:
+                armed = ysa_prevout_arm(&ad, &seller);
+                ysa_prevout_serve = false;
+                break;
+            case PV_WRONG_TOKEN: {
+                uint8_t bad[32];
+                memcpy(bad, ad.token_id, 32);
+                bad[0] ^= 0x01;
+                armed = ysa_prevout_build(seller.token_input.txid, bad,
+                                          ad.token_amount,
+                                          seller.token_input.value_sats,
+                                          seller.token_input.script_pub_key,
+                                          seller.token_input.script_len);
+                break;
+            }
+            case PV_WRONG_AMT:
+                armed = ysa_prevout_build(
+                    seller.token_input.txid, ad.token_id,
+                    ad.token_amount - 1,
+                    seller.token_input.value_sats,
+                    seller.token_input.script_pub_key,
+                    seller.token_input.script_len);
+                break;
+            case PV_WRONG_VAL:
+                armed = ysa_prevout_build(
+                    seller.token_input.txid, ad.token_id,
+                    ad.token_amount,
+                    seller.token_input.value_sats - 1,
+                    seller.token_input.script_pub_key,
+                    seller.token_input.script_len);
+                break;
+            case PV_WRONG_SPK:
+                armed = spk_len == 25 &&
+                    ysa_prevout_build(
+                        seller.token_input.txid, ad.token_id,
+                        ad.token_amount,
+                        seller.token_input.value_sats, spk, 25);
+                break;
+            default:
+                armed = false;
+                break;
+            }
+        }
+
+        /* The buyer's half: ports wired per case (UNWIRED leaves the
+         * chain-content port NULL; the positive control alone may
+         * broadcast). */
+        struct ysa_broadcast_capture broadcast = {0};
+        if (armed) {
+            if (c != PV_UNWIRED)
+                yardsale_ceremony_set_prevout_fetch(
+                    ysa_prevout_fetch_fn, NULL);
+            yardsale_ceremony_set_broadcast(ysa_broadcast_capture_fn,
+                                            &broadcast);
+        }
+        int verdict = armed
+            ? yardsale_ceremony_partial_ingest(partial_wire, partial_len,
+                                               (int64_t)(100 + c), YSA_NOW)
+            : ZSWAP_CEREMONY_WIRE_DROP;
+        bool pass = armed && verdict == ZSWAP_CEREMONY_WIRE_DROP &&
+            broadcast.count == (c == PV_SERVE ? 1 : 0);
+        printf("  yardsale_app: %s... %s\n", names[c], pass ? "OK" : "FAIL");
+        if (!pass)
+            failures++;
+    }
 
     ysa_reset_all();
     return failures;
@@ -1394,6 +1707,7 @@ int test_yardsale_app(void)
     failures += t_simnet_atomic_purchase();
     failures += t_webbuy_plan_gate();
     failures += t_ingress_negatives();
+    failures += t_prevout_guard();
     failures += t_peer_clamp();
     failures += t_seller_web_endpoint();
     failures += t_known_sellers();
