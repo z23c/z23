@@ -74,7 +74,9 @@ the boundary and observed the dirty flag, generation, and persistence timer.
 
 ## Remaining acceptance
 
-The repository's 154 lint gates passed. The first full release suite ran 961
+The repository's full lint gate set passed; `make lint` prints what it ran,
+and the canonical list lives in the LINT-GATES block of
+docs/DEFENSIVE_CODING.md. The first full release suite ran 961
 of 970 registered groups and exposed the strict-profile onion test race; the
 corrected test passed twice without cache. The exact committed tree still
 requires a complete release ship gate. Fleet health is established only after
