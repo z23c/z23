@@ -32,6 +32,7 @@ struct reachability_entry {
 
 struct reachability_backoff {
   bool used;
+  bool was_authenticated;
   uint8_t node_id[32];
   uint64_t next_mono;
   uint8_t attempts;
@@ -282,16 +283,39 @@ void boot_zcode_dht_reachability_drive(
     size_t peer_count, struct vcs_zcode_dht_time now) {
   if (!svc || !svc->connman)
     return;
+
+  /* A FRESH authenticated session earns exactly one clean probe budget:
+   * clearing the ladder on every steady-state tick would let any peer
+   * that merely stays connected pin its dial delay at the base forever
+   * (and nuke its own table slot identity with it). Sessions gone from
+   * this tick's view lose the credit below, so a genuine reconnect
+   * clears once while flapping pays each time. */
   for (size_t i = 0; peers && i < peer_count; i++) {
-    if (peers[i].authenticated) {
-      reach_lock();
-      struct reachability_backoff *backoff =
-          backoff_for_locked(peers[i].node_id);
-      if (backoff)
-        memset(backoff, 0, sizeof(*backoff));
-      zcl_mutex_unlock(&g_reach_lock);
+    if (!peers[i].authenticated)
+      continue;
+    reach_lock();
+    struct reachability_backoff *backoff =
+        backoff_for_locked(peers[i].node_id);
+    if (backoff && !backoff->was_authenticated) {
+      backoff->attempts = 0;
+      backoff->next_mono = 0;
+      backoff->was_authenticated = true;
     }
+    zcl_mutex_unlock(&g_reach_lock);
   }
+  reach_lock();
+  for (size_t i = 0; i < ZENDP_DIR_MAX; i++) {
+    if (!g_reach.backoff[i].used)
+      continue;
+    bool seen = false;
+    for (size_t p = 0; peers && !seen && p < peer_count; p++)
+      seen = peers[p].authenticated &&
+             memcmp(g_reach.backoff[i].node_id, peers[p].node_id,
+                    32) == 0;
+    if (!seen)
+      g_reach.backoff[i].was_authenticated = false;
+  }
+  zcl_mutex_unlock(&g_reach_lock);
 
   uint8_t requests[DHT_REACH_REQUEST_MAX][32];
   size_t request_count = 0;

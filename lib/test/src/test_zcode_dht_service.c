@@ -703,55 +703,12 @@ static bool space16_policy_allows(
       observer->policy, action, &subject);
 }
 
-static bool space16_swarm_fetch(
-    struct space16_observer *observer, const uint8_t transport[32],
-    const uint64_t *providers, size_t provider_count,
-    size_t maximum_wire_bytes) {
-  uint8_t key[33] = {0};
-  key[0] = 2;
-  struct vcs_package_store_summary summaries[64];
-  size_t summary_count = vcs_package_store_list_summaries(
-      observer->provider_store, true, summaries, 64);
-  const struct vcs_package_store_summary *summary = NULL;
-  for (size_t i = 0; i < summary_count; i++)
-    if (memcmp(summaries[i].root, transport, 32) == 0)
-      summary = &summaries[i];
-  if (!summary)
-    return false;
-  for (size_t i = 0; i < provider_count; i++) {
-    key[32] = (uint8_t)providers[i];
-    if (!vcs_swarm_engine_peer_add(observer->swarm, providers[i], key))
-      return false;
-    struct vcs_package_swarm_message announced;
-    memset(&announced, 0, sizeof(announced));
-    announced.type = VCS_PACKAGE_SWARM_ANNOUNCE;
-    memcpy(announced.body.announce.package_root, transport, 32);
-    announced.body.announce.manifest_bytes = summary->manifest_bytes;
-    announced.body.announce.file_count = summary->file_count;
-    announced.body.announce.total_bytes = summary->total_bytes;
-    announced.body.announce.total_chunks = summary->total_chunks;
-    uint8_t frame[VCS_SWARM_OUTBOUND_FRAME_MAX];
-    size_t frame_len = 0;
-    if (!vcs_package_swarm_serialize(
-            &announced, frame, sizeof(frame), &frame_len))
-      return false;
-    struct vcs_swarm_frame_result handled = vcs_swarm_engine_handle_frame(
-        observer->swarm, providers[i], frame, frame_len, 0,
-        observer->now_ms);
-    free(handled.reply);
-    if (handled.penalty != VCS_SWARM_PENALTY_NONE)
-      return false;
-  }
-  enum vcs_swarm_fetch_result started =
-      vcs_swarm_engine_fetch_from_bounded(
-          observer->swarm, transport, 0, observer->now_ms,
-          providers, provider_count, maximum_wire_bytes);
-  if (started != VCS_SWARM_FETCH_OK &&
-      started != VCS_SWARM_FETCH_ALREADY_COMPLETE) {
-    printf("space16 swarm start=%s\n",
-           vcs_swarm_fetch_result_string(started));
-    return false;
-  }
+/* Shared WANT/data exchange: tick the downloader, answer every WANT from
+ * the provider store with real bytes, until the download completes or
+ * fails. Both fetch variants below ride this pump — only how the
+ * downloader first learns its provider differs. */
+static bool space16_swarm_pump(
+    struct space16_observer *observer, const uint8_t transport[32]) {
   for (uint64_t round = 0; round < 64; round++) {
     vcs_swarm_engine_tick(observer->swarm, 0,
                           observer->now_ms + round + 1u);
@@ -839,6 +796,97 @@ static bool space16_swarm_fetch(
   }
   printf("space16 swarm rounds exhausted\n");
   return false;
+}
+
+static bool space16_swarm_fetch(
+    struct space16_observer *observer, const uint8_t transport[32],
+    const uint64_t *providers, size_t provider_count,
+    size_t maximum_wire_bytes) {
+  uint8_t key[33] = {0};
+  key[0] = 2;
+  struct vcs_package_store_summary summaries[64];
+  size_t summary_count = vcs_package_store_list_summaries(
+      observer->provider_store, true, summaries, 64);
+  const struct vcs_package_store_summary *summary = NULL;
+  for (size_t i = 0; i < summary_count; i++)
+    if (memcmp(summaries[i].root, transport, 32) == 0)
+      summary = &summaries[i];
+  if (!summary)
+    return false;
+  for (size_t i = 0; i < provider_count; i++) {
+    key[32] = (uint8_t)providers[i];
+    if (!vcs_swarm_engine_peer_add(observer->swarm, providers[i], key))
+      return false;
+    struct vcs_package_swarm_message announced;
+    memset(&announced, 0, sizeof(announced));
+    announced.type = VCS_PACKAGE_SWARM_ANNOUNCE;
+    memcpy(announced.body.announce.package_root, transport, 32);
+    announced.body.announce.manifest_bytes = summary->manifest_bytes;
+    announced.body.announce.file_count = summary->file_count;
+    announced.body.announce.total_bytes = summary->total_bytes;
+    announced.body.announce.total_chunks = summary->total_chunks;
+    uint8_t frame[VCS_SWARM_OUTBOUND_FRAME_MAX];
+    size_t frame_len = 0;
+    if (!vcs_package_swarm_serialize(
+            &announced, frame, sizeof(frame), &frame_len))
+      return false;
+    struct vcs_swarm_frame_result handled = vcs_swarm_engine_handle_frame(
+        observer->swarm, providers[i], frame, frame_len, 0,
+        observer->now_ms);
+    free(handled.reply);
+    if (handled.penalty != VCS_SWARM_PENALTY_NONE)
+      return false;
+  }
+  enum vcs_swarm_fetch_result started =
+      vcs_swarm_engine_fetch_from_bounded(
+          observer->swarm, transport, 0, observer->now_ms,
+          providers, provider_count, maximum_wire_bytes);
+  if (started != VCS_SWARM_FETCH_OK &&
+      started != VCS_SWARM_FETCH_ALREADY_COMPLETE) {
+    printf("space16 swarm start=%s\n",
+           vcs_swarm_fetch_result_string(started));
+    return false;
+  }
+  return space16_swarm_pump(observer, transport);
+}
+
+/* The boot discovery lane's shape: NO announce frames exist — the
+ * provider evidence arrives through locally verified DHT records and is
+ * applied via the peer_offer seam. The download must still complete on
+ * real manifest/chunk transfers once offers stand in for ads. */
+static bool space16_swarm_fetch_offered(
+    struct space16_observer *observer, const uint8_t transport[32],
+    const uint64_t *providers, size_t provider_count) {
+  struct vcs_package_store_summary summaries[64];
+  size_t summary_count = vcs_package_store_list_summaries(
+      observer->provider_store, true, summaries, 64);
+  bool hosted = false;
+  for (size_t i = 0; i < summary_count; i++)
+    if (memcmp(summaries[i].root, transport, 32) == 0)
+      hosted = true;
+  if (!hosted)
+    return false;
+  uint8_t key[33] = {0};
+  key[0] = 2;
+  for (size_t i = 0; i < provider_count; i++) {
+    key[32] = (uint8_t)providers[i];
+    if (!vcs_swarm_engine_peer_add(observer->swarm, providers[i], key))
+      return false;
+    /* The seam under test: verified evidence, never an announce wire. */
+    if (!vcs_swarm_engine_peer_offer(observer->swarm, providers[i],
+                                     transport))
+      return false;
+  }
+  vcs_swarm_engine_schedule_ready(observer->swarm, 0, observer->now_ms);
+  enum vcs_swarm_fetch_result started = vcs_swarm_engine_fetch(
+      observer->swarm, transport, 0, observer->now_ms);
+  if (started != VCS_SWARM_FETCH_OK &&
+      started != VCS_SWARM_FETCH_ALREADY_COMPLETE) {
+    printf("space16 offered start=%s\n",
+           vcs_swarm_fetch_result_string(started));
+    return false;
+  }
+  return space16_swarm_pump(observer, transport);
 }
 
 static enum vcs_space_scout_manifest_result space16_observe_local(
@@ -3538,6 +3586,32 @@ static int test_sparse_space16_network(void) {
   SPACE16_REQUIRE(vcs_zcode_dht_service_provider_route(
       net.service[origin_a], net.now.wall_unix, &selector, &route));
   SPACE16_REQUIRE(route.authenticated_count == 1);
+
+  /* Announcement-free recovery, end to end: this route stands in for the
+   * boot discovery lane's result and the offer seam replaces announce
+   * frames entirely — yet real manifest/chunk bytes still transfer. */
+  {
+    char offer_store_dir[512];
+    (void)snprintf(offer_store_dir, sizeof(offer_store_dir),
+                   "%s/space-offer-store", net.dir[origin_a]);
+    SPACE16_REQUIRE(mkdir(offer_store_dir, 0700) == 0);
+    struct vcs_package_store *offer_store = vcs_package_store_open(
+        offer_store_dir, VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
+    SPACE16_REQUIRE(offer_store != NULL);
+    struct vcs_swarm_engine *offer_swarm =
+        vcs_swarm_engine_create(offer_store, NULL, NULL, NULL, NULL);
+    SPACE16_REQUIRE(offer_swarm != NULL);
+    struct space16_observer offer_observer = {
+        .local_store = offer_store,
+        .provider_store = provider_store,
+        .swarm = offer_swarm,
+        .now_ms = 100};
+    SPACE16_REQUIRE(space16_swarm_fetch_offered(
+        &offer_observer, blobs[0], route.peer_ids,
+        route.authenticated_count));
+    vcs_swarm_engine_free(offer_swarm);
+    vcs_package_store_close(offer_store);
+  }
 
   (void)snprintf(workspace_a, sizeof(workspace_a),
                  "%s/space-cas", net.dir[origin_a]);
