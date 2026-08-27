@@ -133,17 +133,30 @@ void zcl_native_handle_zcode_toolchain_show(
     /* A live package-host flag does not prove the durable config also carries
      * buildworker=1. `z23 join` is idempotent and detects the compiler before
      * writing that fact, so it is the truthful action until both live flags
-     * prove this process joined compile work. */
-    (void)json_push_kv_str(
-        &reply->data, "next_action",
-        !join.joined
-            ? "z23 join"
-            : !verifier_present
-            ? "Place zclassic23-package-verify next to this binary, then rerun "
-              "zcode work toolchain. A worker cannot prove without the "
-              "confined verifier."
-            : "Compare capsule_root with zcode work toolchain on the proving "
-              "node. Independent compile evidence needs the same capsule.");
+     * prove this process joined compile work. Name THIS datadir: a bare
+     * `z23 join` would write the canonical node instead of the one just
+     * inspected. */
+    char next[1024];
+    const char *next_action;
+    if (!join.joined) {
+        const char *dd = zcl_native_command_datadir();
+        int n = (dd && dd[0])
+            ? snprintf(next, sizeof(next), "z23 join -datadir=%s", dd)
+            : snprintf(next, sizeof(next), "z23 join");
+        if (n < 0 || (size_t)n >= sizeof(next))
+            (void)snprintf(next, sizeof(next), "z23 join");
+        next_action = next;
+    } else if (!verifier_present) {
+        next_action =
+            "Place zclassic23-package-verify next to this binary, then rerun "
+            "zcode work toolchain. A worker cannot prove without the "
+            "confined verifier.";
+    } else {
+        next_action =
+            "Compare capsule_root with zcode work toolchain on the proving "
+            "node. Independent compile evidence needs the same capsule.";
+    }
+    (void)json_push_kv_str(&reply->data, "next_action", next_action);
     (void)json_push_kv_str(&reply->data, "next_safe_command",
                            !join.joined
                                ? "join"
