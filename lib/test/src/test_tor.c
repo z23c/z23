@@ -652,6 +652,70 @@ static int test_tor_log_has_descriptor_publication(void)
     return failures;
 }
 
+/* The dynhost reassembly buffer is the one place an unauthenticated
+ * onion client directly drives node memory: everything it sends before
+ * its request completes lands there. Pin the admission rule (capped,
+ * overflow-safe) and the completion predicate's honest refusals, so the
+ * cap the drain loop enforces cannot quietly regress to unbounded
+ * accumulation — and so a stalled or oversized client is bounded by the
+ * cap, never by the client's goodwill.
+ *
+ * The handlers live in the vendored Tor archive, which stub-only builds
+ * (Darwin, offline default) do not link; the weak declarations resolve
+ * to NULL there and the checks report a skip instead of failing the
+ * link. On any host that builds the full embedded Tor — the profile the
+ * serving node ships — they are live assertions. */
+static int test_dynhost_reassembly_cap(void)
+{
+    extern size_t dynhost_reassembly_cap(void) __attribute__((weak));
+    extern int dynhost_reassembly_admits(size_t accumulated, size_t incoming)
+        __attribute__((weak));
+    extern int dynhost_webserver_has_complete_request(const uint8_t *data,
+                                                      size_t len)
+        __attribute__((weak));
+
+    int failures = 0;
+    printf("test_dynhost_reassembly_cap: ");
+
+    if (!dynhost_reassembly_cap || !dynhost_reassembly_admits ||
+        !dynhost_webserver_has_complete_request) {
+        printf("SKIP (stub Tor build: vendored dynhost not linked)\n");
+        return 0;
+    }
+
+    const size_t cap = dynhost_reassembly_cap();
+    bool ok = cap >= 65536; /* must hold the production response buffer */
+    ok = ok && dynhost_reassembly_admits(0, cap) == 1;
+    ok = ok && dynhost_reassembly_admits(0, cap + 1) == 0;
+    ok = ok && dynhost_reassembly_admits(cap - 1, 1) == 1;
+    ok = ok && dynhost_reassembly_admits(cap, 1) == 0;
+    ok = ok && dynhost_reassembly_admits(SIZE_MAX, 1) == 0;
+
+    /* Completion semantics the cap leans on: a stream with no header
+     * terminator never completes, and a POST that declares a body it
+     * never sends never completes either — both used to accumulate
+     * forever, both now hit the cap and close. */
+    static const uint8_t GET_FULL[] = "GET / HTTP/1.1\r\nHost: a\r\n\r\n";
+    static const uint8_t GET_PARTIAL[] = "GET / HTTP/1.1\r\nHost: a\r\n";
+    static const uint8_t POST_STALLED[] =
+        "POST / HTTP/1.1\r\nHost: a\r\n"
+        "Content-Length: 2147483647\r\n\r\n";
+    ok = ok && dynhost_webserver_has_complete_request(
+                    GET_FULL, sizeof(GET_FULL) - 1) == 1;
+    ok = ok && dynhost_webserver_has_complete_request(
+                    GET_PARTIAL, sizeof(GET_PARTIAL) - 1) == 0;
+    ok = ok && dynhost_webserver_has_complete_request(
+                    POST_STALLED, sizeof(POST_STALLED) - 1) == 0;
+
+    if (ok) {
+        printf("OK\n");
+    } else {
+        printf("FAIL (cap=%zu)\n", cap);
+        failures++;
+    }
+    return failures;
+}
+
 int test_tor(void)
 {
     int failures = 0;
@@ -674,6 +738,9 @@ int test_tor(void)
     failures += test_tor_set_address_null_clears();
     failures += test_tor_log_last_ephemeral_address();
     failures += test_tor_log_has_descriptor_publication();
+
+    /* dynhost reassembly admission cap (vendored handlers under test) */
+    failures += test_dynhost_reassembly_cap();
 
     printf("Tor integration: %d failures\n", failures);
     return failures;

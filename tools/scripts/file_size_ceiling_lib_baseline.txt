@@ -24,7 +24,7 @@
 lib/crypto/src/ed25519.c 1033
 lib/codeindex/src/codeindex_build.c 991
 lib/codeindex/src/codeindex_scan.c 1032
-lib/codeindex/src/codeindex_store.c 932
+lib/codeindex/src/codeindex_store.c 943
 lib/event/src/event.c 1055
 lib/hotswap/src/hotswap_loader.c 817
 lib/kernel/src/command_registry.c 2289
