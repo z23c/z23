@@ -29,6 +29,8 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -67,7 +69,8 @@ static int test_admit_ok(void)
     int failures = 0;
     TEST("hotswap_module_admit accepts a well-formed allowlisted module") {
         struct zcl_hotswap_module m = {
-            .abi_version = ZCL_HOTSWAP_MODULE_ABI_V2,
+            .abi_version = ZCL_HOTSWAP_MODULE_ABI_V3,
+            .core_sections = hotswap_core_sections_self(),
             .source_tu = STATUS_TU,   /* on config/hotswap_swappable.def */
             .leaf_count = 1,
             .leaves = k_status_leaves,
@@ -103,7 +106,8 @@ static int test_admit_missing_fields(void)
     int failures = 0;
     TEST("missing fields (NULL leaf fn) refused at stage=fields") {
         struct zcl_hotswap_module m = {
-            .abi_version = ZCL_HOTSWAP_MODULE_ABI_V2,
+            .abi_version = ZCL_HOTSWAP_MODULE_ABI_V3,
+            .core_sections = hotswap_core_sections_self(),
             .source_tu = STATUS_TU, .leaf_count = 1,
             .leaves = k_status_leaves_nullfn, .self_test = selftest_true,
         };
@@ -120,7 +124,8 @@ static int test_admit_allowlist(void)
     int failures = 0;
     TEST("a non-allowlisted source is refused at stage=allowlist (HARD LINE)") {
         struct zcl_hotswap_module m = {
-            .abi_version = ZCL_HOTSWAP_MODULE_ABI_V2,
+            .abi_version = ZCL_HOTSWAP_MODULE_ABI_V3,
+            .core_sections = hotswap_core_sections_self(),
             /* A consensus/validation TU — must NEVER be swappable. */
             .source_tu = "lib/consensus/src/pow.c",
             .leaf_count = 1, .leaves = k_consensus_leaves,
@@ -140,7 +145,8 @@ static int test_admit_leaf_not_owned(void)
     int failures = 0;
     TEST("an allowlisted source claiming a leaf it does not own is refused") {
         struct zcl_hotswap_module m = {
-            .abi_version = ZCL_HOTSWAP_MODULE_ABI_V2,
+            .abi_version = ZCL_HOTSWAP_MODULE_ABI_V3,
+            .core_sections = hotswap_core_sections_self(),
             .source_tu = STATUS_TU, .leaf_count = 1,
             .leaves = k_consensus_leaves, .self_test = selftest_true,
         };
@@ -158,7 +164,8 @@ static int test_admit_selftest_fail(void)
     int failures = 0;
     TEST("a failing module self_test is refused at stage=self_test (rollback)") {
         struct zcl_hotswap_module m = {
-            .abi_version = ZCL_HOTSWAP_MODULE_ABI_V2,
+            .abi_version = ZCL_HOTSWAP_MODULE_ABI_V3,
+            .core_sections = hotswap_core_sections_self(),
             .source_tu = STATUS_TU, .leaf_count = 1,
             .leaves = k_status_leaves, .self_test = selftest_false,
         };
@@ -168,6 +175,374 @@ static int test_admit_selftest_fail(void)
         ASSERT(strstr(why, "synthetic") != NULL);
         PASS();
     } _test_next:;
+    return failures;
+}
+
+/* ── The sealed-core SECTION declaration (ABI v3) ──────────────────────────
+ *
+ * A module records WHICH sealed sections it compiled against, and admission
+ * verifies them IN ADDITION to the unchanged ROOT pin. Every case below is a
+ * REFUSAL that did not exist before; none of them makes anything admissible.
+ *
+ * The fixtures start from the resident's own table and mutate ONE thing, so a
+ * green result cannot come from the fixture being wrong in some other way. */
+
+/* A narrowed declaration: the sections a status-controller module actually
+ * reaches. Built at runtime from the resident table so it can never go stale
+ * against a re-cut seal. */
+#define SECT_MAX 64
+struct sect_fixture {
+    struct zcl_hotswap_core_section rows[SECT_MAX];
+    struct zcl_hotswap_core_sections decl;
+};
+
+/* Copy the resident's whole declaration into a mutable fixture. */
+static void sect_fixture_init(struct sect_fixture *f)
+{
+    const struct zcl_hotswap_core_sections *self = hotswap_core_sections_self();
+    uint32_t n = self->count < SECT_MAX ? self->count : SECT_MAX;
+    for (uint32_t i = 0; i < n; i++)
+        f->rows[i] = self->sections[i];
+    f->decl.tree = self->tree;
+    f->decl.count = n;
+    f->decl.sections = f->rows;
+}
+
+static struct zcl_hotswap_module sect_module(
+    const struct zcl_hotswap_core_sections *decl)
+{
+    struct zcl_hotswap_module m = {
+        .abi_version = ZCL_HOTSWAP_MODULE_ABI_V3,
+        .core_sections = decl,
+        .source_tu = STATUS_TU,
+        .leaf_count = 1,
+        .leaves = k_status_leaves,
+        .self_test = selftest_true,
+    };
+    return m;
+}
+
+static int test_sections_full_declaration_admitted(void)
+{
+    int failures = 0;
+    TEST("sections: a module declaring every resident section is admitted") {
+        struct sect_fixture f;
+        sect_fixture_init(&f);
+        ASSERT_EQ((int)f.decl.count, (int)ZCL_CORE_SEAL_SECTION_COUNT);
+        struct zcl_hotswap_module m = sect_module(&f.decl);
+        char stage[64] = {0}, why[256] = {0};
+        ASSERT(hotswap_module_admit(&m, stage, sizeof(stage), why, sizeof(why)));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_sections_narrowed_declaration_admitted(void)
+{
+    int failures = 0;
+    TEST("sections: a NARROWED declaration (a real compile closure) is "
+         "admitted") {
+        /* Exactly what the build derives for a controller that reaches only
+         * core/chainparams/include/chain — the one sealed header the whole
+         * module set has in common. */
+        static const char *const want[] = {
+            "core/chainparams/include/chain",
+        };
+        struct sect_fixture f;
+        f.decl.tree = hotswap_core_seal_tree();
+        f.decl.count = 0;
+        f.decl.sections = f.rows;
+        for (size_t i = 0; i < sizeof(want) / sizeof(want[0]); i++) {
+            const char *d = hotswap_core_section_digest(want[i]);
+            ASSERT(d != NULL);
+            f.rows[f.decl.count].path = want[i];
+            f.rows[f.decl.count].digest = d;
+            f.decl.count++;
+        }
+        struct zcl_hotswap_module m = sect_module(&f.decl);
+        char stage[64] = {0}, why[256] = {0};
+        ASSERT(hotswap_module_admit(&m, stage, sizeof(stage), why, sizeof(why)));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_sections_wrong_digest_refused(void)
+{
+    int failures = 0;
+    TEST("sections: a WRONG section digest is refused at stage=sections") {
+        struct sect_fixture f;
+        sect_fixture_init(&f);
+        /* One byte of one row. Everything else — ROOT, TREE, the other 22
+         * rows, every leaf — is exactly what the resident has. */
+        static char bad[65];
+        snprintf(bad, sizeof(bad), "%s", f.rows[0].digest);
+        bad[63] = (bad[63] == 'a') ? 'b' : 'a';
+        const char *mutated_path = f.rows[0].path;
+        f.rows[0].digest = bad;
+
+        struct zcl_hotswap_module m = sect_module(&f.decl);
+        char stage[64] = {0}, why[256] = {0};
+        ASSERT(!hotswap_module_admit(&m, stage, sizeof(stage), why, sizeof(why)));
+        ASSERT_EQ(strcmp(stage, "sections"), 0);
+        ASSERT(strstr(why, mutated_path) != NULL);
+        ASSERT(strstr(why, "mismatch") != NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_sections_unknown_section_refused(void)
+{
+    int failures = 0;
+    TEST("sections: a section this resident does not have is REFUSED, not "
+         "ignored") {
+        struct sect_fixture f;
+        sect_fixture_init(&f);
+        /* A module built from a tree where core/ had grown a directory this
+         * resident's sealed core has never heard of. */
+        ASSERT(hotswap_core_section_digest("core/futurework") == NULL);
+        f.rows[f.decl.count].path = "core/futurework";
+        f.rows[f.decl.count].digest =
+            "0000000000000000000000000000000000000000000000000000000000000000";
+        f.decl.count++;
+
+        struct zcl_hotswap_module m = sect_module(&f.decl);
+        char stage[64] = {0}, why[256] = {0};
+        ASSERT(!hotswap_module_admit(&m, stage, sizeof(stage), why, sizeof(why)));
+        ASSERT_EQ(strcmp(stage, "sections"), 0);
+        ASSERT(strstr(why, "core/futurework") != NULL);
+        ASSERT(strstr(why, "does not have") != NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_sections_tree_mismatch_refused(void)
+{
+    int failures = 0;
+    TEST("sections: a TREE mismatch is refused even when every SECTION row "
+         "matches") {
+        struct sect_fixture f;
+        sect_fixture_init(&f);
+        static char bad_tree[65];
+        snprintf(bad_tree, sizeof(bad_tree), "%s", hotswap_core_seal_tree());
+        bad_tree[0] = (bad_tree[0] == 'a') ? 'b' : 'a';
+        f.decl.tree = bad_tree;
+
+        struct zcl_hotswap_module m = sect_module(&f.decl);
+        char stage[64] = {0}, why[256] = {0};
+        ASSERT(!hotswap_module_admit(&m, stage, sizeof(stage), why, sizeof(why)));
+        ASSERT_EQ(strcmp(stage, "sections"), 0);
+        ASSERT(strstr(why, "TREE") != NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_sections_absent_declaration_refused(void)
+{
+    int failures = 0;
+    TEST("sections: a module declaring NO sections is refused — absence is "
+         "what a pre-v3 artifact looks like") {
+        struct zcl_hotswap_module m = sect_module(NULL);
+        char stage[64] = {0}, why[256] = {0};
+        ASSERT(!hotswap_module_admit(&m, stage, sizeof(stage), why, sizeof(why)));
+        ASSERT_EQ(strcmp(stage, "sections"), 0);
+        ASSERT(strstr(why, "no sealed-core sections") != NULL);
+
+        /* An empty-but-present declaration is the same refusal. */
+        struct sect_fixture f;
+        sect_fixture_init(&f);
+        f.decl.count = 0;
+        struct zcl_hotswap_module e = sect_module(&f.decl);
+        stage[0] = why[0] = '\0';
+        ASSERT(!hotswap_module_admit(&e, stage, sizeof(stage), why, sizeof(why)));
+        ASSERT_EQ(strcmp(stage, "sections"), 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_sections_duplicate_row_refused(void)
+{
+    int failures = 0;
+    TEST("sections: the same section declared twice is refused (a duplicate "
+         "could hide a mismatched second row)") {
+        struct sect_fixture f;
+        sect_fixture_init(&f);
+        f.rows[f.decl.count] = f.rows[0];
+        f.decl.count++;
+
+        struct zcl_hotswap_module m = sect_module(&f.decl);
+        char stage[64] = {0}, why[256] = {0};
+        ASSERT(!hotswap_module_admit(&m, stage, sizeof(stage), why, sizeof(why)));
+        ASSERT_EQ(strcmp(stage, "sections"), 0);
+        ASSERT(strstr(why, "twice") != NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* The v2 struct layout, verbatim: everything ABI v2 had, and nothing v3 added.
+ * Used to prove a retired-ABI artifact is refused WITHOUT its trailing bytes
+ * ever being read. */
+struct v2_module_layout {
+    uint32_t abi_version;
+    const char *source_tu;
+    uint32_t leaf_count;
+    const struct zcl_hotswap_leaf *leaves;
+    bool (*self_test)(char *err, size_t cap);
+};
+
+static int test_sections_old_abi_refused_without_overread(void)
+{
+    int failures = 0;
+    TEST("abi: a v2 module is refused at stage=abi WITHOUT reading past the "
+         "v2 layout (proved with a guard page)") {
+        /* v3 is strictly longer, so there IS something past a v2 object. */
+        ASSERT(sizeof(struct zcl_hotswap_module) > sizeof(struct v2_module_layout));
+
+        long page = sysconf(_SC_PAGESIZE);
+        ASSERT(page > 0);
+        unsigned char *region = mmap(NULL, (size_t)page * 2, PROT_READ | PROT_WRITE,
+                                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        ASSERT(region != MAP_FAILED);
+        /* Second page unreadable: any read past the v2 object faults. */
+        ASSERT_EQ(mprotect(region + page, (size_t)page, PROT_NONE), 0);
+
+        size_t off = (size_t)page - sizeof(struct v2_module_layout);
+        off &= ~(size_t)(_Alignof(struct v2_module_layout) - 1);
+        struct v2_module_layout *v2 =
+            (struct v2_module_layout *)(void *)(region + off);
+        v2->abi_version = ZCL_HOTSWAP_MODULE_ABI_V2;
+        v2->source_tu = STATUS_TU;
+        v2->leaf_count = 1;
+        v2->leaves = k_status_leaves;
+        v2->self_test = selftest_true;
+
+        char stage[64] = {0}, why[256] = {0};
+        /* If admit read core_sections it would touch the guard page and die. */
+        ASSERT(!hotswap_module_admit((const struct zcl_hotswap_module *)(void *)v2,
+                                     stage, sizeof(stage), why, sizeof(why)));
+        ASSERT_EQ(strcmp(stage, "abi"), 0);
+        ASSERT(strstr(why, "abi_version") != NULL);
+        ASSERT(strstr(why, "rebuild") != NULL);
+
+        ASSERT_EQ(munmap(region, (size_t)page * 2), 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* The compiled section table is a MIRROR of core/MANIFEST.sha3. Nothing in the
+ * build forces it to be current, so re-derive it here from the manifest and
+ * demand exact agreement. A seal re-cut that lands without
+ * `make core-seal-sections` fails this case instead of silently leaving every
+ * module declaring the OLD section digests.
+ *
+ * Read relative to the repo root, the directory the test binaries run from. */
+static int test_sections_mirror_matches_manifest(void)
+{
+    int failures = 0;
+    TEST("sections: the compiled table matches core/MANIFEST.sha3 exactly") {
+        FILE *f = fopen("core/MANIFEST.sha3", "r");
+        ASSERT(f != NULL);
+        const struct zcl_hotswap_core_sections *self =
+            hotswap_core_sections_self();
+        char line[1024];
+        char tree[128] = {0};
+        uint32_t seen = 0;
+        bool bad_row = false;
+        while (fgets(line, sizeof(line), f)) {
+            size_t len = strlen(line);
+            while (len && (line[len - 1] == '\n' || line[len - 1] == '\r'))
+                line[--len] = '\0';
+            if (strncmp(line, "TREE ", 5) == 0) {
+                const char *p = line + 5;
+                while (*p == ' ') p++;
+                snprintf(tree, sizeof(tree), "%s", p);
+                continue;
+            }
+            if (strncmp(line, "SECTION ", 8) != 0)
+                continue;
+            /* SECTION  <files>  <pathlen>  <hex>  <path> */
+            unsigned files = 0, pathlen = 0;
+            char hex[128] = {0};
+            int consumed = 0;
+            if (sscanf(line, "SECTION %u %u %127s %n", &files, &pathlen, hex,
+                       &consumed) != 3 || consumed <= 0) {
+                bad_row = true;
+                break;
+            }
+            (void)files;
+            const char *path = line + consumed;
+            if (strlen(path) != pathlen) { bad_row = true; break; }
+            if (seen >= self->count) { bad_row = true; break; }
+            if (strcmp(self->sections[seen].path, path) != 0 ||
+                strcmp(self->sections[seen].digest, hex) != 0) {
+                printf("\n  drift at row %u: compiled %s=%s manifest %s=%s\n",
+                       seen, self->sections[seen].path,
+                       self->sections[seen].digest, path, hex);
+                bad_row = true;
+                break;
+            }
+            seen++;
+        }
+        fclose(f);
+        ASSERT(!bad_row);
+        /* Same count, same order, same TREE — regenerate with
+         * `make core-seal-sections` if this fails. */
+        ASSERT_EQ((int)seen, (int)self->count);
+        ASSERT_EQ(strcmp(tree, self->tree), 0);
+        ASSERT_EQ(strcmp(self->tree, hotswap_core_seal_tree()), 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_sections_table_is_well_formed(void)
+{
+    int failures = 0;
+    TEST("sections: the resident table is sorted, unique and 64-hex") {
+        const struct zcl_hotswap_core_sections *self =
+            hotswap_core_sections_self();
+        ASSERT(self->count > 0);
+        ASSERT_EQ((int)strlen(self->tree), 64);
+        for (uint32_t i = 0; i < self->count; i++) {
+            ASSERT(self->sections[i].path != NULL);
+            ASSERT(self->sections[i].path[0] != '\0');
+            ASSERT_EQ((int)strlen(self->sections[i].digest), 64);
+            for (const char *p = self->sections[i].digest; *p; p++)
+                ASSERT((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'f'));
+            if (i)
+                ASSERT(strcmp(self->sections[i - 1].path,
+                              self->sections[i].path) < 0);
+            /* Round-trips through the lookup admission uses. */
+            ASSERT_EQ(strcmp(hotswap_core_section_digest(self->sections[i].path),
+                             self->sections[i].digest), 0);
+        }
+        ASSERT(hotswap_core_section_digest("core/nope") == NULL);
+        ASSERT(hotswap_core_section_digest("") == NULL);
+        ASSERT(hotswap_core_section_digest(NULL) == NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_module_sections(void)
+{
+    int failures = 0;
+    failures += test_sections_table_is_well_formed();
+    failures += test_sections_mirror_matches_manifest();
+    failures += test_sections_full_declaration_admitted();
+    failures += test_sections_narrowed_declaration_admitted();
+    failures += test_sections_wrong_digest_refused();
+    failures += test_sections_unknown_section_refused();
+    failures += test_sections_tree_mismatch_refused();
+    failures += test_sections_absent_declaration_refused();
+    failures += test_sections_duplicate_row_refused();
+    failures += test_sections_old_abi_refused_without_overread();
     return failures;
 }
 
@@ -479,6 +854,7 @@ int test_hotswap_module(void)
 {
     int failures = 0;
     failures += test_module_admit();
+    failures += test_module_sections();
     failures += test_swappable_allowlist();
     failures += test_activation_gate();
     failures += test_loader_refuses_unconfined_input();

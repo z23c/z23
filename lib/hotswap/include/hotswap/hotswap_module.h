@@ -43,6 +43,9 @@
 
 /* Supplies ZCL_CORE_SEAL_ROOT — the consensus pin both halves compare. */
 #include "hotswap/core_seal_root.h"
+/* Supplies ZCL_CORE_SEAL_TREE + ZCL_CORE_SEAL_SECTION_ROWS — the SAME sealed
+ * set at directory granularity, verified IN ADDITION to the ROOT above. */
+#include "hotswap/core_seal_sections.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -65,9 +68,22 @@ typedef void (*zcl_hotswap_handler_fn)(const struct zcl_command_request *request
  * module still stamped v1 has an incompatible struct layout and is refused at
  * stage=abi before any field but abi_version is read. */
 #define ZCL_HOTSWAP_MODULE_ABI_V1 1u
+/* ABI v2 was the multi-leaf {abi,source_tu,leaf_count,leaves,self_test}
+ * layout. RETIRED by the sealed-core SECTION declaration: v3 appends
+ * `core_sections`, so a v2 struct is SHORTER than what a v3 resident reads.
+ * Reading its trailing field would be a read past the object — which is
+ * exactly why abi_version stays the FIRST member at offset 0 and is compared
+ * before any other field is touched. A v2 module is refused at stage=abi. */
+#define ZCL_HOTSWAP_MODULE_ABI_V2 2u
 /* Bump only on an incompatible layout change to struct zcl_hotswap_module. A
  * loaded .so whose abi_version != this is refused before any handler runs. */
-#define ZCL_HOTSWAP_MODULE_ABI_V2 2u
+#define ZCL_HOTSWAP_MODULE_ABI_V3 3u
+
+/* Hard ceiling on declared sealed-core sections per module. core/MANIFEST.sha3
+ * currently emits ZCL_CORE_SEAL_SECTION_COUNT of them; the ceiling is a bound
+ * on the loop, not a policy, and is deliberately far above that so widening
+ * the sealed set never silently truncates a declaration. */
+#define ZCL_HOTSWAP_MODULE_MAX_SECTIONS 256U
 
 /* Hard ceiling on leaves per module. Matches the command registry's
  * ZCL_COMMAND_HANDLER_OVERRIDE_MAX so one module can never exceed what a
@@ -92,6 +108,73 @@ typedef void (*zcl_hotswap_handler_fn)(const struct zcl_command_request *request
  * is unknown. */
 #define ZCL_HOTSWAP_MODULE_CORE_SEAL_ROOT_SYMBOL "zcl_hotswap_module_core_seal_root"
 
+/* ── THE SECTION DECLARATION (ABI v3, purely ADDITIVE) ─────────────────────
+ *
+ * WHAT CHANGED. The ROOT pin above is a WHOLE-TREE pin: any change to any of
+ * the sealed files moves ROOT and invalidates every module. That check is
+ * UNCHANGED and still runs first. What v3 adds is a RECORD: the module also
+ * carries the SECTION digests of the sealed directories that appeared in its
+ * own compile closure, plus the sealed set's TREE root. The resident verifies
+ * all of them AFTER the ROOT comparison, so nothing that was inadmissible
+ * becomes admissible; some artifacts that were admissible are now refused.
+ *
+ * WHICH SECTIONS A MODULE DECLARES — and why it cannot drift. The build
+ * derives them from the depfile the module compile already writes (-MD): every
+ * dependency that is a sealed file in core/MANIFEST.sha3 contributes the
+ * DEEPEST SECTION containing it. Nothing is hand-maintained, so adding an
+ * #include of a sealed header changes the declaration on the very next build.
+ * A module compiled without that derivation (no ZCL_HOTSWAP_MODULE_SECTION_ROWS
+ * in scope) falls back to declaring the resident's ENTIRE sealed section set,
+ * which is the maximally conservative statement, never a weaker one.
+ *
+ * ANCESTORS ARE DELIBERATELY NOT DECLARED. A SECTION digest is an N-ary node
+ * over that directory RECURSIVELY, so declaring "core" would pin every sealed
+ * sibling the module never saw. The deepest containing section is the narrowest
+ * TRUE statement the build can make.
+ *
+ * WHAT THE TREE FIELD BUYS. TREE is the root node over the same 70 files that
+ * ROOT folds, but in lib/codeindex's source-Merkle dialect (tagged leaf/node
+ * preimages, N-ary, path-bound) rather than the flat `path\0 filehash` fold.
+ * Two structurally different folds over the same bytes: agreement on both is a
+ * genuine second opinion, not a restatement.
+ *
+ * WHAT THIS IS NOT. It is NOT a relaxation of the ROOT pin and must not be read
+ * as licence for one. A module calls resident symbols whose bodies call sealed
+ * consensus code; no section declaration can see that transitive reach. Section
+ * granularity is recorded here as EVIDENCE. Acting on it is a separate,
+ * owner-level safety decision. */
+#define ZCL_HOTSWAP_MODULE_CORE_SEAL_TREE_SYMBOL "zcl_hotswap_module_core_seal_tree"
+#define ZCL_HOTSWAP_MODULE_CORE_SECTIONS_SYMBOL "zcl_hotswap_module_core_sections"
+
+/* One sealed-core directory node: the SECTION line's path and its digest. */
+struct zcl_hotswap_core_section {
+    const char *path;   /* sealed directory, repo-relative, no trailing '/' */
+    const char *digest; /* 64 lowercase hex, codeindex source-Merkle node */
+};
+
+/* What a module (or the resident) says about the sealed core it compiled
+ * against: the whole-set TREE root plus the sections it actually reached. */
+struct zcl_hotswap_core_sections {
+    const char *tree;                              /* == ZCL_CORE_SEAL_TREE */
+    uint32_t count;                                /* 1..MAX_SECTIONS */
+    const struct zcl_hotswap_core_section *sections;
+};
+
+/* X-macro expansion used by ZCL_CORE_SEAL_SECTION_ROWS and by the build's
+ * per-module ZCL_HOTSWAP_MODULE_SECTION_ROWS. One definition, both consumers,
+ * so the resident table and the module table can never disagree in shape. */
+#define ZCL_HOTSWAP_SECTION_ROW(path_, digest_) { (path_), (digest_) },
+
+/* The resident's OWN sealed-core view: every SECTION in core/MANIFEST.sha3 as
+ * of this build, plus TREE. This is what a module built from THIS tree with no
+ * per-module narrowing declares. */
+const struct zcl_hotswap_core_sections *hotswap_core_sections_self(void);
+/* The resident's digest for a sealed SECTION path, or NULL if it has no such
+ * section — which is how a module declaring an unknown section is refused. */
+const char *hotswap_core_section_digest(const char *path);
+/* ZCL_CORE_SEAL_TREE, for callers that must not include the generated header. */
+const char *hotswap_core_seal_tree(void);
+
 /* One re-pointed command leaf. */
 struct zcl_hotswap_leaf {
     const char *name;            /* canonical READY read-only leaf path */
@@ -101,11 +184,15 @@ struct zcl_hotswap_leaf {
 /* Exported (verbatim symbol name ZCL_HOTSWAP_MODULE_SYMBOL) by each swappable
  * .so. Resolved and fully validated before any `fn` is called. */
 struct zcl_hotswap_module {
-    uint32_t abi_version;                     /* == ZCL_HOTSWAP_MODULE_ABI_V2 */
+    uint32_t abi_version;                     /* == ZCL_HOTSWAP_MODULE_ABI_V3 */
     const char *source_tu;                    /* row in hotswap_swappable.def */
     uint32_t leaf_count;                      /* 1..MAX_LEAVES */
     const struct zcl_hotswap_leaf *leaves;    /* leaf_count entries */
     bool (*self_test)(char *err, size_t cap); /* structural health hook */
+    /* v3, REQUIRED: the sealed-core sections this module compiled against.
+     * NULL is refused at stage=sections — absence is what a pre-v3 artifact
+     * looks like, and those are the ones whose section vintage is unknown. */
+    const struct zcl_hotswap_core_sections *core_sections;
 };
 
 /* ── Module emitter (invoke ONCE at file scope in a swappable TU) ──────────
@@ -130,15 +217,38 @@ struct zcl_hotswap_module {
 #define ZCL_HOTSWAP_MODULE_SOURCE_TU __FILE__
 #endif
 
+/* The build force-includes (-include) a generated per-module header defining
+ * ZCL_HOTSWAP_MODULE_SECTION_ROWS from the module's OWN depfile: the deepest
+ * SECTION containing each sealed file in its compile closure. When that header
+ * is absent — any compile that did not go through the derivation — the module
+ * declares the resident's ENTIRE sealed section set instead. That fallback is
+ * the maximally conservative declaration (it pins every sealed directory), so
+ * a missing derivation can never make a module easier to admit. */
+#ifndef ZCL_HOTSWAP_MODULE_SECTION_ROWS
+#define ZCL_HOTSWAP_MODULE_SECTION_ROWS ZCL_CORE_SEAL_SECTION_ROWS
+#endif
+
 #ifdef ZCL_HOTSWAP_MODULE_GEN
 #define ZCL_HOTSWAP_MODULE_LEAVES(leaves_, self_test_)                       \
     const char zcl_hotswap_module_core_seal_root[] = ZCL_CORE_SEAL_ROOT;     \
+    const char zcl_hotswap_module_core_seal_tree[] = ZCL_CORE_SEAL_TREE;     \
+    static const struct zcl_hotswap_core_section                             \
+        zcl_hotswap_module_section_rows_[] = {                               \
+        ZCL_HOTSWAP_MODULE_SECTION_ROWS                                      \
+    };                                                                       \
+    const struct zcl_hotswap_core_sections zcl_hotswap_module_core_sections = { \
+        .tree = zcl_hotswap_module_core_seal_tree,                           \
+        .count = (uint32_t)(sizeof(zcl_hotswap_module_section_rows_) /       \
+                            sizeof(zcl_hotswap_module_section_rows_[0])),    \
+        .sections = zcl_hotswap_module_section_rows_,                        \
+    };                                                                       \
     const struct zcl_hotswap_module zcl_hotswap_module = {                   \
-        .abi_version = ZCL_HOTSWAP_MODULE_ABI_V2,                            \
+        .abi_version = ZCL_HOTSWAP_MODULE_ABI_V3,                            \
         .source_tu = ZCL_HOTSWAP_MODULE_SOURCE_TU,                           \
         .leaf_count = (uint32_t)(sizeof(leaves_) / sizeof((leaves_)[0])),    \
         .leaves = (leaves_),                                                 \
         .self_test = (self_test_),                                           \
+        .core_sections = &zcl_hotswap_module_core_sections,                  \
     };
 #else
 #define ZCL_HOTSWAP_MODULE_LEAVES(leaves_, self_test_) /* node/release: omitted */
@@ -186,8 +296,8 @@ struct hotswap_activate_report {
      * lib/crypto nor its dispatch table. Either field is "" on any path that
      * failed before reaching the artifact's bytes; test both before use. */
     char artifact_sha3_256[65];
-    /* precheck|authorize|dlopen|abi|fields|capacity|allowlist|duplicate|
-     * probe|self_test|commit|verified|activated|release */
+    /* precheck|authorize|dlopen|abi|sections|fields|capacity|allowlist|
+     * duplicate|probe|self_test|commit|verified|activated|release */
     char stage[64];
     char error[256];      /* "" on ok */
 };
@@ -305,13 +415,14 @@ bool hotswap_activate_local(const char *so_path,
 bool hotswap_verify_module_so(const char *so_path, const char *expect_tu,
                               struct hotswap_activate_report *report);
 
-/* Pure admission check for a resolved module: ABI version, required fields,
- * the leaf-count ceiling, the swappable file+leaf allowlist, intra-module leaf
- * uniqueness, the presence of the file's declared probe leaf, and the module's
- * own self_test — the exact gauntlet hotswap_activate applies after dlsym,
- * factored out so it is unit-testable with a fabricated struct in ANY build (no
- * dlopen). On failure fills `stage` (one of "abi"|"fields"|"capacity"|
- * "allowlist"|"duplicate"|"probe"|"self_test") and `why`.
+/* Pure admission check for a resolved module: ABI version, the sealed-core
+ * SECTION + TREE declaration, required fields, the leaf-count ceiling, the
+ * swappable file+leaf allowlist, intra-module leaf uniqueness, the presence of
+ * the file's declared probe leaf, and the module's own self_test — the exact
+ * gauntlet hotswap_activate applies after dlsym, factored out so it is
+ * unit-testable with a fabricated struct in ANY build (no dlopen). On failure
+ * fills `stage` (one of "abi"|"sections"|"fields"|"capacity"|"allowlist"|
+ * "duplicate"|"probe"|"self_test") and `why`.
  * Returns true iff the module is admissible. */
 bool hotswap_module_admit(const struct zcl_hotswap_module *module,
                           char *stage, size_t stage_cap,

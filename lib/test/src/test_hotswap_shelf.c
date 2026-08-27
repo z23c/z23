@@ -323,7 +323,8 @@ static bool drive_image(int idx, const char *source_tu,
     im->fn = k_img_fn[idx];
 
     struct zcl_hotswap_module mod = {
-        .abi_version = ZCL_HOTSWAP_MODULE_ABI_V2,
+        .abi_version = ZCL_HOTSWAP_MODULE_ABI_V3,
+        .core_sections = hotswap_core_sections_self(),
         .source_tu = source_tu,
         .leaves = leafv,
         .leaf_count = leaf_count,
@@ -429,7 +430,8 @@ static int t_pure_publish_never_shelves(void)
         const char *leaves[1] = { LEAF_PROBE };
         struct zcl_hotswap_leaf leafv[1] = { { LEAF_PROBE, h_img0 } };
         struct zcl_hotswap_module mod = {
-            .abi_version = ZCL_HOTSWAP_MODULE_ABI_V2,
+            .abi_version = ZCL_HOTSWAP_MODULE_ABI_V3,
+            .core_sections = hotswap_core_sections_self(),
             .source_tu = SHELF_TU,
             .leaves = leafv,
             .leaf_count = 1,
