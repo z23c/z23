@@ -23,7 +23,6 @@
 #include "vcs/package_store.h"
 
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 #define SF_NOW 1780000000LL
@@ -731,15 +730,10 @@ static int sf_flow(void)
 
 int test_shop_fulfill(void)
 {
-    /* The flow seeds its fixture via the want-post leaf, whose caller
-     * now_unix override is valved behind ZCL_ALLOW_INPUT_CLOCK (SF_NOW is
-     * a fixed constant, not this machine's clock). */
-    setenv("ZCL_ALLOW_INPUT_CLOCK", "1", 1);
     int failures = 0;
     failures += sf_codec();
     failures += sf_registry_whitelist();
     failures += sf_receipt_authorities();
     failures += sf_flow();
-    unsetenv("ZCL_ALLOW_INPUT_CLOCK");
     return failures;
 }

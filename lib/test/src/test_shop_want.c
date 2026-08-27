@@ -48,10 +48,8 @@
 
 #include <sqlite3.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <time.h>
 
 #define SW_CHECK(name, expr) do {                                       \
     printf("shop_want: %s... ", (name));                                \
@@ -939,30 +937,24 @@ static int shop_want_store_not_migrated(void)
     return failures;
 }
 
-/* ── 10. the caller-clock valve ────────────────────────────────────── */
-/* Without ZCL_ALLOW_INPUT_CLOCK=1 every want leaf runs on this node's
- * own wall clock: a caller may declare any now_unix it likes, but only
- * the node's time persists as board evidence or gates lifetimes — the
- * year-2100 forgery below must not mint an unaccountable row whose stamp
- * says 2100. Runs on the node clock by unsetting the valve around itself;
- * the single bounded freshness comparison against time(NULL) pins the
- * node-stamp contract while everything else stays fixed-constant. */
-static int shop_want_input_clock_valve(void)
+/* ── 10. input-clock authority ─────────────────────────────────────── */
+/* Test builds pin time through now_unix so every fixture above is
+ * hermetic; shape validation still precedes any honoring. The release
+ * fork refuses the override outright — shw_now's compile-time twin of
+ * shf_now — and needs no fixture here (there is no runtime valve to
+ * close). What test builds pin: malformed and non-positive clocks are
+ * named refusals before anything else is inspected, and an accepted
+ * override lands verbatim as the stored stamp. */
+static int shop_want_input_clock(void)
 {
     int failures = 0;
     struct json_value input;
     struct zcl_command_reply reply;
     char dir[512];
-    const int64_t FORGED = 4102444800LL /* 2100-01-01 */;
-    const int64_t FORGED_EXPIRES = FORGED + 7LL * 86400LL;
 
-    test_make_tmpdir(dir, sizeof(dir), "shopwant", "clockvalve");
-    SW_CHECK("valve fixture node.db", sw_boot_db(dir));
+    test_make_tmpdir(dir, sizeof(dir), "shopwant", "clock");
+    SW_CHECK("clock fixture node.db", sw_boot_db(dir));
 
-    unsetenv("ZCL_ALLOW_INPUT_CLOCK");
-
-    /* A malformed now_unix still refuses when the valve is closed —
-     * validation precedes the override, in either regime. */
     json_init(&input);
     json_set_object(&input);
     (void)json_push_kv_str(&input, "datadir", dir);
@@ -970,88 +962,49 @@ static int shop_want_input_clock_valve(void)
     (void)json_push_kv_str(&input, "criteria", "malformed clock probe");
     (void)json_push_kv_str(&input, "now_unix", "not-a-clock");
     sw_call(zcl_native_handle_shop_want_post, &input, &reply);
-    SW_CHECK("closed valve: malformed now_unix is still BAD_NOW_UNIX",
+    SW_CHECK("a malformed now_unix is BAD_NOW_UNIX",
              reply.status == ZCL_COMMAND_STATUS_FAILED &&
              strcmp(reply.error.code, "BAD_NOW_UNIX") == 0);
     zcl_command_reply_free(&reply);
     json_free(&input);
 
-    /* The forged far-future window: legitimate shape, forged authorship.
-     * It posts under either regime (the expiry genuinely lies ahead), so
-     * the regime difference shows up where it matters — the stamp. */
-    char secret[65];
-    sw_secret_hex(0xC3, secret);
     json_init(&input);
     json_set_object(&input);
     (void)json_push_kv_str(&input, "datadir", dir);
-    (void)json_push_kv_str(&input, "buyer_secret", secret);
     (void)json_push_kv_int(&input, "amount_zatoshi", 500000);
-    (void)json_push_kv_str(&input, "criteria",
-                           "a standing ad declared from the year 2100");
-    (void)json_push_kv_int(&input, "issued_unix", FORGED);
-    (void)json_push_kv_int(&input, "expires_unix", FORGED_EXPIRES);
-    (void)json_push_kv_int(&input, "now_unix", FORGED);
-    (void)json_push_kv_bool(&input, "confirm", true);
+    (void)json_push_kv_str(&input, "criteria", "zero clock probe");
+    (void)json_push_kv_int(&input, "now_unix", 0);
     sw_call(zcl_native_handle_shop_want_post, &input, &reply);
-    SW_CHECK("closed valve: the far-future want still posts",
-             reply.status == ZCL_COMMAND_STATUS_PASSED);
-    char want_id[65];
-    snprintf(want_id, sizeof(want_id), "%s", sw_str(&reply.data, "want_id"));
+    SW_CHECK("a non-positive now_unix is BAD_NOW_UNIX",
+             reply.status == ZCL_COMMAND_STATUS_FAILED &&
+             strcmp(reply.error.code, "BAD_NOW_UNIX") == 0);
     zcl_command_reply_free(&reply);
     json_free(&input);
 
-    int64_t now_at_test = (int64_t)time(NULL);
+    /* The accepted override persists verbatim — the contract every
+     * fixed-constant fixture in this file relies on. */
+    char want_id[65];
+    SW_CHECK("the pinned-clock want posts",
+             sw_post_one(dir, 0x44, want_id));
     json_init(&input);
     json_set_object(&input);
     (void)json_push_kv_str(&input, "datadir", dir);
     (void)json_push_kv_str(&input, "want_id", want_id);
     sw_call(zcl_native_handle_shop_want_status, &input, &reply);
     const struct json_value *want = json_get(&reply.data, "want");
-    int64_t posted = want ? json_get_int(json_get(want, "posted_unix")) : -1;
-    int64_t status_now =
-        json_get_int(json_get(&reply.data, "now_unix"));
-    SW_CHECK("closed valve: posted stamp is THIS node's clock "
-             "(bounded freshness), never the caller's",
-             llabs(posted - now_at_test) <= 900 &&
-             llabs(status_now - now_at_test) <= 900 &&
-             posted != FORGED);
+    SW_CHECK("the pinned stamp persists verbatim",
+             reply.status == ZCL_COMMAND_STATUS_PASSED && want &&
+             json_get_int(json_get(want, "posted_unix")) == SW_NOW);
     zcl_command_reply_free(&reply);
     json_free(&input);
 
     test_rm_rf(dir);
-
-    /* Valve open again: the caller's clock wins verbatim — this is the
-     * determinism contract every other case in this file relies on. */
-    setenv("ZCL_ALLOW_INPUT_CLOCK", "1", 1);
-    char open_dir[512];
-    test_make_tmpdir(open_dir, sizeof(open_dir), "shopwant",
-                     "clockvalve-open");
-    SW_CHECK("open-valve fixture node.db", sw_boot_db(open_dir));
-    char open_want[65];
-    SW_CHECK("open valve: the fixture want posted", sw_post_one(
-                 open_dir, 0x44, open_want));
-    int64_t stamp_via_status = 0;
-    json_init(&input);
-    json_set_object(&input);
-    (void)json_push_kv_str(&input, "datadir", open_dir);
-    (void)json_push_kv_str(&input, "want_id", open_want);
-    sw_call(zcl_native_handle_shop_want_status, &input, &reply);
-    want = json_get(&reply.data, "want");
-    stamp_via_status = want ? json_get_int(json_get(want, "posted_unix"))
-                            : -1;
-    zcl_command_reply_free(&reply);
-    json_free(&input);
-
-    SW_CHECK("open valve: the caller's clock is honored verbatim",
-             stamp_via_status == SW_NOW);
-    test_rm_rf(open_dir);
     return failures;
 }
 
 int test_shop_want(void)
 {
     int failures = 0;
-    setenv("ZCL_ALLOW_INPUT_CLOCK", "1", 1);
     failures += shop_want_codec();
     failures += shop_want_post_plan();
     failures += shop_want_post_commit();
@@ -1062,7 +1015,6 @@ int test_shop_want(void)
     failures += shop_want_expiry();
     failures += shop_want_list_budget();
     failures += shop_want_store_not_migrated();
-    failures += shop_want_input_clock_valve();
-    unsetenv("ZCL_ALLOW_INPUT_CLOCK");
+    failures += shop_want_input_clock();
     return failures;
 }

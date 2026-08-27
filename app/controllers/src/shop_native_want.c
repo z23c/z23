@@ -55,7 +55,6 @@
 #include <sqlite3.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #define SHW_TAG "native.app.shop.want"
@@ -98,29 +97,36 @@ static const char *shw_datadir(const struct zcl_command_request *request)
     return (dd && dd[0]) ? dd : NULL;
 }
 
-/* now_unix: the caller's clock is honored ONLY when this process opted in
- * with ZCL_ALLOW_INPUT_CLOCK=1 — a valve for hermetic leaf tests. Any
- * other caller runs on this node's own wall clock: persisted board state
- * (posted/cancelled stamps and every lifetime check) must be authored by
- * our time, never by whatever a script declares, or a forged year-2100
- * input would mint permanently-open wants and falsified cancellation
- * evidence. A malformed now_unix still refuses regardless of the valve.
- * Same input surface as the reputation leaf's. */
+/* now_unix: test builds may pin time through the input so leaves stay
+ * hermetic; a release command refuses the override outright — persisted
+ * board state (posted/cancelled stamps and every lifetime check) must be
+ * authored by this node's wall clock, never by whatever a script
+ * declares, or a forged year-2100 input would mint permanently-open
+ * wants and falsified cancellation evidence. A malformed override still
+ * refuses before it is honored in either regime. Compile-time twin of
+ * shf_now; no runtime environment valve exists. */
 static bool shw_now(const struct zcl_command_request *request,
                     int64_t *now_out, struct zcl_command_reply *reply)
 {
     int64_t now = clock_now_wall_ms() / 1000;
     const struct json_value *v = json_get(request->input, "now_unix");
     if (v) {
+#ifndef ZCL_TESTING
+        shw_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_DENIED,
+                 "NOW_OVERRIDE_FORBIDDEN", "validate",
+                 "now_unix is test-only; release commands use the node's "
+                 "wall clock for expiry and board-evidence decisions",
+                 "remove now_unix");
+        return false; // raw-return-ok:shw_fail-already-logged-and-set-the-reply-error
+#else
         if (v->type != JSON_INT || json_get_int(v) <= 0) {
             shw_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                      ZCL_COMMAND_EXIT_INVALID, "BAD_NOW_UNIX", "validate",
                      "now_unix must be a positive integer", "now_unix");
             return false;
         }
-        const char *clk = getenv("ZCL_ALLOW_INPUT_CLOCK");
-        if (clk && strcmp(clk, "1") == 0)
-            now = json_get_int(v);
+        now = json_get_int(v);
+#endif
     }
     *now_out = now;
     return true;
