@@ -45,6 +45,23 @@ leave stale or internally inconsistent state.
 - Remote activation queues systemd restart without waiting for `Type=notify`.
   The existing progress-aware observer now starts immediately, so a slow disk
   can reach the explicit SLOW verdict instead of blocking before observation.
+- Slow-host shutdown gives the derived flat-index/projection binding 120
+  seconds. A live rotating-disk shutdown spent 18 seconds writing the flat
+  file, crossed the former 20-second stage ceiling before binding, and forced
+  the next boot into a full 3,233,145-row projection scan. The wider
+  best-effort budget does not delay a completed stage.
+- DHT request replay admission is transactional across local backpressure.
+  Egress and replacement-probe saturation restore the exact displaced replay
+  row and carry zero peer-offence weight; local record capacity is no longer
+  misreported as peer flooding or identity failure.
+- Snapshot proof-of-work challenges use only requester-visible, explicitly
+  little-endian fields. Swarm provider offers retain signed expiry and are
+  removed before scheduling, and rendered datadirs are POSIX-shell quoted.
+- Hot-swap admission seals no more than 32 MiB before parsing, requires an
+  exact unique ABI and core seal, refuses all pre-map callbacks and ambiguous
+  ELF singleton tags, validates dynamic pointers against section metadata,
+  and checks every undefined symbol against the resident import contract
+  before `dlopen`. Every module producer omits runtime startup files.
 
 ## Evidence
 
@@ -71,8 +88,26 @@ hotswap artifact substitution REFUSED before receipt
 core seal root selftest      PASS
 ship remote transaction     PASS
 check-hex-codec-single       PASS
+test_shutdown_stagewatch     PASS  self_skips=0
+test_block_index_topup       PASS  self_skips=0
+test_net                     PASS  self_skips=0
+test_zcode_package_dev       PASS  self_skips=0
+test_zcode_swarm             PASS  self_skips=0
+zcode_dht_service            PASS  self_skips=0
+zcode_dht_frame_auth         PASS  self_skips=0
+hotswap_module_v2            PASS  self_skips=0
+real hotswap module          ADMITTED, MOUNTABLE; 47 imports resolved
+ship selftest + transaction  PASS
+lint-fast                    PASS
 git diff --check             PASS
 ```
+
+At `2026-08-27T02:07:25Z` on `rhett3.dev`, the clean shutdown began saving
+3,233,145 flat-index entries. The save completed at `02:07:43Z`; the
+`fast-restart-persist` 20-second watchdog fired before the projection binding
+was written. The following boot reported monotonically increasing
+`block_index.projection_topup` progress from zero, directly demonstrating the
+avoidable cold-start cost.
 
 The Yardsale acceptance specifically proved that `?confirm=true`,
 `confirm=true anything`, `confirm=true%00false`, and a malformed percent

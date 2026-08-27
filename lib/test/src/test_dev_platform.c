@@ -2259,7 +2259,7 @@ static bool dp_hotswap_cache_fixture_init(const char *root,
         "CC=%s\n"
         "COMPILER_ID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
         "DEV_CFLAGS=-DZCL_DEV_BUILD -ffile-prefix-map=%s=/zclassic23\n"
-        "HOTSWAP_MODULE_LDFLAGS=-shared -Wl,-Bsymbolic\n",
+        "HOTSWAP_MODULE_LDFLAGS=-shared -nostartfiles -Wl,-Bsymbolic\n",
         compiler, canonical_root);
     return n > 0 && n < (int)sizeof(flags) &&
            dp_mk_write(root, "build/hotswap/fast/flags.env", flags);

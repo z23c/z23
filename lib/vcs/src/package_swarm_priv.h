@@ -74,6 +74,9 @@ struct swarm_peer {
     uint8_t key[33];
     enum vcs_policy_tier tier;
     uint8_t ads[VCS_SWARM_MAX_PEER_ADS][32];
+    /* Zero means a live-session ANNOUNCE. A nonzero value is the exact
+     * signed-evidence expiry for an offer injected by peer_offer(). */
+    uint64_t ad_expires_at[VCS_SWARM_MAX_PEER_ADS];
     size_t ad_count;
     /* Roots WE already announced TO this peer (dedupe: repeat announce_to
      * calls queue only newly complete roots, so the transport glue can

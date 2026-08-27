@@ -2677,6 +2677,53 @@ static int zpd_test_commons_join_front_doors(void)
         ASSERT(strcmp(json_get_str(json_get(&toolchain.data, "join_flags")),
                       json_get_str(json_get(&guide.data, "join_flags")))
                == 0);
+        {
+            static const char datadir[] =
+                "/tmp/z23 commons'$(touch SHOULD_NOT_EXIST)\nsecond line";
+            static const char expected[] =
+                "z23 join -datadir='/tmp/z23 commons'\\''$(touch "
+                "SHOULD_NOT_EXIST)\nsecond line'";
+            struct json_value input;
+            json_init(&input);
+            json_set_object(&input);
+            ASSERT(json_push_kv_str(&input, "datadir", datadir));
+            struct zcl_command_request request = { .input = &input };
+            struct zcl_command_reply reply;
+            zcl_command_reply_init(&reply, "zcl.zcode_package_offered.v1");
+            zcl_native_handle_zcode_package_offered(&request, &reply);
+            ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+            const char *next = json_get_str(json_get(&reply.data,
+                                                     "next_command"));
+            ASSERT(next && strcmp(next, expected) == 0);
+            zcl_command_reply_free(&reply);
+            json_free(&input);
+        }
+        {
+            enum { DATADIR_LEN = 4393 };
+            char datadir[DATADIR_LEN + 1];
+            memset(datadir, 'a', DATADIR_LEN);
+            datadir[0] = '/';
+            datadir[DATADIR_LEN] = '\0';
+            struct json_value input;
+            json_init(&input);
+            json_set_object(&input);
+            ASSERT(json_push_kv_str(&input, "datadir", datadir));
+            struct zcl_command_request request = { .input = &input };
+            struct zcl_command_reply reply;
+            zcl_command_reply_init(&reply, "zcl.zcode_package_offered.v1");
+            zcl_native_handle_zcode_package_offered(&request, &reply);
+            ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+            const char *next = json_get_str(json_get(&reply.data,
+                                                     "next_command"));
+            static const char prefix[] = "z23 join -datadir='";
+            ASSERT(next && strncmp(next, prefix, sizeof(prefix) - 1u) == 0);
+            ASSERT(memcmp(next + sizeof(prefix) - 1u, datadir,
+                          DATADIR_LEN) == 0);
+            ASSERT(next[sizeof(prefix) - 1u + DATADIR_LEN] == '\'');
+            ASSERT(next[sizeof(prefix) + DATADIR_LEN] == '\0');
+            zcl_command_reply_free(&reply);
+            json_free(&input);
+        }
         zcl_command_reply_free(&toolchain);
         zcl_command_reply_free(&offered);
         json_free(&offered_input);

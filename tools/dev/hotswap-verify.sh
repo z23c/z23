@@ -156,7 +156,7 @@ for tu in "${TARGETS[@]}"; do
     lazy_so="$SCRATCH/$safe.verify.so"
     # Same object, same -Bsymbolic; only -z now becomes -z lazy.
     # shellcheck disable=SC2086
-    if ! $cc -shared -Wl,--build-id=none -Wl,-z,relro -Wl,-z,lazy \
+    if ! $cc -shared -nostartfiles -Wl,--build-id=none -Wl,-z,relro -Wl,-z,lazy \
              -Wl,-z,noexecstack -Wl,-Bsymbolic \
              -o "$lazy_so" "$obj" 2>"$SCRATCH/link.log"; then
         echo "  FAIL: verification re-link failed"

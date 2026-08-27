@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 /* The exact seal set this file applies, named once so the apply and the
@@ -45,7 +46,7 @@ static int si_fail(int fd_to_close, char *err, size_t err_cap,
     return -1;
 }
 
-/* Read the source to EOF and write every byte into the image.
+/* Copy exactly the size accepted before the memfd was created.
  *
  * Both halves are loops, not single calls, because read(2) and write(2) are
  * both permitted to move FEWER bytes than asked without it being an error —
@@ -55,15 +56,22 @@ static int si_fail(int fd_to_close, char *err, size_t err_cap,
  * verified twice does not match. EINTR is retried; every other errno fails
  * closed, because a partially copied image must never be handed back.
  *
- * Returns the number of bytes copied, or -1 with errno set. */
-static long long si_copy(int src_fd, int img_fd)
+ * A final one-byte read and a second fstat reject a source that grew during
+ * the copy.  This makes the work bound independent of a concurrent writer:
+ * the function never follows a moving EOF. */
+static int si_copy_exact(int src_fd, int img_fd, uint64_t expected)
 {
     unsigned char buf[64 * 1024];
-    long long total = 0;
-    for (;;) {
-        ssize_t n = read(src_fd, buf, sizeof(buf));
-        if (n == 0)
-            return total;               /* EOF: the whole source is in hand. */
+    uint64_t total = 0;
+    while (total < expected) {
+        size_t want = sizeof(buf);
+        if (expected - total < (uint64_t)want)
+            want = (size_t)(expected - total);
+        ssize_t n = read(src_fd, buf, want);
+        if (n == 0) {
+            errno = EIO;
+            return -1;
+        }
         if (n < 0) {
             if (errno == EINTR)
                 continue;
@@ -88,8 +96,29 @@ static long long si_copy(int src_fd, int img_fd)
                 errno = ENOSPC;
             return -1;
         }
-        total += n;
+        total += (uint64_t)n;
     }
+
+    for (;;) {
+        ssize_t n = read(src_fd, buf, 1);
+        if (n == 0)
+            break;
+        if (n > 0) {
+            errno = EFBIG;
+            return -1;
+        }
+        if (errno != EINTR)
+            return -1;
+    }
+
+    struct stat after;
+    if (fstat(src_fd, &after) != 0)
+        return -1;
+    if (after.st_size < 0 || (uint64_t)after.st_size != expected) {
+        errno = EAGAIN;
+        return -1;
+    }
+    return 0;
 }
 
 /* Apply the seals and then PROVE they took, rather than trusting that a
@@ -147,6 +176,27 @@ int hotswap_sealed_image_from_fd(int src_fd, char *err, size_t err_cap)
         return si_fail(-1, err, err_cap, "sealed image: invalid source fd %d",
                        src_fd);
 
+    struct stat before;
+    if (fstat(src_fd, &before) != 0) {
+        int saved = errno;
+        return si_fail(-1, err, err_cap,
+                       "sealed image: source fstat failed: %s",
+                       strerror(saved));
+    }
+    if (!S_ISREG(before.st_mode))
+        return si_fail(-1, err, err_cap,
+                       "sealed image: source fd %d is not a regular file",
+                       src_fd);
+    if (before.st_size <= 0)
+        return si_fail(-1, err, err_cap,
+                       "sealed image: source fd %d is empty (0 bytes); "
+                       "a zero-length artifact is not loadable", src_fd);
+    if ((uint64_t)before.st_size > ZCL_HOTSWAP_SEALED_IMAGE_MAX_BYTES)
+        return si_fail(-1, err, err_cap,
+                       "sealed image: source is %llu bytes, over the %llu byte ceiling",
+                       (unsigned long long)before.st_size,
+                       (unsigned long long)ZCL_HOTSWAP_SEALED_IMAGE_MAX_BYTES);
+
     /* Rewind the source rather than trusting its offset. Callers reach here
      * after a digest pass or a header sniff has already moved it, and a copy
      * that starts wherever the last reader stopped is an image missing its ELF
@@ -188,22 +238,11 @@ int hotswap_sealed_image_from_fd(int src_fd, char *err, size_t err_cap)
                        strerror(saved));
     }
 
-    long long copied = si_copy(src_fd, img_fd);
-    if (copied < 0) {
+    if (si_copy_exact(src_fd, img_fd, (uint64_t)before.st_size) != 0) {
         int saved = errno;
         return si_fail(img_fd, err, err_cap,
                        "sealed image: copy failed: %s", strerror(saved));
     }
-
-    /* An empty source is a refusal, not a zero-byte success. See the header:
-     * a zero-length artifact is never a loadable module, and accepting it here
-     * would convert a truncated or vanished file into an image that seals
-     * cleanly, hashes to a stable well-known digest, and only fails much later
-     * inside dlopen with a far vaguer message. Fail where the evidence is. */
-    if (copied == 0)
-        return si_fail(img_fd, err, err_cap,
-                       "sealed image: source fd %d is empty (0 bytes); "
-                       "a zero-length artifact is not loadable", src_fd);
 
     /* Seal AFTER the last byte is written — F_SEAL_WRITE applies immediately
      * and to this descriptor too, so any ordering that seals first cannot then

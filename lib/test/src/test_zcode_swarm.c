@@ -2515,9 +2515,11 @@ static int t_swarm_peer_offer(void)
         !sw_make_package(&p, 2, 91))
         return 1;
     const uint64_t pid = 7701;
+    const uint64_t evidence_expiry = 50;
 
     SW_CHECK("unknown peer refused",
-             !vcs_swarm_engine_peer_offer(n.engine, pid, p.root));
+             !vcs_swarm_engine_peer_offer(n.engine, pid, p.root,
+                                          evidence_expiry, 1));
     SW_CHECK("peer add", vcs_swarm_engine_peer_add(n.engine, pid, key));
 
     /* No announce anywhere: with zero advertisers nothing may queue. */
@@ -2538,7 +2540,8 @@ static int t_swarm_peer_offer(void)
     /* Locally verified DHT-style evidence becomes an offer; the event
      * edge wakes scheduling and the manifest WANT goes to this peer. */
     SW_CHECK("offer accepted",
-             vcs_swarm_engine_peer_offer(n.engine, pid, p.root));
+             vcs_swarm_engine_peer_offer(n.engine, pid, p.root,
+                                         evidence_expiry, 3));
     vcs_swarm_engine_tick(n.engine, SW_DAY, 3);
     struct vcs_package_swarm_object wants[2];
     SW_CHECK("want after offer", sw_drain_wants(&n, pid, wants, 2) == 1);
@@ -2549,7 +2552,21 @@ static int t_swarm_peer_offer(void)
 
     /* Idempotent: still true, consumes no further ad inventory. */
     SW_CHECK("idempotent offer",
-             vcs_swarm_engine_peer_offer(n.engine, pid, p.root));
+             vcs_swarm_engine_peer_offer(n.engine, pid, p.root,
+                                         evidence_expiry, 4));
+
+    /* The signed window is scheduler authority, not descriptive metadata.
+     * At expiry the peer stops advertising and the unfinished download
+     * returns to the discovery work list. */
+    vcs_swarm_engine_tick(n.engine, SW_DAY, evidence_expiry);
+    SW_CHECK("expired evidence unscheduled",
+             vcs_swarm_engine_unadvertised_roots(n.engine, stalled, 4) == 1 &&
+             memcmp(stalled[0], p.root, 32) == 0);
+    SW_CHECK("already-expired evidence refused",
+             !vcs_swarm_engine_peer_offer(n.engine, pid, p.root,
+                                          evidence_expiry, evidence_expiry));
+    SW_CHECK("renewed evidence accepted",
+             vcs_swarm_engine_peer_offer(n.engine, pid, p.root, 100, 51));
 
     /* Distinct roots fill the remaining slots exactly; the next one is
      * refused by name instead of writing past ads[]. */
@@ -2559,7 +2576,7 @@ static int t_swarm_peer_offer(void)
     while (filled < VCS_SWARM_MAX_PEER_ADS + 4) {
         junk[31] = (uint8_t)(0x40 + filled);
         junk[15] = (uint8_t)(filled << 2);
-        if (!vcs_swarm_engine_peer_offer(n.engine, pid, junk))
+        if (!vcs_swarm_engine_peer_offer(n.engine, pid, junk, 100, 51))
             break;
         filled++;
     }

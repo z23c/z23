@@ -287,8 +287,14 @@ static bool replay_seen(const struct replay_entry *ledger,
   return false;
 }
 
+struct replay_admission {
+  size_t slot;
+  struct replay_entry previous;
+};
+
 static bool replay_accept(struct replay_entry *ledger, const uint8_t id[16],
-                          uint64_t now_mono) {
+                          uint64_t now_mono,
+                          struct replay_admission *admission) {
   size_t oldest = 0;
   uint64_t oldest_seen = UINT64_MAX;
   for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_REPLAY_PER_PEER; i++) {
@@ -309,10 +315,17 @@ static bool replay_accept(struct replay_entry *ledger, const uint8_t id[16],
       oldest_seen = ledger[i].seen_mono;
     }
   }
+  admission->slot = oldest;
+  admission->previous = ledger[oldest];
   ledger[oldest].used = true;
   memcpy(ledger[oldest].id, id, 16);
   ledger[oldest].seen_mono = now_mono;
   return true;
+}
+
+static void replay_restore(struct replay_entry *ledger,
+                           const struct replay_admission *admission) {
+  ledger[admission->slot] = admission->previous;
 }
 
 static bool rate_accept(struct service_peer *p, uint64_t now_mono) {
@@ -560,7 +573,8 @@ bool vcs_zcode_dht_service_handle_frame(
   }
   struct replay_entry *ledger = request ? p->request_replay
                                         : p->response_replay;
-  if (!replay_accept(ledger, qid, now.monotonic_s)) {
+  struct replay_admission replay_admission;
+  if (!replay_accept(ledger, qid, now.monotonic_s, &replay_admission)) {
     reject(s, VCS_ZCODE_DHT_REJECT_REPLAY, rejected_out);
     return false;
   }
@@ -577,6 +591,14 @@ bool vcs_zcode_dht_service_handle_frame(
   enum vcs_zcode_dht_add_result ar =
       vcs_zcode_dht_table_add_contact(s->table, &c,
                                       (int64_t)now.monotonic_s);
+  if (ar == VCS_ZCODE_DHT_ADD_REJECTED_PENDING_CAP) {
+    /* The replacement-probe ledger belongs to this node. Its saturation
+     * says nothing about a cryptographically valid sender, and the sender
+     * must be able to retry once local capacity returns. */
+    replay_restore(ledger, &replay_admission);
+    reject(s, VCS_ZCODE_DHT_REJECT_BACKPRESSURE, rejected_out);
+    return false;
+  }
   if (ar >= VCS_ZCODE_DHT_ADD_REJECTED_SELF &&
       ar != VCS_ZCODE_DHT_ADD_REJECTED_PENDING) {
     reject(s, VCS_ZCODE_DHT_REJECT_IDENTITY, rejected_out);
@@ -599,8 +621,10 @@ bool vcs_zcode_dht_service_handle_frame(
   if (m.kind == VCS_ZCODE_DHT_MSG_FIND_NODE) {
     s->find_received++;
     if (!reply_nodes(s, p, qid, m.find_node.target_node_id, now.wall_unix,
-                     rejected_out))
+                     rejected_out)) {
+      replay_restore(ledger, &replay_admission);
       return false;
+    }
   } else if (m.kind == VCS_ZCODE_DHT_MSG_NODES) {
     s->nodes_received++;
     if (q->kind == QUERY_LOOKUP) {
@@ -647,10 +671,31 @@ bool vcs_zcode_dht_service_handle_frame(
     }
     vcs_zcode_dht_service_query_finish(s, q, QUERY_OUTCOME_RESPONSE, now);
   } else {
+    /* Every request record frame requires exactly one local reply. Refuse
+     * before mutating STORE state when our egress is already full. The
+     * per-peer STORE quota remains a peer CAP; capacity after that explicit
+     * check is local storage/serialization state and therefore backpressure. */
+    if (request &&
+        s->outbound_count >= VCS_ZCODE_DHT_SERVICE_MAX_OUTBOUND) {
+      replay_restore(ledger, &replay_admission);
+      reject(s, VCS_ZCODE_DHT_REJECT_BACKPRESSURE, rejected_out);
+      return false;
+    }
+    bool peer_store_cap = m.kind == VCS_ZCODE_DHT_MSG_STORE_RECORD &&
+        p->record_admissions >= VCS_ZCODE_DHT_SERVICE_MAX_RECORDS_PER_PEER;
     enum vcs_zcode_dht_reject_reason record_rejected =
         VCS_ZCODE_DHT_REJECT_CAP;
     if (!vcs_zcode_dht_service_records_handle(
             s, p, q, &m, now, &record_rejected)) {
+      if (record_rejected == VCS_ZCODE_DHT_REJECT_CAP && !peer_store_cap) {
+        record_rejected = VCS_ZCODE_DHT_REJECT_BACKPRESSURE;
+        if (m.kind == VCS_ZCODE_DHT_MSG_STORE_RECORD &&
+            p->record_admissions > 0)
+          p->record_admissions--;
+      }
+      if (record_rejected == VCS_ZCODE_DHT_REJECT_BACKPRESSURE) {
+        replay_restore(ledger, &replay_admission);
+      }
       reject(s, record_rejected, rejected_out);
       return false;
     }

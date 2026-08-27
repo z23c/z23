@@ -316,7 +316,8 @@ static bool hs_plan_load_locked(const char *root, bool *cache_hit,
     if (read_error || !next.cc[0] || !hs_lower_hex64(next.compiler_id) ||
         !next.cflags[0] || !next.ldflags[0] ||
         !strstr(next.cflags, "-DZCL_DEV_BUILD") ||
-        !strstr(next.ldflags, "-Wl,-Bsymbolic")) {
+        !strstr(next.ldflags, "-Wl,-Bsymbolic") ||
+        !strstr(next.ldflags, "-nostartfiles")) {
         hs_why(why, why_len,
                "resident action plan incomplete or missing safety flags");
         return false;
@@ -900,7 +901,7 @@ static bool hs_run_hotfork_link(
     const char *argv[HS_ARG_MAX];
     size_t argc = zcl_argv_split(cc, argv, HS_ARG_MAX);
     char version_arg[PATH_MAX + 32];
-    if (!argc || argc + 12 >= HS_ARG_MAX ||
+    if (!argc || argc + 13 >= HS_ARG_MAX ||
         snprintf(version_arg, sizeof(version_arg),
                  "-Wl,--version-script=%s", version_script) >=
             (int)sizeof(version_arg)) {
@@ -908,6 +909,7 @@ static bool hs_run_hotfork_link(
         return false;
     }
     argv[argc++] = "-shared";
+    argv[argc++] = "-nostartfiles";
     argv[argc++] = "-Wl,--build-id=none";
     argv[argc++] = "-Wl,-z,relro";
     argv[argc++] = "-Wl,-z,noexecstack";

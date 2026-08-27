@@ -115,6 +115,13 @@
 #define ZCL_HOTSWAP_SEALED_IMAGE_H
 
 #include <stddef.h>
+#include <stdint.h>
+
+/* Admission reads the complete image into bounded memory after sealing.  Apply
+ * the same ceiling before the memfd is created so an oversized or growing
+ * source cannot consume unbounded tmpfs pages before the probe gets a chance
+ * to reject it. */
+#define ZCL_HOTSWAP_SEALED_IMAGE_MAX_BYTES ((uint64_t)32u << 20)
 
 #ifdef __cplusplus
 extern "C" {
@@ -132,10 +139,11 @@ extern "C" {
  * On failure returns -1, closes anything it opened (no descriptor is leaked on
  * any path), and writes a specific NUL-terminated reason into `err` when `err`
  * is non-NULL and `err_cap` is non-zero. Failure is fail-closed in every case:
- * a negative src_fd, a non-seekable source such as a pipe (ESPIPE from the
- * initial lseek), an EMPTY source, a read or write error other than EINTR, a
- * memfd_create() that the kernel refuses, an F_ADD_SEALS that fails, or seals
- * that read back as anything other than the full set requested.
+ * a negative src_fd, a non-regular or non-seekable source, an EMPTY or
+ * oversized source, a source whose size changes while it is copied, a read or
+ * write error other than EINTR, a memfd_create() that the kernel refuses, an
+ * F_ADD_SEALS that fails, or seals that read back as anything other than the
+ * full set requested.
  *
  * An empty source is rejected rather than sealed. A zero-byte artifact is
  * never a loadable module — dlopen would reject it a moment later with a far

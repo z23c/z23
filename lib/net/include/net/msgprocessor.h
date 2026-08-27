@@ -593,15 +593,17 @@ void msg_headers_get_stats(struct msg_headers_stats *out);
 
 /* ── Client-puzzle PoW guard for zchunkreq / zblkreq ─────────────────
  * See msgprocessor_snapshot_serve.c for the full design note (stateless:
- * challenge = SHA3-256(domain||peer_ip||time_bucket) with a fixed public
- * lane tag, no per-peer server state). Difficulty is 0 (mechanism present,
- * gate open) until armed; arming stays deferred until requesters attach
- * nonces, and the derivation must stay requester-computable. */
+ * challenge = SHA3-256(domain || request-kind || request-index-le ||
+ * time-bucket-le), no per-peer server state). Every input is visible to the
+ * requester; in particular, the server-observed socket address is not part
+ * of the challenge because a client behind NAT cannot derive it. */
 #define SNAP_POW_BUCKET_SECS 60   /* challenge validity window (+1 grace)  */
 /* Fixed public lane tag hashing into every snapshot-puzzle challenge.
  * MUST stay requester-computable — never replace it with secret material
  * (see msgprocessor_snapshot_serve.c design note). */
 #define MSG_SNAP_POW_DOMAIN "z23.snappow.v1"
+#define MSG_SNAP_POW_KIND_CHUNK 1u
+#define MSG_SNAP_POW_KIND_BLOCK 2u
 #define SNAP_POW_MIN_BITS    12   /* idle floor: ~4k hashes, sub-ms        */
 #define SNAP_POW_MAX_BITS    22   /* saturated: ~4M hashes per request     */
 #define SNAP_POW_WINDOW_SECS 10   /* request-rate measurement window       */
@@ -613,10 +615,16 @@ bool msg_snapshot_pow_is_armed(void);
 
 /* Test hooks: drive/inspect the stateless snapshot PoW guard with an
  * explicit clock. Not intended for production call sites. */
-bool msgprocessor_test_snap_pow_solve(const uint8_t peer_ip[16],
+bool msgprocessor_test_snap_pow_challenge(uint8_t request_kind,
+                                          uint32_t request_index,
+                                          int64_t at_time,
+                                          uint8_t out[32]);
+bool msgprocessor_test_snap_pow_solve(uint8_t request_kind,
+                                      uint32_t request_index,
                                       int64_t at_time, int difficulty_bits,
                                       uint64_t *nonce_out);
-bool msgprocessor_test_snap_pow_admit_at(const uint8_t peer_ip[16],
+bool msgprocessor_test_snap_pow_admit_at(uint8_t request_kind,
+                                         uint32_t request_index,
                                          int64_t at_time,
                                          const uint64_t *nonce);
 int msgprocessor_test_snap_pow_bits_at(int64_t at_time);

@@ -371,7 +371,7 @@ relink_lazy() {
     # every other CC-driving recipe in this tree, so it must be word-split,
     # not quoted as one token.
     # shellcheck disable=SC2086
-    if ! $CC_CACHED -shared -Wl,--build-id=none -Wl,-z,relro -Wl,-z,lazy \
+    if ! $CC_CACHED -shared -nostartfiles -Wl,--build-id=none -Wl,-z,relro -Wl,-z,lazy \
              -Wl,-z,noexecstack -Wl,-Bsymbolic \
              -o "$out" "$obj" 2>"$SCRATCH/link.log"; then
         return 1

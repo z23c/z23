@@ -944,11 +944,10 @@ static bool activate_run(const char *so_path, const char *resolved_datadir,
      * never passed our lint. Reading the file's own claims first turns "run
      * it, then check it" into "check it, then run it".
      *
-     * What this does NOT buy: DT_INIT (the crt `_init` stub) is present on
-     * every clean module and still runs at dlopen, so a determined attacker
-     * who controls the artifact can still execute code inside this process.
-     * This raises the bar; it is not an isolation boundary. The only complete
-     * answer is a process boundary, which is a different design. */
+     * This is still not an isolation boundary: admitted leaf handlers execute
+     * inside this process after publication. It does ensure an artifact
+     * rejected before publication has no DT_INIT/init-array opportunity to run
+     * first. */
     int src_fd = open(so_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     struct stat st;
     if (src_fd < 0 || fstat(src_fd, &st) != 0 || !S_ISREG(st.st_mode)) {
@@ -971,78 +970,11 @@ static bool activate_run(const char *so_path, const char *resolved_datadir,
             close(fd);
             return act_reject(report, "shape", "%s", probe_err);
         }
-        /* Baseline is 1, NOT 0: the C runtime's own frame_dummy always
-         * occupies one .init_array slot. Comparing against zero would refuse
-         * every clean module ever built here. */
-        if (facts.init_array_entries >
-            ZCL_HOTSWAP_ELF_PROBE_CLEAN_INIT_ARRAY_ENTRIES) {
+        if (!hotswap_elf_pre_map_admit(
+                &facts, ZCL_CORE_SEAL_ROOT,
+                ZCL_HOTSWAP_MODULE_ABI_V2, probe_err, sizeof(probe_err))) {
             close(fd);
-            return act_reject(report, "shape",
-                "module declares %zu .init_array entries (clean baseline %zu): "
-                "it runs its own code at dlopen, before any admission stage",
-                facts.init_array_entries,
-                ZCL_HOTSWAP_ELF_PROBE_CLEAN_INIT_ARRAY_ENTRIES);
-        }
-        if (facts.preinit_array_entries > 0) {
-            close(fd);
-            return act_reject(report, "shape",
-                "module declares %zu .preinit_array entries; no toolchain in "
-                "this tree emits one", facts.preinit_array_entries);
-        }
-        /* DT_NEEDED is the LARGEST pre-admission execution vector, larger than
-         * this object's own .init_array: ld.so loads every needed library and
-         * runs ITS constructors before ours. A module whose own init_array is
-         * a clean 1 can still name evil.so here and get arbitrary code run at
-         * dlopen. DT_RPATH/DT_RUNPATH is the same hole one level down — it
-         * redirects which file a baseline-looking name resolves to.
-         *
-         * Measured baseline across all 93 artifacts in this tree: exactly one
-         * entry, "libc.so.6", and no runpath. The allowlist below is therefore
-         * as tight as the evidence allows. If a module ever legitimately needs
-         * another library, widen THIS list deliberately — do not relax the
-         * check. */
-        static const char *const k_allowed_needed[] = {
-            "libc.so.6", "libm.so.6",
-        };
-        if (facts.has_runpath) {
-            close(fd);
-            return act_reject(report, "shape",
-                "module carries DT_RPATH/DT_RUNPATH, which redirects where its "
-                "dependencies load from");
-        }
-        if (facts.needed_truncated) {
-            close(fd);
-            return act_reject(report, "shape",
-                "module declares %zu DT_NEEDED libraries, more than this probe "
-                "can enumerate; refusing what cannot be audited",
-                facts.needed_count);
-        }
-        for (size_t i = 0; i < facts.needed_count; i++) {
-            bool allowed = false;
-            for (size_t k = 0;
-                 k < sizeof(k_allowed_needed) / sizeof(k_allowed_needed[0]); k++)
-                if (strcmp(facts.needed[i], k_allowed_needed[k]) == 0) {
-                    allowed = true;
-                    break;
-                }
-            if (!allowed) {
-                close(fd);
-                return act_reject(report, "shape",
-                    "module depends on '%s'; its constructors would run at "
-                    "dlopen before any admission stage",
-                    facts.needed[i]);
-            }
-        }
-        /* The pin is re-checked by dlsym after the map. Checking it here too
-         * is not redundant: this reads the FILE, that reads what the loader
-         * actually bound, and a disagreement between them means the artifact
-         * is lying about itself. */
-        if (facts.core_seal_root[0] &&
-            strncmp(facts.core_seal_root, ZCL_CORE_SEAL_ROOT, 65) != 0) {
-            close(fd);
-            return act_reject(report, "consensus",
-                "module was built against sealed core %.16s..., this node runs "
-                "%.16s...", facts.core_seal_root, ZCL_CORE_SEAL_ROOT);
+            return act_reject(report, "shape", "%s", probe_err);
         }
     }
 
@@ -1226,17 +1158,13 @@ bool hotswap_verify_module_so(const char *so_path, const char *expect_tu,
             act_copy(report->error, sizeof(report->error), vprobe_err);
             return false;
         }
-        if (vfacts.init_array_entries >
-                ZCL_HOTSWAP_ELF_PROBE_CLEAN_INIT_ARRAY_ENTRIES ||
-            vfacts.preinit_array_entries > 0) {
+        if (!hotswap_elf_pre_map_admit(
+                &vfacts, ZCL_CORE_SEAL_ROOT,
+                ZCL_HOTSWAP_MODULE_ABI_V2, vprobe_err,
+                sizeof(vprobe_err))) {
             (void)close(fd);
             act_copy(report->stage, sizeof(report->stage), "shape");
-            snprintf(report->error, sizeof(report->error),
-                     "module runs its own code at dlopen "
-                     "(.init_array %zu, baseline %zu; .preinit_array %zu)",
-                     vfacts.init_array_entries,
-                     ZCL_HOTSWAP_ELF_PROBE_CLEAN_INIT_ARRAY_ENTRIES,
-                     vfacts.preinit_array_entries);
+            act_copy(report->error, sizeof(report->error), vprobe_err);
             return false;
         }
     }
@@ -1252,11 +1180,10 @@ bool hotswap_verify_module_so(const char *so_path, const char *expect_tu,
     (void)snprintf(vpinned, sizeof(vpinned), "/proc/self/fd/%d", fd);
 
     /* RTLD_LOCAL so the candidate's symbols never join the global scope and
-     * interpose on anything the verifying process later resolves. RTLD_LAZY
-     * defers function imports the resident node would satisfy, which is exactly
+     * interpose on anything the verifying process later resolves. The shared
+     * pre-map policy has proved that no artifact callback runs at load time.
+     * RTLD_LAZY defers function imports the resident node would satisfy, which is exactly
      * what lets a build-time verifier open an artifact with no node running.
-     * ELF constructors may still run during dlopen; this verifier is not an
-     * execution sandbox for an untrusted artifact.
      * Data and address-taken relocations still resolve eagerly, so a module
      * that references a body defined in a TU outside its own island still
      * fails here — correctly, since re-pointing such a leaf would dispatch
