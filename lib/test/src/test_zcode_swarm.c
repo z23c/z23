@@ -2205,6 +2205,38 @@ static int t_swarm_bounded_provider(void)
                                          &peer, 1) == VCS_SWARM_FETCH_OK &&
              vcs_swarm_engine_download_status(n.engine, p.root, &status) &&
              status.maximum_package_bytes == 0);
+
+    /* Bound-lift authority: only unrestricted demand may lift a scout
+     * ceiling. fetch_from carries no bound of its own, so before the
+     * !restricted guard a restricted rebind silently un-bound — and
+     * persisted — a live ceiling. */
+    SW_CHECK("provider bound: operator cancel frees the ordinary slot",
+             vcs_swarm_engine_cancel(n.engine, p.root, 1));
+    SW_CHECK("provider bound: bounded scout re-arms on the freed slot",
+             vcs_swarm_engine_fetch_from_bounded(
+                 n.engine, p.root, SW_DAY, 5, &peer, 1, bound) ==
+                 VCS_SWARM_FETCH_OK &&
+             vcs_swarm_engine_download_status(n.engine, p.root, &status) &&
+             status.state == VCS_SWARM_DL_WANT_MANIFEST &&
+             status.maximum_package_bytes == bound);
+    SW_CHECK("provider bound: restricted rebind cannot lift the ceiling",
+             vcs_swarm_engine_fetch_from(n.engine, p.root, SW_DAY, 5,
+                                         &peer, 1) ==
+                 VCS_SWARM_FETCH_OK &&
+             vcs_swarm_engine_download_status(n.engine, p.root, &status) &&
+             status.maximum_package_bytes == bound);
+    vcs_swarm_engine_free(n.engine);
+    n.engine = vcs_swarm_engine_create(n.store, n.book, n.zcode_dir,
+                                       sw_score_contributor, NULL);
+    SW_CHECK("provider bound: engine restarts", n.engine != NULL);
+    SW_CHECK("provider bound: refused lift left no widening on disk",
+             vcs_swarm_engine_download_status(n.engine, p.root, &status) &&
+             status.maximum_package_bytes == bound);
+    SW_CHECK("provider bound: ordinary demand lifts the scout ceiling",
+             vcs_swarm_engine_fetch(n.engine, p.root, SW_DAY, 6) ==
+                 VCS_SWARM_FETCH_OK &&
+             vcs_swarm_engine_download_status(n.engine, p.root, &status) &&
+             status.maximum_package_bytes == 0);
     sw_free_package(&p);
     sw_node_close(&n);
     test_rm_rf_recursive(n.datadir);

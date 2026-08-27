@@ -1705,14 +1705,20 @@ static enum vcs_swarm_fetch_result swarm_fetch(
         dl = NULL;
     }
     if (dl) {
-        /* Never tighten shared work; ordinary demand lifts a scout bound. */
+        /* Never tighten shared work; ordinary demand lifts a scout bound.
+         * Restricted demand never lifts: fetch_from carries no bound of
+         * its own, so an unguarded pass here would let a restricted
+         * rebind silently un-bound — and persist — a scout ceiling,
+         * exactly the widening the restricted posture exists to prevent
+         * ("a restart cannot silently widen it"). */
         if (maximum_package_bytes > 0 &&
             (dl->maximum_package_bytes == 0 ||
              maximum_package_bytes < dl->maximum_package_bytes)) {
             pthread_mutex_unlock(&engine->lock);
             return VCS_SWARM_FETCH_BOUND_NOT_OWNED;
         }
-        if (maximum_package_bytes == 0 && dl->maximum_package_bytes > 0) {
+        if (!restricted && maximum_package_bytes == 0 &&
+            dl->maximum_package_bytes > 0) {
             dl->maximum_package_bytes = 0;
             (void)record_persist(engine, dl);
         }
