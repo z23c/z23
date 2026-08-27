@@ -21,6 +21,8 @@
 #include "codeindex_priv.h"
 #include "codeindex/codeindex_merkle.h"
 
+#include "base/serialize_le.h"
+
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
@@ -107,21 +109,57 @@ static void merkle_write_u64le(struct sha3_256_ctx *sha, uint64_t v)
     sha3_256_write(sha, b, sizeof(b));
 }
 
-/* One direct child of a directory node. */
-struct merkle_child {
-    char                   name[MERKLE_NAME_MAX];
-    uint8_t                kind; /* 0 = file leaf, 1 = directory */
-    struct zcl_sha3_digest digest;
-};
+/* One direct child of a directory node — the unit the interior preimage below
+ * consumes. It is declared in the public header (struct ci_merkle_proof_child)
+ * rather than here because an inclusion proof must carry these verbatim: the
+ * builder and the proof verifier hash the SAME type through the SAME function
+ * (merkle_node_digest), so there is no second copy of the rule to drift. */
+_Static_assert((int)CI_MERKLE_PROOF_NAME_MAX == (int)MERKLE_NAME_MAX,
+               "proof child name bound must equal the builder's name bound");
+_Static_assert((int)CI_MERKLE_PROOF_MAX_LEVELS == (int)MERKLE_MAX_DEPTH,
+               "a proof must be able to hold every level the build can nest");
+_Static_assert(CI_MERKLE_KIND_FILE == 0 && CI_MERKLE_KIND_DIR == 1,
+               "kind numbering is hashed; it cannot be renumbered");
+/* The wire ceiling must exceed the largest proof the other two bounds can
+ * express, or encode() could refuse a legal proof. Worst case, exactly:
+ *   domain + kind + (2 + 255) path
+ *   + 8 (nlevels, nchildren)
+ *   + LEVELS   * (2 + 255 path + 4 nchildren + 4 index)
+ *   + CHILDREN * (1 kind + 2 + (NAME_MAX-1) name + 32 digest)
+ * Written out rather than rounded, so raising a bound cannot quietly outgrow
+ * the ceiling. */
+_Static_assert(sizeof("zcl.codeindex.merkle.proof.v1") + 1 + 2 + 255 + 8 +
+                       (size_t)CI_MERKLE_PROOF_MAX_LEVELS * (2 + 255 + 4 + 4) +
+                       (size_t)CI_MERKLE_PROOF_MAX_CHILDREN *
+                           (1 + 2 + (CI_MERKLE_PROOF_NAME_MAX - 1) + 32) <
+                   (size_t)CI_MERKLE_PROOF_WIRE_MAX,
+               "CI_MERKLE_PROOF_WIRE_MAX is below the largest expressible proof");
 
 /* THE ordering rule, in one place. A directory's direct children are ordered by
  * strcmp over this key: a file's own name, a directory's name followed by '/'.
- * Because '/' (0x2f) sorts above '.' (0x2e) and above every character legal in
- * a C identifier, that key order is identical to strcmp order over the
- * children's full repo-relative paths — which is the order ci_enumerate_sources
- * already emits. The builder therefore appends children in stream order and
- * needs no sort, and the two can never disagree. */
-static void merkle_child_key(const struct merkle_child *c,
+ *
+ * That key order is identical to strcmp order over the children's full
+ * repo-relative paths — which is the order ci_enumerate_sources already emits —
+ * and the reason has nothing to do with where '/' sits in ASCII. It sits at
+ * 0x2f: above '.' (0x2e), but BELOW every character legal in a C identifier
+ * ('0' 0x30, 'A' 0x41, '_' 0x5f, 'a' 0x61). An earlier version of this comment
+ * asserted the opposite; since this is the ONE normative statement of the rule,
+ * a second implementation reasoning from that premise would have ordered
+ * `ab_z.c` against a directory `ab` backwards and minted a different root.
+ *
+ * The real reason is a prefix property, and it holds for any character set: a
+ * child's key is a PREFIX of every full path that child contributes to the
+ * stream — "name" for a file, whose only path is "name", and "name/" for a
+ * directory, all of whose paths begin "name/". Distinct children have distinct
+ * keys, so the first position at which two children's paths differ is a
+ * position both keys already cover, and strcmp decides the key comparison and
+ * the path comparison identically. Concretely, `ab.c`, `ab/` and `ab_z.c` in
+ * one directory give keys "ab.c" < "ab/" < "ab_z.c", and their full paths sort
+ * in exactly that order — even though '/' is below '_'.
+ *
+ * The builder therefore appends children in stream order, needs no second
+ * sort, and cannot disagree with the rule as documented. */
+static void merkle_child_key(const struct ci_merkle_proof_child *c,
                              char out[MERKLE_NAME_MAX + 2])
 {
     (void)snprintf(out, MERKLE_NAME_MAX + 2, "%s%s", c->name,
@@ -133,8 +171,8 @@ static void merkle_child_key(const struct merkle_child *c,
  * above from a comment into a property the build cannot violate silently: if a
  * future change to ci_enumerate_sources reorders the stream, the build fails
  * loudly instead of quietly minting a different root. */
-static bool merkle_child_in_order(const struct merkle_child *prev,
-                                  const struct merkle_child *next)
+static bool merkle_child_in_order(const struct ci_merkle_proof_child *prev,
+                                  const struct ci_merkle_proof_child *next)
 {
     char a[MERKLE_NAME_MAX + 2], bkey[MERKLE_NAME_MAX + 2];
     merkle_child_key(prev, a);
@@ -142,7 +180,7 @@ static bool merkle_child_in_order(const struct merkle_child *prev,
     return strcmp(a, bkey) < 0;
 }
 
-static void merkle_node_digest(const char *path, const struct merkle_child *kids,
+static void merkle_node_digest(const char *path, const struct ci_merkle_proof_child *kids,
                                uint32_t n, struct zcl_sha3_digest *out)
 {
     struct sha3_256_ctx sha;
@@ -632,7 +670,7 @@ merkle_find_node(const struct merkle_node_rec *v, uint32_t n, const char *path)
 
 struct merkle_frame {
     char                 path[256];
-    struct merkle_child *kids;
+    struct ci_merkle_proof_child *kids;
     uint32_t             nkids, cap;
     bool                 dirty;
     uint32_t             file_count, dir_count;
@@ -658,7 +696,7 @@ struct merkle_build {
 };
 
 static bool merkle_frame_push_child(struct merkle_frame *f,
-                                    const struct merkle_child *c)
+                                    const struct ci_merkle_proof_child *c)
 {
     if (f->nkids > 0 && !merkle_child_in_order(&f->kids[f->nkids - 1], c))
         LOG_FAIL("codeindex",
@@ -740,7 +778,7 @@ static bool merkle_pop_frame(struct merkle_build *b)
     memset(f, 0, sizeof(*f));
     b->depth--;
     struct merkle_frame *parent = &b->frames[b->depth - 1];
-    struct merkle_child c;
+    struct ci_merkle_proof_child c;
     memset(&c, 0, sizeof(c));
     ci_cpy(c.name, sizeof(c.name), merkle_basename(nd.path));
     c.kind = 1;
@@ -879,7 +917,7 @@ static bool merkle_file_cb(const char *relpath, const struct stat *st,
     if (!merkle_enter_dir(b, dir)) { b->err = true; return false; }
 
     struct merkle_frame *f = &b->frames[b->depth - 1];
-    struct merkle_child c;
+    struct ci_merkle_proof_child c;
     memset(&c, 0, sizeof(c));
     ci_cpy(c.name, sizeof(c.name), merkle_basename(relpath));
     c.kind = 0;
@@ -1172,4 +1210,533 @@ void ci_merkle_hex(const struct zcl_sha3_digest *d, char out[65])
         out[i * 2 + 1] = hexd[d->bytes[i] & 0xf];
     }
     out[64] = '\0';
+}
+
+/* ── inclusion proofs ──────────────────────────────────────────────────
+ * The generator reads the tree; the verifier does not — it holds a proof, a
+ * claimed digest, and a root, and nothing else. Every parent digest it
+ * recomputes goes through merkle_node_digest(), the one function that states
+ * the interior preimage, so builder and verifier cannot drift apart. See the
+ * header for the size consequence of a non-binary tree; it is real and it is
+ * bounded here rather than hidden. */
+
+static const char merkle_proof_wire_domain[] = "zcl.codeindex.merkle.proof.v1";
+
+struct ci_merkle_proof *ci_merkle_proof_alloc(void)
+{
+    struct ci_merkle_proof *p = zcl_malloc(sizeof(*p), "ci_merkle_proof");
+    if (!p)
+        LOG_NULL("codeindex", "allocate merkle proof (%zu bytes)", sizeof(*p));
+    memset(p, 0, sizeof(*p));
+    return p;
+}
+
+void ci_merkle_proof_free(struct ci_merkle_proof *p)
+{
+    free(p);
+}
+
+/* The parent directory of a repo-relative path; "" for a top-level entry. */
+static void merkle_dirname(const char *path, char out[256])
+{
+    const char *slash = strrchr(path, '/');
+    if (!slash) {
+        out[0] = '\0';
+        return;
+    }
+    size_t n = (size_t)(slash - path);
+    if (n > 255) n = 255;
+    memcpy(out, path, n);
+    out[n] = '\0';
+}
+
+/* `path`'s basename iff `path` is a DIRECT child of `dir`, else NULL. */
+static const char *merkle_direct_child(const char *path, const char *dir,
+                                       size_t dlen)
+{
+    if (dlen) {
+        if (strncmp(path, dir, dlen) != 0 || path[dlen] != '/') return NULL;
+        const char *name = path + dlen + 1;
+        if (!name[0] || strchr(name, '/')) return NULL;
+        return name;
+    }
+    if (!path[0] || strchr(path, '/')) return NULL;
+    return path;
+}
+
+static int merkle_child_key_cmp(const void *a, const void *b)
+{
+    char ka[MERKLE_NAME_MAX + 2], kb[MERKLE_NAME_MAX + 2];
+    merkle_child_key(a, ka);
+    merkle_child_key(b, kb);
+    return strcmp(ka, kb);
+}
+
+/* Rebuild one directory node's direct-child list from the tree's flat leaf and
+ * node arrays, then PROVE the rebuild is faithful by re-deriving that node's
+ * own digest from it and comparing. A proof is worth exactly as much as this
+ * step, so it is checked rather than asserted; a mismatch is a hard failure,
+ * not a proof that happens not to verify. Running out of arena is likewise
+ * loud — a short child list would silently describe a different directory. */
+static bool merkle_collect_children(const struct ci_merkle *m, const char *dir,
+                                    struct ci_merkle_proof_child *out,
+                                    uint32_t cap, uint32_t *out_n)
+{
+    const struct merkle_node_rec *nd =
+        merkle_find_node(m->nodes, m->nnodes, dir);
+    if (!nd)
+        LOG_FAIL("codeindex", "merkle proof: no directory node for '%s'", dir);
+
+    size_t dlen = strlen(dir);
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < m->nleaves; i++) {
+        const char *name = merkle_direct_child(m->leaves[i].path, dir, dlen);
+        if (!name) continue;
+        if (n >= cap)
+            LOG_FAIL("codeindex",
+                     "merkle proof: '%s' needs more than %u sibling records "
+                     "(budget %u); proof refused rather than truncated",
+                     dir, nd->direct_children, CI_MERKLE_PROOF_MAX_CHILDREN);
+        memset(&out[n], 0, sizeof(out[n]));
+        ci_cpy(out[n].name, sizeof(out[n].name), name);
+        out[n].kind = CI_MERKLE_KIND_FILE;
+        out[n].digest = m->leaves[i].digest;
+        n++;
+    }
+    for (uint32_t i = 0; i < m->nnodes; i++) {
+        const char *name = merkle_direct_child(m->nodes[i].path, dir, dlen);
+        if (!name) continue;
+        if (n >= cap)
+            LOG_FAIL("codeindex",
+                     "merkle proof: '%s' needs more than %u sibling records "
+                     "(budget %u); proof refused rather than truncated",
+                     dir, nd->direct_children, CI_MERKLE_PROOF_MAX_CHILDREN);
+        memset(&out[n], 0, sizeof(out[n]));
+        ci_cpy(out[n].name, sizeof(out[n].name), name);
+        out[n].kind = CI_MERKLE_KIND_DIR;
+        out[n].digest = m->nodes[i].digest;
+        n++;
+    }
+    qsort(out, n, sizeof(*out), merkle_child_key_cmp);
+    for (uint32_t i = 1; i < n; i++) {
+        if (!merkle_child_in_order(&out[i - 1], &out[i]))
+            LOG_FAIL("codeindex",
+                     "merkle proof: duplicate or unordered child key in '%s'",
+                     dir);
+    }
+    if (n != nd->direct_children)
+        LOG_FAIL("codeindex",
+                 "merkle proof: rebuilt %u direct children of '%s', tree says %u",
+                 n, dir, nd->direct_children);
+    struct zcl_sha3_digest check;
+    merkle_node_digest(dir, out, n, &check);
+    if (memcmp(check.bytes, nd->digest.bytes, 32) != 0)
+        LOG_FAIL("codeindex",
+                 "merkle proof: rebuilt children of '%s' do not reproduce its "
+                 "digest", dir);
+    *out_n = n;
+    return true;
+}
+
+bool ci_merkle_prove(const struct ci_merkle *m, const char *path,
+                     struct ci_merkle_proof *out,
+                     struct zcl_sha3_digest *out_digest, bool *found)
+{
+    if (!m || !out || !found) LOG_FAIL("codeindex", "null arg to merkle_prove");
+    *found = false;
+    memset(out, 0, sizeof(*out));
+
+    char norm[256];
+    merkle_norm_dir(path, norm);
+
+    struct zcl_sha3_digest target;
+    uint8_t kind;
+    const struct merkle_leaf_rec *lf =
+        norm[0] ? merkle_find_leaf(m->leaves, m->nleaves, norm) : NULL;
+    if (lf) {
+        target = lf->digest;
+        kind = CI_MERKLE_KIND_FILE;
+    } else {
+        const struct merkle_node_rec *nd =
+            merkle_find_node(m->nodes, m->nnodes, norm);
+        if (!nd) return true; /* absent is an answer, not a failure */
+        target = nd->digest;
+        kind = CI_MERKLE_KIND_DIR;
+    }
+
+    ci_cpy(out->path, sizeof(out->path), norm);
+    out->kind = kind;
+
+    char cur[256];
+    ci_cpy(cur, sizeof(cur), norm);
+    while (cur[0]) {
+        if (out->nlevels >= CI_MERKLE_PROOF_MAX_LEVELS)
+            LOG_FAIL("codeindex",
+                     "merkle proof for '%s' would need more than %d levels",
+                     norm, CI_MERKLE_PROOF_MAX_LEVELS);
+        char parent[256];
+        merkle_dirname(cur, parent);
+        struct ci_merkle_proof_level *lv = &out->level[out->nlevels];
+        ci_cpy(lv->path, sizeof(lv->path), parent);
+        lv->first_child = out->nchildren;
+        uint32_t n = 0;
+        if (!merkle_collect_children(
+                m, parent, &out->children[out->nchildren],
+                (uint32_t)(CI_MERKLE_PROOF_MAX_CHILDREN - out->nchildren), &n))
+            return false;
+        lv->nchildren = n;
+
+        const char *want = merkle_basename(cur);
+        uint8_t want_kind =
+            out->nlevels == 0 ? kind : (uint8_t)CI_MERKLE_KIND_DIR;
+        bool hit = false;
+        for (uint32_t i = 0; i < n; i++) {
+            const struct ci_merkle_proof_child *c =
+                &out->children[lv->first_child + i];
+            if (c->kind == want_kind && strcmp(c->name, want) == 0) {
+                lv->index = i;
+                hit = true;
+                break;
+            }
+        }
+        if (!hit)
+            LOG_FAIL("codeindex", "merkle proof: '%s' is not a child of '%s'",
+                     cur, parent);
+        out->nchildren += n;
+        out->nlevels++;
+        ci_cpy(cur, sizeof(cur), parent);
+    }
+
+    /* Refuse to hand out a proof we cannot check ourselves. This is the one
+     * place the generator and the verifier meet, and it runs on every proof. */
+    bool self_ok = false;
+    if (!ci_merkle_proof_verify(out, &target, &m->root, &self_ok)) return false;
+    if (!self_ok) {
+        memset(out, 0, sizeof(*out));
+        LOG_FAIL("codeindex",
+                 "merkle proof for '%s' failed its own verification", norm);
+    }
+    if (out_digest) *out_digest = target;
+    *found = true;
+    return true;
+}
+
+/* Is a fixed-size char field NUL-terminated inside its own storage? Everything
+ * downstream uses strcmp/strlen on these, so this is checked before any of it. */
+static bool merkle_field_terminated(const char *f, size_t cap)
+{
+    return memchr(f, '\0', cap) != NULL;
+}
+
+/* Is `p` a repo-relative path in the ONE shape the builder mints? "" is the
+ * root; anything else is a '/'-separated list of non-empty segments, each
+ * shorter than MERKLE_NAME_MAX, none of them "." or "..", with no leading
+ * slash, no trailing slash, and no empty segment.
+ *
+ * This is not decoration, it closes a real hole. The verifier reconstructs the
+ * proven path by walking merkle_dirname()/merkle_basename() upward, and those
+ * two functions map BOTH "lib" and "/lib" to the same (parent "", basename
+ * "lib") pair. Every deeper case is already closed by the digest chain — a
+ * level's path is hashed verbatim, so "/lib/net" can never reproduce the digest
+ * minted for "lib/net" — but the TOPMOST dirname() collapse is invisible to the
+ * hash, because the parent it produces ("") is the same either way. Without
+ * this check a proof for any top-level entry re-labelled with a leading slash
+ * verifies against the same root with the same claimed digest: two distinct
+ * wire images, two distinct reported paths, one accepted answer. That is
+ * exactly the input ambiguity this API exists to remove, so the verifier
+ * rejects any path that is not the canonical one.
+ *
+ * Applied to child names too, where it additionally means non-empty, no '/',
+ * and inside the name bound — one rule instead of four scattered predicates. */
+static bool merkle_path_canonical(const char *p)
+{
+    if (!p[0]) return true; /* the root */
+    size_t seg = 0;
+    for (const char *c = p;; c++) {
+        if (*c != '/' && *c != '\0') {
+            seg++;
+            continue;
+        }
+        if (seg == 0 || seg >= MERKLE_NAME_MAX) return false;
+        const char *s = c - seg;
+        if (seg == 1 && s[0] == '.') return false;
+        if (seg == 2 && s[0] == '.' && s[1] == '.') return false;
+        if (*c == '\0') return true;
+        seg = 0;
+    }
+}
+
+bool ci_merkle_proof_verify(const struct ci_merkle_proof *p,
+                            const struct zcl_sha3_digest *claimed,
+                            const struct zcl_sha3_digest *root, bool *ok)
+{
+    if (!p || !claimed || !root || !ok)
+        LOG_FAIL("codeindex", "null arg to merkle_proof_verify");
+    *ok = false;
+
+    if (p->nlevels > CI_MERKLE_PROOF_MAX_LEVELS ||
+        p->nchildren > CI_MERKLE_PROOF_MAX_CHILDREN ||
+        (p->kind != CI_MERKLE_KIND_FILE && p->kind != CI_MERKLE_KIND_DIR) ||
+        !merkle_field_terminated(p->path, sizeof(p->path)) ||
+        !merkle_path_canonical(p->path))
+        return true;
+
+    /* The root proves itself: no levels, and the claim IS the trusted root. */
+    if (!p->path[0]) {
+        if (p->kind != CI_MERKLE_KIND_DIR || p->nlevels != 0) return true;
+        *ok = memcmp(claimed->bytes, root->bytes, 32) == 0;
+        return true;
+    }
+    if (p->nlevels == 0) return true;
+
+    char cur[256];
+    memcpy(cur, p->path, sizeof(cur));
+    struct zcl_sha3_digest acc = *claimed;
+    uint8_t kind = p->kind;
+
+    uint32_t run = 0;
+    for (uint32_t i = 0; i < p->nlevels; i++) {
+        const struct ci_merkle_proof_level *lv = &p->level[i];
+        if (!merkle_field_terminated(lv->path, sizeof(lv->path)) ||
+            !merkle_path_canonical(lv->path))
+            return true;
+        if (lv->nchildren == 0 || lv->index >= lv->nchildren) return true;
+        /* Levels tile the arena front to back with no gap and no overlap —
+         * the same shape the encoder demands and the decoder produces, so the
+         * set of proofs this function accepts is exactly the set that can be
+         * written down. Without it a proof could verify and then refuse to
+         * serialize, which is a second, quieter kind of ambiguity. */
+        if (lv->first_child != run || lv->nchildren > p->nchildren - run)
+            return true;
+        run += lv->nchildren;
+
+        /* Each level must be EXACTLY the parent directory of the level below,
+         * which is what pins a proof to one path and only that path. */
+        char parent[256];
+        merkle_dirname(cur, parent);
+        if (strcmp(parent, lv->path) != 0) return true;
+
+        const struct ci_merkle_proof_child *kids = &p->children[lv->first_child];
+        for (uint32_t k = 0; k < lv->nchildren; k++) {
+            if (!merkle_field_terminated(kids[k].name, sizeof(kids[k].name)) ||
+                !kids[k].name[0] || !merkle_path_canonical(kids[k].name) ||
+                strchr(kids[k].name, '/') ||
+                (kids[k].kind != CI_MERKLE_KIND_FILE &&
+                 kids[k].kind != CI_MERKLE_KIND_DIR))
+                return true;
+            /* Canonical order is part of the preimage. A reordered list would
+             * also fail at the root; rejecting it here says WHY. */
+            if (k && !merkle_child_in_order(&kids[k - 1], &kids[k])) return true;
+        }
+
+        const struct ci_merkle_proof_child *slot = &kids[lv->index];
+        if (slot->kind != kind) return true;
+        if (strcmp(slot->name, merkle_basename(cur)) != 0) return true;
+        if (memcmp(slot->digest.bytes, acc.bytes, 32) != 0) return true;
+
+        merkle_node_digest(lv->path, kids, lv->nchildren, &acc);
+        kind = CI_MERKLE_KIND_DIR;
+        memcpy(cur, lv->path, sizeof(cur));
+    }
+    if (cur[0]) return true; /* the last level must have been the root */
+    if (run != p->nchildren) return true; /* no sibling record goes unbound */
+    *ok = memcmp(acc.bytes, root->bytes, 32) == 0;
+    return true;
+}
+
+/* ── the wire form ─────────────────────────────────────────────────────
+ * One writer serves both encode() and wire_size(): size is what encode would
+ * have written, never a second formula that could disagree with it. */
+
+struct merkle_wire {
+    unsigned char *p; /* NULL = measure only */
+    size_t         cap, used;
+    bool           overflow;
+};
+
+static void mw_put(struct merkle_wire *w, const void *src, size_t n)
+{
+    if (w->overflow) return;
+    if (n > w->cap - w->used) {
+        w->overflow = true;
+        return;
+    }
+    if (w->p) memcpy(w->p + w->used, src, n);
+    w->used += n;
+}
+
+static void mw_u8(struct merkle_wire *w, uint8_t v)
+{
+    mw_put(w, &v, 1);
+}
+
+/* The one byte-order codec (lib/base/include/base/serialize_le.h), not a
+ * second shift ladder. The snapshot writer above predates the canonical
+ * header; nothing new here re-states the rule. */
+static void mw_u32(struct merkle_wire *w, uint32_t v)
+{
+    uint8_t b[4];
+    zcl_write_u32_le(b, v);
+    mw_put(w, b, sizeof(b));
+}
+
+static bool mw_str(struct merkle_wire *w, const char *s, size_t cap)
+{
+    if (!merkle_field_terminated(s, cap)) return false;
+    size_t len = strlen(s);
+    if (len > UINT16_MAX) return false; /* unreachable: cap is 256 */
+    uint8_t lb[2];
+    zcl_write_u16_le(lb, (uint16_t)len);
+    mw_put(w, lb, sizeof(lb));
+    if (len) mw_put(w, s, len);
+    return true;
+}
+
+static size_t merkle_proof_write(const struct ci_merkle_proof *p,
+                                 unsigned char *out, size_t cap)
+{
+    if (!p || p->nlevels > CI_MERKLE_PROOF_MAX_LEVELS ||
+        p->nchildren > CI_MERKLE_PROOF_MAX_CHILDREN)
+        return 0;
+    struct merkle_wire w = {.p = out, .cap = cap, .used = 0, .overflow = false};
+    mw_put(&w, merkle_proof_wire_domain, sizeof(merkle_proof_wire_domain));
+    mw_u8(&w, p->kind);
+    if (!mw_str(&w, p->path, sizeof(p->path))) return 0;
+    mw_u32(&w, p->nlevels);
+    mw_u32(&w, p->nchildren);
+
+    uint32_t run = 0;
+    for (uint32_t i = 0; i < p->nlevels; i++) {
+        const struct ci_merkle_proof_level *lv = &p->level[i];
+        if (lv->first_child != run || lv->nchildren == 0 ||
+            lv->index >= lv->nchildren ||
+            lv->nchildren > p->nchildren - run)
+            return 0;
+        if (!mw_str(&w, lv->path, sizeof(lv->path))) return 0;
+        mw_u32(&w, lv->nchildren);
+        mw_u32(&w, lv->index);
+        for (uint32_t k = 0; k < lv->nchildren; k++) {
+            const struct ci_merkle_proof_child *c = &p->children[run + k];
+            mw_u8(&w, c->kind);
+            if (!mw_str(&w, c->name, sizeof(c->name))) return 0;
+            mw_put(&w, c->digest.bytes, 32);
+        }
+        run += lv->nchildren;
+    }
+    if (run != p->nchildren || w.overflow) return 0;
+    return w.used;
+}
+
+size_t ci_merkle_proof_wire_size(const struct ci_merkle_proof *p)
+{
+    return merkle_proof_write(p, NULL, (size_t)-1);
+}
+
+size_t ci_merkle_proof_encode(const struct ci_merkle_proof *p,
+                              unsigned char *out, size_t cap)
+{
+    if (!out) return 0;
+    return merkle_proof_write(p, out, cap);
+}
+
+/* Length-prefixed string into a fixed field, refusing anything that would not
+ * fit or that hides a NUL. */
+static bool merkle_take_str(struct merkle_cursor *c, char *out, size_t outcap)
+{
+    uint8_t lb[2] = {0};
+    if (!merkle_take(c, lb, sizeof(lb))) return false;
+    size_t len = zcl_read_u16_le(lb);
+    if (len >= outcap) {
+        c->bad = true;
+        return false;
+    }
+    memset(out, 0, outcap);
+    if (len && !merkle_take(c, out, len)) return false;
+    out[len] = '\0';
+    if (memchr(out, '\0', len) != NULL) {
+        c->bad = true;
+        return false;
+    }
+    return true;
+}
+
+bool ci_merkle_proof_decode(const unsigned char *in, size_t len,
+                            struct ci_merkle_proof *out)
+{
+    if (!in || !out) LOG_FAIL("codeindex", "null arg to merkle_proof_decode");
+    memset(out, 0, sizeof(*out));
+    if (len <= sizeof(merkle_proof_wire_domain) ||
+        len > CI_MERKLE_PROOF_WIRE_MAX)
+        return false;
+    if (memcmp(in, merkle_proof_wire_domain,
+               sizeof(merkle_proof_wire_domain)) != 0)
+        return false;
+
+    struct merkle_cursor c = {
+        .p = in + sizeof(merkle_proof_wire_domain),
+        .left = len - sizeof(merkle_proof_wire_domain),
+        .bad = false,
+    };
+    unsigned char kind = 0;
+    if (!merkle_take(&c, &kind, 1) || kind > CI_MERKLE_KIND_DIR) return false;
+    out->kind = kind;
+    if (!merkle_take_str(&c, out->path, sizeof(out->path))) return false;
+    uint32_t nlevels = merkle_take_u32(&c);
+    uint32_t nchildren = merkle_take_u32(&c);
+    if (c.bad || nlevels > CI_MERKLE_PROOF_MAX_LEVELS ||
+        nchildren > CI_MERKLE_PROOF_MAX_CHILDREN)
+        return false;
+
+    uint32_t run = 0;
+    for (uint32_t i = 0; i < nlevels; i++) {
+        struct ci_merkle_proof_level *lv = &out->level[i];
+        if (!merkle_take_str(&c, lv->path, sizeof(lv->path))) return false;
+        uint32_t n = merkle_take_u32(&c);
+        uint32_t idx = merkle_take_u32(&c);
+        if (c.bad || n == 0 || idx >= n || n > nchildren - run) return false;
+        lv->first_child = run;
+        lv->nchildren = n;
+        lv->index = idx;
+        for (uint32_t k = 0; k < n; k++) {
+            struct ci_merkle_proof_child *ch = &out->children[run + k];
+            unsigned char ck = 0;
+            if (!merkle_take(&c, &ck, 1) || ck > CI_MERKLE_KIND_DIR) return false;
+            ch->kind = ck;
+            if (!merkle_take_str(&c, ch->name, sizeof(ch->name))) return false;
+            if (!merkle_take(&c, ch->digest.bytes, 32)) return false;
+        }
+        run += n;
+    }
+    if (c.bad || c.left != 0 || run != nchildren) return false;
+    out->nlevels = nlevels;
+    out->nchildren = nchildren;
+    return true;
+}
+
+bool ci_merkle_proof_verify_bytes(const unsigned char *in, size_t len,
+                                  const struct zcl_sha3_digest *claimed,
+                                  const struct zcl_sha3_digest *root,
+                                  char out_path[256], uint8_t *out_kind,
+                                  bool *ok)
+{
+    if (!claimed || !root || !ok)
+        LOG_FAIL("codeindex", "null arg to merkle_proof_verify_bytes");
+    *ok = false;
+    if (out_path) out_path[0] = '\0';
+    if (out_kind) *out_kind = 0;
+    if (!in) return true;
+
+    struct ci_merkle_proof *p = ci_merkle_proof_alloc();
+    if (!p)
+        LOG_FAIL("codeindex", "allocate merkle proof for byte verification");
+    bool rc = true;
+    if (ci_merkle_proof_decode(in, len, p)) {
+        rc = ci_merkle_proof_verify(p, claimed, root, ok);
+        if (rc) {
+            if (out_path) ci_cpy(out_path, 256, p->path);
+            if (out_kind) *out_kind = p->kind;
+        }
+    }
+    ci_merkle_proof_free(p);
+    return rc;
 }
