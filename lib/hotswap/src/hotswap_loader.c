@@ -7,7 +7,6 @@
  * snapshot after the
  * generation self-test succeeds. No generation code runs before its exported
  * manifest has passed the host ABI/capability/provenance/state contract. */
-
 /* realpath() is declared by <stdlib.h> only under __USE_MISC/__USE_XOPEN_EXTENDED,
  * and the build's -D_POSIX_C_SOURCE=200809L sets neither. Without this the
  * declaration reaches the TU only through the glibc fortify inline that
@@ -15,16 +14,13 @@
  * non-glibc build fails with "implicit declaration of realpath", which is a
  * hard error in C23. Matches lib/net/src/connman.c and 26 other TUs. */
 #define _DEFAULT_SOURCE
-
 #include "hotswap/hotswap.h"
 #include "hotswap/hotswap_module.h"
-
 #include "crypto/sha256.h"
 #include "json/json.h"
 #include "platform/time_compat.h"
 #include "util/clientversion.h"
 #include "util/log_macros.h"
-
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -35,9 +31,7 @@
 #include <time.h>
 #include <sys/stat.h>
 #include <unistd.h>
-
 #define HOTSWAP_MAX_GENERATIONS 128
-
 struct hotswap_generation {
     uint32_t gen;
     char so_path[512];
@@ -60,7 +54,6 @@ struct hotswap_generation {
     char mapped_tests_csv[256];
     char probe_tools_csv[256];
 };
-
 struct hotswap_rejection {
     bool present;
     uint32_t gen;
@@ -70,14 +63,12 @@ struct hotswap_rejection {
     char so_path[512];
     char source_identity[256];
 };
-
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct hotswap_generation g_gens[HOTSWAP_MAX_GENERATIONS];
 static size_t g_gen_count;
 static uint32_t g_next_gen = 1;
 static uint32_t g_active_gen;
 static struct hotswap_rejection g_last_rejection;
-
 static const struct {
     const char *source;
     const char *probe;
@@ -88,7 +79,6 @@ static const struct {
 #undef HOTSWAP_PROBE
 #undef HOTSWAP_ELIGIBLE
 };
-
 static void copy_text(char *dst, size_t dst_sz, const char *src)
 {
     if (!dst || dst_sz == 0)

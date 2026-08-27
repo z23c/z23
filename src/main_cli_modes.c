@@ -14,7 +14,6 @@
  * main() (src/main.c) dispatches to these; print_usage() lives in
  * config/src/args.c (config/args.h).
  */
-
 #include "main_cli_modes.h"
 #include "config/boot.h"
 #include "config/boot_cold_start.h"     /* -cold-start staged driver */
@@ -103,7 +102,6 @@ static bool path_join_leaf(char *out, size_t out_size,
 {
     if (!out || out_size == 0 || !directory || !leaf)
         return false;
-
     int written = snprintf(out, out_size, "%s/%s", directory, leaf);
     return written >= 0 && (size_t)written < out_size;
 }
@@ -121,20 +119,17 @@ struct bench_row {
     char unit[16];
     char notes[256];
 };
-
 static const char *bench_history_path(void)
 {
     const char *p = getenv("ZCL_BENCH_HISTORY");
     return (p && *p) ? p : "docs/bench-history.csv";
 }
-
 static const char *bench_commit(void)
 {
     const char *c = getenv("ZCL_BENCH_COMMIT");
     if (c && *c) return c;
     return zcl_build_commit();
 }
-
 static bool bench_env_true(const char *name)
 {
     const char *v = getenv(name);
@@ -145,7 +140,6 @@ static bool bench_env_true(const char *name)
            strcmp(v, "no") != 0 &&
            strcmp(v, "NO") != 0;
 }
-
 static void bench_iso8601(char *out, size_t out_len)
 {
     time_t now = time(NULL);
@@ -153,7 +147,6 @@ static void bench_iso8601(char *out, size_t out_len)
     gmtime_r(&now, &tmv);
     strftime(out, out_len, "%Y-%m-%dT%H:%M:%SZ", &tmv);
 }
-
 static double bench_system_uptime_seconds(void)
 {
     FILE *f = fopen("/proc/uptime", "r");
@@ -163,7 +156,6 @@ static double bench_system_uptime_seconds(void)
     fclose(f);
     return n == 1 ? up : 0.0;
 }
-
 static void bench_csv_field(FILE *f, const char *s)
 {
     bool quote = false;
@@ -184,7 +176,6 @@ static void bench_csv_field(FILE *f, const char *s)
     }
     fputc('"', f);
 }
-
 static bool bench_history_ensure(const char *path)
 {
     FILE *check = fopen(path, "r");
@@ -207,7 +198,6 @@ static bool bench_history_ensure(const char *path)
     fclose(f);
     return true;
 }
-
 static bool bench_history_append(const char *path, const struct bench_row *rows,
                                  size_t rows_len)
 {
@@ -233,24 +223,20 @@ static bool bench_history_append(const char *path, const struct bench_row *rows,
     fclose(f);
     return true;
 }
-
 static void bench_rows_default(struct bench_row rows[5])
 {
     snprintf(rows[0].bench, sizeof(rows[0].bench), "#1 cold-start to operational");
     snprintf(rows[0].unit, sizeof(rows[0].unit), "s");
     snprintf(rows[0].notes, sizeof(rows[0].notes),
              "pending P0/full-chain run; use -bench-coldstart after deploy");
-
     snprintf(rows[1].bench, sizeof(rows[1].bench), "#2 warm-start to operational");
     snprintf(rows[1].unit, sizeof(rows[1].unit), "s");
     snprintf(rows[1].notes, sizeof(rows[1].notes),
              "pending seeded datadir; use -bench-warmstart with ZCL_BENCH_SOURCE_DATADIR");
-
     snprintf(rows[2].bench, sizeof(rows[2].bench), "#3 stay-in-sync MTBF");
     snprintf(rows[2].unit, sizeof(rows[2].unit), "s");
     snprintf(rows[2].notes, sizeof(rows[2].notes),
              "pending soak after P0 deploy");
-
     snprintf(rows[3].bench, sizeof(rows[3].bench), "#4 RAM steady-state");
     snprintf(rows[3].unit, sizeof(rows[3].unit), "MB");
     snprintf(rows[3].notes, sizeof(rows[3].notes),

@@ -134,6 +134,12 @@ The 255-group pre-push intersection then passed 254 groups and exposed one
 deterministic operator-message regression in `test_ratify_mint_anchor`: the
 refusal remained fail-closed but labeled its applied frontier only as `h=`.
 The message now names `applied=` explicitly; the exact group passed uncached.
+The next complete intersection passed all 255 functional groups but refused
+authority for three self-skips. Formatting-only changes in the simulation
+family were restored byte-for-byte so the known-open chaos experiment is no
+longer falsely selected; the same size reduction moved into already-affected
+hot-swap, broker, and CLI units. Their three exact groups passed uncached, and
+the file-size ratchet remained 22/22.
 
 At `2026-08-27T02:07:25Z` on `rhett3.dev`, the clean shutdown began saving
 3,233,145 flat-index entries. The save completed at `02:07:43Z`; the

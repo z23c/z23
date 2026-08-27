@@ -2,7 +2,9 @@
  *
  * Deterministic in-memory P2P wire transport for a real p2p_node.
  */
+
 #include "simnet_wire_internal.h"
+
 #include "core/hash.h"
 #include "core/serialize.h"
 #include "event/event.h"
@@ -18,10 +20,12 @@
 #include "util/blocker.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
+
 #include <stdio.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+
 static uint64_t simnet_wire_now_us(void)
 {
     int64_t ns = clock_now_monotonic_ns();
@@ -29,6 +33,7 @@ static uint64_t simnet_wire_now_us(void)
         return 0;
     return (uint64_t)ns / 1000u;
 }
+
 uint64_t simnet_wire_splitmix64_value(uint64_t x)
 {
     uint64_t z = x + 0x9E3779B97F4A7C15ULL;
@@ -36,6 +41,7 @@ uint64_t simnet_wire_splitmix64_value(uint64_t x)
     z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
     return z ^ (z >> 31);
 }
+
 uint64_t simnet_wire_fnv_bytes(const uint8_t *bytes, size_t len)
 {
     uint64_t h = SIMNET_WIRE_FNV_OFFSET;

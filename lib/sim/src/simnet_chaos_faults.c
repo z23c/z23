@@ -13,6 +13,7 @@
  *   - lib/test/src/test_condition_engine.c   (condition + EV_OPERATOR_NEEDED
  *                                              counting pattern)
  */
+
 #include "sim/simnet_chaos_faults.h"
 #include "platform/file_sync.h"
 

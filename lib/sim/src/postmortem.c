@@ -1,12 +1,16 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE 1
 #endif
+
 #include "sim/postmortem.h"
+
 #include "platform/clock.h"
 #include "util/clientversion.h"
 #include "util/signal_handler.h"
 #include "util/safe_alloc.h"
+
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -20,6 +24,7 @@
 #endif
 #include <unistd.h>
 #include <zlib.h>
+
 #define POSTMORTEM_LOG_TAIL_MAX (64u * 1024u)
 #define TAR_BLOCK_SIZE 512u
 #define POSTMORTEM_GZ_MEMBER_MAX (4u * 1024u * 1024u)
