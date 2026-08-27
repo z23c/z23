@@ -2499,6 +2499,64 @@ static int t_swarm_receipt_session(void)
     return failures;
 }
 
+/* DHT-recovered provider evidence applied as a peer offer — the seam the
+ * automatic discovery fallback will use. Pins: refusal for unknown peers,
+ * zero-advertiser stall broken by exactly one scheduled WANT, idempotent
+ * re-offer consuming no inventory, and the bounded ad table refusing (not
+ * overflowing) when full. */
+static int t_swarm_peer_offer(void)
+{
+    int failures = 0;
+    struct sw_node n;
+    struct sw_pkg p;
+    uint8_t key[33];
+    sw_key(77, key);
+    if (!sw_node_open(&n, "offer", sw_score_contributor) ||
+        !sw_make_package(&p, 2, 91))
+        return 1;
+    const uint64_t pid = 7701;
+
+    SW_CHECK("unknown peer refused",
+             !vcs_swarm_engine_peer_offer(n.engine, pid, p.root));
+    SW_CHECK("peer add", vcs_swarm_engine_peer_add(n.engine, pid, key));
+
+    /* No announce anywhere: with zero advertisers nothing may queue. */
+    SW_CHECK("fetch ok", vcs_swarm_engine_fetch(n.engine, p.root, SW_DAY,
+                                                1) == VCS_SWARM_FETCH_OK);
+    vcs_swarm_engine_tick(n.engine, SW_DAY, 2);
+    struct vcs_package_swarm_object quiet[2];
+    SW_CHECK("stalled before evidence",
+             sw_drain_wants(&n, pid, quiet, 2) == 0);
+
+    /* Locally verified DHT-style evidence becomes an offer; the event
+     * edge wakes scheduling and the manifest WANT goes to this peer. */
+    SW_CHECK("offer accepted",
+             vcs_swarm_engine_peer_offer(n.engine, pid, p.root));
+    vcs_swarm_engine_schedule_ready(n.engine, SW_DAY, 3);
+    struct vcs_package_swarm_object wants[2];
+    SW_CHECK("want after offer", sw_drain_wants(&n, pid, wants, 2) == 1);
+
+    /* Idempotent: still true, consumes no further ad inventory. */
+    SW_CHECK("idempotent offer",
+             vcs_swarm_engine_peer_offer(n.engine, pid, p.root));
+
+    /* Distinct roots fill the remaining slots exactly; the next one is
+     * refused by name instead of writing past ads[]. */
+    uint8_t junk[32];
+    memcpy(junk, p.root, 32);
+    unsigned filled = 0;
+    while (filled < VCS_SWARM_MAX_PEER_ADS + 4) {
+        junk[31] = (uint8_t)(0x40 + filled);
+        junk[15] = (uint8_t)(filled << 2);
+        if (!vcs_swarm_engine_peer_offer(n.engine, pid, junk))
+            break;
+        filled++;
+    }
+    SW_CHECK("fill bounded at capacity minus held root",
+             filled == VCS_SWARM_MAX_PEER_ADS - 1);
+    return failures;
+}
+
 int test_zcode_swarm(void)
 {
     int failures = 0;
@@ -2520,5 +2578,6 @@ int test_zcode_swarm(void)
     failures += t_swarm_bounded_provider();
     failures += t_swarm_legacy_record();
     failures += t_swarm_event_driven_schedule();
+    failures += t_swarm_peer_offer();
     return failures;
 }

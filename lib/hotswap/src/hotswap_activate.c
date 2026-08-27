@@ -853,7 +853,9 @@ static void retire_handle(void *handle, int fd,
  * ran its stale copy — a cloned ledger reached through a dlopen.
  *
  * So the artifact carries the ZCL_CORE_SEAL_ROOT its compile saw, and the
- * resident compares it to its own before admitting anything. The pin is the
+ * resident compares it to its own before admitting anything. dlopen may have
+ * run ELF constructors already, so this prevents stale leaf publication, not
+ * arbitrary module execution. The pin is the
  * SEAL ROOT, deliberately, not a whole-tree build id: editing a controller must
  * not invalidate a module — that is the fast loop — while editing consensus
  * must invalidate every one of them.
@@ -1251,9 +1253,10 @@ bool hotswap_verify_module_so(const char *so_path, const char *expect_tu,
 
     /* RTLD_LOCAL so the candidate's symbols never join the global scope and
      * interpose on anything the verifying process later resolves. RTLD_LAZY
-     * because this call deliberately does NOT run module code: function
-     * imports the resident node would satisfy stay unbound, which is exactly
+     * defers function imports the resident node would satisfy, which is exactly
      * what lets a build-time verifier open an artifact with no node running.
+     * ELF constructors may still run during dlopen; this verifier is not an
+     * execution sandbox for an untrusted artifact.
      * Data and address-taken relocations still resolve eagerly, so a module
      * that references a body defined in a TU outside its own island still
      * fails here — correctly, since re-pointing such a leaf would dispatch

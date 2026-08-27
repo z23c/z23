@@ -2559,10 +2559,35 @@ static int zpd_test_work_toolchain(void)
         }
         zcl_command_reply_free(&reply);
         PASS();
+    }
+    TEST("zcode work toolchain: join next names this datadir") {
+        const char *reset[] = { "z23" };
+        ParseParameters(1, reset);
+        char dir[256], abs[4096];
+        test_make_tmpdir(dir, sizeof(dir), "zcode_package_dev",
+                         "toolchain-join-dd");
+        ASSERT(realpath(dir, abs) != NULL);
+        zcl_native_bridge_bind_rpc(abs, 0);
+        struct zcl_command_request request = { .input = NULL };
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.zcode_toolchain_show.v1");
+        zcl_native_handle_zcode_toolchain_show(&request, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        const char *next = json_get_str(json_get(&reply.data, "next_action"));
+        ASSERT(next && strstr(next, "z23 join") != NULL);
+        ASSERT(strstr(next, "-datadir=") != NULL);
+        ASSERT(strstr(next, abs) != NULL);
+        ASSERT(strstr(next, "-packagehost") == NULL);
+        ASSERT(strstr(next, "-buildworker") == NULL);
+        zcl_command_reply_free(&reply);
+        zcl_native_bridge_bind_rpc("", 0);
+        test_rm_rf(dir);
+        PASS();
     } _test_next:;
     {
         const char *reset[] = { "z23" };
         ParseParameters(1, reset);
+        zcl_native_bridge_bind_rpc("", 0);
     }
     return failures;
 }

@@ -1427,6 +1427,35 @@ void vcs_swarm_engine_peer_drop(struct vcs_swarm_engine *engine,
     pthread_mutex_unlock(&engine->lock);
 }
 
+bool vcs_swarm_engine_peer_offer(struct vcs_swarm_engine *engine,
+                                 uint64_t peer, const uint8_t root[32])
+{
+    if (!engine || !root || peer == 0)
+        LOG_FAIL(SWARM_LOG, "peer_offer: null engine/root or zero id");
+    pthread_mutex_lock(&engine->lock);
+    int slot = peer_slot(engine, peer);
+    if (slot < 0) {
+        pthread_mutex_unlock(&engine->lock);
+        return false;
+    }
+    struct swarm_peer *p = &engine->peers[slot];
+    /* Locally authenticated evidence, not a wire frame: announce quota
+     * and flood scoring stay out of this path entirely. */
+    if (peer_advertises(p, root)) {
+        pthread_mutex_unlock(&engine->lock);
+        return true;
+    }
+    if (p->ad_count >= VCS_SWARM_MAX_PEER_ADS) {
+        pthread_mutex_unlock(&engine->lock);
+        LOG_WARN(SWARM_LOG, "peer %llu ad table full; offer unapplied",
+                 (unsigned long long)peer);
+        return false;
+    }
+    memcpy(p->ads[p->ad_count++], root, 32);
+    pthread_mutex_unlock(&engine->lock);
+    return true;
+}
+
 bool vcs_swarm_engine_peer_known(const struct vcs_swarm_engine *engine,
                                  uint64_t peer)
 {

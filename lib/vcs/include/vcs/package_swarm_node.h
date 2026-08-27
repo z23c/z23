@@ -164,6 +164,18 @@ void vcs_swarm_engine_peer_drop(struct vcs_swarm_engine *engine,
 bool vcs_swarm_engine_peer_known(const struct vcs_swarm_engine *engine,
                                  uint64_t peer);
 
+/* Apply one package-root advertisement for a registered peer from
+ * LOCALLY VERIFIED evidence — e.g. a signed provider record recovered
+ * from the DHT naming that root. This is not an announce frame: it does
+ * not consume announce quota, raise ANNOUNCE_FLOOD, or mark the download
+ * provider-restricted, because the evidence was authenticated by this
+ * node before being handed in (the caller owns that duty). Idempotent on
+ * both the root and re-application; true when the peer now offers the
+ * root to the scheduler, false when the peer is unknown or its ad table
+ * is full. Wake scheduling with vcs_swarm_engine_schedule_ready(). */
+bool vcs_swarm_engine_peer_offer(struct vcs_swarm_engine *engine,
+                                 uint64_t peer, const uint8_t root[32]);
+
 /* All registered peer ids (bounded, ascending slot order). For the
  * transport glue's membership sync (drop detection). */
 size_t vcs_swarm_engine_peer_ids(struct vcs_swarm_engine *engine,
