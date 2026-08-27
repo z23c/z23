@@ -4,9 +4,11 @@
  * init 0xFFFFFFFF, final xor 0xFFFFFFFF.
  *
  * One implementation for the whole tree. The software table is the
- * reference; x86 hosts with SSE4.2 use the hardware instruction after a
- * startup self-check proves it reproduces reference output byte for byte.
- * A failed self-check falls back to the table and says so on stderr.
+ * reference; hosts with a hardware Castagnoli instruction (SSE4.2 on x86,
+ * FEAT_CRC32 on arm64, each runtime-probed through the OS feature report)
+ * use it after a startup self-check proves it reproduces reference output
+ * byte for byte. A failed self-check falls back to the table and says so on
+ * stderr.
  *
  * Two on-disk formats depend on these exact bytes: the append-only event
  * log (storage/event_log.h) and LevelDB's block/record trailers
@@ -27,10 +29,13 @@ uint32_t zcl_crc32c(const void *data, size_t len);
  * the startup self-check and by tests that must pin the reference. */
 uint32_t zcl_crc32c_sw(const void *data, size_t len);
 
-/* True when the SSE4.2 path was selected (i.e. present AND self-checked). */
+/* True when a hardware Castagnoli tier was selected (i.e. present AND
+ * self-checked): the SSE4.2 path on x86, the FEAT_CRC32 path on arm64. */
 bool zcl_crc32c_hw_available(void);
 
-/* "hardware-sse4.2" or "software-table". */
+/* "hardware-sse4.2" when a self-checked hardware tier is active — the label
+ * is the tier marker this module has always reported and covers both the
+ * x86 SSE4.2 and the arm64 FEAT_CRC32 paths — else "software-table". */
 const char *zcl_crc32c_impl_name(void);
 
 #endif /* ZCL_UTIL_CRC32C_H */

@@ -961,6 +961,10 @@ ZCL_TEST_GROUP(params_vk_publish_symmetry)
  * network, with every chunk checked against compiled-in digests. Keep both
  * sides on conflict. */
 ZCL_TEST_GROUP(params_fetch)
+/* arm64 crypto lane: FEAT_SHA256 / FEAT_CRC32 tiers must actually reach the
+ * dispatch when the OS reports them — the arm64 mirror of sha256_isa_parity's
+ * reachability leg. */
+ZCL_TEST_GROUP(arm_hw_tiers)
 ZCL_SPEC_GROUP(wallet_dashboard)
 ZCL_SPEC_GROUP(wallet_send)
 ZCL_SPEC_GROUP(wallet_receive)
