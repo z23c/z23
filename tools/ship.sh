@@ -566,6 +566,10 @@ deploy_local() {
 # fleet availability consequence.
 stage_remote() {
     local host="$1" remote_home release_root incoming lock state rc=0
+    if [ "$DRY_RUN" -eq 1 ]; then
+        say "$host: would stage and verify the frozen release without restarting"
+        return 0
+    fi
     remote_home="$(ssh "${SSH_OPTS[@]}" "$host" 'printf "%s\n" "$HOME"')" || {
         say "$host: could not resolve the remote home for staging"
         return 1

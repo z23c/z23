@@ -108,3 +108,9 @@ The SIGILL crash-handler registration was integrated without growing its
 already-baselined translation unit. `make check-file-size-ceiling` then passed
 with the enforced application ceiling clean and the library drift count at
 its existing 22/22 bound.
+
+The four-host release dry run then reached remote staging with no candidate,
+where `set -u` aborted on the unset release identifier. Dry-run staging now
+returns before resolving or mutating any remote release path and states the
+operation it would perform. The real four-host command completed its CPU,
+glibc, SSH, and service preflight and reached the final no-mutation report.
