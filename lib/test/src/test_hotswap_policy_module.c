@@ -313,6 +313,8 @@ static struct zcl_hotswap_module policy_module(
         .leaf_count = 1,
         .leaves = leaves,
         .self_test = self_test,
+        /* The sealed-core sections a module built from THIS tree declares. */
+        .core_sections = hotswap_core_sections_self(),
     };
     return m;
 }
@@ -326,7 +328,7 @@ static int t_admit_accepts_the_honest_module(void)
             { POLICY_LEAF, policy_stub_handler },
         };
         struct zcl_hotswap_module m = policy_module(
-            POLICY_TU, leaves, ZCL_HOTSWAP_MODULE_ABI_V2, policy_selftest_ok);
+            POLICY_TU, leaves, ZCL_HOTSWAP_MODULE_ABI_V3, policy_selftest_ok);
         char stage[64] = { 0 }, why[256] = { 0 };
         ASSERT(hotswap_module_admit(&m, stage, sizeof(stage), why,
                                     sizeof(why)));
@@ -344,7 +346,7 @@ static int t_admit_refuses_a_foreign_leaf(void)
             { "core.status", policy_stub_handler },
         };
         struct zcl_hotswap_module m = policy_module(
-            POLICY_TU, leaves, ZCL_HOTSWAP_MODULE_ABI_V2, policy_selftest_ok);
+            POLICY_TU, leaves, ZCL_HOTSWAP_MODULE_ABI_V3, policy_selftest_ok);
         char stage[64] = { 0 }, why[256] = { 0 };
         ASSERT(!hotswap_module_admit(&m, stage, sizeof(stage), why,
                                      sizeof(why)));
@@ -363,7 +365,7 @@ static int t_admit_refuses_the_resident_half(void)
             { POLICY_LEAF, policy_stub_handler },
         };
         struct zcl_hotswap_module m = policy_module(
-            POLICY_RESIDENT_TU, leaves, ZCL_HOTSWAP_MODULE_ABI_V2,
+            POLICY_RESIDENT_TU, leaves, ZCL_HOTSWAP_MODULE_ABI_V3,
             policy_selftest_ok);
         char stage[64] = { 0 }, why[256] = { 0 };
         ASSERT(!hotswap_module_admit(&m, stage, sizeof(stage), why,
@@ -383,7 +385,7 @@ static int t_admit_refuses_a_failing_self_test(void)
             { POLICY_LEAF, policy_stub_handler },
         };
         struct zcl_hotswap_module m = policy_module(
-            POLICY_TU, leaves, ZCL_HOTSWAP_MODULE_ABI_V2, policy_selftest_fail);
+            POLICY_TU, leaves, ZCL_HOTSWAP_MODULE_ABI_V3, policy_selftest_fail);
         char stage[64] = { 0 }, why[256] = { 0 };
         ASSERT(!hotswap_module_admit(&m, stage, sizeof(stage), why,
                                      sizeof(why)));

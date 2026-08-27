@@ -164,7 +164,8 @@ static int t_partial_admit_publishes_nothing(void)
         uint32_t before = zcl_command_registry_active_generation();
 
         struct zcl_hotswap_module m = {
-            .abi_version = ZCL_HOTSWAP_MODULE_ABI_V2,
+            .abi_version = ZCL_HOTSWAP_MODULE_ABI_V3,
+            .core_sections = hotswap_core_sections_self(),
             .source_tu = V2_TU_STATUS,
             .leaf_count = 2,
             .leaves = k_partial_leaves,
@@ -225,7 +226,8 @@ static int t_duplicate_leaf_refused(void)
 
         /* Module A (the owner) admits cleanly. */
         struct zcl_hotswap_module a = {
-            .abi_version = ZCL_HOTSWAP_MODULE_ABI_V2,
+            .abi_version = ZCL_HOTSWAP_MODULE_ABI_V3,
+            .core_sections = hotswap_core_sections_self(),
             .source_tu = V2_TU_STATUS, .leaf_count = 1,
             .leaves = k_status_only, .self_test = v2_selftest_true,
         };
@@ -234,7 +236,8 @@ static int t_duplicate_leaf_refused(void)
         /* Module B, a DIFFERENT source file, claiming the same leaf: refused,
          * because core.status belongs to exactly one row. */
         struct zcl_hotswap_module b = {
-            .abi_version = ZCL_HOTSWAP_MODULE_ABI_V2,
+            .abi_version = ZCL_HOTSWAP_MODULE_ABI_V3,
+            .core_sections = hotswap_core_sections_self(),
             .source_tu = V2_TU_META, .leaf_count = 2,
             .leaves = k_meta_claims_status, .self_test = v2_selftest_true,
         };
@@ -246,7 +249,8 @@ static int t_duplicate_leaf_refused(void)
 
         /* And the same leaf twice inside ONE module is refused too. */
         struct zcl_hotswap_module c = {
-            .abi_version = ZCL_HOTSWAP_MODULE_ABI_V2,
+            .abi_version = ZCL_HOTSWAP_MODULE_ABI_V3,
+            .core_sections = hotswap_core_sections_self(),
             .source_tu = V2_TU_STATUS, .leaf_count = 2,
             .leaves = k_status_twice, .self_test = v2_selftest_true,
         };
@@ -315,7 +319,8 @@ static int t_leaf_cap_refused(void)
             oversize[i].fn = v2_handler;
         }
         struct zcl_hotswap_module m = {
-            .abi_version = ZCL_HOTSWAP_MODULE_ABI_V2,
+            .abi_version = ZCL_HOTSWAP_MODULE_ABI_V3,
+            .core_sections = hotswap_core_sections_self(),
             .source_tu = V2_TU_STATUS,
             .leaf_count = ZCL_HOTSWAP_MODULE_MAX_LEAVES + 1u,
             .leaves = oversize, .self_test = v2_selftest_true,
@@ -345,7 +350,8 @@ static int t_generation_monotonic(void)
     TEST("repeated multi-leaf publishes keep the generation strictly rising") {
         v2_reset();
         struct zcl_hotswap_module m = {
-            .abi_version = ZCL_HOTSWAP_MODULE_ABI_V2,
+            .abi_version = ZCL_HOTSWAP_MODULE_ABI_V3,
+            .core_sections = hotswap_core_sections_self(),
             .source_tu = V2_TU_STATUS, .leaf_count = 1,
             .leaves = k_status_only, .self_test = v2_selftest_true,
         };
@@ -385,7 +391,8 @@ static int t_probe_mismatch_publishes_nothing(void)
     TEST("a probe schema mismatch publishes nothing (no commit, no generation)") {
         v2_reset();
         struct zcl_hotswap_module m = {
-            .abi_version = ZCL_HOTSWAP_MODULE_ABI_V2,
+            .abi_version = ZCL_HOTSWAP_MODULE_ABI_V3,
+            .core_sections = hotswap_core_sections_self(),
             .source_tu = V2_TU_STATUS, .leaf_count = 1,
             .leaves = k_status_only, .self_test = v2_selftest_true,
         };
@@ -684,7 +691,7 @@ static void elf_fixture(unsigned char image[4096], bool with_init,
     if (duplicate_seal)
         memcpy(image + SYM_OFF + 72, seal_sym, 24);
     memcpy(image + ROOT_OFF, ZCL_CORE_SEAL_ROOT, 65);
-    elf_put32(image + ABI_OFF, ZCL_HOTSWAP_MODULE_ABI_V2);
+    elf_put32(image + ABI_OFF, ZCL_HOTSWAP_MODULE_ABI_V3);
 
     memcpy(image + SHSTR_OFF, sh_names, sizeof(sh_names));
     unsigned char *shstr = image + SH_OFF + 64;
@@ -731,30 +738,30 @@ static int t_pre_map_policy_is_zero_execution(void)
         char err[256];
         memcpy(facts.core_seal_root, ZCL_CORE_SEAL_ROOT, 65);
         facts.core_seal_root_present = true;
-        facts.abi_version = ZCL_HOTSWAP_MODULE_ABI_V2;
+        facts.abi_version = ZCL_HOTSWAP_MODULE_ABI_V3;
         facts.abi_version_present = true;
         ASSERT(hotswap_elf_pre_map_admit(
-            &facts, ZCL_CORE_SEAL_ROOT, ZCL_HOTSWAP_MODULE_ABI_V2,
+            &facts, ZCL_CORE_SEAL_ROOT, ZCL_HOTSWAP_MODULE_ABI_V3,
             err, sizeof(err)));
         facts.has_dt_init = true;
         ASSERT(!hotswap_elf_pre_map_admit(
-            &facts, ZCL_CORE_SEAL_ROOT, ZCL_HOTSWAP_MODULE_ABI_V2,
+            &facts, ZCL_CORE_SEAL_ROOT, ZCL_HOTSWAP_MODULE_ABI_V3,
             err, sizeof(err)));
         ASSERT(strstr(err, "DT_INIT") != NULL);
         facts.has_dt_init = false;
         facts.init_array_entries = 1;
         ASSERT(!hotswap_elf_pre_map_admit(
-            &facts, ZCL_CORE_SEAL_ROOT, ZCL_HOTSWAP_MODULE_ABI_V2,
+            &facts, ZCL_CORE_SEAL_ROOT, ZCL_HOTSWAP_MODULE_ABI_V3,
             err, sizeof(err)));
         facts.init_array_entries = 0;
         facts.core_seal_root_present = false;
         ASSERT(!hotswap_elf_pre_map_admit(
-            &facts, ZCL_CORE_SEAL_ROOT, ZCL_HOTSWAP_MODULE_ABI_V2,
+            &facts, ZCL_CORE_SEAL_ROOT, ZCL_HOTSWAP_MODULE_ABI_V3,
             err, sizeof(err)));
         facts.core_seal_root_present = true;
         facts.abi_version_present = false;
         ASSERT(!hotswap_elf_pre_map_admit(
-            &facts, ZCL_CORE_SEAL_ROOT, ZCL_HOTSWAP_MODULE_ABI_V2,
+            &facts, ZCL_CORE_SEAL_ROOT, ZCL_HOTSWAP_MODULE_ABI_V3,
             err, sizeof(err)));
         facts.abi_version_present = true;
         facts.undefined_symbol_count = 1;
@@ -762,7 +769,7 @@ static int t_pre_map_policy_is_zero_execution(void)
                  sizeof(facts.undefined_symbols[0]),
                  "zcl_forbidden_runtime_import");
         ASSERT(!hotswap_elf_pre_map_admit(
-            &facts, ZCL_CORE_SEAL_ROOT, ZCL_HOTSWAP_MODULE_ABI_V2,
+            &facts, ZCL_CORE_SEAL_ROOT, ZCL_HOTSWAP_MODULE_ABI_V3,
             err, sizeof(err)));
         ASSERT(strstr(err, "undeclared") != NULL);
         PASS();
@@ -782,7 +789,7 @@ static int t_elf_probe_rejects_deception(void)
         ASSERT(fd >= 0);
         ASSERT(hotswap_elf_probe_fd(fd, &facts, err, sizeof(err)));
         ASSERT(hotswap_elf_pre_map_admit(
-            &facts, ZCL_CORE_SEAL_ROOT, ZCL_HOTSWAP_MODULE_ABI_V2,
+            &facts, ZCL_CORE_SEAL_ROOT, ZCL_HOTSWAP_MODULE_ABI_V3,
             err, sizeof(err)));
         close(fd); unlink(path);
 

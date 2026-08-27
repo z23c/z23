@@ -83,9 +83,11 @@
  *       CONTIGUOUS block of the path-sorted stream. (Any reasoning of the form
  *       "'/' sorts above every character legal in a name" is simply false —
  *       '/' is 0x2f and sorts BELOW every digit and letter — and it is not
- *       what makes the rule work. codeindex_merkle.c's merkle_child_key
- *       comment still carries that wrong reason; it is a comment defect there,
- *       not a behaviour difference, and the two implementations agree.)
+ *       what makes the rule work.)
+ *
+ *       That the two implementations agree is no longer asserted here: the
+ *       core_seal_interop group runs both over one mirrored file set and
+ *       compares every section they can both see.
  *
  *       core_seal sorts children by the key explicitly rather than relying on
  *       its input stream's order, and re-asserts strict ascending order after
