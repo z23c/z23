@@ -14,9 +14,12 @@
  *
  * The AVX-512 lane carries __attribute__((target(...))) so it compiles into the
  * x86-64-v3 baseline and is reached only when keccak_x4_available() confirms
- * avx512f/vl/dq. The scalar fallback (four sha3_256 calls) is the
- * always-available reference and the differential parity oracle (test group
- * `sha3_256_x4`) proves the AVX-512 lane is byte-for-byte identical to it.
+ * avx512f/vl/dq. arm64 carries the mirror-image NEON lane (sha3_256_x4_neon,
+ * permutation in keccak_x4_internal.h), reached only when
+ * keccak_x4_available() confirms FEAT_SHA3. The scalar fallback (four
+ * sha3_256 calls) is the always-available reference and the differential
+ * parity oracle (test group `sha3_256_x4`) proves the vector lane is
+ * byte-for-byte identical to it on both ISAs.
  *
  * SHA3-256 rate = 1088 bits = 136 bytes = 17 uint64 words. Each lane may have a
  * different length; the absorb walks max(blockcount) blocks, XORing each lane's
@@ -114,7 +117,84 @@ void sha3_256_x4_avx512(const uint8_t *const msgs[4], const size_t lens[4],
     }
 }
 
-#else /* non-x86: no AVX-512 lane; dispatch always resolves to scalar. */
+#else /* non-x86 */
+
+#if defined(__aarch64__)
+
+/* The arm64 twin of sha3_256_x4_avx512: same per-lane geometry (pad block,
+ * per-lane block counts, digest captured after the lane's final permutation),
+ * with the four batched instances held as two 25-word uint64x2_t arrays —
+ * slot k of st_a[] is instance k, slot k of st_b[] is instance 2 + k.
+ * Compiles into any arm64 baseline: the SHA3-extension EOR3 inside the
+ * permutation is compile-time guarded, and the runtime probe
+ * (keccak_x4_available) decides whether this lane is reached at all. */
+void sha3_256_x4_neon(const uint8_t *const msgs[4], const size_t lens[4],
+                      uint8_t out[4][32])
+{
+    size_t full_blocks[4], rem[4], blockcount[4], maxblocks = 1;
+    uint8_t padbuf[4][SHA3_256_RATE_BYTES];
+    for (int i = 0; i < 4; ++i) {
+        full_blocks[i] = lens[i] / SHA3_256_RATE_BYTES;
+        rem[i]         = lens[i] % SHA3_256_RATE_BYTES;
+        blockcount[i]  = full_blocks[i] + 1;
+        if (blockcount[i] > maxblocks) maxblocks = blockcount[i];
+
+        memset(padbuf[i], 0, SHA3_256_RATE_BYTES);
+        if (rem[i] > 0)
+            memcpy(padbuf[i], msgs[i] + full_blocks[i] * SHA3_256_RATE_BYTES, rem[i]);
+        padbuf[i][rem[i]] |= 0x06;
+        padbuf[i][SHA3_256_RATE_BYTES - 1] |= 0x80;
+    }
+
+    uint64x2_t st_a[25], st_b[25];
+    for (int i = 0; i < 25; ++i) {
+        st_a[i] = vdupq_n_u64(0);
+        st_b[i] = vdupq_n_u64(0);
+    }
+
+    for (size_t b = 0; b < maxblocks; ++b) {
+        const uint8_t *blk[4];
+        for (int i = 0; i < 4; ++i) {
+            if (b < full_blocks[i])
+                blk[i] = msgs[i] + b * SHA3_256_RATE_BYTES;
+            else if (b == full_blocks[i])
+                blk[i] = padbuf[i];
+            else
+                blk[i] = NULL;
+        }
+
+        for (int w = 0; w < 17; ++w) {
+            uint64_t slot[4] = {0, 0, 0, 0};
+            for (int i = 0; i < 4; ++i)
+                if (blk[i])
+                    slot[i] = ReadLE64(blk[i] + w * 8);
+            st_a[w] = veorq_u64(st_a[w], vld1q_u64(slot));
+            st_b[w] = veorq_u64(st_b[w], vld1q_u64(slot + 2));
+        }
+
+        keccak_x4_permute_neon(st_a, st_b);
+
+        bool any_done = false;
+        for (int i = 0; i < 4; ++i)
+            if (full_blocks[i] == b) { any_done = true; break; }
+        if (any_done) {
+            uint64_t w0[4], w1[4], w2[4], w3[4];
+            vst1q_u64(w0, st_a[0]); vst1q_u64(w0 + 2, st_b[0]);
+            vst1q_u64(w1, st_a[1]); vst1q_u64(w1 + 2, st_b[1]);
+            vst1q_u64(w2, st_a[2]); vst1q_u64(w2 + 2, st_b[2]);
+            vst1q_u64(w3, st_a[3]); vst1q_u64(w3 + 2, st_b[3]);
+            for (int i = 0; i < 4; ++i) {
+                if (full_blocks[i] != b) continue;
+                WriteLE64(out[i] + 0,  w0[i]);
+                WriteLE64(out[i] + 8,  w1[i]);
+                WriteLE64(out[i] + 16, w2[i]);
+                WriteLE64(out[i] + 24, w3[i]);
+            }
+        }
+    }
+}
+
+#else /* neither x86-64 nor arm64: no vector lane; dispatch resolves to scalar. */
 
 void sha3_256_x4_avx512(const uint8_t *const msgs[4], const size_t lens[4],
                         uint8_t out[4][32])
@@ -122,18 +202,25 @@ void sha3_256_x4_avx512(const uint8_t *const msgs[4], const size_t lens[4],
     sha3_256_x4_scalar(msgs, lens, out);
 }
 
-#endif
+#endif /* __aarch64__ */
+
+#endif /* __x86_64__ */
 
 /* ── Dispatch ──────────────────────────────────────────────────────────
  *
- * Default: use the AVX-512 lane when the CPU supports it — this is the genuine
- * multi-stream win (see the bench in the `sha3_256_x4` test group; flip
- * SHA3_256_X4_AVX512_DEFAULT_ENABLED to 0 to ship scalar if a host measures a
- * loss). The parity oracle / bench force a path via sha3_256_x4_select_impl.
- * Setting a function pointer is not torn on any supported target; do not call
- * the selector concurrently with active batched hashing. */
+ * Default: use the vector lane this host has — AVX-512 on x86-64, NEON
+ * (FEAT_SHA3 probed) on arm64. This is the genuine multi-stream win on both
+ * (see the bench in the `sha3_256_x4` test group; flip
+ * SHA3_256_X4_AVX512_DEFAULT_ENABLED / SHA3_256_X4_NEON_DEFAULT_ENABLED to 0
+ * to ship scalar if a host measures a loss). The parity oracle / bench force a
+ * path via sha3_256_x4_select_impl. Setting a function pointer is not torn on
+ * any supported target; do not call the selector concurrently with active
+ * batched hashing. */
 #ifndef SHA3_256_X4_AVX512_DEFAULT_ENABLED
 #define SHA3_256_X4_AVX512_DEFAULT_ENABLED 1
+#endif
+#ifndef SHA3_256_X4_NEON_DEFAULT_ENABLED
+#define SHA3_256_X4_NEON_DEFAULT_ENABLED 1
 #endif
 
 static void (*g_x4)(const uint8_t *const[4], const size_t[4], uint8_t[4][32]) =
@@ -142,10 +229,19 @@ static int g_x4_inited = 0;
 
 static void x4_init_default(void)
 {
+#if defined(__x86_64__)
     if (SHA3_256_X4_AVX512_DEFAULT_ENABLED && keccak_x4_available())
         g_x4 = sha3_256_x4_avx512;
     else
         g_x4 = sha3_256_x4_scalar;
+#elif defined(__aarch64__)
+    if (SHA3_256_X4_NEON_DEFAULT_ENABLED && keccak_x4_available())
+        g_x4 = sha3_256_x4_neon;
+    else
+        g_x4 = sha3_256_x4_scalar;
+#else
+    g_x4 = sha3_256_x4_scalar;
+#endif
     g_x4_inited = 1;
 }
 
@@ -157,18 +253,37 @@ int sha3_256_x4_select_impl(enum sha3_impl which)
         g_x4_inited = 1;
         return SHA3_IMPL_SCALAR;
     case SHA3_IMPL_AVX512:
+#if defined(__x86_64__)
         if (keccak_x4_available()) {
             g_x4 = sha3_256_x4_avx512;
             g_x4_inited = 1;
             return SHA3_IMPL_AVX512;
         }
+#endif
+        g_x4 = sha3_256_x4_scalar;
+        g_x4_inited = 1;
+        return SHA3_IMPL_SCALAR;
+    case SHA3_IMPL_NEON:
+#if defined(__aarch64__)
+        if (keccak_x4_available()) {
+            g_x4 = sha3_256_x4_neon;
+            g_x4_inited = 1;
+            return SHA3_IMPL_NEON;
+        }
+#endif
         g_x4 = sha3_256_x4_scalar;
         g_x4_inited = 1;
         return SHA3_IMPL_SCALAR;
     case SHA3_IMPL_AUTO:
     default:
         x4_init_default();
+#if defined(__x86_64__)
         return (g_x4 == sha3_256_x4_avx512) ? SHA3_IMPL_AVX512 : SHA3_IMPL_SCALAR;
+#elif defined(__aarch64__)
+        return (g_x4 == sha3_256_x4_neon) ? SHA3_IMPL_NEON : SHA3_IMPL_SCALAR;
+#else
+        return SHA3_IMPL_SCALAR;
+#endif
     }
 }
 

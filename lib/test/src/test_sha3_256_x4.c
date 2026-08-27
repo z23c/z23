@@ -7,23 +7,28 @@
  *
  * sha3_256_x4() hashes FOUR independent messages and produces FOUR digests. It
  * is NOT consensus crypto (it backs manifest chunk hashes and Merkle-layer
- * combines only), but a differential oracle proving the AVX-512 lane is
+ * combines only), but a differential oracle proving the vector lane is
  * byte-for-byte identical to 4x scalar sha3_256 is still mandatory before it is
  * allowed onto any code path. This group is that oracle plus an honest
  * multi-stream benchmark:
  *
  *   1. FIPS-202 known-answer vectors through the batch path (all 4 lanes).
  *   2. Randomized parity: every length 0..1100 (crossing the 136B rate
- *      boundary) with all four lanes SHARING the length, on the AVX-512 lane
+ *      boundary) with all four lanes SHARING the length, on the vector lane
  *      and again forced to scalar, vs 4x one-shot sha3_256.
  *   3. Randomized parity with all FOUR lanes at DIFFERENT lengths (the geometry
  *      that exercises per-lane block-count divergence + the pad-block capture),
  *      including empty and NULL-empty lanes, vs 4x sha3_256.
- *   4. Honest benchmark: batch-of-4 (AVX-512) vs 4x scalar sha3_256, the exact
+ *   4. Unaligned-input parity: the same message hashed at byte offsets 0..7
+ *      with lanes at divergent lengths straddling the rate boundary — the
+ *      geometry a caller that does not align its buffers actually produces.
+ *   5. Honest benchmark: batch-of-4 (vector) vs 4x scalar sha3_256, the exact
  *      real-world comparison for a batched consumer. Reported, never gated.
  *
- * When the host lacks AVX-512 the AVX passes degrade to scalar-vs-scalar (still
- * exercises the batch geometry + KAT); this is reported, not failed. */
+ * The vector lane is AVX-512 on x86-64 and NEON (FEAT_SHA3 probed) on arm64 —
+ * SHA3_IMPL_VEC below names whichever this host compiles. When the host lacks
+ * the lane the vector passes degrade to scalar-vs-scalar (still exercises the
+ * batch geometry + KAT); this is reported, not failed. */
 
 #define _POSIX_C_SOURCE 200809L
 
@@ -36,6 +41,19 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+/* The vector tier this target ships: sha3_256_x4_select_impl() dispatches on
+ * the same arch split the implementation does. */
+#if defined(__x86_64__)
+#define SHA3_IMPL_VEC SHA3_IMPL_AVX512
+#define SHA3_VEC_NAME  "AVX-512"
+#elif defined(__aarch64__)
+#define SHA3_IMPL_VEC SHA3_IMPL_NEON
+#define SHA3_VEC_NAME  "NEON"
+#else
+#define SHA3_IMPL_VEC SHA3_IMPL_SCALAR
+#define SHA3_VEC_NAME  "none"
+#endif
 
 /* Deterministic xorshift64* — no libc rand, reproducible across runs. */
 static uint64_t rng_state = 0x243f6a8885a308d3ULL;
@@ -71,10 +89,10 @@ static double now_s(void)
 int test_sha3_256_x4(void)
 {
     int failures = 0;
-    const bool have_avx = keccak_x4_available();
+    const bool have_vec = keccak_x4_available();
 
-    printf("sha3_256_x4: AVX-512 4-lane Keccak available on host... %s\n",
-           have_avx ? "YES" : "no (parity runs scalar-vs-scalar)");
+    printf("sha3_256_x4: %s 4-lane Keccak available on host... %s\n", SHA3_VEC_NAME,
+           have_vec ? "YES" : "no (parity runs scalar-vs-scalar)");
 
     /* ── 1. FIPS-202 known-answer vectors through the batch path ─────── */
     struct { const char *msg; size_t msglen; const char *h256; } kat[] = {
@@ -88,8 +106,8 @@ int test_sha3_256_x4(void)
         int kat_fail = 0;
         for (int pass = 0; pass < 2; ++pass) {
             if (pass == 1) {
-                if (!have_avx) break;
-                sha3_256_x4_select_impl(SHA3_IMPL_AVX512);
+                if (!have_vec) break;
+                sha3_256_x4_select_impl(SHA3_IMPL_VEC);
             } else {
                 sha3_256_x4_select_impl(SHA3_IMPL_SCALAR);
             }
@@ -125,7 +143,7 @@ int test_sha3_256_x4(void)
             uint8_t ref[4][32];
             for (int i = 0; i < 4; ++i) sha3_256(msgs[i], lens[i], ref[i]);
 
-            if (have_avx) sha3_256_x4_select_impl(SHA3_IMPL_AVX512);
+            if (have_vec) sha3_256_x4_select_impl(SHA3_IMPL_VEC);
             else          sha3_256_x4_select_impl(SHA3_IMPL_SCALAR);
             uint8_t got[4][32];
             sha3_256_x4(msgs, lens, got);
@@ -165,7 +183,7 @@ int test_sha3_256_x4(void)
                 uint8_t ref[4][32];
                 for (int i = 0; i < 4; ++i) sha3_256(msgs[i], lens[i], ref[i]);
 
-                if (have_avx) sha3_256_x4_select_impl(SHA3_IMPL_AVX512);
+                if (have_vec) sha3_256_x4_select_impl(SHA3_IMPL_VEC);
                 else          sha3_256_x4_select_impl(SHA3_IMPL_SCALAR);
                 uint8_t got[4][32];
                 sha3_256_x4(msgs, lens, got);
@@ -178,7 +196,40 @@ int test_sha3_256_x4(void)
         else { printf("FAIL (%d)\n", diff_fail); failures++; }
     }
 
-    /* ── 4. Honest benchmark: batch-of-4 vs 4x scalar sha3_256 ──────── */
+    /* ── 4. Parity: unaligned lane buffers, divergent lengths ────────── */
+    printf("sha3_256_x4: parity (unaligned buffers, offsets 0..7) x8x16... ");
+    {
+        int diff_fail = 0;
+        uint8_t *base = (uint8_t *)malloc(4096 + 8);
+        if (!base) {
+            printf("alloc FAIL\n"); failures++;
+        } else {
+            rng_fill(base, 4096 + 8);
+            for (int off = 0; off < 8 && diff_fail == 0; ++off) {
+                const uint8_t *msgs[4] = {
+                    base + off, base + (off + 1) % 8,
+                    base + (off + 3) % 8, base + (off + 7) % 8
+                };
+                for (size_t len = 130; len <= 142; ++len) {
+                    /* Lanes straddle the 136B rate boundary at four lengths. */
+                    size_t lens[4] = { len, len + 1, len + 2, len + 3 };
+                    uint8_t ref[4][32], got[4][32];
+                    for (int i = 0; i < 4; ++i) sha3_256(msgs[i], lens[i], ref[i]);
+
+                    if (have_vec) sha3_256_x4_select_impl(SHA3_IMPL_VEC);
+                    else          sha3_256_x4_select_impl(SHA3_IMPL_SCALAR);
+                    sha3_256_x4(msgs, lens, got);
+                    for (int i = 0; i < 4; ++i)
+                        if (memcmp(ref[i], got[i], 32) != 0) diff_fail++;
+                }
+            }
+            free(base);
+        }
+        if (diff_fail == 0) printf("OK\n");
+        else { printf("FAIL (%d)\n", diff_fail); failures++; }
+    }
+
+    /* ── 5. Honest benchmark: batch-of-4 vs 4x scalar sha3_256 ──────── */
     {
         static const size_t sizes[] = { 64, 136, 512, 4096, 65536 };
         static const char  *names[] = { "64B", "136B", "512B", "4KB", "64KB" };
@@ -210,8 +261,8 @@ int test_sha3_256_x4(void)
                 double mb_ref = ((double)insz * 4.0 * (double)groups)
                                 / (1024.0*1024.0) / dt_ref;
 
-                /* Batch-of-4 (AVX-512 when present). */
-                if (have_avx) sha3_256_x4_select_impl(SHA3_IMPL_AVX512);
+                /* Batch-of-4 (vector lane when present). */
+                if (have_vec) sha3_256_x4_select_impl(SHA3_IMPL_VEC);
                 else          sha3_256_x4_select_impl(SHA3_IMPL_SCALAR);
                 for (int w = 0; w < 8; ++w) sha3_256_x4(msgs, lens, out4);
                 t0 = now_s();
@@ -222,7 +273,7 @@ int test_sha3_256_x4(void)
 
                 printf("sha3_256_x4:   %-6s  4x-scalar %8.1f MB/s   batch-x4 %8.1f MB/s   %.2fx%s\n",
                        names[s], mb_ref, mb_x4, mb_x4 / mb_ref,
-                       have_avx ? "" : " (no avx: scalar-vs-scalar)");
+                       have_vec ? "" : " (no vector lane: scalar-vs-scalar)");
             }
         }
         free(b0); free(b1); free(b2); free(b3);
