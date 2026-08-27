@@ -5,6 +5,7 @@
 #include "models/database_owner_lease.h"
 
 #include "models/database.h"
+#include "platform/file_compat.h"
 #include "platform/path_compat.h"
 #include "util/log_macros.h"
 
@@ -13,7 +14,6 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/file.h>
 #include <unistd.h>
 
 enum { NODE_DB_OWNER_LEASES = 128 };
@@ -60,12 +60,12 @@ static int owner_lease_unlock(int fd)
 #else
 static int owner_lease_lock(int fd)
 {
-    return flock(fd, LOCK_EX | LOCK_NB);
+    return platform_file_lock_exclusive(fd);
 }
 
 static int owner_lease_unlock(int fd)
 {
-    return flock(fd, LOCK_UN);
+    return platform_file_unlock(fd);
 }
 #endif
 
@@ -82,7 +82,7 @@ static struct node_db_owner_lease g_owner_leases[NODE_DB_OWNER_LEASES];
 static bool node_db_owner_lock_path(char out[NODE_DB_OWNER_PATH_MAX],
                                     const char *db_path)
 {
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(_WIN32)
     int written = snprintf(out, NODE_DB_OWNER_PATH_MAX, "%s.owner-lock",
                            db_path);
     return written >= 0 && written < NODE_DB_OWNER_PATH_MAX;
@@ -112,12 +112,12 @@ enum node_db_owner_lease_probe node_db_owner_lease_probe(const char *path)
     pthread_mutex_unlock(&g_owner_lease_mutex);
     if (!node_db_owner_lock_path(lock_path, identity))
         return NODE_DB_OWNER_LEASE_PROBE_ERROR;
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(_WIN32)
     if (access(path, F_OK) != 0)
         return errno == ENOENT ? NODE_DB_OWNER_LEASE_UNOWNED
                                : NODE_DB_OWNER_LEASE_PROBE_ERROR;
 #endif
-    int fd = open(lock_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    int fd = platform_file_open_nofollow(lock_path, O_RDONLY, 0);
     if (fd < 0)
         return errno == ENOENT ? NODE_DB_OWNER_LEASE_UNOWNED
                                : NODE_DB_OWNER_LEASE_PROBE_ERROR;
@@ -192,7 +192,7 @@ bool node_db_owner_lease_acquire(struct node_db *ndb, bool create_if_missing)
     if (!platform_path_identity(identity, sizeof(identity), ndb->path) ||
         !node_db_owner_lock_path(lock_path, identity))
         LOG_FAIL("db", "database owner lease path is too long: %s", ndb->path);
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(_WIN32)
     if (!create_if_missing && access(ndb->path, F_OK) != 0)
         LOG_FAIL("db", "database owner lease open failed for %s: %s",
                  ndb->path, strerror(errno));
@@ -223,13 +223,13 @@ bool node_db_owner_lease_acquire(struct node_db *ndb, bool create_if_missing)
      * database inode is the lease. Darwin implements flock through fcntl and
      * would make SQLite conflict with its own process; use one persistent
      * per-database lock inode there. Independent databases remain independent. */
-    int open_flags = O_RDWR | O_CLOEXEC | O_NOFOLLOW;
-#if defined(__APPLE__)
+    int open_flags = O_RDWR;
+#if defined(__APPLE__) || defined(_WIN32)
     open_flags |= O_CREAT;
 #else
     if (create_if_missing) open_flags |= O_CREAT;
 #endif
-    int fd = open(lock_path, open_flags, 0600);
+    int fd = platform_file_open_nofollow(lock_path, open_flags, 0600);
     if (fd < 0) goto fail_locked;
     if (owner_lease_lock(fd) != 0) {
         int saved = errno;
@@ -261,7 +261,7 @@ bool node_db_owner_lease_rebind(struct node_db *ndb)
 {
     if (!ndb || ndb->lifetime_owner_lease_slot < 0)
         LOG_FAIL("db", "database owner lease rebind requires ownership");
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(_WIN32)
     char identity[NODE_DB_OWNER_PATH_MAX];
     if (!platform_path_identity(identity, sizeof(identity), ndb->path))
         LOG_FAIL("db", "database owner rebind path is invalid");
@@ -276,8 +276,8 @@ bool node_db_owner_lease_rebind(struct node_db *ndb)
         LOG_FAIL("db", "database owner rebind found ambiguous ownership");
     return true;
 #else
-    int replacement = open(ndb->path,
-        O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+    int replacement = platform_file_open_nofollow(
+        ndb->path, O_RDWR | O_CREAT, 0600);
     if (replacement < 0)
         LOG_FAIL("db", "database owner rebind open failed for %s: %s",
                  ndb->path, strerror(errno));

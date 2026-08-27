@@ -1,7 +1,11 @@
 #include "platform/os_proc.h"
+#include "platform/file_compat.h"
 #include "platform/socket_compat.h"
 
+#include <fcntl.h>
 #include <stdint.h>
+#include <string.h>
+#include <unistd.h>
 
 int main(void)
 {
@@ -35,6 +39,30 @@ int main(void)
     if (socket_handle == PLATFORM_SOCKET_INVALID ||
         platform_socket_close(socket_handle) != 0)
         return 4;
+
+    const char *file_path = "z23-platform-file-test.tmp";
+    int first = platform_file_open_nofollow(file_path,
+                                            O_RDWR | O_CREAT, 0600);
+    int second = platform_file_open_nofollow(file_path, O_RDWR, 0600);
+    const char payload[] = "z23-platform-file";
+    unsigned char observed_payload[sizeof(payload)] = { 0 };
+    if (first < 0 || second < 0 ||
+        write(first, payload, sizeof(payload)) != (ssize_t)sizeof(payload) ||
+        platform_file_pread(first, observed_payload, sizeof(observed_payload),
+                            0) != (ssize_t)sizeof(observed_payload) ||
+        memcmp(payload, observed_payload, sizeof(payload)) != 0 ||
+        platform_file_lock_exclusive(first) != 0 ||
+        platform_file_lock_exclusive(second) == 0 ||
+        platform_file_unlock(first) != 0) {
+        if (first >= 0) close(first);
+        if (second >= 0) close(second);
+        unlink(file_path);
+        return 5;
+    }
+    close(first);
+    close(second);
+    if (unlink(file_path) != 0)
+        return 6;
 #if defined(_WIN32)
     if (handles_before != handles_after)
         return 3;
