@@ -5,6 +5,7 @@
 
 #include "services/file_market_payment_service.h"
 
+#include "base/log_macros.h"
 #include "chain/chainparams.h"
 #include "models/file_offer.h"
 #include "sapling/sapling.h"
@@ -37,6 +38,22 @@ static struct zcl_result market_payment_persist(
     if (!db_market_payment_claim_save(ndb, record))
         return ZCL_ERR(-20, "file-market payment claim persistence failed");
     return ZCL_OK;
+}
+
+/* An expired offer's claims are settlement evidence only. Drop its
+ * non-CONFIRMED rows on the next ingest that touches the offer so unconfirmed
+ * locators cannot outlive the offer window and grow the projection without
+ * bound; CONFIRMED rows always survive. */
+static void market_payment_prune_expired_claims(
+    struct node_db *ndb, const struct file_offer *offer, int64_t now_unix)
+{
+    if (now_unix < offer->expires_unix)
+        return;
+    int pruned = db_market_payment_claim_prune_unconfirmed_for_offer(
+        ndb, offer->offer_id);
+    if (pruned > 0)
+        LOG_INFO("market", "pruned %d unconfirmed claim(s) of an expired offer",
+                 pruned);
 }
 
 static struct zcl_result market_payment_reconcile_record(
@@ -149,9 +166,15 @@ struct zcl_result market_payment_claim_ingest(
     struct market_payment_claim_record existing;
     if (db_market_payment_claim_find(ndb, payment->claim_id, &existing)) {
         *out = existing;
-        return market_payment_reconcile_record(
+        struct zcl_result reconciled = market_payment_reconcile_record(
             ndb, main_state, chain_current, wallet_projection_height,
             now_unix, out);
+        if (!reconciled.ok)
+            return reconciled;
+        /* The stored offer wire dates this claim's offer. Prune after the
+         * reconcile so a claim that just confirmed survives as evidence. */
+        market_payment_prune_expired_claims(ndb, &existing.offer, now_unix);
+        return reconciled;
     }
 
     struct file_offer offer;
@@ -162,8 +185,18 @@ struct zcl_result market_payment_claim_ingest(
     if (auth != FILE_PAYMENT_AUTH_OK)
         return ZCL_ERR(-6, "payment does not match signed offer: %s",
                        file_payment_auth_error_string(auth));
+    market_payment_prune_expired_claims(ndb, &offer, now_unix);
     if (now_unix < offer.issued_unix || now_unix >= offer.expires_unix)
         return ZCL_ERR(-7, "new payment claim is outside the signed offer window");
+    int stored = db_market_payment_claim_count_for_offer(ndb,
+                                                         payment->offer_id);
+    if (stored >= MARKET_PAYMENT_CLAIM_OFFER_MAX) {
+        LOG_WARN("market",
+                 "refusing claim: offer holds %d/%d distinct claim cap",
+                 stored, (int)MARKET_PAYMENT_CLAIM_OFFER_MAX);
+        return ZCL_ERR(-9, "offer holds %d distinct claims; cap is %d",
+                       stored, (int)MARKET_PAYMENT_CLAIM_OFFER_MAX);
+    }
 
     out->payment = *payment;
     out->offer = offer;
