@@ -223,26 +223,33 @@ The three roots:
   two nodes that disagree can find the first ten-second window where they
   diverged instead of only learning that they did.
 
-## The two-node proof
+## The three-node proof
 
 `make arena-demo` proves reproduction on one machine. The cross-node proof is
 [`tools/dev/arena_acceptance.sh`](../tools/dev/arena_acceptance.sh), and it is
 the reason the pinned roots above are worth anything.
 
-It stands up two isolated nodes on one host. Node A serves the four published
-arena packages. Node B starts empty, fetches them over the package swarm,
+It stands up three isolated nodes on one host. Nodes B and C start from clean
+datadirs, run the same `z23 join` command an operator runs, and then boot
+without command-line package-host or build-worker overrides. Node A serves the
+four published arena packages. Node B fetches them over the package swarm,
 installs each through the confined build-and-test worker, and builds its own
 pilot binaries from its own store. Then both nodes play the same match
 independently. The proof asserts that B's pilot binaries and installed
 archives are byte-identical to A's, that both replays are byte-identical, and
-that all three roots and the winner and tick count agree. It also flips a byte
-in a copy of B's replay and requires a named refusal, and SIGKILLs a build
-worker mid-build to show the identical retry reproduces identical archives.
+that all three roots and the winner and tick count agree. Before any build,
+the proof stops A and requires clean node C to fetch byte-identical inert
+package bytes from B alone over ordinary P2P inventory. Chain height and
+mempool stay zero and the ZID-gated DHT stays disabled: joining this SWARM leg
+needs no wallet transaction, fee, identity anchor, or invitation. It also
+flips a byte in a copy of B's replay and requires a named refusal, and
+SIGKILLs a build worker mid-build to show the identical retry reproduces
+identical archives.
 
-Run it deliberately — it spawns two real node processes:
+Run it deliberately — it spawns three real node processes:
 
 ```bash
-bash tools/dev/arena_acceptance.sh
+make commons-no-coin-onboarding-acceptance
 ```
 
 ## Honest gaps

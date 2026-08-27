@@ -2629,12 +2629,20 @@ secure-release-regressions-locked: $(TEST_PARALLEL_REL_CANDIDATE) dev-package-ve
 #
 # It is deliberately not part of `make ci`: it spawns three real regtest
 # daemons, mines a regtest chain and runs confined package builds.
-.PHONY: commons-demo commons-journey-acceptance
+.PHONY: commons-demo commons-journey-acceptance \
+	commons-no-coin-onboarding-acceptance
 commons-demo: zclassic23 zcl-rpc zclassic23-package-sign zclassic23-package-verify tools/arena-product-journey-c23
 	@bash tools/dev/commons_journey_acceptance.sh
 
 # The same proof under its acceptance name, for scripts and release notes.
 commons-journey-acceptance: commons-demo
+
+# Real-daemon proof of the permissionless SWARM tier. The Arena harness starts
+# clean consumers through `z23 join`, never passes packagehost/buildworker on
+# daemon argv, and proves onward exact-byte service after the publisher stops
+# with height/mempool/DHT all remaining empty or disabled.
+commons-no-coin-onboarding-acceptance: zclassic23 zcl-rpc tools/arena-runner
+	@bash tools/dev/arena_acceptance.sh
 
 # The SAME journey with nodes B and C on their own physical hosts. The
 # publisher's machine itself is gone; host C still discovers, fetches,

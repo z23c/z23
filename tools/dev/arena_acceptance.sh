@@ -1,6 +1,6 @@
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 #
-# arena_acceptance.sh — the TWO-NODE physical proof for the zdogfight
+# arena_acceptance.sh — the THREE-NODE physical proof for the zdogfight
 # arena alpha: a fresh node pulls the exact published arena packages over
 # the zpkgswm swarm from a second node, installs them through the confined
 # build+test worker, builds its own pilot binaries, and then both nodes
@@ -12,19 +12,22 @@
 # discipline: live-port refuse-set + LISTEN probes, setsid process
 # groups, datadir-scoped pkill, mktemp scratch datadirs under test-tmp/).
 #
-# Topology (two disjoint isolated regtest nodes, loopback only):
+# Topology (three disjoint isolated regtest nodes, loopback only):
 #
 #   Node A (publisher): booted on a BYTE-EXACT cp -a of the quarantine
 #       store pair member ~/.zclassic-c23-commons-arena-a (an ordinary
 #       datadir whose zcode/ store holds the four published arena
-#       packages, all installed). -packagehost=1, dead-sink -connect:
-#       A dials nobody real; it only serves.
+#       packages, all installed). `z23 join` writes its hosting flags;
+#       dead-sink -connect means A dials nobody real and only serves.
 #   Node B (fresh node): empty mktemp datadir. Its four download records
 #       are seeded ONE-SHOT while B is down (the fetch leaf persists a
 #       resumable record under <dd>/zcode/downloads and reports
 #       live:false — the exact science-acceptance pattern), then B boots
-#       with -packagehost=1 -connect=127.0.0.1:$A_PORT and its swarm
-#       engine resumes the records and pulls every chunk from A.
+#       after `z23 join`, with -connect=127.0.0.1:$A_PORT; its swarm engine
+#       resumes the records and pulls every chunk from A.
+#   Node C (late replica): empty mktemp datadir joined through the public
+#       command. After A stops it connects only to B and fetches one exact
+#       package without DHT, identity, wallet transaction, block, or fee.
 #
 # MINIMAL BOOT, NO ZID IDENTITY — resolved empirically: the zpkgswm
 # package swarm needs no DHT delegation or identity anchor between two
@@ -37,12 +40,15 @@
 # script fails loudly at [2], which is the intended signal.
 #
 # What this script PROVES (each step asserts before proceeding):
-#   [1] two-node loopback topology on a byte-exact store copy; A serves
-#       all four arena packages (tracked+complete in its live store).
+#   [1] `z23 join` writes the hosting/worker flags into clean scratch
+#       datadirs; daemons boot without either flag on their command lines.
+#       A then serves all four arena packages (tracked+complete).
 #   [2] B fetches zprng + zdogfight + zdogdrone + zdogace over the swarm
 #       from A (per-package fetch seconds recorded), then installs each
 #       through `zcode package add plan|commit` (confined build+test
 #       worker, receipt-bound; per-package install seconds recorded).
+#   [2b] A is stopped; a third clean joined node fetches exact inert bytes
+#       from B alone, with no DHT, ZID, wallet transaction, block or fee.
 #   [3] A and B each build BOTH pilot binaries from their own datadir
 #       (verified `zcode package checkout` of the app source + the
 #       installed static archives; -static is REQUIRED — the sandbox's
@@ -137,7 +143,7 @@
 # datadir-scoped pkill -f -- "-datadir=<scratch>" only, and the guarded
 # rm -rf accepts only test-tmp/zcl23-arenaacc-* paths.
 #
-# Run: bash tools/dev/arena_acceptance.sh   (opt-in; spawns two real
+# Run: bash tools/dev/arena_acceptance.sh   (opt-in; spawns three real
 # node processes and needs the host Landlock/seccomp confinement
 # backend, same opt-in class as test-science-acceptance.)
 #   ARENA_KEEP=1 preserves the scratch datadirs for inspection.
@@ -189,6 +195,7 @@ REF_STATE_ROOT_CHAIN=657cbc598e8cfff4e3a67e0b11de17a6b576be686ae924149614eca3e15
 # LISTEN table before any bind.
 A_PORT=20022; A_RPC=39211; A_FS=39212; A_HTTPS=39213
 B_PORT=18033; B_RPC=39221; B_FS=39222; B_HTTPS=39223
+C_PORT=20023; C_RPC=39231; C_FS=39232; C_HTTPS=39233
 DEAD_SINK=39999
 RPC_WARMUP="${RPC_WARMUP:-90}"     # per-node RPC warmup budget (s)
 FETCH_BUDGET="${FETCH_BUDGET:-180}" # swarm fetch budget for all 4 pkgs (s)
@@ -206,7 +213,7 @@ AA_T0=$(date +%s%3N)
 
 aa_die() {
     echo "arena-acceptance: FATAL: $*" >&2
-    for dd in "$AA_DD_A" "$AA_DD_B"; do
+    for dd in "$AA_DD_A" "$AA_DD_B" "$AA_DD_C"; do
         if [ -n "$dd" ] && [ -f "$dd/node.log" ]; then
             echo "arena-acceptance: last 30 lines of $dd/node.log:" >&2
             tail -30 "$dd/node.log" | sed 's/^/arena-acceptance:   /' >&2
@@ -312,6 +319,18 @@ aa_wait_topology() { # wait for the one permitted A<->B peer on both sides
     done
     return 1
 }
+aa_wait_pair() { # $1=left-dd $2=left-rpc $3=right-dd $4=right-rpc
+    local deadline left right
+    deadline=$(( $(date +%s) + 60 ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        left="$(aa_peer_count "$1" "$2")"
+        right="$(aa_peer_count "$3" "$4")"
+        [ "$left" -ge 1 ] 2>/dev/null && [ "$right" -ge 1 ] 2>/dev/null &&
+            return 0
+        sleep 0.5
+    done
+    return 1
+}
 aa_wait_rpc() { # $1=dd $2=rpc $3=pid $4=secs
     local dd="$1" rp="$2" pid="$3" secs="$4" deadline t
     deadline=$(( $(date +%s) + secs ))
@@ -333,11 +352,25 @@ aa_spawn() { # $1=datadir $2=p2p $3=rpc $4=fs $5=https $6=connect-target
     setsid "$NODE_BIN" \
         -datadir="$dd" -regtest \
         -port="$p2p" -rpcport="$rpc" -fsport="$fs" -httpsport="$https" \
-        -connect="$conn" -packagehost=1 -nofilesync \
+        -connect="$conn" -nofilesync \
         -v2transport \
         -nobgvalidation -nolegacyimport -showmetrics=0 \
         >"$dd/node.log" 2>&1 &
     echo "$!"   # PID == PGID (setsid leader)
+}
+
+aa_join() { # $1=clean-or-scratch datadir
+    local dd="$1" out config
+    out="$(printf '%s' '{}' | aa_leaf "$dd" zcode.node.join)"
+    [ "$(aa_jget "$out" ok 2>/dev/null || true)" = "true" ] ||
+        aa_die "z23 join failed for $dd: $out"
+    [ "$(aa_jget "$out" data.swarm_member 2>/dev/null || true)" = "true" ] ||
+        aa_die "z23 join did not establish swarm membership: $out"
+    config="$(aa_jget "$out" data.config_file 2>/dev/null || true)"
+    [ "$config" = "$dd/z23.conf" ] && grep -qx 'packagehost=1' "$config" ||
+        aa_die "z23 join did not write packagehost=1 to $dd/z23.conf"
+    grep -qx 'buildworker=1' "$config" ||
+        aa_die "z23 join did not admit the C23 compiler available to this harness"
 }
 
 # dumpstate zcode_store <root> on a LIVE node → "tracked complete" booleans.
@@ -376,7 +409,8 @@ command -v cmp     >/dev/null 2>&1 || aa_die "cmp not found"
     || aa_die "quarantine store $ARENA_SOURCE_STORE missing (need the published arena packages)"
 
 for p in "$A_PORT" "$A_RPC" "$A_FS" "$A_HTTPS" \
-         "$B_PORT" "$B_RPC" "$B_FS" "$B_HTTPS" "$DEAD_SINK"; do
+         "$B_PORT" "$B_RPC" "$B_FS" "$B_HTTPS" \
+         "$C_PORT" "$C_RPC" "$C_FS" "$C_HTTPS" "$DEAD_SINK"; do
     aa_assert_not_live_port "$p"
 done
 
@@ -394,7 +428,8 @@ done
 trap aa_cleanup EXIT INT TERM
 
 for p in "$A_PORT" "$A_RPC" "$A_FS" "$A_HTTPS" \
-         "$B_PORT" "$B_RPC" "$B_FS" "$B_HTTPS"; do
+         "$B_PORT" "$B_RPC" "$B_FS" "$B_HTTPS" \
+         "$C_PORT" "$C_RPC" "$C_FS" "$C_HTTPS"; do
     aa_assert_port_free "$p"
 done
 
@@ -409,12 +444,23 @@ root_of() { # $1=short package name → its published root
 }
 
 echo "arena-acceptance: A{dd=$AA_DD_A p2p=$A_PORT rpc=$A_RPC} B{dd=$AA_DD_B p2p=$B_PORT rpc=$B_RPC}"
-echo "arena-acceptance: work=$AA_WORK C=$AA_DD_C"
+echo "arena-acceptance: C{dd=$AA_DD_C p2p=$C_PORT rpc=$C_RPC} work=$AA_WORK"
+
+# B and C begin genuinely empty. The product command, not this harness's
+# daemon argv, grants their package-host/build-worker posture.
+[ "$(find "$AA_DD_B" -mindepth 1 -maxdepth 1 | wc -l)" -eq 0 ] ||
+    aa_die "B datadir was not clean before join"
+[ "$(find "$AA_DD_C" -mindepth 1 -maxdepth 1 | wc -l)" -eq 0 ] ||
+    aa_die "C datadir was not clean before join"
+aa_join "$AA_DD_B"
+aa_join "$AA_DD_C"
+echo "arena-acceptance:     clean B/C joined through z23.conf; daemon argv carries no packagehost/buildworker override"
 
 # ── [1] byte-exact store copy; boot A; A serves all four ─────────────
 aa_step 1 "copy quarantine store byte-exact; boot A (hosting, dead sink)"
 cp -a "$ARENA_SOURCE_STORE/." "$AA_DD_A/" \
     || aa_die "cp -a of the quarantine store failed"
+aa_join "$AA_DD_A"
 # G-A1: prune A's scratch copy to exactly the four arena manifests, so A's
 # announce set fits the receiver's NEW_USER bootstrap quota (4/hour).
 # Recovery re-derives tracking from manifests/ and GCs unreferenced CAS
@@ -508,6 +554,62 @@ if [ -n "$remaining" ]; then
     aa_die "B swarm fetch stalled past ${FETCH_BUDGET}s: $remaining"
 fi
 T_FETCH_DONE=$(now_ms)
+
+# ── [2b] the no-coin onboarding claim, over real daemons ─────────────
+# B has only verified package bytes from A. Stop A completely, then let a
+# clean `z23 join`-configured C fetch one exact root from B. No DHT discovery
+# is involved: the ordinary NODE_ZCL23 inventory announces the root.
+aa_step 2b "publisher down; clean joined C fetches exact inert bytes from replica B"
+[ ! -e "$AA_DD_B/zcode/installed" ] ||
+    aa_die "B built or installed fetched source before explicit admission"
+aa_kill_group "$AA_PGID_A"; AA_PGID_A=""
+sleep 1
+
+out="$(printf '%s' "{\"root\":\"$ZPRNG_ROOT\",\"maximum_bytes\":268435456}" \
+    | aa_leaf "$AA_DD_C" zcode.package.fetch)"
+[ "$(aa_jget "$out" ok 2>/dev/null || true)" = "true" ] ||
+    aa_die "C no-coin fetch-record seed refused: $out"
+[ "$(aa_jget "$out" data.live 2>/dev/null || true)" = "false" ] ||
+    aa_die "C down-node fetch seed claimed a live engine: $out"
+
+AA_PGID_C="$(aa_spawn "$AA_DD_C" "$C_PORT" "$C_RPC" "$C_FS" \
+    "$C_HTTPS" "127.0.0.1:$B_PORT")"
+aa_wait_rpc "$AA_DD_C" "$C_RPC" "$AA_PGID_C" "$RPC_WARMUP" ||
+    aa_die "C RPC never came up after z23 join"
+aa_wait_pair "$AA_DD_B" "$B_RPC" "$AA_DD_C" "$C_RPC" ||
+    aa_die "B<->C ordinary P2P topology did not settle after A stopped"
+
+deadline=$(( $(date +%s) + FETCH_BUDGET ))
+while [ "$(date +%s)" -lt "$deadline" ]; do
+    set -- $(aa_store_state "$AA_DD_C" "$C_RPC" "$ZPRNG_ROOT")
+    [ "${1:-false}" = "true" ] && [ "${2:-false}" = "true" ] && break
+    sleep 1
+done
+set -- $(aa_store_state "$AA_DD_C" "$C_RPC" "$ZPRNG_ROOT")
+[ "${1:-false}" = "true" ] && [ "${2:-false}" = "true" ] ||
+    aa_die "C did not fetch zprng from replica B after publisher A stopped"
+[ ! -e "$AA_DD_C/zcode/installed" ] ||
+    aa_die "C's fetched bytes gained build/install authority"
+
+cmp -s "$AA_DD_B/zcode/manifests/$ZPRNG_ROOT" \
+    "$AA_DD_C/zcode/manifests/$ZPRNG_ROOT" ||
+    aa_die "C's relayed manifest is not byte-identical to B's verified root"
+for node in "B:$AA_DD_B:$B_RPC" "C:$AA_DD_C:$C_RPC"; do
+    label="${node%%:*}"; rest="${node#*:}"; dd="${rest%:*}"; rpc="${rest##*:}"
+    [ "$(aa_rpc "$dd" "$rpc" getblockcount | aa_result)" = "0" ] ||
+        aa_die "$label wrote a chain block during no-coin onboarding"
+    [ "$(aa_rpc "$dd" "$rpc" getrawmempool | "$JSONQ" count result 2>/dev/null)" = "0" ] ||
+        aa_die "$label created or relayed a fee transaction"
+    [ "$(aa_rpc "$dd" "$rpc" listtransactions | "$JSONQ" count result 2>/dev/null)" = "0" ] ||
+        aa_die "$label wrote a wallet transaction during no-coin onboarding"
+    dht_enabled="$(aa_dump "$dd" "$rpc" zcode_dht | \
+        "$JSONQ" get state.enabled 2>/dev/null || true)"
+    [ "$dht_enabled" = "false" ] ||
+        aa_die "$label unexpectedly enabled the ZID-gated DHT: $dht_enabled"
+done
+echo "arena-acceptance:     PASS join config -> ordinary inventory -> replica fetch; A down, exact bytes inert, height=0, mempool=0, DHT=false"
+aa_kill_group "$AA_PGID_C"; AA_PGID_C=""
+sleep 1
 
 # Nodes down: every further store operation is one-shot per datadir, never
 # racing a live daemon.
@@ -727,6 +829,7 @@ aa_step 8 "worker-failure leg: SIGKILL the confined worker mid-build on C, retry
 # C starts from B's fetched store with the installed/ tree AND the filed
 # build receipts/plans REMOVED, so the add commit genuinely rebuilds
 # (zprng -> zdogfight -> zdogdrone) instead of reusing a receipt.
+rm -rf "$AA_DD_C/zcode"
 cp -a "$AA_DD_B/zcode" "$AA_DD_C/zcode" || aa_die "C store copy failed"
 rm -rf "$AA_DD_C/zcode/installed" "$AA_DD_C/zcode/buildwork" \
        "$AA_DD_C/zcode/staging" "$AA_DD_C/zcode/receipts" \

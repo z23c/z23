@@ -193,3 +193,53 @@ token, state, and commit receipt fields. A contradictory commit fixture is
 refused with `BAD_RPC_BODY`, `mutated=false`; the exact native contract group
 passes. The release remains held pending atomic registration-state comparison,
 database-error separation, and same-second state-identity hardening.
+
+## Registration, public-index, and permissionless-join hardening
+
+The registration plan now commits canonical signed-offer bytes, the exact
+target path, and a digest of every durable registration-row field. Store
+errors are distinct from absence. Commit hashes the candidate bytes first,
+then rechecks the token and saves under one reserved SQLite write transaction
+and the service's in-process registration lock. Same-second rewrites and a
+deterministic post-hash interleaving both return `STALE_PLAN`.
+
+The remote market-content index no longer reveals totals or counts for rows
+hidden by local moderation. Local diagnostics derive their bounded rows and
+uncapped total from one SQLite statement, so they describe one snapshot. A
+failed persisted-offer count is omitted from market status rather than
+rendered as `-1`.
+
+The Arena real-daemon harness now has an explicit no-coin onboarding leg:
+clean receiver and replica datadirs run `z23 join`, restart without hosting
+flags in their process arguments, fetch exact inert bytes over the ordinary
+package swarm, stop the publisher, and prove the late replica fetches from the
+receiver with DHT disabled and no blocks, mempool entries, wallet
+transactions, installation, or fee. The full leg remains unexecuted on this
+host because its declared four-package Arena source store is absent; the
+command-level clean-datadir join probe passed and the harness passed syntax,
+shell, and diff checks. This is recorded as missing live-fixture evidence, not
+as a completed network claim.
+
+Recorded at `2026-08-27T17:28:52Z` (`2026-08-27T13:28:52-04:00`) on an AMD
+Ryzen 7 PRO 8840U with GCC 16.1.1:
+
+```text
+file_market exact             PASS 1/1; groups_failed=0; self_skips=0
+file_market_moderation exact  PASS 1/1; groups_failed=0; self_skips=0
+native_api_contract exact     PASS 1/1; groups_failed=0; self_skips=0
+command_registry exact        PASS 1/1; groups_failed=0; self_skips=0
+block_swarm_loopback exact     PASS 1/1; groups_failed=0; self_skips=0
+zcode_node_command exact       PASS 1/1; groups_failed=0; self_skips=0
+utxo_mirror_sync exact         PASS 1/1; groups_failed=0; self_skips=0
+zcode_swarm exact              PASS 1/1; groups_failed=0; self_skips=0
+lint-fast                      PASS 20/20 gates
+git diff --check               PASS
+```
+
+The UTXO-mirror regression also proved that a mirror cursor one above the
+authority frontier is a real authority rewind, not an encoding difference.
+It freezes the projection and retains quarantine across an equal-height
+frontier rebound. Node 3 therefore remains serving but projection-quarantined
+until the
+[copy-first rebuild experiment](../work/utxo-mirror-authority-rewind.md) is
+implemented and qualified.
