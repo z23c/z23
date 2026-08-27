@@ -945,6 +945,12 @@ static int shop_want_list_budget(void)
  * ended at the cap. Post past the cap and pin all three numbers apart:
  * the true total, the window disclosure, and the moderation counts that
  * are (honestly) window-scoped. */
+static int sw_interrupt_sql(void *unused)
+{
+    (void)unused;
+    return 1;
+}
+
 static int shop_want_board_total_honesty(void)
 {
     int failures = 0;
@@ -991,6 +997,21 @@ static int shop_want_board_total_honesty(void)
     zcl_command_reply_free(&reply);
     json_free(&input);
 
+    /* Interrupt the populated table scan after prepare has completed. A
+     * non-row sqlite3_step result is a store failure, never an empty board. */
+    char path[600];
+    (void)snprintf(path, sizeof(path), "%s/node.db", dir);
+    struct node_db ndb;
+    memset(&ndb, 0, sizeof(ndb));
+    bool opened = node_db_open_runtime(&ndb, path, "test.shop.want.count");
+    SW_CHECK("count-failure fixture opens", opened);
+    if (opened) {
+        sqlite3_progress_handler(ndb.db, 50, sw_interrupt_sql, NULL);
+        SW_CHECK("open-board interrupted count returns -1",
+                 db_shop_want_count(&ndb, SW_NOW, false) == -1);
+        sqlite3_progress_handler(ndb.db, 0, NULL, NULL);
+        node_db_close(&ndb);
+    }
     test_rm_rf(dir);
     return failures;
 }

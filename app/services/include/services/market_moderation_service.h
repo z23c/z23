@@ -170,6 +170,12 @@ struct zcl_result market_moderation_review_counts(
  * Fails when the state is invalid or no signed offer carries that id. */
 struct zcl_result market_moderation_set_review_state(
     const uint8_t offer_id[32], enum market_review_state state);
+/* Plan/commit write: succeeds only when the persisted mark still equals
+ * `expected`. Code MARKET_MODERATION_REVIEW_STALE means another writer won. */
+#define MARKET_MODERATION_REVIEW_STALE (-5)
+struct zcl_result market_moderation_compare_set_review_state(
+    const uint8_t offer_id[32], enum market_review_state expected,
+    enum market_review_state state);
 /* Same answer as _for_root, addressed by the signed offer id a delivery
  * request carries. MARKET_REVIEW_UNREVIEWED when the db is absent, the
  * id matches no signed offer, or the mark is unreadable. */

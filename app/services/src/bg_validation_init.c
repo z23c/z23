@@ -4,6 +4,9 @@
  * The boot adapter may resolve the network datadir in caller-local storage;
  * this service must retain bytes, never that caller's pointer. */
 
+// one-result-type-ok:lifecycle-initializer — this retained void API always
+// leaves a stopped service; bg_validation_start reports invalid initialization.
+
 #include "services/bg_validation_service.h"
 
 #include "adapters/outbound/persistence/bg_validation_store_sqlite.h"

@@ -558,6 +558,54 @@ struct zcl_result market_moderation_set_review_state(
     return ZCL_OK;
 }
 
+struct zcl_result market_moderation_compare_set_review_state(
+    const uint8_t offer_id[32], enum market_review_state expected,
+    enum market_review_state state)
+{
+    if (!offer_id) {
+        LOG_ERROR(MM_TAG, "review CAS: offer_id is NULL");
+        return ZCL_ERR(-1, "review CAS: offer_id is NULL");
+    }
+    if (!market_review_state_valid(expected) ||
+        !market_review_state_valid(state)) {
+        LOG_ERROR(MM_TAG, "review CAS: invalid expected=%d next=%d",
+                  expected, state);
+        return ZCL_ERR(-2, "review CAS: invalid expected or next state");
+    }
+    pthread_mutex_lock(&g_mm_mutex);
+    struct node_db *ndb = g_mm_ndb;
+    pthread_mutex_unlock(&g_mm_mutex);
+    if (!ndb || !ndb->open) {
+        LOG_ERROR(MM_TAG, "review CAS: node db unavailable");
+        return ZCL_ERR(-3, "review CAS: node db unavailable");
+    }
+
+    enum db_file_offer_review_cas_result changed =
+        db_file_offer_compare_set_review_state(
+            ndb, offer_id, market_review_state_string(expected),
+            market_review_state_string(state));
+    if (changed == DB_FILE_OFFER_REVIEW_CAS_UPDATED)
+        return ZCL_OK;
+    if (changed == DB_FILE_OFFER_REVIEW_CAS_ERROR) {
+        LOG_ERROR(MM_TAG, "review CAS: persistence failed");
+        return ZCL_ERR(-6, "review CAS persistence failed");
+    }
+
+    /* Zero changed rows is authoritative for "expected no longer matches".
+     * Preserve the existing unknown-offer diagnostic when possible; this
+     * read is diagnostic only and cannot turn a failed CAS into success. */
+    struct file_offer offer;
+    if (!db_file_offer_find_by_id(ndb, offer_id, &offer)) {
+        LOG_ERROR(MM_TAG, "review CAS: no signed offer matched");
+        return ZCL_ERR(-4, "no signed offer carries that id");
+    }
+    LOG_WARN(MM_TAG, "review CAS stale: expected=%s next=%s",
+             market_review_state_string(expected),
+             market_review_state_string(state));
+    return ZCL_ERR(MARKET_MODERATION_REVIEW_STALE,
+                   "review mark no longer matches the planned state");
+}
+
 /* ── dumpstate dumper ───────────────────────────────────────────── */
 
 bool market_moderation_dump_state_json(struct json_value *out,

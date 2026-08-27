@@ -86,6 +86,24 @@ static bool mmt_kv_bool(const struct json_value *obj, const char *key)
     return v && v->type == JSON_BOOL && json_get_bool(v);
 }
 
+struct mmt_review_interleave {
+    uint8_t offer_id[32];
+    enum market_review_state state;
+    bool ran;
+    bool wrote;
+};
+
+static void mmt_review_interleave_write(void *ctx)
+{
+    struct mmt_review_interleave *step = ctx;
+    if (!step)
+        return;
+    step->ran = true;
+    struct zcl_result moved =
+        market_moderation_set_review_state(step->offer_id, step->state);
+    step->wrote = moved.ok;
+}
+
 static const char *mmt_row_review(const struct json_value *listing,
                                   const char *offer_id_hex)
 {
@@ -451,6 +469,39 @@ static int test_mmt_view_filter(void)
         json_free(&mark);
         ASSERT(mmt_rpc(&table, "zmarket_review_set", params, &mark));
         ASSERT(mmt_kv_bool(&mark, "committed"));
+        json_free(&mark);
+
+        /* Deterministically place a competing writer AFTER commit has read
+         * the prior mark and validated its token, but BEFORE its write. The
+         * conditional UPDATE must prove zero changed rows and preserve the
+         * winner instead of overwriting it with the stale plan. */
+        ASSERT(market_moderation_set_review_state(
+                   offer_c.offer_id, MARKET_REVIEW_UNREVIEWED).ok);
+        snprintf(params, sizeof(params), "[\"%s\",\"reviewed_ok\",\"plan\"]",
+                 id_c);
+        ASSERT(mmt_rpc(&table, "zmarket_review_set", params, &mark));
+        const char *race_token = mmt_kv_str(&mark, "plan_token");
+        char tok_c_race[65];
+        ASSERT(race_token && strlen(race_token) == 64 &&
+               snprintf(tok_c_race, sizeof(tok_c_race), "%s", race_token) ==
+                   64);
+        json_free(&mark);
+        struct mmt_review_interleave interleave = {
+            .state = MARKET_REVIEW_SENSITIVE,
+        };
+        memcpy(interleave.offer_id, offer_c.offer_id,
+               sizeof(interleave.offer_id));
+        market_review_set_precommit_hook_for_test(
+            mmt_review_interleave_write, &interleave);
+        snprintf(params, sizeof(params),
+                 "[\"%s\",\"reviewed_ok\",\"commit\",\"%s\"]", id_c,
+                 tok_c_race);
+        ASSERT(!mmt_rpc(&table, "zmarket_review_set", params, &mark));
+        ASSERT(mark.type == JSON_STR &&
+               strstr(json_get_str(&mark), "STALE_PLAN") != NULL);
+        ASSERT(interleave.ran && interleave.wrote);
+        ASSERT(market_moderation_review_state_for_offer_id(offer_c.offer_id) ==
+               MARKET_REVIEW_SENSITIVE);
         json_free(&mark);
 
         /* Restore C so the listing/count assertions below keep their

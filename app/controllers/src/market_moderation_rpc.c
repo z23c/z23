@@ -35,6 +35,28 @@
 #include <stdio.h>
 #include <string.h>
 
+#ifdef ZCL_TESTING
+static market_review_precommit_test_hook_fn g_review_precommit_hook;
+static void *g_review_precommit_hook_ctx;
+
+void market_review_set_precommit_hook_for_test(
+    market_review_precommit_test_hook_fn fn, void *ctx)
+{
+    g_review_precommit_hook = fn;
+    g_review_precommit_hook_ctx = ctx;
+}
+
+static void market_review_fire_precommit_hook_for_test(void)
+{
+    market_review_precommit_test_hook_fn fn = g_review_precommit_hook;
+    void *ctx = g_review_precommit_hook_ctx;
+    g_review_precommit_hook = NULL;
+    g_review_precommit_hook_ctx = NULL;
+    if (fn)
+        fn(ctx);
+}
+#endif
+
 static bool rpc_zmarket_moderation_status(const struct json_value *params,
                                           bool help,
                                           struct json_value *result)
@@ -528,9 +550,19 @@ static bool rpc_zmarket_review_set(const struct json_value *params, bool help,
                 "— re-plan and commit again");
             return false;
         }
-        struct zcl_result marked = market_moderation_set_review_state(
-            offer_id, (enum market_review_state)state);
+#ifdef ZCL_TESTING
+        market_review_fire_precommit_hook_for_test();
+#endif
+        struct zcl_result marked =
+            market_moderation_compare_set_review_state(
+                offer_id, previous, (enum market_review_state)state);
         if (!marked.ok) {
+            if (marked.code == MARKET_MODERATION_REVIEW_STALE) {
+                json_set_str(result,
+                    "STALE_PLAN: the review mark moved after the plan was "
+                    "validated — re-plan and commit again");
+                return false;
+            }
             char message[300];
             snprintf(message, sizeof(message), "REVIEW_REFUSED: %s",
                      marked.message[0] ? marked.message

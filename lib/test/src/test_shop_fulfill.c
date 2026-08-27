@@ -733,6 +733,12 @@ static int sf_flow(void)
 /* Past SHOP_FULFILL_QUERY_CAP claims on one want, total_matching must
  * stay the true match count with window_capped set — the fetch cap is a
  * rendering bound, never a market-size report. */
+static int sf_interrupt_sql(void *unused)
+{
+    (void)unused;
+    return 1;
+}
+
 static int sf_list_total_honesty(void)
 {
     int failures = 0;
@@ -784,6 +790,26 @@ static int sf_list_total_honesty(void)
     zcl_command_reply_free(&reply);
     json_free(&input);
 
+    /* Interrupt the populated table scan after prepare has completed. A
+     * non-row sqlite3_step result is a store refusal, never a truthful zero. */
+    char path[600];
+    (void)snprintf(path, sizeof(path), "%s/node.db", dir);
+    struct node_db ndb;
+    memset(&ndb, 0, sizeof(ndb));
+    bool opened = node_db_open_runtime(&ndb, path,
+                                       "test.shop.fulfill.count");
+    SF_CHECK("count-failure fixture opens", opened);
+    if (opened) {
+        uint8_t want_id_bytes[32];
+        bool decoded = zcl_hex_decode_lower(want_id, want_id_bytes, 32);
+        SF_CHECK("count-failure want id decodes", decoded);
+        sqlite3_progress_handler(ndb.db, 50, sf_interrupt_sql, NULL);
+        SF_CHECK("open fulfill count interrupted returns -1",
+                 db_shop_fulfill_list_count_for_want(
+                     &ndb, want_id_bytes, SF_NOW, false) == -1);
+        sqlite3_progress_handler(ndb.db, 0, NULL, NULL);
+        node_db_close(&ndb);
+    }
     test_rm_rf(dir);
     return failures;
 }

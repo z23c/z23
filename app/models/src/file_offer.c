@@ -364,6 +364,46 @@ bool db_file_offer_set_review_state(struct node_db *ndb,
         AR_BIND_BLOB(s, 2, offer_id, 32));
 }
 
+enum db_file_offer_review_cas_result
+db_file_offer_compare_set_review_state(struct node_db *ndb,
+                                       const uint8_t offer_id[32],
+                                       const char *expected_review_state,
+                                       const char *next_review_state)
+{
+    if (!ndb || !ndb->open) {
+        LOG_ERROR("market", "review CAS: db not open");
+        return DB_FILE_OFFER_REVIEW_CAS_ERROR;
+    }
+    if (!offer_id || !expected_review_state || !expected_review_state[0] ||
+        !next_review_state || !next_review_state[0]) {
+        LOG_ERROR("market", "review CAS: invalid arguments");
+        return DB_FILE_OFFER_REVIEW_CAS_ERROR;
+    }
+
+    sqlite3_stmt *s = NULL;
+    AR_PREPARE_RET(ndb, s,
+        "UPDATE file_offers SET review_state=? "
+        "WHERE offer_id=? AND auth_version IN (1,2) AND review_state=? "
+        "RETURNING 1",
+        DB_FILE_OFFER_REVIEW_CAS_ERROR);
+    AR_BIND_TEXT(s, 1, next_review_state);
+    AR_BIND_BLOB(s, 2, offer_id, 32);
+    AR_BIND_TEXT(s, 3, expected_review_state);
+    int rc = sqlite3_step(s);  // raw-sql-ok:atomic-review-state-cas
+    bool changed = rc == SQLITE_ROW && sqlite3_column_int(s, 0) == 1;
+    if (changed)
+        rc = sqlite3_step(s);  // raw-sql-ok:prove-one-returned-row-and-done
+    AR_FINALIZE(s);
+    if (rc != SQLITE_DONE) {
+        LOG_ERROR("market", "review CAS step failed: rc=%d msg=%s", rc,
+                  sqlite3_errmsg(ndb->db));
+        return DB_FILE_OFFER_REVIEW_CAS_ERROR;
+    }
+    if (changed)
+        return DB_FILE_OFFER_REVIEW_CAS_UPDATED;
+    return DB_FILE_OFFER_REVIEW_CAS_STALE;
+}
+
 bool db_file_offer_review_counts(struct node_db *ndb, int64_t counts[3])
 {
     if (!ndb || !ndb->open)

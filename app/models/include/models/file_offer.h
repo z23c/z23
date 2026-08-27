@@ -63,6 +63,19 @@ bool db_file_offer_get_review_state(struct node_db *ndb,
 bool db_file_offer_set_review_state(struct node_db *ndb,
                                     const uint8_t offer_id[32],
                                     const char *review_state);
+/* Atomic plan/commit compare-and-set. The expected mark is checked by the
+ * same conditional UPDATE that writes the replacement, and UPDATED is
+ * returned only when SQLite proves exactly one changed row. */
+enum db_file_offer_review_cas_result {
+    DB_FILE_OFFER_REVIEW_CAS_ERROR = -1,
+    DB_FILE_OFFER_REVIEW_CAS_STALE = 0,
+    DB_FILE_OFFER_REVIEW_CAS_UPDATED = 1
+};
+enum db_file_offer_review_cas_result
+db_file_offer_compare_set_review_state(struct node_db *ndb,
+                                       const uint8_t offer_id[32],
+                                       const char *expected_review_state,
+                                       const char *next_review_state);
 /* Per-state row counts, indexed by enum market_review_state order
  * (unreviewed, reviewed_ok, sensitive). False on a DB error. */
 bool db_file_offer_review_counts(struct node_db *ndb, int64_t counts[3]);

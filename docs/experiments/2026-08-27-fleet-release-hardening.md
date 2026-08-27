@@ -129,5 +129,12 @@ regression clobbers the caller buffer after initialization. Focused acceptance
 passed for `bg_validation_reverify` (1/1), `have_data_unreadable` (1/1), and
 the integrity selection (6/6), with zero failures or skips.
 
+Review of the concurrent main advance found two fail-open edge cases before
+the next release. Shop board count queries now treat every non-row SQLite step
+as an error instead of publishing a false zero total. Market review commits
+atomically compare the token-bound prior state in the update predicate, so a
+concurrent local mark wins and the stale plan is refused. Injected
+`SQLITE_INTERRUPT` and deterministic interleaving tests cover both cases.
+
 Wallet policy remained unchanged and no custody operation or canonical
 database surgery was performed.

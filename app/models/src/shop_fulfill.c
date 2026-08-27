@@ -376,8 +376,14 @@ int db_shop_fulfill_list_count_for_want(struct node_db *ndb,
         AR_BIND_BLOB(s, 1, want_id, 32);
         AR_BIND_INT(s, 2, now_unix);
     }
-    if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW)
-        count = sqlite3_column_int64(s, 0);
+    int step_rc = AR_STEP_ROW_READONLY(s);
+    if (step_rc != SQLITE_ROW) {
+        AR_FINALIZE(s);
+        LOG_RETURN(-1, "shop",
+                   "db_shop_fulfill_list_count_for_want: count step failed "
+                   "rc=%d: %s", step_rc, sqlite3_errmsg(ndb->db));
+    }
+    count = sqlite3_column_int64(s, 0);
     AR_FINALIZE(s);
     return count > INT_MAX ? INT_MAX : (int)count;
 }

@@ -22,6 +22,15 @@ void register_market_offer_rpc_commands(struct rpc_table *t);
  * register_market_rpc_commands calls this; callers do not. */
 void register_market_moderation_rpc_commands(struct rpc_table *t);
 
+#ifdef ZCL_TESTING
+/* One-shot deterministic seam after plan-token validation and before the
+ * conditional review write. Tests use it to place a competing writer in the
+ * former read/write race window. */
+typedef void (*market_review_precommit_test_hook_fn)(void *ctx);
+void market_review_set_precommit_hook_for_test(
+    market_review_precommit_test_hook_fn fn, void *ctx);
+#endif
+
 #include "json/json.h"
 bool api_market_list(struct json_value *result);
 /* The listing view with an explicit per-request profile override
