@@ -42,6 +42,8 @@ AGENT_IMPACT_RULE("lib/base/include/base/serialize_le.h|lib/crypto/include/crypt
  * though its source authority now sits below lib/crypto. */
 AGENT_IMPACT_RULE("lib/base/include/base/checked.h|lib/base/include/base/cleanse.h|lib/base/src/cleanse.c|lib/support/include/support/cleanse.h|lib/base/tests/*|lib/base/examples/*|lib/base/zcode-package.json|lib/base/LICENSE|lib/base/NOTICE", "base_foundation key_scrub byte_order_codec hex_codec make_lint_gates")
 AGENT_IMPACT_RULE("lib/sha3/include/sha3/sha3.h|lib/sha3/src/sha3.c|lib/sha3/tests/*|lib/sha3/examples/*|lib/sha3/zcode-package.json|lib/sha3/LICENSE|lib/crypto/include/crypto/sha3.h", "sha3_stream sha3_256_x4 sha3_512_x4 mmb mmr utxo_commitment consensus_parity make_lint_gates")
+AGENT_IMPACT_RULE("lib/crypto/src/sha3_256_x4.c|lib/crypto/src/sha3_avx512.c|lib/test/src/test_sha3_512_x4.c", "sha3_256_x4 sha3_512_x4 crypto file_market make_lint_gates")
+AGENT_IMPACT_RULE("lib/crypto/include/crypto/blake2b.h|lib/test/src/test_blake2b_batch_parity.c", "blake2b_batch_parity crypto crypto_perf_selftest make_lint_gates")
 AGENT_IMPACT_RULE("lib/codec/include/codec/cursor.h|lib/codec/src/cursor.c|lib/codec/tests/*|lib/codec/examples/*|lib/codec/zcode-package.json|lib/codec/LICENSE|lib/codec/README.md", "codec_cursor byte_order_codec make_lint_gates")
 AGENT_IMPACT_RULE("app/views/src/format_helpers.c|app/views/include/views/format_helpers.h|lib/test/src/test_format_helpers_codec.c", "format_helpers_codec explorer make_lint_gates")
 AGENT_IMPACT_RULE("lib/util/src/png_writer.c|lib/util/include/util/png_writer.h|lib/test/src/test_test_png_writer.c", "test_png_writer make_lint_gates")
@@ -146,6 +148,7 @@ AGENT_IMPACT_RULE("lib/test/src/test_bip34_coinbase_height_parity.c", "bip34_coi
 AGENT_IMPACT_RULE("lib/test/src/test_pow_diffadj_precedence.c", "pow_diffadj_precedence difficulty_adjustment_adversarial consensus_parity")
 AGENT_IMPACT_RULE("lib/test/fuzz_seeds/block/*", "block_parse_cache")
 AGENT_IMPACT_RULE("lib/storage/src/block_parse_cache.c|lib/storage/include/storage/block_parse_cache.h|lib/test/src/test_block_parse_cache.c", "block_parse_cache chain_segment mem_pressure make_lint_gates")
+AGENT_IMPACT_RULE("lib/storage/include/storage/disk_block_datadir_guard.h|lib/storage/src/disk_block_datadir_guard.c", "disk_block_io catchup_lifecycle_service make_lint_gates")
 AGENT_IMPACT_RULE("app/jobs/src/created_outputs_index.c|app/jobs/include/jobs/created_outputs_index.h|app/jobs/src/script_validate_stage_prevout.c|lib/test/src/test_created_outputs_index.c", "created_outputs_index script_validate_stage validate_parallel_determinism make_lint_gates")
 AGENT_IMPACT_RULE("lib/sync/src/reducer_stage_profile.c|lib/sync/include/sync/reducer_stage_profile.h|lib/util/include/util/reducer_stage_profile.h", "block_parse_cache body_persist_stage script_validate_stage syncdiag_rpc make_lint_gates")
 AGENT_IMPACT_RULE("lib/platform/src/os_proc.c|lib/platform/include/platform/os_proc.h|lib/test/src/test_os_proc.c", "os_proc mem_pressure node_health_service make_lint_gates")
@@ -1643,7 +1646,7 @@ AGENT_IMPACT_RULE("lib/test/src/test_block_prefetch.c|lib/test/src/test_metavers
  * maintenance adapter/port), the boot gate that arms the size-triggered
  * checkpoint, and the storage telemetry that finally shows the checkpointer
  * that actually runs. They ship as one behaviour, so they run as one set. */
-AGENT_IMPACT_RULE("lib/util/src/wal_checkpoint_stats.c|lib/util/include/util/wal_checkpoint_stats.h|app/models/src/database_modes.c|app/models/include/models/database_internal.h|adapters/outbound/persistence/src/db_maintenance_sqlite.c|adapters/outbound/persistence/include/adapters/outbound/persistence/db_maintenance_sqlite.h|ports/include/ports/db_maintenance_port.h|app/services/src/storage_telemetry_fill.c|lib/util/include/util/telemetry/storage_fields.def|lib/test/src/test_db_maintenance_port.c|lib/test/src/test_telemetry_storage.c", "sqlite db_maintenance_port db_maintenance telemetry_storage telemetry_ontology models health_rollup make_lint_gates")
+AGENT_IMPACT_RULE("lib/util/src/wal_checkpoint_stats.c|lib/util/include/util/wal_checkpoint_stats.h|app/models/src/database_modes.c|app/models/include/models/database_internal.h|adapters/outbound/persistence/src/db_maintenance_sqlite.c|adapters/outbound/persistence/include/adapters/outbound/persistence/db_maintenance_sqlite.h|ports/include/ports/db_maintenance_port.h|app/services/src/storage_telemetry_fill.c|lib/util/include/util/telemetry/storage_fields.def|lib/test/src/test_db_maintenance.c|lib/test/src/test_db_maintenance_port.c|lib/test/src/test_telemetry_storage.c", "sqlite db_maintenance_port db_maintenance telemetry_storage telemetry_ontology models health_rollup make_lint_gates")
 /* The yardsale buyer's chain-content port: the prevout service, the
  * controller ingest that consumes it, and the app lane that exercises
  * all of it move together. */
