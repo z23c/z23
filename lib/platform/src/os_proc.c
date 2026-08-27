@@ -392,7 +392,7 @@ bool os_proc_cmdline_has_token(const char *token)
                                              token, -1, NULL, 0);
     if (wide_token_len <= 0)
         return false;
-    wchar_t *wide_token = malloc((size_t)wide_token_len * sizeof(*wide_token));
+    wchar_t *wide_token = malloc((size_t)wide_token_len * sizeof(*wide_token)); // raw-alloc-ok:win32-wide-token-scratch
     if (!wide_token)
         return false;
     if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, token, -1,
