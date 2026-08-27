@@ -1,13 +1,13 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * PURPOSE: Staging (anonymous inode on Linux, hidden exclusive name on
- * Darwin), sealing, reopen validation, and no-replace publication for
- * contained consensus-state candidates. */
+ * PURPOSE: Anonymous-inode staging, sealing, reopen validation, and
+ * no-replace publication for contained consensus-state candidates. */
 
 #define _GNU_SOURCE
 
 #include "consensus_state_snapshot_install_internal.h"
 
 #include "storage/consensus_db.h"    /* CONSENSUS_DB_FILENAME + legacy name */
+#include "platform/fd_path.h"
 #include "util/log_macros.h"
 
 #include <errno.h>
@@ -98,9 +98,6 @@ void consensus_state_candidate_output_cleanup(
 {
     if (!output || output->binding.abandon_on_close)
         return;
-    /* Darwin: abandon the staged bytes by removing the staging name under its
-     * verified identity (Linux: the anonymous inode dies with the descriptor). */
-    consensus_export_staging_discard(&output->binding);
     if (output->binding.vfs_registered) {
         if (sqlite3_vfs_unregister(&output->binding.vfs) != SQLITE_OK)
             LOG_WARN(CANDIDATE_SUBSYS,
@@ -153,8 +150,24 @@ bool consensus_state_candidate_output_open(
 bool consensus_state_candidate_sqlite_close_strict(
     struct consensus_state_candidate_output *output, sqlite3 **db)
 {
-    return consensus_export_output_sqlite_close_strict(
-        output ? &output->binding : NULL, db);
+    if (!db || !*db)
+        return true;
+    bool ok = true;
+    sqlite3_stmt *stmt;
+    while ((stmt = sqlite3_next_stmt(*db, NULL)) != NULL) {
+        if (sqlite3_finalize(stmt) != SQLITE_OK)
+            ok = false;
+    }
+    if (sqlite3_close(*db) != SQLITE_OK) {
+        /* The registered VFS points into this heap output binding.  Its owner
+         * leaks the binding on an unprovable close rather than unregistering
+         * live callbacks or returning a manufactured clean result. */
+        if (output)
+            output->binding.abandon_on_close = true;
+        return false;
+    }
+    *db = NULL;
+    return ok;
 }
 
 bool consensus_state_candidate_output_sqlite_open(
@@ -171,6 +184,16 @@ bool consensus_state_candidate_output_sqlite_open(
         return false;
     }
     return true;
+}
+
+static bool output_link_fd(int source_fd, int destination_dirfd,
+                           const char *destination_name)
+{
+    char source[PATH_MAX];
+    if (!platform_fd_path(source, sizeof(source), source_fd, NULL))
+        return false;
+    return linkat(AT_FDCWD, source, destination_dirfd, destination_name,
+                  AT_SYMLINK_FOLLOW) == 0;
 }
 
 #ifdef ZCL_TESTING
@@ -217,9 +240,7 @@ bool consensus_state_candidate_output_finalize(
             "candidate writable staging descriptor could not be retired");
     fd = output->binding.temp_fd;
     if (!S_ISREG(sealed.st_mode) ||
-        !consensus_export_staging_nlink_valid(&output->binding,
-                                              sealed.st_nlink) ||
-        sealed.st_dev != output->binding.temp_dev ||
+        sealed.st_nlink != 0 || sealed.st_dev != output->binding.temp_dev ||
         sealed.st_ino != output->binding.temp_ino ||
         (sealed.st_mode & (S_IWUSR | S_IWGRP | S_IWOTH)) != 0)
         return consensus_state_candidate_fail(
@@ -245,10 +266,8 @@ bool consensus_state_candidate_output_finalize(
         ok = false;
     struct stat after;
     if (!ok || fstat(fd, &after) != 0 || sealed.st_dev != after.st_dev ||
-        sealed.st_ino != after.st_ino ||
-        !consensus_export_staging_nlink_valid(&output->binding,
-                                              after.st_nlink) ||
-        sealed.st_size != after.st_size ||
+        sealed.st_ino != after.st_ino || sealed.st_nlink != 0 ||
+        after.st_nlink != 0 || sealed.st_size != after.st_size ||
         sealed.st_mode != after.st_mode ||
         sealed.st_mtim.tv_sec != after.st_mtim.tv_sec ||
         sealed.st_mtim.tv_nsec != after.st_mtim.tv_nsec ||
@@ -271,9 +290,7 @@ bool consensus_state_candidate_output_finalize(
     if (!consensus_export_descriptor_digest(fd, after_hook_digest) ||
         memcmp(after_hook_digest, result->candidate_file_digest, 32) != 0 ||
         fstat(fd, &after_hook) != 0 || after_hook.st_dev != sealed.st_dev ||
-        after_hook.st_ino != sealed.st_ino ||
-        !consensus_export_staging_nlink_valid(&output->binding,
-                                              after_hook.st_nlink) ||
+        after_hook.st_ino != sealed.st_ino || after_hook.st_nlink != 0 ||
         after_hook.st_size != sealed.st_size ||
         after_hook.st_mode != sealed.st_mode ||
         after_hook.st_mtim.tv_sec != sealed.st_mtim.tv_sec ||
@@ -285,11 +302,11 @@ bool consensus_state_candidate_output_finalize(
             "candidate changed after immutable digest");
     if (!output_name_absent(output, output->binding.final_name) ||
         !output_sidecars_absent(output, output->binding.final_name) ||
-        !consensus_export_staging_publish(&output->binding))
+        !output_link_fd(fd, output->binding.dirfd,
+                        output->binding.final_name))
         return consensus_state_candidate_fail(
             result, CONSENSUS_CANDIDATE_OUTPUT_ERROR,
             "candidate atomic no-replace link failed");
-    output->binding.published = true;
     struct stat final;
     uint8_t published_digest[32];
     if (fstatat(output->binding.dirfd, output->binding.final_name, &final,

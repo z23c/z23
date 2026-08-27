@@ -237,3 +237,26 @@ test_dev_platform groups_failed=0 self_skips=0
 check-zcode-package-registry PASS (10 roots rederived)
 check-vendor-provenance PASS
 ```
+
+## Deployment and bundle boundary review
+
+Review of the final concurrent batch found that Darwin named-file bundle
+staging could publish a different inode than the descriptor that was sealed,
+and its read-only reopen could retain an `O_RDWR` descriptor. The Darwin
+extension was removed from this release; Linux retains its already-proven
+anonymous-inode path.
+
+The host-neutral ship observer now uses its platform executable helper at every
+test site. An interrupted rename-before-directory-mode publication is repaired
+by making a real, non-symlink release root read-only before re-verifying any
+bytes and before selection.
+
+Measured at `2026-08-27T19:06:11-04:00`
+(`2026-08-27T23:06:11Z`):
+
+```text
+check-ship-remote-transaction PASS
+test_consensus_state_snapshot_export groups_failed=0 self_skips=0
+test_consensus_state_snapshot_install groups_failed=0 self_skips=0
+check-zcode-package-registry PASS (10 roots rederived)
+```

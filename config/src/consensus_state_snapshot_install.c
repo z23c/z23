@@ -9,7 +9,6 @@
 #include "consensus_state_snapshot_install_internal.h"
 #include "core/utiltime.h"
 #include "crypto/sha3.h"
-#include "platform/fd_path.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 #include "util/sync.h"
@@ -181,17 +180,9 @@ static bool sidecars_absent(const char *path)
 
 static bool open_bundle_descriptor(int artifact_fd, sqlite3 **bundle_db)
 {
-    /* The bundle is admitted through the pinned descriptor, never a path
-     * lookup: SQLite reopens <fd-root>/<fd> (platform_fd_path) with
-     * immutable=1, and every read is fenced by the descriptor identity
-     * checks in artifact_evidence_open_impl. */
-    char fd_ref[32];
-    if (!platform_fd_path(fd_ref, sizeof(fd_ref), artifact_fd, NULL)) {
-        LOG_FAIL(INSTALL_SUBSYS, "bundle descriptor path too long");
-        return false;
-    }
     char uri[96];
-    int n = snprintf(uri, sizeof(uri), "file:%s?mode=ro&immutable=1", fd_ref);
+    int n = snprintf(uri, sizeof(uri),
+                     "file:/proc/self/fd/%d?mode=ro&immutable=1", artifact_fd);
     if (n <= 0 || (size_t)n >= sizeof(uri))
         LOG_FAIL(INSTALL_SUBSYS, "bundle URI too long");
     int rc = sqlite3_open_v2(uri, bundle_db,

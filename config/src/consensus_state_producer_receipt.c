@@ -85,6 +85,43 @@ static bool decode_sha256_identity(const char *hex, uint8_t out[32])
     return true;
 }
 
+/* SHA3-256 of the running executable's on-disk image — the binding the
+ * exporter recomputes from /proc/self/exe. Must match running_binary_digest()
+ * in consensus_state_snapshot_export_proof.c byte for byte. */
+bool producer_running_binary_digest(uint8_t out[32])
+{
+    int fd = open("/proc/self/exe", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        LOG_WARN(PRODUCER_RECEIPT_SUBSYS, "running executable open failed: %s",
+                 strerror(errno));
+        return false;
+    }
+    struct sha3_256_ctx ctx;
+    sha3_256_init(&ctx);
+    uint8_t buffer[32768];
+    bool ok = true;
+    for (;;) {
+        ssize_t n = read(fd, buffer, sizeof(buffer));
+        if (n > 0) {
+            sha3_256_write(&ctx, buffer, (size_t)n);
+            continue;
+        }
+        if (n == 0)
+            break;
+        if (errno == EINTR)
+            continue;
+        ok = false;
+        break;
+    }
+    if (close(fd) != 0)
+        ok = false;
+    if (ok)
+        sha3_256_finalize(&ctx, out);
+    else
+        LOG_WARN(PRODUCER_RECEIPT_SUBSYS, "running executable digest failed");
+    return ok;
+}
+
 static void claim_digest(const char *domain, const uint8_t *extra,
                          size_t extra_len, uint8_t out[32])
 {

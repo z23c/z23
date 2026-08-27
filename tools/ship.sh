@@ -598,6 +598,8 @@ install -d -m 700 "$(dirname "$root")"
 mkdir "$lock" || { echo "remote: release staging is already active: $lock" >&2; exit 1; }
 if [ -e "$root" ]; then
     [ -d "$root" ] &&
+    [ ! -L "$root" ] &&
+    chmod 555 "$root" &&
     [ "$(sha256sum < "$root/MANIFEST.sha256" | awk '{print $1}')" = "$manifest_sha" ] &&
     [ "$(sha256sum < "$root/z23" | awk '{print $1}')" = "$daemon_sha" ] &&
     [ "$(sha256sum < "$root/zclassic23-package-verify" | awk '{print $1}')" = "$worker_v_sha" ] &&
@@ -852,6 +854,10 @@ if [ -d "$node_incoming" ]; then
     mv "$node_incoming" "$release_root"
     chmod 555 "$release_root"
 fi
+[ -d "$release_root" ] && [ ! -L "$release_root" ] || {
+    echo "remote: immutable release root is not a real directory" >&2; exit 1;
+}
+chmod 555 "$release_root"
 [ "$(sha256sum < "$release_root/MANIFEST.sha256" | awk '{print $1}')" = "$manifest_sha" ] &&
 [ "$(sha256sum < "$release_root/z23" | awk '{print $1}')" = "$want_sha" ] &&
 [ "$(sha256sum < "$worker_v" | awk '{print $1}')" = "$want_worker_v" ] &&
