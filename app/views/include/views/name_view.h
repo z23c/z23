@@ -38,10 +38,16 @@ size_t name_view_index(const struct znam_entry *entries, int count,
  * profile page (owner, primary target, resolver records, and the on-chain
  * history that makes the name auditable). Serves as the default hosted site
  * when the name binds no onion/url target. `text`/`addr` arrays may be
- * empty; `hist` may be NULL (the history card is then omitted). */
+ * empty; `hist` may be NULL (the history card is then omitted).
+ * `total_text`/`total_addr` are the uncapped record counts behind the
+ * arrays: when fewer rows actually render than a total reports, the page
+ * says so instead of implying it showed everything. A negative total
+ * disables that disclosure for its kind. */
 size_t name_view_profile(const struct znam_entry *e,
                          const struct znam_text_record *text, int ntext,
+                         int total_text,
                          const struct znam_addr_record *addr, int naddr,
+                         int total_addr,
                          const struct name_history *hist,
                          uint8_t *resp, size_t max);
 

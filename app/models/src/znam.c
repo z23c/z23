@@ -24,6 +24,7 @@
 #include "util/safe_alloc.h"
 
 #include <sqlite3.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -602,6 +603,23 @@ int db_znam_text_list(struct node_db *ndb, const char *name,
         row_to_znam_text(s, &out[count]));
 }
 
+int db_znam_text_count(struct node_db *ndb, const char *name)
+{
+    if (!ndb || !ndb->open)
+        LOG_RETURN(-1, "znam", "db_znam_text_count: db not open");
+    if (!name) LOG_RETURN(-1, "znam", "db_znam_text_count: name NULL");
+
+    sqlite3_stmt *s = NULL;
+    int64_t count = 0;
+    AR_PREPARE_RET(ndb, s,
+        "SELECT count(*) FROM znam_text_records WHERE name=?", -1);
+    AR_BIND_TEXT(s, 1, name);
+    if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW)
+        count = sqlite3_column_int64(s, 0);
+    AR_FINALIZE(s);
+    return count > INT_MAX ? INT_MAX : (int)count;
+}
+
 bool db_znam_addr_save(struct node_db *ndb, const char *name,
                        uint8_t coin_type, const char *address)
 {
@@ -671,4 +689,21 @@ int db_znam_addr_list(struct node_db *ndb, const char *name,
         AR_BIND_TEXT(s, 1, name);
         AR_BIND_INT(s, 2, (int)max),
         row_to_znam_addr(s, &out[count]));
+}
+
+int db_znam_addr_count(struct node_db *ndb, const char *name)
+{
+    if (!ndb || !ndb->open)
+        LOG_RETURN(-1, "znam", "db_znam_addr_count: db not open");
+    if (!name) LOG_RETURN(-1, "znam", "db_znam_addr_count: name NULL");
+
+    sqlite3_stmt *s = NULL;
+    int64_t count = 0;
+    AR_PREPARE_RET(ndb, s,
+        "SELECT count(*) FROM znam_addr_records WHERE name=?", -1);
+    AR_BIND_TEXT(s, 1, name);
+    if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW)
+        count = sqlite3_column_int64(s, 0);
+    AR_FINALIZE(s);
+    return count > INT_MAX ? INT_MAX : (int)count;
 }

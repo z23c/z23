@@ -811,13 +811,21 @@ int test_znam(void)
             bool t_get = db_znam_text_get(&ndb, "alice", "email", val, sizeof(val));
             struct znam_text_record texts[10];
             int t_count = db_znam_text_list(&ndb, "alice", texts, 10);
+            /* The uncapped total behind the window — equal here because
+             * nothing was truncated, and zero for a name that has none. */
+            int t_total = db_znam_text_count(&ndb, "alice");
+            int t_total_missing =
+                db_znam_text_count(&ndb, "nobody-here");
 
             if (t_save && t_save2 && t_get &&
-                strcmp(val, "a@b.com") == 0 && t_count == 2) {
+                strcmp(val, "a@b.com") == 0 && t_count == 2 &&
+                t_total == 2 && t_total_missing == 0) {
                 printf("OK\n");
             } else {
-                printf("FAIL (save=%d get=%d val=%s count=%d)\n",
-                       t_save && t_save2, t_get, val, t_count);
+                printf("FAIL (save=%d get=%d val=%s count=%d total=%d"
+                       " missing=%d)\n",
+                       t_save && t_save2, t_get, val, t_count, t_total,
+                       t_total_missing);
                 failures++;
             }
 
@@ -829,14 +837,16 @@ int test_znam(void)
             bool a_get = db_znam_addr_get(&ndb, "alice", ZNAM_TYPE_BTC, addr, sizeof(addr));
             struct znam_addr_record addrs[10];
             int a_count = db_znam_addr_list(&ndb, "alice", addrs, 10);
+            int a_total = db_znam_addr_count(&ndb, "alice");
             if (a_save && a_save2 && a_get && strcmp(addr, "1abc") == 0 &&
-                a_count == 2 && addrs[0].coin_type == ZNAM_TYPE_BTC &&
+                a_count == 2 && a_total == 2 &&
+                addrs[0].coin_type == ZNAM_TYPE_BTC &&
                 addrs[1].coin_type == ZNAM_TYPE_LTC &&
                 strcmp(addrs[1].address, "Labc") == 0) {
                 printf("OK\n");
             } else {
-                printf("FAIL (save=%d get=%d count=%d)\n",
-                       a_save && a_save2, a_get, a_count);
+                printf("FAIL (save=%d get=%d count=%d total=%d)\n",
+                       a_save && a_save2, a_get, a_count, a_total);
                 failures++;
             }
 

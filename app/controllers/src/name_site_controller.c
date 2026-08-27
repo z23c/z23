@@ -372,8 +372,14 @@ static size_t name_render_profile(struct node_db *ndb,
     struct name_history hist;
     int nt = db_znam_text_list(ndb, e->name, texts, NAME_RECORDS_LIMIT);
     int na = db_znam_addr_list(ndb, e->name, addrs, NAME_RECORDS_LIMIT);
+    /* Uncapped totals: with them the page can say honestly when it is
+     * showing a window instead of everything. A count failure (-1) just
+     * disables the disclosure; it never blocks the render. */
+    int total_nt = db_znam_text_count(ndb, e->name);
+    int total_na = db_znam_addr_count(ndb, e->name);
     name_history_load(ndb, e, &hist);
-    return name_view_profile(e, texts, nt, addrs, na, &hist, resp, max);
+    return name_view_profile(e, texts, nt, total_nt, addrs, na, total_na,
+                             &hist, resp, max);
 }
 
 /* ── the onion gateway leg ──────────────────────────────────────── */

@@ -890,6 +890,74 @@ static int t_name_records_rpc(void)
     return failures;
 }
 
+/* ── Record-window honesty ───────────────────────────────────────────
+ *
+ * The profile page renders a bounded window over a name's text/address
+ * records. A visitor who sees the end of the list must be able to tell
+ * whether that was everything: a page that silently drops records reads
+ * as "this name carries no more", which is a fact about the window, not
+ * the name. Pinned here:
+ *   - more records than the window shows → an exact
+ *     "Showing the first N of M" line per truncated kind;
+ *   - a record set that fits entirely → no such line at all;
+ *   - the uncapped model counts agree with what was seeded. */
+static int t_profile_record_window(void)
+{
+    int failures = 0;
+    sqlite3 *db = NULL;
+    struct node_db ndb;
+    if (!open_site_db(&db, &ndb)) return 1;
+    rpc_name_set_state(&ndb);
+
+    /* Over the window: 70 text records against the page's 64-row bound,
+     * plus two address records that fit. */
+    TS_CHECK("seed windowy", seed_name(&ndb, "windowy", ZNAM_TYPE_TADDR,
+                                       "t1AddrProfile"));
+    char key[32];
+    bool seeded = true;
+    for (int i = 0; i < 70; i++) {
+        snprintf(key, sizeof(key), "k%03d", i);
+        seeded &= db_znam_text_save(&ndb, "windowy", key, "v");
+    }
+    TS_CHECK("seed text batch", seeded);
+    db_znam_addr_save(&ndb, "windowy", ZNAM_TYPE_BTC, "bc1qwin");
+    db_znam_addr_save(&ndb, "windowy", ZNAM_TYPE_LTC, "ltc1win");
+    TS_CHECK("text total honest", db_znam_text_count(&ndb, "windowy") == 70);
+    TS_CHECK("addr total honest", db_znam_addr_count(&ndb, "windowy") == 2);
+
+    uint8_t resp[65536];
+    size_t nb = name_site_handle_request("GET", "/names/windowy", NULL, 0,
+                                         resp, sizeof(resp));
+    resp[nb < sizeof(resp) ? nb : sizeof(resp) - 1] = '\0';
+    TS_CHECK("truncated page 200", strstr((char *)resp, "200 OK") != NULL);
+    TS_CHECK("text truncation disclosed",
+             strstr((char *)resp, "Showing the first 64 of 70 text "
+                                  "records.") != NULL);
+    TS_CHECK("fitting kind stays silent",
+             strstr((char *)resp, "address records.</p>") == NULL);
+
+    /* Exactly at the boundary: 64 records render whole and the page must
+     * not imply a cutoff that did not happen. */
+    TS_CHECK("seed edgey", seed_name(&ndb, "edgey", ZNAM_TYPE_TADDR,
+                                     "t1AddrProfile"));
+    seeded = true;
+    for (int i = 0; i < 64; i++) {
+        snprintf(key, sizeof(key), "e%03d", i);
+        seeded &= db_znam_text_save(&ndb, "edgey", key, "v");
+    }
+    TS_CHECK("seed edge batch", seeded);
+    nb = name_site_handle_request("GET", "/names/edgey", NULL, 0,
+                                  resp, sizeof(resp));
+    resp[nb < sizeof(resp) ? nb : sizeof(resp) - 1] = '\0';
+    TS_CHECK("boundary page 200", strstr((char *)resp, "200 OK") != NULL);
+    TS_CHECK("no disclosure at the boundary",
+             strstr((char *)resp, "Showing the first") == NULL);
+
+    rpc_name_set_state(NULL);
+    sqlite3_close(db);
+    return failures;
+}
+
 int test_znam_site(void)
 {
     int failures = 0;
@@ -898,6 +966,7 @@ int test_znam_site(void)
     failures += t_index_and_show();
     failures += t_register_refusals();
     failures += t_pow_gate_single_use();
+    failures += t_profile_record_window();
     failures += t_name_records_rpc();
     failures += t_error_taxonomy();
     failures += t_resolve_rpc_taxonomy();
