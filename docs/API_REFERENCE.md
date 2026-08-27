@@ -501,7 +501,7 @@ represented by its children's sections.
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
 | `app market content list` | ready | read / read / **owner** · fast/low | none | `zcl.market_contents.index.v1` | `z23 app market content list` | List owner-registered paid content |
-| `app market content register` | ready | mutate / app-write / **owner** · foreground/moderate | **`offer_id`**, `content_path` | `zcl.market_content.v1` | `z23 app market content register --input='{"offer_id":"<64hex>","content_path":"/private/file"}'` | Bind private seller bytes to a signed offer |
+| `app market content register` | ready | mutate / app-write / **owner**, plan-commit · foreground/moderate | **`offer_id`**, `content_path`, **`mode`**, `plan_token` | `zcl.market_content.v1` | `z23 app market content register --input='{"offer_id":"<64hex>","content_path":"/private/file","mode":"plan"}'` | Bind private seller bytes to a signed offer |
 
 #### `app.market.purchase` — Buyer purchase
 
