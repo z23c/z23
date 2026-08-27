@@ -42,6 +42,9 @@ leave stale or internally inconsistent state.
   character of the 64-digit lowercase hexadecimal root. Documentation now
   states that a post-`dlopen` consensus pin prevents stale leaf publication,
   not ELF constructor execution.
+- Remote activation queues systemd restart without waiting for `Type=notify`.
+  The existing progress-aware observer now starts immediately, so a slow disk
+  can reach the explicit SLOW verdict instead of blocking before observation.
 
 ## Evidence
 
@@ -66,6 +69,7 @@ test_onion_bridge            PASS  self_skips=0; strict profile, two runs
 hotswap package verify       PASS  two concurrent processes
 hotswap artifact substitution REFUSED before receipt
 core seal root selftest      PASS
+ship remote transaction     PASS
 check-hex-codec-single       PASS
 git diff --check             PASS
 ```

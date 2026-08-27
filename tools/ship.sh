@@ -561,7 +561,10 @@ restore_prior() {
         rm -f "$dropin" || return 1
     fi
     systemctl --user daemon-reload || return 1
-    systemctl --user restart zclassic23 || return 1
+    # Do not wait for Type=notify startup here: ship_await below is the
+    # progress-aware authority. A synchronous restart can block for tens of
+    # minutes on a spinning-disk datadir before that observer even starts.
+    systemctl --user restart --no-block zclassic23 || return 1
 
     SHIP_AWAIT_WINDOW="$rollback_window"
     SHIP_AWAIT_SILENCE="$rollback_silence"
@@ -643,7 +646,10 @@ install -m 644 "$dropin_tmp" "$dropin"
 rm -f "$dropin_tmp"; dropin_tmp=""
 systemctl --user daemon-reload
 mv -f "$node_incoming" "$svc_bin"
-systemctl --user restart zclassic23
+# Queue the restart and immediately enter the progress-aware observer below.
+# Waiting synchronously defeats the slow-box verdict because Type=notify does
+# not return until the whole cold datadir startup has completed.
+systemctl --user restart --no-block zclassic23
 
 # The rollback stays armed until the candidate proves exact bytes, the expected
 # identity, and answering RPC. A successful `systemctl restart` only proves
@@ -790,7 +796,7 @@ if [ -f "${svc_bin}.rollback.${run_id}" ]; then
         echo "remote: CRITICAL — rollback daemon-reload failed" >&2
         exit 1
     fi
-    if ! systemctl --user restart zclassic23; then
+    if ! systemctl --user restart --no-block zclassic23; then
         echo "remote: CRITICAL — rollback restart request failed" >&2
         exit 1
     fi
