@@ -452,4 +452,11 @@ size_t vcs_swarm_engine_advertised(struct vcs_swarm_engine *engine,
                                    struct vcs_swarm_advertised *out,
                                    size_t max);
 
+/* Roots of downloads in flight (want-manifest or chunks) with ZERO live
+ * advertisements and not provider-restricted — the work list for a DHT
+ * discovery fallback. Sorted lexicographically; no root appears twice.
+ * Returns the row count written (<= max). */
+size_t vcs_swarm_engine_unadvertised_roots(struct vcs_swarm_engine *engine,
+                                           uint8_t out[][32], size_t max);
+
 #endif /* ZCL_VCS_PACKAGE_SWARM_NODE_H */
