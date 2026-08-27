@@ -264,6 +264,7 @@ static const struct lint_gate_entry g_lint_gate_entries[] = {
     S_(t_process_block_node_db_access_is_runtime_owned),
     S_(t_process_block_split_uses_reducer_language),
     S_(t_production_comments_do_not_carry_refactor_scaffold_labels),
+    S_(t_wallet_view_never_invents_rpc_credentials),
     S_(t_deleted_engine_names_absent_from_production_sources),
     S_(t_build_commit_macro_stays_behind_getter),
     S_(t_boot_repaired_index_persistence_contract),

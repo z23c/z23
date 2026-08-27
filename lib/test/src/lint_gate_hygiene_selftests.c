@@ -756,6 +756,37 @@ int t_no_dev_history_in_contracts(void)
  * (4) removing the fixtures recovers green;
  * (5) the gate is wired into the Makefile LINT_GATES list and documented in
  *     DEFENSIVE_CODING.md's canonical block. */
+/* check-wallet-view-rpc-auth-fail-closed — the browser-facing wallet
+ * pages read RPC credentials from conf or a .cookie and must send none
+ * when neither exists. The scanner used to fall back to a hardcoded
+ * development credential, i.e. guessable basic-auth fired at whatever
+ * accepted it; the fail-closed refusal is the only thing standing
+ * between form posts and authenticated RPC. Proof here is a source
+ * ratchet (the refusal path needs a live node to exercise end to end):
+ * the invented credential stays absent and the named refusal stays
+ * present in the helper. */
+int t_wallet_view_never_invents_rpc_credentials(void)
+{
+    int failures = 0;
+    char path[PATH_MAX];
+    char *buf = NULL;
+
+    int have_source =
+        repo_path(path, sizeof(path),
+                  "app/controllers/src/wallet_view_helpers.c") == 0 &&
+        read_entire_file(path, &buf) == 0;
+
+    TEST("[lint-gate] wallet view RPC auth fail-closed: no invented "
+         "credential, named refusal kept") {
+        ASSERT(have_source && buf);
+        ASSERT(strstr(buf, "zcluser:zclpass") == NULL);
+        ASSERT(strstr(buf, "no RPC credentials found") != NULL);
+        PASS();
+    } _test_next:;
+    free(buf);
+    return failures;
+}
+
 int t_no_uncited_victory(void)
 {
     int failures = 0;
