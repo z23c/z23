@@ -28,6 +28,8 @@
 #include "consensus/upgrades.h"
 #include "coins/coins.h"
 #include "coins/coins_view.h"
+
+#include <math.h>
 #include "validation/chainstate.h"
 #include "validation/main_state.h"
 #include "validation/accept_to_mempool.h"
@@ -127,6 +129,21 @@ static double swap_parse_amount(const struct json_value *params)
     return amount;
 }
 
+/* See the contract in swap_controller.h. The overflow ceiling is the exact
+ * whole-coin value whose zatoshis still fit int64_t; anything larger, or
+ * anything that is not a finite positive number, would persist a money
+ * contract this node cannot honour. */
+bool swap_amount_to_zat(double amount_coins, int64_t *zat_out)
+{
+    static const double max_whole_coins =
+        (double)(INT64_MAX / 100000000);
+    if (!zat_out || !(amount_coins > 0.0) || !isfinite(amount_coins) ||
+        amount_coins > max_whole_coins)
+        return false;
+    *zat_out = (int64_t)(amount_coins * 100000000.0);
+    return true;
+}
+
 /* Shared build pipeline for swap_initiate / swap_participate: decode both
  * addresses, build the HTLC redeem script + P2SH address, assemble the
  * swap_contract, persist it, and emit it as JSON. secret_or_null is non-NULL
@@ -143,7 +160,16 @@ static bool swap_build_and_persist(const char *my_addr, const char *counter_addr
                                    struct json_value *result)
 {
     struct htlc_params hp;
+    int64_t amount_zat = 0;
     memset(&hp, 0, sizeof(hp));
+
+    /* Money shape first: refuse before any address decodes or state
+     * persists. swap_parse_amount yields a bare double straight from the
+     * JSON wire, including its failure sentinel of 0 when absent. */
+    if (!swap_amount_to_zat(amount, &amount_zat)) {
+        json_set_str(result, "Invalid arguments");
+        return false;
+    }
     memcpy(hp.secret_hash, secret_hash, 32);
     hp.locktime = (uint32_t)locktime;
 
@@ -183,7 +209,7 @@ static bool swap_build_and_persist(const char *my_addr, const char *counter_addr
         memcpy(swap.secret, secret_or_null, 32);
         swap.has_secret = true;
     }
-    swap.amount = (int64_t)(amount * 100000000.0);
+    swap.amount = amount_zat;
     swap.locktime = (uint32_t)locktime;
     snprintf(swap.my_address, sizeof(swap.my_address), "%s", my_addr);
     snprintf(swap.counter_address, sizeof(swap.counter_address), "%s", counter_addr);

@@ -13,13 +13,17 @@
  * Any failure before the batch replace publishes ZERO leaves and leaves every
  * resident handler untouched.
  *
- * Safety of the dlclose-after-drain reclamation: the superseded module .so is
- * closed ONLY after the resident quiesced callback confirms every retired
+ * Safety of the reclamation: a superseded module .so is released ONLY after
+ * BOTH gates clear — the resident quiesced callback confirms every retired
  * command registry override snapshot has drained (no in-flight dispatch can
- * still enter an old handler). If drain cannot be confirmed within a bounded
- * window the old .so is KEPT mapped forever — the pilot's never-close behavior,
- * always memory-safe. dlclose is thus best-effort reclamation, never a
- * correctness dependency.
+ * still enter an old handler), AND the live-leaf ownership table proves the
+ * ACTIVE snapshot can no longer reach it. Either gate unproven keeps the .so
+ * mapped forever, which is always memory-safe; releasing it is best-effort
+ * reclamation, never a correctness dependency. The second gate is not
+ * decoration: without it a commit that lost the registry race, or a module
+ * that dropped a leaf, unmaps code the live snapshot still dispatches into.
+ * The whole argument, and the interleaving that motivated it, is in
+ * hotswap/hotswap_shelf.h.
  */
 
 #define _GNU_SOURCE
@@ -27,19 +31,23 @@
 #include "hotswap/hotfork_capsule.h"
 #include "hotswap/hotswap.h"
 #include "hotswap/hotswap_retire_blocker.h"
+#include "hotswap/hotswap_shelf.h"
 
 #include "json/json.h"
 #include "platform/time_compat.h"
 #include "util/log_macros.h"
 
+#include <errno.h>
 #include <limits.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdarg.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 /* ── swappable allowlist, compiled from config/hotswap_swappable.def ───────
  * ONE row per source TU; `leaves` is the space-separated set of canonical
@@ -351,6 +359,30 @@ bool hotswap_activation_authorized(const char *resolved_datadir,
 /* ── activation telemetry state (written only on the dev activate path) ──── */
 #define HOTSWAP_ACT_MAX_SLOTS 32
 
+/* The datadir a slot's live image was admitted under, kept so a rollback can
+ * re-run the SAME authorization the forward swap ran instead of inventing a
+ * looser one. A resident node has exactly one datadir for its whole life, so
+ * this is a record, not a policy input. Sized well past
+ * `$HOME/.zclassic-c23-dev`; a path that does not fit is stored truncated and
+ * then FAILS the dev-datadir re-check at rollback time, which is the safe
+ * direction. */
+#define HOTSWAP_ACT_DATADIR_MAX 512
+
+/* Longest canonical leaf path in config/hotswap_swappable.def is well under
+ * half of this; a name that does not fit is refused as untrackable, and an
+ * untrackable leaf pins its image mapped forever (the safe direction). */
+#define HOTSWAP_LEAF_NAME_MAX 64
+
+/* The leaf paths ONE image published, captured at its commit. This is what the
+ * reference proof is evaluated against when that image becomes a retirement
+ * candidate — never re-read from the module struct, which lives inside the
+ * mapping we are deciding whether to unmap. */
+struct hotswap_leafset {
+    uint32_t count;
+    bool trackable;          /* false => a name did not fit; never unmap */
+    char name[ZCL_HOTSWAP_MODULE_MAX_LEAVES][HOTSWAP_LEAF_NAME_MAX];
+};
+
 struct hotswap_act_slot {
     char source[256];        /* one slot per swappable source TU */
     void *handle;            /* currently-live module .so for this source */
@@ -361,6 +393,53 @@ struct hotswap_act_slot {
     time_t activated_at;
     uint64_t swaps;
     bool in_use;
+    char datadir[HOTSWAP_ACT_DATADIR_MAX];
+    /* The leaves the CURRENTLY LIVE image published, and the generation the
+     * registry gave that publish. `generation` above is that same number; it
+     * is the ordering authority for every later commit on this source. */
+    struct hotswap_leafset leaves;
+
+    /* ── shelf: the depth-1 retained PREDECESSOR IMAGE for this source ────
+     * `shelf_fd` is a dup() of the sealed memfd that was live before the
+     * current one, taken at commit BEFORE the original descriptor goes to the
+     * retire path. Independent descriptor, same sealed inode: the two close()
+     * calls never race, and F_SEAL_WRITE guarantees the retained bytes are
+     * still the bytes that were admitted. Rollback re-dlopens it, so the shelf
+     * costs one descriptor and NOT a retained mapping.
+     * `shelf_generation`/`shelf_sha256` describe that image as it was WHEN
+     * LIVE, not what is running now. See hotswap/hotswap_shelf.h. */
+    int shelf_fd;
+    char shelf_sha256[65];
+    uint32_t shelf_generation;
+    time_t shelf_retired_at;
+    bool shelf_present;
+    /* A rollback of this source is between its shelf claim and its commit.
+     * A plain flag, not a lock: it is only ever read and written under
+     * g_act_lock, so it adds no lock-ordering edge at all. */
+    bool rollback_in_flight;
+};
+
+/* ── LIVE-LEAF OWNERSHIP — the reference proof's only input ────────────────
+ *
+ * owner_gen is the HIGHEST registry generation that ever published this leaf.
+ * That is exactly the merge rule zcl_command_registry_replace_batch() applies
+ * when it builds the next snapshot (overwrite the slot with the same path,
+ * else append), so an entry answers "whose code does the live snapshot run for
+ * this leaf" without depending on the order the loader's own threads arrive
+ * in — a MAX is order-independent, which is the whole point.
+ *
+ * A leaf may appear under exactly ONE source_tu (config/hotswap_swappable.def
+ * says so and check-hotswap-swappable-shape enforces it), so leaves partition
+ * across sources and only a later publish for the SAME source can displace
+ * one.
+ *
+ * Guarded by g_act_lock. On overflow the table stops being an authority and
+ * NOTHING may ever be unmapped again — a permanent latch, because a partial
+ * ownership map cannot prove absence. */
+#define HOTSWAP_LIVE_LEAF_MAX 256
+struct hotswap_live_leaf {
+    char name[HOTSWAP_LEAF_NAME_MAX];
+    uint32_t owner_gen;
 };
 
 struct hotswap_act_event {
@@ -387,6 +466,34 @@ static _Atomic uint64_t g_probe_reject_count;
 static _Atomic uint64_t g_leaves_published;
 static _Atomic uint64_t g_dlclose_count;
 static _Atomic uint64_t g_retained_mapped_count;
+/* DELIBERATELY NOT g_rollback_count. That counter means "an activation was
+ * refused and unwound" and is bumped by every act_reject(); this one means "a
+ * shelved predecessor image was successfully put back". Folding the two would
+ * make an existing telemetry number silently ambiguous. */
+static _Atomic uint64_t g_shelf_rollback_count;
+static _Atomic uint64_t g_shelf_dup_fail_count;
+/* A commit whose registry generation was NOT newer than the one already
+ * recorded for its source: the publish order and the loader's arrival order
+ * disagreed. See hotswap/hotswap_shelf.h. */
+static _Atomic uint64_t g_stale_commit_count;
+/* Retirement candidates kept mapped because a leaf they published is still
+ * owned by their own generation. Each one is a use-after-free that did not
+ * happen. */
+static _Atomic uint64_t g_reference_hold_count;
+
+static struct hotswap_live_leaf g_live_leaf[HOTSWAP_LIVE_LEAF_MAX];
+static size_t g_live_leaf_count;      /* guarded by g_act_lock */
+static bool g_live_leaf_overflow;     /* latched; guarded by g_act_lock */
+
+uint64_t hotswap_stale_commit_count(void)
+{
+    return atomic_load_explicit(&g_stale_commit_count, memory_order_relaxed);
+}
+
+uint64_t hotswap_reference_hold_count(void)
+{
+    return atomic_load_explicit(&g_reference_hold_count, memory_order_relaxed);
+}
 
 static void event_json(struct json_value *obj, const struct hotswap_act_event *ev)
 {
@@ -443,6 +550,17 @@ void hotswap_activate_dump_json(struct json_value *out)
                      (int64_t)atomic_load(&g_dlclose_count));
     json_push_kv_int(&act, "retained_mapped_count",
                      (int64_t)atomic_load(&g_retained_mapped_count));
+    /* Shelf + retirement-proof visibility. `rollback_count` above is the
+     * failed-activation unwind count and keeps its old meaning. */
+    json_push_kv_int(&act, "shelf_depth", (int64_t)ZCL_HOTSWAP_SHELF_DEPTH);
+    json_push_kv_int(&act, "shelf_rollback_count",
+                     (int64_t)atomic_load(&g_shelf_rollback_count));
+    json_push_kv_int(&act, "shelf_dup_fail_count",
+                     (int64_t)atomic_load(&g_shelf_dup_fail_count));
+    json_push_kv_int(&act, "stale_commit_count",
+                     (int64_t)atomic_load(&g_stale_commit_count));
+    json_push_kv_int(&act, "reference_hold_count",
+                     (int64_t)atomic_load(&g_reference_hold_count));
 
     struct json_value allow = {0};
     json_set_array(&allow);
@@ -462,9 +580,12 @@ void hotswap_activate_dump_json(struct json_value *out)
     pthread_mutex_lock(&g_act_lock);
     struct json_value slots = {0};
     json_set_array(&slots);
+    size_t shelved = 0;
     for (size_t i = 0; i < g_slot_count; i++) {
         if (!g_slots[i].in_use)
             continue;
+        if (g_slots[i].shelf_present)
+            shelved++;
         struct json_value s = {0};
         json_set_object(&s);
         json_push_kv_str(&s, "source", g_slots[i].source);
@@ -473,11 +594,24 @@ void hotswap_activate_dump_json(struct json_value *out)
         json_push_kv_str(&s, "artifact_sha256", g_slots[i].artifact_sha256);
         json_push_kv_int(&s, "activated_at", (int64_t)g_slots[i].activated_at);
         json_push_kv_int(&s, "swaps", (int64_t)g_slots[i].swaps);
+        /* The shelved PREDECESSOR of this slot, if any: what a rollback of
+         * this source would put back. Absent fields when nothing is shelved,
+         * so "shelf_present": false is never accompanied by a stale digest. */
+        json_push_kv_bool(&s, "shelf_present", g_slots[i].shelf_present);
+        if (g_slots[i].shelf_present) {
+            json_push_kv_str(&s, "shelf_artifact_sha256",
+                             g_slots[i].shelf_sha256);
+            json_push_kv_int(&s, "shelf_generation",
+                             (int64_t)g_slots[i].shelf_generation);
+            json_push_kv_int(&s, "shelf_retired_at",
+                             (int64_t)g_slots[i].shelf_retired_at);
+        }
         json_push_back(&slots, &s);
         json_free(&s);
     }
     json_push_kv(&act, "active_slots", &slots);
     json_free(&slots);
+    json_push_kv_int(&act, "shelf_entries", (int64_t)shelved);
 
     struct json_value last_a = {0}, last_r = {0};
     event_json(&last_a, &g_last_activation);
@@ -645,14 +779,521 @@ bool hotswap_module_publish(const struct zcl_hotswap_module *module,
     return true;
 }
 
+/* ── shelf readers ────────────────────────────────────────────────────────
+ * Pure table reads, compiled in EVERY build. Only the dev activation core can
+ * ever put an image on the shelf, so in a release binary these correctly and
+ * quietly report an empty shelf rather than being absent.
+ *
+ * Both take g_act_lock. That is safe for a status/CLI caller by construction:
+ * command dispatch resolves its handler from a lock-free snapshot pointer and
+ * never touches this mutex, so nothing held here can add dispatch latency. */
+static void shelf_entry_from_slot_locked(struct hotswap_shelf_entry *out,
+                                         const struct hotswap_act_slot *slot)
+{
+    memset(out, 0, sizeof(*out));
+    out->present = true;
+    act_copy(out->source_tu, sizeof(out->source_tu), slot->source);
+    act_copy(out->artifact_sha256, sizeof(out->artifact_sha256),
+             slot->shelf_sha256);
+    out->generation = slot->shelf_generation;
+    out->retired_at = slot->shelf_retired_at;
+}
+
+size_t hotswap_shelf_list(struct hotswap_shelf_entry *out, size_t cap)
+{
+    size_t found = 0;
+    pthread_mutex_lock(&g_act_lock);
+    for (size_t i = 0; i < g_slot_count; i++) {
+        if (!g_slots[i].in_use || !g_slots[i].shelf_present)
+            continue;
+        if (out && found < cap)
+            shelf_entry_from_slot_locked(&out[found], &g_slots[i]);
+        found++;        /* the RETURN is the true count, not what was written */
+    }
+    pthread_mutex_unlock(&g_act_lock);
+    return found;
+}
+
+bool hotswap_shelf_peek(const char *source_tu, struct hotswap_shelf_entry *out)
+{
+    if (out)
+        memset(out, 0, sizeof(*out));
+    if (!source_tu || !source_tu[0])
+        return false;
+    bool found = false;
+    pthread_mutex_lock(&g_act_lock);
+    for (size_t i = 0; i < g_slot_count && !found; i++) {
+        if (!g_slots[i].in_use || !g_slots[i].shelf_present ||
+            strcmp(g_slots[i].source, source_tu) != 0)
+            continue;
+        if (out)
+            shelf_entry_from_slot_locked(out, &g_slots[i]);
+        found = true;
+    }
+    pthread_mutex_unlock(&g_act_lock);
+    return found;
+}
+
+/* Find (or, if activating a not-yet-seen source, add) the per-source slot.
+ * ASSUMES g_act_lock held. Returns NULL only when the fixed table is full.
+ *
+ * Slots exist ONLY on a real image commit, and that is deliberate.
+ * hotswap_module_publish() — the pure, always-compiled admit/probe/commit
+ * gauntlet, which any caller can drive with a fabricated struct — never
+ * creates or touches a slot, so it can never put anything on the shelf. That
+ * is what keeps the shelf from becoming a second, ungated way to publish live
+ * handlers: everything on it is a sealed image that has to be re-admitted
+ * from scratch. */
+static struct hotswap_act_slot *slot_for_source_locked(const char *source)
+{
+    for (size_t i = 0; i < g_slot_count; i++) {
+        if (g_slots[i].in_use && strcmp(g_slots[i].source, source) == 0)
+            return &g_slots[i];
+    }
+    if (g_slot_count >= HOTSWAP_ACT_MAX_SLOTS)
+        return NULL;
+    struct hotswap_act_slot *slot = &g_slots[g_slot_count++];
+    memset(slot, 0, sizeof(*slot));
+    slot->artifact_fd = -1;
+    slot->shelf_fd = -1;        /* shelf_present=false already says "empty" */
+    act_copy(slot->source, sizeof(slot->source), source);
+    slot->in_use = true;
+    return slot;
+}
+
+/* ── leaf sets and the live-leaf ownership table ──────────────────────────
+ *
+ * A leafset is captured ONCE, at the image's own commit, from the module
+ * struct while that struct is still mapped. It is never re-read later: the
+ * whole question at retire time is whether that mapping may be released, and
+ * reading the answer's inputs out of the thing being released is exactly the
+ * mistake this file exists to avoid. */
+static void leafset_capture(struct hotswap_leafset *out,
+                            const struct zcl_hotswap_leaf *leaves,
+                            uint32_t leaf_count)
+{
+    memset(out, 0, sizeof(*out));
+    out->trackable = true;
+    if (!leaves || leaf_count == 0 ||
+        leaf_count > ZCL_HOTSWAP_MODULE_MAX_LEAVES) {
+        out->trackable = false;
+        return;
+    }
+    for (uint32_t i = 0; i < leaf_count; i++) {
+        const char *nm = leaves[i].name;
+        if (!nm || !nm[0] || strlen(nm) >= HOTSWAP_LEAF_NAME_MAX) {
+            out->trackable = false;
+            return;
+        }
+        act_copy(out->name[out->count], HOTSWAP_LEAF_NAME_MAX, nm);
+        out->count++;
+    }
+}
+
+/* ASSUMES g_act_lock held. Records that `gen` published every leaf in `ls`.
+ * owner_gen is a MAX, so the result does not depend on the order concurrent
+ * committers reach this function — only on the generations the registry
+ * handed out, which is the order that actually decides whose code runs. */
+static void live_leaf_publish_locked(const struct hotswap_leafset *ls,
+                                     uint32_t gen)
+{
+    if (!ls->trackable || gen == 0) {
+        g_live_leaf_overflow = true;   /* latched: nothing may be unmapped */
+        return;
+    }
+    for (uint32_t i = 0; i < ls->count; i++) {
+        size_t k = 0;
+        bool found = false;
+        for (; k < g_live_leaf_count; k++) {
+            if (strcmp(g_live_leaf[k].name, ls->name[i]) == 0) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            if (g_live_leaf_count >= HOTSWAP_LIVE_LEAF_MAX) {
+                g_live_leaf_overflow = true;
+                return;
+            }
+            k = g_live_leaf_count++;
+            act_copy(g_live_leaf[k].name, HOTSWAP_LEAF_NAME_MAX, ls->name[i]);
+            g_live_leaf[k].owner_gen = 0;
+        }
+        if (gen > g_live_leaf[k].owner_gen)
+            g_live_leaf[k].owner_gen = gen;
+    }
+}
+
+/* THE REFERENCE PROOF. ASSUMES g_act_lock held.
+ *
+ * True when the live override snapshot may STILL dispatch into this image, so
+ * its mapping must not be released. Answers "yes" for anything it cannot
+ * prove — an untracked leaf, a generation it never saw, an overflowed table —
+ * because a partial ownership map cannot establish absence.
+ *
+ * Monotone: owner_gen only ever rises, so an image proved unreferenced can
+ * never become referenced again. That is what lets the unmap happen outside
+ * the lock. */
+static bool image_referenced_locked(const struct hotswap_leafset *ls,
+                                    uint32_t gen)
+{
+    if (g_live_leaf_overflow || !ls->trackable || gen == 0)
+        return true;
+    for (uint32_t i = 0; i < ls->count; i++) {
+        bool found = false;
+        for (size_t k = 0; k < g_live_leaf_count; k++) {
+            if (strcmp(g_live_leaf[k].name, ls->name[i]) != 0)
+                continue;
+            found = true;
+            if (g_live_leaf[k].owner_gen <= gen)
+                return true;     /* still ours (or unorderable): keep mapped */
+            break;
+        }
+        if (!found)
+            return true;         /* we published it and lost the record */
+    }
+    return false;
+}
+
+/* ── retirement ──────────────────────────────────────────────────────────
+ *
+ * One candidate: a mapping plus the descriptor and leafset that belong to it.
+ * `unmap` is the caller's release function — the loader passes the dynamic
+ * loader's, a test passes its own observer — so this whole path compiles in
+ * every build and carries no dynamic-loading dependency. */
+struct hotswap_retire_candidate {
+    void *handle;
+    int fd;
+    uint32_t generation;
+    struct hotswap_leafset leaves;
+    hotswap_unmap_fn unmap;
+    hotswap_quiesced_cb quiesced_cb;
+    void *ctx;
+};
+
+/* Pending-retire table: mappings kept because a gate could not be cleared.
+ * This exists so the retention is RECLAIMABLE (the escape retries it) instead
+ * of being an unbounded silent leak. Bounded: past the cap we still never
+ * release an unproven mapping — we just stop tracking it for retry, and the
+ * blocker keeps saying so. */
+#define HOTSWAP_PENDING_RETIRE_MAX 32
+static struct hotswap_retire_candidate g_pending[HOTSWAP_PENDING_RETIRE_MAX];
+static size_t g_pending_count;  /* guarded by g_act_lock */
+
+/* Reclaim seam invoked from the blocker escape (outside the registry lock).
+ * Returns true only when NOTHING is left retained — the escape refuses to
+ * clear the blocker on a partial reclaim.
+ *
+ * BOTH gates are re-run here, not just the drain one: a mapping retained
+ * because the live snapshot still dispatched into it becomes releasable only
+ * when a later generation has taken over every one of its leaves. */
+static bool hotswap_reclaim_pending(void *unused)
+{
+    (void)unused;
+    /* Only what the release itself needs, so this frame stays a few hundred
+     * bytes: a whole candidate is ~4 KB and 32 of them would be a 130 KB stack
+     * frame on whatever thread the blocker sweep happens to run on. */
+    struct { void *handle; int fd; hotswap_unmap_fn unmap; }
+        release[HOTSWAP_PENDING_RETIRE_MAX];
+    size_t release_count = 0;
+
+    pthread_mutex_lock(&g_act_lock);
+    size_t kept = 0;
+    for (size_t i = 0; i < g_pending_count; i++) {
+        struct hotswap_retire_candidate *p = &g_pending[i];
+        bool drained = p->quiesced_cb ? p->quiesced_cb(p->ctx) : false;
+        bool referenced = image_referenced_locked(&p->leaves, p->generation);
+        if (drained && !referenced) {
+            release[release_count].handle = p->handle;
+            release[release_count].fd = p->fd;
+            release[release_count].unmap = p->unmap;
+            release_count++;
+            continue;
+        }
+        if (kept != i)
+            g_pending[kept] = *p;
+        kept++;
+    }
+    g_pending_count = kept;
+    bool all_clear = (kept == 0);
+    pthread_mutex_unlock(&g_act_lock);
+
+    /* Outside the lock: the release callback is the caller's code, and an
+     * unreferenced image can never become referenced again (owner_gen only
+     * rises), so nothing can invalidate the decision in between. */
+    for (size_t i = 0; i < release_count; i++) {
+        if (release[i].unmap)
+            release[i].unmap(release[i].handle);
+        if (release[i].fd >= 0)
+            close(release[i].fd);
+        atomic_fetch_add_explicit(&g_dlclose_count, 1, memory_order_relaxed);
+        atomic_fetch_sub_explicit(&g_retained_mapped_count, 1,
+                                  memory_order_relaxed);
+        hotswap_retire_blocker_note_reclaimed();
+    }
+    return all_clear;
+}
+
+bool hotswap_reclaim_retained_now(void)
+{
+    return hotswap_reclaim_pending(NULL);
+}
+
+/* Release a superseded image, but ONLY once both gates are cleared:
+ *
+ *   DRAIN      no in-flight dispatch is still inside a retired snapshot;
+ *   REFERENCE  no leaf this image published is still owned by this image's
+ *              own generation, i.e. the live snapshot cannot reach it.
+ *
+ * On doubt the mapping is KEPT — always memory-safe — but NAMED, and queued
+ * for a reclaim retry. The old behaviour kept it mapped behind one LOG_WARN,
+ * which at a high swap rate is a mapping + fd leaked per swap with no operator
+ * signal; and it ran only the drain gate, which is why a retirement that
+ * raced a concurrent publish could release the mapping the live snapshot was
+ * still dispatching into. See hotswap/hotswap_shelf.h. */
+static void retire_candidate(struct hotswap_retire_candidate *cand)
+{
+    if (!cand->handle) {
+        if (cand->fd >= 0)
+            close(cand->fd);
+        return;
+    }
+
+    bool drained = false;
+    if (cand->quiesced_cb) {
+        /* ~2 s worst case: cheap sched_yield spin, escalating to a 1 ms sleep. */
+        for (int i = 0; i < 20000; i++) {
+            if (cand->quiesced_cb(cand->ctx)) { drained = true; break; }
+            if (i % 1000 == 999) {
+                struct timespec ts = { .tv_sec = 0, .tv_nsec = 1000000 };
+                nanosleep(&ts, NULL);
+            } else {
+                sched_yield();
+            }
+        }
+    }
+
+    pthread_mutex_lock(&g_act_lock);
+    bool referenced = image_referenced_locked(&cand->leaves, cand->generation);
+    bool queued = false;
+    if (!(drained && !referenced)) {
+        if (g_pending_count < HOTSWAP_PENDING_RETIRE_MAX) {
+            g_pending[g_pending_count++] = *cand;
+            queued = true;
+        }
+    }
+    pthread_mutex_unlock(&g_act_lock);
+
+    if (drained && !referenced) {
+        if (cand->unmap)
+            cand->unmap(cand->handle);
+        if (cand->fd >= 0)
+            close(cand->fd);
+        atomic_fetch_add_explicit(&g_dlclose_count, 1, memory_order_relaxed);
+        LOG_INFO("hotswap.activate",
+                 "retired superseded module image gen=%u after drain and "
+                 "reference proof (unmapped)", cand->generation);
+        return;
+    }
+
+    if (referenced)
+        atomic_fetch_add_explicit(&g_reference_hold_count, 1,
+                                  memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_retained_mapped_count, 1,
+                              memory_order_relaxed);
+    hotswap_retire_blocker_set_reclaimer(hotswap_reclaim_pending, NULL);
+    /* Raise unconditionally, queued or not: an untracked retention is a
+     * WORSE fault than a tracked one, so it must not be the quiet case. */
+    hotswap_retire_blocker_raise();
+    LOG_WARN("hotswap.activate",
+             "keeping superseded module image gen=%u mapped (safe leak): "
+             "drain=%s live-reference=%s — blocker %s raised, reclaim retry %s",
+             cand->generation, drained ? "confirmed" : "UNCONFIRMED",
+             referenced ? "STILL PRESENT" : "none",
+             HOTSWAP_RETIRE_UNDRAINED_BLOCKER_ID,
+             queued ? "queued" : "NOT queued (pending table full)");
+}
+
+/* ── THE COMMIT STEP ─────────────────────────────────────────────────────
+ * See hotswap/hotswap_shelf.h for the full argument. In short: the registry
+ * generation, not this function's arrival order, decides which image is live,
+ * and nothing is unmapped without the reference proof above. */
+bool hotswap_commit_image(const struct hotswap_commit_image *req)
+{
+    if (!req || !req->source_tu || !req->source_tu[0]) {
+        if (req && req->fd >= 0)
+            close(req->fd);
+        return false;
+    }
+
+    struct hotswap_leafset mine;
+    leafset_capture(&mine, req->leaves, req->leaf_count);
+
+    struct hotswap_retire_candidate cand;
+    memset(&cand, 0, sizeof(cand));
+    cand.fd = -1;
+    cand.unmap = req->unmap;
+    cand.quiesced_cb = req->hooks ? req->hooks->quiesced : NULL;
+    cand.ctx = req->hooks ? req->hooks->ctx : NULL;
+
+    int evicted_shelf_fd = -1;
+    bool shelf_dup_failed = false;
+    int dup_errno = 0;
+    bool stale = false;
+
+    pthread_mutex_lock(&g_act_lock);
+    struct hotswap_act_slot *slot = slot_for_source_locked(req->source_tu);
+    if (!slot) {
+        pthread_mutex_unlock(&g_act_lock);
+        /* Committed but untrackable (table full): the caller keeps its own
+         * mapping and nothing is retired. */
+        atomic_fetch_add_explicit(&g_retained_mapped_count, 1,
+                                  memory_order_relaxed);
+        LOG_WARN("hotswap.activate",
+                 "activation slot table full; keeping module image mapped");
+        return false;
+    }
+
+    /* Record leaf ownership FIRST and unconditionally. A stale committer's
+     * leaves were genuinely published at its generation, and owner_gen is a
+     * MAX, so recording it can only ever make a LATER image look referenced —
+     * never make an earlier one look free. */
+    live_leaf_publish_locked(&mine, req->generation);
+
+    if (req->generation > slot->generation) {
+        /* We won the registry race for this source: we are the live image and
+         * the slot's previous image is the retirement candidate. */
+        cand.handle = slot->handle;
+        cand.fd = slot->artifact_fd;
+        cand.generation = slot->generation;
+        cand.leaves = slot->leaves;
+
+        /* ── SHELVE THE SUPERSEDED IMAGE (depth 1) ─────────────────────────
+         * dup() BEFORE the outgoing descriptor becomes the retire candidate's,
+         * so the shelf and the retire path own one descriptor each and neither
+         * can close the other's. dup() is an fd-table operation with no I/O;
+         * nothing on the dispatch path takes g_act_lock, so doing it here
+         * cannot add dispatch latency.
+         *
+         * A dup() failure (EMFILE) must NEVER fail the activation: the swap
+         * the operator asked for has already committed. The shelf entry is
+         * simply absent — and any entry already there is dropped rather than
+         * left describing something that is no longer the immediately previous
+         * image, so an entry is never reported present without a descriptor
+         * behind it. */
+        if (cand.fd >= 0) {
+            int dup_fd = dup(cand.fd);
+            evicted_shelf_fd = slot->shelf_fd;
+            if (dup_fd < 0) {
+                dup_errno = errno;
+                shelf_dup_failed = true;
+                slot->shelf_fd = -1;
+                slot->shelf_present = false;
+            } else {
+                slot->shelf_fd = dup_fd;
+                slot->shelf_present = true;
+                slot->shelf_generation = slot->generation;
+                slot->shelf_retired_at = platform_time_wall_time_t();
+                act_copy(slot->shelf_sha256, sizeof(slot->shelf_sha256),
+                         slot->artifact_sha256);
+            }
+        }
+
+        slot->handle = req->handle;
+        slot->artifact_fd = req->fd;
+        slot->generation = req->generation;
+        slot->leaf_count = req->leaf_count;
+        slot->leaves = mine;
+        slot->activated_at = platform_time_wall_time_t();
+        slot->swaps++;
+        act_copy(slot->artifact_sha256, sizeof(slot->artifact_sha256),
+                 req->artifact_sha256);
+        /* Recorded so a rollback re-runs the SAME authorization, never a
+         * looser one invented at rollback time. */
+        act_copy(slot->datadir, sizeof(slot->datadir), req->resolved_datadir);
+    } else {
+        /* A NEWER generation for this source is already recorded: the registry
+         * superseded US between our publish and this line. Touch neither the
+         * slot nor the shelf — both describe the image the registry considers
+         * live — and offer OURSELVES as the retirement candidate. */
+        stale = true;
+        cand.handle = req->handle;
+        cand.fd = req->fd;
+        cand.generation = req->generation;
+        cand.leaves = mine;
+    }
+    uint32_t slot_generation = slot->generation;   /* read under the lock */
+    pthread_mutex_unlock(&g_act_lock);
+
+    /* Depth is 1: the image this shelving displaced is closed, outside the
+     * lock. It was reachable only through the entry we just overwrote, and a
+     * rollback holding a dup() of it is unaffected. */
+    if (evicted_shelf_fd >= 0)
+        close(evicted_shelf_fd);
+    if (shelf_dup_failed) {
+        atomic_fetch_add_explicit(&g_shelf_dup_fail_count, 1,
+                                  memory_order_relaxed);
+        LOG_WARN("hotswap.activate",
+                 "could not shelve the superseded image for %s: dup failed "
+                 "errno=%d; the swap stands, but rollback for this source is "
+                 "unavailable until the next swap shelves one",
+                 req->source_tu, dup_errno);
+    }
+    if (stale) {
+        atomic_fetch_add_explicit(&g_stale_commit_count, 1,
+                                  memory_order_relaxed);
+        LOG_WARN("hotswap.activate",
+                 "commit for %s arrived at generation %u after generation %u "
+                 "was already live: the registry superseded this image, so it "
+                 "is retired instead of installed",
+                 req->source_tu, req->generation, slot_generation);
+    }
+
+    retire_candidate(&cand);
+    return !stale;
+}
+
+void hotswap_activation_reset_for_testing(void)
+{
+    int close_fds[HOTSWAP_ACT_MAX_SLOTS * 2 + HOTSWAP_PENDING_RETIRE_MAX];
+    size_t close_count = 0;
+
+    pthread_mutex_lock(&g_act_lock);
+    for (size_t i = 0; i < g_slot_count; i++) {
+        if (g_slots[i].artifact_fd >= 0)
+            close_fds[close_count++] = g_slots[i].artifact_fd;
+        if (g_slots[i].shelf_fd >= 0)
+            close_fds[close_count++] = g_slots[i].shelf_fd;
+    }
+    for (size_t i = 0; i < g_pending_count; i++) {
+        if (g_pending[i].fd >= 0)
+            close_fds[close_count++] = g_pending[i].fd;
+    }
+    memset(g_slots, 0, sizeof(g_slots));
+    g_slot_count = 0;
+    memset(g_pending, 0, sizeof(g_pending));
+    g_pending_count = 0;
+    memset(g_live_leaf, 0, sizeof(g_live_leaf));
+    g_live_leaf_count = 0;
+    g_live_leaf_overflow = false;
+    pthread_mutex_unlock(&g_act_lock);
+
+    for (size_t i = 0; i < close_count; i++)
+        close(close_fds[i]);
+
+    atomic_store(&g_stale_commit_count, 0);
+    atomic_store(&g_reference_hold_count, 0);
+    atomic_store(&g_shelf_rollback_count, 0);
+    atomic_store(&g_shelf_dup_fail_count, 0);
+    atomic_store(&g_retained_mapped_count, 0);
+    atomic_store(&g_dlclose_count, 0);
+}
+
 #ifdef ZCL_DEV_BUILD
 
 #include <dlfcn.h>
-#include <errno.h>
 #include <fcntl.h>
-#include <sched.h>
 #include <sys/stat.h>
-#include <unistd.h>
 
 #include "crypto/sha256.h"
 #include "hotswap/hotswap_artifact_digest.h"
@@ -721,122 +1362,6 @@ bool zcl_hotswap_hotfork_visit_so(
     return ok;
 }
 
-/* Find (or, if activating a not-yet-seen source, add) the per-source slot.
- * ASSUMES g_act_lock held. Returns NULL only when the fixed table is full. */
-static struct hotswap_act_slot *slot_for_source_locked(const char *source)
-{
-    for (size_t i = 0; i < g_slot_count; i++) {
-        if (g_slots[i].in_use && strcmp(g_slots[i].source, source) == 0)
-            return &g_slots[i];
-    }
-    if (g_slot_count >= HOTSWAP_ACT_MAX_SLOTS)
-        return NULL;
-    struct hotswap_act_slot *slot = &g_slots[g_slot_count++];
-    memset(slot, 0, sizeof(*slot));
-    slot->artifact_fd = -1;
-    act_copy(slot->source, sizeof(slot->source), source);
-    slot->in_use = true;
-    return slot;
-}
-
-/* Pending-retire table: mappings kept because drain was unconfirmed. This
- * exists so the retention is RECLAIMABLE (the escape retries it) instead of
- * being an unbounded silent leak. Bounded: past the cap we still never
- * dlclose an undrained handle — we just stop tracking it for retry, and the
- * blocker (raised below) keeps saying so. */
-#define HOTSWAP_PENDING_RETIRE_MAX 32
-struct pending_retire {
-    void *handle;
-    int fd;
-    hotswap_quiesced_cb quiesced_cb;
-    void *ctx;
-};
-static struct pending_retire g_pending[HOTSWAP_PENDING_RETIRE_MAX];
-static size_t g_pending_count;  /* guarded by g_act_lock */
-
-/* Reclaim seam invoked from the blocker escape (outside the registry lock).
- * Returns true only when NOTHING is left retained — the escape refuses to
- * clear the blocker on a partial reclaim. */
-static bool hotswap_reclaim_pending(void *unused)
-{
-    (void)unused;
-    pthread_mutex_lock(&g_act_lock);
-    size_t kept = 0;
-    for (size_t i = 0; i < g_pending_count; i++) {
-        struct pending_retire p = g_pending[i];
-        bool drained = p.quiesced_cb ? p.quiesced_cb(p.ctx) : false;
-        if (drained) {
-            dlclose(p.handle);
-            if (p.fd >= 0) close(p.fd);
-            atomic_fetch_add_explicit(&g_dlclose_count, 1,
-                                      memory_order_relaxed);
-            atomic_fetch_sub_explicit(&g_retained_mapped_count, 1,
-                                      memory_order_relaxed);
-            hotswap_retire_blocker_note_reclaimed();
-            continue;
-        }
-        g_pending[kept++] = p;
-    }
-    g_pending_count = kept;
-    bool all_clear = (kept == 0);
-    pthread_mutex_unlock(&g_act_lock);
-    return all_clear;
-}
-
-/* Drain then dlclose a superseded module .so. Bounded wait; on doubt, keep it
- * mapped (always memory-safe) — but NAMED, and queued for a reclaim retry.
- * The old behaviour kept it mapped forever behind one LOG_WARN, which at a
- * high swap rate is a mapping + fd leaked per swap with no operator signal. */
-static void retire_handle(void *handle, int fd,
-                          hotswap_quiesced_cb quiesced_cb, void *ctx)
-{
-    if (!handle)
-        return;
-    bool drained = false;
-    if (quiesced_cb) {
-        /* ~2 s worst case: cheap sched_yield spin, escalating to a 1 ms sleep. */
-        for (int i = 0; i < 20000; i++) {
-            if (quiesced_cb(ctx)) { drained = true; break; }
-            if (i % 1000 == 999) {
-                struct timespec ts = { .tv_sec = 0, .tv_nsec = 1000000 };
-                nanosleep(&ts, NULL);
-            } else {
-                sched_yield();
-            }
-        }
-    }
-    if (drained) {
-        dlclose(handle);
-        if (fd >= 0) close(fd);
-        atomic_fetch_add_explicit(&g_dlclose_count, 1, memory_order_relaxed);
-        LOG_INFO("hotswap.activate",
-                 "retired superseded module .so after drain (dlclosed)");
-        return;
-    }
-
-    atomic_fetch_add_explicit(&g_retained_mapped_count, 1,
-                              memory_order_relaxed);
-    hotswap_retire_blocker_set_reclaimer(hotswap_reclaim_pending, NULL);
-    pthread_mutex_lock(&g_act_lock);
-    bool queued = false;
-    if (g_pending_count < HOTSWAP_PENDING_RETIRE_MAX) {
-        g_pending[g_pending_count++] = (struct pending_retire){
-            .handle = handle, .fd = fd, .quiesced_cb = quiesced_cb,
-            .ctx = ctx,
-        };
-        queued = true;
-    }
-    pthread_mutex_unlock(&g_act_lock);
-    /* Raise unconditionally, queued or not: an untracked retention is a
-     * WORSE fault than a tracked one, so it must not be the quiet case. */
-    hotswap_retire_blocker_raise();
-    LOG_WARN("hotswap.activate",
-             "drain unconfirmed; keeping superseded module .so mapped "
-             "(safe leak) — blocker %s raised, reclaim retry %s",
-             HOTSWAP_RETIRE_UNDRAINED_BLOCKER_ID,
-             queued ? "queued" : "NOT queued (pending table full)");
-}
-
 /* ── the consensus pin ─────────────────────────────────────────────────────
  *
  * A module .so is compiled from ONE shape-leaf TU; the resident supplies every
@@ -898,10 +1423,36 @@ static bool module_consensus_pin_ok(void *handle, char *stage, size_t stage_cap,
     return true;
 }
 
+/* How a module mapping is released. The commit/retire core is compiled in
+ * every build and never names the dynamic loader; this is the one place that
+ * does, and it exists only here in the dev region. */
+static void dev_unmap_module(void *handle)
+{
+    if (handle)
+        dlclose(handle);
+}
+
+/* THE ADMISSION GAUNTLET, entered from two doors and no others. Defined just
+ * below; activate_run() (the path entrance) and hotswap_rollback() (the shelf
+ * entrance) both call it, and neither gets a stage the other skips. */
+static bool activate_from_sealed_fd(int fd,
+                                    const char *origin_label,
+                                    const char *resolved_datadir,
+                                    bool request_activate,
+                                    bool require_authorization,
+                                    const struct hotswap_publish_hooks *hooks,
+                                    struct hotswap_activate_report *report);
+
 /* The dlopen half: confinement, authorization, pin+hash, dlopen/dlsym. The
  * admit -> probe -> ONE batch commit half is hotswap_module_publish(), which
  * compiles in every build and is unit-tested directly with fabricated modules
- * (lib/test/src/test_hotswap_module_v2.c). */
+ * (lib/test/src/test_hotswap_module_v2.c).
+ *
+ * PATH ENTRANCE. This function is everything that is specific to "the bytes
+ * arrived as a file at so_path": path confinement, the datadir/authorization
+ * gate, opening the inode, and copying it into a sealed image. From the sealed
+ * image onward there is nothing path-shaped left to check, and the rest is
+ * activate_from_sealed_fd() — the SAME code the shelf rollback re-enters. */
 static bool activate_run(const char *so_path, const char *resolved_datadir,
                          bool request_activate, bool require_authorization,
                          const struct hotswap_publish_hooks *hooks,
@@ -961,6 +1512,80 @@ static bool activate_run(const char *so_path, const char *resolved_datadir,
     close(src_fd);              /* the on-disk inode is no longer load-bearing */
     if (fd < 0)
         return act_reject(report, "seal", "%s", seal_err);
+
+    /* Sealed. Everything from here is entrance-independent — hand the image
+     * to the one gauntlet, which TAKES OWNERSHIP of `fd` on every path. */
+    return activate_from_sealed_fd(fd, so_path, resolved_datadir,
+                                   request_activate, require_authorization,
+                                   hooks, report);
+}
+
+/* ── THE ONE ADMISSION GAUNTLET ───────────────────────────────────────────
+ *
+ * probe -> hash -> map -> symbol -> consensus pin -> admit -> probe-before-
+ * publish -> ONE batch commit -> image commit, over a SEALED image. This is
+ * the tail of the "LOAD ORDER IS THE SECURITY PROPERTY" sequence documented at
+ * its seal step in activate_run() above; the order is the property, so it
+ * lives in exactly one function and both entrances run all of it.
+ *
+ * Two entrances, no shortcut between them:
+ *   - activate_run(): the bytes arrived as a file, were path-confined, and
+ *     were copied into a sealed image.
+ *   - hotswap_rollback(): the bytes are a dup() of an image that was live for
+ *     this same source until a later swap superseded it.
+ * The shelf entrance deliberately does NOT get a "we already admitted this
+ * one" fast path. A second door into module activation that skips stages is a
+ * second implementation of activation, and a stage that was true an hour ago
+ * (the sealed-core pin above all — `make core-seal` may have moved since) is
+ * not a stage that is true now.
+ *
+ * THE ONE STAGE THE SHELF ENTRANCE CANNOT RUN is
+ * hotswap_path_is_acceptable(): a shelved image has no path to confine. That
+ * check answers "where did these bytes come from", and these bytes answered it
+ * before they were ever mapped — it is skipped knowingly, and skipped nowhere
+ * else. Everything the check could still be protecting (that the bytes are
+ * what was admitted) is carried by F_SEAL_WRITE on the retained image.
+ *
+ * DESCRIPTOR DISCIPLINE: this function TAKES OWNERSHIP of `fd` and closes it
+ * on every single return path, EXCEPT a successful activation, where it is
+ * handed to hotswap_commit_image() which owns it from there.
+ *
+ * `origin_label` names where the image came from, for diagnostics only; it is
+ * never an input to any admission decision.
+ *
+ * `resolved_datadir` + `require_authorization` re-run the resident gate HERE
+ * rather than trusting that the caller ran it. For activate_run() that is a
+ * second evaluation of the same pure predicates on the same inputs, which
+ * costs two realpath() calls and can only ever change its mind if the operator
+ * flipped the gate mid-call — in which case refusing is the correct answer. */
+static bool activate_from_sealed_fd(int fd,
+                                    const char *origin_label,
+                                    const char *resolved_datadir,
+                                    bool request_activate,
+                                    bool require_authorization,
+                                    const struct hotswap_publish_hooks *hooks,
+                                    struct hotswap_activate_report *report)
+{
+    (void)origin_label;
+    if (!report) {
+        if (fd >= 0) close(fd);
+        return false;
+    }
+    if (fd < 0)
+        return act_reject(report, "seal", "no sealed module image to admit");
+
+    char why[256] = {0};
+    if (!hotswap_datadir_is_dev(resolved_datadir)) {
+        close(fd);
+        return act_reject(report, "precheck",
+            "hot-swap requires the exact dev datadir ~/.zclassic-c23-dev, got '%s'",
+            resolved_datadir ? resolved_datadir : "");
+    }
+    if (require_authorization && request_activate &&
+        !hotswap_activation_authorized(resolved_datadir, why, sizeof(why))) {
+        close(fd);
+        return act_reject(report, "authorize", "%s", why);
+    }
 
     /* Pre-map shape check, against the sealed image. */
     {
@@ -1035,35 +1660,23 @@ static bool activate_run(const char *so_path, const char *resolved_datadir,
         return true;
     }
 
-    void *prev_handle = NULL;
-    int prev_fd = -1;
-    pthread_mutex_lock(&g_act_lock);
-    struct hotswap_act_slot *slot = slot_for_source_locked(mod->source_tu);
-    if (slot) {
-        prev_handle = slot->handle;
-        prev_fd = slot->artifact_fd;
-        slot->handle = handle;
-        slot->artifact_fd = fd;
-        slot->generation = report->generation;
-        slot->leaf_count = mod->leaf_count;
-        slot->activated_at = platform_time_wall_time_t();
-        slot->swaps++;
-        act_copy(slot->artifact_sha256, sizeof(slot->artifact_sha256),
-                 report->artifact_sha256);
-    }
-    pthread_mutex_unlock(&g_act_lock);
-
-    if (!slot) {
-        /* Committed but untrackable (table full): keep this .so mapped. */
-        atomic_fetch_add_explicit(&g_retained_mapped_count, 1,
-                                  memory_order_relaxed);
-        LOG_WARN("hotswap.activate",
-                 "activation slot table full; keeping module .so mapped");
-    }
-
-    /* Retire the previous module .so for this source once dispatch drains. */
-    retire_handle(prev_handle, prev_fd, hooks ? hooks->quiesced : NULL,
-                  hooks ? hooks->ctx : NULL);
+    /* Record the image against its source and decide what may be released.
+     * hotswap_commit_image() TAKES OWNERSHIP of `fd` on every path, and it —
+     * not this function's arrival order — decides which image the registry
+     * considers live. See hotswap/hotswap_shelf.h. */
+    struct hotswap_commit_image commit = {
+        .source_tu = mod->source_tu,
+        .handle = handle,
+        .fd = fd,
+        .leaves = mod->leaves,
+        .leaf_count = mod->leaf_count,
+        .generation = report->generation,
+        .artifact_sha256 = report->artifact_sha256,
+        .resolved_datadir = resolved_datadir,
+        .unmap = dev_unmap_module,
+        .hooks = hooks,
+    };
+    (void)hotswap_commit_image(&commit);
     return true;
 }
 
@@ -1092,6 +1705,137 @@ bool hotswap_activate_local(const char *so_path, const char *resolved_datadir,
     local.quiesced = NULL;      /* nothing to reclaim in a one-shot process */
     return activate_run(so_path, resolved_datadir, /*request_activate=*/true,
                         /*require_authorization=*/false, &local, report);
+}
+
+/* ── SHELF ROLLBACK — the second entrance to the ONE gauntlet ─────────────
+ *
+ * See hotswap/hotswap_shelf.h for what this does and does not mean (it
+ * republishes the PREVIOUS MODULE, not a compiled-in baseline — the registry
+ * has no per-leaf revert), and for why it must stay operator-initiated.
+ *
+ * ONE DOOR. The shelved image goes back through activate_from_sealed_fd() —
+ * dev-datadir confinement, the -hotswap-activate + ZCL_HOTSWAP_ACTIVATE=1
+ * gate, ELF shape probe, hash, dlopen, symbol, consensus pin, admit,
+ * probe-before-publish, ONE batch commit, image commit. Not one stage is
+ * skipped, and there is deliberately no cheaper variant for "an image we
+ * admitted before".
+ *
+ * The toggle is not special-cased either: the rollback's own commit shelves
+ * the image it supersedes exactly like any other swap, so a second rollback
+ * lands back where you started. A REFUSED rollback never reaches that commit,
+ * so the shelf is not consumed and the live handlers are untouched.
+ *
+ * CONCURRENCY. Three collisions, and none of them can reach an unmap:
+ *   - Two rollbacks of the SAME source: the claim below runs under g_act_lock
+ *     and sets `rollback_in_flight`, so the second is refused at stage
+ *     "shelf" instead of racing. Cleared on every exit path.
+ *   - Two rollbacks of DIFFERENT sources: independent slots; they share only
+ *     the microseconds each spends inside the claim.
+ *   - A rollback racing a FORWARD activation of the same source: both publish
+ *     outside any loader lock, so they can reach hotswap_commit_image() in the
+ *     opposite order to the one the registry gave them. That is the retirement
+ *     race, and it is handled where it belongs — the commit orders itself by
+ *     the registry generation and unmaps nothing it cannot prove unreachable.
+ *     The claim also holds a dup() of the sealed inode, so a forward swap
+ *     replacing (and closing) the shelf entry mid-rollback cannot pull the
+ *     bytes out from under it.
+ * No new lock means no new lock-ordering edge: g_act_lock stays a leaf, and
+ * this function never holds it across a hook callback, dlopen, or any other
+ * blocking call. */
+bool hotswap_rollback(const char *source_tu,
+                      const struct hotswap_publish_hooks *hooks,
+                      struct hotswap_activate_report *report)
+{
+    if (!report)
+        return false;
+    memset(report, 0, sizeof(*report));
+    report->verify_only = false;
+    if (!source_tu || !source_tu[0])
+        return act_reject(report, "precheck", "rollback needs a source_tu");
+    act_copy(report->source_tu, sizeof(report->source_tu), source_tu);
+
+    enum claim { CLAIM_NO_SLOT, CLAIM_EMPTY, CLAIM_BUSY, CLAIM_DUP, CLAIM_OK };
+    enum claim outcome = CLAIM_NO_SLOT;
+    char datadir[HOTSWAP_ACT_DATADIR_MAX] = {0};
+    char shelf_sha[65] = {0};
+    size_t idx = 0;
+    bool claimed = false;
+    int fd = -1;
+    int dup_errno = 0;
+
+    pthread_mutex_lock(&g_act_lock);
+    for (size_t i = 0; i < g_slot_count; i++) {
+        if (!g_slots[i].in_use || strcmp(g_slots[i].source, source_tu) != 0)
+            continue;
+        idx = i;
+        if (!g_slots[i].shelf_present || g_slots[i].shelf_fd < 0) {
+            outcome = CLAIM_EMPTY;
+        } else if (g_slots[i].rollback_in_flight) {
+            outcome = CLAIM_BUSY;
+        } else {
+            fd = dup(g_slots[i].shelf_fd);
+            if (fd < 0) {
+                dup_errno = errno;
+                outcome = CLAIM_DUP;
+            } else {
+                g_slots[i].rollback_in_flight = true;
+                claimed = true;
+                act_copy(datadir, sizeof(datadir), g_slots[i].datadir);
+                act_copy(shelf_sha, sizeof(shelf_sha), g_slots[i].shelf_sha256);
+                outcome = CLAIM_OK;
+            }
+        }
+        break;
+    }
+    pthread_mutex_unlock(&g_act_lock);
+
+    switch (outcome) {
+    case CLAIM_NO_SLOT:
+        return act_reject(report, "shelf",
+            "source '%s' has never been activated in this process, so nothing "
+            "is shelved for it", source_tu);
+    case CLAIM_EMPTY:
+        return act_reject(report, "shelf",
+            "source '%s' has nothing shelved: its current module is the first "
+            "one activated, and there is no per-leaf revert to a compiled-in "
+            "baseline", source_tu);
+    case CLAIM_BUSY:
+        return act_reject(report, "shelf",
+            "a rollback of source '%s' is already in flight", source_tu);
+    case CLAIM_DUP:
+        return act_reject(report, "shelf",
+            "could not duplicate the shelved image for '%s' (errno=%d)",
+            source_tu, dup_errno);
+    case CLAIM_OK:
+        break;
+    }
+
+    /* From here `fd` belongs to the gauntlet, which closes it on every path
+     * except a successful commit (where the image commit takes it over). */
+    char origin[320];
+    (void)snprintf(origin, sizeof(origin), "shelf:%s@%.16s", source_tu,
+                   shelf_sha[0] ? shelf_sha : "(unhashed)");
+    bool ok = activate_from_sealed_fd(fd, origin, datadir,
+                                      /*request_activate=*/true,
+                                      /*require_authorization=*/true,
+                                      hooks, report);
+
+    if (claimed) {
+        pthread_mutex_lock(&g_act_lock);
+        if (idx < g_slot_count)
+            g_slots[idx].rollback_in_flight = false;
+        pthread_mutex_unlock(&g_act_lock);
+    }
+
+    if (ok) {
+        atomic_fetch_add_explicit(&g_shelf_rollback_count, 1,
+                                  memory_order_relaxed);
+        LOG_INFO("hotswap.activate",
+                 "rolled back source=%s to the shelved image sha=%.16s gen=%u "
+                 "(what was live is now the shelf entry)",
+                 source_tu, shelf_sha, report->generation);
+    }
+    return ok;
 }
 
 bool hotswap_verify_module_so(const char *so_path, const char *expect_tu,
@@ -1338,6 +2082,27 @@ bool hotswap_activate_local(const char *so_path, const char *resolved_datadir,
     act_copy(report->stage, sizeof(report->stage), "release");
     act_copy(report->error, sizeof(report->error),
              "hot-swap activation unavailable in release build");
+    return false;
+}
+
+/* Nothing can shelve an image in a release build (only the dev activation
+ * core commits one), so hotswap_shelf_list/peek already report an empty shelf
+ * correctly and need no stub. Rollback still needs one: it publishes live
+ * code, and a release binary refuses to do that. */
+bool hotswap_rollback(const char *source_tu,
+                      const struct hotswap_publish_hooks *hooks,
+                      struct hotswap_activate_report *report)
+{
+    (void)source_tu;
+    (void)hooks;
+    if (!report)
+        return false;
+    memset(report, 0, sizeof(*report));
+    report->verify_only = true;
+    report->rolled_back = true;
+    act_copy(report->stage, sizeof(report->stage), "release");
+    act_copy(report->error, sizeof(report->error),
+             "hot-swap rollback unavailable in release build");
     return false;
 }
 

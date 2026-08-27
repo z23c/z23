@@ -951,6 +951,129 @@ static int test_block_swarm_duplicate_delivery(void)
     return failures;
 }
 
+/* ══════════════ Test 5: manifest anchoring ══════════════════════
+ * MSG_BLOCK_MANIFEST carries attacker-chosen start/end/tip_hash. Before this
+ * pin, receipt alone flagged blk_manifest_received and armed the swarm — a
+ * peer could aim body fetchers at a range rooted in nothing. Admission now
+ * requires a two-tier anchor against the LOCAL header index: full (the real
+ * tip hash resolves at exactly end_height) or fallback (start_height is at or
+ * below our admitted header frontier — the catch-up posture every fixture
+ * above rides, since their best headers carry fabricated hashes). Anything
+ * unrooted is refused and scored. Cases run in contamination order:
+ * refuse (nothing resolvable) → fallback (fabricated frontier) → full
+ * (real tip indexed, frontier removed so ONLY the full tier can admit). */
+static int test_block_swarm_manifest_anchor(void)
+{
+    int failures = 0;
+
+    TEST("block swarm loopback: zblkmanfst must anchor in the local header "
+         "index (full tip match, admitted-frontier fallback, else refuse)") {
+        const struct chain_params *params = chain_params_get();
+        const int32_t end_height = 320;             /* 5 pieces of 64 */
+        struct bs_seeder seed;
+
+        ASSERT(!mp_block_swarm_is_active());
+        ASSERT(bs_seeder_build(&seed, end_height, 7u, "anch"));
+
+        struct main_state ms_b;
+        struct tx_mempool mempool_b;
+        struct coins_view null_view_b;
+        struct coins_view_cache coins_b;
+        struct net_manager nm_b;
+        struct msg_processor mp_b;
+
+        main_state_init(&ms_b);
+        tx_mempool_init(&mempool_b, 0);
+        coins_view_cache_init(&coins_b, &null_view_b);
+        net_manager_init(&nm_b);
+        memset(&mp_b, 0, sizeof(mp_b));
+        mp_b.main_state = &ms_b;
+        mp_b.mempool = &mempool_b;
+        mp_b.coins_tip = &coins_b;
+        mp_b.params = params;
+        mp_b.datadir = ".";
+        mp_b.net_mgr = &nm_b;
+
+        /* One seeder-side sender; three fetcher-side receivers, one per
+         * verdict. ms_b starts completely EMPTY: no index entries at all and
+         * pindex_best_header NULL, so neither tier can resolve yet. */
+        struct p2p_node *a_node = bs_make_peer(&seed.nm, 1);
+        struct p2p_node *p_refuse = bs_make_peer(&nm_b, 2);
+        struct p2p_node *p_fb = bs_make_peer(&nm_b, 3);
+        struct p2p_node *p_full = bs_make_peer(&nm_b, 4);
+        ASSERT(a_node && p_refuse && p_fb && p_full);
+        struct send_segment *sent_a = bs_install_sentinel(a_node);
+
+        bool ok = true;
+
+        /* ── REFUSE: empty index, no frontier → both tiers miss. */
+        push_block_manifest(&seed.mp, a_node);
+        bs_pump(a_node, sent_a, &mp_b, p_refuse, params->pchMessageStart, &ok);
+        ASSERT(ok);
+        ASSERT(!p_refuse->blk_manifest_received);
+        ASSERT(!mp_block_swarm_is_active());       /* nothing armed */
+
+        /* ── FALLBACK: fabricated frontier AT the manifest end height (the
+         * header-synced-bodies-behind posture); the real tip hash is still
+         * unknown locally, so only the frontier tier can admit this. */
+        struct uint256 bhh;
+        memset(&bhh, 0, sizeof(bhh));
+        bhh.data[0] = 0xB0; bhh.data[1] = 0x0B; bhh.data[2] = 0x33;
+        struct block_index *fb_hdr =
+            chainstate_insert_block_index((struct chainstate *)&ms_b, &bhh);
+        ASSERT(fb_hdr != NULL);
+        fb_hdr->nHeight = end_height;
+        fb_hdr->nStatus = BLOCK_VALID_TREE;
+        ms_b.pindex_best_header = fb_hdr;
+
+        a_node->blk_manifest_sent = false;
+        push_block_manifest(&seed.mp, a_node);
+        bs_pump(a_node, sent_a, &mp_b, p_fb, params->pchMessageStart, &ok);
+        ASSERT(ok);
+        ASSERT(p_fb->blk_manifest_received);       /* fallback tier admits */
+        ASSERT(mp_block_swarm_is_active());        /* and the swarm arms    */
+        mp_block_swarm_test_seed_stall(0, 0, 0);   /* teardown              */
+        ASSERT(!mp_block_swarm_is_active());
+
+        /* ── FULL: index the manifest's REAL tip hash at exactly end_height
+         * and drop the frontier, so the fallback tier is UNAVAILABLE and
+         * admission can only come from the resolved tip. */
+        struct block_index *tip_bi = chainstate_insert_block_index(
+            (struct chainstate *)&ms_b, &seed.hashes[end_height]);
+        ASSERT(tip_bi != NULL);
+        tip_bi->nHeight = end_height;
+        tip_bi->nStatus = BLOCK_VALID_TREE;
+        ms_b.pindex_best_header = NULL;
+
+        a_node->blk_manifest_sent = false;
+        push_block_manifest(&seed.mp, a_node);
+        bs_pump(a_node, sent_a, &mp_b, p_full, params->pchMessageStart, &ok);
+        ASSERT(ok);
+        ASSERT(p_full->blk_manifest_received);     /* full tier admits      */
+        ASSERT(mp_block_swarm_is_active());
+        mp_block_swarm_test_seed_stall(0, 0, 0);   /* teardown              */
+        ASSERT(!mp_block_swarm_is_active());
+
+        send_segment_free(sent_a);
+        a_node->send_head = a_node->send_tail = NULL;
+        p_refuse->send_head = p_refuse->send_tail = NULL;
+        p_fb->send_head = p_fb->send_tail = NULL;
+        p_full->send_head = p_full->send_tail = NULL;
+        p2p_node_free(a_node);
+        p2p_node_free(p_refuse);
+        p2p_node_free(p_fb);
+        p2p_node_free(p_full);
+        net_manager_free(&nm_b);
+        coins_view_cache_free(&coins_b);
+        tx_mempool_free(&mempool_b);
+        main_state_free(&ms_b);
+        bs_seeder_free(&seed);
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
 int test_block_swarm_loopback(void)
 {
     int failures = 0;
@@ -959,5 +1082,6 @@ int test_block_swarm_loopback(void)
     failures += test_block_swarm_stall_reap();
     failures += test_block_swarm_integrity_abandon();
     failures += test_block_swarm_duplicate_delivery();
+    failures += test_block_swarm_manifest_anchor();
     return failures;
 }

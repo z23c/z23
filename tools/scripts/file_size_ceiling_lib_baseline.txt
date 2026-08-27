@@ -102,3 +102,10 @@ lib/zswap/src/zswap_ceremony.c 853
 lib/vcs/src/vcs_devloop.c 2390
 lib/vcs/src/zcode_work_node.c 1331
 lib/vcs/src/zcode_workspace_manifest.c 846
+
+# Same again for the permissionless-admission wave: hotswap_elf_probe.c
+# landed at triple the ceiling and zcode_dht_service.c just past it, both
+# already on main and unrecorded, tripping the E1 self-test for the next
+# pusher. Held here at today's size per the rule above.
+lib/hotswap/src/hotswap_elf_probe.c 1231
+lib/vcs/src/zcode_dht_service.c 833

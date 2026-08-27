@@ -1538,8 +1538,49 @@ bool mp_handle_zcl23_sync(struct msg_processor *mp,
                             free(piece_hashes);
                             piece_hashes = NULL;
                         } else {
-                            node->blk_manifest_received = true;
-                            node->blk_peer_height = end_h;
+                            /* ANCHOR the manifest before trusting it. A
+                             * merkle root over attacker-chosen piece hashes
+                             * is self-consistent by construction, so the
+                             * only remaining trust step is against OUR OWN
+                             * validated header index: either tip_hash names
+                             * a block we admit at exactly the claimed end
+                             * height (full anchor), or our admitted header
+                             * tip reaches past start_height (an honestly
+                             * ahead peer whose later headers we simply
+                             * have not fetched yet — its body transfer
+                             * stays capped by local header admission).
+                             * Refuse and score otherwise: a range rooted
+                             * beyond anything we can bind offers bodies
+                             * that can never attach, so serving them is
+                             * pure resource burn. */
+                            struct uint256 tip_u;
+                            memcpy(tip_u.data, tip_hash, 32);
+                            bool anchored = false;
+                            if (mp->main_state) {
+                                struct block_index *tip_bi = block_map_find(
+                                    &mp->main_state->map_block_index,
+                                    &tip_u);
+                                if (tip_bi && tip_bi->nHeight == end_h)
+                                    anchored = true;
+                            }
+                            if (!anchored && mp->main_state &&
+                                mp->main_state->pindex_best_header)
+                                anchored = start_h <=
+                                    mp->main_state->pindex_best_header->nHeight;
+                            if (anchored) {
+                                node->blk_manifest_received = true;
+                                node->blk_peer_height = end_h;
+                            } else {
+                                fprintf(stderr,  // obs-ok:peer-scored
+                                        "Peer %s: block manifest not "
+                                        "anchored in local header index "
+                                        "(start=%d end=%d)\n",
+                                        node->addr_name, start_h, end_h);
+                                peer_scoring_record(
+                                    mp->net_mgr, node,
+                                    PEER_OFFENCE_INVALID_MESSAGE,
+                                    "block manifest not header-anchored");
+                            }
                         }
                     }
                 }
@@ -1980,7 +2021,8 @@ void mp_snapshot_send_tick(struct msg_processor *mp,
             int32_t assignment_cap =
                 block_swarm_contiguous_window_cap(&g_block_swarm, header_cap);
             int32_t pidx = block_swarm_assign_piece_through_height(
-                &g_block_swarm, node->id, node->blk_bitmap, assignment_cap);
+                &g_block_swarm, node->id, node->blk_bitmap,
+                node->blk_bitmap_len, assignment_cap);
             if (pidx < 0)
                 break; /* no more pieces to assign */
 

@@ -542,6 +542,125 @@ int test_process_headers_adversarial(void)
         stream_free(&body);
     }
 
+    /* ── 9. batch-order relink heal refuses a STALE ANCHOR (the
+     *       refuse-don't-mutate contract). The heal may only rewrite an
+     *       entry's parent/height/skip/chain-work when the claimed prev
+     *       resolves IN THE MAP to exactly the batch's previous anchor;
+     *       accept_block_header has already repaired each entry against
+     *       the map, so any residual disagreement means the anchor went
+     *       stale (orphaned twin, concurrent re-key, freed slot) and the
+     *       rewrite would split the ladder onto an out-of-map twin.
+     *
+     *       Hermetic staging: admit A normally, then install a hand-built
+     *       TWIN of A (same hash bytes, outside the map) as the active-
+     *       chain window tip, so the next batch's sequence anchor is not
+     *       what the map resolves. Pre-fix behavior: B(prev=A) mutates
+     *       onto the twin — ancestry pointing OUTSIDE the map, invisible
+     *       to every map walker. Post-fix: refused without mutation, the
+     *       cursor keeps the last map-agreed anchor, and the next header
+     *       in the same batch still admits cleanly. */
+    {
+        struct main_state ms4;
+        main_state_init(&ms4);
+        struct msg_processor mp4;
+        msg_processor_init(&mp4, &ms4, NULL, NULL, cp, dir, &g_ph_nm, NULL);
+
+        struct uint256 gh4 = cp->consensus.hashGenesisBlock;
+        struct block_index *gen4 =
+            chainstate_insert_block_index((struct chainstate *)&ms4, &gh4);
+        PH_CHECK("stale-anchor: genesis inserted", gen4 != NULL);
+        if (gen4) {
+            gen4->nHeight = 0;
+            gen4->nStatus = BLOCK_HAVE_DATA | BLOCK_VALID_SCRIPTS;
+            gen4->nTx = 1;
+            gen4->nChainTx = 1;
+            active_chain_move_window_tip(&ms4.chain_active, gen4);
+            ms4.pindex_best_header = gen4;
+
+            struct block_header ha, hb, hc;
+            bool ok9 = ph_mine_header(&ha, 1, &gh4, cp);
+            if (ok9) {
+                struct uint256 ha_hash;
+                block_header_get_hash(&ha, &ha_hash);
+                ok9 = ph_mine_header(&hb, 2, &ha_hash, cp);
+                if (ok9) {
+                    struct uint256 hb_hash;
+                    block_header_get_hash(&hb, &hb_hash);
+                    ok9 = ph_mine_header(&hc, 3, &hb_hash, cp);
+                }
+            }
+            PH_CHECK("stale-anchor: three chained regtest headers mined", ok9);
+
+            /* Batch 1 [A]: admitted through the heal path with an honest
+             * anchor (genesis resolves in the map) — the healthy flow
+             * this slice must preserve. */
+            size_t map0 = ms4.map_block_index.size;
+            struct byte_stream s1;
+            stream_init(&s1, 512);
+            stream_write_compact_size(&s1, 1);
+            PH_CHECK("stale-anchor: batch1 payload built",
+                     ph_write_header(&s1, &ha));
+            PH_CHECK("stale-anchor: honest batch1 accepted",
+                     process_headers(&mp4, &node, &s1));
+            PH_CHECK("stale-anchor: batch1 grew the map by one",
+                     ms4.map_block_index.size == map0 + 1);
+            stream_free(&s1);
+
+            struct uint256 ha_hash;
+            block_header_get_hash(&ha, &ha_hash);
+            struct block_index *map_a =
+                block_map_find(&ms4.map_block_index, &ha_hash);
+            PH_CHECK("stale-anchor: A resolved in the map", map_a != NULL);
+
+            /* Stage the out-of-map twin as the sequence anchor. */
+            struct uint256 twin_hash;
+            struct block_index twin;
+            memset(&twin, 0, sizeof(twin));
+            twin.nHeight = 1;
+            twin.phashBlock = &twin_hash;
+            memcpy(twin_hash.data, ha_hash.data, 32);
+            PH_CHECK("stale-anchor: twin installed as window tip",
+                     active_chain_move_window_tip(&ms4.chain_active, &twin));
+
+            node.disconnect = false;
+            atomic_store(&node.misbehavior, 0);
+
+            /* Batch 2 [B(prev=A), C(prev=B)] with the anchor stale. */
+            struct byte_stream s2;
+            stream_init(&s2, 1024);
+            stream_write_compact_size(&s2, 2);
+            PH_CHECK("stale-anchor: batch2 payload built",
+                     ph_write_header(&s2, &hb) && ph_write_header(&s2, &hc));
+            bool ret9 = process_headers(&mp4, &node, &s2);
+            stream_free(&s2);
+            PH_CHECK("stale-anchor: batch2 completes", ret9 == true);
+            PH_CHECK("stale-anchor: batch2 grew the map by two",
+                     ms4.map_block_index.size == map0 + 3);
+
+            struct uint256 hb_hash, hc_hash;
+            block_header_get_hash(&hb, &hb_hash);
+            block_header_get_hash(&hc, &hc_hash);
+            struct block_index *bi_b =
+                block_map_find(&ms4.map_block_index, &hb_hash);
+            struct block_index *bi_c =
+                block_map_find(&ms4.map_block_index, &hc_hash);
+            PH_CHECK("stale-anchor: B kept its MAP-resolved parent "
+                     "(not mutated onto the twin)",
+                     bi_b && bi_b->nHeight == 2 &&
+                     map_a && bi_b->pprev == map_a);
+            PH_CHECK("stale-anchor: cursor survived the refusal — "
+                     "next header admits at parent+1",
+                     bi_c && bi_c->nHeight == 3 &&
+                     bi_c->pprev == bi_b);
+            PH_CHECK("stale-anchor: refusal scores no penalty",
+                     atomic_load(&node.misbehavior) == 0 && !node.disconnect);
+            PH_CHECK("stale-anchor: ladder unchanged elsewhere",
+                     map_a->nHeight == 1 &&
+                     (gen4 ? gen4->nHeight == 0 : true));
+        }
+        main_state_free(&ms4);
+    }
+
     sync_set_state(sync0, "process_headers_adversarial restore");
     main_state_free(&ms);
     SetDataDir("");

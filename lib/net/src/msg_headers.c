@@ -1330,16 +1330,44 @@ bool process_headers(struct msg_processor *mp, struct p2p_node *node,
                 header_corroboration_note(&hdr_hash, peer_group, peer_group_len);
             if (pindex && sequence_prev && sequence_prev->phashBlock &&
                 uint256_eq(&hdr.hashPrevBlock, sequence_prev->phashBlock)) {
-                if (pindex->pprev != sequence_prev ||
-                    pindex->nHeight != sequence_prev->nHeight + 1) {
-                    pindex->pprev = sequence_prev;
-                    pindex->nHeight = sequence_prev->nHeight + 1;
-                    block_index_build_skip(pindex);
-                    struct arith_uint256 proof = GetBlockProof(pindex);
-                    arith_uint256_add(&pindex->nChainWork,
-                                      &sequence_prev->nChainWork, &proof);
+                /* Batch-order relink heal: the wire's prev hash names this
+                 * batch's previous header, but our index disagrees with
+                 * that ordering. accept_block_header has ALREADY repaired
+                 * this entry against the map-derived parent, so a residual
+                 * disagreement can only mean the batch anchor went stale
+                 * against the map (concurrent re-keying, an orphaned twin,
+                 * a freed entry). Trust the map, not the batch position:
+                 * re-link only when the claimed parent resolves to exactly
+                 * that anchor and the child carries no failure mask —
+                 * anything else would rewrite an established index ladder
+                 * (parent, height, skip list, chain work) from one
+                 * unauthenticated signal. A refused header does NOT advance
+                 * the cursor: the next one compares against the last
+                 * map-agreed anchor instead. */
+                struct block_index *mapped_prev = block_map_find(
+                    &mp->main_state->map_block_index, &hdr.hashPrevBlock);
+                if (mapped_prev && mapped_prev == sequence_prev &&
+                    !(pindex->nStatus & BLOCK_FAILED_MASK)) {
+                    if (pindex->pprev != sequence_prev ||
+                        pindex->nHeight != sequence_prev->nHeight + 1) {
+                        pindex->pprev = sequence_prev;
+                        pindex->nHeight = sequence_prev->nHeight + 1;
+                        block_index_build_skip(pindex);
+                        struct arith_uint256 proof = GetBlockProof(pindex);
+                        arith_uint256_add(&pindex->nChainWork,
+                                          &sequence_prev->nChainWork, &proof);
+                    }
+                    sequence_prev = pindex;
+                } else {
+                    /* Non-returning ERROR emit: a refused relink must not
+                     * abort the batch (LOG_FAIL would return false out of
+                     * process_headers mid-loop) — later headers in this
+                     * same batch still carry independent information. */
+                    LOG_ERROR("net", "headers[%llu]: batch-order relink "
+                              "refused (anchor not map-resolved or child "
+                              "failed) for h=%d",
+                              (unsigned long long)i, pindex->nHeight);
                 }
-                sequence_prev = pindex;
             }
             pindex_last = pindex;
             if (pindex && pindex->phashBlock)
