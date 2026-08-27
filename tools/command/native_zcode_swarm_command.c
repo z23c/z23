@@ -653,13 +653,50 @@ void zcl_native_handle_zcode_package_peers(
         json_free(&rows);
         (void)json_push_kv_int(&reply->data, "peer_count", 0);
         (void)json_push_kv_bool(&reply->data, "peers_truncated", false);
-        (void)json_push_kv_str(
-            &reply->data, "note",
-            "no live hosting engine on this process (-packagehost=1 on a "
-            "running node wires it); peer facts are session-scoped and "
-            "never persisted, so a one-shot CLI has none to report. "
-            "possession is store-side and is still reported; missing "
-            "store facts fail closed and replica counts are never invented");
+        {
+            /* Session-scoped peer facts need a live engine. Name `z23 join`
+             * (or the restart, once this process is already hosting) instead
+             * of reciting `-packagehost=1` as the way to wire it. */
+            struct zcl_zcode_join_posture join;
+            char note[1200];
+            const char *dd = zw_datadir(request);
+            if (!zcl_zcode_join_posture_fill(&join))
+                join.package_hosting = false;
+            int n;
+            if (join.package_hosting)
+                n = snprintf(
+                    note, sizeof(note),
+                    "no live hosting engine on this process; "
+                    "systemctl --user restart zclassic23 wires it. "
+                    "peer facts are session-scoped and never persisted, so a "
+                    "one-shot CLI has none to report. possession is "
+                    "store-side and is still reported; missing store facts "
+                    "fail closed and replica counts are never invented");
+            else if (dd && dd[0])
+                n = snprintf(
+                    note, sizeof(note),
+                    "no live hosting engine on this process; run "
+                    "z23 join -datadir=%s then restart to wire it. "
+                    "peer facts are session-scoped and never persisted, so a "
+                    "one-shot CLI has none to report. possession is "
+                    "store-side and is still reported; missing store facts "
+                    "fail closed and replica counts are never invented",
+                    dd);
+            else
+                n = snprintf(
+                    note, sizeof(note),
+                    "no live hosting engine on this process; run z23 join "
+                    "then restart to wire it. peer facts are session-scoped "
+                    "and never persisted, so a one-shot CLI has none to "
+                    "report. possession is store-side and is still reported; "
+                    "missing store facts fail closed and replica counts are "
+                    "never invented");
+            if (n < 0 || (size_t)n >= sizeof(note))
+                (void)snprintf(
+                    note, sizeof(note),
+                    "no live hosting engine: run z23 join then restart");
+            (void)json_push_kv_str(&reply->data, "note", note);
+        }
         return;
     }
 
