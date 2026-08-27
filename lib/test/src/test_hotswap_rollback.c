@@ -167,8 +167,8 @@ static enum zcl_command_exit rb_exec(const char *path, char *out,
 
 /* ── publish hooks ────────────────────────────────────────────────────────
  * Same shape as the resident's (tools/command/native_dev_hotswap.c): the
- * commit publishes into the real registry and reports the generation by
- * reading the active generation back. */
+ * commit publishes into the real registry and reports the generation the
+ * publish itself assigned. */
 static bool rb_commit(void *ctx, const struct zcl_hotswap_leaf *leaves,
                       size_t leaf_count, uint32_t *out_gen, char *why,
                       size_t why_sz)
@@ -185,10 +185,9 @@ static bool rb_commit(void *ctx, const struct zcl_hotswap_leaf *leaves,
         ovr[i].path = leaves[i].name;
         ovr[i].handler = leaves[i].fn;
     }
-    if (!zcl_command_registry_replace_batch(0, ovr, leaf_count, why, why_sz))
+    if (!zcl_command_registry_replace_batch(0, ovr, leaf_count, why, why_sz,
+                                            out_gen))
         return false;
-    if (out_gen)
-        *out_gen = zcl_command_registry_active_generation();
     return true;
 }
 
