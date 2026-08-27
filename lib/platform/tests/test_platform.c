@@ -13,6 +13,24 @@ int main(void)
     os_proc_mem_set_override(&expected);
     bool ok = os_proc_mem_read(&observed);
     os_proc_mem_set_override(NULL);
-    return !ok || observed.rss_bytes != 11 || observed.cgroup_max != 55 ||
-           observed.sys_avail_bytes != 77;
+    if (!ok || observed.rss_bytes != 11 || observed.cgroup_max != 55 ||
+        observed.sys_avail_bytes != 77)
+        return 1;
+
+    char executable[4096];
+    size_t handles_before = 0;
+    size_t handles_after = 0;
+    if (!os_proc_mem_read(&observed) || observed.rss_bytes < 0 ||
+        !os_proc_exe_path(executable, sizeof(executable)) ||
+        executable[0] == '\0' || os_proc_uptime_seconds() < 0 ||
+        !os_proc_cmdline_has_token("z23-platform-self-token") ||
+        os_proc_cmdline_has_token("z23-platform-self-token-suffix") ||
+        !os_proc_open_fd_count(&handles_before) ||
+        !os_proc_open_fd_count(&handles_after))
+        return 2;
+#if defined(_WIN32)
+    if (handles_before != handles_after)
+        return 3;
+#endif
+    return 0;
 }

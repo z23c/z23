@@ -8,9 +8,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(_WIN32)
+#include <windows.h>
+#include <shellapi.h>
+#include <psapi.h>
+#else
 #include <unistd.h>
+#endif
 
-#if !defined(__APPLE__)
+#if !defined(__APPLE__) && !defined(_WIN32)
 #include <dirent.h>
 #endif
 
@@ -54,7 +60,7 @@ static void os_proc_trim_newline(char *s)
 
 /* Read a single "Label: NNN kB" style line's value (in kB) from a
  * /proc/self/status-shaped file, returned as bytes. -1 if not found. */
-#if !defined(__APPLE__)
+#if !defined(__APPLE__) && !defined(_WIN32)
 static int64_t os_proc_status_field_bytes(const char *path, const char *label)
 {
     FILE *f = fopen(path, "r");
@@ -84,6 +90,9 @@ bool os_proc_cgroup_dir(char *out, size_t out_len)
     if (!out || out_len == 0)
         return false; // raw-return-ok:optional-cgroup-unavailable
 
+#if defined(_WIN32)
+    return false; // raw-return-ok:platform-has-no-cgroups
+#else
     FILE *f = fopen("/proc/self/cgroup", "r");
     if (!f)
         return false; // raw-return-ok:optional-cgroup-unavailable
@@ -111,9 +120,10 @@ bool os_proc_cgroup_dir(char *out, size_t out_len)
 
     fclose(f);
     return ok;
+#endif
 }
 
-#if !defined(__APPLE__)
+#if !defined(__APPLE__) && !defined(_WIN32)
 static int64_t os_proc_cgroup_limit_bytes(const char *dir, const char *name)
 {
     if (!dir || !name)
@@ -187,7 +197,30 @@ bool os_proc_mem_read(struct os_proc_mem *out)
         return true;
     }
 
-#if defined(__APPLE__)
+#if defined(_WIN32)
+    PROCESS_MEMORY_COUNTERS counters;
+    memset(&counters, 0, sizeof(counters));
+    counters.cb = sizeof(counters);
+    if (!GetProcessMemoryInfo(GetCurrentProcess(), &counters,
+                              sizeof(counters)))
+        return false;
+    out->rss_bytes = (int64_t)counters.WorkingSetSize;
+    out->vsize_bytes = (int64_t)counters.PagefileUsage;
+    out->cgroup_current = -1;
+    out->cgroup_high = -1;
+    out->cgroup_max = -1;
+    MEMORYSTATUSEX memory;
+    memset(&memory, 0, sizeof(memory));
+    memory.dwLength = sizeof(memory);
+    if (GlobalMemoryStatusEx(&memory)) {
+        out->sys_total_bytes = (int64_t)memory.ullTotalPhys;
+        out->sys_avail_bytes = (int64_t)memory.ullAvailPhys;
+    } else {
+        out->sys_total_bytes = -1;
+        out->sys_avail_bytes = -1;
+    }
+    return true;
+#elif defined(__APPLE__)
     struct rusage_info_v2 usage;
     memset(&usage, 0, sizeof(usage));
     if (proc_pid_rusage(getpid(), RUSAGE_INFO_V2,
@@ -231,7 +264,23 @@ bool os_proc_mem_read(struct os_proc_mem *out)
 
 int64_t os_proc_uptime_seconds(void)
 {
-#if defined(__APPLE__)
+#if defined(_WIN32)
+    FILETIME created, exited, kernel, user, now;
+    if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel,
+                         &user))
+        return -1;
+    GetSystemTimeAsFileTime(&now);
+    ULARGE_INTEGER created_ticks;
+    ULARGE_INTEGER now_ticks;
+    created_ticks.LowPart = created.dwLowDateTime;
+    created_ticks.HighPart = created.dwHighDateTime;
+    now_ticks.LowPart = now.dwLowDateTime;
+    now_ticks.HighPart = now.dwHighDateTime;
+    if (now_ticks.QuadPart < created_ticks.QuadPart)
+        return 0;
+    return (int64_t)((now_ticks.QuadPart - created_ticks.QuadPart) /
+                     UINT64_C(10000000));
+#elif defined(__APPLE__)
     struct proc_bsdinfo info;
     int read = proc_pidinfo(getpid(), PROC_PIDTBSDINFO, 0, &info,
                             (int)sizeof(info));
@@ -292,7 +341,22 @@ bool os_proc_exe_path(char *buf, size_t n)
     if (!buf || n == 0)
         return false; // raw-return-ok:null-arg
 
-#if defined(__APPLE__)
+#if defined(_WIN32)
+    wchar_t wide[32768];
+    DWORD length = GetModuleFileNameW(NULL, wide,
+                                     (DWORD)(sizeof(wide) / sizeof(wide[0])));
+    if (length == 0 || length >= sizeof(wide) / sizeof(wide[0]))
+        return false;
+    int required = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide,
+                                       (int)length, NULL, 0, NULL, NULL);
+    if (required <= 0 || (size_t)required >= n)
+        return false;
+    if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, (int)length,
+                            buf, required, NULL, NULL) != required)
+        return false;
+    buf[required] = '\0';
+    return true;
+#elif defined(__APPLE__)
     uint32_t size = n > UINT32_MAX ? UINT32_MAX : (uint32_t)n;
     if (_NSGetExecutablePath(buf, &size) != 0)
         return false;
@@ -323,7 +387,33 @@ bool os_proc_cmdline_has_token(const char *token)
     if (!token || !*token)
         return false; // raw-return-ok:null-arg
 
-#if defined(__APPLE__)
+#if defined(_WIN32)
+    int wide_token_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                             token, -1, NULL, 0);
+    if (wide_token_len <= 0)
+        return false;
+    wchar_t *wide_token = malloc((size_t)wide_token_len * sizeof(*wide_token));
+    if (!wide_token)
+        return false;
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, token, -1,
+                            wide_token, wide_token_len) != wide_token_len) {
+        free(wide_token);
+        return false;
+    }
+    int argc = 0;
+    wchar_t **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    bool found = false;
+    for (int i = 0; argv && i < argc; i++) {
+        if (wcscmp(argv[i], wide_token) == 0) {
+            found = true;
+            break;
+        }
+    }
+    if (argv)
+        LocalFree(argv);
+    free(wide_token);
+    return found;
+#elif defined(__APPLE__)
     int argc = *_NSGetArgc();
     char **argv = *_NSGetArgv();
     for (int i = 0; argv && i < argc; i++) {
@@ -360,7 +450,13 @@ bool os_proc_open_fd_count(size_t *out)
 {
     if (!out)
         return false; // raw-return-ok:null-arg
-#if defined(__APPLE__)
+#if defined(_WIN32)
+    DWORD handles = 0;
+    if (!GetProcessHandleCount(GetCurrentProcess(), &handles))
+        return false; // raw-return-ok:platform-cannot-answer
+    *out = (size_t)handles;
+    return true;
+#elif defined(__APPLE__)
     int bytes = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, NULL, 0);
     if (bytes <= 0)
         return false; // raw-return-ok:platform-cannot-answer
