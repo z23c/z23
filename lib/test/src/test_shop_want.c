@@ -437,6 +437,7 @@ static int shop_want_validation(void)
     static const char *const CRITERIA =
         "a CSV of every ZCL block hash 0..100, sha3-verified";
     struct json_value input;
+    struct zcl_command_reply reply;
 
     sw_post_input_ex(&input, dir, "abcd", 500000, CRITERIA,
                      SW_NOW + 86400LL, false);
@@ -479,6 +480,59 @@ static int shop_want_validation(void)
              sw_post_refused_with(&input, "BAD_LIFETIME"));
     json_free(&input);
 
+    /* Issuance anchor: the window caps above are relative to the
+     * document's own issued stamp, so a caller-chosen epoch would float
+     * an arbitrarily long open row past them all. Same node-clock
+     * anchoring fulfillment claims use; honored because both stamps are
+     * otherwise signed truth once sealed. */
+    json_init(&input);
+    json_set_object(&input);
+    (void)json_push_kv_str(&input, "datadir", dir);
+    (void)json_push_kv_str(&input, "buyer_secret", secret);
+    (void)json_push_kv_int(&input, "amount_zatoshi", 500000);
+    (void)json_push_kv_str(&input, "criteria", CRITERIA);
+    (void)json_push_kv_int(&input, "issued_unix", SW_NOW + 3600LL);
+    (void)json_push_kv_int(&input, "expires_unix",
+                           SW_NOW + 3600LL + 86400LL);
+    (void)json_push_kv_int(&input, "now_unix", SW_NOW);
+    SW_CHECK("a future-dated issuance is ISSUED_TIME_SKEW",
+             sw_post_refused_with(&input, "ISSUED_TIME_SKEW"));
+    json_free(&input);
+
+    json_init(&input);
+    json_set_object(&input);
+    (void)json_push_kv_str(&input, "datadir", dir);
+    (void)json_push_kv_str(&input, "buyer_secret", secret);
+    (void)json_push_kv_int(&input, "amount_zatoshi", 500000);
+    (void)json_push_kv_str(&input, "criteria", CRITERIA);
+    (void)json_push_kv_int(&input, "issued_unix", SW_NOW - 3600LL);
+    (void)json_push_kv_int(&input, "expires_unix",
+                           SW_NOW - 3600LL + 86400LL);
+    (void)json_push_kv_int(&input, "now_unix", SW_NOW);
+    SW_CHECK("a backdated issuance is ISSUED_TIME_SKEW too",
+             sw_post_refused_with(&input, "ISSUED_TIME_SKEW"));
+    json_free(&input);
+
+    /* Inside the tolerance the document signs and persists normally —
+     * the boundary has a live side, not only refusals. */
+    SW_CHECK("fixture node.db", sw_boot_db(dir));
+    json_init(&input);
+    json_set_object(&input);
+    (void)json_push_kv_str(&input, "datadir", dir);
+    (void)json_push_kv_str(&input, "buyer_secret", secret);
+    (void)json_push_kv_int(&input, "amount_zatoshi", 500000);
+    (void)json_push_kv_str(&input, "criteria", CRITERIA);
+    (void)json_push_kv_int(&input, "issued_unix", SW_NOW + 60LL);
+    (void)json_push_kv_int(&input, "expires_unix",
+                           SW_NOW + 60LL + 86400LL);
+    (void)json_push_kv_int(&input, "now_unix", SW_NOW);
+    (void)json_push_kv_bool(&input, "confirm", true);
+    sw_call(zcl_native_handle_shop_want_post, &input, &reply);
+    SW_CHECK("an issuance inside the tolerance posts",
+             reply.status == ZCL_COMMAND_STATUS_PASSED);
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+
     sw_post_input_ex(&input, dir, secret, 500000, CRITERIA,
                      SW_NOW + 86400LL, false);
     (void)json_push_kv_str(&input, "spec_hash", "zz");
@@ -493,7 +547,6 @@ static int shop_want_validation(void)
     sw_post_input_ex(&input, dir, secret, 500000, CRITERIA,
                      SW_NOW + 86400LL, true);
     (void)json_push_kv_str(&input, "spec_hash", spec);
-    struct zcl_command_reply reply;
     sw_call(zcl_native_handle_shop_want_post, &input, &reply);
     SW_CHECK("a spec-committed want posts",
              reply.status == ZCL_COMMAND_STATUS_PASSED);

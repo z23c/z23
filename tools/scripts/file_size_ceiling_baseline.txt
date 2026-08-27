@@ -26,7 +26,7 @@ app/controllers/src/api_controller_routes.c 834 # market-moderation dynamic rout
 app/controllers/src/file_market_controller.c 919 # market-moderation RPCs (split seam: moderation handlers -> market_moderation_native_handler.c)
 app/controllers/src/name_controller.c 1017
 app/controllers/src/swap_controller.c 1053 # atomic-swap money-shape guard (ADR-0009; split seam: settlement helpers)
-app/controllers/src/shop_native_want.c 917 # buyer want-ads: 5 leaves (post/list/status/cancel/review), sign+store controller (split seam: model helpers -> models/shop_want.c); +6 = the compile-time clock fork in shw_now (mirrors shf_now; no runtime env valve)
+app/controllers/src/shop_native_want.c 932 # buyer want-ads: 5 leaves (post/list/status/cancel/review), sign+store controller (split seam: model helpers -> models/shop_want.c); +6 = compile-time clock fork in shw_now; +9 = ISSUED_TIME_SKEW node-clock anchor in shw_build_want
 app/jobs/src/reducer_frontier.c 801
 app/jobs/src/reducer_frontier_replay.c 806
 app/jobs/src/tip_finalize_stage.c 809

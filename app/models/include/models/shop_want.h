@@ -76,8 +76,11 @@
 
 /* A want is a standing advertisement, not a 60-second live sign: capped
  * structurally at 30 days — a buyer that still wants re-issues with a
- * fresh nonce rather than extending. */
+ * fresh nonce rather than extending. The 30-day window only means
+ * something against a real clock, so issuance must sit within this much
+ * of the posting node's wall time (same anchor fulfillment claims use). */
 #define SHOP_WANT_MAX_LIFETIME_SECS (30LL * 24LL * 60LL * 60LL)
+#define SHOP_WANT_ISSUED_SKEW_SECS 300
 
 /* Rows fetched for one board query (the zswap yardsale cap's equivalent). */
 #define SHOP_WANT_QUERY_CAP 64u

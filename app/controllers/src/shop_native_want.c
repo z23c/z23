@@ -396,6 +396,21 @@ static bool shw_build_want(const struct zcl_command_request *request,
                  "nonce instead of extending", "expires_unix");
         return false;
     }
+    /* The relative cap above is anchored to the document's own issued
+     * stamp; if that stamp is the caller's invention the whole window
+     * floats — issued = now+10y would mint a decade-open row while every
+     * relative check passes. Anchor issuance to THIS node's clock before
+     * signing, exactly as fulfillment claims are checked by shf_issued_fresh. */
+    int64_t issued_skew = w->issued_unix > now_unix
+                              ? w->issued_unix - now_unix
+                              : now_unix - w->issued_unix;
+    if (issued_skew > SHOP_WANT_ISSUED_SKEW_SECS) {
+        shw_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                 "ISSUED_TIME_SKEW", "validate",
+                 "a new want's issued_unix must be within 300 seconds of "
+                 "the node clock", "issued_unix");
+        return false;
+    }
 
     /* The secret enters only once the document is known-valid, so no
      * early return above can strand it uncleansed on the stack. */
