@@ -81,6 +81,8 @@ package registry            PASS  217 sources; one host sandbox selected
 SIMD divergence self-test   PASS
 remote ship transaction     PASS
 inventory/time focused set  PASS  12/12 groups; groups_failed=0; self_skips=0
+final lint                   PASS  157/157 gates
+final cold registered suite PASS  966/966 eligible groups; groups_failed=0
 ```
 
 The one lint refusal was `swap_controller.c` growing from its 1,053-line
@@ -93,10 +95,14 @@ The incoming focused set was observed at `2026-08-27T09:51:32Z`
 the snapshot installer and descriptor-bound launcher. macOS behavior remains
 fail-closed but is not claimed as runtime-qualified without a macOS host.
 
+The final lint and cold registered suite completed at `2026-08-27T11:00:49Z`
+(`2026-08-27T07:00:49-04:00`). The canonical runner gated nine
+parameter-file-heavy groups and reported 20 explicit stress/live-fixture skip
+markers; every eligible group passed without an unobserved environment.
+
 ## Remaining acceptance
 
-The final committed source identity still requires the complete local release
-suite, immutable candidate build, process qualification on each host, and
-four-way verified-tip agreement. Node 4 requires copy-first protection before
-its one-way schema migration. No wallet or canonical database surgery is part
-of this procedure.
+The committed source still requires an immutable candidate build, process
+qualification on each host, and four-way verified-tip agreement. Node 4
+requires copy-first protection before its one-way schema migration. No wallet
+or canonical database surgery is part of this procedure.
