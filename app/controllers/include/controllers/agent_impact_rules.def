@@ -86,6 +86,7 @@ AGENT_IMPACT_RULE("lib/crypto/src/hmac_sha3.c|lib/crypto/include/crypto/hmac_sha
  * either transform, the dispatch, or the hw_profile reporting of the live
  * transform must re-run the differential oracle + the bench teeth. */
 AGENT_IMPACT_RULE("lib/crypto/src/sha256.c|lib/crypto/include/crypto/sha256.h|lib/test/src/test_sha256_isa_parity.c|lib/util/src/hw_profile.c", "sha256_isa_parity crypto crypto_perf_selftest hw_profile make_lint_gates")
+AGENT_IMPACT_RULE("lib/util/src/crc32c.c|lib/util/include/util/crc32c.h|lib/test/src/test_arm_hw_tiers.c", "arm_hw_tiers event_log make_lint_gates")
 AGENT_IMPACT_RULE("lib/test/src/test_sprout_groth16_kat.c", "sprout_groth16_kat sprout_phgr13_kat sapling consensus_parity make_lint_gates")
 AGENT_IMPACT_RULE("lib/test/src/test_transaction_wire_evidence.c", "transaction_wire_evidence test_api sapling script multisig consensus_parity make_lint_gates")
 AGENT_IMPACT_RULE("lib/crypto/src/x25519_safe.c|lib/crypto/include/crypto/x25519_safe.h|lib/noise/src/noise_handshake.c|lib/noise/include/noise/noise_handshake.h|lib/noise/src/session_transport.c|lib/noise/include/noise/session_transport.h|lib/test/src/test_noise_transport.c", "x25519_safe noise_nk_handshake noise_xx_handshake session_transport crypto make_lint_gates")
