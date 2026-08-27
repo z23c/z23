@@ -1641,4 +1641,4 @@ AGENT_IMPACT_RULE("lib/test/src/test_block_prefetch.c|lib/test/src/test_metavers
 /* The yardsale buyer's chain-content port: the prevout service, the
  * controller ingest that consumes it, and the app lane that exercises
  * all of it move together. */
-AGENT_IMPACT_RULE("app/services/src/yardsale_prevout_service.c|app/services/include/services/yardsale_prevout_service.h|app/controllers/src/yardsale_controller.c|app/controllers/include/controllers/yardsale_controller.h|lib/test/src/test_yardsale_app.c", "yardsale_app zswap_ceremony dev_platform make_lint_gates")
+AGENT_IMPACT_RULE("app/services/src/yardsale_prevout_service.c|app/services/include/services/yardsale_prevout_service.h|app/controllers/src/yardsale_controller.c|app/controllers/include/controllers/yardsale_controller.h|app/models/src/zslp_ledger.c|app/models/include/models/zslp_ledger.h|config/src/boot_msg_callbacks.c|lib/test/src/test_yardsale_app.c", "yardsale_app zswap_ceremony dev_platform make_lint_gates")

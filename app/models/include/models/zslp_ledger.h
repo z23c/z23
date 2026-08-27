@@ -151,6 +151,21 @@ int64_t zslp_ledger_wallet_address_count(struct node_db *ndb);
 int64_t zslp_ledger_count(struct node_db *ndb);
 int64_t zslp_ledger_unspent_count(struct node_db *ndb);
 
+/* Exact strict-ledger verdict for a proposed token outpoint. The lookup is
+ * intentionally narrower than a balance: a swap buyer must prove that this
+ * one outpoint is the one valid TOKEN row it was promised, with the exact
+ * token and amount, and that no canonical spend has consumed it. */
+enum zslp_ledger_outpoint_state {
+    ZSLP_LEDGER_OUTPOINT_ERROR = 0,
+    ZSLP_LEDGER_OUTPOINT_ABSENT,
+    ZSLP_LEDGER_OUTPOINT_MISMATCH,
+    ZSLP_LEDGER_OUTPOINT_SPENT,
+    ZSLP_LEDGER_OUTPOINT_UNSPENT_TOKEN,
+};
+enum zslp_ledger_outpoint_state zslp_ledger_token_outpoint_state(
+    struct node_db *ndb, const uint8_t txid[32], uint32_t vout,
+    const uint8_t token_id[32], uint64_t amount);
+
 /* Validator-only model seam. zslp_validity is the sole production caller. */
 bool zslp_ledger_record_valid_output(struct node_db *ndb,
     const uint8_t token_id[32], const uint8_t txid[32], int32_t vout,

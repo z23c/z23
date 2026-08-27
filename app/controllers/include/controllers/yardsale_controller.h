@@ -79,14 +79,17 @@ bool yardsale_broadcast_default(const struct transaction *tx, void *ctx);
 /* Chain-content port: fetch a CONFIRMED transaction body by txid (internal
  * byte order) so the buyer can re-classify the seller's claimed token
  * input before signing — the ad's token leg is a claim, and only this
- * port checks it against the chain the buyer actually has. Implemented by
- * the prevout service over node.db + the active chain; tests inject a
- * fake. The result type carries why a body is not confirmed here (E2:
- * services return struct zcl_result, never bare bool). Fail-closed: while
- * unwired, every partial ingest is refused (nothing is signed, nothing is
- * broadcast). */
+ * port checks it against the chain and strict token ledger the buyer actually
+ * has. Implemented by the prevout service over node.db + the active chain;
+ * controller tests inject a contract-equivalent fake and service tests call
+ * the production implementation directly. The result type carries why a body
+ * is not confirmed here (E2: services return struct zcl_result, never bare
+ * bool). Fail-closed: while unwired, every partial ingest is refused (nothing
+ * is signed or broadcast). */
 typedef struct zcl_result (*yardsale_prevout_fetch_fn)(
-    void *ctx, const uint8_t txid[32], struct transaction *tx_out);
+    void *ctx, const uint8_t txid[32], uint32_t vout,
+    const uint8_t token_id[32], uint64_t token_amount,
+    struct transaction *tx_out);
 void yardsale_ceremony_set_prevout_fetch(yardsale_prevout_fetch_fn fn,
                                          void *ctx);
 

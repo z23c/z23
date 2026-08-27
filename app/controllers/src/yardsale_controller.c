@@ -565,7 +565,9 @@ int yardsale_ceremony_partial_ingest(const uint8_t *wire, size_t wire_len,
     memset(&token_tx, 0, sizeof(token_tx));
     struct zcl_result fetched =
         g_prevout_fetch(g_prevout_fetch_ctx,
-                        partial.seller.token_input.txid, &token_tx);
+                        partial.seller.token_input.txid,
+                        partial.seller.token_input.vout, buy.ad.token_id,
+                        buy.ad.token_amount, &token_tx);
     bool token_ok = fetched.ok &&
         partial.seller.token_input.vout < token_tx.num_vout;
     const struct tx_out *claimed =

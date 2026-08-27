@@ -541,6 +541,8 @@ void boot_wire_zswap_ceremony(struct msg_processor *mp,
     prevout_view.state = svc ? svc->state : NULL;
     prevout_view.node_db = svc ? svc->node_db : NULL;
     prevout_view.datadir = svc ? svc->datadir : NULL;
+    prevout_view.read_block = NULL;
+    prevout_view.read_block_ctx = NULL;
     yardsale_ceremony_set_prevout_fetch(yardsale_prevout_fetch_confirmed,
                                         &prevout_view);
 }
