@@ -120,7 +120,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#if defined(__linux__)
 #include <sys/syscall.h>
+#endif
 #include <sys/types.h>
 #include <sys/resource.h>
 #include <sys/wait.h>

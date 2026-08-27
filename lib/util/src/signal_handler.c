@@ -71,7 +71,8 @@ void signal_handler_clear_crash_hook(void)
     g_crash_hook_running = 0;
 }
 
-void signal_handler_run_crash_hook(int sig, siginfo_t *info, void *ucontext)
+void signal_handler_run_crash_hook(int sig, zcl_signal_info_t *info,
+                                   void *ucontext)
 {
     signal_handler_crash_hook_fn fn = g_crash_hook;
     if (!fn || g_crash_hook_running) return;

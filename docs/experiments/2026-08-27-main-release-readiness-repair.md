@@ -281,3 +281,22 @@ test_dev_platform groups_failed=0 self_skips=0
 check-zcode-package-registry PASS (10 roots rederived)
 lint-fast PASS
 ```
+
+## Windows portability integration
+
+The concurrent Windows portability batch was integrated after repairing three
+release blockers: the confined platform package retained only deterministic
+probes, its exact package row was re-derived, and the socket compatibility
+header became self-contained for POSIX consumers. Build and shell entry points
+use Git's `text eol=lf` policy so Windows checkout configuration cannot add
+carriage returns to executable scripts.
+
+Measured at `2026-08-27T19:54:34-04:00`
+(`2026-08-27T23:54:34Z`):
+
+```text
+test_dev_platform groups_failed=0 self_skips=0
+test_zcode_package_registry groups_failed=0 self_skips=0
+check-zcode-package-registry PASS (10 roots rederived)
+lint-fast PASS
+```
