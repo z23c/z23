@@ -31,7 +31,6 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <immintrin.h>
 
 #if defined(__x86_64__) || defined(_M_X64)
 #include "mont_adx.h"
@@ -89,9 +88,6 @@ const char *fr_accel_implementation(void)
             : "BMI2+ADX (MULX+ADCX+ADOX)";
     return "portable (__int128)";
 }
-
-/* 52-bit radix mask for AVX-512 IFMA */
-#define RADIX52_MASK 0x000FFFFFFFFFFFFFULL
 
 /* ================================================================
  * Tier 3: Portable Montgomery multiply (__int128)

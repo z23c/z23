@@ -229,7 +229,7 @@ struct zcl_result zcode_goal_context_select(
                 (void)snprintf(out->why, sizeof(out->why), "%s",
                                out->candidates[0].why);
             else
-                (void)snprintf(out->why, sizeof(out->why), "%s:%s",
+                (void)snprintf(out->why, sizeof(out->why), "%.31s:%.31s",
                                out->candidates[0].matched_token,
                                out->candidates[0].why);
         }

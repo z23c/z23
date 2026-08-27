@@ -1,3 +1,5 @@
+<!-- Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. -->
+
 # Z23 agent entry point
 
 This is the model-neutral operating contract for coding agents. Read it before
@@ -127,7 +129,7 @@ catalogs from the binary instead of copying counts into prose.
 3. Build the public binary:
 
    ```bash
-   make -j"$(nproc)"
+   make -j"$(getconf _NPROCESSORS_ONLN)"
    ```
 
 4. Ask the built binary for the current command tree and source map:
@@ -147,8 +149,8 @@ catalogs from the binary instead of copying counts into prose.
 
    ```bash
    make t-list
-   make -j"$(nproc)" t-fast ONLY=<substring>
-   make -j"$(nproc)" test-parallel TEST_PARALLEL_ARGS=--no-cache
+   make -j"$(getconf _NPROCESSORS_ONLN)" t-fast ONLY=<substring>
+   make -j"$(getconf _NPROCESSORS_ONLN)" test-parallel TEST_PARALLEL_ARGS=--no-cache
    ```
 
    `ONLY=` is mandatory for `t-fast`. Do not invoke `test_zcl` directly.
@@ -158,6 +160,36 @@ catalogs from the binary instead of copying counts into prose.
 <!-- claim: symbol-present discover.schema config/commands/root.def # live schema leaf -->
 <!-- claim: symbol-present code.map config/commands/code.def # live source-map leaf -->
 <!-- claim: file-present docs/API_REFERENCE.md # generated command catalog -->
+
+## Verified platform baseline
+
+The public node has native Linux and macOS build paths. macOS does not use a
+Linux virtual machine. On 2026-08-26, `make z23` completed on an arm64
+`Mac16,10` running macOS 26.0.1 with Apple Clang 17.0.0. The resulting Mach-O
+executable passed its dependency audit with Apple system libraries and
+frameworks as its only dynamic dependencies. The registered crypto group
+passed 3/3 groups, including secp256k1, Ed25519, Equihash, BLS12-381, and hash
+coverage. Native RNG, thread QoS, binary A/B promotion, sandbox capability,
+backtrace capability, process introspection, and the 46-case SQLite group also
+passed their platform contracts. A fresh isolated test-lane datadir reached
+`phase=serving`, `stage=ready`, height 0 with RPC bound, then completed a
+graceful shutdown. This is startup evidence, not chain-sync acceptance.
+The optimized ROM-seed background-scan regression also passed after bounding
+its worker-stack use; the artifact snapshot uses checked allocation instead of
+a roughly 1 MiB automatic array.
+The exact 10-package C23 Commons root and dependency-DAG projection, including
+all 217 monolith-owned package sources, also passed on macOS. Mach-O fixture
+builds use a fixed nonzero UUID and fixed-identifier ad-hoc signature; publisher
+and independent-checkout binaries execute and hash identically. Package builds
+that require Linux full isolation continue to refuse on macOS.
+
+The macOS capability boundary is explicit: the public node, wallet, P2P, RPC,
+database, and cryptography build natively; embedded full Tor, Linux Landlock
+and seccomp confinement, signal-context self-backtraces, the inotify developer
+watcher, and `O_TMPFILE` consensus snapshot export are currently unavailable.
+Those paths refuse or report unavailable instead of claiming Linux guarantees.
+Only arm64 macOS is measured; Intel macOS remains unverified. Build and test
+instructions are in [`docs/GETTING_STARTED.md`](./docs/GETTING_STARTED.md).
 
 ## Orient before editing
 

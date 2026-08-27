@@ -27,6 +27,10 @@ mapfile -t monolith_sources < <(
     make -s --no-print-directory print-zcode-monolith-lib-sources |
         sed -n '/^lib\/.*\/src\/.*\.c$/p'
 )
+platform_alternatives=(
+    lib/platform/src/os_sandbox_linux.c
+    lib/platform/src/os_sandbox_stub.c
+)
 
 if (( ${#package_sources[@]} == 0 || ${#monolith_sources[@]} == 0 )); then
     echo "check-zcode-package-registry: FAIL — empty package or monolith source projection" >&2
@@ -34,6 +38,9 @@ if (( ${#package_sources[@]} == 0 || ${#monolith_sources[@]} == 0 )); then
 fi
 
 for source in "${package_sources[@]}"; do
+    for alternative in "${platform_alternatives[@]}"; do
+        [[ "$source" == "$alternative" ]] && continue 2
+    done
     count=0
     for compiled in "${monolith_sources[@]}"; do
         [[ "$compiled" == "$source" ]] && ((count += 1))
@@ -43,6 +50,17 @@ for source in "${package_sources[@]}"; do
         exit 1
     fi
 done
+
+platform_count=0
+for alternative in "${platform_alternatives[@]}"; do
+    for compiled in "${monolith_sources[@]}"; do
+        [[ "$compiled" == "$alternative" ]] && ((platform_count += 1))
+    done
+done
+if (( platform_count != 1 )); then
+    echo "check-zcode-package-registry: FAIL — platform sandbox alternatives appear $platform_count times in LIB_SRCS" >&2
+    exit 1
+fi
 
 codec_consumers=(
     lib/vcs/src/package_release.c
@@ -62,4 +80,5 @@ if git grep -n -E 'vcs_(wr|rd)_u(16|32|64)le|#include "vcs_priv.h"' -- \
 fi
 
 echo "zcode package registry: ${#package_sources[@]} authoritative package sources occur exactly once in monolith LIB_SRCS"
+echo "zcode package registry: exactly one host sandbox implementation is selected"
 echo "zcode package registry: release, recipe and lock wires use codec/cursor.h exclusively"

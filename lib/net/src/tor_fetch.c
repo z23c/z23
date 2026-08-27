@@ -3,6 +3,7 @@
  * isolated from the embedded Tor thread and service-publication lifecycle. */
 
 #define _DEFAULT_SOURCE
+#include "base/compiler.h"
 #include "net/tor_integration.h"
 #include "support/cleanse.h"
 #include "util/log_macros.h"
@@ -15,7 +16,7 @@
 
 extern int dynhost_client_fetch(const char *, uint16_t, const char *,
     void (*)(int, const uint8_t *, size_t, void *), void *, int)
-    __attribute__((weak));
+    ZCL_WEAK_IMPORT;
 
 int tor_integration_fetch_onion(const char *onion_address,
                                 const char *path,

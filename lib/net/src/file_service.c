@@ -7,6 +7,9 @@
  * overhead visible to observers, wire-speed on gigabit links. */
 
 #include "platform/time_compat.h"
+#include "platform/thread_compat.h"
+#include "platform/file_sync.h"
+#include "platform/barrier.h"
 #include "net/net_runtime_port.h"
 #include "net/file_manifest.h"
 #include "net/file_market_delivery.h"
@@ -63,7 +66,7 @@ static void fs_join_thread_bounded(pthread_t thread,
     int rc;
 
     fs_join_deadline_from_now(&deadline, timeout_sec);
-    rc = pthread_timedjoin_np(thread, NULL, &deadline);
+    rc = platform_thread_join_until(thread, NULL, &deadline);
     if (rc == 0)
         return;
 
@@ -2062,14 +2065,14 @@ static void range_worker_socket_close(struct range_worker *w, int fd)
 #ifdef ZCL_TESTING
 struct fs_test_range_close_race {
     struct range_worker *worker;
-    pthread_barrier_t *barrier;
+    zcl_barrier_t *barrier;
     int fd;
 };
 
 static void *fs_test_range_close_race_fn(void *opaque)
 {
     struct fs_test_range_close_race *race = opaque;
-    (void)pthread_barrier_wait(race->barrier);
+    (void)zcl_barrier_wait(race->barrier);
     range_worker_socket_close(race->worker, race->fd);
     return NULL;
 }
@@ -2161,8 +2164,8 @@ bool fs_test_range_worker_socket_lifecycle(void)
     atomic_store(&w.cancel, false);
     w.fd = -1;
     ok = ok && socketpair(AF_UNIX, SOCK_STREAM, 0, race_pair) == 0;
-    pthread_barrier_t barrier;
-    bool barrier_initialized = ok && pthread_barrier_init(&barrier, NULL, 2) == 0;
+    zcl_barrier_t barrier;
+    bool barrier_initialized = ok && zcl_barrier_init(&barrier, 2) == 0;
     pthread_t closer;
     bool closer_started = false;
     struct fs_test_range_close_race race = {
@@ -2180,7 +2183,7 @@ bool fs_test_range_worker_socket_lifecycle(void)
         ok = closer_started;
     }
     if (closer_started) {
-        (void)pthread_barrier_wait(&barrier);
+        (void)zcl_barrier_wait(&barrier);
         range_worker_cancel(&w);
         pthread_join(closer, NULL);
         race_pair[0] = -1;
@@ -2190,7 +2193,7 @@ bool fs_test_range_worker_socket_lifecycle(void)
         race_pair[0] = -1;
     }
     if (barrier_initialized)
-        pthread_barrier_destroy(&barrier);
+        zcl_barrier_destroy(&barrier);
     if (race_pair[0] >= 0)
         close(race_pair[0]);
     if (race_pair[1] >= 0)
@@ -2413,7 +2416,7 @@ static void *range_worker_fn(void *arg)
                 continue; /* skip — don't count failed write as progress */
             }
             /* Sync to disk so crash can't lose this chunk */
-            fdatasync(bfd);
+            platform_data_sync(bfd);
             close(bfd);
             atomic_fetch_add(&w->chunks_ok, 1);
         } else {
@@ -2875,7 +2878,7 @@ bool fs_client_sync(const char *peer_addr, uint16_t port,
             if (bfd >= 0) {
                 ssize_t written = pwrite(bfd, buf, sz,
                                          (off_t)chunks[ci].offset);
-                fdatasync(bfd);
+                platform_data_sync(bfd);
                 close(bfd);
                 if (written == (ssize_t)sz) {
                     recovered++;

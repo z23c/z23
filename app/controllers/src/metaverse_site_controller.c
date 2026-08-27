@@ -132,7 +132,7 @@ static bool ms_property_page(const char *datadir, enum metaverse_kind kind,
         switch (st) {
         case ZCL_NODE_DB_RO_ABSENT:
             snprintf(source_reason, sizeof(source_reason),
-                     "no node.db at %s; chain-derived property registries "
+                     "no node.db at %.80s; chain-derived property registries "
                      "have not been folded and cannot be reported as empty",
                      db_path);
             break;
@@ -168,7 +168,8 @@ static bool ms_property_page(const char *datadir, enum metaverse_kind kind,
     r = property_catalog_list_with_sources(datadir, &q, &sources, page);
     zcl_native_node_db_close_readonly(&sql, &ndb);
     if (!r.ok) {
-        snprintf(err, err_cap, "the property catalog projection failed: %s",
+        snprintf(err, err_cap,
+                 "the property catalog projection failed: %.200s",
                  r.message[0] ? r.message : "unknown");
         property_catalog_page_free(page);
         LOG_ERROR(MS_LOG, "catalog projection failed for %s: %s", datadir,

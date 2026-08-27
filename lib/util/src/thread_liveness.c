@@ -100,6 +100,7 @@ static bool tl_on_respawn(struct liveness_contract *self)
         goto out;
 
     if (atomic_load(&c->worker_tid_set)) {
+#if defined(__linux__)
         int jr = pthread_tryjoin_np(c->worker_tid, NULL);
         if (jr == EBUSY) {
             /* False EXITED — the worker is still terminating. Abort: do NOT
@@ -111,6 +112,14 @@ static bool tl_on_respawn(struct liveness_contract *self)
         }
         /* jr == 0 (reaped) or ESRCH/EINVAL (already gone): worker is dead. */
         atomic_store(&c->worker_tid_set, false);
+#else
+        /* This restart contract requires a non-blocking join to prove the old
+         * worker is gone before creating its successor. Darwin has no such
+         * primitive, so preserve single-worker ownership and leave the child
+         * EXITED for the operator-visible blocker. */
+        atomic_store(&self->worker_state, SUPERVISOR_WORKER_EXITED);
+        goto out;
+#endif
     }
 
     pthread_t tid;

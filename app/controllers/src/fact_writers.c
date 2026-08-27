@@ -350,6 +350,9 @@ struct fw_paths {
 static bool fw_paths_push(struct fw_paths *ps, const char *p)
 {
     if (strncmp(p, "lib/test/", 9) == 0) return true;   /* fixtures excluded */
+    size_t path_len = strlen(p);
+    if (path_len >= FACT_PATH_MAX)
+        return false;
     if (ps->n == ps->cap) {
         size_t ncap = ps->cap ? ps->cap * 2 : 1024;
         char (*nb)[FACT_PATH_MAX] = zcl_realloc(ps->v, ncap * FACT_PATH_MAX,
@@ -358,7 +361,7 @@ static bool fw_paths_push(struct fw_paths *ps, const char *p)
         ps->v = nb;
         ps->cap = ncap;
     }
-    snprintf(ps->v[ps->n], FACT_PATH_MAX, "%s", p);
+    memcpy(ps->v[ps->n], p, path_len + 1);
     ps->n++;
     return true;
 }

@@ -396,10 +396,16 @@ void zcl_native_handle_wallet_recovery_restore(
         /* The commit input carries the datadir and the confirm flag ONLY.
          * Putting the phrase in a response body is how a wallet ends up in
          * a paste buffer. */
-        char commit[900];
-        (void)snprintf(commit, sizeof(commit),
-                       "{\"phrase\":\"<your words>\",\"datadir\":\"%s\","
-                       "\"confirm\":true}", datadir);
+        struct json_value commit_value;
+        json_init(&commit_value);
+        json_set_object(&commit_value);
+        (void)json_push_kv_str(&commit_value, "phrase", "<your words>");
+        (void)json_push_kv_str(&commit_value, "datadir", datadir);
+        (void)json_push_kv_bool(&commit_value, "confirm", true);
+        char commit[7000];
+        if (json_write(&commit_value, commit, sizeof(commit)) == 0)
+            snprintf(commit, sizeof(commit), "{\"error\":\"input too long\"}");
+        json_free(&commit_value);
         (void)json_push_kv_str(&reply->data, "stage", "plan");
         (void)json_push_kv_str(&reply->data, "action", "recovery-restore");
         (void)json_push_kv_bool(&reply->data, "committed", false);

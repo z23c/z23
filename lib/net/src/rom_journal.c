@@ -23,6 +23,7 @@
 
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
+#include "platform/file_sync.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -146,7 +147,7 @@ static struct rom_journal *rj_create_fresh(int fd,
         rom_journal_close(j);
         LOG_NULL(RJ_SUBSYS, "create: bitmap pwrite failed errno=%d", errno);
     }
-    if (fdatasync(fd) != 0) {
+    if (platform_data_sync(fd) != 0) {
         rom_journal_close(j);
         LOG_NULL(RJ_SUBSYS, "create: fdatasync failed errno=%d", errno);
     }
@@ -254,7 +255,7 @@ bool rom_journal_mark(struct rom_journal *j, uint32_t idx)
      * implies durable data (the caller fdatasync'd the .part first). */
     bool ok = pwrite(j->fd, &j->bitmap[byte], 1,
                      RJ_BITMAP_OFFSET + (off_t)byte) == 1 &&
-              fdatasync(j->fd) == 0;
+              platform_data_sync(j->fd) == 0;
     if (!ok) {
         j->bitmap[byte] &= (uint8_t)~bit; /* roll back the in-memory bit */
         pthread_mutex_unlock(&j->lock);

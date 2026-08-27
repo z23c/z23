@@ -209,11 +209,11 @@ bool stage_repair_quarantine_blocks_row(
     struct blocker_record rec;
     char reason[BLOCKER_REASON_MAX];
     snprintf(reason, sizeof(reason),
-             "runtime poisoned `blocks` row height=%lld hash=%s verdict=%s: "
-             "purged%s; height re-fetched via header sync + body_fetch, stages "
-             "revalidate", (long long)height, hex,
+             "poisoned blocks row height=%lld hash=%.64s verdict=%.40s; "
+             "purge%s; header sync and body_fetch will refetch it",
+             (long long)height, hex,
              row_verify_verdict_name(verdict),
-             purged ? "" : " FAILED (row remains, repair loop retries)");
+             purged ? "=ok" : "=failed (repair loop retries)");
     if (blocker_init(&rec, RUNTIME_ROW_QUARANTINE_BLOCKER_ID, "block_index",
                      BLOCKER_TRANSIENT, reason))
         (void)blocker_set(&rec);

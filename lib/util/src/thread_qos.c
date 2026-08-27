@@ -34,6 +34,10 @@
 #include <unistd.h>
 #include <errno.h>
 #include <string.h>
+#if defined(__APPLE__)
+#include <pthread.h>
+#include <sys/qos.h>
+#endif
 
 /* ioprio_set(2) argument encoding — kernel UAPI, not a glibc wrapper. */
 #ifndef IOPRIO_WHO_PROCESS
@@ -48,6 +52,18 @@
 
 bool zcl_thread_qos_background(void)
 {
+#if defined(__APPLE__)
+    int rc = pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0);
+    if (rc != 0) {
+        LOG_WARN("thread_qos", "background QoS denied: %s", strerror(rc));
+        return false;
+    }
+    uint64_t tid = 0;
+    (void)pthread_threadid_np(NULL, &tid);
+    LOG_INFO("thread_qos", "background QoS applied tid=%llu class=background",
+             (unsigned long long)tid);
+    return true;
+#else
     bool cpu_ok = true;
     bool io_ok = true;
 
@@ -82,4 +98,5 @@ bool zcl_thread_qos_background(void)
              io_ok ? "IOPRIO_CLASS_IDLE" : "unchanged");
 
     return cpu_ok && io_ok;
+#endif
 }

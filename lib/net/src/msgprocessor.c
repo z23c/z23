@@ -311,7 +311,7 @@ static void msg_block_intake_name_drop_blocker(uint64_t dropped_total)
                                   MSG_BLOCK_INTAKE_LOG_KEEPALIVE_SECS,
                                   &suppressed))
         return;
-    char reason[BLOCKER_REASON_MAX];
+    char reason[384];
     snprintf(reason, sizeof(reason),
              "block bodies received and DESTROYED because the %d-slot P2P "
              "intake ring was full: dropped=%llu cumulative. Every drop is a "

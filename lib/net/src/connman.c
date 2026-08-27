@@ -8,6 +8,7 @@
 
 #define _DEFAULT_SOURCE
 #include "platform/time_compat.h"
+#include "platform/thread_compat.h"
 #include "connman_internal.h"
 #include "net/connman.h"
 #include "net/v2_transport.h"
@@ -581,7 +582,10 @@ static bool onion_pass_claim(struct onion_pass_seen *seen, const char *host)
             return false;
     if (seen->n >= ONION_PASS_SEEN_MAX)
         return true;    /* over the ring: still fetch, just stop tracking */
-    snprintf(seen->host[seen->n], sizeof(seen->host[0]), "%s", host);
+    size_t host_len = strlen(host);
+    if (host_len >= sizeof(seen->host[0]))
+        return false;
+    memcpy(seen->host[seen->n], host, host_len + 1u);
     seen->n++;
     return true;
 }
@@ -2619,7 +2623,7 @@ static bool timed_join(pthread_t thread, int timeout_sec)
         return true;
     }
     ts.tv_sec += timeout_sec;
-    int rc = pthread_timedjoin_np(thread, NULL, &ts);
+    int rc = platform_thread_join_until(thread, NULL, &ts);
     if (rc == 0)
         return true;
     /* Retain ownership after the diagnostic deadline. The stage watchdog may

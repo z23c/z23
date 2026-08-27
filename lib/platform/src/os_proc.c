@@ -1,14 +1,22 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * os_proc — Linux implementation. See platform/os_proc.h for the contract
- * and the FreeBSD mapping (header comments only, no FreeBSD build here). */
+ * os_proc — Linux procfs and native Darwin process implementations. */
 
 #include "platform/os_proc.h"
 
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+#if defined(__APPLE__)
+#include <crt_externs.h>
+#include <libproc.h>
+#include <mach/mach.h>
+#include <mach-o/dyld.h>
+#include <sys/sysctl.h>
+#endif
 
 #define OS_PROC_CGROUP_ROOT "/sys/fs/cgroup"
 
@@ -42,6 +50,7 @@ static void os_proc_trim_newline(char *s)
 
 /* Read a single "Label: NNN kB" style line's value (in kB) from a
  * /proc/self/status-shaped file, returned as bytes. -1 if not found. */
+#if !defined(__APPLE__)
 static int64_t os_proc_status_field_bytes(const char *path, const char *label)
 {
     FILE *f = fopen(path, "r");
@@ -62,6 +71,7 @@ static int64_t os_proc_status_field_bytes(const char *path, const char *label)
     fclose(f);
     return result;
 }
+#endif
 
 /* ── cgroup v2 dir resolution + limit reads ──────────────────────── */
 
@@ -99,6 +109,7 @@ bool os_proc_cgroup_dir(char *out, size_t out_len)
     return ok;
 }
 
+#if !defined(__APPLE__)
 static int64_t os_proc_cgroup_limit_bytes(const char *dir, const char *name)
 {
     if (!dir || !name)
@@ -158,6 +169,7 @@ static void os_proc_meminfo(int64_t *total_bytes, int64_t *avail_bytes)
     }
     fclose(f);
 }
+#endif
 
 /* ── Public API ───────────────────────────────────────────────────── */
 
@@ -171,6 +183,28 @@ bool os_proc_mem_read(struct os_proc_mem *out)
         return true;
     }
 
+#if defined(__APPLE__)
+    struct rusage_info_v2 usage;
+    memset(&usage, 0, sizeof(usage));
+    if (proc_pid_rusage(getpid(), RUSAGE_INFO_V2,
+                        (rusage_info_t *)&usage) != 0)
+        return false;
+    out->rss_bytes = (int64_t)usage.ri_resident_size;
+    mach_task_basic_info_data_t basic;
+    mach_msg_type_number_t basic_count = MACH_TASK_BASIC_INFO_COUNT;
+    out->vsize_bytes = task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+        (task_info_t)&basic, &basic_count) == KERN_SUCCESS
+        ? (int64_t)basic.virtual_size : -1;
+    out->cgroup_current = -1;
+    out->cgroup_high = -1;
+    out->cgroup_max = -1;
+    uint64_t total = 0;
+    size_t total_size = sizeof(total);
+    out->sys_total_bytes = sysctlbyname("hw.memsize", &total, &total_size,
+                                       NULL, 0) == 0 ? (int64_t)total : -1;
+    out->sys_avail_bytes = -1;
+    return true;
+#else
     out->rss_bytes = os_proc_status_field_bytes("/proc/self/status", "VmRSS:");
     out->vsize_bytes = os_proc_status_field_bytes("/proc/self/status", "VmSize:");
 
@@ -188,10 +222,21 @@ bool os_proc_mem_read(struct os_proc_mem *out)
     os_proc_meminfo(&out->sys_total_bytes, &out->sys_avail_bytes);
 
     return out->rss_bytes >= 0;
+#endif
 }
 
 int64_t os_proc_uptime_seconds(void)
 {
+#if defined(__APPLE__)
+    struct proc_bsdinfo info;
+    int read = proc_pidinfo(getpid(), PROC_PIDTBSDINFO, 0, &info,
+                            (int)sizeof(info));
+    if (read != (int)sizeof(info))
+        return -1;
+    time_t now = time(NULL);
+    return now >= (time_t)info.pbi_start_tvsec
+        ? (int64_t)(now - (time_t)info.pbi_start_tvsec) : 0;
+#else
     /* System uptime */
     double sys_up = 0;
     FILE *f = fopen("/proc/uptime", "r");
@@ -235,6 +280,7 @@ int64_t os_proc_uptime_seconds(void)
     double proc_start_sec = (double)starttime / (double)clk;
     double age = sys_up - proc_start_sec;
     return age > 0 ? (int64_t)age : 0;
+#endif
 }
 
 bool os_proc_exe_path(char *buf, size_t n)
@@ -242,16 +288,30 @@ bool os_proc_exe_path(char *buf, size_t n)
     if (!buf || n == 0)
         return false; // raw-return-ok:null-arg
 
+#if defined(__APPLE__)
+    uint32_t size = n > UINT32_MAX ? UINT32_MAX : (uint32_t)n;
+    if (_NSGetExecutablePath(buf, &size) != 0)
+        return false;
+    char resolved[4096];
+    if (realpath(buf, resolved)) {
+        size_t len = strlen(resolved);
+        if (len >= n) return false;
+        memcpy(buf, resolved, len + 1u);
+    }
+    return true;
+#else
     ssize_t len = readlink("/proc/self/exe", buf, n - 1);
     if (len <= 0)
         return false; // raw-return-ok:optional-exe-path-unavailable
     buf[len] = '\0';
     return true;
+#endif
 }
 
 FILE *os_proc_open_self_exe(void)
 {
-    return fopen("/proc/self/exe", "rb");
+    char path[4096];
+    return os_proc_exe_path(path, sizeof(path)) ? fopen(path, "rb") : NULL;
 }
 
 bool os_proc_cmdline_has_token(const char *token)
@@ -259,6 +319,15 @@ bool os_proc_cmdline_has_token(const char *token)
     if (!token || !*token)
         return false; // raw-return-ok:null-arg
 
+#if defined(__APPLE__)
+    int argc = *_NSGetArgc();
+    char **argv = *_NSGetArgv();
+    for (int i = 0; argv && i < argc; i++) {
+        if (argv[i] && strcmp(argv[i], token) == 0)
+            return true;
+    }
+    return false;
+#else
     FILE *f = fopen("/proc/self/cmdline", "rb");
     if (!f)
         return false; // raw-return-ok:optional-cmdline-unavailable
@@ -280,4 +349,5 @@ bool os_proc_cmdline_has_token(const char *token)
         }
     }
     return false;
+#endif
 }

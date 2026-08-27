@@ -172,7 +172,7 @@ static void node_health_chain_advance_reason(
         return;
     }
     if (decision->blocker[0] != '\0') {
-        snprintf(out, out_len, "chain_advance_%s", decision->blocker);
+        snprintf(out, out_len, "chain_advance_%.100s", decision->blocker);
         return;
     }
     if (decision->local_height >= 0 && decision->target_height >= 0 &&
@@ -182,7 +182,7 @@ static void node_health_chain_advance_reason(
         return;
     }
     if (decision->reason[0] != '\0') {
-        snprintf(out, out_len, "chain_advance_%s", decision->reason);
+        snprintf(out, out_len, "chain_advance_%.100s", decision->reason);
         return;
     }
     snprintf(out, out_len, "chain_advance_%s",

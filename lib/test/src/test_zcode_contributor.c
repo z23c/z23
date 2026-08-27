@@ -1621,7 +1621,7 @@ static int t_binding_v2_rotate(void)
     zcb_fixture_net(net);
     zcb_fixture_zid(zid_pk, zid_sk);
     const int64_t now = ZCB_ISSUED + 100;
-    struct vcs_zcode_contributor_binding_v2 active, rotate;
+    struct vcs_zcode_contributor_binding_v2 active = {0}, rotate = {0};
     ZC4_CHECK("rotate2: active seals",
               zcb2_active(&active, net, zid_pk, 0x22) &&
               zcb2_seal(&active, zid_sk, zid_pk, 0x22, 0x22));
@@ -1731,7 +1731,7 @@ static int t_binding_v2_time_order(void)
     zcb_fixture_net(net);
     zcb_fixture_zid(zid_pk, zid_sk);
     const int64_t now = ZCB_ISSUED + 100;
-    struct vcs_zcode_contributor_binding_v2 active, rotate;
+    struct vcs_zcode_contributor_binding_v2 active = {0}, rotate = {0};
     ZC4_CHECK("time2: chain seals",
               zcb2_active(&active, net, zid_pk, 0x22) &&
               zcb2_seal(&active, zid_sk, zid_pk, 0x22, 0x22) &&
@@ -1793,7 +1793,7 @@ static int t_binding_v2_chain(void)
 
     /* Revocation is terminal: nothing may follow, not even an honest
      * rotation sealed against the revoked link. */
-    struct vcs_zcode_contributor_binding_v2 revoke, after;
+    struct vcs_zcode_contributor_binding_v2 revoke = {0}, after = {0};
     bool seal_ok = zcb2_successor(&revoke, &a, VCS_ZCODE_BINDING_REVOKE,
                                   0x22, 0, zid_sk, ZCB_ISSUED + 50, 0) &&
                    zcb2_successor(&after, &revoke, VCS_ZCODE_BINDING_ROTATE,

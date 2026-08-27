@@ -386,7 +386,8 @@ int blog_discover_onion_peers_chain(const char *datadir,
     for (int i = 0; i < row_count && (size_t)found < max; i++) {
         if (!onion_hostname_valid(rows[i].hostname))
             continue;   /* refuse, never sanitize — see the model header */
-        snprintf(out[found].hostname, sizeof(out[found].hostname), "%s",
+        snprintf(out[found].hostname, sizeof(out[found].hostname), "%.*s",
+                 (int)sizeof(out[found].hostname) - 1,
                  rows[i].hostname);
         out[found].height = rows[i].height;
         found++;

@@ -540,7 +540,12 @@ static void handle_http_client_fd(int fd, int64_t deadline_ms)
             strncasecmp(line, "Host:", 5) == 0) {
             const char *v = line + 5;
             while (*v == ' ' || *v == '\t') v++;
-            snprintf(req_host, sizeof(req_host), "%s", v);
+            size_t host_len = strlen(v);
+            if (host_len >= sizeof(req_host)) {
+                close(fd);
+                return;
+            }
+            memcpy(req_host, v, host_len + 1u);
         }
     }
     if (!headers_complete) {

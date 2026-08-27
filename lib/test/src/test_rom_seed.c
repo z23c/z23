@@ -553,6 +553,25 @@ static int test_bundles_path_shape_refused(void)
     return failures;
 }
 
+static int test_background_scan_worker_stack(void)
+{
+    int failures = 0;
+    TEST("rom_seed: background scan fits the platform worker stack") {
+        rom_seed_reset();
+        char dir[256];
+        test_make_tmpdir(dir, sizeof(dir), "romseed_worker_stack", "ok");
+
+        rom_seed_start_scan(dir, 0);
+        rom_seed_stop_scan();
+
+        ASSERT(rom_seed_count() == 0);
+        test_rm_rf_recursive(dir);
+        rom_seed_reset();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_rom_seed(void)
 {
     int failures = 0;
@@ -564,5 +583,6 @@ int test_rom_seed(void)
     failures += test_scan_and_directory();
     failures += test_bundles_subdir_scan();
     failures += test_bundles_path_shape_refused();
+    failures += test_background_scan_worker_stack();
     return failures;
 }

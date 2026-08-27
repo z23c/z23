@@ -35,7 +35,10 @@ void msg_header_init_full(struct msg_header *h,
 {
     memcpy(h->pchMessageStart, msgstart, MESSAGE_START_SIZE);
     memset(h->pchCommand, 0, sizeof(h->pchCommand));
-    strncpy(h->pchCommand, command, COMMAND_SIZE);
+    size_t command_len = strlen(command);
+    if (command_len > COMMAND_SIZE)
+        command_len = COMMAND_SIZE;
+    memcpy(h->pchCommand, command, command_len);
     h->nMessageSize = msg_size;
     h->nChecksum = 0;
 }

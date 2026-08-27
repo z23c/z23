@@ -219,7 +219,7 @@ void app_add_node(const char *host, int port)
         }
         printf("Connecting to onion addnode %s:%u\n", hostbuf, use_port);
         {
-            char target[96];
+            char target[sizeof(hostbuf) + 8u];
             snprintf(target, sizeof(target), "%s:%u", hostbuf, use_port);
             onion_stream_note_last_dial(target, "queued");
         }

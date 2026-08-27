@@ -326,27 +326,23 @@ static void staged_stage_stall_escalation_apply(const char *dotted_name,
         char reason[BLOCKER_REASON_MAX];
         if (have_upstream) {
             snprintf(reason, sizeof(reason),
-                "stage=%s frozen cursor=%llu upstream=%s:%llu quiet=%llds "
-                "windows=%d/%d(threshold) — wall-clock quiet at supervisor "
-                "tick granularity, distinct from stage_spin_%s/"
-                "reducer_drive_stuck (drain-round/drive-age predicates)",
+                "stage=%.32s frozen cursor=%llu upstream=%.32s:%llu "
+                "quiet=%llds windows=%d/%d; supervisor wall-clock stall, "
+                "separate from stage_spin/reducer_drive_stuck",
                 staged_stage_short_name(dotted_name),
                 (unsigned long long)cursor,
                 staged_stage_short_name(upstream_dotted_name),
                 (unsigned long long)upstream_cursor,
-                (long long)(quiet_us / 1000000), windows, m,
-                staged_stage_short_name(dotted_name));
+                (long long)(quiet_us / 1000000), windows, m);
         } else {
             snprintf(reason, sizeof(reason),
-                "stage=%s frozen cursor=%llu (no upstream reducer stage — "
-                "waits on the live network tip) quiet=%llds "
-                "windows=%d/%d(threshold) — wall-clock quiet at supervisor "
-                "tick granularity, distinct from stage_spin_%s/"
-                "reducer_drive_stuck (drain-round/drive-age predicates)",
+                "stage=%.32s frozen cursor=%llu, no upstream reducer stage; "
+                "waiting on live network tip, quiet=%llds windows=%d/%d; "
+                "supervisor wall-clock stall, separate from "
+                "stage_spin/reducer_drive_stuck",
                 staged_stage_short_name(dotted_name),
                 (unsigned long long)cursor,
-                (long long)(quiet_us / 1000000), windows, m,
-                staged_stage_short_name(dotted_name));
+                (long long)(quiet_us / 1000000), windows, m);
         }
         struct blocker_record r;
         if (blocker_init(&r, id, "staged_sync_supervisor",

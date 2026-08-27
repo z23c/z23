@@ -1564,15 +1564,14 @@ static bool ban_would_strand_us(struct net_manager *nm,
  * it from. */
 static void raise_last_peer_ban_blocker(void)
 {
-    char reason[BLOCKER_REASON_MAX];
-    snprintf(reason, sizeof reason,
+    const char *reason =
              "the only connected peer crossed the ban threshold — a bounded "
              "recovery ban was applied instead of the full ZCL_PEER_BAN_HOURS "
              "so the node keeps a route back to the network; if this repeats, "
              "either the peer is genuinely bad (give the node a second peer "
              "source via -addnode) or our own validation is rejecting a valid "
              "chain (see the peer_banned log lines for the address and "
-             "offence)");
+             "offence)";
     /* The duration is deliberately absent from the reason: it is volatile
      * config, and blocker.h folds the reason into fault identity. */
     struct blocker_record rec;

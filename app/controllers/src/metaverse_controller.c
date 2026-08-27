@@ -258,7 +258,7 @@ static void mv_catalog_sources_open(
     switch (st) {
     case ZCL_NODE_DB_RO_ABSENT:
         snprintf(reason, reason_cap,
-                 "no node.db at %s; chain-derived property registries have "
+                 "no node.db at %.80s; chain-derived property registries have "
                  "not been folded and cannot be reported as empty", path);
         break;
     case ZCL_NODE_DB_RO_UNRECOVERED_LOG:

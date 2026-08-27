@@ -140,7 +140,7 @@ static void bfr_check_regression(const char *stage, int64_t ms, int64_t median)
     struct blocker_record r;
     char reason[BLOCKER_REASON_MAX];
     snprintf(reason, sizeof(reason),
-             "stage=%s ms=%lld median=%lld threshold=%lld",
+             "stage=%.40s ms=%lld median=%lld threshold=%lld",
              stage, (long long)ms, (long long)median, (long long)threshold);
     if (!blocker_init(&r, "boot.stage_regression", "boot",
                       BLOCKER_TRANSIENT, reason))

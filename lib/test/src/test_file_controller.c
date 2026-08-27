@@ -2,6 +2,7 @@
  * File controller tests — manifest coverage and cache invalidation. */
 
 #include "platform/time_compat.h"
+#include "platform/file_sync.h"
 #include "test/test_core.h"
 #include "config/boot_snapshot_offer.h"
 #include "controllers/file_controller.h"
@@ -226,7 +227,7 @@ static int test_manifest_build_includes_snapshot(void)
             ok = ok && fseek(tamper, 4096, SEEK_SET) == 0;
             ok = ok && fputc(0xA5, tamper) != EOF;
             ok = ok && fflush(tamper) == 0;
-            ok = ok && fdatasync(fileno(tamper)) == 0;
+            ok = ok && platform_data_sync(fileno(tamper)) == 0;
             fclose(tamper);
         }
         memset(&fm, 0, sizeof(fm));

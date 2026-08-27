@@ -50,6 +50,17 @@ static bool zs_path_eq(const char *path, const char *want)
     return path && strcmp(path, want) == 0;
 }
 
+static bool zs_copy_route_segment(char *out, size_t out_size,
+                                  const char *input)
+{
+    size_t len = strcspn(input, "/");
+    if (len == 0 || len >= out_size)
+        return false;
+    memcpy(out, input, len);
+    out[len] = '\0';
+    return true;
+}
+
 /* Percent/`+` decode (the name_site_controller convention). */
 static void zs_url_decode(char *dst, size_t dstmax, const char *src,
                           size_t srclen)
@@ -235,7 +246,7 @@ static size_t zs_handle_package(const char *zcode_dir, const char *root_hex,
     /* The persisted signed envelope (the publisher-signature surface). */
     struct vcs_package_release release;
     bool release_ok = false;
-    char path[4400];
+    char path[4500];
     snprintf(path, sizeof(path), "%s/releases/%s", zcode_dir,
              entry_copy.release_id_hex);
     uint8_t *wire = NULL;
@@ -280,7 +291,7 @@ static size_t zs_handle_package(const char *zcode_dir, const char *root_hex,
             if (attest_scanned == ZS_ATTEST_MAX_SCAN)
                 break;
             attest_scanned++;
-            char apath[4400];
+            char apath[4800];
             int an = snprintf(apath, sizeof(apath), "%s/%s", path,
                               ent->d_name);
             if (an < 0 || (size_t)an >= sizeof(apath))
@@ -531,7 +542,7 @@ static size_t zs_download_manifest(const char *zcode_dir,
                                    const char *root_hex, uint8_t *resp,
                                    size_t max)
 {
-    char path[4400];
+    char path[4500];
     int n = snprintf(path, sizeof(path), "%s/manifests/%s", zcode_dir,
                      root_hex);
     if (n < 0 || (size_t)n >= sizeof(path))
@@ -574,7 +585,7 @@ static size_t zs_download_chunk(const char *zcode_dir, const char *root_hex,
         return zcode_view_package_not_found(root_hex, resp, max);
 
     /* The manifest is the chunk-hash authority. */
-    char path[4400];
+    char path[4500];
     snprintf(path, sizeof(path), "%s/manifests/%s", zcode_dir, root_hex);
     uint8_t *wire = NULL;
     size_t wire_len = 0;
@@ -645,10 +656,9 @@ static size_t zs_handle_download(const char *zcode_dir, const char *rest,
 {
     /* rest: "<64hex>" (manifest) or "<64hex>/<file>/<chunk>" (chunk). */
     char root_hex[80];
-    snprintf(root_hex, sizeof(root_hex), "%s", rest);
-    char *slash = strchr(root_hex, '/');
-    if (slash)
-        *slash = '\0';
+    if (!zs_copy_route_segment(root_hex, sizeof(root_hex), rest))
+        return zcode_view_package_not_found("invalid", resp, max);
+    const char *slash = strchr(rest, '/');
 
     uint8_t root[32];
     if (!zcl_hex_decode(root_hex, root, 32))
@@ -660,7 +670,9 @@ static size_t zs_handle_download(const char *zcode_dir, const char *rest,
     /* Chunk form: the remainder must be exactly <file>/<chunk>. */
     const char *file_str = slash + 1;
     char coords[64];
-    snprintf(coords, sizeof(coords), "%s", file_str);
+    if (strlen(file_str) >= sizeof(coords))
+        return zcode_view_package_not_found(root_hex, resp, max);
+    memcpy(coords, file_str, strlen(file_str) + 1);
     char *csep = strchr(coords, '/');
     if (!csep)
         return zcode_view_package_not_found(root_hex, resp, max);
@@ -717,19 +729,16 @@ size_t zcode_site_handle_request(const char *method, const char *path,
     if (strncmp(route, "/zcode/package/", 15) == 0) {
         const char *root_hex = route + 15;
         char rh[80];
-        snprintf(rh, sizeof(rh), "%s", root_hex);
-        char *slash = strchr(rh, '/');
-        if (slash)
-            *slash = '\0';
+        if (!zs_copy_route_segment(rh, sizeof(rh), root_hex))
+            return zcode_view_package_not_found("invalid", response,
+                                                response_max);
         return zs_handle_package(zcode_dir, rh, response, response_max);
     }
     if (strncmp(route, "/zcode/publisher/", 17) == 0) {
         const char *pub_hex = route + 17;
         char ph[80];
-        snprintf(ph, sizeof(ph), "%s", pub_hex);
-        char *slash = strchr(ph, '/');
-        if (slash)
-            *slash = '\0';
+        if (!zs_copy_route_segment(ph, sizeof(ph), pub_hex))
+            return zcode_view_route_not_found(route, response, response_max);
         return zs_handle_publisher(zcode_dir, ph, response, response_max);
     }
     if (zs_path_eq(route, "/zcode/leaderboard") ||
@@ -738,10 +747,8 @@ size_t zcode_site_handle_request(const char *method, const char *path,
     if (strncmp(route, "/zcode/leaderboard/", 19) == 0) {
         const char *period = route + 19;
         char ps[24];
-        snprintf(ps, sizeof(ps), "%s", period);
-        char *slash = strchr(ps, '/');
-        if (slash)
-            *slash = '\0';
+        if (!zs_copy_route_segment(ps, sizeof(ps), period))
+            return zcode_view_route_not_found(route, response, response_max);
         return zs_handle_leaderboard(zcode_dir, ps, response, response_max);
     }
     if (zs_path_eq(route, "/zcode/badges") ||

@@ -76,9 +76,14 @@
 } while (0)
 
 /* See this file's header comment for the assumed signature. */
+#if defined(__APPLE__)
+static bool (*const boot_reindex_coverage_would_refuse)(int32_t, int32_t) =
+    NULL;
+#else
 extern bool boot_reindex_coverage_would_refuse(int32_t scan_reindex_best,
                                                int32_t scan_max_have_data_h)
     __attribute__((weak));
+#endif
 
 static bool rsb_touch_body(const char *dir, int32_t height)
 {

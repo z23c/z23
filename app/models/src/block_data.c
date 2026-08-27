@@ -40,7 +40,10 @@ static void count_dat_files(const char *dir, const char *prefix,
             strstr(ent->d_name, ".dat")) {
             (*count)++;
             char path[1024];
-            snprintf(path, sizeof(path), "%s/%s", dir, ent->d_name);
+            int written = snprintf(path, sizeof(path), "%s/%s",
+                                   dir, ent->d_name);
+            if (written < 0 || (size_t)written >= sizeof(path))
+                continue;
             struct stat st;
             if (stat(path, &st) == 0)
                 *bytes += st.st_size;

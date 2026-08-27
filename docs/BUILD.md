@@ -1,3 +1,5 @@
+<!-- Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. -->
+
 # Building z23
 
 This is the focused build reference — vendored-library sources/versions, the
@@ -9,6 +11,14 @@ links to for build detail.
 `z23` is one whole-program C23 binary. The build is a single `cc` over
 ~660–1400 `.c` files with LTO, linked against a set of **static** third-party
 archives in `vendor/lib/`.
+
+Linux and macOS use the same C23 source graph. The host-specific layer selects
+ELF or Mach-O linking, GNU libstdc++ or Apple libc++, system capability
+implementations, and the matching dependency audit. On macOS, `make z23`
+produces a native executable and an unstripped `build/bin/z23.debug` sidecar;
+it does not invoke a VM. The first native secp256k1 build is derived from the
+checksum-pinned v0.8.0 source and cached as
+`vendor/lib/libsecp256k1-darwin.a`.
 
 ## What the first build costs
 
@@ -58,7 +68,7 @@ How to read this:
 - **The suite stage compiles before it runs.** `make test-parallel` builds a
   ~1400-file per-TU test tree, and those objects are ordinary Make
   prerequisites — a bare `make test-parallel` compiles them one at a time.
-  Pass `-j` (`make -j"$(nproc)" test-parallel`, which is what the measurement
+  Pass `-j` (`make -j"$(getconf _NPROCESSORS_ONLN)" test-parallel`, which is what the measurement
   runs) or the first suite run is dominated by a missing flag. This is a known
   cost, written down rather than papered over.
 - **Host load matters and is recorded.** The artifact carries the 1-minute
@@ -200,7 +210,7 @@ The generated wallet-template and explorer-CSS headers use the same ordering
 rule: an included-Makefile barrier regenerates stale view outputs and restarts
 parsing before the source record is captured.
 
-`make -j"$(nproc)" build-only` (compile every `.o`, no link) does not need the archives and
+`make -j"$(getconf _NPROCESSORS_ONLN)" build-only` (compile every `.o`, no link) does not need the archives and
 is the fastest way to confirm a clean checkout compiles.
 
 ## Fast development binary
@@ -346,11 +356,11 @@ the original monolithic whole-program LTO binary at
 if a test ever behaves differently between the two (it should not). `test_zcl`
 (the serial runner) also remains a whole-program build.
 
-**Fast inner-loop variant.** `make -j"$(nproc)" t-fast ONLY=<group>` uses the separate
+**Fast inner-loop variant.** `make -j"$(getconf _NPROCESSORS_ONLN)" t-fast ONLY=<group>` uses the separate
 exact candidate and object tree (`build/bin/test-fast/epochs/<compile-epoch>/`
 and `build/test-obj/epochs/<compile-epoch>/`, `-O1`, non-`-Werror`) for the
-tightest edit loop; run strict `make -j"$(nproc)" t` /
-`make -j"$(nproc)" test` before commit.
+tightest edit loop; run strict `make -j"$(getconf _NPROCESSORS_ONLN)" t` /
+`make -j"$(getconf _NPROCESSORS_ONLN)" test` before commit.
 
 ## Sanitizer profiles (opt-in)
 
@@ -630,7 +640,7 @@ build/bin/ldb_verify_c23 /path/to/copy-a /path/to/copy-b
 ordered keyspace comparing every key and value byte for byte, then sweeps
 point reads (present and absent keys) and seek positions. It is the tool to
 re-run against any datadir before trusting the reader on it. The in-suite
-regression is `make -j"$(nproc)" t-fast ONLY=ldb_reader`, which builds its own fixture with
+regression is `make -j"$(getconf _NPROCESSORS_ONLN)" t-fast ONLY=ldb_reader`, which builds its own fixture with
 overwrites, tombstones and unflushed log writes, compares it against
 `libleveldb.a`, and then damages five different ways to confirm each is
 refused by name rather than answered wrongly.
@@ -693,8 +703,8 @@ as a dirty boot.
 
 ```bash
 make audit          # tools/dep_audit.sh — versions vs minimum-safe CVE floors
-make -j"$(nproc)" build-only  # compile every .o (no link) — should be clean
-make -j"$(nproc)" dev-bin     # fast non-LTO local node binary: build/bin/z23-dev
+make -j"$(getconf _NPROCESSORS_ONLN)" build-only  # compile every .o (no link) — should be clean
+make -j"$(getconf _NPROCESSORS_ONLN)" dev-bin     # fast non-LTO local node binary: build/bin/z23-dev
 make vendor         # build the vendored archives from source
 make z23     # full link
 ```
@@ -702,10 +712,10 @@ make z23     # full link
 ## Build, test, deploy
 
 ```bash
-make -j"$(nproc)"   # test_zcl + z23 + zclassic-cli
-make -j"$(nproc)" dev-bin  # fast local node executable, not for deploy/release
-make -j"$(nproc)" test     # full parallel suite via the cached per-TU test_parallel
-make -j"$(nproc)" test_parallel_wpo  # whole-program LTO test binary (debug per-TU/LTO divergence)
+make -j"$(getconf _NPROCESSORS_ONLN)"   # test_zcl + z23 + zclassic-cli
+make -j"$(getconf _NPROCESSORS_ONLN)" dev-bin  # fast local node executable, not for deploy/release
+make -j"$(getconf _NPROCESSORS_ONLN)" test     # full parallel suite via the cached per-TU test_parallel
+make -j"$(getconf _NPROCESSORS_ONLN)" test_parallel_wpo  # whole-program LTO test binary (debug per-TU/LTO divergence)
 make lint           # every defensive-coding gate; it prints the list it ran
 make ci             # local gate: lint + tests + MVP slices (runs locally, not on GitHub Actions)
 make deploy         # rebuild + restart; verify exact source ID and running executable SHA-256

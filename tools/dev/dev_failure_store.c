@@ -9,6 +9,7 @@
 #include "crypto/sha3.h"
 #include "json/json.h"
 #include "platform/rng.h"
+#include "platform/rename_compat.h"
 #include "platform/time_compat.h"
 
 #include <errno.h>
@@ -906,8 +907,8 @@ bool zcl_dev_failure_record_failure(
                                    observation_body, observation_len) &&
                  fsync(stage_fd) == 0;
         if (ok) {
-            if (renameat2(store.failures_fd, stage, store.failures_fd, id,
-                          RENAME_NOREPLACE) == 0) {
+            if (platform_renameat_noreplace(store.failures_fd, stage,
+                                            store.failures_fd, id) == 0) {
                 created = true;
                 failure_fd = stage_fd;
                 stage_fd = -1;

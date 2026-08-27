@@ -485,7 +485,7 @@ int test_slp(void)
         wallet_init(&w);
         bool ok = wallet_init_hd(&w, seed, sizeof(seed));
         char address[128];
-        struct key_id kid;
+        struct key_id kid = {0};
         ok = ok && wallet_get_new_address_with_key_id(
                        &w, address, sizeof(address), &kid);
         ok = ok && wallet_top_up_key_pool(&w, 4);

@@ -85,9 +85,14 @@ int wallet_backup_list(const char *backup_dir,
     int n = wbs_scan_backup_dir(backup_dir, files,
         max < (int)(sizeof(files) / sizeof(files[0]))
             ? max : (int)(sizeof(files) / sizeof(files[0])));
-    for (int i = 0; i < n; i++)
-        snprintf(out_paths[i], 512, "%s/%s", backup_dir, files[i].name);
-    return n;
+    int written_paths = 0;
+    for (int i = 0; i < n; i++) {
+        int written = snprintf(out_paths[written_paths], 512, "%s/%s",
+                               backup_dir, files[i].name);
+        if (written >= 0 && written < 512)
+            written_paths++;
+    }
+    return written_paths;
 }
 
 int wallet_backup_rotate(const char *backup_dir, int max_versions)

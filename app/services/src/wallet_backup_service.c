@@ -500,7 +500,7 @@ static struct zcl_result wbs_run_one_locked(void)
                              "encrypt: unlink plaintext %s failed: %s",
                              path, strerror(errno));
                 snprintf(g_wbs.last_path, sizeof(g_wbs.last_path),
-                         "%s", enc_path);
+                         "%.511s", enc_path);
                 struct zcl_result receipt =
                     wbs_record_encrypted_authority_locked(enc_path);
                 if (!receipt.ok) {

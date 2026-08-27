@@ -14,9 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#if defined(__GLIBC__)
-#include <malloc.h>  /* malloc_trim — return retained transient heap to the OS */
-#endif
+#include "platform/allocator_compat.h"
 
 /* ── Env-tunable threshold percentages (sane defaults) ───────────── */
 
@@ -115,9 +113,7 @@ static void mem_pressure_shrink_malloc_trim(enum mem_pressure_level level,
 {
     (void)level;
     (void)ctx;
-#if defined(__GLIBC__)
-    malloc_trim(0);
-#endif
+    platform_allocator_release_free_pages();
 }
 
 static struct mem_pressure_sink g_malloc_trim_sink = {

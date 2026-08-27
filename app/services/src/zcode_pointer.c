@@ -115,9 +115,13 @@ bool zcode_pointer_resolve(struct node_db *ndb, const char *name,
     snprintf(out->name, sizeof(out->name), "%s", entry.name);
     snprintf(out->owner_address, sizeof(out->owner_address), "%s",
              entry.owner_address);
-    if (entry.target_type == ZNAM_TYPE_CONTENT)
-        snprintf(out->package_root_hex, sizeof(out->package_root_hex), "%s",
-                 entry.target_value);
+    if (entry.target_type == ZNAM_TYPE_CONTENT) {
+        uint8_t package_root[32];
+        if (zcl_hex_decode(entry.target_value, package_root,
+                           sizeof(package_root)))
+            snprintf(out->package_root_hex, sizeof(out->package_root_hex),
+                     "%.64s", entry.target_value);
+    }
 
     char kind[ZNAM_TEXT_VAL_MAX + 1];
     if (!zp_text(ndb, name, ZCODE_POINTER_KEY_KIND, kind, sizeof(kind))) {

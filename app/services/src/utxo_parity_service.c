@@ -345,7 +345,7 @@ static void parity_coarse_block_hash_tick(
         /* Transport/parse error: skip, NEVER page. */
         pthread_mutex_lock(&g_parity.lock);
         snprintf(g_parity.last_skip_reason, sizeof(g_parity.last_skip_reason),
-                 "ref getblockhash(%d) failed: %.96s", (int)h_check, err);
+                 "ref getblockhash(%d) failed: %.80s", (int)h_check, err);
         pthread_mutex_unlock(&g_parity.lock);
         atomic_fetch_add(&g_parity.skips_total, 1);
         atomic_fetch_add(&g_parity.reference_errors, 1);

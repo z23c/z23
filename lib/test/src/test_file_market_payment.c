@@ -194,7 +194,7 @@ int file_market_payment_tests(void)
 
     uint8_t wire[FILE_MARKET_PAYMENT_WIRE_BYTES];
     uint8_t memo[FILE_MARKET_PAYMENT_MEMO_BYTES];
-    struct file_payment decoded;
+    struct file_payment decoded = {0};
     bool codec = file_payment_auth_encode(&payment, wire) ==
                      FILE_PAYMENT_AUTH_OK &&
                  file_payment_auth_decode(wire, sizeof(wire), &decoded) ==

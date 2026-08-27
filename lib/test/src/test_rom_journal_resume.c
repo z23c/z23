@@ -41,6 +41,7 @@
  */
 
 #include "test/test_core.h"
+#include "platform/file_sync.h"
 #include "net/rom_journal.h"
 #include "net/rom_fetch.h"
 #include "net/rom_seed.h"
@@ -292,7 +293,7 @@ static int test_rom_journal_kill9_resume(void)
             ssize_t w = pwrite(fd, cbuf, got,
                               (off_t)((uint64_t)ci * m.chunk_size));
             ASSERT(w == (ssize_t)got);
-            ASSERT(fdatasync(fd) == 0);
+            ASSERT(platform_data_sync(fd) == 0);
             ASSERT(rom_journal_mark(j, ci));
         }
         free(cbuf);
@@ -500,7 +501,7 @@ static int test_rom_journal_bad_chunk_then_recovery(void)
                                cbuf, ROM_SEED_CHUNK_SIZE, &got));
         ASSERT(rom_fetch_verify_chunk(cbuf, got, good_sha3[0]));
         ASSERT(pwrite(fd, cbuf, got, 0) == (ssize_t)got);
-        ASSERT(fdatasync(fd) == 0);
+        ASSERT(platform_data_sync(fd) == 0);
         ASSERT(rom_journal_mark(j, 0));
         free(cbuf);
         close(fd);

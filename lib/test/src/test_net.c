@@ -2,6 +2,7 @@
 
 #define _DEFAULT_SOURCE
 #include "platform/time_compat.h"
+#include "platform/barrier.h"
 #include "test/test_core.h"
 #include "core/hash.h"
 #include "core/random.h"
@@ -112,14 +113,14 @@ static void p74_register_observers(void)
  * `won` slot on success, 0 on failure. A shared start barrier makes
  * both pthreads hit the CAS in the same window. */
 struct p26_race_arg {
-    pthread_barrier_t *barrier;
+    zcl_barrier_t *barrier;
     _Atomic int *won;
 };
 
 static void *p26_race_worker(void *arg)
 {
     struct p26_race_arg *a = arg;
-    pthread_barrier_wait(a->barrier);
+    zcl_barrier_wait(a->barrier);
     if (msgprocessor_test_swarm_try_claim())
         atomic_fetch_add(a->won, 1);
     return NULL;
@@ -4376,8 +4377,8 @@ int test_net(void)
     {
         msgprocessor_test_swarm_release();
 
-        pthread_barrier_t barrier;
-        pthread_barrier_init(&barrier, NULL, 2);
+        zcl_barrier_t barrier;
+        zcl_barrier_init(&barrier, 2);
         _Atomic int won = 0;
 
         struct p26_race_arg arg = { .barrier = &barrier, .won = &won };
@@ -4386,7 +4387,7 @@ int test_net(void)
         pthread_create(&t2, NULL, p26_race_worker, &arg);
         pthread_join(t1, NULL);
         pthread_join(t2, NULL);
-        pthread_barrier_destroy(&barrier);
+        zcl_barrier_destroy(&barrier);
 
         int wins = atomic_load(&won);
         bool still_active = msgprocessor_test_swarm_is_active();

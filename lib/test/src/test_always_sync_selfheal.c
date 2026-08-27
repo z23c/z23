@@ -125,11 +125,17 @@ extern bool stage_rederive_range(struct sqlite3 *db, struct main_state *ms,
  * requested height with NO covering row and no trusted-base declaration,
  * return true iff the write path REFUSED the raise (false = it would have
  * been allowed, i.e. the rule is not yet enforced for this input). */
+#if defined(__APPLE__)
+static bool (*const lcc_test_probe_raise_refused)(struct sqlite3 *,
+                                                  const char *, int32_t,
+                                                  int32_t) = NULL;
+#else
 extern bool lcc_test_probe_raise_refused(struct sqlite3 *db,
                                          const char *stage_name,
                                          int32_t current_height,
                                          int32_t requested_height)
     __attribute__((weak));
+#endif
 
 /* ── Shared fixture helpers (test_sticky_escalator.c T1 pattern, trimmed to
  * what G1/G2 need: a rowless-hole progress.kv + a 3-block main_state) ──── */

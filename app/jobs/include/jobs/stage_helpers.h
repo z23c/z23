@@ -446,11 +446,9 @@ static inline job_result_t stage_body_read_hold(const char *stage_name,
         uint256_get_hex(hash, hashhex);
     char reason[BLOCKER_REASON_MAX];
     snprintf(reason, sizeof(reason),
-             "height=%d hash=%s: body_persist already verified this body's "
-             "hash+merkle root, but %s's own read failed — the on-disk "
-             "block bytes vanished or were corrupted after body_persist "
-             "advanced; investigate blk*.dat and the block_index "
-             "(nFile,nDataPos) for this height",
+             "height=%d hash=%.64s: body read failed after body_persist "
+             "verification; bytes changed or vanished; inspect blk*.dat "
+             "and the block_index position; stage=%.24s",
              height, hashhex, sn);
     struct blocker_record rec;
     int set_rc = -1;

@@ -129,7 +129,7 @@ struct zcl_result utxo_audit_compare_source(struct node_db *ndb,
         out->status = UTXO_AUDIT_LOCAL_ONLY;
         snprintf(out->source, sizeof(out->source), "%s",
                  src->name ? src->name : "reference");
-        snprintf(out->error, sizeof(out->error), "reference error: %s",
+        snprintf(out->error, sizeof(out->error), "reference error: %.100s",
                  rr.message[0] ? rr.message : "unavailable");
         return rr;
     }

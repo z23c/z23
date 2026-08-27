@@ -5,7 +5,7 @@
  * The launch decision happens before the node exists, so it cannot rely on
  * SQLite, the blocker registry, or a shell.  This platform seam owns the one
  * durable boot-failure counter format and pins the selected executable inode
- * before returning it to the caller for fexecve(3).
+ * before returning it to the caller for descriptor-backed execution.
  */
 #ifndef ZCL_PLATFORM_OS_BINARY_SLOTS_H
 #define ZCL_PLATFORM_OS_BINARY_SLOTS_H

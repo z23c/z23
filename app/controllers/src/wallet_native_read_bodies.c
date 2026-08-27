@@ -137,7 +137,7 @@ char *zcl_native_gettransaction_body(const struct json_value *args,
         snprintf(ctx, sizeof(ctx), "txid=%s", v ? v : "(null)");
         err->status = ZCL_NATIVE_BODY_UNAVAILABLE;
         snprintf(err->message, sizeof(err->message),
-                 "RPC %s failed: %s", "gettransaction", ctx);
+                 "RPC gettransaction failed: %.150s", ctx);
         LOG_NULL("native.wallet", "%s failed: %s", "gettransaction", ctx);
     }
     return out;

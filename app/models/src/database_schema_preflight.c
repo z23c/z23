@@ -98,8 +98,13 @@ static bool probe_sidecars(const char *path, struct preflight_sidecars *out)
 static int open_quiet_wal_immutable(int fd, sqlite3 **db_out)
 {
     char uri[NODE_DB_PREFLIGHT_URI_MAX];
+#if defined(__APPLE__)
+    const char *fd_root = "/dev/fd";
+#else
+    const char *fd_root = "/proc/self/fd";
+#endif
     int n = snprintf(uri, sizeof(uri),
-                     "file:/proc/self/fd/%d?mode=ro&immutable=1", fd);
+                     "file:%s/%d?mode=ro&immutable=1", fd_root, fd);
     if (n <= 0 || (size_t)n >= sizeof(uri))
         return SQLITE_CANTOPEN;
     return sqlite3_open_v2(uri, db_out,

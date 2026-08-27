@@ -109,6 +109,8 @@ static void cleanup_temp_db_dir(const char *dir_path)
     unlink(path);
     snprintf(path, sizeof(path), "%s/node.db", dir_path);
     unlink(path);
+    snprintf(path, sizeof(path), "%s/node.db.owner-lock", dir_path);
+    unlink(path);
     rmdir(dir_path);
 }
 

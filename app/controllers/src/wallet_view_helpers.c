@@ -44,6 +44,17 @@ void wallet_view_enable_sync(void) {
 
 /* ── RPC auth ──────────────────────────────────────────────── */
 
+static bool wv_copy_credential(char out[64], const char *value)
+{
+    size_t len = strlen(value);
+    if (len >= 64) {
+        out[0] = '\0';
+        return false;
+    }
+    memcpy(out, value, len + 1);
+    return true;
+}
+
 const char *wv_zclassicd_auth(void) {
     static char auth[256] = "";
     if (auth[0]) return auth;
@@ -59,12 +70,12 @@ const char *wv_zclassicd_auth(void) {
             if (strncmp(line, "rpcuser=", 8) == 0) {
                 char *e = strchr(line + 8, '\n'); if (e) *e = '\0';
                 char *r = strchr(line + 8, '\r'); if (r) *r = '\0';
-                snprintf(user, sizeof(user), "%s", line + 8);
+                (void)wv_copy_credential(user, line + 8);
             }
             if (strncmp(line, "rpcpassword=", 12) == 0) {
                 char *e = strchr(line + 12, '\n'); if (e) *e = '\0';
                 char *r = strchr(line + 12, '\r'); if (r) *r = '\0';
-                snprintf(pass, sizeof(pass), "%s", line + 12);
+                (void)wv_copy_credential(pass, line + 12);
             }
         }
         fclose(f);
@@ -123,11 +134,11 @@ int wv_rpc_call(const char *method, const char *params_json,
             while (fgets(line, sizeof(line), f)) {
                 if (strncmp(line, "rpcuser=", 8) == 0) {
                     char *nl = strchr(line + 8, '\n'); if (nl) *nl = '\0';
-                    snprintf(user, sizeof(user), "%s", line + 8);
+                    (void)wv_copy_credential(user, line + 8);
                 }
                 if (strncmp(line, "rpcpassword=", 12) == 0) {
                     char *nl = strchr(line + 12, '\n'); if (nl) *nl = '\0';
-                    snprintf(pass, sizeof(pass), "%s", line + 12);
+                    (void)wv_copy_credential(pass, line + 12);
                 }
             }
             fclose(f);

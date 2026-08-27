@@ -24,6 +24,7 @@
 #include "storage/event_log_pending.h"
 
 #include "platform/time_compat.h"   /* platform_time_monotonic_us */
+#include "platform/file_sync.h"
 #include "util/crc32c.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
@@ -521,7 +522,7 @@ bool event_log_flush(event_log_t *log)
         LOG_FAIL("event_log", "flush: pwrite(%s) failed: %s",
                  log->path, strerror(errno));
     }
-    if (fdatasync(log->fd) < 0) {
+    if (platform_data_sync(log->fd) < 0) {
         /* Keep `dirty` set so a retry re-attempts the fdatasync; the caller
          * (the stage pre-commit hook) must veto the commit on this false. */
         pthread_mutex_unlock(&log->lock);

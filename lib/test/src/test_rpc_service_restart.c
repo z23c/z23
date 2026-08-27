@@ -37,6 +37,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "test/test_core.h"
+#include "platform/socket_compat.h"
 #include "config/boot.h"
 #include "config/boot_internal.h"
 #include "kernel/service_kernel.h"
@@ -112,7 +113,7 @@ static int rsr_hold_loopback_port(uint16_t *port_out)
 {
     if (!port_out)
         return -1;
-    int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    int fd = platform_socket_open(AF_INET, SOCK_STREAM, 0, true, false);
     if (fd < 0)
         return -1;
     const struct sockaddr_in addr = {

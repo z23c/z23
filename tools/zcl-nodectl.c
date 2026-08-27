@@ -1,7 +1,10 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+
 #define _POSIX_C_SOURCE 200809L
 
 #include "platform/time_compat.h"
 #include "platform/os_binary_slots.h"
+#include "platform/process_compat.h"
 #include <arpa/inet.h>
 #include <ctype.h>
 #include <errno.h>
@@ -708,9 +711,9 @@ static int cmd_launch(int argc, char **argv)
     }
 
     argv[2] = launch.target_path;
-    fexecve(launch.executable_fd, &argv[2], environ);
+    platform_execve_fd(launch.executable_fd, &argv[2], environ);
     int saved_errno = errno;
-    fprintf(stderr, "zcl-nodectl launch: fexecve(%s) failed: %s\n",
+    fprintf(stderr, "zcl-nodectl launch: execute pinned %s failed: %s\n",
             launch.target_path, strerror(saved_errno));
     os_binary_slots_close_launch(&launch);
     return saved_errno == ENOENT ? 127 : 126;

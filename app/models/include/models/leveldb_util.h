@@ -27,7 +27,10 @@ static inline void scan_leveldb_dir(const char *dir, int *sst_count,
     while ((ent = readdir(d)) != NULL) {
         if (ent->d_name[0] == '.') continue;
         char path[1024];
-        snprintf(path, sizeof(path), "%s/%s", dir, ent->d_name);
+        int written = snprintf(path, sizeof(path), "%s/%s",
+                               dir, ent->d_name);
+        if (written < 0 || (size_t)written >= sizeof(path))
+            continue;
         struct stat st;
         if (stat(path, &st) != 0 || !S_ISREG(st.st_mode))
             continue;

@@ -471,8 +471,8 @@ int test_zid_seniority(void)
                    * penalty or an unbounded boost */
                   zid_seniority_combine(-5.0, 1.0) == 1.0 &&
                   zid_seniority_combine(1e9, 1.0) == ZID_SENIORITY_MAX_MULT &&
-                  zid_seniority_combine(NAN, 1.0) == 1.0 &&
-                  zid_seniority_combine(1.0, NAN) == 1.0;
+                  zid_seniority_combine(nan(""), 1.0) == 1.0 &&
+                  zid_seniority_combine(1.0, nan("")) == 1.0;
 
         /* Monotone non-decreasing in BOTH arguments, and never below either
          * one — so neither signal can be used to pull a peer down. */

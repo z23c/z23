@@ -263,7 +263,8 @@ static const char *output_vfs_next_system_call(sqlite3_vfs *vfs,
         ? base->xNextSystemCall(base, name) : NULL;
 }
 
-static bool output_vfs_register(struct consensus_export_output_binding *output)
+[[maybe_unused]] static bool output_vfs_register(
+    struct consensus_export_output_binding *output)
 {
     static atomic_uint_fast64_t sequence = 0;
     output->base_vfs = sqlite3_vfs_find(NULL);
@@ -408,7 +409,7 @@ void consensus_export_run_after_bind_hook(void)
         hook(ctx);
 }
 
-static void output_run_after_staging_create_hook(int staging_fd)
+[[maybe_unused]] static void output_run_after_staging_create_hook(int staging_fd)
 {
     void (*hook)(void *, int) = g_after_staging_create_hook;
     void *ctx = g_after_staging_create_ctx;
@@ -429,7 +430,7 @@ static void output_run_before_link_hook(void)
 }
 #else
 void consensus_export_run_after_bind_hook(void) { }
-static void output_run_after_staging_create_hook(int staging_fd)
+[[maybe_unused]] static void output_run_after_staging_create_hook(int staging_fd)
 {
     (void)staging_fd;
 }
@@ -441,6 +442,12 @@ bool consensus_export_open_temp(struct consensus_export_output_binding *output,
                                 struct consensus_state_export_result *result)
 {
     *destination = NULL;
+#if !defined(__linux__)
+    (void)output;
+    return consensus_export_fail(
+        result, CONSENSUS_EXPORT_OUTPUT_ERROR,
+        "anonymous no-replace output staging is unavailable on this platform");
+#else
     if (!output_name_absent(output, output->final_name))
         return consensus_export_fail(result, CONSENSUS_EXPORT_REFUSED,
                                      "output name appeared after descriptor bind");
@@ -496,6 +503,7 @@ bool consensus_export_open_temp(struct consensus_export_output_binding *output,
                                      "FULL-durable output setup failed");
     }
     return true;
+#endif
 }
 
 static bool manifests_equal(

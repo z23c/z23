@@ -42,6 +42,7 @@
 #include "vcs/zdesc_swarm.h"
 
 #include <stdio.h>
+#include <string.h>
 
 #define BOOT_SIGNED_PEERS_MAX 32u
 
@@ -77,7 +78,7 @@ static int boot_signed_onion_peers(void *unused_ctx, struct onion_peer *out,
     size_t d = zdesc_global_onions((uint64_t)platform_time_wall_unix(), hosts,
                                    room);
     for (size_t i = 0; i < d; i++) {
-        snprintf(out[n].hostname, sizeof(out[n].hostname), "%s", hosts[i]);
+        memcpy(out[n].hostname, hosts[i], sizeof(hosts[i]));
         /* A descriptor carries no height; both consumers treat this as
          * display/storage only. */
         out[n].height = 0;

@@ -50,18 +50,37 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(__linux__)
 #include <sys/mount.h>
 #include <sys/ptrace.h>
+#endif
 #include <time.h>
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#if defined(__linux__)
 #include <sys/random.h>
+#endif
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 
 #include <sqlite3.h>
+
+#if !defined(__linux__)
+
+int test_confine(void)
+{
+    int abi = os_sandbox_landlock_abi();
+    bool seccomp = os_sandbox_seccomp_supported();
+    printf("\n=== -confine platform availability ===\n");
+    printf("confine: Landlock ABI = %d, seccomp supported = %d; "
+           "Linux confinement tests are not applicable\n", abi,
+           (int)seccomp);
+    return abi < 1 && !seccomp ? 0 : 1;
+}
+
+#else
 
 #define CF_CHECK(name, expr) do { \
     printf("confine: %s... ", (name)); \
@@ -388,3 +407,5 @@ int test_confine(void)
            failures);
     return failures;
 }
+
+#endif

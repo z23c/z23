@@ -91,6 +91,14 @@ ENV_MUTATED_COMPILER_ID="$(CPATH="$WORK/env-include" \
     "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CC_COMMAND")"
 [ "$ENV_MUTATED_COMPILER_ID" != "$ENV_COMPILER_ID" ] ||
     fail 'compiler include-root mutation was omitted from fingerprint'
+mkdir -p "$WORK/cyclic-include/nested"
+printf '#define EPOCH_CYCLE_PROBE 1\n' > "$WORK/cyclic-include/probe.h"
+ln -s .. "$WORK/cyclic-include/nested/parent"
+CYCLIC_COMPILER_ID="$(CPATH="$WORK/cyclic-include" \
+    "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CC_COMMAND")" ||
+    fail 'compiler fingerprint rejected a safely detected include-root cycle'
+[[ "$CYCLIC_COMPILER_ID" =~ ^[0-9a-f]{64}$ ]] ||
+    fail 'cyclic include-root produced an invalid compiler fingerprint'
 if "$KEY_TOOL" compiler-id 'cc; printf unsafe' "$CC_COMMAND" \
         >/dev/null 2>&1; then
     fail 'shell-active CC string was accepted'
@@ -352,7 +360,7 @@ GC_CANDIDATES="$WORK/gc-candidates"
 GC_LIVE="$(sha_label gc-live)"
 GC_DEAD_1="$(sha_label gc-dead-1)"
 GC_DEAD_2="$(sha_label gc-dead-2)"
-OWNER_START="$(awk '{print $22}' "/proc/$$/stat")"
+OWNER_START="$("$SELF_DIR/process-start-token.sh" "$$")"
 for old in "$GC_LIVE" "$GC_DEAD_1" "$GC_DEAD_2"; do
     mkdir -p "$GC_ROOT/epochs/$old/.leases" "$GC_CANDIDATES/epochs/$old"
     : > "$GC_CANDIDATES/epochs/$old/candidate"
@@ -410,13 +418,14 @@ publish "$CANDIDATE_A2" "$SOURCE_A" "$MUTATION_A2" "$EPOCH_MAIN" "$SESSION_MAIN"
 BLOCK_MARKER="$WORK/stale-a-blocked"
 BLOCK_RELEASE="$WORK/release-stale-a"
 BLOCK_ONCE="$WORK/stale-a-blocked-once"
+STALE_LOG="$WORK/stale-a-publisher.log"
 STATE_FILE="$STATE" BLOCK_SOURCE="$SOURCE_A" \
     BLOCK_MUTATION="$MUTATION_A2" BLOCK_MARKER="$BLOCK_MARKER" \
     BLOCK_RELEASE="$BLOCK_RELEASE" BLOCK_ONCE="$BLOCK_ONCE" \
     "$PUBLISH_TOOL" "$CANDIDATE_A2" "$STABLE" "$SESSION_MAIN" "$SOURCE_A" 1 \
         "$MUTATION_A2" "$EPOCH_MAIN" "$COMPILER_ID" "$PROFILE" \
         "$COMPILE_FLAGS" "$LINK_FLAGS" "$CC_COMMAND" "$CC_COMMAND" \
-        "$VERIFY" >/dev/null 2>&1 &
+        "$VERIFY" > /dev/null 2> "$STALE_LOG" &
 STALE_PID=$!
 CHILD_PIDS+=("$STALE_PID")
 
@@ -426,7 +435,10 @@ while [ ! -e "$BLOCK_MARKER" ]; do
     kill -0 "$STALE_PID" 2>/dev/null || break
     sleep 0.01
 done
-[ -e "$BLOCK_MARKER" ] || fail 'stale publisher did not enter the locked verifier'
+if [ ! -e "$BLOCK_MARKER" ]; then
+    sed 's/^/build-epoch-selftest: stale publisher: /' "$STALE_LOG" >&2
+    fail 'stale publisher did not enter the locked verifier'
+fi
 
 SESSION_B="$(start_session "$SOURCE_B" "$MUTATION_B")"
 CANDIDATE_B2="$(build_candidate "$EPOCH_MAIN" B)"

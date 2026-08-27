@@ -30,6 +30,7 @@
  * real systemd semantics) doesn't leak state between scenarios. */
 
 #include "test/test_core.h"
+#include "platform/socket_compat.h"
 #include "support/pagelocker.h"
 #include "platform/time_compat.h"
 #include "util/sd_notify.h"
@@ -62,7 +63,7 @@ static int sdn_bind_path_socket(char *path_out, size_t path_out_len)
              (int)getpid(), (long)time(NULL)); // platform-ok: test-fixture unique path, not production timing
     unlink(path_out);
 
-    int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    int fd = platform_socket_open(AF_UNIX, SOCK_DGRAM, 0, true, true);
     if (fd < 0)
         return -1;
 
@@ -87,7 +88,7 @@ static int sdn_bind_abstract_socket(char *name_out, size_t name_out_len)
     snprintf(name_out, name_out_len, "@zcl_test_sd_notify_abs_%d",
              (int)getpid());
 
-    int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    int fd = platform_socket_open(AF_UNIX, SOCK_DGRAM, 0, true, true);
     if (fd < 0)
         return -1;
 

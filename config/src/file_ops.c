@@ -17,6 +17,13 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+static bool file_ops_join(char *out, size_t cap, const char *dir,
+                          const char *name)
+{
+    int n = snprintf(out, cap, "%s/%s", dir, name);
+    return n > 0 && (size_t)n < cap;
+}
+
 bool file_copy(const char *src, const char *dst)
 {
     /* Preserve the historical contract: a regular file only. A directory (or
@@ -53,8 +60,11 @@ bool dir_copy(const char *src_dir, const char *dst_dir)
         if (ent->d_name[0] == '.') continue;
         if (strcmp(ent->d_name, "LOCK") == 0) continue;
         char s[1024], de[1024];
-        snprintf(s, sizeof(s), "%s/%s", src_dir, ent->d_name);
-        snprintf(de, sizeof(de), "%s/%s", dst_dir, ent->d_name);
+        if (!file_ops_join(s, sizeof(s), src_dir, ent->d_name) ||
+            !file_ops_join(de, sizeof(de), dst_dir, ent->d_name)) {
+            failed++;
+            continue;
+        }
         if (file_copy(s, de))
             copied++;
         else
@@ -74,15 +84,22 @@ int block_files_copy(const char *src_dir, const char *dst_dir)
     char src[1024], dst[1024];
     for (int i = 0; i < 9999; i++) {
         struct stat st;
-        snprintf(src, sizeof(src), "%s/blk%05d.dat", src_dir, i);
+        char name[32];
+        snprintf(name, sizeof(name), "blk%05d.dat", i);
+        if (!file_ops_join(src, sizeof(src), src_dir, name))
+            return -1;
         if (stat(src, &st) != 0) break;
-        snprintf(dst, sizeof(dst), "%s/blk%05d.dat", dst_dir, i);
+        if (!file_ops_join(dst, sizeof(dst), dst_dir, name))
+            return -1;
         if (!file_copy(src, dst))
             return -1;
         count++;
-        snprintf(src, sizeof(src), "%s/rev%05d.dat", src_dir, i);
+        snprintf(name, sizeof(name), "rev%05d.dat", i);
+        if (!file_ops_join(src, sizeof(src), src_dir, name))
+            return -1;
         if (stat(src, &st) == 0) {
-            snprintf(dst, sizeof(dst), "%s/rev%05d.dat", dst_dir, i);
+            if (!file_ops_join(dst, sizeof(dst), dst_dir, name))
+                return -1;
             if (!file_copy(src, dst))
                 return -1;
         }
@@ -100,8 +117,8 @@ void block_files_clean(const char *dir)
              strncmp(ent->d_name, "rev", 3) == 0) &&
             strstr(ent->d_name, ".dat")) {
             char path[1024];
-            snprintf(path, sizeof(path), "%s/%s", dir, ent->d_name);
-            unlink(path);
+            if (file_ops_join(path, sizeof(path), dir, ent->d_name))
+                unlink(path);
         }
     }
     closedir(d);

@@ -3003,8 +3003,8 @@ int test_consensus_state_snapshot_install(void)
                       vres.nullifier_count == 2);
 
             struct consensus_state_artifact_evidence *rev = NULL;
-            struct consensus_state_bundle_manifest rman;
-            uint8_t rfile[32];
+            struct consensus_state_bundle_manifest rman = {0};
+            uint8_t rfile[32] = {0};
             struct zcl_result ro =
                 consensus_state_artifact_evidence_open(b.path, -1, &rev);
             bool rgot = ro.ok && rev &&

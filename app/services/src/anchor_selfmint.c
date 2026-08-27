@@ -100,7 +100,7 @@ bool anchor_selfmint_snapshot_status(const char *datadir,
         snprintf(out->error, sizeof(out->error),
                  "anchor snapshot candidate is absent");
         snprintf(out->next_action, sizeof(out->next_action),
-                 "mint or stage %s, then run refold copy proof",
+                 "mint or stage %.180s, then run refold copy proof",
                  out->path);
         return true;
     }
@@ -138,7 +138,8 @@ bool anchor_selfmint_snapshot_status(const char *datadir,
         snprintf(out->error, sizeof(out->error), "%s",
                  err[0] ? err : "uss_open header read failed");
         snprintf(out->next_action, sizeof(out->next_action),
-                 "replace %s with a minted checkpoint snapshot", out->path);
+                 "replace %.180s with a minted checkpoint snapshot",
+                 out->path);
         return true;
     }
 
@@ -184,7 +185,7 @@ bool anchor_selfmint_snapshot_status(const char *datadir,
             snprintf(out->error, sizeof(out->error), "%s",
                      cerr[0] ? cerr : "coins-only component recompute failed");
             snprintf(out->next_action, sizeof(out->next_action),
-                     "replace %s with a checkpoint-matching minted snapshot",
+                     "replace %.180s with a checkpoint-matching minted snapshot",
                      out->path);
         } else if (!sha3_ok) {
             snprintf(out->verification, sizeof(out->verification),
@@ -192,7 +193,7 @@ bool anchor_selfmint_snapshot_status(const char *datadir,
             snprintf(out->error, sizeof(out->error),
                      "coins-only commitment does not match checkpoint");
             snprintf(out->next_action, sizeof(out->next_action),
-                     "replace %s with a snapshot minted at checkpoint height %d",
+                     "replace %.170s with a snapshot minted at checkpoint height %d",
                      out->path, cp->height);
         } else {
             snprintf(out->verification, sizeof(out->verification),
@@ -200,7 +201,7 @@ bool anchor_selfmint_snapshot_status(const char *datadir,
             snprintf(out->error, sizeof(out->error),
                      "snapshot count does not match checkpoint");
             snprintf(out->next_action, sizeof(out->next_action),
-                     "replace %s with a snapshot minted at checkpoint height %d",
+                     "replace %.170s with a snapshot minted at checkpoint height %d",
                      out->path, cp->height);
         }
         return true;
@@ -212,7 +213,7 @@ bool anchor_selfmint_snapshot_status(const char *datadir,
     snprintf(out->error, sizeof(out->error), "%s",
              err[0] ? err : "full SHA3 verification failed");
     snprintf(out->next_action, sizeof(out->next_action),
-             "replace %s with a SHA3/count-verified minted snapshot",
+             "replace %.180s with a SHA3/count-verified minted snapshot",
              out->path);
     return true;
 }

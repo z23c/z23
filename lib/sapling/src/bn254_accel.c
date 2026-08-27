@@ -49,8 +49,10 @@ static const uint64_t BN_INV = 0x87d20782e4866389ULL;
 
 /* ── CPUID detection ─────────────────────────────────────────────── */
 
+#if defined(__x86_64__) || defined(_M_X64)
 static bool g_cpu_bmi2 = false;
 static bool g_cpu_adx = false;
+#endif
 static bool g_cpu_detected = false;
 
 static void bn_detect_cpu(void)

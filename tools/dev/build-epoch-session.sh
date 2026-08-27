@@ -52,6 +52,63 @@ SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KEY_TOOL="$SELF_DIR/build-epoch-key.sh"
 
 case "$MODE" in acquire|check|verify) ;; *) fail "unknown mode: $MODE" ;; esac
+
+find_make_owner()
+{
+    local candidate comm parent owner="" depth=0
+    candidate="$(ps -p "$$" -o ppid= 2>/dev/null || true)"
+    candidate="${candidate//[[:space:]]/}"
+    while [[ "$candidate" =~ ^[1-9][0-9]*$ ]] && [ "$depth" -lt 16 ]; do
+        comm="$(ps -p "$candidate" -o comm= 2>/dev/null || true)"
+        comm="${comm##*/}"
+        comm="${comm//[[:space:]]/}"
+        case "$comm" in
+        make|gmake) owner="$candidate" ;;
+        esac
+        parent="$(ps -p "$candidate" -o ppid= 2>/dev/null || true)"
+        parent="${parent//[[:space:]]/}"
+        [ "$parent" != "$candidate" ] || break
+        candidate="$parent"
+        depth=$((depth + 1))
+    done
+    [ -n "$owner" ] || return 1
+    printf '%s\n' "$owner"
+}
+
+process_ancestry()
+{
+    local candidate comm parent depth=0 chain=""
+    candidate="$(ps -p "$$" -o ppid= 2>/dev/null || true)"
+    candidate="${candidate//[[:space:]]/}"
+    while [[ "$candidate" =~ ^[1-9][0-9]*$ ]] && [ "$depth" -lt 8 ]; do
+        comm="$(ps -p "$candidate" -o comm= 2>/dev/null || true)"
+        comm="${comm##*/}"
+        comm="${comm//[[:space:]]/}"
+        chain="${chain:+$chain,}${candidate}:${comm:-unknown}"
+        parent="$(ps -p "$candidate" -o ppid= 2>/dev/null || true)"
+        parent="${parent//[[:space:]]/}"
+        [ "$parent" != "$candidate" ] || break
+        candidate="$parent"
+        depth=$((depth + 1))
+    done
+    printf '%s\n' "${chain:-unavailable}"
+}
+
+# A PID captured by a parse-time $(shell ...) can name a short-lived helper on
+# Darwin. Resolve the live Make ancestor while this recipe is executing. The
+# explicit PID remains a fallback for direct self-tests that do not run below
+# Make.
+resolved_owner="$(find_make_owner || true)"
+if [ -n "$resolved_owner" ]; then
+    OWNER_PID="$resolved_owner"
+elif "$SELF_DIR/process-start-token.sh" "$OWNER_PID" >/dev/null 2>&1; then
+    :
+elif [ "$MODE" != acquire ]; then
+    OWNER_PID="$$"
+else
+    fail "could not identify live Make owner process; ancestry=$(process_ancestry)"
+fi
+
 for value in "$SOURCE_ID" "$MUTATION" "$COMPILER_ID" "$EPOCH"; do
     is_sha256 "$value" || fail 'authority field is not lowercase SHA-256'
 done
@@ -116,9 +173,9 @@ fi
 # it can reuse whichever call in this same session already paid for the walk
 # instead of repeating it. A pid gets reused eventually; the start-time half
 # of the token means a dead process's cache entry never matches a new one.
-OWNER_START="$(awk '{print $22}' "/proc/$OWNER_PID/stat" 2>/dev/null)" ||
-    fail 'could not identify live Make owner process'
-[[ "$OWNER_START" =~ ^[0-9]+$ ]] || fail 'invalid Make owner start time'
+OWNER_START="$("$SELF_DIR/process-start-token.sh" "$OWNER_PID" 2>/dev/null)" ||
+    fail "could not identify live Make owner pid=$OWNER_PID; ancestry=$(process_ancestry)"
+[[ "$OWNER_START" =~ ^[0-9a-f]+$ ]] || fail 'invalid Make owner start time'
 export ZCL_SOURCE_IDENTITY_SESSION="$OWNER_PID:$OWNER_START"
 
 verify_authority
@@ -170,8 +227,8 @@ lease_is_live()
     local lease="$1" pid start actual
     pid="$(sed -n 's/^pid=//p' "$lease" 2>/dev/null)"
     start="$(sed -n 's/^start=//p' "$lease" 2>/dev/null)"
-    [[ "$pid" =~ ^[1-9][0-9]*$ ]] && [[ "$start" =~ ^[0-9]+$ ]] || return 1
-    actual="$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null)" || return 1
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] && [[ "$start" =~ ^[0-9a-f]+$ ]] || return 1
+    actual="$("$SELF_DIR/process-start-token.sh" "$pid" 2>/dev/null)" || return 1
     [ "$actual" = "$start" ]
 }
 

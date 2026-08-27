@@ -1,3 +1,4 @@
+/* Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. */
 /* Positive Sapling prover capability gate.
  *
  * This test used to print FALSE for the native prover's self-verification and
@@ -402,8 +403,8 @@ static int spend_circuit_shape_gate(void)
             "S14 delta == 1265 (expose_value_commitment)",
             "S15 delta == 776 (EdwardsPoint::repr)",
             "S16 delta == 776 (EdwardsPoint::repr)",
-            "S17 delta == 982 (386 windows + 570 montgomery add + 8 "
-            "into_edwards + 18 edwards add)",
+            ("S17 delta == 982 (386 windows + 570 montgomery add + 8 "
+             "into_edwards + 18 edwards add)"),
             "S18 delta == 252 (field_into_boolean_vec_le, Fs::NUM_BITS)",
             "S19 delta == 750 (84*3 + 83*6, fixed-base mul over 252 bits)",
             "S20 delta == 6 (one Edwards addition)",

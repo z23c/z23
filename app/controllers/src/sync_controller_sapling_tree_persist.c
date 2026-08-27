@@ -72,7 +72,7 @@ bool sapling_tree_open_persist_lane(struct node_db *reducer_ndb,
 
     char reason[BLOCKER_REASON_MAX];
     snprintf(reason, sizeof(reason),
-            "dedicated persist connection open failed height=%d path=%s",
+            "dedicated persist connection open failed height=%d path=%.170s",
             height, reducer_ndb && reducer_ndb->path[0]
                 ? reducer_ndb->path : "(unavailable)");
     struct blocker_record rec;

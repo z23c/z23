@@ -322,7 +322,8 @@ static char *status_frontdoor_body(struct zcl_native_body_err *err)
         snprintf(message_copy, sizeof(message_copy), "%.180s", message);
         err->status = ZCL_NATIVE_BODY_UNAVAILABLE;
         snprintf(err->message, sizeof(err->message),
-                 "status front door dumpstate RPC failed: %s", message_copy);
+                 "status front door dumpstate RPC failed: %.140s",
+                 message_copy);
         json_free(&env);
         LOG_NULL("native.ops", "status front door dumpstate RPC failed: %s",
                  message_copy);
@@ -637,7 +638,7 @@ char *zcl_native_postmortem_list_body(const struct json_value *args,
         free(summaries);
         err->status = ZCL_NATIVE_BODY_UNAVAILABLE;
         snprintf(err->message, sizeof(err->message),
-                 "postmortem list failed for %s (rc=%d)", dir, rc);
+                 "postmortem list failed for %.130s (rc=%d)", dir, rc);
         LOG_NULL("native.ops", "postmortem list failed dir=%s rc=%d", dir, rc);
     }
 

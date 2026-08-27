@@ -117,6 +117,9 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <mach-o/loader.h>
+#endif
 
 #define ZWN_CHECK(name, expr) do {                                       \
     if (expr) { printf("  zcode_swarm_net: %s... OK\n", (name)); }       \
@@ -470,16 +473,63 @@ static bool zwn_write_file(const char *root, const char *relative,
     return ok;
 }
 
-static bool zwn_compile_c23(const char *source, const char *binary)
+static bool zwn_normalize_executable_identity(const char *binary)
 {
+#if defined(__APPLE__)
+    int fd = open(binary, O_RDWR | O_CLOEXEC);
+    if (fd < 0)
+        return false;
+    struct mach_header_64 header;
+    bool ok = pread(fd, &header, sizeof(header), 0) == (ssize_t)sizeof(header) &&
+              header.magic == MH_MAGIC_64;
+    off_t offset = (off_t)sizeof(header);
+    off_t commands_end = offset + (off_t)header.sizeofcmds;
+    bool found = false;
+    for (uint32_t i = 0; ok && i < header.ncmds; i++) {
+        struct load_command command;
+        ok = pread(fd, &command, sizeof(command), offset) ==
+                 (ssize_t)sizeof(command) &&
+             command.cmdsize >= sizeof(command) &&
+             offset <= commands_end - (off_t)command.cmdsize;
+        if (!ok)
+            break;
+        if (command.cmd == LC_UUID &&
+            command.cmdsize >= sizeof(struct uuid_command)) {
+            static const uint8_t deterministic_uuid[16] = {
+                0x5a, 0x32, 0x33, 0x43, 0x32, 0x33, 0x4d, 0x61,
+                0x63, 0x4f, 0x53, 0x46, 0x69, 0x78, 0x74, 0x75,
+            };
+            off_t uuid_offset = offset +
+                (off_t)offsetof(struct uuid_command, uuid);
+            ok = pwrite(fd, deterministic_uuid, sizeof(deterministic_uuid),
+                        uuid_offset) == (ssize_t)sizeof(deterministic_uuid);
+            found = ok;
+            break;
+        }
+        offset += (off_t)command.cmdsize;
+    }
+    if (ok && found)
+        ok = fsync(fd) == 0;
+    if (close(fd) != 0)
+        ok = false;
+    return ok && found;
+#else
+    (void)binary;
+    return true;
+#endif
+}
+
+static bool zwn_sign_executable_identity(const char *binary)
+{
+#if defined(__APPLE__)
     pid_t child = fork();
     if (child < 0)
         return false;
     if (child == 0) {
         char *const argv[] = {
-            (char *)"cc", (char *)"-std=c2x", (char *)"-O2",
-            (char *)"-fno-ident", (char *)"-Wl,--build-id=none",
-            (char *)source, (char *)"-o", (char *)binary, NULL,
+            (char *)"codesign", (char *)"--force", (char *)"--sign",
+            (char *)"-", (char *)"--identifier", (char *)"io.z23.fixture",
+            (char *)binary, NULL,
         };
         execvp(argv[0], argv);
         _exit(127);
@@ -490,6 +540,42 @@ static bool zwn_compile_c23(const char *source, const char *binary)
             return false;
     }
     return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+#else
+    (void)binary;
+    return true;
+#endif
+}
+
+static bool zwn_compile_c23(const char *source, const char *binary)
+{
+    pid_t child = fork();
+    if (child < 0)
+        return false;
+    if (child == 0) {
+        char *argv[10];
+        size_t argc = 0;
+        argv[argc++] = (char *)"cc";
+        argv[argc++] = (char *)"-std=c2x";
+        argv[argc++] = (char *)"-O2";
+        argv[argc++] = (char *)"-fno-ident";
+#if !defined(__APPLE__)
+        argv[argc++] = (char *)"-Wl,--build-id=none";
+#endif
+        argv[argc++] = (char *)source;
+        argv[argc++] = (char *)"-o";
+        argv[argc++] = (char *)binary;
+        argv[argc] = NULL;
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+    int status = 0;
+    while (waitpid(child, &status, 0) < 0) {
+        if (errno != EINTR)
+            return false;
+    }
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0 &&
+           zwn_normalize_executable_identity(binary) &&
+           zwn_sign_executable_identity(binary);
 }
 
 static bool zwn_run_fixture_binary(const char *binary)
@@ -683,8 +769,13 @@ static bool zwn_prepare_package_transport(
     if (expected_package_root_hex &&
         (!zcl_hex_decode(expected_package_root_hex,
                          expected, sizeof(expected)) ||
-         memcmp(expected, prepared->package_root, 32) != 0))
+         memcmp(expected, prepared->package_root, 32) != 0)) {
+        char actual_hex[65];
+        zcl_hex_encode(prepared->package_root, 32, actual_hex);
+        fprintf(stderr, "zwn package root mismatch: expected=%s actual=%s\n",
+                expected_package_root_hex, actual_hex);
         return false;
+    }
     struct uint256 digest;
     memcpy(digest.data, prepared->signing_digest, 32);
     uint8_t compact[COMPACT_SIGNATURE_SIZE];

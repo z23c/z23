@@ -285,10 +285,27 @@ compiler-id)
         resolved="$(readlink -f -- "$root" 2>/dev/null || true)"
         [ -n "$resolved" ] && [ -d "$resolved" ] || continue
         printf 'search-root\0%s\0%s\0' "$root" "$resolved" >> "$PREIMAGE"
-        find -L "$resolved" \( -type f -o -type l \) \
-            -printf '%P\0%D:%i:%s:%T@:%C@:%m:%y:%l\0' 2>/dev/null |
-            LC_ALL=C sort -z >> "$PREIMAGE" ||
-            fail "could not inventory compiler search root: $resolved"
+        find_error="$WORK/search-root-find.error"
+        : > "$find_error"
+        set +e
+        LC_ALL=C find -L "$resolved" \( -type f -o -type l \) \
+            -printf '%P\0%D:%i:%s:%T@:%C@:%m:%y:%l\0' \
+            2> "$find_error" |
+            LC_ALL=C sort -z >> "$PREIMAGE"
+        pipeline_rc=("${PIPESTATUS[@]}")
+        set -e
+        [ "${pipeline_rc[1]}" -eq 0 ] ||
+            fail "could not sort compiler search root inventory: $resolved"
+        if [ "${pipeline_rc[0]}" -ne 0 ]; then
+            # GNU find returns 1 after pruning a link that re-enters an
+            # ancestor. That ancestor is already fully inventoried, and the
+            # link is bound below. Every other incomplete walk still fails.
+            [ "${pipeline_rc[0]}" -eq 1 ] && [ -s "$find_error" ] &&
+                ! LC_ALL=C grep -v \
+                    '^find: File system loop detected;.*$' "$find_error" |
+                    grep -q . ||
+                fail "could not inventory compiler search root: $resolved"
+        fi
         while IFS= read -r -d '' linked; do
             target="$(readlink -f -- "$linked" 2>/dev/null || true)"
             [ -f "$target" ] && fingerprint_tool search-symlink-target "$target"

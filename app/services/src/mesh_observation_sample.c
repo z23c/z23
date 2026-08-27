@@ -37,6 +37,7 @@
 
 #include "services/mesh_observation.h"
 
+#include "base/compiler.h"
 #include "base/hex.h"
 #include "base/log_macros.h"
 #include "chain/chain.h"
@@ -96,7 +97,7 @@
  * the shape a real build reports "the onion is down". */
 extern int dynhost_client_fetch(const char *, uint16_t, const char *,
     void (*)(int, const uint8_t *, size_t, void *), void *, int)
-    __attribute__((weak));
+    ZCL_WEAK_IMPORT;
 
 /* ── published state ────────────────────────────────────────────────── */
 

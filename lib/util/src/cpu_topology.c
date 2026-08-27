@@ -462,6 +462,7 @@ bool cpu_topology_pin_thread(pthread_t thread, int domain)
                  domain, g_state.domain_count);
     }
 
+#if defined(__linux__)
     cpu_set_t set;
     CPU_ZERO(&set);
     int n = g_state.domains[domain].cpu_count;
@@ -477,6 +478,10 @@ bool cpu_topology_pin_thread(pthread_t thread, int domain)
                  "errno=%d (%s)", domain, rc, strerror(rc));
     }
     return true;
+#else
+    (void)thread;
+    return false;
+#endif
 }
 
 /* ── Introspection ─────────────────────────────────────────────────── */

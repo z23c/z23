@@ -24,23 +24,31 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
 #include "net/site_routes.h"
 
-/* Same append-with-truncation-guard semantics as APPEND in
- * controllers/explorer_internal.h; separate name so both headers can be
- * included together. */
-#define SITE_APPEND(off, buf, max, ...) do { \
-    if ((off) < (max)) { \
-        size_t _rem = (max) - (off); \
-        int _n = snprintf((char *)(buf) + (off), _rem, __VA_ARGS__); \
-        if (_n > 0) { \
-            (off) += ((size_t)_n < _rem) ? (size_t)_n : _rem - 1; \
-        } \
-    } \
-} while (0)
+[[gnu::format(printf, 4, 5)]]
+static inline size_t site_appendf(char *buf, size_t max, size_t off,
+                                  const char *format, ...)
+{
+    if (off >= max)
+        return off;
+    size_t remaining = max - off;
+    va_list args;
+    va_start(args, format);
+    int written = vsnprintf(buf + off, remaining, format, args);
+    va_end(args);
+    if (written <= 0)
+        return off;
+    return off + ((size_t)written < remaining ? (size_t)written
+                                              : remaining - 1);
+}
+
+#define SITE_APPEND(off, buf, max, ...) \
+    ((off) = site_appendf((char *)(buf), (max), (off), __VA_ARGS__))
 
 /* Global site nav — the one bar that unifies every route family. `active`
  * is one of "explorer", "names", "store", "blog", "metaverse", "yardsale",

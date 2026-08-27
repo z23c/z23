@@ -433,7 +433,7 @@ static bool rpc_healthcheck_full(const struct json_value *params,
         if (bs.stale) {
             char detail[256];
             snprintf(detail, sizeof(detail),
-                     "running=%.12s on_disk=%.12s path=%s",
+                     "running=%.12s on_disk=%.12s path=%.200s",
                      bs.boot_digest_hex, bs.last_disk_digest_hex,
                      bs.exe_path);
             json_push_kv_str(&checks, "binary_stale_detail", detail);

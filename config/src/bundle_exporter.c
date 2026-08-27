@@ -142,11 +142,8 @@ static void bx_name_degraded(const char *degradation)
     int64_t last_us = atomic_load(&g_bx_last_export_time_us);
     int64_t age_secs = last_us > 0 ? (GetTimeMicros() - last_us) / 1000000 : -1;
 
-    /* The distinguishing detail goes FIRST: blocker_set keys fault identity on
-     * the reason, and the tail is what gets cut. `%.110s` bounds the borrowed
-     * degradation text so the whole sentence stays inside BLOCKER_REASON_MAX
-     * without needing a scratch buffer. */
-    char reason[BLOCKER_REASON_MAX];
+    /* blocker_init applies the shared visible-cut policy to this full reason. */
+    char reason[512];
     if (last_h >= 0 && age_secs >= 0)
         snprintf(reason, sizeof reason,
                  "no consensus-state bundle minted for %lld day(s) (newest is "
@@ -250,7 +247,7 @@ static int32_t bx_scan_newest(const char *dir, int64_t *out_mtime_us)
         long h;
         if (bx_parse_bundle_height(e->d_name, &h) && h > max) {
             max = h;
-            snprintf(maxname, sizeof maxname, "%s", e->d_name);
+            memcpy(maxname, e->d_name, strlen(e->d_name) + 1u);
         }
     }
     closedir(d);
@@ -389,7 +386,7 @@ static void bx_rotate(const char *dir, int keep, const char *datadir)
         long h;
         if (bx_parse_bundle_height(e->d_name, &h)) {
             gens[n].h = h;
-            snprintf(gens[n].name, sizeof gens[n].name, "%s", e->d_name);
+            memcpy(gens[n].name, e->d_name, strlen(e->d_name) + 1u);
             n++;
         }
     }

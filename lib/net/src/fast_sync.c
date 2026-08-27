@@ -23,9 +23,7 @@
 #include "util/safe_alloc.h"
 #include "util/log_macros.h"
 #include "json/json.h"
-#ifdef __GLIBC__
-#include <malloc.h>
-#endif
+#include "platform/allocator_compat.h"
 
 /* Cached UTXO root: the O(n) rolling SHA-256 is computed once at startup.
  * The incremental XOR commitment (maintained per-block) can verify the
@@ -489,9 +487,7 @@ int64_t fast_sync_prebuild_snapshot(const char *datadir,
         printf("[snapshot] Pre-serialized %lld UTXOs (%.1f MB), "
                "SHA3=%s — disk-backed metadata published\n",
                (long long)count, (double)sz / (1024.0 * 1024.0), hex);
-#ifdef __GLIBC__
-        malloc_trim(0);
-#endif
+        platform_allocator_release_free_pages();
     } else {
         fprintf(stderr, "[snapshot] Pre-serialization failed\n");  // obs-ok:helper-context-logged
     }
