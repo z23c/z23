@@ -196,6 +196,34 @@ int zmsg_store_list(struct zmsg_message *out, size_t max,
     return count;
 }
 
+bool zmsg_store_inbox_window(struct zmsg_message *out, size_t max,
+                             bool unread_only, size_t *written_out,
+                             int64_t *total_out)
+{
+    if (written_out) *written_out = 0;
+    if (total_out) *total_out = 0;
+    if (out && max <= SIZE_MAX / sizeof(*out))
+        memset(out, 0, max * sizeof(*out));
+    if (!written_out || !total_out || (max > 0 && !out) ||
+        max > SIZE_MAX / sizeof(*out))
+        LOG_FAIL("zmsg", "store_inbox_window: invalid output arguments");
+
+    pthread_mutex_lock(&g_zmsg_mutex);
+    size_t written = 0;
+    int64_t total = 0;
+    for (int i = g_msg_count - 1; i >= 0; i--) {
+        if (unread_only && g_messages[i].read)
+            continue;
+        total++;
+        if (written < max)
+            out[written++] = g_messages[i];
+    }
+    *written_out = written;
+    *total_out = total;
+    pthread_mutex_unlock(&g_zmsg_mutex);
+    return true;
+}
+
 bool zmsg_store_mark_read(const uint8_t msg_id[32])
 {
     pthread_mutex_lock(&g_zmsg_mutex);

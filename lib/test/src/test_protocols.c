@@ -533,6 +533,54 @@ int test_protocols(void)
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
+    /* ── ZMSG: atomic inbox window + exact filtered total ─── */
+
+    printf("zmsg_store atomic inbox window is newest-first and exact... ");
+    {
+        size_t ignored = 99;
+        int64_t before_all = -1, before_unread = -1;
+        bool ok = zmsg_store_inbox_window(NULL, 0, false, &ignored,
+                                           &before_all) && ignored == 0;
+        ok = ok && zmsg_store_inbox_window(NULL, 0, true, &ignored,
+                                            &before_unread) && ignored == 0;
+
+        struct zmsg_message added[3];
+        memset(added, 0, sizeof(added));
+        for (size_t i = 0; i < 3; i++) {
+            added[i].timestamp = 200000 + (int64_t)i;
+            snprintf(added[i].sender, sizeof(added[i].sender), "window-%zu", i);
+            snprintf(added[i].body, sizeof(added[i].body), "window body %zu", i);
+            zmsg_compute_id(&added[i], added[i].msg_id);
+            ok = ok && zmsg_store_add(&added[i]);
+        }
+        ok = ok && zmsg_store_mark_read(added[1].msg_id);
+
+        struct zmsg_message rows[2];
+        memset(rows, 0, sizeof(rows));
+        size_t written = 0;
+        int64_t total = 0;
+        ok = ok && zmsg_store_inbox_window(rows, 2, false, &written, &total) &&
+             written == 2 && total == before_all + 3 &&
+             memcmp(rows[0].msg_id, added[2].msg_id, 32) == 0 &&
+             memcmp(rows[1].msg_id, added[1].msg_id, 32) == 0;
+
+        memset(rows, 0, sizeof(rows));
+        ok = ok && zmsg_store_inbox_window(rows, 1, true, &written, &total) &&
+             written == 1 && total == before_unread + 2 &&
+             memcmp(rows[0].msg_id, added[2].msg_id, 32) == 0;
+
+        written = 77;
+        total = 88;
+        ok = ok && !zmsg_store_inbox_window(NULL, 1, false,
+                                             &written, &total) &&
+             written == 0 && total == 0;
+        memset(&rows[0], 0xA5, sizeof(rows[0]));
+        total = 88;
+        ok = ok && !zmsg_store_inbox_window(rows, 1, false, NULL, &total) &&
+             total == 0 && rows[0].timestamp == 0 && rows[0].body[0] == '\0';
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
+
     /* ── ZMSG: on-chain memo codec (v1) ───────────────────── */
 
     printf("zmsg_memo encode/decode round-trip... ");

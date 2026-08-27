@@ -153,8 +153,8 @@ static const struct api_json_resource_route k_api_json_resource_routes[] = {
       "zcl.swaps.chains.v1", "", "static", "", false },
     { "GET", "/api/swap_chains", "swaps", "chains", api_swap_chains,
       "zcl.swaps.chains.v1", "", "static", "/api/v1/swaps/chains", false },
-    { "GET", "/api/messages", "messages", "index", api_msg_inbox,
-      "zcl.messages.index.v1", "", "message_projection", "", true },
+    { "GET", "/api/messages", "messages", "index", api_msg_inbox, "zcl.messages.index.v1", "", "message_projection", "", true },
+    { "GET", "/api/messages/index", "messages", "index_window", api_msg_inbox_index, "zcl.messages.index.v2", "", "message_projection", "", true },
 };
 
 enum api_dynamic_dispatch_kind {

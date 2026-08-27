@@ -149,6 +149,16 @@ bool zmsg_store_add(const struct zmsg_message *msg);
 int zmsg_store_list(struct zmsg_message *out, size_t max,
                     bool unread_only);
 
+/* Snapshot one inbox window and its uncapped total under the same mutex.
+ * Rows are newest-first and use the same unread predicate as
+ * zmsg_store_list(). `written_out` and `total_out` are zeroed before any
+ * refusal; out may be NULL only when max is zero. The total is exact for the
+ * same instant as the copied rows, so concurrent delivery/read changes cannot
+ * make pagination metadata disagree with its window. */
+bool zmsg_store_inbox_window(struct zmsg_message *out, size_t max,
+                             bool unread_only, size_t *written_out,
+                             int64_t *total_out);
+
 /* Mark a message as read by msg_id. */
 bool zmsg_store_mark_read(const uint8_t msg_id[32]);
 
@@ -170,6 +180,9 @@ int db_zmsg_list(struct node_db *ndb, struct zmsg_message *out,
  * filter. -1 only when the store is unreadable. Documented alongside the
  * model in models/zmsg.h. */
 int db_zmsg_count(struct node_db *ndb, bool unread_only);
+bool db_zmsg_inbox_window(struct node_db *ndb, struct zmsg_message *out,
+                          size_t max, bool unread_only, size_t *rows_out,
+                          int64_t *total_out);
 bool db_zmsg_mark_read(struct node_db *ndb, const uint8_t msg_id[32]);
 
 #endif

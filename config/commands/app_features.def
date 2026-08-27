@@ -590,7 +590,7 @@ ZCL_COMMAND_READY_READ(
     "Every message in the inbox, newest first, read live at call time; bounded "
     "to the list budget row cap.", ZCL_COMMAND_LIST_BUDGET,
     "messaging,zmsg,inbox", "zcl.command.empty_input.v1",
-    "zcl.app_message_index.v1", "", "", "z23 app messaging inbox",
+    "zcl.app_message_index.v2", "", "", "z23 app messaging inbox",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER,
     ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
     ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,

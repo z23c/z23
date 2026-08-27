@@ -139,5 +139,19 @@ The same non-row audit was applied to the subsequently merged name-record
 totals: text and address counts now return `-1` on an interrupted store step,
 with both refusal paths pinned by deterministic tests.
 
+A later concurrent advance changed the established message-inbox RPC and REST
+response from a bare array to an object without changing the v1 schema. It
+also sampled bounded rows and the total in separate store operations, so a
+concurrent delivery or read could make the metadata disagree with the rows.
+The v1 `msg_inbox` and `/api/messages` contracts now retain their bare-array
+shape. The new `msg_inbox_index`, `/api/messages/index`, and native v2 command
+return `{messages,shown,total}`. SQLite derives the bounded rows and exact
+64-bit total from one statement; the memory store derives both under one mutex.
+Every failure clears partial output and returns an explicit refusal. Focused
+acceptance passed for `test_api`, `test_protocols`, and
+`test_command_registry_catalog`, including injected SQLite interruption,
+bounded-window truncation, concurrent-store invariants, legacy compatibility,
+and adversarial native bridge shapes.
+
 Wallet policy remained unchanged and no custody operation or canonical
 database surgery was performed.

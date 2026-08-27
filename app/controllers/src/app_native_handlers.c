@@ -112,30 +112,104 @@ char *zcl_native_name_list_body(const struct json_value *args,
  * leaf: the registry input validator only admits a fixed set of boolean keys
  * (verbose/confirm/relink_generation), so an `unread_only` bool would be
  * rejected before dispatch. The full inbox is the honest bounded read. */
+static bool native_inbox_index_valid(const struct json_value *doc)
+{
+    if (!doc || doc->type != JSON_OBJ)
+        return false;
+
+    size_t messages_fields = 0;
+    size_t shown_fields = 0;
+    size_t total_fields = 0;
+    for (size_t i = 0; i < doc->num_children; i++) {
+        const char *key = doc->keys[i];
+        if (strcmp(key, "messages") == 0)
+            messages_fields++;
+        else if (strcmp(key, "shown") == 0)
+            shown_fields++;
+        else if (strcmp(key, "total") == 0)
+            total_fields++;
+        else
+            return false;
+    }
+    if (messages_fields != 1 || shown_fields != 1 || total_fields > 1 ||
+        doc->num_children != 2 + total_fields)
+        return false;
+
+    const struct json_value *messages = json_get(doc, "messages");
+    const struct json_value *shown = json_get(doc, "shown");
+    const struct json_value *total = json_get(doc, "total");
+    size_t message_count = messages ? json_size(messages) : 0;
+    if (!messages || messages->type != JSON_ARR ||
+        !shown || shown->type != JSON_INT || shown->val.i < 0 ||
+        (uintmax_t)message_count > (uintmax_t)INT64_MAX ||
+        shown->val.i != (int64_t)message_count)
+        return false;
+    return !total || (total->type == JSON_INT && total->val.i >= shown->val.i);
+}
+
+static char *native_inbox_index_invalid(struct zcl_native_body_err *err,
+                                        const char *reason)
+{
+    err->status = ZCL_NATIVE_BODY_UNAVAILABLE;
+    snprintf(err->message, sizeof(err->message),
+             "RPC msg_inbox_index returned %s", reason);
+    LOG_NULL("native.app", "messaging.inbox index rejected: %s", reason);
+    return NULL;
+}
+
 char *zcl_native_msg_inbox_body(const struct json_value *args,
                                 struct zcl_native_body_err *err)
 {
     (void)args;
-    char *raw = app_native_rpc_noargs("msg_inbox", err);
+    char *raw = app_native_rpc_noargs("msg_inbox_index", err);
     if (!raw)
         return NULL;
-    /* msg_inbox now returns the index object ({messages, shown, total})
-     * directly, which passes through below unchanged. The array wrap is
-     * kept as tolerance for a peer still serving the older bare-array
-     * result: preserve the rows and make the native index shape explicit
-     * instead of letting the bridge reject every valid inbox. */
+
     struct json_value doc;
     json_init(&doc);
-    if (!json_read(&doc, raw, strlen(raw)) || doc.type != JSON_ARR) {
+    if (!json_read(&doc, raw, strlen(raw))) {
+        free(raw);
+        return native_inbox_index_invalid(err, "malformed JSON");
+    }
+    if (doc.type == JSON_OBJ) {
+        if (!native_inbox_index_valid(&doc)) {
+            json_free(&doc);
+            free(raw);
+            return native_inbox_index_invalid(err, "an invalid index object");
+        }
         json_free(&doc);
         return raw;
     }
+    if (doc.type != JSON_ARR) {
+        json_free(&doc);
+        free(raw);
+        return native_inbox_index_invalid(err, "a non-index JSON value");
+    }
+    if ((uintmax_t)json_size(&doc) > (uintmax_t)INT64_MAX) {
+        json_free(&doc);
+        free(raw);
+        return native_inbox_index_invalid(err, "an oversized legacy array");
+    }
+
+    /* A rolling-upgrade peer may still answer with the legacy bare array.
+     * Its complete known window has an exact shown count; total remains
+     * absent because the legacy response cannot prove it. */
     free(raw);
     struct json_value wrapped;
     json_init(&wrapped);
     json_set_object(&wrapped);
-    (void)json_push_kv(&wrapped, "messages", &doc);
+    bool built = json_push_kv(&wrapped, "messages", &doc) &&
+                 json_push_kv_int(&wrapped, "shown",
+                                  (int64_t)json_size(&doc));
     json_free(&doc);
+    if (!built) {
+        json_free(&wrapped);
+        err->status = ZCL_NATIVE_BODY_INTERNAL;
+        snprintf(err->message, sizeof(err->message),
+                 "could not build the legacy message inbox index");
+        LOG_NULL("native.app", "messaging.inbox legacy wrap failed");
+        return NULL;
+    }
     size_t need = json_write(&wrapped, NULL, 0);
     char *out = zcl_malloc(need + 1, "native.messaging_inbox");
     if (out)

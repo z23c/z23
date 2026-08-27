@@ -25,15 +25,28 @@ DEFINE_MODEL_CALLBACKS(zmsg)
 
 #ifdef ZCL_TESTING
 static int (*g_zmsg_count_step_fn)(void *) = NULL;
+static int (*g_zmsg_window_step_fn)(void *) = NULL;
 void db_zmsg_test_set_count_step(int (*step_fn)(void *stmt))
 {
     g_zmsg_count_step_fn = step_fn;
+}
+void db_zmsg_test_set_window_step(int (*step_fn)(void *stmt))
+{
+    g_zmsg_window_step_fn = step_fn;
 }
 #define ZMSG_COUNT_STEP(stmt) \
     (g_zmsg_count_step_fn ? g_zmsg_count_step_fn(stmt) \
                           : AR_STEP_ROW_READONLY(stmt))
 #else
 #define ZMSG_COUNT_STEP(stmt) AR_STEP_ROW_READONLY(stmt)
+#endif
+
+#ifdef ZCL_TESTING
+#define ZMSG_WINDOW_STEP(stmt) \
+    (g_zmsg_window_step_fn ? g_zmsg_window_step_fn(stmt) \
+                           : AR_STEP_ROW_READONLY(stmt))
+#else
+#define ZMSG_WINDOW_STEP(stmt) AR_STEP_ROW_READONLY(stmt)
 #endif
 
 static bool read_zmsg_blob(sqlite3_stmt *s, int col, void *dest,
@@ -185,6 +198,103 @@ int db_zmsg_count(struct node_db *ndb, bool unread_only)
     count = sqlite3_column_int64(s, 0);
     AR_FINALIZE(s);
     return count > INT_MAX ? INT_MAX : (int)count;
+}
+
+bool db_zmsg_inbox_window(struct node_db *ndb, struct zmsg_message *out,
+                          size_t max, bool unread_only, size_t *rows_out,
+                          int64_t *total_out)
+{
+    if (rows_out) *rows_out = 0;
+    if (total_out) *total_out = 0;
+    if (out && max <= SIZE_MAX / sizeof(*out))
+        memset(out, 0, max * sizeof(*out));
+    if (!rows_out || !total_out)
+        LOG_FAIL("zmsg", "db_zmsg_inbox_window: output counts are NULL");
+    if (!ndb || !ndb->open || !ndb->db)
+        LOG_FAIL("zmsg", "db_zmsg_inbox_window: db not open");
+    if ((!out && max > 0) || max > (size_t)INT64_MAX ||
+        max > SIZE_MAX / sizeof(*out))
+        LOG_FAIL("zmsg", "db_zmsg_inbox_window: invalid output window max=%zu",
+                 max);
+
+    static const char sql[] =
+        "WITH filtered AS MATERIALIZED ("
+        " SELECT rowid AS zrowid,msg_id,direction,channel,sender,recipient,"
+        " body,timestamp,txid,read FROM zmsg_messages"
+        " WHERE (?1=0 OR read=0)),"
+        " summary AS (SELECT count(*) AS total FROM filtered),"
+        " windowed AS ("
+        " SELECT msg_id,direction,channel,sender,recipient,body,timestamp,"
+        " txid,read,row_number() OVER (ORDER BY timestamp DESC,zrowid DESC)"
+        " AS rn FROM filtered ORDER BY timestamp DESC,zrowid DESC LIMIT ?2)"
+        " SELECT msg_id,direction,channel,sender,recipient,body,timestamp,"
+        " txid,read,summary.total,windowed.rn,1 AS present"
+        " FROM summary CROSS JOIN windowed"
+        " UNION ALL SELECT NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,"
+        " summary.total,0,0 FROM summary"
+        " WHERE NOT EXISTS (SELECT 1 FROM windowed)"
+        " ORDER BY present DESC,rn ASC";
+
+    sqlite3_stmt *s = NULL;
+    int rc = sqlite3_prepare_v2(ndb->db, sql, -1, &s, NULL);
+    if (rc != SQLITE_OK || !s) {
+        char context[160];
+        snprintf(context, sizeof(context), "%s", sqlite3_errmsg(ndb->db));
+        if (s) AR_FINALIZE(s);
+        LOG_FAIL("zmsg", "db_zmsg_inbox_window: prepare failed rc=%d: %s",
+                 rc, context);
+    }
+    rc = sqlite3_bind_int(s, 1, unread_only ? 1 : 0);
+    if (rc == SQLITE_OK)
+        rc = sqlite3_bind_int64(s, 2, (sqlite3_int64)max);
+    if (rc != SQLITE_OK) {
+        char context[160];
+        snprintf(context, sizeof(context), "%s", sqlite3_errmsg(ndb->db));
+        AR_FINALIZE(s);
+        LOG_FAIL("zmsg", "db_zmsg_inbox_window: bind failed rc=%d: %s",
+                 rc, context);
+    }
+
+    size_t rows = 0;
+    int64_t total = 0;
+    bool have_total = false;
+    while ((rc = ZMSG_WINDOW_STEP(s)) == SQLITE_ROW) {
+        if (sqlite3_column_type(s, 9) != SQLITE_INTEGER ||
+            sqlite3_column_int64(s, 9) < 0) {
+            rc = SQLITE_CORRUPT;
+            goto row_failure;
+        }
+        int64_t row_total = sqlite3_column_int64(s, 9);
+        if (have_total && row_total != total) {
+            rc = SQLITE_CORRUPT;
+            goto row_failure;
+        }
+        total = row_total;
+        have_total = true;
+        if (sqlite3_column_int(s, 11) == 0)
+            continue;
+        if (rows >= max || !row_to_zmsg(s, &out[rows])) {
+            rc = rows >= max ? SQLITE_TOOBIG : SQLITE_CORRUPT;
+            goto row_failure;
+        }
+        rows++;
+    }
+    if (rc != SQLITE_DONE || !have_total)
+        goto row_failure;
+    AR_FINALIZE(s);
+    *rows_out = rows;
+    *total_out = total;
+    return true;
+
+row_failure: {
+        char context[160];
+        snprintf(context, sizeof(context), "%s", sqlite3_errmsg(ndb->db));
+        AR_FINALIZE(s);
+        if (out) memset(out, 0, max * sizeof(*out));
+        LOG_FAIL("zmsg",
+                 "db_zmsg_inbox_window: step/row failed rc=%d rows=%zu: %s",
+                 rc, rows, context);
+    }
 }
 
 bool db_zmsg_mark_read(struct node_db *ndb, const uint8_t msg_id[32])

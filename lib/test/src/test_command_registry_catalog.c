@@ -582,7 +582,7 @@ static int test_messaging_inbox_wraps_rpc_array(void)
 {
     int failures = 0;
     TEST("native messaging inbox preserves the RPC array in an object") {
-        g_bridge_rpc_method_fixture = "msg_inbox";
+        g_bridge_rpc_method_fixture = "msg_inbox_index";
         g_bridge_rpc_error_fixture =
             "[{\"msg_id\":\"abc\",\"read\":false}]";
         node_rpc_client_set_test_hook(bridge_rpc_error_mock);
@@ -599,6 +599,8 @@ static int test_messaging_inbox_wraps_rpc_array(void)
                                                    : NULL;
         bool ok = parsed && doc.type == JSON_OBJ && messages &&
                   messages->type == JSON_ARR && json_size(messages) == 1 &&
+                  json_get_int(json_get(&doc, "shown")) == 1 &&
+                  json_get(&doc, "total") == NULL &&
                   first && strcmp(json_get_str(json_get(first, "msg_id")),
                                   "abc") == 0;
 
@@ -633,7 +635,7 @@ static int test_messaging_inbox_passes_index_object_through(void)
 {
     int failures = 0;
     TEST("native messaging inbox passes the index object through") {
-        g_bridge_rpc_method_fixture = "msg_inbox";
+        g_bridge_rpc_method_fixture = "msg_inbox_index";
         g_bridge_rpc_error_fixture =
             "{\"messages\":[{\"msg_id\":\"abc\",\"read\":false}],"
             "\"shown\":1,\"total\":7}";
@@ -654,6 +656,53 @@ static int test_messaging_inbox_passes_index_object_through(void)
 
         json_free(&doc);
         free(body);
+
+        g_bridge_rpc_error_fixture = "{\"messages\":[],\"shown\":0}";
+        body = zcl_native_msg_inbox_body(NULL, &err);
+        json_init(&doc);
+        parsed = body && json_read(&doc, body, strlen(body));
+        ok = ok && parsed && doc.type == JSON_OBJ &&
+             json_get(&doc, "total") == NULL &&
+             json_get_int(json_get(&doc, "shown")) == 0;
+        json_free(&doc);
+        free(body);
+
+        node_rpc_client_set_test_hook(NULL);
+        g_bridge_rpc_method_fixture = NULL;
+        g_bridge_rpc_error_fixture = NULL;
+        ASSERT(ok);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_messaging_inbox_rejects_invalid_index(void)
+{
+    static const char *const invalid[] = {
+        "null",
+        "not-json",
+        "{}",
+        "{\"messages\":[],\"shown\":-1}",
+        "{\"messages\":[],\"shown\":1}",
+        "{\"messages\":{},\"shown\":0}",
+        "{\"messages\":[],\"shown\":0,\"total\":-1}",
+        "{\"messages\":[],\"shown\":0,\"total\":0.0}",
+        "{\"messages\":[],\"shown\":0,\"extra\":0}",
+        "{\"messages\":[],\"messages\":[],\"shown\":0}",
+    };
+    int failures = 0;
+    TEST("native messaging inbox rejects malformed index results") {
+        bool ok = true;
+        g_bridge_rpc_method_fixture = "msg_inbox_index";
+        node_rpc_client_set_test_hook(bridge_rpc_error_mock);
+        for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+            g_bridge_rpc_error_fixture = invalid[i];
+            struct zcl_native_body_err err = {0};
+            char *body = zcl_native_msg_inbox_body(NULL, &err);
+            ok = ok && !body && err.status == ZCL_NATIVE_BODY_UNAVAILABLE &&
+                 err.message[0] != '\0';
+            free(body);
+        }
         node_rpc_client_set_test_hook(NULL);
         g_bridge_rpc_method_fixture = NULL;
         g_bridge_rpc_error_fixture = NULL;
@@ -3653,6 +3702,8 @@ static int test_app_features_leaves(void)
             ASSERT(zcl_native_bridge_body_for_path(s->path) != NULL);
             ASSERT(zcl_native_bridge_rpc_for_path(s->path) == NULL);
         }
+        ASSERT_STR_EQ(find_spec(reg, "app.messaging.inbox")->output_schema,
+                      "zcl.app_message_index.v2");
 
         /* Executable write surface: READY with a dedicated (non-bridge)
          * handler, and every value-moving one still gated by plan/commit so a
@@ -4062,6 +4113,7 @@ int test_command_registry_catalog(void)
     failures += test_bridge_replacement_rejects_non_bridge_leaf();
     failures += test_messaging_inbox_wraps_rpc_array();
     failures += test_messaging_inbox_passes_index_object_through();
+    failures += test_messaging_inbox_rejects_invalid_index();
     failures += test_network_peer_add_binding();
     failures += test_bridge_rpc_errors_fail_closed();
     failures += test_raw_transaction_string_is_typed();

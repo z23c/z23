@@ -37,10 +37,20 @@ int db_zmsg_list(struct node_db *ndb, struct zmsg_message *out,
  * filter. -1 only when the store is unreadable. */
 int db_zmsg_count(struct node_db *ndb, bool unread_only);
 
+/* Read one bounded newest-first window and its exact uncapped total from one
+ * SQLite statement/snapshot. `rows_out` and `total_out` are initialized to
+ * zero on entry and remain zero on every refusal; no partial window succeeds.
+ * `out` may be NULL only when max is zero. */
+bool db_zmsg_inbox_window(struct node_db *ndb, struct zmsg_message *out,
+                          size_t max, bool unread_only, size_t *rows_out,
+                          int64_t *total_out);
+
 #ifdef ZCL_TESTING
 /* Deterministic store-step fault seam for the uncapped count helper.
  * NULL restores the production readonly step. */
 void db_zmsg_test_set_count_step(int (*step_fn)(void *stmt));
+/* Deterministic step fault seam for db_zmsg_inbox_window. */
+void db_zmsg_test_set_window_step(int (*step_fn)(void *stmt));
 #endif
 bool db_zmsg_mark_read(struct node_db *ndb, const uint8_t msg_id[32]);
 

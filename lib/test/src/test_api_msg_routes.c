@@ -46,13 +46,13 @@ static int zmsg_count_step_interrupted(void *stmt)
     return SQLITE_INTERRUPT;
 }
 
-/* Call the registered msg_inbox RPC with one bool arg. */
-static bool call_msg_inbox(bool unread_only, struct json_value *result)
+/* Call the registered exact-window inbox RPC with one bool arg. */
+static bool call_msg_inbox_index(bool unread_only, struct json_value *result)
 {
     struct rpc_table t;
     rpc_table_init(&t);
     register_msg_rpc_commands(&t);
-    const struct rpc_command *cmd = rpc_table_find(&t, "msg_inbox");
+    const struct rpc_command *cmd = rpc_table_find(&t, "msg_inbox_index");
     if (!cmd)
         return false;
     struct json_value params = {0}, arg = {0};
@@ -87,18 +87,32 @@ int api_msg_routes_focused_tests(void)
     int failures = 0;
 
     /* ── Fitting inbox: the window holds everything ──────────────── */
-    printf("api: /api/messages returns the inbox index object... ");
+    printf("api: /api/messages/index returns the inbox index object... ");
     {
         struct node_db ndb;
         memset(&ndb, 0, sizeof(ndb));
         bool ok = node_db_open(&ndb, ":memory:") && ndb.open;
+        struct zmsg_message model_rows[2];
+        size_t model_shown = 99;
+        int64_t model_total = -1;
+        ok = ok && db_zmsg_inbox_window(
+            &ndb, model_rows, 2, false, &model_shown, &model_total) &&
+            model_shown == 0 && model_total == 0;
         for (int i = 0; ok && i < 3; i++)
             ok = seed_inbox_row(&ndb, i, false);
         ok = ok && db_zmsg_count(&ndb, false) == 3;
+        ok = ok && db_zmsg_inbox_window(
+            &ndb, model_rows, 2, false, &model_shown, &model_total) &&
+            model_shown == 2 && model_total == 3 &&
+            strcmp(model_rows[0].sender, "peer002") == 0 &&
+            strcmp(model_rows[1].sender, "peer001") == 0;
+        ok = ok && db_zmsg_inbox_window(
+            &ndb, NULL, 0, false, &model_shown, &model_total) &&
+            model_shown == 0 && model_total == 3;
 
         rpc_msg_set_state(&ndb, NULL);
         uint8_t resp[16384];
-        size_t n = ok ? api_handle_request("GET", "/api/messages", NULL, 0,
+        size_t n = ok ? api_handle_request("GET", "/api/messages/index", NULL, 0,
                                            resp, sizeof(resp)) : 0;
         resp[n < sizeof(resp) ? n : sizeof(resp) - 1] = '\0';
         const char *body = api_test_body(resp, n, sizeof(resp));
@@ -111,6 +125,18 @@ int api_msg_routes_focused_tests(void)
         size_t rows = 0;
         ok = ok && inbox_counts(&root, &shown, &total, &rows);
         ok = ok && rows == 3 && shown == 3 && total == 3;
+        json_free(&root);
+
+        /* The established v1 route remains a bare array for callers that
+         * predate the exact-window index contract. */
+        n = ok ? api_handle_request("GET", "/api/messages", NULL, 0,
+                                    resp, sizeof(resp)) : 0;
+        resp[n < sizeof(resp) ? n : sizeof(resp) - 1] = '\0';
+        body = api_test_body(resp, n, sizeof(resp));
+        json_init(&root);
+        ok = ok && n > 0 && body &&
+             json_read(&root, body, strlen(body)) &&
+             root.type == JSON_ARR && json_size(&root) == 3;
         json_free(&root);
         rpc_msg_set_state(NULL, NULL);
         node_db_close(&ndb);
@@ -131,7 +157,7 @@ int api_msg_routes_focused_tests(void)
 
         rpc_msg_set_state(&ndb, NULL);
         struct json_value root = {0};
-        bool called = ok && call_msg_inbox(false, &root);
+        bool called = ok && call_msg_inbox_index(false, &root);
         int shown = -1, total = -1;
         size_t rows = 0;
         ok = called && inbox_counts(&root, &shown, &total, &rows);
@@ -153,7 +179,7 @@ int api_msg_routes_focused_tests(void)
     }
 
     /* ── Unread filter: totals follow the filter, not the window ──── */
-    printf("api: msg_inbox unread totals track the unread filter... ");
+    printf("api: msg_inbox_index totals track the unread filter... ");
     {
         struct node_db ndb;
         memset(&ndb, 0, sizeof(ndb));
@@ -161,9 +187,17 @@ int api_msg_routes_focused_tests(void)
         for (int i = 0; ok && i < 5; i++)
             ok = seed_inbox_row(&ndb, i, i >= 3);   /* last two read */
 
+        struct zmsg_message unread_rows[5];
+        size_t unread_shown = 0;
+        int64_t unread_total = 0;
+        ok = ok && db_zmsg_inbox_window(
+            &ndb, unread_rows, 5, true, &unread_shown, &unread_total) &&
+            unread_shown == 3 && unread_total == 3 &&
+            strcmp(unread_rows[0].sender, "peer002") == 0;
+
         rpc_msg_set_state(&ndb, NULL);
         struct json_value root = {0};
-        bool called = ok && call_msg_inbox(true, &root);
+        bool called = ok && call_msg_inbox_index(true, &root);
         int shown = -1, total = -1;
         size_t rows = 0;
         ok = called && inbox_counts(&root, &shown, &total, &rows);
@@ -171,7 +205,7 @@ int api_msg_routes_focused_tests(void)
         json_free(&root);
 
         root = (struct json_value){0};
-        called = ok && call_msg_inbox(false, &root);
+        called = ok && call_msg_inbox_index(false, &root);
         ok = called && inbox_counts(&root, &shown, &total, &rows);
         ok = ok && rows == 5 && shown == 5 && total == 5;
         json_free(&root);
@@ -205,7 +239,7 @@ int api_msg_routes_focused_tests(void)
         ok = ok && zmsg_store_add(&m);
 
         struct json_value root = {0};
-        bool called = ok && api_msg_inbox(&root);
+        bool called = ok && api_msg_inbox_index(&root);
         int shown = -1, total = -1;
         size_t rows = 0;
         ok = called && inbox_counts(&root, &shown, &total, &rows);
@@ -216,7 +250,7 @@ int api_msg_routes_focused_tests(void)
 
         /* The unread view's total is the store's own unread count. */
         root = (struct json_value){0};
-        called = ok && call_msg_inbox(true, &root);
+        called = ok && call_msg_inbox_index(true, &root);
         ok = called && inbox_counts(&root, &shown, &total, &rows);
         ok = ok && total == before_unread + 2;
         json_free(&root);
@@ -225,8 +259,8 @@ int api_msg_routes_focused_tests(void)
                       rows, shown, total); failures++; }
     }
 
-    /* ── Fail closed: an uncountable store drops the total ────────── */
-    printf("api: unreadable store keeps the total off the result... ");
+    /* ── Fail closed: an unreadable snapshot is never partial ────── */
+    printf("api: unreadable inbox snapshot fails closed... ");
     {
         int no_db = db_zmsg_count(NULL, false);
         struct node_db ndb;
@@ -236,9 +270,8 @@ int api_msg_routes_focused_tests(void)
         int closed = db_zmsg_count(&ndb, false);
         bool ok = no_db == -1 && closed == -1;
 
-        /* End to end: rows still list while the count step faults — the
-         * window is served with shown and no total rather than a
-         * made-up one. */
+        /* End to end: the index refuses a statement fault instead of
+         * returning rows with an invented or separately sampled total. */
         struct node_db seeded;
         memset(&seeded, 0, sizeof(seeded));
         ok = ok && node_db_open(&seeded, ":memory:") && seeded.open;
@@ -246,19 +279,28 @@ int api_msg_routes_focused_tests(void)
             ok = seed_inbox_row(&seeded, i, false);
         if (ok) {
             rpc_msg_set_state(&seeded, NULL);
-            db_zmsg_test_set_count_step(zmsg_count_step_interrupted);
+            db_zmsg_test_set_window_step(zmsg_count_step_interrupted);
             struct json_value root = {0};
-            bool called = api_msg_inbox(&root);
-            db_zmsg_test_set_count_step(NULL);
-            int shown = -1, total = -1;
-            size_t rows = 0;
-            bool counted =
-                called && inbox_counts(&root, &shown, &total, &rows);
-            bool has_total = counted && json_get(&root, "total") != NULL;
-            ok = counted && rows == 3 && shown == 3 && total == -1 &&
-                 !has_total;
+            bool called = api_msg_inbox_index(&root);
+            db_zmsg_test_set_window_step(NULL);
+            ok = !called && root.type == JSON_STR &&
+                 strstr(json_get_str(&root), "unavailable") != NULL;
             json_free(&root);
             rpc_msg_set_state(NULL, NULL);
+
+            /* The atomic model API never returns partial rows or stale
+             * counters when its one statement is interrupted. */
+            struct zmsg_message window[2];
+            memset(window, 0xA5, sizeof(window));
+            struct zmsg_message zero_window[2] = {0};
+            size_t window_rows = 7;
+            int64_t window_total = 7;
+            db_zmsg_test_set_window_step(zmsg_count_step_interrupted);
+            bool window_ok = db_zmsg_inbox_window(
+                &seeded, window, 2, false, &window_rows, &window_total);
+            db_zmsg_test_set_window_step(NULL);
+            ok = !window_ok && window_rows == 0 && window_total == 0 &&
+                 memcmp(window, zero_window, sizeof(window)) == 0;
         }
         node_db_close(&seeded);
         if (ok) printf("OK\n");

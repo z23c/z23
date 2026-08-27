@@ -482,7 +482,7 @@ represented by its children's sections.
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
-| `app messaging inbox` | ready | read / read / **owner** · fast/low | none | `zcl.app_message_index.v1` | `z23 app messaging inbox` | List inbox messages |
+| `app messaging inbox` | ready | read / read / **owner** · fast/low | none | `zcl.app_message_index.v2` | `z23 app messaging inbox` | List inbox messages |
 | `app messaging send` | ready | mutate / app-write / **owner**, plan-commit · foreground/moderate | `message`, `channel`, `peer_id`, `to`, `from_address`, `reply_to`, `confirm` | `zcl.app_message_send_result.v1` | `z23 app messaging send --input='{"channel":"p2p","peer_id":1,"message":"hi","confirm":true}'` | Send a message |
 | `app messaging send-named` | planned | mutate / app-write / **owner**, plan-commit · foreground/moderate | **`name`**, `message`, `confirm` | `zcl.app_message_send_result.v1` | `z23 app messaging send-named --input='{"name":"alice","message":"hi"}'` | Send a message to a ZCL Name — *needs an outbound delivery path before it can be exposed natively: rpc_msg_send_named (messaging_controller.c) resolves the name, calls zmsg_store_add + db_zmsg_save, and answers status=queued, but nothing in the tree ever drains that store onto a peer socket — no writer sends MSG_ZMSG for a stored message, so the queue has no consumer and the message is never delivered. Use app messaging send with an explicit peer_id, whose write to the peer socket is real* |
 | `app messaging read` | ready | mutate / app-write / **owner** · fast/low | **`msg_id`** | `zcl.app_message_read_result.v1` | `z23 app messaging read --input='{"msg_id":"<64hex>"}'` | Mark a message read |

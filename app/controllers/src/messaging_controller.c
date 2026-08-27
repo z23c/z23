@@ -17,6 +17,7 @@
 #include "sapling/sapling_prover.h"  /* prover readiness = can we send on-chain */
 #include "chain/chainparams.h"
 #include "models/znam.h"
+#include "models/zmsg.h"
 #include "encoding/utilstrencodings.h"
 #include "json/json.h"
 #include "rpc/server.h"
@@ -313,10 +314,44 @@ static bool rpc_msg_send(const struct json_value *params, bool help,
 
 /* ── msg_inbox ──────────────────────────────────────────────────── */
 
-/* The inbox serves a bounded newest-first window. Before the object result
- * the response was a bare array, so an inbox that outgrew the window was
- * reported as if it were the whole inbox. */
+/* The inbox serves a bounded newest-first window. The legacy RPC remains a
+ * bare array. The index RPC discloses the exact size of the same snapshot. */
 #define MSG_INBOX_WINDOW 50
+
+static bool msg_inbox_window(bool unread_only, struct zmsg_message *msgs,
+                             size_t *shown, int64_t *total)
+{
+    if (g_msg_ndb)
+        return db_zmsg_inbox_window(g_msg_ndb, msgs, MSG_INBOX_WINDOW,
+                                    unread_only, shown, total);
+    return zmsg_store_inbox_window(msgs, MSG_INBOX_WINDOW, unread_only,
+                                   shown, total);
+}
+
+static bool msg_inbox_unread_only(const struct json_value *params)
+{
+    if (!params || json_size(params) == 0)
+        return false;
+    const struct json_value *arg0 = json_at(params, 0);
+    return arg0 && json_get_int(arg0) != 0;
+}
+
+static bool msg_inbox_array(const struct zmsg_message *msgs, size_t count,
+                            struct json_value *result)
+{
+    json_set_array(result);
+    for (size_t i = 0; i < count; i++) {
+        struct json_value entry = {0};
+        msg_to_json(&msgs[i], &entry);
+        if (!json_push_back(result, &entry)) {
+            json_free(&entry);
+            json_free(result);
+            LOG_FAIL("zmsg", "inbox JSON row append failed at row %zu", i);
+        }
+        json_free(&entry);
+    }
+    return true;
+}
 
 static bool rpc_msg_inbox(const struct json_value *params, bool help,
                           struct json_value *result)
@@ -327,58 +362,56 @@ static bool rpc_msg_inbox(const struct json_value *params, bool help,
             "\nList messages in the inbox, newest first.\n"
             "\nArguments:\n"
             "1. unread_only (bool, optional) Only show unread messages\n"
-            "\nResult: { messages: [...], shown: n, total: m }\n"
-            "\nmessages is a bounded newest-first window; shown is how "
-            "many it returned and total is the inbox's full size under "
-            "the same filter. shown < total means the window stopped "
-            "short. total is omitted when the store cannot be counted.\n");
+            "\nResult: [...]\n"
+            "\nReturns the legacy bounded newest-first message array. Use "
+            "msg_inbox_index to distinguish a complete result from a "
+            "truncated window.\n");
         return true;
     }
 
-    bool unread_only = false;
-    if (params && json_size(params) > 0) {
-        const struct json_value *arg0 = json_at(params, 0);
-        if (arg0) unread_only = json_get_int(arg0) != 0;
+    struct zmsg_message msgs[MSG_INBOX_WINDOW];
+    size_t shown = 0;
+    int64_t total = 0;
+    if (!msg_inbox_window(msg_inbox_unread_only(params), msgs, &shown,
+                          &total)) {
+        json_set_str(result, "Message inbox is unavailable");
+        LOG_FAIL("zmsg", "legacy inbox snapshot failed");
+    }
+    return msg_inbox_array(msgs, shown, result);
+}
+
+static bool rpc_msg_inbox_index(const struct json_value *params, bool help,
+                                struct json_value *result)
+{
+    if (help) {
+        json_set_str(result,
+            "msg_inbox_index [unread_only=false]\n"
+            "\nList an exact bounded inbox snapshot, newest first.\n"
+            "\nResult: { messages: [...], shown: n, total: m }\n"
+            "\nshown < total means the bounded window was truncated.\n");
+        return true;
     }
 
     struct zmsg_message msgs[MSG_INBOX_WINDOW];
-    int count = 0;
-    bool served_db = false;
-
-    /* Try SQLite first, fall back to in-memory store (unchanged selection:
-     * an empty db still lets the store answer). */
-    if (g_msg_ndb) {
-        count = db_zmsg_list(g_msg_ndb, msgs, MSG_INBOX_WINDOW, unread_only);
-        served_db = count > 0;
+    size_t shown = 0;
+    int64_t total = 0;
+    if (!msg_inbox_window(msg_inbox_unread_only(params), msgs, &shown,
+                          &total)) {
+        json_set_str(result, "Message inbox index is unavailable");
+        LOG_FAIL("zmsg", "indexed inbox snapshot failed");
     }
-    if (count == 0)
-        count = zmsg_store_list(msgs, MSG_INBOX_WINDOW, unread_only);
-
-    /* Total comes from the store that served the rows, so shown and total
-     * can never describe two different stores. A count failure only drops
-     * the field; it never blocks the listing. */
-    int total = -1;
-    if (served_db)
-        total = db_zmsg_count(g_msg_ndb, unread_only);
-    else
-        total = unread_only ? zmsg_store_count_unread()
-                            : zmsg_store_count();
 
     json_set_object(result);
     struct json_value arr = {0};
-    json_set_array(&arr);
-    for (int i = 0; i < count; i++) {
-        struct json_value e = {0};
-        msg_to_json(&msgs[i], &e);
-        json_push_back(&arr, &e);
-        json_free(&e);
+    if (!msg_inbox_array(msgs, shown, &arr) ||
+        !json_push_kv(result, "messages", &arr) ||
+        !json_push_kv_int(result, "shown", (int64_t)shown) ||
+        !json_push_kv_int(result, "total", total)) {
+        json_free(&arr);
+        json_free(result);
+        LOG_FAIL("zmsg", "indexed inbox JSON construction failed");
     }
-    json_push_kv(result, "messages", &arr);
     json_free(&arr);
-    json_push_kv_int(result, "shown", count);
-    if (total >= 0)
-        json_push_kv_int(result, "total", total);
-
     return true;
 }
 
@@ -496,6 +529,11 @@ bool api_msg_inbox(struct json_value *result)
     return rpc_msg_inbox(NULL, false, result);
 }
 
+bool api_msg_inbox_index(struct json_value *result)
+{
+    return rpc_msg_inbox_index(NULL, false, result);
+}
+
 /* ── Diagnostics: `ops state --subsystem=messaging` ──────────────────
  *
  * See CLAUDE.md "Adding state introspection". Reports the two ZMSG channels'
@@ -565,6 +603,7 @@ void register_msg_rpc_commands(struct rpc_table *t)
         { "messaging", "msg_send",       rpc_msg_send,       true },
         { "messaging", "msg_send_named", rpc_msg_send_named, true },
         { "messaging", "msg_inbox",      rpc_msg_inbox,      true },
+        { "messaging", "msg_inbox_index", rpc_msg_inbox_index, true },
         { "messaging", "msg_read",       rpc_msg_read,       true },
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)
