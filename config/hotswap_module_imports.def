@@ -132,7 +132,8 @@
  * Mechanically, from the artifacts — not from anyone's idea of what a module
  * ought to need:
  *
- *   for f in build/hotswap/*.so; do nm -D --undefined-only "$f"; done \
+ *   find build/hotswap -maxdepth 1 -name '*.so' \
+ *     -exec nm -D --undefined-only {} \; \
  *     | awk '{print $NF}' | sed 's/@.*$//' | LC_ALL=C sort -u
  *
  * over every module .so present (93 artifacts spanning several build

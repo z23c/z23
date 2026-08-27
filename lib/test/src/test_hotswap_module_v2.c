@@ -25,12 +25,18 @@
 #include "test/test_helpers.h"
 
 #include "hotswap/hotswap.h"
+#include "hotswap/hotswap_elf_probe.h"
 #include "hotswap/hotswap_module.h"
+#include "hotswap/hotswap_sealed_image.h"
 #include "kernel/command_registry.h"
 #include "json/json.h"
 
+#include <errno.h>
+#include <fcntl.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 /* The status controller row of config/hotswap_swappable.def; its declared probe
  * leaf in config/hotswap_eligible.def is core.status. */
@@ -578,6 +584,253 @@ static int t_parameterized_probe_catalog_is_host_owned(void)
     return failures;
 }
 
+static void elf_put16(unsigned char *p, uint16_t v)
+{
+    p[0] = (unsigned char)v;
+    p[1] = (unsigned char)(v >> 8);
+}
+
+static void elf_put32(unsigned char *p, uint32_t v)
+{
+    for (unsigned i = 0; i < 4; i++)
+        p[i] = (unsigned char)(v >> (i * 8));
+}
+
+static void elf_put64(unsigned char *p, uint64_t v)
+{
+    for (unsigned i = 0; i < 8; i++)
+        p[i] = (unsigned char)(v >> (i * 8));
+}
+
+static void elf_dyn(unsigned char *image, size_t slot,
+                    uint64_t tag, uint64_t value)
+{
+    const size_t off = 512u + slot * 16u;
+    elf_put64(image + off, tag);
+    elf_put64(image + off + 8u, value);
+}
+
+/* A minimal parser fixture. It is structural evidence, not executable code:
+ * one PT_LOAD covers the image, PT_DYNAMIC names bounded string/symbol/hash
+ * tables, and section headers independently describe the init array. */
+static void elf_fixture(unsigned char image[4096], bool with_init,
+                        bool duplicate_seal)
+{
+    enum {
+        ELF_BASE = 0x10000, STR_OFF = 1024, SYM_OFF = 1280,
+        HASH_OFF = 1536, INIT_OFF = 1664, ROOT_OFF = 1728,
+        ABI_OFF = 1800, SHSTR_OFF = 1984, SH_OFF = 2048
+    };
+    const char seal_name[] = ZCL_HOTSWAP_MODULE_CORE_SEAL_ROOT_SYMBOL;
+    const char abi_name[] = ZCL_HOTSWAP_MODULE_SYMBOL;
+    const char sh_names[] = "\0.shstrtab\0.init_array\0";
+    const uint32_t seal_idx = 1;
+    const uint32_t abi_idx = seal_idx + (uint32_t)sizeof(seal_name);
+    const uint32_t sym_count = duplicate_seal ? 4u : 3u;
+
+    memset(image, 0, 4096);
+    memcpy(image, "\177ELF", 4);
+    image[4] = 2; image[5] = 1; image[6] = 1;
+    elf_put16(image + 16, 3);            /* ET_DYN */
+    elf_put16(image + 18, 62);           /* EM_X86_64 */
+    elf_put32(image + 20, 1);
+    elf_put64(image + 32, 64);
+    elf_put64(image + 40, SH_OFF);
+    elf_put16(image + 52, 64);
+    elf_put16(image + 54, 56);
+    elf_put16(image + 56, 2);
+    elf_put16(image + 58, 64);
+    elf_put16(image + 60, with_init ? 3 : 2);
+    elf_put16(image + 62, 1);
+
+    elf_put32(image + 64, 1);            /* PT_LOAD */
+    elf_put64(image + 64 + 16, ELF_BASE);
+    elf_put64(image + 64 + 32, 4096);
+    elf_put64(image + 64 + 40, 4096);
+    elf_put32(image + 120, 2);           /* PT_DYNAMIC */
+    elf_put64(image + 120 + 8, 512);
+    elf_put64(image + 120 + 16, ELF_BASE + 512);
+    elf_put64(image + 120 + 32, 9 * 16);
+    elf_put64(image + 120 + 40, 9 * 16);
+
+    size_t d = 0;
+    elf_dyn(image, d++, 5, ELF_BASE + STR_OFF);
+    elf_dyn(image, d++, 10, sizeof(seal_name) + sizeof(abi_name) + 1u);
+    elf_dyn(image, d++, 6, ELF_BASE + SYM_OFF);
+    elf_dyn(image, d++, 11, 24);
+    elf_dyn(image, d++, 4, ELF_BASE + HASH_OFF);
+    if (with_init) {
+        elf_dyn(image, d++, 25, ELF_BASE + INIT_OFF);
+        elf_dyn(image, d++, 27, 8);
+    }
+    elf_dyn(image, d, 0, 0);
+
+    image[STR_OFF] = '\0';
+    memcpy(image + STR_OFF + seal_idx, seal_name, sizeof(seal_name));
+    memcpy(image + STR_OFF + abi_idx, abi_name, sizeof(abi_name));
+    elf_put32(image + HASH_OFF, 1);
+    elf_put32(image + HASH_OFF + 4, sym_count);
+
+    unsigned char *seal_sym = image + SYM_OFF + 24;
+    elf_put32(seal_sym, seal_idx);
+    elf_put16(seal_sym + 6, 1);
+    elf_put64(seal_sym + 8, ELF_BASE + ROOT_OFF);
+    elf_put64(seal_sym + 16, 65);
+    unsigned char *abi_sym = image + SYM_OFF + 48;
+    elf_put32(abi_sym, abi_idx);
+    elf_put16(abi_sym + 6, 1);
+    elf_put64(abi_sym + 8, ELF_BASE + ABI_OFF);
+    elf_put64(abi_sym + 16, 4);
+    if (duplicate_seal)
+        memcpy(image + SYM_OFF + 72, seal_sym, 24);
+    memcpy(image + ROOT_OFF, ZCL_CORE_SEAL_ROOT, 65);
+    elf_put32(image + ABI_OFF, ZCL_HOTSWAP_MODULE_ABI_V2);
+
+    memcpy(image + SHSTR_OFF, sh_names, sizeof(sh_names));
+    unsigned char *shstr = image + SH_OFF + 64;
+    elf_put32(shstr, 1);
+    elf_put32(shstr + 4, 3);              /* SHT_STRTAB */
+    elf_put64(shstr + 16, ELF_BASE + SHSTR_OFF);
+    elf_put64(shstr + 24, SHSTR_OFF);
+    elf_put64(shstr + 32, sizeof(sh_names));
+    if (with_init) {
+        unsigned char *init = image + SH_OFF + 128;
+        elf_put32(init, 11);
+        elf_put32(init + 4, 14);          /* SHT_INIT_ARRAY */
+        elf_put64(init + 16, ELF_BASE + INIT_OFF);
+        elf_put64(init + 24, INIT_OFF);
+        elf_put64(init + 32, 8);
+    }
+}
+
+static int fixture_fd(const unsigned char image[4096], char path[64])
+{
+    snprintf(path, 64, "/tmp/z23-hotswap-elf-XXXXXX");
+    int fd = mkstemp(path);
+    if (fd < 0)
+        return -1;
+    size_t off = 0;
+    while (off < 4096) {
+        ssize_t n = write(fd, image + off, 4096 - off);
+        if (n <= 0) {
+            close(fd);
+            unlink(path);
+            return -1;
+        }
+        off += (size_t)n;
+    }
+    (void)lseek(fd, 0, SEEK_SET);
+    return fd;
+}
+
+static int t_pre_map_policy_is_zero_execution(void)
+{
+    int failures = 0;
+    TEST("pre-map policy requires exact identity and zero callbacks") {
+        struct hotswap_elf_facts facts = {0};
+        char err[256];
+        memcpy(facts.core_seal_root, ZCL_CORE_SEAL_ROOT, 65);
+        facts.core_seal_root_present = true;
+        facts.abi_version = ZCL_HOTSWAP_MODULE_ABI_V2;
+        facts.abi_version_present = true;
+        ASSERT(hotswap_elf_pre_map_admit(
+            &facts, ZCL_CORE_SEAL_ROOT, ZCL_HOTSWAP_MODULE_ABI_V2,
+            err, sizeof(err)));
+        facts.has_dt_init = true;
+        ASSERT(!hotswap_elf_pre_map_admit(
+            &facts, ZCL_CORE_SEAL_ROOT, ZCL_HOTSWAP_MODULE_ABI_V2,
+            err, sizeof(err)));
+        ASSERT(strstr(err, "DT_INIT") != NULL);
+        facts.has_dt_init = false;
+        facts.init_array_entries = 1;
+        ASSERT(!hotswap_elf_pre_map_admit(
+            &facts, ZCL_CORE_SEAL_ROOT, ZCL_HOTSWAP_MODULE_ABI_V2,
+            err, sizeof(err)));
+        facts.init_array_entries = 0;
+        facts.core_seal_root_present = false;
+        ASSERT(!hotswap_elf_pre_map_admit(
+            &facts, ZCL_CORE_SEAL_ROOT, ZCL_HOTSWAP_MODULE_ABI_V2,
+            err, sizeof(err)));
+        facts.core_seal_root_present = true;
+        facts.abi_version_present = false;
+        ASSERT(!hotswap_elf_pre_map_admit(
+            &facts, ZCL_CORE_SEAL_ROOT, ZCL_HOTSWAP_MODULE_ABI_V2,
+            err, sizeof(err)));
+        facts.abi_version_present = true;
+        facts.undefined_symbol_count = 1;
+        snprintf(facts.undefined_symbols[0],
+                 sizeof(facts.undefined_symbols[0]),
+                 "zcl_forbidden_runtime_import");
+        ASSERT(!hotswap_elf_pre_map_admit(
+            &facts, ZCL_CORE_SEAL_ROOT, ZCL_HOTSWAP_MODULE_ABI_V2,
+            err, sizeof(err)));
+        ASSERT(strstr(err, "undeclared") != NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int t_elf_probe_rejects_deception(void)
+{
+    int failures = 0;
+    TEST("ELF probe rejects pointer deception and duplicate identity") {
+        unsigned char image[4096];
+        char path[64], err[256];
+        struct hotswap_elf_facts facts;
+        elf_fixture(image, false, false);
+        int fd = fixture_fd(image, path);
+        ASSERT(fd >= 0);
+        ASSERT(hotswap_elf_probe_fd(fd, &facts, err, sizeof(err)));
+        ASSERT(hotswap_elf_pre_map_admit(
+            &facts, ZCL_CORE_SEAL_ROOT, ZCL_HOTSWAP_MODULE_ABI_V2,
+            err, sizeof(err)));
+        close(fd); unlink(path);
+
+        elf_fixture(image, true, false);
+        elf_put64(image + 2048 + 128 + 16, 0x10000 + 1664 + 8);
+        fd = fixture_fd(image, path);
+        ASSERT(fd >= 0);
+        ASSERT(!hotswap_elf_probe_fd(fd, &facts, err, sizeof(err)));
+        ASSERT(strstr(err, "disagrees") != NULL);
+        close(fd); unlink(path);
+
+        elf_fixture(image, false, true);
+        fd = fixture_fd(image, path);
+        ASSERT(fd >= 0);
+        ASSERT(!hotswap_elf_probe_fd(fd, &facts, err, sizeof(err)));
+        ASSERT(strstr(err, "duplicate") != NULL);
+        close(fd); unlink(path);
+
+        elf_fixture(image, false, false);
+        elf_dyn(image, 5, 5, 0x10000 + 1024); /* duplicate DT_STRTAB */
+        fd = fixture_fd(image, path);
+        ASSERT(fd >= 0);
+        ASSERT(!hotswap_elf_probe_fd(fd, &facts, err, sizeof(err)));
+        ASSERT(strstr(err, "duplicate DT_STRTAB") != NULL);
+        close(fd); unlink(path);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int t_sealed_image_is_bounded(void)
+{
+    int failures = 0;
+    TEST("sealed image rejects oversize before copying") {
+        char path[] = "/tmp/z23-hotswap-seal-XXXXXX";
+        char err[256];
+        int fd = mkstemp(path);
+        ASSERT(fd >= 0);
+        ASSERT(ftruncate(fd, (off_t)ZCL_HOTSWAP_SEALED_IMAGE_MAX_BYTES + 1) == 0);
+        int sealed = hotswap_sealed_image_from_fd(fd, err, sizeof(err));
+        ASSERT(sealed < 0);
+        ASSERT(strstr(err, "over") != NULL);
+        close(fd); unlink(path);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_hotswap_module_v2(void);
 
 int test_hotswap_module_v2(void)
@@ -592,6 +845,9 @@ int test_hotswap_module_v2(void)
     failures += t_generation_monotonic();
     failures += t_probe_mismatch_publishes_nothing();
     failures += t_consensus_pin_matches_the_seal();
+    failures += t_pre_map_policy_is_zero_execution();
+    failures += t_elf_probe_rejects_deception();
+    failures += t_sealed_image_is_bounded();
     zcl_command_registry_reset_overrides();
     zcl_command_registry_set_active(NULL);
     printf("=== hotswap_module_v2: %d failures ===\n", failures);

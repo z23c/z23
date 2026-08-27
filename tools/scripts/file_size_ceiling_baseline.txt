@@ -41,9 +41,6 @@ app/services/src/block_index_loader_rebuild.c 853 # ADR-0008 (seed-floor declara
 # lock-contention seatbelts (commit cadence, BEGIN IMMEDIATE, BUSY_SNAPSHOT
 # restart call, abort-streak park) — net 886 -> 866; baseline tightened.
 app/services/src/node_db_catchup_service.c 862
-# 2026-08-26: NEW entry at current LOC (gate's recorded-last-resort); grew
-# over in 91eb601a0's native-macOS portability wave.
-app/services/src/package_lifecycle.c 803 # ADR-0009
 app/services/src/rolling_anchor_service.c 801
 
 app/services/src/sticky_escalator.c 1271
@@ -77,15 +74,10 @@ app/views/src/explorer_pages_view.c 819
 # the phrase, minting one, printing it once) landed in its own
 # config/src/boot_wallet_phrase.c instead of here, and took 25 lines of
 # existing wiring out of boot.c with it.
-# ADR-0009 raises these four past their pre-portability records: the macOS
-# build lane (91eb601a0) added platform branches wholesale. Ratchet intent
-# unchanged — next content touch should shrink, never grow further.
-config/src/boot.c 4280 # ADR-0009
-# 2026-08-26: NEW entry at current LOC; same portability wave.
-config/src/boot_background_workers.c 801 # ADR-0009
+config/src/boot.c 4278
 config/src/boot_bundle_fetch.c 905
-config/src/boot_index.c 854 # ADR-0009
-config/src/boot_mint_anchor.c 809 # ADR-0009
+config/src/boot_index.c 851
+config/src/boot_mint_anchor.c 808
 config/src/boot_refold_staged.c 2077
 config/src/boot_services.c 1476
 # 2026-08-03: NEW entry at current LOC (gate's recorded-last-resort). The
@@ -98,11 +90,9 @@ config/src/bundle_exporter.c 991
 config/src/consensus_state_install_runtime.c 919
 config/src/consensus_state_producer_receipt.c 787
 config/src/consensus_state_snapshot_install_activate.c 1169 # ADR-0008 (seed-floor declaration)
-# 2026-08-26: NEW entry at current LOC; macOS portability wave.
-config/src/consensus_state_snapshot_export.c 803 # ADR-0009
 app/services/src/header_sync_service.c 846
 app/controllers/src/event_agent_summary.c 853
 # 2026-08-15: worker-side quarantine now records exact input/output hashes and
 # bounded execution observations. Observation assembly will move beside the
 # evidence codec; this reviewed baseline remains a hard no-growth ceiling.
-app/services/src/build_fabric_worker.c 877 # ADR-0009
+app/services/src/build_fabric_worker.c 860

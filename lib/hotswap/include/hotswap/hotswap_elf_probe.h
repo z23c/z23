@@ -55,12 +55,12 @@
  * the policy, and the counts below exist so the caller can write a correct
  * one instead of a superstitious one.
  *
- * ── ⛔ THE BASELINE TRAP: A CLEAN MODULE HAS init_array_entries == 1 ────────
- * `.init_array` is NOT empty on a clean module and never has been. Every
- * module this repository builds carries exactly ONE entry: the C runtime's
- * own `frame_dummy`, emitted by crtbegin for unwind-table registration. It is
- * not ours, we cannot remove it, and it is present in every artifact the
- * toolchain has ever produced here.
+ * ── ZERO PRE-MAP EXECUTION IS THE ADMISSION BASELINE ───────────────────────
+ * Ordinary `cc -shared` startup files add DT_INIT and a `frame_dummy`
+ * `.init_array` entry. Those are benign only by provenance, which a hostile
+ * artifact does not have. Admitted modules therefore use the repository's
+ * zero-startup-file build profile and must carry no DT_INIT, init array, or
+ * preinit array at all.
  *
  * VERIFIED, not assumed — this probe was run over EVERY artifact in
  * build/hotswap/ at the time this file was written: 93 .so files spanning 24
@@ -90,22 +90,10 @@
  *                             comment: absence is reported, not refused)
  *     undefined_symbol_count  18 .. 94
  *
- * Therefore:
- *
- *     ⛔ "has constructors"  is NOT  init_array_entries > 0
- *     ✅ "has constructors"  IS      init_array_entries > ZCL_HOTSWAP_ELF_PROBE_CLEAN_INIT_ARRAY_ENTRIES
- *
- * A policy written against `> 0` refuses every clean module and will be
- * "fixed" by deleting the check. A policy written against the baseline
- * constant refuses exactly the artifacts that added something.
- *
- * The same trap applies to has_dt_init: DT_INIT is present in EVERY clean
- * module (it points at the crt `_init` stub, address 0x1000 in each artifact
- * measured). `has_dt_init == true` is the NORMAL state and means nothing on
- * its own. It is reported because DT_INIT is a real pre-admission entry point
- * and a policy that pins the initialiser arrays while ignoring DT_INIT has
- * left a door open — but it must be judged against what the module's own
- * toolchain emits, not against zero.
+ * Historical artifacts with the crt baseline remain inspectable, but are not
+ * admissible. Treating one unverified function pointer as clean lets an
+ * attacker replace `frame_dummy` while preserving the count; treating
+ * DT_INIT as harmless leaves an independent entry point.
  *
  * ── WHY DT_NEEDED IS REPORTED HERE ─────────────────────────────────────────
  * A probe that counted only this object's own initialisers would miss the
@@ -164,6 +152,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "hotswap/hotswap_sealed_image.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -179,7 +169,7 @@ extern "C" {
 /* Whole-image allocation ceiling. The image is read into one contiguous
  * buffer so that every bounds check is against a single known length; this
  * cap is what keeps that allocation from being attacker-sized. */
-#define ZCL_HOTSWAP_ELF_PROBE_MAX_FILE_BYTES ((uint64_t)32u << 20) /* 32 MiB */
+#define ZCL_HOTSWAP_ELF_PROBE_MAX_FILE_BYTES ZCL_HOTSWAP_SEALED_IMAGE_MAX_BYTES
 
 #define ZCL_HOTSWAP_ELF_PROBE_MAX_PHNUM      512u
 #define ZCL_HOTSWAP_ELF_PROBE_MAX_SHNUM      4096u
@@ -192,12 +182,11 @@ extern "C" {
  * stack-safe. */
 #define ZCL_HOTSWAP_ELF_PROBE_MAX_NEEDED     8u
 #define ZCL_HOTSWAP_ELF_PROBE_NEEDED_NAME_CAP 64u
+#define ZCL_HOTSWAP_ELF_PROBE_MAX_UNDEFINED  256u
+#define ZCL_HOTSWAP_ELF_PROBE_SYMBOL_NAME_CAP 128u
 
-/* ⛔ THE CLEAN BASELINE. See the header comment: this is 1, not 0, because
- * crtbegin's `frame_dummy` occupies the single entry in every artifact this
- * toolchain builds. A constructor-detection policy compares AGAINST THIS,
- * never against zero. */
-#define ZCL_HOTSWAP_ELF_PROBE_CLEAN_INIT_ARRAY_ENTRIES ((size_t)1)
+/* Secure module builds omit crt startup files, leaving no pre-map callback. */
+#define ZCL_HOTSWAP_ELF_PROBE_CLEAN_INIT_ARRAY_ENTRIES ((size_t)0)
 
 /* Recommended minimum for `err`; every message this probe emits fits. */
 #define ZCL_HOTSWAP_ELF_PROBE_ERR_CAP 256u
@@ -223,6 +212,7 @@ struct hotswap_elf_facts {
      * refuses the whole probe — reporting a garbage pin that a caller would
      * then string-compare is worse than reporting nothing. */
     char     core_seal_root[65];
+    bool     core_seal_root_present;
 
     /* First member of the exported `zcl_hotswap_module` struct
      * (ZCL_HOTSWAP_MODULE_SYMBOL). C guarantees the first named member sits
@@ -240,9 +230,8 @@ struct hotswap_elf_facts {
 
     /* ── pre-admission code-execution surface ──────────────────────────── */
 
-    /* DT_INIT_ARRAYSZ / sizeof(void *). ⛔ CLEAN BASELINE IS 1, NOT 0 — see
-     * ZCL_HOTSWAP_ELF_PROBE_CLEAN_INIT_ARRAY_ENTRIES and the header comment.
-     * Raw count, no interpretation. */
+    /* DT_INIT_ARRAYSZ / sizeof(void *). Secure admission requires zero; raw
+     * count is retained so a refusal can name the artifact's exact claim. */
     size_t   init_array_entries;
 
     /* DT_PREINIT_ARRAYSZ / sizeof(void *). Clean baseline 0. glibc runs a
@@ -262,8 +251,7 @@ struct hotswap_elf_facts {
     size_t   fini_array_entries;
     bool     has_dt_fini;
 
-    /* DT_INIT present. ⛔ TRUE ON EVERY CLEAN MODULE (the crt `_init` stub).
-     * Not a signal on its own. */
+    /* DT_INIT present. Secure admission requires false. */
     bool     has_dt_init;
 
     /* DT_NEEDED entries. Clean baseline: needed_count == 1, needed[0] ==
@@ -294,6 +282,9 @@ struct hotswap_elf_facts {
      * the load fails, so this is the module's demanded surface against the
      * resident. Clean modules measured here sit in the 30-40 range. */
     size_t   undefined_symbol_count;
+    char     undefined_symbols[ZCL_HOTSWAP_ELF_PROBE_MAX_UNDEFINED]
+                              [ZCL_HOTSWAP_ELF_PROBE_SYMBOL_NAME_CAP];
+    bool     undefined_symbols_truncated;
 
     /* Bytes actually read from the descriptor. */
     uint64_t file_size;
@@ -323,6 +314,12 @@ struct hotswap_elf_facts {
  * false as "refuse this artifact", not as "assume the defaults". */
 bool hotswap_elf_probe_fd(int fd, struct hotswap_elf_facts *out,
                           char *err, size_t err_cap);
+
+/* The one pre-map policy shared by resident activation and offline verify. */
+bool hotswap_elf_pre_map_admit(const struct hotswap_elf_facts *facts,
+                               const char expected_core_seal_root[65],
+                               uint32_t expected_abi,
+                               char *err, size_t err_cap);
 
 #ifdef __cplusplus
 }

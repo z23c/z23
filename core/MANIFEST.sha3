@@ -4,23 +4,7 @@
 # the block-connection ordering layer named in the Makefile's
 # CORE_SEAL_PATHS (an ordering bug forks exactly as hard as a
 # predicate bug — see docs/adr/0002-sealed-consensus-core.md).
-# Format, in emitted order:
-#   <sha3-256 hex>  <path>              one per sealed file, path-sorted.
-#   SECTION  <dir>  <files>  <hex>      one per directory holding sealed
-#       files, path-sorted; <files> is RECURSIVE. <hex> is that
-#       directory's node digest in lib/codeindex's source Merkle dialect
-#       (codeindex_merkle.c): leaf = SHA3-256(0x10 || "zcl.codeindex.merkle.leaf.v1\0"
-#       || relpath\0 || u64le(size) || bytes); node = SHA3-256(0x11 ||
-#       "zcl.codeindex.merkle.node.v1\0" || dirpath\0 || u32le(nkids) || for each
-#       child kind||name\0||digest), children ordered by strcmp over the
-#       child's name, plus '/' for a directory. N-ary, so there is no
-#       leaf-pairing and no duplicate-tail ambiguity; tag 0x10 vs 0x11 plus
-#       the domain strings separate leaves from interior nodes.
-#   TREE  <hex>                         the root node (dirpath "") over the
-#       whole sealed set, same dialect.
-#   ROOT  <hex>                         FINAL LINE. The flat fold over every
-#       sorted `path \0 filehash` pair — the sealed core's identity, mirrored
-#       into hotswap/core_seal_root.h. FROZEN: SECTION/TREE are additive.
+# Format: <sha3-256 hex>  <path>, one per sealed file (sorted), then a final ROOT line.
 1449f017be0e301b124db897eef806aafe1836ca16f015c769afc6c48f37f5bc  core/UNSEAL.md
 0154dee8b452e80f28e6d9c915483ab19cf93ee834518edc355885204dad4119  core/chainparams/include/chain/chainparams.h
 76417939b54d9b0d0b2309c66b90fd20a510de3492bb6f97a11f4198292aa01f  core/chainparams/include/chain/chainparamsbase.h
@@ -91,28 +75,4 @@ d602d82043a31d2231b1c5710a2d63af557c26fc89e67c951cfb89350ddb9596  lib/validation
 cb9cf3ae1c84a7eb23e7a74f6b9f5856b803b2b43840ad5f0c91d7ec662980ad  lib/validation/include/validation/connect_block.h
 21c02a6fbd7a95df7ab8b3f00cc1a311f7fb133df250d4bb055e1568ef17e95c  lib/validation/src/chainstate.c
 4f650f8f3b844519f751fb06a4fc8dab9db0ec46a226ca269da17653fa5589af  lib/validation/src/connect_block.c
-SECTION  core  66  47e0783f6870a125bfe8740faac32e78fd3059ec52fc724d5a29720e77d87b3e
-SECTION  core/chainparams  12  92f3588bd5bf7baa762047db111f4ec501be81170255ec38fb44b3a6a816434f
-SECTION  core/chainparams/include  6  ef779ffaa74f93f2f119830afc90b607b4f2dc7597503f7e8d71e68cf9d71d6c
-SECTION  core/chainparams/include/chain  6  c85db47e801c763c9f5e35853d264553512aae99a6a04a1c64f773764257064e
-SECTION  core/chainparams/src  6  2e6e7bdb45fce18019f2bae2ecd516d7d3ba7bd00eee3b6c8a46c01bd13bd850
-SECTION  core/consensus  36  4a93644417c715d8edd7c561829bce03efc0bcb1ef51f98fbd9cc3477e70bcdd
-SECTION  core/consensus/include  17  93a0d56cd53b8242ab03862de7f4fa8474c3e051907ebfc13ad17b2c88c3bf08
-SECTION  core/consensus/include/domain  17  dd10b76650d4502aa2a3a1bd513432c11f0a4e6fc71f0d2efd2eca27b06982e4
-SECTION  core/consensus/include/domain/consensus  17  053940e24559cbb016fad0cf0707604edecad6781eb4a60839635422d4cd8dcf
-SECTION  core/consensus/src  19  34d704684dc2b44950f03038e0e3398cf03b0f230cc1713d7a249acf4f63de03
-SECTION  core/math  10  4a12df854665934805645f7b11b9ce279b93b7568fe58dde37f68d84913813da
-SECTION  core/math/include  5  3d74828940990b6914192791641041d1ad63de1b84d7693d2533f1c9b29a7edd
-SECTION  core/math/include/core  5  13bc29100524578193cb79036f24fe9e1d8538c0f45dcc4dd87956a25f4f2b38
-SECTION  core/math/src  5  bed7851826222b99834c6ee74bb3e7ce6155798a5ef78c798fe2f836bbf30862
-SECTION  core/params  7  9b023bcd18300a51052f45e69609bb741b2832e3ce6e6a02fd21a12ea94647c0
-SECTION  core/params/include  4  e07dc0f2326862830b48105e02648f8d76dfeee9a859b7c56679c461e2cca7f1
-SECTION  core/params/include/consensus  4  5680a2f2d804163e77f94854ee18838480d785b74b297265f2f8a77db9d02242
-SECTION  core/params/src  2  8fdd673c41b8758e48c6fb225c15d7bbdf79f6816066a1d0c793d4bee2c5f6b1
-SECTION  lib  4  98813389662a275597c863c78603e0650962a47376ca2d5aa022ce1d1438a559
-SECTION  lib/validation  4  f96f6cc3afb4be3797bc41e1607ea3520dc52fb19e712314ed498c542053aaa7
-SECTION  lib/validation/include  2  8434c5b6af68ca0b7e7f8148bffddffa21b92864af22ac86a5257611a309e480
-SECTION  lib/validation/include/validation  2  9449e5ef64f9226c770a9dd86d83745a8e0ada3611d909d7854ce2f1cf4fa3ca
-SECTION  lib/validation/src  2  6f9378a457006f876ccd8b298e882f924e56bbb4794c8a98bb87a2578bc3cd88
-TREE  cedb5217f76366e703a8c9deacb20f402b78d31c5ce552263bf2f4bce09f67e1
 ROOT  a1533630bda2379889f9db262f81cd6e265ad474f642a1ee7d1de9523ac3b1aa

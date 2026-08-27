@@ -169,12 +169,15 @@ bool vcs_swarm_engine_peer_known(const struct vcs_swarm_engine *engine,
  * from the DHT naming that root. This is not an announce frame: it does
  * not consume announce quota, raise ANNOUNCE_FLOOD, or mark the download
  * provider-restricted, because the evidence was authenticated by this
- * node before being handed in (the caller owns that duty). Idempotent on
- * both the root and re-application; true when the peer now offers the
- * root to the scheduler, false when the peer is unknown or its ad table
- * is full. Wake scheduling with vcs_swarm_engine_schedule_ready(). */
+ * node before being handed in (the caller owns that duty). expires_at is
+ * the signed record's Unix expiry and must be strictly after now; the engine
+ * removes the offer before scheduling at or beyond that time. Re-applying
+ * the same root updates its evidence expiry without consuming inventory.
+ * True when the peer now offers the root, false for unknown peers, expired
+ * evidence, or a full ad table. */
 bool vcs_swarm_engine_peer_offer(struct vcs_swarm_engine *engine,
-                                 uint64_t peer, const uint8_t root[32]);
+                                 uint64_t peer, const uint8_t root[32],
+                                 uint64_t expires_at, uint64_t now);
 
 /* All registered peer ids (bounded, ascending slot order). For the
  * transport glue's membership sync (drop detection). */

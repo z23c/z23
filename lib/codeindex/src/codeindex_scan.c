@@ -24,7 +24,6 @@
  *
  * This is deliberately heuristic. It is expected to be iterated; correctness
  * lives in test_codeindex against a controlled fixture. */
-
 #include "codeindex_priv.h"
 
 #include "util/log_macros.h"

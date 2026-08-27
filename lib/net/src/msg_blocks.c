@@ -3,10 +3,8 @@
  * Copyright 2026 Rhett Creighton - Apache License 2.0
  * Distributed under the MIT software license, see the accompanying
  * file COPYING or http://www.opensource.org/licenses/mit-license.php. */
-
 /* msg_blocks.c — Block message processing.
  * Split from msgprocessor.c for maintainability. */
-
 #include "platform/time_compat.h"
 #include "net/msg_internal.h"
 #include "net/peer_scoring.h"
@@ -30,13 +28,10 @@
 #include <string.h>
 #include <time.h>
 #include <stdatomic.h>
-
 /* Rebuild manifest when chain grows this many blocks beyond the cached one. */
 #define MANIFEST_REFRESH_BLOCKS 1000
 #define MSG_BLOCK_RETRYABLE_LOG_KEEPALIVE_SECS 15
-
 static struct log_throttle g_msg_block_retryable_log = LOG_THROTTLE_INIT;
-
 bool process_getblocks(struct msg_processor *mp, struct p2p_node *node,
                        struct byte_stream *s)
 {
@@ -47,17 +42,14 @@ bool process_getblocks(struct msg_processor *mp, struct p2p_node *node,
         LOG_FAIL("net", "failed to deserialize getblocks locator from %s",
                  node->addr_name);
     }
-
     struct uint256 hash_stop;
     if (!stream_read(s, hash_stop.data, 32)) {
         block_locator_free(&locator);
         LOG_FAIL("net", "failed to read getblocks hash_stop from %s",
                  node->addr_name);
     }
-
     struct block_index *pindex = NULL;
     struct active_chain *chain = &mp->main_state->chain_active;
-
     for (size_t i = 0; i < locator.num_hashes; i++) {
         struct block_index *found = block_map_find(
             &mp->main_state->map_block_index, &locator.vhave[i]);
@@ -70,7 +62,6 @@ bool process_getblocks(struct msg_processor *mp, struct p2p_node *node,
         }
     }
     block_locator_free(&locator);
-
     if (!pindex)
         pindex = block_map_find(&mp->main_state->map_block_index,
                                 &mp->params->consensus.hashGenesisBlock);

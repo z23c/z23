@@ -5290,21 +5290,19 @@ skip_parallel_tests:
 
     /* ── Client-puzzle PoW guard for zchunkreq/zblkreq (lane I3) ────
      * See msgprocessor_snapshot_serve.c for the stateless design note:
-     * challenge = SHA3-256(domain||peer_ip||time_bucket) with a fixed
-     * public lane tag, no per-peer server state, no seed distribution
-     * round trip. Difficulty is 0 (mechanism present, gate open) until
-     * armed. */
+     * challenge = SHA3-256(domain || request-kind || request-index-le ||
+     * time-bucket-le), using requester-visible fields only. */
 
     printf("snap_pow: disarmed by default — gate stays open regardless "
            "of nonce... ");
     {
         msgprocessor_test_snap_pow_reset();
-        uint8_t ip[16] = {0}; ip[15] = 1;
         int64_t t = 5000000;
-        bool admit_no_nonce = msgprocessor_test_snap_pow_admit_at(ip, t, NULL);
+        bool admit_no_nonce = msgprocessor_test_snap_pow_admit_at(
+            MSG_SNAP_POW_KIND_CHUNK, 1, t, NULL);
         uint64_t bogus = 0xdeadbeefULL;
-        bool admit_bad_nonce =
-            msgprocessor_test_snap_pow_admit_at(ip, t + 1, &bogus);
+        bool admit_bad_nonce = msgprocessor_test_snap_pow_admit_at(
+            MSG_SNAP_POW_KIND_BLOCK, 2, t + 1, &bogus);
         bool ok = admit_no_nonce && admit_bad_nonce &&
                   !msg_snapshot_pow_is_armed();
         if (ok) printf("OK\n");
@@ -5319,11 +5317,11 @@ skip_parallel_tests:
     {
         msgprocessor_test_snap_pow_reset();
         msg_snapshot_pow_set_armed(true);
-        uint8_t ip[16] = {0}; ip[15] = 2;
         int64_t t = 6000000;
         int bits = msgprocessor_test_snap_pow_bits_at(t); /* fresh window: floor */
 
-        bool reject_missing = !msgprocessor_test_snap_pow_admit_at(ip, t, NULL);
+        bool reject_missing = !msgprocessor_test_snap_pow_admit_at(
+            MSG_SNAP_POW_KIND_CHUNK, 17, t, NULL);
         /* A fixed "bogus" nonce is probabilistic: at D=12 any constant can
          * be a real solution for either accepted time bucket. Search a
          * bounded set through the production admission path. Resetting the
@@ -5334,7 +5332,8 @@ skip_parallel_tests:
         for (; bogus_trials < 64; bogus_trials++, bogus++) {
             msgprocessor_test_snap_pow_reset();
             msg_snapshot_pow_set_armed(true);
-            if (!msgprocessor_test_snap_pow_admit_at(ip, t, &bogus)) {
+            if (!msgprocessor_test_snap_pow_admit_at(
+                    MSG_SNAP_POW_KIND_CHUNK, 17, t, &bogus)) {
                 reject_bad = true;
                 break;
             }
@@ -5344,78 +5343,72 @@ skip_parallel_tests:
         msg_snapshot_pow_set_armed(true);
         bits = msgprocessor_test_snap_pow_bits_at(t);
         uint64_t nonce = 0;
-        bool solved = msgprocessor_test_snap_pow_solve(ip, t, bits, &nonce);
-        bool accept = solved &&
-                      msgprocessor_test_snap_pow_admit_at(ip, t, &nonce);
+        bool solved = msgprocessor_test_snap_pow_solve(
+            MSG_SNAP_POW_KIND_CHUNK, 17, t, bits, &nonce);
+        bool accept = solved && msgprocessor_test_snap_pow_admit_at(
+            MSG_SNAP_POW_KIND_CHUNK, 17, t, &nonce);
 
-        /* Binding means the solution must fail for a different IP. A single
-         * fixed second IP has the same rare-collision problem as a fixed bad
-         * nonce, so test up to 64 distinct peers at a reset difficulty. If
-         * peer binding were absent, the nonce would pass for all 64. */
-        uint8_t other_ip[16] = {0};
-        unsigned peer_trials = 0;
-        bool cross_peer_rejected = false;
-        for (; peer_trials < 64; peer_trials++) {
-            other_ip[15] = (uint8_t)(3 + peer_trials);
+        /* The proof binds the protocol-visible request, not the
+         * server-observed address. Try distinct request indices because a
+         * low-difficulty nonce can occasionally satisfy two challenges. */
+        unsigned request_trials = 0;
+        bool cross_request_rejected = false;
+        for (; request_trials < 64; request_trials++) {
             msgprocessor_test_snap_pow_reset();
             msg_snapshot_pow_set_armed(true);
-            if (!msgprocessor_test_snap_pow_admit_at(other_ip, t, &nonce)) {
-                cross_peer_rejected = true;
+            if (!msgprocessor_test_snap_pow_admit_at(
+                    MSG_SNAP_POW_KIND_BLOCK, 100 + request_trials,
+                    t, &nonce)) {
+                cross_request_rejected = true;
                 break;
             }
         }
 
         msgprocessor_test_snap_pow_reset();
         bool ok = reject_missing && reject_bad && solved && accept &&
-                  cross_peer_rejected;
+                  cross_request_rejected;
         if (ok) printf("OK (bits=%d)\n", bits);
         else { printf("FAIL (bits=%d missing=%d bad=%d bogus_trials=%u "
-                      "solved=%d accept=%d peer_trials=%u "
-                      "cross_peer_rejected=%d)\n",
+                      "solved=%d accept=%d request_trials=%u "
+                      "cross_request_rejected=%d)\n",
                       bits, reject_missing, reject_bad, bogus_trials, solved,
-                      accept, peer_trials, cross_peer_rejected);
+                      accept, request_trials, cross_request_rejected);
                failures++; }
     }
 
-    printf("snap_pow: challenge derives from public inputs only — an "
-           "external solver can meet the gate... ");
+    printf("snap_pow: requester-visible challenge has fixed LE bytes and "
+           "admits an external solve... ");
     {
-        /* This is the pin that separates a solvable puzzle from an
-         * armed kill switch: rebuild the challenge from the documented
-         * PUBLIC derivation alone (domain tag || ip || bucket), solve it
-         * with the production primitives (zero token/ts, exactly as the
-         * snap lane calls them), and require admission to accept. Any
-         * hidden input — e.g. a process-random secret folded into the
-         * challenge — makes that solve useless and this block fails. */
+        /* This fixed-byte KAT catches host-endian serialization and any
+         * accidental reintroduction of server-only address material. */
         msgprocessor_test_snap_pow_reset();
         msg_snapshot_pow_set_armed(true);
-        uint8_t ip[16] = {0};
-        ip[15] = 9;
-        int64_t t = 8000000;
+        const uint32_t request_index = UINT32_C(0x78563412);
+        const int64_t bucket = INT64_C(0x0102030405060708);
+        const int64_t t = bucket * SNAP_POW_BUCKET_SECS;
         int bits = msgprocessor_test_snap_pow_bits_at(t); /* fresh window */
-        int64_t bucket = t / SNAP_POW_BUCKET_SECS;
-
-        static const uint8_t domain[16] = MSG_SNAP_POW_DOMAIN;
-        struct sha3_256_ctx ctx;
-        sha3_256_init(&ctx);
-        sha3_256_write(&ctx, domain, sizeof(domain));
-        sha3_256_write(&ctx, ip, sizeof(ip));
-        sha3_256_write(&ctx, (const unsigned char *)&bucket,
-                       sizeof(bucket));
         uint8_t challenge[32];
-        sha3_256_finalize(&ctx, challenge);
+        static const uint8_t expected[32] = {
+            0x2d, 0x82, 0x1d, 0x8a, 0xbc, 0xb3, 0xb3, 0x1c,
+            0x85, 0x34, 0x1c, 0xbe, 0x13, 0xc8, 0xea, 0x40,
+            0x7a, 0xc2, 0x20, 0xf4, 0x96, 0x15, 0x1d, 0x63,
+            0x61, 0x7e, 0x53, 0xc4, 0xa6, 0xff, 0xad, 0x00,
+        };
+        bool derived = msgprocessor_test_snap_pow_challenge(
+            MSG_SNAP_POW_KIND_CHUNK, request_index, t, challenge);
 
         static const uint8_t zero32[32] = {0};
         uint64_t nonce = 0;
-        bool solved =
-            puzzle_solve(challenge, zero32, 0, bits, &nonce);
-        bool admitted = solved &&
-            msgprocessor_test_snap_pow_admit_at(ip, t, &nonce);
-        bool ok = solved && admitted;
+        bool kat = derived && memcmp(challenge, expected, 32) == 0;
+        bool solved = kat && puzzle_solve(challenge, zero32, 0, bits,
+                                          &nonce);
+        bool admitted = solved && msgprocessor_test_snap_pow_admit_at(
+            MSG_SNAP_POW_KIND_CHUNK, request_index, t, &nonce);
+        bool ok = kat && solved && admitted;
         if (ok) printf("OK (bits=%d nonce=%llu)\n", bits,
                        (unsigned long long)nonce);
-        else { printf("FAIL (bits=%d solved=%d admitted=%d)\n",
-                      bits, solved, admitted);
+        else { printf("FAIL (bits=%d kat=%d solved=%d admitted=%d)\n",
+                      bits, kat, solved, admitted);
                failures++; }
     }
 
@@ -5424,23 +5417,26 @@ skip_parallel_tests:
     {
         msgprocessor_test_snap_pow_reset();
         msg_snapshot_pow_set_armed(true);
-        uint8_t ip[16] = {0}; ip[15] = 4;
         int64_t t = 7000000;
         int bits = msgprocessor_test_snap_pow_bits_at(t);
 
-        /* Two independent solves for the identical (ip, time_bucket)
+        /* Two independent solves for the identical request/time bucket
          * input must land on the identical nonce — proof the challenge
-         * is a pure function of (domain, ip, bucket), not stateful
+         * is a pure function of (domain, kind, index, bucket), not stateful
          * server-issued material that changes between calls. */
         uint64_t nonce1 = 0, nonce2 = 0;
-        bool solved1 = msgprocessor_test_snap_pow_solve(ip, t, bits, &nonce1);
-        bool solved2 = msgprocessor_test_snap_pow_solve(ip, t, bits, &nonce2);
+        bool solved1 = msgprocessor_test_snap_pow_solve(
+            MSG_SNAP_POW_KIND_BLOCK, 5, t, bits, &nonce1);
+        bool solved2 = msgprocessor_test_snap_pow_solve(
+            MSG_SNAP_POW_KIND_BLOCK, 5, t, bits, &nonce2);
 
         /* Verifying the same solution twice both succeed — a stateful
          * single-use ring (like struct puzzle_gate's) would reject the
          * second; this guard deliberately keeps none. */
-        bool admit1 = msgprocessor_test_snap_pow_admit_at(ip, t, &nonce1);
-        bool admit2 = msgprocessor_test_snap_pow_admit_at(ip, t, &nonce1);
+        bool admit1 = msgprocessor_test_snap_pow_admit_at(
+            MSG_SNAP_POW_KIND_BLOCK, 5, t, &nonce1);
+        bool admit2 = msgprocessor_test_snap_pow_admit_at(
+            MSG_SNAP_POW_KIND_BLOCK, 5, t, &nonce1);
 
         msg_snapshot_pow_set_armed(false);
         bool ok = solved1 && solved2 && nonce1 == nonce2 &&
@@ -5473,19 +5469,22 @@ skip_parallel_tests:
         for (attempts = 1; attempts <= 16 && !reject_after_grace; attempts++) {
             msgprocessor_test_snap_pow_reset();
             msg_snapshot_pow_set_armed(true);
-            uint8_t ip[16] = {0};
-            ip[14] = 5;
-            ip[15] = (uint8_t)attempts;
             int bits = msgprocessor_test_snap_pow_bits_at(t0);
             uint64_t nonce = 0;
 
-            solved = msgprocessor_test_snap_pow_solve(ip, t0, bits, &nonce);
+            solved = msgprocessor_test_snap_pow_solve(
+                MSG_SNAP_POW_KIND_CHUNK, (uint32_t)attempts,
+                t0, bits, &nonce);
             /* The rate window is independent of the puzzle bucket, so each
              * admission remains at the same idle-floor difficulty. */
             accept_in_grace = solved &&
-                msgprocessor_test_snap_pow_admit_at(ip, t1, &nonce);
+                msgprocessor_test_snap_pow_admit_at(
+                    MSG_SNAP_POW_KIND_CHUNK, (uint32_t)attempts,
+                    t1, &nonce);
             reject_after_grace = accept_in_grace &&
-                !msgprocessor_test_snap_pow_admit_at(ip, t2, &nonce);
+                !msgprocessor_test_snap_pow_admit_at(
+                    MSG_SNAP_POW_KIND_CHUNK, (uint32_t)attempts,
+                    t2, &nonce);
         }
 
         msg_snapshot_pow_set_armed(false);

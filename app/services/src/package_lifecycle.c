@@ -7,14 +7,11 @@
  * This file decides; it does not do. Every filesystem touch, every spawn,
  * every hash is behind a pkgl_* adapter call, and no package byte is ever
  * interpreted as code here. */
-
 #include "package_lifecycle_internal.h"
-
 #include "base/hex.h"
 #include "base/log_macros.h"
 #include "base/result.h"
 #include "base/text_fit.h"
-
 #include <dirent.h>
 #include <errno.h>
 #include <stdio.h>

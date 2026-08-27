@@ -94,7 +94,8 @@ static pthread_mutex_t g_block_manifest_mutex = PTHREAD_MUTEX_INITIALIZER;
  * seed + single-use ring; this guard only needs the pure, already-tested
  * digest/verify primitives it exposes):
  *
- *   challenge   = SHA3-256(domain[16] || peer_ip[16] || time_bucket[8 LE])
+ *   challenge   = SHA3-256(domain[16] || request_kind[1] ||
+ *                          request_index[4 LE] || time_bucket[8 LE])
  *                 where domain is the fixed lane tag below — it exists to
  *                 namespace the digest, not to hide anything. It must NOT
  *                 be process-random material: a requester that cannot
@@ -107,11 +108,15 @@ static pthread_mutex_t g_block_manifest_mutex = PTHREAD_MUTEX_INITIALIZER;
  *                 has D leading zero bits (reuses the hardened
  *                 puzzle_verify/puzzle_solve digest from
  *                 fast_sync.c, passing a zero peer_token/ts since peer
- *                 binding and freshness are already carried by `challenge`
- *                 itself via peer_ip + time_bucket).
+ *                 request binding and freshness are already carried by
+ *                 `challenge` itself).
  *
- * The derivation is public by construction: peer binding and freshness are
- * carried entirely by (peer_ip, time_bucket). Arming is still deferred —
+ * The derivation is public by construction. Request kind and index are the
+ * first fields of zchunkreq/zblkreq, and the time bucket is explicit LE.
+ * The server-observed peer address is deliberately excluded: a requester
+ * behind NAT cannot know which address the server observes. Per-address
+ * abuse containment remains the existing fast_sync_rate_check() gate.
+ * Arming is still deferred —
  * requesters do not attach nonces yet, so an armed gate today would deny
  * honest legacy peers outright (see msgprocessor.h for the constants and
  * the adaptive-difficulty ramp).
@@ -136,18 +141,23 @@ static pthread_mutex_t g_snap_pow_load_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int64_t g_snap_pow_window_start = 0;
 static uint32_t g_snap_pow_reqs_in_window = 0;
 
-static void snap_pow_challenge(const uint8_t peer_ip[16], int64_t time_bucket,
-                               uint8_t out[32])
+static void snap_pow_challenge(uint8_t request_kind, uint32_t request_index,
+                               int64_t time_bucket, uint8_t out[32])
 {
-    /* Same 15-char lane tag shape as zcl.dht.query.v1: a namespaced
-     * constant every solver can recompute. */
     static const uint8_t snap_pow_domain[16] = MSG_SNAP_POW_DOMAIN;
+    uint8_t index_le[4];
+    uint8_t bucket_le[8];
+    uint64_t bucket_bits = (uint64_t)time_bucket;
+    for (size_t i = 0; i < sizeof(index_le); i++)
+        index_le[i] = (uint8_t)(request_index >> (8u * i));
+    for (size_t i = 0; i < sizeof(bucket_le); i++)
+        bucket_le[i] = (uint8_t)(bucket_bits >> (8u * i));
     struct sha3_256_ctx ctx;
     sha3_256_init(&ctx);
     sha3_256_write(&ctx, snap_pow_domain, sizeof(snap_pow_domain));
-    sha3_256_write(&ctx, peer_ip, 16);
-    sha3_256_write(&ctx, (const unsigned char *)&time_bucket,
-                   sizeof(time_bucket));
+    sha3_256_write(&ctx, &request_kind, sizeof(request_kind));
+    sha3_256_write(&ctx, index_le, sizeof(index_le));
+    sha3_256_write(&ctx, bucket_le, sizeof(bucket_le));
     sha3_256_finalize(&ctx, out);
 }
 
@@ -174,13 +184,14 @@ static int snap_pow_note_request_and_get_bits(int64_t now)
     return bits;
 }
 
-static bool snap_pow_solve_at(const uint8_t peer_ip[16], int64_t at_time,
+static bool snap_pow_solve_at(uint8_t request_kind, uint32_t request_index,
+                              int64_t at_time,
                               int difficulty_bits, uint64_t *nonce_out)
 {
     int64_t bucket = at_time / SNAP_POW_BUCKET_SECS;
     uint8_t challenge[32];
     static const uint8_t zero32[32] = {0};
-    snap_pow_challenge(peer_ip, bucket, challenge);
+    snap_pow_challenge(request_kind, request_index, bucket, challenge);
     return puzzle_solve(challenge, zero32, 0, difficulty_bits,
                                   nonce_out);
 }
@@ -189,7 +200,8 @@ static bool snap_pow_solve_at(const uint8_t peer_ip[16], int64_t at_time,
  * solution (NULL if the request carried none). Checks the current and
  * prior time bucket so a solve that started just before a rotation still
  * verifies (matches the +1 grace epoch struct puzzle_gate uses). */
-static bool snap_pow_admit_at(const uint8_t peer_ip[16], int64_t now,
+static bool snap_pow_admit_at(uint8_t request_kind, uint32_t request_index,
+                              int64_t now,
                               const uint64_t *nonce)
 {
     int bits = snap_pow_note_request_and_get_bits(now);
@@ -202,17 +214,18 @@ static bool snap_pow_admit_at(const uint8_t peer_ip[16], int64_t now,
     uint8_t challenge[32];
     static const uint8_t zero32[32] = {0};
 
-    snap_pow_challenge(peer_ip, bucket, challenge);
+    snap_pow_challenge(request_kind, request_index, bucket, challenge);
     if (puzzle_verify(challenge, zero32, 0, *nonce, bits))
         return true;
-    snap_pow_challenge(peer_ip, bucket - 1, challenge);
+    snap_pow_challenge(request_kind, request_index, bucket - 1, challenge);
     return puzzle_verify(challenge, zero32, 0, *nonce, bits);
 }
 
-static bool snap_pow_admit(const uint8_t peer_ip[16], const uint64_t *nonce)
+static bool snap_pow_admit(uint8_t request_kind, uint32_t request_index,
+                           const uint64_t *nonce)
 {
-    return snap_pow_admit_at(peer_ip, (int64_t)platform_time_wall_time_t(),
-                             nonce);
+    return snap_pow_admit_at(request_kind, request_index,
+                            (int64_t)platform_time_wall_time_t(), nonce);
 }
 
 void msg_snapshot_pow_set_armed(bool armed)
@@ -225,18 +238,33 @@ bool msg_snapshot_pow_is_armed(void)
     return atomic_load(&g_snap_pow_armed);
 }
 
-bool msgprocessor_test_snap_pow_solve(const uint8_t peer_ip[16],
+bool msgprocessor_test_snap_pow_challenge(uint8_t request_kind,
+                                          uint32_t request_index,
+                                          int64_t at_time,
+                                          uint8_t out[32])
+{
+    if (!out)
+        return false;
+    snap_pow_challenge(request_kind, request_index,
+                       at_time / SNAP_POW_BUCKET_SECS, out);
+    return true;
+}
+
+bool msgprocessor_test_snap_pow_solve(uint8_t request_kind,
+                                      uint32_t request_index,
                                       int64_t at_time, int difficulty_bits,
                                       uint64_t *nonce_out)
 {
-    return snap_pow_solve_at(peer_ip, at_time, difficulty_bits, nonce_out);
+    return snap_pow_solve_at(request_kind, request_index, at_time,
+                             difficulty_bits, nonce_out);
 }
 
-bool msgprocessor_test_snap_pow_admit_at(const uint8_t peer_ip[16],
+bool msgprocessor_test_snap_pow_admit_at(uint8_t request_kind,
+                                         uint32_t request_index,
                                          int64_t at_time,
                                          const uint64_t *nonce)
 {
-    return snap_pow_admit_at(peer_ip, at_time, nonce);
+    return snap_pow_admit_at(request_kind, request_index, at_time, nonce);
 }
 
 int msgprocessor_test_snap_pow_bits_at(int64_t at_time)
@@ -864,7 +892,7 @@ void mp_serve_chunk_req(struct msg_processor *mp, struct p2p_node *node,
                                           node->addr.svc.addr.ip)) {
             printf("Peer %s: rate limited on chunk request\n",
                    node->addr_name);
-        } else if (!snap_pow_admit(node->addr.svc.addr.ip,
+        } else if (!snap_pow_admit(MSG_SNAP_POW_KIND_CHUNK, chunk_index,
                                    have_pow_nonce ? &pow_nonce : NULL)) {
             printf("Peer %s: zchunkreq missing/invalid client puzzle "
                    "(armed)\n", node->addr_name);
@@ -957,7 +985,7 @@ void mp_serve_block_req(struct msg_processor *mp, struct p2p_node *node,
                                        FAST_SYNC_MAX_GLOBAL_BLOCK_PIECES_PER_HOUR)) {
         printf("Peer %s: rate limited on block piece\n",
                node->addr_name);
-    } else if (!snap_pow_admit(node->addr.svc.addr.ip,
+    } else if (!snap_pow_admit(MSG_SNAP_POW_KIND_BLOCK, piece_index,
                                have_pow_nonce ? &pow_nonce : NULL)) {
         printf("Peer %s: zblkreq missing/invalid client puzzle "
                "(armed)\n", node->addr_name);

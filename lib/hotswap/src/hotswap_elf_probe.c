@@ -68,6 +68,9 @@
 #define PT_DYNAMIC_      2
 
 #define SHT_NOBITS_      8
+#define SHT_INIT_ARRAY_  14
+#define SHT_FINI_ARRAY_  15
+#define SHT_PREINIT_ARRAY_ 16
 
 #define SHN_UNDEF_       0
 #define SHN_LORESERVE_   0xff00u
@@ -457,7 +460,11 @@ static bool dynsym_count_from_gnu_hash(const struct img *im, uint64_t gh_off,
  * as read from the dynamic segment. */
 static bool sections_agree(const struct img *im, const unsigned char *shtab,
                            uint32_t shnum, uint32_t shstrndx,
+                           uint64_t dyn_init_array, uint64_t dyn_init_off,
                            uint64_t dyn_init_arraysz,
+                           uint64_t dyn_fini_array, uint64_t dyn_fini_off,
+                           uint64_t dyn_fini_arraysz,
+                           uint64_t dyn_preinit_array, uint64_t dyn_preinit_off,
                            uint64_t dyn_preinit_arraysz,
                            struct hotswap_elf_facts *out,
                            char *err, size_t err_cap)
@@ -479,13 +486,18 @@ static bool sections_agree(const struct img *im, const unsigned char *shtab,
                     "section name table at offset %llu size %llu is out of bounds",
                     (unsigned long long)shstr_off, (unsigned long long)shstr_size);
 
-    bool saw_init_array = false, saw_preinit_array = false;
-    uint64_t sh_init_arraysz = 0, sh_preinit_arraysz = 0;
+    bool saw_init_array = false, saw_fini_array = false;
+    bool saw_preinit_array = false;
+    uint64_t sh_init_addr = 0, sh_init_off = 0, sh_init_arraysz = 0;
+    uint64_t sh_fini_addr = 0, sh_fini_off = 0, sh_fini_arraysz = 0;
+    uint64_t sh_preinit_addr = 0, sh_preinit_off = 0;
+    uint64_t sh_preinit_arraysz = 0;
 
     for (uint32_t i = 0; i < shnum; i++) {
         const unsigned char *sh = shtab + (size_t)i * SHDR64_SIZE;
         uint32_t sh_name   = rd32(sh + 0);
         uint32_t sh_type   = rd32(sh + 4);
+        uint64_t sh_addr   = rd64(sh + 16);
         uint64_t sh_offset = rd64(sh + 24);
         uint64_t sh_size   = rd64(sh + 32);
 
@@ -510,30 +522,76 @@ static bool sections_agree(const struct img *im, const unsigned char *shtab,
                         i, sh_name, (unsigned long long)shstr_size);
         }
         if (!trunc && strcmp(name, ".init_array") == 0) {
+            if (saw_init_array)
+                return fail(out, err, err_cap,
+                            "more than one .init_array section");
+            if (sh_type != SHT_INIT_ARRAY_)
+                return fail(out, err, err_cap,
+                            ".init_array has section type %u, want %u",
+                            sh_type, SHT_INIT_ARRAY_);
             saw_init_array = true;
+            sh_init_addr = sh_addr;
+            sh_init_off = sh_offset;
             sh_init_arraysz = sh_size;
+        } else if (!trunc && strcmp(name, ".fini_array") == 0) {
+            if (saw_fini_array)
+                return fail(out, err, err_cap,
+                            "more than one .fini_array section");
+            if (sh_type != SHT_FINI_ARRAY_)
+                return fail(out, err, err_cap,
+                            ".fini_array has section type %u, want %u",
+                            sh_type, SHT_FINI_ARRAY_);
+            saw_fini_array = true;
+            sh_fini_addr = sh_addr;
+            sh_fini_off = sh_offset;
+            sh_fini_arraysz = sh_size;
         } else if (!trunc && strcmp(name, ".preinit_array") == 0) {
+            if (saw_preinit_array)
+                return fail(out, err, err_cap,
+                            "more than one .preinit_array section");
+            if (sh_type != SHT_PREINIT_ARRAY_)
+                return fail(out, err, err_cap,
+                            ".preinit_array has section type %u, want %u",
+                            sh_type, SHT_PREINIT_ARRAY_);
             saw_preinit_array = true;
+            sh_preinit_addr = sh_addr;
+            sh_preinit_off = sh_offset;
             sh_preinit_arraysz = sh_size;
         }
     }
 
-    if (saw_init_array && sh_init_arraysz != dyn_init_arraysz)
+    if (saw_init_array &&
+        (sh_init_addr != dyn_init_array || sh_init_off != dyn_init_off ||
+         sh_init_arraysz != dyn_init_arraysz))
         return fail(out, err, err_cap,
-                    "section .init_array size %llu disagrees with DT_INIT_ARRAYSZ %llu "
-                    "(the file describes itself differently to auditors and to the linker)",
+                    "section .init_array (addr 0x%llx off %llu size %llu) "
+                    "disagrees with dynamic array (addr 0x%llx off %llu size %llu)",
+                    (unsigned long long)sh_init_addr,
+                    (unsigned long long)sh_init_off,
                     (unsigned long long)sh_init_arraysz,
+                    (unsigned long long)dyn_init_array,
+                    (unsigned long long)dyn_init_off,
                     (unsigned long long)dyn_init_arraysz);
     if (!saw_init_array && dyn_init_arraysz != 0)
         return fail(out, err, err_cap,
                     "DT_INIT_ARRAYSZ is %llu but there is no .init_array section "
                     "(constructors hidden from every section-header reader)",
                     (unsigned long long)dyn_init_arraysz);
-    if (saw_preinit_array && sh_preinit_arraysz != dyn_preinit_arraysz)
+    if (saw_fini_array &&
+        (sh_fini_addr != dyn_fini_array || sh_fini_off != dyn_fini_off ||
+         sh_fini_arraysz != dyn_fini_arraysz))
         return fail(out, err, err_cap,
-                    "section .preinit_array size %llu disagrees with DT_PREINIT_ARRAYSZ %llu",
-                    (unsigned long long)sh_preinit_arraysz,
-                    (unsigned long long)dyn_preinit_arraysz);
+                    "section .fini_array disagrees with its dynamic pointer/size");
+    if (!saw_fini_array && dyn_fini_arraysz != 0)
+        return fail(out, err, err_cap,
+                    "DT_FINI_ARRAYSZ is %llu but there is no .fini_array section",
+                    (unsigned long long)dyn_fini_arraysz);
+    if (saw_preinit_array &&
+        (sh_preinit_addr != dyn_preinit_array ||
+         sh_preinit_off != dyn_preinit_off ||
+         sh_preinit_arraysz != dyn_preinit_arraysz))
+        return fail(out, err, err_cap,
+                    "section .preinit_array disagrees with its dynamic pointer/size");
     if (!saw_preinit_array && dyn_preinit_arraysz != 0)
         return fail(out, err, err_cap,
                     "DT_PREINIT_ARRAYSZ is %llu but there is no .preinit_array section",
@@ -695,10 +753,14 @@ bool hotswap_elf_probe_fd(int fd, struct hotswap_elf_facts *out,
 
     uint64_t d_symtab = 0, d_strtab = 0, d_strsz = 0, d_syment = 0;
     uint64_t d_hash = 0, d_gnu_hash = 0;
+    uint64_t d_init_array = 0, d_fini_array = 0, d_preinit_array = 0;
     uint64_t d_init_arraysz = 0, d_fini_arraysz = 0, d_preinit_arraysz = 0;
     bool have_symtab = false, have_strtab = false, have_strsz = false;
+    bool have_syment = false;
     bool have_hash = false, have_gnu_hash = false;
     bool have_init_array = false, have_fini_array = false, have_preinit_array = false;
+    bool have_init_arraysz = false, have_fini_arraysz = false;
+    bool have_preinit_arraysz = false;
 
     /* DT_NEEDED holds string-table INDICES, and the string table's location
      * arrives as another dynamic tag that may appear later in the array. So
@@ -727,22 +789,55 @@ bool hotswap_elf_probe_fd(int fd, struct hotswap_elf_facts *out,
                 out->needed_truncated = true;
             out->needed_count++;
             break;
-        case DT_SYMTAB_:  d_symtab = val; have_symtab = true; break;
-        case DT_STRTAB_:  d_strtab = val; have_strtab = true; break;
-        case DT_STRSZ_:   d_strsz = val;  have_strsz = true;  break;
-        case DT_SYMENT_:  d_syment = val; break;
-        case DT_HASH_:    d_hash = val;   have_hash = true;   break;
-        case DT_GNU_HASH_: d_gnu_hash = val; have_gnu_hash = true; break;
-        case DT_INIT_:    out->has_dt_init = true; break;
-        case DT_FINI_:    out->has_dt_fini = true; break;
-        case DT_INIT_ARRAY_:    have_init_array = true; break;
-        case DT_FINI_ARRAY_:    have_fini_array = true; break;
-        case DT_PREINIT_ARRAY_: have_preinit_array = true; break;
-        case DT_INIT_ARRAYSZ_:    d_init_arraysz = val;    break;
-        case DT_FINI_ARRAYSZ_:    d_fini_arraysz = val;    break;
-        case DT_PREINIT_ARRAYSZ_: d_preinit_arraysz = val; break;
+        case DT_SYMTAB_:
+            if (have_symtab) REFUSE("duplicate DT_SYMTAB");
+            d_symtab = val; have_symtab = true; break;
+        case DT_STRTAB_:
+            if (have_strtab) REFUSE("duplicate DT_STRTAB");
+            d_strtab = val; have_strtab = true; break;
+        case DT_STRSZ_:
+            if (have_strsz) REFUSE("duplicate DT_STRSZ");
+            d_strsz = val; have_strsz = true; break;
+        case DT_SYMENT_:
+            if (have_syment) REFUSE("duplicate DT_SYMENT");
+            d_syment = val; have_syment = true; break;
+        case DT_HASH_:
+            if (have_hash) REFUSE("duplicate DT_HASH");
+            d_hash = val; have_hash = true; break;
+        case DT_GNU_HASH_:
+            if (have_gnu_hash) REFUSE("duplicate DT_GNU_HASH");
+            d_gnu_hash = val; have_gnu_hash = true; break;
+        case DT_INIT_:
+            if (out->has_dt_init) REFUSE("duplicate DT_INIT");
+            out->has_dt_init = true; break;
+        case DT_FINI_:
+            if (out->has_dt_fini) REFUSE("duplicate DT_FINI");
+            out->has_dt_fini = true; break;
+        case DT_INIT_ARRAY_:
+            if (have_init_array)
+                REFUSE("duplicate DT_INIT_ARRAY");
+            d_init_array = val; have_init_array = true; break;
+        case DT_FINI_ARRAY_:
+            if (have_fini_array)
+                REFUSE("duplicate DT_FINI_ARRAY");
+            d_fini_array = val; have_fini_array = true; break;
+        case DT_PREINIT_ARRAY_:
+            if (have_preinit_array)
+                REFUSE("duplicate DT_PREINIT_ARRAY");
+            d_preinit_array = val; have_preinit_array = true; break;
+        case DT_INIT_ARRAYSZ_:
+            if (have_init_arraysz) REFUSE("duplicate DT_INIT_ARRAYSZ");
+            d_init_arraysz = val; have_init_arraysz = true; break;
+        case DT_FINI_ARRAYSZ_:
+            if (have_fini_arraysz) REFUSE("duplicate DT_FINI_ARRAYSZ");
+            d_fini_arraysz = val; have_fini_arraysz = true; break;
+        case DT_PREINIT_ARRAYSZ_:
+            if (have_preinit_arraysz) REFUSE("duplicate DT_PREINIT_ARRAYSZ");
+            d_preinit_arraysz = val; have_preinit_arraysz = true; break;
         case DT_RPATH_:
         case DT_RUNPATH_:
+            if (out->has_runpath)
+                REFUSE("duplicate or combined DT_RPATH/DT_RUNPATH");
             out->has_runpath = true;
             break;
         default:
@@ -754,11 +849,14 @@ bool hotswap_elf_probe_fd(int fd, struct hotswap_elf_facts *out,
 
     /* An array size without its array pointer (or vice versa) is incoherent;
      * one of the two is a lie and there is no way to tell which. */
-    if ((d_init_arraysz != 0) != have_init_array)
+    if (have_init_array != have_init_arraysz ||
+        (have_init_array && d_init_arraysz == 0))
         REFUSE("DT_INIT_ARRAY and DT_INIT_ARRAYSZ disagree about whether an init array exists");
-    if ((d_fini_arraysz != 0) != have_fini_array)
+    if (have_fini_array != have_fini_arraysz ||
+        (have_fini_array && d_fini_arraysz == 0))
         REFUSE("DT_FINI_ARRAY and DT_FINI_ARRAYSZ disagree about whether a fini array exists");
-    if ((d_preinit_arraysz != 0) != have_preinit_array)
+    if (have_preinit_array != have_preinit_arraysz ||
+        (have_preinit_array && d_preinit_arraysz == 0))
         REFUSE("DT_PREINIT_ARRAY and DT_PREINIT_ARRAYSZ disagree about whether a preinit array exists");
 
     /* A size that is not a whole number of 8-byte function pointers cannot be
@@ -777,6 +875,26 @@ bool hotswap_elf_probe_fd(int fd, struct hotswap_elf_facts *out,
     if (d_init_arraysz > n || d_fini_arraysz > n || d_preinit_arraysz > n)
         REFUSE("an initialiser array is larger than the whole %llu byte file",
                (unsigned long long)n);
+
+    uint64_t d_init_off = 0, d_fini_off = 0, d_preinit_off = 0;
+    if (d_init_arraysz != 0 &&
+        !vaddr_to_off(&im, phtab, e_phnum, d_init_array,
+                      d_init_arraysz, &d_init_off))
+        REFUSE("DT_INIT_ARRAY vaddr 0x%llx size %llu is not covered by PT_LOAD file bytes",
+               (unsigned long long)d_init_array,
+               (unsigned long long)d_init_arraysz);
+    if (d_fini_arraysz != 0 &&
+        !vaddr_to_off(&im, phtab, e_phnum, d_fini_array,
+                      d_fini_arraysz, &d_fini_off))
+        REFUSE("DT_FINI_ARRAY vaddr 0x%llx size %llu is not covered by PT_LOAD file bytes",
+               (unsigned long long)d_fini_array,
+               (unsigned long long)d_fini_arraysz);
+    if (d_preinit_arraysz != 0 &&
+        !vaddr_to_off(&im, phtab, e_phnum, d_preinit_array,
+                      d_preinit_arraysz, &d_preinit_off))
+        REFUSE("DT_PREINIT_ARRAY vaddr 0x%llx size %llu is not covered by PT_LOAD file bytes",
+               (unsigned long long)d_preinit_array,
+               (unsigned long long)d_preinit_arraysz);
 
     out->init_array_entries    = (size_t)(d_init_arraysz / ELF64_PTR_SIZE);
     out->fini_array_entries    = (size_t)(d_fini_arraysz / ELF64_PTR_SIZE);
@@ -865,22 +983,63 @@ bool hotswap_elf_probe_fd(int fd, struct hotswap_elf_facts *out,
             REFUSE("dynamic symbol %llu has name index %u, past the %llu byte string table",
                    (unsigned long long)i, st_name, (unsigned long long)d_strsz);
 
+        bool is_seal = dynstr_equals(
+            &im, stroff, d_strsz, st_name,
+            ZCL_HOTSWAP_MODULE_CORE_SEAL_ROOT_SYMBOL);
+        bool is_abi = dynstr_equals(
+            &im, stroff, d_strsz, st_name, ZCL_HOTSWAP_MODULE_SYMBOL);
+        if (is_seal) {
+            if (seen_seal)
+                REFUSE("duplicate %s dynamic symbol",
+                       ZCL_HOTSWAP_MODULE_CORE_SEAL_ROOT_SYMBOL);
+            seen_seal = true;
+        }
+        if (is_abi) {
+            if (seen_abi)
+                REFUSE("duplicate %s dynamic symbol",
+                       ZCL_HOTSWAP_MODULE_SYMBOL);
+            seen_abi = true;
+        }
+
         if (st_shndx == SHN_UNDEF_) {
+            if (is_seal || is_abi)
+                REFUSE("identity symbol '%s' is undefined",
+                       is_seal ? ZCL_HOTSWAP_MODULE_CORE_SEAL_ROOT_SYMBOL
+                               : ZCL_HOTSWAP_MODULE_SYMBOL);
             /* st_name == 0 is the reserved null symbol at index 0, and any
              * other unnamed entry; neither is an import from the host. */
-            if (st_name != 0)
+            if (st_name != 0) {
+                size_t imported = out->undefined_symbol_count;
                 out->undefined_symbol_count++;
+                if (imported < ZCL_HOTSWAP_ELF_PROBE_MAX_UNDEFINED) {
+                    bool trunc = false;
+                    if (!dynstr_copy(
+                            &im, stroff, d_strsz, st_name,
+                            out->undefined_symbols[imported],
+                            ZCL_HOTSWAP_ELF_PROBE_SYMBOL_NAME_CAP, &trunc))
+                        REFUSE("undefined symbol %llu has an unreadable name",
+                               (unsigned long long)i);
+                    if (trunc)
+                        out->undefined_symbols_truncated = true;
+                } else {
+                    out->undefined_symbols_truncated = true;
+                }
+            }
             continue;
         }
         /* A defined symbol in the reserved index range (SHN_ABS, SHN_COMMON,
          * ...) has an st_value that is not a virtual address, so it can never
          * be one of the two identity objects we read bytes out of. */
-        if (st_shndx >= SHN_LORESERVE_)
+        if (st_shndx >= SHN_LORESERVE_) {
+            if (is_seal || is_abi)
+                REFUSE("identity symbol '%s' has reserved section index %u",
+                       is_seal ? ZCL_HOTSWAP_MODULE_CORE_SEAL_ROOT_SYMBOL
+                               : ZCL_HOTSWAP_MODULE_SYMBOL,
+                       st_shndx);
             continue;
+        }
 
-        if (!seen_seal &&
-            dynstr_equals(&im, stroff, d_strsz, st_name,
-                          ZCL_HOTSWAP_MODULE_CORE_SEAL_ROOT_SYMBOL)) {
+        if (is_seal) {
             /* The symbol is `const char zcl_hotswap_module_core_seal_root[]`
              * initialised from ZCL_CORE_SEAL_ROOT: 64 hex characters plus the
              * terminating NUL, so st_size is 65 in every artifact measured.
@@ -913,12 +1072,11 @@ bool hotswap_elf_probe_fd(int fd, struct hotswap_elf_facts *out,
                        ZCL_HOTSWAP_MODULE_CORE_SEAL_ROOT_SYMBOL, p[64]);
             memcpy(out->core_seal_root, p, 64);
             out->core_seal_root[64] = '\0';
-            seen_seal = true;
+            out->core_seal_root_present = true;
             continue;
         }
 
-        if (!seen_abi &&
-            dynstr_equals(&im, stroff, d_strsz, st_name, ZCL_HOTSWAP_MODULE_SYMBOL)) {
+        if (is_abi) {
             /* struct zcl_hotswap_module's FIRST named member is
              * `uint32_t abi_version`, and C puts the first member at offset 0
              * with no leading padding. That is the only layout fact that does
@@ -939,7 +1097,6 @@ bool hotswap_elf_probe_fd(int fd, struct hotswap_elf_facts *out,
                 REFUSE("%s contents out of bounds", ZCL_HOTSWAP_MODULE_SYMBOL);
             out->abi_version = rd32(p);
             out->abi_version_present = true;
-            seen_abi = true;
             continue;
         }
     }
@@ -968,7 +1125,10 @@ bool hotswap_elf_probe_fd(int fd, struct hotswap_elf_facts *out,
                (unsigned long long)e_shoff, e_shnum, SHDR64_SIZE,
                (unsigned long long)n);
     if (!sections_agree(&im, shtab, e_shnum, e_shstrndx,
-                        d_init_arraysz, d_preinit_arraysz, out, err, err_cap)) {
+                        d_init_array, d_init_off, d_init_arraysz,
+                        d_fini_array, d_fini_off, d_fini_arraysz,
+                        d_preinit_array, d_preinit_off, d_preinit_arraysz,
+                        out, err, err_cap)) {
         free(buf);
         return false; /* sections_agree already zeroed *out and set err */
     }
@@ -987,5 +1147,85 @@ bool hotswap_elf_probe_fd(int fd, struct hotswap_elf_facts *out,
 
     if (err && err_cap > 0)
         err[0] = '\0';
+    return true;
+}
+
+static bool runtime_import_allowed(const char *name)
+{
+#define HOTSWAP_MODULE_IMPORT(symbol_, group_) \
+    if (strcmp(name, (symbol_)) == 0) return true;
+#include "../../../config/hotswap_module_imports.def"
+#undef HOTSWAP_MODULE_IMPORT
+    return false;
+}
+
+bool hotswap_elf_pre_map_admit(const struct hotswap_elf_facts *facts,
+                               const char expected_core_seal_root[65],
+                               uint32_t expected_abi,
+                               char *err, size_t err_cap)
+{
+    if (err && err_cap > 0)
+        err[0] = '\0';
+    if (!facts || !expected_core_seal_root)
+        return fail(NULL, err, err_cap, "missing pre-map policy input");
+
+    if (facts->has_dt_init)
+        return fail(NULL, err, err_cap,
+                    "module carries DT_INIT; code would run before admission");
+    if (facts->init_array_entries != 0 ||
+        facts->preinit_array_entries != 0)
+        return fail(NULL, err, err_cap,
+                    "module carries pre-map callbacks (.init_array %zu, .preinit_array %zu)",
+                    facts->init_array_entries,
+                    facts->preinit_array_entries);
+
+    if (facts->has_runpath)
+        return fail(NULL, err, err_cap,
+                    "module carries DT_RPATH/DT_RUNPATH");
+    if (facts->needed_truncated)
+        return fail(NULL, err, err_cap,
+                    "module dependency list cannot be enumerated exactly");
+    static const char *const allowed_needed[] = {
+        "libc.so.6", "libm.so.6",
+    };
+    for (size_t i = 0; i < facts->needed_count; i++) {
+        bool allowed = false;
+        for (size_t k = 0;
+             k < sizeof(allowed_needed) / sizeof(allowed_needed[0]); k++) {
+            if (strcmp(facts->needed[i], allowed_needed[k]) == 0) {
+                allowed = true;
+                break;
+            }
+        }
+        if (!allowed)
+            return fail(NULL, err, err_cap,
+                        "module depends on unapproved library '%s'",
+                        facts->needed[i]);
+    }
+
+    if (!facts->core_seal_root_present)
+        return fail(NULL, err, err_cap,
+                    "module does not export its consensus core seal");
+    if (strncmp(facts->core_seal_root, expected_core_seal_root, 65) != 0)
+        return fail(NULL, err, err_cap,
+                    "module consensus core seal does not match this node");
+    if (!facts->abi_version_present)
+        return fail(NULL, err, err_cap,
+                    "module does not export its ABI descriptor");
+    if (facts->abi_version != expected_abi)
+        return fail(NULL, err, err_cap,
+                    "module ABI %u does not match required ABI %u",
+                    facts->abi_version, expected_abi);
+
+    if (facts->undefined_symbols_truncated ||
+        facts->undefined_symbol_count > ZCL_HOTSWAP_ELF_PROBE_MAX_UNDEFINED)
+        return fail(NULL, err, err_cap,
+                    "module import set cannot be enumerated exactly");
+    for (size_t i = 0; i < facts->undefined_symbol_count; i++) {
+        if (!runtime_import_allowed(facts->undefined_symbols[i]))
+            return fail(NULL, err, err_cap,
+                        "module imports undeclared resident symbol '%s'",
+                        facts->undefined_symbols[i]);
+    }
     return true;
 }

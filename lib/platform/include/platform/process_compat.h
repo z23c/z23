@@ -20,17 +20,15 @@ static inline int platform_execve_fd(int fd, char *const argv[],
                                      char *const envp[])
 {
 #if defined(__APPLE__)
-    char path[1024];
-    struct stat pinned;
-    struct stat current;
-    if (fcntl(fd, F_GETPATH, path) != 0 || fstat(fd, &pinned) != 0 ||
-        stat(path, &current) != 0)
-        return -1;
-    if (pinned.st_dev != current.st_dev || pinned.st_ino != current.st_ino) {
-        errno = ESTALE;
-        return -1;
-    }
-    return execve(path, argv, envp);
+    /* macOS has no fexecve(2). F_GETPATH followed by execve(path) is not an
+     * equivalent: another process can replace the pathname after the inode
+     * check and before execve opens it. Refuse until this platform supplies
+     * an atomic descriptor-bound execution primitive. */
+    (void)fd;
+    (void)argv;
+    (void)envp;
+    errno = ENOTSUP;
+    return -1;
 #else
     return fexecve(fd, argv, envp);
 #endif

@@ -496,7 +496,13 @@ void app_shutdown_svc(struct boot_svc_ctx *svc)
     shutdown_stagewatch_mark_durable();
 
     /* Durability secured; only best-effort teardown follows. The block-index flat cache is written AFTER the marker (it previously preceded the checkpoint and lost the marker on a mid-teardown kill). */
-    shutdown_stagewatch_enter("fast-restart-persist", 20, false, true);
+    /* The flat snapshot alone took 18 seconds on the measured 7200 rpm host;
+     * the former 20-second ceiling then forced a clean exit before the
+     * projection binding committed. Every following boot consequently paid a
+     * full 3.2-million-row projection scan. This cache remains best-effort,
+     * but 120 seconds lets honest rotating media finish while staying below
+     * systemd's 300-second stop ceiling in the normal, already-quiesced path. */
+    shutdown_stagewatch_enter("fast-restart-persist", 120, false, true);
     shutdown_persist_fast_restart_state(svc);
     /* Every worker was joined before persistence; destructive release is now
      * ownership-safe and cannot race a timed-out background callback. */

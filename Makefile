@@ -3389,7 +3389,7 @@ hotswap:
 # shared by this recipe and the fast path's cached flags.env. -Wl,-Bsymbolic
 # is LOAD-BEARING: without it a dlopen'd handler's internal calls interpose
 # back onto the resident (old) code and the swap silently does nothing.
-HOTSWAP_MODULE_LDFLAGS = -shared -Wl,--build-id=none -Wl,-z,relro -Wl,-z,now \
+HOTSWAP_MODULE_LDFLAGS = -shared -nostartfiles -Wl,--build-id=none -Wl,-z,relro -Wl,-z,now \
 	-Wl,-z,noexecstack -Wl,-Bsymbolic
 
 # Intentionally NOT ordered on $(BUILD_IDENTITY_STAMP): that stamp exists to

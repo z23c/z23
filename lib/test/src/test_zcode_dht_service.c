@@ -8,6 +8,7 @@
 #include "chain/chain.h"
 #include "core/uint256.h"
 #include "config/boot_zcode_dht.h"
+#include "config/boot_zcode_dht_frame_auth.h"
 #include "config/boot_zcode_dht_record_kind.h"
 #include "crypto/ed25519.h"
 #include "json/json.h"
@@ -138,6 +139,28 @@ static bool signed_find(const char *dir, uint64_t generation,
   return e == VCS_ZCODE_DHT_OK;
 }
 
+static bool signed_find_record(const char *dir, uint64_t generation,
+                               const uint8_t transcript[32],
+                               uint8_t query_byte, uint8_t root_byte,
+                               uint8_t *wire, size_t cap, size_t *len) {
+  uint8_t seed[32], node_id[32];
+  struct vcs_zcode_dht_msg_find_record msg;
+  memset(&msg, 0, sizeof(msg));
+  if (!fixture_material(dir, &msg.delegation, seed, node_id))
+    return false;
+  msg.session_generation = generation;
+  memcpy(msg.sender_node_id, node_id, sizeof(msg.sender_node_id));
+  memset(msg.query_id, query_byte, sizeof(msg.query_id));
+  msg.selector.kind = VCS_ZCODE_DHT_RECORD_POINTER;
+  (void)snprintf(msg.selector.namespace_name,
+                 sizeof(msg.selector.namespace_name), "science.study");
+  memset(msg.selector.root, root_byte, sizeof(msg.selector.root));
+  enum vcs_zcode_dht_error e = vcs_zcode_dht_msg_serialize_find_record(
+      &msg, transcript, seed, wire, cap, len);
+  memory_cleanse(seed, sizeof(seed));
+  return e == VCS_ZCODE_DHT_OK;
+}
+
 static bool signed_nodes(const char *dir, uint64_t generation,
                          const uint8_t transcript[32], uint8_t query_byte,
                          uint8_t *wire, size_t cap, size_t *len) {
@@ -243,6 +266,94 @@ static void cleanup_fixture(const char *dir) {
   snprintf(path, sizeof(path), "%s/zcode", dir);
   (void)rmdir(path);
   (void)rmdir(dir);
+}
+
+static int test_pending_capacity_is_local_backpressure(void) {
+  int failures = 0;
+  TEST("zcode dht service: pending-probe capacity is zero-score local "
+       "backpressure") {
+    char adir[] = "/tmp/zcl_dht_pending_cap_a_XXXXXX";
+    char bdir[] = "/tmp/zcl_dht_pending_cap_b_XXXXXX";
+    ASSERT(mkdtemp(adir) != NULL);
+    ASSERT(mkdtemp(bdir) != NULL);
+    uint8_t genesis[32], anoise[32], bnoise[32], transcript[32];
+    memset(genesis, 0x11, sizeof(genesis));
+    memset(anoise, 0x22, sizeof(anoise));
+    memset(bnoise, 0x33, sizeof(bnoise));
+    memset(transcript, 0x55, sizeof(transcript));
+    ASSERT(fixture_identity(adir, 0x61, genesis, anoise));
+    ASSERT(fixture_identity(bdir, 0x62, genesis, bnoise));
+    struct vcs_zcode_dht_service *b =
+        fixture_service(bdir, genesis, bnoise);
+    ASSERT(b != NULL);
+    struct vcs_zcode_dht_session session = {
+        .established = true, .generation = 42, .connection_serial = 1};
+    memcpy(session.remote_static, anoise, sizeof(session.remote_static));
+    memcpy(session.transcript_hash, transcript,
+           sizeof(session.transcript_hash));
+    ASSERT(vcs_zcode_dht_service_session_open(b, 1, &session,
+                                              test_time(1001)));
+    (void)drain(b); /* session bootstrap is outside the exercised reply */
+
+    uint8_t seed[32], sender_id[32];
+    struct vcs_zcode_dht_delegation sender_delegation;
+    ASSERT(fixture_material(adir, &sender_delegation, seed, sender_id));
+    memory_cleanse(seed, sizeof(seed));
+    uint8_t distance[32];
+    vcs_zcode_dht_xor_distance(b->self_id, sender_id, distance);
+    int bucket = vcs_zcode_dht_bucket_index(distance);
+    ASSERT(bucket >= 0);
+    b->table->bucket_sizes[bucket] = VCS_ZCODE_DHT_K;
+    b->table->contact_count = VCS_ZCODE_DHT_K;
+    for (size_t i = 0; i < VCS_ZCODE_DHT_K; i++) {
+      memset(b->table->buckets[bucket][i].node_id, (int)(0x40 + i), 32);
+      b->table->buckets[bucket][i].last_success_unix = 1;
+    }
+    b->table->pending_count = VCS_ZCODE_DHT_MAX_PENDING;
+    for (size_t i = 0; i < VCS_ZCODE_DHT_MAX_PENDING; i++) {
+      b->table->pending[i].active = true;
+      b->table->pending[i].victim_node_id[0] = 0x80;
+      b->table->pending[i].victim_node_id[1] = (uint8_t)i;
+    }
+
+    uint8_t wire[VCS_ZCODE_DHT_FIND_NODE_WIRE_BYTES];
+    size_t wire_len = 0;
+    ASSERT(signed_find(adir, 42, transcript, 0xd1, 0x7a, wire,
+                       sizeof(wire), &wire_len));
+    struct vcs_zcode_dht_service_status before, after;
+    vcs_zcode_dht_service_status(b, &before);
+    enum vcs_zcode_dht_reject_reason rejected;
+    ASSERT(!vcs_zcode_dht_service_handle_frame(
+        b, 1, wire, wire_len, test_time(1002), &rejected));
+    ASSERT_EQ(rejected, VCS_ZCODE_DHT_REJECT_BACKPRESSURE);
+    ASSERT_EQ(boot_zcode_dht_offence(rejected), PEER_OFFENCE_NONE);
+    ASSERT_EQ(peer_offence_weight(boot_zcode_dht_offence(rejected)), 0);
+    vcs_zcode_dht_service_status(b, &after);
+    ASSERT_EQ(after.frames_rejected[VCS_ZCODE_DHT_REJECT_IDENTITY],
+              before.frames_rejected[VCS_ZCODE_DHT_REJECT_IDENTITY]);
+    ASSERT_EQ(after.connected_authenticated, 0);
+
+    /* Free exactly one local slot. The identical signed frame must not be
+     * poisoned as replay and can now authenticate and queue its reply. */
+    memset(&b->table->pending[0], 0, sizeof(b->table->pending[0]));
+    b->table->pending_count--;
+    ASSERT(vcs_zcode_dht_service_handle_frame(
+        b, 1, wire, wire_len, test_time(1003), &rejected));
+    ASSERT_EQ(b->table->pending_count, VCS_ZCODE_DHT_MAX_PENDING);
+    ASSERT_EQ(drain(b), 1);
+    vcs_zcode_dht_service_status(b, &after);
+    ASSERT_EQ(after.connected_authenticated, 1);
+
+    uint8_t self_id[32];
+    memcpy(self_id, b->self_id, sizeof(self_id));
+    ASSERT(vcs_zcode_dht_table_init(b->table, self_id));
+    vcs_zcode_dht_service_free(b, test_time(1004));
+    cleanup_fixture(adir);
+    cleanup_fixture(bdir);
+    PASS();
+  }
+_test_next:;
+  return failures;
 }
 
 static bool fixture_pointer_record_named(
@@ -856,7 +967,8 @@ static bool space16_swarm_fetch(
  * real manifest/chunk transfers once offers stand in for ads. */
 static bool space16_swarm_fetch_offered(
     struct space16_observer *observer, const uint8_t transport[32],
-    const uint64_t *providers, size_t provider_count) {
+    const uint64_t *providers, const uint64_t *expires_at,
+    size_t provider_count, uint64_t now) {
   struct vcs_package_store_summary summaries[64];
   size_t summary_count = vcs_package_store_list_summaries(
       observer->provider_store, true, summaries, 64);
@@ -874,7 +986,7 @@ static bool space16_swarm_fetch_offered(
       return false;
     /* The seam under test: verified evidence, never an announce wire. */
     if (!vcs_swarm_engine_peer_offer(observer->swarm, providers[i],
-                                     transport))
+                                     transport, expires_at[i], now))
       return false;
   }
   vcs_swarm_engine_schedule_ready(observer->swarm, 0, observer->now_ms);
@@ -2307,6 +2419,7 @@ static int test_record_transport_and_restart(void) {
     ASSERT(vcs_zcode_dht_service_provider_route(
         b, 1001, &reconnect_selector, &reconnect_route));
     ASSERT_EQ(reconnect_route.authenticated_count, 1);
+    ASSERT_EQ(reconnect_route.expires_at[0], reconnect_provider.expiry);
     vcs_zcode_dht_service_session_close(b, 1, 42, test_time(1001));
     ASSERT(vcs_zcode_dht_service_provider_route(
         b, 1001, &reconnect_selector, &reconnect_route));
@@ -2322,6 +2435,7 @@ static int test_record_transport_and_restart(void) {
     ASSERT(vcs_zcode_dht_service_provider_route(
         b, 1001, &reconnect_selector, &reconnect_route));
     ASSERT_EQ(reconnect_route.authenticated_count, 1);
+    ASSERT_EQ(reconnect_route.expires_at[0], reconnect_provider.expiry);
     ASSERT(vcs_zcode_dht_service_session_open(
         a, 2, &as, test_time(1001)));
     ASSERT(pump(a, b, 2, 1, 1001, NULL, NULL));
@@ -3607,8 +3721,8 @@ static int test_sparse_space16_network(void) {
         .swarm = offer_swarm,
         .now_ms = 100};
     SPACE16_REQUIRE(space16_swarm_fetch_offered(
-        &offer_observer, blobs[0], route.peer_ids,
-        route.authenticated_count));
+        &offer_observer, blobs[0], route.peer_ids, route.expires_at,
+        route.authenticated_count, net.now.wall_unix));
     vcs_swarm_engine_free(offer_swarm);
     vcs_package_store_close(offer_store);
   }
@@ -4667,6 +4781,7 @@ _test_next:;
 
 int test_zcode_dht_service(void) {
   int failures = test_disabled_diagnostics();
+  failures += test_pending_capacity_is_local_backpressure();
   failures += test_publish_reproduction_gate();
   failures += test_publication_monotonic_retry();
   failures += test_publication_delegation_window();
@@ -4950,7 +5065,7 @@ int test_zcode_dht_service(void) {
 
     /* A full egress queue is our own backpressure, not capacity guilt on
      * the sender. Fill every outbound slot with otherwise-accepted signed
-     * FIND_NODE replies, then a further valid find must refuse as
+     * FIND_NODE replies, then a valid record find must refuse as
      * BACKPRESSURE: counted under its own reason, never folded into the
      * peer's flood budget via CAP.
      *
@@ -4990,8 +5105,23 @@ int test_zcode_dht_service(void) {
       }
       /* Exactly MAX_OUTBOUND replies queued; nothing flushed meanwhile. */
       ASSERT_EQ(pushed, (uint64_t)VCS_ZCODE_DHT_SERVICE_MAX_OUTBOUND);
-      ASSERT(signed_find(adir, 42, transcript, 0xee, 0x3c, oversized,
-                         sizeof(oversized), &forged_len));
+      struct service_peer *sender = NULL;
+      for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_PEERS; i++)
+        if (b->peers[i].used && b->peers[i].peer_id == 1)
+          sender = &b->peers[i];
+      ASSERT(sender != NULL);
+      /* Fill the replay ledger with live entries. The refused frame must
+       * restore the exact entry it temporarily evicts, not merely clear its
+       * new ID and silently open a replay hole for the older request. */
+      for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_REPLAY_PER_PEER; i++) {
+        sender->request_replay[i].used = true;
+        memset(sender->request_replay[i].id, 0x80, 16);
+        sender->request_replay[i].id[0] = (uint8_t)i;
+        sender->request_replay[i].seen_mono = 3200 + seconds_needed;
+      }
+      struct replay_entry displaced = sender->request_replay[0];
+      ASSERT(signed_find_record(adir, 42, transcript, 0xee, 0x3c,
+                                oversized, sizeof(oversized), &forged_len));
       ASSERT(!vcs_zcode_dht_service_handle_frame(
           b, 1, oversized, forged_len,
           (struct vcs_zcode_dht_time){
@@ -4999,12 +5129,23 @@ int test_zcode_dht_service(void) {
               .monotonic_s = 3200 + seconds_needed + 1},
           &rejected));
       ASSERT_EQ(rejected, VCS_ZCODE_DHT_REJECT_BACKPRESSURE);
+      ASSERT_EQ(sender->request_replay[0].used, displaced.used);
+      ASSERT(memcmp(sender->request_replay[0].id, displaced.id,
+                    sizeof(displaced.id)) == 0);
+      ASSERT_EQ(sender->request_replay[0].seen_mono, displaced.seen_mono);
       struct vcs_zcode_dht_service_status after;
       vcs_zcode_dht_service_status(b, &after);
       ASSERT_EQ(after.frames_rejected[VCS_ZCODE_DHT_REJECT_BACKPRESSURE],
                 before.frames_rejected[VCS_ZCODE_DHT_REJECT_BACKPRESSURE] +
                     1);
-      (void)drain(b);
+      ASSERT_EQ(drain(b), VCS_ZCODE_DHT_SERVICE_MAX_OUTBOUND);
+      ASSERT(vcs_zcode_dht_service_handle_frame(
+          b, 1, oversized, forged_len,
+          (struct vcs_zcode_dht_time){
+              .wall_unix = 4000 + seconds_needed + 2,
+              .monotonic_s = 3200 + seconds_needed + 2},
+          &rejected));
+      ASSERT_EQ(drain(b), 1);
     }
 
     /* A node ID owns one authenticated service session. Newer local serials

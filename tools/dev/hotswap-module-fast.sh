@@ -142,6 +142,10 @@ case "$F_LDFLAGS" in
     *-Bsymbolic*) ;;
     *) fallback "cached link flags lack -Bsymbolic (interposition guard); refusing fast link" ;;
 esac
+case "$F_LDFLAGS" in
+    *-nostartfiles*) ;;
+    *) fallback "cached link flags lack -nostartfiles (zero-constructor guard); refusing fast link" ;;
+esac
 # Word-splitting below mirrors how make expands these flag strings on its own
 # recipe lines; the values are toolchain flags, never shell code.
 # shellcheck disable=SC2086

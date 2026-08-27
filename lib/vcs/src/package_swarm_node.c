@@ -60,13 +60,35 @@ static int peer_slot(const struct vcs_swarm_engine *engine, uint64_t peer)
 }
 
 /* Shared with package_swarm_stalled.c (declared in package_swarm_priv.h). */
-bool peer_advertises(const struct swarm_peer *peer,
-                    const uint8_t root[32])
+static int peer_ad_index(const struct swarm_peer *peer,
+                         const uint8_t root[32])
 {
     for (size_t i = 0; i < peer->ad_count; i++)
         if (memcmp(peer->ads[i], root, 32) == 0)
-            return true;
-    return false;
+            return (int)i;
+    return -1;
+}
+
+bool peer_advertises(const struct swarm_peer *peer,
+                     const uint8_t root[32])
+{
+    return peer_ad_index(peer, root) >= 0;
+}
+
+static void peer_prune_expired_offers(struct swarm_peer *peer, uint64_t now)
+{
+    size_t write = 0;
+    for (size_t read = 0; read < peer->ad_count; read++) {
+        uint64_t expiry = peer->ad_expires_at[read];
+        if (expiry != 0 && expiry <= now)
+            continue;
+        if (write != read) {
+            memcpy(peer->ads[write], peer->ads[read], 32);
+            peer->ad_expires_at[write] = expiry;
+        }
+        write++;
+    }
+    peer->ad_count = write;
 }
 
 /* A provider-directed fetch is already bound to explicit authenticated
@@ -742,8 +764,13 @@ static void handle_announce(struct vcs_swarm_engine *engine,
     }
     /* Keep-alive of a root already in peer->ads[] is accepted and does
      * not consume the unique-root inventory quota or raise ANNOUNCE_FLOOD. */
-    if (peer_advertises(peer, a->package_root))
+    int existing = peer_ad_index(peer, a->package_root);
+    if (existing >= 0) {
+        /* A live authenticated ANNOUNCE supersedes finite DHT evidence for
+         * this transport session. Disconnect still clears the whole table. */
+        peer->ad_expires_at[existing] = 0;
         return;
+    }
     struct vcs_policy_decision d =
         vcs_policy_check_announce(peer->tier, peer->announce_count);
     if (!d.allow) {
@@ -757,8 +784,10 @@ static void handle_announce(struct vcs_swarm_engine *engine,
         return;
     }
     peer->announce_count++;
-    if (peer->ad_count < VCS_SWARM_MAX_PEER_ADS)
-        memcpy(peer->ads[peer->ad_count++], a->package_root, 32);
+    if (peer->ad_count < VCS_SWARM_MAX_PEER_ADS) {
+        memcpy(peer->ads[peer->ad_count], a->package_root, 32);
+        peer->ad_expires_at[peer->ad_count++] = 0;
+    }
 }
 
 /* Public-hosting admission for one root.
@@ -1427,10 +1456,13 @@ void vcs_swarm_engine_peer_drop(struct vcs_swarm_engine *engine,
 }
 
 bool vcs_swarm_engine_peer_offer(struct vcs_swarm_engine *engine,
-                                 uint64_t peer, const uint8_t root[32])
+                                 uint64_t peer, const uint8_t root[32],
+                                 uint64_t expires_at, uint64_t now)
 {
     if (!engine || !root || peer == 0)
         LOG_FAIL(SWARM_LOG, "peer_offer: null engine/root or zero id");
+    if (expires_at <= now)
+        return false;
     pthread_mutex_lock(&engine->lock);
     int slot = peer_slot(engine, peer);
     if (slot < 0) {
@@ -1438,9 +1470,16 @@ bool vcs_swarm_engine_peer_offer(struct vcs_swarm_engine *engine,
         return false;
     }
     struct swarm_peer *p = &engine->peers[slot];
+    peer_prune_expired_offers(p, now);
     /* Locally authenticated evidence, not a wire frame: announce quota
      * and flood scoring stay out of this path entirely. */
-    if (peer_advertises(p, root)) {
+    int existing = peer_ad_index(p, root);
+    if (existing >= 0) {
+        /* A session ANNOUNCE (expiry zero) is stronger and stays scoped to
+         * the connection. Otherwise retain the latest verified window. */
+        if (p->ad_expires_at[existing] != 0 &&
+            expires_at > p->ad_expires_at[existing])
+            p->ad_expires_at[existing] = expires_at;
         pthread_mutex_unlock(&engine->lock);
         return true;
     }
@@ -1450,7 +1489,8 @@ bool vcs_swarm_engine_peer_offer(struct vcs_swarm_engine *engine,
                  (unsigned long long)peer);
         return false;
     }
-    memcpy(p->ads[p->ad_count++], root, 32);
+    memcpy(p->ads[p->ad_count], root, 32);
+    p->ad_expires_at[p->ad_count++] = expires_at;
     pthread_mutex_unlock(&engine->lock);
     return true;
 }
@@ -1803,9 +1843,11 @@ void vcs_swarm_engine_tick(struct vcs_swarm_engine *engine, int64_t day,
     engine->ticked = true;
     engine->last_tick = now;
     for (size_t i = 0; i < VCS_SWARM_MAX_PEERS; i++)
-        if (engine->peers[i].used)
+        if (engine->peers[i].used) {
+            peer_prune_expired_offers(&engine->peers[i], now);
             engine->peers[i].tier = peer_tier_locked(engine,
                                                      &engine->peers[i]);
+        }
     timeouts_locked(engine, now);
     if (engine->store)
         schedule_locked(engine, day, now);
@@ -1818,6 +1860,9 @@ void vcs_swarm_engine_schedule_ready(struct vcs_swarm_engine *engine,
     if (!engine)
         return;
     pthread_mutex_lock(&engine->lock);
+    for (size_t i = 0; i < VCS_SWARM_MAX_PEERS; i++)
+        if (engine->peers[i].used)
+            peer_prune_expired_offers(&engine->peers[i], now);
     if (engine->store)
         schedule_locked(engine, day, now);
     pthread_mutex_unlock(&engine->lock);

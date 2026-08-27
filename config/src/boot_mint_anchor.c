@@ -42,7 +42,6 @@
  * would trade the fold's dominant throughput lever (a low fsync cadence) for a
  * marginal resume-granularity gain, and the mechanisms above already make the
  * mint resumable without it. */
-
 #include "config/boot.h"
 #include "config/boot_internal.h"  /* boot_full_fold_is_armed/_finish (-full-fold) */
 #include "config/boot_mint_anchor_drive.h"

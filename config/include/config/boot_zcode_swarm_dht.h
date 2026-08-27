@@ -35,7 +35,8 @@ struct boot_zcode_swarm_dht_ops {
   int (*poll)(void *ctx, uint64_t operation_id, uint64_t generation,
               uint64_t now_mono);
   bool (*route)(void *ctx, const uint8_t root[32], uint64_t now_mono,
-                uint64_t *known_peer_ids, size_t max, size_t *count_out);
+                uint64_t *known_peer_ids, uint64_t *expires_at,
+                size_t max, size_t *count_out);
 };
 
 /* Install stub ops (NULL restores production adapters and clears all

@@ -103,15 +103,18 @@ static int prod_poll(void *ctx, uint64_t operation_id, uint64_t generation,
 }
 
 static bool prod_route(void *ctx, const uint8_t root[32], uint64_t now_mono,
-                       uint64_t *known_peer_ids, size_t max, size_t *count_out)
+                       uint64_t *known_peer_ids, uint64_t *expires_at,
+                       size_t max, size_t *count_out)
 {
     (void)ctx;
+    (void)now_mono;
     struct vcs_zcode_dht_record_selector selector = {
         .kind = VCS_ZCODE_DHT_RECORD_PROVIDER};
     memcpy(selector.root, root, 32);
     struct vcs_zcode_dht_provider_route route;
     memset(&route, 0, sizeof(route));
-    if (!boot_zcode_dht_provider_route(now_mono, &selector, &route))
+    uint64_t wall_now = (uint64_t)platform_time_wall_time_t();
+    if (!boot_zcode_dht_provider_route(wall_now, &selector, &route))
         return false;
     size_t n = 0;
     for (size_t i = 0; i < VCS_ZCODE_DHT_K && n < max; i++) {
@@ -124,8 +127,10 @@ static bool prod_route(void *ctx, const uint8_t root[32], uint64_t now_mono,
                 dup = true;
                 break;
             }
-        if (!dup)
-            known_peer_ids[n++] = id;
+        if (!dup) {
+          known_peer_ids[n++] = id;
+          expires_at[n - 1] = route.expires_at[i];
+        }
     }
     *count_out = n;
     return true;
@@ -177,15 +182,17 @@ static struct swarm_discovery_lease *lease_for(const uint8_t root[32])
  * ENROLL_WAIT re-poll re-runs the route once those sessions show up.
  * Offers are idempotent by design. */
 static size_t apply_route(const uint8_t root[32], const uint64_t *ids,
-                          size_t count)
+                          const uint64_t *expires_at, size_t count)
 {
     struct vcs_swarm_engine *engine = vcs_swarm_engine_global();
     if (!engine)
         return 0;
+    uint64_t now = (uint64_t)platform_time_wall_time_t();
     size_t offered = 0;
     for (size_t i = 0; i < count; i++)
         if (vcs_swarm_engine_peer_known(engine, ids[i]) &&
-            vcs_swarm_engine_peer_offer(engine, ids[i], root))
+            vcs_swarm_engine_peer_offer(engine, ids[i], root,
+                                        expires_at[i], now))
             offered++;
     if (offered > 0)
         vcs_swarm_engine_schedule_ready(engine, 0, 0);
@@ -273,10 +280,11 @@ void boot_zcode_swarm_discovery_tick(uint64_t now_mono)
                 break;
             }
             uint64_t ids[VCS_ZCODE_DHT_K];
+            uint64_t expires_at[VCS_ZCODE_DHT_K];
             size_t count = 0;
-            if (s_ops->route(s_ops->ctx, lease->root, now_mono, ids,
+            if (s_ops->route(s_ops->ctx, lease->root, now_mono, ids, expires_at,
                              VCS_ZCODE_DHT_K, &count) &&
-                apply_route(lease->root, ids, count) > 0) {
+                apply_route(lease->root, ids, expires_at, count) > 0) {
                 /* Parked on RECHECK; stall-reap drops it when the root
                  * gets advertised (by us or anyone). */
                 lease->next_mono =

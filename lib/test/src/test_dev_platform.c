@@ -552,7 +552,8 @@ static int test_watcher_publication_containment(void)
             "service ABI changed; select DEV_RESTART",
             why_not_live, sizeof(why_not_live),
             next_command, sizeof(next_command));
-        ASSERT(strcmp(next_command, "make -j\"$(getconf _NPROCESSORS_ONLN)\" dev-bin") == 0);
+        ASSERT(strcmp(next_command,
+                      "make -j\"$(getconf _NPROCESSORS_ONLN)\" dev-bin") == 0);
         zcl_devloop_hotswap_guidance(
             "passed", "resident_commit", "",
             why_not_live, sizeof(why_not_live),
@@ -2259,7 +2260,7 @@ static bool dp_hotswap_cache_fixture_init(const char *root,
         "CC=%s\n"
         "COMPILER_ID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
         "DEV_CFLAGS=-DZCL_DEV_BUILD -ffile-prefix-map=%s=/zclassic23\n"
-        "HOTSWAP_MODULE_LDFLAGS=-shared -Wl,-Bsymbolic\n",
+        "HOTSWAP_MODULE_LDFLAGS=-shared -nostartfiles -Wl,-Bsymbolic\n",
         compiler, canonical_root);
     return n > 0 && n < (int)sizeof(flags) &&
            dp_mk_write(root, "build/hotswap/fast/flags.env", flags);

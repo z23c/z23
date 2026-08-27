@@ -197,6 +197,7 @@ struct vcs_zcode_dht_service_status {
 
 struct vcs_zcode_dht_provider_route {
   uint64_t peer_ids[VCS_ZCODE_DHT_K];
+  uint64_t expires_at[VCS_ZCODE_DHT_K];
   uint32_t authenticated_count;
   uint32_t reachability_pending;
   uint32_t policy_denied;

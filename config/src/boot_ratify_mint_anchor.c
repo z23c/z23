@@ -103,7 +103,7 @@ static bool ratify_seam_core(struct sqlite3 *pdb, int32_t height,
         ratify_hex32(got_hex, got_sha3);
         ratify_hex32(want_hex, coins_sha3);
         snprintf(out->reason, sizeof(out->reason),
-                 "seam mismatch sha3=%s/%s n=%llu/%llu h=%s%d/%d",
+                 "seam mismatch sha3=%s/%s n=%llu/%llu applied=%s%d/%d",
                  got_hex, want_hex, (unsigned long long)count,
                  (unsigned long long)count_want,
                  applied_found ? "" : "absent:", applied, height + 1);

@@ -78,6 +78,8 @@
 
 /* Render cap for peer rows (the LIST budget). */
 #define ZW_MAX_PEERS 32u
+#define ZW_DATADIR_MAX 4400u
+#define ZW_SHELL_QUOTED_MAX (4u * ZW_DATADIR_MAX + 3u)
 
 /* ── small input helpers (the native_zcode_* pattern) ───────────────── */
 
@@ -95,6 +97,34 @@ static const char *zw_datadir(const struct zcl_command_request *request)
         return dd;
     dd = zcl_native_command_datadir();
     return (dd && dd[0]) ? dd : NULL;
+}
+
+/* Render one POSIX-shell argument. Single quotes preserve every byte except
+ * NUL; an embedded quote becomes '\'' (close, escaped quote, reopen). */
+static bool zw_shell_quote(const char *input, char *out, size_t out_cap)
+{
+    if (!input || !out || out_cap < 3)
+        return false;
+    size_t pos = 0;
+    out[pos++] = '\'';
+    for (const unsigned char *p = (const unsigned char *)input; *p; p++) {
+        static const char escaped_quote[] = "'\\''";
+        if (*p == '\'') {
+            if (sizeof(escaped_quote) - 1u > out_cap - pos - 1u)
+                return false;
+            memcpy(out + pos, escaped_quote, sizeof(escaped_quote) - 1u);
+            pos += sizeof(escaped_quote) - 1u;
+        } else {
+            if (pos + 2u > out_cap)
+                return false;
+            out[pos++] = (char)*p;
+        }
+    }
+    if (pos + 2u > out_cap)
+        return false;
+    out[pos++] = '\'';
+    out[pos] = '\0';
+    return true;
 }
 
 static bool zw_zcode_dir(const struct zcl_command_request *request,
@@ -582,8 +612,11 @@ void zcl_native_handle_zcode_package_fetch(
          * (or the restart, once this process is already hosting) instead of
          * reciting `-packagehost=1` as the next boot action. */
         struct zcl_zcode_join_posture join;
-        char note[1200];
+        char note[ZW_SHELL_QUOTED_MAX + 1200u];
+        char quoted_dd[ZW_SHELL_QUOTED_MAX];
         const char *dd = zw_datadir(request);
+        bool have_quoted_dd = dd && dd[0] &&
+            zw_shell_quote(dd, quoted_dd, sizeof(quoted_dd));
         if (!zcl_zcode_join_posture_fill(&join))
             join.package_hosting = false;
         int n;
@@ -595,7 +628,7 @@ void zcl_native_handle_zcode_package_fetch(
                 "systemctl --user restart zclassic23 so the live engine "
                 "resumes it (manifest-first, then chunks rarest-first from "
                 "the peers advertising the root)");
-        else if (dd && dd[0])
+        else if (have_quoted_dd)
             n = snprintf(
                 note, sizeof(note),
                 "no live hosting engine: the resumable download record is "
@@ -603,7 +636,7 @@ void zcl_native_handle_zcode_package_fetch(
                 "z23 join -datadir=%s then restart so the live engine "
                 "resumes it (manifest-first, then chunks rarest-first from "
                 "the peers advertising the root)",
-                dd);
+                quoted_dd);
         else
             n = snprintf(
                 note, sizeof(note),
@@ -658,8 +691,11 @@ void zcl_native_handle_zcode_package_peers(
              * (or the restart, once this process is already hosting) instead
              * of reciting `-packagehost=1` as the way to wire it. */
             struct zcl_zcode_join_posture join;
-            char note[1200];
+            char note[ZW_SHELL_QUOTED_MAX + 1200u];
+            char quoted_dd[ZW_SHELL_QUOTED_MAX];
             const char *dd = zw_datadir(request);
+            bool have_quoted_dd = dd && dd[0] &&
+                zw_shell_quote(dd, quoted_dd, sizeof(quoted_dd));
             if (!zcl_zcode_join_posture_fill(&join))
                 join.package_hosting = false;
             int n;
@@ -672,7 +708,7 @@ void zcl_native_handle_zcode_package_peers(
                     "one-shot CLI has none to report. possession is "
                     "store-side and is still reported; missing store facts "
                     "fail closed and replica counts are never invented");
-            else if (dd && dd[0])
+            else if (have_quoted_dd)
                 n = snprintf(
                     note, sizeof(note),
                     "no live hosting engine on this process; run "
@@ -681,7 +717,7 @@ void zcl_native_handle_zcode_package_peers(
                     "one-shot CLI has none to report. possession is "
                     "store-side and is still reported; missing store facts "
                     "fail closed and replica counts are never invented",
-                    dd);
+                    quoted_dd);
             else
                 n = snprintf(
                     note, sizeof(note),
@@ -853,20 +889,23 @@ void zcl_native_handle_zcode_package_offered(
     json_free(&items);
     (void)json_push_kv_bool(&reply->data, "truncated", truncated);
 
-    char next[384];
+    char next[ZW_SHELL_QUOTED_MAX + 384u];
     if (!live) {
+        char quoted_dd[ZW_SHELL_QUOTED_MAX];
+        bool have_quoted_dd = datadir && datadir[0] &&
+            zw_shell_quote(datadir, quoted_dd, sizeof(quoted_dd));
         int wn;
-        if (join.package_hosting && datadir && datadir[0])
+        if (join.package_hosting && have_quoted_dd)
             wn = snprintf(next, sizeof(next),
                           "systemctl --user restart zclassic23, then "
                           "z23 zcode package offered -datadir=%s",
-                          datadir);
+                          quoted_dd);
         else if (join.package_hosting)
             wn = snprintf(next, sizeof(next), "%s",
                           join.offline_next_command);
-        else if (datadir && datadir[0])
+        else if (have_quoted_dd)
             wn = snprintf(next, sizeof(next), "z23 join -datadir=%s",
-                          datadir);
+                          quoted_dd);
         else
             wn = snprintf(next, sizeof(next), "z23 join");
         if (wn < 0 || (size_t)wn >= sizeof(next))
