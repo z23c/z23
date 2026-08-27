@@ -209,6 +209,21 @@ load_allowlist() {
 SCANNED_SO=0
 declare -A SEEN_IMPORT=()
 
+canonical_import_symbol() {
+    local raw="$1"
+    local host_os="$2"
+    CANONICAL_IMPORT_SYMBOL="$raw"
+    if [ "$host_os" = "Darwin" ]; then
+        # Mach-O adds exactly one underscore to the C linkage name. Removing
+        # more would turn a distinct private/runtime symbol into an allowed
+        # import. The dyld binder is loader plumbing rather than module reach.
+        CANONICAL_IMPORT_SYMBOL="${raw#_}"
+        if [ "$CANONICAL_IMPORT_SYMBOL" = "dyld_stub_binder" ]; then
+            CANONICAL_IMPORT_SYMBOL=""
+        fi
+    fi
+}
+
 scan_modules() {
     if [ ! -d "$SO_DIR" ]; then
         if [ "$SANDBOX" -eq 1 ]; then
@@ -265,24 +280,8 @@ scan_modules() {
             sym="${line##* }"      # trailing field is the symbol name
             sym="${sym%%@*}"       # drop the @GLIBC_x.y.z version half
             [ -n "$sym" ] || continue
-            # Mach-O spells every extern with one leading underscore; the
-            # contract is written in plain C names, so probe the stripped
-            # form on this host while recording the raw spelling. Apple's
-            # fortified small-copy variant maps to its plain libc function,
-            # and dyld_stub_binder is the platform's lazy-bind plumbing —
-            # the ELF equivalent (PLT) is invisible to nm on Linux.
-            probe_sym="$sym"
-            if [[ "$(uname -s)" == "Darwin" ]]; then
-                stripped="${sym#/}"
-                while [ "${stripped#_}" != "$stripped" ]; do stripped="${stripped#_}"; done
-                case "$stripped" in
-                    memcpy_chk)  stripped="memcpy" ;;
-                    strncpy_chk) stripped="strncpy" ;;
-                    strcpy_chk)  stripped="strcpy" ;;
-                    dyld_stub_binder) probe_sym="" ;;
-                esac
-                [ -n "$probe_sym" ] && probe_sym="$stripped"
-            fi
+            canonical_import_symbol "$sym" "$(uname -s)"
+            probe_sym="$CANONICAL_IMPORT_SYMBOL"
             SEEN_IMPORT["$sym"]=1
             if [ -n "$probe_sym" ] && [ -z "${ALLOWED[$sym]:-}" ] &&
                [ -z "${ALLOWED[$probe_sym]:-}" ]; then
@@ -371,6 +370,22 @@ run_checks() {
 # concurrent build would try to consume it. So the selftest builds its OWN
 # module directory in scratch and points the gate at the COPY.
 run_selftest() {
+    canonical_import_symbol "_memcpy" "Darwin"
+    [ "$CANONICAL_IMPORT_SYMBOL" = "memcpy" ] || {
+        echo "$GATE: selftest FATAL — Mach-O C-name normalization failed" >&2
+        exit 2
+    }
+    canonical_import_symbol "___memcpy_chk" "Darwin"
+    [ "$CANONICAL_IMPORT_SYMBOL" = "__memcpy_chk" ] || {
+        echo "$GATE: selftest FATAL — Mach-O normalization widened a private symbol" >&2
+        exit 2
+    }
+    canonical_import_symbol "_dyld_stub_binder" "Darwin"
+    [ -z "$CANONICAL_IMPORT_SYMBOL" ] || {
+        echo "$GATE: selftest FATAL — dyld loader plumbing was not isolated" >&2
+        exit 2
+    }
+
     mkdir -p "$SCRATCH" || {
         echo "$GATE: selftest FATAL — cannot create scratch dir $SCRATCH" >&2
         exit 2
