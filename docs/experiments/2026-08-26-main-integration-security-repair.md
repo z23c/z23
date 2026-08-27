@@ -118,6 +118,10 @@ The following pre-push shell phase caught a whitespace-only drift in sealed
 the 70-file core seal pass; equivalent unsealed P2P formatting cleanup kept
 the 22/22 ratchet unchanged. `test_msg_handlers`, `test_net`, and lint-gate
 shards 06 and 07 then passed uncached with zero skips.
+The push mapper also refused the changed crypto test until it had an explicit
+impact owner. The new narrow rule resolves it to `test_crypto_registry`, the
+shared `crypto` group, and lint contracts; the impact-rule checker, selector
+test, crypto group, and lint shard 03 all passed uncached.
 
 At `2026-08-27T02:07:25Z` on `rhett3.dev`, the clean shutdown began saving
 3,233,145 flat-index entries. The save completed at `02:07:43Z`; the

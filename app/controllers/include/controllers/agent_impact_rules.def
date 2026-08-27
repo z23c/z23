@@ -72,6 +72,9 @@ AGENT_IMPACT_RULE("app/controllers/src/dbquery_controller.c|app/controllers/incl
 AGENT_IMPACT_RULE("app/controllers/src/shielded_gap_remedy_controller.c|app/controllers/include/controllers/shielded_gap_remedy_controller.h|app/controllers/src/agent_runtime_controller.c|lib/test/src/test_shielded_gap_remedy.c", "shielded_gap_remedy syncdiag_rpc rpc make_lint_gates")
 
 AGENT_IMPACT_RULE("lib/crypto/src/hkdf_sha256.c|lib/crypto/include/crypto/hkdf_sha256.h|lib/test/src/test_hkdf.c", "hkdf_sha256_rfc5869 crypto make_lint_gates")
+/* Registry tests own both exact scheme behavior and observational timing.
+ * Changing their verdict logic must run the group itself plus shared crypto. */
+AGENT_IMPACT_RULE("lib/test/src/test_crypto_registry.c", "test_crypto_registry crypto make_lint_gates")
 /* BLAKE3 is TRANSFER-layer only (docs/work/WIRE_COMPILE_CACHE.md): never
  * consensus (SHA-256d, Equihash BLAKE2b) and never stored identity
  * (content.v2 SHA3-256). The official-vector KAT is the whole proof
