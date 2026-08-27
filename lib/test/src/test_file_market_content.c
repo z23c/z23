@@ -3,6 +3,7 @@
 
 #include "test/test_core.h"
 
+#include "base/hex.h"
 #include "chain/chainparams.h"
 #include "controllers/file_market_controller.h"
 #include "crypto/ed25519.h"
@@ -11,6 +12,7 @@
 #include "models/market_content.h"
 #include "net/file_market.h"
 #include "platform/time_compat.h"
+#include "rpc/server.h"
 #include "sapling/sapling.h"
 #include "services/file_market_content_service.h"
 #include "services/market_moderation_service.h"
@@ -103,6 +105,30 @@ static bool content_signed_offer(struct file_offer *offer,
     offer->issued_unix = now_unix - 60;
     offer->expires_unix = now_unix + 600;
     return file_offer_auth_seal(offer, seed) == FILE_OFFER_AUTH_OK;
+}
+
+/* Drive one market RPC by name with a positional string-args JSON body,
+ * mirroring the moderation tests' table harness. */
+static bool content_rpc(struct rpc_table *t, const char *method,
+                        const char *params_json, struct json_value *result)
+{
+    json_init(result);
+    struct json_value params;
+    if (params_json) {
+        if (!json_read(&params, params_json, strlen(params_json)))
+            return false;
+    }
+    bool ok = rpc_table_execute(t, method, params_json ? &params : NULL,
+                                result);
+    if (params_json)
+        json_free(&params);
+    return ok;
+}
+
+static const char *content_kv_str(struct json_value *value, const char *key)
+{
+    const struct json_value *found = json_get(value, key);
+    return found && found->type == JSON_STR ? json_get_str(found) : NULL;
 }
 
 int file_market_content_tests(void)
@@ -400,6 +426,159 @@ int file_market_content_tests(void)
 
         node_db_close(&wndb);
         test_cleanup_tmpdir(wdir);
+    }
+
+    /* ── the registration confirm gate ───────────────────────────── */
+    /* Binding the owner's serving bytes is a two-step command: plan
+     * mints a token bound to the offer, the target path, and the offer's
+     * registration as it stands; commit re-derives that token from live
+     * state. A moved registration or a changed path stales the plan
+     * instead of silently re-pointing delivery, and a plan never
+     * mutates. */
+    {
+        rpc_market_set_state(&ndb);
+        /* The tamper tests above deliberately corrupted filepath's bytes,
+         * and a commit hashes the target file: the gate needs its own
+         * pristine file carrying the same root. */
+        char gate_path[512];
+        snprintf(gate_path, sizeof(gate_path), "%s/gate.bin", dir);
+        struct file_offer gate_offer;
+        bool gate_ready =
+            content_write_file(gate_path, payload, sizeof(payload)) &&
+            content_signed_offer(&gate_offer, root, sizeof(payload), 7501,
+                                 now_unix) &&
+            db_file_offer_save(&ndb, &gate_offer);
+        CONTENT_CHECK("confirm-gate fixture offer", gate_ready);
+
+        struct rpc_table gate_table;
+        rpc_table_init(&gate_table);
+        register_market_rpc_commands(&gate_table);
+        set_rpc_warmup_finished();
+
+        char gate_offer_hex[65];
+        zcl_hex_encode(gate_offer.offer_id, 32, gate_offer_hex);
+        int64_t rows_before = db_market_content_count(&ndb);
+        char gate_params[600];
+        struct json_value gate;
+
+        /* Plan: mints the token, mutates nothing. */
+        snprintf(gate_params, sizeof(gate_params),
+                 "[\"%s\",\"%s\",\"plan\"]", gate_offer_hex, gate_path);
+        json_init(&gate);
+        bool planned = content_rpc(&gate_table, "zmarket_content_register",
+                                   gate_params, &gate);
+        const char *plan_token = content_kv_str(&gate, "plan_token");
+        char token_hex[65];
+        if (plan_token)
+            snprintf(token_hex, sizeof(token_hex), "%s", plan_token);
+        const char *plan_status = content_kv_str(&gate, "status");
+        CONTENT_CHECK("plan mints a token and mutates nothing",
+            planned && plan_status &&
+                strcmp(plan_status, "planned") == 0 &&
+                strlen(token_hex) == 64 &&
+                db_market_content_count(&ndb) == rows_before);
+        json_free(&gate);
+
+        /* A well-formed but wrong token re-derives to a different digest:
+         * the gate reads it as a moved bind, not a malformed token (the
+         * bare-commit leg below covers the malformed case). */
+        char tampered[65];
+        snprintf(tampered, sizeof(tampered), "%s", token_hex);
+        tampered[0] = tampered[0] == '0' ? '1' : '0';
+        snprintf(gate_params, sizeof(gate_params),
+                 "[\"%s\",\"%s\",\"commit\",\"%s\"]", gate_offer_hex,
+                 gate_path, tampered);
+        json_init(&gate);
+        bool tamper_refused = !content_rpc(
+            &gate_table, "zmarket_content_register", gate_params, &gate);
+        const char *tamper_reason =
+            gate.type == JSON_STR ? json_get_str(&gate) : NULL;
+        CONTENT_CHECK("tampered plan token is refused",
+            tamper_refused && tamper_reason &&
+                strstr(tamper_reason, "STALE_PLAN") != NULL &&
+                db_market_content_count(&ndb) == rows_before);
+        json_free(&gate);
+
+        /* Commit without a token is refused. */
+        snprintf(gate_params, sizeof(gate_params),
+                 "[\"%s\",\"%s\",\"commit\"]", gate_offer_hex, gate_path);
+        json_init(&gate);
+        bool bare_refused = !content_rpc(
+            &gate_table, "zmarket_content_register", gate_params, &gate);
+        CONTENT_CHECK("commit without a plan token is refused",
+            bare_refused && db_market_content_count(&ndb) == rows_before);
+        json_free(&gate);
+
+        /* The real commit carries the planned token and binds the bytes —
+         * and the receipt never echoes the private path. */
+        snprintf(gate_params, sizeof(gate_params),
+                 "[\"%s\",\"%s\",\"commit\",\"%s\"]", gate_offer_hex,
+                 gate_path, token_hex);
+        json_init(&gate);
+        bool committed = content_rpc(&gate_table,
+                                     "zmarket_content_register",
+                                     gate_params, &gate);
+        const struct json_value *committed_flag =
+            json_get(&gate, "committed");
+        const char *commit_status = content_kv_str(&gate, "status");
+        const struct json_value *registered_at = json_get(&gate,
+                                                          "registered_at");
+        char commit_rendered[1024];
+        (void)json_write(&gate, commit_rendered, sizeof(commit_rendered));
+        CONTENT_CHECK("commit with the planned token registers",
+            committed && committed_flag &&
+                committed_flag->type == JSON_BOOL &&
+                json_get_bool(committed_flag) &&
+                commit_status && strcmp(commit_status, "registered") == 0 &&
+                registered_at && registered_at->type == JSON_INT &&
+                json_get_int(registered_at) > 0 &&
+                strstr(commit_rendered, gate_path) == NULL &&
+                strstr(commit_rendered, "content_path") == NULL &&
+                db_market_content_count(&ndb) == rows_before + 1);
+        json_free(&gate);
+
+        /* Replaying that commit after the registration moved is stale:
+         * the state the token was minted against no longer exists. */
+        json_init(&gate);
+        bool replay_stale = !content_rpc(
+            &gate_table, "zmarket_content_register", gate_params, &gate);
+        const char *stale_reason =
+            gate.type == JSON_STR ? json_get_str(&gate) : NULL;
+        CONTENT_CHECK("replayed commit after the bind is stale",
+            replay_stale && stale_reason &&
+                strstr(stale_reason, "STALE_PLAN") != NULL);
+        json_free(&gate);
+
+        /* The target path is bound: a token planned for one path cannot
+         * commit another. */
+        snprintf(gate_params, sizeof(gate_params),
+                 "[\"%s\",\"%s\",\"plan\"]", gate_offer_hex, wrong_path);
+        json_init(&gate);
+        bool path_planned = content_rpc(&gate_table,
+                                        "zmarket_content_register",
+                                        gate_params, &gate);
+        const char *path_token = content_kv_str(&gate, "plan_token");
+        char path_token_buf[65];
+        path_token_buf[0] = '\0';
+        if (path_token)
+            snprintf(path_token_buf, sizeof(path_token_buf), "%s",
+                     path_token);
+        json_free(&gate);
+        bool path_token_differs =
+            path_token_buf[0] && strcmp(path_token_buf, token_hex) != 0;
+        snprintf(gate_params, sizeof(gate_params),
+                 "[\"%s\",\"%s\",\"commit\",\"%s\"]", gate_offer_hex,
+                 gate_path, path_token_buf);
+        json_init(&gate);
+        bool path_refused = !content_rpc(
+            &gate_table, "zmarket_content_register", gate_params, &gate);
+        const char *path_reason =
+            gate.type == JSON_STR ? json_get_str(&gate) : NULL;
+        CONTENT_CHECK("a plan for one path cannot commit another",
+            path_planned && path_token_differs && path_refused &&
+                path_reason && strstr(path_reason, "STALE_PLAN") != NULL &&
+                db_market_content_count(&ndb) == rows_before + 1);
+        json_free(&gate);
     }
 
     rpc_market_set_state(NULL);

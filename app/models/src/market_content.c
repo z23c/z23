@@ -152,6 +152,20 @@ int db_market_content_list(struct node_db *ndb,
         if (!market_content_read_public(s, 0, &out[count])) continue);
 }
 
+bool db_market_content_find_registered_at(struct node_db *ndb,
+                                          const uint8_t offer_id[32],
+                                          int64_t *registered_at)
+{
+    if (!ndb || !ndb->open || !offer_id || !registered_at)
+        LOG_FAIL("market",
+                 "market content registered_at find: invalid arguments");
+    sqlite3_stmt *s = NULL;
+    AR_QUERY_ONE_BOOL(ndb, s,
+        "SELECT registered_at FROM market_contents WHERE offer_id=?",
+        AR_BIND_BLOB(s, 1, offer_id, 32),
+        *registered_at = AR_COL_INT(s, 0));
+}
+
 int db_market_content_count(struct node_db *ndb)
 {
     if (!ndb || !ndb->open)

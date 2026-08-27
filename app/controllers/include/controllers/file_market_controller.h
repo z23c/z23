@@ -15,12 +15,20 @@
 #include "models/database.h"
 
 void rpc_market_set_state(struct node_db *ndb);
+/* The store behind the market RPCs, as set by rpc_market_set_state — the
+ * read side of that setter for the satellite RPC files (moderation, the
+ * private content registry) that share this node_db and nothing else. */
+struct node_db *rpc_market_state(void);
 void register_market_rpc_commands(struct rpc_table *t);
 void register_market_offer_rpc_commands(struct rpc_table *t);
 /* The node's own moderation posture (serve profile + relay rule + local
  * review marks), implemented in app/controllers/src/market_moderation_rpc.c.
  * register_market_rpc_commands calls this; callers do not. */
 void register_market_moderation_rpc_commands(struct rpc_table *t);
+/* The owner's private paid-content registry and its registration confirm
+ * gate, implemented in app/controllers/src/market_content_rpc.c.
+ * register_market_rpc_commands calls this; callers do not. */
+void register_market_content_rpc_commands(struct rpc_table *t);
 
 #ifdef ZCL_TESTING
 /* One-shot deterministic seam after plan-token validation and before the

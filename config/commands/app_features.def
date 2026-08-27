@@ -713,17 +713,20 @@ ZCL_COMMAND_READY_COMMAND(
     "Bind private seller bytes to a signed offer",
     "Hashes one non-symlink regular file, verifies its exact size and chunk "
     "manifest root against the authenticated paid offer, and atomically "
-    "records the private canonical binding. The path is accepted only as "
+    "records the private canonical binding. Exact plan/commit: mode plan "
+    "mints a plan_token bound to the offer, the target path, and the "
+    "registration as it stands; commit requires that token (STALE_PLAN if "
+    "any of the three moved in between). The path is accepted only as "
     "owner input and is absent from results, logs, REST, and peer traffic.", 0,
     "market,content,seller,register,manifest",
     "zcl.app_market_content_register.input.v1", "zcl.market_content.v1",
-    "offer_id,content_path", "offer_id",
-    "z23 app market content register --input='{\"offer_id\":\"<64hex>\",\"content_path\":\"/private/file\"}'",
+    "offer_id,content_path,mode,plan_token", "offer_id,mode",
+    "z23 app market content register --input='{\"offer_id\":\"<64hex>\",\"content_path\":\"/private/file\",\"mode\":\"plan\"}'",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
     ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
     ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
-    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
     ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
     ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     zcl_native_handle_market_content_register)

@@ -54,6 +54,12 @@ bool db_market_content_find_chunk(
 int db_market_content_list(struct node_db *ndb,
                            struct market_content_public_record *out,
                            size_t max);
+/* One offer's registration timestamp, or false when the offer has no
+ * registered content. Feeds the register confirm gate's state-at-plan-time
+ * binding: any rewrite moves it and stales an outstanding plan token. */
+bool db_market_content_find_registered_at(struct node_db *ndb,
+                                          const uint8_t offer_id[32],
+                                          int64_t *registered_at);
 /* Uncapped row total behind the db_market_content_list window. -1 only
  * when the registry is unreadable; a serving index measures what it
  * truncated against this, never against its own window. */

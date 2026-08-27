@@ -27,8 +27,6 @@
 #include "rpc/server.h"
 #include "models/database.h"
 #include "models/file_offer.h"
-#include "models/market_content.h"
-#include "services/file_market_content_service.h"
 #include "services/file_market_purchase_service.h"
 #include "services/market_moderation_service.h"
 #include "services/market_moderation_view_service.h"
@@ -46,6 +44,11 @@
 
 static struct node_db *g_market_ndb = NULL;
 static char g_market_datadir[1024] = "";
+
+struct node_db *rpc_market_state(void)
+{
+    return g_market_ndb;
+}
 
 void rpc_market_set_state(struct node_db *ndb)
 {
@@ -654,125 +657,6 @@ static bool rpc_zmarket_status(const struct json_value *params, bool help,
     return true;
 }
 
-/* ── private paid-content registry ───────────────────────────────── */
-
-/* The registered-content index is a serving surface — it tells a caller,
- * including a remote one over GET /api/market-contents, which content
- * this node holds bytes for and will hand out, under the same profile the
- * chunk-delivery gate asks. The listing is a bounded newest-first window,
- * so it discloses the window: shown counts the rows listed, total counts
- * the same store (omitted when uncountable), hidden rows among served. */
-static bool market_content_index_json(struct json_value *result)
-{
-    json_set_object(result);
-    json_push_kv_str(result, "schema", "zcl.market_contents.index.v1");
-    json_push_kv_str(result, "profile",
-                     market_moderation_profile_string(
-                         market_moderation_active_profile()));
-    int64_t hidden = 0; int count = 0, total = -1;
-    struct json_value rows = {0};
-    json_set_array(&rows);
-    if (g_market_ndb && g_market_ndb->open) {
-        struct market_content_public_record content[FILE_MARKET_MAX_OFFERS];
-        count = db_market_content_list(g_market_ndb, content,
-                                       FILE_MARKET_MAX_OFFERS);
-        total = db_market_content_count(g_market_ndb);
-        for (int i = 0; i < count; i++) {
-            if (!market_moderation_may_serve_root(content[i].root_hash)) {
-                hidden++;
-                continue;
-            }
-            struct json_value row = {0};
-            json_set_object(&row);
-            char offer_hex[65], root_hex[65];
-            HexStr(content[i].offer_id, 32, false,
-                   offer_hex, sizeof(offer_hex));
-            HexStr(content[i].root_hash, 32, false,
-                   root_hex, sizeof(root_hex));
-            json_push_kv_str(&row, "offer_id", offer_hex);
-            json_push_kv_str(&row, "root_hash", root_hex);
-            json_push_kv_int(&row, "size_bytes",
-                             (int64_t)content[i].size_bytes);
-            json_push_kv_int(&row, "num_chunks", content[i].num_chunks);
-            json_push_kv_int(&row, "registered_at",
-                             content[i].registered_at);
-            json_push_back(&rows, &row);
-            json_free(&row);
-        }
-    }
-    json_push_kv(result, "contents", &rows);
-    json_free(&rows);
-    json_push_kv_int(result, "hidden_by_profile", hidden);
-    json_push_kv_int(result, "shown", count - (int)hidden);
-    if (total >= 0) json_push_kv_int(result, "total", total);
-    return true;
-}
-
-static bool rpc_zmarket_content_list(const struct json_value *params,
-                                     bool help,
-                                     struct json_value *result)
-{
-    if (help) {
-        json_set_str(result,
-            "zmarket_content_list\n\nList owner-registered paid content "
-            "without revealing private filesystem paths.\n");
-        return true;
-    }
-    (void)params;
-    return market_content_index_json(result);
-}
-
-static bool rpc_zmarket_content_register(const struct json_value *params,
-                                         bool help,
-                                         struct json_value *result)
-{
-    if (help || !params || json_size(params) < 2) {
-        json_set_str(result,
-            "zmarket_content_register \"offer_id\" \"content_path\"\n"
-            "\nBind exact local bytes to an authenticated paid offer. "
-            "The private path is never returned.\n");
-        return true;
-    }
-    const char *offer_hex = json_get_str(json_at(params, 0));
-    const char *content_path = json_get_str(json_at(params, 1));
-    uint8_t offer_id[32];
-    if (!offer_hex || strlen(offer_hex) != 64 || !IsHex(offer_hex) ||
-        ParseHex(offer_hex, offer_id, sizeof(offer_id)) != 32 ||
-        !content_path || !content_path[0]) {
-        json_set_str(result,
-                     "offer_id must be 64 hex characters and content_path is required");
-        return false;
-    }
-    if (!g_market_ndb || !g_market_ndb->open) {
-        json_set_str(result, "market database is unavailable");
-        return false;
-    }
-
-    struct market_content_public_record registered;
-    struct zcl_result saved = file_market_content_register(
-        g_market_ndb, offer_id, content_path,
-        (int64_t)platform_time_wall_time_t(), &registered);
-    if (!saved.ok) {
-        json_set_str(result, saved.message);
-        return false;
-    }
-
-    char saved_offer_hex[65], root_hex[65];
-    HexStr(registered.offer_id, 32, false,
-           saved_offer_hex, sizeof(saved_offer_hex));
-    HexStr(registered.root_hash, 32, false,
-           root_hex, sizeof(root_hex));
-    json_set_object(result);
-    json_push_kv_str(result, "schema", "zcl.market_content.v1");
-    json_push_kv_str(result, "status", "registered");
-    json_push_kv_str(result, "offer_id", saved_offer_hex);
-    json_push_kv_str(result, "root_hash", root_hex);
-    json_push_kv_int(result, "size_bytes", (int64_t)registered.size_bytes);
-    json_push_kv_int(result, "num_chunks", registered.num_chunks);
-    json_push_kv_int(result, "registered_at", registered.registered_at);
-    return true;
-}
-
 /* ── romseed_register ───────────────────────────────────────────────
  *
  * Explicitly (re)register a ROM/sync artifact by basename inside the datadir.
@@ -880,11 +764,6 @@ bool api_market_list(struct json_value *result)
     return market_list_json(NULL, result);
 }
 
-bool api_market_content_list(struct json_value *result)
-{
-    return market_content_index_json(result);
-}
-
 /* ── Registration ───────────────────────────────────────────────── */
 
 void register_market_rpc_commands(struct rpc_table *t)
@@ -894,10 +773,6 @@ void register_market_rpc_commands(struct rpc_table *t)
         { "market", "zmarket_offer",  rpc_zmarket_offer,  true },
         { "market", "zmarket_buy",    rpc_zmarket_buy,    true },
         { "market", "zmarket_status", rpc_zmarket_status, true },
-        { "market", "zmarket_content_list",
-          rpc_zmarket_content_list, true },
-        { "market", "zmarket_content_register",
-          rpc_zmarket_content_register, true },
         { "market", "zmarket_purchase_plan",
           rpc_zmarket_purchase_plan, false },
         { "market", "zmarket_purchase_commit",
@@ -916,4 +791,8 @@ void register_market_rpc_commands(struct rpc_table *t)
      * surface, not a marketplace one — but registers here so this table
      * stays the single list of market RPC names. */
     register_market_moderation_rpc_commands(t);
+    /* The owner's private content registry (with its registration confirm
+     * gate) lives in market_content_rpc.c and registers here for the same
+     * reason. */
+    register_market_content_rpc_commands(t);
 }
