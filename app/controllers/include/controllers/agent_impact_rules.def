@@ -941,6 +941,15 @@ AGENT_IMPACT_RULE("lib/test/src/test_hotswap_module_v2.c|lib/hotswap/include/hot
  * note written by whoever wrote the bytes. Edits here change what a module is
  * admitted against, so they ride the same hot-swap groups. */
 AGENT_IMPACT_RULE("tools/dev/hotswap-package.sh|tools/lint/check_hotswap_package_receipt_is_not_authority.sh|lib/hotswap/src/hotswap_artifact_digest.c|lib/hotswap/include/hotswap/hotswap_artifact_digest.h", "hotswap_module_v2 hotswap_module hotswap_loader hotswap_simnet make_lint_gates")
+/* Pre-map admission. hotswap_sealed_image.c copies a module into a sealed
+ * memory file so the bytes cannot change between the hash and the map;
+ * hotswap_elf_probe.c reads what the artifact CLAIMS (seal root, ABI,
+ * constructors, dependencies) without mapping it, so a module that runs code
+ * at dlopen is refused before it runs. config/hotswap_module_imports.def
+ * declares the only symbols a module may reach into the node for, and its
+ * gate freezes that reach. All four decide whether a module is admitted at
+ * all, so they ride the hot-swap groups. */
+AGENT_IMPACT_RULE("lib/hotswap/src/hotswap_sealed_image.c|lib/hotswap/include/hotswap/hotswap_sealed_image.h|lib/hotswap/src/hotswap_elf_probe.c|lib/hotswap/include/hotswap/hotswap_elf_probe.h|config/hotswap_module_imports.def|tools/lint/check_hotswap_module_imports.sh", "hotswap_module_v2 hotswap_module hotswap_loader hotswap_simnet make_lint_gates")
 /* Pure C23 service calculations are admitted by the service manifest, but
  * their direct behavioral owner is the commons suite. Keep that path-floor
  * proof independent of whether the current reverse-call graph can reach the
