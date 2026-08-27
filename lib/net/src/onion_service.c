@@ -18,6 +18,7 @@
 #include "util/supervisor.h"
 #include "util/template.h"
 #include <pthread.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -58,6 +59,40 @@ void onion_service_set_signed_peer_source(onion_signed_peer_source_fn source,
     ctx->signed_source = source;
     ctx->signed_ctx = ctx_arg;
 }
+
+/* Every serve_* handler returns the number of bytes it WROTE into the
+ * caller's response buffer — the vendored dynhost send loop relays
+ * exactly that many bytes onto the wire. snprintf instead returns the
+ * length it WOULD have written, which on truncation is LARGER than the
+ * buffer: returning it raw made the send loop read past the 64 KB
+ * response allocation and disclose adjacent heap to an unauthenticated
+ * remote client. Render every final response through this clamp; the
+ * return is always the NUL-terminated byte count actually in the
+ * buffer, and Content-Length printed from an inflated `off` upstream
+ * can never again widen the read. */
+static size_t onion_render_response(char *response, size_t max,
+                                    const char *fmt, ...)
+{
+    if (!response || max == 0)
+        return 0;
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(response, max, fmt, ap);
+    va_end(ap);
+    if (n < 0)
+        return 0;
+    if ((size_t)n >= max)
+        return max - 1; /* truncated: snprintf wrote max-1 bytes + NUL */
+    return (size_t)n;
+}
+
+/* Room the directory renderers must leave after their last row so the
+ * fixed trailer, the ROM-seed artifacts block (arts[2560] on the JSON
+ * path), and the HTTP header block all fit: a final render that
+ * truncates serves a cut-off document and, without onion_render_response
+ * above, used to report the inflated would-be length. */
+#define ONION_DIR_JSON_TRAILER_ROOM 3072
+#define ONION_DIR_HTML_TRAILER_ROOM 640
 
 /* Signed descriptors first, then the unsigned wallet scrape; the rule
  * and the merge live in net/onion_peer_merge.h. */
@@ -343,7 +378,7 @@ static size_t serve_landing_page(uint8_t *response, size_t max)
     if (n > 0) off += (size_t)n;
 
     /* Wrap with HTTP headers including Content-Length */
-    return (size_t)snprintf((char *)response, max,
+    return onion_render_response((char *)response,max,
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: text/html; charset=utf-8\r\n"
         "Content-Length: %zu\r\n"
@@ -566,7 +601,7 @@ static size_t serve_search(const char *query, uint8_t *response, size_t max)
         "</body></html>");
     if (n > 0) off += (size_t)n;
 
-    return (size_t)snprintf((char *)response, max,
+    return onion_render_response((char *)response,max,
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: text/html; charset=utf-8\r\n"
         "Content-Length: %zu\r\n"
@@ -622,7 +657,8 @@ static size_t serve_directory_json(uint8_t *response, size_t max)
 
     int count = 0;
     int skipped_expired = 0;
-    while (AR_STEP_ROW_READONLY(s) == SQLITE_ROW && off + 1300 < sizeof(body)) {
+    while (AR_STEP_ROW_READONLY(s) == SQLITE_ROW &&
+           off + 1300 < sizeof(body) - ONION_DIR_JSON_TRAILER_ROOM) {
         const char *addr = (const char *)sqlite3_column_text(s, 0);
         int port = sqlite3_column_int(s, 1);
         int svc = sqlite3_column_int(s, 2);
@@ -769,7 +805,7 @@ static size_t serve_directory_json(uint8_t *response, size_t max)
         (long long)ONION_DIR_EXPIRE_SECS, ONION_DIR_REFRESH_SECS,
         skipped_expired, arts_body);
 
-    return (size_t)snprintf((char *)response, max,
+    return onion_render_response((char *)response,max,
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: application/json\r\n"
         "Access-Control-Allow-Origin: *\r\n"
@@ -830,7 +866,8 @@ static size_t serve_directory_html(uint8_t *response, size_t max)
     }
 
     int count = 0;
-    while (AR_STEP_ROW_READONLY(s) == SQLITE_ROW && off + 900 < sizeof(body)) {
+    while (AR_STEP_ROW_READONLY(s) == SQLITE_ROW &&
+           off + 900 < sizeof(body) - ONION_DIR_HTML_TRAILER_ROOM) {
         const char *addr = (const char *)sqlite3_column_text(s, 0);
         int port = sqlite3_column_int(s, 1);
         int h = sqlite3_column_int(s, 2);
@@ -928,7 +965,7 @@ static size_t serve_directory_html(uint8_t *response, size_t max)
         "<footer>Z23 &mdash; one binary, one onion, one stack</footer>"
         "</body></html>");
 
-    return (size_t)snprintf((char *)response, max,
+    return onion_render_response((char *)response,max,
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: text/html; charset=utf-8\r\n"
         "Content-Length: %zu\r\n"
@@ -1007,7 +1044,7 @@ static size_t serve_status(uint8_t *response, size_t max)
         onion ? "\"" : "");
     if (blen < 0) blen = 0;
 
-    return (size_t)snprintf((char *)response, max,
+    return onion_render_response((char *)response,max,
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: application/json\r\n"
         "Access-Control-Allow-Origin: *\r\n"
@@ -1023,7 +1060,7 @@ static size_t serve_status(uint8_t *response, size_t max)
  * so the node can always say why a request was refused. */
 static size_t serve_rate_limited(uint8_t *response, size_t response_max)
 {
-    return (size_t)snprintf((char *)response, response_max,
+    return onion_render_response((char *)response,response_max,
         "HTTP/1.1 429 Too Many Requests\r\n"
         "Content-Type: text/html; charset=utf-8\r\nConnection: close\r\n"
         "Retry-After: 1\r\n\r\n"
@@ -1046,7 +1083,7 @@ static size_t serve_rate_limited(uint8_t *response, size_t response_max)
 static size_t serve_puzzle_required(const struct onion_pow_challenge *ch,
                                     uint8_t *response, size_t response_max)
 {
-    return (size_t)snprintf((char *)response, response_max,
+    return onion_render_response((char *)response,response_max,
         "HTTP/1.1 402 Payment Required\r\n"
         "Content-Type: text/html; charset=utf-8\r\nConnection: close\r\n"
         "Cache-Control: no-store\r\nRetry-After: 1\r\n\r\n"
@@ -1183,7 +1220,7 @@ size_t onion_service_handle_request(const char *method,
             return site_n_; \
         /* Fail closed: a signed MVC mount must never degrade into an \
          * unrelated legacy static fallback when proof storage is absent. */ \
-        return (size_t)snprintf((char *)response, response_max, \
+        return onion_render_response((char *)response,response_max, \
             "HTTP/1.1 503 Service Unavailable\r\n" \
             "Content-Type: text/plain; charset=utf-8\r\n" \
             "Cache-Control: no-store\r\n" \
@@ -1204,7 +1241,7 @@ size_t onion_service_handle_request(const char *method,
 #undef ZCL_SITE_DISPATCH_STORE
 
     /* 404 */
-    return (size_t)snprintf((char *)response, response_max,
+    return onion_render_response((char *)response,response_max,
         "HTTP/1.1 404 Not Found\r\n"
         "Content-Type: text/html; charset=utf-8\r\n"
         "Connection: close\r\n\r\n"

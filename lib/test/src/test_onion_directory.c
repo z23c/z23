@@ -1716,6 +1716,112 @@ static int od_test_served_pages(const char *datadir)
     return failures;
 }
 
+/* ── Response-bound pins: the handler's return feeds the vendored send
+ * loop verbatim, so an inflated snprintf return once made that loop read
+ * past the 64 KB production response buffer onto the wire. The serve
+ * paths must (a) never report more bytes than the caller's buffer holds,
+ * even on routes whose full render wants far more, and (b) keep a FULL
+ * directory complete inside the production 64 KB response — trailer,
+ * ROM-seed artifacts, headers, honest Content-Length — instead of
+ * silently cutting the tail off. ── */
+static int od_test_response_bounds(const char *datadir)
+{
+    int failures = 0;
+
+    onion_service_start(datadir);
+
+    /* Fill the directory well past one response: hundreds of fresh rows
+     * force both row loops to stop on their capacity guards with rows
+     * still waiting, which is exactly the fill that used to push the
+     * trailer and header render past the buffer end. */
+    sqlite3 *wdb = od_open(datadir);
+    if (!wdb) {
+        OD_CHECK("response-bounds fixture db opened", false);
+        onion_service_stop();
+        return failures;
+    }
+    int64_t now = (int64_t)platform_time_wall_time_t();
+    static const char b32[] = "abcdefghijklmnopqrstuvwxyz234567";
+    for (int i = 0; i < 300; i++) {
+        char host[72]; /* 56 base32 chars + ".onion", varying in low bits */
+        snprintf(host, sizeof(host),
+                 "g%c%c%c%cbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbd.onion",
+                 b32[i & 31], b32[(i >> 5) & 31],
+                 b32[(i >> 10) & 31], b32[(i >> 15) & 31]);
+        od_insert_row(wdb, host, now, "discovery");
+    }
+    sqlite3_close(wdb);
+
+    /* EXACTLY the production dynhost allocation. */
+    static uint8_t resp[65536];
+    memset(resp, 0, sizeof(resp));
+    onion_ratelimit_test_reset();
+    size_t rn = onion_service_handle_request("GET", "/directory.json", NULL, 0,
+                                             resp, sizeof(resp) - 1);
+    resp[rn < sizeof(resp) ? rn : sizeof(resp) - 1] = 0;
+    const char *js = (const char *)resp;
+    OD_CHECK("a full directory.json never reports more than the buffer holds",
+             rn > 0 && rn < sizeof(resp));
+    OD_CHECK("full directory.json ends with its trailer, not a cut",
+             rn > 0 && js[rn - 1] == '}' &&
+             strstr(js, "\"artifacts\":") != NULL);
+    {
+        const char *cl = strstr(js, "Content-Length: ");
+        const char *body = strstr(js, "\r\n\r\n");
+        OD_CHECK("full directory.json carries a parsable header block",
+                 cl != NULL && body != NULL);
+        if (cl && body) {
+            size_t declared = 0;
+            sscanf(cl, "Content-Length: %zu", &declared);
+            OD_CHECK("declared Content-Length equals the bytes behind it",
+                     declared == rn - (size_t)(body + 4 - js));
+        }
+    }
+
+    memset(resp, 0, sizeof(resp));
+    onion_ratelimit_test_reset();
+    rn = onion_service_handle_request("GET", "/directory", NULL, 0,
+                                      resp, sizeof(resp) - 1);
+    resp[rn < sizeof(resp) ? rn : sizeof(resp) - 1] = 0;
+    const char *html = (const char *)resp;
+    OD_CHECK("a full directory page never reports more than the buffer holds",
+             rn > 0 && rn < sizeof(resp));
+    OD_CHECK("full directory page ends with </html>, not a cut",
+             rn >= 7 && strcmp(html + rn - 7, "</html>") == 0);
+    {
+        const char *cl = strstr(html, "Content-Length: ");
+        const char *body = strstr(html, "\r\n\r\n");
+        if (cl && body) {
+            size_t declared = 0;
+            sscanf(cl, "Content-Length: %zu", &declared);
+            OD_CHECK("the page's declared length equals the bytes behind it",
+                     declared == rn - (size_t)(body + 4 - html));
+        }
+    }
+
+    /* A deliberately tiny buffer: the render wants orders of magnitude
+     * more room, so only the clamp keeps the report inside it. */
+    static uint8_t tiny[256];
+    memset(tiny, 0, sizeof(tiny));
+    onion_ratelimit_test_reset();
+    size_t tn = onion_service_handle_request("GET", "/directory.json", NULL, 0,
+                                             tiny, sizeof(tiny));
+    OD_CHECK("a 256-byte buffer is never reported as overfilled (json)",
+             tn > 0 && tn < sizeof(tiny));
+    OD_CHECK("the truncated response stays NUL-terminated in bounds",
+             memchr(tiny, 0, sizeof(tiny)) != NULL);
+
+    memset(tiny, 0, sizeof(tiny));
+    onion_ratelimit_test_reset();
+    tn = onion_service_handle_request("GET", "/", NULL, 0,
+                                      tiny, sizeof(tiny));
+    OD_CHECK("a 256-byte buffer is never reported as overfilled (home)",
+             tn > 0 && tn < sizeof(tiny));
+
+    onion_service_stop();
+    return failures;
+}
+
 /* ── Entry point ──────────────────────────────────────────────────── */
 
 int test_onion_directory(void)
@@ -1752,6 +1858,7 @@ int test_onion_directory(void)
      * back out of the REAL document. */
     failures += od_test_port_and_height(datadir);
     failures += od_test_served_pages(datadir);
+    failures += od_test_response_bounds(datadir);
 
     /* Sub-test in its own file (test_onion_directory_stale_hearsay.c):
      * the freshness boundary from both sides, and the bound on what a
