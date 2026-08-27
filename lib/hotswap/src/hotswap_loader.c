@@ -113,6 +113,14 @@ static bool has_suffix(const char *s, const char *suffix)
            memcmp(s + s_len - suffix_len, suffix, suffix_len) == 0;
 }
 
+static bool path_is_under(const char *path, const char *directory)
+{
+    size_t directory_len = strlen(directory);
+    return directory_len > 0 &&
+           strncmp(path, directory, directory_len) == 0 &&
+           path[directory_len] == '/';
+}
+
 bool hotswap_path_is_acceptable(const char *so_path, char *why, size_t why_sz)
 {
     if (why && why_sz)
@@ -143,7 +151,9 @@ bool hotswap_path_is_acceptable(const char *so_path, char *why, size_t why_sz)
         if (why) snprintf(why, why_sz, "realpath failed");
         return false;
     }
-    bool under_tmp = strncmp(real, "/tmp/", 5) == 0;
+    char real_tmp[PATH_MAX];
+    const char *tmp = realpath("/tmp", real_tmp) ? real_tmp : "/tmp";
+    bool under_tmp = path_is_under(real, tmp);
     bool under_build = strstr(real, "/build/hotswap/") != NULL;
     if (!under_tmp && !under_build) {
         if (why)

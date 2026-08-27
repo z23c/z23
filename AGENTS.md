@@ -178,7 +178,7 @@ The optimized ROM-seed background-scan regression also passed after bounding
 its worker-stack use; the artifact snapshot uses checked allocation instead of
 a roughly 1 MiB automatic array.
 The exact 10-package C23 Commons root and dependency-DAG projection, including
-all 216 monolith-owned package sources, also passed on macOS. Mach-O fixture
+all 217 monolith-owned package sources, also passed on macOS. Mach-O fixture
 builds use a fixed nonzero UUID and fixed-identifier ad-hoc signature; publisher
 and independent-checkout binaries execute and hash identically. Package builds
 that require Linux full isolation continue to refuse on macOS.
