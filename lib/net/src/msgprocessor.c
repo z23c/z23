@@ -2967,7 +2967,17 @@ bool msg_send_messages(void *ctx, struct p2p_node *node, bool send_trickle)
             stream_init(&inv_msg, 256);
             uint64_t count = 0;
 
-            for (size_t i = 0; i < node->inventory_to_send_count; i++) {
+            /* Wire-protocol clamp: one inv message carries at most
+             * MAX_INV_SZ items. Anything beyond that stays queued — the
+             * next tick drains the remainder — instead of emitting a
+             * single oversized frame peers may drop wholesale. */
+            size_t emit = node->inventory_to_send_count;
+            bool retained = false;
+            if (emit > MAX_INV_SZ) {
+                emit = MAX_INV_SZ;
+                retained = true;
+            }
+            for (size_t i = 0; i < emit; i++) {
                 inv_item_serialize(&node->inventory_to_send[i], &inv_msg);
                 count++;
             }
@@ -2986,7 +2996,15 @@ bool msg_send_messages(void *ctx, struct p2p_node *node, bool send_trickle)
             }
             stream_free(&inv_msg);
 
-            node->inventory_to_send_count = 0;
+            if (!retained) {
+                node->inventory_to_send_count = 0;
+            } else {
+                memmove(&node->inventory_to_send[0],
+                        &node->inventory_to_send[emit],
+                        (node->inventory_to_send_count - emit) *
+                            sizeof(node->inventory_to_send[0]));
+                node->inventory_to_send_count -= emit;
+            }
         }
         zcl_mutex_unlock(&node->cs_inventory);
     }

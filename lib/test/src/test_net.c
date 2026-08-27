@@ -2298,6 +2298,63 @@ int test_net(void)
         p2p_node_push_inventory(node, &inv);
         ok = ok && (node->inventory_to_send_count == before);
 
+        /* Known-ring index under growth + oldest-half eviction: 50002
+         * distinct hashes walk the capacity ladder to the first full-ring
+         * eviction. Membership must stay EXACT throughout — evicted hashes
+         * become unknown, survivors stay known — or relays silently
+         * re-advertise old inventory / drop fresh one. This is also the
+         * getblocks cost path: dedup used to linear-scan the whole ring
+         * per pushed item (25M compares for a single 500-item batch). */
+        struct inv_item binv;
+        for (uint32_t i = 0; i < 50002u; i++) {
+            struct uint256 bh;
+            memset(&bh, 0, sizeof(bh));
+            memcpy(bh.data, &i, sizeof(i));   /* unique per iteration */
+            bh.data[31] = 0x5a;               /* keep away from all-zero */
+            inv_item_init_typed(&binv, MSG_TX, &bh);
+            p2p_node_add_inventory_known(node, &binv);
+        }
+        /* Ring hit MAX_INVENTORY_KNOWN mid-walk, dropped its oldest half,
+         * and every add past that point (plus the evicting add itself)
+         * appended into the kept half. That end state is independent of
+         * what the earlier dedup checks left in the ring (they were
+         * evicted with it), so compute rather than hard-code it. */
+        ok = ok && (node->inventory_known_count ==
+                    MAX_INVENTORY_KNOWN / 2 +
+                        (50002u - MAX_INVENTORY_KNOWN) + 1);
+        ok = ok && (node->inventory_known_slot_mask != 0);
+
+        size_t q;
+        /* Newest (i = 50001) is known: pushing it queues nothing. */
+        uint32_t probe = 50001u;
+        memset(&inv, 0, sizeof(inv));
+        memcpy(inv.hash.data, &probe, sizeof(probe));
+        inv.hash.data[31] = 0x5a;
+        inv.type = MSG_TX;
+        q = node->inventory_to_send_count;
+        p2p_node_push_inventory(node, &inv);
+        ok = ok && (node->inventory_to_send_count == q);
+
+        /* Survivor from the kept half (i = 30000 >= 25000) still known. */
+        probe = 30000u;
+        memset(&inv, 0, sizeof(inv));
+        memcpy(inv.hash.data, &probe, sizeof(probe));
+        inv.hash.data[31] = 0x5a;
+        inv.type = MSG_TX;
+        q = node->inventory_to_send_count;
+        p2p_node_push_inventory(node, &inv);
+        ok = ok && (node->inventory_to_send_count == q);
+
+        /* Evicted old-half hash (i = 10000) is unknown again: it queues. */
+        probe = 10000u;
+        memset(&inv, 0, sizeof(inv));
+        memcpy(inv.hash.data, &probe, sizeof(probe));
+        inv.hash.data[31] = 0x5a;
+        inv.type = MSG_TX;
+        q = node->inventory_to_send_count;
+        p2p_node_push_inventory(node, &inv);
+        ok = ok && (node->inventory_to_send_count == q + 1);
+
         p2p_node_free(node);
         net_manager_free(&nm);
         if (ok) printf("OK\n");

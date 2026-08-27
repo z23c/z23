@@ -35,6 +35,17 @@ static struct log_throttle g_msg_block_retryable_log = LOG_THROTTLE_INIT;
 bool process_getblocks(struct msg_processor *mp, struct p2p_node *node,
                        struct byte_stream *s)
 {
+    /* Handshake guard: serving inventory to a peer we have not finished
+     * negotiating with (the post-version, pre-verack window) spends the
+     * relay's most expensive path — up to 500 ring-indexed pushes — for
+     * a peer that may not even share our network. Drop quietly; a
+     * legitimate peer re-requests after handshake. */
+    if (node->state < PEER_HANDSHAKE_COMPLETE) {
+        LOG_ERROR("net", "getblocks from pre-handshake peer %s dropped",
+                  node->addr_name);
+        return true;
+    }
+
     struct block_locator locator;
     block_locator_init(&locator);
     if (!block_locator_deserialize(&locator, s)) {

@@ -35,7 +35,7 @@ lib/net/src/download.c 1623
 lib/net/src/fast_sync.c 1904
 lib/net/src/file_service.c 2255
 lib/net/src/https_server.c 984
-lib/net/src/msg_blocks.c 902
+lib/net/src/msg_blocks.c 913 # getblocks pre-handshake service gate (defense-in-depth)
 lib/net/src/msg_headers.c 2066
 lib/net/src/msgprocessor.c 2817
 lib/net/src/msgprocessor_snapshot.c 2014
