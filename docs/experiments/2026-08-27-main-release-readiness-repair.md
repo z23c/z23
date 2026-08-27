@@ -227,3 +227,13 @@ check-zcode-package-registry PASS (10 roots rederived)
 
 Native NEON execution remains unclaimed by this x86-64 host; the corrected
 oracle will select NEON on an eligible AArch64 test host.
+
+The final Windows-native process-introspection commit changed the registered
+platform package. Its content, release, lock, and signature fields were
+re-derived from the combined tree before release.
+
+```text
+test_dev_platform groups_failed=0 self_skips=0
+check-zcode-package-registry PASS (10 roots rederived)
+check-vendor-provenance PASS
+```
