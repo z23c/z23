@@ -1,4 +1,5 @@
 #include "platform/os_proc.h"
+#include "platform/socket_compat.h"
 
 #include <stdint.h>
 
@@ -28,6 +29,12 @@ int main(void)
         !os_proc_open_fd_count(&handles_before) ||
         !os_proc_open_fd_count(&handles_after))
         return 2;
+
+    platform_socket_t socket_handle =
+        platform_socket_open(AF_INET, SOCK_STREAM, 0, true, true);
+    if (socket_handle == PLATFORM_SOCKET_INVALID ||
+        platform_socket_close(socket_handle) != 0)
+        return 4;
 #if defined(_WIN32)
     if (handles_before != handles_after)
         return 3;

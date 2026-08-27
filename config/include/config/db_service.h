@@ -8,6 +8,7 @@
 #include "util/sync.h"
 #include <sqlite3.h>
 #include <stdbool.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdatomic.h>
 

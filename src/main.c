@@ -36,6 +36,8 @@
 #include "util/signal_handler.h"        /* process-wide signal ownership */
 #include "util/util.h"                  /* ParseParameters */
 #include "util/sd_notify.h"             /* -sandbox=steady NOTIFY_SOCKET check */
+#include "platform/directory_compat.h"
+#include "platform/environment_compat.h"
 #include "session/agent_broker.h"       /* confined metaverse agent + broker modes */
 #include "services/agent_broker_provider.h" /* the broker's real authority, composed pre-fork */
 #include <signal.h>
@@ -46,6 +48,10 @@
 #include <time.h>
 #include <sys/stat.h>
 #include <errno.h>
+#if defined(_WIN32)
+#include <windows.h>
+#include <direct.h>
+#endif
 
 /* ════════════════════════════════════════════════════════════════
  *  NODE MODE — full node daemon
@@ -60,6 +66,7 @@ volatile sig_atomic_t g_shutdown_requested = 0;
  * instead. Replaced with setitimer + SIGALRM handler: alarm() and
  * signal() ARE async-signal-safe, and the kernel guarantees SIGALRM
  * delivery at the scheduled time. */
+#if !defined(_WIN32)
 static void shutdown_alarm_handler(int sig)
 {
     (void)sig;
@@ -69,6 +76,21 @@ static void shutdown_alarm_handler(int sig)
     (void)!write(STDERR_FILENO, msg, sizeof(msg) - 1);
     _exit(1);
 }
+#endif
+
+#if defined(_WIN32)
+static VOID CALLBACK shutdown_timer_callback(PVOID context, BOOLEAN fired)
+{
+    (void)context;
+    (void)fired;
+    static const char message[] =
+        "Shutdown watchdog: 90s timeout - forcing exit\n";
+    DWORD written = 0;
+    (void)WriteFile(GetStdHandle(STD_ERROR_HANDLE), message,
+                    (DWORD)(sizeof(message) - 1), &written, NULL);
+    TerminateProcess(GetCurrentProcess(), 1);
+}
+#endif
 
 static void signal_handler(int sig)
 {
@@ -88,8 +110,16 @@ static void signal_handler(int sig)
     /* Schedule a forced exit if graceful shutdown cannot get control.
      * Startup may still be finishing when SIGTERM arrives, so this must
      * allow enough time for app_init to unwind into app_shutdown. */
+#if defined(_WIN32)
+    static HANDLE shutdown_timer;
+    if (!shutdown_timer)
+        (void)CreateTimerQueueTimer(&shutdown_timer, NULL,
+                                    shutdown_timer_callback, NULL, 90000, 0,
+                                    WT_EXECUTEONLYONCE);
+#else
     signal(SIGALRM, shutdown_alarm_handler);
     alarm(90);
+#endif
 }
 
 /* app_init() returns a bare bool across ~2800 lines and ~20 refusal points.
@@ -397,7 +427,7 @@ int main(int argc, char **argv)
      * terminal SHA3/count hard-assert is identical on either path. Inert on a
      * live node — the mint-drive marker is entered only by the offline driver. */
     if (ctx.mint_anchor && getenv("ZCL_FOLD_INRAM") == NULL)
-        setenv("ZCL_FOLD_INRAM", "1", 1);
+        platform_environment_set("ZCL_FOLD_INRAM", "1", 1);
 
     /* OFFLINE-ONLY GUARD (jobs/mint_skip_crypto.h): -mint-anchor-fast (the
      * crypto pass-through) is HONORED ONLY together with -mint-anchor (the
@@ -425,7 +455,7 @@ int main(int argc, char **argv)
             memset(utxo_root, 0, 32);
             char blocks_dir[512];
             snprintf(blocks_dir, sizeof(blocks_dir), "%s/blocks", ctx.datadir);
-            mkdir(blocks_dir, 0755);
+            platform_directory_create(blocks_dir, 0755);
             int64_t t0 = (int64_t)time(NULL);
             bool ok = fs_client_sync(host, FS_PORT, ctx.datadir, utxo_root);
             int64_t elapsed = (int64_t)time(NULL) - t0;
