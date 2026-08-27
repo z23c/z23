@@ -47,6 +47,7 @@ void os_proc_mem_set_override(const struct os_proc_mem *forced)
 
 /* ── Small parsing helpers ───────────────────────────────────────── */
 
+#if !defined(_WIN32)
 static void os_proc_trim_newline(char *s)
 {
     if (!s)
@@ -82,6 +83,8 @@ static int64_t os_proc_status_field_bytes(const char *path, const char *label)
     return result;
 }
 #endif
+
+#endif /* !_WIN32 */
 
 /* ── cgroup v2 dir resolution + limit reads ──────────────────────── */
 
@@ -392,7 +395,8 @@ bool os_proc_cmdline_has_token(const char *token)
                                              token, -1, NULL, 0);
     if (wide_token_len <= 0)
         return false;
-    wchar_t *wide_token = malloc((size_t)wide_token_len * sizeof(*wide_token));
+    wchar_t *wide_token = malloc( /* raw-alloc-ok:platform-leaf */
+        (size_t)wide_token_len * sizeof(*wide_token));
     if (!wide_token)
         return false;
     if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, token, -1,

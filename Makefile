@@ -19,8 +19,8 @@ endif
 ZCL_HOST_OS := $(shell uname -s 2>/dev/null)
 ZCL_HOST_WINDOWS := $(if $(filter MINGW% MSYS%,$(ZCL_HOST_OS)),1,)
 ifneq ($(ZCL_HOST_WINDOWS),)
-CC = cc
-CXX ?= c++
+CC = gcc
+CXX ?= g++
 ZCL_PLATFORM_CPPFLAGS = -D_WIN32_WINNT=0x0600 -DWIN32_LEAN_AND_MEAN
 ZCL_LTO_FLAG = -flto=auto
 ZCL_PLATFORM_NODE_LIBS = -lws2_32 -liphlpapi -lbcrypt -luserenv \
