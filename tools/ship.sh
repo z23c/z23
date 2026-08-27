@@ -127,6 +127,19 @@ ship_is_proof_host() {
     [ -n "$PROOF_SERVER" ] && [ "$1" = "$PROOF_SERVER" ]
 }
 
+# A release candidate may claim onion support only when the candidate itself
+# reports the production Tor implementation through the native command tree.
+# Keep this check ahead of every deployment function: no byte crosses a host
+# boundary and no service restarts before this exact value is observed.
+ship_candidate_has_real_tor() {
+    local candidate="$1" out tor_build
+    out="$(timeout 30 "$candidate" ops telemetry network tor 2>/dev/null)" || return 1
+    [ -x "$REPO_ROOT/build/bin/jsonq" ] || return 1
+    tor_build="$(printf '%s\n' "$out" |
+        "$REPO_ROOT/build/bin/jsonq" get data.values.tor.tor_build 2>/dev/null)" || return 1
+    [ "$tor_build" = real_tor ]
+}
+
 if [ "${1:-}" = "--selftest" ]; then
     test_fleet=(node1 node2 node3 node4)
     test_order=""
@@ -144,7 +157,15 @@ if [ "${1:-}" = "--selftest" ]; then
     ! ship_glibc_satisfies 2.40 2.39
     PROOF_SERVER=node3
     ! ship_is_proof_host node1 && ship_is_proof_host node3
-    printf 'ship: selftest PASS (four-host order; validation; GLIBC inequality; explicit proof host)\n'
+    test_tmp="$(mktemp -d "${TMPDIR:-/tmp}/z23-ship-selftest.XXXXXX")"
+    trap 'find "$test_tmp" -depth -delete' EXIT HUP INT TERM
+    printf '#!/bin/sh\nprintf '\''%%s\\n'\'' '\''{"data":{"values":{"tor":{"tor_build":"real_tor"}}}}'\''\n' > "$test_tmp/real"
+    printf '#!/bin/sh\nprintf '\''%%s\\n'\'' '\''{"data":{"values":{"tor":{"tor_build":"stub_tor"}}}}'\''\n' > "$test_tmp/stub"
+    chmod 755 "$test_tmp/real" "$test_tmp/stub"
+    ship_candidate_has_real_tor "$test_tmp/real"
+    ! ship_candidate_has_real_tor "$test_tmp/stub"
+    find "$test_tmp" -depth -delete; trap - EXIT HUP INT TERM
+    printf 'ship: selftest PASS (four-host order; validation; GLIBC inequality; explicit proof host; real-Tor gate)\n'
     exit 0
 fi
 
@@ -344,6 +365,11 @@ else
         ''|*[!A-Za-z0-9._-]*)
             die "frozen candidate reports an invalid display build_commit" ;;
     esac
+    # The source preflight above requires a clean committed checkout and the
+    # build happens only after HEAD was integrated/pushed.  The binary's
+    # display field may intentionally say "external" for an out-of-tree link,
+    # but deployment and rollback need a resolvable full commit identity.
+    DEPLOY_COMMIT="$HEAD_SHA"
     say "candidate  source_id ${CAND_SOURCE_ID:0:16}…  commit $CAND_BUILD_COMMIT  sha256 ${ARTIFACT_SHA:0:16}…  $(du -h "$CANDIDATE" | cut -f1)"
 
     # The package-verify workers are spawned by the daemon at reproduce time
@@ -365,6 +391,21 @@ else
         WORKER_SHAS+=("$s")
     done
     say "workers    zclassic23-package-verify ${WORKER_SHAS[0]:0:16}…  zclassic23-package-verify-dev ${WORKER_SHAS[1]:0:16}…  $(du -ch "${WORKER_FILES[@]}" | tail -1 | cut -f1)"
+
+    ship_candidate_has_real_tor "$CANDIDATE" ||
+        die "candidate did not report exact tor_build=real_tor; nothing was transferred or restarted"
+    say "tor        candidate reports exact real_tor"
+
+    RELEASE_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/zclassic23.ship.manifest.XXXXXX")"
+    trap 'rm -f "$CANDIDATE" "$RELEASE_MANIFEST" "${WORKER_FILES[@]}"' EXIT HUP INT TERM
+    {
+        printf '%s  z23\n' "$ARTIFACT_SHA"
+        printf '%s  %s\n' "${WORKER_SHAS[0]}" "${WORKER_NAMES[0]}"
+        printf '%s  %s\n' "${WORKER_SHAS[1]}" "${WORKER_NAMES[1]}"
+    } > "$RELEASE_MANIFEST"
+    RELEASE_ID="$(sha256sum < "$RELEASE_MANIFEST" | awk '{print $1}')"
+    zcl_is_sha256 "$RELEASE_ID" || die "could not hash the release manifest"
+    say "release    manifest ${RELEASE_ID:0:16}…"
 
     CAND_MAX_GLIBC="$(objdump -T "$CANDIDATE" 2>/dev/null |
         grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' | sort -V | tail -1 || true)"
@@ -439,7 +480,7 @@ deploy_local() {
 }
 
 deploy_remote() {
-    local host="$1" svc_bin prev_sha run_id node_incoming
+    local host="$1" svc_bin prev_sha prior_commit run_id release_root node_incoming release_state
     step "Deploy → $host"
     svc_bin="$(ssh "${SSH_OPTS[@]}" "$host" \
         'set -eu
@@ -461,100 +502,108 @@ REMOTE_HASH
     )" || prev_sha=none
     say "remote now sha256 ${prev_sha:0:16}…"
 
-    run_id="${ARTIFACT_SHA:0:16}.$$"
-    node_incoming="${svc_bin}.incoming.$run_id"
+    run_id="${RELEASE_ID:0:16}.$$"
+    # A process rollback after a forward schema migration is not recovery.
+    # Prove that the persistent-schema implementation is byte-equivalent
+    # between the running release and this candidate before any transfer.
+    prior_commit="$(ssh "${SSH_OPTS[@]}" "$host" '
+        pid="$(systemctl --user show zclassic23 -p MainPID --value)" || exit 1
+        tr "\0" "\n" < "/proc/$pid/environ" |
+            sed -n "s/^ZCL_AGENT_EXPECT_BUILD_COMMIT=//p"' | tail -1)"
+    case "$prior_commit" in
+        ''|*[!0-9a-f]*) die "$host has no exact rollback build commit; refusing a schema-unsafe restart" ;;
+    esac
+    git cat-file -e "$prior_commit^{commit}" 2>/dev/null ||
+        die "$host rollback commit $prior_commit is unavailable locally"
+    if ! git diff --quiet "$prior_commit" "$HEAD_SHA" -- \
+        'app/models/src/database_*.c' 'app/models/src/schema_migration.c' \
+        'app/models/include/models/schema_migration.h'; then
+        die "$host candidate changes persistent-schema code; automatic binary rollback is not safe"
+    fi
+    say "rollback   $host persistent-schema code unchanged from ${prior_commit:0:12}"
 
-    # Stage beside the target, keep the outgoing binary as the rollback copy,
-    # then swap. The running process holds its inode open, so replacing the
-    # path never disturbs the daemon still serving from the old bytes.
-    scp -q "${SSH_OPTS[@]}" "$CANDIDATE" "$host:$node_incoming" || \
-        die "could not copy the candidate to $host"
+    release_root="$(ssh "${SSH_OPTS[@]}" "$host" 'printf "%s\n" "$HOME/.local/lib/z23/releases"')/$RELEASE_ID"
+    node_incoming="${release_root}.incoming.$run_id"
 
-    # Stage the workers beside the same executable: pkgl_worker_path resolves
-    # them there, so that directory is the only location where worker bytes
-    # matter at reproduce time.
-    local wi
-    for wi in "${!WORKER_NAMES[@]}"; do
-        scp -q "${SSH_OPTS[@]}" "${WORKER_FILES[$wi]}" \
-            "$host:${svc_bin%/*}/${WORKER_NAMES[$wi]}.incoming.$run_id" || \
-            die "could not copy ${WORKER_NAMES[$wi]} to $host"
-    done
+    # Existing immutable identities are reusable only when every byte still
+    # matches the locally frozen manifest. A collision or partial directory is
+    # corruption, never permission to overwrite an allegedly immutable root.
+    release_state="$(ssh "${SSH_OPTS[@]}" "$host" bash -s -- \
+        "$release_root" "$RELEASE_ID" "$ARTIFACT_SHA" \
+        "${WORKER_SHAS[0]}" "${WORKER_SHAS[1]}" <<'REMOTE_RELEASE_CHECK'
+set -eu
+root="$1"; manifest_sha="$2"; daemon_sha="$3"; worker_v_sha="$4"; worker_d_sha="$5"
+[ -e "$root" ] || { echo missing; exit 0; }
+[ -d "$root" ] || { echo "remote: immutable release root is not a directory: $root" >&2; exit 1; }
+[ "$(sha256sum < "$root/MANIFEST.sha256" | awk '{print $1}')" = "$manifest_sha" ] &&
+[ "$(sha256sum < "$root/z23" | awk '{print $1}')" = "$daemon_sha" ] &&
+[ "$(sha256sum < "$root/zclassic23-package-verify" | awk '{print $1}')" = "$worker_v_sha" ] &&
+[ "$(sha256sum < "$root/zclassic23-package-verify-dev" | awk '{print $1}')" = "$worker_d_sha" ] || {
+    echo "remote: immutable release root content mismatch: $root" >&2
+    exit 1
+}
+echo exact
+REMOTE_RELEASE_CHECK
+    )" || die "$host refused an existing immutable release root"
+
+    if [ "$release_state" = missing ]; then
+        ssh "${SSH_OPTS[@]}" "$host" bash -s -- "$node_incoming" <<'REMOTE_RELEASE_MKDIR'
+set -eu
+incoming="$1"
+[ ! -e "$incoming" ] || { echo "remote: incoming release already exists: $incoming" >&2; exit 1; }
+install -d -m 700 "$incoming"
+REMOTE_RELEASE_MKDIR
+        scp -q "${SSH_OPTS[@]}" "$CANDIDATE" "$host:$node_incoming/z23" ||
+            die "could not copy the candidate to $host"
+        local wi
+        for wi in "${!WORKER_NAMES[@]}"; do
+            scp -q "${SSH_OPTS[@]}" "${WORKER_FILES[$wi]}" \
+                "$host:$node_incoming/${WORKER_NAMES[$wi]}" ||
+                die "could not copy ${WORKER_NAMES[$wi]} to $host"
+        done
+        scp -q "${SSH_OPTS[@]}" "$RELEASE_MANIFEST" "$host:$node_incoming/MANIFEST.sha256" ||
+            die "could not copy the release manifest to $host"
+    else
+        [ "$release_state" = exact ] || die "$host returned invalid release state '$release_state'"
+        say "remote     immutable release already present and exact"
+    fi
 
     local activate_rc=0
     { printf '%s\n' "$SHIP_LIB_TEXT"; cat <<'REMOTE_SCRIPT'
 set -euo pipefail
-svc_bin="$1"; want_sha="$2"; want_src="$3"; want_commit="$4"
-want_worker_v="$5"; want_worker_d="$6"
-run_id="$7"
+svc_bin="$1"; release_root="$2"; manifest_sha="$3"; want_sha="$4"; want_src="$5"; want_commit="$6"
+want_worker_v="$7"; want_worker_d="$8"
+run_id="$9"
 # Health-verdict configuration, positional because ssh forwards no environment.
 # tools/scripts/ship_progress_lib.sh is prepended to this script on stdin: the
 # target box has no checkout, so the code that reaches the verdict has to
 # travel with the question.
-remote_window="$8"; remote_silence="$9"
-rollback_window="${10}"; rollback_silence="${11}"
-crash_samples="${12}"; unknown_samples="${13}"; rpc_budgets="${14}"
+remote_window="${10}"; remote_silence="${11}"
+rollback_window="${12}"; rollback_silence="${13}"
+crash_samples="${14}"; unknown_samples="${15}"; rpc_budgets="${16}"
 # The two subjects this script judges, each wrapped to ship_await's
 # one-argument observer seam. Same observables, same classifier, same words as
 # the local side uses.
 observe_candidate() { ship_observe zclassic23 "$want_sha" "$want_src" "$want_commit" "$1"; }
 observe_restore()   { ship_observe zclassic23 "$prior_sha" "" "" "$1"; }
-worker_dir="$(dirname "$svc_bin")"
-worker_v="$worker_dir/zclassic23-package-verify"
-worker_d="$worker_dir/zclassic23-package-verify-dev"
+worker_v="$release_root/zclassic23-package-verify"
+worker_d="$release_root/zclassic23-package-verify-dev"
 dropin_dir="$HOME/.config/systemd/user/zclassic23.service.d"
-dropin="$dropin_dir/90-build-identity.conf"
-rollback_bin="${svc_bin}.rollback.${run_id}"
+dropin="$dropin_dir/zzzzz-z23-ship-release.conf"
 rollback_dropin="${dropin}.ship.rollback.${run_id}"
 dropin_absent="${dropin}.ship.absent.${run_id}"
-node_incoming="${svc_bin}.incoming.${run_id}"
+node_incoming="${release_root}.incoming.${run_id}"
 lock_dir="$HOME/.cache/z23/ship-activation.lock"
 dropin_tmp=""
 prior_sha=""
 rollback_armed=0
 lock_held=0
 
-# Workers stage beside the service binary. Both outgoing files are snapshotted
-# before either swap, using the same present/absent marker convention as the
-# drop-in, so a second-worker failure restores the complete prior set.
-stage_worker() {
-    w_dst="$1"; w_sha="$2"
-    w_incoming="${w_dst}.incoming.${run_id}"
-    w_got="$(sha256sum < "$w_incoming" | awk '{print $1}')"
-    [ "$w_got" = "$w_sha" ] || \
-        { echo "remote: transferred worker bytes differ from candidate: $w_dst" >&2; exit 1; }
-    chmod 755 "$w_incoming"
-    mv -f "$w_incoming" "$w_dst"
-}
-
-snapshot_worker() {
-    w_dst="$1"
-    if [ -f "$w_dst" ]; then
-        install -m 755 "$w_dst" "${w_dst}.ship.rollback.${run_id}"
-        rm -f "${w_dst}.ship.absent.${run_id}"
-    else
-        : > "${w_dst}.ship.absent.${run_id}"
-        rm -f "${w_dst}.ship.rollback.${run_id}"
-    fi
-}
-
-restore_worker() {
-    r_dst="$1"
-    if [ -f "${r_dst}.ship.rollback.${run_id}" ]; then
-        install -m 755 "${r_dst}.ship.rollback.${run_id}" "$r_dst" || return 1
-    elif [ -f "${r_dst}.ship.absent.${run_id}" ]; then
-        rm -f "$r_dst" || return 1
-    fi
-}
-
 cleanup_backups() {
-    rm -f "$rollback_bin" "$rollback_dropin" "$dropin_absent" \
-        "${worker_v}.ship.rollback.${run_id}" "${worker_v}.ship.absent.${run_id}" \
-        "${worker_d}.ship.rollback.${run_id}" "${worker_d}.ship.absent.${run_id}"
+    rm -f "$rollback_dropin" "$dropin_absent"
 }
 
 restore_prior() {
-    restore_worker "$worker_v" && restore_worker "$worker_d" || return 1
-    install -m 755 "$rollback_bin" "$svc_bin" || return 1
     if [ -f "$rollback_dropin" ]; then
         install -m 644 "$rollback_dropin" "$dropin" || return 1
     elif [ -f "$dropin_absent" ]; then
@@ -592,7 +641,11 @@ restore_on_failure() {
         fi
     fi
     [ -z "$dropin_tmp" ] || rm -f "$dropin_tmp"
-    rm -f "$node_incoming" "${worker_v}.incoming.${run_id}" "${worker_d}.incoming.${run_id}"
+    case "$node_incoming" in
+        "$HOME/.local/lib/z23/releases/"*.incoming.*)
+            find "$node_incoming" -depth -delete 2>/dev/null || true ;;
+        *) echo "remote: refusing unsafe incoming cleanup path" >&2 ;;
+    esac
     [ "$lock_held" -eq 0 ] || rmdir "$lock_dir" 2>/dev/null || true
     exit "$rc"
 }
@@ -602,25 +655,33 @@ mkdir -p "$HOME/.cache/z23"
 mkdir "$lock_dir" || { echo "remote: another ship activation holds $lock_dir" >&2; exit 1; }
 lock_held=1
 
-got="$(sha256sum < "$node_incoming" | awk '{print $1}')"
-[ "$got" = "$want_sha" ] || { echo "remote: transferred bytes differ from candidate" >&2; exit 1; }
-chmod 755 "$node_incoming"
+# Finalize a new immutable directory, or re-verify a pre-existing one. No
+# installed release byte is ever overwritten, including during rollback.
+if [ -d "$node_incoming" ]; then
+    [ "$(sha256sum < "$node_incoming/MANIFEST.sha256" | awk '{print $1}')" = "$manifest_sha" ] &&
+    [ "$(sha256sum < "$node_incoming/z23" | awk '{print $1}')" = "$want_sha" ] &&
+    [ "$(sha256sum < "$node_incoming/zclassic23-package-verify" | awk '{print $1}')" = "$want_worker_v" ] &&
+    [ "$(sha256sum < "$node_incoming/zclassic23-package-verify-dev" | awk '{print $1}')" = "$want_worker_d" ] || {
+        echo "remote: transferred release bytes differ from manifest" >&2; exit 1;
+    }
+    chmod 555 "$node_incoming/z23" "$node_incoming/zclassic23-package-verify" \
+        "$node_incoming/zclassic23-package-verify-dev"
+    chmod 444 "$node_incoming/MANIFEST.sha256"
+    chmod 555 "$node_incoming"
+    mv "$node_incoming" "$release_root"
+fi
+[ "$(sha256sum < "$release_root/MANIFEST.sha256" | awk '{print $1}')" = "$manifest_sha" ] &&
+[ "$(sha256sum < "$release_root/z23" | awk '{print $1}')" = "$want_sha" ] &&
+[ "$(sha256sum < "$worker_v" | awk '{print $1}')" = "$want_worker_v" ] &&
+[ "$(sha256sum < "$worker_d" | awk '{print $1}')" = "$want_worker_d" ] || {
+    echo "remote: immutable release verification failed" >&2; exit 1;
+}
 
-# Workers swap BEFORE the daemon. If a worker stage fails, the host still has
-# its old daemon and old workers — a consistent pair. Once the daemon swap
-# begins, restore_prior (armed below) undoes workers and binary together. The
-# brief old-daemon-spawns-new-worker window is the safe direction: worker
-# flags are only ever added, so the newer worker accepts the older CLI.
-# The transferred SHA-256 is the source binding. The local preflight already
-# asked these exact bytes for their baked source id; re-parsing the same large
-# JSON through a remote grep|head pipeline added no authority and could fail
-# with SIGPIPE after extracting the right value.
 pid="$(systemctl --user show zclassic23 -p MainPID --value)"
 case "$pid" in ""|*[!0-9]*|0) echo "remote: no running MainPID" >&2; exit 1 ;; esac
-install -m 755 "/proc/$pid/exe" "$rollback_bin"
-prior_sha="$(sha256sum < "$rollback_bin" | awk '{print $1}')"
-snapshot_worker "$worker_v"
-snapshot_worker "$worker_d"
+prior_sha="$(sha256sum < "/proc/$pid/exe" | awk '{print $1}')"
+mapfile -d '' -t prior_argv < "/proc/$pid/cmdline"
+[ "${#prior_argv[@]}" -gt 0 ] || { echo "remote: running argv is unavailable" >&2; exit 1; }
 install -d "$dropin_dir"
 rm -f "$rollback_dropin" "$dropin_absent"
 if [ -f "$dropin" ]; then
@@ -633,11 +694,19 @@ fi
 # a failure in that small window could leave intent describing bytes that were
 # never activated.
 rollback_armed=1
-stage_worker "$worker_v" "$want_worker_v"
-stage_worker "$worker_d" "$want_worker_d"
 dropin_tmp="$(mktemp "${dropin}.tmp.XXXXXX")"
 {
     printf '[Service]\n'
+    printf 'ExecStart=\n'
+    printf 'ExecStart="%s"' "$release_root/z23"
+    for ((arg_i=1; arg_i<${#prior_argv[@]}; arg_i++)); do
+        arg="${prior_argv[$arg_i]}"
+        case "$arg" in *$'\n'*|*$'\r'*) echo "remote: node argv contains a control line" >&2; exit 1 ;; esac
+        arg="${arg//\\/\\\\}"; arg="${arg//\"/\\\"}"
+        arg="${arg//%/%%}"; arg="${arg//\$/\$\$}"
+        printf ' "%s"' "$arg"
+    done
+    printf '\n'
     printf 'Environment="ZCL_AGENT_EXPECT_SOURCE_ID=%s"\n' "$want_src"
     printf 'Environment="ZCL_AGENT_EXPECT_BUILD_COMMIT=%s"\n' "$want_commit"
     printf 'Environment="ZCL_AGENT_EXPECT_BUILD_SOURCE=ship"\n'
@@ -645,7 +714,6 @@ dropin_tmp="$(mktemp "${dropin}.tmp.XXXXXX")"
 install -m 644 "$dropin_tmp" "$dropin"
 rm -f "$dropin_tmp"; dropin_tmp=""
 systemctl --user daemon-reload
-mv -f "$node_incoming" "$svc_bin"
 # Queue the restart and immediately enter the progress-aware observer below.
 # Waiting synchronously defeats the slow-box verdict because Type=notify does
 # not return until the whole cold datadir startup has completed.
@@ -689,7 +757,8 @@ lock_held=0
 echo "remote: installed, restarted, and process-qualified"
 REMOTE_SCRIPT
     } | ssh "${SSH_OPTS[@]}" "$host" bash -s -- \
-        "$svc_bin" "$ARTIFACT_SHA" "$CAND_SOURCE_ID" "$CAND_BUILD_COMMIT" \
+        "$svc_bin" "$release_root" "$RELEASE_ID" "$ARTIFACT_SHA" \
+        "$CAND_SOURCE_ID" "$DEPLOY_COMMIT" \
         "${WORKER_SHAS[0]}" "${WORKER_SHAS[1]}" "$run_id" \
         "$SHIP_REMOTE_WINDOW" "$SHIP_REMOTE_SILENCE" \
         "$SHIP_ROLLBACK_WINDOW" "$SHIP_ROLLBACK_SILENCE" \
@@ -731,7 +800,7 @@ REMOTE_SCRIPT
     SHIP_OBS_UNIT=zclassic23
     SHIP_OBS_SHA="$ARTIFACT_SHA"
     SHIP_OBS_SRC="${CAND_SOURCE_ID:-}"
-    SHIP_OBS_COMMIT="${CAND_BUILD_COMMIT:-}"
+    SHIP_OBS_COMMIT="${DEPLOY_COMMIT:-}"
     SHIP_REMOTE_HOST="$host"
     SHIP_AWAIT_WINDOW="$SHIP_REMOTE_WINDOW"
     SHIP_AWAIT_SILENCE="$SHIP_REMOTE_SILENCE"
@@ -766,27 +835,18 @@ REMOTE_SCRIPT
 set -eu
 svc_bin="$1"
 run_id="$2"
+prior_sha="$3"
 # Health-verdict configuration, positional because ssh forwards no environment.
 # tools/scripts/ship_progress_lib.sh is prepended to this script on stdin: the
 # target box has no checkout, so the code that reaches the verdict has to
 # travel with the question.
-rollback_window="$3"; rollback_silence="$4"
-crash_samples="$5"; unknown_samples="$6"; rpc_budgets="$7"
+rollback_window="$4"; rollback_silence="$5"
+crash_samples="$6"; unknown_samples="$7"; rpc_budgets="$8"
 # Wrapped to ship_await's one-argument observer seam. prior_sha is assigned
 # below, before the only call.
 observe_restore() { ship_observe zclassic23 "$prior_sha" "" "" "$1"; }
-dropin="$HOME/.config/systemd/user/zclassic23.service.d/90-build-identity.conf"
-if [ -f "${svc_bin}.rollback.${run_id}" ]; then
-    prior_sha="$(sha256sum < "${svc_bin}.rollback.${run_id}" | awk '{print $1}')"
-    install -m 755 "${svc_bin}.rollback.${run_id}" "$svc_bin"
-    rb_dir="$(dirname "$svc_bin")"
-    for rb_w in "$rb_dir/zclassic23-package-verify" "$rb_dir/zclassic23-package-verify-dev"; do
-        if [ -f "${rb_w}.ship.rollback.${run_id}" ]; then
-            install -m 755 "${rb_w}.ship.rollback.${run_id}" "$rb_w"
-        elif [ -f "${rb_w}.ship.absent.${run_id}" ]; then
-            rm -f "$rb_w"
-        fi
-    done
+dropin="$HOME/.config/systemd/user/zclassic23.service.d/zzzzz-z23-ship-release.conf"
+if [ -f "${dropin}.ship.rollback.${run_id}" ] || [ -f "${dropin}.ship.absent.${run_id}" ]; then
     if [ -f "${dropin}.ship.rollback.${run_id}" ]; then
         install -m 644 "${dropin}.ship.rollback.${run_id}" "$dropin"
     elif [ -f "${dropin}.ship.absent.${run_id}" ]; then
@@ -819,10 +879,10 @@ if [ -f "${svc_bin}.rollback.${run_id}" ]; then
     echo "remote: rollback restart is $SHIP_AWAIT_LAST_VERDICT — $SHIP_AWAIT_LAST_LINE" >&2
     exit "$restore_rc"
 fi
-echo "remote: CRITICAL — rollback executable is missing" >&2
+echo "remote: CRITICAL — rollback path selection is missing" >&2
 exit 1
 ROLLBACK_SCRIPT
-        } | ssh "${SSH_OPTS[@]}" "$host" bash -s -- "$svc_bin" "$run_id" \
+        } | ssh "${SSH_OPTS[@]}" "$host" bash -s -- "$svc_bin" "$run_id" "$prev_sha" \
             "$SHIP_ROLLBACK_WINDOW" "$SHIP_ROLLBACK_SILENCE" \
             "$SHIP_CRASH_SAMPLES" "$SHIP_UNKNOWN_SAMPLES" "$SHIP_RPC_BUDGETS" \
             || rollback_rc=$?
@@ -861,18 +921,13 @@ ROLLBACK_SCRIPT
 
     # Qualification and any proof recording are complete; the run-addressed
     # rollback set is no longer an authority and must not accumulate forever.
-    ssh "${SSH_OPTS[@]}" "$host" bash -s -- "$svc_bin" "$run_id" <<'REMOTE_CLEANUP' || \
+    ssh "${SSH_OPTS[@]}" "$host" bash -s -- "$run_id" <<'REMOTE_CLEANUP' || \
         say "WARNING: $host retained the qualified run's rollback files"
 set -eu
-svc_bin="$1"; run_id="$2"
+run_id="$1"
 case "$run_id" in ''|*[!A-Za-z0-9.-]*) exit 2 ;; esac
-dropin="$HOME/.config/systemd/user/zclassic23.service.d/90-build-identity.conf"
-dir="$(dirname "$svc_bin")"
-rm -f "${svc_bin}.rollback.${run_id}" \
-    "$dir/zclassic23-package-verify.ship.rollback.${run_id}" \
-    "$dir/zclassic23-package-verify.ship.absent.${run_id}" \
-    "$dir/zclassic23-package-verify-dev.ship.rollback.${run_id}" \
-    "$dir/zclassic23-package-verify-dev.ship.absent.${run_id}" \
+dropin="$HOME/.config/systemd/user/zclassic23.service.d/zzzzz-z23-ship-release.conf"
+rm -f \
     "${dropin}.ship.rollback.${run_id}" "${dropin}.ship.absent.${run_id}"
 REMOTE_CLEANUP
 }
