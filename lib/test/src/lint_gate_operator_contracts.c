@@ -204,7 +204,12 @@ int t_remote_node_update_contract(void)
                != NULL);
         ASSERT(strstr(script, "build_leveldb_direct") != NULL);
         ASSERT(strstr(script, "leveldb_cxx_compiler") != NULL);
-        ASSERT(strstr(script, "LEVELDB_PLATFORM_POSIX=1") != NULL);
+        /* The platform define is selected by host and passed as
+         * -D<define>=1, so assert the selection and the flag rather
+         * than a spelling that only held while it was inlined. */
+        ASSERT(strstr(script, "platform_define=LEVELDB_PLATFORM_POSIX")
+               != NULL);
+        ASSERT(strstr(script, "-D\"$platform_define\"=1") != NULL);
         ASSERT(strstr(script, "#define HAVE_SNAPPY 0") != NULL);
         free(script);
         script = NULL;
