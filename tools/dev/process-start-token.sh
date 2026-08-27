@@ -34,6 +34,22 @@ Darwin)
     [ "$observed_pid" = "$pid" ] || exit 1
     printf '%s' "$record" | sha256sum | awk '{print $1}'
     ;;
+MINGW*|MSYS*)
+    record=""
+    for attempt in 1 2 3 4 5 6 7 8 9 10; do
+        first="$(ps -p "$pid" 2>/dev/null | awk 'NR == 2')"
+        second="$(ps -p "$pid" 2>/dev/null | awk 'NR == 2')"
+        if [ -n "$first" ] && [ "$first" = "$second" ] &&
+           kill -0 "$pid" 2>/dev/null; then
+            record="$first"
+            break
+        fi
+    done
+    [ -n "$record" ] || exit 1
+    observed_pid="$(printf '%s\n' "$record" | awk '{print $1}')"
+    [ "$observed_pid" = "$pid" ] || exit 1
+    printf '%s' "$record" | sha256sum | awk '{print $1}'
+    ;;
 *)
     exit 2
     ;;
