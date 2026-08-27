@@ -13,6 +13,22 @@
 #include <stdio.h>
 #include <unistd.h>
 
+#if defined(__linux__)
+#include <sys/syscall.h>
+
+/* renameat2() and RENAME_NOREPLACE are Linux extensions that glibc publishes
+ * only under _GNU_SOURCE, while this tree compiles to strict ISO C with
+ * _POSIX_C_SOURCE. A header may not set a feature macro -- it is included
+ * after libc headers have already been read, so the definition would arrive
+ * too late and silently do nothing. Going straight to the kernel keeps this
+ * seam self-contained: it compiles the same under either setting, so no
+ * caller has to be built with special flags to get the guarantee. */
+#ifndef RENAME_NOREPLACE
+#define RENAME_NOREPLACE (1u << 0)
+#endif
+long syscall(long number, ...);
+#endif
+
 static inline int platform_renameat_noreplace(int old_dirfd,
                                                const char *old_name,
                                                int new_dirfd,
@@ -21,8 +37,8 @@ static inline int platform_renameat_noreplace(int old_dirfd,
 #if defined(__APPLE__)
     return renameatx_np(old_dirfd, old_name, new_dirfd, new_name, RENAME_EXCL);
 #elif defined(__linux__)
-    return renameat2(old_dirfd, old_name, new_dirfd, new_name,
-                     RENAME_NOREPLACE);
+    return (int)syscall(SYS_renameat2, old_dirfd, old_name, new_dirfd,
+                        new_name, (unsigned int)RENAME_NOREPLACE);
 #else
     (void)old_dirfd;
     (void)old_name;
