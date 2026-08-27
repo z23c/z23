@@ -98,6 +98,17 @@ void boot_zcode_dht_record_public_tick(uint64_t monotonic_s) {
 
 void boot_zcode_dht_record_public_reset(void) {
   record_public_lock();
+  /* Mirror the expiry path and replication's reset: free every
+   * in-flight discovery before the wipe. The only caller today is
+   * shutdown, but a live-service caller would otherwise orphan slots
+   * with no tick left to reap them. */
+  for (size_t i = 0; i < RECORD_PUBLIC_LOOKUPS_MAX; i++) {
+    if (!g_record_public[i].used || g_record_public[i].cached)
+      continue;
+    (void)boot_zcode_dht_record_discovery_cancel(
+        g_record_public[i].service_operation_id,
+        g_record_public[i].service_generation);
+  }
   memset(g_record_public, 0, sizeof(g_record_public));
   zcl_mutex_unlock(&g_record_public_lock);
 }

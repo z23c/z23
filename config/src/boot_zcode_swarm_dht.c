@@ -29,9 +29,6 @@
 /* After offers land, re-check this rarely: the root leaves the work list
  * on its own once an advertisement (ours included) goes live. */
 #define SWARM_DISCOVERY_APPLIED_RECHECK_S 600u
-/* A lease whose root vanished from the work list is dropped after one
- * full retry period, so flapping roots keep their backoff memory. */
-#define SWARM_DISCOVERY_STALE_S 1800u
 /* Providers known to the record store but not yet enrolled as swarm
  * peers: retry inside one membership-sync horizon, without counting a
  * failed attempt. */
@@ -216,19 +213,21 @@ void boot_zcode_swarm_discovery_tick(uint64_t now_mono)
                                             SWARM_DISCOVERY_MAX_ROOTS);
 
     /* Reap leases whose root left the work list (completed, failed, or
-     * newly advertised by anyone) once their stale grace lapses. */
+     * newly advertised by anyone). The cancel cannot wait for a grace:
+     * polls stop for absent roots, so every unpolled second of grace is
+     * one more second a discovery slot sits stranded for the whole lane.
+     * Advertisements persist, so the root does not flicker back and the
+     * old flapping worry bought nothing worth eight slots' silence. */
     for (size_t i = 0; i < SWARM_DISCOVERY_MAX_LEASES; i++) {
         struct swarm_discovery_lease *lease = &s_leases[i];
         if (!lease->used ||
             root_known(roots, stalled, lease->root))
             continue;
-        if (now_mono >= lease->next_mono + SWARM_DISCOVERY_STALE_S) {
-            /* Free the DHT operation slot with the lease so a reaped
-             * in-flight discovery cannot strand capacity. */
-            boot_zcode_dht_record_discovery_cancel(lease->operation_id,
-                                                   lease->generation);
-            lease->used = false;
-        }
+        /* Free the DHT operation slot with the lease so an adopted root
+         * hands its capacity to the next waiting demand at once. */
+        boot_zcode_dht_record_discovery_cancel(lease->operation_id,
+                                               lease->generation);
+        lease->used = false;
     }
 
     size_t active = 0;

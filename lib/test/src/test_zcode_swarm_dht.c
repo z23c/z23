@@ -287,10 +287,58 @@ static int t_expired_route_never_advertises(void)
     return failures;
 }
 
+static int t_adopted_root_frees_its_slot_at_once(void)
+{
+    int failures = 0;
+    static struct fake_ops f;
+    memset(&f, 0, sizeof(f));
+    f.ops.begin = fake_begin;
+    f.ops.poll = fake_poll;
+    f.ops.route = fake_route;
+    f.ops.ctx = &f;
+    f.begin_ok = true; /* DISCOVERING persists: nothing ever completes */
+    boot_zcode_swarm_dht_test_install(&f.ops);
+
+    TEST("a root adopted by an advertiser frees its discovery slot in "
+         "one tick") {
+        struct vcs_swarm_engine *engine = fixture_engine("reap");
+        ASSERT(engine != NULL);
+        vcs_swarm_engine_set_global(engine);
+
+        uint8_t key[33];
+        memset(key, 7, sizeof(key));
+        uint8_t roots[5][32];
+        for (size_t i = 0; i < 5; i++) {
+            memset(roots[i], (int)(i + 1), sizeof(roots[i]));
+            ASSERT_EQ(vcs_swarm_engine_fetch(engine, roots[i], 20500, 1),
+                      VCS_SWARM_FETCH_OK);
+        }
+
+        boot_zcode_swarm_discovery_tick(500);
+        ASSERT_EQ(f.begins, 4u);
+        const unsigned leased_begins = f.begins;
+        ASSERT(vcs_swarm_engine_peer_add(engine, 77, key));
+        ASSERT(vcs_swarm_engine_peer_offer(engine, 77, roots[0],
+                                            UINT64_MAX, 1));
+        boot_zcode_swarm_discovery_tick(501);
+        ASSERT_EQ(f.begins, leased_begins + 1u);
+        boot_zcode_swarm_discovery_tick(502);
+        ASSERT_EQ(f.begins, leased_begins + 1u);
+
+        vcs_swarm_engine_set_global(NULL);
+        fixture_teardown(engine);
+        PASS();
+    } _test_next:;
+
+    boot_zcode_swarm_dht_test_install(NULL);
+    return failures;
+}
+
 int test_zcode_swarm_dht(void)
 {
     return t_discovery_inert_before_hosting() +
            t_lease_completes_to_offer_after_enroll() +
            t_unhelpful_outcome_never_spin_rebegins() +
-           t_expired_route_never_advertises();
+           t_expired_route_never_advertises() +
+           t_adopted_root_frees_its_slot_at_once();
 }
