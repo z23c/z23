@@ -1,5 +1,5 @@
-/* Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. */
-/* boot_mint_anchor.c — the ANCHOR-SET MINT driver. Contract in config/boot.h
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * boot_mint_anchor.c — the ANCHOR-SET MINT driver. Contract in config/boot.h
  * (boot_mint_anchor_run). Lives here, separate from boot.c, so each file keeps
  * one focused responsibility.
  *

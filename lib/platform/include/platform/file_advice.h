@@ -1,4 +1,9 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Purpose: posix_fadvise() has no equivalent name on Darwin, so block-file
+ * scan/prefetch callers (boot_block_file_scan, test_block_prefetch) get one
+ * intent-preserving seam: sequential readahead maps to F_RDAHEAD there
+ * (POSIX_FADV_SEQUENTIAL on Linux), and "drop this range from cache" maps to
+ * F_NOCACHE (POSIX_FADV_DONTNEED on Linux). */
 
 #ifndef ZCL_PLATFORM_FILE_ADVICE_H
 #define ZCL_PLATFORM_FILE_ADVICE_H
