@@ -4,6 +4,7 @@
  * Distributed under the MIT software license, see the accompanying
  * file COPYING or http://www.opensource.org/licenses/mit-license.php. */
 #include "storage/disk_block_io.h"
+#include "storage/disk_block_datadir_guard.h"
 #include "core/serialize.h"
 #include "core/hash.h"
 #include "util/log_macros.h"
@@ -29,48 +30,6 @@ static struct log_throttle g_open_fail_throttle = LOG_THROTTLE_INIT;
 static struct log_throttle g_readfail_throttle  = LOG_THROTTLE_INIT;
 /* Same, for a DANGLING position (foreign writer, torn import): every sweep. */
 static struct log_throttle g_locate_fail_throttle = LOG_THROTTLE_INIT;
-/* Same, for a datadir that is not a path at all (see datadir_is_plausible). */
-static struct log_throttle g_bad_datadir_throttle = LOG_THROTTLE_INIT;
-
-/* A datadir that is non-NULL but is not a plausible path means the CALLER is
- * broken, not the disk: the only ways to get here are a retained pointer into
- * a dead stack frame, a freed context, or a non-string pointer reinterpreted
- * as one. Every such value still formats fine into "%s/blocks/blkNNNNN.dat",
- * so before this guard the node reported it as an ordinary missing file and
- * two investigations read it as index corruption.
- *
- * Deliberately permissive about WHICH path: relative datadirs ("." in simnet)
- * and any printable absolute path are accepted. It only rejects what cannot
- * be a path — the empty string, and any byte outside printable ASCII. */
-static bool datadir_is_plausible(const char *datadir)
-{
-    if (!datadir || datadir[0] == '\0')
-        return false;
-    for (size_t i = 0; i < 512u; i++) {
-        unsigned char c = (unsigned char)datadir[i];
-        if (c == '\0')
-            return true;
-        if (c < 0x20u || c >= 0x7fu)
-            return false;
-    }
-    return false;  /* no terminator inside a path-sized window */
-}
-
-/* Render the first bytes of a rejected datadir as hex so the refusal names
- * WHAT was handed over (a stack address, a heap pointer, a lone byte) rather
- * than emitting unprintable bytes into the log. Stops at the first NUL. */
-static void datadir_hex_preview(const char *datadir, char *out, size_t outlen)
-{
-    size_t w = 0;
-    for (size_t i = 0; i < 8u && datadir[i] != '\0'; i++) {
-        if (w + 3u >= outlen)
-            break;
-        w += (size_t)snprintf(out + w, outlen - w, "%02x",
-                              (unsigned)(unsigned char)datadir[i]);
-    }
-    if (w == 0 && outlen > 0)
-        snprintf(out, outlen, "<empty>");
-}
 
 void get_block_pos_filename(char *buf, size_t buflen,
                             const char *datadir,
@@ -682,30 +641,10 @@ bool read_block_from_disk_pread_profiled(struct block *b,
     int64_t read_started = platform_time_monotonic_us();
     block_init(b);
 
-    if (!datadir || !pos || pos->nFile < 0)
-        LOG_FAIL("disk_block_io", "read_block_pread: invalid arguments (datadir=%p pos=%p)",
-                 (const void *)datadir, (const void *)pos);
-
-    /* Secondary safety net, NOT the cure for a bad caller: refuse a datadir
-     * that cannot be a path instead of quietly reporting a missing file.
-     * Throttled like the neighbouring refusals — a broken caller in a fold
-     * loop would otherwise emit one line per block. */
-    if (!datadir_is_plausible(datadir)) {
-        uint64_t reps = 0;
-        if (log_throttle_should_emit(&g_bad_datadir_throttle, 0u,
-                                     platform_time_wall_unix(), 60, &reps)) {
-            char preview[24];
-            datadir_hex_preview(datadir, preview, sizeof(preview));
-            fprintf(stderr,  // obs-ok:throttled-caller-memory-safety-refusal
-                    "[disk_block_io] read_block_pread: refusing "
-                    "implausible datadir ptr=%p bytes=%s file=%d pos=%u — the "
-                    "caller handed a dead or non-string pointer "
-                    "(%llu suppressed repeats since last log)\n",
-                    (const void *)datadir, preview, pos->nFile, pos->nPos,
-                    (unsigned long long)reps);
-        }
+    if (!pos || pos->nFile < 0)
+        LOG_FAIL("disk_block_io", "read_block_pread: invalid pos=%p", (const void *)pos);
+    if (!disk_block_datadir_ok_or_refuse(datadir, pos->nFile, pos->nPos))
         return false;  // raw-return-ok:throttled-named-refusal-replaces-LOG_FAIL
-    }
 
     char path[512];
     get_block_pos_filename(path, sizeof(path), datadir, pos, "blk");
