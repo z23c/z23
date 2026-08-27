@@ -21,6 +21,7 @@
  * Post-fix pthread_once pins body_runs to exactly one. */
 
 #include "test/test_core.h"
+#include "platform/barrier.h"
 #include "validation/main_state.h"
 #include "sapling/pedersen_hash.h"
 #include <pthread.h>
@@ -38,7 +39,7 @@ extern void zcl_sapling_empty_roots_reset_for_test(void);
 /* ── pedersen_hash race ────────────────────────────────────── */
 
 struct pedersen_race_worker {
-    pthread_barrier_t *bar;
+    zcl_barrier_t *bar;
     uint8_t hash[32];
 };
 
@@ -49,7 +50,7 @@ static void *pedersen_race_fn(void *p)
     uint8_t b[32] = { 0 };
     a[0] = 0x11;
     b[0] = 0x22;
-    pthread_barrier_wait(w->bar);
+    zcl_barrier_wait(w->bar);
     pedersen_merkle_hash(0, a, b, w->hash);
     return NULL;
 }
@@ -57,7 +58,7 @@ static void *pedersen_race_fn(void *p)
 /* ── empty_roots race ─────────────────────────────────────── */
 
 struct empty_roots_race_worker {
-    pthread_barrier_t *bar;
+    zcl_barrier_t *bar;
     struct uint256 root;
 };
 
@@ -66,7 +67,7 @@ static void *empty_roots_race_fn(void *p)
     struct empty_roots_race_worker *w = p;
     struct incremental_merkle_tree t;
     sapling_tree_init(&t);
-    pthread_barrier_wait(w->bar);
+    zcl_barrier_wait(w->bar);
     incremental_tree_empty_root(&t, &w->root);
     return NULL;
 }
@@ -81,8 +82,8 @@ int test_sapling_lazy_init(void)
     {
         zcl_pedersen_generators_reset_for_test();
 
-        pthread_barrier_t bar;
-        pthread_barrier_init(&bar, NULL, RACE_NTHREADS);
+        zcl_barrier_t bar;
+        zcl_barrier_init(&bar, RACE_NTHREADS);
 
         struct pedersen_race_worker w[RACE_NTHREADS] = { 0 };
         pthread_t tids[RACE_NTHREADS];
@@ -91,7 +92,7 @@ int test_sapling_lazy_init(void)
             pthread_create(&tids[i], NULL, pedersen_race_fn, &w[i]);
         }
         for (int i = 0; i < RACE_NTHREADS; i++) pthread_join(tids[i], NULL);
-        pthread_barrier_destroy(&bar);
+        zcl_barrier_destroy(&bar);
 
         int body_runs = atomic_load(&zcl_pedersen_generators_body_runs_for_test);
         bool body_once = (body_runs == 1);
@@ -116,8 +117,8 @@ int test_sapling_lazy_init(void)
     {
         zcl_sapling_empty_roots_reset_for_test();
 
-        pthread_barrier_t bar;
-        pthread_barrier_init(&bar, NULL, RACE_NTHREADS);
+        zcl_barrier_t bar;
+        zcl_barrier_init(&bar, RACE_NTHREADS);
 
         struct empty_roots_race_worker w[RACE_NTHREADS] = { 0 };
         pthread_t tids[RACE_NTHREADS];
@@ -126,7 +127,7 @@ int test_sapling_lazy_init(void)
             pthread_create(&tids[i], NULL, empty_roots_race_fn, &w[i]);
         }
         for (int i = 0; i < RACE_NTHREADS; i++) pthread_join(tids[i], NULL);
-        pthread_barrier_destroy(&bar);
+        zcl_barrier_destroy(&bar);
 
         int body_runs = atomic_load(&zcl_sapling_empty_roots_body_runs_for_test);
         bool body_once = (body_runs == 1);

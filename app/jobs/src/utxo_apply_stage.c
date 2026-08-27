@@ -254,10 +254,8 @@ static void ua_fatal_permanent_blocker(int height, const char *reason_tail)
     struct blocker_record rec;
     char reason[BLOCKER_REASON_MAX];
     snprintf(reason, sizeof(reason),
-             "utxo_apply permanent store failure at height=%d: %s "
-             "(cursor held; progress.kv / coins_kv is torn or unreadable — "
-             "a restart re-derives the identical failure; operator must "
-             "repair/reindex the store, then clear this blocker)",
+             "utxo_apply fatal store failure height=%d: %.100s; cursor held; "
+             "operator must repair or reindex the store and clear blocker",
              height, reason_tail ? reason_tail : "unrecoverable error");
     if (!blocker_init(&rec, "utxo_apply.fatal_store", STAGE_NAME,
                       BLOCKER_PERMANENT, reason))

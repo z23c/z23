@@ -11,6 +11,7 @@
  * module sits below the AR lifecycle — the stage_cursor row is not a
  * model. */
 
+#include "platform/fd_path.h"
 #include "platform/time_compat.h"
 #include "storage/progress_store.h"
 
@@ -220,9 +221,8 @@ bool progress_store_open(const char *datadir)
         LOG_FAIL("progress_store", "open: datadir capability failed: %s",
                  strerror(errno));
     char path[PROGRESS_STORE_PATH_MAX];
-    n = snprintf(path, sizeof(path), "/proc/self/fd/%d/%s", opened_dir_fd,
-                 PROGRESS_STORE_FILENAME);
-    if (n <= 0 || (size_t)n >= sizeof(path)) {
+    if (!platform_dirfd_child_path(path, sizeof(path), opened_dir_fd,
+                                   PROGRESS_STORE_FILENAME)) {
         (void)close(opened_dir_fd);
         LOG_FAIL("progress_store", "open: capability path too long");
     }

@@ -419,7 +419,7 @@ static bool rr_cache_key(const struct rr_plan *plan, const char *root,
     rr_key_field(&ctx, "link_mode", "overlay_base_v1", 15);
     rr_key_field(&ctx, "base_reloc_sha256", base_reloc_hash,
                  strlen(base_reloc_hash));
-    char token[PATH_MAX];
+    char token[4096];
     bool ok = true;
     while (ok && fscanf(f, "%4095s", token) == 1) {
         rr_key_field(&ctx, "link_input", token, strlen(token));
@@ -674,7 +674,7 @@ static bool rr_write_overlay_response(const char *root, const char *rsp,
         rr_why(why, why_len, "could not open overlay-only link response");
         return false;
     }
-    char token[PATH_MAX], full[PATH_MAX];
+    char token[4096], full[PATH_MAX];
     size_t count = 0;
     bool ok = true;
     while (ok && fscanf(in, "%4095s", token) == 1) {
@@ -876,7 +876,7 @@ static bool rr_write_response(const struct rr_plan *plan, const char *root,
         return false;
     }
     bool seen[RR_OVERLAY_MAX] = {0};
-    char token[PATH_MAX];
+    char token[4096];
     bool ok = true;
     while (ok && fscanf(in, "%4095s", token) == 1) {
         const char *write_path = token;

@@ -214,7 +214,7 @@ void chain_evidence_controller_snapshot(
 
     if (out->state == CEC_CONTRADICTION_FROZEN) {
         snprintf(out->health_reason, sizeof(out->health_reason),
-                 "%s", out->contradiction_reason[0]
+                 "%.127s", out->contradiction_reason[0]
                            ? out->contradiction_reason
                            : "chain_evidence_contradiction");
     } else if (out->active_tip_hash_mismatch) {

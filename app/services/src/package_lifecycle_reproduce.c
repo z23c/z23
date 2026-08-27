@@ -55,7 +55,7 @@ static void pkgl_repro_note(struct package_lifecycle_reproduce_report *out,
     if (!out)
         return;
     (void)snprintf(out->rule, sizeof(out->rule), "%s", rule);
-    (void)snprintf(out->detail, sizeof(out->detail), "%s", detail);
+    (void)snprintf(out->detail, sizeof(out->detail), "%.191s", detail);
 }
 
 /* One named refusal, logged with its context: a reproduce that cannot run

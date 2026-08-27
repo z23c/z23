@@ -15,6 +15,7 @@
  */
 
 #include "sim/simnet_chaos_faults.h"
+#include "platform/file_sync.h"
 
 #include "test/test_helpers.h"
 
@@ -1386,7 +1387,7 @@ bool chaos_fault_conflicting_chunk_peers(uint64_t seed,
                         art.chunk_size, &good_got) &&
         rom_fetch_verify_chunk(good_buf, good_got, art.chunk_sha3[0]) &&
         pwrite(fd, good_buf, good_got, 0) == (ssize_t)good_got &&
-        fdatasync(fd) == 0 && rom_journal_mark(j, 0);
+        platform_data_sync(fd) == 0 && rom_journal_mark(j, 0);
     snprintf(out->state_before, sizeof(out->state_before),
              "good peer fetched+verified+journaled chunk 0 (%u bytes)",
              good_got);
@@ -1661,7 +1662,7 @@ bool chaos_fault_kill_resume_boundary(uint64_t seed, bool after_bitmap_commit,
                                 ROM_SEED_CHUNK_SIZE, &got) &&
                rom_fetch_verify_chunk(cbuf, got, art.chunk_sha3[0]) &&
                pwrite(fd, cbuf, got, 0) == (ssize_t)got &&
-               fdatasync(fd) == 0 && rom_journal_mark(j, 0);
+               platform_data_sync(fd) == 0 && rom_journal_mark(j, 0);
     }
     /* Chunk 1 (the short tail): data written+fsynced either way — the fault
      * is whether the BITMAP BIT was committed before the simulated kill. */
@@ -1671,7 +1672,7 @@ bool chaos_fault_kill_resume_boundary(uint64_t seed, bool after_bitmap_commit,
                                 ROM_SEED_CHUNK_SIZE, &got) &&
                rom_fetch_verify_chunk(cbuf, got, art.chunk_sha3[1]) &&
                pwrite(fd, cbuf, got, (off_t)m.chunk_size) == (ssize_t)got &&
-               fdatasync(fd) == 0;
+               platform_data_sync(fd) == 0;
         if (built && after_bitmap_commit)
             built = rom_journal_mark(j, 1); /* commit past this boundary too */
         /* else: bytes are durable on disk; the mark is deliberately skipped

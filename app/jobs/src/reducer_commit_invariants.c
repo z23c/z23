@@ -277,10 +277,8 @@ static void ci_raise_blocker(int height, const char *kind, const char *detail)
     struct blocker_record rec;
     char reason[BLOCKER_REASON_MAX];
     snprintf(reason, sizeof(reason),
-             "reducer batch-commit conservation invariant FAILED at height=%d "
-             "(%s): %s — the commit is REFUSED (rolled back) so the corrupt "
-             "state never lands. Owner-gated: inspect/repair the store, then "
-             "clear this blocker.",
+             "reducer commit invariant failed height=%d kind=%.32s: %.80s; "
+             "commit rolled back; owner must repair the store and clear blocker",
              height, kind ? kind : "unknown", detail ? detail : "");
     if (!blocker_init(&rec, UTXO_APPLY_COMMIT_INVARIANT_BLOCKER_ID, CI_SUBSYS,
                       BLOCKER_PERMANENT, reason))

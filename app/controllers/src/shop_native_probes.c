@@ -14,6 +14,7 @@
 
 #include "controllers/shop_native_handler.h"
 
+#include "base/compiler.h"
 #include "command/native_command.h"     /* zcl_native_node_db_open_readonly */
 #include "models/activerecord.h"        /* AR_STEP_ROW */
 #include "models/database.h"            /* struct node_db */
@@ -53,7 +54,7 @@
  * onion" in exactly the shape a real build reports "the onion is down". */
 extern int dynhost_client_fetch(const char *, uint16_t, const char *,
     void (*)(int, const uint8_t *, size_t, void *), void *, int)
-    __attribute__((weak));
+    ZCL_WEAK_IMPORT;
 
 bool shop_tor_real_build_linked(void)
 {

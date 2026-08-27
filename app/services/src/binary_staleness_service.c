@@ -363,7 +363,7 @@ bool binary_staleness_check_now(void)
             struct blocker_record rec;
             char reason[BLOCKER_REASON_MAX];
             snprintf(reason, sizeof(reason),
-                     "running=%s on_disk=%s path=%s mtime=%lld size=%lld "
+                     "running=%s on_disk=%s path=%.100s mtime=%lld size=%lld "
                      "— on-disk binary was replaced; restart the service "
                      "to pick up the deployed build",
                      running_short, disk_short, exe_path_copy,

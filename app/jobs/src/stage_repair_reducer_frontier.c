@@ -218,11 +218,9 @@ static bool tip_finalize_rewind_churn_gate(
                             TIP_FINALIZE_REWIND_CHURN_LIMIT) {
         char reason[BLOCKER_REASON_MAX];
         snprintf(reason, sizeof(reason),
-                 "tip_finalize cursor asked to rewind %d->%d again with "
-                 "hstar pinned at %d since the first rewind (%d consecutive "
-                 "asks) - projection-hole/reconcile livelock; refusing "
-                 "further rewinds so the ladder escalates instead of "
-                 "looping forever",
+                 "tip_finalize rewind %d->%d refused: hstar=%d remained "
+                 "pinned for %d requests; projection reconcile is cycling, "
+                 "so the recovery ladder must escalate",
                  cur, target, hstar,
                  g_tip_finalize_rewind_churn_memo.consecutive_count);
         struct blocker_record rec;

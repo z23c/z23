@@ -19,9 +19,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#ifdef __GLIBC__
-#include <malloc.h>
-#endif
+#include "platform/allocator_compat.h"
 
 #define LOCAL_EXPORT_PROOF_NAME \
     "consensus_snapshot.db.local-export-v1"
@@ -736,9 +734,7 @@ export_cleanup:
             (void)unlink(proof_path);
         }
     }
-#ifdef __GLIBC__
-    malloc_trim(0);
-#endif
+    platform_allocator_release_free_pages();
 
     return result;
 }

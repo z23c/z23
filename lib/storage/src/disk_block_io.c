@@ -10,6 +10,7 @@
 #include "util/log_macros.h"
 #include "support/log_throttle.h"
 #include "platform/time_compat.h"
+#include "platform/file_sync.h"
 #include <errno.h>
 #include <stdint.h>
 #include <string.h>
@@ -167,7 +168,7 @@ bool disk_block_io_sync_pending(void)
     int keep = 0;
     for (int i = 0; i < g_pending_count; i++) {
         int fd = open(g_pending_paths[i], O_RDONLY);
-        bool synced = (fd >= 0 && fdatasync(fd) == 0);
+        bool synced = (fd >= 0 && platform_data_sync(fd) == 0);
         if (fd >= 0)
             close(fd);
         if (!synced) {
@@ -397,7 +398,7 @@ bool write_block_to_disk(struct block *b, struct disk_block_pos *pos,
         if (deferred_record_pending_locked(wpath))
             sync_now = false; /* synced later at the drain-batch boundary */
     }
-    if (sync_now && fdatasync(fileno(file)) != 0) {
+    if (sync_now && platform_data_sync(fileno(file)) != 0) {
         fprintf(stderr, "write_block_to_disk: fdatasync failed: %s\n",
                 strerror(errno));
         fclose(file);

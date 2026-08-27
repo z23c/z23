@@ -168,7 +168,7 @@ static void asp_refuse(struct agent_spend_policy_decision *out,
 {
     out->allowed = false;
     (void)snprintf(out->code, sizeof(out->code), "%s", code);
-    (void)snprintf(out->detail, sizeof(out->detail), "%s", detail);
+    (void)snprintf(out->detail, sizeof(out->detail), "%.159s", detail);
     LOG_ERROR(ASP_TAG, "refusing %s for session %s: %s — %s",
               leaf ? leaf : "(unknown leaf)", out->evidence, code, detail);
 }

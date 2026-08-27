@@ -225,6 +225,8 @@ static bool rr_write_atomic(const char *datadir,
     char final_path[PATH_MAX], tmp_path[PATH_MAX];
     if (!rr_receipt_path(datadir, final_path, sizeof(final_path)))
         return false;
+    if (final_out && strlen(final_path) >= final_cap)
+        return false;
     int n = snprintf(tmp_path, sizeof(tmp_path), "%s/%s.tmp.%ld", datadir,
                      CONSENSUS_STATE_REPLAY_RECEIPT_NAME, (long)getpid());
     if (n <= 0 || (size_t)n >= sizeof(tmp_path))
@@ -265,7 +267,7 @@ static bool rr_write_atomic(const char *datadir,
         (void)close(dir_fd);
     }
     if (final_out)
-        snprintf(final_out, final_cap, "%s", final_path);
+        memcpy(final_out, final_path, strlen(final_path) + 1u);
     return true;
 }
 

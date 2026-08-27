@@ -208,11 +208,18 @@ static bool provider_bind(void *ctx, struct agent_authority_ref *out,
     if (!scope_from_canonical(&g, &out->scope, why, why_cap))
         LOG_FAIL(BP_LOG, "bind refused: %s", c->refusal);
 
+    size_t holder_len = strlen(g.holder);
+    if (holder_len >= sizeof(out->principal) ||
+        holder_len >= sizeof(c->principal)) {
+        refuse(why, why_cap, "grant holder identity exceeds the broker limit");
+        return false;
+    }
+
     snprintf(out->canonical_grant_id, sizeof(out->canonical_grant_id), "%s",
              g.grant_id);
-    snprintf(out->principal, sizeof(out->principal), "%s", g.holder);
+    memcpy(out->principal, g.holder, holder_len + 1);
     snprintf(c->bound_grant_id, sizeof(c->bound_grant_id), "%s", g.grant_id);
-    snprintf(c->principal, sizeof(c->principal), "%s", g.holder);
+    memcpy(c->principal, g.holder, holder_len + 1);
     out->bound = true;
     c->bound = true;
     return true;

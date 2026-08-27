@@ -29,6 +29,7 @@
  */
 
 #include "services/network_telemetry.h"
+#include "base/compiler.h"
 
 /* An upward include, deliberately.
  * rpc_net_get_connman() is the ONLY published way to reach the live connman,
@@ -82,7 +83,7 @@ static_assert(ZCL_PEER_FLOOR_HEALTHY == 3,
  * real build reports "the onion is down". */
 extern int dynhost_client_fetch(const char *, uint16_t, const char *,
     void (*)(int, const uint8_t *, size_t, void *), void *, int)
-    __attribute__((weak));
+    ZCL_WEAK_IMPORT;
 
 static bool nt_real_tor_linked(void) { return dynhost_client_fetch != NULL; }
 

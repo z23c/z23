@@ -922,7 +922,7 @@ verify_mutation()
 session_cache_path()
 {
     local token="$1"
-    [[ "$token" =~ ^[1-9][0-9]*:[0-9]+$ ]] || return 1
+    [[ "$token" =~ ^[1-9][0-9]*:[0-9a-f]+$ ]] || return 1
     printf '%s/build/identity/.session-cache/capture.%s.record' \
         "$ROOT" "${token/:/.}"
 }
@@ -944,8 +944,8 @@ prune_session_cache()
         pid="${token%%.*}"
         start="${token#*.}"
         actual=""
-        if [[ "$pid" =~ ^[1-9][0-9]*$ ]] && [[ "$start" =~ ^[0-9]+$ ]]; then
-            actual="$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null)" || actual=""
+        if [[ "$pid" =~ ^[1-9][0-9]*$ ]] && [[ "$start" =~ ^[0-9a-f]+$ ]]; then
+            actual="$(tools/dev/process-start-token.sh "$pid" 2>/dev/null)" || actual=""
         fi
         [ -n "$actual" ] && [ "$actual" = "$start" ] && continue
         rm -f -- "$f" 2>/dev/null || true

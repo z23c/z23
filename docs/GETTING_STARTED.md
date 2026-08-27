@@ -1,3 +1,5 @@
+<!-- Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. -->
+
 # Getting Started With Z23
 
 This is the generic, fresh-machine setup guide: build the binary, then run it
@@ -18,7 +20,7 @@ it as your only mainnet node yet.
 
 ## Build
 
-**Prerequisites:**
+**Prerequisites on Linux:**
 
 - `gcc` 14+ (or `clang` with working `-std=c23` support) and GNU `make`.
 - A C++ compiler (`c++`/`g++`), `autoconf`, `curl` or `wget`, `unzip`,
@@ -35,18 +37,34 @@ it as your only mainnet node yet.
 No other external dependencies: everything else is stock `cc`/`ld`/`make`
 and libc.
 
+**Prerequisites on macOS:** install Apple's command-line developer tools and
+the GNU build utilities used by the source-identity and build-lease checks.
+The node is compiled as a native Mach-O executable; no virtual machine or
+Linux compatibility layer is involved.
+
+```bash
+xcode-select --install
+brew install autoconf automake cmake coreutils flock libtool make pkgconf
+export PATH="$(brew --prefix make)/libexec/gnubin:$(brew --prefix coreutils)/libexec/gnubin:$PATH"
+```
+
+Apple Clang 17 or newer is required. The `flock` formula supplies the build
+lease primitive absent from the macOS base system.
+
 **Get the source and build:**
 
 ```bash
 git clone https://github.com/z23c/z23.git
 cd z23
-make -j"$(nproc)"     # builds z23, zclassic-cli, zcl-rpc
+make -j"$(getconf _NPROCESSORS_ONLN)" z23
 ```
 
-For the smallest server-only build, use `make -j"$(nproc)" z23`. The
+On Linux, bare `make -j"$(getconf _NPROCESSORS_ONLN)"` also builds the RPC
+client tools. The
 published node is a C23 executable with pinned project dependencies linked
 statically; it does not inherit GTK/WebKit or the C++ LevelDB runtime from the
-build host. The build fails closed if the ELF dependency audit finds one.
+build host. The build fails closed if the ELF or Mach-O dependency audit finds
+an unapproved dynamic library.
 
 For a binary intended to move between x86-64 Linux machines, use
 `make portable`. It needs no container or root access: it downloads a
@@ -79,7 +97,7 @@ address.
 compiles before a full build):
 
 ```bash
-make -j"$(nproc)" build-only
+make -j"$(getconf _NPROCESSORS_ONLN)" build-only
 ```
 
 **Where the binaries land:** `build/bin/z23` (the node),
@@ -95,9 +113,19 @@ build/bin/z23 status        # runs against a running node; see below
 **Run the test suite and lint gates** before relying on a build:
 
 ```bash
-make -j"$(nproc)" test-parallel   # the canonical test runner — do not invoke test_zcl directly
+make -j"$(getconf _NPROCESSORS_ONLN)" test-parallel   # canonical runner; do not invoke test_zcl directly
 make lint            # defensive-coding + doc-accuracy gates
 ```
+
+### macOS capability boundary
+
+The arm64 macOS build includes the node, wallet, P2P and RPC services,
+databases, and native cryptography. The following Linux-specific facilities
+currently report unavailable or refuse safely on macOS: embedded full Tor,
+Landlock/seccomp package confinement, signal-context self-backtraces, the
+inotify development watcher, and consensus snapshot export that requires
+`O_TMPFILE`. The default Tor stub keeps ordinary node operation available but
+does not publish an onion service. Intel macOS has not yet been measured.
 
 ### Your one obvious next action
 
@@ -440,9 +468,9 @@ build/bin/z23-dev status   # read the latest cycle verdict
 Faster manual loops when you don't want the watcher running:
 
 ```bash
-make -j"$(nproc)" build-only           # parallel compile-check, no link
-make -j"$(nproc)" fast-rebuild         # changed-file compile + non-LTO local dev binary
-make -j"$(nproc)" t-fast ONLY=<group>  # one focused test group, fastest iteration
+make -j"$(getconf _NPROCESSORS_ONLN)" build-only           # parallel compile-check, no link
+make -j"$(getconf _NPROCESSORS_ONLN)" fast-rebuild         # changed-file compile + non-LTO local dev binary
+make -j"$(getconf _NPROCESSORS_ONLN)" t-fast ONLY=<group>  # one focused test group, fastest iteration
 ```
 
 These are the `make fast-rebuild` and `make t-fast ONLY=<group>` targets; the
@@ -456,7 +484,7 @@ build, for iteration only; never use it for production/release.
 Before committing or pushing, run the canonical gates:
 
 ```bash
-make -j"$(nproc)" test-parallel   # the canonical test runner (never invoke test_zcl directly)
+make -j"$(getconf _NPROCESSORS_ONLN)" test-parallel   # canonical runner (never invoke test_zcl directly)
 make lint            # all defensive-coding + doc-accuracy gates
 make ci              # local gate: lint + build + tests
 ```

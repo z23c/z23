@@ -33,7 +33,7 @@ void zcl_native_handle_code_guide(
     bool ok = json_push_kv_str(
             &reply->data, "start_command", "z23 code impact <file.c>") &&
         json_push_kv_str(&reply->data, "proof_command",
-                         "make -j\"$(nproc)\" t-fast ONLY=<group>") &&
+                         "make -j\"$(getconf _NPROCESSORS_ONLN)\" t-fast ONLY=<group>") &&
         json_push_kv_str(&reply->data, "lint_command", "make lint-fast") &&
         json_push_kv_str(&reply->data, "push_command", "make pre-push-ci") &&
         json_push_kv_str(

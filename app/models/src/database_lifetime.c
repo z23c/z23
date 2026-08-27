@@ -5,6 +5,7 @@
 #define _GNU_SOURCE
 #include "models/database_lifetime.h"
 
+#include "platform/path_compat.h"
 #include "platform/time_compat.h"
 
 #include <errno.h>
@@ -65,9 +66,17 @@ static int64_t lifetime_monotonic_us(void)
     return platform_time_monotonic_us();
 }
 
-static long lifetime_tid(void)
+static unsigned long long lifetime_tid(void)
 {
-    return (long)syscall(SYS_gettid);
+#if defined(__APPLE__)
+    uint64_t tid = 0;
+    return pthread_threadid_np(NULL, &tid) == 0 ?
+           (unsigned long long)tid : 0u;
+#elif defined(__linux__)
+    return (unsigned long long)syscall(SYS_gettid);
+#else
+#error "lifetime_tid requires a native thread identifier"
+#endif
 }
 
 static bool lifetime_trace_enabled(void)
@@ -104,9 +113,13 @@ static bool lifetime_node_db_path(const char *path)
 static enum { DBLT_MAIN, DBLT_WAL, DBLT_SHM, DBLT_OTHER }
 lifetime_kind_and_base(const char *path, char base[DBLT_PATH_MAX])
 {
-    size_t n = path ? strlen(path) : 0;
+    char identity[DBLT_PATH_MAX];
+    const char *source = path;
+    if (path && platform_path_identity(identity, sizeof(identity), path))
+        source = identity;
+    size_t n = source ? strlen(source) : 0;
     if (n >= DBLT_PATH_MAX) n = DBLT_PATH_MAX - 1u;
-    if (n) memcpy(base, path, n);
+    if (n) memcpy(base, source, n);
     base[n] = '\0';
     static const char wal[] = "-wal";
     static const char shm[] = "-shm";
@@ -188,7 +201,7 @@ static void lifetime_log(const char *event, const char *path,
     lifetime_backtrace(caller);
     fprintf(stderr,  // obs-ok:vfs-boundary-cannot-reenter-event-persistence
             "[db-lifetime] schema=zcl.db_lifetime.v1 event=%s "
-            "mono_us=%lld pid=%ld tid=%ld sqlite_file=%llu generation=%llu "
+            "mono_us=%lld pid=%ld tid=%llu sqlite_file=%llu generation=%llu "
             "owner=%s authority=%s path=%s path_present=%d "
             "path_dev=%llu path_ino=%llu flags=0x%x refs=%u "
             "unauthorized=%d rc=%d caller=%s\n",

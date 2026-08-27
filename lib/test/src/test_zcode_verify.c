@@ -2864,6 +2864,19 @@ static int t_attest_publish_gate(void)
                  json_get(&result, "ok") &&
                  !json_get_bool(json_get(&result, "ok")) &&
                  zv_str_is(&result, "code", "NO_PACKAGE_STORE"));
+        ZV_CHECK("gate: no package store names z23 join, not flags",
+                 zv_str_has(&result, "message", "z23 join") &&
+                 !zv_str_has(&result, "message", "-packagehost") &&
+                 !zv_str_has(&result, "message", "-buildworker"));
+        json_free(&result);
+        json_init(&result);
+        allowed = boot_zcode_dht_package_pointer_publish_gate(&spec, &result);
+        ZV_CHECK("gate: package pointer with no store names z23 join",
+                 !allowed &&
+                 zv_str_is(&result, "code", "NO_PACKAGE_STORE") &&
+                 zv_str_has(&result, "message", "z23 join") &&
+                 !zv_str_has(&result, "message", "-packagehost") &&
+                 !zv_str_has(&result, "message", "-buildworker"));
         json_free(&result);
     }
 

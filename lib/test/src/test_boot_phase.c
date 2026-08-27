@@ -13,6 +13,7 @@
  * tests without polluting their view of the boot stage. */
 
 #include "test/test_core.h"
+#include "platform/socket_compat.h"
 #include "config/boot.h"
 #include "util/boot_phase.h"
 #include <sqlite3.h>
@@ -76,7 +77,7 @@ static int test_wallet_rebuild_probe(void)
 static int bp_bind_abstract_socket(char *name_out, size_t name_cap)
 {
     static unsigned counter;
-    int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    int fd = platform_socket_open(AF_UNIX, SOCK_DGRAM, 0, true, true);
     if (fd < 0)
         return -1;
 

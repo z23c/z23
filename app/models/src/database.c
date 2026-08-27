@@ -14,6 +14,7 @@
 
 #include "platform/time_compat.h"
 #include "platform/os_proc.h"
+#include "platform/path_compat.h"
 #include "util/log_macros.h"
 #include "util/db_txn_trace.h"
 #include "util/hw_profile.h"
@@ -544,8 +545,9 @@ static bool node_db_open_impl(struct node_db *ndb, const char *path,
 {
     memset(ndb, 0, sizeof(*ndb));
     ndb->lifetime_owner_lease_slot = -1;
-    if (path)
-        snprintf(ndb->path, sizeof(ndb->path), "%s", path);
+    if (path && !platform_path_identity(ndb->path, sizeof(ndb->path), path))
+        return false;
+    path = ndb->path;
     node_db_state_init(ndb);
     if (!db_lifetime_install())
         return node_db_open_abort(ndb);
@@ -680,7 +682,9 @@ bool node_db_open_existing_runtime(struct node_db *ndb, const char *path,
         LOG_FAIL("db", "node_db_open_existing_runtime: path and reason are "
                  "mandatory");
 
-    (void)snprintf(ndb->path, sizeof(ndb->path), "%s", path);
+    if (!platform_path_identity(ndb->path, sizeof(ndb->path), path))
+        LOG_FAIL("db", "node_db_open_existing_runtime: path is invalid");
+    path = ndb->path;
     node_db_state_init(ndb);
     if (!db_lifetime_install())
         return node_db_open_abort(ndb);

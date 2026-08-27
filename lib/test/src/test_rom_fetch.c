@@ -19,6 +19,7 @@
  * the no-partial-trust discard against the merged server code. */
 
 #include "test/test_core.h"
+#include "platform/file_sync.h"
 #include "net/rom_fetch.h"
 #include "net/rom_journal.h"
 #include "net/rom_peer_scoring.h"
@@ -844,7 +845,7 @@ static int test_verified_multi_seeder(void)
             ASSERT(rom_fetch_verify_chunk(cbuf, got, chunk_sha3[ci]));
             ASSERT(pwrite(fd, cbuf, got,
                           (off_t)((uint64_t)ci * m.chunk_size)) == (ssize_t)got);
-            ASSERT(fdatasync(fd) == 0);
+            ASSERT(platform_data_sync(fd) == 0);
             ASSERT(rom_journal_mark(j, ci));
         }
         free(cbuf);

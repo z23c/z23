@@ -98,6 +98,15 @@
 #include <dirent.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+static bool path_join_leaf(char *out, size_t out_size,
+                           const char *directory, const char *leaf)
+{
+    if (!out || out_size == 0 || !directory || !leaf)
+        return false;
+
+    int written = snprintf(out, out_size, "%s/%s", directory, leaf);
+    return written >= 0 && (size_t)written < out_size;
+}
 #include "config/cli_lane_defaults.h"
 #include "config/args.h"                /* print_usage (moved to args.c) */
 
@@ -294,13 +303,16 @@ static bool bench_find_live_pid(long *pid_out, char *source, size_t source_len)
         const char *home = getenv("HOME");
         if (!home || !*home)
             home = ".";
-        snprintf(default_datadir, sizeof(default_datadir),
-                 "%s/.zclassic-c23", home);
+        if (!path_join_leaf(default_datadir, sizeof(default_datadir),
+                            home, ".zclassic-c23"))
+            return false;
         datadir = default_datadir;
     }
 
     char pid_path[512];
-    snprintf(pid_path, sizeof(pid_path), "%s/zclassic23.pid", datadir);
+    if (!path_join_leaf(pid_path, sizeof(pid_path), datadir,
+                        "zclassic23.pid"))
+        return false;
     long pid = -1;
     if (!bench_read_pid_from_file(pid_path, &pid))
         return false;
@@ -1278,7 +1290,8 @@ static int cli_fs_port = 0;
 static bool cli_cookie_exists(const char *datadir)
 {
     char path[512];
-    snprintf(path, sizeof(path), "%s/.cookie", datadir);
+    if (!path_join_leaf(path, sizeof(path), datadir, ".cookie"))
+        return false;
     return access(path, R_OK) == 0;
 }
 
@@ -1344,7 +1357,8 @@ static bool cli_service_exec_arg(const char *key, char *out, size_t out_size)
 static bool cli_read_cookie(const char *datadir)
 {
     char path[512];
-    snprintf(path, sizeof(path), "%s/.cookie", datadir);
+    if (!path_join_leaf(path, sizeof(path), datadir, ".cookie"))
+        return false;
     FILE *f = fopen(path, "r");
     if (!f) return false;
     size_t n = fread(cli_cookie, 1, sizeof(cli_cookie) - 1, f);

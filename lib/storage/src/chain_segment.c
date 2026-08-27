@@ -8,6 +8,7 @@
 #include "crypto/sha3.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
+#include "platform/file_sync.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -134,7 +135,7 @@ static enum cseg_status atomic_write_ro(const char *path,
         }
         off += (size_t)w;
     }
-    if (fdatasync(fd) != 0) {
+    if (platform_data_sync(fd) != 0) {
         set_err(err, errlen, "fdatasync(%s): %s", tmp, strerror(errno));
         close(fd); unlink(tmp);
         return CSEG_ERR_IO;

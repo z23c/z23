@@ -220,7 +220,7 @@ static int test_code_impact_missing_path(void)
 
         ASSERT(reply.status == ZCL_COMMAND_STATUS_FAILED);
         ASSERT_STR_EQ(reply.error.code, "MISSING_PATH");
-        ASSERT(reply.error.message && reply.error.message[0]);
+        ASSERT(reply.error.message[0]);
 
         zcl_command_reply_free(&reply);
         PASS();

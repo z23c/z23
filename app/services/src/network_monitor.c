@@ -300,8 +300,9 @@ static int nm_snapshot_peers(struct db_peer_chain_observation *obs,
         struct db_peer_chain_observation *o = &obs[count];
         memset(o, 0, sizeof(*o));
         o->peer_id = (int64_t)node->id;
-        snprintf(o->addr, sizeof(o->addr), "%s", node->addr_name);
-        snprintf(o->user_agent, sizeof(o->user_agent), "%s", node->clean_sub_ver);
+        snprintf(o->addr, sizeof(o->addr), "%.127s", node->addr_name);
+        snprintf(o->user_agent, sizeof(o->user_agent), "%.95s",
+                 node->clean_sub_ver);
         o->version = node->version;
         o->best_height = node->starting_height;
         o->latency_us = node->avg_latency_us;

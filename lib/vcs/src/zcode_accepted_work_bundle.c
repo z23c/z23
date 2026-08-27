@@ -12,6 +12,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define ACCEPTED_BUNDLE_HEADER_BYTES 88u
 #define ACCEPTED_BUNDLE_RECORD_HEADER_BYTES 36u

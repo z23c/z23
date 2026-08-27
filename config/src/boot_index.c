@@ -13,6 +13,7 @@
  * and SQLite cache functions live in app/services/src/block_index_loader.c. */
 
 #include "platform/time_compat.h"
+#include "platform/allocator_compat.h"
 #include "config/boot_internal.h"
 #include "config/boot_memory_guard.h"
 #include "chain/chain.h"
@@ -51,7 +52,9 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <errno.h>
+#if defined(__GLIBC__)
 #include <malloc.h>
+#endif
 #include <sqlite3.h>
 static bool boot_index_shielded_tx(sqlite3 *db, const struct block *blk,
                                    int height, int target_height, bool reset)
@@ -365,7 +368,7 @@ bool reindex_chainstate(struct main_state *ms,
     event_emitf(EV_SYNC_STATE_CHANGE, 0, "reindex start blocks=%d",
                 tip_height + 1);
 
-    mallopt(M_MMAP_THRESHOLD, 32768);
+    platform_allocator_prepare_bulk();
 
     /* The replay reads every block from h=0 and cannot skip. Verify the
      * verb is executable BEFORE wiping the derived set: a cold-import
@@ -487,7 +490,7 @@ bool reindex_chainstate(struct main_state *ms,
                 errors++;
                 break;
             }
-            malloc_trim(0);
+            platform_allocator_release_free_pages();
             if (h % 1000 == 0 || h == tip_height)
                 boot_status_set_progress("reindex_chainstate", h, tip_height);
         }

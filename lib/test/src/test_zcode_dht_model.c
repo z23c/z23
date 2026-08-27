@@ -2,6 +2,7 @@
  * purpose: Deterministic 32-node/10k-transition bounded DHT state model. */
 
 #include "test/test_core.h"
+#include "platform/barrier.h"
 
 #include "config/boot_zcode_dht_reachability.h"
 #include "../../vcs/src/zcode_dht_service_internal.h"
@@ -373,7 +374,7 @@ enum lock_stress_role {
 
 struct lock_stress {
   pthread_mutex_t lock;
-  pthread_barrier_t start;
+  zcl_barrier_t start;
   struct vcs_zcode_dht_service *service;
   uint64_t generation;
   uint8_t genesis[32];
@@ -396,7 +397,7 @@ static void lock_stress_count(struct lock_stress *shared,
 static void *lock_stress_worker(void *opaque) {
   struct lock_stress_arg *arg = opaque;
   struct lock_stress *shared = arg->shared;
-  (void)pthread_barrier_wait(&shared->start);
+  (void)zcl_barrier_wait(&shared->start);
 
   if (arg->role == LOCK_STRESS_SAVE) {
     pthread_mutex_lock(&shared->lock);
@@ -520,8 +521,8 @@ static bool run_lock_stress(void) {
     ok = false;
   if (ok && pthread_mutex_init(&shared.lock, NULL) != 0)
     ok = false;
-  if (ok && pthread_barrier_init(&shared.start, NULL,
-                                 LOCK_STRESS_ROLE_COUNT) != 0) {
+  if (ok && zcl_barrier_init(&shared.start,
+                             LOCK_STRESS_ROLE_COUNT) != 0) {
     pthread_mutex_destroy(&shared.lock);
     ok = false;
   }
@@ -545,7 +546,7 @@ static bool run_lock_stress(void) {
   else
     abort();
   if (started == LOCK_STRESS_ROLE_COUNT) {
-    pthread_barrier_destroy(&shared.start);
+    zcl_barrier_destroy(&shared.start);
     pthread_mutex_destroy(&shared.lock);
   }
   ok = ok && shared.service == NULL &&

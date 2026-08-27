@@ -41,6 +41,7 @@
 #include <string.h>
 #include <time.h>
 
+#if defined(__linux__)
 static void catchup_lifecycle_join_deadline_from_now(struct timespec *ts,
                                                       int timeout_sec)
 {
@@ -49,11 +50,13 @@ static void catchup_lifecycle_join_deadline_from_now(struct timespec *ts,
         timeout_sec = 0;
     ts->tv_sec += timeout_sec;
 }
+#endif
 
 static bool catchup_lifecycle_join_thread_bounded(pthread_t thread,
                                                    const char *name,
                                                    int timeout_sec)
 {
+#if defined(__linux__)
     struct timespec deadline;
     int rc;
 
@@ -73,6 +76,14 @@ static bool catchup_lifecycle_join_thread_bounded(pthread_t thread,
     }
     pthread_join(thread, NULL);
     return false;
+#else
+    (void)timeout_sec;
+    int rc = pthread_join(thread, NULL);
+    if (rc != 0)
+        LOG_WARN("catchup_lifecycle", "%s join failed rc=%d (%s)",
+                 name ? name : "thread", rc, strerror(rc));
+    return rc == 0;
+#endif
 }
 
 bool catchup_lifecycle_start(struct node_db_sync_catchup_job *job,

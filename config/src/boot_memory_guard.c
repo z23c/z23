@@ -3,17 +3,17 @@
 #include "config/boot_memory_guard.h"
 
 #include "chain/chain.h"
+#include "platform/system_memory.h"
 #include "validation/chainstate.h"
 
 #include <stdio.h>
-#include <sys/sysinfo.h>
 
 static size_t boot_system_ram_bytes(void)
 {
-    struct sysinfo si;
-    if (sysinfo(&si) != 0)
+    uint64_t bytes = 0;
+    if (!platform_system_memory_bytes(&bytes) || bytes > SIZE_MAX)
         return 0;
-    return (size_t)si.totalram * (size_t)si.mem_unit;
+    return (size_t)bytes;
 }
 
 int64_t boot_block_index_estimate_count(int64_t persisted_height)

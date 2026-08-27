@@ -15,6 +15,7 @@
  * byte-identically from boot_index.c — no logic change. */
 
 #include "platform/time_compat.h"
+#include "platform/file_advice.h"
 #include "config/boot_internal.h"
 #include "chain/chain.h"
 #include "chain/chainparams.h"
@@ -194,7 +195,7 @@ static void scan_parse_one_file(struct boot_scan_file_result *r)
      * the kernel to read ahead aggressively instead of caching for random
      * access. Advisory only: a denied/unsupported call just forgoes the
      * readahead hint, never fails the scan. */
-    (void)posix_fadvise(fd, 0, st.st_size, POSIX_FADV_SEQUENTIAL);
+    platform_file_advise_sequential(fd, st.st_size);
 
     uint8_t *data = mmap(NULL, (size_t)st.st_size, PROT_READ,
                          MAP_PRIVATE, fd, 0);

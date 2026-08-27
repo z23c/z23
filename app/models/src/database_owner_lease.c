@@ -5,6 +5,7 @@
 #include "models/database_owner_lease.h"
 
 #include "models/database.h"
+#include "platform/path_compat.h"
 #include "util/log_macros.h"
 
 #include <errno.h>
@@ -16,6 +17,7 @@
 #include <unistd.h>
 
 enum { NODE_DB_OWNER_LEASES = 128 };
+enum { NODE_DB_OWNER_PATH_MAX = 1100 };
 
 struct node_db_owner_lease {
     char path[1024];
@@ -27,21 +29,45 @@ struct node_db_owner_lease {
 static pthread_mutex_t g_owner_lease_mutex = PTHREAD_MUTEX_INITIALIZER;
 static struct node_db_owner_lease g_owner_leases[NODE_DB_OWNER_LEASES];
 
+static bool node_db_owner_lock_path(char out[NODE_DB_OWNER_PATH_MAX],
+                                    const char *db_path)
+{
+#if defined(__APPLE__)
+    int written = snprintf(out, NODE_DB_OWNER_PATH_MAX, "%s.owner-lock",
+                           db_path);
+    return written >= 0 && written < NODE_DB_OWNER_PATH_MAX;
+#else
+    int written = snprintf(out, NODE_DB_OWNER_PATH_MAX, "%s", db_path);
+    return written >= 0 && written < NODE_DB_OWNER_PATH_MAX;
+#endif
+}
+
 enum node_db_owner_lease_probe node_db_owner_lease_probe(const char *path)
 {
+    char identity[NODE_DB_OWNER_PATH_MAX];
+    char lock_path[NODE_DB_OWNER_PATH_MAX];
     if (!path || !path[0]) return NODE_DB_OWNER_LEASE_PROBE_ERROR;
     if (strcmp(path, ":memory:") == 0) return NODE_DB_OWNER_LEASE_UNOWNED;
+    if (!platform_path_identity(identity, sizeof(identity), path))
+        return NODE_DB_OWNER_LEASE_PROBE_ERROR;
     pthread_mutex_lock(&g_owner_lease_mutex);
     for (int i = 0; i < NODE_DB_OWNER_LEASES; i++) {
         struct node_db_owner_lease *lease = &g_owner_leases[i];
         if (lease->refs > 0 && lease->pid == getpid() &&
-            strcmp(lease->path, path) == 0) {
+            strcmp(lease->path, identity) == 0) {
             pthread_mutex_unlock(&g_owner_lease_mutex);
             return NODE_DB_OWNER_LEASE_OWNED_SELF;
         }
     }
     pthread_mutex_unlock(&g_owner_lease_mutex);
-    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (!node_db_owner_lock_path(lock_path, identity))
+        return NODE_DB_OWNER_LEASE_PROBE_ERROR;
+#if defined(__APPLE__)
+    if (access(path, F_OK) != 0)
+        return errno == ENOENT ? NODE_DB_OWNER_LEASE_UNOWNED
+                               : NODE_DB_OWNER_LEASE_PROBE_ERROR;
+#endif
+    int fd = open(lock_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0)
         return errno == ENOENT ? NODE_DB_OWNER_LEASE_UNOWNED
                                : NODE_DB_OWNER_LEASE_PROBE_ERROR;
@@ -60,13 +86,16 @@ enum node_db_owner_lease_probe node_db_owner_lease_probe(const char *path)
 
 void node_db_owner_lease_release(struct node_db *ndb)
 {
+    char identity[NODE_DB_OWNER_PATH_MAX];
     if (!ndb || ndb->lifetime_owner_lease_slot < 0) return;
+    if (!platform_path_identity(identity, sizeof(identity), ndb->path))
+        return;
     pthread_mutex_lock(&g_owner_lease_mutex);
     int slot = ndb->lifetime_owner_lease_slot;
     struct node_db_owner_lease *lease =
         slot < NODE_DB_OWNER_LEASES ? &g_owner_leases[slot] : NULL;
     if (lease && lease->pid == getpid() && lease->refs > 0 &&
-        strcmp(lease->path, ndb->path) == 0) {
+        strcmp(lease->path, identity) == 0) {
         lease->refs--;
         if (lease->refs == 0) {
             if (flock(lease->fd, LOCK_UN) != 0)
@@ -85,9 +114,19 @@ void node_db_owner_lease_release(struct node_db *ndb)
 
 bool node_db_owner_lease_acquire(struct node_db *ndb, bool create_if_missing)
 {
+    char identity[NODE_DB_OWNER_PATH_MAX];
+    char lock_path[NODE_DB_OWNER_PATH_MAX];
     if (!ndb || !ndb->path[0])
         LOG_FAIL("db", "database owner lease requires a path");
     if (strcmp(ndb->path, ":memory:") == 0) return true;
+    if (!platform_path_identity(identity, sizeof(identity), ndb->path) ||
+        !node_db_owner_lock_path(lock_path, identity))
+        LOG_FAIL("db", "database owner lease path is too long: %s", ndb->path);
+#if defined(__APPLE__)
+    if (!create_if_missing && access(ndb->path, F_OK) != 0)
+        LOG_FAIL("db", "database owner lease open failed for %s: %s",
+                 ndb->path, strerror(errno));
+#endif
     pthread_mutex_lock(&g_owner_lease_mutex);
     int free_slot = -1;
     for (int i = 0; i < NODE_DB_OWNER_LEASES; i++) {
@@ -98,7 +137,7 @@ bool node_db_owner_lease_acquire(struct node_db *ndb, bool create_if_missing)
             lease->fd = -1;
         }
         if (lease->refs > 0 && lease->pid == getpid() &&
-            strcmp(lease->path, ndb->path) == 0) {
+            strcmp(lease->path, identity) == 0) {
             lease->refs++;
             ndb->lifetime_owner_lease_slot = i;
             pthread_mutex_unlock(&g_owner_lease_mutex);
@@ -110,11 +149,17 @@ bool node_db_owner_lease_acquire(struct node_db *ndb, bool create_if_missing)
         pthread_mutex_unlock(&g_owner_lease_mutex);
         LOG_FAIL("db", "database owner lease registry is full for %s", ndb->path);
     }
-    /* Lock node.db itself: no sidecar or directory metadata mutation, while
-     * independent databases in one test/scratch directory remain independent. */
+    /* Linux flock and SQLite's POSIX byte locks are independent, so the
+     * database inode is the lease. Darwin implements flock through fcntl and
+     * would make SQLite conflict with its own process; use one persistent
+     * per-database lock inode there. Independent databases remain independent. */
     int open_flags = O_RDWR | O_CLOEXEC | O_NOFOLLOW;
+#if defined(__APPLE__)
+    open_flags |= O_CREAT;
+#else
     if (create_if_missing) open_flags |= O_CREAT;
-    int fd = open(ndb->path, open_flags, 0600);
+#endif
+    int fd = open(lock_path, open_flags, 0600);
     if (fd < 0) goto fail_locked;
     if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
         int saved = errno;
@@ -125,7 +170,7 @@ bool node_db_owner_lease_acquire(struct node_db *ndb, bool create_if_missing)
                  strerror(saved));
     }
     struct node_db_owner_lease *lease = &g_owner_leases[free_slot];
-    (void)snprintf(lease->path, sizeof(lease->path), "%s", ndb->path);
+    (void)snprintf(lease->path, sizeof(lease->path), "%s", identity);
     lease->fd = fd;
     lease->refs = 1;
     lease->pid = getpid();
@@ -146,6 +191,21 @@ bool node_db_owner_lease_rebind(struct node_db *ndb)
 {
     if (!ndb || ndb->lifetime_owner_lease_slot < 0)
         LOG_FAIL("db", "database owner lease rebind requires ownership");
+#if defined(__APPLE__)
+    char identity[NODE_DB_OWNER_PATH_MAX];
+    if (!platform_path_identity(identity, sizeof(identity), ndb->path))
+        LOG_FAIL("db", "database owner rebind path is invalid");
+    pthread_mutex_lock(&g_owner_lease_mutex);
+    int slot = ndb->lifetime_owner_lease_slot;
+    struct node_db_owner_lease *lease =
+        slot < NODE_DB_OWNER_LEASES ? &g_owner_leases[slot] : NULL;
+    bool valid = lease && lease->pid == getpid() && lease->refs == 1 &&
+                 strcmp(lease->path, identity) == 0;
+    pthread_mutex_unlock(&g_owner_lease_mutex);
+    if (!valid)
+        LOG_FAIL("db", "database owner rebind found ambiguous ownership");
+    return true;
+#else
     int replacement = open(ndb->path,
         O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
     if (replacement < 0)
@@ -175,4 +235,5 @@ bool node_db_owner_lease_rebind(struct node_db *ndb)
     (void)flock(retired, LOCK_UN);
     (void)close(retired);
     return true;
+#endif
 }

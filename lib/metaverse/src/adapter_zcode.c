@@ -33,6 +33,7 @@
 
 #include "base/hex.h"
 #include "base/safe_alloc.h"
+#include "base/text_fit.h"
 #include "vcs/package_index.h"
 #include "vcs/package_release.h"
 
@@ -164,11 +165,14 @@ static bool zcode_fill(const struct metaverse_adapter_ctx *ctx,
     }
 
     if (f.signature_verified) {
-        snprintf(out->provenance, sizeof(out->provenance),
+        char provenance[256];
+        snprintf(provenance, sizeof(provenance),
                  "publisher signature over the release id verified in this "
                  "call; authorship only, not chain-anchored%s%s",
                  e->has_znam ? "; znam pointer claim: " : "",
                  e->has_znam ? e->znam : "");
+        (void)zcl_text_fit(out->provenance, sizeof(out->provenance),
+                           provenance, "metaverse", "provenance");
         (void)metaverse_view_determined(out,
                                         METAVERSE_EVIDENCE_LOCAL_SIGNATURE,
                                         "vcs_package_release_verify");
@@ -211,8 +215,9 @@ static bool zcode_fill(const struct metaverse_adapter_ctx *ctx,
         snprintf(out->reason, sizeof(out->reason),
                  "stored manifest re-derives a different root than its "
                  "filename");
-    else if (!complete)
-        snprintf(out->reason, sizeof(out->reason),
+    else if (!complete) {
+        char reason[384];
+        snprintf(reason, sizeof(reason),
                  "possession not proven: %s (%u/%u chunks and %llu/%llu "
                  "bytes verified)",
                  out->verification_gap[0] ? out->verification_gap
@@ -220,6 +225,9 @@ static bool zcode_fill(const struct metaverse_adapter_ctx *ctx,
                  out->chunks_verified, out->chunk_total,
                  (unsigned long long)out->bytes_verified,
                  (unsigned long long)out->total_bytes);
+        (void)zcl_text_fit(out->reason, sizeof(out->reason), reason,
+                           "metaverse", "reason");
+    }
     else if (!f.signature_verified)
         snprintf(out->reason, sizeof(out->reason),
                  "release envelope absent or its signature failed to verify: "

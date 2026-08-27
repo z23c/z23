@@ -4,6 +4,7 @@
 #include "devloop.h"
 
 #include "platform/time_compat.h"
+#include "platform/process_compat.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -259,7 +260,7 @@ static bool process_run_impl(const char *cwd, int exec_fd,
         close(fds[1]);
         if (exec_fd >= 0) {
             extern char **environ;
-            fexecve(exec_fd, (char *const *)argv, environ);
+            platform_execve_fd(exec_fd, (char *const *)argv, environ);
         } else {
             execvp(argv[0], (char *const *)argv);
         }

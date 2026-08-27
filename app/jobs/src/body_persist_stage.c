@@ -137,23 +137,15 @@ static void requeue_hold_note_idle(int height, int tip_height)
     char reason[BLOCKER_REASON_MAX];
     if (height == 0)
         snprintf(reason, sizeof(reason),
-                 "height=0: the GENESIS body is not on disk and can NEVER be "
-                 "re-fetched — the header-driven body queue only requests "
-                 "heights strictly above the active tip and genesis IS the "
-                 "tip. body_persist has held at cursor 0 for %llds; the fold "
-                 "cannot leave height 0. Cure: the boot-time genesis anchor "
-                 "seed (config/src/boot_services.c) stamps every upstream "
-                 "cursor to 1. If this blocker is up, that seed did not run or "
-                 "seed_integrity_gate refused it",
+                 "height=0 genesis body absent; body_persist held %llds. "
+                 "The boot genesis anchor seed did not run or its integrity "
+                 "gate refused the seed",
                  (long long)(now - since));
     else
         snprintf(reason, sizeof(reason),
-                 "height=%d: BLOCK_HAVE_DATA was cleared for re-fetch %llds "
-                 "ago and no body arrived (active tip=%d). A height at or "
-                 "below the tip cannot be re-requested by the header-driven "
-                 "body queue, so this hold does not self-heal; inspect "
-                 "blk*.dat and the block_index (nFile,nDataPos) for this "
-                 "height",
+                 "height=%d body refetch pending %llds, tip=%d; the header "
+                 "queue cannot request at/below tip; inspect blk*.dat and "
+                 "the block_index position",
                  height, (long long)(now - since), tip_height);
 
     struct blocker_record rec;

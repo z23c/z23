@@ -173,7 +173,8 @@ bool hodl_wave_scan_current_utxos(sqlite3 *db, int64_t tip_height,
     snprintf(out->status, sizeof(out->status), "ok");
     struct ar_errors errors;
     if (!hodl_wave_validate(out, &errors)) {
-        snprintf(out->status, sizeof(out->status), "%s",
+        snprintf(out->status, sizeof(out->status), "%.*s",
+                 (int)sizeof(out->status) - 1,
                  ar_errors_full(&errors));
         return false;
     }

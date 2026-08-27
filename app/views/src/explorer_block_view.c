@@ -148,7 +148,7 @@ size_t explorer_view_block(const struct explorer_block_view_data *d,
         for (size_t i = 0; i < d->num_rows && off + 512 < max; i++) {
             const struct explorer_block_tx_row *row = &d->rows[i];
 
-            char idx_s[16], in_s[16], out_s[16];
+            char idx_s[21], in_s[21], out_s[21];
             snprintf(idx_s, sizeof(idx_s), "%zu", i);
             snprintf(in_s, sizeof(in_s), "%zu", row->inputs);
             snprintf(out_s, sizeof(out_s), "%zu", row->outputs);

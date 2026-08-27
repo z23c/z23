@@ -616,7 +616,7 @@ int test_stale_validate_headers_repair_condition(void)
         struct main_state ms;
         struct block_index blocks[3];
         struct uint256 hashes[3];
-        struct uint256 repair_hash;
+        struct uint256 repair_hash = {0};
         bool ok = setup_condition_case("hash_mismatch_correct_header_pinned",
                                        dir, sizeof(dir), &ms, blocks, hashes);
         sqlite3 *db = progress_store_db();

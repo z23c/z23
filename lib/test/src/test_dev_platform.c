@@ -12,6 +12,7 @@
 #include "json/json.h"
 #include "keys/key.h"
 #include "platform/time_compat.h"
+#include "platform/file_watch_compat.h"
 #include "services/dev_reflex_policy_service.h"
 #include "sim/social_app_sim.h"
 #include "util/safe_alloc.h"
@@ -25,7 +26,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/inotify.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>

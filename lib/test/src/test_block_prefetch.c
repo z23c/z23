@@ -25,6 +25,7 @@
 #include "primitives/transaction.h"
 #include "json/json.h"
 #include "platform/time_compat.h"
+#include "platform/file_advice.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -85,7 +86,7 @@ static bool bpt_evict(const char *datadir, const struct disk_block_pos *pos)
         return false;
     struct stat st;
     bool ok = (fstat(fd, &st) == 0) &&
-              (posix_fadvise(fd, 0, st.st_size, POSIX_FADV_DONTNEED) == 0);
+              (platform_file_advise_dontneed(fd, st.st_size) == 0);
     close(fd);
     return ok;
 }

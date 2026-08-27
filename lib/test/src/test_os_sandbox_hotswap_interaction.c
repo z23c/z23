@@ -62,6 +62,19 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#if !defined(__linux__)
+
+int test_os_sandbox_hotswap_interaction(void)
+{
+    printf("\n=== confinement/hot-swap platform availability ===\n");
+    printf("confinement: Landlock/seccomp interaction is not applicable "
+           "on this host\n");
+    return os_sandbox_landlock_abi() < 1 &&
+           !os_sandbox_seccomp_supported() ? 0 : 1;
+}
+
+#else
+
 static int failures;
 
 #define CH_CHECK(name, expr) do { \
@@ -421,3 +434,5 @@ int test_os_sandbox_hotswap_interaction(void)
     printf("=== confinement tests done: %d failure(s) ===\n", failures);
     return failures;
 }
+
+#endif

@@ -2,6 +2,7 @@
  * Robustness and defensive coding tests: validation, bounds, edge cases. */
 
 #include "platform/time_compat.h"
+#include "platform/system_memory.h"
 #include "test/test_core.h"
 #include "domain/encoding/base58.h"
 #include "chain/pow.h"
@@ -22,7 +23,6 @@
 #include "event/event.h"
 #include <signal.h>
 #include <stdatomic.h>
-#include <sys/sysinfo.h>
 
 static char test_datadir[256];
 
@@ -695,13 +695,13 @@ int test_robustness(void)
 
     printf("robust: get_system_ram returns reasonable value... ");
     {
-        struct sysinfo si;
-        bool ok = (sysinfo(&si) == 0);
-        size_t ram = (size_t)si.totalram * (size_t)si.mem_unit;
+        uint64_t ram = 0;
+        bool ok = platform_system_memory_bytes(&ram);
         /* Reasonable: at least 512MB, at most 1TB */
         ok = ok && ram >= (512ULL * 1024 * 1024);
         ok = ok && ram <= (1024ULL * 1024 * 1024 * 1024);
-        printf("(%zuMB) ", ram / (1024 * 1024));
+        printf("(%lluMB) ",
+               (unsigned long long)(ram / (1024u * 1024u)));
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }

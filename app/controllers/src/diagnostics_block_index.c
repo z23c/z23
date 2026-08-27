@@ -253,7 +253,8 @@ bool diag_block_index_dump_state_json(struct json_value *out, const char *key)
         json_push_kv(out, "integrity", &integrity);
         json_free(&integrity);
         integrity_degraded = status.degraded;
-        snprintf(integrity_reason, sizeof(integrity_reason), "%s",
+        snprintf(integrity_reason, sizeof(integrity_reason), "%.*s",
+                 (int)sizeof(integrity_reason) - 1,
                  status.reason);
     }
 

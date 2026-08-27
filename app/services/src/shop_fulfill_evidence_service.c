@@ -46,7 +46,7 @@ static struct zcl_result artifact_fail(
     struct shop_fulfill_artifact_fact *out, const char *reason)
 {
     if (out)
-        (void)snprintf(out->reason, sizeof(out->reason), "%s", reason);
+        (void)snprintf(out->reason, sizeof(out->reason), "%.95s", reason);
     LOG_ERROR(SFE_TAG, "artifact evidence refused: %s", reason);
     return ZCL_ERR(-1, "artifact evidence refused: %s", reason);
 }
@@ -55,7 +55,7 @@ static struct zcl_result receipt_fail(
     struct shop_fulfill_receipt_fact *out, const char *reason)
 {
     if (out)
-        (void)snprintf(out->reason, sizeof(out->reason), "%s", reason);
+        (void)snprintf(out->reason, sizeof(out->reason), "%.95s", reason);
     LOG_ERROR(SFE_TAG, "receipt evidence refused: %s", reason);
     return ZCL_ERR(-2, "receipt evidence refused: %s", reason);
 }

@@ -20,7 +20,12 @@
 #include <string.h>
 #include <stdatomic.h>
 #include <stdbool.h>
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64)
 #include <immintrin.h>
+#define ZCL_BLAKE2B_X86_SIMD 1
+#else
+#define ZCL_BLAKE2B_X86_SIMD 0
+#endif
 
 /* ── Runtime CPU feature detection ───────────────────────────── */
 
@@ -71,6 +76,7 @@ static void detect_features(void)
 
 /* ── Constants ───────────────────────────────────────────────── */
 
+#if ZCL_BLAKE2B_X86_SIMD
 static const uint64_t IV[8] = {
     0x6a09e667f3bcc908ULL, 0xbb67ae8584caa73bULL,
     0x3c6ef372fe94f82bULL, 0xa54ff53a5f1d36f1ULL,
@@ -265,6 +271,7 @@ static void blake2b_compress_4way(
             c[j]->h[i] ^= out[j];
     }
 }
+#endif
 
 /* ══════════════════════════════════════════════════════════════
  *  Equihash batch hash generation — 3-tier dispatch
@@ -275,6 +282,7 @@ static void finalize_states(const struct blake2b_ctx *base,
                             const uint32_t *indices, int n,
                             unsigned char **hashes, size_t hash_len)
 {
+#if ZCL_BLAKE2B_X86_SIMD
     struct blake2b_ctx states[8];
     uint8_t blocks[8][128];
     size_t bl = base->buflen;
@@ -330,6 +338,7 @@ static void finalize_states(const struct blake2b_ctx *base,
         }
         return;
     }
+#endif
 
     /* Scalar fallback */
     for (int i = 0; i < n; i++) {

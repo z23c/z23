@@ -11,10 +11,12 @@
 
 #include "hotswap/hotswap_sealed_image.h"
 
+#include <stdio.h>
+
+#if defined(__linux__)
 #include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
-#include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -241,3 +243,13 @@ int hotswap_sealed_image_from_fd(int src_fd, char *err, size_t err_cap)
 
     return img_fd;
 }
+#else
+int hotswap_sealed_image_from_fd(int src_fd, char *err, size_t err_cap)
+{
+    (void)src_fd;
+    if (err && err_cap)
+        (void)snprintf(err, err_cap,
+                       "sealed image: Linux memfd sealing is unavailable");
+    return -1;
+}
+#endif

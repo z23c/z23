@@ -192,7 +192,7 @@ int test_simnet_doublespend(void)
                      cb_height + COINBASE_MATURITY - 1));
         int pre_attempt_height = simnet_tip_height(&sim);
 
-        struct transaction spend_a, spend_b;
+        struct transaction spend_a = {0}, spend_b = {0};
         bool built = ds_make_spend(&spend_a, &cb, 0, 900000, 0xAA) &&
                      ds_make_spend(&spend_b, &cb, 0, 800000, 0xBB);
         DS_CHECK("same-block: build two distinct spends of one outpoint",

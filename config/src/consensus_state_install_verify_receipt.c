@@ -5,6 +5,7 @@
 
 #include "core/utiltime.h"
 #include "crypto/sha3.h"
+#include "platform/file_sync.h"
 #include "util/log_macros.h"
 
 #include <errno.h>
@@ -215,9 +216,9 @@ void consensus_state_install_verify_receipt_store(
         return;
     }
     bool ok = write_all(fd, wire, sizeof(wire));
-    if (ok && fdatasync(fd) != 0) {
+    if (ok && platform_data_sync(fd) != 0) {
         ok = false;
-        LOG_WARN(IVR_SUBSYS, "receipt store: fdatasync failed: %s",
+        LOG_WARN(IVR_SUBSYS, "receipt store: data sync failed: %s",
                  strerror(errno));
     }
     if (close(fd) != 0) {

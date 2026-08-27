@@ -5,6 +5,7 @@
  * Chunks are served by hash over REST, RPC, and P2P. */
 
 #include "platform/time_compat.h"
+#include "platform/file_sync.h"
 #include "controllers/blockchain_controller.h"
 #include "controllers/file_controller.h"
 #include "controllers/strong_params.h"
@@ -345,7 +346,7 @@ static bool file_manifest_save(const struct file_manifest *fm,
         }
     }
     fflush(f);
-    fdatasync(fileno(f));
+    platform_data_sync(fileno(f));
     fclose(f);
     return true;
 }

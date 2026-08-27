@@ -22,13 +22,13 @@
 #include "util/hw_profile.h"
 #include "util/cpu_topology.h"
 #include "json/json.h"
+#include "platform/device_compat.h"
 
 #include <errno.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/sysmacros.h>
 #include <unistd.h>
 
 #define HWP_CHECK(name, expr) do { \
@@ -375,7 +375,8 @@ int test_hw_profile(void)
             HWP_CHECK("block fixture datadir stat() OK", have_stat);
 
             if (have_stat) {
-                unsigned maj = major(st.st_dev), min = minor(st.st_dev);
+                unsigned maj = platform_device_major(st.st_dev);
+                unsigned min = platform_device_minor(st.st_dev);
                 char block_root[600];
                 snprintf(block_root, sizeof(block_root), "%s/blockroot", root);
                 hwp_mkdir_p(block_root);

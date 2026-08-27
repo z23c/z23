@@ -17,7 +17,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
+#if defined(__linux__)
 #include <sys/inotify.h>
+#endif
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -1128,6 +1130,7 @@ enum zcl_devloop_state_lookup zcl_devloop_cycle_state_wait_after(
         return ZCL_DEVLOOP_STATE_INVALID;
     }
     (void)workspace;
+#if defined(__linux__)
     int notify_fd = inotify_init1(IN_CLOEXEC | IN_NONBLOCK);
     int watch = notify_fd >= 0
         ? inotify_add_watch(notify_fd, dir,
@@ -1163,6 +1166,7 @@ enum zcl_devloop_state_lookup zcl_devloop_cycle_state_wait_after(
             notify_fd, events_path,
             IN_CREATE | IN_MOVED_TO | IN_CLOSE_WRITE | IN_MODIFY |
                 IN_DELETE_SELF | IN_MOVE_SELF);
+#endif
 
     int64_t deadline = platform_time_monotonic_us() +
         (int64_t)timeout_ms * 1000;
@@ -1177,6 +1181,7 @@ enum zcl_devloop_state_lookup zcl_devloop_cycle_state_wait_after(
         if (remaining <= 0)
             break;
         int wait_ms = (int)((remaining + 999) / 1000);
+#if defined(__linux__)
         struct pollfd pfd = {.fd = notify_fd, .events = POLLIN};
         int ready = poll(&pfd, 1, wait_ms);
         if (ready < 0 && errno == EINTR)
@@ -1185,12 +1190,20 @@ enum zcl_devloop_state_lookup zcl_devloop_cycle_state_wait_after(
             break;
         char events[4096];
         while (read(notify_fd, events, sizeof(events)) > 0) {}
+#else
+        int slice_ms = wait_ms < 25 ? wait_ms : 25;
+        int ready = poll(NULL, 0, slice_ms);
+        if (ready < 0 && errno == EINTR)
+            continue;
+#endif
     }
+#if defined(__linux__)
     if (events_watch >= 0)
         (void)inotify_rm_watch(notify_fd, events_watch);
     if (stream_watch >= 0)
         (void)inotify_rm_watch(notify_fd, stream_watch);
     (void)inotify_rm_watch(notify_fd, watch);
     close(notify_fd);
+#endif
     return result;
 }

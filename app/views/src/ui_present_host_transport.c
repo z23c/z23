@@ -11,6 +11,7 @@
 #include "util/log_macros.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <poll.h>
 #include <stddef.h>
@@ -25,6 +26,22 @@
 
 static const uint8_t UI_HOST_REQUEST_MAGIC[4] = {'Z', 'P', 'H', 'R'};
 static const uint8_t UI_HOST_REPLY_MAGIC[4] = {'Z', 'P', 'H', 'A'};
+
+static int ui_host_stream_socket(void)
+{
+#if defined(SOCK_CLOEXEC)
+    return socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+#else
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd >= 0 && fcntl(fd, F_SETFD, FD_CLOEXEC) != 0) {
+        int saved = errno;
+        close(fd);
+        errno = saved;
+        return -1;
+    }
+    return fd;
+#endif
+}
 
 bool ui_present_host_display_ready(char *why, size_t why_cap)
 {
@@ -97,7 +114,7 @@ int ui_host_transport_connect_once(void)
         errno = EINVAL;
         return -1;
     }
-    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    int fd = ui_host_stream_socket();
     if (fd < 0) return -1;
     if (connect(fd, (const struct sockaddr *)&address, address_len) != 0) {
         int saved = errno;
@@ -229,11 +246,18 @@ bool ui_host_transport_parse_reply(
 
 bool ui_host_transport_peer_allowed(int client)
 {
+#if defined(__APPLE__)
+    uid_t peer_uid;
+    gid_t peer_gid;
+    return getpeereid(client, &peer_uid, &peer_gid) == 0 &&
+           peer_uid == geteuid();
+#else
     struct ucred peer;
     socklen_t peer_len = sizeof(peer);
     return getsockopt(client, SOL_SOCKET, SO_PEERCRED,
                       &peer, &peer_len) == 0 &&
            peer_len == sizeof(peer) && peer.uid == geteuid();
+#endif
 }
 
 int ui_host_transport_listen(void)
@@ -241,7 +265,7 @@ int ui_host_transport_listen(void)
     struct sockaddr_un address;
     socklen_t address_len = ui_host_address(&address);
     if (address_len == 0) return -1;
-    int listener = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    int listener = ui_host_stream_socket();
     if (listener < 0) return -1;
     if (bind(listener, (const struct sockaddr *)&address, address_len) != 0) {
         int bind_error = errno;

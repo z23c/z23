@@ -265,9 +265,10 @@ static void select_copy(struct reducer_frontier_rewind_base *dst,
     strncpy(dst->kind, kind ? kind : "", sizeof(dst->kind) - 1);
     dst->kind[sizeof(dst->kind) - 1] = '\0';
     if (commitment_hex) {
-        strncpy(dst->commitment_sha3, commitment_hex,
-                sizeof(dst->commitment_sha3) - 1);
-        dst->commitment_sha3[sizeof(dst->commitment_sha3) - 1] = '\0';
+        size_t commitment_len = strnlen(
+            commitment_hex, sizeof(dst->commitment_sha3) - 1);
+        memcpy(dst->commitment_sha3, commitment_hex, commitment_len);
+        dst->commitment_sha3[commitment_len] = '\0';
     } else {
         dst->commitment_sha3[0] = '\0';
     }

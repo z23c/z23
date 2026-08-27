@@ -188,11 +188,14 @@ size_t serve_search(const char *query, uint8_t *r, size_t max)
         {
             char rpc_buf[1024];
             char rpc_params[128];
-            snprintf(rpc_params, sizeof(rpc_params), "[\"%s\", 1]", q);
-            int rn = rpc_call("getrawtransaction", rpc_params,
-                              rpc_buf, sizeof(rpc_buf));
-            if (rn > 0 && strstr(rpc_buf, "\"error\":null"))
-                return serve_tx(q, r, max);
+            int written = snprintf(rpc_params, sizeof(rpc_params),
+                                   "[\"%s\", 1]", q);
+            if (written >= 0 && (size_t)written < sizeof(rpc_params)) {
+                int rn = rpc_call("getrawtransaction", rpc_params,
+                                  rpc_buf, sizeof(rpc_buf));
+                if (rn > 0 && strstr(rpc_buf, "\"error\":null"))
+                    return serve_tx(q, r, max);
+            }
         }
         return serve_block(q, r, max);
     }

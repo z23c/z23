@@ -319,7 +319,7 @@ bool rpc_rescanwitnesses(const struct json_value *params, bool help,
         /* mmap block file */
         if (pindex->nFile != cached_file) {
             if (cached_data) munmap(cached_data, cached_size);
-            char path[512];
+            char path[sizeof(block_datadir) + 32];
             snprintf(path, sizeof(path), "%s/blocks/blk%05d.dat",
                      block_datadir, pindex->nFile);
             int fd = open(path, O_RDONLY);

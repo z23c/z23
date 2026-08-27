@@ -31,6 +31,7 @@
 #include "crypto/blake2b.h"
 #include "crypto/sha256.h"
 #include "json/json.h"
+#include "platform/device_compat.h"
 #include "util/log_macros.h"
 
 #include <limits.h>
@@ -40,7 +41,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/sysmacros.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 #if defined(__x86_64__) || defined(__i386__)
@@ -131,7 +132,7 @@ static bool probe_rotational_under(const char *block_root, dev_t dev,
 {
     char link[HW_PROFILE_ROOT_MAX + 32];
     snprintf(link, sizeof(link), "%s/%u:%u", block_root,
-             (unsigned)major(dev), (unsigned)minor(dev));
+             platform_device_major(dev), platform_device_minor(dev));
 
     char resolved[PATH_MAX];
     if (!realpath(link, resolved)) return false;

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
 # tools/scripts/build_vendor.sh — produce every vendor/lib/*.a from source.
 #
 # Goal: `git clone && make vendor && make zclassic23` LINKS in one shot.
@@ -73,6 +74,10 @@ LEVELDB_VER="1.23"                            # C API (leveldb/c.h) compatible w
 LEVELDB_URL="https://github.com/google/leveldb/archive/refs/tags/${LEVELDB_VER}.tar.gz"
 LEVELDB_SHA="9a37f8a6174f09bd622bc723b55881dc541cd50747cbd08831c2a82d620f6d76"
 
+SECP_VER="0.8.0"
+SECP_URL="https://github.com/bitcoin-core/secp256k1/archive/refs/tags/v${SECP_VER}.tar.gz"
+SECP_SHA="eb52b0e9239dff7dc26be5f9623567141b8720ec47da29eb3c1e0a660d17c8bb"
+
 ZLIB_VER="1.3.1"                              # 1.3 line, clean of CVE-2022-37434
 ZLIB_URL="https://github.com/madler/zlib/releases/download/v${ZLIB_VER}/zlib-${ZLIB_VER}.tar.gz"
 ZLIB_SHA="9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23"
@@ -94,7 +99,8 @@ RECIPE_SQLITE="sqlite-r2"
 RECIPE_ZLIB="zlib-r2"
 RECIPE_OPENSSL="openssl-r4"
 RECIPE_LIBEVENT="libevent-r5"
-RECIPE_LEVELDB="leveldb-r6"
+RECIPE_LEVELDB="leveldb-r7"
+RECIPE_SECP_NATIVE="secp-native-r1"
 
 # --- logging (to stderr; stdout is reserved for fetch() to echo a path) -----
 say()  { printf '\033[36m[vendor]\033[0m %s\n' "$*" >&2; }
@@ -154,6 +160,7 @@ archive_group() {
         libcrypto.a|libssl.a) printf 'openssl' ;;
         libevent.a|libevent_openssl.a|libevent_pthreads.a) printf 'libevent' ;;
         libleveldb.a) printf 'leveldb' ;;
+        libsecp256k1-darwin.a) printf 'secp_native' ;;
         *) return 1 ;;
     esac
 }
@@ -166,6 +173,7 @@ recipe_revision() {
         openssl) printf '%s' "$RECIPE_OPENSSL" ;;
         libevent) printf '%s' "$RECIPE_LIBEVENT" ;;
         leveldb) printf '%s' "$RECIPE_LEVELDB" ;;
+        secp_native) printf '%s' "$RECIPE_SECP_NATIVE" ;;
         *) return 1 ;;
     esac
 }
@@ -198,6 +206,10 @@ recipe_source_fields() {
             printf 'version=%s\nsource_url=%s\nsource_sha256=%s\n' \
                 "$LEVELDB_VER" "$LEVELDB_URL" "$LEVELDB_SHA"
             ;;
+        secp_native)
+            printf 'version=%s\nsource_url=%s\nsource_sha256=%s\n' \
+                "$SECP_VER" "$SECP_URL" "$SECP_SHA"
+            ;;
         *) return 1 ;;
     esac
 }
@@ -212,6 +224,7 @@ recipe_flags() {
         libevent) printf '%s' 'apply pinned secure-rng ABI patch; CFLAGS=-O2 -fPIC -Ivendor/include; LDFLAGS=-Lvendor/lib; CPPFLAGS=-Ivendor/include; ./configure --disable-shared --enable-static --disable-samples --disable-libevent-regress; require=evutil_secure_rng_add_bytes' ;;
         leveldb) printf '%s' 'route=direct-cxx11; -std=c++11 -O2 -DNDEBUG -fPIC -fno-exceptions -fno-rtti; LEVELDB_PLATFORM_POSIX=1; crc32c=off; snappy=off'
             ;;
+        secp_native) printf '%s' 'cmake static; recovery=on; ecdh=on; tests=off; benchmarks=off; examples=off' ;;
         *) return 1 ;;
     esac
 }
@@ -229,6 +242,10 @@ make=$(vp_tool_identity_sha make)"
         libevent|zlib)
             identities="$identities
 make=$(vp_tool_identity_sha make)"
+            ;;
+        secp_native)
+            identities="$identities
+cmake=$(vp_tool_identity_sha cmake)"
             ;;
         leveldb)
             cxx="$(leveldb_cxx_compiler)"
@@ -455,7 +472,7 @@ build_libevent() {     # FETCHED: libevent -> libevent.a + libevent_openssl.a + 
     fi
     nm -g --defined-only "$d/.libs/libevent.a" >"$symbols" 2>/dev/null ||
         die "could not inspect rebuilt libevent.a"
-    grep -qE ' [Tt] evutil_secure_rng_add_bytes$' "$symbols" ||
+    grep -qE ' [Tt] _?evutil_secure_rng_add_bytes$' "$symbols" ||
         die "libevent.a lacks Tor-required evutil_secure_rng_add_bytes"
     install_archive "$d/.libs/libevent.a" libevent.a
     install_archive "$d/.libs/libevent_openssl.a" libevent_openssl.a
@@ -536,10 +553,11 @@ build_leveldb_direct() {
     cat > "$gen/port_config.h" <<'EOF'
 #ifndef STORAGE_LEVELDB_PORT_PORT_CONFIG_H_
 #define STORAGE_LEVELDB_PORT_PORT_CONFIG_H_
-#ifndef HAVE_FDATASYNC
+#if defined(__APPLE__)
+#define HAVE_FDATASYNC 0
+#define HAVE_FULLFSYNC 1
+#else
 #define HAVE_FDATASYNC 1
-#endif
-#ifndef HAVE_FULLFSYNC
 #define HAVE_FULLFSYNC 0
 #endif
 #ifndef HAVE_O_CLOEXEC
@@ -589,6 +607,36 @@ build_leveldb() {      # FETCHED: LevelDB -> libleveldb.a
     ok "built   libleveldb.a"
 }
 
+build_secp_native() {
+    [[ "$(uname -s 2>/dev/null)" == Darwin ]] ||
+        die "libsecp256k1-darwin.a requires Darwin"
+    have libsecp256k1-darwin.a && {
+        say "skip    libsecp256k1-darwin.a (provenance current)"; return;
+    }
+    need cmake
+    say "build   libsecp256k1-darwin.a  (secp256k1 ${SECP_VER})"
+    invalidate_stamps libsecp256k1-darwin.a
+    local tb d
+    tb="$(fetch "$SECP_URL" "$SECP_SHA" "secp256k1-${SECP_VER}.tar.gz")"
+    d="$WORK/secp256k1-${SECP_VER}"
+    rm -rf "$d" "$WORK/secp-native-build"
+    tar -C "$WORK" -xzf "$tb"
+    cmake -S "$d" -B "$WORK/secp-native-build" \
+        -DCMAKE_C_COMPILER="$VENDOR_CC" -DCMAKE_AR="$VENDOR_AR" \
+        -DBUILD_SHARED_LIBS=OFF \
+        -DSECP256K1_ENABLE_MODULE_RECOVERY=ON \
+        -DSECP256K1_ENABLE_MODULE_ECDH=ON \
+        -DSECP256K1_BUILD_TESTS=OFF \
+        -DSECP256K1_BUILD_EXHAUSTIVE_TESTS=OFF \
+        -DSECP256K1_BUILD_BENCHMARK=OFF \
+        -DSECP256K1_BUILD_EXAMPLES=OFF >/dev/null
+    cmake --build "$WORK/secp-native-build" -j"$JOBS" >/dev/null
+    install_archive "$WORK/secp-native-build/lib/libsecp256k1.a" \
+        libsecp256k1-darwin.a
+    stamp_archives libsecp256k1-darwin.a
+    ok "built   libsecp256k1-darwin.a"
+}
+
 # --- orchestration ----------------------------------------------------------
 need "$VENDOR_CC"; need "$VENDOR_AR"; need sha256sum; need tar; need make
 mkdir -p "$LIB" "$INC" "$WORK"
@@ -597,6 +645,9 @@ acquire_vendor_lock
 REQUIRED=(libsecp256k1.a libcrypto.a libssl.a libevent.a libevent_openssl.a
           libevent_pthreads.a libleveldb.a libsqlite3.a libz.a
           libtor_stub.a)
+if [[ "$(uname -s 2>/dev/null)" == Darwin ]]; then
+    REQUIRED+=(libsecp256k1-darwin.a)
+fi
 
 check_one_provenance() {
     local archive="$1" descriptor
@@ -638,6 +689,9 @@ fi
 
 # Build order: openssl before libevent (libevent_openssl needs its headers).
 ALL=(build_tor_stub build_zlib build_sqlite build_openssl build_libevent build_leveldb)
+if [[ "$(uname -s 2>/dev/null)" == Darwin ]]; then
+    ALL+=(build_secp_native)
+fi
 
 # Map .a names -> builder for the subset form.
 declare -A BUILDER=(
@@ -647,6 +701,7 @@ declare -A BUILDER=(
     [libcrypto.a]=build_openssl [libssl.a]=build_openssl
     [libevent.a]=build_libevent [libevent_openssl.a]=build_libevent [libevent_pthreads.a]=build_libevent
     [libleveldb.a]=build_leveldb
+    [libsecp256k1-darwin.a]=build_secp_native
 )
 
 if [[ $# -gt 0 ]]; then

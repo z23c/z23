@@ -163,18 +163,16 @@ void sapling_tree_rebuild_raise_fail_blocker(
     char reason[BLOCKER_REASON_MAX];
     if (body_gap)
         snprintf(reason, sizeof(reason),
-                "sapling_tree_rebuild fail-closed reason=%s height=%d "
+                "sapling rebuild blocked: reason=%.40s height=%d "
                 "commitments=%d mismatches=%d body_gap=%d span=[%d..%d] "
-                "classes=%s: bodies absent below this height, so no rebuild "
-                "from local bodies can match; seed anchor_kv or backfill "
-                "bodies",
+                "classes=%.40s; seed anchor_kv or backfill bodies",
                 fail_reason ? fail_reason : "unknown", fail_height,
                 total_commitments, mismatches, skips->total,
                 skips->first_height, skips->last_height,
                 skips->classes[0] ? skips->classes : "unknown");
     else
         snprintf(reason, sizeof(reason),
-                "sapling_tree_rebuild fail-closed reason=%s height=%d "
+                "sapling_tree_rebuild fail-closed reason=%.120s height=%d "
                 "commitments=%d mismatches=%d",
                 fail_reason ? fail_reason : "unknown", fail_height,
                 total_commitments, mismatches);
@@ -302,4 +300,3 @@ bool sapling_rebuild_anchor_seed(const struct active_chain *chain,
     *height_out = h;
     return true;
 }
-

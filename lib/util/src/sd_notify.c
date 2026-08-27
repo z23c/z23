@@ -9,6 +9,7 @@
 #include "util/log_macros.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stddef.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -74,11 +75,21 @@ static bool sd_send(const char *msg)
     if (!atomic_load(&g_active) || !msg || !msg[0])
         return false;
 
-    int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    int fd = socket(AF_UNIX, SOCK_DGRAM
+#if defined(SOCK_CLOEXEC)
+                    | SOCK_CLOEXEC
+#endif
+                    , 0);
     if (fd < 0) {
         LOG_WARN("sd_notify", "socket failed: %s", strerror(errno));
         return false;
     }
+#if !defined(SOCK_CLOEXEC)
+    if (fcntl(fd, F_SETFD, FD_CLOEXEC) != 0) {
+        (void)close(fd);
+        return false;
+    }
+#endif
 
     struct sockaddr_un sa;
     memset(&sa, 0, sizeof(sa));
@@ -91,7 +102,12 @@ static bool sd_send(const char *msg)
     socklen_t sa_len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) +
                                     g_socket_path_len);
 
-    ssize_t rc = sendto(fd, msg, strlen(msg), MSG_NOSIGNAL,
+    ssize_t rc = sendto(fd, msg, strlen(msg),
+#if defined(MSG_NOSIGNAL)
+                        MSG_NOSIGNAL,
+#else
+                        0,
+#endif
                         (struct sockaddr *)&sa, sa_len);
     close(fd);
     if (rc < 0) {

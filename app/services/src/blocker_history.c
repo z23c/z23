@@ -161,7 +161,9 @@ static bool bh_parse_payload(const void *payload, size_t len,
                              int64_t *ts_out, char *id_out, size_t id_cap,
                              char *reason_out, size_t reason_cap)
 {
-    if (!payload || len == 0) return false;
+    if (!payload || len == 0 || !ts_out || !id_out || id_cap == 0 ||
+        !reason_out || reason_cap == 0)
+        return false;
 
     char buf[BLOCKER_HISTORY_BRIDGE_BUF];
     size_t n = len < sizeof(buf) - 1 ? len : sizeof(buf) - 1;
@@ -179,7 +181,11 @@ static bool bh_parse_payload(const void *payload, size_t len,
         }
     }
     *ts_out = ts;
-    snprintf(reason_out, reason_cap, "%s", body);
+    size_t reason_len = strlen(body);
+    if (reason_len >= reason_cap)
+        reason_len = reason_cap - 1;
+    memcpy(reason_out, body, reason_len);
+    reason_out[reason_len] = '\0';
 
     if (bh_token_after(body, "blocker=",   id_out, id_cap)) return true;
     if (bh_token_after(body, "check=",     id_out, id_cap)) return true;

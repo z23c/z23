@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
 # Fail closed unless the shipped node has only the glibc runtime family as a
 # dynamic dependency. Before glibc 2.34, pthread and dl are separate DSOs;
 # newer glibc merges them into libc. Every project/third-party dependency must
@@ -8,6 +9,46 @@ set -euo pipefail
 
 bin="${1:-build/bin/zclassic23}"
 test -x "$bin" || { echo "c23-node: missing executable: $bin" >&2; exit 1; }
+
+if [[ "$(uname -s 2>/dev/null)" == Darwin ]]; then
+    command -v otool >/dev/null 2>&1 || {
+        echo "c23-node: otool is required for the Mach-O dependency audit" >&2
+        exit 1
+    }
+    command -v nm >/dev/null 2>&1 || {
+        echo "c23-node: nm is required for the Mach-O symbol audit" >&2
+        exit 1
+    }
+
+    bad=0
+    while IFS= read -r dep; do
+        case "$dep" in
+            /usr/lib/*|/System/Library/Frameworks/*) ;;
+            *) echo "c23-node: forbidden dynamic dependency: $dep" >&2; bad=1 ;;
+        esac
+    done < <(otool -L "$bin" | tail -n +2 | sed 's/^[[:space:]]*//; s/[[:space:]].*$//')
+
+    allowed_weak='^_(dynhost_client_fetch|dynhost_get_global_service|dynhost_stream_close|dynhost_stream_open|dynhost_stream_write|ed25519_secret_key_from_seed|hs_parse_address|hs_service_add_ephemeral|hs_service_find|smartlist_add|smartlist_free_|smartlist_new|tor_free_|tor_malloc_zero_)$'
+    while IFS= read -r symbol; do
+        if ! grep -Eq "$allowed_weak" <<<"$symbol"; then
+            echo "c23-node: forbidden dynamically looked-up symbol: $symbol" >&2
+            bad=1
+        fi
+    done < <(nm -m "$bin" 2>/dev/null |
+        sed -n 's/.*(undefined) weak external \([^ ]*\) (dynamically looked up).*/\1/p')
+
+    if nm -u "$bin" 2>/dev/null | grep -E \
+            '(__gxx_personality_v0|__cxa_(throw|rethrow|begin_catch|end_catch|allocate_exception|free_exception|pure_virtual|guard_)|__Z(nw|dl|da|na))' \
+            >/dev/null; then
+        echo "c23-node: C++ runtime symbol found in node executable" >&2
+        bad=1
+    fi
+
+    test "$bad" -eq 0 || exit 1
+    echo "c23-node: PASS (C23 sources; pinned static project dependencies; Apple system runtimes only)"
+    exit 0
+fi
+
 command -v readelf >/dev/null 2>&1 || {
     echo "c23-node: readelf is required for the release dependency audit" >&2
     exit 1

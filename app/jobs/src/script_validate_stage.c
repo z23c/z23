@@ -287,9 +287,8 @@ static job_result_t sv_hold_unresolved(struct stage_step_ctx *c, int height,
     }
     char reason[BLOCKER_REASON_MAX];
     snprintf(reason, sizeof(reason),
-             "script_validate height=%d %s held %llds: prevout could not be "
-             "re-derived from the body (creating coin missing or utxo_apply "
-             "irreducibly behind)%s",
+             "script_validate height=%d reason=%.80s held=%llds; prevout "
+             "not derivable from body%.60s",
              height, s->reason[0] ? s->reason : "prevout_unresolved",
              (long long)elapsed, cause);
     if (!blocker_init(&c->blocker, "script_validate.prevout_unresolved",

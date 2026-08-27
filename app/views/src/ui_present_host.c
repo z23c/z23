@@ -35,12 +35,12 @@
 #define UI_HOST_IDLE_EXIT_US (10LL * 60LL * 1000000LL)
 #define UI_HOST_SESSIONS_MAX 16u
 
+#if defined(__linux__)
 static struct zcl_result ui_host_error(const char *where)
 {
     return ZCL_ERR(-errno, "%s: %s", where, strerror(errno));
 }
 
-#if defined(__linux__)
 static struct zcl_result ui_host_launch(void)
 {
     char executable[PATH_MAX];

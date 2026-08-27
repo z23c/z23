@@ -515,7 +515,12 @@ static bool emit_file_cb(const char *relpath, const struct stat *st, void *user)
         return false;
     }
     char full[CI_PATH_MAX];
-    (void)snprintf(full, sizeof(full), "%s/%s", sc->ci->root, relpath);
+    int path_len = snprintf(full, sizeof(full), "%s/%s", sc->ci->root,
+                            relpath);
+    if (path_len <= 0 || (size_t)path_len >= sizeof(full)) {
+        sc->report.files_unreadable++;
+        return true;
+    }
     int fd = open(full, O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
         sc->report.files_unreadable++;

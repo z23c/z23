@@ -49,7 +49,7 @@ void tx_confirm_stats_setup(struct tx_confirm_stats *s,
     s->buckets = zcl_calloc(s->num_buckets, sizeof(double), "fee_buckets");
     for (size_t i = 0; i < num_defaults; i++)
         s->buckets[i] = default_buckets[i];
-    s->buckets[num_defaults] = INFINITY;
+    s->buckets[num_defaults] = HUGE_VAL;
 
     s->tx_ct_avg = zcl_calloc(s->num_buckets, sizeof(double), "fee_tx_ct_avg");
     s->cur_block_tx_ct = zcl_calloc(s->num_buckets, sizeof(int), "fee_block_tx_ct");

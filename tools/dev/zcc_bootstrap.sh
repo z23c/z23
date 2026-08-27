@@ -44,9 +44,13 @@ fi
 
 # Build with a bare compiler: the cache cannot be used to build itself.
 BOOTSTRAP_CC="${ZCL_BOOTSTRAP_CC:-cc}"
+BOOTSTRAP_FLAGS=(-std=c23 -O2 -D_POSIX_C_SOURCE=200809L)
+if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    BOOTSTRAP_FLAGS+=(-D_DARWIN_C_SOURCE -Dst_mtim=st_mtimespec)
+fi
 mkdir -p "$(dirname "$BIN")" 2>/dev/null || exit 0
 tmp="$BIN.build.$$"
-if "$BOOTSTRAP_CC" -std=c23 -O2 -D_POSIX_C_SOURCE=200809L \
+if "$BOOTSTRAP_CC" "${BOOTSTRAP_FLAGS[@]}" \
         -I"$REPO_ROOT/lib/sha3/include" -I"$REPO_ROOT/lib/base/include" \
         -o "$tmp" "$SRC" "$SHA3" "$ALLOC" >/dev/null 2>&1; then
     mv -f "$tmp" "$BIN" 2>/dev/null && printf '%s\n' "$BIN"

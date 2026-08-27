@@ -64,8 +64,13 @@ static bool show_one(const char *datadir, enum metaverse_kind kind,
 
     struct zcl_result r = property_catalog_show(datadir, &id, view);
     if (!r.ok) {
-        if (why && why_cap)
-            snprintf(why, why_cap, "%s", r.message);
+        if (why && why_cap) {
+            size_t message_len = strlen(r.message);
+            if (message_len >= why_cap)
+                message_len = why_cap - 1;
+            memcpy(why, r.message, message_len);
+            why[message_len] = '\0';
+        }
         return false; /* raw-return-ok:caller receives the named open error */
     }
     return true;
@@ -151,8 +156,8 @@ static bool resolve(void *ctx, const struct mvap_request *req,
            view.has_content_root ? view.content_root : view.immutable_root,
            32);
     snprintf(out->detail, sizeof(out->detail),
-             "authority=%s status=%s evidence=%s settlement=%s revision=%llu "
-             "owner=%s",
+             "authority=%.12s status=%.12s evidence=%.12s settlement=%.12s "
+             "revision=%llu owner=%.20s",
              view.authority_source ? view.authority_source : "unknown",
              metaverse_property_status_name(view.status),
              metaverse_evidence_name(view.evidence),

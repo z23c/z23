@@ -259,7 +259,7 @@ static void pkgl_step_fail(struct package_lifecycle_step *step,
     if (!step)
         return;
     (void)snprintf(step->rule, sizeof(step->rule), "%s", rule);
-    (void)snprintf(step->detail, sizeof(step->detail), "%s", detail);
+    (void)snprintf(step->detail, sizeof(step->detail), "%.191s", detail);
 }
 
 /* ── build + install one root ───────────────────────────────────────── */
@@ -485,7 +485,13 @@ struct zcl_result pkgl_build_and_install(
         ZCL_IGNORE_RESULT(pkgl_rm_rf(p.stage), "aborted install removed");
         return ZCL_ERR(-1, "cannot compute the build receipt id");
     }
-    (void)snprintf(dst, sizeof(dst), "%s/build-report", p.stage);
+    int dst_len = snprintf(dst, sizeof(dst), "%s/build-report", p.stage);
+    if (dst_len <= 0 || (size_t)dst_len >= sizeof(dst)) {
+        free(rwire);
+        pkgl_step_fail(step, "receipt-store", "build report path is too long");
+        ZCL_IGNORE_RESULT(pkgl_rm_rf(p.stage), "aborted install removed");
+        return ZCL_ERR(-1, "build report path is too long");
+    }
     struct zcl_result sw = pkgl_write_atomic(dst, rwire, rwire_len);
     if (sw.ok) {
         char id_hex[65];

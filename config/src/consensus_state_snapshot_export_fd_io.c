@@ -5,6 +5,7 @@
 #define _GNU_SOURCE
 
 #include "consensus_state_snapshot_export_internal.h"
+#include "platform/file_sync.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -93,7 +94,7 @@ static int output_file_sync(sqlite3_file *file, int flags)
     int rc;
     do {
         rc = (flags & SQLITE_SYNC_DATAONLY) != 0
-            ? fdatasync(out->fd) : fsync(out->fd);
+            ? platform_data_sync(out->fd) : fsync(out->fd);
     } while (rc != 0 && errno == EINTR);
     return rc == 0 ? SQLITE_OK : SQLITE_IOERR_FSYNC;
 }

@@ -15,7 +15,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(__linux__)
 #include <sys/random.h>
+#endif
 #include <unistd.h>
 
 /* ── Real-syscall implementation ─────────────────────────────────── */
@@ -23,6 +25,7 @@
 /* /dev/urandom fallback for the unlikely case getrandom(2) is not
  * available (very old kernel or sandbox without the syscall). Opens
  * lazily on first failure, then cached. */
+#if !defined(__APPLE__)
 static _Atomic int g_urandom_fd = -1;
 
 static bool fallback_urandom_fill(uint8_t *out, size_t len)
@@ -63,12 +66,17 @@ static bool fallback_urandom_fill(uint8_t *out, size_t len)
     }
     return true;
 }
+#endif
 
 static bool real_fill(void *self, uint8_t *out, size_t len)
 {
     (void)self;
     if (!out || len == 0) return true;
 
+#if defined(__APPLE__)
+    arc4random_buf(out, len);
+    return true;
+#else
     size_t got = 0;
     while (got < len) {
         ssize_t r = getrandom(out + got, len - got, 0);
@@ -94,6 +102,7 @@ static bool real_fill(void *self, uint8_t *out, size_t len)
         got += (size_t)r;
     }
     return true;
+#endif
 }
 
 static const rng_iface_t g_real_iface = {

@@ -8,6 +8,8 @@
 #define _GNU_SOURCE  /* pthread_timedjoin_np */
 #define _DEFAULT_SOURCE
 #include "platform/time_compat.h"
+#include "platform/thread_compat.h"
+#include "base/compiler.h"
 #include "net/tor_integration.h"
 #include "net/tor_request_state.h"
 #include "net/net.h"      /* net_set_onion_ingress_port() */
@@ -92,7 +94,7 @@ static void tor_join_thread_bounded(pthread_t thread,
     int rc;
 
     tor_join_deadline_from_now(&deadline, timeout_sec);
-    rc = pthread_timedjoin_np(thread, NULL, &deadline);
+    rc = platform_thread_join_until(thread, NULL, &deadline);
     if (rc == 0)
         return;
 
@@ -203,30 +205,30 @@ struct dynhost_service_head_compat {
     void *hs_service;
 };
 
-extern void *dynhost_get_global_service(void) __attribute__((weak));
+extern void *dynhost_get_global_service(void) ZCL_WEAK_IMPORT;
 /* Tor names the real symbol tor_malloc_zero_ (tor_malloc_zero is a macro
  * over it); the weak extern must use the underscored name or it resolves
  * NULL against libtor.a and reads as "stub build". */
-extern void *tor_malloc_zero_(size_t n) __attribute__((weak));
-extern void tor_free_(void *ptr) __attribute__((weak));
-extern tor_smartlist_t *smartlist_new(void) __attribute__((weak));
-extern void smartlist_free_(tor_smartlist_t *sl) __attribute__((weak));
+extern void *tor_malloc_zero_(size_t n) ZCL_WEAK_IMPORT;
+extern void tor_free_(void *ptr) ZCL_WEAK_IMPORT;
+extern tor_smartlist_t *smartlist_new(void) ZCL_WEAK_IMPORT;
+extern void smartlist_free_(tor_smartlist_t *sl) ZCL_WEAK_IMPORT;
 extern void smartlist_add(tor_smartlist_t *sl, void *element)
-    __attribute__((weak));
+    ZCL_WEAK_IMPORT;
 extern int ed25519_secret_key_from_seed(tor_ed25519_secret_key_t *out,
                                         const uint8_t *seed)
-    __attribute__((weak));
+    ZCL_WEAK_IMPORT;
 extern int hs_service_add_ephemeral(tor_ed25519_secret_key_t *sk,
     tor_smartlist_t *ports, int max_streams_per_rdv_circuit,
     int max_streams_close_circuit, int pow_defenses_enabled,
     uint32_t pow_queue_rate, uint32_t pow_queue_burst,
     tor_smartlist_t *auth_clients_v3, char **address_out)
-    __attribute__((weak));
+    ZCL_WEAK_IMPORT;
 extern int hs_parse_address(const char *address,
     tor_ed25519_public_key_t *key_out, uint8_t *checksum_out,
-    uint8_t *version_out) __attribute__((weak));
+    uint8_t *version_out) ZCL_WEAK_IMPORT;
 extern void *hs_service_find(const tor_ed25519_public_key_t *identity_pk)
-    __attribute__((weak));
+    ZCL_WEAK_IMPORT;
 
 /* True when every Tor/dynhost symbol the install path needs is linked. */
 static bool tor_persist_symbols_available(void)
@@ -664,8 +666,14 @@ bool tor_integration_start(const char *datadir, uint16_t p2p_port)
     if (atomic_load(&g_onion_rotate)) {
         char old[128];
         if (onion_identity_rotate(datadir, old, sizeof(old))) {
-            snprintf(g_rotated_old_address, sizeof(g_rotated_old_address),
-                     "%s.onion", old);
+            size_t old_len = strlen(old);
+            if (old_len + sizeof(".onion") > sizeof(g_rotated_old_address)) {
+                LOG_WARN("tor", "rotated onion identity name is invalid");
+                return false;
+            }
+            memcpy(g_rotated_old_address, old, old_len);
+            memcpy(g_rotated_old_address + old_len, ".onion",
+                   sizeof(".onion"));
         } else {
             fprintf(stderr,  // obs-ok:rotation-named-noop
                     "Tor: -onion-rotate found no existing persistent "

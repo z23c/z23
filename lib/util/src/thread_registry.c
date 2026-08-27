@@ -7,6 +7,7 @@
 #define _GNU_SOURCE  /* pthread_timedjoin_np, pthread_setname_np */
 
 #include "platform/time_compat.h"
+#include "platform/thread_compat.h"
 #include "util/thread_registry.h"
 #include "util/safe_alloc.h"
 
@@ -187,7 +188,7 @@ int thread_registry_join_all_except(int timeout_sec,
         platform_time_realtime_timespec(&ts);
         ts.tv_sec += timeout_sec;
 
-        int rc = pthread_timedjoin_np(tid, NULL, &ts);
+        int rc = platform_thread_join_until(tid, NULL, &ts);
         if (rc == 0) {
             pthread_mutex_lock(&g_mu);
             memset(&g_entries[i], 0, sizeof(g_entries[i]));
