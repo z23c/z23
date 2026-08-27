@@ -54,6 +54,7 @@
 #include "chain/chain.h"
 #include "chain/chainparams.h"
 #include "coins/coins_view.h"
+#include "config/boot_snapshot_offer.h"
 #include "core/serialize.h"
 #include "core/uint256.h"
 #include "net/download.h"
@@ -1074,14 +1075,114 @@ static int test_block_swarm_manifest_anchor(void)
     return failures;
 }
 
+/* ══════════ Test 7: the sovereignty gate binds block pieces ══════════ */
+
+/* Private to lib/net/src (msgprocessor_snapshot_internal.h); reached here
+ * by extern prototype, the test_addrman_shutdown_race.c precedent. */
+extern void mp_serve_block_req(struct msg_processor *mp,
+                               struct p2p_node *node, struct byte_stream *s);
+
+/* The snapshot family refuses to advertise or serve while the node is not
+ * snapshot-sovereign (msg_snapshot_serving_allowed()). The block-piece
+ * family — push_block_manifest and mp_serve_block_req — slipped past that
+ * boundary: an assisted node still advertised MSG_BLOCK_MANIFEST and
+ * served MSG_BLOCK_DATA out of its cached manifest. Both doors now sit
+ * behind the same gate, and this test drives them through the real wire
+ * path: the sovereign controls prove the fixture serves, the non-sovereign
+ * refusals leave the queue AND the sticky sent-flag untouched, and the
+ * recovered serves prove the only thing that changed was the trust state. */
+static int test_block_swarm_sovereignty_gate(void)
+{
+    int failures = 0;
+
+    TEST("block swarm loopback: a non-sovereign node neither advertises "
+         "nor serves block pieces, and both recover with the trust state") {
+        const int32_t end_height = 128;             /* 2 pieces of 64 */
+        struct bs_seeder seed;
+
+        ASSERT(!mp_block_swarm_is_active());
+        ASSERT(bs_seeder_build(&seed, end_height, 9u, "sovg"));
+
+        struct p2p_node *a_node = bs_make_peer(&seed.nm, 1);
+        ASSERT(a_node);
+        struct send_segment *sent_a = bs_install_sentinel(a_node);
+
+        /* ── SOVEREIGN CONTROLS: both doors work. ── */
+        boot_snapshot_offer_test_set_trust_override(1);
+
+        push_block_manifest(&seed.mp, a_node);
+        ASSERT(a_node->blk_manifest_sent);
+        ASSERT(bs_queue_depth(sent_a) == 1);       /* the zblkmanfst itself */
+        bs_drop_queue(a_node, sent_a);
+
+        struct byte_stream req;
+        stream_init(&req, 16);
+        stream_write_u32_le(&req, 0);              /* piece 0: h=1..64 */
+        mp_serve_block_req(&seed.mp, a_node, &req);
+        stream_free(&req);
+        ASSERT(bs_queue_depth(sent_a) == 1);       /* zblkdata on the wire */
+        bs_drop_queue(a_node, sent_a);
+
+        /* ── NON-SOVEREIGN: both doors refuse. Nothing may leave the
+         * process: not the manifest frame, not one piece, and the sticky
+         * sent-flag must stay down so a later honest push is not lost. ── */
+        boot_snapshot_offer_test_set_trust_override(0);
+
+        a_node->blk_manifest_sent = false;
+        push_block_manifest(&seed.mp, a_node);
+        ASSERT(!a_node->blk_manifest_sent);
+        ASSERT(bs_queue_depth(sent_a) == 0);
+
+        struct byte_stream req2;
+        stream_init(&req2, 16);
+        stream_write_u32_le(&req2, 0);
+        mp_serve_block_req(&seed.mp, a_node, &req2);
+        stream_free(&req2);
+        ASSERT(bs_queue_depth(sent_a) == 0);
+
+        /* ── RECOVERED: the same fixture serves again the moment the node
+         * is sovereign — the refusal was the trust state, nothing else. ── */
+        boot_snapshot_offer_test_set_trust_override(1);
+
+        struct byte_stream req3;
+        stream_init(&req3, 16);
+        stream_write_u32_le(&req3, 0);
+        mp_serve_block_req(&seed.mp, a_node, &req3);
+        stream_free(&req3);
+        ASSERT(bs_queue_depth(sent_a) == 1);
+        bs_drop_queue(a_node, sent_a);
+
+        boot_snapshot_offer_test_set_trust_override(1);   /* group baseline */
+        send_segment_free(sent_a);
+        a_node->send_head = a_node->send_tail = NULL;
+        p2p_node_free(a_node);
+        bs_seeder_free(&seed);
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
 int test_block_swarm_loopback(void)
 {
     int failures = 0;
+    /* Every test here advertises and serves block pieces from a fixture
+     * that never booted the runtime port, so the live sovereignty
+     * predicate reads "port absent" — not sovereign — and the serving
+     * gates would refuse each push before the scenario under test even
+     * starts. Declare the process sovereign for the group (the same
+     * thing test_net.c and the snapshot serve loopback do around their
+     * serving tests); the one test that exercises the gate itself
+     * (sovereignty_gate) flips the override internally and hands the
+     * baseline back. Cleared once, after the last sub-test. */
+    boot_snapshot_offer_test_set_trust_override(1);
     failures += test_block_swarm_throughput();
     failures += test_block_swarm_disconnect_requeue();
     failures += test_block_swarm_stall_reap();
     failures += test_block_swarm_integrity_abandon();
     failures += test_block_swarm_duplicate_delivery();
     failures += test_block_swarm_manifest_anchor();
+    failures += test_block_swarm_sovereignty_gate();
+    boot_snapshot_offer_test_set_trust_override(-1);
     return failures;
 }

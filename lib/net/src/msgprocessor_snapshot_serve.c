@@ -546,6 +546,15 @@ static bool msg_processor_copy_block_manifest(struct block_piece_manifest *out,
         LOG_FAIL("net", "block manifest copy output pointer is NULL");
     memset(out, 0, sizeof(*out));
 
+    /* Same trust boundary as the snapshot-family copies above: an
+     * assisted node must not hand out block-piece data either. This is
+     * the advertise-side accessor (push_block_manifest is its only
+     * caller); the node's own manifest refresh reads the UNGATED
+     * msg_processor_get_block_manifest_header — a cache view, not a
+     * serving read. */
+    if (!msg_snapshot_serving_allowed())
+        return false;
+
     pthread_mutex_lock(&g_block_manifest_mutex);
     bool ok = atomic_load(&g_cached_block_manifest_valid) &&
               g_cached_block_manifest.piece_hashes &&
@@ -970,8 +979,12 @@ void mp_serve_block_req(struct msg_processor *mp, struct p2p_node *node,
     uint64_t pow_nonce = 0;
     bool have_pow_nonce = stream_remaining(s) >= 8 &&
                           stream_read_u64_le(s, &pow_nonce);
-    if (!msg_processor_get_block_manifest_header(&bm, NULL)) {
-        printf("Peer %s: zblkreq but no block manifest\n",
+    if (!msg_snapshot_serving_allowed() ||
+        !msg_processor_get_block_manifest_header(&bm, NULL)) {
+        /* First disjunct: the same gate mp_serve_chunk_req applies. An
+         * assisted node does not serve block pieces, whatever its cache
+         * holds — the refusal must not wait for the manifest to lapse. */
+        printf("Peer %s: zblkreq but no servable block manifest\n",
                node->addr_name);
     } else if (piece_index >= bm.num_pieces) {
         printf("Peer %s: zblkreq %u out of range (%u)\n",
