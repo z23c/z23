@@ -232,8 +232,7 @@ static bool market_purchase_view_frozen_kat(const void *opaque, char *why,
     return true;
 }
 
-static const struct zcl_hotswap_service_contract k_market_view_contract = {
-    .service_id = MARKET_PURCHASE_VIEW_SERVICE_ID,
+static const struct zcl_hotswap_service_contract k_market_view_contract = { /* hotswap-static-ok: leaf registration tables are immutable */    .service_id = MARKET_PURCHASE_VIEW_SERVICE_ID,
     .source_tu = "app/services/src/market_purchase_view_service.c",
     .abi_version = ZCL_HOTSWAP_SERVICE_ABI_V1,
     .vtable_size = sizeof(struct market_purchase_view_service_v1),

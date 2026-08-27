@@ -3,6 +3,7 @@
 #define _GNU_SOURCE
 #include "config/consensus_state_snapshot_export.h"
 #include "config/consensus_state_bundle_validate.h"
+#include "platform/fd_path.h"
 #include "consensus_state_snapshot_export_internal.h"
 #include "storage/consensus_db.h"    /* CONSENSUS_DB_FILENAME + legacy name */
 #include "storage/progress_store.h"
@@ -124,11 +125,11 @@ static bool output_sidecars_absent(
 static bool output_link_fd(int source_fd, int destination_dirfd,
                            const char *destination_name)
 {
-    char source[64];
-    int n = snprintf(source, sizeof(source), "/proc/self/fd/%d", source_fd);
-    return n > 0 && (size_t)n < sizeof(source) &&
-        linkat(AT_FDCWD, source, destination_dirfd, destination_name,
-               AT_SYMLINK_FOLLOW) == 0;
+    char source[PATH_MAX];
+    if (!platform_fd_path(source, sizeof(source), source_fd, NULL))
+        return false;
+    return linkat(AT_FDCWD, source, destination_dirfd, destination_name,
+                  AT_SYMLINK_FOLLOW) == 0;
 }
 
 static sqlite3_vfs *output_vfs_base(sqlite3_vfs *vfs)

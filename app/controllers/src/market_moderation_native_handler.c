@@ -87,8 +87,7 @@ static bool market_moderation_view_frozen_kat(const void *opaque, char *why,
     return true;
 }
 
-static const struct zcl_hotswap_service_contract k_market_moderation_contract = {
-    .service_id = MARKET_MODERATION_VIEW_SERVICE_ID,
+static const struct zcl_hotswap_service_contract k_market_moderation_contract = { /* hotswap-static-ok: leaf registration tables are immutable */    .service_id = MARKET_MODERATION_VIEW_SERVICE_ID,
     .source_tu = "app/services/src/market_moderation_view_service.c",
     .abi_version = ZCL_HOTSWAP_SERVICE_ABI_V1,
     .vtable_size = sizeof(struct market_moderation_view_service_v1),

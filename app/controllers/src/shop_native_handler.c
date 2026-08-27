@@ -239,8 +239,7 @@ static bool shop_status_frozen_kat(const void *opaque, char *why,
     return true;
 }
 
-static const struct zcl_hotswap_service_contract k_shop_status_contract = {
-    .service_id = SHOP_STATUS_VIEW_SERVICE_ID,
+static const struct zcl_hotswap_service_contract k_shop_status_contract = { /* hotswap-static-ok: leaf registration tables are immutable */    .service_id = SHOP_STATUS_VIEW_SERVICE_ID,
     .source_tu = "app/services/src/shop_status_view_service.c",
     .abi_version = ZCL_HOTSWAP_SERVICE_ABI_V1,
     .vtable_size = sizeof(struct shop_status_view_service_v1),

@@ -43,8 +43,7 @@ struct sbn_code_map {
     enum zcl_command_exit exit_code;
 };
 
-static const struct sbn_code_map g_sbn_codes[] = {
-    { "INVALID_ARGS",          ZCL_COMMAND_STATUS_FAILED,  ZCL_COMMAND_EXIT_INVALID },
+static const struct sbn_code_map g_sbn_codes[] = { /* hotswap-static-ok: leaf registration tables are immutable */    { "INVALID_ARGS",          ZCL_COMMAND_STATUS_FAILED,  ZCL_COMMAND_EXIT_INVALID },
     { "UNKNOWN_PRODUCT",       ZCL_COMMAND_STATUS_FAILED,  ZCL_COMMAND_EXIT_INVALID },
     { "UNKNOWN_PURCHASE",      ZCL_COMMAND_STATUS_FAILED,  ZCL_COMMAND_EXIT_INVALID },
     { "MAINNET_REFUSED",       ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_DENIED },

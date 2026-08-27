@@ -5,10 +5,12 @@
 #define _GNU_SOURCE
 
 #include "consensus_state_snapshot_export_internal.h"
+#include "platform/fd_path.h"
 #include "platform/file_sync.h"
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <sqlite3.h>
 #include <stdio.h>
 #include <string.h>
@@ -196,10 +198,8 @@ int consensus_export_fd_file_open(sqlite3_file *file, int retained_fd,
         return SQLITE_CANTOPEN;
     out->readonly = (flags & SQLITE_OPEN_READONLY) != 0;
     if (out->readonly) {
-        char source[64];
-        int n = snprintf(source, sizeof(source), "/proc/self/fd/%d",
-                         retained_fd);
-        if (n <= 0 || (size_t)n >= sizeof(source))
+        char source[PATH_MAX];
+        if (!platform_fd_path(source, sizeof(source), retained_fd, NULL))
             return SQLITE_CANTOPEN;
         out->fd = open(source, O_RDONLY | O_CLOEXEC);
     } else {

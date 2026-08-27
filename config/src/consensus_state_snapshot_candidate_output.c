@@ -7,10 +7,12 @@
 #include "consensus_state_snapshot_install_internal.h"
 
 #include "storage/consensus_db.h"    /* CONSENSUS_DB_FILENAME + legacy name */
+#include "platform/fd_path.h"
 #include "util/log_macros.h"
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <sqlite3.h>
 #include <stdio.h>
 #include <string.h>
@@ -187,11 +189,11 @@ bool consensus_state_candidate_output_sqlite_open(
 static bool output_link_fd(int source_fd, int destination_dirfd,
                            const char *destination_name)
 {
-    char source[64];
-    int n = snprintf(source, sizeof(source), "/proc/self/fd/%d", source_fd);
-    return n > 0 && (size_t)n < sizeof(source) &&
-        linkat(AT_FDCWD, source, destination_dirfd, destination_name,
-               AT_SYMLINK_FOLLOW) == 0;
+    char source[PATH_MAX];
+    if (!platform_fd_path(source, sizeof(source), source_fd, NULL))
+        return false;
+    return linkat(AT_FDCWD, source, destination_dirfd, destination_name,
+                  AT_SYMLINK_FOLLOW) == 0;
 }
 
 #ifdef ZCL_TESTING

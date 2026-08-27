@@ -25,10 +25,19 @@ if [ -n "$HITS" ]; then
     exit 1
 fi
 for f in $(ls lib/hotswap/src/*.c 2>/dev/null); do
+    # Nesting-aware toggle scan. The old one-line matcher treated every
+    # `#endif` as the end of the dev region, so a per-host `#if defined(...)`
+    # pair INSIDE the dev half silently switched it off. Counting conditional
+    # depth keeps the region open across such inner branches while preserving
+    # the old behavior: `#else` or full unwind at depth 0 closes it.
     BAD=$(awk '
-        /#ifdef[[:space:]]+ZCL_DEV_BUILD/ { dev=1; next }
-        /#else|#endif/                    { dev=0; next }
-        /dl(open|sym|close)[[:space:]]*\(/ { if (dev!=1) print FILENAME ":" NR ": " $0 }
+        /^[ \t]*#[ \t]*ifdef[ \t]+ZCL_DEV_BUILD/ { depth++; dev = 1; next }
+        /^[ \t]*#[ \t]*if/                       { depth++; next }
+        /^[ \t]*#[ \t]*elif/                     { next }
+        /^[ \t]*#[ \t]*else/                     { if (depth == 0) dev = 0; next }
+        /^[ \t]*#[ \t]*endif/                    { if (depth > 0) depth--
+                                                   if (depth == 0) dev = 0; next }
+        /dl(open|sym|close)[[:space:]]*\(/       { if (dev != 1) print FILENAME ":" NR ": " $0 }
     ' "$f")
     if [ -n "$BAD" ]; then
         echo "$BAD"

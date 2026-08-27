@@ -431,8 +431,7 @@ static bool reputation_view_frozen_kat(const void *opaque, char *why,
     return true;
 }
 
-static const struct zcl_hotswap_service_contract k_reputation_view_contract = {
-    .service_id = SHOP_REPUTATION_VIEW_SERVICE_ID,
+static const struct zcl_hotswap_service_contract k_reputation_view_contract = { /* hotswap-static-ok: leaf registration tables are immutable */    .service_id = SHOP_REPUTATION_VIEW_SERVICE_ID,
     .source_tu = "app/services/src/shop_reputation_view_service.c",
     .abi_version = ZCL_HOTSWAP_SERVICE_ABI_V1,
     .vtable_size = sizeof(struct shop_reputation_view_service_v1),

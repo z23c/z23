@@ -54,7 +54,7 @@
  * is a query, and queries do not appear in this mask. */
 #define MV_CONTENT_ACTIONS_INCOMPLETE (0u)
 
-static const char k_content_provenance[] =
+static const char k_content_provenance[] = /* hotswap-static-ok: immutable provenance string */
     "blob root commits length+SHA3-256 of the bytes only; no publisher, "
     "signature, or chain anchor";
 

@@ -169,6 +169,7 @@ static void topo_probe(int cpu, struct cpu_topo *t)
 
 static bool pin_to_cpu(int cpu)
 {
+#if defined(__linux__)
     cpu_set_t set;
     CPU_ZERO(&set);
     CPU_SET(cpu, &set);
@@ -176,6 +177,11 @@ static bool pin_to_cpu(int cpu)
         return false;
     sched_yield();
     return sched_getcpu() == cpu;
+#else
+    /* No userspace affinity API here; an unpinned run must stay visible. */
+    (void)cpu;
+    return false;
+#endif
 }
 
 /* ── Corpus ──────────────────────────────────────────────────────── */

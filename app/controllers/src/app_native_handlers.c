@@ -270,8 +270,7 @@ ZCL_HOTSWAP_TRAMPOLINE(tramp_swap_chains, zcl_native_swap_chains_body)
 
 ZCL_HOTSWAP_TRAMPOLINE(tramp_swap_list, zcl_native_swap_list_body)
 
-static const struct zcl_hotswap_leaf_replacement k_leaves[] = {
-    { "app.names.list",      tramp_name_list },
+static const struct zcl_hotswap_leaf_replacement k_leaves[] = { /* hotswap-static-ok: leaf registration tables are immutable */    { "app.names.list",      tramp_name_list },
     { "app.names.resolve",   tramp_name_resolve },
     { "app.tokens.list",     tramp_tokens },
     { "app.messaging.inbox", tramp_msg_inbox },
@@ -327,8 +326,7 @@ ZCL_HOTSWAP_TRAMPOLINE(module_tramp_swap_list, zcl_native_swap_list_body)
  * ZSLP tokens, messaging inbox, market listings, swap views) in ONE batch.
  * None of these is consensus-bearing: each renders an index or catalog the
  * node already holds. */
-static const struct zcl_hotswap_leaf k_module_leaves[] = {
-    { "app.names.list",          module_tramp_name_list },
+static const struct zcl_hotswap_leaf k_module_leaves[] = { /* hotswap-static-ok: immutable leaf registration tables */    { "app.names.list",          module_tramp_name_list },
     { "app.names.resolve",       module_tramp_name_resolve },
     { "app.tokens.list",         module_tramp_tokens },
     { "app.messaging.inbox",     module_tramp_msg_inbox },

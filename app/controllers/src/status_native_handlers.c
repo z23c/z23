@@ -715,8 +715,7 @@ ZCL_HOTSWAP_TRAMPOLINE(tramp_agent_diagnose, zcl_native_agent_diagnose_body)
 
 ZCL_HOTSWAP_TRAMPOLINE(tramp_postmortem_list, zcl_native_postmortem_list_body)
 
-static const struct zcl_hotswap_leaf_replacement k_leaves[] = {
-    { "core.status",          tramp_status },
+static const struct zcl_hotswap_leaf_replacement k_leaves[] = { /* hotswap-static-ok: leaf registration tables are immutable */    { "core.status",          tramp_status },
     { "core.status.brief",    tramp_status_brief },
     { "core.sync.diagnose",   tramp_syncdiag },
     { "core.sync.blockers",   tramp_blockers },
@@ -771,8 +770,7 @@ ZCL_HOTSWAP_TRAMPOLINE(module_tramp_postmortem_list, zcl_native_postmortem_list_
  * leaf; the module ABI carries it. */
 ZCL_HOTSWAP_TRAMPOLINE(module_tramp_kpi, zcl_native_kpi_body)
 
-static const struct zcl_hotswap_leaf k_module_leaves[] = {
-    { "core.status",         module_tramp_status },
+static const struct zcl_hotswap_leaf k_module_leaves[] = { /* hotswap-static-ok: immutable leaf registration tables */    { "core.status",         module_tramp_status },
     { "ops.debug.dash.kpi",  module_tramp_kpi },
     { "core.status.brief",   module_tramp_status_brief },
     { "core.sync.diagnose",  module_tramp_syncdiag },

@@ -97,6 +97,9 @@
 #include <dirent.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include "config/cli_lane_defaults.h"
+#include "config/args.h"                /* print_usage (moved to args.c) */
+
 static bool path_join_leaf(char *out, size_t out_size,
                            const char *directory, const char *leaf)
 {
@@ -105,8 +108,6 @@ static bool path_join_leaf(char *out, size_t out_size,
     int written = snprintf(out, out_size, "%s/%s", directory, leaf);
     return written >= 0 && (size_t)written < out_size;
 }
-#include "config/cli_lane_defaults.h"
-#include "config/args.h"                /* print_usage (moved to args.c) */
 
 /* ════════════════════════════════════════════════════════════════
  *  BENCH MODE — canonical user benchmark entry points

@@ -43,8 +43,8 @@ struct mv_action_row {
       .requires_plan_commit = (pl_) != 0,                                     \
       .requires_receipt = (rc_) != 0 },
 
-static const struct mv_action_row k_actions[] = {
-    METAVERSE_ACTION_TABLE(MV_ACTION_ROW)
+static const struct mv_action_row k_actions[] = { /* hotswap-static-ok: leaf registration tables are immutable */
+METAVERSE_ACTION_TABLE(MV_ACTION_ROW)
 };
 #undef MV_ACTION_ROW
 
@@ -68,8 +68,8 @@ struct mv_query_row {
     { .bit = (uint32_t)METAVERSE_QUERY_##id_, .name = (name_),                \
       .wire = (wire_), .allows_zero_property_id = (z0_) != 0 },
 
-static const struct mv_query_row k_queries[] = {
-    METAVERSE_QUERY_TABLE(MV_QUERY_ROW)
+static const struct mv_query_row k_queries[] = { /* hotswap-static-ok: immutable leaf registration tables */
+METAVERSE_QUERY_TABLE(MV_QUERY_ROW)
 };
 #undef MV_QUERY_ROW
 
@@ -77,7 +77,7 @@ _Static_assert(sizeof(k_queries) / sizeof(k_queries[0]) ==
                    (size_t)METAVERSE_QUERY_COUNT,
                "the query row table and METAVERSE_QUERY_COUNT disagree");
 
-static const struct metaverse_wire_golden k_golden[] = {
+static const struct metaverse_wire_golden k_golden[] = { /* hotswap-static-ok: immutable leaf registration tables */
 #define MV_GOLDEN_ROW(wire_, v1_, isq_, canon_)                               \
     { .wire = (wire_), .v1_name = (v1_), .is_query = (isq_) != 0,             \
       .canonical_name = (canon_) },

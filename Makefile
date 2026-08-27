@@ -127,6 +127,21 @@ ZCL_PORTABLE_FRONTDOOR_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip \
 # the pre-boundary parse may already have memoized a record that cannot see
 # the inputs this boundary establishes.
 NODE_SECP_ARCHIVE = $(if $(filter Darwin,$(ZCL_HOST_OS)),vendor/lib/libsecp256k1-darwin.a,vendor/lib/libsecp256k1.a)
+ZCL_GC_SECTIONS_LDFLAG = -Wl,--gc-sections
+ifeq ($(ZCL_HOST_OS),Darwin)
+# Apple ld has no --gc-sections; -dead_strip is its equivalent.
+ZCL_GC_SECTIONS_LDFLAG = -Wl,-dead_strip
+endif
+# Static linking of the whole executable is a GNU-ld capability; Apple's
+# cannot link libSystem statically, so the pilots build normally there.
+ZCL_STATIC_FLAG = -static
+ifeq ($(ZCL_HOST_OS),Darwin)
+ZCL_STATIC_FLAG =
+endif
+ZCL_STRIP_ALL = -s
+ifeq ($(ZCL_HOST_OS),Darwin)
+ZCL_STRIP_ALL = -S -x
+endif
 NODE_VENDOR_ARCHIVES = $(notdir $(NODE_SECP_ARCHIVE)) libcrypto.a libssl.a libevent.a \
 	libevent_openssl.a libevent_pthreads.a libsqlite3.a libz.a libtor_stub.a
 # A focused `make z23` (or legacy `make zclassic23`) needs no C++ toolchain.
@@ -2411,7 +2426,7 @@ $(ZCODE_PACKAGE_BASE_TEST_BIN): lib/base/tests/test_base.c \
 		lib/base/src/safe_alloc.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O3 -flto -Wall -Wextra -Werror -pedantic \
-	    -D_POSIX_C_SOURCE=200809L -Ilib/base/include -o $@ $^
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -Ilib/base/include -o $@ $^
 
 zcode-package-sha3-test: $(ZCODE_PACKAGE_SHA3_TEST_BIN)
 	@$(ZCODE_PACKAGE_SHA3_TEST_BIN)
@@ -2508,7 +2523,7 @@ $(BIN_DIR)/zclassic23-package-sign: FORCE tools/zcode_dev_signer.c lib/base/src/
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -Ilib/base/include -Ivendor/include -o $@ $(filter-out FORCE,$^) \
-	    -Lvendor/lib -l:libsecp256k1.a -lpthread -lm
+	    -Lvendor/lib $(NODE_SECP_ARCHIVE) -lpthread -lm
 
 # Run a gate and leave a receipt. The wrapper is transparent — same output,
 # same exit status — so this is a drop-in for the bare command:
@@ -3503,17 +3518,6 @@ hotswap-module-so: $(VIEW_GEN_HEADERS) $(HOTSWAP_ACTION_PLAN)
 # row whose TU emits no module symbol, or whose leaf body lives in a TU outside
 # its island, passed every gate and failed the first time a human tried it.
 # This is the gate that can see that. Needs no node and no datadir.
-
-.PHONY: hotswap-symbols
-# make hotswap-symbols [FILE=<module.so>]
-# Will a built module actually MOUNT? Resolves every strong undefined symbol
-# in the SHIPPED artifact against the dev node it would be dlopen'd into.
-# hotswap-verify admits a -z lazy re-link, which cannot catch an unresolvable
-# symbol; the shipped artifact links -z now, where one is a hard dlopen
-# failure. Needs a node: make fast-rebuild.
-hotswap-symbols:
-	@tools/dev/hotswap-symbols.sh $(if $(FILE),$(FILE),--all)
-
 hotswap-verify:
 	@tools/dev/hotswap-verify.sh $(if $(FILE),$(FILE),--all)
 
@@ -4087,8 +4091,15 @@ $(BIN_DIR)/zclassic23-package-verify: $(VIEW_GEN_HEADERS) \
 # Opt-in C23 development adapter. This small front process enters Landlock and
 # scrubs credentials before it invokes the fixed Codex CLI; the node handler
 # never executes a caller-supplied command.
+ZCL_TOOL_SANDBOX_SRC = lib/platform/src/os_sandbox_linux.c
+ifeq ($(ZCL_HOST_OS),Darwin)
+# The confinement entry points exist per host; on Darwin the backend stub
+# refuses them at runtime, which is the honest degradation of an adapter
+# whose sandbox primitive is Linux Landlock.
+ZCL_TOOL_SANDBOX_SRC = lib/platform/src/os_sandbox_stub.c
+endif
 ZCODE_ADAPTER_RUNNER_SRCS = tools/zcode_adapter_runner.c \
-	lib/platform/src/os_sandbox_linux.c lib/base/src/cleanse.c \
+	$(ZCL_TOOL_SANDBOX_SRC) lib/base/src/cleanse.c \
 	lib/base/src/log_level.c lib/base/src/result.c lib/sha3/src/sha3.c
 .PHONY: zclassic23-zcode-adapter-runner
 zclassic23-zcode-adapter-runner: $(BIN_DIR)/zclassic23-zcode-adapter-runner
@@ -4229,7 +4240,7 @@ $(ZCLASSIC23_BIN): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) \
 		strip -S -x "$$tmp"; \
 	else \
 		objcopy --only-keep-debug "$$tmp" "$$dbgdir/$$(basename "$$dbg")"; \
-		strip -s "$$tmp"; \
+		strip $(ZCL_STRIP_ALL) "$$tmp"; \
 		objcopy --add-gnu-debuglink="$$dbgdir/$$(basename "$$dbg")" "$$tmp"; \
 	fi; \
 	tools/scripts/check_c23_node_binary.sh "$$tmp"; \
@@ -4248,7 +4259,7 @@ $(ZCLASSIC_CLI_BIN): $(BUILD_IDENTITY_STAMP) src/cli.c $(CLI_SRCS) lib/base/src/
 	tmp="$$(mktemp "$@.link.XXXXXX")"; \
 	trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
 	$(CC) $(CFLAGS) $(LDFLAGS) -o "$$tmp" $(filter-out $(BUILD_IDENTITY_STAMP),$^) -lm; \
-	strip -s "$$tmp"; \
+	strip $(ZCL_STRIP_ALL) "$$tmp"; \
 	tools/dev/source-identity.sh verify-record "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" >/dev/null; \
 	mv -f -- "$$tmp" "$@"; \
 	trap - EXIT HUP INT TERM
@@ -4264,7 +4275,7 @@ tools/wal_checkpoint: $(WAL_CHECKPOINT_BIN)
 $(WAL_CHECKPOINT_BIN): tools/wal_checkpoint.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -Ivendor/include -o $@ $< \
-	    -Lvendor/lib -l:libsqlite3.a -lpthread -ldl -lm
+	    -Lvendor/lib vendor/lib/libsqlite3.a -lpthread -ldl -lm
 
 $(eval $(call BUILD_NODE_TOOL,wallet-wireframes,tools/wallet_wireframes.c))
 $(eval $(call BUILD_NODE_TOOL,speedrun,tools/speedrun.c))
@@ -4303,7 +4314,7 @@ $(BIN_DIR)/gen_sha3_windows: tools/gen_sha3_windows.c \
 	    -Ilib/chain/include -Ilib/sha3/include -Ilib/crypto/include -Ilib/encoding/include \
 	    -Ilib/json/include -Ilib/platform/include -Ilib/base/include -Ilib/util/include \
 	    -Ilib/support/include \
-	    -D_POSIX_C_SOURCE=200809L \
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -o $@ $^ -pthread
 
 # corpus-census: offline driver for the C23 corpus odometer (slice 1b).
@@ -4336,13 +4347,13 @@ $(BIN_DIR)/corpus-census: tools/corpus_census.c \
 	# zcl_random_secret_bytes -> sealed-tree random.c; the collector drops it.
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
-	    -D_POSIX_C_SOURCE=200809L \
-	    -ffunction-sections -fdata-sections -Wl,--gc-sections \
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
+	    -ffunction-sections -fdata-sections $(ZCL_GC_SECTIONS_LDFLAG) \
 	    -Ilib/vcs/include -Ilib/base/include -Ilib/util/include \
 	    -Ilib/crypto/include -Ilib/sha3/include -Ilib/codec/include \
 	    -Ilib/json/include -Ilib/platform/include -Ilib/support/include \
 	    -Ilib/core/include -Ivendor/include \
-	    -o $@ $^ -Lvendor/lib -l:libsecp256k1.a -lpthread -lm
+	    -o $@ $^ -Lvendor/lib $(NODE_SECP_ARCHIVE) -lpthread -lm
 
 # Run the corpus census. The default is a SMOKE run into build/corpus-census/
 # (unsigned, cutoff 1, quality unattested) so it can never overwrite the
@@ -4396,13 +4407,13 @@ $(BIN_DIR)/package-factory: tools/package_factory.c \
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
-	    -D_POSIX_C_SOURCE=200809L \
-	    -ffunction-sections -fdata-sections -Wl,--gc-sections \
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
+	    -ffunction-sections -fdata-sections $(ZCL_GC_SECTIONS_LDFLAG) \
 	    -Ilib/vcs/include -Ilib/base/include -Ilib/util/include \
 	    -Ilib/crypto/include -Ilib/sha3/include -Ilib/codec/include \
 	    -Ilib/json/include -Ilib/platform/include -Ilib/support/include \
 	    -Ilib/core/include -Ivendor/include \
-	    -o $@ $^ -Lvendor/lib -l:libsecp256k1.a -lpthread -lm
+	    -o $@ $^ -Lvendor/lib $(NODE_SECP_ARCHIVE) -lpthread -lm
 
 # arena_runner: deterministic 2-team zdogfight match driver (dev tool; NOT a
 # native command — config/commands/*.def untouched). Spawns one confined
@@ -4418,20 +4429,20 @@ $(BIN_DIR)/arena_product_journey_c23: tools/arena_product_journey_c23.c \
 		lib/base/src/log_level.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
-	    $(ZCL_WARN_STRINGOP_OVERFLOW) -D_POSIX_C_SOURCE=200809L \
+	    $(ZCL_WARN_STRINGOP_OVERFLOW) -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -Ilib/json/include -Ilib/base/include -o $@ $^ -lpthread -lm
 $(BIN_DIR)/arena_runner: tools/arena_runner.c \
 		packages/zdogfight/src/zdogfight.c packages/zdogfight/src/zdogfix.c \
 		packages/zprng/src/zprng.c \
-		lib/platform/src/os_sandbox_linux.c lib/platform/src/clock.c \
+		$(ZCL_TOOL_SANDBOX_SRC) lib/platform/src/clock.c \
 		lib/base/src/result.c lib/base/src/log_level.c \
 		lib/base/src/safe_alloc.c \
 		lib/sha3/src/sha3.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
-	    -D_POSIX_C_SOURCE=200809L \
-	    -ffunction-sections -fdata-sections -Wl,--gc-sections \
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
+	    -ffunction-sections -fdata-sections $(ZCL_GC_SECTIONS_LDFLAG) \
 	    -Ipackages/zdogfight/include -Ipackages/zprng/include \
 	    -Ilib/platform/include -Ilib/base/include -Ilib/util/include \
 	    -Ilib/sha3/include -Ilib/support/include -Ivendor/include \
@@ -4453,8 +4464,8 @@ $(BIN_DIR)/arena_present: tools/arena_present.c \
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
-	    -D_POSIX_C_SOURCE=200809L \
-	    -ffunction-sections -fdata-sections -Wl,--gc-sections \
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
+	    -ffunction-sections -fdata-sections $(ZCL_GC_SECTIONS_LDFLAG) \
 	    -Ipackages/zdogfight/include -Ipackages/zprng/include \
 	    -Ilib/presentation/include -Ilib/base/include -Ilib/util/include \
 	    -Ilib/sha3/include -Ilib/support/include -Ivendor/include \
@@ -4480,7 +4491,7 @@ $(BIN_DIR)/test_zdogfight: packages/zdogfight/tests/test_zdogfight.c \
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
-	    -D_POSIX_C_SOURCE=200809L \
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -Ipackages/zdogfight/include -Ipackages/zprng/include \
 	    -o $@ $^ -lm
 
@@ -4491,7 +4502,7 @@ $(BIN_DIR)/test_zdogace: packages/zdogace/tests/test_zdogace.c \
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
-	    -D_POSIX_C_SOURCE=200809L \
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -Ipackages/zdogace/include -Ipackages/zdogfight/include \
 	    -Ipackages/zprng/include \
 	    -o $@ $^ -lm
@@ -4502,7 +4513,7 @@ $(BIN_DIR)/test_zdogdrone: packages/zdogdrone/tests/test_zdogdrone.c \
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
-	    -D_POSIX_C_SOURCE=200809L \
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -Ipackages/zdogdrone/include -Ipackages/zdogfight/include \
 	    -Ipackages/zprng/include \
 	    -o $@ $^ -lm
@@ -4514,7 +4525,7 @@ $(BIN_DIR)/test_zdogview: packages/zdogview/tests/test_zdogview.c \
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
-	    -D_POSIX_C_SOURCE=200809L \
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -Ipackages/zdogview/include -Ipackages/zdogfight/include \
 	    -Ipackages/zprng/include \
 	    -o $@ $^ -lm
@@ -4528,7 +4539,7 @@ $(BIN_DIR)/zdogview: packages/zdogview/app/main.c \
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
-	    -D_POSIX_C_SOURCE=200809L \
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -Ipackages/zdogview/include -Ipackages/zdogfight/include \
 	    -Ipackages/zprng/include \
 	    -o $@ $^ -lm
@@ -4548,8 +4559,8 @@ $(BIN_DIR)/zdogview: packages/zdogview/app/main.c \
 # whose two-node proof produced the pinned roots; the simulation is
 # integer-only so the optimisation level cannot move them, and `make
 # arena-demo-opt-parity` asserts exactly that instead of assuming it.
-ARENA_PILOT_CFLAGS = -std=c23 -O1 -static -Wall -Wextra -Werror -pedantic \
-    $(ZCL_WARN_STRINGOP_OVERFLOW) -D_POSIX_C_SOURCE=200809L
+ARENA_PILOT_CFLAGS = -std=c23 -O1 $(ZCL_STATIC_FLAG) -Wall -Wextra -Werror -pedantic \
+    $(ZCL_WARN_STRINGOP_OVERFLOW) -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS)
 
 $(BIN_DIR)/pilot_zdogace: packages/zdogace/app/main.c \
 		packages/zdogace/src/zdogace.c \
@@ -4583,8 +4594,8 @@ $(BIN_DIR)/arena_svg: tools/arena_svg.c \
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
-	    -D_POSIX_C_SOURCE=200809L \
-	    -ffunction-sections -fdata-sections -Wl,--gc-sections \
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
+	    -ffunction-sections -fdata-sections $(ZCL_GC_SECTIONS_LDFLAG) \
 	    -Ipackages/zdogfight/include -Ipackages/zprng/include \
 	    -Ilib/base/include -Ilib/util/include \
 	    -Ilib/sha3/include -Ilib/support/include -Ivendor/include \
@@ -4612,7 +4623,7 @@ $(BIN_DIR)/arena_view: tools/arena_view.c \
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
 	    -D_POSIX_C_SOURCE=200809L $(RAYLIB_CFLAGS) \
-	    -ffunction-sections -fdata-sections -Wl,--gc-sections \
+	    -ffunction-sections -fdata-sections $(ZCL_GC_SECTIONS_LDFLAG) \
 	    -Ipackages/zdogview/include -Ipackages/zdogfight/include \
 	    -Ipackages/zprng/include \
 	    -Ilib/base/include -Ilib/util/include \
@@ -4733,8 +4744,8 @@ $(BIN_DIR)/gen_utxo_root_ladder: tools/gen_utxo_root_ladder.c \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
 	    -Ilib/chain/include -Ilib/sha3/include -Ilib/crypto/include -Ilib/support/include \
 	    -Ilib/base/include -Ilib/util/include -Ivendor/include \
-	    -D_POSIX_C_SOURCE=200809L \
-	    -o $@ $^ -Lvendor/lib -l:libsqlite3.a -lpthread -lm
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
+	    -o $@ $^ -Lvendor/lib vendor/lib/libsqlite3.a -lpthread -lm
 
 # rom_two_builder_compare: the ROM two-builder gate. Independently re-derives
 # the coins/anchors/nullifiers section digests from the raw rows of two
@@ -4752,8 +4763,8 @@ $(BIN_DIR)/rom_two_builder_compare: tools/rom_two_builder_compare.c \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
 	    -Ilib/sha3/include -Ilib/crypto/include -Ilib/support/include -Ilib/base/include \
 	    -Ivendor/include \
-	    -D_POSIX_C_SOURCE=200809L \
-	    -o $@ $^ -Lvendor/lib -l:libsqlite3.a -lpthread -lm
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
+	    -o $@ $^ -Lvendor/lib vendor/lib/libsqlite3.a -lpthread -lm
 
 # checkpoint_rung_export: the ladder RUNG generator. Reads a consensus-state
 # bundle and emits the complete-state rung at its height as BOTH a binary
@@ -4773,8 +4784,8 @@ $(BIN_DIR)/checkpoint_rung_export: tools/checkpoint_rung_export.c \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
 	    -Ilib/storage/include -Ilib/sha3/include -Ilib/crypto/include -Ilib/base/include -Ilib/util/include \
 	    -Ilib/support/include -Ivendor/include \
-	    -D_POSIX_C_SOURCE=200809L \
-	    -o $@ $^ -Lvendor/lib -l:libsqlite3.a -lpthread -lm
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
+	    -o $@ $^ -Lvendor/lib vendor/lib/libsqlite3.a -lpthread -lm
 
 # consensus_rule_sweep: the FORWARD-facing consensus check. Every past-facing
 # check we own (deterministic rebuild, replay to tip, historical UTXO-root
@@ -4810,7 +4821,7 @@ $(BIN_DIR)/consensus_rule_sweep: tools/consensus_rule_sweep.c \
 	    -Ilib/sapling/include -Ilib/crypto/include \
 	    -Ilib/base/include -Ilib/util/include -Ilib/support/include \
 	    -Ivendor/include \
-	    -D_POSIX_C_SOURCE=200809L \
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -o $@ $(filter %.c,$^) -lpthread -lm
 
 # rom_bundle_sha3: standalone whole-file SHA3-256 digest tool used by
@@ -4826,7 +4837,7 @@ $(BIN_DIR)/rom_bundle_sha3: tools/rom_bundle_sha3.c \
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
 	    -Ilib/sha3/include -Ilib/crypto/include -Ilib/support/include -Ilib/base/include \
-	    -D_POSIX_C_SOURCE=200809L \
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -o $@ $^ -lm
 
 # rom-bundle-replicate: copy a verified consensus-state bundle + its replay
@@ -4895,8 +4906,8 @@ $(BIN_DIR)/export_snapshot: tools/export_snapshot.c \
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -Ivendor/include \
 	    -Ilib/platform/include -Ilib/base/include -Ilib/util/include \
-	    -D_POSIX_C_SOURCE=200809L \
-	    -o $@ $^ -Lvendor/lib -l:libsqlite3.a -lpthread -lm
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
+	    -o $@ $^ -Lvendor/lib vendor/lib/libsqlite3.a -lpthread -lm
 
 # verify_anchor_completeness: cross-checks a zclassicd chainstate LevelDB copy
 # against a zclassic23 progress.kv — did the shielded-history importer
@@ -4907,7 +4918,7 @@ $(BIN_DIR)/export_snapshot: tools/export_snapshot.c \
 verify_anchor_completeness: $(BIN_DIR)/verify_anchor_completeness
 $(BIN_DIR)/verify_anchor_completeness: tools/verify_anchor_completeness.c
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -Ivendor/include -o $@ $< -Lvendor/lib -l:libleveldb.a -l:libsqlite3.a -lstdc++ -lpthread -lm -ldl
+	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -Ivendor/include -o $@ $< -Lvendor/lib vendor/lib/libleveldb.a vendor/lib/libsqlite3.a -lstdc++ -lpthread -lm -ldl
 
 # ldb_verify_c23: differential proof that the C23 read-only LevelDB reader
 # (lib/storage/src/ldb_reader_*.c) returns byte-identical data to the
@@ -4927,10 +4938,10 @@ $(BIN_DIR)/ldb_verify_c23: tools/ldb_verify_c23.c \
 		lib/util/src/crc32c.c lib/base/src/safe_alloc.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
-	    -D_POSIX_C_SOURCE=200809L \
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -Ivendor/include -Ilib/base/include -Ilib/util/include \
 	    -Ilib/storage/include \
-	    -o $@ $^ -Lvendor/lib -l:libleveldb.a -lstdc++ -lpthread -lm -ldl
+	    -o $@ $^ -Lvendor/lib vendor/lib/libleveldb.a -lstdc++ -lpthread -lm -ldl
 
 .PHONY: zcl-blog
 zcl-blog: $(BIN_DIR)/zcl-blog
@@ -5008,7 +5019,7 @@ $(BIN_DIR)/simnet_trace_query: tools/sim/simnet_trace_query.c \
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -Ilib/json/include -Ilib/base/include -Ilib/util/include \
-	    -D_POSIX_C_SOURCE=200809L \
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -o $@ $^ -lpthread -lm
 
 # ── wire_sweep: nightly seed-fuzzing runner for the simnet_wire harness ───
@@ -5248,9 +5259,9 @@ p2_invariant_check: $(P2_INVARIANT_CHECK_BIN)
 $(P2_INVARIANT_CHECK_BIN): tools/p2_invariant_check.c vendor/include/sqlite3.h vendor/lib/libsqlite3.a
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
-	    -D_POSIX_C_SOURCE=200809L -Ivendor/include \
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -Ivendor/include \
 	    -o $@ tools/p2_invariant_check.c \
-	    -Lvendor/lib -l:libsqlite3.a -lpthread -ldl -lm
+	    -Lvendor/lib vendor/lib/libsqlite3.a -lpthread -ldl -lm
 
 # Read-only SQL query CLI over any sqlite db (progress.kv, node.db, fixture
 # datadirs). Python is banned and the host has no sqlite3 CLI; this is the
@@ -5261,9 +5272,9 @@ sqlq: $(SQLQ_BIN)
 $(SQLQ_BIN): tools/sqlq.c vendor/include/sqlite3.h vendor/lib/libsqlite3.a
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
-	    -D_POSIX_C_SOURCE=200809L -Ivendor/include \
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -Ivendor/include \
 	    -o $@ tools/sqlq.c \
-	    -Lvendor/lib -l:libsqlite3.a -lpthread -ldl -lm
+	    -Lvendor/lib vendor/lib/libsqlite3.a -lpthread -ldl -lm
 
 # Nested JSON path query for operator scripts. Python is banned; grep/sed
 # covers flat RPC fields, and this C23 walker covers nested envelopes.
@@ -5276,7 +5287,7 @@ $(JSONQ_BIN): tools/jsonq.c \
     packages/zutf8/include/zutf8/zutf8.h
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
-	    -D_POSIX_C_SOURCE=200809L \
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -Ipackages/zjsonp/include -Ipackages/zutf8/include \
 	    -o $@ tools/jsonq.c packages/zjsonp/src/zjsonp.c \
 	    packages/zutf8/src/zutf8.c
@@ -5308,7 +5319,7 @@ native-ui-driver: $(NATIVE_UI_DRIVER_BIN)
 $(NATIVE_UI_DRIVER_BIN): tools/native_ui_driver.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
-	    -D_POSIX_C_SOURCE=200809L -Ivendor/x11/include \
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -Ivendor/x11/include \
 	    -o $@ $< -Wl,-l:libX11.so.6
 
 # Crash recovery harness: fork zclassic23, SIGKILL at random points,
@@ -5322,7 +5333,7 @@ $(CRASH_RECOVERY_TEST_BIN): tools/crash_recovery_test.c lib/platform/src/clock.c
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pthread \
 	    -Ilib/platform/include -Ilib/base/include -Ilib/util/include -Ivendor/include -o $@ \
 	    tools/crash_recovery_test.c lib/platform/src/clock.c \
-	    -Lvendor/lib -l:libsqlite3.a -lpthread -ldl -lm
+	    -Lvendor/lib vendor/lib/libsqlite3.a -lpthread -ldl -lm
 
 .PHONY: test-crash
 # CI entry point for the crash recovery harness.
@@ -6621,7 +6632,7 @@ FUZZ_CFLAGS = -std=c23 -O1 -g -Wall -Wextra \
 	$(PORTS_INCLUDES) $(DOMAIN_INCLUDES) $(APPLICATION_INCLUDES) \
 	$(ADAPTERS_INCLUDES) $(TOOLS_INCLUDES) $(DEVLOOP_INCLUDES) \
 	-Ilib/test/include -Ivendor/x11/include \
-	-D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE \
+	-D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -D_DEFAULT_SOURCE \
 	-DZCL_FUZZ_QUIET_LOG_MACROS -Ivendor/include \
 	-fsanitize=fuzzer,address,undefined \
 	-fno-sanitize=alignment $(ZCL_FUZZ_EXTRA_CFLAGS)
@@ -6834,7 +6845,7 @@ $(SOAK_RUNNER_BIN): tools/soak/main.c lib/test/src/soak_harness.c \
                         lib/test/include/test/soak_harness.h
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
-	    -D_POSIX_C_SOURCE=200809L \
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -Ilib/test/include -Ilib/platform/include -Ilib/base/include -Ilib/util/include -o $@ \
 	    tools/soak/main.c lib/test/src/soak_harness.c lib/platform/src/clock.c
 
@@ -6888,11 +6899,11 @@ SIMD_BENCH_SRCS = tools/simd_bench.c \
 simd_bench: $(BIN_DIR)/simd_bench
 $(BIN_DIR)/simd_bench: $(SIMD_BENCH_SRCS)
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O3 $(if $(ZCL_NATIVE),-march=native,-march=x86-64-v3) \
+	$(CC) -std=c23 -O3 $(ZCL_ARCH_CFLAGS) \
 	    -Wall -Wextra -Werror -pedantic \
 	    -Ilib/sha3/include -Ilib/crypto/include -Ilib/sapling/include -Ilib/base/include \
 	    -Ilib/util/include -Ilib/platform/include -Ilib/support/include \
-	    -D_POSIX_C_SOURCE=200809L -o $@ $^
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -o $@ $^
 
 # Run it. REPS= and CPU= override the defaults; CPU picks which CCD you land on
 # (this host class is asymmetric: one CCD has 3D V-Cache, the other clocks
@@ -6929,13 +6940,13 @@ SERIAL_BENCH_SRCS = tools/serial_bench.c \
 serial_bench: $(BIN_DIR)/serial_bench
 $(BIN_DIR)/serial_bench: $(SERIAL_BENCH_SRCS)
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O3 $(if $(ZCL_NATIVE),-march=native,-march=x86-64-v3) \
+	$(CC) -std=c23 -O3 $(ZCL_ARCH_CFLAGS) \
 	    -Wall -Wextra -Werror -pedantic \
 	    -Ilib/primitives/include -Ilib/script/include -Ilib/bloom/include \
 	    -Ilib/crypto/include -Ilib/encoding/include -Ilib/base/include \
 	    -Ilib/util/include -Ilib/support/include -Ilib/sapling/include \
 	    -Ilib/keys/include -Ilib/core/include $(CORE_INCLUDES) \
-	    -D_POSIX_C_SOURCE=200809L -o $@ $^
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -o $@ $^
 
 .PHONY: bench-serial
 bench-serial: $(BIN_DIR)/serial_bench
@@ -9565,7 +9576,7 @@ EQUIHASH_FACT_SRCS = tools/equihash_params_fact.c \
 $(EQUIHASH_FACT_TOOL): $(EQUIHASH_FACT_SRCS)
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
-	    -D_POSIX_C_SOURCE=200809L \
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -Icore/chainparams/include -Icore/params/include -Icore/math/include \
 	    -Icore/consensus/include -Ilib/chain/include -Ilib/base/include \
 	    -Ilib/util/include -Ilib/core/include -Ilib/crypto/include \
@@ -10329,8 +10340,8 @@ $(BIN_DIR)/postmortem_to_scenario: tools/postmortem_to_scenario.c \
 	    -Wno-format-truncation \
 	    -Ilib/sim/include -Ilib/platform/include -Ilib/base/include -Ilib/util/include \
 	    -Ilib/json/include \
-	    -D_POSIX_C_SOURCE=200809L \
-	    -o $@ $^ -Lvendor/lib -l:libz.a -lpthread -lm
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
+	    -o $@ $^ -Lvendor/lib vendor/lib/libz.a -lpthread -lm
 
 .PHONY: postmortem-to-scenario
 postmortem-to-scenario: tools/postmortem_to_scenario

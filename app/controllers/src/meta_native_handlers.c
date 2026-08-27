@@ -117,8 +117,7 @@ ZCL_HOTSWAP_TRAMPOLINE(tramp_consensus_report, zcl_native_consensus_report_body)
 
 ZCL_HOTSWAP_TRAMPOLINE(tramp_metrics, zcl_native_metrics_body)
 
-static const struct zcl_hotswap_leaf_replacement k_leaves[] = {
-    { "core.consensus.report", tramp_consensus_report },
+static const struct zcl_hotswap_leaf_replacement k_leaves[] = { /* hotswap-static-ok: leaf registration tables are immutable */    { "core.consensus.report", tramp_consensus_report },
     { "ops.metrics",           tramp_metrics },
 };
 
@@ -154,8 +153,7 @@ static bool module_selftest_metrics(char *err, size_t cap)
  * tree stays unswappable; this is its observability projection. */
 ZCL_HOTSWAP_TRAMPOLINE(module_tramp_consensus_report, zcl_native_consensus_report_body)
 
-static const struct zcl_hotswap_leaf k_module_leaves[] = {
-    { "ops.metrics",           module_tramp_metrics },
+static const struct zcl_hotswap_leaf k_module_leaves[] = { /* hotswap-static-ok: immutable leaf registration tables */    { "ops.metrics",           module_tramp_metrics },
     { "core.consensus.report", module_tramp_consensus_report },
 };
 

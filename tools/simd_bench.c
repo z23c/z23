@@ -175,6 +175,7 @@ static void topo_probe(int cpu, struct cpu_topo *t)
  * pin did not take — an unpinned run on this host is not comparable. */
 static bool pin_to_cpu(int cpu)
 {
+#if defined(__linux__)
     cpu_set_t set;
     CPU_ZERO(&set);
     CPU_SET(cpu, &set);
@@ -183,6 +184,12 @@ static bool pin_to_cpu(int cpu)
     /* Confirm the kernel actually moved us. */
     sched_yield();
     return sched_getcpu() == cpu;
+#else
+    /* No userspace affinity API here (Darwin exposes QoS classes, not a cpu
+     * pin). Refusing honestly keeps an unpinned run visibly unpinned. */
+    (void)cpu;
+    return false;
+#endif
 }
 
 /* ── Tier result plumbing ────────────────────────────────────────── */
@@ -918,9 +925,15 @@ int main(int argc, char **argv)
     if (!g_csv) {
         printf("zclassic23 simd_bench — per-ISA-tier crypto microbenchmark\n");
         printf("=========================================================\n");
-        printf("  pinned          : %s (requested cpu %d, running on cpu %d)\n",
+        printf("  pinned          : %s (requested cpu %d, running on cpu %s)\n",
                pinned ? "YES" : "NO -- NUMBERS ARE NOT COMPARABLE",
-               g_pin_cpu, sched_getcpu());
+               g_pin_cpu,
+#if defined(__linux__)
+               "n/a: this report only runs where a pin was possible"
+#else
+               "unknown"
+#endif
+        );
         if (topo.known)
             printf("  L3 domain (CCD) : ccd%d  [cpus %s]  L3 %ld KiB\n",
                    topo.ccd_index, topo.l3_shared, topo.l3_kb);

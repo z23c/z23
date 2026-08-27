@@ -28,6 +28,7 @@
 #include "storage/nullifier_kv.h"
 #include "storage/progress_store.h"      /* progress_store_tx_lock/unlock,
                                           * progress_meta_set/delete_in_tx */
+#include "platform/fd_path.h"
 #include "platform/time_compat.h"
 #include "util/log_macros.h"
 
@@ -362,9 +363,11 @@ static bool activate_backup_prior_generation(sqlite3 *progress_db,
         return false;
 
     char destination_name_path[PATH_MAX];
-    n = snprintf(destination_name_path, sizeof(destination_name_path),
-                 "/proc/self/fd/%d/%s", datadir_fd, name);
-    if (n <= 0 || (size_t)n >= sizeof(destination_name_path))
+    /* Name the pinned datadir descriptor so the rename below reaches the
+     * exact directory we verified, not whatever a path lookup finds now. */
+    if (!platform_dirfd_child_path(destination_name_path,
+                                   sizeof(destination_name_path),
+                                   datadir_fd, name))
         return false;
     n = snprintf(out_path, out_cap, "%s/%s", datadir_display, name);
     if (n <= 0 || (size_t)n >= out_cap) {
