@@ -16,6 +16,7 @@
 
 #include "codeindex_priv.h"
 
+#include "platform/fd_path.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
@@ -242,9 +243,19 @@ struct ci_store *ci_store_open(const char *root)
     pthread_mutex_init(&s->lock, &attr);
     pthread_mutexattr_destroy(&attr);
 
+    /* Name the bound descriptor through the one fd-naming shim
+     * (platform/fd_path.h): /proc/self/fd/N on Linux, /dev/fd/N on Darwin.
+     * The fd stays the authority; the URI only reopens it read-only. */
+    char fd_name[64];
+    if (!platform_fd_path(fd_name, sizeof(fd_name), fd, NULL)) {
+        close(fd);
+        pthread_mutex_destroy(&s->lock);
+        free(s);
+        LOG_NULL("codeindex", "canonical fd cannot be named");
+    }
     char uri[128];
     int un = snprintf(uri, sizeof(uri),
-                      "file:/proc/self/fd/%d?mode=ro&immutable=1", fd);
+                      "file:%s?mode=ro&immutable=1", fd_name);
     if (un <= 0 || (size_t)un >= sizeof(uri)) {
         close(fd);
         pthread_mutex_destroy(&s->lock);

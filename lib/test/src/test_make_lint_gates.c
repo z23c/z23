@@ -105,6 +105,7 @@ bool lint_gates_group_requires_quiet_pool(const char *group_name)
 #ifdef ZCL_TESTING
 
 #include "lint_gate_selftests.h"
+#include "platform/os_proc.h"
 #include "platform/time_compat.h"
 
 /* Per-process sandbox-root override. A shard group chdir()s into its own
@@ -136,13 +137,13 @@ const char *repo_root(void)
     if (cached) return root[0] ? root : NULL;
 
     char exe[PATH_MAX];
-    ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
-    if (n <= 0 || n >= (ssize_t)sizeof(exe) - 1) {
+    /* One exe-path shim for both hosts: /proc/self/exe on Linux,
+     * _NSGetExecutablePath on Darwin (platform/os_proc.h). */
+    if (!os_proc_exe_path(exe, sizeof(exe))) {
         cached = 1;
         root[0] = '\0';
         return NULL;
     }
-    exe[n] = '\0';
 
     /* The binary lives at <root>/build/bin/<name>; walk UP from the exe
      * until a directory holding both the Makefile and the raw-sqlite
