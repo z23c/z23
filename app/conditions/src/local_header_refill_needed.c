@@ -39,13 +39,30 @@ static int best_header_same_height_body_target(struct main_state *ms)
     zcl_mutex_lock(&ms->cs_main);
     struct block_index *tip = active_chain_tip(&ms->chain_active);
     struct block_index *best = ms->pindex_best_header;
-    if (tip && tip->phashBlock && best && best->nHeight > tip->nHeight) {
-        struct block_index *best_at_tip =
+    if (tip && tip->phashBlock && best &&
+        best->nHeight >= tip->nHeight) {
+        struct block_index *side =
             block_index_get_ancestor(best, tip->nHeight);
-        if (best_at_tip && best_at_tip->phashBlock &&
-            !uint256_eq(best_at_tip->phashBlock, tip->phashBlock) &&
-            !block_has_any_failure(best_at_tip))
-            target = tip->nHeight;
+        struct block_index *active = tip;
+
+        /* A best-header fork can stop header refill even when its tip is only
+         * level with the active tip. Walk just the divergent segment and name
+         * its earliest missing body, so parents are fetched before an already
+         * available descendant. This schedules bytes only; validation and
+         * chain selection retain their existing authority. */
+        while (side && active && side->nHeight == active->nHeight) {
+            if (!side->phashBlock || !active->phashBlock ||
+                block_has_any_failure(side)) {
+                target = -1;
+                break;
+            }
+            if (uint256_eq(side->phashBlock, active->phashBlock))
+                break;
+            if ((side->nStatus & BLOCK_HAVE_DATA) == 0)
+                target = side->nHeight;
+            side = side->pprev;
+            active = active->pprev;
+        }
     }
     zcl_mutex_unlock(&ms->cs_main);
     return target;

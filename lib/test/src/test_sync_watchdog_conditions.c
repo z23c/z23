@@ -739,16 +739,23 @@ int test_sync_watchdog_conditions(void)
         bool ok = true;
         register_local_header_refill_needed();
 
-        struct uint256 active_h, fork_h, best_h;
+        struct uint256 common_h, active_h10, active_h11, fork_h, best_h;
+        struct block_index *common = insert_watchdog_block(
+            &ms, &common_h, 0x90, 9, NULL,
+            BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA);
+        struct block_index *active10 = insert_watchdog_block(
+            &ms, &active_h10, 0xA0, 10, common,
+            BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA);
         struct block_index *tip = insert_watchdog_block(
-            &ms, &active_h, 0xA0, 10, NULL,
+            &ms, &active_h11, 0xA1, 11, active10,
             BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA);
         struct block_index *fork_tip = insert_watchdog_block(
-            &ms, &fork_h, 0xF0, 10, NULL, BLOCK_VALID_TREE);
+            &ms, &fork_h, 0xF0, 10, common, BLOCK_VALID_TREE);
         struct block_index *best = insert_watchdog_block(
-            &ms, &best_h, 0xF1, 11, fork_tip, BLOCK_VALID_TREE);
+            &ms, &best_h, 0xF1, 11, fork_tip,
+            BLOCK_VALID_TREE | BLOCK_HAVE_DATA);
         ms.pindex_best_header = best;
-        ok = ok && tip && fork_tip && best &&
+        ok = ok && common && active10 && tip && fork_tip && best &&
              active_chain_move_window_tip(&ms.chain_active, tip);
 
         struct p2p_node p1 = {0}, p2 = {0}, p3 = {0};
@@ -778,8 +785,9 @@ int test_sync_watchdog_conditions(void)
                             queued);
         SYNC_WATCHDOG_CHECK("local header refill records fork body recovery",
                             recorded);
-        SYNC_WATCHDOG_CHECK("local header refill queues same-height fork body",
-                            ok);
+        SYNC_WATCHDOG_CHECK(
+            "local header refill queues earliest missing same-height fork body",
+            ok);
         dl_free(&dm);
         zcl_mutex_destroy(&dm.cs);
         main_state_free(&ms);
