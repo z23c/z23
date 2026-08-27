@@ -183,6 +183,12 @@ bool db_shop_want_find(struct node_db *ndb, const uint8_t want_id[32],
  * Bounded to max (<= SHOP_WANT_QUERY_CAP) results. */
 int db_shop_want_list(struct node_db *ndb, int64_t now_unix,
                       bool include_closed, struct shop_want *out, size_t max);
+/* Same match set as db_shop_want_list, counted without the window: the
+ * board's total_matching is a market fact, not however many rows fit the
+ * fetch cap. -1 on a store error (the handler refuses rather than
+ * reporting a made-up total). */
+int db_shop_want_count(struct node_db *ndb, int64_t now_unix,
+                       bool include_closed);
 /* Key-checked cancellation is the controller's job; this is the bare
  * mark: sets cancelled_unix on an open row. False when no OPEN row
  * carries the id (absent or already cancelled — the caller distinguishes

@@ -534,6 +534,20 @@ void zcl_native_handle_shop_want_list(
     if (!shw_open_board_readonly(datadir, &db, &ndb, reply))
         return;
     bool include_closed = json_get_bool_or(request->input, "all", false);
+    /* The window (capped fetch) and the market fact (true match count)
+     * are different numbers the moment the board outgrows the window;
+     * reporting the window as the total tells buyers the market ended
+     * at the cap. */
+    int total = db_shop_want_count(&ndb, now_unix, include_closed);
+    if (total < 0) {
+        zcl_native_node_db_close_readonly(&db, &ndb);
+        shw_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
+                 "WANT_COUNT_FAILED", "board",
+                 "the store refused to count matching wants; no total is "
+                 "reported rather than a wrong one",
+                 "app.shop.want.list.v1");
+        return;
+    }
     struct shop_want rows[SHOP_WANT_QUERY_CAP];
     int count = db_shop_want_list(&ndb, now_unix, include_closed, rows,
                                   SHOP_WANT_QUERY_CAP);
@@ -593,7 +607,11 @@ void zcl_native_handle_shop_want_list(
     (void)json_push_kv(&reply->data, "wants", &wants);
     json_free(&wants);
     (void)json_push_kv_int(&reply->data, "rendered", (int64_t)rendered);
-    (void)json_push_kv_int(&reply->data, "total_matching", count);
+    (void)json_push_kv_int(&reply->data, "total_matching", total);
+    /* The window is a fetch bound, not the market: say so when the
+     * match set did not fit it, so readers know rows exist past the page. */
+    (void)json_push_kv_bool(&reply->data, "window_capped",
+                            total > count);
     (void)json_push_kv_int(&reply->data, "hidden_by_profile", hidden);
     (void)json_push_kv_str(&reply->data, "moderation_note",
         SHW_MODERATION_NOTE);

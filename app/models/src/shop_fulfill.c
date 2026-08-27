@@ -13,6 +13,7 @@
 
 #include <sqlite3.h>
 #include <string.h>
+#include <limits.h>
 
 DEFINE_MODEL_CALLBACKS(shop_fulfill)
 
@@ -349,6 +350,36 @@ int db_shop_fulfill_list_for_want(struct node_db *ndb,
         if (row_to_shop_fulfill(s, &out[n])) n++;
     AR_FINALIZE(s);
     return (int)n;
+}
+
+/* The list's WHERE clause with no window — keep the two textually
+ * parallel so the total can never drift from what the window shows. */
+int db_shop_fulfill_list_count_for_want(struct node_db *ndb,
+                                        const uint8_t want_id[32],
+                                        int64_t now_unix,
+                                        bool include_closed)
+{
+    if (!ndb || !ndb->open || !want_id)
+        LOG_RETURN(-1, "shop",
+                   "db_shop_fulfill_list_count_for_want: bad input");
+    sqlite3_stmt *s = NULL;
+    int64_t count = 0;
+    if (include_closed) {
+        AR_PREPARE_RET(ndb, s,
+            "SELECT count(*) FROM shop_fulfills WHERE want_id=?", -1);
+        AR_BIND_BLOB(s, 1, want_id, 32);
+    } else {
+        AR_PREPARE_RET(ndb, s,
+            "SELECT count(*) FROM shop_fulfills"
+            " WHERE want_id=? AND expires_unix>? AND withdrawn_unix=0",
+            -1);
+        AR_BIND_BLOB(s, 1, want_id, 32);
+        AR_BIND_INT(s, 2, now_unix);
+    }
+    if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW)
+        count = sqlite3_column_int64(s, 0);
+    AR_FINALIZE(s);
+    return count > INT_MAX ? INT_MAX : (int)count;
 }
 
 int64_t db_shop_fulfill_count_for_want(struct node_db *ndb,
