@@ -72,7 +72,7 @@ bool boot_zcode_dht_package_pointer_publish_gate(
   struct vcs_package_store *store = vcs_package_store_global();
   if (!store) {
     gate_error(result, "NO_PACKAGE_STORE",
-               "package hosting is disabled on this node; enable -packagehost=1"
+               "package hosting is disabled on this node; run z23 join"
                " and install the package with zcode use before publishing its"
                " pointer");
     return false;
@@ -251,7 +251,7 @@ bool boot_zcode_dht_attestation_pointer_publish_gate(
   struct vcs_package_store *store = vcs_package_store_global();
   if (!store) {
     gate_error(result, "NO_PACKAGE_STORE",
-               "package hosting is disabled on this node; enable -packagehost=1"
+               "package hosting is disabled on this node; run z23 join"
                " and run zcode package attest offer to admit the attestation"
                " bytes before publishing its pointer");
     return false;
