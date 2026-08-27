@@ -218,6 +218,29 @@ ship_ps_text() {
         awk '{ gsub(/^[ \t]+/, ""); gsub(/[ \t]+$/, ""); print; exit }'
 }
 
+# Path of the binary a live pid is running. Linux: /proc/<pid>/exe is a
+# kernel symlink to the running inode. Darwin: ps comm= (argv[0] of the
+# exec) — a name lookup, not an inode handle, so a caller that needs
+# inode-strength identity must re-verify by other means.
+ship_exe_of() {
+    if [ -e "/proc/$1/exe" ]; then
+        readlink -f "/proc/$1/exe"
+    else
+        ship_ps_text "$1" comm
+    fi
+}
+
+# The running argv, one line, space-joined on darwin (ps args= loses argv
+# boundaries; /proc/<pid>/cmdline keeps them NUL-separated). Callers that
+# need exact boundaries on every host must run on Linux.
+ship_args_of() {
+    if [ -r "/proc/$1/cmdline" ]; then
+        tr '\000' ' ' < "/proc/$1/cmdline"
+    else
+        ship_ps_text "$1" args
+    fi
+}
+
 # cputime text -> centiseconds. ps formats accumulated CPU as
 # `[dd-]hh:mm:ss.ss`, and the days field is units-of-24, not another x60, so
 # the leading field is scaled separately when the separator is present. Only

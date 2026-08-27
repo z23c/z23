@@ -525,7 +525,7 @@ deploy_local() {
     case "$pid" in
         ""|*[!0-9]*|0) die "local canonical service must be running before ship" ;;
     esac
-    svc_dir="$(dirname "$(readlink -f "/proc/$pid/exe")")"
+    svc_dir="$(dirname "$(ship_exe_of "$pid")")"
     # Scratch lives under the owner's state root, never /tmp: honour
     # ZCL_SCRATCH_DIR when set (same override ship_selftest.sh recognises),
     # otherwise the standing scratch root.
@@ -684,7 +684,11 @@ deploy_remote() {
         'set -eu
          pid="$(systemctl --user show zclassic23 -p MainPID --value)"
          case "$pid" in ""|*[!0-9]*|0) exit 1 ;; esac
-         readlink -f "/proc/$pid/exe"')"
+         if [ -e "/proc/$pid/exe" ]; then
+             readlink -f "/proc/$pid/exe"
+         else
+             ps -ww -o comm= -p "$pid"
+         fi')"
     case "$svc_bin" in
         /*) ;;
         *) die "remote running executable path is missing or not absolute: '$svc_bin'" ;;
@@ -706,8 +710,16 @@ REMOTE_HASH
     # between the running release and this candidate before any transfer.
     prior_commit="$(ssh "${SSH_OPTS[@]}" "$host" '
         pid="$(systemctl --user show zclassic23 -p MainPID --value)" || exit 1
-        tr "\0" "\n" < "/proc/$pid/environ" |
-            sed -n "s/^ZCL_AGENT_EXPECT_BUILD_COMMIT=//p"' | tail -1)"
+        if [ -r "/proc/$pid/environ" ]; then
+            tr "\0" "\n" < "/proc/$pid/environ" |
+                sed -n "s/^ZCL_AGENT_EXPECT_BUILD_COMMIT=//p"
+        else
+            # No procfs (Darwin fixture host): ps prints the environment
+            # NUL-flattened; whole-word match keeps values with spaces whole.
+            ps -wwE -p "$pid" -o args= 2>/dev/null |
+                tr " " "\n" |
+                sed -n "s/^ZCL_AGENT_EXPECT_BUILD_COMMIT=//p" | head -1
+        fi' | tail -1)"
     case "$prior_commit" in
         ''|*[!0-9a-f]*) die "$host has no exact rollback build commit; refusing a schema-unsafe restart" ;;
     esac
@@ -861,8 +873,17 @@ fi
 
 pid="$(systemctl --user show zclassic23 -p MainPID --value)"
 case "$pid" in ""|*[!0-9]*|0) echo "remote: no running MainPID" >&2; exit 1 ;; esac
-prior_sha="$(sha256sum < "/proc/$pid/exe" | awk '{print $1}')"
-mapfile -d '' -t prior_argv < "/proc/$pid/cmdline"
+prior_sha="$(ship_sha256_stream < "$(ship_exe_of "$pid")")"
+# Linux keeps exact argv boundaries (/proc cmdline is NUL-separated); hosts
+# without procfs fall back to ps args=, which space-joins — the fixture and
+# the canonical node take no argument containing spaces.
+if [ -r "/proc/$pid/cmdline" ]; then
+    mapfile -d '' -t prior_argv < "/proc/$pid/cmdline"
+else
+    args_line="$(ship_args_of "$pid")"
+    # shellcheck disable=SC2206  # deliberate word split of the args line
+    prior_argv=($args_line)
+fi
 [ "${#prior_argv[@]}" -gt 0 ] || { echo "remote: running argv is unavailable" >&2; exit 1; }
 install -d "$dropin_dir"
 rm -f "$rollback_dropin" "$dropin_absent"
@@ -1153,7 +1174,7 @@ for target in $TARGETS; do
     case "$target" in
         local)
             pid="$(systemctl --user show zclassic23 -p MainPID --value 2>/dev/null || true)"
-            s="$(timeout 20 "/proc/$pid/exe" status 2>/dev/null || true)"
+            s="$(timeout 20 "$(ship_exe_of "$pid")" status 2>/dev/null || true)"
             printf '%-22s %-18s %-12s %s\n' "local" "${CAND_SOURCE_ID:0:16}…" \
                 "$(printf '%s' "$s" | grep -oE 'hstar=[0-9]+' | cut -d= -f2)" \
                 "$(printf '%s' "$s" | grep -oE 'sync=[a-z_]+' | cut -d= -f2)" ;;
@@ -1162,7 +1183,12 @@ for target in $TARGETS; do
                 s="$(ssh "${SSH_OPTS[@]}" "$host" '
                     pid="$(systemctl --user show zclassic23 -p MainPID --value)"
                     case "$pid" in ""|*[!0-9]*|0) exit 1 ;; esac
-                    timeout 20 "/proc/$pid/exe" status 2>/dev/null' || true)"
+                    if [ -e "/proc/$pid/exe" ]; then
+                        exe="/proc/$pid/exe"
+                    else
+                        exe="$(ps -ww -o comm= -p "$pid")"
+                    fi
+                    timeout 20 "$exe" status 2>/dev/null' || true)"
                 printf '%-22s %-18s %-12s %s\n' "$host" "${CAND_SOURCE_ID:0:16}…" \
                     "$(printf '%s' "$s" | grep -oE 'hstar=[0-9]+' | cut -d= -f2)" \
                     "$(printf '%s' "$s" | grep -oE 'sync=[a-z_]+' | cut -d= -f2)"
