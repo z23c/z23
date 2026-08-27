@@ -656,6 +656,45 @@ int test_utxo_mirror_sync(void)
                   atomic_load(&svc.delta_rows_changed) ==
                       delta_rows_before + 100);
 
+        /* A canonical rewind lowers coins_applied_height before the mirror
+         * has an inverse projection record. Both markers are next-height
+         * cursors, so cursor == frontier+1 is a real authority rewind, not an
+         * off-by-one convention to normalize. Fail closed without touching
+         * the projection; even a later frontier rebound must not auto-clear
+         * the quarantine because the same height can name a different branch. */
+        uint8_t rewind_txid[32] = {0};
+        ums_le32(rewind_txid, 211);
+        rewind_txid[31] = 0x5a;
+        UMS_CHECK("rewind: remove losing-branch h=211 authority coin",
+                  coins_kv_spend(pdb, rewind_txid, 0));
+        UMS_CHECK("rewind: lower authority frontier from 212 to 211",
+                  ums_set_frontier(pdb, 211));
+        int64_t rewind_rebuilds = atomic_load(&svc.rebuilds_run);
+        int64_t rewind_rows = db_utxo_count(&ndb);
+        UMS_CHECK("rewind: ahead mirror cursor quarantines",
+                  utxo_mirror_sync_run_once(&svc) == -1 &&
+                  atomic_load(&svc.mirror_health) ==
+                      UTXO_MIRROR_QUARANTINED);
+        UMS_CHECK("rewind: losing-branch mirror rows remain frozen",
+                  db_utxo_count(&ndb) == rewind_rows &&
+                  db_utxo_exists(&ndb, rewind_txid, 0));
+        {
+            int64_t cur = -1;
+            node_db_state_get_int(&ndb, UTXO_MIRROR_SYNC_CURSOR_KEY, &cur);
+            UMS_CHECK("rewind: cursor is never silently decremented", cur == 212);
+        }
+        UMS_CHECK("rewind: no automatic wholesale rebuild",
+                  atomic_load(&svc.rebuilds_run) == rewind_rebuilds);
+        UMS_CHECK("rewind: repeated tick is a bounded no-op",
+                  utxo_mirror_sync_run_once(&svc) == 0);
+        UMS_CHECK("rewind: authority frontier can rebound",
+                  ums_set_frontier(pdb, 212));
+        UMS_CHECK("rewind: equal-height rebound stays quarantined",
+                  utxo_mirror_sync_run_once(&svc) == 0 &&
+                  atomic_load(&svc.mirror_health) ==
+                      UTXO_MIRROR_QUARANTINED &&
+                  db_utxo_exists(&ndb, rewind_txid, 0));
+
         csr->initialized = was_init;
         csr->pindex_best_hdr = was_slot;
     }

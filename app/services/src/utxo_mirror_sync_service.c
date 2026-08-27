@@ -548,13 +548,21 @@ int64_t utxo_mirror_sync_run_once(struct utxo_mirror_sync_service *svc)
     }
 
     if (state.cursor > (int64_t)frontier) {
+        /* Both markers are next-height cursors. This is therefore an
+         * authority rewind (normally a reorg), not a harmless one-height
+         * representation difference. The forward delta journal has already
+         * discarded the losing branch at this point, so decrementing the
+         * mirror marker would bless stale rows. Keep the projection frozen
+         * until an owner-gated rebuild from a point-in-time authority copy is
+         * available. */
         atomic_store(&svc->mirror_health, UTXO_MIRROR_QUARANTINED);
         atomic_fetch_add(&svc->quarantines_total, 1);
         atomic_store(&svc->last_quarantine_unix,
                      platform_time_wall_unix());
         LOG_RETURN(-1, "utxo_mirror",
-                   "run_once: mirror cursor=%lld is ahead of frontier=%d; "
-                   "mirror quarantined",
+                   "run_once: mirror cursor=%lld is ahead of next-height "
+                   "authority frontier=%d after an authority rewind; mirror "
+                   "quarantined (cursor was not decremented)",
                    (long long)state.cursor, frontier);
     }
 
