@@ -28,6 +28,17 @@ static void market_content_native_fail(
                            message, "zmarket_content_register");
 }
 
+static bool market_content_native_hex64(const char *s)
+{
+    if (!s || strlen(s) != 64)
+        return false;
+    for (size_t i = 0; i < 64; i++)
+        if (!((s[i] >= '0' && s[i] <= '9') ||
+              (s[i] >= 'a' && s[i] <= 'f')))
+            return false;
+    return true;
+}
+
 void zcl_native_handle_market_content_register(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -110,45 +121,66 @@ void zcl_native_handle_market_content_register(
         return;
     }
 
+    const char *schema = json_get_str(json_get(&body, "schema"));
+    const char *body_mode = json_get_str(json_get(&body, "mode"));
+    const struct json_value *committed_v = json_get(&body, "committed");
+    const char *token = json_get_str(json_get(&body, "plan_token"));
+    const char *state = json_get_str(json_get(&body, "registration_state"));
+    const char *status = json_get_str(json_get(&body, "status"));
+    const char *saved_offer = json_get_str(json_get(&body, "offer_id"));
+    const char *root_hash = json_get_str(json_get(&body, "root_hash"));
+    const struct json_value *size = json_get(&body, "size_bytes");
+    const struct json_value *chunks = json_get(&body, "num_chunks");
+    const struct json_value *registered = json_get(&body, "registered_at");
+    bool wants_commit = strcmp(mode, "commit") == 0;
+    bool committed = committed_v && committed_v->type == JSON_BOOL &&
+                     json_get_bool(committed_v);
+    bool common_valid = schema &&
+        strcmp(schema, "zcl.market_content.v1") == 0 && body_mode &&
+        strcmp(body_mode, mode) == 0 && committed_v &&
+        committed_v->type == JSON_BOOL && committed == wants_commit &&
+        market_content_native_hex64(token) && state && state[0] && status &&
+        saved_offer && strcmp(saved_offer, offer_id) == 0;
+    bool mode_valid = !wants_commit
+        ? strcmp(status, "planned") == 0
+        : strcmp(status, "registered") == 0 &&
+          market_content_native_hex64(root_hash) && size &&
+          size->type == JSON_INT && json_get_int(size) >= 0 && chunks &&
+          chunks->type == JSON_INT && json_get_int(chunks) > 0 && registered &&
+          registered->type == JSON_INT && json_get_int(registered) > 0;
+    if (!common_valid || !mode_valid) {
+        json_free(&body);
+        market_content_native_fail(
+            reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
+            "BAD_RPC_BODY", "serialize",
+            "content registration returned an incomplete or inconsistent receipt");
+        return;
+    }
+
     /* Whitelist fields so a future RPC addition cannot accidentally echo the
      * private path through the native/agent result. The private path is
      * accepted only as owner input and never appears in a reply body. */
     (void)json_push_kv_str(&reply->data, "schema", "zcl.market_content.v1");
     (void)json_push_kv_str(&reply->data, "mode", mode);
-    const struct json_value *committed = json_get(&body, "committed");
-    (void)json_push_kv_bool(&reply->data, "committed",
-                            committed && committed->type == JSON_BOOL &&
-                                json_get_bool(committed));
-    const char *token = json_get_str(json_get(&body, "plan_token"));
-    if (token)
-        (void)json_push_kv_str(&reply->data, "plan_token", token);
-    const char *state = json_get_str(json_get(&body, "registration_state"));
-    if (state)
-        (void)json_push_kv_str(&reply->data, "registration_state", state);
-    const char *status = json_get_str(json_get(&body, "status"));
-    if (status)
-        (void)json_push_kv_str(&reply->data, "status", status);
-    const char *saved_offer = json_get_str(json_get(&body, "offer_id"));
-    if (saved_offer)
-        (void)json_push_kv_str(&reply->data, "offer_id", saved_offer);
-    const char *root_hash = json_get_str(json_get(&body, "root_hash"));
+    (void)json_push_kv_bool(&reply->data, "committed", committed);
+    (void)json_push_kv_str(&reply->data, "plan_token", token);
+    (void)json_push_kv_str(&reply->data, "registration_state", state);
+    (void)json_push_kv_str(&reply->data, "status", status);
+    (void)json_push_kv_str(&reply->data, "offer_id", saved_offer);
     if (root_hash)
         (void)json_push_kv_str(&reply->data, "root_hash", root_hash);
-    const struct json_value *size = json_get(&body, "size_bytes");
     if (size && size->type == JSON_INT)
         (void)json_push_kv_int(&reply->data, "size_bytes",
                                json_get_int(size));
-    const struct json_value *chunks = json_get(&body, "num_chunks");
     if (chunks && chunks->type == JSON_INT)
         (void)json_push_kv_int(&reply->data, "num_chunks",
                                json_get_int(chunks));
-    const struct json_value *registered = json_get(&body, "registered_at");
     if (registered && registered->type == JSON_INT)
         (void)json_push_kv_int(&reply->data, "registered_at",
                                json_get_int(registered));
     json_free(&body);
     /* Only the commit leg mutates; a plan reports what WOULD be bound and
      * must not claim otherwise through the mutation flag. */
-    if (committed && committed->type == JSON_BOOL && json_get_bool(committed))
+    if (committed)
         reply->error.mutated = true;
 }

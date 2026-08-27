@@ -1793,6 +1793,7 @@ static int g_app_blog_anchor_calls;
 static int g_app_msg_send_calls;
 static int g_app_token_send_calls;
 static int g_app_market_content_calls;
+static bool g_app_market_content_malformed;
 static int g_app_market_purchase_plan_calls;
 static int g_app_market_purchase_commit_calls;
 static int g_app_market_purchase_status_calls;
@@ -1873,6 +1874,10 @@ static char *app_write_stub_rpc(const char *method, const char *params_json)
     }
     if (method && strcmp(method, "zmarket_content_register") == 0) {
         g_app_market_content_calls++;
+        if (g_app_market_content_malformed)
+            return strdup("{\"schema\":\"zcl.market_content.v1\","
+                          "\"mode\":\"commit\",\"committed\":false,"
+                          "\"status\":\"registered\"}");
         bool commit = params_json &&
             strstr(params_json, "\"commit\"") != NULL;
         if (!commit)
@@ -1887,6 +1892,9 @@ static char *app_write_stub_rpc(const char *method, const char *params_json)
         return strdup("{\"schema\":\"zcl.market_content.v1\","
                       "\"mode\":\"commit\",\"committed\":true,"
                       "\"status\":\"registered\","
+                      "\"plan_token\":\"cccccccccccccccccccccccccccccccc"
+                      "cccccccccccccccccccccccccccccccc\","
+                      "\"registration_state\":\"unregistered\","
                       "\"offer_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
                       "\"root_hash\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -1988,6 +1996,7 @@ static int test_app_write_native_e2e(void)
         g_app_msg_send_calls = 0;
         g_app_token_send_calls = 0;
         g_app_market_content_calls = 0;
+        g_app_market_content_malformed = false;
         g_app_market_purchase_plan_calls = 0;
         g_app_market_purchase_commit_calls = 0;
         g_app_market_purchase_status_calls = 0;
@@ -2254,6 +2263,20 @@ static int test_app_write_native_e2e(void)
         ASSERT(content_len > 0);
         ASSERT(strstr(content_rendered, "/owner/private") == NULL);
         ASSERT(strstr(content_rendered, "content_path") == NULL);
+        zcl_command_reply_free(&reply);
+
+        /* A syntactically valid but contradictory node receipt must fail
+         * closed and must not claim mutation. This also pins the parser's
+         * ownership boundary: the committed decision is copied before the
+         * response body is released. */
+        g_app_market_content_malformed = true;
+        zcl_command_reply_init(&reply, content_spec->output_schema);
+        zcl_native_handle_market_content_register(&content_req, &reply);
+        g_app_market_content_malformed = false;
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_INTERNAL);
+        ASSERT_STR_EQ(reply.error.code, "BAD_RPC_BODY");
+        ASSERT(!reply.error.mutated);
+        ASSERT_EQ(g_app_market_content_calls, 3);
         zcl_command_reply_free(&reply);
         json_free(&content_input);
 

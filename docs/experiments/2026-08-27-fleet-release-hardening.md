@@ -183,3 +183,13 @@ git diff --check              PASS
 The transaction fixture proves that all stages finish before the first
 activation, any stage failure causes zero remote restarts, activation order is
 stable, and a failed activation does not restart later hosts.
+
+Review of the subsequent market-content confirmation change found that the
+native adapter retained a pointer into a JSON response after freeing that
+response and accepted incomplete or contradictory objects as successful
+receipts. The adapter now copies the mutation decision before release and
+requires the exact mode-specific schema, mode, committed flag, status, offer,
+token, state, and commit receipt fields. A contradictory commit fixture is
+refused with `BAD_RPC_BODY`, `mutated=false`; the exact native contract group
+passes. The release remains held pending atomic registration-state comparison,
+database-error separation, and same-second state-identity hardening.
