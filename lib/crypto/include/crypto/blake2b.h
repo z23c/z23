@@ -66,7 +66,8 @@ int blake2b(void *out, size_t outlen, const void *in, size_t inlen,
             const void *key, size_t keylen);
 
 /* Vectorized BLAKE2b for Equihash batch hashing.
- * 3-tier dispatch: AVX-512 (8-way) -> AVX2 (4-way) -> scalar */
+ * x86-64: AVX-512 (8-way) -> AVX2 (4-way) -> scalar.
+ * arm64:  NEON (4-way) -> scalar; the 8-way tier has no NEON counterpart. */
 void equihash_generate_hash_batch4(
     const struct blake2b_ctx *base_state,
     const uint32_t indices[4],
@@ -93,6 +94,12 @@ void equihash_generate_hash_batch8(
 enum blake2b_batch_impl {
     BLAKE2B_BATCH_IMPL_AUTO   = -1,
     BLAKE2B_BATCH_IMPL_SCALAR = 0,
+    /* Tier values 1 and 2 name THIS HOST's 4-way and 8-way SIMD tiers, not an
+     * instruction set: 1 is AVX2 on x86-64 and NEON on arm64 (both 4-way), and
+     * 2 exists only on x86-64 (AVX-512F, 8-way) — no 8-way NEON tier, so a
+     * request for 2 on arm64 narrows to 1. The names are kept for the x86
+     * callers that already ship against them; the string returned by
+     * equihash_blake2b_batch_implementation() is always the honest one. */
     BLAKE2B_BATCH_IMPL_AVX2   = 1,
     BLAKE2B_BATCH_IMPL_AVX512 = 2
 };
