@@ -826,7 +826,6 @@ void event_install_crash_handler(void)
     sigaction(SIGFPE, &sa, NULL);
     sigaction(SIGILL, &sa, NULL);
 }
-
 /* ── Peer state machine ──────────────────────────────────── */
 
 const char *peer_state_name(enum peer_state state)

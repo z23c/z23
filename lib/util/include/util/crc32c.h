@@ -33,9 +33,8 @@ uint32_t zcl_crc32c_sw(const void *data, size_t len);
  * self-checked): the SSE4.2 path on x86, the FEAT_CRC32 path on arm64. */
 bool zcl_crc32c_hw_available(void);
 
-/* "hardware-sse4.2" when a self-checked hardware tier is active — the label
- * is the tier marker this module has always reported and covers both the
- * x86 SSE4.2 and the arm64 FEAT_CRC32 paths — else "software-table". */
+/* "hardware-sse4.2" or "hardware-armv8-crc32" when the corresponding
+ * self-checked hardware tier is active; else "software-table". */
 const char *zcl_crc32c_impl_name(void);
 
 #endif /* ZCL_UTIL_CRC32C_H */

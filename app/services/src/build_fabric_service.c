@@ -15,16 +15,8 @@
 
 enum { BUILD_FABRIC_ACTION_LIMIT = 256 };
 
-/* BUILD_FABRIC_ACTION_LIMIT * sizeof(struct db_build_action) is ~516 KiB.
- * That buffer must never live in an automatic: the callers run on ordinary
- * worker threads (the supervisor tick-runner among them) whose platform
- * default stack is 512 KiB on macOS, so one frame this large drives the stack
- * pointer past the guard page on entry. The kernel then cannot deliver the
- * resulting fault — a worker thread has no sigaltstack — and falls back to
- * its "process has trashed its stack" remedy: force SIGILL to SIG_DFL and
- * kill the process. The node dies with signal 4 / exit 132, no handler runs,
- * and the crash report blames whatever thread the signal happened to land on.
- * Always allocate this array on the heap. */
+/* The 256-entry action array is about 516 KiB, larger than the usable portion
+ * of a default macOS worker stack. Keep every scan buffer on the heap. */
 static struct db_build_action *bf_actions_scratch(const char *label)
 {
     return zcl_malloc(BUILD_FABRIC_ACTION_LIMIT *
@@ -352,10 +344,8 @@ struct zcl_result build_fabric_submit(struct node_db *ndb,
         free(actions);
         return ZCL_ERR(-1, "build job has no actions");
     }
-    if (!node_db_begin(ndb)) {
-        free(actions);
-        return ZCL_ERR(-1, "cannot begin build submit transaction");
-    }
+    if (!node_db_begin(ndb)) { free(actions); return ZCL_ERR(
+        -1, "cannot begin build submit transaction"); }
     bool ok = true;
     for (int i = 0; i < count && ok; i++) {
         if (bf_terminal(actions[i].state)) {
@@ -417,10 +407,8 @@ struct zcl_result build_fabric_claim(
         next.started_at = 0;
         next.finished_at = 0;
         next.updated_at = now;
-        if (!node_db_begin(ndb)) {
-            free(queued);
-            return ZCL_ERR(-1, "cannot begin build claim transaction");
-        }
+        if (!node_db_begin(ndb)) { free(queued); return ZCL_ERR(
+            -1, "cannot begin build claim transaction"); }
         bool ok = db_build_action_claim_queued(ndb, &next);
         if (ok) {
             (void)snprintf(job.state, sizeof(job.state), "CLAIMED");
@@ -565,10 +553,8 @@ struct zcl_result build_fabric_recover_expired(
         (void)snprintf(next.last_error, sizeof(next.last_error),
                        "lease-expired-requeued");
         next.updated_at = now;
-        if (!node_db_begin(ndb)) {
-            free(expired);
-            return ZCL_ERR(-1, "cannot begin expired-lease recovery");
-        }
+        if (!node_db_begin(ndb)) { free(expired); return ZCL_ERR(
+            -1, "cannot begin expired-lease recovery"); }
         bool ok = db_build_action_save_leased(ndb, &next, prior_state,
                                               prior_lease);
         if (ok) {
@@ -647,10 +633,8 @@ struct zcl_result build_fabric_cancel(struct node_db *ndb,
         return ZCL_ERR(-1, "cannot allocate build action scan buffer");
     int count = db_build_job_actions(ndb, job_id, actions,
                                      BUILD_FABRIC_ACTION_LIMIT);
-    if (!node_db_begin(ndb)) {
-        free(actions);
-        return ZCL_ERR(-1, "cannot begin cancellation transaction");
-    }
+    if (!node_db_begin(ndb)) { free(actions); return ZCL_ERR(
+        -1, "cannot begin cancellation transaction"); }
     bool ok = true;
     for (int i = 0; i < count && ok; i++) {
         if (!bf_terminal(actions[i].state)) {
@@ -777,13 +761,9 @@ struct zcl_result build_fabric_receipt_accept(
               db_build_action_save_leased(ndb, &action, "VERIFYING",
                                            receipt->lease_id);
     struct db_build_action *actions = bf_actions_scratch("build.receipt.actions");
-    int count = 0;
-    if (!actions) {
-        ok = false;
-    } else {
-        count = db_build_job_actions(ndb, receipt->job_id, actions,
-                                     BUILD_FABRIC_ACTION_LIMIT);
-    }
+    int count = actions && ok ? db_build_job_actions(
+        ndb, receipt->job_id, actions, BUILD_FABRIC_ACTION_LIMIT) : 0;
+    ok = ok && actions != NULL;
     bool all_accepted = passed && count > 0;
     for (int i = 0; i < count; i++)
         if (strcmp(actions[i].state, "ACCEPTED") != 0 &&

@@ -321,7 +321,7 @@ static void sha256_transform_shani(uint32_t *state, const unsigned char *data)
  * -march at all, so a compile-time guard here deleted the hardware transform
  * from the release binary on every CPU that has the extension — silently,
  * with no warning and no runtime signal. The per-function
- * `target("sha2")` attribute is what permits the SHA-extension opcodes to be
+ * `target("+sha2")` attribute is what permits the SHA-extension opcodes to be
  * emitted from a baseline translation unit. The binary stays identical
  * across build hosts and the accelerated path stays reachable on the
  * portable build; do not narrow this to a compile-time predicate.
@@ -334,7 +334,7 @@ static _Atomic int sha_arm_available = -1;
 
 /* Forward declarations for the self-test in detect_sha_arm. */
 static void sha256_transform_portable(uint32_t *s, const unsigned char *chunk);
-__attribute__((target("sha2")))
+__attribute__((target("+sha2")))
 static void sha256_transform_arm(uint32_t *state, const unsigned char *data);
 
 /* Round constants for the four rounds each K slice covers. Same values the
@@ -426,7 +426,7 @@ static inline int sha_arm_state(void)
  * h2q needs the PRE-update ABCD as its second operand — hence the save.
  * Message extension: Wq[j] = su1(su0(Wq[j-4], Wq[j-3]), Wq[j-2], Wq[j-1]);
  * the sigma rotations are internal to vsha256su0q/su1q. */
-__attribute__((target("sha2")))
+__attribute__((target("+sha2")))
 static void sha256_transform_arm(uint32_t *state, const unsigned char *data)
 {
     uint32x4_t abcd = vld1q_u32(&state[0]);
