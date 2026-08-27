@@ -40,6 +40,8 @@ boot_zcode_dht_offence(enum vcs_zcode_dht_reject_reason reason) {
   case VCS_ZCODE_DHT_REJECT_PLAINTEXT:
   case VCS_ZCODE_DHT_REJECT_BACKPRESSURE:
     return PEER_OFFENCE_NONE;
+  case VCS_ZCODE_DHT_REJECT_COUNT:
+    break; /* unreachable sentinel: reasons are always below _COUNT */
   }
   return PEER_OFFENCE_NONE;
 }
@@ -76,6 +78,8 @@ enum boot_zcode_dht_frame_verdict boot_zcode_dht_frame_classify(
   case VCS_ZCODE_DHT_REJECT_UNAUTHORIZED:
   case VCS_ZCODE_DHT_REJECT_BACKPRESSURE:
     return BOOT_FRAME_DECODE_DETERMINISTIC;
+  case VCS_ZCODE_DHT_REJECT_COUNT:
+    break; /* unreachable sentinel: reasons are always below _COUNT */
   }
   return BOOT_FRAME_DECODE_DETERMINISTIC;
 }
