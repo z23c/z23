@@ -552,7 +552,7 @@ static int test_watcher_publication_containment(void)
             "service ABI changed; select DEV_RESTART",
             why_not_live, sizeof(why_not_live),
             next_command, sizeof(next_command));
-        ASSERT(strcmp(next_command, "make -j\"$(nproc)\" dev-bin") == 0);
+        ASSERT(strcmp(next_command, "make -j\"$(getconf _NPROCESSORS_ONLN)\" dev-bin") == 0);
         zcl_devloop_hotswap_guidance(
             "passed", "resident_commit", "",
             why_not_live, sizeof(why_not_live),
