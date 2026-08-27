@@ -654,8 +654,11 @@ trap 'rmdir "$lock" 2>/dev/null || true' EXIT HUP INT TERM
 chmod 555 "$incoming/z23" "$incoming/zclassic23-package-verify" \
     "$incoming/zclassic23-package-verify-dev"
 chmod 444 "$incoming/MANIFEST.sha256"
-chmod 555 "$incoming"
+# Rename while the directory is still writable — macOS refuses to move a
+# write-protected directory (Linux checks only the parents) — then publish
+# the read-only mode at its final name.
 mv "$incoming" "$root"
+chmod 555 "$root"
 REMOTE_STAGE_FINALIZE
     then
         rc=1
@@ -844,8 +847,10 @@ if [ -d "$node_incoming" ]; then
     chmod 555 "$node_incoming/z23" "$node_incoming/zclassic23-package-verify" \
         "$node_incoming/zclassic23-package-verify-dev"
     chmod 444 "$node_incoming/MANIFEST.sha256"
-    chmod 555 "$node_incoming"
+    # Rename while writable, then publish the read-only mode (same macOS
+    # directory-rename constraint as the primary publish above).
     mv "$node_incoming" "$release_root"
+    chmod 555 "$release_root"
 fi
 [ "$(sha256sum < "$release_root/MANIFEST.sha256" | awk '{print $1}')" = "$manifest_sha" ] &&
 [ "$(sha256sum < "$release_root/z23" | awk '{print $1}')" = "$want_sha" ] &&

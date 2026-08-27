@@ -181,17 +181,17 @@ static bool sidecars_absent(const char *path)
 
 static bool open_bundle_descriptor(int artifact_fd, sqlite3 **bundle_db)
 {
-    /* One fd-naming shim for both hosts (platform/fd_path.h): the pinned
-     * artifact fd stays the authority; this URI only reopens it read-only.
-     * Measured on darwin: /dev/fd/N + immutable=1 reads the pinned inode. */
-    char fd_name[64];
-    if (!platform_fd_path(fd_name, sizeof(fd_name), artifact_fd, NULL)) {
-        LOG_FAIL(INSTALL_SUBSYS, "bundle fd cannot be named");
+    /* The bundle is admitted through the pinned descriptor, never a path
+     * lookup: SQLite reopens <fd-root>/<fd> (platform_fd_path) with
+     * immutable=1, and every read is fenced by the descriptor identity
+     * checks in artifact_evidence_open_impl. */
+    char fd_ref[32];
+    if (!platform_fd_path(fd_ref, sizeof(fd_ref), artifact_fd, NULL)) {
+        LOG_FAIL(INSTALL_SUBSYS, "bundle descriptor path too long");
         return false;
     }
-    char uri[128];
-    int n = snprintf(uri, sizeof(uri),
-                     "file:%s?mode=ro&immutable=1", fd_name);
+    char uri[96];
+    int n = snprintf(uri, sizeof(uri), "file:%s?mode=ro&immutable=1", fd_ref);
     if (n <= 0 || (size_t)n >= sizeof(uri))
         LOG_FAIL(INSTALL_SUBSYS, "bundle URI too long");
     int rc = sqlite3_open_v2(uri, bundle_db,
@@ -199,10 +199,8 @@ static bool open_bundle_descriptor(int artifact_fd, sqlite3 **bundle_db)
                                  SQLITE_OPEN_NOMUTEX,
                              NULL);
     if (rc != SQLITE_OK)
-        LOG_WARN(INSTALL_SUBSYS,
-                 "bundle open failed: %s (uri=%s errno=%s)",
-                 *bundle_db ? sqlite3_errmsg(*bundle_db) : "no handle",
-                 fd_name, strerror(errno));
+        LOG_WARN(INSTALL_SUBSYS, "bundle open failed: %s",
+                 *bundle_db ? sqlite3_errmsg(*bundle_db) : "no handle");
     if (rc != SQLITE_OK)
         return false;
     int defensive = 0;

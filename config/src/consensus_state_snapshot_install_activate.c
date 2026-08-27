@@ -386,9 +386,9 @@ static bool activate_backup_prior_generation(sqlite3 *progress_db,
     reserved_identity = true;
     reserved_dev = st.st_dev;
     reserved_ino = st.st_ino;
-    /* A rename cannot redirect either SQLite open to a replacement inode. */
-    if (!platform_fd_path(destination_name_path, sizeof(destination_name_path),
-                          fd, NULL)) {
+    /* A rename cannot redirect either SQLite open; see platform_fd_writable_path. */
+    if (!platform_fd_writable_path(destination_name_path,
+                                   sizeof(destination_name_path), fd)) {
         (void)close(fd);
         fd = -1;
         goto cleanup;

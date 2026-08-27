@@ -101,6 +101,18 @@ start_old() {
     "$tmp/old" -fixture-node >/dev/null 2>&1 &
     echo $! > "$pidfile"
 }
+
+# Hash the executable a live pid is running. Linux answers from
+# /proc/<pid>/exe; darwin has no procfs, so resolve the running binary
+# through ps and hash that file (same identity assertion, weaker read).
+live_exe_sha() {
+    if [ -r "/proc/$1/exe" ]; then
+        sha256sum < "/proc/$1/exe" | awk '{print $1}'
+    else
+        comm="$(ps -ww -o comm= -p "$1")" || return 1
+        sha256sum < "$comm" | awk '{print $1}'
+    fi
+}
 stage_release() {
     [ ! -d "$release" ] || chmod 700 "$release"
     [ ! -d "$incoming" ] || chmod 700 "$incoming"
@@ -139,7 +151,7 @@ reset_fixture() {
 assert_old_selected() {
     grep -qx 'prior ship selection' "$dropin"
     live_pid="$(cat "$pidfile")"
-    [ "$(sha256sum < "/proc/$live_pid/exe" | awk '{print $1}')" = "$old_sha" ]
+    [ "$(live_exe_sha "$live_pid")" = "$old_sha" ]
 }
 
 # An existing immutable identity with corrupt content must be refused in place.
@@ -193,7 +205,7 @@ done
 reset_fixture
 invoke_activate >/dev/null
 live_pid="$(cat "$pidfile")"
-[ "$(sha256sum < "/proc/$live_pid/exe" | awk '{print $1}')" = "$new_sha" ]
+[ "$(live_exe_sha "$live_pid")" = "$new_sha" ]
 [ "$(sha256sum < "$release/zclassic23-package-verify" | awk '{print $1}')" = "$new_sha" ]
 grep -Fq "ExecStart=\"$release/z23\"" "$dropin"
 

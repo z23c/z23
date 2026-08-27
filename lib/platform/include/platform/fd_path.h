@@ -49,4 +49,23 @@ static inline bool platform_dirfd_child_path(char *out, size_t out_size,
 #endif
 }
 
+/* The path a SQLite WRITER can open for creation through an already-pinned
+ * descriptor (VACUUM INTO target, journal rebuild). Linux: /proc/self/fd/<fd>,
+ * the kernel-resolved descriptor path, immune to every rename. Darwin:
+ * /dev/fd/<fd> is a dup of the descriptor and cannot be created through, so
+ * the descriptor's own F_GETPATH is used — a path lookup the caller must fence
+ * by re-verifying the pinned dev/ino after the write. */
+static inline bool platform_fd_writable_path(char *out, size_t out_size, int fd)
+{
+#if defined(__APPLE__)
+    char resolved[4096];
+    if (fcntl(fd, F_GETPATH, resolved) != 0)
+        return false;
+    int written = snprintf(out, out_size, "%s", resolved);
+    return written >= 0 && (size_t)written < out_size;
+#else
+    return platform_fd_path(out, out_size, fd, NULL);
+#endif
+}
+
 #endif

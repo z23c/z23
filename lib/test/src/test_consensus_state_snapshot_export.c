@@ -11,6 +11,7 @@
 #include "jobs/tip_finalize_stage.h"
 #include "chain/checkpoints.h"
 #include "crypto/sha3.h"
+#include "platform/os_proc.h"
 #include "sapling/incremental_merkle_tree.h"
 #include "storage/anchor_kv.h"
 #include "storage/checkpoint_ladder.h"
@@ -103,20 +104,49 @@ static void cse_final_race_after_create(void *opaque, int staging_fd)
     f->ok = wrote && closed;
 }
 
+/* The staging link count the exporter must be holding while this hook runs:
+ * an anonymous O_TMPFILE inode on Linux, the single named staging link on
+ * Darwin (mirrors consensus_export_staging_nlink_valid). */
+static nlink_t cse_staging_expected_nlink(void)
+{
+#if defined(__APPLE__)
+    return 1;
+#else
+    return 0;
+#endif
+}
+
 static void cse_staging_link_after_create(void *opaque, int fd)
 {
     struct cse_staging_link_fixture *f = opaque;
     f->ran = true;
     struct stat dir_st, st;
     if (fd < 0 || fstat(f->dirfd, &dir_st) != 0 || fstat(fd, &st) != 0 ||
-        !S_ISREG(st.st_mode) || st.st_nlink != 0 ||
+        !S_ISREG(st.st_mode) ||
+        st.st_nlink != cse_staging_expected_nlink() ||
         st.st_dev != dir_st.st_dev)
         return;
+#if defined(__APPLE__)
+    /* Darwin stages a named O_EXCL sibling (CONSENSUS_STATE_STAGE_PREFIX in
+     * consensus_state_snapshot_export_internal.h) — there is no anonymous
+     * inode to grab, so the equivalent attacker move hardlinks the staging
+     * NAME into the output directory. The staging link count then reads 2 and
+     * the seal must refuse the publication. */
+    char path[4096];
+    if (fcntl(fd, F_GETPATH, path) != 0)
+        return;
+    const char *name = strrchr(path, '/');
+    static const char prefix[] = ".zcl-consensus-candidate-";
+    if (!name || strncmp(name + 1, prefix, sizeof(prefix) - 1) != 0)
+        return;
+    f->ok = linkat(f->dirfd, name + 1, f->dirfd, f->alias, 0) == 0;
+#else
     char source[64];
     int n = snprintf(source, sizeof(source), "/proc/self/fd/%d", fd);
     f->ok = n > 0 && (size_t)n < sizeof(source) &&
         linkat(AT_FDCWD, source, f->dirfd, f->alias,
                AT_SYMLINK_FOLLOW) == 0;
+#endif
 }
 
 static void cse_retain_staging_writer(void *opaque, int fd)
@@ -127,7 +157,8 @@ static void cse_retain_staging_writer(void *opaque, int fd)
     int flags = fd >= 0 ? fcntl(fd, F_GETFL) : -1;
     if (flags < 0 || (flags & O_ACCMODE) != O_RDWR ||
         fstat(f->dirfd, &dir_st) != 0 || fstat(fd, &st) != 0 ||
-        !S_ISREG(st.st_mode) || st.st_nlink != 0 ||
+        !S_ISREG(st.st_mode) ||
+        st.st_nlink != cse_staging_expected_nlink() ||
         st.st_dev != dir_st.st_dev)
         return;
     f->writer_fd = fcntl(fd, F_DUPFD_CLOEXEC,
@@ -256,7 +287,16 @@ static void cse_chain_corpus_digest(uint8_t hash[2][32], uint8_t out[32])
 
 static bool cse_binary_digest(uint8_t out[32])
 {
+#if defined(__APPLE__)
+    /* Darwin has no /proc/self/exe; hash the same running image the
+     * production receipt readers resolve (platform/os_proc.h). */
+    char exe_path[4096];
+    if (!os_proc_exe_path(exe_path, sizeof(exe_path)))
+        return false;
+    int fd = open(exe_path, O_RDONLY | O_CLOEXEC);
+#else
     int fd = open("/proc/self/exe", O_RDONLY | O_CLOEXEC);
+#endif
     if (fd < 0)
         return false;
     struct sha3_256_ctx ctx;
