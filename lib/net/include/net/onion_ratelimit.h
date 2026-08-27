@@ -47,7 +47,9 @@ enum onion_route_class {
     ONION_ROUTE_EXPENSIVE = 2,
 };
 
-/* Admission verdict for one request. */
+/* Admission verdict for one request. RATE_LIMITED is the unescalated
+ * budget verdict; while escalated the puzzle gate owns admission and a
+ * bare 429 is never emitted on an expensive route. */
 enum onion_admit_result {
     ONION_ADMIT_OK = 0,           /* proceed to normal routing            */
     ONION_ADMIT_RATE_LIMITED = 1, /* 429 — this tier's budget is spent    */

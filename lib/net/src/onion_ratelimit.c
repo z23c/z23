@@ -469,15 +469,24 @@ enum onion_admit_result onion_ratelimit_admit(
                    ? ONION_ADMIT_OK : ONION_ADMIT_RATE_LIMITED;
     }
 
-    if (!budget_check(&g_expensive_budget,
-                      ONION_EXPENSIVE_MAX_REQUESTS_PER_SECOND, true))
-        return ONION_ADMIT_RATE_LIMITED;
+    bool budget_admitted = budget_check(&g_expensive_budget,
+                                        ONION_EXPENSIVE_MAX_REQUESTS_PER_SECOND,
+                                        true);
 
     if (!atomic_load(&g_expensive_escalated))
-        return ONION_ADMIT_OK;
+        return budget_admitted ? ONION_ADMIT_OK : ONION_ADMIT_RATE_LIMITED;
 
-    /* Escalated: an admitted budget slot is not enough — this route also
-     * needs a solved, route-bound, single-use puzzle. */
+    /* Escalated: the budget's rejection is not binding — this route is
+     * gated by a solved, route-bound, single-use puzzle instead. Two
+     * lockout traps this ordering avoids, both structural:
+     *   - rejecting on the budget before the puzzle check would let a
+     *     flood eat every per-second slot and turn honest solvers away
+     *     with a bare 429 before they ever see the challenge that would
+     *     admit them;
+     *   - skipping the budget for puzzle-less requests would let that
+     *     same flood read as quiet and flap the hysteresis. Feeding the
+     *     budget on every escalated attempt keeps the saturation windows
+     *     honest. */
     atomic_fetch_add(&g_puzzle_required_total, 1);
 
     char ts_str[32] = "", nonce_str[32] = "";

@@ -3516,6 +3516,99 @@ int test_net(void)
             }
         }
 
+        printf("onion_ratelimit: escalated flood never answers a bare 429 and cannot starve an honest solver... ");
+        {
+            /* Re-escalate: five saturated windows, then the trip. */
+            int64_t base2 = t0 + 5000;
+            int cap = onion_ratelimit_test_cap(ONION_ROUTE_EXPENSIVE);
+            for (int w = 0; w < 5; w++) {
+                onion_fake_clock_set_secs(&fake, base2 + w);
+                for (int i = 0; i < 200; i++)
+                    (void)onion_ratelimit_admit("GET", "/search?q=flood",
+                                                NULL, 0, NULL);
+            }
+            onion_fake_clock_set_secs(&fake, base2 + 5);
+            (void)onion_ratelimit_admit("GET", "/search?q=trigger", NULL, 0,
+                                        NULL);
+
+            /* One saturated escalated second: more puzzle-less requests
+             * than the whole budget. Every answer must be a challenge —
+             * the old ordering rejected on the budget first, so a flood
+             * could eat every slot and honest solvers would never even be
+             * offered the puzzle that admits them. The final challenge is
+             * the one the honest client solves. */
+            struct onion_pow_challenge solver_challenge = {0};
+            bool all_challenged = true;
+            for (int i = 0; i <= cap + 10; i++) {
+                enum onion_admit_result r = onion_ratelimit_admit(
+                    "GET", "/search?q=flood", NULL, 0,
+                    i == cap + 10 ? &solver_challenge : NULL);
+                if (r != ONION_ADMIT_POW_REQUIRED)
+                    all_challenged = false;
+            }
+
+            /* The budget is long spent past its cap; a valid solve must
+             * still admit. */
+            bool solved = false;
+            uint64_t nonce = 0;
+            int64_t ts = (int64_t)platform_time_wall_time_t();
+            uint8_t sseed[32], stoken[32];
+            if (all_challenged && solver_challenge.seed_hex[0]) {
+                onion_hex_decode32(solver_challenge.seed_hex, sseed);
+                onion_hex_decode32(solver_challenge.token_hex, stoken);
+                solved = puzzle_solve(sseed, stoken, ts,
+                                      solver_challenge.bits, &nonce);
+            }
+            char solver_path[256] = "";
+            if (solved)
+                snprintf(solver_path, sizeof(solver_path),
+                         "/search?q=mine&pow_ts=%lld&pow_nonce=%llu",
+                         (long long)ts, (unsigned long long)nonce);
+            enum onion_admit_result solver_r = solved
+                ? onion_ratelimit_admit("GET", solver_path, NULL, 0, NULL)
+                : ONION_ADMIT_RATE_LIMITED;
+            if (all_challenged && solved && solver_r == ONION_ADMIT_OK)
+                printf("OK\n");
+            else {
+                printf("FAIL (all_challenged=%d solved=%d result=%d)\n",
+                       all_challenged, solved, (int)solver_r);
+                failures++;
+            }
+        }
+
+        printf("onion_ratelimit: a puzzle-less flood cannot read as quiet and un-escalate... ");
+        {
+            /* Sixteen more saturated escalated seconds of puzzle-less
+             * flood — well past the 15-clear-window hysteresis. Feeding
+             * the budget on every escalated attempt (even refused ones)
+             * is what keeps these windows honest: if puzzle-less traffic
+             * skipped the counter, a flood would read as quiet, fire the
+             * de-escalation, and toggle the guard off without ever
+             * stopping. */
+            bool found_before = false;
+            int64_t before_deesc = onion_dump_int("deescalate_total",
+                                                  &found_before);
+            int64_t base3 = t0 + 5000;
+            for (int s = 6; s <= 21; s++) {
+                onion_fake_clock_set_secs(&fake, base3 + s);
+                for (int i = 0; i < 30; i++)
+                    (void)onion_ratelimit_admit("GET", "/search?q=flood",
+                                                NULL, 0, NULL);
+            }
+            struct json_value dump = {0};
+            json_init(&dump);
+            bool have_dump = onion_ratelimit_dump_state_json(&dump, NULL);
+            const struct json_value *esc =
+                have_dump ? json_get(&dump, "expensive_escalated") : NULL;
+            const struct json_value *deesc =
+                have_dump ? json_get(&dump, "deescalate_total") : NULL;
+            bool ok = esc && json_get_bool(esc) && deesc &&
+                       json_get_int(deesc) == before_deesc;
+            json_free(&dump);
+            if (ok) printf("OK\n");
+            else { printf("FAIL\n"); failures++; }
+        }
+
         /* Never leak the virtual clock or admission state into later
          * tests in this process. */
         clock_reset_default();
