@@ -160,6 +160,11 @@ bool net_send_over_budget(const struct p2p_node *node)
  * thread without a new lock. */
 static _Atomic uint64_t g_net_addr_push_alloc_fail = 0;
 static _Atomic uint64_t g_net_ban_alloc_fail = 0;
+/* Inserts REFUSED by the ban-table cap: the table held only manual entries,
+ * none of which may be evicted for a provoked auto-ban (see ban_addr_ex()).
+ * Counted, never acted on — the refused peer still takes the disconnect and
+ * the incident record; only the address-ban slot is declined. */
+static _Atomic uint64_t g_net_ban_table_full = 0;
 
 size_t net_send_peer_bytes_cap(void)
 {
@@ -1299,6 +1304,15 @@ void net_manager_free(struct net_manager *nm)
 
     free(nm->local_hosts);
     free(nm->local_host_info);
+
+    /* Flush what the AUTO-write debounce held back (see
+     * ban_db_write_due_locked()), or a restart would amnesty the very bans
+     * the debounce was still holding. Must run while nm->banned[] and
+     * cs_banned are still alive — ban_db_write() walks the table under the
+     * mutex, and stamps/clears the debounce state on success. */
+    if (nm->ban_db_dirty && nm->datadir)
+        ban_db_write(nm, nm->datadir);
+
     free(nm->banned);
     free(nm->whitelisted);
     free(nm->whitelist_prefix);
@@ -1501,6 +1515,48 @@ struct p2p_node *connect_node(struct net_manager *nm,
 
 /* --- ban management --- */
 
+/* Debounce window for AUTO banlist.dat writes (seconds). Manual writes are
+ * never debounced. */
+#define NET_BAN_DB_WRITE_DEBOUNCE_SECS 10
+
+/* Soonest-expiring AUTO entry (score_at_ban != 0) — the one an at-cap insert
+ * may drop. Ties resolve to the lowest index, i.e. the oldest insert, so a
+ * same-ban_until flood loses its oldest members first. Manual entries
+ * (score_at_ban == 0 — every ban_addr() call) are skipped, NEVER evicted:
+ * an operator's ban losing its slot to an attacker's flood is exactly
+ * backwards. Returns SIZE_MAX when the table holds only manual entries; the
+ * caller then refuses the insert. Caller holds cs_banned. */
+static size_t ban_evict_candidate_locked(const struct net_manager *nm)
+{
+    size_t victim = SIZE_MAX;
+    for (size_t i = 0; i < nm->num_banned; i++) {
+        if (nm->banned[i].score_at_ban == 0)
+            continue;
+        if (victim == SIZE_MAX ||
+            nm->banned[i].ban_until < nm->banned[victim].ban_until)
+            victim = i;
+    }
+    return victim;
+}
+
+/* Decide (under cs_banned, which guards the debounce fields) whether this
+ * mutation must reach banlist.dat now. Manual bans always do — an operator's
+ * ban/unban is wasted if the table is not immediately consistent. AUTO bans
+ * write at most once per NET_BAN_DB_WRITE_DEBOUNCE_SECS; the rest mark the
+ * table dirty so net_manager_free() can flush what the debounce held back.
+ * A manager without a datadir has nothing to write. */
+static bool ban_db_write_due_locked(struct net_manager *nm, int32_t score_at_ban)
+{
+    if (!nm->datadir || score_at_ban == 0)
+        return true;
+    int64_t now = GetTime();
+    if (now - nm->ban_db_last_write_unix < NET_BAN_DB_WRITE_DEBOUNCE_SECS) {
+        nm->ban_db_dirty = true;
+        return false;
+    }
+    return true;
+}
+
 bool is_banned(struct net_manager *nm, const struct net_addr *addr)
 {
     /* Localhost is NEVER banned — it's our own zclassicd */
@@ -1537,7 +1593,16 @@ bool is_banned(struct net_manager *nm, const struct net_addr *addr)
 
 /* Shared implementation behind ban_addr() (external/manual bans, score=0)
  * and peer_misbehaving()'s auto-ban (real score + offence reason). Persists
- * to banlist.dat when nm->datadir is set (see connman_load_addrman()). */
+ * to banlist.dat when nm->datadir is set (see connman_load_addrman()).
+ *
+ * Two clamps bound what a ban storm costs, both attacker-influenced state:
+ *  - the table stops at NET_BAN_TABLE_MAX entries. At the cap an insert
+ *    evicts the soonest-expiring AUTO entry (ban_evict_candidate_locked());
+ *    with only manual entries left, the auto insert is REFUSED and counted
+ *    in g_net_ban_table_full — the table is left unchanged.
+ *  - AUTO writes to banlist.dat are debounced (ban_db_write_due_locked()),
+ *    so a storm is O(1) disk writes per window instead of one whole-table
+ *    re-serialization per insert. */
 static void ban_addr_ex(struct net_manager *nm, const struct net_addr *addr,
                         int64_t ban_offset, bool since_epoch,
                         int32_t score_at_ban, const char *reason)
@@ -1554,14 +1619,32 @@ static void ban_addr_ex(struct net_manager *nm, const struct net_addr *addr,
             nm->banned[i].score_at_ban = score_at_ban;
             snprintf(nm->banned[i].reason, sizeof(nm->banned[i].reason),
                      "%s", reason ? reason : "");
+            bool write_now = ban_db_write_due_locked(nm, score_at_ban);
             zcl_mutex_unlock(&nm->cs_banned);
-            if (nm->datadir) ban_db_write(nm, nm->datadir);
+            if (nm->datadir && write_now) ban_db_write(nm, nm->datadir);
             return;
         }
     }
 
-    if (nm->num_banned >= nm->banned_cap) {
+    if (nm->num_banned >= NET_BAN_TABLE_MAX) {
+        size_t victim = ban_evict_candidate_locked(nm);
+        if (victim == SIZE_MAX) {
+            atomic_fetch_add(&g_net_ban_table_full, 1);
+            zcl_mutex_unlock(&nm->cs_banned);
+            LOG_WARN("net",
+                     "ban_addr_ex: ban table at cap (%d) with only manual "
+                     "entries — auto ban refused, table unchanged "
+                     "(reason=%s, refusals=%llu)",
+                     NET_BAN_TABLE_MAX, reason ? reason : "",
+                     (unsigned long long)atomic_load(&g_net_ban_table_full));
+            return;
+        }
+        nm->banned[victim] = nm->banned[nm->num_banned - 1];
+        nm->num_banned--;
+    } else if (nm->num_banned >= nm->banned_cap) {
         size_t newcap = nm->banned_cap ? nm->banned_cap * 2 : 64;
+        if (newcap > NET_BAN_TABLE_MAX)
+            newcap = NET_BAN_TABLE_MAX;
         struct ban_entry *tmp = zcl_realloc(nm->banned, newcap * sizeof(*tmp), "ban_list");
         if (!tmp) {
             zcl_mutex_unlock(&nm->cs_banned);
@@ -1582,9 +1665,10 @@ static void ban_addr_ex(struct net_manager *nm, const struct net_addr *addr,
     snprintf(nm->banned[nm->num_banned].reason,
              sizeof(nm->banned[nm->num_banned].reason), "%s", reason ? reason : "");
     nm->num_banned++;
+    bool write_now = ban_db_write_due_locked(nm, score_at_ban);
     zcl_mutex_unlock(&nm->cs_banned);
 
-    if (nm->datadir) ban_db_write(nm, nm->datadir);
+    if (nm->datadir && write_now) ban_db_write(nm, nm->datadir);
 }
 
 void ban_addr(struct net_manager *nm, const struct net_addr *addr,
@@ -1954,6 +2038,14 @@ bool ban_db_write(struct net_manager *nm, const char *datadir)
         LOG_WARN("net", "ban_db_write: %s", wr.message);
         return false;
     }
+    /* Success restarts the AUTO-write debounce clock and clears the flag a
+     * debounced mutation left behind — so unban_addr()/clear_banned(), which
+     * always write, keep the file immediately consistent. Under cs_banned:
+     * both fields are declared cs_banned-guarded. */
+    zcl_mutex_lock(&nm->cs_banned);
+    nm->ban_db_last_write_unix = now;
+    nm->ban_db_dirty = false;
+    zcl_mutex_unlock(&nm->cs_banned);
     return true;
 }
 
@@ -2003,7 +2095,7 @@ bool ban_db_read(struct net_manager *nm, const char *datadir)
     }
 
     int64_t now = GetTime();
-    uint32_t loaded = 0, expired_skipped = 0;
+    uint32_t loaded = 0, expired_skipped = 0, cap_dropped = 0;
     for (uint32_t i = 0; ok && i < count; i++) {
         struct ban_entry b;
         memset(&b, 0, sizeof(b));
@@ -2022,6 +2114,15 @@ bool ban_db_read(struct net_manager *nm, const char *datadir)
         if (b.ban_until <= now) {
             expired_skipped++;
             continue; /* lazy prune at load time too */
+        }
+        if (nm->num_banned >= NET_BAN_TABLE_MAX) {
+            /* The in-memory table is hard-capped; a persisted table larger
+             * than the cap keeps its first NET_BAN_TABLE_MAX rows (file
+             * order). The file is a snapshot, not a promise about which
+             * rows matter most — the live eviction policy is what keeps
+             * the table useful after this. */
+            cap_dropped++;
+            continue;
         }
 
         zcl_mutex_lock(&nm->cs_banned);
@@ -2044,8 +2145,9 @@ bool ban_db_read(struct net_manager *nm, const char *datadir)
         LOG_WARN("net", "ban_db_read: malformed payload (loaded %u entries "
                  "before the parse error) — keeping what loaded", loaded);
     }
-    LOG_INFO("net", "ban_db_read: loaded %u bans (%u expired skipped) from %s",
-             loaded, expired_skipped, path);
+    LOG_INFO("net", "ban_db_read: loaded %u bans (%u expired skipped, "
+             "%u dropped at the %d-entry cap) from %s",
+             loaded, expired_skipped, cap_dropped, NET_BAN_TABLE_MAX, path);
     return true;
 }
 

@@ -246,6 +246,14 @@ struct ban_entry {
 };
 
 #define MAX_BAN_ENTRIES 4096
+/* Hard cap on the IN-MEMORY ban table (nm->banned[]). The list is attacker-
+ * influenced state — every auto-ban is provoked by a peer — so its size and
+ * the disk traffic it causes may not scale with how many bans an attacker can
+ * fire. At the cap an insert evicts the soonest-expiring AUTO entry; manual
+ * entries are never evicted (see ban_addr_ex()). Smaller than
+ * MAX_BAN_ENTRIES (the persisted-file guard) on purpose: a persisted table
+ * larger than the live cap simply keeps its first NET_BAN_TABLE_MAX rows. */
+#define NET_BAN_TABLE_MAX 2048
 #define MAX_WHITELIST_ENTRIES 256
 #define MAX_RECV_MESSAGES 1024
 #define MAX_ASKFOR_ENTRIES 50000
@@ -548,6 +556,16 @@ struct net_manager {
     struct ban_entry *banned;
     size_t num_banned;
     size_t banned_cap;
+    /* Ban-write debounce, both guarded by cs_banned. An auto-ban storm used
+     * to re-serialize the whole table to banlist.dat on EVERY insert/extend
+     * — O(n) disk writes for O(1) work. AUTO bans (score_at_ban != 0) now
+     * skip the write when one happened within the debounce window and just
+     * set ban_db_dirty; ban_db_write() stamps ban_db_last_write_unix and
+     * clears ban_db_dirty on success, and net_manager_free() flushes a
+     * still-dirty table before the mutex goes away. Manual bans (operator
+     * paths) ignore the debounce and always write. */
+    int64_t ban_db_last_write_unix;
+    bool ban_db_dirty;
     /* Borrowed pointer (owned by boot/connman context), NULL until the
      * owner wires it — see connman_load_addrman()/connman_save_addrman().
      * When set, ban_addr()/unban_addr()/clear_banned() persist the ban
