@@ -89,7 +89,11 @@ config/src/boot_zcode_swarm.c 885
 config/src/bundle_exporter.c 988
 config/src/consensus_state_install_runtime.c 919
 config/src/consensus_state_producer_receipt.c 787
-config/src/consensus_state_snapshot_install_activate.c 1169 # ADR-0008 (seed-floor declaration)
+# ADR-0010: first entry — the 800 ceiling was crossed by the native-macOS
+# platform port before any record existed; pinned at current LOC (the
+# writer-vs-install/activate split seam is noted there).
+config/src/consensus_state_snapshot_export.c 801
+config/src/consensus_state_snapshot_install_activate.c 1172 # ADR-0008 (seed-floor declaration); raised to current LOC per ADR-0010
 app/services/src/header_sync_service.c 846
 app/controllers/src/event_agent_summary.c 853
 # 2026-08-15: worker-side quarantine now records exact input/output hashes and
