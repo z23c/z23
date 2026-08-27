@@ -22,8 +22,9 @@ struct sha256_ctx {
 /* Streaming SHA-256 (FIPS 180-4). init → write* → finalize yields the
  * 32-byte digest of the concatenation of all write() data; write() accepts
  * arbitrary lengths and may be called repeatedly. The compression transform
- * is SHA-NI when available and verified (see sha256_selftest), else portable
- * C — both produce identical output. */
+ * is the ISA's hardware tier when available and verified (see
+ * sha256_selftest) — Intel SHA-NI on x86, the ARMv8 SHA extension on arm64 —
+ * else portable C. All tiers produce identical output. */
 void sha256_init(struct sha256_ctx *ctx);
 void sha256_write(struct sha256_ctx *ctx, const unsigned char *data, size_t len);
 void sha256_finalize(struct sha256_ctx *ctx, unsigned char hash[SHA256_OUTPUT_SIZE]);
@@ -39,23 +40,27 @@ void sha256_finalize(struct sha256_ctx *ctx, unsigned char hash[SHA256_OUTPUT_SI
 int sha256_finalize_no_padding(struct sha256_ctx *ctx, unsigned char hash[SHA256_OUTPUT_SIZE],
                                int enforce_compression);
 
-/* Runtime self-test: verifies SHA-NI matches portable. Returns true if OK.
- * Call once at startup. If false, SHA-NI is auto-disabled. */
+/* Runtime self-test: verifies the selected hardware transform matches
+ * portable. Returns true if OK. Call once at startup. If false, the hardware
+ * tier is auto-disabled. */
 bool sha256_selftest(void);
 
-/* Returns "SHA-NI (hardware)" or "portable C" */
+/* The active tier: "SHA-NI (hardware)" or "ARMv8 SHA (hardware)" when a
+ * verified hardware transform is installed, else "portable C". */
 const char *sha256_implementation(void);
 
 /* True when the host has SHA-NI *and* it passed the known-answer test against
- * the portable reference. False on non-x86, on CPUs without the instruction,
- * and after a failed self-test. */
+ * the portable reference. False on non-x86 (on arm64 the hardware tier is
+ * reported through sha256_implementation() instead), on CPUs without the
+ * instruction, and after a failed self-test. */
 bool sha256_shani_available(void);
 
 /* Force the compression transform. PORTABLE always succeeds. SHANI and AUTO
- * both re-run the CPUID probe + known-answer test and fall back to PORTABLE
- * when the host cannot supply a verified hardware transform — SHANI is a
- * request, never an override of a failed self-test. Returns the impl actually
- * installed (SHA256_IMPL_PORTABLE or SHA256_IMPL_SHANI).
+ * both re-run the probe + known-answer test and fall back to PORTABLE when
+ * the host cannot supply a verified hardware transform — SHANI is a request
+ * (the ARMv8 SHA extension on arm64), never an override of a failed
+ * self-test. Returns the impl actually installed (SHA256_IMPL_PORTABLE or
+ * SHA256_IMPL_SHANI).
  *
  * Both transforms produce identical output by construction (that is what the
  * sha256_isa_parity test group proves), so this only ever changes speed. It
