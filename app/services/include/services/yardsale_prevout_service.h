@@ -40,9 +40,21 @@ struct yardsale_prevout_view {
 /* Fetch a CONFIRMED transaction body by txid (internal little-endian
  * byte order — the same order as transaction.hash). Signature matches
  * yardsale_prevout_fetch_fn so it wires straight into the ceremony port;
- * ctx is a struct yardsale_prevout_view *. On ZCL_OK *tx_out receives a
- * private copy the caller owns (transaction_free); on failure *tx_out is
- * untouched and the result names why the body is not confirmed here. */
+ * ctx is a struct yardsale_prevout_view *.
+ *
+ * OUT-PARAMETER CONTRACT (identical to the port typedef in
+ * controllers/yardsale_controller.h, and to compact_block_reconstruct's):
+ * tx_out is transaction_init()ed on EVERY return, including every refusal,
+ * so transaction_free(tx_out) is always safe and never inspects the
+ * caller's prior stack contents. On ZCL_OK it holds a private copy of the
+ * confirmed body; on failure it is a valid EMPTY transaction and the result
+ * names why the body is not confirmed here.
+ *
+ * The caller therefore owns tx_out on every path and must transaction_free()
+ * it. Symmetrically, this function initializes rather than frees, so tx_out
+ * must arrive uninitialized (or already freed) — handing in a transaction
+ * that still owns memory leaks it. tx_out == NULL is refused, not
+ * dereferenced. */
 struct zcl_result yardsale_prevout_fetch_confirmed(void *ctx,
                                                    const uint8_t txid[32],
                                                    struct transaction *tx_out);
