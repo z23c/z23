@@ -158,6 +158,18 @@ DEFINES=(
     -DZCL_BUILD_SOURCE_ID=\"clang-portability-gate\"
     -DZCL_BUILD_CLEAN=1
 )
+# Mirror the real build's platform defines: once any TU includes a Darwin
+# SDK header (<sys/sysctl.h> for the arm64 feature probe), the SDK's own
+# headers need _DARWIN_C_SOURCE and the st_*timespec aliases, or the pass
+# fails inside the SDK instead of grading our sources.
+if [[ "$(uname -s)" == "Darwin" ]]; then
+    DEFINES+=(
+        -D_DARWIN_C_SOURCE
+        -Dst_atim=st_atimespec
+        -Dst_mtim=st_mtimespec
+        -Dst_ctim=st_ctimespec
+    )
+fi
 
 echo "══ LINT: clang portability (second-compiler whole-tree syntax pass) ══"
 

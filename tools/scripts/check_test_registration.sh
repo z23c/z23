@@ -149,7 +149,10 @@ leaf_symbols() {
         return 2
     fi
     nm -g --defined-only --format=posix "$object" |
-        awk '$2 ~ /^[A-Za-z]$/ { print $1 }' | sort -u
+        awk '$2 ~ /^[A-Za-z]$/ { print $1 }' |
+        # Mach-O spells every extern with one leading underscore; the
+        # registry and the control compare plain C names.
+        sed 's/^_//' | sort -u
 }
 
 # Born-red control for the exact parser weakness this audit replaces: both a
