@@ -245,7 +245,8 @@ ZCL_COMMAND_READY_COMMAND(
     "explicit expiry at most 30 days out. Without confirm:true, a "
     "non-mutating plan rendering the exact signed document and its id; "
     "the commit persists it (idempotent on want_id). Refused by name on "
-    "bad terms, an already-expired window, or a missing node.db.",
+    "bad terms, an issuance that drifts from the node clock, an "
+    "already-expired window, or a missing node.db.",
     ZCL_COMMAND_LIST_BUDGET,
     "shop,want,bounty,buyer,demand,criteria,post",
     "zcl.shop_want_post.input.v1", "zcl.shop_want_post.v1",

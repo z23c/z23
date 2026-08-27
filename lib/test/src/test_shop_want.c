@@ -437,6 +437,7 @@ static int shop_want_validation(void)
     static const char *const CRITERIA =
         "a CSV of every ZCL block hash 0..100, sha3-verified";
     struct json_value input;
+    struct zcl_command_reply reply;
 
     sw_post_input_ex(&input, dir, "abcd", 500000, CRITERIA,
                      SW_NOW + 86400LL, false);
@@ -498,7 +499,6 @@ static int shop_want_validation(void)
     sw_post_input_ex(&input, dir, secret, 500000, CRITERIA,
                      SW_NOW + SHOP_WANT_MAX_LIFETIME_SECS, false);
     (void)json_push_kv_int(&input, "issued_unix", SW_NOW + 300LL);
-    struct zcl_command_reply reply;
     sw_call(zcl_native_handle_shop_want_post, &input, &reply);
     SW_CHECK("the exact issue-skew and node-lifetime bounds pass",
              reply.status == ZCL_COMMAND_STATUS_PASSED);

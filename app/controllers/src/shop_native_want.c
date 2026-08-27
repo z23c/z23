@@ -63,7 +63,6 @@
  * worst case vs the 8192-byte budget), with the criteria preview
  * truncated — the full text is one `status` call away. */
 #define SHW_BOARD_PAGE 16u
-#define SHW_MAX_ISSUED_SKEW_SECS 300LL
 #define SHW_TERMS_NOTE \
     "a want is declared terms inside a signed advertisement — not an " \
     "escrow, not a payment channel; posting moves and promises no value " \
@@ -340,7 +339,7 @@ static bool shw_build_want(const struct zcl_command_request *request,
     w->issued_unix = issued ? json_get_int(issued) : now_unix;
     int64_t issued_skew = w->issued_unix > now_unix
         ? w->issued_unix - now_unix : now_unix - w->issued_unix;
-    if (issued_skew > SHW_MAX_ISSUED_SKEW_SECS) {
+    if (issued_skew > SHOP_WANT_ISSUED_SKEW_SECS) {
         shw_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
                  "ISSUED_TIME_SKEW", "validate",
                  "a new want's issued_unix must be within 300 seconds of "
@@ -395,7 +394,6 @@ static bool shw_build_want(const struct zcl_command_request *request,
                  "expires_unix");
         return false;
     }
-
     /* The secret enters only once the document is known-valid, so no
      * early return above can strand it uncleansed on the stack. */
     uint8_t secret[32];
