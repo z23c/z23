@@ -3729,17 +3729,23 @@ static int test_app_features_leaves(void)
             /* A READY leaf carries no availability_reason — the reason field
              * exists to explain a refusal, and there is none to explain. */
             ASSERT(s->availability_reason && !s->availability_reason[0]);
-            /* Every plan/commit leaf must accept the reserved `confirm` key,
-             * or its commit half would be unreachable through the validator. */
+            /* Every plan/commit leaf must accept the reserved `confirm` key
+             * or, for the domain-token dialect (market content and
+             * moderation), the mode/plan_token pair its commit half
+             * travels in — either way the commit leg must be reachable
+             * through the validator. */
             if (s->confirmation == ZCL_COMMAND_CONFIRM_PLAN_COMMIT)
-                ASSERT(strstr(s->input_keys, "confirm") != NULL);
+                ASSERT(strstr(s->input_keys, "confirm") != NULL ||
+                       strstr(s->input_keys, "plan_token") != NULL);
         }
         /* These local writes have no funds/network effect and do not demand a
-         * confirm round trip. */
+         * confirm round trip. Private content registration is the owned
+         * exception: it moves no funds but binds serving bytes, so it runs
+         * the exact plan/commit token round trip (mode/plan_token above). */
         ASSERT_EQ(find_spec(reg, "app.messaging.read")->confirmation,
                   ZCL_COMMAND_CONFIRM_NONE);
         ASSERT_EQ(find_spec(reg, "app.market.content.register")->confirmation,
-                  ZCL_COMMAND_CONFIRM_NONE);
+                  ZCL_COMMAND_CONFIRM_PLAN_COMMIT);
         ASSERT_EQ(find_spec(reg, "app.market.purchase.plan")->confirmation,
                   ZCL_COMMAND_CONFIRM_NONE);
         ASSERT_EQ(find_spec(reg, "app.market.purchase.commit")->confirmation,

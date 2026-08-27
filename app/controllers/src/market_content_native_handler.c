@@ -1,5 +1,9 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Owner-only typed adapter for private paid-file content registration. */
+ * Owner-only typed adapter for private paid-file content registration.
+ * Registration is the node's exact two-step confirm: mode "plan" mints a
+ * plan_token bound to the offer, the target path, and the offer's
+ * registration as it stands; mode "commit" requires that token and only
+ * then hashes and records the bytes. Only the commit leg mutates. */
 
 #include "controllers/rpc_client.h"
 #include "controllers/rpc_params.h"
@@ -33,11 +37,18 @@ void zcl_native_handle_market_content_register(
         json_get_str(json_get(request->input, "offer_id"));
     const char *content_path =
         json_get_str(json_get(request->input, "content_path"));
-    if (!offer_id || !offer_id[0] || !content_path || !content_path[0]) {
+    const char *mode = json_get_str(json_get(request->input, "mode"));
+    const char *plan_token =
+        json_get_str(json_get(request->input, "plan_token"));
+    if (!offer_id || !offer_id[0] || !content_path || !content_path[0] ||
+        !mode ||
+        (strcmp(mode, "plan") != 0 && strcmp(mode, "commit") != 0) ||
+        (strcmp(mode, "commit") == 0 && (!plan_token || !plan_token[0]))) {
         market_content_native_fail(
             reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
             "MISSING_INPUT", "normalize",
-            "offer_id and content_path are required");
+            "offer_id, content_path, and mode (plan|commit) are required; "
+            "commit also requires the plan_token minted by the plan step");
         return;
     }
 
@@ -45,6 +56,8 @@ void zcl_native_handle_market_content_register(
     rpc_arg_builder_init(&params);
     rpc_arg_builder_push_str(&params, offer_id);
     rpc_arg_builder_push_str(&params, content_path);
+    rpc_arg_builder_push_str(&params, mode);
+    rpc_arg_builder_push_str(&params, plan_token ? plan_token : "");
     char *params_json = rpc_arg_builder_to_json(&params);
     if (!params_json) {
         market_content_native_fail(
@@ -88,37 +101,54 @@ void zcl_native_handle_market_content_register(
             "MARKET_CONTENT_REFUSED", "execute", message);
         return;
     }
-
-    const char *status = json_get_str(json_get(&body, "status"));
-    const char *saved_offer = json_get_str(json_get(&body, "offer_id"));
-    const char *root_hash = json_get_str(json_get(&body, "root_hash"));
-    const struct json_value *size = json_get(&body, "size_bytes");
-    const struct json_value *chunks = json_get(&body, "num_chunks");
-    const struct json_value *registered = json_get(&body, "registered_at");
-    if (body.type != JSON_OBJ || !status ||
-        strcmp(status, "registered") != 0 || !saved_offer || !root_hash ||
-        !size || size->type != JSON_INT || !chunks || chunks->type != JSON_INT ||
-        !registered || registered->type != JSON_INT) {
+    if (body.type != JSON_OBJ) {
         json_free(&body);
         market_content_native_fail(
-            reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
-            "MARKET_CONTENT_NOT_REGISTERED", "execute",
-            "the node did not return a complete registration receipt");
+            reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
+            "BAD_RPC_BODY", "serialize",
+            "content registration returned a non-object body");
         return;
     }
 
     /* Whitelist fields so a future RPC addition cannot accidentally echo the
-     * private path through the native/agent result. */
+     * private path through the native/agent result. The private path is
+     * accepted only as owner input and never appears in a reply body. */
     (void)json_push_kv_str(&reply->data, "schema", "zcl.market_content.v1");
-    (void)json_push_kv_str(&reply->data, "status", status);
-    (void)json_push_kv_str(&reply->data, "offer_id", saved_offer);
-    (void)json_push_kv_str(&reply->data, "root_hash", root_hash);
-    (void)json_push_kv_int(&reply->data, "size_bytes", json_get_int(size));
-    (void)json_push_kv_int(&reply->data, "num_chunks", json_get_int(chunks));
-    (void)json_push_kv_int(&reply->data, "registered_at",
-                           json_get_int(registered));
-    (void)json_push_kv_str(&reply->data, "stage", "committed");
-    (void)json_push_kv_bool(&reply->data, "committed", true);
+    (void)json_push_kv_str(&reply->data, "mode", mode);
+    const struct json_value *committed = json_get(&body, "committed");
+    (void)json_push_kv_bool(&reply->data, "committed",
+                            committed && committed->type == JSON_BOOL &&
+                                json_get_bool(committed));
+    const char *token = json_get_str(json_get(&body, "plan_token"));
+    if (token)
+        (void)json_push_kv_str(&reply->data, "plan_token", token);
+    const char *state = json_get_str(json_get(&body, "registration_state"));
+    if (state)
+        (void)json_push_kv_str(&reply->data, "registration_state", state);
+    const char *status = json_get_str(json_get(&body, "status"));
+    if (status)
+        (void)json_push_kv_str(&reply->data, "status", status);
+    const char *saved_offer = json_get_str(json_get(&body, "offer_id"));
+    if (saved_offer)
+        (void)json_push_kv_str(&reply->data, "offer_id", saved_offer);
+    const char *root_hash = json_get_str(json_get(&body, "root_hash"));
+    if (root_hash)
+        (void)json_push_kv_str(&reply->data, "root_hash", root_hash);
+    const struct json_value *size = json_get(&body, "size_bytes");
+    if (size && size->type == JSON_INT)
+        (void)json_push_kv_int(&reply->data, "size_bytes",
+                               json_get_int(size));
+    const struct json_value *chunks = json_get(&body, "num_chunks");
+    if (chunks && chunks->type == JSON_INT)
+        (void)json_push_kv_int(&reply->data, "num_chunks",
+                               json_get_int(chunks));
+    const struct json_value *registered = json_get(&body, "registered_at");
+    if (registered && registered->type == JSON_INT)
+        (void)json_push_kv_int(&reply->data, "registered_at",
+                               json_get_int(registered));
     json_free(&body);
-    reply->error.mutated = true;
+    /* Only the commit leg mutates; a plan reports what WOULD be bound and
+     * must not claim otherwise through the mutation flag. */
+    if (committed && committed->type == JSON_BOOL && json_get_bool(committed))
+        reply->error.mutated = true;
 }

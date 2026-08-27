@@ -1873,7 +1873,19 @@ static char *app_write_stub_rpc(const char *method, const char *params_json)
     }
     if (method && strcmp(method, "zmarket_content_register") == 0) {
         g_app_market_content_calls++;
+        bool commit = params_json &&
+            strstr(params_json, "\"commit\"") != NULL;
+        if (!commit)
+            return strdup("{\"schema\":\"zcl.market_content.v1\","
+                          "\"mode\":\"plan\",\"committed\":false,"
+                          "\"status\":\"planned\","
+                          "\"plan_token\":\"cccccccccccccccccccccccccccccccc"
+                          "cccccccccccccccccccccccccccccccc\","
+                          "\"registration_state\":\"unregistered\","
+                          "\"offer_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}");
         return strdup("{\"schema\":\"zcl.market_content.v1\","
+                      "\"mode\":\"commit\",\"committed\":true,"
                       "\"status\":\"registered\","
                       "\"offer_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
@@ -2173,13 +2185,14 @@ static int test_app_write_native_e2e(void)
         zcl_command_reply_free(&reply);
         json_free(&token_plan);
 
-        /* 6. Private seller content is an idempotent no-funds app write. It
-         * executes once without a plan round trip and never echoes the path. */
+        /* 6. Private seller content is a two-step no-funds app write: plan
+         * mints a token and mutates nothing, commit binds the bytes and is
+         * the only mutating leg, and neither ever echoes the path. */
         const struct zcl_command_spec *content_spec =
             find_spec(reg, "app.market.content.register");
         ASSERT(content_spec != NULL);
         ASSERT_EQ(content_spec->availability, ZCL_COMMAND_READY);
-        ASSERT_EQ(content_spec->confirmation, ZCL_COMMAND_CONFIRM_NONE);
+        ASSERT_EQ(content_spec->confirmation, ZCL_COMMAND_CONFIRM_PLAN_COMMIT);
         struct json_value content_input;
         json_init(&content_input);
         json_set_object(&content_input);
@@ -2188,19 +2201,57 @@ static int test_app_write_native_e2e(void)
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         (void)json_push_kv_str(&content_input, "content_path",
                                "/owner/private/paid-content.bin");
+        (void)json_push_kv_str(&content_input, "mode", "plan");
         struct zcl_command_request content_req = {
             .spec = content_spec, .input = &content_input, .view = "normal",
         };
         zcl_command_reply_init(&reply, content_spec->output_schema);
         zcl_native_handle_market_content_register(&content_req, &reply);
         ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
-        ASSERT(reply.error.mutated);
+        ASSERT(!reply.error.mutated);
         ASSERT_EQ(g_app_market_content_calls, 1);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "status")),
+                      "planned");
+        ASSERT(!json_get_bool(json_get(&reply.data, "committed")));
+        const char *content_plan_token =
+            json_get_str(json_get(&reply.data, "plan_token"));
+        ASSERT(content_plan_token && strlen(content_plan_token) == 64);
+        char content_token_copy[65];
+        (void)snprintf(content_token_copy, sizeof(content_token_copy), "%s",
+                       content_plan_token);
         char content_rendered[4096];
         size_t content_len = json_write(&reply.data, content_rendered,
                                         sizeof(content_rendered));
         ASSERT(content_len > 0);
-        ASSERT(strstr(content_rendered, "registered") != NULL);
+        ASSERT(strstr(content_rendered, "/owner/private") == NULL);
+        ASSERT(strstr(content_rendered, "content_path") == NULL);
+        zcl_command_reply_free(&reply);
+
+        /* A fresh input object: json_push_kv appends rather than replaces,
+         * so re-pushing "mode" would leave the first "plan" winning. */
+        json_free(&content_input);
+        json_init(&content_input);
+        json_set_object(&content_input);
+        (void)json_push_kv_str(
+            &content_input, "offer_id",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        (void)json_push_kv_str(&content_input, "content_path",
+                               "/owner/private/paid-content.bin");
+        (void)json_push_kv_str(&content_input, "mode", "commit");
+        (void)json_push_kv_str(&content_input, "plan_token",
+                               content_token_copy);
+        content_req.input = &content_input;
+        zcl_command_reply_init(&reply, content_spec->output_schema);
+        zcl_native_handle_market_content_register(&content_req, &reply);
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT(reply.error.mutated);
+        ASSERT_EQ(g_app_market_content_calls, 2);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "status")),
+                      "registered");
+        ASSERT(json_get_bool(json_get(&reply.data, "committed")));
+        content_len = json_write(&reply.data, content_rendered,
+                                 sizeof(content_rendered));
+        ASSERT(content_len > 0);
         ASSERT(strstr(content_rendered, "/owner/private") == NULL);
         ASSERT(strstr(content_rendered, "content_path") == NULL);
         zcl_command_reply_free(&reply);
