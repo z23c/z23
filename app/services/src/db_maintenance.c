@@ -65,6 +65,7 @@
 #include "util/log_macros.h"
 #include "util/supervisor.h"
 #include "util/thread_registry.h"
+#include "util/wal_checkpoint_stats.h"
 
 /* Supervisor deadline (sec). The scheduler ticks every tick_seconds
  * (default 60) but a single VACUUM can hold the DB lock for minutes on
@@ -191,6 +192,15 @@ void db_maintenance_schedule_defaults(struct db_maintenance_schedule *s)
     s->tick_seconds           = 60;
 }
 
+void db_maintenance_schedule_wal_only(struct db_maintenance_schedule *s)
+{
+    if (!s) return;
+    db_maintenance_schedule_defaults(s);
+    s->wal_checkpoint_minutes = 5;
+    s->analyze_hours = -1;   /* exempt: unbounded index scan, no idle gate */
+    s->vacuum_days   = -1;   /* exempt: needs an at-tip-and-idle gate */
+}
+
 void db_maintenance_status_snapshot(struct db_maintenance_status *out)
 {
     if (!out) return;
@@ -303,16 +313,39 @@ static bool dbm_op_known(const char *op)
 
 /* Dispatch a known op to the matching port method. `op` must already be
  * validated by dbm_op_known(). Returns the port method's bool; the error
- * text (on failure) lands in err/errsz. */
+ * text (on failure) lands in err/errsz. For "wal", `wal_out` (when non-NULL)
+ * receives the frame counts that say whether the checkpoint reclaimed
+ * anything; the other two ops leave it untouched. */
 static bool dbm_run_op_via_port(const struct db_maintenance_port *port,
-                                const char *op, char *err, size_t errsz)
+                                const char *op,
+                                struct db_maintenance_wal_outcome *wal_out,
+                                char *err, size_t errsz)
 {
     if (strcmp(op, "wal") == 0)
-        return port->wal_checkpoint(port->self, err, errsz);
+        return port->wal_checkpoint(port->self, wal_out, err, errsz);
     if (strcmp(op, "analyze") == 0)
         return port->analyze(port->self, err, errsz);
     /* "vacuum" — the only remaining known op. */
     return port->vacuum(port->self, err, errsz);
+}
+
+/* Publish what a checkpoint achieved to the process-wide checkpoint ledger
+ * (util/wal_checkpoint_stats.h), so the WAL question can be answered from one
+ * place no matter which of the node's checkpointers ran. Returns the outcome
+ * so the caller can say it out loud. */
+static enum wal_ckpt_outcome dbm_publish_wal_outcome(
+    bool completed, const struct db_maintenance_wal_outcome *w)
+{
+    struct wal_ckpt_record rec = {
+        .outcome = wal_ckpt_classify(completed, w->busy,
+                                     w->log_frames, w->ckpt_frames),
+        .rc = 0,
+        .log_frames = w->log_frames,
+        .ckpt_frames = w->ckpt_frames,
+        .source = "db_maintenance",
+    };
+    wal_ckpt_stats_note(&rec);
+    return rec.outcome;
 }
 
 /* Update the per-op last-run state after a successful run.
@@ -356,8 +389,24 @@ struct zcl_result db_maintenance_run_now(struct node_db *db, const char *op)
     int64_t start_ms = platform_time_monotonic_ms();
     char errmsg[256];
     errmsg[0] = '\0';
-    bool ok = dbm_run_op_via_port(&port, op, errmsg, sizeof(errmsg));
+    struct db_maintenance_wal_outcome wal = { -1, -1, false };
+    bool ok = dbm_run_op_via_port(&port, op, &wal, errmsg, sizeof(errmsg));
     int64_t elapsed_ms = platform_time_monotonic_ms() - start_ms;
+
+    /* A checkpoint is the one op whose success is not the whole answer. Say
+     * what it achieved before the pass/fail bookkeeping below, so a run of
+     * checkpoints that reclaimed nothing is visible as exactly that rather
+     * than as a healthy total_runs climbing. */
+    if (strcmp(op, "wal") == 0) {
+        enum wal_ckpt_outcome outcome = dbm_publish_wal_outcome(ok, &wal);
+        if (wal_ckpt_outcome_reclaimed_nothing(outcome))
+            LOG_WARN("db_maintenance",
+                     "[db_maint] wal checkpoint reclaimed nothing: "
+                     "outcome=%s wal_frames=%lld moved=%lld",
+                     wal_ckpt_outcome_name(outcome),
+                     (long long)wal.log_frames,
+                     (long long)wal.ckpt_frames);
+    }
 
     if (!ok) {
         g_dbm.total_failures++;
@@ -426,6 +475,16 @@ static int64_t dbm_wal_size(struct node_db *db)
     return bytes;
 }
 
+/* Whether an op's schedule arms it at all. A negative interval means the
+ * caller declared the op EXEMPT — deliberately not running — which is a
+ * different statement from an interval so long it has not come round yet.
+ * Zero means "use the default", which is how every existing caller reaches
+ * the DB_MAINT_DEFAULT_* values without naming them. */
+static bool dbm_leg_armed(int configured)
+{
+    return configured >= 0;
+}
+
 static void *dbm_thread_fn(void *arg)
 {
     (void)arg;
@@ -451,13 +510,18 @@ static void *dbm_thread_fn(void *arg)
 
         if (db) {
             /* WAL size cap: force checkpoint regardless of interval
-             * when WAL exceeds the configured byte limit. */
+             * when WAL exceeds the configured byte limit.
+             *
+             * Each leg runs only if its interval is positive. A zero interval
+             * is a leg the caller declared exempt at start(), not a leg due
+             * every tick — the arithmetic without that guard would make
+             * "disabled" the busiest setting there is. */
             bool wal_over_cap = (wal_cap > 0 && dbm_wal_size(db) > wal_cap);
-            if (wal_over_cap || dbm_due(wal_last, wal_sec))
+            if (wal_sec > 0 && (wal_over_cap || dbm_due(wal_last, wal_sec)))
                 (void)db_maintenance_run_now(db, "wal");
-            if (dbm_due(analyze_last, analyze_sec))
+            if (analyze_sec > 0 && dbm_due(analyze_last, analyze_sec))
                 (void)db_maintenance_run_now(db, "analyze");
-            if (dbm_due(vacuum_last, vacuum_sec)) {
+            if (vacuum_sec > 0 && dbm_due(vacuum_last, vacuum_sec)) {
                 bool may_vacuum = gate ? gate() : false;
                 if (may_vacuum)
                     (void)db_maintenance_run_now(db, "vacuum");
@@ -504,11 +568,14 @@ struct zcl_result db_maintenance_start(struct node_db *db,
 
     g_dbm.db    = db;
     g_dbm.sched = *s;
-    g_dbm.wal_minutes   = s->wal_checkpoint_minutes > 0
+    g_dbm.wal_minutes   = !dbm_leg_armed(s->wal_checkpoint_minutes) ? 0
+        : s->wal_checkpoint_minutes > 0
         ? s->wal_checkpoint_minutes : DB_MAINT_DEFAULT_WAL_MINUTES;
-    g_dbm.analyze_hours = s->analyze_hours > 0
+    g_dbm.analyze_hours = !dbm_leg_armed(s->analyze_hours) ? 0
+        : s->analyze_hours > 0
         ? s->analyze_hours : DB_MAINT_DEFAULT_ANALYZE_HOURS;
-    g_dbm.vacuum_days   = s->vacuum_days > 0
+    g_dbm.vacuum_days   = !dbm_leg_armed(s->vacuum_days) ? 0
+        : s->vacuum_days > 0
         ? s->vacuum_days : DB_MAINT_DEFAULT_VACUUM_DAYS;
     g_dbm.tick_seconds  = s->tick_seconds > 0 ? s->tick_seconds : 60;
 

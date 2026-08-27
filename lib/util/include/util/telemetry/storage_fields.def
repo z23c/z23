@@ -246,11 +246,76 @@ TL_LEAF(disk, maintenance_runs_total, TLC_I64, TFU_COUNT_TOTAL, TLV_FULL,
 
 TL_LEAF(disk, wal_checkpoint_age_seconds, TLC_I64, TFU_SECONDS, TLV_NORMAL,
     TFR_INFO, TL_NONE, 0, TFS_INFO,
-    "seconds since the last WAL checkpoint. Compare against the configured "
-    "wal_checkpoint_minutes (15 by default) — this row carries no threshold "
-    "because that interval is a runtime setting the worker does not publish, "
-    "and the WAL is additionally force-checkpointed above 100 MB regardless "
-    "of it",
+    "seconds since the last WAL checkpoint by ANY of this node's "
+    "checkpointers — the 5-minute periodic thread, the maintenance worker's "
+    "interval and size-cap passes, and the shutdown drain. It used to be "
+    "sourced from the maintenance worker alone, which reported "
+    "\"never checkpointed\" on every node while the periodic thread was in "
+    "fact checkpointing every 5 minutes. This row carries no threshold "
+    "because the intervals are runtime settings no worker publishes",
+    "", "")
+
+TL_LEAF(disk, wal_checkpointer_armed, TLC_BOOL, TFU_BOOL, TLV_SUMMARY,
+    TFR_EXPECT_TRUE, TL_NONE, 0, TFS_WARN,
+    "whether the periodic WAL checkpoint thread (zcl_db_ckpt, one pass every "
+    "5 minutes) is running. False is a DECLARED state, never an assumed one: "
+    "the thread publishes armed/not-armed and why, so a checkpointer that "
+    "failed to start can never be mistaken for one with nothing to do",
+    "nothing is folding the write-ahead log back into node.db on a schedule, "
+    "so the WAL grows until an autocheckpoint happens to fire — and an "
+    "unclean exit then leaves a giant WAL for the next boot to recover, which "
+    "is minutes of blocked startup on a slow disk",
+    "z23 ops state --subsystem=db_maintenance")
+
+TL_LEAF(disk, wal_checkpoint_attempts_total, TLC_I64, TFU_COUNT_TOTAL,
+    TLV_FULL, TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "WAL checkpoints attempted since this process started, from every "
+    "checkpointer combined — the denominator for the three outcome counters "
+    "below",
+    "", "")
+
+TL_LEAF(disk, wal_checkpoint_noop_total, TLC_I64, TFU_COUNT_TOTAL, TLV_SUMMARY,
+    TFR_EXPECT_ZERO, TL_NONE, 0, TFS_WARN,
+    "checkpoints that COMPLETED and moved zero frames — the outcome a "
+    "success/failure return cannot express. The WAL was not empty and not one "
+    "page of it was reclaimed, usually because a reader still holds the "
+    "oldest frame",
+    "checkpoints are running and reclaiming nothing, so the WAL is growing "
+    "even though every checkpoint reports success; compare against "
+    "wal_checkpoint_attempts_total to see what fraction of passes are futile",
+    "z23 ops state --subsystem=db_maintenance")
+
+TL_LEAF(disk, wal_checkpoint_busy_total, TLC_I64, TFU_COUNT_TOTAL, TLV_NORMAL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "checkpoints a lock refused or deferred, so they never ran at all. A few "
+    "against a busy database are normal — the checkpointer retries on its "
+    "next pass — and this row is descriptive rather than judged for that "
+    "reason; it is the RATIO to wal_checkpoint_attempts_total that matters",
+    "", "")
+
+TL_LEAF(disk, wal_checkpoint_frames_moved_total, TLC_I64, TFU_COUNT_TOTAL,
+    TLV_FULL, TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "write-ahead-log frames folded back into node.db since this process "
+    "started. This is the one number that goes up only when reclamation "
+    "actually happened; a climbing attempts count beside a flat frames count "
+    "is a checkpointer that is running and achieving nothing",
+    "", "")
+
+TL_LEAF(disk, wal_checkpoint_queue_wait_us, TLC_I64, TFU_MICROSECONDS,
+    TLV_FULL, TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "microseconds the last periodic checkpoint spent QUEUED behind other "
+    "writes before the serialized DB writer ran it. Read together with "
+    "wal_checkpoint_exec_us: this pair is what separates a checkpointer "
+    "starved by write traffic (fix the queue) from one grinding on a slow "
+    "disk (fix the cadence). Neither can be inferred from a stall report",
+    "", "")
+
+TL_LEAF(disk, wal_checkpoint_exec_us, TLC_I64, TFU_MICROSECONDS, TLV_FULL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "microseconds the last periodic checkpoint spent INSIDE the database "
+    "engine moving frames to disk, excluding any time it waited in the "
+    "writer queue. The other half of the pair described in "
+    "wal_checkpoint_queue_wait_us",
     "", "")
 
 TL_LEAF(disk, vacuum_age_seconds, TLC_I64, TFU_SECONDS, TLV_FULL,

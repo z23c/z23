@@ -1636,3 +1636,10 @@ AGENT_IMPACT_RULE("app/controllers/src/metaverse_site_controller.c|app/controlle
 AGENT_IMPACT_RULE("app/jobs/src/reducer_commit_invariants.c|config/src/boot_block_file_scan.c|lib/storage/src/projection_store.c", "reducer_forward_progress_gate reducer_frontier boot_odelta_scan block_scan models integrity make_lint_gates")
 
 AGENT_IMPACT_RULE("lib/test/src/test_block_prefetch.c|lib/test/src/test_metaverse_vocabulary.c|lib/test/src/test_robustness.c|lib/test/src/test_thread_qos.c|lib/test/src/test_zcode_badge.c|lib/test/src/test_zid_seniority.c", "block_prefetch metaverse_vocabulary robustness thread_qos zcode_badge zid_seniority make_lint_gates")
+
+/* WAL-checkpoint accounting: the one ledger every checkpointer records into
+ * (lib/util), the two checkpoint call sites (the node_db model and the
+ * maintenance adapter/port), the boot gate that arms the size-triggered
+ * checkpoint, and the storage telemetry that finally shows the checkpointer
+ * that actually runs. They ship as one behaviour, so they run as one set. */
+AGENT_IMPACT_RULE("lib/util/src/wal_checkpoint_stats.c|lib/util/include/util/wal_checkpoint_stats.h|app/models/src/database_modes.c|app/models/include/models/database_internal.h|adapters/outbound/persistence/src/db_maintenance_sqlite.c|adapters/outbound/persistence/include/adapters/outbound/persistence/db_maintenance_sqlite.h|ports/include/ports/db_maintenance_port.h|app/services/src/storage_telemetry_fill.c|lib/util/include/util/telemetry/storage_fields.def|lib/test/src/test_db_maintenance_port.c|lib/test/src/test_telemetry_storage.c", "sqlite db_maintenance_port db_maintenance telemetry_storage telemetry_ontology models health_rollup make_lint_gates")

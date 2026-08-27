@@ -7,8 +7,12 @@
  * This adapter is the ONLY place that names sqlite for the
  * db_maintenance subsystem. The three methods run the exact maintenance
  * statements the scheduler used inline before the seam
- * (PRAGMA wal_checkpoint(TRUNCATE) / ANALYZE / VACUUM via sqlite3_exec),
- * so the EV_DB_MAINTENANCE_* timing/observability surface is unchanged.
+ * (PRAGMA wal_checkpoint(TRUNCATE) / ANALYZE / VACUUM), so the
+ * EV_DB_MAINTENANCE_* timing/observability surface is unchanged. The
+ * checkpoint runs through sqlite3_wal_checkpoint_v2 rather than exec,
+ * because exec with a NULL callback discards the result row carrying the
+ * frame counts and the busy flag — the only fields that say whether the
+ * checkpoint reclaimed anything.
  *
  * It wraps a single already-open sqlite3* (the primary node DB
  * connection) opened elsewhere and NEVER takes ownership: there is no
