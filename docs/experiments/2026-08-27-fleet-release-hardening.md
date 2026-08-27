@@ -135,6 +135,9 @@ as an error instead of publishing a false zero total. Market review commits
 atomically compare the token-bound prior state in the update predicate, so a
 concurrent local mark wins and the stale plan is refused. Injected
 `SQLITE_INTERRUPT` and deterministic interleaving tests cover both cases.
+The same non-row audit was applied to the subsequently merged name-record
+totals: text and address counts now return `-1` on an interrupted store step,
+with both refusal paths pinned by deterministic tests.
 
 Wallet policy remained unchanged and no custody operation or canonical
 database surgery was performed.

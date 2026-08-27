@@ -20,6 +20,12 @@
 #include <inttypes.h>
 #include <string.h>
 
+static int znam_count_step_interrupted(void *stmt)
+{
+    (void)stmt;
+    return SQLITE_INTERRUPT;
+}
+
 /* ── Test helpers for the RPC write surface ────────────────────────
  *
  * Mirrors the fixture test_api.c already uses for name_list/name_register
@@ -847,6 +853,22 @@ int test_znam(void)
             } else {
                 printf("FAIL (save=%d get=%d count=%d total=%d)\n",
                        a_save && a_save2, a_get, a_count, a_total);
+                failures++;
+            }
+
+            /* A non-row count step is a store failure, never an empty
+             * record set. Inject SQLITE_INTERRUPT at the exact seam shared
+             * by both helpers, then restore the production reader. */
+            printf("znam DB record counts fail closed on interrupt... ");
+            db_znam_test_set_count_step(znam_count_step_interrupted);
+            int t_interrupted = db_znam_text_count(&ndb, "alice");
+            int a_interrupted = db_znam_addr_count(&ndb, "alice");
+            db_znam_test_set_count_step(NULL);
+            if (t_interrupted == -1 && a_interrupted == -1) {
+                printf("OK\n");
+            } else {
+                printf("FAIL (text=%d addr=%d)\n",
+                       t_interrupted, a_interrupted);
                 failures++;
             }
 

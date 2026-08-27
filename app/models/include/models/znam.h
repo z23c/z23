@@ -116,4 +116,10 @@ int db_znam_addr_list(struct node_db *ndb, const char *name,
  * store, mirroring the text count. */
 int db_znam_addr_count(struct node_db *ndb, const char *name);
 
+#ifdef ZCL_TESTING
+/* Deterministic store-step fault seam for the two uncapped count helpers.
+ * NULL restores the production readonly step. */
+void db_znam_test_set_count_step(int (*step_fn)(void *stmt));
+#endif
+
 #endif

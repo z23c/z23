@@ -29,6 +29,21 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef ZCL_TESTING
+static int (*g_znam_count_step_fn)(void *stmt);
+
+void db_znam_test_set_count_step(int (*step_fn)(void *stmt))
+{
+    g_znam_count_step_fn = step_fn;
+}
+
+#define ZNAM_COUNT_STEP(stmt) \
+    (g_znam_count_step_fn ? g_znam_count_step_fn(stmt) \
+                          : AR_STEP_ROW_READONLY(stmt))
+#else
+#define ZNAM_COUNT_STEP(stmt) AR_STEP_ROW_READONLY(stmt)
+#endif
+
 DEFINE_MODEL_CALLBACKS(znam_entry)
 DEFINE_MODEL_CALLBACKS(znam_text)
 DEFINE_MODEL_CALLBACKS(znam_addr)
@@ -614,8 +629,14 @@ int db_znam_text_count(struct node_db *ndb, const char *name)
     AR_PREPARE_RET(ndb, s,
         "SELECT count(*) FROM znam_text_records WHERE name=?", -1);
     AR_BIND_TEXT(s, 1, name);
-    if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW)
-        count = sqlite3_column_int64(s, 0);
+    int step_rc = ZNAM_COUNT_STEP(s);
+    if (step_rc != SQLITE_ROW) {
+        AR_FINALIZE(s);
+        LOG_RETURN(-1, "znam",
+                   "db_znam_text_count: count step failed rc=%d: %s",
+                   step_rc, sqlite3_errmsg(ndb->db));
+    }
+    count = sqlite3_column_int64(s, 0);
     AR_FINALIZE(s);
     return count > INT_MAX ? INT_MAX : (int)count;
 }
@@ -702,8 +723,14 @@ int db_znam_addr_count(struct node_db *ndb, const char *name)
     AR_PREPARE_RET(ndb, s,
         "SELECT count(*) FROM znam_addr_records WHERE name=?", -1);
     AR_BIND_TEXT(s, 1, name);
-    if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW)
-        count = sqlite3_column_int64(s, 0);
+    int step_rc = ZNAM_COUNT_STEP(s);
+    if (step_rc != SQLITE_ROW) {
+        AR_FINALIZE(s);
+        LOG_RETURN(-1, "znam",
+                   "db_znam_addr_count: count step failed rc=%d: %s",
+                   step_rc, sqlite3_errmsg(ndb->db));
+    }
+    count = sqlite3_column_int64(s, 0);
     AR_FINALIZE(s);
     return count > INT_MAX ? INT_MAX : (int)count;
 }
