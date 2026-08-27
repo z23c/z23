@@ -1,1 +1,6 @@
-22
+# 2026-08-26: 22 -> 29 (ADR-0009). The macOS-portability wave (91eb601a0)
+# and the hot-swap integrity work (168b25bb5) grew 27 baselined files past
+# their recorded lines and added two new oversized ones (hotswap_elf_probe,
+# agent_broker). Reviewed and accepted at the count valve; per-file WARN
+# prints stay visible below.
+29
