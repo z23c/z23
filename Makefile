@@ -230,7 +230,7 @@ ifneq ($(filter build-only,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := build-only
 else ifneq ($(filter zclassic23 z23 zclassic23-package-verify,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := node-c23
-else ifneq ($(filter fast-compile dev-build-only,$(ZCL_EPOCH_SINGLE_GOAL)),)
+else ifneq ($(filter fast-compile dev-build-only t-hotswap-shelf,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := dev
 else ifneq ($(filter dev-bin z23-dev zclassic23-dev,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := dev test-fast
@@ -493,7 +493,8 @@ DEVLOOP_INCLUDES = -Itools/dev
 # binary, or the test harness. They must leave the wildcard BEFORE the
 # DEV_ONLY_SRCS split, because DEV_ONLY_SRCS is still linked (into the dev
 # binary) — filtering there would only move the duplicate-`main` link error.
-DEV_STANDALONE_SRCS = tools/dev/hotswap_verify_so.c
+DEV_STANDALONE_SRCS = tools/dev/hotswap_verify_so.c \
+	tools/dev/hotswap_shelf_drive.c
 DEVLOOP_ALL_SRCS = $(call zcl_filter_ephemeral_sources,\
 	$(filter-out $(DEV_STANDALONE_SRCS),$(wildcard tools/dev/*.c)))
 DEV_ONLY_SRCS = tools/dev/devloop_cli.c tools/dev/devloop_cycle.c \
@@ -1159,7 +1160,7 @@ ifneq ($(filter build-only,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := build-only
 else ifneq ($(filter zclassic23 z23 zclassic23-package-verify,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := node-c23
-else ifneq ($(filter fast-compile dev-build-only,$(ZCL_DEPFILE_SINGLE_GOAL)),)
+else ifneq ($(filter fast-compile dev-build-only t-hotswap-shelf,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := dev
 else ifneq ($(filter dev-bin z23-dev zclassic23-dev,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := dev test-fast
@@ -3516,6 +3517,72 @@ hotswap-symbols:
 
 hotswap-verify:
 	@tools/dev/hotswap-verify.sh $(if $(FILE),$(FILE),--all)
+
+# ── t-hotswap-shelf: EXECUTE the depth-1 shelf, end to end ────────────────
+# make t-hotswap-shelf            (add KEEP=1 to keep the run's artifacts)
+#
+# hotswap-verify proves an allowlist row is LOADABLE. This proves the SHELF
+# behaves: activate module A, supersede with B, assert the shelf holds A's REAL
+# sha256 and A's generation, roll back and watch dispatch answer as A again,
+# roll back again and watch it toggle, activate C and assert depth is still 1
+# (the shelf holds B, not A), then drive a REFUSED rollback and assert the live
+# module and the shelf are both untouched. Generation must rise STRICTLY at
+# every publish.
+#
+# WHY IT IS NOT A test_parallel GROUP. Only the dlopen activation path shelves
+# anything, so this needs three REAL module .so files, a genuine supersede, and
+# live-activation authority (-hotswap-activate + ZCL_HOTSWAP_ACTIVATE=1 + the
+# exact dev datadir) at the moment of the rollback. test_parallel's module mode
+# activates ONE module in the parent before any group forks and cannot express
+# a second one. tools/dev/hotswap_shelf_drive.c states the three reasons.
+#
+# The driver is a standalone dev CLI with its own main(), linked against the
+# dev node's OWN objects minus the node entry points, so a module's kernel
+# imports resolve exactly as they do inside zclassic23-dev (that is what
+# -rdynamic in DEV_LDFLAGS is for). It boots no node, opens no real datadir,
+# and listens on nothing: the harness script runs it under a scratch HOME, so
+# the exact dev datadir hotswap_datadir_is_dev() demands is a throwaway
+# directory. The gate is NOT relaxed — the same predicate runs and the driver
+# refuses to start unless it passes.
+HOTSWAP_SHELF_DRIVE_SRC = tools/dev/hotswap_shelf_drive.c
+# NOT under $(BIN_DIR): tools/lint/check_standalone_tools_link.sh derives its
+# build set from every $(BIN_DIR)/<tool> rule and links each one on `make
+# lint`. That gate is for SINGLE-TU tools; this driver pulls the whole dev
+# object graph, which is exactly what its exempt set exists to keep out. It is
+# built by its own goal instead, so it stays out of the lint umbrella by
+# construction rather than by an exemption entry.
+HOTSWAP_SHELF_DRIVE_BIN = $(BUILD_DIR)/dev-tools/hotswap_shelf_drive
+HOTSWAP_SHELF_ENTRY_OBJS = $(patsubst %.c,$(DEV_OBJ_DIR)/%.o,$(NODE_ENTRY_SRCS))
+
+$(HOTSWAP_SHELF_DRIVE_BIN): $(HOTSWAP_SHELF_DRIVE_SRC) $(VIEW_GEN_HEADERS) \
+		$(DEV_LINK_RSP)
+	@mkdir -p $(dir $@)
+	@set -eu; \
+	tmp_o="$$(mktemp "$@.o.XXXXXX")"; \
+	tmp_excl="$$(mktemp "$@.excl.XXXXXX")"; \
+	tmp_rsp="$$(mktemp "$@.rsp.XXXXXX")"; \
+	tmp="$$(mktemp "$@.link.XXXXXX")"; \
+	trap 'rm -f "$$tmp_o" "$$tmp_excl" "$$tmp_rsp" "$$tmp"' EXIT HUP INT TERM; \
+	$(CC) $(DEV_RESTART_CFLAGS) -c -o "$$tmp_o" $(HOTSWAP_SHELF_DRIVE_SRC); \
+	for entry in $(HOTSWAP_SHELF_ENTRY_OBJS); do printf '%s\n' "$$entry"; done \
+	  > "$$tmp_excl"; \
+	tr ' ' '\n' < $(DEV_LINK_RSP) | awk 'NF' \
+	  | LC_ALL=C grep -v -x -F -f "$$tmp_excl" > "$$tmp_rsp"; \
+	all="$$(tr ' ' '\n' < $(DEV_LINK_RSP) | awk 'NF' | wc -l)"; \
+	kept="$$(wc -l < "$$tmp_rsp")"; \
+	[ "$$((all - kept))" -eq $(words $(HOTSWAP_SHELF_ENTRY_OBJS)) ] || { \
+	  echo "hotswap-shelf: refusing — dropped $$((all - kept)) node entry objects, expected $(words $(HOTSWAP_SHELF_ENTRY_OBJS))" >&2; \
+	  exit 3; }; \
+	$(CC) $(DEV_RESTART_CFLAGS) $(DEV_RESTART_LDFLAGS) -o "$$tmp" "$$tmp_o" \
+	  "@$$tmp_rsp" $(TOR_LIBS) $(LIBS) $(GTK_LIBS) $(WEBKIT_LIBS); \
+	mv -f -- "$$tmp" "$@"; \
+	rm -f "$$tmp_o" "$$tmp_excl" "$$tmp_rsp"; \
+	trap - EXIT HUP INT TERM
+
+.PHONY: t-hotswap-shelf
+t-hotswap-shelf: $(HOTSWAP_SHELF_DRIVE_BIN) $(HOTSWAP_ACTION_PLAN)
+	@tools/dev/hotswap-shelf-selftest.sh \
+	  --driver=$(HOTSWAP_SHELF_DRIVE_BIN) $(if $(KEEP),--keep,)
 
 .PHONY: hotswap-apply
 # make hotswap-apply HANDLER=core.status
