@@ -152,6 +152,9 @@ acceptance passed for `test_api`, `test_protocols`, and
 `test_command_registry_catalog`, including injected SQLite interruption,
 bounded-window truncation, concurrent-store invariants, legacy compatibility,
 and adversarial native bridge shapes.
+The public messaging header is mapped to the API, command-catalog, and lint
+groups, so a future declaration change cannot bypass focused pre-push
+acceptance.
 
 Wallet policy remained unchanged and no custody operation or canonical
 database surgery was performed.
