@@ -167,8 +167,7 @@ char *zcl_native_policy_limits_body(const struct json_value *args,
 
 ZCL_HOTSWAP_TRAMPOLINE(tramp_policy_limits, zcl_native_policy_limits_body)
 
-static const struct zcl_hotswap_leaf_replacement k_leaves[] = {
-    { "zcode.package.policy.limits", tramp_policy_limits },
+static const struct zcl_hotswap_leaf_replacement k_leaves[] = { /* hotswap-static-ok: leaf registration tables are immutable */    { "zcode.package.policy.limits", tramp_policy_limits },
 };
 
 ZCL_HOTSWAP_EXPORT_LEAVES(k_leaves, sizeof(k_leaves) / sizeof(k_leaves[0]))

@@ -323,8 +323,7 @@ char *zcl_native_utxo_audit_body(const struct json_value *args,
 
 ZCL_HOTSWAP_TRAMPOLINE(tramp_utxo_audit, zcl_native_utxo_audit_body)
 
-static const struct zcl_hotswap_leaf_replacement k_leaves[] = {
-    { "core.consensus.utxo.audit",  tramp_utxo_audit },
+static const struct zcl_hotswap_leaf_replacement k_leaves[] = { /* hotswap-static-ok: leaf registration tables are immutable */    { "core.consensus.utxo.audit",  tramp_utxo_audit },
 };
 
 ZCL_HOTSWAP_EXPORT_LEAVES(k_leaves, sizeof(k_leaves) / sizeof(k_leaves[0]))

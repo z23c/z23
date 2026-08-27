@@ -29,6 +29,7 @@
 #include "hotswap/hotswap_retire_blocker.h"
 
 #include "json/json.h"
+#include "platform/fd_path.h"
 #include "platform/time_compat.h"
 #include "util/log_macros.h"
 
@@ -704,8 +705,25 @@ bool zcl_hotswap_hotfork_visit_so(
         if (fd >= 0) (void)close(fd);
         return false;
     }
-    char pinned[64];
-    (void)snprintf(pinned, sizeof(pinned), "/proc/self/fd/%d", fd);
+    char pinned[PATH_MAX];
+    if (!platform_fd_path(pinned, sizeof(pinned), fd, NULL)) {
+        (void)close(fd);
+        return false;
+    }
+#if defined(__APPLE__)
+    /* On this host the pinned name is a /dev/fd path rather than an inode
+     * pin. Refuse unless it still resolves to the exact inode whose bytes
+     * were just hash-verified — the same identity discipline as
+     * execve-by-fd. The remaining window between resolve and dlopen is
+     * inherent to any name-based dlopen and is one reason pinned hosts run
+     * the Linux semantics only. */
+    struct stat current;
+    if (stat(pinned, &current) != 0 ||
+        current.st_dev != st.st_dev || current.st_ino != st.st_ino) {
+        (void)close(fd);
+        return false;
+    }
+#endif
     void *handle = dlopen(pinned, RTLD_LAZY | RTLD_LOCAL);
     if (!handle) {
         (void)close(fd);

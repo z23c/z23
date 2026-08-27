@@ -24,8 +24,6 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include "platform/fd_path.h"
-
 #define NODE_DB_PREFLIGHT_URI_MAX 128
 
 struct preflight_sidecars {

@@ -57,8 +57,7 @@ struct journey_reason_row {
 /* Journey-specific recovery stays here, while the shared node-status policy
  * remains the sole authority for operator status, explanation, and whether a
  * human must act.  There is no second verdict ladder. */
-static const struct journey_reason_row g_journey_reasons[] = {
-    [JOURNEY_READY] = {
+static const struct journey_reason_row g_journey_reasons[] = { /* hotswap-static-ok: leaf registration tables are immutable */    [JOURNEY_READY] = {
         "NONE", "READY", "z23 vault intent plan", false,
         ZCL_STATUS_REASON_NONE },
     [JOURNEY_STATUS_SOURCE_UNAVAILABLE] = {

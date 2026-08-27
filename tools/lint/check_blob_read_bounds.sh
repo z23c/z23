@@ -64,8 +64,14 @@ for f in app/models/src/*.c; do
                 blob_guarded[v] = 1
         }
 
-        if (match(line, /([A-Za-z_][A-Za-z0-9_]*)[ \t]*=[ \t]*(\([^)]*\)[ \t]*)?sqlite3_column_blob[ \t]*\(/, m))
-            remember_blob(m[1])
+        # match() with a capture array is a gawk extension; POSIX awk and
+        # the BSD awk on macOS hosts offer only RSTART/RLENGTH. Split into
+        # two matches so both awks parse identically.
+        if (match(line, /[A-Za-z_][A-Za-z0-9_]*[ \t]*=[ \t]*(\([^)]*\)[ \t]*)?sqlite3_column_blob[ \t]*\(/)) {
+            head = substr(line, RSTART, RLENGTH)
+            if (match(head, /^[A-Za-z_][A-Za-z0-9_]*/))
+                remember_blob(substr(head, RSTART, RLENGTH))
+        }
 
         if (line ~ /memcpy[ \t]*\(/) {
             used = memcpy_uses_blob_var(line)

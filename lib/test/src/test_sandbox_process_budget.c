@@ -188,9 +188,20 @@ static int spb_live_reading_and_census(void)
             os_sandbox_process_budget_live(65536, 32);
         /* The end-to-end form of the first assertion, against real processes
          * rather than supplied numbers. Under the old policy this second
-         * reading was ~SPB_EXTRA higher; that drift IS the defect. */
-        ASSERT_EQ(before.ceiling, during.ceiling);
-        ASSERT_EQ(during.ceiling, UINT64_C(65536));
+         * reading was ~SPB_EXTRA higher; that drift IS the defect.
+         *
+         * The ceiling under test is the requested one surviving intact:
+         * min(requested, static hard limit) by policy. Where the host's
+         * kernel bind is generous (typical Linux dev hosts) that is exactly
+         * 65536; where the OS caps this uid lower (macOS kern.maxprocperuid)
+         * honoring it IS the admission contract, so the expectation derives
+         * from the same published static limit rather than assuming it away. */
+        uint64_t expected_ceiling = UINT64_C(65536);
+        uint64_t static_hard = os_sandbox_nproc_hard_limit();
+        if (static_hard != OS_SANDBOX_RLIMIT_KEEP && static_hard < expected_ceiling)
+            expected_ceiling = static_hard;
+        ASSERT_EQ(before.ceiling, expected_ceiling);
+        ASSERT_EQ(during.ceiling, expected_ceiling);
 
         /* The census — the mechanism that DOES bound an action — sees the
          * group and nothing else the uid is running. */

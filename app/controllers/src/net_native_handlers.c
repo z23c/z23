@@ -220,8 +220,7 @@ ZCL_HOTSWAP_TRAMPOLINE(tramp_peer_incidents, zcl_native_peer_incidents_body)
 
 ZCL_HOTSWAP_TRAMPOLINE(tramp_onion_health, zcl_native_onion_health_body)
 
-static const struct zcl_hotswap_leaf_replacement k_leaves[] = {
-    { "core.network.peers.incidents", tramp_peer_incidents },
+static const struct zcl_hotswap_leaf_replacement k_leaves[] = { /* hotswap-static-ok: leaf registration tables are immutable */    { "core.network.peers.incidents", tramp_peer_incidents },
     { "core.network.onion.health",    tramp_onion_health },
 };
 
@@ -255,8 +254,7 @@ ZCL_HOTSWAP_TRAMPOLINE(module_tramp_onion_health, zcl_native_onion_health_body)
 /* Mirrors k_leaves above — both leaves this controller owns, published in ONE
  * all-or-nothing batch. Batch size, not authority: both are READY read-only
  * leaves of this same allowlisted TU. */
-static const struct zcl_hotswap_leaf k_module_leaves[] = {
-    { "core.network.peers.incidents", module_tramp_peer_incidents },
+static const struct zcl_hotswap_leaf k_module_leaves[] = { /* hotswap-static-ok: immutable leaf registration tables */    { "core.network.peers.incidents", module_tramp_peer_incidents },
     { "core.network.onion.health",    module_tramp_onion_health },
 };
 

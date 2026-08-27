@@ -3,8 +3,15 @@
 
 #include "platform/os_sandbox.h"
 
+#include <stdlib.h>
 #include <string.h>
 #include <sys/resource.h>
+#include <sys/sysctl.h>
+#include <unistd.h>
+
+#if defined(__APPLE__)
+#include <libproc.h> /* proc_pidinfo: per-process BSD identity and task size */
+#endif
 
 static char g_requested_profile[64];
 
@@ -134,7 +141,53 @@ struct zcl_result os_sandbox_set_rlimits(const struct os_sandbox_rlimits *limits
     return unavailable("sandbox resource-limit profile");
 }
 
+#if defined(__APPLE__)
+/* Mirror of the Linux census: one entry per live thread of every process
+ * owned by this uid. Linux walks /proc/<pid>/task; Darwin answers the same
+ * question from the kernel through sysctl(KERN_PROC_ALL) plus
+ * proc_pidinfo(PROC_PIDTBSDINFO, PROC_PIDTASKINFO). Enumeration failure
+ * degrades to 0 exactly like the /proc-based path does. */
+uint64_t os_sandbox_uid_task_count(void)
+{
+    const uid_t me = getuid();
+    int mib[3] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL };
+    size_t len = 0;
+    if (sysctl(mib, 3, NULL, &len, NULL, 0) != 0 || len == 0)
+        return 0;
+    /* The table can grow between the size probe and the read; over-allocate
+     * and let the second call report the smaller, true length. */
+    len += 16u * sizeof(struct kinfo_proc);
+    struct kinfo_proc *procs = malloc(len); // raw-alloc-ok:sandbox-census-scratch
+    if (!procs)
+        return 0;
+    if (sysctl(mib, 3, procs, &len, NULL, 0) != 0) {
+        free(procs);
+        return 0;
+    }
+    size_t count = len / sizeof(procs[0]);
+    uint64_t total = 0;
+    for (size_t i = 0; i < count; i++) {
+        pid_t pid = procs[i].kp_proc.p_pid;
+        if (pid <= 0)
+            continue;
+        struct proc_bsdinfo bsd;
+        if (proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &bsd,
+                         sizeof(bsd)) != (int)sizeof(bsd))
+            continue;
+        if (bsd.pbi_ruid != me)
+            continue;
+        struct proc_taskinfo task;
+        if (proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &task,
+                         sizeof(task)) != (int)sizeof(task))
+            continue;
+        total += task.pti_threadnum;
+    }
+    free(procs);
+    return total;
+}
+#else
 uint64_t os_sandbox_uid_task_count(void) { return 0; }
+#endif
 
 uint64_t os_sandbox_nproc_hard_limit(void)
 {
@@ -161,14 +214,50 @@ struct os_sandbox_process_budget os_sandbox_process_budget_at(
 struct os_sandbox_process_budget os_sandbox_process_budget_live(
     uint64_t ceiling, uint64_t required)
 {
-    return os_sandbox_process_budget_at(ceiling, required, 0,
+    return os_sandbox_process_budget_at(ceiling, required,
+                                        os_sandbox_uid_task_count(),
                                         os_sandbox_nproc_hard_limit());
 }
 
 uint64_t os_sandbox_process_group_census(pid_t group)
 {
+#if defined(__APPLE__)
+    /* Linux answers this from /proc/<pid>/stat's pgrp field; Darwin keeps
+     * the process group inside the same kernel BSD record read for the uid
+     * census above (pbi_pgid). Process-granular like Linux. */
+    if (group <= 0)
+        return 0;
+    int mib[3] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL };
+    size_t len = 0;
+    if (sysctl(mib, 3, NULL, &len, NULL, 0) != 0 || len == 0)
+        return 0;
+    len += 16u * sizeof(struct kinfo_proc);
+    struct kinfo_proc *procs = malloc(len); // raw-alloc-ok:sandbox-census-scratch
+    if (!procs)
+        return 0;
+    if (sysctl(mib, 3, procs, &len, NULL, 0) != 0) {
+        free(procs);
+        return 0;
+    }
+    size_t count = len / sizeof(procs[0]);
+    uint64_t total = 0;
+    for (size_t i = 0; i < count; i++) {
+        pid_t pid = procs[i].kp_proc.p_pid;
+        if (pid <= 0)
+            continue;
+        struct proc_bsdinfo bsd;
+        if (proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &bsd,
+                         sizeof(bsd)) != (int)sizeof(bsd))
+            continue;
+        if ((pid_t)bsd.pbi_pgid == group)
+            total++;
+    }
+    free(procs);
+    return total;
+#else
     (void)group;
     return 0;
+#endif
 }
 
 int os_sandbox_session_ns_flags(void) { return 0; }

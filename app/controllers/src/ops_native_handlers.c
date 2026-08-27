@@ -154,8 +154,7 @@ ZCL_HOTSWAP_TRAMPOLINE(tramp_mirror_status, zcl_native_mirror_status_body)
 
 ZCL_HOTSWAP_TRAMPOLINE(tramp_self_heal_stats, zcl_native_self_heal_stats_body)
 
-static const struct zcl_hotswap_leaf_replacement k_leaves[] = {
-    { "ops.debug.dash.snapshot",  tramp_operator_snapshot },
+static const struct zcl_hotswap_leaf_replacement k_leaves[] = { /* hotswap-static-ok: leaf registration tables are immutable */    { "ops.debug.dash.snapshot",  tramp_operator_snapshot },
     { "ops.debug.dash.summary",   tramp_operator_summary },
     { "ops.debug.dash.milestone", tramp_milestone },
     { "ops.debug.dash.mirror",    tramp_mirror_status },
@@ -193,8 +192,7 @@ static bool module_selftest_ops_dash(char *err, size_t cap)
     return true;
 }
 
-static const struct zcl_hotswap_leaf k_module_leaves[] = {
-    { "ops.debug.dash.snapshot",  module_tramp_operator_snapshot },
+static const struct zcl_hotswap_leaf k_module_leaves[] = { /* hotswap-static-ok: immutable leaf registration tables */    { "ops.debug.dash.snapshot",  module_tramp_operator_snapshot },
     { "ops.debug.dash.summary",   module_tramp_operator_summary },
     { "ops.debug.dash.milestone", module_tramp_milestone },
     { "ops.debug.dash.mirror",    module_tramp_mirror_status },

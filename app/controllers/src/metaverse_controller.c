@@ -476,8 +476,7 @@ void zcl_native_handle_metaverse_property_show(
  * are members of the same reloadable island (config/hotswap_islands.def). */
 #ifdef ZCL_HOTSWAP_GEN
 #include "hotswap/hotswap.h"
-static const struct zcl_hotswap_leaf_replacement k_metaverse_leaves[] = {
-    { "metaverse.agent.status", zcl_native_handle_metaverse_agent_status },
+static const struct zcl_hotswap_leaf_replacement k_metaverse_leaves[] = { /* hotswap-static-ok: leaf registration tables are immutable */    { "metaverse.agent.status", zcl_native_handle_metaverse_agent_status },
     { "metaverse.agent.money", zcl_native_handle_metaverse_agent_money },
     { "metaverse.agent.liquidity",
       zcl_native_handle_metaverse_agent_liquidity },
@@ -492,8 +491,7 @@ ZCL_HOTSWAP_EXPORT_LEAVES(
 
 #ifdef ZCL_HOTSWAP_MODULE_GEN
 #include "hotswap/hotswap_module.h"
-static const struct zcl_hotswap_leaf k_metaverse_module_leaves[] = {
-    { "metaverse.agent.status", zcl_native_handle_metaverse_agent_status },
+static const struct zcl_hotswap_leaf k_metaverse_module_leaves[] = { /* hotswap-static-ok: immutable leaf registration tables */    { "metaverse.agent.status", zcl_native_handle_metaverse_agent_status },
     { "metaverse.agent.money", zcl_native_handle_metaverse_agent_money },
     { "metaverse.agent.liquidity",
       zcl_native_handle_metaverse_agent_liquidity },

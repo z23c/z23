@@ -13,8 +13,27 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <pthread.h> /* pthread_threadid_np: the async-safe tid source */
+#else
 #include <sys/syscall.h>
+#endif
 #include <sys/types.h>
+
+/* One thread id, both hosts. async-signal-safe: on Linux SYS_gettid is a
+ * direct syscall; on Darwin pthread_threadid_np is a syscall-backed getter
+ * with no locks (thread self queries never need the kernel allocator). */
+static unsigned long signal_handler_tid(void)
+{
+#if defined(__APPLE__)
+    uint64_t tid = 0;
+    if (pthread_threadid_np(NULL, &tid) != 0)
+        return 0UL;
+    return (unsigned long)tid;
+#else
+    return (unsigned long)syscall(SYS_gettid);
+#endif
+}
 
 static signal_handler_crash_hook_fn g_crash_hook = NULL;
 static void *g_crash_hook_ctx = NULL;
@@ -83,7 +102,7 @@ static void emit_report(int fd, int sig, siginfo_t *info,
     write_s(fd, " pid=");
     write_uint(fd, (unsigned long)getpid());
     write_s(fd, " tid=");
-    write_uint(fd, (unsigned long)syscall(SYS_gettid));
+    write_uint(fd, signal_handler_tid());
     write_s(fd, " time=");
     write_uint(fd, (unsigned long)time(NULL));  // platform-ok:async-signal-safe-crash-handler (platform.clock may lock)
     write_s(fd, "\n");

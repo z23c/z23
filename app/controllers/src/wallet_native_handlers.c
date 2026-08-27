@@ -728,8 +728,7 @@ ZCL_HOTSWAP_TRAMPOLINE(tramp_listtransactions, zcl_native_listtransactions_body)
 
 ZCL_HOTSWAP_TRAMPOLINE(tramp_gettransaction, zcl_native_gettransaction_body)
 
-static const struct zcl_hotswap_leaf_replacement k_leaves[] = {
-    { "core.wallet.address.list",      tramp_listaddresses },
+static const struct zcl_hotswap_leaf_replacement k_leaves[] = { /* hotswap-static-ok: leaf registration tables are immutable */    { "core.wallet.address.list",      tramp_listaddresses },
     { "core.wallet.utxo.list",         tramp_listunspent },
     { "core.wallet.transaction.list",  tramp_listtransactions },
     { "core.wallet.transaction.get",   tramp_gettransaction },
@@ -778,8 +777,7 @@ ZCL_HOTSWAP_TRAMPOLINE(module_tramp_z_getbalance, zcl_native_z_getbalance_body)
 
 ZCL_HOTSWAP_TRAMPOLINE(module_tramp_z_listunspent, zcl_native_z_listunspent_body)
 
-static const struct zcl_hotswap_leaf k_module_leaves[] = {
-    { "core.wallet.address.list",      module_tramp_listaddresses },
+static const struct zcl_hotswap_leaf k_module_leaves[] = { /* hotswap-static-ok: immutable leaf registration tables */    { "core.wallet.address.list",      module_tramp_listaddresses },
     { "core.wallet.utxo.list",         module_tramp_listunspent },
     { "core.wallet.transaction.list",  module_tramp_listtransactions },
     { "core.wallet.transaction.get",   module_tramp_gettransaction },

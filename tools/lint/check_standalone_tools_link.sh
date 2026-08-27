@@ -88,6 +88,19 @@ declare -A EXEMPT=(
     [arena_view]="optional raylib GUI; needs raylib via pkg-config (not a base toolchain dep)"
 )
 
+# ── Host-bound exemptions (consulted only when building on THAT host) ────
+# A tool belongs here when the kernel or runtime primitive underneath it
+# simply does not exist here — code-level porting cannot fix a missing OS
+# facility. Reason is mandatory and names the missing primitive. On every
+# other host the tool keeps being built exactly as before.
+declare -A DARWIN_EXEMPT=(
+    [zcl-portfwd]="event loop sits on sys/epoll.h (Linux kernel API)"
+    [native_ui_driver]="X11 UI transport; links -Wl,-l:libX11.so.6"
+    [fuzz_zcode_commons]="host lacks libclang_rt.fuzzer_osx.a (standalone CLT ships no libFuzzer runtime)"
+    [fuzz_zcode_dht]="host lacks libclang_rt.fuzzer_osx.a (standalone CLT ships no libFuzzer runtime)"
+    [fuzz_zcode_science]="host lacks libclang_rt.fuzzer_osx.a (standalone CLT ships no libFuzzer runtime)"
+)
+
 # ── Derive the tool list from the Makefile ───────────────────────────────
 # Two rule spellings carry a standalone tool:
 #   $(BIN_DIR)/<name>:  ...
@@ -116,9 +129,14 @@ gate_require_scanned "${#TOOLS[@]}" 20 check-standalone-tools-link \
     "no \$(BIN_DIR)/<tool> rules found in Makefile — did the rule spelling change?"
 
 # ── Partition into covered vs must-build ─────────────────────────────────
+GATE_HOST_OS="$(uname -s 2>/dev/null)"
 targets=()
 for name in $(printf '%s\n' "${!TOOLS[@]}" | sort); do
     [[ -n "${EXEMPT[$name]:-}" ]] && continue
+    if [[ "$GATE_HOST_OS" == Darwin && -n "${DARWIN_EXEMPT[$name]:-}" ]]; then
+        echo "[check_standalone_tools_link] darwin-exempt $name: ${DARWIN_EXEMPT[$name]}" >&2
+        continue
+    fi
     targets+=("build/bin/$name")
 done
 

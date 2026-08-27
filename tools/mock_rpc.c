@@ -27,6 +27,12 @@
 #include <pthread.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+
+/* glibc spells the loopback constant for you; POSIX leaves it to the host
+ * headers. One literal fallback keeps this tool header-only portable. */
+#ifndef INADDR_LOOPBACK
+#define INADDR_LOOPBACK 0x7f000001u /* 127.0.0.1 */
+#endif
 #include <sys/time.h>
 #include <signal.h>
 

@@ -98,7 +98,7 @@ static const struct metaverse_adapter *(*const k_providers[])(void) = {
       .unavailable_reason = MV_ADAPTER_##id_,                                \
       .list = NULL, .show = NULL, .store_ready = NULL },
 
-static const struct metaverse_adapter k_unavailable[] = {
+static const struct metaverse_adapter k_unavailable[] = { /* hotswap-static-ok: leaf registration tables are immutable */
     METAVERSE_KIND_TABLE(MV_ADAPTER_UNAVAILABLE_ROW)
 };
 

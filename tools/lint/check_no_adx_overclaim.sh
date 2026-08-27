@@ -101,11 +101,18 @@ for f in "${adx_files[@]}"; do
              || true)
     [[ -z "$claims" ]] && continue
 
-    # Measure the object the way the node ships it: same -std, same -O, same
-    # -march as CFLAGS in the Makefile. Grading a different build would grade
-    # code the operator never runs.
+    # Measure the object the way the node ships it: same -std, same -O, and —
+    # on x86 where the claim can even be true — the same -march as CFLAGS in
+    # the Makefile. Grading a different build would grade code the operator
+    # never runs. Off-x86 the ADX instructions do not exist in the ISA, so
+    # the shipped build cannot contain them by construction; compile portable
+    # and let the objdump scan below confirm zero adcx/adox.
+    march_flags=(-march=x86-64-v3)
+    if [[ "$(uname -m)" != x86_64 ]]; then
+        march_flags=()
+    fi
     obj="$tmpdir/$(basename "$f" .c).o"
-    if ! "$CC" -std=c23 -O3 -march=x86-64-v3 "${incs[@]}" \
+    if ! "$CC" -std=c23 -O3 "${march_flags[@]}" "${incs[@]}" \
               -c -o "$obj" "$f" >"$tmpdir/cc.log" 2>&1; then
         echo "check_no_adx_overclaim: FATAL — could not compile $f to measure it." >&2
         sed 's/^/    /' "$tmpdir/cc.log" >&2
@@ -117,6 +124,13 @@ for f in "${adx_files[@]}"; do
               || true)
 
     if (( emitted > 0 )); then
+        continue
+    fi
+
+    # Off x86 the ISA has no ADCX/ADOX, so a zero count is the tautology the
+    # portability promise wants — the overclaim class this gate hunts can
+    # only exist where the instruction exists.
+    if [[ "${#march_flags[@]}" -eq 0 ]]; then
         continue
     fi
 
