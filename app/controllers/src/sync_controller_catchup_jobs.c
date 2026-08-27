@@ -158,7 +158,25 @@ bool node_db_sync_catchup_job_start(struct node_db_sync_catchup_job *job,
     job->args.ndb = ndb;
     job->args.chain = chain;
     job->args.w = w;
-    job->args.datadir = datadir;
+
+    /* Retain the datadir BYTES, never the starter's pointer. This function
+     * spawns a worker and returns immediately, so a caller that resolved the
+     * network datadir into a local buffer (catchup_lifecycle_start) has its
+     * frame torn down while the worker is still opening blk*.dat out of it.
+     * A NULL datadir stays NULL — the worker reports it with catchup
+     * context, exactly as before. */
+    job->args.datadir = NULL;
+    job->args.datadir_storage[0] = '\0';
+    if (datadir) {
+        int n = snprintf(job->args.datadir_storage,
+                         sizeof(job->args.datadir_storage), "%s", datadir);
+        if (n <= 0 || (size_t)n >= sizeof(job->args.datadir_storage)) {
+            job->args.datadir_storage[0] = '\0';
+            LOG_FAIL("sync", "catchup_job_start: datadir is empty or exceeds "
+                     "%zu bytes", sizeof(job->args.datadir_storage) - 1u);
+        }
+        job->args.datadir = job->args.datadir_storage;
+    }
     job->result = -1;
     atomic_store(&job->finished, false);
     job->started = true;
