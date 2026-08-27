@@ -589,24 +589,52 @@ int test_encoding(void)
                 expect[t] = digits[(src[t / 2] >> ((t % 2) ? 0 : 4)) & 0xF];
             expect[2 * n] = '\0';
 
-            for (int adj = -1; adj <= 1 && ok; adj++) {
-                size_t os = 2u * n + 1u + (size_t)(adj + 1);
+            size_t sizes[] = { 1, 2, 3, 2u * n, 2u * n + 1u,
+                               2u * n + 2u };
+            for (size_t s = 0; s < sizeof(sizes) / sizeof(sizes[0]) && ok;
+                 s++) {
+                size_t os = sizes[s];
+                if (os == 0 || os > sizeof(actual))
+                    continue;
                 memset(actual, 'Z', sizeof(actual));
                 HexStr(src, n, false, actual, os);
-                if (strlen(expect) >= os)          /* would have been cut */
-                    continue;
-                for (size_t k = 0; expect[k]; k++) {
+                size_t pairs = (os - 1u) / 2u;
+                if (pairs > n)
+                    pairs = n;
+                for (size_t k = 0; k < pairs * 2u; k++) {
                     if (actual[k] != expect[k]) { ok = false; break; }
                 }
                 if (ok) {
-                    if (actual[strlen(expect)] != '\0') ok = false;
-                    else if (os == 2u * n + 2u &&
-                             memcmp(actual + strlen(expect) + 1,
-                                    "ZZZZZZZ", 7) != 0)
-                        ok = false;                  /* over-wrote the buffer */
+                    size_t nul = pairs * 2u;
+                    if (actual[nul] != '\0')
+                        ok = false;
+                    for (size_t k = nul + 1u; k < sizeof(actual) && ok; k++)
+                        if (actual[k] != 'Z')
+                            ok = false;
                 }
             }
         }
+        printf("%s\n", ok ? "OK" : "FAIL");
+        if (!ok)
+            failures++;
+    }
+
+    /* Overlap must retain the scalar loop's established byte order even when
+     * the process-wide implementation tier is NEON. */
+    printf("HexStr overlap fallback... ");
+    {
+        unsigned char actual[64], expect[64];
+        for (size_t i = 0; i < sizeof(actual); i++)
+            actual[i] = expect[i] = (unsigned char)(i * 19u + 3u);
+        static const char digits[] = "0123456789abcdef";
+        size_t j = 0;
+        for (size_t i = 0; i < 20; i++) {
+            expect[j++] = (unsigned char)digits[expect[i] >> 4];
+            expect[j++] = (unsigned char)digits[expect[i] & 0x0f];
+        }
+        expect[j] = '\0';
+        HexStr(actual, 20, false, (char *)actual, sizeof(actual));
+        bool ok = memcmp(actual, expect, sizeof(actual)) == 0;
         printf("%s\n", ok ? "OK" : "FAIL");
         if (!ok)
             failures++;
