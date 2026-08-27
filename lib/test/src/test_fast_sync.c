@@ -1523,6 +1523,164 @@ static int test_chunk_roundtrip_preserves_canonical_utxo_fields(void)
     return failures;
 }
 
+/* One-entry snapshot-cache buffer with a caller-chosen script length.
+ * script_len >= 253 needs the 0xFD two-byte compact form the parser
+ * accepts. Ownership passes to fast_sync_publish_snapshot_cache. */
+static uint8_t *test_snapshot_script_entry(size_t *size_out, const char *tag,
+                                           uint32_t script_len,
+                                           uint8_t script_byte)
+{
+    const size_t len_bytes = script_len < 253 ? 1 : 3;
+    const size_t size = 4 + 32 + 4 + 8 + 4 + 1 + len_bytes + script_len;
+    uint8_t *buf = zcl_malloc(size, tag);
+    if (!buf) return NULL;
+
+    size_t pos = 0;
+    buf[pos++] = 1; buf[pos++] = 0; buf[pos++] = 0; buf[pos++] = 0;
+    memset(buf + pos, 0x77, 32); pos += 32;
+    memset(buf + pos, 0, 4); pos += 4;              /* vout */
+    memset(buf + pos, 0, 8); pos += 8;              /* value */
+    memset(buf + pos, 0, 4); pos += 4;              /* height */
+    buf[pos++] = 0;                                 /* is_coinbase */
+    if (script_len < 253) {
+        buf[pos++] = (uint8_t)script_len;
+    } else {
+        buf[pos++] = 0xFD;
+        buf[pos++] = (uint8_t)script_len;
+        buf[pos++] = (uint8_t)(script_len >> 8);
+    }
+    memset(buf + pos, script_byte, script_len);
+
+    if (size_out) *size_out = size;
+    return buf;
+}
+
+/* ── Refuse-don't-truncate: consensus-legal scripts past the 520-byte
+ * entry cap must fail the CHUNK on both serve paths. The wire receiver
+ * rejects oversize entries outright (msgprocessor_snapshot.c) and the
+ * end-of-sync UTXO root is computed over full-fidelity rows, so a
+ * silently shortened script could only ever produce state that fails
+ * verification — or worse, passes it with corrupted entries when the
+ * manifest root falls back to the chunk-derived Merkle root. */
+static int test_serve_refuses_oversize_script(void)
+{
+    int failures = 0;
+    TEST("fast_sync serve refuses oversize-script chunks on both the DB "
+         "and RAM paths, and still serves full-fidelity scripts at or "
+         "under the cap") {
+        char dir[128];
+        snprintf(dir, sizeof(dir),
+                 "./test-tmp/fast_sync_oversize_%d_XXXXXX", (int)getpid());
+        mkdir("./test-tmp", 0755);
+        char *datadir = mkdtemp(dir);
+        ASSERT(datadir != NULL);
+        char db_path[256];
+        snprintf(db_path, sizeof(db_path), "%s/node.db", datadir);
+
+        const char *schema =
+            "CREATE TABLE utxos ("
+            "txid BLOB NOT NULL,vout INTEGER NOT NULL,"
+            "value INTEGER NOT NULL,script BLOB NOT NULL,"
+            "height INTEGER NOT NULL,is_coinbase INTEGER NOT NULL DEFAULT 0,"
+            "PRIMARY KEY (txid,vout))";
+        sqlite3 *db = NULL;
+        ASSERT(sqlite3_open_v2(db_path, &db,
+                               SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+                               NULL) == SQLITE_OK);
+        char *err = NULL;
+        ASSERT(sqlite3_exec(db, schema, NULL, NULL, &err) == SQLITE_OK);
+        sqlite3_stmt *ins = NULL;
+        ASSERT(sqlite3_prepare_v2(db,
+            "INSERT INTO utxos(txid,vout,value,script,height,is_coinbase)"
+            " VALUES(?,?,?,?,?,?)",
+            -1, &ins, NULL) == SQLITE_OK);
+
+        uint8_t txid_ok[32], txid_small[32], txid_big[32];
+        uint8_t script_ok[300], script_big[600];
+        memset(txid_ok, 0xA1, sizeof(txid_ok));
+        memset(txid_small, 0xA2, sizeof(txid_small));
+        memset(txid_big, 0xC3, sizeof(txid_big));
+        memset(script_ok, 0x76, sizeof(script_ok));
+        memset(script_big, 0x63, sizeof(script_big));
+
+        /* Chunk 0: two in-cap rows. Chunk 1: one 600-byte-script row —
+         * consensus-legal (MAX_SCRIPT_SIZE is 10000), past the entry
+         * struct's 520-byte cap, and exactly what bare large multisig
+         * outputs produce. */
+        struct { const uint8_t *txid; const uint8_t *script; int slen; }
+            rows[3] = {
+                { txid_ok, script_ok, (int)sizeof(script_ok) },
+                { txid_small, script_big + 350, 1 },   /* in-cap neighbor */
+                { txid_big, script_big, (int)sizeof(script_big) },
+            };
+        for (int r = 0; r < 3; r++) {
+            sqlite3_reset(ins);
+            sqlite3_clear_bindings(ins);
+            sqlite3_bind_blob(ins, 1, rows[r].txid, 32, SQLITE_STATIC);
+            sqlite3_bind_int(ins, 2, (int)r);
+            sqlite3_bind_int64(ins, 3, 1000 + r);
+            sqlite3_bind_blob(ins, 4, rows[r].script, rows[r].slen,
+                              SQLITE_STATIC);
+            sqlite3_bind_int(ins, 5, 100 + r);
+            sqlite3_bind_int(ins, 6, 0);
+            ASSERT(sqlite3_step(ins) == SQLITE_DONE);  // raw-sql-ok:test-fixture-setup
+        }
+        sqlite3_finalize(ins);
+
+        struct utxo_chunk *chunk =
+            zcl_calloc(1, sizeof(struct utxo_chunk), "oversize_chunk");
+        ASSERT(chunk != NULL);
+
+        /* Control: the in-cap chunk still serves, full fidelity. A chunk
+         * size of 2 puts the two in-cap rows in chunk 0 and the oversize
+         * row alone in chunk 1. */
+        ASSERT(fast_sync_serve_chunk_db(db, 0, 2, chunk));
+        ASSERT(chunk->num_entries == 2);
+        ASSERT(chunk->entries[0].script_len == sizeof(script_ok));
+
+        /* THE REFUSAL: the oversize chunk fails the serve instead of
+         * coming back with entries[0].script_len clamped to 520. */
+        ASSERT(!fast_sync_serve_chunk_db(db, 1, 2, chunk));
+        sqlite3_close(db);
+        db = NULL;
+
+        /* ── RAM cache path: same contract against a full-fidelity
+         * snapshot buffer. Remove the database first so the SQLite
+         * fallback has nothing to serve and a refusal can only come
+         * from the RAM read itself. ── */
+        unlink(db_path);
+        uint8_t sha3[32];
+        memset(sha3, 0x3c, sizeof(sha3));
+        fast_sync_reset_snapshot_cache();
+
+        /* In-cap control: 250-byte script serves from RAM untouched. */
+        size_t buf_size = 0;
+        uint8_t *buf = test_snapshot_script_entry(
+            &buf_size, "oversize_ram_ok", 250, 0x52);
+        ASSERT(buf != NULL);
+        ASSERT(fast_sync_publish_snapshot_cache(buf, (int64_t)buf_size,
+                                                sha3, 1));
+        ASSERT(fast_sync_serve_chunk(datadir, 0, chunk));
+        ASSERT(chunk->num_entries == 1);
+        ASSERT(chunk->entries[0].script_len == 250);
+
+        /* The refusal: 601-byte script fails the RAM read (and the
+         * fallback finds no database at all). */
+        buf = test_snapshot_script_entry(&buf_size, "oversize_ram_big",
+                                         601, 0x63);
+        ASSERT(buf != NULL);
+        ASSERT(fast_sync_publish_snapshot_cache(buf, (int64_t)buf_size,
+                                                sha3, 1));
+        ASSERT(!fast_sync_serve_chunk(datadir, 0, chunk));
+
+        fast_sync_reset_snapshot_cache();
+        free(chunk);
+        rmdir(datadir);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* ── Batched SHA3-256 consumer parity (sha3-x4-batch lane) ─────────────
  *
  * fast_sync_merkle_root/build_proof combine a layer four pairs at a time via
@@ -1700,6 +1858,7 @@ int test_fast_sync(void)
     /* chunk apply atomicity */
     failures += test_apply_chunk_rollback_on_mid_chunk_failure();
     failures += test_chunk_roundtrip_preserves_canonical_utxo_fields();
+    failures += test_serve_refuses_oversize_script();
 
     return failures;
 }
