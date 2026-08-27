@@ -18,6 +18,8 @@
 # Rollout is WARN→RATCHET→HARD with a shrink-only baseline (see palace-design
 # §3, Gate P1), identical to framework_shape_allowlist.txt semantics.
 set -euo pipefail
+# ASCII source scans: pin the locale so BSD awk never trips on high bytes.
+export LC_ALL=C
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"

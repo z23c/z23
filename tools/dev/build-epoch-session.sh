@@ -56,16 +56,16 @@ case "$MODE" in acquire|check|verify) ;; *) fail "unknown mode: $MODE" ;; esac
 find_make_owner()
 {
     local candidate comm parent owner="" depth=0
-    candidate="$(ps -p "$$" -o ppid= 2>/dev/null || true)"
+    candidate="$(process_parent "$$")"
     candidate="${candidate//[[:space:]]/}"
     while [[ "$candidate" =~ ^[1-9][0-9]*$ ]] && [ "$depth" -lt 16 ]; do
-        comm="$(ps -p "$candidate" -o comm= 2>/dev/null || true)"
+        comm="$(process_comm "$candidate")"
         comm="${comm##*/}"
         comm="${comm//[[:space:]]/}"
         case "$comm" in
         make|gmake) owner="$candidate" ;;
         esac
-        parent="$(ps -p "$candidate" -o ppid= 2>/dev/null || true)"
+        parent="$(process_parent "$candidate")"
         parent="${parent//[[:space:]]/}"
         [ "$parent" != "$candidate" ] || break
         candidate="$parent"
@@ -75,17 +75,35 @@ find_make_owner()
     printf '%s\n' "$owner"
 }
 
+process_parent()
+{
+    local pid="$1"
+    case "$(uname -s 2>/dev/null)" in
+        MINGW*|MSYS*) ps -p "$pid" 2>/dev/null | awk 'NR == 2 { print $2 }' ;;
+        *) ps -p "$pid" -o ppid= 2>/dev/null || true ;;
+    esac
+}
+
+process_comm()
+{
+    local pid="$1"
+    case "$(uname -s 2>/dev/null)" in
+        MINGW*|MSYS*) ps -p "$pid" 2>/dev/null | awk 'NR == 2 { print $8 }' ;;
+        *) ps -p "$pid" -o comm= 2>/dev/null || true ;;
+    esac
+}
+
 process_ancestry()
 {
     local candidate comm parent depth=0 chain=""
-    candidate="$(ps -p "$$" -o ppid= 2>/dev/null || true)"
+    candidate="$(process_parent "$$")"
     candidate="${candidate//[[:space:]]/}"
     while [[ "$candidate" =~ ^[1-9][0-9]*$ ]] && [ "$depth" -lt 8 ]; do
-        comm="$(ps -p "$candidate" -o comm= 2>/dev/null || true)"
+        comm="$(process_comm "$candidate")"
         comm="${comm##*/}"
         comm="${comm//[[:space:]]/}"
         chain="${chain:+$chain,}${candidate}:${comm:-unknown}"
-        parent="$(ps -p "$candidate" -o ppid= 2>/dev/null || true)"
+        parent="$(process_parent "$candidate")"
         parent="${parent//[[:space:]]/}"
         [ "$parent" != "$candidate" ] || break
         candidate="$parent"

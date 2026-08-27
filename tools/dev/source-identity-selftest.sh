@@ -64,6 +64,11 @@ done
 printf 'unchanged\n' > hidden.c
 printf 'delete me\n' > deleted.c
 ln -s fixture-1.c source-link
+if [ -L source-link ]; then
+    HAVE_NATIVE_SYMLINK=1
+else
+    HAVE_NATIVE_SYMLINK=0
+fi
 git add .
 git commit -qm base
 
@@ -146,8 +151,16 @@ rm app/controllers/include/controllers/ignored-fixture.h
 
 rm vendor/lib/fixture.a
 ln -s ../../fixture-1.c vendor/lib/fixture.a
-if "$SCRIPT" capture > /dev/null 2>&1; then
-    fail 'symlinked linked archive was not rejected'
+if [ -L vendor/lib/fixture.a ]; then
+    if "$SCRIPT" capture > /dev/null 2>&1; then
+        fail 'symlinked linked archive was not rejected'
+    fi
+else
+    # MSYS2's default winsymlink mode materializes a regular compatibility
+    # file when Windows symlink creation is unavailable. It has no symlink
+    # metadata to reject, but its bytes must still participate in identity.
+    [ "$($SCRIPT capture)" != "$submodule_after" ] ||
+        fail 'materialized Windows symlink compatibility file was omitted'
 fi
 rm vendor/lib/fixture.a
 printf 'archive input\n' > vendor/lib/fixture.a
@@ -170,10 +183,17 @@ for i in $(seq 1 160); do
     printf '/* dirty %s */\n' "$i" >> "fixture-$i.c"
 done
 printf 'untracked with spaces\n' > 'new source file.c'
-printf 'untracked with backslash\n' > 'new\source.c'
+case "$(uname -s)" in
+    MINGW*|MSYS*) ;;
+    *) printf 'untracked with backslash\n' > 'new\source.c' ;;
+esac
 printf 'untracked with newline\n' > $'new\nsource.c'
 rm deleted.c
-ln -sfn fixture-2.c source-link
+if [ "$HAVE_NATIVE_SYMLINK" = 1 ]; then
+    ln -sfn fixture-2.c source-link
+else
+    printf 'materialized link target: fixture-2.c\n' > source-link
+fi
 chmod +x fixture-160.c
 git add fixture-1.c fixture-2.c
 
@@ -189,21 +209,23 @@ portable="$(ZCL_SOURCE_IDENTITY_FORCE_PORTABLE=1 "$SCRIPT" capture)" ||
     fail "batched identity differs from canonical portable identity fast=$fast portable=$portable"
 [[ "$fast" =~ ^[0-9a-f]{64}$ ]] || fail 'capture was not lowercase SHA-256'
 
-# A trailing newline is a legal symlink-target byte. It must supersede the
-# otherwise-identical target, and fast/portable collectors must agree exactly.
-ln -sfn $'fixture-2.c\n' source-link
-newline_fast="$("$SCRIPT" capture)" ||
-    fail 'batched trailing-newline symlink capture failed'
-newline_portable="$(ZCL_SOURCE_IDENTITY_FORCE_PORTABLE=1 "$SCRIPT" capture)" ||
-    fail 'portable trailing-newline symlink capture failed'
-[ "$newline_fast" = "$newline_portable" ] ||
-    fail 'fast/portable identities differ for trailing-newline symlink target'
-[ "$newline_fast" != "$fast" ] ||
-    fail 'trailing-newline symlink target did not supersede source identity'
-ln -sfn fixture-2.c source-link
-restored="$("$SCRIPT" capture)" || fail 'restored symlink capture failed'
-[ "$restored" = "$fast" ] ||
-    fail 'restoring exact symlink target did not restore source identity'
+if [ "$HAVE_NATIVE_SYMLINK" = 1 ]; then
+    # A trailing newline is a legal symlink-target byte. It must supersede the
+    # otherwise-identical target, and both collectors must agree exactly.
+    ln -sfn $'fixture-2.c\n' source-link
+    newline_fast="$("$SCRIPT" capture)" ||
+        fail 'batched trailing-newline symlink capture failed'
+    newline_portable="$(ZCL_SOURCE_IDENTITY_FORCE_PORTABLE=1 "$SCRIPT" capture)" ||
+        fail 'portable trailing-newline symlink capture failed'
+    [ "$newline_fast" = "$newline_portable" ] ||
+        fail 'fast/portable identities differ for trailing-newline symlink target'
+    [ "$newline_fast" != "$fast" ] ||
+        fail 'trailing-newline symlink target did not supersede source identity'
+    ln -sfn fixture-2.c source-link
+    restored="$("$SCRIPT" capture)" || fail 'restored symlink capture failed'
+    [ "$restored" = "$fast" ] ||
+        fail 'restoring exact symlink target did not restore source identity'
+fi
 
 # Edit/revert ABA preserves content but changes the build-session mutation
 # token, so an object compiled during the transient state cannot be published.
