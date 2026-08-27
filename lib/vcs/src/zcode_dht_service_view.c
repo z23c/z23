@@ -64,9 +64,16 @@ void vcs_zcode_dht_service_status(const struct vcs_zcode_dht_service *s,
       out->publication_intents++;
       out->active_publications +=
           s->publications[i].phase != SERVICE_PUBLICATION_WAITING;
+      /* Also true during the ordinary renewal-window proof cycle, so a
+       * nonzero reading is routine; the alarm signal is
+       * possession_stall_releases climbing or this gauge pinned near MAX. */
+      out->stalled_possessions +=
+          s->publications[i].record.kind == VCS_ZCODE_DHT_RECORD_STORAGE_ACK &&
+          !s->publications[i].possession_current;
     }
   out->unauthenticated_expired = s->unauthenticated_expired;
   out->duplicate_sessions_retired = s->duplicate_sessions_retired;
+  out->possession_stall_releases = s->possession_stall_releases;
   out->lookup_rounds = s->lookup_rounds;
   out->lookup_xor_progress = s->lookup_xor_progress;
   out->lookup_queue_wait_s = s->lookup_queue_wait_s;

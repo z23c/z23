@@ -99,6 +99,9 @@ void boot_zcode_dht_status_json(
                    status.active_record_operations);
   json_push_kv_int(out, "publication_intents", status.publication_intents);
   json_push_kv_int(out, "active_publications", status.active_publications);
+  json_push_kv_int(out, "stalled_possessions", status.stalled_possessions);
+  json_push_kv_int(out, "possession_stall_releases",
+                   (int64_t)status.possession_stall_releases);
   json_push_kv_int(out, "unauthenticated_expired",
                    (int64_t)status.unauthenticated_expired);
   json_push_kv_int(out, "duplicate_sessions_retired",

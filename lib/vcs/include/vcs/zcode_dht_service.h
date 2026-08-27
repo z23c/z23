@@ -171,6 +171,11 @@ struct vcs_zcode_dht_service_status {
   uint32_t active_record_operations;
   uint32_t publication_intents;
   uint32_t active_publications;
+  /* STORAGE_ACK intents currently gated (possession proof stale). Nonzero
+   * is routine around renewal windows and right after a restart; alert on
+   * possession_stall_releases climbing or this pinned near MAX. */
+  uint32_t stalled_possessions;
+  uint32_t possession_stall_releases;
   uint64_t lookup_rounds;
   uint64_t lookup_xor_progress;
   uint64_t lookup_queue_wait_s;

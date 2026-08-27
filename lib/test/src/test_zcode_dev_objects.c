@@ -51,6 +51,7 @@
 #include "vcs/zcode_task_authority_bundle.h"
 #include "vcs/zcode_task_index.h"
 #include "vcs/vcs.h"
+#include "config/boot_zcode_async_select.h"
 
 #include <secp256k1.h>
 #include <dirent.h>
@@ -5636,6 +5637,21 @@ static int test_zd_task_index(void)
     return failures;
 }
 
+static int test_zd_async_no_peer_next(void)
+{
+    int failures = 0;
+    TEST("zcode_dev: empty-worker async refusal names z23 join") {
+        /* NULL work is the start state: capable_peers returns 0. */
+        const char *next = boot_zcode_async_log_no_peer(NULL, NULL, "act", 0);
+        ASSERT(next != NULL);
+        ASSERT(strstr(next, "z23 join") != NULL);
+        ASSERT(strstr(next, "-packagehost") == NULL);
+        ASSERT(strstr(next, "-buildworker") == NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_zcode_dev_objects(void)
 {
     int failures = 0;
@@ -5654,6 +5670,7 @@ int test_zcode_dev_objects(void)
     failures += test_zd_work_node_three();
     failures += test_zd_improve_command();
     failures += test_zd_task_index();
+    failures += test_zd_async_no_peer_next();
     printf("=== zcode_dev_objects: %d failures ===\n", failures);
     return failures;
 }
