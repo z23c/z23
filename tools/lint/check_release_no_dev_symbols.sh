@@ -16,9 +16,15 @@
 #      dev-activation engine source file carries its dev/test compile guard.
 #      These facts guarantee absence in any fresh release build while the
 #      registry can still expose honest COMPAT metadata for dev-only commands.
-#   2. ARTIFACT (when a fresh release binary exists): `nm -D` must not export
-#      any forbidden dev-executor symbol. The release binary is stripped, but
-#      -rdynamic keeps extern symbols in .dynsym, so nm -D is definitive.
+#   2. ARTIFACT (when a fresh release binary exists): the exported extern
+#      symbol set must not contain any forbidden dev-executor symbol. The
+#      release binary is stripped, but -rdynamic keeps extern symbols in
+#      .dynsym, so the read is definitive. The read is per-host: ELF (Linux)
+#      exports via -rdynamic into .dynsym, read with `nm -D --defined-only`;
+#      a Mach-O executable has NO dynamic symbol table at all — Apple's nm
+#      refuses it with "File format has no dynamic symbol table" (exit 1) —
+#      and the exported externs are its defined global symbols, read with
+#      `nm -gU`.
 
 set -uo pipefail
 
@@ -113,9 +119,33 @@ gate_require_scanned "$scanned_activation" 5 "check-release-no-dev-symbols" \
 
 # ── layer 2: artifact (nm on a FRESH release binary, when present) ────────
 if [ -x "$BIN" ] && [ "$BIN" -nt src/main.c ] && [ "$BIN" -nt Makefile ]; then
-    syms="$(nm -D --defined-only "$BIN" 2>/dev/null | awk '{print $NF}')"
-    if [ -z "$syms" ]; then
-        echo "NOTE: nm -D exported no symbols from $BIN (unexpected for -rdynamic);" >&2
+    # The symbol read is per-host (see the header). Linux keeps the exact
+    # ELF contract it always had; only Darwin switches read.
+    if [ "$(uname -s)" = "Darwin" ]; then
+        nm_read=(nm -gU)
+    else
+        nm_read=(nm -D --defined-only)
+    fi
+    # The read's exit status is captured EXPLICITLY, never left inside a bare
+    # `$( )` assignment. This script starts `set -uo pipefail` with NO `-e`,
+    # but every gate_grep call above re-arms errexit (gate_lib.sh's gate_grep
+    # ends in a bare `set -e` and shell options are not function-scoped), so
+    # the whole script has been running under errexit from the first grep on.
+    # With `nm -D` failing on a Mach-O binary (exit 1, stderr discarded by the
+    # 2>/dev/null inside the substitution) that assignment killed the gate
+    # dead: rc=1, zero output — the silent red. Same discipline as
+    # check_hotswap_module_imports.sh: a tool failure is a decision, made out
+    # loud, never a pipeline accident.
+    syms="$("${nm_read[@]}" "$BIN" 2>/dev/null | awk '{print $NF}')" && nm_rc=0 || nm_rc=$?
+    if [ "$nm_rc" -ne 0 ]; then
+        nm_err="$("${nm_read[@]}" "$BIN" 2>&1 >/dev/null)" || true
+        echo "FAIL: cannot read the exported symbols of $BIN with '${nm_read[*]}' (exit $nm_rc)" >&2
+        [ -n "$nm_err" ] && echo "      nm says: $(printf '%s' "$nm_err" | head -1)" >&2
+        echo "      the artifact-level proof did NOT run; the structural proof above" >&2
+        echo "      is the only evidence this gate can offer for this artifact." >&2
+        rc=1
+    elif [ -z "$syms" ]; then
+        echo "NOTE: ${nm_read[*]} exported no symbols from $BIN (unexpected for -rdynamic);" >&2
         echo "      relying on the structural proof above." >&2
     else
         # The verdict is a string test on the EXTRACTED match, never the exit
@@ -128,6 +158,17 @@ if [ -x "$BIN" ] && [ "$BIN" -nt src/main.c ] && [ "$BIN" -nt Makefile ]; then
         # PASSes with a forbidden symbol planted on line 6 of the real nm
         # output. Dropping `-q` makes grep consume all of stdin, so printf
         # always completes; the regex itself is unchanged.
+        # Mach-O spells every extern C symbol with one leading underscore
+        # (_zcl_devloop_cli_main); FORBIDDEN is written in plain C names. The
+        # audit's intent is "this name is absent", not "this spelling is
+        # absent", so probe the stripped form on this host — otherwise the
+        # negative match can never fire on Darwin (same rule as
+        # check_hotswap_module_imports.sh). Linux names carry no underscore,
+        # so this is a no-op there and the read above already is ELF-native.
+        if [ "$(uname -s)" = "Darwin" ]; then
+            # one underscore: Mach-O prefixes exactly one; BSD sed has no \+
+            syms="$(printf '%s\n' "$syms" | sed 's/^_//')"
+        fi
         for sym in "${FORBIDDEN[@]}"; do
             sym_hit="$(printf '%s\n' "$syms" | gate_grep -x "$sym" || true)"
             if [ -n "$sym_hit" ]; then
@@ -135,7 +176,13 @@ if [ -x "$BIN" ] && [ "$BIN" -nt src/main.c ] && [ "$BIN" -nt Makefile ]; then
                 rc=1
             fi
         done
-        [ "$rc" -eq 0 ] && echo "  nm -D $BIN: all ${#FORBIDDEN[@]} dev-executor symbols ABSENT ✓"
+        # An `if`, not `[ ... ] && echo`: gate_grep leaves errexit armed, and
+        # a bare `[ 1 -eq 0 ] && echo` failing as a standalone statement would
+        # kill the gate right after a FAIL was printed, dropping the final
+        # summary line.
+        if [ "$rc" -eq 0 ]; then
+            echo "  ${nm_read[*]} $BIN: all ${#FORBIDDEN[@]} dev-executor symbols ABSENT ✓"
+        fi
     fi
 else
     echo "NOTE: no fresh release binary at $BIN — structural proof above is authoritative."
