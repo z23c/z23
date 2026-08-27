@@ -2496,11 +2496,12 @@ $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN): tools/zcode_package_registry_check.c \
 		lib/base/src/safe_alloc.c lib/base/src/log_level.c \
 		lib/platform/src/clock.c
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -D_GNU_SOURCE -O0 -Wall -Wextra -Werror -pedantic \
+	$(CC) -std=c23 -D_GNU_SOURCE $(ZCL_PLATFORM_CPPFLAGS) \
+	    -O0 -Wall -Wextra -Werror -pedantic \
 	    -Ilib/vcs/include -Ilib/json/include -Ilib/codec/include -Ilib/sha3/include \
 	    -Ilib/crypto/include -Ilib/base/include -Ilib/util/include \
 	    -Ilib/platform/include -Ivendor/include -o $@ $(filter %.c,$^) \
-	    -Lvendor/lib -l:libsecp256k1.a -lpthread -lm
+	    $(NODE_SECP_ARCHIVE) -lpthread -lm
 
 zclassic23-package-sign: $(BIN_DIR)/zclassic23-package-sign
 $(BIN_DIR)/zclassic23-package-sign: FORCE tools/zcode_dev_signer.c lib/base/src/cleanse.c
