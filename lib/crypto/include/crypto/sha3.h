@@ -15,7 +15,8 @@ void sha3_512_x4(const uint8_t key[32], const uint8_t nonce[32],
 enum sha3_impl {
     SHA3_IMPL_AUTO = -1,
     SHA3_IMPL_SCALAR = 0,
-    SHA3_IMPL_AVX512 = 1
+    SHA3_IMPL_AVX512 = 1,
+    SHA3_IMPL_NEON = 2
 };
 
 bool keccak_x4_available(void);

@@ -128,6 +128,11 @@ struct yardsale_wallet_ceremony_port {
                        int64_t now_unix, uint8_t *wire_out, size_t wire_cap,
                        size_t *wire_len);
     const char *(*buyer_error_string)(int error_code);
+    /* How a begun buy ended, keyed by quote_root: -1 unknown, 0
+     * in-flight, 1 completed, 2 failed (the controller's outcome enum,
+     * carried as int so this header never names it). NULL keeps the
+     * conservative answer: a committed replay stays committed. */
+    int (*buy_outcome)(const uint8_t quote_root[32]);
 };
 
 /* Set once at composition time (RPC registration / test setup); NULL

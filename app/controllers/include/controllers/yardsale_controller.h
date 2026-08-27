@@ -167,6 +167,21 @@ int yardsale_ceremony_partial_ingest(const uint8_t *wire, size_t wire_len,
 /* Count of live pending buys (diagnostics/tests). */
 int yardsale_pending_count(int64_t now_unix);
 
+/* How a begun buy actually ended. buyer_begin records IN_FLIGHT; every
+ * partial-ingest terminal path records COMPLETED or FAILED — the wallet's
+ * committed replay reads this to distinguish "still pinned" from "the
+ * ceremony died, the plan may reopen". The outcome ring is bounded and
+ * root-keyed: an evicted root (or a restart) reads UNKNOWN, which the
+ * wallet treats conservatively as stay-committed. Carried as int so the
+ * wallet-service port never names this enum. */
+enum yardsale_buy_outcome {
+    YARDSALE_BUY_OUTCOME_UNKNOWN = -1,
+    YARDSALE_BUY_OUTCOME_IN_FLIGHT = 0,
+    YARDSALE_BUY_OUTCOME_COMPLETED = 1,
+    YARDSALE_BUY_OUTCOME_FAILED = 2,
+};
+int yardsale_ceremony_buy_outcome(const uint8_t quote_root[32]);
+
 /* Test hook: drop every pending buy (cleansing keys), the relay dedup
  * ring, and the per-peer clamp. Does NOT clear the seller profile. */
 void yardsale_ceremony_reset(void);

@@ -264,6 +264,18 @@ static int yw_test_buyer_begin(const struct zswap_quote_v1 *ad,
                                      now_unix, wire_out, wire_cap, wire_len);
 }
 
+/* The fake outcome the ceremony port reports for every root: 1
+ * (completed) keeps the historical stay-committed replay; tests flip it
+ * to 2 (failed) to drive the reopen path, or -1 (unknown) for the
+ * conservative default. */
+static int yw_fake_buy_outcome = 1;
+
+static int yw_test_buy_outcome(const uint8_t quote_root[32])
+{
+    (void)quote_root;
+    return yw_fake_buy_outcome;
+}
+
 static void yw_reset_all(void)
 {
     static const struct yardsale_wallet_ceremony_port port = {
@@ -274,8 +286,10 @@ static void yw_reset_all(void)
         .pending_count = yardsale_pending_count,
         .buyer_begin = yw_test_buyer_begin,
         .buyer_error_string = yardsale_error_string,
+        .buy_outcome = yw_test_buy_outcome,
     };
     yardsale_wallet_set_ceremony_port(&port);
+    yw_fake_buy_outcome = 1;
     zswap_yardsale_reset();
     yardsale_ceremony_reset();
     yardsale_seller_profile_clear();
@@ -771,6 +785,49 @@ int test_yardsale_wallet(void)
                  flood.count == 1 &&
                  yardsale_pending_count(YW_NOW) == 1);
         json_free(&replay);
+
+        /* ── buy: a ceremony-FAILED replay reopens and re-arms ──────
+         * Production records FAILED only after the pending buy was
+         * consumed by a refused partial; mirror that here by clearing
+         * the stale pending first, then reporting FAILED from the port. */
+        yardsale_ceremony_reset();
+        YW_CHECK("buy commit: stale pending cleared for the failed case",
+                 yardsale_pending_count(YW_NOW) == 0);
+        yw_fake_buy_outcome = 2;
+        struct json_value failed_replay;
+        json_init(&failed_replay);
+        bool rearmed = yardsale_wallet_buy(&buyer_w, &ndb, buy_root, true,
+                                           YW_NOW, &failed_replay) ==
+            YARDSALE_WALLET_OK;
+        YW_CHECK("buy commit: failed-ceremony replay reopens and re-arms",
+                 rearmed &&
+                 json_get_bool(json_get(&failed_replay, "committed")) &&
+                 !json_get_bool(json_get(&failed_replay,
+                                         "idempotent_replay")) &&
+                 flood.count == 2 &&
+                 yardsale_pending_count(YW_NOW) == 1);
+        json_free(&failed_replay);
+        struct db_yardsale_plan rearmed_row;
+        YW_CHECK("buy commit: re-armed row is COMMITTED/begun again",
+                 db_yardsale_plan_find(&ndb, buy_plan_root, &rearmed_row) &&
+                 strcmp(rearmed_row.state,
+                        YARDSALE_PLAN_STATE_COMMITTED) == 0 &&
+                 strcmp(rearmed_row.result, "begun") == 0);
+
+        /* An UNKNOWN outcome keeps the conservative committed replay. */
+        yardsale_ceremony_reset();
+        yw_fake_buy_outcome = -1;
+        struct json_value unknown_replay;
+        json_init(&unknown_replay);
+        YW_CHECK("buy commit: unknown outcome stays committed",
+                 yardsale_wallet_buy(&buyer_w, &ndb, buy_root, true,
+                                     YW_NOW, &unknown_replay) ==
+                     YARDSALE_WALLET_OK &&
+                 json_get_bool(json_get(&unknown_replay,
+                                        "idempotent_replay")) &&
+                 flood.count == 2);
+        json_free(&unknown_replay);
+        yw_fake_buy_outcome = 1;
 
         /* ── buy: commit after plan expiry refuses ──────────────── */
         struct zswap_quote_v1 ad3;
