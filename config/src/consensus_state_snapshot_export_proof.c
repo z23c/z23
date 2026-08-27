@@ -2,6 +2,7 @@
  * Frozen-source proof gate for zcl.consensus_state_bundle.v1 export. */
 
 #include "consensus_state_snapshot_export_internal.h"
+#include "consensus_state_producer_receipt_internal.h"
 #include "consensus_state_sqlite_text.h"
 
 #include "chain/checkpoints.h"
@@ -32,39 +33,6 @@ static bool digest_nonzero(const uint8_t digest[32])
     for (size_t i = 0; i < 32; i++)
         any |= digest[i];
     return any != 0;
-}
-
-static bool running_binary_digest(uint8_t out[32])
-{
-    int fd = open("/proc/self/exe", O_RDONLY | O_CLOEXEC);
-    if (fd < 0) {
-        LOG_WARN(EXPORT_PROOF_SUBSYS, "running executable open failed");
-        return false;
-    }
-    struct sha3_256_ctx ctx;
-    sha3_256_init(&ctx);
-    uint8_t buffer[32768];
-    bool ok = true;
-    for (;;) {
-        ssize_t n = read(fd, buffer, sizeof(buffer));
-        if (n > 0) {
-            sha3_256_write(&ctx, buffer, (size_t)n);
-            continue;
-        }
-        if (n == 0)
-            break;
-        if (errno == EINTR)
-            continue;
-        ok = false;
-        break;
-    }
-    if (close(fd) != 0)
-        ok = false;
-    if (ok)
-        sha3_256_finalize(&ctx, out);
-    else
-        LOG_WARN(EXPORT_PROOF_SUBSYS, "running executable digest failed");
-    return ok;
 }
 
 static bool copy_receipt_blob(sqlite3_stmt *st, int column, uint8_t out[32])
@@ -172,7 +140,7 @@ static bool prove_source_receipt(sqlite3 *db, int64_t fold_cursor,
               * this digest, so the emitted bundle is byte-identical in shape. */
              (checkpoint_content_export
                   ? digest_nonzero(receipt->running_binary_digest)
-                  : (running_binary_digest(executable) &&
+                  : (producer_running_binary_digest(executable) &&
                      memcmp(receipt->running_binary_digest, executable, 32) ==
                          0));
     if (ok) {

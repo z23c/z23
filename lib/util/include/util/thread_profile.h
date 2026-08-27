@@ -2,16 +2,17 @@
  *
  * In-process thread CPU profiler — the C primitive behind `zclassic23 profile`.
  *
- * Samples /proc/self/task/<tid>/stat twice, `sample_ms` apart, and reports the
- * per-thread user+system CPU-time delta over the window, each thread's name and
- * current kernel wait channel (wchan), and a one-line verdict classifying where
- * the process spends the window (cpu-bound in a named thread, io-wait in a
- * named wait channel such as jbd2, or idle). This replaces the /proc sampling
- * an operator does by hand to find a bottleneck.
+ * Samples the process's threads twice, `sample_ms` apart (per-thread
+ * /proc/self/task/<tid>/stat on Linux; Mach thread_info on Darwin), and
+ * reports the per-thread user+system CPU-time delta over the window, each
+ * thread's name and current kernel wait channel (wchan), and a one-line
+ * verdict classifying where the process spends the window (cpu-bound in a
+ * named thread, io-wait in a named wait channel such as jbd2, or idle). This
+ * replaces the /proc sampling an operator does by hand to find a bottleneck.
  *
- * Read-only: it opens /proc entries of THIS process only, allocates a bounded
- * snapshot, and never mutates node state. A thread that exits mid-window (its
- * /proc entry vanishes between the two samples) is skipped, never fatal.
+ * Read-only: it reads thread state of THIS process only, allocates a bounded
+ * snapshot, and never mutates node state. A thread that exits mid-window is
+ * skipped, never fatal.
  */
 
 #ifndef ZCL_UTIL_THREAD_PROFILE_H
@@ -38,8 +39,9 @@ struct thread_profile_opts {
  *     verdict, busiest_thread,
  *     threads: [ { tid, name, cpu_ms, cpu_fraction, wchan }, ... ] }
  * Threads are sorted by descending cpu_ms. Returns true on success; false and
- * an empty object only if /proc/self/task is unreadable. Never crashes on a
- * thread that races the sample. */
+ * an empty object only if the thread list is unreadable (/proc/self/task on
+ * Linux, the Mach thread list on Darwin). Never crashes on a thread that
+ * races the sample. */
 bool thread_profile_sample(const struct thread_profile_opts *opts,
                            struct json_value *out);
 
