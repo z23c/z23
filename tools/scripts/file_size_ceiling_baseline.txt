@@ -23,18 +23,18 @@ app/controllers/src/agent_anchor_status_controller.c 847
 app/controllers/src/agent_controller.c 805
 app/controllers/src/api_controller_status.c 894
 app/controllers/src/api_controller_routes.c 834 # market-moderation dynamic route (split seam if this grows again)
-app/controllers/src/file_market_controller.c 1189 # market-moderation RPCs (split seam: moderation handlers -> market_moderation_native_handler.c)
+app/controllers/src/file_market_controller.c 919 # market-moderation RPCs (split seam: moderation handlers -> market_moderation_native_handler.c)
 app/controllers/src/name_controller.c 1017
 app/controllers/src/swap_controller.c 1027
 app/controllers/src/shop_native_want.c 902 # buyer want-ads: 5 leaves (post/list/status/cancel/review), sign+store controller (split seam: model helpers -> models/shop_want.c)
 app/jobs/src/reducer_frontier.c 801
-app/jobs/src/reducer_frontier_replay.c 809
+app/jobs/src/reducer_frontier_replay.c 806
 app/jobs/src/tip_finalize_stage.c 809
-app/jobs/src/utxo_apply_stage.c 941
-app/jobs/src/validate_headers_stage.c 1051
+app/jobs/src/utxo_apply_stage.c 939
+app/jobs/src/validate_headers_stage.c 1049
 app/models/src/block.c 823
 app/models/src/database_migrate_features_v49_up.c 812 # append-only migration accumulator — splitting breaks the append order it exists to preserve
-app/services/src/block_index_loader.c 965 # block_index_flat_header_at (replay-canary FAIL#7 tip-bind point read)
+app/services/src/block_index_loader.c 851 # block_index_flat_header_at (replay-canary FAIL#7 tip-bind point read)
 app/services/src/block_index_loader_rebuild.c 853 # ADR-0008 (seed-floor declaration)
 # 2026-07-27 (work/db-lock-fixes): node_db_catchup_service.c shed the
 # try-decrypt helper to node_db_catchup_decrypt.c (-111) and gained the
@@ -49,7 +49,7 @@ app/services/src/sync_monitor.c 810
 # the confined runner (fork + Landlock/seccomp/rlimits + sandbox self-check
 # canaries + crash discipline) is one fail-closed ritual that must stay
 # together; baselined at creation per the zcode_science_service.c precedent.
-app/services/src/zcode_benchmark_executor.c 1232
+app/services/src/zcode_benchmark_executor.c 1228
 # ZCODE Scientific Metaverse S3: plan/commit services + review/vote submit +
 # CAS rebuild for the science store — one fail-closed write ritual per kind;
 # baselined at creation (gate option 3), expected to shrink when S5's
@@ -86,7 +86,7 @@ config/src/boot_services.c 1476
 # over. The work-adapter half (boot_zcode_work_*) is the natural future
 # split seam if this file grows again.
 config/src/boot_zcode_swarm.c 885
-config/src/bundle_exporter.c 991
+config/src/bundle_exporter.c 988
 config/src/consensus_state_install_runtime.c 919
 config/src/consensus_state_producer_receipt.c 787
 config/src/consensus_state_snapshot_install_activate.c 1169 # ADR-0008 (seed-floor declaration)
