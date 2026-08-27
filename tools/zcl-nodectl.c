@@ -711,29 +711,8 @@ static int cmd_launch(int argc, char **argv)
     }
 
     argv[2] = launch.target_path;
-#if defined(__APPLE__)
-    /* No fexecve(2) on this host and process_compat refuses the
-     * F_GETPATH indirection by contract. The slot directory is 0700 and the
-     * authority decision already happened against executable_fd; re-verify
-     * that the named path is still that exact inode immediately before the
-     * exec so a last-instant swap cannot change what runs. The residual
-     * window is the same class the hot-swap dlopen identity check accepts. */
-    struct stat fd_st;
-    if (fstat(launch.executable_fd, &fd_st) == 0) {
-        struct stat path_st;
-        if (stat(launch.target_path, &path_st) == 0 &&
-            path_st.st_dev == fd_st.st_dev &&
-            path_st.st_ino == fd_st.st_ino) {
-            execve(launch.target_path, &argv[2], environ);
-        } else {
-            errno = ESTALE;
-        }
-    }
-    int saved_errno = errno;
-#else
     platform_execve_fd(launch.executable_fd, &argv[2], environ);
     int saved_errno = errno;
-#endif
     fprintf(stderr, "zcl-nodectl launch: execute pinned %s failed: %s\n",
             launch.target_path, strerror(saved_errno));
     os_binary_slots_close_launch(&launch);

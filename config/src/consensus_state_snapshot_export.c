@@ -9,7 +9,6 @@
 #include "storage/progress_store.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
-
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>

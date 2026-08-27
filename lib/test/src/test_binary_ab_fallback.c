@@ -598,6 +598,18 @@ int test_binary_ab_fallback(void)
         int status = -1;
         AB_CHECK("seed adapter normal streak",
                  ab_write_file(streak, "0\n", 0600) == 0);
+#if defined(__APPLE__)
+        AB_CHECK("native launcher refuses when descriptor-bound exec is unavailable",
+                 ab_run_nodectl(dir, "3", "0", AB_TRUE_PATH,
+                                output, sizeof(output), &status) &&
+                 status == 126);
+        AB_CHECK("seed Darwin adapter threshold streak",
+                 ab_write_file(streak, "3\n", 0600) == 0);
+        AB_CHECK("Darwin selected last-good also fails closed",
+                 ab_run_nodectl(dir, "3", "0", AB_TRUE_PATH,
+                                output, sizeof(output), &status) &&
+                 status == 126);
+#else
         AB_CHECK("native launcher runs with explicit slots and no HOME",
                  ab_run_nodectl(dir, "3", "1", AB_TRUE_PATH,
                                 output, sizeof(output), &status) &&
@@ -616,6 +628,7 @@ int test_binary_ab_fallback(void)
                  ab_run_nodectl(dir, "3", "0", AB_TRUE_PATH,
                                 output, sizeof(output), &status) &&
                  status == 0 && output[0] == '\0');
+#endif
 
         AB_CHECK("seed invalid-threshold control streak",
                  ab_write_file(streak, "0\n", 0600) == 0);
@@ -627,6 +640,7 @@ int test_binary_ab_fallback(void)
                  ab_read_file(streak, buf, sizeof(buf)) >= 0 &&
                  strcmp(buf, "0\n") == 0);
 
+#if !defined(__APPLE__)
         AB_CHECK("seed adapter threshold streak",
                  ab_write_file(streak, "3\n", 0600) == 0);
         AB_CHECK("native launcher threshold uses fallback",
@@ -642,6 +656,7 @@ int test_binary_ab_fallback(void)
                                 output, sizeof(output), &status) &&
                  status == 0 && strstr(output, "FALLBACK_ACTIVE=1\n") &&
                  strstr(output, "CURRENT=\n"));
+#endif
     }
 
     /* ── 13. cleanup temp dir ────────────────────────────────────────── */

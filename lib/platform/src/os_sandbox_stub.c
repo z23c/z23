@@ -6,11 +6,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/resource.h>
-#include <sys/sysctl.h>
 #include <unistd.h>
 
 #if defined(__APPLE__)
 #include <libproc.h> /* proc_pidinfo: per-process BSD identity and task size */
+#include <sys/sysctl.h>
 #endif
 
 static char g_requested_profile[64];

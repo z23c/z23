@@ -1,8 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * CLI client + offline run-and-exit modes (split out of src/main.c, pure
- * code motion). Everything here runs one command and exits — it never boots
- * the resident node. Grouped:
+ * Offline CLI modes split from src/main.c; each exits without booting the
+ * resident node. Grouped:
  *   - bench_mode_main            — -bench* crypto/regress benchmarks
  *   - cli_main / is_cli_mode     — native-command + RPC client, status client
  *   - gen_utxo_snapshot_mode     — --gen-utxo-snapshot sidecar writer

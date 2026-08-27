@@ -12,7 +12,7 @@
 
 /* ── tiers ──────────────────────────────────────────────────────────── */
 
-static const char *const k_tier_names[] = { /* hotswap-static-ok: read-only enum-name tables */
+static const char *const k_tier_names[VCS_POLICY_TIER_COUNT] = { /* hotswap-static-ok: read-only enum-name tables */
     "new-user",
     "earned-contributor",
     "verified-seeder",
@@ -214,7 +214,7 @@ struct vcs_policy_decision vcs_policy_check_verifier(
 
 /* ── what never earns credit ────────────────────────────────────────── */
 
-static const char *const k_no_credit_names[] = { /* hotswap-static-ok: read-only enum-name tables */
+static const char *const k_no_credit_names[VCS_POLICY_NO_CREDIT_COUNT] = { /* hotswap-static-ok: read-only enum-name tables */
     "announcement-bytes",
     "unverified-bytes",
     "duplicate-request-replay",
@@ -232,7 +232,7 @@ const char *vcs_policy_no_credit_string(enum vcs_policy_no_credit kind)
 
 /* ── offence kinds ──────────────────────────────────────────────────── */
 
-static const char *const k_offence_names[] = { /* hotswap-static-ok: read-only enum-name tables */
+static const char *const k_offence_names[VCS_POLICY_OFFENCE_COUNT] = { /* hotswap-static-ok: read-only enum-name tables */
     "duplicate-request",
     "unrequested-bytes",
     "invalid-chunk",

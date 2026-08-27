@@ -1,14 +1,8 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * consensus_state_snapshot_install_activate.c — ACTIVATE mode for
- * zcl.consensus_state_bundle.v1: the consumer side of the sovereign shielded-
- * state cure. Kept in its own file (one focused responsibility) from the
- * contained admission preview in consensus_state_snapshot_install.c.
- *
- * Atomically installs a complete bundle's coins + Sprout/Sapling anchors +
- * nullifiers + the 8 reducer stage cursors into the LIVE progress store, with a
- * physically restorable prior generation. Full contract:
- * config/consensus_state_snapshot_install.h. */
+ * ACTIVATE mode atomically installs a complete consensus-state bundle into the
+ * live progress store with a physically restorable prior generation. Full
+ * contract: config/consensus_state_snapshot_install.h. */
 
 #include "config/consensus_state_snapshot_install.h"
 #include "consensus_state_snapshot_install_internal.h" /* lease + authority resolver */
@@ -51,9 +45,7 @@
 #define VALIDATE_SUBSYS ACTIVATE_SUBSYS
 #include "consensus_state_bundle_validate_heartbeat.h"
 
-/* Compact per-phase progress lines for the multi-minute activate verify phases
- * (never-silent doctrine): begin names the phase in flight, done reports
- * elapsed. Paired via the returned start time. */
+/* Pair begin/done progress for multi-minute verification phases. */
 static int64_t activate_phase_begin(const char *phase, uint64_t count)
 {
     LOG_INFO(ACTIVATE_SUBSYS, "activate verify: phase=%s begin count=%llu",
@@ -65,7 +57,6 @@ static void activate_phase_done(const char *phase, int64_t started_us)
     LOG_INFO(ACTIVATE_SUBSYS, "activate verify: phase=%s ok elapsed=%.0fs",
              phase, (double)(GetTimeMicros() - started_us) / 1000000.0);
 }
-
 #ifdef ZCL_TESTING
 static void (*g_activate_after_stream_hook)(void *) = NULL;
 static void *g_activate_after_stream_hook_ctx = NULL;
@@ -80,19 +71,16 @@ void consensus_state_snapshot_install_activate_test_set_after_stream_hook(
     g_activate_after_stream_hook = hook;
     g_activate_after_stream_hook_ctx = ctx;
 }
-
 void consensus_state_snapshot_install_activate_test_set_after_backup_hook(
     void (*hook)(void *), void *ctx)
 {
     g_activate_after_backup_hook = hook;
     g_activate_after_backup_hook_ctx = ctx;
 }
-
 void consensus_state_snapshot_install_activate_test_fail_seed_once(void)
 {
     g_activate_fail_seed_once = true;
 }
-
 void consensus_state_snapshot_install_activate_test_fail_after_seed_once(void)
 {
     g_activate_fail_after_seed_once = true;
@@ -107,7 +95,6 @@ static void activate_run_after_stream_hook(void)
     if (hook)
         hook(ctx);
 }
-
 static void activate_run_after_backup_hook(void)
 {
     void (*hook)(void *) = g_activate_after_backup_hook;
@@ -143,16 +130,13 @@ static bool activate_consume_fail_after_seed(void) { return false; }
 static const char *const k_activate_derived_tables[] = {
     "validate_headers_log", "body_fetch_log", "body_persist_log",
     "script_validate_log", "proof_validate_log", "utxo_apply_log",
-    "tip_finalize_log", "utxo_apply_delta", "created_outputs",
-};
+    "tip_finalize_log", "utxo_apply_delta", "created_outputs"};
 static const char *const k_activate_stages[] = {
     "header_admit", "validate_headers", "body_fetch", "body_persist",
     "script_validate", "proof_validate", "utxo_apply", "tip_finalize",
 };
 static const char *const k_activate_generation_tables[] = {
-    "consensus_state_producer_session",
-    "consensus_state_source_receipt",
-};
+    "consensus_state_producer_session", "consensus_state_source_receipt"};
 
 #define ACTIVATE_TIPFIN_WITNESS_KEY "tipfin_backfill.progress"
 
@@ -348,7 +332,11 @@ static bool activate_backup_prior_generation(sqlite3 *progress_db,
         return false;
     out_path[0] = '\0';
     struct stat dir_st;
-    if (fstat(datadir_fd, &dir_st) != 0 || !S_ISDIR(dir_st.st_mode))
+    struct stat display_st;
+    if (fstat(datadir_fd, &dir_st) != 0 || !S_ISDIR(dir_st.st_mode) ||
+        stat(datadir_display, &display_st) != 0 ||
+        !S_ISDIR(display_st.st_mode) || display_st.st_dev != dir_st.st_dev ||
+        display_st.st_ino != dir_st.st_ino)
         return false;
 
     int64_t stamp = (int64_t)platform_time_wall_time_t();
@@ -363,12 +351,6 @@ static bool activate_backup_prior_generation(sqlite3 *progress_db,
         return false;
 
     char destination_name_path[PATH_MAX];
-    /* Name the pinned datadir descriptor so the rename below reaches the
-     * exact directory we verified, not whatever a path lookup finds now. */
-    if (!platform_dirfd_child_path(destination_name_path,
-                                   sizeof(destination_name_path),
-                                   datadir_fd, name))
-        return false;
     n = snprintf(out_path, out_cap, "%s/%s", datadir_display, name);
     if (n <= 0 || (size_t)n >= out_cap) {
         out_path[0] = '\0';
@@ -404,6 +386,13 @@ static bool activate_backup_prior_generation(sqlite3 *progress_db,
     reserved_identity = true;
     reserved_dev = st.st_dev;
     reserved_ino = st.st_ino;
+    /* A rename cannot redirect either SQLite open to a replacement inode. */
+    if (!platform_fd_path(destination_name_path, sizeof(destination_name_path),
+                          fd, NULL)) {
+        (void)close(fd);
+        fd = -1;
+        goto cleanup;
+    }
 
     sqlite3_int64 version_before = -1;
     sqlite3_int64 version_after = -1;
@@ -483,6 +472,14 @@ static bool activate_backup_prior_generation(sqlite3 *progress_db,
         LOG_WARN(ACTIVATE_SUBSYS,
                  "prior-generation parent directory fsync failed: %s",
                  strerror(errno));
+        ok = false;
+        goto cleanup;
+    }
+    if (stat(datadir_display, &display_st) != 0 ||
+        display_st.st_dev != dir_st.st_dev ||
+        display_st.st_ino != dir_st.st_ino) {
+        LOG_WARN(ACTIVATE_SUBSYS, "prior-generation display path no longer "
+                                 "identifies the pinned directory");
         ok = false;
         goto cleanup;
     }

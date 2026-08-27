@@ -580,7 +580,7 @@ endif
 ifeq ($(ZCL_HOST_OS),Darwin)
 HARDEN_CFLAGS = -fstack-protector-strong -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2 -fPIE
 HARDEN_LDFLAGS =
-ZCL_ARCH_CFLAGS = -march=native
+ZCL_ARCH_CFLAGS = $(if $(ZCL_NATIVE),-march=native,)
 ZCL_DLOPEN_LIB =
 else
 HARDEN_CFLAGS = -fstack-protector-strong -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2 -fcf-protection=full -fPIE

@@ -923,17 +923,17 @@ int main(int argc, char **argv)
     topo_probe(g_pin_cpu, &topo);
 
     if (!g_csv) {
+        char running_cpu[32];
+#if defined(__linux__)
+        (void)snprintf(running_cpu, sizeof(running_cpu), "%d", sched_getcpu());
+#else
+        (void)snprintf(running_cpu, sizeof(running_cpu), "%s", "unknown");
+#endif
         printf("zclassic23 simd_bench — per-ISA-tier crypto microbenchmark\n");
         printf("=========================================================\n");
         printf("  pinned          : %s (requested cpu %d, running on cpu %s)\n",
                pinned ? "YES" : "NO -- NUMBERS ARE NOT COMPARABLE",
-               g_pin_cpu,
-#if defined(__linux__)
-               "n/a: this report only runs where a pin was possible"
-#else
-               "unknown"
-#endif
-        );
+               g_pin_cpu, running_cpu);
         if (topo.known)
             printf("  L3 domain (CCD) : ccd%d  [cpus %s]  L3 %ld KiB\n",
                    topo.ccd_index, topo.l3_shared, topo.l3_kb);
