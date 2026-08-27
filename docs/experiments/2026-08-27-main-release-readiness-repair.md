@@ -82,3 +82,18 @@ test_torn_index_blocks_tip   groups_failed=0 self_skips=0
 The first complete lint run then rejected one runbook phrase that formatted a
 system header as an in-repository path. The wording now distinguishes that
 external header from tracked source paths.
+
+## ARM hardware-tier portability repair
+
+Review of the later ARMv8 SHA-256 and CRC-32C tier found that its target
+attributes and CRC builtins were specific to Clang. GCC 14 and newer require
+the AArch64 target feature forms `+sha2` and `+crc`; the portable Arm C
+Language Extensions API supplies `__crc32cd`, `__crc32cw`, and `__crc32cb`.
+The implementation now uses those shared spellings, which Clang also accepts.
+
+CRC-32C observability now reports the ISA that actually produced the bytes:
+`hardware-sse4.2` on x86 and `hardware-armv8-crc32` on AArch64. Runtime
+selection remains OS-feature-gated and compared with the portable reference
+before activation. The x86 host cannot prove ARM instruction execution, so a
+GCC AArch64 build and live parity run remain required release evidence for an
+AArch64 artifact.

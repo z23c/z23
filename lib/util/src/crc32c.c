@@ -208,11 +208,11 @@ bool zcl_crc32c_hw_available(void)
 const char *zcl_crc32c_impl_name(void)
 {
     pthread_once(&g_crc32c_once, crc32c_init_once);
-    /* The strings are the tier labels this module has always reported and
-     * the only consumer (the event_log test surface) matches them exactly:
-     * "hardware-*" means a self-checked hardware tier produced the bytes,
-     * whichever ISA's Castagnoli instruction that was — SSE4.2 on x86,
-     * FEAT_CRC32 on arm64. Replacing the arm64 label with an ISA-true one is
-     * a one-line change to that consumer, not to this function. */
-    return g_crc32c_use_hw ? "hardware-sse4.2" : "software-table";
+    if (!g_crc32c_use_hw)
+        return "software-table";
+#if defined(__aarch64__)
+    return "hardware-armv8-crc32";
+#else
+    return "hardware-sse4.2";
+#endif
 }
