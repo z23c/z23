@@ -37,6 +37,9 @@ bool db_file_offer_save(struct node_db *ndb,
                         const struct file_offer *offer);
 int db_file_offer_list(struct node_db *ndb,
                        struct file_offer *out, size_t max);
+/* Uncapped row total behind the db_file_offer_list window. -1 only when
+ * the table is unreadable; a status count is measured, never capped. */
+int db_file_offer_count(struct node_db *ndb);
 bool db_file_offer_find(struct node_db *ndb,
                         const uint8_t root_hash[32],
                         struct file_offer *out);

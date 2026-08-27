@@ -9,6 +9,7 @@
 #include "util/log_macros.h"
 
 #include <sqlite3.h>
+#include <limits.h>
 #include <string.h>
 
 DEFINE_MODEL_CALLBACKS(market_content)
@@ -149,4 +150,20 @@ int db_market_content_list(struct node_db *ndb,
         out, max,
         AR_BIND_INT(s, 1, (int64_t)max),
         if (!market_content_read_public(s, 0, &out[count])) continue);
+}
+
+int db_market_content_count(struct node_db *ndb)
+{
+    if (!ndb || !ndb->open)
+        LOG_RETURN(-1, "market", "db_market_content_count: db not open");
+    sqlite3_stmt *s = NULL;
+    int64_t count = 0;
+    AR_PREPARE_RET(ndb, s, "SELECT count(*) FROM market_contents", -1);
+    if (AR_STEP_ROW_READONLY(s) != SQLITE_ROW) {
+        AR_FINALIZE(s);
+        LOG_RETURN(-1, "market", "db_market_content_count: count step failed");
+    }
+    count = AR_COL_INT(s, 0);
+    AR_FINALIZE(s);
+    return count > INT_MAX ? INT_MAX : (int)count;
 }

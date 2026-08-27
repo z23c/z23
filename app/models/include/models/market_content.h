@@ -54,5 +54,9 @@ bool db_market_content_find_chunk(
 int db_market_content_list(struct node_db *ndb,
                            struct market_content_public_record *out,
                            size_t max);
+/* Uncapped row total behind the db_market_content_list window. -1 only
+ * when the registry is unreadable; a serving index measures what it
+ * truncated against this, never against its own window. */
+int db_market_content_count(struct node_db *ndb);
 
 #endif

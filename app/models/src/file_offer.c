@@ -16,6 +16,7 @@
 #include "util/log_macros.h"
 
 #include <sqlite3.h>
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -402,6 +403,22 @@ db_file_offer_compare_set_review_state(struct node_db *ndb,
     if (changed)
         return DB_FILE_OFFER_REVIEW_CAS_UPDATED;
     return DB_FILE_OFFER_REVIEW_CAS_STALE;
+}
+
+int db_file_offer_count(struct node_db *ndb)
+{
+    if (!ndb || !ndb->open)
+        LOG_RETURN(-1, "market", "db_file_offer_count: db not open");
+    sqlite3_stmt *s = NULL;
+    int64_t count = 0;
+    AR_PREPARE_RET(ndb, s, "SELECT count(*) FROM file_offers", -1);
+    if (AR_STEP_ROW_READONLY(s) != SQLITE_ROW) {
+        AR_FINALIZE(s);
+        LOG_RETURN(-1, "market", "db_file_offer_count: count step failed");
+    }
+    count = AR_COL_INT(s, 0);
+    AR_FINALIZE(s);
+    return count > INT_MAX ? INT_MAX : (int)count;
 }
 
 bool db_file_offer_review_counts(struct node_db *ndb, int64_t counts[3])

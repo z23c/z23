@@ -56,6 +56,15 @@ static void content_one_chunk_root(const uint8_t *data, size_t size,
     sha3_256(chunk, 32, root);
 }
 
+/* Distinct registry-row digest for window index i (two varied bytes so
+ * i=0 and i=256 never collide). */
+static void content_window_digest(int i, uint8_t out[32])
+{
+    memset(out, 0, 32);
+    out[0] = (uint8_t)(i + 1);
+    out[1] = (uint8_t)(i / 256);
+}
+
 static bool content_signed_offer(struct file_offer *offer,
                                  const uint8_t root[32], uint64_t size,
                                  uint64_t nonce, int64_t now_unix)
@@ -139,6 +148,21 @@ int file_market_content_tests(void)
         return failures;
     }
 
+    /* Counts are measured from the store, never capped at a listing
+     * window: an empty registry counts zero, an unreadable one fails
+     * closed to -1. */
+    {
+        struct node_db closed_probe;
+        memset(&closed_probe, 0, sizeof(closed_probe));
+        closed_probe.open = false;
+        CONTENT_CHECK("store counts start measured and fail closed",
+            db_market_content_count(&ndb) == 0 &&
+            db_file_offer_count(&ndb) == 1 &&
+            db_market_content_count(NULL) == -1 &&
+            db_market_content_count(&closed_probe) == -1 &&
+            db_file_offer_count(&closed_probe) == -1);
+    }
+
     struct market_content_public_record registered;
     struct zcl_result result = file_market_content_register(
         &ndb, offer.offer_id, filepath, now_unix, &registered);
@@ -184,6 +208,10 @@ int file_market_content_tests(void)
         &registered) : ZCL_ERR(-1, "wrong offer fixture failed");
     CONTENT_CHECK("signed root mismatch fails before persistence",
                   wrong_offer_ready && !result.ok);
+
+    CONTENT_CHECK("model counts follow the rows actually saved",
+        db_file_offer_count(&ndb) == 2 &&
+        db_market_content_count(&ndb) == 1);
 
     rpc_market_set_state(&ndb);
     /* The registered-content index is a serving surface: it names what
@@ -275,6 +303,104 @@ int file_market_content_tests(void)
     load_ok = load_result.ok;
     CONTENT_CHECK("post-registration content tamper revokes delivery",
                   mutated && !load_ok && loaded.data == NULL);
+
+    /* ── the serving index discloses its window ──────────────────── */
+    /* The registry grows past the index's 256-row listing window: the
+     * window must disclose shown and total from the same store instead
+     * of passing the newest page off as the whole registry, and an
+     * uncountable store drops the total instead of guessing. */
+    {
+        char wdir[256], wdbpath[512];
+        snprintf(wdir, sizeof(wdir), "./test-tmp/market_index_window_%d",
+                 (int)getpid());
+        (void)mkdir("./test-tmp", 0700);
+        if (mkdir(wdir, 0700) != 0 && errno != EEXIST) {
+            CONTENT_CHECK("create index window fixture directory", false);
+            node_db_close(&ndb);
+            test_cleanup_tmpdir(dir);
+            return failures;
+        }
+        snprintf(wdbpath, sizeof(wdbpath), "%s/node.db", wdir);
+        struct node_db wndb;
+        memset(&wndb, 0, sizeof(wndb));
+        bool wopened = node_db_open(&wndb, wdbpath);
+        rpc_market_set_state(&wndb);
+
+        /* 257 registry rows — one past the window. The three newest are
+         * reviewed-ok through real signed offers; everything else hides
+         * under the boot-default profile. */
+        struct file_offer reviewed[3];
+        bool seeded = wopened;
+        for (int k = 0; seeded && k < 3; k++) {
+            uint8_t digest[32], root[32];
+            content_window_digest(256 - k, digest);
+            sha3_256(digest, sizeof(digest), root);
+            seeded = content_signed_offer(&reviewed[k], root,
+                                          sizeof(payload),
+                                          (uint64_t)(7401 + k),
+                                          now_unix) &&
+                db_file_offer_save(&wndb, &reviewed[k]) &&
+                market_moderation_set_review_state(
+                    reviewed[k].offer_id,
+                    MARKET_REVIEW_REVIEWED_OK).ok;
+        }
+        for (int i = 0; seeded && i < 257; i++) {
+            uint8_t digest[32], root[32];
+            content_window_digest(i, digest);
+            sha3_256(digest, sizeof(digest), root);
+            struct market_content_record row;
+            memset(&row, 0, sizeof(row));
+            if (i >= 254)
+                memcpy(row.offer_id, reviewed[256 - i].offer_id, 32);
+            else
+                memcpy(row.offer_id, digest, 32);
+            memcpy(row.root_hash, root, 32);
+            snprintf(row.private_path, sizeof(row.private_path),
+                     "/registered/window-%03d.bin", i);
+            row.size_bytes = sizeof(payload);
+            row.num_chunks = 1;
+            row.chunk_hashes = digest;
+            row.chunk_hashes_len = sizeof(digest);
+            row.registered_at = now_unix + 10000 + i;
+            seeded = db_market_content_save(&wndb, &row);
+        }
+        CONTENT_CHECK("registry seeds one past the index window",
+            seeded && db_market_content_count(&wndb) == 257);
+
+        struct json_value window_index;
+        json_init(&window_index);
+        bool window_indexed =
+            seeded && api_market_content_list(&window_index);
+        const struct json_value *shown_v = json_get(&window_index, "shown");
+        const struct json_value *total_v = json_get(&window_index, "total");
+        const struct json_value *hidden_v =
+            json_get(&window_index, "hidden_by_profile");
+        const struct json_value *rows_v =
+            json_get(&window_index, "contents");
+        CONTENT_CHECK("index discloses shown and total over the window",
+            window_indexed && shown_v && total_v && hidden_v && rows_v &&
+            rows_v->type == JSON_ARR &&
+            json_size(rows_v) == 3 &&
+            json_get_int(shown_v) == 3 &&
+            json_get_int(total_v) == 257 &&
+            json_get_int(hidden_v) == 253);
+        json_free(&window_index);
+
+        /* An uncountable store keeps the listing but drops the total. */
+        rpc_market_set_state(NULL);
+        struct json_value uncountable;
+        json_init(&uncountable);
+        bool uncountable_ok = api_market_content_list(&uncountable);
+        const struct json_value *u_shown = json_get(&uncountable, "shown");
+        CONTENT_CHECK("uncountable store drops the total, keeps shown",
+            uncountable_ok && u_shown &&
+            json_get_int(u_shown) == 0 &&
+            json_get(&uncountable, "total") == NULL);
+        json_free(&uncountable);
+
+        node_db_close(&wndb);
+        test_cleanup_tmpdir(wdir);
+    }
 
     rpc_market_set_state(NULL);
     node_db_close(&ndb);

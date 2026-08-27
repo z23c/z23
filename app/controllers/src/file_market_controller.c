@@ -646,25 +646,22 @@ static bool rpc_zmarket_status(const struct json_value *params, bool help,
     json_set_object(result);
     json_push_kv_int(result, "offers_cached", file_market_count());
 
-    /* DB count */
-    if (g_market_ndb) {
-        struct file_offer db_offers[FILE_MARKET_MAX_OFFERS];
-        int db_count = db_file_offer_list(g_market_ndb, db_offers,
-                                          FILE_MARKET_MAX_OFFERS);
-        json_push_kv_int(result, "offers_persisted", db_count);
-    }
+    /* DB count — measured, never capped at the listing window. */
+    if (g_market_ndb && g_market_ndb->open)
+        json_push_kv_int(result, "offers_persisted",
+                         db_file_offer_count(g_market_ndb));
 
     return true;
 }
 
 /* ── private paid-content registry ───────────────────────────────── */
 
-/* The registered-content index is a serving surface: it tells a caller —
- * including a remote one over GET /api/market-contents — exactly which
- * content this node holds bytes for and will hand out. It therefore asks
- * the same profile the chunk-delivery gate asks, so the two can never
- * disagree about what this node hosts. Hidden rows are counted, never
- * deleted, and the private filesystem path is still never returned. */
+/* The registered-content index is a serving surface — it tells a caller,
+ * including a remote one over GET /api/market-contents, which content
+ * this node holds bytes for and will hand out, under the same profile the
+ * chunk-delivery gate asks. The listing is a bounded newest-first window,
+ * so it discloses the window: shown counts the rows listed, total counts
+ * the same store (omitted when uncountable), hidden rows among served. */
 static bool market_content_index_json(struct json_value *result)
 {
     json_set_object(result);
@@ -672,13 +669,14 @@ static bool market_content_index_json(struct json_value *result)
     json_push_kv_str(result, "profile",
                      market_moderation_profile_string(
                          market_moderation_active_profile()));
-    int64_t hidden = 0;
+    int64_t hidden = 0; int count = 0, total = -1;
     struct json_value rows = {0};
     json_set_array(&rows);
     if (g_market_ndb && g_market_ndb->open) {
         struct market_content_public_record content[FILE_MARKET_MAX_OFFERS];
-        int count = db_market_content_list(g_market_ndb, content,
-                                           FILE_MARKET_MAX_OFFERS);
+        count = db_market_content_list(g_market_ndb, content,
+                                       FILE_MARKET_MAX_OFFERS);
+        total = db_market_content_count(g_market_ndb);
         for (int i = 0; i < count; i++) {
             if (!market_moderation_may_serve_root(content[i].root_hash)) {
                 hidden++;
@@ -705,6 +703,8 @@ static bool market_content_index_json(struct json_value *result)
     json_push_kv(result, "contents", &rows);
     json_free(&rows);
     json_push_kv_int(result, "hidden_by_profile", hidden);
+    json_push_kv_int(result, "shown", count - (int)hidden);
+    if (total >= 0) json_push_kv_int(result, "total", total);
     return true;
 }
 
