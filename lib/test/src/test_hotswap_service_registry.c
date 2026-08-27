@@ -1158,6 +1158,9 @@ static int t_shop_want_view(void)
         struct zcl_command_request request = {.input = &request_input};
         struct zcl_command_reply reply;
         zcl_command_reply_init(&reply, "zcl.shop_want_post.v1");
+        /* Test builds pin the want-post leaf's clock through now_unix;
+         * the release fork refuses it outright (shw_now's compile-time
+         * twin of shf_now). */
         zcl_native_handle_shop_want_post(&request, &reply);
         const struct json_value *want = json_get(&reply.data, "want");
         ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);

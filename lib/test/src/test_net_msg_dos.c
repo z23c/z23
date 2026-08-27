@@ -189,6 +189,87 @@ int test_net_msg_dos(void)
         stream_free(&s);
     }
 
+    /* ── A2b. getblocks: no service before the handshake completes ──
+     * The dispatcher only refuses node->version == 0, leaving the
+     * post-version / pre-verack window where serving would spend the
+     * relay's costliest path (500 ring pushes per message) on an
+     * unauthenticated peer. Handshake-gated here instead. A legit
+     * post-handshake control serves genesis and nothing else. */
+    {
+        struct block_locator loc;
+        block_locator_init(&loc);
+        struct uint256 one[1];
+        one[0] = cp->consensus.hashGenesisBlock;
+        loc.vhave = one;
+        loc.num_hashes = 1;
+
+        struct p2p_node node;
+        dos_setup_stack_node(&node);
+        node.state = PEER_VERSION_RECEIVED;   /* past version==0, not verified */
+
+        struct byte_stream s;
+        stream_init(&s, 64);
+        bool built = block_locator_serialize(&loc, &s);
+        unsigned char stop[32] = {0};
+        built = built && stream_write_bytes(&s, stop, sizeof(stop));
+        DOS_CHECK("getblocks pre-handshake: payload built", built);
+        bool ret = process_getblocks(&mp, &node, &s);
+        DOS_CHECK("getblocks pre-handshake: dropped quietly", ret == true);
+        DOS_CHECK("getblocks pre-handshake: nothing queued",
+                  node.inventory_to_send_count == 0);
+        DOS_CHECK("getblocks pre-handshake: no penalty",
+                  atomic_load(&node.misbehavior) == 0 && !node.disconnect);
+        stream_free(&s);
+
+        /* Control: same payload from a fully-active peer is served. Needs a
+         * successor PAST the locator hit to exist, so first admit one mined
+         * regtest child of genesis through the honest headers path (same
+         * recipe as replay case E) — otherwise serving zero items is the
+         * correct answer for a height-0 chain and proves nothing. */
+        dos_setup_stack_node(&node);
+        node.state = PEER_ACTIVE;
+
+        struct block ctrl_child;
+        block_init(&ctrl_child);
+        ctrl_child.header.nVersion = 4;
+        ctrl_child.header.hashPrevBlock = gh;
+        uint256_set_null(&ctrl_child.header.hashMerkleRoot);
+        ctrl_child.header.hashMerkleRoot.data[0] = 2; /* distinct from E */
+        uint256_set_null(&ctrl_child.header.hashFinalSaplingRoot);
+        ctrl_child.header.nTime = 1700000000u;
+        struct arith_uint256 ctrl_pow_limit;
+        uint256_to_arith(&ctrl_pow_limit, &cp->consensus.powLimit);
+        ctrl_child.header.nBits =
+            arith_uint256_get_compact(&ctrl_pow_limit, false);
+        bool ctrl_mined = mine_block_pow(&ctrl_child, 1, cp, 0);
+        DOS_CHECK("getblocks control: regtest child mined", ctrl_mined);
+        bool ctrl_admitted = false;
+        if (ctrl_mined) {
+            struct byte_stream hs;
+            stream_init(&hs, 512);
+            stream_write_compact_size(&hs, 1);
+            block_header_serialize(&ctrl_child.header, &hs);
+            stream_write_compact_size(&hs, 0);
+            ctrl_admitted = process_headers(&mp, &node, &hs);
+            DOS_CHECK("getblocks control: child admitted via headers",
+                      ctrl_admitted);
+            stream_free(&hs);
+        }
+        block_free(&ctrl_child);
+
+        stream_init(&s, 64);
+        built = block_locator_serialize(&loc, &s);
+        built = built && stream_write_bytes(&s, stop, sizeof(stop));
+        ret = process_getblocks(&mp, &node, &s);
+        DOS_CHECK("getblocks active control: served",
+                  ctrl_admitted && ret == true &&
+                  node.inventory_to_send_count == 1);
+        stream_free(&s);
+        /* loc.vhave points at stack storage — release only the shell. */
+        loc.vhave = NULL;
+        loc.num_hashes = 0;
+    }
+
     /* ── A3. addr: oversized count -> reject + disconnect + scored ── */
     {
         const struct msg_dispatch_entry *e = dos_find_entry("addr");
@@ -821,6 +902,80 @@ int test_net_msg_dos(void)
                 stream_free(&ack);
                 p2p_node_free(node);
             }
+        }
+    }
+
+    /* ── K. trickle inv: a queue longer than one frame must emit a
+     *      WIRE-CAPPED inv (≤ MAX_INV_SZ items) and retain the remainder
+     *      for the next trickle tick — never one oversized frame that
+     *      receivers drop wholesale. Pins msgprocessor.c::msg_send_messages'
+     *      clamp + memmove retention driven through the real per-peer send
+     *      body (fast-sync offer, stale-header rules, dandelion gate). ── */
+    {
+        struct net_address kaddr;
+        net_address_init(&kaddr);
+        unsigned char kip[4] = {203, 0, 113, 80};
+        net_addr_set_ipv4(&kaddr.svc.addr, kip);
+        kaddr.svc.port = 8033;
+        struct p2p_node *node = p2p_node_create(
+            &nm, ZCL_INVALID_SOCKET, &kaddr, "trickle-clamp", true);
+        DOS_CHECK("trickle clamp: node created", node != NULL);
+        if (node) {
+            /* Post-handshake so msg_send_messages runs its full body past
+             * the version gate (the node sits at CONNECTED otherwise);
+             * handshake-complete upgrades to ACTIVE inside. */
+            node->state = PEER_HANDSHAKE_COMPLETE;
+            node->version = PROTOCOL_VERSION;
+
+            for (size_t i = 0; i < MAX_INV_SZ + 1; i++) {
+                struct uint256 h;
+                memset(h.data, 0, sizeof(h.data));
+                memcpy(h.data, &i, sizeof(i)); /* distinct, unknown-to-map */
+                h.data[31] = 0x7a;
+                struct inv_item inv;
+                inv_item_init_typed(&inv, MSG_BLOCK, &h);
+                p2p_node_push_inventory(node, &inv);
+            }
+            DOS_CHECK("trickle clamp: queue holds MAX_INV_SZ+1",
+                      node->inventory_to_send_count == MAX_INV_SZ + 1);
+
+            bool ok = msg_send_messages(&mp, node, true);
+            DOS_CHECK("trickle clamp: first tick succeeds", ok == true);
+
+            /* Sum declared item counts across every inv frame queued this
+             * tick (command-filtered: the full send body may also queue
+             * ping/getheaders-type frames on this same connection). */
+            size_t inv_frames = 0, items_sent = 0;
+            for (struct send_segment *seg = node->send_head; seg;
+                seg = seg->next) {
+                if (seg->size <= MSG_HEADER_SIZE)
+                    continue;
+                const struct msg_header *hdr =
+                    (const struct msg_header *)(const void *)seg->data;
+                if (strcmp(hdr->pchCommand, "inv") != 0)
+                    continue;
+                struct byte_stream payload;
+                stream_init_from_data(&payload, seg->data + MSG_HEADER_SIZE,
+                                      seg->size - MSG_HEADER_SIZE);
+                uint64_t n = 0;
+                if (stream_read_compact_size(&payload, &n)) {
+                    items_sent += n;
+                    inv_frames++;
+                }
+                stream_free(&payload);
+            }
+            DOS_CHECK("trickle clamp: exactly one inv frame emitted",
+                      inv_frames == 1);
+            DOS_CHECK("trickle clamp: frame capped at MAX_INV_SZ items",
+                      items_sent == MAX_INV_SZ);
+            DOS_CHECK("trickle clamp: remainder retained for next tick",
+                      node->inventory_to_send_count == 1);
+
+            ok = msg_send_messages(&mp, node, true);
+            DOS_CHECK("trickle clamp: second tick drains remainder",
+                      ok && node->inventory_to_send_count == 0);
+
+            p2p_node_free(node);
         }
     }
 

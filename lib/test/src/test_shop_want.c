@@ -48,7 +48,6 @@
 
 #include <sqlite3.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 
@@ -938,6 +937,71 @@ static int shop_want_store_not_migrated(void)
     return failures;
 }
 
+/* ── 10. input-clock authority ─────────────────────────────────────── */
+/* Test builds pin time through now_unix so every fixture above is
+ * hermetic; shape validation still precedes any honoring. The release
+ * fork refuses the override outright — shw_now's compile-time twin of
+ * shf_now — and needs no fixture here (there is no runtime valve to
+ * close). What test builds pin: malformed and non-positive clocks are
+ * named refusals before anything else is inspected, and an accepted
+ * override lands verbatim as the stored stamp. */
+static int shop_want_input_clock(void)
+{
+    int failures = 0;
+    struct json_value input;
+    struct zcl_command_reply reply;
+    char dir[512];
+
+    test_make_tmpdir(dir, sizeof(dir), "shopwant", "clock");
+    SW_CHECK("clock fixture node.db", sw_boot_db(dir));
+
+    json_init(&input);
+    json_set_object(&input);
+    (void)json_push_kv_str(&input, "datadir", dir);
+    (void)json_push_kv_int(&input, "amount_zatoshi", 500000);
+    (void)json_push_kv_str(&input, "criteria", "malformed clock probe");
+    (void)json_push_kv_str(&input, "now_unix", "not-a-clock");
+    sw_call(zcl_native_handle_shop_want_post, &input, &reply);
+    SW_CHECK("a malformed now_unix is BAD_NOW_UNIX",
+             reply.status == ZCL_COMMAND_STATUS_FAILED &&
+             strcmp(reply.error.code, "BAD_NOW_UNIX") == 0);
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+
+    json_init(&input);
+    json_set_object(&input);
+    (void)json_push_kv_str(&input, "datadir", dir);
+    (void)json_push_kv_int(&input, "amount_zatoshi", 500000);
+    (void)json_push_kv_str(&input, "criteria", "zero clock probe");
+    (void)json_push_kv_int(&input, "now_unix", 0);
+    sw_call(zcl_native_handle_shop_want_post, &input, &reply);
+    SW_CHECK("a non-positive now_unix is BAD_NOW_UNIX",
+             reply.status == ZCL_COMMAND_STATUS_FAILED &&
+             strcmp(reply.error.code, "BAD_NOW_UNIX") == 0);
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+
+    /* The accepted override persists verbatim — the contract every
+     * fixed-constant fixture in this file relies on. */
+    char want_id[65];
+    SW_CHECK("the pinned-clock want posts",
+             sw_post_one(dir, 0x44, want_id));
+    json_init(&input);
+    json_set_object(&input);
+    (void)json_push_kv_str(&input, "datadir", dir);
+    (void)json_push_kv_str(&input, "want_id", want_id);
+    sw_call(zcl_native_handle_shop_want_status, &input, &reply);
+    const struct json_value *want = json_get(&reply.data, "want");
+    SW_CHECK("the pinned stamp persists verbatim",
+             reply.status == ZCL_COMMAND_STATUS_PASSED && want &&
+             json_get_int(json_get(want, "posted_unix")) == SW_NOW);
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+
+    test_rm_rf(dir);
+    return failures;
+}
+
 int test_shop_want(void)
 {
     int failures = 0;
@@ -951,5 +1015,6 @@ int test_shop_want(void)
     failures += shop_want_expiry();
     failures += shop_want_list_budget();
     failures += shop_want_store_not_migrated();
+    failures += shop_want_input_clock();
     return failures;
 }

@@ -367,6 +367,13 @@ struct p2p_node {
     struct uint256 *inventory_known_hashes;
     size_t inventory_known_count;
     size_t inventory_known_cap;
+    /* O(1) membership index over inventory_known_hashes: open-addressing
+     * slots holding ring_position+1 (0 = empty), kept at load <= 1/2 and
+     * rebuilt only on the ring's two structural changes (capacity realloc,
+     * oldest-half eviction). NULL means "index unavailable" — lookups then
+     * fall back to a linear scan with identical semantics. */
+    uint32_t *inventory_known_slots;
+    size_t inventory_known_slot_mask;   /* table length - 1; 0 = none */
     zcl_mutex_t cs_inventory;
 
     struct uint256 *askfor_set;
