@@ -618,7 +618,7 @@ AGENT_IMPACT_RULE("lib/storage/src/mempool_projection.c|lib/storage/src/znam_pro
  * close + projection_meta plumbing) that znam_projection.c and
  * peers_projection.c are rebased onto. */
 AGENT_IMPACT_RULE("lib/storage/src/projection_consumer.c|lib/storage/include/storage/projection_consumer.h|lib/storage/include/storage/znam_projection.h|lib/storage/include/storage/peers_projection.h|lib/storage/include/storage/projection_util.h|lib/test/src/test_projection_consumer.c|lib/test/src/test_znam_projection.c|lib/test/src/test_peers_projection.c", "projection_consumer small_projections znam_projection peers_projection make_lint_gates")
-AGENT_IMPACT_RULE("app/services/src/db_maintenance.c|app/services/src/disk_monitor.c", "health_rollup make_lint_gates")
+AGENT_IMPACT_RULE("app/services/src/db_maintenance.c|app/services/include/services/db_maintenance.h|app/services/src/disk_monitor.c", "db_maintenance health_rollup make_lint_gates")
 AGENT_IMPACT_RULE("app/services/src/disk_monitor.c|app/services/include/services/disk_monitor.h|app/services/src/ibd_throttle.c|app/services/include/services/ibd_throttle.h|lib/test/src/test_disk_monitor.c|lib/test/src/test_ibd_throttle.c", "disk_monitor ibd_throttle sticky_conditions storage_reclaim make_lint_gates")
 /* Network monitoring station: per-peer chain-intelligence model, the supervised
  * sampler service, the three redundant fall-behind/fork/partition conditions,
