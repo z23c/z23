@@ -971,9 +971,33 @@ int test_net_msg_dos(void)
             DOS_CHECK("trickle clamp: remainder retained for next tick",
                       node->inventory_to_send_count == 1);
 
+            struct send_segment *first_tick_tail = node->send_tail;
             ok = msg_send_messages(&mp, node, true);
             DOS_CHECK("trickle clamp: second tick drains remainder",
                       ok && node->inventory_to_send_count == 0);
+            size_t second_items = 0;
+            size_t second_frames = 0;
+            for (struct send_segment *seg = first_tick_tail
+                    ? first_tick_tail->next : node->send_head;
+                 seg; seg = seg->next) {
+                if (seg->size <= MSG_HEADER_SIZE)
+                    continue;
+                const struct msg_header *hdr =
+                    (const struct msg_header *)(const void *)seg->data;
+                if (strcmp(hdr->pchCommand, "inv") != 0)
+                    continue;
+                struct byte_stream payload;
+                stream_init_from_data(&payload, seg->data + MSG_HEADER_SIZE,
+                                      seg->size - MSG_HEADER_SIZE);
+                uint64_t n = 0;
+                if (stream_read_compact_size(&payload, &n)) {
+                    second_items += n;
+                    second_frames++;
+                }
+                stream_free(&payload);
+            }
+            DOS_CHECK("trickle clamp: second frame carries retained item",
+                      second_frames == 1 && second_items == 1);
 
             p2p_node_free(node);
         }

@@ -51,6 +51,12 @@ under their existing authorities.
 - The hot-swap confinement audit now tracks the exact development preprocessor
   frame across nested host conditionals. Its self-test proves that loading in
   the release branch is still detected.
+- Peer inventory membership uses bounded probes, refreshes duplicate slots,
+  and discards incomplete indexes after allocation failure. Exact linear
+  fallback preserves membership without an unbounded mutex-held probe.
+- New software wants bind issuance to within 300 seconds of the node clock and
+  expiry to 30 days from both issuance and node time. A caller-controlled
+  future stamp cannot create a decades-open advertisement.
 
 ## Evidence
 
@@ -74,6 +80,7 @@ hot-swap static state       PASS  38 translation units
 package registry            PASS  217 sources; one host sandbox selected
 SIMD divergence self-test   PASS
 remote ship transaction     PASS
+inventory/time focused set  PASS  12/12 groups; groups_failed=0; self_skips=0
 ```
 
 The one lint refusal was `swap_controller.c` growing from its 1,053-line

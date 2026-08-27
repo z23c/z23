@@ -2355,6 +2355,112 @@ int test_net(void)
         p2p_node_push_inventory(node, &inv);
         ok = ok && (node->inventory_to_send_count == q + 1);
 
+        /* Repeated peer announcements remain in the bounded history ring,
+         * but must refresh one hash-table slot instead of multiplying table
+         * occupancy or forcing a full rebuild for every duplicate. */
+        size_t occupied_before = 0;
+        for (size_t i = 0; i <= node->inventory_known_slot_mask; i++)
+            occupied_before += node->inventory_known_slots[i] != 0;
+        for (size_t i = 0; i < 64; i++)
+            p2p_node_add_inventory_known(node, &binv);
+        size_t occupied_after = 0;
+        for (size_t i = 0; i <= node->inventory_known_slot_mask; i++)
+            occupied_after += node->inventory_known_slots[i] != 0;
+        ok = ok && occupied_after == occupied_before;
+
+        p2p_node_free(node);
+        net_manager_free(&nm);
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+
+    /* p2p_node: inventory-index allocation failure */
+    {
+        printf("p2p_node: inventory index allocation failure... ");
+        struct net_manager nm;
+        net_manager_init(&nm);
+        struct net_address addr;
+        net_address_init(&addr);
+        unsigned char ip4[4] = {127, 0, 0, 1};
+        net_addr_set_ipv4(&addr.svc.addr, ip4);
+        struct p2p_node *node = p2p_node_create(
+            &nm, ZCL_INVALID_SOCKET, &addr, "index-oom", false);
+        bool ok = node != NULL;
+
+        /* Establish the 2,048-slot table, then fill the 1,024-entry ring to
+         * the capacity-growth boundary. */
+        struct inv_item inv;
+        for (uint32_t i = 0; ok && i < 1024u; i++) {
+            struct uint256 h;
+            memset(&h, 0, sizeof(h));
+            memcpy(h.data, &i, sizeof(i));
+            h.data[31] = 0xa5;
+            inv_item_init_typed(&inv, MSG_TX, &h);
+            p2p_node_add_inventory_known(node, &inv);
+        }
+        ok = ok && node->inventory_known_slots != NULL;
+
+        /* Hash-ring growth succeeds, but index growth fails. The old table
+         * is incomplete for the new ring and therefore must be discarded. */
+        zcl_alloc_fault_fail_next("inv_known_slots");
+        struct uint256 newest;
+        memset(&newest, 0, sizeof(newest));
+        uint32_t newest_id = 1024u;
+        memcpy(newest.data, &newest_id, sizeof(newest_id));
+        newest.data[31] = 0xa5;
+        inv_item_init_typed(&inv, MSG_TX, &newest);
+        if (ok)
+            p2p_node_add_inventory_known(node, &inv);
+        ok = ok && node->inventory_known_slots == NULL &&
+             node->inventory_known_slot_mask == 0;
+
+        /* Both an old and the just-appended member are found by the exact
+         * linear fallback, so neither is spuriously re-advertised. */
+        size_t queued = node->inventory_to_send_count;
+        struct uint256 oldest;
+        memset(&oldest, 0, sizeof(oldest));
+        oldest.data[31] = 0xa5;
+        inv_item_init_typed(&inv, MSG_TX, &oldest);
+        if (ok)
+            p2p_node_push_inventory(node, &inv);
+        inv_item_init_typed(&inv, MSG_TX, &newest);
+        if (ok)
+            p2p_node_push_inventory(node, &inv);
+        ok = ok && node->inventory_to_send_count == queued;
+
+        /* The next append retries one full rebuild and restores the bounded
+         * indexed path without changing membership. */
+        struct uint256 recovery;
+        memset(&recovery, 0, sizeof(recovery));
+        uint32_t recovery_id = 1025u;
+        memcpy(recovery.data, &recovery_id, sizeof(recovery_id));
+        recovery.data[31] = 0xa5;
+        inv_item_init_typed(&inv, MSG_TX, &recovery);
+        if (ok)
+            p2p_node_add_inventory_known(node, &inv);
+        ok = ok && node->inventory_known_slots != NULL;
+
+        /* A saturated/inconsistent table must terminate its probe, discard
+         * the index, and answer from the ring instead of hanging while the
+         * inventory mutex is held. Every synthetic slot points at valid ring
+         * position zero so this specifically exercises bounded saturation. */
+        if (ok) {
+            for (size_t i = 0; i <= node->inventory_known_slot_mask; i++)
+                node->inventory_known_slots[i] = 1;
+        }
+        struct uint256 absent;
+        memset(&absent, 0, sizeof(absent));
+        uint32_t absent_id = 999999u;
+        memcpy(absent.data, &absent_id, sizeof(absent_id));
+        absent.data[31] = 0xa5;
+        inv_item_init_typed(&inv, MSG_TX, &absent);
+        queued = node->inventory_to_send_count;
+        if (ok)
+            p2p_node_push_inventory(node, &inv);
+        ok = ok && node->inventory_known_slots == NULL &&
+             node->inventory_to_send_count == queued + 1;
+
+        zcl_alloc_fault_clear();
         p2p_node_free(node);
         net_manager_free(&nm);
         if (ok) printf("OK\n");

@@ -63,6 +63,7 @@
  * worst case vs the 8192-byte budget), with the criteria preview
  * truncated — the full text is one `status` call away. */
 #define SHW_BOARD_PAGE 16u
+#define SHW_MAX_ISSUED_SKEW_SECS 300LL
 #define SHW_TERMS_NOTE \
     "a want is declared terms inside a signed advertisement — not an " \
     "escrow, not a payment channel; posting moves and promises no value " \
@@ -97,14 +98,9 @@ static const char *shw_datadir(const struct zcl_command_request *request)
     return (dd && dd[0]) ? dd : NULL;
 }
 
-/* now_unix: test builds may pin time through the input so leaves stay
- * hermetic; a release command refuses the override outright — persisted
- * board state (posted/cancelled stamps and every lifetime check) must be
- * authored by this node's wall clock, never by whatever a script
- * declares, or a forged year-2100 input would mint permanently-open
- * wants and falsified cancellation evidence. A malformed override still
- * refuses before it is honored in either regime. Compile-time twin of
- * shf_now; no runtime environment valve exists. */
+/* Tests may pin time through input. Release commands refuse that override:
+ * persisted stamps and lifetime checks use the node wall clock. Compile-time
+ * twin of shf_now; no runtime environment valve exists. */
 static bool shw_now(const struct zcl_command_request *request,
                     int64_t *now_out, struct zcl_command_reply *reply)
 {
@@ -138,8 +134,7 @@ static bool shw_hex32(const char *hex, uint8_t out[32])
     return hex && strlen(hex) == 64 && zcl_hex_decode_lower(hex, out, 32);
 }
 
-/* The Ed25519 public key derived from a 32-byte seed (the seed copy the
- * keypair call returns is cleansed here). */
+/* Derive Ed25519 public key and cleanse the returned seed copy. */
 static void shw_derive_pubkey(uint8_t pubkey[32], const uint8_t secret[32])
 {
     uint8_t sk[32];
@@ -178,9 +173,7 @@ static bool shw_want_id(const struct zcl_command_request *request,
     return true;
 }
 
-/* Resolve <datadir>/node.db and refuse a missing one by name — a write
- * leaf must never mint a fresh database on a mistyped datadir (the shop
- * init rule). */
+/* Resolve node.db; a write leaf never creates it on a mistyped datadir. */
 static bool shw_require_node_db_path(const char *datadir, char db_path[1024],
                                      struct zcl_command_reply *reply)
 {
@@ -201,10 +194,7 @@ static bool shw_require_node_db_path(const char *datadir, char db_path[1024],
     return true;
 }
 
-/* Read-leaf store probe: the readonly open (require_readonly fills the
- * reply on failure), then the v66 table check — a pre-v66 node.db is a
- * named refusal with the migration remedy, never an empty-looking board
- * over a store that does not exist. */
+/* Read-only open plus v66 table check; an old store is a named refusal. */
 static bool shw_open_board_readonly(const char *datadir,
                                     struct sqlite3 **db,
                                     struct node_db *ndb,
@@ -253,10 +243,7 @@ static bool shw_open_board_write(const char *datadir, struct node_db *ndb,
     return true;
 }
 
-/* The active moderation profile for this datadir, with the optional
- * per-call override resolved by the same pure service the market listing
- * uses. A corrupt policy file is a named refusal (it must never silently
- * widen the view). */
+/* Resolve the active moderation profile without widening on corrupt policy. */
 static bool shw_resolve_profile(const struct zcl_command_request *request,
                                 const char *datadir, int *profile_out,
                                 const char **override_out,
@@ -299,8 +286,7 @@ static bool shw_resolve_profile(const struct zcl_command_request *request,
 }
 
 /* ── app shop want post (plan/commit) ───────────────────────────────── */
-/* Parse + seal + verify the want from the input. On success `row` holds
- * the verified document and its id. */
+/* Parse, seal, and verify the want and its identity. */
 static bool shw_build_want(const struct zcl_command_request *request,
                            int64_t now_unix, struct shop_want *row,
                            struct zcl_command_reply *reply)
@@ -352,6 +338,16 @@ static bool shw_build_want(const struct zcl_command_request *request,
         return false;
     }
     w->issued_unix = issued ? json_get_int(issued) : now_unix;
+    int64_t issued_skew = w->issued_unix > now_unix
+        ? w->issued_unix - now_unix : now_unix - w->issued_unix;
+    if (issued_skew > SHW_MAX_ISSUED_SKEW_SECS) {
+        shw_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                 "ISSUED_TIME_SKEW", "validate",
+                 "a new want's issued_unix must be within 300 seconds of "
+                 "the node clock; create a fresh plan with a fresh nonce",
+                 "issued_unix");
+        return false;
+    }
 
     const struct json_value *expires = json_get(request->input,
                                                 "expires_unix");
@@ -389,11 +385,14 @@ static bool shw_build_want(const struct zcl_command_request *request,
                  "expires_unix must be after issued_unix", "expires_unix");
         return false;
     }
-    if (w->expires_unix - w->issued_unix > SHOP_WANT_MAX_LIFETIME_SECS) {
+    int64_t lifetime_base = w->issued_unix < now_unix
+        ? w->issued_unix : now_unix;
+    if (w->expires_unix - lifetime_base > SHOP_WANT_MAX_LIFETIME_SECS) {
         shw_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
                  "BAD_LIFETIME", "validate",
-                 "a want lives at most 30 days — re-issue with a fresh "
-                 "nonce instead of extending", "expires_unix");
+                 "a want expires at most 30 days after both issuance and "
+                 "this node's clock — re-issue instead of extending",
+                 "expires_unix");
         return false;
     }
 

@@ -825,38 +825,74 @@ static uint64_t inv_known_hash(const struct uint256 *h)
     return x;
 }
 
-static bool inv_index_rebuild(struct p2p_node *node);
+enum inv_index_result {
+    INV_INDEX_UNAVAILABLE = -1,
+    INV_INDEX_MISS = 0,
+    INV_INDEX_HIT = 1
+};
 
-/* Find a hash's most recent ring position through a healthy table, or
- * SIZE_MAX when absent. Caller holds cs_inventory. */
-static size_t inv_index_lookup(const struct p2p_node *node,
-                               const struct uint256 *hash)
+static void inv_index_invalidate(struct p2p_node *node)
 {
-    if (!node->inventory_known_slots)
-        return SIZE_MAX;
-    size_t s = (size_t)inv_known_hash(hash) &
-               node->inventory_known_slot_mask;
-    while (node->inventory_known_slots[s]) {
-        uint32_t pos = node->inventory_known_slots[s];
-        if (pos - 1 < node->inventory_known_count &&
-            uint256_eq(&node->inventory_known_hashes[pos - 1], hash))
-            return pos - 1;
-        s = (s + 1) & node->inventory_known_slot_mask;
-    }
-    return SIZE_MAX;
+    free(node->inventory_known_slots);
+    node->inventory_known_slots = NULL;
+    node->inventory_known_slot_mask = 0;
 }
 
-/* Insert one ring position into an existing healthy table. Caller holds
- * cs_inventory and guarantees load stays <= 1/2 via capacity sizing. */
-static void inv_index_insert_one(struct p2p_node *node,
-                                 size_t ring_pos)
+/* Probe a hash through a complete table. A full-table walk is bounded and
+ * reports the index unusable so the caller can fall back to the ring. */
+static enum inv_index_result inv_index_lookup(const struct p2p_node *node,
+                                              const struct uint256 *hash)
+{
+    if (!node->inventory_known_slots)
+        return INV_INDEX_UNAVAILABLE;
+    size_t s = (size_t)inv_known_hash(hash) &
+               node->inventory_known_slot_mask;
+    size_t len = node->inventory_known_slot_mask + 1;
+    for (size_t probes = 0; probes < len; probes++) {
+        uint32_t pos = node->inventory_known_slots[s];
+        if (pos == 0)
+            return INV_INDEX_MISS;
+        if ((size_t)(pos - 1) >= node->inventory_known_count)
+            return INV_INDEX_UNAVAILABLE;
+        if (uint256_eq(&node->inventory_known_hashes[pos - 1], hash))
+            return INV_INDEX_HIT;
+        s = (s + 1) & node->inventory_known_slot_mask;
+    }
+    return INV_INDEX_UNAVAILABLE;
+}
+
+/* Insert or refresh one ring position. Equal hashes share one slot pointing
+ * at their newest position, so repeated peer inventory cannot inflate table
+ * occupancy. False means the table is inconsistent or unexpectedly full. */
+static bool inv_index_insert_one(struct p2p_node *node, size_t ring_pos)
 {
     size_t s = (size_t)inv_known_hash(
                    &node->inventory_known_hashes[ring_pos]) &
                node->inventory_known_slot_mask;
-    while (node->inventory_known_slots[s])
+    size_t len = node->inventory_known_slot_mask + 1;
+    for (size_t probes = 0; probes < len; probes++) {
+        uint32_t pos = node->inventory_known_slots[s];
+        if (pos == 0) {
+            node->inventory_known_slots[s] = (uint32_t)(ring_pos + 1);
+            return true;
+        }
+        if ((size_t)(pos - 1) >= node->inventory_known_count) {
+            LOG_ERROR("net", "inventory index corrupt for peer=%s: "
+                      "slot position=%u count=%zu",
+                      node->addr_name, pos, node->inventory_known_count);
+            return false;
+        }
+        if (uint256_eq(&node->inventory_known_hashes[pos - 1],
+                       &node->inventory_known_hashes[ring_pos])) {
+            node->inventory_known_slots[s] = (uint32_t)(ring_pos + 1);
+            return true;
+        }
         s = (s + 1) & node->inventory_known_slot_mask;
-    node->inventory_known_slots[s] = (uint32_t)(ring_pos + 1);
+    }
+    LOG_ERROR("net", "inventory index saturated for peer=%s: slots=%zu "
+              "count=%zu", node->addr_name, len,
+              node->inventory_known_count);
+    return false;
 }
 
 static bool inv_index_rebuild(struct p2p_node *node)
@@ -870,8 +906,12 @@ static bool inv_index_rebuild(struct p2p_node *node)
         len != node->inventory_known_slot_mask + 1) {
         uint32_t *tmp = zcl_realloc(node->inventory_known_slots,
                                     len * sizeof(*tmp), "inv_known_slots");
-        if (!tmp)
+        if (!tmp) {
+            /* The old table no longer covers the grown/repositioned ring.
+             * Discard it so membership uses the exact linear fallback. */
+            inv_index_invalidate(node);
             return false;
+        }
         node->inventory_known_slots = tmp;
         node->inventory_known_slot_mask = len - 1;
     }
@@ -879,8 +919,12 @@ static bool inv_index_rebuild(struct p2p_node *node)
      * their newest holder and occupancy never exceeds unique members. */
     memset(node->inventory_known_slots, 0,
            len * sizeof(node->inventory_known_slots[0]));
-    for (size_t i = 0; i < node->inventory_known_count; i++)
-        inv_index_insert_one(node, i);
+    for (size_t i = 0; i < node->inventory_known_count; i++) {
+        if (!inv_index_insert_one(node, i)) {
+            inv_index_invalidate(node);
+            return false;
+        }
+    }
     return true;
 }
 
@@ -908,18 +952,15 @@ void p2p_node_add_inventory_known(struct p2p_node *node, const struct inv_item *
     }
     node->inventory_known_hashes[node->inventory_known_count++] = inv->hash;
     size_t new_pos = node->inventory_known_count - 1;
-    /* A healthy, correctly-sized table takes one incremental slot for a
-     * hash it does not already hold (duplicates must not multiply slots,
-     * or occupancy would drift above its half-load guarantee); everything
-     * else — first use, growth, eviction, recovery from an earlier alloc
-     * failure — takes one full rebuild. If the rebuild cannot allocate,
-     * the stale-but-SOUND older table (or no table) stays in place:
-     * lookups never give wrong answers, only the pre-fix linear cost. */
-    if (node->inventory_known_slots && !restructure &&
-        SIZE_MAX == inv_index_lookup(node, &node->inventory_known_hashes[new_pos]))
-        inv_index_insert_one(node, new_pos);
-    else
+    /* Plain appends insert or refresh one slot. Structural changes rebuild;
+     * any failed insertion invalidates the table and preserves exact lookup
+     * semantics through the bounded linear fallback. */
+    if (node->inventory_known_slots && !restructure) {
+        if (!inv_index_insert_one(node, new_pos))
+            inv_index_invalidate(node);
+    } else {
         (void)inv_index_rebuild(node);
+    }
     zcl_mutex_unlock(&node->cs_inventory);
 }
 
@@ -929,13 +970,20 @@ static bool inventory_known_contains(struct p2p_node *node,
     /* Index fast path: O(1) expected under cs_inventory, which is what
      * unauthenticated getblocks batches used to hold across a full linear
      * scan per item. */
-    size_t pos = inv_index_lookup(node, hash);
-    if (pos != SIZE_MAX)
+    enum inv_index_result indexed = inv_index_lookup(node, hash);
+    if (indexed == INV_INDEX_HIT)
         return true;
-    if (node->inventory_known_slots)
+    if (indexed == INV_INDEX_MISS)
         return false;
-    /* No table (slot allocation never succeeded): identical semantics via
-     * the original scan. */
+    /* No usable table: identical semantics via the original bounded ring
+     * scan. Discard a saturated/corrupt table so later appends may rebuild. */
+    if (node->inventory_known_slots) {
+        LOG_ERROR("net", "inventory index unusable for peer=%s: slots=%zu "
+                  "count=%zu; using ring fallback", node->addr_name,
+                  node->inventory_known_slot_mask + 1,
+                  node->inventory_known_count);
+        inv_index_invalidate(node);
+    }
     for (size_t i = 0; i < node->inventory_known_count; i++)
         if (uint256_eq(&node->inventory_known_hashes[i], hash))
             return true;

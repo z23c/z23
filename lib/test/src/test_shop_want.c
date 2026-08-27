@@ -13,7 +13,7 @@
  *      byte-identical re-post is already_posted and mutates nothing; a
  *      commit without node.db is WANT_STORE_NOT_INITIALISED
  *   4. input validation: the named refusals (secret, amount, criteria,
- *      expires, lifetime, spec_hash)
+ *      expires, caller-issued clock skew, node-clock lifetime, spec_hash)
  *   5. moderation: the identical visibility rule as moderated market
  *      offers — general-audience.v1 hides unreviewed AND sensitive,
  *      reviewed_ok shows, the open override shows everything; the review
@@ -481,6 +481,41 @@ static int shop_want_validation(void)
 
     sw_post_input_ex(&input, dir, secret, 500000, CRITERIA,
                      SW_NOW + 86400LL, false);
+    (void)json_push_kv_int(&input, "issued_unix", SW_NOW + 301LL);
+    SW_CHECK("an issued time 301 seconds ahead is ISSUED_TIME_SKEW",
+             sw_post_refused_with(&input, "ISSUED_TIME_SKEW"));
+    json_free(&input);
+
+    sw_post_input_ex(&input, dir, secret, 500000, CRITERIA,
+                     SW_NOW + 86400LL, false);
+    (void)json_push_kv_int(&input, "issued_unix", SW_NOW - 301LL);
+    SW_CHECK("an issued time 301 seconds behind is ISSUED_TIME_SKEW",
+             sw_post_refused_with(&input, "ISSUED_TIME_SKEW"));
+    json_free(&input);
+
+    /* Both independent bounds are inclusive: issue skew may reach five
+     * minutes and expiry may reach 30 days from the node clock. */
+    sw_post_input_ex(&input, dir, secret, 500000, CRITERIA,
+                     SW_NOW + SHOP_WANT_MAX_LIFETIME_SECS, false);
+    (void)json_push_kv_int(&input, "issued_unix", SW_NOW + 300LL);
+    struct zcl_command_reply reply;
+    sw_call(zcl_native_handle_shop_want_post, &input, &reply);
+    SW_CHECK("the exact issue-skew and node-lifetime bounds pass",
+             reply.status == ZCL_COMMAND_STATUS_PASSED);
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+
+    /* A future issued stamp cannot extend the board lifetime past the
+     * node-clock cap even when the signed issued-to-expiry span is valid. */
+    sw_post_input_ex(&input, dir, secret, 500000, CRITERIA,
+                     SW_NOW + SHOP_WANT_MAX_LIFETIME_SECS + 1LL, false);
+    (void)json_push_kv_int(&input, "issued_unix", SW_NOW + 300LL);
+    SW_CHECK("future issue cannot bypass the node-clock lifetime cap",
+             sw_post_refused_with(&input, "BAD_LIFETIME"));
+    json_free(&input);
+
+    sw_post_input_ex(&input, dir, secret, 500000, CRITERIA,
+                     SW_NOW + 86400LL, false);
     (void)json_push_kv_str(&input, "spec_hash", "zz");
     SW_CHECK("a malformed spec hash is BAD_SPEC_HASH",
              sw_post_refused_with(&input, "BAD_SPEC_HASH"));
@@ -493,7 +528,6 @@ static int shop_want_validation(void)
     sw_post_input_ex(&input, dir, secret, 500000, CRITERIA,
                      SW_NOW + 86400LL, true);
     (void)json_push_kv_str(&input, "spec_hash", spec);
-    struct zcl_command_reply reply;
     sw_call(zcl_native_handle_shop_want_post, &input, &reply);
     SW_CHECK("a spec-committed want posts",
              reply.status == ZCL_COMMAND_STATUS_PASSED);

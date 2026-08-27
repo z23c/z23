@@ -26,7 +26,7 @@ app/controllers/src/api_controller_routes.c 834 # market-moderation dynamic rout
 app/controllers/src/file_market_controller.c 919 # market-moderation RPCs (split seam: moderation handlers -> market_moderation_native_handler.c)
 app/controllers/src/name_controller.c 1017
 app/controllers/src/swap_controller.c 1053 # atomic-swap money-shape guard (ADR-0009; split seam: settlement helpers)
-app/controllers/src/shop_native_want.c 917 # buyer want-ads: 5 leaves (post/list/status/cancel/review), sign+store controller (split seam: model helpers -> models/shop_want.c); +6 = the compile-time clock fork in shw_now (mirrors shf_now; no runtime env valve)
+app/controllers/src/shop_native_want.c 916 # buyer want-ads: 5 leaves (post/list/status/cancel/review), sign+store controller (split seam: model helpers -> models/shop_want.c)
 app/jobs/src/reducer_frontier.c 801
 app/jobs/src/reducer_frontier_replay.c 806
 app/jobs/src/tip_finalize_stage.c 809
@@ -89,10 +89,6 @@ config/src/boot_zcode_swarm.c 885
 config/src/bundle_exporter.c 988
 config/src/consensus_state_install_runtime.c 919
 config/src/consensus_state_producer_receipt.c 787
-# ADR-0010: first entry — the 800 ceiling was crossed by the native-macOS
-# platform port before any record existed; pinned at current LOC (the
-# writer-vs-install/activate split seam is noted there).
-config/src/consensus_state_snapshot_export.c 801
 config/src/consensus_state_snapshot_install_activate.c 1169 # ADR-0008 (seed-floor declaration); reduced after descriptor binding
 app/services/src/header_sync_service.c 846
 app/controllers/src/event_agent_summary.c 853

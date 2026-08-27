@@ -59,5 +59,5 @@ debt incurred here.
 The release-hardening integration removed the new line from the exporter,
 reduced the installer to its prior 1,169-line ceiling, and reduced
 `src/main_cli_modes.c` to its prior baseline. The enforced baseline is 1,169
-and the WARN-tier drift-count ceiling is 22. No size ceiling was raised in the
-integrated release.
+and the WARN-tier drift-count ceiling is 22; the now-800-line exporter needs
+no exception entry. No size ceiling was raised in the integrated release.
