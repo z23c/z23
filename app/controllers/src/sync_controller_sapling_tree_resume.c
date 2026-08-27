@@ -14,6 +14,7 @@
 
 #include "sync_controller_internal.h"
 
+#include "base/text_fit.h"
 #include "chain/chain.h"
 #include "core/uint256.h"
 #include "sapling/incremental_merkle_tree.h"
@@ -160,22 +161,40 @@ void sapling_tree_rebuild_raise_fail_blocker(
         strcmp(fail_reason, SAPLING_REBUILD_REASON_REPLAY_IMPOSSIBLE) == 0;
     bool body_gap = (is_root_mismatch || bodies_absent) &&
                     skips && skips->total > 0;
+    /* A fail-reason and a skip-class join are CLOSED-SET identifiers: a
+     * reader (operator or test) matches them whole, so a fixed `%.Ns` cap
+     * renders a token that names no member of the set it claims to name --
+     * `replay_impossible_bodies_absent_below_fi` is not a reason, and it is
+     * not one silently. Both therefore carry their FULL width here
+     * (SAPLING_REBUILD_REASON_REPLAY_IMPOSSIBLE is 57 bytes; the all-classes
+     * join is 48).
+     *
+     * The field order is the priority order, because a cut can only ever eat
+     * the tail: identifiers first, then the "what clears it" clause, then the
+     * numeric detail. Realistic mainnet values land at 255 of the 256-byte
+     * blocker reason; the formal worst case (every int at INT_MIN) is 277, so
+     * the sentence is composed in a local buffer that provably holds it and
+     * then fitted by zcl_text_fit(), which leaves a visible "...[cut n/m]"
+     * marker and WARNs the whole text rather than cutting in silence. */
+    char full[BLOCKER_REASON_MAX + 128];
     char reason[BLOCKER_REASON_MAX];
     if (body_gap)
-        snprintf(reason, sizeof(reason),
-                "sapling rebuild blocked: reason=%.40s height=%d "
-                "commitments=%d mismatches=%d body_gap=%d span=[%d..%d] "
-                "classes=%.40s; seed anchor_kv or backfill bodies",
-                fail_reason ? fail_reason : "unknown", fail_height,
+        snprintf(full, sizeof(full),
+                "reason=%s classes=%s; seed anchor_kv or backfill bodies "
+                "(height=%d commitments=%d mismatches=%d body_gap=%d "
+                "span=[%d..%d])",
+                fail_reason ? fail_reason : "unknown",
+                skips->classes[0] ? skips->classes : "unknown", fail_height,
                 total_commitments, mismatches, skips->total,
-                skips->first_height, skips->last_height,
-                skips->classes[0] ? skips->classes : "unknown");
+                skips->first_height, skips->last_height);
     else
-        snprintf(reason, sizeof(reason),
-                "sapling_tree_rebuild fail-closed reason=%.120s height=%d "
+        snprintf(full, sizeof(full),
+                "sapling_tree_rebuild fail-closed reason=%s height=%d "
                 "commitments=%d mismatches=%d",
                 fail_reason ? fail_reason : "unknown", fail_height,
                 total_commitments, mismatches);
+    (void)zcl_text_fit(reason, sizeof(reason), full, "blocker",
+                       "sapling_tree_rebuild.fail_closed.reason");
     enum blocker_class cls = body_gap ? BLOCKER_DEPENDENCY
                            : is_root_mismatch ? BLOCKER_PERMANENT
                                               : BLOCKER_TRANSIENT;

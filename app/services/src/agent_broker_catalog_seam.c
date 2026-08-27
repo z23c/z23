@@ -32,6 +32,7 @@
 #include "agent_broker_provider_internal.h"
 
 #include "base/log_macros.h"
+#include "base/text_fit.h"
 #include "base/result.h"
 #include "base/hex.h"
 #include "json/json.h"
@@ -155,15 +156,39 @@ static bool resolve(void *ctx, const struct mvap_request *req,
     memcpy(out->content_root,
            view.has_content_root ? view.content_root : view.immutable_root,
            32);
-    snprintf(out->detail, sizeof(out->detail),
-             "authority=%.12s status=%.12s evidence=%.12s settlement=%.12s "
-             "revision=%llu owner=%.20s",
+    /* Four of these five values are CLOSED-SET identifiers declared in one
+     * table each -- authority sources in metaverse/property_id.h, status and
+     * evidence grades in metaverse/property_view.c, settlement classes in
+     * metaverse/property_id.c -- and most of them are longer than 12 bytes
+     * (`chain_indexed_unvalidated` is 25, `chain_anchored_incomplete` is 25).
+     * A fixed `%.12s` therefore printed `settlement=content_addr`, a token
+     * that matches no member of the enum it names, with bytes still free in
+     * the field. They all carry their FULL width here: their combined worst
+     * case is 77 bytes, which with the literals and a 20-digit revision puts
+     * the head at 154 of the 160-byte detail field.
+     *
+     * The owner principal is the ONE free-form value (up to
+     * METAVERSE_VIEW_TEXT_MAX-1 = 127 bytes), so it is the field that spends
+     * whatever is left, and zcl_text_fit() cuts it VISIBLY -- a "...[cut n/m]"
+     * marker in the field plus a WARN carrying the whole principal -- instead
+     * of the silent prefix a `%.20s` stored. Note the field size is NOT
+     * negotiable: detail[] sits inside the receipt preimage that the SHA3
+     * digest and the Ed25519 audit signature cover (lib/session/src/
+     * agent_audit.c), so the content is made to fit, never the buffer. */
+    int head = snprintf(out->detail, sizeof(out->detail),
+             "authority=%s status=%s evidence=%s settlement=%s "
+             "revision=%llu owner=",
              view.authority_source ? view.authority_source : "unknown",
              metaverse_property_status_name(view.status),
              metaverse_evidence_name(view.evidence),
              metaverse_settlement_name(view.settlement),
-             (unsigned long long)out->revision,
-             view.owner_principal[0] ? view.owner_principal : "(none recorded)");
+             (unsigned long long)out->revision);
+    if (head > 0 && (size_t)head < sizeof(out->detail))
+        (void)zcl_text_fit(out->detail + head,
+                           sizeof(out->detail) - (size_t)head,
+                           view.owner_principal[0] ? view.owner_principal
+                                                   : "(none recorded)",
+                           "agent_broker", "receipt.detail.owner");
     return true;
 }
 

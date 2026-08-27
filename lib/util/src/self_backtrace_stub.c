@@ -1,5 +1,11 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Purpose: Report self-backtrace unavailability on unsupported platforms. */
+ * Purpose: the non-Linux build of util/self_backtrace.h (Makefile swaps this
+ * in for self_backtrace.c on any ZCL_HOST_OS != Linux). The real
+ * implementation's SIGRTMIN+2 handler and thread-registry walk are Linux-
+ * specific, so here install() just no-ops true, dump_all() reports ENOTSUP,
+ * and dump_state_json() reports installed:false with a reason string — so
+ * boot.c's "self_backtrace_install failed" WARNING path stays a warning, not
+ * a build break, on hosts without the live-dump surface. */
 
 #include "util/self_backtrace.h"
 

@@ -1,5 +1,11 @@
-/* Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
- * Purpose: Render stable platform paths for open descriptors and their children. */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Purpose: turn an open fd back into a walkable path (/proc/self/fd on Linux,
+ * /dev/fd on Darwin) for callers like progress_store/projection_store that
+ * need an *at()-relative path string, not just a descriptor. On Darwin, which
+ * lacks Linux's kernel-resolved /proc/self/fd/<dirfd>/<leaf> shortcut, the
+ * dirfd-child variant re-derives the directory via F_GETPATH and rejects it
+ * if fstat/stat dev+ino no longer match — refusing a path built across a
+ * rename/replace race instead of returning a silently wrong one. */
 #ifndef ZCL_PLATFORM_FD_PATH_H
 #define ZCL_PLATFORM_FD_PATH_H
 

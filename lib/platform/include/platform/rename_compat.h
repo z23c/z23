@@ -1,5 +1,10 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Purpose: Provide a portable no-replace rename operation for directory entries. */
+ * Purpose: atomic no-clobber rename for installers that must never overwrite
+ * a concurrent writer's file (package_checkout, dev_failure_store) —
+ * renameat2(RENAME_NOREPLACE) on Linux, renameatx_np(RENAME_EXCL) on Darwin,
+ * and a hard ENOTSUP (not a silent plain rename) on any other host, since a
+ * plain rename() there would reintroduce the clobber this seam exists to
+ * rule out. */
 
 #ifndef ZCL_PLATFORM_RENAME_COMPAT_H
 #define ZCL_PLATFORM_RENAME_COMPAT_H

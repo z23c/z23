@@ -22,23 +22,23 @@
 # Sorted by path.
 
 lib/crypto/src/ed25519.c 1033
-lib/codeindex/src/codeindex_build.c 1047
+lib/codeindex/src/codeindex_build.c 991
 lib/codeindex/src/codeindex_scan.c 1032
 lib/codeindex/src/codeindex_store.c 932
 lib/event/src/event.c 1055
 lib/hotswap/src/hotswap_loader.c 817
 lib/kernel/src/command_registry.c 2289
 lib/metrics/src/prometheus_metrics.c 1100
-lib/net/src/addrman.c 1444
+lib/net/src/addrman.c 1254
 lib/net/src/connman.c 2929
 lib/net/src/download.c 1623
-lib/net/src/fast_sync.c 1908
+lib/net/src/fast_sync.c 1904
 lib/net/src/file_service.c 2255
-lib/net/src/https_server.c 1047
+lib/net/src/https_server.c 984
 lib/net/src/msg_blocks.c 902
 lib/net/src/msg_headers.c 2066
 lib/net/src/msgprocessor.c 2817
-lib/net/src/msgprocessor_snapshot.c 2039
+lib/net/src/msgprocessor_snapshot.c 2014
 lib/net/src/msgprocessor_snapshot_serve.c 1114
 lib/net/src/net.c 1973
 lib/net/src/onion_directory.c 865
@@ -47,8 +47,8 @@ lib/net/src/peer_lifecycle.c 1856
 lib/net/src/rom_fetch.c 1709
 lib/net/src/rom_seed.c 1111
 lib/platform/src/os_sandbox_linux.c 1526
-lib/rpc/src/httpserver.c 1667
-lib/sapling/src/circuit_gadgets.c 1064
+lib/rpc/src/httpserver.c 1654
+lib/sapling/src/circuit_gadgets.c 1053
 lib/sapling/src/circuit_spend.c 959
 lib/sapling/src/groth16_prover.c 1203
 lib/sapling/src/incremental_merkle_tree.c 1033
@@ -66,12 +66,12 @@ lib/storage/src/coins_ram.c 1406
 lib/storage/src/coins_view_sqlite.c 1247
 lib/validation/src/chainstate.c 1038
 lib/validation/src/connect_block.c 896
-lib/wallet/src/wallet.c 1582
-lib/wallet/src/wallet_sqlite.c 1617
+lib/wallet/src/wallet.c 1560
+lib/wallet/src/wallet_sqlite.c 1603
 lib/sim/src/simnet_chaos_faults.c 2684
 lib/util/src/blocker.c 836
 lib/util/src/supervisor.c 1211
-lib/sync/src/stage.c 819
+lib/sync/src/stage.c 817
 src/main_cli_modes.c 4266
 lib/hotswap/src/hotswap_activate.c 948
 lib/vcs/src/package_store.c 1132
@@ -83,14 +83,14 @@ lib/vcs/src/package_badge.c 1299
 lib/vcs/src/package_badge_eligible.c 817
 lib/vcs/src/package_swarm_node.c 1840
 lib/vcs/src/package_service.c 1040
-lib/vcs/src/zcode_contributor_binding.c 983
+lib/vcs/src/zcode_contributor_binding.c 980
 # ZCODE Scientific Metaverse S5: the rebuildable discovery-graph projection
 # (lineage union-find collapse, citation-set decode, verified vote seeds,
 # bounded assembly, convergence residual) is one deterministic scan ->
 # assemble -> compute pipeline over the CAS that must stay together;
 # baselined at creation per the zcode_science.c precedent.
 lib/vcs/src/zcode_discovery_projection.c 1112
-lib/vcs/src/zcode_science.c 1411
+lib/vcs/src/zcode_science.c 1405
 lib/zswap/src/zswap_ceremony.c 853
 
 # Arrived on origin/main already oversized and unrecorded, so the WARN tier
@@ -100,5 +100,5 @@ lib/zswap/src/zswap_ceremony.c 853
 # today's size. It is NOT a blessing — vcs_devloop.c is three times the
 # ceiling and wants a real split along a seam, not a shave.
 lib/vcs/src/vcs_devloop.c 2390
-lib/vcs/src/zcode_work_node.c 1334
+lib/vcs/src/zcode_work_node.c 1331
 lib/vcs/src/zcode_workspace_manifest.c 846

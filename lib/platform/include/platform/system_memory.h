@@ -1,5 +1,9 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Purpose: Report total physical system memory through a portable bounded API. */
+ * Purpose: total physical RAM in bytes, for boot_memory_guard and
+ * boot_mint_anchor_preflight's percentage-of-RAM budget checks — sysinfo()'s
+ * totalram*mem_unit on Linux, sysctlbyname("hw.memsize") on Darwin — so those
+ * budget checks stay one syscall away instead of duplicating the per-host
+ * incantation at each call site. */
 
 #ifndef ZCL_PLATFORM_SYSTEM_MEMORY_H
 #define ZCL_PLATFORM_SYSTEM_MEMORY_H

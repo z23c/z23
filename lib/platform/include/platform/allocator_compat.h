@@ -1,5 +1,8 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Purpose: Provide portable allocator tuning and free-page release helpers. */
+ * Purpose: glibc-only mallopt/malloc_trim bulk-allocation hooks, so a batch
+ * loader (bg_validation_service, fast_sync, boot_index) can tell the arena to
+ * stop mmap'ing above 32KiB and later hand freed pages back to the OS; a
+ * silent no-op under musl/Darwin, where neither knob exists. */
 
 #ifndef ZCL_PLATFORM_ALLOCATOR_COMPAT_H
 #define ZCL_PLATFORM_ALLOCATOR_COMPAT_H

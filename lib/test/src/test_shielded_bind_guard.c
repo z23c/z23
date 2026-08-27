@@ -542,7 +542,7 @@ int test_shielded_bind_guard(void)
         char reason[BLOCKER_REASON_MAX];
         SBG_CHECK("blocker reason names the mismatch + both heights",
                   sbg_gap_blocker_reason(reason, sizeof(reason)) &&
-                  strstr(reason, "HEIGHT-MISMATCHED") &&
+                  strstr(reason, "shielded anchor height mismatch") &&
                   strstr(reason, "3176225") &&   /* SBG_LAG_H */
                   strstr(reason, "3176325"));    /* SBG_TIP_H */
 
@@ -665,8 +665,8 @@ int test_shielded_bind_guard(void)
             char reason4[BLOCKER_REASON_MAX];
             SBG_CHECK("wedge control: standard backfill blocker raised",
                       sbg_gap_blocker_reason(reason4, sizeof(reason4)) &&
-                      strstr(reason4, "incomplete below reducer cursor") &&
-                      !strstr(reason4, "HEIGHT-MISMATCHED"));
+                      strstr(reason4, "incomplete below cursor") &&
+                      !strstr(reason4, "shielded anchor height mismatch"));
             node_db_close(&ndb4);
             progress_store_close();
             test_rm_rf_recursive(pg4);

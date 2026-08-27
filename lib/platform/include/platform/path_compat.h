@@ -1,5 +1,9 @@
-/* Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
- * Purpose: Canonicalize platform path spellings for process-local identity checks. */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Purpose: one canonical identity string per path, even for a path that does
+ * not exist yet, so process-local database-ownership registries
+ * (database.c, database_owner_lease.c) key on the resource realpath() would
+ * resolve to rather than the caller's original spelling. See below for the
+ * Darwin /tmp-vs-/private/tmp case this exists to collapse. */
 #ifndef ZCL_PLATFORM_PATH_COMPAT_H
 #define ZCL_PLATFORM_PATH_COMPAT_H
 

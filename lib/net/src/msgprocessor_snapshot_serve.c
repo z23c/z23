@@ -39,6 +39,7 @@
 #include "core/uint256.h"
 #include "core/random.h"
 #include "crypto/sha3.h"
+#include "base/serialize_le.h"
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>

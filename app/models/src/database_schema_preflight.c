@@ -24,6 +24,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "platform/fd_path.h"
+
 #define NODE_DB_PREFLIGHT_URI_MAX 128
 
 struct preflight_sidecars {
@@ -93,9 +95,10 @@ static bool probe_sidecars(const char *path, struct preflight_sidecars *out)
 
 /* A cleanly closed WAL database retains header byte 18 == 2 but has no
  * wal-index. Plain SQLITE_OPEN_READONLY would create -wal/-shm in that state.
- * Bind immutable SQLite to the already-open inode through /proc instead; this
- * cannot follow a later path replacement and deliberately ignores sidecars.
- * The caller only selects it when no non-empty WAL and no SHM exists. */
+ * Bind immutable SQLite to the already-open inode through the platform's
+ * magic fd-reopen path instead; this cannot follow a later path replacement
+ * and deliberately ignores sidecars. The caller only selects it when no
+ * non-empty WAL and no SHM exists. */
 static int open_quiet_wal_immutable(int fd, sqlite3 **db_out)
 {
     char fd_path[64];
