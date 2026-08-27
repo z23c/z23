@@ -2729,12 +2729,15 @@ bool msg_send_messages(void *ctx, struct p2p_node *node, bool send_trickle)
          * peer window with duplicate requests and timeout churn, slowing the
          * fast path. Leave queued legacy work untouched; it resumes if the
          * swarm finishes or never starts. */
-        if (!block_swarm_active) {
-            size_t timed_out = dl_check_timeouts(dm, now_dl);
-            if (timed_out > 0)
-                event_emitf(EV_BLOCK_REQUESTED, 0,
-                            "timeouts=%zu reassigned to queue", timed_out);
-        }
+        /* Timeout RECLAIM is not assignment, though, and must run even while
+         * a swarm is active: a legacy getdata already inflight when the
+         * swarm armed would otherwise never be reaped and its window slot
+         * would leak for the swarm's whole lifetime. New assignments stay
+         * swarm-gated below, so this cannot reopen the churn above. */
+        size_t timed_out = dl_check_timeouts(dm, now_dl);
+        if (timed_out > 0)
+            event_emitf(EV_BLOCK_REQUESTED, 0,
+                        "timeouts=%zu reassigned to queue", timed_out);
 
         /* Snapshot receive owns catch-up while active. Normal block assignment,
          * stall recovery, and recovery getheaders only add churn until the

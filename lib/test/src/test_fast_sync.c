@@ -632,11 +632,11 @@ static int test_block_swarm_rarest_first(void)
         bs.piece_availability[3] = 1;
 
         /* First assignment should pick piece 3 (rarest) */
-        int32_t p = block_swarm_assign_piece(&bs, 1, NULL);
+        int32_t p = block_swarm_assign_piece(&bs, 1, NULL, 0);
         ASSERT(p == 3);
 
         /* Next should pick piece 1 (next rarest) */
-        p = block_swarm_assign_piece(&bs, 2, NULL);
+        p = block_swarm_assign_piece(&bs, 2, NULL, 0);
         ASSERT(p == 1);
 
         block_swarm_free(&bs);
@@ -671,7 +671,7 @@ static int test_block_swarm_endgame(void)
             block_swarm_receive_piece(&bs, i, 1);
 
         /* Next assignment should trigger endgame */
-        block_swarm_assign_piece(&bs, 1, NULL);
+        block_swarm_assign_piece(&bs, 1, NULL, 0);
         ASSERT(bs.endgame);
 
         block_swarm_free(&bs);
@@ -1152,9 +1152,9 @@ static int test_block_swarm_lifecycle(void)
         ASSERT(block_swarm_progress(&bs) == 0);
 
         /* 3 peers each get work */
-        int32_t p1 = block_swarm_assign_piece(&bs, 1, NULL);
-        int32_t p2 = block_swarm_assign_piece(&bs, 2, NULL);
-        int32_t p3 = block_swarm_assign_piece(&bs, 3, NULL);
+        int32_t p1 = block_swarm_assign_piece(&bs, 1, NULL, 0);
+        int32_t p2 = block_swarm_assign_piece(&bs, 2, NULL, 0);
+        int32_t p3 = block_swarm_assign_piece(&bs, 3, NULL, 0);
         ASSERT(p1 >= 0 && p2 >= 0 && p3 >= 0);
         ASSERT(bs.pieces_inflight == 3);
 
@@ -1165,8 +1165,8 @@ static int test_block_swarm_lifecycle(void)
         ASSERT(block_swarm_progress(&bs) == 60); /* 3/5 = 60% */
 
         /* Assign and receive remaining */
-        int32_t p4 = block_swarm_assign_piece(&bs, 1, NULL);
-        int32_t p5 = block_swarm_assign_piece(&bs, 2, NULL);
+        int32_t p4 = block_swarm_assign_piece(&bs, 1, NULL, 0);
+        int32_t p5 = block_swarm_assign_piece(&bs, 2, NULL, 0);
         ASSERT(p4 >= 0 && p5 >= 0);
         block_swarm_receive_piece(&bs, (uint32_t)p4, 1);
         block_swarm_receive_piece(&bs, (uint32_t)p5, 2);
@@ -1193,7 +1193,7 @@ static int test_block_swarm_fail_retry(void)
         struct block_swarm bs;
         block_swarm_init(&bs, &manifest, NULL);
 
-        int32_t p = block_swarm_assign_piece(&bs, 1, NULL);
+        int32_t p = block_swarm_assign_piece(&bs, 1, NULL, 0);
         ASSERT(p >= 0);
 
         /* Fail the piece (bad hash) */
@@ -1202,7 +1202,7 @@ static int test_block_swarm_fail_retry(void)
         ASSERT(bs.piece_states[p] == CHUNK_NEEDED);
 
         /* Can reassign to different peer */
-        int32_t p2 = block_swarm_assign_piece(&bs, 2, NULL);
+        int32_t p2 = block_swarm_assign_piece(&bs, 2, NULL, 0);
         ASSERT(p2 == p); /* should get same piece back */
 
         block_swarm_free(&bs);

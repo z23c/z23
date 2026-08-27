@@ -1717,6 +1717,7 @@ void block_swarm_free(struct block_swarm *bs)
 static int32_t block_swarm_assign_piece_capped(struct block_swarm *bs,
                                                 int peer_id,
                                                 const uint8_t *peer_bitmap,
+                                                size_t peer_bitmap_bytes,
                                                 uint32_t max_piece_index)
 {
     if (!bs || !bs->piece_states)
@@ -1749,8 +1750,11 @@ static int32_t block_swarm_assign_piece_capped(struct block_swarm *bs,
             continue;
         }
 
-        /* Check peer bitmap if available */
-        if (peer_bitmap && !(peer_bitmap[i / 8] & (1 << (i % 8))))
+        /* Check peer bitmap if available. Bits past the buffer's span count
+         * as NOT held, so a short bitmap can never be indexed out of bounds
+         * (same bound as block_swarm_update_availability). */
+        if (peer_bitmap && !(i / 8 < peer_bitmap_bytes &&
+                             (peer_bitmap[i / 8] & (1 << (i % 8)))))
             continue;
 
         /* Rarest-first: prefer pieces fewer peers have */
@@ -1773,19 +1777,23 @@ static int32_t block_swarm_assign_piece_capped(struct block_swarm *bs,
 
 /* Rarest-first piece selection: pick the needed piece with the lowest
  * availability count. Ties broken by sequential order (lower index first).
- * If peer_bitmap is non-NULL, only consider pieces the peer has. */
+ * If peer_bitmap is non-NULL, only consider pieces the peer has; bits at or
+ * past peer_bitmap_bytes read as absent. */
 int32_t block_swarm_assign_piece(struct block_swarm *bs, int peer_id,
-                                  const uint8_t *peer_bitmap)
+                                  const uint8_t *peer_bitmap,
+                                  size_t peer_bitmap_bytes)
 {
     if (!bs || bs->manifest.num_pieces == 0)
         return -1;
     return block_swarm_assign_piece_capped(
-        bs, peer_id, peer_bitmap, bs->manifest.num_pieces - 1);
+        bs, peer_id, peer_bitmap, peer_bitmap_bytes,
+        bs->manifest.num_pieces - 1);
 }
 
 int32_t block_swarm_assign_piece_through_height(struct block_swarm *bs,
                                                  int peer_id,
                                                  const uint8_t *peer_bitmap,
+                                                 size_t peer_bitmap_bytes,
                                                  int32_t max_height)
 {
     if (!bs || !bs->piece_states)
@@ -1807,7 +1815,7 @@ int32_t block_swarm_assign_piece_through_height(struct block_swarm *bs,
         max_piece = complete_pieces - 1;
     }
     return block_swarm_assign_piece_capped(
-        bs, peer_id, peer_bitmap, max_piece);
+        bs, peer_id, peer_bitmap, peer_bitmap_bytes, max_piece);
 }
 
 bool block_swarm_receive_piece(struct block_swarm *bs,
