@@ -563,9 +563,10 @@ int yardsale_ceremony_partial_ingest(const uint8_t *wire, size_t wire_len,
     }
     struct transaction token_tx;
     memset(&token_tx, 0, sizeof(token_tx));
-    bool token_ok = g_prevout_fetch(g_prevout_fetch_ctx,
-                                    partial.seller.token_input.txid,
-                                    &token_tx) &&
+    struct zcl_result fetched =
+        g_prevout_fetch(g_prevout_fetch_ctx,
+                        partial.seller.token_input.txid, &token_tx);
+    bool token_ok = fetched.ok &&
         partial.seller.token_input.vout < token_tx.num_vout;
     const struct tx_out *claimed =
         token_ok ? &token_tx.vout[partial.seller.token_input.vout] : NULL;
@@ -587,7 +588,8 @@ int yardsale_ceremony_partial_ingest(const uint8_t *wire, size_t wire_len,
     if (!token_ok) {
         LOG_WARN("yardsale", "seller token input is not the confirmed "
                  "holder of the ad's exact token — the swap names money "
-                 "this chain does not hold; the buy is off");
+                 "this chain does not hold; the buy is off (%s)",
+                 fetched.ok ? "content mismatch" : fetched.message);
         memory_cleanse(buy.input_keys, sizeof(buy.input_keys));
         transaction_free(&tx);
         return ZSWAP_CEREMONY_WIRE_DROP;

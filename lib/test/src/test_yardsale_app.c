@@ -17,6 +17,7 @@
 #include "test/test_core.h"
 
 #include "base/hex.h"
+#include "base/result.h"
 #include "chain/chainparams.h"
 #include "config/db_service.h"
 #include "config/runtime.h"
@@ -250,16 +251,19 @@ static bool ysa_prevout_arm(const struct zswap_quote_v1 *ad,
                              seller->token_input.script_len);
 }
 
-static bool ysa_prevout_fetch_fn(void *ctx, const uint8_t txid[32],
-                                 struct transaction *out)
+static struct zcl_result ysa_prevout_fetch_fn(void *ctx,
+                                              const uint8_t txid[32],
+                                              struct transaction *out)
 {
     (void)ctx;
     if (!ysa_prevout_serve || !out ||
         memcmp(txid, ysa_prevout_tx.hash.data, 32) != 0)
-        return false;
+        return ZCL_ERR(-1, "fake: no confirmed body for this txid");
     transaction_free(out);
     transaction_init(out);
-    return transaction_copy(out, &ysa_prevout_tx);
+    if (!transaction_copy(out, &ysa_prevout_tx))
+        return ZCL_ERR(-2, "fake: body copy failed");
+    return ZCL_OK;
 }
 
 /* The buyer accept; input B (txid 0x60..) is listed FIRST so the canonical

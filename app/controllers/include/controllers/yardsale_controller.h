@@ -40,6 +40,7 @@
 #ifndef ZCL_CONTROLLERS_YARDSALE_CONTROLLER_H
 #define ZCL_CONTROLLERS_YARDSALE_CONTROLLER_H
 
+#include "base/result.h"
 #include "keys/key.h"
 #include "primitives/transaction.h"
 #include "zswap/zswap_ceremony.h"
@@ -80,10 +81,12 @@ bool yardsale_broadcast_default(const struct transaction *tx, void *ctx);
  * input before signing — the ad's token leg is a claim, and only this
  * port checks it against the chain the buyer actually has. Implemented by
  * the prevout service over node.db + the active chain; tests inject a
- * fake. Fail-closed: while unwired, every partial ingest is refused
- * (nothing is signed, nothing is broadcast). */
-typedef bool (*yardsale_prevout_fetch_fn)(void *ctx, const uint8_t txid[32],
-                                          struct transaction *tx_out);
+ * fake. The result type carries why a body is not confirmed here (E2:
+ * services return struct zcl_result, never bare bool). Fail-closed: while
+ * unwired, every partial ingest is refused (nothing is signed, nothing is
+ * broadcast). */
+typedef struct zcl_result (*yardsale_prevout_fetch_fn)(
+    void *ctx, const uint8_t txid[32], struct transaction *tx_out);
 void yardsale_ceremony_set_prevout_fetch(yardsale_prevout_fetch_fn fn,
                                          void *ctx);
 

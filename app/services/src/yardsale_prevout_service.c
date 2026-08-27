@@ -7,6 +7,7 @@
 
 #include "services/yardsale_prevout_service.h"
 
+#include "base/result.h"
 #include "models/database.h"
 #include "models/tx_index.h"
 #include "primitives/block.h"
@@ -18,22 +19,24 @@
 
 #include <string.h>
 
-bool yardsale_prevout_fetch_confirmed(void *ctx, const uint8_t txid[32],
-                                      struct transaction *tx_out)
+struct zcl_result yardsale_prevout_fetch_confirmed(void *ctx,
+                                                   const uint8_t txid[32],
+                                                   struct transaction *tx_out)
 {
     const struct yardsale_prevout_view *view = ctx;
     if (!view || !view->state || !view->node_db || !view->node_db->open ||
         !view->datadir || !txid || !tx_out)
-        return false;
+        return ZCL_ERR(-1, "prevout fetch: unwired chain view");
 
     struct db_tx_index row;
     if (!db_tx_find(view->node_db, txid, &row))
-        return false; /* never finalized on this node */
+        return ZCL_ERR(-2, "prevout fetch: txid never finalized on "
+                           "this node");
     if (row.block_height < 0 || row.tx_index < 0) {
         LOG_WARN("yardsale", "prevout fetch: locator rejected negative "
                  "position (height=%d tx_index=%d)",
                  row.block_height, row.tx_index);
-        return false;
+        return ZCL_ERR(-3, "prevout fetch: malformed locator row");
     }
 
     struct block_index *bi = active_chain_at(&view->state->chain_active,
@@ -41,11 +44,14 @@ bool yardsale_prevout_fetch_confirmed(void *ctx, const uint8_t txid[32],
     if (!bi || !bi->phashBlock ||
         memcmp(row.block_hash, bi->phashBlock->data,
                sizeof(row.block_hash)) != 0)
-        return false; /* locator is not on the active chain */
+        return ZCL_ERR(-4, "prevout fetch: locator is not on the "
+                           "active chain");
 
     struct block blk;
     block_init(&blk);
-    bool found = false;
+    struct zcl_result out =
+        ZCL_ERR(-5, "prevout fetch: confirmed body unreadable or "
+                    "txid mismatch");
     if (read_block_from_disk_index(&blk, bi, view->datadir) &&
         (size_t)row.tx_index < blk.num_vtx &&
         memcmp(blk.vtx[row.tx_index].hash.data, txid, 32) == 0) {
@@ -54,8 +60,10 @@ bool yardsale_prevout_fetch_confirmed(void *ctx, const uint8_t txid[32],
         if (uint256_cmp(&body_hash, bi->phashBlock) == 0) {
             transaction_free(tx_out);
             transaction_init(tx_out);
-            transaction_copy(tx_out, &blk.vtx[row.tx_index]);
-            found = true;
+            if (transaction_copy(tx_out, &blk.vtx[row.tx_index]))
+                out = ZCL_OK;
+            else
+                out = ZCL_ERR(-6, "prevout fetch: body copy failed");
         } else {
             LOG_WARN("yardsale", "prevout fetch: body hash mismatch "
                      "(height=%d tx_index=%d)", row.block_height,
@@ -63,5 +71,5 @@ bool yardsale_prevout_fetch_confirmed(void *ctx, const uint8_t txid[32],
         }
     }
     block_free(&blk);
-    return found;
+    return out;
 }

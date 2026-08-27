@@ -17,6 +17,8 @@
 #ifndef ZCL_SERVICES_YARDSALE_PREVOUT_SERVICE_H
 #define ZCL_SERVICES_YARDSALE_PREVOUT_SERVICE_H
 
+#include "base/result.h"
+
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -38,9 +40,11 @@ struct yardsale_prevout_view {
 /* Fetch a CONFIRMED transaction body by txid (internal little-endian
  * byte order — the same order as transaction.hash). Signature matches
  * yardsale_prevout_fetch_fn so it wires straight into the ceremony port;
- * ctx is a struct yardsale_prevout_view *. On success *tx_out receives a
- * private copy the caller owns (transaction_free). */
-bool yardsale_prevout_fetch_confirmed(void *ctx, const uint8_t txid[32],
-                                      struct transaction *tx_out);
+ * ctx is a struct yardsale_prevout_view *. On ZCL_OK *tx_out receives a
+ * private copy the caller owns (transaction_free); on failure *tx_out is
+ * untouched and the result names why the body is not confirmed here. */
+struct zcl_result yardsale_prevout_fetch_confirmed(void *ctx,
+                                                   const uint8_t txid[32],
+                                                   struct transaction *tx_out);
 
 #endif /* ZCL_SERVICES_YARDSALE_PREVOUT_SERVICE_H */
