@@ -453,6 +453,18 @@ void zcl_native_handle_shop_want_fulfill_list(
         return;
     }
     bool all = json_get_bool_or(request->input, "all", false);
+    /* Window vs market fact, as on the want board: total_matching is the
+     * uncapped match count, not however many rows fit the fetch cap. */
+    int total = db_shop_fulfill_list_count_for_want(&ndb, want_id, now, all);
+    if (total < 0) {
+        zcl_native_node_db_close_readonly(&db, &ndb);
+        shf_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
+                 "FULFILL_COUNT_FAILED", "execute",
+                 "the store refused to count matching fulfillments; no "
+                 "total is reported rather than a wrong one",
+                 "app.shop.want.fulfill.list.v1");
+        return;
+    }
     struct shop_fulfill rows[SHOP_FULFILL_QUERY_CAP];
     int count = db_shop_fulfill_list_for_want(
         &ndb, want_id, now, all, rows, SHOP_FULFILL_QUERY_CAP);
@@ -493,7 +505,11 @@ void zcl_native_handle_shop_want_fulfill_list(
     (void)json_push_kv(&reply->data, "fulfillments", &list);
     json_free(&list);
     (void)json_push_kv_int(&reply->data, "rendered", (int64_t)rendered);
-    (void)json_push_kv_int(&reply->data, "total_matching", count);
+    (void)json_push_kv_int(&reply->data, "total_matching", total);
+    /* Rows exist past the page whenever the match set outgrew the
+     * fetch window — say so instead of letting the cap read as the end. */
+    (void)json_push_kv_bool(&reply->data, "window_capped",
+                            total > count);
     (void)json_push_kv_int(&reply->data, "hidden_by_profile", hidden);
     (void)json_push_kv_str(&reply->data, "facts_note",
         "signature, CAS bytes, and every claimed receipt are re-verified "

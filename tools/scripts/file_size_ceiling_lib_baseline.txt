@@ -72,7 +72,7 @@ lib/sim/src/simnet_chaos_faults.c 2684
 lib/util/src/blocker.c 836
 lib/util/src/supervisor.c 1211
 lib/sync/src/stage.c 817
-src/main_cli_modes.c 4266
+src/main_cli_modes.c 4275
 lib/hotswap/src/hotswap_activate.c 948
 lib/vcs/src/package_store.c 1132
 lib/vcs/src/package_score.c 845

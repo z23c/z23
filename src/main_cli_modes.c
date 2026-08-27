@@ -3711,9 +3711,18 @@ int wallet_backup_decrypt_mode(int argc, char **argv)
 
 int repair_utxos_mode(int argc, char **argv)
 {
+    if (argc <= 4) {
+        fprintf(stderr,
+            "repair-utxos requires the node's RPC credentials\n"
+            "usage: repair-utxos [num_blocks] [port] <user:password>\n\n"
+            "Take user:password from rpcuser/rpcpassword in\n"
+            "zclassic.conf, or from the first line of the node's\n"
+            ".cookie file when conf credentials are not set.\n");
+        return 1;
+    }
     int num_blocks = argc > 2 ? atoi(argv[2]) : 5000;
     int port = argc > 3 ? atoi(argv[3]) : 8232;
-    const char *creds = argc > 4 ? argv[4] : "zcluser:zclpass";
+    const char *creds = argv[4];
     const char *home = getenv("HOME");
     char db_path[512];
     snprintf(db_path, sizeof(db_path), "%s/.zclassic-c23/node.db",

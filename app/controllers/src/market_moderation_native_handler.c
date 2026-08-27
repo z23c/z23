@@ -437,26 +437,42 @@ void zcl_native_handle_market_moderation_review_set(
         return;
     const char *offer_id = mmn_str(request->input, "offer_id");
     const char *review_state = mmn_str(request->input, "review_state");
-    if (!offer_id || !offer_id[0] || !review_state || !review_state[0]) {
+    const char *mode = mmn_str(request->input, "mode");
+    const char *plan_token = mmn_str(request->input, "plan_token");
+    if (!offer_id || !offer_id[0] || !review_state || !review_state[0] ||
+        !mode ||
+        (strcmp(mode, "plan") != 0 && strcmp(mode, "commit") != 0) ||
+        (strcmp(mode, "commit") == 0 && (!plan_token || !plan_token[0]))) {
         mmn_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                  ZCL_COMMAND_EXIT_INVALID, "MISSING_INPUT", "normalize",
-                 "offer_id and review_state are required",
+                 "offer_id, review_state, and mode (plan|commit) are "
+                 "required; commit also requires the plan_token minted by "
+                 "the plan step",
                  "zmarket_review_set");
         return;
     }
-    const char *const args[] = { offer_id, review_state };
+    const char *const args[] = { offer_id, review_state, mode,
+                                 plan_token ? plan_token : "" };
     struct json_value body;
-    if (!mmn_call("zmarket_review_set", args, 2, &body, reply))
+    if (!mmn_call("zmarket_review_set", args, 4, &body, reply))
         return;
     (void)json_push_kv_str(&reply->data, "schema",
                            "zcl.market_review_set.v1");
+    mmn_copy_str(&reply->data, &body, "mode");
+    mmn_copy_bool(&reply->data, &body, "committed");
+    mmn_copy_str(&reply->data, &body, "plan_token");
     mmn_copy_str(&reply->data, &body, "status");
     mmn_copy_str(&reply->data, &body, "offer_id");
     mmn_copy_str(&reply->data, &body, "review_state");
     mmn_copy_str(&reply->data, &body, "previous_review_state");
     mmn_copy_bool(&reply->data, &body, "local_only");
     mmn_copy_bool(&reply->data, &body, "gossiped");
-    reply->error.mutated = true;
+    /* Only the commit leg mutates; a plan reports what WOULD change and
+     * must not claim otherwise through the mutation flag. */
+    const struct json_value *committed = json_get(&body, "committed");
+    if (committed && committed->type == JSON_BOOL &&
+        json_get_bool(committed))
+        reply->error.mutated = true;
     json_free(&body);
 }
 

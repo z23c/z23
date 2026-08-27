@@ -68,9 +68,10 @@ struct explorer_rpc_backend {
 /* struct explorer_assets defined in explorer_controller_internal.h */
 
 static struct explorer_context g_explorer_ctx = {0};
+/* Credentials start absent: boot fills them from the node's .cookie or
+ * rpcuser/rpcpassword config; the call path refuses to fire without
+ * them — no invented fallback pair. */
 static struct explorer_rpc_backend g_explorer_rpc = {
-    .user = "zcluser",
-    .pass = "zclpass",
     .proxy_port = 8023,
 };
 static struct explorer_assets g_explorer_assets = {0};
@@ -286,6 +287,13 @@ int rpc_call(const char *method, const char *params_json,
     if (!out || outmax == 0)
         LOG_ERR("explorer", "rpc_call(%s): invalid output buffer", method);
     out[0] = '\0';
+
+    /* Credentials absent at call time: send nothing rather than
+     * guessable basic-auth. */
+    if (!explorer_rpc()->user[0] || !explorer_rpc()->pass[0])
+        LOG_ERR("explorer",
+                "rpc_call(%s): no node credentials configured; not "
+                "dialing", method);
 
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) LOG_ERR("explorer", "rpc_call(%s): socket() failed", method);

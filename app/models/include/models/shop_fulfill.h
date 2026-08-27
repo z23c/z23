@@ -121,6 +121,15 @@ int db_shop_fulfill_list_for_want(struct node_db *ndb,
                                   const uint8_t want_id[32],
                                   int64_t now_unix, bool include_closed,
                                   struct shop_fulfill *out, size_t max);
+/* Same match set as db_shop_fulfill_list_for_want, counted without the
+ * fetch window: a board total is what the want has waiting, not however
+ * many rows fit the query cap. -1 on a store error. (The unfiltered
+ * db_shop_fulfill_count_for_want below stays an all-time fact for the
+ * status leaf — different question, both honest.) */
+int db_shop_fulfill_list_count_for_want(struct node_db *ndb,
+                                        const uint8_t want_id[32],
+                                        int64_t now_unix,
+                                        bool include_closed);
 int64_t db_shop_fulfill_count_for_want(struct node_db *ndb,
                                        const uint8_t want_id[32]);
 bool db_shop_fulfill_mark_withdrawn(struct node_db *ndb,

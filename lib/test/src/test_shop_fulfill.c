@@ -1,6 +1,8 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Slice-E shop fulfillment claims: signed wire, CAS evidence, replay,
- * plan/commit, expiry, listing, status, and key-checked withdrawal. */
+ * plan/commit, expiry, listing, status, and key-checked withdrawal.
+ * The listing's total_matching is the uncapped match count (the fetch
+ * window only bounds what renders), with window_capped set past it. */
 
 #include "test/test_core.h"
 
@@ -728,6 +730,64 @@ static int sf_flow(void)
     return failures;
 }
 
+/* Past SHOP_FULFILL_QUERY_CAP claims on one want, total_matching must
+ * stay the true match count with window_capped set — the fetch cap is a
+ * rendering bound, never a market-size report. */
+static int sf_list_total_honesty(void)
+{
+    int failures = 0;
+    char dir[512];
+    test_make_tmpdir(dir, sizeof(dir), "shopfulfill", "boardtotal");
+    SF_CHECK("fixture node.db migrated through v67", sf_boot_db(dir));
+    char want_id[65];
+    SF_CHECK("fixture want posted", sf_post_want(dir, want_id));
+    static const uint8_t bytes[] = "slice-E honest-total artifact";
+    char artifact[65], content[65];
+    SF_CHECK("artifact registered in content.v2 CAS",
+             sf_put_artifact(dir, bytes, sizeof(bytes) - 1,
+                             artifact, content));
+
+    const int posted = SHOP_FULFILL_QUERY_CAP + 2;
+    for (int i = 1; i <= posted; i++) {
+        struct json_value input;
+        struct zcl_command_reply reply;
+        sf_post_input(&input, dir, want_id, (uint8_t)i, artifact, content,
+                      9000 + i, true);
+        sf_call(zcl_native_handle_shop_want_fulfill_post, &input, &reply);
+        bool ok = reply.status == ZCL_COMMAND_STATUS_PASSED;
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+        if (!ok) {
+            SF_CHECK("every fulfillment posts (check errors above)", false);
+            test_rm_rf(dir);
+            return failures;
+        }
+    }
+
+    struct json_value input;
+    struct zcl_command_reply reply;
+    json_init(&input); json_set_object(&input);
+    (void)json_push_kv_str(&input, "datadir", dir);
+    (void)json_push_kv_str(&input, "want_id", want_id);
+    (void)json_push_kv_int(&input, "now_unix", SF_NOW);
+    sf_call(zcl_native_handle_shop_want_fulfill_list, &input, &reply);
+    SF_CHECK("list passes", reply.status == ZCL_COMMAND_STATUS_PASSED);
+    SF_CHECK("total_matching is the full match count, not the window",
+             json_get_int(json_get(&reply.data, "total_matching")) ==
+                 posted);
+    SF_CHECK("the window outgrew the page cap is disclosed",
+             json_get_bool(json_get(&reply.data, "window_capped")));
+    SF_CHECK("moderation counts stay window-scoped and honest",
+             json_get_int(json_get(&reply.data, "rendered")) == 0 &&
+             json_get_int(json_get(&reply.data, "hidden_by_profile")) ==
+                 SHOP_FULFILL_QUERY_CAP);
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+
+    test_rm_rf(dir);
+    return failures;
+}
+
 int test_shop_fulfill(void)
 {
     int failures = 0;
@@ -735,5 +795,6 @@ int test_shop_fulfill(void)
     failures += sf_registry_whitelist();
     failures += sf_receipt_authorities();
     failures += sf_flow();
+    failures += sf_list_total_honesty();
     return failures;
 }

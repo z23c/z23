@@ -756,34 +756,62 @@ int t_no_dev_history_in_contracts(void)
  * (4) removing the fixtures recovers green;
  * (5) the gate is wired into the Makefile LINT_GATES list and documented in
  *     DEFENSIVE_CODING.md's canonical block. */
-/* check-wallet-view-rpc-auth-fail-closed — the browser-facing wallet
- * pages read RPC credentials from conf or a .cookie and must send none
- * when neither exists. The scanner used to fall back to a hardcoded
- * development credential, i.e. guessable basic-auth fired at whatever
- * accepted it; the fail-closed refusal is the only thing standing
- * between form posts and authenticated RPC. Proof here is a source
- * ratchet (the refusal path needs a live node to exercise end to end):
- * the invented credential stays absent and the named refusal stays
- * present in the helper. */
+/* check-no-invented-node-credentials — production frontends and repair
+ * paths read node RPC credentials from conf/cookie/boot configuration
+ * and must refuse by name when none exist. Five files once carried (or
+ * defaulted to) the guessable development pair; this ratchet keeps them
+ * absent. Proof here is source-level because exercising each refusal
+ * needs a configured node; the wallet-view helper additionally keeps
+ * its positive refusal marker pinned below. The env-overridable
+ * default in tools/harvest_checkpoints.sh stays: shell tooling is a
+ * thin invocation layer over credentials the operator supplies. */
 int t_wallet_view_never_invents_rpc_credentials(void)
 {
+    static const char *const guarded[] = {
+        "app/controllers/src/wallet_view_helpers.c",
+        "app/controllers/src/api_controller.c",
+        "app/controllers/src/explorer_controller.c",
+        "src/main_cli_modes.c",
+        "app/controllers/src/repair_controller_utxo.c",
+    };
     int failures = 0;
     char path[PATH_MAX];
-    char *buf = NULL;
 
-    int have_source =
-        repo_path(path, sizeof(path),
-                  "app/controllers/src/wallet_view_helpers.c") == 0 &&
-        read_entire_file(path, &buf) == 0;
+    /* One TEST per function: the harness's ASSERT expands to a literal
+     * `_test_next` label, so two blocks cannot share a scope. */
+    TEST("[lint-gate] no invented node credentials remain in guarded files") {
+        for (size_t i = 0; i < sizeof(guarded) / sizeof(guarded[0]); i++) {
+            char *buf = NULL;
+            int have_source =
+                repo_path(path, sizeof(path), guarded[i]) == 0 &&
+                read_entire_file(path, &buf) == 0;
+            if (!have_source || !buf)
+                fprintf(stderr,
+                        "[lint-gate] %s unreadable\n", guarded[i]);
+            ASSERT(have_source);
+            ASSERT(buf);
+            if (strstr(buf, "zcluser:zclpass")) {
+                fprintf(stderr,
+                        "[lint-gate] invented credential pair still "
+                        "present in %s\n",
+                        guarded[i]);
+                ASSERT(strstr(buf, "zcluser:zclpass") == NULL);
+            }
+            free(buf);
+        }
 
-    TEST("[lint-gate] wallet view RPC auth fail-closed: no invented "
-         "credential, named refusal kept") {
-        ASSERT(have_source && buf);
-        ASSERT(strstr(buf, "zcluser:zclpass") == NULL);
-        ASSERT(strstr(buf, "no RPC credentials found") != NULL);
+        /* Positive pin: the wallet view keeps its named refusal so the
+         * guard cannot be satisfied by deleting the protection. */
+        char *wbuf = NULL;
+        int wallet_readable =
+            repo_path(path, sizeof(path),
+                      "app/controllers/src/wallet_view_helpers.c") == 0 &&
+            read_entire_file(path, &wbuf) == 0;
+        ASSERT(wallet_readable && wbuf);
+        ASSERT(strstr(wbuf, "no RPC credentials found") != NULL);
+        free(wbuf);
         PASS();
     } _test_next:;
-    free(buf);
     return failures;
 }
 

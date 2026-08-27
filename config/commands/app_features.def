@@ -977,17 +977,21 @@ ZCL_COMMAND_READY_COMMAND(
     "review_state (unreviewed / reviewed_ok / sensitive) and writes one "
     "audit log line per mark. The mark is never gossiped, never enters the "
     "signed wire, and never deletes anything — the offer stays stored, "
-    "served, and tradable; only this node's listing view changes.", 0,
+    "served, and tradable; only this node's listing view changes. Exact "
+    "plan/commit: mode plan mints a plan_token bound to the offer's current "
+    "mark and the target; commit requires that token (STALE_PLAN if the "
+    "mark moved in between). A local decision that binds no other node and "
+    "never touches consensus.", 0,
     "market,moderation,review,mark,curation",
     "zcl.app_market_moderation_review_set.input.v1",
     "zcl.market_review_set.v1",
-    "offer_id,review_state", "offer_id,review_state",
-    "z23 app market moderation review set --input='{\"offer_id\":\"<64hex>\",\"review_state\":\"reviewed_ok\"}'",
+    "offer_id,review_state,mode,plan_token", "offer_id,review_state,mode",
+    "z23 app market moderation review set --input='{\"offer_id\":\"<64hex>\",\"review_state\":\"reviewed_ok\",\"mode\":\"plan\"}'",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
     ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
     ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
-    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
     ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
     ZCL_COMMAND_CAP_P2P_TOPIC, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     zcl_native_handle_market_moderation_review_set)

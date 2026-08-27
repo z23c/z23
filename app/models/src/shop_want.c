@@ -27,6 +27,7 @@
 #include <sqlite3.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 
 DEFINE_MODEL_CALLBACKS(shop_want)
 
@@ -401,6 +402,32 @@ int db_shop_want_list(struct node_db *ndb, int64_t now_unix,
     }
     AR_FINALIZE(s);
     return (int)n;
+}
+
+/* Count with the list's WHERE clause but no window. The two must stay
+ * textually parallel: a total that disagrees with what the window would
+ * eventually show is exactly the lie this counter exists to prevent. */
+int db_shop_want_count(struct node_db *ndb, int64_t now_unix,
+                       bool include_closed)
+{
+    if (!ndb || !ndb->open)
+        LOG_RETURN(-1, "shop", "db_shop_want_count: db not open");
+    sqlite3_stmt *s = NULL;
+    int64_t count = 0;
+    if (include_closed) {
+        AR_PREPARE_RET(ndb, s,
+            "SELECT count(*) FROM shop_wants", -1);
+    } else {
+        AR_PREPARE_RET(ndb, s,
+            "SELECT count(*) FROM shop_wants"
+            " WHERE expires_unix>? AND cancelled_unix=0",
+            -1);
+        AR_BIND_INT(s, 1, now_unix);
+    }
+    if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW)
+        count = sqlite3_column_int64(s, 0);
+    AR_FINALIZE(s);
+    return count > INT_MAX ? INT_MAX : (int)count;
 }
 
 bool db_shop_want_mark_cancelled(struct node_db *ndb,

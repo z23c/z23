@@ -25,6 +25,9 @@
  *      deleted
  *   8. the populated board list serializes inside the CLI's real reply
  *      budget (ZCL_COMMAND_LIST_BUDGET + 1) through the real registry
+ *   9b. past SHOP_WANT_QUERY_CAP rows, total_matching reports the true
+ *      match count (not the capped fetch window) and window_capped
+ *      discloses that further rows exist
  *   9. a node.db without the v66 table is the named
  *      WANT_STORE_NOT_MIGRATED refusal, never an empty-looking board
  *
@@ -936,6 +939,62 @@ static int shop_want_list_budget(void)
     return failures;
 }
 
+/* ── 9b. total_matching is the market fact, not the fetch window ──────
+ * The board query caps at SHOP_WANT_QUERY_CAP rows; a buyer reading a
+ * capped window reported as "total matching" would believe the market
+ * ended at the cap. Post past the cap and pin all three numbers apart:
+ * the true total, the window disclosure, and the moderation counts that
+ * are (honestly) window-scoped. */
+static int shop_want_board_total_honesty(void)
+{
+    int failures = 0;
+    char dir[512];
+    test_make_tmpdir(dir, sizeof(dir), "shopwant", "boardtotal");
+    SW_CHECK("fixture node.db", sw_boot_db(dir));
+
+    /* SHOP_WANT_QUERY_CAP + 6 unreviewed wants from distinct buyer seeds:
+     * every row is stored, none is board-visible under the default
+     * general-audience.v1 profile, and the window can hold only 64. */
+    const int posted = SHOP_WANT_QUERY_CAP + 6;
+    char id[65];
+    for (int i = 1; i <= posted; i++) {
+        if (!sw_post_one(dir, (uint8_t)i, id)) {
+            SW_CHECK("every want posts", false);
+            test_rm_rf(dir);
+            return failures;
+        }
+    }
+
+    struct json_value input;
+    struct zcl_command_reply reply;
+    sw_list(dir, NULL, false, SW_NOW, &reply, &input);
+    SW_CHECK("open-board list passes",
+             reply.status == ZCL_COMMAND_STATUS_PASSED);
+    SW_CHECK("total_matching is the full match count, not the window",
+             json_get_int(json_get(&reply.data, "total_matching")) ==
+                 posted);
+    SW_CHECK("the window outgrew the page cap is disclosed",
+             json_get_bool(json_get(&reply.data, "window_capped")));
+    SW_CHECK("moderation counts stay window-scoped and honest",
+             json_get_int(json_get(&reply.data, "rendered")) == 0 &&
+             json_get_int(json_get(&reply.data, "hidden_by_profile")) ==
+                 SHOP_WANT_QUERY_CAP);
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+
+    sw_list(dir, NULL, true, SW_NOW, &reply, &input);
+    SW_CHECK("all:1 list passes", reply.status == ZCL_COMMAND_STATUS_PASSED);
+    SW_CHECK("the closed-inclusive board counts the same truth",
+             json_get_int(json_get(&reply.data, "total_matching")) ==
+                 posted &&
+             json_get_bool(json_get(&reply.data, "window_capped")));
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+
+    test_rm_rf(dir);
+    return failures;
+}
+
 /* ── 9. a pre-v66 node.db is the named refusal ──────────────────────── */
 static int shop_want_store_not_migrated(void)
 {
@@ -1048,6 +1107,7 @@ int test_shop_want(void)
     failures += shop_want_cancel();
     failures += shop_want_expiry();
     failures += shop_want_list_budget();
+    failures += shop_want_board_total_honesty();
     failures += shop_want_store_not_migrated();
     failures += shop_want_input_clock();
     return failures;
