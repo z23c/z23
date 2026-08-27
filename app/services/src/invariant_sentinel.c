@@ -429,7 +429,7 @@ bool invariant_sentinel_sweep_once(void)
         atomic_fetch_add(&g_isn_sweep_violations_total, 1);
         pthread_mutex_lock(&g_isn_detail_lock);
         snprintf(g_isn_last_sweep_detail, sizeof(g_isn_last_sweep_detail),
-                 "%s %s", v.invariant, v.detail);
+                 "%.32s %.160s", v.invariant, v.detail);
         pthread_mutex_unlock(&g_isn_detail_lock);
         /* TWO-SWEEP CONFIRMATION before blocker/page/HOLD: there is one
          * durably-committed window where cursors disagree BY DESIGN — a

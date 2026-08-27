@@ -12,6 +12,7 @@
  * progress_store this module sits below the AR lifecycle (the projection
  * tables it fronts are not models). */
 
+#include "platform/fd_path.h"
 #include "platform/time_compat.h"
 #include "base/serialize_le.h"
 #include "storage/projection_store.h"
@@ -292,9 +293,8 @@ bool projection_store_open(const char *datadir)
         LOG_FAIL("projection_store", "open: datadir capability failed: %s",
                  strerror(errno));
     char path[PROJECTION_STORE_PATH_MAX];
-    n = snprintf(path, sizeof(path), "/proc/self/fd/%d/%s", opened_dir_fd,
-                 PROJECTION_STORE_FILENAME);
-    if (n <= 0 || (size_t)n >= sizeof(path)) {
+    if (!platform_dirfd_child_path(path, sizeof(path), opened_dir_fd,
+                                   PROJECTION_STORE_FILENAME)) {
         (void)close(opened_dir_fd);
         LOG_FAIL("projection_store", "open: capability path too long");
     }

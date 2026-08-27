@@ -20,6 +20,7 @@
  */
 
 #include "platform/time_compat.h"
+#include "platform/thread_compat.h"
 #include "config/boot_internal.h"
 #include "config/boot_background_workers.h"
 #include "config/boot_projection_hole_scan.h"
@@ -183,7 +184,7 @@ bool boot_join_thread_bounded(pthread_t thread,
     int rc;
 
     boot_join_deadline_from_now(&deadline, timeout_sec);
-    rc = pthread_timedjoin_np(thread, NULL, &deadline);
+    rc = platform_thread_join_until(thread, NULL, &deadline);
     if (rc == 0)
         return true;
 

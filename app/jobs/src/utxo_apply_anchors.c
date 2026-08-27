@@ -372,19 +372,10 @@ void utxo_apply_anchor_gap_blocker_refresh_with_ndb(struct sqlite3 *db,
             struct blocker_record rec;
             char reason[BLOCKER_REASON_MAX];
             snprintf(reason, sizeof(reason),
-                     "shielded anchor frontier is HEIGHT-MISMATCHED: the "
-                     "latest Sapling frontier row (h=%lld) diverges from the "
-                     "header-committed hashFinalSaplingRoot at the coins "
-                     "island root (h=%d) while both activation cursors claim "
-                     "complete history (0) — the shape of an "
-                     "-import-complete-shielded bind BELOW the island root. "
-                     "The fold cannot append to it: the first "
-                     "Sapling-commitment block above the island mismatches "
-                     "the header root and H* holds. Remedy (owner-gated): "
-                     "re-run -import-complete-shielded against a consistent "
-                     "source whose chainstate best block == the island root; "
-                     "the current importer refuses a mismatched bind "
-                     "outright. No auto-repair is attempted.",
+                     "shielded anchor height mismatch: frontier=%lld, coins "
+                     "island=%d, activation cursors claim complete; rerun "
+                     "-import-complete-shielded with a source whose best "
+                     "block equals the island root; no auto-repair",
                      (long long)frontier_h, coins_h);
             if (!blocker_init(&rec, UTXO_APPLY_ANCHOR_GAP_BLOCKER_ID,
                               ANCHOR_STAGE_SUBSYS, BLOCKER_PERMANENT, reason))
@@ -401,12 +392,9 @@ void utxo_apply_anchor_gap_blocker_refresh_with_ndb(struct sqlite3 *db,
     struct blocker_record rec;
     char reason[BLOCKER_REASON_MAX];
     snprintf(reason, sizeof(reason),
-             "shielded anchor history is incomplete below reducer cursor %lld; "
-             "unknown Sprout/Sapling roots FAIL CLOSED and hold H*. Auto-remedy: "
-             "condition %s seeds a header-verified frontier (empty-table case) "
-             "or arms the bounded refold; a genuine below-cursor historical gap "
-             "stays owner-gated (genesis-to-cursor anchor backfill/from-genesis "
-             "refold).",
+             "shielded anchor history incomplete below cursor %lld; unknown "
+             "roots hold H*. Condition %.48s seeds an empty frontier or starts "
+             "bounded refold; historical gaps require owner backfill",
              (long long)max_activation,
              SAPLING_ANCHOR_FRONTIER_CONDITION_NAME);
     if (!blocker_init(&rec, UTXO_APPLY_ANCHOR_GAP_BLOCKER_ID,

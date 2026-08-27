@@ -13,9 +13,11 @@
 #include "encoding/utilstrencodings.h"
 #include "json/json.h"
 #include "platform/time_compat.h"
+#include "platform/file_sync.h"
 #include "support/cleanse.h"
 #include "util/safe_alloc.h"
 #include "util/log_macros.h"
+#include "base/text_fit.h"
 #include "util/thread_registry.h"
 
 #include <errno.h>
@@ -510,8 +512,10 @@ static void rf_note_begin(const char *peer_addr, uint16_t port,
     g_status.ever_attempted = true;
     g_status.in_progress = true;
     g_status.last_ok = false;
-    snprintf(g_status.peer, sizeof(g_status.peer), "%s:%u",
-             peer_addr, (unsigned)port);
+    char peer[160];
+    snprintf(peer, sizeof(peer), "%s:%u", peer_addr, (unsigned)port);
+    (void)zcl_text_fit(g_status.peer, sizeof(g_status.peer), peer,
+                       RF_SUBSYS, "status.peer");
     snprintf(g_status.filename, sizeof(g_status.filename), "%s", m->filename);
     g_status.detail[0] = '\0';
     g_status.size_bytes = m->size_bytes;
@@ -538,8 +542,8 @@ static void rf_note_end(bool ok, const char *detail)
     g_status.in_progress = false;
     g_status.last_ok = ok;
     g_status.finished_unix = (int64_t)platform_time_wall_time_t();
-    snprintf(g_status.detail, sizeof(g_status.detail), "%s",
-             detail ? detail : "");
+    (void)zcl_text_fit(g_status.detail, sizeof(g_status.detail), detail,
+                       RF_SUBSYS, "status.detail");
     if (ok) {
         g_status.successes++;
         g_status.bytes_total += g_status.bytes_done;
@@ -720,7 +724,7 @@ bool rom_fetch_download(const char *peer_addr, uint16_t port,
         rf_note_end(false, fail_reason);
         return false;
     }
-    fdatasync(fd);
+    platform_data_sync(fd);
     close(fd);
 
     if (!rf_install_verified(part_path, final_path, &mc, &fail_reason)) {
@@ -916,7 +920,7 @@ bool rom_fetch_download_parallel(const struct rom_fetch_peer *peers,
         return false;
     }
 
-    fdatasync(fd);
+    platform_data_sync(fd);
     close(fd);
 
     const char *why = "";
@@ -1419,7 +1423,7 @@ static void *rf_ver_worker(void *arg)
         /* Durability ordering: fdatasync(.part) → set bit → fdatasync(journal)
          * (rom_journal_mark does the last two). A set bit therefore always
          * implies durable, digest-verified data. */
-        if (fdatasync(j->fd) != 0 || !rom_journal_mark(j->jrnl, i)) {
+        if (platform_data_sync(j->fd) != 0 || !rom_journal_mark(j->jrnl, i)) {
             LOG_WARN(RF_SUBSYS, "ver: durable-mark chunk %u failed errno=%d",
                      i, errno);
             atomic_store(&j->failed, true);
@@ -1651,7 +1655,7 @@ static bool rf_download_verified_core(const struct rom_fetch_peer *peers,
         return false;
     }
 
-    fdatasync(fd);
+    platform_data_sync(fd);
     close(fd);
 
     /* Whole-file content proof stays the final gate before install. */

@@ -12,6 +12,7 @@
  */
 
 #include "platform/time_compat.h"
+#include "platform/barrier.h"
 #include "test/test_core.h"
 #include "services/ibd_throttle.h"
 #include "event/event.h"
@@ -53,7 +54,7 @@ static bool near(double a, double b) { return fabs(a - b) < 1e-6; }
 
 struct it_worker_arg {
     _Atomic bool *done;
-    pthread_barrier_t *barrier;  /* count=2 rendezvous with main */
+    zcl_barrier_t *barrier;  /* count=2 rendezvous with main */
 };
 
 static void *it_acquire_worker(void *a)
@@ -63,7 +64,7 @@ static void *it_acquire_worker(void *a)
      * blocking acquire() loop. Replaces a blind fixed sleep with a
      * deterministic synchronization point so the main thread knows the
      * worker is about to block before it calls ibd_throttle_stop(). */
-    pthread_barrier_wait(w->barrier);
+    zcl_barrier_wait(w->barrier);
     (void)ibd_throttle_acquire();
     atomic_store(w->done, true);
     return NULL;
@@ -288,18 +289,18 @@ int test_ibd_throttle(void)
 
         _Atomic bool done = false;
         pthread_t th;
-        pthread_barrier_t barrier;
-        pthread_barrier_init(&barrier, NULL, 2);
+        zcl_barrier_t barrier;
+        zcl_barrier_init(&barrier, 2);
         struct it_worker_arg arg = { .done = &done, .barrier = &barrier };
         pthread_create(&th, NULL, it_acquire_worker, &arg);
         /* Deterministically rendezvous with the worker right before it
          * enters the blocking acquire() loop (replaces a fixed 5ms
          * nanosleep guess). After the barrier the worker is about to
          * block on a drained bucket; stop() must unstick it. */
-        pthread_barrier_wait(&barrier);
+        zcl_barrier_wait(&barrier);
         ibd_throttle_stop();
         pthread_join(th, NULL);
-        pthread_barrier_destroy(&barrier);
+        zcl_barrier_destroy(&barrier);
         IT_CHECK("it: stop while blocked releases the waiter",
                  atomic_load(&done) == true);
     }

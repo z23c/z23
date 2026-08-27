@@ -31,6 +31,15 @@
  *     in-memory image against what currently sits on disk (see
  *     services/binary_staleness_service.h for the concrete consumer).
  *
+ * Darwin implementation:
+ *   - process memory and start time: proc_pid_rusage/proc_pidinfo; virtual
+ *     size: Mach task_info; total RAM: sysctl hw.memsize.
+ *   - executable path and argv: dyld and crt_externs APIs. Opening the image
+ *     uses the resolved path because Darwin has no /proc-held executable
+ *     inode; callers must revalidate identity when pathname replacement is a
+ *     security boundary.
+ *   - cgroup fields and available-system-memory remain -1 (unavailable).
+ *
  * FreeBSD mapping (header comments only — no FreeBSD build in this repo,
  * see docs/work/os-substrate-plan.md §2 "FreeBSD mapping"):
  *   - rss_bytes/vsize_bytes/uptime: kinfo_getproc() (libutil) returns
@@ -70,8 +79,7 @@
 extern "C" {
 #endif
 
-/* Fields are -1 when unreadable (missing /proc entry, no cgroup v2, "max"
- * == unlimited, etc). */
+/* Fields are -1 when unreadable or unavailable on the host. */
 struct os_proc_mem {
     int64_t rss_bytes;         /* VmRSS */
     int64_t vsize_bytes;       /* VmSize */
@@ -83,7 +91,7 @@ struct os_proc_mem {
 };
 
 /* Fill `out` with a fresh process/host memory snapshot. Returns true if at
- * least VmRSS was read; other fields are independently -1 on their own
+ * least the resident set was read; other fields are independently -1 on their own
  * failure without failing the whole call. When a test override is
  * installed, returns a copy of it and always true. */
 bool os_proc_mem_read(struct os_proc_mem *out);
@@ -93,7 +101,7 @@ bool os_proc_mem_read(struct os_proc_mem *out);
 int64_t os_proc_uptime_seconds(void);
 
 /* Resolve this process's own executable path into `buf` (NUL-terminated,
- * truncated to fit `n`). Linux: readlink /proc/self/exe. Note this is the
+ * with failure if it does not fit `n`). Linux: readlink /proc/self/exe. Note this is the
  * PATHNAME only — on Linux a `readlink` result whose original dentry was
  * replaced by a create-new-file-at-same-name deploy gets a trailing
  * " (deleted)" suffix from the kernel; callers that need the real
@@ -101,19 +109,13 @@ int64_t os_proc_uptime_seconds(void);
  * themselves. */
 bool os_proc_exe_path(char *buf, size_t n);
 
-/* Open this process's own RUNNING executable image for reading via the
- * magic "/proc/self/exe" self-reference — see the header block above for
- * why this differs from opening the resolved pathname. Caller owns the
- * returned FILE* and must fclose() it. Returns NULL on failure (e.g.
- * /proc unavailable — non-Linux or a sandboxed environment without
- * /proc). */
+/* Open the executable image for reading. Linux holds the running inode via
+ * /proc/self/exe; Darwin opens the dyld-resolved pathname. Caller owns the
+ * returned FILE* and must fclose() it. */
 FILE *os_proc_open_self_exe(void);
 
-/* True iff this process's command line (/proc/self/cmdline, NUL-separated
- * argv) contains `token` as a WHOLE argument (exact match, never a substring
- * of a longer flag or value). Returns false on any read failure or non-Linux
- * environment. Lets a subsystem honor its own boolean CLI flag without
- * threading argv through the boot/argv loop. */
+/* True iff this process's command line contains `token` as a WHOLE argument
+ * (exact match, never a substring). */
 bool os_proc_cmdline_has_token(const char *token);
 
 /* Resolve this process's cgroup v2 directory (e.g.

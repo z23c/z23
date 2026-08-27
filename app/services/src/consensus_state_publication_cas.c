@@ -14,6 +14,7 @@
 #include "crypto/sha3.h"
 #include "framework/condition.h"
 #include "json/json.h"
+#include "platform/file_sync.h"
 #include "storage/progress_store.h"
 #include "util/log_macros.h"
 #include "validation/main_state.h"
@@ -547,9 +548,9 @@ static struct zcl_result persist_record(
         g_after_temp_open_hook(record, g_after_temp_open_hook_ctx);
 #endif
     bool ok = write_all(fd, wire, sizeof(wire));
-    if (ok && fdatasync(fd) != 0) {
+    if (ok && platform_data_sync(fd) != 0) {
         ok = false;
-        LOG_WARN(CAS_SUBSYS, "fdatasync temp failed: %s", strerror(errno));
+        LOG_WARN(CAS_SUBSYS, "data sync temp failed: %s", strerror(errno));
     }
     if (close(fd) != 0) {
         ok = false;

@@ -15,8 +15,12 @@
 #include "test/test_core.h"
 #include "util/thread_qos.h"
 
+#if defined(__APPLE__)
+#include <sys/qos.h>
+#else
 #include <sched.h>
 #include <sys/syscall.h>
+#endif
 #include <unistd.h>
 #include <pthread.h>
 #include <errno.h>
@@ -29,6 +33,40 @@
 #endif
 #define TQ_IOPRIO_CLASS_SHIFT 13
 #define TQ_IOPRIO_CLASS(value) ((value) >> TQ_IOPRIO_CLASS_SHIFT)
+
+#if defined(__APPLE__)
+
+struct tq_apple_result {
+    bool call_ok;
+    qos_class_t qos_class;
+};
+
+static void *tq_apple_worker(void *arg)
+{
+    struct tq_apple_result *result = arg;
+    result->call_ok = zcl_thread_qos_background();
+    int relative_priority = 0;
+    (void)pthread_get_qos_class_np(pthread_self(), &result->qos_class,
+                                   &relative_priority);
+    return NULL;
+}
+
+static int t_thread_qos_applies_sched_batch_and_ioprio_idle(void)
+{
+    int failures = 0;
+    TEST("thread_qos: background QoS lands QOS_CLASS_BACKGROUND on macOS") {
+        struct tq_apple_result applied = {0};
+        pthread_t thread;
+        ASSERT_EQ(pthread_create(&thread, NULL, tq_apple_worker, &applied), 0);
+        ASSERT_EQ(pthread_join(thread, NULL), 0);
+        ASSERT(applied.call_ok);
+        ASSERT_EQ(applied.qos_class, QOS_CLASS_BACKGROUND);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+#else
 
 struct tq_worker_result {
     bool  qos_call_ok;
@@ -118,6 +156,8 @@ static int t_thread_qos_applies_sched_batch_and_ioprio_idle(void)
 
     return failures;
 }
+
+#endif
 
 /* Idempotency: calling the helper twice from the same thread must not
  * error or change the outcome. */

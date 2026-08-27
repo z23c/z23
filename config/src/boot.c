@@ -152,7 +152,9 @@
 #include <signal.h>
 #include <time.h>
 #include <pthread.h>
+#if defined(__GLIBC__)
 #include <malloc.h>
+#endif
 #include <limits.h>
 #include <sqlite3.h>
 
@@ -1171,7 +1173,7 @@ static struct zcl_result sr_confine_enter(const struct app_context *actx)
          * process down already, so reaching here means an earlier builder
          * (no_new_privs/Landlock) failed cleanly and nothing partial is live. */
         struct blocker_record br;
-        char reason[BLOCKER_REASON_MAX];
+        char reason[512];
         snprintf(reason, sizeof(reason),
                  "os_sandbox_enter(%s) failed code=%d %s; running "
                  "UNCONFINED (operator must widen the allow-list / enable "

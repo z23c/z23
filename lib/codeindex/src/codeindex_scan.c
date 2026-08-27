@@ -28,6 +28,7 @@
 #include "codeindex_priv.h"
 
 #include "util/log_macros.h"
+#include "base/text_fit.h"
 #include "util/safe_alloc.h"
 
 #include <ctype.h>
@@ -312,7 +313,7 @@ static void ci_file_purpose(const struct scan_ctx *c, char out[160])
             if (strncasecmp(line, "purpose:", 8) == 0) {
                 const char *p = line + 8;
                 while (*p == ' ' || *p == '\t') p++;
-                snprintf(out, 160, "%s", p);
+                (void)zcl_text_fit(out, 160, p, "codeindex", "file_purpose");
                 return;
             }
             if (purpose_line_is_license(line)) { i = j + 1; continue; }
@@ -329,7 +330,7 @@ static void ci_file_purpose(const struct scan_ctx *c, char out[160])
                     p += 1; while (*p == ' ') p++; desc = p;
                 }
             }
-            snprintf(out, 160, "%s", desc);
+            (void)zcl_text_fit(out, 160, desc, "codeindex", "file_purpose");
             return;
         }
         i = j + 1;

@@ -118,6 +118,9 @@ static bool zac_capture_file(
     struct vcs_zcode_agent_context_entry_v1 *entry, size_t byte_budget,
     bool *truncated)
 {
+    size_t selected_path_len = strlen(selected->path);
+    if (selected_path_len >= sizeof(entry->path))
+        return false;
     int fd = openat(root_fd, selected->path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     struct stat st;
     if (fd < 0 || fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
@@ -155,7 +158,7 @@ static bool zac_capture_file(
     }
     close(fd);
     if (copied != take) { free(inspect); free(entry->content); return false; }
-    (void)snprintf(entry->path, sizeof(entry->path), "%s", selected->path);
+    memcpy(entry->path, selected->path, selected_path_len + 1);
     entry->start_line = zac_line_at(inspect, start);
     entry->full_file_bytes = (uint64_t)st.st_size;
     entry->content_len = take;

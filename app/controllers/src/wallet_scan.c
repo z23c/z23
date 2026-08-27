@@ -268,8 +268,11 @@ int wallet_scan_blocks(struct node_db *ndb,
     int num_files = 0;
     uint64_t cur_sizes[WSCAN_MAX_FILES];
     for (int f = 0; f < WSCAN_MAX_FILES; f++) {
-        char path[512];
-        snprintf(path, sizeof(path), "%s/blocks/blk%05d.dat", datadir, f);
+        char path[2080];
+        int written = snprintf(path, sizeof(path),
+                               "%s/blocks/blk%05d.dat", datadir, f);
+        if (written < 0 || (size_t)written >= sizeof(path))
+            break;
         struct stat fst;
         if (stat(path, &fst) != 0 || !S_ISREG(fst.st_mode)) break;
         cur_sizes[f] = (uint64_t)fst.st_size;

@@ -129,7 +129,10 @@ char *boot_autodetect_consensus_bundle(const char *datadir)
         else
             take = strcmp(nm, best_name) > 0;
         if (take) {
-            snprintf(best_name, sizeof(best_name), "%s", nm);
+            size_t name_len = strlen(nm);
+            if (name_len >= sizeof(best_name))
+                continue;
+            memcpy(best_name, nm, name_len + 1);
             best_h = h;
         }
     }

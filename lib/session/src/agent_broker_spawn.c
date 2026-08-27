@@ -36,6 +36,18 @@
 
 /* ── spawning the confined child ────────────────────────────────────────── */
 
+#if !defined(__linux__)
+bool agent_broker_spawn_confined(const struct agent_spawn_request *req,
+                                 struct agent_spawn_result *result)
+{
+    (void)req;
+    if (result)
+        memset(result, 0, sizeof(*result));
+    errno = ENOTSUP;
+    return false;
+}
+#else
+
 /* Stage-1 seccomp: the confined agent's allow-set PLUS exactly what a fresh
  * program start needs to reach main(). It is wider than stage 2 only in that
  * it permits the ONE execve this path performs and the loader/startup syscalls
@@ -230,4 +242,4 @@ bool agent_broker_spawn_confined(const struct agent_spawn_request *req,
     result->sock = sv[0];
     return true;
 }
-
+#endif

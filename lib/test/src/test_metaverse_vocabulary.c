@@ -398,8 +398,8 @@ static int check_round_trip_is_byte_identical(void)
 
     static const char *const params[] = {
         "", "a",
-        "abcdefghij0123456789.-_ABCDEFGHIJ0123456789.-_abcdefghij0123456789"
-        ".-_ABCDEFGHIJ0123456789.-_abcd",              /* exactly 96 bytes */
+        ("abcdefghij0123456789.-_ABCDEFGHIJ0123456789.-_abcdefghij0123456789"
+         ".-_ABCDEFGHIJ0123456789.-_abcd"),             /* exactly 96 bytes */
     };
     _Static_assert(sizeof(
         "abcdefghij0123456789.-_ABCDEFGHIJ0123456789.-_abcdefghij0123456789"

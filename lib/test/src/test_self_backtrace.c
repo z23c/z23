@@ -11,6 +11,7 @@
 #include "util/thread_registry.h"
 #include "util/util.h"          /* SetDataDir */
 
+#include <errno.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdatomic.h>
@@ -20,6 +21,22 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+
+#if !defined(__linux__)
+
+int test_self_backtrace(void)
+{
+    char path[32] = {0};
+    errno = 0;
+    bool install_ok = self_backtrace_install();
+    int dumped = self_backtrace_dump_all(path, sizeof(path));
+    printf("\n=== self_backtrace platform availability ===\n");
+    printf("self_backtrace: signal-driven dump unavailable on this host\n");
+    return install_ok && dumped == -1 && errno == ENOTSUP && path[0] == 0
+        ? 0 : 1;
+}
+
+#else
 
 /* Ordinary worker: polls a stop flag, responds normally to SIGRTMIN+2. */
 static void *bt_worker(void *arg)
@@ -203,3 +220,5 @@ int test_self_backtrace(void)
     failures += t_blocked_thread_bounded();
     return failures;
 }
+
+#endif

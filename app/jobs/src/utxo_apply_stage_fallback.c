@@ -142,11 +142,9 @@ void utxo_apply_select_idle_note(int height,
     if (ua_select_idle_reason_is_anomaly(reason)) {
         char reason_buf[BLOCKER_REASON_MAX];
         snprintf(reason_buf, sizeof(reason_buf),
-                 "height=%d reason=%s: the apply candidate could not be "
-                 "selected because the block map / durable-or-visible parent / "
-                 "on-disk body disagrees with the ok-bound height-keyed "
-                 "verdict (a REAL anomaly, not window lag); utxo_apply holds "
-                 "its cursor below this height until the disagreement resolves",
+                 "height=%d reason=%.64s: block map, parent visibility, body, "
+                 "or height verdict disagree; utxo_apply holds below this "
+                 "height until the anomaly resolves",
                  height, utxo_apply_select_idle_reason_name(reason));
         struct blocker_record rec;
         if (blocker_init(&rec, UA_APPLY_ANOMALY_BLOCKER_ID, "utxo_apply",

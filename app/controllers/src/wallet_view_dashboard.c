@@ -93,7 +93,7 @@ size_t serve_dashboard(uint8_t *r, size_t max) {
     const char *pct_color = pct == 100 ? "#34d399" :
                             pct >= 50  ? "#a78bfa" :
                             pct > 0    ? "#fbbf24" : "#f87171";
-    char pct_str[8];
+    char pct_str[12];
     snprintf(pct_str, sizeof(pct_str), "%d", pct);
 
     /* Breakdown text — contextual based on privacy state */

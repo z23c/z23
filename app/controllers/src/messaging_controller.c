@@ -424,8 +424,13 @@ static bool rpc_msg_send_named(const struct json_value *params, bool help,
     msg.channel = ZMSG_CHANNEL_P2P;
     msg.timestamp = (int64_t)platform_time_wall_time_t();
     snprintf(msg.sender, sizeof(msg.sender), "self");
-    snprintf(msg.recipient, sizeof(msg.recipient), "%s (%s)",
-             name, entry.target_value);
+    int recipient_len = snprintf(msg.recipient, sizeof(msg.recipient),
+                                 "%s (%s)", name, entry.target_value);
+    if (recipient_len < 0 ||
+        (size_t)recipient_len >= sizeof(msg.recipient)) {
+        json_set_str(result, "Resolved recipient identity is too long");
+        return false;
+    }
     snprintf(msg.body, sizeof(msg.body), "%s", body);
     zmsg_compute_id(&msg, msg.msg_id);
 

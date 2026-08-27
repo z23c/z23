@@ -1,3 +1,5 @@
+<!-- Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. -->
+
 <p align="center">
   <img src="docs/assets/z23-banner.svg" alt="Z23 — software made for you, not imposed on you" width="100%">
 </p>
@@ -47,7 +49,7 @@ authority over your own machine remain.
 ```bash
 git clone https://github.com/z23c/z23
 cd z23
-make -j"$(nproc)"
+make -j"$(getconf _NPROCESSORS_ONLN)"
 make commons-demo        # (optional first: make setup — arms git hooks + LSP config)
 ```
 

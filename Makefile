@@ -16,8 +16,36 @@ export ZCL_VENDOR_OFFLINE
 export ZCL_USE_CCACHE
 endif
 
+ZCL_HOST_OS := $(shell uname -s 2>/dev/null)
+ifeq ($(ZCL_HOST_OS),Darwin)
+CC = clang
+CXX = clang++
+ZCL_PLATFORM_CPPFLAGS = -D_DARWIN_C_SOURCE \
+	-Dst_atim=st_atimespec -Dst_mtim=st_mtimespec \
+	-Dst_ctim=st_ctimespec -fblocks
+ZCL_LTO_FLAG = -flto=thin
+ZCL_PLATFORM_NODE_LIBS = -framework Cocoa -framework CoreGraphics \
+	-framework QuartzCore -framework CoreVideo \
+	-Wl,-U,_dynhost_client_fetch -Wl,-U,_dynhost_get_global_service \
+	-Wl,-U,_dynhost_stream_close -Wl,-U,_dynhost_stream_open \
+	-Wl,-U,_dynhost_stream_write -Wl,-U,_ed25519_secret_key_from_seed \
+	-Wl,-U,_hs_parse_address -Wl,-U,_hs_service_add_ephemeral \
+	-Wl,-U,_hs_service_find -Wl,-U,_smartlist_add \
+	-Wl,-U,_smartlist_free_ -Wl,-U,_smartlist_new \
+	-Wl,-U,_tor_free_ -Wl,-U,_tor_malloc_zero_
+ZCL_CXX_RUNTIME_LIB = -lc++
+ZCL_WARN_MAYBE_UNINITIALIZED =
+ZCL_TEST_STACK_SETUP = :
+else
 CC = cc
 CXX ?= c++
+ZCL_PLATFORM_CPPFLAGS =
+ZCL_LTO_FLAG = -flto=auto
+ZCL_PLATFORM_NODE_LIBS =
+ZCL_CXX_RUNTIME_LIB = -lstdc++
+ZCL_WARN_MAYBE_UNINITIALIZED = -Wno-maybe-uninitialized
+ZCL_TEST_STACK_SETUP = ulimit -s unlimited
+endif
 ZCL_USE_CCACHE ?= 1
 # The compile cache ships in-tree (tools/zcc.c). Prefer it over any installed
 # sccache/ccache so every developer gets the same fast rebuilds with nothing
@@ -98,7 +126,8 @@ ZCL_PORTABLE_FRONTDOOR_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip \
 # restart, the boundary recipe must also drop this session's cached capture:
 # the pre-boundary parse may already have memoized a record that cannot see
 # the inputs this boundary establishes.
-NODE_VENDOR_ARCHIVES = libsecp256k1.a libcrypto.a libssl.a libevent.a \
+NODE_SECP_ARCHIVE = $(if $(filter Darwin,$(ZCL_HOST_OS)),vendor/lib/libsecp256k1-darwin.a,vendor/lib/libsecp256k1.a)
+NODE_VENDOR_ARCHIVES = $(notdir $(NODE_SECP_ARCHIVE)) libcrypto.a libssl.a libevent.a \
 	libevent_openssl.a libevent_pthreads.a libsqlite3.a libz.a libtor_stub.a
 # A focused `make z23` (or legacy `make zclassic23`) needs no C++ toolchain.
 # Test/dev builds retain LevelDB strictly as a differential oracle.
@@ -178,7 +207,7 @@ endif
 # cache in tools/dev/source-identity.sh.
 BUILD_EPOCH_CLEAN_ONLY := $(if $(ZCL_STANDALONE_CLEAN)$(ZCL_HOTSWAP_LOOP_ONLY),1,)
 BUILD_INVOCATION_PID := $(if $(BUILD_EPOCH_CLEAN_ONLY),0,$(strip $(shell printf '%s' $$PPID)))
-BUILD_INVOCATION_START := $(if $(BUILD_EPOCH_CLEAN_ONLY),0,$(strip $(shell awk '{print $$22}' /proc/$(BUILD_INVOCATION_PID)/stat 2>/dev/null)))
+BUILD_INVOCATION_START := $(if $(BUILD_EPOCH_CLEAN_ONLY),0,$(strip $(shell tools/dev/process-start-token.sh '$(BUILD_INVOCATION_PID)' 2>/dev/null)))
 BUILD_INVOCATION_ID := $(if $(BUILD_EPOCH_CLEAN_ONLY),clean,$(strip $(shell printf '%s\0%s' '$(BUILD_INVOCATION_PID)' '$(BUILD_INVOCATION_START)' | sha256sum | awk '{print $$1}')))
 ZCL_SOURCE_IDENTITY_SESSION := $(BUILD_INVOCATION_PID):$(BUILD_INVOCATION_START)
 
@@ -388,6 +417,13 @@ endif
 LIB_INCLUDES = $(foreach m,$(LIB_MODULES),-Ilib/$(m)/include)
 LIB_SRCS = $(call zcl_filter_ephemeral_sources,\
 	$(foreach m,$(LIB_MODULES),$(wildcard lib/$(m)/src/*.c)))
+ifeq ($(ZCL_HOST_OS),Linux)
+LIB_SRCS := $(filter-out lib/platform/src/os_sandbox_stub.c \
+	lib/util/src/self_backtrace_stub.c,$(LIB_SRCS))
+else
+LIB_SRCS := $(filter-out lib/platform/src/os_sandbox_linux.c \
+	lib/util/src/self_backtrace.c,$(LIB_SRCS))
+endif
 
 # Ports layer (Clean Architecture / Hexagonal interface headers).
 # Headers only — adapters that implement these interfaces live elsewhere.
@@ -526,8 +562,17 @@ endif
 #   -fPIE / -pie              position-independent executable (ASLR)
 #   -Wl,-z,relro -Wl,-z,now   full RELRO (GOT mapped read-only after binding)
 #   -Wl,-z,noexecstack        non-executable stack (NX)
+ifeq ($(ZCL_HOST_OS),Darwin)
+HARDEN_CFLAGS = -fstack-protector-strong -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2 -fPIE
+HARDEN_LDFLAGS =
+ZCL_ARCH_CFLAGS = -march=native
+ZCL_DLOPEN_LIB =
+else
 HARDEN_CFLAGS = -fstack-protector-strong -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2 -fcf-protection=full -fPIE
 HARDEN_LDFLAGS = -pie -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -fcf-protection=full
+ZCL_ARCH_CFLAGS = $(if $(ZCL_NATIVE),-march=native,-march=x86-64-v3)
+ZCL_DLOPEN_LIB = -ldl
+endif
 BUILD_IDENTITY_CPPFLAGS = -DZCL_BUILD_SOURCE_ID=\"$(BUILD_SOURCE_ID)\" -DZCL_BUILD_CLEAN=$(BUILD_CLEAN)
 # The ABA mutation token contains host-local inode/time metadata and therefore
 # MUST NOT enter the reproducible sovereign/release binary. Dev/test artifacts
@@ -573,7 +618,11 @@ DEV_SOURCE_RECEIPT_CPPFLAGS = -DZCL_BUILD_SOURCE_MUTATION=\"$(BUILD_MUTATION)\"
 # DW_AT_name entries stay relative and the line program is unchanged; only the
 # (already-unresolvable-post-deploy) comp_dir source-root hint moves.
 ZCL_REPRO_ROOT ?= /zclassic23
+ifeq ($(ZCL_HOST_OS),Darwin)
+REPRO_CFLAGS = -ffile-prefix-map=$(CURDIR)=$(ZCL_REPRO_ROOT)
+else
 REPRO_CFLAGS = -ffile-prefix-map=$(CURDIR)=$(ZCL_REPRO_ROOT) -gno-record-gcc-switches
+endif
 
 # ── Per-TU random seed (object-level determinism) ─────────────────────────
 # GCC derives its default random seed from the OUTPUT file name. Every object
@@ -603,7 +652,7 @@ REPRO_CFLAGS = -ffile-prefix-map=$(CURDIR)=$(ZCL_REPRO_ROOT) -gno-record-gcc-swi
 # is unaffected — that IR is consumed at link time and never reaches the
 # output — and `make repro-build` proves exactly that.
 # check-tu-random-seed keeps every per-TU object recipe carrying this.
-ZCL_TU_RANDOM_SEED = -frandom-seed=$<
+ZCL_TU_RANDOM_SEED = $(if $(filter Darwin,$(ZCL_HOST_OS)),,-frandom-seed=$<)
 
 # ── The two blanket warning suppressions, each defined exactly ONCE ───────
 # Both arrived in the first commit as unexplained copy-forward defaults and
@@ -644,7 +693,7 @@ ZCL_WARN_UNUSED_RESULT = -Wno-unused-result
 # report zero and mislead you. Re-derive with the same substitution as above,
 # using -Wno-error=stringop-overflow, and a FULL `make -j$(nproc)`.
 # suppression-ok: separate decision from the unused-result deletion; blockers are source sites, measured, not assumed
-ZCL_WARN_STRINGOP_OVERFLOW = -Wno-stringop-overflow
+ZCL_WARN_STRINGOP_OVERFLOW = $(if $(filter Darwin,$(ZCL_HOST_OS)),,-Wno-stringop-overflow)
 
 # ── Warning gates BEYOND -Wall -Wextra -pedantic ────────────────────────────
 #
@@ -703,32 +752,38 @@ ZCL_WARN_STRINGOP_OVERFLOW = -Wno-stringop-overflow
 # at these flags minus -Werror, once plain and once with -DZCL_TESTING.
 # Confirm the rig is armed before believing a zero: a deliberately bogus
 # -Wnot-a-real-flag must report one error per TU.
+ifeq ($(ZCL_HOST_OS),Darwin)
+ZCL_WARN_EXTRA_GATES = \
+	-Wundef -Wstrict-prototypes -Wdouble-promotion \
+	-Wshift-overflow -Walloca -Wvla
+else
 ZCL_WARN_EXTRA_GATES = \
 	-Wundef -Wstrict-prototypes -Wdouble-promotion \
 	-Wduplicated-cond -Wduplicated-branches \
 	-Wshift-overflow=2 -Wattribute-alias=2 \
 	-Walloca -Wvla -Wtrampolines \
 	-Wflex-array-member-not-at-end
+endif
 
-CFLAGS = -std=c23 -g -O3 $(if $(ZCL_NATIVE),-march=native,-march=x86-64-v3) -flto=auto -Wall -Wextra -Werror -pedantic \
+CFLAGS = -std=c23 -g -O3 $(ZCL_ARCH_CFLAGS) $(ZCL_LTO_FLAG) -Wall -Wextra -Werror -pedantic \
 	$(REPRO_CFLAGS) \
 	$(HARDEN_CFLAGS) \
 	$(ZCL_WARN_EXTRA_GATES) \
 	$(ZCL_WARN_STRINGOP_OVERFLOW) $(ZCL_WARN_UNUSED_RESULT) \
 	$(APP_INCLUDES) $(CONFIG_INCLUDES) $(LIB_INCLUDES) $(CORE_INCLUDES) $(PORTS_INCLUDES) $(DOMAIN_INCLUDES) $(APPLICATION_INCLUDES) $(ADAPTERS_INCLUDES) $(TOOLS_INCLUDES) $(DEVLOOP_INCLUDES) \
 	-Ilib/test/include \
-	-D_POSIX_C_SOURCE=200809L -DZCL_AR_ENFORCE $(BUILD_IDENTITY_CPPFLAGS) -Ivendor/include -Ivendor/x11/include $(GTK_DEF) $(GTK_CFLAGS) \
+	-D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -DZCL_AR_ENFORCE $(BUILD_IDENTITY_CPPFLAGS) -Ivendor/include -Ivendor/x11/include $(GTK_DEF) $(GTK_CFLAGS) \
 	$(WEBKIT_DEF) $(WEBKIT_CFLAGS)
-LDFLAGS = -pthread -flto=auto -rdynamic $(HARDEN_LDFLAGS)
+LDFLAGS = -pthread $(ZCL_LTO_FLAG) $(if $(filter Darwin,$(ZCL_HOST_OS)),,-rdynamic) $(HARDEN_LDFLAGS)
 CACHED_CFLAGS = $(filter-out -DZCL_BUILD_SOURCE_ID=% -DZCL_BUILD_CLEAN=%,$(CFLAGS))
 BUILD_ONLY_CFLAGS = $(CACHED_CFLAGS) -Wno-deprecated-declarations
 ZCL_DEV_OPT ?= -Og
 ZCL_DEV_HOT_OPT ?= -O2
 ZCL_DEV_LINKER ?= $(shell tools/dev/dev-linker-select.sh)
-DEV_CFLAGS = $(filter-out -O3 -flto=auto -Werror,$(CACHED_CFLAGS)) $(ZCL_DEV_OPT) -g3 -DZCL_DEV_BUILD \
-	-Wno-deprecated-declarations -Wno-format-truncation -Wno-maybe-uninitialized
+DEV_CFLAGS = $(filter-out -O3 $(ZCL_LTO_FLAG) -Werror,$(CACHED_CFLAGS)) $(ZCL_DEV_OPT) -g3 -DZCL_DEV_BUILD \
+	-Wno-deprecated-declarations -Wno-format-truncation $(ZCL_WARN_MAYBE_UNINITIALIZED)
 DEV_HOT_CFLAGS = $(filter-out $(ZCL_DEV_OPT),$(DEV_CFLAGS)) $(ZCL_DEV_HOT_OPT)
-DEV_LDFLAGS = $(filter-out -flto=auto,$(LDFLAGS)) $(ZCL_DEV_LINKER)
+DEV_LDFLAGS = $(filter-out $(ZCL_LTO_FLAG),$(LDFLAGS)) $(ZCL_DEV_LINKER)
 
 # Explicit save-to-release profiles.  Live modules, incremental restarts, and
 # static integration are non-LTO by contract; only RELEASE retains the
@@ -766,10 +821,10 @@ override ASAN_ADX_FRAME_POINTER_EXCEPTION_FLAGS := -fomit-frame-pointer
 # linker) plus ASan+UBSan. Uniform optimization for every TU — no DEV_HOT
 # split — because sanitizer signal fidelity matters more here than
 # optimizer-sensitivity coverage.
-DEV_ASAN_CFLAGS = $(filter-out -O3 -flto=auto -Werror,$(CACHED_CFLAGS)) $(ZCL_DEV_OPT) -g3 -DZCL_DEV_BUILD \
+DEV_ASAN_CFLAGS = $(filter-out -O3 $(ZCL_LTO_FLAG) -Werror,$(CACHED_CFLAGS)) $(ZCL_DEV_OPT) -g3 -DZCL_DEV_BUILD \
 	$(ASAN_COMMON_SAN_FLAGS) \
-	-Wno-deprecated-declarations -Wno-format-truncation -Wno-maybe-uninitialized
-DEV_ASAN_LDFLAGS = $(filter-out -flto=auto,$(LDFLAGS)) $(ZCL_DEV_LINKER) $(ASAN_COMMON_SAN_FLAGS)
+	-Wno-deprecated-declarations -Wno-format-truncation $(ZCL_WARN_MAYBE_UNINITIALIZED)
+DEV_ASAN_LDFLAGS = $(filter-out $(ZCL_LTO_FLAG),$(LDFLAGS)) $(ZCL_DEV_LINKER) $(ASAN_COMMON_SAN_FLAGS)
 
 # Sanitizer flags shared by the two opt-in TSan profiles (t-tsan, dev-tsan).
 # Same containment posture as ASAN_COMMON_SAN_FLAGS: referenced ONLY by the
@@ -785,10 +840,10 @@ TSAN_COMMON_SAN_FLAGS = -fsanitize=thread -fno-omit-frame-pointer
 # per-TU PCs and stacks, whole-program LTO inlining degrades exactly that
 # attribution, and -fsanitize=thread under -flto=auto is a far less-traveled
 # gcc path than the strict harness's own established non-LTO posture.
-DEV_TSAN_CFLAGS = $(filter-out -O3 -flto=auto -Werror,$(CACHED_CFLAGS)) $(ZCL_DEV_OPT) -g3 -DZCL_DEV_BUILD \
+DEV_TSAN_CFLAGS = $(filter-out -O3 $(ZCL_LTO_FLAG) -Werror,$(CACHED_CFLAGS)) $(ZCL_DEV_OPT) -g3 -DZCL_DEV_BUILD \
 	$(TSAN_COMMON_SAN_FLAGS) \
-	-Wno-deprecated-declarations -Wno-format-truncation -Wno-maybe-uninitialized
-DEV_TSAN_LDFLAGS = $(filter-out -flto=auto,$(LDFLAGS)) $(ZCL_DEV_LINKER) $(TSAN_COMMON_SAN_FLAGS)
+	-Wno-deprecated-declarations -Wno-format-truncation $(ZCL_WARN_MAYBE_UNINITIALIZED)
+DEV_TSAN_LDFLAGS = $(filter-out $(ZCL_LTO_FLAG),$(LDFLAGS)) $(ZCL_DEV_LINKER) $(TSAN_COMMON_SAN_FLAGS)
 
 # Use vendor/tor/libtor.a when Tor is built from source.
 # Tor: use full Tor if built, otherwise fall back to stub.
@@ -796,7 +851,7 @@ TOR_FULL = $(wildcard vendor/tor/libtor.a \
 	vendor/tor/src/ext/ed25519/donna/libed25519_donna.a \
 	vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a \
 	vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a)
-TOR_LIBS = $(if $(TOR_FULL),$(TOR_FULL),-Lvendor/lib -ltor_stub)
+TOR_LIBS = $(if $(filter Darwin,$(ZCL_HOST_OS)),-Lvendor/lib -ltor_stub,$(if $(TOR_FULL),$(TOR_FULL),-Lvendor/lib -ltor_stub))
 # All dependencies bundled in vendor/lib as static archives.
 # Zero system library requirements beyond libc.
 # OpenSSL 3.0 (Apache 2.0), libevent and zlib are vendored and statically
@@ -811,21 +866,23 @@ CXX_STDLIB_FILE := $(shell $(CXX) -print-file-name=libstdc++.a 2>/dev/null)
 endif
 CXX_STDLIB_DIR := $(if $(filter /%,$(CXX_STDLIB_FILE)),$(dir $(CXX_STDLIB_FILE)),)
 CXX_STDLIB_LDFLAGS := $(if $(CXX_STDLIB_DIR),-L$(CXX_STDLIB_DIR),)
-LIBS = -Lvendor/lib -lsecp256k1 -lleveldb \
-	$(CXX_STDLIB_LDFLAGS) -lstdc++ -lsqlite3 \
+LIBS = $(NODE_SECP_ARCHIVE) -Lvendor/lib -lleveldb \
+	$(CXX_STDLIB_LDFLAGS) $(ZCL_CXX_RUNTIME_LIB) -lsqlite3 \
 	-levent -levent_openssl -levent_pthreads \
-	-lssl -lcrypto -lz -ldl -lpthread -lm
+	-lssl -lcrypto -lz $(ZCL_DLOPEN_LIB) -lpthread -lm \
+	$(ZCL_PLATFORM_NODE_LIBS)
 
 # The shipped node is a C23 artifact. It never links the optional GTK/WebKit
 # presentation stack, the C++ LevelDB oracle, or libstdc++. Legacy LevelDB
 # bootstrap reads use the in-tree C23
 # reader; every other third-party input is an exact pinned static archive.
 NODE_C23_CFLAGS = $(CFLAGS) -DZCL_C23_NODE -UHAVE_GTK -UHAVE_WEBKIT
-NODE_C23_TOR_LIBS = $(if $(TOR_FULL),$(TOR_FULL),vendor/lib/libtor_stub.a)
-NODE_C23_LIBS = vendor/lib/libsecp256k1.a vendor/lib/libsqlite3.a \
+NODE_C23_TOR_LIBS = $(if $(filter Darwin,$(ZCL_HOST_OS)),vendor/lib/libtor_stub.a,$(if $(TOR_FULL),$(TOR_FULL),vendor/lib/libtor_stub.a))
+NODE_C23_LIBS = $(NODE_SECP_ARCHIVE) vendor/lib/libsqlite3.a \
 	vendor/lib/libevent.a vendor/lib/libevent_openssl.a \
 	vendor/lib/libevent_pthreads.a vendor/lib/libssl.a \
-	vendor/lib/libcrypto.a vendor/lib/libz.a -ldl -lpthread -lm
+	vendor/lib/libcrypto.a vendor/lib/libz.a $(ZCL_DLOPEN_LIB) -lpthread -lm \
+	$(ZCL_PLATFORM_NODE_LIBS)
 
 # ── Host-local compile epochs ─────────────────────────────────────────────
 # Source bytes remain the portable authority, but they no longer select the
@@ -1562,9 +1619,9 @@ TEST_SRCS_NO_MAIN = $(filter-out lib/test/src/test.c lib/test/src/test_parallel.
 TEST_FAST_OBJ_ROOT = $(BUILD_DIR)/test-obj
 TEST_PARALLEL_FAST_BIN = $(BIN_DIR)/test_parallel_fast
 TEST_PARALLEL_FAST_SRCS = $(TEST_SRCS_NO_MAIN) lib/test/src/test_parallel.c $(SPEC_SRCS) $(CHAOS_SIM_SRCS) $(ALL_SRCS)
-TEST_FAST_CFLAGS = $(filter-out -O3 -flto=auto -Werror,$(CACHED_CFLAGS)) -O1 -g -DZCL_TESTING \
-	-Wno-deprecated-declarations -Wno-format-truncation -Wno-maybe-uninitialized
-TEST_FAST_LDFLAGS = $(filter-out -flto=auto,$(LDFLAGS)) $(ZCL_DEV_LINKER)
+TEST_FAST_CFLAGS = $(filter-out -O3 $(ZCL_LTO_FLAG) -Werror,$(CACHED_CFLAGS)) -O1 -g -DZCL_TESTING \
+	-Wno-deprecated-declarations -Wno-format-truncation $(ZCL_WARN_MAYBE_UNINITIALIZED)
+TEST_FAST_LDFLAGS = $(filter-out $(ZCL_LTO_FLAG),$(LDFLAGS)) $(ZCL_DEV_LINKER)
 TEST_FAST_EPOCH_COMPILE_FLAGS := $(strip $(TEST_FAST_CFLAGS) deps=-MD,-MP)
 TEST_FAST_EPOCH_LINK_FLAGS := $(strip $(TEST_FAST_LDFLAGS) $(TOR_LIBS) $(LIBS) $(GTK_LIBS) $(WEBKIT_LIBS) cxx=$(CXX))
 ifneq ($(filter test-fast,$(ZCL_EPOCH_PROFILES)),)
@@ -1620,11 +1677,11 @@ TEST_REL_OBJ_ROOT = $(BUILD_DIR)/test-rel-obj
 # Each is a conservative worst-case estimate on intentionally-bounded snprintf /
 # memcpy / guarded locals (verified: the flagged sites are all safe), not a real
 # defect. -Werror and -pedantic remain in force for every other warning.
-TEST_REL_CFLAGS = $(filter-out -flto=auto,$(CACHED_CFLAGS)) -DZCL_TESTING \
+TEST_REL_CFLAGS = $(filter-out $(ZCL_LTO_FLAG),$(CACHED_CFLAGS)) -DZCL_TESTING \
 	-Wno-deprecated-declarations -Wno-format-truncation -Wno-format-overflow \
 	-Wno-array-bounds -Wno-stringop-truncation -Wno-stringop-overread \
-	-Wno-restrict -Wno-nonnull -Wno-maybe-uninitialized
-TEST_REL_LDFLAGS = $(filter-out -flto=auto,$(LDFLAGS))
+	-Wno-restrict -Wno-nonnull $(ZCL_WARN_MAYBE_UNINITIALIZED)
+TEST_REL_LDFLAGS = $(filter-out $(ZCL_LTO_FLAG),$(LDFLAGS))
 INTEGRATION_CFLAGS := $(TEST_REL_CFLAGS)
 INTEGRATION_LDFLAGS := $(TEST_REL_LDFLAGS)
 TEST_REL_EPOCH_COMPILE_FLAGS := $(strip $(TEST_REL_CFLAGS) deps=-MD,-MP)
@@ -1683,10 +1740,10 @@ endif
 TEST_ASAN_OBJ_ROOT = $(BUILD_DIR)/test-asan-obj
 TEST_ASAN_BIN = $(BIN_DIR)/test-asan
 TEST_ASAN_SRCS = $(TEST_PARALLEL_FAST_SRCS)
-TEST_ASAN_CFLAGS = $(filter-out -O3 -flto=auto -Werror,$(CACHED_CFLAGS)) -O1 -g -DZCL_TESTING \
+TEST_ASAN_CFLAGS = $(filter-out -O3 $(ZCL_LTO_FLAG) -Werror,$(CACHED_CFLAGS)) -O1 -g -DZCL_TESTING \
 	$(ASAN_COMMON_SAN_FLAGS) \
-	-Wno-deprecated-declarations -Wno-format-truncation -Wno-maybe-uninitialized
-TEST_ASAN_LDFLAGS = $(filter-out -flto=auto,$(LDFLAGS)) $(ASAN_COMMON_SAN_FLAGS)
+	-Wno-deprecated-declarations -Wno-format-truncation $(ZCL_WARN_MAYBE_UNINITIALIZED)
+TEST_ASAN_LDFLAGS = $(filter-out $(ZCL_LTO_FLAG),$(LDFLAGS)) $(ASAN_COMMON_SAN_FLAGS)
 TEST_ASAN_EPOCH_COMPILE_FLAGS := $(strip $(TEST_ASAN_CFLAGS) \
 	adx-exception=$(ASAN_ADX_FRAME_POINTER_EXCEPTION_SRCS):$(ASAN_ADX_FRAME_POINTER_EXCEPTION_FLAGS) \
 	deps=-MD,-MP)
@@ -1737,10 +1794,10 @@ endif
 TEST_TSAN_OBJ_ROOT = $(BUILD_DIR)/test-tsan-obj
 TEST_TSAN_BIN = $(BIN_DIR)/test-tsan
 TEST_TSAN_SRCS = $(TEST_PARALLEL_FAST_SRCS)
-TEST_TSAN_CFLAGS = $(filter-out -O3 -flto=auto -Werror,$(CACHED_CFLAGS)) -O1 -g -DZCL_TESTING \
+TEST_TSAN_CFLAGS = $(filter-out -O3 $(ZCL_LTO_FLAG) -Werror,$(CACHED_CFLAGS)) -O1 -g -DZCL_TESTING \
 	$(TSAN_COMMON_SAN_FLAGS) \
-	-Wno-deprecated-declarations -Wno-format-truncation -Wno-maybe-uninitialized
-TEST_TSAN_LDFLAGS = $(filter-out -flto=auto,$(LDFLAGS)) $(TSAN_COMMON_SAN_FLAGS)
+	-Wno-deprecated-declarations -Wno-format-truncation $(ZCL_WARN_MAYBE_UNINITIALIZED)
+TEST_TSAN_LDFLAGS = $(filter-out $(ZCL_LTO_FLAG),$(LDFLAGS)) $(TSAN_COMMON_SAN_FLAGS)
 TEST_TSAN_EPOCH_COMPILE_FLAGS := $(strip $(TEST_TSAN_CFLAGS) deps=-MD,-MP)
 TEST_TSAN_EPOCH_LINK_FLAGS := $(strip $(TEST_TSAN_LDFLAGS) $(TOR_LIBS) $(LIBS) $(GTK_LIBS) $(WEBKIT_LIBS) cxx=$(CXX))
 ifneq ($(filter test-tsan,$(ZCL_EPOCH_PROFILES)),)
@@ -2019,7 +2076,7 @@ test-parallel-active:
 	  $(MAKE) --no-print-directory test-parallel-active-locked
 
 test-parallel-active-locked: $(TEST_PARALLEL_REL_CANDIDATE) dev-package-verifier-ensure
-	ulimit -s unlimited && $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE)
+	$(ZCL_TEST_STACK_SETUP) && $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE)
 
 test-parallel-fast-active:
 	@mkdir -p "$(BUILD_DIR)"
@@ -2027,7 +2084,7 @@ test-parallel-fast-active:
 	  $(MAKE) --no-print-directory test-parallel-fast-active-locked
 
 test-parallel-fast-active-locked: $(TEST_PARALLEL_FAST_CANDIDATE) dev-package-verifier-ensure
-	ulimit -s unlimited && $(LINKED_TEST_ENV) $(TEST_PARALLEL_FAST_ACTIVE)
+	$(ZCL_TEST_STACK_SETUP) && $(LINKED_TEST_ENV) $(TEST_PARALLEL_FAST_ACTIVE)
 
 .PHONY: test-parallel
 # Checkout-locked (see CHECKOUT_LOCK above): the make_lint_gates exclusive lane
@@ -2055,7 +2112,7 @@ test-parallel:
 
 .PHONY: test-parallel-locked
 test-parallel-locked: $(TEST_PARALLEL_REL_CANDIDATE) dev-package-verifier-ensure
-	ulimit -s unlimited && $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE) $(TEST_PARALLEL_ARGS)
+	$(ZCL_TEST_STACK_SETUP) && $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE) $(TEST_PARALLEL_ARGS)
 
 # ── prove-cold-join — the one command a stranger can run ─────────────────
 #
@@ -2087,7 +2144,7 @@ prove-cold-join: $(TEST_PARALLEL_REL_CANDIDATE)
 	 log="$(BUILD_DIR)/prove-cold-join.log"; \
 	 mkdir -p "$(BUILD_DIR)"; \
 	 echo "== proving a permissionless cold join (no network, wiped datadir) =="; \
-	 ulimit -s unlimited; \
+	 $(ZCL_TEST_STACK_SETUP); \
 	 ZCL_STRESS_TESTS=1 $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE) \
 	     --exact=test_cold_join_sovereign $(TEST_PARALLEL_ARGS) >"$$log" 2>&1; \
 	 rc=$$?; \
@@ -2499,7 +2556,7 @@ t:
 	  $(MAKE) --no-print-directory t-locked ONLY='$(ONLY)'
 
 t-locked: $(TEST_PARALLEL_REL_CANDIDATE) dev-package-verifier-ensure
-	ulimit -s unlimited && $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE) --only=$(ONLY)
+	$(ZCL_TEST_STACK_SETUP) && $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE) --only=$(ONLY)
 
 # Hot-path variant for edit loops. It resolves the complete source inventory in
 # a cached, stable (toolchain+flags-keyed) per-file epoch and links a non-LTO harness; use strict `make t`
@@ -2511,7 +2568,7 @@ t-fast:
 	  $(MAKE) --no-print-directory t-fast-locked ONLY='$(ONLY)'
 
 t-fast-locked: $(TEST_PARALLEL_FAST_CANDIDATE) dev-package-verifier-ensure
-	ulimit -s unlimited && $(LINKED_TEST_ENV) $(TEST_PARALLEL_FAST_ACTIVE) --only=$(ONLY)
+	$(ZCL_TEST_STACK_SETUP) && $(LINKED_TEST_ENV) $(TEST_PARALLEL_FAST_ACTIVE) --only=$(ONLY)
 
 # Proof-facing sibling of t-fast. The human convenience target above keeps its
 # documented substring behavior; impact plans and durable receipts use this
@@ -2523,7 +2580,7 @@ t-fast-exact:
 	    EXACT_ONLY_MATCHED='$(EXACT_ONLY_MATCHED)'
 
 t-fast-exact-locked: $(TEST_PARALLEL_FAST_CANDIDATE) dev-package-verifier-ensure
-	ulimit -s unlimited && \
+	$(ZCL_TEST_STACK_SETUP) && \
 	  $(LINKED_TEST_ENV) $(TEST_PARALLEL_FAST_ACTIVE) --exact=$(EXACT_ONLY_MATCHED) $(T_FAST_EXACT_ARGS)
 
 # Closed historical-failure corpus required by build_release_confirmation.v2.
@@ -2541,7 +2598,7 @@ secure-release-regressions:
 secure-release-regressions-locked: $(TEST_PARALLEL_REL_CANDIDATE) dev-package-verifier-ensure
 	@tools/dev/secure-release-regressions-selftest.sh \
 	  '$(SECURE_RELEASE_REGRESSION_GROUPS)'
-	ulimit -s unlimited && $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE) \
+	$(ZCL_TEST_STACK_SETUP) && $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE) \
 	  --exact=$(SECURE_RELEASE_REGRESSION_GROUPS) --no-cache
 
 # ── the front door ───────────────────────────────────────────────────────
@@ -3630,7 +3687,7 @@ t-hotswap:
 	[ -n "$$so" ] && [ -f "$$so" ] || { \
 	  echo "t-hotswap: module build did not yield a .so (see stderr)" >&2; exit 3; }; \
 	echo "t-hotswap: running $(ONLY) against $$so" >&2; \
-	ulimit -s unlimited && ZCL_HOTSWAP_TEST_AUTH=explicit-t-hotswap-v1 \
+	$(ZCL_TEST_STACK_SETUP) && ZCL_HOTSWAP_TEST_AUTH=explicit-t-hotswap-v1 \
 	  ZCL_HOTSWAP_TEST_MODULE="$$so" \
 	  $(TEST_PARALLEL_FAST_ACTIVE) --only=$(ONLY) --no-cache
 
@@ -3763,7 +3820,7 @@ dev-loop-bench-selftest:
 # multiple peers plus an in-flight old-generation call; sim-fast remains the
 # broader seeded P2P suite.
 hotswap-sim: $(TEST_PARALLEL_FAST_CANDIDATE)
-	@ulimit -s unlimited && $(LINKED_TEST_ENV) $(TEST_PARALLEL_FAST_ACTIVE) --only=hotswap_simnet
+	@$(ZCL_TEST_STACK_SETUP) && $(LINKED_TEST_ENV) $(TEST_PARALLEL_FAST_ACTIVE) --only=hotswap_simnet
 
 native-dev-loop-wait-selftest: dev-bin
 	@tools/dev/native-dev-loop-wait-selftest.sh
@@ -4099,7 +4156,7 @@ check-wallet: wallet_check
 
 .PHONY: spec
 spec: spec_zcl
-	ulimit -s unlimited && $(BIN_DIR)/spec_zcl
+	$(ZCL_TEST_STACK_SETUP) && $(BIN_DIR)/spec_zcl
 
 .PHONY: z23 zclassic23 portable c23-portable-toolchain c23-portable-release \
 	c23-portable-install release-deploy
@@ -4166,9 +4223,14 @@ $(ZCLASSIC23_BIN): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) \
 	  "$(NODE_C23_COMPILE_EPOCH)" "$(NODE_C23_PROFILE)" \
 	  "$(NODE_C23_EPOCH_COMPILE_FLAGS)" "$(NODE_C23_EPOCH_LINK_FLAGS)" \
 	  "$(CC)" "$(CXX)" "$$PPID" >/dev/null; \
-	objcopy --only-keep-debug "$$tmp" "$$dbgdir/$$(basename "$$dbg")"; \
-	strip -s "$$tmp"; \
-	objcopy --add-gnu-debuglink="$$dbgdir/$$(basename "$$dbg")" "$$tmp"; \
+	if test "$(ZCL_HOST_OS)" = Darwin; then \
+		cp -f -- "$$tmp" "$$dbgdir/$$(basename "$$dbg")"; \
+		strip -S -x "$$tmp"; \
+	else \
+		objcopy --only-keep-debug "$$tmp" "$$dbgdir/$$(basename "$$dbg")"; \
+		strip -s "$$tmp"; \
+		objcopy --add-gnu-debuglink="$$dbgdir/$$(basename "$$dbg")" "$$tmp"; \
+	fi; \
 	tools/scripts/check_c23_node_binary.sh "$$tmp"; \
 	tools/dev/source-identity.sh verify-record "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" >/dev/null; \
 	mv -f -- "$$tmp" "$@"; \
@@ -4815,12 +4877,13 @@ zcl-nodectl: $(ZCL_NODECTL_BIN)
 # (see C23_PORTABLE_RELINK at the top of this file).
 $(ZCL_NODECTL_BIN): tools/zcl-nodectl.c lib/util/include/util/rpc_paths.h \
 		lib/platform/include/platform/os_binary_slots.h \
+		lib/platform/include/platform/process_compat.h \
 		lib/platform/src/os_binary_slots.c lib/platform/src/clock.c \
 		lib/base/src/log_level.c $(C23_PORTABLE_RELINK)
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror \
 	    -Ilib/base/include -Ilib/util/include -Ilib/platform/include \
-	    -D_POSIX_C_SOURCE=200809L -o $@ \
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -o $@ \
 	    tools/zcl-nodectl.c lib/platform/src/os_binary_slots.c \
 	    lib/platform/src/clock.c lib/base/src/log_level.c
 
@@ -4887,10 +4950,10 @@ test:
 
 .PHONY: test-locked
 test-locked: $(TEST_PARALLEL_REL_CANDIDATE) dev-package-verifier-ensure
-	ulimit -s unlimited && $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE) $(TEST_PARALLEL_ARGS)
+	$(ZCL_TEST_STACK_SETUP) && $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE) $(TEST_PARALLEL_ARGS)
 
 test-full: test_zcl
-	ulimit -s unlimited && $(TEST_ZCL_BIN)
+	$(ZCL_TEST_STACK_SETUP) && $(TEST_ZCL_BIN)
 
 # zclassic23-chaos links the FULL node source tree ($(ALL_SRCS), same
 # whole-program LTO shape as wire_sweep/test_parallel below) rather than a
@@ -4911,7 +4974,7 @@ chaos: zclassic23-chaos
 sim-fast: $(TEST_PARALLEL_REL_CANDIDATE) zclassic23-chaos
 	@set -eu; \
 	echo "==> chaos harness unit slice"; \
-	ulimit -s unlimited && $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE) --only=chaos_harness; \
+	$(ZCL_TEST_STACK_SETUP) && $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE) --only=chaos_harness; \
 	echo "==> checked-in chaos scenarios"; \
 	$(MAKE) --no-print-directory chaos; \
 	echo "==> bounded chaos seed sweep ($(CHAOS_SEEDS) seeds via $(CHAOS_SWEEP_SCENARIO))"; \
@@ -5917,7 +5980,7 @@ netdisrupt-stopwatch-report:
 # (and test_zcl) before running, ensuring the suite always runs against the
 # current source.
 test-e2e: zclassic23 test_zcl
-	ulimit -s unlimited && $(TEST_ZCL_BIN)
+	$(ZCL_TEST_STACK_SETUP) && $(TEST_ZCL_BIN)
 
 # P11.4 shielded-payment gate.
 #
@@ -8183,7 +8246,7 @@ coverage-locked:
 	@# Match the `test` target — some json/recursion tests need
 	@# unlimited stack.  If the binary fails or crashes we still render
 	@# partial coverage data first, then propagate the failure below.
-	@set +e; ulimit -s unlimited && $(COV_TEST_ACTIVE); rc=$$?; \
+	@set +e; $(ZCL_TEST_STACK_SETUP) && $(COV_TEST_ACTIVE); rc=$$?; \
 		echo $$rc > $(COV_BUILD_DIR)/test_zcl_cov.exit; \
 		if [ "$$rc" != "0" ]; then \
 			echo "coverage: test_zcl_cov exited $$rc; rendering partial report before failing"; \
@@ -10148,9 +10211,9 @@ ci: vendor-ready lint bench-regress zclassic23 $(TEST_PARALLEL_REL_CANDIDATE)
 	@# gets lucky and stores its own PASS — after which G is skipped forever.
 	@# The retry would launder a flake into a permanent cached green. Forcing
 	@# the retry cold keeps it the independent second opinion it claims to be.
-	@ulimit -s unlimited; if $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE); then :; else \
+	@$(ZCL_TEST_STACK_SETUP); if $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE); then :; else \
 		echo "[ci] !! test_parallel FAILED first pass — retrying ONCE, COLD (--no-cache: a cached retry would re-run only the failing group and launder a flake into a stored PASS) !!"; \
-		ulimit -s unlimited; $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE) --no-cache; \
+		$(ZCL_TEST_STACK_SETUP); $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE) --no-cache; \
 	fi
 	@echo ""
 	@echo "══ CI: mvp-gates (hermetic MVP acceptance #3/#5/#7) ══"

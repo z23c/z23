@@ -4,6 +4,7 @@
 
 #include "services/sticky_escalator_resnapshot.h"
 
+#include "base/compiler.h"
 #include "config/boot.h"
 #include "config/runtime.h"
 #include "event/event.h"
@@ -55,7 +56,7 @@ struct stage_rederive_range_result;
 extern bool stage_rederive_range(struct sqlite3 *db, struct main_state *ms,
                                  int from_height, int to_height,
                                  struct stage_rederive_range_result *out)
-    __attribute__((weak));
+    ZCL_WEAK_IMPORT;
 extern bool reducer_frontier_nearest_loadable_self_verified_base(
     int32_t at_or_below, bool compiled_checkpoint_loadable,
     int32_t *base_height_out, const char **base_kind_out);

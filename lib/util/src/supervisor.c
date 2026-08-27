@@ -18,6 +18,7 @@
  *     supervisor API. */
 
 #include "platform/time_compat.h"
+#include "platform/thread_compat.h"
 #include "util/supervisor.h"
 
 #include "json/json.h"
@@ -902,7 +903,8 @@ void supervisor_stop(void)
             struct timespec rdeadline;
             platform_time_realtime_timespec(&rdeadline);
             rdeadline.tv_sec += 2;
-            int rjc = pthread_timedjoin_np(g_runner_thread_id, NULL, &rdeadline);
+            int rjc = platform_thread_join_until(g_runner_thread_id, NULL,
+                                                 &rdeadline);
             if (rjc == 0) {
                 atomic_store(&g_runner_handle_set, false);
                 break;
@@ -932,7 +934,7 @@ void supervisor_stop(void)
             struct timespec deadline;
             platform_time_realtime_timespec(&deadline);
             deadline.tv_sec += 2;
-            int rc = pthread_timedjoin_np(g_thread_id, NULL, &deadline);
+            int rc = platform_thread_join_until(g_thread_id, NULL, &deadline);
             if (rc == 0) {
                 atomic_store(&g_thread_handle_set, false);
                 break;

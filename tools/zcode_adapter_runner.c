@@ -5,6 +5,7 @@
 
 #include "base/cleanse.h"
 #include "platform/os_sandbox.h"
+#include "platform/process_compat.h"
 #include "sha3/sha3.h"
 #include "util/result.h"
 
@@ -211,7 +212,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "adapter_runner: private adapter directories unavailable\n");
         return 73;
     }
-    if (clearenv() != 0 ||
+    if (platform_clear_environment() != 0 ||
         (!preflight && setenv(credential_name, api_key, 1) != 0) ||
         setenv("HOME", adapter_home, 1) != 0 ||
         setenv("CODEX_HOME", adapter_home, 1) != 0 ||

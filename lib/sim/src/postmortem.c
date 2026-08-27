@@ -19,7 +19,9 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#if defined(__linux__) && defined(__x86_64__)
 #include <ucontext.h>
+#endif
 #include <unistd.h>
 #include <zlib.h>
 
@@ -803,6 +805,9 @@ static int signal_write_registers(const char *path, int sig,
                                   const siginfo_t *info,
                                   const void *ucontext)
 {
+#if !defined(__linux__) || !defined(__x86_64__) || !defined(REG_RIP)
+    (void)ucontext;
+#endif
     char regs[1024];
     size_t off = 0;
     regs[0] = '\0';

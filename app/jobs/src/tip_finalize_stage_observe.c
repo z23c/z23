@@ -208,11 +208,9 @@ void tip_finalize_observe_note_tip_missing(int next_h)
      * stale claim once the anomaly clears and stops re-firing. */
     char reason[BLOCKER_REASON_MAX];
     snprintf(reason, sizeof(reason),
-             "height=%d: the current tip block finalize must extend FROM could "
-             "not be resolved from the active-chain window, the durable "
-             "finalized-hash table, or the best-header ancestry — a "
-             "data-availability anomaly, not the healthy at-tip wait; holding "
-             "the cursor until the block at this height connects", next_h);
+             "height=%d finalize predecessor is absent from active chain, "
+             "durable finalized hashes, and header ancestry; holding until "
+             "the block connects", next_h);
     struct blocker_record rec;
     if (blocker_init(&rec, TF_TIP_MISSING_BLOCKER_ID, STAGE_NAME,
                      BLOCKER_TRANSIENT, reason))

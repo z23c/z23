@@ -423,7 +423,7 @@ size_t serve_send_confirm(uint8_t *r, size_t max,
         html_escape(safe_txid, sizeof(safe_txid), txid_result);
 
         bool is_opid = (strncmp(txid_result, "opid-", 5) == 0);
-        char txid_html[512] = "";
+        char txid_html[600] = "";
         if (is_opid)
             snprintf(txid_html, sizeof(txid_html),
                 "<div class='hash' style='word-break:break-all;"

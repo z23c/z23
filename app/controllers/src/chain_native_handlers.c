@@ -16,6 +16,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+static void native_body_set_rpc_error(struct zcl_native_body_err *err,
+                                      const char *method, const char *context)
+{
+    int written = snprintf(err->message, sizeof(err->message),
+                           "RPC %s failed: ", method);
+    if (written < 0 || (size_t)written >= sizeof(err->message))
+        return;
+
+    size_t available = sizeof(err->message) - (size_t)written;
+    snprintf(err->message + written, available, "%.*s",
+             (int)available - 1, context);
+}
+
 /* Keep the transaction identity and lifecycle state ahead of potentially
  * large vin/vout/hex fields.  The native bridge deliberately pages bounded
  * objects in source order, so forwarding the legacy RPC order verbatim could
@@ -112,8 +125,7 @@ char *zcl_native_getrawtransaction_body(const struct json_value *args,
         char ctx[192];
         snprintf(ctx, sizeof(ctx), "txid=%s", txid ? txid : "(null)");
         err->status = ZCL_NATIVE_BODY_UNAVAILABLE;
-        snprintf(err->message, sizeof(err->message),
-                 "RPC %s failed: %s", "getrawtransaction", ctx);
+        native_body_set_rpc_error(err, "getrawtransaction", ctx);
         LOG_NULL("native.chain", "%s failed: %s", "getrawtransaction", ctx);
         return NULL;
     }
@@ -221,8 +233,7 @@ char *zcl_native_getblock_body(const struct json_value *args,
             char ctx[192];
             snprintf(ctx, sizeof(ctx), "height=%s", id_str ? id_str : "(null)");
             err->status = ZCL_NATIVE_BODY_UNAVAILABLE;
-            snprintf(err->message, sizeof(err->message),
-                     "RPC %s failed: %s", "getblockhash", ctx);
+            native_body_set_rpc_error(err, "getblockhash", ctx);
             LOG_NULL("native.chain", "%s failed: %s", "getblockhash", ctx);
         }
         size_t ci = 0;
@@ -244,8 +255,7 @@ char *zcl_native_getblock_body(const struct json_value *args,
         char ctx[192];
         snprintf(ctx, sizeof(ctx), "id=%s", id_str ? id_str : "(null)");
         err->status = ZCL_NATIVE_BODY_UNAVAILABLE;
-        snprintf(err->message, sizeof(err->message),
-                 "RPC %s failed: %s", "getblock", ctx);
+        native_body_set_rpc_error(err, "getblock", ctx);
         LOG_NULL("native.chain", "%s failed: %s", "getblock", ctx);
     }
     return out;

@@ -56,6 +56,7 @@
 #include "platform/clock.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -120,6 +121,16 @@ bool agent_broker_peercred(int fd, struct agent_peer_cred *out)
     if (fd < 0)
         LOG_FAIL(BROKER_TAG, "bad fd=%d", fd);
 
+#if defined(__APPLE__)
+    uid_t uid = 0;
+    gid_t gid = 0;
+    if (getpeereid(fd, &uid, &gid) != 0)
+        LOG_FAIL(BROKER_TAG, "getpeereid on fd=%d failed: %s", fd,
+                 strerror(errno));
+    out->pid = -1;
+    out->uid = uid;
+    out->gid = gid;
+#else
     struct ucred uc;
     socklen_t len = sizeof(uc);
     if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &uc, &len) != 0 ||
@@ -130,12 +141,16 @@ bool agent_broker_peercred(int fd, struct agent_peer_cred *out)
     out->pid   = uc.pid;
     out->uid   = uc.uid;
     out->gid   = uc.gid;
+#endif
     out->valid = true;
     return true;
 }
 
 bool agent_broker_sender_cred(int fd, struct agent_peer_cred *out)
 {
+#if defined(__APPLE__)
+    return agent_broker_peercred(fd, out);
+#else
     if (!out)
         LOG_FAIL(BROKER_TAG, "null out for fd=%d", fd);
     memset(out, 0, sizeof(*out));
@@ -187,6 +202,7 @@ bool agent_broker_sender_cred(int fd, struct agent_peer_cred *out)
     LOG_FAIL(BROKER_TAG,
              "the kernel attached no credentials to the message on fd=%d "
              "(SO_PASSCRED must be set before the peer sends)", fd);
+#endif
 }
 
 bool agent_broker_identify_peer(int fd, struct agent_peer_cred *out)
@@ -752,9 +768,19 @@ int agent_broker_listen(const char *path)
                 strnlen(path, 4096), sizeof(sa.sun_path), path);
     snprintf(sa.sun_path, sizeof(sa.sun_path), "%s", path);
 
-    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    int fd = socket(AF_UNIX, SOCK_STREAM
+#if defined(SOCK_CLOEXEC)
+                    | SOCK_CLOEXEC
+#endif
+                    , 0);
     if (fd < 0)
         LOG_ERR(BROKER_TAG, "socket(AF_UNIX) failed: %s", strerror(errno));
+#if !defined(SOCK_CLOEXEC)
+    if (fcntl(fd, F_SETFD, FD_CLOEXEC) != 0) {
+        (void)close(fd);
+        LOG_ERR(BROKER_TAG, "socket CLOEXEC failed: %s", strerror(errno));
+    }
+#endif
     (void)unlink(path);
 
     /* 0700 before bind: the filesystem permission is a coarse first gate, and

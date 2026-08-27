@@ -92,9 +92,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sched.h>
-#ifdef __GLIBC__
-#include <malloc.h>  /* malloc_trim — return retained transient heap to the OS */
-#endif
+#include "platform/allocator_compat.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 #include "util/supervisor.h"
@@ -486,9 +484,7 @@ static void *bg_validation_thread(void *arg)
              * bulk UTXO serialization. Called once per SAVE_INTERVAL
              * (1000 blocks) so the cost is negligible vs. the per-block
              * crypto. */
-#ifdef __GLIBC__
-            malloc_trim(0);
-#endif
+            platform_allocator_release_free_pages();
         }
 
         /* Log progress */
@@ -676,9 +672,11 @@ void bg_validation_stop(struct bg_validation_service *svc)
         return;
     bg_validation_supervisor_done();
     atomic_store(&svc->stop_requested, true);
-    /* Five seconds is a diagnostic deadline. Retain ownership until the
-     * validation worker exits so its dependencies cannot be freed live. */
+    /* Linux supplies a five-second diagnostic deadline. Every platform
+     * retains ownership until the worker exits, so dependencies cannot be
+     * freed live. */
     struct timespec ts;
+#if defined(__linux__)
     if (platform_time_realtime_timespec(&ts) == 0) {
         ts.tv_sec += 5;
         int rc = pthread_timedjoin_np(svc->thread, NULL, &ts);
@@ -689,6 +687,10 @@ void bg_validation_stop(struct bg_validation_service *svc)
     } else {
         pthread_join(svc->thread, NULL);
     }
+#else
+    (void)ts;
+    pthread_join(svc->thread, NULL);
+#endif
     svc->thread_started = false;
 #ifdef ZCL_TESTING
     supervisor_child_id id = atomic_exchange(&g_bg_validation_supervisor_id,

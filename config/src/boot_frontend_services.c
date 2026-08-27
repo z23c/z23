@@ -274,8 +274,8 @@ static bool boot_https_explorer_start(void *ctx)
                "behind=%d). Will start when near tip.\n",
                chain_tip_h, best_header, best_header - chain_tip_h);
         static char s_cert[1024], s_key[1024];
-        strncpy(s_cert, cert_path, sizeof(s_cert) - 1);
-        strncpy(s_key, key_path, sizeof(s_key) - 1);
+        memcpy(s_cert, cert_path, strlen(cert_path) + 1u);
+        memcpy(s_key, key_path, strlen(key_path) + 1u);
         https_deferred_set(s_cert, s_key, https_domain);
     }
     return true;

@@ -13,6 +13,7 @@
 #include "util/authority_receipt.h"
 
 #include <fcntl.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>

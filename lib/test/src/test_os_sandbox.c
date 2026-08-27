@@ -50,6 +50,20 @@
 #include <sys/syscall.h>
 #include <sys/wait.h>
 
+#if !defined(__linux__)
+
+int test_os_sandbox(void)
+{
+    struct os_sandbox_caps caps = os_sandbox_probe_caps();
+    printf("\n=== os_sandbox platform availability ===\n");
+    printf("os_sandbox: userns=%d landlock_abi=%d seccomp=%d; "
+           "Linux confinement tests are not applicable\n",
+           (int)caps.userns, caps.landlock_abi, (int)caps.seccomp);
+    return !caps.userns && caps.landlock_abi < 1 && !caps.seccomp ? 0 : 1;
+}
+
+#else
+
 #define SB_CHECK(name, expr) do { \
     printf("os_sandbox: %s... ", (name)); \
     if ((expr)) printf("OK\n"); \
@@ -590,3 +604,5 @@ int test_os_sandbox(void)
     printf("=== os_sandbox tests done: %d failure(s) ===\n", failures);
     return failures;
 }
+
+#endif

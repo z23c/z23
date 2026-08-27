@@ -104,6 +104,7 @@
 #include "json/json.h"
 #include "platform/clock.h"
 #include "platform/os_proc.h"
+#include "platform/process_compat.h"
 #include "platform/os_sandbox.h"
 #include "support/cleanse.h"
 #include "util/safe_alloc.h"
@@ -470,6 +471,7 @@ static bool pv_atomic_write(const char *path, const uint8_t *data,
  * gcc must exec cc1/as/ld and pthread tests need clone; every exec'd
  * image inherits the full confinement. Guarded __NR_* like the
  * os_sandbox session set. */
+#if defined(__linux__)
 static const int g_pv_child_denied[] = {
     __NR_socket,
 #ifdef __NR_socketcall
@@ -488,6 +490,12 @@ static const int g_pv_child_denied[] = {
     __NR_add_key, __NR_request_key, __NR_keyctl,
     __NR_open_by_handle_at,
 };
+#define PV_CHILD_DENIED_COUNT \
+    (sizeof(g_pv_child_denied) / sizeof(g_pv_child_denied[0]))
+#else
+static const int g_pv_child_denied[] = { 0 };
+#define PV_CHILD_DENIED_COUNT 0u
+#endif
 
 struct pv_run {
     bool launched;     /* fork/pipe machinery worked */
@@ -798,7 +806,7 @@ static struct pv_run pv_run_child(const char *const argv[],
          * explicit pairs only. clearenv(3) keeps glibc's internal environ
          * state consistent — a raw `environ = ...` reassignment segfaults
          * execvp in this whole-program LTO build. */
-        if (clearenv() != 0)
+        if (platform_clear_environment() != 0)
             _exit(PV_CHILD_EXEC_FAIL);
         (void)setenv("PATH", "/usr/local/bin:/usr/bin:/bin", 1);
         (void)setenv("LC_ALL", "C", 1);
@@ -837,8 +845,7 @@ static struct pv_run pv_run_child(const char *const argv[],
             }
         }
         struct zcl_result sr = os_sandbox_seccomp_deny(
-            g_pv_child_denied,
-            sizeof(g_pv_child_denied) / sizeof(g_pv_child_denied[0]),
+            g_pv_child_denied, PV_CHILD_DENIED_COUNT,
             false);
         if (!zcl_result_is_ok(sr))
             _exit(PV_CHILD_SECCOMP_FAIL);

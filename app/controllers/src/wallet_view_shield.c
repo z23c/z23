@@ -161,10 +161,15 @@ size_t serve_shield_confirm(uint8_t *r, size_t max,
         if (remaining <= 0.00000001) break;
         if (addr_amt > remaining) addr_amt = remaining;
 
-        char z_params[1024];
-        snprintf(z_params, sizeof(z_params),
+        char z_params[2304];
+        int params_len = snprintf(z_params, sizeof(z_params),
             "[\"%s\",[{\"address\":\"%s\",\"amount\":%.8f}],1,%.8f]",
             funded[ai].addr, z_dest, addr_amt, FEE_ZCL);
+        if (params_len < 0 || (size_t)params_len >= sizeof(z_params)) {
+            snprintf(shield_err, sizeof(shield_err),
+                     "Shielding address input exceeds the RPC limit");
+            continue;
+        }
 
         char rpc_buf[4096] = "";
         int rpc_rc = wv_rpc_call("z_sendmany", z_params,
@@ -200,8 +205,8 @@ size_t serve_shield_confirm(uint8_t *r, size_t max,
                 if (!shield_err[0]) {
                     /* Show raw RPC response for debugging */
                     snprintf(shield_err, sizeof(shield_err),
-                        "z_sendmany failed for %s (%.4f ZCL). "
-                        "RPC response: %.180s",
+                        "z_sendmany failed for %.100s (%.4f ZCL). "
+                        "RPC response: %.100s",
                         funded[ai].addr, addr_amt, rpc_buf);
                 }
             }

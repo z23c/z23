@@ -631,11 +631,9 @@ static void vh_mark_fail_note(int height, const struct block_index *bi)
     }
     char reason[BLOCKER_REASON_MAX];
     snprintf(reason, sizeof(reason),
-             "height=%d hash=%s nStatus=0x%lx: header re-validates clean but the "
-             "block_index entry is BLOCK_FAILED-masked and no header_solution_"
-             "repair row clears it; validate_headers holds here (no JOB_FATAL "
-             "storm). Cleared by block_failed_mask_at_tip / process_block_"
-             "revalidate or a fresh solution re-receive.",
+             "height=%d hash=%.64s status=0x%lx: clean header retains a stale "
+             "BLOCK_FAILED mask; holding until repair, revalidation, or fresh "
+             "solution receipt",
              height, hex[0] ? hex : "(unknown)", nstatus);
     struct blocker_record rec;
     if (blocker_init(&rec, VH_MARK_FAIL_BLOCKER_ID, STAGE_NAME,

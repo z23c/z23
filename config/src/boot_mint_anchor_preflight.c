@@ -10,6 +10,7 @@
 #include "chain/checkpoints.h"
 #include "event/event.h"
 #include "json/json.h"
+#include "platform/system_memory.h"
 #include "services/disk_monitor.h"
 #include "storage/consensus_db.h"    /* consensus_db_kernel_store_path + names */
 #include "util/ar_step_readonly.h"
@@ -27,7 +28,6 @@
 #include <string.h>
 #include <sys/file.h>
 #include <sys/stat.h>
-#include <sys/sysinfo.h>
 #include <unistd.h>
 
 #define PREFLIGHT_SUBSYS "mint_anchor"
@@ -577,13 +577,13 @@ static bool preflight_check_fold_inram_ram(const char *datadir, char *why,
     (void)datadir;
     const char *env = getenv("ZCL_FOLD_INRAM");
     bool inram_opted_out = env && env[0] && env[0] == '0';
-    struct sysinfo si;
-    if (sysinfo(&si) != 0) {
-        snprintf(why, why_cap, "sysinfo() failed: %s; cannot estimate RAM",
+    uint64_t total_ram = 0;
+    if (!platform_system_memory_bytes(&total_ram)) {
+        snprintf(why, why_cap,
+                 "system memory query failed: %s; cannot estimate RAM",
                  strerror(errno));
         return true;   /* unmeasurable machine: do not block on it */
     }
-    uint64_t total_ram = (uint64_t)si.totalram * (uint64_t)si.mem_unit;
     double total_gb = (double)total_ram / (1024.0 * 1024.0 * 1024.0);
     if (inram_opted_out) {
         snprintf(why, why_cap,

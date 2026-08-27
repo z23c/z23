@@ -75,6 +75,13 @@ static struct explorer_rpc_backend g_explorer_rpc = {
 };
 static struct explorer_assets g_explorer_assets = {0};
 
+static bool explorer_join_path(char *out, size_t out_size,
+                               const char *directory, const char *leaf)
+{
+    int written = snprintf(out, out_size, "%s/%s", directory, leaf);
+    return written >= 0 && (size_t)written < out_size;
+}
+
 struct explorer_context *explorer_ctx(void)
 {
     return &g_explorer_ctx;
@@ -98,8 +105,12 @@ void ensure_explorer_dir(void)
     struct explorer_context *ctx = explorer_ctx();
     struct explorer_assets *assets = explorer_assets();
     if (!ctx->datadir) return;
-    snprintf(assets->explorer_dir, sizeof(assets->explorer_dir), "%s/explorer",
-             ctx->datadir);
+    if (!explorer_join_path(assets->explorer_dir,
+                            sizeof(assets->explorer_dir), ctx->datadir,
+                            "explorer")) {
+        assets->explorer_dir[0] = '\0';
+        return;
+    }
     mkdir(assets->explorer_dir, 0755);
 }
 
@@ -107,7 +118,9 @@ static void write_default_file(const char *filename, const char *content)
 {
     struct explorer_assets *assets = explorer_assets();
     char path[1200];
-    snprintf(path, sizeof(path), "%s/%s", assets->explorer_dir, filename);
+    if (!explorer_join_path(path, sizeof(path), assets->explorer_dir,
+                            filename))
+        return;
     /* Only write if file doesn't exist — don't overwrite customizations */
     FILE *f = fopen(path, "r");
     if (f) { fclose(f); return; }
@@ -124,7 +137,8 @@ void load_css(void)
     struct explorer_assets *assets = explorer_assets();
     char path[1200];
     const char *override_path = getenv("ZCL_EXPLORER_CSS_FILE");
-    snprintf(path, sizeof(path), "%s/style.css", assets->explorer_dir);
+    bool default_path_valid = explorer_join_path(
+        path, sizeof(path), assets->explorer_dir, "style.css");
 
     if (override_path && override_path[0]) {
         FILE *f = fopen(override_path, "r");
@@ -136,7 +150,7 @@ void load_css(void)
             return;
         }
         LOG_WARN("explorer", "CSS override unavailable: %s", override_path);
-    } else if (getenv("ZCL_EXPLORER_CSS_LIVE")) {
+    } else if (default_path_valid && getenv("ZCL_EXPLORER_CSS_LIVE")) {
         FILE *f = fopen(path, "r");
         if (f) {
             assets->css_len = fread(assets->css_cache, 1,
@@ -302,12 +316,17 @@ int rpc_call(const char *method, const char *params_json,
 
     /* Base64 encode auth (simple inline for user:pass) */
     char auth_plain[256];
-    snprintf(auth_plain, sizeof(auth_plain), "%s:%s",
-             explorer_rpc()->user, explorer_rpc()->pass);
+    int auth_len = snprintf(auth_plain, sizeof(auth_plain), "%s:%s",
+                            explorer_rpc()->user, explorer_rpc()->pass);
+    if (auth_len < 0 || (size_t)auth_len >= sizeof(auth_plain)) {
+        close(fd);
+        LOG_ERR("explorer", "rpc_call(%s): credentials exceed local limit",
+                method);
+    }
     /* Simple base64 */
     static const char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     char auth_b64[512];
-    size_t alen = strlen(auth_plain), bo = 0;
+    size_t alen = (size_t)auth_len, bo = 0;
     for (size_t i = 0; i < alen; i += 3) {
         uint32_t n = ((uint32_t)(uint8_t)auth_plain[i]) << 16;
         if (i + 1 < alen) n |= ((uint32_t)(uint8_t)auth_plain[i+1]) << 8;

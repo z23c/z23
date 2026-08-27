@@ -110,7 +110,7 @@ static void lane_status_from_row(
 {
     memset(out, 0, sizeof(*out));
     out->lane = row->lane;
-    (void)snprintf(out->lane_name, sizeof(out->lane_name), "%s",
+    (void)snprintf(out->lane_name, sizeof(out->lane_name), "%.15s",
                    view->lane_name);
     (void)snprintf(out->source_root_sha3, sizeof(out->source_root_sha3),
                    "%s", row->source_root_sha3);
@@ -344,9 +344,12 @@ struct zcl_result zcode_accepted_work_find(
                 ndb, workspace, actions[i].action_id, now, &evaluation).ok &&
             evaluation.policy_satisfied &&
             strcmp(evaluation.proof_set_root_sha3, proof_hex) == 0) {
+            size_t action_id_len = strlen(actions[i].action_id);
+            if (action_id_len != sizeof(out->action_id) - 1)
+                continue;
             if (!evaluated)
-                (void)snprintf(out->action_id, sizeof(out->action_id), "%s",
-                               actions[i].action_id);
+                memcpy(out->action_id, actions[i].action_id,
+                       action_id_len + 1);
             evaluated = true;
         }
     }

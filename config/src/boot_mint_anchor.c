@@ -1,3 +1,4 @@
+/* Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. */
 /* boot_mint_anchor.c — the ANCHOR-SET MINT driver. Contract in config/boot.h
  * (boot_mint_anchor_run). Lives here, separate from boot.c, so each file keeps
  * one focused responsibility.
@@ -301,7 +302,7 @@ bool boot_mint_anchor_export_bundle(sqlite3 *pdb, const char *datadir,
                     "condition=mint_bundle_export_failed anchor=%d status=%d "
                     "reason=%s", anchor, (int)res.status,
                     res.reason[0] ? res.reason : "unknown");
-        char breason[BLOCKER_REASON_MAX];
+        char breason[640];
         snprintf(breason, sizeof(breason),
                  "consensus-state bundle export refused anchor=%d status=%d: %s "
                  "(verified anchor snapshot + receipt intact)",

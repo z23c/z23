@@ -40,6 +40,7 @@
 #define _GNU_SOURCE
 
 #include "test/test_core.h"
+#include "platform/socket_compat.h"
 
 #include "controllers/rpc_client.h"
 #include "platform/os_proc.h"
@@ -736,6 +737,11 @@ static int mb_peercred(void)
  * trap is real on this kernel AND that the broker does not fall into it. */
 static int mb_sender_cred(void)
 {
+#if defined(__APPLE__)
+    printf("agent_broker: macOS exposes peer uid/gid but no per-message "
+           "sender pid; Linux sender-credential trap is not applicable\n");
+    return 0;
+#else
     int failures = 0;
     int sv[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
@@ -790,13 +796,14 @@ static int mb_sender_cred(void)
     int st = 0;
     (void)waitpid(kid, &st, 0);
     return failures;
+#endif
 }
 
 /* ── (e) SO_PEERCRED end to end over a real listening socket ────────────── */
 
 static int mb_connect(const char *path)
 {
-    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    int fd = platform_socket_open(AF_UNIX, SOCK_STREAM, 0, true, false);
     if (fd < 0)
         return -1;
     struct sockaddr_un sa;

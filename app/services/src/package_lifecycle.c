@@ -13,6 +13,7 @@
 #include "base/hex.h"
 #include "base/log_macros.h"
 #include "base/result.h"
+#include "base/text_fit.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -57,8 +58,8 @@ static void pkgl_note(char *rule, size_t rule_cap, char *detail,
                       size_t detail_cap, const char *rule_text,
                       const char *detail_text)
 {
-    (void)snprintf(rule, rule_cap, "%s", rule_text);
-    (void)snprintf(detail, detail_cap, "%s", detail_text);
+    (void)zcl_text_fit(rule, rule_cap, rule_text, PKGL_LOG, "rule");
+    (void)zcl_text_fit(detail, detail_cap, detail_text, PKGL_LOG, "detail");
 }
 
 static const struct vcs_package_release *pkgl_release_for_name_semver(
@@ -557,7 +558,8 @@ struct zcl_result package_lifecycle_commit(
     struct zcl_result r = pkgl_load_plan(&ctx, plan_id, now_unix, &plan,
                                          out->rule, sizeof(out->rule));
     if (!r.ok) {
-        (void)snprintf(out->detail, sizeof(out->detail), "%s", r.message);
+        (void)zcl_text_fit(out->detail, sizeof(out->detail), r.message,
+                           PKGL_LOG, "commit.detail");
         pkgl_ctx_close(&ctx);
         return r;
     }
@@ -590,10 +592,11 @@ struct zcl_result package_lifecycle_commit(
         r = pkgl_commit_step(&ctx, &plan, i, now_unix, &out->steps[i], prev,
                              &had_prev);
         if (!r.ok) {
-            (void)snprintf(out->rule, sizeof(out->rule), "%s",
-                           out->steps[i].rule);
-            (void)snprintf(out->detail, sizeof(out->detail), "%s",
-                           out->steps[i].detail);
+            (void)zcl_text_fit(out->rule, sizeof(out->rule),
+                               out->steps[i].rule, PKGL_LOG, "commit.rule");
+            (void)zcl_text_fit(out->detail, sizeof(out->detail),
+                               out->steps[i].detail, PKGL_LOG,
+                               "commit.detail");
             pkgl_ctx_close(&ctx);
             return r;
         }

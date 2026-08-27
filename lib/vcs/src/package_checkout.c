@@ -5,6 +5,7 @@
 #include "vcs/package_checkout.h"
 
 #include "vcs/package_manifest.h"
+#include "platform/rename_compat.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -256,8 +257,8 @@ enum vcs_package_checkout_result vcs_package_checkout(
         close(stage_fd);
     bool published = false;
     if (result == VCS_PACKAGE_CHECKOUT_OK) {
-        if (renameat2(parent_fd, stage, parent_fd, leaf,
-                      RENAME_NOREPLACE) != 0) {
+        if (platform_renameat_noreplace(parent_fd, stage, parent_fd,
+                                        leaf) != 0) {
             result = VCS_PACKAGE_CHECKOUT_DESTINATION;
         } else {
             published = true;

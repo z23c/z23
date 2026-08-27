@@ -23,6 +23,7 @@
 #include "hotswap/hotfork_capsule.h"
 #include "platform/os_sandbox.h"
 #include "platform/time_compat.h"
+#include "platform/pipe_compat.h"
 #include "util/safe_alloc.h"
 #include "util/spawn.h"
 
@@ -137,7 +138,7 @@ void zcl_devloop_hotswap_guidance(
                (why && strstr(why, "service schema changed")) ||
                (why && strstr(why, "service wire contract changed")) ||
                (why && strstr(why, "frozen KAT identity changed"))) {
-        next = "make -j\"$(nproc)\" dev-bin";
+        next = "make -j\"$(getconf _NPROCESSORS_ONLN)\" dev-bin";
     } else if (phase && strcmp(phase, "compile") == 0) {
         next = "z23-dev dev diagnose latest";
     } else if ((why && strstr(why, "cannot read RPC auth cookie")) ||
@@ -3505,7 +3506,7 @@ static bool hs_shadow_probe(
         strlen(build->candidate_object_sha256) != 64 ||
         strlen(build->artifact_sha256) != 64 || !artifact || !response ||
         !elapsed_us ||
-        pipe2(pipefd, O_CLOEXEC | O_NONBLOCK) != 0) {
+        platform_pipe_cloexec_nonblock(pipefd) != 0) {
         hs_why(why, why_len, "shadow runner pipe unavailable");
         return false;
     }
@@ -3737,7 +3738,7 @@ static bool hs_hotfork_probe(
     int pipefd[2] = {-1, -1};
     int64_t started = platform_time_monotonic_us();
     if (!def || !build || !response || !elapsed_us ||
-        pipe2(pipefd, O_CLOEXEC | O_NONBLOCK) != 0) {
+        platform_pipe_cloexec_nonblock(pipefd) != 0) {
         hs_why(why, why_len, "HOT_FORK report pipe unavailable");
         return false;
     }

@@ -44,15 +44,8 @@ struct explorer_history_validation {
 };
 
 /* ── Append helper ─────────────────────────────────────────── */
-#define APPEND(off, buf, max, ...) do { \
-    if ((off) < (max)) { \
-        size_t _rem = (max) - (off); \
-        int _n = snprintf((char *)(buf) + (off), _rem, __VA_ARGS__); \
-        if (_n > 0) { \
-            (off) += ((size_t)_n < _rem) ? (size_t)_n : _rem - 1; \
-        } \
-    } \
-} while(0)
+#define APPEND(off, buf, max, ...) \
+    ((off) = site_appendf((char *)(buf), (max), (off), __VA_ARGS__))
 
 /* ── Page template macros ──────────────────────────────────── */
 #define EXPLORER_HEADER(title) \
@@ -367,7 +360,9 @@ static inline bool explorer_open_readonly_db(const char *datadir, sqlite3 **db_o
     if (!datadir || !db_out)
         return false;
 
-    snprintf(dbpath, sizeof(dbpath), "%s/node.db", datadir);
+    int written = snprintf(dbpath, sizeof(dbpath), "%s/node.db", datadir);
+    if (written < 0 || (size_t)written >= sizeof(dbpath))
+        return false;
     if (sqlite3_open_v2(dbpath, db_out, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
         if (*db_out) {
             sqlite3_close(*db_out);

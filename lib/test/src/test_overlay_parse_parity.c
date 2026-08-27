@@ -947,8 +947,8 @@ int test_overlay_parse_parity(void)
             "aaaaaaaaaabbbbbbbbbbccccccccccddddddddddeeeeeeeeeeffffffffffabc",
             "-bad", "", "UPPER" };
         static const char *vals[] = { "", "t1abc", "1BitcoinAddr",
-            "0123456789012345678901234567890123456789012345678901234567890123"
-            "4567890123456789012345678901234567890123456789012345678901234567" };
+            ("0123456789012345678901234567890123456789012345678901234567890123"
+             "4567890123456789012345678901234567890123456789012345678901234567") };
         for (size_t n = 0; n < 7 && ok; n++) {
             for (size_t v = 0; v < 4 && ok; v++) {
                 for (int ty = 0; ty <= 8 && ok; ty++) {

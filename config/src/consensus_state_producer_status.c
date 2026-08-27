@@ -6,6 +6,7 @@
 #include "storage/consensus_db.h"    /* consensus_db_kernel_store_path */
 #include "storage/consensus_state_bundle_codec.h"
 #include "storage/cure_progress_read.h"
+#include "base/text_fit.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -18,7 +19,7 @@
 static bool status_set_err(char *err, size_t err_size, const char *msg)
 {
     if (err && err_size)
-        snprintf(err, err_size, "%s", msg);
+        (void)zcl_text_fit(err, err_size, msg, "producer_status", "error");
     return false; /* raw-return-ok:bounded status reason returned to caller */
 }
 
@@ -540,7 +541,7 @@ bool consensus_state_producer_status_read(const char *datadir,
     struct stat stbuf;
     if (stat(path, &stbuf) != 0) {
         if (errno != ENOENT) {
-            char why[256];
+            char why[1400];
             snprintf(why, sizeof(why), "producer status: stat %s: %s", path,
                      strerror(errno));
             return status_set_err(err, err_size, why);
@@ -555,7 +556,7 @@ bool consensus_state_producer_status_read(const char *datadir,
     sqlite3 *db = NULL;
     if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
         const char *message = db ? sqlite3_errmsg(db) : "open failed";
-        char why[256];
+        char why[1400];
         snprintf(why, sizeof(why), "producer status: open %s: %s", path,
                  message);
         if (db)

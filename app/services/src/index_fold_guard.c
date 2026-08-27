@@ -109,11 +109,8 @@ bool index_fold_disk_ok(const char *index_id, const char *subsys,
         struct blocker_record r;
         char reason[BLOCKER_REASON_MAX];
         snprintf(reason, sizeof(reason),
-                 "disk headroom too low to start/continue the %s backfill: "
-                 "free=%lld bytes, floor=%lld bytes, disk_monitor_critical=%d "
-                 "on %s — holding the index fold so consensus writes keep their "
-                 "last bytes. Auto-clears when free space returns above the "
-                 "floor; free space (or -%s=0 to disable this index).",
+                 "%.32s backfill held: free=%lld floor=%lld critical=%d "
+                 "path=%.80s; free space or disable with -%.32s=0",
                  index_id, (long long)free_bytes, (long long)floor,
                  (int)critical, datadir, index_id);
         if (blocker_init(&r, id, subsys, BLOCKER_RESOURCE, reason))
@@ -230,13 +227,9 @@ void index_fold_note_absent_body(const char *index_id, const char *subsys,
     struct blocker_record r;
     char reason[BLOCKER_REASON_MAX];
     snprintf(reason, sizeof(reason),
-             "%s backfill cannot fold at height %lld: the block body is absent "
-             "at/below the snapshot-seed floor (reducer_trusted_base_height=%lld). "
-             "Bodies below the seed were never downloaded on this snapshot-seeded "
-             "datadir, so this rebuildable index has no source. Not an error and "
-             "not a consensus stall. A PERSON decides: backfill the pre-seed "
-             "bodies (costs time+bandwidth) or accept partial coverage (-%s=0). "
-             "See operator_decision in `dumpstate blocker`.",
+             "%.32s missing body at height %lld, seed floor=%lld; backfill "
+             "pre-seed bodies or accept partial coverage (-%.32s=0); see "
+             "operator_decision in dumpstate blocker",
              index_id, (long long)absent_height, (long long)seed_floor,
              index_id);
     /* No escape action and no retry budget, deliberately and explicitly: there
@@ -291,13 +284,9 @@ void index_fold_declare_partial_coverage(const char *index_id,
     struct blocker_record r;
     char reason[BLOCKER_REASON_MAX];
     snprintf(reason, sizeof(reason),
-             "%s covers heights %lld and up ONLY. This datadir was seeded from "
-             "a UTXO snapshot at reducer_trusted_base_height=%lld, so bodies "
-             "below that floor were never downloaded and this projection has no "
-             "source for them. The index has adopted the floor as its declared "
-             "base (base_height/base_digest travel with the digest) and folds "
-             "forward normally — it is NOT stalled. A PERSON decides whether to "
-             "backfill the pre-seed bodies. See operator_decision.",
+             "%.32s partial coverage from height %lld, seed floor=%lld; "
+             "pre-seed bodies are absent, the index is not stalled; see "
+             "operator_decision in dumpstate blocker",
              index_id, (long long)base_height, (long long)seed_floor);
     /* No escape action and no retry budget, deliberately: the node cannot
      * conjure bodies it never downloaded, and fabricating rows for them would
@@ -340,17 +329,9 @@ void index_fold_note_unreadable_body(const char *index_id, const char *subsys,
     struct blocker_record r;
     char reason[BLOCKER_REASON_MAX];
     snprintf(reason, sizeof(reason),
-             "%s backfill cannot fold at height %lld: the block index flags "
-             "BLOCK_HAVE_DATA and names an (nFile,nDataPos), but the bytes "
-             "there do not read back as that block — a torn import, or a "
-             "blk*.dat shared with a foreign writer that overwrote the "
-             "indexed record. %llu consecutive re-reads have failed "
-             "identically; nothing in this process repairs a height this far "
-             "below the fold frontier, so the retry is now backed off rather "
-             "than run every tick. A PERSON decides: re-point the index at a "
-             "surviving copy (block_index_repair_pos_from_disk), clear "
-             "HAVE_DATA so the body is re-fetched, or accept partial "
-             "coverage. See operator_decision in `dumpstate blocker`.",
+             "%.32s body unreadable at height %lld after %llu attempts; "
+             "repair its position, clear HAVE_DATA to refetch, or accept "
+             "partial coverage; see operator_decision in dumpstate blocker",
              index_id, (long long)height, (unsigned long long)attempts);
     /* No escape action and no retry budget, deliberately: the node cannot
      * re-derive bytes that are not on disk, and the ONE thing it could try

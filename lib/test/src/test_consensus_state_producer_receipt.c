@@ -318,8 +318,8 @@ static bool pr_seed_fold_rows(sqlite3 *db, uint8_t hash[2][32], uint8_t nf[32])
         "height,block_hash,ok,status,source_epoch_digest) "
         "VALUES(?,?,1,'verified',(SELECT value FROM progress_meta WHERE key='"
         CONSENSUS_STATE_SOURCE_EPOCH_META_KEY "'))",
-        "INSERT INTO utxo_apply_delta(height,branch_hash,spent_blob,added_blob) "
-        "VALUES(?,?,X'',X'')",
+        ("INSERT INTO utxo_apply_delta(height,branch_hash,spent_blob,added_blob) "
+         "VALUES(?,?,X'',X'')"),
     };
     for (size_t table = 0; table < sizeof(hash_sql) / sizeof(hash_sql[0]);
          table++) {

@@ -607,7 +607,7 @@ static int t_store(void)
              vcs_badge_policy_load(zcode, &policy) &&
                  memcmp(policy.issuer_pubkey, issuer_pk.vch, 33) == 0);
 
-    struct vcs_badge b1, b2, b3;
+    struct vcs_badge b1 = {0}, b2 = {0}, b3 = {0};
     ZB_CHECK("store: badges built",
              zb_make_badge(&issuer_sk, issuer_pk.vch, c_pk.vch,
                            VCS_BADGE_FIRST_PACKAGE, VCS_BADGE_PERIOD_NONE,

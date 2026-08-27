@@ -643,6 +643,10 @@ struct zcl_result vault_read_snapshot(struct node_db *ndb,
 
     for (size_t i = 0; i < VAULT_CLASS_COUNT; i++) {
         const struct vault_collector *c = &g_collectors[i];
+        if ((unsigned)c->cls >= VAULT_CLASS_COUNT) {
+            free(ids);
+            return ZCL_ERR(-4, "vault collector class is out of range");
+        }
         struct vault_row *row = &out->rows[c->cls];
 
         row_begin(row, c->cls);

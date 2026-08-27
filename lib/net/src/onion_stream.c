@@ -9,6 +9,7 @@
  * most MAX_OUTBOUND_ONION such threads exist at once. */
 
 #define _DEFAULT_SOURCE   /* usleep, MSG_NOSIGNAL */
+#include "base/compiler.h"
 #include "net/onion_stream.h"
 #include "net/onion_stream_telemetry.h"
 #include "net/onion_v3_address.h"
@@ -41,10 +42,10 @@ typedef void (*dynhost_stream_read_fn)(dynhost_stream_t *, const uint8_t *,
 typedef void (*dynhost_stream_event_fn)(dynhost_stream_t *, int, void *);
 extern dynhost_stream_t *dynhost_stream_open(const char *onion,
     uint16_t port, dynhost_stream_read_fn, dynhost_stream_event_fn,
-    void *ctx, int timeout_secs) __attribute__((weak));
+    void *ctx, int timeout_secs) ZCL_WEAK_IMPORT;
 extern int dynhost_stream_write(dynhost_stream_t *, const uint8_t *, size_t)
-    __attribute__((weak));
-extern void dynhost_stream_close(dynhost_stream_t *) __attribute__((weak));
+    ZCL_WEAK_IMPORT;
+extern void dynhost_stream_close(dynhost_stream_t *) ZCL_WEAK_IMPORT;
 
 /* Inbound (Tor → app) staging cap, mirroring the fork's own 4 MiB write
  * queue bound. A peer that outruns our reactor by more than this is torn

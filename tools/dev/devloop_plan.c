@@ -8,6 +8,7 @@
 #include "crypto/sha3.h"
 #include "hotswap/hotswap_module.h"
 #include "hotswap/hotswap_service.h"
+#include "platform/file_watch_compat.h"
 #include "services/dev_reflex_policy_service.h"
 #include "test_group_catalog.h"
 #include "util/safe_alloc.h"
@@ -16,7 +17,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/inotify.h>
 #include <unistd.h>
 
 struct hotswap_eligible_entry {

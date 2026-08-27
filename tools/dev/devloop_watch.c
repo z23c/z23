@@ -15,6 +15,7 @@
 #include "crypto/sha3.h"
 #include "hotswap/hotswap_service.h"
 #include "json/json.h"
+#include "platform/file_watch_compat.h"
 #include "platform/time_compat.h"
 
 #include <dirent.h>
@@ -27,7 +28,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
-#include <sys/inotify.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>

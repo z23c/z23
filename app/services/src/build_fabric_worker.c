@@ -127,31 +127,48 @@ static struct zcl_result bfw_paths_init(const char *workspace,
     n = snprintf(p->work, sizeof(p->work), "%s/%s", base, lease_id);
     if (n <= 0 || (size_t)n >= sizeof(p->work) || mkdir(p->work, 0700) != 0)
         return ZCL_ERR(-1, "lease work directory exists or cannot be created");
-    (void)snprintf(p->src, sizeof(p->src), "%s/src", p->work);
-    (void)snprintf(p->build, sizeof(p->build), "%s/build", p->work);
+    int src_len = snprintf(p->src, sizeof(p->src), "%s/src", p->work);
+    int build_len = snprintf(p->build, sizeof(p->build), "%s/build", p->work);
+    if (src_len <= 0 || (size_t)src_len >= sizeof(p->src) ||
+        build_len <= 0 || (size_t)build_len >= sizeof(p->build))
+        return ZCL_ERR(-1, "isolated source/output path too long");
     if (mkdir(p->src, 0700) != 0 || mkdir(p->build, 0700) != 0)
         return ZCL_ERR(-1, "cannot create isolated source/output directories");
     if (strcmp(kind, VCS_BUILD_ACTION_KIND_V1) == 0) {
-        (void)snprintf(p->input, sizeof(p->input), "%s/unit.i", p->src);
-        (void)snprintf(p->output, sizeof(p->output), "%s/%s", p->build,
-                       VCS_BUILD_OUTPUT_V1);
+        n = snprintf(p->input, sizeof(p->input), "%s/unit.i", p->src);
+        int output_len = snprintf(p->output, sizeof(p->output), "%s/%s",
+                                  p->build, VCS_BUILD_OUTPUT_V1);
+        if (n <= 0 || (size_t)n >= sizeof(p->input) || output_len <= 0 ||
+            (size_t)output_len >= sizeof(p->output))
+            return ZCL_ERR(-1, "compile action path too long");
     } else if (strcmp(kind, VCS_BUILD_ACTION_KIND_TEST_V1) == 0) {
-        (void)snprintf(p->input, sizeof(p->input), "%s/test.bin", p->build);
-        (void)snprintf(p->output, sizeof(p->output), "%s/%s", p->build,
-                       VCS_BUILD_TEST_OUTPUT_V1);
+        n = snprintf(p->input, sizeof(p->input), "%s/test.bin", p->build);
+        int output_len = snprintf(p->output, sizeof(p->output), "%s/%s",
+                                  p->build, VCS_BUILD_TEST_OUTPUT_V1);
+        if (n <= 0 || (size_t)n >= sizeof(p->input) || output_len <= 0 ||
+            (size_t)output_len >= sizeof(p->output))
+            return ZCL_ERR(-1, "test action path too long");
     } else if (strcmp(kind, VCS_BUILD_ACTION_KIND_FUZZ_V1) == 0) {
-        (void)snprintf(p->input, sizeof(p->input), "%s/fuzz.bin", p->build);
-        (void)snprintf(p->output, sizeof(p->output), "%s/%s", p->build,
-                       VCS_BUILD_FUZZ_OUTPUT_V1);
+        n = snprintf(p->input, sizeof(p->input), "%s/fuzz.bin", p->build);
+        int output_len = snprintf(p->output, sizeof(p->output), "%s/%s",
+                                  p->build, VCS_BUILD_FUZZ_OUTPUT_V1);
+        if (n <= 0 || (size_t)n >= sizeof(p->input) || output_len <= 0 ||
+            (size_t)output_len >= sizeof(p->output))
+            return ZCL_ERR(-1, "fuzz action path too long");
     } else if (strcmp(kind, VCS_BUILD_ACTION_KIND_PACKAGE_V1) == 0) {
-        (void)snprintf(p->emit, sizeof(p->emit), "%s/emit", p->work);
-        (void)snprintf(p->recipe, sizeof(p->recipe), "%s/recipe.v1",
-                       p->work);
+        n = snprintf(p->emit, sizeof(p->emit), "%s/emit", p->work);
+        int recipe_len = snprintf(p->recipe, sizeof(p->recipe),
+                                  "%s/recipe.v1", p->work);
+        if (n <= 0 || (size_t)n >= sizeof(p->emit) || recipe_len <= 0 ||
+            (size_t)recipe_len >= sizeof(p->recipe))
+            return ZCL_ERR(-1, "package action path too long");
         if (mkdir(p->emit, 0700) != 0)
             return ZCL_ERR(-1, "cannot create package emit directory");
-        (void)snprintf(p->input, sizeof(p->input), "%s", p->recipe);
-        (void)snprintf(p->output, sizeof(p->output), "%s/%s", p->emit,
-                       VCS_BUILD_PACKAGE_OUTPUT_V1);
+        memcpy(p->input, p->recipe, (size_t)recipe_len + 1);
+        int output_len = snprintf(p->output, sizeof(p->output), "%s/%s",
+                                  p->emit, VCS_BUILD_PACKAGE_OUTPUT_V1);
+        if (output_len <= 0 || (size_t)output_len >= sizeof(p->output))
+            return ZCL_ERR(-1, "package output path too long");
     } else {
         return ZCL_ERR(-1, "worker action kind has no fixed executor");
     }
