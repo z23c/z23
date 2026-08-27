@@ -30,6 +30,11 @@ size_t EncodeBase32(const unsigned char *data, size_t len, char *out, size_t out
 
 void HexStr(const unsigned char *data, size_t len, bool spaces, char *out, size_t out_size);
 
+/* Which encoder HexStr dispatches to. Stable after the first call: either
+ * "scalar" or the acceleration tier that won the known-answer gate against the
+ * portable reference. Mirrors zcl_crc32c_impl_name(). */
+const char *HexStr_impl_name(void);
+
 bool ParseInt32(const char *str, int32_t *out);
 
 bool ParseFixedPoint(const char *val, int decimals, int64_t *amount_out);

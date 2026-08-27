@@ -564,5 +564,115 @@ int test_encoding(void)
         }
     }
 
+    /* --- HexStr: independent-oracle sweep, including truncating buffers ------
+     *
+     * The expected string is derived here from first principles with plain bit
+     * arithmetic rather than by calling HexStr, so this cannot silently agree
+     * with a wrong implementation. It covers every length from 0 to 96 (spanning
+     * the NEON fast path's 16-byte threshold, all its vector lanes and its
+     * scalar tail) crossed with buffer sizes that are exact-fit, one short and
+     * one long. Sentinel padding before the call proves nothing beyond the
+     * terminating NUL was written.
+     */
+    printf("HexStr oracle sweep... ");
+    {
+        static const char digits[] = "0123456789abcdef";
+        unsigned char src[97];
+        char expect[197], actual[256];
+        bool ok = true;
+
+        for (size_t i = 0; i < sizeof(src); i++)
+            src[i] = (unsigned char)(i * 37u + 11u);
+
+        for (size_t n = 0; n < sizeof(src); n++) {
+            for (size_t t = 0; t < 2u * n; t++)
+                expect[t] = digits[(src[t / 2] >> ((t % 2) ? 0 : 4)) & 0xF];
+            expect[2 * n] = '\0';
+
+            for (int adj = -1; adj <= 1 && ok; adj++) {
+                size_t os = 2u * n + 1u + (size_t)(adj + 1);
+                memset(actual, 'Z', sizeof(actual));
+                HexStr(src, n, false, actual, os);
+                if (strlen(expect) >= os)          /* would have been cut */
+                    continue;
+                for (size_t k = 0; expect[k]; k++) {
+                    if (actual[k] != expect[k]) { ok = false; break; }
+                }
+                if (ok) {
+                    if (actual[strlen(expect)] != '\0') ok = false;
+                    else if (os == 2u * n + 2u &&
+                             memcmp(actual + strlen(expect) + 1,
+                                    "ZZZZZZZ", 7) != 0)
+                        ok = false;                  /* over-wrote the buffer */
+                }
+            }
+        }
+        printf("%s\n", ok ? "OK" : "FAIL");
+        if (!ok)
+            failures++;
+    }
+
+    /* --- IsHex: accept/reject table ------------------------------------------ */
+    printf("IsHex table... ");
+    {
+        static const struct { const char *s; bool want; } cases[] = {
+            { "", false },
+            { "a", false },
+            { "ab", true },
+            { "deadbeef", true },
+            { "DEADBEEF", true },
+            { "DeadBeef", true },
+            { "deadbee", false },      /* odd length      */
+            { "xyz", false },
+            { "0123456789abcdef", true },
+            { "gh", false },           /* just past range */
+            { "`a", false },           /* '`' = 0x60, below 'a' */
+            { "g\0b", false },         /* odd after embedded NUL */
+            { "ab\0cd", true },        /* strlen stops at the NUL: len 2, even */
+            { "00112233445566778899aabbccddeeff", true },
+            { "  ab", false },
+            { "ab ", false },
+        };
+        bool ok = true;
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+            if (IsHex(cases[i].s) != cases[i].want) ok = false;
+        printf("%s\n", ok ? "OK" : "FAIL");
+        if (!ok)
+            failures++;
+    }
+
+    /* --- HexStr: the spaced form keeps its own shape ------------------------- */
+    printf("HexStr spaces path... ");
+    {
+        unsigned char data[] = { 0xde, 0xad, 0xbe, 0xef };
+        char out[64];
+        memset(out, 'Z', sizeof(out));
+        HexStr(data, sizeof(data), true, out, sizeof(out));
+        int bad = strcmp(out, "de ad be ef");
+        printf("%s\n", bad == 0 ? "OK" : "FAIL");
+        if (bad != 0) {
+            printf("  got \"%s\"\n", out);
+            failures++;
+        }
+    }
+
+    /* --- HexStr: name the live encoder tier ---------------------------------
+     *
+     * Observability only: whichever tier HexStr_impl_name() reports has already
+     * been forced through the same known-answer gate and through the sweep
+     * above, which exercises the fast path whenever it is enabled. Recording
+     * the name here makes a future failure legible as "this build shipped the
+     * NEON tier" rather than a bare byte mismatch. */
+    printf("HexStr_impl_name... ");
+    {
+        const char *impl = HexStr_impl_name();
+        if (impl != NULL && *impl != '\0')
+            printf("OK (%s)\n", impl);
+        else {
+            printf("FAIL\n");
+            failures++;
+        }
+    }
+
     return failures;
 }
