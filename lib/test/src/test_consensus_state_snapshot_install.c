@@ -2102,6 +2102,10 @@ int test_consensus_state_snapshot_install(void)
     char moved_path[sizeof(b.path) + 16];
     snprintf(moved_path, sizeof(moved_path), "%s-moved", b.path);
     unlink(moved_path);
+    /* Some supported filesystems expose second-granularity ctime. Cross one
+     * complete tick so the metadata-receipt assertion is deterministic even
+     * when admission and rename otherwise land in the same timestamp. */
+    sleep(1);
     CSI_CHECK("admitted artifact can be renamed after descriptor pin",
               rename(b.path, moved_path) == 0);
     FILE *replacement = fopen(b.path, "wb");
