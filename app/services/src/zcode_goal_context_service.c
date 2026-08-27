@@ -229,7 +229,12 @@ struct zcl_result zcode_goal_context_select(
                 (void)snprintf(out->why, sizeof(out->why), "%s",
                                out->candidates[0].why);
             else
-                (void)snprintf(out->why, sizeof(out->why), "%.31s:%.31s",
+                /* The token is free text and degrades gracefully when cut;
+                 * `why` is a closed-set composite whose longest value is
+                 * "name+signature+path+documentation" (33), and a clipped
+                 * composite names no member of that vocabulary. Spend the
+                 * 63 usable bytes accordingly: 29 + : + 33. */
+                (void)snprintf(out->why, sizeof(out->why), "%.29s:%.33s",
                                out->candidates[0].matched_token,
                                out->candidates[0].why);
         }
