@@ -110,6 +110,68 @@ static void sha3_512_x4_avx512(const uint8_t key[32], const uint8_t nonce[32],
 
 #endif /* __x86_64__ */
 
+#if defined(__aarch64__)
+
+/* The arm64 twin of sha3_512_x4_avx512: same keystream geometry — 72-byte
+ * input blocks (key||nonce||counter fill the SHA3-512 rate exactly), two
+ * permutations (full rate block, then the pad block), 64 bytes squeezed per
+ * lane. Four batched instances held as two 25-word uint64x2_t arrays
+ * (instance k in slot k of st_a, instance 2+k in slot k of st_b), permutation
+ * shared with sha3_256_x4_neon via keccak_x4_internal.h. Reached only when
+ * keccak_x4_available() confirms FEAT_SHA3. */
+static void sha3_512_x4_neon(const uint8_t key[32], const uint8_t nonce[32],
+                             uint64_t counter_base, uint8_t out[256])
+{
+    /* Build 4 input blocks with consecutive counters */
+    uint8_t inputs[4][72];
+    for (int i = 0; i < 4; i++) {
+        memcpy(inputs[i], key, 32);
+        memcpy(inputs[i] + 32, nonce, 32);
+        uint64_t ctr = counter_base + (uint64_t)i;
+        memcpy(inputs[i] + 64, &ctr, 8);
+    }
+
+    uint64x2_t st_a[25], st_b[25];
+    for (int i = 0; i < 25; ++i) {
+        st_a[i] = vdupq_n_u64(0);
+        st_b[i] = vdupq_n_u64(0);
+    }
+
+    /* Absorb: SHA3-512 rate = 72 bytes = 9 words (slots 0..8); words 9..24
+     * are capacity and are never touched by absorb or pad. */
+    for (int w = 0; w < 9; w++) {
+        uint64_t slot[4] = {0, 0, 0, 0};
+        for (int i = 0; i < 4; i++)
+            memcpy(&slot[i], inputs[i] + w * 8, 8);
+        st_a[w] = veorq_u64(st_a[w], vld1q_u64(slot));
+        st_b[w] = veorq_u64(st_b[w], vld1q_u64(slot + 2));
+    }
+
+    /* Two-permutation finalization, identical to scalar sha3_512_finalize:
+     * permute the full rate block, then absorb the pad block (domain 0x06 at
+     * rate byte 0 = word 0 low byte; pad10*1 terminator 0x80 at rate byte 71
+     * = word 8, bit 63) and permute again. */
+    keccak_x4_permute_neon(st_a, st_b);
+    st_a[0] = veorq_u64(st_a[0], vdupq_n_u64(0x06));
+    st_b[0] = veorq_u64(st_b[0], vdupq_n_u64(0x06));
+    st_a[8] = veorq_u64(st_a[8], vdupq_n_u64(0x8000000000000000ULL));
+    st_b[8] = veorq_u64(st_b[8], vdupq_n_u64(0x8000000000000000ULL));
+    keccak_x4_permute_neon(st_a, st_b);
+
+    /* Squeeze: first 8 words (64 bytes) of each lane. */
+    for (int w = 0; w < 8; w++) {
+        uint64_t lo[2], hi[2];
+        vst1q_u64(lo, st_a[w]);
+        vst1q_u64(hi, st_b[w]);
+        for (int i = 0; i < 4; i++) {
+            uint64_t v = (i < 2) ? lo[i] : hi[i - 2];
+            memcpy(out + i * 64 + w * 8, &v, 8);
+        }
+    }
+}
+
+#endif /* __aarch64__ */
+
 /* ── Runtime dispatch ─────────────────────────────────────────────
  *
  * Selected once at first use. AVX-512 is the shipped default: measured 1.65x
@@ -136,6 +198,11 @@ static void x4_init_default(void)
         g_x4 = sha3_512_x4_avx512;
     else
         g_x4 = sha3_512_x4_scalar;
+#elif defined(__aarch64__)
+    if (keccak_x4_available())
+        g_x4 = sha3_512_x4_neon;
+    else
+        g_x4 = sha3_512_x4_scalar;
 #else
     g_x4 = sha3_512_x4_scalar;
 #endif
@@ -160,11 +227,24 @@ int sha3_512_x4_select_impl(enum sha3_impl which)
         g_x4 = sha3_512_x4_scalar;
         g_x4_inited = 1;
         return SHA3_IMPL_SCALAR;
+    case SHA3_IMPL_NEON:
+#if defined(__aarch64__)
+        if (keccak_x4_available()) {
+            g_x4 = sha3_512_x4_neon;
+            g_x4_inited = 1;
+            return SHA3_IMPL_NEON;
+        }
+#endif
+        g_x4 = sha3_512_x4_scalar;
+        g_x4_inited = 1;
+        return SHA3_IMPL_SCALAR;
     case SHA3_IMPL_AUTO:
     default:
         x4_init_default();
 #if defined(__x86_64__)
         return (g_x4 == sha3_512_x4_avx512) ? SHA3_IMPL_AVX512 : SHA3_IMPL_SCALAR;
+#elif defined(__aarch64__)
+        return (g_x4 == sha3_512_x4_neon) ? SHA3_IMPL_NEON : SHA3_IMPL_SCALAR;
 #else
         return SHA3_IMPL_SCALAR;
 #endif
