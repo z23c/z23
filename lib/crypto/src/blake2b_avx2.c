@@ -6,13 +6,22 @@
  *
  * Vectorized BLAKE2b compression for Equihash verification.
  *
- * 3-tier dispatch:
- *   Tier 1: AVX-512F — 8-way parallel BLAKE2b (8 blocks per call)
- *   Tier 2: AVX2     — 4-way parallel BLAKE2b (4 blocks per call)
- *   Tier 3: Scalar   — standard sequential BLAKE2b
+ * x86-64 — 3-tier dispatch:
+ *   Tier 2: AVX-512F — 8-way parallel BLAKE2b (8 blocks per call)
+ *   Tier 1: AVX2     — 4-way parallel BLAKE2b (4 blocks per call)
+ *   Tier 0: Scalar   — standard sequential BLAKE2b
+ * arm64  — 2-tier dispatch (tier 2 has no NEON counterpart):
+ *   Tier 1: NEON     — 4-way parallel BLAKE2b (4 blocks per call)
+ *   Tier 0: Scalar   — the same sequential BLAKE2b
  *
- * Runtime CPUID detection. Equihash (200,9) needs 512 independent
- * BLAKE2b hashes per block — perfect for wide SIMD batching.
+ * Runtime gating. Equihash (200,9) needs 512 independent BLAKE2b hashes per
+ * block — perfect for wide SIMD batching. On x86 the gate is the audited
+ * CPUID/OSXSAVE/XCR0 predicate in crypto/simd_dispatch.h. On arm64 NEON is
+ * part of the base ABI — there is no "does the OS save these registers?"
+ * question and no CPUID to ask — so the gate there is a ONE-TIME KAT: the
+ * 4-way NEON compress runs four fixed vectors and its states are compared
+ * against the portable sequential implementation; a single divergent byte
+ * downgrades the process to scalar for its whole life.
  */
 
 #include "crypto/blake2b.h"
@@ -23,8 +32,14 @@
 #if defined(__x86_64__) || defined(__i386__) || defined(_M_X64)
 #include <immintrin.h>
 #define ZCL_BLAKE2B_X86_SIMD 1
+#define ZCL_BLAKE2B_ARM_NEON 0
+#elif defined(__aarch64__)
+#include <arm_neon.h>
+#define ZCL_BLAKE2B_X86_SIMD 0
+#define ZCL_BLAKE2B_ARM_NEON 1
 #else
 #define ZCL_BLAKE2B_X86_SIMD 0
+#define ZCL_BLAKE2B_ARM_NEON 0
 #endif
 
 /* ── Runtime CPU feature detection ───────────────────────────── */
@@ -45,11 +60,22 @@
  * to scalar for the life of the process — on the Equihash PoW path, which runs
  * on both the reducer ingest thread and background validation. Correctness was
  * never at risk (scalar is the reference); the accelerator was. */
-static _Atomic bool g_cap_avx2 = false;
-static _Atomic bool g_cap_avx512f = false;
+/* Declared on every arch so the arch-shared select/implementation functions
+ * below stay one function each; only the arch that owns a tier ever stores to
+ * or reads its capability flag, so the flags the running arch lacks compile as
+ * deliberately unused rather than being #if'd away per arch. */
+__attribute__((unused)) static _Atomic bool g_cap_avx2 = false;
+__attribute__((unused)) static _Atomic bool g_cap_avx512f = false;
 static _Atomic bool g_use_avx2 = false;
 static _Atomic bool g_use_avx512f = false;
+__attribute__((unused)) static _Atomic bool g_cap_neon = false;
+static _Atomic bool g_use_neon = false;
 static _Atomic bool g_detected = false;
+
+#if ZCL_BLAKE2B_ARM_NEON
+/* The one-time gate, defined next to the NEON compressor it guards. */
+static bool blake2b_neon_kat(void);
+#endif
 
 static void detect_features(void)
 {
@@ -70,13 +96,26 @@ static void detect_features(void)
     atomic_store_explicit(&g_cap_avx512f, avx512f, memory_order_relaxed);
     atomic_store_explicit(&g_use_avx2, avx2, memory_order_relaxed);
     atomic_store_explicit(&g_use_avx512f, avx512f, memory_order_relaxed);
+#elif ZCL_BLAKE2B_ARM_NEON
+    /* Nothing to ask the hardware: NEON is in the arm64 base ABI, its register
+     * state is saved on every context switch by definition, and there is no
+     * CPUID/XCR0 to read (crypto/simd_dispatch.h is x86-only by construction).
+     * What CAN still be wrong is the code — a wrong lane order, a bad rotate,
+     * a mis-transposed message word — and a wrong vector digest on the Equihash
+     * PoW path is a fork, not a crash. So the capability is proven, not
+     * assumed: run the 4-way NEON compress on four fixed vectors and require
+     * bit-identity with the portable sequential implementation. Anything else
+     * leaves this process on scalar forever. */
+    bool neon = blake2b_neon_kat();
+    atomic_store_explicit(&g_cap_neon, neon, memory_order_relaxed);
+    atomic_store_explicit(&g_use_neon, neon, memory_order_relaxed);
 #endif
     atomic_store_explicit(&g_detected, true, memory_order_release);
 }
 
 /* ── Constants ───────────────────────────────────────────────── */
 
-#if ZCL_BLAKE2B_X86_SIMD
+#if ZCL_BLAKE2B_X86_SIMD || ZCL_BLAKE2B_ARM_NEON
 static const uint64_t IV[8] = {
     0x6a09e667f3bcc908ULL, 0xbb67ae8584caa73bULL,
     0x3c6ef372fe94f82bULL, 0xa54ff53a5f1d36f1ULL,
@@ -99,6 +138,7 @@ static const uint8_t SIGMA[12][16] = {
     {14,10, 4, 8, 9,15,13, 6, 1,12, 0, 2,11, 7, 5, 3},
 };
 
+#if ZCL_BLAKE2B_X86_SIMD
 /* ══════════════════════════════════════════════════════════════
  *  AVX-512F: 8-way parallel BLAKE2b compression
  * ══════════════════════════════════════════════════════════════ */
@@ -271,10 +311,255 @@ static void blake2b_compress_4way(
             c[j]->h[i] ^= out[j];
     }
 }
-#endif
+#endif /* ZCL_BLAKE2B_X86_SIMD */
+
+#if ZCL_BLAKE2B_ARM_NEON
+/* ══════════════════════════════════════════════════════════════
+ *  NEON: 4-way parallel BLAKE2b compression
+ *
+ *  NEON has no 256-bit vector: a 64-bit-lane value lives in a 128-bit
+ *  uint64x2_t, so FOUR parallel states need a PAIR of registers per state
+ *  word. The batch layout here is therefore
+ *
+ *      u64x4  v[i] = { v.lo = {state0.word[i], state1.word[i]},
+ *                      v.hi = {state2.word[i], state3.word[i]} }
+ *
+ *  — state j of the batch is lane (j % 2) of the (j < 2 ? lo : hi) register,
+ *  in order, with no permute anywhere in the round function. Bit-identity
+ *  with the scalar reference is structural: every scalar operation maps to
+ *  the same operation applied to .lo and .hi, and the two halves never talk
+ *  to each other. The cost of the missing 256-bit width is exactly 2x the
+ *  instruction count per 4-lane operation; what the pair layout buys over a
+ *  2-way batch is not per-instruction throughput but a full 4-state round
+ *  with one spill set, the shape the shared batch entry points hand us.
+ *
+ *  The four BLAKE2b rotations, per 128-bit half:
+ *    32 — vrev64.32s: the two 32-bit halves of each 64-bit lane swap, which
+ *         IS rotate-right-32. One instruction.
+ *    24 — vqtbl1q_u8 with the same per-lane byte-forward mask the AVX2 code
+ *         builds with pshufb: result byte i = source byte (i+3) mod 8.
+ *    16 — vqtbl1q_u8, result byte i = source byte (i+2) mod 8.
+ *    63 — VSRI #63 inserts x>>63 under the low bit of (x+x), which is
+ *         rotate-left-1, which IS rotate-right-63. Two instructions.
+ *  Every one of these is an ARMv8.0-A baseline instruction, so the tier needs
+ *  no -march and no target attribute to compile. NEON register state is saved
+ *  on every context switch by the base ABI, which is why this file needs no
+ *  XSAVE-style OS-support probe for it (see check-simd-os-support, whose scan
+ *  is x86 target("avx…") attributes for exactly that reason).
+ * ══════════════════════════════════════════════════════════════ */
+
+typedef struct { uint64x2_t lo, hi; } u64x4;   /* lo: states 0,1  hi: states 2,3 */
+
+static inline u64x4 u64x4_add(u64x4 a, u64x4 b)
+{
+    u64x4 r;
+    r.lo = vaddq_u64(a.lo, b.lo);
+    r.hi = vaddq_u64(a.hi, b.hi);
+    return r;
+}
+
+static inline u64x4 u64x4_xor(u64x4 a, u64x4 b)
+{
+    u64x4 r;
+    r.lo = veorq_u64(a.lo, b.lo);
+    r.hi = veorq_u64(a.hi, b.hi);
+    return r;
+}
+
+static inline u64x4 u64x4_splat(uint64_t x)
+{
+    u64x4 r;
+    r.lo = vdupq_n_u64(x);
+    r.hi = vdupq_n_u64(x);
+    return r;
+}
+
+/* Whole-byte rotates: vqtbl1q_u8 indexes a 16-byte table, and the byte index
+ * for lane 1 is lane 0's plus 8 — the same two-lane shape pshufb wants. */
+static inline uint64x2_t rot64_bytes(uint64x2_t x, const uint8_t idx[16])
+{
+    uint8x16_t tbl;
+    memcpy(&tbl, idx, 16);
+    return vreinterpretq_u64_u8(vqtbl1q_u8(vreinterpretq_u8_u64(x), tbl));
+}
+
+static inline uint64x2_t rot64_32(uint64x2_t x)
+{
+    return vreinterpretq_u64_u32(vrev64q_u32(vreinterpretq_u32_u64(x)));
+}
+
+static inline uint64x2_t rot64_24(uint64x2_t x)
+{
+    static const uint8_t idx[16] = {
+        3, 4, 5, 6, 7, 0, 1, 2,  11, 12, 13, 14, 15, 8, 9, 10
+    };
+    return rot64_bytes(x, idx);
+}
+
+static inline uint64x2_t rot64_16(uint64x2_t x)
+{
+    static const uint8_t idx[16] = {
+        2, 3, 4, 5, 6, 7, 0, 1,  10, 11, 12, 13, 14, 15, 8, 9
+    };
+    return rot64_bytes(x, idx);
+}
+
+static inline uint64x2_t rot64_63(uint64x2_t x)
+{
+    /* VSRI keeps the top 63 bits of (x+x) and inserts x>>63 into bit 0:
+     * exactly rotr64(x, 63) — there is no ror-by-imm on 64-bit NEON lanes. */
+    return vsriq_n_u64(vaddq_u64(x, x), x, 63);
+}
+
+static inline u64x4 u64x4_rot(u64x4 x, unsigned n)
+{
+    u64x4 r;
+    switch (n) {
+    case 32: r.lo = rot64_32(x.lo); r.hi = rot64_32(x.hi); break;
+    case 24: r.lo = rot64_24(x.lo); r.hi = rot64_24(x.hi); break;
+    case 16: r.lo = rot64_16(x.lo); r.hi = rot64_16(x.hi); break;
+    default: r.lo = rot64_63(x.lo); r.hi = rot64_63(x.hi); break;
+    }
+    return r;
+}
+
+#define G4N(r, i, a, b, c, d, m) do { \
+    a = u64x4_add(a, u64x4_add(b, m[SIGMA[r][2*(i)]])); \
+    d = u64x4_rot(u64x4_xor(d, a), 32); \
+    c = u64x4_add(c, d); \
+    b = u64x4_rot(u64x4_xor(b, c), 24); \
+    a = u64x4_add(a, u64x4_add(b, m[SIGMA[r][2*(i)+1]])); \
+    d = u64x4_rot(u64x4_xor(d, a), 16); \
+    c = u64x4_add(c, d); \
+    b = u64x4_rot(u64x4_xor(b, c), 63); \
+} while(0)
+
+#define ROUND4N(r, v, m) do { \
+    G4N(r, 0, v[0], v[4], v[ 8], v[12], m); \
+    G4N(r, 1, v[1], v[5], v[ 9], v[13], m); \
+    G4N(r, 2, v[2], v[6], v[10], v[14], m); \
+    G4N(r, 3, v[3], v[7], v[11], v[15], m); \
+    G4N(r, 4, v[0], v[5], v[10], v[15], m); \
+    G4N(r, 5, v[1], v[6], v[11], v[12], m); \
+    G4N(r, 6, v[2], v[7], v[ 8], v[13], m); \
+    G4N(r, 7, v[3], v[4], v[ 9], v[14], m); \
+} while(0)
+
+static void blake2b_compress_4way_neon(
+    struct blake2b_ctx *c[4], const uint8_t *b[4])
+{
+    u64x4 m[16], v[16];
+
+    /* Lane j of u64x4 m[i] is word i of block j. The byte memcpy is what
+     * makes this identical to the scalar load64: both take the little-endian
+     * value the BLAKE2b block layout specifies. */
+    for (int i = 0; i < 16; i++) {
+        uint64_t w[4];
+        for (int j = 0; j < 4; j++)
+            memcpy(&w[j], b[j] + i * 8, 8);
+        m[i].lo = vld1q_u64(w);
+        m[i].hi = vld1q_u64(w + 2);
+    }
+
+    for (int i = 0; i < 8; i++) {
+        uint64_t h[4];
+        for (int j = 0; j < 4; j++) h[j] = c[j]->h[i];
+        v[i].lo = vld1q_u64(h);
+        v[i].hi = vld1q_u64(h + 2);
+    }
+    for (int i = 0; i < 4; i++)
+        v[8 + i] = u64x4_splat(IV[i]);
+
+    {
+        uint64_t t0[4], t1[4], f0[4], f1[4];
+        for (int j = 0; j < 4; j++) {
+            t0[j] = IV[4] ^ c[j]->t[0];
+            t1[j] = IV[5] ^ c[j]->t[1];
+            f0[j] = IV[6] ^ c[j]->f[0];
+            f1[j] = IV[7] ^ c[j]->f[1];
+        }
+        v[12].lo = vld1q_u64(t0); v[12].hi = vld1q_u64(t0 + 2);
+        v[13].lo = vld1q_u64(t1); v[13].hi = vld1q_u64(t1 + 2);
+        v[14].lo = vld1q_u64(f0); v[14].hi = vld1q_u64(f0 + 2);
+        v[15].lo = vld1q_u64(f1); v[15].hi = vld1q_u64(f1 + 2);
+    }
+
+    ROUND4N(0,v,m);  ROUND4N(1,v,m);  ROUND4N(2,v,m);  ROUND4N(3,v,m);
+    ROUND4N(4,v,m);  ROUND4N(5,v,m);  ROUND4N(6,v,m);  ROUND4N(7,v,m);
+    ROUND4N(8,v,m);  ROUND4N(9,v,m);  ROUND4N(10,v,m); ROUND4N(11,v,m);
+
+    uint64_t out[4];
+    for (int i = 0; i < 8; i++) {
+        u64x4 xr = u64x4_xor(v[i], v[i + 8]);
+        vst1q_u64(out, xr.lo);
+        vst1q_u64(out + 2, xr.hi);
+        for (int j = 0; j < 4; j++)
+            c[j]->h[i] ^= out[j];
+    }
+}
+
+/* ── The one-time gate: NEON output == portable output ──────────
+ *
+ * Four fixed vectors, each a real Equihash-shaped state: personalized init
+ * through the PORTABLE init, a header-shaped prefix absorbed through the
+ * PORTABLE update, then the 4-byte index finalized both ways. The NEON leg is
+ * driven exactly as finalize_states() drives it (same block buffer, same t/f
+ * fields, same compress call) so the gate proves the thing that will actually
+ * run, not a cousin of it. One divergent bit -> the process stays scalar. */
+static bool blake2b_neon_kat(void)
+{
+    static const size_t OUTLEN = 50;   /* p->hash_output for Equihash (200,9) */
+    static const uint8_t pers[BLAKE2B_PERSONALBYTES] = "zcl-neon-kat-v1";
+    struct blake2b_ctx base[4];
+    uint32_t idx[4];
+
+    for (int j = 0; j < 4; j++) {
+        uint8_t salt[BLAKE2B_SALTBYTES] = {0};
+        salt[0] = (uint8_t)(0xA0 + j);
+        if (blake2b_init_salt_personal(&base[j], OUTLEN, NULL, 0, salt, pers) < 0)
+            return false;
+        unsigned char pre[13];
+        for (size_t i = 0; i < sizeof(pre); i++)
+            pre[i] = (unsigned char)(i * 31 + (size_t)j);
+        if (blake2b_update(&base[j], pre, sizeof(pre)) < 0)
+            return false;
+        idx[j] = 0x01020304u + 0x11111111u * (uint32_t)j;
+    }
+
+    struct blake2b_ctx ns[4];
+    uint8_t blocks[4][BLAKE2B_BLOCKBYTES];
+    for (int j = 0; j < 4; j++) {
+        ns[j] = base[j];
+        memset(blocks[j], 0, sizeof(blocks[j]));
+        memcpy(blocks[j], base[j].buf, base[j].buflen);
+        memcpy(blocks[j] + base[j].buflen, &idx[j], sizeof(idx[j]));
+        ns[j].t[0] += base[j].buflen + sizeof(idx[j]);
+        ns[j].t[1] = 0;
+        ns[j].f[0] = (uint64_t)-1;
+    }
+
+    struct blake2b_ctx *cp[4] = {&ns[0], &ns[1], &ns[2], &ns[3]};
+    const uint8_t *bp[4] = {blocks[0], blocks[1], blocks[2], blocks[3]};
+    blake2b_compress_4way_neon(cp, bp);
+
+    for (int j = 0; j < 4; j++) {
+        struct blake2b_ctx s = base[j];
+        unsigned char dig[BLAKE2B_OUTBYTES];
+        if (blake2b_update(&s, &idx[j], sizeof(idx[j])) < 0)
+            return false;
+        if (blake2b_final(&s, dig, OUTLEN) < 0)
+            return false;
+        if (memcmp(ns[j].h, s.h, sizeof(s.h)) != 0)
+            return false;
+    }
+    return true;
+}
+#endif /* ZCL_BLAKE2B_ARM_NEON */
+#endif /* IV + SIGMA shared by the x86 and arm64 compressors */
 
 /* ══════════════════════════════════════════════════════════════
- *  Equihash batch hash generation — 3-tier dispatch
+ *  Equihash batch hash generation — tiered dispatch
+ *  (x86-64: 8-way / 4-way / scalar; arm64: 4-way / scalar)
  * ══════════════════════════════════════════════════════════════ */
 
 /* Internal: finalize N states that share the same base + 4-byte index */
@@ -327,6 +612,45 @@ static void finalize_states(const struct blake2b_ctx *base,
             const uint8_t *bp[4] = {blocks[done],   blocks[done+1],
                                     blocks[done+2], blocks[done+3]};
             blake2b_compress_4way(cp, bp);
+            for (int i = done; i < done + 4; i++)
+                memcpy(hashes[i], states[i].h, hash_len);
+            done += 4;
+        }
+        for (int i = done; i < n; i++) {
+            struct blake2b_ctx s = *base;
+            blake2b_update(&s, &indices[i], sizeof(uint32_t));
+            blake2b_final(&s, hashes[i], hash_len);
+        }
+        return;
+    }
+#elif ZCL_BLAKE2B_ARM_NEON
+    struct blake2b_ctx states[8];
+    uint8_t blocks[8][128];
+    size_t bl = base->buflen;
+
+    for (int i = 0; i < n; i++) {
+        states[i] = *base;
+        memset(blocks[i], 0, 128);
+        memcpy(blocks[i], base->buf, bl);
+        memcpy(blocks[i] + bl, &indices[i], 4);
+        states[i].t[0] += bl + 4;
+        states[i].t[1] = 0;
+        states[i].f[0] = (uint64_t)-1;
+    }
+
+    if (n >= 4 && atomic_load_explicit(&g_use_neon, memory_order_relaxed)) {
+        /* Same group-boundary split as the AVX2 arm above: whole groups of 4
+         * go through the vector unit and the remainder goes through the scalar
+         * reference. Repeating a context into a spare lane would XOR four lane
+         * results into one state — the aliasing bug the AVX2 arm documents —
+         * so the split, not the caller's discipline, is what prevents it. */
+        int done = 0;
+        while (n - done >= 4) {
+            struct blake2b_ctx *cp[4] = {&states[done],   &states[done+1],
+                                         &states[done+2], &states[done+3]};
+            const uint8_t *bp[4] = {blocks[done],   blocks[done+1],
+                                    blocks[done+2], blocks[done+3]};
+            blake2b_compress_4way_neon(cp, bp);
             for (int i = done; i < done + 4; i++)
                 memcpy(hashes[i], states[i].h, hash_len);
             done += 4;
@@ -397,6 +721,7 @@ int equihash_blake2b_batch_select_impl(enum blake2b_batch_impl which)
 {
     detect_features();
 
+#if ZCL_BLAKE2B_X86_SIMD
     const bool cap512 = atomic_load_explicit(&g_cap_avx512f, memory_order_relaxed);
     const bool cap256 = atomic_load_explicit(&g_cap_avx2, memory_order_relaxed);
 
@@ -427,6 +752,32 @@ int equihash_blake2b_batch_select_impl(enum blake2b_batch_impl which)
     if (use512) return BLAKE2B_BATCH_IMPL_AVX512;
     if (use256) return BLAKE2B_BATCH_IMPL_AVX2;
     return BLAKE2B_BATCH_IMPL_SCALAR;
+#elif ZCL_BLAKE2B_ARM_NEON
+    /* Value 1 of the enum names this host's 4-way SIMD tier, which on arm64 is
+     * NEON. Value 2 (the 8-way tier) has no NEON counterpart, so a request for
+     * it NARROWS to the widest tier that exists here — never widened, and
+     * reported as the tier actually installed, exactly as on x86. */
+    const bool cap_neon = atomic_load_explicit(&g_cap_neon, memory_order_relaxed);
+    bool use_neon = false;
+    switch (which) {
+    case BLAKE2B_BATCH_IMPL_SCALAR:
+        break;
+    case BLAKE2B_BATCH_IMPL_AVX2:     /* the 4-way SIMD tier */
+    case BLAKE2B_BATCH_IMPL_AVX512:   /* 8-way: narrowed to the 4-way here */
+        use_neon = cap_neon;
+        break;
+    case BLAKE2B_BATCH_IMPL_AUTO:
+    default:
+        use_neon = cap_neon;
+        break;
+    }
+
+    atomic_store_explicit(&g_use_neon, use_neon, memory_order_relaxed);
+    return use_neon ? BLAKE2B_BATCH_IMPL_AVX2 : BLAKE2B_BATCH_IMPL_SCALAR;
+#else
+    (void)which;
+    return BLAKE2B_BATCH_IMPL_SCALAR;
+#endif
 }
 
 const char *equihash_blake2b_batch_implementation(void)
@@ -436,5 +787,7 @@ const char *equihash_blake2b_batch_implementation(void)
         return "AVX-512 (8-way)";
     if (atomic_load_explicit(&g_use_avx2, memory_order_relaxed))
         return "AVX2 (4-way)";
+    if (atomic_load_explicit(&g_use_neon, memory_order_relaxed))
+        return "NEON (4-way)";
     return "scalar";
 }

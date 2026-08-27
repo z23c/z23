@@ -22,6 +22,7 @@
 #include "services/sync_monitor.h"
 #include "services/file_market_payment_service.h"
 #include "services/market_moderation_service.h"
+#include "services/yardsale_prevout_service.h"
 #include "controllers/sync_controller.h"
 #include "controllers/yardsale_controller.h"
 #include "models/peer.h"
@@ -525,12 +526,23 @@ static void boot_zswap_ceremony_flood(const char *command,
 void boot_wire_zswap_ceremony(struct msg_processor *mp,
                               struct boot_svc_ctx *svc)
 {
-    (void)svc;
     msg_processor_set_zswap_accept_ingest(mp, boot_zswap_accept_ingest,
                                           NULL);
     msg_processor_set_zswap_partial_ingest(mp, boot_zswap_partial_ingest,
                                            NULL);
     yardsale_ceremony_set_flood(boot_zswap_ceremony_flood, mp);
+
+    /* The buyer's chain-content port: a live view over this node's own
+     * confirmed chain + canonical locator DB. Static: the composition
+     * context outlives every ceremony, and this wiring runs once at
+     * boot. Unwired (or a NULL view field), the port fails closed and
+     * the buyer refuses to sign — by design. */
+    static struct yardsale_prevout_view prevout_view;
+    prevout_view.state = svc ? svc->state : NULL;
+    prevout_view.node_db = svc ? svc->node_db : NULL;
+    prevout_view.datadir = svc ? svc->datadir : NULL;
+    yardsale_ceremony_set_prevout_fetch(yardsale_prevout_fetch_confirmed,
+                                        &prevout_view);
 }
 
 bool boot_save_file_service(const uint8_t ip[16],
