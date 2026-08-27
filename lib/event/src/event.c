@@ -824,6 +824,7 @@ void event_install_crash_handler(void)
     sigaction(SIGABRT, &sa, NULL);
     sigaction(SIGBUS, &sa, NULL);
     sigaction(SIGFPE, &sa, NULL);
+    sigaction(SIGILL, &sa, NULL);
 }
 
 /* ── Peer state machine ──────────────────────────────────── */
