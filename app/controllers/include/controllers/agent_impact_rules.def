@@ -1644,3 +1644,7 @@ AGENT_IMPACT_RULE("lib/test/src/test_block_prefetch.c|lib/test/src/test_metavers
  * checkpoint, and the storage telemetry that finally shows the checkpointer
  * that actually runs. They ship as one behaviour, so they run as one set. */
 AGENT_IMPACT_RULE("lib/util/src/wal_checkpoint_stats.c|lib/util/include/util/wal_checkpoint_stats.h|app/models/src/database_modes.c|app/models/include/models/database_internal.h|adapters/outbound/persistence/src/db_maintenance_sqlite.c|adapters/outbound/persistence/include/adapters/outbound/persistence/db_maintenance_sqlite.h|ports/include/ports/db_maintenance_port.h|app/services/src/storage_telemetry_fill.c|lib/util/include/util/telemetry/storage_fields.def|lib/test/src/test_db_maintenance_port.c|lib/test/src/test_telemetry_storage.c", "sqlite db_maintenance_port db_maintenance telemetry_storage telemetry_ontology models health_rollup make_lint_gates")
+/* The yardsale buyer's chain-content port: the prevout service, the
+ * controller ingest that consumes it, and the app lane that exercises
+ * all of it move together. */
+AGENT_IMPACT_RULE("app/services/src/yardsale_prevout_service.c|app/services/include/services/yardsale_prevout_service.h|app/controllers/src/yardsale_controller.c|app/controllers/include/controllers/yardsale_controller.h|lib/test/src/test_yardsale_app.c", "yardsale_app zswap_ceremony dev_platform make_lint_gates")

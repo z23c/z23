@@ -82,6 +82,9 @@
 # claims, so a fixture that silently stopped containing the violation cannot
 # make this self-test hollow.
 set -euo pipefail
+# Source trees are ASCII; the caller's UTF-8 locale makes BSD awk abort on
+# any high-byte it meets mid-scan. Pin the scan locale for both awks.
+export LC_ALL=C
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -263,6 +266,9 @@ if [ "${1:-}" = "--selftest" ]; then
     plain="$(cat <<'FIXTURE'
 #!/usr/bin/env bash
 set -euo pipefail
+# Source trees are ASCII; the caller's UTF-8 locale makes BSD awk abort on
+# any high-byte it meets mid-scan. Pin the scan locale for both awks.
+export LC_ALL=C
 out="$(some_producer)"
 if printf '%s\n' "$out" | grep -q 'needle'; then
     echo "found"
@@ -276,6 +282,9 @@ FIXTURE
     reindented="$(cat <<'FIXTURE'
 #!/usr/bin/env bash
 set -euo pipefail
+# Source trees are ASCII; the caller's UTF-8 locale makes BSD awk abort on
+# any high-byte it meets mid-scan. Pin the scan locale for both awks.
+export LC_ALL=C
 out="$(some_producer)"
       if      printf '%s\n' "$out"    |
                     grep     -q    'needle'
@@ -289,6 +298,9 @@ FIXTURE
     oneline="$(cat <<'FIXTURE'
 #!/usr/bin/env bash
 set -euo pipefail
+# Source trees are ASCII; the caller's UTF-8 locale makes BSD awk abort on
+# any high-byte it meets mid-scan. Pin the scan locale for both awks.
+export LC_ALL=C
 probe() { out="$(some_producer)"; printf '%s' "$out" | grep -qE 'need|le' && return 0; return 1; }
 FIXTURE
 )"
@@ -298,6 +310,9 @@ FIXTURE
     clean="$(cat <<'FIXTURE'
 #!/usr/bin/env bash
 set -euo pipefail
+# Source trees are ASCII; the caller's UTF-8 locale makes BSD awk abort on
+# any high-byte it meets mid-scan. Pin the scan locale for both awks.
+export LC_ALL=C
 . tools/scripts/sh_str.sh
 out="$(some_producer)"
 first="$(printf '%s\n' "$out" | head -n1)"

@@ -88,6 +88,18 @@ export TZ=UTC LC_ALL=C
 ARFLAGS_DET="Dcr"   # D = deterministic (zero mtime/uid/gid) when supported
 VENDOR_CC="${VENDOR_CC:-cc}"
 VENDOR_AR="${VENDOR_AR:-ar}"
+LIBEVENT_CPPFLAGS="-I$INC"
+LIBEVENT_THREAD_ARCHIVE="libevent_pthreads.a"
+LEVELDB_PLATFORM="LEVELDB_PLATFORM_POSIX; env_posix.cc"
+case "$(uname -s)" in
+    MINGW*|MSYS*)
+        # Current MinGW-w64 headers expose the iphlpapi declarations used by
+        # libevent only when the supported Windows API floor is explicit.
+        LIBEVENT_CPPFLAGS="$LIBEVENT_CPPFLAGS -D_WIN32_WINNT=0x0600"
+        LIBEVENT_THREAD_ARCHIVE="windows-threads-in-libevent.a; empty compatibility archive"
+        LEVELDB_PLATFORM="LEVELDB_PLATFORM_WINDOWS; env_windows.cc"
+        ;;
+esac
 
 # Recipe revisions are part of every expected stamp. Bump the affected value
 # whenever its commands or semantic flags change. Exact flags and toolchain
@@ -221,8 +233,8 @@ recipe_flags() {
         sqlite) printf '%s' '-O2 -fPIC -DSQLITE_THREADSAFE=1 -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_RTREE -DSQLITE_ENABLE_JSON1 -DSQLITE_ENABLE_COLUMN_METADATA -DSQLITE_OMIT_DEPRECATED -DSQLITE_DEFAULT_FOREIGN_KEYS=1; ar=Dcr' ;;
         zlib) printf '%s' 'CFLAGS=-O2 -fPIC; ./configure --static; make libz.a' ;;
         openssl) printf '%s' './Configure no-shared no-tests --prefix=/usr/local --openssldir=/etc/ssl --libdir=lib; make build_libs' ;;
-        libevent) printf '%s' 'apply pinned secure-rng ABI patch; CFLAGS=-O2 -fPIC -Ivendor/include; LDFLAGS=-Lvendor/lib; CPPFLAGS=-Ivendor/include; ./configure --disable-shared --enable-static --disable-samples --disable-libevent-regress; require=evutil_secure_rng_add_bytes' ;;
-        leveldb) printf '%s' 'route=direct-cxx11; -std=c++11 -O2 -DNDEBUG -fPIC -fno-exceptions -fno-rtti; LEVELDB_PLATFORM_POSIX=1; crc32c=off; snappy=off'
+        libevent) printf '%s' "apply pinned secure-rng ABI patch; CFLAGS=-O2 -fPIC -Ivendor/include; LDFLAGS=-Lvendor/lib; CPPFLAGS=$LIBEVENT_CPPFLAGS; ./configure --disable-shared --enable-static --disable-samples --disable-libevent-regress; thread_archive=$LIBEVENT_THREAD_ARCHIVE; require=evutil_secure_rng_add_bytes" ;;
+        leveldb) printf '%s' "route=direct-cxx11; -std=c++11 -O2 -DNDEBUG -fPIC -fno-exceptions -fno-rtti; $LEVELDB_PLATFORM; crc32c=off; snappy=off"
             ;;
         secp_native) printf '%s' 'cmake static; recovery=on; ecdh=on; tests=off; benchmarks=off; examples=off' ;;
         *) return 1 ;;
@@ -462,7 +474,7 @@ build_libevent() {     # FETCHED: libevent -> libevent.a + libevent_openssl.a + 
             && patch -p1 --forward <"$LIBEVENT_PATCH" \
             && CC="$VENDOR_CC" AR="$VENDOR_AR" \
                CFLAGS="-O2 -fPIC -I$INC" LDFLAGS="-L$LIB" \
-               CPPFLAGS="-I$INC" \
+               CPPFLAGS="$LIBEVENT_CPPFLAGS" \
                ./configure --disable-shared --enable-static \
                  --disable-samples --disable-libevent-regress \
             && make -j"$JOBS" \
@@ -476,7 +488,19 @@ build_libevent() {     # FETCHED: libevent -> libevent.a + libevent_openssl.a + 
         die "libevent.a lacks Tor-required evutil_secure_rng_add_bytes"
     install_archive "$d/.libs/libevent.a" libevent.a
     install_archive "$d/.libs/libevent_openssl.a" libevent_openssl.a
-    install_archive "$d/.libs/libevent_pthreads.a" libevent_pthreads.a
+    if [[ -f "$d/.libs/libevent_pthreads.a" ]]; then
+        install_archive "$d/.libs/libevent_pthreads.a" libevent_pthreads.a
+    else
+        # Libevent compiles its Win32 thread backend directly into libevent.a
+        # and intentionally emits no pthread companion archive. Preserve the
+        # fixed link manifest with a deterministic empty archive, but only
+        # after proving the native backend symbol is present.
+        grep -qE ' [Tt] _?evthread_use_windows_threads$' "$symbols" ||
+            die "libevent emitted neither pthread nor Win32 thread support"
+        "$VENDOR_AR" $ARFLAGS_DET "$WORK/libevent_pthreads.a" ||
+            die "could not create Win32 libevent thread compatibility archive"
+        install_archive "$WORK/libevent_pthreads.a" libevent_pthreads.a
+    fi
     # event2/* headers are consumed via the vendored tor build, not directly by
     # app code, so we do not need to install them for the zclassic23 link.
     stamp_archives libevent.a libevent_openssl.a libevent_pthreads.a
@@ -501,7 +525,7 @@ leveldb_cxx_compiler() {
 }
 
 build_leveldb_direct() {
-    local d="$1" cxx gen objdir src obj
+    local d="$1" cxx gen objdir src obj platform_define
     local objs=()
     local sources=(
         db/builder.cc
@@ -540,9 +564,19 @@ build_leveldb_direct() {
         util/logging.cc
         util/options.cc
         util/status.cc
-        util/env_posix.cc
         helpers/memenv/memenv.cc
     )
+
+    case "$(uname -s)" in
+        MINGW*|MSYS*)
+            sources+=(util/env_windows.cc)
+            platform_define=LEVELDB_PLATFORM_WINDOWS
+            ;;
+        *)
+            sources+=(util/env_posix.cc)
+            platform_define=LEVELDB_PLATFORM_POSIX
+            ;;
+    esac
 
     cxx="$(leveldb_cxx_compiler)"
     say "build   libleveldb.a  (fixed direct C++11 route)"
@@ -553,14 +587,19 @@ build_leveldb_direct() {
     cat > "$gen/port_config.h" <<'EOF'
 #ifndef STORAGE_LEVELDB_PORT_PORT_CONFIG_H_
 #define STORAGE_LEVELDB_PORT_PORT_CONFIG_H_
-#if defined(__APPLE__)
+#if defined(_WIN32)
+#define HAVE_FDATASYNC 0
+#define HAVE_FULLFSYNC 0
+#elif defined(__APPLE__)
 #define HAVE_FDATASYNC 0
 #define HAVE_FULLFSYNC 1
 #else
 #define HAVE_FDATASYNC 1
 #define HAVE_FULLFSYNC 0
 #endif
-#ifndef HAVE_O_CLOEXEC
+#if defined(_WIN32)
+#define HAVE_O_CLOEXEC 0
+#elif !defined(HAVE_O_CLOEXEC)
 #define HAVE_O_CLOEXEC 1
 #endif
 #ifndef HAVE_CRC32C
@@ -579,7 +618,7 @@ EOF
         # vendor scratch path in an otherwise deterministic archive.
         ( cd "$d" && "$cxx" -std=c++11 -O2 -DNDEBUG -fPIC \
             -fno-exceptions -fno-rtti \
-            -DLEVELDB_PLATFORM_POSIX=1 -DLEVELDB_COMPILE_LIBRARY \
+            -D"$platform_define"=1 -DLEVELDB_COMPILE_LIBRARY \
             -I"$WORK/leveldb-direct/include" -I. -Iinclude \
             -c "$src" -o "$obj" )
         objs+=("$obj")

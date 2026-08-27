@@ -17,7 +17,18 @@ export ZCL_USE_CCACHE
 endif
 
 ZCL_HOST_OS := $(shell uname -s 2>/dev/null)
-ifeq ($(ZCL_HOST_OS),Darwin)
+ZCL_HOST_WINDOWS := $(if $(filter MINGW% MSYS%,$(ZCL_HOST_OS)),1,)
+ifneq ($(ZCL_HOST_WINDOWS),)
+CC = cc
+CXX ?= c++
+ZCL_PLATFORM_CPPFLAGS = -D_WIN32_WINNT=0x0600 -DWIN32_LEAN_AND_MEAN
+ZCL_LTO_FLAG = -flto=auto
+ZCL_PLATFORM_NODE_LIBS = -lws2_32 -liphlpapi -lbcrypt -luserenv \
+	-lcrypt32 -lshell32 -lole32 -luuid
+ZCL_CXX_RUNTIME_LIB = -lstdc++
+ZCL_WARN_MAYBE_UNINITIALIZED = -Wno-maybe-uninitialized
+ZCL_TEST_STACK_SETUP = :
+else ifeq ($(ZCL_HOST_OS),Darwin)
 CC = clang
 CXX = clang++
 ZCL_PLATFORM_CPPFLAGS = -D_DARWIN_C_SOURCE \
@@ -584,6 +595,11 @@ HARDEN_CFLAGS = -fstack-protector-strong -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2 -
 HARDEN_LDFLAGS =
 ZCL_ARCH_CFLAGS = $(if $(ZCL_NATIVE),-march=native,)
 ZCL_DLOPEN_LIB =
+else ifneq ($(ZCL_HOST_WINDOWS),)
+HARDEN_CFLAGS = -fstack-protector-strong -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2
+HARDEN_LDFLAGS =
+ZCL_ARCH_CFLAGS = $(if $(ZCL_NATIVE),-march=native,-march=x86-64-v3)
+ZCL_DLOPEN_LIB =
 else
 HARDEN_CFLAGS = -fstack-protector-strong -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2 -fcf-protection=full -fPIE
 HARDEN_LDFLAGS = -pie -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -fcf-protection=full
@@ -791,7 +807,8 @@ CFLAGS = -std=c23 -g -O3 $(ZCL_ARCH_CFLAGS) $(ZCL_LTO_FLAG) -Wall -Wextra -Werro
 	-Ilib/test/include \
 	-D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -DZCL_AR_ENFORCE $(BUILD_IDENTITY_CPPFLAGS) -Ivendor/include -Ivendor/x11/include $(GTK_DEF) $(GTK_CFLAGS) \
 	$(WEBKIT_DEF) $(WEBKIT_CFLAGS)
-LDFLAGS = -pthread $(ZCL_LTO_FLAG) $(if $(filter Darwin,$(ZCL_HOST_OS)),,-rdynamic) $(HARDEN_LDFLAGS)
+ZCL_EXPORT_DYNAMIC_FLAG = $(if $(filter Darwin,$(ZCL_HOST_OS)),,$(if $(ZCL_HOST_WINDOWS),,-rdynamic))
+LDFLAGS = -pthread $(ZCL_LTO_FLAG) $(ZCL_EXPORT_DYNAMIC_FLAG) $(HARDEN_LDFLAGS)
 CACHED_CFLAGS = $(filter-out -DZCL_BUILD_SOURCE_ID=% -DZCL_BUILD_CLEAN=%,$(CFLAGS))
 BUILD_ONLY_CFLAGS = $(CACHED_CFLAGS) -Wno-deprecated-declarations
 ZCL_DEV_OPT ?= -Og
@@ -1618,8 +1635,14 @@ $(filter-out vendor/lib/libsecp256k1.a,$(VENDOR_LIBS)):
         install-tip-agreement tip-agreement-status tip-agreement-selftest
 
 CLI_SRCS = lib/rpc/src/client.c lib/json/src/json.c lib/encoding/src/utilstrencodings.c lib/base/src/log_level.c
+ZCL_ADAPTER_RUNNER_TARGET = zclassic23-zcode-adapter-runner
+ifneq ($(ZCL_HOST_WINDOWS),)
+# Windows has no Landlock-equivalent backend in tree. Do not ship an
+# unconstrained agent adapter merely to make the native node build green.
+ZCL_ADAPTER_RUNNER_TARGET =
+endif
 all: test_zcl zclassic23 zclassic-cli zcl-rpc zcl-nodectl zclassic23-package-verify \
-	zclassic23-zcode-adapter-runner
+	$(ZCL_ADAPTER_RUNNER_TARGET)
 
 # ── Hot-swap ROLLBACK fixture images ──────────────────────────────────────
 # lib/test/src/test_hotswap_rollback.c drives a rollback that SUCCEEDS, and a
@@ -3126,7 +3149,7 @@ HOTSWAP_ACTION_PLAN = $(BUILD_DIR)/hotswap/fast/flags.env
 dev-bin z23-dev zclassic23-dev: $(ZCLASSIC23_DEV_BIN) $(ZCLASSIC23_DEV_BIN_ALIAS) \
 	$(DEV_RESTART_PLAN) \
 	$(HOTSWAP_ACTION_PLAN) dev-package-verifier \
-	zclassic23-zcode-adapter-runner
+	$(ZCL_ADAPTER_RUNNER_TARGET)
 
 # Temporary migration alias: build/bin/zclassic23-dev keeps resolving to
 # z23-dev while bots/scripts migrate.
@@ -4190,7 +4213,7 @@ $(BIN_DIR)/zclassic23-package-verify: $(VIEW_GEN_HEADERS) \
 # scrubs credentials before it invokes the fixed Codex CLI; the node handler
 # never executes a caller-supplied command.
 ZCL_TOOL_SANDBOX_SRC = lib/platform/src/os_sandbox_linux.c
-ifeq ($(ZCL_HOST_OS),Darwin)
+ifneq ($(filter-out Linux,$(ZCL_HOST_OS)),)
 # The confinement entry points exist per host; on Darwin the backend stub
 # refuses them at runtime, which is the honest degradation of an adapter
 # whose sandbox primitive is Linux Landlock.
