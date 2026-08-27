@@ -209,6 +209,27 @@ static void market_relay_plan_token(const char *active_name,
     market_plan_token(domain, sizeof(domain), active_name, target_name, out);
 }
 
+/* The per-offer REVIEW mark's plan token: unlike the two posture legs
+ * there is no single "current value", so the token binds offer identity,
+ * the mark as it stands at plan time, and the target. Moving the mark
+ * between plan and commit therefore stales the token exactly the way a
+ * moved profile stales a posture token. */
+static void market_review_plan_token(const char *offer_hex,
+                                     const char *current_name,
+                                     const char *target_name, uint8_t out[32])
+{
+    struct sha3_256_ctx sha;
+    sha3_256_init(&sha);
+    static const char domain[] = "zcl.market.review.plan.v1";
+    sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
+    sha3_256_write(&sha, (const uint8_t *)offer_hex, strlen(offer_hex) + 1u);
+    sha3_256_write(&sha, (const uint8_t *)current_name,
+                   strlen(current_name) + 1u);
+    sha3_256_write(&sha, (const uint8_t *)target_name,
+                   strlen(target_name) + 1u);
+    sha3_256_finalize(&sha, out);
+}
+
 static bool rpc_zmarket_moderation_profile_set(
     const struct json_value *params, bool help, struct json_value *result)
 {
@@ -317,8 +338,8 @@ static bool rpc_zmarket_moderation_relay_set(
             "the serve profile. Same exact two-step as profile_set: mode\n"
             "\"plan\" mints a plan_token bound to the current rule and the\n"
             "target; \"commit\" requires that token (STALE_PLAN if the rule\n"
-            "moved in between). Plan tokens are not interchangeable between\n"
-            "the two legs.\n"
+            "moved in between). Plan tokens are not interchangeable\n"
+            "between the setters.\n"
             "\nBoot default is relay-all.v1: forward every valid offer.\n"
             "Relaying passes on a POINTER, not content — gating it by\n"
             "default would cut an honest seller's reach to one hop and hand\n"
@@ -408,9 +429,10 @@ static bool rpc_zmarket_moderation_relay_set(
 static bool rpc_zmarket_review_set(const struct json_value *params, bool help,
                                    struct json_value *result)
 {
-    if (help || !params || json_size(params) < 2) {
+    if (help || !params || json_size(params) < 3) {
         json_set_str(result,
-            "zmarket_review_set \"offer_id\" \"review_state\"\n"
+            "zmarket_review_set \"offer_id\" \"review_state\" \"mode\" "
+            "[\"plan_token\"]\n"
             "\nThe node's OWN curation mark on one signed offer: sets the\n"
             "local-only review_state (unreviewed / reviewed_ok / sensitive).\n"
             "Never gossiped, never in the signed wire, never a deletion —\n"
@@ -420,10 +442,17 @@ static bool rpc_zmarket_review_set(const struct json_value *params, bool help,
             "separate rule and forwards everything by default, so this mark\n"
             "does not affect relay unless the operator opted in to\n"
             "relay-reviewed-only.v1. One audit log line is written per mark.\n"
+            "\nSame exact two-step as the posture setters: mode \"plan\"\n"
+            "mints a plan_token bound to this offer's current mark and the\n"
+            "target; mode \"commit\" requires that token (STALE_PLAN if the\n"
+            "mark moved in between). Plan tokens are not interchangeable\n"
+            "between the legs.\n"
             "\nArguments:\n"
             "1. offer_id     (string, required) 64-hex signed offer id\n"
             "2. review_state (string, required) unreviewed | reviewed_ok | "
-            "sensitive\n");
+            "sensitive\n"
+            "3. mode         (string, required) \"plan\" or \"commit\"\n"
+            "4. plan_token   (string, required for commit) 64-hex plan token\n");
         return true;
     }
     /* Asked through the service rather than a controller-owned handle:
@@ -436,10 +465,13 @@ static bool rpc_zmarket_review_set(const struct json_value *params, bool help,
     }
     const struct json_value *arg0 = json_at(params, 0);
     const struct json_value *arg1 = json_at(params, 1);
+    const struct json_value *arg2 = json_at(params, 2);
     const char *id_hex =
         arg0 && arg0->type == JSON_STR ? json_get_str(arg0) : NULL;
     const char *state_text =
         arg1 && arg1->type == JSON_STR ? json_get_str(arg1) : NULL;
+    const char *mode =
+        arg2 && arg2->type == JSON_STR ? json_get_str(arg2) : NULL;
     uint8_t offer_id[32];
     if (!id_hex || strlen(id_hex) != 64 ||
         !zcl_hex_decode_lower(id_hex, offer_id, 32)) {
@@ -454,39 +486,81 @@ static bool rpc_zmarket_review_set(const struct json_value *params, bool help,
             "sensitive");
         return false;
     }
-
-    /* Read the mark BEFORE writing it, through the service, so the audit
-     * line can name what it replaced. An id no signed offer carries reads
-     * as unreviewed here and is refused by the write below — which is the
-     * one authority on whether the offer exists, so the two can never
-     * disagree about it. */
-    const char *previous_state = market_review_state_string(
-        (enum market_review_state)
-            market_moderation_review_state_for_offer_id(offer_id));
-    struct zcl_result marked = market_moderation_set_review_state(
-        offer_id, (enum market_review_state)state);
-    if (!marked.ok) {
-        char message[300];
-        snprintf(message, sizeof(message), "REVIEW_REFUSED: %s",
-                 marked.message[0] ? marked.message
-                                   : "the mark could not persist");
-        json_set_str(result, message);
+    if (!mode || (strcmp(mode, "plan") != 0 && strcmp(mode, "commit") != 0)) {
+        json_set_str(result, "mode must be \"plan\" or \"commit\"");
         return false;
     }
-    /* Local curation audit trail: one line per mark, node.log only. */
-    LOG_INFO("market",
-             "moderation review set: offer_id=%s review_state=%s previous=%s",
-             id_hex, market_review_state_string(
-                         (enum market_review_state)state),
-             previous_state);
 
+    /* Read the mark BEFORE any write, through the service, so the plan
+     * token can bind what it replaces and the audit line can name it. An
+     * id no signed offer carries reads as unreviewed here and is refused
+     * by the write below — which is the one authority on whether the
+     * offer exists, so the two can never disagree about it. */
+    enum market_review_state previous =
+        (enum market_review_state)
+            market_moderation_review_state_for_offer_id(offer_id);
+    const char *previous_name = market_review_state_string(previous);
+
+    uint8_t token[32];
+    market_review_plan_token(id_hex, previous_name,
+                             market_review_state_string(
+                                 (enum market_review_state)state),
+                             token);
+
+    bool committed = false;
+    if (strcmp(mode, "commit") == 0) {
+        const struct json_value *arg3 = json_at(params, 3);
+        const char *hex =
+            arg3 && arg3->type == JSON_STR ? json_get_str(arg3) : NULL;
+        uint8_t supplied[32], difference = 0;
+        if (!hex || strlen(hex) != 64 ||
+            !zcl_hex_decode_lower(hex, supplied, 32)) {
+            json_set_str(result,
+                "INVALID_PLAN_TOKEN: commit requires the canonical 64-hex "
+                "plan_token minted by mode \"plan\"");
+            return false;
+        }
+        for (size_t i = 0; i < 32; i++)
+            difference |= supplied[i] ^ token[i];
+        if (difference) {
+            json_set_str(result,
+                "STALE_PLAN: the review mark moved after the plan was minted "
+                "— re-plan and commit again");
+            return false;
+        }
+        struct zcl_result marked = market_moderation_set_review_state(
+            offer_id, (enum market_review_state)state);
+        if (!marked.ok) {
+            char message[300];
+            snprintf(message, sizeof(message), "REVIEW_REFUSED: %s",
+                     marked.message[0] ? marked.message
+                                       : "the mark could not persist");
+            json_set_str(result, message);
+            return false;
+        }
+        committed = true;
+        /* Local curation audit trail: one line per mark, node.log only. */
+        LOG_INFO("market",
+                 "moderation review set: offer_id=%s review_state=%s "
+                 "previous=%s",
+                 id_hex,
+                 market_review_state_string(
+                     (enum market_review_state)state),
+                 previous_name);
+    }
+
+    char token_hex[65];
+    zcl_hex_encode(token, 32, token_hex);
     json_set_object(result);
-    json_push_kv_str(result, "status", "marked");
+    json_push_kv_str(result, "mode", mode);
+    json_push_kv_bool(result, "committed", committed);
+    json_push_kv_str(result, "plan_token", token_hex);
+    json_push_kv_str(result, "status", committed ? "marked" : "planned");
     json_push_kv_str(result, "offer_id", id_hex);
     json_push_kv_str(result, "review_state",
                      market_review_state_string(
                          (enum market_review_state)state));
-    json_push_kv_str(result, "previous_review_state", previous_state);
+    json_push_kv_str(result, "previous_review_state", previous_name);
     json_push_kv_bool(result, "local_only", true);
     json_push_kv_bool(result, "gossiped", false);
     return true;

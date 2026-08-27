@@ -74,6 +74,18 @@ static int64_t mmt_kv_int(const struct json_value *obj, const char *key)
     return v && v->type == JSON_INT ? json_get_int(v) : -1;
 }
 
+static const char *mmt_kv_str(const struct json_value *obj, const char *key)
+{
+    const struct json_value *v = json_get(obj, key);
+    return v && v->type == JSON_STR ? json_get_str(v) : NULL;
+}
+
+static bool mmt_kv_bool(const struct json_value *obj, const char *key)
+{
+    const struct json_value *v = json_get(obj, key);
+    return v && v->type == JSON_BOOL && json_get_bool(v);
+}
+
 static const char *mmt_row_review(const struct json_value *listing,
                                   const char *offer_id_hex)
 {
@@ -311,36 +323,141 @@ static int test_mmt_view_filter(void)
                strcmp(json_get_str(profile), "general-audience.v1") == 0);
         json_free(&listing);
 
-        /* The node's own curation marks: A reviewed_ok, B sensitive. */
+        /* The node's own curation marks: A reviewed_ok, B sensitive.
+         * Same exact two-step as the posture setters: plan mints a token
+         * bound to (offer, current mark, target) and never mutates;
+         * commit requires that exact token. */
         struct json_value mark;
-        char params[160];
-        snprintf(params, sizeof(params), "[\"%s\",\"reviewed_ok\"]", id_a);
+        char params[300];
+        snprintf(params, sizeof(params), "[\"%s\",\"reviewed_ok\",\"plan\"]",
+                 id_a);
         ASSERT(mmt_rpc(&table, "zmarket_review_set", params, &mark));
-        const struct json_value *prev = json_get(&mark,
-                                                 "previous_review_state");
-        ASSERT(prev && prev->type == JSON_STR &&
-               strcmp(json_get_str(prev), "unreviewed") == 0);
+        /* Copy the token out before mark is freed below — the pointer
+         * into the JSON value does not survive a json_free. */
+        const char *token_a = mmt_kv_str(&mark, "plan_token");
+        char tok_a[65];
+        ASSERT(token_a && strlen(token_a) == 64 &&
+               snprintf(tok_a, sizeof(tok_a), "%s", token_a) == 64);
+        ASSERT(!mmt_kv_bool(&mark, "committed"));
+        ASSERT(strcmp(mmt_kv_str(&mark, "status"), "planned") == 0);
+        ASSERT(strcmp(mmt_kv_str(&mark, "previous_review_state"),
+                      "unreviewed") == 0);
         const struct json_value *local = json_get(&mark, "local_only");
         ASSERT(local && local->type == JSON_BOOL && json_get_bool(local));
         const struct json_value *gossiped = json_get(&mark, "gossiped");
         ASSERT(gossiped && gossiped->type == JSON_BOOL &&
                !json_get_bool(gossiped));
-        json_free(&mark);
-        snprintf(params, sizeof(params), "[\"%s\",\"sensitive\"]", id_b);
-        ASSERT(mmt_rpc(&table, "zmarket_review_set", params, &mark));
+        /* The plan changed nothing: A is still unreviewed underneath. */
+        ASSERT(market_moderation_review_state_for_offer_id(offer_a.offer_id) ==
+               MARKET_REVIEW_UNREVIEWED);
         json_free(&mark);
 
-        /* Unknown ids and bad states are honest errors. */
-        snprintf(params, sizeof(params), "[\"%s\",\"banned\"]", id_a);
+        /* Commit without the minted token is refused; so is a garbage
+         * one. Neither leaves a mark behind. */
+        snprintf(params, sizeof(params), "[\"%s\",\"reviewed_ok\",\"commit\"]",
+                 id_a);
         ASSERT(!mmt_rpc(&table, "zmarket_review_set", params, &mark));
         json_free(&mark);
+        snprintf(params, sizeof(params),
+                 "[\"%s\",\"reviewed_ok\",\"commit\","
+                 "\"00000000000000000000000000000000"
+                 "00000000000000000000000000000000\"]", id_a);
+        ASSERT(!mmt_rpc(&table, "zmarket_review_set", params, &mark));
+        json_free(&mark);
+        ASSERT(market_moderation_review_state_for_offer_id(offer_a.offer_id) ==
+               MARKET_REVIEW_UNREVIEWED);
+
+        /* The real commit carries the planned token. */
+        snprintf(params, sizeof(params),
+                 "[\"%s\",\"reviewed_ok\",\"commit\",\"%s\"]", id_a, tok_a);
+        ASSERT(mmt_rpc(&table, "zmarket_review_set", params, &mark));
+        ASSERT(mmt_kv_bool(&mark, "committed"));
+        ASSERT(strcmp(mmt_kv_str(&mark, "status"), "marked") == 0);
+        ASSERT(strcmp(mmt_kv_str(&mark, "previous_review_state"),
+                      "unreviewed") == 0);
+        json_free(&mark);
+
+        /* B sensitive: compact two-step through the same flow. */
+        snprintf(params, sizeof(params), "[\"%s\",\"sensitive\",\"plan\"]",
+                 id_b);
+        ASSERT(mmt_rpc(&table, "zmarket_review_set", params, &mark));
+        const char *token_b = mmt_kv_str(&mark, "plan_token");
+        ASSERT(token_b && strlen(token_b) == 64);
+        snprintf(params, sizeof(params),
+                 "[\"%s\",\"sensitive\",\"commit\",\"%s\"]", id_b, token_b);
+        json_free(&mark);
+        ASSERT(mmt_rpc(&table, "zmarket_review_set", params, &mark));
+        ASSERT(mmt_kv_bool(&mark, "committed"));
+        json_free(&mark);
+
+        /* Bad states are refused at plan time, before any token exists. */
+        snprintf(params, sizeof(params), "[\"%s\",\"banned\",\"plan\"]", id_a);
+        ASSERT(!mmt_rpc(&table, "zmarket_review_set", params, &mark));
+        json_free(&mark);
+
+        /* An id no signed offer carries: PLAN succeeds without mutating
+         * (the write stays the one authority on existence — its token
+         * simply commits nothing useful), COMMIT is refused by name of
+         * the write. */
         char unknown_id[65];
         memset(unknown_id, 'f', 64);
         unknown_id[64] = '\0';
-        snprintf(params, sizeof(params), "[\"%s\",\"sensitive\"]",
+        snprintf(params, sizeof(params), "[\"%s\",\"sensitive\",\"plan\"]",
                  unknown_id);
+        ASSERT(mmt_rpc(&table, "zmarket_review_set", params, &mark));
+        ASSERT(!mmt_kv_bool(&mark, "committed"));
+        json_free(&mark);
+        snprintf(params, sizeof(params),
+                 "[\"%s\",\"sensitive\",\"commit\","
+                 "\"11111111111111111111111111111111"
+                 "11111111111111111111111111111111\"]", unknown_id);
         ASSERT(!mmt_rpc(&table, "zmarket_review_set", params, &mark));
         json_free(&mark);
+
+        /* A mark moved between plan and commit stales the plan's token:
+         * C plans reviewed_ok, an operator marks it sensitive through
+         * the service directly, and the old token no longer commits. */
+        snprintf(params, sizeof(params), "[\"%s\",\"reviewed_ok\",\"plan\"]",
+                 id_c);
+        ASSERT(mmt_rpc(&table, "zmarket_review_set", params, &mark));
+        const char *stale_token = mmt_kv_str(&mark, "plan_token");
+        char tok_c_stale[65];
+        ASSERT(stale_token && strlen(stale_token) == 64 &&
+               snprintf(tok_c_stale, sizeof(tok_c_stale), "%s",
+                        stale_token) == 64);
+        json_free(&mark);
+        ASSERT(market_moderation_set_review_state(
+                   offer_c.offer_id, MARKET_REVIEW_SENSITIVE).ok);
+        snprintf(params, sizeof(params),
+                 "[\"%s\",\"reviewed_ok\",\"commit\",\"%s\"]", id_c,
+                 tok_c_stale);
+        ASSERT(!mmt_rpc(&table, "zmarket_review_set", params, &mark));
+        json_free(&mark);
+        /* ...and the fresh plan re-plans honestly from the moved mark. */
+        snprintf(params, sizeof(params), "[\"%s\",\"reviewed_ok\",\"plan\"]",
+                 id_c);
+        ASSERT(mmt_rpc(&table, "zmarket_review_set", params, &mark));
+        const char *fresh_token = mmt_kv_str(&mark, "plan_token");
+        char tok_c_fresh[65];
+        ASSERT(fresh_token && strlen(fresh_token) == 64 &&
+               strcmp(fresh_token, tok_c_stale) != 0 &&
+               snprintf(tok_c_fresh, sizeof(tok_c_fresh), "%s",
+                        fresh_token) == 64);
+        ASSERT(strcmp(mmt_kv_str(&mark, "previous_review_state"),
+                      "sensitive") == 0);
+        snprintf(params, sizeof(params),
+                 "[\"%s\",\"reviewed_ok\",\"commit\",\"%s\"]", id_c,
+                 tok_c_fresh);
+        json_free(&mark);
+        ASSERT(mmt_rpc(&table, "zmarket_review_set", params, &mark));
+        ASSERT(mmt_kv_bool(&mark, "committed"));
+        json_free(&mark);
+
+        /* Restore C so the listing/count assertions below keep their
+         * fixture meaning: one mark per state — unreviewed (C),
+         * reviewed_ok (A), sensitive (B). */
+        ASSERT(market_moderation_set_review_state(
+                   offer_c.offer_id, MARKET_REVIEW_UNREVIEWED).ok);
 
         /* Default view: only reviewed_ok shows; hidden_count is honest. */
         ASSERT(mmt_rpc(&table, "zmarket_list", NULL, &listing));

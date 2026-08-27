@@ -537,7 +537,7 @@ represented by its children's sections.
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
-| `app market moderation review set` | ready | mutate / app-write / **owner** · fast/low | **`offer_id`**, **`review_state`** | `zcl.market_review_set.v1` | `z23 app market moderation review set --input='{"offer_id":"<64hex>","review_state":"reviewed_ok"}'` | Mark one offer's local review_state |
+| `app market moderation review set` | ready | mutate / app-write / **owner**, plan-commit · fast/low | **`offer_id`**, **`review_state`**, **`mode`**, `plan_token` | `zcl.market_review_set.v1` | `z23 app market moderation review set --input='{"offer_id":"<64hex>","review_state":"reviewed_ok","mode":"plan"}'` | Mark one offer's local review_state |
 
 #### `app.store` — Store
 
