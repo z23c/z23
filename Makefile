@@ -1619,6 +1619,31 @@ CLI_SRCS = lib/rpc/src/client.c lib/json/src/json.c lib/encoding/src/utilstrenco
 all: test_zcl zclassic23 zclassic-cli zcl-rpc zcl-nodectl zclassic23-package-verify \
 	zclassic23-zcode-adapter-runner
 
+# ── Hot-swap ROLLBACK fixture images ──────────────────────────────────────
+# lib/test/src/test_hotswap_rollback.c drives a rollback that SUCCEEDS, and a
+# rollback re-enters the full admission gauntlet over a SEALED IMAGE: ELF shape
+# probe, artifact hash, map, symbol, consensus pin, admit, probe-before-publish,
+# one batch commit. A shelf entry is BYTES, so that group cannot be driven with
+# a module struct fabricated inside a test TU the way test_hotswap_module_v2.c
+# and test_hotswap_shelf.c are — it needs two REAL artifacts.
+#
+# ONE fixture source, compiled twice with different markers, so the two images
+# are byte-distinct and a dispatch says which one answered. They land directly
+# in $(BUILD_DIR)/hotswap because hotswap_path_is_acceptable() confines module
+# artifacts to /tmp or a build/hotswap directory, and because
+# check-hotswap-module-imports reads exactly that directory — the fixture's
+# import set is gated by the same device-driver contract every other module
+# obeys, rather than sitting outside it.
+#
+# Compiled at $(TEST_FAST_CFLAGS): non-LTO (the module link is a plain -shared
+# and never expands an LTO plugin) and carrying -DZCL_TESTING, so the struct
+# layouts the module writes through are the ones every test binary reads.
+HOTSWAP_ROLLBACK_FIXTURE_SRC = lib/test/fixtures/hotswap_rollback_module.c
+HOTSWAP_ROLLBACK_FIXTURE_TU  = app/controllers/src/status_native_handlers.c
+HOTSWAP_ROLLBACK_FIXTURE_SOS = \
+	$(BUILD_DIR)/hotswap/zcl_rollback_fixture_a.so \
+	$(BUILD_DIR)/hotswap/zcl_rollback_fixture_b.so
+
 TEST_SRCS = $(call zcl_filter_ephemeral_sources,\
 	$(wildcard lib/test/src/*.c))
 TEST_DEV_EXECUTOR_SRCS = tools/dev/devloop_cycle.c tools/dev/dev_failure_store.c \
@@ -2004,6 +2029,35 @@ $(TEST_PARALLEL_FAST_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(T
 	  "$(TEST_FAST_EPOCH_LINK_FLAGS)" "$(CC)" "$(CXX)" "$$PPID" >/dev/null; \
 	mv -f -- "$$tmp" "$@"; \
 	trap - EXIT HUP INT TERM
+
+# ── Building the two hot-swap ROLLBACK fixture images ────────────────────
+# The stem ($*) is the marker the image renders, so ONE rule produces both and
+# the two artifacts cannot drift apart in anything but that string. Linked with
+# $(HOTSWAP_MODULE_LDFLAGS) — the same flags every other module uses, and
+# -Wl,-Bsymbolic is load-bearing: without it the module's internal calls
+# interpose back onto the resident copy and a swap silently does nothing.
+$(BUILD_DIR)/hotswap/zcl_rollback_fixture_%.so: $(HOTSWAP_ROLLBACK_FIXTURE_SRC) \
+		$(VIEW_GEN_HEADERS)
+	@mkdir -p $(dir $@)
+	@set -eu; \
+	tmp_o="$$(mktemp "$(dir $@).rbfix.XXXXXX.o")"; \
+	tmp_so="$$(mktemp "$(dir $@).rbfix.XXXXXX.so")"; \
+	trap 'rm -f "$$tmp_o" "$$tmp_so"' EXIT HUP INT TERM; \
+	$(CC) $(TEST_FAST_CFLAGS) -fPIC -DZCL_HOTSWAP_MODULE_GEN \
+	  -DZCL_HOTSWAP_MODULE_SOURCE_TU=\"$(HOTSWAP_ROLLBACK_FIXTURE_TU)\" \
+	  -DZCL_ROLLBACK_FIXTURE_MARK=\"$*\" \
+	  -c -o "$$tmp_o" $(HOTSWAP_ROLLBACK_FIXTURE_SRC); \
+	$(CC) $(HOTSWAP_MODULE_LDFLAGS) -o "$$tmp_so" "$$tmp_o"; \
+	mv -f -- "$$tmp_so" "$@"; \
+	rm -f "$$tmp_o"; \
+	trap - EXIT HUP INT TERM
+
+# Every binary that can run the hotswap_rollback group carries the images as an
+# order-only prerequisite, so the group never has to decide whether a missing
+# artifact is a skip. It is not: it is a broken build.
+$(BIN_DIR)/test_zcl: | $(HOTSWAP_ROLLBACK_FIXTURE_SOS)
+$(TEST_PARALLEL_BIN): | $(HOTSWAP_ROLLBACK_FIXTURE_SOS)
+$(TEST_PARALLEL_FAST_BIN): | $(HOTSWAP_ROLLBACK_FIXTURE_SOS)
 
 # Expanding the complete object list inside a recipe makes the recipe itself
 # one oversized `/bin/sh -c` argument on Linux.  GNU Make writes the exact,

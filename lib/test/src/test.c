@@ -1329,6 +1329,7 @@ int main(int argc, char **argv)
     failures += test_hotswap_policy_module();
     failures += test_hotswap_service_registry();
     { extern int test_hotswap_shelf(void); failures += test_hotswap_shelf(); }
+    { extern int test_hotswap_rollback(void); failures += test_hotswap_rollback(); }
     failures += test_dev_platform();
     failures += test_command_registry_catalog();
     failures += test_command_registry_latency();
