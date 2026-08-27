@@ -59,16 +59,15 @@ static int peer_slot(const struct vcs_swarm_engine *engine, uint64_t peer)
     return -1;
 }
 
-static bool peer_advertises(const struct swarm_peer *peer,
-                            const uint8_t root[32])
+/* Shared with package_swarm_stalled.c (declared in package_swarm_priv.h). */
+bool peer_advertises(const struct swarm_peer *peer,
+                    const uint8_t root[32])
 {
     for (size_t i = 0; i < peer->ad_count; i++)
         if (memcmp(peer->ads[i], root, 32) == 0)
             return true;
     return false;
 }
-
-
 
 /* A provider-directed fetch is already bound to explicit authenticated
  * transport handles by its caller.  Requiring those same handles to win the
@@ -82,8 +81,8 @@ static bool peer_offers_download(const struct swarm_download *dl,
            (dl->provider_restricted || peer_advertises(peer, dl->root));
 }
 
-static uint32_t advertisers_of(const struct vcs_swarm_engine *engine,
-                               const struct swarm_download *dl)
+uint32_t advertisers_of(const struct vcs_swarm_engine *engine,
+                        const struct swarm_download *dl)
 {
     uint32_t n = 0;
     for (size_t i = 0; i < VCS_SWARM_MAX_PEERS; i++)
@@ -1425,6 +1424,35 @@ void vcs_swarm_engine_peer_drop(struct vcs_swarm_engine *engine,
     }
     engine->peers[slot].used = false;
     pthread_mutex_unlock(&engine->lock);
+}
+
+bool vcs_swarm_engine_peer_offer(struct vcs_swarm_engine *engine,
+                                 uint64_t peer, const uint8_t root[32])
+{
+    if (!engine || !root || peer == 0)
+        LOG_FAIL(SWARM_LOG, "peer_offer: null engine/root or zero id");
+    pthread_mutex_lock(&engine->lock);
+    int slot = peer_slot(engine, peer);
+    if (slot < 0) {
+        pthread_mutex_unlock(&engine->lock);
+        return false;
+    }
+    struct swarm_peer *p = &engine->peers[slot];
+    /* Locally authenticated evidence, not a wire frame: announce quota
+     * and flood scoring stay out of this path entirely. */
+    if (peer_advertises(p, root)) {
+        pthread_mutex_unlock(&engine->lock);
+        return true;
+    }
+    if (p->ad_count >= VCS_SWARM_MAX_PEER_ADS) {
+        pthread_mutex_unlock(&engine->lock);
+        LOG_WARN(SWARM_LOG, "peer %llu ad table full; offer unapplied",
+                 (unsigned long long)peer);
+        return false;
+    }
+    memcpy(p->ads[p->ad_count++], root, 32);
+    pthread_mutex_unlock(&engine->lock);
+    return true;
 }
 
 bool vcs_swarm_engine_peer_known(const struct vcs_swarm_engine *engine,

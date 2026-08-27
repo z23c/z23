@@ -122,7 +122,8 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    printf("VERDICT     : ADMITTED (dlopen + symbol + consensus + abi + fields "
-           "+ capacity + allowlist + duplicate + probe + self_test)\n");
+    printf("VERDICT     : ADMITTED (seal + shape + dlopen + symbol + consensus "
+           "+ abi + fields + capacity + allowlist + duplicate + probe "
+           "+ self_test)\n");
     return 0;
 }

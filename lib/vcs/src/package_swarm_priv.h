@@ -157,6 +157,9 @@ static inline bool vcs_swarm_peer_was_announced(const struct swarm_peer *peer,
 }
 
 /* Lock held. Implemented in package_swarm_node.c. */
+bool peer_advertises(const struct swarm_peer *peer, const uint8_t root[32]);
+uint32_t advertisers_of(const struct vcs_swarm_engine *engine,
+                        const struct swarm_download *dl);
 bool vcs_swarm_queue_frame(struct vcs_swarm_engine *engine, uint64_t peer,
                            const struct vcs_package_swarm_message *message);
 bool vcs_swarm_public_serveable(struct vcs_swarm_engine *engine,

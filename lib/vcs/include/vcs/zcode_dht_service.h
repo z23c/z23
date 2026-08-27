@@ -102,6 +102,12 @@ enum vcs_zcode_dht_reject_reason {
   VCS_ZCODE_DHT_REJECT_RATE,
   VCS_ZCODE_DHT_REJECT_CAP,
   VCS_ZCODE_DHT_REJECT_UNAUTHORIZED,
+  /* An outbound reply could not be queued (serialize failure or full
+   * egress). That is an infrastructure non-answer, never peer evidence:
+   * the same causal condition as every other reply-push failure, and the
+   * composition layer scores it NONE. Appended last so every previously
+   * published reason keeps its position. */
+  VCS_ZCODE_DHT_REJECT_BACKPRESSURE,
   VCS_ZCODE_DHT_REJECT_COUNT
 };
 

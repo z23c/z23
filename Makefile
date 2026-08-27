@@ -8379,6 +8379,23 @@ check-hotswap-package-receipt-is-not-authority:
 	@tools/lint/check_hotswap_package_receipt_is_not_authority.sh --selftest
 	@tools/lint/check_hotswap_package_receipt_is_not_authority.sh
 
+# A hot-swap module .so is dlopen'd into the LIVE node, so every body it does
+# not define itself is resolved out of the resident image: its UNDEFINED
+# dynamic-symbol set IS its whole reach into the node — a device-driver
+# contract. Nothing enforced it. Every other hot-swap gate looks at the TU's
+# path, its leaves' spec, its statics or the sealed-core pin; none looks at
+# what the artifact LINKS AGAINST, so one added #include could acquire a door
+# into the reducer, coins, wallet or chain state and still mount. This gate
+# reads `nm -D --undefined-only` over every built module and refuses any name
+# absent from config/hotswap_module_imports.def (282 rows, derived from the
+# real union across 93 artifacts, each grouped with the reason it is allowed).
+# The allowlist leg is fail-closed and needs no build; the artifact leg is
+# UNOBSERVED (loud, never "OK") when build/hotswap has never been produced,
+# and FATAL when that directory exists but holds no module.
+check-hotswap-module-imports:
+	@tools/lint/check_hotswap_module_imports.sh --selftest
+	@tools/lint/check_hotswap_module_imports.sh
+
 # Prove the RELEASE binary links none of the dev-only mutation entry points
 # (dispatcher, cycle, watcher, subprocess runner) NOR the native dev-lane
 # activation engine (tools/dev/dev_activation*.c: stop/start the unit, flip
@@ -8441,7 +8458,7 @@ check-observability-pairing: tools/check_observability_pairing
 # in-tree FIPS-202 SHA3-256 + memory_cleanse) that reads the file list on stdin
 # (git ls-files -z) and writes/verifies core/MANIFEST.sha3. See tools/core_seal.c
 # and core/UNSEAL.md for the ritual.
-.PHONY: core-seal core-seal-check core-unseal check-core-seal check-core-seal-root-mirror check-hotswap-package-receipt-is-not-authority check-core-include-boundary check-accel-oracle-pinned check-no-adx-overclaim check-simd-os-support
+.PHONY: core-seal core-seal-check core-unseal check-core-seal check-core-seal-root-mirror check-hotswap-package-receipt-is-not-authority check-hotswap-module-imports check-core-include-boundary check-accel-oracle-pinned check-no-adx-overclaim check-simd-os-support
 CORE_MANIFEST := core/MANIFEST.sha3
 CORE_UNSEAL_TOKEN := .core-unseal-token
 # The sealed set: every tracked file under core/ (consensus predicates +
@@ -9852,6 +9869,7 @@ LINT_GATES := \
     check-hotswap-swappable-shape \
     check-hotswap-candidates-ledger \
     check-hotswap-package-receipt-is-not-authority \
+    check-hotswap-module-imports \
     check-release-no-dev-symbols \
     check-stable-publish-contained \
     check-raw-sqlite \

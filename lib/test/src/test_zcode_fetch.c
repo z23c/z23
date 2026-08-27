@@ -304,6 +304,15 @@ static int zf_t_fetch_one_shot(void)
             ASSERT_EQ(json_get_int(json_get(dl, "transferred_objects")), 0);
             ASSERT_EQ(json_get_int(json_get(dl, "reused_objects")), 0);
         }
+        {
+            const char *note =
+                json_get_str(json_get(&c.reply.data, "note"));
+            ASSERT(note != NULL);
+            ASSERT(strstr(note, "z23 join") != NULL);
+            ASSERT(strstr(note, dd) != NULL);
+            ASSERT(strstr(note, "-packagehost") == NULL);
+            ASSERT(strstr(note, "-buildworker") == NULL);
+        }
         zf_cmd_free(&c);
 
         /* The resumable record is the one-shot command's only lasting
@@ -629,7 +638,15 @@ static int zf_t_peers_one_shot(void)
                !json_get_bool(json_get(&c.reply.data, "live")));
         ASSERT(json_get_int(json_get(&c.reply.data, "peer_count")) == 0);
         ASSERT(json_get(&c.reply.data, "peers") != NULL);
-        ASSERT(json_get_str(json_get(&c.reply.data, "note")) != NULL);
+        {
+            const char *note =
+                json_get_str(json_get(&c.reply.data, "note"));
+            ASSERT(note != NULL);
+            ASSERT(strstr(note, "z23 join") != NULL);
+            ASSERT(strstr(note, dd) != NULL);
+            ASSERT(strstr(note, "-packagehost") == NULL);
+            ASSERT(strstr(note, "-buildworker") == NULL);
+        }
         {
             const struct json_value *pos = zf_possession(&c);
             ASSERT(pos != NULL);

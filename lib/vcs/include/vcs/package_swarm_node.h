@@ -164,6 +164,18 @@ void vcs_swarm_engine_peer_drop(struct vcs_swarm_engine *engine,
 bool vcs_swarm_engine_peer_known(const struct vcs_swarm_engine *engine,
                                  uint64_t peer);
 
+/* Apply one package-root advertisement for a registered peer from
+ * LOCALLY VERIFIED evidence — e.g. a signed provider record recovered
+ * from the DHT naming that root. This is not an announce frame: it does
+ * not consume announce quota, raise ANNOUNCE_FLOOD, or mark the download
+ * provider-restricted, because the evidence was authenticated by this
+ * node before being handed in (the caller owns that duty). Idempotent on
+ * both the root and re-application; true when the peer now offers the
+ * root to the scheduler, false when the peer is unknown or its ad table
+ * is full. Wake scheduling with vcs_swarm_engine_schedule_ready(). */
+bool vcs_swarm_engine_peer_offer(struct vcs_swarm_engine *engine,
+                                 uint64_t peer, const uint8_t root[32]);
+
 /* All registered peer ids (bounded, ascending slot order). For the
  * transport glue's membership sync (drop detection). */
 size_t vcs_swarm_engine_peer_ids(struct vcs_swarm_engine *engine,
@@ -439,5 +451,12 @@ struct vcs_swarm_advertised {
 size_t vcs_swarm_engine_advertised(struct vcs_swarm_engine *engine,
                                    struct vcs_swarm_advertised *out,
                                    size_t max);
+
+/* Roots of downloads in flight (want-manifest or chunks) with ZERO live
+ * advertisements and not provider-restricted — the work list for a DHT
+ * discovery fallback. Sorted lexicographically; no root appears twice.
+ * Returns the row count written (<= max). */
+size_t vcs_swarm_engine_unadvertised_roots(struct vcs_swarm_engine *engine,
+                                           uint8_t out[][32], size_t max);
 
 #endif /* ZCL_VCS_PACKAGE_SWARM_NODE_H */
