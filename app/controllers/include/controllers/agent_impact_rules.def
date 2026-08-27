@@ -201,6 +201,10 @@ AGENT_IMPACT_RULE("lib/storage/src/coins_record_codec.*|lib/storage/src/coins_db
 /* The incremental UTXO commitment also carries the block-swarm unit pins
  * (fast_sync.h shapes), so fast_sync rides alongside its own group. */
 AGENT_IMPACT_RULE("lib/coins/src/utxo_commitment.c|lib/coins/include/coins/utxo_commitment.h|lib/test/src/test_utxo_commitment.c", "utxo_commitment fast_sync make_lint_gates")
+/* The atomic-swap RPC controller: its money-shape guard is pinned next to
+ * the vault's swap-encumbrance read model, and its wire behaviour is
+ * exercised by the simnet and native-API contract lanes. */
+AGENT_IMPACT_RULE("app/controllers/src/swap_controller.c|app/controllers/include/controllers/swap_controller.h|lib/test/src/test_vault_read.c", "vault_read simnet_contract native_api_contract make_lint_gates")
 AGENT_IMPACT_RULE("app/services/src/utxo_recovery_*.c|app/services/src/utxo_recovery_internal.h|app/services/include/services/utxo_recovery_service.h|lib/test/src/test_utxo_recovery_service.c|lib/storage/include/storage/chainstate_legacy_reader.h|lib/test/src/test_chainstate_sapling_anchor.c|lib/test/src/test_utxo_recovery_shielded_backfill.c|lib/test/src/test_shielded_import_cured_tip_anchor.c|lib/test/src/test_integrity.c", "chainstate_sapling_anchor chainstate_legacy_reader sapling_anchor_frontier_condition utxo_recovery_service utxo_recovery_shielded_backfill shielded_import_cured_tip_anchor utxo_import_pipeline integrity make_lint_gates")
 AGENT_IMPACT_RULE("app/services/src/chain_restore_repair.c|app/services/src/chain_restore_repair_internal.h|app/services/include/services/chain_restore_repair.h|lib/test/src/test_chain_restore_service.c", "chain_restore_service chain_restore_planner make_lint_gates")
 AGENT_IMPACT_RULE("app/services/src/chain_restore_boot_snapshot.c|app/services/include/services/chain_restore_boot_snapshot.h", "chain_restore_service load_verify_boot make_lint_gates")
