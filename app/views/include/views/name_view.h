@@ -30,9 +30,13 @@ size_t name_error_response(const char *status_code,
  * (the onion gateway) close a page exactly the way this one does. */
 int name_view_body_end(char *buf, size_t max);
 
-/* GET /names — browse index of registered names. */
+/* GET /names — browse index of registered names. `total` is the whole
+ * registry's size and is what the headline reports; the page renders at
+ * most a newest-first window over it and says so when it stops short.
+ * A negative total (store unreadable) keeps any count off the page
+ * rather than implying the window is everything. */
 size_t name_view_index(const struct znam_entry *entries, int count,
-                       uint8_t *resp, size_t max);
+                       int total, uint8_t *resp, size_t max);
 
 /* GET /names/{name} and the /n/{name} profile fallback — a name's public
  * profile page (owner, primary target, resolver records, and the on-chain

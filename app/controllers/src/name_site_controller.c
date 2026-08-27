@@ -49,6 +49,7 @@
 #include "base/safe_alloc.h"
 
 #include <pthread.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -601,7 +602,11 @@ size_t name_site_handle_request(const char *method, const char *path,
     if (path_eq(path, "/names") || path_eq(path, "/names/")) {
         struct znam_entry entries[NAME_LIST_LIMIT];
         int count = ndb ? db_znam_list(ndb, entries, NAME_LIST_LIMIT) : 0;
-        return name_view_index(entries, count, response, response_max);
+        size_t rows = 0;
+        bool known = ndb && db_znam_count(ndb, &rows);
+        int total = known ? (rows > INT_MAX ? INT_MAX : (int)rows) : -1;
+        return name_view_index(entries, count, total, response,
+                               response_max);
     }
 
     /* /names/<name> — profile (show), same taxonomy on failure. */
@@ -624,6 +629,10 @@ size_t name_site_handle_request(const char *method, const char *path,
     {
         struct znam_entry entries[NAME_LIST_LIMIT];
         int count = ndb ? db_znam_list(ndb, entries, NAME_LIST_LIMIT) : 0;
-        return name_view_index(entries, count, response, response_max);
+        size_t rows = 0;
+        bool known = ndb && db_znam_count(ndb, &rows);
+        int total = known ? (rows > INT_MAX ? INT_MAX : (int)rows) : -1;
+        return name_view_index(entries, count, total, response,
+                               response_max);
     }
 }

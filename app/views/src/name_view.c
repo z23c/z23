@@ -228,19 +228,32 @@ int name_view_body_end(char *buf, size_t max)
 /* ── Index ──────────────────────────────────────────────────────── */
 
 size_t name_view_index(const struct znam_entry *entries, int count,
-                       uint8_t *resp, size_t max)
+                       int total, uint8_t *resp, size_t max)
 {
     char body[36864];
     size_t off = 0;
     int n = name_body_start(body, sizeof(body), "ZCL Names");
     if (n > 0) off = (size_t)n;
 
-    n = snprintf(body + off, sizeof(body) - off,
-        "<h1>ZCL Names</h1>"
-        "<p>%d registered name%s. A name is a sovereign identity for the "
-        "sites this node hosts over onion + HTTPS. Visit "
-        "<code>/n/&lt;name&gt;</code> to resolve one.</p>",
-        count, count == 1 ? "" : "s");
+    /* The headline states the registry's real size, not how many rows
+     * this page chose to render — a wrong total here reads as fact. An
+     * unreadable store keeps the number off the page entirely rather
+     * than printing the window and implying it is everything. */
+    int shown = 0;
+    if (total < 0) {
+        n = snprintf(body + off, sizeof(body) - off,
+            "<h1>ZCL Names</h1>"
+            "<p>A name is a sovereign identity for the "
+            "sites this node hosts over onion + HTTPS. Visit "
+            "<code>/n/&lt;name&gt;</code> to resolve one.</p>");
+    } else {
+        n = snprintf(body + off, sizeof(body) - off,
+            "<h1>ZCL Names</h1>"
+            "<p>%d registered name%s. A name is a sovereign identity for the "
+            "sites this node hosts over onion + HTTPS. Visit "
+            "<code>/n/&lt;name&gt;</code> to resolve one.</p>",
+            total, total == 1 ? "" : "s");
+    }
     if (n > 0) off += (size_t)n;
 
     for (int i = 0; i < count && off < sizeof(body) - 512; i++) {
@@ -259,6 +272,16 @@ size_t name_view_index(const struct znam_entry *entries, int count,
             safe_name, safe_name,
             znam_type_name(entries[i].target_type), safe_val,
             safe_owner, entries[i].reg_height, safe_name);
+        if (n > 0) off += (size_t)n;
+        shown++;
+    }
+
+    /* Same window honesty as the profile page: the listing is newest-
+     * first and bounded, so say so when it stopped short of the total. */
+    if (total >= 0 && total > shown) {
+        n = snprintf(body + off, sizeof(body) - off,
+            "<p class='muted'>Showing the %d most recently "
+            "registered.</p>", shown);
         if (n > 0) off += (size_t)n;
     }
 

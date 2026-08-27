@@ -958,6 +958,76 @@ static int t_profile_record_window(void)
     return failures;
 }
 
+/* ── Index-total honesty ─────────────────────────────────────────────
+ *
+ * The /names headline used to print how many rows the page happened to
+ * render — a bounded window — as if it were the registry size. Once a
+ * network outgrew one page of names, every visitor was told a smaller
+ * registry exists than actually does. Pinned here:
+ *   - the headline reports the registry's real count;
+ *   - a page that stopped short adds an exact
+ *     "Showing the N most recently registered." line (the count the
+ *     page actually rendered, whether the row window or this buffer
+ *     stopped it);
+ *   - a registry that fits whole renders no such line.
+ * The over-window case pins the number-free shape rather than an exact
+ * count because the render can stop under its own buffer headroom
+ * before the row window is exhausted. */
+static int t_index_total_honesty(void)
+{
+    int failures = 0;
+    sqlite3 *db = NULL;
+    struct node_db ndb;
+    if (!open_site_db(&db, &ndb)) return 1;
+    rpc_name_set_state(&ndb);
+
+    char nm[32];
+    bool seeded = true;
+    /* Two more names than the page's own index window (100). */
+    for (int i = 0; i < 102; i++) {
+        snprintf(nm, sizeof(nm), "n%03d", i);
+        seeded &= seed_name(&ndb, nm, ZNAM_TYPE_TADDR, "t1Index");
+    }
+    TS_CHECK("seed over window", seeded);
+
+    uint8_t resp[65536];
+    size_t nb = name_site_handle_request("GET", "/names", NULL, 0,
+                                         resp, sizeof(resp));
+    resp[nb < sizeof(resp) ? nb : sizeof(resp) - 1] = '\0';
+    TS_CHECK("index 200", strstr((char *)resp, "200 OK") != NULL);
+    TS_CHECK("headline carries the true total",
+             strstr((char *)resp, "102 registered names.") != NULL);
+    TS_CHECK("window disclosed",
+             strstr((char *)resp, " most recently registered.</p>") !=
+                 NULL);
+
+    rpc_name_set_state(NULL);
+    sqlite3_close(db);
+
+    sqlite3 *db2 = NULL;
+    struct node_db ndb2;
+    if (!open_site_db(&db2, &ndb2)) return failures + 1;
+    rpc_name_set_state(&ndb2);
+    seeded = true;
+    /* Comfortably inside both the row window and the page buffer. */
+    for (int i = 0; i < 25; i++) {
+        snprintf(nm, sizeof(nm), "e%03d", i);
+        seeded &= seed_name(&ndb2, nm, ZNAM_TYPE_TADDR, "t1Index");
+    }
+    TS_CHECK("seed fitting batch", seeded);
+    nb = name_site_handle_request("GET", "/names", NULL, 0,
+                                  resp, sizeof(resp));
+    resp[nb < sizeof(resp) ? nb : sizeof(resp) - 1] = '\0';
+    TS_CHECK("fitting page 200", strstr((char *)resp, "200 OK") != NULL);
+    TS_CHECK("fitting headline",
+             strstr((char *)resp, "25 registered names.") != NULL);
+    TS_CHECK("fitting registry stays silent",
+             strstr((char *)resp, "most recently registered") == NULL);
+    rpc_name_set_state(NULL);
+    sqlite3_close(db2);
+    return failures;
+}
+
 int test_znam_site(void)
 {
     int failures = 0;
@@ -967,6 +1037,7 @@ int test_znam_site(void)
     failures += t_register_refusals();
     failures += t_pow_gate_single_use();
     failures += t_profile_record_window();
+    failures += t_index_total_honesty();
     failures += t_name_records_rpc();
     failures += t_error_taxonomy();
     failures += t_resolve_rpc_taxonomy();
