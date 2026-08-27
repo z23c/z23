@@ -32,14 +32,14 @@ pacman -S --needed base-devel git \
   mingw-w64-ucrt-x86_64-ninja
 ```
 
-Keep the checkout on the Windows filesystem, for example
-`C:\Users\you\github\z23`, and enter it from UCRT64 as
-`/c/Users/you/github/z23`. Do not add `C:\msys64\usr\bin` globally to the
-Windows `PATH`; launch the editor from UCRT64 so it inherits
-`C:\msys64\ucrt64\bin`.
+Keep the checkout on the Windows filesystem rather than inside the
+MSYS2 tree, and enter it from UCRT64 through its drive mount (a path
+under `C:` appears as `/c`). Do not add the MSYS2 `usr\bin` directory
+globally to the Windows `PATH`; launch the editor from UCRT64 so it
+inherits the UCRT64 toolchain directory.
 
 ```bash
-cd /c/Users/you/github/z23
+cd "$Z23_CHECKOUT"   # your z23 working copy, entered as /c/...
 code .
 tools/scripts/doctor.sh
 tools/scripts/build_vendor.sh
