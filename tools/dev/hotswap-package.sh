@@ -333,6 +333,9 @@ ensure_verifier_built() {
             tools/dev/hotswap_verify_so.c \
             lib/hotswap/src/hotswap_activate.c \
             lib/hotswap/src/hotswap_islands.c \
+            lib/base/src/safe_alloc.c \
+            lib/hotswap/src/hotswap_sealed_image.c \
+            lib/hotswap/src/hotswap_elf_probe.c \
             lib/hotswap/src/hotswap_artifact_digest.c \
             lib/sha3/src/sha3.c \
             -Wl,--gc-sections -ldl 2>"$SCRATCH/verifier_build.log"; then
