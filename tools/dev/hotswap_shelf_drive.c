@@ -8,7 +8,7 @@
  * code reading only. It cannot be driven from a test_parallel group, for three
  * independent reasons:
  *
- *   1. Only the dlopen-based activation path shelves anything, so the sequence
+ *   1. Only the dynamic-loading activation path shelves anything, so the sequence
  *      needs REAL compiled, consensus-pinned, ELF-shape-clean module .so files
  *      — a separate build step, not a test link.
  *   2. test_parallel's module mode (ZCL_HOTSWAP_TEST_MODULE) reads its module
@@ -47,6 +47,13 @@
  *   f  activate C: depth is 1 — the shelf holds B, not A
  *   g  a REFUSED rollback leaves the live implementation and the shelf intact
  */
+
+/* Contained exactly like the APIs it drives: the publish hooks and the
+ * probe-buffer release are declared only under ZCL_DEV_BUILD/ZCL_TESTING.
+ * A build without either macro (the clang portability gate compiles this
+ * tree with the node flags) then sees a tool that refuses, not one that
+ * fails to parse. */
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
 
 #include "command/native_dev_hotswap.h"
 #include "config/command_catalog.h"
@@ -287,9 +294,9 @@ int main(int argc, char **argv)
     struct hotswap_publish_hooks hooks;
     /* with_quiesce=TRUE, which is what the RESIDENT node uses and is the
      * harder case for the shelf. It lets the loader confirm that every retired
-     * override snapshot has drained and then dlclose() the superseded module's
+     * override snapshot has drained and then unmap the superseded module's
      * mapping. A rollback that then still works is proof the shelf really does
-     * re-dlopen its retained sealed image rather than quietly reusing a
+     * re-map its retained sealed image from scratch rather than quietly reusing a
      * mapping that happened to still be there — which is the whole reason the
      * shelf holds bytes and not a struct pointer. With false, every superseded
      * .so stays mapped forever and that distinction is untestable. */
@@ -517,3 +524,16 @@ int main(int argc, char **argv)
     printf("  SHELF DRIVE PASSED\n");
     return 0;
 }
+
+#else /* neither ZCL_DEV_BUILD nor ZCL_TESTING */
+
+#include <stdio.h>
+
+int main(void)
+{
+    fprintf(stderr,
+            "hotswap_shelf_drive: dev-only tool; build with ZCL_DEV_BUILD.\n");
+    return 2;
+}
+
+#endif /* ZCL_DEV_BUILD || ZCL_TESTING */
