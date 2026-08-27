@@ -1483,7 +1483,9 @@ bool ci_merkle_proof_verify(const struct ci_merkle_proof *p,
 
     /* The root proves itself: no levels, and the claim IS the trusted root. */
     if (!p->path[0]) {
-        if (p->kind != CI_MERKLE_KIND_DIR || p->nlevels != 0) return true;
+        if (p->kind != CI_MERKLE_KIND_DIR || p->nlevels != 0 ||
+            p->nchildren != 0)
+            return true;
         *ok = memcmp(claimed->bytes, root->bytes, 32) == 0;
         return true;
     }

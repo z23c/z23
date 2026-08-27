@@ -749,7 +749,7 @@ static int test_cmp_canonical_path_inputs(void)
 {
     int failures = 0;
     TEST("code_merkle_proof: a leading slash, a trailing slash, an empty or "
-         "dot segment, and an untiled sibling arena are all refused") {
+         "dot segment, and any untiled sibling arena are all refused") {
         cmp_reset();
         ASSERT(cmp_fixture(CMP_FIX));
 
@@ -757,14 +757,17 @@ static int test_cmp_canonical_path_inputs(void)
         ASSERT(m);
         struct ci_merkle_proof *ptop = ci_merkle_proof_alloc();
         struct ci_merkle_proof *pdeep = ci_merkle_proof_alloc();
-        ASSERT(ptop && pdeep);
-        struct zcl_sha3_digest dtop, ddeep, root;
+        struct ci_merkle_proof *proot = ci_merkle_proof_alloc();
+        ASSERT(ptop && pdeep && proot);
+        struct zcl_sha3_digest dtop, ddeep, droot, root;
 
         /* "core" is a TOP-LEVEL directory: its parent is the root, which is
          * the one place dirname() cannot tell "core" from "/core". */
         ASSERT(cmp_prove_ok(m, "core", ptop, &dtop, &root));
         ASSERT(ptop->nlevels == 1 && ptop->level[0].path[0] == '\0');
         ASSERT(cmp_prove_ok(m, "lib/net/src/cmp_a.c", pdeep, &ddeep, &root));
+        ASSERT(cmp_prove_ok(m, "", proot, &droot, &root));
+        ASSERT(proot->nlevels == 0 && proot->nchildren == 0);
 
         /* THE BUG. In memory... */
         struct ci_merkle_proof *mut = cmp_dup(ptop);
@@ -837,6 +840,23 @@ static int test_cmp_canonical_path_inputs(void)
         ci_merkle_proof_free(mut);
         ASSERT(!trailing);
 
+        /* Root verification has no level loop. It must still reject an
+         * unbound arena record, exactly as the encoder does, rather than
+         * accepting a direct in-memory shape that has no canonical wire
+         * representation. */
+        ASSERT(cmp_verifies(proot, &droot, &root));
+        mut = cmp_dup(proot);
+        ASSERT(mut);
+        mut->nchildren = 1;
+        snprintf(mut->children[0].name, sizeof(mut->children[0].name), "%s",
+                 "unbound.c");
+        mut->children[0].kind = CI_MERKLE_KIND_FILE;
+        mut->children[0].digest = droot;
+        bool root_trailing = cmp_verifies(mut, &droot, &root);
+        ASSERT(ci_merkle_proof_wire_size(mut) == 0);
+        ci_merkle_proof_free(mut);
+        ASSERT(!root_trailing);
+
         /* ...and a gap, or an overlap, at the front of a level */
         mut = cmp_dup(pdeep);
         ASSERT(mut);
@@ -845,6 +865,7 @@ static int test_cmp_canonical_path_inputs(void)
         ci_merkle_proof_free(mut);
         ASSERT(!gap);
 
+        ci_merkle_proof_free(proot);
         ci_merkle_proof_free(pdeep);
         ci_merkle_proof_free(ptop);
         ci_merkle_free(m);

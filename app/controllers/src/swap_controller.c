@@ -135,10 +135,10 @@ static double swap_parse_amount(const struct json_value *params)
  * contract this node cannot honour. */
 bool swap_amount_to_zat(double amount_coins, int64_t *zat_out)
 {
-    static const double max_whole_coins =
-        (double)(INT64_MAX / 100000000);
+    static const double max_whole_coins = (double)(INT64_MAX / 100000000);
     if (!zat_out || !(amount_coins > 0.0) || !isfinite(amount_coins) ||
-        amount_coins > max_whole_coins)
+        amount_coins > max_whole_coins ||
+        amount_coins * 100000000.0 < 1.0)
         return false;
     *zat_out = (int64_t)(amount_coins * 100000000.0);
     return true;

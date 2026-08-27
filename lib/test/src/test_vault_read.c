@@ -313,6 +313,10 @@ int test_vault_read(void)
                  !swap_amount_to_zat(INFINITY, &zat));
         VR_CHECK("int64-overflowing swap amount refused",
                  !swap_amount_to_zat(1.0e12, &zat));
+        VR_CHECK("positive sub-zatoshi swap amount refused",
+                 !swap_amount_to_zat(0.000000001, &zat));
+        VR_CHECK("one zatoshi swap amount accepted",
+                 swap_amount_to_zat(0.00000001, &zat) && zat == 1);
         VR_CHECK("whole-coin ceiling itself still converts",
                  swap_amount_to_zat(92233720368.0, &zat) &&
                  zat == 9223372036800000000LL);

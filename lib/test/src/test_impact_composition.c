@@ -936,6 +936,21 @@ static int test_ic_fast_sync_splits_keep_proof_lane(void)
     return failures;
 }
 
+static int test_ic_merkle_verifier_selects_proof_lane(void)
+{
+    int failures = 0;
+    TEST("impact composition: Merkle verifier changes select proof tests") {
+        struct agent_impact_acc impact = {0};
+        ASSERT(agent_impact_apply_shared_rules(
+            "lib/codeindex/src/codeindex_merkle.c", &impact));
+        ASSERT(ic_acc_has_group(&impact, "code_merkle"));
+        ASSERT(ic_acc_has_group(&impact, "code_merkle_proof"));
+        ASSERT(ic_acc_has_group(&impact, "codeindex"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_impact_composition(void)
 {
     int failures = 0;
@@ -952,5 +967,6 @@ int test_impact_composition(void)
     failures += test_ic_code_capsule_stays_with_code_owner();
     failures += test_ic_native_compositor_selects_physical_proof();
     failures += test_ic_fast_sync_splits_keep_proof_lane();
+    failures += test_ic_merkle_verifier_selects_proof_lane();
     return failures;
 }

@@ -196,11 +196,13 @@
 #include "crypto/sha3.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #define HSZ SHA3_256_OUTPUT_SIZE
 #define HEXSZ (2 * HSZ + 1)
@@ -214,6 +216,12 @@ static const char merkle_node_domain[] = "zcl.codeindex.merkle.node.v1";
 /* Mirrors struct ci_merkle_node.path[256] and MERKLE_NAME_MAX. */
 #define MERKLE_PATH_MAX 256
 #define MERKLE_NAME_MAX 160
+
+/* Writer and reader share these ceilings. The sealer must never publish an
+ * image that the checker cannot allocate and parse back. */
+#define MAX_MAN_SECTIONS 512
+#define MAX_MAN_FILES 4096
+#define MAX_FILELIST_BYTES ((MAX_MAN_FILES + 1u) * MERKLE_PATH_MAX)
 
 /* The manifest's field separator, in one place: writer and reader share it so
  * they cannot drift into two spellings of the same line. */
@@ -339,15 +347,70 @@ static void write_u64le(struct sha3_256_ctx *ctx, uint64_t v)
  *          then the same bytes).
  * Returns 0 on success. Fails closed if the byte count does not match the
  * stat size the leaf preimage already committed to. */
+static int open_sealed_file(const char *path)
+{
+    if (path_reject_reason(path) != NULL)
+        return -1;
+
+    char copy[MERKLE_PATH_MAX];
+    memcpy(copy, path, strlen(path) + 1);
+    int dirfd = open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (dirfd < 0)
+        return -1;
+
+    char *part = copy;
+    for (;;) {
+        char *slash = strchr(part, '/');
+        if (slash)
+            *slash = '\0';
+        int flags = O_RDONLY | O_CLOEXEC | O_NOFOLLOW;
+        if (slash)
+            flags |= O_DIRECTORY;
+        int next = openat(dirfd, part, flags);
+        int saved = errno;
+        close(dirfd);
+        if (next < 0) {
+            errno = saved;
+            return -1;
+        }
+        if (!slash)
+            return next;
+        dirfd = next;
+        part = slash + 1;
+    }
+}
+
+static bool stable_file_stat(const struct stat *before,
+                             const struct stat *after)
+{
+#if defined(__APPLE__)
+    bool times_equal =
+        before->st_mtimespec.tv_sec == after->st_mtimespec.tv_sec &&
+        before->st_mtimespec.tv_nsec == after->st_mtimespec.tv_nsec &&
+        before->st_ctimespec.tv_sec == after->st_ctimespec.tv_sec &&
+        before->st_ctimespec.tv_nsec == after->st_ctimespec.tv_nsec;
+#else
+    bool times_equal =
+        before->st_mtim.tv_sec == after->st_mtim.tv_sec &&
+        before->st_mtim.tv_nsec == after->st_mtim.tv_nsec &&
+        before->st_ctim.tv_sec == after->st_ctim.tv_sec &&
+        before->st_ctim.tv_nsec == after->st_ctim.tv_nsec;
+#endif
+    return before->st_dev == after->st_dev &&
+           before->st_ino == after->st_ino &&
+           before->st_size == after->st_size && times_equal;
+}
+
 static int hash_file(const char *path, unsigned char out[HSZ],
                      unsigned char leaf[HSZ], uint64_t *out_size)
 {
-    FILE *f = fopen(path, "rb");
-    if (!f)
+    int fd = open_sealed_file(path);
+    if (fd < 0)
         return -1;
-    struct stat st;
-    if (fstat(fileno(f), &st) != 0 || !S_ISREG(st.st_mode)) {
-        fclose(f);
+    struct stat before, after;
+    if (fstat(fd, &before) != 0 || !S_ISREG(before.st_mode) ||
+        before.st_size < 0) {
+        close(fd);
         return -1;
     }
 
@@ -359,19 +422,30 @@ static int hash_file(const char *path, unsigned char out[HSZ],
     sha3_256_write(&lf, (const unsigned char *)merkle_leaf_domain,
                    sizeof(merkle_leaf_domain));
     sha3_256_write(&lf, (const unsigned char *)path, strlen(path) + 1);
-    write_u64le(&lf, (uint64_t)st.st_size);
+    write_u64le(&lf, (uint64_t)before.st_size);
 
     unsigned char buf[65536];
-    size_t r;
     uint64_t total = 0;
-    while ((r = fread(buf, 1, sizeof(buf), f)) > 0) {
-        sha3_256_write(&flat, buf, r);
-        sha3_256_write(&lf, buf, r);
-        total += (uint64_t)r;
+    bool read_ok = true;
+    for (;;) {
+        ssize_t got = read(fd, buf, sizeof(buf));
+        if (got < 0) {
+            if (errno == EINTR)
+                continue;
+            read_ok = false;
+            break;
+        }
+        if (got == 0)
+            break;
+        sha3_256_write(&flat, buf, (size_t)got);
+        sha3_256_write(&lf, buf, (size_t)got);
+        total += (uint64_t)got;
     }
-    int ferr = ferror(f);
-    fclose(f);
-    if (ferr || total != (uint64_t)st.st_size)
+    if (read_ok && fstat(fd, &after) != 0)
+        read_ok = false;
+    close(fd);
+    if (!read_ok || total != (uint64_t)before.st_size ||
+        !stable_file_stat(&before, &after))
         return -1;
     sha3_256_finalize(&flat, out);
     sha3_256_finalize(&lf, leaf);
@@ -398,17 +472,31 @@ static struct entry *read_and_hash(const char *manifest_path, size_t *out_n)
         die("out of memory reading stdin");
     for (;;) {
         if (len == cap) {
-            cap *= 2;
-            char *nd = realloc(data, cap); // raw-alloc-ok:standalone-build-time-seal-tool-links-no-safe_alloc
+            if (cap >= MAX_FILELIST_BYTES) {
+                int extra = fgetc(stdin);
+                if (extra == EOF && !ferror(stdin))
+                    break;
+                die("NUL file list exceeds the manifest parser's byte budget");
+            }
+            size_t next = cap * 2;
+            if (next > MAX_FILELIST_BYTES)
+                next = MAX_FILELIST_BYTES;
+            char *nd = realloc(data, next); // raw-alloc-ok:standalone-build-time-seal-tool-links-no-safe_alloc
             if (!nd)
                 die("out of memory reading stdin");
             data = nd;
+            cap = next;
         }
         size_t r = fread(data + len, 1, cap - len, stdin);
         len += r;
-        if (r == 0)
+        if (r == 0) {
+            if (ferror(stdin))
+                die("error reading NUL-separated file list from stdin");
             break;
+        }
     }
+    if (len > 0 && data[len - 1] != '\0')
+        die("NUL-separated file list ended with an incomplete path token");
 
     struct entry *ents = NULL;
     size_t n = 0, ecap = 0;
@@ -433,6 +521,8 @@ static struct entry *read_and_hash(const char *manifest_path, size_t *out_n)
                 die_path(path, why);
             /* Skip the manifest itself — it can never seal its own bytes. */
             if (strcmp(path, manifest_path) != 0) {
+                if (n == MAX_MAN_FILES)
+                    die("sealed file count exceeds manifest parser limit");
                 if (n == ecap) {
                     ecap = ecap ? ecap * 2 : 64;
                     struct entry *ne = realloc(ents, ecap * sizeof(*ents)); // raw-alloc-ok:standalone-build-time-seal-tool-links-no-safe_alloc
@@ -906,9 +996,6 @@ static int file_line_parse(const char *line, char hex[HEXSZ],
 
 /* ── manifest parsing ──────────────────────────────────────────────────── */
 
-#define MAX_MAN_SECTIONS 512
-#define MAX_MAN_FILES 4096
-
 struct man_section {
     char name[MERKLE_PATH_MAX];
     uint64_t count;
@@ -958,6 +1045,30 @@ static int read_manifest(const char *manifest_path, struct manifest_view *mv)
     unsigned long lineno = 0;
     while (fgets(line, sizeof(line), m)) {
         lineno++;
+        size_t visible = strlen(line);
+        /* The writer emits one newline-terminated physical record. A missing
+         * newline here means either an overlong/truncated line or an embedded
+         * NUL hiding bytes that fgets already consumed. Both are ambiguous. */
+        if (visible == 0 || line[visible - 1] != '\n' ||
+            memchr(line, '\r', visible) != NULL) {
+            fprintf(stderr,
+                    "core_seal: FATAL — malformed physical line in '%s' "
+                    "line %lu\n", manifest_path, lineno);
+            rc = -2;
+            continue;
+        }
+        if (mv->have_root) {
+            if (strncmp(line, "ROOT", 4) == 0)
+                fprintf(stderr,
+                        "core_seal: FATAL — more than one ROOT line in '%s' "
+                        "line %lu\n", manifest_path, lineno);
+            else
+                fprintf(stderr,
+                        "core_seal: FATAL — data follows final ROOT in '%s' "
+                        "line %lu\n", manifest_path, lineno);
+            rc = -2;
+            continue;
+        }
         if (line[0] == '#' || line[0] == '\n' || line[0] == '\r')
             continue;
 
@@ -1052,7 +1163,13 @@ static int read_manifest(const char *manifest_path, struct manifest_view *mv)
                 manifest_path, lineno, line);
         rc = -2;
     }
-    fclose(m);
+    if (ferror(m)) {
+        fprintf(stderr, "core_seal: FATAL — read error in manifest '%s'\n",
+                manifest_path);
+        rc = -2;
+    }
+    if (fclose(m) != 0)
+        rc = -2;
     return rc;
 }
 
@@ -1250,6 +1367,12 @@ static const char *const manifest_header =
     "#       hotswap/core_seal_root.h. FROZEN: SECTION/TREE are additive and\n"
     "#       do not enter this preimage.\n";
 
+static bool manifest_counts_fit(size_t files, size_t directory_nodes)
+{
+    return files <= MAX_MAN_FILES && directory_nodes > 0 &&
+           directory_nodes - 1 <= MAX_MAN_SECTIONS;
+}
+
 static int do_seal(const char *manifest_path)
 {
     size_t n = 0;
@@ -1261,6 +1384,8 @@ static int do_seal(const char *manifest_path)
     unsigned char tree[HSZ];
     memset(tree, 0, sizeof(tree));
     size_t dn = compute_sections(ents, n, &nodes, tree);
+    if (!manifest_counts_fit(n, dn))
+        die("sealed file/section count exceeds manifest parser limit");
 
     FILE *m = fopen(manifest_path, "wb");
     if (!m)

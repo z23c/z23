@@ -34,12 +34,14 @@
 #endif
 
 #include <errno.h>
+#include <fcntl.h>
 #include <inttypes.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #define CORE_SEAL_NO_MAIN 1
@@ -242,7 +244,7 @@ static void test_section_length_prefix(void)
                    "SECTION  19  18  "
                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
                    "  core/consensus/src\n");
-    CS_CHECK("uppercase hex is REJECTED", 
+    CS_CHECK("uppercase hex is REJECTED",
              section_line_parse(liar, path, &files, hex) == -2);
 
     /* A malformed SECTION line must report -2 (malformed), never -1 (not a
@@ -470,13 +472,18 @@ static void test_leaf_preimage(void)
     if (!dir)
         return;
 
-    char path[512];
-    (void)snprintf(path, sizeof(path), "%s/leaf.c", dir);
+    char oldcwd[4096] = {0};
+    CS_CHECK("capture cwd", getcwd(oldcwd, sizeof(oldcwd)) != NULL);
+    if (!oldcwd[0] || chdir(dir) != 0) {
+        (void)rmdir(dir);
+        return;
+    }
     static const unsigned char payload[] = "int main(void){return 0;}\n";
     const size_t plen = sizeof(payload) - 1;
-    FILE *f = fopen(path, "wb");
+    FILE *f = fopen("leaf.c", "wb");
     CS_CHECK("scratch file", f != NULL);
     if (!f) {
+        (void)chdir(oldcwd);
         (void)rmdir(dir);
         return;
     }
@@ -486,10 +493,10 @@ static void test_leaf_preimage(void)
     unsigned char flat[HSZ], leaf[HSZ], want_leaf[HSZ], want_flat[HSZ];
     uint64_t size = 0;
     CS_CHECK("hash_file reads the scratch file",
-             hash_file(path, flat, leaf, &size) == 0);
+             hash_file("leaf.c", flat, leaf, &size) == 0);
     CS_CHECK("hash_file reports the byte length", size == (uint64_t)plen);
 
-    spec_leaf_digest(path, payload, plen, want_leaf);
+    spec_leaf_digest("leaf.c", payload, plen, want_leaf);
     CS_CHECK("leaf digest matches the documented preimage",
              memcmp(leaf, want_leaf, HSZ) == 0);
 
@@ -504,7 +511,55 @@ static void test_leaf_preimage(void)
     CS_CHECK("the leaf and the flat digest are not the same value",
              memcmp(flat, leaf, HSZ) != 0);
 
-    (void)unlink(path);
+    struct stat before, after;
+    CS_CHECK("stable file metadata fixture", stat("leaf.c", &before) == 0);
+    after = before;
+    CS_CHECK("unchanged pre/post identity and size are stable",
+             stable_file_stat(&before, &after));
+    after.st_ino++;
+    CS_CHECK("a replaced inode is unstable",
+             !stable_file_stat(&before, &after));
+    after = before;
+    after.st_size++;
+    CS_CHECK("a changed byte length is unstable",
+             !stable_file_stat(&before, &after));
+    after = before;
+#if defined(__APPLE__)
+    after.st_ctimespec.tv_nsec = before.st_ctimespec.tv_nsec == 0 ? 1 : 0;
+#else
+    after.st_ctim.tv_nsec = before.st_ctim.tv_nsec == 0 ? 1 : 0;
+#endif
+    CS_CHECK("a same-size metadata mutation is unstable",
+             !stable_file_stat(&before, &after));
+
+    FILE *target = fopen("target.c", "wb");
+    CS_CHECK("symlink target fixture", target != NULL);
+    if (target) {
+        (void)fwrite(payload, 1, plen, target);
+        (void)fclose(target);
+    }
+    CS_CHECK("final-component symlink is refused",
+             symlink("target.c", "link.c") == 0 &&
+             hash_file("link.c", flat, leaf, &size) != 0);
+
+    CS_CHECK("intermediate directory fixture", mkdir("real", 0700) == 0);
+    FILE *nested = fopen("real/nested.c", "wb");
+    CS_CHECK("nested fixture", nested != NULL);
+    if (nested) {
+        (void)fwrite(payload, 1, plen, nested);
+        (void)fclose(nested);
+    }
+    CS_CHECK("intermediate-component symlink is refused",
+             symlink("real", "alias") == 0 &&
+             hash_file("alias/nested.c", flat, leaf, &size) != 0);
+
+    (void)unlink("alias");
+    (void)unlink("real/nested.c");
+    (void)rmdir("real");
+    (void)unlink("link.c");
+    (void)unlink("target.c");
+    (void)unlink("leaf.c");
+    (void)chdir(oldcwd);
     (void)rmdir(dir);
 }
 
@@ -567,6 +622,156 @@ static void test_sections_localise(void)
     free(nodes);
 }
 
+/* ── 10. writer/reader limits and the shipping CLI round trip ─────────── */
+
+static void test_manifest_limits(void)
+{
+    CS_CHECK("the largest reader-compatible manifest is sealable",
+             manifest_counts_fit(MAX_MAN_FILES, MAX_MAN_SECTIONS + 1u));
+    CS_CHECK("one excess file is refused before sealing",
+             !manifest_counts_fit(MAX_MAN_FILES + 1u,
+                                  MAX_MAN_SECTIONS + 1u));
+    CS_CHECK("one excess SECTION is refused before sealing",
+             !manifest_counts_fit(MAX_MAN_FILES, MAX_MAN_SECTIONS + 2u));
+    CS_CHECK("a manifest tree must contain its root node",
+             !manifest_counts_fit(0, 0));
+}
+
+static bool cs_write_bytes(const char *path, const void *bytes, size_t length)
+{
+    FILE *file = fopen(path, "wb");
+    if (!file)
+        return false;
+    bool ok = fwrite(bytes, 1, length, file) == length;
+    return fclose(file) == 0 && ok;
+}
+
+static bool cs_append_bytes(const char *path, const void *bytes, size_t length)
+{
+    FILE *file = fopen(path, "ab");
+    if (!file)
+        return false;
+    bool ok = fwrite(bytes, 1, length, file) == length;
+    return fclose(file) == 0 && ok;
+}
+
+static int cs_run_tool(const char *dir, const char *mode)
+{
+    (void)fflush(NULL);
+    pid_t child = fork();
+    if (child < 0)
+        return -1;
+    if (child == 0) {
+        if (chdir(dir) != 0)
+            _exit(125);
+        int input = open("files.z", O_RDONLY | O_CLOEXEC);
+        if (input < 0 || dup2(input, STDIN_FILENO) < 0)
+            _exit(125);
+        (void)close(input);
+        char program[] = "core_seal";
+        char manifest[] = "core/MANIFEST.sha3";
+        char *argv[] = {program, (char *)mode, manifest, NULL};
+        _exit(core_seal_main(3, argv));
+    }
+
+    int status = 0;
+    pid_t waited;
+    do {
+        waited = waitpid(child, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+    if (waited != child || !WIFEXITED(status))
+        return -1;
+    return WEXITSTATUS(status);
+}
+
+static int cs_parse_manifest(const char *path)
+{
+    struct manifest_view mv;
+    int rc = read_manifest(path, &mv);
+    manifest_view_free(&mv);
+    return rc;
+}
+
+static void test_seal_check_round_trip(void)
+{
+    const char *tmpdir = getenv("TMPDIR");
+    char tmpl[256];
+    (void)snprintf(tmpl, sizeof(tmpl), "%s/zcl_core_seal_e2e_%d_XXXXXX",
+                   (tmpdir && tmpdir[0]) ? tmpdir : "/tmp", (int)getpid());
+    char *dir = mkdtemp(tmpl);
+    CS_CHECK("end-to-end scratch dir", dir != NULL);
+    if (!dir)
+        return;
+
+    char core[512], sub[512], first[512], second[512], list[512], manifest[512];
+    (void)snprintf(core, sizeof(core), "%s/core", dir);
+    (void)snprintf(sub, sizeof(sub), "%s/core/sub", dir);
+    (void)snprintf(first, sizeof(first), "%s/core/a.c", dir);
+    (void)snprintf(second, sizeof(second), "%s/core/sub/b.h", dir);
+    (void)snprintf(list, sizeof(list), "%s/files.z", dir);
+    (void)snprintf(manifest, sizeof(manifest), "%s/core/MANIFEST.sha3", dir);
+
+    static const unsigned char first_bytes[] = "int a(void){return 1;}\n";
+    static const unsigned char second_bytes[] = "#define B 2\n";
+    static const unsigned char changed_bytes[] = "int a(void){return 9;}\n";
+    static const char paths[] = "core/a.c\0core/sub/b.h\0";
+    bool fixture = mkdir(core, 0700) == 0 && mkdir(sub, 0700) == 0 &&
+                   cs_write_bytes(first, first_bytes, sizeof(first_bytes) - 1) &&
+                   cs_write_bytes(second, second_bytes, sizeof(second_bytes) - 1) &&
+                   cs_write_bytes(list, paths, sizeof(paths) - 1);
+    CS_CHECK("end-to-end fixture", fixture);
+    if (!fixture)
+        goto cleanup;
+
+    CS_CHECK("seal writes a reader-compatible manifest",
+             cs_run_tool(dir, "seal") == 0 && cs_parse_manifest(manifest) == 0);
+    CS_CHECK("check accepts the freshly sealed files",
+             cs_run_tool(dir, "check") == 0);
+
+    CS_CHECK("changed sealed bytes are written",
+             cs_write_bytes(first, changed_bytes, sizeof(changed_bytes) - 1));
+    CS_CHECK("check reports same-size content drift",
+             cs_run_tool(dir, "check") == 1);
+    CS_CHECK("fixture is restored and resealed",
+             cs_write_bytes(first, first_bytes, sizeof(first_bytes) - 1) &&
+             cs_run_tool(dir, "seal") == 0);
+
+    static const char duplicate_root[] =
+        "ROOT  0000000000000000000000000000000000000000000000000000000000000000\n";
+    CS_CHECK("duplicate ROOT fixture", cs_append_bytes(
+                 manifest, duplicate_root, sizeof(duplicate_root) - 1));
+    CS_CHECK("duplicate ROOT is a parser error",
+             cs_parse_manifest(manifest) == -2 &&
+             cs_run_tool(dir, "check") == 2);
+
+    CS_CHECK("manifest reseals after duplicate ROOT test",
+             cs_run_tool(dir, "seal") == 0);
+    static const char after_root[] = "# data after final root\n";
+    CS_CHECK("nonfinal ROOT fixture",
+             cs_append_bytes(manifest, after_root, sizeof(after_root) - 1));
+    CS_CHECK("ROOT must be the final physical record",
+             cs_parse_manifest(manifest) == -2 &&
+             cs_run_tool(dir, "check") == 2);
+
+    static const char nul_manifest[] =
+        "ROOT  0000000000000000000000000000000000000000000000000000000000000000"
+        "\0hidden\n";
+    CS_CHECK("embedded-NUL manifest fixture",
+             cs_write_bytes(manifest, nul_manifest, sizeof(nul_manifest) - 1));
+    CS_CHECK("embedded NUL cannot hide a physical-line suffix",
+             cs_parse_manifest(manifest) == -2 &&
+             cs_run_tool(dir, "check") == 2);
+
+cleanup:
+    (void)unlink(manifest);
+    (void)unlink(list);
+    (void)unlink(second);
+    (void)unlink(first);
+    (void)rmdir(sub);
+    (void)rmdir(core);
+    (void)rmdir(dir);
+}
+
 int test_core_seal(void)
 {
     printf("\n=== core_seal manifest-encoding tests ===\n");
@@ -581,6 +786,8 @@ int test_core_seal(void)
     test_root_is_frozen();
     test_leaf_preimage();
     test_sections_localise();
+    test_manifest_limits();
+    test_seal_check_round_trip();
 
     printf("core_seal: %d failure(s)\n", cs_failures);
     return cs_failures;
