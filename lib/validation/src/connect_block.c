@@ -18,6 +18,7 @@
  *   - Per-input MoneyRange validation
  *   - Validation events via event_emitf()
  *   - Input value < output check (bad-txns-in-belowout) */
+
 #include <stdio.h>
 #include <stdatomic.h>
 #include "util/log_macros.h"
@@ -38,6 +39,7 @@
 #include "event/event.h"
 #include "util/workpool.h"
 #include "util/util.h"
+
 /* ── Parallel script verification ────────────────────────── */
 
 /* Work item for one input's script verification */
@@ -49,6 +51,7 @@ struct script_check {
     struct tx_sig_checker tsc;
     struct precomputed_tx_data *txdata; /* shared per-tx, read-only */
 };
+
 static bool script_check_fn(void *item)
 {
     struct script_check *sc = (struct script_check *)item;

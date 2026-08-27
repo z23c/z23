@@ -113,6 +113,11 @@ time, but its correctness verdict now requires exact successful operation
 counts instead of comparing scheduler-sensitive wall-clock intervals. The
 file-size gate passed at the existing application/config baseline and the
 existing 22/22 library drift ratchet; neither acceptance threshold changed.
+The following pre-push shell phase caught a whitespace-only drift in sealed
+`connect_block.c` before publication. Restoring its exact manifest bytes made
+the 70-file core seal pass; equivalent unsealed P2P formatting cleanup kept
+the 22/22 ratchet unchanged. `test_msg_handlers`, `test_net`, and lint-gate
+shards 06 and 07 then passed uncached with zero skips.
 
 At `2026-08-27T02:07:25Z` on `rhett3.dev`, the clean shutdown began saving
 3,233,145 flat-index entries. The save completed at `02:07:43Z`; the
