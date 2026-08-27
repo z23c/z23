@@ -60,3 +60,21 @@ agent_fast_ci plan for test_encoding.c            mapped, no unmapped code
 The encoding test ran on x86-64 and therefore observed the scalar tier. Its
 sentinel and overlap cases are shared source and compile on AArch64, but live
 NEON execution remains an AArch64 acceptance requirement.
+
+## Tor dependency publication repair
+
+At `2026-08-27T19:35:51Z`, Z23 main pinned Tor object `7d5e32fda9c78d…`,
+but the configured public repository still advertised `8f4b01ff3ee6…` and
+refused an exact-object fetch. A fresh clone therefore could not reproduce
+main. The bounded reassembly implementation was committed and signed directly
+in the public Tor repository as `00fd7a14aacacd487634b82fc6203e695da2de0d`;
+Z23 now pins that reachable object.
+
+The rebuilt `vendor/tor/libtor.a` exported both admission functions, and the
+full embedded-Tor test observed the live implementation:
+
+```text
+test_dynhost_reassembly_cap  OK
+test_tor                     groups_failed=0 self_skips=0
+test_torn_index_blocks_tip   groups_failed=0 self_skips=0
+```
