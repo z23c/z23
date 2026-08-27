@@ -5,8 +5,10 @@
 #include "platform/time_compat.h"
 #include "config/db_service.h"
 #include "models/database.h"
+#include "util/log_macros.h"
 #include "util/thread_liveness.h"
 #include "util/thread_registry.h"
+#include "util/wal_checkpoint_stats.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -103,15 +105,36 @@ static bool db_service_normal_mode_write(struct node_db *ndb, void *ctx)
     return ok ? *ok : node_db_normal_mode(ndb);
 }
 
+/* A checkpoint's two clocks, kept apart on purpose.
+ *
+ * db_service_wal_checkpoint() does NOT run the checkpoint on the calling
+ * thread: it submits a synchronous job onto the single serialized writer
+ * queue and blocks until the worker has run it. So a slow checkpoint has two
+ * possible causes that call for opposite fixes — time spent QUEUED behind
+ * other writes (fix: queue priority) and time spent INSIDE sqlite moving
+ * frames to disk (fix: checkpoint cadence, or a slower cap). The two are
+ * indistinguishable from the outside, which is why the stall reports could
+ * never settle it. `submit_us` is stamped by the caller before it queues;
+ * `start_us` and `end_us` by the worker around the checkpoint itself. */
+struct db_service_ckpt_ctx {
+    bool    ok;
+    int64_t submit_us;
+    int64_t start_us;
+    int64_t end_us;
+};
+
 static bool db_service_wal_checkpoint_write(struct node_db *ndb, void *ctx)
 {
-    bool *ok = ctx;
+    struct db_service_ckpt_ctx *c = ctx;
 
     if (!ndb)
         return false;
-    if (ok)
-        *ok = node_db_wal_checkpoint(ndb);
-    return ok ? *ok : node_db_wal_checkpoint(ndb);
+    if (!c)
+        return node_db_wal_checkpoint(ndb);
+    c->start_us = platform_time_monotonic_us();
+    c->ok = node_db_wal_checkpoint(ndb);
+    c->end_us = platform_time_monotonic_us();
+    return c->ok;
 }
 
 /* Supervisor liveness for the two DB-service threads (single global service,
@@ -301,9 +324,19 @@ static void *db_service_ckpt_main(void *arg)
 
         struct node_db *ndb = svc->node_db;
         if (!ndb || !ndb->open) continue;
+        /* Whatever this call does — drain, no-op, defer, or fail — the
+         * outcome and the frame counts land in the process-wide checkpoint
+         * ledger inside node_db_wal_checkpoint(), and the queue-wait /
+         * execution split lands in db_service_wal_checkpoint(). This thread's
+         * only remaining job is to say when the call did not complete, which
+         * used to be one unstructured line to stderr with no counter behind
+         * it: the sole failure signal for the ONLY checkpointer that actually
+         * runs on a live node. */
         if (!db_service_wal_checkpoint(svc)) {
-            fprintf(stderr,
-                "[wal-checkpoint] periodic checkpoint failed (db busy?)\n");
+            LOG_WARN("db_service",
+                     "[wal-checkpoint] periodic checkpoint did not complete "
+                     "(db busy?) — see storage telemetry "
+                     "wal_checkpoint_busy_total / wal_checkpoint_noop_total");
         } else {
             ckpts++;  /* progress marker advances on a real checkpoint */
         }
@@ -345,9 +378,17 @@ static bool db_service_start_impl(struct db_service *svc,
         (void)thread_liveness_register(&g_ckpt_child, "zcl_db_ckpt",
                                        /*deadline_secs=*/60,
                                        /*progress_quiet_us=*/0);
+        wal_ckpt_stats_set_periodic_armed(true, "armed");
     } else if (start_checkpointer) {
-        fprintf(stderr,
-            "[wal-checkpoint] failed to start periodic checkpoint thread\n");
+        /* Declare it, do not leave it looking idle. A checkpointer that could
+         * not start reads exactly like one with nothing to do unless the
+         * difference is published. */
+        wal_ckpt_stats_set_periodic_armed(false, "spawn_failed");
+        LOG_WARN("db_service",
+            "[wal-checkpoint] failed to start periodic checkpoint thread — "
+            "the node.db WAL now has no periodic checkpoint");
+    } else {
+        wal_ckpt_stats_set_periodic_armed(false, "not_requested");
     }
 
     svc->started = true;
@@ -376,6 +417,7 @@ void db_service_stop(struct db_service *svc)
         pthread_join(svc->ckpt_thread, NULL);
         svc->ckpt_started = false;
         thread_liveness_retire(&g_ckpt_child);
+        wal_ckpt_stats_set_periodic_armed(false, "stopped");
     }
     if (svc->worker_started) {
         zcl_mutex_lock(&svc->queue_mutex);
@@ -490,9 +532,21 @@ bool db_service_normal_mode(struct db_service *svc)
 
 bool db_service_wal_checkpoint(struct db_service *svc)
 {
-    bool ok = false;
+    struct db_service_ckpt_ctx c = {
+        .ok = false,
+        .submit_us = platform_time_monotonic_us(),
+        .start_us = 0,
+        .end_us = 0,
+    };
+    bool ran = db_service_run_write(svc, db_service_wal_checkpoint_write, &c);
 
-    return db_service_run_write(svc, db_service_wal_checkpoint_write, &ok) && ok;
+    /* Publish the split only when the worker actually reached the checkpoint;
+     * a job that never ran has a queue wait but no execution time, and
+     * recording a zero there would read as "the disk was instant". */
+    if (c.start_us > 0 && c.end_us >= c.start_us)
+        wal_ckpt_stats_note_periodic_timing(c.start_us - c.submit_us,
+                                            c.end_us - c.start_us);
+    return ran && c.ok;
 }
 
 bool db_service_run_write(struct db_service *svc,

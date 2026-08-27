@@ -53,9 +53,59 @@ static bool dbm_exec(void *self, const char *sql, char *err, size_t errsz)
     return true;
 }
 
-static bool dbm_wal_checkpoint(void *self, char *err, size_t errsz)
+/* WAL checkpoint, with the numbers that say whether it did anything.
+ *
+ * `PRAGMA wal_checkpoint(TRUNCATE)` run through sqlite3_exec with a NULL
+ * callback throws away its result row — and that row is the whole story:
+ * (busy, log, checkpointed). SQLite reports internal contention as
+ * SQLITE_OK with busy=1 IN THAT ROW, so a discarded row turns "the
+ * checkpoint never ran" into "the checkpoint succeeded". Discarding
+ * `checkpointed` likewise makes a pass that moved zero frames identical to
+ * one that drained the entire log. sqlite3_wal_checkpoint_v2 hands both
+ * numbers back as out-parameters, so that is what this uses. */
+static bool dbm_wal_checkpoint(void *self, struct db_maintenance_wal_outcome *out,
+                               char *err, size_t errsz)
 {
-    return dbm_exec(self, "PRAGMA wal_checkpoint(TRUNCATE);", err, errsz);
+    struct db_maintenance_sqlite_ctx *c = ctx_of(self);
+
+    if (out) {
+        out->log_frames = -1;
+        out->ckpt_frames = -1;
+        out->busy = false;
+    }
+    if (!c || !c->db) {
+        dbm_set_err(err, errsz, "db_maint: null or closed db");
+        return false;
+    }
+
+    /* PASSIVE first, TRUNCATE second. TRUNCATE reports its counts as 0/0 on
+     * success whatever it did — truncation resets the log, so the "after"
+     * numbers are always zero — so it can say it succeeded but never how much
+     * it reclaimed. PASSIVE returns the real pair and does the frame-moving
+     * work; the TRUNCATE that follows only returns the .wal file's blocks to
+     * the filesystem, and losing a lock race on THAT step is not a failed
+     * checkpoint. */
+    int log_frames = -1, ckpt_frames = -1;
+    int rc = sqlite3_wal_checkpoint_v2(c->db, NULL,
+                                       SQLITE_CHECKPOINT_PASSIVE,
+                                       &log_frames, &ckpt_frames);
+    if (rc == SQLITE_OK)
+        (void)sqlite3_wal_checkpoint_v2(c->db, NULL,
+                                        SQLITE_CHECKPOINT_TRUNCATE,
+                                        NULL, NULL);
+    if (out) {
+        out->log_frames = log_frames;
+        out->ckpt_frames = ckpt_frames;
+        out->busy = (rc == SQLITE_BUSY || rc == SQLITE_LOCKED);
+    }
+    if (rc != SQLITE_OK) {
+        const char *msg = sqlite3_errmsg(c->db);
+        dbm_set_err(err, errsz, msg && msg[0] ? msg : "wal checkpoint failed");
+        return false;
+    }
+    if (err && errsz)
+        err[0] = '\0';
+    return true;
 }
 
 static bool dbm_analyze(void *self, char *err, size_t errsz)
