@@ -94,9 +94,13 @@ const char *wv_zclassicd_auth(void) {
         char *nl = strchr(auth, '\n'); if (nl) *nl = '\0';
         if (auth[0]) return auth;
     }
-    /* Last resort */
-    snprintf(auth, sizeof(auth), "zcluser:zclpass");
-    return auth;
+    /* No cached auth, no conf credentials, no cookie file: report none
+     * and let the RPC caller fail closed. Inventing a credential here
+     * fired guessable basic-auth at a service that might accept it; this
+     * process sends only credentials it was actually given. */
+    auth[0] = '\0';
+    LOG_RETURN(auth, "wallet_view",
+               "no RPC credentials found in conf or cookie");
 }
 
 /* ── RPC to running zclassicd node ─────────────────────────── */
@@ -114,7 +118,12 @@ int wv_rpc_call(const char *method, const char *params_json,
     if (auth_cookie && auth_cookie[0]) {
         snprintf(cookie, sizeof(cookie), "%s", auth_cookie);
     } else {
-        if (!g_wv_datadir)
+        /* Datadir-scoped credentials: with no datadir there is nothing
+         * to read, and with neither file there is no request to send —
+         * fail closed by name rather than issuing an unauthenticated
+         * call. The LOG_ERR macros below log and RETURN -1; callers of
+         * wv_rpc_call already treat <= 0 as "no response". */
+        if (!g_wv_datadir || !g_wv_datadir[0])
             LOG_ERR("wallet_view", "rpc_call(%s): no datadir set", method);
 
         /* Read auth cookie */
@@ -128,7 +137,9 @@ int wv_rpc_call(const char *method, const char *params_json,
                      g_wv_datadir);
             f = fopen(conf_path, "r");
             if (!f)
-                LOG_ERR("wallet_view", "rpc_call(%s): cannot open cookie or conf at %s", method, g_wv_datadir);
+                LOG_ERR("wallet_view",
+                        "rpc_call(%s): no cookie or conf under %s",
+                        method, g_wv_datadir);
             char user[64] = "", pass[64] = "";
             char line[256];
             while (fgets(line, sizeof(line), f)) {
@@ -143,7 +154,9 @@ int wv_rpc_call(const char *method, const char *params_json,
             }
             fclose(f);
             if (!user[0] || !pass[0])
-                LOG_ERR("wallet_view", "rpc_call(%s): missing rpcuser/rpcpassword in conf", method);
+                LOG_ERR("wallet_view",
+                        "rpc_call(%s): missing rpcuser/rpcpassword in conf",
+                        method);
             snprintf(cookie, sizeof(cookie), "%s:%s", user, pass);
         } else {
             size_t n = fread(cookie, 1, sizeof(cookie) - 1, f);
@@ -570,13 +583,18 @@ int wv_shield_check_status(void) {
 
 /* Bodies are length-delimited slices without a NUL sentinel, so the
  * bounded scanner in web_form.h owns field lookup and decoding here.
- * A miss logs and returns false; empty values count as absent. */
+ * A miss logs, returns false, and leaves the caller's buffer empty;
+ * empty values count as absent. Callers that ignore the return are
+ * still covered — web_form_field clears out on every refusal — but the
+ * boolean is now the contract it always claimed to be. */
 bool wv_parse_form_field(const uint8_t *body, size_t body_len,
                           const char *key, char *out, size_t outmax) {
-    if (!web_form_field((const char *)body, body_len, key, out, outmax))
+    if (!web_form_field((const char *)body, body_len, key, out, outmax)) {
         LOG_FAIL("wallet_view",
                  "parse_form_field: key '%s' not found or empty (%zu bytes)",
                  key ? key : "(null)", body_len);
+        return false;
+    }
     return true;
 }
 

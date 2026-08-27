@@ -18,11 +18,14 @@
  *   9. Pulse API — JSON balance endpoint
  *  10. Visual consistency — CSS classes, color system, accessibility
  *  11. Security — XSS prevention, SQL injection, CSRF
- *  12. Edge cases — empty DB, huge values, special characters */
+ *  12. Edge cases — empty DB, huge values, special characters
+ *  13. Form parsing contract — a miss returns false and clears the
+ *      buffer (the boolean used to be hardcoded true) */
 
 #include "platform/time_compat.h"
 #include "test/test_core.h"
 #include "controllers/wallet_view_controller.h"
+#include "controllers/wallet_view_internal.h"  /* wv_parse_form_field */
 #include "models/database.h"
 #include "util/template.h"
 #include <unistd.h>
@@ -2446,6 +2449,52 @@ int test_wallet_view(void)
                                       wv_perf_samples);
         if (ms < 50.0) printf("OK (%.2f ms median)\n", ms);
         else { printf("FAIL (%.2f ms)\n", ms); failures++; }
+    }
+
+    /* ═══════════════════════════════════════════════════════════
+     * 13. FORM PARSING CONTRACT — a miss returns false
+     * ═══════════════════════════════════════════════════════════
+     * wv_parse_form_field once logged the miss but returned true no
+     * matter what; its boolean now tells the truth. The wrapper rides
+     * on web_form_field's bounded scanner: hit decodes, miss/duplicate/
+     * empty refuse with the buffer left empty. */
+
+    printf("wallet_view: parse_form_field returns a decoded hit... ");
+    {
+        static const char body[] = "address=zs1fixture&amount=0.00000001";
+        char got[32] = {0};
+        bool ok = wv_parse_form_field((const uint8_t *)body,
+                                      sizeof(body) - 1, "amount", got,
+                                      sizeof(got)) &&
+                  strcmp(got, "0.00000001") == 0;
+        if (ok) printf("OK\n");
+        else { printf("FAIL (got='%s')\n", got); failures++; }
+    }
+
+    printf("wallet_view: parse_form_field miss returns false... ");
+    {
+        static const char body[] = "address=zs1fixture&amount=0.00000001";
+        char got[32];
+        snprintf(got, sizeof(got), "dirty");
+        bool ok = !wv_parse_form_field((const uint8_t *)body,
+                                       sizeof(body) - 1, "fee", got,
+                                       sizeof(got)) && got[0] == '\0';
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+
+    printf("wallet_view: parse_form_field duplicate field is refused... ");
+    {
+        /* A payment form saying amount twice is lying by construction;
+         * ambiguity must not be resolved in anyone's favor. */
+        static const char body[] =
+            "amount=100&address=zs1fixture&amount=0.01";
+        char got[32] = {0};
+        bool ok = !wv_parse_form_field((const uint8_t *)body,
+                                       sizeof(body) - 1, "amount", got,
+                                       sizeof(got)) && got[0] == '\0';
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
     }
 
     /* Restore NULL for safety, then tear down the fixture datadir. */

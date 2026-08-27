@@ -536,6 +536,7 @@ int t_make_ignores_ephemeral_lint_fixture_sources(void);
 int t_block_index_flat_atomic_save_contract(void);
 int t_process_block_split_uses_reducer_language(void);
 int t_production_comments_do_not_carry_refactor_scaffold_labels(void);
+int t_wallet_view_never_invents_rpc_credentials(void);
 int t_deleted_engine_names_absent_from_production_sources(void);
 int t_build_commit_macro_stays_behind_getter(void);
 int t_projection_deferral_is_not_block_rejected_contract(void);
