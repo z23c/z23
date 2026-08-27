@@ -186,6 +186,16 @@ static bool test_db_service_async_write_callback(struct node_db *ndb, void *ctx)
         " VALUES('db_service_async', X'04')");
 }
 
+/* Counts frees instead of latching a flag, so the ownership contract can be
+ * asserted as EXACTLY once rather than at-least-once. */
+static int g_db_service_free_calls;
+
+static void test_db_service_counting_free(void *ctx)
+{
+    g_db_service_free_calls++;
+    free(ctx);
+}
+
 static void test_db_service_async_free(void *ctx)
 {
     struct test_db_service_async_ctx *async = ctx;
@@ -475,6 +485,46 @@ int test_sqlite(void) {
             free(ctx);
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
+    }
+
+    /* A refused async enqueue still disposes of the caller's context.
+     *
+     * This pins an ownership contract that a live node already violated: the
+     * queue is bounded and an async submit fails immediately when it is full,
+     * which is routine during sync. A caller that read the false return as
+     * "you still own ctx" freed it a second time and aborted the process. */
+    {
+        printf("SQLite DB service frees the context of a refused async write "
+               "exactly once... ");
+        struct node_db ndb;
+        struct db_service svc;
+        bool ok = node_db_open(&ndb, ":memory:");
+
+        db_service_init(&svc);
+        ok = ok && db_service_attach(&svc, &ndb);
+        /* Deliberately NOT started, so the submit is refused deterministically
+         * rather than by racing the worker to fill the queue. */
+        g_db_service_free_calls = 0;
+        if (ok) {
+            void *ctx = zcl_calloc(1, 16, "test refused enqueue ctx");
+            ok = ctx != NULL;
+            if (ok) {
+                bool queued = db_service_enqueue_write(&svc,
+                    test_db_service_async_write_callback, ctx,
+                    test_db_service_counting_free);
+                /* Refused, and the callee owns the disposal. Freeing ctx here
+                 * would be the double free this test exists to prevent. */
+                ok = !queued;
+            }
+        }
+        ok = ok && g_db_service_free_calls == 1;
+        db_service_stop(&svc);
+        node_db_close(&ndb);
+        if (ok) printf("OK\n");
+        else {
+            printf("FAIL (free calls=%d, want 1)\n", g_db_service_free_calls);
+            failures++;
+        }
     }
 
     {

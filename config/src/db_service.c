@@ -522,10 +522,20 @@ bool db_service_enqueue_write(struct db_service *svc,
     struct db_service_job *job;
     bool queued;
 
-    if (!fn)
+    /* Ownership of `ctx` transfers here on EVERY path, so a caller never has
+     * to work out which refusal it is looking at. Three of these returns used
+     * to drop it silently while a fourth freed it, which is how a caller ended
+     * up freeing a pointer this function had already released. */
+    if (!fn) {
+        if (free_ctx)
+            free_ctx(ctx);
         return false;
-    if (!svc || !svc->started || !svc->worker_started)
+    }
+    if (!svc || !svc->started || !svc->worker_started) {
+        if (free_ctx)
+            free_ctx(ctx);
         return false;
+    }
     if (db_service_is_worker_thread(svc)) {
         bool ok = fn(svc->node_db, ctx);
         if (free_ctx)
@@ -534,8 +544,11 @@ bool db_service_enqueue_write(struct db_service *svc,
     }
 
     job = malloc(sizeof(*job)); /* raw-alloc-ok:db-service-owns-heap-job */
-    if (!job)
+    if (!job) {
+        if (free_ctx)
+            free_ctx(ctx);
         return false;
+    }
     memset(job, 0, sizeof(*job));
     job->type = DB_SERVICE_JOB_NONE;
     job->fn = fn;
