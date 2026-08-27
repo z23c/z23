@@ -267,10 +267,10 @@ int test_utxo_commitment(void)
         struct block_swarm bs;
         block_swarm_init(&bs, &m, "/tmp");
 
-        int32_t p0 = block_swarm_assign_piece(&bs, 1, NULL);
-        int32_t p1 = block_swarm_assign_piece(&bs, 2, NULL);
-        int32_t p2 = block_swarm_assign_piece(&bs, 3, NULL);
-        int32_t p3 = block_swarm_assign_piece(&bs, 4, NULL);
+        int32_t p0 = block_swarm_assign_piece(&bs, 1, NULL, 0);
+        int32_t p1 = block_swarm_assign_piece(&bs, 2, NULL, 0);
+        int32_t p2 = block_swarm_assign_piece(&bs, 3, NULL, 0);
+        int32_t p3 = block_swarm_assign_piece(&bs, 4, NULL, 0);
 
         bool ok = (p0 >= 0 && p1 >= 0 && p2 >= 0);
         ok = ok && (p0 != p1 && p1 != p2);
@@ -293,7 +293,7 @@ int test_utxo_commitment(void)
         struct block_swarm bs;
         block_swarm_init(&bs, &m, "/tmp");
 
-        int32_t pi = block_swarm_assign_piece(&bs, 1, NULL);
+        int32_t pi = block_swarm_assign_piece(&bs, 1, NULL, 0);
         bool ok = (pi == 0);
         ok = ok && block_swarm_receive_piece(&bs, 0, 1);
         ok = ok && block_swarm_is_complete(&bs);
@@ -315,14 +315,14 @@ int test_utxo_commitment(void)
         struct block_swarm bs;
         block_swarm_init(&bs, &m, "/tmp");
 
-        block_swarm_assign_piece(&bs, 1, NULL);
+        block_swarm_assign_piece(&bs, 1, NULL, 0);
         bs.piece_request_time[0] = (int64_t)platform_time_wall_time_t() - 60;
 
         block_swarm_handle_timeouts(&bs, 30);
         bool ok = (bs.piece_states[0] == CHUNK_NEEDED);
         ok = ok && (bs.pieces_inflight == 0);
 
-        int32_t pi = block_swarm_assign_piece(&bs, 2, NULL);
+        int32_t pi = block_swarm_assign_piece(&bs, 2, NULL, 0);
         ok = ok && (pi == 0);
 
         block_swarm_free(&bs);
@@ -341,12 +341,12 @@ int test_utxo_commitment(void)
         struct block_swarm bs;
         block_swarm_init(&bs, &m, "/tmp");
 
-        block_swarm_assign_piece(&bs, 1, NULL);
+        block_swarm_assign_piece(&bs, 1, NULL, 0);
         block_swarm_fail_piece(&bs, 0);
         bool ok = (bs.piece_states[0] == CHUNK_NEEDED);
         ok = ok && (bs.pieces_failed == 1);
 
-        int32_t pi = block_swarm_assign_piece(&bs, 2, NULL);
+        int32_t pi = block_swarm_assign_piece(&bs, 2, NULL, 0);
         ok = ok && (pi == 0);
 
         block_swarm_free(&bs);
@@ -395,7 +395,7 @@ int test_utxo_commitment(void)
         block_swarm_update_availability(&bs, bm_a, 1);
         block_swarm_update_availability(&bs, bm_b, 1);
 
-        int32_t pi = block_swarm_assign_piece(&bs, 1, NULL);
+        int32_t pi = block_swarm_assign_piece(&bs, 1, NULL, 0);
         bool ok = (pi == 3); /* piece 3 has 0 availability = rarest */
 
         block_swarm_free(&bs);
@@ -418,7 +418,7 @@ int test_utxo_commitment(void)
         bs.piece_states[1] = CHUNK_COMPLETE; bs.pieces_complete++;
         bs.piece_states[2] = CHUNK_COMPLETE; bs.pieces_complete++;
 
-        int32_t pi = block_swarm_assign_piece(&bs, 1, NULL);
+        int32_t pi = block_swarm_assign_piece(&bs, 1, NULL, 0);
         bool ok = (pi == 3 && bs.endgame);
 
         uint32_t indices[4];
@@ -443,13 +443,43 @@ int test_utxo_commitment(void)
 
         uint8_t bm[] = { 0x0C }; /* bits 2,3 only */
 
-        int32_t pi = block_swarm_assign_piece(&bs, 1, bm);
+        int32_t pi = block_swarm_assign_piece(&bs, 1, bm, sizeof(bm));
         bool ok = (pi == 2 || pi == 3);
 
         block_swarm_free(&bs);
         free(m.piece_hashes);
         if (ok) printf("OK\n");
         else { printf("FAIL (got piece %d)\n", pi); failures++; }
+    }
+
+    printf("block_swarm short-bitmap assign stays bounded... ");
+    {
+        struct block_piece_manifest m = {
+            .start_height = 1, .end_height = 524288,
+            .num_pieces = 4096,
+            .piece_hashes = zcl_calloc(4096, 32, "test_piece_hashes")
+        };
+        struct block_swarm bs;
+        bool ok = block_swarm_init(&bs, &m, "/tmp");
+
+        /* A 4096-piece manifest against a 1-byte bitmap: every piece index
+         * lands past the buffer's span, so each bit reads as ABSENT and no
+         * byte beyond bitmap[0] may ever be touched. */
+        uint8_t bm[] = { 0x00 };
+        int32_t pi_none = block_swarm_assign_piece(&bs, 1, bm, sizeof(bm));
+        ok = ok && pi_none == -1;
+
+        int32_t pi_thru = block_swarm_assign_piece_through_height(
+            &bs, 2, bm, sizeof(bm), 524288);
+        ok = ok && pi_thru == -1;
+
+        int32_t pi_all = block_swarm_assign_piece(&bs, 3, NULL, 0);
+        ok = ok && pi_all == 0;
+
+        block_swarm_free(&bs);
+        free(m.piece_hashes);
+        if (ok) printf("OK\n");
+        else { printf("FAIL (none=%d thru=%d all=%d)\n", pi_none, pi_thru, pi_all); failures++; }
     }
 
     return failures;

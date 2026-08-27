@@ -38,4 +38,13 @@ void register_swap_rpc_commands(struct rpc_table *t);
 bool api_swap_list(struct json_value *result);
 bool api_swap_chains(struct json_value *result);
 
+/* Convert an RPC-supplied swap amount (whole coins) into zatoshis.
+ * The contract model documents amount as positive with no zero-value
+ * swaps, and the value persists as int64_t — so this refuses everything
+ * else the wire can hand us: zero/negative, NaN, infinities, and any
+ * magnitude whose zatoshis would overflow. Returns false with *zat_out
+ * untouched on refusal. Exported so the money-shape contract is pinned
+ * directly, not only through the RPC plumbing. */
+bool swap_amount_to_zat(double amount_coins, int64_t *zat_out);
+
 #endif

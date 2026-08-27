@@ -32,6 +32,7 @@
 #include "script/htlc.h"
 #include "services/vault_read.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -293,5 +294,31 @@ int test_vault_read(void)
 
     node_db_close(&ndb);
     test_rm_rf(dir);
+
+    /* ── Money-shape guard on swap amounts ─────────────────────────────
+     * The swap contract persists whatever double the JSON wire produced.
+     * swap_amount_to_zat is the single gate between that double and an
+     * int64_t zatoshis field, so every corrupting shape must be refused
+     * here: zero (the absent-argument sentinel), negatives, NaN,
+     * infinities, and magnitudes that overflow int64_t once scaled. */
+    {
+        int64_t zat = -1;
+        VR_CHECK("swap amount 0 refused",
+                 !swap_amount_to_zat(0.0, &zat));
+        VR_CHECK("negative swap amount refused",
+                 !swap_amount_to_zat(-0.00000001, &zat));
+        VR_CHECK("NaN swap amount refused",
+                 !swap_amount_to_zat(NAN, &zat));
+        VR_CHECK("infinite swap amount refused",
+                 !swap_amount_to_zat(INFINITY, &zat));
+        VR_CHECK("int64-overflowing swap amount refused",
+                 !swap_amount_to_zat(1.0e12, &zat));
+        VR_CHECK("whole-coin ceiling itself still converts",
+                 swap_amount_to_zat(92233720368.0, &zat) &&
+                 zat == 9223372036800000000LL);
+        VR_CHECK("fractional amount converts to exact zatoshis",
+                 swap_amount_to_zat(1337.42, &zat) && zat == 133742000000LL);
+    }
+
     return failures;
 }

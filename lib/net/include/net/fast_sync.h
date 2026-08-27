@@ -442,16 +442,19 @@ void block_swarm_free(struct block_swarm *bs);
 
 /* Assign next piece to a peer using rarest-first selection.
  * Returns piece index or -1 if none available.
- * peer_bitmap: which pieces this peer has (NULL = assume all). */
+ * peer_bitmap/peer_bitmap_bytes: which pieces this peer has
+ * (NULL = assume all; bits at or past the span read as absent). */
 int32_t block_swarm_assign_piece(struct block_swarm *bs, int peer_id,
-                                  const uint8_t *peer_bitmap);
+                                  const uint8_t *peer_bitmap,
+                                  size_t peer_bitmap_bytes);
 
 /* Same selection, but only assigns pieces whose ending block height is at or
  * below max_height. Use this when body transfer must not outrun local header
- * admission. */
+ * admission. Bitmap bounds follow block_swarm_assign_piece. */
 int32_t block_swarm_assign_piece_through_height(struct block_swarm *bs,
                                                  int peer_id,
                                                  const uint8_t *peer_bitmap,
+                                                 size_t peer_bitmap_bytes,
                                                  int32_t max_height);
 
 /* Mark a piece as received. Caller must verify hash before calling.
