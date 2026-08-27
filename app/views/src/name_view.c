@@ -324,7 +324,9 @@ static size_t name_emit_history(char *buf, size_t max,
 
 size_t name_view_profile(const struct znam_entry *e,
                          const struct znam_text_record *text, int ntext,
+                         int total_text,
                          const struct znam_addr_record *addr, int naddr,
+                         int total_addr,
                          const struct name_history *hist,
                          uint8_t *resp, size_t max)
 {
@@ -362,6 +364,11 @@ size_t name_view_profile(const struct znam_entry *e,
         n = snprintf(body + off, sizeof(body) - off,
             "<div class='card'><h2>Records</h2>");
         if (n > 0) off += (size_t)n;
+        /* Count what actually rendered: the row loop also stops when the
+         * body buffer runs short of headroom, so a page can show fewer
+         * rows than even its own window arrays hold. The totals are what
+         * the disclosure below is measured against. */
+        int shown_text = 0, shown_addr = 0;
         for (int i = 0; i < ntext && off < sizeof(body) - 512; i++) {
             char sk[96], sv[280];
             html_escape(sk, sizeof(sk), text[i].key);
@@ -370,6 +377,7 @@ size_t name_view_profile(const struct znam_entry *e,
                 "<div class='kv'><b>%s</b><span class='val mono'>%s</span></div>",
                 sk, sv);
             if (n > 0) off += (size_t)n;
+            shown_text++;
         }
         for (int i = 0; i < naddr && off < sizeof(body) - 512; i++) {
             char sv[280];
@@ -377,6 +385,24 @@ size_t name_view_profile(const struct znam_entry *e,
             n = snprintf(body + off, sizeof(body) - off,
                 "<div class='kv'><b>%s</b><span class='val mono'>%s</span></div>",
                 znam_type_name(addr[i].coin_type), sv);
+            if (n > 0) off += (size_t)n;
+            shown_addr++;
+        }
+        /* Window honesty: when fewer records rendered than the name
+         * actually carries, say exactly how many were left out instead of
+         * letting the page imply completeness. Both truncation causes
+         * funnel through here — the listing window in the controller and
+         * this buffer's own headroom guard. */
+        if (total_text >= 0 && total_text > shown_text) {
+            n = snprintf(body + off, sizeof(body) - off,
+                "<p class='muted'>Showing the first %d of %d text "
+                "records.</p>", shown_text, total_text);
+            if (n > 0) off += (size_t)n;
+        }
+        if (total_addr >= 0 && total_addr > shown_addr) {
+            n = snprintf(body + off, sizeof(body) - off,
+                "<p class='muted'>Showing the first %d of %d address "
+                "records.</p>", shown_addr, total_addr);
             if (n > 0) off += (size_t)n;
         }
         n = snprintf(body + off, sizeof(body) - off, "</div>");

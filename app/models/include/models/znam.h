@@ -101,6 +101,9 @@ bool db_znam_text_get(struct node_db *ndb, const char *name,
                       const char *key, char *value_out, size_t max);
 int db_znam_text_list(struct node_db *ndb, const char *name,
                       struct znam_text_record *out, size_t max);
+/* Uncapped total for one name's text records — the number db_znam_text_list
+ * would fold over with no window. -1 only when the store is unreadable. */
+int db_znam_text_count(struct node_db *ndb, const char *name);
 
 /* Multi-coin address records */
 bool db_znam_addr_save(struct node_db *ndb, const char *name,
@@ -109,5 +112,8 @@ bool db_znam_addr_get(struct node_db *ndb, const char *name,
                       uint8_t coin_type, char *addr_out, size_t max);
 int db_znam_addr_list(struct node_db *ndb, const char *name,
                       struct znam_addr_record *out, size_t max);
+/* Uncapped total for one name's address records. -1 on an unreadable
+ * store, mirroring the text count. */
+int db_znam_addr_count(struct node_db *ndb, const char *name);
 
 #endif
