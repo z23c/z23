@@ -27,6 +27,7 @@
 #include "hotswap/hotfork_capsule.h"
 #include "hotswap/hotswap.h"
 #include "hotswap/hotswap_retire_blocker.h"
+#include "hotswap/hotswap_shelf.h"
 
 #include "json/json.h"
 #include "platform/time_compat.h"
@@ -351,6 +352,14 @@ bool hotswap_activation_authorized(const char *resolved_datadir,
 /* ── activation telemetry state (written only on the dev activate path) ──── */
 #define HOTSWAP_ACT_MAX_SLOTS 32
 
+/* The datadir a slot's live image was admitted under, kept so a rollback can
+ * re-run the SAME authorization the forward swap ran instead of inventing a
+ * looser one. A resident node has exactly one datadir for its whole life, so
+ * this is a record, not a policy input. Sized well past `$HOME/.zclassic-c23-dev`;
+ * a path that does not fit is stored truncated and then FAILS the dev-datadir
+ * re-check at rollback time, which is the safe direction. */
+#define HOTSWAP_ACT_DATADIR_MAX 512
+
 struct hotswap_act_slot {
     char source[256];        /* one slot per swappable source TU */
     void *handle;            /* currently-live module .so for this source */
@@ -361,6 +370,41 @@ struct hotswap_act_slot {
     time_t activated_at;
     uint64_t swaps;
     bool in_use;
+    char datadir[HOTSWAP_ACT_DATADIR_MAX];
+
+    /* ── shelf: the depth-1 retained PREDECESSOR IMAGE for this source ────
+     * `shelf_fd` is a dup() of the sealed memfd that was live before the
+     * current one, taken at commit BEFORE the original descriptor goes to
+     * retire_handle(). Independent descriptor, same sealed inode: retire's
+     * close() and this one never race, and F_SEAL_WRITE guarantees the
+     * retained bytes are still the bytes that were admitted. Rollback
+     * re-dlopens it, so the shelf costs one descriptor and NOT a retained
+     * mapping. `shelf_generation`/`shelf_sha256` describe that image as it
+     * was WHEN LIVE, not what is running now.
+     *
+     * AN IMAGE IS THE ONLY THING SHELVED, and that is a security property,
+     * not a convenience. A shelf entry is restored by being re-admitted from
+     * scratch — sealed bytes, ELF shape probe, hash, dlopen, consensus pin,
+     * dev-datadir confinement and the activation gate — and only bytes can go
+     * through that. Retaining a `struct zcl_hotswap_module *` instead would
+     * create a second way to publish live handlers that skips the datadir and
+     * authorization checks entirely, which is exactly the duplicate-system
+     * defect this loader is built to avoid; it would also dangle, since for a
+     * module that came from a .so that struct lives in a mapping
+     * retire_handle() may dlclose. So hotswap_module_publish() — the pure,
+     * always-compiled gauntlet, which any caller may drive with a fabricated
+     * struct — never shelves anything, and a source published only through it
+     * has an empty shelf however many times it publishes.
+     * See hotswap/hotswap_shelf.h. */
+    int shelf_fd;
+    char shelf_sha256[65];
+    uint32_t shelf_generation;
+    time_t shelf_retired_at;
+    bool shelf_present;
+    /* A rollback of this source is between its shelf claim and its commit.
+     * A plain flag, not a lock: it is only ever read and written under
+     * g_act_lock, so it adds no lock-ordering edge at all. */
+    bool rollback_in_flight;
 };
 
 struct hotswap_act_event {
@@ -387,6 +431,12 @@ static _Atomic uint64_t g_probe_reject_count;
 static _Atomic uint64_t g_leaves_published;
 static _Atomic uint64_t g_dlclose_count;
 static _Atomic uint64_t g_retained_mapped_count;
+/* DELIBERATELY NOT g_rollback_count. That counter means "an activation was
+ * refused and unwound" and is bumped by every act_reject(); this one means "a
+ * shelved predecessor image was successfully put back". Folding the two would
+ * make an existing telemetry number silently ambiguous. */
+static _Atomic uint64_t g_shelf_rollback_count;
+static _Atomic uint64_t g_shelf_dup_fail_count;
 
 static void event_json(struct json_value *obj, const struct hotswap_act_event *ev)
 {
@@ -443,6 +493,13 @@ void hotswap_activate_dump_json(struct json_value *out)
                      (int64_t)atomic_load(&g_dlclose_count));
     json_push_kv_int(&act, "retained_mapped_count",
                      (int64_t)atomic_load(&g_retained_mapped_count));
+    /* Shelf visibility. `rollback_count` above is the failed-activation unwind
+     * count and keeps its old meaning; these are the shelf's own numbers. */
+    json_push_kv_int(&act, "shelf_depth", (int64_t)ZCL_HOTSWAP_SHELF_DEPTH);
+    json_push_kv_int(&act, "shelf_rollback_count",
+                     (int64_t)atomic_load(&g_shelf_rollback_count));
+    json_push_kv_int(&act, "shelf_dup_fail_count",
+                     (int64_t)atomic_load(&g_shelf_dup_fail_count));
 
     struct json_value allow = {0};
     json_set_array(&allow);
@@ -462,9 +519,12 @@ void hotswap_activate_dump_json(struct json_value *out)
     pthread_mutex_lock(&g_act_lock);
     struct json_value slots = {0};
     json_set_array(&slots);
+    size_t shelved = 0;
     for (size_t i = 0; i < g_slot_count; i++) {
         if (!g_slots[i].in_use)
             continue;
+        if (g_slots[i].shelf_present)
+            shelved++;
         struct json_value s = {0};
         json_set_object(&s);
         json_push_kv_str(&s, "source", g_slots[i].source);
@@ -473,11 +533,24 @@ void hotswap_activate_dump_json(struct json_value *out)
         json_push_kv_str(&s, "artifact_sha256", g_slots[i].artifact_sha256);
         json_push_kv_int(&s, "activated_at", (int64_t)g_slots[i].activated_at);
         json_push_kv_int(&s, "swaps", (int64_t)g_slots[i].swaps);
+        /* The shelved PREDECESSOR of this slot, if any: what a rollback of
+         * this source would put back. Absent fields when nothing is shelved,
+         * so "shelf_present": false is never accompanied by a stale digest. */
+        json_push_kv_bool(&s, "shelf_present", g_slots[i].shelf_present);
+        if (g_slots[i].shelf_present) {
+            json_push_kv_str(&s, "shelf_artifact_sha256",
+                             g_slots[i].shelf_sha256);
+            json_push_kv_int(&s, "shelf_generation",
+                             (int64_t)g_slots[i].shelf_generation);
+            json_push_kv_int(&s, "shelf_retired_at",
+                             (int64_t)g_slots[i].shelf_retired_at);
+        }
         json_push_back(&slots, &s);
         json_free(&s);
     }
     json_push_kv(&act, "active_slots", &slots);
     json_free(&slots);
+    json_push_kv_int(&act, "shelf_entries", (int64_t)shelved);
 
     struct json_value last_a = {0}, last_r = {0};
     event_json(&last_a, &g_last_activation);
@@ -490,6 +563,61 @@ void hotswap_activate_dump_json(struct json_value *out)
 
     json_push_kv(out, "activation", &act);
     json_free(&act);
+}
+
+/* ── shelf readers ────────────────────────────────────────────────────────
+ * Pure table reads, compiled in EVERY build. Only the dev activation core can
+ * ever put an image on the shelf, so in a release binary these correctly and
+ * quietly report an empty shelf rather than being absent.
+ *
+ * Both take g_act_lock. That is safe for a status/CLI caller by construction:
+ * command dispatch resolves its handler from a lock-free snapshot pointer and
+ * never touches this mutex, so nothing held here can add dispatch latency. */
+static void shelf_entry_from_slot_locked(struct hotswap_shelf_entry *out,
+                                         const struct hotswap_act_slot *slot)
+{
+    memset(out, 0, sizeof(*out));
+    out->present = true;
+    act_copy(out->source_tu, sizeof(out->source_tu), slot->source);
+    act_copy(out->artifact_sha256, sizeof(out->artifact_sha256),
+             slot->shelf_sha256);
+    out->generation = slot->shelf_generation;
+    out->retired_at = slot->shelf_retired_at;
+}
+
+size_t hotswap_shelf_list(struct hotswap_shelf_entry *out, size_t cap)
+{
+    size_t found = 0;
+    pthread_mutex_lock(&g_act_lock);
+    for (size_t i = 0; i < g_slot_count; i++) {
+        if (!g_slots[i].in_use || !g_slots[i].shelf_present)
+            continue;
+        if (out && found < cap)
+            shelf_entry_from_slot_locked(&out[found], &g_slots[i]);
+        found++;        /* the RETURN is the true count, not what was written */
+    }
+    pthread_mutex_unlock(&g_act_lock);
+    return found;
+}
+
+bool hotswap_shelf_peek(const char *source_tu, struct hotswap_shelf_entry *out)
+{
+    if (out)
+        memset(out, 0, sizeof(*out));
+    if (!source_tu || !source_tu[0])
+        return false;
+    bool found = false;
+    pthread_mutex_lock(&g_act_lock);
+    for (size_t i = 0; i < g_slot_count && !found; i++) {
+        if (!g_slots[i].in_use || !g_slots[i].shelf_present ||
+            strcmp(g_slots[i].source, source_tu) != 0)
+            continue;
+        if (out)
+            shelf_entry_from_slot_locked(out, &g_slots[i]);
+        found = true;
+    }
+    pthread_mutex_unlock(&g_act_lock);
+    return found;
 }
 
 static void record_event(struct hotswap_act_event *ev,
@@ -722,7 +850,15 @@ bool zcl_hotswap_hotfork_visit_so(
 }
 
 /* Find (or, if activating a not-yet-seen source, add) the per-source slot.
- * ASSUMES g_act_lock held. Returns NULL only when the fixed table is full. */
+ * ASSUMES g_act_lock held. Returns NULL only when the fixed table is full.
+ *
+ * Slots exist ONLY on the real activation path, and that is deliberate.
+ * hotswap_module_publish() — the pure, always-compiled admit/probe/commit
+ * gauntlet, which any caller can drive with a fabricated struct — never
+ * creates or touches a slot, so it can never put anything on the shelf. That
+ * is what keeps the shelf from becoming a second, ungated way to publish live
+ * handlers: everything on it is a sealed image that has to be re-admitted
+ * from scratch. */
 static struct hotswap_act_slot *slot_for_source_locked(const char *source)
 {
     for (size_t i = 0; i < g_slot_count; i++) {
@@ -734,6 +870,7 @@ static struct hotswap_act_slot *slot_for_source_locked(const char *source)
     struct hotswap_act_slot *slot = &g_slots[g_slot_count++];
     memset(slot, 0, sizeof(*slot));
     slot->artifact_fd = -1;
+    slot->shelf_fd = -1;        /* shelf_present=false already says "empty" */
     act_copy(slot->source, sizeof(slot->source), source);
     slot->in_use = true;
     return slot;
@@ -898,10 +1035,27 @@ static bool module_consensus_pin_ok(void *handle, char *stage, size_t stage_cap,
     return true;
 }
 
+/* THE ADMISSION GAUNTLET, entered from two doors and no others. Defined just
+ * below; activate_run() (the path entrance) and hotswap_rollback() (the shelf
+ * entrance) both call it, and neither gets a stage the other skips. */
+static bool activate_from_sealed_fd(int fd,
+                                    const char *origin_label,
+                                    const char *resolved_datadir,
+                                    bool request_activate,
+                                    bool require_authorization,
+                                    const struct hotswap_publish_hooks *hooks,
+                                    struct hotswap_activate_report *report);
+
 /* The dlopen half: confinement, authorization, pin+hash, dlopen/dlsym. The
  * admit -> probe -> ONE batch commit half is hotswap_module_publish(), which
  * compiles in every build and is unit-tested directly with fabricated modules
- * (lib/test/src/test_hotswap_module_v2.c). */
+ * (lib/test/src/test_hotswap_module_v2.c).
+ *
+ * PATH ENTRANCE. This function is everything that is specific to "the bytes
+ * arrived as a file at so_path": path confinement, the datadir/authorization
+ * gate, opening the inode, and copying it into a sealed image. From the sealed
+ * image onward there is nothing path-shaped left to check, and the rest is
+ * activate_from_sealed_fd() — the SAME code the shelf rollback re-enters. */
 static bool activate_run(const char *so_path, const char *resolved_datadir,
                          bool request_activate, bool require_authorization,
                          const struct hotswap_publish_hooks *hooks,
@@ -961,6 +1115,82 @@ static bool activate_run(const char *so_path, const char *resolved_datadir,
     close(src_fd);              /* the on-disk inode is no longer load-bearing */
     if (fd < 0)
         return act_reject(report, "seal", "%s", seal_err);
+
+    /* Sealed. Everything from here is entrance-independent — hand the image
+     * to the one gauntlet, which TAKES OWNERSHIP of `fd` on every path. */
+    return activate_from_sealed_fd(fd, so_path, resolved_datadir,
+                                   request_activate, require_authorization,
+                                   hooks, report);
+}
+
+/* ── THE ONE ADMISSION GAUNTLET ───────────────────────────────────────────
+ *
+ * probe -> hash -> map -> symbol -> consensus pin -> admit -> probe-before-
+ * publish -> ONE batch commit, over a SEALED image. This is the tail of the
+ * "LOAD ORDER IS THE SECURITY PROPERTY" sequence documented at its seal step
+ * in activate_run() above; the order is the property, so it lives in exactly
+ * one function and both entrances run all of it.
+ *
+ * Two entrances, no shortcut between them:
+ *   - activate_run(): the bytes arrived as a file, were path-confined, and
+ *     were copied into a sealed image.
+ *   - hotswap_rollback(): the bytes are a dup() of an image that was live for
+ *     this same source until a later swap superseded it.
+ * The shelf entrance deliberately does NOT get a "we already admitted this
+ * one" fast path. A second door into module activation that skips stages is a
+ * second implementation of activation, and a stage that was true an hour ago
+ * (the sealed-core pin above all — `make core-seal` may have moved since) is
+ * not a stage that is true now.
+ *
+ * THE ONE STAGE THE SHELF ENTRANCE CANNOT RUN is
+ * hotswap_path_is_acceptable(): a shelved image has no path to confine. That
+ * check answers "where did these bytes come from", and these bytes answered it
+ * before they were ever mapped — it is skipped knowingly, and skipped nowhere
+ * else. Everything the check could still be protecting (that the bytes are
+ * what was admitted) is carried by F_SEAL_WRITE on the retained image.
+ *
+ * DESCRIPTOR DISCIPLINE: this function TAKES OWNERSHIP of `fd` and closes it
+ * on every single return path, EXCEPT the two where ownership provably moves:
+ * a successful activation stores it in the slot (retired later by
+ * retire_handle), and a successful activation that could not be tracked
+ * (slot table full) keeps it, matching the mapping that is also kept.
+ *
+ * `origin_label` names where the image came from, for the one diagnostic that
+ * needs it (a shelf that could not be populated); it is never an input to any
+ * admission decision.
+ *
+ * `resolved_datadir` + `require_authorization` re-run the resident gate HERE
+ * rather than trusting that the caller ran it. For activate_run() that is a
+ * second evaluation of the same pure predicates on the same inputs, which
+ * costs two realpath() calls and can only ever change its mind if the operator
+ * flipped the gate mid-call — in which case refusing is the correct answer. */
+static bool activate_from_sealed_fd(int fd,
+                                    const char *origin_label,
+                                    const char *resolved_datadir,
+                                    bool request_activate,
+                                    bool require_authorization,
+                                    const struct hotswap_publish_hooks *hooks,
+                                    struct hotswap_activate_report *report)
+{
+    if (!report) {
+        if (fd >= 0) close(fd);
+        return false;
+    }
+    if (fd < 0)
+        return act_reject(report, "seal", "no sealed module image to admit");
+
+    char why[256] = {0};
+    if (!hotswap_datadir_is_dev(resolved_datadir)) {
+        close(fd);
+        return act_reject(report, "precheck",
+            "hot-swap requires the exact dev datadir ~/.zclassic-c23-dev, got '%s'",
+            resolved_datadir ? resolved_datadir : "");
+    }
+    if (require_authorization && request_activate &&
+        !hotswap_activation_authorized(resolved_datadir, why, sizeof(why))) {
+        close(fd);
+        return act_reject(report, "authorize", "%s", why);
+    }
 
     /* Pre-map shape check, against the sealed image. */
     {
@@ -1037,11 +1267,54 @@ static bool activate_run(const char *so_path, const char *resolved_datadir,
 
     void *prev_handle = NULL;
     int prev_fd = -1;
+    int evicted_shelf_fd = -1;
+    bool shelf_dup_failed = false;
+    int dup_errno = 0;
     pthread_mutex_lock(&g_act_lock);
     struct hotswap_act_slot *slot = slot_for_source_locked(mod->source_tu);
     if (slot) {
         prev_handle = slot->handle;
         prev_fd = slot->artifact_fd;
+
+        /* ── SHELVE THE SUPERSEDED IMAGE (depth 1) ─────────────────────────
+         * dup() BEFORE prev_fd is handed to retire_handle(), so the shelf and
+         * the retire path own one descriptor each and neither can close the
+         * other's. dup() is an fd-table operation with no I/O; nothing on the
+         * dispatch path takes g_act_lock (dispatch resolves its handler from
+         * a lock-free snapshot pointer), so doing it here cannot add dispatch
+         * latency.
+         *
+         * The digest recorded here is slot->artifact_sha256, the OUTGOING
+         * image's SHA-256 — read before the slot is overwritten below. It is
+         * never empty and never guessed: every image that reaches this line
+         * was hashed from its own sealed fd by this same function, so the
+         * shelf entry always names exactly the bytes it is holding, on a
+         * forward supersede and on a rollback supersede alike.
+         *
+         * A dup() failure (EMFILE) must NEVER fail the activation: the swap
+         * the operator asked for has already committed. The shelf entry is
+         * simply absent — and any entry already there is dropped rather than
+         * left describing something that is no longer the immediately
+         * previous image, so an entry is never reported present without a
+         * descriptor behind it. */
+        if (prev_fd >= 0) {
+            int dup_fd = dup(prev_fd);
+            evicted_shelf_fd = slot->shelf_fd;
+            if (dup_fd < 0) {
+                dup_errno = errno;
+                shelf_dup_failed = true;
+                slot->shelf_fd = -1;
+                slot->shelf_present = false;
+            } else {
+                slot->shelf_fd = dup_fd;
+                slot->shelf_present = true;
+                slot->shelf_generation = slot->generation;
+                slot->shelf_retired_at = platform_time_wall_time_t();
+                act_copy(slot->shelf_sha256, sizeof(slot->shelf_sha256),
+                         slot->artifact_sha256);
+            }
+        }
+
         slot->handle = handle;
         slot->artifact_fd = fd;
         slot->generation = report->generation;
@@ -1050,8 +1323,27 @@ static bool activate_run(const char *so_path, const char *resolved_datadir,
         slot->swaps++;
         act_copy(slot->artifact_sha256, sizeof(slot->artifact_sha256),
                  report->artifact_sha256);
+        /* Recorded so a rollback re-runs the SAME authorization, never a
+         * looser one invented at rollback time. */
+        act_copy(slot->datadir, sizeof(slot->datadir), resolved_datadir);
     }
     pthread_mutex_unlock(&g_act_lock);
+
+    /* Depth is 1: the image this shelving displaced is closed, outside the
+     * lock. It was reachable only through the entry we just overwrote, and a
+     * rollback holding a dup() of it is unaffected. */
+    if (evicted_shelf_fd >= 0)
+        close(evicted_shelf_fd);
+    if (shelf_dup_failed) {
+        atomic_fetch_add_explicit(&g_shelf_dup_fail_count, 1,
+                                  memory_order_relaxed);
+        LOG_WARN("hotswap.activate",
+                 "could not shelve the superseded image for %s (origin %s): "
+                 "dup failed errno=%d; the swap stands, but rollback for this "
+                 "source is unavailable until the next swap shelves one",
+                 mod->source_tu, origin_label ? origin_label : "(unknown)",
+                 dup_errno);
+    }
 
     if (!slot) {
         /* Committed but untrackable (table full): keep this .so mapped. */
@@ -1092,6 +1384,135 @@ bool hotswap_activate_local(const char *so_path, const char *resolved_datadir,
     local.quiesced = NULL;      /* nothing to reclaim in a one-shot process */
     return activate_run(so_path, resolved_datadir, /*request_activate=*/true,
                         /*require_authorization=*/false, &local, report);
+}
+
+/* ── SHELF ROLLBACK — the second entrance to the ONE gauntlet ─────────────
+ *
+ * See hotswap/hotswap_shelf.h for what this does and does not mean (it
+ * republishes the PREVIOUS MODULE, not a compiled-in baseline — the registry
+ * has no per-leaf revert), and for why it must stay operator-initiated.
+ *
+ * ONE DOOR. The shelved image goes back through activate_from_sealed_fd() —
+ * dev-datadir confinement, the -hotswap-activate + ZCL_HOTSWAP_ACTIVATE=1
+ * gate, ELF shape probe, hash, dlopen, symbol, consensus pin, admit,
+ * probe-before-publish, ONE batch commit. Not one stage is skipped, and there
+ * is deliberately no cheaper variant for "an image we admitted before": a
+ * stage that was true an hour ago — the sealed-core pin above all, `make
+ * core-seal` may have moved since — is not a stage that is true now, and a
+ * branch that publishes live handlers without re-running the gate would be a
+ * second implementation of activation. That is why the shelf holds only
+ * images: bytes are the only thing this gauntlet can eat.
+ *
+ * The toggle is not special-cased either: the rollback's own commit shelves
+ * the image it supersedes exactly like any other swap, so a second rollback
+ * lands back where you started. A REFUSED rollback never reaches that commit,
+ * so the shelf is not consumed and the live handlers are untouched.
+ *
+ * SERIALIZATION. Three collisions, no new lock:
+ *   - Two rollbacks of the SAME source: the claim below runs under g_act_lock
+ *     and sets `rollback_in_flight`, so the second is refused at stage
+ *     "shelf" instead of racing. Cleared on every exit path.
+ *   - Two rollbacks of DIFFERENT sources: independent slots; they share only
+ *     the microseconds each spends inside the claim.
+ *   - A rollback racing a FORWARD activation of the same source: both run
+ *     their gauntlet outside the lock and both commit under it, so g_act_lock
+ *     orders the commits and the loser simply becomes the shelf entry. The
+ *     claim holds a dup() of the sealed inode, so a forward swap replacing
+ *     (and closing) the shelf entry mid-rollback cannot pull the bytes out
+ *     from under it.
+ * No new lock means no new lock-ordering edge: g_act_lock stays a leaf, and
+ * this function never holds it across a hook callback, dlopen, or any other
+ * blocking call. */
+bool hotswap_rollback(const char *source_tu,
+                      const struct hotswap_publish_hooks *hooks,
+                      struct hotswap_activate_report *report)
+{
+    if (!report)
+        return false;
+    memset(report, 0, sizeof(*report));
+    report->verify_only = false;
+    if (!source_tu || !source_tu[0])
+        return act_reject(report, "precheck", "rollback needs a source_tu");
+    act_copy(report->source_tu, sizeof(report->source_tu), source_tu);
+
+    enum claim { CLAIM_NO_SLOT, CLAIM_EMPTY, CLAIM_BUSY, CLAIM_DUP, CLAIM_OK };
+    enum claim outcome = CLAIM_NO_SLOT;
+    char datadir[HOTSWAP_ACT_DATADIR_MAX] = {0};
+    char shelf_sha[65] = {0};
+    size_t idx = 0;
+    int fd = -1;
+    int dup_errno = 0;
+
+    pthread_mutex_lock(&g_act_lock);
+    for (size_t i = 0; i < g_slot_count; i++) {
+        if (!g_slots[i].in_use || strcmp(g_slots[i].source, source_tu) != 0)
+            continue;
+        idx = i;
+        if (!g_slots[i].shelf_present || g_slots[i].shelf_fd < 0) {
+            outcome = CLAIM_EMPTY;
+        } else if (g_slots[i].rollback_in_flight) {
+            outcome = CLAIM_BUSY;
+        } else {
+            fd = dup(g_slots[i].shelf_fd);
+            if (fd < 0) {
+                dup_errno = errno;
+                outcome = CLAIM_DUP;
+            } else {
+                g_slots[i].rollback_in_flight = true;
+                act_copy(datadir, sizeof(datadir), g_slots[i].datadir);
+                act_copy(shelf_sha, sizeof(shelf_sha), g_slots[i].shelf_sha256);
+                outcome = CLAIM_OK;
+            }
+        }
+        break;
+    }
+    pthread_mutex_unlock(&g_act_lock);
+
+    switch (outcome) {
+    case CLAIM_NO_SLOT:
+        return act_reject(report, "shelf",
+            "source '%s' has never been activated in this process, so nothing "
+            "is shelved for it", source_tu);
+    case CLAIM_EMPTY:
+        return act_reject(report, "shelf",
+            "source '%s' has nothing shelved: its current module is the first "
+            "one activated, and there is no per-leaf revert to a compiled-in "
+            "baseline", source_tu);
+    case CLAIM_BUSY:
+        return act_reject(report, "shelf",
+            "a rollback of source '%s' is already in flight", source_tu);
+    case CLAIM_DUP:
+        return act_reject(report, "shelf",
+            "could not duplicate the shelved image for '%s' (errno=%d)",
+            source_tu, dup_errno);
+    case CLAIM_OK:
+        break;
+    }
+
+    /* From here `fd` belongs to the gauntlet, which closes it on every path
+     * except a successful commit (where the slot takes it over). */
+    char origin[320];
+    (void)snprintf(origin, sizeof(origin), "shelf:%s@%.16s", source_tu,
+                   shelf_sha[0] ? shelf_sha : "(unhashed)");
+    bool ok = activate_from_sealed_fd(fd, origin, datadir,
+                                      /*request_activate=*/true,
+                                      /*require_authorization=*/true,
+                                      hooks, report);
+
+    pthread_mutex_lock(&g_act_lock);
+    if (idx < g_slot_count)
+        g_slots[idx].rollback_in_flight = false;
+    pthread_mutex_unlock(&g_act_lock);
+
+    if (ok) {
+        atomic_fetch_add_explicit(&g_shelf_rollback_count, 1,
+                                  memory_order_relaxed);
+        LOG_INFO("hotswap.activate",
+                 "rolled back source=%s to the shelved image sha=%.16s gen=%u "
+                 "(what was live is now the shelf entry)",
+                 source_tu, shelf_sha, report->generation);
+    }
+    return ok;
 }
 
 bool hotswap_verify_module_so(const char *so_path, const char *expect_tu,
@@ -1338,6 +1759,27 @@ bool hotswap_activate_local(const char *so_path, const char *resolved_datadir,
     act_copy(report->stage, sizeof(report->stage), "release");
     act_copy(report->error, sizeof(report->error),
              "hot-swap activation unavailable in release build");
+    return false;
+}
+
+/* Nothing can shelve an image in a release build (only the dev activation
+ * core does), so hotswap_shelf_list/peek above already report an empty shelf
+ * correctly and need no stub. Rollback still needs one: it publishes live
+ * code, and a release binary refuses to do that. */
+bool hotswap_rollback(const char *source_tu,
+                      const struct hotswap_publish_hooks *hooks,
+                      struct hotswap_activate_report *report)
+{
+    (void)source_tu;
+    (void)hooks;
+    if (!report)
+        return false;
+    memset(report, 0, sizeof(*report));
+    report->verify_only = true;
+    report->rolled_back = true;
+    act_copy(report->stage, sizeof(report->stage), "release");
+    act_copy(report->error, sizeof(report->error),
+             "hot-swap rollback unavailable in release build");
     return false;
 }
 

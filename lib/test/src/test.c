@@ -1328,6 +1328,7 @@ int main(int argc, char **argv)
     failures += test_hotswap_module_v2();
     failures += test_hotswap_policy_module();
     failures += test_hotswap_service_registry();
+    { extern int test_hotswap_shelf(void); failures += test_hotswap_shelf(); }
     failures += test_dev_platform();
     failures += test_command_registry_catalog();
     failures += test_command_registry_latency();
@@ -1881,6 +1882,8 @@ int main(int argc, char **argv)
     { extern int test_code_capsule(void); failures += test_code_capsule(); }
     { extern int test_code_impact(void); failures += test_code_impact(); }
     { extern int test_code_merkle(void); failures += test_code_merkle(); }
+    { extern int test_code_merkle_proof(void);
+      failures += test_code_merkle_proof(); }
     { extern int test_code_emitter(void); failures += test_code_emitter(); }
     { extern int test_fact_writers(void); failures += test_fact_writers(); }
 

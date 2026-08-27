@@ -110,12 +110,14 @@ static bool prod_route(void *ctx, const uint8_t root[32], uint64_t now_mono,
                        size_t max, size_t *count_out)
 {
     (void)ctx;
+    (void)now_mono;
     struct vcs_zcode_dht_record_selector selector = {
         .kind = VCS_ZCODE_DHT_RECORD_PROVIDER};
     memcpy(selector.root, root, 32);
     struct vcs_zcode_dht_provider_route route;
     memset(&route, 0, sizeof(route));
-    if (!boot_zcode_dht_provider_route(now_mono, &selector, &route))
+    uint64_t wall_now = (uint64_t)platform_time_wall_time_t();
+    if (!boot_zcode_dht_provider_route(wall_now, &selector, &route))
         return false;
     size_t n = 0;
     for (size_t i = 0; i < VCS_ZCODE_DHT_K && n < max; i++) {

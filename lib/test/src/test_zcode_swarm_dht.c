@@ -23,6 +23,7 @@ struct fake_ops {
     bool complete_every_poll;
     bool begin_ok;
     uint64_t route_peer;
+    uint64_t route_expiry;
     bool route_has_peer;
 };
 
@@ -65,7 +66,7 @@ static bool fake_route(void *ctx, const uint8_t root[32], uint64_t now_mono,
         return false;
     }
     known_peer_ids[0] = f->route_peer;
-    expires_at[0] = UINT64_MAX;
+    expires_at[0] = f->route_expiry ? f->route_expiry : UINT64_MAX;
     *count_out = 1;
     return true;
 }
@@ -242,9 +243,54 @@ static int t_unhelpful_outcome_never_spin_rebegins(void)
     return failures;
 }
 
+static int t_expired_route_never_advertises(void)
+{
+    int failures = 0;
+    static struct fake_ops f;
+    memset(&f, 0, sizeof(f));
+    f.ops.begin = fake_begin;
+    f.ops.poll = fake_poll;
+    f.ops.route = fake_route;
+    f.ops.ctx = &f;
+    f.begin_ok = true;
+    f.complete_every_poll = true;
+    f.poll_state = VCS_ZCODE_DHT_RECORD_OPERATION_COMPLETE;
+    f.route_has_peer = true;
+    f.route_peer = 4343;
+    f.route_expiry = 1;
+    boot_zcode_swarm_dht_test_install(&f.ops);
+
+    TEST("expired provider evidence never becomes a swarm offer") {
+        struct vcs_swarm_engine *engine = fixture_engine("expired");
+        ASSERT(engine != NULL);
+        vcs_swarm_engine_set_global(engine);
+
+        uint8_t key[33];
+        uint8_t root[32];
+        memset(key, 8, sizeof(key));
+        memset(root, 12, sizeof(root));
+        ASSERT(vcs_swarm_engine_peer_add(engine, f.route_peer, key));
+        ASSERT_EQ(vcs_swarm_engine_fetch(engine, root, 20500, 1),
+                  VCS_SWARM_FETCH_OK);
+        boot_zcode_swarm_discovery_tick(500);
+        boot_zcode_swarm_discovery_tick(501);
+        ASSERT_EQ(f.routes, 1u);
+        uint8_t out[1][32];
+        ASSERT_EQ(vcs_swarm_engine_unadvertised_roots(engine, out, 1), 1u);
+
+        vcs_swarm_engine_set_global(NULL);
+        fixture_teardown(engine);
+        PASS();
+    } _test_next:;
+
+    boot_zcode_swarm_dht_test_install(NULL);
+    return failures;
+}
+
 int test_zcode_swarm_dht(void)
 {
     return t_discovery_inert_before_hosting() +
            t_lease_completes_to_offer_after_enroll() +
-           t_unhelpful_outcome_never_spin_rebegins();
+           t_unhelpful_outcome_never_spin_rebegins() +
+           t_expired_route_never_advertises();
 }
