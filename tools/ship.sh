@@ -413,7 +413,11 @@ deploy_local() {
         ""|*[!0-9]*|0) die "local canonical service must be running before ship" ;;
     esac
     svc_dir="$(dirname "$(readlink -f "/proc/$pid/exe")")"
-    worker_backup="$(mktemp -d "${TMPDIR:-/tmp}/z23-ship-local-workers.XXXXXX")"
+    # Scratch lives under the owner's state root, never /tmp: honour
+    # ZCL_SCRATCH_DIR when set (same override ship_selftest.sh recognises),
+    # otherwise the standing scratch root.
+    install -d "${ZCL_SCRATCH_DIR:-${HOME}/.local/state/zclassic23/scratch}"
+    worker_backup="$(mktemp -d "${ZCL_SCRATCH_DIR:-${HOME}/.local/state/zclassic23/scratch}/z23-ship-local-workers.XXXXXX")"
     for i in "${!WORKER_NAMES[@]}"; do
         if [ -f "$svc_dir/${WORKER_NAMES[$i]}" ]; then
             install -m 755 "$svc_dir/${WORKER_NAMES[$i]}" "$worker_backup/$i"
@@ -425,7 +429,13 @@ deploy_local() {
     ZCL_DEPLOY_ALLOW_CANONICAL=1 \
     ZCL_DEPLOY_FROZEN_CANDIDATE="$CANDIDATE" \
         make deploy 2>&1 | tail -6 || rc="${PIPESTATUS[0]}"
-    if [ "$rc" -ne 0 ]; then
+    # rc==3 is UNVERIFIED/STILL PROGRESSING: deploy_verify.sh deliberately left
+    # the new candidate installed and rolled nothing back because the node was
+    # still demonstrably advancing when the reporting window closed. Reverting
+    # the workers here would run that new main binary against OLD workers — a
+    # version-skew mismatch this rollback exists to prevent, not create. Only
+    # a genuine failure (1, 2, or anything unexpected) restores them.
+    if [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ]; then
         for i in "${!WORKER_NAMES[@]}"; do
             if [ -f "$worker_backup/$i" ]; then
                 install -m 755 "$worker_backup/$i" "$svc_dir/${WORKER_NAMES[$i]}"
@@ -873,7 +883,26 @@ REMOTE_CLEANUP
 
 for target in $TARGETS; do
     case "$target" in
-        local)  deploy_local  || die "local deploy failed" ;;
+        local)
+            deploy_local_rc=0
+            deploy_local || deploy_local_rc=$?
+            case "$deploy_local_rc" in
+                0) ;;
+                3)
+                    # Not a failure: `make deploy` (via deploy_verify.sh) left the
+                    # candidate installed and rolled nothing back because the node
+                    # was still demonstrably making progress when the reporting
+                    # window closed. Collapsing this into die() would tell the
+                    # caller "deploy broke" when it did not — surface the same
+                    # distinguishable code deploy_verify.sh returned.
+                    say "local is STILL PROGRESSING — the candidate is installed and working,"
+                    say "  but had not finished coming up when the verification window closed."
+                    say "  NOTHING was rolled back. Re-run ship to re-check."
+                    exit 3
+                    ;;
+                *) die "local deploy failed" ;;
+            esac
+            ;;
         remote)
             for host in "${DEPLOY_HOSTS[@]}"; do
                 deploy_remote "$host"
