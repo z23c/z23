@@ -268,6 +268,7 @@ static void output_run_before_link_hook(void) { }
  * (dev/ino/size/mtimes) is re-verified at every point where Linux checked
  * nlink==0, the staging link count must stay exactly 1 until the rename, and
  * the installer independently reopens and re-hashes the published bytes. */
+#if defined(__APPLE__)  /* the only caller is the Darwin branch below */
 static bool output_stage_create(struct consensus_export_output_binding *output,
                                 struct consensus_state_export_result *result)
 {
@@ -295,6 +296,7 @@ static bool output_stage_create(struct consensus_export_output_binding *output,
     return consensus_export_fail(result, CONSENSUS_EXPORT_OUTPUT_ERROR,
                                  "output staging create failed");
 }
+#endif  /* __APPLE__ */
 
 bool consensus_export_open_temp(struct consensus_export_output_binding *output,
                                 sqlite3 **destination,
