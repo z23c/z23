@@ -264,18 +264,22 @@ int test_rpc_safety(void)
 
     printf("rpc_safety: wallet freshness follows authoritative H*... ");
     {
-        struct wallet wallet;
-        wallet_init(&wallet);
-        wallet.best_block_height = 1;
-        wallet.map_wallet[0].used = true;
-        wallet.map_wallet[0].confirms = 1;
-        wallet.num_wallet_tx = 1;
+        /* struct wallet embeds a 64k-entry tx table (~40 MB): stack space,
+         * not intent. Heap it like test_accept_to_mempool does so the group
+         * runs inside every host's default main-thread stack. */
+        struct wallet *wallet = zcl_calloc(1, sizeof(*wallet),
+                                           "rpc-safety-wallet");
+        wallet_init(wallet);
+        wallet->best_block_height = 1;
+        wallet->map_wallet[0].used = true;
+        wallet->map_wallet[0].confirms = 1;
+        wallet->num_wallet_tx = 1;
 
         struct main_state ms;
         build_unresolved_tip_state(&ms, 3);
         reducer_frontier_provable_tip_set(1);
         struct wallet_rpc_context ctx = {
-            .wallet = &wallet,
+            .wallet = wallet,
             .main_state = &ms,
         };
         struct wallet_balance_freshness freshness;
@@ -288,7 +292,8 @@ int test_rpc_safety(void)
 
         reducer_frontier_provable_tip_reset();
         main_state_free(&ms);
-        wallet_free(&wallet);
+        wallet_free(wallet);
+        free(wallet);
         if (ok) printf("OK\n");
         else    { printf("FAIL\n"); failures++; }
     }
@@ -296,14 +301,16 @@ int test_rpc_safety(void)
     printf("rpc_safety: fanout preflight failure creates no address... ");
     {
         ensure_rpc_warmup_finished_once();
-        struct wallet wallet; wallet_init(&wallet);
+        struct wallet *wallet = zcl_calloc(1, sizeof(*wallet),
+                                           "rpc-safety-wallet");
+        wallet_init(wallet);
         struct main_state ms; main_state_init(&ms);
         struct rpc_table tbl; rpc_table_init(&tbl);
         register_vault_intent_rpc_commands(&tbl);
-        wallet_rpc_context_set_base(&wallet, &ms, "/tmp", NULL, NULL, NULL);
+        wallet_rpc_context_set_base(wallet, &ms, "/tmp", NULL, NULL, NULL);
         wallet_rpc_context_set_node_db(NULL);
         wallet_rpc_context_set_coins_tip(NULL);
-        size_t keys_before = wallet.keystore.num_keys;
+        size_t keys_before = wallet->keystore.num_keys;
 
         struct json_value params, input, result;
         json_init(&params); json_set_array(&params);
@@ -320,20 +327,20 @@ int test_rpc_safety(void)
         const char *code = json_get_str(json_get(&result, "code"));
         bool ok = handled && !json_get_bool(json_get(&result, "ok")) &&
             code && strcmp(code, "WALLET_UNAVAILABLE") == 0 &&
-            wallet.keystore.num_keys == keys_before &&
+            wallet->keystore.num_keys == keys_before &&
             json_get(&result, "address") == NULL &&
             json_get(&result, "effects") == NULL;
         if (!ok)
             printf("(handled=%d code=%s keys=%zu->%zu address=%d effects=%d) ",
                    (int)handled, code ? code : "NULL", keys_before,
-                   wallet.keystore.num_keys,
+                   wallet->keystore.num_keys,
                    json_get(&result, "address") != NULL,
                    json_get(&result, "effects") != NULL);
         json_free(&params); json_free(&input); json_free(&result);
         wallet_rpc_context_set_base(NULL, NULL, NULL, NULL, NULL, NULL);
         wallet_rpc_context_set_node_db(NULL);
         wallet_rpc_context_set_coins_tip(NULL);
-        main_state_free(&ms); wallet_free(&wallet);
+        main_state_free(&ms); wallet_free(wallet); free(wallet);
         if (ok) printf("OK\n");
         else    { printf("FAIL\n"); failures++; }
     }
@@ -623,9 +630,11 @@ int test_rpc_safety(void)
         stream_free(&wallet_raw);
 
         /* The finalized in-memory wallet leads even the wallet SQLite row.
-         * Prove lookup remains exact in that smaller projection window too. */
-        struct wallet owned_wallet;
-        wallet_init(&owned_wallet);
+         * Prove lookup remains exact in that smaller projection window too.
+         * Heap like the other wallets here: struct wallet is ~40 MB and this
+         * host's main stack cannot carry it. */
+        struct wallet *owned_wallet = calloc(1, sizeof(*owned_wallet));
+        wallet_init(owned_wallet);
         struct wallet_tx owned_wtx;
         memset(&owned_wtx, 0, sizeof(owned_wtx));
         if (ok) {
@@ -637,9 +646,9 @@ int test_rpc_safety(void)
             owned_wtx.hash_block = body_hash;
             owned_wtx.confirms = 1;
             owned_wtx.used = true;
-            ok = wallet_add_to_wallet(&owned_wallet, &owned_wtx);
+            ok = wallet_add_to_wallet(owned_wallet, &owned_wtx);
             transaction_free(&owned_wtx.tx);
-            wallet_rpc_context_set_base(&owned_wallet, &ms, dir,
+            wallet_rpc_context_set_base(owned_wallet, &ms, dir,
                                         NULL, NULL, NULL);
             wallet_rpc_context_set_node_db(&ndb);
         }
@@ -786,7 +795,7 @@ int test_rpc_safety(void)
         main_state_free(&ms);
         block_free(&body);
         transaction_free(&shielded);
-        wallet_free(&owned_wallet);
+        wallet_free(owned_wallet); free(owned_wallet);
         test_rm_rf(dir);
 
         if (ok) printf("OK\n");
