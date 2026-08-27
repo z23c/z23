@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 int main(void)
@@ -58,6 +59,15 @@ int main(void)
         if (second >= 0) close(second);
         unlink(file_path);
         return 5;
+    }
+    const unsigned char *mapped = mmap(NULL, 3, PROT_READ, MAP_PRIVATE,
+                                       first, 1);
+    if (mapped == MAP_FAILED || memcmp(mapped, "23-", 3) != 0 ||
+        munmap((void *)mapped, 3) != 0) {
+        close(first);
+        close(second);
+        unlink(file_path);
+        return 7;
     }
     close(first);
     close(second);
