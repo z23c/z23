@@ -174,6 +174,9 @@ backtrace capability, process introspection, and the 46-case SQLite group also
 passed their platform contracts. A fresh isolated test-lane datadir reached
 `phase=serving`, `stage=ready`, height 0 with RPC bound, then completed a
 graceful shutdown. This is startup evidence, not chain-sync acceptance.
+The optimized ROM-seed background-scan regression also passed after bounding
+its worker-stack use; the artifact snapshot uses checked allocation instead of
+a roughly 1 MiB automatic array.
 
 The macOS capability boundary is explicit: the public node, wallet, P2P, RPC,
 database, and cryptography build natively; embedded full Tor, Linux Landlock

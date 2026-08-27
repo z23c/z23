@@ -944,7 +944,13 @@ size_t rom_seed_directory_json(char *buf, size_t max)
  * market so it surfaces in zmarket_list and the gossip re-broadcast path. */
 static void rom_seed_announce_all(uint16_t fs_port)
 {
-    struct rom_artifact arts[ROM_SEED_MAX_ARTIFACTS];
+    struct rom_artifact *arts = zcl_calloc(ROM_SEED_MAX_ARTIFACTS,
+                                           sizeof(*arts),
+                                           "rom_seed_announce_artifacts");
+    if (!arts) {
+        LOG_WARN(ROM_SUBSYS, "announce: artifact snapshot allocation failed");
+        return;
+    }
     int n = rom_seed_list(arts, ROM_SEED_MAX_ARTIFACTS);
     uint8_t zero_ip[16] = {0};
     for (int i = 0; i < n; i++) {
@@ -952,6 +958,7 @@ static void rom_seed_announce_all(uint16_t fs_port)
         if (rom_seed_build_offer(&arts[i], zero_ip, fs_port, &offer))
             (void)file_market_add_offer(&offer);
     }
+    free(arts);
 }
 
 static void *rom_seed_scan_thread(void *arg)
