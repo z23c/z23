@@ -82,8 +82,8 @@ check_contract() {
     [ "$override_count" -eq 0 ] ||
         fail "found $override_count recipe/caller override(s) of ASAN_COMMON_SAN_FLAGS"
 
-    require_fixed 'TEST_ASAN_CFLAGS = $(filter-out -O3 -flto=auto -Werror,$(CACHED_CFLAGS)) -O1 -g -DZCL_TESTING \'
-    require_fixed 'DEV_ASAN_CFLAGS = $(filter-out -O3 -flto=auto -Werror,$(CACHED_CFLAGS)) $(ZCL_DEV_OPT) -g3 -DZCL_DEV_BUILD \'
+    require_fixed 'TEST_ASAN_CFLAGS = $(filter-out -O3 $(ZCL_LTO_FLAG) -Werror,$(CACHED_CFLAGS)) -O1 -g -DZCL_TESTING \'
+    require_fixed 'DEV_ASAN_CFLAGS = $(filter-out -O3 $(ZCL_LTO_FLAG) -Werror,$(CACHED_CFLAGS)) $(ZCL_DEV_OPT) -g3 -DZCL_DEV_BUILD \'
 }
 
 if [ "${1:-}" = "--selftest" ]; then
