@@ -43,6 +43,8 @@ exact packages without a central registry.
 - [`../README.md`](../README.md) — what the product is and what users can do.
 - [`GETTING_STARTED.md`](GETTING_STARTED.md) — build and run it on a fresh
   machine, and what peer discovery does with no flags.
+- [`WINDOWS.md`](WINDOWS.md) — MSYS2 UCRT64 native C23 development, the
+  remaining Win32 port boundary, and the current WSL2 full-node/service lane.
 - [`PARAMS.md`](PARAMS.md) — why a node validates shielded proofs out of the
   box but cannot create a shielded payment until you supply the proving
   parameters yourself, and how to check the bytes you were given.

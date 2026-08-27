@@ -16,6 +16,10 @@ The project is pre-v1 (see [`docs/MVP.md`](MVP.md)). It is fully usable for
 building, developing against, and running a real ZClassic node; don't rely on
 it as your only mainnet node yet.
 
+Windows developers should start with [`WINDOWS.md`](WINDOWS.md). It separates
+the native MSYS2 UCRT64 portability lane from the currently supported WSL2
+full-node build and service lane.
+
 ---
 
 ## Build

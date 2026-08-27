@@ -577,7 +577,8 @@ capture_batched()
             digest="${record:0:64}"
             emitted="${record:66}"
             [[ "$digest" =~ ^[0-9a-f]{64}$ ]] &&
-                [ "${record:64:2}" = "  " ] &&
+                [[ "${record:64:2}" = "  " ||
+                   "${record:64:2}" = " *" ]] &&
                 [ "$emitted" = "${regular_paths[$hash_i]}" ] ||
                 fail "regular-file hash batch was malformed or reordered"
             regular_digests+=("$digest")
