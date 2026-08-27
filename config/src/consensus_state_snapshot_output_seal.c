@@ -1,6 +1,8 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * PURPOSE: Retire writable anonymous-output descriptors and hash the exact
- * immutable inode used by consensus bundle/candidate publication. */
+ * PURPOSE: Seal and hash the exact immutable staging inode used by consensus
+ * bundle/candidate publication: retire the writable descriptor where the
+ * platform can (Linux anonymous O_TMPFILE), and everywhere re-verify the
+ * pinned inode identity through the reopened descriptor. */
 
 #define _GNU_SOURCE
 
@@ -17,15 +19,30 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-/* An O_TMPFILE is private by name, but a callback or another in-process
- * subsystem could retain a duplicate of its original O_RDWR descriptor.
- * chmod(0400) does not revoke that already-open authority.  Refuse the seal
- * unless the new read-only descriptor is the only remaining reference in
- * this process with write access to the exact inode. */
+/* fd-naming root for the descriptor scan: /proc/self/fd on Linux, /dev/fd on
+ * Darwin (see platform/fd_path.h). */
+static const char *descriptor_fd_root(void)
+{
+#if defined(__APPLE__)
+    return "/dev/fd";
+#else
+    return "/proc/self/fd";
+#endif
+}
+
+/* A sealed staging inode must have no other in-process descriptor with write
+ * authority: a callback or another subsystem could retain a duplicate of the
+ * original O_RDWR descriptor, and chmod(0400) does not revoke already-open
+ * authority. Refuse the seal unless every remaining descriptor for the exact
+ * inode other than `readonly_fd` is read-only. On Darwin the retained
+ * descriptor itself keeps O_RDWR access (the /dev/fd/N reopen is a dup and
+ * cannot downgrade the access mode) — the weaker recorded property of the
+ * named-staging design — so this scan is the only in-process write-alias
+ * proof either platform has. */
 static bool descriptor_has_writable_alias(int readonly_fd,
                                           const struct stat *identity)
 {
-    DIR *dir = opendir("/proc/self/fd");
+    DIR *dir = opendir(descriptor_fd_root());
     if (!dir)
         return true;
     bool found = false;
@@ -93,21 +110,32 @@ bool consensus_export_seal_readonly(
     if (access < 0 || (access & O_ACCMODE) != O_RDWR ||
         fstat(writable_fd, &before) != 0 || !S_ISREG(before.st_mode) ||
         before.st_dev != output->temp_dev || before.st_ino != output->temp_ino ||
-        before.st_nlink != 0 ||
+        !consensus_export_staging_nlink_valid(output, before.st_nlink) ||
         (before.st_mode & (S_IWUSR | S_IWGRP | S_IWOTH)) != 0)
         return false;
+    /* Reopen the staged inode through the platform fd-naming shim and require
+     * the full identity (dev/ino/size/mtimes/ctimes) to survive: this is the
+     * reopen the installer will later replay, and on Darwin it also proves the
+     * staging name still resolves to the pinned inode. Linux asserts the
+     * reopened descriptor is O_RDONLY (retiring the last writable one); the
+     * Darwin /dev/fd/N reopen is a dup that cannot downgrade O_RDWR, so there
+     * the seal only swaps descriptors and records the retained access. */
     char path[64];
-    int n = snprintf(path, sizeof(path), "/proc/self/fd/%d", writable_fd);
+    int n = snprintf(path, sizeof(path), "%s/%d", descriptor_fd_root(),
+                     writable_fd);
     if (n <= 0 || (size_t)n >= sizeof(path))
         return false;
     int readonly_fd = open(path, O_RDONLY | O_CLOEXEC);
     struct stat reopened;
     int readonly_access = readonly_fd >= 0 ? fcntl(readonly_fd, F_GETFL) : -1;
     bool exact = readonly_fd >= 0 && readonly_access >= 0 &&
+#if !defined(__APPLE__)
         (readonly_access & O_ACCMODE) == O_RDONLY &&
+#endif
         fstat(readonly_fd, &reopened) == 0 && S_ISREG(reopened.st_mode) &&
         reopened.st_dev == before.st_dev && reopened.st_ino == before.st_ino &&
-        reopened.st_nlink == 0 && reopened.st_size == before.st_size &&
+        consensus_export_staging_nlink_valid(output, reopened.st_nlink) &&
+        reopened.st_size == before.st_size &&
         reopened.st_mode == before.st_mode &&
         reopened.st_mtim.tv_sec == before.st_mtim.tv_sec &&
         reopened.st_mtim.tv_nsec == before.st_mtim.tv_nsec &&
@@ -124,7 +152,8 @@ bool consensus_export_seal_readonly(
     output->temp_fd = readonly_fd;
     if (fstat(readonly_fd, sealed) != 0 ||
         sealed->st_dev != before.st_dev || sealed->st_ino != before.st_ino ||
-        sealed->st_nlink != 0 || sealed->st_size != before.st_size ||
+        !consensus_export_staging_nlink_valid(output, sealed->st_nlink) ||
+        sealed->st_size != before.st_size ||
         sealed->st_mode != before.st_mode ||
         sealed->st_mtim.tv_sec != before.st_mtim.tv_sec ||
         sealed->st_mtim.tv_nsec != before.st_mtim.tv_nsec ||

@@ -53,6 +53,8 @@ pass() { printf 'ship-selftest:   ok  %s\n' "$*"; }
 fail() { printf 'ship-selftest: FAIL %s\n' "$*" >&2; FAILS=$((FAILS + 1)); }
 
 WANT_SHA="$(printf 'a%.0s' {1..64})"
+SELFTEST_SOURCE_ID="$(printf 'b%.0s' {1..64})"
+SELFTEST_COMMIT="selftest-commit-$(printf 'c%.0s' {1..8})"
 
 # ── 1. the classifier ───────────────────────────────────────────────────────
 # args: qualified observed exists silent silence unstable crash unknown
@@ -171,6 +173,35 @@ cancelled_write_bytes: 999999
 syscr: 5'
 [ "$(ship_io_bytes_from_text "$IOTXT")" = 12408 ] && pass "io bytes (counted fields only)" \
     || fail "io bytes"
+
+# The darwin-side parsers are pure text->token too, so they are pinned on BOTH
+# hosts: the same library travels over the wire to a Linux box, where these
+# functions are dead code but still have to parse and still have to answer.
+# cputime is `[dd-]hh:mm:ss.ss`. The classifier consumes only the delta between
+# polls, and the parser answers exactly anyway, so both are pinned here.
+printf '\nship-selftest: 3b. darwin-side parsers — pinned on this host, parsed on both\n'
+[ "$(ship_cpu_centisecs_from_text "0:00.00")" = 0 ] && pass "cputime zero" || fail "cputime zero"
+[ "$(ship_cpu_centisecs_from_text "  1:02.03")" = 6203 ] && pass "cputime m:ss.cc" \
+    || fail "cputime m:ss.cc (wanted 6203)"
+[ "$(ship_cpu_centisecs_from_text "1:02:03.04")" = 372304 ] && pass "cputime h:mm:ss.cc" \
+    || fail "cputime h:mm:ss.cc (wanted 372304)"
+[ "$(ship_cpu_centisecs_from_text "3-01:02:03.04")" = 26292304 ] && pass "cputime d-hh:mm:ss.cc" \
+    || fail "cputime d-hh:mm:ss.cc (wanted 26292304)"
+[ "$(ship_cpu_centisecs_from_text "")" = 0 ] && pass "empty cputime -> 0" || fail "empty cputime"
+[ "$(ship_cpu_centisecs_from_text "garbage")" = 0 ] && pass "garbage cputime -> 0" || fail "garbage cputime"
+# A still process and a working one must not be able to share a token: the
+# whole darwin advance signal is this number moving.
+[ "$(ship_cpu_centisecs_from_text "0:00.07")" != "$(ship_cpu_centisecs_from_text "0:00.08")" ] \
+    && pass "one centisecond of CPU is a visible advance" \
+    || fail "centisecond resolution lost — a busy box reads as wedged"
+# lstart is a date with spaces; the observation line may not carry any.
+[ "$(ship_start_token_from_text "Thu Aug 27 14:48:20 2026   ")" = "ThuAug2714:48:202026" ] \
+    && pass "lstart squeezes to a space-free token" || fail "lstart token"
+# The digest helper must agree with itself whichever binary answers, and the
+# fixture's WANT_SHA logic leans on it on a host with no coreutils.
+[ "$(printf 'abc' | ship_sha256_stream)" = \
+  "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" ] \
+    && pass "sha256 helper (sha256sum/shasum/openssl agree)" || fail "sha256 helper digest"
 
 printf '\nship-selftest: 4. observation-line field extraction\n'
 LINE="observed=1 exists=1 pid=9 start=5 sha=$WANT_SHA ident=yes rpc=no cpu=0 blkio=5000 io=12"
@@ -336,10 +367,14 @@ printf '\nship-selftest: 5. the loop, end to end, through the observer seam\n'
 spawn_await s1    QUALIFIED   0   fast-healthy       30     10      3     5     1
 spawn_await s2    QUALIFIED   0   late-answer        30     10      3     5     1
 # ── BAR 1 ── a slow-but-progressing box must NEVER be rolled back. The window
-# expires at 3s while blkio climbs; the verdict is SLOW and the exit code is
-# 3, which no destructive branch in ship.sh reads.
-spawn_await s3    SLOW        3   blocked-on-disk     3     60      3     5     1
-spawn_await s4    SLOW        3   io-only-kernel      3     60      3     5     1
+# expires while blkio climbs; the verdict is SLOW and the exit code is 3,
+# which no destructive branch in ship.sh reads. Six seconds rather than three
+# because the property under test is "still advancing when the window
+# expires", which needs TWO observations to have landed: on a loaded host a
+# first poll can stall for seconds, and a window sized to the bare minimum
+# would measure the host's scheduler instead of the classifier.
+spawn_await s3    SLOW        3   blocked-on-disk     6     60      3     5     1
+spawn_await s4    SLOW        3   io-only-kernel      6     60      3     5     1
 # ── BAR 2 ── a genuinely wedged box must STILL be rolled back. Same observer
 # shape, nothing moving: WEDGED, exit 1.
 spawn_await s5    WEDGED      1   wedged             60      3      3     5     1
@@ -376,18 +411,27 @@ cat "$ZCL_SHIP_TEST_PIDFILE" 2>/dev/null || exit 1
 EOF
 chmod +x "$SANDBOX/mockbin/systemctl"
 
-# A fixture "daemon". It has to be a COMPILED binary, not a shell script:
-# ship_observe reads /proc/<pid>/exe both to hash the running bytes and to
-# re-invoke the daemon as `<exe> status`, and for a script that symlink points
-# at the interpreter — the hash would be /bin/sh's and the status probe would
-# run `sh status`. A script fixture would therefore prove nothing about the
-# path being tested.
+# A fixture "daemon". It has to be a COMPILED binary, not a shell script: the
+# observer hashes the running binary and re-invokes it as `<exe> status`. On
+# Linux that exe is /proc/<pid>/exe and on darwin it is the path `ps` reports,
+# but a script fixture breaks both the same way — the identity the kernel
+# exposes is the interpreter's, so the hash would be /bin/sh's and the status
+# probe would run `sh status`. A script fixture would prove nothing about the
+# path being tested on either host.
 #
 # `status` succeeds only when ZCL_SHIP_TEST_STATUS_OK is in the PROBE's
 # environment, so one binary plays both a healthy node and a node whose RPC
 # front door has not opened yet. ZCL_SHIP_TEST_BUSY, read once at startup,
-# decides whether it moves I/O — that is the difference between a box working
+# decides whether it burns CPU — that is the difference between a box working
 # through a cold datadir and a box that is wedged.
+#
+# The busy loop is sized against the SAMPLER, not against politeness: cputime
+# is read at whole centiseconds, and a duty cycle under one centisecond per
+# poll is indistinguishable from a still process. Two million adds per cycle
+# measures ~10 centiseconds of CPU per 1s poll on the reference Mac — ten
+# times the resolution — while the quiet loop holds 0:00.00 for as long as it
+# runs, so the delta really is the classification signal and not rounding
+# luck. Measured, not assumed: it is re-pinned by every run of this selftest.
 cat > "$SANDBOX/node.c" <<'EOF'
 #include <stdio.h>
 #include <stdlib.h>
@@ -407,10 +451,11 @@ int main(int argc, char **argv)
     if (argc == 2 && strcmp(argv[1], "status") == 0)
         return flag("ZCL_SHIP_TEST_STATUS_OK") ? 0 : 1;
     if (flag("ZCL_SHIP_TEST_BUSY")) {
+        volatile unsigned long sink = 0;
         for (;;) {
-            FILE *f = fopen("/dev/null", "w");
-            if (f) { fprintf(f, "working %d\n", (int)getpid()); fclose(f); }
-            usleep(20000);
+            int i;
+            for (i = 0; i < 2000000; ++i) sink += (unsigned long)i;
+            usleep(6000);
         }
     }
     for (;;) pause();
@@ -443,17 +488,34 @@ chmod +x "$SANDBOX/fake-ssh"
 
 # Each scenario gets its OWN fixture daemon and its own MainPID file, so they
 # are independent and can be observed at the same time. `busy` decides whether
-# the daemon moves I/O — the difference between a box working through a cold
-# datadir and a wedged one.
-# start_fixture_daemon <tag> [busy]
+# the daemon burns CPU — the difference between a box working through a cold
+# datadir and a wedged one. `identified` starts it carrying the deploy
+# identity in its real environment, which is the only way to prove the
+# identity leg end to end: on Linux it is read out of /proc/<pid>/environ, on
+# darwin out of `ps -E`, and until now the selftest only ever passed an empty
+# want_src, so the identity check was trivially yes in every scenario here.
+# start_fixture_daemon <tag> [busy] [identified]
 start_fixture_daemon() {
-    ZCL_SHIP_TEST_BUSY="${2:-}" "$SANDBOX/node" >/dev/null 2>&1 &
+    if [ "${3:-}" = identified ]; then
+        ZCL_SHIP_TEST_BUSY="${2:-}" \
+        ZCL_AGENT_EXPECT_SOURCE_ID="$SELFTEST_SOURCE_ID" \
+        ZCL_AGENT_EXPECT_BUILD_COMMIT="$SELFTEST_COMMIT" \
+        ZCL_AGENT_EXPECT_BUILD_SOURCE=ship \
+            "$SANDBOX/node" >/dev/null 2>&1 &
+    else
+        ZCL_SHIP_TEST_BUSY="${2:-}" "$SANDBOX/node" >/dev/null 2>&1 &
+    fi
     echo "$!" >> "$SANDBOX/fixture.pids"
     printf '%s\n' "$!" > "$SANDBOX/mainpid.$1"
 }
 
 # spawn_remote_await <tag> <want-verdict> <want-rc> <transport> <window>
 #                    <silence> <crash-n> <unknown-n> <want-sha> [status-ok]
+#                    [want-src] [want-commit]
+#
+# Empty want-src (the default) means "this leg has no identity to check", so
+# ident comes back yes without being tested. The `identified` scenario passes
+# both and demands a REAL match from a REAL environment.
 spawn_remote_await() {
     local tag="$1"
     printf '%s\n' "$2 $3 $4" > "$SANDBOX/r.$tag.want"
@@ -466,7 +528,7 @@ spawn_remote_await() {
             ZCL_SHIP_REMOTE_EXEC="$SANDBOX/fake-ssh" \
             SHIP_LIB_TEXT="$SHIP_LIB_TEXT" \
             SHIP_OBS_UNIT=zclassic23 SHIP_OBS_SHA="$9" \
-            SHIP_OBS_SRC= SHIP_OBS_COMMIT= \
+            SHIP_OBS_SRC="${11:-}" SHIP_OBS_COMMIT="${12:-}" \
             SHIP_SSH_OPTS= SHIP_REMOTE_HOST=fixture-host \
             SHIP_AWAIT_WINDOW="$5" SHIP_AWAIT_SILENCE="$6" \
             SHIP_AWAIT_CRASH_SAMPLES="$7" SHIP_AWAIT_UNKNOWN_SAMPLES="$8" \
@@ -491,12 +553,14 @@ judge_remote_await() {
     fi
 }
 
-FIXTURE_SHA="$(sha256sum < "$SANDBOX/node" | awk '{print $1}')"
+FIXTURE_SHA="$(ship_sha256_stream < "$SANDBOX/node")"
 : > "$SANDBOX/fixture.pids"
 start_fixture_daemon healthy
 start_fixture_daemon slow busy
 start_fixture_daemon quiet
 start_fixture_daemon frozen
+start_fixture_daemon stamped '' identified
+start_fixture_daemon unstamp '' identified
 # The far side's service names a MainPID that no longer exists.
 printf '999999\n' > "$SANDBOX/mainpid.gone"
 # The transport-failure cases never reach a daemon at all.
@@ -504,8 +568,9 @@ printf '1\n' > "$SANDBOX/mainpid.down"
 printf '1\n' > "$SANDBOX/mainpid.empty"
 
 # The observer program really does travel over the seam and really is executed
-# on the far side, against a real process and a real /proc: a live fixture
-# daemon whose exact bytes match and which answers `status` QUALIFIES.
+# on the far side, against a real process, through whatever the host running
+# this selftest exposes — /proc on Linux, ps on darwin: a live fixture daemon
+# whose exact bytes match and which answers `status` QUALIFIES.
 #            tag     verdict     rc transport window silence crash unknown sha            status-ok
 spawn_remote_await healthy QUALIFIED  0  up        30     20      3     5   "$FIXTURE_SHA" 1
 # ── BAR 5, over the wire ── ssh cannot connect. The old code read that as
@@ -514,10 +579,12 @@ spawn_remote_await healthy QUALIFIED  0  up        30     20      3     5   "$FI
 spawn_remote_await down    UNKNOWN    4  down      60     60      3     3   "$FIXTURE_SHA"
 spawn_remote_await empty   UNKNOWN    4  empty     60     60      3     3   "$FIXTURE_SHA"
 # ── BAR 1, over the wire, against a REAL process ── the far side is up, has
-# the right bytes, is moving I/O, and its `status` never answers: a node
+# the right bytes, is burning CPU, and its `status` never answers: a node
 # working through a cold datadir with its RPC front door still shut. The old
 # local loop timed out on exactly this and rolled the fleet back. It is SLOW.
-spawn_remote_await slow    SLOW       3  up         4    600      3     5   "$FIXTURE_SHA"
+# Eight seconds so a loaded host still lands the two observations the verdict
+# needs — same reasoning as s3/s4 on the local leg.
+spawn_remote_await slow    SLOW       3  up         8    600      3     5   "$FIXTURE_SHA"
 # The same box with nothing moving at all, judged before silence is
 # established: the window produces UNVERIFIED, which is still not a rollback.
 spawn_remote_await quiet   UNVERIFIED 3  up         4    600      3     5   "$FIXTURE_SHA"
@@ -526,8 +593,20 @@ spawn_remote_await quiet   UNVERIFIED 3  up         4    600      3     5   "$FI
 spawn_remote_await frozen  WEDGED     1  up       600      4      3     5   "$FIXTURE_SHA"
 # The far side LOOKED and found no process. A fault, reachable over the seam.
 spawn_remote_await gone    CRASHED    1  up        60    600      3     5   "$FIXTURE_SHA"
+# The identity leg, end to end: the `stamped` daemon was STARTED carrying
+# ZCL_AGENT_EXPECT_* in its real environment, and this leg demands exactly
+# those values. Linux reads them out of /proc/<pid>/environ, darwin out of
+# `ps -E`. A WRONG value has to read as no identity — which is what `unstamp`
+# is: the same src with a commit the fixture never saw, so qualification must
+# stay out of reach and the window must expire UNVERIFIED. Until these two
+# legs existed the selftest only ever passed an empty want_src, so ident=yes
+# proved nothing here.
+spawn_remote_await stamped QUALIFIED  0  up        30     20      3     5   "$FIXTURE_SHA" 1 \
+    "$SELFTEST_SOURCE_ID" "$SELFTEST_COMMIT"
+spawn_remote_await unstamp UNVERIFIED 3  up         4    600      3     5   "$FIXTURE_SHA" 1 \
+    "$SELFTEST_SOURCE_ID" "a-commit-the-fixture-never-saw"
 wait_await_pids
-for tag in healthy down empty slow quiet frozen gone; do judge_remote_await "$tag"; done
+for tag in healthy down empty slow quiet frozen gone stamped unstamp; do judge_remote_await "$tag"; done
 
 # ── 7. the shipped script text ──────────────────────────────────────────────
 # ship.sh's two remote scripts are extracted the same way
@@ -585,6 +664,24 @@ if sh -n "$ROOT/tools/scripts/ship_progress_lib.sh"; then
     pass "library parses under POSIX sh"
 else
     fail "library is not POSIX sh — the remote leg cannot run it"
+fi
+# Host-neutrality must not be a replacement: every procfs read the Linux leg
+# depends on is still required to be in the library, asserted by construction
+# because a Mac cannot notice their absence — on this host the darwin branch
+# answers every scenario and the Linux reader could rot invisibly.
+lib_text="$(cat "$ROOT/tools/scripts/ship_progress_lib.sh")"
+for procsrc in stat io exe environ; do
+    if str_contains "$lib_text" "/proc/\$_ship_pid/$procsrc"; then
+        pass "linux reader still reads /proc/\\\$_ship_pid/$procsrc"
+    else
+        fail "linux reader lost /proc/\\\$_ship_pid/$procsrc — host-neutrality ate the original"
+    fi
+done
+# ...and the darwin branch must exist and be reachable, not merely compile.
+if str_contains "$lib_text" "ship_observe_darwin" && str_contains "$lib_text" "kill -0"; then
+    pass "darwin reader is present and dispatches on the kernel"
+else
+    fail "darwin reader missing — this host's remote legs prove nothing again"
 fi
 # No duration may decide a health verdict in ship.sh any more. All four sites
 # were `deadline=$(( $(date +%s) + N ))` followed by a `while ... -lt
