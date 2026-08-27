@@ -577,13 +577,46 @@ void zcl_native_handle_zcode_package_fetch(
         (void)json_push_kv(&reply->data, "download", &sj);
         json_free(&sj);
     }
-    if (!live)
-        (void)json_push_kv_str(
-            &reply->data, "note",
-            "no live hosting engine: the resumable download record is "
-            "persisted under <datadir>/zcode/downloads and the next "
-            "-packagehost=1 boot resumes it (manifest-first, then chunks "
-            "rarest-first from the peers advertising the root)");
+    if (!live) {
+        /* The record is inert until a hosting node loads it. Name `z23 join`
+         * (or the restart, once this process is already hosting) instead of
+         * reciting `-packagehost=1` as the next boot action. */
+        struct zcl_zcode_join_posture join;
+        char note[1200];
+        const char *dd = zw_datadir(request);
+        if (!zcl_zcode_join_posture_fill(&join))
+            join.package_hosting = false;
+        int n;
+        if (join.package_hosting)
+            n = snprintf(
+                note, sizeof(note),
+                "no live hosting engine: the resumable download record is "
+                "persisted under <datadir>/zcode/downloads; "
+                "systemctl --user restart zclassic23 so the live engine "
+                "resumes it (manifest-first, then chunks rarest-first from "
+                "the peers advertising the root)");
+        else if (dd && dd[0])
+            n = snprintf(
+                note, sizeof(note),
+                "no live hosting engine: the resumable download record is "
+                "persisted under <datadir>/zcode/downloads; run "
+                "z23 join -datadir=%s then restart so the live engine "
+                "resumes it (manifest-first, then chunks rarest-first from "
+                "the peers advertising the root)",
+                dd);
+        else
+            n = snprintf(
+                note, sizeof(note),
+                "no live hosting engine: the resumable download record is "
+                "persisted under <datadir>/zcode/downloads; run z23 join "
+                "then restart so the live engine resumes it "
+                "(manifest-first, then chunks rarest-first from the peers "
+                "advertising the root)");
+        if (n < 0 || (size_t)n >= sizeof(note))
+            (void)snprintf(note, sizeof(note),
+                           "no live hosting engine: run z23 join then restart");
+        (void)json_push_kv_str(&reply->data, "note", note);
+    }
 }
 
 /* ── zcode package peers ────────────────────────────────────────────── */
