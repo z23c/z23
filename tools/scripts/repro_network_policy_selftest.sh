@@ -50,7 +50,12 @@ make()
         esac
     done
     mkdir -p "$build_dir/bin"
-    printf 'repro-network-policy-fixture\n' >"$build_dir/bin/$binary"
+    if [ "$binary" = zclassic23 ]; then
+        printf 'repro-network-policy-fixture\n' >"$build_dir/bin/z23"
+        ln -s z23 "$build_dir/bin/zclassic23"
+    else
+        printf 'repro-network-policy-fixture\n' >"$build_dir/bin/$binary"
+    fi
 }
 
 git()

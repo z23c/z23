@@ -149,3 +149,15 @@ check-doc-accuracy PASS
 check-markdown-links PASS
 check-clang-portability SKIP (installed Clang 22, baseline Clang 20)
 ```
+
+The subsequent pre-push gate exposed two stale test assumptions after the
+Windows vendor and canonical-binary changes. The LevelDB provenance test now
+accepts the platform-bound recipe form and separately requires both POSIX and
+Windows source routes. The network-policy fixture now models the shipped
+`zclassic23 -> z23` alias instead of creating only the legacy name.
+
+```text
+test_vendor_provenance PASS
+build_vendor_offline_selftest PASS
+repro_network_policy_selftest PASS builds=4
+```
