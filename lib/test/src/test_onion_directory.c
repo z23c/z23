@@ -86,6 +86,8 @@
 #define HOST_A "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion"
 #define HOST_B "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.onion"
 #define HOST_C "cccccccccccccccccccccccccccccccccccccccccccccccccccccccc.onion"
+#define HOST_D "dddddddddddddddddddddddddddddddddddddddddddddddddddddddd.onion"
+#define HOST_E "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.onion"
 #define PH_HOST_UNKNOWN "22222222222222222222222222222222222222222222222222222222.onion"
 #define PH_HOST_STATED  "33333333333333333333333333333333333333333333333333333333.onion"
 #define HOST_SELF "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz.onion"
@@ -1492,6 +1494,63 @@ static int od_test_served_pages(const char *datadir)
     resp[n < sizeof(resp) ? n : sizeof(resp) - 1] = 0;
     OD_CHECK("non-matching query reports no results",
              strstr((const char *)resp, "No results") != NULL);
+
+    /* EXPIRED HEARSAY IS NOT SEARCHABLE — the JSON and HTML directory
+     * pages refuse rows nothing has confirmed for ONION_DIR_EXPIRE_SECS;
+     * /search must refuse them too instead of waiting for the refresh
+     * round to delete the row. A fresh control row proves Source 2 itself
+     * still answers, so the absence cannot be mistaken for a broken
+     * projection. */
+    {
+        sqlite3 *wdb = od_open(datadir);
+        if (!wdb) {
+            OD_CHECK("expired-hearsay fixture db opened", false);
+            return failures;
+        }
+        int64_t now = (int64_t)platform_time_wall_time_t();
+        char sql[512];
+        snprintf(sql, sizeof(sql),
+            "INSERT OR REPLACE INTO peer_directory "
+            "(onion_address, port, services, height, last_seen, version,"
+            " self) VALUES ('" HOST_D "',8033,0,7,%lld,'test',0)",
+            (long long)(now - ONION_DIR_EXPIRE_SECS - 60));
+        bool planted = od_exec(wdb, sql);
+        snprintf(sql, sizeof(sql),
+            "INSERT OR REPLACE INTO peer_directory "
+            "(onion_address, port, services, height, last_seen, version,"
+            " self) VALUES ('" HOST_E "',8033,0,9,%lld,'test',0)",
+            (long long)now);
+        planted = od_exec(wdb, sql) && planted;
+        sqlite3_close(wdb);
+        OD_CHECK("expired-hearsay fixture rows planted", planted);
+
+        onion_ratelimit_test_reset();
+        memset(resp, 0, sizeof(resp));
+        n = onion_service_handle_request("GET",
+                                         "/search?q=dddddddddddd", NULL, 0,
+                                         resp, sizeof(resp) - 1);
+        resp[n < sizeof(resp) ? n : sizeof(resp) - 1] = 0;
+        OD_CHECK("expired hearsay is not searchable",
+                 strstr((const char *)resp, HOST_D) == NULL);
+
+        onion_ratelimit_test_reset();
+        memset(resp, 0, sizeof(resp));
+        n = onion_service_handle_request("GET",
+                                         "/search?q=eeeeeeeeeeee", NULL, 0,
+                                         resp, sizeof(resp) - 1);
+        resp[n < sizeof(resp) ? n : sizeof(resp) - 1] = 0;
+        OD_CHECK("a fresh peer_directory row still answers a search",
+                 strstr((const char *)resp, HOST_E) != NULL);
+
+        onion_ratelimit_test_reset();
+        memset(resp, 0, sizeof(resp));
+        n = onion_service_handle_request("GET", "/directory.json", NULL, 0,
+                                         resp, sizeof(resp) - 1);
+        resp[n < sizeof(resp) ? n : sizeof(resp) - 1] = 0;
+        OD_CHECK("every serving surface agrees on the expired row",
+                 strstr((const char *)resp, HOST_D) == NULL &&
+                 strstr((const char *)resp, HOST_E) != NULL);
+    }
 
     /* DIRECTORY JSON — name beside the address, plus the age fields. */
     onion_ratelimit_test_reset();

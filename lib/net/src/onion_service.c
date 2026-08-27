@@ -447,16 +447,24 @@ static size_t serve_search(const char *query, uint8_t *response, size_t max)
     }
 
     /* Source 2 — the peer_directory itself, so a node learned from a peer's
-     * directory (not from a chain scan) is searchable too. */
+     * directory (not from a chain scan) is searchable too. The freshness
+     * rule the JSON and HTML directory pages apply binds this surface as
+     * well: a search must not hand out an address those pages refuse,
+     * without waiting for the refresh round to delete the row. */
     if (db) {
+        int64_t now = (int64_t)platform_time_wall_time_t();
         sqlite3_stmt *s = NULL;
         if (sqlite3_prepare_v2(db,
-            "SELECT onion_address, height FROM peer_directory "
+            "SELECT onion_address, height, last_seen, self FROM peer_directory "
             "ORDER BY self DESC, last_seen DESC LIMIT 256",
             -1, &s, NULL) == SQLITE_OK && s) {
             while (nhits < 64 && AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
                 const char *addr = (const char *)sqlite3_column_text(s, 0);
                 if (!addr) continue;
+                if (onion_directory_freshness(
+                        sqlite3_column_int64(s, 2), now,
+                        sqlite3_column_int(s, 3) != 0) == ONION_DIR_EXPIRED)
+                    continue;
                 name_buf[0] = '\0';
                 (void)onion_directory_name_for_db(db, addr,
                                                   name_buf, sizeof(name_buf));
