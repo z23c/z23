@@ -158,3 +158,28 @@ acceptance.
 
 Wallet policy remained unchanged and no custody operation or canonical
 database surgery was performed.
+
+## Two-phase remote rollout
+
+Remote deployment now stages one frozen release archive to every selected
+host with bounded parallelism and verifies the manifest, daemon, and both
+package workers before any remote service restarts. A staging failure leaves
+every remote process unchanged. After the fleet-wide staging barrier passes,
+activation remains sequential and retains the existing progress-aware
+qualification and per-host rollback behavior. This removes repeated transfer
+handshakes from the serial restart path and discovers capacity, transport, or
+digest failures before availability is affected.
+
+Recorded at `2026-08-27T16:26:55Z` (`2026-08-27T12:26:55-04:00`):
+
+```text
+check-ship-remote-transaction PASS
+ship self-test                PASS
+ship progress self-test       PASS
+bash syntax                   PASS
+git diff --check              PASS
+```
+
+The transaction fixture proves that all stages finish before the first
+activation, any stage failure causes zero remote restarts, activation order is
+stable, and a failed activation does not restart later hosts.

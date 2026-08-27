@@ -556,6 +556,22 @@ for f in activate rollback; do
         fail "$f heredoc does not parse over the wire: $(cat "$SANDBOX/$f.err")"
     fi
 done
+# Staging crosses three separate SSH sessions. Parse every shipped program so
+# a quoting edit cannot make the fleet barrier fail only on real hosts.
+for marker in PREPARE FINALIZE DISCARD; do
+    awk -v begin="REMOTE_STAGE_$marker" '
+        index($0, "<<\047" begin "\047") { copying=1; next }
+        copying && $0 == begin { exit }
+        copying { print }
+    ' "$ROOT/tools/ship.sh" > "$SANDBOX/stage-$marker.sh"
+    if [ ! -s "$SANDBOX/stage-$marker.sh" ]; then
+        fail "stage $marker heredoc did not extract"
+    elif sh -n "$SANDBOX/stage-$marker.sh" 2>"$SANDBOX/stage-$marker.err"; then
+        pass "stage $marker heredoc parses under POSIX sh"
+    else
+        fail "stage $marker heredoc does not parse: $(cat "$SANDBOX/stage-$marker.err")"
+    fi
+done
 # The observer program is exactly the library plus one call, and it must run
 # on a plain /bin/sh — the target box's shell is not ours to choose.
 PROG="$(ship_observer_program "$SHIP_LIB_TEXT" zclassic23 abc '' '' 5)"

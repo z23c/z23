@@ -127,6 +127,40 @@ ship_is_proof_host() {
     [ -n "$PROOF_SERVER" ] && [ "$1" = "$PROOF_SERVER" ]
 }
 
+# Run immutable release staging with bounded concurrency.  The caller enters
+# the activation loop only after this function has reaped every child and all
+# of them succeeded, making the function a fleet-wide no-restart barrier.
+ship_stage_all() {
+    local stage_fn="$1" limit="${ZCL_SHIP_STAGE_JOBS:-4}"
+    shift
+    case "$limit" in 1|2|3|4|5|6|7|8) ;; *) return 2 ;; esac
+    local -a pids=()
+    local host pid failed=0
+    for host in "$@"; do
+        "$stage_fn" "$host" &
+        pids+=("$!")
+        if [ "${#pids[@]}" -ge "$limit" ]; then
+            for pid in "${pids[@]}"; do
+                wait "$pid" || failed=1
+            done
+            pids=()
+        fi
+    done
+    for pid in "${pids[@]}"; do
+        wait "$pid" || failed=1
+    done
+    [ "$failed" -eq 0 ]
+}
+
+ship_remote_rollout() {
+    local stage_fn="$1" activate_fn="$2" host
+    shift 2
+    ship_stage_all "$stage_fn" "$@" || return 20
+    for host in "$@"; do
+        "$activate_fn" "$host" || return 1
+    done
+}
+
 # A release candidate may claim onion support only when the candidate itself
 # reports the production Tor implementation through the native command tree.
 # Keep this check ahead of every deployment function: no byte crosses a host
@@ -164,8 +198,32 @@ if [ "${1:-}" = "--selftest" ]; then
     chmod 755 "$test_tmp/real" "$test_tmp/stub"
     ship_candidate_has_real_tor "$test_tmp/real"
     ! ship_candidate_has_real_tor "$test_tmp/stub"
+    selftest_stage() {
+        printf 'stage-start %s\n' "$1" >> "$test_tmp/order"
+        case "$1" in bad) return 1 ;; esac
+        printf 'stage-ok %s\n' "$1" >> "$test_tmp/order"
+    }
+    selftest_activate() {
+        printf 'activate %s\n' "$1" >> "$test_tmp/order"
+    }
+    : > "$test_tmp/order"
+    ZCL_SHIP_STAGE_JOBS=2 ship_remote_rollout \
+        selftest_stage selftest_activate node1 node2 node3 node4
+    [ "$(grep -c '^stage-ok ' "$test_tmp/order")" -eq 4 ]
+    first_activate="$(grep -n '^activate ' "$test_tmp/order" | sed -n '1s/:.*//p')"
+    last_stage="$(grep -n '^stage-ok ' "$test_tmp/order" | sed -n '$s/:.*//p')"
+    [ "$first_activate" -gt "$last_stage" ]
+    [ "$(sed -n 's/^activate //p' "$test_tmp/order" | tr '\n' ' ')" = \
+        "node1 node2 node3 node4 " ]
+    : > "$test_tmp/order"
+    stage_rc=0
+    ZCL_SHIP_STAGE_JOBS=2 ship_remote_rollout \
+        selftest_stage selftest_activate node1 bad node3 || stage_rc=$?
+    [ "$stage_rc" -eq 20 ]
+    ! grep -q '^activate ' "$test_tmp/order"
+    ! ZCL_SHIP_STAGE_JOBS=0 ship_stage_all selftest_stage node1
     find "$test_tmp" -depth -delete; trap - EXIT HUP INT TERM
-    printf 'ship: selftest PASS (four-host order; validation; GLIBC inequality; explicit proof host; real-Tor gate)\n'
+    printf 'ship: selftest PASS (four-host order; bounded stage barrier; validation; GLIBC inequality; explicit proof host; real-Tor gate)\n'
     exit 0
 fi
 
@@ -407,6 +465,18 @@ else
     zcl_is_sha256 "$RELEASE_ID" || die "could not hash the release manifest"
     say "release    manifest ${RELEASE_ID:0:16}…"
 
+    # One named archive tree feeds every remote.  It avoids four separate scp
+    # handshakes per host and ensures the bytes staged in parallel have the
+    # same names covered by the release manifest.
+    STAGE_BUNDLE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/zclassic23.ship.bundle.XXXXXX")"
+    install -m 755 "$CANDIDATE" "$STAGE_BUNDLE_DIR/z23"
+    for i in "${!WORKER_NAMES[@]}"; do
+        install -m 755 "${WORKER_FILES[$i]}" \
+            "$STAGE_BUNDLE_DIR/${WORKER_NAMES[$i]}"
+    done
+    install -m 644 "$RELEASE_MANIFEST" "$STAGE_BUNDLE_DIR/MANIFEST.sha256"
+    trap 'rm -f "$CANDIDATE" "$RELEASE_MANIFEST" "${WORKER_FILES[@]}"; [ -z "${STAGE_BUNDLE_DIR:-}" ] || find "$STAGE_BUNDLE_DIR" -depth -delete' EXIT HUP INT TERM
+
     CAND_MAX_GLIBC="$(objdump -T "$CANDIDATE" 2>/dev/null |
         grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' | sort -V | tail -1 || true)"
     case "$CAND_MAX_GLIBC" in GLIBC_[0-9]*.[0-9]*) ;; *) die "candidate has no parseable GLIBC requirement" ;; esac
@@ -488,6 +558,116 @@ deploy_local() {
     return "$rc"
 }
 
+# Copy and verify an immutable release without changing systemd state or the
+# running process.  Every remote passes this function before deploy_remote is
+# called for any remote, so transfer, capacity, or digest failures have no
+# fleet availability consequence.
+stage_remote() {
+    local host="$1" remote_home release_root incoming lock state rc=0
+    remote_home="$(ssh "${SSH_OPTS[@]}" "$host" 'printf "%s\n" "$HOME"')" || {
+        say "$host: could not resolve the remote home for staging"
+        return 1
+    }
+    case "$remote_home" in
+        /*) ;;
+        *) say "$host: unsafe remote home '$remote_home'"; return 1 ;;
+    esac
+    case "$remote_home" in
+        *[!A-Za-z0-9_./-]*|*..*)
+            say "$host: unsafe remote home '$remote_home'"
+            return 1
+            ;;
+    esac
+    release_root="$remote_home/.local/lib/z23/releases/$RELEASE_ID"
+    incoming="${release_root}.incoming.stage.${RELEASE_ID:0:16}.$$"
+    lock="${release_root}.stage.lock"
+
+    state="$(ssh "${SSH_OPTS[@]}" "$host" bash -s -- \
+        "$release_root" "$incoming" "$lock" "$RELEASE_ID" \
+        "$ARTIFACT_SHA" "${WORKER_SHAS[0]}" "${WORKER_SHAS[1]}" <<'REMOTE_STAGE_PREPARE'
+set -eu
+root="$1"; incoming="$2"; lock="$3"; manifest_sha="$4"
+daemon_sha="$5"; worker_v_sha="$6"; worker_d_sha="$7"
+install -d -m 700 "$(dirname "$root")"
+mkdir "$lock" || { echo "remote: release staging is already active: $lock" >&2; exit 1; }
+if [ -e "$root" ]; then
+    [ -d "$root" ] &&
+    [ "$(sha256sum < "$root/MANIFEST.sha256" | awk '{print $1}')" = "$manifest_sha" ] &&
+    [ "$(sha256sum < "$root/z23" | awk '{print $1}')" = "$daemon_sha" ] &&
+    [ "$(sha256sum < "$root/zclassic23-package-verify" | awk '{print $1}')" = "$worker_v_sha" ] &&
+    [ "$(sha256sum < "$root/zclassic23-package-verify-dev" | awk '{print $1}')" = "$worker_d_sha" ] || {
+        rmdir "$lock"
+        echo "remote: immutable release root content mismatch: $root" >&2
+        exit 1
+    }
+    rmdir "$lock"
+    echo exact
+    exit 0
+fi
+[ ! -e "$incoming" ] || {
+    rmdir "$lock"
+    echo "remote: incoming stage already exists: $incoming" >&2
+    exit 1
+}
+install -d -m 700 "$incoming"
+echo missing
+REMOTE_STAGE_PREPARE
+    )" || {
+        say "$host: immutable stage preflight failed"
+        return 1
+    }
+    if [ "$state" = exact ]; then
+        say "$host: immutable release already staged and exact"
+        return 0
+    fi
+    if [ "$state" != missing ]; then
+        say "$host: invalid remote stage state '$state'"
+        return 1
+    fi
+
+    if ! tar -C "$STAGE_BUNDLE_DIR" -cf - \
+        z23 "${WORKER_NAMES[0]}" "${WORKER_NAMES[1]}" MANIFEST.sha256 |
+        ssh "${SSH_OPTS[@]}" "$host" tar -C "$incoming" -xf -; then
+        rc=1
+    elif ! ssh "${SSH_OPTS[@]}" "$host" bash -s -- \
+        "$release_root" "$incoming" "$lock" "$RELEASE_ID" \
+        "$ARTIFACT_SHA" "${WORKER_SHAS[0]}" "${WORKER_SHAS[1]}" <<'REMOTE_STAGE_FINALIZE'
+set -eu
+root="$1"; incoming="$2"; lock="$3"; manifest_sha="$4"
+daemon_sha="$5"; worker_v_sha="$6"; worker_d_sha="$7"
+trap 'rmdir "$lock" 2>/dev/null || true' EXIT HUP INT TERM
+[ -d "$lock" ] && [ -d "$incoming" ] && [ ! -e "$root" ] || {
+    echo "remote: immutable stage ownership changed" >&2; exit 1;
+}
+[ "$(sha256sum < "$incoming/MANIFEST.sha256" | awk '{print $1}')" = "$manifest_sha" ] &&
+[ "$(sha256sum < "$incoming/z23" | awk '{print $1}')" = "$daemon_sha" ] &&
+[ "$(sha256sum < "$incoming/zclassic23-package-verify" | awk '{print $1}')" = "$worker_v_sha" ] &&
+[ "$(sha256sum < "$incoming/zclassic23-package-verify-dev" | awk '{print $1}')" = "$worker_d_sha" ] || {
+    echo "remote: staged release bytes differ from manifest" >&2; exit 1;
+}
+chmod 555 "$incoming/z23" "$incoming/zclassic23-package-verify" \
+    "$incoming/zclassic23-package-verify-dev"
+chmod 444 "$incoming/MANIFEST.sha256"
+chmod 555 "$incoming"
+mv "$incoming" "$root"
+REMOTE_STAGE_FINALIZE
+    then
+        rc=1
+    fi
+    if [ "$rc" -ne 0 ]; then
+        ssh "${SSH_OPTS[@]}" "$host" bash -s -- "$incoming" "$lock" <<'REMOTE_STAGE_DISCARD' || true
+set -eu
+incoming="$1"; lock="$2"
+case "$incoming" in "$HOME/.local/lib/z23/releases/"*.incoming.stage.*) ;; *) exit 2 ;; esac
+find "$incoming" -depth -delete 2>/dev/null || true
+rmdir "$lock" 2>/dev/null || true
+REMOTE_STAGE_DISCARD
+        say "$host: release staging failed"
+        return 1
+    fi
+    say "$host: release staged and SHA-256 verified"
+}
+
 deploy_remote() {
     local host="$1" svc_bin prev_sha prior_commit run_id release_root node_incoming release_state
     step "Deploy → $host"
@@ -555,27 +735,9 @@ echo exact
 REMOTE_RELEASE_CHECK
     )" || die "$host refused an existing immutable release root"
 
-    if [ "$release_state" = missing ]; then
-        ssh "${SSH_OPTS[@]}" "$host" bash -s -- "$node_incoming" <<'REMOTE_RELEASE_MKDIR'
-set -eu
-incoming="$1"
-[ ! -e "$incoming" ] || { echo "remote: incoming release already exists: $incoming" >&2; exit 1; }
-install -d -m 700 "$incoming"
-REMOTE_RELEASE_MKDIR
-        scp -q "${SSH_OPTS[@]}" "$CANDIDATE" "$host:$node_incoming/z23" ||
-            die "could not copy the candidate to $host"
-        local wi
-        for wi in "${!WORKER_NAMES[@]}"; do
-            scp -q "${SSH_OPTS[@]}" "${WORKER_FILES[$wi]}" \
-                "$host:$node_incoming/${WORKER_NAMES[$wi]}" ||
-                die "could not copy ${WORKER_NAMES[$wi]} to $host"
-        done
-        scp -q "${SSH_OPTS[@]}" "$RELEASE_MANIFEST" "$host:$node_incoming/MANIFEST.sha256" ||
-            die "could not copy the release manifest to $host"
-    else
-        [ "$release_state" = exact ] || die "$host returned invalid release state '$release_state'"
-        say "remote     immutable release already present and exact"
-    fi
+    [ "$release_state" = exact ] ||
+        die "$host lost its verified staged release before activation; no bytes were installed"
+    say "remote     immutable staged release remains exact"
 
     local activate_rc=0
     { printf '%s\n' "$SHIP_LIB_TEXT"; cat <<'REMOTE_SCRIPT'
@@ -960,9 +1122,15 @@ for target in $TARGETS; do
             esac
             ;;
         remote)
-            for host in "${DEPLOY_HOSTS[@]}"; do
-                deploy_remote "$host"
-            done
+            step "Stage remote fleet"
+            rollout_rc=0
+            ship_remote_rollout stage_remote deploy_remote \
+                "${DEPLOY_HOSTS[@]}" || rollout_rc=$?
+            case "$rollout_rc" in
+                0) ;;
+                20) die "remote staging failed; zero remote services were restarted" ;;
+                *) die "remote activation failed" ;;
+            esac
             ;;
     esac
 done
