@@ -78,3 +78,7 @@ test_dynhost_reassembly_cap  OK
 test_tor                     groups_failed=0 self_skips=0
 test_torn_index_blocks_tip   groups_failed=0 self_skips=0
 ```
+
+The first complete lint run then rejected one runbook phrase that formatted a
+system header as an in-repository path. The wording now distinguishes that
+external header from tracked source paths.
