@@ -169,11 +169,13 @@ Linux virtual machine. On 2026-08-26, `make z23` completed on an arm64
 executable passed its dependency audit with Apple system libraries and
 frameworks as its only dynamic dependencies. The registered crypto group
 passed 3/3 groups, including secp256k1, Ed25519, Equihash, BLS12-381, and hash
-coverage. Native RNG, thread QoS, binary A/B promotion, sandbox capability,
+coverage. Native RNG, thread QoS, sandbox capability,
 backtrace capability, process introspection, and the 46-case SQLite group also
 passed their platform contracts. A fresh isolated test-lane datadir reached
 `phase=serving`, `stage=ready`, height 0 with RPC bound, then completed a
 graceful shutdown. This is startup evidence, not chain-sync acceptance.
+Descriptor-bound A/B execution is unavailable on macOS and fails closed;
+pathname reconstruction is not accepted as a substitute for `fexecve`.
 The optimized ROM-seed background-scan regression also passed after bounding
 its worker-stack use; the artifact snapshot uses checked allocation instead of
 a roughly 1 MiB automatic array.

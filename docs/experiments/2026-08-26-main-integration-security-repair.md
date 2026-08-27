@@ -62,6 +62,9 @@ leave stale or internally inconsistent state.
   ELF singleton tags, validates dynamic pointers against section metadata,
   and checks every undefined symbol against the resident import contract
   before `dlopen`. Every module producer omits runtime startup files.
+- macOS descriptor-bound binary launch fails closed with `ENOTSUP`. The
+  platform has no `fexecve`; reconstructing a pathname with `F_GETPATH` would
+  reopen a replacement race between identity validation and execution.
 
 ## Evidence
 

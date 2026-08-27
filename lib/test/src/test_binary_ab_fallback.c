@@ -138,6 +138,11 @@ static void ab_report_elapsed(const char *what, int64_t elapsed_ns)
 
 static bool ab_fexecve_true(int fd)
 {
+#if defined(__APPLE__)
+    char *const args[] = { (char *)AB_TRUE_PATH, NULL };
+    errno = 0;
+    return platform_execve_fd(fd, args, environ) == -1 && errno == ENOTSUP;
+#else
     pid_t child = fork();
     if (child < 0)
         return false;
@@ -149,6 +154,7 @@ static bool ab_fexecve_true(int fd)
     int status = 0;
     return waitpid(child, &status, 0) == child && WIFEXITED(status) &&
            WEXITSTATUS(status) == 0;
+#endif
 }
 
 static bool ab_run_nodectl(const char *slots, const char *threshold,
@@ -565,7 +571,7 @@ int test_binary_ab_fallback(void)
         bool ok = os_binary_slots_prepare_launch(dir, AB_TRUE_PATH, 3, &launch);
         AB_CHECK("prepare real native launch succeeds",
                  ok && !launch.fallback_active && launch.executable_fd >= 0);
-        AB_CHECK("descriptor-backed O_CLOEXEC launch succeeds",
+        AB_CHECK("descriptor-bound launch succeeds or fails closed",
                  ok && ab_fexecve_true(launch.executable_fd));
         os_binary_slots_close_launch(&launch);
     }
