@@ -1,4 +1,5 @@
-/* Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. */
+/* Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
+ * Purpose: Render stable platform paths for open descriptors and their children. */
 #ifndef ZCL_PLATFORM_FD_PATH_H
 #define ZCL_PLATFORM_FD_PATH_H
 

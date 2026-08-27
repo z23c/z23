@@ -1,4 +1,5 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Purpose: Normalize sequential-read and cache-release advice across platforms. */
 
 #ifndef ZCL_PLATFORM_FILE_ADVICE_H
 #define ZCL_PLATFORM_FILE_ADVICE_H

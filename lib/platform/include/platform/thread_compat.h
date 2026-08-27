@@ -1,4 +1,5 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Purpose: Normalize deadline-aware thread joining across supported platforms. */
 
 #ifndef ZCL_PLATFORM_THREAD_COMPAT_H
 #define ZCL_PLATFORM_THREAD_COMPAT_H

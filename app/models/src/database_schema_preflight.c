@@ -10,6 +10,7 @@
  */
 
 #include "models/database_internal.h"
+#include "platform/fd_path.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -97,14 +98,12 @@ static bool probe_sidecars(const char *path, struct preflight_sidecars *out)
  * The caller only selects it when no non-empty WAL and no SHM exists. */
 static int open_quiet_wal_immutable(int fd, sqlite3 **db_out)
 {
+    char fd_path[64];
     char uri[NODE_DB_PREFLIGHT_URI_MAX];
-#if defined(__APPLE__)
-    const char *fd_root = "/dev/fd";
-#else
-    const char *fd_root = "/proc/self/fd";
-#endif
-    int n = snprintf(uri, sizeof(uri),
-                     "file:%s/%d?mode=ro&immutable=1", fd_root, fd);
+    if (!platform_fd_path(fd_path, sizeof(fd_path), fd, NULL))
+        return SQLITE_CANTOPEN;
+    int n = snprintf(uri, sizeof(uri), "file:%s?mode=ro&immutable=1",
+                     fd_path);
     if (n <= 0 || (size_t)n >= sizeof(uri))
         return SQLITE_CANTOPEN;
     return sqlite3_open_v2(uri, db_out,

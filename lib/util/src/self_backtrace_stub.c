@@ -1,4 +1,5 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Purpose: Report self-backtrace unavailability on unsupported platforms. */
 
 #include "util/self_backtrace.h"
 

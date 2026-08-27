@@ -1,4 +1,5 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Purpose: Provide a portable no-replace rename operation for directory entries. */
 
 #ifndef ZCL_PLATFORM_RENAME_COMPAT_H
 #define ZCL_PLATFORM_RENAME_COMPAT_H

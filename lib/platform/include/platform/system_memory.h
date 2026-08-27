@@ -1,4 +1,5 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Purpose: Report total physical system memory through a portable bounded API. */
 
 #ifndef ZCL_PLATFORM_SYSTEM_MEMORY_H
 #define ZCL_PLATFORM_SYSTEM_MEMORY_H

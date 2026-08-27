@@ -22,6 +22,7 @@
  * declarations this file promotes across the split. */
 
 #include "platform/time_compat.h"
+#include "base/serialize_le.h"
 #include "msgprocessor_internal.h"
 #include "msgprocessor_snapshot_internal.h"
 
@@ -148,10 +149,8 @@ static void snap_pow_challenge(uint8_t request_kind, uint32_t request_index,
     uint8_t index_le[4];
     uint8_t bucket_le[8];
     uint64_t bucket_bits = (uint64_t)time_bucket;
-    for (size_t i = 0; i < sizeof(index_le); i++)
-        index_le[i] = (uint8_t)(request_index >> (8u * i));
-    for (size_t i = 0; i < sizeof(bucket_le); i++)
-        bucket_le[i] = (uint8_t)(bucket_bits >> (8u * i));
+    zcl_write_u32_le(index_le, request_index);
+    zcl_write_u64_le(bucket_le, bucket_bits);
     struct sha3_256_ctx ctx;
     sha3_256_init(&ctx);
     sha3_256_write(&ctx, snap_pow_domain, sizeof(snap_pow_domain));

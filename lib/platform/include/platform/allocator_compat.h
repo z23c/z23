@@ -1,4 +1,5 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Purpose: Provide portable allocator tuning and free-page release helpers. */
 
 #ifndef ZCL_PLATFORM_ALLOCATOR_COMPAT_H
 #define ZCL_PLATFORM_ALLOCATOR_COMPAT_H

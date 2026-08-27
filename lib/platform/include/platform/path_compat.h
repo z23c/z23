@@ -1,4 +1,5 @@
-/* Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. */
+/* Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
+ * Purpose: Canonicalize platform path spellings for process-local identity checks. */
 #ifndef ZCL_PLATFORM_PATH_COMPAT_H
 #define ZCL_PLATFORM_PATH_COMPAT_H
 
