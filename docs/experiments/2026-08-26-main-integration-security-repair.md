@@ -159,6 +159,25 @@ after restart-equivalent collection. Its service test retained a row that
 expired inside the 300-second debounce interval, then removed it exactly at
 the boundary and observed the dirty flag, generation, and persistence timer.
 
+At `2026-08-27T04:44:18Z`, integration review refused three experimental
+surfaces from the release: hot-swap shelf retirement could unload the module
+named by the active registry under concurrent publication; Merkle inclusion
+proofs accepted ambiguous overlong paths and malformed direct-verifier child
+arenas; sectional sealing did not yet match the code-index path and stable-file
+rules. Their commits remain visible in history, but the release tree restores
+the prior reviewed implementations and does not register those features.
+Deleted-path impact rules keep their surviving security groups selected.
+
+The retained DHT bridge now compares provider-record expiry against Unix wall
+time, not monotonic uptime. An already-expired route remained unadvertised in
+the production application boundary test. The combined uncached acceptance
+ran `zcode_dht_service`, `zcode_swarm_dht`, `zcode_swarm`, `code_merkle`,
+`hotswap_module_v2`, `hotswap_loader`, and `dev_platform`: 7/7 passed with
+zero skips. The ship transaction, 972-group documentation count, 70-file
+consensus seal, and hot-swap root mirror also passed. Slow local deployment
+exit 3 now reports only `UNVERIFIED`; it preserves matching worker bytes but
+does not claim progress that was not observed.
+
 ## Remaining acceptance
 
 The repository's full lint gate set passed; `make lint` prints what it ran,
