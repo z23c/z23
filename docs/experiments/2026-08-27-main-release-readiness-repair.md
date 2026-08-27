@@ -97,3 +97,14 @@ selection remains OS-feature-gated and compared with the portable reference
 before activation. The x86 host cannot prove ARM instruction execution, so a
 GCC AArch64 build and live parity run remain required release evidence for an
 AArch64 artifact.
+
+## Worker-stack repair integration
+
+A later mainline change moved five 256-entry build-action scan buffers from
+worker stacks to checked heap storage. Each buffer is about 516 KiB, which can
+exhaust a default macOS worker stack. Integration retained that repair while
+removing an unnecessary receipt query and reducing the source to 799 lines.
+The SIGILL crash-handler registration was integrated without growing its
+already-baselined translation unit. `make check-file-size-ceiling` then passed
+with the enforced application ceiling clean and the library drift count at
+its existing 22/22 bound.
