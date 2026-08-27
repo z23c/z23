@@ -25,6 +25,7 @@ int test_api(void)
     failures += api_controller_supervision_focused_tests();
     failures += api_http_contract_focused_tests();
     failures += api_znam_routes_focused_tests();
+    failures += api_msg_routes_focused_tests();
     failures += api_rest_index_focused_tests();
     failures += api_catalog_focused_tests();
     failures += api_transaction_type_focused_tests();

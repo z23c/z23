@@ -507,6 +507,32 @@ int test_protocols(void)
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
+    /* ── ZMSG: store unread count ─────────────────────────── */
+
+    printf("zmsg_store unread count tracks the unread filter... ");
+    {
+        /* The store is process-global, so measure deltas around fresh
+         * probes instead of assuming a clean baseline. */
+        int before_all = zmsg_store_count();
+        int before_unread = zmsg_store_count_unread();
+
+        struct zmsg_message m;
+        memset(&m, 0, sizeof(m));
+        m.timestamp = 100002;
+        snprintf(m.sender, sizeof(m.sender), "counter");
+        snprintf(m.body, sizeof(m.body), "unread-count probe");
+        zmsg_compute_id(&m, m.msg_id);
+        bool ok = zmsg_store_add(&m);
+        ok = ok && zmsg_store_count() == before_all + 1 &&
+             zmsg_store_count_unread() == before_unread + 1;
+
+        zmsg_store_mark_read(m.msg_id);
+        ok = ok && zmsg_store_count() == before_all + 1 &&
+             zmsg_store_count_unread() == before_unread;
+
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
+
     /* ── ZMSG: on-chain memo codec (v1) ───────────────────── */
 
     printf("zmsg_memo encode/decode round-trip... ");

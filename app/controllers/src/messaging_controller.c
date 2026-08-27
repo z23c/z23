@@ -313,15 +313,25 @@ static bool rpc_msg_send(const struct json_value *params, bool help,
 
 /* ── msg_inbox ──────────────────────────────────────────────────── */
 
+/* The inbox serves a bounded newest-first window. Before the object result
+ * the response was a bare array, so an inbox that outgrew the window was
+ * reported as if it were the whole inbox. */
+#define MSG_INBOX_WINDOW 50
+
 static bool rpc_msg_inbox(const struct json_value *params, bool help,
                           struct json_value *result)
 {
     if (help) {
         json_set_str(result,
             "msg_inbox [unread_only=false]\n"
-            "\nList messages in the inbox.\n"
+            "\nList messages in the inbox, newest first.\n"
             "\nArguments:\n"
-            "1. unread_only (bool, optional) Only show unread messages\n");
+            "1. unread_only (bool, optional) Only show unread messages\n"
+            "\nResult: { messages: [...], shown: n, total: m }\n"
+            "\nmessages is a bounded newest-first window; shown is how "
+            "many it returned and total is the inbox's full size under "
+            "the same filter. shown < total means the window stopped "
+            "short. total is omitted when the store cannot be counted.\n");
         return true;
     }
 
@@ -331,23 +341,43 @@ static bool rpc_msg_inbox(const struct json_value *params, bool help,
         if (arg0) unread_only = json_get_int(arg0) != 0;
     }
 
-    json_set_array(result);
-
-    struct zmsg_message msgs[50];
+    struct zmsg_message msgs[MSG_INBOX_WINDOW];
     int count = 0;
+    bool served_db = false;
 
-    /* Try SQLite first, fall back to in-memory store */
-    if (g_msg_ndb)
-        count = db_zmsg_list(g_msg_ndb, msgs, 50, unread_only);
+    /* Try SQLite first, fall back to in-memory store (unchanged selection:
+     * an empty db still lets the store answer). */
+    if (g_msg_ndb) {
+        count = db_zmsg_list(g_msg_ndb, msgs, MSG_INBOX_WINDOW, unread_only);
+        served_db = count > 0;
+    }
     if (count == 0)
-        count = zmsg_store_list(msgs, 50, unread_only);
+        count = zmsg_store_list(msgs, MSG_INBOX_WINDOW, unread_only);
 
+    /* Total comes from the store that served the rows, so shown and total
+     * can never describe two different stores. A count failure only drops
+     * the field; it never blocks the listing. */
+    int total = -1;
+    if (served_db)
+        total = db_zmsg_count(g_msg_ndb, unread_only);
+    else
+        total = unread_only ? zmsg_store_count_unread()
+                            : zmsg_store_count();
+
+    json_set_object(result);
+    struct json_value arr = {0};
+    json_set_array(&arr);
     for (int i = 0; i < count; i++) {
         struct json_value e = {0};
         msg_to_json(&msgs[i], &e);
-        json_push_back(result, &e);
+        json_push_back(&arr, &e);
         json_free(&e);
     }
+    json_push_kv(result, "messages", &arr);
+    json_free(&arr);
+    json_push_kv_int(result, "shown", count);
+    if (total >= 0)
+        json_push_kv_int(result, "total", total);
 
     return true;
 }

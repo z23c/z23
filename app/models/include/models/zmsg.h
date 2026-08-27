@@ -33,6 +33,15 @@ bool db_zmsg_validate(const struct zmsg_message *msg,
 bool db_zmsg_save(struct node_db *ndb, const struct zmsg_message *msg);
 int db_zmsg_list(struct node_db *ndb, struct zmsg_message *out,
                  size_t max, bool unread_only);
+/* Uncapped total behind the db_zmsg_list window under the same unread
+ * filter. -1 only when the store is unreadable. */
+int db_zmsg_count(struct node_db *ndb, bool unread_only);
+
+#ifdef ZCL_TESTING
+/* Deterministic store-step fault seam for the uncapped count helper.
+ * NULL restores the production readonly step. */
+void db_zmsg_test_set_count_step(int (*step_fn)(void *stmt));
+#endif
 bool db_zmsg_mark_read(struct node_db *ndb, const uint8_t msg_id[32]);
 
 /* Ingest a decrypted Sapling note memo as an inbound on-chain ZMSG.

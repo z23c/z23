@@ -155,6 +155,10 @@ bool zmsg_store_mark_read(const uint8_t msg_id[32]);
 /* Get message count. */
 int zmsg_store_count(void);
 
+/* Count only unread messages — the same predicate zmsg_store_list applies
+ * with unread_only=true, so an inbox window can be measured against it. */
+int zmsg_store_count_unread(void);
+
 /* ── SQLite Persistence ─────────────────────────────────────────── */
 
 struct node_db;
@@ -162,6 +166,10 @@ struct node_db;
 bool db_zmsg_save(struct node_db *ndb, const struct zmsg_message *msg);
 int db_zmsg_list(struct node_db *ndb, struct zmsg_message *out,
                  size_t max, bool unread_only);
+/* Uncapped total behind the db_zmsg_list window under the same unread
+ * filter. -1 only when the store is unreadable. Documented alongside the
+ * model in models/zmsg.h. */
+int db_zmsg_count(struct node_db *ndb, bool unread_only);
 bool db_zmsg_mark_read(struct node_db *ndb, const uint8_t msg_id[32]);
 
 #endif

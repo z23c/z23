@@ -627,6 +627,42 @@ static char *peer_add_rpc_mock(const char *method, const char *params_json)
     return strdup(g_peer_add_reply ? g_peer_add_reply : "null");
 }
 
+/* msg_inbox serves the index object ({messages, shown, total}) directly now;
+ * the wrapper must hand it through unchanged — same rows, same counts. */
+static int test_messaging_inbox_passes_index_object_through(void)
+{
+    int failures = 0;
+    TEST("native messaging inbox passes the index object through") {
+        g_bridge_rpc_method_fixture = "msg_inbox";
+        g_bridge_rpc_error_fixture =
+            "{\"messages\":[{\"msg_id\":\"abc\",\"read\":false}],"
+            "\"shown\":1,\"total\":7}";
+        node_rpc_client_set_test_hook(bridge_rpc_error_mock);
+
+        struct zcl_native_body_err err = {0};
+        char *body = zcl_native_msg_inbox_body(NULL, &err);
+        struct json_value doc;
+        json_init(&doc);
+        bool parsed = body && json_read(&doc, body, strlen(body));
+        const struct json_value *messages =
+            parsed ? json_get(&doc, "messages") : NULL;
+        bool ok = parsed && doc.type == JSON_OBJ &&
+                  json_get_int(json_get(&doc, "shown")) == 1 &&
+                  json_get_int(json_get(&doc, "total")) == 7 &&
+                  messages && messages->type == JSON_ARR &&
+                  json_size(messages) == 1;
+
+        json_free(&doc);
+        free(body);
+        node_rpc_client_set_test_hook(NULL);
+        g_bridge_rpc_method_fixture = NULL;
+        g_bridge_rpc_error_fixture = NULL;
+        ASSERT(ok);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_network_peer_add_binding(void)
 {
     int failures = 0;
@@ -4025,6 +4061,7 @@ int test_command_registry_catalog(void)
     failures += test_bootstatus_projects_recovery_and_blocker();
     failures += test_bridge_replacement_rejects_non_bridge_leaf();
     failures += test_messaging_inbox_wraps_rpc_array();
+    failures += test_messaging_inbox_passes_index_object_through();
     failures += test_network_peer_add_binding();
     failures += test_bridge_rpc_errors_fail_closed();
     failures += test_raw_transaction_string_is_typed();

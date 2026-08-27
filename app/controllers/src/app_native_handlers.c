@@ -119,9 +119,11 @@ char *zcl_native_msg_inbox_body(const struct json_value *args,
     char *raw = app_native_rpc_noargs("msg_inbox", err);
     if (!raw)
         return NULL;
-    /* msg_inbox is an RPC/REST array, while native handler bodies are
-     * objects. Preserve the message rows and make the native index shape
-     * explicit instead of letting the bridge reject every valid inbox. */
+    /* msg_inbox now returns the index object ({messages, shown, total})
+     * directly, which passes through below unchanged. The array wrap is
+     * kept as tolerance for a peer still serving the older bare-array
+     * result: preserve the rows and make the native index shape explicit
+     * instead of letting the bridge reject every valid inbox. */
     struct json_value doc;
     json_init(&doc);
     if (!json_read(&doc, raw, strlen(raw)) || doc.type != JSON_ARR) {

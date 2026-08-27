@@ -166,6 +166,7 @@ int api_query_filters_focused_tests(void);
 int api_controller_supervision_focused_tests(void);
 int api_http_contract_focused_tests(void);
 int api_znam_routes_focused_tests(void);
+int api_msg_routes_focused_tests(void);
 int api_rest_index_focused_tests(void);
 int api_catalog_focused_tests(void);
 int api_transaction_type_focused_tests(void);

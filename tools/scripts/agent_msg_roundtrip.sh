@@ -232,13 +232,13 @@ while :; do
         \{*) u=$(printf '%s' "$inbox" | "$ZCL_JSONQ" unwrap 2>/dev/null) \
             && inbox=$u ;;
     esac
-    count=$(printf '%s' "$inbox" | "$ZCL_JSONQ" count . 2>/dev/null || true)
+    count=$(printf '%s' "$inbox" | "$ZCL_JSONQ" count .messages 2>/dev/null || true)
     i=0
     while [ -n "$count" ] && [ "$i" -lt "$count" ]; do
-        dir=$(printf '%s' "$inbox" | jqget "[$i].direction")
-        body=$(printf '%s' "$inbox" | jqget "[$i].body")
+        dir=$(printf '%s' "$inbox" | jqget ".messages[$i].direction")
+        body=$(printf '%s' "$inbox" | jqget ".messages[$i].body")
         if [ "$dir" = "inbound" ] && [ "$body" = "$MESSAGE" ]; then
-            ECHO_ID=$(printf '%s' "$inbox" | jqget "[$i].msg_id")
+            ECHO_ID=$(printf '%s' "$inbox" | jqget ".messages[$i].msg_id")
             break
         fi
         i=$((i + 1))
@@ -270,13 +270,13 @@ case "$inbox" in
     \{*) u=$(printf '%s' "$inbox" | "$ZCL_JSONQ" unwrap 2>/dev/null) \
         && inbox=$u ;;
 esac
-count=$(printf '%s' "$inbox" | "$ZCL_JSONQ" count . 2>/dev/null || true)
+count=$(printf '%s' "$inbox" | "$ZCL_JSONQ" count .messages 2>/dev/null || true)
 i=0
 matched=0
 while [ -n "$count" ] && [ "$i" -lt "$count" ]; do
-    id=$(printf '%s' "$inbox" | jqget "[$i].msg_id")
+    id=$(printf '%s' "$inbox" | jqget ".messages[$i].msg_id")
     if [ "$id" = "$ECHO_ID" ]; then
-        body=$(printf '%s' "$inbox" | jqget "[$i].body")
+        body=$(printf '%s' "$inbox" | jqget ".messages[$i].body")
         [ "$body" = "$MESSAGE" ] && matched=1
         break
     fi

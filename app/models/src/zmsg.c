@@ -17,10 +17,24 @@
 #include "platform/time_compat.h"
 
 #include <sqlite3.h>
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 
 DEFINE_MODEL_CALLBACKS(zmsg)
+
+#ifdef ZCL_TESTING
+static int (*g_zmsg_count_step_fn)(void *) = NULL;
+void db_zmsg_test_set_count_step(int (*step_fn)(void *stmt))
+{
+    g_zmsg_count_step_fn = step_fn;
+}
+#define ZMSG_COUNT_STEP(stmt) \
+    (g_zmsg_count_step_fn ? g_zmsg_count_step_fn(stmt) \
+                          : AR_STEP_ROW_READONLY(stmt))
+#else
+#define ZMSG_COUNT_STEP(stmt) AR_STEP_ROW_READONLY(stmt)
+#endif
 
 static bool read_zmsg_blob(sqlite3_stmt *s, int col, void *dest,
                            int expected_len, const char *column)
@@ -150,6 +164,27 @@ int db_zmsg_list(struct node_db *ndb, struct zmsg_message *out,
     AR_QUERY_LIST(ndb, s, sql, out, max,
         AR_BIND_INT(s, 1, (int)max),
         if (!row_to_zmsg(s, &out[count])) continue);
+}
+
+int db_zmsg_count(struct node_db *ndb, bool unread_only)
+{
+    if (!ndb || !ndb->open)
+        LOG_RETURN(-1, "zmsg", "db_zmsg_count: db not open");
+
+    const char *sql = unread_only
+        ? "SELECT count(*) FROM zmsg_messages WHERE read=0"
+        : "SELECT count(*) FROM zmsg_messages";
+
+    sqlite3_stmt *s = NULL;
+    int64_t count = 0;
+    AR_PREPARE_RET(ndb, s, sql, -1);
+    if (ZMSG_COUNT_STEP(s) != SQLITE_ROW) {
+        AR_FINALIZE(s);
+        LOG_RETURN(-1, "zmsg", "db_zmsg_count: count step failed");
+    }
+    count = sqlite3_column_int64(s, 0);
+    AR_FINALIZE(s);
+    return count > INT_MAX ? INT_MAX : (int)count;
 }
 
 bool db_zmsg_mark_read(struct node_db *ndb, const uint8_t msg_id[32])

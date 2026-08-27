@@ -395,6 +395,7 @@ AGENT_IMPACT_RULE("app/services/src/yardsale_wallet_service.c|app/services/src/y
  * znam/slp/overlay rules above — a name controller does not decode scripts. */
 AGENT_IMPACT_RULE("lib/znam/src/znam.c|lib/zslp/src/slp.c|lib/overlay/src/overlay_codec.c|lib/overlay/include/overlay/overlay_codec.h|lib/script/include/script/op_return_push.h|app/controllers/src/blog_controller.c|lib/test/src/test_overlay_parse_parity.c", "overlay_parse_parity make_lint_gates")
 AGENT_IMPACT_RULE("lib/net/src/zmsg.c|lib/net/include/net/zmsg.h|app/models/src/zmsg.c|app/models/include/models/zmsg.h|app/controllers/src/messaging_controller.c|app/jobs/src/tip_finalize_post_step.c|lib/test/src/test_simnet_zmsg_onchain.c", "protocols simnet_zmsg_onchain test_zmsg_memo_codec models make_lint_gates")
+AGENT_IMPACT_RULE("app/controllers/src/messaging_controller.c|app/controllers/src/app_native_handlers.c|lib/test/src/test_api_msg_routes.c|lib/test/src/test_command_registry_catalog.c", "api command_registry_catalog make_lint_gates")
 AGENT_IMPACT_RULE("lib/test/src/test_test_zmsg_memo_codec.c", "test_zmsg_memo_codec make_lint_gates")
 AGENT_IMPACT_RULE("lib/zid/src/zpay.c|lib/zid/include/zid/zpay.h|tools/command/native_zpay_command.c|lib/test/src/test_zpay.c", "zpay command_registry_catalog make_lint_gates")
 AGENT_IMPACT_RULE("lib/session/src/zses.c|lib/session/include/session/zses.h|tools/command/native_zses_command.c|config/commands/zses.def|lib/test/src/test_zses.c|tools/scripts/session_drill.sh", "zses command_registry_catalog make_lint_gates")

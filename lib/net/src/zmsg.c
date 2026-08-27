@@ -217,3 +217,14 @@ int zmsg_store_count(void)
     pthread_mutex_unlock(&g_zmsg_mutex);
     return c;
 }
+
+int zmsg_store_count_unread(void)
+{
+    pthread_mutex_lock(&g_zmsg_mutex);
+    int c = 0;
+    for (int i = 0; i < g_msg_count; i++)
+        if (!g_messages[i].read)
+            c++;
+    pthread_mutex_unlock(&g_zmsg_mutex);
+    return c;
+}
