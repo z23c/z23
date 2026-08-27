@@ -12,6 +12,7 @@
 #include "config/consensus_state_replay_receipt.h"
 
 #include "config/consensus_state_snapshot_install.h"
+#include "consensus_state_producer_receipt_internal.h"
 #include "base/serialize_le.h"
 #include "coins/utxo_commitment.h"
 #include "core/amount.h"
@@ -86,50 +87,6 @@ static bool rr_fail(struct consensus_state_replay_result *out, const char *fmt,
     }
     LOG_WARN(RR_SUBSYS, "%s", reason);
     return false;
-}
-
-/* SHA3-256 of the running executable image — the race-free /proc/self/exe idiom
- * (matches consensus_state_producer_receipt.c's running_binary_digest).
- *
- * OS-A1 note: this body is exactly authority_receipt_running_binary_digest()
- * (util/authority_receipt.h). This live cure path is INTENTIONALLY not rewired
- * onto the generalized primitive — the 344-byte replay payload + its binding
- * digest are behaviorally frozen. The extraction generalizes the SHAPE so new
- * privileged transitions bind authority the same way instead of re-deriving it;
- * a future re-base here would be a byte-preserving change proven against the
- * consensus_state_snapshot_install group, not a behavior change. */
-static bool rr_verifier_binary_digest(uint8_t out[32])
-{
-    int fd = open("/proc/self/exe", O_RDONLY | O_CLOEXEC);
-    if (fd < 0) {
-        LOG_WARN(RR_SUBSYS, "running executable open failed: %s",
-                 strerror(errno));
-        return false;
-    }
-    struct sha3_256_ctx ctx;
-    sha3_256_init(&ctx);
-    uint8_t buffer[32768];
-    bool ok = true;
-    for (;;) {
-        ssize_t n = read(fd, buffer, sizeof(buffer));
-        if (n > 0) {
-            sha3_256_write(&ctx, buffer, (size_t)n);
-            continue;
-        }
-        if (n == 0)
-            break;
-        if (errno == EINTR)
-            continue;
-        ok = false;
-        break;
-    }
-    if (close(fd) != 0)
-        ok = false;
-    if (ok)
-        sha3_256_finalize(&ctx, out);
-    else
-        LOG_WARN(RR_SUBSYS, "running executable digest failed");
-    return ok;
 }
 
 /* Domain-separated binding over every receipt field except receipt_digest. */
@@ -568,8 +525,11 @@ bool consensus_state_replay_verify_and_write_receipt(
     }
     consensus_state_artifact_evidence_free(evidence);
 
-    /* (5) Bind the verifying binary and persist the receipt. */
-    if (!rr_verifier_binary_digest(r.verifier_binary_digest))
+    /* (5) Bind the verifying binary and persist the receipt. The digest
+     * helper is the producer receipt's shared one (byte-identical body; the
+     * 344-byte payload and its binding stay behaviorally frozen — see the
+     * OS-A1 note in config/consensus_state_replay_receipt.h's contract). */
+    if (!producer_running_binary_digest(r.verifier_binary_digest))
         return rr_fail(out, "verifying-binary digest failed");
     rr_receipt_digest(&r, r.receipt_digest);
     uint8_t buf[RR_PAYLOAD_BYTES];
@@ -618,7 +578,7 @@ bool consensus_state_replay_receipt_authority_available(
 
     /* The activating binary must be the exact image that verified. */
     uint8_t running[32];
-    if (!rr_verifier_binary_digest(running) ||
+    if (!producer_running_binary_digest(running) ||
         memcmp(running, r.verifier_binary_digest, 32) != 0) {
         LOG_WARN(RR_SUBSYS, "replay receipt was written by a different binary "
                             "image; ACTIVATE stays contained");

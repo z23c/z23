@@ -1,14 +1,68 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Header-corpus digest for the producer receipt: recompute the genesis..H*
- * header chain digest from the producer's own progress.kv rows. Split from
- * consensus_state_producer_receipt.c along the file-size ceiling seam. */
+ * Digest inputs for the producer receipt: the running executable image and
+ * the genesis..H* header corpus recomputed from the producer's own
+ * progress.kv rows. Split from consensus_state_producer_receipt.c along the
+ * file-size ceiling seam. */
 
 #include "consensus_state_producer_receipt_internal.h"
 
 #include "crypto/sha3.h"
+#include "platform/os_proc.h"
 #include "util/log_macros.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <string.h>
+#include <unistd.h>
+
+/* SHA3-256 of the running executable's on-disk image — the ONE running-binary
+ * binding, shared by the producer receipt, the export proof, and the replay
+ * receipt (they must agree byte for byte). Darwin has no /proc/self/exe: the
+ * platform shim resolves the same running image via _NSGetExecutablePath and
+ * reopens it by path. */
+bool producer_running_binary_digest(uint8_t out[32])
+{
+#if defined(__APPLE__)
+    char exe_path[4096];
+    if (!os_proc_exe_path(exe_path, sizeof(exe_path))) {
+        LOG_WARN(PRODUCER_RECEIPT_SUBSYS,
+                 "running executable path unavailable");
+        return false;
+    }
+    int fd = open(exe_path, O_RDONLY | O_CLOEXEC);
+#else
+    int fd = open("/proc/self/exe", O_RDONLY | O_CLOEXEC);
+#endif
+    if (fd < 0) {
+        LOG_WARN(PRODUCER_RECEIPT_SUBSYS, "running executable open failed: %s",
+                 strerror(errno));
+        return false;
+    }
+    struct sha3_256_ctx ctx;
+    sha3_256_init(&ctx);
+    uint8_t buffer[32768];
+    bool ok = true;
+    for (;;) {
+        ssize_t n = read(fd, buffer, sizeof(buffer));
+        if (n > 0) {
+            sha3_256_write(&ctx, buffer, (size_t)n);
+            continue;
+        }
+        if (n == 0)
+            break;
+        if (errno == EINTR)
+            continue;
+        ok = false;
+        break;
+    }
+    if (close(fd) != 0)
+        ok = false;
+    if (ok)
+        sha3_256_finalize(&ctx, out);
+    else
+        LOG_WARN(PRODUCER_RECEIPT_SUBSYS, "running executable digest failed");
+    return ok;
+}
 
 static void proof_u64(struct sha3_256_ctx *ctx, uint64_t value)
 {
