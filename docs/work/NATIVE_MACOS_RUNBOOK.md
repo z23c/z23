@@ -1,3 +1,5 @@
+<!-- Copyright 2026 Rhett Creighton - Apache License 2.0 -->
+
 # Native macOS maintenance runbook
 
 Maintenance reference for native arm64 macOS work: what is expected green,
@@ -26,7 +28,7 @@ repeat them.
 | `make z23` | whole-program C23 node links natively | front door at `Makefile:4164`; link rule at `Makefile:4210`. Darwin branch ends with `tools/scripts/check_c23_node_binary.sh`, whose Mach-O arm needs `otool` + `nm` and refuses anything outside `/usr/lib/*` and `/System/Library/Frameworks/*` (`tools/scripts/check_c23_node_binary.sh:13-46`) |
 | `make t-fast ONLY=<group>` | one registered group, non-LTO harness | `Makefile:2566`. `ONLY=` is mandatory |
 | `make t-fast-exact EXACT_ONLY_MATCHED=<id>` | same, exact group id for receipts | `Makefile:2577` |
-| `make t ONLY=<group>` | strict variant over the LTO harness | `Makefile:2554`; use before push / when chasing optimizer behavior |
+| `make t ONLY=<group>` | strict cached per-TU non-LTO harness | `Makefile:2554`; use before push / when chasing optimizer behavior |
 | `make test-parallel TEST_PARALLEL_ARGS=--no-cache` | full uncached suite | `Makefile:2107` |
 | `make pre-push-ci` | mapped focused proof for pushed files | unmapped code fails closed |
 | groups: `crypto`, `sqlite`, `rng`, `thread_qos`, `os_sandbox`, `os_proc`, `sandbox_process_budget`, `self_backtrace`, `binary_ab_fallback`, `binary_staleness`, `dev_platform`, `cold_join_sovereign` | platform contracts named in `AGENTS.md` §"Verified platform baseline" | ids are from `tools/dev/test_group_catalog.def`; `make t-list` is the source of truth |
@@ -45,7 +47,8 @@ not chain-sync acceptance.
 | `make lint-cached` / `make lint-cold-audit` | result-cache variants of the umbrella | same Linux-only rules as `make lint` |
 
 Full `make lint` (`Makefile:10079`, gates listed from `Makefile:9915`) still
-hits Linux-only rules on this host — §4 rows 1-4 plus the Linux-resident list.
+hits intentional Linux-resident checks on this host; the tool-link rules in
+§4 use host-specific linker flags and sandbox sources.
 Do not report "lint is red on mac" as a mac regression without naming which
 rule; separate those failures from real portability breaks before acting, and
 separately again from the standalone-tool rules nobody but
@@ -67,7 +70,7 @@ a stripped PATH you silently get 8 workers. Prefer
 | Release packager | `packaging/release/build_release.sh:57-59` | dies with "this packager produces x86_64-linux only (host is …)" — an intentional refusal, not a defect |
 | Release split-debug via `objcopy --add-gnu-debuglink` | `Makefile:4228` takes the Darwin branch instead (`cp` sidecar + `strip -S -x`) | Mach-O has no `.gnu_debuglink`; there is no back-reference, so symbolize against `build/bin/z23.debug` explicitly |
 | `ci-symbol-floor` | `Makefile:10131` | designed SKIP (exit 2 → 0) when `objdump`/`ldd` are absent; both are absent here, so the gate passes by skipping, not by proving |
-| Standalone tool links with GNU-ld spellings | §4 rows 1-3 | not green until each rule picks up a per-host flag/source spelling |
+| Standalone tool links | `ZCL_GC_SECTIONS_LDFLAG` and `ZCL_TOOL_SANDBOX_SRC` in `Makefile` | host-specific linker and sandbox selections are centralized; a red gate is a regression |
 | Landlock/seccomp package confinement, full Tor, inotify dev watcher, signal-context self-backtrace, `O_TMPFILE` snapshot export | `docs/GETTING_STARTED.md:122-127` | refuse or report unavailable; never fake a pass |
 
 ---
@@ -161,25 +164,22 @@ Each row carries how it was established: (m) = measured on this host,
 
 | Symptom | Likely cause | First fix move |
 |---|---|---|
-| `ld: library ':libsqlite3.a' not found` while building `build/bin/wal_checkpoint` | GNU-ld-only `-l:<filename>` spelling at `Makefile:4267` (same spelling at `Makefile:2511`, `:4345`, `:4405`) | Pass the archive path directly. secp already has a per-host selector to copy: `NODE_SECP_ARCHIVE` (`Makefile:129`) picks `vendor/lib/libsecp256k1-darwin.a` on Darwin |
-| `--gc-sections` rejected (or `corpus-census` links in far more than it should) on `corpus-census`, `package-factory`, `arena_runner`, `arena_present`, `arena_svg` | six recipes spell `-Wl,--gc-sections` literally: `Makefile:4340`, `:4400`, `:4434`, `:4457`, `:4587`, `:4615`; Apple ld's equivalent is `-Wl,-dead_strip` | Hoist one per-host flag variable and use it in all six, rather than patching them individually. The collector is load-bearing, not cosmetic — the reason is written down at `Makefile:4335-4336` ("ed25519's batch-verify path … pulls zcl_random_secret_bytes") |
+| `ld: library ':libsqlite3.a' not found` while building a standalone tool | a new rule bypassed the existing host-specific archive selection | Use the same direct archive and host selector as the neighboring standalone rules; do not add a Darwin-only ad hoc fallback |
+| `--gc-sections` rejected (or a tool links in far more than it should) | a rule bypassed `ZCL_GC_SECTIONS_LDFLAG` | Use the centralized flag, which selects `-Wl,-dead_strip` on Darwin and `-Wl,--gc-sections` elsewhere |
 | Undefined symbols (`_dynhost_*`, `_tor_*`, `_ed25519_secret_key_from_seed`) in a standalone tool | The node tolerates absent stub symbols through weak `-Wl,-U,_<sym>` allowances (`Makefile:29-34`); single-TU tool rules get neither that list nor the right objects | Either name the object that defines the symbol in that tool's rule, or route it through the stub backend like the node does. `arena_runner` currently names the Landlock backend directly at `Makefile:4426` |
-| `zclassic23-zcode-adapter-runner` will not compile on Darwin | Its source list hardcodes `lib/platform/src/os_sandbox_linux.c` (`Makefile:4091`) | Select the backend per host the way `LIB_SRCS` does (`Makefile:420-427`); the stub gives runtime refusals, not compile-time ones |
+| A standalone sandboxed tool will not compile on Darwin | a new source list bypassed `ZCL_TOOL_SANDBOX_SRC` | Use the centralized backend selector; the Darwin stub gives runtime refusals, not compile-time ones |
 | `check-standalone-tools-link` FAIL names several `build/bin/*` targets | This gate derives its tool list from the Makefile and must build everything not exempt (`tools/lint/check_standalone_tools_link.sh:15-19`, exempt set `:50-89`) — so it is where every standalone-rule break surfaces | Read the build output tail the gate prints (`:164-168`); fix the rule's `-I` paths/object list. Exemptions need a written reason and an unknown tool is not exempt — do not add an exemption to go green |
-| `check-file-size-ceiling` drift after adding macOS branches | Inline `#if defined(__APPLE__)` blocks grew existing units (`docs/adr/0009-file-size-raises-native-portability.md`) | Put the next variant behind a per-platform seam file or header seam. Raising a record again requires an ADR; shrinking is always preferred |
+| `check-file-size-ceiling` drift after adding macOS branches | Inline `#if defined(__APPLE__)` blocks grew existing units | Put the next variant behind a per-platform seam file or header seam. Raising a baseline requires explicit review; shrinking is always preferred |
 | `zcode-package-registry: FAIL — platform sandbox alternatives appear N times` | `LIB_SRCS` selected zero or both sandbox backends | Exactly one of `os_sandbox_linux.c` / `os_sandbox_stub.c` may be present (`tools/lint/check_zcode_package_registry.sh:54-61`); check whether your edit bypassed the `filter-out` at `Makefile:420-427` |
 | Pre-push hook SIGPIPE/write failure after the gate completed | Hook pipe broke late, not a red gate (`docs/DEVELOPING.md:375-378`) | Inspect the saved log and rerun that gate out-of-band; do not accept a bypass you did not document |
 | Node refuses to boot with `DATABASE_OWNERSHIP_CONFLICT: canonical database owner already holds path=…` | Another live holder, or a stale `blocks/index/LOCK` PID that is alive because the PID was recycled | `lsof <path>` for the truth; for LevelDB LOCK, compare the PID against the actual process (`config/src/boot_stale_locks.c:54`). Never delete a lock file while any holder is identified |
 | Shutdown stalls past the diagnostic join deadline | Deadline joins do not exist off-Linux (`thread_compat.h`), so the stall hides until the watchdog acts | Reproduce with the stage watchdog enabled; treat "join timed out" telemetry as Linux-only observability |
 | Fetched-package build that demands Linux isolation refuses | Full-isolation confinement is unavailable here (`docs/GETTING_STARTED.md:123-126`) | Expected refusal. Re-run that step on a Linux host; do not weaken the refusal |
 
-Nothing in this tree names a variable for the per-host gc-sections flag or the
-per-host sandbox backend source — check before assuming one exists:
+The host-specific linker and sandbox seams are explicit:
 
 ```sh
-git grep -nE 'ZCL_GC_SECTIONS|ZCL_TOOL_SANDBOX' -- Makefile    # empty at 4909a816d9
+git grep -nE 'ZCL_GC_SECTIONS_LDFLAG|ZCL_TOOL_SANDBOX_SRC' -- Makefile
 ```
 
-If your checkout defines them, prefer those seams over editing six recipes
-inline; if it does not, rows 1-4 above are exactly the work.
-
+Use those seams rather than adding per-recipe platform branches.
