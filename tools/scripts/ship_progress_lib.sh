@@ -82,6 +82,66 @@
 # STRICTLY POSIX sh: no arrays, no `local`, no process substitution. It is
 # interpreted by whatever /bin/sh the remote operator happens to have.
 
+# ── ONE OBSERVER, TWO KERNELS ───────────────────────────────────────────────
+# The verdicts above are kernel-independent. The evidence they consume is not:
+# every reader here used to be Linux procfs, and a host with no /proc — any
+# Mac — came back empty on all four reads. An empty /proc/<pid>/stat is the
+# code for "the unit named a pid and the pid is gone", so three samples later
+# the observer said CRASHED about a process that was alive the whole time, and
+# the rollback that verdict authorises fired on a healthy box. The hermetic
+# selftest (tools/ship_selftest.sh) runs this whole two-machine transaction on
+# a laptop with no Linux in it, so "the observer cannot see a process here"
+# was not a hypothetical corner: it was every remote leg of the gate.
+#
+# So the same five facts now come from whichever kernel the observer landed
+# on. The observation line, its field names, the classifier and every verdict
+# are identical; only the readers differ, and the Linux reader is what it
+# always was, statement for statement.
+#
+#   liveness      /proc/<pid>/stat readable     kill -0
+#   cpu           stat utime+stime in ticks     ps -o cputime=, parsed to
+#                                               centiseconds — at the usual
+#                                               100 Hz a tick IS a
+#                                               centisecond, so this is the
+#                                               same unit, coarser sampler
+#   blocked on    stat delayacct_blkio_ticks    no equivalent: ps prints "-"
+#   disk                                        for oublock/inblock, which is
+#                                               a measured absence, not a
+#                                               guess. See DIVERGENCES.
+#   bytes moved   /proc/<pid>/io rchar/wchar    none. blkio=0 io=0 always.
+#   identity      sha256 of /proc/<pid>/exe —   sha256 of the file at the
+#               the running inode, whatever     path the kernel reports —
+#               the path holds now              the PATH's bytes now, not the
+#                                               running image's
+#   environment   /proc/<pid>/environ,          ps -E, matched whole-word
+#                 matched whole NUL string
+#   rpc probe     timeout <n> /proc/<pid>/exe   the reported path, under a
+#                 status                        hand-rolled timeout, because
+#                                               `timeout` is GNU coreutils
+#                                               and a stock Mac has none
+#
+# ── DIVERGENCES: darwin against Linux ───────────────────────────────────────
+#  * A process advancing ONLY in block I/O — the spinning-platter box the
+#    delayacct counter exists for — shows no advance on darwin, and once the
+#    silence limit expires it is convicted WEDGED where Linux reads SLOW. That
+#    is the wrong kind of wrong: a rollback that cannot see must NOT fire, and
+#    this is one silently seeing less. `ps -o state=` flipping to U is the
+#    qualitative twin of delayacct and is the next signal to add if darwin
+#    ever becomes a ship target rather than the host the selftest runs on.
+#  * The identity hash covers the bytes at the reported path NOW. Linux pins
+#    the inode, so overwriting a binary under a running process changes
+#    nothing there; on darwin it changes the hash. The ship transaction
+#    installs into an immutable per-release directory and restarts before it
+#    observes, so nothing rewrites the running path under the observer — but a
+#    host that overwrites in place would hash the replacement's bytes.
+#  * ps -E splits the environment on spaces, so an identity value containing a
+#    space matches nothing. That prints ident=no, and ident=no can never
+#    qualify: the degradation costs a qualification, never fakes one.
+#  * cputime is sampled at whole centiseconds. A process whose duty cycle is
+#    under one centisecond per poll is indistinguishable from a still one, so
+#    the selftest's busy fixture burns ~10 centiseconds per poll — ten times
+#    the resolution — instead of relying on a rounding luck.
+#
 # ── /proc parsers (pure text in, one number out, so a fixture can pin them) ──
 # Field numbering is post-strip of the "pid (comm) " prefix, so proc(5) fields
 # shift down by two: utime(14)/stime(15) -> $12/$13, starttime(22) -> $20,
@@ -126,6 +186,138 @@ ship_io_bytes_from_text() {
     printf '%s\n' "${1:-}" |
         awk '/^(rchar|wchar|read_bytes|write_bytes):[ \t]*[0-9]+$/ { total += $2 }
              END { printf "%.0f\n", total + 0 }'
+}
+
+# ── host-neutral primitives ─────────────────────────────────────────────────
+# Pure text in, one token out, so a fixture pins them exactly like the /proc
+# parsers above — and so they are pinned by the same selftest on a Linux box,
+# where they still have to parse. None of them may care which kernel it is
+# running on: the per-kernel choice happens once, in ship_observe.
+
+# sha256 of stdin, from whichever tool the host ships. Linux has sha256sum; a
+# stock Mac has neither it nor coreutils but does ship shasum; openssl is the
+# last resort. The digest is the digest whichever binary computes it, so the
+# fixture and the observer cannot disagree about the bytes.
+ship_sha256_stream() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 | awk '{print $1}'
+    else
+        openssl dgst -sha256 | awk '{print $NF}'
+    fi
+}
+
+# One BSD-ps field, whitespace-stripped, empty when ps answered nothing. The
+# capture is guarded BEFORE the pipe rather than trusting the pipeline status:
+# ps exits 1 for a pid that is gone, and under a caller's pipefail that status
+# would ride the pipeline into an observer whose contract is to always answer.
+ship_ps_text() {
+    _ship_ps="$(ps -ww -o "$2=" -p "$1" 2>/dev/null || true)"
+    printf '%s\n' "${_ship_ps:-}" |
+        awk '{ gsub(/^[ \t]+/, ""); gsub(/[ \t]+$/, ""); print; exit }'
+}
+
+# cputime text -> centiseconds. ps formats accumulated CPU as
+# `[dd-]hh:mm:ss.ss`, and the days field is units-of-24, not another x60, so
+# the leading field is scaled separately when the separator is present. Only
+# the DELTA between polls is ever consumed, but a parser that answers exactly
+# costs one branch and removes a question nobody should have to ask again.
+ship_cpu_centisecs_from_text() {
+    printf '%s\n' "${1:-}" |
+        awk '{
+                line = $0
+                gsub(/[ \t]/, "", line)
+                has_days = (line ~ /-/) ? 1 : 0
+                gsub(/-/, ":", line)
+                if (line !~ /^[0-9:.]+$/) { print 0; next }
+                n = split(line, part, ":")
+                secs = part[n] + 0
+                total = 0
+                mult = 60
+                for (i = n - 1; i >= 1; i--) {
+                    if (i == 1 && has_days) total += part[i] * 86400
+                    else total += part[i] * mult
+                    mult *= 60
+                }
+                printf "%.0f\n", (total + secs) * 100
+            }'
+}
+
+# One incarnation, one token. Linux pairs the pid with starttime in ticks;
+# the closest darwin offers is lstart, a formatted wall-clock date. Squeezed
+# to a single space-free token so the observation line stays word-split safe,
+# and used only for equality between polls: a restart changes it, a
+# long-lived process never does.
+ship_start_token_from_text() {
+    printf '%s\n' "${1:-}" | tr -d ' \t'
+}
+
+# The executable path darwin will admit to without elevated tools. `comm` is
+# the kernel's own view of the binary; argv[0] covers a process started
+# through a relative path, where `comm` reports exactly what was typed. Empty
+# unless one of them is a file this user can read, in which case the caller
+# prints sha=- — the same "no identity evidence" the /proc reader prints for
+# an unreadable /proc/<pid>/exe.
+ship_darwin_exe_path() {
+    _ship_exe="$(ship_ps_text "$1" comm)"
+    case "$_ship_exe" in
+        /*) if [ -r "$_ship_exe" ]; then printf '%s\n' "$_ship_exe"; return 0; fi ;;
+    esac
+    _ship_exe="$(ship_ps_text "$1" args | sed 's/[[:space:]].*//')"
+    case "$_ship_exe" in
+        /*) if [ -r "$_ship_exe" ]; then printf '%s\n' "$_ship_exe"; return 0; fi ;;
+    esac
+    printf '\n'
+}
+
+# The identity check against an environment the kernel will not hand over as
+# raw bytes. /proc/<pid>/environ matches whole NUL-terminated strings; ps -E
+# only offers words, so this matches whole words. Weaker in exactly one
+# direction: a value containing a space matches nothing and prints ident=no,
+# and ident=no can never qualify.
+ship_ident_from_env_words() {
+    _ship_env="$(ps -wwE -p "$1" 2>/dev/null || true)"
+    printf '%s\n' "${_ship_env:-}" |
+        awk -v src="ZCL_AGENT_EXPECT_SOURCE_ID=$2" \
+            -v commit="ZCL_AGENT_EXPECT_BUILD_COMMIT=$3" \
+            -v origin="ZCL_AGENT_EXPECT_BUILD_SOURCE=ship" '
+                {
+                    n = split($0, word, /[ \t]+/)
+                    for (i = 1; i <= n; i++) {
+                        if (word[i] == src) have_src = 1
+                        else if (word[i] == commit) have_commit = 1
+                        else if (word[i] == origin) have_origin = 1
+                    }
+                }
+                END {
+                    if (have_src && have_commit && have_origin) print "yes"
+                    else print "no"
+                }'
+}
+
+# The `status` probe. The same idea on both kernels — run the daemon's own
+# front door and bound how long we wait for it — but `timeout` is a GNU
+# coreutils binary a stock Mac does not have, so darwin runs the two-process
+# equivalent: probe in the background, a watcher that kills it when the budget
+# expires, both reaped. A probe killed by the watcher is a non-answer, which
+# is exactly what a timed-out probe is on Linux.
+ship_rpc_probe() {
+    if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+        "$1" status >/dev/null 2>&1 &
+        _ship_probe_pid=$!
+        ( sleep "$2" 2>/dev/null; kill "$_ship_probe_pid" 2>/dev/null ) &
+        _ship_watch_pid=$!
+        _ship_probe_rc=0
+        wait "$_ship_probe_pid" 2>/dev/null || _ship_probe_rc=$?
+        # Both kills/waits are status-guarded: the watcher may already be gone
+        # if the budget expired first, and an observer that dies inside its own
+        # probe would hand the loop a no-evidence line instead of an answer.
+        kill "$_ship_watch_pid" 2>/dev/null || true
+        wait "$_ship_watch_pid" 2>/dev/null || true
+        return "$_ship_probe_rc"
+    fi
+    timeout "$2" "$1" status >/dev/null 2>&1
 }
 
 # ── observation line ────────────────────────────────────────────────────────
@@ -177,6 +369,12 @@ ship_field_num() {
 # It ALWAYS exits 0. Its caller distinguishes "the box answered and said X"
 # from "the box did not answer" by transport status, and an observer that
 # could exit non-zero would blur exactly that line.
+#
+# Everything up to and including the MainPID lookup is kernel-independent:
+# systemd answers it, and a non-answer is missing evidence either way. Then
+# the reader is chosen ONCE, by kernel, and each reader is a straight line
+# from its own sources to the same line format — so a difference between the
+# two hosts can only ever be a difference in what a kernel will admit to.
 ship_observe() {
     _ship_unit="$1"; _ship_want_sha="$2"; _ship_want_src="$3"
     _ship_want_commit="$4"; _ship_budget="$5"
@@ -191,6 +389,27 @@ ship_observe() {
             return 0
             ;;
     esac
+    if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+        ship_observe_darwin "$_ship_pid" "$_ship_want_sha" "$_ship_want_src" \
+            "$_ship_want_commit" "$_ship_budget"
+    else
+        ship_observe_proc "$_ship_pid" "$_ship_want_sha" "$_ship_want_src" \
+            "$_ship_want_commit" "$_ship_budget"
+    fi
+    return 0
+}
+
+# ship_observe_proc — the Linux reader. Same files, same parsers, same probe,
+# same line as before the split; it moved into its own function so the darwin
+# reader could sit beside it instead of inside it. kill -0 is deliberately NOT
+# added here: /proc/<pid>/stat already is the liveness evidence, and the two
+# primitives disagree in exactly one state — an EPERM from a reader in a
+# different session, which the user-manager observer cannot reach and which
+# this library has no business changing the answer for.
+ship_observe_proc() {
+    _ship_pid="$1"; _ship_want_sha="$2"; _ship_want_src="$3"
+    _ship_want_commit="$4"; _ship_budget="$5"
+
     _ship_stat="$(cat "/proc/$_ship_pid/stat" 2>/dev/null || true)"
     if [ -z "$_ship_stat" ]; then
         # The unit named a pid and the pid is gone: the box looked, and there
@@ -233,6 +452,59 @@ ship_observe() {
         "$(ship_cpu_ticks_from_text "$_ship_stat")" \
         "$(ship_blkio_ticks_from_text "$_ship_stat")" \
         "$(ship_io_bytes_from_text "$_ship_io")"
+}
+
+# ship_observe_darwin — the macOS reader. No procfs, so ps is the only witness
+# for every field and kill -0 is the liveness check. blkio and io are printed
+# as 0 rather than omitted: the line format is shared with the Linux reader,
+# and a missing field must mean "the host said nothing", not "this kernel has
+# no such counter".
+ship_observe_darwin() {
+    _ship_pid="$1"; _ship_want_sha="$2"; _ship_want_src="$3"
+    _ship_want_commit="$4"; _ship_budget="$5"
+
+    if ! kill -0 "$_ship_pid" 2>/dev/null; then
+        # The unit named a pid and the pid is gone: the box looked, and there
+        # is no process. The same positive statement /proc makes on Linux.
+        printf 'observed=1 exists=0 pid=%s start=0 sha=- ident=no rpc=no cpu=0 blkio=0 io=0\n' \
+            "$_ship_pid"
+        return 0
+    fi
+    _ship_cpu_text="$(ship_ps_text "$_ship_pid" cputime)"
+    if [ -z "$_ship_cpu_text" ] && ! kill -0 "$_ship_pid" 2>/dev/null; then
+        # ps and kill disagreed because the process exited between them. Still
+        # a disappearance, still not missing evidence.
+        printf 'observed=1 exists=0 pid=%s start=0 sha=- ident=no rpc=no cpu=0 blkio=0 io=0\n' \
+            "$_ship_pid"
+        return 0
+    fi
+    _ship_exe="$(ship_darwin_exe_path "$_ship_pid")"
+    _ship_sha=-
+    if [ -n "$_ship_exe" ]; then
+        _ship_sha="$(ship_sha256_stream < "$_ship_exe" 2>/dev/null | awk '{print $1}' || true)"
+        [ -n "$_ship_sha" ] || _ship_sha=-
+    fi
+
+    _ship_ident=yes
+    if [ -n "$_ship_want_src" ]; then
+        _ship_ident="$(ship_ident_from_env_words "$_ship_pid" \
+            "$_ship_want_src" "$_ship_want_commit" || true)"
+        [ -n "$_ship_ident" ] || _ship_ident=no
+    fi
+
+    # Same patience rule as the Linux leg, and one extra degradation: with no
+    # path there is nothing to ask, so rpc=no and the loop waits for a poll
+    # where the kernel hands one over.
+    _ship_rpc=no
+    if [ -n "$_ship_exe" ] && ship_rpc_probe "$_ship_exe" "$_ship_budget"; then
+        _ship_rpc=ok
+    fi
+
+    printf 'observed=1 exists=1 pid=%s start=%s sha=%s ident=%s rpc=%s cpu=%s blkio=0 io=0\n' \
+        "$_ship_pid" \
+        "$(ship_start_token_from_text "$(ship_ps_text "$_ship_pid" lstart)")" \
+        "$_ship_sha" "$_ship_ident" "$_ship_rpc" \
+        "$(ship_cpu_centisecs_from_text "$_ship_cpu_text")"
 }
 
 # ship_rpc_budget <attempt> <budget-list> — escalating patience. A late answer
