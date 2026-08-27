@@ -364,12 +364,19 @@ static bool snapshot_read_chunk_locked(uint32_t chunk_index,
             return false;
         if (pos + script_len > size)
             return false;
-        uint32_t copy_len = script_len > sizeof(out->entries[i].script)
-            ? sizeof(out->entries[i].script)
-            : script_len;
-        if (copy_len > 0)
-            memcpy(out->entries[i].script, g_snapshot_buf + pos, copy_len);
-        out->entries[i].script_len = (uint16_t)copy_len;
+        if (script_len > sizeof(out->entries[i].script)) {
+            /* Same refuse-don't-truncate contract as the DB serve path:
+             * a full-fidelity snapshot carries consensus-legal scripts
+             * past the entry cap, and silently shortening one here would
+             * hand the receiver a corrupted entry. The SQLite fallback
+             * refuses the same chunk, so serve stays honest end to end. */
+            LOG_FAIL("sync", "snapshot_read_chunk: chunk %u entry %u "
+                     "script_len %u exceeds entry cap %zu",
+                     chunk_index, i, script_len,
+                     sizeof(out->entries[i].script));
+        }
+        memcpy(out->entries[i].script, g_snapshot_buf + pos, script_len);
+        out->entries[i].script_len = (uint16_t)script_len;
         pos += script_len;
     }
 
@@ -1064,8 +1071,24 @@ bool fast_sync_serve_chunk_db(sqlite3 *db, uint32_t chunk_index,
         const void *script = sqlite3_column_blob(s, 3);
         int slen = sqlite3_column_bytes(s, 3);
         if (script && slen > 0) {
-            if (slen > (int)sizeof(out->entries[i].script))
-                slen = (int)sizeof(out->entries[i].script);
+            if (slen > (int)sizeof(out->entries[i].script)) {
+                /* The entry struct carries the 520-byte per-element
+                 * consensus cap. A longer — but consensus-legal —
+                 * scriptPubKey must REFUSE the chunk, not serve a
+                 * silently truncated script: the wire receiver rejects
+                 * oversize entries outright, and the end-of-sync UTXO
+                 * root is computed over full-fidelity rows, so a
+                 * truncated chunk can never reconstruct honest state.
+                 * LOG_WARN (not LOG_FAIL) because the sqlite3_stmt
+                 * still needs its finalize before the return. */
+                LOG_WARN("sync", "serve_chunk_db: chunk %u entry %u "
+                         "script_len %d exceeds entry cap %zu; "
+                         "refusing the chunk",
+                         chunk_index, i, slen,
+                         sizeof(out->entries[i].script));
+                sqlite3_finalize(s);
+                return false;
+            }
             memcpy(out->entries[i].script, script, (size_t)slen);
             out->entries[i].script_len = (uint16_t)slen;
         }
