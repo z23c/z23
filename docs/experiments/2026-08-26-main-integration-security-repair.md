@@ -130,6 +130,10 @@ bridge was adapted to the current swarm admission API by carrying each signed
 provider record's exact expiry into `peer_offer`; no synthetic lifetime is
 minted. `test_zcode_swarm_dht`, `test_zcode_swarm`, `test_zcode_dht_service`,
 `test_crypto_registry`, and lint shard 03 passed uncached with zero skips.
+The 255-group pre-push intersection then passed 254 groups and exposed one
+deterministic operator-message regression in `test_ratify_mint_anchor`: the
+refusal remained fail-closed but labeled its applied frontier only as `h=`.
+The message now names `applied=` explicitly; the exact group passed uncached.
 
 At `2026-08-27T02:07:25Z` on `rhett3.dev`, the clean shutdown began saving
 3,233,145 flat-index entries. The save completed at `02:07:43Z`; the
