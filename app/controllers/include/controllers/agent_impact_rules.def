@@ -1048,6 +1048,9 @@ AGENT_IMPACT_RULE("lib/vcs/include/vcs/package_prepare.h|lib/vcs/src/package_pre
  * regression) and the package dev suite cover them. */
 AGENT_IMPACT_RULE("tools/dev/c23_commons_beta_hook.sh|tools/dev/arena_product_journey_hook.sh|tools/dev/cross-machine-reproduce.sh|docs/spec/c23-package-format.md", "zcode_dht_service zcode_package_dev command_registry_catalog make_lint_gates")
 AGENT_IMPACT_RULE("lib/vcs/src/package_swarm_receipt.c|lib/vcs/src/package_swarm_receipt_session.c|lib/vcs/include/vcs/service_receipt.h|lib/vcs/src/service_receipt.c|lib/vcs/include/vcs/package_swarm_node.h|lib/test/src/test_zcode_swarm.c", "zcode_swarm make_lint_gates")
+/* The stall-recovery lane: new files live in the swarm_dht suite; engine
+ * seams it leans on keep their own mapped suites below. */
+AGENT_IMPACT_RULE("config/src/boot_zcode_swarm_dht.c|config/include/config/boot_zcode_swarm_dht.h|lib/test/src/test_zcode_swarm_dht.c", "zcode_swarm_dht zcode_swarm zcode_dht_service make_lint_gates")
 AGENT_IMPACT_RULE("lib/vcs/src/package_swarm_node.c|lib/vcs/src/package_swarm_complete.c|lib/vcs/src/package_swarm_priv.h|lib/vcs/src/package_swarm_ads.c|lib/test/src/test_zcode_swarm_complete.c", "zcode_swarm_complete make_lint_gates")
 AGENT_IMPACT_RULE("lib/vcs/src/package_swarm_status.c|lib/vcs/include/vcs/package_swarm_status.h|lib/vcs/src/package_swarm_ads.c", "zcode_store make_lint_gates")
 AGENT_IMPACT_RULE("config/src/boot_zcode_swarm_receipt.c|config/include/config/boot_zcode_swarm_receipt.h|app/controllers/include/controllers/diagnostics_dumpers_zcode.def", "zcode_store make_lint_gates")
