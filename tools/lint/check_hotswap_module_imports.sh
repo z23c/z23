@@ -247,8 +247,14 @@ scan_modules() {
     for f in "${sos[@]}"; do
         mod="$(basename "$f")"
         # nm is NOT in a pipeline: its exit status is a real decision here.
-        nm_out="$(nm -D --undefined-only "$f" 2>&1)"
-        nm_rc=$?
+        # `nm -u` (undefined-only) works on both GNU binutils and BSD nm;
+        # `-D` (dynamic symbols) is GNU-only, so try the exact contract read
+        # first and fall back to the portable undefined-only read.
+        nm_out="$(nm -D --undefined-only "$f" 2>/dev/null)" && nm_rc=0 || nm_rc=$?
+        if [ "$nm_rc" -ne 0 ]; then
+            nm_out="$(nm -u "$f" 2>&1)"
+            nm_rc=$?
+        fi
         if [ "$nm_rc" -ne 0 ]; then
             bad "cannot read dynamic symbols of $mod (nm exit $nm_rc): $nm_out"
             continue
@@ -259,8 +265,27 @@ scan_modules() {
             sym="${line##* }"      # trailing field is the symbol name
             sym="${sym%%@*}"       # drop the @GLIBC_x.y.z version half
             [ -n "$sym" ] || continue
+            # Mach-O spells every extern with one leading underscore; the
+            # contract is written in plain C names, so probe the stripped
+            # form on this host while recording the raw spelling. Apple's
+            # fortified small-copy variant maps to its plain libc function,
+            # and dyld_stub_binder is the platform's lazy-bind plumbing —
+            # the ELF equivalent (PLT) is invisible to nm on Linux.
+            probe_sym="$sym"
+            if [[ "$(uname -s)" == "Darwin" ]]; then
+                stripped="${sym#/}"
+                while [ "${stripped#_}" != "$stripped" ]; do stripped="${stripped#_}"; done
+                case "$stripped" in
+                    memcpy_chk)  stripped="memcpy" ;;
+                    strncpy_chk) stripped="strncpy" ;;
+                    strcpy_chk)  stripped="strcpy" ;;
+                    dyld_stub_binder) probe_sym="" ;;
+                esac
+                [ -n "$probe_sym" ] && probe_sym="$stripped"
+            fi
             SEEN_IMPORT["$sym"]=1
-            if [ -z "${ALLOWED[$sym]:-}" ]; then
+            if [ -n "$probe_sym" ] && [ -z "${ALLOWED[$sym]:-}" ] &&
+               [ -z "${ALLOWED[$probe_sym]:-}" ]; then
                 bad_rows="$bad_rows
     $mod  imports  $sym"
             fi
@@ -399,13 +424,18 @@ BADEOF
     local clean_so="$sandbox/zcl_selftest_clean.so"
     local bad_so="$sandbox/zcl_selftest_violating.so"
     local cc_out
-    cc_out="$("$CC" -shared -fPIC -O0 -o "$clean_so" "$sandbox/clean_fixture.c" 2>&1)"
+    # The fixtures deliberately import symbols that only the resident image
+    # provides. GNU ld allows unresolved symbols in -shared by default; ld64
+    # requires -undefined dynamic_lookup for the same semantic.
+    local undef_flags=""
+    [[ "$(uname -s)" == "Darwin" ]] && undef_flags="-undefined dynamic_lookup"
+    cc_out="$("$CC" -shared -fPIC -O0 $undef_flags -o "$clean_so" "$sandbox/clean_fixture.c" 2>&1)"
     if [ ! -f "$clean_so" ]; then
         echo "$GATE: selftest FATAL — could not build the clean fixture module: $cc_out" >&2
         rm -rf "$sandbox"
         exit 2
     fi
-    cc_out="$("$CC" -shared -fPIC -O0 -o "$bad_so" "$sandbox/violating_fixture.c" 2>&1)"
+    cc_out="$("$CC" -shared -fPIC -O0 $undef_flags -o "$bad_so" "$sandbox/violating_fixture.c" 2>&1)"
     if [ ! -f "$bad_so" ]; then
         echo "$GATE: selftest FATAL — could not build the violating fixture module: $cc_out" >&2
         rm -rf "$sandbox"

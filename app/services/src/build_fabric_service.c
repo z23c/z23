@@ -4,6 +4,7 @@
 #include "services/build_fabric_service.h"
 
 #include "base/hex.h"
+#include "base/safe_alloc.h"
 #include "crypto/ed25519.h"
 #include "crypto/sha3.h"
 #include "util/log_macros.h"
@@ -13,6 +14,14 @@
 #include <string.h>
 
 enum { BUILD_FABRIC_ACTION_LIMIT = 256 };
+
+/* The 256-entry action array is about 516 KiB, larger than the usable portion
+ * of a default macOS worker stack. Keep every scan buffer on the heap. */
+static struct db_build_action *bf_actions_scratch(const char *label)
+{
+    return zcl_malloc(BUILD_FABRIC_ACTION_LIMIT *
+                      sizeof(struct db_build_action), label);
+}
 
 static void bf_sha_text(struct sha3_256_ctx *sha, const char *text)
 {
@@ -326,13 +335,17 @@ struct zcl_result build_fabric_submit(struct node_db *ndb,
     if (strcmp(job.state, "PLANNED") != 0 &&
         strcmp(job.state, "SNAPSHOTTED") != 0)
         return ZCL_ERR(-1, "job state %s cannot transition to QUEUED", job.state);
-    struct db_build_action actions[BUILD_FABRIC_ACTION_LIMIT];
+    struct db_build_action *actions = bf_actions_scratch("build.submit.actions");
+    if (!actions)
+        return ZCL_ERR(-1, "cannot allocate build action scan buffer");
     int count = db_build_job_actions(ndb, job_id, actions,
                                      BUILD_FABRIC_ACTION_LIMIT);
-    if (count <= 0)
+    if (count <= 0) {
+        free(actions);
         return ZCL_ERR(-1, "build job has no actions");
-    if (!node_db_begin(ndb))
-        return ZCL_ERR(-1, "cannot begin build submit transaction");
+    }
+    if (!node_db_begin(ndb)) { free(actions); return ZCL_ERR(
+        -1, "cannot begin build submit transaction"); }
     bool ok = true;
     for (int i = 0; i < count && ok; i++) {
         if (bf_terminal(actions[i].state)) {
@@ -346,6 +359,7 @@ struct zcl_result build_fabric_submit(struct node_db *ndb,
     (void)snprintf(job.state, sizeof(job.state), "QUEUED");
     job.updated_at = now;
     ok = ok && db_build_job_save(ndb, &job) && node_db_commit(ndb);
+    free(actions);
     if (!ok) {
         if (!node_db_rollback(ndb))
             LOG_ERROR("build_fabric", "submit and rollback both failed");
@@ -369,7 +383,9 @@ struct zcl_result build_fabric_claim(
     if (!db_build_worker_find(ndb, worker_id, &worker) || !worker.approved ||
         worker.revoked || (worker.expires_at && now >= worker.expires_at))
         return ZCL_ERR(-1, "worker is unapproved, expired, or revoked");
-    struct db_build_action queued[BUILD_FABRIC_ACTION_LIMIT];
+    struct db_build_action *queued = bf_actions_scratch("build.claim.queued");
+    if (!queued)
+        return ZCL_ERR(-1, "cannot allocate build action scan buffer");
     int count = db_build_actions_queued(ndb, queued,
                                         BUILD_FABRIC_ACTION_LIMIT);
     for (int i = 0; i < count; i++) {
@@ -391,8 +407,8 @@ struct zcl_result build_fabric_claim(
         next.started_at = 0;
         next.finished_at = 0;
         next.updated_at = now;
-        if (!node_db_begin(ndb))
-            return ZCL_ERR(-1, "cannot begin build claim transaction");
+        if (!node_db_begin(ndb)) { free(queued); return ZCL_ERR(
+            -1, "cannot begin build claim transaction"); }
         bool ok = db_build_action_claim_queued(ndb, &next);
         if (ok) {
             (void)snprintf(job.state, sizeof(job.state), "CLAIMED");
@@ -406,8 +422,10 @@ struct zcl_result build_fabric_claim(
         }
         *out = next;
         *claimed = true;
+        free(queued);
         return ZCL_OK;
     }
+    free(queued);
     return ZCL_OK;
 }
 
@@ -508,7 +526,11 @@ struct zcl_result build_fabric_recover_expired(
     if (requeued) *requeued = 0;
     if (!ndb || !ndb->open || now < 0 || !requeued)
         return ZCL_ERR(-1, "lease recovery requires an open db and time");
-    struct db_build_action expired[BUILD_FABRIC_ACTION_LIMIT];
+    struct db_build_action *expired = bf_actions_scratch("build.recover.expired");
+    if (!expired) {
+        if (requeued) *requeued = 0;
+        return ZCL_ERR(-1, "cannot allocate build action scan buffer");
+    }
     int count = db_build_actions_expired(ndb, now, expired,
                                          BUILD_FABRIC_ACTION_LIMIT);
     for (int i = 0; i < count; i++) {
@@ -531,8 +553,8 @@ struct zcl_result build_fabric_recover_expired(
         (void)snprintf(next.last_error, sizeof(next.last_error),
                        "lease-expired-requeued");
         next.updated_at = now;
-        if (!node_db_begin(ndb))
-            return ZCL_ERR(-1, "cannot begin expired-lease recovery");
+        if (!node_db_begin(ndb)) { free(expired); return ZCL_ERR(
+            -1, "cannot begin expired-lease recovery"); }
         bool ok = db_build_action_save_leased(ndb, &next, prior_state,
                                               prior_lease);
         if (ok) {
@@ -547,6 +569,7 @@ struct zcl_result build_fabric_recover_expired(
         }
         (*requeued)++;
     }
+    free(expired);
     return ZCL_OK;
 }
 
@@ -605,11 +628,13 @@ struct zcl_result build_fabric_cancel(struct node_db *ndb,
         return ZCL_OK;
     if (strcmp(job.state, "ACCEPTED") == 0 || strcmp(job.state, "CACHE_HIT") == 0)
         return ZCL_ERR(-1, "completed build job cannot be cancelled");
-    struct db_build_action actions[BUILD_FABRIC_ACTION_LIMIT];
+    struct db_build_action *actions = bf_actions_scratch("build.cancel.actions");
+    if (!actions)
+        return ZCL_ERR(-1, "cannot allocate build action scan buffer");
     int count = db_build_job_actions(ndb, job_id, actions,
                                      BUILD_FABRIC_ACTION_LIMIT);
-    if (!node_db_begin(ndb))
-        return ZCL_ERR(-1, "cannot begin cancellation transaction");
+    if (!node_db_begin(ndb)) { free(actions); return ZCL_ERR(
+        -1, "cannot begin cancellation transaction"); }
     bool ok = true;
     for (int i = 0; i < count && ok; i++) {
         if (!bf_terminal(actions[i].state)) {
@@ -626,6 +651,7 @@ struct zcl_result build_fabric_cancel(struct node_db *ndb,
     job.cancel_requested = 1;
     job.updated_at = now;
     ok = ok && db_build_job_save(ndb, &job) && node_db_commit(ndb);
+    free(actions);
     if (!ok) {
         if (!node_db_rollback(ndb))
             LOG_ERROR("build_fabric", "cancel and rollback both failed");
@@ -734,9 +760,10 @@ struct zcl_result build_fabric_receipt_accept(
     bool ok = db_build_receipt_save(ndb, receipt) &&
               db_build_action_save_leased(ndb, &action, "VERIFYING",
                                            receipt->lease_id);
-    struct db_build_action actions[BUILD_FABRIC_ACTION_LIMIT];
-    int count = ok ? db_build_job_actions(ndb, receipt->job_id, actions,
-                                           BUILD_FABRIC_ACTION_LIMIT) : 0;
+    struct db_build_action *actions = bf_actions_scratch("build.receipt.actions");
+    int count = actions && ok ? db_build_job_actions(
+        ndb, receipt->job_id, actions, BUILD_FABRIC_ACTION_LIMIT) : 0;
+    ok = ok && actions != NULL;
     bool all_accepted = passed && count > 0;
     for (int i = 0; i < count; i++)
         if (strcmp(actions[i].state, "ACCEPTED") != 0 &&
@@ -762,6 +789,7 @@ struct zcl_result build_fabric_receipt_accept(
         }
     }
     ok = ok && node_db_commit(ndb);
+    free(actions);
     if (!ok) {
         if (!node_db_rollback(ndb))
             LOG_ERROR("build_fabric", "receipt accept and rollback both failed");

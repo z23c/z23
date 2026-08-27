@@ -97,7 +97,7 @@ keeps the `_stub` variants).
 | `file_advice.h` | read-ahead / cache eviction | `fcntl(fd, F_RDAHEAD, 1)`; `fcntl(fd, F_NOCACHE, 1)` | `posix_fadvise(POSIX_FADV_SEQUENTIAL / _DONTNEED)` |
 | `file_watch_compat.h` | dev-loop mutation events | stub: `inotify_init1()` sets `ENOTSUP` and returns -1 | `<sys/inotify.h>` |
 | `system_memory.h` | total RAM | `sysctlbyname("hw.memsize")` | `sysinfo().totalram × mem_unit` |
-| `device_compat.h` | major/minor extraction | manual bit fields `(dev >> 24) & 0xff` / `dev & 0x00ffffff` | `sys/sysmacros.h` `major()`/`minor()` | <!-- doc-path-ok: glibc system header, named as the Linux-side API this seam replaces -->
+| `device_compat.h` | major/minor extraction | manual bit fields `(dev >> 24) & 0xff` / `dev & 0x00ffffff` | system sysmacros header `major()`/`minor()` |
 | `allocator_compat.h` | glibc malloc tuning | both functions compile empty (keyed on `__GLIBC__`, not on OS) | `mallopt(M_MMAP_THRESHOLD, …)`, `malloc_trim(0)` |
 | `clock.h` (+ `lib/platform/src/clock.c`) | injectable clock | same `clock_gettime(CLOCK_MONOTONIC/_REALTIME)` calls; feature-tested fallbacks for `_RAW` and per-thread CPU clocks, no Mach timebase | identical shape |
 | `os_proc.h` (+ `lib/platform/src/os_proc.c`) | process/host introspection | `proc_pid_rusage(RUSAGE_INFO_V2)`, `task_info(MACH_TASK_BASIC_INFO)`, `proc_pidinfo(PROC_PIDTBSDINFO)`, `sysctlbyname("hw.memsize")`, `_NSGetExecutablePath`, `_NSGetArgc/_NSGetArgv`; cgroup and available-memory stay `-1` | `/proc/self/status`, `/proc/meminfo`, `/proc/uptime` + field 22, `readlink("/proc/self/exe")`, cgroup v2 |
