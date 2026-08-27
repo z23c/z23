@@ -93,7 +93,7 @@ config/src/consensus_state_producer_receipt.c 787
 # platform port before any record existed; pinned at current LOC (the
 # writer-vs-install/activate split seam is noted there).
 config/src/consensus_state_snapshot_export.c 801
-config/src/consensus_state_snapshot_install_activate.c 1172 # ADR-0008 (seed-floor declaration); raised to current LOC per ADR-0010
+config/src/consensus_state_snapshot_install_activate.c 1169 # ADR-0008 (seed-floor declaration); reduced after descriptor binding
 app/services/src/header_sync_service.c 846
 app/controllers/src/event_agent_summary.c 853
 # 2026-08-15: worker-side quarantine now records exact input/output hashes and

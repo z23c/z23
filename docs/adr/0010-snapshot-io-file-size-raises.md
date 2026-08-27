@@ -1,6 +1,6 @@
 # ADR-0010: File-size raises for the consensus snapshot export/install IO
 
-- **Status:** Accepted 2026-08-27.
+- **Status:** Superseded 2026-08-27 by line-count reductions during integration.
 - **Deciders:** Project maintainer.
 - **Related:** [`0009-swap-money-shape-guard-file-size-raise.md`](./0009-swap-money-shape-guard-file-size-raise.md),
   `config/src/consensus_state_snapshot_export.c`,
@@ -53,3 +53,11 @@ debt incurred here.
   (`src/main_cli_modes.c` +1 in the same port) rides its own valve —
   `file_size_ceiling_lib_drift_count.txt` — with this document as the
   reviewed provenance.
+
+## Integrated resolution
+
+The release-hardening integration removed the new line from the exporter,
+reduced the installer to its prior 1,169-line ceiling, and reduced
+`src/main_cli_modes.c` to its prior baseline. The enforced baseline is 1,169
+and the WARN-tier drift-count ceiling is 22. No size ceiling was raised in the
+integrated release.
