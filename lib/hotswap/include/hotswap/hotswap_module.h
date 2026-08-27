@@ -80,8 +80,10 @@ typedef void (*zcl_hotswap_handler_fn)(const struct zcl_command_request *request
 /* The consensus pin. A module .so ALSO exports this string: the ZCL_CORE_SEAL_ROOT
  * its compile saw. The resident compares it to its own before any leaf is
  * admitted, so a module built against a different sealed consensus core is
- * refused at the door instead of running a private, stale copy of the inline
- * consensus arithmetic it compiled in. See hotswap/core_seal_root.h for why the
+ * refused before leaf publication instead of dispatching a private, stale copy
+ * of the inline consensus arithmetic it compiled in. dlopen may already have
+ * run ELF constructors; this pin is not an execution sandbox. See
+ * hotswap/core_seal_root.h for why the
  * pin is the seal ROOT and not a whole-tree build id — a controller edit must
  * not invalidate a module, a consensus edit must.
  *

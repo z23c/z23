@@ -84,7 +84,7 @@ bool boot_zcode_async_select_peer(
     return false;
 }
 
-void boot_zcode_async_log_no_peer(
+const char *boot_zcode_async_log_no_peer(
     struct vcs_zcode_work_node *work, const struct db_build_job *job,
     const char *action_id, int64_t now)
 {
@@ -110,13 +110,14 @@ void boot_zcode_async_log_no_peer(
     const char *reason = capable == 0 ? "no-capable-worker" :
         toolchain_match ? "worker-busy-or-target-mismatch" :
         "toolchain-capsule-mismatch";
+    const char *next = capable == 0
+        ? "z23 join"
+        : "run zcode work toolchain here and on the proving node";
     LOG_WARN("net.zcode_async",
              "dispatch refused action=%s stage=peer_selection "
              "reason=%s capable=%zu job_toolchain=%s "
              "peer0_toolchain=%s next_action=%s",
              action_id, reason, capable, job_toolchain,
-             peer_toolchain[0] ? peer_toolchain : "none",
-             capable == 0
-                 ? "restart a peer with -packagehost=1 -buildworker=1"
-                 : "run zcode work toolchain here and on the proving node");
+             peer_toolchain[0] ? peer_toolchain : "none", next);
+    return next;
 }

@@ -6,6 +6,7 @@
 #include "config/boot_internal.h"
 #include "config/boot_zcode_dht_access.h"
 #include "config/boot_zcode_dht_chain.h"
+#include "config/boot_zcode_dht_frame_auth.h"
 #include "config/boot_zcode_dht_possession.h"
 #include "config/boot_zcode_dht_reachability.h"
 #include "base/safe_alloc.h"
@@ -34,6 +35,9 @@ static struct boot_svc_ctx *g_dht_svc;
 static uint64_t g_dht_generation;
 static uint64_t g_last_create_attempt_mono;
 static bool g_create_in_progress;
+/* Episode flag for NONE-class scoring calls: set while a logged episode is
+ * open, cleared by the next accepted frame. */
+static _Atomic bool dht_score_none_logged;
 static uint8_t g_dht_genesis[32];
 static size_t g_cold_contact_cursor;
 static struct vcs_zcode_dht_time dht_now(void) {
@@ -254,13 +258,6 @@ static void dht_refresh_ready_sessions(void) {
   for (size_t i = 0; i < count; i++)
     p2p_node_release(nodes[i]);
 }
-static enum peer_offence dht_offence(enum vcs_zcode_dht_reject_reason reason) {
-  if (reason == VCS_ZCODE_DHT_REJECT_RATE || reason == VCS_ZCODE_DHT_REJECT_CAP)
-    return PEER_OFFENCE_FLOOD;
-  if (reason == VCS_ZCODE_DHT_REJECT_UNSOLICITED)
-    return PEER_OFFENCE_UNREQUESTED;
-  return PEER_OFFENCE_INVALID_PAYLOAD;
-}
 static void dht_send(struct msg_processor *mp, struct p2p_node *node,
                      const uint8_t *wire, size_t wire_len) {
   if (!p2p_node_begin_message(node, "zpkgswm", mp->params->pchMessageStart)) {
@@ -391,6 +388,7 @@ bool boot_zcode_dht_frame(struct msg_processor *mp, struct p2p_node *node,
 
   dht_lock();
   dht = generation == g_dht_generation ? g_dht : NULL;
+  bool service_enabled = dht && vcs_zcode_dht_service_enabled(dht);
   if (dht && have_session)
     (void)vcs_zcode_dht_service_session_open(dht, (uint64_t)node->id + 1,
                                              &session, now);
@@ -399,13 +397,29 @@ bool boot_zcode_dht_frame(struct msg_processor *mp, struct p2p_node *node,
                        dht, (uint64_t)node->id + 1, payload, payload_len, now,
                        &rejected);
   zcl_mutex_unlock(&g_dht_lock);
-  if (ok)
+  if (ok) {
+    atomic_store_explicit(&dht_score_none_logged, false,
+                          memory_order_relaxed);
     (void)dht_flush_node(mp, node);
-  if (!ok && mp && mp->net_mgr) {
+  } else if (mp && mp->net_mgr &&
+             boot_zcode_dht_frame_classify(ok, dht != NULL, service_enabled,
+                                           have_session,
+                                           rejected) !=
+                 BOOT_FRAME_INFRA_NON_ANSWER) {
     char context[96];
+    enum peer_offence offence = boot_zcode_dht_offence(rejected);
     snprintf(context, sizeof(context), "zcode dht: %s",
              vcs_zcode_dht_reject_reason_string(rejected));
-    peer_scoring_record(mp->net_mgr, node, dht_offence(rejected), context);
+    /* NONE-class calls never move a score; say so once per episode so the
+     * probes stay visible in the log without spamming every plaintext
+     * scan. The counters still count each one under frames_rejected. */
+    if (offence == PEER_OFFENCE_NONE &&
+        !atomic_exchange_explicit(&dht_score_none_logged, true,
+                                  memory_order_relaxed))
+      LOG_INFO("net.zcode_dht",
+               "probe scored NONE (%s); counted under frames_rejected",
+               vcs_zcode_dht_reject_reason_string(rejected));
+    peer_scoring_record(mp->net_mgr, node, offence, context);
   }
   return true;
 }

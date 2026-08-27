@@ -17,6 +17,7 @@
 #include "net/onion_v3_address.h"
 #include "net/onion_ratelimit.h"
 #include "net/puzzle.h"
+#include "crypto/sha3.h"
 #include "net/msgprocessor.h"
 #include "net/connman.h"
 #include "net/peer_strategy.h"
@@ -5288,10 +5289,11 @@ skip_parallel_tests:
     }
 
     /* ── Client-puzzle PoW guard for zchunkreq/zblkreq (lane I3) ────
-     * See msgprocessor_snapshot.c for the stateless design note:
-     * challenge = SHA3-256(secret||peer_ip||time_bucket), no per-peer
-     * server state, no seed distribution round trip. Difficulty is 0
-     * (mechanism present, gate open) until armed. */
+     * See msgprocessor_snapshot_serve.c for the stateless design note:
+     * challenge = SHA3-256(domain||peer_ip||time_bucket) with a fixed
+     * public lane tag, no per-peer server state, no seed distribution
+     * round trip. Difficulty is 0 (mechanism present, gate open) until
+     * armed. */
 
     printf("snap_pow: disarmed by default — gate stays open regardless "
            "of nonce... ");
@@ -5375,6 +5377,48 @@ skip_parallel_tests:
                failures++; }
     }
 
+    printf("snap_pow: challenge derives from public inputs only — an "
+           "external solver can meet the gate... ");
+    {
+        /* This is the pin that separates a solvable puzzle from an
+         * armed kill switch: rebuild the challenge from the documented
+         * PUBLIC derivation alone (domain tag || ip || bucket), solve it
+         * with the production primitives (zero token/ts, exactly as the
+         * snap lane calls them), and require admission to accept. Any
+         * hidden input — e.g. a process-random secret folded into the
+         * challenge — makes that solve useless and this block fails. */
+        msgprocessor_test_snap_pow_reset();
+        msg_snapshot_pow_set_armed(true);
+        uint8_t ip[16] = {0};
+        ip[15] = 9;
+        int64_t t = 8000000;
+        int bits = msgprocessor_test_snap_pow_bits_at(t); /* fresh window */
+        int64_t bucket = t / SNAP_POW_BUCKET_SECS;
+
+        static const uint8_t domain[16] = MSG_SNAP_POW_DOMAIN;
+        struct sha3_256_ctx ctx;
+        sha3_256_init(&ctx);
+        sha3_256_write(&ctx, domain, sizeof(domain));
+        sha3_256_write(&ctx, ip, sizeof(ip));
+        sha3_256_write(&ctx, (const unsigned char *)&bucket,
+                       sizeof(bucket));
+        uint8_t challenge[32];
+        sha3_256_finalize(&ctx, challenge);
+
+        static const uint8_t zero32[32] = {0};
+        uint64_t nonce = 0;
+        bool solved =
+            puzzle_solve(challenge, zero32, 0, bits, &nonce);
+        bool admitted = solved &&
+            msgprocessor_test_snap_pow_admit_at(ip, t, &nonce);
+        bool ok = solved && admitted;
+        if (ok) printf("OK (bits=%d nonce=%llu)\n", bits,
+                       (unsigned long long)nonce);
+        else { printf("FAIL (bits=%d solved=%d admitted=%d)\n",
+                      bits, solved, admitted);
+               failures++; }
+    }
+
     printf("snap_pow: stateless recompute — no per-peer server state, "
            "no single-use consumption... ");
     {
@@ -5386,7 +5430,7 @@ skip_parallel_tests:
 
         /* Two independent solves for the identical (ip, time_bucket)
          * input must land on the identical nonce — proof the challenge
-         * is a pure function of (secret, ip, bucket), not stateful
+         * is a pure function of (domain, ip, bucket), not stateful
          * server-issued material that changes between calls. */
         uint64_t nonce1 = 0, nonce2 = 0;
         bool solved1 = msgprocessor_test_snap_pow_solve(ip, t, bits, &nonce1);

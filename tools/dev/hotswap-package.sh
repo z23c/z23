@@ -55,11 +55,13 @@
 # BUILD_SOURCE_ID than the specific .so this script was asked to package), but
 # the immutable, per-artifact object `make hotswap-module-so` also writes and
 # never overwrites: build/hotswap-obj/mod-<safe>-<BUILD_SOURCE_ID>.o. That
-# name is derived from the .so's OWN filename, so the object relinked here is
-# provably the one that produced the exact bytes being packaged. If that
-# object is gone (build/hotswap-obj pruned by the epoch keeper), this refuses
-# rather than substitute a different build's object for a stand-in — see
-# HARD RULES below.
+# name is derived from the .so's OWN filename, then the object is re-linked
+# with the frozen shipping flags and the result must compare byte-for-byte
+# equal to the supplied .so. The filename is only a lookup hint; the byte
+# comparison proves the object that supplies source_tu/leaves produced the
+# artifact being receipted. If that object is gone (build/hotswap-obj pruned
+# by the epoch keeper), this refuses rather than substitute a different
+# build's object for a stand-in — see HARD RULES below.
 #
 # ── WHERE core_seal_root / abi_version COME FROM ───────────────────────────
 # hotswap_verify_so's CLI does not print either of these, so they cannot be
@@ -135,6 +137,8 @@
 #     produces)
 #   - the immutable object build/hotswap-obj/mod-<safe>-<id>.o for that exact
 #     .so is missing
+#   - re-linking that object with the frozen shipping flags is not byte-equal
+#     to the .so (artifact bytes and object-derived metadata are never mixed)
 #   - build/hotswap/fast/flags.env (the frozen CC/DEV_CFLAGS the module was
 #     built with) is missing
 #   - the verifier or the lazy relink fails to build
@@ -145,11 +149,13 @@
 # silent pass. `--verify` additionally treats any field mismatch (including a
 # manifest that does not exist yet) as a FAIL, not a crash.
 #
-# Scratch lives under ZCL_HOTSWAP_PACKAGE_DIR (default
+# Each invocation uses a private scratch directory under
+# ZCL_HOTSWAP_PACKAGE_DIR (default
 # ~/.local/state/zclassic23/scratch/hotswap-package), never /tmp and never
 # under build/ — the lazily-bound relink artifact this script builds must
 # never be mistakable for a shippable one, exactly the same reason
-# hotswap-verify.sh keeps its own relinks out of build/.
+# hotswap-verify.sh keeps its own relinks out of build/. Private per-run files
+# also prevent concurrent agents from cross-reading verifier or digest output.
 
 set -uo pipefail
 
@@ -163,8 +169,14 @@ cd "$ROOT"
 # shellcheck source=tools/scripts/sh_str.sh
 . tools/scripts/sh_str.sh
 
-SCRATCH="${ZCL_HOTSWAP_PACKAGE_DIR:-$HOME/.local/state/zclassic23/scratch/hotswap-package}"
-mkdir -p "$SCRATCH" || { echo "hotswap-package: FATAL — cannot create $SCRATCH" >&2; exit 2; }
+SCRATCH_ROOT="${ZCL_HOTSWAP_PACKAGE_DIR:-$HOME/.local/state/zclassic23/scratch/hotswap-package}"
+mkdir -p "$SCRATCH_ROOT" || { echo "hotswap-package: FATAL — cannot create $SCRATCH_ROOT" >&2; exit 2; }
+SCRATCH="$(mktemp -d "$SCRATCH_ROOT/run.XXXXXX")" || {
+    echo "hotswap-package: FATAL — cannot create private scratch under $SCRATCH_ROOT" >&2
+    exit 2
+}
+cleanup_run() { rm -rf "$SCRATCH"; }
+trap cleanup_run EXIT HUP INT TERM
 
 FLAGS_ENV="build/hotswap/fast/flags.env"
 HOTSWAP_SO_DIR="build/hotswap"
@@ -309,10 +321,12 @@ VERIFIER_BIN="$SCRATCH/hotswap_verify_so"
 ensure_verifier_built() {
     [ "$VERIFIER_BUILT" -eq 1 ] && return 0
     [ -r "$FLAGS_ENV" ] || fatal "$FLAGS_ENV missing — run 'make hotswap-module-so FILE=<tu>' once first"
-    local cc cflags
+    local cc cflags ldflags
     cc="$(sed -n 's/^CC=//p' "$FLAGS_ENV")"
     cflags="$(sed -n 's/^DEV_CFLAGS=//p' "$FLAGS_ENV")"
-    { [ -n "$cc" ] && [ -n "$cflags" ]; } || fatal "could not parse CC/DEV_CFLAGS from $FLAGS_ENV"
+    ldflags="$(sed -n 's/^HOTSWAP_MODULE_LDFLAGS=//p' "$FLAGS_ENV")"
+    { [ -n "$cc" ] && [ -n "$cflags" ] && [ -n "$ldflags" ]; } ||
+        fatal "could not parse CC/DEV_CFLAGS/HOTSWAP_MODULE_LDFLAGS from $FLAGS_ENV"
     # shellcheck disable=SC2086
     if ! $cc $cflags -ffunction-sections -fdata-sections \
             -o "$VERIFIER_BIN" \
@@ -326,8 +340,22 @@ ensure_verifier_built() {
         fatal "verifier build failed"
     fi
     CC_CACHED="$cc"
+    LDFLAGS_CACHED="$ldflags"
     VERIFIER_BUILT=1
     return 0
+}
+
+# Prove the immutable object is the exact input that produced the artifact.
+# A matching filename is only a lookup hint: without this byte comparison a
+# replaced .so could be hashed while source_tu/leaves came from another object,
+# yielding a self-consistent but false receipt on every later --verify run.
+object_matches_artifact() {
+    local obj="$1" so="$2" rebuilt="$SCRATCH/rebuilt.so"
+    # CC/LDFLAGS may name wrappers and multiple arguments, as in the Makefile.
+    # shellcheck disable=SC2086
+    $CC_CACHED $LDFLAGS_CACHED -o "$rebuilt" "$obj" 2>"$SCRATCH/relink-exact.log" ||
+        return 1
+    cmp -s "$rebuilt" "$so"
 }
 
 # relink_lazy <object> <out_so> -> re-link the module object with -z lazy
@@ -381,6 +409,12 @@ extract_fields() {
     }
 
     ensure_verifier_built
+
+    if ! object_matches_artifact "$obj" "$so"; then
+        echo "  FAIL: $so is not the exact deterministic link of $obj" >&2
+        echo "        refusing to combine artifact bytes with metadata from another object" >&2
+        return 1
+    fi
 
     lazy_so="$SCRATCH/$safe-$build_id.verify.so"
     if ! relink_lazy "$obj" "$lazy_so"; then

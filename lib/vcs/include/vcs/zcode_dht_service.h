@@ -102,6 +102,12 @@ enum vcs_zcode_dht_reject_reason {
   VCS_ZCODE_DHT_REJECT_RATE,
   VCS_ZCODE_DHT_REJECT_CAP,
   VCS_ZCODE_DHT_REJECT_UNAUTHORIZED,
+  /* An outbound reply could not be queued (serialize failure or full
+   * egress). That is an infrastructure non-answer, never peer evidence:
+   * the same causal condition as every other reply-push failure, and the
+   * composition layer scores it NONE. Appended last so every previously
+   * published reason keeps its position. */
+  VCS_ZCODE_DHT_REJECT_BACKPRESSURE,
   VCS_ZCODE_DHT_REJECT_COUNT
 };
 
@@ -171,6 +177,11 @@ struct vcs_zcode_dht_service_status {
   uint32_t active_record_operations;
   uint32_t publication_intents;
   uint32_t active_publications;
+  /* STORAGE_ACK intents currently gated (possession proof stale). Nonzero
+   * is routine around renewal windows and right after a restart; alert on
+   * possession_stall_releases climbing or this pinned near MAX. */
+  uint32_t stalled_possessions;
+  uint32_t possession_stall_releases;
   uint64_t lookup_rounds;
   uint64_t lookup_xor_progress;
   uint64_t lookup_queue_wait_s;

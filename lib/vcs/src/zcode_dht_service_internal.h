@@ -122,6 +122,10 @@ struct service_publication {
   bool used, possession_current;
   bool renewal_proof_required, renewal_proof_ready;
   uint64_t possession_proof_epoch;
+  /* Monotonic stamp of the first gated tick while custody is stale; zero
+   * means the residency clock is not running. Same state-not-zero doctrine
+   * as terminal_mono above. */
+  uint64_t possession_stall_since_mono;
   enum service_publication_phase phase;
   struct vcs_zcode_dht_record record;
   uint64_t lifetime_s, lookup_id, next_attempt_mono, backoff_s;
@@ -199,6 +203,7 @@ struct vcs_zcode_dht_service {
   uint64_t find_record_sent, records_sent;
   uint64_t store_record_sent, store_result_sent;
   uint64_t unauthenticated_expired, duplicate_sessions_retired;
+  uint64_t possession_stall_releases;
   uint64_t lookup_rounds, lookup_xor_progress, lookup_queue_wait_s;
   uint64_t lookup_terminations[VCS_ZCODE_DHT_TERMINATION_COUNT];
   uint32_t scheduler_cursor;
@@ -270,6 +275,14 @@ bool vcs_zcode_dht_publications_save(
 #define PUBLICATION_RETRY_MIN_S 30u
 #define PUBLICATION_RETRY_MAX_S 3600u
 #define PUBLICATION_RENEW_FLOOR_S 60u
+/* Bounded residency for a STORAGE_ACK whose possession proof can never pass
+ * (object deleted, root re-keyed, datadir moved). Sized far above the 30s
+ * possession retry, the 6h scrub, and a multi-GiB chunked rebuild at
+ * 1 MiB/cycle, while capping a dead object's slot residency well inside the
+ * 7-day record window. Measured from first gated tick in this process, so a
+ * superseding re-commit legitimately restarts the clock for refreshed
+ * streams. */
+#define PUBLICATION_POSSESSION_STALL_MAX_S (2u * 86400u)
 
 /* Expired-row reclaim cadence for the signed-record store. Dead rows stop
  * consuming capacity the moment put() or collect() sees them, but the
@@ -286,6 +299,12 @@ uint64_t publication_renew_at(const struct service_publication *publication);
  * (or service restart) reclaims them. A no-op on a fresh slot. */
 void publication_cancel_active(struct vcs_zcode_dht_service *service,
                                struct service_publication *publication);
+/* Free the WHOLE slot: detach children, wipe every field, mark dirty. The
+ * one true release path — supersede-heal, SRA expiry, and possession-stall
+ * eviction all mean the same thing and must not re-derive it. */
+void publication_release(struct vcs_zcode_dht_service *service,
+                         struct service_publication *publication,
+                         uint64_t monotonic_s);
 void publication_drive(struct vcs_zcode_dht_service *service,
                        struct service_publication *publication,
                        struct vcs_zcode_dht_time now);

@@ -2589,6 +2589,30 @@ static int test_record_transport_and_restart(void) {
               0);
     vcs_zcode_dht_service_status(a, &publication_status);
     ASSERT_EQ(publication_status.publication_intents, 2);
+    /* Gated custody is bounded residency: the reloaded ACK comes back
+     * non-current, arms its stall clock on the first gated tick, and the
+     * slot is released once the PROCESS-monotonic clock passes the cap
+     * while the wall clock stays inside the record's own window. Only a
+     * hand-built decoupled time can express that — real elapsed wall can
+     * never reach the residency bound before the record's expiry lane
+     * preempts it. */
+    vcs_zcode_dht_service_status(a, &publication_status);
+    ASSERT_EQ(publication_status.stalled_possessions, 1);
+    ASSERT_EQ(publication_status.possession_stall_releases, 0);
+    struct vcs_zcode_dht_time stall_breach = {
+        .wall_unix = 1999,
+        .monotonic_s = test_time(2001).monotonic_s +
+                       PUBLICATION_POSSESSION_STALL_MAX_S};
+    vcs_zcode_dht_service_tick(a, stall_breach);
+    vcs_zcode_dht_service_status(a, &publication_status);
+    ASSERT_EQ(publication_status.publication_intents, 1);
+    ASSERT_EQ(publication_status.stalled_possessions, 0);
+    ASSERT_EQ(publication_status.possession_stall_releases, 1);
+    /* Releasing the intent frees the slot, not the signed evidence: the
+     * stored record stays locally queryable until its own expiry. */
+    ASSERT_EQ(vcs_zcode_dht_service_record_local_query(
+                  a, 2001, &ack_selector, local, 1),
+              1);
     vcs_package_store_close(ack_store);
     test_rm_rf_recursive(ack_dir);
     vcs_zcode_dht_service_free(a, test_time(2001));
@@ -4849,6 +4873,65 @@ int test_zcode_dht_service(void) {
         (struct vcs_zcode_dht_time){.wall_unix = 3000, .monotonic_s = 3007},
         &rejected));
     ASSERT_EQ(rejected, VCS_ZCODE_DHT_REJECT_REPLAY);
+
+    /* A full egress queue is our own backpressure, not capacity guilt on
+     * the sender. Fill every outbound slot with otherwise-accepted signed
+     * FIND_NODE replies, then a further valid find must refuse as
+     * BACKPRESSURE: counted under its own reason, never folded into the
+     * peer's flood budget via CAP.
+     *
+     * Pacing is load-bearing: the token bucket sustains exactly four
+     * requests per wall second (burst eight is a one-shot spike from
+     * empty), so pushing eight per second self-starves into a bogus RATE
+     * refusal long before the queue fills. Four per second never trips
+     * the limiter; every query ID stays fresh so the 30s replay ledger
+     * stays inert; monotonic time only moves forward of any stamp b saw
+     * in the lanes above. One idle second before the probe refills a
+     * token so its first refusal comes from the full queue itself. */
+    {
+      const uint64_t rate_per_second = 4;
+      const uint64_t seconds_needed =
+          VCS_ZCODE_DHT_SERVICE_MAX_OUTBOUND / rate_per_second;
+      struct vcs_zcode_dht_service_status before;
+      vcs_zcode_dht_service_status(b, &before);
+      ASSERT_EQ(before.frames_rejected[VCS_ZCODE_DHT_REJECT_BACKPRESSURE],
+                0);
+      ASSERT_EQ(drain(b), 0); /* start empty: every reply below queues */
+      uint64_t pushed = 0;
+      for (uint64_t second = 0; pushed < VCS_ZCODE_DHT_SERVICE_MAX_OUTBOUND;
+           second++) {
+        for (uint64_t i = 0; i < rate_per_second &&
+             pushed < VCS_ZCODE_DHT_SERVICE_MAX_OUTBOUND;
+             i++) {
+          ASSERT(signed_find(adir, 42, transcript,
+                             (uint8_t)(0x21 + pushed), 0x3c, oversized,
+                             sizeof(oversized), &forged_len));
+          struct vcs_zcode_dht_time when = {.wall_unix = 4000 + second,
+                                            .monotonic_s = 3200 + second};
+          ASSERT(vcs_zcode_dht_service_handle_frame(b, 1, oversized,
+                                                    forged_len, when,
+                                                    &rejected));
+          pushed++;
+        }
+      }
+      /* Exactly MAX_OUTBOUND replies queued; nothing flushed meanwhile. */
+      ASSERT_EQ(pushed, (uint64_t)VCS_ZCODE_DHT_SERVICE_MAX_OUTBOUND);
+      ASSERT(signed_find(adir, 42, transcript, 0xee, 0x3c, oversized,
+                         sizeof(oversized), &forged_len));
+      ASSERT(!vcs_zcode_dht_service_handle_frame(
+          b, 1, oversized, forged_len,
+          (struct vcs_zcode_dht_time){
+              .wall_unix = 4000 + seconds_needed + 1,
+              .monotonic_s = 3200 + seconds_needed + 1},
+          &rejected));
+      ASSERT_EQ(rejected, VCS_ZCODE_DHT_REJECT_BACKPRESSURE);
+      struct vcs_zcode_dht_service_status after;
+      vcs_zcode_dht_service_status(b, &after);
+      ASSERT_EQ(after.frames_rejected[VCS_ZCODE_DHT_REJECT_BACKPRESSURE],
+                before.frames_rejected[VCS_ZCODE_DHT_REJECT_BACKPRESSURE] +
+                    1);
+      (void)drain(b);
+    }
 
     /* A node ID owns one authenticated service session. Newer local serials
      * replace older sessions; equal serials retain the lower peer ID, and a

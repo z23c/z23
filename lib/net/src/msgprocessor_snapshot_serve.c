@@ -94,7 +94,15 @@ static pthread_mutex_t g_block_manifest_mutex = PTHREAD_MUTEX_INITIALIZER;
  * seed + single-use ring; this guard only needs the pure, already-tested
  * digest/verify primitives it exposes):
  *
- *   challenge   = SHA3-256(secret[32] || peer_ip[16] || time_bucket[8 LE])
+ *   challenge   = SHA3-256(domain[16] || peer_ip[16] || time_bucket[8 LE])
+ *                 where domain is the fixed lane tag below — it exists to
+ *                 namespace the digest, not to hide anything. It must NOT
+ *                 be process-random material: a requester that cannot
+ *                 derive the challenge can never produce a valid nonce, so
+ *                 arming a secret-bound variant would permanently deny
+ *                 every external client (the in-process tests could not
+ *                 catch that, since solver and verifier share the secret
+ *                 there).
  *   solve       = nonce such that SHA3-256(challenge || 0^32 || 0 || nonce)
  *                 has D leading zero bits (reuses the hardened
  *                 puzzle_verify/puzzle_solve digest from
@@ -102,11 +110,11 @@ static pthread_mutex_t g_block_manifest_mutex = PTHREAD_MUTEX_INITIALIZER;
  *                 binding and freshness are already carried by `challenge`
  *                 itself via peer_ip + time_bucket).
  *
- * `secret` is one random value generated at first use and held only in
- * this process's memory (never persisted, never a consensus predicate).
- * time_bucket rotates automatically off wall-clock, so verification is a
- * pure recompute — no seed distribution round trip, no server-side
- * table to evict or flood.
+ * The derivation is public by construction: peer binding and freshness are
+ * carried entirely by (peer_ip, time_bucket). Arming is still deferred —
+ * requesters do not attach nonces yet, so an armed gate today would deny
+ * honest legacy peers outright (see msgprocessor.h for the constants and
+ * the adaptive-difficulty ramp).
  *
  * Difficulty is 0 (mechanism present, gate open) until armed via
  * msg_snapshot_pow_set_armed(true) — see lane note point 3. When
@@ -122,35 +130,21 @@ static pthread_mutex_t g_block_manifest_mutex = PTHREAD_MUTEX_INITIALIZER;
  * here) so the test suite can assert scaling bounds without duplicating
  * magic numbers. */
 
-static uint8_t g_snap_pow_secret[32];
-static _Atomic bool g_snap_pow_secret_ready = false;
-static pthread_mutex_t g_snap_pow_secret_mutex = PTHREAD_MUTEX_INITIALIZER;
-
 static _Atomic bool g_snap_pow_armed = false;
 
 static pthread_mutex_t g_snap_pow_load_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int64_t g_snap_pow_window_start = 0;
 static uint32_t g_snap_pow_reqs_in_window = 0;
 
-static void snap_pow_ensure_secret(void)
-{
-    if (atomic_load(&g_snap_pow_secret_ready))
-        return;
-    pthread_mutex_lock(&g_snap_pow_secret_mutex);
-    if (!atomic_load(&g_snap_pow_secret_ready)) {
-        GetRandBytes(g_snap_pow_secret, sizeof(g_snap_pow_secret));
-        atomic_store(&g_snap_pow_secret_ready, true);
-    }
-    pthread_mutex_unlock(&g_snap_pow_secret_mutex);
-}
-
 static void snap_pow_challenge(const uint8_t peer_ip[16], int64_t time_bucket,
                                uint8_t out[32])
 {
-    snap_pow_ensure_secret();
+    /* Same 15-char lane tag shape as zcl.dht.query.v1: a namespaced
+     * constant every solver can recompute. */
+    static const uint8_t snap_pow_domain[16] = MSG_SNAP_POW_DOMAIN;
     struct sha3_256_ctx ctx;
     sha3_256_init(&ctx);
-    sha3_256_write(&ctx, g_snap_pow_secret, sizeof(g_snap_pow_secret));
+    sha3_256_write(&ctx, snap_pow_domain, sizeof(snap_pow_domain));
     sha3_256_write(&ctx, peer_ip, 16);
     sha3_256_write(&ctx, (const unsigned char *)&time_bucket,
                    sizeof(time_bucket));

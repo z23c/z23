@@ -32,10 +32,13 @@ static bool pending_candidate_valid(struct vcs_zcode_dht_service *s,
 const char *
 vcs_zcode_dht_reject_reason_string(enum vcs_zcode_dht_reject_reason r) {
   static const char *const names[] = {
-      "malformed", "plaintext",         "delegation", "identity",
-      "signature", "wrong-session",     "replay",     "unsolicited",
-      "expired",   "poisoned-contacts", "rate-limit", "capacity",
-      "unauthorized"};
+      "malformed",    "plaintext",
+      "delegation",   "identity",
+      "signature",    "wrong-session",
+      "replay",       "unsolicited",
+      "expired",      "poisoned-contacts",
+      "rate-limit",   "capacity",
+      "unauthorized", "backpressure"};
   return (unsigned)r < VCS_ZCODE_DHT_REJECT_COUNT ? names[r] : "unknown";
 }
 
@@ -337,7 +340,8 @@ static int node_cmp(const void *a, const void *b) { return memcmp(a, b, 32); }
 
 static bool reply_nodes(struct vcs_zcode_dht_service *s, struct service_peer *p,
                         const uint8_t query[16], const uint8_t target[32],
-                        uint64_t now) {
+                        uint64_t now,
+                        enum vcs_zcode_dht_reject_reason *rejected_out) {
   struct vcs_zcode_dht_contact closest[VCS_ZCODE_DHT_K];
   size_t n = vcs_zcode_dht_table_closest(s->table, target, closest,
                                          VCS_ZCODE_DHT_K - 1);
@@ -356,8 +360,13 @@ static bool reply_nodes(struct vcs_zcode_dht_service *s, struct service_peer *p,
   if (vcs_zcode_dht_msg_serialize_nodes(&m, p->session.transcript_hash,
                                         s->online_seed, wire, sizeof(wire),
                                         &len) != VCS_ZCODE_DHT_OK ||
-      !outbound_push(s, p->peer_id, wire, len))
+      !outbound_push(s, p->peer_id, wire, len)) {
+    /* Same causal condition as every other outbound failure: our egress
+     * could not take the frame. That is not capacity guilt on the peer,
+     * so it reports BACKPRESSURE instead of CAP. */
+    reject(s, VCS_ZCODE_DHT_REJECT_BACKPRESSURE, rejected_out);
     return false;
+  }
   s->nodes_sent++;
   return true;
 }
@@ -589,10 +598,9 @@ bool vcs_zcode_dht_service_handle_frame(
   }
   if (m.kind == VCS_ZCODE_DHT_MSG_FIND_NODE) {
     s->find_received++;
-    if (!reply_nodes(s, p, qid, m.find_node.target_node_id, now.wall_unix)) {
-      reject(s, VCS_ZCODE_DHT_REJECT_CAP, rejected_out);
+    if (!reply_nodes(s, p, qid, m.find_node.target_node_id, now.wall_unix,
+                     rejected_out))
       return false;
-    }
   } else if (m.kind == VCS_ZCODE_DHT_MSG_NODES) {
     s->nodes_received++;
     if (q->kind == QUERY_LOOKUP) {

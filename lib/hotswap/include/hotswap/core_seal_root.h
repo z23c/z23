@@ -31,7 +31,7 @@
  * Pinning the SEAL ROOT rather than a whole-tree build id is what keeps the
  * fast loop fast: editing a controller does not move this value, so the module
  * just built still mounts. Editing consensus does move it, and then every
- * module compiled against the old core is refused at the door.
+ * module compiled against the old core is refused before leaf publication.
  *
  * SCOPE OF THE GUARANTEE. This is a generated, checked-in mirror, and nothing
  * in the BUILD forces it to be current: the hotswap-module-so recipe does not
