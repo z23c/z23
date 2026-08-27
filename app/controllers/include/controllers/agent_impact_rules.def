@@ -657,7 +657,7 @@ AGENT_IMPACT_RULE("lib/codeindex/*|config/commands/code.def|tools/command/native
 
 /* Source-tree SHA3 Merkle identity: the leaf/node hashing rule, its snapshot
  * cache, and the code.merkle surface that projects it. */
-AGENT_IMPACT_RULE("lib/codeindex/src/codeindex_merkle.c|lib/codeindex/include/codeindex/codeindex_merkle.h|lib/test/src/test_code_merkle.c|lib/test/src/test_code_merkle_proof.c", "code_merkle code_merkle_proof codeindex command_registry_catalog make_lint_gates")
+AGENT_IMPACT_RULE("lib/codeindex/src/codeindex_merkle.c|lib/codeindex/include/codeindex/codeindex_merkle.h|lib/test/src/test_code_merkle.c", "code_merkle codeindex command_registry_catalog make_lint_gates")
 
 /* Emitted-text -> emitting-code attribution: the query-time source-evidence
  * scan, the leaf that joins it against blocker_remedy_bindings.def and
@@ -936,7 +936,7 @@ AGENT_IMPACT_RULE("lib/test/src/test_code_capsule.c", "code_capsule make_lint_ga
  * module and the resident it mounts into can prove they were compiled against
  * the same sealed consensus core. Touching the mirror, its generator, its lint
  * gate, or the manifest itself changes what every module is admitted against. */
-AGENT_IMPACT_RULE("lib/test/src/test_hotswap_module_v2.c|lib/test/src/test_hotswap_shelf.c|lib/hotswap/include/hotswap/hotswap_module.h|lib/hotswap/include/hotswap/hotswap_shelf.h|lib/hotswap/src/hotswap_activate.c|config/hotswap_swappable.def|config/hotswap_islands.def|config/hotfork_capsules.def|tools/lint/check_hotswap_swappable_shape.sh|tools/lint/check_hotswap_static_state.sh|tools/dev/hotswap-module-fast.sh|tools/dev/devloop_hotswap_build.c|tools/dev/hotswap-resident-bench.sh|lib/test/fixtures/hotswap_swappable_not_ready_read.def|lib/test/fixtures/hotswap_swappable_dup_leaf.def|lib/test/fixtures/hotswap_swappable_bad_static.def|lib/test/fixtures/hotswap_islands_*.def|lib/hotswap/include/hotswap/core_seal_root.h|tools/scripts/gen_core_seal_root.sh|tools/lint/check_core_seal_root_mirror.sh|core/MANIFEST.sha3", "hotswap_module_v2 hotswap_module hotswap_shelf hotswap_loader hotswap_simnet command_handler_snapshot dev_platform make_lint_gates")
+AGENT_IMPACT_RULE("lib/test/src/test_hotswap_module_v2.c|lib/hotswap/include/hotswap/hotswap_module.h|lib/hotswap/src/hotswap_activate.c|config/hotswap_swappable.def|config/hotswap_islands.def|config/hotfork_capsules.def|tools/lint/check_hotswap_swappable_shape.sh|tools/lint/check_hotswap_static_state.sh|tools/dev/hotswap-module-fast.sh|tools/dev/devloop_hotswap_build.c|tools/dev/hotswap-resident-bench.sh|lib/test/fixtures/hotswap_swappable_not_ready_read.def|lib/test/fixtures/hotswap_swappable_dup_leaf.def|lib/test/fixtures/hotswap_swappable_bad_static.def|lib/test/fixtures/hotswap_islands_*.def|lib/hotswap/include/hotswap/core_seal_root.h|tools/scripts/gen_core_seal_root.sh|tools/lint/check_core_seal_root_mirror.sh|core/MANIFEST.sha3", "hotswap_module_v2 hotswap_module hotswap_loader hotswap_simnet command_handler_snapshot dev_platform make_lint_gates")
 /* Packaging half of the same pin. tools/dev/hotswap-package.sh writes and
  * verifies the <artifact>.manifest receipt (SHA3-256, source TU, leaves,
  * abi_version, core_seal_root) that a human reads before mounting a module
