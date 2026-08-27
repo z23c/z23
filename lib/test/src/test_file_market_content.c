@@ -131,6 +131,19 @@ static const char *content_kv_str(struct json_value *value, const char *key)
     return found && found->type == JSON_STR ? json_get_str(found) : NULL;
 }
 
+struct content_interleave_fixture {
+    struct node_db *ndb;
+    struct market_content_record row;
+    bool saved;
+};
+
+static void content_interleave_registration(void *opaque)
+{
+    struct content_interleave_fixture *fixture = opaque;
+    file_market_content_set_precommit_test_hook(NULL, NULL);
+    fixture->saved = db_market_content_save(fixture->ndb, &fixture->row);
+}
+
 int file_market_content_tests(void)
 {
     int failures = 0;
@@ -174,6 +187,19 @@ int file_market_content_tests(void)
         return failures;
     }
 
+    {
+        uint8_t identity[32];
+        struct node_db closed_probe;
+        memset(&closed_probe, 0, sizeof(closed_probe));
+        CONTENT_CHECK("registration state distinguishes absent from error",
+            db_market_content_registration_identity(
+                &ndb, offer.offer_id, identity) ==
+                MARKET_CONTENT_STATE_ABSENT &&
+            db_market_content_registration_identity(
+                &closed_probe, offer.offer_id, identity) ==
+                MARKET_CONTENT_STATE_ERROR);
+    }
+
     /* Counts are measured from the store, never capped at a listing
      * window: an empty registry counts zero, an unreadable one fails
      * closed to -1. */
@@ -198,9 +224,11 @@ int file_market_content_tests(void)
         memcmp(registered.root_hash, root, 32) == 0);
 
     struct market_content_public_record listed[2];
-    int listed_count = db_market_content_list(&ndb, listed, 2);
+    int listed_total = -1;
+    int listed_count = db_market_content_list_snapshot(
+        &ndb, listed, 2, &listed_total);
     CONTENT_CHECK("path-free model projection lists one binding",
-        listed_count == 1 &&
+        listed_count == 1 && listed_total == 1 &&
         memcmp(listed[0].offer_id, offer.offer_id, 32) == 0);
 
     struct file_market_delivery_chunk loaded;
@@ -251,13 +279,11 @@ int file_market_content_tests(void)
     char hidden_rendered[4096];
     size_t hidden_len = json_write(&hidden_index, hidden_rendered,
                                    sizeof(hidden_rendered));
-    const struct json_value *hidden_count =
-        json_get(&hidden_index, "hidden_by_profile");
-    CONTENT_CHECK("unreviewed content is withheld and counted, not listed",
+    CONTENT_CHECK("public index withholds rows and private counts",
         hidden_indexed && hidden_len > 0 &&
         !strstr(hidden_rendered, "offer_id") &&
-        hidden_count && hidden_count->type == JSON_INT &&
-        json_get_int(hidden_count) >= 1);
+        json_get(&hidden_index, "hidden_by_profile") == NULL &&
+        json_get(&hidden_index, "total") == NULL);
     json_free(&hidden_index);
 
     /* After this node signs off on its own content the row appears — and
@@ -398,19 +424,23 @@ int file_market_content_tests(void)
         bool window_indexed =
             seeded && api_market_content_list(&window_index);
         const struct json_value *shown_v = json_get(&window_index, "shown");
-        const struct json_value *total_v = json_get(&window_index, "total");
-        const struct json_value *hidden_v =
-            json_get(&window_index, "hidden_by_profile");
         const struct json_value *rows_v =
             json_get(&window_index, "contents");
-        CONTENT_CHECK("index discloses shown and total over the window",
-            window_indexed && shown_v && total_v && hidden_v && rows_v &&
+        CONTENT_CHECK("public index reveals only servable window rows",
+            window_indexed && shown_v && rows_v &&
             rows_v->type == JSON_ARR &&
             json_size(rows_v) == 3 &&
             json_get_int(shown_v) == 3 &&
-            json_get_int(total_v) == 257 &&
-            json_get_int(hidden_v) == 253);
+            json_get(&window_index, "total") == NULL &&
+            json_get(&window_index, "hidden_by_profile") == NULL);
         json_free(&window_index);
+
+        struct market_content_public_record snapshot[2];
+        int snapshot_total = -1;
+        int snapshot_count = db_market_content_list_snapshot(
+            &wndb, snapshot, 2, &snapshot_total);
+        CONTENT_CHECK("local snapshot binds bounded rows to exact total",
+            snapshot_count == 2 && snapshot_total == 257);
 
         /* An uncountable store keeps the listing but drops the total. */
         rpc_market_set_state(NULL);
@@ -535,6 +565,9 @@ int file_market_content_tests(void)
                 strstr(commit_rendered, gate_path) == NULL &&
                 strstr(commit_rendered, "content_path") == NULL &&
                 db_market_content_count(&ndb) == rows_before + 1);
+        int64_t gate_registered_at = registered_at &&
+            registered_at->type == JSON_INT
+                ? json_get_int(registered_at) : 0;
         json_free(&gate);
 
         /* Replaying that commit after the registration moved is stale:
@@ -579,6 +612,64 @@ int file_market_content_tests(void)
                 path_reason && strstr(path_reason, "STALE_PLAN") != NULL &&
                 db_market_content_count(&ndb) == rows_before + 1);
         json_free(&gate);
+
+        /* A timestamp is not a row identity. Rebinding the same offer in
+         * the same second must change the plan, and a rewrite injected after
+         * hashing must be observed by the transactional compare. */
+        char alternate_path[512], canonical_gate[MARKET_CONTENT_PATH_MAX];
+        char canonical_alternate[MARKET_CONTENT_PATH_MAX];
+        snprintf(alternate_path, sizeof(alternate_path), "%s/gate-alt.bin",
+                 dir);
+        bool alternate_ready =
+            content_write_file(alternate_path, payload, sizeof(payload)) &&
+            realpath(gate_path, canonical_gate) &&
+            realpath(alternate_path, canonical_alternate);
+        uint8_t before_same_second[32], after_same_second[32];
+        char state_name[MARKET_CONTENT_REGISTRATION_STATE_MAX];
+        struct zcl_result before_plan = alternate_ready
+            ? file_market_content_registration_plan(
+                &ndb, gate_offer.offer_id, gate_path, before_same_second,
+                state_name)
+            : ZCL_ERR(-1, "alternate fixture failed");
+        struct market_content_record same_second;
+        memset(&same_second, 0, sizeof(same_second));
+        memcpy(same_second.offer_id, gate_offer.offer_id, 32);
+        memcpy(same_second.root_hash, root, 32);
+        snprintf(same_second.private_path, sizeof(same_second.private_path),
+                 "%s", canonical_alternate);
+        same_second.size_bytes = sizeof(payload);
+        same_second.num_chunks = 1;
+        same_second.chunk_hashes = chunk_sha3;
+        same_second.chunk_hashes_len = sizeof(chunk_sha3);
+        same_second.registered_at = gate_registered_at;
+        bool rebound_same_second = before_plan.ok &&
+            db_market_content_save(&ndb, &same_second);
+        struct zcl_result after_plan = rebound_same_second
+            ? file_market_content_registration_plan(
+                &ndb, gate_offer.offer_id, gate_path, after_same_second,
+                state_name)
+            : ZCL_ERR(-1, "same-second rebind failed");
+        CONTENT_CHECK("same-second durable row rewrite stales the plan",
+            after_plan.ok &&
+            memcmp(before_same_second, after_same_second, 32) != 0);
+
+        struct content_interleave_fixture interleave;
+        memset(&interleave, 0, sizeof(interleave));
+        interleave.ndb = &ndb;
+        interleave.row = same_second;
+        snprintf(interleave.row.private_path,
+                 sizeof(interleave.row.private_path), "%s", canonical_gate);
+        file_market_content_set_precommit_test_hook(
+            content_interleave_registration, &interleave);
+        struct market_content_public_record refused_record;
+        struct zcl_result interleaved =
+            file_market_content_register_planned(
+                &ndb, gate_offer.offer_id, gate_path, after_same_second,
+                gate_registered_at, &refused_record);
+        file_market_content_set_precommit_test_hook(NULL, NULL);
+        CONTENT_CHECK("post-hash interleaving rewrite is atomically refused",
+            interleave.saved && !interleaved.ok &&
+            strstr(interleaved.message, "STALE_PLAN") != NULL);
     }
 
     rpc_market_set_state(NULL);

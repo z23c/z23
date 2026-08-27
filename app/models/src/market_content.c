@@ -3,6 +3,7 @@
 
 #include "models/market_content.h"
 
+#include "base/serialize_le.h"
 #include "crypto/sha3.h"
 #include "net/file_market.h"
 #include "util/ar_step_readonly.h"
@@ -152,18 +153,138 @@ int db_market_content_list(struct node_db *ndb,
         if (!market_content_read_public(s, 0, &out[count])) continue);
 }
 
-bool db_market_content_find_registered_at(struct node_db *ndb,
-                                          const uint8_t offer_id[32],
-                                          int64_t *registered_at)
+int db_market_content_list_snapshot(
+    struct node_db *ndb, struct market_content_public_record *out, size_t max,
+    int *total_out)
 {
-    if (!ndb || !ndb->open || !offer_id || !registered_at)
-        LOG_FAIL("market",
-                 "market content registered_at find: invalid arguments");
+    if (total_out)
+        *total_out = -1;
+    if (!ndb || !ndb->open || !out || max == 0 || !total_out) {
+        LOG_ERROR("market", "market content snapshot: invalid arguments");
+        return -1;
+    }
     sqlite3_stmt *s = NULL;
-    AR_QUERY_ONE_BOOL(ndb, s,
-        "SELECT registered_at FROM market_contents WHERE offer_id=?",
-        AR_BIND_BLOB(s, 1, offer_id, 32),
-        *registered_at = AR_COL_INT(s, 0));
+    if (sqlite3_prepare_v2(ndb->db,
+            "SELECT offer_id,root_hash,size_bytes,num_chunks,registered_at,"
+            "(SELECT count(*) FROM market_contents) "
+            "FROM market_contents ORDER BY registered_at DESC LIMIT ?",
+            -1, &s, NULL) != SQLITE_OK || !s) {
+        LOG_ERROR("market", "market content snapshot prepare failed: %s",
+                  sqlite3_errmsg(ndb->db));
+        return -1;
+    }
+    if (sqlite3_bind_int64(s, 1, (sqlite3_int64)max) != SQLITE_OK) {
+        LOG_ERROR("market", "market content snapshot bind failed: %s",
+                  sqlite3_errmsg(ndb->db));
+        AR_FINALIZE(s);
+        return -1;
+    }
+
+    int count = 0;
+    int rc = SQLITE_OK;
+    while ((rc = AR_STEP_ROW_READONLY(s)) == SQLITE_ROW) {
+        int64_t total = sqlite3_column_int64(s, 5);
+        if (total < 0 || total > INT_MAX) {
+            LOG_ERROR("market", "market content snapshot total is invalid");
+            AR_FINALIZE(s);
+            return -1;
+        }
+        *total_out = (int)total;
+        if (!market_content_read_public(s, 0, &out[count]))
+            continue;
+        count++;
+    }
+    if (rc != SQLITE_DONE) {
+        LOG_ERROR("market", "market content snapshot read failed: %s",
+                  sqlite3_errmsg(ndb->db));
+        AR_FINALIZE(s);
+        *total_out = -1;
+        return -1;
+    }
+    AR_FINALIZE(s);
+    if (*total_out < 0)
+        *total_out = 0;
+    return count;
+}
+
+enum market_content_state_result db_market_content_registration_identity(
+    struct node_db *ndb, const uint8_t offer_id[32], uint8_t identity[32])
+{
+    if (identity)
+        memset(identity, 0, 32);
+    if (!ndb || !ndb->open || !offer_id || !identity) {
+        LOG_ERROR("market", "market content identity: invalid arguments");
+        return MARKET_CONTENT_STATE_ERROR;
+    }
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(ndb->db,
+            "SELECT root_hash,private_path,size_bytes,num_chunks,"
+            "chunk_hashes,registered_at FROM market_contents WHERE offer_id=?",
+            -1, &s, NULL) != SQLITE_OK || !s) {
+        LOG_ERROR("market", "market content identity prepare failed: %s",
+                  sqlite3_errmsg(ndb->db));
+        return MARKET_CONTENT_STATE_ERROR;
+    }
+    if (sqlite3_bind_blob(s, 1, offer_id, 32, SQLITE_STATIC) != SQLITE_OK) {
+        LOG_ERROR("market", "market content identity bind failed: %s",
+                  sqlite3_errmsg(ndb->db));
+        AR_FINALIZE(s);
+        return MARKET_CONTENT_STATE_ERROR;
+    }
+    int rc = AR_STEP_ROW_READONLY(s);
+    if (rc == SQLITE_DONE) {
+        AR_FINALIZE(s);
+        return MARKET_CONTENT_STATE_ABSENT;
+    }
+    if (rc != SQLITE_ROW) {
+        LOG_ERROR("market", "market content identity read failed: %s",
+                  sqlite3_errmsg(ndb->db));
+        AR_FINALIZE(s);
+        return MARKET_CONTENT_STATE_ERROR;
+    }
+
+    const uint8_t *root_hash = sqlite3_column_blob(s, 0);
+    const uint8_t *path = sqlite3_column_text(s, 1);
+    const uint8_t *chunk_hashes = sqlite3_column_blob(s, 4);
+    int root_len = sqlite3_column_bytes(s, 0);
+    int path_len = sqlite3_column_bytes(s, 1);
+    int chunks_len = sqlite3_column_bytes(s, 4);
+    int64_t size_bytes = sqlite3_column_int64(s, 2);
+    int64_t num_chunks = sqlite3_column_int64(s, 3);
+    int64_t registered_at = sqlite3_column_int64(s, 5);
+    if (!root_hash || root_len != 32 || !path || path_len <= 0 ||
+        path_len >= (int)MARKET_CONTENT_PATH_MAX || !chunk_hashes ||
+        chunks_len <= 0 || num_chunks <= 0 ||
+        num_chunks > MARKET_CONTENT_MAX_CHUNKS ||
+        chunks_len != num_chunks * 32 || size_bytes <= 0 ||
+        registered_at <= 0) {
+        LOG_ERROR("market", "market content identity row is malformed");
+        AR_FINALIZE(s);
+        return MARKET_CONTENT_STATE_ERROR;
+    }
+
+    static const char domain[] = "zcl.market.content.row.v1";
+    uint8_t encoded[8];
+    struct sha3_256_ctx sha;
+    sha3_256_init(&sha);
+    sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
+    sha3_256_write(&sha, offer_id, 32);
+    sha3_256_write(&sha, root_hash, 32);
+    zcl_write_u64_le(encoded, (uint64_t)path_len);
+    sha3_256_write(&sha, encoded, sizeof(encoded));
+    sha3_256_write(&sha, path, (size_t)path_len);
+    zcl_write_u64_le(encoded, (uint64_t)size_bytes);
+    sha3_256_write(&sha, encoded, sizeof(encoded));
+    zcl_write_u64_le(encoded, (uint64_t)num_chunks);
+    sha3_256_write(&sha, encoded, sizeof(encoded));
+    zcl_write_u64_le(encoded, (uint64_t)chunks_len);
+    sha3_256_write(&sha, encoded, sizeof(encoded));
+    sha3_256_write(&sha, chunk_hashes, (size_t)chunks_len);
+    zcl_write_u64_le(encoded, (uint64_t)registered_at);
+    sha3_256_write(&sha, encoded, sizeof(encoded));
+    sha3_256_finalize(&sha, identity);
+    AR_FINALIZE(s);
+    return MARKET_CONTENT_STATE_PRESENT;
 }
 
 int db_market_content_count(struct node_db *ndb)

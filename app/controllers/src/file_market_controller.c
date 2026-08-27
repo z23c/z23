@@ -650,9 +650,11 @@ static bool rpc_zmarket_status(const struct json_value *params, bool help,
     json_push_kv_int(result, "offers_cached", file_market_count());
 
     /* DB count — measured, never capped at the listing window. */
-    if (g_market_ndb && g_market_ndb->open)
-        json_push_kv_int(result, "offers_persisted",
-                         db_file_offer_count(g_market_ndb));
+    if (g_market_ndb && g_market_ndb->open) {
+        int persisted = db_file_offer_count(g_market_ndb);
+        if (persisted >= 0)
+            json_push_kv_int(result, "offers_persisted", persisted);
+    }
 
     return true;
 }

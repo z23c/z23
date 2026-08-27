@@ -43,6 +43,12 @@ struct market_content_chunk_record {
     uint8_t chunk_sha3[32];
 };
 
+enum market_content_state_result {
+    MARKET_CONTENT_STATE_ERROR = -1,
+    MARKET_CONTENT_STATE_ABSENT = 0,
+    MARKET_CONTENT_STATE_PRESENT = 1,
+};
+
 struct ar_callbacks *db_market_content_callbacks(void);
 bool db_market_content_validate(const struct market_content_record *record,
                                 struct ar_errors *errors);
@@ -54,15 +60,16 @@ bool db_market_content_find_chunk(
 int db_market_content_list(struct node_db *ndb,
                            struct market_content_public_record *out,
                            size_t max);
-/* One offer's registration timestamp, or false when the offer has no
- * registered content. Feeds the register confirm gate's state-at-plan-time
- * binding: any rewrite moves it and stales an outstanding plan token. */
-bool db_market_content_find_registered_at(struct node_db *ndb,
-                                          const uint8_t offer_id[32],
-                                          int64_t *registered_at);
-/* Uncapped row total behind the db_market_content_list window. -1 only
- * when the registry is unreadable; a serving index measures what it
- * truncated against this, never against its own window. */
+/* One statement returns the bounded rows and uncapped total from the same
+ * SQLite snapshot. Errors are distinct from an empty registry. */
+int db_market_content_list_snapshot(
+    struct node_db *ndb, struct market_content_public_record *out, size_t max,
+    int *total_out);
+/* Tri-state read of the complete durable row identity. Absence is distinct
+ * from a read error; every persisted field contributes canonical bytes. */
+enum market_content_state_result db_market_content_registration_identity(
+    struct node_db *ndb, const uint8_t offer_id[32], uint8_t identity[32]);
+/* Uncapped row total. -1 only when the registry is unreadable. */
 int db_market_content_count(struct node_db *ndb);
 
 #endif
