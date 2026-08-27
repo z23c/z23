@@ -250,13 +250,15 @@ static int test_code_emitter_budget(void)
     int failures = 0;
     TEST("code_emitter: the serialized reply fits ZCL_COMMAND_RESULT_BUDGET") {
         static char out[ZCL_COMMAND_RESULT_BUDGET * 4];
-        /* the longest realistic input: a whole BLOCKER_REASON_MAX reason */
+        /* The longest realistic input: the full reason
+         * index_fold_note_absent_body() (index_fold_guard.c) formats for its
+         * longest real caller id, op_return_index (op_return_backfill_service.c),
+         * at a below-seed-floor absent body. */
         size_t n = emit_run(
-            "address_index backfill cannot fold at height 0: the block body is "
-            "absent at/below the snapshot-seed floor "
-            "(reducer_trusted_base_height=3195247). Bodies below the seed were "
-            "never downloaded on this snapshot-seeded datadir, so this "
-            "rebuildable index has no ", out, sizeof(out));
+            "op_return_index missing body at height 0, seed floor=3195247; "
+            "backfill pre-seed bodies or accept partial coverage "
+            "(-op_return_index=0); see operator_decision in dumpstate blocker",
+            out, sizeof(out));
         ASSERT(n > 0);
         ASSERT(n <= ZCL_COMMAND_RESULT_BUDGET);
         ASSERT(strstr(out, "app/services/src/index_fold_guard.c") != NULL);

@@ -163,8 +163,9 @@ int test_ratify_mint_anchor(void)
             RMA_CHECK("applied: REFUSED",
                       !boot_ratify_mint_anchor_check_and_stamp(db, &cp, &r));
             RMA_CHECK("applied: result not ratified", !r.ratified);
-            RMA_CHECK("applied: reason mentions applied",
-                      strstr(r.reason, "applied") != NULL);
+            RMA_CHECK("applied: reason reports the applied-height pair",
+                      strstr(r.reason, "seam mismatch") != NULL &&
+                      strstr(r.reason, "h=105/101") != NULL);
             RMA_CHECK("applied: nothing stamped (no authority)",
                       !coins_kv_is_proven_authority(db, NULL));
             RMA_CHECK("applied: nothing stamped (no self-folded)",
