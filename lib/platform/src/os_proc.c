@@ -10,6 +10,10 @@
 #include <string.h>
 #include <unistd.h>
 
+#if !defined(__APPLE__)
+#include <dirent.h>
+#endif
+
 #if defined(__APPLE__)
 #include <crt_externs.h>
 #include <libproc.h>
@@ -349,5 +353,35 @@ bool os_proc_cmdline_has_token(const char *token)
         }
     }
     return false;
+#endif
+}
+
+bool os_proc_open_fd_count(size_t *out)
+{
+    if (!out)
+        return false; // raw-return-ok:null-arg
+#if defined(__APPLE__)
+    int bytes = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, NULL, 0);
+    if (bytes <= 0)
+        return false; // raw-return-ok:platform-cannot-answer
+    *out = (size_t)bytes / sizeof(struct proc_fdinfo);
+    return true;
+#else
+    /* The shim for this read lives here precisely so no caller outside
+     * lib/platform/ opens /proc itself. */
+    DIR *d = opendir("/proc/self/fd");
+    if (!d)
+        return false; // raw-return-ok:platform-cannot-answer
+    size_t n = 0;
+    for (const struct dirent *e = readdir(d); e; e = readdir(d)) {
+        if (e->d_name[0] == '.')
+            continue;
+        n++;
+    }
+    closedir(d);
+    /* Exclude the directory handle opened just above, so a census taken
+     * before an operation and one taken after are directly comparable. */
+    *out = n ? n - 1 : 0;
+    return true;
 #endif
 }

@@ -133,6 +133,15 @@ bool os_proc_cgroup_dir(char *out, size_t out_len);
  * time, so a stack-local struct is safe to pass. */
 void os_proc_mem_set_override(const struct os_proc_mem *forced);
 
+/* Count the descriptors this process currently has open, into `*out`.
+ * Returns false when the platform cannot answer, leaving `*out` untouched;
+ * a caller that cannot get a count must not treat zero as an answer.
+ *
+ * Exists for leak assertions: take a census either side of an operation and
+ * require the two to agree. The counting descriptor itself is excluded, so
+ * two censuses taken the same way are directly comparable. */
+bool os_proc_open_fd_count(size_t *out);
+
 #ifdef __cplusplus
 }
 #endif
