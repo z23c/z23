@@ -225,7 +225,9 @@ bool rpc_repairutxos(const struct json_value *params, bool help,
         "UTXOs are missing locally, and fetches them via RPC.\n"
         "\nArguments:\n"
         "1. zclassicd_port   (number, optional, default=8232)\n"
-        "2. zclassicd_creds  (string, optional, default=\"zcluser:zclpass\")\n"
+        "2. zclassicd_creds  (string, required — the node's\n"
+        "                    rpcuser:rpcpassword from zclassic.conf or its\n"
+        "                    .cookie; never a built-in pair)\n"
         "3. num_blocks       (number, optional, default=10000, max=50000)\n"
         "\nRequires zclassicd running on localhost with RPC enabled.\n"
         "For spent UTXOs, zclassicd needs txindex=1.\n");
@@ -249,7 +251,9 @@ bool rpc_repairutxos(const struct json_value *params, bool help,
 
     int port = (int)rpc_permit_int(&p, 0, "port",
                                    ZCLASSICD_RPC_DEFAULT_PORT);
-    const char *creds = rpc_permit_str(&p, 1, "creds", "zcluser:zclpass");
+    /* Credentials are never invented here: absence is refused by name
+     * below, not filled with a guessable development default. */
+    const char *creds = rpc_permit_str(&p, 1, "creds", "");
     int num_blocks = (int)rpc_permit_int(&p, 2, "num_blocks",
                                          REPAIRUTXOS_DEFAULT_SCAN_BLOCKS);
     if (rpc_params_invalid(&p)) { rpc_params_error(&p, result); return false; }

@@ -6,6 +6,7 @@
  * when called from HTTPS handler threads). */
 
 #include "platform/time_compat.h"
+#include "rpc/zclassicd_port.h" /* ZCLASSICD_RPC_DEFAULT_PORT */
 #include "controllers/api_controller.h"
 #include "controllers/explorer_internal.h"
 #include "encoding/utilstrencodings.h"
@@ -68,10 +69,11 @@
 /* struct api_rpc_backend defined in api_controller_internal.h */
 
 struct api_context g_api_ctx = {0};
+/* Credentials start absent: boot fills them from the node's .cookie or
+ * rpcuser/rpcpassword config, and api_rpc_call refuses to fire when
+ * they are still absent — no invented fallback pair. */
 struct api_rpc_backend g_api_rpc = {
-    .user = "zcluser",
-    .pass = "zclpass",
-    .port = 18232,
+    .port = ZCLASSICD_RPC_DEFAULT_PORT,
 };
 pthread_mutex_t g_api_worker_generation_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -157,6 +159,13 @@ int api_rpc_call(const char *method, const char *params_json,
     if (g_api_test_rpc_call)
         return g_api_test_rpc_call(method, params_json, out, outmax);
 #endif
+
+    /* Credentials absent (no .cookie, no conf pair at boot): send
+     * nothing rather than guessable basic-auth. */
+    if (!g_api_rpc.user[0] || !g_api_rpc.pass[0])
+        LOG_ERR("api",
+                "api_rpc_call(%s): no node credentials configured; "
+                "not dialing", method);
 
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) LOG_ERR("api", "api_rpc_call(%s): socket() failed", method);
