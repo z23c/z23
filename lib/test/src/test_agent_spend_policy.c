@@ -78,6 +78,7 @@ struct asp_fixture {
     struct app_runtime_context runtime;
     struct rpc_table tbl;
     struct wallet wallet;
+    bool open;
 };
 
 static struct asp_fixture *g_fixture;
@@ -183,10 +184,10 @@ static int asp_open(struct asp_fixture *f, const char *tag)
     wallet_init(&f->wallet);
     f->wallet.default_fee = 0;
     db_service_init(&f->dbsvc);
+    f->open = true;
     if (!db_service_attach(&f->dbsvc, &f->ndb) ||
         !db_service_start_test_worker(&f->dbsvc)) {
         printf("agent_spend_policy: db_service start... FAIL\n");
-        node_db_close(&f->ndb);
         return 0;
     }
     if (f->dbsvc.ckpt_started)
@@ -213,6 +214,9 @@ static int asp_open(struct asp_fixture *f, const char *tag)
 
 static void asp_close(struct asp_fixture *f)
 {
+    if (!f || !f->open)
+        return;
+    f->open = false;
     node_rpc_client_set_test_hook(NULL);
     g_fixture = NULL;
     app_runtime_set_current(NULL);
@@ -309,9 +313,10 @@ static void asp_bound_intent(struct asp_fixture *f,
 static int test_operator_exemption(void)
 {
     int failures = 0;
-    struct asp_fixture f;
+    struct asp_fixture *f = calloc(1, sizeof(*f)); /* ~40 MB wallet: heap */
     TEST("a NULL/empty session id is the explicit local-operator exemption") {
-        ASSERT(asp_open(&f, "exempt"));
+        ASSERT(f != NULL);
+        ASSERT(asp_open(f, "exempt"));
         struct agent_spend_policy_decision d;
         double amt = 5.0;
         struct json_value in;
@@ -333,9 +338,10 @@ static int test_operator_exemption(void)
             NULL, spec_for("vault.session.create"), &in, true, &d);
         ASSERT(d.allowed);
         json_free(&in);
-        asp_close(&f);
         PASS();
     } _test_next:;
+    asp_close(f);
+    free(f);
     return failures;
 }
 
@@ -447,13 +453,14 @@ static int test_money_freshness_fails_closed(void)
 static int test_default_deny_surface(void)
 {
     int failures = 0;
-    struct asp_fixture f;
+    struct asp_fixture *f = calloc(1, sizeof(*f)); /* ~40 MB wallet: heap */
     TEST("a bounded session is refused every wallet leaf the policy cannot "
         "bound, and the entire grant surface") {
-        ASSERT(asp_open(&f, "deny"));
+        ASSERT(f != NULL);
+        ASSERT(asp_open(f, "deny"));
         struct db_agent_session s;
         mk_session(&s, k_sid_a, 100000000, 100000000);   /* 1 ZCL caps */
-        ASSERT(agent_session_save(&f.ndb, &s));
+        ASSERT(agent_session_save(&f->ndb, &s));
 
         /* None of these carries an `amount`, which is precisely why keying the
          * gate on the input's shape let every one of them through. */
@@ -514,10 +521,11 @@ static int test_default_deny_surface(void)
         ASSERT_STR_EQ(d.code, "POLICY_UNKNOWN_COMMAND");
         json_free(&empty);
 
-        ASSERT_EQ(spent_now(&f, k_sid_a), 0);
-        asp_close(&f);
+        ASSERT_EQ(spent_now(f, k_sid_a), 0);
         PASS();
     } _test_next:;
+    asp_close(f);
+    free(f);
     return failures;
 }
 
@@ -535,12 +543,13 @@ static int test_default_deny_surface(void)
 static int test_arbitrary_sql_refused(void)
 {
     int failures = 0;
-    struct asp_fixture f;
+    struct asp_fixture *f = calloc(1, sizeof(*f)); /* ~40 MB wallet: heap */
     TEST("a bounded session may not run arbitrary SQL over node.db") {
-        ASSERT(asp_open(&f, "sql"));
+        ASSERT(f != NULL);
+        ASSERT(asp_open(f, "sql"));
         struct db_agent_session s;
         mk_session(&s, k_sid_a, 100000000, 100000000);
-        ASSERT(agent_session_save(&f.ndb, &s));
+        ASSERT(agent_session_save(&f->ndb, &s));
 
         static const char *const sql_leaves[] = {
             "core.storage.query",
@@ -580,10 +589,11 @@ static int test_arbitrary_sql_refused(void)
         ASSERT(d.allowed);
         json_free(&in);
 
-        ASSERT_EQ(spent_now(&f, k_sid_a), 0);
-        asp_close(&f);
+        ASSERT_EQ(spent_now(f, k_sid_a), 0);
         PASS();
     } _test_next:;
+    asp_close(f);
+    free(f);
     return failures;
 }
 
@@ -592,13 +602,14 @@ static int test_arbitrary_sql_refused(void)
 static int test_wallet_reads_pass(void)
 {
     int failures = 0;
-    struct asp_fixture f;
+    struct asp_fixture *f = calloc(1, sizeof(*f)); /* ~40 MB wallet: heap */
     TEST("understood wallet reads pass for a bounded session and debit "
         "nothing") {
-        ASSERT(asp_open(&f, "reads"));
+        ASSERT(f != NULL);
+        ASSERT(asp_open(f, "reads"));
         struct db_agent_session s;
         mk_session(&s, k_sid_a, 1, 1);   /* caps so tight every spend fails */
-        ASSERT(agent_session_save(&f.ndb, &s));
+        ASSERT(agent_session_save(&f->ndb, &s));
         static const char *const reads[] = {
             "core.wallet.balance", "core.wallet.utxo.list",
             "core.wallet.transaction.list", "core.wallet.shielded.balance",
@@ -618,10 +629,11 @@ static int test_wallet_reads_pass(void)
             ASSERT(d.allowed);
             ASSERT_EQ(d.debited_zat, 0);
         }
-        ASSERT_EQ(spent_now(&f, k_sid_a), 0);
-        asp_close(&f);
+        ASSERT_EQ(spent_now(f, k_sid_a), 0);
         PASS();
     } _test_next:;
+    asp_close(f);
+    free(f);
     return failures;
 }
 
@@ -630,13 +642,14 @@ static int test_wallet_reads_pass(void)
 static int test_spend_caps(void)
 {
     int failures = 0;
-    struct asp_fixture f;
+    struct asp_fixture *f = calloc(1, sizeof(*f)); /* ~40 MB wallet: heap */
     TEST("understood spends: plan enforces without debiting, commit debits, "
         "per-tx and window caps refuse, revoked/missing fail closed") {
-        ASSERT(asp_open(&f, "caps"));
+        ASSERT(f != NULL);
+        ASSERT(asp_open(f, "caps"));
         struct db_agent_session s;
         mk_session(&s, k_sid_a, 1000000, 600000);  /* per-tx .01, window .006 */
-        ASSERT(agent_session_save(&f.ndb, &s));
+        ASSERT(agent_session_save(&f->ndb, &s));
         const struct zcl_command_spec *send =
             spec_for("core.wallet.transaction.send");
         ASSERT(send != NULL);
@@ -657,7 +670,7 @@ static int test_spend_caps(void)
         json_free(&in);
         ASSERT(d.allowed);
         ASSERT_EQ(d.debited_zat, 0);
-        ASSERT_EQ(spent_now(&f, k_sid_a), 0);
+        ASSERT_EQ(spent_now(f, k_sid_a), 0);
 
         /* Committing: the same spend debits. */
         asp_input(&in, "address", k_recipient, &small, true);
@@ -666,7 +679,7 @@ static int test_spend_caps(void)
         ASSERT(d.allowed);
         ASSERT_EQ(d.debited_zat, 500000);
         ASSERT_EQ(d.window_remaining_zat, 100000);
-        ASSERT_EQ(spent_now(&f, k_sid_a), 500000);
+        ASSERT_EQ(spent_now(f, k_sid_a), 500000);
 
         /* 500000 + 200000 > 600000: the window cap bites, nothing added. */
         double next = 0.002;
@@ -675,10 +688,10 @@ static int test_spend_caps(void)
         json_free(&in);
         ASSERT(!d.allowed);
         ASSERT_STR_EQ(d.code, "POLICY_WINDOW_LIMIT");
-        ASSERT_EQ(spent_now(&f, k_sid_a), 500000);
+        ASSERT_EQ(spent_now(f, k_sid_a), 500000);
 
         /* Revoked and missing both fail closed. */
-        ASSERT(agent_session_revoke(&f.ndb, k_sid_a));
+        ASSERT(agent_session_revoke(&f->ndb, k_sid_a));
         asp_input(&in, "address", k_recipient, &small, true);
         agent_spend_policy_evaluate(k_sid_a, send, &in, true, &d);
         ASSERT(!d.allowed);
@@ -687,9 +700,10 @@ static int test_spend_caps(void)
         ASSERT(!d.allowed);
         ASSERT_STR_EQ(d.code, "SESSION_INVALID");
         json_free(&in);
-        asp_close(&f);
         PASS();
     } _test_next:;
+    asp_close(f);
+    free(f);
     return failures;
 }
 
@@ -698,15 +712,16 @@ static int test_spend_caps(void)
 static int test_allowlist_both_keys(void)
 {
     int failures = 0;
-    struct asp_fixture f;
+    struct asp_fixture *f = calloc(1, sizeof(*f)); /* ~40 MB wallet: heap */
     TEST("the allowlist is checked against each leaf's OWN recipient key "
         "(address for transparent, to for shielded)") {
-        ASSERT(asp_open(&f, "allow"));
+        ASSERT(f != NULL);
+        ASSERT(asp_open(f, "allow"));
         struct db_agent_session s;
         mk_session(&s, k_sid_a, 100000000, 100000000);
         snprintf(s.recipient_allowlist, sizeof(s.recipient_allowlist),
                  "%s,zs1Allowed", k_recipient);
-        ASSERT(agent_session_save(&f.ndb, &s));
+        ASSERT(agent_session_save(&f->ndb, &s));
         struct agent_spend_policy_decision d;
         double amt = 0.001;
         struct json_value in;
@@ -740,9 +755,10 @@ static int test_allowlist_both_keys(void)
         json_free(&in);
         ASSERT(!d.allowed);
         ASSERT_STR_EQ(d.code, "POLICY_RECIPIENT");
-        asp_close(&f);
         PASS();
     } _test_next:;
+    asp_close(f);
+    free(f);
     return failures;
 }
 
@@ -751,13 +767,14 @@ static int test_allowlist_both_keys(void)
 static int test_amount_shapes(void)
 {
     int failures = 0;
-    struct asp_fixture f;
+    struct asp_fixture *f = calloc(1, sizeof(*f)); /* ~40 MB wallet: heap */
     TEST("amount as INT / REAL / decimal string parse identically; junk, "
         "negative, absurd and MISSING all fail closed") {
-        ASSERT(asp_open(&f, "amount"));
+        ASSERT(f != NULL);
+        ASSERT(asp_open(f, "amount"));
         struct db_agent_session s;
         mk_session(&s, k_sid_a, 200000000, 2000000000);  /* 2 / 20 ZCL */
-        ASSERT(agent_session_save(&f.ndb, &s));
+        ASSERT(agent_session_save(&f->ndb, &s));
         const struct zcl_command_spec *send =
             spec_for("core.wallet.transaction.send");
         struct agent_spend_policy_decision d;
@@ -789,7 +806,7 @@ static int test_amount_shapes(void)
         json_free(&in);
         ASSERT(d.allowed);
         ASSERT_EQ(d.debited_zat, 100000000);
-        ASSERT_EQ(spent_now(&f, k_sid_a), 300000000);
+        ASSERT_EQ(spent_now(f, k_sid_a), 300000000);
 
         static const char *const junk[] = { "abc", "1.0x", "-1", "", "1e999" };
         for (size_t i = 0; i < sizeof(junk) / sizeof(junk[0]); i++) {
@@ -820,10 +837,11 @@ static int test_amount_shapes(void)
         json_free(&in);
         ASSERT(!d.allowed);
         ASSERT_STR_EQ(d.code, "POLICY_AMOUNT");
-        ASSERT_EQ(spent_now(&f, k_sid_a), 300000000);
-        asp_close(&f);
+        ASSERT_EQ(spent_now(f, k_sid_a), 300000000);
         PASS();
     } _test_next:;
+    asp_close(f);
+    free(f);
     return failures;
 }
 
@@ -832,12 +850,13 @@ static int test_amount_shapes(void)
 static int test_node_down_fails_closed(void)
 {
     int failures = 0;
-    struct asp_fixture f;
+    struct asp_fixture *f = calloc(1, sizeof(*f)); /* ~40 MB wallet: heap */
     TEST("a grant store that cannot be reached refuses the spend") {
-        ASSERT(asp_open(&f, "down"));
+        ASSERT(f != NULL);
+        ASSERT(asp_open(f, "down"));
         struct db_agent_session s;
         mk_session(&s, k_sid_a, 100000000, 100000000);
-        ASSERT(agent_session_save(&f.ndb, &s));
+        ASSERT(agent_session_save(&f->ndb, &s));
         g_node_down = true;
         double amt = 0.001;
         struct json_value in;
@@ -848,9 +867,10 @@ static int test_node_down_fails_closed(void)
         json_free(&in);
         ASSERT(!d.allowed);
         ASSERT_STR_EQ(d.code, "NODE_UNREACHABLE");
-        asp_close(&f);
         PASS();
     } _test_next:;
+    asp_close(f);
+    free(f);
     return failures;
 }
 
@@ -878,14 +898,15 @@ static bool exec_leaf(const char *path, const char *session_id,
 static int test_kernel_hook_rendered_bytes(void)
 {
     int failures = 0;
-    struct asp_fixture f;
+    struct asp_fixture *f = calloc(1, sizeof(*f)); /* ~40 MB wallet: heap */
     char out[ZCL_COMMAND_RESULT_BUDGET + 1];
     TEST("execute_json refuses an over-limit spend in the RENDERED bytes, "
         "with the redacted grant id, no plan body, and an authority block") {
-        ASSERT(asp_open(&f, "kernel"));
+        ASSERT(f != NULL);
+        ASSERT(asp_open(f, "kernel"));
         struct db_agent_session s;
         mk_session(&s, k_sid_a, 100000, 100000);   /* 0.001 ZCL */
-        ASSERT(agent_session_save(&f.ndb, &s));
+        ASSERT(agent_session_save(&f->ndb, &s));
 
         double amt = 5.0;
         struct json_value in;
@@ -914,9 +935,10 @@ static int test_kernel_hook_rendered_bytes(void)
         ASSERT(strstr(out, "none (local operator)") != NULL);
         ASSERT(strstr(out, "POLICY_") == NULL);
         ASSERT(strstr(out, "plan_token") != NULL);
-        asp_close(&f);
         PASS();
     } _test_next:;
+    asp_close(f);
+    free(f);
     return failures;
 }
 
@@ -929,14 +951,15 @@ static int test_kernel_hook_rendered_bytes(void)
 static int test_vault_send_debits_once(void)
 {
     int failures = 0;
-    struct asp_fixture f;
+    struct asp_fixture *f = calloc(1, sizeof(*f)); /* ~40 MB wallet: heap */
     char out[ZCL_COMMAND_RESULT_BUDGET + 1];
     TEST("vault send through execute_json debits the window exactly once") {
-        ASSERT(asp_open(&f, "once"));
+        ASSERT(f != NULL);
+        ASSERT(asp_open(f, "once"));
         struct db_agent_session s;
         /* per-tx == per-window == 1 ZCL: a double debit cannot hide here. */
         mk_session(&s, k_sid_a, 100000000, 100000000);
-        ASSERT(agent_session_save(&f.ndb, &s));
+        ASSERT(agent_session_save(&f->ndb, &s));
         g_sendtoaddress_result = k_txid;
 
         double amt = 1.0;
@@ -950,10 +973,11 @@ static int test_vault_send_debits_once(void)
         ASSERT_EQ((int)code, (int)ZCL_COMMAND_EXIT_OK);
         ASSERT(strstr(out, "POLICY_") == NULL);
         ASSERT_EQ((int64_t)g_commit_calls, (int64_t)1);
-        ASSERT_EQ(spent_now(&f, k_sid_a), 100000000);
-        asp_close(&f);
+        ASSERT_EQ(spent_now(f, k_sid_a), 100000000);
         PASS();
     } _test_next:;
+    asp_close(f);
+    free(f);
     return failures;
 }
 
@@ -963,14 +987,15 @@ static int test_vault_send_debits_once(void)
 static int test_failed_handler_releases_debit(void)
 {
     int failures = 0;
-    struct asp_fixture f;
+    struct asp_fixture *f = calloc(1, sizeof(*f)); /* ~40 MB wallet: heap */
     char out[ZCL_COMMAND_RESULT_BUDGET + 1];
     TEST("a handler that fails after an allowed debit gets the window "
         "credited back, and the budget is usable again") {
-        ASSERT(asp_open(&f, "release"));
+        ASSERT(f != NULL);
+        ASSERT(asp_open(f, "release"));
         struct db_agent_session s;
         mk_session(&s, k_sid_a, 100000000, 100000000);
-        ASSERT(agent_session_save(&f.ndb, &s));
+        ASSERT(agent_session_save(&f->ndb, &s));
         g_sendtoaddress_result = NULL;   /* the send RPC fails */
 
         double amt = 1.0;
@@ -982,7 +1007,7 @@ static int test_failed_handler_releases_debit(void)
         json_free(&in);
         ASSERT(code != ZCL_COMMAND_EXIT_OK);
         ASSERT_EQ((int64_t)g_release_calls, (int64_t)1);
-        ASSERT_EQ(spent_now(&f, k_sid_a), 0);
+        ASSERT_EQ(spent_now(f, k_sid_a), 0);
 
         g_sendtoaddress_result = k_txid;
         asp_input(&in, "address", k_recipient, &amt, true);
@@ -991,10 +1016,11 @@ static int test_failed_handler_releases_debit(void)
                          sizeof(out), &code));
         json_free(&in);
         ASSERT_EQ((int)code, (int)ZCL_COMMAND_EXIT_OK);
-        ASSERT_EQ(spent_now(&f, k_sid_a), 100000000);
-        asp_close(&f);
+        ASSERT_EQ(spent_now(f, k_sid_a), 100000000);
         PASS();
     } _test_next:;
+    asp_close(f);
+    free(f);
     return failures;
 }
 
@@ -1011,16 +1037,17 @@ static int test_fixture_thread_scope(void)
 static int test_canonical_intent_session(void)
 {
     int failures = 0;
-    struct asp_fixture f;
+    struct asp_fixture *f = calloc(1, sizeof(*f)); /* ~40 MB wallet: heap */
     TEST("canonical intent session binds once, charges value plus fee once, "
          "recovers retries, and releases only before broadcast") {
-        ASSERT(asp_open(&f, "canonical_intent"));
-        f.wallet.default_fee = 10000;
+        ASSERT(f != NULL);
+        ASSERT(asp_open(f, "canonical_intent"));
+        f->wallet.default_fee = 10000;
         struct db_agent_session s;
         mk_session(&s, k_sid_a, 2000000, 2000000); /* mission-style .02 */
         snprintf(s.recipient_allowlist, sizeof(s.recipient_allowlist), "%s",
                  k_recipient);
-        ASSERT(agent_session_save(&f.ndb, &s));
+        ASSERT(agent_session_save(&f->ndb, &s));
 
         /* Planning sees the exact canonical effects and includes the current
          * maximum fee in the grant check, but does not debit. */
@@ -1039,12 +1066,12 @@ static int test_canonical_intent_session(void)
             k_sid_a, spec_for("vault.intent.plan"), &in, true, &d);
         ASSERT(d.allowed);
         ASSERT_EQ(d.debited_zat, 0);
-        ASSERT_EQ(spent_now(&f, k_sid_a), 0);
+        ASSERT_EQ(spent_now(f, k_sid_a), 0);
         json_free(&effect); json_free(&effects); json_free(&in);
 
         struct vault_intent_row row;
-        asp_bound_intent(&f, &row, 1900000, 10000);
-        ASSERT(vault_intent_save(&f.ndb, &row));
+        asp_bound_intent(f, &row, 1900000, 10000);
+        ASSERT(vault_intent_save(&f->ndb, &row));
         char why[64] = { 0 };
         ASSERT(agent_session_client_bind_intent(
             k_sid_a, k_plan_a, k_recipient, why, sizeof(why)));
@@ -1057,40 +1084,41 @@ static int test_canonical_intent_session(void)
             k_sid_a, k_plan_a, &managed, &charged, why, sizeof(why)));
         ASSERT(managed);
         ASSERT_EQ(charged, 1910000);
-        ASSERT_EQ(spent_now(&f, k_sid_a), 1910000);
+        ASSERT_EQ(spent_now(f, k_sid_a), 1910000);
         ASSERT(agent_session_client_authorize_intent(
             k_sid_a, k_plan_a, &managed, &charged, why, sizeof(why)));
         ASSERT(managed);
         ASSERT_EQ(charged, 0);
-        ASSERT_EQ(spent_now(&f, k_sid_a), 1910000);
+        ASSERT_EQ(spent_now(f, k_sid_a), 1910000);
 
         /* A known pre-broadcast terminal failure releases the marker and
          * window. A network-accepted transaction never does. */
-        ASSERT(vault_intent_set_state(&f.ndb, row.plan_id,
+        ASSERT(vault_intent_set_state(&f->ndb, row.plan_id,
             VAULT_INTENT_FAILED, NULL, "EXACT_BUILD_FAILED",
             (int64_t)platform_time_wall_time_t()));
         ASSERT(agent_session_service_release_bound_intent(
-            &f.ndb, row.plan_id));
-        ASSERT_EQ(spent_now(&f, k_sid_a), 0);
-        ASSERT(vault_intent_find(&f.ndb, row.plan_id, &row));
+            &f->ndb, row.plan_id));
+        ASSERT_EQ(spent_now(f, k_sid_a), 0);
+        ASSERT(vault_intent_find(&f->ndb, row.plan_id, &row));
         ASSERT_EQ(row.agent_debited_zat, 0);
 
-        ASSERT(vault_intent_set_state(&f.ndb, row.plan_id,
+        ASSERT(vault_intent_set_state(&f->ndb, row.plan_id,
             VAULT_INTENT_PLANNED, NULL, "",
             (int64_t)platform_time_wall_time_t()));
         ASSERT(agent_session_client_authorize_intent(
             k_sid_a, k_plan_a, &managed, &charged, why, sizeof(why)));
         ASSERT_EQ(charged, 1910000);
-        ASSERT(vault_intent_set_state(&f.ndb, row.plan_id,
+        ASSERT(vault_intent_set_state(&f->ndb, row.plan_id,
             VAULT_INTENT_MEMPOOL_ACCEPTED, row.txid, "",
             (int64_t)platform_time_wall_time_t()));
         ASSERT(agent_session_service_release_bound_intent(
-            &f.ndb, row.plan_id));
-        ASSERT_EQ(spent_now(&f, k_sid_a), 1910000);
+            &f->ndb, row.plan_id));
+        ASSERT_EQ(spent_now(f, k_sid_a), 1910000);
 
-        asp_close(&f);
         PASS();
     } _test_next:;
+    asp_close(f);
+    free(f);
     return failures;
 }
 

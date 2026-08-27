@@ -106,6 +106,20 @@ bool db_service_wal_checkpoint(struct db_service *svc);
 bool db_service_run_write(struct db_service *svc,
                           db_service_write_fn fn,
                           void *ctx);
+/* Queue an asynchronous write.
+ *
+ * OWNERSHIP: takes `ctx` on EVERY return path. On success the worker frees
+ * it through `free_ctx` once the write has run; on failure this function
+ * runs `free_ctx` before returning. The caller must never free `ctx`
+ * itself, and must not read it after the call.
+ *
+ * The return value never reports ownership. It means "queued", except when
+ * called ON the worker thread, where the write runs inline and the return is
+ * the write's own result. Either way `ctx` is already disposed of.
+ *
+ * A false return is routine, not exceptional: the queue is bounded and an
+ * async submit is refused immediately once it is full, which happens steadily
+ * during sync. Treat the failure path as hot. */
 bool db_service_enqueue_write(struct db_service *svc,
                               db_service_write_fn fn,
                               void *ctx,

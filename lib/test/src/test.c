@@ -1885,6 +1885,7 @@ int main(int argc, char **argv)
     { extern int test_code_merkle_proof(void);
       failures += test_code_merkle_proof(); }
     { extern int test_core_seal(void); failures += test_core_seal(); }
+    { extern int test_core_seal_interop(void); failures += test_core_seal_interop(); }
     { extern int test_code_emitter(void); failures += test_code_emitter(); }
     { extern int test_fact_writers(void); failures += test_fact_writers(); }
 

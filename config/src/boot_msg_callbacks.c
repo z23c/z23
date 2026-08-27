@@ -351,8 +351,11 @@ void boot_save_peer_advisory(const struct p2p_node *node, void *ctx)
         if (db_service_enqueue_write(dbsvc, boot_peer_save_write,
                                      save, boot_peer_save_free))
             return;
+        /* `save` is NOT freed here: db_service_enqueue_write() takes
+         * ownership on every return path and has already run
+         * boot_peer_save_free() on this failure. Freeing it again aborts
+         * the process, and a full queue is routine during sync. */
         peer_lifecycle_note_cache_skipped(node, "enqueue_queue_full");
-        boot_peer_save_free(save);
         return;
     }
 

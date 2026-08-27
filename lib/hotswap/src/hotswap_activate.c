@@ -164,11 +164,155 @@ const char *hotswap_module_probe_leaf(const char *source_tu)
     return probe ? probe->operation : NULL;
 }
 
+/* ── the resident's sealed-core SECTION table ──────────────────────────────
+ * Compiled from hotswap/core_seal_sections.h, which is generated from the
+ * SECTION/TREE lines of core/MANIFEST.sha3 by `make core-seal-sections`. The
+ * SAME X-macro expansion builds the module-side table in
+ * ZCL_HOTSWAP_MODULE_LEAVES, so the two halves cannot disagree in shape — only
+ * in CONTENT, which is exactly the disagreement admission is here to catch. */
+static const struct zcl_hotswap_core_section g_core_sections[] = {
+    ZCL_CORE_SEAL_SECTION_ROWS
+};
+#define CORE_SECTION_COUNT (sizeof(g_core_sections) / sizeof(g_core_sections[0]))
+
+static const struct zcl_hotswap_core_sections g_core_sections_self = {
+    .tree = ZCL_CORE_SEAL_TREE,
+    .count = (uint32_t)CORE_SECTION_COUNT,
+    .sections = g_core_sections,
+};
+
+const struct zcl_hotswap_core_sections *hotswap_core_sections_self(void)
+{
+    return &g_core_sections_self;
+}
+
+const char *hotswap_core_section_digest(const char *path)
+{
+    if (!path || !path[0])
+        return NULL;
+    for (size_t i = 0; i < CORE_SECTION_COUNT; i++)
+        if (strcmp(path, g_core_sections[i].path) == 0)
+            return g_core_sections[i].digest;
+    return NULL;
+}
+
+const char *hotswap_core_seal_tree(void)
+{
+    return ZCL_CORE_SEAL_TREE;
+}
+
 static void act_copy(char *dst, size_t cap, const char *src)
 {
     if (!dst || cap == 0)
         return;
     snprintf(dst, cap, "%s", src ? src : "");
+}
+
+/* Exact 64-char lowercase-hex, no shorter and no longer. A digest that is not
+ * this shape never gets compared — it is refused outright. */
+static bool is_seal_digest(const char *hex)
+{
+    if (!hex)
+        return false;
+    size_t n = 0;
+    for (; hex[n]; n++) {
+        if (n >= 64)
+            return false;
+        char c = hex[n];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+            return false;
+    }
+    return n == 64;
+}
+
+/* ── THE SECTION DECLARATION CHECK (purely ADDITIVE to the ROOT pin) ───────
+ *
+ * The ROOT pin (module_consensus_pin_ok, dlsym path) and the pre-map ELF probe
+ * both still compare ZCL_CORE_SEAL_ROOT and are UNCHANGED. This adds, for a
+ * module that has been dlsym'd into a struct:
+ *
+ *   - TREE must equal the resident's ZCL_CORE_SEAL_TREE (the same 70 sealed
+ *     files, folded in lib/codeindex's source-Merkle dialect instead of the
+ *     flat ROOT fold — a second opinion in a different hash structure);
+ *   - every SECTION the module declares must be a section this resident HAS,
+ *     and its digest must equal the resident's for that path. A section the
+ *     resident does not have is refused, never ignored;
+ *   - a section declared twice is refused (a duplicate row could otherwise
+ *     hide a mismatched second entry behind a matching first one).
+ *
+ * Nothing here can admit a module the old code refused: every module still has
+ * to clear ROOT first, and this only adds ways to be refused. */
+static bool module_sections_ok(const struct zcl_hotswap_module *module,
+                               char *stage, size_t stage_cap,
+                               char *why, size_t why_cap)
+{
+    const struct zcl_hotswap_core_sections *cs = module->core_sections;
+    act_copy(stage, stage_cap, "sections");
+    if (!cs || !cs->sections || cs->count == 0) {
+        act_copy(why, why_cap,
+                 "module declares no sealed-core sections — built before the "
+                 "section declaration existed; rebuild it with "
+                 "'make hotswap-module-so'");
+        return false;
+    }
+    if (cs->count > ZCL_HOTSWAP_MODULE_MAX_SECTIONS) {
+        if (why && why_cap)
+            snprintf(why, why_cap,
+                     "module declares %u sealed-core sections, ceiling is %u",
+                     cs->count, ZCL_HOTSWAP_MODULE_MAX_SECTIONS);
+        return false;
+    }
+    if (!is_seal_digest(cs->tree)) {
+        act_copy(why, why_cap,
+                 "module's sealed-core TREE is not 64 lowercase hex");
+        return false;
+    }
+    if (strcmp(cs->tree, ZCL_CORE_SEAL_TREE) != 0) {
+        if (why && why_cap)
+            snprintf(why, why_cap,
+                     "sealed-core TREE mismatch: artifact=%.64s resident=%s "
+                     "(the module was compiled against a different sealed core;"
+                     " rebuild it)",
+                     cs->tree, ZCL_CORE_SEAL_TREE);
+        return false;
+    }
+    for (uint32_t i = 0; i < cs->count; i++) {
+        const char *path = cs->sections[i].path;
+        const char *digest = cs->sections[i].digest;
+        if (!path || !path[0] || !is_seal_digest(digest)) {
+            if (why && why_cap)
+                snprintf(why, why_cap,
+                         "declared section %u has an empty path or a malformed "
+                         "digest", i);
+            return false;
+        }
+        for (uint32_t j = 0; j < i; j++) {
+            if (cs->sections[j].path && strcmp(path, cs->sections[j].path) == 0) {
+                if (why && why_cap)
+                    snprintf(why, why_cap,
+                             "sealed-core section '%s' is declared twice", path);
+                return false;
+            }
+        }
+        const char *host = hotswap_core_section_digest(path);
+        if (!host) {
+            if (why && why_cap)
+                snprintf(why, why_cap,
+                         "module declares sealed-core section '%s', which this "
+                         "resident's sealed core does not have", path);
+            return false;
+        }
+        if (strcmp(digest, host) != 0) {
+            if (why && why_cap)
+                snprintf(why, why_cap,
+                         "sealed-core section '%s' mismatch: artifact=%.64s "
+                         "resident=%s (rebuild the module)",
+                         path, digest, host);
+            return false;
+        }
+    }
+    if (stage && stage_cap) stage[0] = '\0';
+    return true;
 }
 
 bool hotswap_module_admit(const struct zcl_hotswap_module *module,
@@ -182,15 +326,22 @@ bool hotswap_module_admit(const struct zcl_hotswap_module *module,
         act_copy(why, why_cap, "null module");
         return false;
     }
-    if (module->abi_version != ZCL_HOTSWAP_MODULE_ABI_V2) {
+    if (module->abi_version != ZCL_HOTSWAP_MODULE_ABI_V3) {
         act_copy(stage, stage_cap, "abi");
         if (why && why_cap)
             snprintf(why, why_cap,
                      "module abi_version %u != required %u (rebuild the module "
                      "against the current hotswap_module.h)",
-                     module->abi_version, ZCL_HOTSWAP_MODULE_ABI_V2);
+                     module->abi_version, ZCL_HOTSWAP_MODULE_ABI_V3);
         return false;
     }
+    /* The sealed-core SECTION + TREE declaration, verified immediately after
+     * the version stamp and BEFORE any other property of the module is
+     * considered. A v2 struct is shorter than v3, so `core_sections` is only
+     * safe to read once abi_version has proven the layout — which is why this
+     * block sits here and not earlier. */
+    if (!module_sections_ok(module, stage, stage_cap, why, why_cap))
+        return false;
     if (!module->source_tu || !module->source_tu[0] || !module->leaves ||
         !module->self_test || module->leaf_count == 0) {
         act_copy(stage, stage_cap, "fields");
@@ -519,10 +670,15 @@ void hotswap_activate_dump_json(struct json_value *out)
         return;
     struct json_value act = {0};
     json_set_object(&act);
-    json_push_kv_str(&act, "abi", "zcl.hotswap_module.v2");
-    json_push_kv_int(&act, "abi_version", (int64_t)ZCL_HOTSWAP_MODULE_ABI_V2);
+    json_push_kv_str(&act, "abi", "zcl.hotswap_module.v3");
+    json_push_kv_int(&act, "abi_version", (int64_t)ZCL_HOTSWAP_MODULE_ABI_V3);
     json_push_kv_int(&act, "max_leaves_per_module",
                      (int64_t)ZCL_HOTSWAP_MODULE_MAX_LEAVES);
+    /* What a module has to agree with. Reported so an operator can compare an
+     * artifact's stamp to the resident's without loading it. */
+    json_push_kv_str(&act, "core_seal_root", ZCL_CORE_SEAL_ROOT);
+    json_push_kv_str(&act, "core_seal_tree", ZCL_CORE_SEAL_TREE);
+    json_push_kv_int(&act, "core_seal_sections", (int64_t)CORE_SECTION_COUNT);
 #ifdef ZCL_DEV_BUILD
     json_push_kv_bool(&act, "available", true);
 #else
@@ -693,7 +849,7 @@ bool hotswap_module_publish(const struct zcl_hotswap_module *module,
     report->activated = false;
     report->probed = false;
     report->verify_only = !request_activate;
-    if (module && module->abi_version == ZCL_HOTSWAP_MODULE_ABI_V2 &&
+    if (module && module->abi_version == ZCL_HOTSWAP_MODULE_ABI_V3 &&
         module->source_tu)
         act_copy(report->source_tu, sizeof(report->source_tu),
                  module->source_tu);
@@ -1615,7 +1771,7 @@ static bool activate_from_sealed_fd(int fd,
         }
         if (!hotswap_elf_pre_map_admit(
                 &facts, ZCL_CORE_SEAL_ROOT,
-                ZCL_HOTSWAP_MODULE_ABI_V2, probe_err, sizeof(probe_err))) {
+                ZCL_HOTSWAP_MODULE_ABI_V3, probe_err, sizeof(probe_err))) {
             close(fd);
             return act_reject(report, "shape", "%s", probe_err);
         }
@@ -1922,7 +2078,7 @@ bool hotswap_verify_module_so(const char *so_path, const char *expect_tu,
         }
         if (!hotswap_elf_pre_map_admit(
                 &vfacts, ZCL_CORE_SEAL_ROOT,
-                ZCL_HOTSWAP_MODULE_ABI_V2, vprobe_err,
+                ZCL_HOTSWAP_MODULE_ABI_V3, vprobe_err,
                 sizeof(vprobe_err))) {
             (void)close(fd);
             act_copy(report->stage, sizeof(report->stage), "shape");
