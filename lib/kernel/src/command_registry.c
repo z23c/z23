@@ -272,7 +272,7 @@ void zcl_command_registry_reset_overrides(void)
 bool zcl_command_registry_replace_batch(
     uint32_t generation,
     const struct zcl_command_handler_override *overrides,
-    size_t count, char *why, size_t why_sz)
+    size_t count, char *why, size_t why_sz, uint32_t *out_generation)
 {
     if (why && why_sz)
         why[0] = '\0';
@@ -411,6 +411,13 @@ bool zcl_command_registry_replace_batch(
         atomic_load_explicit(&g_published_head, memory_order_acquire);
     atomic_store_explicit(&g_published_head, next, memory_order_release);
     atomic_store_explicit(&g_active_handlers, next, memory_order_release);
+    /* Report the generation THIS publish assigned, still under the write lock
+     * that assigned it. A caller must never re-read it afterwards: a
+     * concurrent publisher can bump the active generation before the caller
+     * looks, and the caller would then attribute someone else's snapshot to
+     * its own batch. Refusal paths above return without touching it. */
+    if (out_generation)
+        *out_generation = next_generation;
     handler_write_unlock();
     return true;
 }

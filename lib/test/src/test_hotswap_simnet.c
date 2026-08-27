@@ -89,9 +89,9 @@ static int test_hotswap_native_leaf_repoint(void)
             .path = "sim.leaf.repoint", .handler = hsim_leaf_h_gen_a,
         };
         why[0] = '\0';
+        uint32_t gen_a = 0;
         ASSERT(zcl_command_registry_replace_batch(0, &ovr_a, 1, why,
-                                                  sizeof(why)));
-        uint32_t gen_a = zcl_command_registry_active_generation();
+                                                  sizeof(why), &gen_a));
         ASSERT(gen_a > 0);
         ASSERT_EQ((int)hsim_leaf_dispatch(out, sizeof(out)),
                   (int)ZCL_COMMAND_EXIT_OK);
@@ -103,9 +103,9 @@ static int test_hotswap_native_leaf_repoint(void)
             .path = "sim.leaf.repoint", .handler = hsim_leaf_h_gen_b,
         };
         why[0] = '\0';
+        uint32_t gen_b = 0;
         ASSERT(zcl_command_registry_replace_batch(0, &ovr_b, 1, why,
-                                                  sizeof(why)));
-        uint32_t gen_b = zcl_command_registry_active_generation();
+                                                  sizeof(why), &gen_b));
         ASSERT(gen_b > gen_a);
         ASSERT_EQ((int)hsim_leaf_dispatch(out, sizeof(out)),
                   (int)ZCL_COMMAND_EXIT_OK);
@@ -115,7 +115,7 @@ static int test_hotswap_native_leaf_repoint(void)
          * rejected outright and publishes nothing. */
         why[0] = '\0';
         ASSERT(!zcl_command_registry_replace_batch(gen_b, &ovr_a, 1, why,
-                                                    sizeof(why)));
+                                                    sizeof(why), NULL));
         ASSERT(strstr(why, "not newer") != NULL);
         ASSERT_EQ((unsigned)zcl_command_registry_active_generation(),
                   (unsigned)gen_b);

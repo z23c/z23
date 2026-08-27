@@ -11,6 +11,8 @@
  *   - batch atomicity (a failing path leaves NOTHING installed)
  *   - destructive/mutating and not-READY and alias leaves are rejected
  *   - generation monotonicity
+ *   - a publish reports ITS OWN generation (no read-after-write race); a
+ *     refusal neither advances it nor writes the out-parameter
  *   - two-thread hammer (writer replace_batch loop + reader dispatch loop)
  */
 
@@ -164,7 +166,8 @@ static int test_install_and_dispatch(void)
             .path = "core.probe.read", .handler = h_override,
         };
         char why[256] = {0};
-        ASSERT(zcl_command_registry_replace_batch(0, &ovr, 1, why, sizeof(why)));
+        ASSERT(zcl_command_registry_replace_batch(0, &ovr, 1, why,
+                                                 sizeof(why), NULL));
         ASSERT_EQ((unsigned)zcl_command_registry_active_generation(), 1u);
 
         ASSERT_EQ((int)exec_path("core.probe.read", out, sizeof(out)),
@@ -192,7 +195,7 @@ static int test_fallback_when_absent(void)
         struct zcl_command_handler_override ovr = {
             .path = "core.probe.read", .handler = h_override,
         };
-        ASSERT(zcl_command_registry_replace_batch(0, &ovr, 1, NULL, 0));
+        ASSERT(zcl_command_registry_replace_batch(0, &ovr, 1, NULL, 0, NULL));
 
         ASSERT_EQ((int)exec_path("core.probe.read2", out, sizeof(out)),
                   (int)ZCL_COMMAND_EXIT_OK);
@@ -221,7 +224,7 @@ static int test_batch_atomicity(void)
         };
         char why[256] = {0};
         ASSERT(!zcl_command_registry_replace_batch(0, batch, 2, why,
-                                                   sizeof(why)));
+                                                   sizeof(why), NULL));
         ASSERT(why[0] != '\0');
         ASSERT_EQ((unsigned)zcl_command_registry_active_generation(), 0u);
 
@@ -248,7 +251,7 @@ static int test_reject_ineligible_leaves(void)
         };
         why[0] = '\0';
         ASSERT(!zcl_command_registry_replace_batch(0, &mut, 1, why,
-                                                   sizeof(why)));
+                                                   sizeof(why), NULL));
         ASSERT(strstr(why, "mutating") != NULL ||
                strstr(why, "destructive") != NULL);
 
@@ -258,7 +261,7 @@ static int test_reject_ineligible_leaves(void)
         };
         why[0] = '\0';
         ASSERT(!zcl_command_registry_replace_batch(0, &planned, 1, why,
-                                                   sizeof(why)));
+                                                   sizeof(why), NULL));
         ASSERT(strstr(why, "READY") != NULL);
 
         /* Alias (not a canonical path). */
@@ -267,7 +270,7 @@ static int test_reject_ineligible_leaves(void)
         };
         why[0] = '\0';
         ASSERT(!zcl_command_registry_replace_batch(0, &alias, 1, why,
-                                                   sizeof(why)));
+                                                   sizeof(why), NULL));
 
         /* NULL handler. */
         struct zcl_command_handler_override nullh = {
@@ -275,7 +278,7 @@ static int test_reject_ineligible_leaves(void)
         };
         why[0] = '\0';
         ASSERT(!zcl_command_registry_replace_batch(0, &nullh, 1, why,
-                                                   sizeof(why)));
+                                                   sizeof(why), NULL));
 
         /* None of these mutated the active snapshot. */
         ASSERT_EQ((unsigned)zcl_command_registry_active_generation(), 0u);
@@ -296,7 +299,7 @@ static int test_reject_branch_leaf(void)
         };
         why[0] = '\0';
         ASSERT(!zcl_command_registry_replace_batch(0, &branch, 1, why,
-                                                   sizeof(why)));
+                                                   sizeof(why), NULL));
         ASSERT(strstr(why, "branch") != NULL);
         ASSERT(strstr(why, "core.probe.branch") != NULL);
 
@@ -320,22 +323,23 @@ static int test_generation_monotonicity(void)
         char why[256] = {0};
 
         /* Auto-increment from 0 -> 1. */
-        ASSERT(zcl_command_registry_replace_batch(0, &ovr, 1, why, sizeof(why)));
+        ASSERT(zcl_command_registry_replace_batch(0, &ovr, 1, why,
+                                                 sizeof(why), NULL));
         ASSERT_EQ((unsigned)zcl_command_registry_active_generation(), 1u);
 
         /* Explicit stale generation (== active) is rejected. */
         why[0] = '\0';
         ASSERT(!zcl_command_registry_replace_batch(1, &ovr, 1, why,
-                                                   sizeof(why)));
+                                                   sizeof(why), NULL));
         ASSERT(strstr(why, "not newer") != NULL);
         ASSERT_EQ((unsigned)zcl_command_registry_active_generation(), 1u);
 
         /* Explicit jump forward. */
-        ASSERT(zcl_command_registry_replace_batch(5, &ovr, 1, NULL, 0));
+        ASSERT(zcl_command_registry_replace_batch(5, &ovr, 1, NULL, 0, NULL));
         ASSERT_EQ((unsigned)zcl_command_registry_active_generation(), 5u);
 
         /* Auto-increment continues from the active generation. */
-        ASSERT(zcl_command_registry_replace_batch(0, &ovr, 1, NULL, 0));
+        ASSERT(zcl_command_registry_replace_batch(0, &ovr, 1, NULL, 0, NULL));
         ASSERT_EQ((unsigned)zcl_command_registry_active_generation(), 6u);
         PASS();
     } _test_next:;
@@ -360,7 +364,7 @@ static void *hammer_writer(void *arg)
         /* Strictly increasing generation => always succeeds; alternate the
          * handler so readers can observe either the base or the override. */
         ovr.handler = (i & 1u) ? h_override : h_base;
-        (void)zcl_command_registry_replace_batch(i, &ovr, 1, NULL, 0);
+        (void)zcl_command_registry_replace_batch(i, &ovr, 1, NULL, 0, NULL);
     }
     atomic_store_explicit(&g_hammer_done, true, memory_order_release);
     return NULL;
@@ -389,6 +393,103 @@ static void *hammer_reader(void *arg)
             atomic_fetch_add_explicit(&g_hammer_torn, 1, memory_order_relaxed);
     }
     return NULL;
+}
+
+
+/* The publish reports ITS OWN generation.
+ *
+ * Callers used to publish and then call zcl_command_registry_active_generation()
+ * to learn "which generation did my batch produce". That read-after-write is a
+ * race: a concurrent publisher can bump the active generation in between, and
+ * the caller then attributes another publisher's snapshot to its own batch.
+ * The out-parameter is written under the same write lock that assigns the
+ * generation, so it can only ever be this call's own value.
+ *
+ * This pins three things: a successful publish reports a generation, that
+ * generation is strictly greater than the generation active before the call
+ * (monotonicity is load-bearing — it is the ordering authority for the whole
+ * hot-swap subsystem), and a REFUSED publish neither advances the generation
+ * nor writes the out-parameter. */
+static int test_publish_reports_own_generation(void)
+{
+    int failures = 0;
+    TEST("replace_batch reports the generation it published") {
+        reset_fixture();
+        struct zcl_command_handler_override ovr = {
+            .path = "core.probe.read", .handler = h_override,
+        };
+        char why[256] = {0};
+
+        /* First publish onto an empty override layer. */
+        uint32_t before = zcl_command_registry_active_generation();
+        ASSERT_EQ((unsigned)before, 0u);
+        uint32_t reported = 0;
+        ASSERT(zcl_command_registry_replace_batch(0, &ovr, 1, why,
+                                                 sizeof(why), &reported));
+        ASSERT(reported > before);
+        ASSERT_EQ((unsigned)reported,
+                  (unsigned)zcl_command_registry_active_generation());
+
+        /* Every further publish reports a strictly greater generation, both
+         * for auto-increment and for an explicit forward jump. */
+        for (int i = 0; i < 4; i++) {
+            uint32_t prev = reported;
+            uint32_t next = 0;
+            ASSERT(zcl_command_registry_replace_batch(0, &ovr, 1, why,
+                                                     sizeof(why), &next));
+            ASSERT(next > prev);
+            reported = next;
+        }
+        uint32_t jumped = 0;
+        ASSERT(zcl_command_registry_replace_batch(reported + 100u, &ovr, 1,
+                                                 why, sizeof(why), &jumped));
+        ASSERT_EQ((unsigned)jumped, (unsigned)(reported + 100u));
+        ASSERT(jumped > reported);
+        reported = jumped;
+
+        /* REFUSED at the generation check (inside the write lock): the active
+         * generation does not move and the out-parameter keeps its sentinel. */
+        uint32_t untouched = 0xDEADBEEFu;
+        why[0] = '\0';
+        ASSERT(!zcl_command_registry_replace_batch(reported, &ovr, 1, why,
+                                                  sizeof(why), &untouched));
+        ASSERT(strstr(why, "not newer") != NULL);
+        ASSERT_EQ((unsigned)untouched, 0xDEADBEEFu);
+        ASSERT_EQ((unsigned)zcl_command_registry_active_generation(),
+                  (unsigned)reported);
+
+        /* REFUSED at batch validation (before the write lock is ever taken):
+         * same contract — no advance, no write. */
+        struct zcl_command_handler_override bad = {
+            .path = "core.probe.nope", .handler = h_override,
+        };
+        untouched = 0xFEEDFACEu;
+        why[0] = '\0';
+        ASSERT(!zcl_command_registry_replace_batch(0, &bad, 1, why,
+                                                  sizeof(why), &untouched));
+        ASSERT_EQ((unsigned)untouched, 0xFEEDFACEu);
+        ASSERT_EQ((unsigned)zcl_command_registry_active_generation(),
+                  (unsigned)reported);
+
+        /* A REFUSED mutating leaf behaves identically. */
+        struct zcl_command_handler_override mut = {
+            .path = "core.probe.write", .handler = h_override,
+        };
+        untouched = 0xA5A5A5A5u;
+        why[0] = '\0';
+        ASSERT(!zcl_command_registry_replace_batch(0, &mut, 1, why,
+                                                  sizeof(why), &untouched));
+        ASSERT_EQ((unsigned)untouched, 0xA5A5A5A5u);
+        ASSERT_EQ((unsigned)zcl_command_registry_active_generation(),
+                  (unsigned)reported);
+
+        /* A caller that does not want the generation still publishes fine. */
+        ASSERT(zcl_command_registry_replace_batch(0, &ovr, 1, NULL, 0, NULL));
+        ASSERT_EQ((unsigned)zcl_command_registry_active_generation(),
+                  (unsigned)(reported + 1u));
+        PASS();
+    } _test_next:;
+    return failures;
 }
 
 static int test_concurrent_hammer(void)
@@ -426,6 +527,7 @@ int test_command_handler_snapshot(void)
     failures += test_reject_ineligible_leaves();
     failures += test_reject_branch_leaf();
     failures += test_generation_monotonicity();
+    failures += test_publish_reports_own_generation();
     failures += test_concurrent_hammer();
     /* Leave the override layer clean for any sibling group sharing the TU. */
     zcl_command_registry_reset_overrides();
