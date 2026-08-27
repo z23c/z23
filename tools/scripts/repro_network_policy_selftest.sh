@@ -49,6 +49,8 @@ make()
             zclassic23|zclassic-cli) binary="$arg" ;;
         esac
     done
+    # The real node build emits build/bin/z23 with zclassic23 as its migration
+    # alias. The CLI remains a regular zclassic-cli artifact.
     mkdir -p "$build_dir/bin"
     if [ "$binary" = zclassic23 ]; then
         printf 'repro-network-policy-fixture\n' >"$build_dir/bin/z23"

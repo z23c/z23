@@ -18,6 +18,43 @@
 #include "util/log_macros.h"
 #include <sqlite3.h>
 
+/* ── WAL bounds ────────────────────────────────────────────────────────
+ *
+ * Two settings, and they do DIFFERENT jobs. Getting one without the other is
+ * how a node ends up with a write-ahead log many times the size of the
+ * database it journals.
+ *
+ *   wal_autocheckpoint   how many WAL pages may accumulate before a writer
+ *                        folds them back into the database. It bounds how far
+ *                        BEHIND the WAL runs — not the size of the file.
+ *   journal_size_limit   the size the .wal FILE is truncated back to after a
+ *                        checkpoint. Without it a checkpointed WAL keeps its
+ *                        high-water mark for the life of the connection, so
+ *                        one burst leaves a permanently large file that
+ *                        nothing reclaims.
+ *
+ * Both are per-connection: neither survives into the next process, which is
+ * exactly why the bound has to be established when the connection is OPENED
+ * rather than restored at the end of a phase. A process killed mid-sync never
+ * reaches an end-of-phase restore, and the run after it opens a fresh
+ * connection carrying whatever the open path set.
+ *
+ * Bulk-sync mode gets looser bounds, not absent ones. Its whole point is to
+ * checkpoint rarely, and 256 MiB of WAL is rare enough on any disk; unbounded
+ * is not a faster setting, it is an unbounded one. */
+/* Spelled as bare decimal literals: they are pasted into PRAGMA text by
+ * ZCL_NODE_DB_PRAGMA_NUM below, and an arithmetic expression would stringify
+ * into SQL sqlite cannot parse. */
+#define ZCL_NODE_DB_WAL_AUTOCKPT_PAGES        1000       /* ~4 MiB   */
+#define ZCL_NODE_DB_WAL_AUTOCKPT_PAGES_BULK   65536      /* ~256 MiB */
+#define ZCL_NODE_DB_JOURNAL_SIZE_LIMIT        67108864   /* 64 MiB   */
+#define ZCL_NODE_DB_JOURNAL_SIZE_LIMIT_BULK   268435456  /* 256 MiB  */
+
+/* Paste one of the constants above into a PRAGMA string at compile time, so
+ * the number in the SQL and the number a test asserts are the same token. */
+#define ZCL_NODE_DB_PRAGMA_NUM_(x_) #x_
+#define ZCL_NODE_DB_PRAGMA_NUM(x_) ZCL_NODE_DB_PRAGMA_NUM_(x_)
+
 /* Persist the schema_version counter; halt migration on failure so
  * we don't silently re-apply the same migration on next boot. Used by
  * every versioned migration block in database_migrate.c and

@@ -161,3 +161,36 @@ test_vendor_provenance PASS
 build_vendor_offline_selftest PASS
 repro_network_policy_selftest PASS builds=4
 ```
+
+## Concurrent main integration safety repair
+
+Review of the next concurrent `main` batch retained its datadir ownership,
+bounded-WAL, exact publish-generation, and real rollback acceptance work while
+removing four false or unsafe outcomes:
+
+- block reads no longer attempt to validate or hex-dump a possibly dangling
+  pointer; the caller now owns the copied datadir bytes for the worker lifetime;
+- WAL maintenance records the effective SQLite result and exact TRUNCATE result,
+  and hard file-reset errors fail instead of becoming success;
+- the byte-cap scheduler no longer duplicates the DB service's periodic
+  five-minute checkpoint on slow disks;
+- a hot-swap image superseded between registry publication and ownership commit
+  is retired and reported as refused, not counted as a successful rollback.
+
+Rollback fixtures are Linux-only build prerequisites, with an explicit
+non-Linux platform contract. Fresh focused execution rebuilt both missing
+fixtures, reproduced byte-identical images, and passed the real loader path.
+
+Measured at `2026-08-27T18:39:21-04:00`
+(`2026-08-27T22:39:21Z`):
+
+```text
+test_db_maintenance groups_failed=0 self_skips=0
+test_db_maintenance_port groups_failed=0 self_skips=0
+test_hotswap_rollback groups_failed=0 self_skips=0
+test_agent_spend_policy groups_failed=0 self_skips=0
+test_catchup_lifecycle_service groups_failed=0 self_skips=0
+test_disk_block_io groups_failed=0 self_skips=0
+test_command_handler_snapshot groups_failed=0 self_skips=0
+test_sqlite + wallet SQLite groups_failed=0 self_skips=0
+```

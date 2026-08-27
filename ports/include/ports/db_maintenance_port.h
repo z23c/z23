@@ -10,9 +10,12 @@
  * sqlite is execute one fixed maintenance statement per op. Those three
  * executions are exactly what this port captures, one method per op:
  *
- *   wal_checkpoint(self, err, errsz)  "PRAGMA wal_checkpoint(TRUNCATE);"
+ *   wal_checkpoint(self, out, err, errsz)
+ *                                     "PRAGMA wal_checkpoint(TRUNCATE);"
  *                                     Flush committed WAL frames into the
- *                                     main file and truncate the WAL.
+ *                                     main file and truncate the WAL, and
+ *                                     report how many frames actually moved
+ *                                     (struct db_maintenance_wal_outcome).
  *   analyze(self, err, errsz)         "ANALYZE;"
  *                                     Rebuild sqlite_stat1 planner stats.
  *   vacuum(self, err, errsz)          "VACUUM;"
@@ -32,8 +35,14 @@
  * never closes it.
  *
  * Contract for every method:
- *   - Runs the op's SQL verbatim via sqlite3_exec (no statement caching).
- *   - Returns true iff the op reported success (SQLITE_OK).
+ *   - Runs the op's SQL verbatim (no statement caching). The WAL checkpoint
+ *     is the one exception to "via sqlite3_exec": exec with a NULL callback
+ *     DISCARDS the PRAGMA's result row, and that row is where the frame
+ *     counts and the busy flag live, so the adapter uses the checkpoint call
+ *     that returns them as out-parameters instead.
+ *   - Returns true iff the op reported success (SQLITE_OK). For the WAL
+ *     checkpoint, note that success does NOT imply the WAL shrank — read the
+ *     outcome's frame counts for that.
  *   - On failure returns false and, if `err`/`errsz` are non-NULL, copies
  *     a NUL-terminated SQLite error string into `err` (truncated to
  *     `errsz`). The buffer is left a valid C string in all paths.
@@ -53,11 +62,33 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* What one checkpoint actually achieved, which its true/false return cannot
+ * say. A checkpoint that completes having moved ZERO frames leaves the WAL
+ * exactly as large as it found it, and reports the same success as one that
+ * folded the whole log away — so the frame counts, not the return value, are
+ * what tells an operator whether reclamation is happening.
+ *
+ * `truncate_rc` separately records whether the second-stage filesystem reset
+ * succeeded. BUSY/LOCKED there is nonfatal after PASSIVE already moved the
+ * frames; any other TRUNCATE error makes the operation fail. */
+struct db_maintenance_wal_outcome {
+    int64_t log_frames;   /* total frames observed in the WAL;    -1 unknown */
+    int64_t ckpt_frames;  /* frames folded into the database;   -1 unknown */
+    int     rc;           /* effective SQLite result for the whole request */
+    int     truncate_rc;  /* exact file-reset result; -1 when not attempted */
+    bool    busy;         /* PASSIVE was refused by a lock                  */
+    bool    truncated;    /* the second-stage file reset returned OK       */
+};
+
 struct db_maintenance_port {
     void *self;
 
-    /* "PRAGMA wal_checkpoint(TRUNCATE);" */
-    bool (*wal_checkpoint)(void *self, char *err, size_t errsz);
+    /* "PRAGMA wal_checkpoint(TRUNCATE);"
+     *
+     * `out` may be NULL. When non-NULL it is filled on EVERY path, including
+     * the failure paths, so a caller never reads a previous call's numbers. */
+    bool (*wal_checkpoint)(void *self, struct db_maintenance_wal_outcome *out,
+                           char *err, size_t errsz);
 
     /* "ANALYZE;" */
     bool (*analyze)(void *self, char *err, size_t errsz);

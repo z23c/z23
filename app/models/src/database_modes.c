@@ -154,12 +154,24 @@ bool node_db_ibd_turbo_mode(struct node_db *ndb)
     /* Turbo-mode PRAGMAs are performance optimisations, not integrity
      * invariants — if any of them fail, fall back to the safe
      * defaults and carry on.  The previous silent path left the DB in
-     * a partial-turbo state (e.g. synchronous=OFF succeeded but
-     * wal_autocheckpoint=0 did not, so WAL grew unbounded). */
+     * a partial-turbo state (e.g. synchronous=OFF succeeded but the WAL
+     * bound did not, so the WAL grew unbounded). */
+    /* Bulk sync checkpoints RARELY, never NEVER. `wal_autocheckpoint=0` — what
+     * this used to set — removes the bound entirely, and because bulk mode is
+     * entered on every sync of more than 50,000 blocks and only left by
+     * node_db_normal_mode() at the END of that sync, a process that dies
+     * mid-sync spends its whole life with no bound at all. That is how single
+     * runs reached 51-115 GB of WAL against a 10 GB database. The loose bound
+     * below keeps the checkpoint rare enough to be cheap and the file bounded
+     * enough to survive a slow disk, and journal_size_limit is what actually
+     * returns the .wal file's blocks to the filesystem afterwards. */
     static const char *const turbo_pragmas[] = {
         "PRAGMA synchronous=OFF",
         "PRAGMA cache_size=-524288",
-        "PRAGMA wal_autocheckpoint=0",
+        "PRAGMA wal_autocheckpoint="
+            ZCL_NODE_DB_PRAGMA_NUM(ZCL_NODE_DB_WAL_AUTOCKPT_PAGES_BULK),
+        "PRAGMA journal_size_limit="
+            ZCL_NODE_DB_PRAGMA_NUM(ZCL_NODE_DB_JOURNAL_SIZE_LIMIT_BULK),
         NULL,
     };
     bool turbo_ok = true;
@@ -176,9 +188,11 @@ bool node_db_ibd_turbo_mode(struct node_db *ndb)
                         "turbo_fallback synchronous");
         db_exec_checked(ndb->db, "PRAGMA cache_size=-65536",
                         "turbo_fallback cache_size");
-        db_exec_checked(ndb->db, "PRAGMA wal_autocheckpoint=1000",
+        db_exec_checked(ndb->db, "PRAGMA wal_autocheckpoint="
+                        ZCL_NODE_DB_PRAGMA_NUM(ZCL_NODE_DB_WAL_AUTOCKPT_PAGES),
                         "turbo_fallback wal_autocheckpoint");
-        db_exec_checked(ndb->db, "PRAGMA journal_size_limit=67108864",
+        db_exec_checked(ndb->db, "PRAGMA journal_size_limit="
+                        ZCL_NODE_DB_PRAGMA_NUM(ZCL_NODE_DB_JOURNAL_SIZE_LIMIT),
                         "turbo_fallback journal_size_limit");
         node_db_note_turbo_mode(ndb, false, "ibd_turbo_mode_fallback",
                                 SQLITE_ERROR);
@@ -198,7 +212,8 @@ bool node_db_normal_mode(struct node_db *ndb)
                     "normal_mode synchronous");
     db_exec_checked(ndb->db, "PRAGMA cache_size=-65536",
                     "normal_mode cache_size");
-    db_exec_checked(ndb->db, "PRAGMA wal_autocheckpoint=1000",
+    db_exec_checked(ndb->db, "PRAGMA wal_autocheckpoint="
+                    ZCL_NODE_DB_PRAGMA_NUM(ZCL_NODE_DB_WAL_AUTOCKPT_PAGES),
                     "normal_mode wal_autocheckpoint");
     /* Cap the WAL FILE size after checkpoint. wal_autocheckpoint is PASSIVE: it
      * folds WAL pages into the db but leaves the .wal file at its high-water
@@ -208,7 +223,8 @@ bool node_db_normal_mode(struct node_db *ndb)
      * checkpoint, bounding disk at the source — no reclaim thread, no deleting a
      * live WAL out from under an open handle. 64 MiB is generous headroom over
      * the ~4 MiB autocheckpoint trigger; it only caps pathological bursts. */
-    db_exec_checked(ndb->db, "PRAGMA journal_size_limit=67108864",
+    db_exec_checked(ndb->db, "PRAGMA journal_size_limit="
+                    ZCL_NODE_DB_PRAGMA_NUM(ZCL_NODE_DB_JOURNAL_SIZE_LIMIT),
                     "normal_mode journal_size_limit");
     node_db_rebuild_indexes(ndb);
     node_db_wal_checkpoint(ndb);
@@ -217,10 +233,22 @@ bool node_db_normal_mode(struct node_db *ndb)
     return true;
 }
 
-bool node_db_wal_checkpoint(struct node_db *ndb)
+bool node_db_wal_checkpoint_result(struct node_db *ndb,
+                                   struct wal_ckpt_record *out)
 {
     sqlite3_stmt *stmt = NULL;
     bool is_wal = false;
+
+    /* Give `out` a definite meaning on every exit, including the two early
+     * ones. A caller that reads a record this function never touched would be
+     * reading the last checkpoint's numbers as if they were this one's. */
+    if (out) {
+        static const struct wal_ckpt_record unattempted = {
+            .outcome = WAL_CKPT_UNKNOWN, .rc = 0,
+            .log_frames = -1, .ckpt_frames = -1, .source = "node_db",
+        };
+        *out = unattempted;
+    }
 
     if (!ndb || !ndb->open) return false;
     struct db_lifetime_scope lifetime_scope;
@@ -240,34 +268,88 @@ bool node_db_wal_checkpoint(struct node_db *ndb)
     if (stmt)
         sqlite3_finalize(stmt);
     if (!is_wal) {
+        /* Not a WAL database (an in-memory or rollback-journal handle): there
+         * is no write-ahead log to reclaim, so this is exempt, not drained.
+         * Nothing is recorded — counting it would dilute the ratios an
+         * operator reads off a real WAL connection. */
+        if (out)
+            out->outcome = WAL_CKPT_DRAINED;
         node_db_note_activity(ndb, "wal_checkpoint", SQLITE_OK);
         db_lifetime_scope_leave(&lifetime_scope);
         return true;
     }
-    /* TRUNCATE resets the WAL file to zero bytes but needs an exclusive
-     * checkpoint moment: on a busy multi-connection node.db (the periodic
-     * checkpoint, catch-up, and the many onion/explorer/coordinator readers
-     * all share this file) it returns SQLITE_BUSY and reclaims NOTHING, so
-     * the WAL grew without bound (observed ~196 MB on the canonical node) and
-     * an ever-larger WAL lengthens every write-lock hold window until the
-     * wallet-key flush can no longer win the lock within its retry budget.
-     * Fall back to a PASSIVE checkpoint when TRUNCATE is busy: PASSIVE never
-     * blocks on other connections and reclaims every WAL frame up to the
-     * oldest live reader, so the WAL stops growing (frames are reused) even
-     * when it cannot be truncated to zero. A PASSIVE pass that checkpoints
-     * some frames is progress, not a failure. */
-    int rc = sqlite3_wal_checkpoint_v2(ndb->db, NULL,
-                                       SQLITE_CHECKPOINT_TRUNCATE,
-                                       NULL, NULL);
-    if (rc == SQLITE_BUSY || rc == SQLITE_LOCKED) {
-        int prc = sqlite3_wal_checkpoint_v2(ndb->db, NULL,
-                                            SQLITE_CHECKPOINT_PASSIVE,
-                                            NULL, NULL);
-        node_db_note_activity(ndb, "wal_checkpoint_passive", prc);
-        db_lifetime_scope_leave(&lifetime_scope);
-        return prc == SQLITE_OK;
-    }
+    /* Two checkpoint calls, in this order, and the order is the whole point.
+     *
+     * PASSIVE FIRST, because it is the only one that reports what happened.
+     * pnLog/pnCkpt come back from TRUNCATE as 0/0 on success no matter how
+     * much work it did — truncation resets the log, so the "after" numbers
+     * are always zero — which means a TRUNCATE can tell you it succeeded but
+     * never how much it reclaimed. PASSIVE reports the real pair: frames in
+     * the log, and frames folded into the database. So PASSIVE is what
+     * classifies the outcome, and it is also the call that does the actual
+     * work of moving frames. It never blocks on another connection.
+     *
+     * TRUNCATE SECOND, purely to return the .wal file's blocks to the
+     * filesystem. By then the frames are already folded, so a busy TRUNCATE
+     * costs nothing but a still-large file — which journal_size_limit caps
+     * anyway at the next autocheckpoint. That is why its result is NOT an
+     * error here and NOT the verdict: the reclamation already happened or
+     * already failed one call earlier, and reporting the file-reset step's
+     * lock race as the checkpoint's outcome is what used to make a busy
+     * multi-connection node.db look like a checkpoint failure.
+     *
+     * Passing NULL for both counts — what this function used to do — collapses
+     * "folded the whole log away" and "moved zero frames because a reader is
+     * parked on the oldest one" into one indistinguishable SQLITE_OK. That is
+     * how a WAL 9.2 times the size of its database stayed invisible. */
+    int log_frames = -1, ckpt_frames = -1;
+    int passive_rc = sqlite3_wal_checkpoint_v2(ndb->db, NULL,
+                                                SQLITE_CHECKPOINT_PASSIVE,
+                                                &log_frames, &ckpt_frames);
+    int truncate_rc = -1;
+    if (passive_rc == SQLITE_OK)
+        truncate_rc = sqlite3_wal_checkpoint_v2(ndb->db, NULL,
+                                                 SQLITE_CHECKPOINT_TRUNCATE,
+                                                 NULL, NULL);
+    bool truncate_hard_failure =
+        truncate_rc != -1 && truncate_rc != SQLITE_OK &&
+        truncate_rc != SQLITE_BUSY && truncate_rc != SQLITE_LOCKED;
+    int rc = truncate_hard_failure ? truncate_rc : passive_rc;
+    if (truncate_hard_failure)
+        LOG_ERROR("db",
+                  "[db] wal file reset failed after PASSIVE checkpoint: "
+                  "truncate_rc=%d wal_frames=%d moved=%d",
+                  truncate_rc, log_frames, ckpt_frames);
+
+    struct wal_ckpt_record rec = {
+        .outcome = wal_ckpt_classify(rc == SQLITE_OK,
+                                     rc == SQLITE_BUSY || rc == SQLITE_LOCKED,
+                                     log_frames, ckpt_frames),
+        .rc = rc,
+        .log_frames = log_frames,
+        .ckpt_frames = ckpt_frames,
+        .source = "node_db",
+    };
+    wal_ckpt_stats_note(&rec);
+    if (out)
+        *out = rec;
+
+    /* A checkpoint that completed and reclaimed nothing is not an error, so
+     * it must not be reported as one — but it is not silence either. Say what
+     * happened, once, with the numbers that prove it. */
+    if (wal_ckpt_outcome_reclaimed_nothing(rec.outcome))
+        LOG_WARN("db",
+                 "[db] wal checkpoint reclaimed nothing: outcome=%s rc=%d "
+                 "wal_frames=%lld moved=%lld",
+                 wal_ckpt_outcome_name(rec.outcome), rc,
+                 (long long)log_frames, (long long)ckpt_frames);
+
     node_db_note_activity(ndb, "wal_checkpoint", rc);
     db_lifetime_scope_leave(&lifetime_scope);
     return rc == SQLITE_OK;
+}
+
+bool node_db_wal_checkpoint(struct node_db *ndb)
+{
+    return node_db_wal_checkpoint_result(ndb, NULL);
 }

@@ -62,9 +62,11 @@
 #include "util/db_txn_trace.h"
 #include "util/log_macros.h"
 #include "util/telemetry_render.h"
+#include "util/wal_checkpoint_stats.h"
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <string.h>
 
 /* Every reason token this file can attach to a non-present leaf. They are
  * static strings with program lifetime (the render layer borrows them) and
@@ -73,6 +75,7 @@
 #define SR_MAINT_UNREAD    "db_maintenance_unreadable"
 #define SR_MAINT_NEVER_WAL "no_wal_checkpoint_recorded"
 #define SR_MAINT_NEVER_VAC "no_vacuum_recorded"
+#define SR_CKPT_NO_PERIODIC_RUN "no_periodic_checkpoint_completed"
 #define SR_TRACE_OFF       "db_txn_trace_disabled"
 #define SR_TRACE_UNREAD    "db_txn_trace_unreadable"
 #define SR_DISK_NEVER      "disk_never_polled"
@@ -254,8 +257,65 @@ static void maintenance_all_unavailable(struct storage_snapshot *s,
     TELEMETRY_UNAVAILABLE_LEAF(s, maintenance_worker_running, why);
     TELEMETRY_UNAVAILABLE_LEAF(s, maintenance_failures_total, why);
     TELEMETRY_UNAVAILABLE_LEAF(s, maintenance_runs_total, why);
-    TELEMETRY_UNAVAILABLE_LEAF(s, wal_checkpoint_age_seconds, why);
     TELEMETRY_UNAVAILABLE_LEAF(s, vacuum_age_seconds, why);
+}
+
+/* The WAL checkpoint leaves, sourced from the process-wide checkpoint ledger
+ * (util/wal_checkpoint_stats.h) rather than from the maintenance worker.
+ *
+ * WHY THEY MOVED. wal_checkpoint_age_seconds used to be read out of the
+ * maintenance worker's dumper alone. That worker was gated behind an
+ * environment variable nothing set, so it never ran, so the age leaf read
+ * "not_applicable: no_wal_checkpoint_recorded" on every node forever — while
+ * the checkpointer that DOES run (one pass every 5 minutes, from the DB
+ * service) had no telemetry at all. An operator reading the storage domain
+ * got a permanent nothing-happening about the wrong subsystem. Every
+ * checkpointer now records into one ledger and this reads that. */
+static void fill_wal_checkpoint(struct storage_snapshot *s, int64_t now_unix)
+{
+    struct wal_ckpt_stats w;
+    memset(&w, 0, sizeof(w));
+    wal_ckpt_stats_snapshot(&w);
+
+    /* Armed is always a statement, never an absence: the checkpointer
+     * publishes its own state, so this leaf is present even when false. */
+    TELEMETRY_SET_BOOL(s, wal_checkpointer_armed, w.periodic_armed,
+                       TELEMETRY_SRC_IN_PROCESS);
+
+    TELEMETRY_SET_I64(s, wal_checkpoint_attempts_total, w.attempts_total,
+                      TELEMETRY_SRC_IN_PROCESS);
+    TELEMETRY_SET_I64(s, wal_checkpoint_noop_total, w.noop_total,
+                      TELEMETRY_SRC_IN_PROCESS);
+    TELEMETRY_SET_I64(s, wal_checkpoint_busy_total, w.busy_total,
+                      TELEMETRY_SRC_IN_PROCESS);
+    TELEMETRY_SET_I64(s, wal_checkpoint_frames_moved_total,
+                      w.frames_moved_total, TELEMETRY_SRC_IN_PROCESS);
+
+    /* The age of a checkpoint that has not happened yet is not a number. */
+    int64_t age = 0;
+    if (w.attempts_total <= 0 || w.last_unix <= 0)
+        TELEMETRY_NOT_APPLICABLE_LEAF(s, wal_checkpoint_age_seconds,
+                                      SR_MAINT_NEVER_WAL);
+    else if (sr_age_seconds(w.last_unix, now_unix, &age))
+        TELEMETRY_SET_I64(s, wal_checkpoint_age_seconds, age,
+                          TELEMETRY_SRC_DERIVED);
+    else
+        TELEMETRY_UNAVAILABLE_LEAF(s, wal_checkpoint_age_seconds, SR_CLOCK);
+
+    /* The wait/exec split exists only once the PERIODIC checkpointer has
+     * completed a pass — a checkpoint run from anywhere else was never in
+     * that queue, so it has no wait to report and a zero would be a claim. */
+    if (w.periodic_runs_total <= 0) {
+        TELEMETRY_NOT_APPLICABLE_LEAF(s, wal_checkpoint_queue_wait_us,
+                                      SR_CKPT_NO_PERIODIC_RUN);
+        TELEMETRY_NOT_APPLICABLE_LEAF(s, wal_checkpoint_exec_us,
+                                      SR_CKPT_NO_PERIODIC_RUN);
+    } else {
+        TELEMETRY_SET_I64(s, wal_checkpoint_queue_wait_us,
+                          w.periodic_last_wait_us, TELEMETRY_SRC_IN_PROCESS);
+        TELEMETRY_SET_I64(s, wal_checkpoint_exec_us,
+                          w.periodic_last_exec_us, TELEMETRY_SRC_IN_PROCESS);
+    }
 }
 
 static void fill_maintenance(struct storage_snapshot *s, int64_t now_unix)
@@ -299,15 +359,6 @@ static void fill_maintenance(struct storage_snapshot *s, int64_t now_unix)
         TELEMETRY_UNAVAILABLE_LEAF(s, maintenance_runs_total, SR_MAINT_UNREAD);
 
     int64_t last = 0, age = 0;
-    if (!sr_get_int(&doc, "wal_last_unix", &last) || last <= 0)
-        TELEMETRY_NOT_APPLICABLE_LEAF(s, wal_checkpoint_age_seconds,
-                                      SR_MAINT_NEVER_WAL);
-    else if (sr_age_seconds(last, now_unix, &age))
-        TELEMETRY_SET_I64(s, wal_checkpoint_age_seconds, age,
-                          TELEMETRY_SRC_DERIVED);
-    else
-        TELEMETRY_UNAVAILABLE_LEAF(s, wal_checkpoint_age_seconds, SR_CLOCK);
-
     if (!sr_get_int(&doc, "vacuum_last_unix", &last) || last <= 0)
         TELEMETRY_NOT_APPLICABLE_LEAF(s, vacuum_age_seconds,
                                       SR_MAINT_NEVER_VAC);
@@ -338,6 +389,7 @@ bool storage_dump_state_fill(struct storage_snapshot *s)
     fill_txn_trace(s);
     fill_disk(s, now_unix);
     fill_maintenance(s, now_unix);
+    fill_wal_checkpoint(s, now_unix);
     return true;
 }
 

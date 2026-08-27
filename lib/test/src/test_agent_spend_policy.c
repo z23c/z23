@@ -1091,6 +1091,9 @@ static int test_canonical_intent_session(void)
         ASSERT_EQ(charged, 0);
         ASSERT_EQ(spent_now(f, k_sid_a), 1910000);
 
+        /* Derive transition stamps from the stored row so the verdict does
+         * not depend on wall-clock scheduling on a loaded or slow host. */
+
         /* A known pre-broadcast terminal failure releases the marker and
          * window. A network-accepted transaction never does. */
         ASSERT(vault_intent_set_state(&f->ndb, row.plan_id,

@@ -45,6 +45,44 @@
  *
  * Tests call `run_now` directly so they don't have to sleep for
  * a real interval.
+ *
+ * Boot policy — why this service runs, and why not all of it
+ * ---------------------------------------------------------
+ * This scheduler owns the ONLY size-triggered WAL checkpoint in the node:
+ * the DB_MAINT_DEFAULT_WAL_MAX_BYTES cap that forces a checkpoint when the
+ * WAL passes it regardless of the clock. It is also what registers the
+ * node_db handle that db_maintenance_checkpoint_now() — the storage-reclaim
+ * emergency leg — reaches the database through. Without it started, that
+ * leg returns "no registered db" and the WAL has no size bound at all.
+ *
+ * It used to start only when ZCL_ENABLE_BOOT_DB_MAINT=1 was set in the
+ * environment: a variable set nowhere in the repository, in no unit file, in
+ * no drop-in and in no env file. A safety net nothing can switch on is not a
+ * safety net, so boot now starts it by default and an operator opts out with
+ * ZCL_DISABLE_BOOT_DB_MAINT=1.
+ *
+ * The three ops share a thread but not a risk profile, so boot arms them
+ * individually rather than shipping all three or none:
+ *
+ *   wal      SIZE CAP ARMED. The DB-service writer already runs the periodic
+ *            five-minute checkpoint. This scheduler adds only the independent
+ *            byte threshold and emergency handle, avoiding two synchronized
+ *            periodic checkpoints against the same connection.
+ *   analyze  EXEMPT. A full scan of every index on a multi-GB node.db, with
+ *            no idle gate and no bound, on the same serialized connection
+ *            the writer uses — so it blocks writes for its whole duration.
+ *            It has never once run in production (the service never
+ *            started), and its first run would land AT BOOT, because an op
+ *            that has never run is due immediately. Arming it would trade a
+ *            WAL bound for a boot-time write stall on exactly the slow-disk
+ *            machines that need the WAL bound most. Still available on
+ *            demand through db_maintenance_run_now(db, "analyze").
+ *   vacuum   EXEMPT. Rewrites the whole database into a new file and holds
+ *            the lock for the duration; it needs an at-tip-and-idle gate,
+ *            and the boot path installs none.
+ *
+ * Declaring the two off legs exempt is the point. The alternative on offer
+ * was leaving all three off and calling the whole thing deferred.
  */
 
 #ifndef ZCL_SERVICES_DB_MAINTENANCE_H
@@ -69,15 +107,31 @@
 
 /* ── Config ─────────────────────────────────────────────────── */
 
+/* Each interval has three states, and the third one is the point:
+ *
+ *    > 0   run this op on that interval
+ *      0   use the DB_MAINT_DEFAULT_* interval for this op
+ *    < 0   EXEMPT — the caller has deliberately decided this op does not run
+ *          from the scheduler. run_now() still executes it on demand.
+ *
+ * "Exempt" exists so a caller can arm the cheap ops without arming an
+ * expensive one, and say so, instead of the two being packaged together and
+ * the whole scheduler being left switched off to avoid the expensive half.
+ * An op that is off should be off ON PURPOSE and legible as such. */
 struct db_maintenance_schedule {
-    int wal_checkpoint_minutes;   /* 0 = use default  */
-    int analyze_hours;            /* 0 = use default  */
-    int vacuum_days;              /* 0 = use default  */
+    int wal_checkpoint_minutes;   /* 0 = use default, <0 = exempt */
+    int analyze_hours;            /* 0 = use default, <0 = exempt */
+    int vacuum_days;              /* 0 = use default, <0 = exempt */
     int tick_seconds;             /* 0 = 60 s (poll)  */
     int64_t wal_max_bytes;        /* 0 = use default (100MB) */
 };
 
 void db_maintenance_schedule_defaults(struct db_maintenance_schedule *s);
+
+/* The boot schedule: only the WAL byte cap is armed here; periodic WAL work is
+ * owned by the serialized DB-service writer. ANALYZE and VACUUM are exempt. */
+void db_maintenance_schedule_wal_cap_only(
+    struct db_maintenance_schedule *s);
 
 /* ── Status snapshot ────────────────────────────────────────── */
 

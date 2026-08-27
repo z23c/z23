@@ -751,14 +751,16 @@ static int test_live_swap_and_quiesce(void)
         /* Publish v1 override (generation 1). */
         struct zcl_command_handler_override o1 = { .path = "hs.mod.read", .handler = h_v1 };
         char why[256] = {0};
-        ASSERT(zcl_command_registry_replace_batch(0, &o1, 1, why, sizeof(why)));
+        ASSERT(zcl_command_registry_replace_batch(0, &o1, 1, why,
+                                                 sizeof(why), NULL));
 
         /* No in-flight readers: every retired snapshot has drained. */
         ASSERT(zcl_command_registry_all_retired_quiesced());
 
         /* Swap to v2 (generation 2, retires the gen-1 snapshot). */
         struct zcl_command_handler_override o2 = { .path = "hs.mod.read", .handler = h_v2 };
-        ASSERT(zcl_command_registry_replace_batch(0, &o2, 1, why, sizeof(why)));
+        ASSERT(zcl_command_registry_replace_batch(0, &o2, 1, why,
+                                                 sizeof(why), NULL));
         ASSERT_EQ((int)mod_exec(out, sizeof(out)), (int)ZCL_COMMAND_EXIT_OK);
         ASSERT(strstr(out, "\"v\":\"v2\"") != NULL);
         ASSERT(atomic_load(&g_v2_calls) >= 1);
@@ -788,7 +790,7 @@ static void *mod_writer(void *arg)
     struct zcl_command_handler_override ovr = { .path = "hs.mod.read", .handler = h_v1 };
     for (uint32_t i = 1; i <= MOD_HAMMER_ITERS; i++) {
         ovr.handler = (i & 1u) ? h_v2 : h_v1;
-        (void)zcl_command_registry_replace_batch(i, &ovr, 1, NULL, 0);
+        (void)zcl_command_registry_replace_batch(i, &ovr, 1, NULL, 0, NULL);
     }
     atomic_store_explicit(&g_mod_done, true, memory_order_release);
     return NULL;

@@ -6,6 +6,7 @@
 #define ZCL_DB_H
 
 #include "util/sync.h"
+#include "util/wal_checkpoint_stats.h"
 #include <sqlite3.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -262,8 +263,23 @@ bool node_db_ibd_turbo_mode(struct node_db *ndb);
  * Call after IBD completes. */
 bool node_db_normal_mode(struct node_db *ndb);
 
-/* WAL checkpoint (TRUNCATE). Call after large bulk operations. */
+/* WAL checkpoint (TRUNCATE, falling back to PASSIVE when a lock refuses the
+ * exclusive moment TRUNCATE needs). Call after large bulk operations.
+ *
+ * Returns true when the checkpoint COMPLETED — which is not the same as "the
+ * WAL shrank". A checkpoint can complete having moved zero frames, and for a
+ * long time that outcome was reported identically to a full drain. Use
+ * node_db_wal_checkpoint_result() when you need to tell those apart; the
+ * outcome of every call, from either entry point, is also published to
+ * util/wal_checkpoint_stats.h for telemetry. */
 bool node_db_wal_checkpoint(struct node_db *ndb);
+
+/* As node_db_wal_checkpoint(), and additionally fills `out` with what the
+ * checkpoint actually did: the outcome, the sqlite result code, and the WAL
+ * frame counts (pnLog / pnCkpt) that separate a drain from a no-op. `out` may
+ * be NULL, in which case this is exactly node_db_wal_checkpoint(). */
+bool node_db_wal_checkpoint_result(struct node_db *ndb,
+                                   struct wal_ckpt_record *out);
 
 /* Drop secondary indexes for bulk load throughput. */
 bool node_db_drop_indexes(struct node_db *ndb);

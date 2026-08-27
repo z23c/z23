@@ -7,6 +7,7 @@
 #include "chain/chainparams.h"
 #include "storage/coins_db.h"
 #include "models/wallet_key.h"
+#include "models/database_internal.h"
 #include "models/database_lifetime.h"
 #include "models/database_owner_lease.h"
 #include "controllers/snapshot_controller.h"
@@ -24,11 +25,28 @@
 #include "validation/main_state.h"
 #include "util/safe_alloc.h"
 #include "util/hw_profile.h"
+#include "util/wal_checkpoint_stats.h"
 #include <pthread.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+
+/* Read a single-value PRAGMA off an open connection. Returns -1 when the
+ * statement does not produce a row, so a missing setting can never be
+ * mistaken for a setting of zero — which for wal_autocheckpoint is exactly
+ * the value that means "unbounded". */
+static int64_t sqlite_test_pragma_i64(sqlite3 *db, const char *pragma)
+{
+    sqlite3_stmt *stmt = NULL;
+    int64_t value = -1;
+    if (sqlite3_prepare_v2(db, pragma, -1, &stmt, NULL) == SQLITE_OK && stmt &&
+        sqlite3_step(stmt) == SQLITE_ROW)  // raw-sql-ok:read-only-introspection
+        value = sqlite3_column_int64(stmt, 0);
+    if (stmt)
+        sqlite3_finalize(stmt);
+    return value;
+}
 
 /* Write one wallet_keys row through the encryption-aware single writer
  * (the model save functions are gone — wallet_sqlite owns the secret
@@ -2535,6 +2553,141 @@ int test_sqlite(void) {
         node_db_close(&ndb);
         if (ok) printf("OK (%d/%d reads consistent)\n", hits, READS);
         else { printf("FAIL (hits=%d)\n", hits); failures++; }
+    }
+
+
+    /* ── WAL checkpoint accounting ─────────────────────────────────────
+     *
+     * A checkpoint reports success whether it drained the whole write-ahead
+     * log or moved not one frame of it, and for a long time this codebase
+     * kept only that bool: sqlite3_wal_checkpoint_v2 was called with NULL for
+     * both frame-count out-parameters, and the maintenance adapter ran the
+     * PRAGMA through sqlite3_exec with a NULL callback, discarding the result
+     * row that carries the counts AND the busy flag. A node whose WAL had
+     * grown to many times the size of its database therefore looked, from
+     * every log line and every telemetry leaf, exactly like a node whose WAL
+     * was being kept at zero.
+     *
+     * These checks pin the distinction and the bounds that keep it from
+     * mattering, against a throwaway database under ./test-tmp. */
+    {
+        printf("SQLite WAL checkpoint classification is unambiguous... ");
+        bool ok = true;
+
+        /* The one case the old code could not express: completed, and
+         * reclaimed NOTHING. It must not share an answer with a drain. */
+        ok = ok && wal_ckpt_classify(true, false, 400, 0) == WAL_CKPT_NOOP;
+        ok = ok && wal_ckpt_classify(true, false, 400, 400) == WAL_CKPT_DRAINED;
+        ok = ok && wal_ckpt_classify(true, false, 400, 120) == WAL_CKPT_PARTIAL;
+        /* An empty log is drained, not a no-op: there was nothing to move. */
+        ok = ok && wal_ckpt_classify(true, false, 0, 0) == WAL_CKPT_DRAINED;
+        /* Busy outranks completed, because the engine reports internal
+         * contention as a SUCCESSFUL call with busy set in its result row. */
+        ok = ok && wal_ckpt_classify(true, true, 400, 400) == WAL_CKPT_BUSY;
+        ok = ok && wal_ckpt_classify(false, false, -1, -1) == WAL_CKPT_ERROR;
+        /* Unknown counts cannot be talked up into a success. */
+        ok = ok && wal_ckpt_classify(true, false, -1, -1) == WAL_CKPT_UNKNOWN;
+
+        ok = ok && wal_ckpt_outcome_reclaimed_nothing(WAL_CKPT_NOOP);
+        ok = ok && wal_ckpt_outcome_reclaimed_nothing(WAL_CKPT_BUSY);
+        ok = ok && wal_ckpt_outcome_reclaimed_nothing(WAL_CKPT_ERROR);
+        ok = ok && !wal_ckpt_outcome_reclaimed_nothing(WAL_CKPT_DRAINED);
+        ok = ok && !wal_ckpt_outcome_reclaimed_nothing(WAL_CKPT_PARTIAL);
+
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+
+    {
+        printf("SQLite node.db opens with a bounded WAL and reports what "
+               "each checkpoint moved... ");
+        char dir[256];
+        char dbpath[512];
+        test_make_tmpdir(dir, sizeof(dir), "sqlite", "wal_bounds");
+        snprintf(dbpath, sizeof(dbpath), "%s/node.db", dir);
+
+        struct node_db ndb;
+        memset(&ndb, 0, sizeof(ndb));
+        app_runtime_set_current(NULL);
+        wal_ckpt_stats_reset();
+        bool ok = node_db_open(&ndb, dbpath);
+
+        /* 1. The bound is established BY THE OPEN, not by an end-of-phase
+         *    restore. Both settings are per-connection, so a process killed
+         *    mid-sync never reaches a restore and the next process inherits
+         *    only what the open path set. Without journal_size_limit an
+         *    autocheckpointed WAL keeps its high-water mark for the life of
+         *    the connection — the file never shrinks, however clean the
+         *    checkpoints look. */
+        ok = ok && sqlite_test_pragma_i64(ndb.db, "PRAGMA wal_autocheckpoint")
+                       == ZCL_NODE_DB_WAL_AUTOCKPT_PAGES;
+        ok = ok && sqlite_test_pragma_i64(ndb.db, "PRAGMA journal_size_limit")
+                       == ZCL_NODE_DB_JOURNAL_SIZE_LIMIT;
+
+        /* 2. Bulk-sync mode loosens those bounds; it must never remove them.
+         *    An unbounded write-ahead log is not a faster setting. */
+        ok = ok && node_db_ibd_turbo_mode(&ndb);
+        int64_t bulk_ckpt =
+            sqlite_test_pragma_i64(ndb.db, "PRAGMA wal_autocheckpoint");
+        ok = ok && bulk_ckpt != 0;
+        ok = ok && bulk_ckpt == ZCL_NODE_DB_WAL_AUTOCKPT_PAGES_BULK;
+        ok = ok && sqlite_test_pragma_i64(ndb.db, "PRAGMA journal_size_limit")
+                       == ZCL_NODE_DB_JOURNAL_SIZE_LIMIT_BULK;
+        ok = ok && node_db_normal_mode(&ndb);
+        ok = ok && sqlite_test_pragma_i64(ndb.db, "PRAGMA wal_autocheckpoint")
+                       == ZCL_NODE_DB_WAL_AUTOCKPT_PAGES;
+
+        /* 3. A checkpoint that DRAINS a non-empty log and one that moves
+         *    nothing must be tellable apart. Both return true. */
+        wal_ckpt_stats_reset();
+        for (int i = 0; ok && i < 64; i++) {
+            char key[32];
+            uint8_t val[64];
+            snprintf(key, sizeof(key), "wal_bounds_%d", i);
+            memset(val, (uint8_t)i, sizeof(val));
+            ok = node_db_state_set(&ndb, key, val, sizeof(val));
+        }
+
+        struct wal_ckpt_record drain = {0};
+        ok = ok && node_db_wal_checkpoint_result(&ndb, &drain);
+        ok = ok && drain.outcome == WAL_CKPT_DRAINED;
+        ok = ok && drain.ckpt_frames > 0;      /* it really moved frames */
+        ok = ok && drain.log_frames >= 0;
+
+        struct wal_ckpt_record again = {0};
+        ok = ok && node_db_wal_checkpoint_result(&ndb, &again);
+        /* Same true, same outcome name — and a different, honest number.
+         * The frame count is the only thing that separates them. */
+        ok = ok && again.ckpt_frames == 0;
+        ok = ok && again.ckpt_frames != drain.ckpt_frames;
+
+        /* 4. Every attempt lands in the one ledger the operator reads, from
+         *    whichever checkpointer ran it. */
+        struct wal_ckpt_stats st;
+        memset(&st, 0, sizeof(st));
+        wal_ckpt_stats_snapshot(&st);
+        ok = ok && st.attempts_total == 2;
+        ok = ok && st.frames_moved_total == drain.ckpt_frames;
+        ok = ok && st.noop_total == 0 && st.error_total == 0;
+        ok = ok && st.last_source && strcmp(st.last_source, "node_db") == 0;
+
+        /* 5. The periodic checkpointer's state is DECLARED, never inferred.
+         *    "Not started" and "ran and found nothing to do" are different
+         *    facts and must not render as the same silence. */
+        wal_ckpt_stats_set_periodic_armed(false, "not_started");
+        wal_ckpt_stats_snapshot(&st);
+        ok = ok && !st.periodic_armed;
+        ok = ok && st.periodic_state &&
+                   strcmp(st.periodic_state, "not_started") == 0;
+        wal_ckpt_stats_set_periodic_armed(true, "armed");
+        wal_ckpt_stats_snapshot(&st);
+        ok = ok && st.periodic_armed;
+
+        node_db_close(&ndb);
+        wal_ckpt_stats_reset();
+        test_rm_rf_recursive(dir);
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
     }
 
     return failures;

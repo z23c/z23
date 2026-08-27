@@ -641,7 +641,8 @@ bool read_block_from_disk_pread_profiled(struct block *b,
     block_init(b);
 
     if (!datadir || !pos || pos->nFile < 0)
-        LOG_FAIL("disk_block_io", "read_block_pread: invalid arguments (datadir=%p pos=%p)",
+        LOG_FAIL("disk_block_io",
+                 "read_block_pread: invalid arguments (datadir=%p pos=%p)",
                  (const void *)datadir, (const void *)pos);
 
     char path[512];

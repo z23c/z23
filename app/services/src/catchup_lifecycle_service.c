@@ -99,7 +99,12 @@ bool catchup_lifecycle_start(struct node_db_sync_catchup_job *job,
      * NET-SPECIFIC datadir (GetDataDir(true); the writer idiom in
      * reducer_ingest_service.c) — the catchup blk reader must look there or
      * it reads an empty/legacy blk dir on regtest/testnet and indexes
-     * nothing. Byte-identical on mainnet. */
+     * nothing. Byte-identical on mainnet.
+     *
+     * This buffer is function-local and this function RETURNS as soon as the
+     * worker is spawned, so the job must retain the bytes rather than the
+     * pointer — node_db_sync_catchup_job_start() copies into its own
+     * args.datadir_storage. Do not "simplify" that copy away. */
     char net_dir[2048];
     GetDataDir(true, net_dir, sizeof(net_dir));
     return node_db_sync_catchup_job_start(job, ndb, chain, w,

@@ -856,26 +856,25 @@ static void boot_wallet_backup_service_stop(void *ctx)
     wallet_backup_stop();
 }
 
+/* node.db WAL bound: ON by default; see "Boot policy" in services/db_maintenance.h. */
 static bool boot_db_maintenance_service_start(void *ctx)
 {
     struct node_db *db = ctx;
     if (!db || !db->open)
         return true;
-
-    const char *enabled = getenv("ZCL_ENABLE_BOOT_DB_MAINT");
-    if (!enabled || strcmp(enabled, "1") != 0) {
-        printf("DB maintenance deferred (set ZCL_ENABLE_BOOT_DB_MAINT=1 to enable boot scheduler)\n");
+    const char *off = getenv("ZCL_DISABLE_BOOT_DB_MAINT");
+    if (off && strcmp(off, "1") == 0) {
+        fprintf(stderr, "[boot] DB maintenance DISABLED: the node.db WAL"
+                " now has no size-triggered checkpoint\n");
         return true;
     }
-
     struct db_maintenance_schedule dbm_sched;
-    db_maintenance_schedule_defaults(&dbm_sched);
-    dbm_sched.wal_checkpoint_minutes = 5;
+    db_maintenance_schedule_wal_cap_only(&dbm_sched);
     struct zcl_result _dbm_r = db_maintenance_start(db, &dbm_sched);
     if (_dbm_r.ok) {
-        printf("DB maintenance started (wal=%dmin analyze=%dh)\n",
-               dbm_sched.wal_checkpoint_minutes,
-               dbm_sched.analyze_hours);
+        printf("DB maintenance started (wal=%lldMB size cap; periodic via "
+               "db_service; analyze/vacuum exempt)\n",
+               (long long)(DB_MAINT_DEFAULT_WAL_MAX_BYTES >> 20));
         return true;
     }
     fprintf(stderr, "db_maintenance_start failed: %s\n", _dbm_r.message);
