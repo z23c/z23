@@ -592,11 +592,16 @@ struct msg_headers_stats {
 void msg_headers_get_stats(struct msg_headers_stats *out);
 
 /* ── Client-puzzle PoW guard for zchunkreq / zblkreq ─────────────────
- * See msgprocessor_snapshot.c for the full design note (stateless:
- * challenge = SHA3-256(secret||peer_ip||time_bucket), no per-peer server
- * state, no seed distribution round trip). Difficulty is 0 (mechanism
- * present, gate open) until armed. */
+ * See msgprocessor_snapshot_serve.c for the full design note (stateless:
+ * challenge = SHA3-256(domain||peer_ip||time_bucket) with a fixed public
+ * lane tag, no per-peer server state). Difficulty is 0 (mechanism present,
+ * gate open) until armed; arming stays deferred until requesters attach
+ * nonces, and the derivation must stay requester-computable. */
 #define SNAP_POW_BUCKET_SECS 60   /* challenge validity window (+1 grace)  */
+/* Fixed public lane tag hashing into every snapshot-puzzle challenge.
+ * MUST stay requester-computable — never replace it with secret material
+ * (see msgprocessor_snapshot_serve.c design note). */
+#define MSG_SNAP_POW_DOMAIN "z23.snappow.v1"
 #define SNAP_POW_MIN_BITS    12   /* idle floor: ~4k hashes, sub-ms        */
 #define SNAP_POW_MAX_BITS    22   /* saturated: ~4M hashes per request     */
 #define SNAP_POW_WINDOW_SECS 10   /* request-rate measurement window       */
