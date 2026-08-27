@@ -32,7 +32,9 @@ ZCL_PLATFORM_NODE_LIBS = -framework Cocoa -framework CoreGraphics \
 	-Wl,-U,_hs_parse_address -Wl,-U,_hs_service_add_ephemeral \
 	-Wl,-U,_hs_service_find -Wl,-U,_smartlist_add \
 	-Wl,-U,_smartlist_free_ -Wl,-U,_smartlist_new \
-	-Wl,-U,_tor_free_ -Wl,-U,_tor_malloc_zero_
+	-Wl,-U,_tor_free_ -Wl,-U,_tor_malloc_zero_ \
+	-Wl,-U,_dynhost_reassembly_cap -Wl,-U,_dynhost_reassembly_admits \
+	-Wl,-U,_dynhost_webserver_has_complete_request
 ZCL_CXX_RUNTIME_LIB = -lc++
 ZCL_WARN_MAYBE_UNINITIALIZED =
 ZCL_TEST_STACK_SETUP = :
