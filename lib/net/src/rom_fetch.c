@@ -4,7 +4,6 @@
  * net/rom_fetch.h for the contract, the trust model, and the wire protocol.
  * Wire/disk input is bounded and verified against caller-committed digests;
  * install/activation remains with the unified installer. */
-
 #include "net/rom_fetch.h"
 #include "net/file_service.h"
 #include "net/rom_journal.h"
@@ -19,7 +18,6 @@
 #include "util/log_macros.h"
 #include "base/text_fit.h"
 #include "util/thread_registry.h"
-
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
@@ -33,7 +31,6 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #define RF_SUBSYS "rom_fetch"
-
 static void rf_session_close(struct fs_session *session, int fd)
 {
     fs_session_cleanup(session);
@@ -43,7 +40,6 @@ static void rf_session_close(struct fs_session *session, int fd)
 #define RF_CONNECT_TIMEOUT_SEC 10
 /* Per-socket timeout: bound a stalled LAN/fast-WAN peer. */
 #define RF_IO_TIMEOUT_SEC 120
-
 /* Bounded per-chunk retry against the seeder's wall-clock-1s rate window
  * (rom_seed_rate_charge): 1100 ms always crosses a second boundary, and
  * 25 retries bound a persistently-refusing peer to ~28 s per chunk before

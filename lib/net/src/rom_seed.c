@@ -7,7 +7,6 @@
  * re-derives every digest from the bytes on disk in one pass (never a sidecar).
  * The serve caps are in-memory DDoS bounds only — nothing here is persisted or
  * a consensus predicate. */
-
 #include "platform/time_compat.h"
 #include "net/rom_seed.h"
 #include "net/file_market.h"
@@ -18,7 +17,6 @@
 #include "util/log_macros.h"
 #include "util/thread_registry.h"
 #include "util/thread_liveness.h"
-
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -28,9 +26,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
-
 #define ROM_SUBSYS "rom_seed"
-
 /* ROM_SEED_SCAN_ENTRY_CAP lives in net/rom_seed.h — see the note there.
  * Measured 2026-08-19: the canonical node's datadir root held 5,686 entries
  * with block_index.bin at readdir position 4,499, so a silent cap of 4,096
@@ -41,14 +37,12 @@
 
 static struct rom_artifact g_artifacts[ROM_SEED_MAX_ARTIFACTS];
 static pthread_mutex_t g_reg_mutex = PTHREAD_MUTEX_INITIALIZER;
-
 /* ── Config (read from serve threads; set at boot) ──────────────────── */
 
 static _Atomic bool     g_enabled = true;
 static _Atomic uint32_t g_max_inflight_per_peer = ROM_SEED_DEFAULT_MAX_INFLIGHT_PER_PEER;
 static _Atomic uint64_t g_peer_bps_cap   = ROM_SEED_DEFAULT_PEER_BPS_CAP;
 static _Atomic uint64_t g_global_bps_cap = ROM_SEED_DEFAULT_GLOBAL_BPS_CAP;
-
 /* ── Caps + stats state (one mutex) ─────────────────────────────────── */
 
 struct rom_peer_stat {
@@ -62,7 +56,6 @@ struct rom_peer_stat {
 };
 static struct rom_peer_stat g_peers[ROM_SEED_PEER_TABLE_CAP];
 static pthread_mutex_t g_caps_mutex = PTHREAD_MUTEX_INITIALIZER;
-
 static int64_t  g_global_win_start = 0;
 static uint64_t g_global_win_bytes = 0;
 

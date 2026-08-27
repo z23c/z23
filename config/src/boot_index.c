@@ -11,7 +11,6 @@
  * config/src/boot_address_backfill.c; the on-disk block-file scan lives
  * in config/src/boot_block_file_scan.c. Block index flat-file save/load
  * and SQLite cache functions live in app/services/src/block_index_loader.c. */
-
 #include "platform/time_compat.h"
 #include "platform/allocator_compat.h"
 #include "config/boot_internal.h"
@@ -111,7 +110,6 @@ static bool boot_index_shielded_tx(sqlite3 *db, const struct block *blk,
 static struct db_service *boot_index_db_service_for(struct node_db *ndb)
 {
     struct db_service *dbsvc = app_runtime_db_service();
-
     if (!ndb || !dbsvc)
         return NULL;
     return db_service_node_db(dbsvc) == ndb ? dbsvc : NULL;
@@ -120,7 +118,6 @@ static struct db_service *boot_index_db_service_for(struct node_db *ndb)
 static bool boot_index_enter_turbo_mode(struct node_db *ndb)
 {
     struct db_service *dbsvc = boot_index_db_service_for(ndb);
-
     if (dbsvc)
         return db_service_ibd_turbo_mode(dbsvc);
     return node_db_ibd_turbo_mode(ndb);

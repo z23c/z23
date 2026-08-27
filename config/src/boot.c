@@ -3,7 +3,6 @@
  * Copyright 2026 Rhett Creighton - Apache License 2.0
  * Distributed under the MIT software license, see the accompanying
  * file COPYING or http://www.opensource.org/licenses/mit-license.php. */
-
 #include "platform/time_compat.h"
 #include "config/boot_blkidx_ladder.h"
 #include "config/boot_blocktree_cleanup.h"
@@ -157,7 +156,6 @@
 #endif
 #include <limits.h>
 #include <sqlite3.h>
-
 static struct main_state g_state;
 static struct coins_view_sqlite g_coins_sqlite;
 /* Read authority for the coins_tip cache backing: a read-only coins_view over

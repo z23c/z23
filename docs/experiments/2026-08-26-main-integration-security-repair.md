@@ -105,6 +105,15 @@ lint-fast                    PASS
 git diff --check             PASS
 ```
 
+At `2026-08-27T03:14:20Z` (`2026-08-26T23:14:20-04:00`), the five groups
+that failed only in the loaded pre-push run were repeated uncached on the
+same host. All five passed: `test_crypto_registry`, `test_dev_platform`, and
+lint-gate shards 03, 06, and 07. The crypto benchmark still records elapsed
+time, but its correctness verdict now requires exact successful operation
+counts instead of comparing scheduler-sensitive wall-clock intervals. The
+file-size gate passed at the existing application/config baseline and the
+existing 22/22 library drift ratchet; neither acceptance threshold changed.
+
 At `2026-08-27T02:07:25Z` on `rhett3.dev`, the clean shutdown began saving
 3,233,145 flat-index entries. The save completed at `02:07:43Z`; the
 `fast-restart-persist` 20-second watchdog fired before the projection binding

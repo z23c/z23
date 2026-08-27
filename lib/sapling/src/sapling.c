@@ -2,7 +2,6 @@
  *
  * Sapling key operations — pure C23 implementation.
  * group_hash, key derivation, commitment, nullifier, RedJubjub, verification context. */
-
 #include <stdio.h>
 #include <inttypes.h>
 #include "sapling/sapling.h"
@@ -21,15 +20,12 @@
 #include "util/log_macros.h"
 #include <string.h>
 #include <stdlib.h>
-
 /* Global verifying keys — set by sapling_init_vk() at startup */
 static struct groth16_vk *sapling_spend_vk = NULL;
 static struct groth16_vk *sapling_output_vk = NULL;
-
 /* URS: first 64 bytes of BLAKE2s input for group_hash (rigidity constant) */
 static const uint8_t GH_FIRST_BLOCK[] =
     "096b36a5804bfacef1691e173c366a47ff5ba84a44f26ddd7e8d9f79d5b42df0";
-
 bool group_hash(struct jub_point *result,
                 const uint8_t *tag, size_t tag_len,
                 const uint8_t personalization[8])

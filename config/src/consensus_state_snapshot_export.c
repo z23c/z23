@@ -1,10 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Contained, immutable full-history consensus-state exporter. */
-
 #define _GNU_SOURCE
-
 #include "config/consensus_state_snapshot_export.h"
-
 #include "config/consensus_state_bundle_validate.h"
 #include "consensus_state_snapshot_export_internal.h"
 #include "storage/consensus_db.h"    /* CONSENSUS_DB_FILENAME + legacy name */

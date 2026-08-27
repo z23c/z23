@@ -1048,7 +1048,8 @@ int t_agent_fast_ci_contract(void)
         ASSERT(strstr(buf, "generic, fresh-machine setup guide")
                != NULL);
         ASSERT(strstr(buf, "make vendor") != NULL);
-        ASSERT(strstr(buf, "make -j\"$(nproc)\"") != NULL);
+        ASSERT(strstr(buf,
+                      "make -j\"$(getconf _NPROCESSORS_ONLN)\"") != NULL);
         ASSERT(strstr(buf, "make fast-rebuild") != NULL);
         ASSERT(strstr(buf, "make t-fast ONLY=<group>") != NULL);
         ASSERT(strstr(buf, "build/bin/z23 status")

@@ -18,7 +18,6 @@
  * helpers move here; boot_join_thread_bounded is re-exported because the
  * catchup-job helpers that stay in boot_services.c reuse it.
  */
-
 #include "platform/time_compat.h"
 #include "platform/thread_compat.h"
 #include "config/boot_internal.h"

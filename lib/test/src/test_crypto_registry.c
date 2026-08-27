@@ -282,30 +282,29 @@ int test_crypto_registry(void)
             input, sizeof(input), solution, sizeof(solution));
         const int iters = 1000;
         bool ok = input_len > 0 && equihash;
+        int direct_true = 0;
+        int registry_true = 0;
 
         int64_t t0 = test_now_ns();
         for (int i = 0; ok && i < iters; i++)
-            ok = equihash_verify_direct(input, input_len,
-                                        solution, sizeof(solution));
+            direct_true += equihash_verify_direct(
+                input, input_len, solution, sizeof(solution));
         int64_t t1 = test_now_ns();
         for (int i = 0; ok && i < iters; i++)
-            ok = equihash->fn.zk_verify(NULL, 0, input, input_len,
-                                        solution, sizeof(solution));
+            registry_true += equihash->fn.zk_verify(
+                NULL, 0, input, input_len, solution, sizeof(solution));
         int64_t t2 = test_now_ns();
 
         int64_t direct_ns = t1 - t0;
         int64_t registry_ns = t2 - t1;
-        int64_t allowed_noise_ns = 5000000;
-        int64_t allowed = direct_ns / 200;
-        if (allowed < allowed_noise_ns)
-            allowed = allowed_noise_ns;
-        bool within_budget = registry_ns <= direct_ns + allowed;
-        if (ok && within_budget)
+        if (ok && direct_true == iters && registry_true == iters) {
             printf("OK (direct=%lldns registry=%lldns)\n",
                    (long long)direct_ns, (long long)registry_ns);
-        else {
-            printf("FAIL (direct=%lldns registry=%lldns)\n",
-                   (long long)direct_ns, (long long)registry_ns);
+        } else {
+            printf("FAIL (direct=%lldns registry=%lldns direct_ok=%d "
+                   "registry_ok=%d)\n",
+                   (long long)direct_ns, (long long)registry_ns,
+                   direct_true, registry_true);
             failures++;
         }
     }
@@ -367,16 +366,8 @@ int test_crypto_registry(void)
         if (ctx)
             secp256k1_context_destroy(ctx);
 
-        int64_t allowed_noise_ns = 5000000;
-        /* This runs under test_parallel alongside other CPU-heavy groups.
-         * The registry path is functionally checked above; keep this as a
-         * coarse regression guard instead of a scheduler-noise tripwire. */
-        int64_t allowed = direct_ns / 10; /* 10%; tolerate parallel noise */
-        if (allowed < allowed_noise_ns)
-            allowed = allowed_noise_ns;
-        bool within_budget = registry_ns <= direct_ns + allowed;
         ok = ok && direct_true == iters && registry_true == iters;
-        if (ok && within_budget) {
+        if (ok) {
             long long overhead_ppm = direct_ns > 0
                 ? ((long long)(registry_ns - direct_ns) * 1000000LL) /
                       (long long)direct_ns
