@@ -22,6 +22,7 @@
  * declarations this file promotes across the split. */
 
 #include "platform/time_compat.h"
+#include "base/serialize_le.h"
 #include "msgprocessor_internal.h"
 #include "msgprocessor_snapshot_internal.h"
 

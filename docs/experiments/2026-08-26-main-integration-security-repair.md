@@ -178,6 +178,14 @@ consensus seal, and hot-swap root mirror also passed. Slow local deployment
 exit 3 now reports only `UNVERIFIED`; it preserves matching worker bytes but
 does not claim progress that was not observed.
 
+The first full ship lint then refused four integration regressions before any
+host received bytes. Snapshot serving now uses the canonical little-endian
+codec; immutable SQLite preflight resolves its open descriptor through the
+platform path API; the ASan ADX contract checks the host-selected LTO flag;
+and ten source files now state precise public purposes. Their four exact lint
+gates passed together. The network fixed-byte challenge KAT and the immutable
+database migration group also passed uncached with zero skips.
+
 ## Remaining acceptance
 
 The repository's full lint gate set passed; `make lint` prints what it ran,
