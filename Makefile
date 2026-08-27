@@ -8595,6 +8595,7 @@ tools/core_seal: $(BIN_DIR)/core_seal
 $(BIN_DIR)/core_seal: $(CORE_SEAL_SRCS)
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror \
+	    $(ZCL_PLATFORM_CPPFLAGS) \
 	    -Ilib/sha3/include -Ilib/crypto/include -Ilib/support/include -Ilib/base/include \
 	    -o $@ $(CORE_SEAL_SRCS)
 
