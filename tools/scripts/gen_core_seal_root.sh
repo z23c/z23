@@ -23,13 +23,14 @@ cd "$ROOT_DIR"
 MANIFEST="core/MANIFEST.sha3"
 OUT="lib/hotswap/include/hotswap/core_seal_root.h"
 
-valid_root() { [[ "$1" =~ ^[0-9a-f]{64}$ ]]; }
+# The repository's single exact 64-lowercase-hex predicate.
+. "$ROOT_DIR/tools/scripts/source_identity_lib.sh"
 
 if [ "${1:-}" = "--selftest" ]; then
-    valid_root "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    ! valid_root "aaaaaaaaZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ"
-    ! valid_root "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    ! valid_root "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    zcl_is_sha256 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ! zcl_is_sha256 "aaaaaaaaZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ"
+    ! zcl_is_sha256 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ! zcl_is_sha256 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
     echo "core_seal_root: selftest PASS — exact 64-character lowercase hex validation"
     exit 0
 fi
@@ -40,7 +41,7 @@ fi
 }
 
 root="$(awk '$1 == "ROOT" { print $2; exit }' "$MANIFEST")"
-valid_root "$root" || root=""
+zcl_is_sha256 "$root" || root=""
 [ -n "$root" ] || {
     echo "gen_core_seal_root: $MANIFEST has no 64-hex ROOT line" >&2
     echo "  Run 'make core-seal' first — a missing ROOT would disarm the pin." >&2
