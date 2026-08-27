@@ -162,6 +162,7 @@ void register_yardsale_wallet_rpc_commands(struct rpc_table *t)
         .pending_count = yardsale_pending_count,
         .buyer_begin = ywc_buyer_begin,
         .buyer_error_string = yardsale_error_string,
+        .buy_outcome = yardsale_ceremony_buy_outcome,
     };
     const struct rpc_command cmds[] = {
         { "wallet", "yardsale_seller_arm",    rpc_yardsale_seller_arm,    false },

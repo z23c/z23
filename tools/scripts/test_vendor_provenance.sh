@@ -166,7 +166,18 @@ vendor_builder="$repo_root/tools/scripts/build_vendor.sh"
 # once let hosts with CMake and hosts without it produce distinct, individually
 # valid archives—and therefore different node action identities—from the same
 # source commit.  The vendor graph now has one fixed direct-C++ route.
-grep -q "leveldb) printf '%s' 'route=direct-cxx11;" "$vendor_builder" ||
+# The recipe line is double-quoted where it interpolates the platform
+# define and single-quoted where it does not. Both declare the same
+# fixed route, so accept either quoting rather than pinning an
+# incidental one -- what must not change is the route itself.
+vp_leveldb_route=0
+if grep -q "leveldb) printf '%s' 'route=direct-cxx11;" "$vendor_builder"; then
+    vp_leveldb_route=1
+fi
+if grep -q "leveldb) printf '%s' \"route=direct-cxx11;" "$vendor_builder"; then
+    vp_leveldb_route=1
+fi
+[ "$vp_leveldb_route" = 1 ] ||
     die "LevelDB provenance does not declare the fixed direct-C++ route"
 if grep -q 'command -v cmake' "$vendor_builder"; then
     die "LevelDB vendor route still depends on optional host CMake presence"

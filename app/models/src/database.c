@@ -378,16 +378,27 @@ static void db_set_pragmas(sqlite3 *db)
     /* One exec call to keep the PRAGMA batch atomic with respect to
      * other threads that might latch onto the connection immediately
      * after open_raw returns. */
+    /* The WAL bound belongs HERE, on the open, not only in the end-of-phase
+     * restore node_db_normal_mode() performs: both settings are
+     * per-connection, and a run killed mid-sync never reaches a restore. The
+     * default this batch used to inherit was an autocheckpoint with NO
+     * file-size cap, which folds the WAL back into the database but leaves
+     * the .wal file at its high-water mark for the life of the connection.
+     * See models/database_internal.h for what each setting bounds. */
     char sql[512];
     snprintf(sql, sizeof(sql),
         "PRAGMA journal_mode=WAL;"
         "PRAGMA synchronous=NORMAL;"
         "PRAGMA cache_size=-%lld;"      /* negative → KiB units */
         "PRAGMA mmap_size=%lld;"
+        "PRAGMA wal_autocheckpoint=%d;"
+        "PRAGMA journal_size_limit=%lld;"
         "PRAGMA temp_store=MEMORY;"
         "PRAGMA foreign_keys=ON",
         (long long)cache_kib,
-        (long long)mmap_bytes);
+        (long long)mmap_bytes,
+        (int)ZCL_NODE_DB_WAL_AUTOCKPT_PAGES,
+        (long long)ZCL_NODE_DB_JOURNAL_SIZE_LIMIT);
     sqlite3_exec(db, sql, NULL, NULL, NULL);
     sqlite3_busy_timeout(db, ZCL_NODE_DB_BUSY_TIMEOUT_MS);
 }

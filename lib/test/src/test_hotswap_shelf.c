@@ -253,10 +253,12 @@ static bool t_commit(void *ctx, const struct zcl_hotswap_leaf *leaves,
         ovr[i].path = leaves[i].name;
         ovr[i].handler = leaves[i].fn;
     }
-    if (!zcl_command_registry_replace_batch(0, ovr, leaf_count, why, why_sz))
+    /* Take the generation from the publish itself. Re-reading the active
+     * generation here would race a concurrent publisher and could hand the
+     * loader a generation that belongs to somebody else's batch. */
+    if (!zcl_command_registry_replace_batch(0, ovr, leaf_count, why, why_sz,
+                                            out_gen))
         return false;
-    if (out_gen)
-        *out_gen = zcl_command_registry_active_generation();
 
     /* THE WINDOW. Registry published, loader commit not yet reached. Parking
      * the slow publisher here — and only here — reproduces the production

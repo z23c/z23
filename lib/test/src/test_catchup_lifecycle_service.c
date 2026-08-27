@@ -15,6 +15,8 @@
 #include "validation/chainstate.h"
 
 #include <stdatomic.h>
+#include <stdio.h>
+#include <string.h>
 
 int test_catchup_lifecycle_service(void)
 {
@@ -110,6 +112,56 @@ int test_catchup_lifecycle_service(void)
             node_db_close(&ndb);
         active_chain_free(&ac);
 
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+
+    {
+        /* Lifetime regression. catchup_lifecycle_start() resolves the
+         * network datadir into a FUNCTION-LOCAL buffer and returns the
+         * instant the worker is spawned. If the job kept that pointer the
+         * worker would read a dead stack frame and open block files under
+         * whatever later reused it — the live node logged exactly that,
+         * whole runs of "cannot open <binary junk>/blocks/blkNNNNN.dat".
+         * The job must own the BYTES. */
+        printf("catchup_lifecycle_service: the job owns the starter's "
+               "datadir bytes... ");
+        static const char kDatadir[] = "/nonexistent/catchup-datadir-owner";
+        struct node_db ndb;
+        struct active_chain ac;
+        struct node_db_sync_catchup_job job;
+
+        /* A closed handle makes the worker exit at its first check, so this
+         * exercises the hand-off and nothing else. */
+        memset(&ndb, 0, sizeof(ndb));
+        active_chain_init(&ac);
+        node_db_sync_catchup_job_init(&job);
+
+        char caller_path[512];
+        snprintf(caller_path, sizeof(caller_path), "%s", kDatadir);
+        bool started =
+            node_db_sync_catchup_job_start(&job, &ndb, &ac, NULL, caller_path);
+        /* Stand in for the starter's frame going away. */
+        memset(caller_path, 0xA5, sizeof(caller_path));
+
+        int result = 0;
+        bool joined = started &&
+            node_db_sync_catchup_job_join(&job, &result);
+        bool ok = started && joined &&
+            job.args.datadir == job.args.datadir_storage &&
+            strcmp(job.args.datadir, kDatadir) == 0;
+
+        /* A datadir that cannot be retained whole is refused at start
+         * rather than silently truncated into a wrong path. */
+        char oversized[sizeof(job.args.datadir_storage) + 1u];
+        memset(oversized, 'x', sizeof(oversized) - 1u);
+        oversized[sizeof(oversized) - 1u] = '\0';
+        node_db_sync_catchup_job_init(&job);
+        ok = ok &&
+            !node_db_sync_catchup_job_start(&job, &ndb, &ac, NULL, oversized) &&
+            job.args.datadir_storage[0] == '\0';
+
+        active_chain_free(&ac);
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }

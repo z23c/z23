@@ -429,11 +429,18 @@ void zcl_command_registry_set_active(const struct zcl_command_registry *registry
  * `why` (when non-NULL, size why_sz) carries a one-line reason. `generation`
  * must be strictly greater than the active generation, or 0 to auto-increment.
  * In-flight readers observe the entire old or entire new override set, never a
- * torn one. Returns true on publish. */
+ * torn one. Returns true on publish.
+ *
+ * `out_generation` (nullable) receives the generation THIS call published,
+ * written under the same write lock that assigns it. Use it instead of a
+ * follow-up zcl_command_registry_active_generation() call: a concurrent
+ * publisher can bump the active generation between the two, so a read-after-
+ * write attributes another publisher's generation to this batch. On a REFUSED
+ * publish `out_generation` is left untouched. */
 bool zcl_command_registry_replace_batch(
     uint32_t generation,
     const struct zcl_command_handler_override *overrides,
-    size_t count, char *why, size_t why_sz);
+    size_t count, char *why, size_t why_sz, uint32_t *out_generation);
 
 /* Active override-snapshot generation (0 = none published). */
 uint32_t zcl_command_registry_active_generation(void);

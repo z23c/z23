@@ -49,8 +49,21 @@ make()
             zclassic23|zclassic-cli) binary="$arg" ;;
         esac
     done
+    # The real build emits build/bin/z23 and leaves zclassic23* as
+    # migration symlink aliases, so the fixture must produce the same
+    # shape: callers that verify the artifact look for the real name.
     mkdir -p "$build_dir/bin"
-    printf 'repro-network-policy-fixture\n' >"$build_dir/bin/$binary"
+    case "$binary" in
+        zclassic23)
+            printf 'repro-network-policy-fixture\n' >"$build_dir/bin/z23"
+            ln -sfn z23 "$build_dir/bin/zclassic23"
+            ;;
+        zclassic-cli)
+            printf 'repro-network-policy-fixture\n' >"$build_dir/bin/z23-cli"
+            ln -sfn z23-cli "$build_dir/bin/zclassic-cli"
+            ;;
+        *) printf 'repro-network-policy-fixture\n' >"$build_dir/bin/$binary" ;;
+    esac
 }
 
 git()

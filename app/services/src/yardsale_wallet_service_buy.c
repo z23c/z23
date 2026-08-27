@@ -227,20 +227,50 @@ enum yardsale_wallet_status yardsale_wallet_buy(
     yw_plan_identity(&p, YARDSALE_PLAN_KIND_BUY, ad_root, 32, NULL, 0);
     p.exists = db_yardsale_plan_find_by_request(ndb, p.request_hex, &p.row);
 
-    /* Idempotent replay of a committed buy — never a second begin. */
+    /* Idempotent replay of a committed buy — never a second begin...
+     * unless the ceremony itself recorded the buy as FAILED: a buy whose
+     * partial was refused, whose seller's token input failed the
+     * chain-content check, or which never broadcast is not committed in
+     * any sense that should pin the buyer's plan forever. Reopen the row
+     * to PLANNED and fall through, where the ordinary plan/confirm paths
+     * re-verify the ad, the coins, and the terms before anything re-arms.
+     * Unknown/in-flight/completed outcomes (and an unwired port) keep the
+     * conservative answer: the replay stays committed. */
     if (p.exists &&
         strcmp(p.row.state, YARDSALE_PLAN_STATE_COMMITTED) == 0) {
-        char root_hex[65];
-        zcl_hex_encode(ad_root, 32, root_hex);
-        json_set_object(out);
-        yw_render_plan_head(out, YARDSALE_PLAN_KIND_BUY, p.plan_root_hex,
-                            p.request_hex, p.row.expires_unix);
-        json_push_kv_str(out, "stage", "committed");
-        json_push_kv_bool(out, "committed", true);
-        json_push_kv_bool(out, "idempotent_replay", true);
-        json_push_kv_str(out, "result", p.row.result);
-        json_push_kv_str(out, "quote_root", root_hex);
-        return YARDSALE_WALLET_OK;
+        const struct yardsale_wallet_ceremony_port *port =
+            yw_ceremony_port();
+        if (port && port->buy_outcome &&
+            port->buy_outcome(ad_root) == 2 /* BUY_OUTCOME_FAILED */) {
+            /* The reopen carries no result string — the plan ledger only
+             * attaches results to COMMITTED rows; the failure trace lives
+             * in the log. */
+            LOG_WARN("yardsale", "buy replay on a ceremony-FAILED root "
+                     "%s — reopening the committed plan for re-arming",
+                     p.request_hex);
+            if (!yw_plan_mark(&p, ndb, YARDSALE_PLAN_STATE_PLANNED,
+                              NULL).ok) {
+                return yw_fail(out, YARDSALE_WALLET_ERR_DB,
+                               "the ceremony failed but the plan ledger "
+                               "could not record the reopen");
+            }
+            p.exists = db_yardsale_plan_find_by_request(ndb,
+                                                        p.request_hex,
+                                                        &p.row);
+        } else {
+            char root_hex[65];
+            zcl_hex_encode(ad_root, 32, root_hex);
+            json_set_object(out);
+            yw_render_plan_head(out, YARDSALE_PLAN_KIND_BUY,
+                                p.plan_root_hex, p.request_hex,
+                                p.row.expires_unix);
+            json_push_kv_str(out, "stage", "committed");
+            json_push_kv_bool(out, "committed", true);
+            json_push_kv_bool(out, "idempotent_replay", true);
+            json_push_kv_str(out, "result", p.row.result);
+            json_push_kv_str(out, "quote_root", root_hex);
+            return YARDSALE_WALLET_OK;
+        }
     }
 
     if (confirm)
