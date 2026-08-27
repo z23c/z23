@@ -359,14 +359,15 @@ bool vcs_zcode_dht_service_record_operation_poll(
   memcpy(out->records, operation->records,
          operation->record_count * sizeof(*operation->records));
   if (operation->state != VCS_ZCODE_DHT_RECORD_OPERATION_PENDING)
-    memset(operation, 0, sizeof(*operation));
+    vcs_zcode_dht_records_operation_release(service, operation_id, operation);
   return true;
 }
 
-/* Drop an operation and any query still carrying its id. Both cancel and the
- * terminal sweep need exactly this; a swept operation normally has no live
- * query left, but releasing one that does is cheaper than proving it can't. */
-static void records_operation_release(
+/* Drop an operation and any query still carrying its id. Cancel, the
+ * retention sweep, poll-collect, and the drive's harvest all mean the same
+ * thing (see internal.h); a released operation normally has no live query
+ * left, but releasing one that does is cheaper than proving it can't. */
+void vcs_zcode_dht_records_operation_release(
     struct vcs_zcode_dht_service *service, uint64_t operation_id,
     struct service_record_operation *operation)
 {
@@ -386,7 +387,7 @@ bool vcs_zcode_dht_service_record_operation_cancel(
       vcs_zcode_dht_records_operation_find(service, operation_id);
   if (!operation)
     return false;
-  records_operation_release(service, operation_id, operation);
+  vcs_zcode_dht_records_operation_release(service, operation_id, operation);
   return true;
 }
 
@@ -407,7 +408,7 @@ void vcs_zcode_dht_records_sweep(struct vcs_zcode_dht_service *service,
         now_mono >= operation->terminal_mono &&
         now_mono - operation->terminal_mono >=
             VCS_ZCODE_DHT_RECORD_OPERATION_RESULT_RETENTION_S)
-      records_operation_release(service, operation->id, operation);
+      vcs_zcode_dht_records_operation_release(service, operation->id, operation);
   }
 }
 
