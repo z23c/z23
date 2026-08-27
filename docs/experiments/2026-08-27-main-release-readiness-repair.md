@@ -194,3 +194,36 @@ test_disk_block_io groups_failed=0 self_skips=0
 test_command_handler_snapshot groups_failed=0 self_skips=0
 test_sqlite + wallet SQLite groups_failed=0 self_skips=0
 ```
+
+## Final concurrent integration review
+
+The next `main` batch added AArch64 SHA3 lanes and a wallet replay outcome.
+Review found that the SHA3-512 oracle still forced the x86 selector on AArch64,
+so it would compare scalar output with itself while production selected NEON.
+The oracle now selects the target's real vector tier. Both SHA3 batch dispatch
+surfaces publish their initialized function through atomic storage guarded by
+`pthread_once`, removing concurrent first-use data races.
+
+The replay outcome was volatile and keyed only by a public quote root, so it
+could not safely authorize a durable `COMMITTED` to `PLANNED` custody-state
+downgrade. That downgrade and its unused outcome ring were removed. Wallet buy
+confirmation now uses the existing atomic `PLANNED` to `ARMING` claim before
+key access or outbound gossip; a competing confirmation fails closed without
+sending an accept. The Windows setup now defines its checkout placeholder, and
+the LevelDB recipe retains the platform-bound form required by the stronger
+provenance gate.
+
+Measured at `2026-08-27T18:50:21-04:00`
+(`2026-08-27T22:50:21Z`):
+
+```text
+test_sha3_512_x4 groups_failed=0 self_skips=0 (AVX-512 selected)
+test_sha3_256_x4 groups_failed=0 self_skips=0 (AVX-512 selected)
+test_yardsale_wallet groups_failed=0 self_skips=0
+test_yardsale_app groups_failed=0 self_skips=0
+check-vendor-provenance PASS
+check-zcode-package-registry PASS (10 roots rederived)
+```
+
+Native NEON execution remains unclaimed by this x86-64 host; the corrected
+oracle will select NEON on an eligible AArch64 test host.

@@ -1283,17 +1283,7 @@ static int t_prevout_guard(void)
 
         /* The buyer's half: ports wired per case (UNWIRED leaves the
          * chain-content port NULL; the positive control alone may
-         * broadcast). The outcome ring must read in-flight between
-         * begin and partial, then completed for the honest ceremony and
-         * failed for every refusal — and unknown for a root it never
-         * saw. */
-        uint8_t seen_root[32], stranger_root[32];
-        ysa_pattern32(stranger_root, 0xE1);
-        bool have_root =
-            ready && zswap_quote_root(&ad, seen_root) == ZSWAP_QUOTE_OK;
-        int outcome_before = have_root
-            ? yardsale_ceremony_buy_outcome(seen_root)
-            : YARDSALE_BUY_OUTCOME_UNKNOWN;
+         * broadcast). */
         struct ysa_broadcast_capture broadcast = {0};
         if (armed) {
             if (c != PV_UNWIRED)
@@ -1306,17 +1296,8 @@ static int t_prevout_guard(void)
             ? yardsale_ceremony_partial_ingest(partial_wire, partial_len,
                                                (int64_t)(100 + c), YSA_NOW)
             : ZSWAP_CEREMONY_WIRE_DROP;
-        int outcome_after = have_root
-            ? yardsale_ceremony_buy_outcome(seen_root)
-            : YARDSALE_BUY_OUTCOME_UNKNOWN;
         bool pass = armed && verdict == ZSWAP_CEREMONY_WIRE_DROP &&
-            broadcast.count == (c == PV_SERVE ? 1 : 0) &&
-            outcome_before == YARDSALE_BUY_OUTCOME_IN_FLIGHT &&
-            outcome_after == (c == PV_SERVE
-                                  ? YARDSALE_BUY_OUTCOME_COMPLETED
-                                  : YARDSALE_BUY_OUTCOME_FAILED) &&
-            yardsale_ceremony_buy_outcome(stranger_root) ==
-                YARDSALE_BUY_OUTCOME_UNKNOWN;
+            broadcast.count == (c == PV_SERVE ? 1 : 0);
         printf("  yardsale_app: %s... %s\n", names[c], pass ? "OK" : "FAIL");
         if (!pass)
             failures++;

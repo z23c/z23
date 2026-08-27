@@ -39,7 +39,8 @@ globally to the Windows `PATH`; launch the editor from UCRT64 so it
 inherits the UCRT64 toolchain directory.
 
 ```bash
-cd "$Z23_CHECKOUT"   # your z23 working copy, entered as /c/...
+Z23_CHECKOUT=/c/path/to/your/z23-checkout
+cd "$Z23_CHECKOUT"
 code .
 tools/scripts/doctor.sh
 tools/scripts/build_vendor.sh

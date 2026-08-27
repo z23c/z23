@@ -234,7 +234,7 @@ recipe_flags() {
         zlib) printf '%s' 'CFLAGS=-O2 -fPIC; ./configure --static; make libz.a' ;;
         openssl) printf '%s' './Configure no-shared no-tests --prefix=/usr/local --openssldir=/etc/ssl --libdir=lib; make build_libs' ;;
         libevent) printf '%s' "apply pinned secure-rng ABI patch; CFLAGS=-O2 -fPIC -Ivendor/include; LDFLAGS=-Lvendor/lib; CPPFLAGS=$LIBEVENT_CPPFLAGS; ./configure --disable-shared --enable-static --disable-samples --disable-libevent-regress; thread_archive=$LIBEVENT_THREAD_ARCHIVE; require=evutil_secure_rng_add_bytes" ;;
-        leveldb) printf '%s' 'route=direct-cxx11; -std=c++11 -O2 -DNDEBUG -fPIC -fno-exceptions -fno-rtti; '"$LEVELDB_PLATFORM"'; crc32c=off; snappy=off'
+        leveldb) printf '%s' "route=direct-cxx11; -std=c++11 -O2 -DNDEBUG -fPIC -fno-exceptions -fno-rtti; $LEVELDB_PLATFORM; crc32c=off; snappy=off"
             ;;
         secp_native) printf '%s' 'cmake static; recovery=on; ecdh=on; tests=off; benchmarks=off; examples=off' ;;
         *) return 1 ;;
