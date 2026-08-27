@@ -11,6 +11,8 @@
 #include "json/json.h"
 #include "platform/time_compat.h"
 #include "storage/event_log_payloads.h"
+#include "storage/projection_consumer.h"
+#include "storage/projection_meta.h"
 #include "storage/projection_util.h"
 #include "util/safe_alloc.h"
 
@@ -20,8 +22,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-#define WALLET_PROJECTION_SCHEMA_VERSION 1
 
 struct wallet_projection {
     sqlite3 *db;
@@ -40,10 +40,6 @@ static _Atomic uint64_t g_emit_tx_seen_total = 0;
 static _Atomic uint64_t g_emit_utxo_seen_total = 0;
 static _Atomic uint64_t g_emit_note_decrypted_total = 0;
 static _Atomic uint64_t g_emit_fail_total = 0;
-
-/* now_ms / apply_pragmas / meta_get_u64 / meta_set_u64 / bounded_strlen
- * live in storage/projection_util.h. exec_sql stays local for its
- * "[wallet_projection]" log prefix. */
 
 static bool append_wallet_event(enum event_log_type type,
                                 const void *payload, size_t len,
@@ -66,18 +62,10 @@ static bool append_wallet_event(enum event_log_type type,
     return true;
 }
 
+/* Shared exec-and-log body; also satisfies projection_util.h's exec_sql decl. */
 static bool exec_sql(sqlite3 *db, const char *sql, const char *ctx)
 {
-    char *err = NULL;
-    int rc = sqlite3_exec(db, sql, NULL, NULL, &err);
-    if (rc != SQLITE_OK) {
-        fprintf(stderr,  // obs-ok:wallet-projection-sql
-                "[wallet_projection] %s failed: %s\n",
-                ctx, err ? err : sqlite3_errmsg(db));
-        if (err) sqlite3_free(err);
-        return false;
-    }
-    return true;
+    return projection_consumer_exec_sql(db, "wallet_projection", sql, ctx);
 }
 
 static bool ensure_schema(sqlite3 *db)
@@ -120,20 +108,7 @@ static bool ensure_schema(sqlite3 *db)
         " PRIMARY KEY(txid, output_index)"
         ") WITHOUT ROWID",
         "create wallet_view_notes") &&
-        exec_sql(db,
-        "CREATE TABLE IF NOT EXISTS projection_meta ("
-        " k TEXT PRIMARY KEY,"
-        " v TEXT NOT NULL"
-        ")",
-        "create projection_meta") &&
-        exec_sql(db,
-        "INSERT OR IGNORE INTO projection_meta(k,v) "
-        "VALUES('schema_version','1')",
-        "insert schema_version") &&
-        exec_sql(db,
-        "INSERT OR IGNORE INTO projection_meta(k,v) "
-        "VALUES('last_consumed_offset','0')",
-        "insert last_consumed_offset");
+        projection_meta_ensure(db);
 }
 
 wallet_projection_t *wallet_projection_open(const char *projection_path,

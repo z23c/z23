@@ -5,6 +5,8 @@
 #include "json/json.h"
 #include "platform/time_compat.h"
 #include "storage/event_log_payloads.h"
+#include "storage/projection_consumer.h"
+#include "storage/projection_meta.h"
 #include "storage/projection_util.h"
 #include "util/safe_alloc.h"
 
@@ -30,10 +32,6 @@ static _Atomic(hodl_history_projection_t *) g_projection = NULL;
 static _Atomic uint64_t g_emit_snapshot_total = 0;
 static _Atomic uint64_t g_emit_fail_total = 0;
 
-/* now_ms / apply_pragmas / meta_get_u64 / meta_set_u64 live in
- * storage/projection_util.h. exec_sql stays local for its
- * "[hodl_history_projection]" log prefix. */
-
 static bool append_hodl_event(const void *payload, size_t len)
 {
     event_log_t *log = atomic_load_explicit(&g_event_log,
@@ -56,18 +54,11 @@ static bool append_hodl_event(const void *payload, size_t len)
     return true;
 }
 
+/* Shared exec-and-log body; also satisfies projection_util.h's exec_sql decl. */
 static bool exec_sql(sqlite3 *db, const char *sql, const char *ctx)
 {
-    char *err = NULL;
-    int rc = sqlite3_exec(db, sql, NULL, NULL, &err);
-    if (rc != SQLITE_OK) {
-        fprintf(stderr,  // obs-ok:hodl-history-projection-sql
-                "[hodl_history_projection] %s failed: %s\n",
-                ctx, err ? err : sqlite3_errmsg(db));
-        if (err) sqlite3_free(err);
-        return false;
-    }
-    return true;
+    return projection_consumer_exec_sql(db, "hodl_history_projection",
+                                        sql, ctx);
 }
 
 static bool ensure_schema(sqlite3 *db)
@@ -85,20 +76,7 @@ static bool ensure_schema(sqlite3 *db)
         "CREATE INDEX IF NOT EXISTS idx_hodl_history_time "
         "ON hodl_history(time)",
         "create idx_hodl_history_time") &&
-        exec_sql(db,
-        "CREATE TABLE IF NOT EXISTS projection_meta ("
-        " k TEXT PRIMARY KEY,"
-        " v TEXT NOT NULL"
-        ")",
-        "create projection_meta") &&
-        exec_sql(db,
-        "INSERT OR IGNORE INTO projection_meta(k,v) "
-        "VALUES('schema_version','1')",
-        "insert schema_version") &&
-        exec_sql(db,
-        "INSERT OR IGNORE INTO projection_meta(k,v) "
-        "VALUES('last_consumed_offset','0')",
-        "insert last_consumed_offset");
+        projection_meta_ensure(db);
 }
 
 hodl_history_projection_t *hodl_history_projection_open(
