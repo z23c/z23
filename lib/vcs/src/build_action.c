@@ -119,23 +119,6 @@ static bool build_gcc_query(const char *arg, char *out, size_t cap)
     return out[0] != '\0';
 }
 
-#if defined(__APPLE__)
-/* Apple clang answers the GNU sysroot probes with the bare file name when
- * its SDK does not ship that file (cc1, crti.o, crtn.o, crtbegin.o,
- * libc.so.6). Those probes still have to contribute a deterministic digest,
- * so the printed name is hashed as an absence marker rather than failing
- * the capture. glibc/GNU hosts keep the strict file-hash path below. */
-static void build_hash_absent_file(const char *printed, uint8_t out[32])
-{
-    struct sha3_256_ctx sha;
-    sha3_256_init(&sha);
-    static const char domain[] = "zcl.toolchain.absent_file.v1";
-    sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
-    build_hash_text(&sha, printed);
-    sha3_256_finalize(&sha, out);
-}
-#endif
-
 static bool build_gcc_file(const char *arg, const char *fallback,
                            uint8_t out[32],
                            struct build_toolchain_file *file)
@@ -146,13 +129,6 @@ static bool build_gcc_file(const char *arg, const char *fallback,
     char resolved[4096];
     if (!candidate || !file || !realpath(candidate, resolved) ||
         strlen(resolved) >= sizeof(file->path)) {
-#if defined(__APPLE__)
-        if (candidate == NULL && file) {
-            build_hash_absent_file(named, out);
-            memset(file, 0, sizeof(*file));
-            return true;
-        }
-#endif
         return false;
     }
     (void)snprintf(file->path, sizeof(file->path), "%s", resolved);
@@ -251,8 +227,6 @@ static bool build_toolchain_cache_current(
         return false;
     for (size_t i = 0; i < BUILD_TOOLCHAIN_FILE_COUNT; i++) {
         struct stat current;
-        if (!cache->files[i].path[0])
-            continue; /* absence marker: no file to re-stat */
         if (stat(cache->files[i].path, &current) != 0 ||
             !build_stat_equal(&cache->files[i].stamp, &current))
             return false;
@@ -292,13 +266,7 @@ static bool build_toolchain_capture_uncached(
                              &file_count))
         return false;
     char machine[256], full_version[256], version[256];
-#if defined(__APPLE__)
-    /* Apple clang has no -dumpfullversion; -dumpversion is the only
-     * version probe the driver answers. */
-    static const char dump_full_version_arg[] = "-dumpversion";
-#else
     static const char dump_full_version_arg[] = "-dumpfullversion";
-#endif
     if (!build_gcc_query("-dumpmachine", machine, sizeof(machine)) ||
         !build_gcc_query(dump_full_version_arg, full_version,
                          sizeof(full_version)) ||

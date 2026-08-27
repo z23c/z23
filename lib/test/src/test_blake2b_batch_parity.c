@@ -176,7 +176,7 @@ int test_blake2b_batch_parity(void)
         BLAKE2B_BATCH_IMPL_AVX2,
         BLAKE2B_BATCH_IMPL_AVX512
     };
-    const char *tier_name[3] = { "scalar", "AVX2 (4-way)", "AVX-512 (8-way)" };
+    const char *tier_name[3] = { "scalar", "4-way SIMD", "8-way SIMD" };
     bool tier_ran[3] = { false, false, false };
 
     /* ── Leg 1+2: every tier, both entry points, vs the portable reference ──

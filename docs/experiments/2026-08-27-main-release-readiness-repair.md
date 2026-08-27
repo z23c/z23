@@ -114,3 +114,38 @@ where `set -u` aborted on the unset release identifier. Dry-run staging now
 returns before resolving or mutating any remote release path and states the
 operation it would perform. The real four-host command completed its CPU,
 glibc, SSH, and service preflight and reached the final no-mutation report.
+
+## Cross-platform integration review
+
+Review of the Windows build lane found that default MSYS `ps` output was
+parsed as though it contained PPID and command columns, and that its displayed
+start time was too coarse to distinguish a reused PID. The lane now reads the
+documented procfs PPID, process name, and kernel start tick and fails closed if
+those authorities are unavailable.
+
+The incoming Apple toolchain path also claimed the fixed
+`linux-x86_64-v3` action while hashing absence markers for Linux ABI files. It
+was removed: the existing action remains Linux-only and Apple capture fails
+closed until a versioned Apple target can pin the selected SDK, compiler
+resources, flags, and ABI files. The new four-way BLAKE2b tier now uses
+platform-neutral labels in its differential oracle and the benchmark reports
+the runtime implementation name. Live NEON execution still requires an
+AArch64 host and is not claimed by this x86-64 run.
+
+Measured at `2026-08-27T17:59:02-04:00`
+(`2026-08-27T21:59:02Z`):
+
+```text
+test_blake2b_batch_parity groups_failed=0 self_skips=0
+test_build_fabric groups_failed=0 self_skips=0
+check-build-epoch-integrity PASS
+check-test-registration PASS
+check-file-purpose PASS
+check-pipefail-status-pipe PASS
+check-c23-only PASS
+check-long-functions PASS (existing library warnings only)
+check-file-size-ceiling PASS (existing 22/22 library drift only)
+check-doc-accuracy PASS
+check-markdown-links PASS
+check-clang-portability SKIP (installed Clang 22, baseline Clang 20)
+```
