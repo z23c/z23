@@ -22,6 +22,7 @@
 #include "vcs/zcode_lane.h"
 
 #include <stdatomic.h>
+#include <stdlib.h>
 #include <string.h>
 
 struct arithmetic_vtable {
@@ -1158,7 +1159,11 @@ static int t_shop_want_view(void)
         struct zcl_command_request request = {.input = &request_input};
         struct zcl_command_reply reply;
         zcl_command_reply_init(&reply, "zcl.shop_want_post.v1");
+        /* The want-post leaf runs on this node's clock unless the test
+         * valve is open; these fixed constant times need the override. */
+        setenv("ZCL_ALLOW_INPUT_CLOCK", "1", 1);
         zcl_native_handle_shop_want_post(&request, &reply);
+        unsetenv("ZCL_ALLOW_INPUT_CLOCK");
         const struct json_value *want = json_get(&reply.data, "want");
         ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
         ASSERT_STR_EQ(json_get_str(json_get(want, "next_action")),

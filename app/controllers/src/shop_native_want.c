@@ -55,6 +55,7 @@
 #include <sqlite3.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #define SHW_TAG "native.app.shop.want"
@@ -97,8 +98,14 @@ static const char *shw_datadir(const struct zcl_command_request *request)
     return (dd && dd[0]) ? dd : NULL;
 }
 
-/* now_unix: the input override wins (deterministic tests), else wall
- * clock. Same contract as the reputation leaf's. */
+/* now_unix: the caller's clock is honored ONLY when this process opted in
+ * with ZCL_ALLOW_INPUT_CLOCK=1 — a valve for hermetic leaf tests. Any
+ * other caller runs on this node's own wall clock: persisted board state
+ * (posted/cancelled stamps and every lifetime check) must be authored by
+ * our time, never by whatever a script declares, or a forged year-2100
+ * input would mint permanently-open wants and falsified cancellation
+ * evidence. A malformed now_unix still refuses regardless of the valve.
+ * Same input surface as the reputation leaf's. */
 static bool shw_now(const struct zcl_command_request *request,
                     int64_t *now_out, struct zcl_command_reply *reply)
 {
@@ -111,7 +118,9 @@ static bool shw_now(const struct zcl_command_request *request,
                      "now_unix must be a positive integer", "now_unix");
             return false;
         }
-        now = json_get_int(v);
+        const char *clk = getenv("ZCL_ALLOW_INPUT_CLOCK");
+        if (clk && strcmp(clk, "1") == 0)
+            now = json_get_int(v);
     }
     *now_out = now;
     return true;
