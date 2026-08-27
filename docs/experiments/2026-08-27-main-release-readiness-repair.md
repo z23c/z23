@@ -78,3 +78,39 @@ test_dynhost_reassembly_cap  OK
 test_tor                     groups_failed=0 self_skips=0
 test_torn_index_blocks_tip   groups_failed=0 self_skips=0
 ```
+
+The first complete lint run then rejected one runbook phrase that formatted a
+system header as an in-repository path. The wording now distinguishes that
+external header from tracked source paths.
+
+## ARM hardware-tier portability repair
+
+Review of the later ARMv8 SHA-256 and CRC-32C tier found that its target
+attributes and CRC builtins were specific to Clang. GCC 14 and newer require
+the AArch64 target feature forms `+sha2` and `+crc`; the portable Arm C
+Language Extensions API supplies `__crc32cd`, `__crc32cw`, and `__crc32cb`.
+The implementation now uses those shared spellings, which Clang also accepts.
+
+CRC-32C observability now reports the ISA that actually produced the bytes:
+`hardware-sse4.2` on x86 and `hardware-armv8-crc32` on AArch64. Runtime
+selection remains OS-feature-gated and compared with the portable reference
+before activation. The x86 host cannot prove ARM instruction execution, so a
+GCC AArch64 build and live parity run remain required release evidence for an
+AArch64 artifact.
+
+## Worker-stack repair integration
+
+A later mainline change moved five 256-entry build-action scan buffers from
+worker stacks to checked heap storage. Each buffer is about 516 KiB, which can
+exhaust a default macOS worker stack. Integration retained that repair while
+removing an unnecessary receipt query and reducing the source to 799 lines.
+The SIGILL crash-handler registration was integrated without growing its
+already-baselined translation unit. `make check-file-size-ceiling` then passed
+with the enforced application ceiling clean and the library drift count at
+its existing 22/22 bound.
+
+The four-host release dry run then reached remote staging with no candidate,
+where `set -u` aborted on the unset release identifier. Dry-run staging now
+returns before resolving or mutating any remote release path and states the
+operation it would perform. The real four-host command completed its CPU,
+glibc, SSH, and service preflight and reached the final no-mutation report.

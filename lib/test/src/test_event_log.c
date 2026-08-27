@@ -870,12 +870,18 @@ static int run_crc32c_dispatch(int *failures)
     printf("event_log: crc32c — impl=%s sw=%.2f GB/s active=%.2f GB/s "
            "(sink=%u)\n",
            event_log_crc32c_impl(), sw_gbs, active_gbs, (unsigned)sink);
-    if (event_log_crc32c_hw_available())
+    if (event_log_crc32c_hw_available()) {
+#if defined(__aarch64__)
+        const char *expected_impl = "hardware-armv8-crc32";
+#else
+        const char *expected_impl = "hardware-sse4.2";
+#endif
         EL_CHECK("crc32c: hardware path selected after self-check",
-                 strcmp(event_log_crc32c_impl(), "hardware-sse4.2") == 0);
-    else
+                 strcmp(event_log_crc32c_impl(), expected_impl) == 0);
+    } else {
         EL_CHECK("crc32c: software fallback selected",
                  strcmp(event_log_crc32c_impl(), "software-table") == 0);
+    }
 
     free(buf);
     return *failures - start_failures;
