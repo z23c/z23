@@ -123,6 +123,14 @@ impact owner. The new narrow rule resolves it to `test_crypto_registry`, the
 shared `crypto` group, and lint contracts; the impact-rule checker, selector
 test, crypto group, and lint shard 03 all passed uncached.
 
+The next `origin/main` introduced automatic provider-record discovery for
+stalled swarm downloads and proposed raising the file-size drift ratchet from
+22 to 29. Integration retained the already-proven 22 limit. The discovery
+bridge was adapted to the current swarm admission API by carrying each signed
+provider record's exact expiry into `peer_offer`; no synthetic lifetime is
+minted. `test_zcode_swarm_dht`, `test_zcode_swarm`, `test_zcode_dht_service`,
+`test_crypto_registry`, and lint shard 03 passed uncached with zero skips.
+
 At `2026-08-27T02:07:25Z` on `rhett3.dev`, the clean shutdown began saving
 3,233,145 flat-index entries. The save completed at `02:07:43Z`; the
 `fast-restart-persist` 20-second watchdog fired before the projection binding

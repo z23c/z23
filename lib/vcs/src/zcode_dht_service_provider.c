@@ -68,7 +68,9 @@ bool vcs_zcode_dht_service_provider_route(
     struct service_peer *peer = provider_peer(
         service, records[i].provider_node_id);
     if (peer && out->authenticated_count < VCS_ZCODE_DHT_K) {
-      out->peer_ids[out->authenticated_count++] = peer->peer_id;
+      size_t route_index = out->authenticated_count++;
+      out->peer_ids[route_index] = peer->peer_id;
+      out->expires_at[route_index] = records[i].expiry;
       continue;
     }
     if (service->request_reachability &&

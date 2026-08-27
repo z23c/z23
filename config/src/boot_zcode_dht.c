@@ -9,6 +9,7 @@
 #include "config/boot_zcode_dht_frame_auth.h"
 #include "config/boot_zcode_dht_possession.h"
 #include "config/boot_zcode_dht_reachability.h"
+#include "config/boot_zcode_swarm_dht.h"
 #include "base/safe_alloc.h"
 #include "net/connman.h"
 #include "net/net.h"
@@ -539,6 +540,8 @@ void boot_zcode_dht_periodic(struct msg_processor *mp,
     (void)dht_flush_node(mp, nodes[i]);
   boot_zcode_dht_reachability_drive(svc, cold, cold_count, now);
   boot_zcode_dht_public_tick(now.monotonic_s);
+  /* Recover stalled swarm downloads from the DHT record store. */
+  boot_zcode_swarm_discovery_tick(now.monotonic_s);
   for (size_t i = 0; i < count; i++)
     p2p_node_release(nodes[i]);
 }

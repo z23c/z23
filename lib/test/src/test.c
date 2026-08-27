@@ -1692,6 +1692,7 @@ int main(int argc, char **argv)
     { extern int test_zcode_swarm_net(void); failures += test_zcode_swarm_net(); }
     { extern int test_zcode_swarm_complete(void);
       failures += test_zcode_swarm_complete(); }
+    { extern int test_zcode_swarm_dht(void); failures += test_zcode_swarm_dht(); }
     { extern int test_zcode_fetch(void); failures += test_zcode_fetch(); }
     { extern int test_zcode_site(void); failures += test_zcode_site(); }
     { extern int test_zcode_add(void); failures += test_zcode_add(); }

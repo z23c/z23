@@ -2370,6 +2370,7 @@ static int test_record_transport_and_restart(void) {
     ASSERT(vcs_zcode_dht_service_provider_route(
         b, 1001, &reconnect_selector, &reconnect_route));
     ASSERT_EQ(reconnect_route.authenticated_count, 1);
+    ASSERT_EQ(reconnect_route.expires_at[0], reconnect_provider.expiry);
     vcs_zcode_dht_service_session_close(b, 1, 42, test_time(1001));
     ASSERT(vcs_zcode_dht_service_provider_route(
         b, 1001, &reconnect_selector, &reconnect_route));
@@ -2385,6 +2386,7 @@ static int test_record_transport_and_restart(void) {
     ASSERT(vcs_zcode_dht_service_provider_route(
         b, 1001, &reconnect_selector, &reconnect_route));
     ASSERT_EQ(reconnect_route.authenticated_count, 1);
+    ASSERT_EQ(reconnect_route.expires_at[0], reconnect_provider.expiry);
     ASSERT(vcs_zcode_dht_service_session_open(
         a, 2, &as, test_time(1001)));
     ASSERT(pump(a, b, 2, 1, 1001, NULL, NULL));
