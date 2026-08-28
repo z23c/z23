@@ -59,7 +59,7 @@ lib/sim/src/simnet_wire.c 1497
 lib/storage/src/census_read.c 868
 lib/storage/src/coins_kv.c 1363
 lib/storage/src/consensus_db.c 883
-lib/storage/src/disk_block_io.c 975
+lib/storage/src/disk_block_io.c 974
 lib/storage/src/peers_projection.c 1304
 lib/storage/src/progress_store.c 881
 lib/storage/src/coins_ram.c 1406
@@ -72,8 +72,8 @@ lib/sim/src/simnet_chaos_faults.c 2685
 lib/util/src/blocker.c 836
 lib/util/src/supervisor.c 1276
 lib/sync/src/stage.c 817
-src/main_cli_modes.c 4279
-lib/hotswap/src/hotswap_activate.c 2283
+src/main_cli_modes.c 4275
+lib/hotswap/src/hotswap_activate.c 2293
 lib/vcs/src/package_store.c 1280
 lib/vcs/src/package_score.c 845
 lib/vcs/src/package_reward.c 2094
