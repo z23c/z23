@@ -374,6 +374,15 @@ peers, never production wallet state.
     implements; unavailable Tor, confinement, descriptor execution, or other OS
     facilities are explicit refusals.
 
+## Measured checkpoints
+
+- 2026-08-28: the local pairing authority reached schema v76. The focused
+  `mesh_pairing` acceptance proved that fingerprint mismatch and Noise-static
+  mismatch make no durable write, accepted status-read authority survives a
+  database reopen, expiry is fail-closed, and sticky revocation survives a
+  second reopen without timestamp or generation drift. This is local authority
+  storage only; no remote status request is wired or claimed yet.
+
 ## Completion rule
 
 The sovereign machine mesh is ready only when the acceptance above runs from a

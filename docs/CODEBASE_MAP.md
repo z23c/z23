@@ -167,13 +167,13 @@ page changing with it.
 <!--   app_shape_folders    = directories directly under app/                        -->
 <!-- Fix a mismatch with `tools/scripts/check_doc_counts.sh --fix`, never by hand.  -->
 
-test_groups: 978
+test_groups: 979
 port_interfaces: 13
 persistence_adapters: 14
 condition_registrations: 52
 command_bundles: 25
 command_roots: 11
-dumpstate_subsystems: 163
+dumpstate_subsystems: 164
 app_shape_folders: 7
 <!-- DOC-COUNTS-END -->
 
@@ -392,7 +392,7 @@ bundles + `app/controllers/src/*_native_handlers.c`.
 
 | I need the list of… | Run |
 |---|---|
-| the 163 dumpstate subsystems | `z23 ops statecatalog` — the typed leaf: every name in one call, then `--subsystem=<name>` for that descriptor in full (owner file, accepted key forms, owning test) or `--limit`/`--page` for a window. Node-free — the registry is compiled in. The flat `z23 statecatalog` is the same catalog through the legacy shim. **Not** `ops state` with no `--subsystem`: that errors `MISSING_SUBSYSTEM`. |
+| the 164 dumpstate subsystems | `z23 ops statecatalog` — the typed leaf: every name in one call, then `--subsystem=<name>` for that descriptor in full (owner file, accepted key forms, owning test) or `--limit`/`--page` for a window. Node-free — the registry is compiled in. The flat `z23 statecatalog` is the same catalog through the legacy shim. **Not** `ops state` with no `--subsystem`: that errors `MISSING_SUBSYSTEM`. |
 | test group names (one per line) | `git grep -hoE 'X\([a-z_0-9]+\)' lib/test/src/test_parallel.c \| tr -d 'X()'` — instant, no build; `-h` matters or every name arrives glued to the filename. `make test_parallel && build/bin/test_parallel --list` gives the same list but costs a second link: `make -j$(nproc)` does **not** publish the `build/bin/test_parallel` alias, and `make test` / `make test-parallel` / `make t-fast` run an epoch candidate under `build/bin/test-strict/epochs/<epoch>/` and leave it absent |
 | registry commands | `z23 discover help` — 11 command roots (`core`, `app`, `dev`, `ops`, `discover`, `code`, `vault`, `zcode`, `metaverse`, `yardsale`) plus the bare `status` leaf, so 11 top-level names — then `discover help <path>` to descend |
 | a command's exact input keys | `z23 discover schema <leaf>` |
