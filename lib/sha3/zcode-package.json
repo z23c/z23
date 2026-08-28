@@ -8,7 +8,7 @@
   "source_dir": "src",
   "dependencies": [
     {
-      "root": "442499c92fb3b7aa5e8007905ce53a62362487419831b817d09425d0069e6a64",
+      "root": "af8155c4d7643e92947f5025603645c1629f0b662765b2143ff7e593ae0dc34e",
       "name": "zclassic23/base",
       "semver": "0.1.0-dev.1"
     }
