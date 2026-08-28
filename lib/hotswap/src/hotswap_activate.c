@@ -693,12 +693,10 @@ void hotswap_activate_dump_json(struct json_value *out)
     json_push_kv_str(&act, "core_seal_root", ZCL_CORE_SEAL_ROOT);
     json_push_kv_str(&act, "core_seal_tree", ZCL_CORE_SEAL_TREE);
     json_push_kv_int(&act, "core_seal_sections", (int64_t)CORE_SECTION_COUNT);
-#if defined(ZCL_DEV_BUILD) && !defined(_WIN32)
-    json_push_kv_bool(&act, "available", true);
-#else
-    json_push_kv_bool(&act, "available", false);
-    json_push_kv_str(&act, "note", "activation unavailable in release build");
-#endif
+    json_push_kv_bool(&act, "available",
+                      hotswap_native_activation_available());
+    if (!hotswap_native_activation_available())
+        json_push_kv_str(&act, "note", hotswap_native_unavailable_reason());
     bool flag = hotswap_activate_flag();
     bool env = env_opt_in();
     json_push_kv_bool(&act, "activate_flag", flag);
@@ -1461,7 +1459,7 @@ void hotswap_activation_reset_for_testing(void)
 }
 
 #ifdef ZCL_DEV_BUILD
-#if !defined(_WIN32)
+#if defined(__linux__) && !defined(_WIN32)
 
 #include <dlfcn.h>
 #include <fcntl.h>
@@ -2216,24 +2214,13 @@ bool hotswap_verify_module_so(const char *so_path, const char *expect_tu,
 
 #else
 #define ZCL_HOTSWAP_ACTIVATE_UNAVAILABLE 1
-#endif /* !_WIN32 */
+#endif /* Linux */
 #else
 #define ZCL_HOTSWAP_ACTIVATE_UNAVAILABLE 1
 #endif /* ZCL_DEV_BUILD */
 
 #ifdef ZCL_HOTSWAP_ACTIVATE_UNAVAILABLE
-/* Release or Windows: no dynamic activation surface. */
-
-#if defined(_WIN32)
-#define HOTSWAP_UNAVAILABLE_STAGE "windows"
-#define HOTSWAP_UNAVAILABLE_REASON \
-    "hot-swap loading refused on Windows pending PE import validation and " \
-    "immutable directory staging"
-#else
-#define HOTSWAP_UNAVAILABLE_STAGE "release"
-#define HOTSWAP_UNAVAILABLE_REASON \
-    "hot-swap dynamic loading unavailable in release build"
-#endif
+/* Unsupported platform or release build: no dynamic activation surface. */
 
 bool hotswap_verify_module_so(const char *so_path, const char *expect_tu,
                               struct hotswap_activate_report *report)
@@ -2245,8 +2232,10 @@ bool hotswap_verify_module_so(const char *so_path, const char *expect_tu,
     memset(report, 0, sizeof(*report));
     report->verify_only = true;
     report->rolled_back = true;
-    act_copy(report->stage, sizeof(report->stage), HOTSWAP_UNAVAILABLE_STAGE);
-    act_copy(report->error, sizeof(report->error), HOTSWAP_UNAVAILABLE_REASON);
+    act_copy(report->stage, sizeof(report->stage),
+             hotswap_native_unavailable_stage());
+    act_copy(report->error, sizeof(report->error),
+             hotswap_native_unavailable_reason());
     return false;
 }
 
@@ -2278,8 +2267,10 @@ bool hotswap_activate(const char *so_path, const char *resolved_datadir,
     memset(report, 0, sizeof(*report));
     report->verify_only = true;
     report->rolled_back = true;
-    act_copy(report->stage, sizeof(report->stage), HOTSWAP_UNAVAILABLE_STAGE);
-    act_copy(report->error, sizeof(report->error), HOTSWAP_UNAVAILABLE_REASON);
+    act_copy(report->stage, sizeof(report->stage),
+             hotswap_native_unavailable_stage());
+    act_copy(report->error, sizeof(report->error),
+             hotswap_native_unavailable_reason());
     return false;
 }
 
@@ -2295,8 +2286,10 @@ bool hotswap_activate_local(const char *so_path, const char *resolved_datadir,
     memset(report, 0, sizeof(*report));
     report->verify_only = true;
     report->rolled_back = true;
-    act_copy(report->stage, sizeof(report->stage), HOTSWAP_UNAVAILABLE_STAGE);
-    act_copy(report->error, sizeof(report->error), HOTSWAP_UNAVAILABLE_REASON);
+    act_copy(report->stage, sizeof(report->stage),
+             hotswap_native_unavailable_stage());
+    act_copy(report->error, sizeof(report->error),
+             hotswap_native_unavailable_reason());
     return false;
 }
 
@@ -2315,13 +2308,12 @@ bool hotswap_rollback(const char *source_tu,
     memset(report, 0, sizeof(*report));
     report->verify_only = true;
     report->rolled_back = true;
-    act_copy(report->stage, sizeof(report->stage), HOTSWAP_UNAVAILABLE_STAGE);
-    act_copy(report->error, sizeof(report->error), HOTSWAP_UNAVAILABLE_REASON);
+    act_copy(report->stage, sizeof(report->stage),
+             hotswap_native_unavailable_stage());
+    act_copy(report->error, sizeof(report->error),
+             hotswap_native_unavailable_reason());
     return false;
 }
-
-#undef HOTSWAP_UNAVAILABLE_STAGE
-#undef HOTSWAP_UNAVAILABLE_REASON
 
 #endif /* ZCL_HOTSWAP_ACTIVATE_UNAVAILABLE */
 #undef ZCL_HOTSWAP_ACTIVATE_UNAVAILABLE
