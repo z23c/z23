@@ -37,13 +37,30 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 
 #define EXPORT_SUBSYS "export_consensus_bundle"
 
 void boot_export_consensus_bundle(struct node_db *ndb, struct main_state *ms,
                                   const char *datadir)
 {
+#ifdef _WIN32
+    (void)ndb;
+    (void)ms;
+    (void)datadir;
+    /* Refuse at the exported boundary, before checkpoint/database reads,
+     * datadir opening, staging, or export publication. An integer POSIX dirfd
+     * cannot represent the directory-handle capability required for a native
+     * no-reparse atomic bundle transaction. */
+    fprintf(stderr,
+            "REFUSED: -export-consensus-bundle: native Windows export is "
+            "disabled until directory-handle atomic publication is qualified\n");
+    LOG_WARN(EXPORT_SUBSYS,
+             "Windows export refused before datadir or output mutation");
+    exit(EXIT_FAILURE);
+#else
     if (!datadir || !datadir[0]) {
         fprintf(stderr, "REFUSED: -export-consensus-bundle: empty datadir\n");
         LOG_WARN(EXPORT_SUBSYS, "empty datadir");
@@ -169,4 +186,5 @@ void boot_export_consensus_bundle(struct node_db *ndb, struct main_state *ms,
     LOG_INFO(EXPORT_SUBSYS, "exported checkpoint-content bundle h=%d count=%llu",
              res.height, (unsigned long long)res.utxo_count);
     _exit(EXIT_SUCCESS);
+#endif
 }
