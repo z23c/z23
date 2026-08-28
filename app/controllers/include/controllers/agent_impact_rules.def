@@ -2101,6 +2101,26 @@ AGENT_IMPACT_RULE("lib/sim/src/simnet_chaos_faults_rom.c|lib/sim/src/simnet_chao
  * the same builders when it walks a run back out of the log. */
 AGENT_IMPACT_RULE("lib/sim/src/simnet_chaos_faults_stagelog.c", "always_sync_chaos always_sync_lifecycle make_lint_gates")
 
+/* The closed-shape validator for a parsed zcode-package.json metadata
+ * object, split out of package_prepare.c. It reads a JSON tree and a
+ * detail buffer and never touches the walk state or a file descriptor.
+ * test_zcode_package_dev.c drives it through vcs_package_prepare() on
+ * inputs with unknown metadata keys and a non-array file list, asserting
+ * the META refusal --- the case named "symlink, special and unknown
+ * fields fail closed". */
+AGENT_IMPACT_RULE("lib/vcs/src/package_prepare.c|lib/vcs/src/package_prepare_schema.c|lib/vcs/src/package_prepare_internal.h|lib/test/src/test_zcode_package_dev.c", "zcode_package_dev command_registry_catalog native_api_contract make_lint_gates")
+
+/* The whole revert facility --- its two-phase stage-then-commit plan, the
+ * diff collector, and the parent-directory maker that is its only
+ * caller --- split out of vcs.c. Nothing reaches it except vcs_revert(),
+ * and it touches none of the open, snapshot, status or log state.
+ * test_vcs_core.c calls vcs_revert() at seven sites and
+ * test_golden_revert_roundtrip.c drives the full source-and-binary
+ * revert end to end. vcs_repo_priv.h is the private header the split
+ * introduced, holding the repo struct both files now dereference. */
+AGENT_IMPACT_RULE("lib/vcs/src/vcs_revert.c|lib/vcs/src/vcs_repo_priv.h|lib/test/src/test_vcs_core.c|lib/test/src/test_golden_revert_roundtrip.c", "vcs_core vcs_devloop golden_revert_roundtrip command_registry_catalog make_lint_gates")
+
+
 /* The badge commit record --- the issuance idempotence authority --- split
  * out of package_badge.c. Both files were reachable only through the
  * catch-all for everything under lib/vcs. test_zcode_badge.c is what

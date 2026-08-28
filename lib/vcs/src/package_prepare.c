@@ -76,6 +76,8 @@ enum vcs_package_prepare_error vcs_package_scan_layout(
 #include "json/json.h"
 #include "util/safe_alloc.h"
 
+#include "package_prepare_internal.h"
+
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -388,61 +390,6 @@ static bool prepare_copy_field(char *out, size_t cap, const char *value)
     if (!value || strlen(value) >= cap)
         return false;
     memcpy(out, value, strlen(value) + 1u);
-    return true;
-}
-
-static bool prepare_key_allowed(const char *key, const char *const *allowed,
-                                size_t allowed_count)
-{
-    for (size_t i = 0; i < allowed_count; i++)
-        if (strcmp(key, allowed[i]) == 0)
-            return true;
-    return false;
-}
-
-static bool prepare_meta_closed(const struct json_value *meta,
-                                char *detail, size_t detail_cap)
-{
-    static const char *const top_keys[] = {
-        "schema", "name", "semver", "language", "license",
-        "include_dir", "source_dir", "dependencies", "files",
-    };
-    static const char *const dep_keys[] = { "root", "name", "semver" };
-    for (size_t i = 0; i < meta->num_children; i++) {
-        if (!prepare_key_allowed(meta->keys[i], top_keys,
-                                 sizeof(top_keys) / sizeof(top_keys[0]))) {
-            if (detail && detail_cap)
-                (void)snprintf(detail, detail_cap,
-                               "unknown metadata key: %s", meta->keys[i]);
-            return false;
-        }
-    }
-    const struct json_value *dependencies = json_get(meta, "dependencies");
-    if (!dependencies || dependencies->type != JSON_ARR)
-        return false;
-    for (size_t i = 0; i < dependencies->num_children; i++) {
-        const struct json_value *dep = &dependencies->children[i];
-        if (dep->type != JSON_OBJ)
-            return false;
-        for (size_t j = 0; j < dep->num_children; j++) {
-            if (!prepare_key_allowed(dep->keys[j], dep_keys,
-                                     sizeof(dep_keys) / sizeof(dep_keys[0]))) {
-                if (detail && detail_cap)
-                    (void)snprintf(detail, detail_cap,
-                                   "dependency %zu unknown key: %s", i,
-                                   dep->keys[j]);
-                return false;
-            }
-        }
-    }
-    const struct json_value *files = json_get(meta, "files");
-    if (files && files->type != JSON_ARR)
-        return false;
-    if (files) {
-        for (size_t i = 0; i < files->num_children; i++)
-            if (files->children[i].type != JSON_STR)
-                return false;
-    }
     return true;
 }
 
