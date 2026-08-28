@@ -15,20 +15,23 @@
  * Consumer defines ZCL_COMMAND_*; see config/src/command_catalog.c. */
 
 ZCL_COMMAND_BRANCH("zcode", "",
-                   "Create, verify and preserve public C23 work together",
+                   "Create, verify and preserve public C23 work",
                    ZCL_COMMAND_LAYER_APP)
 
 ZCL_COMMAND_BRANCH("zcode.project", "zcode",
-                   "C23 projects",
+                   "Projects",
                    ZCL_COMMAND_LAYER_APP)
 ZCL_COMMAND_BRANCH("zcode.work", "zcode",
-                   "Proven C23 work",
+                   "Proven work",
+                   ZCL_COMMAND_LAYER_APP)
+ZCL_COMMAND_BRANCH("zcode.task", "zcode",
+                   "Posted tasks and transports",
                    ZCL_COMMAND_LAYER_APP)
 ZCL_COMMAND_BRANCH("zcode.passport", "zcode",
-                   "Signed C23 module Passports",
+                   "Signed module passports",
                    ZCL_COMMAND_LAYER_APP)
 ZCL_COMMAND_BRANCH("zcode.workspace", "zcode",
-                   "C23 workspace evidence",
+                   "Workspace evidence",
                    ZCL_COMMAND_LAYER_APP)
 ZCL_COMMAND_BRANCH("zcode.workspace.source", "zcode.workspace",
                    "Git-free source",
@@ -632,6 +635,192 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     zcl_native_handle_zcode_work_accept)
 
+/* ── work transport: solutions move between nodes, keyed by task ──────
+ * A task is content-addressed (task_root); a solution is the source
+ * package whose accepted-work chain verifies against exactly that root.
+ * Discovery in zclassic23.work is keyed by the PROBLEM, not by author or
+ * package name. Both leaves ride only existing wires: the frozen swarm
+ * codec for bytes, signed POINTER/PROVIDER records for discovery. */
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.work.offer", "zcode.work", "",
+    "Make one accepted solution discoverable by its task",
+    "Verifies the source package at package_root is held complete and "
+    "reconstructs to a verified accepted-work chain (task, candidate, "
+    "proof policy, every receipt, PROVEN lane), DERIVES the task root it "
+    "solves — the task root is an output of verification, never an input "
+    "— and returns TWO ready-to-run zcode network publish inputs for "
+    "zclassic23.work: provider_publish_input (\"ask me for these bytes\", "
+    "the record the fetch path routes on) and pointer_publish_input "
+    "(\"this package solves this task\", what a puller looks up when all "
+    "it knows is the task root). Both are required; either alone is a "
+    "silent no-op at pull time. WORK_NOT_RECONSTRUCTIBLE names a package "
+    "that is not held or does not verify. Offering announces NOTHING: "
+    "publishing is the separate second act.",
+    0,
+    "zcode,work,offer,solution,task,dht,provider,pointer,swarm",
+    "zcl.zcode_work_offer.input.v1",
+    "zcl.zcode_work_offer.v1",
+    "package_root,datadir", "package_root",
+    "z23 zcode work offer --input='{\"package_root\":\"<64hex>\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_zcode_work_offer)
+
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.work.pull", "zcode.work", "",
+    "Fetch and verify published solutions for one task root",
+    "Resolves every zclassic23.work POINTER record at "
+    "semantic_root=task_root, drives the ordinary swarm fetch for each "
+    "DISTINCT source package, and verifies each with "
+    "vcs_zcode_work_solution_admit — reconstruction from stored bytes "
+    "re-verifying the package's own accepted-work chain, with "
+    "expect_task_root ALWAYS set to the caller's root. That "
+    "receiver-side binding check — never the publish gate — is the "
+    "security property: a package that proves a DIFFERENT task is refused "
+    "task-mismatch and stays unverified. Bounded rows carry "
+    "transport_root, fetch_outcome, admit_result (the NAMED rule), "
+    "source_root and accepted_work_root (verified rows only), plus "
+    "totals pointers_seen, distinct_transport_roots, fetched, admitted, "
+    "refused and rows_truncated. A row that fails STAYS in the report "
+    "naming its rule; one bad pointer never aborts the sweep. status "
+    "separates the dead ends that must never be merged: NO_WORK_POINTERS "
+    "(nobody has solved this task yet) versus WORK_BYTES_UNREACHABLE "
+    "(solutions exist, no authenticated provider served the bytes). "
+    "Pulling is NOT accepting and NOTHING is executed: reconstruction "
+    "runs in fresh private scratch removed before returning, and choosing "
+    "what to do with the source is a separate explicit act.",
+    0,
+    "zcode,work,pull,solution,task,dht,pointer,swarm,verify",
+    "zcl.zcode_work_pull.input.v1",
+    "zcl.zcode_work_pull.v1",
+    "task_root,datadir,maximum_records", "task_root",
+    "z23 zcode work pull --input='{\"task_root\":\"<64hex>\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_zcode_work_pull)
+
+/* ── task transport: posted problems move between nodes ───────────────
+ * The other half of the work lane: before a solution can be discovered by
+ * its task, the task itself must be discoverable. A task is already
+ * content-addressed (task_root); this carrier adds the part a stranger
+ * cannot re-derive from the task wire alone — the goal preimage bound at
+ * task.goal_root and the proof policy bytes bound at
+ * task.proof_policy_root — inside one ordinary content.v2 package. No new
+ * wire message and no new CAS object: bytes ride the frozen swarm codec,
+ * discovery is two signed records in zclassic23.task, exactly like the
+ * work and attestation lanes. The task object is deliberately unsigned:
+ * authenticity of a posting is the signed record pair (governed by
+ * AGENT_SCOPE grants like every namespace); integrity is the root. */
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.task.offer", "zcode.task", "",
+    "Bind one task's wires into the transport carrier",
+    "Loads one task's three wires from the workspace object store (task "
+    "wire at task_root, goal preimage at task.goal_root, proof policy at "
+    "task.proof_policy_root — raw CAS loads do not verify, so EACH is "
+    "re-hashed against its own address before use), binds them into the "
+    "fixed-layout zcl-task-context.v1 carrier (exactly three members, "
+    "deterministic root), admits it to the package store, and returns "
+    "task_root, context_root, expires_unix and TWO ready-to-run zcode "
+    "network publish inputs for zclassic23.task: provider_publish_input "
+    "(\"ask me for these bytes\", the record the fetch path routes on) and "
+    "pointer_publish_input (\"this context posts this task\", what a "
+    "puller looks up when all it knows is the task root). Both are "
+    "required; either alone is a silent no-op at pull time. "
+    "TASK_WIRES_NOT_HELD names a workspace that lacks any of the three "
+    "wires or one that does not hash to its own address. Offering "
+    "announces NOTHING: publishing is the separate second act.",
+    0,
+    "zcode,task,offer,post,carrier,context,dht,provider,pointer",
+    "zcl.zcode_task_offer.input.v1",
+    "zcl.zcode_task_offer.v1",
+    "task_root,datadir", "task_root",
+    "z23 zcode task offer --input='{\"task_root\":\"<64hex>\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_zcode_task_offer)
+
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.task.pull", "zcode.task", "",
+    "Fetch and verify posted contexts for one task root",
+    "Resolves every zclassic23.task POINTER record at "
+    "semantic_root=task_root, drives the ordinary swarm fetch for each "
+    "DISTINCT context, and verifies each with vcs_zcode_task_context_admit "
+    "— manifest re-rooting, the fixed three-file shape, and every "
+    "cross-binding re-run from stored bytes, with expect_task_root ALWAYS "
+    "set to the caller's root and a liveness check at this instant (an "
+    "expired posting drops off here). That receiver-side binding check — "
+    "never the publish gate — is the security property: a context that "
+    "proves a DIFFERENT task is refused task-mismatch and stays "
+    "unverified. Verified rows carry expires_unix and the goal text — the "
+    "problem statement a remote agent starts from; failed rows carry "
+    "fetch_outcome and admit_rule (the NAMED rule). Totals pointers_seen, "
+    "distinct_transport_roots, fetched, admitted, refused and "
+    "rows_truncated bound the report; a row that fails STAYS in it, and "
+    "one bad pointer never aborts the sweep. status separates the dead "
+    "ends that must never be merged: NO_TASK_POINTERS (nobody has posted "
+    "this task) versus TASK_BYTES_UNREACHABLE (postings exist, no "
+    "authenticated provider served the bytes) versus TASKS_REFUSED (bytes "
+    "arrived, every context failed a named rule). Pulling is NOT "
+    "executing: choosing to do the work is the ordinary local journey.",
+    0,
+    "zcode,task,pull,context,dht,pointer,swarm,verify,goal",
+    "zcl.zcode_task_pull.input.v1",
+    "zcl.zcode_task_pull.v1",
+    "task_root,datadir,maximum_records", "task_root",
+    "z23 zcode task pull --input='{\"task_root\":\"<64hex>\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_zcode_task_pull)
+
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.task.board", "zcode.task", "",
+    "List task postings this node has seen",
+    "Local seen-set projection of the zclassic23.task namespace — a scan "
+    "of this node's own record store filtered by the sovereignty DISCOVER "
+    "decision, NEVER a peer query: records arrive only through the "
+    "ordinary paths (publish here, exact-root discovery merges, "
+    "replication), so an empty board means nothing seen yet, not nothing "
+    "anywhere. Every row whose context this node already holds is "
+    "re-verified with vcs_zcode_task_context_admit and carries "
+    "expires_unix and the goal text; rows whose bytes are not here name "
+    "their rule (bytes-not-held) — zcode task pull fetches and "
+    "re-verifies those against the task root. Rows are task_root, "
+    "context_root, admit_rule, verified, and the goal on verified rows.",
+    0,
+    "zcode,task,board,listing,dht,records,discovery",
+    "zcl.zcode_task_board.input.v1",
+    "zcl.zcode_task_board.v1",
+    "datadir", "",
+    "z23 zcode task board",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_READ,
+    ZCL_COMMAND_RISK_READ, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_zcode_task_board)
+
 ZCL_COMMAND_READY_COMMAND(
     "zcode.work.review", "zcode.work", "", "Review one exact candidate",
     "Reloads the exact candidate and its trusted non-review proof set, stores "
@@ -653,7 +842,7 @@ ZCL_COMMAND_READY_COMMAND(
     zcl_native_handle_zcode_work_review)
 
 ZCL_COMMAND_READY_READ(
-    "zcode.guide", "zcode", "", "Tell Z23 what you want C23 to do",
+    "zcode.guide", "zcode", "", "Tell Z23 what you want done",
     "Returns one root-free, reuse-first start command and the plain journey "
     "from desired behavior to an exact accepted version. Proof identities "
     "remain available on request. It grants no acceptance or publication "
@@ -669,7 +858,7 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_zcode_guide)
 
 ZCL_COMMAND_BRANCH("zcode.commons", "zcode",
-                   "ZC23 Living Commons projection",
+                   "Living Commons projection",
                    ZCL_COMMAND_LAYER_APP)
 ZCL_COMMAND_BRANCH("zcode.commons.creation", "zcode.commons",
                    "Creation-attribution inspection",
@@ -714,7 +903,7 @@ ZCL_COMMAND_BRANCH("zcode.commons.impact", "zcode.commons",
                    "Locally rendered productivity evidence",
                    ZCL_COMMAND_LAYER_APP)
 ZCL_COMMAND_BRANCH("zcode.moderation", "zcode",
-                   "Family Commons moderation",
+                   "Commons moderation",
                    ZCL_COMMAND_LAYER_APP)
 ZCL_COMMAND_BRANCH("zcode.moderation.policy", "zcode.moderation",
                    "Immutable family policy profiles",
@@ -1563,7 +1752,7 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_zcode_patronage_show)
 
 ZCL_COMMAND_BRANCH("zcode.continuity", "zcode",
-                   "Package continuity",
+                   "Continuity",
                    ZCL_COMMAND_LAYER_APP)
 ZCL_COMMAND_READY_READ(
     "zcode.continuity.plan", "zcode.continuity", "",
@@ -2070,7 +2259,7 @@ ZCL_COMMAND_READY_COMMAND(
     zcl_native_handle_zcode_publish_commit)
 
 ZCL_COMMAND_BRANCH("zcode.package", "zcode",
-                   "Locally committed packages",
+                   "Committed packages",
                    ZCL_COMMAND_LAYER_APP)
 
 ZCL_COMMAND_BRANCH("zcode.package.publish", "zcode.package",
@@ -2783,7 +2972,7 @@ ZCL_COMMAND_READY_READ(
  * unavailable and report zero honestly until slices 11-12. */
 
 ZCL_COMMAND_BRANCH("zcode.leaderboard", "zcode",
-                   "Evidence rankings",
+                   "Rankings",
                    ZCL_COMMAND_LAYER_APP)
 
 ZCL_COMMAND_READY_READ(
@@ -2886,7 +3075,7 @@ ZCL_COMMAND_READY_READ(
  * callback. */
 
 ZCL_COMMAND_BRANCH("zcode.badge", "zcode",
-                   "Evidence badges",
+                   "Badges",
                    ZCL_COMMAND_LAYER_APP)
 
 ZCL_COMMAND_READY_READ(
@@ -3012,7 +3201,7 @@ ZCL_COMMAND_READY_READ(
  * checkpoint is already wired into zcode package publish commit. */
 
 ZCL_COMMAND_BRANCH("zcode.seed", "zcode",
-                   "Local seeding facts",
+                   "Seeding facts",
                    ZCL_COMMAND_LAYER_APP)
 
 ZCL_COMMAND_READY_READ(
@@ -3070,7 +3259,7 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_zcode_seed_ratio)
 
 ZCL_COMMAND_BRANCH("zcode.storage", "zcode",
-                   "Content-addressed storage",
+                   "CAS storage",
                    ZCL_COMMAND_LAYER_APP)
 
 ZCL_COMMAND_READY_READ(
@@ -3379,7 +3568,7 @@ ZCL_COMMAND_READY_COMMAND(
  * separately from signature validity.
  * See docs/spec/sovereign-identity-layer.md. */
 ZCL_COMMAND_BRANCH("zcode.release", "zcode",
-                   "Release records",
+                   "Releases",
                    ZCL_COMMAND_LAYER_APP)
 
 ZCL_COMMAND_READY_COMMAND(
@@ -3572,7 +3761,7 @@ ZCL_COMMAND_READY_READ(
  * zid_identities projection READONLY via db_zid_identity_find, and stays
  * not_checked without one. `node_free` in the report says which. */
 ZCL_COMMAND_BRANCH("zcode.proof", "zcode",
-                   "Proof verification",
+                   "Proof verify",
                    ZCL_COMMAND_LAYER_APP)
 
 ZCL_COMMAND_READY_READ(
@@ -3820,7 +4009,8 @@ ZCL_COMMAND_READY_READ(
     65536, "zcode,network,dht,records,lookup,root,async",
     "zcl.zcode_network_records.input.v1",
     "zcl.zcode_network_records.v1",
-    "kind,namespace,semantic_root,transport_root,include_evidence_wires",
+    "kind,namespace,semantic_root,transport_root,include_evidence_wires,"
+    "board",
     "kind,namespace",
     "z23 zcode network records --input='{\"kind\":\"pointer\",\"namespace\":\"science.study\",\"semantic_root\":\"<64hex>\"}'",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
@@ -3839,7 +4029,7 @@ ZCL_COMMAND_READY_READ(
     "is returned.",
     16384, "zcode,network,dht,provider,root,discovery",
     "zcl.zcode_network_providers.input.v1",
-    "zcl.zcode_network_providers.v1", "namespace,transport_root",
+    "zcl.zcode_network_providers.v1", "namespace,transport_root,board",
     "namespace,transport_root",
     "z23 zcode network providers --input='{\"namespace\":\"science\",\"transport_root\":\"<64hex>\"}'",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
@@ -4078,7 +4268,7 @@ ZCL_COMMAND_READY_READ(
  *
  * See lib/zid/include/zid/zendp.h and lib/vcs/include/vcs/zendp_swarm.h. */
 ZCL_COMMAND_BRANCH("zcode.endpoint", "zcode",
-                   "Signed node addresses",
+                   "Signed addresses",
                    ZCL_COMMAND_LAYER_APP)
 
 ZCL_COMMAND_READY_COMMAND(

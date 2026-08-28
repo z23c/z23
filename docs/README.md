@@ -152,6 +152,8 @@ current development mission; neither file redefines the durable product.
 
 - [`BENCHMARKS_LOG.md`](BENCHMARKS_LOG.md) — append-only measured benchmark
   ledger.
+- [`BUILD_BENCH.md`](BUILD_BENCH.md) — `make build-bench` scenario harness;
+  how build-speed claims get a measured artifact.
 - [`USER_BENCHMARKS.md`](USER_BENCHMARKS.md) — user-facing measurement
   questions.
 - [`SIMNET_PERF.md`](SIMNET_PERF.md) — deterministic simulation performance

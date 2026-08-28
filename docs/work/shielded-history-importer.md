@@ -187,9 +187,8 @@ value right after an import: `release_assisted` /
 
 ## Copy-prove harness
 
-`tools/scripts/import-copy-prove.sh` is the sibling of
-`tools/scripts/cure-copy-prove.sh` for this path (its verdict does not
-require `self_folded`, unlike the sovereign harness). Contract (see the
+`tools/scripts/import-copy-prove.sh` covers this path (its verdict does
+not require `self_folded`, unlike the sovereign harness). Contract (see the
 script's own header comment for the authoritative, current detail):
 
 1. Safety: requires the `--copy-dir` marker, refuses to alias a live datadir.

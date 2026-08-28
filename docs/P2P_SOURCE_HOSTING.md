@@ -462,7 +462,127 @@ own allowlist decide what it is allowed to see, and a quorum you can only
 observe when you already agree with it proves nothing. The
 approved-verifier quorum is applied afterwards, by `zcode package verify`.
 
-## Ratio and optional ZCL burn credits
+## Work solutions are discovered by task
+
+Attestations answer "is this package any good?" A different question moves
+the development loop itself: *I know the problem — who has solved it?* A
+task is content-addressed (`task_root`, the signed task object's root), and
+a solution is the source package whose accepted-work chain — task →
+candidate → proof policy → proof receipts → PROVEN lane — verifies against
+exactly that root. The `zclassic23.work` namespace keys discovery by the
+**problem**, not by author or package name: a stranger who knows only the
+task asks for `semantic_root` = the task root and learns every carrier
+claiming to solve it.
+
+The records are the same two ordinary signed DHT records the attestation
+lane uses, with the same two-must-be-published rule:
+
+- **PROVIDER** on the source package root — "ask me for these bytes"; the
+  record the fetch path routes on.
+- **POINTER** binding `semantic_root` = the task root to `transport_root`
+  = the source package root — "this package solves this task"; what a
+  puller looks up.
+
+`zcode work offer --input='{"package_root":"<64hex>"}'` verifies the held
+package reconstructs to a proven accepted work, **derives** the task root
+from the package's own chain — the task root is an output of verification,
+never typed by the operator — and returns both ready-to-run publish
+inputs, provider first, exactly as `attest offer` does. The publish path
+gates the POINTER with the same hygiene doctrine as the attestation gate:
+this node may not advertise a solution pointer whose package it does not
+hold, does not verify, or that proves a different task than the pointer
+names (`WORK_NOT_RECONSTRUCTIBLE`, `TASK_ROOT_NOT_BOUND`). And with the
+same limit: the gate constrains only the node applying it.
+
+On the other side, `zcode work pull --input='{"task_root":"<64hex>"}'`
+resolves every POINTER at that key, fetches each distinct package over the
+ordinary swarm codec, and admits each with
+`vcs_zcode_work_solution_admit(expect_task_root)` — reconstruction from
+stored bytes re-verifying the whole accepted-work chain, then a refusal
+unless the task the package itself proves equals the root the reader
+asked about. That receiver-side binding check is the security property:
+a hostile pointer in this namespace cannot deliver a solution to a
+different problem. The report shape follows `attest pull` — bounded rows
+naming each rule, failures never abort the sweep, and the two dead ends
+stay separate (`NO_WORK_POINTERS` versus `WORK_BYTES_UNREACHABLE`).
+
+**Pulling is not accepting, and nothing is executed.** Reconstruction
+runs in fresh private scratch that is removed before returning; a
+verified row means "this package genuinely solves this task, and this
+node holds the bytes" — nothing more. It does not say the solution is
+good, and it does not run one instruction of it. Choosing what to do
+with the source is the separate, explicit acts the operator already has
+(checkout, reproduce). The scoped-agent governance of the previous
+section applies here as anywhere: once a master key's grants govern this
+namespace, only the founder and live grantees can publish into it.
+
+## Tasks are posted for strangers to pick up
+
+<!-- claim: symbol-present vcs_zcode_task_context_admit lib/vcs/src/zcode_task_context.c # the receiver-side binding check exists -->
+<!-- claim: symbol-present boot_zcode_dht_task_pointer_publish_gate config/src/boot_zcode_dht_publish_gate.c # the pointer hygiene gate exists -->
+<!-- claim: symbol-present zcl_native_handle_zcode_task_pull tools/command/native_zcode_task_transport_command.c # the pull leaf exists -->
+<!-- claim: symbol-present zcode.task.pull config/commands/zcode.def # the task lane is a bound command -->
+
+The work lane answers "who has solved this task?" — but a stranger on
+another node cannot even *start* from the task wire alone: the wire commits
+`goal_root` and `proof_policy_root`, and the preimages live in the author's
+workspace CAS. Task posting closes that gap. The `zcl-task-context.v1`
+carrier is one ordinary content.v2 package with a fixed three-file layout —
+`task.wire`, `goal.bin`, `proof-policy.wire` — so the goal text and the
+policy bytes cross the same frozen swarm codec as any other package, with
+no new CAS object and no new wire message. The same task context always
+roots to the same deterministic context root.
+
+A task object is deliberately **unsigned**. It is a content-addressed
+constraint set, not an identity claim: the authenticity of a *posting* is
+the signed POINTER/PROVIDER pair in the `zclassic23.task` namespace
+(governed by scoped-agent grants like every namespace); the integrity of
+the task is its root. The carrier contributes the cross-bindings a
+stranger cannot re-derive from the task wire alone — `sha3-256(goal.bin)`
+must equal `task.goal_root`, and the policy wire must root to
+`task.proof_policy_root`. Every rule runs identically at export and at
+admit.
+
+The records are the same pair every lane uses, and both are required:
+
+- **PROVIDER** on the context root — "ask me for these bytes".
+- **POINTER** binding `semantic_root` = the task root to
+  `transport_root` = the context root — "this context posts this task".
+
+`zcode task offer --input='{"task_root":"<64hex>"}'` loads the three wires
+from the workspace CAS — each re-hashed against its own address, since raw
+CAS loads do not verify — exports the carrier into the package store, and
+returns both publish inputs, provider first. The publish path gates the
+POINTER with the same hygiene doctrine as the work gate
+(`TASK_CONTEXT_NOT_VERIFIABLE`, `TASK_ROOT_NOT_BOUND`), plus one addition
+the work lane does not need: a liveness check, because an expired posting
+must not be advertised any more than it may be started on.
+
+`zcode task pull --input='{"task_root":"<64hex>"}'` resolves every POINTER
+at that key, fetches each distinct context, and admits each with
+`vcs_zcode_task_context_admit(expect_task_root)` — the receiver-side
+binding check, never the publish gate, is the security property. Verified
+rows carry `expires_unix` and the **goal text**: that is the problem
+statement a remote agent starts from, together with the proof policy the
+solution will be held to. Failed rows name their rule; one bad pointer
+never aborts the sweep; and the dead ends stay separate
+(`NO_TASK_POINTERS`, `TASK_BYTES_UNREACHABLE`, `TASKS_REFUSED`).
+**Pulling is not executing** — doing the work is the ordinary local
+journey, and offering its result is `zcode work offer`.
+
+`zcode task board` lists what *this node* has seen posted in the task
+namespace. It is a local projection of the node's own record store — a
+scan filtered by the sovereignty DISCOVER decision, never a peer query —
+because a namespace-wide DHT query would widen the frozen protocol.
+Records arrive through the ordinary paths (published here, exact-root
+discovery merges, replication), so an empty board means nothing seen yet,
+not nothing anywhere. Every row whose context is already held is
+re-verified and carries its goal; the rest name their rule and wait for
+`task pull`. Sovereignty applies as everywhere: with no matching policy
+rule, DISCOVER defaults to allow while storing stays governed by the
+node's own policy file.
+
+
 
 The primary ratio should be earned by serving verified bytes:
 

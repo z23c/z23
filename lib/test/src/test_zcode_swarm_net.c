@@ -104,7 +104,9 @@
 #include "vcs/zcode_commons.h"
 #include "vcs/zcode_dht_identity.h"
 #include "vcs/zcode_dht_service.h"
+#include "vcs/zcode_task_context.h"
 #include "vcs/zcode_lane.h"
+#include "sha3/sha3.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -2894,6 +2896,30 @@ static int zwn_t_sovereign_source_build(const struct chain_params *params)
                0);
         ASSERT(memcmp(consumer_assignment.assignment_evidence_root,
                       discovered_accepted_root, 32) == 0);
+        /* Work-solution admission on the FETCHED package — the receiver-
+         * side binding check a work puller runs after the swarm delivered
+         * bytes this node never held before. The package's own chain
+         * names the task; a flipped expected root is refused. */
+        uint8_t work_task_root[32], work_source_root[32];
+        uint8_t work_accepted_root[32];
+        ASSERT_EQ(vcs_zcode_work_solution_admit(
+                      b.store, discovered_package_root,
+                      consumer_accepted.task_root, work_task_root,
+                      work_source_root, work_accepted_root),
+                  VCS_ZCODE_WORK_ADMIT_OK);
+        ASSERT(memcmp(work_task_root, consumer_accepted.task_root, 32) ==
+               0);
+        ASSERT(memcmp(work_source_root,
+                      consumer_assignment.source_root, 32) == 0);
+        ASSERT(memcmp(work_accepted_root, discovered_accepted_root, 32) ==
+               0);
+        uint8_t work_flipped[32];
+        memcpy(work_flipped, consumer_accepted.task_root, 32);
+        work_flipped[0] ^= 1u;
+        ASSERT_EQ(vcs_zcode_work_solution_admit(
+                      b.store, discovered_package_root, work_flipped,
+                      NULL, NULL, NULL),
+                  VCS_ZCODE_WORK_ADMIT_TASK_MISMATCH);
 
         char consumer_source[1400], consumer_binary[1400];
         ASSERT(snprintf(consumer_source, sizeof(consumer_source),
@@ -4759,6 +4785,250 @@ static int zwn_t_attestation_flight(const struct chain_params *params)
     return failures;
 }
 
+/* ── task-posting flight ───────────────────────────────────────────────
+ *
+ * Same shape as the attestation flight for a different cargo: a dev task
+ * posted as the fixed three-file carrier. What crosses the codec is a
+ * real content.v2 package (manifest + chunks); what B runs afterwards is
+ * the receiver-side binding check a stranger relies on. */
+
+#define ZWN_TASK_NS VCS_ZCODE_TASK_DHT_NAMESPACE
+
+/* Export one real, pinned task context into node z's store. The goal text
+ * commits at task.goal_root, the policy wire at task.proof_policy_root,
+ * and the whole carrier roots deterministically — same task always the
+ * same context root. */
+static bool zwn_task_offer(struct zwn_node *z, const char *goal,
+                           int64_t now, int64_t expires_unix,
+                           uint8_t task_root[32], uint8_t context_root[32])
+{
+    struct vcs_zcode_proof_policy_v1 policy;
+    memset(&policy, 0, sizeof(policy));
+    policy.schema_version = VCS_ZCODE_DEV_VERSION;
+    policy.required_proofs = VCS_ZCODE_PROOF_COMPILE |
+                             VCS_ZCODE_PROOF_TEST | VCS_ZCODE_PROOF_FUZZ |
+                             VCS_ZCODE_PROOF_REVIEW |
+                             VCS_ZCODE_PROOF_LOCAL_REPRODUCTION;
+    policy.minimum_compile_receipts = 2;
+    policy.minimum_test_receipts = 2;
+    policy.minimum_fuzz_receipts = 1;
+    policy.minimum_reviews = 1;
+    policy.minimum_matching_receipts = 2;
+    policy.flags = VCS_ZCODE_POLICY_INDEPENDENT_SIGNERS |
+                   VCS_ZCODE_POLICY_RELEASE_BYTE_IDENTITY;
+    policy.deterministic_fuzz_seeds = 64;
+    policy.audit_basis_points = 100;
+    policy.maximum_proof_age_seconds = 3600;
+    uint8_t policy_root[32];
+    if (vcs_zcode_proof_policy_root(&policy, policy_root) !=
+        VCS_ZCODE_DEV_OK)
+        return false;
+    uint8_t policy_wire[VCS_ZCODE_PROOF_POLICY_WIRE_BYTES];
+    if (vcs_zcode_proof_policy_serialize(&policy, policy_wire) !=
+        VCS_ZCODE_DEV_OK)
+        return false;
+
+    struct vcs_zcode_task_v1 task;
+    memset(&task, 0, sizeof(task));
+    task.schema_version = VCS_ZCODE_DEV_VERSION;
+    /* Validation refuses zero roots, so every unconstrained root gets a
+     * distinct nonzero pattern. */
+    memset(task.source_root, 0x41, 32);
+    memset(task.dependency_lock_root, 0x42, 32);
+    memset(task.toolchain_capsule_root, 0x43, 32);
+    memset(task.write_scope_root, 0x44, 32);
+    memset(task.acceptance_tests_root, 0x45, 32);
+    memset(task.model_policy_root, 0x46, 32);
+    memcpy(task.proof_policy_root, policy_root, 32);
+    sha3_256((const uint8_t *)goal, strlen(goal), task.goal_root);
+    task.capabilities = VCS_ZCODE_TASK_CAP_V1_MASK;
+    task.max_changed_files = 32;
+    task.max_patch_bytes = 1024 * 1024;
+    task.max_context_bytes = 2 * 1024 * 1024;
+    task.max_cpu_seconds = 120;
+    task.max_memory_bytes = UINT64_C(512) * 1024 * 1024;
+    task.max_output_bytes = UINT64_C(64) * 1024 * 1024;
+    task.expires_unix = expires_unix;
+    uint8_t task_wire[VCS_ZCODE_TASK_WIRE_BYTES];
+    if (vcs_zcode_task_serialize(&task, task_wire) != VCS_ZCODE_DEV_OK ||
+        vcs_zcode_task_root(&task, task_root) != VCS_ZCODE_DEV_OK)
+        return false;
+    return vcs_zcode_task_context_export(
+               task_wire, sizeof(task_wire), (const uint8_t *)goal,
+               strlen(goal), policy_wire, sizeof(policy_wire), z->store,
+               now, context_root) == VCS_ZCODE_TASK_CONTEXT_OK &&
+           vcs_package_store_pin(z->store, context_root, true) ==
+               VCS_PACKAGE_STORE_OK;
+}
+
+static int zwn_t_task_flight(const struct chain_params *params)
+{
+    int failures = 0;
+    struct zwn_fixture fixture = {0};
+    TEST("task flight: A posts a dev task as the three-file carrier, B "
+         "resolves the pointer, pulls the context over real zpkgswm "
+         "frames, and re-verifies it against exactly the task root — "
+         "goal text included") {
+        static const char goal[] =
+            "port the fold reducer to the new arena API; the suite stays "
+            "green or the work is worth nothing";
+        uint8_t task_root[32], context_root[32];
+
+        struct zwn_node a, b;
+        const struct zwn_node_spec nodes[] = {
+            {&a, "task-a"}, {&b, "task-b"},
+        };
+        ASSERT(zwn_fixture_nodes(&fixture, params, nodes,
+                                 sizeof(nodes) / sizeof(nodes[0])));
+        struct zwn_link a_b, b_a;
+        const struct zwn_link_spec links[] = {
+            {&a, &a_b, {10, 4, 0, 1}, "task-peer-b"},
+            {&b, &b_a, {10, 4, 0, 2}, "task-peer-a"},
+        };
+        ASSERT(zwn_fixture_links(&fixture, links,
+                                 sizeof(links) / sizeof(links[0])));
+        ASSERT(zwn_meet_side_quiet(&a, &a_b));
+        ASSERT(zwn_meet_side_quiet(&b, &b_a));
+
+        /* 1. A offers AFTER the fixture exists (the offer writes into
+         *    A's store); the synthetic clock is 1000 and the task lives
+         *    until 4020, so every later admit is a live one. */
+        ASSERT(zwn_task_offer(&a, goal, 1000, 4020, task_root,
+                              context_root));
+
+        /* 2. B has never seen it: admit refuses on the store rule. */
+        ASSERT_EQ(vcs_zcode_task_context_admit(
+                      b.store, context_root, task_root, 1002, NULL, NULL,
+                      NULL, 0, NULL, NULL),
+                  VCS_ZCODE_TASK_CONTEXT_STORE);
+
+        /* 3. B learns the context root the way a stranger does: the
+         *    signed POINTER pair in the task namespace, keyed on the task
+         *    root. The discover helper's record window is 1000..2000, so
+         *    the flight runs at 1002 like every other flight. */
+        uint8_t discovered[32];
+        struct vcs_zcode_dht_record provider;
+        memset(&provider, 0, sizeof(provider));
+        ASSERT(zwn_discover_transport(&a, &a, &b, ZWN_TASK_NS, task_root,
+                                      context_root, discovered, &provider,
+                                      1002));
+        ASSERT(memcmp(discovered, context_root, 32) == 0);
+
+        /* 4. The bytes cross the codec on real frames — A's DATA reply
+         *    counter is the proof nothing was copied out of band. */
+        ASSERT(a.chunk_data_replies[0] == 0);
+        ASSERT(zwn_fetch_package_from_provider(&b, discovered, &a_b, &b_a,
+                                               params->pchMessageStart));
+        ASSERT(a.chunk_data_replies[0] > 0);
+
+        /* 5. B re-verifies from ITS stored bytes with the binding a
+         *    stranger actually has: this context must prove exactly the
+         *    task root B asked about, and hand back the goal text. */
+        struct vcs_zcode_task_v1 admitted;
+        char goal_back[VCS_ZCODE_TASK_CONTEXT_GOAL_MAX + 1u];
+        size_t goal_back_len = 0;
+        uint8_t derived[32];
+        ASSERT_EQ(vcs_zcode_task_context_admit(
+                      b.store, discovered, task_root, 1002, &admitted, NULL,
+                      (uint8_t *)goal_back, sizeof(goal_back) - 1u,
+                      &goal_back_len, derived),
+                  VCS_ZCODE_TASK_CONTEXT_OK);
+        ASSERT(goal_back_len == strlen(goal));
+        ASSERT(memcmp(goal_back, goal, goal_back_len) == 0);
+        ASSERT(memcmp(derived, task_root, 32) == 0);
+        ASSERT(admitted.expires_unix == 4020);
+
+        /* 6. A hostile clock drop: the same bytes, admitted after the
+         *    posting expired, refuse — a stale posting is not a task. */
+        ASSERT_EQ(vcs_zcode_task_context_admit(
+                      b.store, discovered, task_root, 4100, NULL, NULL,
+                      NULL, 0, NULL, NULL),
+                  VCS_ZCODE_TASK_CONTEXT_TASK_EXPIRED);
+
+        zwn_fixture_cleanup(&fixture);
+        PASS();
+    } _test_next:
+    zwn_fixture_cleanup(&fixture);
+    return failures;
+}
+
+/* The hostile task pointer: a context for a DIFFERENT task, delivered
+ * under the root B asked about. Nothing in the record layer can check
+ * what a task context proves — the refusal has to happen where the bytes
+ * land, exactly like the attestation binding arm. */
+static int zwn_t_task_hostile_pointer(const struct chain_params *params)
+{
+    int failures = 0;
+    struct zwn_fixture fixture = {0};
+    TEST("hostile task pointer: a context proving a DIFFERENT task, "
+         "resolved and fetched under the task root B asked about, is "
+         "refused task-mismatch and nothing is admitted") {
+        struct zwn_node a, b;
+        const struct zwn_node_spec nodes[] = {
+            {&a, "taskhostile-a"}, {&b, "taskhostile-b"},
+        };
+        ASSERT(zwn_fixture_nodes(&fixture, params, nodes,
+                                 sizeof(nodes) / sizeof(nodes[0])));
+        struct zwn_link a_b, b_a;
+        const struct zwn_link_spec links[] = {
+            {&a, &a_b, {10, 4, 0, 1}, "taskhostile-peer-b"},
+            {&b, &b_a, {10, 4, 0, 2}, "taskhostile-peer-a"},
+        };
+        ASSERT(zwn_fixture_links(&fixture, links,
+                                 sizeof(links) / sizeof(links[0])));
+        ASSERT(zwn_meet_side_quiet(&a, &a_b));
+        ASSERT(zwn_meet_side_quiet(&b, &b_a));
+
+        /* Two honest postings: the asked-about task and a different one
+         * (a different goal is a different root). */
+        static const char asked_goal[] =
+            "make the frontier scan linear in height";
+        static const char other_goal[] =
+            "make the fold reducer arena-first";
+        uint8_t asked_root[32], asked_context[32];
+        uint8_t other_root[32], other_context[32];
+        ASSERT(zwn_task_offer(&a, asked_goal, 1000, 4020, asked_root,
+                              asked_context));
+        ASSERT(zwn_task_offer(&a, other_goal, 1000, 4020, other_root,
+                              other_context));
+        ASSERT(memcmp(asked_root, other_root, 32) != 0);
+        ASSERT(memcmp(asked_context, other_context, 32) != 0);
+
+        /* The lie: a pointer binding the ASKED task root to the OTHER
+         * task's context. The record layer carries it happily. */
+        uint8_t discovered[32];
+        struct vcs_zcode_dht_record provider;
+        memset(&provider, 0, sizeof(provider));
+        ASSERT(zwn_discover_transport(&a, &a, &b, ZWN_TASK_NS, asked_root,
+                                      other_context, discovered, &provider,
+                                      1002));
+        ASSERT(memcmp(discovered, other_context, 32) == 0);
+
+        /* B fetches the bytes for real — they are valid carrier bytes,
+         * which is exactly why the check cannot live in the codec. */
+        ASSERT(zwn_fetch_package_from_provider(&b, discovered, &a_b, &b_a,
+                                               params->pchMessageStart));
+
+        /* The refusal: the context proves other_root, B asked about
+         * asked_root, and admit says so by name. With the CORRECT
+         * expectation the same bytes verify — proving the refusal is the
+         * binding, not the bytes. */
+        ASSERT_EQ(vcs_zcode_task_context_admit(
+                      b.store, discovered, asked_root, 1002, NULL, NULL,
+                      NULL, 0, NULL, NULL),
+                  VCS_ZCODE_TASK_CONTEXT_TASK_MISMATCH);
+        ASSERT_EQ(vcs_zcode_task_context_admit(
+                      b.store, discovered, other_root, 1002, NULL, NULL,
+                      NULL, 0, NULL, NULL),
+                  VCS_ZCODE_TASK_CONTEXT_OK);
+
+        zwn_fixture_cleanup(&fixture);
+        PASS();
+    } _test_next:
+    zwn_fixture_cleanup(&fixture);
+    return failures;
+}
+
 /* The security property of the whole design. A pointer is a signed pair
  * (semantic_root, transport_root) and NOTHING in the record layer can
  * check that the attestation on the far end is about the package the key
@@ -5005,6 +5275,8 @@ int test_zcode_swarm_net(void)
     failures += zwn_t_useful_c23_redundant(params);
     failures += zwn_t_ordinary_c23_redundant(params);
     failures += zwn_t_attestation_flight(params);
+    failures += zwn_t_task_flight(params);
+    failures += zwn_t_task_hostile_pointer(params);
     failures += zwn_t_attestation_hostile_pointer(params);
     failures += zwn_t_attestation_corrupt_wire(params);
     if (failures == 0 && g_zwn_sovereign_receipt.ready)

@@ -74,15 +74,15 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 737 |
+| Registry entries (branches + leaves) | 743 |
 | Top-level roots | 12 |
-| Branches | 172 |
-| Leaves (dispatchable command paths) | 565 |
-| … `ready` (live handler in this build) | 509 |
+| Branches | 173 |
+| Leaves (dispatchable command paths) | 570 |
+| … `ready` (live handler in this build) | 514 |
 | … `compat` (metadata only, names a fallback) | 25 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 24 |
-| Leaves with `effect=mutate` | 197 |
+| Leaves with `effect=mutate` | 201 |
 | Leaves with `effect=destructive` | 4 |
 | Leaves requiring **owner** authority | 113 |
 
@@ -100,7 +100,7 @@ Per source file:
 | `config/commands/code.def` | 17 | 2 | 15 |
 | `config/commands/accounts.def` | 11 | 2 | 9 |
 | `config/commands/vault.def` | 24 | 4 | 20 |
-| `config/commands/zcode.def` | 237 | 57 | 180 |
+| `config/commands/zcode.def` | 243 | 58 | 185 |
 | `config/commands/zcode_science.def` | 25 | 7 | 18 |
 | `config/commands/metaverse.def` | 30 | 7 | 23 |
 | `config/commands/yardsale.def` | 7 | 2 | 5 |
@@ -167,7 +167,7 @@ The root order below is a wire contract, not a presentation choice.
 | `discover` | `discover` | branch | ready | Search and describe the command registry |
 | `code` | `code` | branch | ready | Hierarchical source-code navigator |
 | `vault` | `vault` | branch | ready | What this node owns, and what may act on it |
-| `zcode` | `zcode` | branch | ready | Create, verify and preserve public C23 work together |
+| `zcode` | `zcode` | branch | ready | Create, verify and preserve public C23 work |
 | `metaverse` | `metaverse` | branch | ready | Sovereign digital property: catalog, rights, receipts |
 | `yardsale` | `yardsale` | branch | ready | For-sale-by-owner signed ads, settled bilaterally |
 | `zses` | `zses` | branch | ready | Session invites |
@@ -996,13 +996,13 @@ represented by its children's sections.
 | `vault swap redeem` | ready | mutate / wallet / **owner**, plan-commit · foreground/moderate | `swap_id`, `secret`, `funding_txid`, `vout`, `confirm` | `zcl.vault_swap_settle.v1` | `z23 vault swap redeem --input='{"swap_id":"..","secret":"<64hex>"}'` | Claim a funded swap HTLC by dispatching the node's swap_redeem |
 | `vault swap refund` | ready | mutate / wallet / **owner**, plan-commit · foreground/moderate | `swap_id`, `funding_txid`, `vout`, `confirm` | `zcl.vault_swap_settle.v1` | `z23 vault swap refund --input='{"swap_id":".."}'` | Reclaim an expired swap HTLC by dispatching the node's swap_refund |
 
-### `zcode` — Create, verify and preserve public C23 work together
+### `zcode` — Create, verify and preserve public C23 work
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
-| `zcode guide` | ready | read / read / public · instant/tiny | none | `zcl.zcode_guide.v1` | `z23 zcode guide` | Tell Z23 what you want C23 to do |
+| `zcode guide` | ready | read / read / public · instant/tiny | none | `zcl.zcode_guide.v1` | `z23 zcode guide` | Tell Z23 what you want done |
 
-#### `zcode.project` — C23 projects
+#### `zcode.project` — Projects
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
@@ -1011,7 +1011,7 @@ represented by its children's sections.
 | `zcode project init commit` | ready | mutate / app-write / operator, plan-commit · fast/moderate | **`workspace`**, `name`, `semver`, `license`, **`plan_id`**, **`confirm`** | `zcl.zcode_project_init_commit.v1` | `z23-dev zcode project init commit --input='{"workspace":".","plan_id":"<plan from init plan>","confirm":true}'` | Initialize one C23 project |
 | `zcode project status` | ready | read / read / operator · fast/moderate | **`workspace`**, `name`, `semver`, `license` | `zcl.zcode_project_status.v1` | `z23-dev zcode project status --input='{"workspace":"."}'` | Show C23 project readiness |
 
-#### `zcode.work` — Proven C23 work
+#### `zcode.work` — Proven work
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
@@ -1023,9 +1023,19 @@ represented by its children's sections.
 | `zcode work show` | ready | read / read / operator · fast/low | `workspace`, `work`, `datadir`, `details` | `zcl.zcode_work_status.v1` | `z23-dev zcode work show --input='{"work":"latest"}'` | Show one human-first work result |
 | `zcode work run` | ready | mutate / app-write / operator · foreground/moderate | `workspace`, `work`, `adapter`, `datadir`, `details` | `zcl.zcode_work_run.v1` | `z23-dev zcode work run --input='{"work":"latest","adapter":"manual"}'` | Run one contained adapter handoff |
 | `zcode work accept` | ready | mutate / app-write / operator · foreground/moderate | `workspace`, `work`, `datadir`, `confirmation_identity`, `details` | `zcl.zcode_work_accept.v1` | `z23-dev zcode work accept --input='{"work":"latest"}'` | Accept one exact proven candidate |
+| `zcode work offer` | ready | mutate / app-write / operator · foreground/low | **`package_root`**, `datadir` | `zcl.zcode_work_offer.v1` | `z23 zcode work offer --input='{"package_root":"<64hex>"}'` | Make one accepted solution discoverable by its task |
+| `zcode work pull` | ready | mutate / app-write / operator · foreground/moderate | **`task_root`**, `datadir`, `maximum_records` | `zcl.zcode_work_pull.v1` | `z23 zcode work pull --input='{"task_root":"<64hex>"}'` | Fetch and verify published solutions for one task root |
 | `zcode work review` | ready | mutate / app-write / operator · foreground/moderate | `workspace`, `work`, `adapter`, **`verdict`**, **`findings`** | `zcl.zcode_work_review.v1` | `z23-dev zcode work review --input='{"work":"latest","adapter":"manual","verdict":"approve","findings":"No blocking findings."}'` | Review one exact candidate |
 
-#### `zcode.passport` — Signed C23 module Passports
+#### `zcode.task` — Posted tasks and transports
+
+| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
+|---|---|---|---|---|---|---|
+| `zcode task offer` | ready | mutate / app-write / operator · foreground/low | **`task_root`**, `datadir` | `zcl.zcode_task_offer.v1` | `z23 zcode task offer --input='{"task_root":"<64hex>"}'` | Bind one task's wires into the transport carrier |
+| `zcode task pull` | ready | mutate / app-write / operator · foreground/moderate | **`task_root`**, `datadir`, `maximum_records` | `zcl.zcode_task_pull.v1` | `z23 zcode task pull --input='{"task_root":"<64hex>"}'` | Fetch and verify posted contexts for one task root |
+| `zcode task board` | ready | read / read / operator · foreground/low | `datadir` | `zcl.zcode_task_board.v1` | `z23 zcode task board` | List task postings this node has seen |
+
+#### `zcode.passport` — Signed module passports
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
@@ -1034,7 +1044,7 @@ represented by its children's sections.
 | `zcode passport commit` | ready | read / read / public · instant/tiny | **`stable_api_root`**, **`recipe_root`**, **`toolchain_root`**, **`tests_root`**, **`license_root`**, **`semantic_fingerprint_root`**, **`workspace_lineage_root`**, **`source_assignment_root`**, **`quality_profiles_root`**, **`signer_pubkey`**, **`signature`**, `workspace`, `publication_job_root` | `zcl.zcode_passport_commit.v1` | `z23 zcode passport commit --input='<same roots, signer_pubkey, external signature>'` | Materialize an externally signed C23 module Passport |
 | `zcode passport verify` | ready | read / read / public · instant/tiny | **`passport`** | `zcl.zcode_passport_verify.v1` | `z23 zcode passport verify --passport=<lowercase-hex-wire>` | Verify one signed C23 module Passport |
 
-#### `zcode.workspace` — C23 workspace evidence
+#### `zcode.workspace` — Workspace evidence
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
@@ -1071,7 +1081,7 @@ represented by its children's sections.
 | `zcode workspace manifest plan` | ready | read / read / public · instant/tiny | **`passport`**, **`module_release_root`**, **`sequence`**, `predecessor_release_root`, **`workspace_sequence`**, `predecessor_workspace_root`, **`signer_root`**, `workspace`, `publication_job_root` | `zcl.zcode_workspace_manifest_plan.v1` | `z23 zcode workspace manifest plan --input='<verified Passport binding and signer public key>'` | Plan one externally signed workspace manifest |
 | `zcode workspace manifest commit` | ready | read / read / public · instant/tiny | **`passport`**, **`module_release_root`**, **`sequence`**, `predecessor_release_root`, **`workspace_sequence`**, `predecessor_workspace_root`, **`signer_root`**, **`signature`**, `workspace`, `publication_job_root` | `zcl.zcode_workspace_manifest_commit.v1` | `z23 zcode workspace manifest commit --input='<same plan plus external signature>'` | Verify one externally signed workspace manifest |
 
-#### `zcode.commons` — ZC23 Living Commons projection
+#### `zcode.commons` — Living Commons projection
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
@@ -1176,7 +1186,7 @@ represented by its children's sections.
 | `zcode commons impact status` | ready | read / read / public · instant/tiny | none | `zcl.zcode_commons_impact_status.v1` | `z23 zcode commons impact status` | Show whether a productivity basis is shareable |
 | `zcode commons impact share` | ready | read / read / public · instant/tiny | none | `zcl.zcode_commons_impact_share.v1` | `z23 zcode commons impact share` | Render a locally shareable productivity statement |
 
-#### `zcode.moderation` — Family Commons moderation
+#### `zcode.moderation` — Commons moderation
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
@@ -1216,7 +1226,7 @@ represented by its children's sections.
 | `zcode patronage fund plan` | ready | read / read / operator · fast/low | **`workspace`**, **`funding_hex`**, **`expected_network_genesis_root`**, **`now_unix`** | `zcl.zcode_patronage_funding.v1` | `z23 zcode patronage fund plan --input='{"workspace":"/tmp/zclassic23-zcode-scratch","funding_hex":"<hex>","expected_network_genesis_root":"<64hex>","now_unix":1}'` | Validate a fully simulated funding receipt |
 | `zcode patronage fund commit` | ready | mutate / app-write / operator, plan-commit · fast/low | **`workspace`**, **`funding_hex`**, **`expected_network_genesis_root`**, **`now_unix`** | `zcl.zcode_patronage_funding.v1` | `z23 zcode patronage fund commit --input='{...}'` | Verify and store a fully simulated funding receipt |
 
-#### `zcode.continuity` — Package continuity
+#### `zcode.continuity` — Continuity
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
@@ -1268,7 +1278,7 @@ represented by its children's sections.
 | `zcode package dev publish plan` (aliases: `zcode.publish.plan`) | ready | read / read / operator · foreground/moderate | **`workspace`**, **`datadir`**, `acceptance_datadir`, **`source_root`**, **`publisher_pubkey`**, `name`, `semver`, `license`, `reward_address`, `znam`, `task_root`, `lane_receipt_root`, `publisher_sequence`, `parent_release_root`, `package_mapping_root`, `publication_job_root` | `zcl.zcode_publish_plan.v1` | `z23 zcode publish plan --input='{"workspace":"/src/project","datadir":"/tmp/zcode-dev","source_root":"<64hex>","publisher_pubkey":"<66hex>"}'` | Prepare a PROVEN work for offline release signing |
 | `zcode package dev publish commit` (aliases: `zcode.publish`) | ready | mutate / app-write / operator · foreground/moderate | **`workspace`**, **`datadir`**, `acceptance_datadir`, **`source_root`**, **`release_hex`**, `task_root`, `lane_receipt_root`, `day`, `package_mapping_root`, `publication_job_root` | `zcl.zcode_publish_commit.v1` | `z23 zcode publish --input='{"workspace":"/src/project","datadir":"/tmp/zcode-dev","source_root":"<64hex>","release_hex":"<hex>"}'` | Publish one offline-signed PROVEN-work release |
 
-#### `zcode.package` — Locally committed packages
+#### `zcode.package` — Committed packages
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
@@ -1320,7 +1330,7 @@ represented by its children's sections.
 | `zcode reward commit` | ready | mutate / app-write / operator · foreground/moderate | **`plan_id`**, `datadir` | `zcl.zcode_reward_commit.v1` | `z23 zcode reward commit --input='{"plan_id":"<64hex>"}'` | Settle a planned batch (SIMULATED, idempotent) |
 | `zcode reward receipt` | ready | read / read / operator · fast/low | **`plan_id`**, `datadir` | `zcl.zcode_reward_receipt.v1` | `z23 zcode reward receipt --input='{"plan_id":"<64hex>"}'` | Durable receipt for a settled batch (SIMULATED) |
 
-#### `zcode.leaderboard` — Evidence rankings
+#### `zcode.leaderboard` — Rankings
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
@@ -1329,7 +1339,7 @@ represented by its children's sections.
 | `zcode leaderboard monthly` | ready | read / read / operator · fast/low | `category`, `day`, `limit`, `offset`, `breakdown`, `datadir` | `zcl.zcode_leaderboard.v1` | `z23 zcode leaderboard monthly --input='{"day":20500}'` | Monthly ZCODE Ranking (calendar month, earned score) |
 | `zcode leaderboard all` | ready | read / read / operator · fast/low | `category`, `limit`, `offset`, `breakdown`, `datadir` | `zcl.zcode_leaderboard.v1` | `z23 zcode leaderboard all --input='{}'` | All-time ZCODE Ranking (earned score) |
 
-#### `zcode.badge` — Evidence badges
+#### `zcode.badge` — Badges
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
@@ -1337,14 +1347,14 @@ represented by its children's sections.
 | `zcode badge plan` | ready | mutate / app-write / operator · foreground/moderate | **`pubkey`**, `day`, `datadir` | `zcl.zcode_badge_plan.v1` | `z23 zcode badge plan --input='{"pubkey":"<66hex>","day":20500}'` | Assemble one dedup-checked badge issuance batch (SIMULATED) |
 | `zcode badge issue` | ready | mutate / app-write / operator · foreground/moderate | **`plan_id`**, **`issuer_secret`**, `datadir` | `zcl.zcode_badge_issue.v1` | `z23 zcode badge issue --input='{"plan_id":"<64hex>","issuer_secret":"<64hex>"}'` | Issue a planned badge batch (SIMULATED, idempotent) |
 
-#### `zcode.seed` — Local seeding facts
+#### `zcode.seed` — Seeding facts
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
 | `zcode seed status` | ready | read / read / operator · fast/low | `pubkey`, `day`, `datadir` | `zcl.zcode_seed_status.v1` | `z23 zcode seed status --input='{"pubkey":"<66hex>"}'` | Local serving facts, tier, and allowances per contributor key |
 | `zcode seed ratio` | ready | read / read / operator · fast/low | `pubkey`, `datadir` | `zcl.zcode_seed_ratio.v1` | `z23 zcode seed ratio --input='{"pubkey":"<66hex>"}'` | The local verified-bytes ratio and exactly how it is computed |
 
-#### `zcode.storage` — Content-addressed storage
+#### `zcode.storage` — CAS storage
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
@@ -1366,7 +1376,7 @@ represented by its children's sections.
 | `zcode package fastobj export` | ready | mutate / app-write / operator · foreground/moderate | `datadir`, **`cache_dir`** | `zcl.zcode_package_fastobj_export.v1` | `z23 zcode package fastobj export --input='{"datadir":"/tmp/zclassic23-node","cache_dir":"/tmp/zbuild-cache"}'` | Export a compile cache into the store as one carrier |
 | `zcode package fastobj admit` | ready | mutate / app-write / operator · foreground/moderate | `datadir`, **`package_root`**, `root`, **`cache_dir`** | `zcl.zcode_package_fastobj_admit.v1` | `z23 zcode package fastobj admit --input='{"datadir":"/tmp/zclassic23-node","package_root":"<64hex>","cache_dir":"/tmp/zbuild-cache"}'` | Admit a carrier from the store into a fresh compile cache |
 
-#### `zcode.release` — Release records
+#### `zcode.release` — Releases
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
@@ -1382,7 +1392,7 @@ represented by its children's sections.
 | `zcode domain list` | ready | read / read / operator · fast/low | `datadir` | `zcl.zcode_domain_list.v1` | `z23 zcode domain list --input='{}'` | List the anchor domains stored in this datadir |
 | `zcode domain status` | ready | read / read / operator · fast/low | `domain`, `datadir` | `zcl.zcode_domain_status.v1` | `z23 zcode domain status --input='{"domain":"zcode"}'` | Show one anchor domain's stored root, leaves, and anchor |
 
-#### `zcode.proof` — Proof verification
+#### `zcode.proof` — Proof verify
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
@@ -1402,8 +1412,8 @@ represented by its children's sections.
 | `zcode network records begin` | ready | read / read / operator · fast/low | **`kind`**, **`namespace`**, `semantic_root`, `transport_root`, `include_evidence_wires` | `zcl.zcode_network_records_begin.v1` | `z23 zcode network records begin --input='{"kind":"provider","namespace":"science","transport_root":"<64hex>"}'` | Admit iterative record discovery |
 | `zcode network records poll` | ready | read / read / operator · fast/low | **`lookup_id`**, **`owner_token`** | `zcl.zcode_network_records_poll.v1` | `z23 zcode network records poll --input='{"lookup_id":"<32hex>","owner_token":"<32hex>"}'` | Poll iterative record discovery |
 | `zcode network records cancel` | ready | read / read / operator · fast/low | **`lookup_id`**, **`owner_token`** | `zcl.zcode_network_records_cancel.v1` | `z23 zcode network records cancel --input='{"lookup_id":"<32hex>","owner_token":"<32hex>"}'` | Cancel iterative record discovery |
-| `zcode network records` | ready | read / read / operator · foreground/moderate | **`kind`**, **`namespace`**, `semantic_root`, `transport_root`, `include_evidence_wires` | `zcl.zcode_network_records.v1` | `z23 zcode network records --input='{"kind":"pointer","namespace":"science.study","semantic_root":"<64hex>"}'` | Discover signed DHT records |
-| `zcode network providers` | ready | read / read / operator · foreground/moderate | **`namespace`**, **`transport_root`** | `zcl.zcode_network_providers.v1` | `z23 zcode network providers --input='{"namespace":"science","transport_root":"<64hex>"}'` | List provider hints |
+| `zcode network records` | ready | read / read / operator · foreground/moderate | **`kind`**, **`namespace`**, `semantic_root`, `transport_root`, `include_evidence_wires`, `board` | `zcl.zcode_network_records.v1` | `z23 zcode network records --input='{"kind":"pointer","namespace":"science.study","semantic_root":"<64hex>"}'` | Discover signed DHT records |
+| `zcode network providers` | ready | read / read / operator · foreground/moderate | **`namespace`**, **`transport_root`**, `board` | `zcl.zcode_network_providers.v1` | `z23 zcode network providers --input='{"namespace":"science","transport_root":"<64hex>"}'` | List provider hints |
 | `zcode network publish` | ready | mutate / app-write / operator, plan-commit · fast/low | **`mode`**, **`kind`**, **`namespace`**, `semantic_root`, **`transport_root`**, `owner_group`, **`sequence`**, **`not_before`**, **`expiry`**, `plan_token` | `zcl.zcode_network_publish.v1` | `z23 zcode network publish --input='{"mode":"plan","kind":"provider","namespace":"science","transport_root":"<64hex>","sequence":1,"not_before":1,"expiry":2}'` | Publish a signed DHT record |
 | `zcode network storage_ack` | ready | mutate / app-write / operator, plan-commit · foreground/high | **`mode`**, **`namespace`**, `semantic_root`, **`transport_root`**, `owner_group`, **`sequence`**, **`not_before`**, **`expiry`**, `plan_token` | `zcl.zcode_network_storage_ack.v1` | `z23 zcode network storage_ack --input='{"mode":"plan","namespace":"science","transport_root":"<64hex>","sequence":1,"not_before":1,"expiry":2}'` | Publish a possession-backed storage ACK |
 | `zcode network policy list` | ready | read / read / operator · fast/low | `datadir` | `zcl.zcode_network_policy_list.v1` | `z23 zcode network policy list` | Inspect local policy summary |
@@ -1418,7 +1428,7 @@ represented by its children's sections.
 | `zcode desc verify` | ready | read / read / public · fast/low | `doc`, `file`, **`pubkey`**, `now` | `zcl.zcode_desc_verify.v1` | `z23 zcode desc verify --input='{"doc":"<hex>","pubkey":"<64hex>"}'` | Check a descriptor's signature against a master key you supply |
 | `zcode desc resolve` | ready | read / read / public · fast/low | **`pubkey`**, `now`, `datadir` | `zcl.zcode_desc_resolve.v1` | `z23 zcode desc resolve --input='{"pubkey":"<64hex>"}'` | Look up an identity's current descriptor by its blinded record key |
 
-#### `zcode.endpoint` — Signed node addresses
+#### `zcode.endpoint` — Signed addresses
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|

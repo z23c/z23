@@ -79,6 +79,39 @@ size_t vcs_zcode_dht_service_record_local_query(
   return count;
 }
 
+size_t vcs_zcode_dht_service_record_local_scan(
+    const struct vcs_zcode_dht_service *service, uint64_t now_unix,
+    enum vcs_zcode_dht_record_kind kind, const char *namespace_name,
+    struct vcs_zcode_dht_record *out, size_t out_capacity,
+    size_t *seen_total_out)
+{
+  if (seen_total_out)
+    *seen_total_out = 0;
+  if (!service || !service->record_store || !namespace_name ||
+      (!out && out_capacity))
+    return 0;
+  /* The store fills `out` with the first out_capacity live records in its
+   * canonical order and reports the TOTAL live count; the sovereignty
+   * filter then compacts in place, so a blocked record costs one row
+   * slot without ever being named. Callers report both numbers so a
+   * short listing is legible (seen vs shown). */
+  size_t total = vcs_zcode_dht_record_store_scan(
+      service->record_store, kind, namespace_name, now_unix, out,
+      out_capacity);
+  size_t seen = total > out_capacity ? out_capacity : total;
+  size_t allowed = 0;
+  for (size_t i = 0; i < seen; i++)
+    if (vcs_zcode_dht_records_policy_allows(
+            service, VCS_ZCODE_SOVEREIGNTY_DISCOVER, &out[i])) {
+      if (allowed != i)
+        out[allowed] = out[i];
+      allowed++;
+    }
+  if (seen_total_out)
+    *seen_total_out = total;
+  return allowed;
+}
+
 size_t vcs_zcode_dht_service_record_local_query_page(
     const struct vcs_zcode_dht_service *service, uint64_t now_unix,
     const struct vcs_zcode_dht_record_selector *selector,

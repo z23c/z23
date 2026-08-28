@@ -77,6 +77,14 @@ config/src/boot.c 4001
 config/src/boot_index.c 851
 config/src/boot_refold_staged.c 1810
 config/src/boot_services.c 1474
+# 2026-08-28: NEW entry at current LOC (gate's recorded-last-resort). The
+# task-carrier slice's board adapter (boot_zcode_dht_record_board) pushed
+# this file from 789 to 811. The record adapters (query/board/snapshot/
+# publish plan+commit) are the natural future split seam — they need the
+# dht_lock statics, so the move is a rewrite against
+# boot_zcode_dht_service_apply, not a pure file split; deferred to a
+# dedicated refactor. Reviewed, hard no-growth ceiling.
+config/src/boot_zcode_dht.c 811
 # 2026-08-03: NEW entry at current LOC (gate's recorded-last-resort). The
 # file sat at exactly the 800 ceiling before the G2 swarm-clock slice; the
 # supervisor timer tick + all-peer drain + domain registration pushed it
