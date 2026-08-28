@@ -104,9 +104,12 @@
  *                 leaf-spec gates, not by this list. Adding a row here that
  *                 mutates CONSENSUS state (coins, chain, reducer) would be a
  *                 different thing entirely and must be refused.
- *   NODE_UTIL    Stateless helpers with no node state behind them: hex and
+ *   NODE_UTIL    Stateless/read-only platform helpers with no node state
+ *                 behind them: hex and
  *                 fixed-point codecs, `arith_uint256_get_hex`, `memory_cleanse`,
- *                 the monotonic/wall clocks, `path_check_url_arg`,
+ *                 the monotonic/wall clocks, `path_check_url_arg`, and the
+ *                 read-only positioned-file lifecycle (only open-beneath is
+ *                 path-confined),
  *                 `chain_params_select` (selects a compiled-in parameter
  *                 table; it does not change chain state), SHA3-256, Ed25519
  *                 keypair, Sapling address decode, `thread_registry_spawn`.
@@ -381,6 +384,12 @@ HOTSWAP_MODULE_IMPORT("clock_now_monotonic_ns", "NODE_UTIL")
 HOTSWAP_MODULE_IMPORT("clock_now_wall_ms", "NODE_UTIL")
 HOTSWAP_MODULE_IMPORT("memory_cleanse", "NODE_UTIL")
 HOTSWAP_MODULE_IMPORT("path_check_url_arg", "NODE_UTIL")
+HOTSWAP_MODULE_IMPORT("platform_file_metadata_read", "NODE_UTIL")
+HOTSWAP_MODULE_IMPORT("platform_positioned_file_close", "NODE_UTIL")
+HOTSWAP_MODULE_IMPORT("platform_positioned_file_init", "NODE_UTIL")
+HOTSWAP_MODULE_IMPORT("platform_positioned_file_open_beneath", "NODE_UTIL")
+HOTSWAP_MODULE_IMPORT("platform_positioned_file_read", "NODE_UTIL")
+HOTSWAP_MODULE_IMPORT("platform_positioned_file_snapshot", "NODE_UTIL")
 HOTSWAP_MODULE_IMPORT("sapling_decode_payment_address", "NODE_UTIL")
 HOTSWAP_MODULE_IMPORT("sha3_256_finalize", "NODE_UTIL")
 HOTSWAP_MODULE_IMPORT("sha3_256_init", "NODE_UTIL")

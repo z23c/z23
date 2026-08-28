@@ -268,8 +268,9 @@ the leaf has a larger response budget) is included in the activation receipt,
 so publication is itself proof of visible behavior; no second status process
 is needed.
 
-Before starting GCC, the executor consults one verified host-local artifact
-cache. Its key binds the compiler capsule, compiler command, normalized
+With a known dependency closure, the executor consults one verified host-local
+artifact cache before starting GCC. Its key binds the compiler capsule,
+compiler command, normalized
 `DEV_LIVE` flags, link flags, island owner, and the path plus SHA-256 of every
 known dependency. Checkout roots embedded in reproducibility flags normalize
 to `${WORKTREE}`; source paths in the dependency closure normalize to paths
@@ -279,10 +280,13 @@ worktree's content-addressed build directory. A corrupt or partial entry is
 removed under a per-key process lock and rebuilt. Cache hits therefore start
 zero compiler and zero linker processes; their receipts expose
 `artifact_cache_hit`, `artifact_cache_key`, `compiler_processes`, and
-`linker_processes`. The first observation of a dependency closure still fails
-closed and asks for one more save. Exact reverts and a second worktree can then
-reuse the verified artifact; the cache is acceleration only and grants no
-probe, activation, or publication authority.
+`linker_processes`. On the first observation of a dependency closure, one
+discovery compile binds the key. A verified cache hit activates immediately;
+otherwise a second compile in the same save must reproduce the exact closure
+before linking. Dependency mutation or expansion between those passes refuses
+publication. Exact reverts and another worktree reuse the verified artifact;
+the cache is acceleration only and grants no probe, activation, or publication
+authority.
 
 If an event is multi-file or outside the compiled allowlist, auto mode discards
 its publication authority and invokes the ordinary cycle in verify-only mode.
