@@ -372,6 +372,22 @@ bool platform_private_file_link_no_clobber(
   *same = false;
   if (!pf_wide(s, ws) || !pf_wide(d, wd))
     return false;
+  HANDLE source =
+      CreateFileW(ws, FILE_READ_ATTRIBUTES,
+                  FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                  OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+  BY_HANDLE_FILE_INFORMATION source_info = {0};
+  bool source_ok = source != INVALID_HANDLE_VALUE &&
+                   GetFileInformationByHandle(source, &source_info) &&
+                   (source_info.dwFileAttributes &
+                    (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0 &&
+                   source_info.dwVolumeSerialNumber == sid->volume &&
+                   (((uint64_t)source_info.nFileIndexHigh << 32) |
+                    source_info.nFileIndexLow) == sid->file;
+  if (source != INVALID_HANDLE_VALUE)
+    CloseHandle(source);
+  if (!source_ok)
+    return false;
   bool created = CreateHardLinkW(wd, ws, NULL) != 0;
   DWORD link_error = created ? ERROR_SUCCESS : GetLastError();
   if (!created && link_error != ERROR_ALREADY_EXISTS &&
@@ -390,14 +406,16 @@ bool platform_private_file_link_no_clobber(
   struct platform_private_file_identity did = {
       .volume = info.dwVolumeSerialNumber,
       .file = ((uint64_t)info.nFileIndexHigh << 32) | info.nFileIndexLow};
-  *same = ok && did.volume == sid->volume && did.file == sid->file;
-  if (created && !*same) {
+  bool identity_matches = ok && did.volume == sid->volume &&
+                          did.file == sid->file;
+  *same = !created && identity_matches;
+  if (created && !identity_matches) {
     FILE_DISPOSITION_INFO disposition = {.DeleteFile = TRUE};
     (void)SetFileInformationByHandle(h, FileDispositionInfo, &disposition,
                                      sizeof(disposition));
   }
   CloseHandle(h);
-  return *same;
+  return identity_matches;
 }
 
 bool platform_private_file_unlink_missing_ok(const char *path) {
@@ -631,16 +649,23 @@ bool platform_private_file_link_no_clobber(
     const char *s, const char *d,
     const struct platform_private_file_identity *si, bool *same) {
   *same = false;
+  struct stat source;
+  if (lstat(s, &source) || !S_ISREG(source.st_mode) ||
+      (uint64_t)source.st_dev != si->volume ||
+      (uint64_t)source.st_ino != si->file)
+    return false;
   bool created = link(s, d) == 0;
   if (!created && errno != EEXIST)
     return false;
   struct stat st;
   if (lstat(d, &st))
     return false;
-  *same = (uint64_t)st.st_dev == si->volume && (uint64_t)st.st_ino == si->file;
-  if (created && !*same)
+  bool identity_matches = (uint64_t)st.st_dev == si->volume &&
+                          (uint64_t)st.st_ino == si->file;
+  *same = !created && identity_matches;
+  if (created && !identity_matches)
     (void)unlink(d);
-  return *same;
+  return identity_matches;
 }
 bool platform_private_file_unlink_missing_ok(const char *p) {
   return unlink(p) == 0 || errno == ENOENT;
