@@ -2,6 +2,11 @@
 
 # Windows development
 
+> **Product direction:** the supported zero-install product interface is now
+> specified in [the native Windows developer journey contract](WINDOWS_DEVELOPER_JOURNEY.md).
+> The manual MSYS2 instructions below are a porting lane, not the intended new-user
+> experience and not an acceptable product dependency.
+
 Windows development has two explicit lanes. Do not mix their objects or
 vendored archives.
 
