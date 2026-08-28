@@ -1,7 +1,9 @@
 /* Focused native acceptance for UTF-8 regular-file pathname metadata. */
 #include "platform/file_metadata.h"
 
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <stdio.h>
 #include <wchar.h>
 #include <windows.h>

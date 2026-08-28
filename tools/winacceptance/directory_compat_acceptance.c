@@ -1,7 +1,9 @@
 /* Headless native acceptance for UTF-8 directory creation and enumeration. */
 #include "platform/directory_compat.h"
 
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>

@@ -1,7 +1,9 @@
 /* Headless acceptance for current-user private directory boundaries. */
 #include "platform/private_directory.h"
 
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <stdio.h>
 #include <windows.h>
 

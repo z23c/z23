@@ -9400,6 +9400,51 @@ check-windows-platform-seam:
 	@echo "══ LINT: Windows platform-seam cross-compile (mingw -fsyntax-only) ══"
 	@./tools/lint/check_windows_platform_seam.sh --self-test && ./tools/lint/check_windows_platform_seam.sh
 
+# ─────────────────────────────────────────────────────────────────────────
+# BEGIN winacceptance lane — one contiguous block, nothing above or below
+# this belongs to it.
+#
+# tools/winacceptance/ (24 programs) and tools/tests/ (2 programs) are the
+# acceptance tests for the macOS/Windows platform seam, and until this block
+# existed NOTHING built or ran any of them: no target, no test group, no CI
+# reference, and outside its own directory the string "winacceptance"
+# appeared nowhere in the tree. Twenty-six programs no compiler had ever seen
+# were standing in for the verification of the seam that is the active work.
+#
+# `winacceptance` cross-compiles all 26 for the Windows target with mingw at
+# the project's REAL API floor (ZCL_PLATFORM_CPPFLAGS, read out of this
+# Makefile by the script rather than copied into it — see
+# check-windows-platform-seam above for why a guessed floor is a false
+# green), natively compiles the portable ones, and EXECUTES only the six that
+# can genuinely run on a POSIX host. It prints those three numbers
+# separately and never sums them: a Windows binary does not run here, so for
+# twenty of the twenty-six the honest deliverable is a compile check, and it
+# is labelled as one. A program whose bucket says it runs but which exits 77
+# is graded a FAILURE, not a skip.
+#
+# `winacceptance-selftest` proves the gate can trip before you believe a
+# green: it asserts mingw REJECTS a TU using an API above the project's own
+# _WIN32_WINNT floor (the real defect this found in
+# logical_cpu_acceptance.c), accepts clean code, and grades both a failing
+# run and a 77 skip as failures.
+#
+# Wired into LINT_GATES, which takes three files as a set: the list entry
+# below, a gate_command() row in tools/lint/run_lint.sh, and a row in
+# docs/DEFENSIVE_CODING.md. check-lint-gate-wiring enforces all three
+# together, because a half-wired gate makes `make lint` exit 2 for EVERY
+# gate, not just this one.
+.PHONY: check-winacceptance winacceptance-selftest winacceptance-compile-only
+check-winacceptance:
+	@tools/scripts/winacceptance.sh
+
+winacceptance-compile-only:
+	@tools/scripts/winacceptance.sh --compile-only
+
+winacceptance-selftest:
+	@tools/scripts/winacceptance.sh --self-test
+# END winacceptance lane
+# ─────────────────────────────────────────────────────────────────────────
+
 # C23 lets a `(void)` cast suppress [[nodiscard]], so annotating
 # struct zcl_result fences off NEW silent discards but cannot excavate the
 # existing ones. This is the excavator: a shrink-only ratchet over the cast
@@ -10404,6 +10449,7 @@ LINT_GATES := \
     check-no-gnu-va-args \
     check-clang-portability \
     check-windows-platform-seam \
+    check-winacceptance \
     check-result-discard \
     check-c23-only \
     check-no-python \

@@ -2,7 +2,9 @@
  * Headless acceptance: native wallet restore refuses before mutation. */
 
 #ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 
 #include "base/log_level.h"
@@ -78,5 +80,8 @@ int main(void)
                ? 0 : 1;
 }
 #else
-int main(void) { return 0; }
+/* Not Windows: this program asserts a Windows-only refusal, so there is
+ * nothing to observe here. Exit 77 (the convention its siblings use) so a
+ * non-run can never be mistaken for a passing assertion. */
+int main(void) { return 77; }
 #endif

@@ -2,7 +2,9 @@
 #include "platform/private_file.h"
 #include "platform/positioned_file.h"
 
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>

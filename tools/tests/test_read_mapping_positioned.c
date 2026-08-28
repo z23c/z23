@@ -1,4 +1,8 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Purpose: standalone proof that a positioned_file read and a read_mapping
+ * of the same file return identical bytes at the same offsets -- the two
+ * paths must agree, since callers pick between them by platform. Writes its
+ * own fixture to argv[1]; distinct exit codes report which step failed. */
 #include "platform/positioned_file.h"
 #include "platform/read_mapping.h"
 

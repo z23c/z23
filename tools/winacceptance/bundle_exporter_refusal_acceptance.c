@@ -1,7 +1,9 @@
 /* Headless proof that Windows bundle export and retention mutate nothing. */
 #include "config/bundle_exporter.h"
 
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <stdio.h>
 #include <windows.h>
 
