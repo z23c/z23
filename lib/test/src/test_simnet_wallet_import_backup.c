@@ -629,11 +629,6 @@ static int part2_backup_restore(void)
     char srcdir[256], backupdir[256], restoredir[256];
     ib_make_dir(srcdir, sizeof(srcdir), "bksrc");
     ib_make_dir(backupdir, sizeof(backupdir), "bkdst");
-    /* wallet_backup_run_once -> wbs_ensure_backup_dir ->
-     * platform_private_directory_ensure requires exactly 0700 and refuses a
-     * wider directory rather than narrowing it. mkdir is umask-masked, so
-     * state the mode here rather than depend on the caller's umask. */
-    chmod(backupdir, 0700);
     ib_make_dir(restoredir, sizeof(restoredir), "bkrestore");
 
     char srcdb[320];

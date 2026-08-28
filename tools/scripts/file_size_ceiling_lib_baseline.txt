@@ -73,7 +73,7 @@ lib/vcs/src/package_score.c 845
 lib/vcs/src/package_reward.c 1986
 lib/vcs/src/fastobj_carrier.c 822
 lib/codeindex/src/codeindex_merkle.c 1069
-lib/vcs/src/package_badge.c 1186
+lib/vcs/src/package_badge.c 1177
 lib/vcs/src/package_badge_eligible.c 817
 lib/vcs/src/package_swarm_node.c 1840
 lib/vcs/src/package_service.c 1040

@@ -341,9 +341,10 @@ static void mv_manifest_verify_possession_impl(
                  * different facts, and reporting a planted symlink or a
                  * directory as "chunk_missing" tells an operator to
                  * re-download when what actually happened is that something
-                 * was substituted at the CAS coordinate. Same reasoning as
-                 * mv_read_file() above, which classifies its own refusal the
-                 * same way. A race here can only mislabel a refusal that
+                 * was substituted at the CAS coordinate. mv_read_file()
+                 * above answers a coarser question -- absent or invalid --
+                 * so it keeps only two of these four facts; this path needs
+                 * all four. A race here can only mislabel a refusal that
                  * stands regardless. */
                 mv_verification_gap(manifest,
                                     mv_chunk_refusal_gap(zcode_dir, path));
