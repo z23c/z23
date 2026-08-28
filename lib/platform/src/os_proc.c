@@ -378,8 +378,18 @@ bool os_proc_exe_path(char *buf, size_t n)
 
 FILE *os_proc_open_self_exe(void)
 {
+#if defined(__linux__)
+    /* Hold the RUNNING inode, which is what this function promises.
+     * Resolving the pathname first and opening that instead would
+     * reopen whatever now sits at the name -- after a deploy that
+     * replaces the file, a different binary -- and the kernel marks a
+     * replaced dentry with a " (deleted)" suffix that does not open
+     * at all. Neither is the image this process is executing. */
+    return fopen("/proc/self/exe", "rb");
+#else
     char path[4096];
     return os_proc_exe_path(path, sizeof(path)) ? fopen(path, "rb") : NULL;
+#endif
 }
 
 bool os_proc_cmdline_has_token(const char *token)
