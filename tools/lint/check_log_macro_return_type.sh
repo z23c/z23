@@ -4,6 +4,23 @@
 # The LOG_* guard macros return from the enclosing function. This gate catches
 # the return-value/type mismatches that compile but invert behavior, such as
 # LOG_ERR (return -1) inside a bool-returning function.
+#
+# Function attribution tracks braces without running the preprocessor, so a
+# conditional group is reconciled per group, not per line: valid C requires
+# every branch of one #if group to carry the same brace delta, and the
+# Windows-compat idiom
+#
+#     #if defined(_WIN32)
+#     if (!a()) {
+#     #else
+#     if (!b()) {
+#     #endif
+#
+# carries +1 in each branch and +2 on the page. Counting the page leaves a
+# phantom open brace, and every later LOG_FAIL in the file is then blamed on
+# whichever function the tracker resolved last. At #endif the group
+# contributes its common delta; branches that disagree (extern "C" guards,
+# #if 0) contribute their raw sum, which reproduces the naive line count.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -109,10 +126,48 @@ for my $file (sort @files) {
     my $in_block_comment = 0;
     my ($func_name, $ret_type, $ret_is_bool) = ('', '', 0);
 
+    # Innermost-last stack of open #if groups. A group records one delta per
+    # branch; braces seen while a group is open park in the current branch
+    # and reach $depth only at #endif, so sibling branches cannot leak into
+    # each other's count.
+    my @cond_groups;
+    my $cond_emit = sub {
+        my ($v) = @_;
+        $depth += $v;
+        # An inner group's resolved contribution is also the outer branch's
+        # contribution, so corrections propagate up the stack.
+        $cond_groups[-1]{cur} += $v if @cond_groups;
+    };
+
     for (my $i = 0; $i < @lines; $i++) {
         my $line_no = $i + 1;
         my $raw = $lines[$i];
         my $code = scrub_line($raw, \$in_block_comment);
+
+        # The directive is consumed before any braces on the same line, so
+        # they land in the branch the directive selects.
+        if ($code =~ /^\s*#\s*(ifdef|ifndef|if|elif|else|endif)\b/) {
+            my $dir = $1;
+            if ($dir eq 'endif') {
+                if (@cond_groups) {
+                    my $group = pop @cond_groups;
+                    push @{ $group->{branches} }, $group->{cur};
+                    my @deltas = @{ $group->{branches} };
+                    my ($sum, $common) = (0, $deltas[0]);
+                    $sum += $_ for @deltas;
+                    my $aligned = !grep { $_ != $common } @deltas;
+                    $cond_emit->($aligned ? $common : $sum);
+                }
+            } elsif ($dir eq 'elif' or $dir eq 'else') {
+                if (@cond_groups) {
+                    push @{ $cond_groups[-1]{branches} },
+                        $cond_groups[-1]{cur};
+                    $cond_groups[-1]{cur} = 0;
+                }
+            } else {
+                push @cond_groups, { branches => [], cur => 0 };
+            }
+        }
 
         if ($depth == 0) {
             if ($code =~ /^\s*#/) {
@@ -155,12 +210,26 @@ for my $file (sort @files) {
             }
         }
 
-        $depth += brace_delta($code);
+        my $delta = brace_delta($code);
+        if (@cond_groups) {
+            $cond_groups[-1]{cur} += $delta;
+        } else {
+            $depth += $delta;
+        }
         if ($depth <= 0) {
             $depth = 0;
             ($func_name, $ret_type, $ret_is_bool) = ('', '', 0);
             $decl = '' if $code =~ /\}/;
         }
+    }
+
+    # An unterminated #if never reached its #endif; unwind as raw sums so a
+    # malformed file counts exactly as the naive line count would have.
+    while (@cond_groups) {
+        my $group = pop @cond_groups;
+        my $sum = $group->{cur};
+        $sum += $_ for @{ $group->{branches} };
+        $cond_emit->($sum);
     }
 }
 
