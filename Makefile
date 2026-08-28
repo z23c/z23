@@ -5422,6 +5422,29 @@ $(JSONQ_BIN): tools/jsonq.c \
 check-onion-pair-watch: jsonq
 	@tools/scripts/check_onion_pair_watch.sh
 
+# ── macOS .app bundle over any tool binary ───────────────────────────────
+# The minimal launchable bundle — Contents/{MacOS/<exe>,Info.plist,PkgInfo},
+# ad-hoc signed with the timestamp server off — around an already-built tool
+# binary, reproducibly: identical binary in, byte-identical bundle out,
+# signature included. tools/lint/check_app_bundle_reproducible.sh proves the
+# reproducibility half and launches the product; this target is the wired
+# user path over tools/scripts/make_app_bundle.sh, which any other package
+# binary can use directly.
+#
+#   make app-bundle                      # build/app-bundle/Sqlq.app over build/bin/sqlq
+#   make app-bundle APP_NAME=Jsonq APP_BUNDLE_BIN=$(BIN_DIR)/jsonq
+#   ./build/app-bundle/Sqlq.app/Contents/MacOS/sqlq   # the bundled executable, signed
+#
+# APP_NAME names the .app (and derives CFBundleIdentifier); the executable
+# inside keeps the binary's own name, which is what CFBundleExecutable pins.
+APP_BUNDLE_BIN ?= $(SQLQ_BIN)
+APP_NAME ?= Sqlq
+APP_BUNDLE_OUT ?= $(BUILD_DIR)/app-bundle
+.PHONY: app-bundle
+app-bundle: $(APP_BUNDLE_BIN)
+	@mkdir -p $(APP_BUNDLE_OUT)
+	@tools/scripts/make_app_bundle.sh $(APP_BUNDLE_BIN) $(APP_NAME) $(APP_BUNDLE_OUT)
+
 # Hermetic Git-history fixtures for the mesh-source CURRENT/STALE classifier.
 # Does not access a node, production datadir, or network peer.
 .PHONY: check-fleet-source-status
@@ -9149,6 +9172,18 @@ check-standalone-tools-link:
 	@echo "→ Gate: standalone_tools_link (every tool rule still builds)"
 	@./tools/lint/check_standalone_tools_link.sh
 
+# tools/scripts/make_app_bundle.sh must be a pure function of its input: two
+# bundle runs over identical binaries into two temp dirs must be
+# byte-identical, embedded signature included (codesign embeds it in the
+# Mach-O; --timestamp=none keeps the timestamp authority out), and the
+# product must actually LAUNCH — a bundle whose signature the kernel rejects
+# is SIGKILLed, which an exit-code-only smoke test cannot distinguish from a
+# clean nonzero exit. See the gate header for the probe contract.
+check-app-bundle-reproducible:
+	@echo "→ Gate: app_bundle_reproducible (bundle is byte-identical across runs and launches)"
+	@./tools/lint/check_app_bundle_reproducible.sh --selftest
+	@./tools/lint/check_app_bundle_reproducible.sh
+
 # North Star invariant 1 (single writer per frontier), made mechanical for the
 # sealed ROM segment store: only the designated sealer/RPC/healer/writer surface
 # may call the store's WRITE API (chain_segment_seal_range /
@@ -10229,6 +10264,7 @@ LINT_GATES := \
     check-live-datadir-isolation \
     check-installed-acceptance-tools \
     check-standalone-tools-link \
+    check-app-bundle-reproducible \
     check-no-operator-paths \
     check-no-unattended-publish \
     check-tor-dial-prewarm \
