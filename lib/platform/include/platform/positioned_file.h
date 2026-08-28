@@ -31,8 +31,28 @@ struct platform_positioned_file_snapshot {
 };
 
 void platform_positioned_file_init(struct platform_positioned_file *file);
+/* Open a regular file WITHOUT following a symlink/reparse point at the final
+ * component, so a link planted at a content path cannot redirect the read.
+ * This is the right call for every datadir, market, snapshot and CAS path. */
 bool platform_positioned_file_open(struct platform_positioned_file *file,
                                    const char *utf8_path);
+/* Open the regular file a path RESOLVES to, following symlinks/reparse
+ * points. This exists for identifying an external tool the host installs
+ * behind an indirection the operator chose: on a Debian-family box
+ * /usr/bin/cc is a symlink into /etc/alternatives and /usr/bin/as is a
+ * symlink to x86_64-linux-gnu-as, so the no-follow open above refuses both
+ * with ELOOP and a toolchain identity cannot be captured at all. It restores
+ * exactly the reach realpath() gave those callers before they were bound to
+ * handles, while keeping the content hash and the stamp bound to the handle
+ * that was actually opened.
+ *
+ * ONLY for a fixed, compiled-in, trusted tool location. Never for datadir,
+ * market, or any other path an attacker can influence: following a link is
+ * precisely the property platform_positioned_file_open() refuses, and
+ * platform_positioned_file_open_beneath() is the confined form. Both still
+ * refuse a directory and any non-regular object. */
+bool platform_positioned_file_open_resolved(
+    struct platform_positioned_file *file, const char *utf8_path);
 /* Open a slash-separated relative path beneath a trusted real directory,
  * without following a symlink/reparse point at any component. */
 bool platform_positioned_file_open_beneath(

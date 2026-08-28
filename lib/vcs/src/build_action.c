@@ -137,12 +137,30 @@ static bool build_sha3_file(const char *path, uint8_t out[32],
     return true;
 }
 
+/* Resolve a TOOL path to the real file it names, and report that file's
+ * canonical path and handle-bound stamp.
+ *
+ * This must FOLLOW symlinks. Every path reaching here is a compiled-in or
+ * compiler-reported tool location, and on a Debian-family host those are
+ * links by design: /usr/bin/cc points into /etc/alternatives, and the
+ * assembler fallback /usr/bin/as points at x86_64-linux-gnu-as. This used
+ * to be realpath(), which followed them. Binding the identity to a handle
+ * swapped in platform_positioned_file_open(), whose O_NOFOLLOW refuses a
+ * symlink outright — so the very first step of a capture, resolving
+ * VCS_BUILD_COMPILER_V1, returned ELOOP and NO host with an alternatives-
+ * managed cc could capture a toolchain capsule at all.
+ *
+ * platform_positioned_file_open_resolved() restores realpath()'s reach
+ * without touching the no-follow refusal that datadir and market content
+ * depend on. The bytes hashed and the stamp compared still come from the
+ * handle this opened, so the identity stays handle-bound. */
 static bool build_resolve_file(const char *candidate, char resolved[PATH_MAX],
                                struct platform_positioned_file_snapshot *stamp)
 {
     struct platform_positioned_file file;
     platform_positioned_file_init(&file);
-    bool ok = candidate && platform_positioned_file_open(&file, candidate) &&
+    bool ok = candidate &&
+              platform_positioned_file_open_resolved(&file, candidate) &&
               platform_positioned_file_path(&file, resolved, PATH_MAX) &&
               (!stamp || platform_positioned_file_snapshot(&file, stamp));
     platform_positioned_file_close(&file);

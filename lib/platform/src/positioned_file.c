@@ -75,8 +75,12 @@ void platform_positioned_file_init(struct platform_positioned_file *file)
     if (file) file->native = (uintptr_t)INVALID_HANDLE_VALUE;
 }
 
-bool platform_positioned_file_open(struct platform_positioned_file *file,
-                                   const char *path)
+/* follow=false opens the link itself and then refuses it, which is the
+ * content-path contract; follow=true opens what it points at, which is the
+ * trusted-tool contract. See positioned_file.h for which callers may ask
+ * for which. */
+static bool positioned_open_path(struct platform_positioned_file *file,
+                                 const char *path, bool follow)
 {
     wchar_t wide[32768];
     if (!file || !positioned_wide(path, wide)) return false;
@@ -84,19 +88,35 @@ bool platform_positioned_file_open(struct platform_positioned_file *file,
     HANDLE handle = CreateFileW(
         wide, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         NULL, OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT |
-            FILE_FLAG_OVERLAPPED,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED |
+            (follow ? 0u : (DWORD)FILE_FLAG_OPEN_REPARSE_POINT),
         NULL);
     if (handle == INVALID_HANDLE_VALUE) return false;
+    /* When we followed the reparse point the handle names the TARGET, so
+     * only a directory is disqualifying; the target of a followed link is
+     * legitimately not itself a reparse point. */
+    DWORD refuse = FILE_ATTRIBUTE_DIRECTORY |
+                   (follow ? 0u : (DWORD)FILE_ATTRIBUTE_REPARSE_POINT);
     BY_HANDLE_FILE_INFORMATION info = {0};
     if (!GetFileInformationByHandle(handle, &info) ||
-        (info.dwFileAttributes &
-         (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
+        (info.dwFileAttributes & refuse) != 0) {
         CloseHandle(handle);
         return false;
     }
     file->native = (uintptr_t)handle;
     return true;
+}
+
+bool platform_positioned_file_open(struct platform_positioned_file *file,
+                                   const char *path)
+{
+    return positioned_open_path(file, path, false);
+}
+
+bool platform_positioned_file_open_resolved(
+    struct platform_positioned_file *file, const char *path)
+{
+    return positioned_open_path(file, path, true);
 }
 
 bool platform_positioned_file_open_beneath(
@@ -407,8 +427,12 @@ void platform_positioned_file_init(struct platform_positioned_file *file)
     if (file) file->native = (uintptr_t)-1;
 }
 
-bool platform_positioned_file_open(struct platform_positioned_file *file,
-                                   const char *path)
+/* follow=false keeps O_NOFOLLOW, which is the content-path contract;
+ * follow=true drops it, which is the trusted-tool contract. See
+ * positioned_file.h for which callers may ask for which. The S_ISREG
+ * refusal below is unconditional either way. */
+static bool positioned_open_path(struct platform_positioned_file *file,
+                                 const char *path, bool follow)
 {
     if (!file || !path || !path[0]) return false;
     platform_positioned_file_close(file);
@@ -418,7 +442,8 @@ bool platform_positioned_file_open(struct platform_positioned_file *file,
      * had already hung. O_NONBLOCK has no effect on a regular file, so
      * the success path is unchanged. os_binary_slots.c opens with it at
      * all three of its sites for exactly this reason. */
-    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK |
+                            (follow ? 0 : O_NOFOLLOW));
     if (fd < 0) return false;
     struct stat st;
     if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
@@ -427,6 +452,18 @@ bool platform_positioned_file_open(struct platform_positioned_file *file,
     }
     file->native = (uintptr_t)fd;
     return true;
+}
+
+bool platform_positioned_file_open(struct platform_positioned_file *file,
+                                   const char *path)
+{
+    return positioned_open_path(file, path, false);
+}
+
+bool platform_positioned_file_open_resolved(
+    struct platform_positioned_file *file, const char *path)
+{
+    return positioned_open_path(file, path, true);
 }
 
 bool platform_positioned_file_open_beneath(
