@@ -46,6 +46,10 @@
 #include "models/database.h"
 #include "models/zid_domain.h"
 #include "models/zid_identity.h"
+#if defined(_WIN32)
+#include "platform/directory_transaction.h"
+#include "platform/positioned_file.h"
+#endif
 #include "platform/time_compat.h"
 #include "support/cleanse.h"
 #include "zanc/zanc.h"
@@ -58,6 +62,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(_WIN32)
+#include <process.h>
+#endif
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -78,6 +85,40 @@ static const char *zr_datadir(const struct zcl_command_request *request)
     dd = zcl_native_command_datadir();
     return (dd && dd[0]) ? dd : NULL;
 }
+
+#if defined(_WIN32)
+static bool zr_snapshot_same(const struct platform_positioned_file_snapshot *a,
+                             const struct platform_positioned_file_snapshot *b)
+{
+    return a->size == b->size && a->volume == b->volume &&
+           a->file_low == b->file_low && a->file_high == b->file_high &&
+           a->modified_seconds == b->modified_seconds &&
+           a->modified_nanoseconds == b->modified_nanoseconds &&
+           a->changed_seconds == b->changed_seconds &&
+           a->changed_nanoseconds == b->changed_nanoseconds;
+}
+
+static bool zr_read_stable(const char *path, void *bytes, size_t cap,
+                           size_t *size_out, bool require_private)
+{
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    platform_positioned_file_init(&file);
+    bool ok = platform_positioned_file_open(&file, path) &&
+              (!require_private || platform_positioned_file_is_private(&file)) &&
+              platform_positioned_file_snapshot(&file, &before) &&
+              before.size <= cap;
+    int64_t got = ok ? platform_positioned_file_read(
+                           &file, bytes, (size_t)before.size, 0) : -1;
+    ok = ok && got >= 0 && (uint64_t)got == before.size &&
+         platform_positioned_file_snapshot(&file, &after) &&
+         zr_snapshot_same(&before, &after);
+    platform_positioned_file_close(&file);
+    if (ok && size_out)
+        *size_out = (size_t)before.size;
+    return ok;
+}
+#endif
 
 /* ── anchor domain (durable leaf set, models/zid_domain.h) ─────────── */
 
@@ -147,6 +188,16 @@ static bool zr_open_ndb(const char *datadir, struct node_db *ndb,
 static bool zr_read_seed(const char *path, uint8_t seed_out[32],
                          char *err, size_t err_size)
 {
+#if defined(_WIN32)
+    uint8_t raw[65];
+    size_t raw_size = 0;
+    if (!zr_read_stable(path, raw, sizeof(raw), &raw_size, true)) {
+        snprintf(err, err_size,
+                 "seed file must be a private, stable 64-hex file");
+        return false;
+    }
+    ssize_t n = (ssize_t)raw_size;
+#else
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
         snprintf(err, err_size, "cannot open seed file: %s", strerror(errno));
@@ -169,6 +220,7 @@ static bool zr_read_seed(const char *path, uint8_t seed_out[32],
     uint8_t raw[65]; /* 64 hex + optional one trailing newline */
     ssize_t n = read(fd, raw, sizeof(raw));
     close(fd);
+#endif
     if (n < 64) {
         snprintf(err, err_size,
                  "seed file must be exactly 64 hex chars (read %zd bytes)", n);
@@ -198,6 +250,51 @@ static bool zr_write_doc_file(const char *datadir, const char *name,
                               char *path_out, size_t path_size,
                               char *err, size_t err_size)
 {
+#if defined(_WIN32)
+    struct platform_directory_transaction root, zcode, releases;
+    struct platform_directory_child staged;
+    platform_directory_transaction_init(&root);
+    platform_directory_transaction_init(&zcode);
+    platform_directory_transaction_init(&releases);
+    platform_directory_child_init(&staged);
+    char leaf[PLATFORM_DIRECTORY_CHILD_LEAF_MAX + 1u];
+    int leaf_n = snprintf(leaf, sizeof(leaf), "%s-%s.zid", name, version);
+    int path_n = snprintf(path_out, path_size, "%s/zcode/releases/%s",
+                          datadir, leaf);
+    bool ok = leaf_n > 0 && (size_t)leaf_n < sizeof(leaf) &&
+        path_n > 0 && (size_t)path_n < path_size &&
+        platform_directory_transaction_open(&root, datadir) &&
+        platform_directory_transaction_open_child(&root, "zcode", true,
+                                                  &zcode) ==
+            PLATFORM_DIRECTORY_OK &&
+        platform_directory_transaction_open_child(&zcode, "releases", true,
+                                                  &releases) ==
+            PLATFORM_DIRECTORY_OK;
+    char staged_leaf[64];
+    int staged_n = snprintf(staged_leaf, sizeof(staged_leaf),
+                            ".release.%ld.tmp", (long)_getpid());
+    bool staged_created = false;
+    size_t len = strlen(doc_hex);
+    ok = ok && staged_n > 0 && (size_t)staged_n < sizeof(staged_leaf) &&
+        platform_directory_child_create(&releases, staged_leaf, &staged) &&
+        (staged_created = true) &&
+        platform_directory_child_write_exact(&staged, doc_hex, len, 0) &&
+        platform_directory_child_write_exact(&staged, "\n", 1, len) &&
+        platform_directory_child_flush(&staged) &&
+        platform_directory_child_replace(&releases, &staged, leaf, false) &&
+        platform_directory_transaction_flush(&releases);
+    platform_directory_child_close(&staged);
+    if (!ok && staged_created)
+        (void)platform_directory_child_unlink(&releases, staged_leaf, true);
+    platform_directory_transaction_close(&releases);
+    platform_directory_transaction_close(&zcode);
+    platform_directory_transaction_close(&root);
+    if (!ok) {
+        snprintf(err, err_size, "atomic release write failed");
+        return false;
+    }
+    return true;
+#else
     char dir[1024];
     int n = snprintf(dir, sizeof(dir), "%s/zcode", datadir);
     if (n <= 0 || (size_t)n >= sizeof(dir))
@@ -233,6 +330,7 @@ static bool zr_write_doc_file(const char *datadir, const char *name,
 too_long:
     snprintf(err, err_size, "path too long under datadir");
     return false;
+#endif
 }
 
 /* ── release batch (domain tree over the releases dir) ───────────── */
@@ -273,6 +371,109 @@ static size_t zr_batch_load(const char *datadir,
         snprintf(err, err_size, "path too long under datadir");
         return (size_t)-1;
     }
+#if defined(_WIN32)
+    struct platform_directory_transaction root, zcode, releases;
+    struct platform_directory_names names = {0};
+    platform_directory_transaction_init(&root);
+    platform_directory_transaction_init(&zcode);
+    platform_directory_transaction_init(&releases);
+    if (!platform_directory_transaction_open(&root, datadir)) {
+        snprintf(err, err_size, "unsafe datadir for release scan");
+        return (size_t)-1;
+    }
+    enum platform_directory_result opened =
+        platform_directory_transaction_open_child(&root, "zcode", false,
+                                                  &zcode);
+    if (opened == PLATFORM_DIRECTORY_MISSING) {
+        platform_directory_transaction_close(&root);
+        return 0;
+    }
+    if (opened != PLATFORM_DIRECTORY_OK) {
+        snprintf(err, err_size, "unsafe zcode directory");
+        platform_directory_transaction_close(&root);
+        return (size_t)-1;
+    }
+    opened = platform_directory_transaction_open_child(&zcode, "releases",
+                                                       false, &releases);
+    if (opened == PLATFORM_DIRECTORY_MISSING) {
+        platform_directory_transaction_close(&zcode);
+        platform_directory_transaction_close(&root);
+        return 0;
+    }
+    if (opened != PLATFORM_DIRECTORY_OK ||
+        !platform_directory_transaction_list_regular(&releases, &names)) {
+        snprintf(err, err_size, "unsafe releases directory");
+        platform_directory_transaction_close(&releases);
+        platform_directory_transaction_close(&zcode);
+        platform_directory_transaction_close(&root);
+        return (size_t)-1;
+    }
+    size_t count = 0;
+    for (size_t i = 0; i < names.count; i++) {
+        const char *fn = names.items[i];
+        size_t fl = strlen(fn);
+        if (fl < 5 || strcmp(fn + fl - 4, ".zid") != 0)
+            continue;
+        if (count == cap) {
+            snprintf(err, err_size, "more than %zu releases under %s", cap,
+                     dir);
+            count = (size_t)-1;
+            break;
+        }
+        struct platform_directory_child file;
+        struct platform_directory_child_info before, after;
+        platform_directory_child_init(&file);
+        char hex[ZID_DOC_MAX * 2 + 2];
+        bool read_ok = platform_directory_child_open(&releases, fn, &file) &&
+            platform_directory_child_info(&file, &before) &&
+            before.size > 0 && before.size < sizeof(hex) &&
+            platform_directory_child_read_exact(&file, hex,
+                                                (size_t)before.size, 0) &&
+            platform_directory_child_info(&file, &after) &&
+            before.volume == after.volume && before.file_low == after.file_low &&
+            before.file_high == after.file_high && before.size == after.size &&
+            before.modified_seconds == after.modified_seconds &&
+            before.modified_nanoseconds == after.modified_nanoseconds &&
+            before.changed_seconds == after.changed_seconds &&
+            before.changed_nanoseconds == after.changed_nanoseconds;
+        platform_directory_child_close(&file);
+        if (!read_ok) {
+            snprintf(err, err_size, "%s: empty, unstable or unreadable", fn);
+            count = (size_t)-1;
+            break;
+        }
+        size_t rn = (size_t)before.size;
+        while (rn > 0 && (hex[rn - 1] == '\n' || hex[rn - 1] == '\r' ||
+                          hex[rn - 1] == ' '))
+            rn--;
+        hex[rn] = '\0';
+        if ((rn & 1u) != 0 || !IsHex(hex)) {
+            snprintf(err, err_size, "%s: not even-length hex", fn);
+            count = (size_t)-1;
+            break;
+        }
+        uint8_t wire[ZID_DOC_MAX];
+        size_t wire_len = (size_t)ParseHex(hex, wire, sizeof(wire));
+        struct zid_doc doc;
+        struct zid_release rel;
+        if (wire_len == 0 || !zid_doc_decode(&doc, wire, wire_len) ||
+            !zid_release_decode_body(&rel, doc.body, doc.body_len)) {
+            snprintf(err, err_size, "%s: not a well-formed release doc", fn);
+            count = (size_t)-1;
+            break;
+        }
+        struct zr_batch_entry *e = &entries[count++];
+        zid_record_digest(e->digest, wire, wire_len);
+        snprintf(e->name, sizeof(e->name), "%s", rel.name);
+        snprintf(e->version, sizeof(e->version), "%s", rel.version);
+    }
+    platform_directory_names_free(&names);
+    platform_directory_transaction_close(&releases);
+    platform_directory_transaction_close(&zcode);
+    platform_directory_transaction_close(&root);
+    if (count == (size_t)-1)
+        return count;
+#else
     DIR *d = opendir(dir);
     if (!d) {
         if (errno == ENOENT)
@@ -346,6 +547,7 @@ static size_t zr_batch_load(const char *datadir,
         count++;
     }
     closedir(d);
+#endif
     qsort(entries, count, sizeof(entries[0]), zr_entry_cmp);
     return count;
 }
@@ -642,6 +844,19 @@ void zcl_native_handle_zcode_release_verify(
 
     char file_hex[ZID_DOC_MAX * 2 + 2];
     if (!doc_hex || !doc_hex[0]) {
+#if defined(_WIN32)
+        size_t file_size = 0;
+        if (!zr_read_stable(file, file_hex, sizeof(file_hex) - 1u,
+                            &file_size, false) || file_size == 0) {
+            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                                   ZCL_COMMAND_EXIT_INVALID, "DOC_UNREADABLE",
+                                   "normalize", false, false,
+                                   "doc file empty, unsafe, unstable or unreadable",
+                                   file);
+            return;
+        }
+        ssize_t n = (ssize_t)file_size;
+#else
         int fd = open(file, O_RDONLY | O_CLOEXEC);
         if (fd < 0) {
             zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
@@ -659,6 +874,7 @@ void zcl_native_handle_zcode_release_verify(
                                    "doc file empty or unreadable", file);
             return;
         }
+#endif
         while (n > 0 && (file_hex[n - 1] == '\n' || file_hex[n - 1] == '\r' ||
                          file_hex[n - 1] == ' '))
             n--;
