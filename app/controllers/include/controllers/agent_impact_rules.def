@@ -1943,28 +1943,42 @@ AGENT_IMPACT_RULE("lib/platform/src/current_identity.c|lib/platform/include/plat
  * naming it here would claim coverage that does not exist. */
 AGENT_IMPACT_RULE("lib/platform/src/positioned_io.c|lib/platform/include/platform/positioned_io.h", "consensus_state_snapshot_export make_lint_gates")
 
-/* The CRT stream-lock shim, owned by base (it moved out of platform, which the
- * log sink at the bottom of the stack cannot depend on). Header-only, with
- * exactly one call site:
- * zcl_log_emit_at() in lib/base/src/log_level.c brackets its fprintf+vfprintf
- * pair with zcl_stdio_lock/unlock. test_log_level.c captures stderr
- * around real LOG_WARN/LOG_INFO calls and asserts the emitted line starts with
- * the ISO-8601 stamp and carries the level token, so the assertion is on
- * output produced inside that bracket. POSIX arm only: the _lock_file arm is
- * observed by check-windows-platform-seam, not by a test. The pre-move path
- * stays listed so this commit's deletion of it maps too. */
+/* The CRT stream-lock shim, owned by base: it moved out of platform, which
+ * the log sink at the bottom of the stack cannot depend on. Header-only,
+ * with exactly one call site -- zcl_log_emit_at() in lib/base/src/log_level.c
+ * brackets its fprintf+vfprintf pair with zcl_stdio_lock/unlock.
+ * test_log_level.c captures stderr around real LOG_WARN/LOG_INFO calls and
+ * asserts the emitted line starts with the ISO-8601 stamp and carries the
+ * level token, so the assertion is on output produced inside that bracket.
+ * That covers the POSIX arm only. The _lock_file arm is graded by nothing:
+ * check-windows-platform-seam scopes only the .c files under lib/platform/src,
+ * and no seam translation unit includes this header, so it was cross-compiled
+ * by hand with x86_64-w64-mingw32-gcc when it moved, and otherwise rides on
+ * review. The pre-move path stays listed so this commit's deletion of it
+ * maps too. */
 AGENT_IMPACT_RULE("lib/base/include/base/stdio_lock.h|lib/platform/include/platform/stdio_compat.h", "log_level make_lint_gates")
 
-/* The UTC calendar-shape conversion, and the platform header that forwards to
- * it. This is not a clock read -- the caller supplies the instant -- so base
- * owns it: lib/base/src/log_level.c timestamps every line in the tree and is
- * the sink platform.clock itself logs through, so it cannot include platform.
- * test_log_level.c asserts the emitted line carries the ISO-8601 stamp, which
- * is produced by exactly this conversion, so `log_level` observes the POSIX
- * arm. time_compat.h's remaining helpers are thin wrappers over
- * platform/clock.h and ride that header's groups. The _WIN32 arms of both are
- * observed by check-windows-platform-seam, not by a test. */
+/* The UTC calendar-shape conversion, and the platform header that forwards
+ * to it. This is not a clock read -- the caller supplies the instant -- so
+ * base owns it: lib/base/src/log_level.c timestamps every line in the tree
+ * and is the sink platform.clock itself logs through, so it cannot include
+ * platform. test_log_level.c asserts the emitted line carries the ISO-8601
+ * stamp, produced by exactly this conversion, so `log_level` observes the
+ * POSIX arm. time_compat.h's remaining helpers are thin wrappers over
+ * platform/clock.h and ride that header's groups. The _WIN32 arms of both
+ * headers are graded by nothing, for the same reason as the shim above, and
+ * were likewise cross-compiled by hand when they moved. */
 AGENT_IMPACT_RULE("lib/base/include/base/utc_tm.h|lib/platform/include/platform/time_compat.h", "log_level time_authority sticky_conditions make_lint_gates")
+
+/* The reimport-flag storage primitive and its unit test. Both were unmapped:
+ * the group `utxo_reimport_flag` has always been registered and always run,
+ * but no rule pointed at either file, so a change to the primitive selected
+ * nothing and landed on the fail-closed path instead. test_utxo_reimport_flag.c
+ * drives utxo_reimport_flag_check_and_clear() and _set() directly and asserts
+ * the file side effect after each -- absent stays absent, '1' returns true and
+ * removes the file, '0' returns false and still removes it, set() creates it,
+ * and a NULL datadir refuses -- so the group observes the whole surface. */
+AGENT_IMPACT_RULE("lib/storage/src/utxo_reimport_flag.c|lib/storage/include/storage/utxo_reimport_flag.h|lib/test/src/test_utxo_reimport_flag.c", "utxo_reimport_flag make_lint_gates")
 
 /* The metric-alert CATALOG half, split out of prometheus_metrics.c (the
  * gauges and the firing engine stayed behind). The catalog is what
