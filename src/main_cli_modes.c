@@ -80,6 +80,7 @@
 #include "config/command_catalog.h"
 #include "kernel/command_registry.h"
 #include "base/safe_alloc.h"
+#include "platform/socket_compat.h"
 #include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -89,13 +90,18 @@
 #include <pthread.h>
 #include <time.h>
 #include <sys/stat.h>
+#if defined(_WIN32)
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
 #include <sys/socket.h>
 #include <sys/select.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#endif
 #include <errno.h>
 #include <fcntl.h>
 #include <dirent.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
 #include "config/cli_lane_defaults.h"
 #include "config/args.h"                /* print_usage (moved to args.c) */
 
@@ -348,7 +354,11 @@ static bool bench_read_proc_status(long pid, double *rss_mb, double *uptime_s)
                     }
                     tok = strtok_r(NULL, " \t\r\n", &save);
                 }
+#if defined(_WIN32)
+                long hz = 0;
+#else
                 long hz = sysconf(_SC_CLK_TCK);
+#endif
                 double up = bench_system_uptime_seconds();
                 if (start_ticks > 0 && hz > 0 && up > 0.0) {
                     double start_s = (double)start_ticks / (double)hz;
@@ -1502,12 +1512,10 @@ cli_autodiscover_datadir_for_port(int port, char *out, size_t outlen)
  * CLI — worst case this costs `timeout_ms` per candidate datadir. */
 static bool cli_probe_port_alive(int port, int timeout_ms)
 {
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0)
+    platform_socket_t sock =
+        platform_socket_open(AF_INET, SOCK_STREAM, 0, true, true);
+    if (sock == PLATFORM_SOCKET_INVALID)
         return false;
-    int flags = fcntl(sock, F_GETFL, 0);
-    if (flags >= 0)
-        fcntl(sock, F_SETFL, flags | O_NONBLOCK);
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -1519,23 +1527,16 @@ static bool cli_probe_port_alive(int port, int timeout_ms)
     int rc = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
     if (rc == 0) {
         alive = true;
-    } else if (errno == EINPROGRESS) {
-        fd_set wfds;
-        FD_ZERO(&wfds);
-        FD_SET(sock, &wfds);
-        struct timeval tv = {
-            .tv_sec = timeout_ms / 1000,
-            .tv_usec = (timeout_ms % 1000) * 1000,
-        };
-        if (select(sock + 1, NULL, &wfds, NULL, &tv) > 0) {
+    } else if (platform_socket_error_in_progress(
+                   platform_socket_last_error())) {
+        if (platform_socket_wait_writable(sock, timeout_ms) > 0) {
             int soerr = 0;
-            socklen_t elen = sizeof(soerr);
-            if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &soerr, &elen) == 0 &&
+            if (platform_socket_pending_error(sock, &soerr) == 0 &&
                 soerr == 0)
                 alive = true;
         }
     }
-    close(sock);
+    platform_socket_close(sock);
     return alive;
 }
 
@@ -1783,8 +1784,9 @@ static char *cli_rpc_call_internal_ex(const char *body, size_t body_len,
 {
     if (outcome) *outcome = CLI_RPC_OK;
 
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) {
+    platform_socket_t sock =
+        platform_socket_open(AF_INET, SOCK_STREAM, 0, true, false);
+    if (sock == PLATFORM_SOCKET_INVALID) {
         if (outcome) *outcome = CLI_RPC_OTHER_ERROR;
         return NULL;
     }
@@ -1796,12 +1798,13 @@ static char *cli_rpc_call_internal_ex(const char *body, size_t body_len,
     inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
 
     if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        int connect_errno = errno;
-        enum cli_rpc_outcome oc = (connect_errno == ECONNREFUSED)
+        int connect_errno = platform_socket_last_error();
+        enum cli_rpc_outcome oc = platform_socket_error_refused(connect_errno)
             ? CLI_RPC_CONNECT_REFUSED
-            : (connect_errno == ETIMEDOUT ? CLI_RPC_TIMEOUT
-                                          : CLI_RPC_OTHER_ERROR);
+            : (platform_socket_error_timed_out(connect_errno)
+                   ? CLI_RPC_TIMEOUT : CLI_RPC_OTHER_ERROR);
         if (outcome) *outcome = oc;
+        char socket_error[64];
         if (!quiet) {
             if (oc == CLI_RPC_CONNECT_REFUSED)
                 fprintf(stderr,
@@ -1819,9 +1822,11 @@ static char *cli_rpc_call_internal_ex(const char *body, size_t body_len,
                        "error=CONNECT_FAILED detail=cannot connect to node "
                        "at 127.0.0.1:%d (%s) try=check -rpcport and that "
                        "the node is reachable\n", cli_port,
-                       strerror(connect_errno));
+                       platform_socket_error_string(connect_errno,
+                                                    socket_error,
+                                                    sizeof(socket_error)));
         }
-        close(sock);
+        platform_socket_close(sock);
         return NULL;
     }
 
@@ -1830,8 +1835,7 @@ static char *cli_rpc_call_internal_ex(const char *body, size_t body_len,
      * — SO_RCVTIMEO turns that into a bounded CLI_RPC_TIMEOUT instead of
      * blocking a monitor script forever. */
     int timeout_sec = cli_rpc_timeout_sec();
-    struct timeval rcvtimeo = { .tv_sec = timeout_sec, .tv_usec = 0 };
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &rcvtimeo, sizeof(rcvtimeo));
+    platform_socket_set_receive_timeout(sock, timeout_sec * 1000);
 
     char auth[512];
     b64_encode(cli_cookie, strlen(cli_cookie), auth);
@@ -1851,7 +1855,7 @@ static char *cli_rpc_call_internal_ex(const char *body, size_t body_len,
     char *buf = malloc(cap);
     if (!buf) {
         if (outcome) *outcome = CLI_RPC_OTHER_ERROR;
-        close(sock);
+        platform_socket_close(sock);
         return NULL;
     }
     bool timed_out = false;
@@ -1861,7 +1865,7 @@ static char *cli_rpc_call_internal_ex(const char *body, size_t body_len,
             char *next = realloc(buf, next_cap);
             if (!next) {
                 free(buf);
-                close(sock);
+                platform_socket_close(sock);
                 if (outcome) *outcome = CLI_RPC_OTHER_ERROR;
                 return NULL;
             }
@@ -1877,7 +1881,7 @@ static char *cli_rpc_call_internal_ex(const char *body, size_t body_len,
         if (n == 0) break;
         len += (size_t)n;
     }
-    close(sock);
+    platform_socket_close(sock);
 
     if (timed_out && len == 0) {
         free(buf);

@@ -47,6 +47,7 @@ void os_proc_mem_set_override(const struct os_proc_mem *forced)
 
 /* ── Small parsing helpers ───────────────────────────────────────── */
 
+#if !defined(_WIN32)
 static void os_proc_trim_newline(char *s)
 {
     if (!s)
@@ -82,6 +83,8 @@ static int64_t os_proc_status_field_bytes(const char *path, const char *label)
     return result;
 }
 #endif
+
+#endif /* !_WIN32 */
 
 /* ── cgroup v2 dir resolution + limit reads ──────────────────────── */
 

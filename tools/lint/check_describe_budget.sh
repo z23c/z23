@@ -62,7 +62,13 @@ INCS=(
 # Build the gate binary. $1 = output path, $2 = directory holding `commands/`.
 build_tool() {
     local out="$1" def_parent="$2" log="$3"
+    # Mirror the real build's platform defines: on darwin the SDK's own
+    # headers (<sys/sysctl.h> via the arm64 feature probe in sha256.c) need
+    # _DARWIN_C_SOURCE and the st_*timespec aliases to parse at all.
     "${CC:-cc}" -std=c23 -O1 -Wall -Wextra -Werror -D_POSIX_C_SOURCE=200809L \
+        -D_DARWIN_C_SOURCE \
+        -Dst_atim=st_atimespec -Dst_mtim=st_mtimespec \
+        -Dst_ctim=st_ctimespec \
         "-I$def_parent" "${INCS[@]}" \
         -o "$out" "$TOOL_SRC" "${LINK_SRCS[@]}" 2> "$log"
 }

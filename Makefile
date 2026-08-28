@@ -19,9 +19,11 @@ endif
 ZCL_HOST_OS := $(shell uname -s 2>/dev/null)
 ZCL_HOST_WINDOWS := $(if $(filter MINGW% MSYS%,$(ZCL_HOST_OS)),1,)
 ifneq ($(ZCL_HOST_WINDOWS),)
-CC = cc
-CXX ?= c++
-ZCL_PLATFORM_CPPFLAGS = -D_WIN32_WINNT=0x0600 -DWIN32_LEAN_AND_MEAN
+CC = gcc
+CXX ?= g++
+ZCL_PLATFORM_CPPFLAGS = -D_WIN32_WINNT=0x0600 -DWIN32_LEAN_AND_MEAN \
+	-D__USE_MINGW_ANSI_STDIO=1 -include platform/directory_compat.h \
+	-include platform/fcntl_compat.h
 ZCL_LTO_FLAG = -flto=auto
 ZCL_PLATFORM_NODE_LIBS = -lws2_32 -liphlpapi -lbcrypt -luserenv \
 	-lcrypt32 -lshell32 -lole32 -luuid -lpsapi
@@ -561,6 +563,7 @@ DEV_PACKAGE_VERIFY_NODE_OBJS = $(patsubst %.c,$(DEV_OBJ_DIR)/%.o,\
 DEV_PACKAGE_VERIFY_LINK_RSP = $(DEV_OBJ_DIR)/package-verify-link-inputs.rsp
 DEV_PACKAGE_VERIFY_BIN = $(BIN_DIR)/zclassic23-package-verify-dev
 DEV_PACKAGE_VERIFY_ENSURE_STAMP = $(BUILD_DIR)/dev-package-verifier.ensure
+ZCL_DEV_PACKAGE_VERIFIER_PREREQ = $(if $(ZCL_HOST_WINDOWS),,dev-package-verifier)
 
 # pkg-config probes feed only compile/link flag expansion. The hot-swap loop
 # compiles nothing inside this parse (the fast path replays cached flags), so
@@ -3148,7 +3151,7 @@ verify-change:
 HOTSWAP_ACTION_PLAN = $(BUILD_DIR)/hotswap/fast/flags.env
 dev-bin z23-dev zclassic23-dev: $(ZCLASSIC23_DEV_BIN) $(ZCLASSIC23_DEV_BIN_ALIAS) \
 	$(DEV_RESTART_PLAN) \
-	$(HOTSWAP_ACTION_PLAN) dev-package-verifier \
+	$(HOTSWAP_ACTION_PLAN) $(ZCL_DEV_PACKAGE_VERIFIER_PREREQ) \
 	$(ZCL_ADAPTER_RUNNER_TARGET)
 
 # Temporary migration alias: build/bin/zclassic23-dev keeps resolving to

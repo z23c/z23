@@ -216,7 +216,7 @@ ZCL_SHIP_TEST_SOURCE="$source_id" \
     bash "$tmp/rollback.sh" "$tmp/old" test-run "$old_sha" 20 6 2 2 "2 4 6" >/dev/null
 grep -qx 'prior ship selection' "$dropin"
 live_pid="$(cat "$pidfile")"
-[ "$(sha256sum < "/proc/$live_pid/exe" | awk '{print $1}')" = "$old_sha" ]
+[ "$(live_exe_sha "$live_pid")" = "$old_sha" ]
 [ "$(sha256sum < "$release/z23" | awk '{print $1}')" = "$new_sha" ]
 
 # A fallback restart failure is an explicit critical result, never a success

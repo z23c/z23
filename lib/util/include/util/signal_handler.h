@@ -26,26 +26,40 @@
 
 #include <signal.h>
 
+#if defined(_WIN32)
+/* Windows console and exception handlers do not expose POSIX siginfo_t.
+ * Keep the hook ABI explicit and opaque on that platform; the native crash
+ * backend supplies exception detail through its own durable report. */
+typedef struct zcl_signal_info {
+    int code;
+    void *address;
+} zcl_signal_info_t;
+#else
+typedef siginfo_t zcl_signal_info_t;
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 typedef void (*signal_handler_crash_hook_fn)(int sig,
-                                             siginfo_t *info,
+                                             zcl_signal_info_t *info,
                                              void *ucontext,
                                              void *ctx);
 
-/* Install handlers for SIGABRT, SIGSEGV, SIGBUS, SIGFPE on an alternate
- * signal stack (so a stack-overflow SIGSEGV can still produce a backtrace),
- * and ignore SIGPIPE so socket/pipe races return EPIPE instead of terminating
- * the node. Idempotent. Returns 0 on success, -1 on sigaction/sigaltstack
- * failure. */
+/* Install fatal-process diagnostics. POSIX uses SIGABRT/SIGSEGV/SIGBUS/
+ * SIGFPE on an alternate stack and ignores SIGPIPE. Windows installs the
+ * unhandled-exception filter plus the C runtime's fatal-signal handlers;
+ * Winsock writes already report errors rather than raising SIGPIPE. Idempotent.
+ * Returns 0 on success and -1 when a required handler cannot be installed. */
 int signal_handler_install(void);
 
-/* Install the node owner's persistent SIGINT/SIGTERM callback. Embedded
+/* Install the node owner's persistent termination callback. Embedded
  * runtimes (notably Tor) may install process-wide termination handlers while
  * they initialize, so the composition root calls this once before boot and
  * once after all embedded runtimes have started to reclaim signal ownership.
+ * Windows maps console Ctrl-C/Break to SIGINT and close/logoff/shutdown events
+ * to SIGTERM through SetConsoleCtrlHandler.
  * `handler` must be non-NULL. Returns 0 on success, -1 on invalid input or
  * sigaction failure. */
 int signal_handler_install_termination(void (*handler)(int));
@@ -71,7 +85,8 @@ void signal_handler_clear_crash_hook(void);
 
 /* Shared hook entry point for other fatal handlers that own the active
  * sigaction chain, such as the event-log crash dumper. */
-void signal_handler_run_crash_hook(int sig, siginfo_t *info, void *ucontext);
+void signal_handler_run_crash_hook(int sig, zcl_signal_info_t *info,
+                                   void *ucontext);
 
 #ifdef __cplusplus
 }

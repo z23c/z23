@@ -65,3 +65,11 @@ vendor/typography/stb_truetype.h -whitespace
 # appends to. Concurrent appends are not semantically conflicting, so take the
 # union rather than stopping the merge on a textual collision at EOF.
 app/controllers/include/controllers/agent_impact_rules.def merge=union
+
+# Build and operator entry points execute in MSYS2, WSL, Linux, and macOS.
+# Pin their working-tree bytes to LF even when a Windows-wide Git installation
+# enables core.autocrlf; CRLF makes an env-based shebang resolve "bash\r" and
+# prevents source identity, lint, and bootstrap from starting at all.
+*.sh         -text
+Makefile     -text
+*.mk         -text

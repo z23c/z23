@@ -52,7 +52,13 @@ bool zcl_log_level_from_string(const char *s, enum zcl_log_level *out);
  * sequence so lines from different threads never interleave. Called only
  * by ZCL_LOG_EMIT_AT (log_macros.h) after the level gate passes — do not
  * call directly; use the LOG_* / GUARD* macros. */
+#if defined(_WIN32) && defined(__GNUC__)
+#define ZCL_PRINTF_FORMAT_KIND gnu_printf
+#else
+#define ZCL_PRINTF_FORMAT_KIND printf
+#endif
+
 void zcl_log_emit_at(enum zcl_log_level level, const char *fmt, ...)
-    __attribute__((format(printf, 2, 3)));
+    __attribute__((format(ZCL_PRINTF_FORMAT_KIND, 2, 3)));
 
 #endif /* ZCL_LOG_LEVEL_H */
