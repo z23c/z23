@@ -63,7 +63,15 @@ cd "$ROOT"
 source "$SCRIPT_DIR/lint_cache.sh"
 
 STATE_DIR="${ZCL_LINT_TIMING_DIR:-$ROOT/.cache/lint-timing}"
-GATES_DIR="$STATE_DIR/gates"
+# Per-run artifact dir, never a path two runs can share. Every run used to
+# write .log/.rc/.ms into $STATE_DIR/gates and wipe that directory at start,
+# so two `make lint` runs in one checkout stepped on each other: measured
+# 2026-08-27, three concurrent runs reported byte-identical per-gate timings
+# because each was reading the others' files. The same sharing lets one run
+# print a verdict another run produced, or cat a log body another run's worker
+# had just truncated to zero bytes. The parent picks the dir; workers inherit
+# it through ZCL_LINT_GATES_DIR_X (they are re-execs of this script).
+GATES_DIR="${ZCL_LINT_GATES_DIR_X:-$STATE_DIR/gates/run.$$}"
 JOBS="${ZCL_LINT_JOBS:-8}"
 BIN_DIR="build/bin"
 BUDGET_SEC="${ZCL_LINT_BUDGET_SEC:-75}"
@@ -431,9 +439,14 @@ main() {
         esac
     done < <("$0" --list 2>/dev/null | grep '^check-' || true)
 
+    # This run's private artifact dir, exported so every worker re-exec lands
+    # in the same one. Old run dirs are pruned by age, never by "everything
+    # that is here now" — that wipe is exactly what collided with live runs.
+    rm -rf "$GATES_DIR"
     mkdir -p "$GATES_DIR"
-    rm -f "$GATES_DIR"/*.log "$GATES_DIR"/*.ms "$GATES_DIR"/*.rc \
-          "$GATES_DIR"/*.cached "$GATES_DIR"/*.wouldhit 2>/dev/null
+    export ZCL_LINT_GATES_DIR_X="$GATES_DIR"
+    find "$STATE_DIR/gates" -maxdepth 1 -type d -name 'run.*' -mmin +120 \
+         -exec rm -rf {} + 2>/dev/null || true
 
     # Same scan-exclusion contract as the Makefile `check-%` pattern rule.
     export ZCL_LINT_PRODUCTION_SCAN=1
@@ -561,7 +574,7 @@ main() {
                 "$g" "$ms" "$(cat "$GATES_DIR/$g.rc" 2>/dev/null || echo 2)"
         done
         printf '\n  ]\n}\n'
-    } > "$STATE_DIR/last-run.json.tmp" && mv -f "$STATE_DIR/last-run.json.tmp" "$STATE_DIR/last-run.json"
+    } > "$STATE_DIR/last-run.json.$$.tmp" && mv -f "$STATE_DIR/last-run.json.$$.tmp" "$STATE_DIR/last-run.json"
 
     if [ "$wall_ms" -gt $((BUDGET_SEC * 1000)) ]; then
         echo "run_lint.sh: NOTE — wall ${wall_ms} ms exceeds the ${BUDGET_SEC}s soft budget" \
@@ -599,12 +612,35 @@ main() {
             echo "  ✗ $g" >&2
         done
         for g in "${failed[@]}"; do
-            local name="${g%% *}"
-            if [ -f "$GATES_DIR/$name.log" ]; then
-                echo "" >&2
-                echo "──── FAIL log: $name ────────────────────────────" >&2
+            local name="${g%% *}" body frc cmd
+            body="$(wc -c < "$GATES_DIR/$name.log" 2>/dev/null)"
+            [[ "$body" =~ ^[0-9]+$ ]] || body=0
+            echo "" >&2
+            echo "──── FAIL log: $name ────────────────────────────" >&2
+            if [ "$body" -gt 0 ]; then
                 cat "$GATES_DIR/$name.log" >&2
+                continue
             fi
+            # A red with no message is unactionable, and it reads like a
+            # flake — which is how a real failure gets waved through. A gate
+            # that exits non-zero having printed nothing gets its silence
+            # reported as the finding it is, with everything needed to
+            # reproduce it by hand.
+            frc="$(cat "$GATES_DIR/$name.rc" 2>/dev/null || echo '?')"
+            cmd="$(gate_command "$name" 2>/dev/null || echo '(no invocation-table entry)')"
+            echo "  (this gate produced NO output at all)" >&2
+            echo "" >&2
+            echo "  The gate exited ${frc} without printing a diagnosis, so the" >&2
+            echo "  failure is real but self-reported nothing. That is a defect in" >&2
+            echo "  the gate, on top of whatever it was failing on: a gate must say" >&2
+            echo "  why it refused. Most often it is a script under 'set -e' whose" >&2
+            echo "  checks are bare boolean assertions, dying on a missing build" >&2
+            echo "  artifact, tool, or fixture before it prints anything." >&2
+            echo "" >&2
+            echo "  Reproduce it directly (this driver captured nothing more):" >&2
+            echo "      $cmd" >&2
+            echo "  and to see the exact assertion that failed:" >&2
+            echo "      bash -x -c '$cmd'" >&2
         done
         exit 1
     fi

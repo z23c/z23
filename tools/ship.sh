@@ -175,6 +175,56 @@ ship_candidate_has_real_tor() {
 }
 
 if [ "${1:-}" = "--selftest" ]; then
+    # Everything below is a chain of bare boolean assertions under `set -e`,
+    # which prints exactly one line — and only on success. Any assertion that
+    # failed used to exit 1 having written zero bytes to stdout AND stderr, in
+    # about 30 ms. Run through `make lint` that surfaced as
+    # check-ship-remote-transaction FAILED with a completely empty log, which
+    # reads like a flake and cost three separate investigations. This trap
+    # makes the failing assertion name itself.
+    ship_selftest_src_line() {
+        sed -n "${1}p" "$0" 2>/dev/null | sed 's/^[[:space:]]*//'
+    }
+    ship_selftest_report_failure() {
+        local rc=$1 line=$2 frame src
+        printf 'ship: selftest FAILED (exit %s)\n' "$rc" >&2
+        src="$(ship_selftest_src_line "$line")"
+        printf '  failed at %s line %s: %s\n' \
+            "$0" "$line" "${src:-<source line unavailable>}" >&2
+        # Walk out of ship_glibc_satisfies/ship_valid_host/... to the assertion
+        # in the selftest chain that called it — that is the line a reader
+        # needs. Frame 0 is this reporter, so start at 1.
+        for ((frame = 1; frame < ${#FUNCNAME[@]}; frame++)); do
+            case "${FUNCNAME[frame]}" in ''|main|source) break ;; esac
+            src="$(ship_selftest_src_line "${BASH_LINENO[frame]}")"
+            printf '    called from line %s: %s\n' \
+                "${BASH_LINENO[frame]}" "${src:-<source line unavailable>}" >&2
+        done
+        printf '  Every check here is a bare boolean under `set -e`, so the lines\n' >&2
+        printf '  above are exactly what returned non-zero. Full trace:\n' >&2
+        printf '      bash -x %s --selftest\n' "$0" >&2
+        exit 1
+    }
+    # errtrace, so the trap also fires for a command that fails INSIDE one of
+    # the helper functions the assertions call. Without it bash runs the ERR
+    # trap only for top-level commands, and this selftest asserts almost
+    # entirely through functions — which is why it stayed silent.
+    set -E
+    trap 'ship_selftest_report_failure "$?" "$LINENO"' ERR
+
+    # Stated as a prerequisite rather than discovered as a mystery failure.
+    # The real-Tor candidate gate below reads the candidate's JSON with
+    # build/bin/jsonq, and the parallel `make lint` driver execs gate scripts
+    # directly, so nothing on that path builds it first. In a checkout where
+    # it has never been built, that assertion is the one that fails.
+    if [ ! -x "$REPO_ROOT/build/bin/jsonq" ]; then
+        printf 'ship: selftest CANNOT RUN — required tool is missing:\n' >&2
+        printf '  %s\n' "$REPO_ROOT/build/bin/jsonq" >&2
+        printf '  The real-Tor release-candidate gate parses candidate JSON with it.\n' >&2
+        printf '  Build it first:  make jsonq\n' >&2
+        exit 1
+    fi
+
     test_fleet=(node1 node2 node3 node4)
     test_order=""
     for test_host in "${test_fleet[@]}"; do
