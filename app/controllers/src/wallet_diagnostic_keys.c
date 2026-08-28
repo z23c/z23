@@ -50,11 +50,6 @@
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 #include <string.h>
-#include <sys/stat.h>
-#include <sys/mman.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <time.h>
 
 /* wallet-diagnostic health RPCs: read-only inspection of wallet state. */
 
