@@ -92,6 +92,18 @@ for round in $(seq 1 "$MAX_ROUNDS"); do
     if out=$("$BIN" 2>&1); then
         if [ "$changed_any" = 1 ]; then
             echo "registry: CLEAN after $((round - 1)) re-derivation(s)"
+            # This script rebuilds ONLY $BIN. Three test sources include the
+            # same config/zcode_package_registry.def and compile the row into
+            # build/bin/test_parallel, so until that is relinked the suite is
+            # still asserting the OLD root and will report a mismatch that no
+            # longer exists. That exact stale-binary reading has already been
+            # mistaken for a real regression once. Say so, every time a row
+            # actually moved.
+            echo "registry: a row MOVED -- rebuild before trusting the suite:" >&2
+            echo "           make -j\"\$(getconf _NPROCESSORS_ONLN)\" test_parallel" >&2
+            echo "         build/bin/test_parallel still embeds the old root" >&2
+            echo "         until it is relinked (test_zcode_package_registry," >&2
+            echo "         test_zcode_swarm_net, test_zcode_score_receipt)." >&2
         else
             echo "registry: CLEAN -- no drift, nothing to do"
         fi
