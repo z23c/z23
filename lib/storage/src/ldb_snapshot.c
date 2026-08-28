@@ -6,17 +6,19 @@
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
-#include <dirent.h>
-#include <errno.h>
-#include <fcntl.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#endif
 
 static void set_err(char *buf, size_t cap, const char *fmt, ...)
 {
@@ -27,6 +29,7 @@ static void set_err(char *buf, size_t cap, const char *fmt, ...)
     va_end(ap);
 }
 
+#if !defined(_WIN32)
 /* Read up to `cap-1` bytes from `path` into `buf`, NUL-terminate.
  * Returns number of bytes read (>= 0), or -1 on error. */
 static ssize_t slurp_small(const char *path, char *buf, size_t cap)
@@ -131,9 +134,16 @@ static bool name_is_ldb(const char *name)
     size_t n = strlen(name);
     return n >= 4 && strcmp(name + n - 4, ".ldb") == 0;
 }
+#endif
 
 void ldb_snapshot_destroy(const char *dst_dir)
 {
+#if defined(_WIN32)
+    /* Destruction is part of the same unqualified directory transaction as
+     * creation; refuse without inspecting or mutating the supplied path. */
+    (void)dst_dir;
+    return;
+#else
     if (!dst_dir) return;
     DIR *d = opendir(dst_dir);
     if (!d) return; /* nothing to clean */
@@ -147,6 +157,7 @@ void ldb_snapshot_destroy(const char *dst_dir)
     }
     closedir(d);
     (void)rmdir(dst_dir);
+#endif
 }
 
 bool ldb_snapshot_make(const char *src_dir,
@@ -159,6 +170,12 @@ bool ldb_snapshot_make(const char *src_dir,
         return false;
     }
 
+#if defined(_WIN32)
+    set_err(err_msg, err_sz,
+            "Windows LevelDB snapshots are disabled until retained directory "
+            "capabilities provide no-clobber copy/link and rollback");
+    return false;
+#else
     /* Verify src exists. */
     struct stat st;
     if (stat(src_dir, &st) != 0 || !S_ISDIR(st.st_mode)) {
@@ -256,4 +273,5 @@ bool ldb_snapshot_make(const char *src_dir,
     }
 
     return true;
+#endif
 }
