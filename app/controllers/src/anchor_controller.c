@@ -21,6 +21,8 @@
 #include "services/zslp_command_service.h"
 #include "jobs/reducer_frontier.h"
 #include "util/log_macros.h"
+#include "platform/file_compat.h"
+#include "platform/os_proc.h"
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -135,7 +137,7 @@ static bool hash_fd(int fd, uint8_t sha2[32], uint8_t sha3[32])
 static bool hash_file(const char *path, uint8_t sha2[32], uint8_t sha3[32])
 {
     if (!path || !path[0]) return false;
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    int fd = platform_file_open_nofollow(path, O_RDONLY, 0);
     if (fd < 0)
         LOG_RETURN(false, "zanc", "hash_file: open %s failed: %s",
                    path, strerror(errno));
@@ -144,10 +146,13 @@ static bool hash_file(const char *path, uint8_t sha2[32], uint8_t sha3[32])
     return ok;
 }
 
-/* SHA2-256 and SHA3-256 of the running executable via /proc/self/exe. */
+/* SHA2-256 and SHA3-256 of the exact running executable image. */
 static bool hash_self_exe(uint8_t sha2[32], uint8_t sha3[32])
 {
-    int fd = open("/proc/self/exe", O_RDONLY | O_CLOEXEC);
+    char path[32768];
+    if (!os_proc_exe_path(path, sizeof(path)))
+        LOG_RETURN(false, "zanc", "hash_self_exe: path unavailable");
+    int fd = platform_file_open_nofollow(path, O_RDONLY, 0);
     if (fd < 0)
         LOG_RETURN(false, "zanc", "hash_self_exe: open failed: %s",
                    strerror(errno));

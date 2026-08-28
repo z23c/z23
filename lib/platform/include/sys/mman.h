@@ -40,6 +40,11 @@
 #define MADV_SEQUENTIAL 2
 #define MADV_WILLNEED   3
 #define MADV_DONTNEED   4
+#define POSIX_MADV_NORMAL     MADV_NORMAL
+#define POSIX_MADV_RANDOM     MADV_RANDOM
+#define POSIX_MADV_SEQUENTIAL MADV_SEQUENTIAL
+#define POSIX_MADV_WILLNEED   MADV_WILLNEED
+#define POSIX_MADV_DONTNEED   MADV_DONTNEED
 
 struct platform_mmap_view {
     void *address;
@@ -200,6 +205,11 @@ static inline int madvise(void *address, size_t length, int advice)
     (void)length;
     (void)advice;
     return 0;
+}
+
+static inline int posix_madvise(void *address, size_t length, int advice)
+{
+    return madvise(address, length, advice);
 }
 
 #endif

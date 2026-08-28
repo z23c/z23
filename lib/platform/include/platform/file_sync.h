@@ -9,10 +9,25 @@
 #define ZCL_PLATFORM_FILE_SYNC_H
 
 #include <unistd.h>
+#if defined(_WIN32)
+#include <errno.h>
+#include <io.h>
+#include <windows.h>
+#endif
 
 static inline int platform_data_sync(int fd)
 {
-#if defined(__APPLE__)
+#if defined(_WIN32)
+    intptr_t handle = _get_osfhandle(fd);
+    if (handle == -1) {
+        errno = EBADF;
+        return -1;
+    }
+    if (FlushFileBuffers((HANDLE)handle))
+        return 0;
+    errno = EIO;
+    return -1;
+#elif defined(__APPLE__)
     return fsync(fd);
 #else
     return fdatasync(fd);

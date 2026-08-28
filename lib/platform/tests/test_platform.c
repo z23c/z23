@@ -3,6 +3,7 @@
 #include "platform/socket_compat.h"
 
 #include <fcntl.h>
+#include <fnmatch.h>
 #include <stdint.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -63,6 +64,7 @@ int main(void)
     const unsigned char *mapped = mmap(NULL, 3, PROT_READ, MAP_PRIVATE,
                                        first, 1);
     if (mapped == MAP_FAILED || memcmp(mapped, "23-", 3) != 0 ||
+        posix_madvise((void *)mapped, 3, POSIX_MADV_SEQUENTIAL) != 0 ||
         munmap((void *)mapped, 3) != 0) {
         close(first);
         close(second);
@@ -73,6 +75,12 @@ int main(void)
     close(second);
     if (unlink(file_path) != 0)
         return 6;
+    if (fnmatch("app/*/src/*.c", "app/models/src/block.c", FNM_PATHNAME) != 0 ||
+        fnmatch("app/*/src/*.c", "app/models/deep/src/block.c",
+                FNM_PATHNAME) == 0 ||
+        fnmatch("test_[a-c]?.c", "test_b7.c", 0) != 0 ||
+        fnmatch("*", ".hidden", FNM_PERIOD) == 0)
+        return 8;
 #if defined(_WIN32)
     if (handles_before != handles_after)
         return 3;
