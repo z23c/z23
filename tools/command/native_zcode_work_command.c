@@ -18,6 +18,10 @@
 #include "models/build_fabric.h"
 #include "models/build_proof_event.h"
 #include "models/database.h"
+#include "platform/directory_compat.h"
+#include "platform/positioned_file.h"
+#include "platform/private_directory.h"
+#include "platform/state_root.h"
 #include "platform/time_compat.h"
 #include "services/build_fabric_service.h"
 #include "services/build_fabric_worker.h"
@@ -48,10 +52,12 @@
 #include <string.h>
 #ifndef ZCL_HOTFORK_ZWORK_INPUT_CORE
 #include <limits.h>
-#include <fcntl.h>
 #include <stdlib.h>
+#if !defined(_WIN32)
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 #endif
 
 #ifndef ZCL_HOTFORK_ZWORK_INPUT_CORE
@@ -60,6 +66,22 @@
 #define ZWORK_REUSE_API_TEXT_MAX 256u
 #define ZWORK_REUSE_HEADER_BYTES_MAX (64u * 1024u)
 #define ZWORK_LOG "zcode.work"
+
+static bool zwork_task_path(char out[ZWORK_PATH_MAX], const char *task,
+                            const char *suffix)
+{
+#if defined(_WIN32)
+    char state[ZWORK_PATH_MAX];
+    int n = platform_state_root(state, sizeof(state))
+        ? snprintf(out, ZWORK_PATH_MAX, "%s/zcode-workspaces/%.64s%s",
+                   state, task, suffix ? suffix : "") : -1;
+#else
+    int n = snprintf(out, ZWORK_PATH_MAX,
+                     "/tmp/zclassic23-zcode-workspaces/%lu/%.64s%s",
+                     (unsigned long)getuid(), task, suffix ? suffix : "");
+#endif
+    return n > 0 && n < ZWORK_PATH_MAX;
+}
 
 struct zwork_patch_summary {
     struct vcs_zcode_patch_v1 patch;
@@ -114,7 +136,11 @@ static bool zwork_open_build_ledger(
     bool allow_create)
 {
     if (!ndb || !path || !path[0] || !reason || !reason[0]) return false;
-    if (access(path, F_OK) == 0)
+    struct platform_positioned_file existing;
+    platform_positioned_file_init(&existing);
+    bool present = platform_positioned_file_open(&existing, path);
+    platform_positioned_file_close(&existing);
+    if (present)
         return node_db_open_existing_runtime(ndb, path, reason);
     return allow_create && node_db_open(ndb, path);
 }
@@ -177,12 +203,13 @@ static bool zwork_bind_accepted_publication(
                               source_root, 32))
         return false;
     char candidate_path[ZWORK_PATH_MAX];
-    int n = snprintf(candidate_path, sizeof(candidate_path),
-                     "/tmp/zclassic23-zcode-workspaces/%lu/%.64s/attempt-%u",
-                     (unsigned long)getuid(), entry->task_root_hex,
+    char suffix[48];
+    int n = snprintf(suffix, sizeof(suffix), "/attempt-%u",
                      (uint32_t)entry->latest_candidate_sequence);
-    if (n <= 0 || (size_t)n >= sizeof(candidate_path) ||
-        !realpath(candidate_path, candidate_workspace))
+    if (n <= 0 || (size_t)n >= sizeof(suffix) ||
+        !zwork_task_path(candidate_path, entry->task_root_hex, suffix) ||
+        !platform_directory_canonical_real(
+            candidate_path, candidate_workspace, ZWORK_PATH_MAX))
         return false;
     vcs_devloop_publication_bind_accepted_candidate(
         workspace, candidate_workspace, accepted_root, source_root,
@@ -262,8 +289,11 @@ static bool zwork_regular_package_config(const char *workspace)
                      VCS_PACKAGE_DEPS_META_PATH);
     if (n <= 0 || (size_t)n >= sizeof(path))
         return false;
-    struct stat st;
-    return lstat(path, &st) == 0 && S_ISREG(st.st_mode);
+    struct platform_positioned_file file;
+    platform_positioned_file_init(&file);
+    bool regular = platform_positioned_file_open(&file, path);
+    platform_positioned_file_close(&file);
+    return regular;
 }
 
 static bool zwork_prepare(const char *workspace,
@@ -293,31 +323,36 @@ static bool zwork_read_bounded_regular(const char *path, size_t maximum,
         return false;
     }
     *out = NULL; *out_len = 0;
-    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (fd < 0) return false;
-    struct stat st;
-    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0 ||
-        (uint64_t)st.st_size > maximum) {
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path) ||
+        !platform_positioned_file_snapshot(&file, &before) ||
+        before.size == 0 || before.size > maximum) {
         LOG_ERROR(ZWORK_LOG, "reuse object is not one bounded regular file: %s",
                   path);
-        close(fd); return false;
+        platform_positioned_file_close(&file); return false;
     }
-    size_t len = (size_t)st.st_size;
+    size_t len = (size_t)before.size;
     uint8_t *bytes = zcl_malloc(len + 1u, "zcode.work.reuse_read");
-    if (!bytes) { close(fd); return false; }
+    if (!bytes) { platform_positioned_file_close(&file); return false; }
     size_t off = 0;
     while (off < len) {
-        ssize_t n = read(fd, bytes + off, len - off);
+        int64_t n = platform_positioned_file_read(
+            &file, bytes + off, len - off, off);
         if (n <= 0) {
             LOG_ERROR(ZWORK_LOG, "reuse object read failed: %s", path);
-            free(bytes); close(fd); return false;
+            free(bytes); platform_positioned_file_close(&file); return false;
         }
         off += (size_t)n;
     }
-    if (close(fd) != 0) {
-        LOG_ERROR(ZWORK_LOG, "reuse object close failed: %s", path);
+    if (!platform_positioned_file_snapshot(&file, &after) ||
+        !platform_positioned_file_snapshot_equal(&before, &after)) {
+        LOG_ERROR(ZWORK_LOG, "reuse object changed while read: %s", path);
+        platform_positioned_file_close(&file);
         free(bytes); return false;
     }
+    platform_positioned_file_close(&file);
     bytes[len] = 0; *out = bytes; *out_len = len; return true;
 }
 
@@ -458,14 +493,19 @@ static void zwork_reuse_installed(
     char installed[ZWORK_PATH_MAX];
     int n = snprintf(installed, sizeof(installed), "%s/installed/%s",
                      zcode_dir, entry->package_root_hex);
-    struct stat st;
     if (n <= 0 || (size_t)n >= sizeof(installed)) {
         candidate->installed_invalid = true; return;
     }
-    if (lstat(installed, &st) != 0) return;
-    if (!S_ISDIR(st.st_mode) || S_ISLNK(st.st_mode)) {
+    char installed_real[ZWORK_PATH_MAX];
+    enum platform_directory_probe_result installed_probe =
+        platform_directory_probe_real(installed);
+    if (installed_probe == PLATFORM_DIRECTORY_PROBE_MISSING) return;
+    if (installed_probe != PLATFORM_DIRECTORY_PROBE_OK ||
+        !platform_directory_canonical_real(
+            installed, installed_real, sizeof(installed_real))) {
         candidate->installed_invalid = true; return;
     }
+    (void)snprintf(installed, sizeof(installed), "%s", installed_real);
     struct package_lifecycle_step step;
     bool verified = false;
     struct zcl_result inspected = package_lifecycle_installed_inspect(
@@ -972,12 +1012,14 @@ void zcl_native_handle_zcode_work_start(
                    false, false);
         return;
     }
-    struct stat workspace_st;
-    if (lstat(workspace, &workspace_st) != 0 || !S_ISDIR(workspace_st.st_mode)) {
+    char canonical_workspace[ZWORK_PATH_MAX];
+    if (!platform_directory_canonical_real(
+            workspace, canonical_workspace, sizeof(canonical_workspace))) {
         zwork_fail(reply, "PROJECT_INSPECT_FAILED", "inspect",
                    "workspace must be a real directory", false, false);
         return;
     }
+    workspace = canonical_workspace;
     if (!zwork_regular_package_config(workspace)) {
         struct json_value next_input;
         json_init(&next_input);
@@ -1423,14 +1465,19 @@ static void zwork_proof_snapshot_read(
     char resolved_datadir[ZWORK_PATH_MAX], db_path[ZWORK_PATH_MAX];
     bool explicit_datadir = proof_datadir && proof_datadir[0];
     int n = explicit_datadir
-        ? (realpath(proof_datadir, resolved_datadir)
+        ? (platform_directory_canonical_real(
+               proof_datadir, resolved_datadir, sizeof(resolved_datadir))
             ? snprintf(db_path, sizeof(db_path), "%s/node.db",
                        resolved_datadir) : -1)
-        : snprintf(db_path, sizeof(db_path),
-                   "/tmp/zclassic23-zcode-workspaces/%lu/%.64s/zbuild/node.db",
-                   (unsigned long)getuid(), task_root);
-    if (n <= 0 || (size_t)n >= sizeof(db_path) ||
-        access(db_path, F_OK) != 0)
+        : (zwork_task_path(resolved_datadir, task_root, "/zbuild")
+            ? snprintf(db_path, sizeof(db_path), "%s/node.db",
+                       resolved_datadir) : -1);
+    struct platform_positioned_file db_file;
+    platform_positioned_file_init(&db_file);
+    bool db_present = n > 0 && (size_t)n < sizeof(db_path) &&
+        platform_positioned_file_open(&db_file, db_path);
+    platform_positioned_file_close(&db_file);
+    if (!db_present)
         return;
     struct node_db local_ndb = {0};
     struct node_db *ndb = zwork_runtime_ledger(db_path);
@@ -1679,9 +1726,13 @@ void zcl_native_handle_zcode_work_status(
     bool continuation_ready =
         (!can_resume_candidate && !can_present_confirmation &&
          !can_resume_publication) ||
-        (realpath(workspace, continuation_workspace) != NULL &&
+        (platform_directory_canonical_real(
+             workspace, continuation_workspace,
+             sizeof(continuation_workspace)) &&
          (!proof_datadir || !proof_datadir[0] ||
-          realpath(proof_datadir, continuation_datadir) != NULL));
+          platform_directory_canonical_real(
+              proof_datadir, continuation_datadir,
+              sizeof(continuation_datadir))));
     char remaining_risks[256];
     if (entry->expired)
         (void)snprintf(remaining_risks, sizeof(remaining_risks),
@@ -2183,7 +2234,8 @@ void zcl_native_handle_zcode_work_review(
         return;
     }
     char workspace[ZWORK_PATH_MAX];
-    if (!realpath(workspace_arg, workspace)) {
+    if (!platform_directory_canonical_real(
+            workspace_arg, workspace, sizeof(workspace))) {
         zwork_fail(reply, "BAD_WORKSPACE", "resolve",
                    "workspace must resolve to an existing directory",
                    false, false);
@@ -2206,9 +2258,8 @@ void zcl_native_handle_zcode_work_review(
         return;
     }
     char datadir[ZWORK_PATH_MAX], reviewer_dir[ZWORK_PATH_MAX], db_path[ZWORK_PATH_MAX];
-    int dn = snprintf(datadir, sizeof(datadir),
-                      "/tmp/zclassic23-zcode-workspaces/%lu/%.64s/zbuild",
-                      (unsigned long)getuid(), entry->task_root_hex);
+    int dn = zwork_task_path(datadir, entry->task_root_hex, "/zbuild")
+        ? (int)strlen(datadir) : -1;
     int rn = snprintf(reviewer_dir, sizeof(reviewer_dir), "%s/reviewer", datadir);
     int bn = snprintf(db_path, sizeof(db_path), "%s/node.db", datadir);
     struct node_db ndb = {0};
@@ -2231,7 +2282,11 @@ void zcl_native_handle_zcode_work_review(
         &ndb, workspace, entry->latest_action_root_hex, now, &before).ok &&
         before.valid_receipts > 0 && before.review_receipts == 0;
     if (ready) failed_stage = "reviewer_directory";
+#if defined(_WIN32)
+    ready = ready && platform_private_directory_ensure(reviewer_dir);
+#else
     ready = ready && zcl_mkdir_p(reviewer_dir, 0700).ok;
+#endif
     if (ready) failed_stage = "reviewer_identity";
     ready = ready && build_fabric_worker_identity_load(
         reviewer_dir, &reviewer, secret, pubkey).ok;
@@ -2342,7 +2397,8 @@ void zcl_native_handle_zcode_work_accept(
         return;
     if (!workspace_arg || !workspace_arg[0]) workspace_arg = ".";
     char workspace[ZWORK_PATH_MAX];
-    if (!realpath(workspace_arg, workspace)) {
+    if (!platform_directory_canonical_real(
+            workspace_arg, workspace, sizeof(workspace))) {
         zwork_fail(reply, "BAD_WORKSPACE", "resolve",
                    "workspace must resolve to an existing directory",
                    false, false);
@@ -2369,10 +2425,11 @@ void zcl_native_handle_zcode_work_accept(
     }
     char datadir[ZWORK_PATH_MAX];
     int n = proof_datadir && proof_datadir[0]
-        ? (realpath(proof_datadir, datadir) ? (int)strlen(datadir) : -1)
-        : snprintf(datadir, sizeof(datadir),
-                   "/tmp/zclassic23-zcode-workspaces/%lu/%.64s/zbuild",
-                   (unsigned long)getuid(), entry->task_root_hex);
+        ? (platform_directory_canonical_real(
+               proof_datadir, datadir, sizeof(datadir))
+            ? (int)strlen(datadir) : -1)
+        : (zwork_task_path(datadir, entry->task_root_hex, "/zbuild")
+            ? (int)strlen(datadir) : -1);
     if (n <= 0 || (size_t)n >= sizeof(datadir)) {
         zwork_fail(reply, "ACCEPT_PATH_FAILED", "resolve",
                    proof_datadir && proof_datadir[0]

@@ -9,6 +9,10 @@
 #include "config/runtime.h"
 #include "json/json.h"
 #include "platform/os_proc.h"
+#include "platform/directory_compat.h"
+#include "platform/directory_transaction.h"
+#include "platform/file_metadata.h"
+#include "platform/positioned_file.h"
 #include "platform/time_compat.h"
 #include "models/build_proof_event.h"
 #include "models/database.h"
@@ -37,6 +41,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(_WIN32)
+#include <process.h>
+#endif
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -55,6 +62,41 @@ struct run_dependency_candidate {
     char api_text[VCS_PACKAGE_REUSE_MAX_APIS][ZWORK_DEPENDENCY_API_MAX];
     struct vcs_package_build_receipt receipt;
 };
+
+#if defined(_WIN32)
+static bool run_snapshot_equal(
+    const struct platform_positioned_file_snapshot *a,
+    const struct platform_positioned_file_snapshot *b)
+{
+    return a->size == b->size && a->volume == b->volume &&
+        a->file_low == b->file_low && a->file_high == b->file_high &&
+        a->modified_seconds == b->modified_seconds &&
+        a->modified_nanoseconds == b->modified_nanoseconds &&
+        a->changed_seconds == b->changed_seconds &&
+        a->changed_nanoseconds == b->changed_nanoseconds;
+}
+
+static bool run_stable_read(const char *path, void *bytes, size_t cap,
+                            size_t *len_out, bool current_user_only)
+{
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    platform_positioned_file_init(&file);
+    bool ok = platform_positioned_file_open(&file, path) &&
+        (!current_user_only ||
+         platform_positioned_file_is_current_user_only(&file)) &&
+        platform_positioned_file_snapshot(&file, &before) &&
+        before.size <= cap;
+    int64_t got = ok ? platform_positioned_file_read(
+                           &file, bytes, (size_t)before.size, 0) : -1;
+    ok = ok && got >= 0 && (uint64_t)got == before.size &&
+        platform_positioned_file_snapshot(&file, &after) &&
+        run_snapshot_equal(&before, &after);
+    platform_positioned_file_close(&file);
+    if (ok && len_out) *len_out = (size_t)before.size;
+    return ok;
+}
+#endif
 
 static const char *run_str(const struct json_value *input, const char *key)
 {
@@ -171,13 +213,33 @@ static bool run_codex_runner_path(char out[ZWORK_RUN_PATH_MAX])
     if (!os_proc_exe_path(executable, sizeof(executable)))
         return false;
     char *slash = strrchr(executable, '/');
+#if defined(_WIN32)
+    char *backslash = strrchr(executable, '\\');
+    if (!slash || (backslash && backslash > slash)) slash = backslash;
+#endif
     if (!slash)
         return false;
     *slash = '\0';
     int n = snprintf(out, ZWORK_RUN_PATH_MAX,
-                     "%s/zclassic23-zcode-adapter-runner", executable);
-    return n > 0 && (size_t)n < ZWORK_RUN_PATH_MAX &&
-           access(out, X_OK) == 0;
+                     "%s/zclassic23-zcode-adapter-runner%s", executable,
+#if defined(_WIN32)
+                     ".exe"
+#else
+                     ""
+#endif
+    );
+#if defined(_WIN32)
+    struct platform_positioned_file runner;
+    platform_positioned_file_init(&runner);
+    bool ok = n > 0 && (size_t)n < ZWORK_RUN_PATH_MAX &&
+        platform_positioned_file_open(&runner, out) &&
+        platform_positioned_file_is_executable(&runner) &&
+        platform_positioned_file_is_current_user_only(&runner);
+    platform_positioned_file_close(&runner);
+    return ok;
+#else
+    return n > 0 && (size_t)n < ZWORK_RUN_PATH_MAX && access(out, X_OK) == 0;
+#endif
 }
 
 static bool run_packet_path(const char *candidate_workspace,
@@ -204,6 +266,30 @@ static bool run_write_packet(const char *candidate_workspace,
         free(wire);
         return false;
     }
+#if defined(_WIN32)
+    struct platform_directory_transaction directory;
+    struct platform_directory_child staged;
+    platform_directory_transaction_init(&directory);
+    platform_directory_child_init(&staged);
+    char staged_leaf[64];
+    int staged_n = snprintf(staged_leaf, sizeof(staged_leaf),
+                            ".adapter-packet.%ld.tmp", (long)_getpid());
+    bool staged_created = false;
+    bool ok = platform_directory_transaction_open(&directory,
+                                                   candidate_workspace) &&
+        staged_n > 0 && (size_t)staged_n < sizeof(staged_leaf) &&
+        platform_directory_child_create(&directory, staged_leaf, &staged) &&
+        (staged_created = true) &&
+        platform_directory_child_write_exact(&staged, wire, len, 0) &&
+        platform_directory_child_flush(&staged) &&
+        platform_directory_child_replace(&directory, &staged,
+                                         ".zcode-adapter-packet.json", true) &&
+        platform_directory_transaction_flush(&directory);
+    platform_directory_child_close(&staged);
+    if (!ok && staged_created)
+        (void)platform_directory_child_unlink(&directory, staged_leaf, true);
+    platform_directory_transaction_close(&directory);
+#else
     int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
                   0600);
     bool ok = fd >= 0;
@@ -223,6 +309,7 @@ static bool run_write_packet(const char *candidate_workspace,
         ok = false;
     if (!ok)
         (void)unlink(path);
+#endif
     free(wire);
     return ok;
 }
@@ -238,6 +325,24 @@ static int run_read_packet(const char *candidate_workspace,
     *len_out = 0;
     char path[ZWORK_RUN_PATH_MAX];
     if (!run_packet_path(candidate_workspace, path)) return -1;
+#if defined(_WIN32)
+    char *wire = zcl_malloc(ZWORK_ADAPTER_PACKET_MAX + 1u,
+                            "zcode.work.repair.packet");
+    if (!wire) return -1;
+    size_t len = 0;
+    if (!run_stable_read(path, wire, ZWORK_ADAPTER_PACKET_MAX, &len, true)) {
+        free(wire);
+        struct platform_file_metadata metadata;
+        return platform_file_metadata_read(path, &metadata) ==
+                       PLATFORM_FILE_METADATA_MISSING
+                   ? 0 : -1;
+    }
+    if (len == 0) { free(wire); return -1; }
+    wire[len] = '\0';
+    *wire_out = wire;
+    *len_out = len;
+    return 1;
+#else
     struct stat before;
     if (lstat(path, &before) != 0)
         return errno == ENOENT ? 0 : -1;
@@ -272,6 +377,7 @@ static int run_read_packet(const char *candidate_workspace,
     *wire_out = wire;
     *len_out = len;
     return 1;
+#endif
 }
 
 static bool run_repair_packet_valid(const struct json_value *packet,
@@ -303,8 +409,19 @@ static bool run_repair_packet_valid(const struct json_value *packet,
 static void run_adapter_cleanup(const char *candidate_workspace,
                                 const char *packet_path)
 {
+#if defined(_WIN32)
+    (void)packet_path;
+    struct platform_directory_transaction directory;
+    platform_directory_transaction_init(&directory);
+    if (platform_directory_transaction_open(&directory, candidate_workspace)) {
+        (void)platform_directory_child_unlink(
+            &directory, ".zcode-adapter-packet.json", true);
+        platform_directory_transaction_close(&directory);
+    }
+#else
     if (packet_path && packet_path[0])
         (void)unlink(packet_path);
+#endif
     char path[ZWORK_RUN_PATH_MAX];
     int n = snprintf(path, sizeof(path), "%s/.zcode-adapter-home",
                      candidate_workspace);
@@ -557,6 +674,13 @@ static bool run_read_dependency_header(
     int n = snprintf(path, sizeof(path), "%s/zcode/installed/%s/%s",
                      datadir, root_hex, output->path);
     if (n <= 0 || (size_t)n >= sizeof(path)) return false;
+#if defined(_WIN32)
+    uint8_t *bytes = zcl_malloc((size_t)output->bytes + 1u,
+                                "zcode.work.locked_header");
+    size_t off = 0;
+    bool ok = bytes && run_stable_read(path, bytes, (size_t)output->bytes,
+                                       &off, true) && off == output->bytes;
+#else
     int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) return false;
     struct stat st;
@@ -575,6 +699,7 @@ static bool run_read_dependency_header(
         else off += (size_t)got;
     }
     if (close(fd) != 0) ok = false;
+#endif
     uint8_t check[32];
     if (ok) {
         sha3_256(bytes, off, check);
@@ -796,6 +921,14 @@ static bool run_candidate_metadata_read(
     int n = snprintf(path, sizeof(path), "%s/%s", candidate_workspace,
                      VCS_PACKAGE_DEPS_META_PATH);
     if (n <= 0 || (size_t)n >= sizeof(path)) return false;
+#if defined(_WIN32)
+    char *wire = zcl_malloc(VCS_PACKAGE_DEPS_META_MAX_BYTES + 1u,
+                            "zcode.work.candidate_metadata");
+    size_t len = 0;
+    bool ok = wire && run_stable_read(path, wire,
+                                      VCS_PACKAGE_DEPS_META_MAX_BYTES,
+                                      &len, true) && len > 0;
+#else
     int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) return false;
     struct stat st;
@@ -813,6 +946,7 @@ static bool run_candidate_metadata_read(
         else off += (size_t)got;
     }
     if (close(fd) != 0) ok = false;
+#endif
     if (ok) {
         wire[len] = '\0';
         json_init(document);
@@ -837,6 +971,29 @@ static bool run_candidate_metadata_write(
     bool valid = vcs_package_deps_parse_meta(
         (const uint8_t *)wire, len, &checked, NULL, 0) ==
         VCS_PACKAGE_DEPS_OK;
+#if defined(_WIN32)
+    struct platform_directory_transaction directory;
+    struct platform_directory_child staged;
+    platform_directory_transaction_init(&directory);
+    platform_directory_child_init(&staged);
+    char temporary[64];
+    int tn = snprintf(temporary, sizeof(temporary),
+                      ".zcode-package.compose.%ld.tmp", (long)_getpid());
+    bool staged_created = false;
+    bool ok = valid && tn > 0 && (size_t)tn < sizeof(temporary) &&
+        platform_directory_transaction_open(&directory, candidate_workspace) &&
+        platform_directory_child_create(&directory, temporary, &staged) &&
+        (staged_created = true) &&
+        platform_directory_child_write_exact(&staged, wire, len, 0) &&
+        platform_directory_child_flush(&staged) &&
+        platform_directory_child_replace(&directory, &staged,
+                                         VCS_PACKAGE_DEPS_META_PATH, false) &&
+        platform_directory_transaction_flush(&directory);
+    platform_directory_child_close(&staged);
+    if (!ok && staged_created)
+        (void)platform_directory_child_unlink(&directory, temporary, true);
+    platform_directory_transaction_close(&directory);
+#else
     char path[ZWORK_RUN_PATH_MAX] = {0};
     char temporary[ZWORK_RUN_PATH_MAX] = {0};
     int pn = snprintf(path, sizeof(path), "%s/%s", candidate_workspace,
@@ -865,6 +1022,7 @@ static bool run_candidate_metadata_write(
         if (dir_fd >= 0 && close(dir_fd) != 0) ok = false;
     }
     if (!ok && temporary[0]) (void)unlink(temporary);
+#endif
     free(wire);
     return ok;
 }
@@ -967,6 +1125,14 @@ static bool run_candidate_workspace(const char *store,
                                     const uint8_t source_root[32], char out[4400],
                                     bool *created)
 {
+#if defined(_WIN32)
+    (void)store; (void)task; (void)task_hex; (void)attempt;
+    (void)source_root; (void)out;
+    if (created) *created = false;
+    /* Materializing executable package workspaces is disabled until the
+     * restricted-token/Job-Object sandbox is qualified. */
+    return false;
+#else
     char parent[ZWORK_RUN_PATH_MAX];
     int n = snprintf(parent, sizeof(parent),
                      "/tmp/zclassic23-zcode-workspaces/%lu/%.64s",
@@ -989,6 +1155,7 @@ static bool run_candidate_workspace(const char *store,
     struct stat st;
     *created = false;
     return errno == EEXIST && lstat(out, &st) == 0 && S_ISDIR(st.st_mode);
+#endif
 }
 
 static bool run_packet(struct json_value *packet, const char *goal,
@@ -1664,24 +1831,51 @@ static bool run_preflight_runner_path(char out[ZWORK_RUN_PATH_MAX])
     char executable[ZWORK_RUN_PATH_MAX];
     if (!os_proc_exe_path(executable, sizeof(executable))) return false;
     char *slash = strrchr(executable, '/');
+#if defined(_WIN32)
+    char *backslash = strrchr(executable, '\\');
+    if (!slash || (backslash && backslash > slash)) slash = backslash;
+#endif
     if (!slash) return false;
     *slash = '\0';
     int n = snprintf(out, ZWORK_RUN_PATH_MAX,
-                     "%s/zclassic23-zcode-adapter-runner", executable);
+                     "%s/zclassic23-zcode-adapter-runner%s", executable,
+#if defined(_WIN32)
+                     ".exe"
+#else
+                     ""
+#endif
+    );
+#if defined(_WIN32)
+    struct platform_positioned_file runner;
+    platform_positioned_file_init(&runner);
+    bool ok = n > 0 && (size_t)n < ZWORK_RUN_PATH_MAX &&
+        platform_positioned_file_open(&runner, out) &&
+        platform_positioned_file_is_executable(&runner) &&
+        platform_positioned_file_is_current_user_only(&runner);
+    platform_positioned_file_close(&runner);
+    return ok;
+#else
     struct stat st;
     return n > 0 && (size_t)n < ZWORK_RUN_PATH_MAX &&
         lstat(out, &st) == 0 && S_ISREG(st.st_mode) &&
         st.st_uid == getuid() && (st.st_mode & 0100u) != 0 &&
         (st.st_mode & 0022u) == 0;
+#endif
 }
 
 static bool run_preflight_invoke(const char *runner, const char *verb,
                                  char output[ZWORK_PREFLIGHT_OUTPUT_MAX])
 {
+#if defined(_WIN32)
+    (void)runner; (void)verb;
+    memset(output, 0, ZWORK_PREFLIGHT_OUTPUT_MAX);
+    return false;
+#else
     const char *const argv[] = { runner, verb, NULL };
     memset(output, 0, ZWORK_PREFLIGHT_OUTPUT_MAX);
     return zcl_spawn_capture(argv, output, ZWORK_PREFLIGHT_OUTPUT_MAX,
                              30000) == 0;
+#endif
 }
 
 static bool run_preflight_runner_identity(const char *runner)
@@ -1731,6 +1925,10 @@ static bool run_preflight_credential(void)
 
 static bool run_preflight_sandbox(const char *runner)
 {
+#if defined(_WIN32)
+    (void)runner;
+    return false;
+#else
     char root[] = "/tmp/z23-adapter-preflight.XXXXXX";
     if (!mkdtemp(root)) return false;
     struct json_value packet;
@@ -1754,6 +1952,7 @@ static bool run_preflight_sandbox(const char *runner)
     json_free(&response);
     struct zcl_result removed = zcl_tree_remove(root);
     return started && removed.ok;
+#endif
 }
 
 static bool run_preflight_packet(
@@ -1765,12 +1964,15 @@ static bool run_preflight_packet(
     const char *datadir_arg = run_str(request->input, "datadir");
     if (!workspace_arg || !workspace_arg[0]) workspace_arg = ".";
     char workspace[ZWORK_RUN_PATH_MAX], datadir[ZWORK_RUN_PATH_MAX] = {0};
-    if (!realpath(workspace_arg, workspace)) {
+    if (!platform_directory_canonical_real(workspace_arg, workspace,
+                                           sizeof(workspace))) {
         (void)snprintf(detail, 256,
                        "workspace must resolve to an existing directory");
         return false;
     }
-    if (datadir_arg && datadir_arg[0] && !realpath(datadir_arg, datadir)) {
+    if (datadir_arg && datadir_arg[0] &&
+        !platform_directory_canonical_real(datadir_arg, datadir,
+                                           sizeof(datadir))) {
         (void)snprintf(detail, 256,
                        "datadir must resolve to an existing node directory");
         return false;
@@ -1922,6 +2124,14 @@ void zcl_native_handle_zcode_work_run(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
     if (!request || !reply) return;
+#if defined(_WIN32)
+    run_fail(reply, "PACKAGE_EXECUTION_UNSUPPORTED", "sandbox",
+             "package execution is disabled on Windows until restricted "
+             "tokens, Job Objects, low-integrity isolation, resource limits, "
+             "and network denial pass adversarial qualification",
+             false, false);
+    return;
+#endif
     int64_t feedback_started_us = platform_time_monotonic_us();
     const char *workspace_arg = run_str(request->input, "workspace");
     const char *work = run_str(request->input, "work");
@@ -1950,7 +2160,8 @@ void zcl_native_handle_zcode_work_run(
         return;
     }
     char workspace[ZWORK_RUN_PATH_MAX];
-    if (!realpath(workspace_arg, workspace)) {
+    if (!platform_directory_canonical_real(workspace_arg, workspace,
+                                           sizeof(workspace))) {
         run_fail(reply, "BAD_WORKSPACE", "resolve",
                  "workspace must resolve to an existing directory", false,
                  false);
@@ -1958,7 +2169,8 @@ void zcl_native_handle_zcode_work_run(
     }
     char proof_datadir[ZWORK_RUN_PATH_MAX] = {0};
     if (proof_datadir_arg && proof_datadir_arg[0] &&
-        !realpath(proof_datadir_arg, proof_datadir)) {
+        !platform_directory_canonical_real(proof_datadir_arg, proof_datadir,
+                                           sizeof(proof_datadir))) {
         run_fail(reply, "BAD_DATADIR", "resolve",
                  "datadir must resolve to an existing full-node data directory",
                  false, false);
