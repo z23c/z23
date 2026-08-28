@@ -9,13 +9,13 @@
 #include "base/hex.h"
 #include "json/json.h"
 #include "models/database.h"
+#include "platform/directory_compat.h"
 #include "platform/time_compat.h"
 #include "services/zcode_benchmark_executor.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 #define ZSX_PATH_MAX 4096
 
@@ -75,14 +75,19 @@ static const char *zsx_workspace(const struct json_value *input,
                                  char *resolved, size_t resolved_size)
 {
     const char *workspace = zsx_str(input, "workspace");
-    if (workspace && workspace[0]) {
-        if (realpath(workspace, resolved))
-            return resolved;
-        return NULL;
-    }
+    char candidate[ZSX_PATH_MAX];
+    if (workspace && workspace[0])
+        return platform_directory_canonical_real(workspace, resolved,
+                                                 resolved_size)
+                   ? resolved : NULL;
     const char *datadir = zsx_datadir(input);
-    int n = snprintf(resolved, resolved_size, "%s/zcode", datadir);
-    return n > 0 && (size_t)n < resolved_size ? resolved : NULL;
+    if (!datadir || !datadir[0])
+        return NULL;
+    int n = snprintf(candidate, sizeof(candidate), "%s/zcode", datadir);
+    return n > 0 && (size_t)n < sizeof(candidate) &&
+                   platform_directory_canonical_real(candidate, resolved,
+                                                     resolved_size)
+               ? resolved : NULL;
 }
 
 static bool zsx_hex32(const char *hex, uint8_t out[32])
@@ -100,6 +105,16 @@ void zcl_native_handle_zcode_science_work_execute(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
     if (!request || !reply) return;
+#if defined(_WIN32)
+    /* The executor intentionally has no Windows implementation until its
+     * restricted-token/Job-Object/network-denial sandbox is qualified.  Refuse
+     * before policy, database, workspace, or execution side effects. */
+    zsx_fail_service(
+        reply, "WORK_EXECUTE_UNSUPPORTED",
+        "science execution is disabled on Windows until the native sandbox "
+        "passes adversarial qualification");
+    return;
+#endif
     const struct json_value *input = request->input;
     const char *original = zsx_str(input, "original_result_root");
     bool is_repro = original && original[0];

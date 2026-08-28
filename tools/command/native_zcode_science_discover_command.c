@@ -11,6 +11,7 @@
 #include "models/database.h"
 #include "models/zcode_science.h"
 #include "platform/time_compat.h"
+#include "platform/directory_compat.h"
 #include "util/safe_alloc.h"
 #include "vcs/zcode_discovery_projection.h"
 #include "vcs/zcode_discovery_rank.h"
@@ -19,7 +20,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 #define ZDSC_PATH_MAX 4096
 #define ZDSC_STUDY_FILTER_MAX 1024 /* the index study cap */
@@ -76,7 +76,8 @@ static const char *zdsc_workspace(const struct json_value *input,
 {
     const char *workspace = zdsc_str(input, "workspace");
     if (workspace && workspace[0]) {
-        if (realpath(workspace, resolved))
+        if (platform_directory_canonical_real(workspace, resolved,
+                                               resolved_size))
             return resolved;
         return NULL;
     }
@@ -464,7 +465,8 @@ void zcl_native_handle_zcode_science_rank_snapshot(
     const char *workspace_in = zdsc_str(request->input, "workspace");
     const char *genesis_hex = zdsc_str(request->input, "network_genesis_root");
     char ws[ZDSC_PATH_MAX];
-    if (!workspace_in || !workspace_in[0] || !realpath(workspace_in, ws)) {
+    if (!workspace_in || !workspace_in[0] ||
+        !platform_directory_canonical_real(workspace_in, ws, sizeof(ws))) {
         zdsc_fail(reply, "WORKSPACE_NOT_FOUND",
                   "workspace must name an existing directory", leaf);
         return;
