@@ -154,10 +154,6 @@ zwn_prepare_package_transport|prepared|vcs_package_prepared
 # failing lookup.
 db_utxo_find|out|db_utxo
 
-# ysa_prevout_fetch_fn is the test fake for the prevout port. It writes
-# *out only after its own checks pass, and every early return leaves the
-# caller's out-param untouched -- which is the port's contract, not a
-# defect: the caller initializes tx_out before the call and owns it on
-# every path. The production implementation no longer appears here; it
-# refuses a NULL tx_out outright.
+# ysa_prevout_fetch_fn writes *out only after the locator, chain-membership and
+# body-hash validations pass; its caller tests the return before reading it.
 ysa_prevout_fetch_fn|out|transaction

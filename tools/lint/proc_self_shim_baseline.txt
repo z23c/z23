@@ -8,7 +8,9 @@ config/src/consensus_state_snapshot_export_fd_io.c
 config/src/consensus_state_snapshot_candidate_output.c
 config/src/consensus_state_snapshot_export.c
 config/src/consensus_state_snapshot_output_seal.c
-config/src/consensus_state_producer_receipt_corpus.c
+# consensus_state_producer_receipt.c hashes /proc/self/exe through an open file
+# descriptor so the receipt names the executing bytes without a path race.
+config/src/consensus_state_producer_receipt.c
 
 config/src/consensus_state_snapshot_export_proof.c
 lib/util/src/thread_profile.c

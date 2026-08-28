@@ -21,6 +21,7 @@
 #include "net/rom_seed.h"
 #include "net/tor_integration.h"
 #include "util/util.h"
+#include "util/safe_alloc.h"
 #include "encoding/utilstrencodings.h"
 #include "util/log_macros.h"
 #include "json/json.h"
@@ -731,7 +732,14 @@ static bool rpc_romseed_list(const struct json_value *params, bool help,
     (void)params;
 
     json_set_array(result);
-    struct rom_artifact arts[ROM_SEED_MAX_ARTIFACTS];
+    /* ~1MB of whole artifacts (each carries the 128KB chunk-digest table):
+     * heap, not stack — RPC threads run on default 512KB stacks. */
+    struct rom_artifact *arts = zcl_calloc(ROM_SEED_MAX_ARTIFACTS,
+                                           sizeof(*arts),
+                                           "romseed_list_artifacts");
+    if (!arts) {
+        LOG_FAIL("market", "romseed_list: artifact snapshot allocation failed");
+    }
     int n = rom_seed_list(arts, ROM_SEED_MAX_ARTIFACTS);
     for (int i = 0; i < n; i++) {
         struct json_value entry = {0};
@@ -750,6 +758,7 @@ static bool rpc_romseed_list(const struct json_value *params, bool help,
         json_push_back(result, &entry);
         json_free(&entry);
     }
+    free(arts);
     return true;
 }
 
