@@ -721,21 +721,35 @@ struct zcl_result pkgl_sha3_file(const char *path, uint8_t out[32],
     return ZCL_OK;
 }
 
+/* EXISTENCE OF ANY OBJECT, NOT REGULARITY OF A FILE. Most callers probe
+ * installed/<root>, which is a DIRECTORY -- "is this package installed?" is
+ * the single most common question asked here. platform_file_metadata_read()
+ * deliberately answers REFUSED for everything that is not a regular file, so
+ * routing this probe through it alone turns an installed package into a hard
+ * lifecycle error and makes every plan over an installed root fail. Keep the
+ * regular-file probe for the platforms that have nothing better, and use the
+ * exact kind-agnostic lstat elsewhere. */
 struct zcl_result pkgl_exists(const char *path, bool *out)
 {
     if (!path || !out)
         return ZCL_ERR(-1, "null argument probing a path");
+#if defined(_WIN32)
     struct platform_file_metadata metadata;
     enum platform_file_metadata_result result =
         platform_file_metadata_read(path, &metadata);
-    if (result == PLATFORM_FILE_METADATA_OK) {
+    *out = result != PLATFORM_FILE_METADATA_MISSING;
+    return ZCL_OK;
+#else
+    struct stat st;
+    if (lstat(path, &st) == 0) {
         *out = true;
         return ZCL_OK;
     }
     *out = false;
-    if (result == PLATFORM_FILE_METADATA_MISSING)
+    if (errno == ENOENT || errno == ENOTDIR)
         return ZCL_OK;
-    return ZCL_ERR(-1, "%s: refused or not a regular file", path);
+    return ZCL_ERR(-1, "lstat %s: %s", path, strerror(errno));
+#endif
 }
 
 struct zcl_result pkgl_installed_dir(const struct pkgl_ctx *ctx,
