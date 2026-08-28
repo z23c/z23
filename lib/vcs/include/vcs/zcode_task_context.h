@@ -11,10 +11,10 @@
  *   zcl-task-context.v1/proof-policy.wire  vcs_zcode_proof_policy_v1 wire (36 B)
  *
  * A task object is deliberately unsigned: it is a content-addressed
- * constraint set, not an identity claim. The authenticity of a POSTING is
- * the signed DHT POINTER/PROVIDER pair in VCS_ZCODE_TASK_DHT_NAMESPACE
- * (governed by AGENT_SCOPE grants, like every other namespace); the
- * integrity of the task is the root. What this carrier adds is the part a
+ * constraint set, not an identity claim. DHT record signatures identify
+ * the publishing key; local STORE/INDEX/DISCOVER policy decides visibility.
+ * AGENT_SCOPE governance remains dormant. The task's integrity is its root.
+ * What this carrier adds is the part a
  * stranger cannot re-derive from the task wire alone — the goal preimage
  * and the proof policy bytes — bound so that sha3-256(goal.bin) equals
  * task.goal_root and the policy wire roots to task.proof_policy_root.

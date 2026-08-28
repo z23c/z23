@@ -4787,7 +4787,7 @@ static int zwn_t_attestation_flight(const struct chain_params *params)
 
 /* ── task-posting flight ───────────────────────────────────────────────
  *
- * Same shape as the attestation flight for a different cargo: a dev task
+ * Same shape as the attestation flight for different content: a dev task
  * posted as the fixed three-file carrier. What crosses the codec is a
  * real content.v2 package (manifest + chunks); what B runs afterwards is
  * the receiver-side binding check a stranger relies on. */

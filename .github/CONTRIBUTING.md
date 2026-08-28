@@ -51,7 +51,8 @@ push, you just find out about a lint or test failure after the fact.
 ## Build and test
 
 ```bash
-make -j"$(nproc)"        # test_zcl + z23 + zclassic-cli
+make -j"$(nproc)" z23    # public node only (the default goal)
+make -j"$(nproc)" all    # test harness + node + auxiliary tools
 make vendor              # build missing vendor/lib archives from pinned sources
 make -j"$(nproc)" build-only          # compile check, no final link
 make -j"$(nproc)" dev-bin             # fast non-LTO local node binary: build/bin/z23-dev

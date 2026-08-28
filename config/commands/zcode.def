@@ -718,9 +718,10 @@ ZCL_COMMAND_READY_COMMAND(
  * task.proof_policy_root — inside one ordinary content.v2 package. No new
  * wire message and no new CAS object: bytes ride the frozen swarm codec,
  * discovery is two signed records in zclassic23.task, exactly like the
- * work and attestation lanes. The task object is deliberately unsigned:
- * authenticity of a posting is the signed record pair (governed by
- * AGENT_SCOPE grants like every namespace); integrity is the root. */
+ * work and attestation lanes. The task object is deliberately unsigned.
+ * Record signatures identify the publisher, local sovereignty policy
+ * controls visibility, and receiver verification binds task integrity.
+ * AGENT_SCOPE governance remains dormant. */
 ZCL_COMMAND_READY_COMMAND(
     "zcode.task.offer", "zcode.task", "",
     "Bind one task's wires into the transport carrier",

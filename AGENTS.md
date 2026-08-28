@@ -129,7 +129,7 @@ catalogs from the binary instead of copying counts into prose.
 3. Build the public binary:
 
    ```bash
-   make -j"$(getconf _NPROCESSORS_ONLN)"
+   make -j"$(getconf _NPROCESSORS_ONLN)" z23
    ```
 
 4. Ask the built binary for the current command tree and source map:

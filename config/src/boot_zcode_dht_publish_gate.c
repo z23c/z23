@@ -421,15 +421,26 @@ bool boot_zcode_dht_task_pointer_publish_gate(
                " publishing its task pointer");
     return false;
   }
+  struct vcs_zcode_task_v1 task;
   enum vcs_zcode_task_context_error admitted =
       vcs_zcode_task_context_admit(store, spec->transport_root,
                                    spec->semantic_root,
-                                   (int64_t)platform_time_wall_unix(), NULL,
+                                   (int64_t)platform_time_wall_unix(), &task,
                                    NULL, NULL, 0, NULL, NULL);
-  if (admitted == VCS_ZCODE_TASK_CONTEXT_OK)
+  if (admitted == VCS_ZCODE_TASK_CONTEXT_OK &&
+      spec->expiry <= (uint64_t)task.expires_unix)
     return true;
   char root_hex[65];
   zcl_hex_encode(spec->transport_root, 32, root_hex);
+  if (admitted == VCS_ZCODE_TASK_CONTEXT_OK) {
+    LOG_ERROR("net.zcode_dht",
+              "publish gate: context %s task expires before pointer",
+              root_hex);
+    gate_error(result, "TASK_POINTER_OUTLIVES_TASK",
+               "pointer expiry exceeds the task's own expiry; shorten the"
+               " pointer window or export a fresh live task");
+    return false;
+  }
   if (admitted == VCS_ZCODE_TASK_CONTEXT_TASK_MISMATCH) {
     LOG_ERROR("net.zcode_dht",
               "publish gate: context %s posts a different task than the"

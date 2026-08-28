@@ -49,7 +49,7 @@ authority over your own machine remain.
 ```bash
 git clone https://github.com/z23c/z23
 cd z23
-make -j"$(getconf _NPROCESSORS_ONLN)"
+make -j"$(getconf _NPROCESSORS_ONLN)" z23
 make commons-demo        # (optional first: make setup — arms git hooks + LSP config)
 ```
 
