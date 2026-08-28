@@ -9,6 +9,8 @@
 #define _DEFAULT_SOURCE
 #include "platform/time_compat.h"
 #include "platform/thread_compat.h"
+#include "platform/socket_compat.h"
+#include "platform/private_file.h"
 #include "connman_internal.h"
 #include "net/connman.h"
 #include "net/v2_transport.h"
@@ -33,17 +35,11 @@
 #include "net/version.h"
 #include "bloom/bloom.h"
 #include "storage/census_read.h"
-#include <netdb.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <poll.h>
-#include <sys/socket.h>
 #include <time.h>
-#include <unistd.h>
 #include "core/utiltime.h"
 #include "util/safe_alloc.h"
 #include "util/util.h"
@@ -122,14 +118,7 @@ static bool connman_wait_for_stop(int seconds)
          * cheap for a thread whose ordinary cadence is 3..300 seconds. */
         if (remaining_us > 100000)
             remaining_us = 100000;
-        struct timespec slice = {
-            .tv_sec = (time_t)(remaining_us / 1000000LL),
-            .tv_nsec = (long)((remaining_us % 1000000LL) * 1000LL),
-        };
-        while (nanosleep(&slice, &slice) != 0 && errno == EINTR) {
-            if (atomic_load_explicit(&g_stop, memory_order_acquire))
-                return true;
-        }
+        platform_sleep_ms((int)((remaining_us + 999) / 1000));
     }
     return true;
 }
@@ -247,6 +236,10 @@ static size_t connman_recv_cap_for_queue(size_t queued, size_t base_cap)
 
 static void dns_seed_resolve(struct connman *cm)
 {
+    if (!platform_socket_runtime_init()) {
+        LOG_WARN("connman", "socket runtime initialization failed");
+        return;
+    }
     for (size_t i = 0; i < cm->params->nSeeds; i++) {
         const char *host = cm->params->vSeeds[i].host;
         if (host[0] == '\0') continue;
@@ -261,8 +254,8 @@ static void dns_seed_resolve(struct connman *cm)
         struct addrinfo *res = NULL;
         int gai_rc = getaddrinfo(host, NULL, &hints, &res);
         if (gai_rc != 0) {
-            LOG_WARN("connman", "DNS seed %s resolution failed: %s",
-                     host, gai_strerror(gai_rc));
+            LOG_WARN("connman", "DNS seed %s resolution failed: %d",
+                     host, gai_rc);
             continue;
         }
 
@@ -1630,29 +1623,29 @@ static void *thread_socket_handler(void *arg)
          * guarantees num_listen_sockets + max_connections never exceeds it,
          * so these loop bounds are a defense-in-depth belt, not the
          * enforcement point. */
-        struct pollfd pfds[REACTOR_MAX_FDS];
+        platform_socket_pollfd pfds[REACTOR_MAX_FDS];
         size_t npfds = 0;
         size_t listen_count = cm->manager.num_listen_sockets;
 
         /* Add listen sockets */
         for (size_t i = 0; i < listen_count && npfds < REACTOR_MAX_FDS; i++) {
-            pfds[npfds].fd = (int)cm->manager.listen_sockets[i].socket;
-            pfds[npfds].events = POLLIN;
+            pfds[npfds].fd = cm->manager.listen_sockets[i].socket;
+            pfds[npfds].events = PLATFORM_SOCKET_POLL_READ;
             pfds[npfds].revents = 0;
             npfds++;
         }
 
         /* Add connected nodes — snapshot fd + index under lock */
-        struct { int fd; size_t node_idx; } node_fds[REACTOR_MAX_FDS];
+        struct { zcl_socket_t fd; size_t node_idx; } node_fds[REACTOR_MAX_FDS];
         size_t n_node_fds = 0;
         zcl_mutex_lock(&cm->manager.cs_nodes);
         for (size_t i = 0; i < cm->manager.num_nodes && npfds < REACTOR_MAX_FDS; i++) {
             struct p2p_node *node = cm->manager.nodes[i];
-            int fd = (int)node->socket;
-            if (fd < 0) continue;
-            short events = POLLIN;
+            zcl_socket_t fd = node->socket;
+            if (fd == ZCL_INVALID_SOCKET) continue;
+            short events = PLATFORM_SOCKET_POLL_READ;
             if (node->send_size > 0)
-                events |= POLLOUT;
+                events |= PLATFORM_SOCKET_POLL_WRITE;
             pfds[npfds].fd = fd;
             pfds[npfds].events = events;
             pfds[npfds].revents = 0;
@@ -1692,16 +1685,16 @@ static void *thread_socket_handler(void *arg)
                                  memory_order_relaxed) + 1);
 
         if (npfds == 0) {
-            usleep(50000);
+            platform_sleep_ms(50);
             continue;
         }
 
-        int nready = poll(pfds, (nfds_t)npfds, 50 /* ms */);
+        int nready = platform_socket_poll(pfds, npfds, 50 /* ms */);
         if (nready < 0) continue;
 
         /* Accept new connections via net.c accept_connection() */
         for (size_t i = 0; i < listen_count; i++) {
-            if (pfds[i].revents & POLLIN)
+            if (pfds[i].revents & PLATFORM_SOCKET_POLL_READ)
                 accept_connection(&cm->manager,
                                   &cm->manager.listen_sockets[i]);
         }
@@ -1716,17 +1709,17 @@ static void *thread_socket_handler(void *arg)
             if (!rev) continue;
 
             /* Find the node that still has this fd */
-            int target_fd = node_fds[pi].fd;
+            zcl_socket_t target_fd = node_fds[pi].fd;
             struct p2p_node *node = NULL;
             for (size_t ni = 0; ni < cm->manager.num_nodes; ni++) {
-                if ((int)cm->manager.nodes[ni]->socket == target_fd) {
+                if (cm->manager.nodes[ni]->socket == target_fd) {
                     node = cm->manager.nodes[ni];
                     break;
                 }
             }
             if (!node) continue; /* node was removed between poll and now */
 
-            if ((rev & POLLIN) && !node->disconnect) {
+            if ((rev & PLATFORM_SOCKET_POLL_READ) && !node->disconnect) {
                 /* Bandwidth quota: check download budget before recv.
                  * If no tokens available, skip this peer until refill. */
                 uint32_t bw_id = (uint32_t)node->id;
@@ -1758,7 +1751,7 @@ static void *thread_socket_handler(void *arg)
                     zcl_mutex_unlock(&node->cs_recv);
                     goto skip_recv;
                 }
-                ssize_t n = recv(target_fd, buf, recv_cap, MSG_DONTWAIT);
+                int n = platform_socket_receive(target_fd, buf, recv_cap);
                 if (n > 0) {
                     /* v2 transport seam: decrypt below the message layer. The
                      * plaintext path (transport == NULL) is the UNCHANGED else
@@ -1833,8 +1826,9 @@ static void *thread_socket_handler(void *arg)
                         P2P_DISCONNECT_SOURCE_SOCKET,
                         node->endpoint_generation);
                 } else {
-                    int err = errno;
-                    if (err != EAGAIN && err != EWOULDBLOCK && err != EINTR) {
+                    int err = platform_socket_last_error();
+                    if (!platform_socket_error_would_block(err) &&
+                        !platform_socket_error_interrupted(err)) {
                         connman_note_addnode_prehandshake_disconnect(
                             cm, node, "recv-error");
                         (void)p2p_node_request_disconnect(
@@ -1853,7 +1847,7 @@ static void *thread_socket_handler(void *arg)
             }
             skip_recv: ;
 
-            if ((rev & POLLOUT) && !node->disconnect) {
+            if ((rev & PLATFORM_SOCKET_POLL_WRITE) && !node->disconnect) {
                 /* Bandwidth quota: check upload budget before send. */
                 uint32_t bw_id_s = (uint32_t)node->id;
                 size_t up_avail = g_peer_bw_active
@@ -1874,7 +1868,8 @@ static void *thread_socket_handler(void *arg)
             }
 
             /* POLLHUP/POLLERR — peer disconnected or socket error */
-            if ((rev & (POLLHUP | POLLERR)) && !node->disconnect) {
+            if ((rev & (PLATFORM_SOCKET_POLL_HANGUP |
+                        PLATFORM_SOCKET_POLL_ERROR)) && !node->disconnect) {
                 connman_note_addnode_prehandshake_disconnect(
                     cm, node, "poll-hup-err");
                 (void)p2p_node_request_disconnect(
@@ -2335,6 +2330,16 @@ static void *thread_message_handler(void *arg)
         thread_liveness_beat(&g_msg_liveness, (int64_t)++msg_cycles);
         bool did_work = connman_run_message_cycle(cm);
         if (!did_work) {
+#ifdef _WIN32
+            atomic_fetch_add_explicit(&cm->message_idle_waits, 1,
+                                      memory_order_relaxed);
+            zcl_mutex_lock(&cm->manager.msg_handler_mutex);
+            if (!g_stop)
+                (void)SleepConditionVariableCS(
+                    &cm->manager.msg_handler_cond,
+                    &cm->manager.msg_handler_mutex, 100);
+            zcl_mutex_unlock(&cm->manager.msg_handler_mutex);
+#else
             struct timespec until;
             platform_time_realtime_timespec(&until);
             until.tv_nsec += 100 * 1000 * 1000;
@@ -2350,6 +2355,7 @@ static void *thread_message_handler(void *arg)
                                        &cm->manager.msg_handler_mutex,
                                        &until);
             zcl_mutex_unlock(&cm->manager.msg_handler_mutex);
+#endif
         }
     }
     return NULL;
@@ -2359,6 +2365,8 @@ bool connman_init(struct connman *cm, const struct chain_params *params,
                    struct node_signals *signals)
 {
     if (!cm || !params || !signals)
+        return false;
+    if (!platform_socket_runtime_init())
         return false;
 
     /* Load peer-scoring config from environment. Safe to call multiple
@@ -2782,15 +2790,14 @@ void connman_save_addrman(struct connman *cm)
     if (ok && s.size > 0) {
         char tmp_path[520];
         snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
-        FILE *f = fopen(tmp_path, "wb");
-        if (f) {
-            size_t written = fwrite(s.data, 1, s.size, f);
-            fflush(f);
-            int fd = fileno(f);
-            if (fd >= 0) (void)fsync(fd);
-            fclose(f);
-            if (written == s.size) {
-                rename(tmp_path, path);
+        struct platform_private_file staged;
+        platform_private_file_init(&staged);
+        if (platform_private_file_unlink_missing_ok(tmp_path) &&
+            platform_private_file_create(tmp_path, &staged)) {
+            if (platform_private_file_write_at(&staged, s.data, s.size, 0) &&
+                platform_private_file_truncate(&staged, s.size) &&
+                platform_private_file_replace(&staged, tmp_path, path) &&
+                platform_private_parent_flush(cm->datadir)) {
                 /* Write the SHA3 sidecar so the next boot can
                  * detect tampering or partial corruption. Best-
                  * effort — a sidecar write failure is logged but
@@ -2799,11 +2806,10 @@ void connman_save_addrman(struct connman *cm)
                 (void)aii_write_sidecar(cm->datadir);
                 printf("Saved %zu peers to %s (%zu bytes)\n",
                        addrman_size(&cm->manager.addrman), path, s.size);
-            } else {
-                remove(tmp_path);
-                LOG_WARN("addrman", "save: short write (%zu/%zu)",
-                         written, s.size);
-            }
+            } else
+                LOG_WARN("addrman", "save: durable private replace failed");
+            platform_private_file_close(&staged);
+            (void)platform_private_file_unlink_missing_ok(tmp_path);
         }
     }
     stream_free(&s);

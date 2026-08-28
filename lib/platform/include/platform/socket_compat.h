@@ -14,7 +14,12 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 typedef SOCKET platform_socket_t;
+typedef WSAPOLLFD platform_socket_pollfd;
 #define PLATFORM_SOCKET_INVALID INVALID_SOCKET
+#define PLATFORM_SOCKET_POLL_READ POLLRDNORM
+#define PLATFORM_SOCKET_POLL_WRITE POLLWRNORM
+#define PLATFORM_SOCKET_POLL_HANGUP POLLHUP
+#define PLATFORM_SOCKET_POLL_ERROR POLLERR
 
 static INIT_ONCE platform_winsock_once = INIT_ONCE_STATIC_INIT;
 static BOOL CALLBACK platform_winsock_start(PINIT_ONCE once, PVOID parameter,
@@ -39,18 +44,63 @@ static inline bool platform_socket_runtime_init(void)
 #include <netdb.h>
 #include <netinet/in.h> /* struct sockaddr_in, htons/htonl, INADDR_LOOPBACK —
                          * winsock2.h supplies these to the _WIN32 branch */
+#include <poll.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
 typedef int platform_socket_t;
+typedef struct pollfd platform_socket_pollfd;
 #define PLATFORM_SOCKET_INVALID (-1)
+#define PLATFORM_SOCKET_POLL_READ POLLIN
+#define PLATFORM_SOCKET_POLL_WRITE POLLOUT
+#define PLATFORM_SOCKET_POLL_HANGUP POLLHUP
+#define PLATFORM_SOCKET_POLL_ERROR POLLERR
 
 static inline bool platform_socket_runtime_init(void)
 {
     return true;
 }
 #endif
+
+struct platform_socket_poll_entry {
+    platform_socket_t socket;
+    bool writable;
+    bool error;
+};
+
+static inline int platform_socket_wait_writable_many(
+    struct platform_socket_poll_entry *entries, size_t count, int timeout_ms)
+{
+    if ((!entries && count != 0) || count > INT32_MAX)
+        return -1;
+#if defined(_WIN32)
+    WSAPOLLFD descriptors[64];
+#else
+    struct pollfd descriptors[64];
+#endif
+    if (count > sizeof(descriptors) / sizeof(descriptors[0]))
+        return -1;
+    for (size_t i = 0; i < count; i++) {
+        descriptors[i].fd = entries[i].socket;
+        descriptors[i].events = POLLOUT;
+        descriptors[i].revents = 0;
+        entries[i].writable = false;
+        entries[i].error = false;
+    }
+#if defined(_WIN32)
+    int result = WSAPoll(descriptors, (ULONG)count, timeout_ms);
+#else
+    int result = poll(descriptors, count, timeout_ms);
+#endif
+    if (result <= 0) return result;
+    for (size_t i = 0; i < count; i++) {
+        short revents = descriptors[i].revents;
+        entries[i].writable = (revents & POLLOUT) != 0;
+        entries[i].error = (revents & (POLLERR | POLLHUP | POLLNVAL)) != 0;
+    }
+    return result;
+}
 
 /* Includes space for the terminating NUL.  Keep address text sizing in the
  * platform boundary so application code does not depend on which socket
@@ -319,6 +369,18 @@ static inline int platform_socket_receive(platform_socket_t sock, void *data,
         result = (int)recv(sock, data, (size_t)part, 0);
     } while (result < 0 && errno == EINTR);
     return result;
+#endif
+}
+
+static inline int platform_socket_poll(platform_socket_pollfd *sockets,
+                                       size_t count, int timeout_ms)
+{
+#if defined(_WIN32)
+    if (count > ULONG_MAX || !platform_socket_runtime_init())
+        return SOCKET_ERROR;
+    return WSAPoll(sockets, (ULONG)count, timeout_ms);
+#else
+    return poll(sockets, (nfds_t)count, timeout_ms);
 #endif
 }
 

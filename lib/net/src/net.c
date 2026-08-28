@@ -13,10 +13,12 @@
 #include "net/peer_eviction.h"
 #include "primitives/block.h"
 #include "platform/time_compat.h"
+#include "platform/socket_compat.h"
 #include "util/blocker.h"
 #include "util/log_json.h"
 #include "util/log_macros.h"
 #include "support/log_throttle.h"
+#include "util/safe_alloc.h"
 #include "core/hash.h"
 #include "core/random.h"
 #include "core/utiltime.h"
@@ -36,7 +38,6 @@
 #include <netinet/tcp.h>
 #include <ifaddrs.h>
 #include <net/if.h>
-#include "util/safe_alloc.h"
 #include "net/file_market.h"
 #ifndef MSG_NOSIGNAL
 #define MSG_NOSIGNAL 0
@@ -2189,7 +2190,8 @@ bool bind_listen_port(struct net_manager *nm, const struct net_service *addr,
 
     if (!net_addr_is_ipv4(&addr->addr)) {
 #ifdef IPV6_V6ONLY
-        setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY, &one, sizeof(one));
+        setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY,
+                   (const char *)&one, sizeof(one));
 #endif
     }
 
@@ -2246,8 +2248,13 @@ bool accept_connection(struct net_manager *nm, const struct listen_socket *ls)
     socklen_t sslen = sizeof(ss);
     zcl_socket_t sock = accept(ls->socket, (struct sockaddr *)&ss, &sslen);
 
-    if (sock == ZCL_INVALID_SOCKET)
+    if (sock == ZCL_INVALID_SOCKET) {
+        int error = platform_socket_last_error();
+        if (platform_socket_error_would_block(error) ||
+            platform_socket_error_interrupted(error))
+            return false;
         LOG_FAIL("net", "accept() returned invalid socket");
+    }
 
     struct net_address addr;
     net_address_init(&addr);
@@ -2405,7 +2412,8 @@ bool accept_connection(struct net_manager *nm, const struct listen_socket *ls)
     }
 
     int one = 1;
-    setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    setsockopt(sock, IPPROTO_TCP, TCP_NODELAY,
+               (const char *)&one, sizeof(one));
 
     struct p2p_node *node = p2p_node_create(nm, sock, &addr, "", true);
     if (!node) {
