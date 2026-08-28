@@ -19,6 +19,7 @@
 #include "platform/file_sync.h"
 #include "platform/directory_compat.h"
 #include "platform/socket_compat.h"
+#include "platform/temp_directory.h"
 
 #include "test/test_helpers.h"
 
@@ -354,14 +355,16 @@ bool chaos_fault_conflicting_chunk_peers(uint64_t seed,
     rom_seed_set_peer_bps_cap(1ull << 30);
     rom_seed_set_global_bps_cap(1ull << 30);
 
-    char sroot[] = "/tmp/zcl_sfm_g_srv_XXXXXX";
-    char *sdir = mkdtemp(sroot);
-    char croot[] = "/tmp/zcl_sfm_g_cli_XXXXXX";
-    char *cdir = mkdtemp(croot);
-    if (!sdir || !cdir) {
-        sfm_note(out, "mkdtemp failed");
+    char sroot[PLATFORM_TEMP_PATH_MAX], croot[PLATFORM_TEMP_PATH_MAX];
+    bool made_s = platform_temp_directory_create("zcl_sfm_g_srv_", sroot,
+                                                 sizeof(sroot));
+    if (!made_s || !platform_temp_directory_create("zcl_sfm_g_cli_", croot,
+                                                   sizeof(croot))) {
+        if (made_s) rmdir(sroot);
+        sfm_note(out, "temporary directory create failed");
         return false;
     }
+    char *sdir = sroot, *cdir = croot;
 
     uint8_t content[SFM_ARTIFACT_BYTES];
     sfm_gen_content(content, sizeof(content), seed);
@@ -635,14 +638,16 @@ bool chaos_fault_kill_resume_boundary(uint64_t seed, bool after_bitmap_commit,
     rom_seed_set_peer_bps_cap(1ull << 30);
     rom_seed_set_global_bps_cap(1ull << 30);
 
-    char sroot[] = "/tmp/zcl_sfm_i_srv_XXXXXX";
-    char *sdir = mkdtemp(sroot);
-    char croot[] = "/tmp/zcl_sfm_i_cli_XXXXXX";
-    char *cdir = mkdtemp(croot);
-    if (!sdir || !cdir) {
-        sfm_note(out, "mkdtemp failed");
+    char sroot[PLATFORM_TEMP_PATH_MAX], croot[PLATFORM_TEMP_PATH_MAX];
+    bool made_s = platform_temp_directory_create("zcl_sfm_i_srv_", sroot,
+                                                 sizeof(sroot));
+    if (!made_s || !platform_temp_directory_create("zcl_sfm_i_cli_", croot,
+                                                   sizeof(croot))) {
+        if (made_s) rmdir(sroot);
+        sfm_note(out, "temporary directory create failed");
         return false;
     }
+    char *sdir = sroot, *cdir = croot;
 
     size_t size = (size_t)ROM_SEED_CHUNK_SIZE + 4096; /* 2 chunks */
     uint8_t *content = malloc(size); // raw-alloc-ok:test

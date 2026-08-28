@@ -15,7 +15,9 @@
 /* The whole carrier is disabled on native Windows (see the
  * fastobj_carrier_windows_refused() stub in fastobj_carrier.c, which
  * already defines vcs_fastobj_carrier_fetch() for this platform); this
- * translation unit has nothing to add there. */
+ * translation unit has nothing to add there. ISO C forbids an empty
+ * translation unit under -Wpedantic -Werror. */
+typedef int fastobj_carrier_fetch_win32_no_op_placeholder;
 
 #else
 
