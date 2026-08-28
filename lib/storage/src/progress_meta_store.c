@@ -10,6 +10,7 @@
  * storage/progress_store.h for the full progress_meta contract. */
 
 #include "storage/progress_store.h"
+#include "base/serialize_le.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -103,8 +104,7 @@ bool progress_meta_raise_u64_in_tx(sqlite3 *db, const char *key, uint64_t value,
     if (present) {
         if (n != sizeof(blob))
             return false;  /* malformed floor — never overwrite, fail closed */
-        for (int i = 7; i >= 0; i--)
-            prior = (prior << 8) | blob[i];
+        prior = zcl_read_u64_le(blob);
     }
 
     if (present && value <= prior) {
@@ -113,8 +113,7 @@ bool progress_meta_raise_u64_in_tx(sqlite3 *db, const char *key, uint64_t value,
     }
 
     uint8_t out[8];
-    for (int i = 0; i < 8; i++)
-        out[i] = (uint8_t)((value >> (8 * i)) & 0xff);
+    zcl_write_u64_le(out, value);
     if (!progress_meta_set_in_tx(db, key, out, sizeof(out)))
         return false;
     if (raised) *raised = true;

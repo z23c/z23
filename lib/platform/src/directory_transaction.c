@@ -391,9 +391,13 @@ void platform_directory_lock_release(struct platform_directory_lock *lock)
 bool platform_directory_transaction_list_regular(
     struct platform_directory_transaction *d, struct platform_directory_names *out)
 {
-    nt_query_directory_file_fn query = resolve_nt_query_directory_file();
-    if (!query || !d || !out) return false;
+    if (!d || !out) return false;
+    /* Zero the out-parameter before the resolve below, which can fail
+     * with every argument non-NULL. A caller that frees the name list
+     * on a false return would otherwise free indeterminate pointers. */
     memset(out, 0, sizeof(*out));
+    nt_query_directory_file_fn query = resolve_nt_query_directory_file();
+    if (!query) return false;
     BYTE buffer[16384]; bool restart = true;
     for (;;) {
         IO_STATUS_BLOCK status = {0};
