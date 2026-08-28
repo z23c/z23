@@ -27,15 +27,59 @@
 #include "crypto/sha3.h"
 #include "json/json.h"
 #include "platform/clock.h"
+#include "platform/positioned_file.h"
+#include "platform/private_file.h"
 #include "platform/rng.h"
+#include "util/safe_alloc.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
 
 #define AUDIT_TAG "agent.audit"
+#define AUDIT_FILE_MAX (64u << 20)
+
+static bool audit_read_stable(const char *path, size_t cap, char **out,
+                              size_t *out_size)
+{
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    platform_positioned_file_init(&file);
+    *out = NULL;
+    *out_size = 0;
+    if (!platform_positioned_file_open(&file, path) ||
+        !platform_positioned_file_snapshot(&file, &before) ||
+        before.size > cap || before.size > SIZE_MAX - 1) {
+        platform_positioned_file_close(&file);
+        return false;
+    }
+    char *data = zcl_malloc((size_t)before.size + 1, "agent_audit_read");
+    if (!data) {
+        platform_positioned_file_close(&file);
+        return false;
+    }
+    size_t done = 0;
+    while (done < before.size) {
+        int64_t got = platform_positioned_file_read(
+            &file, data + done, (size_t)before.size - done, done);
+        if (got <= 0) break;
+        done += (size_t)got;
+    }
+    bool stable = done == before.size &&
+        platform_positioned_file_snapshot(&file, &after) &&
+        before.size == after.size && before.volume == after.volume &&
+        before.file_low == after.file_low && before.file_high == after.file_high &&
+        before.modified_seconds == after.modified_seconds &&
+        before.modified_nanoseconds == after.modified_nanoseconds &&
+        before.changed_seconds == after.changed_seconds &&
+        before.changed_nanoseconds == after.changed_nanoseconds;
+    platform_positioned_file_close(&file);
+    if (!stable) { free(data); return false; }
+    data[done] = '\0';
+    *out = data;
+    *out_size = done;
+    return true;
+}
 
 /* One receipt line stays well under this; the reader rejects anything longer
  * rather than splitting a row it cannot parse. */
@@ -271,11 +315,13 @@ bool agent_audit_open(struct agent_audit_log *log, const char *dir)
      * verification for those rows — keep the old one instead and refuse to
      * append under a key that cannot verify the head we just replayed. */
     char pub_hex[65];
-    FILE *pf = fopen(log->pub_path, "re");
-    if (pf) {
+    char *existing = NULL;
+    size_t existing_size = 0;
+    if (audit_read_stable(log->pub_path, 79, &existing, &existing_size)) {
         char buf[80] = { 0 };
-        bool got = fgets(buf, sizeof(buf), pf) != NULL;
-        (void)fclose(pf);
+        memcpy(buf, existing, existing_size);
+        free(existing);
+        bool got = existing_size != 0;
         size_t bl = strnlen(buf, sizeof(buf));
         while (bl && (buf[bl - 1] == '\n' || buf[bl - 1] == '\r'))
             buf[--bl] = '\0';
@@ -292,18 +338,18 @@ bool agent_audit_open(struct agent_audit_log *log, const char *dir)
     }
 
     zcl_hex_encode(log->pk, 32, pub_hex);
-    int pfd = open(log->pub_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC,
-                   0600);
-    if (pfd < 0)
-        LOG_FAIL(AUDIT_TAG, "create %s failed: %s", log->pub_path,
-                 strerror(errno));
+    struct platform_private_file pub;
+    platform_private_file_init(&pub);
+    if (!platform_private_file_create(log->pub_path, &pub))
+        LOG_FAIL(AUDIT_TAG, "exclusive private create %s failed", log->pub_path);
     char pline[80];
     int pn = snprintf(pline, sizeof(pline), "%s\n", pub_hex);
-    bool wrote = pn > 0 && write(pfd, pline, (size_t)pn) == (ssize_t)pn;
-    (void)close(pfd);
+    bool wrote = pn > 0 &&
+        platform_private_file_write_at(&pub, pline, (size_t)pn, 0) &&
+        platform_private_file_flush(&pub);
+    platform_private_file_close(&pub);
     if (!wrote)
-        LOG_FAIL(AUDIT_TAG, "write %s failed: %s", log->pub_path,
-                 strerror(errno));
+        LOG_FAIL(AUDIT_TAG, "durable write %s failed", log->pub_path);
 
     if (!audit_replay_head(log))
         LOG_FAIL(AUDIT_TAG, "could not replay %s to find the chain head",
@@ -340,18 +386,17 @@ bool agent_audit_append(struct agent_audit_log *log, struct agent_receipt *r)
         LOG_FAIL(AUDIT_TAG, "receipt seq=%llu does not fit a %d-byte line",
                  (unsigned long long)r->seq, AUDIT_LINE_MAX);
 
-    int fd = open(log->log_path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC,
-                  0600);
-    if (fd < 0)
-        LOG_FAIL(AUDIT_TAG, "open %s for append failed: %s", log->log_path,
-                 strerror(errno));
-    bool ok = write(fd, line, n) == (ssize_t)n;
-    if (ok)
-        ok = fsync(fd) == 0;
-    (void)close(fd);
+    struct platform_private_file file;
+    platform_private_file_init(&file);
+    if (!platform_private_file_open_locked_create(log->log_path, &file))
+        LOG_FAIL(AUDIT_TAG, "open %s for exclusive append failed", log->log_path);
+    uint64_t offset = 0;
+    bool ok = platform_private_file_size(&file, &offset) &&
+              platform_private_file_write_at(&file, line, n, offset) &&
+              platform_private_file_flush(&file);
+    platform_private_file_close(&file);
     if (!ok)
-        LOG_FAIL(AUDIT_TAG, "append+fsync to %s failed: %s", log->log_path,
-                 strerror(errno));
+        LOG_FAIL(AUDIT_TAG, "append+durable flush to %s failed", log->log_path);
 
     log->seq = r->seq;
     memcpy(log->head, r->id, 32);
@@ -364,12 +409,14 @@ static bool audit_read_pubkey(const char *dir, uint8_t pk[32])
 {
     char path[448];
     snprintf(path, sizeof(path), "%s/audit.pub", dir);
-    FILE *f = fopen(path, "re");
-    if (!f)
-        LOG_FAIL(AUDIT_TAG, "open %s failed: %s", path, strerror(errno));
+    char *contents = NULL;
+    size_t contents_size = 0;
+    if (!audit_read_stable(path, 79, &contents, &contents_size))
+        LOG_FAIL(AUDIT_TAG, "stable open of %s failed", path);
     char buf[80] = { 0 };
-    bool got = fgets(buf, sizeof(buf), f) != NULL;
-    (void)fclose(f);
+    memcpy(buf, contents, contents_size);
+    free(contents);
+    bool got = contents_size != 0;
     if (!got)
         LOG_FAIL(AUDIT_TAG, "%s is empty", path);
     size_t bl = strnlen(buf, sizeof(buf));
@@ -393,19 +440,26 @@ bool agent_audit_verify_dir(const char *dir, struct agent_audit_verdict *out)
 
     char path[448];
     snprintf(path, sizeof(path), "%s/audit.log", dir);
-    FILE *f = fopen(path, "re");
-    if (!f)
-        LOG_FAIL(AUDIT_TAG, "open %s failed: %s", path, strerror(errno));
+    char *contents = NULL;
+    size_t contents_size = 0;
+    if (!audit_read_stable(path, AUDIT_FILE_MAX, &contents, &contents_size))
+        LOG_FAIL(AUDIT_TAG, "stable open of %s failed", path);
 
     uint8_t prev[32] = { 0 };
     uint64_t expect_seq = 1;
     char line[AUDIT_LINE_MAX];
-    while (fgets(line, sizeof(line), f)) {
-        size_t n = strnlen(line, sizeof(line));
-        if (n == 0 || line[n - 1] != '\n') {
+    size_t offset = 0;
+    while (offset < contents_size) {
+        const char *newline = memchr(contents + offset, '\n',
+                                     contents_size - offset);
+        size_t n = newline ? (size_t)(newline - (contents + offset)) + 1 : 0;
+        if (n == 0 || n >= sizeof(line)) {
             out->malformed++;
             break;
         }
+        memcpy(line, contents + offset, n);
+        line[n] = '\0';
+        offset += n;
         struct agent_receipt r;
         if (!receipt_parse_line(line, n, &r)) {
             out->malformed++;
@@ -428,7 +482,7 @@ bool agent_audit_verify_dir(const char *dir, struct agent_audit_verdict *out)
         memcpy(prev, r.id, 32);
         expect_seq = r.seq + 1;
     }
-    (void)fclose(f);
+    free(contents);
 
     memcpy(out->head, prev, 32);
     out->ok = out->rows > 0 && out->chain_breaks == 0 &&
