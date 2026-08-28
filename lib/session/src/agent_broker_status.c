@@ -24,14 +24,14 @@
 #include "base/hex.h"
 #include "base/log_macros.h"
 #include "json/json.h"
+#include "platform/os_proc.h"
+#include "platform/positioned_file.h"
+#include "platform/private_file.h"
 
 #include <errno.h>
-#include <fcntl.h>
-#include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
 
 #define BROKER_TAG "agent.broker"
 
@@ -39,13 +39,7 @@ static _Atomic uint32_t g_broker_stage_seq;
 
 static bool broker_sync_dir(const char *dir)
 {
-    int fd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (fd < 0)
-        return false;
-    bool ok = fsync(fd) == 0;
-    if (close(fd) != 0)
-        ok = false;
-    return ok;
+    return platform_private_parent_flush(dir);
 }
 
 static void broker_retire_document(const char *dir, const char *name)
@@ -56,12 +50,20 @@ static void broker_retire_document(const char *dir, const char *name)
     int n = snprintf(path, sizeof(path), "%s/%s", dir, name);
     if (n < 0 || (size_t)n >= sizeof(path))
         return;
-    if (unlink(path) == 0) {
+    if (platform_private_path_absent(path))
+        return;
+    struct platform_private_file file;
+    struct platform_private_file_identity identity;
+    platform_private_file_init(&file);
+    if (platform_private_file_open_locked(path, &file) &&
+        platform_private_file_identity(&file, &identity) &&
+        platform_private_file_retire_if_identity(&file, path, &identity)) {
         if (!broker_sync_dir(dir))
             LOG_WARN(BROKER_TAG, "cannot sync retirement of %s", path);
-    } else if (errno != ENOENT) {
+    } else {
         LOG_WARN(BROKER_TAG, "cannot retire %s: %s", path, strerror(errno));
     }
+    platform_private_file_close(&file);
 }
 
 static bool broker_write_document(const char *dir, const char *name,
@@ -69,40 +71,35 @@ static bool broker_write_document(const char *dir, const char *name,
 {
     char path[512], tmp[512];
     int pn = snprintf(path, sizeof(path), "%s/%s", dir, name);
-    int tn = snprintf(tmp, sizeof(tmp), "%s/.%s.%ld-%u.tmp", dir, name,
-                      (long)getpid(),
+    int tn = snprintf(tmp, sizeof(tmp), "%s/.%s.%llu-%u.tmp", dir, name,
+                      (unsigned long long)os_proc_current_pid(),
                       (unsigned)atomic_fetch_add(&g_broker_stage_seq, 1));
     if (pn < 0 || tn < 0 || (size_t)pn >= sizeof(path) ||
         (size_t)tn >= sizeof(tmp)) {
         broker_retire_document(dir, name);
         return false;
     }
-    int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
-                  0600);
-    bool ok = fd >= 0;
-    size_t off = 0;
-    while (ok && off < len) {
-        ssize_t n = write(fd, buf + off, len - off);
-        if (n > 0)
-            off += (size_t)n;
-        else if (n < 0 && errno == EINTR)
-            continue;
-        else
-            ok = false;
-    }
-    if (ok && fsync(fd) != 0)
-        ok = false;
-    if (fd >= 0 && close(fd) != 0)
-        ok = false;
-    if (ok && rename(tmp, path) != 0)
-        ok = false;
+    struct platform_private_file file;
+    struct platform_private_file_identity identity;
+    platform_private_file_init(&file);
+    bool created = platform_private_file_create(tmp, &file);
+    bool identified = created &&
+                      platform_private_file_identity(&file, &identity);
+    bool ok = identified &&
+              platform_private_file_write_at(&file, buf, len, 0) &&
+              platform_private_file_truncate(&file, len) &&
+              platform_private_file_flush(&file) &&
+              platform_private_file_replace(&file, tmp, path);
     if (ok && !broker_sync_dir(dir))
         ok = false;
     if (!ok) {
-        (void)unlink(tmp);
+        if (identified)
+            (void)platform_private_file_retire_if_identity(&file, tmp,
+                                                           &identity);
         broker_retire_document(dir, name);
         LOG_WARN(BROKER_TAG, "cannot atomically persist %s", name);
     }
+    platform_private_file_close(&file);
     return ok;
 }
 
@@ -206,7 +203,8 @@ void agent_broker_write_status(const char *dir,
     struct json_value doc;
     json_init(&doc);
     json_set_object(&doc);
-    (void)json_push_kv_int(&doc, "broker_pid", (int64_t)getpid());
+    (void)json_push_kv_int(&doc, "broker_pid",
+                           (int64_t)os_proc_current_pid());
     (void)json_push_kv_int(&doc, "agent_pid", (int64_t)child_pid);
     (void)socket_path; /* endpoint remains broker-private */
     (void)json_push_kv_bool(&doc, "granted", bound);
@@ -293,8 +291,10 @@ size_t agent_broker_render_status_json(const char *dir, char *out,
     struct json_value doc;
     json_init(&doc);
     json_set_object(&doc);
-    FILE *f = fopen(path, "re");
-    if (!f) {
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path)) {
         (void)json_push_kv_bool(&doc, "broker_state_present", false);
         (void)json_push_kv_str(&doc, "reason",
                                "no broker.json in this directory — no confined "
@@ -304,8 +304,17 @@ size_t agent_broker_render_status_json(const char *dir, char *out,
         return n;
     }
     char buf[4096];
-    size_t got = fread(buf, 1, sizeof(buf) - 1, f);
-    (void)fclose(f);
+    bool stable = platform_positioned_file_snapshot(&file, &before) &&
+                  before.size < sizeof(buf);
+    int64_t read_size = stable
+                            ? platform_positioned_file_read(
+                                  &file, buf, (size_t)before.size, 0)
+                            : -1;
+    stable = stable && read_size == (int64_t)before.size &&
+             platform_positioned_file_snapshot(&file, &after) &&
+             memcmp(&before, &after, sizeof(before)) == 0;
+    platform_positioned_file_close(&file);
+    size_t got = stable ? (size_t)read_size : 0;
     buf[got] = '\0';
 
     struct json_value state;
@@ -316,8 +325,10 @@ size_t agent_broker_render_status_json(const char *dir, char *out,
         /* A recorded broker_pid that is no longer alive is reported as such
          * rather than implied by its presence. */
         int64_t bpid = json_get_int(json_get(&state, "broker_pid"));
-        (void)json_push_kv_bool(&doc, "broker_running",
-                                bpid > 0 && kill((pid_t)bpid, 0) == 0);
+        (void)json_push_kv_bool(
+            &doc, "broker_running",
+            bpid > 0 && os_proc_pid_liveness((uint64_t)bpid) ==
+                            OS_PROC_LIVENESS_RUNNING);
         (void)json_push_kv(&doc, "state", &state);
     } else {
         (void)json_push_kv_str(&doc, "reason", "broker.json is not valid JSON");

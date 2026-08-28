@@ -11,22 +11,25 @@
  * agent_broker.c for why the grant is built after this returns, never before.
  */
 
+#if defined(__linux__)
 #define _GNU_SOURCE  /* setgroups, execve with an empty envp */
+#endif
 
 #include "session/agent_broker.h"
 
+#include <errno.h>
+#include <string.h>
+#if defined(__linux__)
 #include "base/log_macros.h"
 #include "base/result.h"
 #include "platform/os_sandbox.h"
-
-#include <errno.h>
 #include <fcntl.h>
 #include <grp.h>
-#include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <unistd.h>
+#endif
 
 #define BROKER_TAG "agent.broker"
 
@@ -40,9 +43,20 @@
 bool agent_broker_spawn_confined(const struct agent_spawn_request *req,
                                  struct agent_spawn_result *result)
 {
-    (void)req;
     if (result)
         memset(result, 0, sizeof(*result));
+#if defined(_WIN32)
+    /* Validation is pure and remains available, but no valid request may
+     * advance into identity, group, path, socket, or process activity until
+     * the restricted-token + Job Object sandbox is qualified. */
+    if (!req || !result || !req->self_exe || !req->scratch_dir ||
+        !req->script || !mvap_param_is_safe(req->script)) {
+        errno = EINVAL;
+        return false;
+    }
+#else
+    (void)req;
+#endif
     errno = ENOTSUP;
     return false;
 }
