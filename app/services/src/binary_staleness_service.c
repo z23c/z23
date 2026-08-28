@@ -175,6 +175,9 @@ static bool bs_snapshot_equal(
 {
     return left->size == right->size &&
            left->modified_seconds == right->modified_seconds &&
+           left->modified_nanoseconds == right->modified_nanoseconds &&
+           left->changed_seconds == right->changed_seconds &&
+           left->changed_nanoseconds == right->changed_nanoseconds &&
            left->volume == right->volume &&
            left->file_low == right->file_low &&
            left->file_high == right->file_high;

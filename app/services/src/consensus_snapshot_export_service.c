@@ -5,20 +5,20 @@
 #include "services/consensus_snapshot_export_service.h"
 
 #include "crypto/sha3.h"
+#include "platform/file_metadata.h"
+#include "platform/positioned_file.h"
+#include "platform/private_file.h"
 #include "util/ar_step_readonly.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <pthread.h>
 #include <sqlite3.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
 #include "platform/allocator_compat.h"
 
 #define LOCAL_EXPORT_PROOF_NAME \
@@ -40,8 +40,8 @@ struct local_export_proof {
 struct local_export_cache {
     bool valid;
     char datadir[576];
-    struct stat body_stat;
-    struct stat proof_stat;
+    struct platform_positioned_file_snapshot body_snapshot;
+    struct platform_positioned_file_snapshot proof_snapshot;
     struct local_export_proof proof;
 };
 
@@ -87,14 +87,17 @@ static bool export_path(char *out, size_t out_size, const char *datadir,
     return n >= 0 && (size_t)n < out_size;
 }
 
-static bool stat_identity_equal(const struct stat *a, const struct stat *b)
+static bool snapshot_identity_equal(
+    const struct platform_positioned_file_snapshot *a,
+    const struct platform_positioned_file_snapshot *b)
 {
-    return a && b && a->st_dev == b->st_dev && a->st_ino == b->st_ino &&
-           a->st_size == b->st_size &&
-           a->st_mtim.tv_sec == b->st_mtim.tv_sec &&
-           a->st_mtim.tv_nsec == b->st_mtim.tv_nsec &&
-           a->st_ctim.tv_sec == b->st_ctim.tv_sec &&
-           a->st_ctim.tv_nsec == b->st_ctim.tv_nsec;
+    return a && b && a->volume == b->volume &&
+           a->file_low == b->file_low && a->file_high == b->file_high &&
+           a->size == b->size &&
+           a->modified_seconds == b->modified_seconds &&
+           a->modified_nanoseconds == b->modified_nanoseconds &&
+           a->changed_seconds == b->changed_seconds &&
+           a->changed_nanoseconds == b->changed_nanoseconds;
 }
 
 static void local_export_cache_invalidate(void)
@@ -105,25 +108,26 @@ static void local_export_cache_invalidate(void)
 }
 
 static bool hash_regular_file(const char *path, uint8_t out_sha3[32],
-                              uint64_t *out_size, struct stat *out_stat)
+    uint64_t *out_size,
+    struct platform_positioned_file_snapshot *out_snapshot)
 {
     if (!path || !out_sha3 || !out_size)
         return false; /* raw-return-ok:validation predicate rejects input */
-    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (fd < 0)
+    struct platform_positioned_file file;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path))
         return false; /* raw-return-ok:bounded policy reason returned */
 
-    struct stat before;
-    if (fstat(fd, &before) != 0 || !S_ISREG(before.st_mode) ||
-        before.st_size < 0) {
-        close(fd);
+    struct platform_positioned_file_snapshot before;
+    if (!platform_positioned_file_snapshot(&file, &before)) {
+        platform_positioned_file_close(&file);
         return false; /* raw-return-ok:bounded policy reason returned */
     }
 
     enum { HASH_WINDOW = 1u << 20 };
     uint8_t *buf = zcl_malloc(HASH_WINDOW, "snapshot_local_export_hash");
     if (!buf) {
-        close(fd);
+        platform_positioned_file_close(&file);
         return false; /* raw-return-ok:bounded policy reason returned */
     }
 
@@ -131,83 +135,52 @@ static bool hash_regular_file(const char *path, uint8_t out_sha3[32],
     sha3_256_init(&sha3);
     uint64_t total = 0;
     bool ok = true;
-    for (;;) {
-        ssize_t n = read(fd, buf, HASH_WINDOW);
+    while (total < before.size) {
+        size_t wanted = before.size - total > HASH_WINDOW
+            ? HASH_WINDOW : (size_t)(before.size - total);
+        int64_t n = platform_positioned_file_read(&file, buf, wanted, total);
         if (n > 0) {
             sha3_256_write(&sha3, buf, (size_t)n);
             total += (uint64_t)n;
             continue;
         }
-        if (n == 0)
-            break;
-        if (errno == EINTR)
-            continue;
         ok = false;
         break;
     }
-    struct stat after;
-    if (fstat(fd, &after) != 0 || !stat_identity_equal(&before, &after) ||
-        total != (uint64_t)before.st_size)
+    struct platform_positioned_file_snapshot after;
+    if (!platform_positioned_file_snapshot(&file, &after) ||
+        !snapshot_identity_equal(&before, &after) || total != before.size)
         ok = false;
     free(buf);
-    close(fd);
+    platform_positioned_file_close(&file);
     if (!ok)
         return false;
 
     sha3_256_finalize(&sha3, out_sha3);
     *out_size = total;
-    if (out_stat)
-        *out_stat = before;
-    return true;
-}
-
-static bool read_exact_fd(int fd, uint8_t *out, size_t size)
-{
-    size_t off = 0;
-    while (off < size) {
-        ssize_t n = read(fd, out + off, size - off);
-        if (n > 0) {
-            off += (size_t)n;
-            continue;
-        }
-        if (n < 0 && errno == EINTR)
-            continue;
-        return false;
-    }
-    return true;
-}
-
-static bool write_exact_fd(int fd, const uint8_t *data, size_t size)
-{
-    size_t off = 0;
-    while (off < size) {
-        ssize_t n = write(fd, data + off, size - off);
-        if (n > 0) {
-            off += (size_t)n;
-            continue;
-        }
-        if (n < 0 && errno == EINTR)
-            continue;
-        return false;
-    }
+    if (out_snapshot) *out_snapshot = before;
     return true;
 }
 
 static bool read_local_export_proof(const char *path,
                                     struct local_export_proof *out,
-                                    struct stat *out_stat)
+    struct platform_positioned_file_snapshot *out_snapshot)
 {
     if (!path || !out)
         return false;
-    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (fd < 0)
+    struct platform_positioned_file file;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path))
         return false;
-    struct stat st;
+    struct platform_positioned_file_snapshot before, after;
     uint8_t raw[LOCAL_EXPORT_PROOF_BYTES];
-    bool ok = fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
-              st.st_size == (off_t)sizeof(raw) &&
-              read_exact_fd(fd, raw, sizeof(raw));
-    close(fd);
+    bool ok = platform_positioned_file_snapshot(&file, &before) &&
+              before.size == sizeof(raw) &&
+              platform_positioned_file_read(&file, raw, sizeof(raw), 0) ==
+                  (int64_t)sizeof(raw) &&
+              platform_positioned_file_snapshot(&file, &after) &&
+              snapshot_identity_equal(&before, &after);
+    platform_positioned_file_close(&file);
     if (!ok || memcmp(raw, LOCAL_EXPORT_PROOF_MAGIC,
                       sizeof(LOCAL_EXPORT_PROOF_MAGIC)) != 0 ||
         get_u32_le(raw + 8) != LOCAL_EXPORT_PROOF_VERSION ||
@@ -225,9 +198,19 @@ static bool read_local_export_proof(const char *path,
     memcpy(out->state_block_hash, raw + 60, 32);
     if (out->state_height < 0 || out->body_size == 0)
         return false;
-    if (out_stat)
-        *out_stat = st;
+    if (out_snapshot) *out_snapshot = before;
     return true;
+}
+
+static bool snapshot_named_file(
+    const char *path, struct platform_positioned_file_snapshot *snapshot)
+{
+    struct platform_positioned_file file;
+    platform_positioned_file_init(&file);
+    bool ok = platform_positioned_file_open(&file, path) &&
+              platform_positioned_file_snapshot(&file, snapshot);
+    platform_positioned_file_close(&file);
+    return ok;
 }
 
 static bool sqlite_has_bound_block(const char *db_path, int32_t height,
@@ -270,9 +253,9 @@ static bool load_verified_local_export(const char *datadir,
         return false; /* raw-return-ok:bounded policy reason returned */
     }
 
-    struct stat body_st, proof_st;
-    if (lstat(body_path, &body_st) != 0 || !S_ISREG(body_st.st_mode) ||
-        lstat(proof_path, &proof_st) != 0 || !S_ISREG(proof_st.st_mode)) {
+    struct platform_positioned_file_snapshot body_snapshot, proof_snapshot;
+    if (!snapshot_named_file(body_path, &body_snapshot) ||
+        !snapshot_named_file(proof_path, &proof_snapshot)) {
         if (reason && reason_size)
             snprintf(reason, reason_size, "local_export_proof_missing");
         return false; /* raw-return-ok:missing proof is expected policy */
@@ -281,8 +264,10 @@ static bool load_verified_local_export(const char *datadir,
     pthread_mutex_lock(&g_local_export_cache_mutex);
     bool cached = g_local_export_cache.valid &&
         strcmp(g_local_export_cache.datadir, datadir) == 0 &&
-        stat_identity_equal(&g_local_export_cache.body_stat, &body_st) &&
-        stat_identity_equal(&g_local_export_cache.proof_stat, &proof_st);
+        snapshot_identity_equal(&g_local_export_cache.body_snapshot,
+                                &body_snapshot) &&
+        snapshot_identity_equal(&g_local_export_cache.proof_snapshot,
+                                &proof_snapshot);
     if (cached)
         *out = g_local_export_cache.proof;
     pthread_mutex_unlock(&g_local_export_cache_mutex);
@@ -290,15 +275,18 @@ static bool load_verified_local_export(const char *datadir,
         return true;
 
     struct local_export_proof proof;
-    struct stat opened_proof_st, opened_body_st;
+    struct platform_positioned_file_snapshot opened_proof_snapshot;
+    struct platform_positioned_file_snapshot opened_body_snapshot;
     uint8_t got_sha3[32];
     uint64_t got_size = 0;
-    if (!read_local_export_proof(proof_path, &proof, &opened_proof_st)) {
+    if (!read_local_export_proof(proof_path, &proof,
+                                 &opened_proof_snapshot)) {
         if (reason && reason_size)
             snprintf(reason, reason_size, "local_export_proof_malformed");
         return false; /* raw-return-ok:bounded policy reason returned */
     }
-    if (!hash_regular_file(body_path, got_sha3, &got_size, &opened_body_st) ||
+    if (!hash_regular_file(body_path, got_sha3, &got_size,
+                           &opened_body_snapshot) ||
         got_size != proof.body_size ||
         memcmp(got_sha3, proof.body_sha3, 32) != 0) {
         if (reason && reason_size)
@@ -311,14 +299,26 @@ static bool load_verified_local_export(const char *datadir,
             snprintf(reason, reason_size, "local_export_state_mismatch");
         return false; /* raw-return-ok:bounded policy reason returned */
     }
+    struct platform_positioned_file_snapshot final_body_snapshot;
+    struct platform_positioned_file_snapshot final_proof_snapshot;
+    if (!snapshot_named_file(body_path, &final_body_snapshot) ||
+        !snapshot_named_file(proof_path, &final_proof_snapshot) ||
+        !snapshot_identity_equal(&opened_body_snapshot,
+                                 &final_body_snapshot) ||
+        !snapshot_identity_equal(&opened_proof_snapshot,
+                                 &final_proof_snapshot)) {
+        if (reason && reason_size)
+            snprintf(reason, reason_size, "local_export_identity_changed");
+        return false;
+    }
 
     pthread_mutex_lock(&g_local_export_cache_mutex);
     memset(&g_local_export_cache, 0, sizeof(g_local_export_cache));
     g_local_export_cache.valid = true;
     snprintf(g_local_export_cache.datadir,
              sizeof(g_local_export_cache.datadir), "%s", datadir);
-    g_local_export_cache.body_stat = opened_body_st;
-    g_local_export_cache.proof_stat = opened_proof_st;
+    g_local_export_cache.body_snapshot = opened_body_snapshot;
+    g_local_export_cache.proof_snapshot = opened_proof_snapshot;
     g_local_export_cache.proof = proof;
     pthread_mutex_unlock(&g_local_export_cache_mutex);
     *out = proof;
@@ -354,34 +354,32 @@ static struct zcl_result write_local_export_proof(
     put_u32_le(raw + 56, (uint32_t)state_height);
     memcpy(raw + 60, state_block_hash, 32);
 
-    (void)unlink(tmp_path);
-    int fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC |
-                            O_NOFOLLOW, 0644);
-    if (fd < 0)
+    (void)platform_private_file_unlink_missing_ok(tmp_path);
+    struct platform_private_file staging;
+    platform_private_file_init(&staging);
+    if (!platform_private_file_create(tmp_path, &staging))
         return ZCL_ERR(-23, "local export proof: open %s failed: %s",
                        tmp_path, strerror(errno));
-    bool ok = write_exact_fd(fd, raw, sizeof(raw)) && fsync(fd) == 0;
-    int close_rc = close(fd);
-    if (!ok || close_rc != 0) {
-        (void)unlink(tmp_path);
+    bool ok = platform_private_file_write_at(&staging, raw, sizeof(raw), 0) &&
+              platform_private_file_flush(&staging);
+    if (!ok) {
+        (void)platform_private_file_retire(&staging, tmp_path);
+        platform_private_file_close(&staging);
         return ZCL_ERR(-24, "local export proof: durable write failed: %s",
                        strerror(errno));
     }
-    if (rename(tmp_path, proof_path) != 0) {
+    if (!platform_private_file_replace(&staging, tmp_path, proof_path)) {
         struct zcl_result result = ZCL_ERR(
             -25, "local export proof: rename failed: %s", strerror(errno));
-        (void)unlink(tmp_path);
+        (void)platform_private_file_retire(&staging, tmp_path);
+        platform_private_file_close(&staging);
         return result;
     }
-    int dfd = open(datadir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (dfd < 0 || fsync(dfd) != 0) {
-        if (dfd >= 0)
-            close(dfd);
-        (void)unlink(proof_path);
+    if (!platform_private_parent_flush(datadir)) {
+        (void)platform_private_file_unlink_missing_ok(proof_path);
         return ZCL_ERR(-26, "local export proof: directory fsync failed: %s",
                        strerror(errno));
     }
-    close(dfd);
     local_export_cache_invalidate();
     return ZCL_OK;
 }
@@ -497,8 +495,9 @@ static struct zcl_result consensus_snapshot_export_service_run_internal(
                      LOCAL_EXPORT_PROOF_NAME))
         return ZCL_ERR(-1, "export_snapshot: proof path too long");
 
-    struct stat src_st;
-    if (stat(src_path, &src_st) != 0 || src_st.st_size < 1000000) {
+    struct platform_file_metadata src_metadata;
+    if (platform_file_metadata_read(src_path, &src_metadata) !=
+            PLATFORM_FILE_METADATA_OK || src_metadata.size < 1000000) {
         return ZCL_ERR(-2, "export_snapshot: %s missing or too small",
                        src_path);
     }
@@ -539,9 +538,9 @@ static struct zcl_result consensus_snapshot_export_service_run_internal(
     /* Remove eligibility before touching the body.  A crash at any later
      * boundary leaves either no artifact or an unstamped artifact, neither of
      * which can be advertised by the serving gate. */
-    (void)unlink(proof_path);
+    (void)platform_private_file_unlink_missing_ok(proof_path);
     local_export_cache_invalidate();
-    unlink(dst_path);
+    (void)platform_private_file_unlink_missing_ok(dst_path);
 
     sqlite3 *src_db = NULL;
     sqlite3 *dst_db = NULL;
@@ -679,8 +678,9 @@ static struct zcl_result consensus_snapshot_export_service_run_internal(
     step = export_exec_checked(dst_db, "VACUUM", "vacuum snapshot");
     if (!step.ok) { result = step; goto export_cleanup; }
 
-    struct stat dst_st;
-    if (stat(dst_path, &dst_st) != 0) {
+    struct platform_file_metadata dst_metadata;
+    if (platform_file_metadata_read(dst_path, &dst_metadata) !=
+        PLATFORM_FILE_METADATA_OK) {
         result = ZCL_ERR(-8, "export_snapshot: destination stat failed: %s",
                          dst_path);
         goto export_cleanup;
@@ -688,7 +688,7 @@ static struct zcl_result consensus_snapshot_export_service_run_internal(
 
     printf("Consensus snapshot: %d tables, height %d, %.0f MB\n",
            tables_copied, state_height,
-           (double)dst_st.st_size / (1024.0 * 1024.0));
+           (double)dst_metadata.size / (1024.0 * 1024.0));
     if (tables_copied == 0) {
         result = ZCL_ERR(-9, "export_snapshot: no tables exported");
         goto export_cleanup;
@@ -715,23 +715,23 @@ export_cleanup:
 
     if (!result.ok) {
         LOG_WARN("consensus_snapshot_export", "%s", result.message);
-        unlink(dst_path);
-        (void)unlink(proof_path);
+        (void)platform_private_file_unlink_missing_ok(dst_path);
+        (void)platform_private_file_unlink_missing_ok(proof_path);
     } else if (!sqlite_has_bound_block(dst_path, state_height,
                                        state_block_hash)) {
         result = ZCL_ERR(-27, "export_snapshot: exported blocks do not contain "
                               "the bound state h=%d", state_height);
         LOG_WARN("consensus_snapshot_export", "%s", result.message);
-        (void)unlink(dst_path);
-        (void)unlink(proof_path);
+        (void)platform_private_file_unlink_missing_ok(dst_path);
+        (void)platform_private_file_unlink_missing_ok(proof_path);
     } else {
         struct zcl_result proof_result = write_local_export_proof(
             datadir, state_height, state_block_hash);
         if (!proof_result.ok) {
             result = proof_result;
             LOG_WARN("consensus_snapshot_export", "%s", result.message);
-            (void)unlink(dst_path);
-            (void)unlink(proof_path);
+            (void)platform_private_file_unlink_missing_ok(dst_path);
+            (void)platform_private_file_unlink_missing_ok(proof_path);
         }
     }
     platform_allocator_release_free_pages();
