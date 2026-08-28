@@ -21,6 +21,7 @@ ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	file_ops_copy \
 	format_attribute \
 	glob_match \
+	headless_run \
 	hotswap_elf_probe_refusal \
 	logical_cpu \
 	log_level \
@@ -167,6 +168,34 @@ ZCL_WINDOWS_ACCEPTANCE_format_attribute_SOURCES := \
 	lib/base/tests/format_attribute_windows_acceptance.c
 ZCL_WINDOWS_ACCEPTANCE_glob_match_SOURCES := \
 	lib/platform/tests/glob_match_windows_acceptance.c
+# ── The Windows-only headless process launcher ──────────────────────────────
+# tools/dev/windows_headless_run.c is NOT a platform-seam acceptance program
+# like every other row here: it is a standalone TOOL. Its
+# $(BIN_DIR)/z23-headless-run.exe rule in the top-level Makefile is written
+# entirely inside `ifeq ($(ZCL_HOST_WINDOWS),1)` -- the else arm defines only
+# phony goals that print "windows headless runner requires native Windows" and
+# fail -- so on a POSIX host make has NO RULE for that target at all, and
+# check-standalone-tools-link (the gate whose whole point is "a Makefile tool
+# rule that nothing else builds rots silently") cannot build it.
+#
+# That gate therefore host-exempts the target and points HERE for the
+# replacement evidence. This row is the ONLY thing on a POSIX host that proves
+# the source still compiles and links for Windows; delete it and the exemption
+# over there becomes exactly the rot the gate exists to stop. The coupling is
+# not a comment: check_standalone_tools_link.sh reads this file and refuses
+# (exit 2) if it stops naming tools/dev/windows_headless_run.c.
+#
+# STANDARD NOTE -- deliberate, not a silent divergence. The native Makefile
+# rule compiles this file with -std=c23. This catalog compiles every row with
+# -std=c2x (ZCL_WINDOWS_ACCEPTANCE_FLAGS) because the mingw driver installed
+# as x86_64-w64-mingw32-gcc (GCC 13) rejects -std=c23 outright with
+# "unrecognized command-line option '-std=c23'". c2x is that same language
+# under its pre-ratification spelling, so this is one compiler driver's
+# spelling, not a weaker standard. -municode is required and not optional: the
+# program's entry point is wmain(), and without it the link has no entry.
+ZCL_WINDOWS_ACCEPTANCE_headless_run_SOURCES := \
+	tools/dev/windows_headless_run.c
+ZCL_WINDOWS_ACCEPTANCE_headless_run_FLAGS := -municode
 ZCL_WINDOWS_ACCEPTANCE_hotswap_elf_probe_refusal_SOURCES := \
 	lib/test/src/hotswap_elf_probe_refusal_acceptance.c \
 	lib/hotswap/src/hotswap_elf_probe.c \

@@ -28,14 +28,13 @@
 # cross-compiling is a FAILURE; a file that starts passing should prompt
 # `ZCL_LINT_MODE=UPDATE` to tighten the ratchet.
 #
-# Measured baseline (2026-08-28, GCC 13-posix mingw): 8 of 11 in-scope files
-# compile clean; 3 hold real diagnostic sites — os_binary_slots.c (POSIX
-# open()/openat()/flock() flags and calls with no Windows equivalent),
-# os_sandbox_stub.c (`#include <sys/resource.h>` does not exist under
-# mingw), and rng.c (`O_CLOEXEC` and `getrandom()` are POSIX/Linux-only).
-# Those are genuine gaps another lane owns closing; this gate's job is only
-# to make sure none of the OTHER files silently joins that list, and that
-# the three above only ever shrink.
+# The three files this comment used to name as holding diagnostics --
+# os_binary_slots.c, os_sandbox_stub.c and rng.c -- have since been ported,
+# and the baseline file is now empty: every in-scope seam file cross-compiles
+# with zero diagnostics. No count is repeated here on purpose. The gate prints
+# the live in-scope file count and diagnostic-site total on every run, and
+# tools/lint/windows_platform_seam_baseline.txt is the authority for which
+# files still carry sites. A number written into this comment can only rot.
 #
 # ── THE EXEMPTION: os_sandbox_linux.c ────────────────────────────────────
 # lib/platform/src/os_sandbox_linux.c is Linux's confinement backend; it is

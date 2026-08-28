@@ -11,11 +11,27 @@ vendored archives.
 | WSL2 Ubuntu | Build, test, and operate the complete node today | Linux ELF running under WSL2 |
 
 The UCRT64 bootstrap, source-identity checks, compile-epoch leases, OpenSSL,
-SQLite, zlib, libevent, and LevelDB builds are supported. The full native node
-currently stops at POSIX APIs that still need platform adapters: signals,
-users/groups, sockets, and a small set of filesystem/process calls. The agent
-adapter is deliberately unavailable because Windows confinement is not yet
-implemented. Never weaken that refusal to obtain a green build.
+SQLite, zlib, libevent, and LevelDB builds are supported.
+
+What actually blocks the full native node was measured, not assumed. Almost
+every one of the node's translation units already cross-compiles for Windows,
+and the process, signal, socket and filesystem adapters this page once named
+as the blockers resolve cleanly — the platform seam covers them. What is left
+is a much shorter list:
+
+- The vendored third-party archives — SQLite above all, then OpenSSL,
+  libsecp256k1, zlib, LevelDB, and the Tor stub. These build natively under
+  UCRT64 today; what does not exist is a path to cross-build them from Linux,
+  because the vendor script decides POSIX-versus-Windows from the machine it
+  is running on rather than from the compiler it was handed.
+- A handful of the node's own functions that are still defined only outside
+  Windows while a Windows caller still reaches them.
+- Two POSIX facilities with no mingw equivalent yet: a temporary-directory
+  call, and POSIX regular expressions in the node-log reader. The latter wants
+  a small in-tree matcher rather than a dependency.
+
+The agent adapter is deliberately unavailable because Windows confinement is
+not yet implemented. Never weaken that refusal to obtain a green build.
 
 ## Native UCRT64 lane
 
