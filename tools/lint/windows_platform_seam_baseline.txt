@@ -11,4 +11,3 @@
 #
 # Recorded from 11 in-scope translation units with:
 #   x86_64-w64-mingw32-gcc (GCC) 13-posix
-lib/platform/src/rng.c 2
