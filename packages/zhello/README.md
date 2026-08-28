@@ -44,7 +44,13 @@ opaque.
 - `app/main.c` — RGFW driver plus the headless self-test mode
 
 The per-host link inputs (Cocoa frameworks, X11-at-runtime, Win32) live
-in the `zhello` block of the top-level `Makefile`, not in the source.
+in the GUI-packages block of the top-level `Makefile`, not in the source.
+zhello is the template of record: `make new-app NAME=myapp` stamps a new
+application out of this package — same two files, same targets, your name —
+and registers it in the gitignored `config/gui_apps.mk`, which is what puts
+`make myapp`, `make myapp-selftest` and `make myapp-app` on the build. The
+whole journey, with this host's measured latencies, is
+[`docs/MACOS_GUI_QUICKSTART.md`](../../docs/MACOS_GUI_QUICKSTART.md).
 On a macOS host nothing but the Apple command-line tools is needed:
 
 ```sh
