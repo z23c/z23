@@ -23,7 +23,6 @@
 #include "util/file_io.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
-#include "platform/path_compat.h"
 
 /* Last discovery pass's per-source contribution, published through
  * blog_onion_discovery_counts(). Diagnostic only — nothing branches on these.
@@ -125,11 +124,7 @@ size_t blog_serve(const char *datadir, const char *path,
     char blog_root[1024];
     snprintf(blog_root, sizeof(blog_root), "%s/blog", datadir);
     char real_root[PATH_MAX];
-#if defined(_WIN32)
-    if (!platform_path_resolve(real_root, sizeof(real_root), blog_root)) {
-#else
     if (!realpath(blog_root, real_root)) {
-#endif
         const char *body =
             "<html><head><style>body{background:#0a0a0a;color:#e0e0e0;"
             "font-family:monospace;text-align:center;padding:80px 20px}"
@@ -164,11 +159,7 @@ size_t blog_serve(const char *datadir, const char *path,
 
     /* Verify resolved path stays under blog root */
     char real_file[PATH_MAX];
-#if defined(_WIN32)
-    if (!platform_path_resolve(real_file, sizeof(real_file), filepath) ||
-#else
     if (!realpath(filepath, real_file) ||
-#endif
         strncmp(real_file, real_root, root_len) != 0 ||
         (real_file[root_len] != '/' && real_file[root_len] != '\0')) {
         fclose(f);

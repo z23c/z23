@@ -47,19 +47,17 @@ typedef void (*signal_handler_crash_hook_fn)(int sig,
                                              void *ucontext,
                                              void *ctx);
 
-/* Install fatal-process diagnostics. POSIX uses SIGABRT/SIGSEGV/SIGBUS/
- * SIGFPE on an alternate stack and ignores SIGPIPE. Windows installs the
- * unhandled-exception filter plus the C runtime's fatal-signal handlers;
- * Winsock writes already report errors rather than raising SIGPIPE. Idempotent.
- * Returns 0 on success and -1 when a required handler cannot be installed. */
+/* Install handlers for SIGABRT, SIGSEGV, SIGBUS, SIGFPE on an alternate
+ * signal stack (so a stack-overflow SIGSEGV can still produce a backtrace),
+ * and ignore SIGPIPE so socket/pipe races return EPIPE instead of terminating
+ * the node. Idempotent. Returns 0 on success, -1 on sigaction/sigaltstack
+ * failure. */
 int signal_handler_install(void);
 
-/* Install the node owner's persistent termination callback. Embedded
+/* Install the node owner's persistent SIGINT/SIGTERM callback. Embedded
  * runtimes (notably Tor) may install process-wide termination handlers while
  * they initialize, so the composition root calls this once before boot and
  * once after all embedded runtimes have started to reclaim signal ownership.
- * Windows maps console Ctrl-C/Break to SIGINT and close/logoff/shutdown events
- * to SIGTERM through SetConsoleCtrlHandler.
  * `handler` must be non-NULL. Returns 0 on success, -1 on invalid input or
  * sigaction failure. */
 int signal_handler_install_termination(void (*handler)(int));
