@@ -189,6 +189,25 @@ static inline int platform_socket_bind(platform_socket_t sock,
 static inline int platform_socket_listen(platform_socket_t sock, int backlog)
 { return listen(sock, backlog); }
 
+static inline int platform_socket_local_address(platform_socket_t sock,
+                                                 struct sockaddr *address,
+                                                 size_t *address_size)
+{
+    if (!address_size) return -1;
+#if defined(_WIN32)
+    if (*address_size > INT32_MAX) return SOCKET_ERROR;
+    int size = (int)*address_size;
+    int result = getsockname(sock, address, &size);
+    if (result == 0) *address_size = (size_t)size;
+    return result;
+#else
+    socklen_t size = (socklen_t)*address_size;
+    int result = getsockname(sock, address, &size);
+    if (result == 0) *address_size = (size_t)size;
+    return result;
+#endif
+}
+
 static inline platform_socket_t platform_socket_accept(
     platform_socket_t sock, struct sockaddr *address, size_t *address_size)
 {
