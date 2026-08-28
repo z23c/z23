@@ -388,7 +388,13 @@ bool platform_positioned_file_open(struct platform_positioned_file *file,
 {
     if (!file || !path || !path[0]) return false;
     platform_positioned_file_close(file);
-    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    /* O_NONBLOCK so a FIFO (or any other blocking-open node) cannot park
+     * this thread FOREVER before the S_ISREG check below gets to refuse
+     * it. The refusal was always correct; it just arrived after the open
+     * had already hung. O_NONBLOCK has no effect on a regular file, so
+     * the success path is unchanged. os_binary_slots.c opens with it at
+     * all three of its sites for exactly this reason. */
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     if (fd < 0) return false;
     struct stat st;
     if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
@@ -419,8 +425,15 @@ bool platform_positioned_file_open_beneath(
         if (!part[0] || strcmp(part, ".") == 0 || strcmp(part, "..") == 0) {
             close(fd); return false;
         }
+        /* O_NONBLOCK for the same reason as platform_positioned_file_open
+         * above: the S_ISREG refusal below the loop cannot run until the
+         * open returns, so a FIFO leaf would park this thread forever.
+         * This is the market SERVING path, so a private file that is
+         * regular at registration and replaced by a FIFO before serving
+         * would wedge a serving thread. No-op on regular files and on
+         * the O_DIRECTORY components, so it is unconditional. */
         int next = openat(fd, part, O_RDONLY | O_CLOEXEC | O_NOFOLLOW |
-                          (slash ? O_DIRECTORY : 0));
+                          O_NONBLOCK | (slash ? O_DIRECTORY : 0));
         close(fd);
         if (next < 0) return false;
         fd = next;
