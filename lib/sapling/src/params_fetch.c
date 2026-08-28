@@ -23,18 +23,14 @@
 
 #include "base/safe_alloc.h"
 #include "crypto/sha256.h"
+#include "platform/positioned_file.h"
 #include "util/log_macros.h"
 
-#include <errno.h>
-#include <fcntl.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <unistd.h>
 
 /* ── The trust root ─────────────────────────────────────────────────
  *
@@ -265,9 +261,16 @@ bool zcl_param_pin_recompute_from_file(const char *path, uint64_t *out_bytes,
     if (!path)
         return false;
 
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0)
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path))
         return false;
+    if (!platform_positioned_file_snapshot(&file, &before) ||
+        before.size == 0 || before.size > ZCL_PARAM_MAX_FILE_BYTES) {
+        platform_positioned_file_close(&file);
+        return false;
+    }
 
     bool ok = false;
     uint8_t *buf = zcl_malloc(ZCL_PARAM_CHUNK_BYTES, "param_recompute_chunk");
@@ -281,34 +284,34 @@ bool zcl_param_pin_recompute_from_file(const char *path, uint64_t *out_bytes,
     uint64_t total = 0;
     uint32_t nleaves = 0;
 
-    for (;;) {
+    while (total < before.size) {
+        uint64_t remaining = before.size - total;
+        size_t wanted = remaining < ZCL_PARAM_CHUNK_BYTES
+                            ? (size_t)remaining
+                            : ZCL_PARAM_CHUNK_BYTES;
         size_t filled = 0;
-        while (filled < ZCL_PARAM_CHUNK_BYTES) {
-            ssize_t r = read(fd, buf + filled, ZCL_PARAM_CHUNK_BYTES - filled);
-            if (r < 0) {
-                if (errno == EINTR)
-                    continue;
+        while (filled < wanted) {
+            int64_t got = platform_positioned_file_read(
+                &file, buf + filled, wanted - filled, total + filled);
+            if (got <= 0)
                 goto done;
-            }
-            if (r == 0)
-                break;
-            filled += (size_t)r;
+            filled += (size_t)got;
         }
-        if (filled == 0)
-            break;
         total += filled;
-        if (total > ZCL_PARAM_MAX_FILE_BYTES)
-            goto done;
         if (nleaves >= ZCL_PARAM_MAX_CHUNKS)
             goto done;
         sha256_write(&whole, (const unsigned char *)buf, filled);
         zcl_param_leaf_hash(buf, filled,
                             leaves + (size_t)nleaves * ZCL_PARAM_HASH_BYTES);
         nleaves++;
-        if (filled < ZCL_PARAM_CHUNK_BYTES)
-            break;
     }
-    if (nleaves == 0)
+    if (nleaves == 0 || !platform_positioned_file_snapshot(&file, &after) ||
+        before.size != after.size || before.volume != after.volume ||
+        before.file_low != after.file_low || before.file_high != after.file_high ||
+        before.modified_seconds != after.modified_seconds ||
+        before.modified_nanoseconds != after.modified_nanoseconds ||
+        before.changed_seconds != after.changed_seconds ||
+        before.changed_nanoseconds != after.changed_nanoseconds)
         goto done;
 
     if (out_bytes)
@@ -326,7 +329,7 @@ bool zcl_param_pin_recompute_from_file(const char *path, uint64_t *out_bytes,
 done:
     free(buf);
     free(leaves);
-    close(fd);
+    platform_positioned_file_close(&file);
     return ok;
 }
 
@@ -346,12 +349,6 @@ bool zcl_param_verify_installed(const char *dir, int file_idx)
 
     char path[1200];
     zcl_pf_join_path(path, sizeof(path), dir, p->name, NULL);
-
-    struct stat st;
-    if (stat(path, &st) != 0)
-        return false;
-    if ((uint64_t)st.st_size != p->bytes)
-        return false;
 
     uint64_t bytes = 0;
     uint8_t got[ZCL_PARAM_HASH_BYTES], want[ZCL_PARAM_HASH_BYTES];
