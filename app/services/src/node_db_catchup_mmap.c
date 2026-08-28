@@ -53,30 +53,35 @@ void node_db_catchup_block_mapping_close(
     node_db_catchup_block_mapping_init(block_mapping);
 }
 
+/* Returns an fd, or -1 with errno set -- the open() contract this helper
+ * stands in for on Windows. The failures below are reported, not
+ * swallowed: the _quiet caller turns errno into the code on its
+ * struct zcl_result. It must not log, because a missing block file is
+ * the normal case that gives this function its name. */
 static int catchup_open_readonly_binary(const char *path)
 {
 #if defined(_WIN32)
     if (!path) {
         errno = EINVAL;
-        return -1;
+        return -1; // raw-return-ok:open() contract, errno reported by the _quiet caller
     }
     int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path,
                                        -1, NULL, 0);
     if (wide_len <= 0 || wide_len > 32768) {
         errno = EINVAL;
-        return -1;
+        return -1; // raw-return-ok:open() contract, errno reported by the _quiet caller
     }
     wchar_t *wide = zcl_malloc((size_t)wide_len * sizeof(*wide),
                                "node_db_catchup_wide_path");
     if (!wide) {
         errno = ENOMEM;
-        return -1;
+        return -1; // raw-return-ok:open() contract, errno reported by the _quiet caller
     }
     if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
                             wide, wide_len) != wide_len) {
         free(wide);
         errno = EINVAL;
-        return -1;
+        return -1; // raw-return-ok:open() contract, errno reported by the _quiet caller
     }
     int fd = _wopen(wide, _O_RDONLY | _O_BINARY | _O_NOINHERIT);
     free(wide);
