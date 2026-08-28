@@ -5,8 +5,10 @@
 
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <sys/resource.h>
 #include <unistd.h>
+#endif
 
 #if defined(__APPLE__)
 #include <libproc.h> /* proc_pidinfo: per-process BSD identity and task size */
@@ -17,8 +19,17 @@ static char g_requested_profile[64];
 
 static struct zcl_result unavailable(const char *mechanism)
 {
+#if defined(_WIN32)
+    return ZCL_ERR(OS_SANDBOX_ERR_INVALID_ARG,
+                   "%s is unavailable: Windows package/agent execution "
+                   "remains disabled until restricted-token, Job Object, "
+                   "low-integrity, resource-limit, and network-denial "
+                   "sandbox acceptance passes",
+                   mechanism);
+#else
     return ZCL_ERR(OS_SANDBOX_ERR_INVALID_ARG,
                    "%s is unavailable on this operating system", mechanism);
+#endif
 }
 
 void os_sandbox_note_requested(const char *profile_name)
@@ -56,7 +67,11 @@ bool os_sandbox_path_is_granted(const char *path, bool need_write)
 {
     (void)path;
     (void)need_write;
+#if defined(_WIN32)
+    return false;
+#else
     return true;
+#endif
 }
 
 size_t os_sandbox_explain_denied_path(const char *path, bool need_write,
@@ -64,8 +79,20 @@ size_t os_sandbox_explain_denied_path(const char *path, bool need_write,
 {
     (void)path;
     (void)need_write;
+#if defined(_WIN32)
+    static const char reason[] =
+        "Windows package/agent sandbox is not qualified";
+    size_t length = sizeof(reason) - 1u;
+    if (out && out_size) {
+        size_t copy = length < out_size - 1u ? length : out_size - 1u;
+        memcpy(out, reason, copy);
+        out[copy] = '\0';
+    }
+    return length;
+#else
     if (out && out_size) out[0] = '\0';
     return 0;
+#endif
 }
 
 bool os_sandbox_no_new_privs(void) { return false; }
@@ -191,10 +218,14 @@ uint64_t os_sandbox_uid_task_count(void) { return 0; }
 
 uint64_t os_sandbox_nproc_hard_limit(void)
 {
+#if defined(_WIN32)
+    return OS_SANDBOX_RLIMIT_KEEP;
+#else
     struct rlimit limit;
     if (getrlimit(RLIMIT_NPROC, &limit) != 0 || limit.rlim_max == RLIM_INFINITY)
         return OS_SANDBOX_RLIMIT_KEEP;
     return (uint64_t)limit.rlim_max;
+#endif
 }
 
 struct os_sandbox_process_budget os_sandbox_process_budget_at(
@@ -324,5 +355,9 @@ struct zcl_result os_sandbox_enter(const struct os_sandbox_profile *value)
 {
     if (!value)
         return ZCL_ERR(OS_SANDBOX_ERR_INVALID_ARG, "profile==NULL");
+#if defined(_WIN32)
+    return unavailable("Windows restricted-token sandbox");
+#else
     return unavailable("Linux process confinement");
+#endif
 }

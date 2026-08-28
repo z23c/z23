@@ -2,6 +2,12 @@
 #include "platform/logical_cpu.h"
 
 #if defined(_WIN32)
+/* GetActiveProcessorCount is declared only when the SDK target is Windows 7
+ * or newer.  Z23's native baseline is Windows 10, but standalone strict TU
+ * checks do not necessarily provide a global _WIN32_WINNT definition. */
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0601
+#endif
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -10,7 +16,16 @@
 uint32_t platform_logical_cpu_count(void)
 {
     DWORD count = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
-    return count == 0 ? UINT32_C(1) : (uint32_t)count;
+    if (count != 0)
+        return (uint32_t)count;
+
+    /* Defensive fallback for an unexpected API failure. GetSystemInfo is
+     * available on every supported Windows version, though it sees only the
+     * caller's processor group on group-partitioned hosts. */
+    SYSTEM_INFO info;
+    GetSystemInfo(&info);
+    return info.dwNumberOfProcessors == 0
+               ? UINT32_C(1) : (uint32_t)info.dwNumberOfProcessors;
 }
 
 #else
