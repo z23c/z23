@@ -18,22 +18,20 @@
 #include "crypto/sha256.h"
 #include "framework/condition.h"
 #include "json/json.h"
+#include "platform/directory_compat.h"
+#include "platform/file_metadata.h"
+#include "platform/os_proc.h"
+#include "platform/positioned_file.h"
 #include "platform/time_compat.h"
 #include "util/clientversion.h"
 #include "util/log_macros.h"
 
-#include <errno.h>
-#include <fcntl.h>
-#include <dirent.h>
-#include <limits.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 #define CANARY_WATCH_MAX_KINDS     8
 #define CANARY_KIND_NAME_MAX       32
@@ -42,6 +40,7 @@
 #define CANARY_COMMIT_MAX          128
 #define CANARY_SOURCE_ID_MAX       65
 #define CANARY_ARTIFACT_ID_MAX     65
+#define CANARY_PATH_MAX          4096
 /* A sentinel is one flat JSON object (~400 bytes); anything larger than this
  * is not a canary verdict and is treated as unreadable. */
 #define CANARY_SENTINEL_MAX_BYTES  8192
@@ -88,27 +87,25 @@ static char g_running_artifact_sha256[CANARY_ARTIFACT_ID_MAX];
 
 static void capture_running_artifact_sha256(void)
 {
-    int fd = open("/proc/self/exe", O_RDONLY | O_CLOEXEC);
-    if (fd < 0)
+    FILE *image = os_proc_open_self_exe();
+    if (!image)
         return;
     struct sha256_ctx ctx;
     sha256_init(&ctx);
     uint8_t buf[32768];
     bool ok = true;
     for (;;) {
-        ssize_t n = read(fd, buf, sizeof(buf));
+        size_t n = fread(buf, 1, sizeof(buf), image);
         if (n > 0) {
-            sha256_write(&ctx, buf, (size_t)n);
+            sha256_write(&ctx, buf, n);
             continue;
         }
-        if (n == 0)
+        if (feof(image))
             break;
-        if (errno == EINTR)
-            continue;
         ok = false;
         break;
     }
-    if (close(fd) != 0)
+    if (fclose(image) != 0)
         ok = false;
     if (!ok)
         return;
@@ -144,11 +141,19 @@ bool canary_sentinel_watch_resolve_dir(char *out, size_t cap)
     const char *env = getenv("ZCL_CANARY_VERDICT_DIR");
     if (env && env[0])
         return snprintf(out, cap, "%s", env) < (int)cap;
+#if defined(_WIN32)
+    const char *local_app_data = getenv("LOCALAPPDATA");
+    if (!local_app_data || !local_app_data[0])
+        return false;
+    return snprintf(out, cap, "%s/z23/dev/canary", local_app_data) <
+           (int)cap;
+#else
     const char *home = getenv("HOME");
     if (!home || !home[0])
         return false; /* quiet: no env, no HOME — nothing to watch */
     return snprintf(out, cap, "%s/.local/state/zclassic23-canary", home) <
            (int)cap;
+#endif
 }
 
 /* Find (or claim) the slot for `kind`. Caller holds g_watch.lock. */
@@ -198,16 +203,21 @@ static bool kind_from_filename(const char *name, char *out, size_t cap)
 static bool read_sentinel(const char *path, char *buf, size_t cap,
                           size_t *out_len)
 {
-    FILE *f = fopen(path, "rb");
-    if (!f)
+    struct platform_positioned_file file;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path))
         return false; /* raced with the harness's rm/rename: not an error */
-    size_t n = fread(buf, 1, cap - 1, f);
-    bool more = fgetc(f) != EOF; /* oversize ⇒ not a canary sentinel */
-    fclose(f);
-    if (more)
+    uint64_t size = 0;
+    if (!platform_positioned_file_size(&file, &size) || size >= cap) {
+        platform_positioned_file_close(&file);
         return false;
-    buf[n] = '\0';
-    *out_len = n;
+    }
+    int64_t got = platform_positioned_file_read(&file, buf, (size_t)size, 0);
+    platform_positioned_file_close(&file);
+    if (got < 0 || (uint64_t)got != size)
+        return false;
+    buf[(size_t)got] = '\0';
+    *out_len = (size_t)got;
     return true;
 }
 
@@ -231,12 +241,14 @@ static void process_sentinel(const char *dir, const char *name)
     if (!kind_from_filename(name, kind, sizeof(kind)))
         return;
 
-    char path[PATH_MAX];
+    char path[CANARY_PATH_MAX];
     if (snprintf(path, sizeof(path), "%s/%s", dir, name) >= (int)sizeof(path))
         return;
 
-    struct stat st;
-    int64_t mtime = (stat(path, &st) == 0) ? (int64_t)st.st_mtime : 0;
+    struct platform_file_metadata metadata;
+    int64_t mtime =
+        platform_file_metadata_read(path, &metadata) == PLATFORM_FILE_METADATA_OK
+        ? metadata.modified_seconds : 0;
 
     char raw[CANARY_SENTINEL_MAX_BYTES];
     size_t raw_len = 0;
@@ -437,32 +449,32 @@ void canary_sentinel_watch_tick_once(void)
     atomic_store(&g_watch.last_scan_unix, platform_time_wall_unix());
     atomic_fetch_add(&g_watch.scans_total, 1);
 
-    char dir[PATH_MAX];
+    char dir[CANARY_PATH_MAX];
     if (!canary_sentinel_watch_resolve_dir(dir, sizeof(dir))) {
         atomic_store(&g_watch.files_seen_last, 0);
         return; /* quiet: nowhere to look (no env, no HOME) */
     }
 
-    DIR *d = opendir(dir);
-    if (!d) {
+    struct platform_directory_list entries;
+    if (!platform_directory_list_regular_sorted(dir, &entries)) {
         /* Fresh install / canary never ran: stay silent (no log spam, no
          * health impact). Absence never transitions the latch (header). */
         atomic_store(&g_watch.files_seen_last, 0);
         return;
     }
 
-    int64_t files = 0;
-    struct dirent *ent;
-    while ((ent = readdir(d)) != NULL) {
+    int64_t files_seen = 0;
+    for (size_t i = 0; i < entries.count; i++) {
+        const char *name = entries.entries[i].name;
         char kind[CANARY_KIND_NAME_MAX];
-        if (!kind_from_filename(ent->d_name, kind, sizeof(kind)))
+        if (!kind_from_filename(name, kind, sizeof(kind)))
             continue;
-        process_sentinel(dir, ent->d_name);
-        files++;
+        process_sentinel(dir, name);
+        files_seen++;
     }
-    closedir(d);
+    platform_directory_list_free(&entries);
 
-    atomic_store(&g_watch.files_seen_last, files);
+    atomic_store(&g_watch.files_seen_last, files_seen);
     recompute_latch();
 }
 
@@ -506,7 +518,7 @@ bool canary_watch_dump_state_json(struct json_value *out, const char *key)
         return false;
     json_set_object(out);
 
-    char dir[PATH_MAX];
+    char dir[CANARY_PATH_MAX];
     if (!canary_sentinel_watch_resolve_dir(dir, sizeof(dir)))
         dir[0] = '\0';
     json_push_kv_str(out, "verdict_dir", dir[0] ? dir : "unresolved");

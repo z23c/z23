@@ -11,7 +11,7 @@
  * have long since been evaluated and the node may be mid-write
  * to a filesystem that just filled.
  *
- * This service runs one pthread that polls `statvfs()` on the
+ * This service runs one pthread that polls the platform capacity seam on the
  * data directory every N seconds. When free bytes drop below
  * `warn_free_bytes` it emits `EV_DISK_LOW` (operators should
  * rotate/clean). When free bytes drop below `refuse_free_bytes`
@@ -29,8 +29,8 @@
  * The monitor owns a pthread and a mutex guarding lifecycle
  * state. `disk_monitor_is_critical()` is lock-free (atomic) so
  * the mempool / block processor hot path has no contention.
- * `disk_monitor_free_bytes()` is a standalone wrapper around
- * statvfs usable without the thread running — tests call it
+ * `disk_monitor_free_bytes()` is a standalone UTF-8-path wrapper usable
+ * without the thread running — tests call it
  * directly.
  */
 
@@ -112,12 +112,12 @@ enum disk_monitor_level disk_monitor_level(void);
 /* ── Standalone primitive (testable) ────────────────────────── */
 
 /* Return free bytes on the filesystem containing `path`. Returns
- * -1 on any statvfs error. This is the only place in the service
+ * -1 on any platform capacity-query error. This is the only place in the service
  * that touches the kernel, so tests stub it by pointing at a
  * temp directory they control. */
 int64_t disk_monitor_free_bytes(const char *path);
 
-/* Process-local unit-test seam. A negative value restores statvfs(). */
+/* Process-local unit-test seam. A negative value restores the platform query. */
 void disk_monitor_set_free_bytes_for_test(int64_t bytes);
 
 #endif /* ZCL_SERVICES_DISK_MONITOR_H */
