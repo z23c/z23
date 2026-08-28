@@ -49,6 +49,12 @@ static inline bool platform_socket_runtime_init(void)
 }
 #endif
 
+/* Includes space for the terminating NUL.  Keep address text sizing in the
+ * platform boundary so application code does not depend on which socket
+ * headers expose the POSIX INET_* constants. */
+#define PLATFORM_IPV4_ADDRESS_TEXT_SIZE 16U
+#define PLATFORM_IPV6_ADDRESS_TEXT_SIZE 46U
+
 static inline platform_socket_t platform_socket_open(int domain, int type,
                                                       int protocol,
                                                       bool close_on_exec,
