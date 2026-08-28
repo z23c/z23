@@ -595,11 +595,12 @@ int test_transaction_intent(void)
         ASSERT(vault_intent_store_raw(&chain_db, row.plan_id,
                                       raw.data, raw.size));
 
-        struct wallet wallet;
-        wallet_init(&wallet);
+        struct wallet *wallet = zcl_calloc(1, sizeof(*wallet), "test-wallet");
+        /* ~40 MB wallet: heap, never stack */
+        wallet_init(wallet);
         struct wallet_rpc_context ctx;
         memset(&ctx, 0, sizeof(ctx));
-        ctx.wallet = &wallet;
+        ctx.wallet = wallet;
         ctx.main_state = &ms;
         ctx.datadir = dir;
         ctx.node_db = &chain_db;
@@ -609,7 +610,7 @@ int test_transaction_intent(void)
         ASSERT(row.has_confirm_hash &&
                memcmp(row.confirm_hash, body_hash.data, 32) == 0);
 
-        wallet_free(&wallet);
+        wallet_free(wallet); free(wallet);
         node_db_close(&chain_db);
         main_state_free(&ms);
         block_free(&body);

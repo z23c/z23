@@ -37,6 +37,7 @@
 #include "models/database.h"
 
 #include "wallet/wallet.h"
+#include "util/safe_alloc.h"
 #include "wallet/wallet_sqlite.h"
 
 #include "storage/disk_block_io.h"
@@ -131,11 +132,12 @@ int test_wallet_rescan_coverage(void)
     }
 
     /* ── wallet 1: owns the funding output ───────────────────────────── */
-    struct wallet w1;
-    wallet_init(&w1);
+    struct wallet *w1 = zcl_calloc(1, sizeof(*w1), "test-wallet");
+    /* ~40 MB wallet: heap, never stack */
+    wallet_init(w1);
     struct pubkey pk;
     memset(&pk, 0, sizeof(pk));
-    bool have_key = wallet_generate_new_key(&w1, &pk);
+    bool have_key = wallet_generate_new_key(w1, &pk);
     WRC_CHECK("wallet1 generates a key", have_key);
     struct key_id kid = pubkey_get_id(&pk);
 
@@ -236,7 +238,7 @@ int test_wallet_rescan_coverage(void)
      * (code -28, "RPC server started"); this fixture never boots a node. */
     set_rpc_warmup_finished();
 
-    rpc_wallet_set_state(&w1, &ms, datadir, &ws, &mempool, NULL);
+    rpc_wallet_set_state(w1, &ms, datadir, &ws, &mempool, NULL);
     rpc_wallet_set_node_db(&ndb);
     rpc_wallet_set_coins_tip(NULL);  /* skip the chainstate-lookup gate */
 
@@ -326,12 +328,13 @@ int test_wallet_rescan_coverage(void)
     /* ── D. 199/200 = 99.5% coverage (clears the floor) but the wallet owns
      * nothing. We still cannot say "you have no funds" — the one block we
      * could not read is exactly where they might be. ── */
-    struct wallet w2;
-    wallet_init(&w2);
+    struct wallet *w2 = zcl_calloc(1, sizeof(*w2), "test-wallet");
+    /* ~40 MB wallet: heap, never stack */
+    wallet_init(w2);
     for (int i = 0; i < WRC_NBLOCKS; i++)
         idx[i].nStatus |= BLOCK_HAVE_DATA;
     idx[7].nStatus &= ~BLOCK_HAVE_DATA;
-    rpc_wallet_set_state(&w2, &ms, datadir, &ws, &mempool, NULL);
+    rpc_wallet_set_state(w2, &ms, datadir, &ws, &mempool, NULL);
     {
         struct json_value params, result;
         wrc_params(&params, 0, last);
@@ -357,8 +360,8 @@ int test_wallet_rescan_coverage(void)
     rpc_wallet_set_node_db(NULL);
     tx_mempool_free(&mempool);
     wallet_sqlite_close(&ws);
-    wallet_free(&w2);
-    wallet_free(&w1);
+    wallet_free(w2); free(w2);
+    wallet_free(w1); free(w1);
     ms.chain_active.chain = NULL;
     ms.chain_active.capacity = 0;
     ms.chain_active.height = 0;
