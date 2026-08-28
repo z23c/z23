@@ -226,6 +226,17 @@ bool boot_mint_anchor_export_bundle(sqlite3 *pdb, const char *datadir,
                                     int32_t anchor,
                                     const uint8_t block_hash[32])
 {
+#if defined(_WIN32)
+    (void)pdb;
+    (void)datadir;
+    (void)anchor;
+    (void)block_hash;
+    fprintf(stderr,
+            "REFUSED: mint-anchor bundle export is unavailable on Windows "
+            "until the exporter accepts a validated native directory "
+            "capability\n");
+    return false;
+#else
     const char *dir = (datadir && datadir[0]) ? datadir : ".";
     char name[128];
     int nn = snprintf(name, sizeof(name),
@@ -331,6 +342,7 @@ bool boot_mint_anchor_export_bundle(sqlite3 *pdb, const char *datadir,
             res.validation_profile == CONSENSUS_STATE_VALIDATION_FULL
                 ? "full" : "checkpoint_fold");
     return true;
+#endif
 }
 
 bool boot_mint_anchor_stamp_sovereign_markers(sqlite3 *pdb)
