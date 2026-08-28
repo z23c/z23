@@ -1,4 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+#if !defined(_WIN32) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
 #include "platform/private_directory.h"
 
 #include <errno.h>
@@ -137,6 +140,78 @@ bool platform_private_directory_ensure(const char *path)
     return ok;
 }
 
+bool platform_private_directory_create(const char *path)
+{
+    wchar_t wide[32768];
+    HANDLE token = NULL;
+    TOKEN_USER *user = NULL;
+    if (!private_directory_wide(path, wide) ||
+        !current_user_sid(&token, &user)) {
+        errno = EINVAL;
+        return false;
+    }
+    LPWSTR sid = NULL;
+    bool ok = ConvertSidToStringSidW(user->User.Sid, &sid) != 0;
+    wchar_t sddl[512];
+    int written = ok ? swprintf(sddl, 512,
+        L"O:%lsD:P(A;;FA;;;%ls)(A;;FA;;;SY)", sid, sid) : -1;
+    PSECURITY_DESCRIPTOR descriptor = NULL;
+    ok = written > 0 && written < 512 &&
+         ConvertStringSecurityDescriptorToSecurityDescriptorW(
+             sddl, SDDL_REVISION_1, &descriptor, NULL);
+    SECURITY_ATTRIBUTES attributes = {
+        .nLength = sizeof(attributes), .lpSecurityDescriptor = descriptor,
+        .bInheritHandle = FALSE};
+    if (ok && !CreateDirectoryW(wide, &attributes)) {
+        DWORD error = GetLastError();
+        errno = error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS
+                    ? EEXIST : error == ERROR_ACCESS_DENIED ? EACCES : EIO;
+        ok = false;
+    }
+    HANDLE directory = INVALID_HANDLE_VALUE;
+    if (ok)
+        directory = CreateFileW(wide, READ_CONTROL | FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    ok = ok && directory != INVALID_HANDLE_VALUE &&
+         private_directory_validate(directory, user->User.Sid);
+    if (!ok && directory != INVALID_HANDLE_VALUE) RemoveDirectoryW(wide);
+    if (directory != INVALID_HANDLE_VALUE) CloseHandle(directory);
+    if (descriptor) LocalFree(descriptor);
+    if (sid) LocalFree(sid);
+    free(user);
+    CloseHandle(token);
+    return ok;
+}
+
+bool platform_private_directory_publish_no_clobber(
+    const char *staging, const char *destination)
+{
+    uintptr_t retained = 0;
+    wchar_t from[32768], to[32768];
+    if (!platform_private_directory_open_validated(staging, &retained) ||
+        !private_directory_wide(staging, from) ||
+        !private_directory_wide(destination, to)) {
+        if (retained) platform_private_directory_close(retained);
+        return false;
+    }
+    bool ok = MoveFileExW(from, to, MOVEFILE_WRITE_THROUGH) != 0;
+    if (!ok) {
+        DWORD error = GetLastError();
+        errno = error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS
+                    ? EEXIST : error == ERROR_ACCESS_DENIED ? EACCES : EIO;
+    }
+    platform_private_directory_close(retained);
+    return ok;
+}
+
+bool platform_private_directory_remove_empty(const char *path)
+{
+    wchar_t wide[32768];
+    return private_directory_wide(path, wide) && RemoveDirectoryW(wide) != 0;
+}
+
 bool platform_private_directory_open_validated(const char *path,
                                                uintptr_t *native_handle)
 {
@@ -171,6 +246,7 @@ void platform_private_directory_close(uintptr_t native_handle)
 
 #else
 #include <fcntl.h>
+#include <stdio.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -186,6 +262,44 @@ bool platform_private_directory_ensure(const char *path)
         return false;
     }
     return true;
+}
+
+bool platform_private_directory_create(const char *path)
+{
+    if (!path || !path[0]) { errno = EINVAL; return false; }
+    if (mkdir(path, 0700) != 0) return false;
+    uintptr_t handle;
+    if (platform_private_directory_open_validated(path, &handle)) {
+        platform_private_directory_close(handle);
+        return true;
+    }
+    (void)rmdir(path);
+    return false;
+}
+
+bool platform_private_directory_publish_no_clobber(
+    const char *staging, const char *destination)
+{
+    uintptr_t handle;
+    if (!platform_private_directory_open_validated(staging, &handle))
+        return false;
+    platform_private_directory_close(handle);
+#if defined(__linux__)
+    return renameat2(AT_FDCWD, staging, AT_FDCWD, destination,
+                     RENAME_NOREPLACE) == 0;
+#else
+    struct stat st;
+    if (lstat(destination, &st) == 0 || errno != ENOENT) {
+        errno = EEXIST;
+        return false;
+    }
+    return rename(staging, destination) == 0;
+#endif
+}
+
+bool platform_private_directory_remove_empty(const char *path)
+{
+    return path && rmdir(path) == 0;
 }
 
 bool platform_private_directory_open_validated(const char *path,
