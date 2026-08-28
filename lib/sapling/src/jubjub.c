@@ -94,6 +94,13 @@ static void bi_shl1(struct bigint *a)
     (void)carry;
 }
 
+/* unsigned __int128 is a compiler extension, not ISO C, and this tree
+ * compiles -std=c23 -pedantic. The carry chains below need a 128-bit
+ * accumulator; lib/sapling/src/bls12_381.c suppresses the same warning
+ * over the same construct for the same reason. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+
 /* a -= c (mod 2^256).  Returns the borrow (0 or 1); the caller folds it
  * back in within the same iteration, so no information escapes. */
 static uint64_t bi_sub(struct bigint *a, const struct bigint *c)
@@ -183,3 +190,5 @@ void jubjub_to_scalar(const unsigned char *input, unsigned char *result)
     (void)bi_sub(&acc, &r);
     bi_to_bytes(&acc, result, 32);
 }
+
+#pragma GCC diagnostic pop
