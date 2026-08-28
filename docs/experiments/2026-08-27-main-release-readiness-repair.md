@@ -300,3 +300,14 @@ test_zcode_package_registry groups_failed=0 self_skips=0
 check-zcode-package-registry PASS (10 roots rederived)
 lint-fast PASS
 ```
+
+## Unsafe Windows storage batch excluded
+
+Two concurrent Windows storage commits were merged for shared-history
+continuity and then reverted before release. The mapping shim omitted APIs
+required by existing sources, weakened `PROT_NONE`, stored mappings in a
+translation-unit-local 256-entry table, and could not safely unmap across
+components. The file helper changed the shared file offset while claiming
+positioned-read semantics and allowed the database ownership sidecar to be
+deleted and replaced while locked. Those behaviors are not release-safe
+without Windows-native adversarial acceptance.
