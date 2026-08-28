@@ -5,8 +5,10 @@
 /* GetActiveProcessorCount is declared only when the SDK target is Windows 7
  * or newer.  Z23's native baseline is Windows 10, but standalone strict TU
  * checks do not necessarily provide a global _WIN32_WINNT definition. */
-#ifndef _WIN32_WINNT
-#define _WIN32_WINNT 0x0601
+#if !defined(_WIN32_WINNT)
+#define _WIN32_WINNT 0x0A00
+#elif _WIN32_WINNT < 0x0601
+#error "platform_logical_cpu_count requires a Windows 7 or newer SDK target"
 #endif
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
