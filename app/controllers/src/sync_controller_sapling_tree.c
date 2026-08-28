@@ -33,7 +33,6 @@
 #include <sqlite3.h>
 #include <stdatomic.h>
 #include <string.h>
-#include <sys/mman.h>
 #include <time.h>
 
 /* The BEGIN-retry + atomic (tree-blob, height) persist machinery lives in
@@ -292,8 +291,8 @@ int sapling_tree_rebuild(struct node_db *ndb,
 
     int64_t t_replay_start = GetTimeMillis();
     int cached_file = -1;
-    uint8_t *cached_data = NULL;
-    size_t cached_size = 0;
+    struct sync_block_file_mapping cached_mapping;
+    sync_block_file_mapping_init(&cached_mapping);
 
     /* Refuse a provably-impossible replay UP FRONT, from headers alone — see
      * sapling_rebuild_replay_is_impossible for the proof and why it can only
@@ -357,11 +356,9 @@ int sapling_tree_rebuild(struct node_db *ndb,
         }
 
         if (bi->nFile != cached_file) {
-            if (cached_data) munmap(cached_data, cached_size);
-            cached_data = sync_controller_mmap_block_file(datadir, bi->nFile,
-                                                          &cached_size);
-            cached_file = cached_data ? bi->nFile : -1;
-            if (!cached_data) {
+            if (!sync_block_file_mapping_open(&cached_mapping, datadir,
+                                              bi->nFile)) {
+                cached_file = -1;
                 if (sapling_rebuild_account_skip("no_mmap", h,
                         endpoint_is_coins_applied, &skipped_no_mmap,
                         &first_skip_height, &last_skip_height)) {
@@ -371,9 +368,11 @@ int sapling_tree_rebuild(struct node_db *ndb,
                 }
                 continue;
             }
+            cached_file = bi->nFile;
         }
 
-        if (bi->nDataPos >= cached_size) {
+        if ((uintmax_t)bi->nDataPos >=
+            (uintmax_t)cached_mapping.view.size) {
             /* Data position past the mapped size: the block file was still
              * growing when it was mmap'd (stale cached_size), or the recorded
              * position is corrupt. This is the leading suspect for a
@@ -390,9 +389,11 @@ int sapling_tree_rebuild(struct node_db *ndb,
 
         struct block blk;
         block_init(&blk);
-        size_t remaining = cached_size - bi->nDataPos;
+        size_t data_pos = (size_t)bi->nDataPos;
+        size_t remaining = cached_mapping.view.size - data_pos;
         struct byte_stream s;
-        stream_init_from_data(&s, cached_data + bi->nDataPos, remaining);
+        stream_init_from_data(&s, cached_mapping.view.data + data_pos,
+                              remaining);
         if (!block_deserialize(&blk, &s)) {
             block_free(&blk);
             if (sapling_rebuild_account_skip("deserialize_failed", h,
@@ -495,11 +496,7 @@ int sapling_tree_rebuild(struct node_db *ndb,
         }
     }
 
-    if (cached_data) {
-        munmap(cached_data, cached_size);
-        cached_data = NULL;
-        cached_size = 0;
-    }
+    sync_block_file_mapping_close(&cached_mapping);
 
     int total_skipped = skipped_no_index + skipped_no_data + skipped_no_mmap +
                         skipped_datapos_oob + skipped_deserialize;
@@ -623,7 +620,7 @@ int sapling_tree_rebuild(struct node_db *ndb,
     return total_commitments;
 
 fail:
-    if (cached_data) munmap(cached_data, cached_size);
+    sync_block_file_mapping_close(&cached_mapping);
     if (sup_id != SUPERVISOR_INVALID_ID)
         supervisor_child_complete(sup_id);
     /* Root-cause aid: a tip/intermediate root mismatch is very often the
