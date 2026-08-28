@@ -52,6 +52,11 @@ bool platform_positioned_file_is_executable(
  * on Windows), matching POSIX mode 0600 policy files. */
 bool platform_positioned_file_is_private(
     const struct platform_positioned_file *file);
+/* True when only the current user (plus SYSTEM on Windows) can access the
+ * file. POSIX owner permission bits may be read-only, as with service-manager
+ * credentials, but group/other permissions are forbidden. */
+bool platform_positioned_file_is_current_user_only(
+    const struct platform_positioned_file *file);
 
 /* Return bytes read (zero at EOF), or -1 on invalid input/I/O failure.  A
  * successful short read is preserved for callers that deliberately race an
