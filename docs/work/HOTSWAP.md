@@ -18,6 +18,12 @@ Z23 has three development layers:
 
 None is publication authority for the canonical node or a release build.
 
+Resident native-image activation is currently a Linux DEV-build capability.
+macOS retains the pure admission and status surfaces but reports activation
+unavailable until validated Mach-O imports and immutable executable-image
+staging are proved. Native Windows does the same pending its PE loading and
+sandbox path. WSL2 uses the proved Linux lane.
+
 The build profiles are explicit: resident modules use `DEV_LIVE`, an isolated
 incremental process replacement uses `DEV_RESTART`, static combined proof uses
 `INTEGRATION`, and production uses `RELEASE`. The first three are permanently

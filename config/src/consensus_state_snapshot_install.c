@@ -8,6 +8,7 @@
 #include "config/consensus_state_producer_receipt.h"
 #include "consensus_state_snapshot_install_internal.h"
 #include "core/utiltime.h"
+#include "platform/fd_path.h"
 #include "crypto/sha3.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
@@ -286,9 +287,15 @@ static bool sidecars_absent(const char *path)
 
 static bool open_bundle_descriptor(int artifact_fd, sqlite3 **bundle_db)
 {
-    char uri[96];
+    /* Name the pinned descriptor through the one fd-naming shim. */
+    char fd_name[64];
+    if (!platform_fd_path(fd_name, sizeof(fd_name), artifact_fd, NULL)) {
+        LOG_FAIL(INSTALL_SUBSYS, "bundle fd cannot be named");
+        return false;
+    }
+    char uri[128];
     int n = snprintf(uri, sizeof(uri),
-                     "file:/proc/self/fd/%d?mode=ro&immutable=1", artifact_fd);
+                     "file:%s?mode=ro&immutable=1", fd_name);
     if (n <= 0 || (size_t)n >= sizeof(uri))
         LOG_FAIL(INSTALL_SUBSYS, "bundle URI too long");
     int rc = sqlite3_open_v2(uri, bundle_db,

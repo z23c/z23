@@ -13,7 +13,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#if defined(ZCL_DEV_BUILD) && !defined(_WIN32)
+#if ZCL_HOTSWAP_NATIVE_AVAILABLE
 #include <dlfcn.h>
 #include <pthread.h>
 #include <time.h>
@@ -381,7 +381,7 @@ bool zcl_hotswap_service_publish(
  * dl* call site can never leave the dev-only region (check-hotswap-dev-only
  * reads that exact toggle; a release build must link zero dl* code). */
 #ifdef ZCL_DEV_BUILD
-#if !defined(_WIN32)
+#if defined(__linux__) && !defined(_WIN32)
 struct service_handle_slot {
     char service_id[96];
     void *handle;
@@ -500,7 +500,7 @@ bool zcl_hotswap_service_activate_so(
 }
 #else
 #define ZCL_HOTSWAP_SERVICE_UNAVAILABLE 1
-#endif /* !_WIN32 */
+#endif /* Linux */
 #else
 #define ZCL_HOTSWAP_SERVICE_UNAVAILABLE 1
 #endif /* ZCL_DEV_BUILD */
@@ -517,14 +517,8 @@ bool zcl_hotswap_service_activate_so_any(
     if (!report)
         LOG_FAIL("hotswap.service", "activation report is NULL");
     memset(report, 0, sizeof(*report));
-#ifdef _WIN32
-    return reject(report, "windows", false,
-                  "service activation is disabled on Windows pending "
-                  "validated PE imports and immutable staging");
-#else
-    return reject(report, "unavailable", false,
-                  "service activation is unavailable in release builds");
-#endif
+    return reject(report, hotswap_native_unavailable_stage(), false,
+                  hotswap_native_unavailable_reason());
 }
 
 bool zcl_hotswap_service_activate_so(
