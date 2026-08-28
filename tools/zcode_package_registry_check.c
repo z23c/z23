@@ -169,6 +169,16 @@ int main(int argc, char **argv)
                     detail);
             if (err == VCS_PACKAGE_PREPARE_OK)
                 print_derived_roots(&prepared);
+            /* Naming the values is not enough to act on: this row's new
+             * content root is ALSO pinned in dependencies[].root of every
+             * dependent's zcode-package.json, and rewriting those moves
+             * their own roots in turn. Fixing one row by hand therefore
+             * never terminates -- point at the tool that iterates the
+             * cascade to a fixpoint. */
+            fprintf(stderr,
+                    "  fix: tools/scripts/zcode_registry_rederive.sh\n"
+                    "  (re-derives this row AND every dependent's pinned\n"
+                    "   copy of it, iterating to a fixpoint)\n");
             vcs_package_prepared_free(&prepared);
             return 1;
         }
