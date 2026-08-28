@@ -1,3 +1,12 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Purpose: acceptance for the Windows page-locker -- asserts VirtualLock /
+ * VirtualUnlock round-trip on a two-page span, and that the reference
+ * counting in locked_page_manager holds. A range spanning page+1 bytes must
+ * count 2 pages, a nested lock/unlock of the same range must leave that
+ * count at 2 rather than releasing pages another holder still needs, and
+ * the final unlock must return it to 0. Wallet key material is what sits in
+ * these pages, so a page released while still referenced is a page that can
+ * reach swap. */
 #include "support/pagelocker.h"
 
 #include <windows.h>

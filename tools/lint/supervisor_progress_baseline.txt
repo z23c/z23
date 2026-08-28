@@ -46,5 +46,4 @@ app/supervisors/src/net_supervisor.c 1
 app/supervisors/src/self_heal.c 1
 app/supervisors/src/staged_sync_supervisor.c 2
 config/src/bundle_exporter.c 1
-lib/sim/src/simnet_chaos_faults.c 2
 lib/storage/src/block_prefetch.c 1

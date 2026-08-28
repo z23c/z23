@@ -203,6 +203,14 @@ bool chaos_fault_slow_loris_seeder(uint64_t seed,
         return false;
     }
 
+    /* This child is a fault INJECTION: the case backdates its heartbeat
+     * on purpose so the supervisor declares it stalled. It has no work
+     * units to report and never will, so it is exempt rather than armed
+     * -- arming it would mean asserting progress the fixture exists to
+     * withhold. Test-only: the whole block is inside ZCL_TESTING. */
+    supervisor_set_progress_exempt(
+        id, "synthetic stall fixture: no work units by construction");
+
     /* THE FAULT: the seeder accepted the connection (the client would be
      * blocked in a real recv() on the socket) but never sends a byte —
      * modeled at the same supervisor liveness primitive every bounded-stall
