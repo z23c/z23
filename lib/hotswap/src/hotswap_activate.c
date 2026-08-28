@@ -2267,8 +2267,10 @@ bool hotswap_activate(const char *so_path, const char *resolved_datadir,
     memset(report, 0, sizeof(*report));
     report->verify_only = true;
     report->rolled_back = true;
-    act_copy(report->stage, sizeof(report->stage), HOTSWAP_UNAVAILABLE_STAGE);
-    act_copy(report->error, sizeof(report->error), HOTSWAP_UNAVAILABLE_REASON);
+    act_copy(report->stage, sizeof(report->stage),
+             hotswap_native_unavailable_stage());
+    act_copy(report->error, sizeof(report->error),
+             hotswap_native_unavailable_reason());
     return false;
 }
 
@@ -2284,8 +2286,10 @@ bool hotswap_activate_local(const char *so_path, const char *resolved_datadir,
     memset(report, 0, sizeof(*report));
     report->verify_only = true;
     report->rolled_back = true;
-    act_copy(report->stage, sizeof(report->stage), HOTSWAP_UNAVAILABLE_STAGE);
-    act_copy(report->error, sizeof(report->error), HOTSWAP_UNAVAILABLE_REASON);
+    act_copy(report->stage, sizeof(report->stage),
+             hotswap_native_unavailable_stage());
+    act_copy(report->error, sizeof(report->error),
+             hotswap_native_unavailable_reason());
     return false;
 }
 
@@ -2304,13 +2308,12 @@ bool hotswap_rollback(const char *source_tu,
     memset(report, 0, sizeof(*report));
     report->verify_only = true;
     report->rolled_back = true;
-    act_copy(report->stage, sizeof(report->stage), HOTSWAP_UNAVAILABLE_STAGE);
-    act_copy(report->error, sizeof(report->error), HOTSWAP_UNAVAILABLE_REASON);
+    act_copy(report->stage, sizeof(report->stage),
+             hotswap_native_unavailable_stage());
+    act_copy(report->error, sizeof(report->error),
+             hotswap_native_unavailable_reason());
     return false;
 }
-
-#undef HOTSWAP_UNAVAILABLE_STAGE
-#undef HOTSWAP_UNAVAILABLE_REASON
 
 #endif /* ZCL_HOTSWAP_ACTIVATE_UNAVAILABLE */
 #undef ZCL_HOTSWAP_ACTIVATE_UNAVAILABLE
