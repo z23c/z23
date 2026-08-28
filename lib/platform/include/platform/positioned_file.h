@@ -13,12 +13,29 @@ struct platform_positioned_file {
     uintptr_t native;
 };
 
+/* Handle-bound metadata used to prove that content and metadata came from
+ * one regular file, even when its pathname is concurrently replaced. */
+struct platform_positioned_file_snapshot {
+    uint64_t size;
+    int64_t modified_seconds;
+    uint64_t volume;
+    uint64_t file_low;
+    uint64_t file_high;
+};
+
 void platform_positioned_file_init(struct platform_positioned_file *file);
 bool platform_positioned_file_open(struct platform_positioned_file *file,
                                    const char *utf8_path);
 void platform_positioned_file_close(struct platform_positioned_file *file);
 bool platform_positioned_file_size(const struct platform_positioned_file *file,
                                    uint64_t *size);
+bool platform_positioned_file_snapshot(
+    const struct platform_positioned_file *file,
+    struct platform_positioned_file_snapshot *snapshot);
+/* True for a regular executable image. Windows validates the PE image magic;
+ * POSIX additionally requires at least one execute permission bit. */
+bool platform_positioned_file_is_executable(
+    const struct platform_positioned_file *file);
 
 /* Return bytes read (zero at EOF), or -1 on invalid input/I/O failure.  A
  * successful short read is preserved for callers that deliberately race an

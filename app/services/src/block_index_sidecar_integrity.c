@@ -11,12 +11,12 @@
 #include "encoding/utilstrencodings.h"
 #include "event/event.h"
 #include "ports/block_index_sidecar_port.h"
+#include "platform/file_metadata.h"
 #include "util/result.h"
 
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/stat.h>
 
 _Static_assert(BII_SIDECAR_BYTES == 48u,
                "BII_SIDECAR_BYTES must match sidecar header layout");
@@ -150,11 +150,16 @@ enum bii_verdict bii_verify(const char *datadir,
     snprintf(side_path, sizeof(side_path), "%s/%s", datadir, bii_spec.sidecar_name);
 
     /* Body presence. */
-    struct stat body_st;
-    if (stat(body_path, &body_st) != 0) {
+    struct platform_file_metadata body_metadata;
+    enum platform_file_metadata_result metadata_result =
+        platform_file_metadata_read(body_path, &body_metadata);
+    if (metadata_result != PLATFORM_FILE_METADATA_OK) {
         if (err_out) snprintf(err_out, err_cap,
-                "block_index.bin: %s", strerror(errno));
-        return errno == ENOENT ? BII_BODY_MISSING : BII_BODY_UNREADABLE;
+                "block_index.bin: %s",
+                metadata_result == PLATFORM_FILE_METADATA_MISSING
+                    ? "missing" : "unreadable or not a regular file");
+        return metadata_result == PLATFORM_FILE_METADATA_MISSING
+            ? BII_BODY_MISSING : BII_BODY_UNREADABLE;
     }
 
     /* Embedded single-file format FIRST (task #32): the integrity header
@@ -224,11 +229,11 @@ enum bii_verdict bii_verify(const char *datadir,
     }
 
     /* Size check before expensive hash. */
-    if (hdr.body_size != (uint64_t)body_st.st_size) {
+    if (hdr.body_size != body_metadata.size) {
         if (err_out) snprintf(err_out, err_cap,
-                "size drift: sidecar=%llu actual=%lld",
+                "size drift: sidecar=%llu actual=%llu",
                 (unsigned long long)hdr.body_size,
-                (long long)body_st.st_size);
+                (unsigned long long)body_metadata.size);
         return BII_SIDECAR_STALE;
     }
 
