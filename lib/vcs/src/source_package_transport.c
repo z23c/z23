@@ -3,6 +3,8 @@
 
 #include "vcs/source_package_transport.h"
 
+#include "platform/file_metadata.h"
+#include "platform/positioned_file.h"
 #include "util/safe_alloc.h"
 #include "vcs/package_manifest.h"
 #include "vcs/package_content.h"
@@ -14,13 +16,9 @@
 #include "vcs/zcode_accepted_work_bundle.h"
 #include "vcs/zcode_lane.h"
 
-#include <errno.h>
-#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 #define SOURCE_PACKAGE_MAX_AUTHORITY_BYTES 4096u
 
@@ -35,6 +33,18 @@ static const char *const offline_input_paths[] = {
     "vendor/.cache/sqlite-amalgamation-3490000.zip",
     "vendor/.cache/zlib-1.3.1.tar.gz",
 };
+
+static bool source_package_snapshot_same(
+    const struct platform_positioned_file_snapshot *a,
+    const struct platform_positioned_file_snapshot *b)
+{
+    return a->size == b->size && a->volume == b->volume &&
+           a->file_low == b->file_low && a->file_high == b->file_high &&
+           a->modified_seconds == b->modified_seconds &&
+           a->modified_nanoseconds == b->modified_nanoseconds &&
+           a->changed_seconds == b->changed_seconds &&
+           a->changed_nanoseconds == b->changed_nanoseconds;
+}
 
 static bool source_package_proven_lane(
     const uint8_t *wire, size_t wire_len, const uint8_t source_root[32],
@@ -190,35 +200,24 @@ static bool source_package_read_file(const char *workspace, const char *path,
 {
     *bytes_out = NULL;
     *len_out = 0;
-    char full[4096];
-    int n = snprintf(full, sizeof(full), "%s/%s", workspace, path);
-    struct stat before;
-    if (n <= 0 || (size_t)n >= sizeof(full) || lstat(full, &before) != 0 ||
-        !S_ISREG(before.st_mode) || before.st_size <= 0 ||
-        (uint64_t)before.st_size > VCS_PACKAGE_MAX_FILE_BYTES)
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open_beneath(&file, workspace, path) ||
+        !platform_positioned_file_snapshot(&file, &before) ||
+        before.size == 0 || before.size > VCS_PACKAGE_MAX_FILE_BYTES ||
+        before.size > SIZE_MAX) {
+        platform_positioned_file_close(&file);
         return false;
-    int fd = open(full, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (fd < 0) return false;
-    size_t len = (size_t)before.st_size;
-    uint8_t *bytes = zcl_malloc(len, "vcs.source_package.offline_input");
-    size_t off = 0;
-    bool ok = bytes != NULL;
-    while (ok && off < len) {
-        ssize_t got = read(fd, bytes + off, len - off);
-        if (got < 0 && errno == EINTR) continue;
-        if (got <= 0) ok = false;
-        else off += (size_t)got;
     }
-    struct stat after;
-    ok = ok && fstat(fd, &after) == 0 &&
-        before.st_dev == after.st_dev && before.st_ino == after.st_ino &&
-        before.st_mode == after.st_mode &&
-        before.st_size == after.st_size &&
-        before.st_mtim.tv_sec == after.st_mtim.tv_sec &&
-        before.st_mtim.tv_nsec == after.st_mtim.tv_nsec &&
-        before.st_ctim.tv_sec == after.st_ctim.tv_sec &&
-        before.st_ctim.tv_nsec == after.st_ctim.tv_nsec;
-    if (close(fd) != 0) ok = false;
+    size_t len = (size_t)before.size;
+    uint8_t *bytes = zcl_malloc(len, "vcs.source_package.offline_input");
+    int64_t got = bytes ? platform_positioned_file_read(
+                              &file, bytes, len, 0) : -1;
+    bool ok = got == (int64_t)len &&
+              platform_positioned_file_snapshot(&file, &after) &&
+              source_package_snapshot_same(&before, &after);
+    platform_positioned_file_close(&file);
     if (!ok) {
         free(bytes);
         return false;
@@ -238,11 +237,13 @@ static bool source_package_offline_inputs(
         char full[4096];
         int n = snprintf(full, sizeof(full), "%s/%s", workspace,
                          offline_input_paths[i]);
-        struct stat st;
         if (n <= 0 || (size_t)n >= sizeof(full)) return false;
-        if (lstat(full, &st) == 0) {
+        struct platform_file_metadata file_metadata;
+        enum platform_file_metadata_result metadata =
+            platform_file_metadata_read(full, &file_metadata);
+        if (metadata == PLATFORM_FILE_METADATA_OK) {
             present++;
-        } else if (errno != ENOENT) {
+        } else if (metadata != PLATFORM_FILE_METADATA_MISSING) {
             return false;
         }
     }
