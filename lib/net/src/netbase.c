@@ -8,6 +8,7 @@
 #include "encoding/utilstrencodings.h"
 #include "platform/socket_compat.h"
 #include "util/log_macros.h"
+#include "base/safe_alloc.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -62,7 +63,8 @@ bool lookup_host(const char *name, struct net_addr *results,
 
     if (max_results > SIZE_MAX / 16)
         return false;
-    uint8_t (*resolved)[16] = malloc(max_results * sizeof(*resolved));
+    uint8_t (*resolved)[16] =
+        zcl_malloc(max_results * sizeof(*resolved), "netbase.resolve_addresses");
     if (!resolved)
         return false;
     size_t count = 0;
