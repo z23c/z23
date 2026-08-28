@@ -21,6 +21,7 @@
 #include "services/node_db_import_service.h"
 
 #include "node_db_import_internal.h"
+#include "platform/logical_cpu.h"
 #include "platform/time_compat.h"
 #include "services/recovery_policy.h"
 #include "services/utxo_import_pipeline.h"
@@ -41,7 +42,6 @@
 #include <stdint.h>
 #include <pthread.h>
 #include <signal.h>
-#include <unistd.h>
 
 /* db_iter_check_error is declared in storage/dbwrapper.h (included above) and
  * now returns bool (true = clean scan, false = LevelDB iterator error). */
@@ -177,8 +177,8 @@ struct zcl_result node_db_import_service_run(struct node_db *ndb,
     sync_job_import_begin();
 
     int num_decoders = utxo_import_num_decoders();
-    printf("UTXO import: parallel pipeline (%d decoders, %d chunks, %ld cores)...\n",
-           num_decoders, IMPORT_NUM_CHUNKS, sysconf(_SC_NPROCESSORS_ONLN));
+    printf("UTXO import: parallel pipeline (%d decoders, %d chunks, %u cores)...\n",
+           num_decoders, IMPORT_NUM_CHUNKS, platform_logical_cpu_count());
     fflush(stdout);
 
     struct timespec ts_start;

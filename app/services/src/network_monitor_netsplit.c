@@ -22,13 +22,36 @@
 #include "util/log_macros.h"
 #include "util/sync.h"
 
+#include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static struct {
     zcl_mutex_t lock;
     struct network_partition_view view;
-} g_ns = { .lock = PTHREAD_MUTEX_INITIALIZER };
+} g_ns;
+
+static pthread_once_t g_ns_lock_once = PTHREAD_ONCE_INIT;
+
+static void ns_lock_init_once(void)
+{
+    zcl_mutex_init(&g_ns.lock);
+}
+
+static void ns_lock(void)
+{
+    /* This process-lifetime lock must be initialized as the host's native
+     * zcl_mutex_t (CRITICAL_SECTION on Win32, pthread mutex on POSIX).
+     * Route every acquisition through pthread_once so no caller can observe
+     * the zero-initialized object before its platform initialization. */
+    if (pthread_once(&g_ns_lock_once, ns_lock_init_once) != 0) {
+        LOG_ERROR("network_monitor",
+                  "netsplit lock one-time initialization failed");
+        abort();
+    }
+    zcl_mutex_lock(&g_ns.lock);
+}
 
 
 /* Bounded per-cluster distinct-address-group ledger. A cluster that draws
@@ -288,7 +311,7 @@ void network_monitor_netsplit_publish(const struct network_partition_view *v)
 {
     if (!v)
         return;
-    zcl_mutex_lock(&g_ns.lock);
+    ns_lock();
     bool onset = v->netsplit_suspected && !g_ns.view.netsplit_suspected;
     g_ns.view = *v;
     g_ns.view.ready = true;
@@ -304,7 +327,7 @@ void network_monitor_netsplit_publish(const struct network_partition_view *v)
 
 bool network_monitor_netsplit_suspected(struct network_partition_view *out)
 {
-    zcl_mutex_lock(&g_ns.lock);
+    ns_lock();
     struct network_partition_view pv = g_ns.view;
     zcl_mutex_unlock(&g_ns.lock);
     if (out)

@@ -16,16 +16,24 @@
 #include "base/result.h"
 #include "base/safe_alloc.h"
 #include "crypto/sha3.h"
+#include "platform/file_metadata.h"
+#include "platform/positioned_file.h"
 #include "vcs/package_publish.h"
 
+#if !defined(_WIN32)
 #include <dirent.h>
+#endif
 #include <errno.h>
+#if !defined(_WIN32)
 #include <fcntl.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 /* ── context ────────────────────────────────────────────────────────── */
 
@@ -297,6 +305,10 @@ struct zcl_result pkgl_materialize_package(const struct pkgl_ctx *ctx,
 {
     if (!ctx || !root || !destination || !destination[0])
         return ZCL_ERR(-1, "null argument materializing a package");
+#if defined(_WIN32)
+    return ZCL_ERR(-1, "package materialization is disabled on Windows until "
+                       "the sandbox and immutable staging lane qualify");
+#else
     struct vcs_package_manifest manifest;
     ZCL_CHECK(pkgl_load_manifest(ctx, root, &manifest));
     uint8_t derived[32];
@@ -368,6 +380,7 @@ struct zcl_result pkgl_materialize_package(const struct pkgl_ctx *ctx,
     }
     vcs_package_manifest_free(&manifest);
     return res;
+#endif
 }
 
 struct zcl_result pkgl_survey_package(const struct pkgl_ctx *ctx,
@@ -541,6 +554,9 @@ struct zcl_result pkgl_mkdir_p(const char *path)
 {
     if (!path || !path[0])
         return ZCL_ERR(-1, "null directory path");
+#if defined(_WIN32)
+    return ZCL_ERR(-1, "package store directory mutation is disabled on Windows");
+#else
     char buf[PKGL_PATH_MAX];
     size_t len = strlen(path);
     if (len >= sizeof(buf))
@@ -557,12 +573,16 @@ struct zcl_result pkgl_mkdir_p(const char *path)
     if (mkdir(buf, 0700) != 0 && errno != EEXIST)
         return ZCL_ERR(-1, "mkdir %s: %s", buf, strerror(errno));
     return ZCL_OK;
+#endif
 }
 
 struct zcl_result pkgl_rm_rf(const char *path)
 {
     if (!path || !path[0])
         return ZCL_ERR(-1, "null path to remove");
+#if defined(_WIN32)
+    return ZCL_ERR(-1, "package store removal is disabled on Windows");
+#else
     struct stat st;
     if (lstat(path, &st) != 0)
         return errno == ENOENT ? ZCL_OK
@@ -595,6 +615,7 @@ struct zcl_result pkgl_rm_rf(const char *path)
     if (rmdir(path) != 0 && res.ok)
         res = ZCL_ERR(-1, "rmdir %s: %s", path, strerror(errno));
     return res;
+#endif
 }
 
 struct zcl_result pkgl_read_file(const char *path, size_t cap, uint8_t **out,
@@ -604,27 +625,30 @@ struct zcl_result pkgl_read_file(const char *path, size_t cap, uint8_t **out,
         return ZCL_ERR(-1, "null argument reading a file");
     *out = NULL;
     *len_out = 0;
-    struct stat st;
-    if (stat(path, &st) != 0)
-        return ZCL_ERR(-1, "%s: %s", path, strerror(errno));
-    if (!S_ISREG(st.st_mode) || st.st_size < 0 || (uint64_t)st.st_size > cap)
+    struct platform_positioned_file file;
+    platform_positioned_file_init(&file);
+    uint64_t file_size = 0;
+    if (!platform_positioned_file_open(&file, path) ||
+        !platform_positioned_file_size(&file, &file_size)) {
+        platform_positioned_file_close(&file);
+        return ZCL_ERR(-1, "%s: refused, missing, or not a regular file", path);
+    }
+    if (file_size > cap || file_size > SIZE_MAX) {
+        platform_positioned_file_close(&file);
         return ZCL_ERR(-1, "%s: not a regular file within %zu bytes", path,
                        cap);
-    size_t len = (size_t)st.st_size;
+    }
+    size_t len = (size_t)file_size;
     uint8_t *buf = zcl_malloc(len ? len : 1u, "pkgl.read_file");
     if (!buf)
         return ZCL_ERR(-1, "cannot allocate %zu bytes for %s", len, path);
-    FILE *f = fopen(path, "rb");
-    if (!f) {
-        free(buf);
-        return ZCL_ERR(-1, "fopen %s: %s", path, strerror(errno));
-    }
-    if (len > 0 && fread(buf, 1, len, f) != len) {
-        fclose(f);
+    if (len > 0 && platform_positioned_file_read(&file, buf, len, 0) !=
+                       (int64_t)len) {
+        platform_positioned_file_close(&file);
         free(buf);
         return ZCL_ERR(-1, "short read on %s", path);
     }
-    fclose(f);
+    platform_positioned_file_close(&file);
     *out = buf;
     *len_out = len;
     return ZCL_OK;
@@ -635,6 +659,9 @@ struct zcl_result pkgl_write_atomic(const char *path, const uint8_t *data,
 {
     if (!path || (!data && len))
         return ZCL_ERR(-1, "null argument writing a file");
+#if defined(_WIN32)
+    return ZCL_ERR(-1, "package store writes are disabled on Windows");
+#else
     char tmp[PKGL_PATH_MAX];
     int n = snprintf(tmp, sizeof(tmp), "%s.zpltmp.%ld", path, (long)getpid());
     if (n <= 0 || (size_t)n >= sizeof(tmp))
@@ -662,6 +689,7 @@ struct zcl_result pkgl_write_atomic(const char *path, const uint8_t *data,
                        strerror(e));
     }
     return ZCL_OK;
+#endif
 }
 
 struct zcl_result pkgl_sha3_file(const char *path, uint8_t out[32],
@@ -669,21 +697,24 @@ struct zcl_result pkgl_sha3_file(const char *path, uint8_t out[32],
 {
     if (!path || !out || !bytes_out)
         return ZCL_ERR(-1, "null argument hashing a file");
-    FILE *f = fopen(path, "rb");
-    if (!f)
-        return ZCL_ERR(-1, "fopen %s: %s", path, strerror(errno));
+    struct platform_positioned_file file;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path))
+        return ZCL_ERR(-1, "open %s: refused, missing, or not regular", path);
     struct sha3_256_ctx ctx;
     sha3_256_init(&ctx);
     uint8_t buf[65536];
     uint64_t total = 0;
-    size_t got;
-    while ((got = fread(buf, 1, sizeof(buf), f)) > 0) {
+    uint64_t offset = 0;
+    int64_t got;
+    while ((got = platform_positioned_file_read(&file, buf, sizeof(buf),
+                                                 offset)) > 0) {
         sha3_256_write(&ctx, buf, got);
-        total += got;
+        total += (uint64_t)got;
+        offset += (uint64_t)got;
     }
-    bool bad = ferror(f) != 0;
-    fclose(f);
-    if (bad)
+    platform_positioned_file_close(&file);
+    if (got < 0)
         return ZCL_ERR(-1, "read error hashing %s", path);
     sha3_256_finalize(&ctx, out);
     *bytes_out = total;
@@ -694,15 +725,17 @@ struct zcl_result pkgl_exists(const char *path, bool *out)
 {
     if (!path || !out)
         return ZCL_ERR(-1, "null argument probing a path");
-    struct stat st;
-    if (lstat(path, &st) == 0) {
+    struct platform_file_metadata metadata;
+    enum platform_file_metadata_result result =
+        platform_file_metadata_read(path, &metadata);
+    if (result == PLATFORM_FILE_METADATA_OK) {
         *out = true;
         return ZCL_OK;
     }
     *out = false;
-    if (errno == ENOENT || errno == ENOTDIR)
+    if (result == PLATFORM_FILE_METADATA_MISSING)
         return ZCL_OK;
-    return ZCL_ERR(-1, "lstat %s: %s", path, strerror(errno));
+    return ZCL_ERR(-1, "%s: refused or not a regular file", path);
 }
 
 struct zcl_result pkgl_installed_dir(const struct pkgl_ctx *ctx,
