@@ -5,7 +5,6 @@
  */
 
 #include "metrics/stage_metrics.h"
-#include "base/format_attribute.h"
 #include "util/stage.h"
 
 #include <stdarg.h>
@@ -48,7 +47,7 @@ void metrics_stage_set_samples(const int64_t cursor[METRICS_STAGE_COUNT],
 /* Same bounded vsnprintf-append convention as prometheus_metrics.c's
  * file-local `append()` — duplicated rather than shared because both are
  * small, file-scoped helpers with no other consumer. */
-ZCL_PRINTF_LIKE(4, 5)
+__attribute__((format(printf, 4, 5)))
 static size_t stage_append(char *buf, size_t cap, size_t pos, const char *fmt, ...)
 {
     if (pos >= cap) return pos;

@@ -8,8 +8,6 @@
 #include <stdatomic.h>
 #include <stddef.h>
 
-#include "base/format_attribute.h"
-
 /* ── Event types ─────────────────────────────────────────────
  * Every observable event in the system. Grouped by subsystem.
  * Adding a new event: add the enum, add the name string in
@@ -286,7 +284,7 @@ void event_emit(enum event_type type, uint32_t peer_id,
 /* Convenience: emit with a format string as payload. */
 void event_emitf(enum event_type type, uint32_t peer_id,
                  const char *fmt, ...)
-    ZCL_PRINTF_LIKE(3, 4);
+    __attribute__((format(printf, 3, 4)));
 
 /* Dump last `count` events to stderr. For crash handlers. */
 void event_dump_recent(size_t count);

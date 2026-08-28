@@ -5,7 +5,6 @@
  * Sapling tree state, and chain statistics. */
 
 #include "platform/time_compat.h"
-#include "platform/read_mapping.h"
 #include "views/format_helpers.h"
 #include "controllers/chain_inspect_controller.h"
 #include "controllers/rpc_chainstate_guard.h"
@@ -33,6 +32,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <time.h>
@@ -457,7 +457,7 @@ static bool rpc_scancommitments(const struct json_value *params, bool help,
     RPC_HELP(help, result,
         "scancommitments start_height end_height\n"
         "Fast-scan blocks for Sapling commitments without building tree.\n"
-        "Reports commitment count per block range. Uses a read-only mapping + fast_scan.\n"
+        "Reports commitment count per block range. Uses mmap + fast_scan.\n"
         "\nArguments:\n"
         "1. start_height  (int, required)\n"
         "2. end_height    (int, required)\n");
@@ -482,9 +482,8 @@ static bool rpc_scancommitments(const struct json_value *params, bool help,
     }
 
     int cached_file = -1;
-    int cached_fd = -1;
-    struct platform_read_mapping cached_mapping;
-    platform_read_mapping_init(&cached_mapping);
+    uint8_t *cached_data = NULL;
+    size_t cached_size = 0;
     int64_t total_cms = 0;
     int blocks_with_cms = 0;
     int64_t t0 = (int64_t)platform_time_wall_time_t();
@@ -495,41 +494,35 @@ static bool rpc_scancommitments(const struct json_value *params, bool help,
         if (!bi || !(bi->nStatus & BLOCK_HAVE_DATA)) continue;
 
         if (bi->nFile != cached_file) {
-            platform_read_mapping_close(&cached_mapping);
-            if (cached_fd >= 0) close(cached_fd);
-            cached_fd = -1;
+            if (cached_data) munmap(cached_data, cached_size);
             char path[512];
             snprintf(path, sizeof(path), "%s/blocks/blk%05d.dat",
                      ctx->datadir, bi->nFile);
             int fd = open(path, O_RDONLY);
-            if (fd < 0) { cached_file = -1; continue; }
+            if (fd < 0) { cached_data = NULL; cached_file = -1; continue; }
             struct stat fst;
             if (fstat(fd, &fst) != 0) { close(fd); continue; }
-            if (fst.st_size <= 0 || (uintmax_t)fst.st_size > SIZE_MAX) {
-                close(fd);
-                cached_file = -1;
-                continue;
+            cached_size = (size_t)fst.st_size;
+            cached_data = mmap(NULL, cached_size,
+                               PROT_READ, MAP_PRIVATE, fd, 0);
+            close(fd);
+            if (cached_data == MAP_FAILED) {
+                cached_data = NULL; cached_file = -1; continue;
             }
-            bool mapped = platform_read_mapping_open(
-                &cached_mapping, fd, (size_t)fst.st_size);
-            if (!mapped) { close(fd); cached_file = -1; continue; }
-            cached_fd = fd;
             cached_file = bi->nFile;
         }
-        if (!cached_mapping.data || bi->nDataPos >= cached_mapping.size)
-            continue;
+        if (!cached_data || bi->nDataPos >= cached_size) continue;
 
         uint8_t cms[4096][32];
         int n = fast_scan_sapling_commitments(
-            cached_mapping.data + bi->nDataPos,
-            cached_mapping.size - bi->nDataPos, cms, 4096);
+            cached_data + bi->nDataPos,
+            cached_size - bi->nDataPos, cms, 4096);
         if (n > 0) {
             total_cms += n;
             blocks_with_cms++;
         }
     }
-    platform_read_mapping_close(&cached_mapping);
-    if (cached_fd >= 0) close(cached_fd);
+    if (cached_data) munmap(cached_data, cached_size);
 
     int64_t elapsed = (int64_t)platform_time_wall_time_t() - t0;
 
@@ -579,9 +572,8 @@ static bool rpc_verifychainroots(const struct json_value *params, bool help,
     if (start < sapling_start) start = sapling_start;
 
     int cached_file = -1;
-    int cached_fd = -1;
-    struct platform_read_mapping cached_mapping;
-    platform_read_mapping_init(&cached_mapping);
+    uint8_t *cached_data = NULL;
+    size_t cached_size = 0;
     size_t total_cms = 0;
     int first_mismatch = -1;
     int checkpoints_ok = 0;
@@ -594,32 +586,28 @@ static bool rpc_verifychainroots(const struct json_value *params, bool help,
 
         if (bi->nStatus & BLOCK_HAVE_DATA) {
             if (bi->nFile != cached_file) {
-                platform_read_mapping_close(&cached_mapping);
-                if (cached_fd >= 0) close(cached_fd);
-                cached_fd = -1;
+                if (cached_data) munmap(cached_data, cached_size);
                 char path[512];
                 snprintf(path, sizeof(path), "%s/blocks/blk%05d.dat",
                          ctx->datadir, bi->nFile);
                 int fd = open(path, O_RDONLY);
-                if (fd < 0) { cached_file = -1; goto next; }
+                if (fd < 0) { cached_data = NULL; cached_file = -1; goto next; }
                 struct stat fst;
                 if (fstat(fd, &fst) != 0) { close(fd); goto next; }
-                if (fst.st_size <= 0 || (uintmax_t)fst.st_size > SIZE_MAX) {
-                    close(fd);
-                    cached_file = -1;
-                    goto next;
+                cached_size = (size_t)fst.st_size;
+                cached_data = mmap(NULL, cached_size,
+                                   PROT_READ, MAP_PRIVATE, fd, 0);
+                close(fd);
+                if (cached_data == MAP_FAILED) {
+                    cached_data = NULL; cached_file = -1; goto next;
                 }
-                bool mapped = platform_read_mapping_open(
-                    &cached_mapping, fd, (size_t)fst.st_size);
-                if (!mapped) { close(fd); cached_file = -1; goto next; }
-                cached_fd = fd;
                 cached_file = bi->nFile;
             }
-            if (cached_mapping.data && bi->nDataPos < cached_mapping.size) {
+            if (cached_data && bi->nDataPos < cached_size) {
                 uint8_t cms[4096][32];
                 int n = fast_scan_sapling_commitments(
-                    cached_mapping.data + bi->nDataPos,
-                    cached_mapping.size - bi->nDataPos, cms, 4096);
+                    cached_data + bi->nDataPos,
+                    cached_size - bi->nDataPos, cms, 4096);
                 for (int ci = 0; ci < n; ci++) {
                     struct uint256 cm;
                     memcpy(cm.data, cms[ci], 32);
@@ -642,8 +630,7 @@ next:
             }
         }
     }
-    platform_read_mapping_close(&cached_mapping);
-    if (cached_fd >= 0) close(cached_fd);
+    if (cached_data) munmap(cached_data, cached_size);
 
     int64_t elapsed = (int64_t)platform_time_wall_time_t() - t0;
 

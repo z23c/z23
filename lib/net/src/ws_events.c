@@ -4,7 +4,6 @@
 
 #define _DEFAULT_SOURCE  /* usleep */
 #include "net/ws_events.h"
-#include "base/format_attribute.h"
 #include "event/event.h"
 #include "crypto/sha1.h"
 #include "encoding/utilstrencodings.h"
@@ -448,7 +447,7 @@ int ws_events_client_count(void)
     return atomic_load(&g_client_count);
 }
 
-ZCL_PRINTF_LIKE(4, 5)
+__attribute__((format(printf, 4, 5)))
 static size_t ws_append(char *buf, size_t cap, size_t pos, const char *fmt, ...)
 {
     if (pos >= cap) return pos;

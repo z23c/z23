@@ -21,8 +21,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "base/format_attribute.h"
-
 /* ── on-disk constants (LevelDB format, frozen) ────────────────────── */
 
 #define LDB_BLOCK_TRAILER_SIZE   5u        /* 1 compression byte + 4 crc */
@@ -264,7 +262,7 @@ struct ldbr_iterator *ldbr_db_iter_internal(struct ldbr_db *db);
 /* ── small helpers shared across the reader ─────────────────────────── */
 
 char *ldb_strdup(const char *s);
-char *ldb_errf(const char *fmt, ...) ZCL_PRINTF_LIKE(1, 2);
+char *ldb_errf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 /* mmap a whole file read-only; returns NULL and sets *err on failure. */
 const uint8_t *ldb_map_file(const char *path, size_t *out_size, char **err);
 void ldb_unmap_file(const uint8_t *base, size_t size);

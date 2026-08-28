@@ -25,8 +25,6 @@
 
 #include <stdbool.h>
 
-#include "base/format_attribute.h"
-
 enum zcl_log_level {
     ZCL_LOG_ALL   = 0, /* alias of ZCL_LOG_INFO: the default, emits every LOG_* site */
     ZCL_LOG_INFO  = 0,
@@ -55,6 +53,6 @@ bool zcl_log_level_from_string(const char *s, enum zcl_log_level *out);
  * by ZCL_LOG_EMIT_AT (log_macros.h) after the level gate passes — do not
  * call directly; use the LOG_* / GUARD* macros. */
 void zcl_log_emit_at(enum zcl_log_level level, const char *fmt, ...)
-    ZCL_PRINTF_LIKE(2, 3);
+    __attribute__((format(printf, 2, 3)));
 
 #endif /* ZCL_LOG_LEVEL_H */

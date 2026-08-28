@@ -9,8 +9,8 @@
 
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
-#include "platform/glob_match.h"
 
+#include <fnmatch.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -123,7 +123,7 @@ bool vcs_seal_path_matches(const char *path, char *const *globs, size_t nglobs)
         if (g[gl - 1] == '/') {
             if (strncmp(path, g, gl) == 0)
                 return true;
-        } else if (platform_glob_match(g, path, true)) {
+        } else if (fnmatch(g, path, FNM_PATHNAME) == 0) {
             return true;
         }
     }

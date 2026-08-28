@@ -75,7 +75,6 @@
 #include "metaverse/property_action.h"
 #include "metaverse/property_id.h"
 #include "metaverse/property_work.h"
-#include "base/format_attribute.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -219,7 +218,7 @@ bool metaverse_view_determined(struct metaverse_property_view *view,
  * fields as facts. */
 void metaverse_view_undetermined(struct metaverse_property_view *view,
                                  const char *fmt, ...)
-    ZCL_PRINTF_LIKE(2, 3);
+    __attribute__((format(printf, 2, 3)));
 
 /* Render one view as a JSON object into `out` (set to an object by this
  * call). Every field is emitted, including the explicit unknowns — a
