@@ -38,9 +38,9 @@
 #include "jobs/catchup_cadence.h"
 #include "jobs/refold_cadence.h"
 #include "jobs/validate_headers_stage.h"
+#include "platform/logical_cpu.h"
 
 #include <stdlib.h>
-#include <unistd.h>
 
 static int vh_env_clamped(const char *name, int def, int lo, int hi)
 {
@@ -59,8 +59,7 @@ static int vh_env_clamped(const char *name, int def, int lo, int hi)
 /* Catch-up pool default: min(online processors, VH_CATCHUP_POOL_CAP). */
 static int vh_catchup_pool_default(void)
 {
-    long n = sysconf(_SC_NPROCESSORS_ONLN);
-    if (n < 1) n = 1;
+    uint32_t n = platform_logical_cpu_count();
     if (n > VH_CATCHUP_POOL_CAP) n = VH_CATCHUP_POOL_CAP;
     return (int)n;
 }

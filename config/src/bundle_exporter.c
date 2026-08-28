@@ -48,16 +48,93 @@
 #include "core/utiltime.h"
 
 #include <ctype.h>
-#include <dirent.h>
 #include <errno.h>
-#include <fcntl.h>
-#include <pthread.h>
-#include <stdarg.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#if defined(_WIN32)
+
+/* Native Windows export/retention stays fail-closed until the snapshot writer,
+ * durable installation, and pruning transaction have passed the Windows
+ * private-directory and atomic-file acceptance suite.  These exported gates
+ * execute before any pathname is opened or created. */
+bool bundle_exporter_start(sqlite3 *pdb, const char *datadir)
+{
+    (void)pdb;
+    (void)datadir;
+    return false;
+}
+
+void bundle_exporter_stop(void) {}
+
+bool bundle_exporter_register_service(struct zcl_service_kernel *kernel,
+                                      const char *datadir)
+{
+    (void)kernel;
+    (void)datadir;
+    return false;
+}
+
+bool bundle_exporter_dump_state_json(struct json_value *out, const char *key)
+{
+    (void)key;
+    if (!out) return false;
+    json_set_object(out);
+    json_push_kv_bool(out, "session_open", false);
+    json_push_kv_bool(out, "qualified", false);
+    json_push_kv_str(out, "degradation_reason",
+                     "native Windows bundle export is security-refused");
+    json_push_kv_str(out, "last_refusal",
+                     "windows_export_retention_not_qualified");
+    return true;
+}
+
+#ifdef ZCL_TESTING
+bool bundle_exporter_source_identity_is_exact_for_test(const char *source_id)
+{
+    if (!source_id || strlen(source_id) != 64) return false;
+    for (size_t i = 0; i < 64; ++i)
+        if (!((source_id[i] >= '0' && source_id[i] <= '9') ||
+              (source_id[i] >= 'a' && source_id[i] <= 'f')))
+            return false;
+    return true;
+}
+
+bool bundle_exporter_at_tip_ok_for_test(bool synced, int log_head_gap,
+                                        int64_t max_tip_gap)
+{
+    return synced || (log_head_gap >= 0 &&
+                      (int64_t)log_head_gap <= max_tip_gap);
+}
+
+bool bundle_exporter_export_due_for_test(
+    int64_t h, int64_t last_h, int64_t elapsed_secs, int64_t every_blocks,
+    int64_t every_secs, int64_t min_secs)
+{
+    return h > last_h && elapsed_secs >= min_secs &&
+           ((h - last_h) >= every_blocks || elapsed_secs >= every_secs);
+}
+
+void bundle_exporter_rotate_for_test(const char *dir, int keep,
+                                     const char *datadir)
+{
+    (void)dir;
+    (void)keep;
+    (void)datadir;
+}
+
+void bundle_exporter_set_rotate_skip_validate_for_test(bool on) { (void)on; }
+#endif
+
+#else
+
+#include <dirent.h>
+#include <fcntl.h>
+#include <pthread.h>
+#include <stdarg.h>
+#include <stdatomic.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -986,3 +1063,5 @@ bool bundle_exporter_dump_state_json(struct json_value *out, const char *key)
 
     return true;
 }
+
+#endif /* _WIN32 */

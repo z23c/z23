@@ -6,6 +6,7 @@
 #include "core/utiltime.h"
 #include "crypto/sha3.h"
 #include "platform/file_sync.h"
+#include "platform/positioned_file.h"
 #include "util/log_macros.h"
 
 #include <errno.h>
@@ -13,8 +14,10 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #include <string.h>
+#ifndef _WIN32
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 #define IVR_SUBSYS "install_verify_receipt"
 
@@ -29,18 +32,22 @@
 #define IVR_WIRE_SIZE     108u
 #define IVR_VERSION       1u
 
+#ifndef _WIN32
 static _Atomic uint64_t g_temp_nonce;
+#endif
 
 static bool valid_dir_fd(int dir_fd)
 {
     return dir_fd >= 0;
 }
 
+#ifndef _WIN32
 static void put_u32(uint8_t *b, size_t o, uint32_t v)
 {
     for (size_t i = 0; i < 4; i++)
         b[o + i] = (uint8_t)(v >> (8u * i));
 }
+#endif
 
 static uint32_t get_u32(const uint8_t *b, size_t o)
 {
@@ -50,11 +57,13 @@ static uint32_t get_u32(const uint8_t *b, size_t o)
     return v;
 }
 
+#ifndef _WIN32
 static void put_u64(uint8_t *b, size_t o, uint64_t v)
 {
     for (size_t i = 0; i < 8; i++)
         b[o + i] = (uint8_t)(v >> (8u * i));
 }
+#endif
 
 static uint64_t get_u64(const uint8_t *b, size_t o)
 {
@@ -75,6 +84,7 @@ static void ivr_digest(const uint8_t *wire_without_digest, uint8_t out[32])
     sha3_256_finalize(&ctx, out);
 }
 
+#ifndef _WIN32
 static void encode(const uint8_t bundle_sha3_256[32],
                    const uint8_t verifier_epoch[32], int64_t verified_at_us,
                    uint8_t out[IVR_WIRE_SIZE])
@@ -104,6 +114,71 @@ static bool write_all(int fd, const uint8_t *buf, size_t n)
     }
     return true;
 }
+#endif
+
+static bool snapshot_equal(
+    const struct platform_positioned_file_snapshot *a,
+    const struct platform_positioned_file_snapshot *b)
+{
+    return a->size == b->size &&
+           a->modified_seconds == b->modified_seconds &&
+           a->modified_nanoseconds == b->modified_nanoseconds &&
+           a->changed_seconds == b->changed_seconds &&
+           a->changed_nanoseconds == b->changed_nanoseconds &&
+           a->volume == b->volume && a->file_low == b->file_low &&
+           a->file_high == b->file_high;
+}
+
+static bool verify_wire(const uint8_t wire[IVR_WIRE_SIZE],
+                        const uint8_t bundle_sha3_256[32],
+                        const uint8_t verifier_epoch[32],
+                        int64_t *out_age_us)
+{
+    if (get_u32(wire, IVR_OFF_VERSION) != IVR_VERSION)
+        return false;
+    uint8_t expected_digest[32];
+    ivr_digest(wire, expected_digest);
+    if (memcmp(expected_digest, wire + IVR_OFF_DIGEST, 32) != 0 ||
+        memcmp(wire + IVR_OFF_BUNDLE, bundle_sha3_256, 32) != 0 ||
+        memcmp(wire + IVR_OFF_EPOCH, verifier_epoch, 32) != 0)
+        return false;
+    int64_t age_us = GetTimeMicros() - (int64_t)get_u64(wire, IVR_OFF_TIME);
+    if (age_us < 0)
+        age_us = 0;
+    if (out_age_us)
+        *out_age_us = age_us;
+    return true;
+}
+
+bool consensus_state_install_verify_receipt_lookup_root(
+    const char *trusted_root_utf8, const uint8_t bundle_sha3_256[32],
+    const uint8_t verifier_epoch[32], int64_t *out_age_us)
+{
+    if (out_age_us)
+        *out_age_us = 0;
+    if (!trusted_root_utf8 || !trusted_root_utf8[0] || !bundle_sha3_256 ||
+        !verifier_epoch)
+        return false;
+
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before;
+    struct platform_positioned_file_snapshot after;
+    uint8_t wire[IVR_WIRE_SIZE];
+    platform_positioned_file_init(&file);
+    bool ok = platform_positioned_file_open_beneath(
+                  &file, trusted_root_utf8,
+                  CONSENSUS_STATE_INSTALL_VERIFY_RECEIPT_NAME) &&
+              platform_positioned_file_is_private(&file) &&
+              platform_positioned_file_snapshot(&file, &before) &&
+              before.size == IVR_WIRE_SIZE &&
+              platform_positioned_file_read(&file, wire, sizeof(wire), 0) ==
+                  (int64_t)sizeof(wire) &&
+              platform_positioned_file_snapshot(&file, &after) &&
+              snapshot_equal(&before, &after);
+    platform_positioned_file_close(&file);
+    return ok && verify_wire(wire, bundle_sha3_256, verifier_epoch,
+                             out_age_us);
+}
 
 bool consensus_state_install_verify_receipt_lookup(
     int dir_fd, const uint8_t bundle_sha3_256[32],
@@ -113,6 +188,12 @@ bool consensus_state_install_verify_receipt_lookup(
         *out_age_us = 0;
     if (!valid_dir_fd(dir_fd) || !bundle_sha3_256 || !verifier_epoch)
         return false; /* raw-return-ok:no-receipt-store-available */
+
+#ifdef _WIN32
+    /* A POSIX integer dirfd cannot carry a Windows directory HANDLE. Native
+     * callers must use lookup_root(), which performs handle-bound reads. */
+    return false;
+#else
 
     int fd = openat(dir_fd, CONSENSUS_STATE_INSTALL_VERIFY_RECEIPT_NAME,
                     O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
@@ -177,6 +258,7 @@ bool consensus_state_install_verify_receipt_lookup(
     if (out_age_us)
         *out_age_us = age_us;
     return true;
+#endif
 }
 
 void consensus_state_install_verify_receipt_store(
@@ -185,6 +267,12 @@ void consensus_state_install_verify_receipt_store(
 {
     if (!valid_dir_fd(dir_fd) || !bundle_sha3_256 || !verifier_epoch)
         return;
+#ifdef _WIN32
+    LOG_WARN(IVR_SUBSYS,
+             "receipt store refused: Windows directory-handle atomic "
+             "replacement is not yet qualified");
+    return;
+#else
     uint8_t wire[IVR_WIRE_SIZE];
     encode(bundle_sha3_256, verifier_epoch, GetTimeMicros(), wire);
 
@@ -246,4 +334,5 @@ void consensus_state_install_verify_receipt_store(
         LOG_INFO(IVR_SUBSYS,
                  "content-verify receipt persisted; a byte-identical bundle "
                  "under this exact binary will skip the deep content scan");
+#endif
 }

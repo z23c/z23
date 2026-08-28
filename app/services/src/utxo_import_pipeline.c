@@ -4,6 +4,7 @@
 
 #include "../../../lib/storage/src/coins_record_codec.h"
 #include "models/database.h"
+#include "platform/logical_cpu.h"
 #include "util/ar_step_readonly.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
@@ -12,11 +13,10 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
 
 int utxo_import_num_decoders(void)
 {
-    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    uint32_t n = platform_logical_cpu_count();
     if (n < 6)
         return 4;
     if (n > 34)

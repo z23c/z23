@@ -14,9 +14,12 @@
  * Consensus-adjacent: touches the block-index load surface. Moved
  * byte-identically from boot_index.c — no logic change. */
 
-#include "platform/time_compat.h"
-#include "platform/file_advice.h"
+#include "platform/socket_compat.h"
 #include "config/boot_internal.h"
+#include "platform/time_compat.h"
+#include "platform/logical_cpu.h"
+#include "platform/positioned_file.h"
+#include "platform/read_mapping.h"
 #include "chain/chain.h"
 #include "chain/chainparams.h"
 #include "chain/pow.h"
@@ -28,12 +31,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <sys/mman.h>
-#include <fcntl.h>
-#include <unistd.h>
 #include <errno.h>
 #include <pthread.h>
+#include <limits.h>
+#ifndef _WIN32
+#include <sys/stat.h>
+#endif
 
 /* ZClassic mainnet block file magic (little-endian 0x6427e924) */
 #define ZCL_BLOCK_MAGIC 0x6427e924
@@ -176,35 +179,45 @@ static bool scan_file_append_meta(struct boot_scan_file_result *r,
 static void scan_parse_one_file(struct boot_scan_file_result *r)
 {
     r->ok = false;
-    int fd = open(r->path, O_RDONLY);
-    if (fd < 0) {
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before;
+    struct platform_positioned_file_snapshot after;
+    struct platform_read_mapping mapping;
+    platform_positioned_file_init(&file);
+    platform_read_mapping_init(&mapping);
+    if (!platform_positioned_file_open(&file, r->path)) {
         fprintf(stderr, "scan: cannot open %s: %s\n", r->path, strerror(errno));
         return;
     }
 
-    struct stat st;
-    if (fstat(fd, &st) != 0 || st.st_size <= 0) {
-        close(fd);
+    if (!platform_positioned_file_snapshot(&file, &before) ||
+        before.size == 0) {
+        platform_positioned_file_close(&file);
         r->ok = true;
         return;
     }
-    r->file_size = (long)st.st_size;
+    if (before.size > (uint64_t)LONG_MAX || before.size > (uint64_t)SIZE_MAX) {
+        fprintf(stderr, "scan: block file too large for this build: %s\n",
+                r->path);
+        platform_positioned_file_close(&file);
+        return;
+    }
+    r->file_size = (long)before.size;
 
     /* This scan walks the whole blk*.dat front-to-back (the `pos` cursor
      * below only ever advances) during boot index rebuild / import — tell
      * the kernel to read ahead aggressively instead of caching for random
      * access. Advisory only: a denied/unsupported call just forgoes the
      * readahead hint, never fails the scan. */
-    platform_file_advise_sequential(fd, st.st_size);
-
-    uint8_t *data = mmap(NULL, (size_t)st.st_size, PROT_READ,
-                         MAP_PRIVATE, fd, 0);
-    close(fd);
-    if (data == MAP_FAILED) {
-        fprintf(stderr, "scan: mmap failed for %s: %s\n",
+    if (!platform_read_mapping_open_positioned(
+            &mapping, &file, (size_t)before.size)) {
+        fprintf(stderr, "scan: read mapping failed for %s: %s\n",
                 r->path, strerror(errno));
+        platform_positioned_file_close(&file);
         return;
     }
+    platform_read_mapping_advise_sequential(&mapping);
+    const uint8_t *data = mapping.data;
 
     bool complete = true;
     int consec_errors = 0;
@@ -281,8 +294,20 @@ static void scan_parse_one_file(struct boot_scan_file_result *r)
         pos += 8 + (long)blk_size;
     }
 
-    munmap(data, (size_t)st.st_size);
-    r->ok = complete;
+    bool stable = platform_positioned_file_snapshot(&file, &after) &&
+                  before.size == after.size &&
+                  before.modified_seconds == after.modified_seconds &&
+                  before.modified_nanoseconds == after.modified_nanoseconds &&
+                  before.changed_seconds == after.changed_seconds &&
+                  before.changed_nanoseconds == after.changed_nanoseconds &&
+                  before.volume == after.volume &&
+                  before.file_low == after.file_low &&
+                  before.file_high == after.file_high;
+    platform_read_mapping_close(&mapping);
+    platform_positioned_file_close(&file);
+    if (!stable)
+        fprintf(stderr, "scan: block file changed during scan: %s\n", r->path);
+    r->ok = complete && stable;
 }
 
 struct boot_scan_parallel_ctx {
@@ -319,7 +344,7 @@ static int scan_worker_count(int nfiles)
                 override);
     }
 
-    long cpus = sysconf(_SC_NPROCESSORS_ONLN);
+    uint32_t cpus = platform_logical_cpu_count();
     int n = cpus > 0 ? (int)cpus : 1;
     if (n > nfiles) n = nfiles;
     if (n > 16) n = 16;
@@ -457,6 +482,17 @@ static void scan_free_file_results(struct boot_scan_file_result *files,
         free(files[i].blocks);
 }
 
+static bool scan_regular_nonempty(const char *path)
+{
+    struct platform_positioned_file file;
+    uint64_t size = 0;
+    platform_positioned_file_init(&file);
+    bool ok = platform_positioned_file_open(&file, path) &&
+              platform_positioned_file_size(&file, &size) && size > 0;
+    platform_positioned_file_close(&file);
+    return ok;
+}
+
 /* Scan block files on disk, parse proper ZClassic headers (with
  * equihash solution), create block_index entries if missing, set
  * nTx, mark BLOCK_HAVE_DATA, and propagate nChainTx so
@@ -488,23 +524,22 @@ int scan_block_files_mark_data(struct main_state *ms, const char *datadir,
     for (int file_idx = 0; file_idx < 256; file_idx++) {
         snprintf(path, sizeof(path), "%s/blocks/blk%05d.dat",
                  datadir, file_idx);
-        struct stat st;
-        if (stat(path, &st) != 0 || st.st_size == 0) {
+        if (!scan_regular_nonempty(path)) {
             if (++consecutive_misses >= 3) break;
             continue;
         }
         consecutive_misses = 0;
 
-        /* Hardlink tripwire: st_nlink > 1 means another path shares this
-         * inode — potentially a live foreign writer (e.g. a zclassicd
-         * oracle datadir hardlinked into this one) whose own append pointer
-         * can overwrite records this scan is about to index. Positions in
-         * the last blk file are provisional on such a layout. */
-        if (st.st_nlink > 1)
+#ifndef _WIN32
+        /* Advisory hardlink tripwire. Authoritative scan acceptance remains
+         * bound to the opened file identity checked by scan_parse_one_file. */
+        struct stat st;
+        if (lstat(path, &st) == 0 && st.st_nlink > 1)
             fprintf(stderr,  // obs-ok:hardlink-tripwire-boot-scan-foreign-writer-warning
                     "scan: %s has %lu hard links — shared blk file; "
                     "a foreign writer may invalidate indexed positions\n",
                     path, (unsigned long)st.st_nlink);
+#endif
 
         struct boot_scan_file_result *r = &files[nfiles++];
         snprintf(r->path, sizeof(r->path), "%s", path);
@@ -515,8 +550,7 @@ int scan_block_files_mark_data(struct main_state *ms, const char *datadir,
      * File-service bootstrap does not always create it, so missing
      * sync spool should not look like a scan failure. */
     snprintf(path, sizeof(path), "%s/blocks/blk_sync.dat", datadir);
-    struct stat sync_st;
-    if (stat(path, &sync_st) == 0 && sync_st.st_size > 0) {
+    if (scan_regular_nonempty(path)) {
         struct boot_scan_file_result *r = &files[nfiles++];
         snprintf(r->path, sizeof(r->path), "%s", path);
         r->file_idx = 255;

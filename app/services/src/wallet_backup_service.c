@@ -22,6 +22,8 @@
 #include "base/text_fit.h"
 #include "crypto/sha3.h"
 #include "models/wallet_backup_receipt.h"
+#include "platform/positioned_file.h"
+#include "platform/private_file.h"
 #include "platform/time_compat.h"
 #include "services/wallet_backup_internal.h"
 #include "services/wallet_backup_service.h"
@@ -95,83 +97,117 @@ static struct liveness_contract g_wbs_contract;
 
 /* ── Helpers ────────────────────────────────────────────────── */
 
-static bool wbs_same_file(const struct stat *a, const struct stat *b)
+static bool wbs_same_snapshot(
+    const struct platform_positioned_file_snapshot *a,
+    const struct platform_positioned_file_snapshot *b)
 {
-    return a && b && a->st_dev == b->st_dev && a->st_ino == b->st_ino &&
-           a->st_size == b->st_size &&
-           a->st_mtim.tv_sec == b->st_mtim.tv_sec &&
-           a->st_mtim.tv_nsec == b->st_mtim.tv_nsec &&
-           a->st_ctim.tv_sec == b->st_ctim.tv_sec &&
-           a->st_ctim.tv_nsec == b->st_ctim.tv_nsec;
+    return a && b && a->size == b->size &&
+           a->modified_seconds == b->modified_seconds &&
+           a->modified_nanoseconds == b->modified_nanoseconds &&
+           a->changed_seconds == b->changed_seconds &&
+           a->changed_nanoseconds == b->changed_nanoseconds &&
+           a->volume == b->volume && a->file_low == b->file_low &&
+           a->file_high == b->file_high;
 }
-/* Hash through a no-follow descriptor and prove the file identity did not
- * change while it was read. A receipt never grants send authority from a path
- * check alone. */
-static bool wbs_hash_regular_file(const char *path, uint8_t out[32],
-                                  int64_t *size_out)
+
+static bool wbs_path_char_equal(char a, char b)
 {
-    if (!path || !out || !size_out)
+#ifdef _WIN32
+    if (a == '\\') a = '/';
+    if (b == '\\') b = '/';
+    if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+    if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+#endif
+    return a == b;
+}
+
+static bool wbs_canonical_backup_path(const char *backup_dir,
+                                      const char *canonical_path)
+{
+    char probe[WALLET_BACKUP_RECEIPT_PATH_MAX];
+    char resolved[WALLET_BACKUP_RECEIPT_PATH_MAX];
+    char canonical_root[WALLET_BACKUP_RECEIPT_PATH_MAX];
+    int n = snprintf(probe, sizeof(probe), "%s/%s", backup_dir,
+                     ".z23-wallet-backup-root-probe");
+    if (n <= 0 || (size_t)n >= sizeof(probe) ||
+        !platform_private_path_resolve(probe, resolved, sizeof(resolved),
+                                       canonical_root,
+                                       sizeof(canonical_root)))
+        return false;
+    size_t root_len = strlen(canonical_root);
+    size_t path_len = strlen(canonical_path);
+    if (path_len <= root_len + 1)
+        return false;
+    for (size_t i = 0; i < root_len; i++)
+        if (!wbs_path_char_equal(canonical_root[i], canonical_path[i]))
+            return false;
+    if (!wbs_path_char_equal(canonical_path[root_len], '/'))
+        return false;
+    const char *leaf = canonical_path + root_len + 1;
+    if (strchr(leaf, '/') || strchr(leaf, '\\') ||
+        strncmp(leaf, WALLET_BACKUP_FILENAME_PREFIX,
+                strlen(WALLET_BACKUP_FILENAME_PREFIX)) != 0)
+        return false;
+    size_t leaf_len = strlen(leaf);
+    size_t suffix_len = strlen(WALLET_BACKUP_FILENAME_SUFFIX_ENC);
+    return leaf_len >= suffix_len &&
+           strcmp(leaf + leaf_len - suffix_len,
+                  WALLET_BACKUP_FILENAME_SUFFIX_ENC) == 0;
+}
+
+/* Hash through one private, no-reparse handle and prove its canonical handle
+ * path is a direct policy-named child of the validated backup root. */
+static bool wbs_hash_regular_file(const char *backup_dir, const char *path,
+                                  uint8_t out[32], int64_t *size_out,
+                                  char *canonical_out, size_t canonical_cap)
+{
+    if (!backup_dir || !path || !out || !size_out || !canonical_out ||
+        canonical_cap == 0)
         return false; /* raw-return-ok:input validation predicate */
-    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (fd < 0)
+    struct platform_positioned_file file;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path))
         return false; /* raw-return-ok:unreadable receipt is not authority */
-    struct stat before;
-    if (fstat(fd, &before) != 0 || !S_ISREG(before.st_mode) ||
-        before.st_size <= 0) {
-        close(fd);
+    struct platform_positioned_file_snapshot before, after;
+    char canonical[WALLET_BACKUP_RECEIPT_PATH_MAX];
+    if (!platform_positioned_file_is_private(&file) ||
+        !platform_positioned_file_snapshot(&file, &before) ||
+        before.size == 0 || before.size > INT64_MAX ||
+        !platform_positioned_file_path(&file, canonical, sizeof(canonical)) ||
+        !wbs_canonical_backup_path(backup_dir, canonical)) {
+        platform_positioned_file_close(&file);
         return false; /* raw-return-ok:not a stable regular backup file */
     }
     struct sha3_256_ctx sha;
     sha3_256_init(&sha);
     uint8_t buf[65536];
-    int64_t total = 0;
+    uint64_t total = 0;
     bool ok = true;
-    for (;;) {
-        ssize_t n = read(fd, buf, sizeof(buf));
+    while (total < before.size) {
+        size_t wanted = before.size - total > sizeof(buf)
+            ? sizeof(buf) : (size_t)(before.size - total);
+        int64_t n = platform_positioned_file_read(
+            &file, buf, wanted, total);
         if (n > 0) {
-            if (total > INT64_MAX - n) {
-                ok = false;
-                break;
-            }
             sha3_256_write(&sha, buf, (size_t)n);
-            total += n;
+            total += (uint64_t)n;
             continue;
         }
-        if (n == 0)
-            break;
-        if (errno == EINTR)
-            continue;
         ok = false;
         break;
     }
-    struct stat after;
-    if (fstat(fd, &after) != 0 || !wbs_same_file(&before, &after) ||
-        total != before.st_size)
+    if (!platform_positioned_file_snapshot(&file, &after) ||
+        !wbs_same_snapshot(&before, &after) || total != before.size)
         ok = false;
-    close(fd);
+    platform_positioned_file_close(&file);
     if (!ok)
         return false; /* raw-return-ok:file changed or read failed */
     sha3_256_finalize(&sha, out);
-    *size_out = total;
+    *size_out = (int64_t)total;
+    int copied = snprintf(canonical_out, canonical_cap, "%s", canonical);
+    if (copied <= 0 || (size_t)copied >= canonical_cap)
+        return false;
     return true;
-}
-static bool wbs_receipt_path_bound(const char *backup_dir, const char *path)
-{
-    if (!backup_dir || backup_dir[0] != '/' || !path || path[0] != '/')
-        return false;
-    char prefix[WALLET_BACKUP_RECEIPT_PATH_MAX];
-    size_t dir_len = strlen(backup_dir);
-    int n = snprintf(prefix, sizeof(prefix), "%s%s%s", backup_dir,
-                     dir_len > 0 && backup_dir[dir_len - 1] == '/' ? "" : "/",
-                     WALLET_BACKUP_FILENAME_PREFIX);
-    if (n <= 0 || (size_t)n >= sizeof(prefix) ||
-        strncmp(path, prefix, (size_t)n) != 0)
-        return false;
-    size_t path_len = strlen(path);
-    size_t suffix_len = strlen(WALLET_BACKUP_FILENAME_SUFFIX_ENC);
-    return path_len >= suffix_len &&
-        strcmp(path + path_len - suffix_len,
-               WALLET_BACKUP_FILENAME_SUFFIX_ENC) == 0;
 }
 
 static void wbs_clear_encrypted_authority_locked(void)
@@ -193,10 +229,11 @@ static void wbs_restore_encrypted_authority_locked(void)
     (void)wallet_backup_tables(&table_count);
     uint8_t digest[32];
     int64_t size = 0;
-    if (!wbs_receipt_path_bound(g_wbs.cfg.backup_dir,
-                                receipt.backup_path) ||
-        receipt.tables_verified != (int)table_count ||
-        !wbs_hash_regular_file(receipt.backup_path, digest, &size) ||
+    char canonical[WALLET_BACKUP_RECEIPT_PATH_MAX];
+    if (receipt.tables_verified != (int)table_count ||
+        !wbs_hash_regular_file(g_wbs.cfg.backup_dir, receipt.backup_path,
+                               digest, &size, canonical,
+                               sizeof(canonical)) ||
         size != receipt.size_bytes ||
         memcmp(digest, receipt.file_sha3, sizeof(digest)) != 0) {
         LOG_WARN("wallet_backup",
@@ -209,7 +246,7 @@ static void wbs_restore_encrypted_authority_locked(void)
     g_wbs.last_encrypted_key_count = receipt.key_count;
     g_wbs.last_encrypted_tables_verified = receipt.tables_verified;
     snprintf(g_wbs.last_encrypted_path,
-             sizeof(g_wbs.last_encrypted_path), "%s", receipt.backup_path);
+             sizeof(g_wbs.last_encrypted_path), "%s", canonical);
 }
 
 static struct zcl_result wbs_record_encrypted_authority_locked(
@@ -220,15 +257,15 @@ static struct zcl_result wbs_record_encrypted_authority_locked(
         .key_count = g_wbs.last_key_count,
         .tables_verified = g_wbs.last_tables_verified,
     };
-    if (!wbs_receipt_path_bound(g_wbs.cfg.backup_dir, path))
-        return ZCL_ERR(-13, "encrypted backup path is outside backup policy");
-    if (snprintf(receipt.backup_path, sizeof(receipt.backup_path), "%s",
-                 path) <= 0 ||
-        strlen(path) >= sizeof(receipt.backup_path))
-        return ZCL_ERR(-13, "encrypted backup path exceeds receipt bound");
-    if (!wbs_hash_regular_file(path, receipt.file_sha3,
-                               &receipt.size_bytes))
+    char canonical[WALLET_BACKUP_RECEIPT_PATH_MAX];
+    if (!wbs_hash_regular_file(g_wbs.cfg.backup_dir, path,
+                               receipt.file_sha3, &receipt.size_bytes,
+                               canonical, sizeof(canonical)))
         return ZCL_ERR(-13, "encrypted backup bytes could not be verified");
+    if (snprintf(receipt.backup_path, sizeof(receipt.backup_path), "%s",
+                 canonical) <= 0 ||
+        strlen(canonical) >= sizeof(receipt.backup_path))
+        return ZCL_ERR(-13, "encrypted backup path exceeds receipt bound");
     if (!db_wallet_backup_receipt_save(g_wbs.db, &receipt))
         return ZCL_ERR(-13, "encrypted backup receipt could not be persisted");
 

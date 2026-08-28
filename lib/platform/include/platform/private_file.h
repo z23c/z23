@@ -43,6 +43,12 @@ bool platform_private_file_replace(struct platform_private_file *file,
                                    const char *destination_path);
 bool platform_private_file_retire(struct platform_private_file *file,
                                   const char *path);
+/* Delete exactly the regular file held by `file`, refusing if its identity no
+ * longer matches the object previously inspected. Path substitution must
+ * never cause deletion of the replacement object. */
+bool platform_private_file_retire_if_identity(
+    struct platform_private_file *file, const char *path,
+    const struct platform_private_file_identity *expected);
 bool platform_private_file_identity(struct platform_private_file *file,
                                     struct platform_private_file_identity *id);
 

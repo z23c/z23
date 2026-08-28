@@ -660,6 +660,52 @@ static int test_sync_benchmark_no_datadir_no_write(void)
     return failures;
 }
 
+static int test_sync_benchmark_private_replacement(void)
+{
+    int failures = 0;
+    TEST("sync_benchmark: durable replacement ignores fixed tmp collision") {
+        sync_benchmark_reset_for_test();
+        make_tmpdir();
+        char final_path[320], fixed_tmp[340];
+        snprintf(final_path, sizeof(final_path), "%s/sync_benchmark.json",
+                 g_tmpdir);
+        snprintf(fixed_tmp, sizeof(fixed_tmp), "%s.tmp", final_path);
+        FILE *old = fopen(final_path, "wb");
+        FILE *sentinel = fopen(fixed_tmp, "wb");
+        bool fixtures = old && sentinel;
+        if (old) {
+            fixtures = fixtures && fwrite("old", 1, 3, old) == 3;
+            fclose(old);
+        }
+        if (sentinel) {
+            fixtures = fixtures && fwrite("sentinel", 1, 8, sentinel) == 8;
+            fclose(sentinel);
+        }
+        sync_benchmark_init(g_tmpdir);
+        bool wrote = fixtures &&
+            sync_benchmark_write_receipt(false, "replacement_fixture");
+        struct json_value receipt = {0};
+        bool parsed = wrote && sb_read_receipt(&receipt);
+        if (parsed) json_free(&receipt);
+        char fixed_bytes[16] = {0};
+        FILE *check = fopen(fixed_tmp, "rb");
+        size_t fixed_len = check
+            ? fread(fixed_bytes, 1, sizeof(fixed_bytes), check) : 0;
+        if (check) fclose(check);
+        bool ok = parsed && fixed_len == 8 &&
+                  memcmp(fixed_bytes, "sentinel", 8) == 0;
+        if (ok) PASS();
+        else {
+            printf("FAIL: wrote=%d parsed=%d fixed_len=%zu\n",
+                   (int)wrote, (int)parsed, fixed_len);
+            failures++;
+        }
+    }
+    sync_benchmark_reset_for_test();
+    cleanup_tmpdir();
+    return failures;
+}
+
 /* ── Test registration ───────────────────────────────────────────── */
 
 int test_soak_attestation(void)
@@ -678,5 +724,6 @@ int test_soak_attestation(void)
     failures += test_sync_benchmark_bytes_reused_on_resume();
     failures += test_sync_benchmark_derived_monotonic();
     failures += test_sync_benchmark_no_datadir_no_write();
+    failures += test_sync_benchmark_private_replacement();
     return failures;
 }

@@ -15,19 +15,18 @@
 
 #include "services/storage_reclaim.h"
 
+#include "platform/directory_compat.h"
+#include "platform/positioned_file.h"
+#include "platform/private_file.h"
 #include "platform/time_compat.h"
 #include "services/db_maintenance.h"
 #include "storage/progress_store.h"
 #include "util/log_macros.h"
 
-#include <dirent.h>
-#include <errno.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <time.h>
-#include <unistd.h>
 
 static _Atomic int64_t g_reclaim_runs;
 
@@ -46,39 +45,61 @@ static int sweep_stale_tmp(const char *datadir, int64_t *bytes_out)
 {
     if (!datadir || !*datadir)
         return 0;
-    DIR *d = opendir(datadir);
-    if (!d) {
+    struct platform_directory_list entries;
+    if (!platform_directory_list_regular_sorted(datadir, &entries)) {
         LOG_WARN("storage_reclaim",
-                 "[reclaim] opendir(%s) failed: %s", datadir, strerror(errno));
+                 "[reclaim] directory enumeration failed: %s", datadir);
         return 0;
     }
     int removed = 0;
     time_t now = platform_time_wall_time_t();
-    struct dirent *e;
-    while ((e = readdir(d)) != NULL) {
-        size_t n = strlen(e->d_name);
-        if (n < 4 || strcmp(e->d_name + n - 4, ".tmp") != 0)
+    for (size_t i = 0; i < entries.count; i++) {
+        const char *name = entries.entries[i].name;
+        size_t n = strlen(name);
+        if (n < 4 || strcmp(name + n - 4, ".tmp") != 0)
             continue;
         char path[2048];
-        int pn = snprintf(path, sizeof(path), "%s/%s", datadir, e->d_name);
+        int pn = snprintf(path, sizeof(path), "%s/%s", datadir, name);
         if (pn <= 0 || pn >= (int)sizeof(path))
             continue;
-        struct stat st;
-        if (lstat(path, &st) != 0)
-            continue; /* vanished between readdir and lstat — nothing to do */
-        if (!S_ISREG(st.st_mode))
-            continue; /* never unlink a directory or follow a symlink */
-        if ((int64_t)(now - st.st_mtime) < STORAGE_RECLAIM_TMP_MIN_AGE_SECS)
+        struct platform_positioned_file inspected;
+        struct platform_positioned_file_snapshot snapshot;
+        platform_positioned_file_init(&inspected);
+        if (!platform_positioned_file_open_beneath(
+                &inspected, datadir, name) ||
+            !platform_positioned_file_snapshot(&inspected, &snapshot)) {
+            platform_positioned_file_close(&inspected);
+            continue;
+        }
+        platform_positioned_file_close(&inspected);
+        int64_t now_seconds = (int64_t)now;
+        uint64_t age = (uint64_t)now_seconds -
+                       (uint64_t)snapshot.modified_seconds;
+        if (snapshot.modified_seconds > now_seconds ||
+            age < STORAGE_RECLAIM_TMP_MIN_AGE_SECS)
             continue; /* young: may be an in-flight atomic write — leave it */
-        if (unlink(path) == 0) {
+        if (snapshot.size > INT64_MAX || snapshot.file_high != 0)
+            continue;
+
+        struct platform_private_file candidate;
+        struct platform_private_file_identity expected = {
+            .volume = snapshot.volume,
+            .file = snapshot.file_low,
+        };
+        platform_private_file_init(&candidate);
+        bool deleted = platform_private_file_open_locked(path, &candidate) &&
+            platform_private_file_retire_if_identity(
+                &candidate, path, &expected);
+        platform_private_file_close(&candidate);
+        if (deleted) {
             removed++;
-            if (bytes_out) *bytes_out += (int64_t)st.st_size;
+            if (bytes_out) *bytes_out += (int64_t)snapshot.size;
         } else {
             LOG_WARN("storage_reclaim",
-                     "[reclaim] unlink(%s) failed: %s", path, strerror(errno));
+                     "[reclaim] exact-file retirement refused: %s", path);
         }
     }
-    closedir(d);
+    platform_directory_list_free(&entries);
     return removed;
 }
 

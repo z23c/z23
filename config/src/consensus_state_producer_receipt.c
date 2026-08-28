@@ -8,11 +8,11 @@
 #include "storage/progress_store.h"
 #include "crypto/sha3.h"
 #include "core/utiltime.h"
+#include "platform/os_proc.h"
+#include "platform/positioned_file.h"
 #include "util/clientversion.h"
 #include "util/log_macros.h"
-#include "platform/os_proc.h"
 
-#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -84,43 +84,81 @@ static bool decode_sha256_identity(const char *hex, uint8_t out[32])
     return true;
 }
 
-/* SHA3-256 of the running executable's on-disk image -- the binding the
- * exporter recomputes. Must match running_binary_digest() in
- * consensus_state_snapshot_export_proof.c byte for byte. Reaching the
- * running image is the platform layer's job: it holds the running inode
- * where the host offers one, and resolves the executing image by other
- * means where it does not -- so this binding exists on every host, not
- * only the ones with /proc. */
+static bool producer_snapshot_equal(
+    const struct platform_positioned_file_snapshot *a,
+    const struct platform_positioned_file_snapshot *b)
+{
+    return a->size == b->size &&
+           a->modified_seconds == b->modified_seconds &&
+           a->modified_nanoseconds == b->modified_nanoseconds &&
+           a->changed_seconds == b->changed_seconds &&
+           a->changed_nanoseconds == b->changed_nanoseconds &&
+           a->volume == b->volume && a->file_low == b->file_low &&
+           a->file_high == b->file_high;
+}
+
+/* SHA3-256 of the executable image opened through the platform process seam.
+ * All bytes and both identity snapshots come from one no-reparse handle, so a
+ * pathname replacement cannot splice two image generations into one claim. */
 bool producer_running_binary_digest(uint8_t out[32])
 {
-    FILE *fp = os_proc_open_self_exe();
-    if (!fp) {
-        LOG_WARN(PRODUCER_RECEIPT_SUBSYS, "running executable open failed: %s",
-                 strerror(errno));
+    if (!out)
+        return false;
+    char executable[4096];
+    if (!os_proc_exe_path(executable, sizeof(executable))) {
+        LOG_WARN(PRODUCER_RECEIPT_SUBSYS,
+                 "running executable path resolution failed");
+        return false;
+    }
+    struct platform_positioned_file file;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, executable)) {
+        LOG_WARN(PRODUCER_RECEIPT_SUBSYS,
+                 "running executable handle open failed");
+        return false;
+    }
+    struct platform_positioned_file_snapshot before;
+    if (!platform_positioned_file_snapshot(&file, &before)) {
+        platform_positioned_file_close(&file);
         return false;
     }
     struct sha3_256_ctx ctx;
     sha3_256_init(&ctx);
     uint8_t buffer[32768];
     bool ok = true;
-    for (;;) {
-        size_t n = fread(buffer, 1, sizeof(buffer), fp);
-        if (n > 0)
-            sha3_256_write(&ctx, buffer, n);
-        if (n == sizeof(buffer))
+    uint64_t offset = 0;
+    while (offset < before.size) {
+        size_t wanted = before.size - offset < sizeof(buffer)
+            ? (size_t)(before.size - offset) : sizeof(buffer);
+        int64_t n = platform_positioned_file_read(&file, buffer, wanted,
+                                                   offset);
+        if (n > 0) {
+            sha3_256_write(&ctx, buffer, (size_t)n);
+            offset += (uint64_t)n;
             continue;
-        if (ferror(fp))
-            ok = false;
+        }
+        ok = false;
         break;
     }
-    if (fclose(fp) != 0)
-        ok = false;
+    struct platform_positioned_file_snapshot after;
+    ok = ok && offset == before.size &&
+         platform_positioned_file_snapshot(&file, &after) &&
+         producer_snapshot_equal(&before, &after);
+    platform_positioned_file_close(&file);
     if (ok)
         sha3_256_finalize(&ctx, out);
     else
         LOG_WARN(PRODUCER_RECEIPT_SUBSYS, "running executable digest failed");
     return ok;
 }
+
+#ifdef ZCL_TESTING
+bool consensus_state_producer_receipt_test_running_binary_digest(
+    uint8_t out[32])
+{
+    return producer_running_binary_digest(out);
+}
+#endif
 
 static void claim_digest(const char *domain, const uint8_t *extra,
                          size_t extra_len, uint8_t out[32])

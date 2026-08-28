@@ -24,6 +24,8 @@
  */
 
 #include "platform/time_compat.h"
+#include "platform/file_metadata.h"
+#include "platform/private_directory.h"
 #include "services/wallet_backup_internal.h"
 #include "services/wallet_backup_service.h"
 
@@ -35,9 +37,6 @@
 #include <stdlib.h>
 #include <stdatomic.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <unistd.h>
 
 #include "adapters/outbound/persistence/wallet_backup_store_sqlite.h"
 #include "ports/wallet_backup_store_port.h"
@@ -97,15 +96,9 @@ struct zcl_result wbs_ensure_backup_dir(const char *dir)
         LOG_WARN("wallet_backup", "backup dir is NULL or empty");
         return ZCL_ERR(-2, "backup dir is NULL or empty");
     }
-    struct stat st;
-    if (stat(dir, &st) == 0) {
-        if (S_ISDIR(st.st_mode))
-            return ZCL_OK;
-        LOG_WARN("wallet_backup", "backup dir %s is not a directory", dir);
-        return ZCL_ERR(-2, "backup dir %s is not a directory", dir);
-    }
-    if (mkdir(dir, 0700) != 0) {
-        LOG_WARN("wallet_backup", "mkdir %s: %s", dir, strerror(errno));
+    if (!platform_private_directory_ensure(dir)) {
+        LOG_WARN("wallet_backup", "cannot ensure private backup dir %s: %s",
+                 dir, strerror(errno));
         return ZCL_ERR(-2, "cannot create backup dir %s: %s", dir,
                        strerror(errno));
     }
@@ -241,8 +234,11 @@ struct zcl_result wbs_run_once_impl(const char *backup_dir,
     if (status == WB_STORE_COPY_FAILED || status == WB_STORE_MANIFEST_FAILED) {
         /* Leave the dst file on disk for forensics, but emit the
          * failure event and bail out. */
-        struct stat st;
-        int64_t bytes = stat(dst_path, &st) == 0 ? (int64_t)st.st_size : -1;
+        struct platform_file_metadata metadata;
+        int64_t bytes = platform_file_metadata_read(dst_path, &metadata) ==
+                                PLATFORM_FILE_METADATA_OK &&
+                            metadata.size <= INT64_MAX
+                            ? (int64_t)metadata.size : -1;
         struct zcl_result r = ZCL_ERR(status == WB_STORE_MANIFEST_FAILED ? -9 : -7,
                                       "%s", copy_err);
         if (err_out) snprintf(err_out, err_cap, "%s", r.message);
@@ -301,8 +297,11 @@ struct zcl_result wbs_run_once_impl(const char *backup_dir,
 
     vout->tables_verified = verified;
 
-    struct stat st;
-    int64_t bytes = stat(dst_path, &st) == 0 ? (int64_t)st.st_size : -1;
+    struct platform_file_metadata metadata;
+    int64_t bytes = platform_file_metadata_read(dst_path, &metadata) ==
+                            PLATFORM_FILE_METADATA_OK &&
+                        metadata.size <= INT64_MAX
+                        ? (int64_t)metadata.size : -1;
     event_emitf(EV_WALLET_BACKUP, 0,
                 "path=%s bytes=%lld keys=%lld tables_verified=%d "
                 "tables_absent_in_source=%s",

@@ -45,6 +45,7 @@
 /* ── datadir single-writer proof ────────────────────────────── */
 
 /* Read the pid recorded in an open pidfile; 0 when unreadable. */
+#ifndef _WIN32
 static long wrs_holder_pid(int fd)
 {
     char buf[32] = {0};
@@ -57,6 +58,7 @@ static long wrs_holder_pid(int fd)
         return 0;
     return pid;
 }
+#endif
 
 struct zcl_result wallet_restore_datadir_free(const char *datadir)
 {
@@ -64,6 +66,11 @@ struct zcl_result wallet_restore_datadir_free(const char *datadir)
         LOG_WARN(WRS_TAG, "datadir_free: datadir path is empty");
         return ZCL_ERR(-50, "datadir path is empty");
     }
+#ifdef _WIN32
+    return ZCL_ERR(-58,
+                   "native Windows wallet restore lock queries are disabled "
+                   "until current-SID single-writer qualification passes");
+#else
     char path[1200];
     snprintf(path, sizeof(path), "%s/%s", datadir, WRS_PIDFILE);
 
@@ -95,6 +102,7 @@ struct zcl_result wallet_restore_datadir_free(const char *datadir)
                        datadir, pid);
     return ZCL_ERR(-52, "a node is holding %s (flock: %s); stop it first",
                    datadir, strerror(saved));
+#endif
 }
 
 /* ── the WRITER's lock, held across check-then-write ─────────── */
@@ -117,6 +125,12 @@ struct zcl_result wallet_restore_datadir_hold(
         LOG_WARN(WRS_TAG, "datadir_hold: datadir path is empty");
         return ZCL_ERR(-55, "datadir path is empty");
     }
+#ifdef _WIN32
+    return ZCL_ERR(-58,
+                   "native Windows wallet restore locking is disabled until "
+                   "current-SID, no-reparse private transaction "
+                   "qualification passes");
+#else
     int n = snprintf(lock->path, sizeof(lock->path), "%s/%s", datadir,
                      WRS_WRITE_LOCKFILE);
     if (n <= 0 || (size_t)n >= sizeof(lock->path)) {
@@ -158,10 +172,18 @@ struct zcl_result wallet_restore_datadir_hold(
     }
     lock->fd = fd;
     return ZCL_OK;
+#endif
 }
 
 void wallet_restore_datadir_release(struct wallet_restore_datadir_lock *lock)
 {
+#ifdef _WIN32
+    if (lock) {
+        lock->fd = -1;
+        lock->path[0] = '\0';
+    }
+    return;
+#else
     if (!lock || lock->fd < 0)
         return;
     /* close() drops the flock; the unlock is explicit so the intent is
@@ -171,10 +193,12 @@ void wallet_restore_datadir_release(struct wallet_restore_datadir_lock *lock)
     (void)flock(lock->fd, LOCK_UN);
     close(lock->fd);
     lock->fd = -1;
+#endif
 }
 
 /* ── helpers ────────────────────────────────────────────────── */
 
+#ifndef _WIN32
 static void wrs_warn(struct wallet_restore_report *rep, const char *what)
 {
     size_t used = strlen(rep->warnings);
@@ -189,6 +213,10 @@ static void wrs_warn(struct wallet_restore_report *rep, const char *what)
 /* True when the file starts with the WBE1 encrypted-backup magic. */
 static bool wrs_is_encrypted(const char *path)
 {
+#ifdef _WIN32
+    (void)path;
+    return false;
+#else
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0)
         return false;
@@ -197,6 +225,7 @@ static bool wrs_is_encrypted(const char *path)
     close(fd);
     return n == (ssize_t)sizeof(magic) &&
            memcmp(magic, WALLET_BACKUP_ENC_MAGIC, sizeof(magic)) == 0;
+#endif
 }
 
 /* Roll up the per-table numbers and flag manifest disagreements. */
@@ -273,6 +302,7 @@ static struct zcl_result wrs_materialize(const char *src, const char *password,
     (void)chmod(tmp_out, 0600);
     return ZCL_OK;
 }
+#endif
 
 struct zcl_result wallet_restore_run(const struct wallet_restore_request *req,
                                      struct wallet_restore_report *out)
@@ -285,6 +315,12 @@ struct zcl_result wallet_restore_run(const struct wallet_restore_request *req,
         LOG_WARN(WRS_TAG, "restore: backup_path and datadir are both required");
         return ZCL_ERR(-31, "restore: backup_path and datadir are required");
     }
+#ifdef _WIN32
+    return ZCL_ERR(-58,
+                   "native Windows wallet restore is disabled until the "
+                   "current-SID single-writer, no-reparse private restore "
+                   "transaction passes qualification");
+#else
 
     size_t n_tables = 0;
     const char *const *tables = wallet_backup_tables(&n_tables);
@@ -386,4 +422,5 @@ struct zcl_result wallet_restore_run(const struct wallet_restore_request *req,
         return ZCL_ERR(-38, "%s", err[0] ? err : "restore merge failed");
     }
     return ZCL_OK;
+#endif
 }

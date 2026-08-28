@@ -10,16 +10,18 @@
 #include "core/random.h"
 #include "crypto/chacha20poly1305.h"
 #include "crypto/pbkdf2_sha256.h"
+#include "platform/positioned_file.h"
+#include "platform/private_file.h"
 #include "support/cleanse.h"
 #include "util/file_io.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
 #include <stdint.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 /* The existing chacha20poly1305_encrypt/_decrypt helpers in
  * lib/crypto use a 2048-byte stack buffer for the Poly1305 MAC
@@ -127,31 +129,69 @@ static bool wbs_aead_decrypt(const uint8_t *ciphertext, size_t plain_len,
     return true;
 }
 
-/* Write `buf/len` to `path` atomically: write to a sibling
- * `.tmp` file, fsync, then rename over the final path. Returns
- * true on success. */
+/* Publish bytes through a unique owner-private sibling and a durable,
+ * handle-bound replacement. Existing destinations must already be private
+ * regular files; links/reparse points fail closed. */
 static bool wbs_write_file_atomic(const char *path,
                                    const uint8_t *buf, size_t len)
 {
     if (!path || (!buf && len > 0))
         LOG_FAIL("wallet_backup", "write_file_atomic: NULL path or buf");
 
-    char tmp[1024];
-    int n = snprintf(tmp, sizeof(tmp), "%s.tmp", path);
-    if (n < 0 || (size_t)n >= sizeof(tmp))
-        LOG_FAIL("wallet_backup", "write_file_atomic: path too long (%s)", path);
+    char destination[1024], parent[1024];
+    if (!platform_private_path_resolve(path, destination,
+                                       sizeof(destination), parent,
+                                       sizeof(parent)))
+        LOG_FAIL("wallet_backup",
+                 "write_file_atomic: destination parent is not a safe real directory");
 
-    FILE *f = fopen(tmp, "wb");
-    if (!f) LOG_FAIL("wallet_backup", "write_file_atomic: fopen failed for %s", tmp);
-    if (len > 0 && fwrite(buf, 1, len, f) != len) {
-        fclose(f); unlink(tmp); LOG_FAIL("wallet_backup", "write_file_atomic: short fwrite for %s (%zu bytes)", tmp, len);
+    struct platform_positioned_file existing;
+    platform_positioned_file_init(&existing);
+    bool exists = platform_positioned_file_open(&existing, destination);
+    bool replaceable = exists &&
+        platform_positioned_file_is_private(&existing);
+    platform_positioned_file_close(&existing);
+    if ((!exists && !platform_private_path_absent(destination)) ||
+        (exists && !replaceable))
+        LOG_FAIL("wallet_backup",
+                 "write_file_atomic: destination is not private/no-reparse");
+
+    static _Atomic uint64_t tmp_sequence;
+    char tmp[1100];
+    struct platform_private_file staging;
+    platform_private_file_init(&staging);
+    bool created = false;
+    for (unsigned int attempt = 0; attempt < 16 && !created; attempt++) {
+        uint64_t sequence = atomic_fetch_add_explicit(
+            &tmp_sequence, 1, memory_order_relaxed);
+        int n = snprintf(tmp, sizeof(tmp), "%s.tmp.%llu", destination,
+                         (unsigned long long)sequence);
+        if (n <= 0 || (size_t)n >= sizeof(tmp))
+            LOG_FAIL("wallet_backup", "write_file_atomic: path too long (%s)",
+                     path);
+        created = platform_private_file_create(tmp, &staging);
     }
-    if (fflush(f) != 0) { fclose(f); unlink(tmp); LOG_FAIL("wallet_backup", "write_file_atomic: fflush failed for %s", tmp); }
-    int fd = fileno(f);
-    if (fd >= 0) (void)fsync(fd);
-    fclose(f);
+    if (!created)
+        LOG_FAIL("wallet_backup",
+                 "write_file_atomic: private staging creation failed");
 
-    if (rename(tmp, path) != 0) { unlink(tmp); LOG_FAIL("wallet_backup", "write_file_atomic: rename %s -> %s failed", tmp, path); }
+    bool written = (len == 0 || platform_private_file_write_at(
+                                  &staging, buf, len, 0)) &&
+                   platform_private_file_flush(&staging);
+    if (!written) {
+        (void)platform_private_file_retire(&staging, tmp);
+        platform_private_file_close(&staging);
+        LOG_FAIL("wallet_backup", "write_file_atomic: durable write failed");
+    }
+    if (!platform_private_file_replace(
+            &staging, tmp, destination)) {
+        (void)platform_private_file_retire(&staging, tmp);
+        platform_private_file_close(&staging);
+        LOG_FAIL("wallet_backup", "write_file_atomic: atomic replace failed");
+    }
+    if (!platform_private_parent_flush(parent))
+        LOG_FAIL("wallet_backup",
+                 "write_file_atomic: parent durability barrier failed");
     return true;
 }
 

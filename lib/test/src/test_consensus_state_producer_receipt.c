@@ -394,6 +394,21 @@ static bool pr_run_export(sqlite3 *db, int output_dir_fd, const char *name,
 int test_consensus_state_producer_receipt(void)
 {
     int failures = 0;
+    uint8_t running_digest_a[32] = {0};
+    uint8_t running_digest_b[32] = {0};
+    uint8_t running_any = 0;
+    bool running_a_ok =
+        consensus_state_producer_receipt_test_running_binary_digest(
+            running_digest_a);
+    bool running_b_ok =
+        consensus_state_producer_receipt_test_running_binary_digest(
+            running_digest_b);
+    for (size_t i = 0; i < sizeof(running_digest_a); i++)
+        running_any |= running_digest_a[i];
+    PR_CHECK("running image handle digest is stable and nonzero",
+             running_a_ok && running_b_ok && running_any != 0 &&
+                 memcmp(running_digest_a, running_digest_b,
+                        sizeof(running_digest_a)) == 0);
     consensus_state_producer_receipt_test_set_identity(PR_TEST_SOURCE_ID,
                                                         true);
 

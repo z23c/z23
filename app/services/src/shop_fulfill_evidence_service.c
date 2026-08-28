@@ -7,6 +7,7 @@
 #include "base/safe_alloc.h"
 #include "crypto/ed25519.h"
 #include "models/build_fabric.h"
+#include "platform/positioned_file.h"
 #include "services/build_fabric_service.h"
 #include "services/zcode_benchmark_executor.h"
 #include "services/zcode_science_service.h"
@@ -17,13 +18,9 @@
 #include "vcs/vcs_object.h"
 #include "vcs/zcode_science.h"
 
-#include <errno.h>
-#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 #define SFE_TAG "shop.fulfill.evidence"
 #define SFE_PATH_MAX 4400u
@@ -37,9 +34,17 @@ static bool sfe_nonzero(const uint8_t value[32])
     return any != 0;
 }
 
-static bool sfe_same_time(struct timespec a, struct timespec b)
+static bool sfe_same_snapshot(
+    const struct platform_positioned_file_snapshot *a,
+    const struct platform_positioned_file_snapshot *b)
 {
-    return a.tv_sec == b.tv_sec && a.tv_nsec == b.tv_nsec;
+    return a->size == b->size &&
+           a->modified_seconds == b->modified_seconds &&
+           a->modified_nanoseconds == b->modified_nanoseconds &&
+           a->changed_seconds == b->changed_seconds &&
+           a->changed_nanoseconds == b->changed_nanoseconds &&
+           a->volume == b->volume && a->file_low == b->file_low &&
+           a->file_high == b->file_high;
 }
 
 static struct zcl_result artifact_fail(
@@ -65,38 +70,36 @@ static bool sfe_read_bounded(const char *path, size_t cap,
 {
     *out = NULL;
     *out_len = 0;
-    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (fd < 0)
-        LOG_FAIL(SFE_TAG, "open %s: %s", path, strerror(errno));
-    struct stat before, after;
-    if (fstat(fd, &before) != 0 || !S_ISREG(before.st_mode) ||
-        before.st_size <= 0 || (uint64_t)before.st_size > cap) {
-        close(fd);
+    struct platform_positioned_file file;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path))
+        LOG_FAIL(SFE_TAG, "open bounded evidence failed: %s", path);
+    struct platform_positioned_file_snapshot before, after;
+    if (!platform_positioned_file_snapshot(&file, &before) ||
+        before.size == 0 || before.size > cap || before.size > SIZE_MAX) {
+        platform_positioned_file_close(&file);
         LOG_FAIL(SFE_TAG, "manifest is not a bounded regular file: %s", path);
     }
-    size_t len = (size_t)before.st_size;
+    size_t len = (size_t)before.size;
     uint8_t *bytes = zcl_malloc(len, "shop fulfillment manifest");
     if (!bytes) {
-        close(fd);
+        platform_positioned_file_close(&file);
         LOG_FAIL(SFE_TAG, "manifest allocation failed: %zu", len);
     }
     size_t off = 0;
     while (off < len) {
-        ssize_t got = read(fd, bytes + off, len - off);
-        if (got < 0 && errno == EINTR) continue;
+        int64_t got = platform_positioned_file_read(
+            &file, bytes + off, len - off, off);
         if (got <= 0) {
             free(bytes);
-            close(fd);
+            platform_positioned_file_close(&file);
             LOG_FAIL(SFE_TAG, "manifest short read: %s", path);
         }
         off += (size_t)got;
     }
-    bool stable = fstat(fd, &after) == 0 &&
-        before.st_dev == after.st_dev && before.st_ino == after.st_ino &&
-        before.st_size == after.st_size &&
-        sfe_same_time(before.st_mtim, after.st_mtim) &&
-        sfe_same_time(before.st_ctim, after.st_ctim);
-    close(fd);
+    bool stable = platform_positioned_file_snapshot(&file, &after) &&
+                  sfe_same_snapshot(&before, &after);
+    platform_positioned_file_close(&file);
     if (!stable) {
         free(bytes);
         LOG_FAIL(SFE_TAG, "manifest changed while reading: %s", path);
@@ -109,37 +112,36 @@ static bool sfe_read_bounded(const char *path, size_t cap,
 static bool sfe_hash_regular(const char *path, uint64_t expected_size,
                              uint8_t out[32])
 {
-    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (fd < 0)
-        LOG_FAIL(SFE_TAG, "open CAS bytes %s: %s", path, strerror(errno));
-    struct stat before, after;
-    if (fstat(fd, &before) != 0 || !S_ISREG(before.st_mode) ||
-        before.st_size <= 0 || (uint64_t)before.st_size != expected_size) {
-        close(fd);
+    struct platform_positioned_file file;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path))
+        LOG_FAIL(SFE_TAG, "open CAS bytes failed: %s", path);
+    struct platform_positioned_file_snapshot before, after;
+    if (!platform_positioned_file_snapshot(&file, &before) ||
+        before.size == 0 || before.size != expected_size) {
+        platform_positioned_file_close(&file);
         LOG_FAIL(SFE_TAG, "CAS bytes size/type mismatch: %s", path);
     }
     uint8_t buffer[SFE_HASH_BUFFER];
     struct sha3_256_ctx sha;
     sha3_256_init(&sha);
     uint64_t total = 0;
-    for (;;) {
-        ssize_t got = read(fd, buffer, sizeof(buffer));
-        if (got < 0 && errno == EINTR) continue;
-        if (got < 0) {
-            close(fd);
-            LOG_FAIL(SFE_TAG, "read CAS bytes %s: %s", path,
-                     strerror(errno));
+    while (total < expected_size) {
+        size_t wanted = expected_size - total > sizeof(buffer)
+                            ? sizeof(buffer)
+                            : (size_t)(expected_size - total);
+        int64_t got = platform_positioned_file_read(
+            &file, buffer, wanted, total);
+        if (got <= 0) {
+            platform_positioned_file_close(&file);
+            LOG_FAIL(SFE_TAG, "read CAS bytes failed: %s", path);
         }
-        if (got == 0) break;
         total += (uint64_t)got;
         sha3_256_write(&sha, buffer, (size_t)got);
     }
-    bool stable = fstat(fd, &after) == 0 &&
-        before.st_dev == after.st_dev && before.st_ino == after.st_ino &&
-        before.st_size == after.st_size &&
-        sfe_same_time(before.st_mtim, after.st_mtim) &&
-        sfe_same_time(before.st_ctim, after.st_ctim);
-    close(fd);
+    bool stable = platform_positioned_file_snapshot(&file, &after) &&
+                  sfe_same_snapshot(&before, &after);
+    platform_positioned_file_close(&file);
     if (!stable || total != expected_size)
         LOG_FAIL(SFE_TAG, "CAS bytes changed while hashing: %s", path);
     sha3_256_finalize(&sha, out);

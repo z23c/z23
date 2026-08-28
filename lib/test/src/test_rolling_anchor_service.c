@@ -11,8 +11,14 @@
 #include "json/json.h"
 #include "services/oracle_policy.h"
 #include "services/rolling_anchor_service.h"
+#include "platform/directory_compat.h"
+#include "platform/private_file.h"
 #include "util/supervisor.h"
 #include "validation/main_state.h"
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #include <stdatomic.h>
 #include <stdio.h>
@@ -128,6 +134,110 @@ int test_rolling_anchor_service(void)
     rolling_anchor_reset_for_test();
     idx = find_rolling_anchor_snapshot(&snap, &count);
     RA_CHECK("test reset unregisters child", idx < 0 && count == 0);
+
+    /* The narrow commit hook executes the production durable transaction;
+     * reload and corruption checks therefore cover the actual wire and I/O
+     * path without constructing one thousand historical block bodies. */
+    {
+        char persist_dir[256];
+        test_make_tmpdir(persist_dir, sizeof(persist_dir), "rolling_anchor",
+                         "persistence");
+        struct zcl_result initialized =
+            rolling_anchor_init(persist_dir, NULL);
+        RA_CHECK("persistence: initial empty load succeeds", initialized.ok);
+
+        int32_t start = (int32_t)(g_sha3_windows_count * SHA3_WINDOW_SIZE);
+        int32_t end = start + (int32_t)SHA3_WINDOW_SIZE - 1;
+        uint8_t committed[32];
+        for (size_t i = 0; i < sizeof(committed); i++)
+            committed[i] = (uint8_t)(0x40u + i);
+        struct zcl_result saved =
+            rolling_anchor_test_commit_window(start, committed);
+        RA_CHECK("persistence: production durable commit succeeds", saved.ok);
+
+        char state_path[512];
+        (void)snprintf(state_path, sizeof(state_path),
+                       "%s/sha3_windows_runtime.dat", persist_dir);
+        RA_CHECK("persistence: committed state exists",
+                 !platform_private_path_absent(state_path));
+        struct platform_directory_list files = {0};
+        bool listed = platform_directory_list_regular_sorted(persist_dir,
+                                                              &files);
+        bool staging_found = false;
+        for (size_t i = 0; listed && i < files.count; i++)
+            if (strstr(files.entries[i].name,
+                       "sha3_windows_runtime.dat.tmp.") ==
+                files.entries[i].name)
+                staging_found = true;
+        RA_CHECK("persistence: successful commit leaves no staging file",
+                 listed && !staging_found);
+        platform_directory_list_free(&files);
+
+        rolling_anchor_reset_for_test();
+        struct zcl_result reloaded = rolling_anchor_init(persist_dir, NULL);
+        uint8_t loaded[32] = {0};
+        struct zcl_result found =
+            rolling_anchor_window_hash_ending_at(end, loaded);
+        RA_CHECK("persistence: reset/reload succeeds", reloaded.ok);
+        RA_CHECK("persistence: reloaded window is exposed exactly",
+                 found.ok && memcmp(loaded, committed, 32) == 0 &&
+                     rolling_anchor_effective_prefix_end() == end);
+
+        struct platform_private_file corrupt;
+        platform_private_file_init(&corrupt);
+        uint8_t bad_magic = 0;
+        bool corrupted = platform_private_file_open_locked(state_path,
+                                                            &corrupt) &&
+                         platform_private_file_write_at(&corrupt, &bad_magic,
+                                                        1, 0) &&
+                         platform_private_file_flush(&corrupt);
+        platform_private_file_close(&corrupt);
+        RA_CHECK("persistence: fixture corruption is durable", corrupted);
+
+        rolling_anchor_reset_for_test();
+        struct zcl_result refused = rolling_anchor_init(persist_dir, NULL);
+        memset(loaded, 0, sizeof(loaded));
+        found = rolling_anchor_window_hash_ending_at(end, loaded);
+        int32_t compile_end = start - 1;
+        RA_CHECK("persistence: corrupt state is refused", !refused.ok);
+        RA_CHECK("persistence: corrupt runtime window is never exposed",
+                 !found.ok &&
+                     rolling_anchor_effective_prefix_end() == compile_end);
+        RA_CHECK("persistence: corrupt private state is removed",
+                 platform_private_path_absent(state_path));
+
+        rolling_anchor_reset_for_test();
+#ifdef _WIN32
+        char outside_path[512];
+        (void)snprintf(outside_path, sizeof(outside_path),
+                       "%s/rolling-anchor-outside.dat", persist_dir);
+        struct platform_private_file outside;
+        platform_private_file_init(&outside);
+        uint8_t outside_byte = 0x7a;
+        bool outside_ready = platform_private_file_create(outside_path,
+                                                          &outside) &&
+                             platform_private_file_write_at(
+                                 &outside, &outside_byte, 1, 0) &&
+                             platform_private_file_flush(&outside);
+        platform_private_file_close(&outside);
+        bool link_created = outside_ready &&
+            CreateSymbolicLinkA(state_path, outside_path, 0) != 0;
+        if (link_created) {
+            struct zcl_result reparse_refused =
+                rolling_anchor_init(persist_dir, NULL);
+            DWORD attrs = GetFileAttributesA(state_path);
+            RA_CHECK("persistence: reparse state is refused",
+                     !reparse_refused.ok);
+            RA_CHECK("persistence: refusal does not follow or delete reparse",
+                     attrs != INVALID_FILE_ATTRIBUTES &&
+                         (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0);
+            rolling_anchor_reset_for_test();
+            (void)DeleteFileA(state_path);
+        }
+        (void)platform_private_file_unlink_missing_ok(outside_path);
+#endif
+        test_cleanup_tmpdir(persist_dir);
+    }
 
     /* rolling_anchor_window_hash_ending_at — success + one failure envelope
      * (E2 migration to struct zcl_result; no prior direct coverage). */

@@ -19,6 +19,25 @@
 
 #include "config/consensus_state_install_runtime.h"
 
+#if defined(_WIN32)
+
+struct zcl_result consensus_state_install_from_bundle(
+    struct node_db *ndb, struct main_state *ms, const char *bundle_path,
+    const char *datadir, struct consensus_state_install_runtime_result *out)
+{
+    (void)ndb;
+    (void)ms;
+    (void)bundle_path;
+    (void)datadir;
+    (void)out;
+    return ZCL_ERR(
+        -1,
+        "consensus-state installation is disabled on Windows until SID/ACL "
+        "owner policy and directory-handle-relative activation qualify");
+}
+
+#else
+
 #include "config/boot.h"                              /* node_db, main_state, test-surface decls */
 #include "config/boot_consensus_bundle_marker.h"       /* installed-bundle marker */
 #include "config/consensus_state_snapshot_install.h"
@@ -916,4 +935,6 @@ bool boot_install_consensus_bundle_reset_utxo_mirror_for_test(struct node_db *nd
 {
     return icb_reset_utxo_mirror(ndb);
 }
+#endif
+
 #endif

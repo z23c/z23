@@ -10,6 +10,7 @@
 
 #include "platform/clock.h"
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <time.h>
 
@@ -21,6 +22,16 @@ static inline int64_t platform_time_wall_unix(void)
 static inline time_t platform_time_wall_time_t(void)
 {
     return (time_t)platform_time_wall_unix();
+}
+
+static inline bool platform_time_utc_tm(time_t value, struct tm *out)
+{
+    if (!out) return false;
+#if defined(_WIN32)
+    return gmtime_s(out, &value) == 0;
+#else
+    return gmtime_r(&value, out) != NULL;
+#endif
 }
 
 static inline int platform_time_monotonic_timespec(struct timespec *ts)
