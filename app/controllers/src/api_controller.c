@@ -188,24 +188,14 @@ int api_rpc_call(const char *method, const char *params_json,
         "{\"jsonrpc\":\"1.0\",\"id\":1,\"method\":\"%s\",\"params\":%s}",
         method, params_json);
 
-    /* Base64 encode auth */
-    static const char b64[] =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    /* Base64 encode auth: the shared encoder in encoding/utilstrencodings.h
+     * uses the same alphabet and '=' padding this call site used to inline. */
     char auth_plain[256];
     snprintf(auth_plain, sizeof(auth_plain), "%s:%s",
              g_api_rpc.user, g_api_rpc.pass);
     char auth_b64[512];
-    size_t alen = strlen(auth_plain), bo = 0;
-    for (size_t i = 0; i < alen; i += 3) {
-        uint32_t n = ((uint32_t)(uint8_t)auth_plain[i]) << 16;
-        if (i + 1 < alen) n |= ((uint32_t)(uint8_t)auth_plain[i+1]) << 8;
-        if (i + 2 < alen) n |= (uint32_t)(uint8_t)auth_plain[i+2];
-        auth_b64[bo++] = b64[(n >> 18) & 63];
-        auth_b64[bo++] = b64[(n >> 12) & 63];
-        auth_b64[bo++] = (i + 1 < alen) ? b64[(n >> 6) & 63] : '=';
-        auth_b64[bo++] = (i + 2 < alen) ? b64[n & 63] : '=';
-    }
-    auth_b64[bo] = '\0';
+    EncodeBase64((const unsigned char *)auth_plain, strlen(auth_plain),
+                 auth_b64, sizeof(auth_b64));
 
     char req[8192];
     int rlen = snprintf(req, sizeof(req),
