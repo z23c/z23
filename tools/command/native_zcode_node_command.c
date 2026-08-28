@@ -227,7 +227,8 @@ static bool znj_write_conf(const char *path, bool build_worker,
              info.size <= ZNJ_CONF_MAX_BYTES;
         if (ok) {
             existing_len = (size_t)info.size;
-            existing = malloc(existing_len + 1u);
+            existing = zcl_malloc(existing_len + 1u,
+                                  "zcode.node.join.existing-config");
             ok = existing != NULL &&
                  platform_directory_child_read_exact(&source, existing,
                                                      existing_len, 0);
@@ -252,7 +253,7 @@ static bool znj_write_conf(const char *path, bool build_worker,
     static const char header[] =
         "# Written by `z23 join`. Command-line flags still win.\n";
     size_t output_cap = existing_len + sizeof(header) + 64u;
-    char *output = malloc(output_cap);
+    char *output = zcl_malloc(output_cap, "zcode.node.join.config-output");
     if (!output) {
         free(existing);
         platform_directory_transaction_close(&dir);
