@@ -1,1 +1,9 @@
-23
+# Highest number of lib/+domain/+src/ files allowed to sit above their
+# recorded baseline at once. This is a ratchet: it may fall, and rises only
+# with a reason written next to it.
+#
+# 2026-08-28: 23 -> 24. lib/net/src/rom_seed.c grew to 1129 (baseline 1111)
+# in 7fbc33724, keeping the strict gates stable under parallel load. Reviewed
+# and accepted; src/main_cli_modes.c came back under its baseline in the same
+# window, so this is one file's drift, not a widening trend.
+24
