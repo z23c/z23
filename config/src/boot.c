@@ -3,6 +3,8 @@
  * Copyright 2026 Rhett Creighton - Apache License 2.0
  * Distributed under the MIT software license, see the accompanying
  * file COPYING or http://www.opensource.org/licenses/mit-license.php. */
+#include "platform/socket_compat.h"
+#include "platform/directory_compat.h"
 #include "platform/time_compat.h"
 #include "config/boot_blkidx_ladder.h"
 #include "config/boot_blocktree_cleanup.h"
@@ -136,15 +138,11 @@
 #include "controllers/event_controller.h"
 #include "models/block.h"
 #include <errno.h>
-#include <netdb.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
 #include <sys/stat.h>
-#include <sys/mman.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <dirent.h>
@@ -436,17 +434,16 @@ static bool boot_step_select_chain_and_datadir(struct app_context *ctx)
      * said was created. Name the create failure where it happens. EEXIST is
      * not a failure: another process (or the stat race) won. */
     struct stat st;
-    if (stat(ctx->datadir, &st) != 0) {
-        if (mkdir(ctx->datadir, 0700) == 0) {
-            printf("Created data directory: %s\n", ctx->datadir);
-        } else if (errno != EEXIST) {
-            int e = errno;
-            boot_report_datadir_create_failed(ctx->datadir, e);
-            event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
-                        "datadir_create_failed errno=%d", e);
-            return false;
-        }
+    bool datadir_existed = stat(ctx->datadir, &st) == 0;
+    if (!platform_directory_ensure(ctx->datadir, 0700)) {
+        int e = errno;
+        boot_report_datadir_create_failed(ctx->datadir, e);
+        event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
+                    "datadir_create_failed errno=%d", e);
+        return false;
     }
+    if (!datadir_existed)
+        printf("Created data directory: %s\n", ctx->datadir);
 
     /* Now that the datadir is known, point the crash handler at a durable,
      * fsync'd crash log there. Until this call a crash still lands on stderr;
@@ -4211,10 +4208,23 @@ sapling_tree_boot_check_done:
  * code 1 only if it was never reached) after writing a terminal receipt. If
  * the stagewatch was never begun (a shutdown path that armed a raw alarm), it
  * falls back to the legacy loud forced exit. Async-signal-safe throughout. */
+#ifndef _WIN32
 static void shutdown_alarm_abort(int sig)
 {
     (void)sig;
     shutdown_stagewatch_on_alarm();
+}
+#endif
+
+static void boot_shutdown_deadline_handler_install(void)
+{
+#ifndef _WIN32
+    signal(SIGALRM, shutdown_alarm_abort);
+#else
+    /* Win32 has no SIGALRM. The shutdown stagewatch remains the owner of
+     * per-stage deadlines; its native lane uses service-stop events/timers
+     * rather than installing a process signal handler here. */
+#endif
 }
 
 /* app_shutdown delegates to boot_services.c */
@@ -4222,7 +4232,7 @@ void app_shutdown(void)
 {
     boot_stage_advance_to(BOOT_STAGE_SHUTDOWN_REQUESTED);
     /* Backstop must be live BEFORE app_shutdown_svc arms alarm(90). */
-    signal(SIGALRM, shutdown_alarm_abort);
+    boot_shutdown_deadline_handler_install();
     boot_stop_platform_services();
     app_shutdown_svc(&g_svc);
     boot_postmortem_stop();
@@ -4235,7 +4245,7 @@ void app_shutdown_offline(void)
 {
     bool durability_ok = true;
     boot_stage_advance_to(BOOT_STAGE_SHUTDOWN_REQUESTED);
-    signal(SIGALRM, shutdown_alarm_abort);
+    boot_shutdown_deadline_handler_install();
     shutdown_stagewatch_begin(g_datadir);
     shutdown_stagewatch_enter("offline-worker-drain", 15, false, true);
     thread_registry_request_shutdown();

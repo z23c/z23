@@ -17,6 +17,7 @@
 #include "config/boot_error.h"
 #include "controllers/agent_controller.h"  /* agent_print_native_usage (print_usage) */
 #include "hotswap/hotswap_module.h"
+#include "platform/environment_compat.h"
 #include "util/hw_profile.h"
 #include "util/log_level.h"
 #include "util/log_macros.h"
@@ -345,7 +346,7 @@ int args_parse_node_options(int argc, char **argv, struct app_context *ctx,
              * coins_ram_* call. STRICTLY for the bulk fold (from-genesis mint /
              * -refold-from-anchor catch-up): the at-tip steady state (1 block /
              * 2.5 min) does NOT benefit and should run plain SQLite coins_kv. */
-            setenv("ZCL_FOLD_INRAM", "1", 1);
+            platform_environment_set("ZCL_FOLD_INRAM", "1", 1);
         }
         else if (strcmp(argv[i], "-mint-anchor") == 0) ctx->mint_anchor = true;
         else if (strcmp(argv[i], "-mint-anchor-fast") == 0) ctx->mint_anchor_fast = true;
@@ -380,7 +381,7 @@ int args_parse_node_options(int argc, char **argv, struct app_context *ctx,
                         mode);
                 return 1;
             }
-            setenv("ZCL_UTXO_MIRROR_MODE", mode, 1);
+            platform_environment_set("ZCL_UTXO_MIRROR_MODE", mode, 1);
         }
         else if (strncmp(argv[i], "-bodyhistorybackfill=", 21) == 0) {
             const char *mode = argv[i] + 21;
@@ -390,7 +391,8 @@ int args_parse_node_options(int argc, char **argv, struct app_context *ctx,
                         "(accepted: throttled, off, normal)\n", mode);
                 return 1;
             }
-            setenv("ZCL_BODY_HISTORY_BACKFILL_MODE", mode, 1);
+            platform_environment_set("ZCL_BODY_HISTORY_BACKFILL_MODE", mode,
+                                     1);
         }
         else if (strncmp(argv[i], "-legacyoracle=", 14) == 0) {
             const char *mode = argv[i] + 14;
@@ -399,7 +401,7 @@ int args_parse_node_options(int argc, char **argv, struct app_context *ctx,
                         mode);
                 return 1;
             }
-            setenv("ZCL_LEGACY_ORACLE_MODE", mode, 1);
+            platform_environment_set("ZCL_LEGACY_ORACLE_MODE", mode, 1);
         }
         else if (strncmp(argv[i], "-profile=", 9) == 0) {
             if (!app_runtime_profile_parse(argv[i] + 9,
@@ -522,7 +524,8 @@ int args_parse_node_options(int argc, char **argv, struct app_context *ctx,
              * lib/wallet/src/wallet_keystore.c). Without this flag AND
              * without ZCL_WALLET_PASSPHRASE, first-run wallet creation
              * refuses rather than silently minting unencrypted keys. */
-            setenv("ZCL_ALLOW_PLAINTEXT_WALLET", "1", 1);
+            platform_environment_set("ZCL_ALLOW_PLAINTEXT_WALLET", "1",
+                                     1);
         }
         else if (strcmp(argv[i], "-wallet-no-phrase-backup") == 0) {
             /* "I accept a wallet with no written backup." A new wallet's
@@ -533,14 +536,16 @@ int args_parse_node_options(int argc, char **argv, struct app_context *ctx,
              * wallet is created, NO phrase is drawn, and every boot that
              * creates one says so loudly. Read by
              * boot_wallet_phrase_backup_waived() (config/boot_wallet_phrase.h). */
-            setenv("ZCL_WALLET_NO_PHRASE_BACKUP", "1", 1);
+            platform_environment_set("ZCL_WALLET_NO_PHRASE_BACKUP", "1",
+                                     1);
         }
         else if (strcmp(argv[i], "-rebuildfromlog") == 0) ctx->boot_from_log = true;
         else if (strcmp(argv[i], "-leveldb-no-verify-checksums") == 0) {
             /* Turns off LevelDB checksum verification for both point
              * reads and iteration.  Use only when chasing a suspected
              * corruption issue — silent truncation returns. */
-            setenv("ZCL_LEVELDB_NO_VERIFY_CHECKSUMS", "1", 1);
+            platform_environment_set("ZCL_LEVELDB_NO_VERIFY_CHECKSUMS", "1",
+                                     1);
         }
         else if (strncmp(argv[i], "-externalip=", 12) == 0) ctx->external_ip = argv[i] + 12;
         else if (strncmp(argv[i], "-httpsdomain=", 13) == 0) ctx->https_domain = argv[i] + 13;
