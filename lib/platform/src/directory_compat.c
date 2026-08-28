@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0 */
 
-#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
-#define _POSIX_C_SOURCE 200809L
+#if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
+#define _XOPEN_SOURCE 700
 #endif
 
 #include "platform/directory_compat.h"
@@ -162,6 +162,63 @@ enum platform_directory_probe_result platform_directory_probe_real(
     if (ok) return PLATFORM_DIRECTORY_PROBE_OK;
     errno = ENOTDIR;
     return PLATFORM_DIRECTORY_PROBE_REFUSED;
+}
+
+static HANDLE open_real_directory_component(const wchar_t *path)
+{
+    HANDLE directory = CreateFileW(
+        path, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    FILE_ATTRIBUTE_TAG_INFO info;
+    if (directory == INVALID_HANDLE_VALUE ||
+        !GetFileInformationByHandleEx(directory, FileAttributeTagInfo, &info,
+                                      sizeof(info)) ||
+        (info.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
+        (info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        if (directory != INVALID_HANDLE_VALUE) CloseHandle(directory);
+        return INVALID_HANDLE_VALUE;
+    }
+    return directory;
+}
+
+bool platform_directory_canonical_real(const char *path, char *out,
+                                       size_t out_size)
+{
+    wchar_t *input = utf8_to_wide(path);
+    wchar_t full[32768], canonical[32768];
+    if (!input || !out || !out_size) { free(input); return false; }
+    DWORD count = GetFullPathNameW(input, 32768, full, NULL);
+    free(input);
+    if (!count || count >= 32768 || !full[0] || full[1] != L':' ||
+        (full[2] != L'\\' && full[2] != L'/'))
+        return false;
+    for (wchar_t *p = full; *p; ++p)
+        if (*p == L'/') *p = L'\\';
+    for (wchar_t *p = full + 3; ; ++p) {
+        if (*p != L'\\' && *p != L'\0') continue;
+        wchar_t saved = *p;
+        *p = L'\0';
+        HANDLE component = open_real_directory_component(full);
+        *p = saved;
+        if (component == INVALID_HANDLE_VALUE) return false;
+        if (saved == L'\0') {
+            count = GetFinalPathNameByHandleW(
+                component, canonical, 32768,
+                FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+            CloseHandle(component);
+            if (!count || count >= 32768) return false;
+            const wchar_t *plain = wcsncmp(canonical, L"\\\\?\\", 4) == 0
+                                       ? canonical + 4 : canonical;
+            int needed = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+                                             plain, -1, NULL, 0, NULL, NULL);
+            return needed > 0 && (size_t)needed <= out_size &&
+                   WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, plain,
+                                       -1, out, (int)out_size, NULL, NULL) > 0;
+        }
+        CloseHandle(component);
+    }
 }
 
 bool platform_directory_list_real_sorted(const char *path,
@@ -333,6 +390,19 @@ enum platform_directory_probe_result platform_directory_probe_real(
         return PLATFORM_DIRECTORY_PROBE_OK;
     errno = ENOTDIR;
     return PLATFORM_DIRECTORY_PROBE_REFUSED;
+}
+
+bool platform_directory_canonical_real(const char *path, char *out,
+                                       size_t out_size)
+{
+    if (!path || !out || !out_size) return false;
+    char *resolved = realpath(path, NULL);
+    if (!resolved) return false;
+    size_t length = strlen(resolved) + 1;
+    bool ok = length <= out_size;
+    if (ok) memcpy(out, resolved, length);
+    free(resolved);
+    return ok;
 }
 
 bool platform_directory_list_real_sorted(const char *path,
