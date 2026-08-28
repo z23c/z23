@@ -1978,6 +1978,15 @@ AGENT_IMPACT_RULE("lib/metrics/src/prometheus_metrics_alert_rules.c|lib/metrics/
  * metadata" checking crash_signal == 11 and tape_size_bytes against the live
  * tape, both parsed out of manifest.json pulled from inside the gzipped tar.
  * A bad octal field or a mis-skipped block breaks those, not just the open. */
+/* The Windows arm of the postmortem capsule: every public entry point,
+ * stubbed, under `#if defined(_WIN32)`. On this host it compiles to an empty
+ * object, so NO live test executes a line of it -- the postmortem group is
+ * named because a change here is almost always paired with a change to the
+ * implementation next door, and that group proves the non-Windows side still
+ * builds and links. Treat the Windows behaviour itself as compile-checked
+ * only: the mingw cross-compile is the sole thing that reads it, and
+ * check-windows-platform-seam's scope is lib/platform, not lib/sim. */
+AGENT_IMPACT_RULE("lib/sim/src/postmortem_stub.c", "postmortem make_lint_gates")
 AGENT_IMPACT_RULE("lib/sim/src/postmortem_archive.c|lib/sim/src/postmortem_internal.h", "postmortem make_lint_gates")
 
 /* The blk*.dat frame-decode + hash-targeted position rescan, split out of
