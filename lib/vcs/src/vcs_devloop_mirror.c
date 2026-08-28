@@ -190,6 +190,7 @@ static bool mirror_scan_log(const char *repo_root, const uint8_t job_root[32],
     if (log) event_log_close(log);
     return ok && !scan->invalid;
 }
+#endif
 
 enum vcs_devloop_mirror_lookup vcs_devloop_mirror_load_for_job(
     const char *repo_root, const uint8_t job_root[32],
@@ -231,6 +232,7 @@ enum vcs_devloop_mirror_lookup vcs_devloop_mirror_load_for_job(
 #endif
 }
 
+#ifndef _WIN32
 static bool mirror_build_from_provider(
     const char *repo_root, const uint8_t job_root[32],
     const uint8_t *git_oid, size_t git_oid_len,
