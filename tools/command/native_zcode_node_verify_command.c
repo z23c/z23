@@ -57,7 +57,11 @@
 #include "base/hex.h"
 #include "base/serialize_le.h"
 #include "json/json.h"
+#include "platform/directory_compat.h"
+#include "platform/logical_cpu.h"
 #include "platform/os_proc.h"
+#include "platform/positioned_file.h"
+#include "platform/state_root.h"
 #include "util/safe_alloc.h"
 #include "sha3/sha3.h"
 #include "util/clientversion.h"
@@ -71,7 +75,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
 #include <unistd.h>
+#endif
 
 #define NV_CMD "zcode.node.verify"
 /* The one artifact path both receipts name. The real files live at
@@ -451,7 +457,14 @@ static bool nv_resolve(const struct zcl_command_request *request,
         }
         artifact = self;
     }
-    if (!realpath(artifact, c->artifact)) {
+    struct platform_positioned_file artifact_file;
+    platform_positioned_file_init(&artifact_file);
+    bool artifact_resolved = platform_positioned_file_open(
+            &artifact_file, artifact) &&
+        platform_positioned_file_path(&artifact_file, c->artifact,
+                                      sizeof(c->artifact));
+    platform_positioned_file_close(&artifact_file);
+    if (!artifact_resolved) {
         nv_fail(reply, "ARTIFACT_MISSING",
                 "that artifact path does not resolve to a file on this disk",
                 artifact);
@@ -465,10 +478,9 @@ static bool nv_resolve(const struct zcl_command_request *request,
     c->artifact_is_self = have_self && strcmp(c->artifact, self) == 0;
 
     const char *src = nv_str(in, "source_dir");
-    char cwd[PATH_MAX];
-    if (!src && getcwd(cwd, sizeof(cwd)))
-        src = cwd;
-    if (!src || !realpath(src, c->source_dir)) {
+    if (!src) src = ".";
+    if (!platform_directory_canonical_real(src, c->source_dir,
+                                           sizeof(c->source_dir))) {
         nv_fail(reply, "NO_SOURCE_TREE",
                 "pass source_dir=<path to a z23 checkout>: rebuilding is the "
                 "whole check, and without source there is nothing to rebuild",
@@ -477,12 +489,16 @@ static bool nv_resolve(const struct zcl_command_request *request,
     }
     int n = snprintf(c->script, sizeof(c->script),
                      "%s/tools/scripts/node_reproduce.sh", c->source_dir);
-    if (n <= 0 || (size_t)n >= sizeof(c->script) ||
-        (!g_nv_driver && access(c->script, X_OK) != 0)) {
+    bool driver_available = g_nv_driver != NULL;
+#if !defined(_WIN32)
+    driver_available = driver_available || access(c->script, X_OK) == 0;
+#endif
+    if (n <= 0 || (size_t)n >= sizeof(c->script) || !driver_available) {
         nv_fail(reply, "NO_SOURCE_TREE",
                 "that directory has no executable "
-                "tools/scripts/node_reproduce.sh, so it is not a z23 "
-                "checkout this command can rebuild from",
+                "tools/scripts/node_reproduce.sh (or no native reproduce "
+                "driver), so it is not a checkout this command can rebuild "
+                "from",
                 c->source_dir);
         return false;
     }
@@ -491,6 +507,12 @@ static bool nv_resolve(const struct zcl_command_request *request,
     if (scratch) {
         n = snprintf(c->scratch, sizeof(c->scratch), "%s", scratch);
     } else {
+#if defined(_WIN32)
+        char state[PATH_MAX];
+        n = platform_state_root(state, sizeof(state))
+            ? snprintf(c->scratch, sizeof(c->scratch),
+                       "%s/scratch/node-verify", state) : -1;
+#else
         const char *home = getenv("HOME");
         if (!home || !home[0]) {
             nv_fail(reply, "NO_SCRATCH_DIR",
@@ -500,6 +522,7 @@ static bool nv_resolve(const struct zcl_command_request *request,
         }
         n = snprintf(c->scratch, sizeof(c->scratch),
                      "%s/.local/state/zclassic23/scratch/node-verify", home);
+#endif
     }
     if (n <= 0 || (size_t)n >= sizeof(c->scratch)) {
         nv_fail(reply, "SCRATCH_PATH_TOO_LONG",
@@ -525,7 +548,7 @@ static bool nv_resolve(const struct zcl_command_request *request,
     const struct json_value *jv = in ? json_get(in, "jobs") : NULL;
     long jobs = jv ? (long)json_get_int(jv) : 0;
     if (jobs <= 0)
-        jobs = (long)sysconf(_SC_NPROCESSORS_ONLN);
+        jobs = (long)platform_logical_cpu_count();
     if (jobs <= 0)
         jobs = 4;
     if (jobs > 4096)
