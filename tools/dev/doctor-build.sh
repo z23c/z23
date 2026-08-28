@@ -39,42 +39,42 @@ echo "doctor-build: accelerator health for the Z23 inner loop"
 echo "  host: $(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo '?') online CPUs — width for \`make -j\` build-only / test-fast per-TU compiles"
 echo ""
 
-# ccache/sccache — per-TU compile cache wrapped around CC (Makefile:6-12,
+# ccache/sccache — per-TU compile cache wrapped around CC (ZCL_USE_CCACHE guard,
 # ZCL_USE_CCACHE ?= 1). The whole dev loop (build-only, test-fast, dev-bin)
 # recompiles translation units through it.
 if have ccache; then
     found ccache "$(command -v ccache) ($(ccache --version 2>/dev/null | sed -n '1p'))" \
-        "per-TU compile cache around CC (Makefile:6-12) — repeat build-only/test-fast compiles hit the cache instead of rerunning the front-end"
+        "per-TU compile cache around CC (ZCL_USE_CCACHE) — repeat build-only/test-fast compiles hit the cache instead of rerunning the front-end"
 elif have sccache; then
     found sccache "$(command -v sccache)" \
-        "per-TU compile cache around CC (Makefile:6-12) — repeat build-only/test-fast compiles hit the cache instead of rerunning the front-end"
+        "per-TU compile cache around CC (ZCL_USE_CCACHE) — repeat build-only/test-fast compiles hit the cache instead of rerunning the front-end"
 else
-    absent ccache/sccache "no per-TU compile cache (Makefile:6-12 leaves CC unwrapped)" \
+    absent ccache/sccache "no per-TU compile cache (ZCL_USE_CCACHE=0 leaves CC unwrapped)" \
         "every build-only/test-fast/dev-bin epoch reruns the full C front-end for every recompiled TU (~0.5-2 s per TU x hundreds on a header edit) instead of ~50-200 ms cache hits"
 fi
 
 # mold/lld/gold — fast linker selected for the DEV (non-LTO) binary link
-# (Makefile:305, ZCL_DEV_LINKER).
+# (ZCL_DEV_LINKER).
 if have mold; then
     found mold "$(command -v mold) ($(mold --version 2>/dev/null | sed -n '1p'))" \
-        "fast link of the non-LTO dev binary (Makefile:305, ZCL_DEV_LINKER=-fuse-ld=mold)"
+        "fast link of the non-LTO dev binary (ZCL_DEV_LINKER=-fuse-ld=mold)"
 elif have ld.lld; then
     found ld.lld "$(command -v ld.lld)" \
-        "faster link of the non-LTO dev binary (Makefile:305, ZCL_DEV_LINKER=-fuse-ld=lld)"
+        "faster link of the non-LTO dev binary (ZCL_DEV_LINKER=-fuse-ld=lld)"
 elif have ld.gold; then
     found ld.gold "$(command -v ld.gold)" \
-        "faster link of the non-LTO dev binary (Makefile:305, ZCL_DEV_LINKER=-fuse-ld=gold)"
+        "faster link of the non-LTO dev binary (ZCL_DEV_LINKER=-fuse-ld=gold)"
 else
-    absent mold/lld/gold "dev-bin non-LTO link falls back to GNU ld (Makefile:305 finds none)" \
+    absent mold/lld/gold "dev-bin non-LTO link falls back to GNU ld (ZCL_DEV_LINKER finds none)" \
         "the hot dev-reload/dev-bin link over ~1000 objects misses the fastest installed linker on every edit-link cycle"
 fi
 
-# clang — libFuzzer + ASan/UBSan toolchain (Makefile:2594, FUZZ_CC ?= clang).
+# clang — libFuzzer + ASan/UBSan toolchain (FUZZ_CC ?= clang).
 if have clang; then
     found clang "$(command -v clang) ($(clang --version 2>/dev/null | sed -n '1p'))" \
-        "libFuzzer+ASan/UBSan fuzz targets (Makefile:2594, FUZZ_CC)"
+        "libFuzzer+ASan/UBSan fuzz targets (FUZZ_CC)"
 else
-    absent clang "fuzz/fuzz-ci targets cannot build (Makefile:2594 FUZZ_CC)" \
+    absent clang "fuzz/fuzz-ci targets cannot build (FUZZ_CC)" \
         "\`make ci\` must run with SKIP_FUZZ=1; the fuzz corpus and sanitizer coverage never execute on this host"
 fi
 
@@ -88,15 +88,15 @@ else
         "save-to-check latency grows by up to ZCL_DEV_WATCH_POLL_MS (default 500 ms) on every edit, plus a steady polling wake instead of sleeping on inotify"
 fi
 
-# lcov (or gcovr) — coverage rendering (Makefile:3456).
+# lcov (or gcovr) — coverage rendering (coverage target).
 if have lcov; then
     found lcov "$(command -v lcov) ($(lcov --version 2>/dev/null | sed -n '1p'))" \
-        "coverage report rendering for \`make coverage\` (Makefile:3456)"
+        "coverage report rendering for \`make coverage\` (coverage target)"
 elif have gcovr; then
     found gcovr "$(command -v gcovr)" \
         "coverage report rendering for \`make coverage\` (lcov absent; gcovr fallback path)"
 else
-    absent lcov/gcovr "no coverage renderer for \`make coverage\` (Makefile:3456)" \
+    absent lcov/gcovr "no coverage renderer for \`make coverage\` (coverage target)" \
         "the coverage stage in \`make ci\` cannot render reports — run with SKIP_COV=1 or lose coverage evidence"
 fi
 
