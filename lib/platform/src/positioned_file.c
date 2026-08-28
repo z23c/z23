@@ -4,6 +4,7 @@
  * symlink/reparse-point-safe open_beneath, and the is_executable/is_private
  * identity checks. */
 #include "platform/positioned_file.h"
+#include "windows_path_internal.h"
 
 #include "base/safe_alloc.h"
 
@@ -43,34 +44,6 @@ static HANDLE positioned_handle(const struct platform_positioned_file *file)
     return file ? (HANDLE)file->native : INVALID_HANDLE_VALUE;
 }
 
-static bool positioned_wide(const char *utf8, wchar_t out[32768])
-{
-    if (!utf8 || !utf8[0]) return false;
-    wchar_t plain[32768];
-    int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8, -1,
-                                plain, 32768);
-    if (n <= 0) return false;
-    if (wcsncmp(plain, L"\\\\?\\", 4) == 0) {
-        wmemcpy(out, plain, (size_t)n);
-        return true;
-    }
-    if (plain[0] == L'\\' && plain[1] == L'\\') {
-        if ((size_t)n + 6 >= 32768) return false;
-        wmemcpy(out, L"\\\\?\\UNC\\", 8);
-        wmemcpy(out + 8, plain + 2, (size_t)n - 2);
-        return true;
-    }
-    if (plain[0] && plain[1] == L':' &&
-        (plain[2] == L'\\' || plain[2] == L'/')) {
-        if ((size_t)n + 4 >= 32768) return false;
-        wmemcpy(out, L"\\\\?\\", 4);
-        wmemcpy(out + 4, plain, (size_t)n);
-        return true;
-    }
-    wmemcpy(out, plain, (size_t)n);
-    return true;
-}
-
 void platform_positioned_file_init(struct platform_positioned_file *file)
 {
     if (file) file->native = (uintptr_t)INVALID_HANDLE_VALUE;
@@ -84,7 +57,7 @@ static bool positioned_open_path(struct platform_positioned_file *file,
                                  const char *path, bool follow)
 {
     wchar_t wide[32768];
-    if (!file || !positioned_wide(path, wide)) return false;
+    if (!file || !platform_windows_wide_path(path, wide)) return false;
     platform_positioned_file_close(file);
     HANDLE handle = CreateFileW(
         wide, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -128,7 +101,7 @@ bool platform_positioned_file_open_beneath(
         relative[0] == '\\' || strchr(relative, '\\'))
         return false;
     wchar_t root_wide[32768], relative_wide[32768];
-    if (!positioned_wide(root, root_wide) ||
+    if (!platform_windows_wide_path(root, root_wide) ||
         MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, relative, -1,
                             relative_wide, 32768) <= 0)
         return false;

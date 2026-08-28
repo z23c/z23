@@ -7,6 +7,7 @@
 #endif
 
 #include "platform/file_metadata.h"
+#include "windows_path_internal.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -18,39 +19,11 @@
 #include <windows.h>
 #include <wchar.h>
 
-static bool metadata_wide(const char *utf8, wchar_t out[32768])
-{
-    if (!utf8 || !utf8[0]) return false;
-    wchar_t plain[32768];
-    int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8, -1,
-                                plain, 32768);
-    if (n <= 0) return false;
-    if (wcsncmp(plain, L"\\\\?\\", 4) == 0) {
-        wmemcpy(out, plain, (size_t)n);
-        return true;
-    }
-    if (plain[0] == L'\\' && plain[1] == L'\\') {
-        if ((size_t)n + 6 >= 32768) return false;
-        wmemcpy(out, L"\\\\?\\UNC\\", 8);
-        wmemcpy(out + 8, plain + 2, (size_t)n - 2);
-        return true;
-    }
-    if (plain[0] && plain[1] == L':' &&
-        (plain[2] == L'\\' || plain[2] == L'/')) {
-        if ((size_t)n + 4 >= 32768) return false;
-        wmemcpy(out, L"\\\\?\\", 4);
-        wmemcpy(out + 4, plain, (size_t)n);
-        return true;
-    }
-    wmemcpy(out, plain, (size_t)n);
-    return true;
-}
-
 enum platform_file_metadata_result platform_file_metadata_read(
     const char *path, struct platform_file_metadata *out)
 {
     wchar_t wide[32768];
-    if (!out || !metadata_wide(path, wide))
+    if (!out || !platform_windows_wide_path(path, wide))
         return PLATFORM_FILE_METADATA_REFUSED;
     HANDLE file = CreateFileW(
         wide, FILE_READ_ATTRIBUTES,
@@ -84,7 +57,7 @@ enum platform_file_metadata_result platform_file_metadata_read(
 enum platform_file_shape platform_file_shape_read(const char *path)
 {
     wchar_t wide[32768];
-    if (!metadata_wide(path, wide))
+    if (!platform_windows_wide_path(path, wide))
         return PLATFORM_FILE_SHAPE_UNREADABLE;
     /* FILE_FLAG_BACKUP_SEMANTICS because a directory has no handle without
      * it: CreateFileW refuses one with ERROR_ACCESS_DENIED, which this
