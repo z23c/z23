@@ -48,7 +48,27 @@
  * All access to g_swarm fields protected by g_swarm_mutex. */
 static struct swarm_sync g_swarm __attribute__((used));
 static _Atomic bool g_swarm_active = false;
-static pthread_mutex_t g_swarm_mutex = PTHREAD_MUTEX_INITIALIZER;
+static zcl_mutex_t g_swarm_mutex;
+static pthread_once_t g_swarm_mutex_once = PTHREAD_ONCE_INIT;
+
+static void swarm_mutex_init_once(void)
+{
+    zcl_mutex_init(&g_swarm_mutex);
+}
+
+static void swarm_mutex_lock(void)
+{
+    if (pthread_once(&g_swarm_mutex_once, swarm_mutex_init_once) != 0) {
+        LOG_ERROR("net", "swarm mutex initialization failed");
+        abort();
+    }
+    zcl_mutex_lock(&g_swarm_mutex);
+}
+
+static void swarm_mutex_unlock(void)
+{
+    zcl_mutex_unlock(&g_swarm_mutex);
+}
 
 /* Snapshot sync service — global singleton in snapshot_sync_service.c */
 static int64_t g_swarm_last_progress_time = 0;
@@ -1320,7 +1340,7 @@ bool mp_handle_zcl23_sync(struct msg_processor *mp,
                                 memcpy(peer_manifest.utxo_sha3, utxo_sha3, 32);
 
                                 int32_t first_chunk = -1;
-                                zcl_mutex_lock(&g_swarm_mutex);
+                                swarm_mutex_lock();
                                 if (swarm_sync_init(&g_swarm, &peer_manifest,
                                                     mp->datadir)) {
                                     g_swarm_last_progress_time =
@@ -1340,7 +1360,7 @@ bool mp_handle_zcl23_sync(struct msg_processor *mp,
                                      * another peer's manifest can retry. */
                                     atomic_store(&g_swarm_active, false);
                                 }
-                                zcl_mutex_unlock(&g_swarm_mutex);
+                                swarm_mutex_unlock();
                                 if (first_chunk >= 0)
                                     push_chunk_request(mp, node,
                                                        (uint32_t)first_chunk);
@@ -1404,13 +1424,13 @@ bool mp_handle_zcl23_sync(struct msg_processor *mp,
                     }
 
                     if (parse_ok) {
-                        zcl_mutex_lock(&g_swarm_mutex);
+                        swarm_mutex_lock();
                         bool verified = swarm_sync_receive_chunk(
                             &g_swarm, chunk, node->id);
                         node->swarm_inflight_chunk = -1;
 
                         if (!verified) {
-                            zcl_mutex_unlock(&g_swarm_mutex);
+                            swarm_mutex_unlock();
                             fprintf(stderr, "Peer %s: chunk %u failed verification\n",  // obs-ok:helper-context-logged
                                    node->addr_name, chunk_index);
                             peer_scoring_record(mp->net_mgr, node, PEER_OFFENCE_INVALID_CHUNK,
@@ -1451,9 +1471,9 @@ bool mp_handle_zcl23_sync(struct msg_processor *mp,
                              * equivalent to `g_swarm_active = false` on
                              * _Atomic bool, but documents the pairing. */
                             atomic_store(&g_swarm_active, false);
-                            zcl_mutex_unlock(&g_swarm_mutex);
+                            swarm_mutex_unlock();
                         } else {
-                            zcl_mutex_unlock(&g_swarm_mutex);
+                            swarm_mutex_unlock();
                         }
                     } else {
                         printf("Peer %s: truncated zchunkdata\n",
@@ -1915,7 +1935,7 @@ void mp_snapshot_send_tick(struct msg_processor *mp,
     if (g_swarm_active && node->swarm_manifest_received &&
         node->state >= PEER_HANDSHAKE_COMPLETE) {
 
-        zcl_mutex_lock(&g_swarm_mutex);
+        swarm_mutex_lock();
 
         /* Requeue globally stale inflight chunks. A peer can disconnect and
          * lose node->swarm_inflight_chunk while g_swarm still marks that
@@ -1960,7 +1980,7 @@ void mp_snapshot_send_tick(struct msg_processor *mp,
             uint32_t complete = g_swarm.chunks_complete;
             uint32_t total = g_swarm.manifest.num_chunks;
             uint32_t inflight = g_swarm.chunks_inflight;
-            zcl_mutex_unlock(&g_swarm_mutex);
+            swarm_mutex_unlock();
 
             /* Count serving peers — under cs_nodes: the socket-thread
              * disconnect sweep frees nodes at refcount 0. g_swarm_mutex
@@ -1979,7 +1999,7 @@ void mp_snapshot_send_tick(struct msg_processor *mp,
             printf("Sync: %d%% (%u/%u chunks, %u inflight, %d peers serving)\n",
                    progress, complete, total, inflight, serving_peers);
         } else {
-            zcl_mutex_unlock(&g_swarm_mutex);
+            swarm_mutex_unlock();
         }
     }
 
