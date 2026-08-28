@@ -78,6 +78,7 @@ BASELINE="${ZCL_SUPREG_BASELINE:-tools/scripts/supervisor_baseline.txt}"
 declare -A baseline
 baseline_count=0
 while IFS= read -r line; do
+    line="${line%$'\r'}"
     [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
     baseline["$line"]=1
     baseline_count=$((baseline_count + 1))
