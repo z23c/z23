@@ -7,6 +7,7 @@
 #define ZCL_CONTROLLERS_WALLET_RESCAN_CONTROLLER_INTERNAL_H
 
 #include "platform/time_compat.h"
+#include "platform/read_mapping.h"
 #include "controllers/wallet_rescan_controller.h"
 #include "controllers/rpc_chainstate_guard.h"
 #include "controllers/wallet_helpers.h"
@@ -57,7 +58,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/mman.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <time.h>

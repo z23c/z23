@@ -16,6 +16,14 @@
 #include <sys/file.h>
 #include <unistd.h>
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <io.h>
+#endif
+
 enum { NODE_DB_OWNER_LEASES = 128 };
 enum { NODE_DB_OWNER_PATH_MAX = 1100 };
 
@@ -34,7 +42,75 @@ enum { NODE_DB_OWNER_PATH_MAX = 1100 };
  * disjoint advisory states on the exact inode — same ownership contract,
  * same fail-closed probes. */
 
-#if defined(__APPLE__)
+#if defined(_WIN32)
+#define NODE_DB_OWNER_LEASE_LOCK_START UINT64_C(0x0000F00000000000)
+
+static int owner_lease_apply(int fd, bool lock)
+{
+    intptr_t raw = _get_osfhandle(fd);
+    if (raw == -1) {
+        errno = EBADF;
+        return -1;
+    }
+    OVERLAPPED overlap;
+    memset(&overlap, 0, sizeof(overlap));
+    overlap.Offset = (DWORD)NODE_DB_OWNER_LEASE_LOCK_START;
+    overlap.OffsetHigh = (DWORD)(NODE_DB_OWNER_LEASE_LOCK_START >> 32);
+    BOOL ok = lock
+        ? LockFileEx((HANDLE)raw, LOCKFILE_EXCLUSIVE_LOCK |
+                     LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &overlap)
+        : UnlockFileEx((HANDLE)raw, 0, 1, 0, &overlap);
+    if (!ok) {
+        DWORD error = GetLastError();
+        errno = error == ERROR_LOCK_VIOLATION ? EWOULDBLOCK : EIO;
+        return -1;
+    }
+    return 0;
+}
+
+static int owner_lease_lock(int fd) { return owner_lease_apply(fd, true); }
+static int owner_lease_unlock(int fd) { return owner_lease_apply(fd, false); }
+
+static int owner_lease_open(const char *path, bool writable, bool create)
+{
+    int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
+                                    NULL, 0);
+    if (count <= 0 || count > 32767) {
+        errno = EINVAL;
+        return -1;
+    }
+    wchar_t wide[32768];
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
+                            wide, count) != count) {
+        errno = EINVAL;
+        return -1;
+    }
+    DWORD access = GENERIC_READ | (writable ? GENERIC_WRITE : 0);
+    HANDLE handle = CreateFileW(wide, access,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+        create ? OPEN_ALWAYS : OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    if (handle == INVALID_HANDLE_VALUE) {
+        DWORD error = GetLastError();
+        errno = error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND
+              ? ENOENT : EACCES;
+        return -1;
+    }
+    FILE_ATTRIBUTE_TAG_INFO tag;
+    if (!GetFileInformationByHandleEx(handle, FileAttributeTagInfo, &tag,
+                                      sizeof(tag)) ||
+        (tag.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY |
+                               FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
+        CloseHandle(handle);
+        errno = ELOOP;
+        return -1;
+    }
+    int fd = _open_osfhandle((intptr_t)handle,
+                             (writable ? _O_RDWR : _O_RDONLY) | _O_BINARY);
+    if (fd < 0) CloseHandle(handle);
+    return fd;
+}
+#elif defined(__APPLE__)
 #define NODE_DB_OWNER_LEASE_LOCK_START ((off_t)0x0000F00000000000ULL)
 
 static int owner_lease_apply(int fd, short type)
@@ -66,6 +142,16 @@ static int owner_lease_lock(int fd)
 static int owner_lease_unlock(int fd)
 {
     return flock(fd, LOCK_UN);
+}
+#endif
+
+#if !defined(_WIN32)
+static int owner_lease_open(const char *path, bool writable, bool create)
+{
+    int flags = writable ? O_RDWR : O_RDONLY;
+    flags |= O_CLOEXEC | O_NOFOLLOW;
+    if (create) flags |= O_CREAT;
+    return open(path, flags, 0600);
 }
 #endif
 
@@ -117,7 +203,7 @@ enum node_db_owner_lease_probe node_db_owner_lease_probe(const char *path)
         return errno == ENOENT ? NODE_DB_OWNER_LEASE_UNOWNED
                                : NODE_DB_OWNER_LEASE_PROBE_ERROR;
 #endif
-    int fd = open(lock_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    int fd = owner_lease_open(lock_path, false, false);
     if (fd < 0)
         return errno == ENOENT ? NODE_DB_OWNER_LEASE_UNOWNED
                                : NODE_DB_OWNER_LEASE_PROBE_ERROR;
@@ -223,13 +309,11 @@ bool node_db_owner_lease_acquire(struct node_db *ndb, bool create_if_missing)
      * database inode is the lease. Darwin implements flock through fcntl and
      * would make SQLite conflict with its own process; use one persistent
      * per-database lock inode there. Independent databases remain independent. */
-    int open_flags = O_RDWR | O_CLOEXEC | O_NOFOLLOW;
+    bool create_lease = create_if_missing;
 #if defined(__APPLE__)
-    open_flags |= O_CREAT;
-#else
-    if (create_if_missing) open_flags |= O_CREAT;
+    create_lease = true;
 #endif
-    int fd = open(lock_path, open_flags, 0600);
+    int fd = owner_lease_open(lock_path, true, create_lease);
     if (fd < 0) goto fail_locked;
     if (owner_lease_lock(fd) != 0) {
         int saved = errno;
@@ -276,8 +360,7 @@ bool node_db_owner_lease_rebind(struct node_db *ndb)
         LOG_FAIL("db", "database owner rebind found ambiguous ownership");
     return true;
 #else
-    int replacement = open(ndb->path,
-        O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+    int replacement = owner_lease_open(ndb->path, true, true);
     if (replacement < 0)
         LOG_FAIL("db", "database owner rebind open failed for %s: %s",
                  ndb->path, strerror(errno));

@@ -50,11 +50,6 @@
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 #include <string.h>
-#include <sys/stat.h>
-#include <sys/mman.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <time.h>
 
 /* walletledger: Unified double-entry ledger for transparent + shielded pools.
  * Each transaction shows debits/credits in both pools with running balances.

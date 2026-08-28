@@ -5,6 +5,7 @@
  * config/include/config/boot_error.h. libc only, by design. */
 
 #include "config/boot_error.h"
+#include "base/format_attribute.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -19,7 +20,7 @@ static char g_last_render[BOOT_ERROR_RENDER_MAX];
  * before any allocator policy is set up. */
 static void render_append(char *buf, size_t cap, size_t *off,
                           const char *fmt, ...)
-    __attribute__((format(printf, 4, 5)));
+    ZCL_PRINTF_LIKE(4, 5);
 
 static void render_append(char *buf, size_t cap, size_t *off,
                           const char *fmt, ...)

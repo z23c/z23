@@ -32,6 +32,7 @@
 // implements.
 
 #include "services/agent_broker_provider.h"
+#include "base/format_attribute.h"
 
 #include "agent_broker_provider_internal.h"
 
@@ -58,7 +59,7 @@ const char *agent_broker_provider_last_refusal(void)
 }
 
 static void refuse(char *why, size_t why_cap, const char *fmt, ...)
-    __attribute__((format(printf, 3, 4)));
+    ZCL_PRINTF_LIKE(3, 4);
 
 static void refuse(char *why, size_t why_cap, const char *fmt, ...)
 {

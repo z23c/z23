@@ -46,15 +46,9 @@
 #include "coins/coins_view.h"
 #include "views/wallet_view.h"
 #include <stdio.h>
-#include <stdlib.h>
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 #include <string.h>
-#include <sys/stat.h>
-#include <sys/mman.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <time.h>
 
 /* wallet-diagnostic audit RPCs: cross-reference UTXO + tx state, no mutations. */
 

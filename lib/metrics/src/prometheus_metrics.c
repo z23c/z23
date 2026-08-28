@@ -4,6 +4,7 @@
  */
 
 #include "metrics/prometheus_metrics.h"
+#include "base/format_attribute.h"
 #include "metrics/stage_metrics.h"
 #include "core/utiltime.h"
 #include "event/event.h"
@@ -798,7 +799,7 @@ void metrics_prometheus_init(void)
 
 /* ── Prometheus text format ─────────────────────────────────── */
 
-__attribute__((format(printf, 4, 5)))
+ZCL_PRINTF_LIKE(4, 5)
 static size_t append(char *buf, size_t cap, size_t pos, const char *fmt, ...)
 {
     if (pos >= cap) return pos;

@@ -43,19 +43,18 @@
 #include "controllers/node_binary_identity_json.h"
 #include "controllers/strong_params.h"
 #include "json/json.h"
+#include "platform/private_file.h"
 #include "platform/time_compat.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 #include "util/thread_registry.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
-#include <unistd.h>
 
 #define DBB_SUBSYS "debug_bundle"
 
@@ -247,7 +246,11 @@ static bool debug_bundle_write_leased(const char *trigger,
     struct tm tm_utc;
     char utc_iso[24] = {0};
     char utc_name[24] = {0};
+#ifdef _WIN32
+    if (gmtime_s(&tm_utc, &wall_t) != 0 ||
+#else
     if (!gmtime_r(&wall_t, &tm_utc) ||
+#endif
         strftime(utc_iso, sizeof(utc_iso), "%Y-%m-%dT%H:%M:%SZ", &tm_utc) == 0 ||
         strftime(utc_name, sizeof(utc_name), "%Y%m%dT%H%M%SZ", &tm_utc) == 0)
         LOG_FAIL(DBB_SUBSYS, "UTC timestamp formatting failed");
@@ -291,7 +294,9 @@ static bool debug_bundle_write_leased(const char *trigger,
 
     /* Create <datadir>/debug-bundle-<utc>.json (O_EXCL; -N suffix on
      * collision, same convention as self_backtrace's backtrace-<ts>.log). */
-    int fd = -1;
+    struct platform_private_file file;
+    platform_private_file_init(&file);
+    bool created = false;
     for (int k = 0; k < 1000; k++) {
         if (k == 0)
             snprintf(res->path, sizeof(res->path),
@@ -299,42 +304,47 @@ static bool debug_bundle_write_leased(const char *trigger,
         else
             snprintf(res->path, sizeof(res->path),
                      "%s/debug-bundle-%s-%d.json", datadir, utc_name, k);
-        fd = open(res->path,
-                  O_WRONLY | O_CREAT | O_EXCL | O_APPEND | O_CLOEXEC, 0600);
-        if (fd >= 0)
+        if (platform_private_file_create(res->path, &file)) {
+            created = true;
             break;
-        if (errno != EEXIST) {
+        }
+        /* A false absent result includes both an existing collision and an
+         * inaccessible path. Continue choosing a fresh exclusive name; if
+         * the parent is inaccessible every candidate fails closed. */
+        if (platform_private_path_absent(res->path)) {
             free(buf);
-            LOG_FAIL(DBB_SUBSYS, "open %s failed: %s", res->path,
-                     strerror(errno));
+            LOG_FAIL(DBB_SUBSYS, "creating private bundle %s failed",
+                     res->path);
         }
     }
-    if (fd < 0) {
+    if (!created) {
         free(buf);
         LOG_FAIL(DBB_SUBSYS, "no free debug-bundle filename under %s",
                  datadir);
     }
 
-    int io_errno = 0;
-    size_t off = 0;
-    while (off < wrote) {
-        ssize_t n = write(fd, buf + off, wrote - off);
-        if (n < 0) {
-            if (errno == EINTR)
-                continue;
-            io_errno = errno;
-            break;
-        }
-        off += (size_t)n;
-    }
-    if (close(fd) != 0 && io_errno == 0)
-        io_errno = errno;
+    bool io_ok = platform_private_file_write_at(&file, buf, wrote, 0) &&
+                 platform_private_file_flush(&file);
     free(buf);
-    if (io_errno != 0) {
-        (void)unlink(res->path);   /* never leave a half-written bundle */
+    if (!io_ok) {
+        /* Retire by the still-open identity so a path replacement cannot
+         * trick cleanup into deleting an attacker's file. */
+        (void)platform_private_file_retire(&file, res->path);
+        platform_private_file_close(&file);
         res->path[0] = '\0';
-        LOG_FAIL(DBB_SUBSYS, "writing bundle file failed: %s",
-                 strerror(io_errno));
+        LOG_FAIL(DBB_SUBSYS, "writing durable private bundle file failed");
+    }
+    platform_private_file_close(&file);
+
+    /* Match file durability with a parent-directory recovery barrier where
+     * the host supports one. The Windows seam revalidates a non-reparse
+     * parent because Windows exposes no directory fsync operation. */
+    if (!platform_private_parent_flush(datadir)) {
+        /* The fully flushed file is intentionally retained. Once its handle
+         * is closed, deleting by pathname could race a replacement and
+         * remove an object we did not create. */
+        res->path[0] = '\0';
+        LOG_FAIL(DBB_SUBSYS, "debug bundle parent durability check failed");
     }
 
     res->bytes = (int64_t)wrote;

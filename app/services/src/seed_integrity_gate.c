@@ -9,6 +9,7 @@
  * seed_integrity_gate — see services/seed_integrity_gate.h. */
 
 #include "services/seed_integrity_gate.h"
+#include "base/format_attribute.h"
 
 #include "config/runtime.h"
 #include "event/event.h"
@@ -49,7 +50,7 @@ static struct node_db *gate_ndb(void)
 }
 
 static void gate_refuse(int height, const char *fmt, ...)
-    __attribute__((format(printf, 2, 3)));
+    ZCL_PRINTF_LIKE(2, 3);
 static void gate_refuse(int height, const char *fmt, ...)
 {
     char reason[BLOCKER_REASON_MAX];

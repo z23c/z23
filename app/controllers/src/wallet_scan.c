@@ -15,6 +15,7 @@
  * Result: skips 99.9%+ of block deserialization. */
 
 #include "platform/time_compat.h"
+#include "platform/read_mapping.h"
 #include "views/format_helpers.h"
 #include "controllers/wallet_scan.h"
 #include "controllers/sync_controller.h"
@@ -31,7 +32,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -127,21 +127,42 @@ static void *scan_file_thread(void *arg)
 {
     struct scan_thread_arg *a = (struct scan_thread_arg *)arg;
     char path[512];
-    snprintf(path, sizeof(path), "%s/blocks/blk%05d.dat",
-             a->datadir, a->file_num);
-    int fd = open(path, O_RDONLY);
+    int path_len = snprintf(path, sizeof(path), "%s/blocks/blk%05d.dat",
+                            a->datadir, a->file_num);
+    if (path_len < 0 || (size_t)path_len >= sizeof(path)) {
+        a->result = false;
+        LOG_NULL("wallet_scan", "path too long for blk%05d.dat",
+                 a->file_num);
+    }
+    int flags = O_RDONLY;
+#ifdef O_BINARY
+    flags |= O_BINARY;
+#endif
+    int fd = open(path, flags);
     if (fd < 0) { a->result = false; LOG_NULL("wallet_scan", "open failed for blk%05d.dat", a->file_num); }
     struct stat st;
     if (fstat(fd, &st) != 0) { close(fd); a->result = false; LOG_NULL("wallet_scan", "fstat failed for blk%05d.dat", a->file_num); }
+    if (st.st_size <= 0 || (uintmax_t)st.st_size > (uintmax_t)SIZE_MAX) {
+        close(fd);
+        a->result = false;
+        LOG_NULL("wallet_scan", "invalid size for blk%05d.dat",
+                 a->file_num);
+    }
     size_t sz = (size_t)st.st_size;
-    uint8_t *data = mmap(NULL, sz, PROT_READ, MAP_PRIVATE, fd, 0);
+    struct platform_read_mapping mapping;
+    platform_read_mapping_init(&mapping);
+    if (!platform_read_mapping_open(&mapping, fd, sz)) {
+        close(fd);
+        a->result = false;
+        LOG_NULL("wallet_scan", "mapping failed for blk%05d.dat (size=%zu)",
+                 a->file_num, sz);
+    }
+    platform_read_mapping_advise_sequential(&mapping);
+
+    a->result = scan_file_raw(mapping.data, mapping.size, a->ht);
+
+    platform_read_mapping_close(&mapping);
     close(fd);
-    if (data == MAP_FAILED) { a->result = false; LOG_NULL("wallet_scan", "mmap failed for blk%05d.dat (size=%zu)", a->file_num, sz); }
-    posix_madvise(data, sz, POSIX_MADV_SEQUENTIAL);
-
-    a->result = scan_file_raw(data, sz, a->ht);
-
-    munmap(data, sz);
     return NULL;
 }
 

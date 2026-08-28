@@ -6,6 +6,7 @@
  * stays there and points here. */
 
 #include "platform/time_compat.h"
+#include "platform/socket_compat.h"
 #include "base/hex.h"
 #include "controllers/network_controller.h"
 #include "controllers/wallet_helpers.h"
@@ -26,7 +27,6 @@
 #include "models/database.h"
 #include "wallet/sapling_keys.h"
 #include "wallet/wallet.h"
-#include <arpa/inet.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -87,7 +87,7 @@ static struct zcl_result market_offer_endpoint(void *opaque,
     if (fs_port == 0)
         return ZCL_ERR(-2, "the file service is not listening");
     struct in_addr addr4;
-    if (inet_pton(AF_INET, ip, &addr4) != 1)
+    if (platform_socket_parse_address(AF_INET, ip, &addr4) != 1)
         return ZCL_ERR(-3, "configured external IP is not IPv4");
     memset(peer_ip, 0, 16);
     memcpy(peer_ip, pchIPv4Prefix, 12);

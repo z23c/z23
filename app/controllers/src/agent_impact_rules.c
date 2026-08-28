@@ -1,8 +1,8 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0 */
 
 #include "controllers/agent_impact_rules.h"
+#include "platform/glob_match.h"
 
-#include <fnmatch.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -36,7 +36,7 @@ static bool agent_impact_match_one_pattern(const char *path,
         return false;
     memcpy(buf, pattern, len);
     buf[len] = 0;
-    return fnmatch(buf, path, 0) == 0;
+    return platform_glob_match(buf, path, false);
 }
 
 static bool agent_impact_match_any_pattern(const char *path,
