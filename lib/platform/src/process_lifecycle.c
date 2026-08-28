@@ -196,11 +196,18 @@ bool platform_process_start_hidden(struct platform_process *process,
         goto done;
     }
     PROCESS_INFORMATION information = {0};
-    DWORD flags = CREATE_NO_WINDOW | CREATE_DEFAULT_ERROR_MODE |
+    platform_process_child_prepare_headless();
+    DWORD previous_thread_mode = 0;
+    bool thread_mode = SetThreadErrorMode(
+        SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX |
+        SEM_NOOPENFILEERRORBOX, &previous_thread_mode) != 0;
+    DWORD flags = CREATE_NO_WINDOW |
                   CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT;
-    bool ok = CreateProcessW(image, line, NULL, NULL, TRUE, flags,
-                             environment, cwd, &startup.StartupInfo,
-                             &information) != 0;
+    bool ok = thread_mode &&
+        CreateProcessW(image, line, NULL, NULL, TRUE, flags, environment, cwd,
+                       &startup.StartupInfo, &information) != 0;
+    if (thread_mode)
+        (void)SetThreadErrorMode(previous_thread_mode, NULL);
     DeleteProcThreadAttributeList(startup.lpAttributeList);
     free(startup.lpAttributeList); free(handles); CloseHandle(null_handle);
     if (ok) {

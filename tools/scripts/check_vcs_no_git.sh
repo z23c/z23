@@ -12,8 +12,8 @@
 # primitive: the word `git`, or exec*/system(/popen(/fork(. Keeping lib/vcs/
 # free of these is what makes the VCS sovereign and reproducible.
 #
-# Fail-loud: a grep exit >=2 (bad pattern / unreadable tree / non-GNU grep) is
-# a real error and aborts, never a hollow pass.
+# Fail-loud: a grep exit >=2 (bad pattern / unreadable tree) is a real error
+# and aborts, never a hollow pass.
 
 set -uo pipefail
 
@@ -31,12 +31,18 @@ fi
 
 # `\bgit\b` as a whole word, plus the process-spawning primitives. The word
 # boundary keeps identifiers like "digit"/"legit" from matching; a real git
-# call ("git ", `execvp("git"...`) trips it. The `(?<!\.)` lookbehind exempts
-# the string ".git" — lib/vcs/ legitimately names the .git DIRECTORY as an
-# ignore target; that is not a git invocation. Any bare `git` still fails.
-PATTERN='(?<!\.)\bgit\b|\bexec[lv][ep]*[[:space:]]*\(|\bexecve[[:space:]]*\(|\bsystem[[:space:]]*\(|\bpopen[[:space:]]*\(|\bfork[[:space:]]*\('
+# call ("git ", `execvp("git"...`) trips it. The exemption of a preceding
+# "." exempts the string ".git" — lib/vcs/ legitimately names the .git
+# DIRECTORY as an ignore target; that is not a git invocation. Any bare
+# `git` still fails.
+#
+# Spelled as POSIX ERE on purpose: the previous PCRE form (`grep -P` with a
+# `(?<!\.)` lookbehind) needs GNU grep, which Apple's grep does not ship —
+# the gate aborted with exit 2 on a stock macOS host. The ERE is verified
+# match-identical to the PCRE over lib/vcs and the whole repo corpus.
+PATTERN='(^|[^A-Za-z0-9_.])(git([^A-Za-z0-9_]|$)|exec[lv][ep]*[[:space:]]*\(|execve[[:space:]]*\(|system[[:space:]]*\(|popen[[:space:]]*\(|fork[[:space:]]*\()'
 
-hits=$(grep -rnP "$PATTERN" "$VCS_DIR" --include='*.c' --include='*.h' "${LINT_GREP_EXCLUDE_ARGS[@]}")
+hits=$(grep -rnE "$PATTERN" "$VCS_DIR" --include='*.c' --include='*.h' "${LINT_GREP_EXCLUDE_ARGS[@]}")
 rc=$?
 if [[ $rc -ge 2 ]]; then
     echo "check_vcs_no_git: FATAL — grep exited $rc scanning $VCS_DIR." >&2

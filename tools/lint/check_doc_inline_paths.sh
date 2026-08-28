@@ -92,7 +92,13 @@ gate_require_scanned "${#IS_MODULE_DIR[@]}" 20 check_doc_inline_paths \
     "no two-component tracked directories — the module-directory prong would pass on anything"
 
 # Collapse "a/b/../c" -> "a/c" and strip a leading "./".
-norm() { printf '%s' "$1" | sed -E 's#^\./##; :a; s#(^|/)[^/]+/\.\./#\1#; ta'; }
+# The label/branch is spelled with separate -e expressions on purpose: a
+# one-string `sed -E 's#^\./##; :a; ...; ta'` misparses on Apple's sed
+# ("unused label"), which left every "../" path unresolved and failed the
+# gate on phantom drift.
+norm() {
+    printf '%s' "$1" | sed -E -e 's#^\./##' -e ':a' -e 's#(^|/)[^/]+/\.\./#\1#' -e 'ta'
+}
 
 resolves() {
     local tok="$1" docdir="$2"

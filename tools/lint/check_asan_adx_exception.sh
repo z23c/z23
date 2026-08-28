@@ -98,8 +98,21 @@ if [ "${1:-}" = "--selftest" ]; then
     ZCL_ASAN_ADX_MAKEFILE="$tmp/Makefile" \
         "$0" >/dev/null
 
-    sed -i '0,/lib\/sapling\/src\/bn254_accel\.c/{s//lib\/sapling\/src\/bn254_accel.c lib\/sapling\/src\/unaudited_accel.c/}' \
-        "$tmp/Makefile"
+    # Replace the FIRST occurrence of the allowlist entry via an awk rewrite.
+    # GNU's `sed -i '0,/re/{s//.../}'` has no BSD spelling: Apple sed would
+    # take the whole program string as an in-place backup suffix and mutate
+    # nothing, hollowing this selftest.
+    FROM='lib/sapling/src/bn254_accel.c'
+    TO='lib/sapling/src/bn254_accel.c lib/sapling/src/unaudited_accel.c'
+    awk -v from="$FROM" -v to="$TO" '
+        BEGIN { done = 0 }
+        !done && (i = index($0, from)) {
+            print substr($0, 1, i - 1) to substr($0, i + length(from))
+            done = 1
+            next
+        }
+        { print }
+    ' "$tmp/Makefile" > "$tmp/Makefile.next" && mv "$tmp/Makefile.next" "$tmp/Makefile"
     if ZCL_ASAN_ADX_MAKEFILE="$tmp/Makefile" \
             "$0" >"$tmp/out" 2>&1; then
         fail "selftest expanded the exception allowlist but the gate passed"

@@ -85,6 +85,7 @@ int main(int argc, char **argv)
 
     int result = 1;
     const char *phase = "open";
+    const char *detail = "";
     struct platform_directory_transaction directory;
     struct platform_directory_child stage, opened, occupied, replacement;
     platform_directory_transaction_init(&directory);
@@ -126,6 +127,7 @@ int main(int argc, char **argv)
         goto cleanup;
 
     phase = "nested retained transaction";
+    detail = "open child directory";
     struct platform_directory_transaction nested;
     platform_directory_transaction_init(&nested);
     if (platform_directory_transaction_open_child(
@@ -133,6 +135,7 @@ int main(int argc, char **argv)
         goto cleanup;
     struct platform_directory_child nested_file;
     platform_directory_child_init(&nested_file);
+    detail = "create/write/flush child file";
     if (!platform_directory_child_create(&nested, "child", &nested_file) ||
         !platform_directory_child_write_exact(&nested_file, "nested", 6, 0) ||
         !platform_directory_child_flush(&nested_file)) {
@@ -141,12 +144,14 @@ int main(int argc, char **argv)
         goto cleanup;
     }
     platform_directory_child_close(&nested_file);
+    detail = "unlink child file";
     if (platform_directory_child_unlink_result(&nested, "child") !=
         PLATFORM_DIRECTORY_OK) {
         platform_directory_transaction_close(&nested);
         goto cleanup;
     }
     platform_directory_transaction_close(&nested);
+    detail = "remove child directory";
     wchar_t nested_wide[MAX_PATH];
     if (swprintf(nested_wide, MAX_PATH, L"%s\\nested", root_wide) <= 0 ||
         !RemoveDirectoryW(nested_wide))
@@ -371,7 +376,12 @@ cleanup:
     if (swprintf(nested_cleanup, MAX_PATH, L"%s\\nested", root_wide) > 0)
         (void)RemoveDirectoryW(nested_cleanup);
     if (!platform_private_directory_remove_empty(root)) result = 1;
-    if (result) return fail(phase);
+    if (result) {
+        fprintf(stderr, "directory_transaction_acceptance detail: %s "
+                        "winerr=%lu\n", detail,
+                (unsigned long)GetLastError());
+        return fail(phase);
+    }
     puts("directory_transaction_acceptance: PASS");
     return 0;
 }
