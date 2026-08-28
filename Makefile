@@ -3854,7 +3854,8 @@ LINT_FAST_GATES := \
     check-equihash-params \
     check-framework-shape \
     check-supervisor-registration \
-    check-vendor-provenance
+    check-vendor-provenance \
+    check-windows-platform-seam
 
 ifeq ($(ZCL_LINT_SERIAL),1)
 lint-fast: $(LINT_FAST_GATES)
@@ -9220,6 +9221,19 @@ check-clang-portability:
 	@echo "══ LINT: second-compiler portability (clang -std=c23 -pedantic) ══"
 	@./tools/lint/check_clang_portability.sh --self-test && ./tools/lint/check_clang_portability.sh
 
+# Windows cross-compile check for the platform seam (lib/platform/src/*.c),
+# the layer whose entire job is hiding OS differences behind one header per
+# primitive. mingw-w64 is already on the dev reference host and already
+# cross-links the presentation demo (see presentation-portability above); this
+# gate spends that same toolchain on a syntax-only pass over every seam file
+# and ratchets realized diagnostics against a recorded baseline, so a file
+# that newly stops cross-compiling for Windows fails the build instead of
+# surfacing later as a human-caught revert. Reports UNOBSERVED, never a pass,
+# when mingw is absent.
+check-windows-platform-seam:
+	@echo "══ LINT: Windows platform-seam cross-compile (mingw -fsyntax-only) ══"
+	@./tools/lint/check_windows_platform_seam.sh --self-test && ./tools/lint/check_windows_platform_seam.sh
+
 # C23 lets a `(void)` cast suppress [[nodiscard]], so annotating
 # struct zcl_result fences off NEW silent discards but cannot excavate the
 # existing ones. This is the excavator: a shrink-only ratchet over the cast
@@ -10223,6 +10237,7 @@ LINT_GATES := \
     check-privileged-transition-receipt \
     check-no-gnu-va-args \
     check-clang-portability \
+    check-windows-platform-seam \
     check-result-discard \
     check-c23-only \
     check-no-python \

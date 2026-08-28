@@ -243,6 +243,7 @@ gate_command() {
         check-no-gnu-va-args)              echo './tools/lint/check_no_gnu_va_args.sh' ;;
         check-no-warning-suppression)      echo './tools/lint/check_no_warning_suppression.sh .' ;;
         check-clang-portability)           echo './tools/lint/check_clang_portability.sh --self-test && ./tools/lint/check_clang_portability.sh' ;;
+        check-windows-platform-seam)       echo './tools/lint/check_windows_platform_seam.sh --self-test && ./tools/lint/check_windows_platform_seam.sh' ;;
         check-result-discard)              echo 'ZCL_LINT_MODE=FAIL ./tools/lint/check_result_discard.sh' ;;
         *) return 1 ;;
     esac

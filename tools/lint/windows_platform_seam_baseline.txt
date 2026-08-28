@@ -1,0 +1,14 @@
+# Windows platform-seam ratchet baseline — regenerate with:
+#   ZCL_LINT_MODE=UPDATE tools/lint/check_windows_platform_seam.sh
+#
+# One '<path> <count>' line per lib/platform/src/*.c file that
+# still holds mingw diagnostic sites under
+#   x86_64-w64-mingw32-gcc -std=c2x -fsyntax-only <lib/*/include -I flags>
+# A file absent from this list must produce ZERO diagnostics.
+# Counts may only go DOWN. os_sandbox_linux.c and any other
+# file the Makefile's own non-Linux LIB_SRCS filter drops are
+# never listed here — they are exempt, not zero.
+#
+# Recorded from 11 in-scope translation units with:
+#   x86_64-w64-mingw32-gcc (GCC) 13-posix
+lib/platform/src/rng.c 2
