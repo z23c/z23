@@ -93,6 +93,26 @@ bool platform_positioned_file_size(const struct platform_positioned_file *file,
     return true;
 }
 
+bool platform_positioned_file_is_executable(
+    const struct platform_positioned_file *file)
+{
+    HANDLE handle = positioned_handle(file);
+    IMAGE_DOS_HEADER header;
+    int64_t read = platform_positioned_file_read(file, &header,
+                                                 sizeof(header), 0);
+    DWORD signature = 0;
+    uint64_t size = 0;
+    return handle != INVALID_HANDLE_VALUE && read == (int64_t)sizeof(header) &&
+           header.e_magic == IMAGE_DOS_SIGNATURE && header.e_lfanew > 0 &&
+           platform_positioned_file_size(file, &size) &&
+           (uint64_t)header.e_lfanew <= size &&
+           size - (uint64_t)header.e_lfanew >= sizeof(signature) &&
+           platform_positioned_file_read(file, &signature, sizeof(signature),
+                                         (uint64_t)header.e_lfanew) ==
+               (int64_t)sizeof(signature) &&
+           signature == IMAGE_NT_SIGNATURE;
+}
+
 int64_t platform_positioned_file_read(
     const struct platform_positioned_file *file, void *data, size_t size,
     uint64_t offset)
@@ -163,6 +183,15 @@ bool platform_positioned_file_size(const struct platform_positioned_file *file,
         return false;
     *size = (uint64_t)st.st_size;
     return true;
+}
+
+bool platform_positioned_file_is_executable(
+    const struct platform_positioned_file *file)
+{
+    struct stat st;
+    int fd = file ? (int)file->native : -1;
+    return fd >= 0 && fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
+           (st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) != 0;
 }
 
 int64_t platform_positioned_file_read(

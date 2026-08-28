@@ -37,15 +37,13 @@
 #include "coins/undo.h"
 #include "script/interpreter.h"
 #include "script/script_flags.h"
+#include "platform/positioned_file.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <sys/stat.h>
 
 /* ── Read undo data for a block ──────────────────────────────── */
 
@@ -67,39 +65,44 @@ static bool read_block_undo(struct block_undo *undo, const struct block_index *p
     char path[512];
     get_block_pos_filename(path, sizeof(path), datadir, &undo_pos, "rev");
 
-    int fd = open(path, O_RDONLY);
-    if (fd < 0)
+    struct platform_positioned_file file;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path))
         LOG_FAIL("bg_validation", "read_block_undo: cannot open %s", path);
 
-    struct stat st;
-    if (fstat(fd, &st) != 0 || st.st_size <= 0) {
-        close(fd);
-        LOG_FAIL("bg_validation", "read_block_undo: fstat failed or empty file %s", path);
+    uint64_t file_size = 0;
+    if (!platform_positioned_file_size(&file, &file_size) || file_size == 0) {
+        platform_positioned_file_close(&file);
+        LOG_FAIL("bg_validation", "read_block_undo: size failed or empty file %s", path);
     }
 
     /* Read from undo_pos.nPos, capped at MAX_UNDO_READ.
      * The deserializer is stream-based and stops when done — we don't
      * need to read to EOF. This keeps memory bounded per block. */
-    size_t avail = (size_t)(st.st_size - (off_t)undo_pos.nPos);
-    if (avail == 0) {
-        close(fd);
+    uint64_t offset = undo_pos.nPos;
+    if (offset >= file_size) {
+        platform_positioned_file_close(&file);
         LOG_FAIL("bg_validation", "read_block_undo: no data available at pos %u in %s",
                  undo_pos.nPos, path);
     }
-    size_t read_len = avail < MAX_UNDO_READ ? avail : MAX_UNDO_READ;
+    uint64_t available = file_size - offset;
+    size_t read_len = available < MAX_UNDO_READ
+        ? (size_t)available : MAX_UNDO_READ;
 
     uint8_t *buf = zcl_malloc(read_len, "bg_valid undo buf");
     if (!buf) {
-        close(fd);
+        platform_positioned_file_close(&file);
         LOG_FAIL("bg_validation", "read_block_undo: malloc failed for %zu bytes", read_len);
     }
 
-    ssize_t nread = pread(fd, buf, read_len, (off_t)undo_pos.nPos);
-    close(fd);
+    int64_t nread = platform_positioned_file_read(&file, buf, read_len,
+                                                  offset);
+    platform_positioned_file_close(&file);
 
     if (nread <= 0) {
         free(buf);
-        LOG_FAIL("bg_validation", "read_block_undo: pread returned %zd for %s", nread, path);
+        LOG_FAIL("bg_validation", "read_block_undo: positioned read returned %lld for %s",
+                 (long long)nread, path);
     }
 
     struct byte_stream s;
