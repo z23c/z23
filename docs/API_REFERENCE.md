@@ -74,11 +74,11 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 742 |
+| Registry entries (branches + leaves) | 743 |
 | Top-level roots | 12 |
 | Branches | 173 |
-| Leaves (dispatchable command paths) | 569 |
-| … `ready` (live handler in this build) | 513 |
+| Leaves (dispatchable command paths) | 570 |
+| … `ready` (live handler in this build) | 514 |
 | … `compat` (metadata only, names a fallback) | 25 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 24 |
@@ -95,7 +95,7 @@ Per source file:
 | `config/commands/apps.def` | 16 | 3 | 13 |
 | `config/commands/app_features.def` | 73 | 20 | 53 |
 | `config/commands/store.def` | 18 | 0 | 18 |
-| `config/commands/ops.def` | 48 | 9 | 39 |
+| `config/commands/ops.def` | 49 | 9 | 40 |
 | `config/commands/dev.def` | 55 | 13 | 42 |
 | `config/commands/code.def` | 17 | 2 | 15 |
 | `config/commands/accounts.def` | 11 | 2 | 9 |
@@ -817,6 +817,7 @@ represented by its children's sections.
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
+| `ops mesh identity` (aliases: `ops.machine.status`, `machine.status`) | ready | read / read / operator · fast/low | none | `zcl.machine_mesh_identity.v1` | `z23 ops mesh identity` | Report this machine's mesh identity readiness |
 | `ops mesh join` | ready | mutate / core-recovery / operator · foreground/low | **`endpoint`**, `address` | `zcl.ops_mesh_join_status.v1` | `z23 ops mesh join --endpoint=<host:port>` | Join a peer from a verified session invite |
 | `ops mesh join_status` | ready | read / read / operator · fast/low | **`endpoint`**, `address` | `zcl.ops_mesh_join_status.v1` | `z23 ops mesh join_status --endpoint=<host:port>` | Report whether a mesh join has peered |
 
@@ -1629,6 +1630,8 @@ Every alias resolves through the same grammar as its canonical path
 | `ops.mirror` | `ops.debug.dash.mirror` |
 | `selfheal` | `ops.debug.dash.selfheal` |
 | `ops.selfheal` | `ops.debug.dash.selfheal` |
+| `ops.machine.status` | `ops.mesh.identity` |
+| `machine.status` | `ops.mesh.identity` |
 | `dev.change.cycle` | `dev.change.apply` |
 | `dev.loop.watch` | `dev.loop.ensure` |
 | `dev.loop.heartbeat` | `dev.loop.status` |
