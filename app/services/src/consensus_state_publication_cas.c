@@ -15,6 +15,8 @@
 #include "framework/condition.h"
 #include "json/json.h"
 #include "platform/file_sync.h"
+#include "platform/file_compat.h"
+#include "platform/fd_path.h"
 #include "storage/progress_store.h"
 #include "util/log_macros.h"
 #include "validation/main_state.h"
@@ -484,7 +486,14 @@ static bool write_all(int fd, const uint8_t *buf, size_t n)
 static bool verify_exact_wire_at(int dir_fd, const char *name,
                                  const uint8_t expected[CAS_WIRE_SIZE])
 {
+#if defined(_WIN32)
+    char path[4096];
+    if (!platform_dirfd_child_path(path, sizeof(path), dir_fd, name))
+        return false;
+    int fd = platform_file_open_nofollow(path, O_RDONLY | O_CLOEXEC, 0);
+#else
     int fd = openat(dir_fd, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+#endif
     if (fd < 0)
         return false;
     struct stat st;
@@ -524,6 +533,13 @@ static struct zcl_result persist_record(
     /* A shared <name>.tmp lets concurrent writers truncate/write the same
      * inode. Give every attempt an exclusive directory-local temp instead. */
     char tmp[256];
+#if defined(_WIN32)
+    char tmp_path[4096];
+    char destination_path[4096];
+    if (!platform_dirfd_child_path(destination_path,
+                                   sizeof(destination_path), dir_fd, name))
+        return ZCL_ERR(-42, "cas persist: output directory unavailable");
+#endif
     int fd = -1;
     for (unsigned attempt = 0; attempt < 1024; attempt++) {
         uint64_t nonce = atomic_fetch_add_explicit(
@@ -532,9 +548,18 @@ static struct zcl_result persist_record(
                          (long)getpid(), (unsigned long long)nonce);
         if (n <= 0 || (size_t)n >= sizeof(tmp))
             return ZCL_ERR(-42, "cas persist: temp name overflow");
+#if defined(_WIN32)
+        if (!platform_dirfd_child_path(tmp_path, sizeof(tmp_path), dir_fd,
+                                       tmp))
+            break;
+        fd = platform_file_open_nofollow(
+            tmp_path,
+            O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0400);
+#else
         fd = openat(dir_fd, tmp,
                     O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
                     0400);
+#endif
         if (fd >= 0)
             break;
         if (errno != EEXIST)
@@ -557,25 +582,35 @@ static struct zcl_result persist_record(
         LOG_WARN(CAS_SUBSYS, "close temp failed: %s", strerror(errno));
     }
     bool renamed = false;
+#if defined(_WIN32)
+    if (ok && platform_file_replace_atomic(tmp_path, destination_path) != 0) {
+#else
     if (ok && renameat(dir_fd, tmp, dir_fd, name) != 0) {
+#endif
         ok = false;
         LOG_WARN(CAS_SUBSYS, "renameat into place failed: %s",
                  strerror(errno));
     } else if (ok) {
         renamed = true;
     }
+#if !defined(_WIN32)
     if (ok && fsync(dir_fd) != 0) {
         ok = false;
         LOG_WARN(CAS_SUBSYS, "directory fsync failed: %s", strerror(errno));
     }
+#endif
     if (ok && !verify_exact_wire_at(dir_fd, name, wire)) {
         ok = false;
         LOG_WARN(CAS_SUBSYS, "published record verification failed");
     }
     if (!ok) {
         if (!renamed) {
+#if defined(_WIN32)
+            (void)unlink(tmp_path);
+#else
             (void)unlinkat(dir_fd, tmp, 0);
             (void)fsync(dir_fd);
+#endif
         }
         /* After rename, durability may be indeterminate. Never unlink by name:
          * a concurrent writer may already own it. Retain the self-verifying
@@ -607,7 +642,14 @@ struct zcl_result consensus_state_publication_cas_load(
         return ZCL_ERR(-50, "cas load: null out");
     if (dir_fd < 0 || !valid_output_name(name))
         return ZCL_ERR(-51, "cas load: invalid fd/name");
+#if defined(_WIN32)
+    char path[4096];
+    if (!platform_dirfd_child_path(path, sizeof(path), dir_fd, name))
+        return ZCL_ERR(-52, "cas load: directory path unavailable");
+    int fd = platform_file_open_nofollow(path, O_RDONLY | O_CLOEXEC, 0);
+#else
     int fd = openat(dir_fd, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+#endif
     if (fd < 0)
         return ZCL_ERR(-52, "cas load: openat failed: %s", strerror(errno));
     uint8_t wire[CAS_WIRE_SIZE + 1];

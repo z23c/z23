@@ -20,6 +20,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "platform/allocator_compat.h"
+#include "platform/file_compat.h"
+#include "platform/file_sync.h"
 
 #define LOCAL_EXPORT_PROOF_NAME \
     "consensus_snapshot.db.local-export-v1"
@@ -89,12 +91,18 @@ static bool export_path(char *out, size_t out_size, const char *datadir,
 
 static bool stat_identity_equal(const struct stat *a, const struct stat *b)
 {
+#if defined(_WIN32)
+    (void)a; (void)b;
+    /* Windows cache hits require handle identities, not CRT stat metadata. */
+    return false;
+#else
     return a && b && a->st_dev == b->st_dev && a->st_ino == b->st_ino &&
            a->st_size == b->st_size &&
            a->st_mtim.tv_sec == b->st_mtim.tv_sec &&
            a->st_mtim.tv_nsec == b->st_mtim.tv_nsec &&
            a->st_ctim.tv_sec == b->st_ctim.tv_sec &&
            a->st_ctim.tv_nsec == b->st_ctim.tv_nsec;
+#endif
 }
 
 static void local_export_cache_invalidate(void)
@@ -109,13 +117,15 @@ static bool hash_regular_file(const char *path, uint8_t out_sha3[32],
 {
     if (!path || !out_sha3 || !out_size)
         return false; /* raw-return-ok:validation predicate rejects input */
-    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    int fd = platform_file_open_nofollow(path, O_RDONLY | O_CLOEXEC, 0);
     if (fd < 0)
         return false; /* raw-return-ok:bounded policy reason returned */
 
     struct stat before;
+    struct platform_file_identity before_identity;
     if (fstat(fd, &before) != 0 || !S_ISREG(before.st_mode) ||
-        before.st_size < 0) {
+        before.st_size < 0 ||
+        !platform_file_identity_read(fd, &before_identity)) {
         close(fd);
         return false; /* raw-return-ok:bounded policy reason returned */
     }
@@ -146,7 +156,11 @@ static bool hash_regular_file(const char *path, uint8_t out_sha3[32],
         break;
     }
     struct stat after;
-    if (fstat(fd, &after) != 0 || !stat_identity_equal(&before, &after) ||
+    struct platform_file_identity after_identity;
+    if (fstat(fd, &after) != 0 ||
+        !platform_file_identity_read(fd, &after_identity) ||
+        memcmp(&before_identity, &after_identity,
+               sizeof(before_identity)) != 0 ||
         total != (uint64_t)before.st_size)
         ok = false;
     free(buf);
@@ -199,7 +213,7 @@ static bool read_local_export_proof(const char *path,
 {
     if (!path || !out)
         return false;
-    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    int fd = platform_file_open_nofollow(path, O_RDONLY | O_CLOEXEC, 0);
     if (fd < 0)
         return false;
     struct stat st;
@@ -271,8 +285,13 @@ static bool load_verified_local_export(const char *datadir,
     }
 
     struct stat body_st, proof_st;
+#if defined(_WIN32)
+    if (stat(body_path, &body_st) != 0 || !S_ISREG(body_st.st_mode) ||
+        stat(proof_path, &proof_st) != 0 || !S_ISREG(proof_st.st_mode)) {
+#else
     if (lstat(body_path, &body_st) != 0 || !S_ISREG(body_st.st_mode) ||
         lstat(proof_path, &proof_st) != 0 || !S_ISREG(proof_st.st_mode)) {
+#endif
         if (reason && reason_size)
             snprintf(reason, reason_size, "local_export_proof_missing");
         return false; /* raw-return-ok:missing proof is expected policy */
@@ -355,24 +374,26 @@ static struct zcl_result write_local_export_proof(
     memcpy(raw + 60, state_block_hash, 32);
 
     (void)unlink(tmp_path);
-    int fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC |
-                            O_NOFOLLOW, 0644);
+    int fd = platform_file_open_nofollow(
+        tmp_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
     if (fd < 0)
         return ZCL_ERR(-23, "local export proof: open %s failed: %s",
                        tmp_path, strerror(errno));
-    bool ok = write_exact_fd(fd, raw, sizeof(raw)) && fsync(fd) == 0;
+    bool ok = write_exact_fd(fd, raw, sizeof(raw)) &&
+              platform_data_sync(fd) == 0;
     int close_rc = close(fd);
     if (!ok || close_rc != 0) {
         (void)unlink(tmp_path);
         return ZCL_ERR(-24, "local export proof: durable write failed: %s",
                        strerror(errno));
     }
-    if (rename(tmp_path, proof_path) != 0) {
+    if (platform_file_replace_atomic(tmp_path, proof_path) != 0) {
         struct zcl_result result = ZCL_ERR(
             -25, "local export proof: rename failed: %s", strerror(errno));
         (void)unlink(tmp_path);
         return result;
     }
+#if !defined(_WIN32)
     int dfd = open(datadir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (dfd < 0 || fsync(dfd) != 0) {
         if (dfd >= 0)
@@ -382,6 +403,7 @@ static struct zcl_result write_local_export_proof(
                        strerror(errno));
     }
     close(dfd);
+#endif
     local_export_cache_invalidate();
     return ZCL_OK;
 }

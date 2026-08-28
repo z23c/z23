@@ -2,6 +2,7 @@
  * purpose: Persistent private identity and capability declaration for ZBuild workers. */
 
 #include "services/build_fabric_worker.h"
+#include "platform/file_sync.h"
 
 #include "base/hex.h"
 #include "crypto/ed25519.h"
@@ -44,7 +45,8 @@ struct zcl_result build_fabric_worker_identity_load(
         if (fd < 0)
             return ZCL_ERR(-1, "create worker key: %s", strerror(errno));
         ssize_t wrote = write(fd, seed, sizeof(seed));
-        bool synced = wrote == (ssize_t)sizeof(seed) && fsync(fd) == 0;
+        bool synced = wrote == (ssize_t)sizeof(seed) &&
+                      platform_data_sync(fd) == 0;
         bool ok = close(fd) == 0 && synced;
         if (!ok) {
             (void)unlink(path);

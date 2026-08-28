@@ -27,6 +27,7 @@
 static const uint8_t UI_HOST_REQUEST_MAGIC[4] = {'Z', 'P', 'H', 'R'};
 static const uint8_t UI_HOST_REPLY_MAGIC[4] = {'Z', 'P', 'H', 'A'};
 
+#if !defined(_WIN32)
 static int ui_host_stream_socket(void)
 {
 #if defined(SOCK_CLOEXEC)
@@ -42,9 +43,16 @@ static int ui_host_stream_socket(void)
     return fd;
 #endif
 }
+#endif
 
 bool ui_present_host_display_ready(char *why, size_t why_cap)
 {
+#if defined(_WIN32)
+    if (why && why_cap > 0)
+        (void)snprintf(why, why_cap,
+                       "native presentation host is disabled on Windows");
+    return false;
+#else
     const char *display = getenv("DISPLAY");
     if (!display || !display[0]) {
         if (why && why_cap > 0)
@@ -54,8 +62,10 @@ bool ui_present_host_display_ready(char *why, size_t why_cap)
     }
     if (why && why_cap > 0) why[0] = '\0';
     return true;
+#endif
 }
 
+#if !defined(_WIN32)
 static uint32_t ui_host_display_hash(void)
 {
     const unsigned char *display =
@@ -105,9 +115,14 @@ static socklen_t ui_host_address(struct sockaddr_un *address)
     return (socklen_t)(offsetof(struct sockaddr_un, sun_path) +
                        (size_t)length + 1u);
 }
+#endif
 
 int ui_host_transport_connect_once(void)
 {
+#if defined(_WIN32)
+    errno = ENOTSUP;
+    return -1;
+#else
     struct sockaddr_un address;
     socklen_t address_len = ui_host_address(&address);
     if (address_len == 0) {
@@ -123,10 +138,16 @@ int ui_host_transport_connect_once(void)
         return -1;
     }
     return fd;
+#endif
 }
 
 bool ui_host_transport_send_all(int fd, const uint8_t *bytes, size_t length)
 {
+#if defined(_WIN32)
+    (void)fd; (void)bytes; (void)length;
+    errno = ENOTSUP;
+    return false;
+#else
     size_t sent = 0;
     while (sent < length) {
         ssize_t count = send(fd, bytes + sent, length - sent, MSG_NOSIGNAL);
@@ -138,11 +159,17 @@ bool ui_host_transport_send_all(int fd, const uint8_t *bytes, size_t length)
         return false;
     }
     return true;
+#endif
 }
 
 bool ui_host_transport_recv_all(int fd, uint8_t *bytes, size_t length,
                                 int timeout_ms)
 {
+#if defined(_WIN32)
+    (void)fd; (void)bytes; (void)length; (void)timeout_ms;
+    errno = ENOTSUP;
+    return false;
+#else
     size_t received = 0;
     while (received < length) {
         struct pollfd wait = {.fd = fd, .events = POLLIN};
@@ -164,6 +191,7 @@ bool ui_host_transport_recv_all(int fd, uint8_t *bytes, size_t length,
         return false;
     }
     return true;
+#endif
 }
 
 bool ui_host_transport_nonce(uint8_t nonce[UI_HOST_NONCE_BYTES])
@@ -246,7 +274,10 @@ bool ui_host_transport_parse_reply(
 
 bool ui_host_transport_peer_allowed(int client)
 {
-#if defined(__APPLE__)
+#if defined(_WIN32)
+    (void)client;
+    return false;
+#elif defined(__APPLE__)
     uid_t peer_uid;
     gid_t peer_gid;
     return getpeereid(client, &peer_uid, &peer_gid) == 0 &&
@@ -262,6 +293,10 @@ bool ui_host_transport_peer_allowed(int client)
 
 int ui_host_transport_listen(void)
 {
+#if defined(_WIN32)
+    errno = ENOTSUP;
+    return -1;
+#else
     struct sockaddr_un address;
     socklen_t address_len = ui_host_address(&address);
     if (address_len == 0) return -1;
@@ -299,10 +334,13 @@ int ui_host_transport_listen(void)
         return -1;
     }
     return listener;
+#endif
 }
 
 void ui_host_transport_cleanup(void)
 {
+#if !defined(_WIN32)
     struct sockaddr_un address;
     if (ui_host_address(&address) != 0) (void)unlink(address.sun_path);
+#endif
 }

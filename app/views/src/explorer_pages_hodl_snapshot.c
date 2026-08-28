@@ -9,6 +9,7 @@
  * the SVG chart emitters in explorer_pages_hodl_chart.c. */
 
 #include "platform/time_compat.h"
+#include "platform/file_sync.h"
 #include "views/explorer_pages_view.h"
 #include "views/explorer_pages_hodl_internal.h"
 #include "controllers/explorer_internal.h"
@@ -331,7 +332,7 @@ void hodl_view_disk_cache_save(const char *datadir, int64_t tip,
         ok = fprintf(f, "bucket %d value=%" PRId64 " count=%" PRId64 "\n",
                      i, h->buckets[i].value, h->buckets[i].count) > 0;
     }
-    ok = ok && fflush(f) == 0 && fsync(fileno(f)) == 0;
+    ok = ok && fflush(f) == 0 && platform_data_sync(fileno(f)) == 0;
     if (fclose(f) != 0)
         ok = false;
     if (!ok) {
