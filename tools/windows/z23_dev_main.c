@@ -1,4 +1,6 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Purpose: entry point for z23-dev.exe: turn one command word into the matching
+ * journey and run its steps. */
 #include "z23_dev_journey.h"
 
 #ifdef _WIN32

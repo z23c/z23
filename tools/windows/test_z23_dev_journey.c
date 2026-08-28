@@ -1,4 +1,6 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Purpose: prove the Windows dev journey resolves its own toolchain and refuses a
+ * command it does not recognise. */
 #include "z23_dev_journey.h"
 
 #ifdef _WIN32

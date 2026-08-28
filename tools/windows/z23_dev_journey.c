@@ -1,4 +1,6 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Purpose: Windows implementation of the create/develop/ship journey declared in
+ * z23_dev_journey.h. */
 #include "z23_dev_journey.h"
 
 #ifdef _WIN32

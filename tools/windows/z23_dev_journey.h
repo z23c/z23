@@ -1,4 +1,7 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Purpose: the create/develop/ship journey a Windows developer runs, declared as
+ * explicit steps. Every tool is resolved relative to z23-dev.exe, so an
+ * ambient PATH can never decide which compiler builds the node. */
 #ifndef Z23_TOOLS_WINDOWS_Z23_DEV_JOURNEY_H
 #define Z23_TOOLS_WINDOWS_Z23_DEV_JOURNEY_H
 
