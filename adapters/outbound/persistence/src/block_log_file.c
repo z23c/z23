@@ -4,6 +4,9 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "adapters/outbound/persistence/block_log_file.h"
+#include "platform/directory_compat.h"
+#include "platform/file_sync.h"
+#include "platform/positioned_io.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -64,17 +67,20 @@ static struct zcl_result write_all(int fd, const void *buf, size_t n)
 
 static struct zcl_result read_exact(int fd, off_t off, void *buf, size_t n)
 {
+    if (off < 0)
+        return ZCL_ERR(BLOCK_LOG_ERR_IO, "positioned read: negative offset");
     uint8_t *p = buf;
     while (n > 0) {
-        ssize_t r = pread(fd, p, n, off);
+        size_t chunk = n > UINT32_MAX ? UINT32_MAX : n;
+        int64_t r = platform_positioned_read(fd, p, chunk, (uint64_t)off);
         if (r < 0) {
-            if (errno == EINTR) continue;
             return ZCL_ERR(BLOCK_LOG_ERR_IO,
-                           "pread: errno=%d (%s)", errno, strerror(errno));
+                           "positioned read: errno=%d (%s)", errno,
+                           strerror(errno));
         }
         if (r == 0)
             return ZCL_ERR(BLOCK_LOG_ERR_CORRUPT,
-                           "pread: unexpected EOF at offset %lld",
+                           "positioned read: unexpected EOF at offset %lld",
                            (long long)off);
         p += (size_t)r;
         off += r;
@@ -179,7 +185,7 @@ static struct zcl_result idx_append_and_fsync(struct block_log_file *h,
      * to end-of-file. */
     r = write_all(h->idx_fd, rec, sizeof rec);
     if (!r.ok) return r;
-    if (fsync(h->idx_fd) != 0)
+    if (platform_file_sync(h->idx_fd) != 0)
         return ZCL_ERR(BLOCK_LOG_ERR_IO,
                        "fsync idx: errno=%d (%s)", errno, strerror(errno));
 
@@ -264,7 +270,7 @@ static struct zcl_result blf_append(void *self_v,
         r = write_all(h->log_fd, bytes, len);
         if (!r.ok) return r;
     }
-    if (fsync(h->log_fd) != 0)
+    if (platform_file_sync(h->log_fd) != 0)
         return ZCL_ERR(BLOCK_LOG_ERR_IO,
                        "fsync log: errno=%d (%s)", errno, strerror(errno));
 
@@ -448,13 +454,7 @@ static struct zcl_result scan_log_tail(struct block_log_file *h)
 
 static int ensure_dir(const char *path)
 {
-    struct stat st;
-    if (stat(path, &st) == 0) {
-        if (!S_ISDIR(st.st_mode)) { errno = ENOTDIR; return -1; }
-        return 0;
-    }
-    if (errno != ENOENT) return -1;
-    return mkdir(path, 0755);
+    return platform_directory_ensure(path, 0755) ? 0 : -1;
 }
 
 struct zcl_result block_log_file_open(const char *dir,

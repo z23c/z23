@@ -5,6 +5,74 @@
 
 #include "vcs/package_prepare.h"
 
+#ifdef _WIN32
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+const char *vcs_package_prepare_error_string(enum vcs_package_prepare_error e)
+{
+    static const char *const names[] = {
+        "ok", "null-argument", "path", "file-type", "file-changed", "io",
+        "allocation", "package-metadata", "content-manifest", "build-recipe",
+        "dependency-lock", "api-capsule", "release-body"
+    };
+    return (unsigned)e < sizeof(names) / sizeof(names[0]) ? names[e]
+                                                          : "unknown-error";
+}
+
+void vcs_package_prepared_init(struct vcs_package_prepared *prepared)
+{
+    if (!prepared) return;
+    memset(prepared, 0, sizeof(*prepared));
+    vcs_package_manifest_init(&prepared->manifest);
+    vcs_package_recipe_init(&prepared->recipe);
+    vcs_package_lock_init(&prepared->lock);
+    vcs_package_capsule_init(&prepared->capsule);
+}
+
+void vcs_package_prepared_free(struct vcs_package_prepared *prepared)
+{
+    if (!prepared) return;
+    vcs_package_manifest_free(&prepared->manifest);
+    vcs_package_recipe_free(&prepared->recipe);
+    free(prepared->manifest_wire); free(prepared->recipe_wire);
+    free(prepared->lock_wire); free(prepared->capsule_wire);
+    free(prepared->release_body);
+    memset(prepared, 0, sizeof(*prepared));
+}
+
+static enum vcs_package_prepare_error prepare_windows_refusal(
+    struct vcs_package_prepared *out, char *detail, size_t detail_cap)
+{
+    if (out) vcs_package_prepared_init(out);
+    if (detail && detail_cap)
+        (void)snprintf(detail, detail_cap,
+                       "Windows package traversal requires retained-root "
+                       "no-reparse qualification");
+    return VCS_PACKAGE_PREPARE_ERR_PATH;
+}
+
+enum vcs_package_prepare_error vcs_package_prepare(
+    const struct vcs_package_prepare_options *options,
+    struct vcs_package_prepared *out, char *detail, size_t detail_cap)
+{
+    if (!options || !options->dir || !out) return VCS_PACKAGE_PREPARE_ERR_NULL;
+    return prepare_windows_refusal(out, detail, detail_cap);
+}
+
+enum vcs_package_prepare_error vcs_package_scan_layout(
+    const char *dir, struct vcs_package_prepared *out,
+    bool *has_package_config, char *detail, size_t detail_cap)
+{
+    if (!dir || !out || !has_package_config) return VCS_PACKAGE_PREPARE_ERR_NULL;
+    *has_package_config = false;
+    return prepare_windows_refusal(out, detail, detail_cap);
+}
+
+#else
+
 #include "json/json.h"
 #include "util/safe_alloc.h"
 
@@ -744,3 +812,5 @@ enum vcs_package_prepare_error vcs_package_scan_layout(
     }
     return err;
 }
+
+#endif

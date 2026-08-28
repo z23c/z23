@@ -1,7 +1,9 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * Supervisor — implementation. See util/supervisor.h for design notes. */
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE  /* pthread_timedjoin_np */
+#endif
 /*
  *
  * Architecture:

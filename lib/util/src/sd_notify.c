@@ -8,16 +8,35 @@
 #include "util/sd_notify.h"
 #include "util/log_macros.h"
 
-#include <errno.h>
-#include <fcntl.h>
 #include <stddef.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
+#include <errno.h>
+#include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
+#endif
+
+#if defined(_WIN32)
+
+bool sd_notify_init(void) { return false; }
+bool sd_notify_is_active(void) { return false; }
+uint64_t sd_notify_watchdog_usec(void) { return 0; }
+bool sd_notify_ready(void) { return false; }
+bool sd_notify_watchdog_ping(void) { return false; }
+void sd_notify_set_health_check(sd_notify_health_check_fn fn) { (void)fn; }
+bool sd_notify_status(const char *msg) { (void)msg; return false; }
+bool sd_notify_extend_timeout_usec(uint64_t usec) { (void)usec; return false; }
+bool sd_notify_stopping(const char *reason) { (void)reason; return false; }
+#ifdef ZCL_TESTING
+void sd_notify_reset_for_testing(void) {}
+#endif
+
+#else
 
 static _Atomic int      g_active;
 static _Atomic uint64_t g_watchdog_usec;
@@ -175,3 +194,5 @@ void sd_notify_reset_for_testing(void)
     atomic_store_explicit(&g_health_check, NULL, memory_order_release);
 }
 #endif
+
+#endif /* !_WIN32 */

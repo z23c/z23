@@ -24,16 +24,25 @@
  * running at its inherited priority rather than aborting.
  */
 
+#if !defined(_WIN32)
 #define _GNU_SOURCE  /* SCHED_BATCH, syscall() */
+#endif
 
 #include "util/thread_qos.h"
 #include "util/log_macros.h"
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
 #include <sched.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <errno.h>
 #include <string.h>
+#endif
 #if defined(__APPLE__)
 #include <pthread.h>
 #include <sys/qos.h>
@@ -52,7 +61,22 @@
 
 bool zcl_thread_qos_background(void)
 {
-#if defined(__APPLE__)
+#if defined(_WIN32)
+    /* GetCurrentThread returns a process-local pseudo-handle for exactly the
+     * calling thread. It is neither stored nor closed. BELOW_NORMAL is an
+     * idempotent advisory priority suitable for repeated calls; Windows'
+     * THREAD_MODE_BACKGROUND_BEGIN deliberately rejects a second call. */
+    if (!SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL)) {
+        LOG_WARN("thread_qos",
+                 "background QoS denied error=%lu (continuing at inherited "
+                 "CPU priority)", (unsigned long)GetLastError());
+        return false;
+    }
+    LOG_INFO("thread_qos",
+             "background QoS applied tid=%lu priority=below-normal",
+             (unsigned long)GetCurrentThreadId());
+    return true;
+#elif defined(__APPLE__)
     int rc = pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0);
     if (rc != 0) {
         LOG_WARN("thread_qos", "background QoS denied: %s", strerror(rc));

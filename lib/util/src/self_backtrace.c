@@ -16,6 +16,128 @@
 #include "util/log_macros.h"
 #include "json/json.h"
 
+#if defined(_WIN32)
+#include "platform/private_file.h"
+#include "platform/time_compat.h"
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <stdatomic.h>
+#include <stdio.h>
+#include <string.h>
+
+static _Atomic bool g_installed;
+static _Atomic long g_dump_count;
+static _Atomic long g_last_unix_ts;
+static _Atomic int g_last_thread_count;
+static atomic_flag g_dump_in_progress = ATOMIC_FLAG_INIT;
+static SRWLOCK g_last_lock = SRWLOCK_INIT;
+static char g_last_path[4300];
+
+bool self_backtrace_install(void)
+{
+    atomic_store_explicit(&g_installed, true, memory_order_release);
+    return true;
+}
+
+int self_backtrace_dump_all(char *path_out, size_t cap)
+{
+    if (path_out && cap) path_out[0] = '\0';
+    if (!atomic_load_explicit(&g_installed, memory_order_acquire))
+        return -1;
+    if (atomic_flag_test_and_set_explicit(&g_dump_in_progress,
+                                          memory_order_acquire))
+        return -2;
+
+    char datadir[4096];
+    GetDataDir(false, datadir, sizeof(datadir));
+    if (!datadir[0]) {
+        atomic_flag_clear_explicit(&g_dump_in_progress, memory_order_release);
+        return -1;
+    }
+
+    char path[4300] = "", parent[4096] = "";
+    struct platform_private_file file;
+    platform_private_file_init(&file);
+    bool created = false;
+    int64_t now = platform_time_wall_unix();
+    for (unsigned attempt = 0; attempt < 1000 && !created; attempt++) {
+        char candidate[4300];
+        int written = snprintf(candidate, sizeof(candidate),
+                               "%s/backtrace-%lld-%u.log", datadir,
+                               (long long)now, attempt);
+        created = written > 0 && (size_t)written < sizeof(candidate) &&
+                  platform_private_path_resolve(candidate, path, sizeof(path),
+                                                parent, sizeof(parent)) &&
+                  platform_private_file_create(path, &file);
+    }
+    if (!created) {
+        atomic_flag_clear_explicit(&g_dump_in_progress, memory_order_release);
+        return -1;
+    }
+
+    void *frames[64];
+    USHORT count = CaptureStackBackTrace(0, 64, frames, NULL);
+    char report[4096];
+    int used = snprintf(report, sizeof(report),
+                        "=== self-backtrace ts=%lld pid=%lu tid=%lu ===\n"
+                        "[current-thread-only: cross-thread suspension refused]\n",
+                        (long long)now, (unsigned long)GetCurrentProcessId(),
+                        (unsigned long)GetCurrentThreadId());
+    for (USHORT i = 0; used > 0 && (size_t)used < sizeof(report) && i < count;
+         i++) {
+        int n = snprintf(report + used, sizeof(report) - (size_t)used,
+                         "#%u %p\n", (unsigned)i, frames[i]);
+        if (n < 0 || (size_t)n >= sizeof(report) - (size_t)used) break;
+        used += n;
+    }
+    bool ok = used > 0 && platform_private_file_write_at(
+                              &file, report, (size_t)used, 0) &&
+              platform_private_file_truncate(&file, (uint64_t)used) &&
+              platform_private_file_flush(&file);
+    platform_private_file_close(&file);
+    if (ok)
+        ok = platform_private_parent_flush(parent);
+    if (!ok) {
+        (void)platform_private_file_unlink_missing_ok(path);
+        atomic_flag_clear_explicit(&g_dump_in_progress, memory_order_release);
+        return -1;
+    }
+
+    AcquireSRWLockExclusive(&g_last_lock);
+    snprintf(g_last_path, sizeof(g_last_path), "%s", path);
+    ReleaseSRWLockExclusive(&g_last_lock);
+    atomic_store_explicit(&g_last_thread_count, 1, memory_order_release);
+    atomic_store_explicit(&g_last_unix_ts, (long)now, memory_order_release);
+    atomic_fetch_add_explicit(&g_dump_count, 1, memory_order_relaxed);
+    atomic_flag_clear_explicit(&g_dump_in_progress, memory_order_release);
+    if (path_out && cap) snprintf(path_out, cap, "%s", path);
+    return 1;
+}
+
+bool self_backtrace_dump_state_json(struct json_value *out, const char *key)
+{
+    (void)key;
+    if (!out) return false;
+    json_set_object(out);
+    json_push_kv_bool(out, "installed",
+                      atomic_load_explicit(&g_installed, memory_order_acquire));
+    json_push_kv_int(out, "dump_count", atomic_load(&g_dump_count));
+    json_push_kv_int(out, "last_thread_count",
+                     atomic_load(&g_last_thread_count));
+    json_push_kv_int(out, "last_unix_ts", atomic_load(&g_last_unix_ts));
+    char path[4300];
+    AcquireSRWLockShared(&g_last_lock);
+    snprintf(path, sizeof(path), "%s", g_last_path);
+    ReleaseSRWLockShared(&g_last_lock);
+    json_push_kv_str(out, "last_path", path);
+    json_push_kv_str(out, "scope", "current_thread_only");
+    return true;
+}
+
+#else
 #include <errno.h>
 #include <execinfo.h>
 #include <fcntl.h>
@@ -301,3 +423,4 @@ bool self_backtrace_dump_state_json(struct json_value *out, const char *key)
     json_push_kv_str(out, "last_path", path);
     return true;
 }
+#endif

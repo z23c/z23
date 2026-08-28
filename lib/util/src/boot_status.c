@@ -7,16 +7,17 @@
 #include "util/boot_status.h"
 #include "util/boot_phase.h"   /* enum boot_stage (writer-side derivation only) */
 #include "util/log_macros.h"
+#include "platform/positioned_file.h"
+#include "platform/private_file.h"
 #include "platform/time_compat.h"
 #include "json/json.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 /* ── Writer state ─────────────────────────────────────────────────────
  * Boot is single-threaded through app_init, but the stage machine and the
@@ -43,6 +44,19 @@ static int64_t g_progress_published_mono_ms;
  * escapes anything. */
 static char    g_blocker[64];
 static char    g_blocker_reason[256];
+static _Atomic uint64_t g_publish_sequence;
+
+static bool boot_status_snapshot_same(
+    const struct platform_positioned_file_snapshot *a,
+    const struct platform_positioned_file_snapshot *b)
+{
+    return a->size == b->size && a->volume == b->volume &&
+           a->file_low == b->file_low && a->file_high == b->file_high &&
+           a->modified_seconds == b->modified_seconds &&
+           a->modified_nanoseconds == b->modified_nanoseconds &&
+           a->changed_seconds == b->changed_seconds &&
+           a->changed_nanoseconds == b->changed_nanoseconds;
+}
 
 /* ── Phase derivation (pure) ─────────────────────────────────────────── */
 const char *boot_status_phase_for_stage(int stage, bool *rpc_bound,
@@ -182,36 +196,42 @@ static void boot_status_publish_locked(void)
     }
 
     char final_path[600];
-    char tmp_path[640];
     snprintf(final_path, sizeof(final_path), "%s/%s", g_datadir,
              ZCL_BOOT_STATUS_FILENAME);
-    snprintf(tmp_path, sizeof(tmp_path), "%s/%s.tmp.%ld", g_datadir,
-             ZCL_BOOT_STATUS_FILENAME, (long)getpid());
+    char resolved[640], parent[600];
+    if (!platform_private_path_resolve(final_path, resolved, sizeof(resolved),
+                                       parent, sizeof(parent))) {
+        LOG_WARN("boot_status", "cannot resolve private status destination");
+        return;
+    }
 
-    int fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) {
-        LOG_WARN("boot_status", "open(%s) failed: %s", tmp_path,
-                 strerror(errno));
+    char tmp_path[700] = "";
+    struct platform_private_file staging;
+    platform_private_file_init(&staging);
+    bool created = false;
+    for (unsigned attempt = 0; attempt < 64 && !created; attempt++) {
+        uint64_t sequence = atomic_fetch_add_explicit(
+            &g_publish_sequence, 1, memory_order_relaxed);
+        int written = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.%llu",
+                               resolved, (unsigned long long)sequence);
+        created = written > 0 && (size_t)written < sizeof(tmp_path) &&
+                  platform_private_file_create(tmp_path, &staging);
+    }
+    if (!created) {
+        LOG_WARN("boot_status", "cannot create private status staging file");
         return;
     }
-    ssize_t w = write(fd, json, n);
-    if (w < 0 || (size_t)w != n) {
-        LOG_WARN("boot_status", "short write to %s (%zd/%zu)", tmp_path, w, n);
-        close(fd);
-        (void)unlink(tmp_path);
-        return;
-    }
-    (void)fsync(fd);
-    if (close(fd) != 0) {
-        LOG_WARN("boot_status", "close(%s) failed: %s", tmp_path,
-                 strerror(errno));
-        (void)unlink(tmp_path);
-        return;
-    }
-    if (rename(tmp_path, final_path) != 0) {
-        LOG_WARN("boot_status", "rename(%s -> %s) failed: %s", tmp_path,
-                 final_path, strerror(errno));
-        (void)unlink(tmp_path);
+
+    bool ok = platform_private_file_write_at(&staging, json, n, 0) &&
+              platform_private_file_truncate(&staging, n) &&
+              platform_private_file_flush(&staging) &&
+              platform_private_file_replace(&staging, tmp_path, resolved);
+    platform_private_file_close(&staging);
+    if (ok)
+        ok = platform_private_parent_flush(parent);
+    if (!ok) {
+        LOG_WARN("boot_status", "durable status publication failed");
+        (void)platform_private_file_unlink_missing_ok(tmp_path);
     }
 }
 
@@ -346,22 +366,30 @@ bool boot_status_read(const char *datadir, struct boot_status_snapshot *out,
     char path[600];
     snprintf(path, sizeof(path), "%s/%s", datadir, ZCL_BOOT_STATUS_FILENAME);
 
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) {
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path) ||
+        !platform_positioned_file_snapshot(&file, &before) ||
+        before.size == 0 || before.size >= 4096) {
         if (err && errlen)
-            snprintf(err, errlen, "no boot_status.json at %s (%s)", path,
-                     strerror(errno));
+            snprintf(err, errlen, "no valid boot_status.json at %s", path);
+        platform_positioned_file_close(&file);
         return false;
     }
     char raw[4096];
-    ssize_t r = read(fd, raw, sizeof(raw) - 1);
-    close(fd);
-    if (r <= 0) {
+    int64_t r = platform_positioned_file_read(&file, raw, (size_t)before.size,
+                                               0);
+    bool stable = r == (int64_t)before.size &&
+                  platform_positioned_file_snapshot(&file, &after) &&
+                  boot_status_snapshot_same(&before, &after);
+    platform_positioned_file_close(&file);
+    if (!stable) {
         if (err && errlen)
             snprintf(err, errlen, "boot_status.json empty or unreadable");
         return false;
     }
-    raw[r] = '\0';
+    raw[(size_t)r] = '\0';
 
     struct json_value doc;
     if (!json_read(&doc, raw, (size_t)r) || doc.type != JSON_OBJ) {

@@ -4,7 +4,9 @@
  * pthread population. See `util/thread_registry.h` for the API
  * contract and rationale. */
 
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE  /* pthread_timedjoin_np, pthread_setname_np */
+#endif
 
 #include "platform/time_compat.h"
 #include "platform/thread_compat.h"
@@ -110,7 +112,7 @@ int thread_registry_spawn(const char *name,
 
     if (out_tid) *out_tid = tid;
 
-#ifdef __linux__
+#if defined(__linux__) || defined(_WIN32)
     /* pthread_setname_np accepts up to 15 chars + NUL; silently
      * truncate without propagating failure — diagnostics only. */
     char short_name[16];

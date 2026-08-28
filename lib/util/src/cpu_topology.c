@@ -27,19 +27,29 @@
 #include "util/cpu_topology.h"
 
 #include "json/json.h"
+#include "platform/logical_cpu.h"
 #include "util/log_macros.h"
 #include "platform/logical_cpu.h"
 
 
 #include <limits.h>
 #include <pthread.h>
+#include <limits.h>
+#if !defined(_WIN32)
 #include <sched.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#else
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <sys/stat.h>
+#endif
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 #define CPU_TOPOLOGY_DEFAULT_ROOT "/sys/devices/system/cpu"
 #define CPU_TOPOLOGY_ROOT_MAX     256
@@ -67,6 +77,7 @@ static char g_sysfs_root[CPU_TOPOLOGY_ROOT_MAX] = CPU_TOPOLOGY_DEFAULT_ROOT;
 
 /* ── Raw /sys readers ──────────────────────────────────────────────── */
 
+#if !defined(_WIN32)
 static bool sysfs_path_exists(const char *path)
 {
     struct stat st;
@@ -153,6 +164,7 @@ static void expand_cpu_list(const char *list, int *out, int cap, int *count)
         p = comma ? comma + 1 : NULL;
     }
 }
+#endif
 
 /* ── Scan ──────────────────────────────────────────────────────────── */
 
@@ -194,9 +206,106 @@ static void fill_fallback(struct cpu_topology_state *st)
     st->valid = true;
 }
 
+#if defined(_WIN32)
+static int windows_group_cpu_id(WORD group, BYTE bit)
+{
+    uint64_t id = bit;
+    for (WORD g = 0; g < group; g++)
+        id += GetActiveProcessorCount(g);
+    return id < CPU_TOPOLOGY_MAX_CPUS ? (int)id : -1;
+}
+
+static int windows_mask_count(KAFFINITY mask)
+{
+    int count = 0;
+    while (mask) {
+        count += (int)(mask & 1u);
+        mask >>= 1;
+    }
+    return count;
+}
+
+static bool scan_windows(struct cpu_topology_state *st)
+{
+    DWORD bytes = 0;
+    if (GetLogicalProcessorInformationEx(RelationAll, NULL, &bytes) ||
+        GetLastError() != ERROR_INSUFFICIENT_BUFFER || bytes == 0)
+        return false;
+    SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *records = malloc(bytes);
+    if (!records || !GetLogicalProcessorInformationEx(RelationAll, records,
+                                                        &bytes)) {
+        free(records);
+        return false;
+    }
+
+    memset(st, 0, sizeof(*st));
+    for (int i = 0; i < CPU_TOPOLOGY_MAX_CPUS; i++) st->domain_of[i] = -1;
+    st->logical_cpus = sysconf_cpu_count();
+    if (st->logical_cpus > CPU_TOPOLOGY_MAX_CPUS)
+        st->logical_cpus = CPU_TOPOLOGY_MAX_CPUS;
+
+    BYTE *cursor = (BYTE *)records;
+    BYTE *end = cursor + bytes;
+    while (cursor < end) {
+        SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *record =
+            (SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *)cursor;
+        if (record->Size == 0 || cursor + record->Size > end)
+            break;
+        if (record->Relationship == RelationProcessorCore) {
+            st->physical_cores++;
+            int siblings = 0;
+            for (WORD i = 0; i < record->Processor.GroupCount; i++)
+                siblings += windows_mask_count(
+                    record->Processor.GroupMask[i].Mask);
+            if (siblings > st->smt_width) st->smt_width = siblings;
+        } else if (record->Relationship == RelationCache &&
+                   record->Cache.Level == 3 &&
+                   st->domain_count < CPU_TOPOLOGY_MAX_DOMAINS) {
+            struct cpu_topology_domain *domain =
+                &st->domains[st->domain_count];
+            domain->id = st->domain_count;
+            domain->l3_size_bytes = record->Cache.CacheSize;
+            GROUP_AFFINITY affinity = record->Cache.GroupMask;
+            for (BYTE bit = 0; bit < sizeof(KAFFINITY) * 8; bit++) {
+                if ((affinity.Mask & ((KAFFINITY)1 << bit)) == 0)
+                    continue;
+                int cpu = windows_group_cpu_id(affinity.Group, bit);
+                if (cpu >= 0 && domain->cpu_count < CPU_TOPOLOGY_MAX_CPUS) {
+                    domain->cpus[domain->cpu_count++] = cpu;
+                    st->domain_of[cpu] = domain->id;
+                }
+            }
+            st->domain_count++;
+        }
+        cursor += record->Size;
+    }
+    free(records);
+
+    if (st->physical_cores <= 0)
+        st->physical_cores = st->logical_cpus;
+    if (st->physical_cores > st->logical_cpus)
+        st->physical_cores = st->logical_cpus;
+    if (st->domain_count == 0) {
+        fill_fallback(st);
+        return true;
+    }
+    for (int cpu = 0; cpu < st->logical_cpus; cpu++) {
+        if (st->domain_of[cpu] < 0 &&
+            st->domains[0].cpu_count < CPU_TOPOLOGY_MAX_CPUS) {
+            st->domains[0].cpus[st->domains[0].cpu_count++] = cpu;
+            st->domain_of[cpu] = 0;
+        }
+    }
+    snprintf(st->source, sizeof(st->source), "windows");
+    st->valid = true;
+    return true;
+}
+#endif
+
 /* Find the L3 cache index dir under cpu<cpu>/cache and read its size +
  * shared_cpu_list. Returns false if this cpu has no level==3 cache entry
  * (e.g. containers that expose topology but not cache info). */
+#if !defined(_WIN32)
 static bool find_l3_cache(const char *root, int cpu, int64_t *size_out,
                           char *shared_list_out, size_t shared_list_cap)
 {
@@ -357,6 +466,7 @@ static bool scan_sysfs(const char *root, struct cpu_topology_state *st)
     st->valid = true;
     return true;
 }
+#endif
 
 /* ── Lifecycle ─────────────────────────────────────────────────────── */
 
@@ -371,9 +481,14 @@ bool cpu_topology_init(void)
     }
 
     struct cpu_topology_state st;
+#if defined(_WIN32)
+    if (!scan_windows(&st))
+        fill_fallback(&st);
+#else
     if (!scan_sysfs(g_sysfs_root, &st)) {
         fill_fallback(&st);
     }
+#endif
     g_state = st;
     atomic_store(&g_inited, true);
     pthread_mutex_unlock(&g_lock);

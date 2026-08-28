@@ -12,14 +12,55 @@
 #include "util/file_tree_ops.h"
 #include "util/safe_alloc.h"
 
-#include <dirent.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <limits.h>
 #include <stdint.h>
 #include <string.h>
+
+#ifndef _WIN32
+#include <dirent.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
+
+#ifdef _WIN32
+
+/* Recursive mutation remains disabled until the Win32 implementation walks
+ * retained directory handles and validates every component against reparse
+ * substitution. Refuse before probing or creating either tree. */
+struct zcl_result zcl_tree_copy(const char *src, const char *dst,
+                                unsigned flags, zcl_tree_filter_fn filter,
+                                void *fctx)
+{
+    (void)src;
+    (void)dst;
+    (void)flags;
+    (void)filter;
+    (void)fctx;
+    return ZCL_ERR(-1,
+        "zcl_tree_copy: Windows recursive mutation is disabled pending "
+        "handle-bound no-reparse qualification");
+}
+
+struct zcl_result zcl_tree_remove(const char *path)
+{
+    (void)path;
+    return ZCL_ERR(-1,
+        "zcl_tree_remove: Windows recursive mutation is disabled pending "
+        "handle-bound no-reparse qualification");
+}
+
+struct zcl_result zcl_mkdir_p(const char *path, mode_t mode)
+{
+    (void)path;
+    (void)mode;
+    return ZCL_ERR(-1,
+        "zcl_mkdir_p: Windows recursive mutation is disabled pending "
+        "handle-bound no-reparse qualification");
+}
+
+#else
 
 #define ZCL_TREE_IOBUF_SZ (256u * 1024u)
 
@@ -427,3 +468,5 @@ struct zcl_result zcl_mkdir_p(const char *path, mode_t mode)
     free(copy);
     return ZCL_OK;
 }
+
+#endif

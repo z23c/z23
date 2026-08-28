@@ -365,6 +365,12 @@ bool platform_positioned_file_is_private(
     return ok;
 }
 
+bool platform_positioned_file_is_current_user_only(
+    const struct platform_positioned_file *file)
+{
+    return platform_positioned_file_is_private(file);
+}
+
 int64_t platform_positioned_file_read(
     const struct platform_positioned_file *file, void *data, size_t size,
     uint64_t offset)
@@ -544,6 +550,15 @@ bool platform_positioned_file_is_private(
     int fd = file ? (int)file->native : -1;
     return fd >= 0 && fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
            (st.st_mode & 0777) == 0600;
+}
+
+bool platform_positioned_file_is_current_user_only(
+    const struct platform_positioned_file *file)
+{
+    struct stat st;
+    int fd = file ? (int)file->native : -1;
+    return fd >= 0 && fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
+           st.st_uid == geteuid() && (st.st_mode & 077) == 0;
 }
 
 int64_t platform_positioned_file_read(

@@ -7,16 +7,19 @@
 #include "vcs/package_manifest.h"
 #include "vcs/vcs_object.h"
 
+#if !defined(_WIN32)
 #include <errno.h>
 #include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 #define VCS_MATERIALIZE_PATH_MAX 4400
 
+#if !defined(_WIN32)
 static bool materialize_write(const char *path, const uint8_t *bytes,
                               size_t len, uint32_t mode)
 {
@@ -36,17 +39,25 @@ static bool materialize_write(const char *path, const uint8_t *bytes,
     if (!ok) (void)unlink(path);
     return ok;
 }
+#endif
 
 int vcs_tree_materialize(const char *object_store_root,
                          const uint8_t tree_hash[32],
                          const char *destination, uint64_t maximum_bytes,
                          uint32_t file_mode)
 {
-    struct stat st;
     if (!object_store_root || !tree_hash || !destination ||
         maximum_bytes == 0 ||
-        (file_mode != 0u && file_mode != 0400u && file_mode != 0600u) ||
-        lstat(destination, &st) != 0 || !S_ISDIR(st.st_mode))
+        (file_mode != 0u && file_mode != 0400u && file_mode != 0600u))
+        return VCS_ERR;
+#if defined(_WIN32)
+    /* Materialization feeds confined consumers and may create an executable
+     * tree. Refuse before destination or object-store access until Windows
+     * has a retained-root, no-reparse immutable generation transaction. */
+    return VCS_REFUSED;
+#else
+    struct stat st;
+    if (lstat(destination, &st) != 0 || !S_ISDIR(st.st_mode))
         return VCS_ERR;
     struct vcs_manifest tree;
     if (!vcs_tree_load(object_store_root, tree_hash, &tree))
@@ -91,4 +102,5 @@ int vcs_tree_materialize(const char *object_store_root,
     }
     vcs_manifest_free(&tree);
     return result;
+#endif
 }

@@ -109,6 +109,11 @@ int64_t os_proc_uptime_seconds(void);
  * themselves. */
 bool os_proc_exe_path(char *buf, size_t n);
 
+/* Resolve the executable image of a live process. Windows holds a process
+ * HANDLE while querying its UTF-16 image path, avoiding PID/path races during
+ * the query. POSIX uses the platform's process-image authority. */
+bool os_proc_pid_exe_path(uint64_t pid, char *buf, size_t n);
+
 /* Open the executable image for reading. Linux holds the running inode via
  * /proc/self/exe; Darwin opens the dyld-resolved pathname. Caller owns the
  * returned FILE* and must fclose() it. */
@@ -183,6 +188,11 @@ enum os_proc_liveness {
  * error is UNKNOWN, never proof that a process is dead. */
 enum os_proc_liveness os_proc_pid_liveness(uint64_t pid);
 uint64_t os_proc_current_pid(void);
+
+/* Cumulative process filesystem I/O bytes suitable for progress evidence.
+ * Windows uses GetProcessIoCounters transfer bytes; POSIX uses getrusage
+ * block counts converted from their specified 512-byte units. */
+bool os_proc_io_bytes(uint64_t *out);
 
 #ifdef __cplusplus
 }

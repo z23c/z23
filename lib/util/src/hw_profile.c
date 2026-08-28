@@ -38,7 +38,7 @@
  * -D_FORTIFY_SOURCE=2 pulls in at -O3 — so any -O0, -U_FORTIFY_SOURCE, or
  * non-glibc build fails with "implicit declaration of realpath", which is a
  * hard error in C23. Matches lib/net/src/connman.c and 26 other TUs. */
-#ifndef _DEFAULT_SOURCE
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
 #define _DEFAULT_SOURCE
 #endif
 
@@ -71,9 +71,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#endif
 
 #if defined(__x86_64__) || defined(__i386__)
 #include <cpuid.h>
@@ -210,14 +217,25 @@ static bool probe_rotational_under(const char *block_root, dev_t dev,
     *out = (buf[0] == '1');
     return true;
 }
+#endif
 
 static bool probe_datadir_rotational(const char *block_root,
                                      const char *datadir, bool *out)
 {
+#if defined(_WIN32)
+    /* Windows storage stacks do not always expose seek-penalty truth (virtual,
+     * Storage Spaces, network and filter volumes). Unknown is safer than
+     * silently tuning an HDD as solid-state or vice versa. */
+    (void)block_root;
+    (void)datadir;
+    (void)out;
+    return false;
+#else
     if (!datadir || !*datadir) return false;
     struct stat st;
     if (stat(datadir, &st) != 0) return false;
     return probe_rotational_under(block_root, st.st_dev, out);
+#endif
 }
 
 #else /* _WIN32 */

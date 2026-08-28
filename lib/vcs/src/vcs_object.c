@@ -20,6 +20,12 @@
 #include "vcs_priv.h"
 
 #include "platform/time_compat.h"
+#include "platform/directory_compat.h"
+#include "platform/file_metadata.h"
+#include "platform/os_proc.h"
+#include "platform/positioned_file.h"
+#include "platform/private_directory.h"
+#include "platform/private_file.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
@@ -53,9 +59,7 @@ static bool zvcs_path(const char *repo_root, const char *suffix,
 
 static bool ensure_dir(const char *path)
 {
-    if (mkdir(path, 0700) == 0)
-        return true;
-    return errno == EEXIST;
+    return platform_private_directory_ensure(path);
 }
 
 bool vcs_object_store_init(const char *repo_root)
@@ -81,9 +85,8 @@ bool vcs_object_store_initialized(const char *repo_root)
     static const char *const suffixes[] = {"", "objects", "objects/tmp"};
     for (size_t i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); i++) {
         char path[VCS_OBJECT_PATH_MAX];
-        struct stat st;
         if (!zvcs_path(repo_root, suffixes[i], path, sizeof(path)) ||
-            stat(path, &st) != 0 || !S_ISDIR(st.st_mode))
+            platform_directory_probe_real(path) != PLATFORM_DIRECTORY_PROBE_OK)
             return false;
     }
     return true;
@@ -110,7 +113,9 @@ bool vcs_object_has(const char *repo_root, const uint8_t hash[32])
     char path[VCS_OBJECT_PATH_MAX];
     if (!object_path(repo_root, hash, path, sizeof(path)))
         return false;
-    return access(path, F_OK) == 0;
+    struct platform_file_metadata metadata;
+    return platform_file_metadata_read(path, &metadata) ==
+           PLATFORM_FILE_METADATA_OK;
 }
 
 /* Write content[0..len) into the object addressed by addr, atomically and
@@ -123,7 +128,9 @@ static bool object_write_mode(const char *repo_root, const uint8_t addr[32],
     char final[VCS_OBJECT_PATH_MAX];
     if (!object_path(repo_root, addr, final, sizeof(final)))
         LOG_FAIL("vcs", "object path too long");
-    if (!replace && access(final, F_OK) == 0)
+    struct platform_file_metadata metadata;
+    if (!replace && platform_file_metadata_read(final, &metadata) ==
+                        PLATFORM_FILE_METADATA_OK)
         return true;  /* dedup */
 
     char hex[65];
@@ -142,7 +149,8 @@ static bool object_write_mode(const char *repo_root, const uint8_t addr[32],
     int64_t mono_ns = platform_time_monotonic_us();
     char tmpsuffix[128];
     int tn = snprintf(tmpsuffix, sizeof(tmpsuffix),
-                      "objects/tmp/.put.%ld.%llu.%lld", (long)getpid(),
+                      "objects/tmp/.put.%llu.%llu.%lld",
+                      (unsigned long long)os_proc_current_pid(),
                       (unsigned long long)seq, (long long)mono_ns);
     if (tn <= 0 || (size_t)tn >= sizeof(tmpsuffix))
         LOG_FAIL("vcs", "tmp path too long");
@@ -150,34 +158,30 @@ static bool object_write_mode(const char *repo_root, const uint8_t addr[32],
     if (!zvcs_path(repo_root, tmpsuffix, tmp, sizeof(tmp)))
         LOG_FAIL("vcs", "tmp path too long");
 
-    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-    if (fd < 0)
+    struct platform_private_file staged;
+    struct platform_private_file_identity staged_identity;
+    platform_private_file_init(&staged);
+    if (!platform_private_file_create(tmp, &staged) ||
+        !platform_private_file_identity(&staged, &staged_identity))
         LOG_FAIL("vcs", "open tmp %s: %s", tmp, strerror(errno));
-
-    size_t off = 0;
-    while (off < len) {
-        ssize_t w = write(fd, content + off, len - off);
-        if (w < 0) {
-            if (errno == EINTR) continue;
-            close(fd); unlink(tmp);
-            LOG_FAIL("vcs", "write tmp: %s", strerror(errno));
-        }
-        off += (size_t)w;
+    bool ok = (len == 0 ||
+               platform_private_file_write_at(&staged, content, len, 0)) &&
+              platform_private_file_truncate(&staged, len) &&
+              platform_private_file_flush(&staged);
+    if (ok && replace)
+        ok = platform_private_file_replace(&staged, tmp, final);
+    if (ok && !replace) {
+        bool already_same = false;
+        ok = platform_private_file_link_no_clobber(
+            tmp, final, &staged_identity, &already_same);
     }
-    if (fsync(fd) != 0) {
-        close(fd); unlink(tmp);
-        LOG_FAIL("vcs", "fsync tmp: %s", strerror(errno));
-    }
-    if (close(fd) != 0) {
-        unlink(tmp);
-        LOG_FAIL("vcs", "close tmp: %s", strerror(errno));
-    }
-    if (rename(tmp, final) != 0) {
-        if (access(final, F_OK) == 0) { unlink(tmp); return true; }
-        unlink(tmp);
-        LOG_FAIL("vcs", "rename %s -> %s: %s", tmp, final, strerror(errno));
-    }
-    return true;
+    if (!replace || !ok)
+        (void)platform_private_file_retire_if_identity(
+            &staged, tmp, &staged_identity);
+    platform_private_file_close(&staged);
+    if (ok) ok = platform_private_parent_flush(sharddir);
+    if (!ok) LOG_FAIL("vcs", "durable object publication failed");
+    return ok;
 }
 
 static bool object_write(const char *repo_root, const uint8_t addr[32],
@@ -264,44 +268,36 @@ static int object_read(const char *repo_root, const uint8_t addr[32],
     char path[VCS_OBJECT_PATH_MAX];
     if (!object_path(repo_root, addr, path, sizeof(path)))
         LOG_ERR("vcs", "object path too long");
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0)
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path) ||
+        !platform_positioned_file_snapshot(&file, &before))
         LOG_ERR("vcs", "open %s: %s", path, strerror(errno));
-    struct stat st;
-    if (fstat(fd, &st) != 0) {
-        close(fd);
-        LOG_ERR("vcs", "fstat %s: %s", path, strerror(errno));
+    if (before.size > VCS_OBJECT_MAX_BYTES) {
+        platform_positioned_file_close(&file);
+        LOG_ERR("vcs", "object too large: %llu",
+                (unsigned long long)before.size);
     }
-    if (st.st_size < 0 || (size_t)st.st_size > VCS_OBJECT_MAX_BYTES) {
-        close(fd);
-        LOG_ERR("vcs", "object too large: %lld", (long long)st.st_size);
-    }
-    if ((size_t)st.st_size > maximum_bytes) {
-        close(fd);
+    if (before.size > maximum_bytes) {
+        platform_positioned_file_close(&file);
         return -2; /* caller-owned pre-read byte bound */
     }
-    size_t len = (size_t)st.st_size;
+    size_t len = (size_t)before.size;
     uint8_t *buf = NULL;
     if (len > 0) {
         buf = zcl_malloc(len, "vcs_object_read");
-        if (!buf) { close(fd); LOG_ERR("vcs", "malloc %zu", len); }
-        size_t off = 0;
-        while (off < len) {
-            ssize_t r = read(fd, buf + off, len - off);
-            if (r < 0) {
-                if (errno == EINTR) continue;
-                free(buf); close(fd);
-                LOG_ERR("vcs", "read %s: %s", path, strerror(errno));
-            }
-            if (r == 0) break;
-            off += (size_t)r;
-        }
-        if (off != len) {
-            free(buf); close(fd);
-            LOG_ERR("vcs", "short read %zu/%zu on %s", off, len, path);
+        if (!buf) { platform_positioned_file_close(&file); LOG_ERR("vcs", "malloc %zu", len); }
+        int64_t nr = platform_positioned_file_read(&file, buf, len, 0);
+        if (nr != (int64_t)len) {
+            free(buf); platform_positioned_file_close(&file);
+            LOG_ERR("vcs", "short read on %s", path);
         }
     }
-    close(fd);
+    bool stable = platform_positioned_file_snapshot(&file, &after) &&
+                  memcmp(&before, &after, sizeof(before)) == 0;
+    platform_positioned_file_close(&file);
+    if (!stable) { free(buf); LOG_ERR("vcs", "object changed while read"); }
     *out = buf;
     *out_len = len;
     return 0;

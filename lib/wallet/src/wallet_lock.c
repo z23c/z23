@@ -8,6 +8,8 @@
 #include "wallet/wallet_sqlite_key_crypto.h"
 #include "wallet/keystore.h"
 
+#include "platform/positioned_file.h"
+#include "platform/private_file.h"
 #include "support/cleanse.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
@@ -15,13 +17,9 @@
 #include "json/json.h"
 
 #include <pthread.h>
-#include <errno.h>
-#include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <time.h>
-#include <unistd.h>
 
 /* Bound the cached passphrase so it lives in a fixed, cleansable buffer
  * (no heap copy of the secret to chase). 512 bytes is far past any real
@@ -232,37 +230,44 @@ struct zcl_result wallet_lock_register_boot_credential(void)
         return ZCL_ERR(WLK_CREDENTIAL_IO,
                        "boot credential path exceeds internal bound");
 
-    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (fd < 0) {
-        if (errno == ENOENT)
-            return ZCL_OK;
+    struct platform_positioned_file credential;
+    platform_positioned_file_init(&credential);
+    if (!platform_positioned_file_open_beneath(
+            &credential, dir, "wallet-passphrase")) {
+        if (platform_private_path_absent(path)) return ZCL_OK;
         return ZCL_ERR(WLK_CREDENTIAL_IO,
                        "boot credential could not be opened");
     }
 
-    struct stat st;
-    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
-        st.st_uid != geteuid() ||
-        (st.st_mode & 077) != 0 || st.st_size <= 0 ||
-        st.st_size > WLK_MAX_PASS) {
-        close(fd);
+    struct platform_positioned_file_snapshot before, after;
+    if (!platform_positioned_file_snapshot(&credential, &before) ||
+        !platform_positioned_file_is_current_user_only(&credential) ||
+        before.size == 0 || before.size > WLK_MAX_PASS) {
+        platform_positioned_file_close(&credential);
         return ZCL_ERR(WLK_CREDENTIAL_MODE,
                        "boot credential is not a private bounded file");
     }
 
     char secret[WLK_MAX_PASS + 1];
-    size_t need = (size_t)st.st_size;
+    size_t need = (size_t)before.size;
     size_t off = 0;
     while (off < need) {
-        ssize_t got = read(fd, secret + off, need - off);
-        if (got < 0 && errno == EINTR)
-            continue;
+        int64_t got = platform_positioned_file_read(
+            &credential, secret + off, need - off, off);
         if (got <= 0)
             break;
         off += (size_t)got;
     }
-    close(fd);
-    if (off != need || memchr(secret, '\0', need) != NULL) {
+    bool stable = platform_positioned_file_snapshot(&credential, &after) &&
+        before.size == after.size &&
+        before.modified_seconds == after.modified_seconds &&
+        before.modified_nanoseconds == after.modified_nanoseconds &&
+        before.changed_seconds == after.changed_seconds &&
+        before.changed_nanoseconds == after.changed_nanoseconds &&
+        before.volume == after.volume && before.file_low == after.file_low &&
+        before.file_high == after.file_high;
+    platform_positioned_file_close(&credential);
+    if (off != need || !stable || memchr(secret, '\0', need) != NULL) {
         memory_cleanse(secret, sizeof(secret));
         return ZCL_ERR(WLK_CREDENTIAL_IO,
                        "boot credential read was incomplete or invalid");

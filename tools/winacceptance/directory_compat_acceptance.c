@@ -53,6 +53,14 @@ int main(void)
                                          SYMBOLIC_LINK_FLAG_DIRECTORY |
                                          SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) != 0;
 
+    char canonical[4 * MAX_PATH];
+    if (!platform_directory_canonical_real(unicode, canonical,
+                                           sizeof(canonical)) ||
+        !strstr(canonical, "20260101_000002-\xE9\x9B\xAA") ||
+        (made_link && platform_directory_canonical_real(
+                          link, canonical, sizeof(canonical))))
+        return fail("canonical real-directory resolution");
+
     struct platform_directory_list list;
     if (!platform_directory_list_real_sorted(root, &list))
         return fail("enumeration");

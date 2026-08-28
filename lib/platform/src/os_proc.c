@@ -21,6 +21,7 @@
 #else
 #include <errno.h>
 #include <signal.h>
+#include <sys/resource.h>
 #include <unistd.h>
 #endif
 
@@ -76,6 +77,27 @@ uint64_t os_proc_current_pid(void)
     return (uint64_t)GetCurrentProcessId();
 #else
     return (uint64_t)getpid();
+#endif
+}
+
+bool os_proc_io_bytes(uint64_t *out)
+{
+    if (!out) return false;
+#if defined(_WIN32)
+    IO_COUNTERS counters;
+    if (!GetProcessIoCounters(GetCurrentProcess(), &counters)) return false;
+    if (UINT64_MAX - counters.ReadTransferCount < counters.WriteTransferCount)
+        return false;
+    *out = counters.ReadTransferCount + counters.WriteTransferCount;
+    return true;
+#else
+    struct rusage usage;
+    if (getrusage(RUSAGE_SELF, &usage) != 0) return false;
+    uint64_t input = usage.ru_inblock > 0 ? (uint64_t)usage.ru_inblock : 0;
+    uint64_t output = usage.ru_oublock > 0 ? (uint64_t)usage.ru_oublock : 0;
+    if (UINT64_MAX / 512u - input < output) return false;
+    *out = (input + output) * 512u;
+    return true;
 #endif
 }
 
@@ -424,6 +446,43 @@ bool os_proc_exe_path(char *buf, size_t n)
     if (len <= 0)
         return false; // raw-return-ok:optional-exe-path-unavailable
     buf[len] = '\0';
+    return true;
+#endif
+}
+
+bool os_proc_pid_exe_path(uint64_t pid, char *buf, size_t n)
+{
+    if (pid == 0 || pid > UINT32_MAX || !buf || n == 0) return false;
+#if defined(_WIN32)
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
+                                 (DWORD)pid);
+    if (!process) return false;
+    wchar_t wide[32768];
+    DWORD length = (DWORD)(sizeof(wide) / sizeof(wide[0]));
+    bool ok = QueryFullProcessImageNameW(process, 0, wide, &length) != 0 &&
+              length > 0 && length < sizeof(wide) / sizeof(wide[0]);
+    CloseHandle(process);
+    if (!ok) return false;
+    int required = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide,
+                                       (int)length, NULL, 0, NULL, NULL);
+    if (required <= 0 || (size_t)required >= n) return false;
+    if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, (int)length,
+                            buf, required, NULL, NULL) != required)
+        return false;
+    buf[required] = '\0';
+    return true;
+#elif defined(__APPLE__)
+    if (pid > INT_MAX || n > INT_MAX) return false;
+    int length = proc_pidpath((int)pid, buf, (uint32_t)n);
+    return length > 0 && (size_t)length < n;
+#else
+    char link[64];
+    int written = snprintf(link, sizeof(link), "/proc/%llu/exe",
+                           (unsigned long long)pid);
+    if (written <= 0 || (size_t)written >= sizeof(link)) return false;
+    ssize_t length = readlink(link, buf, n - 1);
+    if (length <= 0 || (size_t)length >= n) return false;
+    buf[length] = '\0';
     return true;
 #endif
 }

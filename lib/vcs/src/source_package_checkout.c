@@ -1,6 +1,10 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: Git-free reconstruction of verified PROVEN source carriers. */
 
+#if !defined(_WIN32)
+#define _GNU_SOURCE
+#endif
+
 #include "vcs/source_package_checkout.h"
 
 #include "util/file_tree_ops.h"
@@ -12,14 +16,16 @@
 #include "vcs/zcode_accepted_work_bundle.h"
 #include "vcs/zcode_lane.h"
 
-#include <dirent.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
+#include <dirent.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 #define SOURCE_CHECKOUT_PATH_MAX 4400
 #define SOURCE_CHECKOUT_AUTHORITY_MAX 4096u
@@ -120,6 +126,7 @@ static bool source_checkout_read_file(
     return true;
 }
 
+#if !defined(_WIN32)
 static bool source_checkout_shard_index(const char *path, uint16_t *index_out)
 {
     static const char prefix[] = "zclassic23-source/shard-";
@@ -155,6 +162,7 @@ static int source_checkout_offline_index(const char *path)
             return (int)i;
     return -1;
 }
+#endif
 
 static enum vcs_source_package_checkout_result source_checkout_manifest(
     struct vcs_package_store *store, const uint8_t package_root[32],
@@ -176,6 +184,7 @@ static enum vcs_source_package_checkout_result source_checkout_manifest(
     return VCS_SOURCE_PACKAGE_CHECKOUT_OK;
 }
 
+#if !defined(_WIN32)
 static enum vcs_source_package_checkout_result source_checkout_load_fixed(
     struct vcs_package_store *store, const uint8_t package_root[32],
     const uint8_t source_root[32], const uint8_t expected_signer[32],
@@ -311,6 +320,10 @@ static enum vcs_source_package_checkout_result source_checkout_load_variable(
 
 static bool source_checkout_empty_dir(const char *path)
 {
+#if defined(_WIN32)
+    (void)path;
+    return false;
+#else
     DIR *dir = opendir(path);
     if (!dir) return false;
     bool empty = true;
@@ -322,11 +335,18 @@ static bool source_checkout_empty_dir(const char *path)
         }
     }
     return closedir(dir) == 0 && empty;
+#endif
 }
 
 static bool source_checkout_write(const char *path, const uint8_t *bytes,
                                   size_t len)
 {
+#if defined(_WIN32)
+    (void)path;
+    (void)bytes;
+    (void)len;
+    return false;
+#else
     int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
                   0400);
     if (fd < 0) return false;
@@ -341,12 +361,19 @@ static bool source_checkout_write(const char *path, const uint8_t *bytes,
     if (close(fd) != 0) ok = false;
     if (!ok) (void)unlink(path);
     return ok;
+#endif
 }
 
 static bool source_checkout_write_offline(
     const char *destination, const struct source_checkout_loaded *loaded,
     uint64_t *bytes_out)
 {
+#if defined(_WIN32)
+    (void)destination;
+    (void)loaded;
+    if (bytes_out) *bytes_out = 0;
+    return false;
+#else
     if (loaded->offline_count == 0) {
         *bytes_out = 0;
         return true;
@@ -372,7 +399,10 @@ static bool source_checkout_write_offline(
     }
     *bytes_out = total;
     return true;
+#endif
 }
+
+#endif /* !_WIN32: checkout publication helpers */
 
 enum vcs_source_package_checkout_result
 vcs_source_package_accepted_work_discover(
@@ -442,6 +472,12 @@ static enum vcs_source_package_checkout_result source_package_checkout_common(
         (!expected_signer && !accepted_work_root) ||
         (expected_signer && accepted_work_root) || !workspace || !destination)
         return VCS_SOURCE_PACKAGE_CHECKOUT_NULL;
+#if defined(_WIN32)
+    /* Publication is intentionally disabled until tree materialization is
+     * backed by a retained directory-relative capability. Refuse before
+     * probing either caller-supplied path or reading package-store state. */
+    return VCS_SOURCE_PACKAGE_CHECKOUT_DESTINATION;
+#else
     if (!source_checkout_empty_dir(destination))
         return VCS_SOURCE_PACKAGE_CHECKOUT_DESTINATION;
     struct vcs_package_store_status status;
@@ -503,6 +539,7 @@ static enum vcs_source_package_checkout_result source_package_checkout_common(
     }
     source_checkout_loaded_free(&loaded);
     return result;
+#endif
 }
 
 enum vcs_source_package_checkout_result vcs_source_package_checkout(
@@ -528,6 +565,7 @@ vcs_source_package_checkout_accepted(
         workspace, destination, metrics);
 }
 
+#if !defined(_WIN32)
 static enum vcs_source_package_checkout_result
 source_package_identity_discover(
     struct vcs_package_store *store, const uint8_t package_root[32],
@@ -581,6 +619,7 @@ source_package_identity_discover(
     source_checkout_loaded_free(&loaded);
     return result;
 }
+#endif
 
 enum vcs_source_package_checkout_result
 vcs_source_package_reconstruct_verify(
@@ -594,6 +633,12 @@ vcs_source_package_reconstruct_verify(
     if (!store || !package_root || !source_root_out ||
         !accepted_work_root_out)
         return VCS_SOURCE_PACKAGE_CHECKOUT_NULL;
+#if defined(_WIN32)
+    /* Reconstruction creates and recursively removes a workspace. Keep the
+     * entire operation fail-closed until that transaction has a validated
+     * directory capability and identity-bound cleanup. */
+    return VCS_SOURCE_PACKAGE_CHECKOUT_DESTINATION;
+#else
     uint8_t source_root[32], accepted_work_root[32];
     enum vcs_source_package_checkout_result result =
         source_package_identity_discover(
@@ -628,4 +673,5 @@ vcs_source_package_reconstruct_verify(
     memcpy(accepted_work_root_out, accepted_work_root, 32);
     if (metrics) *metrics = checked;
     return VCS_SOURCE_PACKAGE_CHECKOUT_OK;
+#endif
 }

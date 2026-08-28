@@ -1,20 +1,53 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: inert checkout of one verified ordinary ZCODE package tree. */
 
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include "vcs/package_checkout.h"
 
+#if defined(_WIN32)
+#include <string.h>
+
+const char *vcs_package_checkout_result_string(
+    enum vcs_package_checkout_result result)
+{
+    switch (result) {
+    case VCS_PACKAGE_CHECKOUT_OK: return "ok";
+    case VCS_PACKAGE_CHECKOUT_NULL: return "null-argument";
+    case VCS_PACKAGE_CHECKOUT_INCOMPLETE: return "package-incomplete";
+    case VCS_PACKAGE_CHECKOUT_MANIFEST: return "package-manifest";
+    case VCS_PACKAGE_CHECKOUT_CHUNK: return "package-chunk";
+    case VCS_PACKAGE_CHECKOUT_DESTINATION: return "destination";
+    }
+    return "unknown";
+}
+
+enum vcs_package_checkout_result vcs_package_checkout(
+    struct vcs_package_store *store, const uint8_t package_root[32],
+    const char *destination, struct vcs_package_checkout_metrics *metrics)
+{
+    if (metrics) memset(metrics, 0, sizeof(*metrics));
+    if (!store || !package_root || !destination)
+        return VCS_PACKAGE_CHECKOUT_NULL;
+    /* Refuse before package-store reads and destination inspection. Native
+     * checkout requires a retained-root, no-reparse immutable generation
+     * transaction and remains part of the unqualified package sandbox. */
+    return VCS_PACKAGE_CHECKOUT_DESTINATION;
+}
+
+#else
 #include "vcs/package_manifest.h"
 #include "platform/rename_compat.h"
 
-#include <dirent.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <limits.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -272,3 +305,5 @@ enum vcs_package_checkout_result vcs_package_checkout(
     vcs_package_manifest_free(&manifest);
     return result;
 }
+
+#endif

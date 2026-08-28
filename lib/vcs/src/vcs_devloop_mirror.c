@@ -17,7 +17,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
 #include <sys/file.h>
+#endif
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -123,6 +125,7 @@ bool vcs_devloop_mirror_receipt_load(
     return ok;
 }
 
+#ifndef _WIN32
 static bool mirror_path(const char *repo_root, const char *leaf,
                         char out[PATH_MAX])
 {
@@ -196,6 +199,11 @@ enum vcs_devloop_mirror_lookup vcs_devloop_mirror_load_for_job(
     if (!repo_root || !repo_root[0] || !job_root || !out ||
         !receipt_root_out)
         return VCS_DEVLOOP_MIRROR_INVALID;
+#ifdef _WIN32
+    /* The event-log snapshot and its lock must be bound to retained handles;
+     * a pathname-only emulation could mix generations during publication. */
+    return VCS_DEVLOOP_MIRROR_INVALID;
+#else
     char path[PATH_MAX], lock_path[PATH_MAX];
     struct stat st;
     if (!mirror_path(repo_root, "publication.mirrors.log", path) ||
@@ -220,6 +228,7 @@ enum vcs_devloop_mirror_lookup vcs_devloop_mirror_load_for_job(
     *out = scan.receipt;
     memcpy(receipt_root_out, scan.receipt_root, 32);
     return VCS_DEVLOOP_MIRROR_FOUND;
+#endif
 }
 
 static bool mirror_build_from_provider(
@@ -269,6 +278,7 @@ static bool mirror_build_from_provider(
         memcpy(out->git_oid, git_oid, git_oid_len);
     return true;
 }
+#endif
 
 bool vcs_devloop_mirror_record(
     const char *repo_root, const uint8_t job_root[32],
@@ -278,6 +288,13 @@ bool vcs_devloop_mirror_record(
     if (reused_out) *reused_out = false;
     if (!repo_root || !repo_root[0] || !job_root || !receipt_root_out)
         return false;
+#ifdef _WIN32
+    (void)git_oid;
+    (void)git_oid_len;
+    /* Refuse before object publication or log mutation until a retained-root
+     * cross-process lock and atomic event-log transaction are qualified. */
+    return false;
+#else
     struct vcs_devloop_mirror_receipt receipt;
     uint8_t wire[VCS_DEVLOOP_MIRROR_WIRE_BYTES];
     if (!mirror_build_from_provider(
@@ -315,4 +332,5 @@ bool vcs_devloop_mirror_record(
         LOG_WARN("vcs.devloop.mirror",
                  "mirror receipt append or exact retry validation failed");
     return ok;
+#endif
 }
