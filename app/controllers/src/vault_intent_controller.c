@@ -741,7 +741,20 @@ static bool rpc_vi_list(const struct json_value *params, bool help,
     struct node_db *ndb = wallet_rpc_node_db();
     if (!ndb) { vi_error(result, "DATABASE_UNAVAILABLE", "node.db is unavailable"); return true; }
     vault_intent_expire_due(ndb, (int64_t)platform_time_wall_time_t());
-    struct vault_intent_row rows[100]; int n = vault_intent_list(ndb, rows, 100);
+    struct vault_intent_row *rows = zcl_calloc(
+        100, sizeof(*rows), "vault intent RPC list rows");
+    if (!rows) {
+        vi_error(result, "ALLOCATION_FAILED",
+                 "vault intent list workspace allocation failed");
+        return true;
+    }
+    int n = vault_intent_list(ndb, rows, 100);
+    if (n < 0) {
+        free(rows);
+        vi_error(result, "DATABASE_READ_FAILED",
+                 "vault intent list could not be read");
+        return true;
+    }
     for (int i = 0; i < n; i++)
         vault_intent_refresh_state(wallet_rpc_context_current(), &rows[i],
                                    (int64_t)platform_time_wall_time_t());
@@ -754,6 +767,7 @@ static bool rpc_vi_list(const struct json_value *params, bool help,
         json_push_back(&items, &item); json_free(&item);
     }
     json_push_kv(result, "intents", &items); json_free(&items);
+    free(rows);
     json_push_kv_int(result, "count", n); return true;
 }
 

@@ -547,6 +547,17 @@ bool boot_wallet_rebuild_probe(sqlite3 *db, bool *has_utxos,
     return false;
 }
 
+#if defined(_WIN32) && defined(__clang__)
+/* LLVM's Windows whole-program pass otherwise folds this startup coordinator
+ * and dozens of service callees into a 1.7 MiB frame, exceeding the native
+ * PE main-thread stack before the first service call. Keep this one-time
+ * coordinator unoptimized so each already-optimized callee retains its own
+ * bounded frame. */
+__attribute__((optnone))
+#elif defined(_WIN32) && defined(__GNUC__)
+__attribute__((optimize("no-inline", "no-inline-functions",
+                        "no-inline-small-functions")))
+#endif
 bool app_init_services(struct app_context *ctx,
                         const struct chain_params *params,
                         struct boot_svc_ctx *svc)
