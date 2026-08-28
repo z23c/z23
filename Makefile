@@ -9616,7 +9616,8 @@ check-verification-coverage:
 # Fault injection at daemon-reload and restart must restore both the executable
 # and its systemd identity intent; the success case must qualify the /proc
 # executable bytes and status command before considering activation complete.
-check-ship-remote-transaction:
+# jsonq: ship.sh's release-candidate real-Tor gate reads candidate JSON with it.
+check-ship-remote-transaction: jsonq
 	@echo "══ LINT: remote ship transaction rollback + process qualification ══"
 	@./tools/ship.sh --selftest
 	@./tools/ship_selftest.sh
@@ -10326,15 +10327,19 @@ LINT_GATES := \
     check-tor-dial-prewarm \
     check-fleet-source-status
 
-# The driver execs gate scripts directly, so the two gates backed by a built
-# tool (check-core-seal, check-observability-pairing, and the package root
-# projection checker) need their binaries
-# present before it starts; in serial mode those deps ride the check-* rules.
+# The driver execs gate scripts directly, so every gate backed by a built tool
+# (check-core-seal, check-observability-pairing, the package root projection
+# checker, and jsonq for check-ship-remote-transaction / check-onion-pair-watch)
+# needs its binary present before it starts; in serial mode those deps ride the
+# check-* rules. jsonq was the one missing from this list: on a checkout where
+# it had not been built, `make lint` failed check-ship-remote-transaction in
+# about 30 ms and — because that gate's selftest was a silent assertion chain —
+# with a completely empty failure log.
 ifeq ($(ZCL_LINT_SERIAL),1)
 lint: $(LINT_GATES)
 	@echo "══ LINT: all checks passed (serial) ══"
 else
-lint: tools/core_seal tools/check_observability_pairing $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN)
+lint: tools/core_seal tools/check_observability_pairing $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN) $(JSONQ_BIN)
 	@tools/lint/run_lint.sh --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_GATES)
 	@echo "══ LINT: all checks passed ══"
 endif
@@ -10359,11 +10364,11 @@ endif
 # read build output, git config, /proc, or untracked worktree state. Each
 # carries its reason in tools/lint/lint_cache.sh, and each always runs.
 .PHONY: lint-cached lint-cold-audit
-lint-cached: tools/core_seal tools/check_observability_pairing
+lint-cached: tools/core_seal tools/check_observability_pairing $(JSONQ_BIN)
 	@tools/lint/run_lint.sh --cache --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_GATES)
 	@echo "══ LINT: all checks passed (cached where inputs were unchanged) ══"
 
-lint-cold-audit: tools/core_seal tools/check_observability_pairing
+lint-cold-audit: tools/core_seal tools/check_observability_pairing $(JSONQ_BIN)
 	@tools/lint/run_lint.sh --cold-audit --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_GATES)
 	@echo "══ LINT: all checks passed, every cache hit verified against a fresh run ══"
 
