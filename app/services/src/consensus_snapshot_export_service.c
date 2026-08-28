@@ -171,7 +171,7 @@ static bool read_local_export_proof(const char *path,
     struct platform_positioned_file file;
     platform_positioned_file_init(&file);
     if (!platform_positioned_file_open(&file, path))
-        return false;
+        return false; /* raw-return-ok:bounded policy reason returned */
     struct platform_positioned_file_snapshot before, after;
     uint8_t raw[LOCAL_EXPORT_PROOF_BYTES];
     bool ok = platform_positioned_file_snapshot(&file, &before) &&

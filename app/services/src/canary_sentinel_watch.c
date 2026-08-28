@@ -206,7 +206,7 @@ static bool read_sentinel(const char *path, char *buf, size_t cap,
     struct platform_positioned_file file;
     platform_positioned_file_init(&file);
     if (!platform_positioned_file_open(&file, path))
-        return false; /* raced with the harness's rm/rename: not an error */
+        return false; // raw-return-ok:raced with the harness's rm/rename of the sentinel between directory listing and open — the normal steady-state race, not an error
     uint64_t size = 0;
     if (!platform_positioned_file_size(&file, &size) || size >= cap) {
         platform_positioned_file_close(&file);
