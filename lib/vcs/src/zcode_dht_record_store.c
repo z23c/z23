@@ -6,6 +6,10 @@
 #include "base/safe_alloc.h"
 #include "base/serialize_le.h"
 #include "crypto/sha3.h"
+#include "platform/os_proc.h"
+#include "platform/positioned_file.h"
+#include "platform/private_directory.h"
+#include "platform/private_file.h"
 #include "util/write_all.h"
 #include "vcs/zcode_dht_identity.h"
 
@@ -373,7 +377,7 @@ static bool store_paths(const char *datadir, char directory[1400],
   char zcode[1300];
   int n = snprintf(zcode, sizeof(zcode), "%s/zcode", datadir);
   if (n <= 0 || (size_t)n >= sizeof(zcode) ||
-      (mkdir(zcode, 0700) != 0 && errno != EEXIST)) {
+      !platform_private_directory_ensure(zcode)) {
     (void)store_error(error, error_capacity, VCS_ZCODE_DHT_RECORD_STORE_IO,
                       "cannot create zcode directory");
     return false;
@@ -381,7 +385,7 @@ static bool store_paths(const char *datadir, char directory[1400],
   n = snprintf(directory, 1400, "%s/%s", datadir,
                VCS_ZCODE_DHT_IDENTITY_DIR);
   if (n <= 0 || n >= 1400 ||
-      (mkdir(directory, 0700) != 0 && errno != EEXIST)) {
+      !platform_private_directory_ensure(directory)) {
     (void)store_error(error, error_capacity, VCS_ZCODE_DHT_RECORD_STORE_IO,
                       "cannot create DHT record directory");
     return false;
@@ -427,58 +431,43 @@ enum vcs_zcode_dht_record_store_result vcs_zcode_dht_record_store_save(
   uint64_t sequence = atomic_fetch_add_explicit(
       &g_record_store_temp_sequence, 1, memory_order_relaxed);
   char temporary[1600];
-  int n = snprintf(temporary, sizeof(temporary), "%s.tmp.%ld.%llu", path,
-                   (long)getpid(), (unsigned long long)sequence);
+  int n = snprintf(temporary, sizeof(temporary), "%s.tmp.%llu.%llu", path,
+                   (unsigned long long)os_proc_current_pid(),
+                   (unsigned long long)sequence);
   if (n <= 0 || (size_t)n >= sizeof(temporary)) {
     free(wire);
     return store_error(error_out, error_capacity,
                        VCS_ZCODE_DHT_RECORD_STORE_IO,
                        "record store temp path too long");
   }
-  int fd = open(temporary, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
-  bool ok = fd >= 0 && zcl_write_all(fd, wire, bytes) && fsync(fd) == 0;
+  struct platform_private_file staged;
+  struct platform_private_file_identity staged_identity;
+  platform_private_file_init(&staged);
+  bool created = platform_private_file_create(temporary, &staged) &&
+                 platform_private_file_identity(&staged, &staged_identity);
+  bool ok = created &&
+            platform_private_file_write_at(&staged, wire, bytes, 0) &&
+            platform_private_file_truncate(&staged, bytes) &&
+            platform_private_file_flush(&staged) &&
+            platform_private_file_replace(&staged, temporary, path);
   free(wire);
-  if (fd >= 0 && close(fd) != 0)
-    ok = false;
+  if (!ok && created)
+    (void)platform_private_file_retire_if_identity(
+        &staged, temporary, &staged_identity);
+  platform_private_file_close(&staged);
   if (!ok) {
-    (void)unlink(temporary);
     return store_error(error_out, error_capacity,
                        VCS_ZCODE_DHT_RECORD_STORE_IO,
                        "record store temp write failed");
   }
-  if (rename(temporary, path) != 0) {
-    (void)unlink(temporary);
-    return store_error(error_out, error_capacity,
-                       VCS_ZCODE_DHT_RECORD_STORE_IO,
-                       "record store rename failed");
-  }
-  int dfd = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-  if (dfd < 0 || fsync(dfd) != 0) {
-    if (dfd >= 0)
-      (void)close(dfd);
+  if (!platform_private_parent_flush(directory)) {
     return store_error(error_out, error_capacity,
                        VCS_ZCODE_DHT_RECORD_STORE_IO,
                        "record store directory fsync failed");
   }
-  (void)close(dfd);
   if (error_out && error_capacity)
     error_out[0] = '\0';
   return VCS_ZCODE_DHT_RECORD_STORE_OK;
-}
-
-static bool exact_read(int fd, uint8_t *wire, size_t bytes)
-{
-  size_t off = 0;
-  while (off < bytes) {
-    ssize_t n = read(fd, wire + off, bytes - off);
-    if (n < 0 && errno == EINTR)
-      continue;
-    if (n <= 0)
-      return false;
-    off += (size_t)n;
-  }
-  uint8_t extra;
-  return read(fd, &extra, 1) == 0;
 }
 
 enum vcs_zcode_dht_record_store_result vcs_zcode_dht_record_store_load(
@@ -494,37 +483,41 @@ enum vcs_zcode_dht_record_store_result vcs_zcode_dht_record_store_load(
   char directory[1400], path[1500];
   if (!store_paths(datadir, directory, path, error_out, error_capacity))
     return VCS_ZCODE_DHT_RECORD_STORE_IO;
-  int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-  if (fd < 0) {
-    if (errno == ENOENT)
+  struct platform_positioned_file file;
+  struct platform_positioned_file_snapshot before, after;
+  platform_positioned_file_init(&file);
+  if (!platform_positioned_file_open(&file, path)) {
+    if (platform_private_path_absent(path))
       return VCS_ZCODE_DHT_RECORD_STORE_OK;
     return store_error(error_out, error_capacity,
                        VCS_ZCODE_DHT_RECORD_STORE_IO,
                        "cannot open DHT record store");
   }
-  struct stat st;
   size_t max_bytes = VCS_ZCODE_DHT_RECORD_STORE_HEADER_BYTES +
                      VCS_ZCODE_DHT_RECORD_STORE_MAX_RECORDS *
                          VCS_ZCODE_DHT_RECORD_WIRE_BYTES;
-  if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
-      (st.st_mode & 0777) != 0600 ||
-      st.st_size < (off_t)VCS_ZCODE_DHT_RECORD_STORE_HEADER_BYTES ||
-      st.st_size > (off_t)max_bytes) {
-    (void)close(fd);
+  if (!platform_positioned_file_is_private(&file) ||
+      !platform_positioned_file_snapshot(&file, &before) ||
+      before.size < VCS_ZCODE_DHT_RECORD_STORE_HEADER_BYTES ||
+      before.size > max_bytes) {
+    platform_positioned_file_close(&file);
     return store_error(error_out, error_capacity,
                        VCS_ZCODE_DHT_RECORD_STORE_CORRUPT,
                        "DHT record store size or mode is invalid");
   }
-  size_t bytes = (size_t)st.st_size;
+  size_t bytes = (size_t)before.size;
   uint8_t *wire = zcl_malloc(bytes, "dht.record_store.load");
   if (!wire) {
-    (void)close(fd);
+    platform_positioned_file_close(&file);
     return store_error(error_out, error_capacity,
                        VCS_ZCODE_DHT_RECORD_STORE_IO,
                        "record store load allocation failed");
   }
-  bool read_ok = exact_read(fd, wire, bytes);
-  (void)close(fd);
+  bool read_ok = platform_positioned_file_read(&file, wire, bytes, 0) ==
+                     (int64_t)bytes &&
+                 platform_positioned_file_snapshot(&file, &after) &&
+                 memcmp(&before, &after, sizeof(before)) == 0;
+  platform_positioned_file_close(&file);
   if (!read_ok || memcmp(wire, record_store_magic, 8) != 0 ||
       zcl_read_u32_le(wire + 8) != RECORD_STORE_VERSION ||
       memcmp(wire + 16, store->network_genesis, 32) != 0) {
