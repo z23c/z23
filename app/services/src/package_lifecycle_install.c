@@ -28,6 +28,9 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#ifdef _WIN32
+#include <io.h>
+#endif
 
 #define PKGL_DEV_WORKER_NAME "zclassic23-package-verify-dev"
 #define PKGL_RELEASE_WORKER_NAME "zclassic23-package-verify"
@@ -120,7 +123,13 @@ static struct zcl_result pkgl_copy_hashed(const char *src, const char *dst,
     if (ferror(in))
         bad = true;
     fclose(in);
-    if (fflush(outf) != 0 || fsync(fileno(outf)) != 0)
+    if (fflush(outf) != 0
+#ifdef _WIN32
+        || _commit(_fileno(outf)) != 0
+#else
+        || fsync(fileno(outf)) != 0
+#endif
+    )
         bad = true;
     if (fclose(outf) != 0)
         bad = true;
@@ -366,6 +375,17 @@ struct zcl_result pkgl_build_and_install(
 {
     if (!ctx || !root || !release || !lock_root || !step)
         return ZCL_ERR(-1, "null argument installing a package");
+#ifdef _WIN32
+    /* Package builds execute untrusted recipes and activation publishes their
+     * output.  Keep the native boundary closed until the restricted-token /
+     * Job Object sandbox and immutable generation transaction are qualified. */
+    pkgl_step_fail(step, "windows-package-install-disabled",
+                   "native package install awaits sandbox qualification");
+    return ZCL_ERR(-1,
+                   "native Windows package install is disabled until the "
+                   "sandbox and secure immutable generation activation pass "
+                   "qualification");
+#endif
 
     struct pkgl_build_paths p;
     struct zcl_result pr = pkgl_build_paths_init(ctx, root, &p);
@@ -627,8 +647,13 @@ static struct zcl_result pkgl_swap_active(const struct pkgl_ctx *ctx,
     if (n <= 0 || (size_t)n >= sizeof(tmp))
         return ZCL_ERR(-1, "active temp path too long");
     ZCL_IGNORE_RESULT(pkgl_rm_rf(tmp), "stale active temp link");
+#ifdef _WIN32
+    errno = ENOTSUP;
+    return ZCL_ERR(-1, "symlink %s: %s", tmp, strerror(errno));
+#else
     if (symlink(target, tmp) != 0)
         return ZCL_ERR(-1, "symlink %s: %s", tmp, strerror(errno));
+#endif
     if (rename(tmp, link) != 0) {
         int e = errno;
         ZCL_IGNORE_RESULT(pkgl_rm_rf(tmp), "failed active swap cleaned up");
@@ -646,6 +671,12 @@ struct zcl_result pkgl_activate(const struct pkgl_ctx *ctx, const char *name,
         return ZCL_ERR(-1, "null argument activating a package");
     memset(prev_root_out, 0, 32);
     *had_previous_out = false;
+#ifdef _WIN32
+    return ZCL_ERR(-1,
+                   "native Windows package activation is disabled until the "
+                   "sandbox and secure immutable generation activation pass "
+                   "qualification");
+#endif
 
     struct vcs_package_generations gens;
     ZCL_CHECK(pkgl_generations_load(ctx, name, &gens));
