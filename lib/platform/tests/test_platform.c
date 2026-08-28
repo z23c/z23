@@ -1,6 +1,8 @@
 #include "platform/os_proc.h"
 #include "platform/file_compat.h"
 #include "platform/socket_compat.h"
+#include "platform/directory_compat.h"
+#include "platform/fd_path.h"
 
 #include <fcntl.h>
 #include <fnmatch.h>
@@ -102,6 +104,16 @@ int main(void)
     }
     close(first);
     unlink(file_path);
+    int directory_fd = platform_directory_open(".");
+    char child_path[4096];
+    if (directory_fd < 0 ||
+        !platform_dirfd_child_path(child_path, sizeof(child_path),
+                                   directory_fd, "Makefile") ||
+        strstr(child_path, "Makefile") == NULL) {
+        if (directory_fd >= 0) close(directory_fd);
+        return 12;
+    }
+    close(directory_fd);
     if (fnmatch("app/*/src/*.c", "app/models/src/block.c", FNM_PATHNAME) != 0 ||
         fnmatch("app/*/src/*.c", "app/models/deep/src/block.c",
                 FNM_PATHNAME) == 0 ||

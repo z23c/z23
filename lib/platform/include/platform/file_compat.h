@@ -11,10 +11,34 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 
 #if defined(_WIN32)
 #include <windows.h>
 #include <io.h>
+
+struct platform_file_identity {
+    uint64_t volume;
+    uint64_t file;
+    uint64_t size;
+    uint64_t write_time;
+};
+
+static inline bool platform_file_identity_read(
+    int fd, struct platform_file_identity *out)
+{
+    if (!out) return false;
+    intptr_t raw = _get_osfhandle(fd);
+    BY_HANDLE_FILE_INFORMATION info;
+    if (raw == -1 || !GetFileInformationByHandle((HANDLE)raw, &info))
+        return false;
+    out->volume = info.dwVolumeSerialNumber;
+    out->file = ((uint64_t)info.nFileIndexHigh << 32) | info.nFileIndexLow;
+    out->size = ((uint64_t)info.nFileSizeHigh << 32) | info.nFileSizeLow;
+    out->write_time = ((uint64_t)info.ftLastWriteTime.dwHighDateTime << 32) |
+                      info.ftLastWriteTime.dwLowDateTime;
+    return true;
+}
 
 static inline bool platform_file_utf8_path(const char *path,
                                            wchar_t out[32768])
@@ -141,6 +165,27 @@ static inline ssize_t platform_file_pread(int fd, void *buffer, size_t count,
 #else
 #include <sys/file.h>
 #include <unistd.h>
+
+struct platform_file_identity {
+    uint64_t volume;
+    uint64_t file;
+    uint64_t size;
+    uint64_t write_time;
+};
+
+static inline bool platform_file_identity_read(
+    int fd, struct platform_file_identity *out)
+{
+    struct stat st;
+    if (!out || fstat(fd, &st) != 0)
+        return false;
+    out->volume = (uint64_t)st.st_dev;
+    out->file = (uint64_t)st.st_ino;
+    out->size = (uint64_t)st.st_size;
+    out->write_time = ((uint64_t)st.st_mtim.tv_sec << 32) ^
+                      (uint32_t)st.st_mtim.tv_nsec;
+    return true;
+}
 
 static inline int platform_file_open_nofollow(const char *path, int flags,
                                                int mode)

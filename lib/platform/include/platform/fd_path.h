@@ -14,10 +14,33 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <sys/stat.h>
+#if defined(_WIN32)
+#include <windows.h>
+#include <io.h>
+#endif
 
 static inline bool platform_fd_path(char *out, size_t out_size, int fd,
                                     const char *leaf)
 {
+#if defined(_WIN32)
+    intptr_t raw = _get_osfhandle(fd);
+    wchar_t wide[32768];
+    if (raw == -1 || !GetFinalPathNameByHandleW((HANDLE)raw, wide, 32768,
+                                                FILE_NAME_NORMALIZED))
+        return false;
+    const wchar_t *start = wcsncmp(wide, L"\\\\?\\", 4) == 0
+        ? wide + 4 : wide;
+    char directory[32768];
+    int converted = WideCharToMultiByte(CP_UTF8, 0, start, -1, directory,
+                                        sizeof(directory), NULL, NULL);
+    if (converted <= 0) return false;
+    for (char *cursor = directory; *cursor; cursor++)
+        if (*cursor == '\\') *cursor = '/';
+    int written = leaf && leaf[0]
+        ? snprintf(out, out_size, "%s/%s", directory, leaf)
+        : snprintf(out, out_size, "%s", directory);
+    return written >= 0 && (size_t)written < out_size;
+#else
 #if defined(__APPLE__)
     const char *root = "/dev/fd";
 #else
@@ -27,6 +50,7 @@ static inline bool platform_fd_path(char *out, size_t out_size, int fd,
         ? snprintf(out, out_size, "%s/%d/%s", root, fd, leaf)
         : snprintf(out, out_size, "%s/%d", root, fd);
     return written >= 0 && (size_t)written < out_size;
+#endif
 }
 
 static inline bool platform_dirfd_child_path(char *out, size_t out_size,
@@ -34,7 +58,9 @@ static inline bool platform_dirfd_child_path(char *out, size_t out_size,
                                              const char *leaf)
 {
     if (!leaf || !leaf[0]) return false;
-#if defined(__APPLE__)
+#if defined(_WIN32)
+    return platform_fd_path(out, out_size, directory_fd, leaf);
+#elif defined(__APPLE__)
     char directory[4096];
     struct stat opened;
     struct stat resolved;
@@ -57,7 +83,9 @@ static inline bool platform_dirfd_child_path(char *out, size_t out_size,
  * by re-verifying the pinned dev/ino after the write. */
 static inline bool platform_fd_writable_path(char *out, size_t out_size, int fd)
 {
-#if defined(__APPLE__)
+#if defined(_WIN32)
+    return platform_fd_path(out, out_size, fd, NULL);
+#elif defined(__APPLE__)
     char resolved[4096];
     if (fcntl(fd, F_GETPATH, resolved) != 0)
         return false;
