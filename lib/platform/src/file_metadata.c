@@ -86,12 +86,19 @@ enum platform_file_shape platform_file_shape_read(const char *path)
     wchar_t wide[32768];
     if (!metadata_wide(path, wide))
         return PLATFORM_FILE_SHAPE_UNREADABLE;
-    /* FILE_FLAG_OPEN_REPARSE_POINT so a symlink/junction is described rather
+    /* FILE_FLAG_BACKUP_SEMANTICS because a directory has no handle without
+     * it: CreateFileW refuses one with ERROR_ACCESS_DENIED, which this
+     * function would report as UNREADABLE. That is the exact conflation the
+     * header forbids -- "nobody put anything here" and "something is here we
+     * could not look at" are different facts, and a directory is neither.
+     * Without the flag the FILE_ATTRIBUTE_DIRECTORY branch below is dead.
+     * FILE_FLAG_OPEN_REPARSE_POINT so a symlink/junction is described rather
      * than traversed — the whole point is to name what sits AT the path. */
     HANDLE file = CreateFileW(
         wide, FILE_READ_ATTRIBUTES,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
-        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS |
+            FILE_FLAG_OPEN_REPARSE_POINT,
         NULL);
     if (file == INVALID_HANDLE_VALUE) {
         DWORD error = GetLastError();

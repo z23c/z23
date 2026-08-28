@@ -1,12 +1,22 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * ROM artifact seeding registry + free-tier serve policy + caps. See
- * net/rom_seed.h for the contract and trust model.
+ * ROM artifact seeding REGISTRY + the scan that fills it. See net/rom_seed.h
+ * for the contract and trust model.
  *
- * Everything wire- or disk-derived is bounded and validated here. Registration
- * re-derives every digest from the bytes on disk in one pass (never a sidecar).
- * The serve caps are in-memory DDoS bounds only — nothing here is persisted or
- * a consensus predicate. */
+ * This file owns one state group: the artifact registry and g_reg_mutex, plus
+ * the background scan lifecycle and its own g_scan_mutex. Everything
+ * wire- or disk-derived is bounded and validated here, and registration
+ * re-derives every digest from the bytes on disk in one pass (never a
+ * sidecar). The serve caps live in rom_seed_throttle.c, the pure name rules in
+ * rom_seed_classify.c, and the outward description of an artifact (offer,
+ * directory JSON, state dump) in rom_seed_report.c — see rom_seed_internal.h
+ * for the seam. Nothing here is persisted or a consensus predicate.
+ *
+ * LOCKING (unchanged by those splits): g_reg_mutex guards g_artifacts and is
+ * never held across a call out of this file; g_scan_mutex guards the scan
+ * lifecycle fields only. rom_seed_reset() releases g_reg_mutex before calling
+ * rom_seed_throttle_reset(), so the registry and caps locks are still never
+ * held at the same time. */
 #include "rom_seed_internal.h"
 
 #include "platform/time_compat.h"
@@ -15,7 +25,6 @@
 #include "net/file_market.h"
 #include "crypto/sha3.h"
 #include "encoding/utilstrencodings.h"
-#include "json/json.h"
 #include "util/safe_alloc.h"
 #include "util/log_macros.h"
 #include "util/thread_registry.h"
@@ -40,25 +49,6 @@
 /* ── Registry ───────────────────────────────────────────────────────── */
 static struct rom_artifact g_artifacts[ROM_SEED_MAX_ARTIFACTS];
 static pthread_mutex_t g_reg_mutex = PTHREAD_MUTEX_INITIALIZER;
-/* ── Config (read from serve threads; set at boot) ──────────────────── */
-static _Atomic bool     g_enabled = true;
-static _Atomic uint32_t g_max_inflight_per_peer = ROM_SEED_DEFAULT_MAX_INFLIGHT_PER_PEER;
-static _Atomic uint64_t g_peer_bps_cap   = ROM_SEED_DEFAULT_PEER_BPS_CAP;
-static _Atomic uint64_t g_global_bps_cap = ROM_SEED_DEFAULT_GLOBAL_BPS_CAP;
-/* ── Caps + stats state (one mutex) ─────────────────────────────────── */
-struct rom_peer_stat {
-    uint8_t  ip[16];
-    bool     used;
-    bool     ever_served;
-    uint32_t concurrent;   /* active in-flight serves for this peer   */
-    int64_t  win_start;    /* rolling 1-second byte-rate window start  */
-    uint64_t win_bytes;    /* bytes charged in the current window      */
-    int64_t  last_seen;    /* LRU eviction when the table is full      */
-};
-static struct rom_peer_stat g_peers[ROM_SEED_PEER_TABLE_CAP];
-static pthread_mutex_t g_caps_mutex = PTHREAD_MUTEX_INITIALIZER;
-static int64_t  g_global_win_start = 0;
-static uint64_t g_global_win_bytes = 0;
 
 /* ── Background scan lifecycle ──────────────────────────────────────── */
 static pthread_t g_scan_thread;
@@ -68,10 +58,6 @@ static char      g_scan_datadir[1024];
 static _Atomic bool g_scan_cancel = false;
 static pthread_mutex_t g_scan_mutex = PTHREAD_MUTEX_INITIALIZER;
 static struct thread_liveness_child g_scan_liveness = { .id = SUPERVISOR_INVALID_ID };
-
-static uint64_t g_chunks_served = 0;
-static uint64_t g_bytes_served_total = 0;
-static uint64_t g_unique_peers_served = 0;
 
 /* ── Registration ───────────────────────────────────────────────────── */
 
@@ -253,16 +239,6 @@ enum rom_register_result rom_seed_register(const char *datadir,
     return ROM_REG_OK;
 }
 
-/* Bare basename of a registerable name: "bundles/foo.sqlite" -> "foo.sqlite",
- * "foo.sqlite" -> "foo.sqlite". Pure — mirrors the basename rule the classifier
- * uses so deregister matches an entry regardless of which shape it was
- * registered under. */
-static const char *rom_basename(const char *name)
-{
-    const char *slash = strrchr(name, '/');
-    return slash ? slash + 1 : name;
-}
-
 enum rom_register_result rom_seed_deregister(const char *datadir,
                                              const char *filename)
 {
@@ -425,21 +401,7 @@ void rom_seed_reset(void)
     memset(g_artifacts, 0, sizeof(g_artifacts));
     pthread_mutex_unlock(&g_reg_mutex);
 
-    pthread_mutex_lock(&g_caps_mutex);
-    memset(g_peers, 0, sizeof(g_peers));
-    g_global_win_start = 0;
-    g_global_win_bytes = 0;
-    g_chunks_served = 0;
-    g_bytes_served_total = 0;
-    g_unique_peers_served = 0;
-    pthread_mutex_unlock(&g_caps_mutex);
-
-    /* Restore default config so a serving session (or a test) starts from a
-     * known clean slate — enabled, default caps. */
-    atomic_store(&g_enabled, true);
-    atomic_store(&g_max_inflight_per_peer, ROM_SEED_DEFAULT_MAX_INFLIGHT_PER_PEER);
-    atomic_store(&g_peer_bps_cap, ROM_SEED_DEFAULT_PEER_BPS_CAP);
-    atomic_store(&g_global_bps_cap, ROM_SEED_DEFAULT_GLOBAL_BPS_CAP);
+    rom_seed_throttle_reset();
 }
 
 int rom_seed_count(void)
@@ -547,7 +509,7 @@ enum rom_serve_verdict rom_seed_serve_lookup(const uint8_t root_hash[32],
                                              uint32_t chunk_index,
                                              struct rom_artifact *out)
 {
-    if (!atomic_load(&g_enabled))
+    if (!rom_seed_enabled())
         return ROM_SERVE_DISABLED;
     struct rom_artifact a;
     if (!rom_seed_find_by_root(root_hash, &a))
@@ -561,252 +523,6 @@ enum rom_serve_verdict rom_seed_serve_lookup(const uint8_t root_hash[32],
 bool rom_seed_offer_is_free(const uint8_t root_hash[32])
 {
     return rom_seed_find_by_root(root_hash, NULL);
-}
-
-/* ── Caps ───────────────────────────────────────────────────────────── */
-
-void rom_seed_set_enabled(bool on) { atomic_store(&g_enabled, on); }
-bool rom_seed_enabled(void) { return atomic_load(&g_enabled); }
-
-void rom_seed_set_max_inflight_per_peer(uint32_t n)
-{
-    if (n == 0) n = 1;
-    atomic_store(&g_max_inflight_per_peer, n);
-}
-void rom_seed_set_peer_bps_cap(uint64_t bps)
-{
-    atomic_store(&g_peer_bps_cap, bps ? bps : 1);
-}
-void rom_seed_set_global_bps_cap(uint64_t bps)
-{
-    atomic_store(&g_global_bps_cap, bps ? bps : 1);
-}
-
-/* Find-or-allocate the peer slot (caller holds g_caps_mutex). Evicts the LRU
- * idle slot when full; never evicts a slot with active in-flight serves. */
-static struct rom_peer_stat *peer_slot_locked(const uint8_t ip[16], int64_t now)
-{
-    struct rom_peer_stat *lru = NULL;
-    for (unsigned i = 0; i < ROM_SEED_PEER_TABLE_CAP; i++) {
-        if (g_peers[i].used && memcmp(g_peers[i].ip, ip, 16) == 0)
-            return &g_peers[i];
-        if (!g_peers[i].used)
-            return &g_peers[i];
-    }
-    for (unsigned i = 0; i < ROM_SEED_PEER_TABLE_CAP; i++) {
-        if (g_peers[i].concurrent == 0 &&
-            (!lru || g_peers[i].last_seen < lru->last_seen))
-            lru = &g_peers[i];
-    }
-    if (!lru)
-        return NULL;   /* table full and every slot has an active serve: fail
-                          closed rather than corrupt a live slot's in-flight
-                          count. Callers deny the serve on NULL. */
-    memset(lru, 0, sizeof(*lru));
-    (void)now;
-    return lru;
-}
-
-bool rom_seed_peer_acquire(const uint8_t peer_ip[16])
-{
-    if (!peer_ip) return false;
-    if (!atomic_load(&g_enabled)) return false;
-    uint32_t cap = atomic_load(&g_max_inflight_per_peer);
-    int64_t now = (int64_t)platform_time_wall_time_t();
-    bool ok = false;
-    pthread_mutex_lock(&g_caps_mutex);
-    struct rom_peer_stat *s = peer_slot_locked(peer_ip, now);
-    if (s) {
-        if (!s->used) {
-            s->used = true;
-            memcpy(s->ip, peer_ip, 16);
-            s->win_start = now;
-        }
-        s->last_seen = now;
-        if (s->concurrent < cap) {
-            s->concurrent++;
-            ok = true;
-        }
-    }
-    pthread_mutex_unlock(&g_caps_mutex);
-    return ok;
-}
-
-void rom_seed_peer_release(const uint8_t peer_ip[16])
-{
-    if (!peer_ip) return;
-    pthread_mutex_lock(&g_caps_mutex);
-    for (unsigned i = 0; i < ROM_SEED_PEER_TABLE_CAP; i++) {
-        if (g_peers[i].used && memcmp(g_peers[i].ip, peer_ip, 16) == 0) {
-            if (g_peers[i].concurrent > 0)
-                g_peers[i].concurrent--;
-            break;
-        }
-    }
-    pthread_mutex_unlock(&g_caps_mutex);
-}
-
-bool rom_seed_rate_charge(const uint8_t peer_ip[16], uint64_t n, int64_t now)
-{
-    if (!peer_ip) return false;
-    uint64_t peer_cap = atomic_load(&g_peer_bps_cap);
-    uint64_t global_cap = atomic_load(&g_global_bps_cap);
-    bool ok = true;
-
-    pthread_mutex_lock(&g_caps_mutex);
-
-    /* Global rolling-1s window. */
-    if (now != g_global_win_start) {
-        g_global_win_start = now;
-        g_global_win_bytes = 0;
-    }
-    if (g_global_win_bytes > UINT64_MAX - n) g_global_win_bytes = UINT64_MAX;
-    else g_global_win_bytes += n;
-    if (g_global_win_bytes > global_cap) ok = false;
-
-    /* Per-peer rolling-1s window. */
-    struct rom_peer_stat *s = peer_slot_locked(peer_ip, now);
-    if (s) {
-        if (!s->used) {
-            s->used = true;
-            memcpy(s->ip, peer_ip, 16);
-            s->win_start = now;
-            s->win_bytes = 0;
-        }
-        if (now != s->win_start) {
-            s->win_start = now;
-            s->win_bytes = 0;
-        }
-        s->last_seen = now;
-        if (s->win_bytes > UINT64_MAX - n) s->win_bytes = UINT64_MAX;
-        else s->win_bytes += n;
-        if (s->win_bytes > peer_cap) ok = false;
-
-        if (ok) {
-            if (!s->ever_served) {
-                s->ever_served = true;
-                g_unique_peers_served++;
-            }
-            g_bytes_served_total += n;
-        }
-    } else {
-        ok = false;
-    }
-
-    pthread_mutex_unlock(&g_caps_mutex);
-    return ok;
-}
-
-void rom_seed_note_chunk_served(void)
-{
-    pthread_mutex_lock(&g_caps_mutex);
-    g_chunks_served++;
-    pthread_mutex_unlock(&g_caps_mutex);
-}
-
-/* ── Announce ───────────────────────────────────────────────────────── */
-
-static const char *kind_name(enum rom_artifact_kind k)
-{
-    switch (k) {
-    case ROM_ARTIFACT_CONSENSUS_BUNDLE: return "consensus_bundle";
-    case ROM_ARTIFACT_HEADER_SEED:      return "header_seed";
-    case ROM_ARTIFACT_UNKNOWN:
-    default:                            return "unknown";
-    }
-}
-
-bool rom_seed_build_offer(const struct rom_artifact *a,
-                          const uint8_t self_ip[16], uint16_t fs_port,
-                          struct file_offer *out)
-{
-    if (!a || !out)
-        LOG_FAIL(ROM_SUBSYS, "build_offer: null arg");
-    memset(out, 0, sizeof(*out));
-    memcpy(out->root_hash, a->chunk_root, 32);
-    snprintf(out->filename, sizeof(out->filename), "%s", a->filename);
-    out->size_bytes = a->size_bytes;
-    out->num_chunks = a->num_chunks;
-    out->price_per_mb = 0;              /* free tier — no payment gate */
-    if (self_ip) memcpy(out->peer_ip, self_ip, 16);
-    out->peer_port = fs_port;
-    out->ttl = FILE_MARKET_MAX_TTL;
-    out->last_seen = (int64_t)platform_time_wall_time_t();
-    return true;
-}
-
-/* Parse the height out of a canonical bundle name
- * "consensus-state-bundle-<N>.sqlite" (matched on the bare basename, so the
- * "bundles/<name>" shape resolves the same). Returns 0 for the header seed, an
- * unknown kind, or any non-canonical name — the download-cosmetic default that
- * a legacy directory (no "height" field) also parses to. Pure, no I/O. */
-static int64_t rom_bundle_height_from_name(const char *filename)
-{
-    if (!filename || !filename[0])
-        return 0;
-    const char *base = rom_basename(filename);
-    static const char pfx[] = "consensus-state-bundle-";
-    static const char sfx[] = ".sqlite";
-    size_t bl = strlen(base), pl = sizeof(pfx) - 1, sl = sizeof(sfx) - 1;
-    if (bl <= pl + sl || strncmp(base, pfx, pl) != 0 ||
-        strcmp(base + bl - sl, sfx) != 0)
-        return 0;
-    const char *d = base + pl;
-    size_t dcount = bl - pl - sl;
-    if (dcount == 0 || dcount >= 19) /* fits int64 without overflow */
-        return 0;
-    int64_t h = 0;
-    for (size_t i = 0; i < dcount; i++) {
-        if (d[i] < '0' || d[i] > '9')
-            return 0;
-        h = h * 10 + (d[i] - '0');
-    }
-    return h;
-}
-
-size_t rom_seed_directory_json(char *buf, size_t max)
-{
-    if (!buf || max == 0) return 0;
-    /* Heap: 8 × ~131KB = ~1MB — exceeds the 512KB darwin thread stack. */
-    struct rom_artifact *arts = zcl_calloc(
-        ROM_SEED_MAX_ARTIFACTS, sizeof(*arts), "rom-seed-directory");
-    if (!arts) return 0;
-    int n = rom_seed_list(arts, ROM_SEED_MAX_ARTIFACTS);
-
-    size_t off = 0;
-    int w = snprintf(buf + off, max - off, "[");
-    if (w < 0 || (size_t)w >= max - off) return 0;
-    off += (size_t)w;
-
-    int emitted = 0;
-    for (int i = 0; i < n; i++) {
-        char digest_hex[65];
-        HexStr(arts[i].chunk_root, 32, false, digest_hex, sizeof(digest_hex));
-        char whole_hex[65];
-        HexStr(arts[i].whole_sha3, 32, false, whole_hex, sizeof(whole_hex));
-        w = snprintf(buf + off, max - off,
-                     "%s{\"kind\":\"%s\",\"digest\":\"%s\",\"whole_sha3\":\"%s\","
-                     "\"size\":%llu,\"chunk_size\":%u,\"chunks\":%u,"
-                     "\"height\":%lld}",
-                     emitted ? "," : "", kind_name(arts[i].kind),
-                     digest_hex, whole_hex,
-                     (unsigned long long)arts[i].size_bytes,
-                     arts[i].chunk_size, arts[i].num_chunks,
-                     (long long)rom_bundle_height_from_name(arts[i].filename));
-        if (w < 0 || (size_t)w >= max - off) {
-            /* Overflow — close the array at what we have so the JSON stays
-             * well-formed rather than truncating mid-object. */
-            break;
-        }
-        off += (size_t)w;
-        emitted++;
-    }
-
-    w = snprintf(buf + off, max - off, "]");
-    free(arts);
-    if (w < 0 || (size_t)w >= max - off) return 0;
-    off += (size_t)w;
-    return off;
 }
 
 /* ── Background scan lifecycle ──────────────────────────────────────── */
@@ -843,7 +559,7 @@ static void *rom_seed_scan_thread(void *arg)
     pthread_mutex_unlock(&g_scan_mutex);
 
     int reg = 0;
-    if (atomic_load(&g_enabled))
+    if (rom_seed_enabled())
         reg = rom_seed_scan_datadir(dir);
     if (reg > 0)
         rom_seed_announce_all(fs_port);
@@ -891,73 +607,6 @@ void rom_seed_stop_scan(void)
     atomic_store(&g_scan_cancel, true);   /* stop between directory entries */
     pthread_join(t, NULL);
     thread_liveness_retire(&g_scan_liveness);
-}
-
-/* ── Introspection ──────────────────────────────────────────────────── */
-
-bool rom_seed_dump_state_json(struct json_value *out, const char *key)
-{
-    (void)key;
-    if (!out) return false;
-    json_set_object(out);
-
-    json_push_kv_bool(out, "enabled", atomic_load(&g_enabled));
-    json_push_kv_int(out, "max_inflight_per_peer",
-                     (int64_t)atomic_load(&g_max_inflight_per_peer));
-    json_push_kv_int(out, "peer_bps_cap",
-                     (int64_t)atomic_load(&g_peer_bps_cap));
-    json_push_kv_int(out, "global_bps_cap",
-                     (int64_t)atomic_load(&g_global_bps_cap));
-
-    uint64_t chunks_served, bytes_total, unique_peers, cur_bps;
-    int64_t now = (int64_t)platform_time_wall_time_t();
-    pthread_mutex_lock(&g_caps_mutex);
-    chunks_served = g_chunks_served;
-    bytes_total = g_bytes_served_total;
-    unique_peers = g_unique_peers_served;
-    cur_bps = (now == g_global_win_start) ? g_global_win_bytes : 0;
-    pthread_mutex_unlock(&g_caps_mutex);
-
-    json_push_kv_int(out, "chunks_served", (int64_t)chunks_served);
-    json_push_kv_int(out, "bytes_served_total", (int64_t)bytes_total);
-    json_push_kv_int(out, "unique_peers_served", (int64_t)unique_peers);
-    json_push_kv_int(out, "current_bps", (int64_t)cur_bps);
-
-    /* Heap: 8 × ~131KB = ~1MB — exceeds the 512KB darwin thread stack. */
-    struct rom_artifact *arts = zcl_calloc(
-        ROM_SEED_MAX_ARTIFACTS, sizeof(*arts), "rom-seed-dump");
-    if (!arts) {
-        diag_push_health(out, false, "rom seed: allocation failed");
-        return false;
-    }
-    int n = rom_seed_list(arts, ROM_SEED_MAX_ARTIFACTS);
-    json_push_kv_int(out, "artifact_count", n);
-
-    struct json_value arr = {0};
-    json_set_array(&arr);
-    for (int i = 0; i < n; i++) {
-        struct json_value o = {0};
-        json_set_object(&o);
-        char digest_hex[65];
-        HexStr(arts[i].chunk_root, 32, false, digest_hex, sizeof(digest_hex));
-        json_push_kv_str(&o, "kind", kind_name(arts[i].kind));
-        json_push_kv_str(&o, "filename", arts[i].filename);
-        json_push_kv_str(&o, "digest", digest_hex);
-        json_push_kv_int(&o, "size", (int64_t)arts[i].size_bytes);
-        json_push_kv_int(&o, "chunk_size", (int64_t)arts[i].chunk_size);
-        json_push_kv_int(&o, "chunks", (int64_t)arts[i].num_chunks);
-        json_push_kv_int(&o, "registered_at", arts[i].registered_at);
-        json_push_back(&arr, &o);
-        json_free(&o);
-    }
-    json_push_kv(out, "artifacts", &arr);
-    json_free(&arr);
-
-    bool ok = atomic_load(&g_enabled);
-    diag_push_health(out, ok,
-                     ok ? "seeding enabled" : "seeding disabled by config");
-    free(arts);
-    return true;
 }
 
 /* ── WF2 artifact-protocol: per-chunk manifest serialization ──────────

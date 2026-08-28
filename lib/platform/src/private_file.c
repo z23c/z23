@@ -5,8 +5,6 @@
 #include "platform/private_file.h"
 #include "base/safe_alloc.h"
 
-#include "base/safe_alloc.h"
-
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>

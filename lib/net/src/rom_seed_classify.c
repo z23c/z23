@@ -9,8 +9,9 @@
  * keeps everything that has state — the registry, registration, the datadir
  * scan, the serve caps, the announce/introspection surface.
  *
- * The public entry points stay declared in net/rom_seed.h; the three names
- * rom_seed.c reaches back for are declared in rom_seed_internal.h.
+ * The public entry points stay declared in net/rom_seed.h; the names the
+ * other rom_seed translation units reach back for are declared in
+ * rom_seed_internal.h.
  */
 #include "net/rom_seed.h"
 
@@ -51,6 +52,16 @@ bool rom_filename_ok(const char *filename)
     if (strcmp(base, ".") == 0 || strcmp(base, "..") == 0)
         return false;
     return true;
+}
+
+/* Bare basename of a registerable name: "bundles/foo.sqlite" -> "foo.sqlite",
+ * "foo.sqlite" -> "foo.sqlite". Pure — mirrors the basename rule the classifier
+ * below uses, so a caller matches the same entry regardless of which shape the
+ * name was registered under. */
+const char *rom_basename(const char *name)
+{
+    const char *slash = strrchr(name, '/');
+    return slash ? slash + 1 : name;
 }
 
 /* Case-sensitive "does `s` start with `prefix`". */
