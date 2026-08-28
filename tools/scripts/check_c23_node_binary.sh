@@ -49,6 +49,33 @@ if [[ "$(uname -s 2>/dev/null)" == Darwin ]]; then
     exit 0
 fi
 
+case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*)
+        command -v objdump >/dev/null 2>&1 || {
+            echo "c23-node: objdump is required for the PE dependency audit" >&2
+            exit 1
+        }
+        format="$(objdump -f "$bin" | sed -n 's/^.*file format //p' | head -1)"
+        [[ "$format" == pei-x86-64 ]] || {
+            echo "c23-node: expected native x86-64 PE, found ${format:-unknown}" >&2
+            exit 1
+        }
+        bad=0
+        while IFS= read -r dep; do
+            folded="${dep,,}"
+            case "$folded" in
+                advapi32.dll|bcrypt.dll|crypt32.dll|gdi32.dll|iphlpapi.dll|\
+                kernel32.dll|msvcrt.dll|ole32.dll|psapi.dll|shell32.dll|\
+                user32.dll|userenv.dll|ws2_32.dll|api-ms-win-*.dll) ;;
+                *) echo "c23-node: forbidden dynamic dependency: $dep" >&2; bad=1 ;;
+            esac
+        done < <(objdump -p "$bin" | sed -n 's/^[[:space:]]*DLL Name: //p')
+        test "$bad" -eq 0 || exit 1
+        echo "c23-node: PASS (native x86-64 PE; pinned static project dependencies; Windows system DLLs only)"
+        exit 0
+        ;;
+esac
+
 command -v readelf >/dev/null 2>&1 || {
     echo "c23-node: readelf is required for the release dependency audit" >&2
     exit 1

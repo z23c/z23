@@ -46,12 +46,24 @@ int main(void)
     struct platform_private_file file;
     platform_private_file_init(&file);
     static const char expected[] = "source wallet remains untouched";
-    bool fixture = platform_private_file_create(sentinel, &file) &&
-                   platform_private_file_write_at(&file, expected,
-                                                  sizeof(expected), 0) &&
-                   platform_private_file_flush(&file);
+    const char *fixture_stage = "create";
+    bool fixture = platform_private_file_create(sentinel, &file);
+    if (fixture) {
+        fixture_stage = "write";
+        fixture = platform_private_file_write_at(
+            &file, expected, sizeof(expected), 0);
+    }
+    if (fixture) {
+        fixture_stage = "flush";
+        fixture = platform_private_file_flush(&file);
+    }
+    DWORD fixture_error = fixture ? ERROR_SUCCESS : GetLastError();
     platform_private_file_close(&file);
-    if (!fixture) return 3;
+    if (!fixture) {
+        fprintf(stderr, "wallet recovery fixture %s failed: win32=%lu\n",
+                fixture_stage, (unsigned long)fixture_error);
+        return 3;
+    }
 
     struct wallet_recovery_report report = {0};
     struct zcl_result made =

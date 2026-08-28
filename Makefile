@@ -22,10 +22,11 @@ ifneq ($(ZCL_HOST_WINDOWS),)
 CC = gcc
 CXX ?= g++
 ZCL_PLATFORM_CPPFLAGS = -D_WIN32_WINNT=0x0A00 -DWIN32_LEAN_AND_MEAN \
-	-D__USE_MINGW_ANSI_STDIO=1
+	-D__USE_MINGW_ANSI_STDIO=1 -DSECP256K1_STATIC
 ZCL_LTO_FLAG = -flto=auto
-ZCL_PLATFORM_NODE_LIBS = -lws2_32 -liphlpapi -lbcrypt -luserenv \
-	-lcrypt32 -lshell32 -lole32 -luuid -lpsapi
+ZCL_PLATFORM_NODE_LIBS = -l:libregex.a -l:libtre.a -l:libintl.a \
+	-l:libiconv.a -lws2_32 -liphlpapi -lbcrypt \
+	-luserenv -lcrypt32 -lshell32 -lole32 -luuid -lpsapi -lgdi32
 ZCL_CXX_RUNTIME_LIB = -lstdc++
 ZCL_WARN_MAYBE_UNINITIALIZED = -Wno-maybe-uninitialized
 ZCL_TEST_STACK_SETUP = :
@@ -163,7 +164,7 @@ ZCL_PORTABLE_FRONTDOOR_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip \
 # restart, the boundary recipe must also drop this session's cached capture:
 # the pre-boundary parse may already have memoized a record that cannot see
 # the inputs this boundary establishes.
-NODE_SECP_ARCHIVE = $(if $(filter Darwin,$(ZCL_HOST_OS)),vendor/lib/libsecp256k1-darwin.a,vendor/lib/libsecp256k1.a)
+NODE_SECP_ARCHIVE = $(if $(filter Darwin,$(ZCL_HOST_OS)),vendor/lib/libsecp256k1-darwin.a,$(if $(ZCL_HOST_WINDOWS),vendor/lib/libsecp256k1-windows.a,vendor/lib/libsecp256k1.a))
 ZCL_GC_SECTIONS_LDFLAG = -Wl,--gc-sections
 ifeq ($(ZCL_HOST_OS),Darwin)
 # Apple ld has no --gc-sections; -dead_strip is its equivalent.
@@ -419,10 +420,11 @@ $(BUILD_IDENTITY_STAMP): $(BUILD_MUTATION_STAMP) tools/dev/source-identity.sh
 # The ZCLASSIC23_* variable names stay (build-internal), and the old
 # build/bin/zclassic23* names remain as temporary symlink aliases so existing
 # bots and scripts get an obvious migration path.
-ZCLASSIC23_BIN = $(BIN_DIR)/z23
-ZCLASSIC23_DEV_BIN = $(BIN_DIR)/z23-dev
-ZCLASSIC23_BIN_ALIAS = $(BIN_DIR)/zclassic23
-ZCLASSIC23_DEV_BIN_ALIAS = $(BIN_DIR)/zclassic23-dev
+ZCL_HOST_EXEEXT = $(if $(ZCL_HOST_WINDOWS),.exe,)
+ZCLASSIC23_BIN = $(BIN_DIR)/z23$(ZCL_HOST_EXEEXT)
+ZCLASSIC23_DEV_BIN = $(BIN_DIR)/z23-dev$(ZCL_HOST_EXEEXT)
+ZCLASSIC23_BIN_ALIAS = $(BIN_DIR)/zclassic23$(ZCL_HOST_EXEEXT)
+ZCLASSIC23_DEV_BIN_ALIAS = $(BIN_DIR)/zclassic23-dev$(ZCL_HOST_EXEEXT)
 DEV_RESTART_PLAN = $(BUILD_DIR)/dev-loop/restart.env
 TEST_ZCL_BIN = $(BIN_DIR)/test_zcl
 TEST_PARALLEL_BIN = $(BIN_DIR)/test_parallel
@@ -870,7 +872,7 @@ CFLAGS = -std=c23 -g -O3 $(ZCL_ARCH_CFLAGS) $(ZCL_LTO_FLAG) -Wall -Wextra -Werro
 	-D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -DZCL_AR_ENFORCE $(BUILD_IDENTITY_CPPFLAGS) -Ivendor/include -Ivendor/x11/include $(GTK_DEF) $(GTK_CFLAGS) \
 	$(WEBKIT_DEF) $(WEBKIT_CFLAGS)
 ZCL_EXPORT_DYNAMIC_FLAG = $(if $(filter Darwin,$(ZCL_HOST_OS)),,$(if $(ZCL_HOST_WINDOWS),,-rdynamic))
-LDFLAGS = -pthread $(ZCL_LTO_FLAG) $(ZCL_EXPORT_DYNAMIC_FLAG) $(HARDEN_LDFLAGS)
+LDFLAGS = $(if $(ZCL_HOST_WINDOWS),-static-libgcc,-pthread) $(ZCL_LTO_FLAG) $(ZCL_EXPORT_DYNAMIC_FLAG) $(HARDEN_LDFLAGS)
 CACHED_CFLAGS = $(filter-out -DZCL_BUILD_SOURCE_ID=% -DZCL_BUILD_CLEAN=%,$(CFLAGS))
 BUILD_ONLY_CFLAGS = $(CACHED_CFLAGS) -Wno-deprecated-declarations
 ZCL_DEV_OPT ?= -Og
@@ -965,7 +967,8 @@ CXX_STDLIB_LDFLAGS := $(if $(CXX_STDLIB_DIR),-L$(CXX_STDLIB_DIR),)
 LIBS = $(NODE_SECP_ARCHIVE) -Lvendor/lib -lleveldb \
 	$(CXX_STDLIB_LDFLAGS) $(ZCL_CXX_RUNTIME_LIB) -lsqlite3 \
 	-levent -levent_openssl -levent_pthreads \
-	-lssl -lcrypto -lz $(ZCL_DLOPEN_LIB) -lpthread -lm \
+	-lssl -lcrypto -lz $(ZCL_DLOPEN_LIB) \
+	$(if $(ZCL_HOST_WINDOWS),-l:libwinpthread.a,-lpthread) -lm \
 	$(ZCL_PLATFORM_NODE_LIBS)
 
 # The shipped node is a C23 artifact. It never links the optional GTK/WebKit
@@ -977,7 +980,8 @@ NODE_C23_TOR_LIBS = $(if $(filter Darwin,$(ZCL_HOST_OS)),vendor/lib/libtor_stub.
 NODE_C23_LIBS = $(NODE_SECP_ARCHIVE) vendor/lib/libsqlite3.a \
 	vendor/lib/libevent.a vendor/lib/libevent_openssl.a \
 	vendor/lib/libevent_pthreads.a vendor/lib/libssl.a \
-	vendor/lib/libcrypto.a vendor/lib/libz.a $(ZCL_DLOPEN_LIB) -lpthread -lm \
+	vendor/lib/libcrypto.a vendor/lib/libz.a $(ZCL_DLOPEN_LIB) \
+	$(if $(ZCL_HOST_WINDOWS),-l:libwinpthread.a,-lpthread) -lm \
 	$(ZCL_PLATFORM_NODE_LIBS)
 
 # ── Host-local compile epochs ─────────────────────────────────────────────
@@ -4535,7 +4539,7 @@ z23: $(ZCLASSIC23_BIN) $(ZCLASSIC23_BIN_ALIAS)
 zclassic23: z23
 
 $(ZCLASSIC23_BIN_ALIAS): $(ZCLASSIC23_BIN)
-	@ln -sfn z23 "$@"
+	@$(if $(ZCL_HOST_WINDOWS),cp -f "$<" "$@",ln -sfn z23 "$@")
 
 # Release portability is an explicit, reproducible build input rather than an
 # accidental property of the maintainer's workstation. This path downloads a

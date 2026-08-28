@@ -26,6 +26,13 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$ROOT"
 
+case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*)
+        echo "check_zcc_cache: SKIP — POSIX compile-cache process backend is unavailable on native Windows"
+        exit 0
+        ;;
+esac
+
 ZCC="$("$ROOT/tools/dev/zcc_bootstrap.sh")"
 if [ -z "$ZCC" ] || [ ! -x "$ZCC" ]; then
     echo "check_zcc_cache: FAIL — could not build tools/zcc.c" >&2

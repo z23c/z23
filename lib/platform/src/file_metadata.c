@@ -53,7 +53,8 @@ enum platform_file_metadata_result platform_file_metadata_read(
     HANDLE file = CreateFileW(
         wide, FILE_READ_ATTRIBUTES,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
-        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS |
+            FILE_FLAG_OPEN_REPARSE_POINT,
         NULL);
     if (file == INVALID_HANDLE_VALUE) {
         DWORD error = GetLastError();
