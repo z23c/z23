@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "encoding/utilstrencodings.h"
+#include "platform/socket_compat.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
@@ -270,30 +271,37 @@ int rpc_cli_print_json_result(const char *json_str, FILE *out, FILE *err)
 
 /* ── Shared RPC caller for local node communication ────────────── */
 
-#include <sys/socket.h>
-#include <sys/time.h>
-#include <netinet/in.h>
-#include <unistd.h>
-
 int rpc_call_local(int port, const char *creds,
                    const char *method, const char *params_json,
                    char *out, size_t outmax)
 {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return -1;
+    if (port < 1 || port > UINT16_MAX || !creds || !method || !params_json ||
+        !out || outmax == 0)
+        return -1;
+
+    platform_socket_t sock = platform_socket_open(AF_INET, SOCK_STREAM, 0,
+                                                   true, false);
+    if (sock == PLATFORM_SOCKET_INVALID) return -1;
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (platform_socket_parse_address(AF_INET, "127.0.0.1",
+                                      &addr.sin_addr) != 1) {
+        platform_socket_close(sock);
+        return -1;
+    }
     addr.sin_port = htons((uint16_t)port);
 
-    struct timeval tv = { .tv_sec = 30, .tv_usec = 0 };
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    if (platform_socket_set_receive_timeout(sock, 30000) != 0 ||
+        platform_socket_set_send_timeout(sock, 30000) != 0) {
+        platform_socket_close(sock);
+        return -1;
+    }
 
-    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        close(fd);
+    if (platform_socket_connect(sock, (struct sockaddr *)&addr,
+                                sizeof(addr)) != 0) {
+        platform_socket_close(sock);
         return -1;
     }
 
@@ -302,7 +310,7 @@ int rpc_call_local(int port, const char *creds,
         "{\"jsonrpc\":\"1.0\",\"id\":1,\"method\":\"%s\",\"params\":%s}",
         method, params_json);
     if (blen < 0 || blen >= (int)sizeof(body)) {
-        close(fd);
+        platform_socket_close(sock);
         LOG_ERR("rpc", "local rpc body truncated: len=%d cap=%zu",
                 blen, sizeof(body));
     }
@@ -321,21 +329,25 @@ int rpc_call_local(int port, const char *creds,
         "Content-Length: %zu\r\nConnection: close\r\n\r\n%s",
         auth_b64, body_len, body);
     if (rlen < 0 || rlen >= (int)sizeof(req)) {
-        close(fd);
+        platform_socket_close(sock);
         LOG_ERR("rpc", "local rpc request truncated: len=%d cap=%zu",
                 rlen, sizeof(req));
     }
 
-    if (write(fd, req, (size_t)rlen) != rlen) { close(fd); return -1; }
+    if (!platform_socket_send_all(sock, req, (size_t)rlen)) {
+        platform_socket_close(sock);
+        return -1;
+    }
 
     size_t total = 0;
     while (total < outmax - 1) {
-        ssize_t r = read(fd, out + total, outmax - 1 - total);
+        int r = platform_socket_receive(sock, out + total,
+                                        outmax - 1 - total);
         if (r <= 0) break;
         total += (size_t)r;
     }
     out[total] = '\0';
-    close(fd);
+    platform_socket_close(sock);
     return (int)total;
 }
 

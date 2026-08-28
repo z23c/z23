@@ -2609,7 +2609,9 @@ RGFWDEF RGFW_info* RGFW_getInfo(void);
 	/*! source data for the window (used by the APIs) */
 	#ifdef RGFW_WINDOWS
 
+	#ifndef WIN32_LEAN_AND_MEAN
 	#define WIN32_LEAN_AND_MEAN
+	#endif
 	#define OEMRESOURCE
 	#include <windows.h>
 
