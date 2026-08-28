@@ -21,6 +21,44 @@
 #include "vcs/zcode_action_input.h"
 #include "vcs/zcode_dev.h"
 #include "vcs/zcode_patch.h"
+
+#if defined(_WIN32)
+
+#include <string.h>
+
+/* Windows package/agent execution is deliberately unavailable until the
+ * native launcher has passed the restricted-token, Job Object, low-integrity
+ * (or AppContainer), resource-limit, and network-denial qualification suite.
+ * Keep this refusal ahead of every database lookup, filesystem mutation, and
+ * process-launch primitive so an unqualified build can never partially stage
+ * or execute attacker-controlled work. */
+struct zcl_result build_fabric_worker_execute(
+    struct node_db *ndb, const char *workspace, const char *datadir,
+    const char *action_id,
+    const char *lease_id, const uint8_t signer_secret[32],
+    const uint8_t signer_pubkey[32], struct db_build_receipt *out_receipt,
+    struct build_fabric_worker_feedback *out_feedback)
+{
+    (void)ndb;
+    (void)workspace;
+    (void)datadir;
+    (void)action_id;
+    (void)lease_id;
+    (void)signer_secret;
+    (void)signer_pubkey;
+    if (out_receipt)
+        memset(out_receipt, 0, sizeof(*out_receipt));
+    if (out_feedback)
+        memset(out_feedback, 0, sizeof(*out_feedback));
+    return ZCL_ERR(
+        -1,
+        "windows-build-fabric-execution-refused: restricted-token Job Object "
+        "low-integrity/AppContainer resource-limit network-denial sandbox "
+        "qualification is not complete");
+}
+
+#else
+
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -858,3 +896,5 @@ struct zcl_result build_fabric_worker_execute(
     *out_receipt = receipt;
     return ZCL_OK;
 }
+
+#endif
