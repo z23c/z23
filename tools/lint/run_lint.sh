@@ -242,6 +242,7 @@ gate_command() {
         check-no-python)                    echo './tools/lint/check_no_python.sh --selftest && ./tools/lint/check_no_python.sh' ;;
         check-no-trust-state-ordering)     echo './tools/scripts/check_no_trust_state_ordering.sh' ;;
         check-no-gnu-va-args)              echo './tools/lint/check_no_gnu_va_args.sh' ;;
+        check-no-snapshot-struct-memcmp)   echo './tools/lint/check_no_snapshot_struct_memcmp.sh --self-test && ./tools/lint/check_no_snapshot_struct_memcmp.sh' ;;
         check-no-warning-suppression)      echo './tools/lint/check_no_warning_suppression.sh .' ;;
         check-clang-portability)           echo './tools/lint/check_clang_portability.sh --self-test && ./tools/lint/check_clang_portability.sh' ;;
         check-windows-platform-seam)       echo './tools/lint/check_windows_platform_seam.sh --self-test && ./tools/lint/check_windows_platform_seam.sh' ;;

@@ -9402,6 +9402,28 @@ check-no-gnu-va-args:
 	@echo "══ LINT: C23 __VA_OPT__, never the GNU comma-swallowing extension ══"
 	@./tools/lint/check_no_gnu_va_args.sh
 
+# struct platform_positioned_file_snapshot (lib/platform/include/platform/
+# positioned_file.h) is 64 bytes wide but holds only 56 bytes of fields --
+# two uint32_t nanosecond members sit in front of wider int64_t/uint64_t
+# ones, so the compiler inserts 8 bytes of alignment padding it never has to
+# initialize. A raw `memcmp(&before, &after, sizeof(before))` over the whole
+# struct reads that padding and can report an unchanged file as CHANGED.
+# This exact defect landed THREE TIMES (twenty test groups red the second
+# time, commit 44c45f255); the fix already exists as
+# platform_positioned_file_snapshot_equal(). This gate: for every .c/.h file
+# in scope, collect identifiers declared as a plain (non-pointer)
+# `struct platform_positioned_file_snapshot <name>[, <name>...];` object,
+# then flag any memcmp()/bcmp() in that SAME file naming one of those
+# identifiers as its first or second argument. Narrow and text-based by
+# design -- see the script's own header for exactly what it cannot see
+# (a helper function doing the memcmp elsewhere, a macro-wrapped memcmp, a
+# multi-line call).
+.PHONY: check-no-snapshot-struct-memcmp
+check-no-snapshot-struct-memcmp:
+	@echo "══ LINT: no raw memcmp/bcmp over struct platform_positioned_file_snapshot ══"
+	@./tools/lint/check_no_snapshot_struct_memcmp.sh --self-test
+	@./tools/lint/check_no_snapshot_struct_memcmp.sh
+
 # Second-compiler portability. The node ships as one whole-program GCC build,
 # so nothing ever asked a different compiler whether the tree is well-formed
 # and GCC-only spellings landed invisibly — including real undefined behaviour
@@ -10473,6 +10495,7 @@ LINT_GATES := \
     check-telemetry-ontology \
     check-privileged-transition-receipt \
     check-no-gnu-va-args \
+    check-no-snapshot-struct-memcmp \
     check-clang-portability \
     check-windows-platform-seam \
     check-winacceptance \
