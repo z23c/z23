@@ -202,6 +202,13 @@ static const struct rlw_leaf g_rlw_leaves[] = {
      * leaves alone. */
     { "zcode.work.show", zcl_native_handle_zcode_work_status,
       "workspace", RLW_DATADIR_VALUE, "work", RLW_ZID_PUBKEY, NULL },
+    /* Task-carrier board: declared READ with a `datadir` input only, so
+     * the harness injects the fixture datadir and the seen-set projection
+     * answers from the local record store without writing to it. The
+     * task-namespace siblings take transport roots, not a datadir, so the
+     * derived population names only the board here. */
+    { "zcode.task.board", zcl_native_handle_zcode_task_board,
+      NULL, NULL,               NULL, NULL, NULL },
     /* The seventh. Declared READ, `datadir` defaults to the operator's LIVE
      * one, and it opened node.db with node_db_open() — so pointed at a
      * damaged database it renamed the user's wallet to

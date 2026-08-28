@@ -395,6 +395,21 @@ size_t vcs_zcode_dht_service_record_local_query_page(
     uint8_t page_offset, struct vcs_zcode_dht_record *out,
     size_t out_capacity, uint8_t *next_offset_out);
 
+/* Namespace-wide local listing for a board view: every live record of
+ * `kind` the store holds in `namespace_name`, sovereignty-filtered for
+ * DISCOVER exactly like local_query, in the store's canonical order.
+ * Answers only from what this node has SEEN — no peer query is begun, so
+ * unlike discovery there is nothing to poll. Returns the allowed rows
+ * collected in `out` (first out_capacity of the store's canonical order,
+ * compacted in place past blocked records); `seen_total_out` when given
+ * receives the namespace's total live record count regardless of policy,
+ * so a short listing is legible (seen vs shown). */
+size_t vcs_zcode_dht_service_record_local_scan(
+    const struct vcs_zcode_dht_service *service, uint64_t now_unix,
+    enum vcs_zcode_dht_record_kind kind, const char *namespace_name,
+    struct vcs_zcode_dht_record *out, size_t out_capacity,
+    size_t *seen_total_out);
+
 /* Resolve active signed PROVIDER records to current Noise/delegation-
  * authenticated transport sessions. Missing accepted providers are handed to
  * the existing ZENDP reachability callback; no address crosses this API. */

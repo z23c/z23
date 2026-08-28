@@ -38,6 +38,26 @@ static const char *SCHEMA[] = {
     "CREATE INDEX IF NOT EXISTS idx_blocks_chainwork"
     " ON blocks(chain_work DESC)",
 
+    /* Private local mesh authority. Public identities are stored only after
+     * explicit operator confirmation; no key material or remote content root
+     * belongs in this table. */
+    "CREATE TABLE IF NOT EXISTS mesh_pairings("
+    "pairing_id TEXT PRIMARY KEY CHECK(length(pairing_id)=64),"
+    "network_genesis BLOB NOT NULL CHECK(length(network_genesis)=32),"
+    "peer_master_pubkey BLOB NOT NULL CHECK(length(peer_master_pubkey)=32),"
+    "peer_noise_pubkey BLOB NOT NULL CHECK(length(peer_noise_pubkey)=32),"
+    "capability_mask INTEGER NOT NULL CHECK(capability_mask>0),"
+    "delegation_sequence INTEGER NOT NULL CHECK(delegation_sequence>0),"
+    "paired_at INTEGER NOT NULL CHECK(paired_at>0),"
+    "expires_at INTEGER NOT NULL CHECK(expires_at>paired_at),"
+    "revoked_at INTEGER NOT NULL DEFAULT 0 CHECK(revoked_at>=0),"
+    "revocation_generation INTEGER NOT NULL DEFAULT 0 "
+    "CHECK(revocation_generation>=0),"
+    "UNIQUE(network_genesis,peer_master_pubkey,peer_noise_pubkey))",
+
+    "CREATE INDEX IF NOT EXISTS idx_mesh_pairings_active"
+    " ON mesh_pairings(revoked_at,expires_at)",
+
     /* Transaction index */
     "CREATE TABLE IF NOT EXISTS transactions ("
     "txid BLOB PRIMARY KEY,block_hash BLOB NOT NULL,"

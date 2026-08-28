@@ -1,0 +1,150 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Proves that local machine pairing is explicit, Noise-bound, narrowly
+ * scoped, expiring, and durably revoked. */
+
+#include "test/test_core.h"
+
+#include "models/mesh_pairing.h"
+#include "models/zid_identity.h"
+#include "net/v2_identity.h"
+#include "services/mesh_pairing_service.h"
+#include "validation/main_constants.h"
+#include "vcs/zcode_dht_delegation.h"
+
+#include <stdio.h>
+#include <string.h>
+
+static void mesh_fill32(uint8_t out[32], uint8_t value)
+{
+    memset(out, value, 32);
+}
+
+/* raw-sql-ok:test-fixture -- creates only the connected chain rows required
+ * to exercise the production chain-bound pairing verifier. */
+static bool mesh_seed_block(struct node_db *ndb, int height,
+                            const uint8_t hash[32])
+{
+    sqlite3_stmt *st = NULL;
+    static const char sql[] =
+        "INSERT INTO blocks(hash,height,prev_hash,version,merkle_root,time,"
+        "bits,nonce,solution,chain_work,status,num_tx) "
+        "VALUES(?,?,zeroblob(32),4,zeroblob(32),1,1,zeroblob(32),"
+        "X'00',zeroblob(32),3,0)";
+    if (sqlite3_prepare_v2(ndb->db, sql, -1, &st, NULL) != SQLITE_OK)
+        return false;
+    sqlite3_bind_blob(st, 1, hash, 32, SQLITE_STATIC);
+    sqlite3_bind_int(st, 2, height);
+    bool ok = sqlite3_step(st) == SQLITE_DONE;
+    sqlite3_finalize(st);
+    return ok;
+}
+
+static bool mesh_fixture(struct node_db *ndb, const char *path,
+                         struct vcs_zcode_dht_delegation *delegation,
+                         uint8_t fingerprint[32])
+{
+    if (!node_db_open(ndb, path))
+        return false;
+    uint8_t genesis[32], beacon[32], tip[32], online[32], noise[32], seed[32];
+    mesh_fill32(genesis, 0x11);
+    mesh_fill32(beacon, 0x22);
+    mesh_fill32(tip, 0x33);
+    mesh_fill32(online, 0x44);
+    mesh_fill32(noise, 0x55);
+    mesh_fill32(seed, 0x66);
+    if (!mesh_seed_block(ndb, 0, genesis) ||
+        !mesh_seed_block(ndb, ZCL_FINALITY_DEPTH, beacon) ||
+        !mesh_seed_block(ndb, 2 * ZCL_FINALITY_DEPTH, tip) ||
+        vcs_zcode_dht_delegation_sign(
+            delegation, genesis, online, noise, ZCL_FINALITY_DEPTH, beacon,
+            1000, 4000, 7, seed) != VCS_ZCODE_DHT_DELEGATION_OK ||
+        !v2_identity_public_fingerprint(noise, fingerprint))
+        return false;
+    struct zid_identity identity = {0};
+    memcpy(identity.master_pubkey, delegation->doc.master_pubkey, 32);
+    mesh_fill32(identity.anchor_txid, 0x77);
+    identity.anchor_height = 0;
+    identity.updated_height = 0;
+    snprintf(identity.status, sizeof(identity.status), "%s",
+             ZID_IDENTITY_STATUS_ACTIVE);
+    snprintf(identity.source, sizeof(identity.source), "%s",
+             ZID_IDENTITY_SOURCE_ZID_OVERLAY);
+    return db_zid_identity_save(ndb, &identity);
+}
+
+int test_mesh_pairing(void)
+{
+    int failures = 0;
+    char dir[256], path[320];
+    test_make_tmpdir(dir, sizeof(dir), "mesh_pairing", "authority");
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    struct node_db ndb = {0};
+    struct vcs_zcode_dht_delegation delegation;
+    uint8_t fingerprint[32];
+
+    TEST("mesh pairing: explicit Noise-bound acceptance is durable") {
+        ASSERT(mesh_fixture(&ndb, path, &delegation, fingerprint));
+        struct db_mesh_pairing row;
+        uint8_t wrong[32];
+        mesh_fill32(wrong, 0x99);
+        ASSERT_EQ(mesh_pairing_service_accept(
+                      &ndb, &delegation, wrong,
+                      delegation.noise_static_pubkey, true,
+                      MESH_PAIRING_CAP_STATUS_READ, 2000, 3000, &row),
+                  MESH_PAIRING_FINGERPRINT_MISMATCH);
+        ASSERT_EQ(db_mesh_pairing_list(&ndb, &row, 1), 0);
+        ASSERT_EQ(mesh_pairing_service_accept(
+                      &ndb, &delegation, fingerprint, wrong, true,
+                      MESH_PAIRING_CAP_STATUS_READ, 2000, 3000, &row),
+                  MESH_PAIRING_SESSION_MISMATCH);
+        ASSERT_EQ(mesh_pairing_service_accept(
+                      &ndb, &delegation, fingerprint,
+                      delegation.noise_static_pubkey, true,
+                      MESH_PAIRING_CAP_STATUS_READ, 2000, 3000, &row),
+                  MESH_PAIRING_OK);
+        ASSERT(mesh_pairing_allows(&row, MESH_PAIRING_CAP_STATUS_READ, 2500));
+        ASSERT(!mesh_pairing_allows(&row, MESH_PAIRING_CAP_STATUS_READ, 3000));
+        ASSERT_EQ(mesh_pairing_service_authorize_status(
+                      &ndb, row.pairing_id, &delegation,
+                      delegation.noise_static_pubkey, 2500),
+                  MESH_PAIRING_OK);
+        node_db_close(&ndb);
+        ASSERT(node_db_open(&ndb, path));
+        struct db_mesh_pairing persisted;
+        ASSERT(db_mesh_pairing_find(&ndb, row.pairing_id, &persisted));
+        ASSERT_EQ(persisted.delegation_sequence, 7);
+        PASS();
+    }
+
+    TEST("mesh pairing: revocation is sticky and cannot resurrect") {
+        struct db_mesh_pairing row;
+        ASSERT_EQ(db_mesh_pairing_list(&ndb, &row, 1), 1);
+        ASSERT_EQ(mesh_pairing_service_revoke(&ndb, row.pairing_id, 2600),
+                  MESH_PAIRING_OK);
+        ASSERT_EQ(mesh_pairing_service_revoke(&ndb, row.pairing_id, 2700),
+                  MESH_PAIRING_OK);
+        node_db_close(&ndb);
+        ASSERT(node_db_open(&ndb, path));
+        ASSERT(db_mesh_pairing_find(&ndb, row.pairing_id, &row));
+        ASSERT_EQ(row.revoked_at, 2600);
+        ASSERT_EQ(row.revocation_generation, 1);
+        ASSERT_EQ(mesh_pairing_service_authorize_status(
+                      &ndb, row.pairing_id, &delegation,
+                      delegation.noise_static_pubkey, 2800),
+                  MESH_PAIRING_ALREADY_REVOKED);
+        struct db_mesh_pairing refused;
+        ASSERT_EQ(mesh_pairing_service_accept(
+                      &ndb, &delegation, fingerprint,
+                      delegation.noise_static_pubkey, true,
+                      MESH_PAIRING_CAP_STATUS_READ, 2000, 3000, &refused),
+                  MESH_PAIRING_ALREADY_REVOKED);
+        PASS();
+    }
+
+_test_next:
+    if (ndb.open)
+        node_db_close(&ndb);
+    test_rm_rf_recursive(dir);
+    return failures;
+}

@@ -533,9 +533,11 @@ static enum vcs_source_package_checkout_result source_package_checkout_common(
         metrics->carrier_files = (uint32_t)loaded.package.count;
         metrics->authority_objects = authority_objects;
         metrics->work_receipts = work_receipts;
-        if (accepted_work_root)
+        if (accepted_work_root) {
             memcpy(metrics->accepted_signer,
                    accepted.expected_signer, 32);
+            memcpy(metrics->task_root, accepted.task_root, 32);
+        }
     }
     source_checkout_loaded_free(&loaded);
     return result;
@@ -674,4 +676,44 @@ vcs_source_package_reconstruct_verify(
     if (metrics) *metrics = checked;
     return VCS_SOURCE_PACKAGE_CHECKOUT_OK;
 #endif
+}
+
+const char *vcs_zcode_work_admit_result_string(
+    enum vcs_zcode_work_admit_result result)
+{
+    switch (result) {
+    case VCS_ZCODE_WORK_ADMIT_OK: return "ok";
+    case VCS_ZCODE_WORK_ADMIT_NULL: return "null argument";
+    case VCS_ZCODE_WORK_ADMIT_NOT_RECONSTRUCTIBLE:
+        return "package does not reconstruct to a proven accepted work";
+    case VCS_ZCODE_WORK_ADMIT_TASK_MISMATCH:
+        return "package proves a different task than the expected root";
+    }
+    return "unknown";
+}
+
+enum vcs_zcode_work_admit_result vcs_zcode_work_solution_admit(
+    struct vcs_package_store *store, const uint8_t package_root[32],
+    const uint8_t expect_task_root[32], uint8_t task_root_out[32],
+    uint8_t source_root_out[32], uint8_t accepted_work_root_out[32])
+{
+    if (task_root_out) memset(task_root_out, 0, 32);
+    if (source_root_out) memset(source_root_out, 0, 32);
+    if (accepted_work_root_out) memset(accepted_work_root_out, 0, 32);
+    if (!store || !package_root)
+        return VCS_ZCODE_WORK_ADMIT_NULL;
+    uint8_t source_root[32], accepted_work_root[32];
+    struct vcs_source_package_checkout_metrics metrics;
+    if (vcs_source_package_reconstruct_verify(
+            store, package_root, source_root, accepted_work_root,
+            &metrics) != VCS_SOURCE_PACKAGE_CHECKOUT_OK)
+        return VCS_ZCODE_WORK_ADMIT_NOT_RECONSTRUCTIBLE;
+    if (expect_task_root &&
+        memcmp(metrics.task_root, expect_task_root, 32) != 0)
+        return VCS_ZCODE_WORK_ADMIT_TASK_MISMATCH;
+    if (task_root_out) memcpy(task_root_out, metrics.task_root, 32);
+    if (source_root_out) memcpy(source_root_out, source_root, 32);
+    if (accepted_work_root_out)
+        memcpy(accepted_work_root_out, accepted_work_root, 32);
+    return VCS_ZCODE_WORK_ADMIT_OK;
 }

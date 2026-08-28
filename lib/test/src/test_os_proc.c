@@ -33,6 +33,23 @@ int test_os_proc(void)
     printf("\n=== platform os_proc tests ===\n");
     int failures = 0;
 
+    OSPROC_CHECK("native Linux release classification",
+                 os_proc_environment_classify_kernel_release(
+                     "6.12.8-generic") == OS_PROC_ENVIRONMENT_NATIVE);
+    OSPROC_CHECK("WSL2 release classification",
+                 os_proc_environment_classify_kernel_release(
+                     "5.15.153.1-microsoft-standard-WSL2") ==
+                     OS_PROC_ENVIRONMENT_WSL);
+    OSPROC_CHECK("WSL classification is case-insensitive",
+                 os_proc_environment_classify_kernel_release(
+                     "4.4.0-MICROSOFT") == OS_PROC_ENVIRONMENT_WSL);
+    OSPROC_CHECK("missing release remains unknown",
+                 os_proc_environment_classify_kernel_release(NULL) ==
+                     OS_PROC_ENVIRONMENT_UNKNOWN);
+    OSPROC_CHECK("live environment is observed",
+                 os_proc_environment_observe() !=
+                     OS_PROC_ENVIRONMENT_UNKNOWN);
+
     /* ── real reads: this live process ───────────────────────────── */
     {
         os_proc_mem_set_override(NULL);

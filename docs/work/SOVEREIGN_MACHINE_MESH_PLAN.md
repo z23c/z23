@@ -224,11 +224,18 @@ the node process.
 
 The read-only `z23 ops mesh identity` capsule now reports the running daemon's
 exact source identity, available running-image digest, native platform,
-encrypted-transport counts, authenticated DHT node identity, confinement, and
-native hot-swap capability. It redacts local paths and private material, names
-missing prerequisites, and reports pairing as unimplemented. This is local
-observation only; restart stability, four-host distinctness, and native macOS
-and Windows execution still require independent host receipts.
+encrypted-transport counts, a domain-separated fingerprint of the public Noise
+static key, authenticated DHT node identity, confinement, and native hot-swap
+capability. Linux distinguishes WSL from native execution; Windows distinguishes
+Wine from native execution. The capsule redacts local paths and private
+material, names missing prerequisites, and reports pairing as unimplemented.
+This is local observation only; restart stability, four-host distinctness, and
+native macOS and Windows execution still require independent host receipts.
+
+Checkpoint measured 2026-08-28T17:24:08-04:00 / 2026-08-28T21:24:08Z:
+the strict C23 release build and the `v2_transport_parity`, `os_proc`,
+`syncdiag_rpc`, `command_registry_catalog`, `native_api_contract`, and
+`telemetry_network` focused groups passed locally with zero skips.
 
 - Make the authenticated-v2 capability visible and operable on every supported
   platform without claiming unsupported Tor or confinement features.
@@ -366,6 +373,15 @@ peers, never production wallet state.
     Linux/macOS/Windows pair. A platform passes only the guarantees it actually
     implements; unavailable Tor, confinement, descriptor execution, or other OS
     facilities are explicit refusals.
+
+## Measured checkpoints
+
+- 2026-08-28: the local pairing authority reached schema v76. The focused
+  `mesh_pairing` acceptance proved that fingerprint mismatch and Noise-static
+  mismatch make no durable write, accepted status-read authority survives a
+  database reopen, expiry is fail-closed, and sticky revocation survives a
+  second reopen without timestamp or generation drift. This is local authority
+  storage only; no remote status request is wired or claimed yet.
 
 ## Completion rule
 

@@ -33,6 +33,9 @@ int syncdiag_cases_network(void)
         ok = ok && platform && platform->type == JSON_OBJ;
         ok = ok && build && build->type == JSON_OBJ;
         ok = ok && transport && transport->type == JSON_OBJ;
+        ok = ok && json_get(transport, "identity_loaded") != NULL;
+        ok = ok && json_get(transport,
+                            "local_noise_fingerprint_sha3") != NULL;
         ok = ok && dht && dht->type == JSON_OBJ;
         ok = ok && pairing && pairing->type == JSON_OBJ;
         ok = ok && !json_get_bool(json_get(pairing, "implemented"));

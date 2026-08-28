@@ -70,12 +70,8 @@ PATTERN='[fs]?n?printf\s*\([^"]*"[^"]*"\s*,[^)]*\b(priv_?key|privateKey|spending
 # is a regex checked with egrep — if any entry matches the full file:line
 # output, the hit is suppressed. Keep this list small and annotated.
 ALLOWLIST_RE=(
-    # tools/wallet_recover.c is an explicit "dump keys" recovery utility
-    # invoked by the operator; printing WIFs is its entire purpose. This
-    # tool has a clear user-intent gate (must be run manually) and prints
-    # to stdout that the operator controls.
-    'tools/wallet_recover\.c'
-    # tools/wallet_dump.c, same idea — dedicated key-export utility.
+    # tools/wallet_dump.c — dedicated key-export utility; printing keys is
+    # its entire purpose, behind an explicit operator-run gate.
     'tools/wallet_dump\.c'
 )
 

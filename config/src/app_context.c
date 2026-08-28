@@ -17,6 +17,11 @@ void app_context_defaults(struct app_context *ctx)
     ctx->fs_port = 18034;
     ctx->listen = true;   /* accept inbound by default — be a good peer */
     ctx->checkpoints_enabled = true;
+    /* proof_validate owns ~77% of a profiled IBD fold (sprout PHGR13 pairings).
+     * The pre-verification pool is verdict-identical (test_pv_lookahead parity
+     * oracle) and fail-safe (a miss verifies inline), so it starts by default;
+     * -pv-lookahead=0 restores the inline-only sweep. */
+    ctx->pv_lookahead = true;
     ctx->runtime_profile = ZCL_RUNTIME_FULL;
     ctx->operator_lane = ZCL_OPERATOR_LANE_UNKNOWN;
     ctx->par_workers = 0;   /* 0 => verify engine sizes to GetNumCores()-1 */

@@ -7,6 +7,7 @@
 #include "hotswap/hotswap.h"
 #include "json/json.h"
 #include "platform/os_sandbox.h"
+#include "platform/os_proc.h"
 #include "services/binary_staleness_service.h"
 #include "util/clientversion.h"
 
@@ -64,11 +65,15 @@ static void push_string_item(struct json_value *array, const char *value)
 
 static void push_platform(struct json_value *out)
 {
+    enum os_proc_environment environment = os_proc_environment_observe();
     struct json_value platform = {0};
     json_set_object(&platform);
     json_push_kv_str(&platform, "os", machine_os());
     json_push_kv_str(&platform, "architecture", machine_arch());
-    json_push_kv_str(&platform, "environment", "native");
+    json_push_kv_str(&platform, "environment",
+                     os_proc_environment_string(environment));
+    json_push_kv_bool(&platform, "environment_observed",
+                      environment != OS_PROC_ENVIRONMENT_UNKNOWN);
     json_push_kv_bool(&platform, "runtime_observed", true);
     json_push_kv(out, "platform", &platform);
     json_free(&platform);
@@ -102,15 +107,21 @@ static bool push_build(struct json_value *out)
     return have_digest;
 }
 
-static bool push_transport(struct json_value *out)
+static bool push_transport(struct json_value *out, bool *identity_loaded_out)
 {
     struct json_value raw = {0};
     bool collected = net_transport_dump_state_json(&raw, NULL);
     bool enabled = collected && object_bool(&raw, "v2_enabled");
+    bool identity_loaded = collected && object_bool(&raw, "identity_loaded");
+    if (identity_loaded_out)
+        *identity_loaded_out = identity_loaded;
     struct json_value transport = {0};
     json_set_object(&transport);
     json_push_kv_bool(&transport, "observed", collected);
     json_push_kv_bool(&transport, "v2_enabled", enabled);
+    json_push_kv_bool(&transport, "identity_loaded", identity_loaded);
+    json_push_kv_str(&transport, "local_noise_fingerprint_sha3",
+                     object_str(&raw, "local_noise_fingerprint_sha3"));
     json_push_kv_int(&transport, "noise_peers",
                      object_int(&raw, "noise_peers"));
     json_push_kv_int(&transport, "plaintext_peers",
@@ -179,11 +190,13 @@ bool machine_identity_dump_state_json(struct json_value *out, const char *key)
     json_push_kv_str(out, "authority", "live_daemon_observation");
     push_platform(out);
     bool binary_ready = push_build(out);
-    bool v2_ready = push_transport(out);
+    bool noise_identity_ready = false;
+    bool v2_ready = push_transport(out, &noise_identity_ready);
     bool dht_ready = push_dht(out);
     push_runtime_capabilities(out);
 
-    bool identity_ready = binary_ready && v2_ready && dht_ready;
+    bool identity_ready = binary_ready && v2_ready && noise_identity_ready &&
+                          dht_ready;
     struct json_value pairing = {0};
     json_set_object(&pairing);
     json_push_kv_bool(&pairing, "identity_prerequisites_ready", identity_ready);
@@ -198,6 +211,8 @@ bool machine_identity_dump_state_json(struct json_value *out, const char *key)
         push_string_item(&blockers, "BINARY_IDENTITY_UNAVAILABLE");
     if (!v2_ready)
         push_string_item(&blockers, "V2_TRANSPORT_DISABLED");
+    if (!noise_identity_ready)
+        push_string_item(&blockers, "NOISE_IDENTITY_UNAVAILABLE");
     if (!dht_ready)
         push_string_item(&blockers, "AUTHENTICATED_DHT_INACTIVE");
     push_string_item(&blockers, "PAIRING_NOT_IMPLEMENTED");

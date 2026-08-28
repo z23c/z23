@@ -680,6 +680,22 @@ bool boot_zcode_dht_record_query(
   return ok;
 }
 
+bool boot_zcode_dht_record_board(
+    uint64_t wall_now, enum vcs_zcode_dht_record_kind kind,
+    const char *namespace_name, struct vcs_zcode_dht_record *out, size_t max,
+    size_t *count_out, size_t *seen_total_out) {
+  if (!namespace_name || !out || !max || !count_out)
+    return false;
+  *count_out = 0;
+  dht_lock();
+  bool ok = g_dht && vcs_zcode_dht_service_enabled(g_dht);
+  if (ok)
+    *count_out = vcs_zcode_dht_service_record_local_scan(
+        g_dht, wall_now, kind, namespace_name, out, max, seen_total_out);
+  zcl_mutex_unlock(&g_dht_lock);
+  return ok;
+}
+
 bool boot_zcode_dht_publication_snapshot(
     uint64_t wall_now,
     const struct vcs_zcode_dht_record_selector *pointer_selector,
