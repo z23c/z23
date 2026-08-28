@@ -5535,8 +5535,9 @@ skip_parallel_tests:
         ctx.disconnect_1_in_n = 20;
 
         /* Allocate a nodes array large enough to hold 50 fake peers.
-         * Bypass nm_add_node (static) by growing the manager's nodes
-         * slot directly. Pattern only valid for tests. */
+         * Bypass nm_add_node (declared only in net_internal.h) by
+         * growing the manager's nodes slot directly. Pattern only
+         * valid for tests. */
         const int n_peers = 50;
         cm.manager.nodes = zcl_realloc(
             cm.manager.nodes,

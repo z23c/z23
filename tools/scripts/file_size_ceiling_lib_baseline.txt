@@ -45,7 +45,7 @@ lib/net/src/msgprocessor_snapshot_serve.c 946
 # 2026-08-28: ban-table clamp + banlist write debounce + raced-flush
 # generation (single-flight write mutex), re-measured at the raced-flush
 # pick's size.
-lib/net/src/net.c 2688
+lib/net/src/net.c 2373
 # 2026-08-28: second windows merge — raised 11 grown entries and
 # tightened 11 shrunk entries to the merged tree sizes; drift count
 # stays 0.
