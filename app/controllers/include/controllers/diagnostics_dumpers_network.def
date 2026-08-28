@@ -94,8 +94,9 @@
                "lib/test/src/test_telemetry_ontology.c", false),
     DIAG_LOCAL("transport", net_transport_dump_state_json,
                "per-peer P2P transport: plaintext vs noise_xx (Noise_XX "
-               "encrypted), handshake state, and frame counters; names + "
-               "counts plaintext peers so a default-off node is explicit"),
+               "encrypted), local public static-key fingerprint, handshake "
+               "state, and frame counters; names + counts plaintext peers "
+               "so a default-off node is explicit"),
     DIAG_LOCAL("omniscience", omniscience_dump_state_json,
                "capstone network-omniscience verdict: time_to_first_peer_us, "
                "handshaked_peers vs peer_floor, census_age_s, per-index "

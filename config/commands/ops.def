@@ -550,6 +550,23 @@ ZCL_COMMAND_READY_COMMAND(
 
 ZCL_COMMAND_BRANCH("ops.mesh", "ops", "Mesh",
                    ZCL_COMMAND_LAYER_OPS)
+ZCL_COMMAND_READY_READ(
+    "ops.mesh.identity", "ops.mesh", "ops.machine.status,machine.status",
+    "Report this machine's mesh identity readiness",
+    "A redacted live-daemon capsule of exact source and binary identity, "
+    "platform/environment, stable public Noise fingerprint, encrypted "
+    "transport, authenticated DHT identity, confinement, hot-swap support, "
+    "and named blockers. It creates no identity and grants no pairing or "
+    "remote-control authority.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "mesh,machine,identity,readiness,platform,hotswap",
+    "zcl.command.empty_input.v1", "zcl.machine_mesh_identity.v1",
+    "", "", "z23 ops mesh identity",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_mesh_identity)
 ZCL_COMMAND_READY_COMMAND(
     "ops.mesh.join", "ops.mesh", "",
     "Join a peer from a verified session invite",

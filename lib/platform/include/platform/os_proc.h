@@ -88,6 +88,22 @@ struct os_proc_mem {
     int64_t sys_avail_bytes;   /* /proc/meminfo MemAvailable */
 };
 
+enum os_proc_environment {
+    OS_PROC_ENVIRONMENT_UNKNOWN = 0,
+    OS_PROC_ENVIRONMENT_NATIVE,
+    OS_PROC_ENVIRONMENT_WSL,
+    OS_PROC_ENVIRONMENT_WINE,
+};
+
+/* Classify a Linux kernel release without consulting ambient environment
+ * variables. Exposed so fixtures can prove WSL recognition deterministically. */
+enum os_proc_environment
+os_proc_environment_classify_kernel_release(const char *release);
+
+/* Observe the current runtime environment through the platform authority. */
+enum os_proc_environment os_proc_environment_observe(void);
+const char *os_proc_environment_string(enum os_proc_environment environment);
+
 /* Fill `out` with a fresh process/host memory snapshot. Returns true if at
  * least the resident set was read; other fields are independently -1 on their own
  * failure without failing the whole call. When a test override is

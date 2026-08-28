@@ -39,11 +39,13 @@
 #include "controllers/messaging_controller.h"
 #include "controllers/network_controller.h"
 
+#include "base/hex.h"
 #include "json/json.h"
 #include "net/addrman.h"
 #include "net/connman.h"
 #include "net/net.h"
 #include "net/v2_transport.h"
+#include "net/v2_identity.h"
 #include "net/peer_lifecycle.h"
 #include "services/network_crawler.h"
 #include "services/network_monitor.h"
@@ -276,6 +278,17 @@ bool net_transport_dump_state_json(struct json_value *out, const char *key)
     }
     json_push_kv_bool(out, "wired", true);
     json_push_kv_bool(out, "v2_enabled", cm->manager.v2_enabled);
+    uint8_t identity_fingerprint[32];
+    char identity_fingerprint_hex[65] = {0};
+    bool identity_loaded = cm->manager.v2_enabled &&
+        v2_identity_public_fingerprint(cm->manager.identity_pub,
+                                       identity_fingerprint);
+    if (identity_loaded)
+        zcl_hex_encode(identity_fingerprint, sizeof(identity_fingerprint),
+                       identity_fingerprint_hex);
+    json_push_kv_bool(out, "identity_loaded", identity_loaded);
+    json_push_kv_str(out, "local_noise_fingerprint_sha3",
+                     identity_fingerprint_hex);
 
     int64_t plaintext_peers = 0, noise_peers = 0, handshaking_peers = 0;
     struct json_value peers = {0};

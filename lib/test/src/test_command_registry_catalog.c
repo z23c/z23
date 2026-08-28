@@ -3019,10 +3019,13 @@ static int test_zses_invite_leaves(void)
             find_spec(reg, "ops.mesh.join");
         const struct zcl_command_spec *st =
             find_spec(reg, "ops.mesh.join_status");
+        const struct zcl_command_spec *identity =
+            find_spec(reg, "ops.mesh.identity");
         ASSERT(create != NULL);
         ASSERT(accept != NULL);
         ASSERT(join != NULL);
         ASSERT(st != NULL);
+        ASSERT(identity != NULL);
         ASSERT_EQ(create->availability, ZCL_COMMAND_READY);
         ASSERT_EQ(accept->availability, ZCL_COMMAND_READY);
         ASSERT_EQ(join->availability, ZCL_COMMAND_READY);
@@ -3030,6 +3033,9 @@ static int test_zses_invite_leaves(void)
         ASSERT(accept->handler == zcl_native_handle_zses_invite_accept);
         ASSERT(join->handler == zcl_native_handle_ops_mesh_join);
         ASSERT(st->handler == zcl_native_handle_ops_mesh_join_status);
+        ASSERT(identity->handler == zcl_native_handle_ops_mesh_identity);
+        ASSERT(strcmp(identity->aliases,
+                      "ops.machine.status,machine.status") == 0);
         ASSERT(strstr(create->input_keys, "endpoint") != NULL);
         ASSERT(strstr(create->input_keys, "expires") != NULL);
         ASSERT(strstr(create->input_keys, "capability-tag") != NULL);

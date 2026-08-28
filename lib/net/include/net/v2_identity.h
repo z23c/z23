@@ -16,4 +16,10 @@ bool v2_identity_load_or_create(const char *datadir,
                                 uint8_t public_out[32],
                                 char *error_out, size_t error_capacity);
 
+/* Domain-separated SHA3-256 identifier for the public static key. The
+ * all-zero sentinel is refused. This never accepts or exposes private key
+ * material and is stable for the lifetime of the persisted public key. */
+bool v2_identity_public_fingerprint(const uint8_t public_key[32],
+                                    uint8_t fingerprint_out[32]);
+
 #endif /* ZCL_NET_V2_IDENTITY_H */
