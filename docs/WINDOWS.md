@@ -7,11 +7,11 @@ vendored archives.
 
 | Lane | Purpose | Artifact status |
 | --- | --- | --- |
-| MSYS2 UCRT64 | Native C23 build, GCC/Clang diagnostics, and the ongoing Win32 port | GCC builds the native `z23.exe`; Clang and runtime acceptance remain in progress |
+| MSYS2 UCRT64 | Native C23 build, GCC/Clang diagnostics, and the ongoing Win32 port | GCC and Clang build the native `z23.exe`; native runtime acceptance covers the qualified Windows seams |
 | WSL2 Ubuntu | Build, test, and operate the complete node today | Linux ELF running under WSL2 |
 
 The UCRT64 bootstrap, source-identity checks, compile-epoch leases, pinned
-static C dependencies, and canonical GCC node build are supported. The built
+static C dependencies, and canonical GCC and Clang node builds are supported. The built
 binary is a native x86-64 PE named `build/bin/z23.exe`; its release audit
 allows only declared Windows system DLLs. Some optional package, snapshot, and
 agent operations still refuse where their Windows capability backend is not
@@ -30,6 +30,7 @@ pacman -S --needed base-devel git \
   mingw-w64-ucrt-x86_64-toolchain \
   mingw-w64-ucrt-x86_64-clang \
   mingw-w64-ucrt-x86_64-clang-tools-extra \
+  mingw-w64-ucrt-x86_64-lld \
   mingw-w64-ucrt-x86_64-cmake \
   mingw-w64-ucrt-x86_64-ninja \
   mingw-w64-ucrt-x86_64-libsystre
@@ -52,11 +53,15 @@ make -j"$(getconf _NPROCESSORS_ONLN)" z23
 make windows-acceptance
 ```
 
-Use both native compilers for focused C23 work:
+Use both native compilers for focused C23 work. For the canonical node, pass
+the compiler explicitly; the build epoch key prevents either lane from reusing
+the other lane's objects:
 
 ```bash
 gcc -std=c23 -Wall -Wextra -Wpedantic -pedantic-errors file.c
 clang -std=c23 -Wall -Wextra -Wpedantic -pedantic-errors file.c
+make -j"$(getconf _NPROCESSORS_ONLN)" CC=gcc CXX=g++ z23
+make -j"$(getconf _NPROCESSORS_ONLN)" CC=clang CXX=clang++ z23
 ```
 
 Never reuse `vendor/lib` or `build` across UCRT64 and WSL. Each archive and
