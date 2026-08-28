@@ -35,7 +35,7 @@
 #include "vcs/package_build.h"
 #include "vcs/vcs_object.h"
 #include "vcs/zcode_dev.h"
-#include "vcs/zcode_commons_v2.h"
+#include "vcs/zcode_commons.h"
 #include "vcs/zcode_dht_record.h"
 #include "vcs/zcode_agent_context.h"
 #include "vcs/zcode_lane.h"
@@ -4293,7 +4293,7 @@ static int test_zd_improve_command(void)
 
         struct vcs_zcode_module_passport_v1 publication_passport = {
             .schema_version = 1,
-            .flags = VCS_ZCODE_COMMONS_V2_REQUIRED_FLAGS,
+            .flags = VCS_ZCODE_COMMONS_REQUIRED_FLAGS,
         };
         uint8_t *accepted_lane_wire = NULL;
         size_t accepted_lane_wire_len = 0;
@@ -4478,7 +4478,7 @@ static int test_zd_improve_command(void)
         struct vcs_zcode_module_passport_v1 stored_passport_object;
         ASSERT_EQ(vcs_zcode_module_passport_v1_decode(
                       &stored_passport_object, stored_passport,
-                      stored_passport_len), VCS_ZCODE_COMMONS_V2_OK);
+                      stored_passport_len), VCS_ZCODE_COMMONS_OK);
         free(stored_passport);
         struct vcs_devloop_publication_receipt passport_progress;
         uint8_t passport_progress_root[32];
@@ -4626,7 +4626,7 @@ static int test_zd_improve_command(void)
         struct vcs_zcode_workspace_manifest_v1_decoded stored_manifest = {0};
         ASSERT_EQ(vcs_zcode_workspace_manifest_v1_decode(
                       &stored_manifest, stored_workspace,
-                      stored_workspace_len), VCS_ZCODE_COMMONS_V2_OK);
+                      stored_workspace_len), VCS_ZCODE_COMMONS_OK);
         ASSERT(memcmp(stored_manifest.manifest.entries[0].module_passport_root,
                       passport_root, 32) == 0);
         vcs_zcode_workspace_manifest_v1_decoded_free(&stored_manifest);

@@ -59,6 +59,14 @@ int db_market_payment_claim_list_for_chunk(
     struct node_db *ndb, const uint8_t offer_id[32],
     const uint8_t buyer_pubkey[32], uint32_t chunk_index,
     struct market_payment_claim_record *out, size_t max);
+int db_market_payment_claim_count_for_offer(
+    struct node_db *ndb, const uint8_t offer_id[32]);
+
+/* Drop this offer's non-CONFIRMED claim rows and return how many went.
+ * CONFIRMED rows always survive: they are settlement evidence. */
+int db_market_payment_claim_prune_unconfirmed_for_offer(
+    struct node_db *ndb, const uint8_t offer_id[32]);
+
 enum market_payment_authority_state db_market_payment_observe_authority(
     struct node_db *ndb, const struct file_payment *payment,
     const char *seller_address,

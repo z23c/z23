@@ -127,7 +127,7 @@ HOTSHADOW_SERVICE_MEMBERS(
     "lib/vcs/src/zcode_workspace_manifest.c")
 HOTSHADOW_SERVICE_MEMBERS(
     "app/services/src/zcode_c23_economics_service.c",
-    "lib/vcs/src/zcode_commons_v2_economics.c lib/vcs/src/zcode_epoch_schedule.c lib/vcs/src/zcode_claim_epoch.c")
+    "lib/vcs/src/zcode_commons_economics.c lib/vcs/src/zcode_epoch_schedule.c lib/vcs/src/zcode_claim_epoch.c")
 HOTSHADOW_SERVICE_MEMBERS(
     "app/services/src/zcode_c23_corpus_service.c",
     "lib/vcs/src/zcode_c23_corpus_objects.c lib/vcs/src/zcode_c23_corpus_shard.c lib/vcs/src/zcode_c23_productivity_receipt.c")

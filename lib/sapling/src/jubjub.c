@@ -60,9 +60,11 @@ static const unsigned char JUBJUB_R[32] = {
 /* 256-bit integer (4 x 64-bit limbs, little-endian).  r < 2^252, so the
  * shifted accumulator A < 2r < 2^253 and its doubled form 2A|b < 2^254
  * always fit without a limb carry-out; a subtracting step may wrap and
- * is corrected in the same iteration.  Carry chains use unsigned
- * __int128, as in fr.c. */
+ * is corrected in the same iteration. Carry chains use the standard C23
+ * 128-bit integer type rather than a compiler extension. */
 #define NL 4
+
+typedef unsigned _BitInt(128) jubjub_uint128;
 
 struct bigint {
     uint64_t d[NL];
@@ -100,8 +102,8 @@ static uint64_t bi_sub(struct bigint *a, const struct bigint *c)
 {
     uint64_t borrow = 0;
     for (int i = 0; i < NL; i++) {
-        unsigned __int128 diff =
-            (unsigned __int128)a->d[i] - c->d[i] - borrow;
+        jubjub_uint128 diff =
+            (jubjub_uint128)a->d[i] - c->d[i] - borrow;
         a->d[i] = (uint64_t)diff;
         borrow = (uint64_t)(diff >> 64) & 1u;
     }
@@ -113,11 +115,11 @@ static uint64_t bi_sub(struct bigint *a, const struct bigint *c)
 static void bi_add_r_weighted(struct bigint *a, const struct bigint *r,
                               uint64_t w)
 {
-    unsigned __int128 carry = 0;
+    jubjub_uint128 carry = 0;
     for (int i = 0; i < NL; i++) {
-        unsigned __int128 sum = (unsigned __int128)a->d[i] +
-                                (unsigned __int128)r->d[i] +
-                                (unsigned __int128)r->d[i] * w + carry;
+        jubjub_uint128 sum = (jubjub_uint128)a->d[i] +
+                             (jubjub_uint128)r->d[i] +
+                             (jubjub_uint128)r->d[i] * w + carry;
         a->d[i] = (uint64_t)sum;
         carry = sum >> 64;
     }
@@ -148,7 +150,7 @@ void jubjub_to_scalar(const unsigned char *input, unsigned char *result)
     {
         uint64_t carry = 0;
         for (int i = 0; i < NL; i++) {
-            unsigned __int128 s = (unsigned __int128)r3.d[i] * 3u + carry;
+            jubjub_uint128 s = (jubjub_uint128)r3.d[i] * 3u + carry;
             r3.d[i] = (uint64_t)s;
             carry = (uint64_t)(s >> 64);
         }

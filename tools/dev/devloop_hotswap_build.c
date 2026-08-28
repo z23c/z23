@@ -2770,7 +2770,7 @@ static int hs_hotfork_unity_source(
             " lower,lower,lower,lower,lower,lower,lower,lower,lower,lower);"
             " struct vcs_zcode_module_passport_v1 passport;"
             " HF_CHECK(hf_passport_parse(plan,false,&passport) && passport.schema_version==1"
-            " && passport.flags==VCS_ZCODE_COMMONS_V2_REQUIRED_FLAGS"
+            " && passport.flags==VCS_ZCODE_COMMONS_REQUIRED_FLAGS"
             " && passport.stable_api_root[0]==0xaa && passport.signer_root[31]==0xaa);\n"
             " size_t n=strlen(plan); snprintf(candidate,sizeof(candidate),"
             " \"%%.*s,\\\"workspace\\\":\\\"/tmp/zcl-hotfork-scratch\\\","

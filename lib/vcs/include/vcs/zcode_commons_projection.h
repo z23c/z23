@@ -7,7 +7,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "vcs/zcode_commons_v2.h"
+#include "vcs/zcode_commons.h"
 
 #define VCS_ZCODE_COMMONS_PROJECTION_DOMAIN \
     "zcl.zcode.commons_projection.v1"

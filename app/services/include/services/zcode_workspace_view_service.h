@@ -4,7 +4,7 @@
 #ifndef ZCL_SERVICES_ZCODE_WORKSPACE_VIEW_SERVICE_H
 #define ZCL_SERVICES_ZCODE_WORKSPACE_VIEW_SERVICE_H
 
-#include "vcs/zcode_commons_v2.h"
+#include "vcs/zcode_commons.h"
 
 #include <stdbool.h>
 #include <stdint.h>

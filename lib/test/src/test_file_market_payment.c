@@ -65,16 +65,19 @@ static bool payment_test_offer(struct file_offer *offer, int64_t now_unix)
     return file_offer_auth_seal(offer, seed) == FILE_OFFER_AUTH_OK;
 }
 
-static bool payment_test_claim(struct file_payment *payment,
-                               const struct file_offer *offer)
+/* Each claim mints a fresh buyer keypair: claim_id is content-bound over the
+ * whole wire, so the keypair is what makes two claims of one offer distinct. */
+static bool payment_test_claim_seeded(struct file_payment *payment,
+                                      const struct file_offer *offer,
+                                      uint8_t seed_byte, uint8_t txid_byte)
 {
     uint8_t seed[32], secret[32];
     memset(payment, 0, sizeof(*payment));
-    memset(seed, 0x29, sizeof(seed));
+    memset(seed, seed_byte, sizeof(seed));
     payment->version = FILE_MARKET_PAYMENT_VERSION;
     memcpy(payment->network_genesis, offer->network_genesis, 32);
     memcpy(payment->offer_id, offer->offer_id, 32);
-    memset(payment->txid, 0x91, sizeof(payment->txid));
+    memset(payment->txid, txid_byte, sizeof(payment->txid));
     payment->chunk_start = 1;
     payment->chunks_paid = 1;
     if (!file_market_offer_range_zat(offer, payment->chunk_start,
@@ -83,6 +86,12 @@ static bool payment_test_claim(struct file_payment *payment,
         return false;
     ed25519_keypair(payment->buyer_pubkey, secret, seed);
     return file_payment_auth_seal(payment, seed) == FILE_PAYMENT_AUTH_OK;
+}
+
+static bool payment_test_claim(struct file_payment *payment,
+                               const struct file_offer *offer)
+{
+    return payment_test_claim_seeded(payment, offer, 0x29, 0x91);
 }
 
 static bool payment_test_insert_block(struct node_db *ndb,
@@ -374,6 +383,85 @@ int file_market_payment_tests(void)
         onion_fixture &&
         db_market_payment_claim_find(&ndb, onion_payment.claim_id, &found) &&
         found.offer.endpoint_type == FILE_MARKET_ENDPOINT_ONION);
+
+    /* Claim cap: claim_id is content-bound, so fresh buyer keypairs mint
+     * unlimited self-consistent claims against one live offer. The ingest
+     * must refuse beyond MARKET_PAYMENT_CLAIM_OFFER_MAX without evicting the
+     * earlier claims — refusal, not eviction, keeps an honest early claim. */
+    struct file_offer capped_offer = offer;
+    memset(capped_offer.root_hash, 0x73, sizeof(capped_offer.root_hash));
+    capped_offer.nonce = 9003;
+    bool capped_ready = file_offer_auth_seal(&capped_offer, seller_seed) ==
+                            FILE_OFFER_AUTH_OK &&
+                        db_file_offer_save(&ndb, &capped_offer);
+    bool cap_enforced = capped_ready;
+    struct file_payment flood;
+    struct zcl_result flood_result = ZCL_OK;
+    for (int i = 0; cap_enforced && i <= MARKET_PAYMENT_CLAIM_OFFER_MAX; i++) {
+        if (!payment_test_claim_seeded(&flood, &capped_offer,
+                                       (uint8_t)(0x30 + i), 0x91)) {
+            cap_enforced = false;
+            break;
+        }
+        flood_result = market_payment_claim_ingest(
+            &ndb, &main_state, false, -1, &flood, now_unix, &record);
+        cap_enforced = flood_result.ok == (i < MARKET_PAYMENT_CLAIM_OFFER_MAX);
+    }
+    PAYMENT_CHECK("per-offer cap refuses the (cap+1)th distinct valid claim",
+                  cap_enforced && !flood_result.ok && flood_result.code == -9 &&
+                  strstr(flood_result.message, "cap") != NULL &&
+                  db_market_payment_claim_count_for_offer(
+                      &ndb, capped_offer.offer_id) ==
+                      MARKET_PAYMENT_CLAIM_OFFER_MAX);
+
+    /* Prune: an expired offer's non-CONFIRMED claims are dropped by the next
+     * ingest touching that offer, while a CONFIRMED row always survives as
+     * settlement evidence. Time is injected through the ingest's now_unix —
+     * the test never waits on the wall clock. */
+    struct file_offer expiring_offer = offer;
+    memset(expiring_offer.root_hash, 0x74, sizeof(expiring_offer.root_hash));
+    expiring_offer.nonce = 9004;
+    expiring_offer.expires_unix = now_unix + 120;
+    bool expiring_ready = file_offer_auth_seal(&expiring_offer, seller_seed) ==
+                              FILE_OFFER_AUTH_OK &&
+                          db_file_offer_save(&ndb, &expiring_offer);
+    struct file_payment settled, stale, late;
+    bool expiry_fixture = expiring_ready &&
+        payment_test_claim_seeded(&settled, &expiring_offer, 0x61, 0x93) &&
+        payment_test_insert_transaction(&ndb, settled.txid,
+                                        payment_block_hash, 100) &&
+        payment_test_insert_note(&ndb, &settled, &expiring_offer, 100) &&
+        payment_test_claim_seeded(&stale, &expiring_offer, 0x62, 0x92);
+    result = expiry_fixture
+        ? market_payment_claim_ingest(&ndb, &main_state, true, 101, &settled,
+                                      now_unix, &record)
+        : ZCL_ERR(-1, "fixture failed");
+    expiry_fixture = expiry_fixture && result.ok &&
+                     strcmp(record.status, "CONFIRMED") == 0;
+    result = expiry_fixture
+        ? market_payment_claim_ingest(&ndb, &main_state, true, 101, &stale,
+                                      now_unix, &record)
+        : ZCL_ERR(-1, "fixture failed");
+    expiry_fixture = expiry_fixture && result.ok &&
+                     strcmp(record.status, "PENDING") == 0;
+    PAYMENT_CHECK("expired-offer fixture stores confirmed and pending claims",
+                  expiry_fixture);
+
+    bool late_ready = payment_test_claim_seeded(&late, &expiring_offer, 0x63,
+                                                0x94);
+    result = late_ready
+        ? market_payment_claim_ingest(&ndb, &main_state, true, 101, &late,
+                                      expiring_offer.expires_unix + 1, &record)
+        : ZCL_ERR(-1, "fixture failed");
+    bool settlement_kept =
+        db_market_payment_claim_find(&ndb, settled.claim_id, &found) &&
+        strcmp(found.status, "CONFIRMED") == 0;
+    bool pending_dropped =
+        !db_market_payment_claim_find(&ndb, stale.claim_id, &found);
+    PAYMENT_CHECK("expired offer prunes pending claims, keeps settlement",
+                  result.code == -7 && settlement_kept && pending_dropped &&
+                  db_market_payment_claim_count_for_offer(
+                      &ndb, expiring_offer.offer_id) == 1);
 
     node_db_close(&ndb);
     main_state_free(&main_state);

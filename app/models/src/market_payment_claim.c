@@ -197,6 +197,33 @@ int db_market_payment_claim_list_for_chunk(
         if (!market_payment_claim_read_row(s, &out[count])) continue);
 }
 
+int db_market_payment_claim_count_for_offer(
+    struct node_db *ndb, const uint8_t offer_id[32])
+{
+    if (!ndb || !ndb->open || !offer_id)
+        LOG_RETURN(0, "market", "payment claim offer count: invalid arguments");
+    sqlite3_stmt *s = NULL;
+    AR_QUERY_COUNT_BOUND(ndb, s,
+        "SELECT COUNT(*) FROM market_payment_claims WHERE offer_id=?",
+        AR_BIND_BLOB(s, 1, offer_id, 32));
+}
+
+/* Settlement evidence only: a CONFIRMED row always survives this prune. */
+int db_market_payment_claim_prune_unconfirmed_for_offer(
+    struct node_db *ndb, const uint8_t offer_id[32])
+{
+    if (!ndb || !ndb->open || !offer_id)
+        LOG_RETURN(0, "market", "payment claim prune: invalid arguments");
+    sqlite3_stmt *s = NULL;
+    AR_PREPARE_RET(ndb, s,
+        "DELETE FROM market_payment_claims "
+        "WHERE offer_id=? AND status<>'CONFIRMED'", 0);
+    AR_BIND_BLOB(s, 1, offer_id, 32);
+    bool ok = false;
+    AR_FINALIZE_STEP_DONE(s, ok);
+    return ok ? sqlite3_changes(ndb->db) : 0;
+}
+
 enum market_payment_authority_state db_market_payment_observe_authority(
     struct node_db *ndb, const struct file_payment *payment,
     const char *seller_address,

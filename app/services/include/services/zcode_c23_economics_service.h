@@ -4,7 +4,7 @@
 #ifndef ZCL_SERVICES_ZCODE_C23_ECONOMICS_SERVICE_H
 #define ZCL_SERVICES_ZCODE_C23_ECONOMICS_SERVICE_H
 
-#include "vcs/zcode_commons_v2.h"
+#include "vcs/zcode_commons.h"
 #include "vcs/zcode_claim_epoch.h"
 #include "vcs/zcode_epoch_schedule.h"
 
@@ -108,12 +108,12 @@ struct zcode_c23_economics_service_v1 {
                         const uint8_t moderation_policy_root[32],
                         const uint8_t qualification_predicates_root[32],
                         const uint8_t backlog_algorithm_root[32]);
-    enum vcs_zcode_commons_v2_error (*policy_validate)(
+    enum vcs_zcode_commons_error (*policy_validate)(
         const struct vcs_zcode_policy_candidate_v2 *policy);
-    enum vcs_zcode_commons_v2_error (*policy_root)(
+    enum vcs_zcode_commons_error (*policy_root)(
         const struct vcs_zcode_policy_candidate_v2 *policy,
         uint8_t out[32]);
-    enum vcs_zcode_commons_v2_error (*epoch_select)(
+    enum vcs_zcode_commons_error (*epoch_select)(
         const struct vcs_zcode_epoch_selection_v2 *input,
         const struct vcs_zcode_policy_candidate_v2 *policy,
         struct vcs_zcode_epoch_selection_result_v2 *out);

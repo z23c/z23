@@ -3,14 +3,14 @@
 #ifndef ZCL_VCS_ZCODE_CLAIM_EPOCH_H
 #define ZCL_VCS_ZCODE_CLAIM_EPOCH_H
 
-#include "vcs/zcode_commons_v2.h"
+#include "vcs/zcode_commons.h"
 
 #include <stddef.h>
 #include <stdint.h>
 
 #define VCS_ZCODE_CLAIM_EPOCH_DOMAIN \
     "zcl.zcode.claim_epoch_proposal.v2"
-#define VCS_ZCODE_CLAIM_EPOCH_VERSION VCS_ZCODE_COMMONS_V2_VERSION
+#define VCS_ZCODE_CLAIM_EPOCH_VERSION VCS_ZCODE_CREATION_CLAIM_V2_VERSION
 #define VCS_ZCODE_CLAIM_EPOCH_HEADER_BYTES 228u
 #define VCS_ZCODE_CLAIM_EPOCH_MAX_SELECTED VCS_ZCODE_COMMONS_MAX_CLAIMS
 #define VCS_ZCODE_CLAIM_EPOCH_MAX_WIRE_BYTES \
