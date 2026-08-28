@@ -62,9 +62,17 @@ static void serve_rate_key(const struct net_addr *addr, uint8_t out[16])
 
 int param_service_arm_serving(const char *params_dir)
 {
+#if defined(_WIN32)
+    (void)params_dir;
+    /* params_fetch_session still uses path-based POSIX descriptors. Do not
+     * expose parameter bytes until its retained-handle verifier is ported. */
+    atomic_store(&g_serving, false);
+    return 0;
+#else
     int armed = zcl_param_serve_prepare(params_dir);
     atomic_store(&g_serving, armed > 0);
     return armed;
+#endif
 }
 
 bool param_service_is_serving(void)
@@ -291,6 +299,11 @@ bool param_service_begin_fetch(const char *params_dir)
 {
     if (!params_dir)
         return false;
+#if defined(_WIN32)
+    /* Fetch persists partial/state/final generations. Refuse before copying
+     * the path or opening a session until private atomic replacement is used. */
+    return false;
+#else
     pthread_mutex_lock(&g_fetch_lock);
     snprintf(g_fetch.dir, sizeof(g_fetch.dir), "%s", params_dir);
     g_fetch.file_idx = -1;
@@ -303,6 +316,7 @@ bool param_service_begin_fetch(const char *params_dir)
                  "[crypto.params] proving parameters already complete and "
                  "verified in %s — nothing to fetch", params_dir);
     return any;
+#endif
 }
 
 bool param_service_fetch_active(void)
