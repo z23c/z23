@@ -7,11 +7,11 @@
  * mutation), so the Wave 2.2 registry handlers in
  * tools/command/native_dev_command.c bind straight to them. */
 
-#define _GNU_SOURCE
 #include "devloop.h"
 
 #include "framework/app_definition.h"
 #include "framework/app_platform.h"
+#include "platform/directory_compat.h"
 #include "platform/time_compat.h"
 #include "sim/social_app_sim.h"
 
@@ -90,7 +90,7 @@ static bool resource_name_ok(const char *name)
 
 static bool resolve_root(const char *requested, char out[PATH_MAX])
 {
-    return requested && realpath(requested, out) != NULL;
+    return platform_directory_canonical_real(requested, out, PATH_MAX);
 }
 
 /* ── describe ──────────────────────────────────────────────────────────── */

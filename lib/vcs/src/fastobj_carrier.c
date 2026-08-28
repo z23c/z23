@@ -5,6 +5,7 @@
 
 #include "vcs/fastobj_carrier.h"
 
+#if !defined(_WIN32)
 #include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "sha3/sha3.h"
@@ -26,9 +27,7 @@
 #define FASTOBJ_CARRIER_MAX_OBJECT_BYTES VCS_PACKAGE_STORE_MAX_PACKAGE_BYTES
 
 static const char carrier_dir[] = VCS_FASTOBJ_CARRIER_DIR "/";
-
 /* ── small local io helpers (the lib/vcs revert convention) ─────────── */
-
 static bool fc_read_file(const char *path, size_t cap, uint8_t **out,
                          size_t *out_len)
 {
@@ -913,3 +912,4 @@ bool vcs_fastobj_carrier_admit(const char *cache_dir,
     }
     return fc_carrier_apply(cache_dir, store, root, stats, err, err_cap);
 }
+#endif

@@ -8,6 +8,10 @@
 #include "package_store_priv.h"
 
 #include "crypto/random_secret.h"
+#include "platform/file_metadata.h"
+#include "platform/positioned_file.h"
+#include "platform/private_directory.h"
+#include "platform/private_file.h"
 #include "support/cleanse.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
@@ -81,26 +85,21 @@ static struct vcs_swarm_receipt_session *session_from_secret(
 
 static bool read_key_0600(const char *path, uint8_t secret[32])
 {
-    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (fd < 0)
-        LOG_FAIL(SESSION_LOG, "open receipt key: %s", strerror(errno));
-    struct stat st;
-    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
-        st.st_size != 32 || (st.st_mode & 0777) != 0600) {
-        close(fd);
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path) ||
+        !platform_positioned_file_is_private(&file) ||
+        !platform_positioned_file_snapshot(&file, &before) ||
+        before.size != 32) {
+        platform_positioned_file_close(&file);
         LOG_FAIL(SESSION_LOG, "receipt key has wrong size or mode");
     }
-    size_t off = 0;
-    while (off < 32) {
-        ssize_t n = read(fd, secret + off, 32 - off);
-        if (n < 0 && errno == EINTR)
-            continue;
-        if (n <= 0)
-            break;
-        off += (size_t)n;
-    }
-    close(fd);
-    if (off != 32) {
+    int64_t nr = platform_positioned_file_read(&file, secret, 32, 0);
+    bool stable = platform_positioned_file_snapshot(&file, &after) &&
+                  platform_positioned_file_snapshot_equal(&before, &after);
+    platform_positioned_file_close(&file);
+    if (nr != 32 || !stable) {
         memory_cleanse(secret, 32);
         LOG_FAIL(SESSION_LOG, "receipt key read was not exact");
     }
@@ -112,7 +111,7 @@ struct vcs_swarm_receipt_session *vcs_swarm_receipt_session_open(
 {
     if (!zcode_dir || !zcode_dir[0])
         LOG_NULL(SESSION_LOG, "receipt session: missing zcode_dir");
-    if (!store_mkdir_p(zcode_dir))
+    if (!platform_private_directory_ensure(zcode_dir))
         LOG_NULL(SESSION_LOG, "receipt session: cannot create zcode_dir");
     char path[STORE_PATH_MAX];
     int n = snprintf(path, sizeof(path), "%s/%s", zcode_dir,
@@ -120,10 +119,13 @@ struct vcs_swarm_receipt_session *vcs_swarm_receipt_session_open(
     if (n <= 0 || (size_t)n >= sizeof(path))
         LOG_NULL(SESSION_LOG, "receipt key path too long");
     uint8_t secret[32];
-    if (access(path, F_OK) == 0) {
+    struct platform_file_metadata metadata;
+    enum platform_file_metadata_result key_state =
+        platform_file_metadata_read(path, &metadata);
+    if (key_state == PLATFORM_FILE_METADATA_OK) {
         if (!read_key_0600(path, secret))
             return NULL;
-    } else if (errno == ENOENT) {
+    } else if (key_state == PLATFORM_FILE_METADATA_MISSING) {
         secp256k1_context *probe =
             secp256k1_context_create(SECP256K1_CONTEXT_SIGN);
         if (!probe)
@@ -135,7 +137,21 @@ struct vcs_swarm_receipt_session *vcs_swarm_receipt_session_open(
             }
         } while (!secp256k1_ec_seckey_verify(probe, secret));
         secp256k1_context_destroy(probe);
-        if (!store_atomic_write(path, secret, 32)) {
+        struct platform_private_file key;
+        struct platform_private_file_identity key_identity;
+        platform_private_file_init(&key);
+        bool created = platform_private_file_create(path, &key) &&
+                       platform_private_file_identity(&key, &key_identity);
+        bool persisted = created &&
+                         platform_private_file_write_at(&key, secret, 32, 0) &&
+                         platform_private_file_truncate(&key, 32) &&
+                         platform_private_file_flush(&key) &&
+                         platform_private_parent_flush(zcode_dir);
+        if (!persisted && created)
+            (void)platform_private_file_retire_if_identity(
+                &key, path, &key_identity);
+        platform_private_file_close(&key);
+        if (!persisted) {
             memory_cleanse(secret, 32);
             LOG_NULL(SESSION_LOG, "receipt key: persist failed");
         }

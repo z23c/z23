@@ -15,6 +15,11 @@
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
 
 #include "storage/boot_auto_reindex.h"
+#include "platform/directory_compat.h"
+#include "platform/os_proc.h"
+#include "platform/positioned_file.h"
+#include "platform/private_directory.h"
+#include "platform/private_file.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
@@ -22,6 +27,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -51,6 +57,8 @@ static void dev_stage_run_after_hash_hook(void)
 static void dev_stage_run_after_hash_hook(void) { }
 #endif
 
+static _Atomic uint64_t g_stage_directory_sequence;
+
 /* ── staging: immutable content-addressed generation ─────────────────── */
 
 static bool dev_write_manifest(const char *path, const char *generation,
@@ -60,10 +68,6 @@ static bool dev_write_manifest(const char *path, const char *generation,
 {
     if (!dev_activation_source_id_valid(source_id_sha256))
         LOG_FAIL("dev-activation", "manifest source_id_sha256 is invalid");
-    FILE *f = fopen(path, "w");
-    if (!f)
-        LOG_FAIL("dev-activation", "manifest open %s: %s", path,
-                 strerror(errno));
     char e_commit[256], e_source_id[80], e_type[64], e_src[PATH_MAX];
     dev_activation_json_escape(build_commit, e_commit, sizeof(e_commit));
     dev_activation_json_escape(source_id_sha256, e_source_id,
@@ -72,59 +76,91 @@ static bool dev_write_manifest(const char *path, const char *generation,
     dev_activation_json_escape(source, e_src, sizeof(e_src));
     char now[32];
     dev_activation_iso_utc_now(now);
-    fprintf(f, "{\n");
-    fprintf(f, "  \"schema\": \"zcl.dev_binary_generation.v1\",\n");
-    fprintf(f, "  \"generation\": \"%s\",\n", generation);
-    fprintf(f, "  \"sha256\": \"%s\",\n", sha);
-    fprintf(f, "  \"source_id_sha256\": \"%s\",\n", e_source_id);
-    /* Optional GitHub trace metadata; never generation authority. */
-    fprintf(f, "  \"build_commit\": \"%s\",\n", e_commit);
-    fprintf(f, "  \"build_type\": \"%s\",\n", e_type);
-    fprintf(f, "  \"source_artifact\": \"%s\",\n", e_src);
-    fprintf(f, "  \"created_at_utc\": \"%s\"\n", now);
-    fprintf(f, "}\n");
-    if (fclose(f) != 0)
-        LOG_FAIL("dev-activation", "manifest fclose: %s", strerror(errno));
+    char wire[8192];
+    int n = snprintf(
+        wire, sizeof(wire),
+        "{\n"
+        "  \"schema\": \"zcl.dev_binary_generation.v1\",\n"
+        "  \"generation\": \"%s\",\n"
+        "  \"sha256\": \"%s\",\n"
+        "  \"source_id_sha256\": \"%s\",\n"
+        "  \"build_commit\": \"%s\",\n"
+        "  \"build_type\": \"%s\",\n"
+        "  \"source_artifact\": \"%s\",\n"
+        "  \"created_at_utc\": \"%s\"\n"
+        "}\n",
+        generation, sha, e_source_id, e_commit, e_type, e_src, now);
+    if (n <= 0 || (size_t)n >= sizeof(wire))
+        LOG_FAIL("dev-activation", "manifest overflow");
+    struct platform_private_file manifest;
+    platform_private_file_init(&manifest);
+    bool ok = platform_private_file_create(path, &manifest) &&
+              platform_private_file_write_at(&manifest, wire, (size_t)n, 0) &&
+              platform_private_file_truncate(&manifest, (uint64_t)n) &&
+              platform_private_file_flush(&manifest);
+    platform_private_file_close(&manifest);
+    if (!ok) {
+        (void)platform_private_file_unlink_missing_ok(path);
+        LOG_FAIL("dev-activation", "manifest durable write %s: %s", path,
+                 strerror(errno));
+    }
     return true;
 }
 
-/* Copy `src` into `dst` with mode `mode`. */
+static bool dev_stage_snapshot_equal(
+    const struct platform_positioned_file_snapshot *a,
+    const struct platform_positioned_file_snapshot *b)
+{
+    return a->size == b->size && a->volume == b->volume &&
+           a->file_low == b->file_low && a->file_high == b->file_high &&
+           a->modified_seconds == b->modified_seconds &&
+           a->modified_nanoseconds == b->modified_nanoseconds &&
+           a->changed_seconds == b->changed_seconds &&
+           a->changed_nanoseconds == b->changed_nanoseconds;
+}
+
+/* Copy one stable executable snapshot into a create-only private destination.
+ * The source and destination remain handle-bound throughout the transaction;
+ * pathname replacement cannot substitute bytes after validation. */
 bool dev_activation_install_file(const char *src, const char *dst, mode_t mode)
 {
-    int in = open(src, O_RDONLY | O_CLOEXEC);
-    if (in < 0)
+    struct platform_positioned_file in;
+    struct platform_positioned_file_snapshot before, after;
+    platform_positioned_file_init(&in);
+    if (!platform_positioned_file_open(&in, src) ||
+        !platform_positioned_file_snapshot(&in, &before) ||
+        !platform_positioned_file_is_executable(&in)) {
+        platform_positioned_file_close(&in);
         LOG_FAIL("dev-activation", "install open %s: %s", src, strerror(errno));
-    int out = open(dst, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, mode);
-    if (out < 0) {
-        close(in);
+    }
+    struct platform_private_file out;
+    platform_private_file_init(&out);
+    if (!platform_private_file_create(dst, &out)) {
+        platform_positioned_file_close(&in);
         LOG_FAIL("dev-activation", "install create %s: %s", dst,
                  strerror(errno));
     }
     char buf[65536];
-    ssize_t n;
     bool ok = true;
-    while ((n = read(in, buf, sizeof(buf))) > 0) {
-        ssize_t off = 0;
-        while (off < n) {
-            ssize_t w = write(out, buf + off, (size_t)(n - off));
-            if (w < 0) {
-                ok = false;
-                break;
-            }
-            off += w;
-        }
-        if (!ok)
-            break;
+    uint64_t offset = 0;
+    while (ok && offset < before.size) {
+        size_t chunk = before.size - offset > sizeof(buf)
+                           ? sizeof(buf) : (size_t)(before.size - offset);
+        int64_t got = platform_positioned_file_read(&in, buf, chunk, offset);
+        ok = got == (int64_t)chunk &&
+             platform_private_file_write_at(&out, buf, chunk, offset);
+        offset += chunk;
     }
-    if (n < 0)
-        ok = false;
-    close(in);
-    if (fchmod(out, mode) != 0)
-        ok = false;
-    if (close(out) != 0)
-        ok = false;
+    ok = ok && platform_positioned_file_snapshot(&in, &after) &&
+         dev_stage_snapshot_equal(&before, &after) &&
+         platform_private_file_truncate(&out, before.size) &&
+         platform_private_file_flush(&out) &&
+         platform_private_file_mark_executable(&out);
+    platform_positioned_file_close(&in);
+    platform_private_file_close(&out);
     if (!ok)
         LOG_FAIL("dev-activation", "install copy %s -> %s failed", src, dst);
+    (void)mode;
     return true;
 }
 
@@ -134,7 +170,13 @@ bool dev_activation_install_file(const char *src, const char *dst, mode_t mode)
 int dev_activation_stage_candidate(struct dev_activation_txn *txn)
 {
     struct dev_activation_result *r = txn->result;
-    if (access(txn->req->artifact_path, X_OK) != 0) {
+    struct platform_positioned_file artifact;
+    platform_positioned_file_init(&artifact);
+    bool artifact_executable =
+        platform_positioned_file_open(&artifact, txn->req->artifact_path) &&
+        platform_positioned_file_is_executable(&artifact);
+    platform_positioned_file_close(&artifact);
+    if (!artifact_executable) {
         fprintf(stderr, "[dev-activation] artifact missing/not executable: %s\n",
                 txn->req->artifact_path);
         return DEV_ACTIVATION_E_STAGE;
@@ -170,8 +212,9 @@ int dev_activation_stage_candidate(struct dev_activation_txn *txn)
         return DEV_ACTIVATION_E_STAGE;
     }
 
-    struct stat st;
-    if (stat(txn->candidate_dir, &st) == 0) {
+    enum platform_directory_probe_result candidate_probe =
+        platform_directory_probe_real(txn->candidate_dir);
+    if (candidate_probe == PLATFORM_DIRECTORY_PROBE_OK) {
         /* Immutable collision: an existing gen dir must carry the same sha. */
         char have[65];
         if (access(txn->candidate_bin, X_OK) != 0 ||
@@ -194,18 +237,36 @@ int dev_activation_stage_candidate(struct dev_activation_txn *txn)
         return DEV_ACTIVATION_OK; /* already staged, byte-identical */
     }
 
-    char tmpl[PATH_MAX];
-    n = snprintf(tmpl, sizeof(tmpl), "%s/.candidate.XXXXXX", txn->gen_root);
-    if (n <= 0 || (size_t)n >= sizeof(tmpl))
+    if (candidate_probe != PLATFORM_DIRECTORY_PROBE_MISSING)
         return DEV_ACTIVATION_E_STAGE;
-    char *tmpdir = mkdtemp(tmpl);
-    if (!tmpdir) {
+    char tmpl[PATH_MAX];
+    bool made_tmpdir = false;
+    for (unsigned int attempt = 0; attempt < 64 && !made_tmpdir; attempt++) {
+        uint64_t sequence = atomic_fetch_add_explicit(
+            &g_stage_directory_sequence, 1, memory_order_relaxed);
+        n = snprintf(tmpl, sizeof(tmpl), "%s/.candidate.%llu.%llu",
+                     txn->gen_root,
+                     (unsigned long long)os_proc_current_pid(),
+                     (unsigned long long)sequence);
+        if (n <= 0 || (size_t)n >= sizeof(tmpl))
+            break;
+        made_tmpdir = platform_private_directory_create(tmpl);
+        if (!made_tmpdir && errno != EEXIST)
+            break;
+    }
+    if (!made_tmpdir) {
         LOG_ERR("dev-activation", "candidate mkdtemp: %s", strerror(errno));
         return DEV_ACTIVATION_E_STAGE;
     }
+    const char *tmpdir = tmpl;
     char tmp_bin[PATH_MAX], tmp_manifest[PATH_MAX];
-    snprintf(tmp_bin, sizeof(tmp_bin), "%s/zclassic23-dev", tmpdir);
-    snprintf(tmp_manifest, sizeof(tmp_manifest), "%s/manifest.json", tmpdir);
+    if (!dev_activation_join(tmp_bin, sizeof(tmp_bin), tmpdir,
+                             "zclassic23-dev") ||
+        !dev_activation_join(tmp_manifest, sizeof(tmp_manifest), tmpdir,
+                             "manifest.json")) {
+        (void)platform_private_directory_remove_empty(tmpdir);
+        return DEV_ACTIVATION_E_STAGE;
+    }
     char copied_sha[65];
     if (!dev_activation_install_file(txn->req->artifact_path, tmp_bin, 0555) ||
         !dev_activation_sha256_file(tmp_bin, copied_sha) ||
@@ -214,23 +275,37 @@ int dev_activation_stage_candidate(struct dev_activation_txn *txn)
                             txn->candidate_sha_hex, txn->req->build_commit,
                             txn->req->source_identity,
                             txn->req->build_type, txn->req->artifact_path)) {
-        (void)unlink(tmp_bin);
-        (void)unlink(tmp_manifest);
-        (void)rmdir(tmpdir);
+        (void)platform_private_file_unlink_missing_ok(tmp_bin);
+        (void)platform_private_file_unlink_missing_ok(tmp_manifest);
+        (void)platform_private_directory_remove_empty(tmpdir);
         return DEV_ACTIVATION_E_STAGE;
     }
+#if !defined(_WIN32)
     (void)chmod(tmp_manifest, 0444);
-    (void)chmod(tmpdir, 0555);
-    if (rename(tmpdir, txn->candidate_dir) != 0) {
-        (void)chmod(tmpdir, 0755);
-        (void)unlink(tmp_bin);
-        (void)unlink(tmp_manifest);
-        (void)rmdir(tmpdir);
+#endif
+    bool published = platform_private_directory_publish_no_clobber(
+        tmpdir, txn->candidate_dir);
+    if (!published) {
+        (void)platform_private_file_unlink_missing_ok(tmp_bin);
+        (void)platform_private_file_unlink_missing_ok(tmp_manifest);
+        (void)platform_private_directory_remove_empty(tmpdir);
         if (access(txn->candidate_bin, X_OK) != 0) {
             LOG_ERR("dev-activation", "candidate rename lost the race: %s",
                     strerror(errno));
             return DEV_ACTIVATION_E_STAGE;
         }
+    }
+#if !defined(_WIN32)
+    if (published && chmod(txn->candidate_dir, 0555) != 0) {
+        LOG_ERR("dev-activation", "candidate chmod failed: %s",
+                strerror(errno));
+        return DEV_ACTIVATION_E_STAGE;
+    }
+#endif
+    if (!platform_private_parent_flush(txn->gen_root)) {
+        LOG_ERR("dev-activation", "generation parent flush failed: %s",
+                strerror(errno));
+        return DEV_ACTIVATION_E_STAGE;
     }
     char published_sha[65];
     if (!dev_activation_sha256_file(txn->candidate_bin, published_sha) ||
@@ -271,8 +346,7 @@ static bool dev_import_existing(struct dev_activation_txn *txn,
     char dir[PATH_MAX];
     if (!dev_activation_join(dir, sizeof(dir), txn->gen_root, generation))
         return false;
-    struct stat st;
-    if (stat(dir, &st) != 0) {
+    if (platform_directory_probe_real(dir) != PLATFORM_DIRECTORY_PROBE_OK) {
         fprintf(stderr,
                 "[dev-activation] refusing unbound legacy rollback binary: "
                 "%s\n", existing);
@@ -302,9 +376,13 @@ void dev_activation_ensure_rollback(struct dev_activation_txn *txn)
         (void)dev_activation_refresh_compat_link(txn);
         return;
     }
-    struct stat st;
-    if (lstat(txn->compat_bin, &st) == 0 && !S_ISLNK(st.st_mode) &&
-        access(txn->compat_bin, X_OK) == 0)
+    struct platform_positioned_file compat;
+    platform_positioned_file_init(&compat);
+    bool compat_executable =
+        platform_positioned_file_open(&compat, txn->compat_bin) &&
+        platform_positioned_file_is_executable(&compat);
+    platform_positioned_file_close(&compat);
+    if (compat_executable)
         (void)dev_import_existing(txn, txn->compat_bin);
     dev_activation_refresh_gen_state(txn);
 }

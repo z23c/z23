@@ -3,6 +3,123 @@
 
 #include "package_store_priv.h"
 
+#if defined(_WIN32)
+#include <string.h>
+
+struct vcs_package_possession_proof { int unavailable; };
+
+const char *vcs_package_possession_failure_string(
+    enum vcs_package_possession_failure failure)
+{
+    switch (failure) {
+    case VCS_PACKAGE_POSSESSION_NONE: return "none";
+    case VCS_PACKAGE_POSSESSION_UNTRACKED: return "untracked";
+    case VCS_PACKAGE_POSSESSION_INCOMPLETE: return "incomplete";
+    case VCS_PACKAGE_POSSESSION_UNPINNED: return "unpinned";
+    case VCS_PACKAGE_POSSESSION_MANIFEST: return "manifest-invalid";
+    case VCS_PACKAGE_POSSESSION_CHUNK_MISSING: return "chunk-missing";
+    case VCS_PACKAGE_POSSESSION_CHUNK_HASH: return "chunk-hash-mismatch";
+    case VCS_PACKAGE_POSSESSION_MUTATED: return "package-mutated";
+    case VCS_PACKAGE_POSSESSION_ALLOC: return "allocation-failed";
+    }
+    return "unknown";
+}
+
+static void windows_receipt_refused(
+    struct vcs_package_possession_receipt *receipt, uint64_t generation,
+    bool complete, bool pinned,
+    enum vcs_package_possession_failure failure)
+{
+    if (receipt) *receipt = (struct vcs_package_possession_receipt){
+        .mutation_generation = generation, .complete = complete,
+        .pinned = pinned, .failure = failure};
+}
+
+bool vcs_package_store_possession_snapshot(
+    struct vcs_package_store *store, const uint8_t package_root[32],
+    struct vcs_package_possession_receipt *out)
+{
+    if (!store || !package_root || !out) return false;
+    bool found = false;
+    pthread_mutex_lock(&store->lock);
+    for (size_t i = 0; i < store->pkg_count; i++) {
+        const struct store_package *package = &store->pkgs[i];
+        if (memcmp(package->root, package_root, 32) != 0) continue;
+        windows_receipt_refused(out, package->mutation_generation,
+                                package->committed, package->pinned,
+                                VCS_PACKAGE_POSSESSION_NONE);
+        found = true;
+        break;
+    }
+    pthread_mutex_unlock(&store->lock);
+    if (!found) windows_receipt_refused(out, 0, false, false,
+                                        VCS_PACKAGE_POSSESSION_UNTRACKED);
+    return found;
+}
+
+uint64_t vcs_package_store_mutation_epoch(struct vcs_package_store *store)
+{
+    if (!store) return 0;
+    pthread_mutex_lock(&store->lock);
+    uint64_t epoch = store->next_mutation_generation;
+    pthread_mutex_unlock(&store->lock);
+    return epoch;
+}
+
+struct vcs_package_possession_proof *vcs_package_store_possession_begin(
+    struct vcs_package_store *store, const uint8_t package_root[32],
+    bool require_pinned, struct vcs_package_possession_receipt *receipt)
+{
+    (void)store; (void)package_root; (void)require_pinned;
+    windows_receipt_refused(receipt, 0, false, false,
+                            VCS_PACKAGE_POSSESSION_CHUNK_MISSING);
+    return NULL;
+}
+
+enum vcs_package_possession_step vcs_package_store_possession_step(
+    struct vcs_package_possession_proof *proof, uint64_t byte_budget,
+    uint32_t chunk_budget, struct vcs_package_possession_receipt *receipt,
+    uint64_t *bytes_used)
+{
+    (void)proof; (void)byte_budget; (void)chunk_budget;
+    if (bytes_used) *bytes_used = 0;
+    windows_receipt_refused(receipt, 0, false, false,
+                            VCS_PACKAGE_POSSESSION_CHUNK_MISSING);
+    return VCS_PACKAGE_POSSESSION_FAILED;
+}
+
+void vcs_package_store_possession_free(
+    struct vcs_package_possession_proof *proof) { (void)proof; }
+
+void vcs_package_store_possession_apply_if_current(
+    struct vcs_package_store *store, const uint8_t package_root[32],
+    uint64_t successful_generation, bool require_pinned,
+    vcs_package_possession_apply_fn apply, void *context)
+{
+    (void)store; (void)package_root; (void)successful_generation;
+    (void)require_pinned;
+    if (apply) apply(context, false);
+}
+
+bool vcs_package_store_verify_possession_receipt(
+    struct vcs_package_store *store, const uint8_t package_root[32],
+    bool require_pinned, struct vcs_package_possession_receipt *receipt)
+{
+    (void)store; (void)package_root; (void)require_pinned;
+    windows_receipt_refused(receipt, 0, false, false,
+                            VCS_PACKAGE_POSSESSION_CHUNK_MISSING);
+    return false;
+}
+
+bool vcs_package_store_verify_possession(
+    struct vcs_package_store *store, const uint8_t package_root[32],
+    bool require_pinned)
+{
+    (void)store; (void)package_root; (void)require_pinned;
+    return false;
+}
+
+#else
 #include "base/hex.h"
 #include "base/safe_alloc.h"
 
@@ -144,8 +261,21 @@ static void proof_cas_path(const struct vcs_package_possession_proof *proof,
 {
     char hex[65];
     zcl_hex_encode(hash, 32, hex);
-    (void)snprintf(out, STORE_PATH_MAX, "%s/cas/sha3/%.2s/%s",
-                   proof->store_root, hex, hex);
+    static const char suffix[] = "/cas/sha3/";
+    size_t root_len = strlen(proof->store_root);
+    size_t suffix_len = sizeof(suffix) - 1u;
+    size_t need = root_len + suffix_len + 2u + 1u + 64u + 1u;
+    if (need > STORE_PATH_MAX) {
+        out[0] = '\0';
+        return;
+    }
+    memcpy(out, proof->store_root, root_len);
+    memcpy(out + root_len, suffix, suffix_len);
+    size_t offset = root_len + suffix_len;
+    memcpy(out + offset, hex, 2u);
+    offset += 2u;
+    out[offset++] = '/';
+    memcpy(out + offset, hex, 65u);
 }
 
 static bool read_exact(int descriptor, uint8_t *out, size_t length)
@@ -516,3 +646,4 @@ bool vcs_package_store_verify_possession(
     return vcs_package_store_verify_possession_receipt(
         store, package_root, require_pinned, NULL);
 }
+#endif

@@ -27,6 +27,22 @@ struct platform_positioned_file_snapshot {
     uint64_t file_high;
 };
 
+/* Compare defined metadata fields only. Structure padding is indeterminate
+ * and must never participate in an identity or stability decision. */
+static inline bool platform_positioned_file_snapshot_equal(
+    const struct platform_positioned_file_snapshot *left,
+    const struct platform_positioned_file_snapshot *right)
+{
+    return left && right && left->size == right->size &&
+           left->modified_seconds == right->modified_seconds &&
+           left->modified_nanoseconds == right->modified_nanoseconds &&
+           left->changed_seconds == right->changed_seconds &&
+           left->changed_nanoseconds == right->changed_nanoseconds &&
+           left->volume == right->volume &&
+           left->file_low == right->file_low &&
+           left->file_high == right->file_high;
+}
+
 void platform_positioned_file_init(struct platform_positioned_file *file);
 bool platform_positioned_file_open(struct platform_positioned_file *file,
                                    const char *utf8_path);
@@ -52,6 +68,11 @@ bool platform_positioned_file_is_executable(
 /* True only when the opened file is private to the current user (plus SYSTEM
  * on Windows), matching POSIX mode 0600 policy files. */
 bool platform_positioned_file_is_private(
+    const struct platform_positioned_file *file);
+/* True when only the current user (plus SYSTEM on Windows) can access the
+ * file. POSIX owner permission bits may be read-only, as with service-manager
+ * credentials, but group/other permissions are forbidden. */
+bool platform_positioned_file_is_current_user_only(
     const struct platform_positioned_file *file);
 
 /* Return bytes read (zero at EOF), or -1 on invalid input/I/O failure.  A

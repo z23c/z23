@@ -27,6 +27,11 @@ enum platform_directory_probe_result {
 enum platform_directory_probe_result platform_directory_probe_real(
     const char *path);
 
+/* Resolve an existing real directory to a canonical UTF-8 absolute path.
+ * Windows rejects reparse points at every traversed component. */
+bool platform_directory_canonical_real(const char *path, char *out,
+                                       size_t out_size);
+
 int platform_directory_create(const char *path, int mode);
 
 /* Create path if absent and prove the resulting object is a real directory.

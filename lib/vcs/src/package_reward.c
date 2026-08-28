@@ -23,19 +23,26 @@
 
 #include "crypto/sha3.h"
 #include "base/hex.h"
+#include "platform/directory_compat.h"
+#include "platform/os_proc.h"
+#include "platform/positioned_file.h"
+#include "platform/private_directory.h"
+#include "platform/private_file.h"
+#include "package_directory.h"
+#include "package_file_io.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 #include "vcs/package_score.h"
 
-#include <dirent.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 #define REWARD_LOG "vcs.reward"
 
@@ -70,12 +77,6 @@ const uint8_t *vcs_reward_placeholder_token_id(void)
 void vcs_reward_placeholder_token_id_hex(char out[65])
 {
     zcl_hex_encode(vcs_reward_placeholder_token_id(), 32, out);
-}
-
-static bool reward_name_is_hex64(const char *name)
-{
-    uint8_t scratch[32];
-    return zcl_hex_decode_lower(name, scratch, 32);
 }
 
 /* ── strings + bands ────────────────────────────────────────────────── */
@@ -205,6 +206,9 @@ static int64_t reward_get_i64le(const uint8_t *p)
 
 static bool reward_mkdir_p(const char *path)
 {
+#if defined(_WIN32)
+    return platform_private_directory_ensure(path);
+#else
     char buf[4400];
     size_t len = strlen(path);
     if (len == 0 || len >= sizeof(buf))
@@ -219,6 +223,7 @@ static bool reward_mkdir_p(const char *path)
         *p = '/';
     }
     return mkdir(buf, 0700) == 0 || errno == EEXIST;
+#endif
 }
 
 /* Durable write: temp sibling + fsync + atomic rename. A crash leaves
@@ -229,38 +234,22 @@ static bool reward_atomic_write(const char *path, const uint8_t *data,
     static _Atomic uint64_t g_seq = 0;
     uint64_t seq = atomic_fetch_add(&g_seq, 1);
     char tmp[4400];
-    int tn = snprintf(tmp, sizeof(tmp), "%s.tmp.%ld.%llu", path,
-                      (long)getpid(), (unsigned long long)seq);
+    int tn = snprintf(tmp, sizeof(tmp), "%s.tmp.%llu.%llu", path,
+                      (unsigned long long)os_proc_current_pid(),
+                      (unsigned long long)seq);
     if (tn <= 0 || (size_t)tn >= sizeof(tmp))
         LOG_FAIL(REWARD_LOG, "temp path too long for %s", path);
-    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-    if (fd < 0)
-        LOG_FAIL(REWARD_LOG, "open temp %s: %s", tmp, strerror(errno));
-    size_t off = 0;
-    while (off < data_len) {
-        ssize_t w = write(fd, data + off, data_len - off);
-        if (w < 0) {
-            if (errno == EINTR)
-                continue;
-            close(fd);
-            unlink(tmp);
-            LOG_FAIL(REWARD_LOG, "write temp %s: %s", tmp, strerror(errno));
-        }
-        off += (size_t)w;
-    }
-    if (fsync(fd) != 0) {
-        close(fd);
-        unlink(tmp);
-        LOG_FAIL(REWARD_LOG, "fsync temp %s: %s", tmp, strerror(errno));
-    }
-    if (close(fd) != 0) {
-        unlink(tmp);
-        LOG_FAIL(REWARD_LOG, "close temp %s: %s", tmp, strerror(errno));
-    }
-    if (rename(tmp, path) != 0) {
-        unlink(tmp);
-        LOG_FAIL(REWARD_LOG, "rename %s -> %s: %s", tmp, path,
-                 strerror(errno));
+    struct platform_private_file file;
+    platform_private_file_init(&file);
+    bool ok = platform_private_file_create(tmp, &file) &&
+              platform_private_file_write_at(&file, data, data_len, 0) &&
+              platform_private_file_truncate(&file, data_len) &&
+              platform_private_file_flush(&file) &&
+              platform_private_file_replace(&file, tmp, path);
+    if (!ok) {
+        platform_private_file_close(&file);
+        (void)platform_private_file_unlink_missing_ok(tmp);
+        LOG_FAIL(REWARD_LOG, "durable replace %s -> %s failed", tmp, path);
     }
     return true;
 }
@@ -271,26 +260,30 @@ static uint8_t *reward_read_file(const char *path, size_t cap,
                                  size_t *out_len)
 {
     *out_len = 0;
-    struct stat st;
-    if (stat(path, &st) != 0)
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path) ||
+        !platform_positioned_file_snapshot(&file, &before)) {
+        platform_positioned_file_close(&file);
         return NULL;
-    if (st.st_size <= 0 || (uint64_t)st.st_size > cap)
+    }
+    if (before.size == 0 || before.size > cap) {
+        platform_positioned_file_close(&file);
         return NULL;
-    size_t len = (size_t)st.st_size;
+    }
+    size_t len = (size_t)before.size;
     uint8_t *buf = zcl_malloc(len, "reward_read_file");
     if (!buf)
         LOG_NULL(REWARD_LOG, "alloc %zu for %s", len, path);
-    FILE *f = fopen(path, "rb");
-    if (!f) {
+    if (platform_positioned_file_read(&file, buf, len, 0) != (int64_t)len ||
+        !platform_positioned_file_snapshot(&file, &after) ||
+        !vcs_package_file_snapshot_equal(&before, &after)) {
+        platform_positioned_file_close(&file);
         free(buf);
         return NULL;
     }
-    if (fread(buf, 1, len, f) != len) {
-        fclose(f);
-        free(buf);
-        return NULL;
-    }
-    fclose(f);
+    platform_positioned_file_close(&file);
     *out_len = len;
     return buf;
 }
@@ -791,19 +784,19 @@ static struct vcs_reward_loaded_plan *reward_plan_slot(
 static void reward_load_queue_dir(struct vcs_reward_ledger *l,
                                   const char *dir)
 {
-    DIR *d = opendir(dir);
-    if (!d)
+    struct vcs_package_directory d;
+    if (!vcs_package_directory_open(&d, dir))
         return;
-    struct dirent *ent;
-    while ((ent = readdir(d)) != NULL) {
-        if (!reward_name_is_hex64(ent->d_name))
+    const char *name;
+    while ((name = vcs_package_directory_next(&d)) != NULL) {
+        if (!vcs_package_name_is_hex64(name))
             continue;
         if (l->entry_count >= VCS_REWARD_MAX_QUEUE_ENTRIES) {
             l->truncated = true;
             break;
         }
         char path[4400];
-        int n = snprintf(path, sizeof(path), "%s/%s", dir, ent->d_name);
+        int n = snprintf(path, sizeof(path), "%s/%s", dir, name);
         if (n <= 0 || (size_t)n >= sizeof(path))
             continue;
         size_t wire_len = 0;
@@ -823,10 +816,10 @@ static void reward_load_queue_dir(struct vcs_reward_ledger *l,
         reward_entry_id(&e, e.entry_id);
         char id_hex[65];
         zcl_hex_encode(e.entry_id, 32, id_hex);
-        if (strcmp(id_hex, ent->d_name) != 0) {
+        if (strcmp(id_hex, name) != 0) {
             /* The name must commit the content (rehash-on-read). */
             LOG_ERROR(REWARD_LOG, "queue wire %s commits a different id",
-                      ent->d_name);
+                      name);
             l->corrupt++;
             continue;
         }
@@ -840,24 +833,24 @@ static void reward_load_queue_dir(struct vcs_reward_ledger *l,
         if (inserted)
             *slot = e;
     }
-    closedir(d);
+    vcs_package_directory_close(&d);
 }
 
 static void reward_load_fact_dir(struct vcs_reward_ledger *l, const char *dir)
 {
-    DIR *d = opendir(dir);
-    if (!d)
+    struct vcs_package_directory d;
+    if (!vcs_package_directory_open(&d, dir))
         return;
-    struct dirent *ent;
-    while ((ent = readdir(d)) != NULL) {
-        if (!reward_name_is_hex64(ent->d_name))
+    const char *name;
+    while ((name = vcs_package_directory_next(&d)) != NULL) {
+        if (!vcs_package_name_is_hex64(name))
             continue;
         if (l->fact_count >= VCS_REWARD_MAX_FACTS) {
             l->truncated = true;
             break;
         }
         char path[4400];
-        int n = snprintf(path, sizeof(path), "%s/%s", dir, ent->d_name);
+        int n = snprintf(path, sizeof(path), "%s/%s", dir, name);
         if (n <= 0 || (size_t)n >= sizeof(path))
             continue;
         size_t wire_len = 0;
@@ -876,9 +869,9 @@ static void reward_load_fact_dir(struct vcs_reward_ledger *l, const char *dir)
         }
         char id_hex[65];
         zcl_hex_encode(f.entry_id, 32, id_hex);
-        if (strcmp(id_hex, ent->d_name) != 0) {
+        if (strcmp(id_hex, name) != 0) {
             LOG_ERROR(REWARD_LOG, "fact wire %s names a different entry",
-                      ent->d_name);
+                      name);
             l->corrupt++;
             continue;
         }
@@ -897,24 +890,24 @@ static void reward_load_fact_dir(struct vcs_reward_ledger *l, const char *dir)
         }
         l->facts[l->fact_count - 1] = f;
     }
-    closedir(d);
+    vcs_package_directory_close(&d);
 }
 
 static void reward_load_plan_dir(struct vcs_reward_ledger *l, const char *dir)
 {
-    DIR *d = opendir(dir);
-    if (!d)
+    struct vcs_package_directory d;
+    if (!vcs_package_directory_open(&d, dir))
         return;
-    struct dirent *ent;
-    while ((ent = readdir(d)) != NULL) {
-        if (!reward_name_is_hex64(ent->d_name))
+    const char *name;
+    while ((name = vcs_package_directory_next(&d)) != NULL) {
+        if (!vcs_package_name_is_hex64(name))
             continue;
         if (l->plan_count >= VCS_REWARD_MAX_PLANS) {
             l->truncated = true;
             break;
         }
         char path[4400];
-        int n = snprintf(path, sizeof(path), "%s/%s", dir, ent->d_name);
+        int n = snprintf(path, sizeof(path), "%s/%s", dir, name);
         if (n <= 0 || (size_t)n >= sizeof(path))
             continue;
         size_t wire_len = 0;
@@ -934,9 +927,9 @@ static void reward_load_plan_dir(struct vcs_reward_ledger *l, const char *dir)
         reward_plan_id(plan.day, plan.rows, plan.row_count, plan.plan_id);
         char id_hex[65];
         zcl_hex_encode(plan.plan_id, 32, id_hex);
-        if (strcmp(id_hex, ent->d_name) != 0) {
+        if (strcmp(id_hex, name) != 0) {
             LOG_ERROR(REWARD_LOG, "plan wire %s commits a different id",
-                      ent->d_name);
+                      name);
             l->corrupt++;
             vcs_reward_plan_free(&plan);
             continue;
@@ -970,19 +963,19 @@ static void reward_load_plan_dir(struct vcs_reward_ledger *l, const char *dir)
         }
         vcs_reward_plan_free(&plan);
     }
-    closedir(d);
+    vcs_package_directory_close(&d);
 }
 
 static void reward_load_commit_dir(struct vcs_reward_ledger *l,
                                    const char *dir)
 {
-    DIR *d = opendir(dir);
-    if (!d)
+    struct vcs_package_directory d;
+    if (!vcs_package_directory_open(&d, dir))
         return;
-    struct dirent *ent;
-    while ((ent = readdir(d)) != NULL) {
+    const char *name;
+    while ((name = vcs_package_directory_next(&d)) != NULL) {
         uint8_t id[32];
-        if (!zcl_hex_decode_lower(ent->d_name, id, 32))
+        if (!zcl_hex_decode_lower(name, id, 32))
             continue;
         if (l->commit_count >= VCS_REWARD_MAX_COMMITS) {
             l->truncated = true;
@@ -991,7 +984,7 @@ static void reward_load_commit_dir(struct vcs_reward_ledger *l,
         /* A commit record that does not parse is NOT treated as settled:
          * the safe direction is to allow a resumable re-commit. */
         char path[4400];
-        int n = snprintf(path, sizeof(path), "%s/%s", dir, ent->d_name);
+        int n = snprintf(path, sizeof(path), "%s/%s", dir, name);
         if (n <= 0 || (size_t)n >= sizeof(path))
             continue;
         size_t wire_len = 0;
@@ -1014,14 +1007,14 @@ static void reward_load_commit_dir(struct vcs_reward_ledger *l,
         free(wire);
         if (!ok) {
             LOG_ERROR(REWARD_LOG, "commit record %s does not parse",
-                      ent->d_name);
+                      name);
             l->corrupt++;
             continue;
         }
         if (!reward_commit_register(l, id))
             l->corrupt++;
     }
-    closedir(d);
+    vcs_package_directory_close(&d);
 }
 
 struct vcs_reward_ledger *vcs_reward_ledger_load(const char *zcode_dir)
@@ -1040,13 +1033,13 @@ struct vcs_reward_ledger *vcs_reward_ledger_load(const char *zcode_dir)
         return NULL;
     }
     char dir[4400];
-    snprintf(dir, sizeof(dir), "%s/queue", l->root);
+    if (!vcs_package_child_path(dir, sizeof(dir), l->root, "queue")) goto bad_path;
     reward_load_queue_dir(l, dir);
-    snprintf(dir, sizeof(dir), "%s/ledger", l->root);
+    if (!vcs_package_child_path(dir, sizeof(dir), l->root, "ledger")) goto bad_path;
     reward_load_fact_dir(l, dir);
-    snprintf(dir, sizeof(dir), "%s/commits", l->root);
+    if (!vcs_package_child_path(dir, sizeof(dir), l->root, "commits")) goto bad_path;
     reward_load_commit_dir(l, dir);
-    snprintf(dir, sizeof(dir), "%s/plans", l->root);
+    if (!vcs_package_child_path(dir, sizeof(dir), l->root, "plans")) goto bad_path;
     reward_load_plan_dir(l, dir);
 
     /* Mark committed plans and derive PLANNED entry states: an entry
@@ -1067,6 +1060,9 @@ struct vcs_reward_ledger *vcs_reward_ledger_load(const char *zcode_dir)
         }
     }
     return l;
+bad_path:
+    vcs_reward_ledger_free(l);
+    return NULL;
 }
 
 void vcs_reward_ledger_free(struct vcs_reward_ledger *l)
@@ -1185,7 +1181,8 @@ static enum vcs_reward_enqueue_error reward_enqueue_finish(
         return VCS_REWARD_ENQUEUE_FULL;
 
     char dir[4400];
-    snprintf(dir, sizeof(dir), "%s/queue", l->root);
+    if (!vcs_package_child_path(dir, sizeof(dir), l->root, "queue"))
+        return VCS_REWARD_ENQUEUE_IO;
     if (!reward_mkdir_p(dir)) {
         LOG_ERROR(REWARD_LOG, "mkdir %s: %s", dir, strerror(errno));
         return VCS_REWARD_ENQUEUE_IO;
@@ -1506,7 +1503,8 @@ enum vcs_reward_plan_persist_error vcs_reward_plan_persist(
         return VCS_REWARD_PLAN_PERSIST_IO;
 
     char dir[4400];
-    snprintf(dir, sizeof(dir), "%s/plans", l->root);
+    if (!vcs_package_child_path(dir, sizeof(dir), l->root, "plans"))
+        return VCS_REWARD_PLAN_PERSIST_IO;
     if (!reward_mkdir_p(dir)) {
         LOG_ERROR(REWARD_LOG, "mkdir %s: %s", dir, strerror(errno));
         return VCS_REWARD_PLAN_PERSIST_IO;
@@ -1519,8 +1517,7 @@ enum vcs_reward_plan_persist_error vcs_reward_plan_persist(
         LOG_ERROR(REWARD_LOG, "plan path too long");
         return VCS_REWARD_PLAN_PERSIST_IO;
     }
-    struct stat st;
-    if (stat(path, &st) == 0)
+    if (vcs_package_file_exists(path))
         return VCS_REWARD_PLAN_PERSIST_DUPLICATE;
     if (l->plan_count >= VCS_REWARD_MAX_PLANS)
         return VCS_REWARD_PLAN_PERSIST_FULL;
@@ -1639,7 +1636,8 @@ static bool reward_fact_write(const struct vcs_reward_ledger *l,
                               const struct vcs_reward_fact *f)
 {
     char dir[4400];
-    snprintf(dir, sizeof(dir), "%s/ledger", l->root);
+    if (!vcs_package_child_path(dir, sizeof(dir), l->root, "ledger"))
+        LOG_FAIL(REWARD_LOG, "ledger path too long");
     if (!reward_mkdir_p(dir))
         LOG_FAIL(REWARD_LOG, "mkdir %s: %s", dir, strerror(errno));
     char id_hex[65];
@@ -1648,8 +1646,7 @@ static bool reward_fact_write(const struct vcs_reward_ledger *l,
     int n = snprintf(path, sizeof(path), "%s/%s", dir, id_hex);
     if (n <= 0 || (size_t)n >= sizeof(path))
         LOG_FAIL(REWARD_LOG, "fact path too long");
-    struct stat st;
-    if (stat(path, &st) == 0)
+    if (vcs_package_file_exists(path))
         return true; /* dedup: the identical fact is already durable */
     uint8_t wire[REWARD_FACT_WIRE_BYTES];
     reward_fact_wire_encode(f, wire);
@@ -1661,7 +1658,8 @@ static bool reward_commit_record_write(const struct vcs_reward_ledger *l,
                                        const bool *rejected)
 {
     char dir[4400];
-    snprintf(dir, sizeof(dir), "%s/commits", l->root);
+    if (!vcs_package_child_path(dir, sizeof(dir), l->root, "commits"))
+        LOG_FAIL(REWARD_LOG, "commits path too long");
     if (!reward_mkdir_p(dir))
         LOG_FAIL(REWARD_LOG, "mkdir %s: %s", dir, strerror(errno));
     uint32_t rows = plan->planned_count;

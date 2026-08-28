@@ -13,7 +13,7 @@
 
 #include <stdbool.h>
 
-/* Apply background QoS to the CALLING thread:
+/* Apply background QoS to the CALLING thread. On Linux:
  *   - CPU: SCHED_BATCH scheduling class (sched_setscheduler). The kernel
  *     treats the thread as CPU-bound/non-interactive — it is still fully
  *     scheduled (no starvation, unlike SCHED_IDLE), it just yields to
@@ -22,7 +22,10 @@
  *     wrapper exists, so the syscall is hand-rolled). The thread only gets
  *     disk I/O when no other process wants the device.
  *
- * Fail-soft: a denied syscall is logged via LOG_WARN and the thread keeps
+ * On Windows, the calling thread is assigned the idempotent advisory
+ * THREAD_PRIORITY_BELOW_NORMAL priority; process priority is unchanged.
+ *
+ * Fail-soft: a denied OS call is logged via LOG_WARN and the thread keeps
  * running at its inherited priority — this is best-effort armor, not a
  * precondition. The return value reports whether BOTH knobs were applied;
  * callers are not required to check it. Idempotent — safe to call more

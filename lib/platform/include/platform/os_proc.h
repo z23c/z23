@@ -107,6 +107,11 @@ int64_t os_proc_uptime_seconds(void);
  * themselves. */
 bool os_proc_exe_path(char *buf, size_t n);
 
+/* Resolve the executable image of a live process. Windows holds a process
+ * HANDLE while querying its UTF-16 image path, avoiding PID/path races during
+ * the query. POSIX uses the platform's process-image authority. */
+bool os_proc_pid_exe_path(uint64_t pid, char *buf, size_t n);
+
 /* Open the exact executable image for reading. Linux holds the running inode
  * via /proc/self/exe. Platforms without an identity-bound running-image
  * primitive fail with ENOTSUP. Caller owns a successful FILE*. */

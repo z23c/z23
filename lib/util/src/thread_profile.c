@@ -13,12 +13,20 @@
 #include "util/safe_alloc.h"
 #include "platform/time_compat.h"
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <tlhelp32.h>
+#else
 #include <ctype.h>
 #include <dirent.h>
+#include <unistd.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 struct tp_entry {
     long     tid;
@@ -27,7 +35,74 @@ struct tp_entry {
     bool     found2;
     char     name[32];    /* thread comm */
     char     wchan[48];   /* current kernel wait channel */
+#if defined(_WIN32)
+    HANDLE   handle;      /* retained so a recycled tid cannot change identity */
+#endif
 };
+
+#if defined(_WIN32)
+static uint64_t tp_filetime_ticks(const FILETIME *time)
+{
+    return ((uint64_t)time->dwHighDateTime << 32) | time->dwLowDateTime;
+}
+
+static bool tp_read_handle_ticks(HANDLE thread, uint64_t *out)
+{
+    FILETIME created, exited, kernel, user;
+    if (!thread || !GetThreadTimes(thread, &created, &exited, &kernel, &user))
+        return false;
+    *out = tp_filetime_ticks(&kernel) + tp_filetime_ticks(&user);
+    return true;
+}
+
+static int tp_collect_sample1(struct tp_entry *e, int cap)
+{
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return -1;
+    THREADENTRY32 entry = { .dwSize = sizeof(entry) };
+    DWORD process = GetCurrentProcessId();
+    int n = 0;
+    if (Thread32First(snapshot, &entry)) {
+        do {
+            if (entry.th32OwnerProcessID != process || n >= cap) continue;
+            HANDLE thread = OpenThread(THREAD_QUERY_LIMITED_INFORMATION,
+                                       FALSE, entry.th32ThreadID);
+            uint64_t ticks = 0;
+            if (!thread || !tp_read_handle_ticks(thread, &ticks)) {
+                if (thread) CloseHandle(thread);
+                continue;
+            }
+            e[n].tid = (long)entry.th32ThreadID;
+            e[n].ticks1 = ticks;
+            e[n].ticks2 = ticks;
+            e[n].found2 = false;
+            e[n].handle = thread;
+            snprintf(e[n].name, sizeof(e[n].name), "tid-%lu",
+                     (unsigned long)entry.th32ThreadID);
+            snprintf(e[n].wchan, sizeof(e[n].wchan), "-");
+            n++;
+        } while (Thread32Next(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+    return n;
+}
+
+static void tp_collect_sample2(struct tp_entry *e, int n)
+{
+    for (int i = 0; i < n; i++) {
+        uint64_t ticks = 0;
+        e[i].found2 = tp_read_handle_ticks(e[i].handle, &ticks);
+        if (e[i].found2) e[i].ticks2 = ticks;
+    }
+}
+
+static void tp_entries_close(struct tp_entry *e, int n)
+{
+    for (int i = 0; i < n; i++)
+        if (e[i].handle) CloseHandle(e[i].handle);
+}
+
+#else
 
 /* Read up to cap-1 bytes of `path` into `buf`, NUL-terminated. Returns bytes
  * read (0 on any failure — a racing thread whose file vanished is not fatal). */
@@ -144,6 +219,13 @@ static void tp_collect_sample2(struct tp_entry *e, int n)
     }
 }
 
+static void tp_entries_close(struct tp_entry *e, int n)
+{
+    (void)e;
+    (void)n;
+}
+#endif
+
 static int tp_cmp_desc(const void *a, const void *b)
 {
     const struct tp_entry *x = a, *y = b;
@@ -171,8 +253,13 @@ bool thread_profile_sample(const struct thread_profile_opts *opts,
         zcl_malloc(sizeof(*e) * THREAD_PROFILE_MAX, "thread_profile.entries");
     if (!e) return false;
 
+#if defined(_WIN32)
+    /* GetThreadTimes is expressed in 100-nanosecond units. */
+    int64_t clk_tck = INT64_C(10000000);
+#else
     int64_t clk_tck = sysconf(_SC_CLK_TCK);
     if (clk_tck <= 0) clk_tck = 100;
+#endif
 
     int64_t t0 = platform_time_monotonic_us();
     int n = tp_collect_sample1(e, THREAD_PROFILE_MAX);
@@ -262,6 +349,7 @@ bool thread_profile_sample(const struct thread_profile_opts *opts,
     json_push_kv(out, "threads", &threads);
     json_free(&threads);
 
+    tp_entries_close(e, n);
     free(e);
     return true;
 }

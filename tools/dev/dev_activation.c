@@ -9,7 +9,9 @@
  * systemctl/proc ops) is further confined to ZCL_DEV_BUILD.
  */
 
+#if !defined(_WIN32)
 #define _GNU_SOURCE
+#endif
 
 #include "dev_activation.h"
 #include "dev_activation_internal.h"
@@ -18,12 +20,17 @@
 
 #include "crypto/sha256.h"
 #include "platform/time_compat.h"
+#include "platform/os_proc.h"
+#include "platform/positioned_file.h"
+#include "platform/private_directory.h"
+#include "platform/private_file.h"
 #include "storage/boot_auto_reindex.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
-#include <dirent.h>
 #include <errno.h>
+#if !defined(_WIN32)
+#include <dirent.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,6 +39,7 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#endif
 
 /* ── small utilities ─────────────────────────────────────────────────── */
 
@@ -45,6 +53,9 @@ bool dev_activation_join(char *out, size_t out_sz, const char *a, const char *b)
 
 bool dev_activation_mkdir_p(const char *path)
 {
+#if defined(_WIN32)
+    return platform_private_directory_ensure(path);
+#else
     char tmp[PATH_MAX];
     size_t len = strlen(path);
     if (len == 0 || len >= sizeof(tmp))
@@ -61,13 +72,18 @@ bool dev_activation_mkdir_p(const char *path)
     if (mkdir(tmp, 0755) != 0 && errno != EEXIST)
         LOG_FAIL("dev-activation", "mkdir %s: %s", tmp, strerror(errno));
     return true;
+#endif
 }
 
 void dev_activation_iso_utc_now(char out[32])
 {
     time_t t = platform_time_wall_time_t();
     struct tm tmv;
+#if defined(_WIN32)
+    if (gmtime_s(&tmv, &t) == 0)
+#else
     if (gmtime_r(&t, &tmv))
+#endif
         strftime(out, 32, "%Y-%m-%dT%H:%M:%SZ", &tmv);
     else
         snprintf(out, 32, "1970-01-01T00:00:00Z");
@@ -110,18 +126,37 @@ void dev_activation_hex32(const uint8_t in[32], char out[65])
 
 bool dev_activation_sha256_file(const char *path, char out[65])
 {
-    FILE *f = fopen(path, "rb");
-    if (!f)
-        LOG_FAIL("dev-activation", "sha256 open %s: %s", path, strerror(errno));
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path) ||
+        !platform_positioned_file_snapshot(&file, &before)) {
+        platform_positioned_file_close(&file);
+        LOG_FAIL("dev-activation", "sha256 open %s failed", path);
+    }
     struct sha256_ctx ctx;
     sha256_init(&ctx);
     unsigned char buf[65536];
-    size_t n;
-    while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
-        sha256_write(&ctx, buf, n);
-    bool io_err = ferror(f) != 0;
-    fclose(f);
-    if (io_err)
+    uint64_t offset = 0;
+    bool ok = true;
+    while (offset < before.size) {
+        size_t want = before.size - offset > sizeof(buf) ? sizeof(buf) :
+                      (size_t)(before.size - offset);
+        int64_t got = platform_positioned_file_read(&file, buf, want, offset);
+        if (got <= 0) { ok = false; break; }
+        sha256_write(&ctx, buf, (size_t)got);
+        offset += (uint64_t)got;
+    }
+    ok = ok && platform_positioned_file_snapshot(&file, &after) &&
+         before.size == after.size && before.volume == after.volume &&
+         before.file_low == after.file_low &&
+         before.file_high == after.file_high &&
+         before.modified_seconds == after.modified_seconds &&
+         before.modified_nanoseconds == after.modified_nanoseconds &&
+         before.changed_seconds == after.changed_seconds &&
+         before.changed_nanoseconds == after.changed_nanoseconds;
+    platform_positioned_file_close(&file);
+    if (!ok)
         LOG_FAIL("dev-activation", "sha256 read %s failed", path);
     unsigned char digest[32];
     sha256_finalize(&ctx, digest);
@@ -131,8 +166,15 @@ bool dev_activation_sha256_file(const char *path, char out[65])
 
 bool dev_activation_canon(const char *in, char *out, size_t out_sz)
 {
+#if defined(_WIN32)
+    if (!in || !((in[0] >= 'A' && in[0] <= 'Z') ||
+                 (in[0] >= 'a' && in[0] <= 'z')) ||
+        in[1] != ':' || (in[2] != '/' && in[2] != '\\'))
+        LOG_FAIL("dev-activation", "canon requires an absolute drive path");
+#else
     if (!in || in[0] != '/')
         LOG_FAIL("dev-activation", "canon requires an absolute path");
+#endif
     char *stack[256];
     size_t depth = 0;
     char work[PATH_MAX];
@@ -140,7 +182,16 @@ bool dev_activation_canon(const char *in, char *out, size_t out_sz)
     if (len >= sizeof(work))
         LOG_FAIL("dev-activation", "canon path too long");
     memcpy(work, in, len + 1);
-    for (char *tok = strtok(work, "/"); tok; tok = strtok(NULL, "/")) {
+#if defined(_WIN32)
+    for (size_t i = 0; i < len; i++)
+        if (work[i] == '\\') work[i] = '/';
+    char drive = work[0] >= 'a' && work[0] <= 'z'
+        ? (char)(work[0] - 'a' + 'A') : work[0];
+    char *token_input = work + 3;
+#else
+    char *token_input = work;
+#endif
+    for (char *tok = strtok(token_input, "/"); tok; tok = strtok(NULL, "/")) {
         if (strcmp(tok, ".") == 0)
             continue;
         if (strcmp(tok, "..") == 0) {
@@ -153,12 +204,22 @@ bool dev_activation_canon(const char *in, char *out, size_t out_sz)
         stack[depth++] = tok;
     }
     size_t o = 0;
+#if defined(_WIN32)
+    int prefix = snprintf(out, out_sz, "%c:/", drive);
+    if (prefix != 3) return false;
+    o = 2;
+#endif
     if (depth == 0) {
+#if defined(_WIN32)
+        out[3] = 0;
+        return true;
+#else
         if (out_sz < 2)
             LOG_FAIL("dev-activation", "canon out overflow");
         out[0] = '/';
         out[1] = 0;
         return true;
+#endif
     }
     for (size_t i = 0; i < depth; i++) {
         int n = snprintf(out + o, out_sz - o, "/%s", stack[i]);
@@ -191,9 +252,41 @@ static bool dev_valid_generation_id(const char *g)
     return hex[0] != 0;
 }
 
+bool dev_activation_json_first_string(const char *blob, const char *key,
+                                      char *out, size_t out_sz);
+
 bool dev_activation_read_gen_link(const struct dev_activation_txn *txn,
                                   const char *link, char *out, size_t out_sz)
 {
+#if defined(_WIN32)
+    struct platform_positioned_file file;
+    platform_positioned_file_init(&file);
+    uint64_t size = 0;
+    char blob[256];
+    if (!platform_positioned_file_open(&file, link) ||
+        !platform_positioned_file_size(&file, &size) || size == 0 ||
+        size >= sizeof(blob) ||
+        platform_positioned_file_read(&file, blob, (size_t)size, 0) !=
+            (int64_t)size) {
+        platform_positioned_file_close(&file);
+        return false;
+    }
+    platform_positioned_file_close(&file);
+    blob[size] = 0;
+    if (!dev_activation_json_first_string(blob, "generation", out, out_sz) ||
+        !dev_valid_generation_id(out))
+        return false;
+    char full[PATH_MAX];
+    int m = snprintf(full, sizeof(full), "%s/%s/zclassic23-dev.exe",
+                     txn->gen_root, out);
+    struct platform_positioned_file binary;
+    platform_positioned_file_init(&binary);
+    bool ok = m > 0 && (size_t)m < sizeof(full) &&
+              platform_positioned_file_open(&binary, full) &&
+              platform_positioned_file_is_executable(&binary);
+    platform_positioned_file_close(&binary);
+    return ok;
+#else
     char target[PATH_MAX];
     ssize_t n = readlink(link, target, sizeof(target) - 1);
     if (n <= 0)
@@ -212,6 +305,7 @@ bool dev_activation_read_gen_link(const struct dev_activation_txn *txn,
     if (n <= 0 || (size_t)n >= out_sz)
         return false;
     return true;
+#endif
 }
 
 void dev_activation_refresh_gen_state(struct dev_activation_txn *txn)
@@ -232,19 +326,53 @@ bool dev_activation_link_generation(const struct dev_activation_txn *txn,
     if (!dev_valid_generation_id(generation))
         LOG_FAIL("dev-activation", "invalid generation id: %s", generation);
     char bin[PATH_MAX];
-    int m = snprintf(bin, sizeof(bin), "%s/%s/zclassic23-dev",
+    int m = snprintf(bin, sizeof(bin),
+#if defined(_WIN32)
+                     "%s/%s/zclassic23-dev.exe",
+#else
+                     "%s/%s/zclassic23-dev",
+#endif
                      txn->gen_root, generation);
     if (m <= 0 || (size_t)m >= sizeof(bin))
         LOG_FAIL("dev-activation", "generation bin path overflow");
+#if defined(_WIN32)
+    struct platform_positioned_file binary;
+    platform_positioned_file_init(&binary);
+    bool executable = platform_positioned_file_open(&binary, bin) &&
+                      platform_positioned_file_is_executable(&binary);
+    platform_positioned_file_close(&binary);
+    if (!executable)
+#else
     if (access(bin, X_OK) != 0)
+#endif
         LOG_FAIL("dev-activation", "generation binary not executable: %s", bin);
     char link[PATH_MAX], tmp[PATH_MAX];
     if (!dev_activation_join(link, sizeof(link), txn->gen_root, name))
         return false;
-    int n = snprintf(tmp, sizeof(tmp), "%s/.%s.%ld",
-                     txn->gen_root, name, (long)getpid());
+    int n = snprintf(tmp, sizeof(tmp), "%s/.%s.%llu",
+                     txn->gen_root, name,
+                     (unsigned long long)os_proc_current_pid());
     if (n <= 0 || (size_t)n >= sizeof(tmp))
         LOG_FAIL("dev-activation", "link tmp path overflow");
+#if defined(_WIN32)
+    char payload[160];
+    int pn = snprintf(payload, sizeof(payload),
+                      "{\"schema\":\"zcl.dev_generation_selection.v1\","
+                      "\"generation\":\"%s\"}\n", generation);
+    struct platform_private_file file;
+    platform_private_file_init(&file);
+    bool ok = pn > 0 && (size_t)pn < sizeof(payload) &&
+              platform_private_file_create(tmp, &file) &&
+              platform_private_file_write_at(&file, payload, (size_t)pn, 0) &&
+              platform_private_file_truncate(&file, (size_t)pn) &&
+              platform_private_file_flush(&file) &&
+              platform_private_file_replace(&file, tmp, link);
+    if (!ok) {
+        platform_private_file_close(&file);
+        (void)platform_private_file_unlink_missing_ok(tmp);
+        LOG_FAIL("dev-activation", "generation manifest replace failed");
+    }
+#else
     (void)unlink(tmp);
     if (symlink(generation, tmp) != 0)
         LOG_FAIL("dev-activation", "symlink %s: %s", tmp, strerror(errno));
@@ -253,11 +381,16 @@ bool dev_activation_link_generation(const struct dev_activation_txn *txn,
         LOG_FAIL("dev-activation", "rename %s -> %s: %s", tmp, link,
                  strerror(errno));
     }
+#endif
     return true;
 }
 
 bool dev_activation_refresh_compat_link(const struct dev_activation_txn *txn)
 {
+#if defined(_WIN32)
+    (void)txn;
+    return true; /* the stable controller resolves the current manifest */
+#else
     char dir[PATH_MAX];
     int n = snprintf(dir, sizeof(dir), "%s", txn->compat_bin);
     if (n <= 0 || (size_t)n >= sizeof(dir))
@@ -284,6 +417,7 @@ bool dev_activation_refresh_compat_link(const struct dev_activation_txn *txn)
         LOG_FAIL("dev-activation", "compat rename: %s", strerror(errno));
     }
     return true;
+#endif
 }
 
 /* Extract the first "key":"value" string field from a JSON blob into out. */
@@ -383,6 +517,11 @@ bool dev_activation_write_build_identity(const struct dev_activation_txn *txn,
                 generation ? generation : "(null)");
         return false;
     }
+#if defined(_WIN32)
+    /* The Windows supervisor resolves the exact immutable generation and its
+     * source identity directly from the selected-generation manifest. */
+    return true;
+#else
     char commit[128];
     dev_activation_generation_commit(txn, generation, commit, sizeof(commit));
     if (commit[0] == 0)
@@ -418,6 +557,7 @@ bool dev_activation_write_build_identity(const struct dev_activation_txn *txn,
         return false;
     }
     return true;
+#endif
 }
 
 /* ── confinement + path derivation ───────────────────────────────────── */
@@ -459,7 +599,11 @@ static bool dev_paths_equal(const char *a, const char *b)
 static bool dev_validate_confinement(struct dev_activation_txn *txn)
 {
     const struct dev_activation_request *req = txn->req;
+#if defined(_WIN32)
+    if (!req->gen_root || strlen(req->gen_root) < 3 || req->gen_root[1] != ':')
+#else
     if (!req->gen_root || req->gen_root[0] != '/')
+#endif
         LOG_FAIL("dev-activation",
                  "FATAL: generation root must be absolute: %s",
                  req->gen_root ? req->gen_root : "(null)");
@@ -470,10 +614,17 @@ static bool dev_validate_confinement(struct dev_activation_txn *txn)
                  req->gen_root);
 
     char dev_dd[PATH_MAX], canonical[PATH_MAX], soak[PATH_MAX], legacy[PATH_MAX];
+#if defined(_WIN32)
+    if (!dev_activation_join(dev_dd, sizeof(dev_dd), txn->home, "z23/dev") ||
+        !dev_activation_join(canonical, sizeof(canonical), txn->home, "z23/canonical") ||
+        !dev_activation_join(soak, sizeof(soak), txn->home, "z23/soak") ||
+        !dev_activation_join(legacy, sizeof(legacy), txn->home, "z23/legacy"))
+#else
     if (!dev_activation_join(dev_dd, sizeof(dev_dd), txn->home, ".zclassic-c23-dev") ||
         !dev_activation_join(canonical, sizeof(canonical), txn->home, ".zclassic-c23") ||
         !dev_activation_join(soak, sizeof(soak), txn->home, ".zclassic-c23-soak") ||
         !dev_activation_join(legacy, sizeof(legacy), txn->home, ".zclassic"))
+#endif
         return false;
 
     if (dev_path_under(req->gen_root, canonical) ||
@@ -497,7 +648,12 @@ static bool dev_validate_confinement(struct dev_activation_txn *txn)
 static bool dev_derive_paths(struct dev_activation_txn *txn)
 {
     const struct dev_activation_request *req = txn->req;
-    const char *home = getenv("HOME");
+    const char *home =
+#if defined(_WIN32)
+        getenv("LOCALAPPDATA");
+#else
+        getenv("HOME");
+#endif
     if (!home || !home[0])
         LOG_FAIL("dev-activation", "HOME is unset");
     int n = snprintf(txn->home, sizeof(txn->home), "%s", home);
@@ -541,46 +697,16 @@ static int dev_acquire_lock(struct dev_activation_txn *txn)
 {
     if (!dev_activation_mkdir_p(txn->gen_root) || !dev_activation_mkdir_p(txn->rejected_dir))
         return DEV_ACTIVATION_E_INTERNAL;
-    int fd = open(txn->lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
-    if (fd < 0) {
-        LOG_ERR("dev-activation", "lock open %s: %s", txn->lock_path,
-                strerror(errno));
-        return DEV_ACTIVATION_E_INTERNAL;
-    }
-    if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
-        int e = errno;
-        close(fd);
-        if (e == EWOULDBLOCK) {
-            fprintf(stderr,
-                    "[dev-activation] BUSY: another activation owns %s\n",
-                    txn->lock_path);
-            return DEV_ACTIVATION_E_LOCK_BUSY;
-        }
-        LOG_ERR("dev-activation", "flock %s: %s", txn->lock_path, strerror(e));
-        return DEV_ACTIVATION_E_INTERNAL;
-    }
-    txn->lock_fd = fd;
+    if (!platform_process_lock_try_acquire(&txn->lock, txn->lock_path, true))
+        return DEV_ACTIVATION_E_LOCK_BUSY;
     txn->lock_held = true;
-    if (ftruncate(fd, 0) != 0) { /* best-effort payload */ }
-    char now[32];
-    dev_activation_iso_utc_now(now);
-    char line[256];
-    int n = snprintf(line, sizeof(line),
-                     "{\"schema\":\"zcl.dev_activation_lock.v1\",\"pid\":%ld,"
-                     "\"acquired_at_utc\":\"%s\"}\n",
-                     (long)getpid(), now);
-    if (n > 0)
-        (void)!write(fd, line, (size_t)n);
     return DEV_ACTIVATION_OK;
 }
 
 static void dev_release_lock(struct dev_activation_txn *txn)
 {
-    if (txn->lock_held && txn->lock_fd >= 0) {
-        flock(txn->lock_fd, LOCK_UN);
-        close(txn->lock_fd);
-    }
-    txn->lock_fd = -1;
+    if (txn->lock_held)
+        platform_process_lock_release(&txn->lock);
     txn->lock_held = false;
 }
 
@@ -649,6 +775,7 @@ static int dev_guard_pending_auto_reindex(struct dev_activation_txn *txn)
  * prior transaction and refuses, pointing the operator at `make
  * agent-dev-recover`. We deliberately do NOT auto-roll-back another run's
  * half-finished state. */
+#if !defined(_WIN32)
 static bool dev_write_all(int fd, const char *bytes, size_t len)
 {
     size_t off = 0;
@@ -664,6 +791,7 @@ static bool dev_write_all(int fd, const char *bytes, size_t len)
     }
     return true;
 }
+#endif
 
 static bool dev_write_in_progress(struct dev_activation_txn *txn)
 {
@@ -674,17 +802,37 @@ static bool dev_write_in_progress(struct dev_activation_txn *txn)
     char line[256];
     int n = snprintf(line, sizeof(line),
                      "{\"schema\":\"zcl.dev_activation_in_progress.v1\","
-                     "\"pid\":%ld,\"candidate_generation\":\"%s\","
+                     "\"pid\":%llu,\"candidate_generation\":\"%s\","
                      "\"started_at_utc\":\"%s\"}\n",
-                     (long)getpid(), esc, now);
+                     (unsigned long long)os_proc_current_pid(), esc, now);
     if (n <= 0 || (size_t)n >= sizeof(line))
         LOG_FAIL("dev-activation", "in-progress marker payload overflow");
     size_t line_len = (size_t)n;
 
     char tmp[PATH_MAX];
+#if defined(_WIN32)
+    n = snprintf(tmp, sizeof(tmp), "%s.tmp.%llu", txn->inprogress_path,
+                 (unsigned long long)os_proc_current_pid());
+#else
     n = snprintf(tmp, sizeof(tmp), "%s.tmp.XXXXXX", txn->inprogress_path);
+#endif
     if (n <= 0 || (size_t)n >= sizeof(tmp))
         LOG_FAIL("dev-activation", "in-progress marker temp path overflow");
+#if defined(_WIN32)
+    struct platform_private_file file;
+    platform_private_file_init(&file);
+    bool ok = platform_private_file_create(tmp, &file) &&
+              platform_private_file_write_at(&file, line, line_len, 0) &&
+              platform_private_file_truncate(&file, line_len) &&
+              platform_private_file_flush(&file) &&
+              platform_private_file_replace(
+                  &file, tmp, txn->inprogress_path);
+    if (!ok) {
+        platform_private_file_close(&file);
+        (void)platform_private_file_unlink_missing_ok(tmp);
+        return false;
+    }
+#else
     int fd = mkstemp(tmp);
     if (fd < 0) {
         LOG_WARN("dev-activation", "in-progress marker create %s: %s",
@@ -719,13 +867,14 @@ static bool dev_write_in_progress(struct dev_activation_txn *txn)
         (void)unlink(txn->inprogress_path);
         return false;
     }
+#endif
     txn->activation_in_progress = true;
     return true;
 }
 
 void dev_activation_clear_in_progress(const struct dev_activation_txn *txn)
 {
-    (void)unlink(txn->inprogress_path);
+    (void)platform_private_file_unlink_missing_ok(txn->inprogress_path);
 }
 
 /* With the activation flock held, a surviving in-progress marker can only come
@@ -733,17 +882,28 @@ void dev_activation_clear_in_progress(const struct dev_activation_txn *txn)
  * recovery command; never touch the mixed on-disk state. */
 static int dev_check_stale_in_progress(struct dev_activation_txn *txn)
 {
-    struct stat st;
-    if (stat(txn->inprogress_path, &st) != 0)
+    struct platform_positioned_file marker;
+    platform_positioned_file_init(&marker);
+    if (!platform_positioned_file_open(&marker, txn->inprogress_path))
         return DEV_ACTIVATION_OK; /* no marker => clean */
 
     char buf[256] = {0};
+#if defined(_WIN32)
+    uint64_t marker_size = 0;
+    if (platform_positioned_file_size(&marker, &marker_size) &&
+        marker_size < sizeof(buf))
+        (void)platform_positioned_file_read(
+            &marker, buf, (size_t)marker_size, 0);
+    platform_positioned_file_close(&marker);
+#else
+    platform_positioned_file_close(&marker);
     FILE *f = fopen(txn->inprogress_path, "r");
     if (f) {
         size_t rn = fread(buf, 1, sizeof(buf) - 1, f);
         buf[rn] = 0;
         fclose(f);
     }
+#endif
     char stale_gen[96] = {0};
     (void)dev_activation_json_first_string(buf, "candidate_generation", stale_gen,
                                            sizeof(stale_gen));
@@ -872,7 +1032,7 @@ static int dev_activate_candidate(struct dev_activation_txn *txn)
 
     (void)dev_activation_link_generation(txn, "last-good",
                                          txn->candidate_generation);
-    (void)unlink(txn->staged_link);
+    (void)platform_private_file_unlink_missing_ok(txn->staged_link);
     txn->activation_in_progress = false;
     dev_activation_clear_in_progress(txn);
     dev_set_status(r, "active", "ready",
@@ -994,7 +1154,7 @@ static int dev_prepare(struct dev_activation_txn *txn,
                        struct dev_activation_ops *default_slot)
 {
     memset(txn, 0, sizeof(*txn));
-    txn->lock_fd = -1;
+    platform_process_lock_init(&txn->lock);
     txn->req = req;
     txn->result = result;
     if (!result)
@@ -1102,8 +1262,19 @@ int dev_activation_activate_generation(const uint8_t gen_sha256[32],
              "%s", txn.candidate_generation);
     dev_activation_join(txn.candidate_dir, sizeof(txn.candidate_dir), txn.gen_root,
              txn.candidate_generation);
-    snprintf(txn.candidate_bin, sizeof(txn.candidate_bin),
+    int candidate_n = snprintf(txn.candidate_bin, sizeof(txn.candidate_bin),
+#if defined(_WIN32)
+             "%s/zclassic23-dev.exe", txn.candidate_dir);
+#else
              "%s/zclassic23-dev", txn.candidate_dir);
+#endif
+    if (candidate_n <= 0 ||
+        (size_t)candidate_n >= sizeof(txn.candidate_bin)) {
+        dev_set_status(result, "stage_failed", "stage_failed",
+                       "generation binary path too long");
+        result->status = DEV_ACTIVATION_E_STAGE;
+        return DEV_ACTIVATION_E_STAGE;
+    }
 
     st = dev_acquire_lock(&txn);
     if (st != DEV_ACTIVATION_OK) {
@@ -1113,7 +1284,17 @@ int dev_activation_activate_generation(const uint8_t gen_sha256[32],
         return st;
     }
     char have[65];
+#if defined(_WIN32)
+    struct platform_positioned_file candidate;
+    platform_positioned_file_init(&candidate);
+    bool candidate_ok = platform_positioned_file_open(
+                            &candidate, txn.candidate_bin) &&
+                        platform_positioned_file_is_executable(&candidate);
+    platform_positioned_file_close(&candidate);
+    if (!candidate_ok ||
+#else
     if (access(txn.candidate_bin, X_OK) != 0 ||
+#endif
         !dev_activation_sha256_file(txn.candidate_bin, have) ||
         strcmp(have, txn.candidate_sha_hex) != 0) {
         dev_release_lock(&txn);

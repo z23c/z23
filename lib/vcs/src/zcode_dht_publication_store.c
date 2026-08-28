@@ -5,15 +5,15 @@
 
 #include "base/serialize_le.h"
 #include "crypto/sha3.h"
-#include "util/write_all.h"
+#include "platform/file_metadata.h"
+#include "platform/os_proc.h"
+#include "platform/positioned_file.h"
+#include "platform/private_file.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 #define PUBLICATION_STORE_VERSION 1u
 #define PUBLICATION_STORE_FILE "zcode/dht/publications.v1"
@@ -89,52 +89,62 @@ bool vcs_zcode_dht_publications_save(
   publication_checksum(wire, offset, digest);
   memcpy(wire + offset, digest, sizeof(digest));
   offset += sizeof(digest);
-  char path[1400], temporary[1460], directory[1400];
+  char path[1400], resolved[1400], temporary[1460], parent[1400];
   if (!publication_path(datadir, path))
     return false;
-  uint64_t serial = atomic_fetch_add_explicit(
-                        &g_publication_store_serial, 1,
-                        memory_order_relaxed) +
-                    1;
-  (void)snprintf(temporary, sizeof(temporary), "%s.tmp.%ld.%llu", path,
-                 (long)getpid(), (unsigned long long)serial);
-  int fd = open(temporary, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-  bool ok = fd >= 0 && zcl_write_all(fd, wire, offset) && fsync(fd) == 0;
-  if (fd >= 0 && close(fd) != 0)
-    ok = false;
-  if (ok)
-    ok = rename(temporary, path) == 0;
-  if (!ok) {
-    (void)unlink(temporary);
+  if (!platform_private_path_resolve(path, resolved, sizeof(resolved), parent,
+                                     sizeof(parent))) {
     if (error_out && error_capacity)
       (void)snprintf(error_out, error_capacity,
                      "publication intent atomic write failed");
     return false;
   }
-  (void)snprintf(directory, sizeof(directory), "%s/zcode/dht", datadir);
-  int directory_fd = open(directory,
-                          O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-  ok = directory_fd >= 0 && fsync(directory_fd) == 0;
-  if (directory_fd >= 0)
-    (void)close(directory_fd);
-  if (!ok && error_out && error_capacity)
-    (void)snprintf(error_out, error_capacity,
-                   "publication intent directory fsync failed");
-  return ok;
-}
-
-static bool publication_read_exact(int fd, uint8_t *wire, size_t length)
-{
-  size_t offset = 0;
-  while (offset < length) {
-    ssize_t got = read(fd, wire + offset, length - offset);
-    if (got < 0 && errno == EINTR)
-      continue;
-    if (got <= 0)
-      return false;
-    offset += (size_t)got;
+  struct platform_private_file staged;
+  platform_private_file_init(&staged);
+  bool created = false;
+  for (unsigned int attempt = 0; attempt < 64 && !created; attempt++) {
+    uint64_t serial = atomic_fetch_add_explicit(
+                          &g_publication_store_serial, 1,
+                          memory_order_relaxed) +
+                      1;
+    int written = snprintf(temporary, sizeof(temporary), "%s.tmp.%llu.%llu",
+                           resolved,
+                           (unsigned long long)os_proc_current_pid(),
+                           (unsigned long long)serial);
+    if (written <= 0 || (size_t)written >= sizeof(temporary))
+      break;
+    created = platform_private_file_create(temporary, &staged);
+    if (!created && errno != EEXIST)
+      break;
+  }
+  bool ok = created &&
+            platform_private_file_write_at(&staged, wire, offset, 0) &&
+            platform_private_file_truncate(&staged, offset) &&
+            platform_private_file_flush(&staged) &&
+            platform_private_file_replace(&staged, temporary, resolved);
+  platform_private_file_close(&staged);
+  if (!ok || !platform_private_parent_flush(parent)) {
+    if (created)
+      (void)platform_private_file_unlink_missing_ok(temporary);
+    if (error_out && error_capacity)
+      (void)snprintf(error_out, error_capacity,
+                     ok ? "publication intent directory flush failed"
+                        : "publication intent atomic write failed");
+    return false;
   }
   return true;
+}
+
+static bool publication_snapshot_equal(
+    const struct platform_positioned_file_snapshot *a,
+    const struct platform_positioned_file_snapshot *b)
+{
+  return a->size == b->size && a->volume == b->volume &&
+         a->file_low == b->file_low && a->file_high == b->file_high &&
+         a->modified_seconds == b->modified_seconds &&
+         a->modified_nanoseconds == b->modified_nanoseconds &&
+         a->changed_seconds == b->changed_seconds &&
+         a->changed_nanoseconds == b->changed_nanoseconds;
 }
 
 static uint64_t publication_lifetime_max(
@@ -158,22 +168,32 @@ bool vcs_zcode_dht_publications_load(struct vcs_zcode_dht_service *service,
   char path[1400];
   if (!publication_path(service->datadir, path))
     return false;
-  int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-  if (fd < 0)
-    return errno == ENOENT;
-  struct stat status;
-  if (fstat(fd, &status) != 0 || status.st_size <
-          (off_t)(PUBLICATION_STORE_HEADER_BYTES + 32u) ||
-      status.st_size > (off_t)PUBLICATION_STORE_MAX_BYTES) {
-    (void)close(fd);
+  struct platform_file_metadata metadata;
+  enum platform_file_metadata_result probe =
+      platform_file_metadata_read(path, &metadata);
+  if (probe == PLATFORM_FILE_METADATA_MISSING)
+    return true;
+  struct platform_positioned_file file;
+  struct platform_positioned_file_snapshot before, after;
+  platform_positioned_file_init(&file);
+  if (probe != PLATFORM_FILE_METADATA_OK ||
+      !platform_positioned_file_open(&file, path) ||
+      !platform_positioned_file_snapshot(&file, &before) ||
+      !platform_positioned_file_is_private(&file) ||
+      before.size < PUBLICATION_STORE_HEADER_BYTES + 32u ||
+      before.size > PUBLICATION_STORE_MAX_BYTES) {
+    platform_positioned_file_close(&file);
     vcs_zcode_dht_service_set_error(service,
                                     "publication intent size invalid");
     return false;
   }
-  size_t length = (size_t)status.st_size;
+  size_t length = (size_t)before.size;
   uint8_t wire[PUBLICATION_STORE_MAX_BYTES];
-  bool read_ok = publication_read_exact(fd, wire, length);
-  (void)close(fd);
+  int64_t got = platform_positioned_file_read(&file, wire, length, 0);
+  bool read_ok = got == (int64_t)length &&
+                 platform_positioned_file_snapshot(&file, &after) &&
+                 publication_snapshot_equal(&before, &after);
+  platform_positioned_file_close(&file);
   if (!read_ok || memcmp(wire, publication_magic, sizeof(publication_magic)) != 0 ||
       zcl_read_u16_le(wire + 8) != PUBLICATION_STORE_VERSION) {
     vcs_zcode_dht_service_set_error(service,

@@ -7,16 +7,19 @@
 #include "vcs/vcs_object.h"
 #include "vcs_priv.h"
 
+#include "platform/positioned_file.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
+#if !defined(_WIN32)
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <stdlib.h>
-#include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
+#include <stdlib.h>
+#include <string.h>
 
 /* Return the final path component of relpath. */
 static const char *base_of(const char *relpath)
@@ -129,6 +132,7 @@ bool vcs_path_ignored(const char *relpath)
     return false;
 }
 
+#if !defined(_WIN32)
 struct walk_ctx {
     const char  *repo_root;
     vcs_walk_cb  cb;
@@ -228,15 +232,36 @@ static bool walk_dir(struct walk_ctx *w, const char *rel)
     free(names);
     return ok;
 }
+#endif
 
 bool vcs_walk_tracked(const char *repo_root, vcs_walk_cb cb, void *user)
 {
     if (!repo_root || !cb)
         LOG_FAIL("vcs", "null arg to walk_tracked");
+#if defined(_WIN32)
+    (void)user;
+    /* Safe traversal requires enumeration relative to a retained directory
+     * handle. The current Windows directory-list seam validates only the
+     * final path and cannot exclude an intermediate reparse substitution. */
+    return false;
+#else
     struct walk_ctx w = { repo_root, cb, user, false };
     if (!walk_dir(&w, ""))
         return false;
     return !w.aborted;
+#endif
+}
+
+static bool blob_snapshot_same(
+    const struct platform_positioned_file_snapshot *a,
+    const struct platform_positioned_file_snapshot *b)
+{
+    return a->size == b->size && a->volume == b->volume &&
+           a->file_low == b->file_low && a->file_high == b->file_high &&
+           a->modified_seconds == b->modified_seconds &&
+           a->modified_nanoseconds == b->modified_nanoseconds &&
+           a->changed_seconds == b->changed_seconds &&
+           a->changed_nanoseconds == b->changed_nanoseconds;
 }
 
 bool vcs_blob_hash_file(const char *repo_root, const char *relpath,
@@ -244,14 +269,14 @@ bool vcs_blob_hash_file(const char *repo_root, const char *relpath,
 {
     if (!repo_root || !relpath || !out)
         LOG_FAIL("vcs", "null arg to blob_hash_file");
-    char full[4096];
-    int n = snprintf(full, sizeof(full), "%s/%s", repo_root, relpath);
-    if (n <= 0 || (size_t)n >= sizeof(full))
-        LOG_FAIL("vcs", "blob path too long");
-
-    int fd = open(full, O_RDONLY | O_CLOEXEC);
-    if (fd < 0)
-        LOG_FAIL("vcs", "open %s: %s", full, strerror(errno));
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open_beneath(&file, repo_root, relpath) ||
+        !platform_positioned_file_snapshot(&file, &before)) {
+        platform_positioned_file_close(&file);
+        return false;
+    }
 
     uint8_t tag = VCS_TAG_BLOB;
     struct sha3_256_ctx ctx;
@@ -259,19 +284,23 @@ bool vcs_blob_hash_file(const char *repo_root, const char *relpath,
     sha3_256_write(&ctx, &tag, 1);
 
     unsigned char buf[65536];
-    for (;;) {
-        ssize_t r = read(fd, buf, sizeof(buf));
-        if (r < 0) {
-            if (errno == EINTR)
-                continue;
-            close(fd);
-            LOG_FAIL("vcs", "read %s: %s", full, strerror(errno));
-        }
+    uint64_t offset = 0;
+    bool ok = true;
+    while (offset < before.size) {
+        size_t want = before.size - offset > sizeof(buf)
+                          ? sizeof(buf) : (size_t)(before.size - offset);
+        int64_t r = platform_positioned_file_read(&file, buf, want, offset);
+        if (r <= 0) { ok = false; break; }
         if (r == 0)
             break;
         sha3_256_write(&ctx, buf, (size_t)r);
+        offset += (uint64_t)r;
     }
-    close(fd);
+    ok = ok && offset == before.size &&
+         platform_positioned_file_snapshot(&file, &after) &&
+         blob_snapshot_same(&before, &after);
+    platform_positioned_file_close(&file);
+    if (!ok) return false;
     sha3_256_finalize(&ctx, out);
     return true;
 }

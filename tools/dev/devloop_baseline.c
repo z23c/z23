@@ -1,8 +1,8 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * devloop_baseline — the dev-loop's detach launcher for the generation-
- * neutral initial ZVCS baseline. This is the ONLY place the double-fork +
- * setsid + stdio-redirect mechanics live: lib/vcs/ must stay process-spawn
+ * neutral initial ZVCS baseline. This is the ONLY place the POSIX double-fork
+ * mechanics live: lib/vcs/ must stay process-spawn
  * free (check-vcs-no-git — ZVCS sovereignty; lib/vcs is release-linkable),
  * so it exports a purely synchronous
  * vcs_devloop_run_initial_baseline(repo_root, out) and leaves detaching that
@@ -25,16 +25,19 @@
 
 #include "vcs/vcs_devloop.h"
 
-#include <errno.h>
-#include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #ifdef ZCL_DEV_BUILD
+#if !defined(_WIN32)
+#include <errno.h>
+#include <fcntl.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
 #endif
 
 bool zcl_devloop_baseline_launch(const char *repo_root)
@@ -56,6 +59,24 @@ bool zcl_devloop_baseline_launch(const char *repo_root)
     if (n <= 0 || (size_t)n >= sizeof(log_path))
         return false;
 
+#if defined(_WIN32)
+    /* There is no qualified detached-process seam on Windows yet. Run the
+     * initial baseline synchronously: this preserves repository isolation and
+     * completion semantics without sharing mutable VCS state with a detached
+     * in-process thread. */
+    struct vcs_devloop_anchor_result result;
+    vcs_devloop_run_initial_baseline(repo_root, &result);
+    FILE *log = fopen(log_path, "ab");
+    if (log) {
+        fprintf(log, "[vcs.devloop] initial baseline %s%s%s\n",
+                result.status == VCS_DEVLOOP_ANCHOR_OK ? "complete" : "failed",
+                result.status == VCS_DEVLOOP_ANCHOR_OK ? "" : ": ",
+                result.status == VCS_DEVLOOP_ANCHOR_OK ? "" :
+                    (result.error[0] ? result.error : "unknown error"));
+        fclose(log);
+    }
+    return result.status == VCS_DEVLOOP_ANCHOR_OK;
+#else
     /* Double fork: the immediate child setsid()s and forks again, then
      * exits so the launcher (this process) can reap it right away — the
      * persistent dev-loop watcher never accumulates an unreaped zombie
@@ -105,5 +126,6 @@ bool zcl_devloop_baseline_launch(const char *repo_root)
     } while (waited < 0 && errno == EINTR);
     return waited == launcher && WIFEXITED(status) &&
            WEXITSTATUS(status) == 0;
+#endif
 #endif
 }

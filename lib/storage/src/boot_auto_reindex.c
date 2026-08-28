@@ -46,7 +46,7 @@ static bool ar_read(const char *path, int32_t *anchor, int *count)
         &file, buf, (size_t)before.size, 0);
     bool ok = got == (int64_t)before.size &&
               platform_positioned_file_snapshot(&file, &after) &&
-              memcmp(&before, &after, sizeof(before)) == 0;
+              platform_positioned_file_snapshot_equal(&before, &after);
     platform_positioned_file_close(&file);
     if (ok) {
         buf[before.size] = '\0';

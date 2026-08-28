@@ -2,6 +2,8 @@
  *
  * vcs — the ZVCS façade implementation. See vcs/vcs.h. */
 
+#if !defined(_WIN32)
+#define _GNU_SOURCE
 #include "vcs/vcs.h"
 #include "vcs/vcs_object.h"
 #include "vcs/vcs_seal.h"
@@ -261,7 +263,6 @@ static int tree_capture_from(const char *scan_root, struct vcs_index *idx,
     memcpy(out_tree_hash, first_root, 32);
     return VCS_OK;
 }
-
 int vcs_tree_capture(struct vcs_repo *r, uint8_t out_tree_hash[32])
 {
     if (!r || !out_tree_hash)
@@ -794,3 +795,6 @@ int vcs_revert(struct vcs_repo *r, const uint8_t target_commit[32],
     }
     return VCS_OK;
 }
+#else
+typedef int vcs_posix_requires_a_translation_unit;
+#endif

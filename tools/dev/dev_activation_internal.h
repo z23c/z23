@@ -17,6 +17,7 @@
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
 
 #include "dev_activation.h"
+#include "platform/process_lock.h"
 
 #include <limits.h>
 #include <stdbool.h>
@@ -81,7 +82,7 @@ struct dev_activation_txn {
     char current_generation[DEV_GEN_ID_MAX];
     char last_good_generation[DEV_GEN_ID_MAX];
 
-    int lock_fd;
+    struct platform_process_lock lock;
     bool lock_held;
     bool activation_in_progress;
     bool recovery_boot;

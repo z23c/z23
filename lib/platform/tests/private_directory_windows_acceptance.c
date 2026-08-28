@@ -18,7 +18,7 @@ int main(void)
 {
     wchar_t temp[MAX_PATH], root[MAX_PATH], private_path[MAX_PATH];
     wchar_t permissive[MAX_PATH], target[MAX_PATH], link_path[MAX_PATH];
-    wchar_t moved_path[MAX_PATH];
+    wchar_t moved_path[MAX_PATH], staged_path[MAX_PATH], collision_path[MAX_PATH];
     if (!GetTempPathW(MAX_PATH, temp) ||
         swprintf(root, MAX_PATH, L"%lsz23-private-dir-%lu-%llu", temp,
                  (unsigned long)GetCurrentProcessId(),
@@ -30,6 +30,8 @@ int main(void)
     (void)swprintf(target, MAX_PATH, L"%ls\\target", root);
     (void)swprintf(link_path, MAX_PATH, L"%ls\\link", root);
     (void)swprintf(moved_path, MAX_PATH, L"%ls\\private-moved", root);
+    (void)swprintf(staged_path, MAX_PATH, L"%ls\\staged", root);
+    (void)swprintf(collision_path, MAX_PATH, L"%ls\\collision", root);
 
     char utf8[MAX_PATH * 3];
     if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, private_path, -1,
@@ -58,6 +60,26 @@ int main(void)
     platform_private_directory_close(native);
     if (!MoveFileExW(moved_path, private_path, 0))
         return fail("fixture rename restore failed");
+
+    char staged_utf8[MAX_PATH * 3], moved_utf8[MAX_PATH * 3];
+    char collision_utf8[MAX_PATH * 3];
+    if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, staged_path, -1,
+                             staged_utf8, sizeof(staged_utf8), NULL, NULL) ||
+        !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, moved_path, -1,
+                             moved_utf8, sizeof(moved_utf8), NULL, NULL) ||
+        !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, collision_path, -1,
+                             collision_utf8, sizeof(collision_utf8), NULL,
+                             NULL) ||
+        !platform_private_directory_create(staged_utf8) ||
+        platform_private_directory_create(staged_utf8) ||
+        !platform_private_directory_publish_no_clobber(staged_utf8,
+                                                        moved_utf8) ||
+        !platform_private_directory_create(collision_utf8) ||
+        platform_private_directory_publish_no_clobber(collision_utf8,
+                                                       moved_utf8) ||
+        !platform_private_directory_remove_empty(collision_utf8) ||
+        !platform_private_directory_remove_empty(moved_utf8))
+        return fail("create-only/no-clobber publication failed");
 
     if (!CreateDirectoryW(permissive, NULL) ||
         !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, permissive, -1,

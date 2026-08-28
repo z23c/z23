@@ -4,16 +4,14 @@
 #include "zcode_dht_service_internal.h"
 
 #include "base/safe_alloc.h"
-#include "util/write_all.h"
+#include "platform/os_proc.h"
+#include "platform/positioned_file.h"
+#include "platform/private_file.h"
 #include "vcs/zcode_dht_identity.h"
 
-#include <errno.h>
-#include <fcntl.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 static bool contacts_path(const struct vcs_zcode_dht_service *s,
                           char out[1400]) {
@@ -120,38 +118,30 @@ bool vcs_zcode_dht_persistence_snapshot_write(
   if (!snapshot || !snapshot->wire)
     return false;
   char tmp[1460];
-  (void)snprintf(tmp, sizeof(tmp), "%s.tmp.%ld.%llu.%llu", snapshot->path,
-                 (long)getpid(),
-                 (unsigned long long)snapshot->generation,
-                 (unsigned long long)snapshot->serial);
-  int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-  bool ok = fd >= 0 &&
-            zcl_write_all(fd, snapshot->wire, snapshot->wire_len) &&
-            fsync(fd) == 0;
-  if (fd >= 0 && close(fd) != 0)
-    ok = false;
+  int tn = snprintf(tmp, sizeof(tmp), "%s.tmp.%llu.%llu.%llu", snapshot->path,
+                    (unsigned long long)os_proc_current_pid(),
+                    (unsigned long long)snapshot->generation,
+                    (unsigned long long)snapshot->serial);
+  if (tn <= 0 || (size_t)tn >= sizeof(tmp)) {
+    snprintf(snapshot->error, sizeof(snapshot->error),
+             "contacts temp path too long");
+    return false;
+  }
+  struct platform_private_file file;
+  platform_private_file_init(&file);
+  bool ok = platform_private_file_create(tmp, &file) &&
+            platform_private_file_write_at(
+                &file, snapshot->wire, snapshot->wire_len, 0) &&
+            platform_private_file_truncate(&file, snapshot->wire_len) &&
+            platform_private_file_flush(&file) &&
+            platform_private_file_replace(&file, tmp, snapshot->path);
   if (!ok) {
-    (void)unlink(tmp);
+    platform_private_file_close(&file);
+    (void)platform_private_file_unlink_missing_ok(tmp);
     snprintf(snapshot->error, sizeof(snapshot->error),
              "contacts temp write failed");
     return false;
   }
-  if (rename(tmp, snapshot->path) != 0) {
-    (void)unlink(tmp);
-    snprintf(snapshot->error, sizeof(snapshot->error),
-             "contacts rename failed");
-    return false;
-  }
-  int dfd = open(snapshot->directory,
-                 O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-  if (dfd < 0 || fsync(dfd) != 0) {
-    if (dfd >= 0)
-      (void)close(dfd);
-    snprintf(snapshot->error, sizeof(snapshot->error),
-             "contacts directory fsync failed");
-    return false;
-  }
-  (void)close(dfd);
   if (snapshot->records_dirty &&
       vcs_zcode_dht_record_store_save(
           snapshot->records, snapshot->datadir, snapshot->error,
@@ -213,43 +203,45 @@ bool vcs_zcode_dht_service_persistence_load(struct vcs_zcode_dht_service *s,
   char path[1400];
   if (!contacts_path(s, path))
     return false;
-  int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-  if (fd < 0)
-    return errno == ENOENT;
-  struct stat st;
-  if (fstat(fd, &st) != 0 ||
-      st.st_size < (off_t)VCS_ZCODE_DHT_CONTACTS_HEADER_BYTES ||
-      st.st_size > (off_t)VCS_ZCODE_DHT_CONTACTS_MAX_WIRE_BYTES) {
-    (void)close(fd);
+  struct platform_positioned_file file;
+  struct platform_positioned_file_snapshot before, after;
+  platform_positioned_file_init(&file);
+  if (!platform_positioned_file_open(&file, path))
+    return platform_private_path_absent(path);
+  if (!platform_positioned_file_snapshot(&file, &before) ||
+      before.size < VCS_ZCODE_DHT_CONTACTS_HEADER_BYTES ||
+      before.size > VCS_ZCODE_DHT_CONTACTS_MAX_WIRE_BYTES) {
+    platform_positioned_file_close(&file);
     vcs_zcode_dht_service_set_error(s, "contacts file size invalid");
     return false;
   }
-  size_t len = (size_t)st.st_size;
+  size_t len = (size_t)before.size;
   uint8_t *wire = zcl_malloc(len, "dht.load.wire");
   struct vcs_zcode_dht_contact *contacts = zcl_malloc(
       VCS_ZCODE_DHT_MAX_CONTACTS * sizeof(*contacts), "dht.load.contacts");
   struct vcs_zcode_dht_table *tmp = zcl_malloc(sizeof(*tmp), "dht.load.table");
   if (!wire || !contacts || !tmp) {
-    (void)close(fd);
+    platform_positioned_file_close(&file);
     free(wire);
     free(contacts);
     free(tmp);
     vcs_zcode_dht_service_set_error(s, "contacts load allocation failed");
     return false;
   }
-  size_t off = 0;
-  while (off < len) {
-    ssize_t n = read(fd, wire + off, len - off);
-    if (n < 0 && errno == EINTR)
-      continue;
-    if (n <= 0)
-      break;
-    off += (size_t)n;
-  }
-  (void)close(fd);
+  bool stable = platform_positioned_file_read(&file, wire, len, 0) ==
+                    (int64_t)len &&
+                platform_positioned_file_snapshot(&file, &after) &&
+                before.size == after.size && before.volume == after.volume &&
+                before.file_low == after.file_low &&
+                before.file_high == after.file_high &&
+                before.modified_seconds == after.modified_seconds &&
+                before.modified_nanoseconds == after.modified_nanoseconds &&
+                before.changed_seconds == after.changed_seconds &&
+                before.changed_nanoseconds == after.changed_nanoseconds;
+  platform_positioned_file_close(&file);
   uint32_t count = 0;
   enum vcs_zcode_dht_error e =
-      off == len
+      stable
           ? vcs_zcode_dht_contacts_parse(
                 wire, len, s->genesis, s->self_id, now, s->chain_verify,
                 s->chain_ctx, contacts, VCS_ZCODE_DHT_MAX_CONTACTS, &count)

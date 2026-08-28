@@ -612,12 +612,11 @@ bool zcl_devloop_deterministic_compile_failure(
     char out[ZCL_DEVLOOP_FIRST_ERROR_MAX]);
 #endif
 
-/* Detach-launch the generation-neutral initial ZVCS baseline: double-fork +
- * setsid, grandchild runs vcs_devloop_run_initial_baseline() with stdio
- * redirected to <repo_root>/.zvcs/bootstrap.log, then _exit()s. Reaps the
- * short-lived launcher child itself so a persistent dev-loop watcher never
- * accumulates a zombie. Returns true iff the launcher was forked and
- * exited 0 (the baseline itself may still have failed — check
+/* Launch the generation-neutral initial ZVCS baseline. POSIX uses a detached
+ * double-fork/setsid grandchild. Until a qualified native detached-process
+ * seam exists, Windows runs synchronously to preserve VCS state isolation.
+ * Completion is appended to <repo_root>/.zvcs/bootstrap.log. Returns true iff
+ * work started successfully (the detached baseline may still have failed; check
  * .zvcs/bootstrap.log or the next vcs_devloop_anchor_cycle() call). Dev-only
  * (tools/dev/devloop_baseline.c); a release build never links this. */
 bool zcl_devloop_baseline_launch(const char *repo_root);

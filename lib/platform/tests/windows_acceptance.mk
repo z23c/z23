@@ -23,6 +23,7 @@ ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	mint_anchor_preflight_refusal \
 	package_lifecycle_store_refusal \
 	os_binary_slots_refusal \
+	os_proc_pid_image \
 	pagelocker \
 	positioned_file \
 	positioned_io \
@@ -40,6 +41,7 @@ ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	snapshot_install_activate_refusal \
 	socket_compat \
 	stale_lock_capability \
+	thread_join \
 	ui_host_transport \
 	utxo_recovery_ldb_copy_refusal \
 	wallet_recovery_directory \
@@ -148,6 +150,12 @@ ZCL_WINDOWS_ACCEPTANCE_package_lifecycle_store_refusal_LIBS := \
 ZCL_WINDOWS_ACCEPTANCE_os_binary_slots_refusal_SOURCES := \
 	lib/test/src/os_binary_slots_refusal_acceptance.c \
 	lib/platform/src/os_binary_slots.c
+ZCL_WINDOWS_ACCEPTANCE_os_proc_pid_image_SOURCES := \
+	lib/platform/tests/os_proc_pid_image_windows_acceptance.c \
+	lib/platform/src/os_proc.c \
+	lib/platform/src/private_file.c \
+	lib/base/src/safe_alloc.c
+ZCL_WINDOWS_ACCEPTANCE_os_proc_pid_image_LIBS := -ladvapi32 -lpsapi
 ZCL_WINDOWS_ACCEPTANCE_pagelocker_SOURCES := \
 	lib/test/src/pagelocker_acceptance.c \
 	lib/support/src/pagelocker.c \
@@ -218,6 +226,8 @@ ZCL_WINDOWS_ACCEPTANCE_stale_lock_capability_SOURCES := \
 	lib/platform/src/private_file.c \
 	lib/base/src/safe_alloc.c
 ZCL_WINDOWS_ACCEPTANCE_stale_lock_capability_LIBS := -ladvapi32 -lpsapi
+ZCL_WINDOWS_ACCEPTANCE_thread_join_SOURCES := \
+	lib/platform/tests/thread_join_windows_acceptance.c
 ZCL_WINDOWS_ACCEPTANCE_ui_host_transport_SOURCES := \
 	lib/test/src/ui_host_transport_windows_acceptance.c \
 	app/views/src/ui_present_host_transport.c \

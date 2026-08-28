@@ -2,7 +2,8 @@
  *
  * dev_activation_ops.c — the REAL service-action ops for the native dev-lane
  * activation engine: exec `systemctl --user ...` through the fixed-argv runner
- * zcl_devloop_process_run(), and read /proc/<pid>/exe. Every entry point here
+ * zcl_devloop_process_run(), and query the service's running image through the
+ * platform process authority. Every entry point here
  * does process exec, so the whole TU is confined to ZCL_DEV_BUILD and is absent
  * from both the release binary and the (ZCL_TESTING) test harness — tests drive
  * a fake ops vtable instead. Symbol absence from release is proven by
@@ -20,12 +21,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 #include "devloop.h"
+#include "platform/os_proc.h"
 
-/* The default ops treat the request as their context so the real systemctl /
- * proc calls can read unit / datadir / rpcport / repo_root. */
+/* The default ops treat the request as their context so service/process calls
+ * can read unit / datadir / rpcport / repo_root. */
 
 static int dev_run_argv(const char *cwd, const char *const argv[],
                         int timeout_ms, struct zcl_devloop_process_result *out)
@@ -136,17 +137,13 @@ static int dev_op_running_exe(void *ctx, long pid, char *out, size_t out_sz)
     (void)ctx;
     if (pid <= 0)
         return -1;
-    char link[64];
-    snprintf(link, sizeof(link), "/proc/%ld/exe", pid);
     char target[PATH_MAX];
-    ssize_t n = readlink(link, target, sizeof(target) - 1);
-    if (n <= 0)
+    if (!os_proc_pid_exe_path((uint64_t)pid, target, sizeof(target)))
         return -1;
-    target[n] = 0;
     char canon[PATH_MAX];
     if (!dev_activation_canon(target, canon, sizeof(canon)))
         return -1;
-    n = snprintf(out, out_sz, "%s", canon);
+    int n = snprintf(out, out_sz, "%s", canon);
     return (n > 0 && (size_t)n < out_sz) ? 0 : -1;
 }
 

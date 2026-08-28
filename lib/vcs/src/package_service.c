@@ -7,7 +7,7 @@
  * question is answered by lib/vcs/package_policy.* over the facts read
  * here. */
 #include "vcs/package_service.h"
-
+#if !defined(_WIN32)
 #include "base/hex.h"
 #include "base/log_macros.h"
 #include "base/safe_alloc.h"
@@ -21,7 +21,6 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
-
 #define SERVICE_LOG "vcs.service"
 
 /* Hash domain (never hash undomained content). */
@@ -1038,3 +1037,4 @@ void vcs_service_book_totals(const struct vcs_service_book *book,
     out->offence_total = book->total_offences;
     out->no_credit_bytes = book->total_no_credit_bytes;
 }
+#endif

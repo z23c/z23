@@ -2,8 +2,9 @@
  *
  * vcs_devloop — implementation. See vcs/vcs_devloop.h. */
 
-#include "vcs/vcs_devloop.h"
+#define _GNU_SOURCE
 
+#include "vcs/vcs_devloop.h"
 #include "vcs/vcs.h"
 #include "vcs/vcs_commit.h"
 #include "vcs/vcs_index.h"
@@ -17,7 +18,6 @@
 #include "vcs/zcode_commons_v2.h"
 #include "vcs/zcode_dht_record.h"
 #include "vcs/build_action.h"
-
 #include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "base/serialize_le.h"

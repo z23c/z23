@@ -119,7 +119,8 @@ ZCL_HOTSWAP_LOOP_GOALS := hotswap-try hotswap-apply hotswap \
 	presentation-lib presentation-demo presentation-relaunch \
 	presentation-desktop-install presentation-portability \
 	windows-acceptance-compile windows-acceptance \
-	new-app new-app-selftest $(ZCL_GUI_APP_GOALS)
+	new-app new-app-selftest test-windows-thread-join-acceptance \
+	$(ZCL_GUI_APP_GOALS)
 ZCL_HOTSWAP_LOOP_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_HOTSWAP_LOOP_GOALS),$(MAKECMDGOALS))),,1),)
 
 # hotswap-module-so compiles exactly one TU via a direct $(CC) shell command in
@@ -4644,7 +4645,10 @@ $(BIN_DIR)/corpus-census: tools/corpus_census.c \
 		lib/base/src/cleanse.c lib/base/src/log_level.c \
 		lib/base/src/safe_alloc.c \
 		lib/codec/src/cursor.c lib/json/src/json.c \
-		lib/platform/src/rng.c lib/platform/src/clock.c
+		lib/platform/src/rng.c lib/platform/src/clock.c \
+		lib/platform/src/file_metadata.c lib/platform/src/os_proc.c \
+		lib/platform/src/positioned_file.c \
+		lib/platform/src/private_directory.c lib/platform/src/private_file.c
 	@mkdir -p $(dir $@)
 	# --gc-sections: ed25519's batch-verify path (never called here) pulls
 	# zcl_random_secret_bytes -> sealed-tree random.c; the collector drops it.
@@ -5930,6 +5934,21 @@ zcode-reproduction-acceptance:
 	@$(MAKE) --no-print-directory t-fast-exact \
 	  ONLY='$(ZCODE_REPRODUCTION_ACCEPTANCE_TESTS)'
 	@echo "zcode-reproduction-acceptance: PASS distinct_signer_simulation=true approved_fixture_policy=true actual_off_host_credit=false"
+
+# Headless proof for the bounded join primitive shared by thread_registry,
+# thread_liveness, and supervisor shutdown. This target is intentionally
+# standalone: it needs no vendor archive, node link, service, or GUI runtime.
+THREAD_JOIN_ACCEPTANCE_BIN := $(BIN_DIR)/thread-join-acceptance
+.PHONY: test-windows-thread-join-acceptance
+test-windows-thread-join-acceptance: $(THREAD_JOIN_ACCEPTANCE_BIN)
+	@$(THREAD_JOIN_ACCEPTANCE_BIN)
+
+$(THREAD_JOIN_ACCEPTANCE_BIN): lib/platform/tests/thread_join_windows_acceptance.c \
+		lib/platform/include/platform/thread_compat.h
+	@mkdir -p $(dir $@)
+	$(CC) $(ZCL_PLATFORM_CPPFLAGS) -D_GNU_SOURCE \
+		-std=c23 -Wall -Wextra -Werror -pedantic \
+		-Ilib/platform/include $< $(ZCL_STATIC_FLAG) -pthread -o $@
 
 # ── STICKINESS fault-injection matrix (sticky-node-plan §4 metric) ──
 #
