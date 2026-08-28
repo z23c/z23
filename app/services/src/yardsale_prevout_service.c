@@ -23,9 +23,24 @@ struct zcl_result yardsale_prevout_fetch_confirmed(void *ctx,
                                                    const uint8_t txid[32],
                                                    struct transaction *tx_out)
 {
+    if (!tx_out)
+        return ZCL_ERR(-1, "prevout fetch: no output transaction");
+
+    /* CONSTRUCT tx_out BEFORE the first thing that can fail. Every refusal
+     * below is an ordinary runtime outcome — a closed node.db, a txid this
+     * node never finalized, a body that will not hash back — and the caller
+     * transaction_free()s tx_out on exactly those paths. A return that left
+     * it untouched would hand transaction_free() whatever the caller's stack
+     * was holding: a stale pointer plus a stale count, i.e. a wild walk.
+     * That is the compact_block_reconstruct() defect of 2026-08-26, one
+     * frame over. Because this function initializes rather than frees,
+     * tx_out arrives UNINITIALIZED by contract: a caller must never hand in
+     * a transaction that still owns memory. */
+    transaction_init(tx_out);
+
     const struct yardsale_prevout_view *view = ctx;
     if (!view || !view->state || !view->node_db || !view->node_db->open ||
-        !view->datadir || !txid || !tx_out)
+        !view->datadir || !txid)
         return ZCL_ERR(-1, "prevout fetch: unwired chain view");
 
     struct db_tx_index row;
@@ -58,8 +73,10 @@ struct zcl_result yardsale_prevout_fetch_confirmed(void *ctx,
         struct uint256 body_hash;
         block_header_get_hash(&blk.header, &body_hash);
         if (uint256_cmp(&body_hash, bi->phashBlock) == 0) {
-            transaction_free(tx_out);
-            transaction_init(tx_out);
+            /* tx_out is still the empty transaction constructed on entry,
+             * and transaction_copy re-initializes it and frees back to
+             * empty on its own failure — so every outcome from here on is
+             * a valid, freeable body. */
             if (transaction_copy(tx_out, &blk.vtx[row.tx_index]))
                 out = ZCL_OK;
             else

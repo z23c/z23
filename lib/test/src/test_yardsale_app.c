@@ -32,7 +32,9 @@
 #include "models/yardsale_plan.h"
 #include "net/onion_service.h"
 #include "platform/time_compat.h"
+#include "primitives/transaction.h"
 #include "script/standard.h"
+#include "services/yardsale_prevout_service.h"
 #include "sim/simnet.h"
 #include "support/cleanse.h"
 #include "znam/znam.h"
@@ -256,11 +258,16 @@ static struct zcl_result ysa_prevout_fetch_fn(void *ctx,
                                               struct transaction *out)
 {
     (void)ctx;
-    if (!ysa_prevout_serve || !out ||
+    if (!out)
+        return ZCL_ERR(-1, "fake: no output transaction");
+    /* Same out-parameter contract as the real service (see the typedef in
+     * controllers/yardsale_controller.h): construct BEFORE the first
+     * refusal so the caller's transaction_free() is safe on every path,
+     * and never free what the caller handed in. */
+    transaction_init(out);
+    if (!ysa_prevout_serve ||
         memcmp(txid, ysa_prevout_tx.hash.data, 32) != 0)
         return ZCL_ERR(-1, "fake: no confirmed body for this txid");
-    transaction_free(out);
-    transaction_init(out);
     if (!transaction_copy(out, &ysa_prevout_tx))
         return ZCL_ERR(-2, "fake: body copy failed");
     return ZCL_OK;
@@ -1059,6 +1066,91 @@ static int t_prevout_guard(void)
     return failures;
 }
 
+/* ── The chain-content port's out-parameter contract ─────────────── */
+
+/* A transaction nobody wrote: exactly the shape transaction_init leaves,
+ * so a poisoned slot that a refusal never touched fails this test loudly
+ * instead of crashing the caller's transaction_free() later. */
+static bool ysa_tx_is_empty(const struct transaction *tx)
+{
+    return tx->vin == NULL && tx->num_vin == 0 &&
+           tx->vout == NULL && tx->num_vout == 0 &&
+           tx->v_shielded_spend == NULL && tx->num_shielded_spend == 0 &&
+           tx->v_shielded_output == NULL && tx->num_shielded_output == 0 &&
+           tx->v_joinsplit == NULL && tx->num_joinsplit == 0;
+}
+
+/* The buyer frees the fetched body on EVERY path — the refusals included,
+ * because a refusal is what happens when the seller named a token input
+ * this chain does not hold. So both implementations of the port must hand
+ * back a transaction that is safe to free even when they refuse.
+ *
+ * The slot is poisoned with 0xAB first. A fresh stack reads back as zero,
+ * which is why the same defect in compact_block_reconstruct() survived 140
+ * replays and a 1.26M-exec fuzz session; poisoning makes an untouched
+ * return deterministic rather than a long-lived-process-only crash. The
+ * free is skipped when the check fails, so a regression reports FAIL here
+ * instead of taking the whole group down with a wild free. */
+static int t_prevout_out_contract(void)
+{
+    int failures = 0;
+    ysa_reset_all();
+
+    uint8_t txid[32];
+    ysa_pattern32(txid, 0x7c);
+    struct transaction tx;
+
+    memset(&tx, 0xab, sizeof(tx));
+    struct zcl_result r = ysa_prevout_fetch_fn(NULL, txid, &tx);
+    bool ok = !r.ok && ysa_tx_is_empty(&tx);
+    YSA_CHECK("prevout contract: a refused fetch is still safe to free", ok);
+    if (ok) transaction_free(&tx);
+
+    /* The production service, refusing because no chain view is wired —
+     * the state a node is in before boot finishes composing it. */
+    memset(&tx, 0xab, sizeof(tx));
+    r = yardsale_prevout_fetch_confirmed(NULL, txid, &tx);
+    ok = !r.ok && ysa_tx_is_empty(&tx);
+    YSA_CHECK("prevout contract: an unwired chain view is still safe to free",
+              ok);
+    if (ok) transaction_free(&tx);
+
+    /* No output slot at all is refused, never dereferenced. */
+    struct zcl_result rf = ysa_prevout_fetch_fn(NULL, txid, NULL);
+    struct zcl_result rs = yardsale_prevout_fetch_confirmed(NULL, txid, NULL);
+    YSA_CHECK("prevout contract: a missing output slot is refused",
+              !rf.ok && !rs.ok);
+
+    /* Positive control: the same poisoned slot comes back holding the
+     * served body — so the checks above are not satisfied by a port that
+     * simply never serves anything, and the other half of the contract
+     * holds too: the port must never free what the caller handed in, since
+     * the slot it receives is uninitialized by contract.
+     *
+     * Run only once the refusals above have proved the port constructs
+     * before it can fail. A port that does not is precisely one that would
+     * free this poison, and the point of the checks above is to REPORT
+     * that, not to crash the group demonstrating it. */
+    if (failures == 0) {
+        uint8_t token_id[32], script[25];
+        ysa_pattern32(token_id, 0x40);
+        struct privkey seller_key;
+        ysa_key(&seller_key, 0x11);
+        bool armed = ysa_p2pkh_script(&seller_key, script) == 25 &&
+            ysa_prevout_build(txid, token_id, 500, 1000, script, 25);
+        memset(&tx, 0xab, sizeof(tx));
+        r = armed ? ysa_prevout_fetch_fn(NULL, txid, &tx)
+                  : ZCL_ERR(-1, "fixture not armed");
+        ok = armed && r.ok && tx.num_vout == 3 && tx.vout != NULL;
+        YSA_CHECK("prevout contract: a served body arrives in the same slot",
+                  ok);
+        if (r.ok) transaction_free(&tx);
+    }
+
+    ysa_reset_all();
+    return failures;
+}
+
 /* ── The per-peer gossip clamp ───────────────────────────────────── */
 
 static int t_peer_clamp(void)
@@ -1731,6 +1823,7 @@ int test_yardsale_app(void)
     failures += t_webbuy_plan_gate();
     failures += t_ingress_negatives();
     failures += t_prevout_guard();
+    failures += t_prevout_out_contract();
     failures += t_peer_clamp();
     failures += t_seller_web_endpoint();
     failures += t_known_sellers();

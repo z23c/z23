@@ -84,7 +84,18 @@ bool yardsale_broadcast_default(const struct transaction *tx, void *ctx);
  * fake. The result type carries why a body is not confirmed here (E2:
  * services return struct zcl_result, never bare bool). Fail-closed: while
  * unwired, every partial ingest is refused (nothing is signed, nothing is
- * broadcast). */
+ * broadcast).
+ *
+ * OUT-PARAMETER CONTRACT, binding on every implementation: tx_out is
+ * transaction_init()ed BEFORE the first thing that can fail, so it is a
+ * valid transaction on EVERY return — a populated body on ZCL_OK, an empty
+ * one on every refusal — and transaction_free(tx_out) is always safe. An
+ * implementation that returns early without touching tx_out hands the
+ * caller's own transaction_free() a stale pointer and a stale count out of
+ * the caller's stack frame; that is a wild free, not a leak. Conversely an
+ * implementation must never free tx_out on entry: it arrives uninitialized
+ * by contract, so callers must not pass a transaction that still owns
+ * memory. tx_out == NULL is refused, not dereferenced. */
 typedef struct zcl_result (*yardsale_prevout_fetch_fn)(
     void *ctx, const uint8_t txid[32], struct transaction *tx_out);
 void yardsale_ceremony_set_prevout_fetch(yardsale_prevout_fetch_fn fn,
