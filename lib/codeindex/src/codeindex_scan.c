@@ -24,7 +24,7 @@
  *
  * This is deliberately heuristic. It is expected to be iterated; correctness
  * lives in test_codeindex against a controlled fixture. */
-#include "codeindex_priv.h"
+#include "codeindex_scan_internal.h"
 
 #include "util/log_macros.h"
 #include "base/text_fit.h"
@@ -80,36 +80,8 @@ static bool is_reserved_name(const char *s)
 
 /* ── line index ─────────────────────────────────────────────────────── */
 
-struct scan_ctx {
-    const char *src;
-    const char *clean;
-    size_t      len;
-    size_t     *line_starts;   /* offset of each line start */
-    size_t      nlines;
-    char       *line_guard;    /* nlines * 128, guard active on each line */
-    bool       *pp_line;       /* nlines, true for preprocessor lines */
-    const char *relpath;
-    bool        is_header;
-    const char *group;
-    ci_sym_cb   on_sym;
-    ci_ref_cb   on_ref;
-    void       *user;
-    int         syms_emitted;
-    int         refs_emitted;
-
-    /* doc comments: end offset + first line */
-    struct { size_t start_off; size_t end_off; char firstline[256]; } *comments;
-    size_t      ncomments;
-    size_t      cap_comments;
-
-    /* function definitions in this file, in emit order: (def_line, name). Used
-     * to attribute each call site's enclosing function (greatest def_line <=
-     * ref_line). C functions do not nest, so this is exact for well-formed
-     * source and best-effort otherwise. */
-    struct { int def_line; char name[128]; } *funcs;
-    size_t      nfuncs;
-    size_t      cap_funcs;
-};
+/* `struct scan_ctx` now lives in codeindex_scan_internal.h, shared with the
+ * doc-comment layer in codeindex_scan_doc.c. */
 
 /* Record a function definition for later enclosing-attribution. Best-effort:
  * silently drops the record on OOM (the ref simply stays unattributed). */
@@ -167,173 +139,6 @@ static const char *guard_of_line(const struct scan_ctx *c, int line1)
 {
     if (line1 < 1 || (size_t)line1 > c->nlines) return "";
     return c->line_guard + (size_t)(line1 - 1) * 128;
-}
-
-/* ── comment capture ────────────────────────────────────────────────── */
-
-static void capture_doc(struct scan_ctx *c, size_t content_start, size_t end)
-{
-    /* Find the first non-empty textual line inside [content_start,end),
-     * stripping leading whitespace and comment-fill '*'. */
-    char line[256];
-    line[0] = '\0';
-    size_t i = content_start;
-    while (i < end) {
-        /* skip leading whitespace + '*' + '/' fill */
-        while (i < end && (c->src[i] == ' ' || c->src[i] == '\t' ||
-                           c->src[i] == '*' || c->src[i] == '\r'))
-            i++;
-        if (i < end && c->src[i] == '\n') { i++; continue; }
-        size_t j = i;
-        while (j < end && c->src[j] != '\n') j++;
-        /* trim trailing */
-        size_t e = j;
-        while (e > i && (c->src[e - 1] == ' ' || c->src[e - 1] == '\t' ||
-                         c->src[e - 1] == '\r' || c->src[e - 1] == '*'))
-            e--;
-        if (e > i) {
-            size_t n = e - i;
-            if (n > sizeof(line) - 1) n = sizeof(line) - 1;
-            memcpy(line, c->src + i, n);
-            line[n] = '\0';
-            break;
-        }
-        i = j + 1;
-    }
-    if (!line[0]) return;
-    if (c->ncomments == c->cap_comments) {
-        size_t ncap = c->cap_comments ? c->cap_comments * 2 : 64;
-        void *nb = zcl_realloc(c->comments, ncap * sizeof(*c->comments),
-                               "ci_comments");
-        if (!nb) return;  /* best-effort: drop doc capture on OOM */
-        c->comments = nb;
-        c->cap_comments = ncap;
-    }
-    c->comments[c->ncomments].start_off = content_start;
-    c->comments[c->ncomments].end_off = end;
-    snprintf(c->comments[c->ncomments].firstline,
-             sizeof(c->comments[c->ncomments].firstline), "%s", line);
-    c->ncomments++;
-}
-
-/* Doc for a segment starting at seg_start whose first token is at tok_off:
- * the last comment fully inside [seg_start, tok_off). */
-static const char *doc_for(const struct scan_ctx *c, size_t seg_start,
-                           size_t tok_off)
-{
-    const char *best = "";
-    for (size_t i = 0; i < c->ncomments; i++) {
-        if (c->comments[i].start_off >= seg_start &&
-            c->comments[i].end_off <= tok_off)
-            best = c->comments[i].firstline;
-    }
-    return best;
-}
-
-/* ── file self-description (§1.1 of docs/work/palace-design.md) ───────── */
-
-/* License headers describe redistribution terms, not the file.  Keep this
- * deliberately prefix-based and narrow: a line that is not recognizable
- * boilerplate remains eligible as the file's purpose. */
-static bool purpose_line_is_license(const char *line)
-{
-    static const char *const prefixes[] = {
-        "Copyright",
-        "SPDX-License-Identifier:",
-        "Distributed under",
-        "file COPYING",
-        "Licensed under",
-        "See the License",
-        "All rights reserved.",
-        NULL,
-    };
-    for (size_t i = 0; prefixes[i]; i++) {
-        size_t n = strlen(prefixes[i]);
-        if (strncasecmp(line, prefixes[i], n) == 0) return true;
-    }
-    return false;
-}
-
-/* Derive a file's one-line purpose from its EXISTING leading block comment:
- * the first substantive body line after skipping license boilerplate and blank
- * '*' fill, with a leading "<stem> [—:-] " prefix stripped so the stored
- * purpose is the bare description. An explicit "purpose: ..." body line
- * overrides (mirrors the // suffix-ok convention). Writes "" when no comment
- * precedes the first code token. Walks only the one leading comment's bytes via
- * the offsets already captured in c->comments[] — NO second file parse. */
-static void ci_file_purpose(const struct scan_ctx *c, char out[160])
-{
-    out[0] = '\0';
-    if (c->ncomments == 0) return;
-
-    /* first code token in the clean buffer (comments already blanked) */
-    size_t code_off = 0;
-    while (code_off < c->len && isspace((unsigned char)c->clean[code_off]))
-        code_off++;
-    /* the leading comment must precede the first code token, else the earliest
-     * comment is an interior doc block, not a file-level purpose. */
-    size_t start = c->comments[0].start_off;
-    size_t end   = c->comments[0].end_off;
-    if (start >= code_off) return;
-
-    /* file stem = basename minus extension, for prefix stripping */
-    char stem[128];
-    {
-        const char *base = strrchr(c->relpath, '/');
-        base = base ? base + 1 : c->relpath;
-        size_t n = 0;
-        while (base[n] && base[n] != '.' && n + 1 < sizeof(stem))
-            stem[n] = base[n], n++;
-        stem[n] = '\0';
-    }
-    size_t sl = strlen(stem);
-
-    /* walk body lines of [start,end), mirroring capture_doc's fill-stripping */
-    size_t i = start;
-    char line[256];
-    while (i < end) {
-        while (i < end && (c->src[i] == ' ' || c->src[i] == '\t' ||
-                           c->src[i] == '*' || c->src[i] == '\r'))
-            i++;
-        if (i < end && c->src[i] == '\n') { i++; continue; }
-        size_t j = i;
-        while (j < end && c->src[j] != '\n') j++;
-        size_t e = j;
-        while (e > i && (c->src[e - 1] == ' ' || c->src[e - 1] == '\t' ||
-                         c->src[e - 1] == '\r' || c->src[e - 1] == '*'))
-            e--;
-        if (e > i) {
-            size_t n = e - i;
-            if (n > sizeof(line) - 1) n = sizeof(line) - 1;
-            memcpy(line, c->src + i, n);
-            line[n] = '\0';
-
-            /* explicit override wins: "purpose: <text>" */
-            if (strncasecmp(line, "purpose:", 8) == 0) {
-                const char *p = line + 8;
-                while (*p == ' ' || *p == '\t') p++;
-                (void)zcl_text_fit(out, 160, p, "codeindex", "file_purpose");
-                return;
-            }
-            if (purpose_line_is_license(line)) { i = j + 1; continue; }
-
-            /* first substantive line: strip a leading "<stem> [—:-] " prefix */
-            const char *desc = line;
-            if (sl > 0 && strncmp(line, stem, sl) == 0) {
-                const char *p = line + sl;
-                while (*p == ' ') p++;
-                if ((unsigned char)p[0] == 0xE2 && (unsigned char)p[1] == 0x80 &&
-                    (unsigned char)p[2] == 0x94) {          /* em-dash — */
-                    p += 3; while (*p == ' ') p++; desc = p;
-                } else if (p[0] == ':' || p[0] == '-') {    /* "stem:" / "stem -" */
-                    p += 1; while (*p == ' ') p++; desc = p;
-                }
-            }
-            (void)zcl_text_fit(out, 160, desc, "codeindex", "file_purpose");
-            return;
-        }
-        i = j + 1;
-    }
 }
 
 /* ── small string helpers over the clean buffer ─────────────────────── */

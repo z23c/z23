@@ -6,4 +6,13 @@
 # in 7fbc33724, keeping the strict gates stable under parallel load. Reviewed
 # and accepted; src/main_cli_modes.c came back under its baseline in the same
 # window, so this is one file's drift, not a widening trend.
-24
+#
+# 2026-08-28: 24 -> 22. Merging origin/main's Windows/macOS work pushed the
+# drift to 30. The gate offered to record 30; raising it would have hidden the
+# growth instead of answering it. Eight files were split along their own seams
+# instead -- simnet_chaos_faults, simnet_wire, postmortem, disk_block_io,
+# prometheus_metrics, codeindex_scan, codeindex_store, hotswap_elf_probe --
+# which took the count to 22, and disk_block_io.c and codeindex_store.c fell
+# back under the 800 ceiling entirely, so their baseline entries were deleted
+# rather than tightened.
+22

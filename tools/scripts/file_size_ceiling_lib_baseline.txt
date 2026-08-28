@@ -23,12 +23,11 @@
 
 lib/crypto/src/ed25519.c 1033
 lib/codeindex/src/codeindex_build.c 991
-lib/codeindex/src/codeindex_scan.c 1032
-lib/codeindex/src/codeindex_store.c 943
+lib/codeindex/src/codeindex_scan.c 848
 lib/event/src/event.c 1055
 lib/hotswap/src/hotswap_loader.c 817
 lib/kernel/src/command_registry.c 2289
-lib/metrics/src/prometheus_metrics.c 1100
+lib/metrics/src/prometheus_metrics.c 933
 lib/net/src/addrman.c 1254
 lib/net/src/connman.c 2929
 lib/net/src/download.c 1623
@@ -53,13 +52,12 @@ lib/sapling/src/circuit_spend.c 959
 lib/sapling/src/groth16_prover.c 1203
 lib/sapling/src/incremental_merkle_tree.c 1033
 lib/sapling/src/sapling.c 1220
-lib/sim/src/postmortem.c 1444
+lib/sim/src/postmortem.c 1265
 lib/sim/src/simnet_cluster.c 873
-lib/sim/src/simnet_wire.c 1491
+lib/sim/src/simnet_wire.c 1283
 lib/storage/src/census_read.c 868
 lib/storage/src/coins_kv.c 1363
 lib/storage/src/consensus_db.c 883
-lib/storage/src/disk_block_io.c 973
 lib/storage/src/peers_projection.c 1304
 lib/storage/src/progress_store.c 881
 lib/storage/src/coins_ram.c 1406
@@ -68,7 +66,7 @@ lib/validation/src/chainstate.c 1038
 lib/validation/src/connect_block.c 896
 lib/wallet/src/wallet.c 1560
 lib/wallet/src/wallet_sqlite.c 1603
-lib/sim/src/simnet_chaos_faults.c 2684
+lib/sim/src/simnet_chaos_faults.c 1492
 lib/util/src/blocker.c 836
 lib/util/src/supervisor.c 1211
 lib/sync/src/stage.c 817
@@ -107,5 +105,5 @@ lib/vcs/src/zcode_workspace_manifest.c 846
 # landed at triple the ceiling and zcode_dht_service.c just past it, both
 # already on main and unrecorded, tripping the E1 self-test for the next
 # pusher. Held here at today's size per the rule above.
-lib/hotswap/src/hotswap_elf_probe.c 1231
+lib/hotswap/src/hotswap_elf_probe.c 990
 lib/vcs/src/zcode_dht_service.c 833
