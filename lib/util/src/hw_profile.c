@@ -4,12 +4,29 @@
  *
  * Four probes, each pure raw-syscall/sysfs/cpuid, no external deps:
  *   1. Online/physical core count — delegates to util/cpu_topology.h.
- *   2. Total RAM — sysconf(_SC_PHYS_PAGES) * sysconf(_SC_PAGE_SIZE).
+ *   2. Total RAM — sysconf(_SC_PHYS_PAGES) * sysconf(_SC_PAGE_SIZE) on Linux
+ *      and the other POSIX hosts; platform/system_memory.h's per-OS
+ *      primitive (sysctlbyname("hw.memsize") on Darwin, GlobalMemoryStatusEx
+ *      on Windows) where _SC_PHYS_PAGES is absent or is not the documented
+ *      total-RAM interface.
  *   3. x86_64 ISA extensions — __builtin_cpu_supports("...").
  *   4. Datadir storage rotational flag — stat(datadir).st_dev -> major:minor
  *      -> resolve /sys/dev/block/<maj>:<min> -> if it's a partition (has a
  *      "partition" sibling file) walk up to the parent whole-disk dir ->
  *      read queue/rotational.
+ *
+ * PORTABILITY AND HONESTY. This profile is published over the wire: peers
+ * fetch a node's mesh observation document and compose their own verdict
+ * from the cores/RAM/rotational facts in it. A probe that cannot observe its
+ * answer on this host therefore reports UNKNOWN and never a plausible
+ * substitute — a composing peer handles "unknown" correctly and cannot
+ * detect an invented value. Concretely: RAM stays 0 when no primitive
+ * answers, and the rotational flag's `known` out-parameter stays false
+ * wherever the sysfs walk above is unavailable (macOS, Windows, containers,
+ * tmpfs, no datadir). The rotational probe itself is written against POSIX
+ * (stat + realpath), so it compiles and runs on Darwin — where it finds no
+ * /sys and honestly reports unknown — and is compiled out only on Windows,
+ * which has neither realpath() nor major()/minor().
  *
  * Everything below the probes is pure/allocation-free so the derived
  * tunables and the monotonicity properties they promise are directly
@@ -31,8 +48,22 @@
 #include "crypto/blake2b.h"
 #include "crypto/sha256.h"
 #include "json/json.h"
+/* platform/device_compat.h decomposes a dev_t into major:minor for the sysfs
+ * walk below. Windows has no such decomposition (and no realpath), so the
+ * whole sysfs-shaped rotational probe is compiled out there and this header
+ * would only contribute an unusable major()/minor(). Darwin DOES take this
+ * arm — device_compat.h carries a Darwin decomposition, and the probe simply
+ * finds no /sys at runtime and reports unknown. */
+#if !defined(_WIN32)
 #include "platform/device_compat.h"
+#endif
 #include "util/log_macros.h"
+
+/* Darwin and Windows have no usable sysconf(_SC_PHYS_PAGES); route those two
+ * through the shared total-RAM seam instead of restating the incantation. */
+#if defined(__APPLE__) || defined(_WIN32)
+#include "platform/system_memory.h"
+#endif
 
 #include <limits.h>
 #include <pthread.h>
@@ -70,12 +101,29 @@ static char g_block_root[HW_PROFILE_ROOT_MAX] = HW_PROFILE_BLOCK_ROOT_DEFAULT;
 
 /* ── RAM probe ─────────────────────────────────────────────────────── */
 
+/* Returns 0 for "unknown" — the documented sentinel of
+ * hw_profile_ram_bytes(). Every derived tunable already treats a
+ * non-positive ram_bytes as "small/unknown host, keep the safe baseline", so
+ * an unanswerable host degrades instead of getting an invented figure. */
 static int64_t probe_ram_bytes(void)
 {
+#if defined(__APPLE__) || defined(_WIN32)
+    /* _SC_PHYS_PAGES is not in the POSIX base: Windows has no sysconf() at
+     * all, and on Darwin it is a compatibility shim rather than the
+     * documented total-RAM interface (hw.memsize is). Both go through
+     * platform/system_memory.h, which owns the per-OS primitive and returns
+     * false when it cannot answer. Do not fall back to a guess on that
+     * false. */
+    uint64_t bytes = 0;
+    if (!platform_system_memory_bytes(&bytes)) return 0;
+    if (bytes > (uint64_t)INT64_MAX) return 0;
+    return (int64_t)bytes;
+#else
     long pages = sysconf(_SC_PHYS_PAGES);
     long page_sz = sysconf(_SC_PAGE_SIZE);
     if (pages <= 0 || page_sz <= 0) return 0;
     return (int64_t)pages * (int64_t)page_sz;
+#endif
 }
 
 /* ── ISA probe ─────────────────────────────────────────────────────── */
@@ -103,6 +151,8 @@ static void probe_isa(struct hw_profile_isa *out)
 }
 
 /* ── Storage-rotational probe ──────────────────────────────────────── */
+
+#if !defined(_WIN32)
 
 static bool sysfs_path_exists_local(const char *path)
 {
@@ -169,6 +219,35 @@ static bool probe_datadir_rotational(const char *block_root,
     if (stat(datadir, &st) != 0) return false;
     return probe_rotational_under(block_root, st.st_dev, out);
 }
+
+#else /* _WIN32 */
+
+/* Windows: NOT OBSERVABLE with what this module is willing to do, so it
+ * reports unknown — *out is left untouched and the caller's
+ * `rotational_known` stays false.
+ *
+ * The Windows answer exists, but only behind a much heavier path than a
+ * stat(): open a handle on the volume (\\.\X:) and issue
+ * DeviceIoControl(IOCTL_STORAGE_QUERY_PROPERTY) with
+ * StorageDeviceSeekPenaltyProperty, reading DEVICE_SEEK_PENALTY_DESCRIPTOR
+ * .IncursSeekPenalty — and even that is a driver self-report that is wrong
+ * on several USB bridges and on storage behind a RAID/virtualization layer.
+ * Until that is implemented AND measured against real Windows spindles and
+ * SSDs, guessing "not rotational" here would be a lie with consequences: a
+ * peer composing a verdict from this node's published observation cannot
+ * tell an invented flag from an observed one, and an SSD-shaped assumption
+ * is exactly what grades an honest slow-disk box as failing. Unknown is the
+ * correct, composable answer. */
+static bool probe_datadir_rotational(const char *block_root,
+                                     const char *datadir, bool *out)
+{
+    (void)block_root;
+    (void)datadir;
+    (void)out;
+    return false;
+}
+
+#endif /* !_WIN32 */
 
 /* ── Lifecycle ─────────────────────────────────────────────────────── */
 
