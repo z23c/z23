@@ -28,7 +28,7 @@
 #include <errno.h>
 #include <string.h>
 
-void fs_session_init(struct fs_session *s, int fd)
+void fs_session_init(struct fs_session *s, platform_socket_t fd)
 {
     if (!s) return;
     memset(s, 0, sizeof(*s));
@@ -249,7 +249,7 @@ static void fs_join_thread_bounded(pthread_t thread,
 
 /* ── Session management ────────────────────────────────────────── */
 
-void fs_session_init(struct fs_session *s, int fd)
+void fs_session_init(struct fs_session *s, platform_socket_t fd)
 {
     memset(s, 0, sizeof(*s));
     s->fd = fd;

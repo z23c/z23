@@ -161,6 +161,20 @@ static inline int platform_socket_close(platform_socket_t sock)
 #endif
 }
 
+static inline bool platform_socket_set_nonblocking(platform_socket_t sock,
+                                                    bool enabled)
+{
+#if defined(_WIN32)
+    u_long value = enabled ? 1UL : 0UL;
+    return ioctlsocket(sock, FIONBIO, &value) == 0;
+#else
+    int flags = fcntl(sock, F_GETFL);
+    if (flags < 0) return false;
+    int updated = enabled ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK);
+    return fcntl(sock, F_SETFL, updated) == 0;
+#endif
+}
+
 static inline int platform_socket_last_error(void)
 {
 #if defined(_WIN32)
