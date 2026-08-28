@@ -143,15 +143,13 @@
 #include "keys/key_io.h"
 #include "script/standard.h"
 #include "sapling/params_init.h"
-#include <netdb.h>
+#include "platform/socket_compat.h"
 #include <errno.h>
 #include <stdatomic.h>
 #include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
 #include <unistd.h>
 #include <sys/stat.h>
 #include <pthread.h>
