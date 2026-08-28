@@ -369,6 +369,20 @@ struct p2p_node {
     int64_t unverifiable_tx_window_start;
     uint32_t unverifiable_tx_window_count;
 
+    /* Per-peer getheaders SERVE window
+     * (msg_headers.c::process_getheaders). Same fixed-window shape as the
+     * addr limit above: getheaders_rate_window_count accumulates requests
+     * this node ANSWERED since getheaders_rate_window_start, and the whole
+     * window resets once GETHEADERS_SERVE_WINDOW_SECS have elapsed. Beyond
+     * the allowance the request is DEFERRED — no reply, no disconnect, no
+     * offence: an honest peer never reaches the gate, so a punishment there
+     * could only hurt a peer we mis-measured. Zero-initialised by
+     * p2p_node_create (calloc), so window_start==0 reads as "no window yet";
+     * and because the state dies with the connection, a reconnecting peer
+     * starts from a fresh window exactly like any other per-peer slot here. */
+    int64_t getheaders_rate_window_start;
+    uint32_t getheaders_rate_window_count;
+
     struct inv_item *inventory_to_send;
     size_t inventory_to_send_count;
     size_t inventory_to_send_cap;

@@ -136,6 +136,33 @@ uint64_t getheaders_serve_pow_checks(void);
  * nothing branches on it. */
 uint64_t getheaders_serve_refusals_no_header_bytes(void);
 
+/* Per-peer getheaders SERVE window. Answering one request costs up to
+ * ~2000 Equihash verifications (~0.8 s of a core) and ~2.9 MB of wire, so
+ * without a bound one peer chooses this node's serve bill: measured honest
+ * IBD re-asks at roughly one request per scheduler poll (~6/min), while an
+ * unbounded peer drives the same wire at its own send rate — about three
+ * orders of magnitude more serving than any honest client needs.
+ *
+ * GETHEADERS_SERVE_MAX_REQUESTS_PER_WINDOW is the sustained allowance. It is
+ * deliberately GENEROUS against the honest pace — several scheduler polls
+ * land in every window, and an RTT-bound pipelining burst still fits —
+ * because the response to exceeding it is DEFER, not disconnect: an honest
+ * peer that somehow lands above the allowance just sees its next request go
+ * unanswered and retries, losing nothing. Exposed so tests and operators can
+ * see the chosen thresholds; the window itself is per-peer state on
+ * struct p2p_node, so it dies with the connection. */
+#define GETHEADERS_SERVE_WINDOW_SECS 60
+#define GETHEADERS_SERVE_MAX_REQUESTS_PER_WINDOW 30u
+
+/* getheaders requests DEFERRED by that per-peer serve window, process-wide
+ * since start. A non-zero and climbing value names a peer (or peers) asking
+ * for more serving than the allowance admits; it never counts a request this
+ * node answered (those are getheaders_served_requests) and never fires for
+ * the snapshot-serving defer (getheaders_deferred_snapshot_serving). Exposed
+ * for the offline serve regression tests and operator diagnostics; nothing
+ * branches on it. */
+uint64_t getheaders_deferred_rate_window(void);
+
 /* Serve-path verification receipts — the bound on how often a peer can make
  * this node REDO an Equihash verification it has already done.
  *

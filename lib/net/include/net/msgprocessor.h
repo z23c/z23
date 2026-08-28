@@ -570,6 +570,11 @@ struct msg_headers_stats {
     uint64_t push_getheaders_span_suppressed_snapshot;
     uint64_t push_getheaders_span_alloc_fail;
     uint64_t getheaders_deferred_snapshot_serving;
+    /* Same silent-drop family: getheaders requests DEFERRED by the per-peer
+     * serve window (GETHEADERS_SERVE_* in net/msg_internal.h). Surfaced here
+     * alongside the snapshot defer so the health object carries both defer
+     * reasons; getheaders_deferred_rate_window() reads the same counter. */
+    uint64_t getheaders_deferred_rate_window;
     /* Serve-side accounting — what OTHER peers cost this node.
      *
      * getheaders_served_requests counts `getheaders` requests this node
