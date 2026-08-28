@@ -15,6 +15,7 @@
 // bool exports (network_monitor_get_view + test helpers) are pure readiness
 // predicates, not fallible operations.
 
+#include "platform/socket_compat.h"
 #include "services/network_monitor.h"
 #include "services/sync_monitor.h"
 
@@ -42,6 +43,7 @@
 #include "util/thread_registry.h"
 #include "supervisors/domains.h"
 
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -86,9 +88,28 @@ static struct {
     _Atomic int64_t loop_ticks;
     _Atomic supervisor_child_id supervisor_id;
 } g_nm = {
-    .lock = PTHREAD_MUTEX_INITIALIZER,
     .last_fork_height = -1,
 };
+
+static pthread_once_t g_nm_lock_once = PTHREAD_ONCE_INIT;
+
+static void nm_lock_init_once(void)
+{
+    zcl_mutex_init(&g_nm.lock);
+}
+
+static void nm_lock(void)
+{
+    /* Process-lifetime lock, initialized exactly once as the native
+     * zcl_mutex_t for this host (CRITICAL_SECTION on Win32, recursive pthread
+     * mutex on POSIX). Every public and worker acquisition uses this gate. */
+    if (pthread_once(&g_nm_lock_once, nm_lock_init_once) != 0) {
+        LOG_ERROR("network_monitor",
+                  "network monitor lock one-time initialization failed");
+        abort();
+    }
+    zcl_mutex_lock(&g_nm.lock);
+}
 
 static struct liveness_contract g_nm_contract;
 
@@ -123,7 +144,7 @@ void network_monitor_note_peer_header(uint32_t peer_id, int height,
 {
     if (!hash_hex || height < 0)
         return;
-    zcl_mutex_lock(&g_nm.lock);
+    nm_lock();
     int free_slot = -1;
     int match = -1;
     for (int i = 0; i < NM_MAX_HEADER_VOTES; i++) {
@@ -288,7 +309,7 @@ static int nm_snapshot_peers(struct db_peer_chain_observation *obs,
         return 0;
 
     int count = 0;
-    zcl_mutex_lock(&g_nm.lock);
+    nm_lock();
     zcl_mutex_lock(&cm->manager.cs_nodes);
     for (size_t i = 0; i < cm->manager.num_nodes && count < max; i++) {
         struct p2p_node *node = cm->manager.nodes[i];
@@ -439,7 +460,7 @@ static void nm_sample_once(void)
     network_monitor_netsplit_publish(&pv);
 
     bool emit_fork = false;
-    zcl_mutex_lock(&g_nm.lock);
+    nm_lock();
     g_nm.view = v;
     if (v.fork_detected) {
         if (v.fork_height != g_nm.last_fork_height ||
@@ -470,7 +491,7 @@ bool network_monitor_get_view(struct network_consensus_view *out)
 {
     if (!out)
         return false;
-    zcl_mutex_lock(&g_nm.lock);
+    nm_lock();
     bool ready = g_nm.view.ready;
     if (ready)
         *out = g_nm.view;
@@ -666,7 +687,7 @@ void network_monitor_test_set_view(const struct network_consensus_view *v)
 {
     if (!v)
         return;
-    zcl_mutex_lock(&g_nm.lock);
+    nm_lock();
     g_nm.view = *v;
     g_nm.view.ready = true;
     zcl_mutex_unlock(&g_nm.lock);
