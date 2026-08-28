@@ -110,8 +110,9 @@ bool platform_positioned_file_open_beneath(
     HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
     FARPROC symbol = ntdll ? GetProcAddress(ntdll, "NtCreateFile") : NULL;
     nt_create_file_fn create_file = NULL;
-    static_assert(sizeof(create_file) == sizeof(symbol));
-    if (symbol) memcpy(&create_file, &symbol, sizeof(create_file));
+    static_assert(sizeof(create_file) == sizeof(symbol),
+                  "Windows function pointer representations must match");
+    memcpy(&create_file, &symbol, sizeof(create_file));
     HANDLE handle = INVALID_HANDLE_VALUE;
     HANDLE current = directory;
     wchar_t *part = relative_wide;

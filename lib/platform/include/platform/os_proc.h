@@ -149,6 +149,7 @@ enum os_proc_liveness {
 /* Fail-closed process liveness. Access denial or an indeterminate platform
  * error is UNKNOWN, never proof that a process is dead. */
 enum os_proc_liveness os_proc_pid_liveness(uint64_t pid);
+uint64_t os_proc_current_pid(void);
 
 #ifdef __cplusplus
 }

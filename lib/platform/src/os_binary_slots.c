@@ -10,11 +10,12 @@
 #include "platform/os_binary_slots.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
+#include <fcntl.h>
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -28,6 +29,7 @@
 #define SLOT_TRAVERSE_FLAGS (O_PATH | O_DIRECTORY | O_CLOEXEC)
 #else
 #define SLOT_TRAVERSE_FLAGS (O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+#endif
 #endif
 
 #define SLOT_LOCK_BASENAME ".binary-slots.lock"
@@ -52,6 +54,7 @@ static void set_error(char *out, size_t out_size, const char *fmt, ...)
     va_end(ap);
 }
 
+#ifndef _WIN32
 static bool component_valid(const char *s)
 {
     return s && s[0] && strcmp(s, ".") != 0 && strcmp(s, "..") != 0 &&
@@ -73,6 +76,7 @@ static bool join_slots_path(const char *slots_dir, const char *base,
     }
     return true;
 }
+#endif
 
 bool os_binary_slots_parse_threshold(const char *text, uint32_t *out)
 {
@@ -90,6 +94,58 @@ bool os_binary_slots_parse_threshold(const char *text, uint32_t *out)
     *out = (uint32_t)value;
     return true;
 }
+
+#ifdef _WIN32
+static bool windows_refusal(char *error, size_t error_size)
+{
+    set_error(error, error_size,
+              "binary slot mutation is disabled on Windows pending a "
+              "retained directory capability transaction");
+    return false;
+}
+
+bool os_binary_slots_ensure_directory(const char *slots_dir,
+                                      char *error, size_t error_size)
+{
+    (void)slots_dir;
+    return windows_refusal(error, error_size);
+}
+
+bool os_binary_slots_prepare_launch(const char *slots_dir,
+                                    const char *current_path,
+                                    uint32_t fallback_threshold,
+                                    struct os_binary_slots_launch *out)
+{
+    (void)slots_dir;
+    (void)current_path;
+    (void)fallback_threshold;
+    if (!out)
+        return false;
+    memset(out, 0, sizeof(*out));
+    out->executable_fd = -1;
+    return windows_refusal(out->error, sizeof(out->error));
+}
+
+void os_binary_slots_close_launch(struct os_binary_slots_launch *launch)
+{
+    if (launch)
+        launch->executable_fd = -1;
+}
+
+bool os_binary_slots_reset_streak_file(const char *streak_file,
+                                       char *error, size_t error_size)
+{
+    (void)streak_file;
+    return windows_refusal(error, error_size);
+}
+
+bool os_binary_slots_increment_streak_file(const char *streak_file,
+                                           char *error, size_t error_size)
+{
+    (void)streak_file;
+    return windows_refusal(error, error_size);
+}
+#else
 
 bool os_binary_slots_ensure_directory(const char *slots_dir,
                                       char *error, size_t error_size)
@@ -514,3 +570,4 @@ bool os_binary_slots_increment_streak_file(const char *streak_file,
 {
     return streak_file_operation(streak_file, false, error, error_size);
 }
+#endif

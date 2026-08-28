@@ -8,11 +8,13 @@
 #include "net/file_service.h"
 #include "net/rom_journal.h"
 #include "net/rom_peer_scoring.h"
+#include "rom_fetch_transport.h"
 #include "crypto/sha3.h"
 #include "encoding/utilstrencodings.h"
 #include "json/json.h"
 #include "platform/time_compat.h"
 #include "platform/file_sync.h"
+#include "platform/socket_compat.h"
 #include "support/cleanse.h"
 #include "util/safe_alloc.h"
 #include "util/log_macros.h"
@@ -20,26 +22,48 @@
 #include "util/thread_registry.h"
 #include <errno.h>
 #include <fcntl.h>
-#include <netdb.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/select.h>
-#include <sys/socket.h>
 #include <sys/stat.h>
-#include <unistd.h>
-#define RF_SUBSYS "rom_fetch"
-static void rf_session_close(struct fs_session *session, int fd)
+#if defined(_WIN32)
+#include <io.h>
+#include <process.h>
+#define close _close
+#define open _open
+#define unlink _unlink
+#define chmod _chmod
+#define fstat _fstat64
+#define stat _stat64
+#ifndef O_CLOEXEC
+#define O_CLOEXEC 0
+#endif
+#ifndef S_ISREG
+#define S_ISREG(mode_) (((mode_) & _S_IFMT) == _S_IFREG)
+#endif
+static int64_t rf_windows_pread(int fd, void *data, size_t size,
+                                int64_t offset)
 {
-    fs_session_cleanup(session);
-    close(fd);
+    if (_lseeki64(fd, offset, SEEK_SET) < 0) return -1;
+    return _read(fd, data, size > INT_MAX ? INT_MAX : (unsigned int)size);
 }
-/* Connect timeout for one chunk-fetch connection (seconds). */
-#define RF_CONNECT_TIMEOUT_SEC 10
-/* Per-socket timeout: bound a stalled LAN/fast-WAN peer. */
-#define RF_IO_TIMEOUT_SEC 120
+static int64_t rf_windows_pwrite(int fd, const void *data, size_t size,
+                                 int64_t offset)
+{
+    if (_lseeki64(fd, offset, SEEK_SET) < 0) return -1;
+    return _write(fd, data, size > INT_MAX ? INT_MAX : (unsigned int)size);
+}
+#define pread(fd_, data_, size_, offset_) \
+    rf_windows_pread((fd_), (data_), (size_), (int64_t)(offset_))
+#define pwrite(fd_, data_, size_, offset_) \
+    rf_windows_pwrite((fd_), (data_), (size_), (int64_t)(offset_))
+#define fsync _commit
+#else
+#include <unistd.h>
+#endif
+#define RF_SUBSYS "rom_fetch"
 /* Bounded per-chunk retry against the seeder's wall-clock-1s rate window
  * (rom_seed_rate_charge): 1100 ms always crosses a second boundary, and
  * 25 retries bound a persistently-refusing peer to ~28 s per chunk before
@@ -47,6 +71,11 @@ static void rf_session_close(struct fs_session *session, int fd)
  * one retry per chunk pair. */
 #define ROM_FETCH_CHUNK_RETRIES  25u
 #define ROM_FETCH_CHUNK_RETRY_MS 1100u
+#if defined(_WIN32)
+#define RF_MUTATION_ONLY __attribute__((unused))
+#else
+#define RF_MUTATION_ONLY
+#endif
 
 /* ── Small helpers ──────────────────────────────────────────────────── */
 
@@ -63,24 +92,6 @@ static bool rf_filename_ok(const char *filename)
         return false;
     if (strstr(filename, ".."))
         return false;
-    return true;
-}
-
-/* Read exactly n bytes into buf. Returns false on EOF/error/timeout. */
-static bool rf_recv_exact(int fd, uint8_t *buf, size_t n)
-{
-    size_t got = 0;
-    while (got < n) {
-        ssize_t r = recv(fd, buf + got, n - got, 0);
-        if (r < 0) {
-            if (errno == EINTR)
-                continue;
-            return false;
-        }
-        if (r == 0)
-            return false;
-        got += (size_t)r;
-    }
     return true;
 }
 
@@ -184,61 +195,6 @@ int rom_fetch_parse_directory(const char *json_body,
 
 /* ── Verified chunk fetch ───────────────────────────────────────────── */
 
-/* Connect to peer_addr:port with a bounded connect timeout. Returns the fd
- * or -1 (logged). */
-static int rf_connect(const char *peer_addr, uint16_t port)
-{
-    char port_str[8];
-    snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
-
-    struct addrinfo hints;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    struct addrinfo *res = NULL;
-    if (getaddrinfo(peer_addr, port_str, &hints, &res) != 0 || !res)
-        LOG_ERR(RF_SUBSYS, "chunk: resolve failed for %s", peer_addr);
-
-    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (fd < 0) {
-        freeaddrinfo(res);
-        LOG_ERR(RF_SUBSYS, "chunk: socket() failed: %s", strerror(errno));
-    }
-
-    int flags = fcntl(fd, F_GETFL, 0);
-    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-    int rc = connect(fd, res->ai_addr, res->ai_addrlen);
-    if (rc < 0 && errno == EINPROGRESS) {
-        struct timeval tv = { .tv_sec = RF_CONNECT_TIMEOUT_SEC, .tv_usec = 0 };
-        fd_set wfds;
-        FD_ZERO(&wfds);
-        FD_SET(fd, &wfds);
-        rc = select(fd + 1, NULL, &wfds, NULL, &tv);
-        int err = 0;
-        socklen_t elen = sizeof(err);
-        if (rc > 0)
-            getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &elen);
-        if (rc <= 0 || err != 0) {
-            close(fd);
-            freeaddrinfo(res);
-            LOG_ERR(RF_SUBSYS, "chunk: connect to %s:%u failed/timed out",
-                    peer_addr, (unsigned)port);
-        }
-    } else if (rc < 0) {
-        close(fd);
-        freeaddrinfo(res);
-        LOG_ERR(RF_SUBSYS, "chunk: connect to %s:%u failed: %s",
-                peer_addr, (unsigned)port, strerror(errno));
-    }
-    freeaddrinfo(res);
-    fcntl(fd, F_SETFL, flags); /* restore blocking mode */
-
-    struct timeval tv = { .tv_sec = RF_IO_TIMEOUT_SEC, .tv_usec = 0 };
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-    return fd;
-}
-
 /* Must byte-match FS_ROM_REFUSAL_MAC_TAG in file_service.c: the typed ROM
  * chunk refusal frame rides fs_send_chunk_refusal's MAC scheme with this
  * constant in the tag slot. "RREF" + zero padding. */
@@ -282,8 +238,8 @@ bool rom_fetch_chunk(const char *peer_addr, uint16_t port,
         LOG_FAIL(RF_SUBSYS, "chunk: buf_cap %u < ROM chunk size %u",
                  buf_cap, (unsigned)ROM_SEED_CHUNK_SIZE);
 
-    int fd = rf_connect(peer_addr, port);
-    if (fd < 0)
+    platform_socket_t fd = rf_connect(peer_addr, port);
+    if (fd == PLATFORM_SOCKET_INVALID)
         return false;
 
     struct fs_session s;
@@ -330,7 +286,7 @@ bool rom_fetch_chunk(const char *peer_addr, uint16_t port,
                      (unsigned)port);
             return false;
         }
-        close(fd);
+        platform_socket_close(fd);
         uint8_t rmac_expect[32];
         struct sha3_256_ctx rmc;
         sha3_256_init(&rmc);
@@ -373,7 +329,7 @@ bool rom_fetch_chunk(const char *peer_addr, uint16_t port,
         LOG_FAIL(RF_SUBSYS, "chunk: MAC read failed from %s:%u",
                  peer_addr, (unsigned)port);
     }
-    close(fd);
+    platform_socket_close(fd);
 
     /* The chunk's content digest is learned from the received bytes: the
      * serve side binds the true per-chunk SHA3 into the MAC, so a tampered
@@ -601,6 +557,12 @@ bool rom_fetch_download(const char *peer_addr, uint16_t port,
                         const char *out_dir,
                         rom_fetch_progress_cb cb, void *cb_ctx)
 {
+#if defined(_WIN32)
+    (void)peer_addr; (void)port; (void)m; (void)out_dir;
+    (void)cb; (void)cb_ctx;
+    errno = ENOTSUP;
+    return false;
+#else
     if (!peer_addr || !m || !out_dir || !out_dir[0])
         LOG_FAIL(RF_SUBSYS, "download: null arg");
 
@@ -734,6 +696,7 @@ bool rom_fetch_download(const char *peer_addr, uint16_t port,
              final_path, (unsigned long long)mc.size_bytes, mc.num_chunks,
              peer_addr, (unsigned)port);
     return true;
+#endif
 }
 
 /* ── Parallel multi-seeder download ─────────────────────────────────── */
@@ -753,7 +716,7 @@ struct rf_par_job {
     pthread_mutex_t cb_mutex;
 };
 
-static void *rf_par_worker(void *arg)
+static RF_MUTATION_ONLY void *rf_par_worker(void *arg)
 {
     struct rf_par_job *j = (struct rf_par_job *)arg;
     uint8_t *buf = zcl_malloc(ROM_SEED_CHUNK_SIZE, "rom_fetch_par_buf");
@@ -829,6 +792,12 @@ bool rom_fetch_download_parallel(const struct rom_fetch_peer *peers,
                                  const char *out_dir, uint32_t workers,
                                  rom_fetch_progress_cb cb, void *cb_ctx)
 {
+#if defined(_WIN32)
+    (void)peers; (void)npeers; (void)m; (void)out_dir;
+    (void)workers; (void)cb; (void)cb_ctx;
+    errno = ENOTSUP;
+    return false;
+#else
     if (!peers || npeers == 0 || !m || !out_dir || !out_dir[0])
         LOG_FAIL(RF_SUBSYS, "par: null arg");
 
@@ -931,6 +900,7 @@ bool rom_fetch_download_parallel(const struct rom_fetch_peer *peers,
              final_path, (unsigned long long)mc.size_bytes, mc.num_chunks,
              spawned, npeers);
     return true;
+#endif
 }
 
 /* ── Introspection ──────────────────────────────────────────────────── */
@@ -1058,14 +1028,14 @@ bool rom_fetch_get_manifest(const char *peer_addr, uint16_t port,
         LOG_FAIL(RF_SUBSYS, "manifest: null/empty arg");
     *out_num_chunks = 0;
 
-    int fd = rf_connect(peer_addr, port);
-    if (fd < 0)
+    platform_socket_t fd = rf_connect(peer_addr, port);
+    if (fd == PLATFORM_SOCKET_INVALID)
         return false; /* rf_connect logged; caller falls back to whole-file */
 
     /* Shorten the recv window: a legacy (RMF-unaware) seeder never replies, so
      * a fast timeout is the fall-back signal rather than a 120 s stall. */
-    struct timeval tv = { .tv_sec = RF_MANIFEST_IO_TIMEOUT_SEC, .tv_usec = 0 };
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    (void)platform_socket_set_receive_timeout(
+        fd, RF_MANIFEST_IO_TIMEOUT_SEC * 1000);
 
     struct fs_session s;
     fs_session_init(&s, fd);
@@ -1123,7 +1093,7 @@ bool rom_fetch_get_manifest(const char *peer_addr, uint16_t port,
                  "back", peer_addr, (unsigned)port);
         return false;
     }
-    close(fd);
+    platform_socket_close(fd);
 
     /* Transport MAC: SHA3(key || recv_counter || "RMF"tag || blob), matching
      * the serve side's fs_send_chunk_fast(blob, tag). */
@@ -1173,14 +1143,14 @@ bool rom_fetch_get_directory(const char *peer_addr, uint16_t port,
     if (!peer_addr || !peer_addr[0] || !buf || cap == 0)
         LOG_FAIL(RF_SUBSYS, "directory: null/empty arg");
 
-    int fd = rf_connect(peer_addr, port);
-    if (fd < 0)
+    platform_socket_t fd = rf_connect(peer_addr, port);
+    if (fd == PLATFORM_SOCKET_INVALID)
         return false; /* rf_connect logged; caller just skips this seed */
 
     /* Short recv window: a legacy (RLS-unaware) seeder never replies, so a fast
      * timeout is the fall-back signal rather than a 120 s stall. */
-    struct timeval tv = { .tv_sec = RF_MANIFEST_IO_TIMEOUT_SEC, .tv_usec = 0 };
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    (void)platform_socket_set_receive_timeout(
+        fd, RF_MANIFEST_IO_TIMEOUT_SEC * 1000);
 
     struct fs_session s;
     fs_session_init(&s, fd);
@@ -1234,7 +1204,7 @@ bool rom_fetch_get_directory(const char *peer_addr, uint16_t port,
                  "seed", peer_addr, (unsigned)port);
         return false;
     }
-    close(fd);
+    platform_socket_close(fd);
 
     /* Transport MAC: SHA3(key || recv_counter || "RLS"tag || body), matching the
      * serve side's fs_send_chunk_fast(body, tag). */
@@ -1513,7 +1483,8 @@ static bool rf_ver_spotcheck_resume(int fd, const struct rom_fetch_manifest *m,
  * (rf_ver_acquire_chunk). Everything else — durable resume journal, spot-check
  * on resume, whole-file gate, atomic read-only install — is identical to the
  * single-peer contract, so a single-element ring reproduces it byte-for-byte. */
-static bool rf_download_verified_core(const struct rom_fetch_peer *peers,
+static RF_MUTATION_ONLY bool rf_download_verified_core(
+    const struct rom_fetch_peer *peers,
                                       size_t npeers,
                                       const struct rom_fetch_manifest *m,
                                       const uint8_t (*chunk_sha3)[32],
@@ -1679,6 +1650,12 @@ bool rom_fetch_download_verified(const char *peer_addr, uint16_t port,
                                  uint32_t num_chunks, const char *out_dir,
                                  rom_fetch_progress_cb cb, void *cb_ctx)
 {
+#if defined(_WIN32)
+    (void)peer_addr; (void)port; (void)m; (void)chunk_sha3;
+    (void)num_chunks; (void)out_dir; (void)cb; (void)cb_ctx;
+    errno = ENOTSUP;
+    return false;
+#else
     if (!peer_addr || !peer_addr[0])
         LOG_FAIL(RF_SUBSYS, "ver: null/empty peer_addr");
     struct rom_fetch_peer p;
@@ -1687,6 +1664,7 @@ bool rom_fetch_download_verified(const char *peer_addr, uint16_t port,
     p.port = port;
     return rf_download_verified_core(&p, 1, m, chunk_sha3, num_chunks, out_dir,
                                      cb, cb_ctx);
+#endif
 }
 
 bool rom_fetch_download_verified_parallel(const struct rom_fetch_peer *peers,
@@ -1698,6 +1676,12 @@ bool rom_fetch_download_verified_parallel(const struct rom_fetch_peer *peers,
                                           rom_fetch_progress_cb cb,
                                           void *cb_ctx)
 {
+#if defined(_WIN32)
+    (void)peers; (void)npeers; (void)m; (void)chunk_sha3;
+    (void)num_chunks; (void)out_dir; (void)cb; (void)cb_ctx;
+    errno = ENOTSUP;
+    return false;
+#else
     if (!peers || npeers == 0)
         LOG_FAIL(RF_SUBSYS, "ver-par: null/empty peer list");
     for (size_t i = 0; i < npeers; i++) {
@@ -1706,4 +1690,5 @@ bool rom_fetch_download_verified_parallel(const struct rom_fetch_peer *peers,
     }
     return rf_download_verified_core(peers, npeers, m, chunk_sha3, num_chunks,
                                      out_dir, cb, cb_ctx);
+#endif
 }

@@ -13,7 +13,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#ifdef ZCL_DEV_BUILD
+#if defined(ZCL_DEV_BUILD) && !defined(_WIN32)
 #include <dlfcn.h>
 #include <pthread.h>
 #include <time.h>
@@ -286,6 +286,12 @@ bool zcl_hotswap_service_publish(
     report->verify_only = !activate;
     if (contract) copy_text(report->service_id, sizeof(report->service_id),
                             contract->service_id);
+#ifdef _WIN32
+    if (activate)
+        return reject(report, "windows", false,
+                      "service activation is disabled on Windows pending "
+                      "validated PE imports and immutable staging");
+#endif
     if (!contract || !candidate || !contract->service_id ||
         !contract->source_tu || !candidate->service_id ||
         !candidate->source_tu || !contract->frozen_kat ||
@@ -372,6 +378,7 @@ bool zcl_hotswap_service_publish(
 }
 
 #ifdef ZCL_DEV_BUILD
+#if !defined(_WIN32)
 struct service_handle_slot {
     char service_id[96];
     void *handle;
@@ -489,6 +496,13 @@ bool zcl_hotswap_service_activate_so(
         so_path, resolved_datadir, request_activate, contracts, 1, report);
 }
 #else
+#define ZCL_HOTSWAP_SERVICE_UNAVAILABLE 1
+#endif /* !_WIN32 */
+#else
+#define ZCL_HOTSWAP_SERVICE_UNAVAILABLE 1
+#endif /* ZCL_DEV_BUILD */
+
+#ifdef ZCL_HOTSWAP_SERVICE_UNAVAILABLE
 bool zcl_hotswap_service_activate_so_any(
     const char *so_path, const char *resolved_datadir, bool request_activate,
     const struct zcl_hotswap_service_contract *const *contracts,
@@ -500,8 +514,14 @@ bool zcl_hotswap_service_activate_so_any(
     if (!report)
         LOG_FAIL("hotswap.service", "activation report is NULL");
     memset(report, 0, sizeof(*report));
+#ifdef _WIN32
+    return reject(report, "windows", false,
+                  "service activation is disabled on Windows pending "
+                  "validated PE imports and immutable staging");
+#else
     return reject(report, "unavailable", false,
                   "service activation is unavailable in release builds");
+#endif
 }
 
 bool zcl_hotswap_service_activate_so(
@@ -513,4 +533,5 @@ bool zcl_hotswap_service_activate_so(
     return zcl_hotswap_service_activate_so_any(
         so_path, resolved_datadir, request_activate, contracts, 1, report);
 }
-#endif
+#endif /* ZCL_HOTSWAP_SERVICE_UNAVAILABLE */
+#undef ZCL_HOTSWAP_SERVICE_UNAVAILABLE

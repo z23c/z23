@@ -11,19 +11,14 @@
 
 #include "encoding/utilstrencodings.h"
 #include "json/json.h"
+#include "platform/socket_compat.h"
 #include "rpc/zclassicd_port.h"
 #include "util/safe_alloc.h"
 
-#include <arpa/inet.h>
-#include <errno.h>
-#include <netinet/in.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <sys/time.h>
-#include <unistd.h>
 
 #define LRC_TIMEOUT_SECS    5
 /* 8 MB hard cap. A full getblock verbose=0 response is the serialized
@@ -137,32 +132,39 @@ bool legacy_rpc_call(const char *host, int port,
                      char *err, size_t err_sz)
 {
     if (out_resp) *out_resp = NULL;
-    if (!host || !body_json || !out_resp) {
+    if (!host || port < 1 || port > UINT16_MAX || !body_json || !out_resp) {
         if (err && err_sz) snprintf(err, err_sz, "bad args");
         return false;
     }
 
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) {
-        snprintf(err, err_sz, "socket: %s", strerror(errno));
+    platform_socket_t sock = platform_socket_open(AF_INET, SOCK_STREAM, 0,
+                                                   true, false);
+    if (sock == PLATFORM_SOCKET_INVALID) {
+        char detail[64];
+        snprintf(err, err_sz, "socket: %s",
+                 platform_socket_error_string(platform_socket_last_error(),
+                                              detail, sizeof(detail)));
         return false;
     }
-    struct timeval tv = { .tv_sec = LRC_TIMEOUT_SECS, .tv_usec = 0 };
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    (void)platform_socket_set_receive_timeout(sock, LRC_TIMEOUT_SECS * 1000);
+    (void)platform_socket_set_send_timeout(sock, LRC_TIMEOUT_SECS * 1000);
 
     struct sockaddr_in sa = {0};
     sa.sin_family = AF_INET;
     sa.sin_port   = htons((uint16_t)port);
-    if (inet_pton(AF_INET, host, &sa.sin_addr) != 1) {
-        close(fd);
+    if (platform_socket_parse_address(AF_INET, host, &sa.sin_addr) != 1) {
+        platform_socket_close(sock);
         snprintf(err, err_sz, "bad host: %s", host);
         return false;
     }
-    if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) != 0) {
+    if (platform_socket_connect(sock, (struct sockaddr *)&sa,
+                                sizeof(sa)) != 0) {
+        char detail[64];
         snprintf(err, err_sz, "connect %s:%d: %s",
-                 host, port, strerror(errno));
-        close(fd);
+                 host, port,
+                 platform_socket_error_string(platform_socket_last_error(),
+                                              detail, sizeof(detail)));
+        platform_socket_close(sock);
         return false;
     }
 
@@ -177,7 +179,7 @@ bool legacy_rpc_call(const char *host, int port,
     size_t req_cap  = 768 + body_len;
     char *req = zcl_malloc(req_cap, "lrc_req");
     if (!req) {
-        close(fd);
+        platform_socket_close(sock);
         snprintf(err, err_sz, "oom req");
         return false;
     }
@@ -192,18 +194,16 @@ bool legacy_rpc_call(const char *host, int port,
         "%s",
         host, port, b64, body_len, body_json);
     if (reqlen < 0 || (size_t)reqlen >= req_cap) {
-        free(req); close(fd);
+        free(req); platform_socket_close(sock);
         snprintf(err, err_sz, "request buffer overflow");
         return false;
     }
-    size_t sent = 0;
-    while (sent < (size_t)reqlen) {
-        ssize_t n = send(fd, req + sent, (size_t)reqlen - sent, 0);
-        if (n <= 0) {
-            snprintf(err, err_sz, "send: %s", strerror(errno));
-            free(req); close(fd); return false;
-        }
-        sent += (size_t)n;
+    if (!platform_socket_send_all(sock, req, (size_t)reqlen)) {
+        char detail[64];
+        snprintf(err, err_sz, "send: %s",
+                 platform_socket_error_string(platform_socket_last_error(),
+                                              detail, sizeof(detail)));
+        free(req); platform_socket_close(sock); return false;
     }
     free(req);
 
@@ -211,7 +211,7 @@ bool legacy_rpc_call(const char *host, int port,
     size_t total = 0;
     char *buf = zcl_malloc(cap, "lrc_resp");
     if (!buf) {
-        close(fd);
+        platform_socket_close(sock);
         snprintf(err, err_sz, "oom resp");
         return false;
     }
@@ -219,28 +219,31 @@ bool legacy_rpc_call(const char *host, int port,
         if (total + 1 >= cap) {
             if (cap >= LRC_RESP_MAX) {
                 snprintf(err, err_sz, "response > %u byte cap", LRC_RESP_MAX);
-                free(buf); close(fd); return false;
+                free(buf); platform_socket_close(sock); return false;
             }
             size_t ncap = cap * 2;
             if (ncap > LRC_RESP_MAX) ncap = LRC_RESP_MAX;
             char *nbuf = zcl_realloc(buf, ncap, "lrc_resp");
             if (!nbuf) {
                 snprintf(err, err_sz, "oom resp grow");
-                free(buf); close(fd); return false;
+                free(buf); platform_socket_close(sock); return false;
             }
             buf = nbuf;
             cap = ncap;
         }
-        ssize_t n = recv(fd, buf + total, cap - total - 1, 0);
+        int n = platform_socket_receive(sock, buf + total, cap - total - 1);
         if (n < 0) {
-            snprintf(err, err_sz, "recv: %s", strerror(errno));
-            free(buf); close(fd); return false;
+            char detail[64];
+            snprintf(err, err_sz, "recv: %s",
+                     platform_socket_error_string(platform_socket_last_error(),
+                                                  detail, sizeof(detail)));
+            free(buf); platform_socket_close(sock); return false;
         }
         if (n == 0) break;
         total += (size_t)n;
     }
     buf[total] = '\0';
-    close(fd);
+    platform_socket_close(sock);
 
     if (total == 0) {
         snprintf(err, err_sz, "empty response");

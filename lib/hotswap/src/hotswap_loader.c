@@ -13,7 +13,9 @@
  * -D_FORTIFY_SOURCE=2 pulls in at -O3 — so any -O0, -U_FORTIFY_SOURCE, or
  * non-glibc build fails with "implicit declaration of realpath", which is a
  * hard error in C23. Matches lib/net/src/connman.c and 26 other TUs. */
+#if !defined(_WIN32)
 #define _DEFAULT_SOURCE
+#endif
 #include "hotswap/hotswap.h"
 #include "hotswap/hotswap_module.h"
 #include "crypto/sha256.h"
@@ -22,15 +24,17 @@
 #include "util/clientversion.h"
 #include "util/log_macros.h"
 #include <errno.h>
-#include <fcntl.h>
 #include <limits.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#if !defined(_WIN32)
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 #define HOTSWAP_MAX_GENERATIONS 128
 struct hotswap_generation {
     uint32_t gen;
@@ -94,6 +98,7 @@ size_t hotswap_generation_count(void)
     return n;
 }
 
+#if !defined(_WIN32)
 static bool has_suffix(const char *s, const char *suffix)
 {
     if (!s || !suffix)
@@ -110,6 +115,7 @@ static bool path_is_under(const char *path, const char *directory)
            strncmp(path, directory, directory_len) == 0 &&
            path[directory_len] == '/';
 }
+#endif
 
 bool hotswap_path_is_acceptable(const char *so_path, char *why, size_t why_sz)
 {
@@ -119,6 +125,13 @@ bool hotswap_path_is_acceptable(const char *so_path, char *why, size_t why_sz)
         if (why) snprintf(why, why_sz, "empty path");
         return false;
     }
+#if defined(_WIN32)
+    if (why)
+        snprintf(why, why_sz,
+                 "native Windows DLL hot-swap is disabled pending validated "
+                 "PE imports and immutable generation loading");
+    return false;
+#else
     if (so_path[0] != '/') {
         if (why) snprintf(why, why_sz, "path must be absolute");
         return false;
@@ -153,8 +166,10 @@ bool hotswap_path_is_acceptable(const char *so_path, char *why, size_t why_sz)
         return false;
     }
     return true;
+#endif
 }
 
+#if !defined(_WIN32)
 static bool same_dir(const char *a, const char *b)
 {
     if (!a || !a[0] || !b || !b[0])
@@ -167,9 +182,14 @@ static bool same_dir(const char *a, const char *b)
     if (b_len && path_b[b_len - 1] == '/') b_len--;
     return a_len == b_len && strncmp(path_a, path_b, a_len) == 0;
 }
+#endif
 
 bool hotswap_datadir_is_dev(const char *resolved_datadir)
 {
+#if defined(_WIN32)
+    (void)resolved_datadir;
+    return false;
+#else
     if (!resolved_datadir || !resolved_datadir[0])
         return false;
     const char *home = getenv("HOME");
@@ -178,6 +198,7 @@ bool hotswap_datadir_is_dev(const char *resolved_datadir)
     char exact_dev[PATH_MAX];
     snprintf(exact_dev, sizeof(exact_dev), "%s/.zclassic-c23-dev", home);
     return same_dir(resolved_datadir, exact_dev);
+#endif
 }
 
 static const char *eligible_probe(const char *source_identity)
@@ -276,7 +297,7 @@ bool hotswap_manifest_v2_validate(
     return true;
 }
 
-#ifdef ZCL_DEV_BUILD
+#if defined(ZCL_DEV_BUILD) && !defined(_WIN32)
 static void rejection_set_locked(uint32_t gen, const char *stage,
                                  const char *error, const char *so_path,
                                  const char *source_identity)
@@ -333,7 +354,7 @@ bool hotswap_dump_state_json(struct json_value *out, const char *key)
         return false;
     json_set_object(out);
     json_push_kv_str(out, "schema", "zcl.hotswap_generation.v2");
-#ifdef ZCL_DEV_BUILD
+#if defined(ZCL_DEV_BUILD) && !defined(_WIN32)
     json_push_kv_bool(out, "available", true);
 #else
     json_push_kv_bool(out, "available", false);
@@ -394,6 +415,7 @@ bool hotswap_dump_state_json(struct json_value *out, const char *key)
 }
 
 #ifdef ZCL_DEV_BUILD
+#if !defined(_WIN32)
 
 #include <dlfcn.h>
 
@@ -790,7 +812,15 @@ bool hotswap_load_leaves(const char *so_path,
     return true;
 }
 
-#else /* !ZCL_DEV_BUILD */
+#else
+#define ZCL_HOTSWAP_LOADER_UNAVAILABLE 1
+#endif /* !_WIN32 */
+#else
+#define ZCL_HOTSWAP_LOADER_UNAVAILABLE 1
+#endif /* ZCL_DEV_BUILD */
+
+#ifdef ZCL_HOTSWAP_LOADER_UNAVAILABLE
+/* Release build or native Windows: fail closed. */
 
 bool hotswap_load_leaves(const char *so_path,
                          const char *datadir,
@@ -808,10 +838,20 @@ bool hotswap_load_leaves(const char *so_path,
         return false;
     memset(report, 0, sizeof(*report));
     copy_text(report->rejection_stage, sizeof(report->rejection_stage),
+#if defined(_WIN32)
+              "platform");
+#else
               "release");
+#endif
     copy_text(report->error, sizeof(report->error),
+#if defined(_WIN32)
+              "native Windows DLL hot-swap is disabled pending sandbox and "
+              "validated immutable PE loading");
+#else
               "hotswap unavailable in release build");
+#endif
     return false;
 }
 
-#endif /* ZCL_DEV_BUILD */
+#endif /* ZCL_HOTSWAP_LOADER_UNAVAILABLE */
+#undef ZCL_HOTSWAP_LOADER_UNAVAILABLE

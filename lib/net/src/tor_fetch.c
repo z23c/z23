@@ -5,6 +5,7 @@
 #define _DEFAULT_SOURCE
 #include "base/compiler.h"
 #include "net/tor_integration.h"
+#include "platform/time_compat.h"
 #include "support/cleanse.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
@@ -12,7 +13,6 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 extern int dynhost_client_fetch(const char *, uint16_t, const char *,
     void (*)(int, const uint8_t *, size_t, void *), void *, int)
@@ -121,7 +121,7 @@ int tor_integration_fetch_onion_blocking(const char *onion_address,
             blocking_fetch_release(ctx);
             return ok ? 0 : -1;
         }
-        usleep(100000);
+        platform_sleep_ms(100);
     }
 
     /* The callback retains its reference and may safely finish later. */

@@ -6,28 +6,12 @@
 
 #include "net/netbase.h"
 #include "encoding/utilstrencodings.h"
+#include "platform/socket_compat.h"
+#include "util/safe_alloc.h"
 #include "util/log_macros.h"
 #include <string.h>
 #include <stdio.h>
-
-#ifndef _WIN32
-#include <netdb.h>
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <netinet/tcp.h>
-#include <errno.h>
-#include <poll.h>
-#include <sys/select.h>
-
-#ifndef MSG_NOSIGNAL
-#define MSG_NOSIGNAL 0
-#endif
-#endif
-
-static const unsigned char pchIPv4Map[12] = {
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff
-};
+#include <stdlib.h>
 
 void split_host_port(const char *in, char *host_out, size_t host_size,
                      int *port_out)
@@ -77,58 +61,24 @@ bool lookup_host(const char *name, struct net_addr *results,
 
     *num_results = 0;
 
-    struct in_addr ipv4;
-    if (inet_pton(AF_INET, name, &ipv4) > 0) {
-        net_addr_init(&results[0]);
-        memcpy(results[0].ip, pchIPv4Map, 12);
-        memcpy(results[0].ip + 12, &ipv4, 4);
-        *num_results = 1;
-        return true;
-    }
-
-    struct in6_addr ipv6;
-    if (inet_pton(AF_INET6, name, &ipv6) > 0) {
-        net_addr_init(&results[0]);
-        memcpy(results[0].ip, &ipv6, 16);
-        *num_results = 1;
-        return true;
-    }
-
-    struct addrinfo hints;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_protocol = IPPROTO_TCP;
-    hints.ai_family = AF_UNSPEC;
-#ifndef _WIN32
-    hints.ai_flags = allow_lookup ? AI_ADDRCONFIG : AI_NUMERICHOST;
-#else
-    hints.ai_flags = allow_lookup ? 0 : AI_NUMERICHOST;
-#endif
-
-    struct addrinfo *res = NULL;
-    int err = getaddrinfo(name, NULL, &hints, &res);
-    if (err != 0)
-        LOG_FAIL("net", "getaddrinfo failed for '%s': error %d", name, err);
-
-    for (struct addrinfo *ai = res;
-         ai && *num_results < max_results;
-         ai = ai->ai_next) {
-        if (ai->ai_family == AF_INET) {
-            struct sockaddr_in *s4 = (struct sockaddr_in *)ai->ai_addr;
-            net_addr_init(&results[*num_results]);
-            memcpy(results[*num_results].ip, pchIPv4Map, 12);
-            memcpy(results[*num_results].ip + 12, &s4->sin_addr, 4);
-            (*num_results)++;
-        } else if (ai->ai_family == AF_INET6) {
-            struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)ai->ai_addr;
-            net_addr_init(&results[*num_results]);
-            memcpy(results[*num_results].ip, &s6->sin6_addr, 16);
-            (*num_results)++;
+    if (max_results > SIZE_MAX / 16)
+        return false;
+    uint8_t (*resolved)[16] = zcl_malloc(
+        max_results * sizeof(*resolved), "net_resolved_addresses");
+    if (!resolved)
+        LOG_FAIL("net", "lookup_host: address allocation failed for '%s'",
+                 name);
+    size_t count = 0;
+    bool ok = platform_socket_resolve_addresses(
+        name, allow_lookup, resolved, max_results, &count);
+    if (ok)
+        for (size_t i = 0; i < count; i++) {
+            net_addr_init(&results[i]);
+            memcpy(results[i].ip, resolved[i], 16);
         }
-    }
-
-    freeaddrinfo(res);
-    return *num_results > 0;
+    free(resolved);
+    *num_results = count;
+    return ok;
 }
 
 bool lookup_numeric(const char *name, struct net_service *result,
@@ -187,7 +137,7 @@ struct timeval millis_to_timeval(int64_t ms)
 
 static bool net_service_get_sockaddr(const struct net_service *svc,
                                      struct sockaddr_storage *ss,
-                                     socklen_t *len)
+                                     size_t *len)
 {
     if (net_addr_is_ipv4(&svc->addr)) {
         struct sockaddr_in *s4 = (struct sockaddr_in *)ss;
@@ -223,34 +173,28 @@ enum zcl_connect_start connect_socket_start(const struct net_service *addr,
     }
 
     struct sockaddr_storage ss;
-    socklen_t len = sizeof(ss);
+    size_t len = sizeof(ss);
     if (!net_service_get_sockaddr(addr, &ss, &len)) {
         LOG_RETURN(ZCL_CONNECT_START_ERROR, "net",
                    "connect_socket_start: failed to get sockaddr");
     }
 
-    zcl_socket_t sock = socket(((struct sockaddr *)&ss)->sa_family,
-                               SOCK_STREAM, IPPROTO_TCP);
+    zcl_socket_t sock = platform_socket_open(
+        ((struct sockaddr *)&ss)->sa_family, SOCK_STREAM, IPPROTO_TCP,
+        true, true);
     if (sock == ZCL_INVALID_SOCKET) {
         LOG_RETURN(ZCL_CONNECT_START_ERROR, "net",
-                   "connect_socket_start: socket() failed, errno=%d", errno);
+                   "connect_socket_start: socket failed, error=%d",
+                   platform_socket_last_error());
     }
 
-    int set = 1;
-#ifdef SO_NOSIGPIPE
-    setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, &set, sizeof(int));
-#endif
-    setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &set, sizeof(int));
+    (void)platform_socket_set_no_delay(sock, true);
 
-    if (!set_socket_nonblocking(sock, true)) {
-        close_socket(&sock);
-        LOG_RETURN(ZCL_CONNECT_START_ERROR, "net",
-                   "connect_socket_start: set_socket_nonblocking failed");
-    }
-
-    if (connect(sock, (struct sockaddr *)&ss, len) == ZCL_SOCKET_ERROR) {
-        int err = errno;
-        if (err == EINPROGRESS || err == EWOULDBLOCK) {
+    if (platform_socket_connect(sock, (struct sockaddr *)&ss, len) ==
+        ZCL_SOCKET_ERROR) {
+        int err = platform_socket_last_error();
+        if (platform_socket_error_in_progress(err) ||
+            platform_socket_error_would_block(err)) {
             *sock_out = sock;
             return ZCL_CONNECT_START_IN_PROGRESS;
         }
@@ -268,8 +212,7 @@ bool connect_socket_check(zcl_socket_t sock)
     if (sock == ZCL_INVALID_SOCKET)
         return false;
     int so_err = 0;
-    socklen_t so_len = sizeof(so_err);
-    if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_err, &so_len) < 0)
+    if (platform_socket_pending_error(sock, &so_err) < 0)
         return false;
     return so_err == 0;
 }
@@ -288,8 +231,9 @@ bool connect_socket_directly(const struct net_service *addr,
     }
 
     /* IN_PROGRESS: wait for writability up to timeout_ms, then confirm. */
-    struct pollfd pfd = { .fd = sock, .events = POLLOUT, .revents = 0 };
-    int nRet = poll(&pfd, 1, timeout_ms);
+    platform_socket_pollfd pfd = {
+        .fd = sock, .events = PLATFORM_SOCKET_POLL_WRITE, .revents = 0};
+    int nRet = platform_socket_poll(&pfd, 1, timeout_ms);
     if (nRet <= 0 || !connect_socket_check(sock)) {
         close_socket(&sock);
         *sock_out = ZCL_INVALID_SOCKET;
@@ -303,27 +247,12 @@ bool close_socket(zcl_socket_t *sock)
 {
     if (*sock == ZCL_INVALID_SOCKET)
         return false;
-#ifdef _WIN32
-    int ret = closesocket(*sock);
-#else
-    int ret = close(*sock);
-#endif
+    int ret = platform_socket_close(*sock);
     *sock = ZCL_INVALID_SOCKET;
     return ret != ZCL_SOCKET_ERROR;
 }
 
 bool zcl_set_socket_nonblocking(zcl_socket_t sock, bool nonblocking)
 {
-#ifdef _WIN32
-    u_long mode = nonblocking ? 1 : 0;
-    return ioctlsocket(sock, FIONBIO, &mode) != ZCL_SOCKET_ERROR;
-#else
-    int flags = fcntl(sock, F_GETFL, 0);
-    if (flags < 0) LOG_FAIL("net", "fcntl F_GETFL failed for socket %d", sock);
-    if (nonblocking)
-        flags |= O_NONBLOCK;
-    else
-        flags &= ~O_NONBLOCK;
-    return fcntl(sock, F_SETFL, flags) != -1;
-#endif
+    return platform_socket_set_nonblocking(sock, nonblocking);
 }

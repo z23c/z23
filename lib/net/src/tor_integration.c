@@ -9,20 +9,22 @@
 #define _DEFAULT_SOURCE
 #include "platform/time_compat.h"
 #include "platform/thread_compat.h"
+#include "platform/socket_compat.h"
+#include "platform/file_metadata.h"
+#include "platform/private_directory.h"
+#include "platform/private_file.h"
 #include "base/compiler.h"
 #include "net/tor_integration.h"
 #include "net/tor_request_state.h"
 #include "net/net.h"      /* net_set_onion_ingress_port() */
 #include <errno.h>
-#include <netinet/in.h>   /* AF_INET for the inbound P2P port mapping */
+#include <limits.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <time.h>
-#include <unistd.h>
 #include "util/log_macros.h"
 #include "util/thread_liveness.h"
 #include "util/thread_registry.h"
@@ -551,7 +553,7 @@ static bool read_onion_address(const char *datadir)
                         "Tor: still waiting for .onion address after %ds "
                         "(bootstrap may be slow)\n", waited);
         }
-        sleep(1);
+        platform_sleep_ms(1000);
     }
 }
 
@@ -683,23 +685,30 @@ bool tor_integration_start(const char *datadir, uint16_t p2p_port)
 
     char path[1024];
     snprintf(path, sizeof(path), "%s/tor_data", datadir);
-    mkdir(path, 0700);
+    if (!platform_private_directory_ensure(path))
+        LOG_FAIL("tor", "failed to create private Tor datadir");
     snprintf(path, sizeof(path), "%s/tor_data/onion_service", datadir);
-    mkdir(path, 0700);
+    if (!platform_private_directory_ensure(path))
+        LOG_FAIL("tor", "failed to create private onion-service datadir");
 
     /* Remove stale lock file from previous session. When the node is
      * killed (SIGTERM from systemctl), Tor may not clean up its lock.
      * Safe to remove: we're the only process that uses this tor_data. */
     snprintf(path, sizeof(path), "%s/tor_data/lock", datadir);
-    unlink(path);
+    if (!platform_private_file_unlink_missing_ok(path))
+        LOG_FAIL("tor", "failed to retire stale Tor lock");
 
     /* Record tor.log's current size BEFORE the tor thread can append: the
      * address scan in read_onion_address starts here, so it can only see
      * the service THIS start creates (see tor_log_last_ephemeral_address). */
     snprintf(path, sizeof(path), "%s/tor.log", datadir);
-    struct stat log_st;
+    struct platform_file_metadata log_metadata;
+    enum platform_file_metadata_result metadata_result =
+        platform_file_metadata_read(path, &log_metadata);
     g_tor_log_scan_from =
-        (stat(path, &log_st) == 0) ? (long)log_st.st_size : 0;
+        metadata_result == PLATFORM_FILE_METADATA_OK &&
+                log_metadata.size <= LONG_MAX
+            ? (long)log_metadata.size : 0;
 
     if (!tor_write_torrc(datadir, p2p_port))
         LOG_FAIL("tor", "failed to write torrc to %s", datadir);
@@ -748,7 +757,7 @@ void tor_integration_stop(void)
         tor_shutdown_event_loop_and_exit(0);
         if (atomic_load(&g_tor_thread_done))
             break;
-        usleep(100000); /* 100ms, up to 5s total */
+        platform_sleep_ms(100); /* up to 5s total */
     }
 
     tor_join_thread_bounded(g_tor_thread, "main", 5);

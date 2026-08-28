@@ -31,6 +31,7 @@
 #include "util/log_macros.h"
 
 #include <errno.h>
+#if !defined(_WIN32)
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -40,6 +41,66 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#endif
+
+#if defined(_WIN32)
+
+struct zcl_param_fetch { unsigned char unavailable; };
+
+struct zcl_param_fetch *zcl_param_fetch_open(const char *dir, int file_idx)
+{
+    (void)dir; (void)file_idx; errno = ENOTSUP; return NULL;
+}
+bool zcl_param_fetch_set_manifest(struct zcl_param_fetch *s,
+                                  const uint8_t *leaves, uint32_t count)
+{
+    (void)s; (void)leaves; (void)count; errno = ENOTSUP; return false;
+}
+bool zcl_param_fetch_has_manifest(const struct zcl_param_fetch *s)
+{ (void)s; return false; }
+uint32_t zcl_param_fetch_next_needed(const struct zcl_param_fetch *s)
+{ (void)s; return UINT32_MAX; }
+uint32_t zcl_param_fetch_pick_missing(const struct zcl_param_fetch *s,
+                                      uint32_t after, uint32_t *out,
+                                      uint32_t max)
+{ (void)s; (void)after; (void)out; (void)max; return 0; }
+enum zcl_param_chunk_result
+zcl_param_fetch_accept_chunk(struct zcl_param_fetch *s, uint32_t idx,
+                             const uint8_t *data, size_t len)
+{
+    (void)s; (void)idx; (void)data; (void)len; errno = ENOTSUP;
+    return ZCL_PARAM_CHUNK_IO_ERROR;
+}
+uint32_t zcl_param_fetch_chunks_have(const struct zcl_param_fetch *s)
+{ (void)s; return 0; }
+uint32_t zcl_param_fetch_chunks_total(const struct zcl_param_fetch *s)
+{ (void)s; return 0; }
+uint64_t zcl_param_fetch_bytes_rejected(const struct zcl_param_fetch *s)
+{ (void)s; return 0; }
+bool zcl_param_fetch_is_complete(const struct zcl_param_fetch *s)
+{ (void)s; return false; }
+size_t zcl_param_fetch_session_footprint(const struct zcl_param_fetch *s)
+{ (void)s; return 0; }
+bool zcl_param_fetch_finalize(struct zcl_param_fetch *s)
+{ (void)s; errno = ENOTSUP; return false; }
+void zcl_param_fetch_close(struct zcl_param_fetch *s) { free(s); }
+int zcl_param_serve_prepare(const char *dir)
+{ (void)dir; errno = ENOTSUP; return 0; }
+bool zcl_param_serve_ready(int file_idx) { (void)file_idx; return false; }
+bool zcl_param_serve_manifest(int file_idx, uint8_t *out, size_t cap,
+                              uint32_t *out_count)
+{
+    (void)file_idx; (void)out; (void)cap; (void)out_count; return false;
+}
+bool zcl_param_serve_chunk(int file_idx, uint32_t idx, uint8_t *out,
+                           size_t cap, size_t *out_len)
+{
+    (void)file_idx; (void)idx; (void)out; (void)cap; (void)out_len;
+    return false;
+}
+void zcl_param_serve_shutdown(void) {}
+
+#else
 
 /* ── Fetch session ──────────────────────────────────────────────────── */
 
@@ -639,3 +700,5 @@ void zcl_param_serve_shutdown(void)
     }
     pthread_mutex_unlock(&g_serve_lock);
 }
+
+#endif

@@ -2,25 +2,24 @@
  *
  * WebSocket event stream — see ws_events.h for the contract. */
 
-#define _DEFAULT_SOURCE  /* usleep */
+#if !defined(_WIN32)
+#define _DEFAULT_SOURCE
+#endif
 #include "net/ws_events.h"
 #include "base/format_attribute.h"
 #include "event/event.h"
 #include "crypto/sha1.h"
 #include "encoding/utilstrencodings.h"
 #include "core/utiltime.h"
+#include "platform/socket_compat.h"
+#include "platform/time_compat.h"
 
-#include <errno.h>
-#include <fcntl.h>
-#include <poll.h>
-#include <sys/socket.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 #include "util/log_macros.h"
 #include "util/thread_liveness.h"
 #include "util/thread_registry.h"
@@ -35,8 +34,23 @@
 
 /* Write a server→client frame (no masking per RFC 6455 §5.1).
  * Returns bytes written, or -1 on error. */
-static ssize_t ws_write_frame(int fd, uint8_t opcode,
-                               const void *data, size_t len)
+static int ws_send_nonblocking(platform_socket_t fd, const void *data,
+                               size_t len)
+{
+    int part = len > INT32_MAX ? INT32_MAX : (int)len;
+#if defined(_WIN32)
+    return send(fd, (const char *)data, part, 0);
+#else
+    int flags = MSG_DONTWAIT;
+#ifdef MSG_NOSIGNAL
+    flags |= MSG_NOSIGNAL;
+#endif
+    return (int)send(fd, data, (size_t)part, flags);
+#endif
+}
+
+static int ws_write_frame(platform_socket_t fd, uint8_t opcode,
+                          const void *data, size_t len)
 {
     uint8_t hdr[10];
     size_t hdr_len;
@@ -60,10 +74,10 @@ static ssize_t ws_write_frame(int fd, uint8_t opcode,
     /* Non-blocking write with MSG_NOSIGNAL to avoid SIGPIPE when the
      * client has disconnected.  If the buffer is full, we'll catch
      * the error and mark the client dead on the next pump iteration. */
-    ssize_t w1 = send(fd, hdr, hdr_len, MSG_NOSIGNAL);
+    int w1 = ws_send_nonblocking(fd, hdr, hdr_len);
     if (w1 < 0) return -1;
     if (len > 0) {
-        ssize_t w2 = send(fd, data, len, MSG_NOSIGNAL);
+        int w2 = ws_send_nonblocking(fd, data, len);
         if (w2 < 0) return -1;
         return w1 + w2;
     }
@@ -101,7 +115,7 @@ static bool domain_matches(const char *filter, const char *type_name)
 /* ── Client table ────────────────────────────────────────────── */
 
 struct ws_client {
-    int       fd;
+    platform_socket_t fd;
     bool      active;
     uint64_t  cursor;        /* position in global event ring */
     char      filter[WS_FILTER_LEN];
@@ -256,10 +270,10 @@ static void pump_events_to_clients(void)
 
             if (!domain_matches(c->filter, type_name)) continue;
 
-            ssize_t w = ws_write_frame(c->fd, WS_TEXT, json, jlen);
+            int w = ws_write_frame(c->fd, WS_TEXT, json, jlen);
             if (w < 0) {
                 /* Write failed — mark client dead */
-                close(c->fd);
+                platform_socket_close(c->fd);
                 c->active = false;
                 atomic_fetch_sub(&g_client_count, 1);
             } else {
@@ -288,7 +302,7 @@ static void send_heartbeats(void)
         /* Idle timeout: disconnect if no activity for too long */
         if (now - c->last_active_us > idle_timeout) {
             ws_write_frame(c->fd, WS_CLOSE, NULL, 0);
-            close(c->fd);
+            platform_socket_close(c->fd);
             c->active = false;
             atomic_fetch_sub(&g_client_count, 1);
             continue;
@@ -312,10 +326,12 @@ static void drain_client_input(void)
         struct ws_client *c = &g_clients[i];
         if (!c->active) continue;
 
-        struct pollfd pfd = { .fd = c->fd, .events = POLLIN };
-        if (poll(&pfd, 1, 0) > 0) {
+        platform_socket_pollfd pfd = {
+            .fd = c->fd, .events = PLATFORM_SOCKET_POLL_READ, .revents = 0
+        };
+        if (platform_socket_poll(&pfd, 1, 0) > 0) {
             if (pfd.revents & (POLLHUP | POLLERR)) {
-                close(c->fd);
+                platform_socket_close(c->fd);
                 c->active = false;
                 atomic_fetch_sub(&g_client_count, 1);
                 continue;
@@ -326,9 +342,10 @@ static void drain_client_input(void)
                  * parse masked frames, but for an event stream the
                  * client only sends pong or close. */
                 uint8_t discard[256];
-                ssize_t r = read(c->fd, discard, sizeof(discard));
+                int r = platform_socket_receive(c->fd, discard,
+                                                sizeof(discard));
                 if (r <= 0) {
-                    close(c->fd);
+                    platform_socket_close(c->fd);
                     c->active = false;
                     atomic_fetch_sub(&g_client_count, 1);
                 } else {
@@ -349,7 +366,7 @@ static void *pump_thread_fn(void *arg)
         send_heartbeats();
         thread_liveness_beat(&g_ws_pump_liveness,
                              (int64_t)atomic_fetch_add(&g_ws_pump_beat_count, 1) + 1);
-        usleep(WS_PUMP_INTERVAL_MS * 1000);
+        platform_sleep_ms(WS_PUMP_INTERVAL_MS);
     }
     return NULL;
 }
@@ -399,7 +416,7 @@ void ws_events_stop(void)
     for (int i = 0; i < WS_MAX_CLIENTS; i++) {
         if (g_clients[i].active) {
             ws_write_frame(g_clients[i].fd, WS_CLOSE, NULL, 0);
-            close(g_clients[i].fd);
+            platform_socket_close(g_clients[i].fd);
             g_clients[i].active = false;
         }
     }
@@ -409,15 +426,14 @@ void ws_events_stop(void)
     atomic_store(&g_started, false);
 }
 
-bool ws_events_accept(int fd, const char *domain_filter)
+bool ws_events_accept(platform_socket_t fd, const char *domain_filter)
 {
     if (atomic_load(&g_client_count) >= WS_MAX_CLIENTS)
         return false;
 
     /* Set non-blocking so write() in pump thread doesn't stall */
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags >= 0)
-        fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    if (!platform_socket_set_nonblocking(fd, true))
+        return false;
 
     pthread_mutex_lock(&g_lock);
     int slot = -1;
@@ -483,7 +499,7 @@ size_t ws_events_status_json(char *buf, size_t cap)
 
 /* RFC 6455 §4.2.2: Sec-WebSocket-Accept = Base64(SHA1(key + GUID)) */
 
-bool ws_events_upgrade(int fd, const char *path,
+bool ws_events_upgrade(platform_socket_t fd, const char *path,
                         const char *ws_key, const char *query)
 {
     if (!ws_key || !*ws_key) LOG_FAIL("ws", "upgrade request missing Sec-WebSocket-Key");
@@ -534,8 +550,8 @@ bool ws_events_upgrade(int fd, const char *path,
         "\r\n",
         accept_b64);
     if (rlen < 0) LOG_FAIL("ws", "snprintf failed building 101 response");
-    ssize_t w = write(fd, resp, (size_t)rlen);
-    if (w < 0) LOG_FAIL("ws", "write failed sending 101 response: fd=%d", fd);
+    if (!platform_socket_send_all(fd, resp, (size_t)rlen))
+        LOG_FAIL("ws", "write failed sending 101 response");
 
     /* Hand the fd to the event pump */
     (void)path;  /* reserved for future path-based dispatch */

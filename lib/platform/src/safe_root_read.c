@@ -45,8 +45,10 @@ static bool native_file_functions(nt_create_file_fn *create_file,
     if (!ntdll) return false;
     FARPROC create_symbol = GetProcAddress(ntdll, "NtCreateFile");
     FARPROC error_symbol = GetProcAddress(ntdll, "RtlNtStatusToDosError");
-    static_assert(sizeof(*create_file) == sizeof(create_symbol));
-    static_assert(sizeof(*to_dos_error) == sizeof(error_symbol));
+    static_assert(sizeof(*create_file) == sizeof(create_symbol),
+                  "Windows function pointer representations must match");
+    static_assert(sizeof(*to_dos_error) == sizeof(error_symbol),
+                  "Windows function pointer representations must match");
     memcpy(create_file, &create_symbol, sizeof(*create_file));
     memcpy(to_dos_error, &error_symbol, sizeof(*to_dos_error));
     return *create_file != NULL && *to_dos_error != NULL;

@@ -48,7 +48,28 @@
  * All access to g_swarm fields protected by g_swarm_mutex. */
 static struct swarm_sync g_swarm __attribute__((used));
 static _Atomic bool g_swarm_active = false;
-static pthread_mutex_t g_swarm_mutex = PTHREAD_MUTEX_INITIALIZER;
+static zcl_mutex_t g_swarm_mutex;
+static pthread_once_t g_swarm_mutex_once = PTHREAD_ONCE_INIT;
+
+static void swarm_mutex_init_once(void)
+{
+    zcl_mutex_init(&g_swarm_mutex);
+}
+
+static bool swarm_mutex_lock(void)
+{
+    if (pthread_once(&g_swarm_mutex_once, swarm_mutex_init_once) != 0) {
+        LOG_ERROR("net", "swarm mutex initialization failed");
+        return false;
+    }
+    zcl_mutex_lock(&g_swarm_mutex);
+    return true;
+}
+
+static void swarm_mutex_unlock(void)
+{
+    zcl_mutex_unlock(&g_swarm_mutex);
+}
 
 /* Snapshot sync service — global singleton in snapshot_sync_service.c */
 static int64_t g_swarm_last_progress_time = 0;
@@ -62,7 +83,6 @@ static int64_t g_swarm_last_progress_time = 0;
  * shared with msgprocessor_snapshot_serve.c's build_block_piece_payloads,
  * which must agree with this file's parse_block_piece_payload_refs on the
  * same per-block cap. */
-#define BLOCK_PAYLOAD_SUBMIT_RETRIES 3
 #define BLOCK_PIECE_TIMEOUT_SECS 8
 /* No piece completion for this long => the swarm is black-holing (peer
  * silently dropping zblkreq, serve-side gap, TCP backpressure): abandon it
@@ -75,147 +95,6 @@ static int64_t g_swarm_last_progress_time = 0;
  * ahead window. Every piece remains manifest-hash checked before any block
  * reaches the reducer. */
 #define BLOCK_PIECE_CONTIGUOUS_WINDOW PIECE_PIPELINE_DEPTH
-
-struct block_piece_payload_ref {
-    const unsigned char *data;
-    size_t len;
-};
-
-static int block_payload_drain_catchup(struct msg_processor *mp)
-{
-    if (!mp || !mp->catchup_drain)
-        return 0;
-    return mp->catchup_drain(mp->catchup_drain_ctx);
-}
-
-static bool block_payload_retry_after_drain(const char *reason)
-{
-    return reason &&
-        (strcmp(reason, "header-admit-inbox-full") == 0 ||
-         strcmp(reason, "p2p-block-header-missing") == 0 ||
-         strcmp(reason, "p2p-block-intake-full") == 0);
-}
-
-static bool block_payload_submit_accepted(
-        const struct validation_state *state)
-{
-    if (!state)
-        return false;
-    if (validation_state_is_valid(state))
-        return true;
-    return strcmp(state->reject_reason, "p2p-block-queued-for-reducer") == 0 ||
-           strcmp(state->reject_reason, "p2p-block-staged-for-reducer") == 0;
-}
-
-static bool block_payload_submit_all(struct msg_processor *mp,
-                                     struct p2p_node *node,
-                                     const struct block_piece_payload_ref *refs,
-                                     uint32_t count)
-{
-    if (!refs)
-        return true;
-    if (!mp || !node)
-        return false;
-
-    /* Match async intake's outer durability scope: nested per-body exits do
-     * not fdatasync individually, while pre-commit/final-exit still flushes
-     * before durable cursors. One scope is bounded by BLOCKS_PER_PIECE. */
-    bool batch_scope_open = mp->catchup_batch_begin && mp->catchup_batch_end;
-    if (batch_scope_open)
-        mp->catchup_batch_begin(mp->catchup_batch_scope_ctx);
-
-    for (uint32_t i = 0; i < count; i++) {
-        struct byte_stream block_stream;
-        stream_init_from_data(&block_stream, refs[i].data, refs[i].len);
-
-        struct block blk;
-        block_init(&blk);
-        if (!block_deserialize(&blk, &block_stream)) {
-            block_free(&blk);
-            stream_free(&block_stream);
-            LOG_WARN("net", "zblkdata payload deserialize failed index=%u", i);
-            if (batch_scope_open)
-                mp->catchup_batch_end(mp->catchup_batch_scope_ctx);
-            return false;
-        }
-
-        struct uint256 hash;
-        block_get_hash(&blk, &hash);
-        dl_mark_received(get_download_mgr(), &hash);
-        dl_add_bytes_received(get_download_mgr(), refs[i].len);
-
-        /* Skip only bodies already persisted (BLOCK_HAVE_DATA). The
-         * block_already_seen ring ALSO covers blocks that were received and
-         * REJECTED at intake — marked seen without ever being persisted —
-         * so keying the skip on the ring completed the piece while leaving
-         * the body missing: a permanent fold hole behind a "complete"
-         * swarm. Persisting here is idempotent (the submit path
-         * early-returns on HAVE_DATA), so a genuinely-persisted block costs
-         * one map lookup, same as the ring check it replaces. */
-        struct block_index *have_bi =
-            mp->main_state
-                ? block_map_find(&mp->main_state->map_block_index, &hash)
-                : NULL;
-        if (!msg_processor_snapshot_active(mp) &&
-            !(have_bi && (have_bi->nStatus & BLOCK_HAVE_DATA))) {
-            bool accepted = false;
-            char last_reason[MAX_REJECT_REASON] = {0};
-            if (!mp->block_submit) {
-                snprintf(last_reason, sizeof(last_reason), "not-enqueued");
-            } else {
-                for (int attempt = 0;
-                     attempt < BLOCK_PAYLOAD_SUBMIT_RETRIES && !accepted;
-                     attempt++) {
-                    struct validation_state state;
-                    validation_state_init(&state);
-                    bool ok = mp->block_submit(
-                        &blk, &state, mp->block_submit_ctx);
-                    accepted = ok || block_payload_submit_accepted(&state);
-                    if (accepted)
-                        break;
-
-                    snprintf(last_reason, sizeof(last_reason), "%s",
-                             state.reject_reason[0]
-                                 ? state.reject_reason : "not-enqueued");
-                    if (!block_payload_retry_after_drain(last_reason))
-                        break;
-                    if (block_payload_drain_catchup(mp) <= 0)
-                        break;
-                }
-            }
-
-            if (!accepted) {
-                LOG_INFO("net",
-                         "zblkdata payload deferred by reducer submit "
-                         "(index=%u reason=%s)",
-                         i, last_reason[0] ? last_reason : "not-enqueued");
-                block_free(&blk);
-                stream_free(&block_stream);
-                if (batch_scope_open)
-                    mp->catchup_batch_end(mp->catchup_batch_scope_ctx);
-                return false;
-            }
-        }
-
-        block_free(&blk);
-        stream_free(&block_stream);
-    }
-
-    /* The staged-sync supervisor is the single continuous reducer driver.
-     * Do not park this P2P message thread behind a whole-pipeline drain after
-     * an arbitrary body count: that stalls the next wire piece even while the
-     * bounded inbox and body store still have capacity. The retry loop above
-     * retains the synchronous drain exactly where it is required for bounded
-     * backpressure (inbox full / missing header), then retries the same body. */
-    if (batch_scope_open)
-        mp->catchup_batch_end(mp->catchup_batch_scope_ctx);
-    /* Connman body staging and the reducer share the activation mutex. A 1 ms
-     * handoff per verified 64-block piece (≤2.1 s over 133k blocks) prevents
-     * connman from starving the waiting reducer between durability scopes;
-     * validity and wire ordering are unchanged. */
-    platform_sleep_ms(1);
-    return true;
-}
 
 static void block_pipeline_clear_piece(struct p2p_node *node,
                                        uint32_t piece_index)
@@ -1320,7 +1199,12 @@ bool mp_handle_zcl23_sync(struct msg_processor *mp,
                                 memcpy(peer_manifest.utxo_sha3, utxo_sha3, 32);
 
                                 int32_t first_chunk = -1;
-                                zcl_mutex_lock(&g_swarm_mutex);
+                                if (!swarm_mutex_lock()) {
+                                    atomic_store(&g_swarm_active, false);
+                                    free(hashes);
+                                    LOG_FAIL("net", "rejecting snapshot manifest: "
+                                             "swarm mutex unavailable");
+                                }
                                 if (swarm_sync_init(&g_swarm, &peer_manifest,
                                                     mp->datadir)) {
                                     g_swarm_last_progress_time =
@@ -1340,7 +1224,7 @@ bool mp_handle_zcl23_sync(struct msg_processor *mp,
                                      * another peer's manifest can retry. */
                                     atomic_store(&g_swarm_active, false);
                                 }
-                                zcl_mutex_unlock(&g_swarm_mutex);
+                                swarm_mutex_unlock();
                                 if (first_chunk >= 0)
                                     push_chunk_request(mp, node,
                                                        (uint32_t)first_chunk);
@@ -1404,13 +1288,17 @@ bool mp_handle_zcl23_sync(struct msg_processor *mp,
                     }
 
                     if (parse_ok) {
-                        zcl_mutex_lock(&g_swarm_mutex);
+                        if (!swarm_mutex_lock()) {
+                            free(chunk);
+                            LOG_FAIL("net", "rejecting snapshot chunk: "
+                                             "swarm mutex unavailable");
+                        }
                         bool verified = swarm_sync_receive_chunk(
                             &g_swarm, chunk, node->id);
                         node->swarm_inflight_chunk = -1;
 
                         if (!verified) {
-                            zcl_mutex_unlock(&g_swarm_mutex);
+                            swarm_mutex_unlock();
                             fprintf(stderr, "Peer %s: chunk %u failed verification\n",  // obs-ok:helper-context-logged
                                    node->addr_name, chunk_index);
                             peer_scoring_record(mp->net_mgr, node, PEER_OFFENCE_INVALID_CHUNK,
@@ -1451,9 +1339,9 @@ bool mp_handle_zcl23_sync(struct msg_processor *mp,
                              * equivalent to `g_swarm_active = false` on
                              * _Atomic bool, but documents the pairing. */
                             atomic_store(&g_swarm_active, false);
-                            zcl_mutex_unlock(&g_swarm_mutex);
+                            swarm_mutex_unlock();
                         } else {
-                            zcl_mutex_unlock(&g_swarm_mutex);
+                            swarm_mutex_unlock();
                         }
                     } else {
                         printf("Peer %s: truncated zchunkdata\n",
@@ -1726,7 +1614,7 @@ bool mp_handle_zcl23_sync(struct msg_processor *mp,
                         const uint32_t swarm_pieces =
                             g_block_swarm.manifest.num_pieces;
                         pthread_mutex_unlock(&g_block_swarm_mutex);
-                        payloads_accepted = block_payload_submit_all(
+                        payloads_accepted = mp_block_payload_submit_all(
                             mp, node, block_refs, block_count);
                         pthread_mutex_lock(&g_block_swarm_mutex);
                         if (!atomic_load(&g_block_swarm_active) ||
@@ -1915,7 +1803,11 @@ void mp_snapshot_send_tick(struct msg_processor *mp,
     if (g_swarm_active && node->swarm_manifest_received &&
         node->state >= PEER_HANDSHAKE_COMPLETE) {
 
-        zcl_mutex_lock(&g_swarm_mutex);
+        if (!swarm_mutex_lock()) {
+            LOG_ERROR("net", "snapshot send tick refused: swarm mutex "
+                      "unavailable peer=%s", node->addr_name);
+            return;
+        }
 
         /* Requeue globally stale inflight chunks. A peer can disconnect and
          * lose node->swarm_inflight_chunk while g_swarm still marks that
@@ -1960,7 +1852,7 @@ void mp_snapshot_send_tick(struct msg_processor *mp,
             uint32_t complete = g_swarm.chunks_complete;
             uint32_t total = g_swarm.manifest.num_chunks;
             uint32_t inflight = g_swarm.chunks_inflight;
-            zcl_mutex_unlock(&g_swarm_mutex);
+            swarm_mutex_unlock();
 
             /* Count serving peers — under cs_nodes: the socket-thread
              * disconnect sweep frees nodes at refcount 0. g_swarm_mutex
@@ -1979,7 +1871,7 @@ void mp_snapshot_send_tick(struct msg_processor *mp,
             printf("Sync: %d%% (%u/%u chunks, %u inflight, %d peers serving)\n",
                    progress, complete, total, inflight, serving_peers);
         } else {
-            zcl_mutex_unlock(&g_swarm_mutex);
+            swarm_mutex_unlock();
         }
     }
 

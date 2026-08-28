@@ -10,16 +10,11 @@
 
 #include "net/file_market.h"
 #include "net/file_service.h"
+#include "platform/socket_compat.h"
 #include "platform/time_compat.h"
 #include "support/cleanse.h"
 
 #include <errno.h>
-#include <fcntl.h>
-#include <netinet/in.h>
-#include <sys/select.h>
-#include <sys/socket.h>
-#include <sys/time.h>
-#include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -123,69 +118,56 @@ enum file_market_delivery_status file_market_delivery_fetch_session(
         buyer_seed, INT64_MAX, out_chunk);
 }
 
-static int delivery_connect_endpoint(const uint8_t peer_ip[16],
-                                     uint16_t peer_port,
-                                     int64_t deadline_ms)
+static platform_socket_t delivery_connect_endpoint(const uint8_t peer_ip[16],
+                                                   uint16_t peer_port,
+                                                   int64_t deadline_ms)
 {
     if (!peer_ip || !delivery_bytes_nonzero(peer_ip, 16) || peer_port == 0)
-        return -1;
+        return PLATFORM_SOCKET_INVALID;
     int64_t now_ms = platform_time_monotonic_ms();
     if (deadline_ms != INT64_MAX &&
         (now_ms <= 0 || now_ms >= deadline_ms))
-        return -1;
-    int fd = socket(AF_INET6, SOCK_STREAM, 0);
-    if (fd < 0)
-        return -1;
+        return PLATFORM_SOCKET_INVALID;
+    platform_socket_t fd = platform_socket_open(AF_INET6, SOCK_STREAM, 0,
+                                                true, true);
+    if (fd == PLATFORM_SOCKET_INVALID)
+        return PLATFORM_SOCKET_INVALID;
     struct sockaddr_in6 addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin6_family = AF_INET6;
     addr.sin6_port = htons(peer_port);
     memcpy(&addr.sin6_addr, peer_ip, 16);
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) {
-        close(fd);
-        return -1;
-    }
-    int rc = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
-    if (rc < 0 && errno == EINPROGRESS) {
-        fd_set writefds;
-        FD_ZERO(&writefds);
-        FD_SET(fd, &writefds);
-        struct timeval timeout = { .tv_sec = 10, .tv_usec = 0 };
+    int rc = platform_socket_connect(fd, (struct sockaddr *)&addr,
+                                     sizeof(addr));
+    int connect_error = rc == 0 ? 0 : platform_socket_last_error();
+    if (rc != 0 && platform_socket_error_in_progress(connect_error)) {
+        int timeout_ms = 10000;
         if (deadline_ms != INT64_MAX) {
             now_ms = platform_time_monotonic_ms();
             if (now_ms <= 0 || now_ms >= deadline_ms) {
-                close(fd);
-                return -1;
+                platform_socket_close(fd);
+                return PLATFORM_SOCKET_INVALID;
             }
             int64_t remain_ms = deadline_ms - now_ms;
-            if (remain_ms < 10000) {
-                timeout.tv_sec = (time_t)(remain_ms / 1000);
-                timeout.tv_usec = (suseconds_t)((remain_ms % 1000) * 1000);
-            }
+            if (remain_ms < timeout_ms) timeout_ms = (int)remain_ms;
         }
-        rc = select(fd + 1, NULL, &writefds, NULL, &timeout);
+        rc = platform_socket_wait_writable(fd, timeout_ms);
         int socket_error = 0;
-        socklen_t error_len = sizeof(socket_error);
-        if (rc <= 0 || getsockopt(fd, SOL_SOCKET, SO_ERROR,
-                                  &socket_error, &error_len) != 0 ||
+        if (rc <= 0 || platform_socket_pending_error(fd, &socket_error) != 0 ||
             socket_error != 0 || !delivery_deadline_active(deadline_ms)) {
-            close(fd);
-            return -1;
+            platform_socket_close(fd);
+            return PLATFORM_SOCKET_INVALID;
         }
-    } else if (rc < 0) {
-        close(fd);
-        return -1;
+    } else if (rc != 0) {
+        platform_socket_close(fd);
+        return PLATFORM_SOCKET_INVALID;
     }
-    if (fcntl(fd, F_SETFL, flags) != 0) {
-        close(fd);
-        return -1;
+    if (!platform_socket_set_nonblocking(fd, false)) {
+        platform_socket_close(fd);
+        return PLATFORM_SOCKET_INVALID;
     }
-    struct timeval io_timeout = { .tv_sec = 30, .tv_usec = 0 };
-    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO,
-                     &io_timeout, sizeof(io_timeout));
-    (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO,
-                     &io_timeout, sizeof(io_timeout));
+    (void)platform_socket_set_receive_timeout(fd, 30000);
+    (void)platform_socket_set_send_timeout(fd, 30000);
     return fd;
 }
 
@@ -210,8 +192,9 @@ enum file_market_delivery_status file_market_delivery_fetch_endpoint_until(
 {
     if (out_chunk)
         memset(out_chunk, 0, sizeof(*out_chunk));
-    int fd = delivery_connect_endpoint(peer_ip, peer_port, deadline_ms);
-    if (fd < 0)
+    platform_socket_t fd = delivery_connect_endpoint(peer_ip, peer_port,
+                                                     deadline_ms);
+    if (fd == PLATFORM_SOCKET_INVALID)
         return delivery_deadline_active(deadline_ms)
             ? FILE_MARKET_DELIVERY_PAYMENT_UNKNOWN
             : FILE_MARKET_DELIVERY_RESOURCE_LIMIT;
@@ -231,6 +214,6 @@ enum file_market_delivery_status file_market_delivery_fetch_endpoint_until(
     else if (!delivery_deadline_active(deadline_ms))
         status = FILE_MARKET_DELIVERY_RESOURCE_LIMIT;
     fs_session_cleanup(&session);
-    close(fd);
+    platform_socket_close(fd);
     return status;
 }

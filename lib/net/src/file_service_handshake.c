@@ -11,13 +11,11 @@
 #include "crypto/sha3.h"
 #include "crypto/x25519_safe.h"
 #include "platform/time_compat.h"
+#include "platform/socket_compat.h"
 #include "support/cleanse.h"
 #include "util/log_macros.h"
 
-#include <errno.h>
-#include <poll.h>
 #include <string.h>
-#include <sys/socket.h>
 
 #define FS_HANDSHAKE_RECV_BUDGET_MS 30000
 
@@ -26,7 +24,8 @@ static const uint8_t k_fs_handshake_domain[] =
 static const uint8_t k_fs_confirmation_domain[] =
     "zcl.file-service.key-confirmation.v1";
 
-static bool handshake_send_all(int fd, const uint8_t *data, size_t len,
+static bool handshake_send_all(platform_socket_t fd, const uint8_t *data,
+                               size_t len,
                                int64_t deadline_ms)
 {
     size_t sent = 0;
@@ -34,16 +33,21 @@ static bool handshake_send_all(int fd, const uint8_t *data, size_t len,
         int64_t now_ms = platform_time_monotonic_ms();
         if (now_ms <= 0 || now_ms >= deadline_ms)
             return false;
-        struct pollfd pfd = {.fd = fd, .events = POLLOUT};
-        int ready = poll(&pfd, 1, (int)(deadline_ms - now_ms));
-        if (ready < 0 && errno == EINTR)
+        int64_t remaining_ms = deadline_ms - now_ms;
+        int timeout_ms = remaining_ms > INT32_MAX
+                             ? INT32_MAX : (int)remaining_ms;
+        platform_socket_pollfd pfd = {
+            .fd = fd, .events = PLATFORM_SOCKET_POLL_WRITE};
+        int ready = platform_socket_poll(&pfd, 1, timeout_ms);
+        if (ready < 0 && platform_socket_error_interrupted(
+                             platform_socket_last_error()))
             continue;
-        if (ready <= 0 || !(pfd.revents & POLLOUT))
+        if (ready <= 0 || !(pfd.revents & PLATFORM_SOCKET_POLL_WRITE))
             return false;
-        ssize_t n = send(fd, data + sent, len - sent,
-                         MSG_DONTWAIT | MSG_NOSIGNAL);
-        if (n < 0 && (errno == EINTR || errno == EAGAIN ||
-                      errno == EWOULDBLOCK))
+        int n = platform_socket_send_nonblocking(fd, data + sent, len - sent);
+        int error = n < 0 ? platform_socket_last_error() : 0;
+        if (n < 0 && (platform_socket_error_interrupted(error) ||
+                      platform_socket_error_would_block(error)))
             continue;
         if (n <= 0)
             return false;
@@ -52,7 +56,7 @@ static bool handshake_send_all(int fd, const uint8_t *data, size_t len,
     return true;
 }
 
-static bool handshake_recv_all(int fd, uint8_t *out, size_t len,
+static bool handshake_recv_all(platform_socket_t fd, uint8_t *out, size_t len,
                                int64_t deadline_ms)
 {
     size_t got = 0;
@@ -60,16 +64,23 @@ static bool handshake_recv_all(int fd, uint8_t *out, size_t len,
         int64_t now_ms = platform_time_monotonic_ms();
         if (now_ms <= 0 || now_ms >= deadline_ms)
             return false;
-        int timeout_ms = (int)(deadline_ms - now_ms);
-        struct pollfd pfd = {.fd = fd, .events = POLLIN};
-        int ready = poll(&pfd, 1, timeout_ms);
-        if (ready < 0 && errno == EINTR)
+        int64_t remaining_ms = deadline_ms - now_ms;
+        int timeout_ms = remaining_ms > INT32_MAX
+                             ? INT32_MAX : (int)remaining_ms;
+        platform_socket_pollfd pfd = {
+            .fd = fd, .events = PLATFORM_SOCKET_POLL_READ};
+        int ready = platform_socket_poll(&pfd, 1, timeout_ms);
+        if (ready < 0 && platform_socket_error_interrupted(
+                             platform_socket_last_error()))
             continue;
-        if (ready <= 0 || !(pfd.revents & (POLLIN | POLLHUP)))
+        if (ready <= 0 || !(pfd.revents &
+                            (PLATFORM_SOCKET_POLL_READ |
+                             PLATFORM_SOCKET_POLL_HANGUP)))
             return false;
-        ssize_t n = recv(fd, out + got, len - got, MSG_DONTWAIT);
-        if (n < 0 && (errno == EINTR || errno == EAGAIN ||
-                      errno == EWOULDBLOCK))
+        int n = platform_socket_receive_nonblocking(fd, out + got, len - got);
+        int error = n < 0 ? platform_socket_last_error() : 0;
+        if (n < 0 && (platform_socket_error_interrupted(error) ||
+                      platform_socket_error_would_block(error)))
             continue;
         if (n <= 0)
             return false;

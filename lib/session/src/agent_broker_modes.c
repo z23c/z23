@@ -33,24 +33,19 @@
 #include "platform/os_sandbox.h"
 #include "platform/rng.h"
 
-#include <errno.h>
-#include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
+#include <errno.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
 
 #define MODES_TAG "agent.broker.mode"
-
-static bool ensure_dir(const char *path)
-{
-    if (mkdir(path, 0700) == 0 || errno == EEXIST)
-        return true;
-    LOG_FAIL(MODES_TAG, "mkdir %s failed: %s", path, strerror(errno));
-}
 
 static const char *arg_value(int argc, char **argv, const char *prefix)
 {
@@ -67,6 +62,14 @@ static bool arg_present(int argc, char **argv, const char *flag)
         if (strcmp(argv[i], flag) == 0)
             return true;
     return false;
+}
+
+#if !defined(_WIN32)
+static bool ensure_dir(const char *path)
+{
+    if (mkdir(path, 0700) == 0 || errno == EEXIST)
+        return true;
+    LOG_FAIL(MODES_TAG, "mkdir %s failed: %s", path, strerror(errno));
 }
 
 /* The child writes its ACHIEVED posture into its own scratch directory; the
@@ -109,6 +112,7 @@ static void read_child_report(const char *scratch_dir,
     }
     json_free(&v);
 }
+#endif
 
 /* WHERE THE AUTHORITY COMES FROM.
  *
@@ -132,6 +136,7 @@ static void read_child_report(const char *scratch_dir,
  * production binary the flag is not merely rejected: the symbol it would call
  * is not compiled and not declared, so there is no code path from here to a
  * fixture at all. */
+#if !defined(_WIN32)
 static const struct agent_broker_provider *
 resolve_provider(int argc, char **argv, const char **why)
 {
@@ -151,6 +156,7 @@ resolve_provider(int argc, char **argv, const char **why)
                "catalog and no real grant, and will not substitute one";
     return p;
 }
+#endif
 
 int agent_broker_mode_main(int argc, char **argv)
 {
@@ -206,6 +212,22 @@ int agent_broker_mode_main(int argc, char **argv)
     if (!canary)
         canary = "";
 
+#if defined(_WIN32)
+    (void)script;
+    (void)canary;
+    (void)reqs;
+    (void)euid_s;
+    (void)auid_s;
+    (void)listen_mode;
+#ifdef ZCL_TESTING
+    (void)revoke_s;
+#endif
+    (void)fprintf(stderr,
+        "broker: Windows agent execution is disabled until restricted-token, "
+        "Job Object, low-integrity, resource-limit, and network-denial "
+        "sandbox qualification passes\n"); // obs-ok:argv-mode-cli
+    return 78;
+#else
     char scratch[448];
     snprintf(scratch, sizeof(scratch), "%s/agent-scratch", dir);
     if (!ensure_dir(dir) || !ensure_dir(scratch))
@@ -393,4 +415,5 @@ int agent_broker_mode_main(int argc, char **argv)
                (unsigned long long)s.receipts_written);
     (void)fflush(stdout);
     return 0;
+#endif
 }

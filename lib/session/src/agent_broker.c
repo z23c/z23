@@ -43,29 +43,35 @@
  * which the kernel stamps per message and the sender cannot forge. See
  * agent_broker_identify_peer().
  */
+#if !defined(_WIN32)
 #define _GNU_SOURCE  /* struct ucred, execvpe — must precede every include */
+#endif
 #include "session/agent_broker.h"
-#include "base/format_attribute.h"
+#include "agent_broker_internal.h"
 #include "session/agent_broker_vocab.h"
 #include "base/hex.h"
 #include "base/log_macros.h"
 #include "crypto/sha3.h"
 #include "platform/clock.h"
 #include <errno.h>
+#if !defined(_WIN32)
 #include <fcntl.h>
 #include <poll.h>
-#include <stdarg.h>
+#endif
 #include <stdio.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
+#endif
 #define BROKER_TAG "agent.broker"
 /* Fixed descriptor keeps it off the child's command line. */
 #define AGENT_CHILD_SOCKET_FD 3
 /* ── fd helpers (EINTR-safe, exact-length) ──────────────────────────────── */
 
+#if !defined(_WIN32)
 static bool read_full(int fd, uint8_t *buf, size_t n, bool *peer_closed)
 {
     size_t got = 0;
@@ -101,10 +107,16 @@ static bool write_full(int fd, const uint8_t *buf, size_t n)
     }
     return true;
 }
+#endif
 /* ── SO_PEERCRED ────────────────────────────────────────────────────────── */
 
 bool agent_broker_peercred(int fd, struct agent_peer_cred *out)
 {
+#if defined(_WIN32)
+    (void)fd;
+    if (out) memset(out, 0, sizeof(*out));
+    return false;
+#else
     if (!out)
         LOG_FAIL(BROKER_TAG, "null out for fd=%d", fd);
     memset(out, 0, sizeof(*out));
@@ -132,10 +144,15 @@ bool agent_broker_peercred(int fd, struct agent_peer_cred *out)
 #endif
     out->valid = true;
     return true;
+#endif
 }
 bool agent_broker_sender_cred(int fd, struct agent_peer_cred *out)
 {
-#if defined(__APPLE__)
+#if defined(_WIN32)
+    (void)fd;
+    if (out) memset(out, 0, sizeof(*out));
+    return false;
+#elif defined(__APPLE__)
     return agent_broker_peercred(fd, out);
 #else
     if (!out)
@@ -188,6 +205,11 @@ bool agent_broker_sender_cred(int fd, struct agent_peer_cred *out)
 }
 bool agent_broker_identify_peer(int fd, struct agent_peer_cred *out)
 {
+#if defined(_WIN32)
+    (void)fd;
+    if (out) memset(out, 0, sizeof(*out));
+    return false;
+#else
     if (!out)
         LOG_FAIL(BROKER_TAG, "null out for fd=%d", fd);
     if (!agent_broker_peercred(fd, out))
@@ -201,6 +223,7 @@ bool agent_broker_identify_peer(int fd, struct agent_peer_cred *out)
             *out = sender;
     }
     return true;
+#endif
 }
 bool agent_broker_peer_authorized(const struct agent_peer_cred *c,
                                   const struct agent_peer_expectation *e,
@@ -281,6 +304,15 @@ bool agent_broker_session_bind(struct agent_broker_session *s,
     memset(ref, 0, sizeof(*ref));
     s->authority = ref;
 
+#if defined(_WIN32)
+    if (why && why_cap)
+        snprintf(why, why_cap,
+                 "Windows agent execution is disabled until restricted-token, "
+                 "Job Object, low-integrity, and network-denial sandbox "
+                 "acceptance passes");
+    return false;
+#else
+
     const struct agent_broker_provider *p = g_provider;
     if (!p) {
         if (why && why_cap)
@@ -301,33 +333,10 @@ bool agent_broker_session_bind(struct agent_broker_session *s,
     ref->provider     = p;
     ref->provider_ctx = p->ctx;
     return true;
+#endif
 }
 
 /* ── the request pipeline ───────────────────────────────────────────────── */
-
-static void resp_init(struct mvap_response *r, const struct mvap_request *req,
-                      int32_t status)
-{
-    memset(r, 0, sizeof(*r));
-    r->verb       = req ? req->verb : MVAP_VERB_NONE;
-    r->request_id = req ? req->request_id : 0;
-    /* Reply in the dialect the peer spoke, not the one this build prefers. */
-    r->version    = req ? req->version : 0;
-    r->status     = status;
-}
-
-static void resp_body(struct mvap_response *r, const char *fmt, ...)
-    ZCL_PRINTF_LIKE(2, 3);
-
-static void resp_body(struct mvap_response *r, const char *fmt, ...)
-{
-    va_list ap;
-    va_start(ap, fmt);
-    int n = vsnprintf(r->body, sizeof(r->body), fmt, ap);
-    va_end(ap);
-    if (n < 0)
-        r->body[0] = '\0';
-}
 
 /* Replay protection lives in agent_broker_idem.c — the digest, the ring, and
  * the replay label. What is left in this file is WHERE it is consulted, and
@@ -347,6 +356,7 @@ static void resp_body(struct mvap_response *r, const char *fmt, ...)
  * the whole reason the session stopped holding a grant: with a copy present,
  * "the authority is unreachable" would silently become "use the copy", which
  * is exactly how a revoked grant keeps working. */
+#if !defined(_WIN32)
 static int32_t authorize_live(const struct agent_broker_session *s,
                               const struct mvap_request *req, int64_t now_ms)
 {
@@ -360,95 +370,14 @@ static int32_t authorize_live(const struct agent_broker_session *s,
     return agent_broker_scope_check(&a->scope, req);
 }
 
-static const char *session_principal(const struct agent_broker_session *s)
+static const char *session_grant_id(const struct agent_broker_session *session)
 {
-    return (s->authority && s->authority->bound) ? s->authority->principal : "";
-}
-
-static const char *session_grant_id(const struct agent_broker_session *s)
-{
-    return (s->authority && s->authority->bound)
-               ? s->authority->canonical_grant_id
+    return (session->authority && session->authority->bound)
+               ? session->authority->canonical_grant_id
                : "";
 }
 
-/* One confinement receipt. `action_receipt_id` is the canonical metaverse
- * action receipt this row COMMITS TO — passed in from the COMMIT outcome, all
- * zero when the operation minted none (a refusal, or a query, which never
- * reaches here at all). It is inside the row's digest, so a confinement row
- * cannot later be pointed at a different action. */
-static void broker_receipt(struct agent_broker_session *s,
-                           const struct mvap_request *req,
-                           struct mvap_response *resp, const char *detail,
-                           const uint8_t action_receipt_id[32])
-{
-    if (!s->audit || !s->audit->open)
-        return;
-    struct agent_receipt r = { 0 };
-    r.receipt_version = 3;
-    snprintf(r.money_snapshot_status, sizeof(r.money_snapshot_status),
-             "UNKNOWN");
-    r.verb       = req->verb;
-    r.request_id = req->request_id;
-    r.status     = resp->status;
-    r.value_zats = req->value_zats;
-    memcpy(r.property_id, req->property_id, MVAP_PROPERTY_ID_LEN);
-    if (action_receipt_id)
-        memcpy(r.action_receipt_id, action_receipt_id, 32);
-    snprintf(r.principal, sizeof(r.principal), "%s", session_principal(s));
-    snprintf(r.grant_id, sizeof(r.grant_id), "%s", session_grant_id(s));
-    r.peer = s->peer;
-    snprintf(r.detail, sizeof(r.detail), "%s", detail ? detail : "");
-    if (agent_audit_append(s->audit, &r)) {
-        memcpy(resp->receipt_id, r.id, MVAP_RECEIPT_ID_LEN);
-        s->receipts_written++;
-    }
-}
-
-/* The audit row a REPLAY writes.
- *
- * It is its own row, and deliberately so: the agent asked twice, and a log that
- * records only the first ask cannot answer "how many times did this agent
- * present this receipt". It is DISTINGUISHABLE from a first execution on its
- * face — the detail begins with the word REPLAYED and names the receipt of the
- * execution it is replaying, which no first execution's detail can do.
- *
- * It is NOT counted in `receipts_written`, because that counter answers "how
- * much work did this broker commit" and a replay commits none; `replays_served`
- * counts it instead.
- *
- * `resp` is const on purpose. A replay returns the ORIGINAL confinement
- * receipt id, so this row must not stamp its own id over it — otherwise a
- * retry would hand the agent a second receipt for one action, which is the
- * double-count the ring exists to prevent. */
-static void broker_replay_receipt(struct agent_broker_session *s,
-                                  const struct mvap_request *req,
-                                  const struct mvap_response *resp,
-                                  const struct agent_idem_slot *slot)
-{
-    if (!s->audit || !s->audit->open || !slot)
-        return;
-    struct agent_receipt r = { 0 };
-    r.receipt_version = 3;
-    snprintf(r.money_snapshot_status, sizeof(r.money_snapshot_status),
-             "UNKNOWN");
-    r.verb       = req->verb;
-    r.request_id = req->request_id;
-    r.status     = resp->status;
-    r.value_zats = req->value_zats;
-    memcpy(r.property_id, req->property_id, MVAP_PROPERTY_ID_LEN);
-    memcpy(r.action_receipt_id, slot->action_receipt_id, 32);
-    snprintf(r.principal, sizeof(r.principal), "%s", session_principal(s));
-    snprintf(r.grant_id, sizeof(r.grant_id), "%s", session_grant_id(s));
-    r.peer = s->peer;
-
-    char first[65];
-    zcl_hex_encode(slot->resp.receipt_id, MVAP_RECEIPT_ID_LEN, first);
-    snprintf(r.detail, sizeof(r.detail),
-             "REPLAYED request_id=%u: executed nothing; first_receipt=%s",
-             req->request_id, first);
-    (void)agent_audit_append(s->audit, &r);
-}
+#endif
 
 void agent_broker_handle(struct agent_broker_session *s,
                          const struct mvap_request *req,
@@ -458,6 +387,15 @@ void agent_broker_handle(struct agent_broker_session *s,
         return;
 
     s->requests_served++;
+
+#if defined(_WIN32)
+    resp_init(out, req, MVAP_ERR_DENIED_NO_GRANT);
+    resp_body(out,
+              "{\"denied\":\"WINDOWS_SANDBOX_UNQUALIFIED\","
+              "\"stage\":\"broker_disabled\"}");
+    s->requests_denied++;
+    return;
+#else
 
     /* Queries and actions are two different pipelines from here on. A QUERY
      * resolves and answers; it can reach neither PLAN/COMMIT nor a receipt,
@@ -643,7 +581,7 @@ void agent_broker_handle(struct agent_broker_session *s,
     bool have_action_receipt = false;
     for (size_t i = 0; i < 32; i++)
         have_action_receipt |= outcome.action_receipt_id[i] != 0;
-    snprintf(detail, sizeof(detail), "%s action_receipt=%s", plan.detail,
+    snprintf(detail, sizeof(detail), "%.79s action_receipt=%s", plan.detail,
              have_action_receipt ? action_hex : "none");
     broker_receipt(s, req, out, detail, outcome.action_receipt_id);
     /* THE ONLY THING THAT PUTS AN ANSWER IN THE RING. A mutation that actually
@@ -652,12 +590,18 @@ void agent_broker_handle(struct agent_broker_session *s,
      * it commits to, so the replay's audit row can name it too. */
     agent_broker_idem_commit(s, &ident, digest, out,
                              outcome.action_receipt_id);
+#endif
 }
 
 /* ── serving ────────────────────────────────────────────────────────────── */
 
 int agent_broker_serve_once(struct agent_broker_session *s, int fd)
 {
+#if defined(_WIN32)
+    (void)s;
+    (void)fd;
+    return -1;
+#else
     if (!s || fd < 0)
         LOG_ERR(BROKER_TAG, "bad session=%p fd=%d", (void *)s, fd);
 
@@ -695,11 +639,18 @@ int agent_broker_serve_once(struct agent_broker_session *s, int fd)
     if (!write_full(fd, out, n))
         LOG_ERR(BROKER_TAG, "writing the response failed: %s", strerror(errno));
     return 1;
+#endif
 }
 
 int agent_broker_serve_fd(struct agent_broker_session *s, int fd,
                           uint64_t max_requests)
 {
+#if defined(_WIN32)
+    (void)s;
+    (void)fd;
+    (void)max_requests;
+    return -1;
+#else
     if (!s || fd < 0)
         LOG_ERR(BROKER_TAG, "bad session=%p fd=%d", (void *)s, fd);
 
@@ -733,10 +684,15 @@ int agent_broker_serve_fd(struct agent_broker_session *s, int fd,
         if (max_requests && served >= max_requests)
             return (int)served;
     }
+#endif
 }
 
 int agent_broker_listen(const char *path)
 {
+#if defined(_WIN32)
+    (void)path;
+    return -1;
+#else
     if (!path || !path[0])
         LOG_ERR(BROKER_TAG, "null socket path");
     struct sockaddr_un sa;
@@ -776,11 +732,18 @@ int agent_broker_listen(const char *path)
         LOG_ERR(BROKER_TAG, "listen on %s failed: %s", path, strerror(errno));
     }
     return fd;
+#endif
 }
 
 int agent_broker_accept_once(struct agent_broker_session *s, int listen_fd,
                              int timeout_ms)
 {
+#if defined(_WIN32)
+    (void)s;
+    (void)listen_fd;
+    (void)timeout_ms;
+    return -1;
+#else
     if (!s || listen_fd < 0)
         LOG_ERR(BROKER_TAG, "bad session=%p listen_fd=%d", (void *)s,
                 listen_fd);
@@ -797,4 +760,5 @@ int agent_broker_accept_once(struct agent_broker_session *s, int listen_fd,
     int served = agent_broker_serve_fd(s, cfd, 0);
     (void)close(cfd);
     return served < 0 ? -1 : 1;
+#endif
 }

@@ -13,14 +13,21 @@
 #include "util/timedata.h"
 #include "event/event.h"
 #include "platform/os_sandbox.h"
+#include "platform/time_compat.h"
 #include "sync/sync_state.h"
 #include "util/thread_liveness.h"
 #include "util/thread_registry.h"
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
 #include <unistd.h>
-#include <sys/ioctl.h>
+#endif
 
 _Atomic uint64_t g_transactions_validated = 0;
 _Atomic uint64_t g_eh_solver_runs = 0;
@@ -40,6 +47,18 @@ static struct thread_liveness_child g_metrics_child = {
  * thread); the winner of this CAS is the only spawner, and metrics_stop()
  * pairs with it so only the matching join runs. */
 static _Atomic bool g_metrics_started = false;
+
+static bool stdout_is_terminal(void)
+{
+#ifdef _WIN32
+    HANDLE output = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD mode = 0;
+    return output != NULL && output != INVALID_HANDLE_VALUE &&
+           GetConsoleMode(output, &mode) != 0;
+#else
+    return isatty(STDOUT_FILENO) != 0;
+#endif
+}
 
 void metrics_print_art(void)
 {
@@ -330,7 +349,7 @@ static void *metrics_thread_fn(void *arg)
     struct metrics_context *ctx = (struct metrics_context *)arg;
     g_start_time = GetTime();
 
-    bool is_tty = isatty(STDOUT_FILENO);
+    bool is_tty = stdout_is_terminal();
 
     if (is_tty) {
         printf("\033[2J");
@@ -436,7 +455,7 @@ static void *metrics_thread_fn(void *arg)
         }
 
         fflush(stdout);
-        sleep(1);
+        platform_sleep_ms(1000);
 
         if (is_tty)
             printf("\033[%dA", lines);

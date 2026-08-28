@@ -9,24 +9,24 @@
  * (the node stays unprivileged). See tools/zcl_portfwd.c,
  * deploy/systemd/zcl-portfwd.service, and docs/BLOCK_EXPLORER_HOSTING.md. */
 
+#if !defined(_WIN32)
 #define _XOPEN_SOURCE 700
+#endif
 #include "net/https_frontdoor.h"
 #include "net/https_server.h"
 #include "net/site_routes.h"
+#include "platform/socket_compat.h"
 #include <openssl/ssl.h>
 #include <openssl/err.h>
-#include <arpa/inet.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <limits.h>
-#include <netinet/in.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <strings.h>
-#include <sys/socket.h>
-#include <unistd.h>
+#endif
 #include <signal.h>
 #include <stdatomic.h>
 #include <sys/time.h>
@@ -39,8 +39,8 @@
 #include "metrics/prometheus_metrics.h"
 
 static SSL_CTX *g_ssl_ctx = NULL;
-static int g_https_fd = -1;
-static int g_http_fd = -1;
+static platform_socket_t g_https_fd = PLATFORM_SOCKET_INVALID;
+static platform_socket_t g_http_fd = PLATFORM_SOCKET_INVALID;
 static pthread_t g_https_thread;
 static pthread_t g_http_thread;
 static pthread_t g_worker_threads[16];
@@ -110,6 +110,15 @@ static bool plain_read_line(struct https_frontdoor_fd_reader *reader,
                                      buf, max, reader->deadline_ms);
 }
 
+static int https_ascii_casecmp_n(const char *left, const char *right, size_t n)
+{
+#if defined(_WIN32)
+    return _strnicmp(left, right, n);
+#else
+    return strncasecmp(left, right, n);
+#endif
+}
+
 /* Bound the request-header count so an endless-header stream (a slowloris
  * variant) cannot pin a server thread reading lines forever. Legitimate
  * explorer/API clients send well under this. */
@@ -141,7 +150,7 @@ static void https_write_all(SSL *ssl, const unsigned char *buf, size_t n)
 
 /* ── HTTPS handler ────────────────────────────────────────── */
 
-static void handle_https_client(SSL *ssl, int fd, int original_flags,
+static void handle_https_client(SSL *ssl, platform_socket_t fd,
                                 int64_t deadline_ms)
 {
     struct https_frontdoor_ssl_reader reader = {
@@ -171,7 +180,7 @@ static void handle_https_client(SSL *ssl, int fd, int original_flags,
     }
     if (!headers_complete)
         return;
-    if (fcntl(fd, F_SETFL, original_flags) != 0)
+    if (!platform_socket_set_nonblocking(fd, false))
         return;
 
     /* Only serve GET requests to explorer routes */
@@ -359,38 +368,45 @@ static void handle_https_client(SSL *ssl, int fd, int original_flags,
     SSL_write(ssl, resp, (int)strlen(resp));
 }
 
-static void handle_https_client_fd(int fd, int64_t deadline_ms)
+static void handle_https_client_fd(platform_socket_t fd, int64_t deadline_ms)
 {
     atomic_fetch_add(&g_active_connections, 1);
 
-    int original_flags = fcntl(fd, F_GETFL, 0);
-    if (original_flags < 0 ||
-        fcntl(fd, F_SETFL, original_flags | O_NONBLOCK) != 0) {
-        close(fd);
+    if (!platform_socket_set_nonblocking(fd, true)) {
+        platform_socket_close(fd);
         atomic_fetch_sub(&g_active_connections, 1);
         return;
     }
     SSL *ssl = SSL_new(g_ssl_ctx);
     if (!ssl) {
-        close(fd);
+        platform_socket_close(fd);
         atomic_fetch_sub(&g_active_connections, 1);
         return;
     }
 
-    SSL_set_fd(ssl, fd);
+#if defined(_WIN32)
+    if ((uintptr_t)fd > INT_MAX || SSL_set_fd(ssl, (int)(uintptr_t)fd) != 1) {
+#else
+    if (SSL_set_fd(ssl, fd) != 1) {
+#endif
+        SSL_free(ssl);
+        platform_socket_close(fd);
+        atomic_fetch_sub(&g_active_connections, 1);
+        return;
+    }
 
     if (!https_frontdoor_ssl_accept(ssl, fd, deadline_ms)) {
         SSL_free(ssl);
-        close(fd);
+        platform_socket_close(fd);
         atomic_fetch_sub(&g_active_connections, 1);
         return;
     }
 
-    handle_https_client(ssl, fd, original_flags, deadline_ms);
+    handle_https_client(ssl, fd, deadline_ms);
 
     SSL_shutdown(ssl);
     SSL_free(ssl);
-    close(fd);
+    platform_socket_close(fd);
     atomic_fetch_sub(&g_active_connections, 1);
 }
 
@@ -399,13 +415,11 @@ static void *https_listen_fn(void *arg)
     (void)arg;
     while (g_running) {
         struct sockaddr_in client_addr;
-        socklen_t addr_len = sizeof(client_addr);
-        int client_fd = accept(g_https_fd,
-                                (struct sockaddr *)&client_addr, &addr_len);
+        size_t addr_len = sizeof(client_addr);
+        platform_socket_t client_fd = platform_socket_accept(
+            g_https_fd, (struct sockaddr *)&client_addr, &addr_len);
         thread_liveness_beat(&g_https_listen_liveness, -1);
-        if (client_fd < 0) {
-            if (g_running && errno != EINVAL)
-                perror("https accept");
+        if (client_fd == PLATFORM_SOCKET_INVALID) {
             continue;
         }
 
@@ -418,20 +432,19 @@ static void *https_listen_fn(void *arg)
              * which the client already handles. Not worth logging — an
              * attacker driving us to the connection cap would then also
              * control our log volume. */
-            (void)zcl_write_all(client_fd, busy, strlen(busy));
-            close(client_fd);
+            (void)platform_socket_send_all(client_fd, busy, strlen(busy));
+            platform_socket_close(client_fd);
             continue;
         }
 
         /* Slowloris protection: 15s timeout for HTTPS requests.
          * Heavy pages (HODL, stats) are pre-cached so serve instantly. */
-        struct timeval tv = { .tv_sec = 15, .tv_usec = 0 };
-        setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-        setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+        (void)platform_socket_set_receive_timeout(client_fd, 15000);
+        (void)platform_socket_set_send_timeout(client_fd, 15000);
 
         int64_t deadline_ms = 0;
         if (!https_frontdoor_deadline_start(&deadline_ms)) {
-            close(client_fd);
+            platform_socket_close(client_fd);
             continue;
         }
         struct https_frontdoor_client ca = {
@@ -443,8 +456,8 @@ static void *https_listen_fn(void *arg)
             const char *busy = "HTTP/1.1 503 Service Unavailable\r\n"
                 "Retry-After: 5\r\nConnection: close\r\n\r\n";
             /* Best-effort: see the connection-cap branch above. */
-            (void)zcl_write_all(client_fd, busy, strlen(busy));
-            close(client_fd);
+            (void)platform_socket_send_all(client_fd, busy, strlen(busy));
+            platform_socket_close(client_fd);
         }
     }
     return NULL;
@@ -461,6 +474,10 @@ static bool acme_challenge_filepath_under_root(const char *root,
                                                char *out,
                                                size_t out_len)
 {
+#if defined(_WIN32)
+    (void)root; (void)path; (void)out; (void)out_len;
+    return false;
+#else
     if (!root || !path || !out || out_len == 0)
         return false;
     if (!path_check_url_arg(path, ACME_CHALLENGE_URL_MAX))
@@ -492,6 +509,7 @@ static bool acme_challenge_filepath_under_root(const char *root,
 
     n = snprintf(out, out_len, "%s", file_real);
     return n >= 0 && n < (int)out_len;
+#endif
 }
 
 static bool acme_challenge_filepath(const char *path, char *out, size_t out_len)
@@ -510,7 +528,7 @@ bool https_server_acme_challenge_filepath_for_testing(const char *root,
 }
 #endif
 
-static void handle_http_client_fd(int fd, int64_t deadline_ms)
+static void handle_http_client_fd(platform_socket_t fd, int64_t deadline_ms)
 {
     /* Read the request line to get the path */
     struct https_frontdoor_fd_reader reader = {
@@ -518,7 +536,7 @@ static void handle_http_client_fd(int fd, int64_t deadline_ms)
     };
     char line[4096];
     if (!plain_read_line(&reader, line, sizeof(line))) {
-        close(fd);
+        platform_socket_close(fd);
         return;
     }
 
@@ -535,21 +553,23 @@ static void handle_http_client_fd(int fd, int64_t deadline_ms)
             headers_complete = true;
             break;
         }
-        if (++hdr_count > HTTP_MAX_REQUEST_HEADERS) { close(fd); return; }
+        if (++hdr_count > HTTP_MAX_REQUEST_HEADERS) {
+            platform_socket_close(fd); return;
+        }
         if (req_host[0] == '\0' &&
-            strncasecmp(line, "Host:", 5) == 0) {
+            https_ascii_casecmp_n(line, "Host:", 5) == 0) {
             const char *v = line + 5;
             while (*v == ' ' || *v == '\t') v++;
             size_t host_len = strlen(v);
             if (host_len >= sizeof(req_host)) {
-                close(fd);
+                platform_socket_close(fd);
                 return;
             }
             memcpy(req_host, v, host_len + 1u);
         }
     }
     if (!headers_complete) {
-        close(fd);
+        platform_socket_close(fd);
         return;
     }
 
@@ -575,14 +595,14 @@ static void handle_http_client_fd(int fd, int64_t deadline_ms)
              * later. Logged with the token path so it is diagnosable when it
              * happens, which is rare enough not to be a log-volume lever. */
             bool sent = hlen > 0 && (size_t)hlen < sizeof(hdr) &&
-                        zcl_write_all(fd, hdr, (size_t)hlen) &&
-                        zcl_write_all(fd, body, n);
+                        platform_socket_send_all(fd, hdr, (size_t)hlen) &&
+                        platform_socket_send_all(fd, body, n);
             if (!sent)
                 LOG_WARN("https",
                          "ACME http-01 challenge response for %s was not "
                          "delivered in full (%s) — certificate renewal will "
                          "fail this attempt", filepath, strerror(errno));
-            close(fd);
+            platform_socket_close(fd);
             return;
         }
     }
@@ -616,13 +636,14 @@ static void handle_http_client_fd(int fd, int64_t deadline_ms)
      * `n` is bounded (path <= 2047, host <= 255) but clamped regardless. */
     if (n > 0) {
         size_t resp_len = (size_t)n < sizeof(resp) ? (size_t)n : sizeof(resp) - 1;
-        (void)zcl_write_all(fd, resp, resp_len);
+        (void)platform_socket_send_all(fd, resp, resp_len);
     }
-    close(fd);
+    platform_socket_close(fd);
 }
 
 #ifdef ZCL_TESTING
-void https_server_handle_http_for_testing(int fd, int64_t deadline_ms)
+void https_server_handle_http_for_testing(platform_socket_t fd,
+                                          int64_t deadline_ms)
 {
     handle_http_client_fd(fd, deadline_ms);
 }
@@ -633,22 +654,19 @@ static void *http_listen_fn(void *arg)
     (void)arg;
     while (g_running) {
         struct sockaddr_in client_addr;
-        socklen_t addr_len = sizeof(client_addr);
-        int client_fd = accept(g_http_fd,
-                                (struct sockaddr *)&client_addr, &addr_len);
+        size_t addr_len = sizeof(client_addr);
+        platform_socket_t client_fd = platform_socket_accept(
+            g_http_fd, (struct sockaddr *)&client_addr, &addr_len);
         thread_liveness_beat(&g_http_listen_liveness, -1);
-        if (client_fd < 0) {
-            if (g_running && errno != EINVAL)
-                perror("http accept");
+        if (client_fd == PLATFORM_SOCKET_INVALID) {
             continue;
         }
 
-        struct timeval tv = { .tv_sec = 5, .tv_usec = 0 };
-        setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        (void)platform_socket_set_receive_timeout(client_fd, 5000);
 
         int64_t deadline_ms = 0;
         if (!https_frontdoor_deadline_start(&deadline_ms)) {
-            close(client_fd);
+            platform_socket_close(client_fd);
             continue;
         }
         struct https_frontdoor_client ca = {
@@ -660,8 +678,8 @@ static void *http_listen_fn(void *arg)
             const char *busy = "HTTP/1.1 503 Service Unavailable\r\n"
                 "Retry-After: 5\r\nConnection: close\r\n\r\n";
             /* Best-effort: see https_listen_fn(). */
-            (void)zcl_write_all(client_fd, busy, strlen(busy));
-            close(client_fd);
+            (void)platform_socket_send_all(client_fd, busy, strlen(busy));
+            platform_socket_close(client_fd);
         }
     }
     return NULL;
@@ -677,10 +695,10 @@ static void *https_worker_fn(void *arg)
         if (!client_queue_pop(&ca))
             break;
         thread_liveness_beat(&g_https_wkr_liveness, -1);
-        if (ca.fd < 0)
+        if (ca.fd == PLATFORM_SOCKET_INVALID)
             continue;
         if (!https_frontdoor_deadline_active(ca.deadline_ms)) {
-            close(ca.fd);
+            platform_socket_close(ca.fd);
             continue;
         }
         if (ca.tls)
@@ -694,13 +712,14 @@ static void *https_worker_fn(void *arg)
 
 /* ── Bind helper ──────────────────────────────────────────── */
 
-static int bind_port(uint16_t port, bool any_addr)
+static platform_socket_t bind_port(uint16_t port, bool any_addr)
 {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) LOG_ERR("https", "socket() failed: %s", strerror(errno));
+    platform_socket_t fd = platform_socket_open(AF_INET, SOCK_STREAM, 0,
+                                                true, false);
+    if (fd == PLATFORM_SOCKET_INVALID)
+        LOG_ERR("https", "socket() failed");
 
-    int opt = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    (void)platform_socket_set_reuse_address(fd, true);
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -708,13 +727,13 @@ static int bind_port(uint16_t port, bool any_addr)
     addr.sin_addr.s_addr = any_addr ? htonl(INADDR_ANY) : htonl(INADDR_LOOPBACK);
     addr.sin_port = htons(port);
 
-    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        close(fd);
-        LOG_ERR("https", "bind port %u failed: %s", port, strerror(errno));
+    if (platform_socket_bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        platform_socket_close(fd);
+        LOG_ERR("https", "bind port %u failed", port);
     }
-    if (listen(fd, 32) < 0) {
-        close(fd);
-        LOG_ERR("https", "listen on port %u failed: %s", port, strerror(errno));
+    if (platform_socket_listen(fd, 32) != 0) {
+        platform_socket_close(fd);
+        LOG_ERR("https", "listen on port %u failed", port);
     }
     return fd;
 }
@@ -726,7 +745,9 @@ bool https_server_start_on_port(const char *cert_path, const char *key_path,
 {
     unsigned started_workers = 0;
 
+#if !defined(_WIN32)
     signal(SIGPIPE, SIG_IGN);
+#endif
 
     pthread_mutex_lock(&g_https_state_mutex);
     if (atomic_load(&g_running) || g_https_thread_started) {
@@ -747,7 +768,8 @@ bool https_server_start_on_port(const char *cert_path, const char *key_path,
     if (!g_ssl_ctx) {
         ERR_print_errors_fp(stderr);
         pthread_mutex_unlock(&g_https_state_mutex);
-        LOG_FAIL("https", "SSL_CTX_new failed");
+        LOG_ERROR("https", "SSL_CTX_new failed");
+        return false;
     }
 
     /* Set minimum TLS 1.2 */
@@ -758,34 +780,39 @@ bool https_server_start_on_port(const char *cert_path, const char *key_path,
         SSL_CTX_free(g_ssl_ctx);
         g_ssl_ctx = NULL;
         pthread_mutex_unlock(&g_https_state_mutex);
-        LOG_FAIL("https", "failed to load cert: %s", cert_path);
+        LOG_ERROR("https", "failed to load cert: %s", cert_path);
+        return false;
     }
     if (SSL_CTX_use_PrivateKey_file(g_ssl_ctx, key_path, SSL_FILETYPE_PEM) <= 0) {
         ERR_print_errors_fp(stderr);
         SSL_CTX_free(g_ssl_ctx);
         g_ssl_ctx = NULL;
         pthread_mutex_unlock(&g_https_state_mutex);
-        LOG_FAIL("https", "failed to load private key: %s", key_path);
+        LOG_ERROR("https", "failed to load private key: %s", key_path);
+        return false;
     }
     if (!SSL_CTX_check_private_key(g_ssl_ctx)) {
         SSL_CTX_free(g_ssl_ctx);
         g_ssl_ctx = NULL;
         pthread_mutex_unlock(&g_https_state_mutex);
-        LOG_FAIL("https", "cert/key mismatch: cert=%s key=%s", cert_path, key_path);
+        LOG_ERROR("https", "cert/key mismatch: cert=%s key=%s",
+                  cert_path, key_path);
+        return false;
     }
 
     /* Bind HTTPS port (iptables redirects 443→default 8443) */
     g_https_fd = bind_port(https_port, true);
-    if (g_https_fd < 0) {
+    if (g_https_fd == PLATFORM_SOCKET_INVALID) {
         SSL_CTX_free(g_ssl_ctx);
         g_ssl_ctx = NULL;
         pthread_mutex_unlock(&g_https_state_mutex);
-        LOG_FAIL("https", "cannot bind HTTPS port %d", https_port);
+        LOG_ERROR("https", "cannot bind HTTPS port %d", https_port);
+        return false;
     }
 
     /* Bind HTTP port for redirect */
     g_http_fd = bind_port(http_port, true);
-    if (g_http_fd < 0) {
+    if (g_http_fd == PLATFORM_SOCKET_INVALID) {
         fprintf(stderr, "HTTPS: cannot bind port %d, HTTP redirect won't work\n",  // obs-ok:bind-failure-non-fatal
                 http_port);
         /* Non-fatal — continue with HTTPS only */
@@ -809,24 +836,25 @@ bool https_server_start_on_port(const char *cert_path, const char *key_path,
     g_worker_threads_started = started_workers;
     if (g_worker_threads_started == 0) {
         atomic_store(&g_running, false);
-        close(g_https_fd);
-        g_https_fd = -1;
-        if (g_http_fd >= 0) {
-            close(g_http_fd);
-            g_http_fd = -1;
+        platform_socket_close(g_https_fd);
+        g_https_fd = PLATFORM_SOCKET_INVALID;
+        if (g_http_fd != PLATFORM_SOCKET_INVALID) {
+            platform_socket_close(g_http_fd);
+            g_http_fd = PLATFORM_SOCKET_INVALID;
         }
         if (g_ssl_ctx) {
             SSL_CTX_free(g_ssl_ctx);
             g_ssl_ctx = NULL;
         }
         pthread_mutex_unlock(&g_https_state_mutex);
-        LOG_FAIL("https", "no worker threads could be started");
+        LOG_ERROR("https", "no worker threads could be started");
+        return false;
     }
 
     if (thread_registry_spawn("zcl_https_listen", https_listen_fn, NULL,
                                   &g_https_thread) != 0) {
-        close(g_https_fd);
-        g_https_fd = -1;
+        platform_socket_close(g_https_fd);
+        g_https_fd = PLATFORM_SOCKET_INVALID;
         atomic_store(&g_running, false);
         pthread_cond_broadcast(&g_client_queue_cv);
         pthread_mutex_unlock(&g_https_state_mutex);
@@ -837,17 +865,18 @@ bool https_server_start_on_port(const char *cert_path, const char *key_path,
             SSL_CTX_free(g_ssl_ctx);
             g_ssl_ctx = NULL;
         }
-        LOG_FAIL("https", "thread_registry_spawn failed for HTTPS listen thread");
+        LOG_ERROR("https", "thread_registry_spawn failed for HTTPS listen thread");
+        return false;
     }
     g_https_thread_started = true;
     thread_liveness_register(&g_https_listen_liveness, "zcl_https_listen", 0, 0);
 
-    if (g_http_fd >= 0) {
+    if (g_http_fd != PLATFORM_SOCKET_INVALID) {
         if (thread_registry_spawn("zcl_http_listen", http_listen_fn, NULL,
                                       &g_http_thread) != 0) {
             fprintf(stderr, "HTTPS: HTTP redirect thread failed\n");  // obs-ok:thread-spawn-fallback-logged
-            close(g_http_fd);
-            g_http_fd = -1;
+            platform_socket_close(g_http_fd);
+            g_http_fd = PLATFORM_SOCKET_INVALID;
         } else {
             g_http_thread_started = true;
             thread_liveness_register(&g_http_listen_liveness, "zcl_http_listen", 0, 0);
@@ -856,7 +885,7 @@ bool https_server_start_on_port(const char *cert_path, const char *key_path,
     pthread_mutex_unlock(&g_https_state_mutex);
 
     printf("HTTPS server listening on 0.0.0.0:%d (TLS)\n", https_port);
-    if (g_http_fd >= 0)
+    if (g_http_fd != PLATFORM_SOCKET_INVALID)
         printf("HTTP redirect on 0.0.0.0:%d -> https://%s\n", http_port, g_hostname);
 
     return true;
@@ -876,8 +905,8 @@ void https_server_stop(void)
     unsigned worker_threads_started = 0;
     bool have_https_thread = false;
     bool have_http_thread = false;
-    int https_fd = -1;
-    int http_fd = -1;
+    platform_socket_t https_fd = PLATFORM_SOCKET_INVALID;
+    platform_socket_t http_fd = PLATFORM_SOCKET_INVALID;
 
     pthread_mutex_lock(&g_https_state_mutex);
     if (!atomic_load(&g_running) && !g_https_thread_started &&
@@ -889,8 +918,8 @@ void https_server_stop(void)
     atomic_store(&g_https_port, 0);
     https_fd = g_https_fd;
     http_fd = g_http_fd;
-    g_https_fd = -1;
-    g_http_fd = -1;
+    g_https_fd = PLATFORM_SOCKET_INVALID;
+    g_http_fd = PLATFORM_SOCKET_INVALID;
     if (g_https_thread_started) {
         https_thread = g_https_thread;
         g_https_thread_started = false;
@@ -907,13 +936,13 @@ void https_server_stop(void)
     g_worker_threads_started = 0;
     pthread_mutex_unlock(&g_https_state_mutex);
 
-    if (https_fd >= 0) {
-        shutdown(https_fd, SHUT_RDWR);
-        close(https_fd);
+    if (https_fd != PLATFORM_SOCKET_INVALID) {
+        platform_socket_shutdown_both(https_fd);
+        platform_socket_close(https_fd);
     }
-    if (http_fd >= 0) {
-        shutdown(http_fd, SHUT_RDWR);
-        close(http_fd);
+    if (http_fd != PLATFORM_SOCKET_INVALID) {
+        platform_socket_shutdown_both(http_fd);
+        platform_socket_close(http_fd);
     }
     pthread_cond_broadcast(&g_client_queue_cv);
     client_queue_close_all();
@@ -939,23 +968,6 @@ void https_server_stop(void)
 
 /* ── Deferred HTTPS start (after IBD completes) ──────────── */
 
-static char g_deferred_cert[1024];
-static char g_deferred_key[1024];
-static char g_deferred_host[256];
-static _Atomic bool g_deferred_pending = false;
-
-void https_deferred_set(const char *cert, const char *key, const char *hostname)
-{
-    strncpy(g_deferred_cert, cert, sizeof(g_deferred_cert) - 1);
-    strncpy(g_deferred_key, key, sizeof(g_deferred_key) - 1);
-    if (hostname && hostname[0])
-        snprintf(g_deferred_host, sizeof(g_deferred_host), "%s", hostname);
-    else
-        g_deferred_host[0] = '\0';
-    atomic_store(&g_deferred_pending, true);
-    printf("HTTPS: deferred start queued (will start when synced)\n");
-}
-
 bool https_server_is_running(void)
 {
     return atomic_load(&g_running);
@@ -964,21 +976,4 @@ bool https_server_is_running(void)
 int https_server_port(void)
 {
     return atomic_load(&g_https_port);
-}
-
-bool https_deferred_pending(void)
-{
-    return atomic_load(&g_deferred_pending);
-}
-
-void https_deferred_check(void)
-{
-    if (atomic_load(&g_deferred_pending) && !g_running) {
-        atomic_store(&g_deferred_pending, false);
-        printf("HTTPS: starting deferred server (node synced)\n");
-        /* hostname NULL when the operator did not set -httpsdomain; with a
-         * single cert the presented cert is the same regardless of SNI. */
-        https_server_start(g_deferred_cert, g_deferred_key,
-                           g_deferred_host[0] ? g_deferred_host : NULL);
-    }
 }

@@ -2,30 +2,38 @@
  *
  * Injectable RNG — implementation. See platform/rng.h for design. */
 
+#ifndef _WIN32
 #define _GNU_SOURCE  /* getrandom on glibc */
+#endif
 
 #include "platform/rng.h"
 
 #include "util/log_macros.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <stdatomic.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#if defined(__linux__)
+#if defined(_WIN32)
+#include <windows.h>
+#include <bcrypt.h>
+#elif defined(__linux__)
+#include <fcntl.h>
 #include <sys/random.h>
-#endif
 #include <unistd.h>
+#elif !defined(__APPLE__)
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 /* ── Real-syscall implementation ─────────────────────────────────── */
 
 /* /dev/urandom fallback for the unlikely case getrandom(2) is not
  * available (very old kernel or sandbox without the syscall). Opens
  * lazily on first failure, then cached. */
-#if !defined(__APPLE__)
+#if !defined(__APPLE__) && !defined(_WIN32)
 static _Atomic int g_urandom_fd = -1;
 
 static bool fallback_urandom_fill(uint8_t *out, size_t len)
@@ -71,9 +79,27 @@ static bool fallback_urandom_fill(uint8_t *out, size_t len)
 static bool real_fill(void *self, uint8_t *out, size_t len)
 {
     (void)self;
-    if (!out || len == 0) return true;
+    if (len == 0) return true;
+    if (!out) return false;
 
-#if defined(__APPLE__)
+#if defined(_WIN32)
+    size_t filled = 0;
+    while (filled < len) {
+        size_t remaining = len - filled;
+        ULONG part = remaining > ULONG_MAX ? ULONG_MAX : (ULONG)remaining;
+        NTSTATUS status = BCryptGenRandom(
+            NULL, out + filled, part, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+        if (!BCRYPT_SUCCESS(status)) {
+            fprintf(stderr,
+                    "[platform] %s:%d %s(): BCryptGenRandom failed "
+                    "status=0x%08lx\n",
+                    __FILE__, __LINE__, __func__, (unsigned long)status);
+            return false;
+        }
+        filled += part;
+    }
+    return true;
+#elif defined(__APPLE__)
     arc4random_buf(out, len);
     return true;
 #else

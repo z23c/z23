@@ -16,11 +16,13 @@ ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	file_metadata \
 	format_attribute \
 	glob_match \
+	hotswap_elf_probe_refusal \
 	logical_cpu \
 	log_level \
 	mint_anchor_export_refusal \
 	mint_anchor_preflight_refusal \
 	package_lifecycle_store_refusal \
+	os_binary_slots_refusal \
 	positioned_file \
 	positioned_io \
 	private_directory \
@@ -29,6 +31,7 @@ ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	read_mapping \
 	rom_bundle_admission_refusal \
 	rpc_client_transport \
+	rng \
 	safe_root_read \
 	snapshot_candidate_output_refusal \
 	snapshot_export_refusal \
@@ -109,6 +112,10 @@ ZCL_WINDOWS_ACCEPTANCE_format_attribute_SOURCES := \
 	lib/base/tests/format_attribute_windows_acceptance.c
 ZCL_WINDOWS_ACCEPTANCE_glob_match_SOURCES := \
 	lib/platform/tests/glob_match_windows_acceptance.c
+ZCL_WINDOWS_ACCEPTANCE_hotswap_elf_probe_refusal_SOURCES := \
+	lib/test/src/hotswap_elf_probe_refusal_acceptance.c \
+	lib/hotswap/src/hotswap_elf_probe.c \
+	lib/hotswap/src/hotswap_elf_probe_windows.c
 ZCL_WINDOWS_ACCEPTANCE_logical_cpu_SOURCES := \
 	lib/platform/tests/logical_cpu_windows_acceptance.c \
 	lib/platform/src/logical_cpu.c
@@ -136,6 +143,9 @@ ZCL_WINDOWS_ACCEPTANCE_package_lifecycle_store_refusal_FLAGS := \
 	-fno-asynchronous-unwind-tables
 ZCL_WINDOWS_ACCEPTANCE_package_lifecycle_store_refusal_LIBS := \
 	-Wl,--gc-sections
+ZCL_WINDOWS_ACCEPTANCE_os_binary_slots_refusal_SOURCES := \
+	lib/test/src/os_binary_slots_refusal_acceptance.c \
+	lib/platform/src/os_binary_slots.c
 ZCL_WINDOWS_ACCEPTANCE_positioned_file_SOURCES := \
 	lib/platform/tests/positioned_file_windows_acceptance.c \
 	lib/platform/src/positioned_file.c
@@ -170,6 +180,10 @@ ZCL_WINDOWS_ACCEPTANCE_rpc_client_transport_SOURCES := \
 	lib/base/src/safe_alloc.c \
 	lib/platform/src/clock.c
 ZCL_WINDOWS_ACCEPTANCE_rpc_client_transport_LIBS := -lws2_32
+ZCL_WINDOWS_ACCEPTANCE_rng_SOURCES := \
+	lib/test/src/rng_acceptance.c \
+	lib/platform/src/rng.c
+ZCL_WINDOWS_ACCEPTANCE_rng_LIBS := -lbcrypt
 ZCL_WINDOWS_ACCEPTANCE_safe_root_read_SOURCES := \
 	lib/platform/tests/safe_root_read_windows_acceptance.c \
 	lib/platform/src/safe_root_read.c \

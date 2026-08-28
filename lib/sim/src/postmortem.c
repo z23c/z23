@@ -6,6 +6,99 @@
 
 #include "sim/postmortem.h"
 
+#if defined(_WIN32)
+
+#include <errno.h>
+
+int postmortem_capture_write(const struct postmortem_capture_opts *opts,
+                             char *capsule_path_out,
+                             size_t capsule_path_cap)
+{
+    (void)opts;
+    if (capsule_path_out && capsule_path_cap) capsule_path_out[0] = '\0';
+    return -ENOTSUP;
+}
+
+int postmortem_install(seed_tape_t *tape, const char *dir)
+{
+    (void)tape;
+    (void)dir;
+    return -ENOTSUP;
+}
+
+void postmortem_uninstall(void) {}
+
+int postmortem_list(const char *dir, struct postmortem_summary *out,
+                    size_t out_cap, size_t *count_out)
+{
+    (void)dir;
+    (void)out;
+    (void)out_cap;
+    if (count_out) *count_out = 0;
+    return -ENOTSUP;
+}
+
+seed_tape_t *postmortem_load(const char *path)
+{
+    (void)path;
+    return NULL;
+}
+
+bool postmortem_capsule_validate(const char *capsule_path)
+{
+    (void)capsule_path;
+    return false;
+}
+
+seed_tape_t *postmortem_capsule_load_tape(const char *capsule_path)
+{
+    (void)capsule_path;
+    return NULL;
+}
+
+int postmortem_capsule_compress(const char *capsule_path,
+                                char *compressed_path_out,
+                                size_t compressed_path_cap)
+{
+    (void)capsule_path;
+    if (compressed_path_out && compressed_path_cap)
+        compressed_path_out[0] = '\0';
+    return -ENOTSUP;
+}
+
+int postmortem_capsule_compress_unpacked(const char *dir,
+                                         size_t *compressed_out)
+{
+    (void)dir;
+    if (compressed_out) *compressed_out = 0;
+    return -ENOTSUP;
+}
+
+int postmortem_capsule_list(const char *dir,
+                            struct postmortem_capsule_entry *entries,
+                            size_t entry_cap, size_t *count_out)
+{
+    (void)dir;
+    (void)entries;
+    (void)entry_cap;
+    if (count_out) *count_out = 0;
+    return -ENOTSUP;
+}
+
+int postmortem_capsule_prune(const char *dir, int64_t now_unix,
+                             int64_t max_age_seconds, size_t keep_latest,
+                             size_t *pruned_out)
+{
+    (void)dir;
+    (void)now_unix;
+    (void)max_age_seconds;
+    (void)keep_latest;
+    if (pruned_out) *pruned_out = 0;
+    return -ENOTSUP;
+}
+
+#else
+
 #include "platform/clock.h"
 #include "util/clientversion.h"
 #include "util/signal_handler.h"
@@ -1364,7 +1457,8 @@ int postmortem_capsule_list(const char *dir,
 
         struct postmortem_capsule_entry candidate;
         memset(&candidate, 0, sizeof(candidate));
-        snprintf(candidate.name, sizeof(candidate.name), "%s", de->d_name);
+        snprintf(candidate.name, sizeof(candidate.name), "%.*s",
+                 (int)sizeof(candidate.name) - 1, de->d_name);
         snprintf(candidate.path, sizeof(candidate.path), "%s/%s", dir,
                  de->d_name);
         candidate.crash_unix = parse_capsule_time(de->d_name);
@@ -1448,3 +1542,5 @@ int postmortem_capsule_prune(const char *dir,
     free(entries);
     return first_err;
 }
+
+#endif
