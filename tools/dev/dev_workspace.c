@@ -441,13 +441,13 @@ bool zcl_devloop_workspace_resolve(const char *repo_root, char out_id[65],
     if (!home || !home[0] || !out_id || !out_dir || out_dir_len == 0 ||
         !workspace_identity(repo_root, out_id))
         return false;
-    int n = snprintf(out_dir, out_dir_len,
+    /* Format string chosen outside the macro arguments (-Wembedded-directive). */
 #if defined(_WIN32)
-                     "%s/z23/dev/workspaces/%s",
+    const char *ws_fmt = "%s/z23/dev/workspaces/%s";
 #else
-                     "%s/.local/state/zclassic23-dev/workspaces/%s",
+    const char *ws_fmt = "%s/.local/state/zclassic23-dev/workspaces/%s";
 #endif
-                     home, out_id);
+    int n = snprintf(out_dir, out_dir_len, ws_fmt, home, out_id);
     return n > 0 && (size_t)n < out_dir_len;
 }
 
