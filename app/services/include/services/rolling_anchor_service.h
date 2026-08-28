@@ -98,6 +98,8 @@ void rolling_anchor_reset_for_test(void);
  * drive the supervisor stall escalation that decides whether to page. Only
  * compiled under ZCL_TESTING. */
 #ifdef ZCL_TESTING
+struct zcl_result rolling_anchor_test_commit_window(int32_t start_height,
+                                                     const uint8_t hash[32]);
 void rolling_anchor_test_inject_read_failure(int32_t failing_height);
 void rolling_anchor_test_note_window_read_failure(int32_t sealed_end,
                                                   int32_t next_start,
