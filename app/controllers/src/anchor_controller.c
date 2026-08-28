@@ -21,12 +21,21 @@
 #include "services/zslp_command_service.h"
 #include "jobs/reducer_frontier.h"
 #include "util/log_macros.h"
+#include "platform/os_proc.h"
 
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
 #include <string.h>
 #include <stdio.h>
+
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <io.h>
+#endif
 
 /* ── Context ────────────────────────────────────────────────────── */
 
@@ -135,7 +144,27 @@ static bool hash_fd(int fd, uint8_t sha2[32], uint8_t sha3[32])
 static bool hash_file(const char *path, uint8_t sha2[32], uint8_t sha3[32])
 {
     if (!path || !path[0]) return false;
+#if defined(_WIN32)
+    wchar_t wide[32768];
+    int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
+                                    wide, 32768);
+    if (count <= 0) return false;
+    HANDLE handle = CreateFileW(wide, GENERIC_READ, FILE_SHARE_READ, NULL,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+        NULL);
+    if (handle == INVALID_HANDLE_VALUE) return false;
+    BY_HANDLE_FILE_INFORMATION info;
+    if (!GetFileInformationByHandle(handle, &info) ||
+        (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY |
+                                  FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
+        CloseHandle(handle);
+        return false;
+    }
+    int fd = _open_osfhandle((intptr_t)handle, _O_RDONLY | _O_BINARY);
+    if (fd < 0) CloseHandle(handle);
+#else
     int fd = open(path, O_RDONLY | O_CLOEXEC);
+#endif
     if (fd < 0)
         LOG_RETURN(false, "zanc", "hash_file: open %s failed: %s",
                    path, strerror(errno));
@@ -144,15 +173,15 @@ static bool hash_file(const char *path, uint8_t sha2[32], uint8_t sha3[32])
     return ok;
 }
 
-/* SHA2-256 and SHA3-256 of the running executable via /proc/self/exe. */
+/* SHA2-256 and SHA3-256 of the exact running executable image. */
 static bool hash_self_exe(uint8_t sha2[32], uint8_t sha3[32])
 {
-    int fd = open("/proc/self/exe", O_RDONLY | O_CLOEXEC);
-    if (fd < 0)
+    FILE *image = os_proc_open_self_exe();
+    if (!image)
         LOG_RETURN(false, "zanc", "hash_self_exe: open failed: %s",
                    strerror(errno));
-    bool ok = hash_fd(fd, sha2, sha3);
-    close(fd);
+    bool ok = hash_fd(fileno(image), sha2, sha3);
+    fclose(image);
     return ok;
 }
 
@@ -438,7 +467,7 @@ static bool rpc_anchor_self(const struct json_value *params, bool help,
     if (help) {
         json_set_str(result,
             "anchor_self\n"
-            "\nDigest the running binary (/proc/self/exe) with SHA2-256 and\n"
+            "\nDigest the exact running executable with SHA2-256 and\n"
             "SHA3-256 and report whether it is anchored on-chain.\n");
         return true;
     }
