@@ -86,11 +86,16 @@ extern "C" {
 #define SIMNET_PERF_DEFAULT_BLOCKS 192
 #define SIMNET_PERF_DEFAULT_TXS_PER_BLOCK 8
 
-/* The in-suite self-test's workload (lib/test/src/test_simnet_perf.c). Same
- * shape, one quarter the size, because the ARMED direction is quadratic by
- * construction and must stay ~1 s inside a 32-worker suite run. Calibrated the
- * same way: 32 concurrent runs gave clean max 1429, armed min 2174. */
-#define SIMNET_PERF_SELFTEST_BLOCKS 96
+/* The in-suite self-test (lib/test/src/test_simnet_perf.c) runs THIS default
+ * workload, not a quarter-size ladder. The 96-block quarter-size ladder it
+ * used until 2026-08-28 was calibrated the same way (32 concurrent runs:
+ * clean max 1429, armed min 2174) but its real-suite contention regime is
+ * NOT its calibration regime: a mixed 32-worker suite inflates the growth
+ * ratio (observed clean 1905 on a tree whose solo rerun gave 1117), while at
+ * the default size the calibrated contention direction is compression
+ * (32-concurrent max 1111 vs idle max 1254) and each point is long enough
+ * that scheduler contention averages out. The armed direction costs ~4 s
+ * in-suite at this size. */
 
 /* Test-only regressions this harness knows how to arm. Default NONE. */
 enum simnet_perf_inject {

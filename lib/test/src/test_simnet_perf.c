@@ -28,10 +28,17 @@
  * simnet_perf_expect(), so the test and the tool gate on one shared mechanism
  * and one shared threshold constant.
  *
- * Runtime note: the armed direction is quadratic BY CONSTRUCTION, so this
- * group deliberately runs a quarter-size workload (SIMNET_PERF_SELFTEST_BLOCKS)
- * to stay ~1 s inside a 32-worker suite run. The full-size calibration lives in
- * `make sim-perf` / `make sim-perf-teeth` and docs/SIMNET_PERF.md.
+ * Runtime note: the group runs the DEFAULT calibrated workload, not a
+ * quarter-size ladder. The quarter-size ladder was retired 2026-08-28 after a
+ * healthy tree failed the absolute budget in-suite (clean growth 1905 vs the
+ * calibrated 96-size 32-worker max of 1429; solo rerun on the same host gave
+ * 1117, inside the idle band): at that size a mixed-suite worker mix inflates
+ * the growth ratio the same way the calibration's own model does not. At the
+ * default size the calibrated contention direction is compression
+ * (32-concurrent max 1111 vs idle max 1254), and each ladder point is long
+ * enough that scheduler contention averages out. The armed direction costs
+ * ~4x its quarter-size runtime (~4 s), well inside this suite's per-group
+ * budget. docs/SIMNET_PERF.md carries both calibration tables.
  */
 
 #include "test/test_core.h"
@@ -54,7 +61,6 @@ static void sp_config(struct simnet_perf_config *cfg,
                       enum simnet_perf_inject inject)
 {
     simnet_perf_config_defaults(cfg);
-    cfg->blocks = SIMNET_PERF_SELFTEST_BLOCKS;
     cfg->inject = inject;
 }
 

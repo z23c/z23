@@ -127,6 +127,16 @@ size (whose smaller workload is noisier in both directions). Every
 one of those 32 concurrent clean runs passed and every one of the 32 armed runs
 failed, in both sizes.
 
+2026-08-28: the in-suite group stopped running the self-test size. A healthy
+tree failed the absolute budget in a mixed 32-worker suite (clean growth 1905,
+above the 96-size concurrent max of 1429) while a solo rerun of the same binary
+on the same host gave 1117 — inside the idle band. The suite's worker mix is a
+different contention regime from the 32-concurrent-copies-of-this-test model
+the calibration used, and at the small size that regime inflates the growth
+ratio instead of compressing it. The in-suite assertions now run the default
+workload above, where contention compresses growth and the margins are the
+44% / 21% pair. The self-test-size rows stay as measured calibration history.
+
 ## Proving the detector has teeth
 
 Per this project's own hard-won lesson — a Groth16 QAP-matrix bug satisfied
