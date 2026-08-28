@@ -17,6 +17,11 @@
 #include "base/hex.h"
 #include "crypto/sha256.h"
 #include "json/json.h"
+#include "platform/directory_compat.h"
+#include "platform/directory_transaction.h"
+#include "platform/positioned_file.h"
+#include "platform/private_directory.h"
+#include "platform/process_lock.h"
 #include "platform/time_compat.h"
 #include "util/safe_alloc.h"
 #include "util/spawn.h"
@@ -26,12 +31,18 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+#if defined(_WIN32)
+#include <io.h>
+#include <windows.h>
+#endif
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -61,7 +72,11 @@ struct rr_plan {
     char test_obj_dir[PATH_MAX];
     char test_link_rsp[PATH_MAX];
     char test_base_reloc[PATH_MAX];
+#if defined(_WIN32)
+    struct platform_positioned_file_snapshot stamp;
+#else
     struct stat stamp;
+#endif
     bool loaded;
 };
 
@@ -87,31 +102,144 @@ struct rr_failure_priority {
 
 static struct rr_failure_priority g_rr_failure_priority;
 
+static bool rr_bytes_contain(const unsigned char *data, size_t data_len,
+                             const char *needle)
+{
+    size_t needle_len = needle ? strlen(needle) : 0;
+    if (!data || needle_len == 0 || needle_len > data_len)
+        return false;
+    for (size_t i = 0; i <= data_len - needle_len; i++)
+        if (memcmp(data + i, needle, needle_len) == 0)
+            return true;
+    return false;
+}
+
+#if defined(_WIN32)
+static atomic_uint_fast64_t g_rr_temp_nonce = 1;
+
+static bool rr_parent_leaf(const char *path, char parent[PATH_MAX],
+                           char leaf[PLATFORM_DIRECTORY_CHILD_LEAF_MAX + 1u])
+{
+    if (!path || !path[0] || strlen(path) >= PATH_MAX)
+        return false;
+    const char *slash = strrchr(path, '/');
+    const char *backslash = strrchr(path, '\\');
+    if (!slash || (backslash && backslash > slash)) slash = backslash;
+    if (!slash || slash == path || !slash[1] ||
+        strlen(slash + 1) > PLATFORM_DIRECTORY_CHILD_LEAF_MAX)
+        return false;
+    size_t parent_len = (size_t)(slash - path);
+    memcpy(parent, path, parent_len);
+    parent[parent_len] = 0;
+    (void)snprintf(leaf, PLATFORM_DIRECTORY_CHILD_LEAF_MAX + 1u, "%s",
+                   slash + 1);
+    return true;
+}
+
+static bool rr_create_temp_child(
+    struct platform_directory_transaction *directory, const char *suffix,
+    struct platform_directory_child *child,
+    char leaf[PLATFORM_DIRECTORY_CHILD_LEAF_MAX + 1u])
+{
+    for (unsigned int attempt = 0; attempt < 64; attempt++) {
+        uint64_t nonce = atomic_fetch_add_explicit(
+            &g_rr_temp_nonce, 1, memory_order_relaxed);
+        int n = snprintf(leaf, PLATFORM_DIRECTORY_CHILD_LEAF_MAX + 1u,
+                         ".restart-%016llx-%02x%s",
+                         (unsigned long long)nonce, attempt,
+                         suffix ? suffix : "");
+        if (n <= 0 || n > (int)PLATFORM_DIRECTORY_CHILD_LEAF_MAX)
+            return false;
+        platform_directory_child_init(child);
+        if (platform_directory_child_create(directory, leaf, child))
+            return true;
+        platform_directory_child_close(child);
+    }
+    return false;
+}
+#endif
+
 static void rr_why(char *why, size_t why_len, const char *message)
 {
     if (why && why_len)
         (void)snprintf(why, why_len, "%s", message ? message : "unknown");
 }
 
-static bool rr_regular(const char *path, struct stat *out)
+#if defined(_WIN32)
+typedef struct platform_positioned_file_snapshot rr_file_stamp;
+#else
+typedef struct stat rr_file_stamp;
+#endif
+
+static bool rr_regular(const char *path, rr_file_stamp *out)
 {
+#if defined(_WIN32)
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot snapshot;
+    platform_positioned_file_init(&file);
+    bool ok = path && platform_positioned_file_open(&file, path) &&
+              platform_positioned_file_snapshot(&file, &snapshot);
+    platform_positioned_file_close(&file);
+    if (ok && out) *out = snapshot;
+    return ok;
+#else
     struct stat st;
     if (!path || lstat(path, &st) != 0 || !S_ISREG(st.st_mode) ||
         S_ISLNK(st.st_mode))
         return false;
     if (out) *out = st;
     return true;
+#endif
 }
 
 static bool rr_directory(const char *path)
 {
+#if defined(_WIN32)
+    return path && platform_directory_probe_real(path) ==
+                       PLATFORM_DIRECTORY_PROBE_OK;
+#else
     struct stat st;
     return path && lstat(path, &st) == 0 && S_ISDIR(st.st_mode) &&
            !S_ISLNK(st.st_mode);
+#endif
 }
 
 static bool rr_mkdirs(const char *path)
 {
+#if defined(_WIN32)
+    char copy[PATH_MAX];
+    if (!path || !path[0] || strlen(path) >= sizeof(copy))
+        return false;
+    (void)snprintf(copy, sizeof(copy), "%s", path);
+    for (char *p = copy; *p; p++)
+        if (*p == '\\') *p = '/';
+    char *scan = copy;
+    if (((copy[0] >= 'A' && copy[0] <= 'Z') ||
+         (copy[0] >= 'a' && copy[0] <= 'z')) && copy[1] == ':' &&
+        copy[2] == '/')
+        scan = copy + 3;
+    else if (copy[0] == '/')
+        scan = copy + 1;
+    else
+        return false;
+    for (char *p = scan; *p; p++) {
+        if (*p != '/') continue;
+        *p = 0;
+        enum platform_directory_probe_result probe =
+            platform_directory_probe_real(copy);
+        if (probe == PLATFORM_DIRECTORY_PROBE_MISSING) {
+            if (!platform_private_directory_ensure(copy)) return false;
+        } else if (probe != PLATFORM_DIRECTORY_PROBE_OK) {
+            return false;
+        }
+        *p = '/';
+    }
+    enum platform_directory_probe_result probe =
+        platform_directory_probe_real(copy);
+    return probe == PLATFORM_DIRECTORY_PROBE_OK ||
+           (probe == PLATFORM_DIRECTORY_PROBE_MISSING &&
+            platform_private_directory_ensure(copy));
+#else
     char copy[PATH_MAX];
     struct stat st;
     if (!path || path[0] != '/' || strlen(path) >= sizeof(copy))
@@ -129,6 +257,7 @@ static bool rr_mkdirs(const char *path)
     return mkdir(copy, 0700) == 0 ||
            (errno == EEXIST && lstat(copy, &st) == 0 &&
             S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode));
+#endif
 }
 
 static bool rr_safe_relative(const char *path)
@@ -174,12 +303,54 @@ static bool rr_join_root(const char *root, const char *rel,
            snprintf(out, PATH_MAX, "%s/%s", root, rel) < PATH_MAX;
 }
 
-static bool rr_stat_equal(const struct stat *a, const struct stat *b)
+static bool rr_stat_equal(const rr_file_stamp *a, const rr_file_stamp *b)
 {
+#if defined(_WIN32)
+    return platform_positioned_file_snapshot_equal(a, b);
+#else
     return a->st_dev == b->st_dev && a->st_ino == b->st_ino &&
            a->st_size == b->st_size &&
            a->st_mtim.tv_sec == b->st_mtim.tv_sec &&
            a->st_mtim.tv_nsec == b->st_mtim.tv_nsec;
+#endif
+}
+
+static bool rr_stamp_newer(const rr_file_stamp *left,
+                           const rr_file_stamp *right)
+{
+#if defined(_WIN32)
+    return left->modified_seconds > right->modified_seconds ||
+           (left->modified_seconds == right->modified_seconds &&
+            left->modified_nanoseconds > right->modified_nanoseconds);
+#else
+    return left->st_mtim.tv_sec > right->st_mtim.tv_sec ||
+           (left->st_mtim.tv_sec == right->st_mtim.tv_sec &&
+            left->st_mtim.tv_nsec > right->st_mtim.tv_nsec);
+#endif
+}
+
+static bool rr_stamp_size(const rr_file_stamp *stamp, uint64_t *size)
+{
+#if defined(_WIN32)
+    if (!stamp || !size) return false;
+    *size = stamp->size;
+    return true;
+#else
+    if (!stamp || !size || stamp->st_size < 0) return false;
+    *size = (uint64_t)stamp->st_size;
+    return true;
+#endif
+}
+
+static bool rr_flush_stream(FILE *stream)
+{
+    if (!stream || fflush(stream) != 0) return false;
+#if defined(_WIN32)
+    intptr_t handle = _get_osfhandle(_fileno(stream));
+    return handle != -1 && FlushFileBuffers((HANDLE)handle) != 0;
+#else
+    return fsync(fileno(stream)) == 0;
+#endif
 }
 
 static bool rr_plan_load_locked(const char *root, struct rr_plan *out,
@@ -195,15 +366,13 @@ static bool rr_plan_load_locked(const char *root, struct rr_plan *out,
         rr_why(why, why_len, "restart action-plan path overflow");
         return false;
     }
-    struct stat stamp, make_st;
+    rr_file_stamp stamp, make_st;
     if (!rr_regular(path, &stamp) || !rr_regular(makefile, &make_st)) {
         rr_why(why, why_len,
                "restart action plan absent; run make dev-bin once");
         return false;
     }
-    if (make_st.st_mtim.tv_sec > stamp.st_mtim.tv_sec ||
-        (make_st.st_mtim.tv_sec == stamp.st_mtim.tv_sec &&
-         make_st.st_mtim.tv_nsec > stamp.st_mtim.tv_nsec)) {
+    if (rr_stamp_newer(&make_st, &stamp)) {
         rr_why(why, why_len,
                "restart action plan stale after build-system change");
         return false;
@@ -259,6 +428,13 @@ static bool rr_plan_load_locked(const char *root, struct rr_plan *out,
     }
     bool read_error = ferror(f) != 0;
     fclose(f);
+    rr_file_stamp stable_stamp;
+    if (!rr_regular(path, &stable_stamp) ||
+        !rr_stat_equal(&stamp, &stable_stamp)) {
+        rr_why(why, why_len,
+               "restart action plan changed while it was being read");
+        return false;
+    }
     char obj_full[PATH_MAX], rsp_full[PATH_MAX], base_reloc_full[PATH_MAX];
     char test_obj_full[PATH_MAX], test_rsp_full[PATH_MAX];
     char test_base_reloc_full[PATH_MAX];
@@ -454,11 +630,13 @@ static bool rr_read_hash(const char *path, char out[65])
     return ok;
 }
 
+#if !defined(_WIN32)
 static bool rr_force_cache_copy_for_test(void)
 {
     const char *force_copy = getenv("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY");
     return force_copy && strcmp(force_copy, "1") == 0;
 }
+#endif
 
 /* The operator may place the shared cache on a different filesystem from
  * the worktree. Publish an immutable, rehashed copy when hard links cannot
@@ -466,6 +644,56 @@ static bool rr_force_cache_copy_for_test(void)
 static bool rr_copy_publish(const char *source, const char *target,
                             const char expected_sha256[65])
 {
+#if defined(_WIN32)
+    char parent[PATH_MAX], target_leaf[PLATFORM_DIRECTORY_CHILD_LEAF_MAX + 1u];
+    struct platform_positioned_file input;
+    struct platform_positioned_file_snapshot before, after;
+    struct platform_directory_transaction directory;
+    struct platform_directory_child staged;
+    char staged_leaf[PLATFORM_DIRECTORY_CHILD_LEAF_MAX + 1u] = {0};
+    platform_positioned_file_init(&input);
+    platform_directory_transaction_init(&directory);
+    platform_directory_child_init(&staged);
+    bool ok = rr_parent_leaf(target, parent, target_leaf) &&
+              platform_positioned_file_open(&input, source) &&
+              platform_positioned_file_snapshot(&input, &before) &&
+              before.size <= SIZE_MAX &&
+              platform_directory_transaction_open(&directory, parent) &&
+              rr_create_temp_child(&directory, ".bin", &staged, staged_leaf);
+    unsigned char buffer[32u * 1024u];
+    uint64_t offset = 0;
+    while (ok && offset < before.size) {
+        size_t wanted = before.size - offset > sizeof(buffer)
+                            ? sizeof(buffer) : (size_t)(before.size - offset);
+        int64_t got = platform_positioned_file_read(&input, buffer, wanted,
+                                                    offset);
+        ok = got == (int64_t)wanted &&
+             platform_directory_child_write_exact(&staged, buffer, wanted,
+                                                   offset);
+        offset += ok ? wanted : 0;
+    }
+    ok = ok && platform_positioned_file_snapshot(&input, &after) &&
+         platform_positioned_file_snapshot_equal(&before, &after) &&
+         platform_directory_child_truncate(&staged, before.size) &&
+         platform_directory_child_flush(&staged);
+    platform_positioned_file_close(&input);
+    if (ok)
+        ok = platform_directory_child_replace(&directory, &staged,
+                                              target_leaf, true);
+    platform_directory_child_close(&staged);
+    if (!ok && staged_leaf[0])
+        (void)platform_directory_child_unlink(&directory, staged_leaf, true);
+    ok = ok && platform_directory_transaction_flush(&directory);
+    platform_directory_transaction_close(&directory);
+    char actual[65];
+    if (ok)
+        ok = rr_sha256_file(target, actual) &&
+             strcmp(actual, expected_sha256) == 0;
+    if (!ok && rr_regular(target, NULL))
+        ok = rr_sha256_file(target, actual) &&
+             strcmp(actual, expected_sha256) == 0;
+    return ok;
+#else
     char temp[PATH_MAX];
     int n = snprintf(temp, sizeof(temp), "%s.tmp.XXXXXX", target);
     if (n <= 0 || n >= (int)sizeof(temp))
@@ -526,11 +754,15 @@ static bool rr_copy_publish(const char *source, const char *target,
     }
     (void)unlink(temp);
     return ok;
+#endif
 }
 
 static bool rr_link_or_copy_publish(const char *source, const char *target,
                                     const char expected_sha256[65])
 {
+#if defined(_WIN32)
+    return rr_copy_publish(source, target, expected_sha256);
+#else
     if (!rr_force_cache_copy_for_test() && link(source, target) == 0)
         return chmod(target, 0555) == 0;
     int link_errno = rr_force_cache_copy_for_test() ? EXDEV : errno;
@@ -543,9 +775,17 @@ static bool rr_link_or_copy_publish(const char *source, const char *target,
     if (link_errno != EXDEV)
         return false;
     return rr_copy_publish(source, target, expected_sha256);
+#endif
 }
 
-static int rr_cache_lock(const char *cache_root, const char key[65],
+#if defined(_WIN32)
+typedef struct platform_process_lock rr_cache_lock_handle;
+#else
+typedef int rr_cache_lock_handle;
+#endif
+
+static bool rr_cache_lock(const char *cache_root, const char key[65],
+                         rr_cache_lock_handle *held,
                          char binary[PATH_MAX], char hash[PATH_MAX])
 {
     char lock[PATH_MAX];
@@ -553,15 +793,32 @@ static int rr_cache_lock(const char *cache_root, const char key[65],
             (int)sizeof(lock) ||
         snprintf(binary, PATH_MAX, "%s/%s.bin", cache_root, key) >= PATH_MAX ||
         snprintf(hash, PATH_MAX, "%s/%s.sha256", cache_root, key) >= PATH_MAX)
-        return -1;
+        return false;
+#if defined(_WIN32)
+    platform_process_lock_init(held);
+    return platform_process_lock_try_acquire(held, lock, true);
+#else
     int fd = open(lock, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
     struct stat st;
     if (fd < 0 || fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
         flock(fd, LOCK_EX) != 0) {
         if (fd >= 0) close(fd);
-        return -1;
+        return false;
     }
-    return fd;
+    *held = fd;
+    return true;
+#endif
+}
+
+static void rr_cache_unlock(rr_cache_lock_handle *held)
+{
+#if defined(_WIN32)
+    platform_process_lock_release(held);
+#else
+    (void)flock(*held, LOCK_UN);
+    (void)close(*held);
+    *held = -1;
+#endif
 }
 
 static bool rr_publish_candidate(const char *root, const char *candidate_dir,
@@ -595,6 +852,31 @@ static bool rr_cache_publish(const char *cache_binary, const char *cache_hash,
 {
     if (!rr_link_or_copy_publish(built, cache_binary, hash))
         return false;
+#if defined(_WIN32)
+    char parent[PATH_MAX], leaf[PLATFORM_DIRECTORY_CHILD_LEAF_MAX + 1u];
+    struct platform_directory_transaction directory;
+    struct platform_directory_child staged;
+    char staged_leaf[PLATFORM_DIRECTORY_CHILD_LEAF_MAX + 1u] = {0};
+    platform_directory_transaction_init(&directory);
+    platform_directory_child_init(&staged);
+    char line[66];
+    (void)snprintf(line, sizeof(line), "%s\n", hash);
+    bool ok = rr_parent_leaf(cache_hash, parent, leaf) &&
+              platform_directory_transaction_open(&directory, parent) &&
+              rr_create_temp_child(&directory, ".sha256", &staged,
+                                   staged_leaf) &&
+              platform_directory_child_write_exact(&staged, line, 65, 0) &&
+              platform_directory_child_truncate(&staged, 65) &&
+              platform_directory_child_flush(&staged) &&
+              platform_directory_child_replace(&directory, &staged, leaf,
+                                               false);
+    platform_directory_child_close(&staged);
+    if (!ok && staged_leaf[0])
+        (void)platform_directory_child_unlink(&directory, staged_leaf, true);
+    ok = ok && platform_directory_transaction_flush(&directory);
+    platform_directory_transaction_close(&directory);
+    return ok;
+#else
     char temp[PATH_MAX];
     int n = snprintf(temp, sizeof(temp), "%s.tmp.%ld", cache_hash,
                      (long)getpid());
@@ -615,16 +897,36 @@ static bool rr_cache_publish(const char *cache_binary, const char *cache_hash,
         return false;
     }
     return true;
+#endif
 }
 
 static bool rr_temp(char out[PATH_MAX], const char *dir, const char *suffix)
 {
+#if defined(_WIN32)
+    struct platform_directory_transaction directory;
+    struct platform_directory_child child;
+    char leaf[PLATFORM_DIRECTORY_CHILD_LEAF_MAX + 1u];
+    platform_directory_transaction_init(&directory);
+    platform_directory_child_init(&child);
+    bool ok = strlen(dir) < PATH_MAX &&
+              platform_directory_transaction_open(&directory, dir) &&
+              rr_create_temp_child(&directory, suffix, &child, leaf);
+    platform_directory_child_close(&child);
+    if (ok) {
+        int n = snprintf(out, PATH_MAX, "%s/%s", dir, leaf);
+        ok = n > 0 && n < PATH_MAX &&
+             platform_directory_transaction_flush(&directory);
+    }
+    platform_directory_transaction_close(&directory);
+    return ok;
+#else
     int n = snprintf(out, PATH_MAX, "%s/.restart-XXXXXX%s", dir, suffix);
     if (n <= 0 || n >= PATH_MAX) return false;
     int fd = mkstemps(out, (int)strlen(suffix));
     if (fd < 0) return false;
     close(fd);
     return true;
+#endif
 }
 
 static bool rr_overlay_object_safe(const char *path)
@@ -642,7 +944,7 @@ static bool rr_overlay_object_safe(const char *path)
         size_t n = fread(buf + carry, 1, 65536, f);
         size_t total = carry + n;
         for (size_t i = 0; i < sizeof(forbidden) / sizeof(forbidden[0]); i++)
-            if (memmem(buf, total, forbidden[i], strlen(forbidden[i]))) {
+            if (rr_bytes_contain(buf, total, forbidden[i])) {
                 safe = false;
                 break;
             }
@@ -688,8 +990,7 @@ static bool rr_write_overlay_response(const char *root, const char *rsp,
         if (ok)
             count++;
     }
-    ok = ok && count > 0 && !ferror(in) && fflush(dst) == 0 &&
-         fsync(fileno(dst)) == 0;
+    ok = ok && count > 0 && !ferror(in) && rr_flush_stream(dst);
     fclose(in);
     fclose(dst);
     if (!ok) {
@@ -795,7 +1096,7 @@ static bool rr_compile_one(const struct rr_plan *plan, const char *root,
     bool marker_ok = marker_file &&
         fprintf(marker_file, "%s %s\n", plan->base_generation,
                 after_hash) == 130 &&
-        fflush(marker_file) == 0 && fsync(fileno(marker_file)) == 0;
+        rr_flush_stream(marker_file);
     if (marker_file) fclose(marker_file);
     if (!marker_ok || rename(marker_temp, marker) != 0) {
         (void)unlink(marker_temp); (void)unlink(overlay->overlay_object);
@@ -900,7 +1201,7 @@ static bool rr_write_response(const struct rr_plan *plan, const char *root,
             write_path = persistent_overlay;
         ok = fprintf(dst, "%s\n", write_path) > 0;
     }
-    ok = ok && !ferror(in) && fflush(dst) == 0 && fsync(fileno(dst)) == 0;
+    ok = ok && !ferror(in) && rr_flush_stream(dst);
     fclose(in); fclose(dst);
     for (size_t i = 0; i < overlay_count; i++)
         ok = ok && (seen[i] || (allow_test_only_omission &&
@@ -998,19 +1299,22 @@ static bool rr_link_cached(const struct rr_plan *plan, const char *root,
     }
     char cache_root[PATH_MAX] = {0}, cache_binary[PATH_MAX] = {0};
     char cache_hash[PATH_MAX] = {0};
-    int cache_fd = -1;
+    rr_cache_lock_handle cache_lock;
+#if !defined(_WIN32)
+    cache_lock = -1;
+#endif
+    bool cache_locked = false;
     if (rr_cache_root(cache_root))
-        cache_fd = rr_cache_lock(cache_root, cache_key,
-                                 cache_binary, cache_hash);
-    if (cache_fd >= 0 &&
+        cache_locked = rr_cache_lock(cache_root, cache_key, &cache_lock,
+                                     cache_binary, cache_hash);
+    if (cache_locked &&
         rr_cache_lookup(root, candidate_dir, cache_binary, cache_hash,
                         binary)) {
         *cache_hit = true;
-        (void)flock(cache_fd, LOCK_UN);
-        (void)close(cache_fd);
+        rr_cache_unlock(&cache_lock);
         return true;
     }
-    if (cache_fd >= 0) {
+    if (cache_locked) {
         /* With the per-key lock held, an unverifiable pair is stale or
          * corrupt rather than a publisher in flight. Repair it from a new
          * exact link; never accept one side alone. */
@@ -1020,7 +1324,7 @@ static bool rr_link_cached(const struct rr_plan *plan, const char *root,
     bool ok = rr_link(plan, root, rsp, candidate_dir, binary,
                       linker_processes, process,
                       elapsed_us, startup_us, body_us, why, why_len);
-    if (ok && cache_fd >= 0) {
+    if (ok && cache_locked) {
         char hash[65];
         ok = rr_sha256_file(binary, hash) &&
              rr_cache_publish(cache_binary, cache_hash, binary, hash);
@@ -1028,10 +1332,8 @@ static bool rr_link_cached(const struct rr_plan *plan, const char *root,
             rr_why(why, why_len,
                    "restart artifact cache publication failed");
     }
-    if (cache_fd >= 0) {
-        (void)flock(cache_fd, LOCK_UN);
-        (void)close(cache_fd);
-    }
+    if (cache_locked)
+        rr_cache_unlock(&cache_lock);
     return ok;
 }
 
@@ -1176,7 +1478,7 @@ static bool rr_restart_build(
         }
     }
     char root[PATH_MAX];
-    if (!realpath(repo_root, root)) {
+    if (!platform_directory_canonical_real(repo_root, root, sizeof(root))) {
         rr_why(why, why_len, "restart checkout root could not be resolved");
         return false;
     }
@@ -1541,7 +1843,7 @@ static bool rr_restart_prove(
     receipt->selection_us =
         platform_time_monotonic_us() - selection_started;
     char root[PATH_MAX];
-    if (!realpath(repo_root, root)) {
+    if (!platform_directory_canonical_real(repo_root, root, sizeof(root))) {
         rr_why(why, why_len, "restart proof checkout root could not be resolved");
         return false;
     }
@@ -1881,11 +2183,11 @@ static bool rr_emit_event(
     bool changed_bytes_complete = true;
     for (size_t i = 0; i < source_count; i++) {
         char full[PATH_MAX];
-        struct stat st;
-        uint64_t next = 0;
+        rr_file_stamp stamp;
+        uint64_t size = 0, next = 0;
         if (!rr_join_root(root, sources[i], full) ||
-            !rr_regular(full, &st) || st.st_size < 0 ||
-            !zcl_u64_add(changed_source_bytes, (uint64_t)st.st_size, &next)) {
+            !rr_regular(full, &stamp) || !rr_stamp_size(&stamp, &size) ||
+            !zcl_u64_add(changed_source_bytes, size, &next)) {
             changed_bytes_complete = false;
             break;
         }
