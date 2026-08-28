@@ -13,15 +13,21 @@
 #include "util/authority_receipt.h"
 
 #include "crypto/sha3.h"
+#include "platform/os_proc.h"
+#include "platform/positioned_file.h"
+#include "platform/private_directory.h"
+#include "platform/private_file.h"
 #include "util/log_macros.h"
 
-#include <errno.h>
-#include <fcntl.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#if !defined(_WIN32)
+#include <errno.h>
+#include <fcntl.h>
 #include <unistd.h>
+#endif
 
 #define AR_SUBSYS "authority_receipt"
 
@@ -39,31 +45,40 @@ bool authority_receipt_running_binary_digest(uint8_t out[32])
 {
     if (!out)
         return false;
-    int fd = open("/proc/self/exe", O_RDONLY | O_CLOEXEC);
-    if (fd < 0) {
-        LOG_WARN(AR_SUBSYS, "running executable open failed: %s",
-                 strerror(errno));
+    char path[32768];
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    platform_positioned_file_init(&file);
+    if (!os_proc_exe_path(path, sizeof(path)) ||
+        !platform_positioned_file_open(&file, path) ||
+        !platform_positioned_file_snapshot(&file, &before)) {
+        platform_positioned_file_close(&file);
+        LOG_WARN(AR_SUBSYS, "running executable validated open failed");
         return false;
     }
     struct sha3_256_ctx ctx;
     sha3_256_init(&ctx);
     uint8_t buffer[32768];
     bool ok = true;
-    for (;;) {
-        ssize_t n = read(fd, buffer, sizeof(buffer));
-        if (n > 0) {
-            sha3_256_write(&ctx, buffer, (size_t)n);
-            continue;
-        }
-        if (n == 0)
-            break;
-        if (errno == EINTR)
-            continue;
-        ok = false;
-        break;
+    uint64_t offset = 0;
+    while (offset < before.size) {
+        size_t wanted = before.size - offset > sizeof(buffer)
+                            ? sizeof(buffer) : (size_t)(before.size - offset);
+        int64_t n = platform_positioned_file_read(&file, buffer, wanted,
+                                                   offset);
+        if (n <= 0) { ok = false; break; }
+        sha3_256_write(&ctx, buffer, (size_t)n);
+        offset += (uint64_t)n;
     }
-    if (close(fd) != 0)
-        ok = false;
+    ok = ok && offset == before.size &&
+        platform_positioned_file_snapshot(&file, &after) &&
+        before.size == after.size && before.volume == after.volume &&
+        before.file_low == after.file_low && before.file_high == after.file_high &&
+        before.modified_seconds == after.modified_seconds &&
+        before.modified_nanoseconds == after.modified_nanoseconds &&
+        before.changed_seconds == after.changed_seconds &&
+        before.changed_nanoseconds == after.changed_nanoseconds;
+    platform_positioned_file_close(&file);
     if (!ok)
         LOG_FAIL(AR_SUBSYS, "running executable digest failed");
     sha3_256_finalize(&ctx, out);
@@ -79,6 +94,37 @@ bool authority_receipt_write_atomic(const char *datadir, const char *name,
     if (!datadir || !datadir[0] || !name || !name[0] || !payload || len == 0)
         LOG_FAIL(AR_SUBSYS, "invalid write args");
 
+#if defined(_WIN32)
+    if (strchr(name, '/') || strchr(name, '\\') || strcmp(name, ".") == 0 ||
+        strcmp(name, "..") == 0)
+        LOG_FAIL(AR_SUBSYS, "invalid receipt child name");
+    uintptr_t directory = 0;
+    if (!platform_private_directory_open_validated(datadir, &directory))
+        LOG_FAIL(AR_SUBSYS, "private datadir validation failed");
+    char final_path[32768], tmp_path[32768], resolved[32768], parent[32768];
+    int fn = snprintf(final_path, sizeof(final_path), "%s/%s", datadir, name);
+    int tn = snprintf(tmp_path, sizeof(tmp_path), "%s/%s.tmp", datadir, name);
+    struct platform_private_file staged;
+    platform_private_file_init(&staged);
+    bool ok = fn > 0 && (size_t)fn < sizeof(final_path) && tn > 0 &&
+        (size_t)tn < sizeof(tmp_path) &&
+        platform_private_path_resolve(final_path, resolved, sizeof(resolved),
+                                      parent, sizeof(parent)) &&
+        platform_private_file_create(tmp_path, &staged) &&
+        platform_private_file_write_at(&staged, payload, len, 0) &&
+        platform_private_file_flush(&staged) &&
+        platform_private_file_replace(&staged, tmp_path, resolved) &&
+        platform_private_parent_flush(parent);
+    if (!ok && staged.native != (uintptr_t)-1) {
+        (void)platform_private_file_retire(&staged, tmp_path);
+        platform_private_file_close(&staged);
+    }
+    platform_private_directory_close(directory);
+    if (!ok) LOG_FAIL(AR_SUBSYS, "durable receipt publication failed");
+    if (final_out && final_cap > 0)
+        snprintf(final_out, final_cap, "%s", resolved);
+    return true;
+#else
     char final_path[PATH_MAX], tmp_path[PATH_MAX];
     int fn = snprintf(final_path, sizeof(final_path), "%s/%s", datadir, name);
     if (fn <= 0 || (size_t)fn >= sizeof(final_path))
@@ -125,6 +171,7 @@ bool authority_receipt_write_atomic(const char *datadir, const char *name,
     if (final_out && final_cap > 0)
         snprintf(final_out, final_cap, "%s", final_path);
     return true;
+#endif
 }
 
 /* ── Idiom primitive: exact-length read through a datadir capability fd ──────
@@ -133,6 +180,10 @@ bool authority_receipt_write_atomic(const char *datadir, const char *name,
 bool authority_receipt_read_fixed(int datadir_fd, const char *name,
                                   uint8_t *out, size_t len)
 {
+#if defined(_WIN32)
+    (void)datadir_fd; (void)name; (void)out; (void)len;
+    return false;
+#else
     if (datadir_fd < 0 || !name || !name[0] || !out || len == 0)
         return false;
     int fd = openat(datadir_fd, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
@@ -170,6 +221,7 @@ bool authority_receipt_read_fixed(int datadir_fd, const char *name,
     }
     (void)close(fd);
     return ok && got == len && !extra;
+#endif
 }
 
 /* ── Canonical HEADER: domain-separated self-binding digest ─────────────────

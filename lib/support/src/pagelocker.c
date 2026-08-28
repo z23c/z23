@@ -5,24 +5,46 @@
 
 #include "support/pagelocker.h"
 #include <assert.h>
+#include <stdint.h>
 #include <string.h>
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
 #include <sys/mman.h>
 #include <unistd.h>
+#endif
 
 size_t get_system_page_size(void)
 {
+#if defined(_WIN32)
+    SYSTEM_INFO info;
+    GetSystemInfo(&info);
+    return (size_t)info.dwPageSize;
+#else
     return (size_t)sysconf(_SC_PAGESIZE);
+#endif
 }
 
 bool memory_page_lock(const void *addr, size_t len)
 {
+#if defined(_WIN32)
+    return addr && len > 0 && VirtualLock((void *)(uintptr_t)addr, len) != 0;
+#else
     return mlock(addr, len) == 0;
+#endif
 }
 
 bool memory_page_unlock(const void *addr, size_t len)
 {
+#if defined(_WIN32)
+    return addr && len > 0 && VirtualUnlock((void *)(uintptr_t)addr, len) != 0;
+#else
     return munlock(addr, len) == 0;
+#endif
 }
 
 void locked_page_manager_init(struct locked_page_manager *m)
@@ -57,6 +79,10 @@ void locked_page_manager_lock_range(struct locked_page_manager *m,
         return;
     }
     size_t base = (size_t)p;
+    if (base > SIZE_MAX - (size - 1)) {
+        zcl_mutex_unlock(&m->mutex);
+        return;
+    }
     size_t start_page = base & m->page_mask;
     size_t end_page = (base + size - 1) & m->page_mask;
     for (size_t page = start_page; page <= end_page; page += m->page_size) {
@@ -83,6 +109,10 @@ void locked_page_manager_unlock_range(struct locked_page_manager *m,
         return;
     }
     size_t base = (size_t)p;
+    if (base > SIZE_MAX - (size - 1)) {
+        zcl_mutex_unlock(&m->mutex);
+        return;
+    }
     size_t start_page = base & m->page_mask;
     size_t end_page = (base + size - 1) & m->page_mask;
     for (size_t page = start_page; page <= end_page; page += m->page_size) {
@@ -107,14 +137,17 @@ int locked_page_manager_get_count(struct locked_page_manager *m)
 }
 
 static struct locked_page_manager g_locked_page_manager;
-static bool g_locked_page_manager_initialized = false;
+static zcl_once_t g_locked_page_manager_once = ZCL_ONCE_INIT;
+
+static void locked_page_manager_global_init(void)
+{
+    locked_page_manager_init(&g_locked_page_manager);
+}
 
 struct locked_page_manager *locked_page_manager_instance(void)
 {
-    if (!g_locked_page_manager_initialized) {
-        locked_page_manager_init(&g_locked_page_manager);
-        g_locked_page_manager_initialized = true;
-    }
+    (void)zcl_once_call(&g_locked_page_manager_once,
+                        locked_page_manager_global_init);
     return &g_locked_page_manager;
 }
 

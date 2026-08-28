@@ -1,12 +1,14 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0 */
 
 #include "platform/time_compat.h"
+#include "platform/os_proc.h"
 #include "util/boot_phase.h"
 #include "util/boot_scan.h"
 #include "util/boot_status.h"
 #include "util/boot_progress.h"
 #include "util/sd_notify.h"
 #include "health/heartbeat.h"
+#include "util/sync.h"
 
 /* One hour. Each throttled PROGRESS line (and phase BEGIN) tells systemd
  * the Type=notify start job is still alive so TimeoutStartSec cannot
@@ -37,12 +39,10 @@ static void boot_phase_notify_progress(const char *status)
     (void)sd_notify_extend_timeout_usec(BOOT_PHASE_EXTEND_TIMEOUT_USEC);
 }
 
-#include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/resource.h>
 #include <time.h>
 
 #define BOOT_PHASE_STALL_SECS (BOOT_STEP_BUDGET_MS / 1000)
@@ -139,15 +139,9 @@ void boot_step_set_evidence_probe(boot_evidence_probe_fn fn, void *ctx)
 uint64_t boot_evidence_probe_process_io(void *ctx)
 {
     (void)ctx;
-    struct rusage ru;
-    if (getrusage(RUSAGE_SELF, &ru) != 0)
+    uint64_t bytes = 0;
+    if (!os_proc_io_bytes(&bytes))
         return 0;
-    /* ru_inblock / ru_oublock are counted in 512-byte units. Reads AND
-     * writes both count: WAL recovery reads the log and writes the main
-     * database, and either half moving proves the device is serving us. */
-    int64_t in  = ru.ru_inblock > 0 ? ru.ru_inblock : 0;
-    int64_t out = ru.ru_oublock > 0 ? ru.ru_oublock : 0;
-    uint64_t bytes = ((uint64_t)in + (uint64_t)out) * 512u;
     return bytes / (uint64_t)BOOT_EVIDENCE_IO_QUANTUM_BYTES;
 }
 
@@ -264,7 +258,8 @@ static void boot_step_emit(const char *name, enum boot_step_state st,
  * step boundary. A per-step register/unregister pair would leak a
  * phantom ring entry on every early `return false` out of the boot
  * path; this cannot. */
-static pthread_mutex_t     g_step_mu = PTHREAD_MUTEX_INITIALIZER;
+static zcl_mutex_t         g_step_mu;
+static zcl_once_t          g_step_mu_once = ZCL_ONCE_INIT;
 static char                g_step_name[BOOT_PHASE_NAME_MAX];
 static int64_t             g_step_start_ms     = 0;
 static uint64_t            g_step_seen_count   = 0;
@@ -272,6 +267,13 @@ static int64_t             g_step_seen_tick_us = 0;
 static unsigned            g_step_reports      = 0;
 static bool                g_step_active       = false;
 static health_subsystem_id g_step_health_id    = HEALTH_INVALID_ID;
+
+static void boot_step_mutex_init(void) { zcl_mutex_init(&g_step_mu); }
+static void boot_step_mutex_lock(void)
+{
+    (void)zcl_once_call(&g_step_mu_once, boot_step_mutex_init);
+    zcl_mutex_lock(&g_step_mu);
+}
 
 /* g_step_mu guards the whole record — name, clock, evidence baseline,
  * report counter — because the boot thread rewrites it at each step
@@ -285,10 +287,10 @@ static health_subsystem_id g_step_health_id    = HEALTH_INVALID_ID;
  * baseline in boot_phase_begin. */
 static void boot_step_reseed_evidence_baseline(void)
 {
-    pthread_mutex_lock(&g_step_mu);
+    boot_step_mutex_lock();
     if (g_step_active)
         (void)boot_step_delta(&g_step_seen_count, &g_step_seen_tick_us);
-    pthread_mutex_unlock(&g_step_mu);
+    zcl_mutex_unlock(&g_step_mu);
 }
 
 /* One consistent snapshot of the open step, advancing its bookkeeping.
@@ -296,16 +298,16 @@ static void boot_step_reseed_evidence_baseline(void)
 static bool boot_step_snapshot(char *name, size_t cap, int64_t *elapsed_ms,
                                uint64_t *delta, unsigned *report)
 {
-    pthread_mutex_lock(&g_step_mu);
+    boot_step_mutex_lock();
     if (!g_step_active) {
-        pthread_mutex_unlock(&g_step_mu);
+        zcl_mutex_unlock(&g_step_mu);
         return false;
     }
     snprintf(name, cap, "%s", g_step_name);
     *elapsed_ms = platform_time_monotonic_ms() - g_step_start_ms;
     *delta      = boot_step_delta(&g_step_seen_count, &g_step_seen_tick_us);
     *report     = ++g_step_reports;
-    pthread_mutex_unlock(&g_step_mu);
+    zcl_mutex_unlock(&g_step_mu);
     return true;
 }
 
@@ -355,9 +357,9 @@ static void boot_step_close(enum boot_step_state st, const char *reason)
     unsigned report;
     health_subsystem_id id;
 
-    pthread_mutex_lock(&g_step_mu);
+    boot_step_mutex_lock();
     if (!g_step_active) {
-        pthread_mutex_unlock(&g_step_mu);
+        zcl_mutex_unlock(&g_step_mu);
         return;
     }
     g_step_active = false;
@@ -366,7 +368,7 @@ static void boot_step_close(enum boot_step_state st, const char *reason)
     report  = g_step_reports;
     id      = g_step_health_id;
     g_step_health_id = HEALTH_INVALID_ID;
-    pthread_mutex_unlock(&g_step_mu);
+    zcl_mutex_unlock(&g_step_mu);
 
     /* Outside g_step_mu — the setter re-seeds the open step's baseline and
      * takes that same non-recursive lock. Safe here because g_step_active
@@ -391,7 +393,7 @@ void boot_step_enter(const char *name)
     (void)health_start();  /* idempotent; only the first call spawns it */
 
     char nm[BOOT_PHASE_NAME_MAX];
-    pthread_mutex_lock(&g_step_mu);
+    boot_step_mutex_lock();
     snprintf(g_step_name, sizeof(g_step_name), "%s",
              (name && name[0]) ? name : "(unnamed)");
     snprintf(nm, sizeof(nm), "%s", g_step_name);
@@ -404,7 +406,7 @@ void boot_step_enter(const char *name)
     (void)boot_step_delta(&g_step_seen_count, &g_step_seen_tick_us);
     g_step_health_id = health_register("boot_step", BOOT_PHASE_STALL_SECS,
                                        boot_step_on_stall, NULL);
-    pthread_mutex_unlock(&g_step_mu);
+    zcl_mutex_unlock(&g_step_mu);
 
     boot_step_emit(nm, BOOT_STEP_RUNNING, 0, BOOT_STEP_BUDGET_MS, 0, 0, NULL);
 }

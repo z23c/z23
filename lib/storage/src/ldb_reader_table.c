@@ -86,15 +86,16 @@ static bool read_block(const struct ldb_table *t, const struct ldb_handle *h,
 
 struct ldb_table *ldb_table_open(const char *path, bool verify, char **err)
 {
-    size_t size = 0;
-    const uint8_t *base = ldb_map_file(path, &size, err);
-    if (!base)
+    struct ldb_file_mapping file = {0};
+    if (!ldb_map_file(path, &file, err))
         return NULL;
+    size_t size = file.mapping.size;
+    const uint8_t *base = file.mapping.data;
     if (size < LDB_FOOTER_LEN) {
         if (err)
             *err = ldb_errf("ldb table: %s is %zu bytes, shorter than the "
                             "%u-byte footer", path, size, LDB_FOOTER_LEN);
-        ldb_unmap_file(base, size);
+        ldb_unmap_file(&file);
         return NULL;
     }
 
@@ -107,7 +108,7 @@ struct ldb_table *ldb_table_open(const char *path, bool verify, char **err)
                             "%016llx (not a LevelDB SSTable)", path,
                             (unsigned long long)magic,
                             (unsigned long long)LDB_TABLE_MAGIC);
-        ldb_unmap_file(base, size);
+        ldb_unmap_file(&file);
         return NULL;
     }
 
@@ -118,7 +119,7 @@ struct ldb_table *ldb_table_open(const char *path, bool verify, char **err)
         if (err)
             *err = ldb_errf("ldb table: %s has a malformed footer handle",
                             path);
-        ldb_unmap_file(base, size);
+        ldb_unmap_file(&file);
         return NULL;
     }
 
@@ -126,16 +127,17 @@ struct ldb_table *ldb_table_open(const char *path, bool verify, char **err)
     if (!t) {
         if (err)
             *err = ldb_strdup("ldb table: out of memory");
-        ldb_unmap_file(base, size);
+        ldb_unmap_file(&file);
         return NULL;
     }
     memset(t, 0, sizeof(*t));
+    t->file = file;
     t->base = base;
     t->file_size = size;
     t->verify = verify;
 
     if (!read_block(t, &index, verify, &t->index, err)) {
-        ldb_unmap_file(base, size);
+        ldb_unmap_file(&t->file);
         free(t);
         return NULL;
     }
@@ -147,7 +149,7 @@ void ldb_table_close(struct ldb_table *t)
     if (!t)
         return;
     ldb_block_free(&t->index);
-    ldb_unmap_file(t->base, t->file_size);
+    ldb_unmap_file(&t->file);
     free(t->err);
     free(t);
 }

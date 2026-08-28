@@ -222,19 +222,20 @@ static bool read_current(const char *dir, char *out, size_t cap, char **err)
 {
     char path[4096];
     snprintf(path, sizeof(path), "%s/CURRENT", dir);
-    size_t size = 0;
-    const uint8_t *base = ldb_map_file(path, &size, err);
-    if (!base)
+    struct ldb_file_mapping file = {0};
+    if (!ldb_map_file(path, &file, err))
         return false;
+    size_t size = file.mapping.size;
+    const uint8_t *base = file.mapping.data;
     if (size == 0 || size > cap - 1 || base[size - 1] != '\n') {
         *err = ldb_errf("ldb: CURRENT in %s is %zu bytes and not "
                         "newline-terminated", dir, size);
-        ldb_unmap_file(base, size);
+        ldb_unmap_file(&file);
         return false;
     }
     memcpy(out, base, size - 1);
     out[size - 1] = '\0';
-    ldb_unmap_file(base, size);
+    ldb_unmap_file(&file);
     if (strncmp(out, "MANIFEST-", 9) != 0 || strchr(out, '/') != NULL) {
         *err = ldb_errf("ldb: CURRENT in %s names '%s', not a MANIFEST file",
                         dir, out);
@@ -253,10 +254,11 @@ bool ldb_version_load(struct ldb_version *v, const char *dir, char **err)
 
     char path[4096];
     snprintf(path, sizeof(path), "%s/%s", dir, manifest_name);
-    size_t size = 0;
-    const uint8_t *base = ldb_map_file(path, &size, err);
-    if (!base)
+    struct ldb_file_mapping file = {0};
+    if (!ldb_map_file(path, &file, err))
         return false;
+    size_t size = file.mapping.size;
+    const uint8_t *base = file.mapping.data;
 
     struct ldb_log_reader r;
     ldb_log_reader_init(&r, base, size, true);
@@ -291,7 +293,7 @@ bool ldb_version_load(struct ldb_version *v, const char *dir, char **err)
         ok = false;
     }
     ldb_log_reader_free(&r);
-    ldb_unmap_file(base, size);
+    ldb_unmap_file(&file);
 
     if (!ok) {
         ldb_version_free(v);
@@ -465,10 +467,11 @@ static int cmp_mem_entry(const void *a, const void *b)
 static bool replay_log(struct ldb_memtable *m, const char *path, bool verify,
                        char **err)
 {
-    size_t size = 0;
-    const uint8_t *base = ldb_map_file(path, &size, err);
-    if (!base)
+    struct ldb_file_mapping file = {0};
+    if (!ldb_map_file(path, &file, err))
         return false;
+    size_t size = file.mapping.size;
+    const uint8_t *base = file.mapping.data;
     struct ldb_log_reader r;
     ldb_log_reader_init(&r, base, size, verify);
     bool ok = true;
@@ -485,7 +488,7 @@ static bool replay_log(struct ldb_memtable *m, const char *path, bool verify,
         ok = false;
     }
     ldb_log_reader_free(&r);
-    ldb_unmap_file(base, size);
+    ldb_unmap_file(&file);
     return ok;
 }
 

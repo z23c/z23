@@ -21,7 +21,7 @@
  * -D_FORTIFY_SOURCE=2 pulls in at -O3 — so any -O0, -U_FORTIFY_SOURCE, or
  * non-glibc build fails with "implicit declaration of realpath", which is a
  * hard error in C23. Matches lib/net/src/connman.c and 26 other TUs. */
-#ifndef _DEFAULT_SOURCE
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
 #define _DEFAULT_SOURCE
 #endif
 
@@ -31,7 +31,9 @@
 #include "crypto/blake2b.h"
 #include "crypto/sha256.h"
 #include "json/json.h"
+#if !defined(_WIN32)
 #include "platform/device_compat.h"
+#endif
 #include "util/log_macros.h"
 
 #include <limits.h>
@@ -40,9 +42,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#endif
 
 #if defined(__x86_64__) || defined(__i386__)
 #include <cpuid.h>
@@ -72,10 +81,17 @@ static char g_block_root[HW_PROFILE_ROOT_MAX] = HW_PROFILE_BLOCK_ROOT_DEFAULT;
 
 static int64_t probe_ram_bytes(void)
 {
+#if defined(_WIN32)
+    MEMORYSTATUSEX status = { .dwLength = sizeof(status) };
+    if (!GlobalMemoryStatusEx(&status) || status.ullTotalPhys > INT64_MAX)
+        return 0;
+    return (int64_t)status.ullTotalPhys;
+#else
     long pages = sysconf(_SC_PHYS_PAGES);
     long page_sz = sysconf(_SC_PAGE_SIZE);
     if (pages <= 0 || page_sz <= 0) return 0;
     return (int64_t)pages * (int64_t)page_sz;
+#endif
 }
 
 /* ── ISA probe ─────────────────────────────────────────────────────── */
@@ -104,6 +120,7 @@ static void probe_isa(struct hw_profile_isa *out)
 
 /* ── Storage-rotational probe ──────────────────────────────────────── */
 
+#if !defined(_WIN32)
 static bool sysfs_path_exists_local(const char *path)
 {
     struct stat st;
@@ -160,14 +177,25 @@ static bool probe_rotational_under(const char *block_root, dev_t dev,
     *out = (buf[0] == '1');
     return true;
 }
+#endif
 
 static bool probe_datadir_rotational(const char *block_root,
                                      const char *datadir, bool *out)
 {
+#if defined(_WIN32)
+    /* Windows storage stacks do not always expose seek-penalty truth (virtual,
+     * Storage Spaces, network and filter volumes). Unknown is safer than
+     * silently tuning an HDD as solid-state or vice versa. */
+    (void)block_root;
+    (void)datadir;
+    (void)out;
+    return false;
+#else
     if (!datadir || !*datadir) return false;
     struct stat st;
     if (stat(datadir, &st) != 0) return false;
     return probe_rotational_under(block_root, st.st_dev, out);
+#endif
 }
 
 /* ── Lifecycle ─────────────────────────────────────────────────────── */

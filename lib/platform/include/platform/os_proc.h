@@ -151,6 +151,11 @@ enum os_proc_liveness {
 enum os_proc_liveness os_proc_pid_liveness(uint64_t pid);
 uint64_t os_proc_current_pid(void);
 
+/* Cumulative process filesystem I/O bytes suitable for progress evidence.
+ * Windows uses GetProcessIoCounters transfer bytes; POSIX uses getrusage
+ * block counts converted from their specified 512-byte units. */
+bool os_proc_io_bytes(uint64_t *out);
+
 #ifdef __cplusplus
 }
 #endif

@@ -11,9 +11,9 @@
  * module sits below the AR lifecycle — the stage_cursor row is not a
  * model. */
 
-#include "platform/fd_path.h"
 #include "platform/time_compat.h"
 #include "storage/progress_store.h"
+#include "progress_store_directory.h"
 
 #include "sqlite_integrity_gate.h"
 #include "storage/consensus_db.h"
@@ -59,7 +59,7 @@ static _Atomic(sqlite3 *) g_db = NULL;
  * renamed or replaced.  g_display_path is observational only. */
 static char g_path[PROGRESS_STORE_PATH_MAX];
 static char g_display_path[PROGRESS_STORE_PATH_MAX];
-static int g_dir_fd = -1;
+static uintptr_t g_dir_handle = UINTPTR_MAX;
 static int64_t g_opened_at;
 /* Monotonic open-epoch. Bumped on every successful open so in-memory caches
  * seeded from the store (e.g. the log-row counters in stage_log_rows) can
@@ -192,6 +192,17 @@ bool progress_store_open(const char *datadir)
     if (!datadir || !datadir[0]) LOG_FAIL("progress_store",
         "open: empty datadir");
 
+#ifdef _WIN32
+    /* consensus.db is authority-bearing and SQLite opens its WAL/SHM siblings
+     * by pathname. Until the native VFS can bind those opens to the validated
+     * directory handle, refuse before migration, quarantine, schema creation,
+     * or any other filesystem mutation. */
+    fprintf(stderr,  // obs-ok:progress-store-open-failure
+            "[progress_store] native Windows consensus store disabled: "
+            "retained-directory SQLite VFS is not qualified (%s)\n", datadir);
+    return false;
+#endif
+
     /* Rename-in-place flip: migrate a legacy progress.kv kernel into
      * consensus.db before opening it. Idempotent (a no-op once consensus.db
      * exists, and a clean no-op on a fresh node where there is no progress.kv —
@@ -216,27 +227,21 @@ bool progress_store_open(const char *datadir)
     if (n <= 0 || (size_t)n >= sizeof(display_path))
         LOG_FAIL("progress_store", "open: datadir path too long");
 
-    int opened_dir_fd = open(datadir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (opened_dir_fd < 0)
+    uintptr_t opened_dir_handle = UINTPTR_MAX;
+    char path[PROGRESS_STORE_PATH_MAX];
+    if (!progress_directory_open(datadir, PROGRESS_STORE_FILENAME, path,
+                                 sizeof(path),
+                                 &opened_dir_handle))
         LOG_FAIL("progress_store", "open: datadir capability failed: %s",
                  strerror(errno));
-    char path[PROGRESS_STORE_PATH_MAX];
-    if (!platform_dirfd_child_path(path, sizeof(path), opened_dir_fd,
-                                   PROGRESS_STORE_FILENAME)) {
-        (void)close(opened_dir_fd);
-        LOG_FAIL("progress_store", "open: capability path too long");
-    }
 
     pthread_mutex_lock(&g_lock);
 
     /* Already open with this path → idempotent success. */
     if (atomic_load_explicit(&g_db, memory_order_relaxed) != NULL) {
-        struct stat have;
-        struct stat want;
-        bool same = g_dir_fd >= 0 && fstat(g_dir_fd, &have) == 0 &&
-                    fstat(opened_dir_fd, &want) == 0 &&
-                    have.st_dev == want.st_dev && have.st_ino == want.st_ino;
-        (void)close(opened_dir_fd);
+        bool same = progress_directory_same(g_dir_handle,
+                                            opened_dir_handle);
+        progress_directory_close(opened_dir_handle);
         pthread_mutex_unlock(&g_lock);
         if (!same)
             LOG_FAIL("progress_store",
@@ -254,7 +259,7 @@ bool progress_store_open(const char *datadir)
                 "[progress_store] sqlite3_open_v2(%s) failed: %s\n",
                 path, db ? sqlite3_errmsg(db) : sqlite3_errstr(rc));
         if (db) sqlite3_close(db);
-        (void)close(opened_dir_fd);
+        progress_directory_close(opened_dir_handle);
         pthread_mutex_unlock(&g_lock);
         return false;
     }
@@ -286,7 +291,7 @@ bool progress_store_open(const char *datadir)
                     "%s — disk/fs fault\n",
                     path, db ? sqlite3_errmsg(db) : sqlite3_errstr(rc));
             if (db) sqlite3_close(db);
-            (void)close(opened_dir_fd);
+            progress_directory_close(opened_dir_handle);
             event_emitf(EV_RECOVERY_ACTION, 0,
                         "action=progress_store_reopen_failed reason=disk_fault "
                         "path=%s", path);
@@ -302,7 +307,7 @@ bool progress_store_open(const char *datadir)
                     "[progress_store] FRESH %s still fails quick_check — "
                     "terminal disk/fs fault, refusing to loop\n", path);
             sqlite3_close(db);
-            (void)close(opened_dir_fd);
+            progress_directory_close(opened_dir_handle);
             event_emitf(EV_RECOVERY_ACTION, 0,
                         "action=progress_store_fresh_corrupt reason=disk_fault "
                         "path=%s", path);
@@ -331,7 +336,7 @@ bool progress_store_open(const char *datadir)
                     "failed for %s\n", path);
         }
         sqlite3_close(db);
-        (void)close(opened_dir_fd);
+        progress_directory_close(opened_dir_handle);
         pthread_mutex_unlock(&g_lock);
         return false;
     }
@@ -341,7 +346,7 @@ bool progress_store_open(const char *datadir)
         !repair_marker_table_ensure(db) ||
         !repair_marker_migrate_from_progress_meta(db)) {
         sqlite3_close(db);
-        (void)close(opened_dir_fd);
+        progress_directory_close(opened_dir_handle);
         pthread_mutex_unlock(&g_lock);
         return false;
     }
@@ -361,7 +366,7 @@ bool progress_store_open(const char *datadir)
             fprintf(stderr,  // obs-ok:progress-store-open-failure
                     "[progress_store] FATAL: %s\n", derr);
             sqlite3_close(db);
-            (void)close(opened_dir_fd);
+            progress_directory_close(opened_dir_handle);
             event_emitf(EV_RECOVERY_ACTION, 0,
                         "action=progress_store_downgrade_refused "
                         "reason=schema_marker_future marker_version=%u "
@@ -374,7 +379,7 @@ bool progress_store_open(const char *datadir)
 
     snprintf(g_path, sizeof(g_path), "%s", path);
     snprintf(g_display_path, sizeof(g_display_path), "%s", display_path);
-    g_dir_fd = opened_dir_fd;
+    g_dir_handle = opened_dir_handle;
     g_opened_at = wall_now_s();
     atomic_fetch_add_explicit(&g_epoch, 1, memory_order_release);
     atomic_store_explicit(&g_db, db, memory_order_release);
@@ -438,13 +443,8 @@ bool progress_store_directory_matches_fd(sqlite3 *db, int dir_fd)
     if (!db || dir_fd < 0)
         return false;
     pthread_mutex_lock(&g_lock);
-    struct stat have;
-    struct stat want;
     bool ok = atomic_load_explicit(&g_db, memory_order_acquire) == db &&
-              g_dir_fd >= 0 && fstat(g_dir_fd, &have) == 0 &&
-              fstat(dir_fd, &want) == 0 && S_ISDIR(have.st_mode) &&
-              S_ISDIR(want.st_mode) && have.st_dev == want.st_dev &&
-              have.st_ino == want.st_ino;
+              progress_directory_matches_fd(g_dir_handle, dir_fd);
     pthread_mutex_unlock(&g_lock);
     return ok;
 }
@@ -553,9 +553,8 @@ void progress_store_close(void)
                 "[progress_store] closed %s\n", g_display_path);
     }
 
-    if (g_dir_fd >= 0)
-        (void)close(g_dir_fd);
-    g_dir_fd = -1;
+    progress_directory_close(g_dir_handle);
+    g_dir_handle = UINTPTR_MAX;
     g_path[0] = '\0';
     g_display_path[0] = '\0';
     g_opened_at = 0;

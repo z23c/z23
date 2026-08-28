@@ -16,6 +16,8 @@
 
 #include "sim/simnet_chaos_faults.h"
 #include "platform/file_sync.h"
+#include "platform/directory_compat.h"
+#include "platform/socket_compat.h"
 
 #include "test/test_helpers.h"
 
@@ -58,22 +60,26 @@
 #include "validation/chainstate.h"
 #include "validation/connect_block.h"
 #include "validation/main_state.h"
-#include <arpa/inet.h>
 #include <fcntl.h>
-#include <netinet/in.h>
 #include <pthread.h>
+#if !defined(_WIN32)
 #include <signal.h>
+#endif
 #include <sqlite3.h>
 #include <stdarg.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <sys/resource.h>
-#include <sys/socket.h>
+#endif
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#if defined(_WIN32)
+#include <io.h>
+#endif
 
 static void chaos_note(struct chaos_fault_result *out, const char *fmt, ...)
 {
@@ -83,6 +89,34 @@ static void chaos_note(struct chaos_fault_result *out, const char *fmt, ...)
     vsnprintf(out->note, sizeof(out->note), fmt, ap);
     va_end(ap);
 }
+
+#if defined(_WIN32)
+static ssize_t chaos_positioned_io(int fd, void *data, size_t size,
+                                   int64_t offset, bool write_data)
+{
+    __int64 saved = _lseeki64(fd, 0, SEEK_CUR);
+    if (saved < 0 || offset < 0 || _lseeki64(fd, offset, SEEK_SET) < 0)
+        return -1;
+    size_t done = 0;
+    while (done < size) {
+        unsigned int part = size - done > UINT_MAX ? UINT_MAX :
+                                                    (unsigned int)(size - done);
+        int n = write_data ? _write(fd, (char *)data + done, part)
+                           : _read(fd, (char *)data + done, part);
+        if (n <= 0) { done = 0; break; }
+        done += (size_t)n;
+    }
+    bool restored = _lseeki64(fd, saved, SEEK_SET) >= 0;
+    return done == size && restored ? (ssize_t)done : -1;
+}
+#define chaos_pwrite(fd, data, size, offset) \
+    chaos_positioned_io((fd), (void *)(data), (size), (offset), true)
+#define chaos_pread(fd, data, size, offset) \
+    chaos_positioned_io((fd), (data), (size), (offset), false)
+#else
+#define chaos_pwrite pwrite
+#define chaos_pread pread
+#endif
 
 static void chaos_result_init(struct chaos_fault_result *out)
 {
@@ -503,9 +537,9 @@ bool chaos_fault_empty_active_chain_window(int gap_height,
     int N = gap_height;
 
     char dir[256];
-    mkdir("./test-tmp", 0755);
+    platform_directory_create("./test-tmp", 0755);
     test_fmt_tmpdir(dir, sizeof(dir), "chaos_empty_window", "main");
-    mkdir(dir, 0755);
+    platform_directory_create(dir, 0755);
 
     progress_store_close();
     bool store_ok = progress_store_open(dir);
@@ -619,9 +653,9 @@ bool chaos_fault_kill_restart_mid_fold(struct chaos_fault_result *out)
     const int32_t K = 37;
 
     char dir[256];
-    mkdir("./test-tmp", 0755);
+    platform_directory_create("./test-tmp", 0755);
     test_fmt_tmpdir(dir, sizeof(dir), "chaos_kill_restart", "main");
-    mkdir(dir, 0755);
+    platform_directory_create(dir, 0755);
 
     progress_store_close();
     if (!progress_store_open(dir)) {
@@ -791,9 +825,7 @@ bool chaos_fault_corrupt_sealed_segment(struct chaos_fault_result *out)
 #ifdef ZCL_TESTING
 static void chaos_sleep_ms(int ms)
 {
-    struct timespec ts = { .tv_sec = ms / 1000,
-                           .tv_nsec = (ms % 1000) * 1000000L };
-    nanosleep(&ts, NULL);
+    platform_sleep_ms(ms);
 }
 
 bool chaos_fault_freeze_reducer_drive(struct chaos_fault_result *out)
@@ -997,9 +1029,9 @@ bool chaos_fault_kill_restart_mid_recovery(struct chaos_fault_result *out)
     const int32_t HOLE = 25;  /* recovery-window target: rederive [HOLE,HOLE] */
 
     char dir[256];
-    mkdir("./test-tmp", 0755);
+    platform_directory_create("./test-tmp", 0755);
     test_fmt_tmpdir(dir, sizeof(dir), "chaos_kill_recovery", "main");
-    mkdir(dir, 0755);
+    platform_directory_create(dir, 0755);
 
     progress_store_close();
     if (!progress_store_open(dir)) {
@@ -1216,7 +1248,7 @@ bool fs_send_chunk_fast(struct fs_session *s, const uint8_t *data,
  * content check (rom_fetch_verify_chunk against the manifest's committed
  * digest) catches it — which is exactly the property this fault proves. */
 struct sfm_bad_peer {
-    int          listen_fd;
+    platform_socket_t listen_fd;
     uint16_t     port;
     pthread_t    thread;
     uint32_t     reply_bytes;
@@ -1227,8 +1259,10 @@ struct sfm_bad_peer {
 static void *sfm_bad_peer_loop(void *arg)
 {
     struct sfm_bad_peer *bp = (struct sfm_bad_peer *)arg;
-    int fd = accept(bp->listen_fd, NULL, NULL);
-    if (fd < 0)
+    size_t peer_size = 0;
+    platform_socket_t fd = platform_socket_accept(bp->listen_fd, NULL,
+                                                   &peer_size);
+    if (fd == PLATFORM_SOCKET_INVALID)
         return NULL;
 
     struct fs_session s;
@@ -1236,7 +1270,7 @@ static void *sfm_bad_peer_loop(void *arg)
     uint8_t zero_root[32];
     memset(zero_root, 0, sizeof(zero_root));
     if (!fs_handshake(&s, zero_root, false)) {
-        close(fd);
+        platform_socket_close(fd);
         return NULL;
     }
 
@@ -1262,7 +1296,7 @@ static void *sfm_bad_peer_loop(void *arg)
             (void)fs_send_frame(&s, FS_DONE, NULL, 0);
         }
     }
-    close(fd);
+    platform_socket_close(fd);
     return NULL;
 }
 
@@ -1270,35 +1304,40 @@ static bool sfm_bad_peer_start(struct sfm_bad_peer *bp, uint32_t reply_bytes,
                                uint64_t seed)
 {
     memset(bp, 0, sizeof(*bp));
-    bp->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (bp->listen_fd < 0)
+    bp->listen_fd = platform_socket_open(AF_INET, SOCK_STREAM, 0, true, false);
+    if (bp->listen_fd == PLATFORM_SOCKET_INVALID)
         return false;
-    int one = 1;
-    setsockopt(bp->listen_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    (void)platform_socket_set_reuse_address(bp->listen_fd, true);
     struct sockaddr_in sa;
     memset(&sa, 0, sizeof(sa));
     sa.sin_family = AF_INET;
-    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    sa.sin_port = 0; /* ephemeral — no fixed-port collision risk */
-    if (bind(bp->listen_fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
-        close(bp->listen_fd);
+    if (platform_socket_parse_address(AF_INET, "127.0.0.1",
+                                      &sa.sin_addr) != 1) {
+        platform_socket_close(bp->listen_fd);
         return false;
     }
-    socklen_t sl = sizeof(sa);
-    if (getsockname(bp->listen_fd, (struct sockaddr *)&sa, &sl) < 0) {
-        close(bp->listen_fd);
+    sa.sin_port = 0; /* ephemeral — no fixed-port collision risk */
+    if (platform_socket_bind(bp->listen_fd, (struct sockaddr *)&sa,
+                             sizeof(sa)) != 0) {
+        platform_socket_close(bp->listen_fd);
+        return false;
+    }
+    size_t sl = sizeof(sa);
+    if (platform_socket_local_address(bp->listen_fd,
+                                      (struct sockaddr *)&sa, &sl) != 0) {
+        platform_socket_close(bp->listen_fd);
         return false;
     }
     bp->port = ntohs(sa.sin_port);
-    if (listen(bp->listen_fd, 1) < 0) {
-        close(bp->listen_fd);
+    if (platform_socket_listen(bp->listen_fd, 1) != 0) {
+        platform_socket_close(bp->listen_fd);
         return false;
     }
     bp->reply_bytes = reply_bytes;
     bp->fill = (uint8_t)(seed ^ 0xA5u);
     /* raw-pthread-ok: single accept()->reply->exit, joined immediately below */
     if (pthread_create(&bp->thread, NULL, sfm_bad_peer_loop, bp) != 0) {
-        close(bp->listen_fd);
+        platform_socket_close(bp->listen_fd);
         return false;
     }
     return true;
@@ -1311,8 +1350,8 @@ static bool sfm_bad_peer_start(struct sfm_bad_peer *bp, uint32_t reply_bytes,
  * hp_mock_stop ordering). */
 static void sfm_bad_peer_join(struct sfm_bad_peer *bp)
 {
-    shutdown(bp->listen_fd, SHUT_RDWR);
-    close(bp->listen_fd);
+    platform_socket_shutdown_both(bp->listen_fd);
+    platform_socket_close(bp->listen_fd);
     pthread_join(bp->thread, NULL);
 }
 
@@ -1386,7 +1425,7 @@ bool chaos_fault_conflicting_chunk_peers(uint64_t seed,
         rom_fetch_chunk("127.0.0.1", good_port, art.chunk_root, 0, good_buf,
                         art.chunk_size, &good_got) &&
         rom_fetch_verify_chunk(good_buf, good_got, art.chunk_sha3[0]) &&
-        pwrite(fd, good_buf, good_got, 0) == (ssize_t)good_got &&
+        chaos_pwrite(fd, good_buf, good_got, 0) == (ssize_t)good_got &&
         platform_data_sync(fd) == 0 && rom_journal_mark(j, 0);
     snprintf(out->state_before, sizeof(out->state_before),
              "good peer fetched+verified+journaled chunk 0 (%u bytes)",
@@ -1424,7 +1463,7 @@ bool chaos_fault_conflicting_chunk_peers(uint64_t seed,
      * ordering), so both the journal bit AND the on-disk .part bytes for
      * chunk 0 must still read back exactly what the good peer served. */
     uint8_t reread[SFM_ARTIFACT_BYTES];
-    bool part_kept = pread(fd, reread, good_got, 0) == (ssize_t)good_got &&
+    bool part_kept = chaos_pread(fd, reread, good_got, 0) == (ssize_t)good_got &&
                      memcmp(reread, good_buf, good_got) == 0;
     bool journal_kept = rom_journal_is_done(j, 0) &&
                         rom_journal_count_done(j) == 1;
@@ -1475,14 +1514,22 @@ bool chaos_fault_conflicting_chunk_peers(uint64_t seed,
 bool chaos_fault_journal_commit_enospc(uint64_t seed,
                                        struct sync_fault_capsule *out)
 {
+#if defined(_WIN32)
+    sfm_capsule_init(out, seed);
+    snprintf(out->fault_point, sizeof(out->fault_point),
+             "journal ENOSPC injection unavailable on Windows");
+    sfm_note(out, "refused: RLIMIT_FSIZE/SIGXFSZ fault injection has no "
+                  "qualified Windows equivalent");
+    return false;
+#else
     sfm_capsule_init(out, seed);
     snprintf(out->fault_point, sizeof(out->fault_point),
              "rom_journal_mark()'s pwrite of the bitmap byte");
 
     char dir[256];
-    mkdir("./test-tmp", 0755);
+    platform_directory_create("./test-tmp", 0755);
     test_fmt_tmpdir(dir, sizeof(dir), "chaos_journal_enospc", "main");
-    mkdir(dir, 0755);
+    platform_directory_create(dir, 0755);
     char jrnl_path[512];
     snprintf(jrnl_path, sizeof(jrnl_path), "%s/journal", dir);
 
@@ -1580,6 +1627,7 @@ bool chaos_fault_journal_commit_enospc(uint64_t seed,
 
     test_cleanup_tmpdir(dir);
     return true;
+#endif
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -1661,7 +1709,7 @@ bool chaos_fault_kill_resume_boundary(uint64_t seed, bool after_bitmap_commit,
         built = rom_fetch_chunk("127.0.0.1", port, m.chunk_root, 0, cbuf,
                                 ROM_SEED_CHUNK_SIZE, &got) &&
                rom_fetch_verify_chunk(cbuf, got, art.chunk_sha3[0]) &&
-               pwrite(fd, cbuf, got, 0) == (ssize_t)got &&
+               chaos_pwrite(fd, cbuf, got, 0) == (ssize_t)got &&
                platform_data_sync(fd) == 0 && rom_journal_mark(j, 0);
     }
     /* Chunk 1 (the short tail): data written+fsynced either way — the fault
@@ -1671,7 +1719,7 @@ bool chaos_fault_kill_resume_boundary(uint64_t seed, bool after_bitmap_commit,
         built = rom_fetch_chunk("127.0.0.1", port, m.chunk_root, 1, cbuf,
                                 ROM_SEED_CHUNK_SIZE, &got) &&
                rom_fetch_verify_chunk(cbuf, got, art.chunk_sha3[1]) &&
-               pwrite(fd, cbuf, got, (off_t)m.chunk_size) == (ssize_t)got &&
+               chaos_pwrite(fd, cbuf, got, (off_t)m.chunk_size) == (ssize_t)got &&
                platform_data_sync(fd) == 0;
         if (built && after_bitmap_commit)
             built = rom_journal_mark(j, 1); /* commit past this boundary too */
@@ -2023,7 +2071,7 @@ bool chaos_fault_invalid_tail_block(uint64_t seed,
     simnet_free(&sim);
 
     snprintf(out->state_after, sizeof(out->state_after),
-             "tail_accepted=%d reject=%s tip_unmoved=%d honest_advanced=%d",
+             "tail_accepted=%d reject=%.100s tip_unmoved=%d honest_advanced=%d",
              tail_accepted, vs.reject_reason, tip_unmoved, honest_advanced);
     out->event_number = (uint32_t)(prefix_blocks + 1); /* +1 for the tail */
     snprintf(out->phase, sizeof(out->phase), "connect_block");
@@ -2239,8 +2287,7 @@ bool chaos_fault_peer_disconnect_mid_body_download(
         }
 
         struct uint256 *hh = &out_hashes[batch_off++];
-        struct timespec xfer = { .tv_sec = 0, .tv_nsec = 2 * 1000 * 1000 };
-        nanosleep(&xfer, NULL);   /* simulated LAN body-transfer latency */
+        platform_sleep_ms(2);   /* simulated LAN body-transfer latency */
         uint32_t got_peer = dl_mark_received(&dm, hh);
         if (got_peer != PEER_B) {
             dl_free(&dm); free(chain); free(hashes);
@@ -2329,11 +2376,11 @@ bool chaos_fault_torn_progress_wal(struct chaos_fault_result *out)
     const int32_t K = 24;     /* stamped into the un-checkpointed WAL suffix */
 
     char dir[256], torn[256];
-    mkdir("./test-tmp", 0755);
+    platform_directory_create("./test-tmp", 0755);
     test_fmt_tmpdir(dir, sizeof(dir), "chaos_torn_wal", "main");
     test_fmt_tmpdir(torn, sizeof(torn), "chaos_torn_wal", "torn");
-    mkdir(dir, 0755);
-    mkdir(torn, 0755);
+    platform_directory_create(dir, 0755);
+    platform_directory_create(torn, 0755);
 
     progress_store_close();
     if (!progress_store_open(dir)) {
@@ -2379,7 +2426,7 @@ bool chaos_fault_torn_progress_wal(struct chaos_fault_result *out)
         const char *base = strrchr(src_db, '/');
         base = base ? base + 1 : src_db;
         snprintf(src_wal, sizeof(src_wal), "%s-wal", src_db);
-        snprintf(dst_db, sizeof(dst_db), "%s/%s", torn, base);
+        snprintf(dst_db, sizeof(dst_db), "%.255s/%.767s", torn, base);
         snprintf(dst_wal, sizeof(dst_wal), "%s-wal", dst_db);
         copied = chaos_copy_file(src_db, dst_db) &&
                  chaos_copy_file(src_wal, dst_wal);
@@ -2512,9 +2559,9 @@ bool chaos_fault_disk_full_pause(struct chaos_fault_result *out)
     chaos_result_init(out);
 
     char dir[256];
-    mkdir("./test-tmp", 0755);
+    platform_directory_create("./test-tmp", 0755);
     test_fmt_tmpdir(dir, sizeof(dir), "chaos_disk_full", "main");
-    mkdir(dir, 0755);
+    platform_directory_create(dir, 0755);
 
     progress_store_close();
     if (!progress_store_open(dir)) {
@@ -2608,9 +2655,9 @@ bool chaos_fault_cleared_have_data_hole(struct chaos_fault_result *out)
     const int32_t HOLE = 10; /* body_fetch stalls here: its body vanished */
 
     char dir[256];
-    mkdir("./test-tmp", 0755);
+    platform_directory_create("./test-tmp", 0755);
     test_fmt_tmpdir(dir, sizeof(dir), "chaos_have_data_hole", "main");
-    mkdir(dir, 0755);
+    platform_directory_create(dir, 0755);
 
     progress_store_close();
     if (!progress_store_open(dir)) {

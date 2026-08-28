@@ -15,6 +15,7 @@
 #else
 #include <errno.h>
 #include <signal.h>
+#include <sys/resource.h>
 #include <unistd.h>
 #endif
 
@@ -65,6 +66,27 @@ uint64_t os_proc_current_pid(void)
     return (uint64_t)GetCurrentProcessId();
 #else
     return (uint64_t)getpid();
+#endif
+}
+
+bool os_proc_io_bytes(uint64_t *out)
+{
+    if (!out) return false;
+#if defined(_WIN32)
+    IO_COUNTERS counters;
+    if (!GetProcessIoCounters(GetCurrentProcess(), &counters)) return false;
+    if (UINT64_MAX - counters.ReadTransferCount < counters.WriteTransferCount)
+        return false;
+    *out = counters.ReadTransferCount + counters.WriteTransferCount;
+    return true;
+#else
+    struct rusage usage;
+    if (getrusage(RUSAGE_SELF, &usage) != 0) return false;
+    uint64_t input = usage.ru_inblock > 0 ? (uint64_t)usage.ru_inblock : 0;
+    uint64_t output = usage.ru_oublock > 0 ? (uint64_t)usage.ru_oublock : 0;
+    if (UINT64_MAX / 512u - input < output) return false;
+    *out = (input + output) * 512u;
+    return true;
 #endif
 }
 

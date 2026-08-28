@@ -23,6 +23,7 @@ ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	mint_anchor_preflight_refusal \
 	package_lifecycle_store_refusal \
 	os_binary_slots_refusal \
+	pagelocker \
 	positioned_file \
 	positioned_io \
 	private_directory \
@@ -33,6 +34,7 @@ ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	rpc_client_transport \
 	rng \
 	safe_root_read \
+	sd_notify_unsupported \
 	snapshot_candidate_output_refusal \
 	snapshot_export_refusal \
 	snapshot_install_activate_refusal \
@@ -146,6 +148,10 @@ ZCL_WINDOWS_ACCEPTANCE_package_lifecycle_store_refusal_LIBS := \
 ZCL_WINDOWS_ACCEPTANCE_os_binary_slots_refusal_SOURCES := \
 	lib/test/src/os_binary_slots_refusal_acceptance.c \
 	lib/platform/src/os_binary_slots.c
+ZCL_WINDOWS_ACCEPTANCE_pagelocker_SOURCES := \
+	lib/test/src/pagelocker_acceptance.c \
+	lib/support/src/pagelocker.c \
+	lib/base/src/cleanse.c
 ZCL_WINDOWS_ACCEPTANCE_positioned_file_SOURCES := \
 	lib/platform/tests/positioned_file_windows_acceptance.c \
 	lib/platform/src/positioned_file.c
@@ -188,6 +194,9 @@ ZCL_WINDOWS_ACCEPTANCE_safe_root_read_SOURCES := \
 	lib/platform/tests/safe_root_read_windows_acceptance.c \
 	lib/platform/src/safe_root_read.c \
 	lib/base/src/safe_alloc.c
+ZCL_WINDOWS_ACCEPTANCE_sd_notify_unsupported_SOURCES := \
+	lib/test/src/sd_notify_unsupported_acceptance.c \
+	lib/util/src/sd_notify.c
 ZCL_WINDOWS_ACCEPTANCE_snapshot_candidate_output_refusal_SOURCES := \
 	lib/test/src/snapshot_candidate_output_refusal_acceptance.c \
 	config/src/consensus_state_snapshot_candidate_output.c

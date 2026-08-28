@@ -10,17 +10,59 @@
 #include "util/log_macros.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <limits.h>
-#include <poll.h>
-#include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#ifndef _WIN32
+#include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
+
+#ifdef _WIN32
+
+/* Native package/agent execution stays unavailable until the controller owns
+ * a restricted token, kill-on-close Job Object, resource limits, low-integrity
+ * filesystem boundary, and network denial. Refuse before opening pipes, logs,
+ * or creating a process. */
+struct zcl_result zcl_spawn_detached(const char *const argv[],
+                                     const char *log_path)
+{
+    return zcl_spawn_detached_input(argv, NULL, 0, log_path);
+}
+
+struct zcl_result zcl_spawn_detached_input(const char *const argv[],
+                                           const void *input,
+                                           size_t input_len,
+                                           const char *log_path)
+{
+    (void)argv; (void)input; (void)input_len; (void)log_path;
+    return ZCL_ERR(-1, "spawn: Windows execution sandbox is not qualified");
+}
+
+int zcl_spawn_capture_cancelable(
+    const char *const argv[], char *buf, size_t cap, int timeout_ms,
+    zcl_spawn_cancel_fn should_cancel, void *cancel_ctx, bool *cancelled)
+{
+    (void)argv; (void)timeout_ms; (void)should_cancel; (void)cancel_ctx;
+    if (buf && cap > 0) buf[0] = '\0';
+    if (cancelled) *cancelled = false;
+    return -1;
+}
+
+int zcl_spawn_capture(const char *const argv[], char *buf, size_t cap,
+                      int timeout_ms)
+{
+    return zcl_spawn_capture_cancelable(argv, buf, cap, timeout_ms,
+                                        NULL, NULL, NULL);
+}
+
+#else
 
 /* ── Shared helpers (parent-side only — never called between fork/exec) ── */
 
@@ -336,6 +378,8 @@ int zcl_spawn_capture(const char *const argv[], char *buf, size_t cap,
         argv, buf, cap, timeout_ms, NULL, NULL, NULL);
 }
 
+#endif
+
 /* ── zcl_argv_split ──────────────────────────────────────────────────── */
 
 size_t zcl_argv_split(char *str, const char *argv[], size_t max)
@@ -344,11 +388,15 @@ size_t zcl_argv_split(char *str, const char *argv[], size_t max)
         return 0;
     size_t n = 0;
     if (str) {
-        char *save = NULL;
-        for (char *tok = strtok_r(str, " \t\r\n", &save);
-             tok && n < max - 1;
-             tok = strtok_r(NULL, " \t\r\n", &save))
-            argv[n++] = tok;
+        char *p = str;
+        while (*p && n < max - 1) {
+            while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+            if (!*p) break;
+            argv[n++] = p;
+            while (*p && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n')
+                p++;
+            if (*p) *p++ = '\0';
+        }
     }
     argv[n] = NULL;
     return n;

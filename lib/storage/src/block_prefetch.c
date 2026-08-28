@@ -16,11 +16,13 @@
  * worker never blocks the fold; the fold never calls into the worker on its
  * hot path. */
 
+#if defined(__linux__)
 #define _GNU_SOURCE
+#endif
 #include "storage/block_prefetch.h"
 
-#include "storage/disk_block_io.h" /* get_block_pos_filename */
 #include "json/json.h"
+#include "platform/positioned_file.h"
 #include "platform/time_compat.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
@@ -28,12 +30,12 @@
 #include "util/thread_registry.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <string.h>
+#if defined(__linux__)
 #include <sys/uio.h>
-#include <unistd.h>
+#endif
 
 /* preadv2 + RWF_NOWAIT (Linux 4.14+/glibc 2.26+). Where absent we degrade to
  * an unconditional warming pread (no residency probe, no hit/miss split). */
@@ -187,62 +189,69 @@ static bool bp_frame_size(const uint8_t hdr[8], uint32_t *out_size)
     return true;
 }
 
-static void bp_locate(int fd, const struct disk_block_pos *pos,
-                      off_t *payload_off, size_t *payload_len)
+static void bp_locate(const struct platform_positioned_file *file,
+                      const struct disk_block_pos *pos,
+                      uint64_t *payload_off, size_t *payload_len)
 {
     uint8_t hdr[8];
     uint32_t sz = 0;
     if (pos->nPos >= 8) {
-        if (pread(fd, hdr, 8, (off_t)pos->nPos - 8) == 8 && bp_frame_size(hdr, &sz)) {
-            *payload_off = (off_t)pos->nPos;
+        if (platform_positioned_file_read(file, hdr, 8,
+                                          (uint64_t)pos->nPos - 8) == 8 &&
+            bp_frame_size(hdr, &sz)) {
+            *payload_off = pos->nPos;
             *payload_len = sz;
             return;
         }
     }
-    if (pread(fd, hdr, 8, (off_t)pos->nPos) == 8 && bp_frame_size(hdr, &sz) &&
+    if (platform_positioned_file_read(file, hdr, 8, pos->nPos) == 8 &&
+        bp_frame_size(hdr, &sz) &&
         pos->nPos <= UINT32_MAX - 8u) {
-        *payload_off = (off_t)pos->nPos + 8;
+        *payload_off = (uint64_t)pos->nPos + 8;
         *payload_len = sz;
         return;
     }
-    *payload_off = (off_t)pos->nPos;
+    *payload_off = pos->nPos;
     *payload_len = BP_MAX_BLOCK_BYTES;
 }
 
 /* Warm one block frame into the page cache. Best-effort: every failure is a
  * counted no-op. `scratch` is a reusable BP_MAX_BLOCK_BYTES buffer owned by the
- * worker. `fd_cache`/`nfile_cache` reuse the open fd across the (usually
+ * worker. `file_cache`/`nfile_cache` reuse one handle across the (usually
  * same-file) window. */
 static void bp_warm_one(const struct disk_block_pos *pos, uint8_t *scratch,
-                        int *fd_cache, int *nfile_cache)
+                        struct platform_positioned_file *file_cache,
+                        int *nfile_cache)
 {
     if (pos->nFile < 0)
         return;
 
-    if (*fd_cache < 0 || *nfile_cache != pos->nFile) {
-        if (*fd_cache >= 0)
-            close(*fd_cache);
-        char path[512];
-        get_block_pos_filename(path, sizeof(path), g_datadir, pos, "blk");
-        *fd_cache = open(path, O_RDONLY);
+    if (file_cache->native == UINTPTR_MAX || *nfile_cache != pos->nFile) {
+        platform_positioned_file_close(file_cache);
+        char leaf[64];
+        int written = pos->nFile == 255
+            ? snprintf(leaf, sizeof(leaf), "blocks/blk_sync.dat")
+            : snprintf(leaf, sizeof(leaf), "blocks/blk%05d.dat", pos->nFile);
+        platform_positioned_file_init(file_cache);
         *nfile_cache = pos->nFile;
-        if (*fd_cache < 0) {
+        if (written <= 0 || (size_t)written >= sizeof(leaf) ||
+            !platform_positioned_file_open_beneath(file_cache, g_datadir,
+                                                   leaf)) {
             atomic_fetch_add(&g_read_fails, 1);
             return; /* fail-safe: a missing file is the drive's problem, not ours */
         }
     }
-    int fd = *fd_cache;
-
-    off_t off = (off_t)pos->nPos;
+    uint64_t off = pos->nPos;
     size_t len = BP_MAX_BLOCK_BYTES;
-    bp_locate(fd, pos, &off, &len);
+    bp_locate(file_cache, pos, &off, &len);
     if (len == 0 || len > BP_MAX_BLOCK_BYTES)
         len = BP_MAX_BLOCK_BYTES;
 
 #if BP_HAVE_NOWAIT_PROBE
     if (!g_cfg.force_warm) {
         struct iovec iov = { .iov_base = scratch, .iov_len = len };
-        ssize_t probe = preadv2(fd, &iov, 1, off, RWF_NOWAIT);
+        ssize_t probe = preadv2((int)file_cache->native, &iov, 1,
+                                (off_t)off, RWF_NOWAIT);
         if (probe == (ssize_t)len) {
             /* Every requested page was already resident — nothing to warm. */
             atomic_fetch_add(&g_warm_hits, 1);
@@ -253,7 +262,7 @@ static void bp_warm_one(const struct disk_block_pos *pos, uint8_t *scratch,
     }
 #endif
 
-    ssize_t n = pread(fd, scratch, len, off);
+    int64_t n = platform_positioned_file_read(file_cache, scratch, len, off);
     if (n <= 0) {
         atomic_fetch_add(&g_read_fails, 1);
         return;
@@ -285,7 +294,8 @@ static void bp_run_pass_locked_released(int32_t cursor, uint8_t *scratch)
     int64_t end = want_hi;
     pthread_mutex_unlock(&g_mu);
 
-    int fd_cache = -1;
+    struct platform_positioned_file file_cache;
+    platform_positioned_file_init(&file_cache);
     int nfile_cache = -1;
     int64_t warmed_to = start;
     for (int64_t h = start; h < end; h++) {
@@ -301,7 +311,7 @@ static void bp_run_pass_locked_released(int32_t cursor, uint8_t *scratch)
         struct disk_block_pos pos;
         disk_block_pos_init(&pos);
         if (g_pos_fn && g_pos_fn(g_pos_user, (int32_t)h, &pos)) {
-            bp_warm_one(&pos, scratch, &fd_cache, &nfile_cache);
+            bp_warm_one(&pos, scratch, &file_cache, &nfile_cache);
         } else {
             /* A gap ahead of the fold: stop this pass at the gap so the frontier
              * does not skip past a not-yet-available height (it may fill in
@@ -311,8 +321,7 @@ static void bp_run_pass_locked_released(int32_t cursor, uint8_t *scratch)
         }
         warmed_to = h + 1;
     }
-    if (fd_cache >= 0)
-        close(fd_cache);
+    platform_positioned_file_close(&file_cache);
 
     pthread_mutex_lock(&g_mu);
     if (warmed_to > g_warm_frontier)

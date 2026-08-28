@@ -466,8 +466,11 @@ endif
 LIB_INCLUDES = $(foreach m,$(LIB_MODULES),-Ilib/$(m)/include)
 LIB_SRCS = $(call zcl_filter_ephemeral_sources,\
 	$(foreach m,$(LIB_MODULES),$(wildcard lib/$(m)/src/*.c)))
-ifeq ($(ZCL_HOST_OS),Linux)
+ifneq ($(filter Linux,$(ZCL_HOST_OS)),)
 LIB_SRCS := $(filter-out lib/platform/src/os_sandbox_stub.c \
+	lib/util/src/self_backtrace_stub.c,$(LIB_SRCS))
+else ifeq ($(ZCL_HOST_WINDOWS),1)
+LIB_SRCS := $(filter-out lib/platform/src/os_sandbox_linux.c \
 	lib/util/src/self_backtrace_stub.c,$(LIB_SRCS))
 else
 LIB_SRCS := $(filter-out lib/platform/src/os_sandbox_linux.c \
@@ -5235,12 +5238,14 @@ $(BIN_DIR)/ldb_verify_c23: tools/ldb_verify_c23.c \
 		lib/storage/src/ldb_reader_version.c \
 		lib/storage/src/ldb_reader_db.c \
 		lib/storage/src/ldb_reader_api.c \
+		lib/platform/src/positioned_file.c \
+		lib/platform/src/read_mapping.c \
 		lib/util/src/crc32c.c lib/base/src/safe_alloc.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -Ivendor/include -Ilib/base/include -Ilib/util/include \
-	    -Ilib/storage/include \
+	    -Ilib/storage/include -Ilib/platform/include \
 	    -o $@ $^ -Lvendor/lib vendor/lib/libleveldb.a -lstdc++ -lpthread -lm -ldl
 
 .PHONY: zcl-blog
