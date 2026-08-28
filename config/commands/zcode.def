@@ -15,23 +15,23 @@
  * Consumer defines ZCL_COMMAND_*; see config/src/command_catalog.c. */
 
 ZCL_COMMAND_BRANCH("zcode", "",
-                   "Create, verify and preserve public C23 work together",
+                   "Create, verify and preserve public C23 work",
                    ZCL_COMMAND_LAYER_APP)
 
 ZCL_COMMAND_BRANCH("zcode.project", "zcode",
-                   "C23 projects",
+                   "Projects",
                    ZCL_COMMAND_LAYER_APP)
 ZCL_COMMAND_BRANCH("zcode.work", "zcode",
-                   "Proven C23 work",
+                   "Proven work",
                    ZCL_COMMAND_LAYER_APP)
 ZCL_COMMAND_BRANCH("zcode.task", "zcode",
-                   "Posted C23 tasks and their transport",
+                   "Posted tasks and transports",
                    ZCL_COMMAND_LAYER_APP)
 ZCL_COMMAND_BRANCH("zcode.passport", "zcode",
-                   "Signed C23 module Passports",
+                   "Signed module passports",
                    ZCL_COMMAND_LAYER_APP)
 ZCL_COMMAND_BRANCH("zcode.workspace", "zcode",
-                   "C23 workspace evidence",
+                   "Workspace evidence",
                    ZCL_COMMAND_LAYER_APP)
 ZCL_COMMAND_BRANCH("zcode.workspace.source", "zcode.workspace",
                    "Git-free source",
@@ -842,7 +842,7 @@ ZCL_COMMAND_READY_COMMAND(
     zcl_native_handle_zcode_work_review)
 
 ZCL_COMMAND_READY_READ(
-    "zcode.guide", "zcode", "", "Tell Z23 what you want C23 to do",
+    "zcode.guide", "zcode", "", "Tell Z23 what you want done",
     "Returns one root-free, reuse-first start command and the plain journey "
     "from desired behavior to an exact accepted version. Proof identities "
     "remain available on request. It grants no acceptance or publication "
@@ -858,7 +858,7 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_zcode_guide)
 
 ZCL_COMMAND_BRANCH("zcode.commons", "zcode",
-                   "ZC23 Living Commons projection",
+                   "Living Commons projection",
                    ZCL_COMMAND_LAYER_APP)
 ZCL_COMMAND_BRANCH("zcode.commons.creation", "zcode.commons",
                    "Creation-attribution inspection",
@@ -903,7 +903,7 @@ ZCL_COMMAND_BRANCH("zcode.commons.impact", "zcode.commons",
                    "Locally rendered productivity evidence",
                    ZCL_COMMAND_LAYER_APP)
 ZCL_COMMAND_BRANCH("zcode.moderation", "zcode",
-                   "Family Commons moderation",
+                   "Commons moderation",
                    ZCL_COMMAND_LAYER_APP)
 ZCL_COMMAND_BRANCH("zcode.moderation.policy", "zcode.moderation",
                    "Immutable family policy profiles",
@@ -1752,7 +1752,7 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_zcode_patronage_show)
 
 ZCL_COMMAND_BRANCH("zcode.continuity", "zcode",
-                   "Package continuity",
+                   "Continuity",
                    ZCL_COMMAND_LAYER_APP)
 ZCL_COMMAND_READY_READ(
     "zcode.continuity.plan", "zcode.continuity", "",
@@ -2259,7 +2259,7 @@ ZCL_COMMAND_READY_COMMAND(
     zcl_native_handle_zcode_publish_commit)
 
 ZCL_COMMAND_BRANCH("zcode.package", "zcode",
-                   "Locally committed packages",
+                   "Committed packages",
                    ZCL_COMMAND_LAYER_APP)
 
 ZCL_COMMAND_BRANCH("zcode.package.publish", "zcode.package",
@@ -2972,7 +2972,7 @@ ZCL_COMMAND_READY_READ(
  * unavailable and report zero honestly until slices 11-12. */
 
 ZCL_COMMAND_BRANCH("zcode.leaderboard", "zcode",
-                   "Evidence rankings",
+                   "Rankings",
                    ZCL_COMMAND_LAYER_APP)
 
 ZCL_COMMAND_READY_READ(
@@ -3075,7 +3075,7 @@ ZCL_COMMAND_READY_READ(
  * callback. */
 
 ZCL_COMMAND_BRANCH("zcode.badge", "zcode",
-                   "Evidence badges",
+                   "Badges",
                    ZCL_COMMAND_LAYER_APP)
 
 ZCL_COMMAND_READY_READ(
@@ -3201,7 +3201,7 @@ ZCL_COMMAND_READY_READ(
  * checkpoint is already wired into zcode package publish commit. */
 
 ZCL_COMMAND_BRANCH("zcode.seed", "zcode",
-                   "Local seeding facts",
+                   "Seeding facts",
                    ZCL_COMMAND_LAYER_APP)
 
 ZCL_COMMAND_READY_READ(
@@ -3259,7 +3259,7 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_zcode_seed_ratio)
 
 ZCL_COMMAND_BRANCH("zcode.storage", "zcode",
-                   "Content-addressed storage",
+                   "CAS storage",
                    ZCL_COMMAND_LAYER_APP)
 
 ZCL_COMMAND_READY_READ(
@@ -3568,7 +3568,7 @@ ZCL_COMMAND_READY_COMMAND(
  * separately from signature validity.
  * See docs/spec/sovereign-identity-layer.md. */
 ZCL_COMMAND_BRANCH("zcode.release", "zcode",
-                   "Release records",
+                   "Releases",
                    ZCL_COMMAND_LAYER_APP)
 
 ZCL_COMMAND_READY_COMMAND(
@@ -3761,7 +3761,7 @@ ZCL_COMMAND_READY_READ(
  * zid_identities projection READONLY via db_zid_identity_find, and stays
  * not_checked without one. `node_free` in the report says which. */
 ZCL_COMMAND_BRANCH("zcode.proof", "zcode",
-                   "Proof verification",
+                   "Proof verify",
                    ZCL_COMMAND_LAYER_APP)
 
 ZCL_COMMAND_READY_READ(
@@ -4268,7 +4268,7 @@ ZCL_COMMAND_READY_READ(
  *
  * See lib/zid/include/zid/zendp.h and lib/vcs/include/vcs/zendp_swarm.h. */
 ZCL_COMMAND_BRANCH("zcode.endpoint", "zcode",
-                   "Signed node addresses",
+                   "Signed addresses",
                    ZCL_COMMAND_LAYER_APP)
 
 ZCL_COMMAND_READY_COMMAND(
