@@ -5,6 +5,7 @@
 #include "views/ui_present_host.h"
 #include "views/ui_present_host_transport.h"
 
+#include "base/safe_alloc.h"
 #include "base/serialize_le.h"
 #include "platform/time_compat.h"
 #include "platform/rng.h"
@@ -56,7 +57,7 @@ static bool ui_host_pipe_name(wchar_t out[256])
     bool ok = OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token) &&
               !GetTokenInformation(token, TokenUser, NULL, 0, &bytes) &&
               GetLastError() == ERROR_INSUFFICIENT_BUFFER;
-    if (ok) user = malloc(bytes);
+    if (ok) user = zcl_malloc(bytes, "ui_host_token_user");
     ok = ok && user && GetTokenInformation(token, TokenUser, user, bytes,
                                             &bytes) &&
          ConvertSidToStringSidW(user->User.Sid, &sid) != 0;
@@ -84,7 +85,7 @@ static HANDLE ui_host_pipe_instance(void)
     bool ok = OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token) &&
               !GetTokenInformation(token, TokenUser, NULL, 0, &bytes) &&
               GetLastError() == ERROR_INSUFFICIENT_BUFFER;
-    if (ok) user = malloc(bytes);
+    if (ok) user = zcl_malloc(bytes, "ui_host_token_user");
     ok = ok && user && GetTokenInformation(token, TokenUser, user, bytes,
                                             &bytes) &&
          ConvertSidToStringSidW(user->User.Sid, &sid) != 0;
@@ -426,8 +427,8 @@ bool ui_host_transport_peer_allowed(ui_host_transport_t client)
                                   &process_bytes);
         (void)GetTokenInformation(client_token, TokenUser, NULL, 0,
                                   &client_bytes);
-        process_user = malloc(process_bytes);
-        client_user = malloc(client_bytes);
+        process_user = zcl_malloc(process_bytes, "ui_host_process_user");
+        client_user = zcl_malloc(client_bytes, "ui_host_client_user");
         ok = process_user && client_user &&
              GetTokenInformation(process_token, TokenUser, process_user,
                                  process_bytes, &process_bytes) &&

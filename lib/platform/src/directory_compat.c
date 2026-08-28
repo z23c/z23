@@ -6,6 +6,8 @@
 
 #include "platform/directory_compat.h"
 
+#include "base/safe_alloc.h"
+
 #include <errno.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -26,11 +28,12 @@ static bool append_entry(struct platform_directory_list *list,
         next_count > SIZE_MAX / sizeof(*list->entries))
         return false;
     struct platform_directory_entry *next =
-        realloc(list->entries, next_count * sizeof(*next));
+        zcl_realloc(list->entries, next_count * sizeof(*next),
+                   "platform_directory_entries");
     if (!next) return false;
     list->entries = next;
     size_t name_size = strlen(name) + 1;
-    next[list->count].name = malloc(name_size);
+    next[list->count].name = zcl_malloc(name_size, "platform_directory_entry_name");
     if (!next[list->count].name) return false;
     memcpy(next[list->count].name, name, name_size);
     list->count = next_count;
@@ -59,7 +62,7 @@ static wchar_t *utf8_to_wide(const char *path)
     int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
                                 NULL, 0);
     if (n <= 0) return NULL;
-    wchar_t *wide = malloc((size_t)n * sizeof(*wide));
+    wchar_t *wide = zcl_malloc((size_t)n * sizeof(*wide), "directory_compat_wide");
     if (!wide || !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
                                       wide, n)) {
         free(wide);
@@ -73,7 +76,7 @@ static char *wide_to_utf8(const wchar_t *name)
     int n = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, name, -1,
                                 NULL, 0, NULL, NULL);
     if (n <= 0) return NULL;
-    char *utf8 = malloc((size_t)n);
+    char *utf8 = zcl_malloc((size_t)n, "directory_compat_utf8");
     if (!utf8 || !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, name, -1,
                                       utf8, n, NULL, NULL)) {
         free(utf8);
@@ -159,7 +162,8 @@ bool platform_directory_list_real_sorted(const char *path,
         CloseHandle(root_handle);
         return false;
     }
-    wchar_t *pattern = realloc(wide, (len + 3) * sizeof(*pattern));
+    wchar_t *pattern = zcl_realloc(wide, (len + 3) * sizeof(*pattern),
+                                   "directory_compat_pattern");
     if (!pattern) {
         free(wide);
         CloseHandle(root_handle);

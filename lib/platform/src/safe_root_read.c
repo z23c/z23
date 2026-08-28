@@ -1,6 +1,8 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0 */
 #include "platform/safe_root_read.h"
 
+#include "base/safe_alloc.h"
+
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
@@ -63,7 +65,7 @@ static bool utf8_to_wide(const char *input, wchar_t **output)
     int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, input, -1,
                                 NULL, 0);
     if (n <= 0) return false;
-    wchar_t *wide = malloc((size_t)n * sizeof(*wide));
+    wchar_t *wide = zcl_malloc((size_t)n * sizeof(*wide), "safe_root_read_wide");
     if (!wide) return false;
     if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, input, -1,
                              wide, n)) {
@@ -165,7 +167,7 @@ enum platform_safe_root_read_result platform_safe_root_read(
                 goto done;
             }
             size_t wanted = (size_t)length.QuadPart;
-            uint8_t *buffer = malloc(wanted ? wanted : 1);
+            uint8_t *buffer = zcl_malloc(wanted ? wanted : 1, "safe_root_read_buffer");
             if (!buffer) goto done;
             size_t offset = 0;
             while (offset < wanted) {
@@ -243,7 +245,7 @@ enum platform_safe_root_read_result platform_safe_root_read(
             result = PLATFORM_SAFE_ROOT_READ_TOO_LARGE; break;
         }
         size_t wanted = (size_t)st.st_size;
-        uint8_t *buffer = malloc(wanted ? wanted : 1);
+        uint8_t *buffer = zcl_malloc(wanted ? wanted : 1, "safe_root_read_buffer");
         if (!buffer) break;
         size_t offset = 0;
         while (offset < wanted) {

@@ -4,6 +4,8 @@
  * single private file, portable across POSIX and Windows. */
 #include "platform/private_file.h"
 
+#include "base/safe_alloc.h"
+
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
@@ -207,7 +209,8 @@ bool platform_private_file_replace(struct platform_private_file *f,
   if (bytes > UINT32_MAX - sizeof(FILE_RENAME_INFO))
     return false;
   size_t allocation = sizeof(FILE_RENAME_INFO) + bytes;
-  FILE_RENAME_INFO *rename_info = calloc(1, allocation);
+  FILE_RENAME_INFO *rename_info =
+      zcl_calloc(1, allocation, "private_file_rename_info");
   if (!rename_info)
     return false;
   rename_info->ReplaceIfExists = TRUE;

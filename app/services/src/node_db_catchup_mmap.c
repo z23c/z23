@@ -5,6 +5,7 @@
 #include "node_db_catchup_internal.h"
 
 #include "services/node_db_catchup_service.h"
+#include "base/safe_alloc.h"
 #include "util/log_macros.h"
 
 #include <errno.h>
@@ -57,7 +58,8 @@ static int catchup_open_readonly_binary(const char *path)
         errno = EINVAL;
         return -1;
     }
-    wchar_t *wide = malloc((size_t)wide_len * sizeof(*wide));
+    wchar_t *wide = zcl_malloc((size_t)wide_len * sizeof(*wide),
+                               "node_db_catchup_wide_path");
     if (!wide) {
         errno = ENOMEM;
         return -1;
