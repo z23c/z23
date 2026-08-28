@@ -222,6 +222,10 @@ static int test_hotswap_load_leaves_stub_and_registry(void)
     int failures = 0;
     TEST("release build: hotswap_load_leaves refuses; registry empty") {
         ASSERT(hotswap_generation_count() == 0);
+        ASSERT(hotswap_native_activation_available() == false);
+        ASSERT(strcmp(hotswap_native_unavailable_stage(), "release") == 0);
+        ASSERT(strstr(hotswap_native_unavailable_reason(), "unavailable") !=
+               NULL);
 
         struct hotswap_load_report rep;
         bool ok = hotswap_load_leaves("/tmp/whatever.so", "/tmp/dev-datadir",
@@ -250,6 +254,8 @@ static int test_hotswap_dump_state(void)
         ASSERT(avail != NULL);
         /* Test binary is not a ZCL_DEV_BUILD → available is false. */
         ASSERT(json_get_bool(avail) == false);
+        ASSERT(strcmp(json_get_str(json_get(&out, "note")),
+                      hotswap_native_unavailable_reason()) == 0);
 
         ASSERT(strcmp(json_get_str(json_get(&out, "schema")),
                       "zcl.hotswap_generation.v2") == 0);

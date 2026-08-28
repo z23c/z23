@@ -297,7 +297,7 @@ bool hotswap_manifest_v2_validate(
     return true;
 }
 
-#if defined(ZCL_DEV_BUILD) && !defined(_WIN32)
+#if ZCL_HOTSWAP_NATIVE_AVAILABLE
 static void rejection_set_locked(uint32_t gen, const char *stage,
                                  const char *error, const char *so_path,
                                  const char *source_identity)
@@ -354,12 +354,10 @@ bool hotswap_dump_state_json(struct json_value *out, const char *key)
         return false;
     json_set_object(out);
     json_push_kv_str(out, "schema", "zcl.hotswap_generation.v2");
-#if defined(ZCL_DEV_BUILD) && !defined(_WIN32)
-    json_push_kv_bool(out, "available", true);
-#else
-    json_push_kv_bool(out, "available", false);
-    json_push_kv_str(out, "note", "hotswap unavailable in release build");
-#endif
+    json_push_kv_bool(out, "available",
+                      hotswap_native_activation_available());
+    if (!hotswap_native_activation_available())
+        json_push_kv_str(out, "note", hotswap_native_unavailable_reason());
     json_push_kv_bool(out, "ephemeral", true);
     json_push_kv_str(out, "mapping_policy",
                      "successful_generations_permanently_mapped");
@@ -415,7 +413,7 @@ bool hotswap_dump_state_json(struct json_value *out, const char *key)
 }
 
 #ifdef ZCL_DEV_BUILD
-#if !defined(_WIN32)
+#if defined(__linux__) && !defined(_WIN32)
 
 #include <dlfcn.h>
 
@@ -814,13 +812,13 @@ bool hotswap_load_leaves(const char *so_path,
 
 #else
 #define ZCL_HOTSWAP_LOADER_UNAVAILABLE 1
-#endif /* !_WIN32 */
+#endif /* Linux */
 #else
 #define ZCL_HOTSWAP_LOADER_UNAVAILABLE 1
 #endif /* ZCL_DEV_BUILD */
 
 #ifdef ZCL_HOTSWAP_LOADER_UNAVAILABLE
-/* Release build or native Windows: fail closed. */
+/* Unsupported platform or release build: fail closed. */
 
 bool hotswap_load_leaves(const char *so_path,
                          const char *datadir,
@@ -838,18 +836,9 @@ bool hotswap_load_leaves(const char *so_path,
         return false;
     memset(report, 0, sizeof(*report));
     copy_text(report->rejection_stage, sizeof(report->rejection_stage),
-#if defined(_WIN32)
-              "platform");
-#else
-              "release");
-#endif
+              hotswap_native_unavailable_stage());
     copy_text(report->error, sizeof(report->error),
-#if defined(_WIN32)
-              "native Windows DLL hot-swap is disabled pending sandbox and "
-              "validated immutable PE loading");
-#else
-              "hotswap unavailable in release build");
-#endif
+              hotswap_native_unavailable_reason());
     return false;
 }
 
