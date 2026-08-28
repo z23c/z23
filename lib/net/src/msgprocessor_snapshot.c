@@ -45,29 +45,29 @@
 
 /* Global swarm coordinator — manages parallel UTXO chunk download.
  * Only active when we are syncing from multiple ZCL23 peers.
- * All access to g_swarm fields protected by g_swarm_mutex. */
+ * All access to g_swarm fields protected by g_swarm_mutex, which is
+ * statically initialized like g_block_swarm_mutex below. The lazy
+ * pthread_once it replaces had an abort() on its failure path, in a
+ * network-reachable helper; a static initializer deletes that failure
+ * rather than documenting it. Two things that gives up, both checked:
+ * zcl_mutex_t is recursive on both platforms and this is not, which is
+ * safe because the lock helpers are static to this file and no locked
+ * region reaches another that locks; and the raw pthread type is
+ * POSIX-only, which this file already is at g_block_swarm_mutex, so
+ * porting lib/net to Windows has to handle both together rather than
+ * one more site than before. */
 static struct swarm_sync g_swarm __attribute__((used));
 static _Atomic bool g_swarm_active = false;
-static zcl_mutex_t g_swarm_mutex;
-static pthread_once_t g_swarm_mutex_once = PTHREAD_ONCE_INIT;
-
-static void swarm_mutex_init_once(void)
-{
-    zcl_mutex_init(&g_swarm_mutex);
-}
+static pthread_mutex_t g_swarm_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static void swarm_mutex_lock(void)
 {
-    if (pthread_once(&g_swarm_mutex_once, swarm_mutex_init_once) != 0) {
-        LOG_ERROR("net", "swarm mutex initialization failed");
-        abort();
-    }
-    zcl_mutex_lock(&g_swarm_mutex);
+    pthread_mutex_lock(&g_swarm_mutex);
 }
 
 static void swarm_mutex_unlock(void)
 {
-    zcl_mutex_unlock(&g_swarm_mutex);
+    pthread_mutex_unlock(&g_swarm_mutex);
 }
 
 /* Snapshot sync service — global singleton in snapshot_sync_service.c */

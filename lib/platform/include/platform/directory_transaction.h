@@ -1,4 +1,10 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Purpose: a retained, owner-verified directory handle (opened O_NOFOLLOW,
+ * checked to be owned by the current user with no group/other bits) used for
+ * openat-relative child create/open/read/write/replace/unlink/lock/list, so
+ * every operation binds to the checked directory rather than a re-resolved
+ * path, and every mutating call fsyncs the directory entry for crash
+ * durability. POSIX and Windows (NtCreateFile) share this contract. */
 #ifndef ZCL_PLATFORM_DIRECTORY_TRANSACTION_H
 #define ZCL_PLATFORM_DIRECTORY_TRANSACTION_H
 

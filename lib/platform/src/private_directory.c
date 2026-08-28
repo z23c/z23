@@ -1,4 +1,11 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Purpose: implementation of platform/private_directory.h. Windows route
+ * creates the directory with an owner+SYSTEM-only security descriptor
+ * (private_acl_internal.h) then re-opens and validates the live handle's
+ * actual ACL/owner/no-reparse; POSIX route mkdir(0700)s then lstat-verifies
+ * owner, exact 0700 mode, and no symlink. Both routes distrust their own
+ * create call and refuse if the resulting directory does not actually match
+ * what was requested. */
 #if !defined(_WIN32) && !defined(_GNU_SOURCE)
 #define _GNU_SOURCE
 #endif

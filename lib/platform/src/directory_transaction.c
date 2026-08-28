@@ -1,4 +1,11 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Purpose: implementation of platform/directory_transaction.h. Windows route
+ * opens/creates via NtCreateFile with FILE_OPEN_REPARSE_POINT so a reparse
+ * point is detected rather than followed, and validates the private ACL
+ * (private_acl_internal.h); POSIX route uses openat/renameat(2)/flock(2)/
+ * fsync with O_NOFOLLOW. Both refuse a leaf name that could escape the
+ * directory (path separators, `.`/`..`, reserved Windows device stems) and
+ * fsync the parent directory after every create/replace/unlink. */
 #if !defined(_WIN32) && !defined(_GNU_SOURCE)
 #define _GNU_SOURCE
 #endif

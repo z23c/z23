@@ -1,3 +1,7 @@
+/* Headless acceptance proving sd_notify degrades to an all-no-op off
+ * systemd: with no NOTIFY_SOCKET in the environment, every sd_notify_*
+ * call returns false/zero and the registered health-check callback is
+ * never invoked. */
 #include "util/sd_notify.h"
 
 #include <stdio.h>

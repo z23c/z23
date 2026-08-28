@@ -1,4 +1,9 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Purpose: Windows-only implementation of private_acl_internal.h —
+ * synthesizes an SDDL descriptor granting full access solely to the current
+ * user's SID and SYSTEM, and validates that an open handle's owner and DACL
+ * (exactly two non-inherited allow ACEs, one per grantee) still match it.
+ * An empty translation unit on POSIX. */
 #include "private_acl_internal.h"
 
 #if defined(_WIN32)
