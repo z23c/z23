@@ -1,4 +1,8 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Purpose: POSIX (openat) and Win32 (NtCreateFile) implementation of
+ * platform/safe_root_read.h — walks a relative path one component/handle at
+ * a time beneath a trusted root so no component can be a symlink or Windows
+ * reparse point. */
 #include "platform/safe_root_read.h"
 
 #include "base/safe_alloc.h"

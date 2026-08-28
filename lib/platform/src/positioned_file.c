@@ -1,5 +1,11 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Purpose: POSIX (pread/openat) and Win32 (overlapped ReadFile/NtCreateFile)
+ * implementation of platform/positioned_file.h — offset reads, the
+ * symlink/reparse-point-safe open_beneath, and the is_executable/is_private
+ * identity checks. */
 #include "platform/positioned_file.h"
+
+#include "base/safe_alloc.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -280,7 +286,7 @@ bool platform_positioned_file_is_private(
         dacl && OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token) &&
         !GetTokenInformation(token, TokenUser, NULL, 0, &bytes) &&
         GetLastError() == ERROR_INSUFFICIENT_BUFFER;
-    if (ok) user = malloc(bytes);
+    if (ok) user = zcl_malloc(bytes, "positioned_file_token_user");
     ok = ok && user && GetTokenInformation(token, TokenUser, user, bytes,
                                             &bytes) &&
          CreateWellKnownSid(WinLocalSystemSid, NULL, system_buffer,

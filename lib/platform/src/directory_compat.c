@@ -1,4 +1,7 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Purpose: POSIX (dirent/fstatat) and Win32 (FindFirstFileW) implementation
+ * of platform/directory_compat.h — create/ensure a directory and list its
+ * real, sorted, non-symlink child directories or child regular files. */
 
 #if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
 #define _POSIX_C_SOURCE 200809L
@@ -233,7 +236,8 @@ bool platform_directory_list_regular_sorted(
         CloseHandle(root_handle);
         return false;
     }
-    wchar_t *pattern = realloc(wide, (len + 3) * sizeof(*pattern));
+    wchar_t *pattern = zcl_realloc(wide, (len + 3) * sizeof(*pattern),
+                                   "directory_compat_pattern");
     if (!pattern) {
         free(wide);
         CloseHandle(root_handle);

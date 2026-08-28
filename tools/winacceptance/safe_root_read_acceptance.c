@@ -1,4 +1,9 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Purpose: Windows-only acceptance for platform_safe_root_read() -- reads a
+ * UTF-8 nested path beneath a trusted root, then proves each refusal is
+ * reported distinctly rather than collapsed: parent traversal, a backslash
+ * separator, a directory, an oversize file, a missing name, and a leaf
+ * reparse point escaping the root. Exits 77 (skip) off Windows. */
 #include "platform/safe_root_read.h"
 
 #include <stdio.h>

@@ -1,4 +1,7 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Purpose: POSIX (statvfs) and Win32 (GetDiskFreeSpaceExW) implementation of
+ * platform/disk_space.h, including the \\?\ long-path escaping Windows needs
+ * for drive, UNC, and already-extended paths. */
 #include "platform/disk_space.h"
 
 #include <stddef.h>

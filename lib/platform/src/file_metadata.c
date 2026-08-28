@@ -1,4 +1,7 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Purpose: POSIX (lstat) and Win32 (CreateFileW + GetFileInformationByHandle)
+ * implementation of platform/file_metadata.h, distinguishing a missing path
+ * from a refused one without ever following a final symlink/reparse point. */
 #if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
 #define _POSIX_C_SOURCE 200809L
 #endif

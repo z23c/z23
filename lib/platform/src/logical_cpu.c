@@ -1,4 +1,8 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Purpose: Win32 (GetActiveProcessorCount/GetSystemInfo) and POSIX
+ * (sysconf) implementation of platform_logical_cpu_count(); see
+ * platform/logical_cpu.h for the deliberate undercount-over-overcount
+ * contract this preserves. */
 #include "platform/logical_cpu.h"
 
 #if defined(_WIN32)

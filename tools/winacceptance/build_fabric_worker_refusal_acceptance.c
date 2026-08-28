@@ -1,4 +1,9 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Purpose: acceptance for build_fabric_worker_execute()'s Windows refusal --
+ * asserts it fails with the named sandbox reasons (restricted-token Job
+ * Object, network-denial) and that it ZEROES the caller's receipt and
+ * feedback structs, which are poisoned to 0xa5 beforehand so a refusal that
+ * left caller garbage in place would be caught rather than read as clean. */
 #include "services/build_fabric_worker.h"
 
 #include <stdint.h>

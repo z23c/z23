@@ -1,4 +1,8 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Purpose: handle-based read-only regular-file abstraction with offset reads
+ * that do not share a seek cursor, a symlink/reparse-point-safe open beneath
+ * a trusted directory, and identity/executable/private-ACL checks, portable
+ * across POSIX and Windows. */
 #ifndef ZCL_PLATFORM_POSITIONED_FILE_H
 #define ZCL_PLATFORM_POSITIONED_FILE_H
 
