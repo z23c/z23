@@ -6,7 +6,9 @@
  * as ROOT supervisor children, so a wedged loop in lib/ or config/ is a
  * named blocker instead of a silent stop. SAFE stateless workers may also opt
  * into bounded auto-restart (Erlang/OTP) via the _restartable variant. */
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE  /* pthread_tryjoin_np */
+#endif
 
 #include "util/thread_liveness.h"
 
@@ -102,6 +104,10 @@ static bool tl_on_respawn(struct liveness_contract *self)
     if (atomic_load(&c->worker_tid_set)) {
 #if defined(__linux__)
         int jr = pthread_tryjoin_np(c->worker_tid, NULL);
+#elif defined(_WIN32)
+        int jr = _pthread_tryjoin(c->worker_tid, NULL);
+#endif
+#if defined(__linux__) || defined(_WIN32)
         if (jr == EBUSY) {
             /* False EXITED — the worker is still terminating. Abort: do NOT
              * spawn, do NOT count. Restore EXITED (the supervisor claimed it as
