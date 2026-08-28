@@ -51,7 +51,7 @@ if [ "$configured" != true ]; then
         ./configure "${configure_opts[@]}")
 fi
 
-jobs="${ZCL_TOR_JOBS:-$(nproc)}"
+jobs="${ZCL_TOR_JOBS:-$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
 case "$jobs" in
     ''|*[!0-9]*) echo "tor-full: ZCL_TOR_JOBS must be a positive integer" >&2; exit 2 ;;
     0) echo "tor-full: ZCL_TOR_JOBS must be greater than zero" >&2; exit 2 ;;

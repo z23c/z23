@@ -889,7 +889,7 @@ TOR_FULL = $(wildcard vendor/tor/libtor.a \
 	vendor/tor/src/ext/ed25519/donna/libed25519_donna.a \
 	vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a \
 	vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a)
-TOR_LIBS = $(if $(filter Darwin,$(ZCL_HOST_OS)),-Lvendor/lib -ltor_stub,$(if $(TOR_FULL),$(TOR_FULL),-Lvendor/lib -ltor_stub))
+TOR_LIBS = $(if $(TOR_FULL),$(TOR_FULL),-Lvendor/lib -ltor_stub)
 # All dependencies bundled in vendor/lib as static archives.
 # Zero system library requirements beyond libc.
 # OpenSSL 3.0 (Apache 2.0), libevent and zlib are vendored and statically
@@ -915,7 +915,7 @@ LIBS = $(NODE_SECP_ARCHIVE) -Lvendor/lib -lleveldb \
 # bootstrap reads use the in-tree C23
 # reader; every other third-party input is an exact pinned static archive.
 NODE_C23_CFLAGS = $(CFLAGS) -DZCL_C23_NODE -UHAVE_GTK -UHAVE_WEBKIT
-NODE_C23_TOR_LIBS = $(if $(filter Darwin,$(ZCL_HOST_OS)),vendor/lib/libtor_stub.a,$(if $(TOR_FULL),$(TOR_FULL),vendor/lib/libtor_stub.a))
+NODE_C23_TOR_LIBS = $(if $(TOR_FULL),$(TOR_FULL),vendor/lib/libtor_stub.a)
 NODE_C23_LIBS = $(NODE_SECP_ARCHIVE) vendor/lib/libsqlite3.a \
 	vendor/lib/libevent.a vendor/lib/libevent_openssl.a \
 	vendor/lib/libevent_pthreads.a vendor/lib/libssl.a \
