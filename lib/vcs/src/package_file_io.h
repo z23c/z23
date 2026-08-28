@@ -9,9 +9,6 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-bool vcs_package_file_snapshot_equal(
-    const struct platform_positioned_file_snapshot *a,
-    const struct platform_positioned_file_snapshot *b);
 bool vcs_package_file_exists(const char *path);
 bool vcs_package_name_is_hex64(const char *name);
 bool vcs_package_child_path(char *out, size_t out_size,

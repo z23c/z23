@@ -499,20 +499,11 @@ uint8_t *badge_read_file(const char *path, size_t cap,
     }
     struct platform_positioned_file_snapshot after;
     bool stable = platform_positioned_file_snapshot(&file, &after) &&
-                  vcs_package_file_snapshot_equal(&stamp, &after);
+                  platform_positioned_file_snapshot_equal(&stamp, &after);
     platform_positioned_file_close(&file);
     if (!stable) { free(buf); return NULL; }
     *out_len = len;
     return buf;
-}
-
-static bool badge_file_exists(const char *path)
-{
-    struct platform_positioned_file file;
-    platform_positioned_file_init(&file);
-    bool exists = platform_positioned_file_open(&file, path);
-    platform_positioned_file_close(&file);
-    return exists;
 }
 
 /* ── the store (struct vcs_badge_store and struct vcs_badge_loaded are

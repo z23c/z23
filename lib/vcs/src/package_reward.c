@@ -172,7 +172,7 @@ static uint8_t *reward_read_file(const char *path, size_t cap,
         LOG_NULL(REWARD_LOG, "alloc %zu for %s", len, path);
     if (platform_positioned_file_read(&file, buf, len, 0) != (int64_t)len ||
         !platform_positioned_file_snapshot(&file, &after) ||
-        !vcs_package_file_snapshot_equal(&before, &after)) {
+        !platform_positioned_file_snapshot_equal(&before, &after)) {
         platform_positioned_file_close(&file);
         free(buf);
         return NULL;
