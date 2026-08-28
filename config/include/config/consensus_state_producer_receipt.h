@@ -173,6 +173,10 @@ bool consensus_state_producer_status_read(const char *datadir,
  * not derive it from Git cleanliness. Pass source_id=NULL to clear. */
 void consensus_state_producer_receipt_test_set_identity(const char *source_id,
                                                         bool source_clean);
+
+/* Exercise the production, handle-bound running-image identity path. */
+bool consensus_state_producer_receipt_test_running_binary_digest(
+    uint8_t out[32]);
 #endif
 
 #endif /* ZCL_CONFIG_CONSENSUS_STATE_PRODUCER_RECEIPT_H */
