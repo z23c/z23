@@ -118,7 +118,8 @@ ZCL_GUI_APP_GOALS := $(foreach a,$(GUI_APPS),$(a) $(a)-selftest $(a)-clean \
 ZCL_HOTSWAP_LOOP_GOALS := hotswap-try hotswap-apply hotswap \
 	presentation-lib presentation-demo presentation-relaunch \
 	presentation-desktop-install presentation-portability \
-	new-app new-app-selftest $(ZCL_GUI_APP_GOALS)
+	new-app new-app-selftest test-windows-thread-join-acceptance \
+	$(ZCL_GUI_APP_GOALS)
 ZCL_HOTSWAP_LOOP_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_HOTSWAP_LOOP_GOALS),$(MAKECMDGOALS))),,1),)
 
 # hotswap-module-so compiles exactly one TU via a direct $(CC) shell command in
@@ -5885,6 +5886,20 @@ zcode-reproduction-acceptance:
 	@$(MAKE) --no-print-directory t-fast-exact \
 	  ONLY='$(ZCODE_REPRODUCTION_ACCEPTANCE_TESTS)'
 	@echo "zcode-reproduction-acceptance: PASS distinct_signer_simulation=true approved_fixture_policy=true actual_off_host_credit=false"
+
+# Headless proof for the bounded join primitive shared by thread_registry,
+# thread_liveness, and supervisor shutdown. This target is intentionally
+# standalone: it needs no vendor archive, node link, service, or GUI runtime.
+THREAD_JOIN_ACCEPTANCE_BIN := $(BIN_DIR)/thread-join-acceptance
+.PHONY: test-windows-thread-join-acceptance
+test-windows-thread-join-acceptance: $(THREAD_JOIN_ACCEPTANCE_BIN)
+	@$(THREAD_JOIN_ACCEPTANCE_BIN)
+
+$(THREAD_JOIN_ACCEPTANCE_BIN): tests/windows/thread_join_acceptance.c \
+		lib/platform/include/platform/thread_compat.h
+	@mkdir -p $(dir $@)
+	$(CC) $(ZCL_PLATFORM_CPPFLAGS) -std=c23 -Wall -Wextra -Werror -pedantic \
+		-Ilib/platform/include $< $(ZCL_STATIC_FLAG) -pthread -o $@
 
 # ── STICKINESS fault-injection matrix (sticky-node-plan §4 metric) ──
 #
