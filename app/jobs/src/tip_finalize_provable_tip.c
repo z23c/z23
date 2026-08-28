@@ -79,11 +79,27 @@ void tf_advance_provable_tip(sqlite3 *db, int next_h)
      * a boot_scan_reset_for_testing() — that clears the registration table, so
      * a cached pointer would bump an orphaned slot the by-name reader can't
      * find; one find() over <=48 slots per finalize is negligible). */
-    if (reducer_frontier_provable_tip_is_published() &&
-        reducer_frontier_provable_tip_cached() == next_h - 1) {
-        reducer_frontier_provable_tip_set(next_h);
-        boot_scan_bump(boot_scan_counter("reducer_frontier.hstar_fastpath"));
-        return;
+    if (reducer_frontier_provable_tip_is_published()) {
+        int32_t cached = reducer_frontier_provable_tip_cached();
+        if (cached == next_h - 1) {
+            reducer_frontier_provable_tip_set(next_h);
+            boot_scan_bump(boot_scan_counter("reducer_frontier.hstar_fastpath"));
+            return;
+        }
+        /* Already current: another path in THIS finalize cycle published H*
+         * at exactly the height we just finalized (the on-demand authority
+         * anchor republishes H* on every ingested tip block before the
+         * stage's own advance runs, and a mint/refold re-warm does the same).
+         * Publishing next_h again would be a no-op, so take the O(1) exit
+         * instead of re-folding the whole frontier per block — measured at
+         * ~2.1 ms/block of pure compute_hstar work on a regtest fold, all of
+         * it confirming a value the cache already held. Anything else
+         * (cached < next_h - 1 or cached > next_h) is still "any doubt"
+         * and takes the full fold below. */
+        if (cached == next_h) {
+            boot_scan_bump(boot_scan_counter("reducer_frontier.hstar_fastpath"));
+            return;
+        }
     }
 
     /* Named, throttled: the full-fold fallback / self-heal (normal on the first
