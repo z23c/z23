@@ -1,18 +1,21 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * purpose: Canonical SHA3 identities for toolchains and fixed C23 actions. */
 
+#if !defined(_WIN32)
+#define _GNU_SOURCE
+#endif
+
 #include "vcs/build_action.h"
 
 #include "crypto/sha3.h"
+#include "platform/positioned_file.h"
 #include "util/spawn.h"
+#include "util/sync.h"
 #include "vcs/zcode_dev.h"
 
-#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -22,7 +25,7 @@
 
 struct build_toolchain_file {
     char path[PATH_MAX];
-    struct stat stamp;
+    struct platform_positioned_file_snapshot stamp;
 };
 
 struct build_toolchain_cache {
@@ -34,8 +37,22 @@ struct build_toolchain_cache {
     bool valid;
 };
 
-static pthread_mutex_t g_toolchain_cache_mu = PTHREAD_MUTEX_INITIALIZER;
+static zcl_mutex_t g_toolchain_cache_mu;
+static zcl_once_t g_toolchain_cache_once = ZCL_ONCE_INIT;
 static struct build_toolchain_cache g_toolchain_cache;
+
+static void build_toolchain_cache_init(void)
+{
+    zcl_mutex_init(&g_toolchain_cache_mu);
+}
+
+static bool build_toolchain_cache_lock(void)
+{
+    if (!zcl_once_call(&g_toolchain_cache_once, build_toolchain_cache_init))
+        return false;
+    zcl_mutex_lock(&g_toolchain_cache_mu);
+    return true;
+}
 
 void vcs_source_manifest_id(const uint8_t *wire, size_t len, uint8_t out[32])
 {
@@ -75,39 +92,61 @@ static bool build_text_valid(const char *value, size_t cap)
     return value && value[0] && strnlen(value, cap) < cap;
 }
 
-static bool build_stat_equal(const struct stat *a, const struct stat *b)
+static bool build_stat_equal(
+    const struct platform_positioned_file_snapshot *a,
+    const struct platform_positioned_file_snapshot *b)
 {
-    return a->st_dev == b->st_dev && a->st_ino == b->st_ino &&
-           a->st_mode == b->st_mode && a->st_size == b->st_size &&
-           a->st_mtim.tv_sec == b->st_mtim.tv_sec &&
-           a->st_mtim.tv_nsec == b->st_mtim.tv_nsec &&
-           a->st_ctim.tv_sec == b->st_ctim.tv_sec &&
-           a->st_ctim.tv_nsec == b->st_ctim.tv_nsec;
+    return a->size == b->size && a->volume == b->volume &&
+           a->file_low == b->file_low && a->file_high == b->file_high &&
+           a->modified_seconds == b->modified_seconds &&
+           a->modified_nanoseconds == b->modified_nanoseconds &&
+           a->changed_seconds == b->changed_seconds &&
+           a->changed_nanoseconds == b->changed_nanoseconds;
 }
 
 static bool build_sha3_file(const char *path, uint8_t out[32],
-                            struct stat *stable_stamp)
+                            struct platform_positioned_file_snapshot *stable_stamp)
 {
-    FILE *f = fopen(path, "rb");
-    if (!f) return false;
-    struct stat before, after;
-    if (fstat(fileno(f), &before) != 0 || !S_ISREG(before.st_mode)) {
-        fclose(f);
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path) ||
+        !platform_positioned_file_snapshot(&file, &before)) {
+        platform_positioned_file_close(&file);
         return false;
     }
     struct sha3_256_ctx sha;
     sha3_256_init(&sha);
     uint8_t buf[65536];
-    size_t got;
-    while ((got = fread(buf, 1, sizeof(buf), f)) > 0)
-        sha3_256_write(&sha, buf, got);
-    bool ok = ferror(f) == 0 && fstat(fileno(f), &after) == 0 &&
-              build_stat_equal(&before, &after);
-    fclose(f);
+    uint64_t offset = 0;
+    bool ok = true;
+    while (offset < before.size) {
+        size_t want = before.size - offset > sizeof(buf) ? sizeof(buf) :
+                      (size_t)(before.size - offset);
+        int64_t got = platform_positioned_file_read(&file, buf, want, offset);
+        if (got <= 0) { ok = false; break; }
+        sha3_256_write(&sha, buf, (size_t)got);
+        offset += (uint64_t)got;
+    }
+    ok = ok && platform_positioned_file_snapshot(&file, &after) &&
+         build_stat_equal(&before, &after);
+    platform_positioned_file_close(&file);
     if (!ok) return false;
     sha3_256_finalize(&sha, out);
     if (stable_stamp) *stable_stamp = after;
     return true;
+}
+
+static bool build_resolve_file(const char *candidate, char resolved[PATH_MAX],
+                               struct platform_positioned_file_snapshot *stamp)
+{
+    struct platform_positioned_file file;
+    platform_positioned_file_init(&file);
+    bool ok = candidate && platform_positioned_file_open(&file, candidate) &&
+              platform_positioned_file_path(&file, resolved, PATH_MAX) &&
+              (!stamp || platform_positioned_file_snapshot(&file, stamp));
+    platform_positioned_file_close(&file);
+    return ok;
 }
 
 static bool build_gcc_query(const char *arg, char *out, size_t cap)
@@ -125,9 +164,10 @@ static bool build_gcc_file(const char *arg, const char *fallback,
 {
     char named[4096];
     if (!build_gcc_query(arg, named, sizeof(named))) return false;
-    const char *candidate = strchr(named, '/') ? named : fallback;
+    const char *candidate = (strchr(named, '/') || strchr(named, '\\')) ?
+                            named : fallback;
     char resolved[4096];
-    if (!candidate || !file || !realpath(candidate, resolved) ||
+    if (!candidate || !file || !build_resolve_file(candidate, resolved, NULL) ||
         strlen(resolved) >= sizeof(file->path)) {
         return false;
     }
@@ -146,14 +186,13 @@ static bool build_assembler_identity(uint8_t out[32],
     char named[4096];
     if (!build_gcc_query("-print-prog-name=as", named, sizeof(named)))
         return false;
-    const char *candidate = strchr(named, '/') ? named : "/usr/bin/as";
+    const char *candidate = (strchr(named, '/') || strchr(named, '\\')) ?
+                            named : "/usr/bin/as";
     char resolved[4096];
-    if (!file || !realpath(candidate, resolved) ||
+    if (!file || !build_resolve_file(candidate, resolved, &file->stamp) ||
         strlen(resolved) >= sizeof(file->path))
         return false;
     (void)snprintf(file->path, sizeof(file->path), "%s", resolved);
-    if (stat(resolved, &file->stamp) != 0 || !S_ISREG(file->stamp.st_mode))
-        return false;
     char version[512];
     const char *const argv[] = { resolved, "--version", NULL };
     if (zcl_spawn_capture(argv, version, sizeof(version), 10000) != 0 ||
@@ -226,8 +265,9 @@ static bool build_toolchain_cache_current(
         memcmp(cache->environment_root, environment_root, 32) != 0)
         return false;
     for (size_t i = 0; i < BUILD_TOOLCHAIN_FILE_COUNT; i++) {
-        struct stat current;
-        if (stat(cache->files[i].path, &current) != 0 ||
+        struct platform_positioned_file_snapshot current;
+        if (!build_resolve_file(cache->files[i].path, (char[PATH_MAX]){0},
+                                &current) ||
             !build_stat_equal(&cache->files[i].stamp, &current))
             return false;
     }
@@ -244,7 +284,7 @@ static bool build_toolchain_capture_uncached(
            sizeof(struct build_toolchain_file) * BUILD_TOOLCHAIN_FILE_COUNT);
     size_t file_count = 0;
     char driver[4096];
-    if (!realpath(VCS_BUILD_COMPILER_V1, driver) ||
+    if (!build_resolve_file(VCS_BUILD_COMPILER_V1, driver, NULL) ||
         strlen(driver) >= sizeof(files[file_count].path))
         return false;
     (void)snprintf(files[file_count].path, sizeof(files[file_count].path),
@@ -301,12 +341,12 @@ bool vcs_toolchain_capsule_v1_capture_gcc(
     if (!out) return false;
     uint8_t environment_root[32];
     build_toolchain_environment_root(environment_root);
-    pthread_mutex_lock(&g_toolchain_cache_mu);
+    if (!build_toolchain_cache_lock()) return false;
     if (build_toolchain_cache_current(&g_toolchain_cache,
                                       environment_root)) {
         *out = g_toolchain_cache.capsule;
         g_toolchain_cache.cache_hits++;
-        pthread_mutex_unlock(&g_toolchain_cache_mu);
+        zcl_mutex_unlock(&g_toolchain_cache_mu);
         return true;
     }
     struct vcs_toolchain_capsule_v1 captured;
@@ -321,27 +361,27 @@ bool vcs_toolchain_capsule_v1_capture_gcc(
         g_toolchain_cache.valid = true;
         *out = captured;
     }
-    pthread_mutex_unlock(&g_toolchain_cache_mu);
+    zcl_mutex_unlock(&g_toolchain_cache_mu);
     return ok;
 }
 
 #ifdef ZCL_TESTING
 void vcs_toolchain_capsule_v1_cache_reset_for_test(void)
 {
-    pthread_mutex_lock(&g_toolchain_cache_mu);
+    if (!build_toolchain_cache_lock()) return;
     memset(&g_toolchain_cache, 0, sizeof(g_toolchain_cache));
-    pthread_mutex_unlock(&g_toolchain_cache_mu);
+    zcl_mutex_unlock(&g_toolchain_cache_mu);
 }
 
 void vcs_toolchain_capsule_v1_cache_stats_for_test(
     uint64_t *fresh_captures, uint64_t *cache_hits)
 {
-    pthread_mutex_lock(&g_toolchain_cache_mu);
+    if (!build_toolchain_cache_lock()) return;
     if (fresh_captures)
         *fresh_captures = g_toolchain_cache.fresh_captures;
     if (cache_hits)
         *cache_hits = g_toolchain_cache.cache_hits;
-    pthread_mutex_unlock(&g_toolchain_cache_mu);
+    zcl_mutex_unlock(&g_toolchain_cache_mu);
 }
 #endif
 
