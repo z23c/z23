@@ -51,8 +51,8 @@ lib/net/src/net.c 2688
 # stays 0.
 lib/net/src/onion_directory.c 1516
 lib/net/src/onion_service.c 1324
-lib/net/src/peer_lifecycle.c 1906
-lib/net/src/rom_fetch.c 1694
+lib/net/src/peer_lifecycle.c 1634
+lib/net/src/rom_fetch.c 1599
 lib/platform/src/os_sandbox_linux.c 1526
 lib/rpc/src/httpserver.c 1496
 lib/sapling/src/circuit_gadgets.c 1053
@@ -85,7 +85,7 @@ lib/util/src/blocker.c 836
 lib/util/src/supervisor.c 1290
 lib/sync/src/stage.c 817
 src/main_cli_modes.c 4275
-lib/hotswap/src/hotswap_activate.c 2333
+lib/hotswap/src/hotswap_activate.c 2325
 lib/vcs/src/package_store.c 1301
 lib/vcs/src/package_score.c 845
 lib/vcs/src/package_reward.c 1986

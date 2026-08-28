@@ -13,6 +13,7 @@
     "include/platform/os_proc.h",
     "src/os_binary_slots.c",
     "src/os_proc.c",
+    "src/os_proc_mem.c",
     "tests/test_platform.c",
     "zcode-package.json"
   ]
