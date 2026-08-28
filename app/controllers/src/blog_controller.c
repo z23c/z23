@@ -126,10 +126,15 @@ size_t blog_serve(const char *datadir, const char *path,
     snprintf(blog_root, sizeof(blog_root), "%s/blog", datadir);
     char real_root[PATH_MAX];
 #if defined(_WIN32)
-    if (!platform_path_resolve(real_root, sizeof(real_root), blog_root)) {
+    /* Per-host path resolution, expressed as one shared condition: keeping
+     * the brace OUT of the conditional branches keeps brace-scanning linters
+     * (function-attribution) correct. */
+    const int resolve_failed =
+        !platform_path_resolve(real_root, sizeof(real_root), blog_root);
 #else
-    if (!realpath(blog_root, real_root)) {
+    const int resolve_failed = !realpath(blog_root, real_root);
 #endif
+    if (resolve_failed) {
         const char *body =
             "<html><head><style>body{background:#0a0a0a;color:#e0e0e0;"
             "font-family:monospace;text-align:center;padding:80px 20px}"
