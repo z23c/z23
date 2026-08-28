@@ -40,8 +40,7 @@ app/services/src/block_index_loader_rebuild.c 853 # ADR-0008 (seed-floor declara
 # try-decrypt helper to node_db_catchup_decrypt.c (-111) and gained the
 # lock-contention seatbelts (commit cadence, BEGIN IMMEDIATE, BUSY_SNAPSHOT
 # restart call, abort-streak park) — net 886 -> 866; baseline tightened.
-app/services/src/node_db_catchup_service.c 862
-app/services/src/rolling_anchor_service.c 801
+app/services/src/node_db_catchup_service.c 861
 
 app/services/src/sticky_escalator.c 1271
 app/services/src/sync_monitor.c 810
@@ -49,7 +48,7 @@ app/services/src/sync_monitor.c 810
 # the confined runner (fork + Landlock/seccomp/rlimits + sandbox self-check
 # canaries + crash discipline) is one fail-closed ritual that must stay
 # together; baselined at creation per the zcode_science_service.c precedent.
-app/services/src/zcode_benchmark_executor.c 1228
+app/services/src/zcode_benchmark_executor.c 1172
 # ZCODE Scientific Metaverse S3: plan/commit services + review/vote submit +
 # CAS rebuild for the science store — one fail-closed write ritual per kind;
 # baselined at creation (gate option 3), expected to shrink when S5's
@@ -74,8 +73,11 @@ app/views/src/explorer_pages_view.c 819
 # the phrase, minting one, printing it once) landed in its own
 # config/src/boot_wallet_phrase.c instead of here, and took 25 lines of
 # existing wiring out of boot.c with it.
-config/src/boot.c 4277
-config/src/boot_bundle_fetch.c 905
+# 2026-08-28: TIGHTENED 4277 -> 4262. The boot phase-timing marks
+# (boot_clock_ms / boot_submark / boot_topmark) moved to
+# config/src/boot_timing_marks.c.
+config/src/boot.c 4262
+config/src/boot_bundle_fetch.c 805
 config/src/boot_index.c 851
 config/src/boot_mint_anchor.c 808
 config/src/boot_refold_staged.c 2077
@@ -86,9 +88,19 @@ config/src/boot_services.c 1476
 # over. The work-adapter half (boot_zcode_work_*) is the natural future
 # split seam if this file grows again.
 config/src/boot_zcode_swarm.c 885
-config/src/bundle_exporter.c 988
-config/src/consensus_state_install_runtime.c 919
-config/src/consensus_state_producer_receipt.c 787
+# 2026-08-28: TIGHTENED 988 -> 867. The on-disk bundle GENERATIONS half
+# (filename convention, newest-generation scan, keep-N retention rotation)
+# moved to config/src/bundle_exporter_generations.c. Still over the 800
+# ceiling; the export job + worker are the next seam.
+config/src/bundle_exporter.c 867
+# 2026-08-28: ENTRY REMOVED (was 919). The post-install derived-state
+# reconciliation moved to config/src/consensus_state_install_derived_state.c,
+# leaving the engine at 768 - back under the 800 ceiling, so the plain
+# ceiling governs it again and no baseline line is needed.
+# 2026-08-28: ENTRY REMOVED (was 787). The committed final-receipt row
+# (read cursor / write / exact-match compare) moved to
+# config/src/consensus_state_producer_receipt_final.c, leaving this file at
+# 667 - under the 800 ceiling, so no baseline line is needed.
 config/src/consensus_state_snapshot_install_activate.c 1169 # ADR-0008 (seed-floor declaration); reduced after descriptor binding
 app/services/src/header_sync_service.c 846
 app/controllers/src/event_agent_summary.c 853

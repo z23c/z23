@@ -13,6 +13,7 @@
 #include "platform/positioned_file.h"
 #include "platform/private_file.h"
 #include "services/rolling_anchor_service.h"
+#include "rolling_anchor_internal.h"
 #include "services/oracle_policy.h"
 #include "services/quorum_oracle_service.h"
 #include "services/seal_service.h"
@@ -99,11 +100,10 @@ static struct {
 static struct liveness_contract g_ra_contract;
 static _Atomic supervisor_child_id g_ra_supervisor_id = SUPERVISOR_INVALID_ID;
 
-static int ra_compile_time_end(void)
-{
-    if (g_sha3_windows_count == 0) return -1; // raw-return-ok:sentinel-no-compile-time-windows
-    return (int)(g_sha3_windows_count * SHA3_WINDOW_SIZE) - 1;
-}
+/* The state-free helpers this file calls — ra_compile_time_end,
+ * ra_file_digest, ra_snapshot_equal, ra_compute_window_hash, and
+ * ra_quorum_allows_commit — live in rolling_anchor_compute.c (declared in
+ * rolling_anchor_internal.h). None of them touch g_ra or its lock. */
 
 /* Caller holds g_ra.lock. Last committed runtime window's end height
  * (or compile-time end when no runtime windows are present). */
@@ -113,27 +113,6 @@ static int ra_runtime_end_locked(void)
     if (g_ra.count == 0) return compile_end;
     return g_ra.windows[g_ra.count - 1].start_height +
            (int)SHA3_WINDOW_SIZE - 1;
-}
-
-/* Compute the file-level SHA3 over the on-disk body (everything before
- * the trailing 32-byte digest). Caller passes the body bytes + length. */
-static void ra_file_digest(const uint8_t *body, size_t body_len,
-                            uint8_t out[32])
-{
-    sha3_256(body, body_len, out);
-}
-
-static bool ra_snapshot_equal(
-    const struct platform_positioned_file_snapshot *a,
-    const struct platform_positioned_file_snapshot *b)
-{
-    return a->size == b->size &&
-           a->modified_seconds == b->modified_seconds &&
-           a->modified_nanoseconds == b->modified_nanoseconds &&
-           a->changed_seconds == b->changed_seconds &&
-           a->changed_nanoseconds == b->changed_nanoseconds &&
-           a->volume == b->volume && a->file_low == b->file_low &&
-           a->file_high == b->file_high;
 }
 
 /* Write the in-memory ring to disk atomically. Caller holds lock. */
@@ -375,77 +354,6 @@ struct zcl_result rolling_anchor_init(const char *datadir,
         return ZCL_ERR(-2, "rolling_anchor_init: load failed (corrupt file wiped) datadir=%s",
                        datadir);
     return ZCL_OK;
-}
-
-/* Caller holds lock. Compute SHA3 over heights [start_h..start_h+999]
- * by reading each block from disk via active_chain. Returns true if
- * every block was read; false on any I/O failure. */
-static bool ra_compute_window_hash(struct main_state *ms,
-                                    const char *datadir,
-                                    int start_h,
-                                    uint8_t out_hash[32],
-                                    int *out_failure_height)
-{
-    *out_failure_height = -1;
-    if (!ms || !datadir || !datadir[0])
-        return false;
-
-    struct sha3_256_ctx ctx;
-    sha3_256_init(&ctx);
-
-    struct byte_stream s;
-    stream_init(&s, 4096);
-
-    bool ok = true;
-    for (int h = start_h; h < start_h + (int)SHA3_WINDOW_SIZE; h++) {
-        struct block_index *bi = active_chain_at(&ms->chain_active, h);
-        if (!bi || bi->nFile < 0 ||
-            !(bi->nStatus & BLOCK_HAVE_DATA)) {
-            *out_failure_height = h;
-            ok = false;
-            break;
-        }
-        struct block blk;
-        block_init(&blk);
-        if (!read_block_from_disk_index_pread(&blk, bi, datadir)) {
-            block_free(&blk);
-            *out_failure_height = h;
-            ok = false;
-            break;
-        }
-        s.size = 0;
-        s.read_pos = 0;
-        s.error = false;
-        if (!block_serialize(&blk, &s)) {
-            block_free(&blk);
-            *out_failure_height = h;
-            ok = false;
-            break;
-        }
-        sha3_256_write(&ctx, s.data, s.size);
-        block_free(&blk);
-    }
-    stream_free(&s);
-    if (ok) sha3_256_finalize(&ctx, out_hash);
-    return ok;
-}
-
-static bool ra_quorum_allows_commit(int height)
-{
-    struct quorum_oracle_result qr;
-    int present = 0;
-
-    if (!quorum_oracle_probe(height, &qr).ok)
-        return true;
-    for (int i = 0; i < QO_SRC_NUM; i++) {
-        if (qr.by_source[i].present && !qr.by_source[i].error &&
-            qr.by_source[i].hash_hex[0] != '\0')
-            present++;
-    }
-    if (present <= 1)
-        return true;
-    return qr.verdict == QO_VERDICT_QUORUM_MATCH &&
-           qr.agreeing_sources >= 2;
 }
 
 static bool ra_note_window_read_failure(int sealed_end,
