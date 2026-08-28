@@ -105,14 +105,6 @@ snapshot_deserialize_index_block|blk|block
 # result as an `if (found) { ... free ... }` gate.
 db_store_blob_find|out|db_store_blob
 
-# ── tools/corpus_census.c — offline census tool ─────────────────────────
-# def_parse_line(): field-count/shape refusal above the memset. Caller drops
-# the whole defs[] row on false without freeing it.
-def_parse_line|def|scope_def
-# dep_closure_bind(): size refusal above json_init(m). Both callers treat the
-# false as "measure this scope as unbound" and do not free m on that path.
-dep_closure_bind|m|scope_measure
-
 # ── lib/sim — deterministic simulator, no peer input ────────────────────
 # finish_block()/build_oversize_vtx build a byzantine block case into a
 # caller-declared struct; simnet_chain_capture_undo/store_entry build undo

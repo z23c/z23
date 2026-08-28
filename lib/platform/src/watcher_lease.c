@@ -10,6 +10,7 @@
 #include "platform/os_proc.h"
 #include "platform/positioned_file.h"
 #include "platform/rng.h"
+#include "base/hex.h"
 #include "base/safe_alloc.h"
 
 #include <stdio.h>
@@ -34,22 +35,6 @@ struct watcher_record {
     uint64_t root_volume, root_low, root_high;
     uint64_t image_volume, image_low, image_high, image_size;
 };
-
-static bool hex64(const char *s)
-{
-    return s && strlen(s) == 64 &&
-           strspn(s, "0123456789abcdef") == 64;
-}
-
-static void hex_bytes(const uint8_t bytes[32], char out[65])
-{
-    static const char digits[] = "0123456789abcdef";
-    for (size_t i = 0; i < 32; ++i) {
-        out[i * 2] = digits[bytes[i] >> 4];
-        out[i * 2 + 1] = digits[bytes[i] & 15];
-    }
-    out[64] = 0;
-}
 
 static bool file_identity(const char *path, uint64_t *volume, uint64_t *low,
                           uint64_t *high, uint64_t *size,
@@ -239,7 +224,10 @@ bool platform_watcher_launch_prepare(struct platform_watcher_launch *launch,
                                      const char *root, const char *image,
                                      const char hash[65])
 {
-    if (!launch || launch->inherited_read != UINTPTR_MAX || !hex64(hash)) return false;
+    uint8_t hash_bytes[32];
+    if (!launch || launch->inherited_read != UINTPTR_MAX ||
+        !zcl_hex_decode_lower(hash, hash_bytes, sizeof(hash_bytes)))
+        return false;
     struct watcher_record record = {0};
     uint8_t nonce[32];
     if (!platform_directory_canonical_real(root, record.root, sizeof(record.root)) ||
@@ -256,7 +244,8 @@ bool platform_watcher_launch_prepare(struct platform_watcher_launch *launch,
     if (!os_proc_pid_start_token(record.creator_pid,
                                  &record.creator_start_token))
         return false;
-    hex_bytes(nonce, record.nonce); memcpy(launch->nonce, record.nonce, 65);
+    zcl_hex_encode(nonce, sizeof(nonce), record.nonce);
+    memcpy(launch->nonce, record.nonce, 65);
 #if defined(_WIN32)
     SECURITY_ATTRIBUTES sa = {.nLength = sizeof(sa), .bInheritHandle = TRUE};
     HANDLE read_handle = NULL, write_handle = NULL, event = NULL;
@@ -333,8 +322,9 @@ bool platform_watcher_lease_accept(struct platform_watcher_lease *lease,
                                    const char *image, const char hash[65])
 {
     if (inherited == UINTPTR_MAX) return false;
+    uint8_t hash_bytes[32];
     if (!lease || lease->stop_native != UINTPTR_MAX || !root || !image ||
-        !hex64(hash)) {
+        !zcl_hex_decode_lower(hash, hash_bytes, sizeof(hash_bytes))) {
 #if defined(_WIN32)
         CloseHandle((HANDLE)inherited);
 #else
@@ -351,9 +341,12 @@ bool platform_watcher_lease_accept(struct platform_watcher_lease *lease,
     close((int)inherited);
 #endif
     char identity[WL_IDENTITY], canonical[WL_PATH], parent_image[WL_PATH];
+    uint8_t nonce_bytes[32];
     uint64_t rv, rl, rh, iv, il, ih, size;
     ok = ok && memcmp(record.magic, WL_MAGIC, sizeof(WL_MAGIC)) == 0 &&
-         hex64(record.nonce) && platform_current_identity(identity, sizeof(identity)) &&
+         zcl_hex_decode_lower(record.nonce, nonce_bytes,
+                              sizeof(nonce_bytes)) &&
+         platform_current_identity(identity, sizeof(identity)) &&
          strcmp(identity, record.identity) == 0 && parent_matches(&record) &&
          platform_directory_canonical_real(root, canonical, sizeof(canonical)) &&
          strcmp(canonical, record.root) == 0 &&
@@ -431,7 +424,9 @@ bool platform_watcher_lease_binding(
 
 bool platform_watcher_lease_signal_stop(const char nonce[65])
 {
-    if (!hex64(nonce)) return false;
+    uint8_t nonce_bytes[32];
+    if (!zcl_hex_decode_lower(nonce, nonce_bytes, sizeof(nonce_bytes)))
+        return false;
 #if defined(_WIN32)
     char name[320]; if (snprintf(name, sizeof(name), "Local\\z23-watch-stop-%s", nonce) <= 0) return false;
     HANDLE event = OpenEventA(EVENT_MODIFY_STATE, FALSE, name);
