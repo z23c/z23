@@ -7,6 +7,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <sqlite3.h>
+#include "platform/read_mapping.h"
 
 /* Contention-safe proven-authority read for the catchup walk. Defined in
  * node_db_catchup_proven.c; see its doc comment for the TRYLOCK contract.
@@ -15,10 +16,18 @@
 bool node_db_catchup_read_proven_authority(sqlite3 *progress_db,
                                            int32_t *applied_out);
 
-uint8_t *node_db_catchup_mmap_block_file_quiet(const char *datadir,
-                                               int file_num,
-                                               size_t *out_size,
-                                               int *out_errno);
+struct node_db_catchup_block_mapping {
+    struct platform_read_mapping mapping;
+    int fd;
+};
+
+void node_db_catchup_block_mapping_init(
+    struct node_db_catchup_block_mapping *block_mapping);
+bool node_db_catchup_block_mapping_open_quiet(
+    struct node_db_catchup_block_mapping *block_mapping,
+    const char *datadir, int file_num, int *out_errno);
+void node_db_catchup_block_mapping_close(
+    struct node_db_catchup_block_mapping *block_mapping);
 
 /* Sparse-prefix projection-cursor classifier. Defined in
  * node_db_catchup_sparse.c; see its doc comment for the contract. */

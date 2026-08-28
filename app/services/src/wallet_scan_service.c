@@ -21,6 +21,7 @@
 // -1 on error) so the Controller can return it verbatim.
 
 #include "services/wallet_scan_service.h"
+#include "platform/read_mapping.h"
 #include "platform/time_compat.h"
 #include "models/wallet_tx.h"
 #include "primitives/block.h"
@@ -35,7 +36,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -192,8 +192,9 @@ int wallet_scan_pass2_execute(struct node_db *ndb,
     int blocks_deserialized = 0;
     int found = 0;
     int cached_file = -1;
-    uint8_t *fdata = NULL;
-    size_t fsize = 0;
+    int cached_fd = -1;
+    struct platform_read_mapping cached_mapping;
+    platform_read_mapping_init(&cached_mapping);
 
     for (int h = start_height; h <= end_height; h++) {
         const struct block_index *pi = active_chain_at(chain, h);
@@ -204,30 +205,42 @@ int wallet_scan_pass2_execute(struct node_db *ndb,
         if (!file_has_match[pi->nFile]) continue;
 
         if (pi->nFile != cached_file) {
-            if (fdata) munmap(fdata, fsize);
+            platform_read_mapping_close(&cached_mapping);
+            if (cached_fd >= 0) {
+                close(cached_fd);
+                cached_fd = -1;
+            }
+            cached_file = -1;
             char path[512];
             snprintf(path, sizeof(path), "%s/blocks/blk%05d.dat",
                      datadir, pi->nFile);
             int fd = open(path, O_RDONLY);
-            if (fd < 0) { fdata = NULL; cached_file = -1; continue; }
+            if (fd < 0) continue;
             struct stat st;
             if (fstat(fd, &st) != 0) { close(fd); continue; }
-            fsize = (size_t)st.st_size;
-            fdata = mmap(NULL, fsize, PROT_READ, MAP_PRIVATE, fd, 0);
-            close(fd);
-            if (fdata == MAP_FAILED) {
-                fdata = NULL; cached_file = -1; continue;
+            if (st.st_size <= 0 ||
+                (uintmax_t)st.st_size > (uintmax_t)SIZE_MAX) {
+                close(fd);
+                continue;
             }
+            if (!platform_read_mapping_open(&cached_mapping, fd,
+                                            (size_t)st.st_size)) {
+                close(fd);
+                continue;
+            }
+            cached_fd = fd;
             cached_file = pi->nFile;
-            posix_madvise(fdata, fsize, POSIX_MADV_SEQUENTIAL);
+            platform_read_mapping_advise_sequential(&cached_mapping);
         }
-        if (!fdata || pi->nDataPos >= fsize) continue;
+        if (!cached_mapping.data ||
+            pi->nDataPos >= cached_mapping.size) continue;
 
         struct block blk;
         block_init(&blk);
-        size_t rem = fsize - pi->nDataPos;
+        size_t rem = cached_mapping.size - pi->nDataPos;
         struct byte_stream bs;
-        stream_init_from_data(&bs, fdata + pi->nDataPos, rem);
+        stream_init_from_data(&bs,
+                              cached_mapping.data + pi->nDataPos, rem);
         if (!block_deserialize(&blk, &bs)) {
             block_free(&blk);
             continue;
@@ -239,7 +252,9 @@ int wallet_scan_pass2_execute(struct node_db *ndb,
 
         block_free(&blk);
     }
-    if (fdata) munmap(fdata, fsize);
+    platform_read_mapping_close(&cached_mapping);
+    if (cached_fd >= 0)
+        close(cached_fd);
 
     platform_time_monotonic_timespec(&ts_p2);
     double p2_ms = (double)(ts_p2.tv_sec - ts_p1->tv_sec) * 1000.0 +

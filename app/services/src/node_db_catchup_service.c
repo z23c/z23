@@ -71,10 +71,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <unistd.h>
 #include <stdatomic.h>
 #include <pthread.h>
 #include <signal.h>
@@ -381,10 +377,11 @@ int node_db_catchup_service_run(struct node_db *ndb,
     bool busy_snapshot = false;
     int64_t t_start = (int64_t)platform_time_wall_time_t();
 
-    /* mmap cache */
+    /* Read-only mapping cache.  The cache owns the source descriptor for the
+     * complete mapping lifetime, as required on Windows and POSIX. */
     int cached_file = -1;
-    uint8_t *cached_data = NULL;
-    size_t cached_size = 0;
+    struct node_db_catchup_block_mapping cached_mapping;
+    node_db_catchup_block_mapping_init(&cached_mapping);
 
     /* Initialize Sapling commitment tree for catchup */
     struct incremental_merkle_tree sapling_tree;
@@ -472,26 +469,26 @@ int node_db_catchup_service_run(struct node_db *ndb,
             continue;
         }
 
-        /* mmap new file if needed */
+        /* Map a new file if needed. */
         if (pindex->nFile != cached_file) {
-            if (cached_data) munmap(cached_data, cached_size);
-            int mmap_errno = 0;
-            cached_data = node_db_catchup_mmap_block_file_quiet(
-                datadir, pindex->nFile, &cached_size, &mmap_errno);
-            cached_file = cached_data ? pindex->nFile : -1;
-            if (!cached_data) {
+            node_db_catchup_block_mapping_close(&cached_mapping);
+            int mapping_errno = 0;
+            bool mapped = node_db_catchup_block_mapping_open_quiet(
+                &cached_mapping, datadir, pindex->nFile, &mapping_errno);
+            cached_file = mapped ? pindex->nFile : -1;
+            if (!mapped) {
                 missing_file_holes++;
                 if (first_missing_file_h < 0) {
                     first_missing_file_h = h;
                     first_missing_file_num = pindex->nFile;
                 }
-                if (mmap_errno != ENOENT && mmap_errno != ENOTDIR) {
+                if (mapping_errno != ENOENT && mapping_errno != ENOTDIR) {
                     suspicious_lean_holes++;
                     if (suspicious_lean_holes <= 3)
                         LOG_WARN("catchup",
-                                 "catchup: mmap failed for blk%05d.dat "
+                                 "catchup: mapping failed for blk%05d.dat "
                                  "(errno=%d) — skipping its blocks",
-                                 pindex->nFile, mmap_errno);
+                                 pindex->nFile, mapping_errno);
                 }
                 skip_file = pindex->nFile;
                 if (++lean_holes == 1) first_hole_h = h;
@@ -499,7 +496,7 @@ int node_db_catchup_service_run(struct node_db *ndb,
             }
         }
 
-        if (pindex->nDataPos >= cached_size) {
+        if ((uint64_t)pindex->nDataPos >= cached_mapping.mapping.size) {
             if (++lean_holes == 1) first_hole_h = h;
             suspicious_lean_holes++;
             if (lean_holes <= 3)
@@ -511,9 +508,11 @@ int node_db_catchup_service_run(struct node_db *ndb,
         struct block blk;
         block_init(&blk);
 
-        size_t remaining = cached_size - pindex->nDataPos;
+        size_t remaining = cached_mapping.mapping.size -
+                           (size_t)pindex->nDataPos;
         struct byte_stream s;
-        stream_init_from_data(&s, cached_data + pindex->nDataPos,
+        stream_init_from_data(&s, cached_mapping.mapping.data +
+                                  (size_t)pindex->nDataPos,
                               remaining);
         if (!block_deserialize(&blk, &s)) {
             block_free(&blk);
@@ -693,7 +692,7 @@ int node_db_catchup_service_run(struct node_db *ndb,
         }
     }
 
-    if (cached_data) munmap(cached_data, cached_size);
+    node_db_catchup_block_mapping_close(&cached_mapping);
 
     /* Capture the snapshot class of the first write failure BEFORE any
      * rollback (a successful ROLLBACK would clobber the handle errcode).

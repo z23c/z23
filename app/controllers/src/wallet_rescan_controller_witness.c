@@ -7,6 +7,64 @@
 
 #include "controllers/wallet_rescan_controller_internal.h"
 
+struct wallet_rescan_block_mapping {
+    int file_num;
+    int fd;
+    struct platform_read_mapping view;
+};
+
+static void wallet_rescan_block_mapping_init(
+    struct wallet_rescan_block_mapping *mapping)
+{
+    mapping->file_num = -1;
+    mapping->fd = -1;
+    platform_read_mapping_init(&mapping->view);
+}
+
+static void wallet_rescan_block_mapping_close(
+    struct wallet_rescan_block_mapping *mapping)
+{
+    platform_read_mapping_close(&mapping->view);
+    if (mapping->fd >= 0)
+        close(mapping->fd);
+    wallet_rescan_block_mapping_init(mapping);
+}
+
+static bool wallet_rescan_block_mapping_open(
+    struct wallet_rescan_block_mapping *mapping, const char *datadir,
+    int file_num)
+{
+    wallet_rescan_block_mapping_close(mapping);
+
+    char path[4096];
+    int path_len = snprintf(path, sizeof(path), "%s/blocks/blk%05d.dat",
+                            datadir, file_num);
+    if (path_len < 0 || (size_t)path_len >= sizeof(path))
+        return false;
+
+    int flags = O_RDONLY;
+#ifdef O_BINARY
+    flags |= O_BINARY;
+#endif
+    int fd = open(path, flags);
+    if (fd < 0)
+        return false;
+
+    struct stat fst;
+    if (fstat(fd, &fst) != 0 || fst.st_size <= 0 ||
+        (uintmax_t)fst.st_size > (uintmax_t)SIZE_MAX ||
+        !platform_read_mapping_open(&mapping->view, fd,
+                                    (size_t)fst.st_size)) {
+        close(fd);
+        return false;
+    }
+
+    mapping->fd = fd;
+    mapping->file_num = file_num;
+    platform_read_mapping_advise_sequential(&mapping->view);
+    return true;
+}
+
 #include "storage/anchor_kv.h"
 #include "storage/progress_store.h"
 
@@ -275,10 +333,10 @@ bool rpc_rescanwitnesses(const struct json_value *params, bool help,
         (void)snprintf(block_datadir, sizeof(block_datadir), "%s",
                        ctx->datadir);
 
-    /* mmap cache */
-    int cached_file = -1;
-    uint8_t *cached_data = NULL;
-    size_t cached_size = 0;
+    /* Keep the descriptor alive with its view.  Windows file mappings do not
+     * inherit POSIX's close-after-mmap lifetime semantics. */
+    struct wallet_rescan_block_mapping block_mapping;
+    wallet_rescan_block_mapping_init(&block_mapping);
 
     int64_t t_start = (int64_t)platform_time_wall_time_t();
     int blocks_scanned = 0;
@@ -316,31 +374,14 @@ bool rpc_rescanwitnesses(const struct json_value *params, bool help,
         if (!pindex->phashBlock || pindex->nFile < 0)
             continue;
 
-        /* mmap block file */
-        if (pindex->nFile != cached_file) {
-            if (cached_data) munmap(cached_data, cached_size);
-            char path[sizeof(block_datadir) + 32];
-            snprintf(path, sizeof(path), "%s/blocks/blk%05d.dat",
-                     block_datadir, pindex->nFile);
-            int fd = open(path, O_RDONLY);
-            if (fd < 0) { cached_data = NULL; cached_file = -1; continue; }
-            struct stat fst;
-            if (fstat(fd, &fst) != 0) { close(fd); continue; }
-            cached_size = (size_t)fst.st_size;
-            cached_data = mmap(NULL, cached_size,
-                               PROT_READ, MAP_PRIVATE, fd, 0);
-            close(fd);
-            if (cached_data == MAP_FAILED) {
-                cached_data = NULL; cached_file = -1; continue;
-            }
-            /* Advise kernel: sequential read, prefetch entire file */
-            posix_madvise(cached_data, cached_size,
-                          POSIX_MADV_SEQUENTIAL);
-            posix_madvise(cached_data, cached_size,
-                          POSIX_MADV_WILLNEED);
-            cached_file = pindex->nFile;
-        }
-        if (!cached_data || pindex->nDataPos >= cached_size) continue;
+        if (pindex->nFile != block_mapping.file_num &&
+            !wallet_rescan_block_mapping_open(&block_mapping, block_datadir,
+                                              pindex->nFile))
+            continue;
+        if (!block_mapping.view.data ||
+            (uintmax_t)pindex->nDataPos >=
+                (uintmax_t)block_mapping.view.size)
+            continue;
 
         /* A repeated header root proves this block did not change the Sapling
          * tree, so the body is irrelevant to witness replay. This skips the
@@ -361,10 +402,11 @@ bool rpc_rescanwitnesses(const struct json_value *params, bool help,
          * former fixed 4096-entry fast-scan buffer, this cannot silently drop
          * commitments from a valid high-output block. The final header-root
          * comparison below remains the authority before persistence. */
-        size_t block_data_len = cached_size - pindex->nDataPos;
+        size_t data_pos = (size_t)pindex->nDataPos;
+        size_t block_data_len = block_mapping.view.size - data_pos;
         struct byte_stream body_stream;
         stream_init_from_data(&body_stream,
-                              cached_data + pindex->nDataPos,
+                              block_mapping.view.data + data_pos,
                               block_data_len);
         struct block block;
         block_init(&block);
@@ -410,7 +452,7 @@ bool rpc_rescanwitnesses(const struct json_value *params, bool help,
         }
     }
 
-    if (cached_data) munmap(cached_data, cached_size);
+    wallet_rescan_block_mapping_close(&block_mapping);
 
     /* Binary search for divergence point: check tree root at last checkpoint
      * that passed (3036968) vs block header. We know tree matches there.

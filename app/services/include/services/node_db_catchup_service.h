@@ -49,11 +49,6 @@ bool node_db_catchup_tail_fold_in_progress(int64_t canonical_target,
                                            int hstar);
 
 #ifdef ZCL_TESTING
-#include <stddef.h>
-uint8_t *node_db_catchup_test_mmap_block_file_quiet(const char *datadir,
-                                                    int file_num,
-                                                    size_t *out_size,
-                                                    int *out_errno);
 int node_db_catchup_test_sparse_prefix_target(int indexed,
                                               int total,
                                               int lean_holes,
