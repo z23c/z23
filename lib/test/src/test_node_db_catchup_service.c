@@ -17,7 +17,6 @@
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -40,10 +39,13 @@ int test_node_db_catchup_service(void)
 
     size_t sz = 99;
     int err = 0;
-    uint8_t *data = node_db_catchup_test_mmap_block_file_quiet(
-        dir, 7, &sz, &err);
+    void *mapping = NULL;
+    const uint8_t *data = NULL;
+    bool opened = node_db_catchup_test_block_mapping_open(
+        dir, 7, &mapping, &data, &sz, &err);
     NDC_CHECK("missing block file is quiet ENOENT",
-              data == NULL && sz == 0 && err == ENOENT);
+              !opened && mapping == NULL && data == NULL &&
+              sz == 0 && err == ENOENT);
 
     char path[512];
     snprintf(path, sizeof(path), "%s/blk00008.dat", blocks);
@@ -51,9 +53,11 @@ int test_node_db_catchup_service(void)
     if (fd >= 0) close(fd);
     sz = 99;
     err = 0;
-    data = node_db_catchup_test_mmap_block_file_quiet(dir, 8, &sz, &err);
+    opened = node_db_catchup_test_block_mapping_open(
+        dir, 8, &mapping, &data, &sz, &err);
     NDC_CHECK("empty block file is quiet EINVAL",
-              data == NULL && sz == 0 && err == EINVAL);
+              !opened && mapping == NULL && data == NULL &&
+              sz == 0 && err == EINVAL);
 
     snprintf(path, sizeof(path), "%s/blk00009.dat", blocks);
     fd = open(path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
@@ -63,10 +67,12 @@ int test_node_db_catchup_service(void)
     if (fd >= 0) close(fd);
     sz = 0;
     err = 0;
-    data = node_db_catchup_test_mmap_block_file_quiet(dir, 9, &sz, &err);
-    bool mapped = wrote && data != NULL && sz == sizeof(bytes) && err == 0 &&
+    opened = node_db_catchup_test_block_mapping_open(
+        dir, 9, &mapping, &data, &sz, &err);
+    bool mapped = wrote && opened && mapping != NULL && data != NULL &&
+                  sz == sizeof(bytes) && err == 0 &&
                   memcmp(data, bytes, sizeof(bytes)) == 0;
-    if (data) munmap(data, sz);
+    node_db_catchup_test_block_mapping_close(mapping);
     NDC_CHECK("valid block file maps", mapped);
 
     NDC_CHECK("header target defers catchup for a two-block canonical gap",

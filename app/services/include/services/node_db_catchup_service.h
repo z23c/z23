@@ -22,6 +22,7 @@
 #define ZCL_SERVICES_NODE_DB_CATCHUP_SERVICE_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 struct node_db;
@@ -49,6 +50,11 @@ bool node_db_catchup_tail_fold_in_progress(int64_t canonical_target,
                                            int hstar);
 
 #ifdef ZCL_TESTING
+bool node_db_catchup_test_block_mapping_open(
+    const char *datadir, int file_num, void **mapping_out,
+    const uint8_t **data_out, size_t *size_out, int *error_out);
+void node_db_catchup_test_block_mapping_close(void *mapping);
+
 int node_db_catchup_test_sparse_prefix_target(int indexed,
                                               int total,
                                               int lean_holes,
