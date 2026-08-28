@@ -71,7 +71,10 @@ static bool dbm_wal_checkpoint(void *self, struct db_maintenance_wal_outcome *ou
     if (out) {
         out->log_frames = -1;
         out->ckpt_frames = -1;
+        out->rc = SQLITE_MISUSE;
+        out->truncate_rc = -1;
         out->busy = false;
+        out->truncated = false;
     }
     if (!c || !c->db) {
         dbm_set_err(err, errsz, "db_maint: null or closed db");
@@ -83,22 +86,31 @@ static bool dbm_wal_checkpoint(void *self, struct db_maintenance_wal_outcome *ou
      * numbers are always zero — so it can say it succeeded but never how much
      * it reclaimed. PASSIVE returns the real pair and does the frame-moving
      * work; the TRUNCATE that follows only returns the .wal file's blocks to
-     * the filesystem, and losing a lock race on THAT step is not a failed
-     * checkpoint. */
+     * the filesystem. Losing a lock race on that step is nonfatal after the
+     * frames moved; I/O, full-disk, corruption, and misuse errors are not. */
     int log_frames = -1, ckpt_frames = -1;
-    int rc = sqlite3_wal_checkpoint_v2(c->db, NULL,
-                                       SQLITE_CHECKPOINT_PASSIVE,
-                                       &log_frames, &ckpt_frames);
-    if (rc == SQLITE_OK)
-        (void)sqlite3_wal_checkpoint_v2(c->db, NULL,
-                                        SQLITE_CHECKPOINT_TRUNCATE,
-                                        NULL, NULL);
+    int passive_rc = sqlite3_wal_checkpoint_v2(c->db, NULL,
+                                                SQLITE_CHECKPOINT_PASSIVE,
+                                                &log_frames, &ckpt_frames);
+    int truncate_rc = -1;
+    if (passive_rc == SQLITE_OK)
+        truncate_rc = sqlite3_wal_checkpoint_v2(c->db, NULL,
+                                                 SQLITE_CHECKPOINT_TRUNCATE,
+                                                 NULL, NULL);
+    bool truncate_hard_failure =
+        truncate_rc != -1 && truncate_rc != SQLITE_OK &&
+        truncate_rc != SQLITE_BUSY && truncate_rc != SQLITE_LOCKED;
+    int effective_rc = truncate_hard_failure ? truncate_rc : passive_rc;
     if (out) {
         out->log_frames = log_frames;
         out->ckpt_frames = ckpt_frames;
-        out->busy = (rc == SQLITE_BUSY || rc == SQLITE_LOCKED);
+        out->rc = effective_rc;
+        out->truncate_rc = truncate_rc;
+        out->busy = (passive_rc == SQLITE_BUSY ||
+                     passive_rc == SQLITE_LOCKED);
+        out->truncated = truncate_rc == SQLITE_OK;
     }
-    if (rc != SQLITE_OK) {
+    if (effective_rc != SQLITE_OK) {
         const char *msg = sqlite3_errmsg(c->db);
         dbm_set_err(err, errsz, msg && msg[0] ? msg : "wal checkpoint failed");
         return false;

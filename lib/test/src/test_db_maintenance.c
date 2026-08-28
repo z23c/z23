@@ -132,6 +132,17 @@ int test_db_maintenance(void)
     printf("\n=== db_maintenance tests ===\n");
     int failures = 0;
 
+    {
+        struct db_maintenance_schedule sched;
+        db_maintenance_schedule_wal_cap_only(&sched);
+        DBM_CHECK("dbm: boot schedule leaves periodic WAL to DB service",
+                  sched.wal_checkpoint_minutes < 0);
+        DBM_CHECK("dbm: boot schedule exempts analyze and vacuum",
+                  sched.analyze_hours < 0 && sched.vacuum_days < 0);
+        DBM_CHECK("dbm: boot schedule keeps the WAL byte cap armed",
+                  sched.wal_max_bytes == 0);
+    }
+
     /* ── 1. Each op succeeds via run_now ──────────────────── */
     {
         dbm_install_observer();

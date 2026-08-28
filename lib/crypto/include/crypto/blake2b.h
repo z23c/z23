@@ -106,7 +106,7 @@ enum blake2b_batch_impl {
 int equihash_blake2b_batch_select_impl(enum blake2b_batch_impl which);
 
 /* Name of the tier currently installed ("AVX-512 (8-way)", "AVX2 (4-way)",
- * or "scalar"). */
+ * "NEON (4-way)", or "scalar"). */
 const char *equihash_blake2b_batch_implementation(void);
 
 #endif

@@ -586,8 +586,8 @@ static void bench_equihash_blake2b(void)
         .ntiers = 3,
     };
     b.tier[0].name = "generic (scalar)";
-    b.tier[1].name = "AVX2 (4-way)";
-    b.tier[2].name = "AVX-512 (8-way)";
+    b.tier[1].name = "4-way SIMD";
+    b.tier[2].name = "8-way SIMD";
 
     struct blake2b_ctx base;
     eh_base_state(&base);
@@ -611,6 +611,7 @@ static void bench_equihash_blake2b(void)
         int got = equihash_blake2b_batch_select_impl(want[i]);
         b.tier[i].available = (got == expect[i]);
         if (!b.tier[i].available) continue;
+        b.tier[i].name = equihash_blake2b_batch_implementation();
 
         for (int bidx = 0; bidx < EH_BATCHES; bidx++) {
             uint32_t idx[EH_BATCH];

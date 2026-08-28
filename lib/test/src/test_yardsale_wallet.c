@@ -264,18 +264,6 @@ static int yw_test_buyer_begin(const struct zswap_quote_v1 *ad,
                                      now_unix, wire_out, wire_cap, wire_len);
 }
 
-/* The fake outcome the ceremony port reports for every root: 1
- * (completed) keeps the historical stay-committed replay; tests flip it
- * to 2 (failed) to drive the reopen path, or -1 (unknown) for the
- * conservative default. */
-static int yw_fake_buy_outcome = 1;
-
-static int yw_test_buy_outcome(const uint8_t quote_root[32])
-{
-    (void)quote_root;
-    return yw_fake_buy_outcome;
-}
-
 static void yw_reset_all(void)
 {
     static const struct yardsale_wallet_ceremony_port port = {
@@ -286,10 +274,8 @@ static void yw_reset_all(void)
         .pending_count = yardsale_pending_count,
         .buyer_begin = yw_test_buyer_begin,
         .buyer_error_string = yardsale_error_string,
-        .buy_outcome = yw_test_buy_outcome,
     };
     yardsale_wallet_set_ceremony_port(&port);
-    yw_fake_buy_outcome = 1;
     zswap_yardsale_reset();
     yardsale_ceremony_reset();
     yardsale_seller_profile_clear();
@@ -786,49 +772,6 @@ int test_yardsale_wallet(void)
                  yardsale_pending_count(YW_NOW) == 1);
         json_free(&replay);
 
-        /* ── buy: a ceremony-FAILED replay reopens and re-arms ──────
-         * Production records FAILED only after the pending buy was
-         * consumed by a refused partial; mirror that here by clearing
-         * the stale pending first, then reporting FAILED from the port. */
-        yardsale_ceremony_reset();
-        YW_CHECK("buy commit: stale pending cleared for the failed case",
-                 yardsale_pending_count(YW_NOW) == 0);
-        yw_fake_buy_outcome = 2;
-        struct json_value failed_replay;
-        json_init(&failed_replay);
-        bool rearmed = yardsale_wallet_buy(&buyer_w, &ndb, buy_root, true,
-                                           YW_NOW, &failed_replay) ==
-            YARDSALE_WALLET_OK;
-        YW_CHECK("buy commit: failed-ceremony replay reopens and re-arms",
-                 rearmed &&
-                 json_get_bool(json_get(&failed_replay, "committed")) &&
-                 !json_get_bool(json_get(&failed_replay,
-                                         "idempotent_replay")) &&
-                 flood.count == 2 &&
-                 yardsale_pending_count(YW_NOW) == 1);
-        json_free(&failed_replay);
-        struct db_yardsale_plan rearmed_row;
-        YW_CHECK("buy commit: re-armed row is COMMITTED/begun again",
-                 db_yardsale_plan_find(&ndb, buy_plan_root, &rearmed_row) &&
-                 strcmp(rearmed_row.state,
-                        YARDSALE_PLAN_STATE_COMMITTED) == 0 &&
-                 strcmp(rearmed_row.result, "begun") == 0);
-
-        /* An UNKNOWN outcome keeps the conservative committed replay. */
-        yardsale_ceremony_reset();
-        yw_fake_buy_outcome = -1;
-        struct json_value unknown_replay;
-        json_init(&unknown_replay);
-        YW_CHECK("buy commit: unknown outcome stays committed",
-                 yardsale_wallet_buy(&buyer_w, &ndb, buy_root, true,
-                                     YW_NOW, &unknown_replay) ==
-                     YARDSALE_WALLET_OK &&
-                 json_get_bool(json_get(&unknown_replay,
-                                        "idempotent_replay")) &&
-                 flood.count == 2);
-        json_free(&unknown_replay);
-        yw_fake_buy_outcome = 1;
-
         /* ── buy: commit after plan expiry refuses ──────────────── */
         struct zswap_quote_v1 ad3;
         uint8_t ad3_root[32];
@@ -855,6 +798,45 @@ int test_yardsale_wallet(void)
                  code3 && strcmp(code3, "PLAN_EXPIRED") == 0 &&
                  flood3.count == 0);
         json_free(&late);
+        yardsale_ceremony_set_flood(yw_flood_fn, &flood);
+
+        /* A durable ARMING claim is exclusive. A second confirmation must
+         * refuse before key access or any outbound accept. */
+        struct zswap_quote_v1 claim_ad;
+        uint8_t claim_root[32];
+        bool have_claim = yw_make_ad(&claim_ad, token_txid,
+                                     YW_TOKEN_SUPPLY, YW_ZCL_PRICE,
+                                     0x010203040506070fULL) &&
+                          yw_ingest_ad(&claim_ad, claim_root);
+        struct json_value claim_plan;
+        json_init(&claim_plan);
+        bool planned_claim = have_claim && yardsale_wallet_buy(
+            &buyer_w, &ndb, claim_root, false, YW_NOW,
+            &claim_plan) == YARDSALE_WALLET_OK;
+        const char *claim_plan_root =
+            json_get_str(json_get(&claim_plan, "plan_root"));
+        struct db_yardsale_plan claimed_row;
+        bool found_claim = claim_plan_root &&
+            db_yardsale_plan_find(&ndb, claim_plan_root, &claimed_row);
+        enum db_yardsale_plan_claim_result claim_result = found_claim
+            ? db_yardsale_plan_claim(&ndb, &claimed_row, YW_NOW)
+            : DB_YARDSALE_PLAN_CLAIM_ERROR;
+        json_free(&claim_plan);
+        struct yw_flood_capture claim_flood = { 0 };
+        yardsale_ceremony_set_flood(yw_flood_fn, &claim_flood);
+        struct json_value claim_retry;
+        json_init(&claim_retry);
+        enum yardsale_wallet_status claim_status = yardsale_wallet_buy(
+            &buyer_w, &ndb, claim_root, true, YW_NOW, &claim_retry);
+        const char *claim_code =
+            json_get_str(json_get(&claim_retry, "code"));
+        YW_CHECK("buy: an ARMING plan excludes a second confirmation",
+                 planned_claim &&
+                 claim_result == DB_YARDSALE_PLAN_CLAIMED &&
+                 claim_status == YARDSALE_WALLET_ERR_PLAN_CONFLICT &&
+                 claim_code && strcmp(claim_code, "PLAN_CONFLICT") == 0 &&
+                 claim_flood.count == 0);
+        json_free(&claim_retry);
         yardsale_ceremony_set_flood(yw_flood_fn, &flood);
     }
 

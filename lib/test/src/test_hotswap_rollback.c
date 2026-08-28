@@ -67,6 +67,21 @@
  *   - a rollback that leaked the descriptor it dup()ed fails the fd census.
  */
 
+#if !defined(__linux__)
+
+#include <stdio.h>
+
+int test_hotswap_rollback(void);
+int test_hotswap_rollback(void)
+{
+    printf("\n=== hot-swap rollback platform contract ===\n");
+    printf("hotswap_rollback: PASS platform=non-linux "
+           "dynamic_rollback=unsupported fixture_required=false\n");
+    return 0;
+}
+
+#else
+
 #include "test/test_helpers.h"
 
 #include "hotswap/hotswap.h"
@@ -584,3 +599,5 @@ int test_hotswap_rollback(void)
     printf("=== hotswap_rollback: %d failures ===\n", failures);
     return failures;
 }
+
+#endif

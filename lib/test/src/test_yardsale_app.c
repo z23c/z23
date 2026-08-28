@@ -18,6 +18,7 @@
 
 #include "base/hex.h"
 #include "base/result.h"
+#include "base/safe_alloc.h"
 #include "chain/chainparams.h"
 #include "config/db_service.h"
 #include "config/runtime.h"
@@ -29,13 +30,15 @@
 #include "keys/key_io.h"
 #include "keys/pubkey.h"
 #include "models/database.h"
+#include "models/tx_index.h"
 #include "models/yardsale_plan.h"
+#include "models/zslp_ledger.h"
+#include "models/zslp_validity.h"
 #include "net/onion_service.h"
 #include "platform/time_compat.h"
-#include "primitives/transaction.h"
 #include "script/standard.h"
-#include "services/yardsale_prevout_service.h"
 #include "sim/simnet.h"
+#include "services/yardsale_prevout_service.h"
 #include "support/cleanse.h"
 #include "znam/znam.h"
 #include "zslp/slp.h"
@@ -43,6 +46,7 @@
 #include "zswap/zswap_ceremony.h"
 #include "zswap/zswap_quote.h"
 #include "zswap/zswap_yardsale.h"
+#include "validation/main_state.h"
 
 #include <sqlite3.h>
 #include <stdio.h>
@@ -255,22 +259,280 @@ static bool ysa_prevout_arm(const struct zswap_quote_v1 *ad,
 
 static struct zcl_result ysa_prevout_fetch_fn(void *ctx,
                                               const uint8_t txid[32],
+                                              uint32_t vout,
+                                              const uint8_t token_id[32],
+                                              uint64_t token_amount,
                                               struct transaction *out)
 {
     (void)ctx;
-    if (!out)
-        return ZCL_ERR(-1, "fake: no output transaction");
-    /* Same out-parameter contract as the real service (see the typedef in
-     * controllers/yardsale_controller.h): construct BEFORE the first
-     * refusal so the caller's transaction_free() is safe on every path,
-     * and never free what the caller handed in. */
-    transaction_init(out);
-    if (!ysa_prevout_serve ||
+    (void)vout;
+    (void)token_id;
+    (void)token_amount;
+    if (!ysa_prevout_serve || !out ||
         memcmp(txid, ysa_prevout_tx.hash.data, 32) != 0)
         return ZCL_ERR(-1, "fake: no confirmed body for this txid");
+    transaction_free(out);
+    transaction_init(out);
     if (!transaction_copy(out, &ysa_prevout_tx))
         return ZCL_ERR(-2, "fake: body copy failed");
     return ZCL_OK;
+}
+
+/* ── Production strict-prevout service ───────────────────────────── */
+
+struct ysa_prevout_service_fixture {
+    char dir[256];
+    struct node_db ndb;
+    struct main_state state;
+    struct block_index canonical;
+    struct block_index replacement;
+    struct block body;
+    struct yardsale_prevout_view view;
+    uint8_t token_id[32];
+    uint64_t amount;
+    bool reorg_after_read;
+    bool fail_result_copy;
+    bool dir_ready;
+    bool db_ready;
+    bool state_ready;
+};
+
+static void ysa_prevout_service_fixture_free(
+    struct ysa_prevout_service_fixture *fx);
+
+static bool ysa_prevout_service_read(struct block *out,
+                                     const struct block_index *index,
+                                     const char *datadir, void *ctx)
+{
+    struct ysa_prevout_service_fixture *fx = ctx;
+    (void)datadir;
+    if (!fx || index != &fx->canonical || !block_clone(out, &fx->body))
+        return false;
+    if (fx->reorg_after_read) {
+        zcl_mutex_lock(&fx->state.cs_main);
+        bool moved = active_chain_install_tip_slot(&fx->state.chain_active,
+                                                    &fx->replacement);
+        zcl_mutex_unlock(&fx->state.cs_main);
+        if (!moved)
+            return false;
+    }
+    if (fx->fail_result_copy)
+        zcl_alloc_fault_fail_next("tx_vin");
+    return true;
+}
+
+static bool ysa_prevout_service_tx(struct transaction *tx, uint64_t amount)
+{
+    transaction_init(tx);
+    if (!transaction_alloc(tx, 1, 2))
+        return false;
+    memset(tx->vin[0].prevout.hash.data, 0x91, 32);
+    tx->vin[0].prevout.n = 0;
+    tx->vin[0].sequence = UINT32_MAX;
+    uint8_t opret[256];
+    size_t opret_len = slp_build_genesis(opret, sizeof(opret), "YSA", "YSA",
+                                         "", NULL, 0, 0, amount);
+    if (opret_len == 0 ||
+        opret_len > sizeof(tx->vout[0].script_pub_key.data)) {
+        transaction_free(tx);
+        return false;
+    }
+    tx->vout[0].script_pub_key.size = opret_len;
+    memcpy(tx->vout[0].script_pub_key.data, opret, opret_len);
+    tx->vout[1].value = YSA_SELLER_INPUT_VALUE;
+    tx->vout[1].script_pub_key.size = 1;
+    tx->vout[1].script_pub_key.data[0] = 0x51;
+    transaction_compute_hash(tx);
+    return true;
+}
+
+static bool ysa_prevout_service_fixture_init(
+    struct ysa_prevout_service_fixture *fx, const char *case_name,
+    bool strict_valid, bool projection_current, bool spent,
+    bool locator_mismatch)
+{
+    memset(fx, 0, sizeof(*fx));
+    test_make_tmpdir(fx->dir, sizeof(fx->dir), "yardsale_prevout", case_name);
+    fx->dir_ready = fx->dir[0] != '\0';
+    char dbpath[320];
+    snprintf(dbpath, sizeof(dbpath), "%s/node.db", fx->dir);
+    if (!node_db_open(&fx->ndb, dbpath))
+        goto fail;
+    fx->db_ready = true;
+    main_state_init(&fx->state);
+    fx->state_ready = true;
+    block_init(&fx->body);
+    fx->amount = YSA_TOKEN_AMOUNT;
+
+    struct transaction token_tx;
+    if (!ysa_prevout_service_tx(&token_tx, fx->amount))
+        goto fail;
+    memcpy(fx->token_id, token_tx.hash.data, 32);
+    fx->body.vtx = zcl_calloc(1, sizeof(*fx->body.vtx),
+                              "yardsale.prevout.test.block");
+    if (!fx->body.vtx || !transaction_copy(&fx->body.vtx[0], &token_tx)) {
+        transaction_free(&token_tx);
+        goto fail;
+    }
+    fx->body.num_vtx = 1;
+    fx->body.header.nTime = 1;
+    fx->body.header.nBits = 1;
+
+    struct uint256 body_hash;
+    block_header_get_hash(&fx->body.header, &body_hash);
+    block_index_init(&fx->canonical);
+    fx->canonical.nHeight = 0;
+    fx->canonical.hashBlock = body_hash;
+    fx->canonical.phashBlock = &fx->canonical.hashBlock;
+    block_index_init(&fx->replacement);
+    fx->replacement.nHeight = 0;
+    fx->replacement.hashBlock = body_hash;
+    fx->replacement.hashBlock.data[0] ^= 0x80;
+    fx->replacement.phashBlock = &fx->replacement.hashBlock;
+    if (!active_chain_install_tip_slot(&fx->state.chain_active,
+                                       &fx->canonical)) {
+        transaction_free(&token_tx);
+        goto fail;
+    }
+
+    struct db_tx_index row;
+    memset(&row, 0, sizeof(row));
+    memcpy(row.txid, token_tx.hash.data, 32);
+    memcpy(row.block_hash, locator_mismatch ? fx->replacement.hashBlock.data
+                                            : body_hash.data, 32);
+    row.block_height = 0;
+    row.tx_index = 0;
+    row.file_num = 0;
+    row.file_pos = 0;
+    bool ok = db_tx_save(&fx->ndb, &row);
+    if (strict_valid) {
+        struct slp_message msg;
+        ok = ok && slp_parse(token_tx.vout[0].script_pub_key.data,
+                             token_tx.vout[0].script_pub_key.size, &msg) &&
+            zslp_validity_apply_live(&fx->ndb, &token_tx, &msg, 0);
+    }
+    uint8_t digest[32] = {0};
+    ok = ok && zslp_ledger_set_cursor(&fx->ndb,
+                                      projection_current ? 0 : -1, digest);
+    if (ok && spent) {
+        uint8_t spender[32];
+        memset(spender, 0xa5, sizeof(spender));
+        ok = zslp_ledger_mark_valid_spent(&fx->ndb, token_tx.hash.data, 1,
+                                          spender, 1);
+    }
+    transaction_free(&token_tx);
+    fx->view = (struct yardsale_prevout_view) {
+        .state = &fx->state,
+        .node_db = &fx->ndb,
+        .datadir = fx->dir,
+        .read_block = ysa_prevout_service_read,
+        .read_block_ctx = fx,
+    };
+    if (ok)
+        return true;
+
+fail:
+    ysa_prevout_service_fixture_free(fx);
+    return false;
+}
+
+static void ysa_prevout_service_fixture_free(
+    struct ysa_prevout_service_fixture *fx)
+{
+    zcl_alloc_fault_clear();
+    block_free(&fx->body);
+    if (fx->state_ready) {
+        main_state_free(&fx->state);
+        fx->state_ready = false;
+    }
+    if (fx->db_ready) {
+        node_db_close(&fx->ndb);
+        fx->db_ready = false;
+    }
+    if (fx->dir_ready) {
+        test_cleanup_tmpdir(fx->dir);
+        fx->dir_ready = false;
+    }
+}
+
+static struct zcl_result ysa_prevout_service_call(
+    struct ysa_prevout_service_fixture *fx, uint64_t amount,
+    struct transaction *out)
+{
+    return yardsale_prevout_fetch_confirmed(
+        &fx->view, fx->token_id, 1, fx->token_id, amount, out);
+}
+
+static int t_prevout_service_strict(void)
+{
+    int failures = 0;
+    struct ysa_prevout_service_fixture fx;
+    struct transaction out;
+
+#define YSA_PREVOUT_CASE(label, valid, current, spent, mismatch, assertion)  \
+    do {                                                                     \
+        transaction_init(&out);                                              \
+        bool ready = ysa_prevout_service_fixture_init(                       \
+            &fx, (label), (valid), (current), (spent), (mismatch));          \
+        struct zcl_result result = ready                                     \
+            ? ysa_prevout_service_call(&fx, fx.amount, &out)                 \
+            : ZCL_ERR(-99, "fixture setup failed");                         \
+        YSA_CHECK((label), ready && (assertion));                            \
+        transaction_free(&out);                                              \
+        if (ready) ysa_prevout_service_fixture_free(&fx);                    \
+    } while (0)
+
+    YSA_PREVOUT_CASE("prevout service: strict unspent token accepted",
+                     true, true, false, false,
+                     result.ok && out.num_vout == 2);
+    YSA_PREVOUT_CASE("prevout service: invalid ancestry refused",
+                     false, true, false, false,
+                     !result.ok && strstr(result.message, "ancestry"));
+    YSA_PREVOUT_CASE("prevout service: spent token output refused",
+                     true, true, true, false,
+                     !result.ok && strstr(result.message, "spent"));
+    YSA_PREVOUT_CASE("prevout service: stale projection refused",
+                     true, false, false, false,
+                     !result.ok && strstr(result.message, "stale"));
+    YSA_PREVOUT_CASE("prevout service: noncanonical locator refused",
+                     true, true, false, true,
+                     !result.ok && strstr(result.message, "active chain"));
+    YSA_PREVOUT_CASE("prevout service: exact amount required",
+                     true, true, false, false,
+                     result.ok &&
+                     !ysa_prevout_service_call(&fx, fx.amount + 1, &out).ok);
+
+    transaction_init(&out);
+    bool ready = ysa_prevout_service_fixture_init(
+        &fx, "reorg", true, true, false, false);
+    if (ready) fx.reorg_after_read = true;
+    struct zcl_result result = ready
+        ? ysa_prevout_service_call(&fx, fx.amount, &out)
+        : ZCL_ERR(-99, "fixture setup failed");
+    YSA_CHECK("prevout service: reorg during read refused",
+              ready && !result.ok && strstr(result.message, "changed"));
+    transaction_free(&out);
+    if (ready) ysa_prevout_service_fixture_free(&fx);
+
+    transaction_init(&out);
+    ready = ysa_prevout_service_fixture_init(
+        &fx, "copy_oom", true, true, false, false) &&
+        transaction_alloc(&out, 0, 1);
+    struct tx_out *original_vout = ready ? out.vout : NULL;
+    if (ready) {
+        out.vout[0].value = 777;
+        fx.fail_result_copy = true;
+    }
+    result = ready ? ysa_prevout_service_call(&fx, fx.amount, &out)
+                   : ZCL_ERR(-99, "fixture setup failed");
+    YSA_CHECK("prevout service: copy OOM leaves caller output untouched",
+              ready && !result.ok && out.vout == original_vout &&
+              out.num_vout == 1 && out.vout[0].value == 777);
+    transaction_free(&out);
+    if (ready) ysa_prevout_service_fixture_free(&fx);
+
+#undef YSA_PREVOUT_CASE
+    return failures;
 }
 
 /* The buyer accept; input B (txid 0x60..) is listed FIRST so the canonical
@@ -590,12 +852,10 @@ static int t_simnet_atomic_purchase(void)
     bool ad_ok = ysa_ingest_kat_ad(&ad, quote_root);
     YSA_CHECK("simnet: signed Yardsale ad enters the app cache", ad_ok);
 
-    /* The seller's token input becomes an honest confirmed SLP SEND on
-     * the sim chain: vin[0] a matured fixture coinbase, vout[0] the
-     * op-return paying the ad's token amount to vout[1], vout[1] the
-     * exact (value, script) the terms claim. The chain-content port
-     * serves this body — a real confirmed classification target, not a
-     * fixture stub. */
+    /* Controller-only fixture: the injected port stands for a completed
+     * strict-chain decision and returns the body whose value/script the
+     * controller must bind. The direct production-service cases below prove
+     * ancestry, projection freshness, unspent state, and canonicality. */
 
     /* Fixture-only funding coinbase the token send consumes; the 100
      * filler blocks minted below satisfy its coinbase maturity before
@@ -660,7 +920,7 @@ static int t_simnet_atomic_purchase(void)
             simnet_mint_txs(&sim, &token_tx, 1); /* ownership -> sim */
         transaction_init(&token_tx); /* the sim owns the minted body */
     }
-    YSA_CHECK("simnet: token send confirms; chain-content port serves it",
+    YSA_CHECK("simnet: body confirms; trusted port fixture serves it",
               token_served);
     if (!token_served) {
         simnet_free(&sim);
@@ -943,7 +1203,7 @@ static int t_prevout_guard(void)
         PV_CASES
     };
     static const char *const names[PV_CASES] = {
-        "guard: honest token input signs and broadcasts",
+        "guard: trusted port matching body signs and broadcasts",
         "guard: unwired port refuses to sign",
         "guard: unconfirmed token input refuses",
         "guard: wrong token id refuses",
@@ -1023,17 +1283,7 @@ static int t_prevout_guard(void)
 
         /* The buyer's half: ports wired per case (UNWIRED leaves the
          * chain-content port NULL; the positive control alone may
-         * broadcast). The outcome ring must read in-flight between
-         * begin and partial, then completed for the honest ceremony and
-         * failed for every refusal — and unknown for a root it never
-         * saw. */
-        uint8_t seen_root[32], stranger_root[32];
-        ysa_pattern32(stranger_root, 0xE1);
-        bool have_root =
-            ready && zswap_quote_root(&ad, seen_root) == ZSWAP_QUOTE_OK;
-        int outcome_before = have_root
-            ? yardsale_ceremony_buy_outcome(seen_root)
-            : YARDSALE_BUY_OUTCOME_UNKNOWN;
+         * broadcast). */
         struct ysa_broadcast_capture broadcast = {0};
         if (armed) {
             if (c != PV_UNWIRED)
@@ -1046,105 +1296,11 @@ static int t_prevout_guard(void)
             ? yardsale_ceremony_partial_ingest(partial_wire, partial_len,
                                                (int64_t)(100 + c), YSA_NOW)
             : ZSWAP_CEREMONY_WIRE_DROP;
-        int outcome_after = have_root
-            ? yardsale_ceremony_buy_outcome(seen_root)
-            : YARDSALE_BUY_OUTCOME_UNKNOWN;
         bool pass = armed && verdict == ZSWAP_CEREMONY_WIRE_DROP &&
-            broadcast.count == (c == PV_SERVE ? 1 : 0) &&
-            outcome_before == YARDSALE_BUY_OUTCOME_IN_FLIGHT &&
-            outcome_after == (c == PV_SERVE
-                                  ? YARDSALE_BUY_OUTCOME_COMPLETED
-                                  : YARDSALE_BUY_OUTCOME_FAILED) &&
-            yardsale_ceremony_buy_outcome(stranger_root) ==
-                YARDSALE_BUY_OUTCOME_UNKNOWN;
+            broadcast.count == (c == PV_SERVE ? 1 : 0);
         printf("  yardsale_app: %s... %s\n", names[c], pass ? "OK" : "FAIL");
         if (!pass)
             failures++;
-    }
-
-    ysa_reset_all();
-    return failures;
-}
-
-/* ── The chain-content port's out-parameter contract ─────────────── */
-
-/* A transaction nobody wrote: exactly the shape transaction_init leaves,
- * so a poisoned slot that a refusal never touched fails this test loudly
- * instead of crashing the caller's transaction_free() later. */
-static bool ysa_tx_is_empty(const struct transaction *tx)
-{
-    return tx->vin == NULL && tx->num_vin == 0 &&
-           tx->vout == NULL && tx->num_vout == 0 &&
-           tx->v_shielded_spend == NULL && tx->num_shielded_spend == 0 &&
-           tx->v_shielded_output == NULL && tx->num_shielded_output == 0 &&
-           tx->v_joinsplit == NULL && tx->num_joinsplit == 0;
-}
-
-/* The buyer frees the fetched body on EVERY path — the refusals included,
- * because a refusal is what happens when the seller named a token input
- * this chain does not hold. So both implementations of the port must hand
- * back a transaction that is safe to free even when they refuse.
- *
- * The slot is poisoned with 0xAB first. A fresh stack reads back as zero,
- * which is why the same defect in compact_block_reconstruct() survived 140
- * replays and a 1.26M-exec fuzz session; poisoning makes an untouched
- * return deterministic rather than a long-lived-process-only crash. The
- * free is skipped when the check fails, so a regression reports FAIL here
- * instead of taking the whole group down with a wild free. */
-static int t_prevout_out_contract(void)
-{
-    int failures = 0;
-    ysa_reset_all();
-
-    uint8_t txid[32];
-    ysa_pattern32(txid, 0x7c);
-    struct transaction tx;
-
-    memset(&tx, 0xab, sizeof(tx));
-    struct zcl_result r = ysa_prevout_fetch_fn(NULL, txid, &tx);
-    bool ok = !r.ok && ysa_tx_is_empty(&tx);
-    YSA_CHECK("prevout contract: a refused fetch is still safe to free", ok);
-    if (ok) transaction_free(&tx);
-
-    /* The production service, refusing because no chain view is wired —
-     * the state a node is in before boot finishes composing it. */
-    memset(&tx, 0xab, sizeof(tx));
-    r = yardsale_prevout_fetch_confirmed(NULL, txid, &tx);
-    ok = !r.ok && ysa_tx_is_empty(&tx);
-    YSA_CHECK("prevout contract: an unwired chain view is still safe to free",
-              ok);
-    if (ok) transaction_free(&tx);
-
-    /* No output slot at all is refused, never dereferenced. */
-    struct zcl_result rf = ysa_prevout_fetch_fn(NULL, txid, NULL);
-    struct zcl_result rs = yardsale_prevout_fetch_confirmed(NULL, txid, NULL);
-    YSA_CHECK("prevout contract: a missing output slot is refused",
-              !rf.ok && !rs.ok);
-
-    /* Positive control: the same poisoned slot comes back holding the
-     * served body — so the checks above are not satisfied by a port that
-     * simply never serves anything, and the other half of the contract
-     * holds too: the port must never free what the caller handed in, since
-     * the slot it receives is uninitialized by contract.
-     *
-     * Run only once the refusals above have proved the port constructs
-     * before it can fail. A port that does not is precisely one that would
-     * free this poison, and the point of the checks above is to REPORT
-     * that, not to crash the group demonstrating it. */
-    if (failures == 0) {
-        uint8_t token_id[32], script[25];
-        ysa_pattern32(token_id, 0x40);
-        struct privkey seller_key;
-        ysa_key(&seller_key, 0x11);
-        bool armed = ysa_p2pkh_script(&seller_key, script) == 25 &&
-            ysa_prevout_build(txid, token_id, 500, 1000, script, 25);
-        memset(&tx, 0xab, sizeof(tx));
-        r = armed ? ysa_prevout_fetch_fn(NULL, txid, &tx)
-                  : ZCL_ERR(-1, "fixture not armed");
-        ok = armed && r.ok && tx.num_vout == 3 && tx.vout != NULL;
-        YSA_CHECK("prevout contract: a served body arrives in the same slot",
-                  ok);
-        if (r.ok) transaction_free(&tx);
     }
 
     ysa_reset_all();
@@ -1819,11 +1975,11 @@ int test_yardsale_app(void)
     int failures = 0;
     failures += t_manifest();
     failures += t_ceremony_roundtrip();
+    failures += t_prevout_service_strict();
     failures += t_simnet_atomic_purchase();
     failures += t_webbuy_plan_gate();
     failures += t_ingress_negatives();
     failures += t_prevout_guard();
-    failures += t_prevout_out_contract();
     failures += t_peer_clamp();
     failures += t_seller_web_endpoint();
     failures += t_known_sellers();

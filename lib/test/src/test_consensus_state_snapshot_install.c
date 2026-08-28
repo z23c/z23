@@ -1123,17 +1123,9 @@ static void candidate_retain_staging_writer(void *opaque, int fd)
     hook->ran=true;
     struct stat dir_st,st;
     int flags=fd>=0?fcntl(fd,F_GETFL):-1;
-    /* Staging link count: 0 on Linux (anonymous O_TMPFILE inode), 1 on Darwin
-     * (named O_EXCL sibling; mirrors consensus_export_staging_nlink_valid). */
-#if defined(__APPLE__)
-    nlink_t staged_nlink=1;
-#else
-    nlink_t staged_nlink=0;
-#endif
     if(flags<0||(flags&O_ACCMODE)!=O_RDWR||
        fstat(hook->dirfd,&dir_st)!=0||fstat(fd,&st)!=0||
-       !S_ISREG(st.st_mode)||st.st_nlink!=staged_nlink||
-       st.st_dev!=dir_st.st_dev)
+       !S_ISREG(st.st_mode)||st.st_nlink!=0||st.st_dev!=dir_st.st_dev)
         return;
     hook->writer_fd=fcntl(fd,F_DUPFD_CLOEXEC,
                           candidate_retained_writer_dup_floor());

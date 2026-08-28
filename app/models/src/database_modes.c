@@ -303,13 +303,23 @@ bool node_db_wal_checkpoint_result(struct node_db *ndb,
      * parked on the oldest one" into one indistinguishable SQLITE_OK. That is
      * how a WAL 9.2 times the size of its database stayed invisible. */
     int log_frames = -1, ckpt_frames = -1;
-    int rc = sqlite3_wal_checkpoint_v2(ndb->db, NULL,
-                                       SQLITE_CHECKPOINT_PASSIVE,
-                                       &log_frames, &ckpt_frames);
-    if (rc == SQLITE_OK)
-        (void)sqlite3_wal_checkpoint_v2(ndb->db, NULL,
-                                        SQLITE_CHECKPOINT_TRUNCATE,
-                                        NULL, NULL);
+    int passive_rc = sqlite3_wal_checkpoint_v2(ndb->db, NULL,
+                                                SQLITE_CHECKPOINT_PASSIVE,
+                                                &log_frames, &ckpt_frames);
+    int truncate_rc = -1;
+    if (passive_rc == SQLITE_OK)
+        truncate_rc = sqlite3_wal_checkpoint_v2(ndb->db, NULL,
+                                                 SQLITE_CHECKPOINT_TRUNCATE,
+                                                 NULL, NULL);
+    bool truncate_hard_failure =
+        truncate_rc != -1 && truncate_rc != SQLITE_OK &&
+        truncate_rc != SQLITE_BUSY && truncate_rc != SQLITE_LOCKED;
+    int rc = truncate_hard_failure ? truncate_rc : passive_rc;
+    if (truncate_hard_failure)
+        LOG_ERROR("db",
+                  "[db] wal file reset failed after PASSIVE checkpoint: "
+                  "truncate_rc=%d wal_frames=%d moved=%d",
+                  truncate_rc, log_frames, ckpt_frames);
 
     struct wal_ckpt_record rec = {
         .outcome = wal_ckpt_classify(rc == SQLITE_OK,

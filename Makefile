@@ -22,8 +22,7 @@ ifneq ($(ZCL_HOST_WINDOWS),)
 CC = gcc
 CXX ?= g++
 ZCL_PLATFORM_CPPFLAGS = -D_WIN32_WINNT=0x0600 -DWIN32_LEAN_AND_MEAN \
-	-D__USE_MINGW_ANSI_STDIO=1 -include platform/directory_compat.h \
-	-include platform/fcntl_compat.h
+	-D__USE_MINGW_ANSI_STDIO=1
 ZCL_LTO_FLAG = -flto=auto
 ZCL_PLATFORM_NODE_LIBS = -lws2_32 -liphlpapi -lbcrypt -luserenv \
 	-lcrypt32 -lshell32 -lole32 -luuid -lpsapi
@@ -563,7 +562,6 @@ DEV_PACKAGE_VERIFY_NODE_OBJS = $(patsubst %.c,$(DEV_OBJ_DIR)/%.o,\
 DEV_PACKAGE_VERIFY_LINK_RSP = $(DEV_OBJ_DIR)/package-verify-link-inputs.rsp
 DEV_PACKAGE_VERIFY_BIN = $(BIN_DIR)/zclassic23-package-verify-dev
 DEV_PACKAGE_VERIFY_ENSURE_STAMP = $(BUILD_DIR)/dev-package-verifier.ensure
-ZCL_DEV_PACKAGE_VERIFIER_PREREQ = $(if $(ZCL_HOST_WINDOWS),,dev-package-verifier)
 
 # pkg-config probes feed only compile/link flag expansion. The hot-swap loop
 # compiles nothing inside this parse (the fast path replays cached flags), so
@@ -2083,9 +2081,13 @@ $(BUILD_DIR)/hotswap/zcl_rollback_fixture_%.so: $(HOTSWAP_ROLLBACK_FIXTURE_SRC) 
 # Every binary that can run the hotswap_rollback group carries the images as an
 # order-only prerequisite, so the group never has to decide whether a missing
 # artifact is a skip. It is not: it is a broken build.
+ifeq ($(ZCL_HOST_OS),Linux)
 $(BIN_DIR)/test_zcl: | $(HOTSWAP_ROLLBACK_FIXTURE_SOS)
 $(TEST_PARALLEL_BIN): | $(HOTSWAP_ROLLBACK_FIXTURE_SOS)
 $(TEST_PARALLEL_FAST_BIN): | $(HOTSWAP_ROLLBACK_FIXTURE_SOS)
+$(TEST_PARALLEL_REL_CANDIDATE): | $(HOTSWAP_ROLLBACK_FIXTURE_SOS)
+$(TEST_PARALLEL_FAST_CANDIDATE): | $(HOTSWAP_ROLLBACK_FIXTURE_SOS)
+endif
 
 # Expanding the complete object list inside a recipe makes the recipe itself
 # one oversized `/bin/sh -c` argument on Linux.  GNU Make writes the exact,
@@ -3151,7 +3153,7 @@ verify-change:
 HOTSWAP_ACTION_PLAN = $(BUILD_DIR)/hotswap/fast/flags.env
 dev-bin z23-dev zclassic23-dev: $(ZCLASSIC23_DEV_BIN) $(ZCLASSIC23_DEV_BIN_ALIAS) \
 	$(DEV_RESTART_PLAN) \
-	$(HOTSWAP_ACTION_PLAN) $(ZCL_DEV_PACKAGE_VERIFIER_PREREQ) \
+	$(HOTSWAP_ACTION_PLAN) dev-package-verifier \
 	$(ZCL_ADAPTER_RUNNER_TARGET)
 
 # Temporary migration alias: build/bin/zclassic23-dev keeps resolving to

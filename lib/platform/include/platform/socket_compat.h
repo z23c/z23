@@ -5,7 +5,6 @@
 #define ZCLASSIC_PLATFORM_SOCKET_COMPAT_H
 
 #include <stdbool.h>
-#include <limits.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -36,7 +35,9 @@ static inline bool platform_socket_runtime_init(void)
 #else
 #include <errno.h>
 #include <fcntl.h>
+#include <sys/select.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 typedef int platform_socket_t;
 #define PLATFORM_SOCKET_INVALID (-1)
@@ -195,70 +196,6 @@ static inline int platform_socket_set_receive_timeout(platform_socket_t sock,
     return setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout,
                       sizeof(timeout));
 #endif
-}
-
-static inline int platform_socket_set_send_timeout(platform_socket_t sock,
-                                                    int timeout_ms)
-{
-#if defined(_WIN32)
-    DWORD timeout = (DWORD)timeout_ms;
-    return setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char *)&timeout,
-                      (int)sizeof(timeout));
-#else
-    struct timeval timeout = {
-        .tv_sec = timeout_ms / 1000,
-        .tv_usec = (timeout_ms % 1000) * 1000,
-    };
-    return setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout,
-                      sizeof(timeout));
-#endif
-}
-
-static inline ptrdiff_t platform_socket_send(platform_socket_t sock,
-                                             const void *data, size_t size)
-{
-#if defined(_WIN32)
-    if (size > INT_MAX)
-        size = INT_MAX;
-    return send(sock, (const char *)data, (int)size, 0);
-#else
-    return send(sock, data, size, MSG_NOSIGNAL);
-#endif
-}
-
-static inline ptrdiff_t platform_socket_receive(platform_socket_t sock,
-                                                void *data, size_t size)
-{
-#if defined(_WIN32)
-    if (size > INT_MAX)
-        size = INT_MAX;
-    return recv(sock, (char *)data, (int)size, 0);
-#else
-    return recv(sock, data, size, 0);
-#endif
-}
-
-static inline bool platform_socket_send_all(platform_socket_t sock,
-                                            const void *data, size_t size)
-{
-    const uint8_t *cursor = data;
-    while (size > 0) {
-        ptrdiff_t sent = platform_socket_send(sock, cursor, size);
-        if (sent > 0) {
-            cursor += (size_t)sent;
-            size -= (size_t)sent;
-            continue;
-        }
-#if defined(_WIN32)
-        if (sent < 0 && WSAGetLastError() == WSAEINTR)
-            continue;
-#else
-        if (sent < 0 && errno == EINTR)
-            continue;
-#endif
-        return false;
-    }
-    return true;
 }
 
 #endif

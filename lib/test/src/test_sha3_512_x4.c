@@ -8,7 +8,7 @@
  * sha3_512_x4(key, nonce, ctr, out) produces 256 bytes: SHA3-512(key || nonce ||
  * le64(ctr+i)) for i in 0..3. It is NOT consensus crypto — it is the frame
  * cipher keystream for the file-transfer service (lib/net/src/file_service.c) —
- * but it IS wire-visible: an AVX-512 build whose keystream diverged by one bit
+ * but it IS wire-visible: a vector build whose keystream diverged by one bit
  * from a scalar build could not exchange a single file-market frame with it. So
  * a byte-identity oracle is mandatory before the vector lane is allowed on.
  *
@@ -19,7 +19,7 @@
  *
  *   1. Known-answer: the four lanes vs four independent one-shot sha3_512
  *      hashes of the exact 72-byte preimage, on BOTH implementations.
- *   2. Randomized parity: 20000 random (key, nonce, counter) triples, AVX-512
+ *   2. Randomized parity: 20000 random (key, nonce, counter) triples, vector
  *      lane vs scalar lane, all 256 bytes compared.
  *   3. Counter-carry geometry: counter_base values that make the +0..+3 lanes
  *      straddle a 2^8 / 2^16 / 2^32 / 2^64 boundary (little-endian byte carry
@@ -30,7 +30,8 @@
  *   5. Honest benchmark: one 64 KiB file_service frame = 256 calls. Reported,
  *      never gated.
  *
- * When the host lacks AVX-512 the parity passes degrade to scalar-vs-scalar;
+ * The vector lane is AVX-512 on x86-64 and NEON on arm64. When the host lacks
+ * its vector tier the parity passes degrade to scalar-vs-scalar;
  * that is reported, not failed. */
 
 #define _POSIX_C_SOURCE 200809L
@@ -43,6 +44,17 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+
+#if defined(__x86_64__)
+#define SHA3_IMPL_VEC SHA3_IMPL_AVX512
+#define SHA3_VEC_NAME "AVX-512"
+#elif defined(__aarch64__)
+#define SHA3_IMPL_VEC SHA3_IMPL_NEON
+#define SHA3_VEC_NAME "NEON"
+#else
+#define SHA3_IMPL_VEC SHA3_IMPL_SCALAR
+#define SHA3_VEC_NAME "none"
+#endif
 
 /* Deterministic xorshift64* — no libc rand, reproducible across runs. */
 static uint64_t x4_rng = 0x9e3779b97f4a7c15ULL;
@@ -84,11 +96,12 @@ static void x4_reference(const uint8_t key[32], const uint8_t nonce[32],
 int test_sha3_512_x4(void)
 {
     int failures = 0;
-    const bool have_avx = keccak_x4_available();
+    const bool have_vec = keccak_x4_available();
 
     printf("\n=== sha3_512_x4 (4-way SHA3-512 keystream parity oracle) ===\n");
-    printf("sha3_512_x4: AVX-512 4-lane Keccak available on host... %s\n",
-           have_avx ? "YES" : "no (parity runs scalar-vs-scalar)");
+    printf("sha3_512_x4: %s 4-lane Keccak available on host... %s\n",
+           SHA3_VEC_NAME,
+           have_vec ? "YES" : "no (parity runs scalar-vs-scalar)");
 
     /* ── 1. Contract: both lanes == 4x independent one-shot sha3_512 ──── */
     printf("sha3_512_x4: matches 4x one-shot sha3_512(key||nonce||le64(ctr))... ");
@@ -96,8 +109,9 @@ int test_sha3_512_x4(void)
         int bad = 0;
         for (int pass = 0; pass < 2; ++pass) {
             if (pass == 1) {
-                if (!have_avx) break;
-                sha3_512_x4_select_impl(SHA3_IMPL_AVX512);
+                if (!have_vec) break;
+                if (sha3_512_x4_select_impl(SHA3_IMPL_VEC) != SHA3_IMPL_VEC)
+                    bad++;
             } else {
                 sha3_512_x4_select_impl(SHA3_IMPL_SCALAR);
             }
@@ -115,8 +129,8 @@ int test_sha3_512_x4(void)
         else { printf("FAIL (%d)\n", bad); failures++; }
     }
 
-    /* ── 2. Randomized parity: AVX-512 lane vs scalar lane, 20000 triples ─ */
-    printf("sha3_512_x4: parity avx512-vs-scalar x20000 random triples... ");
+    /* ── 2. Randomized parity: vector lane vs scalar lane, 20000 triples ─ */
+    printf("sha3_512_x4: parity vector-vs-scalar x20000 random triples... ");
     {
         int bad = 0;
         for (int trial = 0; trial < 20000; ++trial) {
@@ -128,7 +142,7 @@ int test_sha3_512_x4(void)
             sha3_512_x4_select_impl(SHA3_IMPL_SCALAR);
             sha3_512_x4(key, nonce, ctr, ref);
 
-            if (have_avx) sha3_512_x4_select_impl(SHA3_IMPL_AVX512);
+            if (have_vec) sha3_512_x4_select_impl(SHA3_IMPL_VEC);
             sha3_512_x4(key, nonce, ctr, got);
 
             if (memcmp(ref, got, 256) != 0) {
@@ -167,7 +181,7 @@ int test_sha3_512_x4(void)
             sha3_512_x4_select_impl(SHA3_IMPL_SCALAR);
             sha3_512_x4(key, nonce, bases[k], ref);
 
-            if (have_avx) sha3_512_x4_select_impl(SHA3_IMPL_AVX512);
+            if (have_vec) sha3_512_x4_select_impl(SHA3_IMPL_VEC);
             sha3_512_x4(key, nonce, bases[k], got);
 
             if (memcmp(want, ref, 256) != 0 || memcmp(want, got, 256) != 0) {
@@ -185,8 +199,8 @@ int test_sha3_512_x4(void)
         int bad = 0;
         for (int pass = 0; pass < 2; ++pass) {
             if (pass == 1) {
-                if (!have_avx) break;
-                sha3_512_x4_select_impl(SHA3_IMPL_AVX512);
+                if (!have_vec) break;
+                sha3_512_x4_select_impl(SHA3_IMPL_VEC);
             } else {
                 sha3_512_x4_select_impl(SHA3_IMPL_SCALAR);
             }
@@ -236,9 +250,9 @@ int test_sha3_512_x4(void)
         for (int pass = 0; pass < 2; ++pass) {
             const char *lbl;
             if (pass == 1) {
-                if (!have_avx) break;
-                sha3_512_x4_select_impl(SHA3_IMPL_AVX512);
-                lbl = "avx512-4way";
+                if (!have_vec) break;
+                sha3_512_x4_select_impl(SHA3_IMPL_VEC);
+                lbl = SHA3_VEC_NAME;
             } else {
                 sha3_512_x4_select_impl(SHA3_IMPL_SCALAR);
                 lbl = "scalar-x4  ";

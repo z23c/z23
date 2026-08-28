@@ -70,6 +70,6 @@ app/controllers/include/controllers/agent_impact_rules.def merge=union
 # Pin their working-tree bytes to LF even when a Windows-wide Git installation
 # enables core.autocrlf; CRLF makes an env-based shebang resolve "bash\r" and
 # prevents source identity, lint, and bootstrap from starting at all.
-*.sh         -text
-Makefile     -text
-*.mk         -text
+*.sh         text eol=lf
+Makefile     text eol=lf
+*.mk         text eol=lf

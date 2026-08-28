@@ -2,6 +2,11 @@
 
 # Windows development
 
+> **Product direction:** the supported zero-install product interface is now
+> specified in [the native Windows developer journey contract](WINDOWS_DEVELOPER_JOURNEY.md).
+> The manual MSYS2 instructions below are a porting lane, not the intended new-user
+> experience and not an acceptable product dependency.
+
 Windows development has two explicit lanes. Do not mix their objects or
 vendored archives.
 
@@ -39,7 +44,8 @@ globally to the Windows `PATH`; launch the editor from UCRT64 so it
 inherits the UCRT64 toolchain directory.
 
 ```bash
-cd "$Z23_CHECKOUT"   # your z23 working copy, entered as /c/...
+Z23_CHECKOUT=/c/path/to/your/z23-checkout
+cd "$Z23_CHECKOUT"
 code .
 tools/scripts/doctor.sh
 tools/scripts/build_vendor.sh

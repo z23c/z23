@@ -1512,8 +1512,7 @@ cli_autodiscover_datadir_for_port(int port, char *out, size_t outlen)
  * CLI — worst case this costs `timeout_ms` per candidate datadir. */
 static bool cli_probe_port_alive(int port, int timeout_ms)
 {
-    platform_socket_t sock =
-        platform_socket_open(AF_INET, SOCK_STREAM, 0, true, true);
+    platform_socket_t sock = platform_socket_open(AF_INET, SOCK_STREAM, 0, true, true);
     if (sock == PLATFORM_SOCKET_INVALID)
         return false;
 
@@ -1784,13 +1783,11 @@ static char *cli_rpc_call_internal_ex(const char *body, size_t body_len,
 {
     if (outcome) *outcome = CLI_RPC_OK;
 
-    platform_socket_t sock =
-        platform_socket_open(AF_INET, SOCK_STREAM, 0, true, false);
+    platform_socket_t sock = platform_socket_open(AF_INET, SOCK_STREAM, 0, true, false);
     if (sock == PLATFORM_SOCKET_INVALID) {
         if (outcome) *outcome = CLI_RPC_OTHER_ERROR;
         return NULL;
     }
-
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
@@ -1801,8 +1798,8 @@ static char *cli_rpc_call_internal_ex(const char *body, size_t body_len,
         int connect_errno = platform_socket_last_error();
         enum cli_rpc_outcome oc = platform_socket_error_refused(connect_errno)
             ? CLI_RPC_CONNECT_REFUSED
-            : (platform_socket_error_timed_out(connect_errno)
-                   ? CLI_RPC_TIMEOUT : CLI_RPC_OTHER_ERROR);
+            : (platform_socket_error_timed_out(connect_errno) ? CLI_RPC_TIMEOUT
+                                                              : CLI_RPC_OTHER_ERROR);
         if (outcome) *outcome = oc;
         char socket_error[64];
         if (!quiet) {
@@ -1822,9 +1819,8 @@ static char *cli_rpc_call_internal_ex(const char *body, size_t body_len,
                        "error=CONNECT_FAILED detail=cannot connect to node "
                        "at 127.0.0.1:%d (%s) try=check -rpcport and that "
                        "the node is reachable\n", cli_port,
-                       platform_socket_error_string(connect_errno,
-                                                    socket_error,
-                                                    sizeof(socket_error)));
+                       platform_socket_error_string(
+                           connect_errno, socket_error, sizeof(socket_error)));
         }
         platform_socket_close(sock);
         return NULL;

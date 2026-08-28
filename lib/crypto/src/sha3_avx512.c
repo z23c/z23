@@ -26,7 +26,9 @@
 #include "keccak_x4_internal.h"
 
 #include <stdbool.h>
+#include <pthread.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <string.h>
 
 /* Scalar reference: four sequential SHA3-512 hashes. Always safe, always
@@ -179,8 +181,8 @@ static void sha3_512_x4_neon(const uint8_t key[32], const uint8_t nonce[32],
  * permutation the geometry is lane-parallel with no cross-lane gather. Set
  * SHA3_512_X4_AVX512_DEFAULT_ENABLED to 0 to ship scalar if a host measures a
  * loss. The parity oracle / bench force a path via sha3_512_x4_select_impl.
- * Setting a function pointer is not torn on any supported target; do not call
- * the selector concurrently with active keystream generation. */
+ * One-time initialization and subsequent selector overrides are atomically
+ * published, so concurrent first use is valid ISO C. */
 #ifndef SHA3_512_X4_AVX512_DEFAULT_ENABLED
 #define SHA3_512_X4_AVX512_DEFAULT_ENABLED 1
 #endif
@@ -188,63 +190,69 @@ static void sha3_512_x4_neon(const uint8_t key[32], const uint8_t nonce[32],
 typedef void (*sha3_512_x4_fn)(const uint8_t[32], const uint8_t[32],
                                uint64_t, uint8_t[256]);
 
-static sha3_512_x4_fn g_x4 = sha3_512_x4_scalar;
-static int g_x4_inited = 0;
+static _Atomic(sha3_512_x4_fn) g_x4 = sha3_512_x4_scalar;
+static pthread_once_t g_x4_once = PTHREAD_ONCE_INIT;
 
 static void x4_init_default(void)
 {
 #if defined(__x86_64__)
     if (SHA3_512_X4_AVX512_DEFAULT_ENABLED && keccak_x4_available())
-        g_x4 = sha3_512_x4_avx512;
+        atomic_store_explicit(&g_x4, sha3_512_x4_avx512,
+                              memory_order_release);
     else
-        g_x4 = sha3_512_x4_scalar;
+        atomic_store_explicit(&g_x4, sha3_512_x4_scalar,
+                              memory_order_release);
 #elif defined(__aarch64__)
     if (keccak_x4_available())
-        g_x4 = sha3_512_x4_neon;
+        atomic_store_explicit(&g_x4, sha3_512_x4_neon,
+                              memory_order_release);
     else
-        g_x4 = sha3_512_x4_scalar;
+        atomic_store_explicit(&g_x4, sha3_512_x4_scalar,
+                              memory_order_release);
 #else
-    g_x4 = sha3_512_x4_scalar;
+    atomic_store_explicit(&g_x4, sha3_512_x4_scalar, memory_order_release);
 #endif
-    g_x4_inited = 1;
 }
 
 int sha3_512_x4_select_impl(enum sha3_impl which)
 {
+    pthread_once(&g_x4_once, x4_init_default);
     switch (which) {
     case SHA3_IMPL_SCALAR:
-        g_x4 = sha3_512_x4_scalar;
-        g_x4_inited = 1;
+        atomic_store_explicit(&g_x4, sha3_512_x4_scalar,
+                              memory_order_release);
         return SHA3_IMPL_SCALAR;
     case SHA3_IMPL_AVX512:
 #if defined(__x86_64__)
         if (keccak_x4_available()) {
-            g_x4 = sha3_512_x4_avx512;
-            g_x4_inited = 1;
+            atomic_store_explicit(&g_x4, sha3_512_x4_avx512,
+                                  memory_order_release);
             return SHA3_IMPL_AVX512;
         }
 #endif
-        g_x4 = sha3_512_x4_scalar;
-        g_x4_inited = 1;
+        atomic_store_explicit(&g_x4, sha3_512_x4_scalar,
+                              memory_order_release);
         return SHA3_IMPL_SCALAR;
     case SHA3_IMPL_NEON:
 #if defined(__aarch64__)
         if (keccak_x4_available()) {
-            g_x4 = sha3_512_x4_neon;
-            g_x4_inited = 1;
+            atomic_store_explicit(&g_x4, sha3_512_x4_neon,
+                                  memory_order_release);
             return SHA3_IMPL_NEON;
         }
 #endif
-        g_x4 = sha3_512_x4_scalar;
-        g_x4_inited = 1;
+        atomic_store_explicit(&g_x4, sha3_512_x4_scalar,
+                              memory_order_release);
         return SHA3_IMPL_SCALAR;
     case SHA3_IMPL_AUTO:
     default:
         x4_init_default();
 #if defined(__x86_64__)
-        return (g_x4 == sha3_512_x4_avx512) ? SHA3_IMPL_AVX512 : SHA3_IMPL_SCALAR;
+        return atomic_load_explicit(&g_x4, memory_order_acquire) ==
+                       sha3_512_x4_avx512 ? SHA3_IMPL_AVX512 : SHA3_IMPL_SCALAR;
 #elif defined(__aarch64__)
-        return (g_x4 == sha3_512_x4_neon) ? SHA3_IMPL_NEON : SHA3_IMPL_SCALAR;
+        return atomic_load_explicit(&g_x4, memory_order_acquire) ==
+                       sha3_512_x4_neon ? SHA3_IMPL_NEON : SHA3_IMPL_SCALAR;
 #else
         return SHA3_IMPL_SCALAR;
 #endif
@@ -254,6 +262,7 @@ int sha3_512_x4_select_impl(enum sha3_impl which)
 void sha3_512_x4(const uint8_t key[32], const uint8_t nonce[32],
                  uint64_t counter_base, uint8_t out[256])
 {
-    if (__builtin_expect(!g_x4_inited, 0)) x4_init_default();
-    g_x4(key, nonce, counter_base, out);
+    pthread_once(&g_x4_once, x4_init_default);
+    sha3_512_x4_fn fn = atomic_load_explicit(&g_x4, memory_order_acquire);
+    fn(key, nonce, counter_base, out);
 }

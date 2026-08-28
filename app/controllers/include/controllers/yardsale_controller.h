@@ -79,25 +79,17 @@ bool yardsale_broadcast_default(const struct transaction *tx, void *ctx);
 /* Chain-content port: fetch a CONFIRMED transaction body by txid (internal
  * byte order) so the buyer can re-classify the seller's claimed token
  * input before signing — the ad's token leg is a claim, and only this
- * port checks it against the chain the buyer actually has. Implemented by
- * the prevout service over node.db + the active chain; tests inject a
- * fake. The result type carries why a body is not confirmed here (E2:
- * services return struct zcl_result, never bare bool). Fail-closed: while
- * unwired, every partial ingest is refused (nothing is signed, nothing is
- * broadcast).
- *
- * OUT-PARAMETER CONTRACT, binding on every implementation: tx_out is
- * transaction_init()ed BEFORE the first thing that can fail, so it is a
- * valid transaction on EVERY return — a populated body on ZCL_OK, an empty
- * one on every refusal — and transaction_free(tx_out) is always safe. An
- * implementation that returns early without touching tx_out hands the
- * caller's own transaction_free() a stale pointer and a stale count out of
- * the caller's stack frame; that is a wild free, not a leak. Conversely an
- * implementation must never free tx_out on entry: it arrives uninitialized
- * by contract, so callers must not pass a transaction that still owns
- * memory. tx_out == NULL is refused, not dereferenced. */
+ * port checks it against the chain and strict token ledger the buyer actually
+ * has. Implemented by the prevout service over node.db + the active chain;
+ * controller tests inject a contract-equivalent fake and service tests call
+ * the production implementation directly. The result type carries why a body
+ * is not confirmed here (E2: services return struct zcl_result, never bare
+ * bool). Fail-closed: while unwired, every partial ingest is refused (nothing
+ * is signed or broadcast). */
 typedef struct zcl_result (*yardsale_prevout_fetch_fn)(
-    void *ctx, const uint8_t txid[32], struct transaction *tx_out);
+    void *ctx, const uint8_t txid[32], uint32_t vout,
+    const uint8_t token_id[32], uint64_t token_amount,
+    struct transaction *tx_out);
 void yardsale_ceremony_set_prevout_fetch(yardsale_prevout_fetch_fn fn,
                                          void *ctx);
 
@@ -174,21 +166,6 @@ int yardsale_ceremony_partial_ingest(const uint8_t *wire, size_t wire_len,
 
 /* Count of live pending buys (diagnostics/tests). */
 int yardsale_pending_count(int64_t now_unix);
-
-/* How a begun buy actually ended. buyer_begin records IN_FLIGHT; every
- * partial-ingest terminal path records COMPLETED or FAILED — the wallet's
- * committed replay reads this to distinguish "still pinned" from "the
- * ceremony died, the plan may reopen". The outcome ring is bounded and
- * root-keyed: an evicted root (or a restart) reads UNKNOWN, which the
- * wallet treats conservatively as stay-committed. Carried as int so the
- * wallet-service port never names this enum. */
-enum yardsale_buy_outcome {
-    YARDSALE_BUY_OUTCOME_UNKNOWN = -1,
-    YARDSALE_BUY_OUTCOME_IN_FLIGHT = 0,
-    YARDSALE_BUY_OUTCOME_COMPLETED = 1,
-    YARDSALE_BUY_OUTCOME_FAILED = 2,
-};
-int yardsale_ceremony_buy_outcome(const uint8_t quote_root[32]);
 
 /* Test hook: drop every pending buy (cleansing keys), the relay dedup
  * ring, and the per-peer clamp. Does NOT clear the seller profile. */
