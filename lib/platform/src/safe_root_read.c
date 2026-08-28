@@ -47,10 +47,14 @@ static bool native_file_functions(nt_create_file_fn *create_file,
 {
     HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
     if (!ntdll) return false;
-    *create_file = (nt_create_file_fn)(void *)GetProcAddress(ntdll,
-                                                             "NtCreateFile");
-    *to_dos_error = (rtl_status_to_dos_error_fn)(void *)GetProcAddress(
-        ntdll, "RtlNtStatusToDosError");
+    FARPROC create_symbol = GetProcAddress(ntdll, "NtCreateFile");
+    FARPROC error_symbol = GetProcAddress(ntdll, "RtlNtStatusToDosError");
+    _Static_assert(sizeof(*create_file) == sizeof(create_symbol),
+                   "Windows function pointer representations must match");
+    _Static_assert(sizeof(*to_dos_error) == sizeof(error_symbol),
+                   "Windows function pointer representations must match");
+    memcpy(create_file, &create_symbol, sizeof(*create_file));
+    memcpy(to_dos_error, &error_symbol, sizeof(*to_dos_error));
     return *create_file != NULL && *to_dos_error != NULL;
 }
 

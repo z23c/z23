@@ -21,7 +21,7 @@ ZCL_HOST_WINDOWS := $(if $(filter MINGW% MSYS%,$(ZCL_HOST_OS)),1,)
 ifneq ($(ZCL_HOST_WINDOWS),)
 CC = gcc
 CXX ?= g++
-ZCL_PLATFORM_CPPFLAGS = -D_WIN32_WINNT=0x0600 -DWIN32_LEAN_AND_MEAN \
+ZCL_PLATFORM_CPPFLAGS = -D_WIN32_WINNT=0x0A00 -DWIN32_LEAN_AND_MEAN \
 	-D__USE_MINGW_ANSI_STDIO=1
 ZCL_LTO_FLAG = -flto=auto
 ZCL_PLATFORM_NODE_LIBS = -lws2_32 -liphlpapi -lbcrypt -luserenv \
@@ -10716,7 +10716,8 @@ check-restart-follow:
 .PHONY: tools/postmortem_to_scenario
 tools/postmortem_to_scenario: $(BIN_DIR)/postmortem_to_scenario
 $(BIN_DIR)/postmortem_to_scenario: tools/postmortem_to_scenario.c \
-		lib/sim/src/postmortem.c lib/sim/src/seed_tape.c \
+		lib/sim/src/postmortem.c lib/sim/src/postmortem_archive.c \
+		lib/sim/src/postmortem_stub.c lib/sim/src/seed_tape.c \
 		lib/platform/src/clock.c lib/platform/src/rng.c \
 		lib/util/src/signal_handler.c lib/util/src/clientversion.c \
 		lib/util/src/async_safe_write.c \

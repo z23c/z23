@@ -14,22 +14,49 @@
  *
  * Graceful degradation: NAT-PMP → UPnP → fail silently. */
 
+#if !defined(_WIN32)
 #define _POSIX_C_SOURCE 200809L
+#endif
 #include "net/nat.h"
+#include "platform/socket_compat.h"
 #include "util/log_json.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <sys/time.h>
-#include <fcntl.h>
-#include <poll.h>
 #include <errno.h>
+#include <limits.h>
+#if defined(_WIN32)
+#include <netioapi.h>
+#else
+#include <unistd.h>
+#endif
 #include "util/safe_alloc.h"
 #include "util/log_macros.h"
+
+static int nat_send_datagram(platform_socket_t socket, const void *data,
+                             size_t size, const struct sockaddr *address,
+                             size_t address_size)
+{
+#if defined(_WIN32)
+    if (size > INT_MAX || address_size > INT_MAX) return SOCKET_ERROR;
+    return sendto(socket, (const char *)data, (int)size, 0, address,
+                  (int)address_size);
+#else
+    return (int)sendto(socket, data, size, 0, address,
+                       (socklen_t)address_size);
+#endif
+}
+
+static int nat_receive_datagram(platform_socket_t socket, void *data,
+                                size_t size)
+{
+    int amount = size > INT_MAX ? INT_MAX : (int)size;
+#if defined(_WIN32)
+    return recvfrom(socket, (char *)data, amount, 0, NULL, NULL);
+#else
+    return (int)recvfrom(socket, data, (size_t)amount, 0, NULL, NULL);
+#endif
+}
 
 /* ════════════════════════════════════════════════════════════════
  *  Gateway discovery via /proc/net/route
@@ -37,6 +64,21 @@
 
 bool nat_get_gateway(uint8_t gw_out[4])
 {
+#if defined(_WIN32)
+    if (!gw_out || !platform_socket_runtime_init()) return false;
+    SOCKADDR_INET destination = {0};
+    destination.Ipv4.sin_family = AF_INET;
+    destination.Ipv4.sin_addr.s_addr = htonl(UINT32_C(0x08080808));
+    MIB_IPFORWARD_ROW2 route;
+    SOCKADDR_INET source;
+    if (GetBestRoute2(NULL, 0, NULL, &destination, 0, &route, &source) !=
+            NO_ERROR ||
+        route.NextHop.si_family != AF_INET ||
+        route.NextHop.Ipv4.sin_addr.s_addr == 0)
+        return false;
+    memcpy(gw_out, &route.NextHop.Ipv4.sin_addr, 4);
+    return true;
+#else
     FILE *f = fopen("/proc/net/route", "r");
     if (!f) LOG_FAIL("nat", "cannot open /proc/net/route");
 
@@ -65,6 +107,7 @@ bool nat_get_gateway(uint8_t gw_out[4])
     }
     fclose(f);
     LOG_FAIL("nat", "no default gateway found in /proc/net/route");
+#endif
 }
 
 /* ════════════════════════════════════════════════════════════════
@@ -99,12 +142,13 @@ struct natpmp_response {
 static bool natpmp_send_recv(const uint8_t gw[4], const void *req, size_t req_len,
                               void *resp, size_t resp_max, size_t *resp_len)
 {
-    int sock = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sock < 0) LOG_FAIL("nat", "UDP socket creation failed: %s", strerror(errno));
+    platform_socket_t sock = platform_socket_open(AF_INET, SOCK_DGRAM, 0,
+                                                  true, false);
+    if (sock == PLATFORM_SOCKET_INVALID)
+        LOG_FAIL("nat", "UDP socket creation failed");
 
     /* Non-blocking with timeout */
-    struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    (void)platform_socket_set_receive_timeout(sock, 2000);
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -112,13 +156,14 @@ static bool natpmp_send_recv(const uint8_t gw[4], const void *req, size_t req_le
     addr.sin_port = htons(5351);
     memcpy(&addr.sin_addr, gw, 4);
 
-    if (sendto(sock, req, req_len, 0, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        close(sock);
-        LOG_FAIL("nat", "NAT-PMP sendto gateway failed: %s", strerror(errno));
+    if (nat_send_datagram(sock, req, req_len, (struct sockaddr *)&addr,
+                          sizeof(addr)) < 0) {
+        platform_socket_close(sock);
+        LOG_FAIL("nat", "NAT-PMP sendto gateway failed");
     }
 
-    ssize_t n = recvfrom(sock, resp, resp_max, 0, NULL, NULL);
-    close(sock);
+    int n = nat_receive_datagram(sock, resp, resp_max);
+    platform_socket_close(sock);
 
     if (n < 8) return false;
     *resp_len = (size_t)n;
@@ -204,22 +249,27 @@ static char *http_request(const char *host, uint16_t port, const char *method,
                            const char *path, const char *body, size_t body_len,
                            const char *content_type)
 {
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) LOG_NULL("nat", "TCP socket creation failed: %s", strerror(errno));
+    platform_socket_t sock = platform_socket_open(AF_INET, SOCK_STREAM, 0,
+                                                  true, false);
+    if (sock == PLATFORM_SOCKET_INVALID)
+        LOG_NULL("nat", "TCP socket creation failed");
 
-    struct timeval tv = { .tv_sec = 3, .tv_usec = 0 };
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    (void)platform_socket_set_receive_timeout(sock, 3000);
+    (void)platform_socket_set_send_timeout(sock, 3000);
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
-    inet_pton(AF_INET, host, &addr.sin_addr);
+    if (platform_socket_parse_address(AF_INET, host, &addr.sin_addr) != 1) {
+        platform_socket_close(sock);
+        LOG_NULL("nat", "HTTP host is not a numeric IPv4 address");
+    }
 
-    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        close(sock);
-        LOG_NULL("nat", "HTTP connect to %s:%u failed: %s", host, port, strerror(errno));
+    if (platform_socket_connect(sock, (struct sockaddr *)&addr,
+                                sizeof(addr)) != 0) {
+        platform_socket_close(sock);
+        LOG_NULL("nat", "HTTP connect to %s:%u failed", host, port);
     }
 
     char header[1024];
@@ -238,15 +288,22 @@ static char *http_request(const char *host, uint16_t port, const char *method,
             method, path, host, port);
     }
 
-    send(sock, header, (size_t)hlen, 0);
+    if (hlen <= 0 || (size_t)hlen >= sizeof(header) ||
+        !platform_socket_send_all(sock, header, (size_t)hlen)) {
+        platform_socket_close(sock);
+        LOG_NULL("nat", "HTTP request header send failed");
+    }
     if (body && body_len > 0)
-        send(sock, body, body_len, 0);
+        if (!platform_socket_send_all(sock, body, body_len)) {
+            platform_socket_close(sock);
+            LOG_NULL("nat", "HTTP request body send failed");
+        }
 
     size_t cap = 8192, len = 0;
     char *buf = zcl_malloc(cap, "nat_recv_buf");
-    if (!buf) { close(sock); LOG_NULL("nat", "malloc failed for HTTP recv buffer: %zu bytes", cap); }
+    if (!buf) { platform_socket_close(sock); LOG_NULL("nat", "malloc failed for HTTP recv buffer: %zu bytes", cap); }
     for (;;) {
-        ssize_t n = recv(sock, buf + len, cap - len - 1, 0);
+        int n = platform_socket_receive(sock, buf + len, cap - len - 1);
         if (n <= 0) break;
         len += (size_t)n;
         if (len + 1024 > cap) {
@@ -256,7 +313,7 @@ static char *http_request(const char *host, uint16_t port, const char *method,
             buf = nb;
         }
     }
-    close(sock);
+    platform_socket_close(sock);
     buf[len] = 0;
 
     /* Skip HTTP headers */
@@ -340,19 +397,31 @@ static bool upnp_add_mapping(const char *ctrl_url, uint16_t external,
     /* Get local IP for this connection */
     char local_ip[32] = "0.0.0.0";
     {
-        int sock = socket(AF_INET, SOCK_DGRAM, 0);
-        if (sock >= 0) {
+        platform_socket_t sock = platform_socket_open(AF_INET, SOCK_DGRAM, 0,
+                                                      true, false);
+        if (sock != PLATFORM_SOCKET_INVALID) {
             struct sockaddr_in dest;
             memset(&dest, 0, sizeof(dest));
             dest.sin_family = AF_INET;
             dest.sin_port = htons(port);
-            inet_pton(AF_INET, host, &dest.sin_addr);
-            connect(sock, (struct sockaddr *)&dest, sizeof(dest));
+            (void)platform_socket_parse_address(AF_INET, host,
+                                                &dest.sin_addr);
+            (void)platform_socket_connect(sock, (struct sockaddr *)&dest,
+                                          sizeof(dest));
             struct sockaddr_in local;
+            memset(&local, 0, sizeof(local));
+#if defined(_WIN32)
+            int len = sizeof(local);
+            (void)getsockname(sock, (struct sockaddr *)&local, &len);
+            (void)InetNtopA(AF_INET, &local.sin_addr, local_ip,
+                            sizeof(local_ip));
+#else
             socklen_t len = sizeof(local);
-            getsockname(sock, (struct sockaddr *)&local, &len);
-            inet_ntop(AF_INET, &local.sin_addr, local_ip, sizeof(local_ip));
-            close(sock);
+            (void)getsockname(sock, (struct sockaddr *)&local, &len);
+            (void)inet_ntop(AF_INET, &local.sin_addr, local_ip,
+                            sizeof(local_ip));
+#endif
+            platform_socket_close(sock);
         }
     }
 
@@ -405,24 +474,26 @@ static bool upnp_discover_and_map(uint16_t external, uint16_t internal,
                                     uint32_t lifetime, const char *protocol)
 {
     /* SSDP M-SEARCH via multicast */
-    int sock = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sock < 0) LOG_FAIL("nat", "SSDP socket creation failed: %s", strerror(errno));
+    platform_socket_t sock = platform_socket_open(AF_INET, SOCK_DGRAM, 0,
+                                                  true, false);
+    if (sock == PLATFORM_SOCKET_INVALID)
+        LOG_FAIL("nat", "SSDP socket creation failed");
 
-    struct timeval tv = { .tv_sec = 3, .tv_usec = 0 };
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    (void)platform_socket_set_receive_timeout(sock, 3000);
 
     struct sockaddr_in mcast;
     memset(&mcast, 0, sizeof(mcast));
     mcast.sin_family = AF_INET;
     mcast.sin_port = htons(1900);
-    inet_pton(AF_INET, "239.255.255.250", &mcast.sin_addr);
+    (void)platform_socket_parse_address(AF_INET, "239.255.255.250",
+                                        &mcast.sin_addr);
 
-    sendto(sock, SSDP_SEARCH, strlen(SSDP_SEARCH), 0,
-           (struct sockaddr *)&mcast, sizeof(mcast));
+    (void)nat_send_datagram(sock, SSDP_SEARCH, strlen(SSDP_SEARCH),
+                            (struct sockaddr *)&mcast, sizeof(mcast));
 
     char buf[4096];
-    ssize_t n = recvfrom(sock, buf, sizeof(buf) - 1, 0, NULL, NULL);
-    close(sock);
+    int n = nat_receive_datagram(sock, buf, sizeof(buf) - 1);
+    platform_socket_close(sock);
     if (n <= 0) LOG_FAIL("nat", "SSDP M-SEARCH got no response");
     buf[n] = 0;
 

@@ -9,17 +9,15 @@
 #include "sapling/pedersen_hash.h"
 #include "crypto/sha256.h"
 #include "crypto/sha3.h"
+#include "platform/positioned_file.h"
+#include "platform/private_file.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 #include <assert.h>
-#include <errno.h>
-#include <fcntl.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 #include <pthread.h>
 
@@ -517,54 +515,48 @@ bool sapling_tree_flush_checkpoint(const struct incremental_merkle_tree *t,
     uint8_t trailer[SAPLING_CKPT_TRAILER_SZ];
     zcl_sha3_256(body, body_sz, trailer);
 
-    /* 4. Atomic write: .tmp + fsync + rename. */
-    size_t path_len = strlen(path);
-    char *tmp_path = (char *)zcl_malloc(path_len + 8, "sapling_ckpt_tmp_path");
-    if (!tmp_path) {
+    /* 4. Resolve the existing parent, create a private staged file, flush its
+     * bytes, replace atomically, then make the parent transition durable. */
+    char resolved[32768];
+    char parent[32768];
+    if (!platform_private_path_resolve(path, resolved, sizeof(resolved),
+                                       parent, sizeof(parent))) {
         free(body);
         LOG_FAIL("sapling_tree",
-                 "flush_checkpoint: alloc tmp_path failed");
+                 "flush_checkpoint: invalid checkpoint path");
     }
-    snprintf(tmp_path, path_len + 8, "%s.tmp", path);
-
-    int fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) {
-        int saved_errno = errno;
+    char tmp_path[32768];
+    int tmp_len = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", resolved);
+    struct platform_private_file staged;
+    platform_private_file_init(&staged);
+    if (tmp_len < 0 || (size_t)tmp_len >= sizeof(tmp_path) ||
+        !platform_private_file_create(tmp_path, &staged)) {
         fprintf(stderr,  // obs-ok:helper-context-logged
                 "[sapling_tree] %s:%d %s(): flush_checkpoint: "
-                "open(%s) failed: %s\n",
-                __FILE__, __LINE__, __func__, tmp_path,
-                strerror(saved_errno));
+                "private staging creation failed\n",
+                __FILE__, __LINE__, __func__);
         free(body);
-        free(tmp_path);
         return false;
     }
 
-    bool ok = true;
-    ssize_t w1 = write(fd, body, body_sz);
-    if (w1 < 0 || (size_t)w1 != body_sz) ok = false;
-    ssize_t w2 = write(fd, trailer, SAPLING_CKPT_TRAILER_SZ);
-    if (w2 < 0 || (size_t)w2 != SAPLING_CKPT_TRAILER_SZ) ok = false;
-
-    if (ok && fsync(fd) != 0) ok = false;
-    if (close(fd) != 0) ok = false;
-
-    if (ok) {
-        if (rename(tmp_path, path) != 0) ok = false;
-    } else {
-        unlink(tmp_path);
-    }
-
-    int saved_errno = errno;
+    bool ok = platform_private_file_write_at(&staged, body, body_sz, 0) &&
+              platform_private_file_write_at(&staged, trailer,
+                                              SAPLING_CKPT_TRAILER_SZ,
+                                              body_sz) &&
+              platform_private_file_flush(&staged) &&
+              platform_private_file_replace(&staged, tmp_path, resolved) &&
+              platform_private_parent_flush(parent);
     free(body);
-    free(tmp_path);
 
     if (!ok) {
+        if (staged.native != (uintptr_t)-1) {
+            (void)platform_private_file_retire(&staged, tmp_path);
+            platform_private_file_close(&staged);
+        }
         fprintf(stderr,  // obs-ok:helper-context-logged
                 "[sapling_tree] %s:%d %s(): flush_checkpoint: "
-                "write/rename to %s failed: %s\n",
-                __FILE__, __LINE__, __func__, path,
-                strerror(saved_errno));
+                "durable private replacement of %s failed\n",
+                __FILE__, __LINE__, __func__, path);
         return false;
     }
     return true;
@@ -580,34 +572,38 @@ bool sapling_tree_load_checkpoint(struct incremental_merkle_tree *t,
                  "load_checkpoint: NULL arg (t=%p path=%p)",
                  (const void *)t, (const void *)path);
 
-    struct stat st;
-    if (stat(path, &st) != 0)
+    struct platform_positioned_file file;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path))
         return false; /* missing file is a silent not-found */
 
-    if (st.st_size < (off_t)(SAPLING_CKPT_HEADER_SZ + SAPLING_CKPT_TRAILER_SZ))
+    uint64_t file_size = 0;
+    if (!platform_positioned_file_size(&file, &file_size) ||
+        file_size < SAPLING_CKPT_HEADER_SZ + SAPLING_CKPT_TRAILER_SZ) {
+        platform_positioned_file_close(&file);
         return false; /* too small — treat as corrupt */
-    if ((size_t)st.st_size >
-        SAPLING_CKPT_HEADER_SZ + SAPLING_CKPT_MAX_BLOB + SAPLING_CKPT_TRAILER_SZ)
+    }
+    if (file_size >
+        SAPLING_CKPT_HEADER_SZ + SAPLING_CKPT_MAX_BLOB + SAPLING_CKPT_TRAILER_SZ) {
+        platform_positioned_file_close(&file);
         return false; /* too large — refuse */
+    }
 
-    uint8_t *buf = (uint8_t *)zcl_malloc((size_t)st.st_size,
+    uint8_t *buf = (uint8_t *)zcl_malloc((size_t)file_size,
                                          "sapling_ckpt_load");
-    if (!buf)
-        return false;
-
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) {
-        free(buf);
+    if (!buf) {
+        platform_positioned_file_close(&file);
         return false;
     }
-    ssize_t r = read(fd, buf, (size_t)st.st_size);
-    close(fd);
-    if (r != st.st_size) {
+    int64_t read = platform_positioned_file_read(&file, buf,
+                                                 (size_t)file_size, 0);
+    platform_positioned_file_close(&file);
+    if (read < 0 || (uint64_t)read != file_size) {
         free(buf);
         return false;
     }
 
-    size_t body_sz = (size_t)st.st_size - SAPLING_CKPT_TRAILER_SZ;
+    size_t body_sz = (size_t)file_size - SAPLING_CKPT_TRAILER_SZ;
     uint8_t expected_trailer[SAPLING_CKPT_TRAILER_SZ];
     zcl_sha3_256(buf, body_sz, expected_trailer);
 

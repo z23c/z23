@@ -96,10 +96,12 @@
 #   (default)      compile all, run the `run` bucket, report.
 #   --compile-only compile legs only; execute nothing. Still reports 0 ran.
 #   --list         print the manifest (name, bucket, link deps) and exit.
-#   --self-test    prove the gate actually trips: assert mingw rejects a
-#                  planted TU that uses an API above the project's own
-#                  _WIN32_WINNT floor and accepts a clean one, and assert a
-#                  planted failing `run` program is graded as a failure.
+#   --self-test    prove the gate actually trips: assert mingw really gates
+#                  API surface on _WIN32_WINNT (a Windows 7 API is rejected
+#                  at a planted 0x0600 target and accepted at the project's
+#                  floor), assert the cross flags carry the Makefile's exact
+#                  floor, and assert a planted failing `run` program — and a
+#                  planted 77 skip — are both graded as failures.
 #
 # Env:
 #   ZCL_MINGW_CC   cross compiler (default: x86_64-w64-mingw32-gcc)
@@ -215,6 +217,21 @@ MANIFEST=(
   "tools/tests/test_boot_refusal_identity.c|run|config/src/boot_error.c config/src/boot_refusal_reports.c lib/platform/src/current_identity.c"
   "tools/tests/test_boot_shutdown_marker_persistence.c|run|config/src/boot_shutdown_marker.c lib/platform/src/clock.c lib/platform/src/file_metadata.c lib/platform/src/positioned_file.c lib/platform/src/private_directory.c lib/platform/src/private_file.c"
   "tools/tests/test_file_ops_copy.c|run|config/src/file_ops.c lib/platform/src/directory_compat.c lib/platform/src/positioned_file.c lib/platform/src/private_directory.c lib/platform/src/private_file.c lib/base/src/safe_alloc.c"
+
+  # ── Wave 3: the 21-commit Windows/macOS merge ──────────────────────────
+  # --- win: <windows.h> unconditionally, and its assertions ARE the
+  # Windows-side refusal of os_binary_slots (on POSIX that seam does the real
+  # directory/launch work), so this could only ever be a compile check here.
+  "tools/winacceptance/os_binary_slots_refusal_acceptance.c|win|"
+
+  # --- run: portable, meaningful, and actually executed on this host ------
+  # No <windows.h> and no _WIN32 split anywhere: it drives rng_fill() through
+  # the public seam and asserts properties that hold on EVERY arm — two
+  # 64-byte draws are non-zero, they differ, a zero-length fill succeeds, and
+  # a NULL/non-zero fill is REFUSED. On Linux that grades the real
+  # getrandom(2) path, so executing it here is not a stand-in for the Windows
+  # arm; it is the Linux arm being graded for real.
+  "tools/winacceptance/rng_acceptance.c|run|lib/platform/src/rng.c"
 )
 
 # Arguments for the `run` programs that take them. Every path handed out here
@@ -257,6 +274,26 @@ if [ "${#PLATFORM_DEFINES[@]}" -eq 0 ]; then
     echo "  $GATE: FATAL — could not read ZCL_PLATFORM_CPPFLAGS from the" >&2
     echo "      Makefile. Refusing to cross-compile at a guessed API floor," >&2
     echo "      which silently grades an easier question than the build asks." >&2
+    exit 2
+fi
+
+# The API floor itself, pulled out of those defines. It is the one number in
+# the flag set whose absence would be INVISIBLE: without -D_WIN32_WINNT the
+# cross leg still compiles everything, at mingw's own permissive default,
+# and prints the same green — grading an easier question than the build asks
+# while looking identical. So a missing floor is FATAL here, and the value is
+# carried into the self-test so its probes track the Makefile instead of a
+# number copied into this script that goes stale the day the floor moves
+# (it already did: 0x0600 -> 0x0A00).
+WINNT_FLOOR=""
+for d in "${PLATFORM_DEFINES[@]}"; do
+    case "$d" in -D_WIN32_WINNT=*) WINNT_FLOOR="${d#-D_WIN32_WINNT=}" ;; esac
+done
+if [ -z "$WINNT_FLOOR" ]; then
+    echo "  $GATE: FATAL — ZCL_PLATFORM_CPPFLAGS no longer defines" >&2
+    echo "      _WIN32_WINNT. Cross-compiling would fall back to mingw's" >&2
+    echo "      default target and grade an easier question than the build" >&2
+    echo "      asks, with no visible difference in this script's output." >&2
     exit 2
 fi
 
@@ -326,27 +363,129 @@ if [ "${1:-}" = "--self-test" ]; then
         echo "  $GATE --self-test: UNOBSERVED — '$CROSS_CC' is not installed;" \
              "cannot prove the cross leg trips without the compiler it uses."
     else
-        # An API above the project's own _WIN32_WINNT floor must be REJECTED.
-        # This is the exact false green the floor exists to prevent, and it is
-        # a real defect this script found in logical_cpu_acceptance.c.
+        # Two things have to be true for the cross leg to be worth anything,
+        # and each is proved separately.
+        #
+        # (1) mingw's version gating is REAL in this toolchain: an API the
+        #     SDK declares only above a given target must be REJECTED when
+        #     compiled at a target below it. GetActiveProcessorCount and
+        #     ALL_PROCESSOR_GROUPS appear only at _WIN32_WINNT >= 0x0601, so
+        #     the probe is compiled at an explicitly LOWERED 0x0600 and must
+        #     fail, then at the project's own floor and must succeed.
+        #
+        #     This used to be a single probe compiled at CROSS_FLAGS, on the
+        #     standing assumption that the project floor was 0x0600. Upstream
+        #     raised it to Windows 10 (0x0A00) and the probe silently became
+        #     an assertion that the highest target rejects a Windows 7 API,
+        #     which is false — the gate went red for the right reason. There
+        #     is no API above 0x0A00 to substitute, so the gating check is
+        #     pinned to a target this script chooses, and the separate
+        #     question "is the BUILD's floor what actually reaches the
+        #     compiler" is asked directly in (2) instead of being inferred.
         cat > "$WORK/above_floor.c" <<'PROBE'
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
 /* GetActiveProcessorCount/ALL_PROCESSOR_GROUPS are declared by mingw only at
- * _WIN32_WINNT >= 0x0601; the project pins the Windows target at 0x0600. */
+ * _WIN32_WINNT >= 0x0601. */
 int zcl_probe(void) { return (int)GetActiveProcessorCount(ALL_PROCESSOR_GROUPS); }
 PROBE
-        "$CROSS_CC" "${CROSS_FLAGS[@]}" "${INC_FLAGS[@]}" -c "$WORK/above_floor.c" \
-            -o "$WORK/above_floor.o" >/dev/null 2>&1
+        "$CROSS_CC" "${CROSS_FLAGS[@]}" "${INC_FLAGS[@]}" \
+            -U_WIN32_WINNT -D_WIN32_WINNT=0x0600 \
+            -c "$WORK/above_floor.c" -o "$WORK/above_floor.o" >/dev/null 2>&1
         rc=$?
         if [ "$rc" -eq 0 ]; then
-            echo "FAIL: --self-test — mingw ACCEPTED an API above the" >&2
-            echo "  project's own _WIN32_WINNT floor. The flag set is not the" >&2
-            echo "  build's; this script would grade an easier question." >&2
+            echo "FAIL: --self-test — mingw ACCEPTED a Windows 7 API while" >&2
+            echo "  compiling at _WIN32_WINNT=0x0600. This toolchain is not" >&2
+            echo "  gating API surface on the target at all, so compiling" >&2
+            echo "  the acceptance programs at the build's floor proves" >&2
+            echo "  nothing about what the build's target actually offers." >&2
             st_fail=1
         fi
+        "$CROSS_CC" "${CROSS_FLAGS[@]}" "${INC_FLAGS[@]}" \
+            -c "$WORK/above_floor.c" -o "$WORK/above_floor.o" >/dev/null 2>&1
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            echo "FAIL: --self-test — mingw REJECTED a Windows 7 API at the" >&2
+            echo "  project's own floor ($WINNT_FLOOR). The floor read from" >&2
+            echo "  the Makefile is below what the product's own sources" >&2
+            echo "  require; every cross compile below is grading a target" >&2
+            echo "  the build does not ship." >&2
+            st_fail=1
+        fi
+
+        # (2) EVERY -D the Makefile hands the Windows build actually reaches
+        #     the compiler, with the Makefile's value. Asserted inside the
+        #     TU, from PLATFORM_DEFINES, so a dropped flag fails here rather
+        #     than somewhere downstream as a confusing error in a program.
+        #
+        #     Asserting only _WIN32_WINNT would NOT do it, and this was
+        #     measured rather than assumed: mingw-w64 GCC 13 defaults
+        #     _WIN32_WINNT to 0x0A00, which is now exactly the project floor,
+        #     so an equality check on the floor alone passes identically
+        #     whether the flag arrived or the default coincided — deleting
+        #     the whole -D set from CROSS_FLAGS still went green. The other
+        #     defines (WIN32_LEAN_AND_MEAN, __USE_MINGW_ANSI_STDIO) have no
+        #     such default, so checking the set is what makes the probe
+        #     sensitive to the flags actually being passed.
+        {
+            printf '/* generated by --self-test; see winacceptance.sh */\n'
+            for d in "${PLATFORM_DEFINES[@]}"; do
+                body="${d#-D}"
+                nm="${body%%=*}"
+                printf '#if !defined(%s)\n#error "%s never reached the compiler"\n#endif\n' \
+                       "$nm" "$nm"
+                case "$body" in
+                    *=*)
+                        val="${body#*=}"
+                        # Only an integer constant expression can be compared
+                        # in #if. A non-numeric value still gets the
+                        # defined-ness assertion above rather than a probe
+                        # that would fail to compile for the wrong reason.
+                        case "$val" in
+                            *[!0-9xXa-fA-F]*) : ;;
+                            *) printf '#if (%s) != (%s)\n#error "%s is not the Makefile value"\n#endif\n' \
+                                      "$nm" "$val" "$nm" ;;
+                        esac ;;
+                    *) : ;;
+                esac
+            done
+            printf 'int zcl_flags(void);\nint zcl_flags(void) { return 0; }\n'
+        } > "$WORK/flags_are_builds.c"
+        "$CROSS_CC" "${CROSS_FLAGS[@]}" "${INC_FLAGS[@]}" \
+            -c "$WORK/flags_are_builds.c" -o "$WORK/flags_are_builds.o" \
+            2>"$WORK/flags_are_builds.err"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            echo "FAIL: --self-test — the cross flags do NOT carry the" >&2
+            echo "  Makefile's ZCL_PLATFORM_CPPFLAGS set" >&2
+            echo "  (${PLATFORM_DEFINES[*]}) to the compiler. Every cross" >&2
+            echo "  compile below would grade a different API target than" >&2
+            echo "  the build ships." >&2
+            sed 's/^/    /' "$WORK/flags_are_builds.err" >&2
+            st_fail=1
+        fi
+        # The negated form of (2). An #error that can never fire would make
+        # the probe above a tautology that passes on an empty flag set.
+        cat > "$WORK/floor_negated.c" <<PROBE
+#if _WIN32_WINNT == $WINNT_FLOOR
+#error "expected: the flag assertion machinery can fire"
+#endif
+int zcl_neg(void);
+int zcl_neg(void) { return 0; }
+PROBE
+        "$CROSS_CC" "${CROSS_FLAGS[@]}" "${INC_FLAGS[@]}" \
+            -c "$WORK/floor_negated.c" -o "$WORK/floor_negated.o" \
+            >/dev/null 2>&1
+        rc=$?
+        if [ "$rc" -eq 0 ]; then
+            echo "FAIL: --self-test — a TU whose #error fires on the" >&2
+            echo "  Makefile's floor ($WINNT_FLOOR) still compiled. The" >&2
+            echo "  flag assertion above is hollow." >&2
+            st_fail=1
+        fi
+
         printf 'int zcl_clean(int a);\nint zcl_clean(int a) { return a + 1; }\n' \
             > "$WORK/clean.c"
         "$CROSS_CC" "${CROSS_FLAGS[@]}" "${INC_FLAGS[@]}" -c "$WORK/clean.c" \
@@ -382,9 +521,11 @@ PROBE
     done
 
     if [ "$st_fail" -ne 0 ]; then exit 1; fi
-    echo "  OK: --self-test — cross flags reject an above-floor API and" \
-         "accept clean code; a failing run and a 77 skip are both graded" \
-         "as failures"
+    echo "  OK: --self-test — mingw gates API surface on the target" \
+         "(a Windows 7 API is rejected at 0x0600, accepted at the project" \
+         "floor $WINNT_FLOOR), the cross flags carry the Makefile's whole" \
+         "-D set (${PLATFORM_DEFINES[*]}) with its exact values, and a" \
+         "failing run and a 77 skip are both graded as failures"
     exit 0
 fi
 

@@ -18,14 +18,18 @@
  * credential, a credential the kernel never supplied, and an expectation that
  * constrains nothing are all refusals, each with a reason the caller can show.
  */
+#if !defined(_WIN32)
 #define _GNU_SOURCE  /* struct ucred, SO_PASSCRED — must precede every include */
+#endif
 #include "session/agent_broker.h"
 #include "base/log_macros.h"
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <sys/socket.h>
 #include <unistd.h>
+#endif
 
 #define BROKER_TAG "agent.broker"
 
@@ -33,6 +37,11 @@
 
 bool agent_broker_peercred(int fd, struct agent_peer_cred *out)
 {
+#if defined(_WIN32)
+    (void)fd;
+    if (out) memset(out, 0, sizeof(*out));
+    return false;
+#else
     if (!out)
         LOG_FAIL(BROKER_TAG, "null out for fd=%d", fd);
     memset(out, 0, sizeof(*out));
@@ -60,10 +69,15 @@ bool agent_broker_peercred(int fd, struct agent_peer_cred *out)
 #endif
     out->valid = true;
     return true;
+#endif
 }
 bool agent_broker_sender_cred(int fd, struct agent_peer_cred *out)
 {
-#if defined(__APPLE__)
+#if defined(_WIN32)
+    (void)fd;
+    if (out) memset(out, 0, sizeof(*out));
+    return false;
+#elif defined(__APPLE__)
     return agent_broker_peercred(fd, out);
 #else
     if (!out)
@@ -116,6 +130,11 @@ bool agent_broker_sender_cred(int fd, struct agent_peer_cred *out)
 }
 bool agent_broker_identify_peer(int fd, struct agent_peer_cred *out)
 {
+#if defined(_WIN32)
+    (void)fd;
+    if (out) memset(out, 0, sizeof(*out));
+    return false;
+#else
     if (!out)
         LOG_FAIL(BROKER_TAG, "null out for fd=%d", fd);
     if (!agent_broker_peercred(fd, out))
@@ -129,6 +148,7 @@ bool agent_broker_identify_peer(int fd, struct agent_peer_cred *out)
             *out = sender;
     }
     return true;
+#endif
 }
 bool agent_broker_peer_authorized(const struct agent_peer_cred *c,
                                   const struct agent_peer_expectation *e,

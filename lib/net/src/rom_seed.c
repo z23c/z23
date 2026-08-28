@@ -8,6 +8,7 @@
  * The serve caps are in-memory DDoS bounds only — nothing here is persisted or
  * a consensus predicate. */
 #include "platform/time_compat.h"
+#include "platform/positioned_file.h"
 #include "net/rom_seed.h"
 #include "net/file_market.h"
 #include "crypto/sha3.h"
@@ -242,27 +243,28 @@ enum rom_register_result rom_seed_register(const char *datadir,
         return ROM_REG_ERR_ARGS;
     }
 
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) {
-        LOG_WARN(ROM_SUBSYS, "register: open '%s' failed errno=%d", path, errno);
+    struct platform_positioned_file file;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open_beneath(&file, datadir, filename)) {
+        LOG_WARN(ROM_SUBSYS, "register: validated open '%s' failed", path);
         return ROM_REG_ERR_NOT_FOUND;
     }
 
-    struct stat st;
-    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
-        close(fd);
-        LOG_WARN(ROM_SUBSYS, "register: fstat '%s' failed / not a file", path);
+    struct platform_positioned_file_snapshot snapshot;
+    if (!platform_positioned_file_snapshot(&file, &snapshot)) {
+        platform_positioned_file_close(&file);
+        LOG_WARN(ROM_SUBSYS, "register: snapshot '%s' failed / not a file", path);
         return ROM_REG_ERR_NOT_FOUND;
     }
-    uint64_t size_bytes = (uint64_t)st.st_size;
+    uint64_t size_bytes = snapshot.size;
     if (size_bytes < ROM_SEED_MIN_ARTIFACT_BYTES) {
-        close(fd);
+        platform_positioned_file_close(&file);
         LOG_WARN(ROM_SUBSYS, "register: '%s' too small (%llu bytes)",
                  filename, (unsigned long long)size_bytes);
         return ROM_REG_ERR_TOO_SMALL;
     }
     if (size_bytes > ROM_SEED_MAX_ARTIFACT_BYTES) {
-        close(fd);
+        platform_positioned_file_close(&file);
         LOG_WARN(ROM_SUBSYS, "register: '%s' too large (%llu bytes)",
                  filename, (unsigned long long)size_bytes);
         return ROM_REG_ERR_TOO_LARGE;
@@ -271,7 +273,7 @@ enum rom_register_result rom_seed_register(const char *datadir,
     uint32_t num_chunks =
         (uint32_t)((size_bytes + ROM_SEED_CHUNK_SIZE - 1) / ROM_SEED_CHUNK_SIZE);
     if (num_chunks == 0 || num_chunks > ROM_SEED_MAX_CHUNKS) {
-        close(fd);
+        platform_positioned_file_close(&file);
         LOG_WARN(ROM_SUBSYS, "register: '%s' chunk count %u out of range",
                  filename, num_chunks);
         return ROM_REG_ERR_TOO_LARGE;
@@ -279,7 +281,7 @@ enum rom_register_result rom_seed_register(const char *datadir,
 
     uint8_t *buf = zcl_malloc(ROM_SEED_CHUNK_SIZE, "rom_seed_reg_buf");
     if (!buf) {
-        close(fd);
+        platform_positioned_file_close(&file);
         LOG_WARN(ROM_SUBSYS, "register: alloc chunk buffer failed");
         return ROM_REG_ERR_IO;
     }
@@ -308,10 +310,9 @@ enum rom_register_result rom_seed_register(const char *datadir,
 
         uint32_t got = 0;
         while (got < want) {
-            ssize_t r = pread(fd, buf + got, want - got,
-                              (off_t)(total_read + got));
+            int64_t r = platform_positioned_file_read(
+                &file, buf + got, want - got, total_read + got);
             if (r < 0) {
-                if (errno == EINTR) continue;
                 rc = ROM_REG_ERR_IO;
                 break;
             }
@@ -339,7 +340,7 @@ enum rom_register_result rom_seed_register(const char *datadir,
     }
 
     free(buf);
-    close(fd);
+    platform_positioned_file_close(&file);
 
     if (rc != ROM_REG_OK) {
         LOG_WARN(ROM_SUBSYS, "register: '%s' failed rc=%d", filename, (int)rc);
@@ -632,30 +633,33 @@ bool rom_seed_read_chunk(const struct rom_artifact *a, const char *datadir,
 
     if (!rom_filename_ok(a->filename))
         LOG_FAIL(ROM_SUBSYS, "read_chunk: unsafe filename");
-    char path[1024];
-    int pn = snprintf(path, sizeof(path), "%s/%s", datadir, a->filename);
-    if (pn <= 0 || (size_t)pn >= sizeof(path))
-        LOG_FAIL(ROM_SUBSYS, "read_chunk: path overflow");
-
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0)
-        LOG_FAIL(ROM_SUBSYS, "read_chunk: open '%s' failed errno=%d", path, errno);
+    struct platform_positioned_file file;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open_beneath(
+            &file, datadir, a->filename))
+        LOG_FAIL(ROM_SUBSYS, "read_chunk: validated open failed");
+    uint64_t current_size = 0;
+    if (!platform_positioned_file_size(&file, &current_size) ||
+        current_size != a->size_bytes) {
+        platform_positioned_file_close(&file);
+        LOG_FAIL(ROM_SUBSYS, "read_chunk: registered size changed");
+    }
 
     uint32_t got = 0;
     while (got < want) {
-        ssize_t r = pread(fd, buf + got, want - got, (off_t)(offset + got));
+        int64_t r = platform_positioned_file_read(
+            &file, buf + got, want - got, offset + got);
         if (r < 0) {
-            if (errno == EINTR) continue;
-            close(fd);
-            LOG_FAIL(ROM_SUBSYS, "read_chunk: pread errno=%d", errno);
+            platform_positioned_file_close(&file);
+            LOG_FAIL(ROM_SUBSYS, "read_chunk: positioned read failed");
         }
         if (r == 0) {
-            close(fd);
+            platform_positioned_file_close(&file);
             LOG_FAIL(ROM_SUBSYS, "read_chunk: short read (file changed?)");
         }
         got += (uint32_t)r;
     }
-    close(fd);
+    platform_positioned_file_close(&file);
 
     uint8_t h[32];
     sha3_256(buf, got, h);

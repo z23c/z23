@@ -29,7 +29,7 @@ int main(int argc, char **argv)
         !platform_private_path_absent(argv[2]))
         return 4;
     if (!platform_private_file_link_no_clobber(argv[1], argv[2], &identity,
-                                                &same) || !same)
+                                                &same) || same)
         return 5;
     same = false;
     if (!platform_private_file_link_no_clobber(argv[1], argv[2], &identity,

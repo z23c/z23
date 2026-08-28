@@ -23,14 +23,11 @@
 
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
-#include "platform/file_sync.h"
+#include "platform/private_file.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <pthread.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 #define RJ_SUBSYS "rom_journal"
 
@@ -41,7 +38,7 @@
 #define RJ_MAX_NUM_CHUNKS  (1u << 24)
 
 struct rom_journal {
-    int             fd;
+    struct platform_private_file file;
     uint32_t        num_chunks;
     uint32_t        bitmap_bytes;   /* ceil(num_chunks / 8)                 */
     uint8_t        *bitmap;         /* in-memory mirror of the on-disk map  */
@@ -50,7 +47,7 @@ struct rom_journal {
 };
 
 /* On-disk offset of the chunk bitmap (immediately after the fixed header). */
-#define RJ_BITMAP_OFFSET  ((off_t)sizeof(struct rom_journal_header))
+#define RJ_BITMAP_OFFSET  ((uint64_t)sizeof(struct rom_journal_header))
 
 static uint32_t rj_popcount_bitmap(const uint8_t *bm, uint32_t nbytes,
                                    uint32_t num_chunks)
@@ -96,7 +93,8 @@ static void rj_fill_header(struct rom_journal_header *h,
 
 /* Allocate + zero-init a handle wrapping `fd`. Returns NULL on OOM (fd left
  * open for the caller to close). */
-static struct rom_journal *rj_alloc(int fd, uint32_t num_chunks,
+static struct rom_journal *rj_alloc(struct platform_private_file *file,
+                                    uint32_t num_chunks,
                                     uint32_t bitmap_bytes)
 {
     struct rom_journal *j = zcl_malloc(sizeof(*j), "rom_journal_handle");
@@ -108,7 +106,8 @@ static struct rom_journal *rj_alloc(int fd, uint32_t num_chunks,
         return NULL;
     }
     memset(j->bitmap, 0, bitmap_bytes);
-    j->fd = fd;
+    j->file = *file;
+    platform_private_file_init(file);
     j->num_chunks = num_chunks;
     j->bitmap_bytes = bitmap_bytes;
     j->done = 0;
@@ -118,36 +117,36 @@ static struct rom_journal *rj_alloc(int fd, uint32_t num_chunks,
 
 /* Truncate + (re)write a fresh header and zeroed bitmap onto `fd`, then
  * fdatasync. Returns the handle, or NULL on IO failure (fd closed on error). */
-static struct rom_journal *rj_create_fresh(int fd,
+static struct rom_journal *rj_create_fresh(struct platform_private_file *file,
                                            const uint8_t chunk_root[32],
                                            const uint8_t whole_sha3[32],
                                            uint32_t chunk_size,
                                            uint32_t num_chunks,
                                            uint32_t bitmap_bytes)
 {
-    if (ftruncate(fd, 0) != 0) {
-        close(fd);
+    if (!platform_private_file_truncate(file, 0)) {
+        platform_private_file_close(file);
         LOG_NULL(RJ_SUBSYS, "create: ftruncate failed errno=%d", errno);
     }
     struct rom_journal_header h;
     rj_fill_header(&h, chunk_root, whole_sha3, chunk_size, num_chunks);
-    if (pwrite(fd, &h, sizeof(h), 0) != (ssize_t)sizeof(h)) {
-        close(fd);
+    if (!platform_private_file_write_at(file, &h, sizeof(h), 0)) {
+        platform_private_file_close(file);
         LOG_NULL(RJ_SUBSYS, "create: header pwrite failed errno=%d", errno);
     }
 
-    struct rom_journal *j = rj_alloc(fd, num_chunks, bitmap_bytes);
+    struct rom_journal *j = rj_alloc(file, num_chunks, bitmap_bytes);
     if (!j) {
-        close(fd);
+        platform_private_file_close(file);
         LOG_NULL(RJ_SUBSYS, "create: handle alloc failed");
     }
     /* bitmap is already zeroed in rj_alloc; persist the zeroed region. */
-    if (pwrite(fd, j->bitmap, bitmap_bytes, RJ_BITMAP_OFFSET) !=
-        (ssize_t)bitmap_bytes) {
+    if (!platform_private_file_write_at(&j->file, j->bitmap, bitmap_bytes,
+                                        RJ_BITMAP_OFFSET)) {
         rom_journal_close(j);
         LOG_NULL(RJ_SUBSYS, "create: bitmap pwrite failed errno=%d", errno);
     }
-    if (platform_data_sync(fd) != 0) {
+    if (!platform_private_file_flush(&j->file)) {
         rom_journal_close(j);
         LOG_NULL(RJ_SUBSYS, "create: fdatasync failed errno=%d", errno);
     }
@@ -169,33 +168,39 @@ struct rom_journal *rom_journal_open(const char *journal_path,
     uint32_t bitmap_bytes = (num_chunks + 7u) / 8u;
 
     /* Try to resume an existing journal. */
-    int fd = open(journal_path, O_RDWR | O_CLOEXEC);
-    if (fd >= 0) {
+    struct platform_private_file file;
+    platform_private_file_init(&file);
+    bool existed = !platform_private_path_absent(journal_path);
+    if (!platform_private_file_open_locked_create(journal_path, &file))
+        LOG_NULL(RJ_SUBSYS, "open: secure open/create('%s') failed errno=%d",
+                 journal_path, errno);
+    if (existed) {
         struct rom_journal_header disk;
         struct rom_journal_header want;
         rj_fill_header(&want, chunk_root, whole_sha3, chunk_size, num_chunks);
 
-        bool header_ok = (pread(fd, &disk, sizeof(disk), 0) ==
-                          (ssize_t)sizeof(disk)) &&
+        bool header_ok = platform_private_file_read_at(&file, &disk,
+                                                       sizeof(disk), 0) &&
                          memcmp(&disk, &want, sizeof(disk)) == 0;
         if (header_ok) {
-            struct rom_journal *j = rj_alloc(fd, num_chunks, bitmap_bytes);
+            struct rom_journal *j = rj_alloc(&file, num_chunks, bitmap_bytes);
             if (!j) {
-                close(fd);
+                platform_private_file_close(&file);
                 LOG_NULL(RJ_SUBSYS, "open: resume handle alloc failed");
             }
-            ssize_t br = pread(fd, j->bitmap, bitmap_bytes, RJ_BITMAP_OFFSET);
-            if (br != (ssize_t)bitmap_bytes ||
+            if (!platform_private_file_read_at(&j->file, j->bitmap,
+                                               bitmap_bytes,
+                                               RJ_BITMAP_OFFSET) ||
                 rj_has_stray_bits(j->bitmap, bitmap_bytes, num_chunks)) {
                 /* Short/garbage bitmap → do not partially trust; rewrite
                  * fresh onto the same fd. rj_alloc's mutex/bitmap are freed
                  * here; rj_create_fresh makes its own. */
-                int reuse_fd = j->fd;
-                j->fd = -1;             /* keep fd open across close()        */
+                struct platform_private_file reuse_file = j->file;
+                platform_private_file_init(&j->file);
                 rom_journal_close(j);
                 LOG_WARN(RJ_SUBSYS, "open: '%s' bitmap unreadable/inconsistent"
                          " — discarding, starting fresh", journal_path);
-                return rj_create_fresh(reuse_fd, chunk_root, whole_sha3,
+                return rj_create_fresh(&reuse_file, chunk_root, whole_sha3,
                                        chunk_size, num_chunks, bitmap_bytes);
             }
             j->done = rj_popcount_bitmap(j->bitmap, bitmap_bytes, num_chunks);
@@ -208,20 +213,11 @@ struct rom_journal *rom_journal_open(const char *journal_path,
          * start fresh on the same fd. */
         LOG_WARN(RJ_SUBSYS, "open: '%s' header mismatch — discarding stale "
                  "journal, starting fresh", journal_path);
-        return rj_create_fresh(fd, chunk_root, whole_sha3, chunk_size,
+        return rj_create_fresh(&file, chunk_root, whole_sha3, chunk_size,
                                num_chunks, bitmap_bytes);
     }
 
-    if (errno != ENOENT)
-        LOG_NULL(RJ_SUBSYS, "open: open('%s') failed errno=%d",
-                 journal_path, errno);
-
-    /* No journal yet: create one. */
-    fd = open(journal_path, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-    if (fd < 0)
-        LOG_NULL(RJ_SUBSYS, "open: create('%s') failed errno=%d",
-                 journal_path, errno);
-    return rj_create_fresh(fd, chunk_root, whole_sha3, chunk_size, num_chunks,
+    return rj_create_fresh(&file, chunk_root, whole_sha3, chunk_size, num_chunks,
                            bitmap_bytes);
 }
 
@@ -253,9 +249,9 @@ bool rom_journal_mark(struct rom_journal *j, uint32_t idx)
     j->bitmap[byte] |= bit;
     /* Persist the single changed byte, then fdatasync so a set bit always
      * implies durable data (the caller fdatasync'd the .part first). */
-    bool ok = pwrite(j->fd, &j->bitmap[byte], 1,
-                     RJ_BITMAP_OFFSET + (off_t)byte) == 1 &&
-              platform_data_sync(j->fd) == 0;
+    bool ok = platform_private_file_write_at(&j->file, &j->bitmap[byte], 1,
+                                             RJ_BITMAP_OFFSET + byte) &&
+              platform_private_file_flush(&j->file);
     if (!ok) {
         j->bitmap[byte] &= (uint8_t)~bit; /* roll back the in-memory bit */
         pthread_mutex_unlock(&j->lock);
@@ -281,8 +277,7 @@ void rom_journal_close(struct rom_journal *j)
 {
     if (!j)
         return;
-    if (j->fd >= 0)
-        (void)close(j->fd);
+    platform_private_file_close(&j->file);
     pthread_mutex_destroy(&j->lock);
     free(j->bitmap);
     free(j);
@@ -292,8 +287,19 @@ bool rom_journal_discard(const char *journal_path)
 {
     if (!journal_path)
         LOG_FAIL(RJ_SUBSYS, "discard: NULL journal_path");
-    if (unlink(journal_path) != 0 && errno != ENOENT)
-        LOG_FAIL(RJ_SUBSYS, "discard: unlink(%s) failed errno=%d",
+    if (platform_private_path_absent(journal_path))
+        return true;
+    struct platform_private_file file;
+    struct platform_private_file_identity identity;
+    platform_private_file_init(&file);
+    if (!platform_private_file_open_locked(journal_path, &file) ||
+        !platform_private_file_identity(&file, &identity) ||
+        !platform_private_file_retire_if_identity(&file, journal_path,
+                                                  &identity)) {
+        platform_private_file_close(&file);
+        LOG_FAIL(RJ_SUBSYS, "discard: secure retire(%s) failed errno=%d",
                  journal_path, errno);
+    }
+    platform_private_file_close(&file);
     return true;
 }

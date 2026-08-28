@@ -2,7 +2,9 @@
  *
  * Injectable RNG — implementation. See platform/rng.h for design. */
 
+#ifndef _WIN32
 #define _GNU_SOURCE  /* getrandom on glibc */
+#endif
 
 #include "platform/rng.h"
 
@@ -17,12 +19,17 @@
 #if defined(_WIN32)
 #include <windows.h>
 #include <bcrypt.h>
-#else
+/* Windows gets CNG only; the POSIX descriptor fallback below is compiled
+ * out there. Linux additionally needs <sys/random.h> for getrandom(2).
+ * Darwin uses arc4random_buf and needs neither, so it pulls in no
+ * descriptor headers at all. */
+#elif defined(__linux__)
+#include <fcntl.h>
+#include <sys/random.h>
+#include <unistd.h>
+#elif !defined(__APPLE__)
 #include <fcntl.h>
 #include <unistd.h>
-#endif
-#if defined(__linux__)
-#include <sys/random.h>
 #endif
 
 /* ── Real-syscall implementation ─────────────────────────────────── */
@@ -76,7 +83,8 @@ static bool fallback_urandom_fill(uint8_t *out, size_t len)
 static bool real_fill(void *self, uint8_t *out, size_t len)
 {
     (void)self;
-    if (!out || len == 0) return true;
+    if (len == 0) return true;
+    if (!out) return false;
 
 #if defined(_WIN32)
     /* CNG's system-preferred RNG (hAlgorithm must be NULL when the

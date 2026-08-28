@@ -32,16 +32,54 @@
 #include "platform/os_sandbox.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
+#if !defined(_WIN32)
+#include <fcntl.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 #define AGENT_TAG "agent.confined"
 #define AGENT_CHILD_SOCKET_FD 3
+
+#if defined(_WIN32)
+
+const int *agent_confined_allowed_syscalls(size_t *count_out)
+{
+    if (count_out)
+        *count_out = 0;
+    return NULL;
+}
+
+bool agent_confined_enter(const char *scratch_dir, uid_t want_uid,
+                          gid_t want_gid, struct agent_confine_report *out)
+{
+    (void)scratch_dir;
+    (void)want_uid;
+    (void)want_gid;
+    if (!out)
+        return false;
+    memset(out, 0, sizeof(*out));
+    out->landlock_abi = -1;
+    out->uid_posture = AGENT_CONFINE_UID_UNKNOWN;
+    snprintf(out->seccomp_method, sizeof(out->seccomp_method), "%s",
+             "windows-sandbox-unqualified");
+    errno = ENOTSUP;
+    return false;
+}
+
+int agent_confined_mode_main(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    errno = ENOTSUP;
+    return 126;
+}
+
+#else
 
 /* The confined agent's allow-list IS the node's strict -confine allow-set. That
  * set was empirically derived and is regression-covered by test_confine, and it
@@ -407,3 +445,5 @@ int agent_confined_mode_main(int argc, char **argv)
     (void)close(fd);
     return 0;
 }
+
+#endif

@@ -6,6 +6,7 @@
 
 #include "sim/postmortem.h"
 
+#if !defined(_WIN32)
 #include "postmortem_internal.h"
 
 #include "platform/clock.h"
@@ -1179,7 +1180,8 @@ int postmortem_capsule_list(const char *dir,
 
         struct postmortem_capsule_entry candidate;
         memset(&candidate, 0, sizeof(candidate));
-        snprintf(candidate.name, sizeof(candidate.name), "%s", de->d_name);
+        snprintf(candidate.name, sizeof(candidate.name), "%.*s",
+                 (int)sizeof(candidate.name) - 1, de->d_name);
         snprintf(candidate.path, sizeof(candidate.path), "%s/%s", dir,
                  de->d_name);
         candidate.crash_unix = parse_capsule_time(de->d_name);
@@ -1263,3 +1265,4 @@ int postmortem_capsule_prune(const char *dir,
     free(entries);
     return first_err;
 }
+#endif /* !defined(_WIN32) */

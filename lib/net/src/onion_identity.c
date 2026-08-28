@@ -5,15 +5,69 @@
 #include "net/tor_integration.h"
 #include "crypto/ed25519.h"
 #include "crypto/random_secret.h"
+#include "platform/private_directory.h"
+#include "platform/private_file.h"
 #include "sha3/sha3.h"
 #include "util/log_macros.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
+
+static bool onion_identity_read_seed(const char *path, uint8_t seed[32],
+                                     struct platform_private_file *retained)
+{
+    struct platform_private_file file;
+    uint64_t size = 0;
+    platform_private_file_init(&file);
+    if (!platform_private_file_open_locked(path, &file) ||
+        !platform_private_file_size(&file, &size) || size != 32 ||
+        !platform_private_file_read_at(&file, seed, 32, 0)) {
+        platform_private_file_close(&file);
+        return false;
+    }
+    if (retained) {
+        *retained = file;
+        platform_private_file_init(&file);
+    }
+    platform_private_file_close(&file);
+    return true;
+}
+
+static bool onion_identity_publish_hostname(const char *path,
+                                            const char *line, size_t size)
+{
+    uint8_t nonce[16];
+    if (!zcl_random_secret_bytes(nonce, sizeof(nonce),
+                                 "onion_hostname_staging"))
+        return false;
+    char staging[1280];
+    int n = snprintf(staging, sizeof(staging),
+                     "%s.tmp.%02x%02x%02x%02x%02x%02x%02x%02x"
+                     "%02x%02x%02x%02x%02x%02x%02x%02x",
+                     path, nonce[0], nonce[1], nonce[2], nonce[3], nonce[4],
+                     nonce[5], nonce[6], nonce[7], nonce[8], nonce[9],
+                     nonce[10], nonce[11], nonce[12], nonce[13], nonce[14],
+                     nonce[15]);
+    if (n < 0 || (size_t)n >= sizeof(staging))
+        return false;
+    struct platform_private_file file;
+    struct platform_private_file_identity identity;
+    platform_private_file_init(&file);
+    bool created = platform_private_file_create(staging, &file);
+    bool have_identity = created &&
+                         platform_private_file_identity(&file, &identity);
+    bool ok = have_identity &&
+              platform_private_file_write_at(&file, line, size, 0) &&
+              platform_private_file_truncate(&file, size) &&
+              platform_private_file_flush(&file) &&
+              platform_private_file_replace(&file, staging, path);
+    if (!ok && have_identity)
+        (void)platform_private_file_retire_if_identity(&file, staging,
+                                                       &identity);
+    platform_private_file_close(&file);
+    return ok;
+}
 
 static void base32_lower_encode(const uint8_t *data, size_t len, char *out)
 {
@@ -75,10 +129,12 @@ static bool onion_identity_dir(const char *datadir, char *dir_out,
 
     char tor_data[1024];
     snprintf(tor_data, sizeof(tor_data), "%s/tor_data", datadir);
-    if (mkdir(tor_data, 0700) != 0 && errno != EEXIST)
-        LOG_FAIL("tor", "mkdir %s failed: %s", tor_data, strerror(errno));
-    if (mkdir(dir_out, 0700) != 0 && errno != EEXIST)
-        LOG_FAIL("tor", "mkdir %s failed: %s", dir_out, strerror(errno));
+    if (!platform_private_directory_ensure(tor_data))
+        LOG_FAIL("tor", "private directory %s failed: %s", tor_data,
+                 strerror(errno));
+    if (!platform_private_directory_ensure(dir_out))
+        LOG_FAIL("tor", "private directory %s failed: %s", dir_out,
+                 strerror(errno));
     return true;
 }
 
@@ -98,30 +154,27 @@ bool onion_identity_ensure(const char *datadir, uint8_t seed_out[32],
     snprintf(hostname_path, sizeof(hostname_path), "%s/hostname", dir);
 
     bool created = false;
-    int fd = open(seed_path, O_RDONLY);
-    if (fd >= 0) {
-        ssize_t got = read(fd, seed_out, 32);
-        close(fd);
-        if (got != 32)
-            LOG_FAIL("tor", "onion identity seed corrupt (%zd bytes, want "
-                            "32): %s — refusing to silently remint (that "
+    if (!platform_private_path_absent(seed_path)) {
+        if (!onion_identity_read_seed(seed_path, seed_out, NULL))
+            LOG_FAIL("tor", "onion identity seed corrupt or unsafe (want "
+                            "exactly 32 private bytes): %s — refusing to "
+                            "silently remint (that "
                             "would change the shop's address); restore the "
-                            "file or pass -onion-rotate", got, seed_path);
+                            "file or pass -onion-rotate", seed_path);
     } else {
-        if (errno != ENOENT)
-            LOG_FAIL("tor", "cannot open onion identity seed %s: %s",
-                     seed_path, strerror(errno));
         if (!zcl_random_secret_bytes(seed_out, 32, "onion_identity_seed"))
             LOG_FAIL("tor", "CSPRNG refused the onion identity seed");
-        fd = open(seed_path, O_WRONLY | O_CREAT | O_EXCL, 0600);
-        if (fd < 0)
+        struct platform_private_file seed_file;
+        platform_private_file_init(&seed_file);
+        if (!platform_private_file_create(seed_path, &seed_file) ||
+            !platform_private_file_write_at(&seed_file, seed_out, 32, 0) ||
+            !platform_private_file_truncate(&seed_file, 32) ||
+            !platform_private_file_flush(&seed_file)) {
+            platform_private_file_close(&seed_file);
             LOG_FAIL("tor", "cannot write onion identity seed %s: %s",
                      seed_path, strerror(errno));
-        ssize_t put = write(fd, seed_out, 32);
-        close(fd);
-        if (put != 32)
-            LOG_FAIL("tor", "short write on onion identity seed %s",
-                     seed_path);
+        }
+        platform_private_file_close(&seed_file);
         created = true;
     }
 
@@ -129,16 +182,11 @@ bool onion_identity_ensure(const char *datadir, uint8_t seed_out[32],
     if (!onion_identity_address_from_seed(seed_out, addr, sizeof(addr)))
         return false;
 
-    int hfd = open(hostname_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-    if (hfd < 0)
-        LOG_FAIL("tor", "cannot write onion hostname file %s: %s",
-                 hostname_path, strerror(errno));
     char hline[80];
     int hlen = snprintf(hline, sizeof(hline), "%s.onion\n", addr);
-    ssize_t hput = write(hfd, hline, (size_t)hlen);
-    close(hfd);
-    if (hput != hlen)
-        LOG_FAIL("tor", "short write on onion hostname file %s",
+    if (hlen < 0 || (size_t)hlen >= sizeof(hline) ||
+        !onion_identity_publish_hostname(hostname_path, hline, (size_t)hlen))
+        LOG_FAIL("tor", "cannot atomically write onion hostname file %s",
                  hostname_path);
 
     if (addr_out) {
@@ -167,22 +215,17 @@ bool onion_identity_rotate(const char *datadir, char *old_addr_out,
     snprintf(hostname_path, sizeof(hostname_path), "%s/hostname", dir);
 
     uint8_t seed[32];
-    int fd = open(seed_path, O_RDONLY);
-    if (fd < 0) {
-        if (errno == ENOENT) {
+    if (platform_private_path_absent(seed_path)) {
             LOG_WARN("tor", "-onion-rotate: no persistent identity at %s — "
                             "nothing to archive", seed_path);
             return false;
-        }
-        LOG_FAIL("tor", "cannot open onion identity seed %s: %s",
-                 seed_path, strerror(errno));
     }
-    ssize_t got = read(fd, seed, sizeof(seed));
-    close(fd);
-    if (got != (ssize_t)sizeof(seed))
-        LOG_FAIL("tor", "onion identity seed corrupt (%zd bytes, want 32): "
+    struct platform_private_file seed_file;
+    platform_private_file_init(&seed_file);
+    if (!onion_identity_read_seed(seed_path, seed, &seed_file))
+        LOG_FAIL("tor", "onion identity seed corrupt or unsafe (want 32): "
                         "%s — refusing to rotate a corrupt identity; restore "
-                        "or delete the file deliberately", got, seed_path);
+                        "or delete the file deliberately", seed_path);
 
     char addr[57];
     if (!onion_identity_address_from_seed(seed, addr, sizeof(addr)))
@@ -190,19 +233,48 @@ bool onion_identity_rotate(const char *datadir, char *old_addr_out,
 
     char archive[1280];
     snprintf(archive, sizeof(archive), "%s/archive", dir);
-    if (mkdir(archive, 0700) != 0 && errno != EEXIST)
-        LOG_FAIL("tor", "mkdir %s failed: %s", archive, strerror(errno));
+    if (!platform_private_directory_ensure(archive))
+        LOG_FAIL("tor", "private directory %s failed: %s", archive,
+                 strerror(errno));
 
     char seed_arch[1408], host_arch[1408];
     snprintf(seed_arch, sizeof(seed_arch), "%s/identity_seed.%s",
              archive, addr);
     snprintf(host_arch, sizeof(host_arch), "%s/hostname.%s", archive, addr);
-    if (rename(seed_path, seed_arch) != 0)
-        LOG_FAIL("tor", "failed to archive onion identity seed to %s: %s",
-                 seed_arch, strerror(errno));
-    if (rename(hostname_path, host_arch) != 0 && errno != ENOENT)
-        LOG_FAIL("tor", "failed to archive onion hostname to %s: %s",
-                 host_arch, strerror(errno));
+    struct platform_private_file_identity seed_identity;
+    bool already_same = false;
+    if (!platform_private_file_identity(&seed_file, &seed_identity) ||
+        !platform_private_file_link_no_clobber(seed_path, seed_arch,
+                                               &seed_identity,
+                                               &already_same) ||
+        !platform_private_file_retire_if_identity(&seed_file, seed_path,
+                                                  &seed_identity)) {
+        platform_private_file_close(&seed_file);
+        LOG_FAIL("tor", "failed to archive exact onion identity seed to %s",
+                 seed_arch);
+    }
+    platform_private_file_close(&seed_file);
+
+    if (!platform_private_path_absent(hostname_path)) {
+        struct platform_private_file hostname_file;
+        struct platform_private_file_identity hostname_identity;
+        platform_private_file_init(&hostname_file);
+        already_same = false;
+        if (!platform_private_file_open_locked(hostname_path, &hostname_file) ||
+            !platform_private_file_identity(&hostname_file,
+                                             &hostname_identity) ||
+            !platform_private_file_link_no_clobber(hostname_path, host_arch,
+                                                   &hostname_identity,
+                                                   &already_same) ||
+            !platform_private_file_retire_if_identity(&hostname_file,
+                                                      hostname_path,
+                                                      &hostname_identity)) {
+            platform_private_file_close(&hostname_file);
+            LOG_FAIL("tor", "failed to archive exact onion hostname to %s",
+                     host_arch);
+        }
+        platform_private_file_close(&hostname_file);
+    }
 
     memcpy(old_addr_out, addr, 57);
     return true;

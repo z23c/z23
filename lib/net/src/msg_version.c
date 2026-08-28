@@ -8,6 +8,7 @@
  * Split from msgprocessor.c for maintainability. */
 
 #include "platform/time_compat.h"
+#include "platform/socket_compat.h"
 #include "net/msg_internal.h"
 #include "net/connman.h"
 #include "net/addrman.h"
@@ -31,7 +32,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <arpa/inet.h>
 
 /* External IP for addr advertisement — set by boot from -externalip= */
 static uint8_t g_external_ip[4];
@@ -43,7 +43,7 @@ static bool msg_version_parse_external_ip(const char *ip_str,
                                           uint8_t out_ip[4],
                                           uint16_t *out_port)
 {
-    char host[INET_ADDRSTRLEN];
+    char host[PLATFORM_IPV4_ADDRESS_TEXT_SIZE];
     const char *port_part = NULL;
     const char *colon;
     struct in_addr addr;
@@ -68,7 +68,7 @@ static bool msg_version_parse_external_ip(const char *ip_str,
         memcpy(host, ip_str, host_len + 1);
     }
 
-    if (inet_pton(AF_INET, host, &addr) != 1)
+    if (platform_socket_parse_address(AF_INET, host, &addr) != 1)
         LOG_RETURN(false, "net", "externalip is not IPv4: %s", ip_str);
 
     if (port_part) {
@@ -105,7 +105,7 @@ void msg_version_set_external_ip(const char *ip_str, uint16_t port)
 {
     uint8_t ip[4];
     uint16_t parsed_port = port;
-    char printable_ip[INET_ADDRSTRLEN];
+    char printable_ip[PLATFORM_IPV4_ADDRESS_TEXT_SIZE];
     struct in_addr addr;
 
     if (!msg_version_parse_external_ip(ip_str, port, ip, &parsed_port))
@@ -116,7 +116,8 @@ void msg_version_set_external_ip(const char *ip_str, uint16_t port)
     g_has_external_ip = true;
 
     memcpy(&addr, g_external_ip, 4);
-    if (inet_ntop(AF_INET, &addr, printable_ip, sizeof(printable_ip)))
+    if (platform_socket_format_address(AF_INET, &addr, printable_ip,
+                                       sizeof(printable_ip)))
         printf("External IP configured: %s:%u\n", printable_ip,
                g_external_port);
 }
@@ -126,7 +127,8 @@ bool msg_version_get_external_ip(char *buf, size_t buflen, uint16_t *port)
     if (!g_has_external_ip) return false;
     struct in_addr addr;
     memcpy(&addr, g_external_ip, 4);
-    if (!inet_ntop(AF_INET, &addr, buf, (socklen_t)buflen)) return false;
+    if (!platform_socket_format_address(AF_INET, &addr, buf, buflen))
+        return false;
     if (port) *port = g_external_port;
     return true;
 }
@@ -323,7 +325,7 @@ bool msg_version_classify_peer(const char *subver, uint64_t services,
 
 static bool addr_name_host_is_external(const char *addr_name)
 {
-    char ext[INET_ADDRSTRLEN] = {0};
+    char ext[PLATFORM_IPV4_ADDRESS_TEXT_SIZE] = {0};
     uint16_t port = 0;
     size_t host_len;
 

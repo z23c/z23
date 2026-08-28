@@ -10,15 +10,43 @@
 #include "platform/os_binary_slots.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+/* Directory-handle-relative open/rename/unlink, flock(2) and the POSIX file
+ * mode predicates the slot machinery is built on. mingw ships no
+ * <sys/file.h> at all, so these are pulled in only on the arm that uses
+ * them; the Windows arm below refuses instead of emulating them. */
+#if !defined(_WIN32)
+#include <fcntl.h>
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#endif
+
+/* Shared on every platform: this is pure text validation with no OS
+ * dependency, so a Windows build can still reject a malformed operator
+ * threshold at parse time even though every slot MUTATION below refuses.
+ * Nothing is weakened by that — the refusal lives on the calls that would
+ * actually touch the filesystem or exec a binary. */
+bool os_binary_slots_parse_threshold(const char *text, uint32_t *out)
+{
+    if (!text || !text[0] || !out)
+        return false;
+    for (const char *p = text; *p; p++)
+        if (*p < '0' || *p > '9')
+            return false;
+    errno = 0;
+    char *end = NULL;
+    unsigned long long value = strtoull(text, &end, 10);
+    if (errno == ERANGE || !end || *end != '\0' || value == 0 ||
+        value > UINT32_MAX)
+        return false;
+    *out = (uint32_t)value;
+    return true;
+}
 
 #if defined(_WIN32)
 
@@ -66,8 +94,9 @@
  */
 
 #define SLOT_WIN32_REFUSAL                                                 \
-    "binary A/B slots are unavailable on Windows: no directory-handle-"    \
-    "relative O_NOFOLLOW/O_DIRECTORY open and no descriptor-bound exec"
+    "binary A/B slot mutation is disabled on Windows pending a retained "  \
+    "directory capability transaction: no directory-handle-relative "      \
+    "O_NOFOLLOW/O_DIRECTORY open and no descriptor-bound exec"
 
 static bool slots_unavailable(char *error, size_t error_size)
 {
@@ -75,16 +104,6 @@ static bool slots_unavailable(char *error, size_t error_size)
     if (error && error_size)
         (void)snprintf(error, error_size, "%s", SLOT_WIN32_REFUSAL);
     return false;
-}
-
-bool os_binary_slots_parse_threshold(const char *text, uint32_t *out)
-{
-    /* Refuses with the rest of the module rather than validating input for a
-     * subsystem that cannot exist here; errno distinguishes this from a real
-     * parse failure. */
-    (void)text;
-    (void)out;
-    return slots_unavailable(NULL, 0);
 }
 
 bool os_binary_slots_ensure_directory(const char *slots_dir,
@@ -195,23 +214,6 @@ static bool join_slots_path(const char *slots_dir, const char *base,
         set_error(error, error_size, "slots path is too long");
         return false;
     }
-    return true;
-}
-
-bool os_binary_slots_parse_threshold(const char *text, uint32_t *out)
-{
-    if (!text || !text[0] || !out)
-        return false;
-    for (const char *p = text; *p; p++)
-        if (*p < '0' || *p > '9')
-            return false;
-    errno = 0;
-    char *end = NULL;
-    unsigned long long value = strtoull(text, &end, 10);
-    if (errno == ERANGE || !end || *end != '\0' || value == 0 ||
-        value > UINT32_MAX)
-        return false;
-    *out = (uint32_t)value;
     return true;
 }
 

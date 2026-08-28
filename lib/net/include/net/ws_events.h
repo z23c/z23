@@ -27,6 +27,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "platform/socket_compat.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -53,7 +54,7 @@ void ws_events_stop(void);
  *
  * Returns true if accepted, false if the client table is full
  * (caller should send 503 and close fd). */
-bool ws_events_accept(int fd, const char *domain_filter);
+bool ws_events_accept(platform_socket_t fd, const char *domain_filter);
 
 /* Current number of connected clients. */
 int ws_events_client_count(void);
@@ -71,7 +72,7 @@ size_t ws_events_status_json(char *buf, size_t cap);
  * Returns true if the upgrade succeeded (fd is now owned by
  * ws_events — caller must NOT close it).  Returns false on
  * handshake failure (caller closes fd normally). */
-bool ws_events_upgrade(int fd, const char *path,
+bool ws_events_upgrade(platform_socket_t fd, const char *path,
                         const char *ws_key, const char *query);
 
 #ifdef __cplusplus

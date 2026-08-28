@@ -41,6 +41,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "platform/socket_compat.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -71,7 +72,7 @@ extern "C" {
 struct rpc_timeout_slot {
     bool     in_use;
     bool     killed;             /* set by sweep when deadline exceeded */
-    int      client_fd;
+    platform_socket_t client_fd;
     uint32_t ip_be;              /* network byte order, 0x0100007F for loopback */
     int64_t  start_us;
     int      timeout_ms;         /* method-scoped deadline; 0 only if disabled */
@@ -120,7 +121,7 @@ void rpc_timeout_stop_watchdog(struct rpc_timeout_mgr *mgr);
  * back to best-effort (the SO_RCVTIMEO still protects against the
  * slowloris case). */
 int  rpc_timeout_register(struct rpc_timeout_mgr *mgr,
-                           int client_fd, uint32_t ip_be);
+                           platform_socket_t client_fd, uint32_t ip_be);
 
 /* Update the method name on an existing slot once the JSON-RPC request has
  * been parsed. Truncates to RPC_TIMEOUT_METHOD_LEN-1. */

@@ -7,6 +7,7 @@
 
 #include "rpc/server.h"
 #include "json/json.h"
+#include "platform/socket_compat.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -75,8 +76,8 @@ struct rpc_http_queue_stats {
  *                                deadline (ms; <0 restores the default,
  *                                0 disables age-based reclaim).
  * Not for production use — the server owns this queue while running. */
-bool rpc_http_test_queue_admit(int fd);
-int  rpc_http_test_queue_take(void);
+bool rpc_http_test_queue_admit(platform_socket_t fd);
+platform_socket_t rpc_http_test_queue_take(void);
 void rpc_http_test_queue_reset(int wait_ms);
 void rpc_http_test_queue_stats(struct rpc_http_queue_stats *out);
 
