@@ -203,6 +203,74 @@ bool platform_directory_list_real_sorted(const char *path,
     return true;
 }
 
+bool platform_directory_list_regular_sorted(
+    const char *path, struct platform_directory_list *out)
+{
+    if (!out) return false;
+    *out = (struct platform_directory_list){0};
+    wchar_t *root = utf8_to_wide(path);
+    if (!root) return false;
+    HANDLE root_handle = CreateFileW(
+        root, FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    FILE_ATTRIBUTE_TAG_INFO root_info;
+    bool root_ok = root_handle != INVALID_HANDLE_VALUE &&
+        GetFileInformationByHandleEx(root_handle, FileAttributeTagInfo,
+                                     &root_info, sizeof(root_info)) &&
+        (root_info.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+        (root_info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
+    free(root);
+    if (!root_ok) {
+        if (root_handle != INVALID_HANDLE_VALUE) CloseHandle(root_handle);
+        return false;
+    }
+    wchar_t *wide = utf8_to_wide(path);
+    if (!wide) { CloseHandle(root_handle); return false; }
+    size_t len = wcslen(wide);
+    if (len > SIZE_MAX - 3) {
+        free(wide);
+        CloseHandle(root_handle);
+        return false;
+    }
+    wchar_t *pattern = realloc(wide, (len + 3) * sizeof(*pattern));
+    if (!pattern) {
+        free(wide);
+        CloseHandle(root_handle);
+        return false;
+    }
+    if (len && pattern[len - 1] != L'/' && pattern[len - 1] != L'\\')
+        pattern[len++] = L'\\';
+    pattern[len++] = L'*';
+    pattern[len] = L'\0';
+
+    WIN32_FIND_DATAW data;
+    HANDLE find = FindFirstFileW(pattern, &data);
+    free(pattern);
+    if (find == INVALID_HANDLE_VALUE) {
+        CloseHandle(root_handle);
+        return false;
+    }
+    bool ok = true;
+    do {
+        DWORD attrs = data.dwFileAttributes;
+        if ((attrs & (FILE_ATTRIBUTE_DIRECTORY |
+                      FILE_ATTRIBUTE_REPARSE_POINT)) != 0)
+            continue;
+        char *name = wide_to_utf8(data.cFileName);
+        if (!name || !append_entry(out, name)) ok = false;
+        free(name);
+        if (!ok) break;
+    } while (FindNextFileW(find, &data));
+    DWORD error = GetLastError();
+    FindClose(find);
+    CloseHandle(root_handle);
+    if (error != ERROR_NO_MORE_FILES) ok = false;
+    if (!ok) { platform_directory_list_free(out); return false; }
+    qsort(out->entries, out->count, sizeof(*out->entries), entry_compare);
+    return true;
+}
+
 #else
 #include <dirent.h>
 #include <fcntl.h>
@@ -245,6 +313,38 @@ bool platform_directory_list_real_sorted(const char *path,
             break;
         }
         if (!S_ISDIR(st.st_mode) || S_ISLNK(st.st_mode)) continue;
+        if (!append_entry(out, entry->d_name)) { ok = false; break; }
+    }
+    if (closedir(dir) != 0) ok = false;
+    if (!ok) { platform_directory_list_free(out); return false; }
+    qsort(out->entries, out->count, sizeof(*out->entries), entry_compare);
+    return true;
+}
+
+bool platform_directory_list_regular_sorted(
+    const char *path, struct platform_directory_list *out)
+{
+    if (!out) return false;
+    *out = (struct platform_directory_list){0};
+    struct stat root_st;
+    if (lstat(path, &root_st) != 0 || !S_ISDIR(root_st.st_mode) ||
+        S_ISLNK(root_st.st_mode))
+        return false;
+    DIR *dir = opendir(path);
+    if (!dir) return false;
+    bool ok = true;
+    int fd = dirfd(dir);
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 ||
+            strcmp(entry->d_name, "..") == 0)
+            continue;
+        struct stat st;
+        if (fstatat(fd, entry->d_name, &st, AT_SYMLINK_NOFOLLOW) != 0) {
+            ok = false;
+            break;
+        }
+        if (!S_ISREG(st.st_mode) || S_ISLNK(st.st_mode)) continue;
         if (!append_entry(out, entry->d_name)) { ok = false; break; }
     }
     if (closedir(dir) != 0) ok = false;

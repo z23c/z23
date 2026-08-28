@@ -26,6 +26,11 @@ bool platform_directory_ensure(const char *path, int mode);
  * entries, symbolic links, and Windows reparse points are omitted. */
 bool platform_directory_list_real_sorted(const char *path,
                                          struct platform_directory_list *out);
+
+/* Return real, immediate child regular files in bytewise name order.
+ * Symbolic links and Windows reparse points are omitted. */
+bool platform_directory_list_regular_sorted(
+    const char *path, struct platform_directory_list *out);
 void platform_directory_list_free(struct platform_directory_list *list);
 
 #endif

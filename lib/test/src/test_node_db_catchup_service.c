@@ -28,6 +28,10 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+
 
 #define NDC_CHECK(name, expr) do { \
     printf("node_db_catchup_service: %s... ", (name)); \

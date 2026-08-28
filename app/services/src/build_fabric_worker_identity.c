@@ -9,12 +9,14 @@
 #include "crypto/sha3.h"
 #include "vcs/build_action.h"
 
-#include <errno.h>
-#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
+#if !defined(_WIN32)
+#include <errno.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 #define BFW_IDENTITY_PATH_MAX 4096
 
@@ -73,6 +75,16 @@ struct zcl_result build_fabric_worker_identity_load(
     const char *datadir, struct db_build_worker *worker,
     uint8_t signer_secret[32], uint8_t signer_pubkey[32])
 {
+#if defined(_WIN32)
+    (void)datadir;
+    (void)worker;
+    (void)signer_secret;
+    (void)signer_pubkey;
+    return ZCL_ERR(
+        -1,
+        "Windows build-worker identity is disabled until restricted-token, "
+        "Job Object, filesystem, resource, and network sandbox gates pass");
+#else
     if (!datadir || !datadir[0] || !worker || !signer_secret ||
         !signer_pubkey)
         return ZCL_ERR(-1, "worker identity requires datadir and outputs");
@@ -142,4 +154,5 @@ struct zcl_result build_fabric_worker_identity_load(
     bool have_toolchain = vcs_toolchain_capsule_v1_capture_gcc(&capsule);
     return build_fabric_worker_capabilities(
         have_toolchain, worker->capabilities, sizeof(worker->capabilities));
+#endif
 }

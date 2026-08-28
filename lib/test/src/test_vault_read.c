@@ -308,9 +308,9 @@ int test_vault_read(void)
         VR_CHECK("negative swap amount refused",
                  !swap_amount_to_zat(-0.00000001, &zat));
         VR_CHECK("NaN swap amount refused",
-                 !swap_amount_to_zat(NAN, &zat));
+                 !swap_amount_to_zat((double)NAN, &zat));
         VR_CHECK("infinite swap amount refused",
-                 !swap_amount_to_zat(INFINITY, &zat));
+                 !swap_amount_to_zat((double)INFINITY, &zat));
         VR_CHECK("int64-overflowing swap amount refused",
                  !swap_amount_to_zat(1.0e12, &zat));
         VR_CHECK("positive sub-zatoshi swap amount refused",

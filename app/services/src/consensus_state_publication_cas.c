@@ -14,20 +14,22 @@
 #include "crypto/sha3.h"
 #include "framework/condition.h"
 #include "json/json.h"
-#include "platform/file_sync.h"
 #include "storage/progress_store.h"
 #include "util/log_macros.h"
 #include "validation/main_state.h"
 
-#include <errno.h>
-#include <fcntl.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#if !defined(_WIN32)
+#include "platform/file_sync.h"
+#include <errno.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 #define CAS_SUBSYS "consensus_publication_cas"
 
@@ -40,10 +42,14 @@
 
 /* ── latest-decision snapshot for dumpstate ──────────────────────────── */
 static pthread_mutex_t g_latest_lock = PTHREAD_MUTEX_INITIALIZER;
+#if !defined(_WIN32)
 static pthread_mutex_t g_persist_lock = PTHREAD_MUTEX_INITIALIZER;
+#endif
 static bool g_latest_present;
 static struct consensus_state_publication_decision_record g_latest;
+#if !defined(_WIN32)
 static _Atomic uint64_t g_temp_nonce;
+#endif
 
 #ifdef ZCL_TESTING
 static consensus_state_publication_cas_after_temp_open_hook
@@ -387,6 +393,7 @@ void consensus_state_publication_cas_decide(
 }
 
 /* ── durable record I/O (FULL durability, contained) ──────────────────── */
+#if !defined(_WIN32)
 static bool valid_output_name(const char *name)
 {
     if (!name || !name[0])
@@ -634,7 +641,37 @@ struct zcl_result consensus_state_publication_cas_load(
         return ZCL_ERR(-55, "cas load: record failed digest verification");
     return ZCL_OK;
 }
+#else
+/* Windows may not emulate this directory-capability boundary with joined
+ * path strings. Refuse until the platform layer can perform relative opens,
+ * staging, replacement, and verification beneath one pinned directory
+ * HANDLE. These stubs perform no I/O and mutate no caller-owned record. */
+#ifdef ZCL_TESTING
+struct zcl_result consensus_state_publication_cas_persist_for_test(
+    int dir_fd, const char *name,
+    const struct consensus_state_publication_decision_record *record)
+{
+    (void)dir_fd;
+    (void)name;
+    (void)record;
+    return ZCL_ERR(-47, "cas persist: native Windows directory capability "
+                        "is unavailable");
+}
+#endif
 
+struct zcl_result consensus_state_publication_cas_load(
+    int dir_fd, const char *name,
+    struct consensus_state_publication_decision_record *out_record)
+{
+    (void)dir_fd;
+    (void)name;
+    (void)out_record;
+    return ZCL_ERR(-56, "cas load: native Windows directory capability "
+                        "is unavailable");
+}
+#endif
+
+#if !defined(_WIN32)
 static void store_latest(
     const struct consensus_state_publication_decision_record *record)
 {
@@ -643,11 +680,20 @@ static void store_latest(
     g_latest_present = true;
     pthread_mutex_unlock(&g_latest_lock);
 }
+#endif
 
 struct zcl_result consensus_state_publication_cas_run(
     const struct consensus_state_publication_cas_request *request,
     struct consensus_state_publication_decision_record *out_record)
 {
+#if defined(_WIN32)
+    (void)request;
+    (void)out_record;
+    /* Refuse before validating evidence, capturing the frontier, deciding,
+     * touching disk, or updating the process-local latest projection. */
+    return ZCL_ERR(-67, "cas run: native Windows directory capability "
+                        "is unavailable");
+#else
     struct consensus_state_publication_decision_record local;
     struct consensus_state_publication_decision_record *rec =
         out_record ? out_record : &local;
@@ -731,6 +777,7 @@ struct zcl_result consensus_state_publication_cas_run(
     if (!persisted.ok)
         return persisted;
     return ZCL_OK;
+#endif
 }
 
 /* ── dumpstate surface ────────────────────────────────────────────────── */

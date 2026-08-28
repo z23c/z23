@@ -4,6 +4,7 @@
  * and Windows file mappings. */
 
 #include "platform/read_mapping.h"
+#include "platform/positioned_file.h"
 
 #include <limits.h>
 
@@ -54,6 +55,33 @@ bool platform_read_mapping_open(struct platform_read_mapping *mapping,
     return true;
 }
 
+bool platform_read_mapping_open_positioned(
+    struct platform_read_mapping *mapping,
+    const struct platform_positioned_file *file, size_t size)
+{
+    if (!file) return false;
+#if defined(_WIN32)
+    if (!mapping || file->native == (uintptr_t)INVALID_HANDLE_VALUE ||
+        size == 0)
+        return false;
+    platform_read_mapping_close(mapping);
+    HANDLE section = CreateFileMappingW((HANDLE)file->native, NULL,
+                                        PAGE_READONLY, 0, 0, NULL);
+    if (!section) return false;
+    const uint8_t *view = MapViewOfFile(section, FILE_MAP_READ, 0, 0, size);
+    if (!view) {
+        CloseHandle(section);
+        return false;
+    }
+    mapping->native_mapping = section;
+    mapping->data = view;
+    mapping->size = size;
+    return true;
+#else
+    return platform_read_mapping_open(mapping, (int)file->native, size);
+#endif
+}
+
 void platform_read_mapping_advise_sequential(
     const struct platform_read_mapping *mapping)
 {
@@ -61,17 +89,22 @@ void platform_read_mapping_advise_sequential(
 #if defined(_WIN32)
     /* Resolve this Windows 8+ API dynamically so older MinGW header feature
      * levels do not decide whether this implementation compiles. */
+    struct platform_win_memory_range_entry {
+        PVOID virtual_address;
+        SIZE_T number_of_bytes;
+    };
     typedef BOOL (WINAPI *prefetch_virtual_memory_fn)(
-        HANDLE, ULONG_PTR, const WIN32_MEMORY_RANGE_ENTRY *, ULONG);
+        HANDLE, ULONG_PTR,
+        const struct platform_win_memory_range_entry *, ULONG);
     HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
     prefetch_virtual_memory_fn prefetch = kernel
         ? (prefetch_virtual_memory_fn)(void *)GetProcAddress(
               kernel, "PrefetchVirtualMemory")
         : NULL;
     if (prefetch) {
-        WIN32_MEMORY_RANGE_ENTRY range = {
-            .VirtualAddress = (PVOID)mapping->data,
-            .NumberOfBytes = mapping->size,
+        struct platform_win_memory_range_entry range = {
+            .virtual_address = (PVOID)mapping->data,
+            .number_of_bytes = mapping->size,
         };
         (void)prefetch(GetCurrentProcess(), 1, &range, 0);
     }

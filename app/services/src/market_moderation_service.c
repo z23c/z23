@@ -22,17 +22,16 @@
 #include "models/database.h"
 #include "models/file_offer.h"
 #include "base/log_macros.h"
-#include "util/write_all.h"
 #include "json/json.h"
+#include "platform/directory_compat.h"
+#include "platform/positioned_file.h"
+#include "platform/private_file.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 #define MM_TAG "market.moderation"
 #define MM_POLICY_MAGIC "zcl.market.moderation.v1"
@@ -97,8 +96,7 @@ static bool mm_policy_paths(const char *datadir, char directory[1400],
     }
     int n = snprintf(directory, 1400, "%s/market", datadir);
     if (n <= 0 || n >= 1400 ||
-        (create_directories && mkdir(directory, 0700) != 0 &&
-         errno != EEXIST)) {
+        (create_directories && !platform_directory_ensure(directory, 0700))) {
         if (error && error_capacity)
             snprintf(error, error_capacity,
                      "cannot create market policy directory");
@@ -138,9 +136,10 @@ enum market_moderation_profile market_moderation_profile_load(
     if (!mm_policy_paths(datadir, directory, path, false, error,
                          error_capacity))
         return mm_unreadable(relay_out);
-    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (fd < 0) {
-        if (errno == ENOENT) {
+    struct platform_positioned_file file;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path)) {
+        if (platform_private_path_absent(path)) {
             /* First boot / never configured: each leg's own default. */
             if (relay_out) *relay_out = MARKET_MODERATION_RELAY_ALL;
             if (ok_out) *ok_out = true;
@@ -153,21 +152,24 @@ enum market_moderation_profile market_moderation_profile_load(
                   strerror(errno));
         return mm_unreadable(relay_out);
     }
-    struct stat st;
+    struct platform_positioned_file_snapshot before, after;
     char buf[MM_POLICY_MAX_BYTES + 1];
-    ssize_t got = -1;
-    if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
-        (st.st_mode & 0777) == 0600 && st.st_size > 0 &&
-        st.st_size <= MM_POLICY_MAX_BYTES) {
-        got = 0;
-        while (got < st.st_size) {
-            ssize_t n = read(fd, buf + got, (size_t)(st.st_size - got));
-            if (n < 0 && errno == EINTR) continue;
-            if (n <= 0) { got = -1; break; }
-            got += n;
-        }
-    }
-    (void)close(fd);
+    int64_t got = -1;
+    if (platform_positioned_file_snapshot(&file, &before) &&
+        platform_positioned_file_is_private(&file) && before.size > 0 &&
+        before.size <= MM_POLICY_MAX_BYTES &&
+        platform_positioned_file_read(&file, buf, (size_t)before.size, 0) ==
+            (int64_t)before.size &&
+        platform_positioned_file_snapshot(&file, &after) &&
+        before.size == after.size && before.volume == after.volume &&
+        before.file_low == after.file_low &&
+        before.file_high == after.file_high &&
+        before.modified_seconds == after.modified_seconds &&
+        before.modified_nanoseconds == after.modified_nanoseconds &&
+        before.changed_seconds == after.changed_seconds &&
+        before.changed_nanoseconds == after.changed_nanoseconds)
+        got = (int64_t)before.size;
+    platform_positioned_file_close(&file);
     if (got < 0) {
         if (error && error_capacity)
             snprintf(error, error_capacity,
@@ -175,7 +177,7 @@ enum market_moderation_profile market_moderation_profile_load(
         LOG_ERROR(MM_TAG, "policy load: %s size/mode/read invalid", path);
         return mm_unreadable(relay_out);
     }
-    buf[got] = '\0';
+    buf[(size_t)got] = '\0';
     /* Exact match against every legal document, both legs enumerated —
      * the file is a choice from a closed set, never a parsed grammar, so
      * a byte an operator added by hand is a rejection rather than a
@@ -253,37 +255,37 @@ struct zcl_result market_moderation_profile_save(
     unsigned long long sequence =
         atomic_fetch_add_explicit(&g_temp_sequence, 1, memory_order_relaxed);
     char temporary[1600];
-    int n = snprintf(temporary, sizeof(temporary), "%s.tmp.%ld.%llu", path,
-                     (long)getpid(), sequence);
+    int n = snprintf(temporary, sizeof(temporary), "%s.tmp.%llu", path,
+                     sequence);
     if (n <= 0 || (size_t)n >= sizeof(temporary)) {
         LOG_ERROR(MM_TAG, "policy save: temp path too long");
         return ZCL_ERR(-4, "moderation policy temp path too long");
     }
-    int fd = open(temporary, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
-    bool wrote = fd >= 0 &&
-                 zcl_write_all(fd, body, (size_t)body_len) && fsync(fd) == 0;
-    if (fd >= 0 && close(fd) != 0)
-        wrote = false;
+    struct platform_private_file staging;
+    platform_private_file_init(&staging);
+    bool created = platform_private_file_create(temporary, &staging);
+    bool wrote = created && platform_private_file_write_at(
+        &staging, body, (size_t)body_len, 0) &&
+        platform_private_file_flush(&staging);
     if (!wrote) {
-        (void)unlink(temporary);
+        if (created) (void)platform_private_file_retire(&staging, temporary);
+        platform_private_file_close(&staging);
         LOG_ERROR(MM_TAG, "policy save: temp write failed for %s", path);
         return ZCL_ERR(-5, "moderation policy temp write failed for %s",
                        path);
     }
-    if (rename(temporary, path) != 0) {
-        (void)unlink(temporary);
+    if (!platform_private_file_replace(&staging, temporary, path)) {
+        (void)platform_private_file_retire(&staging, temporary);
+        platform_private_file_close(&staging);
         LOG_ERROR(MM_TAG, "policy save: rename to %s failed: %s", path,
                   strerror(errno));
         return ZCL_ERR(-6, "moderation policy rename failed: %s",
                        strerror(errno));
     }
-    int dfd = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    if (dfd < 0 || fsync(dfd) != 0) {
-        if (dfd >= 0) (void)close(dfd);
+    if (!platform_private_parent_flush(directory)) {
         LOG_ERROR(MM_TAG, "policy save: directory fsync failed");
         return ZCL_ERR(-7, "moderation policy directory fsync failed");
     }
-    (void)close(dfd);
     return ZCL_OK;
 }
 

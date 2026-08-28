@@ -331,9 +331,17 @@ static int lifetime_os_remove(const char *event, int dirfd, const char *path,
         rc = -1;
     } else {
 #if defined(__APPLE__)
-        /* Darwin exposes unlinkat(2) as a libc function; SYS_unlinkat is a
-         * Linux syscall number with no darwin equivalent. */
-        rc = unlinkat(dirfd, path, flags);
+        /* Darwin: calling our own unlinkat() wrapper recurses (the call
+         * resolves to the definition in this TU). libc's remove(3) is NOT
+         * wrapped here and deletes through libc's internal unlink, which
+         * the lifetime check above has already authorised. AT_FDCWD with
+         * no flags is the only form the lifetime model uses. */
+        if (dirfd == AT_FDCWD && flags == 0)
+            rc = remove(path);
+        else {
+            errno = ENOTSUP;
+            rc = -1;
+        }
 #else
         rc = (int)syscall(SYS_unlinkat, dirfd, path, flags);
 #endif
@@ -371,7 +379,15 @@ static int lifetime_os_rename(const char *event,
         rc = -1;
     } else {
 #if defined(__APPLE__)
-        rc = renameat(olddirfd, oldpath, newdirfd, newpath);
+        /* Same recursion risk as unlinkat: call libc's rename(2), which is
+         * NOT wrapped in this TU. AT_FDCWD is the only form the lifetime
+         * model uses; other dirfd combinations fall through to ENOTSUP. */
+        if (olddirfd == AT_FDCWD && newdirfd == AT_FDCWD)
+            rc = rename(oldpath, newpath);
+        else {
+            errno = ENOTSUP;
+            rc = -1;
+        }
 #else
         rc = (int)syscall(SYS_renameat, olddirfd, oldpath, newdirfd, newpath);
 #endif
