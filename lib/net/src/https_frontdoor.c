@@ -4,11 +4,7 @@
 #include "net/https_frontdoor.h"
 
 #include "platform/time_compat.h"
-
-#include <errno.h>
-#include <poll.h>
-#include <sys/socket.h>
-#include <unistd.h>
+#include "platform/socket_compat.h"
 
 bool https_frontdoor_deadline_start(int64_t *deadline_ms)
 {
@@ -27,16 +23,20 @@ bool https_frontdoor_deadline_active(int64_t deadline_ms)
     return now_ms > 0 && now_ms < deadline_ms;
 }
 
-bool https_frontdoor_wait(int fd, short events, short ready_mask,
+bool https_frontdoor_wait(platform_socket_t fd, short events, short ready_mask,
                           int64_t deadline_ms)
 {
     for (;;) {
         int64_t now_ms = platform_time_monotonic_ms();
         if (now_ms <= 0 || now_ms >= deadline_ms)
             return false;
-        struct pollfd pfd = {.fd = fd, .events = events};
-        int ready = poll(&pfd, 1, (int)(deadline_ms - now_ms));
-        if (ready < 0 && errno == EINTR)
+        int64_t remaining_ms = deadline_ms - now_ms;
+        int timeout_ms = remaining_ms > INT32_MAX
+                             ? INT32_MAX : (int)remaining_ms;
+        platform_socket_pollfd pfd = {.fd = fd, .events = events};
+        int ready = platform_socket_poll(&pfd, 1, timeout_ms);
+        if (ready < 0 && platform_socket_error_interrupted(
+                             platform_socket_last_error()))
             continue;
         return ready > 0 && (pfd.revents & ready_mask) != 0;
     }
@@ -48,13 +48,16 @@ int https_frontdoor_fd_read_byte(void *src, char *c)
     if (!reader || !c)
         return -1;
     for (;;) {
-        if (!https_frontdoor_wait(reader->fd, POLLIN, POLLIN | POLLHUP,
+        if (!https_frontdoor_wait(reader->fd, PLATFORM_SOCKET_POLL_READ,
+                                  PLATFORM_SOCKET_POLL_READ |
+                                      PLATFORM_SOCKET_POLL_HANGUP,
                                   reader->deadline_ms))
             return -1;
-        ssize_t n = recv(reader->fd, c, 1, MSG_DONTWAIT);
-        if (n < 0 && errno == EINTR)
+        int n = platform_socket_receive_nonblocking(reader->fd, c, 1);
+        int error = n < 0 ? platform_socket_last_error() : 0;
+        if (n < 0 && platform_socket_error_interrupted(error))
             continue;
-        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+        if (n < 0 && platform_socket_error_would_block(error))
             continue;
         return (int)n;
     }
@@ -68,26 +71,34 @@ int https_frontdoor_ssl_read_byte(void *src, char *c)
         if (n > 0)
             return n;
         int error = SSL_get_error(reader->ssl, n);
-        short events = error == SSL_ERROR_WANT_READ ? POLLIN : POLLOUT;
+        short events = error == SSL_ERROR_WANT_READ
+                           ? PLATFORM_SOCKET_POLL_READ
+                           : PLATFORM_SOCKET_POLL_WRITE;
         if ((error != SSL_ERROR_WANT_READ &&
              error != SSL_ERROR_WANT_WRITE) ||
-            !https_frontdoor_wait(reader->fd, events, events | POLLHUP,
+            !https_frontdoor_wait(reader->fd, events,
+                                  events | PLATFORM_SOCKET_POLL_HANGUP,
                                   reader->deadline_ms))
             return -1;
     }
 }
 
-bool https_frontdoor_ssl_accept(SSL *ssl, int fd, int64_t deadline_ms)
+bool https_frontdoor_ssl_accept(SSL *ssl, platform_socket_t fd,
+                                int64_t deadline_ms)
 {
     for (;;) {
         int accepted = SSL_accept(ssl);
         if (accepted == 1)
             return true;
         int error = SSL_get_error(ssl, accepted);
-        short events = error == SSL_ERROR_WANT_READ ? POLLIN : POLLOUT;
+        short events = error == SSL_ERROR_WANT_READ
+                           ? PLATFORM_SOCKET_POLL_READ
+                           : PLATFORM_SOCKET_POLL_WRITE;
         if ((error != SSL_ERROR_WANT_READ &&
              error != SSL_ERROR_WANT_WRITE) ||
-            !https_frontdoor_wait(fd, events, events | POLLHUP, deadline_ms))
+            !https_frontdoor_wait(fd, events,
+                                  events | PLATFORM_SOCKET_POLL_HANGUP,
+                                  deadline_ms))
             return false;
     }
 }
@@ -116,9 +127,9 @@ bool https_frontdoor_read_line(void *src, https_frontdoor_read_byte_fn read_byte
 
 static void https_frontdoor_client_close(struct https_frontdoor_client *client)
 {
-    if (client->fd >= 0)
-        close(client->fd);
-    client->fd = -1;
+    if (client->fd != PLATFORM_SOCKET_INVALID)
+        platform_socket_close(client->fd);
+    client->fd = PLATFORM_SOCKET_INVALID;
 }
 
 static void https_frontdoor_queue_purge_expired(
@@ -149,7 +160,7 @@ static void https_frontdoor_queue_purge_expired(
 bool https_frontdoor_queue_push(struct https_frontdoor_queue *queue,
                                 const struct https_frontdoor_client *client)
 {
-    if (!queue || !client || client->fd < 0)
+    if (!queue || !client || client->fd == PLATFORM_SOCKET_INVALID)
         return false;
     https_frontdoor_queue_purge_expired(queue);
     if (queue->len >= HTTPS_FRONTDOOR_QUEUE_CAP)

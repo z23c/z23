@@ -161,6 +161,60 @@ static inline int platform_socket_close(platform_socket_t sock)
 #endif
 }
 
+static inline int platform_socket_set_reuse_address(platform_socket_t sock,
+                                                     bool enabled)
+{
+    int value = enabled ? 1 : 0;
+#if defined(_WIN32)
+    return setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (const char *)&value,
+                      (int)sizeof(value));
+#else
+    return setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &value, sizeof(value));
+#endif
+}
+
+static inline int platform_socket_bind(platform_socket_t sock,
+                                       const struct sockaddr *address,
+                                       size_t address_size)
+{
+#if defined(_WIN32)
+    if (address_size > INT32_MAX) return SOCKET_ERROR;
+    return bind(sock, address, (int)address_size);
+#else
+    return bind(sock, address, (socklen_t)address_size);
+#endif
+}
+
+static inline int platform_socket_listen(platform_socket_t sock, int backlog)
+{ return listen(sock, backlog); }
+
+static inline platform_socket_t platform_socket_accept(
+    platform_socket_t sock, struct sockaddr *address, size_t *address_size)
+{
+    if (!address_size) return PLATFORM_SOCKET_INVALID;
+#if defined(_WIN32)
+    if (*address_size > INT32_MAX) return PLATFORM_SOCKET_INVALID;
+    int size = (int)*address_size;
+    SOCKET accepted = accept(sock, address, &size);
+    if (accepted != INVALID_SOCKET) *address_size = (size_t)size;
+    return accepted;
+#else
+    socklen_t size = (socklen_t)*address_size;
+    int accepted = accept(sock, address, &size);
+    if (accepted >= 0) *address_size = (size_t)size;
+    return accepted;
+#endif
+}
+
+static inline int platform_socket_shutdown_both(platform_socket_t sock)
+{
+#if defined(_WIN32)
+    return shutdown(sock, SD_BOTH);
+#else
+    return shutdown(sock, SHUT_RDWR);
+#endif
+}
+
 static inline bool platform_socket_set_nonblocking(platform_socket_t sock,
                                                     bool enabled)
 {
