@@ -5,6 +5,7 @@
  * separator, a directory, an oversize file, a missing name, and a leaf
  * reparse point escaping the root. Exits 77 (skip) off Windows. */
 #include "platform/safe_root_read.h"
+#include "base/safe_alloc.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,7 +26,9 @@ static bool write_utf8(const char *path, const char *bytes)
 {
     int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
                                 NULL, 0);
-    wchar_t *wide = n > 0 ? malloc((size_t)n * sizeof(*wide)) : NULL;
+    wchar_t *wide = n > 0 ? zcl_malloc((size_t)n * sizeof(*wide),
+                                       "winacceptance.safe_root_read.wide")
+                          : NULL;
     if (!wide || !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
                                       wide, n)) { free(wide); return false; }
     HANDLE h = CreateFileW(wide, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
