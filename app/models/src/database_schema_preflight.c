@@ -24,6 +24,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#if defined(_WIN32)
+#include <io.h>
+#endif
+
 #define NODE_DB_PREFLIGHT_URI_MAX 128
 
 struct preflight_sidecars {
@@ -47,7 +51,11 @@ static bool read_header(int fd, unsigned char header[20])
 {
     size_t off = 0;
     while (off < 20) {
+#if defined(_WIN32)
+        int n = _read(fd, header + off, (unsigned int)(20 - off));
+#else
         ssize_t n = pread(fd, header + off, 20 - off, (off_t)off);
+#endif
         if (n > 0) {
             off += (size_t)n;
             continue;
@@ -307,7 +315,11 @@ struct node_db_schema_preflight node_db_schema_preflight_existing(
         return preflight_result(NODE_DB_SCHEMA_PREFLIGHT_FRESH, 0,
                                 "empty database file");
 
+#if defined(_WIN32)
+    int fd = _open(path, _O_RDONLY | _O_BINARY);
+#else
     int fd = open(path, O_RDONLY | O_CLOEXEC);
+#endif
     if (fd < 0)
         return preflight_result(NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN, 0,
             "SCHEMA_VERSION_UNKNOWN: database file cannot be read");
