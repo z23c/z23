@@ -4607,7 +4607,15 @@ $(BIN_DIR)/corpus-census: tools/corpus_census.c \
 		lib/base/src/cleanse.c lib/base/src/log_level.c \
 		lib/base/src/safe_alloc.c \
 		lib/codec/src/cursor.c lib/json/src/json.c \
-		lib/platform/src/rng.c lib/platform/src/clock.c
+		lib/platform/src/rng.c lib/platform/src/clock.c \
+		lib/platform/src/positioned_file.c \
+		lib/platform/src/read_mapping.c \
+		lib/platform/src/private_file.c \
+		lib/platform/src/private_directory.c \
+		lib/platform/src/private_acl_internal.c \
+		lib/platform/src/file_metadata.c \
+		lib/platform/src/directory_compat.c \
+		lib/platform/src/os_proc.c
 	@mkdir -p $(dir $@)
 	# --gc-sections: ed25519's batch-verify path (never called here) pulls
 	# zcl_random_secret_bytes -> sealed-tree random.c; the collector drops it.
