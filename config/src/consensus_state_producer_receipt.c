@@ -10,13 +10,12 @@
 #include "core/utiltime.h"
 #include "util/clientversion.h"
 #include "util/log_macros.h"
+#include "platform/os_proc.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
 
 
 /* Singleton start-of-fold ownership marker in the producer's progress.kv.
@@ -85,13 +84,17 @@ static bool decode_sha256_identity(const char *hex, uint8_t out[32])
     return true;
 }
 
-/* SHA3-256 of the running executable's on-disk image — the binding the
- * exporter recomputes from /proc/self/exe. Must match running_binary_digest()
- * in consensus_state_snapshot_export_proof.c byte for byte. */
+/* SHA3-256 of the running executable's on-disk image -- the binding the
+ * exporter recomputes. Must match running_binary_digest() in
+ * consensus_state_snapshot_export_proof.c byte for byte. Reaching the
+ * running image is the platform layer's job: it holds the running inode
+ * where the host offers one, and resolves the executing image by other
+ * means where it does not -- so this binding exists on every host, not
+ * only the ones with /proc. */
 bool producer_running_binary_digest(uint8_t out[32])
 {
-    int fd = open("/proc/self/exe", O_RDONLY | O_CLOEXEC);
-    if (fd < 0) {
+    FILE *fp = os_proc_open_self_exe();
+    if (!fp) {
         LOG_WARN(PRODUCER_RECEIPT_SUBSYS, "running executable open failed: %s",
                  strerror(errno));
         return false;
@@ -101,19 +104,16 @@ bool producer_running_binary_digest(uint8_t out[32])
     uint8_t buffer[32768];
     bool ok = true;
     for (;;) {
-        ssize_t n = read(fd, buffer, sizeof(buffer));
-        if (n > 0) {
-            sha3_256_write(&ctx, buffer, (size_t)n);
+        size_t n = fread(buffer, 1, sizeof(buffer), fp);
+        if (n > 0)
+            sha3_256_write(&ctx, buffer, n);
+        if (n == sizeof(buffer))
             continue;
-        }
-        if (n == 0)
-            break;
-        if (errno == EINTR)
-            continue;
-        ok = false;
+        if (ferror(fp))
+            ok = false;
         break;
     }
-    if (close(fd) != 0)
+    if (fclose(fp) != 0)
         ok = false;
     if (ok)
         sha3_256_finalize(&ctx, out);
