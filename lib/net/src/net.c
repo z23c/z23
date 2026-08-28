@@ -2557,6 +2557,36 @@ bool accept_connection(struct net_manager *nm, const struct listen_socket *ls)
     setsockopt(sock, IPPROTO_TCP, TCP_NODELAY,
                (const char *)&one, sizeof(one));
 
+    /* The accepted socket is a NEW socket and does NOT inherit the listener's
+     * non-blocking mode: POSIX accept(2) does not carry file status flags
+     * across, and Winsock does not propagate FIONBIO. It arrives BLOCKING on
+     * every platform.
+     *
+     * On POSIX that stays invisible, because socket_send_data() asks for
+     * non-blocking per call with MSG_DONTWAIT. Windows has no such flag --
+     * the _WIN32 arm at the top of this file defines MSG_DONTWAIT to 0 -- so
+     * there the same send() is an ordinary blocking send. One stalled inbound
+     * peer would then park the caller inside send() holding cs_send, and on
+     * the reactor write path (connman.c thread_socket_handler) cs_nodes as
+     * well, stalling every other peer and every subsystem that walks nodes[].
+     * A reader on Linux cannot observe that, which is why it is stated here.
+     *
+     * Fail closed. Both I/O paths ASSUME this socket is non-blocking: they
+     * treat EWOULDBLOCK as the normal "nothing more right now" answer and
+     * never bound a blocking call with SO_SNDTIMEO or SO_RCVTIMEO. A socket
+     * whose mode we could not set is one the reactor cannot serve without
+     * risking that stall, so refuse the peer rather than admit it. Same
+     * statement, same order, as bind_listen_port above and as the outbound
+     * dial in connect_socket_start(). */
+    if (!set_socket_nonblocking(sock, true)) {
+        close_socket(&sock);
+        LOG_FAIL("net",
+                 "set_socket_nonblocking failed for accepted inbound socket, "
+                 "error=%d -- refusing peer: a blocking peer socket can stall "
+                 "the reactor inside send()",
+                 platform_socket_last_error());
+    }
+
     struct p2p_node *node = p2p_node_create(nm, sock, &addr, "", true);
     if (!node) {
         close_socket(&sock);

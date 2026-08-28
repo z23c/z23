@@ -33,6 +33,9 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <sys/socket.h>   /* socketpair() — slow-reader send-queue fixture */
+#include <netinet/in.h>   /* sockaddr_in — accept() non-blocking fixture */
+#include <arpa/inet.h>
+#include <fcntl.h>        /* F_GETFL — reads back the accepted socket mode */
 #include "util/safe_alloc.h"
 
 static int test_onion_peer_discover(const char *datadir,
@@ -2163,6 +2166,68 @@ int test_net(void)
         ok = ok && nm.num_listen_sockets == 1;
         ok = ok && nm.listen_sockets[0].local_port > 0;
 
+        net_manager_free(&nm);
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+
+    /* accepted inbound socket is non-blocking
+     *
+     * accept(2) hands back a NEW socket that does not inherit the listener's
+     * non-blocking mode, and Winsock does not propagate FIONBIO either. The
+     * send path treats EWOULDBLOCK as its normal answer and never sets
+     * SO_SNDTIMEO, so a blocking peer socket can park the reactor inside
+     * send() while it holds cs_send -- and cs_nodes on the connman write
+     * path. On POSIX that stays hidden because socket_send_data() passes
+     * MSG_DONTWAIT per call; on Windows MSG_DONTWAIT is 0, so the stall is
+     * real there and invisible here.
+     *
+     * Winsock offers no way to READ a socket's blocking mode back, so the
+     * assertion below can only be made on the POSIX side. That is still the
+     * right regression lock: the bug is one missing statement on a shared
+     * code path, and this pins that statement's presence. */
+    {
+        printf("accept: inbound socket is set non-blocking... ");
+        struct net_manager nm;
+        struct net_service svc;
+        unsigned char ip4[4] = {127, 0, 0, 1};
+        net_manager_init(&nm);
+        net_service_init(&svc);
+        net_addr_set_ipv4(&svc.addr, ip4);
+        svc.port = 0;
+
+        bool ok = bind_listen_port(&nm, &svc, false);
+        ok = ok && nm.num_listen_sockets == 1;
+
+        zcl_socket_t client = ZCL_INVALID_SOCKET;
+        if (ok) {
+            struct sockaddr_in to;
+            memset(&to, 0, sizeof(to));
+            to.sin_family = AF_INET;
+            to.sin_port = htons(nm.listen_sockets[0].local_port);
+            to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            client = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+            ok = ok && client != ZCL_INVALID_SOCKET;
+            ok = ok && connect(client, (struct sockaddr *)&to, sizeof(to)) == 0;
+        }
+
+        /* The listener is non-blocking, so accept() can legitimately report
+         * EWOULDBLOCK before the kernel has completed the handshake. Retry
+         * rather than let a scheduling delay read as a defect. */
+        bool accepted = false;
+        for (int i = 0; ok && i < 200 && !accepted; i++) {
+            accepted = accept_connection(&nm, &nm.listen_sockets[0]);
+            if (!accepted) platform_sleep_ms(5);
+        }
+        ok = ok && accepted;
+        ok = ok && nm.num_nodes == 1;
+#ifndef _WIN32
+        if (ok) {
+            int flags = fcntl(nm.nodes[0]->socket, F_GETFL);
+            ok = ok && flags >= 0 && (flags & O_NONBLOCK) != 0;
+        }
+#endif
+        if (client != ZCL_INVALID_SOCKET) close_socket(&client);
         net_manager_free(&nm);
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
