@@ -29,6 +29,7 @@ first	doctor	what this host is still missing, with the exact install line
 first	setup	arm the git hooks and generate compile_commands.json (idempotent)
 first	vendor	one-time build of the vendored static archives from pinned sources
 first	all	build the node, the CLI and the test binary
+loop	new-app	scaffold a GUI app from zhello: make new-app NAME=myapp, then make myapp
 loop	build-only	compile every translation unit, no link — genuinely parallel under -j
 loop	syntax-check	whole-tree no-link syntax pass in one compiler invocation
 loop	dev-bin	non-LTO local node binary at build/bin/zclassic23-dev

@@ -43,6 +43,9 @@ exact packages without a central registry.
 - [`../README.md`](../README.md) — what the product is and what users can do.
 - [`GETTING_STARTED.md`](GETTING_STARTED.md) — build and run it on a fresh
   machine, and what peer discovery does with no flags.
+- [`MACOS_GUI_QUICKSTART.md`](MACOS_GUI_QUICKSTART.md) — a fresh Mac with only
+  Apple's command-line tools to a native GUI application: scaffold it from
+  `packages/zhello`, see your change on screen, ship a reproducible `.app`.
 - [`WINDOWS.md`](WINDOWS.md) — MSYS2 UCRT64 native C23 development, the
   remaining Win32 port boundary, and the current WSL2 full-node/service lane.
 - [`PARAMS.md`](PARAMS.md) — why a node validates shielded proofs out of the
