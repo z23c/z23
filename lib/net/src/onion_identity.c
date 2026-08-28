@@ -5,6 +5,7 @@
 #include "net/tor_integration.h"
 #include "crypto/ed25519.h"
 #include "crypto/random_secret.h"
+#include "platform/private_directory.h"
 #include "sha3/sha3.h"
 #include "util/log_macros.h"
 
@@ -12,7 +13,6 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <unistd.h>
 
 static void base32_lower_encode(const uint8_t *data, size_t len, char *out)
@@ -75,10 +75,12 @@ static bool onion_identity_dir(const char *datadir, char *dir_out,
 
     char tor_data[1024];
     snprintf(tor_data, sizeof(tor_data), "%s/tor_data", datadir);
-    if (mkdir(tor_data, 0700) != 0 && errno != EEXIST)
-        LOG_FAIL("tor", "mkdir %s failed: %s", tor_data, strerror(errno));
-    if (mkdir(dir_out, 0700) != 0 && errno != EEXIST)
-        LOG_FAIL("tor", "mkdir %s failed: %s", dir_out, strerror(errno));
+    if (!platform_private_directory_ensure(tor_data))
+        LOG_FAIL("tor", "private directory %s failed: %s", tor_data,
+                 strerror(errno));
+    if (!platform_private_directory_ensure(dir_out))
+        LOG_FAIL("tor", "private directory %s failed: %s", dir_out,
+                 strerror(errno));
     return true;
 }
 
@@ -190,8 +192,9 @@ bool onion_identity_rotate(const char *datadir, char *old_addr_out,
 
     char archive[1280];
     snprintf(archive, sizeof(archive), "%s/archive", dir);
-    if (mkdir(archive, 0700) != 0 && errno != EEXIST)
-        LOG_FAIL("tor", "mkdir %s failed: %s", archive, strerror(errno));
+    if (!platform_private_directory_ensure(archive))
+        LOG_FAIL("tor", "private directory %s failed: %s", archive,
+                 strerror(errno));
 
     char seed_arch[1408], host_arch[1408];
     snprintf(seed_arch, sizeof(seed_arch), "%s/identity_seed.%s",
