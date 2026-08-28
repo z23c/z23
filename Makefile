@@ -472,7 +472,8 @@ LIB_SRCS := $(filter-out lib/platform/src/os_sandbox_stub.c \
 	lib/util/src/self_backtrace_stub.c,$(LIB_SRCS))
 else ifeq ($(ZCL_HOST_WINDOWS),1)
 LIB_SRCS := $(filter-out lib/platform/src/os_sandbox_linux.c \
-	lib/util/src/self_backtrace_stub.c,$(LIB_SRCS))
+	lib/util/src/self_backtrace_stub.c \
+	lib/vcs/src/vcs_devloop.c,$(LIB_SRCS))
 else
 LIB_SRCS := $(filter-out lib/platform/src/os_sandbox_linux.c \
 	lib/util/src/self_backtrace.c,$(LIB_SRCS))
@@ -753,6 +754,19 @@ ZCL_WARN_UNUSED_RESULT = -Wno-unused-result
 # suppression-ok: separate decision from the unused-result deletion; blockers are source sites, measured, not assumed
 ZCL_WARN_STRINGOP_OVERFLOW = $(if $(filter Darwin,$(ZCL_HOST_OS)),,-Wno-stringop-overflow)
 
+# CC may be an in-tree cache wrapper followed by the real compiler.  Derive
+# warning support from the final driver token so `make CC=clang` selects a
+# genuinely Clang-clean profile instead of feeding it GCC-only diagnostics.
+ZCL_CC_DRIVER := $(notdir $(lastword $(CC)))
+ZCL_CC_IS_CLANG := $(if $(findstring clang,$(ZCL_CC_DRIVER)),1,)
+ifneq ($(ZCL_CC_IS_CLANG),)
+ZCL_WARN_MAYBE_UNINITIALIZED =
+ZCL_WARN_STRINGOP_OVERFLOW =
+ZCL_WARN_FORMAT_TRUNCATION =
+else
+ZCL_WARN_FORMAT_TRUNCATION = -Wno-format-truncation
+endif
+
 # ── Warning gates BEYOND -Wall -Wextra -pedantic ────────────────────────────
 #
 # Every flag below was measured at ZERO warnings over BOTH -Werror-bearing
@@ -810,7 +824,7 @@ ZCL_WARN_STRINGOP_OVERFLOW = $(if $(filter Darwin,$(ZCL_HOST_OS)),,-Wno-stringop
 # at these flags minus -Werror, once plain and once with -DZCL_TESTING.
 # Confirm the rig is armed before believing a zero: a deliberately bogus
 # -Wnot-a-real-flag must report one error per TU.
-ifeq ($(ZCL_HOST_OS),Darwin)
+ifneq ($(strip $(filter Darwin,$(ZCL_HOST_OS)) $(ZCL_CC_IS_CLANG)),)
 ZCL_WARN_EXTRA_GATES = \
 	-Wundef -Wstrict-prototypes -Wdouble-promotion \
 	-Wshift-overflow -Walloca -Wvla
@@ -840,7 +854,7 @@ ZCL_DEV_OPT ?= -Og
 ZCL_DEV_HOT_OPT ?= -O2
 ZCL_DEV_LINKER ?= $(shell tools/dev/dev-linker-select.sh)
 DEV_CFLAGS = $(filter-out -O3 $(ZCL_LTO_FLAG) -Werror,$(CACHED_CFLAGS)) $(ZCL_DEV_OPT) -g3 -DZCL_DEV_BUILD \
-	-Wno-deprecated-declarations -Wno-format-truncation $(ZCL_WARN_MAYBE_UNINITIALIZED)
+	-Wno-deprecated-declarations $(ZCL_WARN_FORMAT_TRUNCATION) $(ZCL_WARN_MAYBE_UNINITIALIZED)
 DEV_HOT_CFLAGS = $(filter-out $(ZCL_DEV_OPT),$(DEV_CFLAGS)) $(ZCL_DEV_HOT_OPT)
 DEV_LDFLAGS = $(filter-out $(ZCL_LTO_FLAG),$(LDFLAGS)) $(ZCL_DEV_LINKER)
 

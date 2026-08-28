@@ -5,6 +5,113 @@
 
 #include "platform/time_compat.h"
 #include "platform/process_compat.h"
+#include "platform/process_lifecycle.h"
+
+#if defined(_WIN32)
+
+#include <stdatomic.h>
+#include <stdio.h>
+#include <string.h>
+
+static _Atomic bool g_process_cancel_requested;
+static zcl_devloop_process_cancel_poll_fn g_process_cancel_poll;
+static void *g_process_cancel_poll_opaque;
+
+void zcl_devloop_process_cancel_request(void)
+{
+    atomic_store_explicit(&g_process_cancel_requested, true,
+                          memory_order_release);
+}
+
+void zcl_devloop_process_cancel_clear(void)
+{ atomic_store_explicit(&g_process_cancel_requested, false,
+                        memory_order_release); }
+
+bool zcl_devloop_process_cancel_requested(void)
+{ return atomic_load_explicit(&g_process_cancel_requested,
+                              memory_order_acquire); }
+
+void zcl_devloop_process_cancel_poll_set(
+    zcl_devloop_process_cancel_poll_fn poll_fn, void *opaque)
+{ g_process_cancel_poll = poll_fn; g_process_cancel_poll_opaque = opaque; }
+
+void zcl_devloop_process_cancel_poll_clear(void)
+{ g_process_cancel_poll = NULL; g_process_cancel_poll_opaque = NULL; }
+
+static bool process_run_impl(const char *cwd, int exec_fd,
+                             const char *const argv[], int timeout_ms,
+                             bool raise_stack,
+                             struct zcl_devloop_process_result *out)
+{
+    (void)raise_stack;
+    size_t image_len = argv && argv[0] ? strlen(argv[0]) : 0u;
+    if (!cwd || !cwd[0] || !argv || !argv[0] || !out || timeout_ms <= 0 ||
+        exec_fd >= 0 ||
+        !((image_len >= 3u && argv[0][1] == ':' &&
+           (argv[0][2] == '\\' || argv[0][2] == '/')) ||
+          (image_len >= 2u && argv[0][0] == '\\' && argv[0][1] == '\\'))) {
+        if (out) { memset(out, 0, sizeof(*out)); out->exit_code = -1; }
+        fprintf(stderr, "[devloop] process: Windows requires an absolute "
+                        "native executable path; descriptor execution is unavailable\n");
+        return false;
+    }
+    memset(out, 0, sizeof(*out)); out->exit_code = -1;
+#if !defined(ZCL_DEV_BUILD) && !defined(ZCL_TESTING)
+    fprintf(stderr, "[devloop] process execution is disabled outside a dev build\n");
+    return false;
+#else
+    static const char *const empty_environment[] = {NULL};
+    struct platform_process child;
+    platform_process_init(&child);
+    struct platform_process_options options = {
+        .image = argv[0], .argv = argv, .cwd = cwd,
+        .env = empty_environment, .inherited = NULL, .inherited_count = 0};
+    int64_t started = platform_time_monotonic_us();
+    if (!platform_process_start_hidden(&child, &options))
+        return false;
+    out->startup_us = platform_time_monotonic_us() - started;
+    uint32_t code = 0;
+    enum platform_process_wait_result waited = PLATFORM_PROCESS_WAIT_RUNNING;
+    while (waited == PLATFORM_PROCESS_WAIT_RUNNING) {
+        if (!zcl_devloop_process_cancel_requested() && g_process_cancel_poll &&
+            g_process_cancel_poll(g_process_cancel_poll_opaque))
+            zcl_devloop_process_cancel_request();
+        int64_t elapsed = platform_time_monotonic_us() - started;
+        if (zcl_devloop_process_cancel_requested() ||
+            elapsed >= (int64_t)timeout_ms * 1000) {
+            out->cancelled = zcl_devloop_process_cancel_requested();
+            out->timed_out = !out->cancelled;
+            (void)platform_process_terminate(&child,
+                                             out->cancelled ? 125u : 124u);
+        }
+        waited = platform_process_wait(&child, 5u, &code);
+    }
+    int64_t elapsed = platform_time_monotonic_us() - started;
+    out->elapsed_ms = elapsed / 1000;
+    out->body_us = elapsed > out->startup_us ? elapsed - out->startup_us : 0;
+    bool ok = waited == PLATFORM_PROCESS_WAIT_EXITED;
+    if (ok) out->exit_code = (int)code;
+    platform_process_close(&child);
+    return ok;
+#endif
+}
+
+bool zcl_devloop_process_run(const char *cwd, const char *const argv[],
+                             int timeout_ms,
+                             struct zcl_devloop_process_result *out)
+{ return process_run_impl(cwd, -1, argv, timeout_ms, false, out); }
+
+bool zcl_devloop_process_run_test(const char *cwd, const char *const argv[],
+                                  int timeout_ms,
+                                  struct zcl_devloop_process_result *out)
+{ return process_run_impl(cwd, -1, argv, timeout_ms, true, out); }
+
+bool zcl_devloop_process_run_fd(const char *cwd, int exec_fd,
+                                const char *const argv[], int timeout_ms,
+                                struct zcl_devloop_process_result *out)
+{ return process_run_impl(cwd, exec_fd, argv, timeout_ms, false, out); }
+
+#else
 
 #include <ctype.h>
 #include <dirent.h>
@@ -418,3 +525,5 @@ bool zcl_devloop_process_run_fd(const char *cwd, int exec_fd,
     }
     return process_run_impl(cwd, exec_fd, argv, timeout_ms, false, out);
 }
+
+#endif /* _WIN32 */

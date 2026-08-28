@@ -153,8 +153,41 @@ static int test_rom_watch_null_args(void)
 
     TEST("rom watch: NULL fetch/opts is a non-zero invalid-usage return") {
         ASSERT(rom_watch_run(NULL, NULL, NULL) != 0);
-        struct rom_watch_opts opts = { 0, 1, false, NULL };
+        struct rom_watch_opts opts = { .max_iters = 1 };
         ASSERT(rom_watch_run(NULL, NULL, &opts) != 0);
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
+static bool stop_after_first_frame(void *opaque)
+{
+    int *polls = (int *)opaque;
+    *polls += 1;
+    return *polls >= 2;
+}
+
+static int test_rom_watch_stop_callback(void)
+{
+    int failures = 0;
+
+    TEST("rom watch: headless stop callback exits after the current frame") {
+        FILE *f = tmpfile();
+        ASSERT(f != NULL);
+        struct fake_fetch_ctx ctx = { 0, false };
+        int stop_polls = 0;
+        struct rom_watch_opts opts = {
+            .interval_ms = 500,
+            .stream = f,
+            .stop = stop_after_first_frame,
+            .stop_ctx = &stop_polls
+        };
+        int rc = rom_watch_run(fake_fetch_ok, &ctx, &opts);
+        ASSERT_EQ(rc, 0);
+        ASSERT_EQ(ctx.calls, 1);
+        ASSERT_EQ(stop_polls, 2);
+        fclose(f);
         PASS();
     } _test_next:;
 
@@ -313,6 +346,7 @@ int test_rom_watch_loop(void)
     failures += test_rom_watch_three_frames();
     failures += test_rom_watch_fetch_error_continues();
     failures += test_rom_watch_null_args();
+    failures += test_rom_watch_stop_callback();
     failures += test_rom_offline_wellformed_log();
     failures += test_rom_offline_malformed_log();
     failures += test_rom_offline_rejects_empty_datadir();

@@ -37,6 +37,7 @@
 #include "command/native_command.h"
 #include "command/native_zcode_join.h"
 
+#include "base/safe_alloc.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #if defined(_WIN32)

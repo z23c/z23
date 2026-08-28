@@ -9,6 +9,7 @@
 
 #include "platform/os_proc.h"
 
+#include <errno.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,7 +19,6 @@
 #include <shellapi.h>
 #include <psapi.h>
 #else
-#include <errno.h>
 #include <signal.h>
 #include <sys/resource.h>
 #include <sys/types.h>

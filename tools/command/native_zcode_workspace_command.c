@@ -6,6 +6,7 @@
 #include "base/hex.h"
 #include "hotswap/hotswap_service.h"
 #include "json/json.h"
+#include "platform/directory_compat.h"
 #include "services/zcode_workspace_view_service.h"
 #include "vcs/package_mapping.h"
 #include "vcs/vcs_devloop.h"
@@ -395,7 +396,8 @@ static bool workspace_manifest_job_preflight(
     struct vcs_devloop_publication_receipt mapping = {0};
     uint8_t progress_root[32];
     bool valid = have_workspace && have_job &&
-        realpath(workspace, binding->workspace) != NULL &&
+        platform_directory_canonical_real(
+            workspace, binding->workspace, sizeof(binding->workspace)) &&
         strlen(job_hex) == 64u &&
         zcl_hex_decode_lower(job_hex, binding->job_root, 32) &&
         vcs_devloop_publication_job_load(

@@ -25,19 +25,22 @@ struct json_value;
  * going. `ctx` is the caller's opaque state. */
 typedef bool (*rom_watch_fetch_fn)(void *ctx, struct json_value *out,
                                    char *err, size_t errlen);
+typedef bool (*rom_watch_stop_fn)(void *ctx);
 
 struct rom_watch_opts {
     int   interval_ms; /* poll cadence; default 2000, clamped to [500, 60000] */
     int   max_iters;   /* stop after N renders; 0 = until interrupted (SIGINT) */
     bool  ansi;        /* in-place cursor-up redraw — only pass true for a TTY */
     FILE *stream;      /* output sink; NULL means stdout */
+    rom_watch_stop_fn stop; /* optional hidden/headless-safe stop event poll */
+    void *stop_ctx;
 };
 
-/* Run the watch loop. Returns 0 on a clean finish (max_iters reached or SIGINT).
+/* Run the watch loop. Returns 0 on a clean finish (max_iters, stop callback,
+ * or POSIX SIGINT).
  * A NULL fetch or opts returns a non-zero invalid-usage code without looping.
- * Installs a transient SIGINT handler for the duration and restores the prior
- * disposition on return, so a Ctrl-C during a watch exits cleanly (exit 0)
- * rather than killing the process mid-render. */
+ * POSIX installs a transient SIGINT handler and restores it on return.
+ * Windows uses only the callback: no console allocation or control handler. */
 int rom_watch_run(rom_watch_fetch_fn fetch, void *ctx,
                   const struct rom_watch_opts *opts);
 
