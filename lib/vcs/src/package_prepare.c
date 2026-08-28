@@ -547,6 +547,23 @@ static enum vcs_package_prepare_error prepare_finish(
         json_free(&meta);
         return VCS_PACKAGE_PREPARE_ERR_LOCK;
     }
+    /* THIS IS THE DECLARATION GRAPH, NOT THE TRANSITIVE CLOSURE, AND THE
+     * DIFFERENCE IS LOAD-BEARING. prepare() reads ONE directory. A declared
+     * dependency is named only by its 32-byte root, and nothing here can turn
+     * a root into that package's own metadata: there is no store handle, no
+     * index, and no root -> directory map in the options. So this lock states
+     * exactly what this package's own zcode-package.json says and nothing
+     * more -- the target, its directly declared edges, and depth 1 for each
+     * of them, which is the true longest path in a graph that HAS no other
+     * edges. `direct_deps` is 0 on a dependency node for the same reason: this
+     * graph records no edge out of it. That is a complete statement about the
+     * declaration, not a truncated one about the closure.
+     *
+     * The real transitive DAG -- deduplicated, cycle-checked, with
+     * longest-path depth and true direct_deps -- is vcs_package_lock_resolve()
+     * in package_deps.c, which takes a loader and is what the install
+     * lifecycle pins into a build receipt. A caller that needs the closure
+     * must go through that, never through this projection. */
     for (size_t i = 0; i < deps.count; i++) {
         struct vcs_package_lock_node *node = &out->lock.nodes[out->lock.count++];
         memcpy(node->root, deps.items[i].root, 32);
