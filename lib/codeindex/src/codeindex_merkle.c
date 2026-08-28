@@ -25,15 +25,20 @@
 
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
+#include "platform/positioned_file.h"
 
+#if !defined(_WIN32)
 #include <errno.h>
 #include <fcntl.h>
+#endif
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
 #include <unistd.h>
+#endif
 
 /* ── domain separation ───────────────────────────────────────────────
  * codeindex_store.c already spends tag byte 0x01 on a symbol row and
@@ -52,11 +57,13 @@ enum {
     MERKLE_SNAPSHOT_MAX = 64u * 1024u * 1024u,
 };
 
+#if !defined(_WIN32)
 static const char merkle_snapshot_format[] =
     "zcl.codeindex.source_tree.merkle.v2";
 static const char merkle_snapshot_name[] = "source_tree.merkle";
 static const char merkle_snapshot_seal_domain[] =
     "zcl.codeindex.source_tree.merkle.seal.v1";
+#endif
 
 /* ── records ─────────────────────────────────────────────────────────── */
 
@@ -208,27 +215,18 @@ static bool merkle_leaf_digest(const char *root, const char *relpath,
                                struct merkle_stat_key *out_key, bool *found)
 {
     *found = false;
-    char full[CI_PATH_MAX];
-    int n = snprintf(full, sizeof(full), "%s/%s", root, relpath);
-    if (n <= 0 || (size_t)n >= sizeof(full))
-        LOG_FAIL("codeindex", "merkle leaf path too long: %s", relpath);
-
-    int fd = open(full, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (fd < 0 && errno == ENOENT) {
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open_beneath(&file, root, relpath)) {
         memset(out, 0, sizeof(*out));
         *out_size = 0;
         memset(out_key, 0, sizeof(*out_key));
         return true;
     }
-    if (fd < 0)
-        LOG_FAIL("codeindex", "merkle open leaf failed path=%s: %s", relpath,
-                 strerror(errno));
-    struct stat before, after;
-    if (fstat(fd, &before) != 0 || !S_ISREG(before.st_mode)) {
-        int saved = errno ? errno : EINVAL;
-        close(fd);
-        LOG_FAIL("codeindex", "merkle stat leaf failed path=%s: %s", relpath,
-                 strerror(saved));
+    if (!platform_positioned_file_snapshot(&file, &before)) {
+        platform_positioned_file_close(&file);
+        LOG_FAIL("codeindex", "merkle stat leaf failed path=%s", relpath);
     }
 
     struct sha3_256_ctx sha;
@@ -238,43 +236,42 @@ static bool merkle_leaf_digest(const char *root, const char *relpath,
     sha3_256_write(&sha, &tag, 1);
     sha3_256_write(&sha, (const unsigned char *)domain, sizeof(domain));
     sha3_256_write(&sha, (const unsigned char *)relpath, strlen(relpath) + 1);
-    merkle_write_u64le(&sha, (uint64_t)before.st_size);
+    merkle_write_u64le(&sha, before.size);
 
     unsigned char buf[64 * 1024];
     uint64_t total = 0;
     bool ok = true;
-    for (;;) {
-        ssize_t got = read(fd, buf, sizeof(buf));
-        if (got < 0) {
-            if (errno == EINTR) continue;
-            ok = false;
-            break;
-        }
+    while (total < before.size) {
+        size_t want = before.size - total < sizeof(buf)
+            ? (size_t)(before.size - total) : sizeof(buf);
+        int64_t got = platform_positioned_file_read(&file, buf, want, total);
+        if (got < 0) { ok = false; break; }
         if (got == 0) break;
         sha3_256_write(&sha, buf, (size_t)got);
         total += (uint64_t)got;
     }
-    if (ok && (fstat(fd, &after) != 0 || total != (uint64_t)before.st_size ||
-               before.st_dev != after.st_dev || before.st_ino != after.st_ino ||
-               before.st_size != after.st_size ||
-               before.st_mtim.tv_sec != after.st_mtim.tv_sec ||
-               before.st_mtim.tv_nsec != after.st_mtim.tv_nsec ||
-               before.st_ctim.tv_sec != after.st_ctim.tv_sec ||
-               before.st_ctim.tv_nsec != after.st_ctim.tv_nsec))
+    if (ok && (!platform_positioned_file_snapshot(&file, &after) ||
+               total != before.size || before.size != after.size ||
+               before.volume != after.volume || before.file_low != after.file_low ||
+               before.file_high != after.file_high ||
+               before.modified_seconds != after.modified_seconds ||
+               before.modified_nanoseconds != after.modified_nanoseconds ||
+               before.changed_seconds != after.changed_seconds ||
+               before.changed_nanoseconds != after.changed_nanoseconds))
         ok = false;
-    close(fd);
+    platform_positioned_file_close(&file);
     if (!ok)
         LOG_FAIL("codeindex", "merkle read leaf failed path=%s", relpath);
 
     sha3_256_finalize(&sha, out->bytes);
     *out_size = total;
-    out_key->dev = (uint64_t)after.st_dev;
-    out_key->ino = (uint64_t)after.st_ino;
-    out_key->size = (uint64_t)after.st_size;
-    out_key->mtime_sec = (uint64_t)after.st_mtim.tv_sec;
-    out_key->mtime_nsec = (uint64_t)after.st_mtim.tv_nsec;
-    out_key->ctime_sec = (uint64_t)after.st_ctim.tv_sec;
-    out_key->ctime_nsec = (uint64_t)after.st_ctim.tv_nsec;
+    out_key->dev = after.volume;
+    out_key->ino = after.file_low;
+    out_key->size = after.size;
+    out_key->mtime_sec = (uint64_t)after.modified_seconds;
+    out_key->mtime_nsec = after.modified_nanoseconds;
+    out_key->ctime_sec = (uint64_t)after.changed_seconds;
+    out_key->ctime_nsec = after.changed_nanoseconds;
     *found = true;
     return true;
 }
@@ -304,6 +301,7 @@ struct merkle_cursor {
     bool                 bad;
 };
 
+#if !defined(_WIN32)
 static void merkle_snapshot_seal(const unsigned char *image, size_t len,
                                  unsigned char out[32])
 {
@@ -315,6 +313,7 @@ static void merkle_snapshot_seal(const unsigned char *image, size_t len,
     sha3_256_write(&sha, image, len);
     sha3_256_finalize(&sha, out);
 }
+#endif
 
 static bool merkle_take(struct merkle_cursor *c, void *dst, size_t n)
 {
@@ -333,6 +332,7 @@ static uint32_t merkle_take_u32(struct merkle_cursor *c)
            ((uint32_t)b[3] << 24);
 }
 
+#if !defined(_WIN32)
 static uint64_t merkle_take_u64(struct merkle_cursor *c)
 {
     unsigned char b[8] = {0};
@@ -379,10 +379,34 @@ static void merkle_put_path(unsigned char **w, const char *p)
     *w += 2;
     merkle_put(w, p, len);
 }
+#endif
 
 /* Open <root>/.codeindex as a directory capability. `create` mkdirs it. Same
  * owner-controlled posture codeindex_build.c requires of the same directory: a
  * cache another user can write is a cache that can answer for us. */
+#if defined(_WIN32)
+static bool merkle_snapshot_load(const char *root, struct merkle_snapshot *out,
+                                 bool *found)
+{
+    (void)root;
+    *found = false;
+    memset(out, 0, sizeof(*out));
+    return true;
+}
+
+static bool merkle_snapshot_save(const char *root, const struct ci_merkle *m)
+{
+    (void)root;
+    (void)m;
+    return false;
+}
+
+bool ci_merkle_forget(const char *root)
+{
+    (void)root;
+    return false;
+}
+#else
 static int merkle_open_dir(const char *root, bool create)
 {
     char dir[CI_PATH_MAX];
@@ -635,6 +659,7 @@ bool ci_merkle_forget(const char *root)
                  strerror(saved));
     return true;
 }
+#endif
 
 /* ── the build pass ──────────────────────────────────────────────────── */
 
@@ -875,10 +900,17 @@ static bool merkle_file_cb(const char *relpath, const struct stat *st,
         .dev = (uint64_t)st->st_dev,
         .ino = (uint64_t)st->st_ino,
         .size = (uint64_t)st->st_size,
+#if defined(_WIN32)
+        .mtime_sec = (uint64_t)st->st_mtime,
+        .mtime_nsec = 0,
+        .ctime_sec = (uint64_t)st->st_ctime,
+        .ctime_nsec = 0,
+#else
         .mtime_sec = (uint64_t)st->st_mtim.tv_sec,
         .mtime_nsec = (uint64_t)st->st_mtim.tv_nsec,
         .ctime_sec = (uint64_t)st->st_ctim.tv_sec,
         .ctime_nsec = (uint64_t)st->st_ctim.tv_nsec,
+#endif
     };
     const struct merkle_leaf_rec *prev =
         b->use_prev ? merkle_find_leaf(b->prev.leaves, b->prev.nleaves, relpath)
