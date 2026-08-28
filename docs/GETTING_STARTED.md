@@ -125,11 +125,20 @@ make lint            # defensive-coding + doc-accuracy gates
 
 The arm64 macOS build includes the node, wallet, P2P and RPC services,
 databases, and native cryptography. The following Linux-specific facilities
-currently report unavailable or refuse safely on macOS: embedded full Tor,
-Landlock/seccomp package confinement, signal-context self-backtraces, the
-inotify development watcher, and consensus snapshot export that requires
-`O_TMPFILE`. The default Tor stub keeps ordinary node operation available but
-does not publish an onion service. Intel macOS has not yet been measured.
+currently report unavailable or refuse safely on macOS: Landlock/seccomp
+package confinement, signal-context self-backtraces, the inotify development
+watcher, and consensus snapshot export that requires `O_TMPFILE`. Intel macOS
+has not yet been measured.
+
+Embedded full Tor is not in that list. It was, because the build pinned Darwin
+to the offline stub regardless of whether the Tor archives existed; that pin is
+gone, and `make tor-full` now points Tor's configure at this repository's
+vendored OpenSSL, libevent, and zlib rather than at the system trees macOS does
+not ship. The archives — not the host OS — select what the node links, on every
+host. This build path has **not yet been observed to complete on a Mac**: until
+someone runs `make tor-full` there and reports it, treat embedded Tor on macOS
+as untested rather than as either working or unavailable. The default Tor stub
+keeps ordinary node operation available but does not publish an onion service.
 
 ### Your one obvious next action
 

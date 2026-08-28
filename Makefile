@@ -36,8 +36,19 @@ ZCL_PLATFORM_CPPFLAGS = -D_DARWIN_C_SOURCE \
 	-Dst_atim=st_atimespec -Dst_mtim=st_mtimespec \
 	-Dst_ctim=st_ctimespec -fblocks
 ZCL_LTO_FLAG = -flto=thin
-ZCL_PLATFORM_NODE_LIBS = -framework Cocoa -framework CoreGraphics \
-	-framework QuartzCore -framework CoreVideo \
+# Apple's linker has no weak-undefined default: lib/net/tor_integration.c
+# declares the vendored Tor and dynhost entry points ZCL_WEAK_IMPORT and tests
+# each against NULL at runtime, and on Darwin that only links if the linker is
+# told each name is allowed to stay undefined. That permission is STUB
+# scaffolding, so it is spent only on a stub link. Keeping it on a real-Tor
+# link would be fail-open: a name the vendored archive stopped defining (a
+# rename in vendor/tor, a module dropped from an include.am) would link
+# silently as a NULL weak symbol and surface as a dead onion at runtime instead
+# of as an undefined symbol at build time. Gate it on the same TOR_FULL the
+# link inputs use, so the real-Tor link is strict. ZCL_PLATFORM_NODE_LIBS is
+# recursively expanded and reaches LIBS/NODE_C23_LIBS (also recursive) well
+# after TOR_FULL is defined below, so the reference resolves at use time.
+ZCL_DARWIN_TOR_WEAK_UNDEFS = \
 	-Wl,-U,_dynhost_client_fetch -Wl,-U,_dynhost_get_global_service \
 	-Wl,-U,_dynhost_stream_close -Wl,-U,_dynhost_stream_open \
 	-Wl,-U,_dynhost_stream_write -Wl,-U,_ed25519_secret_key_from_seed \
@@ -47,6 +58,9 @@ ZCL_PLATFORM_NODE_LIBS = -framework Cocoa -framework CoreGraphics \
 	-Wl,-U,_tor_free_ -Wl,-U,_tor_malloc_zero_ \
 	-Wl,-U,_dynhost_reassembly_cap -Wl,-U,_dynhost_reassembly_admits \
 	-Wl,-U,_dynhost_webserver_has_complete_request
+ZCL_PLATFORM_NODE_LIBS = -framework Cocoa -framework CoreGraphics \
+	-framework QuartzCore -framework CoreVideo \
+	$(if $(TOR_FULL),,$(ZCL_DARWIN_TOR_WEAK_UNDEFS))
 ZCL_CXX_RUNTIME_LIB = -lc++
 ZCL_WARN_MAYBE_UNINITIALIZED =
 ZCL_TEST_STACK_SETUP = :
@@ -943,11 +957,26 @@ DEV_TSAN_LDFLAGS = $(filter-out $(ZCL_LTO_FLAG),$(LDFLAGS)) $(ZCL_DEV_LINKER) $(
 
 # Use vendor/tor/libtor.a when Tor is built from source.
 # Tor: use full Tor if built, otherwise fall back to stub.
+#
+# The selection is host-independent and evidence-based: it asks whether the
+# four embedded-Tor archives EXIST, never which OS is running. Darwin used to
+# be pinned to the stub by an outer $(filter Darwin,...) arm that ignored
+# TOR_FULL entirely, so a Mac that had successfully run `make tor-full` still
+# linked the offline stub — and `mvp-onion-local`, which gates on $(TOR_FULL)
+# rather than on the archives the link actually consumed, would then have
+# claimed the real onion path was armed while the binary held a
+# tor_run_main that returns -1. Upstream Tor is macOS-capable (configure.ac
+# carries its own darwin* arms); what a Mac lacks is the SYSTEM OpenSSL,
+# libevent, and zlib development trees Tor's configure discovers on Linux, and
+# tools/scripts/build_tor_full.sh now points configure at the vendored copies
+# this repository already builds. A Mac without those archives simply has no
+# vendor/tor/libtor.a, so this wildcard stays empty and the stub is selected
+# for the same reason it is on any other host that never opted in.
 TOR_FULL = $(wildcard vendor/tor/libtor.a \
 	vendor/tor/src/ext/ed25519/donna/libed25519_donna.a \
 	vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a \
 	vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a)
-TOR_LIBS = $(if $(filter Darwin,$(ZCL_HOST_OS)),-Lvendor/lib -ltor_stub,$(if $(TOR_FULL),$(TOR_FULL),-Lvendor/lib -ltor_stub))
+TOR_LIBS = $(if $(TOR_FULL),$(TOR_FULL),-Lvendor/lib -ltor_stub)
 # All dependencies bundled in vendor/lib as static archives.
 # Zero system library requirements beyond libc.
 # OpenSSL 3.0 (Apache 2.0), libevent and zlib are vendored and statically
@@ -973,7 +1002,9 @@ LIBS = $(NODE_SECP_ARCHIVE) -Lvendor/lib -lleveldb \
 # bootstrap reads use the in-tree C23
 # reader; every other third-party input is an exact pinned static archive.
 NODE_C23_CFLAGS = $(CFLAGS) -DZCL_C23_NODE -UHAVE_GTK -UHAVE_WEBKIT
-NODE_C23_TOR_LIBS = $(if $(filter Darwin,$(ZCL_HOST_OS)),vendor/lib/libtor_stub.a,$(if $(TOR_FULL),$(TOR_FULL),vendor/lib/libtor_stub.a))
+# Same archives-not-OS rule as TOR_LIBS above; see the comment there for why
+# the Darwin arm is gone.
+NODE_C23_TOR_LIBS = $(if $(TOR_FULL),$(TOR_FULL),vendor/lib/libtor_stub.a)
 NODE_C23_LIBS = $(NODE_SECP_ARCHIVE) vendor/lib/libsqlite3.a \
 	vendor/lib/libevent.a vendor/lib/libevent_openssl.a \
 	vendor/lib/libevent_pthreads.a vendor/lib/libssl.a \
