@@ -580,6 +580,27 @@ struct net_manager {
      * paths) ignore the debounce and always write. */
     int64_t ban_db_last_write_unix;
     bool ban_db_dirty;
+    /* Bumped by EVERY ban-table mutation site (extend, cap eviction, insert,
+     * unban swap-remove, clear) — but NOT by is_banned()'s lazy prune, which
+     * only drops rows the next write would skip anyway. ban_db_write()
+     * snapshots the counter under cs_banned while it serializes, and after
+     * the file lands clears ban_db_dirty ONLY when the counter still
+     * matches: a write that unconditionally cleared the flag would drop any
+     * mutation that raced it — the row is missing from the file just written
+     * AND no longer marked dirty, so the next rewrite (and the destroy
+     * flush) never happens and a restart amnesties the ban. */
+    uint64_t ban_db_generation;
+    /* Single-flight banlist.dat writes. Two concurrent flushes each
+     * serialize their own snapshot, and the OLDER one can install last,
+     * making the file staler than an already-completed newer write. A
+     * second flush WAITS rather than bailing: every caller is either an
+     * operator path whose ban must reach disk or the destroy flush, and
+     * connman.c ignores the return value, so a bail would drop writes
+     * silently. Writes are rare (debounced) so the wait is bounded in
+     * practice. Lock order: cs_ban_db_write is always taken BEFORE
+     * cs_banned — mutation sites call ban_db_write() only after releasing
+     * cs_banned. */
+    zcl_mutex_t cs_ban_db_write;
     /* Borrowed pointer (owned by boot/connman context), NULL until the
      * owner wires it — see connman_load_addrman()/connman_save_addrman().
      * When set, ban_addr()/unban_addr()/clear_banned() persist the ban
@@ -752,6 +773,16 @@ void clear_banned(struct net_manager *nm);
  * hardening, never fatal to boot. */
 bool ban_db_write(struct net_manager *nm, const char *datadir);
 bool ban_db_read(struct net_manager *nm, const char *datadir);
+
+/* Test-visible probe over the two fields whose relationship is the flush
+ * invariant: if a mutation moved ban_db_generation during a ban_db_write(),
+ * that write must leave ban_db_dirty set (its file predates the mutation).
+ * Plain data reads under cs_banned; no behaviour of its own. */
+struct ban_db_flush_state {
+    uint64_t generation;
+    bool dirty;
+};
+struct ban_db_flush_state ban_db_flush_state_read(struct net_manager *nm);
 
 bool add_local(struct net_manager *nm, const struct net_service *addr,
                int score);

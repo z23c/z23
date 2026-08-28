@@ -1262,6 +1262,7 @@ void net_manager_init(struct net_manager *nm)
     zcl_mutex_init(&nm->cs_nodes);
     zcl_mutex_init(&nm->cs_local_host);
     zcl_mutex_init(&nm->cs_banned);
+    zcl_mutex_init(&nm->cs_ban_db_write);
     zcl_mutex_init(&nm->cs_last_node_id);
     zcl_mutex_init(&nm->cs_total_bytes_recv);
     zcl_mutex_init(&nm->cs_total_bytes_sent);
@@ -1322,6 +1323,7 @@ void net_manager_free(struct net_manager *nm)
     zcl_mutex_destroy(&nm->cs_nodes);
     zcl_mutex_destroy(&nm->cs_local_host);
     zcl_mutex_destroy(&nm->cs_banned);
+    zcl_mutex_destroy(&nm->cs_ban_db_write);
     zcl_mutex_destroy(&nm->cs_last_node_id);
     zcl_mutex_destroy(&nm->cs_total_bytes_recv);
     zcl_mutex_destroy(&nm->cs_total_bytes_sent);
@@ -1619,6 +1621,7 @@ static void ban_addr_ex(struct net_manager *nm, const struct net_addr *addr,
             nm->banned[i].score_at_ban = score_at_ban;
             snprintf(nm->banned[i].reason, sizeof(nm->banned[i].reason),
                      "%s", reason ? reason : "");
+            nm->ban_db_generation++;
             bool write_now = ban_db_write_due_locked(nm, score_at_ban);
             zcl_mutex_unlock(&nm->cs_banned);
             if (nm->datadir && write_now) ban_db_write(nm, nm->datadir);
@@ -1641,6 +1644,7 @@ static void ban_addr_ex(struct net_manager *nm, const struct net_addr *addr,
         }
         nm->banned[victim] = nm->banned[nm->num_banned - 1];
         nm->num_banned--;
+        nm->ban_db_generation++;
     } else if (nm->num_banned >= nm->banned_cap) {
         size_t newcap = nm->banned_cap ? nm->banned_cap * 2 : 64;
         if (newcap > NET_BAN_TABLE_MAX)
@@ -1665,6 +1669,7 @@ static void ban_addr_ex(struct net_manager *nm, const struct net_addr *addr,
     snprintf(nm->banned[nm->num_banned].reason,
              sizeof(nm->banned[nm->num_banned].reason), "%s", reason ? reason : "");
     nm->num_banned++;
+    nm->ban_db_generation++;
     bool write_now = ban_db_write_due_locked(nm, score_at_ban);
     zcl_mutex_unlock(&nm->cs_banned);
 
@@ -1940,6 +1945,7 @@ bool unban_addr(struct net_manager *nm, const struct net_addr *addr)
         if (net_addr_eq(&nm->banned[i].addr, addr)) {
             nm->banned[i] = nm->banned[nm->num_banned - 1];
             nm->num_banned--;
+            nm->ban_db_generation++;
             zcl_mutex_unlock(&nm->cs_banned);
             if (nm->datadir) ban_db_write(nm, nm->datadir);
             return true;
@@ -1952,7 +1958,12 @@ bool unban_addr(struct net_manager *nm, const struct net_addr *addr)
 void clear_banned(struct net_manager *nm)
 {
     zcl_mutex_lock(&nm->cs_banned);
+    bool dropped = nm->num_banned > 0;
     nm->num_banned = 0;
+    /* A clear of an already-empty table changed nothing worth a generation
+     * bump — the write it triggers below is a faithful rewrite either way. */
+    if (dropped)
+        nm->ban_db_generation++;
     zcl_mutex_unlock(&nm->cs_banned);
     if (nm->datadir) ban_db_write(nm, nm->datadir);
 }
@@ -2000,6 +2011,11 @@ bool ban_db_write(struct net_manager *nm, const char *datadir)
 {
     if (!nm || !datadir) return false;
 
+    /* Single-flight: taken before cs_banned (see cs_ban_db_write in net.h),
+     * so only one flush serializes/installs at a time and a slower older
+     * snapshot can never land after a newer one. */
+    zcl_mutex_lock(&nm->cs_ban_db_write);
+
     /* Two-pass: serialize entries first (count unknown up front since
      * expired rows are skipped), then prepend the count. Avoids patching
      * raw bytes into an already-written buffer (endian-fragile). */
@@ -2008,7 +2024,9 @@ bool ban_db_write(struct net_manager *nm, const char *datadir)
 
     int64_t now = GetTime();
     uint32_t live = 0;
+    uint64_t gen_snapshot;
     zcl_mutex_lock(&nm->cs_banned);
+    gen_snapshot = nm->ban_db_generation;
     for (size_t i = 0; i < nm->num_banned; i++) {
         const struct ban_entry *b = &nm->banned[i];
         if (b->ban_until <= now)
@@ -2036,17 +2054,39 @@ bool ban_db_write(struct net_manager *nm, const char *datadir)
     stream_free(&s);
     if (!wr.ok) {
         LOG_WARN("net", "ban_db_write: %s", wr.message);
+        zcl_mutex_unlock(&nm->cs_ban_db_write);
         return false;
     }
-    /* Success restarts the AUTO-write debounce clock and clears the flag a
-     * debounced mutation left behind — so unban_addr()/clear_banned(), which
-     * always write, keep the file immediately consistent. Under cs_banned:
-     * both fields are declared cs_banned-guarded. */
+    /* Success restarts the AUTO-write debounce clock — so unban_addr()/
+     * clear_banned(), which always write, keep the file immediately
+     * consistent. The dirty flag, though, is cleared only when the table is
+     * still exactly what was serialized above: a mutation that landed
+     * between the snapshot and this line set ban_db_dirty itself, and the
+     * file just written does not contain it. Clearing the flag anyway would
+     * drop that mutation until some later mutation happened to rewrite the
+     * file — a restart in between amnesties the ban. Leaving it set costs
+     * one extra rewrite: the next debounced write, or the destroy flush,
+     * serializes the newer table. Under cs_banned: all three fields are
+     * declared cs_banned-guarded. */
     zcl_mutex_lock(&nm->cs_banned);
     nm->ban_db_last_write_unix = now;
-    nm->ban_db_dirty = false;
+    if (nm->ban_db_generation == gen_snapshot)
+        nm->ban_db_dirty = false;
     zcl_mutex_unlock(&nm->cs_banned);
+
+    zcl_mutex_unlock(&nm->cs_ban_db_write);
     return true;
+}
+
+struct ban_db_flush_state ban_db_flush_state_read(struct net_manager *nm)
+{
+    struct ban_db_flush_state st = { .generation = 0, .dirty = false };
+    if (!nm) return st;
+    zcl_mutex_lock(&nm->cs_banned);
+    st.generation = nm->ban_db_generation;
+    st.dirty = nm->ban_db_dirty;
+    zcl_mutex_unlock(&nm->cs_banned);
+    return st;
 }
 
 bool ban_db_read(struct net_manager *nm, const char *datadir)

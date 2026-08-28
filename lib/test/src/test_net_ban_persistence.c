@@ -27,6 +27,14 @@
  *      flushed by net_manager_free().
  *   8. with only manual entries left, an auto insert is refused and the
  *      table is left unchanged.
+ *   9. every mutation site moves the generation counter; is_banned()'s
+ *      lazy prune does not.
+ *  10. a ban that lands DURING a banlist.dat write survives that write
+ *      and a simulated restart (the lost-update regression: the write
+ *      used to clear the dirty flag unconditionally after installing a
+ *      file that predated the mutation).
+ *  11. concurrent writers serialize on the single-flight write mutex and
+ *      leave the file equal to the live table.
  *
  * One TEST()/ASSERT() block per function — this codebase's TEST macro
  * uses a single fixed `_test_next:` goto label per function (see
@@ -38,9 +46,11 @@
 #include "net/net.h"
 #include "net/peer_scoring.h"
 
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 static struct net_addr nbp_addr(uint8_t a, uint8_t b, uint8_t c, uint8_t d)
 {
@@ -344,6 +354,220 @@ static int test_nbp_full_manual_table_refuses_auto(void)
     return failures;
 }
 
+static int test_nbp_generation_contract(void)
+{
+    int failures = 0;
+    TEST("ban_db: every mutation site moves the generation; lazy prune does not") {
+        struct net_manager nm;
+        net_manager_init(&nm); /* no datadir: this is about the counter */
+
+        ASSERT_EQ((int)ban_db_flush_state_read(&nm).generation, 0);
+
+        struct net_addr a = nbp_addr(203, 0, 113, 20);
+        struct net_addr b = nbp_addr(203, 0, 113, 21);
+
+        /* Insert. */
+        nbp_ban_day(&nm, a);
+        ASSERT_EQ((int)ban_db_flush_state_read(&nm).generation, 1);
+
+        /* Extend (re-ban of the same address). */
+        nbp_ban_day(&nm, a);
+        ASSERT_EQ((int)ban_db_flush_state_read(&nm).generation, 2);
+
+        /* An insert of an already-expired ban is still a mutation. */
+        ban_addr(&nm, &b, 1, true);
+        ASSERT_EQ((int)ban_db_flush_state_read(&nm).generation, 3);
+
+        /* is_banned()'s lazy prune drops the expired row — deliberately
+         * NOT a bump: it only removes rows the next write would skip, so
+         * it must never hold a write back from clearing the dirty flag. */
+        ASSERT(!is_banned(&nm, &b));
+        ASSERT_EQ((int)ban_db_flush_state_read(&nm).generation, 3);
+        ASSERT(is_banned(&nm, &a));
+
+        /* Unban swap-remove. */
+        ASSERT(unban_addr(&nm, &a));
+        ASSERT_EQ((int)ban_db_flush_state_read(&nm).generation, 4);
+
+        /* Clear, and the no-op clear of an empty table. */
+        nbp_ban_day(&nm, a);
+        ASSERT_EQ((int)ban_db_flush_state_read(&nm).generation, 5);
+        clear_banned(&nm);
+        ASSERT_EQ((int)ban_db_flush_state_read(&nm).generation, 6);
+        ASSERT(nm.num_banned == 0);
+        clear_banned(&nm);
+        ASSERT_EQ((int)ban_db_flush_state_read(&nm).generation, 6);
+
+        net_manager_free(&nm);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Writer thread for the lost-update regression: one whole-table write, with
+ * the flush state sampled after it returns. Read by main only after
+ * pthread_join(), so plain stores are enough. The thread must enter
+ * ban_db_write() FIRST — its snapshot parks on cs_banned while main holds
+ * it, and that park is what main's trylock on cs_ban_db_write detects; any
+ * cs_banned-touching probe before the write would park the thread one lock
+ * too early and the handshake below would never see the write mutex held. */
+static struct ban_db_flush_state g_nbp_race_after;
+
+static void *nbp_write_once(void *arg)
+{
+    struct net_manager *nm = (struct net_manager *)arg;
+    ban_db_write(nm, nm->datadir);
+    g_nbp_race_after = ban_db_flush_state_read(nm);
+    return NULL;
+}
+
+static int test_nbp_ban_during_write_survives_restart(void)
+{
+    int failures = 0;
+    TEST("ban_db: a ban landing during a write survives that write and a restart") {
+        char dir[256];
+        test_make_tmpdir(dir, sizeof(dir), "net_ban_persistence", "race");
+        nbp_default_scoring();
+        struct net_manager nm;
+        net_manager_init(&nm);
+        nm.datadir = dir;
+
+        /* Ground truth on disk first: manual bans always write through,
+         * leaving the table clean (dirty false) and the debounce clock
+         * freshly stamped for the auto ban below. */
+        for (size_t i = 0; i < 48; i++)
+            nbp_ban_day(&nm, nbp_flood_addr(i));
+        ASSERT(!nm.ban_db_dirty);
+        const uint64_t gen_before = ban_db_flush_state_read(&nm).generation;
+
+        /* Park a writer at its snapshot: with cs_banned held, a
+         * ban_db_write() thread takes cs_ban_db_write and then blocks on
+         * cs_banned. trylock() stops succeeding on cs_ban_db_write exactly
+         * when the writer holds it — a deterministic observation that the
+         * writer is parked BEFORE it serialized anything. */
+        zcl_mutex_lock(&nm.cs_banned);
+        pthread_t writer;
+        ASSERT(pthread_create(&writer, NULL, nbp_write_once, &nm) == 0);
+        bool writer_parked = false;
+        for (int i = 0; i < 100000 && !writer_parked; i++) {
+            if (!zcl_mutex_trylock(&nm.cs_ban_db_write)) {
+                writer_parked = true; /* held by the writer */
+            } else {
+                zcl_mutex_unlock(&nm.cs_ban_db_write);
+                struct timespec ts = { .tv_sec = 0, .tv_nsec = 100 * 1000 };
+                nanosleep(&ts, NULL);
+            }
+        }
+        ASSERT(writer_parked);
+
+        /* Release cs_banned and take it back: the writer must have finished
+         * its snapshot (it held cs_banned between the two observations), so
+         * everything banned from here is AFTER what that write serializes
+         * and is in the write's flight window or later. */
+        zcl_mutex_unlock(&nm.cs_banned);
+        bool snapshot_done = false;
+        for (int i = 0; i < 100000 && !snapshot_done; i++) {
+            if (zcl_mutex_trylock(&nm.cs_banned)) {
+                snapshot_done = true;
+                zcl_mutex_unlock(&nm.cs_banned);
+            } else {
+                struct timespec ts = { .tv_sec = 0, .tv_nsec = 100 * 1000 };
+                nanosleep(&ts, NULL);
+            }
+        }
+        ASSERT(snapshot_done);
+
+        /* THE RACE: ban a fresh address as an AUTO ban while the write is
+         * in flight. AUTO keeps the debounce from writing it behind our
+         * back, so the in-flight file is the only writer racing us. */
+        struct net_addr racer = nbp_addr(203, 0, 113, 99);
+        struct p2p_node node;
+        nbp_flood_node(&node, racer);
+        peer_scoring_record(&nm, &node, PEER_OFFENCE_INVALID_BLOCK, "race");
+        ASSERT(is_banned(&nm, &racer));
+
+        pthread_join(writer, NULL);
+
+        /* Exactly one mutation happened (the racer), and the write
+         * serialized the table as it was BEFORE it — main held cs_banned
+         * from before the writer existed until the snapshot had completed,
+         * so the file it installed cannot contain the racer. */
+        ASSERT_EQ((int)ban_db_flush_state_read(&nm).generation, (int)gen_before + 1);
+        struct net_manager probe;
+        net_manager_init(&probe);
+        ASSERT(ban_db_read(&probe, dir));
+        ASSERT(!is_banned(&probe, &racer));
+        net_manager_free(&probe);
+
+        /* But the write must NOT have reported the table clean: the racer
+         * moved the generation past the write's snapshot, so the dirty flag
+         * is the only thing that gets the racer flushed before a restart.
+         * This is the regression: the flag used to be cleared
+         * unconditionally, amnestying the racer at restart. */
+        ASSERT(g_nbp_race_after.dirty);
+
+        /* Simulated restart: the destroy flush honours the dirty flag, and
+         * the reloaded table still bans the racer. */
+        net_manager_free(&nm);
+        struct net_manager nm2;
+        net_manager_init(&nm2);
+        ASSERT(ban_db_read(&nm2, dir));
+        ASSERT(is_banned(&nm2, &racer));
+        net_manager_free(&nm2);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static void *nbp_write_loop(void *arg)
+{
+    struct net_manager *nm = (struct net_manager *)arg;
+    for (int i = 0; i < 8; i++)
+        ban_db_write(nm, nm->datadir);
+    return NULL;
+}
+
+static int test_nbp_concurrent_writes_stay_complete(void)
+{
+    int failures = 0;
+    TEST("ban_db: concurrent writers serialize; the file ends equal to the live table") {
+        char dir[256];
+        test_make_tmpdir(dir, sizeof(dir), "net_ban_persistence", "storm");
+        struct net_manager nm;
+        net_manager_init(&nm);
+        nm.datadir = dir;
+
+        for (size_t i = 0; i < 32; i++)
+            nbp_ban_day(&nm, nbp_flood_addr(i));
+
+        /* Four flushers over one table while the main thread keeps
+         * mutating: without the single-flight write mutex two writers can
+         * install out of order and an older snapshot can land last. */
+        pthread_t writers[4];
+        for (size_t t = 0; t < 4; t++)
+            ASSERT(pthread_create(&writers[t], NULL, nbp_write_loop, &nm) == 0);
+        for (size_t i = 32; i < 64; i++)
+            nbp_ban_day(&nm, nbp_flood_addr(i));
+        for (size_t t = 0; t < 4; t++)
+            pthread_join(writers[t], NULL);
+
+        /* The final flush — the same thing the destroy flush does — must
+         * leave the file carrying every live ban. */
+        ASSERT(ban_db_write(&nm, dir));
+        net_manager_free(&nm);
+
+        struct net_manager nm2;
+        net_manager_init(&nm2);
+        ASSERT(ban_db_read(&nm2, dir));
+        ASSERT_EQ((int)nm2.num_banned, 64);
+        ASSERT(nbp_banned(&nm2, nbp_flood_addr(0)));
+        ASSERT(nbp_banned(&nm2, nbp_flood_addr(63)));
+        net_manager_free(&nm2);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_net_ban_persistence(void);
 int test_net_ban_persistence(void)
 {
@@ -356,5 +580,8 @@ int test_net_ban_persistence(void)
     failures += test_nbp_flood_caps_table();
     failures += test_nbp_manual_ban_survives_flood();
     failures += test_nbp_full_manual_table_refuses_auto();
+    failures += test_nbp_generation_contract();
+    failures += test_nbp_ban_during_write_survives_restart();
+    failures += test_nbp_concurrent_writes_stay_complete();
     return failures;
 }
