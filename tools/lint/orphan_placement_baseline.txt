@@ -24,6 +24,3 @@ src/cli.c
 src/main.c
 src/main_cli_modes.c
 src/main_cli_modes.h
-tests/windows/glob_match_acceptance.c
-tests/windows/private_file_acceptance.c
-tests/windows/read_mapping_acceptance.c
