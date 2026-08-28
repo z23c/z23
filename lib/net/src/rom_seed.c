@@ -893,7 +893,10 @@ static int64_t rom_bundle_height_from_name(const char *filename)
 size_t rom_seed_directory_json(char *buf, size_t max)
 {
     if (!buf || max == 0) return 0;
-    struct rom_artifact arts[ROM_SEED_MAX_ARTIFACTS];
+    /* Heap: 8 × ~131KB = ~1MB — exceeds the 512KB darwin thread stack. */
+    struct rom_artifact *arts = zcl_calloc(
+        ROM_SEED_MAX_ARTIFACTS, sizeof(*arts), "rom-seed-directory");
+    if (!arts) return 0;
     int n = rom_seed_list(arts, ROM_SEED_MAX_ARTIFACTS);
 
     size_t off = 0;
@@ -926,6 +929,7 @@ size_t rom_seed_directory_json(char *buf, size_t max)
     }
 
     w = snprintf(buf + off, max - off, "]");
+    free(arts);
     if (w < 0 || (size_t)w >= max - off) return 0;
     off += (size_t)w;
     return off;
@@ -1045,7 +1049,13 @@ bool rom_seed_dump_state_json(struct json_value *out, const char *key)
     json_push_kv_int(out, "unique_peers_served", (int64_t)unique_peers);
     json_push_kv_int(out, "current_bps", (int64_t)cur_bps);
 
-    struct rom_artifact arts[ROM_SEED_MAX_ARTIFACTS];
+    /* Heap: 8 × ~131KB = ~1MB — exceeds the 512KB darwin thread stack. */
+    struct rom_artifact *arts = zcl_calloc(
+        ROM_SEED_MAX_ARTIFACTS, sizeof(*arts), "rom-seed-dump");
+    if (!arts) {
+        diag_push_health(out, false, "rom seed: allocation failed");
+        return false;
+    }
     int n = rom_seed_list(arts, ROM_SEED_MAX_ARTIFACTS);
     json_push_kv_int(out, "artifact_count", n);
 
@@ -1072,6 +1082,7 @@ bool rom_seed_dump_state_json(struct json_value *out, const char *key)
     bool ok = atomic_load(&g_enabled);
     diag_push_health(out, ok,
                      ok ? "seeding enabled" : "seeding disabled by config");
+    free(arts);
     return true;
 }
 
