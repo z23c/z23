@@ -15,6 +15,7 @@
 #include <time.h>
 #include <sqlite3.h>
 #include "models/database.h"
+#include "platform/time_compat.h"
 #include "util/log_macros.h"
 #include "views/format_helpers.h"
 #include "views/site_layout.h"
@@ -544,8 +545,9 @@ static inline void explorer_format_time(char *buf, size_t max, uint32_t t)
 {
     time_t ts = (time_t)t;
     struct tm tm;
-    gmtime_r(&ts, &tm);
-    strftime(buf, max, "%Y-%m-%d %H:%M:%S UTC", &tm);
+    if (!platform_time_utc_tm(ts, &tm) ||
+        strftime(buf, max, "%Y-%m-%d %H:%M:%S UTC", &tm) == 0)
+        snprintf(buf, max, "1970-01-01 00:00:00 UTC");
 }
 
 /* Shared difficulty calculation — canonical version in chain/pow.h */

@@ -7,6 +7,7 @@
 #include "codeindex/codeindex.h"
 #include "codeindex/codeindex_merkle.h"
 #include "crypto/sha3.h"
+#include "platform/positioned_file.h"
 #include "util/safe_alloc.h"
 #include "vcs/package_manifest.h"
 #include "vcs/vcs.h"
@@ -14,19 +15,17 @@
 #include "vcs/zcode_agent_context.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 #define ZAC_CAPTURE_READ_MAX (4u * 1024u * 1024u)
 
 struct zac_path {
     char path[VCS_ZCODE_AGENT_CONTEXT_PATH_MAX + 1u];
     uint32_t line;
-    off_t byte_offset;
+    uint64_t byte_offset;
+    struct platform_positioned_file_snapshot snapshot;
 };
 
 static bool zac_source_root(const char *workspace, uint8_t out[32])
@@ -83,16 +82,30 @@ static bool zac_select_paths(struct codeindex *ci, const struct ci_symbol *sym,
     return *count > 0;
 }
 
-static bool zac_read_all(int fd, uint8_t *bytes, size_t len)
+static bool zac_read_all(const struct platform_positioned_file *file,
+                         uint8_t *bytes, size_t len, uint64_t offset)
 {
     size_t off = 0;
     while (off < len) {
-        ssize_t got = pread(fd, bytes + off, len - off, (off_t)off);
-        if (got < 0 && errno == EINTR) continue;
+        int64_t got = platform_positioned_file_read(
+            file, bytes + off, len - off, offset + off);
         if (got <= 0) return false;
         off += (size_t)got;
     }
     return true;
+}
+
+static bool zac_snapshot_equal(
+    const struct platform_positioned_file_snapshot *a,
+    const struct platform_positioned_file_snapshot *b)
+{
+    return a->size == b->size &&
+           a->modified_seconds == b->modified_seconds &&
+           a->modified_nanoseconds == b->modified_nanoseconds &&
+           a->changed_seconds == b->changed_seconds &&
+           a->changed_nanoseconds == b->changed_nanoseconds &&
+           a->volume == b->volume && a->file_low == b->file_low &&
+           a->file_high == b->file_high;
 }
 
 static size_t zac_line_offset(const uint8_t *bytes, size_t len, uint32_t line)
@@ -114,85 +127,81 @@ static uint32_t zac_line_at(const uint8_t *bytes, size_t offset)
 }
 
 static bool zac_capture_file(
-    int root_fd, struct zac_path *selected,
+    const char *workspace, struct zac_path *selected,
     struct vcs_zcode_agent_context_entry_v1 *entry, size_t byte_budget,
     bool *truncated)
 {
     size_t selected_path_len = strlen(selected->path);
     if (selected_path_len >= sizeof(entry->path))
         return false;
-    int fd = openat(root_fd, selected->path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    struct stat st;
-    if (fd < 0 || fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
-        st.st_size <= 0) {
-        if (fd >= 0) close(fd);
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open_beneath(
+            &file, workspace, selected->path) ||
+        !platform_positioned_file_snapshot(&file, &before) || before.size == 0) {
+        platform_positioned_file_close(&file);
         return false;
     }
     size_t cap = byte_budget < VCS_ZCODE_AGENT_CONTEXT_EXCERPT_MAX
         ? byte_budget : VCS_ZCODE_AGENT_CONTEXT_EXCERPT_MAX;
-    if (cap == 0) { close(fd); return false; }
-    size_t inspect_len = (uint64_t)st.st_size < ZAC_CAPTURE_READ_MAX
-        ? (size_t)st.st_size : ZAC_CAPTURE_READ_MAX;
+    if (cap == 0) { platform_positioned_file_close(&file); return false; }
+    size_t inspect_len = before.size < ZAC_CAPTURE_READ_MAX
+        ? (size_t)before.size : ZAC_CAPTURE_READ_MAX;
     uint8_t *inspect = zcl_malloc(inspect_len, "zcode.context.inspect");
-    if (!inspect || !zac_read_all(fd, inspect, inspect_len)) {
-        free(inspect); close(fd); return false;
+    if (!inspect || !zac_read_all(&file, inspect, inspect_len, 0)) {
+        free(inspect); platform_positioned_file_close(&file); return false;
     }
-    size_t take = (size_t)st.st_size < cap ? (size_t)st.st_size : cap;
+    size_t take = before.size < cap ? (size_t)before.size : cap;
     size_t target = zac_line_offset(inspect, inspect_len, selected->line);
     size_t start = target > take / 4u ? target - take / 4u : 0;
     if (start > 0) {
         while (start < inspect_len && inspect[start - 1u] != '\n') start++;
         if (start >= inspect_len) start = 0;
     }
-    if ((uint64_t)start + take > (uint64_t)st.st_size)
-        start = (size_t)st.st_size - take;
+    if ((uint64_t)start + take > before.size)
+        start = (size_t)before.size - take;
     entry->content = zcl_malloc(take, "zcode.context.excerpt");
-    if (!entry->content) { free(inspect); close(fd); return false; }
-    size_t copied = 0;
-    while (copied < take) {
-        ssize_t got = pread(fd, entry->content + copied, take - copied,
-                            (off_t)start + (off_t)copied);
-        if (got < 0 && errno == EINTR) continue;
-        if (got <= 0) break;
-        copied += (size_t)got;
-    }
-    close(fd);
-    if (copied != take) { free(inspect); free(entry->content); return false; }
+    bool stable = entry->content &&
+        zac_read_all(&file, entry->content, take, start) &&
+        platform_positioned_file_snapshot(&file, &after) &&
+        zac_snapshot_equal(&before, &after);
+    platform_positioned_file_close(&file);
+    if (!stable) { free(inspect); free(entry->content); return false; }
     memcpy(entry->path, selected->path, selected_path_len + 1);
     entry->start_line = zac_line_at(inspect, start);
-    entry->full_file_bytes = (uint64_t)st.st_size;
+    entry->full_file_bytes = before.size;
     entry->content_len = take;
     sha3_256(entry->content, take, entry->content_root);
-    selected->byte_offset = (off_t)start;
-    if (take != (size_t)st.st_size) *truncated = true;
+    selected->byte_offset = start;
+    selected->snapshot = before;
+    if (take != before.size) *truncated = true;
     free(inspect);
     return true;
 }
 
 static bool zac_reread_matches(
-    int root_fd, const struct zac_path *selected,
+    const char *workspace, const struct zac_path *selected,
     const struct vcs_zcode_agent_context_entry_v1 *entry)
 {
-    int fd = openat(root_fd, selected->path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    struct stat st;
-    if (fd < 0 || fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
-        (uint64_t)st.st_size != entry->full_file_bytes) {
-        if (fd >= 0) close(fd);
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot snapshot;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open_beneath(
+            &file, workspace, selected->path) ||
+        !platform_positioned_file_snapshot(&file, &snapshot) ||
+        !zac_snapshot_equal(&snapshot, &selected->snapshot)) {
+        platform_positioned_file_close(&file);
         return false;
     }
     uint8_t *check = zcl_malloc(entry->content_len, "zcode.context.reread");
-    if (!check) { close(fd); return false; }
-    size_t off = 0;
-    while (off < entry->content_len) {
-        ssize_t got = pread(fd, check + off, entry->content_len - off,
-                            selected->byte_offset + (off_t)off);
-        if (got < 0 && errno == EINTR) continue;
-        if (got <= 0) break;
-        off += (size_t)got;
-    }
-    close(fd);
-    bool matches = off == entry->content_len &&
+    if (!check) { platform_positioned_file_close(&file); return false; }
+    bool matches = zac_read_all(&file, check, entry->content_len,
+                                selected->byte_offset) &&
+                   platform_positioned_file_snapshot(&file, &snapshot) &&
+                   zac_snapshot_equal(&snapshot, &selected->snapshot) &&
                    memcmp(check, entry->content, entry->content_len) == 0;
+    platform_positioned_file_close(&file);
     free(check);
     return matches;
 }
@@ -235,11 +244,6 @@ struct zcl_result zcode_agent_context_capture(
         ci_merkle_free(before); codeindex_close(ci);
         return ZCL_ERR(-1, "code index could not select a source context");
     }
-    int root_fd = open(workspace, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (root_fd < 0) {
-        ci_merkle_free(before); codeindex_close(ci);
-        return ZCL_ERR(-1, "workspace could not be opened for context capture");
-    }
     struct vcs_zcode_agent_context_v1 context;
     vcs_zcode_agent_context_init(&context);
     memcpy(context.task_root, task_root, 32);
@@ -255,9 +259,9 @@ struct zcl_result zcode_agent_context_capture(
     for (size_t i = 0; i < path_count; i++) {
         size_t left = path_count - i;
         size_t share = left > 0 ? budget / left : 0;
-        if (!zac_capture_file(root_fd, &paths[i], &context.files[i], share,
+        if (!zac_capture_file(workspace, &paths[i], &context.files[i], share,
                               &truncated)) {
-            vcs_zcode_agent_context_free(&context); close(root_fd);
+            vcs_zcode_agent_context_free(&context);
             ci_merkle_free(before); codeindex_close(ci);
             return ZCL_ERR(-1, "selected source file changed or could not be read");
         }
@@ -269,8 +273,8 @@ struct zcl_result zcode_agent_context_capture(
     bool stable = after && ci_merkle_root(after, &after_root) &&
         memcmp(before_root.digest.bytes, after_root.digest.bytes, 32) == 0;
     for (size_t i = 0; stable && i < context.file_count; i++)
-        stable = zac_reread_matches(root_fd, &paths[i], &context.files[i]);
-    close(root_fd); ci_merkle_free(after); ci_merkle_free(before);
+        stable = zac_reread_matches(workspace, &paths[i], &context.files[i]);
+    ci_merkle_free(after); ci_merkle_free(before);
     codeindex_close(ci);
     uint8_t source_root_after[32];
     stable = stable && zac_source_root(workspace, source_root_after) &&

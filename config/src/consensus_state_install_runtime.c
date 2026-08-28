@@ -16,9 +16,23 @@
  * durable install-on-next-boot request (1c), and the app_init selection seam —
  * live in the sibling config/src/boot_auto_install_bundle.c. Every install still
  * routes through consensus_state_snapshot_install_activate; no new state writer. */
-
 #include "config/consensus_state_install_runtime.h"
-
+#if defined(_WIN32)
+struct zcl_result consensus_state_install_from_bundle(
+    struct node_db *ndb, struct main_state *ms, const char *bundle_path,
+    const char *datadir, struct consensus_state_install_runtime_result *out)
+{
+    (void)ndb;
+    (void)ms;
+    (void)bundle_path;
+    (void)datadir;
+    (void)out;
+    return ZCL_ERR(
+        -1,
+        "consensus-state installation is disabled on Windows until SID/ACL "
+        "owner policy and directory-handle-relative activation qualify");
+}
+#else
 #include "config/boot.h"                              /* node_db, main_state, test-surface decls */
 #include "config/boot_consensus_bundle_marker.h"       /* installed-bundle marker */
 #include "config/consensus_state_snapshot_install.h"
@@ -42,7 +56,6 @@
 #include "util/log_macros.h"
 #include "validation/chainstate.h"                    /* active_chain_at */
 #include "validation/main_state.h"
-
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -54,12 +67,9 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
-
 #define ICB_SUBSYS "install_consensus_bundle"
 #define ICB_DECISION_RECORD_NAME "consensus_state_publication_decision.v1"
-
 /* ── Containment classification (verbatim from the terminal verb) ──────────── */
-
 static bool icb_same_directory(int target_fd, const char *candidate, bool *same)
 {
     *same = false;
@@ -76,7 +86,6 @@ static bool icb_same_directory(int target_fd, const char *candidate, bool *same)
     (void)close(candidate_fd);
     return ok;
 }
-
 static bool icb_canonical_candidate(int target_fd, const char *home,
                                     bool *canonical)
 {
@@ -92,7 +101,6 @@ static bool icb_canonical_candidate(int target_fd, const char *home,
     *canonical = *canonical || same;
     return true;
 }
-
 /* Open the target once and compare directory identities, not spelling. Both the
  * account home and HOME are considered: an altered/unset HOME must not turn the
  * real daily-driver into a copy-proof lane, while test/service homes still
@@ -108,11 +116,9 @@ static struct zcl_result icb_datadir_open_classify(const char *datadir,
         *out_canonical = false;
     if (!datadir || !datadir[0] || !out_fd || !out_canonical)
         return ZCL_ERR(-1, "datadir classification arguments are missing");
-
     int target_fd = open(datadir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (target_fd < 0)
         return ZCL_ERR(-2, "could not open datadir: %s", strerror(errno));
-
     bool canonical = false;
     bool have_home = false;
     char pwbuf[16384];
@@ -126,7 +132,6 @@ static struct zcl_result icb_datadir_open_classify(const char *datadir,
             return ZCL_ERR(-3, "could not resolve account canonical datadir");
         }
     }
-
     const char *env_home = getenv("HOME");
     if (env_home && env_home[0]) {
         have_home = true;
@@ -139,17 +144,14 @@ static struct zcl_result icb_datadir_open_classify(const char *datadir,
         (void)close(target_fd);
         return ZCL_ERR(-5, "no account or HOME directory for lane authority");
     }
-
     *out_fd = target_fd;
     *out_canonical = canonical;
     return ZCL_OK;
 }
-
 static bool icb_canonical_authorized(const char *authorization)
 {
     return authorization && strcmp(authorization, "1") == 0;
 }
-
 /* Read the producer source receipt from the pinned, already-validated bundle
  * handle. The CAS re-checks the receipt's self-consistency and its binding to
  * the manifest source digest, so a misread fails closed there. */
@@ -216,7 +218,6 @@ static bool icb_read_source_receipt(sqlite3 *bundle_db,
     sqlite3_finalize(st);
     return ok;
 }
-
 /* MAX(coins.height) on the installed progress store. found=false on an empty
  * coins table (MAX over 0 rows is SQL NULL). */
 static bool icb_coins_max_height(sqlite3 *progress_db, int64_t *out, bool *found)
@@ -239,7 +240,6 @@ static bool icb_coins_max_height(sqlite3 *progress_db, int64_t *out, bool *found
     sqlite3_finalize(st);
     return ok;
 }
-
 /* The activated bundle already installed every Sapling anchor row, including
  * the verified current frontier tree. Persist that frontier into node.db's
  * boot cache as the bundle-height state instead of deleting the cache and
@@ -258,7 +258,6 @@ static bool icb_install_bundle_sapling_tree(struct node_db *ndb,
     if (!ndb || !progress_db || bundle_height < 0)
         LOG_FAIL(ICB_SUBSYS,
                  "post-install Sapling cache: invalid ndb/progress_db/height");
-
     struct incremental_merkle_tree tree;
     sapling_tree_init(&tree);
     int64_t frontier_height = -1;
@@ -270,7 +269,6 @@ static bool icb_install_bundle_sapling_tree(struct node_db *ndb,
                  "post-install Sapling cache: installed frontier unavailable "
                  "or out of range (result=%d frontier_h=%lld bundle_h=%d)",
                  (int)found, (long long)frontier_height, bundle_height);
-
     struct byte_stream encoded;
     stream_init(&encoded, 4096);
     bool serialized = incremental_tree_serialize(&tree, &encoded) &&
@@ -281,7 +279,6 @@ static bool icb_install_bundle_sapling_tree(struct node_db *ndb,
                  "post-install Sapling cache: frontier serialization failed "
                  "at bundle height=%d", bundle_height);
     }
-
     bool persisted = sapling_tree_persist_pair(
         ndb, encoded.data, encoded.size, (int64_t)bundle_height);
     stream_free(&encoded);
@@ -289,14 +286,12 @@ static bool icb_install_bundle_sapling_tree(struct node_db *ndb,
         LOG_FAIL(ICB_SUBSYS,
                  "post-install Sapling cache: atomic tree/height persist failed "
                  "at bundle height=%d", bundle_height);
-
     LOG_INFO(ICB_SUBSYS,
              "post-install Sapling cache installed from bundle frontier_h=%lld "
              "at bundle_h=%d (boot skips Sapling rebuild)",
              (long long)frontier_height, bundle_height);
     return true;
 }
-
 /* Post-install derived-state reconciliation. The atomic activate step resets the
  * kernel store's (consensus.db) reducer/tip_finalize authority to the installed
  * anchor, but two derived surfaces live OUTSIDE that store and would fight the new
@@ -308,7 +303,6 @@ static bool icb_invalidate_derived_state(struct node_db *ndb,
 {
     if (!ndb || !progress_db)
         LOG_FAIL(ICB_SUBSYS, "post-install invalidation: null ndb/progress_db");
-
     /* (1) tip_finalize provable-tip cache. Its DURABLE source (tip_finalize_log
      * + the 8 stage cursors) was already reset to the installed anchor AND
      * post-install-verified inside consensus_state_snapshot_install_activate.
@@ -316,7 +310,6 @@ static bool icb_invalidate_derived_state(struct node_db *ndb,
      * from the PRE-install store, so drop that stale in-memory value: nothing may
      * republish the old tip if this path returns rather than _exit()ing. */
     reducer_frontier_provable_tip_reset();
-
     /* (2) The installed coin set must sit exactly at the bundle height. */
     int64_t coins_max = -1;
     bool have_coins = false;
@@ -330,19 +323,16 @@ static bool icb_invalidate_derived_state(struct node_db *ndb,
                   (long long)coins_max, bundle_height);
         return false;
     }
-
     /* (3) Replace any stale node.db Sapling tree pair with the complete,
      * destination-verified frontier that activation just installed. */
     if (!icb_install_bundle_sapling_tree(ndb, progress_db, bundle_height))
         return false;
-
     LOG_INFO(ICB_SUBSYS,
              "post-install derived-state reconciliation OK: bundle Sapling "
              "tree cached, provable-tip cache reset, coins tip=%lld == bundle "
              "height=%d", (long long)coins_max, bundle_height);
     return true;
 }
-
 /* node.db `utxos` is a DERIVED, rebuildable read-model projection —
  * utxo_mirror_sync_service.h's own design doc: consensus reads never depend on
  * it, its sole writer is this background service, and every drift shape it
@@ -370,7 +360,6 @@ static bool icb_reset_utxo_mirror(struct node_db *ndb)
 {
     if (!ndb || !ndb->open)
         LOG_FAIL(ICB_SUBSYS, "post-install mirror reset: node.db not open");
-
     bool ok = node_db_exec(ndb, "DELETE FROM utxos");
     if (!ok)
         LOG_WARN(ICB_SUBSYS, "post-install mirror reset: DELETE FROM utxos failed");
@@ -389,7 +378,6 @@ static bool icb_reset_utxo_mirror(struct node_db *ndb)
         LOG_WARN(ICB_SUBSYS, "post-install mirror reset: sync cursor reset failed");
     return ok && commitment_ok && cursor_ok;
 }
-
 /* True iff this node's validated header chain has reached `height` and the block
  * at that height on the selected header chain carries `block_hash`. The assisted
  * above-checkpoint chain-binding needs the bundle-height header (and its Sapling
@@ -407,7 +395,6 @@ static bool install_bundle_header_ready(struct main_state *ms, int32_t height,
     return at && at->phashBlock &&
            memcmp(at->phashBlock->data, block_hash, 32) == 0;
 }
-
 /* Assisted (above-checkpoint FRESHEST-bundle) admission is owner-approved and
  * default ON. The env kill switch ZCL_INSTALL_ASSISTED=0 forces it OFF, in which
  * case an above-checkpoint bundle gets no assisted opt-in and refuses at the
@@ -419,9 +406,7 @@ static bool install_assisted_opt_in(void)
     const char *kill = getenv("ZCL_INSTALL_ASSISTED");
     return !(kill && strcmp(kill, "0") == 0);
 }
-
 /* ── The NON-TERMINAL install core ─────────────────────────────────────────── */
-
 struct zcl_result consensus_state_install_from_bundle(
     struct node_db *ndb, struct main_state *ms, const char *bundle_path,
     const char *datadir, struct consensus_state_install_runtime_result *out)
@@ -433,20 +418,17 @@ struct zcl_result consensus_state_install_from_bundle(
     out->status = CONSENSUS_INSTALL_REFUSED;
     out->height = -1;
     out->hstar = -1;
-
     if (!bundle_path || !bundle_path[0] || !datadir || !datadir[0]) {
         LOG_WARN(ICB_SUBSYS, "empty bundle path or datadir");
         snprintf(out->reason, sizeof(out->reason), "empty bundle path or datadir");
         return ZCL_ERR(-1, "empty bundle path or datadir");
     }
-
     struct zcl_result rc = ZCL_OK;
     int dir_fd = -1;
     bool canonical_datadir = false;
     struct consensus_state_artifact_evidence *artifact = NULL;
     struct consensus_state_bundle_manifest manifest;
     memset(&manifest, 0, sizeof(manifest));
-
     /* (1) Containment: descriptor-classify the target once, then retain that
      * exact directory capability through the CAS decision write. */
     struct zcl_result classified =
@@ -464,11 +446,9 @@ struct zcl_result consensus_state_install_from_bundle(
                      "or run the install on a dev/copy datadir first", datadir);
         goto done;
     }
-
     enum consensus_state_target_lane lane =
         canonical_datadir ? CONSENSUS_STATE_TARGET_LANE_CANONICAL
                           : CONSENSUS_STATE_TARGET_LANE_COPY_PROOF;
-
     /* (2) Admit + strictly validate the immutable bundle. */
     struct zcl_result admitted =
         consensus_state_artifact_evidence_open(bundle_path, dir_fd, &artifact);
@@ -481,7 +461,6 @@ struct zcl_result consensus_state_install_from_bundle(
         rc = ZCL_ERR(-1, "artifact evidence became stale after admission");
         goto done;
     }
-
     /* (2b) Deferral gate — distinguish a RETRIABLE WAIT from a genuine refusal.
      * The bundle has already passed strict admission (byte integrity + manifest
      * self-bind) above, so a flipped-byte / corrupt bundle never reaches here.
@@ -538,7 +517,6 @@ struct zcl_result consensus_state_install_from_bundle(
             goto done;
         }
     }
-
     /* (3) Read the producer source receipt from the pinned bundle handle. */
     struct consensus_state_source_receipt receipt;
     {
@@ -557,7 +535,6 @@ struct zcl_result consensus_state_install_from_bundle(
             goto done;
         }
     }
-
     /* (4) Gate through the publication CAS. Both the chain-evidence build and the
      * CAS run assert the process singleton (condition_engine_main_state() ==
      * request->main); at this boot stage the singleton is not yet wired to the
@@ -565,7 +542,6 @@ struct zcl_result consensus_state_install_from_bundle(
      * Single-threaded boot — no reducer thread observes the transient value. */
     struct main_state *prev_singleton = condition_engine_main_state();
     condition_engine_set_main_state(ms);
-
     /* (3b) Boot-order warm: this runs BEFORE tip_finalize_stage_init, so the
      * runtime authority pair + provable-tip cache the chain-binding evidence
      * consults are still unpublished and every target — copy or live — would
@@ -575,7 +551,6 @@ struct zcl_result consensus_state_install_from_bundle(
     tip_finalize_stage_warm_authority_caches(
         progress_store_db(),
         ms ? active_chain_tip(&ms->chain_active) : NULL, "install_runtime_warm");
-
     struct consensus_state_chain_binding_request chain_req = {
         .main = ms, .artifact = artifact, .target_lane = lane,
     };
@@ -609,7 +584,6 @@ struct zcl_result consensus_state_install_from_bundle(
     chain_req.allow_assisted_above_checkpoint =
         install_assisted_opt_in() && sha3_cp &&
         manifest.height > (int32_t)sha3_cp->height;
-
     /* (3d) Gap C — instant-on checkpoint-header pass record. A headers-first
      * (--importblockindex / fast-sync) substrate bulk-loads the block index but
      * never runs the forward reducer, so validate_headers_log carries no pass
@@ -628,7 +602,6 @@ struct zcl_result consensus_state_install_from_bundle(
                  "instant-on checkpoint-header pass record not established at "
                  "h=%d (header absent / already-present miss / validate failed) "
                  "— chain-binding gate decides", chain_req.checkpoint_authority.height);
-
     /* (3d-assisted) Same instant-on seam at the BUNDLE height: the assisted -4
      * bind requires a full-Equihash pass record at exactly manifest.height, so
      * genuinely PoW-validate the imported bundle-height header now. Idempotent +
@@ -640,7 +613,6 @@ struct zcl_result consensus_state_install_from_bundle(
                  "assisted bundle-height header pass record not established at "
                  "h=%d (header absent / already-present miss / validate failed) "
                  "— chain-binding gate decides", manifest.height);
-
     struct consensus_state_chain_evidence *chain_evidence = NULL;
     struct zcl_result chain_built =
         consensus_state_chain_evidence_build(&chain_req, &chain_evidence);
@@ -650,7 +622,6 @@ struct zcl_result consensus_state_install_from_bundle(
     bool used_assisted_authority =
         chain_built.ok &&
         consensus_state_chain_evidence_used_assisted_authority(chain_evidence);
-
     struct consensus_state_publication_decision_record decision;
     struct zcl_result cas = ZCL_ERR(-1, "chain evidence unavailable");
     if (chain_built.ok) {
@@ -663,11 +634,9 @@ struct zcl_result consensus_state_install_from_bundle(
         };
         cas = consensus_state_publication_cas_run(&cas_req, &decision);
     }
-
     condition_engine_set_main_state(prev_singleton);
     if (chain_evidence)
         consensus_state_chain_evidence_free(chain_evidence);
-
     if (!chain_built.ok) {
         /* Retriable classification — from the chain-binding refusal CODE
          * (consensus_state_chain_binding_decide returns -3..-11), not the pass
@@ -743,12 +712,10 @@ struct zcl_result consensus_state_install_from_bundle(
         rc = ZCL_ERR(-1, "durable publication ADMIT changed between write and load");
         goto done;
     }
-
     /* The activate step re-opens and must reproduce the exact artifact receipt
      * bound into the ADMIT record; height/hash alone carry no state authority. */
     consensus_state_artifact_evidence_free(artifact);
     artifact = NULL;
-
     /* (4b) CHECKPOINT_CONTENT authority input. If this node's validated header
      * chain owns the compiled SHA3 UTXO checkpoint block, read that header's
      * PoW-committed hashFinalSaplingRoot so activate can bind a checkpoint-content
@@ -772,7 +739,6 @@ struct zcl_result consensus_state_install_from_bundle(
             checkpoint_root_from_header = true;
         }
     }
-
     /* (4b-assisted) ASSISTED authority input. When the chain-binding admitted via
      * the assisted above-checkpoint tier, read the BUNDLE-height header's PoW-
      * committed hashFinalSaplingRoot from this node's own validated header chain
@@ -799,7 +765,6 @@ struct zcl_result consensus_state_install_from_bundle(
             assisted_root_from_header = true;
         }
     }
-
     /* (5) ADMIT — atomically install the complete state. */
     struct consensus_state_activate_request areq;
     memset(&areq, 0, sizeof(areq));
@@ -830,14 +795,12 @@ struct zcl_result consensus_state_install_from_bundle(
         rc = ZCL_ERR(-1, "activation install failed after ADMIT: %s", ares.reason);
         goto done;
     }
-
     /* The atomic swap committed. From here every failure is post-install: the
      * state IS on disk, so mark it so callers never fall through to a wipe. */
     out->state_installed = true;
     out->status = ares.status; /* CONSENSUS_INSTALL_ACTIVATED */
     out->height = manifest.height;
     out->hstar = ares.hstar;
-
     /* (6) Post-install: invalidate the derived stores that live OUTSIDE the
      * activated kernel store (consensus.db) — the persisted Sapling tree pair +
      * the in-process provable-tip cache — and verify the installed coin tip
@@ -851,7 +814,6 @@ struct zcl_result consensus_state_install_from_bundle(
                      "cleared) — see ERROR log above");
         goto done;
     }
-
     /* (7) Durable marker: record that a sovereign bundle is now installed here so
      * a future boot never auto-loads a leftover borrowed starter-pack seed back
      * over the installed state. Best-effort — the install is already durable; a
@@ -865,7 +827,6 @@ struct zcl_result consensus_state_install_from_bundle(
                   "the datadir root manually", datadir);
     else
         out->marker_written = true;
-
     /* (8) Post-install: reset the node.db `utxos` mirror — see
      * icb_reset_utxo_mirror. Best-effort by design (see its doc comment). */
     if (!icb_reset_utxo_mirror(ndb))
@@ -874,10 +835,8 @@ struct zcl_result consensus_state_install_from_bundle(
                  "retain stale rows until utxo_mirror_sync_service's own drift "
                  "detector next fires; the installed consensus state itself is "
                  "unaffected (node.db utxos carries no consensus weight)");
-
     snprintf(out->reason, sizeof(out->reason), "%s", ares.reason);
     rc = ZCL_OK;
-
 done:
     if (artifact)
         consensus_state_artifact_evidence_free(artifact);
@@ -889,7 +848,6 @@ done:
     }
     return rc;
 }
-
 #ifdef ZCL_TESTING
 bool boot_install_consensus_bundle_gate_allows_for_test(
     const char *datadir, const char *authorization, bool *out_canonical)
@@ -905,15 +863,14 @@ bool boot_install_consensus_bundle_gate_allows_for_test(
         *out_canonical = canonical;
     return !canonical || icb_canonical_authorized(authorization);
 }
-
 bool boot_install_consensus_bundle_invalidate_derived_for_test(
     struct node_db *ndb, sqlite3 *progress_db, int32_t bundle_height)
 {
     return icb_invalidate_derived_state(ndb, progress_db, bundle_height);
 }
-
 bool boot_install_consensus_bundle_reset_utxo_mirror_for_test(struct node_db *ndb)
 {
     return icb_reset_utxo_mirror(ndb);
 }
+#endif
 #endif

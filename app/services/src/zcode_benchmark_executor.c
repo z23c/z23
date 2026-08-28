@@ -2,9 +2,8 @@
  * purpose: The closed S4 benchmark/reproduction executor (see the header
  *          for the contract: observation, never truth; registry fixed
  *          actions only; confinement or refusal). */
-
 #include "services/zcode_benchmark_executor.h"
-
+#if !defined(_WIN32)
 #include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "base/serialize_le.h"
@@ -13,7 +12,6 @@
 #include "platform/os_sandbox.h"
 #include "platform/time_compat.h"
 #include "vcs/vcs_object.h"
-
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -25,32 +23,25 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
-
 #define EXEC_PATH_MAX 4096
-
 static const uint8_t result_v1_magic[8] = {'Z','C','B','E','N','C','\r','\n'};
 static const uint8_t result_v2_magic[8] = {'Z','C','B','E','N','2','\r','\n'};
-
 static bool exec_hex32(const char *hex, uint8_t out[32])
 {
     return hex && strlen(hex) == 64 && zcl_hex_decode_lower(hex, out, 32);
 }
-
 static bool exec_root_nonzero(const uint8_t root[32])
 {
     uint8_t any = 0;
     for (size_t i = 0; i < 32; i++) any |= root[i];
     return any != 0;
 }
-
 /* ── CAS load helpers (load raw + parse + rederived-root agreement) ──── */
-
 static bool exec_cas_load(const char *workspace, const uint8_t root[32],
                           uint8_t **wire, size_t *wire_len)
 {
     return vcs_object_load_raw(workspace, root, wire, wire_len) == 0;
 }
-
 static bool exec_load_study(const char *workspace, const uint8_t root[32],
                             struct vcs_zcode_study_spec_v1 *out)
 {
@@ -64,7 +55,6 @@ static bool exec_load_study(const char *workspace, const uint8_t root[32],
     free(wire);
     return ok;
 }
-
 static bool exec_load_task(const char *workspace, const uint8_t root[32],
                            struct vcs_zcode_task_v1 *out)
 {
@@ -77,7 +67,6 @@ static bool exec_load_task(const char *workspace, const uint8_t root[32],
     free(wire);
     return ok;
 }
-
 /* Load one candidate with parse + rederived-root agreement. */
 static bool exec_load_candidate(const char *workspace, const uint8_t root[32],
                                 struct vcs_zcode_candidate_v1 *out)
@@ -91,7 +80,6 @@ static bool exec_load_candidate(const char *workspace, const uint8_t root[32],
     free(wire);
     return ok;
 }
-
 static bool exec_load_method(const char *workspace, const uint8_t root[32],
                              struct vcs_zcode_benchmark_method_v1 *out,
                              uint8_t *wire_out)
@@ -111,7 +99,6 @@ static bool exec_load_method(const char *workspace, const uint8_t root[32],
     free(wire);
     return ok;
 }
-
 static bool exec_load_policy(const char *workspace, const uint8_t root[32],
                              struct vcs_zcode_environment_policy_v1 *out)
 {
@@ -126,17 +113,14 @@ static bool exec_load_policy(const char *workspace, const uint8_t root[32],
     free(wire);
     return ok;
 }
-
 /* ── fixed resource policy parsing ("cpu=1,memory_mb=4096,timeout_s=600,
  *    network=0" — closed keys, strict grammar, fail closed) ──────────── */
-
 struct exec_resource_limits {
     uint64_t cpu_seconds;
     uint64_t memory_mb;
     uint64_t timeout_s;
     bool network_allowed;
 };
-
 static bool exec_policy_parse(const char *policy,
                               struct exec_resource_limits *out)
 {
@@ -176,9 +160,7 @@ static bool exec_policy_parse(const char *policy,
     }
     return have_cpu && have_mem && have_timeout && have_network;
 }
-
 /* ── the confined runner (fixed kernel: SHA3-256 over the payload) ───── */
-
 struct exec_run_job {
     const uint8_t *payload;
     size_t payload_len;
@@ -188,7 +170,6 @@ struct exec_run_job {
     struct exec_resource_limits limits;
     const char *bench_dir;
 };
-
 /* Child-side entry. Only async-safe-ish calls after fork; the payload is
  * inherited across fork and the samples leave over the pre-opened pipe
  * (fork is copy-on-write, so the pipe — not shared memory — carries them
@@ -206,7 +187,6 @@ static bool exec_child_flush(int fd, const uint8_t *buf, size_t len)
     }
     return true;
 }
-
 static void exec_runner_child(const struct exec_run_job *job)
 {
     struct os_sandbox_path_rule rules[] = {
@@ -263,7 +243,6 @@ static void exec_runner_child(const struct exec_run_job *job)
         _exit(72);
     _exit(0);
 }
-
 /* Parent side: fork the confined child, collect exactly 8*measured+1
  * bytes, enforce the wall-clock timeout, and report the child verdict.
  * samples must point at a parent buffer of `measured` entries. */
@@ -370,7 +349,6 @@ static struct zcl_result exec_runner_fork(const char *bench_dir,
     return ZCL_OK;
 }
 /* ── the sandbox canary self-check (escape-suite pattern) ────────────── */
-
 static int exec_canary_fs(const char *bench_dir)
 {
     char probe[EXEC_PATH_MAX];
@@ -401,7 +379,6 @@ static int exec_canary_fs(const char *bench_dir)
     if (errno != EACCES) return 74;
     return 0;
 }
-
 static int exec_canary_socket(const char *bench_dir)
 {
     struct os_sandbox_path_rule rules[] = {
@@ -420,7 +397,6 @@ static int exec_canary_socket(const char *bench_dir)
     (void)s;
     return 6; /* reached only if socket was not denied */
 }
-
 static int exec_canary_exec(const char *bench_dir)
 {
     struct os_sandbox_path_rule rules[] = {
@@ -439,9 +415,7 @@ static int exec_canary_exec(const char *bench_dir)
            (char *const[]){ NULL });
     return 5; /* reached only if exec was not denied */
 }
-
 typedef int (*exec_canary_fn)(const char *);
-
 static bool exec_canary_wait(pid_t pid, int *status)
 {
     for (;;) {
@@ -451,7 +425,6 @@ static bool exec_canary_wait(pid_t pid, int *status)
         return false;
     }
 }
-
 struct zcl_result zcode_benchmark_executor_sandbox_selfcheck(
     const char *bench_dir)
 {
@@ -492,9 +465,7 @@ struct zcl_result zcode_benchmark_executor_sandbox_selfcheck(
         (void)unlink(probe);
     return ZCL_OK;
 }
-
 /* ── shared run context ──────────────────────────────────────────────── */
-
 struct exec_context {
     struct vcs_zcode_study_spec_v1 study;
     struct vcs_zcode_task_v1 task;
@@ -511,13 +482,11 @@ struct exec_context {
     uint8_t *workload_wire;
     size_t workload_wire_len;
 };
-
 static void exec_context_free(struct exec_context *ctx)
 {
     free(ctx->workload_wire);
     ctx->workload_wire = NULL;
 }
-
 /* Load and cross-check every CAS input the run dereferences. Any missing
  * or disagreeing object is a refusal naming the root kind. */
 static struct zcl_result exec_context_load(
@@ -594,7 +563,6 @@ static struct zcl_result exec_context_load(
         return ZCL_ERR(-1, "executor-environment-mismatch");
     return ZCL_OK;
 }
-
 /* Derive the executed fixed action. The canonical binding is ALWAYS
  * computed under c23.benchmark.v1 descriptors — a reproduction reruns the
  * SAME fixed action, so original and reproduced results share the action
@@ -642,15 +610,12 @@ static struct zcl_result exec_action_derive(
         return ZCL_ERR(-1, "executor-action-root-failed");
     return ZCL_OK;
 }
-
 static int exec_u64_cmp(const void *a, const void *b)
 {
     uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
     return (x > y) - (x < y);
 }
-
 /* ── stage 1: the confined run ───────────────────────────────────────── */
-
 struct zcl_result zcode_benchmark_executor_run(
     const struct zcode_benchmark_execute_request *req,
     struct zcode_benchmark_run_out *out)
@@ -680,7 +645,6 @@ struct zcl_result zcode_benchmark_executor_run(
         return ZCL_ERR(-1, "executor-action-kind-closed");
     }
     out->is_reproduction = is_repro;
-
     struct vcs_zcode_benchmark_result_v1 original;
     if (is_repro) {
         uint8_t original_root[32];
@@ -707,7 +671,6 @@ struct zcl_result zcode_benchmark_executor_run(
         if (!ok)
             return ZCL_ERR(-1, "executor-original-not-v1-in-cas");
     }
-
     struct exec_context ctx;
     struct zcl_result loaded = exec_context_load(req, is_repro,
                                                  is_repro ? &original : NULL,
@@ -727,7 +690,6 @@ struct zcl_result zcode_benchmark_executor_run(
         exec_context_free(&ctx);
         return ZCL_ERR(-1, "executor-action-mismatch");
     }
-
     /* Confinement: self-check first, refuse on any failure, then run the
      * fixed action under the kind's fixed resource policy. */
     char bench_dir[EXEC_PATH_MAX];
@@ -781,7 +743,6 @@ struct zcl_result zcode_benchmark_executor_run(
         exec_context_free(&ctx);
         return ran;
     }
-
     /* Compose the artifacts. */
     uint64_t *sorted =
         zcl_malloc(8u * (size_t)measured, "zcode.bench.sorted");
@@ -795,7 +756,6 @@ struct zcl_result zcode_benchmark_executor_run(
     uint8_t status = ctx.workload.payload_len == 0
                          ? VCS_ZCODE_BENCHMARK_NULL_RESULT
                          : VCS_ZCODE_BENCHMARK_OBSERVED;
-
     uint8_t profile_wire[VCS_ZCODE_HARDWARE_PROFILE_WIRE_BYTES];
     if (vcs_zcode_hardware_profile_serialize(&ctx.profile, profile_wire) !=
             VCS_ZCODE_SCIENCE_OK ||
@@ -869,7 +829,6 @@ struct zcl_result zcode_benchmark_executor_run(
         exec_context_free(&ctx);
         return ZCL_ERR(-1, "executor-evidence-failed");
     }
-
     /* Compose the result wire(s). */
     if (!is_repro) {
         struct vcs_zcode_benchmark_result_v2 *r = &out->result;
@@ -1000,7 +959,6 @@ struct zcl_result zcode_benchmark_executor_run(
             return ZCL_ERR(-1, "executor-reproduction-compose-failed");
         }
     }
-
     /* Store the auxiliary objects. The finished evidence wire itself
      * enters CAS only via the S3 confirm:true commit — except the
      * reproduced v1 wire, which the landed admission path cannot carry
@@ -1028,9 +986,7 @@ struct zcl_result zcode_benchmark_executor_run(
         return ZCL_ERR(-1, "executor-artifact-store-failed");
     return ZCL_OK;
 }
-
 /* ── stage 2: admission via the landed S3 plan/commit path ───────────── */
-
 struct zcl_result zcode_benchmark_executor_admit(
     struct node_db *ndb, const char *workspace,
     const struct zcode_benchmark_run_out *run, bool confirm, int64_t now,
@@ -1065,7 +1021,6 @@ struct zcl_result zcode_benchmark_executor_admit(
     out->committed = true;
     return ZCL_OK;
 }
-
 struct zcl_result zcode_benchmark_execute(
     struct node_db *ndb, const struct zcode_benchmark_execute_request *req,
     struct zcode_benchmark_execute_out *out)
@@ -1076,9 +1031,7 @@ struct zcl_result zcode_benchmark_execute(
     return zcode_benchmark_executor_admit(ndb, req->workspace, &run,
                                           req->confirm, req->now, out);
 }
-
 /* ── receipt verification (tamper → root mismatch → rejection) ───────── */
-
 static struct zcl_result exec_verify_samples(
     const char *workspace, const uint8_t action_root[32], uint8_t status,
     const uint8_t raw_sample_root[32], const uint8_t evidence_root[32],
@@ -1157,7 +1110,6 @@ static struct zcl_result exec_verify_samples(
         return ZCL_ERR(-1, "receipt-evidence-stats-mismatch");
     return ZCL_OK;
 }
-
 struct zcl_result zcode_benchmark_executor_verify_receipt(
     const char *workspace, const char *result_root_hex)
 {
@@ -1226,3 +1178,4 @@ struct zcl_result zcode_benchmark_executor_verify_receipt(
     free(wire);
     return ZCL_ERR(-1, "receipt-result-kind-unknown");
 }
+#endif

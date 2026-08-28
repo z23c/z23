@@ -88,9 +88,29 @@ static struct {
     _Atomic int64_t test_own_modal;   /* INT64_MIN = unset */
 #endif
 } g_ncrawl = {
-    .lock = PTHREAD_MUTEX_INITIALIZER,
     .probe_fn = network_crawler_default_probe,
 };
+
+static pthread_once_t g_ncrawl_lock_once = PTHREAD_ONCE_INIT;
+
+static void ncrawl_lock_init_once(void)
+{
+    zcl_mutex_init(&g_ncrawl.lock);
+}
+
+static void ncrawl_lock(void)
+{
+    /* The lock has process lifetime, matching the former static POSIX mutex.
+     * pthread_once is supplied by both supported pthread runtimes; the object
+     * it initializes is the platform zcl_mutex_t (CRITICAL_SECTION on Win32,
+     * recursive pthread mutex on POSIX). */
+    if (pthread_once(&g_ncrawl_lock_once, ncrawl_lock_init_once) != 0) {
+        LOG_ERROR("network_crawler",
+                  "crawler lock one-time initialization failed");
+        abort();
+    }
+    zcl_mutex_lock(&g_ncrawl.lock);
+}
 
 static struct liveness_contract g_ncrawl_contract;
 
@@ -275,7 +295,7 @@ static void ncrawl_census_ingest_locked(const struct ncrawl_probe_result *pr)
 
 void ncrawl_census_ingest(const struct ncrawl_probe_result *pr)
 {
-    zcl_mutex_lock(&g_ncrawl.lock);
+    ncrawl_lock();
     ncrawl_census_ingest_locked(pr);
     zcl_mutex_unlock(&g_ncrawl.lock);
 }
@@ -283,7 +303,7 @@ void ncrawl_census_ingest(const struct ncrawl_probe_result *pr)
 /* Snapshot every bound this round runs under. */
 static void ncrawl_limits_snapshot(struct ncrawl_round_limits *lim)
 {
-    zcl_mutex_lock(&g_ncrawl.lock);
+    ncrawl_lock();
     lim->concurrent = g_ncrawl.max_concurrent;
     lim->connect_timeout_ms = g_ncrawl.connect_timeout_ms;
     lim->handshake_timeout_ms = g_ncrawl.handshake_timeout_ms;
@@ -341,7 +361,7 @@ static void ncrawl_do_round(void)
 
     int64_t now = sweep_finished;
     int64_t own = ncrawl_own_modal();
-    zcl_mutex_lock(&g_ncrawl.lock);
+    ncrawl_lock();
     g_ncrawl.rounds_run++;
     g_ncrawl.probed_last_round = probed;
     g_ncrawl.not_probed_last_round = st.not_probed;
@@ -486,7 +506,7 @@ bool network_crawler_get_view(struct network_census_view *out)
      * eviction order in ncrawl_census_ingest_locked), so "the answer is
      * always there" is no longer a safe assumption anywhere. */
     memset(out, 0, sizeof(*out));
-    zcl_mutex_lock(&g_ncrawl.lock);
+    ncrawl_lock();
     bool ready = g_ncrawl.view.ready;
     if (ready)
         *out = g_ncrawl.view;
@@ -503,7 +523,7 @@ bool network_crawler_dump_state_json(struct json_value *out, const char *key)
         return false;
     json_set_object(out);
 
-    zcl_mutex_lock(&g_ncrawl.lock);
+    ncrawl_lock();
     bool started = g_ncrawl.started;
     bool enabled = g_ncrawl.enabled;
     struct network_census_view v = g_ncrawl.view;
@@ -632,7 +652,7 @@ bool network_crawler_dump_state_json(struct json_value *out, const char *key)
 #ifdef ZCL_TESTING
 void network_crawler_test_reset(void)
 {
-    zcl_mutex_lock(&g_ncrawl.lock);
+    ncrawl_lock();
     g_ncrawl.census_count = 0;
     memset(g_ncrawl.census, 0, sizeof(g_ncrawl.census));
     memset(&g_ncrawl.view, 0, sizeof(g_ncrawl.view));
@@ -656,7 +676,7 @@ void network_crawler_test_reset(void)
 
 void network_crawler_test_set_probe_fn(ncrawl_probe_fn fn)
 {
-    zcl_mutex_lock(&g_ncrawl.lock);
+    ncrawl_lock();
     g_ncrawl.probe_fn = fn ? fn : network_crawler_default_probe;
     zcl_mutex_unlock(&g_ncrawl.lock);
 }
@@ -670,7 +690,7 @@ void network_crawler_test_set_view(const struct network_census_view *v)
 {
     if (!v)
         return;
-    zcl_mutex_lock(&g_ncrawl.lock);
+    ncrawl_lock();
     g_ncrawl.view = *v;
     g_ncrawl.view.ready = true;
     zcl_mutex_unlock(&g_ncrawl.lock);
@@ -687,7 +707,7 @@ int network_crawler_test_probe_round(const struct net_address *addrs, int n)
     (void)topology_store_record_sweep(sweep_started, now, n, st.reachable,
                                       st.edges_seen, st.new_nodes);
     int64_t own = ncrawl_own_modal();
-    zcl_mutex_lock(&g_ncrawl.lock);
+    ncrawl_lock();
     g_ncrawl.rounds_run++;
     g_ncrawl.probed_last_round = probed;
     g_ncrawl.not_probed_last_round = st.not_probed;
@@ -698,7 +718,7 @@ int network_crawler_test_probe_round(const struct net_address *addrs, int n)
 
 int network_crawler_test_census_count(void)
 {
-    zcl_mutex_lock(&g_ncrawl.lock);
+    ncrawl_lock();
     int c = g_ncrawl.census_count;
     zcl_mutex_unlock(&g_ncrawl.lock);
     return c;
@@ -711,7 +731,7 @@ bool network_crawler_test_census_row(const char *addr,
         return false;
     memset(out, 0, sizeof(*out));   /* defined even when the row is absent */
     bool found = false;
-    zcl_mutex_lock(&g_ncrawl.lock);
+    ncrawl_lock();
     for (int i = 0; i < g_ncrawl.census_count; i++) {
         if (strcmp(g_ncrawl.census[i].addr, addr) == 0) {
             *out = g_ncrawl.census[i];
@@ -733,7 +753,7 @@ void network_crawler_test_set_onion_limits(int per_round, int concurrent,
     c.onion_timeout_ms = timeout_ms;
     c.onion_round_budget_ms = budget_ms;
     ncrawl_clamp(&c);
-    zcl_mutex_lock(&g_ncrawl.lock);
+    ncrawl_lock();
     g_ncrawl.onion_max_per_round = c.onion_max_per_round;
     g_ncrawl.onion_max_concurrent = c.onion_max_concurrent;
     g_ncrawl.onion_timeout_ms = c.onion_timeout_ms;

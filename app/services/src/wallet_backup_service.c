@@ -4,7 +4,6 @@
 // app/controllers/src/diagnostics_registry.c; every other dumper in the
 // codebase has the same bool signature for the same reason, so this is not
 // a candidate for struct zcl_result conversion.
-
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * Wallet Backup Service — LIFECYCLE half: config, the background thread,
@@ -17,19 +16,18 @@
  * wallet_backup_crypto.c. The split happened when verification grew from
  * one table to eight and this file passed the 800-line shape ceiling.
  */
-
 #include "base/result.h"
 #include "base/text_fit.h"
 #include "crypto/sha3.h"
 #include "models/wallet_backup_receipt.h"
+#include "platform/positioned_file.h"
+#include "platform/private_file.h"
 #include "platform/time_compat.h"
 #include "services/wallet_backup_internal.h"
 #include "services/wallet_backup_service.h"
-
 #include "event/event.h"
 #include "json/json.h"
 #include "supervisors/domains.h"
-
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -46,20 +44,15 @@
 #include "util/safe_alloc.h"
 #include "util/supervisor.h"
 #include "util/thread_registry.h"
-
 #define WALLET_BACKUP_SUPERVISOR_DEADLINE_SEC 60
-
 /* ── Module state ───────────────────────────────────────────── */
-
 struct wallet_backup_service_state {
     pthread_mutex_t lock;
     pthread_t       thread;
     bool            thread_running;
     bool            stop_requested;
-
     struct wallet_backup_config cfg;
     struct node_db             *db;
-
     /* Snapshot counters */
     int64_t total_runs;
     int64_t total_failures;
@@ -75,7 +68,6 @@ struct wallet_backup_service_state {
     int     last_encrypted_tables_verified;
     char    last_encrypted_path[512];
     char    last_error[256];
-
     /* Debounced event trigger (D4: plan §5.4).
      * Set by wallet_backup_service_on_key_change; cleared by the
      * thread after running a debounce-eligible backup. */
@@ -84,96 +76,121 @@ struct wallet_backup_service_state {
     int64_t total_trigger_runs; /* backups that actually ran due to a trigger */
     _Atomic supervisor_child_id supervisor_id;
 };
-
 static struct wallet_backup_service_state g_wbs = {
     .lock = PTHREAD_MUTEX_INITIALIZER,
     .supervisor_id = SUPERVISOR_INVALID_ID,
 };
-
-
 static struct liveness_contract g_wbs_contract;
-
 /* ── Helpers ────────────────────────────────────────────────── */
-
-static bool wbs_same_file(const struct stat *a, const struct stat *b)
+static bool wbs_same_snapshot(
+    const struct platform_positioned_file_snapshot *a,
+    const struct platform_positioned_file_snapshot *b)
 {
-    return a && b && a->st_dev == b->st_dev && a->st_ino == b->st_ino &&
-           a->st_size == b->st_size &&
-           a->st_mtim.tv_sec == b->st_mtim.tv_sec &&
-           a->st_mtim.tv_nsec == b->st_mtim.tv_nsec &&
-           a->st_ctim.tv_sec == b->st_ctim.tv_sec &&
-           a->st_ctim.tv_nsec == b->st_ctim.tv_nsec;
+    return a && b && a->size == b->size &&
+           a->modified_seconds == b->modified_seconds &&
+           a->modified_nanoseconds == b->modified_nanoseconds &&
+           a->changed_seconds == b->changed_seconds &&
+           a->changed_nanoseconds == b->changed_nanoseconds &&
+           a->volume == b->volume && a->file_low == b->file_low &&
+           a->file_high == b->file_high;
 }
-/* Hash through a no-follow descriptor and prove the file identity did not
- * change while it was read. A receipt never grants send authority from a path
- * check alone. */
-static bool wbs_hash_regular_file(const char *path, uint8_t out[32],
-                                  int64_t *size_out)
+static bool wbs_path_char_equal(char a, char b)
 {
-    if (!path || !out || !size_out)
+#ifdef _WIN32
+    if (a == '\\') a = '/';
+    if (b == '\\') b = '/';
+    if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+    if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+#endif
+    return a == b;
+}
+static bool wbs_canonical_backup_path(const char *backup_dir,
+                                      const char *canonical_path)
+{
+    char probe[WALLET_BACKUP_RECEIPT_PATH_MAX];
+    char resolved[WALLET_BACKUP_RECEIPT_PATH_MAX];
+    char canonical_root[WALLET_BACKUP_RECEIPT_PATH_MAX];
+    int n = snprintf(probe, sizeof(probe), "%s/%s", backup_dir,
+                     ".z23-wallet-backup-root-probe");
+    if (n <= 0 || (size_t)n >= sizeof(probe) ||
+        !platform_private_path_resolve(probe, resolved, sizeof(resolved),
+                                       canonical_root,
+                                       sizeof(canonical_root)))
+        return false;
+    size_t root_len = strlen(canonical_root);
+    size_t path_len = strlen(canonical_path);
+    if (path_len <= root_len + 1)
+        return false;
+    for (size_t i = 0; i < root_len; i++)
+        if (!wbs_path_char_equal(canonical_root[i], canonical_path[i]))
+            return false;
+    if (!wbs_path_char_equal(canonical_path[root_len], '/'))
+        return false;
+    const char *leaf = canonical_path + root_len + 1;
+    if (strchr(leaf, '/') || strchr(leaf, '\\') ||
+        strncmp(leaf, WALLET_BACKUP_FILENAME_PREFIX,
+                strlen(WALLET_BACKUP_FILENAME_PREFIX)) != 0)
+        return false;
+    size_t leaf_len = strlen(leaf);
+    size_t suffix_len = strlen(WALLET_BACKUP_FILENAME_SUFFIX_ENC);
+    return leaf_len >= suffix_len &&
+           strcmp(leaf + leaf_len - suffix_len,
+                  WALLET_BACKUP_FILENAME_SUFFIX_ENC) == 0;
+}
+/* Hash through one private, no-reparse handle and prove its canonical handle
+ * path is a direct policy-named child of the validated backup root. */
+static bool wbs_hash_regular_file(const char *backup_dir, const char *path,
+                                  uint8_t out[32], int64_t *size_out,
+                                  char *canonical_out, size_t canonical_cap)
+{
+    if (!backup_dir || !path || !out || !size_out || !canonical_out ||
+        canonical_cap == 0)
         return false; /* raw-return-ok:input validation predicate */
-    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (fd < 0)
+    struct platform_positioned_file file;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path))
         return false; /* raw-return-ok:unreadable receipt is not authority */
-    struct stat before;
-    if (fstat(fd, &before) != 0 || !S_ISREG(before.st_mode) ||
-        before.st_size <= 0) {
-        close(fd);
+    struct platform_positioned_file_snapshot before, after;
+    char canonical[WALLET_BACKUP_RECEIPT_PATH_MAX];
+    if (!platform_positioned_file_is_private(&file) ||
+        !platform_positioned_file_snapshot(&file, &before) ||
+        before.size == 0 || before.size > INT64_MAX ||
+        !platform_positioned_file_path(&file, canonical, sizeof(canonical)) ||
+        !wbs_canonical_backup_path(backup_dir, canonical)) {
+        platform_positioned_file_close(&file);
         return false; /* raw-return-ok:not a stable regular backup file */
     }
     struct sha3_256_ctx sha;
     sha3_256_init(&sha);
     uint8_t buf[65536];
-    int64_t total = 0;
+    uint64_t total = 0;
     bool ok = true;
-    for (;;) {
-        ssize_t n = read(fd, buf, sizeof(buf));
+    while (total < before.size) {
+        size_t wanted = before.size - total > sizeof(buf)
+            ? sizeof(buf) : (size_t)(before.size - total);
+        int64_t n = platform_positioned_file_read(
+            &file, buf, wanted, total);
         if (n > 0) {
-            if (total > INT64_MAX - n) {
-                ok = false;
-                break;
-            }
             sha3_256_write(&sha, buf, (size_t)n);
-            total += n;
+            total += (uint64_t)n;
             continue;
         }
-        if (n == 0)
-            break;
-        if (errno == EINTR)
-            continue;
         ok = false;
         break;
     }
-    struct stat after;
-    if (fstat(fd, &after) != 0 || !wbs_same_file(&before, &after) ||
-        total != before.st_size)
+    if (!platform_positioned_file_snapshot(&file, &after) ||
+        !wbs_same_snapshot(&before, &after) || total != before.size)
         ok = false;
-    close(fd);
+    platform_positioned_file_close(&file);
     if (!ok)
         return false; /* raw-return-ok:file changed or read failed */
     sha3_256_finalize(&sha, out);
-    *size_out = total;
+    *size_out = (int64_t)total;
+    int copied = snprintf(canonical_out, canonical_cap, "%s", canonical);
+    if (copied <= 0 || (size_t)copied >= canonical_cap)
+        return false;
     return true;
 }
-static bool wbs_receipt_path_bound(const char *backup_dir, const char *path)
-{
-    if (!backup_dir || backup_dir[0] != '/' || !path || path[0] != '/')
-        return false;
-    char prefix[WALLET_BACKUP_RECEIPT_PATH_MAX];
-    size_t dir_len = strlen(backup_dir);
-    int n = snprintf(prefix, sizeof(prefix), "%s%s%s", backup_dir,
-                     dir_len > 0 && backup_dir[dir_len - 1] == '/' ? "" : "/",
-                     WALLET_BACKUP_FILENAME_PREFIX);
-    if (n <= 0 || (size_t)n >= sizeof(prefix) ||
-        strncmp(path, prefix, (size_t)n) != 0)
-        return false;
-    size_t path_len = strlen(path);
-    size_t suffix_len = strlen(WALLET_BACKUP_FILENAME_SUFFIX_ENC);
-    return path_len >= suffix_len &&
-        strcmp(path + path_len - suffix_len,
-               WALLET_BACKUP_FILENAME_SUFFIX_ENC) == 0;
-}
-
 static void wbs_clear_encrypted_authority_locked(void)
 {
     g_wbs.last_encrypted_run_unix = 0;
@@ -181,22 +198,21 @@ static void wbs_clear_encrypted_authority_locked(void)
     g_wbs.last_encrypted_tables_verified = 0;
     g_wbs.last_encrypted_path[0] = '\0';
 }
-
 static void wbs_restore_encrypted_authority_locked(void)
 {
     wbs_clear_encrypted_authority_locked();
     struct wallet_backup_receipt receipt;
     if (!db_wallet_backup_receipt_find(g_wbs.db, &receipt))
         return;
-
     size_t table_count = 0;
     (void)wallet_backup_tables(&table_count);
     uint8_t digest[32];
     int64_t size = 0;
-    if (!wbs_receipt_path_bound(g_wbs.cfg.backup_dir,
-                                receipt.backup_path) ||
-        receipt.tables_verified != (int)table_count ||
-        !wbs_hash_regular_file(receipt.backup_path, digest, &size) ||
+    char canonical[WALLET_BACKUP_RECEIPT_PATH_MAX];
+    if (receipt.tables_verified != (int)table_count ||
+        !wbs_hash_regular_file(g_wbs.cfg.backup_dir, receipt.backup_path,
+                               digest, &size, canonical,
+                               sizeof(canonical)) ||
         size != receipt.size_bytes ||
         memcmp(digest, receipt.file_sha3, sizeof(digest)) != 0) {
         LOG_WARN("wallet_backup",
@@ -204,14 +220,12 @@ static void wbs_restore_encrypted_authority_locked(void)
                  "send readiness remains blocked");
         return;
     }
-
     g_wbs.last_encrypted_run_unix = receipt.completed_unix;
     g_wbs.last_encrypted_key_count = receipt.key_count;
     g_wbs.last_encrypted_tables_verified = receipt.tables_verified;
     snprintf(g_wbs.last_encrypted_path,
-             sizeof(g_wbs.last_encrypted_path), "%s", receipt.backup_path);
+             sizeof(g_wbs.last_encrypted_path), "%s", canonical);
 }
-
 static struct zcl_result wbs_record_encrypted_authority_locked(
     const char *path)
 {
@@ -220,18 +234,17 @@ static struct zcl_result wbs_record_encrypted_authority_locked(
         .key_count = g_wbs.last_key_count,
         .tables_verified = g_wbs.last_tables_verified,
     };
-    if (!wbs_receipt_path_bound(g_wbs.cfg.backup_dir, path))
-        return ZCL_ERR(-13, "encrypted backup path is outside backup policy");
-    if (snprintf(receipt.backup_path, sizeof(receipt.backup_path), "%s",
-                 path) <= 0 ||
-        strlen(path) >= sizeof(receipt.backup_path))
-        return ZCL_ERR(-13, "encrypted backup path exceeds receipt bound");
-    if (!wbs_hash_regular_file(path, receipt.file_sha3,
-                               &receipt.size_bytes))
+    char canonical[WALLET_BACKUP_RECEIPT_PATH_MAX];
+    if (!wbs_hash_regular_file(g_wbs.cfg.backup_dir, path,
+                               receipt.file_sha3, &receipt.size_bytes,
+                               canonical, sizeof(canonical)))
         return ZCL_ERR(-13, "encrypted backup bytes could not be verified");
+    if (snprintf(receipt.backup_path, sizeof(receipt.backup_path), "%s",
+                 canonical) <= 0 ||
+        strlen(canonical) >= sizeof(receipt.backup_path))
+        return ZCL_ERR(-13, "encrypted backup path exceeds receipt bound");
     if (!db_wallet_backup_receipt_save(g_wbs.db, &receipt))
         return ZCL_ERR(-13, "encrypted backup receipt could not be persisted");
-
     g_wbs.last_encrypted_run_unix = receipt.completed_unix;
     g_wbs.last_encrypted_key_count = receipt.key_count;
     g_wbs.last_encrypted_tables_verified = receipt.tables_verified;
@@ -240,7 +253,6 @@ static struct zcl_result wbs_record_encrypted_authority_locked(
     g_wbs.last_size_bytes = receipt.size_bytes;
     return ZCL_OK;
 }
-
 static int64_t wbs_progress_marker(void)
 {
     if (pthread_mutex_trylock(&g_wbs.lock) != 0)
@@ -249,7 +261,6 @@ static int64_t wbs_progress_marker(void)
     pthread_mutex_unlock(&g_wbs.lock);
     return marker;
 }
-
 static void wbs_supervisor_heartbeat(void)
 {
     supervisor_child_id id = atomic_load(&g_wbs.supervisor_id);
@@ -258,7 +269,6 @@ static void wbs_supervisor_heartbeat(void)
     supervisor_tick(id);
     supervisor_progress(id, wbs_progress_marker());
 }
-
 static void wbs_on_stall(struct liveness_contract *c)
 {
     const char *reason = c
@@ -280,12 +290,10 @@ static void wbs_on_stall(struct liveness_contract *c)
                 "reason=%s runs=%lld failures=%lld",
                 reason, (long long)runs, (long long)failures);
 }
-
 static struct zcl_result wbs_register_supervisor(void)
 {
     if (!supervisor_start())
         return ZCL_ERR(-30, "wallet_backup: supervisor_start failed");
-
     supervisor_child_id id = atomic_load(&g_wbs.supervisor_id);
     if (id != SUPERVISOR_INVALID_ID) {
         supervisor_set_deadline(id, WALLET_BACKUP_SUPERVISOR_DEADLINE_SEC);
@@ -293,14 +301,12 @@ static struct zcl_result wbs_register_supervisor(void)
         supervisor_tick(id);
         return ZCL_OK;
     }
-
     liveness_contract_init(&g_wbs_contract, "wallet.backup");
     atomic_store(&g_wbs_contract.period_secs, 0);
     atomic_store(&g_wbs_contract.deadline_secs,
                  WALLET_BACKUP_SUPERVISOR_DEADLINE_SEC);
     atomic_store(&g_wbs_contract.progress_max_quiet_us, 0);
     g_wbs_contract.on_stall = wbs_on_stall;
-
     supervisor_domains_init();
     id = supervisor_register_in_domain(g_op_sup, &g_wbs_contract);
     if (id == SUPERVISOR_INVALID_ID)
@@ -310,7 +316,6 @@ static struct zcl_result wbs_register_supervisor(void)
     supervisor_tick(id);
     return ZCL_OK;
 }
-
 /* WALLET_BACKUP_PASSWORD env policy: non-empty => encrypt; absent or
  * empty => plaintext with a one-time warning (the service is the
  * key-loss safety net, so it must not refuse to run). The password is
@@ -354,7 +359,6 @@ static void wbs_config_apply_env_password(struct wallet_backup_config *cfg)
     cfg->encrypt = true;
     cfg->encrypt_password = cached_pw;
 }
-
 void wallet_backup_config_defaults(struct wallet_backup_config *cfg)
 {
     if (!cfg) return;
@@ -366,7 +370,6 @@ void wallet_backup_config_defaults(struct wallet_backup_config *cfg)
      * config_defaults caller (boot included) inherits it. */
     wbs_config_apply_env_password(cfg);
 }
-
 void wallet_backup_status_snapshot(struct wallet_backup_status *out)
 {
     if (!out) return;
@@ -395,7 +398,6 @@ void wallet_backup_status_snapshot(struct wallet_backup_status *out)
     snprintf(out->last_error, sizeof(out->last_error), "%s", g_wbs.last_error);
     pthread_mutex_unlock(&g_wbs.lock);
 }
-
 /* See CLAUDE.md "Adding state introspection". Reentrant-safe: reuses the
  * lock-guarded snapshot that RPC/agent callers already read. */
 bool wallet_backup_dump_state_json(struct json_value *out, const char *key)
@@ -404,7 +406,6 @@ bool wallet_backup_dump_state_json(struct json_value *out, const char *key)
     if (!out)
         return false;
     json_set_object(out);
-
     struct wallet_backup_status st;
     wallet_backup_status_snapshot(&st);
     bool backup_available = st.last_run_unix > 0 && st.last_path[0] != '\0';
@@ -445,12 +446,9 @@ bool wallet_backup_dump_state_json(struct json_value *out, const char *key)
                            "enabling real-money sends");
     return true;
 }
-
 /* Rotation / listing (wallet_backup_list, wallet_backup_rotate) live
  * in wallet_backup_rotation.c. */
-
 /* ── Synchronous entry points ───────────────────────────────── */
-
 static struct zcl_result wbs_run_one_locked(void)
 {
     int64_t started_ms = platform_time_monotonic_ms();
@@ -464,11 +462,9 @@ static struct zcl_result wbs_run_one_locked(void)
                                       err, sizeof(err), &vout);
     bool ok = res.ok;
     int64_t elapsed = platform_time_monotonic_ms() - started_ms;
-
     g_wbs.last_tables_verified = vout.tables_verified;
     snprintf(g_wbs.last_missing_tables, sizeof(g_wbs.last_missing_tables),
              "%s", vout.missing);
-
     if (ok) {
         g_wbs.total_runs++;
         g_wbs.last_run_unix    = platform_time_wall_unix();
@@ -543,7 +539,6 @@ static struct zcl_result wbs_run_one_locked(void)
     }
     return res;
 }
-
 struct zcl_result wallet_backup_now(void)
 {
     pthread_mutex_lock(&g_wbs.lock);
@@ -558,12 +553,10 @@ struct zcl_result wallet_backup_now(void)
     pthread_mutex_unlock(&g_wbs.lock);
     return res;
 }
-
 struct zcl_result wallet_backup_now_encrypted(const char *password)
 {
     if (!password || !password[0])
         return ZCL_ERR(-11, "backup_now_encrypted: password is empty");
-
     pthread_mutex_lock(&g_wbs.lock);
     if (!g_wbs.db || !g_wbs.cfg.backup_dir) {
         struct zcl_result r = ZCL_ERR(-10,
@@ -571,7 +564,6 @@ struct zcl_result wallet_backup_now_encrypted(const char *password)
         pthread_mutex_unlock(&g_wbs.lock);
         return r;
     }
-
     bool saved_encrypt = g_wbs.cfg.encrypt;
     const char *saved_password = g_wbs.cfg.encrypt_password;
     int64_t failures_before = g_wbs.total_failures;
@@ -580,7 +572,6 @@ struct zcl_result wallet_backup_now_encrypted(const char *password)
     struct zcl_result res = wbs_run_one_locked();
     g_wbs.cfg.encrypt = saved_encrypt;
     g_wbs.cfg.encrypt_password = saved_password;
-
     size_t path_len = strlen(g_wbs.last_path);
     size_t suffix_len = strlen(WALLET_BACKUP_FILENAME_SUFFIX_ENC);
     bool encrypted = res.ok && g_wbs.total_failures == failures_before &&
@@ -588,15 +579,12 @@ struct zcl_result wallet_backup_now_encrypted(const char *password)
         strcmp(g_wbs.last_path + path_len - suffix_len,
                WALLET_BACKUP_FILENAME_SUFFIX_ENC) == 0;
     pthread_mutex_unlock(&g_wbs.lock);
-
     if (!encrypted)
         return ZCL_ERR(-12,
             "backup_now_encrypted: verified encrypted backup was not created");
     return res;
 }
-
 /* ── Thread loop ────────────────────────────────────────────── */
-
 static void *wbs_thread_fn(void *arg)
 {
     (void)arg;
@@ -606,13 +594,11 @@ static void *wbs_thread_fn(void *arg)
         ? g_wbs.cfg.interval_seconds
         : WALLET_BACKUP_DEFAULT_INTERVAL_SEC;
     pthread_mutex_unlock(&g_wbs.lock);
-
     /* Do one immediate backup on start so the user always has a
      * fresh copy within a few seconds of boot — the worst failure
      * is the boot that hasn't reached its first hourly tick yet. */
     (void)wallet_backup_now();
     wbs_supervisor_heartbeat();
-
     int64_t next_at_ms = platform_time_monotonic_ms() + (int64_t)interval * 1000;
     while (true) {
         pthread_mutex_lock(&g_wbs.lock);
@@ -621,7 +607,6 @@ static void *wbs_thread_fn(void *arg)
         int64_t last_ok = g_wbs.last_run_unix;
         pthread_mutex_unlock(&g_wbs.lock);
         if (stop) break;
-
         bool ran_this_tick = false;
         if (platform_time_monotonic_ms() >= next_at_ms) {
             (void)wallet_backup_now();
@@ -650,31 +635,26 @@ static void *wbs_thread_fn(void *arg)
                 pthread_mutex_unlock(&g_wbs.lock);
             }
         }
-
         if (ran_this_tick) {
             pthread_mutex_lock(&g_wbs.lock);
             g_wbs.key_change_pending = false;
             pthread_mutex_unlock(&g_wbs.lock);
         }
-
         /* Sleep in small increments so stop_requested is honoured
          * without waiting up to `interval` seconds. */
         wbs_supervisor_heartbeat();
         platform_sleep_ms(200);
     }
-
     pthread_mutex_lock(&g_wbs.lock);
     g_wbs.thread_running = false;
     pthread_mutex_unlock(&g_wbs.lock);
     return NULL;
 }
-
 struct zcl_result wallet_backup_start(const struct wallet_backup_config *cfg,
                           struct node_db *db)
 {
     if (!cfg || !db || !cfg->backup_dir)
         return ZCL_ERR(-20, "start: NULL config, db, or backup_dir");
-
     /* Explicit encrypt without a password must fail loudly here —
      * silently falling back to plaintext would betray the operator's
      * stated intent. (config_defaults sets cfg->encrypt only when
@@ -690,13 +670,11 @@ struct zcl_result wallet_backup_start(const struct wallet_backup_config *cfg,
         LOG_WARN("wallet_backup", "%s", r.message);
         return r;
     }
-
     pthread_mutex_lock(&g_wbs.lock);
     if (g_wbs.thread_running) {
         pthread_mutex_unlock(&g_wbs.lock);
         return ZCL_OK;
     }
-
     /* Refuse to back up into the same datadir as the source — the
      * whole point is an *external* copy. We detect this by
      * comparing the backup_dir to the directory containing the
@@ -714,20 +692,17 @@ struct zcl_result wallet_backup_start(const struct wallet_backup_config *cfg,
             return r;
         }
     }
-
     struct zcl_result dir_r = wbs_ensure_backup_dir(cfg->backup_dir);
     if (!dir_r.ok) {
         struct zcl_result r = ZCL_ERR(-22, "start: %s", dir_r.message);
         pthread_mutex_unlock(&g_wbs.lock);
         return r;
     }
-
     g_wbs.cfg = *cfg;
     g_wbs.db = db;
     g_wbs.stop_requested = false;
     wbs_restore_encrypted_authority_locked();
     g_wbs.thread_running = true;
-
     int rc = thread_registry_spawn("zcl_wallet_bk", wbs_thread_fn, NULL,
                                        &g_wbs.thread);
     if (rc != 0) {
@@ -738,7 +713,6 @@ struct zcl_result wallet_backup_start(const struct wallet_backup_config *cfg,
         return r;
     }
     pthread_mutex_unlock(&g_wbs.lock);
-
     struct zcl_result sup_r = wbs_register_supervisor();
     if (!sup_r.ok) {
         wallet_backup_stop();
@@ -746,7 +720,6 @@ struct zcl_result wallet_backup_start(const struct wallet_backup_config *cfg,
     }
     return ZCL_OK;
 }
-
 void wallet_backup_stop(void)
 {
     pthread_t th;
@@ -761,7 +734,6 @@ void wallet_backup_stop(void)
         joinable = true;
     }
     pthread_mutex_unlock(&g_wbs.lock);
-
     if (joinable) {
         pthread_join(th, NULL);
         pthread_mutex_lock(&g_wbs.lock);
@@ -777,9 +749,7 @@ void wallet_backup_stop(void)
         supervisor_unregister(id);
 #endif
 }
-
 /* ── Event triggers (D4: plan §5.4) ─────────────────────────── */
-
 void wallet_backup_service_on_key_change(void)
 {
     pthread_mutex_lock(&g_wbs.lock);
@@ -793,7 +763,6 @@ void wallet_backup_service_on_key_change(void)
     }
     pthread_mutex_unlock(&g_wbs.lock);
 }
-
 void wallet_backup_service_on_keypool_topup(void)
 {
     wallet_backup_service_on_key_change();

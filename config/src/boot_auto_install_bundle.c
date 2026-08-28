@@ -37,6 +37,80 @@
 #include "validation/chainstate.h"             /* active_chain_height */
 #include "validation/main_state.h"
 
+#include <string.h>
+
+#if defined(_WIN32)
+
+/* Bundle installation and activation remain fail-closed on native Windows
+ * until immutable-generation staging and the installer sandbox are qualified.
+ * Every exported filesystem mutation returns here before inspecting or
+ * changing the install budget, bundle, datadir, or active state. */
+char *boot_autodetect_consensus_bundle(const char *datadir)
+{
+    (void)datadir;
+    return NULL;
+}
+
+void boot_auto_install_clear_failed_marker(const char *bundle_path)
+{
+    (void)bundle_path;
+}
+
+int boot_install_bundle_request(const char *datadir, const char *bundle_path)
+{
+    (void)datadir;
+    (void)bundle_path;
+    return 0;
+}
+
+bool boot_install_bundle_pending(const char *datadir)
+{
+    (void)datadir;
+    return false;
+}
+
+bool boot_install_bundle_consume(const char *datadir, char *out_path,
+                                 size_t out_cap)
+{
+    (void)datadir;
+    if (out_path && out_cap) out_path[0] = '\0';
+    return false;
+}
+
+void boot_install_bundle_clear(const char *datadir) { (void)datadir; }
+
+bool boot_maybe_auto_install_consensus_bundle(struct node_db *ndb,
+                                              struct main_state *ms,
+                                              const char *datadir)
+{
+    (void)ndb;
+    (void)ms;
+    (void)datadir;
+    return false;
+}
+
+void boot_post_install_fold_span_check(struct main_state *ms,
+                                       int32_t installed_height)
+{
+    (void)ms;
+    (void)installed_height;
+}
+
+void boot_select_state_source(struct node_db *ndb, struct main_state *ms,
+                              struct app_context *ctx,
+                              struct boot_state_source_selection *out)
+{
+    (void)ndb;
+    (void)ms;
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    /* Explicit operator from-anchor selection is independent of bundle
+     * installation and remains available in the native refusal lane. */
+    if (ctx) out->do_from_anchor = ctx->refold_from_anchor;
+}
+
+#else
+
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -44,7 +118,6 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <unistd.h>
 
 #define ICB_SUBSYS "install_consensus_bundle"
@@ -672,3 +745,5 @@ void boot_select_state_source(struct node_db *ndb, struct main_state *ms,
         no_state_source_raise(&f);
     }
 }
+
+#endif /* _WIN32 */

@@ -22,17 +22,17 @@
 
 #include "json/json.h"
 #include "platform/os_proc.h"
+#include "platform/positioned_file.h"
+#include "platform/private_file.h"
 #include "platform/time_compat.h"
 #include "util/clientversion.h"
 #include "util/hw_profile.h"
 #include "util/log_macros.h"
 
-#include <errno.h>
-#include <fcntl.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
 
 #define SB_SUBSYS "sync_benchmark"
 
@@ -366,7 +366,7 @@ bool sync_benchmark_write_receipt(bool complete, const char *incomplete_reason)
         return false;
     }
 
-    /* Atomic publish: write to a sibling .tmp, fsync, rename over the target. */
+    /* Atomic publish from a unique, owner-private sibling. */
     char final_path[600];
     char tmp_path[640];
     int fn = snprintf(final_path, sizeof(final_path),
@@ -375,32 +375,56 @@ bool sync_benchmark_write_receipt(bool complete, const char *incomplete_reason)
         LOG_FAIL(SB_SUBSYS, "write_receipt: datadir path too long");
         return false;
     }
-    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", final_path);
 
-    int fd = open(tmp_path, O_CREAT | O_TRUNC | O_WRONLY, 0644);
-    if (fd < 0)
-        LOG_FAIL(SB_SUBSYS, "write_receipt: open %s: %s",
-                 tmp_path, strerror(errno));
-    ssize_t w = write(fd, buf, need);
-    if (w < 0 || (size_t)w != need) {
-        LOG_ERROR(SB_SUBSYS, "write_receipt: short write to %s (%zd of %zu)",
-                  tmp_path, w, need);
-        close(fd);
-        unlink(tmp_path);
+    /* An existing destination must itself be a regular no-reparse file.
+     * Missing is allowed; any other open refusal fails closed. */
+    struct platform_positioned_file existing;
+    platform_positioned_file_init(&existing);
+    bool destination_regular =
+        platform_positioned_file_open(&existing, final_path);
+    platform_positioned_file_close(&existing);
+    if (!destination_regular && !platform_private_path_absent(final_path)) {
+        LOG_ERROR(SB_SUBSYS,
+                  "write_receipt: destination is not a regular no-reparse file");
         return false;
     }
-    if (fsync(fd) < 0) {  // platform-ok:sync-benchmark-receipt-fsync
-        LOG_ERROR(SB_SUBSYS, "write_receipt: fsync %s: %s",
-                  tmp_path, strerror(errno));
-        close(fd);
-        unlink(tmp_path);
+
+    static _Atomic uint64_t tmp_sequence;
+    struct platform_private_file staging;
+    platform_private_file_init(&staging);
+    bool created = false;
+    for (unsigned int attempt = 0; attempt < 16 && !created; attempt++) {
+        uint64_t sequence = atomic_fetch_add_explicit(
+            &tmp_sequence, 1, memory_order_relaxed);
+        int tn = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.%llu",
+                          final_path, (unsigned long long)sequence);
+        if (tn <= 0 || (size_t)tn >= sizeof(tmp_path)) {
+            LOG_ERROR(SB_SUBSYS, "write_receipt: staging path too long");
+            return false;
+        }
+        created = platform_private_file_create(tmp_path, &staging);
+    }
+    if (!created) {
+        LOG_ERROR(SB_SUBSYS,
+                  "write_receipt: unique private staging creation failed");
         return false;
     }
-    close(fd);
-    if (rename(tmp_path, final_path) < 0) {
-        LOG_ERROR(SB_SUBSYS, "write_receipt: rename %s -> %s: %s",
-                  tmp_path, final_path, strerror(errno));
-        unlink(tmp_path);
+    if (!platform_private_file_write_at(&staging, buf, need, 0) ||
+        !platform_private_file_flush(&staging)) {
+        LOG_ERROR(SB_SUBSYS, "write_receipt: durable staging write failed");
+        (void)platform_private_file_retire(&staging, tmp_path);
+        platform_private_file_close(&staging);
+        return false;
+    }
+    if (!platform_private_file_replace(
+            &staging, tmp_path, final_path)) {
+        LOG_ERROR(SB_SUBSYS, "write_receipt: atomic handle replace failed");
+        (void)platform_private_file_retire(&staging, tmp_path);
+        platform_private_file_close(&staging);
+        return false;
+    }
+    if (!platform_private_parent_flush(datadir)) {
+        LOG_ERROR(SB_SUBSYS, "write_receipt: parent durability barrier failed");
         return false;
     }
     LOG_INFO(SB_SUBSYS, "wrote sync_benchmark receipt (complete=%s) to %s",

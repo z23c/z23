@@ -18,6 +18,7 @@
 #include "config/runtime.h"
 #include "crypto/sha3.h"
 #include "models/store.h"
+#include "platform/private_file.h"
 #include "sapling/sapling_prover.h"
 #include "util/safe_alloc.h"
 #include "wallet/sapling_keys.h"
@@ -27,7 +28,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 /* ── shared preconditions ───────────────────────────────────────────── */
 
@@ -387,26 +387,55 @@ static const uint8_t *sb_http_body(const uint8_t *resp, size_t n,
  * removed, so a failed collect leaves no debris either. */
 static bool sb_write_atomic(const char *path, const uint8_t *data, size_t len)
 {
-    char tmp[STORE_PURCHASE_PATH_MAX + 16];
-    int n = snprintf(tmp, sizeof(tmp), "%s.part", path);
-    if (n <= 0 || (size_t)n >= sizeof(tmp))
+    errno = 0;
+    char installed[STORE_PURCHASE_PATH_MAX + 1];
+    char parent[STORE_PURCHASE_PATH_MAX + 1];
+    if (!platform_private_path_resolve(path, installed, sizeof(installed),
+                                       parent, sizeof(parent))) {
+        errno = EINVAL;
         return false;
+    }
 
-    FILE *f = fopen(tmp, "wb");
-    if (!f)
+    char tmp[STORE_PURCHASE_PATH_MAX + 16];
+    int n = snprintf(tmp, sizeof(tmp), "%s.part", installed);
+    if (n <= 0 || (size_t)n >= sizeof(tmp)) {
+        errno = ENAMETOOLONG;
         return false;
-    bool ok = (len == 0) || (fwrite(data, 1, len, f) == len);
-    if (ok)
-        ok = (fflush(f) == 0);
-    if (ok)
-        ok = (fsync(fileno(f)) == 0);
-    if (fclose(f) != 0)
-        ok = false;
-    if (ok && rename(tmp, path) != 0)
-        ok = false;
-    if (!ok)
-        (void)unlink(tmp);
-    return ok;
+    }
+
+    if (!platform_private_file_unlink_missing_ok(tmp)) {
+        if (errno == 0) errno = EIO;
+        return false;
+    }
+
+    struct platform_private_file staging;
+    platform_private_file_init(&staging);
+    if (!platform_private_file_create(tmp, &staging)) {
+        if (errno == 0) errno = EIO;
+        return false;
+    }
+
+    if ((len != 0 &&
+         !platform_private_file_write_at(&staging, data, len, 0)) ||
+        !platform_private_file_flush(&staging)) {
+        int saved_errno = errno ? errno : EIO;
+        (void)platform_private_file_retire(&staging, tmp);
+        platform_private_file_close(&staging);
+        errno = saved_errno;
+        return false;
+    }
+    if (!platform_private_file_replace(&staging, tmp, installed)) {
+        int saved_errno = errno ? errno : EIO;
+        (void)platform_private_file_retire(&staging, tmp);
+        platform_private_file_close(&staging);
+        errno = saved_errno;
+        return false;
+    }
+    if (!platform_private_parent_flush(parent)) {
+        if (errno == 0) errno = EIO;
+        return false;
+    }
+    return true;
 }
 
 struct zcl_result store_buyer_collect(const char *datadir,

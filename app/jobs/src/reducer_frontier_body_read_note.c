@@ -22,12 +22,32 @@
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
-static zcl_mutex_t g_body_read_note_lock = PTHREAD_MUTEX_INITIALIZER;
+static zcl_mutex_t g_body_read_note_lock;
+static pthread_once_t g_body_read_note_lock_once = PTHREAD_ONCE_INIT;
 static struct reducer_frontier_body_read_note g_body_read_note = {
     .height = -1,
 };
+
+static void body_read_note_lock_init_once(void)
+{
+    zcl_mutex_init(&g_body_read_note_lock);
+}
+
+static void body_read_note_lock(void)
+{
+    /* Process-lifetime lock: pthread_once is provided by both supported
+     * pthread runtimes, while zcl_mutex_t selects CRITICAL_SECTION on Win32
+     * and a recursive pthread mutex on POSIX. */
+    if (pthread_once(&g_body_read_note_lock_once,
+                     body_read_note_lock_init_once) != 0) {
+        fputs("body read note lock initialization failed\n", stderr);
+        abort();
+    }
+    zcl_mutex_lock(&g_body_read_note_lock);
+}
 
 const char *reducer_frontier_body_read_reason_name(
     enum reducer_frontier_body_read_reason r)
@@ -69,7 +89,7 @@ bool reducer_frontier_body_read_note_snapshot(
 {
     if (!out)
         return false;
-    zcl_mutex_lock(&g_body_read_note_lock);
+    body_read_note_lock();
     *out = g_body_read_note;
     zcl_mutex_unlock(&g_body_read_note_lock);
     return out->active;
@@ -103,7 +123,7 @@ uint64_t reducer_frontier_body_read_note_record(
 {
     if (height < 0 || !block_hash)
         return 0;
-    zcl_mutex_lock(&g_body_read_note_lock);
+    body_read_note_lock();
     if (g_body_read_note.active && height > g_body_read_note.height) {
         uint64_t generation = g_body_read_note.generation;
         zcl_mutex_unlock(&g_body_read_note_lock);
@@ -137,7 +157,7 @@ bool reducer_frontier_body_read_note_clear_if(
 {
     if (!expected || !expected->active)
         return false;
-    zcl_mutex_lock(&g_body_read_note_lock);
+    body_read_note_lock();
     bool match = g_body_read_note.active &&
         g_body_read_note.generation == expected->generation &&
         g_body_read_note.height == expected->height &&
@@ -157,7 +177,7 @@ bool reducer_frontier_body_read_note_clear_if(
 #ifdef ZCL_TESTING
 void reducer_frontier_body_read_note_reset_for_testing(void)
 {
-    zcl_mutex_lock(&g_body_read_note_lock);
+    body_read_note_lock();
     memset(&g_body_read_note, 0, sizeof(g_body_read_note));
     g_body_read_note.height = -1;
     zcl_mutex_unlock(&g_body_read_note_lock);

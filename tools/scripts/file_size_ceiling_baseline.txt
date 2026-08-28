@@ -40,7 +40,7 @@ app/services/src/block_index_loader_rebuild.c 853 # ADR-0008 (seed-floor declara
 # try-decrypt helper to node_db_catchup_decrypt.c (-111) and gained the
 # lock-contention seatbelts (commit cadence, BEGIN IMMEDIATE, BUSY_SNAPSHOT
 # restart call, abort-streak park) — net 886 -> 866; baseline tightened.
-app/services/src/node_db_catchup_service.c 862
+app/services/src/node_db_catchup_service.c 861
 app/services/src/rolling_anchor_service.c 801
 
 app/services/src/sticky_escalator.c 1271

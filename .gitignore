@@ -86,6 +86,13 @@ chaos-output/
 .core-unseal-token
 .codeindex/
 
+# Scaffolded GUI apps are user-local content, never tree content. `make
+# new-app NAME=…` copies packages/zhello into packages/<name> (untracked by
+# construction) and registers the app here, which is what puts its targets on
+# the lean parse path; zhello itself stays tracked as the template of record.
+# Delete the line for an app you are contributing; keep this file gitignored.
+config/gui_apps.mk
+
 # Per-box operator config is local-only, never committed.
 deploy/devfleet/*.env
 

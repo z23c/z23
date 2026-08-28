@@ -1,24 +1,18 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Producer-owned durable source receipt for the full-history exporter. */
-
 #include "config/consensus_state_producer_receipt.h"
 #include "consensus_state_producer_receipt_internal.h"
-
 #include "storage/consensus_state_bundle_codec.h"
 #include "storage/progress_store.h"
 #include "crypto/sha3.h"
 #include "core/utiltime.h"
+#include "platform/os_proc.h"
+#include "platform/positioned_file.h"
 #include "util/clientversion.h"
 #include "util/log_macros.h"
-
-#include <errno.h>
-#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
-
-
 /* Singleton start-of-fold ownership marker in the producer's progress.kv.
  * Distinct from the exporter-read consensus_state_source_receipt: this records
  * WHO started the fold; the receipt is written only when the fold completes. */
@@ -31,12 +25,10 @@ static const char k_receipt_schema_sql[] =
     "source_clean INTEGER NOT NULL,validation_profile INTEGER NOT NULL,"
     "producer_commit TEXT NOT NULL,fold_cursor INTEGER NOT NULL,"
     "receipt_digest BLOB NOT NULL)";
-
 #ifdef ZCL_TESTING
 static bool g_override_active;
 static char g_override_source_id[65];
 static bool g_override_clean;
-
 void consensus_state_producer_receipt_test_set_identity(const char *source_id,
                                                         bool source_clean)
 {
@@ -54,14 +46,12 @@ void consensus_state_producer_receipt_test_set_identity(const char *source_id,
     g_override_clean = source_clean;
 }
 #endif
-
 static bool set_err(char *err, size_t err_size, const char *msg)
 {
     if (err && err_size)
         snprintf(err, err_size, "%s", msg);
     return false; /* raw-return-ok:bounded policy reason returned to caller */
 }
-
 static int lowercase_hex_nibble(char c)
 {
     if (c >= '0' && c <= '9')
@@ -70,7 +60,6 @@ static int lowercase_hex_nibble(char c)
         return c - 'a' + 10;
     return -1;
 }
-
 static bool decode_sha256_identity(const char *hex, uint8_t out[32])
 {
     if (!hex || strnlen(hex, 65) != 64)
@@ -84,44 +73,79 @@ static bool decode_sha256_identity(const char *hex, uint8_t out[32])
     }
     return true;
 }
-
-/* SHA3-256 of the running executable's on-disk image — the binding the
- * exporter recomputes from /proc/self/exe. Must match running_binary_digest()
- * in consensus_state_snapshot_export_proof.c byte for byte. */
+static bool producer_snapshot_equal(
+    const struct platform_positioned_file_snapshot *a,
+    const struct platform_positioned_file_snapshot *b)
+{
+    return a->size == b->size &&
+           a->modified_seconds == b->modified_seconds &&
+           a->modified_nanoseconds == b->modified_nanoseconds &&
+           a->changed_seconds == b->changed_seconds &&
+           a->changed_nanoseconds == b->changed_nanoseconds &&
+           a->volume == b->volume && a->file_low == b->file_low &&
+           a->file_high == b->file_high;
+}
+/* SHA3-256 of the executable image opened through the platform process seam.
+ * All bytes and both identity snapshots come from one no-reparse handle, so a
+ * pathname replacement cannot splice two image generations into one claim. */
 bool producer_running_binary_digest(uint8_t out[32])
 {
-    int fd = open("/proc/self/exe", O_RDONLY | O_CLOEXEC);
-    if (fd < 0) {
-        LOG_WARN(PRODUCER_RECEIPT_SUBSYS, "running executable open failed: %s",
-                 strerror(errno));
+    if (!out)
+        return false;
+    char executable[4096];
+    if (!os_proc_exe_path(executable, sizeof(executable))) {
+        LOG_WARN(PRODUCER_RECEIPT_SUBSYS,
+                 "running executable path resolution failed");
+        return false;
+    }
+    struct platform_positioned_file file;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, executable)) {
+        LOG_WARN(PRODUCER_RECEIPT_SUBSYS,
+                 "running executable handle open failed");
+        return false;
+    }
+    struct platform_positioned_file_snapshot before;
+    if (!platform_positioned_file_snapshot(&file, &before)) {
+        platform_positioned_file_close(&file);
         return false;
     }
     struct sha3_256_ctx ctx;
     sha3_256_init(&ctx);
     uint8_t buffer[32768];
     bool ok = true;
-    for (;;) {
-        ssize_t n = read(fd, buffer, sizeof(buffer));
+    uint64_t offset = 0;
+    while (offset < before.size) {
+        size_t wanted = before.size - offset < sizeof(buffer)
+            ? (size_t)(before.size - offset) : sizeof(buffer);
+        int64_t n = platform_positioned_file_read(&file, buffer, wanted,
+                                                   offset);
         if (n > 0) {
             sha3_256_write(&ctx, buffer, (size_t)n);
+            offset += (uint64_t)n;
             continue;
         }
-        if (n == 0)
-            break;
-        if (errno == EINTR)
-            continue;
         ok = false;
         break;
     }
-    if (close(fd) != 0)
-        ok = false;
+    struct platform_positioned_file_snapshot after;
+    ok = ok && offset == before.size &&
+         platform_positioned_file_snapshot(&file, &after) &&
+         producer_snapshot_equal(&before, &after);
+    platform_positioned_file_close(&file);
     if (ok)
         sha3_256_finalize(&ctx, out);
     else
         LOG_WARN(PRODUCER_RECEIPT_SUBSYS, "running executable digest failed");
     return ok;
 }
-
+#ifdef ZCL_TESTING
+bool consensus_state_producer_receipt_test_running_binary_digest(
+    uint8_t out[32])
+{
+    return producer_running_binary_digest(out);
+}
+#endif
 static void claim_digest(const char *domain, const uint8_t *extra,
                          size_t extra_len, uint8_t out[32])
 {
@@ -131,7 +155,6 @@ static void claim_digest(const char *domain, const uint8_t *extra,
     sha3_256_write(&ctx, extra, extra_len);
     sha3_256_finalize(&ctx, out);
 }
-
 /* Fill a v2 source-identity claim. source_tree_root is the exact 32-byte value
  * baked from tools/dev/source-identity.sh; no Git object ID participates in
  * durable authority. producer_commit remains empty; GitHub trace metadata
@@ -152,11 +175,9 @@ static bool fill_source_identity_claim(struct consensus_state_source_receipt *r)
 #endif
     if (!decode_sha256_identity(source_id, r->source_tree_root))
         return false; /* raw-return-ok:unstamped build cannot earn a receipt */
-
     r->schema_version = CONSENSUS_STATE_SOURCE_RECEIPT_V2;
     r->producer_commit[0] = '\0';
     r->source_clean = clean;
-
     const char *toolchain =
 #ifdef __VERSION__
         __VERSION__;
@@ -165,7 +186,6 @@ static bool fill_source_identity_claim(struct consensus_state_source_receipt *r)
 #endif
     claim_digest("zcl.producer_toolchain.v2", (const uint8_t *)toolchain,
                  strlen(toolchain), r->toolchain_digest);
-
     uint8_t build_inputs_preimage[36];
     uint32_t version = (uint32_t)CLIENT_VERSION;
     for (size_t i = 0; i < 4; i++)
@@ -175,7 +195,6 @@ static bool fill_source_identity_claim(struct consensus_state_source_receipt *r)
                  sizeof(build_inputs_preimage), r->build_inputs_digest);
     return true;
 }
-
 static bool read_session_blob(sqlite3_stmt *st, int col, uint8_t out[32])
 {
     if (sqlite3_column_type(st, col) != SQLITE_BLOB ||
@@ -184,7 +203,6 @@ static bool read_session_blob(sqlite3_stmt *st, int col, uint8_t out[32])
     memcpy(out, sqlite3_column_blob(st, col), 32);
     return true;
 }
-
 static const char *producer_session_schema(uint8_t receipt_version)
 {
     /* V1 sessions remain parseable below for historical status/diagnostics,
@@ -193,7 +211,6 @@ static const char *producer_session_schema(uint8_t receipt_version)
         return PRODUCER_SESSION_SCHEMA_V2;
     return NULL;
 }
-
 static bool producer_session_schema_version(sqlite3_stmt *st, int column,
                                             uint8_t *out_version)
 {
@@ -215,7 +232,6 @@ static bool producer_session_schema_version(sqlite3_stmt *st, int column,
     }
     return false;
 }
-
 /* Resume authority is derived from this running build, never from the row it
  * is deciding whether to trust. In particular, recomputing an epoch from a
  * stored claim would admit a preseeded/tampered claim whose attacker updated
@@ -233,7 +249,6 @@ bool producer_current_v2_claim(
     memcpy(out->source_epoch_digest, source_epoch, 32);
     return true;
 }
-
 bool consensus_state_producer_receipt_current_binary_epoch(uint8_t out[32])
 {
     if (!out)
@@ -248,7 +263,6 @@ bool consensus_state_producer_receipt_current_binary_epoch(uint8_t out[32])
     memcpy(out, epoch, 32);
     return true;
 }
-
 bool producer_session_matches_current(
     const struct producer_session *stored,
     const struct consensus_state_source_receipt *current,
@@ -271,7 +285,6 @@ bool producer_session_matches_current(
            strcmp(stored->claim.producer_commit,
                   current->producer_commit) == 0;
 }
-
 /* Load the singleton start session. Returns false only on a store error;
  * `out->present` reports whether a row exists. */
 bool producer_session_load(sqlite3 *db, struct producer_session *out)
@@ -327,7 +340,6 @@ bool producer_session_load(sqlite3 *db, struct producer_session *out)
     sqlite3_finalize(st);
     return ok;
 }
-
 static bool insert_session(sqlite3 *db,
                            const struct consensus_state_source_receipt *r,
                            const uint8_t running_binary[32],
@@ -373,7 +385,6 @@ static bool insert_session(sqlite3 *db,
     sqlite3_finalize(st);
     return ok;
 }
-
 /* Read the EXISTING committed receipt's fold_cursor (H*+1 of the last finalize).
  * *present reports whether a receipt row exists; returns false only on a store
  * error. Used by the monotonic re-finalize guard: the standing live exporter
@@ -406,7 +417,6 @@ static bool read_existing_receipt_fold_cursor(sqlite3 *db, int64_t *out,
     sqlite3_finalize(st);
     return ok;
 }
-
 static bool write_final_receipt(
     sqlite3 *db, const struct consensus_state_source_receipt *r)
 {
@@ -453,7 +463,6 @@ static bool write_final_receipt(
     sqlite3_finalize(st);
     return ok;
 }
-
 enum final_receipt_state {
     FINAL_RECEIPT_READ_ERROR = 0, FINAL_RECEIPT_ABSENT,
     FINAL_RECEIPT_IDENTICAL, FINAL_RECEIPT_CONFLICT,
@@ -466,7 +475,6 @@ static bool receipt_blob_equal(sqlite3_stmt *st, int column,
     return blob && sqlite3_column_bytes(st, column) == 32 &&
            memcmp(blob, expected, 32) == 0;
 }
-
 static bool receipt_text_equal(sqlite3_stmt *st, int column,
                                const char *expected, size_t expected_len)
 {
@@ -476,7 +484,6 @@ static bool receipt_text_equal(sqlite3_stmt *st, int column,
     return text && sqlite3_column_bytes(st, column) == (int)expected_len &&
            memcmp(text, expected, expected_len) == 0;
 }
-
 /* A finalized receipt is an append-only ownership record. A retry may observe
  * the exact row it already committed, but must never heal, replace, or silently
  * adopt a malformed/different row. That distinction matters after a crash:
@@ -532,7 +539,6 @@ static enum final_receipt_state final_receipt_state(
         return FINAL_RECEIPT_READ_ERROR;
     return identical ? FINAL_RECEIPT_IDENTICAL : FINAL_RECEIPT_CONFLICT;
 }
-
 static bool exec_checked(sqlite3 *db, const char *sql)
 {
     char *error = NULL;
@@ -543,7 +549,6 @@ static bool exec_checked(sqlite3 *db, const char *sql)
     }
     return ok;
 }
-
 bool consensus_state_producer_receipt_begin(sqlite3 *pdb,
                                             uint8_t validation_profile,
                                             char *err, size_t err_size)
@@ -556,13 +561,11 @@ bool consensus_state_producer_receipt_begin(sqlite3 *pdb,
         validation_profile != CONSENSUS_STATE_VALIDATION_CHECKPOINT_FOLD)
         return set_err(err, err_size,
                        "producer receipt begin: invalid validation profile");
-
     uint8_t running_binary[32];
     if (!producer_running_binary_digest(running_binary))
         return set_err(err, err_size,
                        "producer receipt begin: running executable digest "
                        "failed");
-
     /* Compute every current-build authority input before consulting durable
      * session state. A stored row is evidence to compare, never an input to
      * the claim/epoch we expect from this executable. */
@@ -573,11 +576,9 @@ bool consensus_state_producer_receipt_begin(sqlite3 *pdb,
             err, err_size,
             "producer receipt begin: build has no exact 64-hex SHA-256 "
             "source identity; an unstamped build cannot earn a receipt");
-
     char datadir[576] = {0};
     (void)progress_store_path(datadir, sizeof(datadir));
     int64_t start_us = GetTimeMicros();
-
     bool committed = false;
     progress_store_tx_lock();
     if (!exec_checked(pdb, "BEGIN IMMEDIATE")) {
@@ -632,7 +633,6 @@ bool consensus_state_producer_receipt_begin(sqlite3 *pdb,
                        "producer receipt begin: durable session write failed");
     return true;
 }
-
 bool consensus_state_producer_receipt_finalize(sqlite3 *pdb, int32_t height,
                                                const uint8_t block_hash[32],
                                                char *err, size_t err_size)
@@ -644,13 +644,11 @@ bool consensus_state_producer_receipt_finalize(sqlite3 *pdb, int32_t height,
     if (height < 0 || height == INT32_MAX)
         return set_err(err, err_size,
                        "producer receipt finalize: height out of range");
-
     uint8_t running_binary[32];
     if (!producer_running_binary_digest(running_binary))
         return set_err(err, err_size,
                        "producer receipt finalize: running executable digest "
                        "failed");
-
     bool committed = false;
     progress_store_tx_lock();
     if (!exec_checked(pdb, "BEGIN IMMEDIATE")) {
@@ -658,7 +656,6 @@ bool consensus_state_producer_receipt_finalize(sqlite3 *pdb, int32_t height,
         return set_err(err, err_size,
                        "producer receipt finalize: cannot open transaction");
     }
-
     struct producer_session session;
     bool ok = producer_session_load(pdb, &session);
     if (ok && !session.present) {
@@ -695,7 +692,6 @@ bool consensus_state_producer_receipt_finalize(sqlite3 *pdb, int32_t height,
                        "producer receipt finalize: running executable/current "
                        "build does not own the start session");
     }
-
     /* Build the receipt from the independently derived current claim after
      * exact session equality, never from durable fields under evaluation.
      * Then bind chain corpus + fold cursor to the completed fold. */
@@ -705,7 +701,6 @@ bool consensus_state_producer_receipt_finalize(sqlite3 *pdb, int32_t height,
         receipt = current_claim;
         memcpy(receipt.running_binary_digest, running_binary, 32);
     }
-
     if (ok &&
         !producer_receipt_header_corpus_digest(pdb, height, block_hash,
                                                receipt.chain_corpus_digest)) {
@@ -743,7 +738,6 @@ bool consensus_state_producer_receipt_finalize(sqlite3 *pdb, int32_t height,
             return set_err(err, err_size, why);
         }
     }
-
     if (ok) {
         receipt.fold_cursor = (int64_t)height + 1;
         consensus_state_source_receipt_digest(&receipt, receipt.receipt_digest);

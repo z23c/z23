@@ -11,21 +11,26 @@
  */
 
 #include "utxo_recovery_internal.h"
+#if !defined(_WIN32)
 #include "util/log_macros.h"
 #include "util/file_tree_ops.h"
 
 #include <dirent.h>
+#endif
 #include <stdint.h>
+#if !defined(_WIN32)
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 /* FNV-1a signature over (name, size, mtime_ns) of every entry in a
  * LevelDB directory. Two equal signatures taken around a copy prove no
  * file changed while the copy ran — i.e. the copy is a point-in-time
  * image. Returns 0 only on opendir failure. */
+#if !defined(_WIN32)
 static uint64_t chainstate_dir_signature(const char *path)
 {
     DIR *d = opendir(path);
@@ -57,6 +62,7 @@ static uint64_t chainstate_dir_signature(const char *path)
     closedir(d);
     return sig;
 }
+#endif
 
 struct zcl_result utxo_recovery_copy_chainstate_stable(const char *cs_path,
                                                        const char *import_path)
@@ -64,6 +70,12 @@ struct zcl_result utxo_recovery_copy_chainstate_stable(const char *cs_path,
     if (!cs_path || !import_path)
         return ZCL_ERR(-3, "copy_chainstate_stable: NULL path");
 
+#if defined(_WIN32)
+    return ZCL_ERR(
+        -3,
+        "copy_chainstate_stable: Windows recovery copy is disabled until "
+        "directory-handle-relative, reparse-safe stable copying qualifies");
+#else
     const int max_copy_attempts = 6;
     for (int attempt = 1; attempt <= max_copy_attempts; attempt++) {
         uint64_t sig_before = chainstate_dir_signature(cs_path);
@@ -105,4 +117,5 @@ struct zcl_result utxo_recovery_copy_chainstate_stable(const char *cs_path,
         "copy_chainstate_stable: could not capture a complete point-in-time "
         "copy of %s across %d attempts — refusing a torn import (retry when "
         "the source is idle)", cs_path, max_copy_attempts);
+#endif
 }

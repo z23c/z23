@@ -28,6 +28,8 @@
  * ripple through that stable public API for no behavior gain. */
 
 #include "platform/time_compat.h"
+#include "platform/positioned_file.h"
+#include "platform/read_mapping.h"
 #include "services/legacy_import_service.h"
 #include "models/wallet_tx.h"
 #include "wallet/wallet.h"
@@ -38,10 +40,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <sys/mman.h>
-#include <fcntl.h>
-#include <unistd.h>
 #include <time.h>
 #include <pthread.h>
 #include "controllers/scan_util.h"
@@ -106,6 +104,35 @@ static uint8_t *ser_tx(const struct transaction *tx, size_t *len)
     transaction_serialize(tx, &s);
     *len = s.size;
     return s.data;
+}
+
+static bool legacy_import_snapshot_equal(
+    const struct platform_positioned_file_snapshot *a,
+    const struct platform_positioned_file_snapshot *b)
+{
+    return a->size == b->size && a->volume == b->volume &&
+           a->file_low == b->file_low && a->file_high == b->file_high &&
+           a->modified_seconds == b->modified_seconds &&
+           a->modified_nanoseconds == b->modified_nanoseconds &&
+           a->changed_seconds == b->changed_seconds &&
+           a->changed_nanoseconds == b->changed_nanoseconds;
+}
+
+static bool legacy_import_open_block(
+    const char *legacy_datadir, int file_number,
+    struct platform_positioned_file *file,
+    struct platform_positioned_file_snapshot *snapshot)
+{
+    char blocks[512];
+    char leaf[32];
+    int blocks_length = snprintf(blocks, sizeof(blocks), "%s/blocks",
+                                 legacy_datadir);
+    int leaf_length = snprintf(leaf, sizeof(leaf), "blk%05d.dat", file_number);
+    return blocks_length > 0 && (size_t)blocks_length < sizeof(blocks) &&
+           leaf_length > 0 && (size_t)leaf_length < sizeof(leaf) &&
+           platform_positioned_file_open_beneath(file, blocks, leaf) &&
+           platform_positioned_file_snapshot(file, snapshot) &&
+           snapshot->size > 0 && snapshot->size <= SIZE_MAX;
 }
 
 /* Process a single deserialized block for wallet txns. */
@@ -234,10 +261,13 @@ int legacy_import_service_run(const char *legacy_datadir,
     /* Count block files. */
     int num_files = 0;
     for (int f = 0; f < 200; f++) {
-        char path[512];
-        snprintf(path, sizeof(path), "%s/blocks/blk%05d.dat",
-                 legacy_datadir, f);
-        if (access(path, R_OK) != 0) break;
+        struct platform_positioned_file probe;
+        struct platform_positioned_file_snapshot snapshot;
+        platform_positioned_file_init(&probe);
+        bool present = legacy_import_open_block(legacy_datadir, f, &probe,
+                                                &snapshot);
+        platform_positioned_file_close(&probe);
+        if (!present) break;
         num_files = f + 1;
     }
     printf("legacy_import: %d block files in %s\n",
@@ -313,22 +343,31 @@ int legacy_import_service_run(const char *legacy_datadir,
     int total_blocks_p2 = 0;
     for (int f = 0; f < num_files; f++) {
         if (!file_has_match[f]) continue;
-        char path[512];
-        snprintf(path, sizeof(path), "%s/blocks/blk%05d.dat",
-                 legacy_datadir, f);
-        int fd = open(path, O_RDONLY);
-        if (fd < 0) continue;
-        struct stat st;
-        if (fstat(fd, &st) != 0) { close(fd); continue; }
-        size_t sz = (size_t)st.st_size;
-        uint8_t *data = mmap(NULL, sz, PROT_READ, MAP_PRIVATE, fd, 0);
-        close(fd);
-        if (data == MAP_FAILED) continue;
-        posix_madvise(data, sz, POSIX_MADV_SEQUENTIAL);
+        struct platform_positioned_file file;
+        struct platform_positioned_file_snapshot before, after;
+        struct platform_read_mapping mapping;
+        platform_positioned_file_init(&file);
+        platform_read_mapping_init(&mapping);
+        if (!legacy_import_open_block(legacy_datadir, f, &file, &before) ||
+            !platform_read_mapping_open_positioned(
+                &mapping, &file, (size_t)before.size)) {
+            platform_read_mapping_close(&mapping);
+            platform_positioned_file_close(&file);
+            continue;
+        }
+        platform_read_mapping_advise_sequential(&mapping);
 
         total_blocks_p2 += legacy_import_walk_block_file(
-            data, sz, transparent_visitor, &tctx);
-        munmap(data, sz);
+            mapping.data, mapping.size, transparent_visitor, &tctx);
+        bool stable = platform_positioned_file_snapshot(&file, &after) &&
+                      legacy_import_snapshot_equal(&before, &after);
+        platform_read_mapping_close(&mapping);
+        platform_positioned_file_close(&file);
+        if (!stable) {
+            LOG_WARN("legacy_import",
+                     "legacy block file changed during immutable pass 2");
+            goto cleanup;
+        }
     }
 
     platform_time_monotonic_timespec(&ts_p2);

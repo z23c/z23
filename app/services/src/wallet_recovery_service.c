@@ -11,6 +11,8 @@
 #include "models/database.h"
 #include "models/utxo.h"                       /* gap-scan history oracle */
 #include "models/wallet_key.h"
+#include "platform/private_directory.h"
+#include "platform/private_file.h"
 #include "services/wallet_restore_service.h"   /* datadir single-writer proof */
 #include "support/cleanse.h"
 #include "util/log_macros.h"
@@ -62,18 +64,25 @@ static int wrc_word_count(const char *phrase)
 static struct zcl_result wrc_ensure_datadir(const char *datadir,
                                             struct wallet_recovery_report *out)
 {
-    struct stat st;
-    if (stat(datadir, &st) != 0) {
-        if (mkdir(datadir, 0700) != 0)
-            return ZCL_ERR(-63, "cannot create datadir %s: %s", datadir,
-                           strerror(errno));
-        out->datadir_created = true;
-        return ZCL_OK;
-    }
-    if (!S_ISDIR(st.st_mode))
-        return ZCL_ERR(-63, "%s is not a directory", datadir);
+    bool absent = platform_private_path_absent(datadir);
+    if (!platform_private_directory_ensure(datadir))
+        return ZCL_ERR(-63,
+                       "cannot create or validate private datadir %s",
+                       datadir);
+    out->datadir_created = absent;
     return ZCL_OK;
 }
+
+#ifdef ZCL_TESTING
+struct zcl_result wallet_recovery_test_ensure_datadir(
+    const char *datadir, struct wallet_recovery_report *out)
+{
+    if (!out)
+        return ZCL_ERR(-63, "wallet recovery datadir test: report is NULL");
+    memset(out, 0, sizeof(*out));
+    return wrc_ensure_datadir(datadir, out);
+}
+#endif
 
 /* ── at-rest policy: the SAME one boot obeys ──────────────────────────
  *

@@ -25,7 +25,7 @@ ZCL_PLATFORM_CPPFLAGS = -D_WIN32_WINNT=0x0600 -DWIN32_LEAN_AND_MEAN \
 	-D__USE_MINGW_ANSI_STDIO=1
 ZCL_LTO_FLAG = -flto=auto
 ZCL_PLATFORM_NODE_LIBS = -lws2_32 -liphlpapi -lbcrypt -luserenv \
-	-lcrypt32 -lshell32 -lole32 -luuid -lpsapi -ladvapi32
+	-lcrypt32 -lshell32 -lole32 -luuid -lpsapi
 ZCL_CXX_RUNTIME_LIB = -lstdc++
 ZCL_WARN_MAYBE_UNINITIALIZED = -Wno-maybe-uninitialized
 ZCL_TEST_STACK_SETUP = :
@@ -97,10 +97,29 @@ ZCL_ZERO_SHA256 = 00000000000000000000000000000000000000000000000000000000000000
 # stamps and links nothing at all, so every parse-time input this set skips is
 # input it could not consume. It is the first command an agent types about the
 # loop, so it has to answer in ~2 s, not ~13 s.
+# GUI packages: zhello is the template of record and is tracked; every app the
+# scaffolder creates (`make new-app NAME=…`) appends itself to
+# config/gui_apps.mk instead. That file is gitignored — a scaffolded app is
+# user-local content, not tree content — so it is `-include`d here, before the
+# goal set below is built, and a missing file costs nothing. Its position is
+# the whole point: an app registered there joins the SAME lean parse zhello
+# gets, instead of paying the authoritative parse for a two-file build.
+GUI_APPS := zhello
+-include config/gui_apps.mk
+# Five goals per GUI app: run, headless selftest, clean, .app bundle, and the
+# bare binary path. The binary is spelled `build/bin/…` literally because
+# BIN_DIR is defined further down, after this list is consulted.
+ZCL_GUI_APP_GOALS := $(foreach a,$(GUI_APPS),$(a) $(a)-selftest $(a)-clean \
+	$(a)-app build/bin/$(a))
+# `new-app` is the front door of that journey and only copies + rewrites files
+# under packages/ and config/, so it belongs here too: measured on this host,
+# the authoritative parse it would otherwise pay turned a 0.5 s scaffold into a
+# ~17 s one. Its selftest runs in a throwaway repo and needs even less.
 ZCL_HOTSWAP_LOOP_GOALS := hotswap-try hotswap-apply hotswap \
 	presentation-lib presentation-demo presentation-relaunch \
 	presentation-desktop-install presentation-portability \
-	windows-acceptance-compile windows-acceptance
+	windows-acceptance-compile windows-acceptance \
+	new-app new-app-selftest $(ZCL_GUI_APP_GOALS)
 ZCL_HOTSWAP_LOOP_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_HOTSWAP_LOOP_GOALS),$(MAKECMDGOALS))),,1),)
 
 # hotswap-module-so compiles exactly one TU via a direct $(CC) shell command in
@@ -1590,9 +1609,124 @@ windows-acceptance: windows-acceptance-compile
 		exit 2; \
 	}; \
 	for executable in $(ZCL_WINDOWS_ACCEPTANCE_BINS); do \
-		WINEDEBUG=-all wine "$$executable" || exit; \
+		WINEDEBUG=-all wine "$$executable"; rc=$$?; \
+		if test $$rc -eq 77; then \
+			printf '%s\n' "windows-acceptance: honest runtime refusal: $$executable"; \
+		elif test $$rc -ne 0; then exit $$rc; fi; \
 	done; \
-	printf '%s\n' 'windows-acceptance: execution PASS'
+	printf '%s\n' 'windows-acceptance: execution PASS (explicit runtime refusals reported above)'
+
+# ── GUI packages: the prompt-to-pixel loop ───────────────────────────────
+# `make <app>` opens a real window on this host and prints the timestamp it
+# presented its first frame; `make <app>-selftest` replays the same painter
+# headless (no window, no RGFW call) so a machine without a WindowServer can
+# still prove the frame code runs; `make <app>-app` wraps the built binary in
+# the reproducible .app bundle. One package, two C23 TUs, no node objects:
+# the whole build is two zcc-cached compiles and one link.
+#
+# Every GUI package has exactly zhello's shape — packages/zhello is the
+# template of record and `make new-app NAME=…` stamps new ones out of it — so
+# the rules are generated, not copied: GUI_APPS (top of this file, extended by
+# the gitignored config/gui_apps.mk) is the one list, and the template below
+# emits the same goals for every entry. Adding an app means appending one line
+# to that file, never editing this Makefile.
+#
+# Per-app variables, keyed by the package name exactly as spelled (the
+# template below has no case conversion), set in config/gui_apps.mk:
+#   <name>_APP_TITLE   the .app's display name (default: the package name)
+#   <name>_ARGS        extra argv for `make <app>`; scaffolded apps alias the
+#                      uppercased <APP>_ARGS spelling a reader would guess
+#
+# Host seams: RGFW needs Cocoa on macOS and loads X11 at runtime on Linux, so
+# the per-host link inputs live here rather than in the source (same shape as
+# ZCL_TOOL_SANDBOX_SRC above; lib/presentation carries the same table).
+GUI_APP_HOST_CPPFLAGS := -D_POSIX_C_SOURCE=200809L
+GUI_APP_HOST_LIBS := -ldl -lm
+ifeq ($(ZCL_HOST_OS),Darwin)
+GUI_APP_HOST_LIBS := -framework Cocoa -framework CoreGraphics \
+	-framework QuartzCore -framework CoreVideo
+else ifneq ($(filter MINGW% MSYS% CYGWIN%,$(ZCL_HOST_OS)),)
+GUI_APP_HOST_LIBS := -lgdi32 -luser32 -lshell32 -lole32
+endif
+GUI_APP_CFLAGS := -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(ZCL_WARN_STRINGOP_OVERFLOW) $(GUI_APP_HOST_CPPFLAGS) \
+	$(ZCL_PLATFORM_CPPFLAGS) -Ivendor/rgfw
+# Output dir for <app>-app. This is the same knob `make app-bundle` uses; the
+# definition lives here rather than there because the template below is
+# EXPANDED at the stamp line, so anything its recipes name must already be
+# defined — a `?=` further down would arrive too late and the recipe would
+# run with an empty path.
+APP_BUNDLE_OUT ?= $(BUILD_DIR)/app-bundle
+
+# $(1) = the package name under packages/. Recipe lines escape `$$` for the
+# automatic variables ($$@, $$<, $$^), which make must not expand until the
+# recipe runs; everything else in the recipe is fixed as the template is
+# expanded.
+define GUI_APP_RULES
+$(BUILD_DIR)/$(1)/$(1).o: packages/$(1)/src/$(1).c \
+		packages/$(1)/include/$(1)/$(1).h
+	@mkdir -p $$(dir $$@)
+	$$(CC) $(GUI_APP_CFLAGS) -Ipackages/$(1)/include -c $$< -o $$@
+
+$(BUILD_DIR)/$(1)/main.o: packages/$(1)/app/main.c \
+		packages/$(1)/include/$(1)/$(1).h vendor/rgfw/RGFW.h
+	@mkdir -p $$(dir $$@)
+	$$(CC) $(GUI_APP_CFLAGS) -Ipackages/$(1)/include -c $$< -o $$@
+
+$(BIN_DIR)/$(1): $(BUILD_DIR)/$(1)/$(1).o $(BUILD_DIR)/$(1)/main.o
+	@mkdir -p $$(dir $$@)
+	$$(CC) $(GUI_APP_CFLAGS) -Ipackages/$(1)/include $$^ \
+		$(GUI_APP_HOST_LIBS) -o $$@
+
+.PHONY: $(1) $(1)-selftest $(1)-clean $(1)-app
+# Run the window. `make $(1) $(1)_ARGS=--seconds=2` returns on its own;
+# otherwise Esc or the window close button ends it. The lookup key is the
+# lowercase package name (the template has no case-conversion), and every app
+# aliases its uppercased spelling to it — zhello right below, scaffolded apps
+# in config/gui_apps.mk — so the variable a reader would guess, <APP>_ARGS,
+# is the one that works. The value is read as the template is stamped out: a
+# command-line variable is already set at that point.
+$(1): $(BIN_DIR)/$(1)
+	$(BIN_DIR)/$(1) $($(1)_ARGS)
+# The headless gate: presents N logical frames, prints per-frame present
+# times, exits 0. No window is ever created.
+$(1)-selftest: $(BIN_DIR)/$(1)
+	$(BIN_DIR)/$(1) --frames=120 --quiet
+$(1)-clean:
+	rm -f $(BIN_DIR)/$(1) $(BUILD_DIR)/$(1)/*.o
+# Ship it: the minimal launchable, byte-reproducible .app over the binary we
+# just built (same bundler `make app-bundle` drives; same output dir).
+$(1)-app: $(BIN_DIR)/$(1)
+	@mkdir -p $(APP_BUNDLE_OUT)
+	@tools/scripts/make_app_bundle.sh $(BIN_DIR)/$(1) \
+		$(if $($(1)_APP_TITLE),$($(1)_APP_TITLE),$(1)) $(APP_BUNDLE_OUT)
+endef
+# zhello's run-args spelling is documented in packages/zhello/README.md as
+# ZHELLO_ARGS (it predates the generated template); the alias keeps that
+# documented interface working, and its .app keeps the macOS capitalized
+# form. Every per-app variable here is keyed by the package name EXACTLY as
+# spelled — the template has no case conversion, so a lowercase package name
+# means a lowercase key — and aliases the user-facing uppercased spelling.
+# Both must precede the stamp below: the template reads them as it expands.
+zhello_ARGS = $(ZHELLO_ARGS)
+zhello_APP_TITLE := Zhello
+$(foreach a,$(GUI_APPS),$(eval $(call GUI_APP_RULES,$(a))))
+
+.PHONY: new-app
+# Scaffold a new GUI package out of packages/zhello: copies the template,
+# renames zhello→NAME in symbols, header guards and README, registers the app
+# in config/gui_apps.mk, and refuses to touch anything that already exists.
+#
+#   make new-app NAME=myapp      then: make myapp / make myapp-selftest
+#
+new-app:
+	@tools/scripts/new_app.sh '$(NAME)'
+
+.PHONY: new-app-selftest
+# Proves the scaffolder's refusals and rollback in a throwaway git repo, so a
+# change to new_app.sh that would clobber an existing app fails here instead.
+new-app-selftest:
+	@tools/scripts/new_app.sh --selftest
 
 .PHONY: worktree-prime
 # Formalizes the "cp -a vendor/lib before a fresh worktree can link" tribal
@@ -5464,6 +5598,29 @@ $(JSONQ_BIN): tools/jsonq.c \
 check-onion-pair-watch: jsonq
 	@tools/scripts/check_onion_pair_watch.sh
 
+# ── macOS .app bundle over any tool binary ───────────────────────────────
+# The minimal launchable bundle — Contents/{MacOS/<exe>,Info.plist,PkgInfo},
+# ad-hoc signed with the timestamp server off — around an already-built tool
+# binary, reproducibly: identical binary in, byte-identical bundle out,
+# signature included. tools/lint/check_app_bundle_reproducible.sh proves the
+# reproducibility half and launches the product; this target is the wired
+# user path over tools/scripts/make_app_bundle.sh, which any other package
+# binary can use directly.
+#
+#   make app-bundle                      # build/app-bundle/Sqlq.app over build/bin/sqlq
+#   make app-bundle APP_NAME=Jsonq APP_BUNDLE_BIN=$(BIN_DIR)/jsonq
+#   ./build/app-bundle/Sqlq.app/Contents/MacOS/sqlq   # the bundled executable, signed
+#
+# APP_NAME names the .app (and derives CFBundleIdentifier); the executable
+# inside keeps the binary's own name, which is what CFBundleExecutable pins.
+# APP_BUNDLE_OUT is defined once, up with the GUI-app template that shares it.
+APP_BUNDLE_BIN ?= $(SQLQ_BIN)
+APP_NAME ?= Sqlq
+.PHONY: app-bundle
+app-bundle: $(APP_BUNDLE_BIN)
+	@mkdir -p $(APP_BUNDLE_OUT)
+	@tools/scripts/make_app_bundle.sh $(APP_BUNDLE_BIN) $(APP_NAME) $(APP_BUNDLE_OUT)
+
 # Hermetic Git-history fixtures for the mesh-source CURRENT/STALE classifier.
 # Does not access a node, production datadir, or network peer.
 .PHONY: check-fleet-source-status
@@ -9191,6 +9348,18 @@ check-standalone-tools-link:
 	@echo "→ Gate: standalone_tools_link (every tool rule still builds)"
 	@./tools/lint/check_standalone_tools_link.sh
 
+# tools/scripts/make_app_bundle.sh must be a pure function of its input: two
+# bundle runs over identical binaries into two temp dirs must be
+# byte-identical, embedded signature included (codesign embeds it in the
+# Mach-O; --timestamp=none keeps the timestamp authority out), and the
+# product must actually LAUNCH — a bundle whose signature the kernel rejects
+# is SIGKILLed, which an exit-code-only smoke test cannot distinguish from a
+# clean nonzero exit. See the gate header for the probe contract.
+check-app-bundle-reproducible:
+	@echo "→ Gate: app_bundle_reproducible (bundle is byte-identical across runs and launches)"
+	@./tools/lint/check_app_bundle_reproducible.sh --selftest
+	@./tools/lint/check_app_bundle_reproducible.sh
+
 # North Star invariant 1 (single writer per frontier), made mechanical for the
 # sealed ROM segment store: only the designated sealer/RPC/healer/writer surface
 # may call the store's WRITE API (chain_segment_seal_range /
@@ -10271,6 +10440,7 @@ LINT_GATES := \
     check-live-datadir-isolation \
     check-installed-acceptance-tools \
     check-standalone-tools-link \
+    check-app-bundle-reproducible \
     check-no-operator-paths \
     check-no-unattended-publish \
     check-tor-dial-prewarm \

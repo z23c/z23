@@ -51,6 +51,13 @@ bool consensus_state_install_verify_receipt_lookup(
     int dir_fd, const uint8_t bundle_sha3_256[32],
     const uint8_t verifier_epoch[32], int64_t *out_age_us);
 
+/* Native/path-capability variant. `trusted_root_utf8` must name a trusted,
+ * real directory. The receipt is opened beneath it without following
+ * symlinks/reparse points and is verified from one stable file handle. */
+bool consensus_state_install_verify_receipt_lookup_root(
+    const char *trusted_root_utf8, const uint8_t bundle_sha3_256[32],
+    const uint8_t verifier_epoch[32], int64_t *out_age_us);
+
 /* Persist a receipt for (bundle_sha3_256, verifier_epoch) into the directory
  * capability `dir_fd`, to be honored by a later lookup() for the same exact
  * pair. Call only after the deterministic content verify has actually

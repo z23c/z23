@@ -1,0 +1,72 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Headless acceptance for current-user private directory boundaries. */
+#include "platform/private_directory.h"
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <stdio.h>
+#include <windows.h>
+
+static int fail(const char *message)
+{
+    fprintf(stderr, "private_directory_acceptance: %s\n", message);
+    return 1;
+}
+
+int main(void)
+{
+    wchar_t temp[MAX_PATH], root[MAX_PATH], private_path[MAX_PATH];
+    wchar_t permissive[MAX_PATH], target[MAX_PATH], link_path[MAX_PATH];
+    if (!GetTempPathW(MAX_PATH, temp) ||
+        swprintf(root, MAX_PATH, L"%lsz23-private-dir-%lu-%llu", temp,
+                 (unsigned long)GetCurrentProcessId(),
+                 (unsigned long long)GetTickCount64()) <= 0 ||
+        !CreateDirectoryW(root, NULL))
+        return fail("fixture root create failed");
+    (void)swprintf(private_path, MAX_PATH, L"%ls\\private", root);
+    (void)swprintf(permissive, MAX_PATH, L"%ls\\permissive", root);
+    (void)swprintf(target, MAX_PATH, L"%ls\\target", root);
+    (void)swprintf(link_path, MAX_PATH, L"%ls\\link", root);
+
+    char utf8[MAX_PATH * 3];
+    if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, private_path, -1,
+                             utf8, sizeof(utf8), NULL, NULL))
+        return fail("private path UTF-8 conversion failed");
+    if (!platform_private_directory_ensure(utf8)) {
+        RemoveDirectoryW(private_path);
+        RemoveDirectoryW(root);
+        fputs("private_directory_acceptance: REFUSE: runtime cannot prove "
+              "native SID/DACL semantics\n", stderr);
+        return 77;
+    }
+    if (!platform_private_directory_ensure(utf8))
+        return fail("create/existing validation failed");
+
+    if (!CreateDirectoryW(permissive, NULL) ||
+        !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, permissive, -1,
+                             utf8, sizeof(utf8), NULL, NULL) ||
+        platform_private_directory_ensure(utf8))
+        return fail("permissive inherited ACL accepted");
+
+    if (!CreateDirectoryW(target, NULL))
+        return fail("reparse target create failed");
+    DWORD flags = SYMBOLIC_LINK_FLAG_DIRECTORY;
+#ifdef SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE
+    flags |= SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
+#endif
+    if (CreateSymbolicLinkW(link_path, target, flags)) {
+        if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, link_path, -1,
+                                 utf8, sizeof(utf8), NULL, NULL) ||
+            platform_private_directory_ensure(utf8))
+            return fail("directory reparse point accepted");
+        RemoveDirectoryW(link_path);
+    }
+
+    RemoveDirectoryW(private_path);
+    RemoveDirectoryW(permissive);
+    RemoveDirectoryW(target);
+    RemoveDirectoryW(root);
+    puts("private_directory_acceptance: PASS");
+    return 0;
+}

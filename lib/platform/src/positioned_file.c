@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #if defined(_WIN32)
@@ -12,6 +13,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <aclapi.h>
 #include <winternl.h>
 #include <wchar.h>
 
@@ -79,16 +81,15 @@ bool platform_positioned_file_open(struct platform_positioned_file *file,
 
 bool platform_positioned_file_open_beneath(
     struct platform_positioned_file *file, const char *root,
-    const char *leaf)
+    const char *relative)
 {
-    if (!file || !root || !leaf || !leaf[0] || strchr(leaf, '/') ||
-        strchr(leaf, '\\') || strcmp(leaf, ".") == 0 ||
-        strcmp(leaf, "..") == 0)
+    if (!file || !root || !relative || !relative[0] || relative[0] == '/' ||
+        relative[0] == '\\' || strchr(relative, '\\'))
         return false;
-    wchar_t root_wide[32768], leaf_wide[32768];
+    wchar_t root_wide[32768], relative_wide[32768];
     if (!positioned_wide(root, root_wide) ||
-        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, leaf, -1,
-                            leaf_wide, 32768) <= 0)
+        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, relative, -1,
+                            relative_wide, 32768) <= 0)
         return false;
     HANDLE directory = CreateFileW(
         root_wide, FILE_READ_ATTRIBUTES | FILE_TRAVERSE,
@@ -111,23 +112,46 @@ bool platform_positioned_file_open_beneath(
     nt_create_file_fn create_file = NULL;
     static_assert(sizeof(create_file) == sizeof(symbol));
     if (symbol) memcpy(&create_file, &symbol, sizeof(create_file));
-    size_t leaf_length = wcslen(leaf_wide);
-    UNICODE_STRING name = {
-        .Length = (USHORT)(leaf_length * sizeof(*leaf_wide)),
-        .MaximumLength = (USHORT)(leaf_length * sizeof(*leaf_wide)),
-        .Buffer = leaf_wide,
-    };
-    OBJECT_ATTRIBUTES attributes;
-    InitializeObjectAttributes(&attributes, &name, OBJ_CASE_INSENSITIVE,
-                               directory, NULL);
-    IO_STATUS_BLOCK status = {0};
     HANDLE handle = INVALID_HANDLE_VALUE;
-    NTSTATUS result = create_file ? create_file(
-        &handle, FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-        &attributes, &status, NULL, FILE_ATTRIBUTE_NORMAL,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_OPEN,
-        FILE_OPEN_REPARSE_POINT | FILE_NON_DIRECTORY_FILE,
-        NULL, 0) : (NTSTATUS)-1;
+    HANDLE current = directory;
+    wchar_t *part = relative_wide;
+    NTSTATUS result = (NTSTATUS)-1;
+    while (create_file) {
+        wchar_t *slash = wcschr(part, L'/');
+        size_t length = slash ? (size_t)(slash - part) : wcslen(part);
+        if (!length || length > UINT16_MAX / sizeof(*part) ||
+            (length == 1 && part[0] == L'.') ||
+            (length == 2 && part[0] == L'.' && part[1] == L'.'))
+            break;
+        bool leaf = slash == NULL;
+        UNICODE_STRING name = {.Length = (USHORT)(length * sizeof(*part)),
+            .MaximumLength = (USHORT)(length * sizeof(*part)), .Buffer = part};
+        OBJECT_ATTRIBUTES attributes;
+        InitializeObjectAttributes(&attributes, &name, OBJ_CASE_INSENSITIVE,
+                                   current, NULL);
+        IO_STATUS_BLOCK status = {0};
+        result = create_file(&handle,
+            FILE_READ_ATTRIBUTES | SYNCHRONIZE |
+                (leaf ? FILE_READ_DATA : FILE_TRAVERSE),
+            &attributes, &status, NULL, FILE_ATTRIBUTE_NORMAL,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_OPEN,
+            FILE_OPEN_REPARSE_POINT |
+                (leaf ? FILE_NON_DIRECTORY_FILE : FILE_DIRECTORY_FILE),
+            NULL, 0);
+        if (result < 0) break;
+        BY_HANDLE_FILE_INFORMATION component = {0};
+        bool valid = GetFileInformationByHandle(handle, &component) &&
+            !(component.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
+            (leaf ? !(component.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                  : (component.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY));
+        if (!valid) { CloseHandle(handle); handle = INVALID_HANDLE_VALUE; break; }
+        if (current != directory) CloseHandle(current);
+        current = handle;
+        if (leaf) break;
+        handle = INVALID_HANDLE_VALUE;
+        part = slash + 1;
+    }
+    if (current != directory && current != handle) CloseHandle(current);
     CloseHandle(directory);
     BY_HANDLE_FILE_INFORMATION info = {0};
     if (result < 0 || handle == INVALID_HANDLE_VALUE ||
@@ -260,6 +284,66 @@ bool platform_positioned_file_is_executable(
            signature == IMAGE_NT_SIGNATURE;
 }
 
+bool platform_positioned_file_is_private(
+    const struct platform_positioned_file *file)
+{
+    HANDLE handle = positioned_handle(file);
+    PACL dacl = NULL;
+    PSID owner = NULL;
+    PSECURITY_DESCRIPTOR descriptor = NULL;
+    HANDLE token = NULL;
+    DWORD bytes = 0;
+    TOKEN_USER *user = NULL;
+    BYTE system_buffer[SECURITY_MAX_SID_SIZE];
+    DWORD system_size = sizeof(system_buffer);
+    SID_IDENTIFIER_AUTHORITY creator_authority = SECURITY_CREATOR_SID_AUTHORITY;
+    PSID owner_rights = NULL;
+    bool ok = handle != INVALID_HANDLE_VALUE &&
+        GetSecurityInfo(handle, SE_FILE_OBJECT,
+                        OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                        &owner, NULL, &dacl, NULL, &descriptor) == ERROR_SUCCESS &&
+        dacl && OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token) &&
+        !GetTokenInformation(token, TokenUser, NULL, 0, &bytes) &&
+        GetLastError() == ERROR_INSUFFICIENT_BUFFER;
+    if (ok) user = malloc(bytes);
+    ok = ok && user && GetTokenInformation(token, TokenUser, user, bytes,
+                                            &bytes) &&
+         CreateWellKnownSid(WinLocalSystemSid, NULL, system_buffer,
+                            &system_size) &&
+         EqualSid(owner, user->User.Sid) &&
+         AllocateAndInitializeSid(&creator_authority, 1,
+                                  SECURITY_CREATOR_OWNER_RIGHTS_RID,
+                                  0, 0, 0, 0, 0, 0, 0, &owner_rights);
+    bool user_allowed = false;
+    ACL_SIZE_INFORMATION info = {0};
+    ok = ok && GetAclInformation(dacl, &info, sizeof(info),
+                                 AclSizeInformation);
+    for (DWORD i = 0; ok && i < info.AceCount; i++) {
+        void *raw = NULL;
+        if (!GetAce(dacl, i, &raw)) { ok = false; break; }
+        ACE_HEADER *header = raw;
+        PSID sid = NULL;
+        if (header->AceType == ACCESS_ALLOWED_ACE_TYPE)
+            sid = &((ACCESS_ALLOWED_ACE *)raw)->SidStart;
+        else if (header->AceType == ACCESS_DENIED_ACE_TYPE)
+            sid = &((ACCESS_DENIED_ACE *)raw)->SidStart;
+        else { ok = false; break; }
+        bool is_user = EqualSid(sid, user->User.Sid) != 0;
+        bool is_system = EqualSid(sid, system_buffer) != 0;
+        bool is_owner_rights = EqualSid(sid, owner_rights) != 0;
+        if (!is_user && !is_system && !is_owner_rights) ok = false;
+        if ((is_user || is_owner_rights) &&
+            header->AceType == ACCESS_ALLOWED_ACE_TYPE)
+            user_allowed = true;
+    }
+    ok = ok && user_allowed;
+    free(user);
+    if (owner_rights) FreeSid(owner_rights);
+    if (token) CloseHandle(token);
+    if (descriptor) LocalFree(descriptor);
+    return ok;
+}
+
 int64_t platform_positioned_file_read(
     const struct platform_positioned_file *file, void *data, size_t size,
     uint64_t offset)
@@ -314,18 +398,32 @@ bool platform_positioned_file_open(struct platform_positioned_file *file,
 
 bool platform_positioned_file_open_beneath(
     struct platform_positioned_file *file, const char *root,
-    const char *leaf)
+    const char *relative)
 {
-    if (!file || !root || !leaf || !leaf[0] || strchr(leaf, '/') ||
-        strcmp(leaf, ".") == 0 || strcmp(leaf, "..") == 0)
+    if (!file || !root || !relative || !relative[0] || relative[0] == '/' ||
+        strchr(relative, '\\'))
         return false;
-    int directory = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC |
-                               O_NOFOLLOW);
-    if (directory < 0) return false;
-    int fd = openat(directory, leaf,
-                    O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
-    close(directory);
+    int fd = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) return false;
+    char path[4096];
+    size_t length = strlen(relative);
+    if (length >= sizeof(path)) { close(fd); return false; }
+    memcpy(path, relative, length + 1);
+    char *part = path;
+    for (;;) {
+        char *slash = strchr(part, '/');
+        if (slash) *slash = '\0';
+        if (!part[0] || strcmp(part, ".") == 0 || strcmp(part, "..") == 0) {
+            close(fd); return false;
+        }
+        int next = openat(fd, part, O_RDONLY | O_CLOEXEC | O_NOFOLLOW |
+                          (slash ? O_DIRECTORY : O_NONBLOCK));
+        close(fd);
+        if (next < 0) return false;
+        fd = next;
+        if (!slash) break;
+        part = slash + 1;
+    }
     struct stat st;
     if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
         close(fd);
@@ -410,6 +508,15 @@ bool platform_positioned_file_is_executable(
     int fd = file ? (int)file->native : -1;
     return fd >= 0 && fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
            (st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) != 0;
+}
+
+bool platform_positioned_file_is_private(
+    const struct platform_positioned_file *file)
+{
+    struct stat st;
+    int fd = file ? (int)file->native : -1;
+    return fd >= 0 && fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
+           (st.st_mode & 0777) == 0600;
 }
 
 int64_t platform_positioned_file_read(

@@ -3,6 +3,8 @@
  * Copyright 2026 Rhett Creighton - Apache License 2.0
  * Distributed under the MIT software license, see the accompanying
  * file COPYING or http://www.opensource.org/licenses/mit-license.php. */
+#include "platform/socket_compat.h"
+#include "platform/directory_compat.h"
 #include "platform/time_compat.h"
 #include "config/boot_blkidx_ladder.h"
 #include "config/boot_blocktree_cleanup.h"
@@ -136,15 +138,11 @@
 #include "controllers/event_controller.h"
 #include "models/block.h"
 #include <errno.h>
-#include <netdb.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
 #include <sys/stat.h>
-#include <sys/mman.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <dirent.h>
@@ -166,7 +164,6 @@ static struct coins_view_sqlite g_coins_sqlite;
 static struct coins_view_kv g_coins_read_view;
 static struct coins_view_cache g_coins_tip;
 static struct chain_activation_controller g_activation_ctl;
-
 struct chain_activation_controller *boot_activation_controller(void)
 {
     return &g_activation_ctl;
@@ -196,37 +193,29 @@ static struct ibd_throttle_config g_ibd_throttle_cfg;
 static struct zcl_service_kernel g_guard_kernel;
 static struct zcl_service_kernel g_maintenance_kernel;
 static struct zcl_service_kernel g_boot_db_kernel;
-
 static struct db_service *boot_runtime_db_service(void)
 {
     return db_service_is_started(&g_db_service) ? &g_db_service : NULL;
 }
-
 /* Policy-gated UTXO wipe moved to utxo_recovery_service.c.
  * boot_policy_wipe_utxos → utxo_recovery_wipe(&g_node_db, reason) */
-
 static bool boot_db_enter_turbo_mode(void)
 {
     struct db_service *dbsvc = boot_runtime_db_service();
-
     if (dbsvc)
         return db_service_ibd_turbo_mode(dbsvc);
     return g_node_db.open && node_db_ibd_turbo_mode(&g_node_db);
 }
-
 static bool boot_db_restore_normal_mode(void)
 {
     struct db_service *dbsvc = boot_runtime_db_service();
-
     if (dbsvc)
         return db_service_normal_mode(dbsvc);
     return g_node_db.open && node_db_normal_mode(&g_node_db);
 }
-
 static bool boot_db_set_sync_batch_size(int batch_size)
 {
     struct db_service *dbsvc = boot_runtime_db_service();
-
     if (dbsvc)
         return db_service_set_sync_batch_size(dbsvc, batch_size);
     if (!g_node_db.open)
@@ -234,11 +223,9 @@ static bool boot_db_set_sync_batch_size(int batch_size)
     node_db_set_sync_batch_size(&g_node_db, batch_size);
     return true;
 }
-
 /* Shielded backfill moved to utxo_recovery_service.c —
  * utxo_recovery_backfill_shielded(). */
 static struct metrics_context g_metrics;
-
 /* Comparator for sorting block_index pointers by height (for qsort). */
 static int cmp_block_index_height(const void *a, const void *b)
 {
@@ -246,7 +233,6 @@ static int cmp_block_index_height(const void *a, const void *b)
     const struct block_index *pb = *(const struct block_index **)b;
     return (pa->nHeight > pb->nHeight) - (pa->nHeight < pb->nHeight);
 }
-
 /* Callback for block_tree_db_load_block_index_guts — inserts a block
  * into the block map, reusing existing entry if hash already present. */
 static struct block_index *boot_insert_block_index_cb(void *ctx_ptr,
@@ -255,35 +241,29 @@ static struct block_index *boot_insert_block_index_cb(void *ctx_ptr,
     struct main_state *ms = (struct main_state *)ctx_ptr;
     return chainstate_insert_block_index((struct chainstate *)ms, hash);
 }
-
 /* SQLite tuning and file operations now live in the model layer:
  *   node_db_ibd_turbo_mode()  — database.h
  *   node_db_normal_mode()     — database.h
  *   file_copy(), dir_copy()   — file_ops.h
  */
-
 /* Background ZK param loading */
 static char g_params_dir_buf[1024];
 static pthread_t g_params_thread;
 static bool g_params_thread_started = false;
 static _Atomic bool g_params_loaded = false;
 static struct boot_svc_ctx g_svc;
-
 /* Single source of truth for the live boot service context — the &g_svc handed
  * to app_init_services; boot_services.c's main.c-facing entry points read it. */
 struct boot_svc_ctx *boot_active_svc(void) { return &g_svc; }
-
 /* boot_park_until_shutdown prototype is in config/boot_internal.h (included
  * above); defined below (line ~1175), non-static so boot_node_db_gate.c can
  * share the same park path. */
-
 static bool boot_params_thread_failure_is_fatal(const struct app_context *ctx,
                                                 const char *network_id)
 {
     return ctx && ctx->params_dir && network_id &&
            strcmp(network_id, "main") == 0 && !ctx->mint_anchor_fast;
 }
-
 #ifdef ZCL_TESTING
 bool boot_test_params_thread_failure_is_fatal(bool has_params_dir,
                                               bool is_mainnet,
@@ -296,7 +276,6 @@ bool boot_test_params_thread_failure_is_fatal(bool has_params_dir,
                                                is_mainnet ? "main" : "test");
 }
 #endif
-
 void *load_params_thread(void *arg)
 {
     (void)arg;
@@ -314,11 +293,9 @@ void *load_params_thread(void *arg)
         atomic_store(&g_params_loaded, true);
     return NULL;
 }
-
 /* Block index, chainstate rebuild, and address backfill are in
  * boot_index.c. Service startup (P2P, RPC, Tor) and shutdown
  * are in boot_services.c. */
-
 /* Boot timing helper */
 static int64_t boot_clock_ms(void)
 {
@@ -326,7 +303,6 @@ static int64_t boot_clock_ms(void)
     platform_time_monotonic_timespec(&ts);
     return ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
-
 /* Emit an indented [boot] sub-phase marker + feed boot_flight_recorder;
  * return a fresh clock reading so the caller can chain: t = boot_submark("x", t). */
 static int64_t boot_submark(const char *name, int64_t since)
@@ -336,7 +312,6 @@ static int64_t boot_submark(const char *name, int64_t since)
     boot_flight_recorder_mark(name, ms);
     return boot_clock_ms();
 }
-
 /* Top-level [boot] phase marker + boot_flight_recorder feed (boot_submark, one indent level up). */
 static void boot_topmark(const char *name, int64_t since)
 {
@@ -344,14 +319,12 @@ static void boot_topmark(const char *name, int64_t since)
     printf("[boot] %-30s %lldms\n", name, (long long)ms);
     boot_flight_recorder_mark(name, ms);
 }
-
 /* ── boot.c decomposition ──────────────────────────────────────────
  * app_init is split into named, single-responsibility `boot_step_*`
  * static functions returning bool — true to continue, false to bail.
  * Contract: either the precondition holds and the step succeeds, or
  * the process exits non-zero before any other subsystem can observe
  * partial state. */
-
 static bool boot_step_init_observability(void)
 {
     /* Install fatal-signal handler BEFORE any thread is spawned so the
@@ -365,7 +338,6 @@ static bool boot_step_init_observability(void)
                         "boot without a crash handler\n");
         return false;
     }
-
     /* Arm the live self-backtrace handler (SIGRTMIN+2) before threads spawn so
      * every worker inherits it. Non-fatal: a diagnostic surface, not a
      * correctness gate. Enables `ops.debug.backtrace` to dump all threads on a
@@ -373,13 +345,10 @@ static bool boot_step_init_observability(void)
     if (!self_backtrace_install())
         fprintf(stderr, "WARNING: self_backtrace_install failed; "
                         "ops.debug.backtrace will be unavailable\n");
-
     db_service_init(&g_db_service);
-
     /* Initialize event log first — everything after this is observable */
     event_log_init();
     event_install_crash_handler();
-
     /* Start async observer thread + register error accumulator.
      * Captures DB errors, block rejections, flush failures for
      * instant health queries via /api/health and healthcheck RPC. */
@@ -390,17 +359,14 @@ static bool boot_step_init_observability(void)
     event_observe_async(EV_COINS_FLUSH_FAILED, error_ring_observer, er);
     event_observe_async(EV_BLOCK_REJECTED, error_ring_observer, er);
     event_observe_async(EV_UTXO_CHECKPOINT_FAIL, error_ring_observer, er);
-
     /* Observe validation failures as errors too */
     event_observe_async(EV_MODEL_VALIDATION_FAILED, error_ring_observer, er);
-
     /* Typed blocker registry: init BEFORE the restore/import producers.
      * blocker_module_init memsets the registry; if it first ran AFTER
      * restore it would silently wipe any band/producer blockers recorded
      * during restore. Idempotent — the boot_services call remains as a
      * backstop. */
     blocker_module_init();
-
     /* If the native launcher (`zcl-nodectl launch`) fell back to the
      * last-known-good binary after a boot-failure streak, surface the
      * degraded-but-alive state as a typed blocker as early as the registry
@@ -408,11 +374,9 @@ static bool boot_step_init_observability(void)
      * only once we reach ready. Sibling of the stale-binary blocker above.
      * No-op when launched directly (env unset). */
     binary_ab_raise_fallback_blocker_env();
-
     event_emitf(EV_NODE_STARTING, 0, "zclassic23 1.0.0");
     return true;
 }
-
 static bool boot_step_select_chain_and_datadir(struct app_context *ctx)
 {
     if (ctx->regtest)
@@ -425,7 +389,6 @@ static bool boot_step_select_chain_and_datadir(struct app_context *ctx)
     g_datadir = ctx->datadir;
     g_blog_datadir = ctx->datadir;
     SetDataDir(ctx->datadir);
-
     /* Auto-create datadir if it doesn't exist.
      *
      * The mkdir return value used to be discarded and "Created data
@@ -436,18 +399,16 @@ static bool boot_step_select_chain_and_datadir(struct app_context *ctx)
      * said was created. Name the create failure where it happens. EEXIST is
      * not a failure: another process (or the stat race) won. */
     struct stat st;
-    if (stat(ctx->datadir, &st) != 0) {
-        if (mkdir(ctx->datadir, 0700) == 0) {
-            printf("Created data directory: %s\n", ctx->datadir);
-        } else if (errno != EEXIST) {
-            int e = errno;
-            boot_report_datadir_create_failed(ctx->datadir, e);
-            event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
-                        "datadir_create_failed errno=%d", e);
-            return false;
-        }
+    bool datadir_existed = stat(ctx->datadir, &st) == 0;
+    if (!platform_directory_ensure(ctx->datadir, 0700)) {
+        int e = errno;
+        boot_report_datadir_create_failed(ctx->datadir, e);
+        event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
+                    "datadir_create_failed errno=%d", e);
+        return false;
     }
-
+    if (!datadir_existed)
+        printf("Created data directory: %s\n", ctx->datadir);
     /* Now that the datadir is known, point the crash handler at a durable,
      * fsync'd crash log there. Until this call a crash still lands on stderr;
      * after it, the backtrace also survives in $datadir/crash_log.txt
@@ -458,19 +419,15 @@ static bool boot_step_select_chain_and_datadir(struct app_context *ctx)
                  ctx->datadir);
         signal_handler_set_crash_log(crash_path);
     }
-
     /* Arm the pre-RPC boot-progress beacon (util/boot_status.h). */
     boot_status_init(ctx->datadir);
-
     /* Acquire data directory lock — prevents two instances from
      * corrupting SQLite / LevelDB by writing concurrently. */
     if (!boot_datadir_lock_acquire(ctx->datadir))
         return false;
-
     boot_stage_advance_to(BOOT_STAGE_DATADIR_LOCKED);
     return true;
 }
-
 static void boot_step_backfill_shielded_if_needed(struct app_context *ctx,
                                                    struct block_index *tip)
 {
@@ -483,7 +440,6 @@ static void boot_step_backfill_shielded_if_needed(struct app_context *ctx,
     utxo_recovery_backfill_shielded_if_needed(&g_node_db,
         boot_runtime_db_service(), &g_state, g_datadir, (int)tip->nHeight);
 }
-
 static void boot_step_build_svc_ctx(struct app_context *ctx,
                                      struct boot_svc_ctx *svc)
 {
@@ -519,7 +475,6 @@ static void boot_step_build_svc_ctx(struct app_context *ctx,
         svc->want_address_backfill = (addr_done == 0);
     }
 }
-
 static void boot_step_finalize_chain_state(void)
 {
     /* Restore normal SQLite settings after any IBD replay */
@@ -532,7 +487,6 @@ static void boot_step_finalize_chain_state(void)
     /* Flush every 500 blocks during normal sync so crash/kill never
      * loses more than ~500 blocks of connected coins state. */
     set_flush_policy(3600, 500000, 500);
-
     struct block_index *tip = active_chain_tip(&g_state.chain_active);
     if (tip && tip->phashBlock) {
         if (g_node_db.open &&
@@ -544,7 +498,6 @@ static void boot_step_finalize_chain_state(void)
         printf("Chain tip: height=%d hash=%s\n", tip->nHeight, hex);
         boot_status_set_height(tip->nHeight);
         event_emitf(EV_BOOT_ACTIVATE, 0, "done tip=%d", tip->nHeight);
-
         /* Do not auto-extend deferred proof validation at startup: chainstate
          * came from a trusted source (import / prior run / hash-checked coins
          * DB); only blocks received via P2P AFTER startup need new validation. */
@@ -552,7 +505,6 @@ static void boot_step_finalize_chain_state(void)
         printf("Chain tip: genesis\n");
     }
 }
-
 static bool boot_promote_tip_via_csr_internal(struct block_index *tip,
                                               const char *reason,
                                               bool persist_coins_best,
@@ -560,7 +512,6 @@ static bool boot_promote_tip_via_csr_internal(struct block_index *tip,
 {
     if (!tip || !tip->phashBlock)
         return false;
-
     struct chain_state_rollback_authorization rollback_auth = {
         .source = CSR_ROLLBACK_SOURCE_BOOT_REPAIR,
         .decision = POLICY_ALLOW,
@@ -580,7 +531,6 @@ static bool boot_promote_tip_via_csr_internal(struct block_index *tip,
         .wallet_scan_height = -1,
         .reason = reason ? reason : "boot_repair",
     };
-
     enum csr_result rc = csr_commit_tip(csr_instance(), &commit);
     if (rc != CSR_OK) {
         fprintf(stderr, // obs-ok:pre-existing-diagnostic
@@ -589,10 +539,8 @@ static bool boot_promote_tip_via_csr_internal(struct block_index *tip,
                 csr_result_name(rc), reason ? reason : "", tip->nHeight);
         return false;
     }
-
     return true;
 }
-
 bool boot_promote_tip_via_csr(struct block_index *tip,
                               const char *reason,
                               bool persist_coins_best)
@@ -600,7 +548,6 @@ bool boot_promote_tip_via_csr(struct block_index *tip,
     return boot_promote_tip_via_csr_internal(
         tip, reason, persist_coins_best, true);
 }
-
 bool boot_promote_tip_preserving_header_via_csr(
     struct block_index *tip,
     const char *reason,
@@ -609,13 +556,11 @@ bool boot_promote_tip_preserving_header_via_csr(
     return boot_promote_tip_via_csr_internal(
         tip, reason, persist_coins_best, false);
 }
-
 static bool boot_promote_header_via_csr(struct block_index *header,
                                         const char *reason)
 {
     if (!header || !header->phashBlock)
         return false;
-
     struct chain_state_rollback_authorization rollback_auth = {
         .source = CSR_ROLLBACK_SOURCE_BOOT_REPAIR,
         .decision = POLICY_ALLOW,
@@ -641,7 +586,6 @@ static bool boot_promote_header_via_csr(struct block_index *header,
     }
     return true;
 }
-
 /* DERIVED coins-best (wave 2): one cheap point-read of progress.kv's own
  * co-committed state via reducer_frontier_derive_coins_best. Recomputed at
  * every decision point (derive, don't cache). Returns true iff
@@ -653,7 +597,6 @@ struct boot_derived_coins_best {
     uint8_t hash[32];    /* valid iff hash_found */
     bool hash_found;
 };
-
 static bool boot_derive_coins_best(struct boot_derived_coins_best *out)
 {
     memset(out, 0, sizeof(*out));
@@ -661,7 +604,6 @@ static bool boot_derive_coins_best(struct boot_derived_coins_best *out)
     return reducer_frontier_derive_coins_best_now(&out->height, out->hash,
                                                   &out->hash_found);
 }
-
 static bool boot_step_init_crypto_and_state(struct app_context *ctx,
                                              const struct chain_params *params)
 {
@@ -671,30 +613,24 @@ static bool boot_step_init_crypto_and_state(struct app_context *ctx,
      * handles both script verification (connect_block.c) and Sapling
      * proof verification (contextual_check_tx.c) via
      * g_deferred_proof_validation_below_height. */
-
     ecc_start();
     ecc_verify_init();
-
     /* SHA-256 hardware self-test */
     if (!sha256_selftest())
         printf("WARNING: SHA-256 SHA-NI self-test FAILED — using portable fallback\n");
     printf("SHA-256: %s\n", sha256_implementation());
-
     /* Report field arithmetic acceleration */
     extern const char *fr_accel_implementation(void);
     printf("Field arithmetic: %s\n", fr_accel_implementation());
-
     main_state_init(&g_state);
     g_state.fTxIndex = ctx->tx_index;
     g_state.fCheckpointsEnabled = ctx->checkpoints_enabled;
-
     /* Initialize chain activation controller — single authority for when the
      * reducer activation path can run. Must be before any chain work. */
     activation_controller_init(&g_activation_ctl, &g_state, &g_coins_tip,
                                params, ctx->datadir);
     activation_set_state(&g_activation_ctl, ACTIVATION_BOOT_PENDING,
                          "boot_start");
-
     /* -deferproofvalidationbelow: skip Groth16/Sapling proof verification for blocks
      * at or below the specified hash's height. Default: latest checkpoint.
      * Pass -deferproofvalidationbelow=0 to disable (verify everything). */
@@ -712,13 +648,11 @@ static bool boot_step_init_crypto_and_state(struct app_context *ctx,
                    g_deferred_proof_validation_below_height);
         }
     }
-
     /* Defer ZK key loading to background thread — not needed for RPC startup.
      * Keys load in parallel while block index + wallet initialize. */
     g_params_thread_started = false;
     if (ctx->params_dir)
         snprintf(g_params_dir_buf, sizeof(g_params_dir_buf), "%s", ctx->params_dir);
-
     /* zk-parameter gate. A missing ~/.zcash-params costs exactly one
      * capability — creating shielded transactions — because validation reads
      * only the compiled-in verifying keys. See config/src/boot_params_gate.c
@@ -734,7 +668,6 @@ static bool boot_step_init_crypto_and_state(struct app_context *ctx,
     case BOOT_PARAMS_GATE_PRESENT:
         break;
     }
-
     /* Only start the loader when the files are actually there. With them
      * missing we already installed the compiled-in verifying keys above, and
      * running the loader would do nothing but fail and re-page the operator
@@ -766,11 +699,9 @@ static bool boot_step_init_crypto_and_state(struct app_context *ctx,
                     "WARNING: failed to start ZK params loader thread\n");
         }
     }
-
     boot_stage_advance_to(BOOT_STAGE_CRYPTO_READY);
     return true;
 }
-
 static bool boot_disk_monitor_service_start(void *ctx)
 {
     const char *datadir = ctx;
@@ -789,13 +720,11 @@ static bool boot_disk_monitor_service_start(void *ctx)
             dr.source_file, dr.source_line, dr.code, dr.message);
     return false;
 }
-
 static void boot_disk_monitor_service_stop(void *ctx)
 {
     (void)ctx;
     disk_monitor_stop();
 }
-
 static bool boot_ibd_throttle_service_start(void *ctx)
 {
     (void)ctx;
@@ -812,26 +741,21 @@ static bool boot_ibd_throttle_service_start(void *ctx)
             ir.source_file, ir.source_line, ir.code, ir.message);
     return false;
 }
-
 static void boot_ibd_throttle_service_stop(void *ctx)
 {
     (void)ctx;
     ibd_throttle_stop();
 }
-
 static bool boot_wallet_backup_service_start(void *ctx)
 {
     struct node_db *db = ctx;
     static char backup_dir[1024];
-
     if (!db || !db->open || !db->db) {
         printf("Wallet backup deferred until node DB is open\n");
         return true;
     }
-
     /* Defaults apply the WALLET_BACKUP_PASSWORD encryption policy. */
     wallet_backup_config_defaults(&g_wallet_backup_cfg);
-
     if (!g_wallet_backup_cfg.backup_dir) {
         const char *home = getenv("HOME");
         snprintf(backup_dir, sizeof(backup_dir), "%s/wallet_backups",
@@ -849,13 +773,11 @@ static bool boot_wallet_backup_service_start(void *ctx)
             br.source_file, br.source_line, br.code, br.message);
     return false;
 }
-
 static void boot_wallet_backup_service_stop(void *ctx)
 {
     (void)ctx;
     wallet_backup_stop();
 }
-
 /* node.db WAL bound: ON by default; see "Boot policy" in services/db_maintenance.h. */
 static bool boot_db_maintenance_service_start(void *ctx)
 {
@@ -880,13 +802,11 @@ static bool boot_db_maintenance_service_start(void *ctx)
     fprintf(stderr, "db_maintenance_start failed: %s\n", _dbm_r.message);
     return false;
 }
-
 static void boot_db_maintenance_service_stop(void *ctx)
 {
     (void)ctx;
     db_maintenance_stop();
 }
-
 static bool boot_binary_staleness_service_start(void *ctx)
 {
     (void)ctx;
@@ -906,13 +826,11 @@ static bool boot_binary_staleness_service_start(void *ctx)
      * data-safety dependency. */
     return false;
 }
-
 static void boot_binary_staleness_service_stop(void *ctx)
 {
     (void)ctx;
     binary_staleness_stop();
 }
-
 static bool boot_register_guard_services(const char *datadir)
 {
     const struct zcl_service_spec disk_spec = {
@@ -931,7 +849,6 @@ static bool boot_register_guard_services(const char *datadir)
     return zcl_service_kernel_register(&g_guard_kernel, &disk_spec) &&
            zcl_service_kernel_register(&g_guard_kernel, &ibd_spec);
 }
-
 static bool boot_register_maintenance_services(void)
 {
     const struct zcl_service_spec wallet_backup_spec = {
@@ -962,7 +879,6 @@ static bool boot_register_maintenance_services(void)
            boot_register_network_observability_services(
                &g_maintenance_kernel, &g_node_db);
 }
-
 static void boot_step_start_disk_and_ibd_guards(const char *datadir)
 {
     zcl_service_kernel_init(&g_guard_kernel);
@@ -971,7 +887,6 @@ static void boot_step_start_disk_and_ibd_guards(const char *datadir)
         fprintf(stderr, "WARNING: failed to start boot guard services\n");
     }
 }
-
 static void boot_step_start_maintenance_services(void)
 {
     zcl_service_kernel_init(&g_maintenance_kernel);
@@ -980,7 +895,6 @@ static void boot_step_start_maintenance_services(void)
         fprintf(stderr, "WARNING: failed to start maintenance services\n");
     }
 }
-
 /* ── SYSINIT records: the boot-stage boundaries between DB_OPEN and READY ──
  *
  * These convert boot.c's literal call order into declarative records the
@@ -994,7 +908,6 @@ static void boot_step_start_maintenance_services(void)
  * ctx: WALLET_LOADED / BLOCK_INDEX_LOADED / CHAIN_TIP_RESOLVED /
  * SERVICES_RUNNING receive the `struct app_context *`; NETWORK_READY (run from
  * boot_services.c app_init_services) receives the `struct boot_svc_ctx *`. */
-
 static struct zcl_result sr_wallet_loaded(void *ctx)
 {
     (void)ctx;
@@ -1005,7 +918,6 @@ static struct zcl_result sr_wallet_loaded(void *ctx)
         return ZCL_OK;  /* STATE A: no node.db — keypool generated in RAM */
     return ZCL_OK;
 }
-
 static struct zcl_result sr_block_index_loaded(void *ctx)
 {
     (void)ctx;
@@ -1014,7 +926,6 @@ static struct zcl_result sr_block_index_loaded(void *ctx)
      * genesis-only map (size <= 1) is legitimate on a fresh datadir. */
     return ZCL_OK;
 }
-
 static struct zcl_result sr_chain_tip_resolved(void *ctx)
 {
     (void)ctx;
@@ -1024,7 +935,6 @@ static struct zcl_result sr_chain_tip_resolved(void *ctx)
     boot_step_finalize_chain_state();
     return ZCL_OK;
 }
-
 static struct zcl_result sr_network_ready(void *ctx)
 {
     const struct boot_svc_ctx *svc = ctx;
@@ -1032,14 +942,12 @@ static struct zcl_result sr_network_ready(void *ctx)
         return ZCL_ERR(-1, "network boundary reached without a connman");
     return ZCL_OK;
 }
-
 static struct zcl_result sr_services_running(void *ctx)
 {
     (void)ctx;
     boot_step_start_maintenance_services();
     return ZCL_OK;
 }
-
 /* Late confinement: enter the os_sandbox node steady-state profile once every
  * thread is spawned and every late fd is open (SERVICES_RUNNING, highest
  * `order` — last record before READY). No-op unless -sandbox=steady.
@@ -1076,7 +984,6 @@ static size_t sandbox_build_fs_rules(const char *datadir,
     if (cap == 0) return 0;
     rules[n++] = (struct os_sandbox_path_rule){
         .path = datadir, .allow_read = true, .allow_write = true };
-
     const char *home = getenv("HOME");
     if (home && home[0] && n < cap && s < scratch_cap) {
         snprintf(scratch[s], PATH_MAX, "%s/.zclassic-c23-agent-test-status", home);
@@ -1087,7 +994,6 @@ static size_t sandbox_build_fs_rules(const char *datadir,
             s++;
         }
     }
-
     if (extra_ro) {
         /* Sapling params dir (read-only proving/verifying keys). */
         if (home && home[0] && n < cap && s < scratch_cap) {
@@ -1106,14 +1012,12 @@ static size_t sandbox_build_fs_rules(const char *datadir,
             rules[n++] = (struct os_sandbox_path_rule){
                 .path = "/etc/resolv.conf", .allow_read = true };
     }
-
     /* Self-introspection only (getrusage/sysinfo already cover this ground). */
     if (n < cap)
         rules[n++] = (struct os_sandbox_path_rule){
             .path = OS_SANDBOX_PROC_SELF_STATUS_PATH, .allow_read = true };
     return n;
 }
-
 /* -confine / -confine=serving (strict seccomp ALLOW-list + Landlock): apply
  * once every listen socket/file/thread is up. An unexpected syscall KILLs the
  * process; actx->confine_serving picks the wider allow-set (adds the socket
@@ -1142,7 +1046,6 @@ static struct zcl_result sr_confine_enter(const struct app_context *actx)
                  "(blocker confine.apply_failed raised)");
         return ZCL_OK;  /* NOT fatal: unconfined-but-loud, per the -confine contract */
     }
-
     int abi = os_sandbox_landlock_abi();
     bool seccomp_ok = os_sandbox_seccomp_supported();
     if (abi < 1 && !seccomp_ok) {
@@ -1154,12 +1057,10 @@ static struct zcl_result sr_confine_enter(const struct app_context *actx)
                  "this kernel/build; running unconfined (graceful degrade)", abi);
         return ZCL_OK;
     }
-
     char scratch[4][PATH_MAX];
     struct os_sandbox_path_rule rules[6];
     size_t n = sandbox_build_fs_rules(datadir, rules, 6, /*extra_ro=*/true,
                                       scratch, 4);
-
     struct os_sandbox_profile prof = actx->confine_serving
         ? os_sandbox_node_confine_serving_profile(rules, n)
         : os_sandbox_node_confine_profile(rules, n);
@@ -1191,31 +1092,25 @@ static struct zcl_result sr_confine_enter(const struct app_context *actx)
            abi, n, os_sandbox_seccomp_install_method());
     return ZCL_OK;
 }
-
 static struct zcl_result sr_sandbox_enter(void *ctx)
 {
     const struct app_context *actx = ctx;
     if (!actx)
         return ZCL_OK;
-
     /* -confine: strict allow-list confinement (distinct from -sandbox=steady;
      * main.c refuses both at once). Unconfined-but-loud on apply failure. */
     if (actx->confine)
         return sr_confine_enter(actx);
-
     if (!actx->sandbox_steady)
         return ZCL_OK;  /* -sandbox=off (default): no confinement requested */
-
     os_sandbox_note_requested("node_steady_state");
     const char *datadir = actx->datadir ? actx->datadir : g_datadir;
     if (!datadir || !datadir[0])
         return ZCL_ERR(-1, "-sandbox=steady: no datadir to grant");
-
     char scratch[4][PATH_MAX];
     struct os_sandbox_path_rule rules[3];
     size_t n = sandbox_build_fs_rules(datadir, rules, 3, /*extra_ro=*/false,
                                       scratch, 4);
-
     struct os_sandbox_profile prof =
         os_sandbox_node_steady_state_profile(rules, n);
     struct zcl_result r = os_sandbox_enter(&prof);
@@ -1230,7 +1125,6 @@ static struct zcl_result sr_sandbox_enter(void *ctx)
            os_sandbox_landlock_abi(), n);
     return ZCL_OK;
 }
-
 /* The boot boundary table. One record per line so the golden lint gate can
  * parse (stage, order, name) without a C compile. `order` reserves headroom
  * for future per-subsystem records at each boundary; the single record per
@@ -1243,14 +1137,12 @@ static const struct sysinit_record k_boot_sysinit_records[] = {
     { .subsystem = "services",    .stage = BOOT_STAGE_SERVICES_RUNNING,   .order = 10, .init = sr_services_running,   .fini = NULL, .name = "services_running" },
     { .subsystem = "sandbox",     .stage = BOOT_STAGE_SERVICES_RUNNING,   .order = 90, .init = sr_sandbox_enter,      .fini = NULL, .name = "sandbox" },
 };
-
 static void boot_sysinit_register_all(void)
 {
     for (size_t i = 0; i < sizeof(k_boot_sysinit_records) /
                            sizeof(k_boot_sysinit_records[0]); i++)
         (void)sysinit_register(&k_boot_sysinit_records[i]);
 }
-
 static void boot_stop_platform_services(void)
 {
     zcl_service_kernel_stop_all(&g_maintenance_kernel);
@@ -1258,7 +1150,6 @@ static void boot_stop_platform_services(void)
     zcl_service_kernel_reset(&g_maintenance_kernel);
     zcl_service_kernel_reset(&g_guard_kernel);
 }
-
 static bool boot_db_worker_service_init(struct zcl_service_kernel *kernel,
                                         void *ctx)
 {
@@ -1266,7 +1157,6 @@ static bool boot_db_worker_service_init(struct zcl_service_kernel *kernel,
     (void)ctx;
     return db_service_attach(&g_db_service, &g_node_db);
 }
-
 static bool boot_db_worker_service_start(void *ctx)
 {
     (void)ctx;
@@ -1278,13 +1168,11 @@ static bool boot_db_worker_service_start(void *ctx)
     }
     return false;
 }
-
 static void boot_db_worker_service_stop(void *ctx)
 {
     (void)ctx;
     db_service_stop(&g_db_service);
 }
-
 static bool boot_step_start_db_service(void)
 {
     const struct zcl_service_spec db_spec = {
@@ -1293,18 +1181,15 @@ static bool boot_step_start_db_service(void)
         .start = boot_db_worker_service_start,
         .stop = boot_db_worker_service_stop,
     };
-
     zcl_service_kernel_init(&g_boot_db_kernel);
     return zcl_service_kernel_register(&g_boot_db_kernel, &db_spec) &&
            zcl_service_kernel_start_all(&g_boot_db_kernel);
 }
-
 void boot_stop_db_service_kernel(void)
 {
     zcl_service_kernel_stop_all(&g_boot_db_kernel);
     zcl_service_kernel_reset(&g_boot_db_kernel);
 }
-
 /* Park the process alive-but-degraded after a boot-storage gate exhausted its
  * bounded re-derive budget. This is the TERMINATING end-state for a genuinely
  * unrecoverable local-storage corruption: the operator was paged ONCE (the
@@ -1331,7 +1216,6 @@ bool boot_park_until_shutdown(const char *gate_name)
         sleep(2);
     return false;
 }
-
 /* lane/sapling-tree-persist: decide whether a persisted Sapling tree that
  * mismatches the CURRENT tip may still be trusted as an older-but-consistent
  * frontier, rather than treated as corrupt.
@@ -1361,21 +1245,18 @@ static int sapling_tree_verify_at_saved_height(
 {
     if (saved_height <= 476969 || saved_height >= tip_height)
         return 0;
-
     const struct block_index *saved_bi =
         active_chain_at(chain, (int)saved_height);
     static const uint8_t zeros32[32] = {0};
     bool hash_known = saved_bi && saved_bi->phashBlock;
     bool root_known = saved_bi && memcmp(saved_bi->hashFinalSaplingRoot.data,
                                          zeros32, 32) != 0;
-
     enum sapling_ckpt_verdict v = sapling_ckpt_verify_binding(
         saved_height, tree_root, NULL, tip_height,
         hash_known ? saved_bi->phashBlock->data : NULL, hash_known,
         root_known ? &saved_bi->hashFinalSaplingRoot : NULL, root_known);
     if (v == SAPLING_CKPT_OK)
         return 1;
-
     char expected_hex[65] = "unknown";
     char got_hex[65];
     uint256_get_hex(tree_root, got_hex);
@@ -1387,7 +1268,6 @@ static int sapling_tree_verify_at_saved_height(
             sapling_ckpt_verdict_str(v), expected_hex, got_hex, tree_size,
             (long long)saved_height, tip_height);
 }
-
 /* lane/sapling-tree-persist: given a verified older-but-consistent tree
  * (sapling_tree_verify_at_saved_height already returned 1 for this
  * saved_height), fold forward to tip via sapling_tree_rebuild()'s existing
@@ -1405,7 +1285,6 @@ static bool sapling_tree_attempt_fold_forward(struct app_context *ctx,
           tip_height);
     fflush(stdout);
     atomic_store(&g_sapling_tree_rebuilding, true);
-
     bool folded = false;
     int fn = sapling_tree_rebuild(&g_node_db, &g_state.chain_active,
                                   g_datadir);
@@ -1430,12 +1309,10 @@ static bool sapling_tree_attempt_fold_forward(struct app_context *ctx,
     save_block_index_flat(ctx->datadir, &g_state);
     return folded;
 }
-
 bool app_init(struct app_context *ctx)
 {
     int64_t t_boot_start = boot_clock_ms();
     int64_t t_phase;
-
     /* ── Move 5 boot checklist: prologue steps ───────────────────
      * Each step is a named static above. Failing steps return false
      * and the process exits non-zero — never partial-init state. */
@@ -1452,24 +1329,19 @@ bool app_init(struct app_context *ctx)
         return false;
     if (!boot_refold_staged_preflight(ctx->refold_staged)) return false;
     const struct chain_params *params = chain_params_get();
-
     boot_postmortem_start(ctx->datadir);
     boot_shutdown_marker_detect_unclean(ctx->datadir);
     /* Tier-2 fast restart: arm node_db_open's quick_check-skip probe BEFORE
      * node.db opens (consumes the binding detect_unclean just cached). */
     boot_fast_restart_arm_quick_check_skip_probe();
     boot_step_start_disk_and_ibd_guards(ctx->datadir);
-
     if (!boot_step_init_crypto_and_state(ctx, params))
         return false;
-
     /* Timing only: the boot prologue (observability, chain/datadir select,
      * postmortem, unclean-shutdown detect, disk/IBD guards, crypto+state
      * init) as a named phase. */
     boot_topmark("prologue", t_boot_start);
-
     boot_stale_locks_preflight(ctx->datadir);
-
     t_phase = boot_clock_ms();
     boot_node_db_open_step_begin();  /* see boot_node_db_gate.c */
     if (node_db_sync_init(&g_node_db, ctx->datadir)) {
@@ -1509,7 +1381,6 @@ bool app_init(struct app_context *ctx)
     }
     boot_step_done();
     boot_topmark("sqlite_open_migrate", t_phase);
-
     if (!boot_wallet_identity_ensure(&g_node_db, params->consensus.hashGenesisBlock.data, app_operator_lane_name(ctx->operator_lane))) return false;
     /* Initialize wallet AFTER node.db is open (g_node_db.open=true) and
      * BEFORE the block index load below — the latter is the only
@@ -1544,7 +1415,6 @@ bool app_init(struct app_context *ctx)
      * so a live reorg clamps them down (next boot re-derives above the fork). */
     if (g_node_db.open)
         boot_cursor_install_reorg_clamp(&g_node_db);
-
     /* Determine the on-disk wallet_keys row count BEFORE attempting to
      * open the wallet_sqlite subsystem. Used below for the abort
      * decisions — we only refuse to proceed when there's something to
@@ -1563,7 +1433,6 @@ bool app_init(struct app_context *ctx)
             pre_open_key_rows = -1;
         }
     }
-
     /* Attempt to open — use the rich-error *_r API (Agent 2) so any
      * prepare failure carries a WSQL_* code + message + source
      * location we can surface in the abort diagnostic. */
@@ -1573,7 +1442,6 @@ bool app_init(struct app_context *ctx)
         wsql_open_r = wallet_sqlite_open_r(&g_wallet_sqlite, g_node_db.db);
         sqlite_open = wsql_open_r.ok;
     }
-
     if (!sqlite_open && pre_open_key_rows > 0) {
         /* STATE D: wallet has user keys on disk but we cannot open the
          * persistence layer. The ONLY safe action is to refuse the
@@ -1644,7 +1512,6 @@ bool app_init(struct app_context *ctx)
                 "WARNING: wallet canary failed (code=%d): %s —"
                 " continuing on empty wallet.\n", crc, cs.error);
         }
-
         /* STATE F: invariant — the keystore count loaded from disk
          * must equal the row count we observed before opening. A
          * mismatch means read_keys dropped rows or the table changed
@@ -1668,7 +1535,6 @@ bool app_init(struct app_context *ctx)
         /* STATE A/B: new datadir, no user keys at risk. */
         printf("New wallet created.\n");
     }
-
     /* One-time wallet migration: if SQLite wallet is empty but LevelDB
      * wallet/ directory exists, import keys/txs from LevelDB. Only
      * runs when pre_open_key_rows <= 0 (no existing user keys), so no
@@ -1690,7 +1556,6 @@ bool app_init(struct app_context *ctx)
                 if (wallet_db_read_scan_height(&legacy_wdb, &saved_height))
                     g_wallet.best_block_height = saved_height;
                 wallet_db_close(&legacy_wdb);
-
                 /* Persist to SQLite and check the result — a silent
                  * failure here is exactly what the boot state machine's
                  * never-silent invariant forbids. */
@@ -1712,14 +1577,12 @@ bool app_init(struct app_context *ctx)
                         exit(1);
                     }
                 }
-
                 printf("Wallet migrated: %zu keys, %zu sapling keys\n",
                        g_wallet.keystore.num_keys,
                        g_wallet.sapling_keys.num_keys);
             }
         }
     }
-
     if (g_wallet.keystore.num_keys == 0) {
         /* Genuinely empty wallet — first-run. A wallet decision must NOT be a
          * precondition for syncing, and plaintext keys must NEVER be minted
@@ -1743,16 +1606,13 @@ bool app_init(struct app_context *ctx)
     }
     printf("Wallet has %zu keys.\n", g_wallet.keystore.num_keys);
     boot_topmark("wallet_load", t_phase);
-
     /* WALLET_LOADED: keys read + canary passed, or a keypool was generated. */
     {
         struct zcl_result wr = sysinit_run_stage(BOOT_STAGE_WALLET_LOADED, ctx);
         if (!wr.ok) return false;
     }
-
     /* Upload the onion descriptor in parallel with block-index hydration. */
     if (!ctx->no_services) (void)boot_onion_tor_start_early(ctx);
-
     /* Keep staged-sync cursors in progress.kv, independent of node.db. */
     bool progress_open = progress_store_open(ctx->datadir);
     boot_snapshot_install_gate_boot(progress_open, ctx->load_snapshot_at_own_height);
@@ -1781,7 +1641,6 @@ bool app_init(struct app_context *ctx)
          * inside boot_refold_from_anchor_reset below. */
         boot_refold_staged_init(ctx->refold_staged);  /* cache refold_in_progress + refold_from_anchor */
     }
-
     /* Snapshot-first: if a downloaded consensus_snapshot.db
      * is present in the datadir, import its UTXOs into node.db *before*
      * any chain-tip restoration runs. This makes coins_best_block
@@ -1797,7 +1656,6 @@ bool app_init(struct app_context *ctx)
     /* Timing only: the stretch to the block_index_load marker (~1.3–13s warm)
      * had no markers — attribute its heaviest steps via boot_submark(). */
     int64_t t_sub = boot_clock_ms();
-
     if (g_node_db.open) {
         char snap_path[PATH_MAX];
         int sp_n = snprintf(snap_path, sizeof(snap_path),
@@ -1850,9 +1708,7 @@ bool app_init(struct app_context *ctx)
             }
         }
     }
-
     t_sub = boot_submark("coins.snapshot_first", t_sub);
-
     /* -snapshot: Create snapshot of legacy data dir, import in parallel,
      * then start normally with P2P sync to catch up any delta. */
     if (ctx->snapshot_dir) {
@@ -1860,7 +1716,6 @@ bool app_init(struct app_context *ctx)
             fprintf(stderr, "Error: SQLite database required for snapshot\n");
             return false;
         }
-
         /* Step 1: Create snapshot (hardlink block files, copy LevelDB) */
         const char *snap = snapshot_create(ctx->snapshot_dir,
                                            ctx->datadir, 2);
@@ -1868,17 +1723,14 @@ bool app_init(struct app_context *ctx)
             fprintf(stderr, "Error: Failed to create snapshot\n");
             return false;
         }
-
         /* Step 2: Parallel import (block index + UTXOs + wallet) */
         if (snapshot_import(snap, ctx->datadir,
                             &g_node_db, &g_wallet) < 0) {
             fprintf(stderr, "Warning: Snapshot import had errors\n");
         }
-
         /* Step 3: Build transaction index after runtime services take
          * ownership of background jobs, so shutdown can join it cleanly. */
     }
-
     /* Open block index database after removing stale filesystem artifacts left
      * behind by interrupted legacy import/copy paths. */
     char blocktree_path[1024];
@@ -1896,7 +1748,6 @@ bool app_init(struct app_context *ctx)
         fprintf(stderr, "Warning: Could not open block tree DB at %s\n",
                 blocktree_path);
     }
-
     /* Open coins view on the SHARED sqlite3 handle.
      * Both node_db and coins_view_sqlite use the same connection.
      * Transaction coordination is handled by flush_coins_if_needed
@@ -1925,7 +1776,6 @@ bool app_init(struct app_context *ctx)
             if (boot_crashonly_consume_reindex_request(ctx->datadir))
                 ctx->reindex_chainstate = true;
         }
-
         /* -reindex-chainstate explicitly rebuilds the UTXO set from on-disk
          * block data, discarding the stored coins state. Clear that state
          * BEFORE the coins-integrity gate runs — otherwise a torn coins anchor
@@ -2014,9 +1864,7 @@ bool app_init(struct app_context *ctx)
             return boot_park_until_shutdown("coins_view_integrity");
         }
     }
-
     t_sub = boot_submark("coins.view_open_gate", t_sub);
-
     /* One-time migration: import UTXOs from LevelDB chainstate into SQLite.
      * The old LevelDB had the authoritative UTXO set; SQLite's utxos table
      * may be incomplete. Check for migration flag in node_state. */
@@ -2056,26 +1904,21 @@ bool app_init(struct app_context *ctx)
                            "projection\n", (long long)utxo_count);
             }
         }
-
         /* Auto-recovery: check for needs_reimport flag */
         if (utxo_reimport_flag_check_and_clear(ctx->datadir))
             ctx->reimport_utxos = true;
-
         /* (Crash-only reindex request is consumed EARLIER, above the coins
          * clear + the coins-view integrity gate — see boot_index.c reorder
          * note near the block-index open. Consuming it here would be too late:
          * the coins-view gate already ran and would re-fire before the reindex,
          * dead-ending the bounded re-derive ladder.) */
-
         /* -reimport-utxos: force re-import from LevelDB chainstate */
         if (ctx->reimport_utxos) {
             if (!utxo_recovery_prepare_reimport(&g_node_db).ok)
                 ctx->reimport_utxos = false;
         }
-
         /* LDB UTXO import deferred to post-block-index (see below). */
     }
-
     /* coins_kv-backed read authority: the coins_tip RAM cache resolves
      * misses against coins_kv (canonical UTXO set in progress.kv), authored
      * in-txn by the reducer so it is atomically consistent with the stage
@@ -2115,7 +1958,6 @@ bool app_init(struct app_context *ctx)
         return false;
     }
     coins_view_cache_init(&g_coins_tip, &g_coins_read_view.view);
-
     /* Hoist the block_index_projection open next to the event-log open
      * so load_block_index_from_projection (under -rebuildfromlog) has the
      * caught-up projection available BEFORE the block-index load below.
@@ -2124,7 +1966,6 @@ bool app_init(struct app_context *ctx)
      * Non-fatal if it cannot open: -rebuildfromlog simply falls through to
      * the legacy loaders. */
     (void)boot_ensure_block_index_projection(ctx->datadir);
-
     /* Wire the process-lifetime chain_state_repository singleton now
      * that g_coins_tip is alive. From this point on, call-site
      * migrations can go through csr_commit_tip() and get all six
@@ -2139,7 +1980,6 @@ bool app_init(struct app_context *ctx)
              &g_node_db,
              NULL);
     csr_set_db_service(csr_instance(), &g_db_service);
-
     /* Wire UTXO commitment: load from SQLite and set pointer for
      * persistence on flush. */
     set_coins_sqlite_for_commitment(&g_coins_sqlite);
@@ -2147,7 +1987,6 @@ bool app_init(struct app_context *ctx)
         printf("Loaded UTXO commitment from SQLite (count=%llu)\n",
                (unsigned long long)g_coins_tip.commitment.count);
     }
-
     /* skip_activate removed — activation controller is the authority */
     bool fast_restart = false;
     /* Set true if the block index + tip were rebuilt purely from the
@@ -2158,13 +1997,10 @@ bool app_init(struct app_context *ctx)
     int boot_restored_authority_height = -1;
     struct uint256 boot_restored_authority_hash;
     memset(&boot_restored_authority_hash, 0, sizeof(boot_restored_authority_hash));
-
     /* Block index is now cached in SQLite (load_block_index_sqlite).
      * The full index is saved on shutdown/save, enabling instant restart
      * without the 10-15s LevelDB scan. */
-
     t_sub = boot_submark("coins.readview_csr", t_sub);
-
     /* OOM protection: estimate block index memory before loading.
      * Warn if it would exceed 50% of system RAM. */
     {
@@ -2173,9 +2009,7 @@ bool app_init(struct app_context *ctx)
             : 0;
         boot_block_index_memory_warn(est_count);
     }
-
     (void)boot_submark("blkidx.mem_estimate", t_sub);
-
     /* Block index load: flat file first (mmap, <2s), then SQLite, then LevelDB.
      * Jeff Dean rule: use the fastest data structure available. */
     t_phase = boot_clock_ms();
@@ -2192,7 +2026,6 @@ bool app_init(struct app_context *ctx)
          * counters: `ops state --subsystem=block_index_load_rungs`. */
         boot_blkidx_run_ladder(&blkidx);
         rebuilt_from_log = blkidx.rebuilt_from_log;
-
         /* If block index is much smaller than the chain, try loading
          * from zclassicd's LevelDB. This gives us 3M+ entries with
          * correct heights and pprev chains in seconds. Triggers when
@@ -2236,12 +2069,10 @@ bool app_init(struct app_context *ctx)
              * normally. */
             struct boot_derived_coins_best ndcb;
             bool have_ndcb = boot_derive_coins_best(&ndcb);
-
             if (legacy_source_present) {
                 printf("Loading block index from zclassicd LevelDB: %s\n",
                        zcd_idx_path);
                 fflush(stdout);
-
                 /* Build a snapshot dir so we can open the LevelDB even
                  * while a live zclassicd holds the source LOCK.
                  * Hardlinks the immutable .ldb SST files + copies the
@@ -2274,7 +2105,6 @@ bool app_init(struct app_context *ctx)
                              "%s/LOCK", zcd_idx_path);
                     unlink(lock_path);
                 }
-
                 struct block_tree_db zcd_btdb;
                 int64_t t0 = (int64_t)platform_time_wall_time_t();
                 if (block_tree_db_open(&zcd_btdb, open_path,
@@ -2286,7 +2116,6 @@ bool app_init(struct app_context *ctx)
                                "in %llds\n",
                                g_state.map_block_index.size,
                                (long long)elapsed);
-
                         /* Option A: re-seed per-node hash storage and point
                          * phashBlock at it (boot_insert_block_index_cb ->
                          * chainstate_insert_block_index already does this at
@@ -2301,7 +2130,6 @@ bool app_init(struct app_context *ctx)
                                 pi2->hashBlock = *hash2;
                                 pi2->phashBlock = &pi2->hashBlock;
                             }
-
                         /* Compute chain work + set chain tip directly.
                          * This avoids the O(n^2) find_most_work_chain scan
                          * which is catastrophically slow with 3M entries. */
@@ -2318,7 +2146,6 @@ bool app_init(struct app_context *ctx)
                                 n = idx2;
                                 qsort(sorted, n, sizeof(*sorted),
                                       cmp_block_index_height);
-
                                 /* Forward pass: compute nChainWork + nChainTx */
                                 struct block_index *best = NULL;
                                 for (size_t i = 0; i < n; i++) {
@@ -2329,14 +2156,12 @@ bool app_init(struct app_context *ctx)
                                             &b->pprev->nChainWork, &proof);
                                     else
                                         b->nChainWork = proof;
-
                                     if (b->nTx > 0) {
                                         if (b->pprev && b->pprev->nChainTx > 0)
                                             b->nChainTx = b->pprev->nChainTx + b->nTx;
                                         else if (!b->pprev)
                                             b->nChainTx = b->nTx;
                                     }
-
                                     /* Track best valid chain tip */
                                     if (b->nChainTx > 0 &&
                                         (b->nStatus & BLOCK_HAVE_DATA) &&
@@ -2348,7 +2173,6 @@ bool app_init(struct app_context *ctx)
                                     }
                                 }
                                 free(sorted);
-
                                 if (best && best->nHeight > 0) {
                                     int32_t zcd_best_h = best->nHeight;
                                     if (have_ndcb &&
@@ -2382,7 +2206,6 @@ bool app_init(struct app_context *ctx)
                                 }
                             }
                         }
-
                         /* Save flat file for instant future boots. The map is
                          * now ENRICHED with zclassicd's 0..zcd-tip ancestry; the
                          * flat persists the entry SET only (no tip), so saving it
@@ -2399,7 +2222,6 @@ bool app_init(struct app_context *ctx)
                 /* Tear down the snapshot (hardlinks free cheaply). */
                 if (snap_ok)
                     ldb_snapshot_destroy(snap_path);
-
                 /* Copy block files from zclassicd if we don't have them */
                 if (g_state.map_block_index.size > 1000) {
                     char zcd_blk_dir[1024];
@@ -2423,14 +2245,12 @@ bool app_init(struct app_context *ctx)
             }
         } /* need_zcd */
         } /* chain height check scope */
-
         /* Save recent blocks to SQLite (skip for large indexes —
          * the flat file handles 3M+ entries in 1-3s and the SQLite
          * cache path uses 10GB+ RAM causing OOM kills) */
         if (g_node_db.open && g_state.map_block_index.size > 1000
             && g_state.map_block_index.size < 500000)
             save_block_index_recent(&g_node_db, &g_state);
-
         /* Ensure block files from zclassicd are available.
          * Hard-link (instant, same FS) or skip (cross-FS handled above).
          * This runs every boot to catch the case where block_index.bin
@@ -2450,7 +2270,6 @@ bool app_init(struct app_context *ctx)
                 printf("Linked %d block files from zclassicd\n",
                        link_files.linked);
         }
-
         /* Projection top-up: fold the event-log block_index_projection over
          * the loaded map raise-only so a restart keeps the connected extent
          * instead of dropping to the stale flat floor. Runs BEFORE the
@@ -2463,7 +2282,6 @@ bool app_init(struct app_context *ctx)
                      "[boot] block_index projection top-up FAILED — the "
                      "connected extent may regress to the last flat-file "
                      "save; expect a window re-chase (see node.log above)");
-
         /* node.db forward-extent top-up (cold-import restart fragility): folds
          * the body-backed window above a cold-import seed anchor into the map
          * so the anchor stops being a DETACHED orphan tip and the tip does not
@@ -2472,7 +2290,6 @@ bool app_init(struct app_context *ctx)
             !block_index_node_db_topup(&g_state, &g_node_db, ctx->datadir))
             LOG_WARN("boot", "[boot] block_index node.db forward-extent top-up "
                      "FAILED — a cold-import restart may regress (node.log above)");
-
         /* Propagate nChainTx for all blocks in the index (OS-S2 #2).
          * Without it, find_most_work_chain() skips blocks with nChainTx=0,
          * causing "tip=X most_work=Y" with Y << X. Cursor-gated
@@ -2481,13 +2298,10 @@ bool app_init(struct app_context *ctx)
          * they are contiguous-complete. Full body: boot_cursor_state.c. */
         boot_cursor_propagate_nchaintx(&g_state, &g_node_db);
     }
-
     boot_topmark("block_index_load", t_phase);
-
     /* Log block index memory usage */
     boot_block_index_memory_log_loaded(g_state.map_block_index.size,
                                        g_state.map_block_index.capacity);
-
     /* Bulk height repair: fix scrambled nHeight values from LDB import.
      * This must run AFTER block index is loaded but BEFORE header sync.
      * Without this, header processing fixes heights 160-at-a-time which
@@ -2495,7 +2309,6 @@ bool app_init(struct app_context *ctx)
     int index_repaired = 0;
     if (g_state.map_block_index.size > 100)
         index_repaired += boot_cursor_repair_heights(&g_state, &g_node_db);
-
     /* pprev chain repair: fix corrupted pprev pointers from LDB import (reads
      * hashPrevBlock from disk; must run after height repair). Cursor-gated on
      * `pprev_repaired_height`: only rescan blocks above the verified cursor and
@@ -2518,13 +2331,11 @@ bool app_init(struct app_context *ctx)
             node_db_state_set_int(&g_node_db, "pprev_repaired_height",
                                   pprev_max);
     }
-
     if (index_repaired > 0 && g_state.map_block_index.size > 1000) {
         printf("Block index repaired: saving canonical flat file "
                "(%d repairs)\n", index_repaired);
         save_block_index_flat(ctx->datadir, &g_state);
     }
-
     /* Block index integrity — verify sidecar SHA3 after all loads.
      *
      * File integrity failures are still quarantined before boot can
@@ -2590,7 +2401,6 @@ bool app_init(struct app_context *ctx)
             }
         }
     }
-
     /* BLOCK_INDEX_LOADED boundary: the block index is loaded, repaired, and
      * the sidecar integrity gate accepted the map. The tip is not yet
      * resolved (UTXO import + chain-tip restore run below). */
@@ -2599,7 +2409,6 @@ bool app_init(struct app_context *ctx)
             sysinit_run_stage(BOOT_STAGE_BLOCK_INDEX_LOADED, ctx);
         if (!br.ok) return false;
     }
-
     /* ── LDB UTXO import (runs AFTER block index load) ──
      * Skipped on the log-rebuild path: the UTXO projection (bound as the
      * coins read view above) is the sole money authority there; reading the
@@ -2628,9 +2437,7 @@ bool app_init(struct app_context *ctx)
                                               ir.anchor_reason);
         }
     }
-
     boot_topmark("utxo_import", t_phase);
-
     /* Timing only (no behavior change): mark the start of the
      * block-index reconcile span — single-pass block-index scan,
      * utxo_recovery_restore_chain_tip, block-index repair/relink,
@@ -2639,7 +2446,6 @@ bool app_init(struct app_context *ctx)
      * part of the warm-start unattributed gap. */
     int64_t t_reconcile_blockindex = boot_clock_ms();
     int64_t t_reconcile_sub = t_reconcile_blockindex;
-
     /* Resolve -deferproofvalidationbelow=<hash> now that block index is loaded */
     if (ctx->defer_proof_validation_below && strcmp(ctx->defer_proof_validation_below, "0") != 0) {
         struct uint256 av_hash;
@@ -2664,7 +2470,6 @@ bool app_init(struct app_context *ctx)
             fprintf(stderr, "Warning: -deferproofvalidationbelow hash must be 64 hex chars\n");
         }
     }
-
     /* ── Single-pass block index scan ────────────────────────────
      * Previously 6+ separate O(n) scans of 3M entries (15-20s).
      * Now ONE pass that: clears BLOCK_FAILED, finds best header,
@@ -2677,7 +2482,6 @@ bool app_init(struct app_context *ctx)
     int scan_max_have_data_h = 0;
     int scan_have_data_count = 0;
     int scan_missing_header_data = 0;
-
     {
         size_t si = 0;
         struct block_index *sp;
@@ -2726,9 +2530,7 @@ bool app_init(struct app_context *ctx)
         printf("Block index has %d HAVE_DATA entries with missing headers; "
                "will hydrate from block files\n",
                scan_missing_header_data);
-
     t_reconcile_sub = boot_submark("blkidx.scan", t_reconcile_sub);
-
     /* Tier-2 P2 fast-restart decision (helper does verify + in-memory install;
      * any mismatch ⇒ full dirty-boot path). Never on reindex/log-rebuild/mint/
      * refold/snapshot — those intentionally rebuild. */
@@ -2747,7 +2549,6 @@ bool app_init(struct app_context *ctx)
                                                   "fast_restart");
         }
     }
-
     /* Coverage gate: a -reindex-chainstate (explicit or sentinel-consumed)
      * replays from genesis and cannot skip a missing body. When coins are
      * already seeded but local bodies materially fail to cover [0..target] (a
@@ -2765,7 +2566,6 @@ bool app_init(struct app_context *ctx)
                 scan_have_data_count, seeded))
             ctx->reindex_chainstate = false;
     }
-
     /* Restore chain tip from coins DB best block hash */
     if (ctx->reindex_chainstate) {
         if (scan_reindex_best) {
@@ -2849,7 +2649,6 @@ bool app_init(struct app_context *ctx)
             boot_restored_authority_tip = true;
             boot_restored_authority_height = cr.restored_height;
             boot_restored_authority_hash = cr.restored_hash;
-
             if (!active_chain_tip(&g_state.chain_active) &&
                 !uint256_is_null(&boot_restored_authority_hash)) {
                 struct block_index *restored = block_map_find(
@@ -2890,7 +2689,6 @@ bool app_init(struct app_context *ctx)
             (void)boot_promote_header_via_csr(scan_best_header,
                                               "scan_best_header");
     }
-
     /* Ensure genesis block is always properly initialized.
      * On a fresh start, load_block_index creates genesis. On restart,
      * LevelDB may have entries but genesis might lack BLOCK_HAVE_DATA
@@ -2948,7 +2746,6 @@ bool app_init(struct app_context *ctx)
             }
         }
     }
-
     t_reconcile_sub = boot_submark("blkidx.restore_tip", t_reconcile_sub);
     if (!boot_seed_oneshot_headers_preflight(ctx, &g_state)) return false; /* D3: seed one-shot headers-prereq fast-fail, boot_seed_gate.c */
     /* Repair block index from SQLite.
@@ -2978,19 +2775,14 @@ bool app_init(struct app_context *ctx)
                 int file_num = sqlite3_column_int(sel, 1);
                 int data_pos = sqlite3_column_int(sel, 2);
                 int status = sqlite3_column_int(sel, 3);
-
                 if (!hash_blob || hash_len != 32) continue;
-
                 struct uint256 hash;
                 memcpy(hash.data, hash_blob, 32);
-
                 struct block_index *bi = block_map_find(
                     &g_state.map_block_index, &hash);
                 if (!bi) continue;
                 checked++;
-
                 bool changed = false;
-
                 /* Fix file positions */
                 if (bi->nFile != file_num || bi->nDataPos != (unsigned)data_pos) {
                     if (file_num >= 0 && data_pos > 0) {
@@ -2999,7 +2791,6 @@ bool app_init(struct app_context *ctx)
                         changed = true;
                     }
                 }
-
                 /* Promote validation status from SQLite. A prior import
                  * (e.g. -cold-import) may have persisted BLOCK_HAVE_DATA,
                  * BLOCK_HAVE_UNDO, and BLOCK_VALID_SCRIPTS into the
@@ -3011,7 +2802,6 @@ bool app_init(struct app_context *ctx)
                                    BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO));
                     changed = true;
                 }
-
                 if (changed) repaired++;
             }
             sqlite3_finalize(sel);
@@ -3022,14 +2812,12 @@ bool app_init(struct app_context *ctx)
             }
         }
     }
-
     /* Option A: phashBlock now references per-node block_index.hashBlock
      * (stable, never freed by bucket realloc), seeded at every insert.
      * The old bucket-identity relink pass is intentionally removed: under
      * Option A 'phashBlock != &bucket.hash' is ALWAYS true, so it would
      * re-point every node BACK into the reallocatable bucket array and
      * re-introduce the UAF. No relink is needed. */
-
     /* Validate coins/chain agreement and execute recovery */
     t_reconcile_sub = boot_submark("blkidx.repair_relink", t_reconcile_sub);
     {
@@ -3051,7 +2839,6 @@ bool app_init(struct app_context *ctx)
             fprintf(stderr, "[boot] UTXO recovery execution failed: %s\n",
                     rr.status.message);
         (void)rr.skip_activate; /* activation controller handles state */
-
         /* Turbo DROPS every index — only worth it before a bulk reload. */
         if (rr.bulk_reload_pending &&
             (vr.action == BOOT_RECOVER_REIMPORT ||
@@ -3063,7 +2850,6 @@ bool app_init(struct app_context *ctx)
                 fprintf(stderr, "boot: failed to set sync batch size\n");
         }
     }
-
     /* Clear stale HAVE_DATA above tip — targeted, not full scan.
      * Only needed if max HAVE_DATA height > chain tip (from the
      * single-pass scan above). Skip when block index has 1M+ entries
@@ -3089,7 +2875,6 @@ bool app_init(struct app_context *ctx)
                        cleared, tip_h);
         }
     }
-
     /* Scan block files on disk if HAVE_DATA is missing or if entries claim
      * HAVE_DATA but still have placeholder header fields. The latter blocks
      * activation because the validator must reject nBits=0 placeholders.
@@ -3123,7 +2908,6 @@ bool app_init(struct app_context *ctx)
                 fflush(stdout);
                 if (g_state.map_block_index.size > 1000)
                     save_block_index_flat(ctx->datadir, &g_state);
-
                 /* Wave 2: on canonical datadirs the post-scan anchor ladder
                  * below is GUESSWORK over caches (node_state anchor, mirror
                  * MAX(height), "most work scanned") that manufactured wedges;
@@ -3173,14 +2957,12 @@ bool app_init(struct app_context *ctx)
                         uint8_t hash_rev[32];
                         for (int bi = 0; bi < 32; bi++)
                             hash_rev[bi] = post_scan_best.data[31 - bi];
-
                         struct db_block sqlite_blk;
                         if (db_block_find_by_hash(&g_node_db, hash_rev,
                                                    &sqlite_blk) &&
                             sqlite_blk.height > 0) {
                             target_h = sqlite_blk.height;
                         }
-
                         /* Fallback: try finding by height range near chain tip */
                         if (target_h <= 0) {
                             sqlite3_stmt *qs = NULL;
@@ -3197,11 +2979,9 @@ bool app_init(struct app_context *ctx)
                                 printf("Post-scan: using max block height "
                                        "%d as import target\n", target_h);
                         }
-
                         if (target_h > 0)
                             printf("Post-scan: import height=%d\n", target_h);
                     }
-
                     struct block_index *post_found = block_map_find(
                         &g_state.map_block_index, &post_scan_best);
                     if (post_found && target_h > 0) {
@@ -3254,7 +3034,6 @@ bool app_init(struct app_context *ctx)
                         printf("[boot] coins_best_block %s not in "
                                "block index — resolving from UTXO "
                                "heights\n", hex);
-
                         int utxo_max_h = 0;
                         {
                             sqlite3_stmt *hst = NULL;
@@ -3266,7 +3045,6 @@ bool app_init(struct app_context *ctx)
                                 sqlite3_finalize(hst);
                             }
                         }
-
                         if (utxo_max_h > 0) {
                             /* Find highest HAVE_DATA block at or below
                              * the UTXO height — conservative but safe. */
@@ -3285,7 +3063,6 @@ bool app_init(struct app_context *ctx)
                                      bp->nHeight > best_have->nHeight))
                                     best_have = bp;
                             }
-
                             if (best_have && best_have->nHeight > 0 &&
                                 boot_promote_tip_via_csr(
                                     best_have, "coins_hash_orphan_promote",
@@ -3303,7 +3080,6 @@ bool app_init(struct app_context *ctx)
                                         utxo_max_h);
                                 if (anchor) {
                                     snapsync_set_anchor(anchor);
-
                                     printf("[boot] coins_best_block hash "
                                            "not in index — metadata anchor "
                                            "at h=%d\n", utxo_max_h);
@@ -3327,17 +3103,14 @@ bool app_init(struct app_context *ctx)
             }
         }
     }
-
     (void)boot_submark("blkidx.validate_recover", t_reconcile_sub);
     boot_topmark("block_index_reconcile", t_reconcile_blockindex);
-
     t_phase = boot_clock_ms();
     /* Wire the flat-file sapling checkpoint. Tells
      * process_block.c where to flush every 10K blocks; separate from
      * the node_state-backed path because the flat file is immune to
      * the P14 savepoint contention class. */
     set_sapling_checkpoint_datadir(g_datadir);
-
     /* Load Sapling commitment tree from persistent storage.
      *
      * Three-tier fall-back, most-authoritative first:
@@ -3414,7 +3187,6 @@ bool app_init(struct app_context *ctx)
                                      "missing_or_corrupt");
         }
     }
-
     if (g_node_db.open && !g_state.sapling_tree_loaded) {
         uint8_t tree_buf[8192];
         size_t tree_len = 0;
@@ -3456,7 +3228,6 @@ bool app_init(struct app_context *ctx)
             set_sapling_tree_for_flush(&g_state.sapling_tree);
         }
     }
-
     /* Verify Sapling tree root matches chain tip. If mismatched,
      * rebuild from block files before P2P starts (no concurrency risk).
      * Skip if hashFinalSaplingRoot is all-zeros (block_index.bin doesn't
@@ -3495,7 +3266,6 @@ bool app_init(struct app_context *ctx)
             if (memcmp(tree_root.data,
                        tip->hashFinalSaplingRoot.data, 32) != 0) {
                 size_t old_size = incremental_tree_size(&g_state.sapling_tree);
-
                 /* lane/sapling-tree-persist: a mismatch against the CURRENT
                  * tip does not by itself mean the tree is corrupt — it is
                  * the expected state whenever blocks were applied after the
@@ -3515,7 +3285,6 @@ bool app_init(struct app_context *ctx)
                     folded_forward = sapling_tree_attempt_fold_forward(ctx,
                         tip->nHeight, old_size, sapling_tree_saved_height);
                 }
-
                 if (!folded_forward) {
                 if (tip->nHeight > 1000000) {
                     printf("Sapling tree root MISMATCH (size=%zu) - "
@@ -3561,9 +3330,7 @@ bool app_init(struct app_context *ctx)
 sapling_tree_boot_check_done:
         ;
     }
-
     boot_topmark("sapling_tree_load", t_phase);
-
     /* Timing only (no behavior change): mark the start of the
      * UTXO/chain reconcile span — clear-failed-above-tip, the
      * coins-vs-chain height mismatch repair, clean-above-tip, and the
@@ -3571,7 +3338,6 @@ sapling_tree_boot_check_done:
      * sapling_tree_load marker and the reducer activation boot phase and was
      * part of the warm-start unattributed gap. */
     int64_t t_reconcile_utxochain = boot_clock_ms();
-
     /* Clear BLOCK_FAILED flags above the chain tip on boot.
      * After a UTXO repair or crash recovery, blocks may be marked
      * BLOCK_FAILED_VALID/BLOCK_FAILED_CHILD from a prior session where
@@ -3579,26 +3345,22 @@ sapling_tree_boot_check_done:
      * these blocks should be re-validated. Without this, reducer activation
      * skips them and the node is permanently stuck. */
     chain_restore_clear_failed_above_tip(&g_state);
-
     /* Safety: verify chain tip matches UTXO set height (coins anchor
      * promotion + coins_best/tip reconcile, every real-block promotion
      * gated by the Invariant A trust-root check). Body lives in
      * boot_index.c. */
     boot_index_verify_coins_tip_consistency(&g_state, &g_coins_sqlite,
                                             &g_node_db);
-
     /* Clean up UTXOs above chain tip only after the mismatch repair above
      * has had a chance to promote a durable snapshot/coins anchor. Running
      * this earlier can delete the high-water UTXO rows that prove where an
      * immutable historical snapshot actually lands. */
     utxo_recovery_clean_above_tip(&g_node_db, &g_state);
-
     /* Activate best chain via controller (single authority).
      * The controller checks: anchor state, shutdown, UTXO availability.
      * Replaces the old skip_activate boolean with state machine. */
     if (activation_get_state(&g_activation_ctl) == ACTIVATION_BOOT_PENDING)
         activation_boot_complete(&g_activation_ctl, "boot_done");
-
     /* If anchor exists but chain tip is already past it (previous boot
      * synced successfully), clear the anchor so blocks can connect. */
     if (activation_get_state(&g_activation_ctl) == ACTIVATION_ANCHOR_ACTIVE) {
@@ -3615,7 +3377,6 @@ sapling_tree_boot_check_done:
         }
     }
     boot_topmark("utxo_chain_reconcile", t_reconcile_utxochain);
-
     /* Reducer cursor/coins desync reconcile — runs AFTER coins_best is durable
      * (utxo_chain_reconcile above) and BEFORE the staged reducer Jobs init in
      * app_init_services, so the stages load a corrected cursor. If an unclean
@@ -3627,7 +3388,6 @@ sapling_tree_boot_check_done:
      * forward. Reset-safe: deletes no log rows,
      * so the public tip can never drop below coins_best (proven in
      * test_stage_reducer_unwedge). No-op unless the cursor is ahead. */
-
     if (ctx->full_fold)
         /* GENESIS-FOLD-TO-TIP: same offline driver as -mint-anchor, but the fold
          * ceiling/target is the local header TIP and the terminal checkpoint
@@ -3714,7 +3474,6 @@ sapling_tree_boot_check_done:
      * the self-heal covers those callers without threading datadir through the
      * install-runtime seam. */
     boot_refold_body_rebind_set_datadir(ctx->datadir);
-
     struct boot_state_source_selection ssel;
     boot_select_state_source(&g_node_db, &g_state, ctx, &ssel);
     bool consumed_auto_refold = ssel.consumed_auto_refold;
@@ -3810,7 +3569,6 @@ sapling_tree_boot_check_done:
         (void)refold_progress_mark_started_from_anchor(progress_store_db(),
                                                        resume_target);
     }
-
     {
         /* SINGLE SOURCE OF TRUTH (docs/work/tip-durability-collapse.md):
          * floor on the GENUINE coins frontier. Wave 2: that frontier is
@@ -3845,7 +3603,6 @@ sapling_tree_boot_check_done:
             }
         }
     }
-
     {
         int restored_h = active_chain_height(&g_state.chain_active);
         if (boot_restored_authority_tip && restored_h > 1000) {
@@ -3868,7 +3625,6 @@ sapling_tree_boot_check_done:
             boot_phase_end(&bp_act);
         }
     }
-
     /* final sweep. Post-activation is the last point at
      * which block_map and active_chain could still carry the anchor-
      * restore limp (nBits==0 entries, chain_active holes below tip); the
@@ -3926,7 +3682,6 @@ sapling_tree_boot_check_done:
             }
         }
     }
-
     {
         struct boot_phase bp_fin;
         boot_phase_begin(&bp_fin, "chain_restore_finalize");
@@ -3941,7 +3696,6 @@ sapling_tree_boot_check_done:
                     finalize_r.code, finalize_r.message);
         boot_phase_end(&bp_fin);
         int  tip_h = active_chain_height(&g_state.chain_active);
-
         /* Mint/refold flags reset the staged reducer to genesis (or the SHA3
          * anchor) and re-fold over on-disk bodies — boot_*_reset above ALREADY
          * discarded the upper active chain these flags exist to rebuild. So the
@@ -3964,7 +3718,6 @@ sapling_tree_boot_check_done:
                 "finalize_integrity_skipped_for_refold tip=%d", tip_h);
             finalize_ok = true;  /* take the clean-integrity branch below */
         }
-
         /* Classify the post-restore integrity result on its structured
          * breakdown — the finalize bool discards it. A RECONCILABLE
          * divergence (active_chain window holes, with no zero-nbits and
@@ -3985,7 +3738,6 @@ sapling_tree_boot_check_done:
         struct chain_integrity_result integ;
         chain_integrity_check_post_restore(&integ, &g_state);
         enum chain_integrity_class cls = chain_integrity_classify(&integ);
-
         if (!finalize_ok && tip_h > 1000) {
             if (cls == CHAIN_INTEGRITY_UNRECOVERABLE && !ctx->allow_degraded) {
                 /* Crash-only: the reindex-recoverable shape (zero_nbits==0, a
@@ -4058,7 +3810,6 @@ sapling_tree_boot_check_done:
                                   "post-restore integrity clean");
         }
     }
-
     /* Auto-scan wallet for transactions in connected blocks.
      * This ensures balance shows immediately after LDB import or
      * snapshot sync — no manual replaywalletfromchain needed.
@@ -4078,13 +3829,11 @@ sapling_tree_boot_check_done:
                        "(blocks 0-%d)\n", found, tip_h);
         }
     }
-
     /* Timing only (no behavior change): mark the start of the
      * finalize-and-build span — finalize_chain_state, shielded backfill,
      * and svc-ctx build — which sat uninstrumented between the
      * wallet_scan_blocks boot_phase and the p2p_services_start marker. */
     int64_t t_finalize_build = boot_clock_ms();
-
     /* CHAIN_TIP_RESOLVED boundary: finalize (restore normal SQLite mode,
      * persist the resolved tip, stamp boot_status) runs as this stage's
      * record. */
@@ -4094,12 +3843,10 @@ sapling_tree_boot_check_done:
         if (!cr.ok) return false;
     }
     struct block_index *tip = active_chain_tip(&g_state.chain_active);
-
     /* -reindex-explorer: truncate + rewind AFTER finalize re-stamped the tip
      * so the backfill re-walks genesis..tip (node.db only, boot_index.c). */
     if (ctx->reindex_explorer && g_node_db.open)
         boot_reindex_explorer(&g_node_db);
-
     /* -backfill-nullifiers / ZCL_NULLIFIER_BACKFILL=1: one-shot
      * populate-only remediation for the nullifier activation gap. Runs
      * before P2P/RPC/runtime services and exits through main.c. */
@@ -4127,16 +3874,13 @@ sapling_tree_boot_check_done:
                (long long)nbr.blocks_scanned);
         return true;
     }
-
     /* -backfill-zslp: one-shot re-derive of zslp_* from op_returns (no full
      * block re-walk), then exit before services. The helper guards db-open. */
     if (ctx->backfill_zslp) {
         boot_backfill_zslp(&g_node_db);
         return true;
     }
-
     boot_step_backfill_shielded_if_needed(ctx, tip);
-
     /* -mint-anchor is a one-shot offline reducer driver. app_init has already
      * opened storage, restored chain/index state, applied the genesis reset and
      * anchor cap, and initialized the activation controller. Stop here: the
@@ -4157,7 +3901,6 @@ sapling_tree_boot_check_done:
         boot_stage_advance_to(BOOT_STAGE_READY);
         return true;
     }
-
     /* Skip services if no_services flag is set (speedrun / benchmarking) */
     if (ctx->no_services) {
         printf("Boot complete (no_services mode). "
@@ -4165,22 +3908,18 @@ sapling_tree_boot_check_done:
                active_chain_height(&g_state.chain_active));
         return true;
     }
-
     /* Runtime services: mempool, P2P, RPC, Tor, wallet sync (boot_services.c) */
     struct boot_svc_ctx svc;
     boot_step_build_svc_ctx(ctx, &svc);
     /* g_svc is stored so app_shutdown can access it */
     g_svc = svc;
-
     /* Emit crash recovery complete if boot succeeded */
     {
         int chain_h = active_chain_height(&g_state.chain_active);
         event_emitf(EV_CRASH_RECOVERY_COMPLETE, 0,
             "chain_height=%d", chain_h);
     }
-
     boot_topmark("finalize_and_build", t_finalize_build);
-
     t_phase = boot_clock_ms();
     bool svc_ok = app_init_services(ctx, params, &g_svc);
     boot_topmark("p2p_services_start", t_phase);
@@ -4203,7 +3942,6 @@ sapling_tree_boot_check_done:
     }
     return svc_ok;
 }
-
 /* AS-safe SIGALRM backstop. app_shutdown_svc drives a per-stage stagewatch
  * (util/shutdown_stagewatch.h); a fired per-stage deadline lands here and the
  * stagewatch decides truthfully: re-arm a bounded grace for a durability-
@@ -4211,18 +3949,29 @@ sapling_tree_boot_check_done:
  * code 1 only if it was never reached) after writing a terminal receipt. If
  * the stagewatch was never begun (a shutdown path that armed a raw alarm), it
  * falls back to the legacy loud forced exit. Async-signal-safe throughout. */
+#ifndef _WIN32
 static void shutdown_alarm_abort(int sig)
 {
     (void)sig;
     shutdown_stagewatch_on_alarm();
 }
-
+#endif
+static void boot_shutdown_deadline_handler_install(void)
+{
+#ifndef _WIN32
+    signal(SIGALRM, shutdown_alarm_abort);
+#else
+    /* Win32 has no SIGALRM. The shutdown stagewatch remains the owner of
+     * per-stage deadlines; its native lane uses service-stop events/timers
+     * rather than installing a process signal handler here. */
+#endif
+}
 /* app_shutdown delegates to boot_services.c */
 void app_shutdown(void)
 {
     boot_stage_advance_to(BOOT_STAGE_SHUTDOWN_REQUESTED);
     /* Backstop must be live BEFORE app_shutdown_svc arms alarm(90). */
-    signal(SIGALRM, shutdown_alarm_abort);
+    boot_shutdown_deadline_handler_install();
     boot_stop_platform_services();
     app_shutdown_svc(&g_svc);
     boot_postmortem_stop();
@@ -4230,12 +3979,11 @@ void app_shutdown(void)
     boot_datadir_lock_release();
     boot_stage_advance_to(BOOT_STAGE_SHUTDOWN_COMPLETE);
 }
-
 void app_shutdown_offline(void)
 {
     bool durability_ok = true;
     boot_stage_advance_to(BOOT_STAGE_SHUTDOWN_REQUESTED);
-    signal(SIGALRM, shutdown_alarm_abort);
+    boot_shutdown_deadline_handler_install();
     shutdown_stagewatch_begin(g_datadir);
     shutdown_stagewatch_enter("offline-worker-drain", 15, false, true);
     thread_registry_request_shutdown();
@@ -4271,7 +4019,5 @@ void app_shutdown_offline(void)
     boot_datadir_lock_release();
     boot_stage_advance_to(BOOT_STAGE_SHUTDOWN_COMPLETE);
 }
-
 bool app_is_running(void) { return atomic_load(&g_running); }
-
 /* app_add_node, app_start_metrics, app_stop_metrics: boot_services.c */
