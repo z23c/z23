@@ -1169,11 +1169,19 @@ static void *tls_listen_thread_fn(void *arg)
             platform_socket_close(client_fd);
             continue;
         }
+        /* Computed into a variable rather than split across the #if arms of a
+         * single `if (`: the split form opens a brace in each arm and closes
+         * it in neither, so any tool counting braces without evaluating the
+         * preprocessor loses track of the enclosing function from here on. */
 #if defined(_WIN32)
-        if (client_fd > INT_MAX || SSL_set_fd(ssl, (int)client_fd) != 1) {
+        /* Winsock's SOCKET is handle-sized; SSL_set_fd takes an int, so
+         * refuse a descriptor that cannot round-trip rather than truncate. */
+        const bool fd_bound = client_fd <= INT_MAX &&
+                              SSL_set_fd(ssl, (int)client_fd) == 1;
 #else
-        if (SSL_set_fd(ssl, client_fd) != 1) {
+        const bool fd_bound = SSL_set_fd(ssl, client_fd) == 1;
 #endif
+        if (!fd_bound) {
             SSL_free(ssl);
             platform_socket_close(client_fd);
             continue;

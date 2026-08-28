@@ -384,11 +384,22 @@ static void handle_https_client_fd(platform_socket_t fd, int64_t deadline_ms)
         return;
     }
 
+    /* The condition is computed into a variable rather than split across the
+     * #if arms of a single `if (`. Both spellings compile, but the split form
+     * opens a brace in each arm and closes it in neither, so any tool that
+     * counts braces without evaluating the preprocessor double-counts and
+     * loses track of which function it is in for the rest of the file --
+     * which is exactly how check-log-macro-return-type came to report five
+     * correct LOG_FAIL uses as errors. */
 #if defined(_WIN32)
-    if ((uintptr_t)fd > INT_MAX || SSL_set_fd(ssl, (int)(uintptr_t)fd) != 1) {
+    /* Winsock's SOCKET is handle-sized; SSL_set_fd takes an int, so refuse a
+     * descriptor that cannot round-trip instead of truncating it. */
+    const bool fd_bound = (uintptr_t)fd <= INT_MAX &&
+                          SSL_set_fd(ssl, (int)(uintptr_t)fd) == 1;
 #else
-    if (SSL_set_fd(ssl, fd) != 1) {
+    const bool fd_bound = SSL_set_fd(ssl, fd) == 1;
 #endif
+    if (!fd_bound) {
         SSL_free(ssl);
         platform_socket_close(fd);
         atomic_fetch_sub(&g_active_connections, 1);
