@@ -78,8 +78,8 @@ static bool arf_write(const char *datadir, const char *path,
         return false;
 
     char resolved[512], parent[512], staging_path[576];
-    if (!platform_private_path_resolve(path, resolved, sizeof(resolved),
-                                       parent, sizeof(parent))) {
+    if (!platform_private_destination_resolve(
+            path, resolved, sizeof(resolved), parent, sizeof(parent))) {
         fprintf(stderr,  // obs-ok:storage-primitive-error
                 "[boot] boot_auto_refold: unsafe destination %s\n", path);
         return false;

@@ -238,7 +238,7 @@ int test_wallet_backup_port(void)
         char svc_dir[256];
         snprintf(svc_dir, sizeof(svc_dir),
                  WBP_DIR "/wbp_%d_svc_out", (int)getpid());
-        mkdir(svc_dir, 0755);
+        mkdir(svc_dir, 0700);
 
         char out_path[512] = {0};
         int64_t out_keys = -1;

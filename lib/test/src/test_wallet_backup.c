@@ -85,7 +85,7 @@ static bool wb_fixture_init(struct wb_fixture *f, const char *tag)
     snprintf(f->backup_dir, sizeof(f->backup_dir),
              "/tmp/zcl_wb_test_%d_%s_dst", (int)getpid(), tag);
     mkdir(f->datadir, 0755);
-    mkdir(f->backup_dir, 0755);
+    mkdir(f->backup_dir, 0700);
     snprintf(f->dbpath, sizeof(f->dbpath), "%s/node.db", f->datadir);
     return node_db_open(&f->ndb, f->dbpath);
 }
