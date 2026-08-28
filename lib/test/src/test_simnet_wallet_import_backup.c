@@ -116,8 +116,15 @@ static bool ib_wif_decode(const char *wif, struct privkey *out)
 
 static void ib_make_dir(char *dir, size_t dirlen, const char *tag)
 {
+    char rel[192];
     mkdir("./test-tmp", 0755);
-    snprintf(dir, dirlen, "./test-tmp/ibck_%d_%s", (int)getpid(), tag);
+    snprintf(rel, sizeof(rel), "./test-tmp/ibck_%d_%s", (int)getpid(), tag);
+    /* wbs_ensure_backup_dir resolves its destination through the
+     * absolute-only platform_private seam — hand every dir this fixture
+     * mints to callers in absolute form. */
+    test_abs_path(rel, dir, dirlen);
+    /* platform_private_directory_ensure requires exactly 0700 on any dir
+     * it is handed to validate (EACCES otherwise) — mint them private. */
     mkdir(dir, 0700);
 }
 
