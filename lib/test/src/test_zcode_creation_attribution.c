@@ -593,7 +593,10 @@ static int commons_workspace_safety_test(void)
         static const char *const unsafe[] = {
             "", ".", "./", "..", "/", "./../test-tmp/escape",
             "./test-tmp/scratch/../escape", "~/.zcla" "ssic-c23",
-            ".zcla" "ssic-c23", "/var/lib/.zcla" "ssic-c23"
+            ".zcla" "ssic-c23", "/var/lib/.zcla" "ssic-c23",
+            ".\\test-tmp\\scratch\\..\\escape",
+            "C:\\canonical\\scratch\\..\\escape",
+            ".\\test-tmp\\scratch\\"
         };
         for (size_t i = 0; i < sizeof(unsafe) / sizeof(unsafe[0]); i++) {
             ASSERT(!zcl_native_zcode_workspace_is_explicit_scratch(unsafe[i]));
@@ -611,6 +614,10 @@ static int commons_workspace_safety_test(void)
             "./test-tmp/zcode-explicit-scratch"));
         ASSERT(zcl_native_zcode_workspace_is_explicit_scratch(
             "/tmp/zclassic23-zcode-scratch"));
+#if defined(_WIN32)
+        ASSERT(zcl_native_zcode_workspace_is_explicit_scratch(
+            "C:\\test-tmp\\zcode-explicit-scratch"));
+#endif
         PASS();
     } _test_next:;
     return failures;

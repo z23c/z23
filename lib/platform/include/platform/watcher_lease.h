@@ -23,6 +23,17 @@ struct platform_watcher_lease {
     uintptr_t stop_native;
     char nonce[PLATFORM_WATCHER_NONCE_HEX + 1u];
     char stop_locator[320];
+    struct platform_watcher_accepted_binding *accepted;
+};
+
+struct platform_watcher_accepted_binding {
+    char nonce[65];
+    uint64_t creator_pid, creator_start_token;
+    char canonical_root[4096];
+    uint64_t root_volume, root_low, root_high;
+    char canonical_image[4096];
+    uint64_t image_volume, image_low, image_high, image_size;
+    char image_sha256[65];
 };
 
 void platform_watcher_launch_init(struct platform_watcher_launch *launch);
@@ -44,6 +55,10 @@ bool platform_watcher_lease_accept(struct platform_watcher_lease *lease,
                                    const char *claimed_root,
                                    const char *claimed_image,
                                    const char claimed_sha256[65]);
+/* Immutable copy of the identities authenticated during accept. */
+bool platform_watcher_lease_binding(
+    const struct platform_watcher_lease *lease,
+    struct platform_watcher_accepted_binding *out);
 bool platform_watcher_lease_signal_stop(const char nonce[65]);
 /* true means stopped; false means timeout/error. */
 bool platform_watcher_lease_wait_stop(struct platform_watcher_lease *lease,

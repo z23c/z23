@@ -490,6 +490,8 @@ const char *zcl_dev_source_admission_name(
 
 bool zcl_devloop_is_method(const char *method);
 int zcl_devloop_cli_main(const char **args, int nargs);
+int zcl_devloop_watch_worker_main(uintptr_t inherited, const char *root,
+                                  const char *mode, const char image_sha256[65]);
 
 bool zcl_devloop_plan_files(const char *const *files, size_t file_count,
                             struct zcl_devloop_plan *out);
@@ -708,6 +710,10 @@ enum zcl_devloop_state_lookup zcl_devloop_cycle_state_wait_after(
 int zcl_devloop_watch(const char *repo_root);
 int zcl_devloop_watch_mode(const char *repo_root,
                            enum zcl_devloop_publish_mode publish_mode);
+typedef bool (*zcl_devloop_stop_predicate)(void *opaque);
+int zcl_devloop_watch_mode_until(const char *repo_root,
+    enum zcl_devloop_publish_mode publish_mode,
+    zcl_devloop_stop_predicate stop, void *opaque);
 int zcl_devloop_print_status(void);
 int zcl_devloop_run_sim(const char *repo_root);
 int zcl_devloop_app_describe(const char *repo_root, const char *app_id);

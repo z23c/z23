@@ -56,7 +56,16 @@ static int child_main(int argc, char **argv)
         &lease, inherited, argv[4], argv[5], argv[2][2] == 'r' ? hash_b : hash_a);
     if (strcmp(argv[2], "--reject") == 0)
         return accepted ? 21 : 0;
-    if (!accepted || !platform_watcher_lease_wait_stop(&lease, 5000))
+    struct platform_watcher_accepted_binding binding;
+    if (!accepted || !platform_watcher_lease_binding(&lease, &binding) ||
+        strcmp(binding.canonical_root, argv[4]) != 0 ||
+        strcmp(binding.canonical_image, argv[5]) != 0 ||
+        strcmp(binding.image_sha256, hash_a) != 0 ||
+        strcmp(binding.nonce, lease.nonce) != 0 ||
+        binding.creator_pid == 0 || binding.creator_start_token == 0 ||
+        binding.root_low == 0 || binding.image_low == 0 ||
+        binding.image_size == 0 ||
+        !platform_watcher_lease_wait_stop(&lease, 5000))
         return 22;
     platform_watcher_lease_close(&lease);
     return 0;
