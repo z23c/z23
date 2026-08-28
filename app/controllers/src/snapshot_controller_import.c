@@ -13,6 +13,7 @@
  * creation and the shared SQLite transaction helpers used here. */
 
 #pragma GCC diagnostic ignored "-Wformat-truncation"
+#include "platform/directory_compat.h"
 #include "platform/time_compat.h"
 #include "controllers/snapshot_controller.h"
 #include "snapshot_controller_internal.h"
@@ -40,8 +41,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <sys/stat.h>
-#include <unistd.h>
 #include <pthread.h>
 #include "util/blocker.h"
 #include "util/log_macros.h"
@@ -708,7 +707,9 @@ int snapshot_import(const char *snapshot_dir,
 
     /* Block files: remove stale then byte-copy through checked helper. */
     snprintf(dst, sizeof(dst), "%s/blocks", c23_datadir);
-    mkdir(dst, 0700);
+    if (!platform_directory_ensure(dst, 0700))
+        LOG_ERR("snapshot", "snapshot_import: refusing unsafe blocks destination %s",
+                dst);
     snprintf(src, sizeof(src), "%s/blocks", snapshot_dir);
     block_files_clean(dst);
     int copied = block_files_copy(src, dst);
@@ -724,7 +725,9 @@ int snapshot_import(const char *snapshot_dir,
     /* Block index: clean copy */
     snprintf(dst, sizeof(dst), "%s/blocks/index", c23_datadir);
     dir_remove_tree(dst);
-    mkdir(dst, 0700);
+    if (!platform_directory_ensure(dst, 0700))
+        LOG_ERR("snapshot", "snapshot_import: refusing unsafe block index destination %s",
+                dst);
     snprintf(src, sizeof(src), "%s/blocks/index", snapshot_dir);
     if (!dir_copy(src, dst)) {
         LOG_ERR("snapshot", "snapshot_import: failed to sync block index from %s to %s",
@@ -734,7 +737,9 @@ int snapshot_import(const char *snapshot_dir,
     /* Chainstate: clean copy */
     snprintf(dst, sizeof(dst), "%s/chainstate", c23_datadir);
     dir_remove_tree(dst);
-    mkdir(dst, 0700);
+    if (!platform_directory_ensure(dst, 0700))
+        LOG_ERR("snapshot", "snapshot_import: refusing unsafe chainstate destination %s",
+                dst);
     snprintf(src, sizeof(src), "%s/chainstate", snapshot_dir);
     if (!dir_copy(src, dst)) {
         LOG_ERR("snapshot", "snapshot_import: failed to sync chainstate from %s to %s",
