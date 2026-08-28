@@ -14,16 +14,11 @@
 #include "util/crc32c.h"
 #include "util/safe_alloc.h"
 
-#include <errno.h>
-#include <fcntl.h>
 #include <dirent.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 /* ── misc helpers ───────────────────────────────────────────────────── */
 
@@ -47,45 +42,51 @@ char *ldb_errf(const char *fmt, ...)
     return ldb_strdup(buf);
 }
 
-const uint8_t *ldb_map_file(const char *path, size_t *out_size, char **err)
+bool ldb_map_file(const char *path, struct ldb_file_mapping *out, char **err)
 {
-    *out_size = 0;
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) {
+    if (!path || !out) return false;
+    platform_positioned_file_init(&out->file);
+    platform_read_mapping_init(&out->mapping);
+    if (!platform_positioned_file_open(&out->file, path)) {
         if (err)
-            *err = ldb_errf("ldb: open %s: %s", path, strerror(errno));
-        return NULL;
+            *err = ldb_errf("ldb: validated open %s failed", path);
+        return false;
     }
-    struct stat st;
-    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+    struct platform_positioned_file_snapshot before, after;
+    if (!platform_positioned_file_snapshot(&out->file, &before) ||
+        before.size > SIZE_MAX) {
         if (err)
-            *err = ldb_errf("ldb: stat %s: not a regular file", path);
-        close(fd);
-        return NULL;
+            *err = ldb_errf("ldb: snapshot %s failed", path);
+        ldb_unmap_file(out);
+        return false;
     }
-    if (st.st_size == 0) {
+    if (before.size == 0) {
         /* An empty file maps to nothing; callers treat size 0 explicitly
          * rather than dereferencing a zero-length mapping. */
-        close(fd);
-        *out_size = 0;
-        return (const uint8_t *)"";
+        return true;
     }
-    void *base = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-    close(fd);
-    if (base == MAP_FAILED) {
+    if (!platform_read_mapping_open_positioned(&out->mapping, &out->file,
+                                                (size_t)before.size) ||
+        !platform_positioned_file_snapshot(&out->file, &after) ||
+        before.size != after.size || before.volume != after.volume ||
+        before.file_low != after.file_low || before.file_high != after.file_high ||
+        before.modified_seconds != after.modified_seconds ||
+        before.modified_nanoseconds != after.modified_nanoseconds ||
+        before.changed_seconds != after.changed_seconds ||
+        before.changed_nanoseconds != after.changed_nanoseconds) {
         if (err)
-            *err = ldb_errf("ldb: mmap %s (%lld bytes): %s", path,
-                            (long long)st.st_size, strerror(errno));
-        return NULL;
+            *err = ldb_errf("ldb: stable mapping %s failed", path);
+        ldb_unmap_file(out);
+        return false;
     }
-    *out_size = (size_t)st.st_size;
-    return (const uint8_t *)base;
+    return true;
 }
 
-void ldb_unmap_file(const uint8_t *base, size_t size)
+void ldb_unmap_file(struct ldb_file_mapping *file)
 {
-    if (base && size > 0)
-        munmap((void *)(uintptr_t)base, size);
+    if (!file) return;
+    platform_read_mapping_close(&file->mapping);
+    platform_positioned_file_close(&file->file);
 }
 
 /* ── little-endian + varint ─────────────────────────────────────────── */

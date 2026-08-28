@@ -22,6 +22,13 @@
 #include <stdint.h>
 
 #include "base/format_attribute.h"
+#include "platform/positioned_file.h"
+#include "platform/read_mapping.h"
+
+struct ldb_file_mapping {
+    struct platform_positioned_file file;
+    struct platform_read_mapping mapping;
+};
 
 /* ── on-disk constants (LevelDB format, frozen) ────────────────────── */
 
@@ -147,6 +154,7 @@ static inline void ldb_iter_destroy(struct ldb_iter *i)
 /* ── tables ─────────────────────────────────────────────────────────── */
 
 struct ldb_table {
+    struct ldb_file_mapping file;
     const uint8_t *base;    /* mmap of the whole .ldb file */
     size_t file_size;
     struct ldb_block index;
@@ -266,7 +274,7 @@ struct ldbr_iterator *ldbr_db_iter_internal(struct ldbr_db *db);
 char *ldb_strdup(const char *s);
 char *ldb_errf(const char *fmt, ...) ZCL_PRINTF_LIKE(1, 2);
 /* mmap a whole file read-only; returns NULL and sets *err on failure. */
-const uint8_t *ldb_map_file(const char *path, size_t *out_size, char **err);
-void ldb_unmap_file(const uint8_t *base, size_t size);
+bool ldb_map_file(const char *path, struct ldb_file_mapping *out, char **err);
+void ldb_unmap_file(struct ldb_file_mapping *file);
 
 #endif /* ZCL_STORAGE_LDB_READER_INTERNAL_H */
