@@ -6,18 +6,16 @@
 #include "core/amount.h"
 #include "crypto/sha3.h"
 #include "storage/snapshot_shielded.h"
+#include "platform/positioned_file.h"
+#include "platform/read_mapping.h"
 #include "util/safe_alloc.h"
 #include "util/log_macros.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 #define USS_HEADER_BYTES 104
 #define USS_MAGIC        "ZCLUTXO\x00"
@@ -28,7 +26,23 @@ struct uss_handle {
     size_t         body_off;   /* offset where body starts (= 104) */
     size_t         body_len;
     struct uss_header hdr;
+    struct platform_positioned_file file;
+    struct platform_read_mapping mapping;
+    struct platform_positioned_file_snapshot snapshot;
 };
+
+static bool uss_snapshot_equal(
+    const struct platform_positioned_file_snapshot *a,
+    const struct platform_positioned_file_snapshot *b)
+{
+    return a->size == b->size &&
+           a->modified_seconds == b->modified_seconds &&
+           a->modified_nanoseconds == b->modified_nanoseconds &&
+           a->changed_seconds == b->changed_seconds &&
+           a->changed_nanoseconds == b->changed_nanoseconds &&
+           a->volume == b->volume && a->file_low == b->file_low &&
+           a->file_high == b->file_high;
+}
 
 #define USS_VERSION_V1 1u
 #define USS_VERSION_V2 2u   /* v1 + trailing Sapling-frontier section */
@@ -157,32 +171,37 @@ struct uss_handle *uss_open(const char *path,
         LOG_NULL("uss", "open: null path");
         return NULL;
     }
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) {
+    struct platform_positioned_file file;
+    struct platform_read_mapping mapping;
+    struct platform_positioned_file_snapshot snapshot;
+    platform_positioned_file_init(&file);
+    platform_read_mapping_init(&mapping);
+    if (!platform_positioned_file_open(&file, path)) {
         set_err(err, err_sz, "open(%s): %s", path, strerror(errno));
         LOG_NULL("uss", "open failed: %s", strerror(errno));
         return NULL;
     }
-    struct stat st;
-    if (fstat(fd, &st) != 0 || st.st_size < USS_HEADER_BYTES) {
-        set_err(err, err_sz, "too small or fstat failed");
-        close(fd);
-        LOG_NULL("uss", "fstat or size");
+    if (!platform_positioned_file_snapshot(&file, &snapshot) ||
+        snapshot.size < USS_HEADER_BYTES || snapshot.size > SIZE_MAX) {
+        set_err(err, err_sz, "too small or metadata failed");
+        platform_positioned_file_close(&file);
+        LOG_NULL("uss", "metadata or size");
         return NULL;
     }
-    void *mp = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-    close(fd);
-    if (mp == MAP_FAILED) {
-        set_err(err, err_sz, "mmap: %s", strerror(errno));
-        LOG_NULL("uss", "mmap failed");
+    if (!platform_read_mapping_open_positioned(
+            &mapping, &file, (size_t)snapshot.size)) {
+        set_err(err, err_sz, "read mapping failed");
+        platform_positioned_file_close(&file);
+        LOG_NULL("uss", "read mapping failed");
         return NULL;
     }
-    posix_madvise(mp, (size_t)st.st_size, POSIX_MADV_SEQUENTIAL);
+    platform_read_mapping_advise_sequential(&mapping);
 
-    const uint8_t *base = (const uint8_t *)mp;
+    const uint8_t *base = mapping.data;
     if (memcmp(base, USS_MAGIC, 8) != 0) {
         set_err(err, err_sz, "bad magic");
-        munmap(mp, (size_t)st.st_size);
+        platform_read_mapping_close(&mapping);
+        platform_positioned_file_close(&file);
         LOG_NULL("uss", "bad magic");
         return NULL;
     }
@@ -190,11 +209,15 @@ struct uss_handle *uss_open(const char *path,
     struct uss_handle *h = zcl_malloc(sizeof(*h), "uss.handle");
     if (!h) {
         set_err(err, err_sz, "oom");
-        munmap(mp, (size_t)st.st_size);
+        platform_read_mapping_close(&mapping);
+        platform_positioned_file_close(&file);
         return NULL;
     }
+    h->file = file;
+    h->mapping = mapping;
+    h->snapshot = snapshot;
     h->base = base;
-    h->size = (size_t)st.st_size;
+    h->size = (size_t)snapshot.size;
     h->body_off = USS_HEADER_BYTES;
     h->body_len = h->size - USS_HEADER_BYTES;
 
@@ -208,32 +231,28 @@ struct uss_handle *uss_open(const char *path,
     if (h->hdr.version != USS_VERSION_V1 && h->hdr.version != USS_VERSION_V2 &&
         h->hdr.version != USS_VERSION_V3) {
         set_err(err, err_sz, "bad version %u", h->hdr.version);
-        munmap(mp, (size_t)st.st_size);
-        free(h);
+        uss_close(h);
         LOG_NULL("uss", "version");
         return NULL;
     }
     if (base[12] != 0 || base[13] != 0 || base[14] != 0 || base[15] != 0 ||
         base[20] != 0 || base[21] != 0 || base[22] != 0 || base[23] != 0) {
         set_err(err, err_sz, "nonzero reserved header bytes");
-        munmap(mp, (size_t)st.st_size);
-        free(h);
+        uss_close(h);
         LOG_NULL("uss", "nonzero reserved header bytes");
         return NULL;
     }
     if (h->hdr.total_supply < 0 || !uss_layout_exact(h, err, err_sz)) {
         if (h->hdr.total_supply < 0)
             set_err(err, err_sz, "negative header supply");
-        munmap(mp, (size_t)st.st_size);
-        free(h);
+        uss_close(h);
         LOG_NULL("uss", "invalid exact layout");
         return NULL;
     }
     if (expected_sha3 &&
         memcmp(h->hdr.sha3_hash, expected_sha3, 32) != 0) {
         set_err(err, err_sz, "expected sha3 mismatch");
-        munmap(mp, (size_t)st.st_size);
-        free(h);
+        uss_close(h);
         LOG_NULL("uss", "expected sha3 mismatch");
         return NULL;
     }
@@ -245,11 +264,18 @@ struct uss_handle *uss_open(const char *path,
         sha3_256_finalize(&ctx, computed);
         if (memcmp(computed, h->hdr.sha3_hash, 32) != 0) {
             set_err(err, err_sz, "body sha3 mismatch");
-            munmap(mp, (size_t)st.st_size);
-            free(h);
+            uss_close(h);
             LOG_NULL("uss", "body sha3 mismatch");
             return NULL;
         }
+    }
+    struct platform_positioned_file_snapshot after;
+    if (!platform_positioned_file_snapshot(&h->file, &after) ||
+        !uss_snapshot_equal(&h->snapshot, &after)) {
+        set_err(err, err_sz, "snapshot changed during validation");
+        uss_close(h);
+        LOG_NULL("uss", "snapshot identity changed");
+        return NULL;
     }
     if (hdr_out) *hdr_out = h->hdr;
     return h;
@@ -258,7 +284,8 @@ struct uss_handle *uss_open(const char *path,
 void uss_close(struct uss_handle *h)
 {
     if (!h) return;
-    if (h->base) munmap((void *)h->base, h->size);
+    platform_read_mapping_close(&h->mapping);
+    platform_positioned_file_close(&h->file);
     free(h);
 }
 

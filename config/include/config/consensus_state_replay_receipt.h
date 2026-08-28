@@ -78,6 +78,9 @@ bool consensus_state_replay_verify_and_write_receipt(
 bool consensus_state_replay_receipt_authority_available(
     const struct consensus_state_bundle_manifest *manifest,
     const uint8_t bundle_file_digest[32], int datadir_fd);
+bool consensus_state_replay_receipt_authority_available_root(
+    const struct consensus_state_bundle_manifest *manifest,
+    const uint8_t bundle_file_digest[32], const char *trusted_root);
 
 /* ── Bundle-binding-only reader (ROM catalog admission) ─────────────────────
  *
@@ -109,6 +112,9 @@ struct consensus_state_replay_receipt_binding {
  * zeroed. `out` may be NULL. */
 bool consensus_state_replay_receipt_bundle_binding_verified(
     int datadir_fd, const uint8_t bundle_file_digest[32],
+    struct consensus_state_replay_receipt_binding *out);
+bool consensus_state_replay_receipt_bundle_binding_verified_root(
+    const char *trusted_root, const uint8_t bundle_file_digest[32],
     struct consensus_state_replay_receipt_binding *out);
 
 #ifdef ZCL_TESTING

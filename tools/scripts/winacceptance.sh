@@ -39,6 +39,19 @@
 #              assertions are Windows refusal semantics. Cross-compiled AND
 #              natively compiled. NOT executed. Also a COMPILE CHECK.
 #
+#   linkblocked
+#              Portable and genuinely meaningful on this host, but it cannot
+#              be built as a FOCUSED binary: its call graph reaches the
+#              node's consensus core and vendored crypto, so a standalone
+#              link pulls 66+ translation units and still wants
+#              secp256k1_context_create. Cross-compiled AND natively
+#              compiled. NOT executed HERE — for a reason that is NOT
+#              "it would falsely fail", so it is counted and reported
+#              apart from `win`/`noexec` rather than quietly folded in
+#              with them. The fix is to run it where the full graph
+#              already exists (a test_parallel group), not to relax a
+#              bucket.
+#
 #   run        Genuinely portable and genuinely meaningful on this host.
 #              Cross-compiled, natively compiled, LINKED, and EXECUTED, and
 #              its real exit status is graded. An exit of 77 from a `run`
@@ -154,13 +167,73 @@ MANIFEST=(
   "tools/winacceptance/read_mapping_acceptance.c|run|lib/platform/src/read_mapping.c"
   "tools/winacceptance/workpool_acceptance.c|run|lib/util/src/workpool.c lib/base/src/safe_alloc.c"
   "tools/tests/test_read_mapping_positioned.c|run|lib/platform/src/read_mapping.c lib/platform/src/positioned_file.c"
+
+  # ── Wave 2: the 29-commit macOS/Windows merge ───────────────────────────
+  # --- win: <windows.h> unconditionally -----------------------------------
+  "tools/winacceptance/codeindex_build_refusal_acceptance.c|win|"
+  "tools/winacceptance/consensus_bundle_marker_acceptance.c|win|"
+  "tools/winacceptance/mint_anchor_export_refusal_acceptance.c|win|"
+  "tools/winacceptance/mint_anchor_preflight_refusal_acceptance.c|win|"
+  "tools/winacceptance/rom_bundle_admission_refusal_acceptance.c|win|"
+  "tools/winacceptance/snapshot_candidate_output_refusal_acceptance.c|win|"
+  "tools/winacceptance/snapshot_export_refusal_acceptance.c|win|"
+  "tools/winacceptance/snapshot_install_activate_refusal_acceptance.c|win|"
+  "tools/winacceptance/stale_lock_capability_acceptance.c|win|"
+  # --- win: no <windows.h>, but <io.h> and the _open/_read/_lseeki64 CRT,
+  # which is just as Windows-only. Classified from reading the program, not
+  # from the absence of a windows.h line.
+  "tools/winacceptance/consensus_export_fd_io_refusal_acceptance.c|win|"
+  "tools/winacceptance/positioned_io_acceptance.c|win|"
+
+  # --- noexec: compiles for both, but executing it here proves nothing ----
+  # Asserts consensus_export_seal_readonly()/descriptor_digest() REFUSE.
+  # config/src/consensus_state_snapshot_export_fd_io.c gates that refusal
+  # behind #if defined(_WIN32); on POSIX those functions do the real work,
+  # so running this natively would be a FALSE failure.
+  "tools/winacceptance/consensus_export_output_seal_refusal_acceptance.c|noexec|"
+  # Asserts the error text contains "PE import validator" — a string
+  # lib/hotswap/src/hotswap_elf_probe.c emits only on the Windows side of its
+  # #if !defined(_WIN32) split. On Linux it probes a real ELF instead.
+  "tools/winacceptance/hotswap_elf_probe_refusal_acceptance.c|noexec|"
+  # boot_export_consensus_bundle() is documented TERMINAL — it never returns
+  # (config/include/config/boot.h:708), so the trailing `return 3` is the
+  # "it wrongly returned" path, not dead code. Correct as written. It is
+  # noexec because on POSIX the call performs the REAL export and exits with
+  # its own status, which says nothing about a Windows refusal.
+  "tools/tests/test_boot_export_windows_refusal.c|noexec|"
+  # Asserts result.reason contains "Windows consensus install refused".
+  "tools/tests/test_consensus_install_windows_refusal.c|noexec|"
+
+  # --- linkblocked: portable and meaningful, but not linkable standalone --
+  "tools/tests/test_replay_receipt_root.c|linkblocked|"
+
+  # --- run: portable, meaningful, and actually executed on this host ------
+  "tools/winacceptance/log_level_acceptance.c|run|lib/base/src/log_level.c"
+  "tools/tests/test_socket_resolve.c|run|"
+  "tools/tests/test_private_link_no_clobber.c|run|lib/platform/src/private_file.c"
+  "tools/tests/test_running_image_positioned.c|run|lib/platform/src/os_proc.c lib/platform/src/positioned_file.c"
+  "tools/tests/test_boot_refusal_identity.c|run|config/src/boot_error.c config/src/boot_refusal_reports.c lib/platform/src/current_identity.c"
+  "tools/tests/test_boot_shutdown_marker_persistence.c|run|config/src/boot_shutdown_marker.c lib/platform/src/clock.c lib/platform/src/file_metadata.c lib/platform/src/positioned_file.c lib/platform/src/private_directory.c lib/platform/src/private_file.c"
+  "tools/tests/test_file_ops_copy.c|run|config/src/file_ops.c lib/platform/src/directory_compat.c lib/platform/src/positioned_file.c lib/platform/src/private_directory.c lib/platform/src/private_file.c lib/base/src/safe_alloc.c"
 )
 
-# test_read_mapping_positioned writes its own fixture to argv[1]; every other
-# `run` program takes no arguments.
+# Arguments for the `run` programs that take them. Every path handed out here
+# lives under this script's own mktemp WORK dir, never a datadir the node
+# might be using: several of these programs CREATE and DELETE what they are
+# pointed at, and one of them (test_file_ops_copy) calls dir_remove_tree() on
+# argv[1]. A stray real path here would be a destructive test, so each gets a
+# fresh private subdirectory made below.
 run_args() {
     case "$1" in
-        *test_read_mapping_positioned.c) printf '%s\n' "$WORK/positioned-fixture.bin" ;;
+        *test_read_mapping_positioned.c)
+            printf '%s\n' "$WORK/positioned-fixture.bin" ;;
+        *test_boot_shutdown_marker_persistence.c)
+            printf '%s\n' "$WORK/run/shutdown-marker" ;;
+        *test_file_ops_copy.c)
+            printf '%s\n' "$WORK/run/file-ops" ;;
+        *test_private_link_no_clobber.c)
+            printf '%s\n%s\n' "$WORK/run/link-source.bin" \
+                              "$WORK/run/link-target.bin" ;;
         *) : ;;
     esac
 }
@@ -190,16 +263,38 @@ fi
 # ── Include search path ─────────────────────────────────────────────────────
 # Superset by construction, same reasoning check_windows_platform_seam.sh
 # records: headers are namespaced per module, so an extra -I can only add a
-# search path, never collide. app/services/src is explicit because
-# package_lifecycle_store_refusal_acceptance.c includes that module's PRIVATE
-# header, package_lifecycle_internal.h, which has no include/ root.
+# search path, never collide.
+#
+# The PRIVATE-header roots are DERIVED, not listed. Several acceptance
+# programs include a module's internal header by bare name --
+# package_lifecycle_internal.h, codeindex_priv.h,
+# consensus_state_snapshot_export_internal.h,
+# consensus_state_snapshot_install_internal.h -- and those live beside the
+# .c files, with no include/ root. Hardcoding their directories would go
+# stale the next time upstream adds a program that reaches into a different
+# module, and the failure would look like a compile error in the program
+# rather than a missing -I here. So instead: read the bare-name includes out
+# of the acceptance programs themselves, find where each header actually
+# lives outside any include/ tree, and add that directory. A new private
+# header is picked up on the commit that introduces it.
+mapfile -t PRIVATE_HDRS < <(
+    LC_ALL=C grep -ho '^#include "[A-Za-z0-9_]*\.h"' \
+        tools/winacceptance/*.c tools/tests/*.c 2>/dev/null \
+    | sed 's/.*"\(.*\)"/\1/' | sort -u )
+PRIVATE_DIRS=()
+for h in ${PRIVATE_HDRS+"${PRIVATE_HDRS[@]}"}; do
+    mapfile -t hits < <(find lib app config core domain -maxdepth 3 -name "$h" \
+        -not -path '*/include/*' 2>/dev/null)
+    for hit in ${hits+"${hits[@]}"}; do PRIVATE_DIRS+=("$(dirname "$hit")"); done
+done
 mapfile -t INC_DIRS < <(
     { find lib app core domain -maxdepth 2 -type d -name include 2>/dev/null
       for d in config/include ports/include application/include \
                adapters/include vendor/include vendor/x11/include \
-               lib/test/include app/services/src; do
+               lib/test/include; do
           [ -d "$d" ] && printf '%s\n' "$d"
       done
+      for d in ${PRIVATE_DIRS+"${PRIVATE_DIRS[@]}"}; do printf '%s\n' "$d"; done
     } | sort -u )
 gate_require_scanned "${#INC_DIRS[@]}" 20 "$GATE" \
     "no include roots found — the lib/ or app/ layout moved"
@@ -219,6 +314,7 @@ NATIVE_FLAGS=(-std=c23 "${COMMON_FLAGS[@]}")
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/zcl-winacceptance.XXXXXX")" || {
     echo "$GATE: FATAL — mktemp failed." >&2; exit 2; }
 trap 'rm -rf "$WORK"' EXIT
+mkdir -p "$WORK/run"
 
 have_cross=1
 command -v "$CROSS_CC" >/dev/null 2>&1 || have_cross=0
@@ -298,7 +394,7 @@ fi
 mapfile -t ON_DISK < <(
     find tools/winacceptance tools/tests -maxdepth 1 -name '*.c' -type f \
         2>/dev/null | sort )
-gate_require_scanned "${#ON_DISK[@]}" 26 "$GATE" \
+gate_require_scanned "${#ON_DISK[@]}" 49 "$GATE" \
     "scanned tools/winacceptance/*.c and tools/tests/*.c — a directory move or a broken glob would empty this"
 
 declared="$WORK/declared.txt"
@@ -327,6 +423,7 @@ fi
 cross_ok=0; cross_fail=0
 native_ok=0; native_fail=0
 ran_ok=0; ran_fail=0
+linkblocked=0
 failures=""
 
 if [ "$have_cross" -eq 0 ]; then
@@ -365,6 +462,10 @@ for row in "${MANIFEST[@]}"; do
             n_col=FAIL; native_fail=$((native_fail + 1))
             failures="${failures}--- native compile $src"$'\n'"$out"$'\n'
         fi
+    fi
+
+    if [ "$bucket" = "linkblocked" ]; then
+        r_col=nolink; linkblocked=$((linkblocked + 1))
     fi
 
     if [ "$bucket" = "run" ] && [ "$n_col" = "ok" ] && \
@@ -413,6 +514,12 @@ echo "  natively compiled          : $native_ok ok, $native_fail failed"
 echo "  EXECUTED on this host      : $ran_ok passed, $ran_fail failed"
 echo "  compile-checked ONLY       : $compile_only of $total —" \
      "these were NOT run and are NOT an execution pass"
+if [ "$linkblocked" -gt 0 ]; then
+    echo "     of which $linkblocked are 'linkblocked': portable and"
+    echo "     meaningful here, but NOT linkable as a focused binary — they"
+    echo "     need the node's full link graph. Counted apart from the"
+    echo "     Windows-only ones so the reason is never guessed."
+fi
 
 if [ -n "${failures//[[:space:]]/}" ]; then
     echo "" >&2

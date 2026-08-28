@@ -51,6 +51,11 @@ void mmb_leaf_store_close(struct mmb_leaf_store *store);
 bool mmb_leaf_store_append(struct mmb_leaf_store *store,
                            const uint8_t hash[32]);
 
+/* Repair one existing leaf in place without changing the descriptor cursor.
+ * The index must already exist; callers remap after a repair batch. */
+bool mmb_leaf_store_write_at(struct mmb_leaf_store *store, uint64_t index,
+                             const uint8_t hash[32]);
+
 /* Refresh mmap after appends have extended the backing file. */
 bool mmb_leaf_store_remap(struct mmb_leaf_store *store);
 

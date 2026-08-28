@@ -29,14 +29,14 @@
 #include "util/log_macros.h"
 #include "base/text_fit.h"
 #include "util/safe_alloc.h"
+#include "platform/positioned_file.h"
 
 #include <ctype.h>
-#include <fcntl.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>   /* strncasecmp */
-#include <unistd.h>
 
 #define CI_MAX_SYMS_PER_FILE  20000
 #define CI_MAX_REFS_PER_FILE  20000
@@ -984,32 +984,43 @@ bool ci_scan_file(const char *root, const char *relpath,
     if (!root || !relpath || !on_sym || !on_ref)
         LOG_FAIL("codeindex", "null arg to scan_file");
 
-    char full[CI_PATH_MAX];
-    int n = snprintf(full, sizeof(full), "%s/%s", root, relpath);
-    if (n <= 0 || (size_t)n >= sizeof(full))
-        LOG_FAIL("codeindex", "scan path too long");
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open_beneath(&file, root, relpath) ||
+        !platform_positioned_file_snapshot(&file, &before) ||
+        before.size > SIZE_MAX)
+        LOG_FAIL("codeindex", "open stable source %s", relpath);
 
-    int fd = open(full, O_RDONLY | O_CLOEXEC);
-    if (fd < 0)
-        LOG_FAIL("codeindex", "open %s", full);
-
-    /* read whole file */
-    size_t cap = 1 << 16, len = 0;
+    /* Read the exact snapshotted file size through the held object. */
+    size_t cap = before.size ? (size_t)before.size : 1u, len = 0;
     char *buf = zcl_malloc(cap, "ci_filebuf");
-    if (!buf) { close(fd); LOG_FAIL("codeindex", "alloc filebuf"); }
-    for (;;) {
-        if (len == cap) {
-            size_t ncap = cap * 2;
-            char *nb = zcl_realloc(buf, ncap, "ci_filebuf");
-            if (!nb) { free(buf); close(fd); LOG_FAIL("codeindex", "grow filebuf"); }
-            buf = nb; cap = ncap;
+    if (!buf) {
+        platform_positioned_file_close(&file);
+        LOG_FAIL("codeindex", "alloc filebuf");
+    }
+    while (len < (size_t)before.size) {
+        int64_t r = platform_positioned_file_read(
+            &file, buf + len, (size_t)before.size - len, len);
+        if (r <= 0) {
+            free(buf);
+            platform_positioned_file_close(&file);
+            LOG_FAIL("codeindex", "read stable source %s", relpath);
         }
-        ssize_t r = read(fd, buf + len, cap - len);
-        if (r < 0) { free(buf); close(fd); LOG_FAIL("codeindex", "read %s", full); }
-        if (r == 0) break;
         len += (size_t)r;
     }
-    close(fd);
+    bool stable = platform_positioned_file_snapshot(&file, &after) &&
+        before.size == after.size && before.volume == after.volume &&
+        before.file_low == after.file_low && before.file_high == after.file_high &&
+        before.modified_seconds == after.modified_seconds &&
+        before.modified_nanoseconds == after.modified_nanoseconds &&
+        before.changed_seconds == after.changed_seconds &&
+        before.changed_nanoseconds == after.changed_nanoseconds;
+    platform_positioned_file_close(&file);
+    if (!stable) {
+        free(buf);
+        LOG_FAIL("codeindex", "source changed while scanning %s", relpath);
+    }
 
     if (out_sha3) {
         static const uint8_t tag = 0x02;  /* content-hash domain tag */

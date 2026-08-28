@@ -457,6 +457,11 @@ static bool dir_equals(const char *a, const char *b)
 {
     if (!a || !a[0] || !b || !b[0])
         return false;
+#if defined(_WIN32)
+    /* Native activation is refused below before this comparison can grant
+     * authority. Do not approximate canonical identity with string folding. */
+    return false;
+#else
     char ra[PATH_MAX], rb[PATH_MAX];
     const char *pa = realpath(a, ra) ? ra : a;
     const char *pb = realpath(b, rb) ? rb : b;
@@ -464,6 +469,7 @@ static bool dir_equals(const char *a, const char *b)
     if (la && pa[la - 1] == '/') la--;
     if (lb && pb[lb - 1] == '/') lb--;
     return la == lb && strncmp(pa, pb, la) == 0;
+#endif
 }
 
 static bool datadir_is_canonical(const char *datadir)
@@ -483,6 +489,14 @@ bool hotswap_activation_authorized(const char *resolved_datadir,
 {
     if (why && why_sz)
         why[0] = '\0';
+#if defined(_WIN32)
+    (void)resolved_datadir;
+    if (why && why_sz)
+        snprintf(why, why_sz,
+                 "activation refused: native Windows module loading awaits "
+                 "PE import validation and immutable directory staging");
+    return false;
+#endif
     if (!hotswap_activate_flag()) {
         if (why) snprintf(why, why_sz,
             "activation refused: -hotswap-activate flag is not set");
@@ -679,7 +693,7 @@ void hotswap_activate_dump_json(struct json_value *out)
     json_push_kv_str(&act, "core_seal_root", ZCL_CORE_SEAL_ROOT);
     json_push_kv_str(&act, "core_seal_tree", ZCL_CORE_SEAL_TREE);
     json_push_kv_int(&act, "core_seal_sections", (int64_t)CORE_SECTION_COUNT);
-#ifdef ZCL_DEV_BUILD
+#if defined(ZCL_DEV_BUILD) && !defined(_WIN32)
     json_push_kv_bool(&act, "available", true);
 #else
     json_push_kv_bool(&act, "available", false);
@@ -1446,7 +1460,7 @@ void hotswap_activation_reset_for_testing(void)
     atomic_store(&g_dlclose_count, 0);
 }
 
-#ifdef ZCL_DEV_BUILD
+#if defined(ZCL_DEV_BUILD) && !defined(_WIN32)
 
 #include <dlfcn.h>
 #include <fcntl.h>
@@ -2199,7 +2213,18 @@ bool hotswap_verify_module_so(const char *so_path, const char *expect_tu,
     return true;
 }
 
-#else /* !ZCL_DEV_BUILD — release: no dynamic activation surface */
+#else /* release or Windows: no dynamic activation surface */
+
+#if defined(_WIN32)
+#define HOTSWAP_UNAVAILABLE_STAGE "windows"
+#define HOTSWAP_UNAVAILABLE_REASON \
+    "hot-swap loading refused on Windows pending PE import validation and " \
+    "immutable directory staging"
+#else
+#define HOTSWAP_UNAVAILABLE_STAGE "release"
+#define HOTSWAP_UNAVAILABLE_REASON \
+    "hot-swap dynamic loading unavailable in release build"
+#endif
 
 bool hotswap_verify_module_so(const char *so_path, const char *expect_tu,
                               struct hotswap_activate_report *report)
@@ -2211,9 +2236,8 @@ bool hotswap_verify_module_so(const char *so_path, const char *expect_tu,
     memset(report, 0, sizeof(*report));
     report->verify_only = true;
     report->rolled_back = true;
-    act_copy(report->stage, sizeof(report->stage), "release");
-    act_copy(report->error, sizeof(report->error),
-             "hot-swap module load verification unavailable in release build");
+    act_copy(report->stage, sizeof(report->stage), HOTSWAP_UNAVAILABLE_STAGE);
+    act_copy(report->error, sizeof(report->error), HOTSWAP_UNAVAILABLE_REASON);
     return false;
 }
 
@@ -2245,9 +2269,8 @@ bool hotswap_activate(const char *so_path, const char *resolved_datadir,
     memset(report, 0, sizeof(*report));
     report->verify_only = true;
     report->rolled_back = true;
-    act_copy(report->stage, sizeof(report->stage), "release");
-    act_copy(report->error, sizeof(report->error),
-             "hot-swap activation unavailable in release build");
+    act_copy(report->stage, sizeof(report->stage), HOTSWAP_UNAVAILABLE_STAGE);
+    act_copy(report->error, sizeof(report->error), HOTSWAP_UNAVAILABLE_REASON);
     return false;
 }
 
@@ -2263,9 +2286,8 @@ bool hotswap_activate_local(const char *so_path, const char *resolved_datadir,
     memset(report, 0, sizeof(*report));
     report->verify_only = true;
     report->rolled_back = true;
-    act_copy(report->stage, sizeof(report->stage), "release");
-    act_copy(report->error, sizeof(report->error),
-             "hot-swap activation unavailable in release build");
+    act_copy(report->stage, sizeof(report->stage), HOTSWAP_UNAVAILABLE_STAGE);
+    act_copy(report->error, sizeof(report->error), HOTSWAP_UNAVAILABLE_REASON);
     return false;
 }
 
@@ -2284,10 +2306,12 @@ bool hotswap_rollback(const char *source_tu,
     memset(report, 0, sizeof(*report));
     report->verify_only = true;
     report->rolled_back = true;
-    act_copy(report->stage, sizeof(report->stage), "release");
-    act_copy(report->error, sizeof(report->error),
-             "hot-swap rollback unavailable in release build");
+    act_copy(report->stage, sizeof(report->stage), HOTSWAP_UNAVAILABLE_STAGE);
+    act_copy(report->error, sizeof(report->error), HOTSWAP_UNAVAILABLE_REASON);
     return false;
 }
 
-#endif /* ZCL_DEV_BUILD */
+#undef HOTSWAP_UNAVAILABLE_STAGE
+#undef HOTSWAP_UNAVAILABLE_REASON
+
+#endif /* ZCL_DEV_BUILD && !_WIN32 */

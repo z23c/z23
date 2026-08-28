@@ -10,6 +10,82 @@
 #include "platform/fd_path.h"
 #include "util/log_macros.h"
 
+#if defined(_WIN32)
+
+#include <string.h>
+
+#define CANDIDATE_SUBSYS "consensus_state_candidate"
+
+void consensus_state_candidate_output_cleanup(
+    struct consensus_state_candidate_output *output)
+{
+    if (!output)
+        return;
+    output->binding.dirfd = -1;
+    output->binding.temp_fd = -1;
+}
+
+bool consensus_state_candidate_output_open(
+    const struct consensus_state_candidate_request *request,
+    struct consensus_state_candidate_output *output,
+    struct consensus_state_candidate_result *result)
+{
+    (void)request;
+    if (output) {
+        memset(output, 0, sizeof(*output));
+        output->binding.dirfd = -1;
+        output->binding.temp_fd = -1;
+    }
+    return consensus_state_candidate_fail(
+        result, CONSENSUS_CANDIDATE_REFUSED,
+        "candidate publication is unavailable on Windows until a retained "
+        "native directory capability and identity-bound no-clobber link are "
+        "qualified");
+}
+
+bool consensus_state_candidate_sqlite_close_strict(
+    struct consensus_state_candidate_output *output, sqlite3 **db)
+{
+    (void)output;
+    return !db || !*db;
+}
+
+bool consensus_state_candidate_output_sqlite_open(
+    struct consensus_state_candidate_output *output, sqlite3 **db)
+{
+    (void)output;
+    if (db)
+        *db = NULL;
+    return false;
+}
+
+bool consensus_state_candidate_output_finalize(
+    struct consensus_state_candidate_output *output,
+    const struct consensus_state_bundle_manifest *manifest,
+    const uint8_t admission_receipt[32],
+    enum consensus_state_candidate_failpoint failpoint,
+    struct consensus_state_candidate_result *result)
+{
+    (void)output;
+    (void)manifest;
+    (void)admission_receipt;
+    (void)failpoint;
+    return consensus_state_candidate_fail(
+        result, CONSENSUS_CANDIDATE_REFUSED,
+        "candidate publication is unavailable on Windows");
+}
+
+#ifdef ZCL_TESTING
+void consensus_state_snapshot_candidate_test_set_before_link_hook(
+    void (*hook)(void *), void *ctx)
+{
+    (void)hook;
+    (void)ctx;
+}
+#endif
+
+#else
+
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -323,3 +399,5 @@ bool consensus_state_candidate_output_finalize(
             "candidate final inode/directory durability ambiguous");
     return true;
 }
+
+#endif

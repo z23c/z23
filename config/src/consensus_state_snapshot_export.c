@@ -9,12 +9,161 @@
 #include "storage/progress_store.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
+
+#if defined(_WIN32)
+
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
+
+bool consensus_export_fail(struct consensus_state_export_result *result,
+                           enum consensus_state_export_status status,
+                           const char *fmt, ...)
+{
+    char reason[384];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(reason, sizeof(reason), fmt, ap);
+    va_end(ap);
+    if (result) {
+        result->status = status;
+        snprintf(result->reason, sizeof(result->reason), "%s", reason);
+    }
+    return false;
+}
+
+void consensus_export_output_init(struct consensus_export_output_binding *output)
+{
+    if (!output)
+        return;
+    memset(output, 0, sizeof(*output));
+    output->dirfd = -1;
+    output->temp_fd = -1;
+}
+
+void consensus_export_output_close(struct consensus_export_output_binding *output)
+{
+    if (!output)
+        return;
+    output->dirfd = -1;
+    output->temp_fd = -1;
+    output->vfs_registered = false;
+}
+
+static bool export_windows_refused(struct consensus_state_export_result *result)
+{
+    return consensus_export_fail(
+        result, CONSENSUS_EXPORT_REFUSED,
+        "consensus-state export is unavailable on Windows until a retained "
+        "native directory capability and identity-bound publication are "
+        "qualified");
+}
+
+bool consensus_export_output_open(
+    const struct consensus_state_snapshot_export_request *request,
+    struct consensus_export_output_binding *output,
+    struct consensus_state_export_result *result)
+{
+    (void)request;
+    consensus_export_output_init(output);
+    return export_windows_refused(result);
+}
+
+bool consensus_export_open_temp(struct consensus_export_output_binding *output,
+                                sqlite3 **destination,
+                                struct consensus_state_export_result *result)
+{
+    (void)output;
+    if (destination)
+        *destination = NULL;
+    return export_windows_refused(result);
+}
+
+bool consensus_export_finalize_temp(
+    struct consensus_export_output_binding *output,
+    const struct consensus_state_bundle_manifest *manifest,
+    struct consensus_state_export_result *result)
+{
+    (void)output;
+    (void)manifest;
+    return export_windows_refused(result);
+}
+
+bool consensus_export_prove_write(
+    sqlite3 *source,
+    const struct consensus_state_snapshot_export_request *request,
+    struct consensus_export_output_binding *output,
+    struct consensus_state_bundle_manifest *manifest,
+    struct consensus_state_export_result *result)
+{
+    (void)source;
+    (void)request;
+    (void)output;
+    (void)manifest;
+    return export_windows_refused(result);
+}
+
+void consensus_export_run_after_bind_hook(void) { }
+
+#ifdef ZCL_TESTING
+void consensus_state_snapshot_export_test_set_after_output_bind_hook(
+    void (*hook)(void *), void *ctx)
+{
+    (void)hook;
+    (void)ctx;
+}
+void consensus_state_snapshot_export_test_set_after_staging_create_hook(
+    void (*hook)(void *, int), void *ctx)
+{
+    (void)hook;
+    (void)ctx;
+}
+#endif
+
+bool consensus_export_digest_nonzero(const uint8_t digest[32])
+{
+    uint8_t any = 0;
+    for (size_t i = 0; i < 32; i++)
+        any |= digest[i];
+    return any != 0;
+}
+
+void consensus_export_fill_success(
+    const struct consensus_state_bundle_manifest *manifest,
+    struct consensus_state_export_result *result)
+{
+    if (!manifest || !result)
+        return;
+    result->status = CONSENSUS_EXPORT_EXPORTED;
+    result->history_complete = true;
+    result->source_clean = manifest->source_clean;
+    result->validation_profile = manifest->validation_profile;
+    result->height = manifest->height;
+    result->utxo_count = manifest->utxo_count;
+    result->anchor_count = manifest->anchor_count;
+    result->nullifier_count = manifest->nullifier_count;
+    memcpy(result->artifact_digest, manifest->artifact_digest, 32);
+}
+
+bool consensus_state_snapshot_export(
+    sqlite3 *progress_db,
+    const struct consensus_state_snapshot_export_request *request,
+    struct consensus_state_export_result *result)
+{
+    (void)progress_db;
+    (void)request;
+    if (result)
+        memset(result, 0, sizeof(*result));
+    return export_windows_refused(result);
+}
+
+#else
+
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <sqlite3.h>
 #include <stdarg.h>
-#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -129,178 +278,6 @@ static bool output_link_fd(int source_fd, int destination_dirfd,
         return false;
     return linkat(AT_FDCWD, source, destination_dirfd, destination_name,
                   AT_SYMLINK_FOLLOW) == 0;
-}
-
-static sqlite3_vfs *output_vfs_base(sqlite3_vfs *vfs)
-{
-    struct consensus_export_output_binding *output = vfs->pAppData;
-    return output ? output->base_vfs : NULL;
-}
-
-static int output_vfs_open(sqlite3_vfs *vfs, const char *name,
-                           sqlite3_file *file, int flags, int *out_flags)
-{
-    (void)name;
-    struct consensus_export_output_binding *output = vfs->pAppData;
-    return consensus_export_fd_file_open(
-        file, output ? output->temp_fd : -1, flags, out_flags);
-}
-
-static int output_vfs_delete(sqlite3_vfs *vfs, const char *name,
-                             int sync_dir)
-{
-    (void)vfs;
-    (void)name;
-    (void)sync_dir;
-    return SQLITE_IOERR_DELETE;
-}
-
-static int output_vfs_access(sqlite3_vfs *vfs, const char *name, int flags,
-                             int *result)
-{
-    (void)vfs;
-    (void)flags;
-    *result = name && strcmp(name, "zcl-export-main") == 0;
-    return SQLITE_OK;
-}
-
-static int output_vfs_full_pathname(sqlite3_vfs *vfs, const char *name,
-                                    int size, char *out)
-{
-    (void)vfs;
-    if (!name || !out || size <= 0 || strlen(name) >= (size_t)size)
-        return SQLITE_CANTOPEN;
-    memcpy(out, name, strlen(name) + 1);
-    return SQLITE_OK;
-}
-
-static void *output_vfs_dl_open(sqlite3_vfs *vfs, const char *name)
-{
-    sqlite3_vfs *base = output_vfs_base(vfs);
-    return base && base->xDlOpen ? base->xDlOpen(base, name) : NULL;
-}
-
-static void output_vfs_dl_error(sqlite3_vfs *vfs, int size, char *message)
-{
-    sqlite3_vfs *base = output_vfs_base(vfs);
-    if (base && base->xDlError)
-        base->xDlError(base, size, message);
-    else if (size > 0)
-        message[0] = '\0';
-}
-
-static void (*output_vfs_dl_sym(sqlite3_vfs *vfs, void *handle,
-                                const char *symbol))(void)
-{
-    sqlite3_vfs *base = output_vfs_base(vfs);
-    return base && base->xDlSym ? base->xDlSym(base, handle, symbol) : NULL;
-}
-
-static void output_vfs_dl_close(sqlite3_vfs *vfs, void *handle)
-{
-    sqlite3_vfs *base = output_vfs_base(vfs);
-    if (base && base->xDlClose)
-        base->xDlClose(base, handle);
-}
-
-static int output_vfs_randomness(sqlite3_vfs *vfs, int size, char *out)
-{
-    sqlite3_vfs *base = output_vfs_base(vfs);
-    return base->xRandomness(base, size, out);
-}
-
-static int output_vfs_sleep(sqlite3_vfs *vfs, int microseconds)
-{
-    sqlite3_vfs *base = output_vfs_base(vfs);
-    return base->xSleep(base, microseconds);
-}
-
-static int output_vfs_current_time(sqlite3_vfs *vfs, double *time_out)
-{
-    sqlite3_vfs *base = output_vfs_base(vfs);
-    return base->xCurrentTime(base, time_out);
-}
-
-static int output_vfs_last_error(sqlite3_vfs *vfs, int size, char *message)
-{
-    sqlite3_vfs *base = output_vfs_base(vfs);
-    return base && base->xGetLastError
-        ? base->xGetLastError(base, size, message) : 0;
-}
-
-static int output_vfs_current_time_i64(sqlite3_vfs *vfs,
-                                       sqlite3_int64 *time_out)
-{
-    sqlite3_vfs *base = output_vfs_base(vfs);
-    return base && base->iVersion >= 2 && base->xCurrentTimeInt64
-        ? base->xCurrentTimeInt64(base, time_out) : SQLITE_ERROR;
-}
-
-static int output_vfs_set_system_call(sqlite3_vfs *vfs, const char *name,
-                                      sqlite3_syscall_ptr call)
-{
-    sqlite3_vfs *base = output_vfs_base(vfs);
-    return base && base->iVersion >= 3 && base->xSetSystemCall
-        ? base->xSetSystemCall(base, name, call) : SQLITE_NOTFOUND;
-}
-
-static sqlite3_syscall_ptr output_vfs_get_system_call(sqlite3_vfs *vfs,
-                                                       const char *name)
-{
-    sqlite3_vfs *base = output_vfs_base(vfs);
-    return base && base->iVersion >= 3 && base->xGetSystemCall
-        ? base->xGetSystemCall(base, name) : NULL;
-}
-
-static const char *output_vfs_next_system_call(sqlite3_vfs *vfs,
-                                                const char *name)
-{
-    sqlite3_vfs *base = output_vfs_base(vfs);
-    return base && base->iVersion >= 3 && base->xNextSystemCall
-        ? base->xNextSystemCall(base, name) : NULL;
-}
-
-[[maybe_unused]] static bool output_vfs_register(
-    struct consensus_export_output_binding *output)
-{
-    static atomic_uint_fast64_t sequence = 0;
-    output->base_vfs = sqlite3_vfs_find(NULL);
-    if (!output->base_vfs)
-        return false;
-    uint64_t nonce = atomic_fetch_add(&sequence, 1) + 1;
-    int n = snprintf(output->vfs_name, sizeof(output->vfs_name),
-                     "zcl_export_fd_%ld_%llu", (long)getpid(),
-                     (unsigned long long)nonce);
-    if (n <= 0 || (size_t)n >= sizeof(output->vfs_name))
-        return false;
-    output->vfs = (sqlite3_vfs) {
-        .iVersion = output->base_vfs->iVersion > 3
-            ? 3 : output->base_vfs->iVersion,
-        .szOsFile = consensus_export_fd_file_size(),
-        .mxPathname = output->base_vfs->mxPathname,
-        .zName = output->vfs_name,
-        .pAppData = output,
-        .xOpen = output_vfs_open,
-        .xDelete = output_vfs_delete,
-        .xAccess = output_vfs_access,
-        .xFullPathname = output_vfs_full_pathname,
-        .xDlOpen = output_vfs_dl_open,
-        .xDlError = output_vfs_dl_error,
-        .xDlSym = output_vfs_dl_sym,
-        .xDlClose = output_vfs_dl_close,
-        .xRandomness = output_vfs_randomness,
-        .xSleep = output_vfs_sleep,
-        .xCurrentTime = output_vfs_current_time,
-        .xGetLastError = output_vfs_last_error,
-        .xCurrentTimeInt64 = output_vfs_current_time_i64,
-        .xSetSystemCall = output_vfs_set_system_call,
-        .xGetSystemCall = output_vfs_get_system_call,
-        .xNextSystemCall = output_vfs_next_system_call,
-    };
-    if (sqlite3_vfs_register(&output->vfs, 0) != SQLITE_OK)
-        return false;
-    output->vfs_registered = true;
-    return true;
 }
 
 void consensus_export_output_close(struct consensus_export_output_binding *output)
@@ -798,3 +775,5 @@ bool consensus_state_snapshot_export(
         free(output);
     return true;
 }
+
+#endif

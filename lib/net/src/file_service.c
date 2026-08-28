@@ -1,4 +1,6 @@
+#if !defined(_WIN32)
 #define _GNU_SOURCE  /* pthread_timedjoin_np */
+#endif
 
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
@@ -19,6 +21,173 @@
 #include "net/rom_seed.h"
 #include "util/log_json.h"
 #include "crypto/sha3.h"
+#include "json/json.h"
+
+#if defined(_WIN32)
+
+#include <errno.h>
+#include <string.h>
+
+void fs_session_init(struct fs_session *s, platform_socket_t fd)
+{
+    if (!s) return;
+    memset(s, 0, sizeof(*s));
+    s->fd = fd;
+}
+
+void fs_session_cleanup(struct fs_session *s)
+{
+    if (s) memset(s, 0, sizeof(*s));
+}
+
+double fs_session_mbps(const struct fs_session *s) { (void)s; return 0.0; }
+
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+#endif
+#define FS_WINDOWS_TRANSPORT_REFUSAL(name_, args_) \
+    bool name_ args_ { errno = ENOTSUP; return false; }
+
+FS_WINDOWS_TRANSPORT_REFUSAL(fs_handshake,
+    (struct fs_session *s, const uint8_t root[32], bool initiator))
+FS_WINDOWS_TRANSPORT_REFUSAL(fs_handshake_until,
+    (struct fs_session *s, const uint8_t root[32], bool initiator,
+     int64_t deadline))
+FS_WINDOWS_TRANSPORT_REFUSAL(fs_send_frame,
+    (struct fs_session *s, uint8_t type, const uint8_t *p, uint32_t n))
+FS_WINDOWS_TRANSPORT_REFUSAL(fs_send_frame_until,
+    (struct fs_session *s, uint8_t type, const uint8_t *p, uint32_t n,
+     int64_t deadline))
+FS_WINDOWS_TRANSPORT_REFUSAL(fs_recv_frame,
+    (struct fs_session *s, uint8_t *type, const uint8_t **p, uint32_t *n))
+FS_WINDOWS_TRANSPORT_REFUSAL(fs_recv_frame_until,
+    (struct fs_session *s, uint8_t *type, const uint8_t **p, uint32_t *n,
+     int64_t deadline))
+FS_WINDOWS_TRANSPORT_REFUSAL(fs_send_chunk_fast,
+    (struct fs_session *s, const uint8_t *p, uint32_t n,
+     const uint8_t digest[32]))
+FS_WINDOWS_TRANSPORT_REFUSAL(fs_send_chunk_refusal,
+    (struct fs_session *s, uint8_t reason))
+FS_WINDOWS_TRANSPORT_REFUSAL(fs_recv_chunk_fast,
+    (struct fs_session *s, uint8_t **p, uint32_t *n,
+     const uint8_t digest[32]))
+FS_WINDOWS_TRANSPORT_REFUSAL(fs_send_chunk_private,
+    (struct fs_session *s, const uint8_t *p, uint32_t n,
+     const uint8_t digest[32]))
+FS_WINDOWS_TRANSPORT_REFUSAL(fs_recv_chunk_private,
+    (struct fs_session *s, uint8_t **p, uint32_t *n, uint32_t expected,
+     const uint8_t digest[32]))
+FS_WINDOWS_TRANSPORT_REFUSAL(fs_recv_chunk_private_until,
+    (struct fs_session *s, uint8_t **p, uint32_t *n, uint32_t expected,
+     const uint8_t digest[32], int64_t deadline))
+
+#undef FS_WINDOWS_TRANSPORT_REFUSAL
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+
+void fs_server_start(const char *datadir, uint16_t port)
+{ (void)datadir; (void)port; errno = ENOTSUP; }
+void fs_server_stop(void) {}
+bool fs_server_is_running(void) { return false; }
+uint16_t fs_server_get_port(void) { return 0; }
+bool fs_server_refresh_manifest(void) { errno = ENOTSUP; return false; }
+bool fs_client_sync(const char *peer, uint16_t port, const char *datadir,
+                    const uint8_t root[32])
+{
+    (void)peer; (void)port; (void)datadir; (void)root;
+    errno = ENOTSUP;
+    return false;
+}
+
+bool file_service_dump_state_json(struct json_value *out, const char *key)
+{
+    (void)key;
+    if (!out) return false;
+    json_set_object(out);
+    json_push_kv_bool(out, "running", false);
+    json_push_kv_bool(out, "available", false);
+    json_push_kv_str(out, "reason",
+                     "native Windows file service disabled pending trusted "
+                     "snapshot transaction and socket port");
+    return true;
+}
+
+struct puzzle_gate *fs_pow_gate(void) { return NULL; }
+void fs_pow_reset_state(void) {}
+bool fs_ip_serve_acquire(const uint8_t ip[16]) { (void)ip; return false; }
+void fs_ip_serve_release(const uint8_t ip[16]) { (void)ip; }
+bool fs_ip_bytes_charge(const uint8_t ip[16], uint64_t n)
+{ (void)ip; (void)n; return false; }
+bool fs_conn_budget_ok(uint64_t bytes, int64_t start, int64_t now)
+{
+    return now >= start && bytes <= FS_CONN_MAX_BYTES &&
+           now - start <= FS_CONN_MAX_SECONDS * INT64_C(1000);
+}
+bool fs_parse_serve_request(const uint8_t *p, uint32_t n, bool *all,
+                            bool *range, const uint8_t **puzzle,
+                            uint16_t *start, uint16_t *end)
+{
+    if (all) *all = false;
+    if (range) *range = false;
+    if (puzzle) *puzzle = NULL;
+    if (start) *start = 0;
+    if (end) *end = 0;
+    if (!p) return false;
+    uint32_t off = 0;
+    if (n >= FS_POW_SOLUTION_SIZE + 3 &&
+        (memcmp(p + FS_POW_SOLUTION_SIZE, "ALL", 3) == 0 ||
+         memcmp(p + FS_POW_SOLUTION_SIZE, "RNG", 3) == 0)) {
+        if (puzzle) *puzzle = p;
+        off = FS_POW_SOLUTION_SIZE;
+    }
+    if (n == off + 3 && memcmp(p + off, "ALL", 3) == 0) {
+        if (all) *all = true;
+        return true;
+    }
+    if (n == off + 7 && memcmp(p + off, "RNG", 3) == 0) {
+        if (range) *range = true;
+        if (start) *start = (uint16_t)p[off + 3] | (uint16_t)p[off + 4] << 8;
+        if (end) *end = (uint16_t)p[off + 5] | (uint16_t)p[off + 6] << 8;
+        return true;
+    }
+    return false;
+}
+bool fs_parse_rom_request(const uint8_t *p, uint32_t n, uint8_t root[32],
+                          uint32_t *idx)
+{
+    if (!p || n != FS_ROM_REQUEST_SIZE || memcmp(p, "ROM", 3) != 0 ||
+        !root || !idx) return false;
+    memcpy(root, p + 3, 32);
+    *idx = (uint32_t)p[35] | (uint32_t)p[36] << 8 |
+           (uint32_t)p[37] << 16 | (uint32_t)p[38] << 24;
+    return true;
+}
+bool fs_parse_rom_manifest_request(const uint8_t *p, uint32_t n,
+                                   uint8_t root[32])
+{
+    if (!p || !root || n != FS_ROM_MANIFEST_REQUEST_SIZE ||
+        memcmp(p, "RMF", 3) != 0) return false;
+    memcpy(root, p + 3, 32);
+    return true;
+}
+bool fs_parse_rom_list_request(const uint8_t *p, uint32_t n)
+{ return p && n == FS_ROM_LIST_REQUEST_SIZE && memcmp(p, "RLS", 3) == 0; }
+enum fs_admit_result fs_admit_serve_pow(const uint8_t *p,
+    const uint8_t token[32], uint8_t seed[32], int *bits, int64_t *server_time)
+{
+    (void)p; (void)token; (void)seed; (void)bits; (void)server_time;
+    return FS_ADMIT_REFUSED_CAP;
+}
+
+#ifdef ZCL_TESTING
+bool fs_test_range_worker_socket_lifecycle(void) { return false; }
+bool fs_test_resolved_connect_lifecycle(void) { return false; }
+#endif
+
+#else
+
 #include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
@@ -41,7 +210,6 @@
 #include "util/log_macros.h"
 #include "util/thread_registry.h"
 #include "util/thread_liveness.h"
-#include "json/json.h"
 #include "support/cleanse.h"
 #define FS_FRAME_RECV_BUDGET_MS 30000
 #define FS_PUBLIC_IO_BASE_BUDGET_MS 30000LL
@@ -84,7 +252,7 @@ static void fs_join_thread_bounded(pthread_t thread,
 
 /* ── Session management ────────────────────────────────────────── */
 
-void fs_session_init(struct fs_session *s, int fd)
+void fs_session_init(struct fs_session *s, platform_socket_t fd)
 {
     memset(s, 0, sizeof(*s));
     s->fd = fd;
@@ -2906,3 +3074,5 @@ bool fs_client_sync(const char *peer_addr, uint16_t port,
 
     return true;
 }
+
+#endif /* _WIN32 */

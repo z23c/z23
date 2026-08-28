@@ -24,6 +24,8 @@ bool platform_private_file_create(const char *path,
                                   struct platform_private_file *file);
 bool platform_private_file_open_locked(const char *path,
                                        struct platform_private_file *file);
+bool platform_private_file_open_locked_create(
+    const char *path, struct platform_private_file *file);
 void platform_private_file_close(struct platform_private_file *file);
 bool platform_private_file_size(struct platform_private_file *file,
                                 uint64_t *size);

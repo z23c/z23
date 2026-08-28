@@ -1841,3 +1841,15 @@ AGENT_IMPACT_RULE("lib/platform/src/private_directory.c", "boot_bundle_fetch wal
  * boot_flight_recorder_mark() call is removed. So this rule names real
  * execution, not a file-shape check. */
 AGENT_IMPACT_RULE("config/src/boot_timing_marks.c|config/src/boot_timing_marks_internal.h", "boot_flight_recorder make_lint_gates")
+
+/* The store-buyer collect path's own test. It drives store_buyer_collect ->
+ * sb_write_atomic, which is where the absolute-path refusal bites. */
+AGENT_IMPACT_RULE("lib/test/src/test_store_buyer.c", "store_buyer make_lint_gates")
+
+/* tests/windows/ was renamed to tools/winacceptance/. Changes that still
+ * name the OLD path are deletions from that rename, and the thing that
+ * observes them is the lint tier: check-winacceptance builds every program
+ * at the new location and fails closed on one that is not declared. That is
+ * a real observer, not a shape check -- it is what caught 23 undeclared
+ * programs on the merge that created these deletions. */
+AGENT_IMPACT_RULE("tests/windows/*", "make_lint_gates")

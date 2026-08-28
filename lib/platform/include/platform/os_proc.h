@@ -173,6 +173,16 @@ long os_proc_self_tid(void);
  * while the rest of the process is stuck on storage. */
 bool os_proc_thread_work_read(long tid, struct os_proc_thread_work *out);
 
+enum os_proc_liveness {
+    OS_PROC_LIVENESS_UNKNOWN = 0,
+    OS_PROC_LIVENESS_RUNNING,
+    OS_PROC_LIVENESS_DEAD
+};
+
+/* Fail-closed process liveness. Access denial or an indeterminate platform
+ * error is UNKNOWN, never proof that a process is dead. */
+enum os_proc_liveness os_proc_pid_liveness(uint64_t pid);
+
 #ifdef __cplusplus
 }
 #endif

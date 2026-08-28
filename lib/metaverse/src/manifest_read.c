@@ -16,44 +16,46 @@
 #include "base/log_macros.h"
 #include "base/safe_alloc.h"
 #include "metaverse/property_adapter.h"
+#include "platform/positioned_file.h"
+#include "platform/file_metadata.h"
 #include "vcs/blob_store.h"
 #include "vcs/package_release.h"
 #include "vcs/package_store.h"
 
 #include <dirent.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 #define MV_LOG "metaverse.read"
 #define MV_PATH_MAX 4400
 
 struct mv_chunk_fingerprint {
-    dev_t device;
-    ino_t inode;
-    off_t size;
-    struct timespec mtime;
-    struct timespec ctime;
+    struct platform_positioned_file_snapshot snapshot;
     uint8_t hash[32];
 };
 
-static bool mv_timespec_equal(struct timespec left, struct timespec right)
+static bool mv_snapshot_equal(
+    const struct platform_positioned_file_snapshot *left,
+    const struct platform_positioned_file_snapshot *right)
 {
-    return left.tv_sec == right.tv_sec && left.tv_nsec == right.tv_nsec;
+    return left->size == right->size && left->volume == right->volume &&
+        left->file_low == right->file_low && left->file_high == right->file_high &&
+        left->modified_seconds == right->modified_seconds &&
+        left->modified_nanoseconds == right->modified_nanoseconds &&
+        left->changed_seconds == right->changed_seconds &&
+        left->changed_nanoseconds == right->changed_nanoseconds;
 }
 
-static bool mv_read_exact(int descriptor, uint8_t *out, size_t length)
+static bool mv_read_exact(const struct platform_positioned_file *file,
+                          uint8_t *out, size_t length)
 {
     size_t offset = 0;
 
     while (offset < length) {
-        ssize_t got = read(descriptor, out + offset, length - offset);
-        if (got < 0 && errno == EINTR)
-            continue;
+        int64_t got = platform_positioned_file_read(
+            file, out + offset, length - offset, offset);
         if (got <= 0)
             return false;
         offset += (size_t)got;
@@ -81,8 +83,8 @@ static bool mv_cas_path(const char *zcode_dir, const uint8_t hash[32],
     if (!zcode_dir || !hash || !out)
         return false;
     zcl_hex_encode(hash, 32, hex);
-    n = snprintf(out, MV_PATH_MAX, "%s/cas/sha3/%.2s/%s", zcode_dir,
-                 hex, hex);
+    (void)zcode_dir;
+    n = snprintf(out, MV_PATH_MAX, "cas/sha3/%.2s/%s", hex, hex);
     return n >= 0 && (size_t)n < MV_PATH_MAX;
 }
 
@@ -97,51 +99,51 @@ static void mv_verification_gap(struct mv_manifest_read *manifest,
 /* Read at most `cap` bytes of a file; a file larger than cap is a
  * rejection, not a truncated read. */
 static enum mv_manifest_read_status mv_read_file(
-    const char *path, size_t cap, uint8_t **out, size_t *out_len)
+    const char *root, const char *relative, size_t cap,
+    uint8_t **out, size_t *out_len)
 {
-    int descriptor;
     uint8_t *buf;
-    struct stat before, after;
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
     size_t len = 0;
-    int open_errno;
 
     *out = NULL;
     *out_len = 0;
-    descriptor = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (descriptor < 0) {
-        open_errno = errno;
-        if (open_errno == ENOENT)
-            return MV_MANIFEST_READ_ABSENT;
-        return open_errno == ELOOP ? MV_MANIFEST_READ_INVALID
-                                   : MV_MANIFEST_READ_IO_ERROR;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open_beneath(&file, root, relative)) {
+        char full[MV_PATH_MAX];
+        struct platform_file_metadata metadata;
+        int n = snprintf(full, sizeof(full), "%s/%s", root, relative);
+        enum platform_file_metadata_result result =
+            n > 0 && (size_t)n < sizeof(full)
+                ? platform_file_metadata_read(full, &metadata)
+                : PLATFORM_FILE_METADATA_REFUSED;
+        return result == PLATFORM_FILE_METADATA_MISSING
+            ? MV_MANIFEST_READ_ABSENT : MV_MANIFEST_READ_INVALID;
     }
-    if (cap == SIZE_MAX || fstat(descriptor, &before) != 0) {
-        (void)close(descriptor);
+    if (cap == SIZE_MAX || !platform_positioned_file_snapshot(&file, &before)) {
+        platform_positioned_file_close(&file);
         return MV_MANIFEST_READ_IO_ERROR;
     }
-    if (!S_ISREG(before.st_mode) || before.st_size <= 0 ||
-        (uint64_t)before.st_size > (uint64_t)cap) {
-        (void)close(descriptor);
+    if (before.size == 0 || before.size > (uint64_t)cap) {
+        platform_positioned_file_close(&file);
         return MV_MANIFEST_READ_INVALID;
     }
-    len = (size_t)before.st_size;
+    len = (size_t)before.size;
     buf = zcl_malloc(len, "mv_read_file");
     if (!buf) {
-        (void)close(descriptor);
+        platform_positioned_file_close(&file);
         LOG_RETURN(MV_MANIFEST_READ_IO_ERROR, MV_LOG,
-                   "read buffer of %zu bytes for %s", len, path);
+                   "read buffer of %zu bytes for %s", len, relative);
     }
-    if (!mv_read_exact(descriptor, buf, len) ||
-        fstat(descriptor, &after) != 0) {
-        (void)close(descriptor);
+    if (!mv_read_exact(&file, buf, len) ||
+        !platform_positioned_file_snapshot(&file, &after)) {
+        platform_positioned_file_close(&file);
         free(buf);
         return MV_MANIFEST_READ_IO_ERROR;
     }
-    (void)close(descriptor);
-    if (before.st_dev != after.st_dev || before.st_ino != after.st_ino ||
-        before.st_size != after.st_size ||
-        !mv_timespec_equal(before.st_mtim, after.st_mtim) ||
-        !mv_timespec_equal(before.st_ctim, after.st_ctim)) {
+    platform_positioned_file_close(&file);
+    if (!mv_snapshot_equal(&before, &after)) {
         free(buf);
         return MV_MANIFEST_READ_INVALID;
     }
@@ -197,10 +199,10 @@ enum mv_manifest_read_status mv_manifest_read(
     if (!zcode_dir || !root_hex || !zcl_hex_decode_lower(root_hex, name_root, 32))
         return MV_MANIFEST_READ_INVALID;
 
-    n = snprintf(path, sizeof(path), "%s/manifests/%s", zcode_dir, root_hex);
+    n = snprintf(path, sizeof(path), "manifests/%s", root_hex);
     if (n < 0 || (size_t)n >= sizeof(path))
         return MV_MANIFEST_READ_INVALID;
-    read_status = mv_read_file(path, VCS_PACKAGE_MANIFEST_MAX_WIRE_BYTES,
+    read_status = mv_read_file(zcode_dir, path, VCS_PACKAGE_MANIFEST_MAX_WIRE_BYTES,
                                &wire, &wire_len);
     if (read_status != MV_MANIFEST_READ_OK)
         return read_status;
@@ -285,10 +287,9 @@ static void mv_manifest_verify_possession_impl(
             const uint8_t *hash = file->chunk_hashes + (size_t)c * 32u;
             size_t expected = mv_expected_chunk(file, c);
             char path[MV_PATH_MAX];
-            struct stat before, after;
+            struct platform_positioned_file file_handle;
+            struct platform_positioned_file_snapshot before, after;
             uint8_t *bytes = NULL;
-            int descriptor;
-            int open_error;
 
             if (used_operations >= operation_budget) {
                 mv_verification_gap(manifest, "operation_budget_exhausted");
@@ -303,72 +304,53 @@ static void mv_manifest_verify_possession_impl(
                 mv_verification_gap(manifest, "cas_path_invalid");
                 goto done;
             }
-            descriptor = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-            if (descriptor < 0) {
-                open_error = errno;
-                if (open_error == ELOOP)
-                    mv_verification_gap(manifest, "chunk_symlink");
-                else if (open_error == ENOENT)
-                    mv_verification_gap(manifest, "chunk_missing");
-                else
-                    mv_verification_gap(manifest, "chunk_unreadable");
+            platform_positioned_file_init(&file_handle);
+            if (!platform_positioned_file_open_beneath(
+                    &file_handle, zcode_dir, path)) {
+                mv_verification_gap(manifest, "chunk_missing");
                 goto done;
             }
-            if (fstat(descriptor, &before) != 0) {
-                (void)close(descriptor);
+            if (!platform_positioned_file_snapshot(&file_handle, &before)) {
+                platform_positioned_file_close(&file_handle);
                 mv_verification_gap(manifest, "chunk_stat_failed");
                 goto done;
             }
-            if (!S_ISREG(before.st_mode)) {
-                (void)close(descriptor);
-                mv_verification_gap(manifest, "chunk_not_regular");
-                goto done;
-            }
-            if (before.st_size < 0 ||
-                (uint64_t)before.st_size != (uint64_t)expected) {
-                (void)close(descriptor);
+            if (before.size != (uint64_t)expected) {
+                platform_positioned_file_close(&file_handle);
                 mv_verification_gap(manifest, "chunk_length_mismatch");
                 goto done;
             }
             manifest->chunks_present++;
             bytes = zcl_malloc(expected, "mv_verify_chunk");
             if (!bytes) {
-                (void)close(descriptor);
+                platform_positioned_file_close(&file_handle);
                 mv_verification_gap(manifest, "allocation_failed");
                 goto done;
             }
-            if (!mv_read_exact(descriptor, bytes, expected)) {
+            if (!mv_read_exact(&file_handle, bytes, expected)) {
                 free(bytes);
-                (void)close(descriptor);
+                platform_positioned_file_close(&file_handle);
                 used_bytes += expected;
                 mv_verification_gap(manifest, "chunk_read_failed");
                 goto done;
             }
             used_bytes += expected;
-            if (fstat(descriptor, &after) != 0 ||
-                before.st_dev != after.st_dev ||
-                before.st_ino != after.st_ino ||
-                before.st_size != after.st_size ||
-                !mv_timespec_equal(before.st_mtim, after.st_mtim) ||
-                !mv_timespec_equal(before.st_ctim, after.st_ctim)) {
+            if (!platform_positioned_file_snapshot(&file_handle, &after) ||
+                !mv_snapshot_equal(&before, &after)) {
                 free(bytes);
-                (void)close(descriptor);
+                platform_positioned_file_close(&file_handle);
                 mv_verification_gap(manifest,
                                     "chunk_mutated_during_verification");
                 goto done;
             }
-            (void)close(descriptor);
+            platform_positioned_file_close(&file_handle);
             if (!vcs_package_verify_chunk(file, c, bytes, expected)) {
                 free(bytes);
                 mv_verification_gap(manifest, "chunk_hash_mismatch");
                 goto done;
             }
             free(bytes);
-            fingerprints[coordinate].device = after.st_dev;
-            fingerprints[coordinate].inode = after.st_ino;
-            fingerprints[coordinate].size = after.st_size;
-            fingerprints[coordinate].mtime = after.st_mtim;
-            fingerprints[coordinate].ctime = after.st_ctim;
+            fingerprints[coordinate].snapshot = after;
             memcpy(fingerprints[coordinate].hash, hash, 32);
             manifest->chunks_verified++;
             manifest->bytes_verified += expected;
@@ -384,7 +366,8 @@ static void mv_manifest_verify_possession_impl(
      * hashed cannot yield a completed possession claim. */
     for (coordinate = 0; coordinate < manifest->chunk_total; coordinate++) {
         char path[MV_PATH_MAX];
-        struct stat status;
+        struct platform_positioned_file file_handle;
+        struct platform_positioned_file_snapshot status;
         const struct mv_chunk_fingerprint *fingerprint =
             &fingerprints[coordinate];
 
@@ -393,13 +376,14 @@ static void mv_manifest_verify_possession_impl(
             goto done;
         }
         used_operations++;
-        if (!mv_cas_path(zcode_dir, fingerprint->hash, path) ||
-            lstat(path, &status) != 0 || !S_ISREG(status.st_mode) ||
-            status.st_dev != fingerprint->device ||
-            status.st_ino != fingerprint->inode ||
-            status.st_size != fingerprint->size ||
-            !mv_timespec_equal(status.st_mtim, fingerprint->mtime) ||
-            !mv_timespec_equal(status.st_ctim, fingerprint->ctime)) {
+        platform_positioned_file_init(&file_handle);
+        bool unchanged = mv_cas_path(zcode_dir, fingerprint->hash, path) &&
+            platform_positioned_file_open_beneath(
+                &file_handle, zcode_dir, path) &&
+            platform_positioned_file_snapshot(&file_handle, &status) &&
+            mv_snapshot_equal(&status, &fingerprint->snapshot);
+        platform_positioned_file_close(&file_handle);
+        if (!unchanged) {
             mv_verification_gap(manifest,
                                 "chunk_mutated_during_verification");
             goto done;
@@ -581,11 +565,11 @@ bool mv_release_read_verified(const char *zcode_dir,
     memset(out, 0, sizeof(*out));
     if (!zcode_dir || !release_id_hex)
         return false;
-    n = snprintf(path, sizeof(path), "%s/releases/%s", zcode_dir,
+    n = snprintf(path, sizeof(path), "releases/%s",
                  release_id_hex);
     if (n < 0 || (size_t)n >= sizeof(path))
         return false;
-    if (mv_read_file(path, VCS_PACKAGE_RELEASE_MAX_WIRE_BYTES, &wire,
+    if (mv_read_file(zcode_dir, path, VCS_PACKAGE_RELEASE_MAX_WIRE_BYTES, &wire,
                      &wire_len) != MV_MANIFEST_READ_OK)
         return false;
     if (vcs_package_release_parse(wire, wire_len, out) !=

@@ -25,4 +25,16 @@ static inline int platform_data_sync(int fd)
 #endif
 }
 
+/* Flush an existing descriptor including metadata needed for durable file or
+ * directory updates. Directory descriptors are supported where the host
+ * permits opening them; callers may retain best-effort behavior. */
+static inline int platform_file_sync(int fd)
+{
+#if defined(_WIN32)
+    return _commit(fd);
+#else
+    return fsync(fd);
+#endif
+}
+
 #endif

@@ -7,12 +7,12 @@
 #include "config/boot_refusal_reports.h"
 
 #include "config/boot_error.h"
+#include "platform/current_identity.h"
 #include "util/result.h"
 
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
 
 #define WALLET_PHASE "wallet_load"
 #define WALLET_RECOVERY_DOC "docs/WALLET_PERSISTENCE_RECOVERY.md"
@@ -66,13 +66,16 @@ void boot_report_datadir_create_failed(const char *datadir, int mkdir_errno)
         { "id -un", "print the user this process runs as" },
     };
     bool parent_missing = mkdir_errno == ENOENT;
+    char identity[192];
+    if (!platform_current_identity(identity, sizeof(identity)))
+        (void)snprintf(identity, sizeof(identity), "unavailable");
     boot_error_report(BOOT_ERROR_FATAL, "BOOT_DATADIR_CREATE_FAILED",
                       "datadir_select",
                       "the data directory does not exist and could not be "
                       "created",
                       parent_missing ? missing_parent : not_permitted, 2,
-                      "datadir=%s parent=%s uid=%ld mkdir_errno=%s",
-                      dd, parent, (long)getuid(), strerror(mkdir_errno));
+                      "datadir=%s parent=%s identity=%s mkdir_errno=%s",
+                      dd, parent, identity, strerror(mkdir_errno));
 }
 
 void boot_report_wallet_persistence_open_failed(

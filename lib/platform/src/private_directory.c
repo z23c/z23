@@ -142,7 +142,40 @@ bool platform_private_directory_ensure(const char *path)
     return ok;
 }
 
+bool platform_private_directory_open_validated(const char *path,
+                                               uintptr_t *native_handle)
+{
+    wchar_t wide[32768];
+    HANDLE token = NULL;
+    TOKEN_USER *user = NULL;
+    if (!native_handle || !private_directory_wide(path, wide) ||
+        !current_user_sid(&token, &user))
+        return false;
+    HANDLE directory = CreateFileW(
+        wide, READ_CONTROL | FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    bool ok = directory != INVALID_HANDLE_VALUE &&
+              private_directory_validate(directory, user->User.Sid);
+    free(user);
+    CloseHandle(token);
+    if (!ok) {
+        if (directory != INVALID_HANDLE_VALUE) CloseHandle(directory);
+        return false;
+    }
+    *native_handle = (uintptr_t)directory;
+    return true;
+}
+
+void platform_private_directory_close(uintptr_t native_handle)
+{
+    if ((HANDLE)native_handle != INVALID_HANDLE_VALUE)
+        CloseHandle((HANDLE)native_handle);
+}
+
 #else
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -158,5 +191,25 @@ bool platform_private_directory_ensure(const char *path)
         return false;
     }
     return true;
+}
+
+bool platform_private_directory_open_validated(const char *path,
+                                               uintptr_t *native_handle)
+{
+    if (!path || !path[0] || !native_handle) return false;
+    int fd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat st;
+    if (fd < 0 || fstat(fd, &st) != 0 || !S_ISDIR(st.st_mode) ||
+        st.st_uid != geteuid() || (st.st_mode & 0777) != 0700) {
+        if (fd >= 0) close(fd);
+        return false;
+    }
+    *native_handle = (uintptr_t)fd;
+    return true;
+}
+
+void platform_private_directory_close(uintptr_t native_handle)
+{
+    if ((int)native_handle >= 0) close((int)native_handle);
 }
 #endif

@@ -19,6 +19,8 @@
 #include <shellapi.h>
 #include <psapi.h>
 #else
+#include <errno.h>
+#include <signal.h>
 #include <unistd.h>
 #endif
 
@@ -40,6 +42,33 @@
 #endif
 
 #define OS_PROC_CGROUP_ROOT "/sys/fs/cgroup"
+
+enum os_proc_liveness os_proc_pid_liveness(uint64_t pid)
+{
+    if (pid == 0 || pid > UINT32_MAX)
+        return OS_PROC_LIVENESS_UNKNOWN;
+#if defined(_WIN32)
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
+                                 (DWORD)pid);
+    if (!process) {
+        DWORD error = GetLastError();
+        return error == ERROR_INVALID_PARAMETER ? OS_PROC_LIVENESS_DEAD
+                                                : OS_PROC_LIVENESS_UNKNOWN;
+    }
+    DWORD exit_code = 0;
+    bool queried = GetExitCodeProcess(process, &exit_code) != 0;
+    CloseHandle(process);
+    if (!queried)
+        return OS_PROC_LIVENESS_UNKNOWN;
+    return exit_code == STILL_ACTIVE ? OS_PROC_LIVENESS_RUNNING
+                                     : OS_PROC_LIVENESS_DEAD;
+#else
+    if (kill((pid_t)pid, 0) == 0)
+        return OS_PROC_LIVENESS_RUNNING;
+    return errno == ESRCH ? OS_PROC_LIVENESS_DEAD
+                          : OS_PROC_LIVENESS_UNKNOWN;
+#endif
+}
 
 /* ── Test override seam (mirrors platform/clock.h, platform/rng.h) ──── */
 

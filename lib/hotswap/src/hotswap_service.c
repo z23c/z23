@@ -13,7 +13,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#ifdef ZCL_DEV_BUILD
+#if defined(ZCL_DEV_BUILD) && !defined(_WIN32)
 #include <dlfcn.h>
 #include <pthread.h>
 #include <time.h>
@@ -286,6 +286,12 @@ bool zcl_hotswap_service_publish(
     report->verify_only = !activate;
     if (contract) copy_text(report->service_id, sizeof(report->service_id),
                             contract->service_id);
+#ifdef _WIN32
+    if (activate)
+        return reject(report, "windows", false,
+                      "service activation is disabled on Windows pending "
+                      "validated PE imports and immutable staging");
+#endif
     if (!contract || !candidate || !contract->service_id ||
         !contract->source_tu || !candidate->service_id ||
         !candidate->source_tu || !contract->frozen_kat ||
@@ -371,7 +377,7 @@ bool zcl_hotswap_service_publish(
     return true;
 }
 
-#ifdef ZCL_DEV_BUILD
+#if defined(ZCL_DEV_BUILD) && !defined(_WIN32)
 struct service_handle_slot {
     char service_id[96];
     void *handle;
@@ -500,8 +506,14 @@ bool zcl_hotswap_service_activate_so_any(
     if (!report)
         LOG_FAIL("hotswap.service", "activation report is NULL");
     memset(report, 0, sizeof(*report));
+#ifdef _WIN32
+    return reject(report, "windows", false,
+                  "service activation is disabled on Windows pending "
+                  "validated PE imports and immutable staging");
+#else
     return reject(report, "unavailable", false,
                   "service activation is unavailable in release builds");
+#endif
 }
 
 bool zcl_hotswap_service_activate_so(

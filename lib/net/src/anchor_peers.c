@@ -13,15 +13,15 @@
 #include "net/anchor_peers.h"
 #include "storage/sha3_sidecar_io.h"
 
+#include "platform/positioned_file.h"
+#include "platform/private_file.h"
+
 #include "encoding/utilstrencodings.h"
 #include "event/event.h"
 #include "util/log_macros.h"
 
-#include <errno.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 /* ── On-disk layout ─────────────────────────────────────────────
  *
@@ -155,23 +155,22 @@ static bool anchor_write_body(const char *datadir,
     snprintf(path, sizeof(path), "%s/%s", datadir, anchors_spec.body_name);
     snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
 
-    FILE *f = fopen(tmp_path, "wb");
-    if (!f)
-        LOG_FAIL("anchor_peers", "open %s failed: %s", tmp_path, strerror(errno));
-    size_t w = fwrite(buf, 1, len, f);
-    fflush(f);
-    int fd = fileno(f);
-    if (fd >= 0) (void)fsync(fd);
-    fclose(f);
-    if (w != len) {
-        remove(tmp_path);
-        LOG_FAIL("anchor_peers", "short write %zu/%zu to %s", w, len, tmp_path);
+    struct platform_private_file staged;
+    platform_private_file_init(&staged);
+    if (!platform_private_file_unlink_missing_ok(tmp_path) ||
+        !platform_private_file_create(tmp_path, &staged))
+        LOG_FAIL("anchor_peers", "create private staging file %s failed",
+                 tmp_path);
+    if (!platform_private_file_write_at(&staged, buf, len, 0) ||
+        !platform_private_file_truncate(&staged, len) ||
+        !platform_private_file_replace(&staged, tmp_path, path)) {
+        platform_private_file_close(&staged);
+        (void)platform_private_file_unlink_missing_ok(tmp_path);
+        LOG_FAIL("anchor_peers", "durable replace %s -> %s failed",
+                 tmp_path, path);
     }
-    if (rename(tmp_path, path) != 0) {
-        remove(tmp_path);
-        LOG_FAIL("anchor_peers", "rename %s -> %s failed: %s",
-                 tmp_path, path, strerror(errno));
-    }
+    if (!platform_private_parent_flush(datadir))
+        LOG_FAIL("anchor_peers", "flush datadir %s failed", datadir);
     return true;
 }
 
@@ -210,13 +209,16 @@ enum anchor_load_status anchor_peers_load(const char *datadir,
     if (!datadir || !out)
         return ANCHOR_LOAD_EMPTY;
 
-    char body_path[512];
-    snprintf(body_path, sizeof(body_path), "%s/%s", datadir,
-             anchors_spec.body_name);
-
-    struct stat body_st;
-    if (stat(body_path, &body_st) != 0)
+    struct platform_positioned_file body;
+    platform_positioned_file_init(&body);
+    if (!platform_positioned_file_open_beneath(
+            &body, datadir, anchors_spec.body_name))
         return ANCHOR_LOAD_EMPTY; /* no anchors yet — normal first run */
+    uint64_t body_size = 0;
+    if (!platform_positioned_file_size(&body, &body_size)) {
+        platform_positioned_file_close(&body);
+        return ANCHOR_LOAD_EMPTY;
+    }
 
     struct ssio_sidecar_header hdr;
     enum ssio_read_verdict rv = ssio_read_sidecar(datadir, &anchors_spec, &hdr);
@@ -225,17 +227,20 @@ enum anchor_load_status anchor_peers_load(const char *datadir,
          * so we do not trust it for outbound steering. Start empty; the next
          * save rewrites both files. */
         LOG_WARN("anchor_peers", "anchors.dat present but sidecar missing — starting empty");
+        platform_positioned_file_close(&body);
         return ANCHOR_LOAD_EMPTY;
     }
     if (rv != SSIO_READ_OK) {
         LOG_WARN("anchor_peers", "anchors sidecar read verdict=%d — quarantining", (int)rv);
+        platform_positioned_file_close(&body);
         ssio_quarantine(datadir, &anchors_spec, "sidecar_read");
         return ANCHOR_LOAD_QUARANTINED;
     }
 
-    if (hdr.body_size != (uint64_t)body_st.st_size) {
+    if (hdr.body_size != body_size) {
         LOG_WARN("anchor_peers", "anchors size drift sidecar=%llu actual=%lld — quarantining",
-                 (unsigned long long)hdr.body_size, (long long)body_st.st_size);
+                 (unsigned long long)hdr.body_size, (long long)body_size);
+        platform_positioned_file_close(&body);
         ssio_quarantine(datadir, &anchors_spec, "size_drift");
         return ANCHOR_LOAD_QUARANTINED;
     }
@@ -244,37 +249,35 @@ enum anchor_load_status anchor_peers_load(const char *datadir,
     uint64_t hashed_size = 0;
     if (!ssio_hash_body(datadir, &anchors_spec, actual_hash, &hashed_size)) {
         LOG_WARN("anchor_peers", "anchors body unreadable — quarantining");
+        platform_positioned_file_close(&body);
         ssio_quarantine(datadir, &anchors_spec, "body_unreadable");
         return ANCHOR_LOAD_QUARANTINED;
     }
     if (hashed_size != hdr.body_size ||
         memcmp(actual_hash, hdr.body_sha3, 32) != 0) {
         LOG_WARN("anchor_peers", "anchors body sha3 mismatch — quarantining");
+        platform_positioned_file_close(&body);
         ssio_quarantine(datadir, &anchors_spec, "hash_mismatch");
         return ANCHOR_LOAD_QUARANTINED;
     }
 
     /* Body integrity proven — read + deserialize it (bounded, ≤ 570 bytes). */
-    if (body_st.st_size <= 0 || body_st.st_size > (off_t)ANCHOR_BODY_MAX) {
+    if (body_size == 0 || body_size > ANCHOR_BODY_MAX) {
         LOG_WARN("anchor_peers", "anchors body size %lld out of range — quarantining",
-                 (long long)body_st.st_size);
+                 (long long)body_size);
+        platform_positioned_file_close(&body);
         ssio_quarantine(datadir, &anchors_spec, "size_range");
         return ANCHOR_LOAD_QUARANTINED;
     }
     uint8_t buf[ANCHOR_BODY_MAX];
-    FILE *f = fopen(body_path, "rb");
-    if (!f) {
-        LOG_WARN("anchor_peers", "anchors body open failed: %s", strerror(errno));
-        return ANCHOR_LOAD_EMPTY;
-    }
-    size_t rd = fread(buf, 1, (size_t)body_st.st_size, f);
-    fclose(f);
-    if (rd != (size_t)body_st.st_size) {
+    int64_t rd = platform_positioned_file_read(&body, buf, (size_t)body_size, 0);
+    platform_positioned_file_close(&body);
+    if (rd < 0 || (uint64_t)rd != body_size) {
         LOG_WARN("anchor_peers", "anchors body short read %zu/%lld",
-                 rd, (long long)body_st.st_size);
+                 rd < 0 ? 0u : (size_t)rd, (long long)body_size);
         return ANCHOR_LOAD_EMPTY;
     }
-    if (!anchor_deserialize(buf, rd, out)) {
+    if (!anchor_deserialize(buf, (size_t)rd, out)) {
         /* Sidecar matched but the payload is structurally invalid — treat as
          * corrupt so a hostile-but-hash-consistent body cannot steer us. */
         ssio_quarantine(datadir, &anchors_spec, "deserialize_failed");

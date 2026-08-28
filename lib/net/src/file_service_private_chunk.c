@@ -7,15 +7,14 @@
 #include "base/serialize_le.h"
 #include "crypto/chacha20poly1305.h"
 #include "crypto/sha3.h"
+#include "platform/socket_compat.h"
 #include "platform/time_compat.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
 #include <errno.h>
-#include <poll.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
 
 #define FS_PRIVATE_CHUNK_MAX (60u * 1024u * 1024u)
 #define FS_PRIVATE_TAG_SIZE POLY1305_TAG_SIZE
@@ -59,7 +58,7 @@ static bool private_io_deadline(size_t wire_bytes, int64_t caller_deadline_ms,
     return true;
 }
 
-static bool private_send_all(int fd, const uint8_t *buf, size_t len,
+static bool private_send_all(platform_socket_t fd, const uint8_t *buf, size_t len,
                              int64_t deadline_ms)
 {
     size_t sent = 0;
@@ -67,24 +66,23 @@ static bool private_send_all(int fd, const uint8_t *buf, size_t len,
         int64_t now_ms = platform_time_monotonic_ms();
         if (now_ms <= 0 || now_ms >= deadline_ms)
             LOG_FAIL("filesvc_private", "send exceeded absolute deadline");
-        struct pollfd pfd = {.fd = fd, .events = POLLOUT};
-        int ready = poll(&pfd, 1, (int)(deadline_ms - now_ms));
-        if (ready < 0 && errno == EINTR)
+        int ready = platform_socket_wait_writable(
+            fd, (int)(deadline_ms - now_ms));
+        int socket_error = ready < 0 ? platform_socket_last_error() : 0;
+        if (ready < 0 && platform_socket_error_interrupted(socket_error))
             continue;
         if (ready < 0)
-            LOG_FAIL("filesvc_private", "send poll failed: errno=%d", errno);
+            LOG_FAIL("filesvc_private", "send wait failed: error=%d",
+                     socket_error);
         if (ready == 0)
             LOG_FAIL("filesvc_private", "send exceeded absolute deadline");
-        if (!(pfd.revents & POLLOUT))
-            LOG_FAIL("filesvc_private", "send poll revents=0x%x",
-                     pfd.revents);
-        ssize_t n = send(fd, buf + sent, len - sent,
-                         MSG_DONTWAIT | MSG_NOSIGNAL);
-        if (n < 0 && (errno == EINTR || errno == EAGAIN ||
-                      errno == EWOULDBLOCK))
+        int n = platform_socket_send_nonblocking(fd, buf + sent, len - sent);
+        socket_error = n < 0 ? platform_socket_last_error() : 0;
+        if (n < 0 && (platform_socket_error_interrupted(socket_error) ||
+                      platform_socket_error_would_block(socket_error)))
             continue;
         if (n < 0)
-            LOG_FAIL("filesvc_private", "send failed: errno=%d", errno);
+            LOG_FAIL("filesvc_private", "send failed: error=%d", socket_error);
         if (n == 0)
             LOG_FAIL("filesvc_private", "send made no progress");
         sent += (size_t)n;
@@ -92,7 +90,7 @@ static bool private_send_all(int fd, const uint8_t *buf, size_t len,
     return true;
 }
 
-static bool private_recv_all(int fd, uint8_t *buf, size_t len,
+static bool private_recv_all(platform_socket_t fd, uint8_t *buf, size_t len,
                              int64_t deadline_ms)
 {
     size_t got = 0;
@@ -100,24 +98,24 @@ static bool private_recv_all(int fd, uint8_t *buf, size_t len,
         int64_t now_ms = platform_time_monotonic_ms();
         if (now_ms <= 0 || now_ms >= deadline_ms)
             LOG_FAIL("filesvc_private", "receive exceeded absolute deadline");
-        struct pollfd pfd = {.fd = fd, .events = POLLIN};
-        int ready = poll(&pfd, 1, (int)(deadline_ms - now_ms));
-        if (ready < 0 && errno == EINTR)
+        int ready = platform_socket_wait_readable(
+            fd, (int)(deadline_ms - now_ms));
+        int socket_error = ready < 0 ? platform_socket_last_error() : 0;
+        if (ready < 0 && platform_socket_error_interrupted(socket_error))
             continue;
         if (ready < 0)
-            LOG_FAIL("filesvc_private", "receive poll failed: errno=%d",
-                     errno);
+            LOG_FAIL("filesvc_private", "receive wait failed: error=%d",
+                     socket_error);
         if (ready == 0)
             LOG_FAIL("filesvc_private", "receive exceeded absolute deadline");
-        if (!(pfd.revents & (POLLIN | POLLHUP)))
-            LOG_FAIL("filesvc_private", "receive poll revents=0x%x",
-                     pfd.revents);
-        ssize_t n = recv(fd, buf + got, len - got, MSG_DONTWAIT);
-        if (n < 0 && (errno == EINTR || errno == EAGAIN ||
-                      errno == EWOULDBLOCK))
+        int n = platform_socket_receive_nonblocking(fd, buf + got, len - got);
+        socket_error = n < 0 ? platform_socket_last_error() : 0;
+        if (n < 0 && (platform_socket_error_interrupted(socket_error) ||
+                      platform_socket_error_would_block(socket_error)))
             continue;
         if (n < 0)
-            LOG_FAIL("filesvc_private", "receive failed: errno=%d", errno);
+            LOG_FAIL("filesvc_private", "receive failed: error=%d",
+                     socket_error);
         if (n == 0)
             LOG_FAIL("filesvc_private",
                      "peer closed after %zu/%zu private bytes", got, len);

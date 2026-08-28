@@ -7,6 +7,7 @@
 #include "consensus_state_snapshot_export_internal.h"
 #include "platform/fd_path.h"
 #include "platform/file_sync.h"
+#include "platform/positioned_io.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -15,7 +16,11 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#if defined(_WIN32)
+#include <io.h>
+#else
 #include <unistd.h>
+#endif
 
 struct output_sqlite_file {
     sqlite3_file base;
@@ -27,7 +32,12 @@ struct output_sqlite_file {
 static int output_file_close(sqlite3_file *file)
 {
     struct output_sqlite_file *out = (struct output_sqlite_file *)file;
-    int rc = out->fd >= 0 && close(out->fd) != 0
+    int rc = out->fd >= 0 &&
+#if defined(_WIN32)
+        _close(out->fd) != 0
+#else
+        close(out->fd) != 0
+#endif
         ? SQLITE_IOERR_CLOSE : SQLITE_OK;
     out->fd = -1;
     out->base.pMethods = NULL;
@@ -41,7 +51,9 @@ static int output_file_read(sqlite3_file *file, void *buffer, int amount,
     unsigned char *cursor = buffer;
     int remaining = amount;
     while (remaining > 0) {
-        ssize_t n = pread(out->fd, cursor, (size_t)remaining, (off_t)offset);
+        int64_t n = platform_positioned_read(out->fd, cursor,
+                                             (size_t)remaining,
+                                             (uint64_t)offset);
         if (n < 0 && errno == EINTR)
             continue;
         if (n < 0)
@@ -61,6 +73,11 @@ static int output_file_write(sqlite3_file *file, const void *buffer,
                              int amount, sqlite3_int64 offset)
 {
     struct output_sqlite_file *out = (struct output_sqlite_file *)file;
+#if defined(_WIN32)
+    (void)out;
+    (void)buffer; (void)amount; (void)offset;
+    return SQLITE_READONLY;
+#else
     if (out->readonly)
         return SQLITE_READONLY;
     const unsigned char *cursor = buffer;
@@ -76,11 +93,17 @@ static int output_file_write(sqlite3_file *file, const void *buffer,
         offset += n;
     }
     return SQLITE_OK;
+#endif
 }
 
 static int output_file_truncate(sqlite3_file *file, sqlite3_int64 size)
 {
     struct output_sqlite_file *out = (struct output_sqlite_file *)file;
+#if defined(_WIN32)
+    (void)out;
+    (void)size;
+    return SQLITE_READONLY;
+#else
     if (out->readonly)
         return SQLITE_READONLY;
     int rc;
@@ -88,24 +111,35 @@ static int output_file_truncate(sqlite3_file *file, sqlite3_int64 size)
         rc = ftruncate(out->fd, (off_t)size);
     } while (rc != 0 && errno == EINTR);
     return rc == 0 ? SQLITE_OK : SQLITE_IOERR_TRUNCATE;
+#endif
 }
 
 static int output_file_sync(sqlite3_file *file, int flags)
 {
     struct output_sqlite_file *out = (struct output_sqlite_file *)file;
+#if defined(_WIN32)
+    (void)flags;
+    return out->readonly ? SQLITE_OK : SQLITE_READONLY;
+#else
     int rc;
     do {
         rc = (flags & SQLITE_SYNC_DATAONLY) != 0
             ? platform_data_sync(out->fd) : fsync(out->fd);
     } while (rc != 0 && errno == EINTR);
     return rc == 0 ? SQLITE_OK : SQLITE_IOERR_FSYNC;
+#endif
 }
 
 static int output_file_size(sqlite3_file *file, sqlite3_int64 *size)
 {
     struct output_sqlite_file *out = (struct output_sqlite_file *)file;
+#if defined(_WIN32)
+    struct _stat64 st;
+    if (_fstat64(out->fd, &st) != 0)
+#else
     struct stat st;
     if (fstat(out->fd, &st) != 0)
+#endif
         return SQLITE_IOERR_FSTAT;
     *size = (sqlite3_int64)st.st_size;
     return SQLITE_OK;
@@ -197,6 +231,11 @@ int consensus_export_fd_file_open(sqlite3_file *file, int retained_fd,
     if (retained_fd < 0 || (flags & SQLITE_OPEN_MAIN_DB) == 0)
         return SQLITE_CANTOPEN;
     out->readonly = (flags & SQLITE_OPEN_READONLY) != 0;
+#if defined(_WIN32)
+    if (!out->readonly)
+        return SQLITE_READONLY;
+    out->fd = _dup(retained_fd);
+#else
     if (out->readonly) {
         char source[PATH_MAX];
         if (!platform_fd_path(source, sizeof(source), retained_fd, NULL))
@@ -205,6 +244,7 @@ int consensus_export_fd_file_open(sqlite3_file *file, int retained_fd,
     } else {
         out->fd = fcntl(retained_fd, F_DUPFD_CLOEXEC, 3);
     }
+#endif
     if (out->fd < 0)
         return SQLITE_CANTOPEN;
     out->base.pMethods = &g_output_file_methods;

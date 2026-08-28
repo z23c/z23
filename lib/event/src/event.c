@@ -1,6 +1,8 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0 */
 
+#if !defined(_WIN32)
 #define _GNU_SOURCE  /* sigaltstack / SA_ONSTACK in the crash handler */
+#endif
 
 #include "platform/time_compat.h"
 #include "event/event.h"
@@ -13,9 +15,19 @@
 #include <string.h>
 #include <stdarg.h>
 #include <signal.h>
-#include <unistd.h>
-#include <execinfo.h>
 #include <time.h>
+
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <io.h>
+#include <process.h>
+#include <windows.h>
+#else
+#include <execinfo.h>
+#include <unistd.h>
+#endif
 
 /* ── Global event log ─────────────────────────────────────
  * Single instance. Lock-free ring buffer. Every thread writes
@@ -745,7 +757,11 @@ uint64_t event_log_head_sequence(void)
  * flush+fsync before _exit so event_dump_recent's fprintf output lands too. */
 static void crash_write_fd(int fd, const char *s, size_t n)
 {
+#if defined(_WIN32)
+    int w = _write(fd, s, (unsigned int)(n > UINT_MAX ? UINT_MAX : n));
+#else
     ssize_t w = write(fd, s, n);
+#endif
     (void)w;  /* best-effort — nothing we can do if the fd is gone */
 }
 
@@ -760,13 +776,25 @@ static void crash_emit_to(int fd, int sig, void *const *frames, int nframes)
      * itoa) doesn't meaningfully improve safety here. Trade-off acknowledged. */
     int n = snprintf(buf, sizeof(buf),
                      "\n\n*** FATAL SIGNAL %d (pid=%d t=%ld) ***\n",
-                     sig, (int)getpid(),
+                     sig,
+#if defined(_WIN32)
+                     _getpid(),
+#else
+                     (int)getpid(),
+#endif
                      (long)time(NULL));  // platform-ok:async-signal-safe-crash-handler (platform.clock may lock)
     if (n > 0) crash_write_fd(fd, buf, (size_t)n);
     n = snprintf(buf, sizeof(buf),
                  "=== STACK BACKTRACE (%d frames) ===\n", nframes);
     if (n > 0) crash_write_fd(fd, buf, (size_t)n);
+#if defined(_WIN32)
+    for (int i = 0; i < nframes; i++) {
+        n = snprintf(buf, sizeof(buf), "  #%d %p\n", i, frames[i]);
+        if (n > 0) crash_write_fd(fd, buf, (size_t)n);
+    }
+#else
     backtrace_symbols_fd(frames, nframes, fd);  /* -rdynamic for symbol names */
+#endif
     static const char end_bt[] = "=== END BACKTRACE ===\n\n";
     crash_write_fd(fd, end_bt, sizeof(end_bt) - 1);
 }
@@ -776,15 +804,23 @@ static void crash_signal_handler(int sig)
     signal_handler_run_crash_hook(sig, NULL, NULL);
 
     void *frames[64];
+#if defined(_WIN32)
+    int nframes = (int)CaptureStackBackTrace(0, 64, frames, NULL);
+#else
     int nframes = backtrace(frames, 64);
+#endif
 
-    crash_emit_to(STDERR_FILENO, sig, frames, nframes);
+    crash_emit_to(2, sig, frames, nframes);
 
     /* Durable, fsync'd copy independent of stderr routing. */
     int cfd = signal_handler_crash_log_fd();
     if (cfd >= 0) {
         crash_emit_to(cfd, sig, frames, nframes);
+#if defined(_WIN32)
+        _commit(cfd);
+#else
         fsync(cfd);
+#endif
     }
 
     event_emitf(EV_CRASH, 0, "signal %d", sig);
@@ -797,12 +833,26 @@ static void crash_signal_handler(int sig)
      * drained.  fsync drives the kernel page cache down to the
      * journald/journal-file so the log line is durable. */
     fflush(stderr);
+#if defined(_WIN32)
+    _commit(2);
+#else
     fsync(STDERR_FILENO);
+#endif
     _exit(128 + sig);
 }
 
 void event_install_crash_handler(void)
 {
+#if defined(_WIN32)
+    /* Suppress Windows Error Reporting UI: a background node must terminate
+     * through the installed handler without displaying an interactive dialog. */
+    SetErrorMode(GetErrorMode() | SEM_FAILCRITICALERRORS |
+                 SEM_NOGPFAULTERRORBOX);
+    signal(SIGSEGV, crash_signal_handler);
+    signal(SIGABRT, crash_signal_handler);
+    signal(SIGFPE, crash_signal_handler);
+    signal(SIGILL, crash_signal_handler);
+#else
     /* Alternate signal stack: without SA_ONSTACK + a registered alt stack a
      * stack-overflow SIGSEGV cannot run this handler at all (the thread stack
      * is already exhausted). The static buffer lives for the process lifetime. */
@@ -825,6 +875,7 @@ void event_install_crash_handler(void)
     sigaction(SIGBUS, &sa, NULL);
     sigaction(SIGFPE, &sa, NULL);
     sigaction(SIGILL, &sa, NULL);
+#endif
 }
 /* ── Peer state machine ──────────────────────────────────── */
 

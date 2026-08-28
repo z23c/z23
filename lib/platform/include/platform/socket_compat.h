@@ -14,7 +14,12 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 typedef SOCKET platform_socket_t;
+typedef WSAPOLLFD platform_socket_pollfd;
 #define PLATFORM_SOCKET_INVALID INVALID_SOCKET
+#define PLATFORM_SOCKET_POLL_READ POLLRDNORM
+#define PLATFORM_SOCKET_POLL_WRITE POLLWRNORM
+#define PLATFORM_SOCKET_POLL_HANGUP POLLHUP
+#define PLATFORM_SOCKET_POLL_ERROR POLLERR
 
 static INIT_ONCE platform_winsock_once = INIT_ONCE_STATIC_INIT;
 static BOOL CALLBACK platform_winsock_start(PINIT_ONCE once, PVOID parameter,
@@ -36,20 +41,66 @@ static inline bool platform_socket_runtime_init(void)
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <netdb.h>
 #include <netinet/in.h> /* struct sockaddr_in, htons/htonl, INADDR_LOOPBACK —
                          * winsock2.h supplies these to the _WIN32 branch */
+#include <poll.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
 typedef int platform_socket_t;
+typedef struct pollfd platform_socket_pollfd;
 #define PLATFORM_SOCKET_INVALID (-1)
+#define PLATFORM_SOCKET_POLL_READ POLLIN
+#define PLATFORM_SOCKET_POLL_WRITE POLLOUT
+#define PLATFORM_SOCKET_POLL_HANGUP POLLHUP
+#define PLATFORM_SOCKET_POLL_ERROR POLLERR
 
 static inline bool platform_socket_runtime_init(void)
 {
     return true;
 }
 #endif
+
+struct platform_socket_poll_entry {
+    platform_socket_t socket;
+    bool writable;
+    bool error;
+};
+
+static inline int platform_socket_wait_writable_many(
+    struct platform_socket_poll_entry *entries, size_t count, int timeout_ms)
+{
+    if ((!entries && count != 0) || count > INT32_MAX)
+        return -1;
+#if defined(_WIN32)
+    WSAPOLLFD descriptors[64];
+#else
+    struct pollfd descriptors[64];
+#endif
+    if (count > sizeof(descriptors) / sizeof(descriptors[0]))
+        return -1;
+    for (size_t i = 0; i < count; i++) {
+        descriptors[i].fd = entries[i].socket;
+        descriptors[i].events = POLLOUT;
+        descriptors[i].revents = 0;
+        entries[i].writable = false;
+        entries[i].error = false;
+    }
+#if defined(_WIN32)
+    int result = WSAPoll(descriptors, (ULONG)count, timeout_ms);
+#else
+    int result = poll(descriptors, count, timeout_ms);
+#endif
+    if (result <= 0) return result;
+    for (size_t i = 0; i < count; i++) {
+        short revents = descriptors[i].revents;
+        entries[i].writable = (revents & POLLOUT) != 0;
+        entries[i].error = (revents & (POLLERR | POLLHUP | POLLNVAL)) != 0;
+    }
+    return result;
+}
 
 /* Includes space for the terminating NUL.  Keep address text sizing in the
  * platform boundary so application code does not depend on which socket
@@ -107,6 +158,20 @@ static inline int platform_socket_close(platform_socket_t sock)
     return closesocket(sock);
 #else
     return close(sock);
+#endif
+}
+
+static inline bool platform_socket_set_nonblocking(platform_socket_t sock,
+                                                    bool enabled)
+{
+#if defined(_WIN32)
+    u_long value = enabled ? 1UL : 0UL;
+    return ioctlsocket(sock, FIONBIO, &value) == 0;
+#else
+    int flags = fcntl(sock, F_GETFL);
+    if (flags < 0) return false;
+    int updated = enabled ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK);
+    return fcntl(sock, F_SETFL, updated) == 0;
 #endif
 }
 
@@ -321,6 +386,62 @@ static inline int platform_socket_receive(platform_socket_t sock, void *data,
 #endif
 }
 
+/* One nonblocking operation without leaking a socket-mode change to callers.
+ * Windows has no MSG_DONTWAIT, so temporarily toggle FIONBIO and restore the
+ * blocking mode expected by the framing layer. */
+static inline int platform_socket_send_nonblocking(platform_socket_t sock,
+                                                    const void *data,
+                                                    size_t size)
+{
+    int part = size > INT32_MAX ? INT32_MAX : (int)size;
+#if defined(_WIN32)
+    if (!platform_socket_set_nonblocking(sock, true)) return SOCKET_ERROR;
+    int result = send(sock, (const char *)data, part, 0);
+    int error = result == SOCKET_ERROR ? WSAGetLastError() : 0;
+    if (!platform_socket_set_nonblocking(sock, false) &&
+        result != SOCKET_ERROR)
+        return SOCKET_ERROR;
+    if (result == SOCKET_ERROR) WSASetLastError(error);
+    return result;
+#else
+    int flags = MSG_DONTWAIT;
+#ifdef MSG_NOSIGNAL
+    flags |= MSG_NOSIGNAL;
+#endif
+    return (int)send(sock, data, (size_t)part, flags);
+#endif
+}
+
+static inline int platform_socket_receive_nonblocking(platform_socket_t sock,
+                                                       void *data, size_t size)
+{
+    int part = size > INT32_MAX ? INT32_MAX : (int)size;
+#if defined(_WIN32)
+    if (!platform_socket_set_nonblocking(sock, true)) return SOCKET_ERROR;
+    int result = recv(sock, (char *)data, part, 0);
+    int error = result == SOCKET_ERROR ? WSAGetLastError() : 0;
+    if (!platform_socket_set_nonblocking(sock, false) &&
+        result != SOCKET_ERROR)
+        return SOCKET_ERROR;
+    if (result == SOCKET_ERROR) WSASetLastError(error);
+    return result;
+#else
+    return (int)recv(sock, data, (size_t)part, MSG_DONTWAIT);
+#endif
+}
+
+static inline int platform_socket_poll(platform_socket_pollfd *sockets,
+                                       size_t count, int timeout_ms)
+{
+#if defined(_WIN32)
+    if (count > ULONG_MAX || !platform_socket_runtime_init())
+        return SOCKET_ERROR;
+    return WSAPoll(sockets, (ULONG)count, timeout_ms);
+#else
+    return poll(sockets, (nfds_t)count, timeout_ms);
+#endif
+}
+
 /* Parse one numeric network address without exposing the platform-specific
  * inet_pton declaration or its Windows startup requirement to callers. */
 static inline int platform_socket_parse_address(int family, const char *text,
@@ -333,6 +454,77 @@ static inline int platform_socket_parse_address(int family, const char *text,
 #else
     return inet_pton(family, text, address);
 #endif
+}
+
+/* Resolve one UTF-8 host name to the node's canonical 16-byte address form.
+ * IPv4 is returned as an IPv4-mapped IPv6 address. Windows uses the wide
+ * resolver so non-ASCII UTF-8 host names are never interpreted in the active
+ * ANSI code page. */
+static inline bool platform_socket_resolve_ip(const char *host,
+                                               uint8_t address[16])
+{
+    if (!host || !host[0] || !address || !platform_socket_runtime_init())
+        return false;
+    memset(address, 0, 16);
+#if defined(_WIN32)
+    wchar_t wide[256];
+    int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, host, -1,
+                                    wide, (int)(sizeof(wide) / sizeof(*wide)));
+    if (count <= 0)
+        return false;
+    ADDRINFOW hints = {0};
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    PADDRINFOW results = NULL;
+    if (GetAddrInfoW(wide, NULL, &hints, &results) != 0)
+        return false;
+    bool found = false;
+    for (PADDRINFOW it = results; it && !found; it = it->ai_next) {
+        if (it->ai_family == AF_INET &&
+            it->ai_addrlen >= sizeof(struct sockaddr_in)) {
+            const struct sockaddr_in *v4 =
+                (const struct sockaddr_in *)it->ai_addr;
+            address[10] = 0xff;
+            address[11] = 0xff;
+            memcpy(address + 12, &v4->sin_addr, 4);
+            found = true;
+        } else if (it->ai_family == AF_INET6 &&
+                   it->ai_addrlen >= sizeof(struct sockaddr_in6)) {
+            const struct sockaddr_in6 *v6 =
+                (const struct sockaddr_in6 *)it->ai_addr;
+            memcpy(address, &v6->sin6_addr, 16);
+            found = true;
+        }
+    }
+    FreeAddrInfoW(results);
+#else
+    struct addrinfo hints = {0};
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo *results = NULL;
+    if (getaddrinfo(host, NULL, &hints, &results) != 0)
+        return false;
+    bool found = false;
+    for (struct addrinfo *it = results; it && !found; it = it->ai_next) {
+        if (it->ai_family == AF_INET &&
+            it->ai_addrlen >= sizeof(struct sockaddr_in)) {
+            const struct sockaddr_in *v4 =
+                (const struct sockaddr_in *)it->ai_addr;
+            address[10] = 0xff;
+            address[11] = 0xff;
+            memcpy(address + 12, &v4->sin_addr, 4);
+            found = true;
+        } else if (it->ai_family == AF_INET6 &&
+                   it->ai_addrlen >= sizeof(struct sockaddr_in6)) {
+            const struct sockaddr_in6 *v6 =
+                (const struct sockaddr_in6 *)it->ai_addr;
+            memcpy(address, &v6->sin6_addr, 16);
+            found = true;
+        }
+    }
+    freeaddrinfo(results);
+#endif
+    return found;
 }
 
 #endif

@@ -79,9 +79,8 @@ app/views/src/explorer_pages_view.c 819
 config/src/boot.c 4262
 config/src/boot_bundle_fetch.c 805
 config/src/boot_index.c 851
-config/src/boot_mint_anchor.c 808
-config/src/boot_refold_staged.c 2077
-config/src/boot_services.c 1476
+config/src/boot_refold_staged.c 1811
+config/src/boot_services.c 1474
 # 2026-08-03: NEW entry at current LOC (gate's recorded-last-resort). The
 # file sat at exactly the 800 ceiling before the G2 swarm-clock slice; the
 # supervisor timer tick + all-peer drain + domain registration pushed it
@@ -101,7 +100,7 @@ config/src/bundle_exporter.c 867
 # (read cursor / write / exact-match compare) moved to
 # config/src/consensus_state_producer_receipt_final.c, leaving this file at
 # 667 - under the 800 ceiling, so no baseline line is needed.
-config/src/consensus_state_snapshot_install_activate.c 1169 # ADR-0008 (seed-floor declaration); reduced after descriptor binding
+config/src/consensus_state_snapshot_install_activate.c 949 # ADR-0008 (seed-floor declaration); reduced after descriptor binding
 app/services/src/header_sync_service.c 846
 app/controllers/src/event_agent_summary.c 853
 # 2026-08-15: worker-side quarantine now records exact input/output hashes and

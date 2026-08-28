@@ -8,8 +8,11 @@
  * non-blocking connects, and the open-connection loop. connman.c retains
  * lifecycle, persistence, discovery, selection, reactor, and message cycle. */
 
-#define _DEFAULT_SOURCE   /* usleep */
+#if !defined(_WIN32)
+#define _DEFAULT_SOURCE
+#endif
 #include "platform/time_compat.h"
+#include "platform/socket_compat.h"
 #include "connman_internal.h"
 #include "net/connman.h"
 #include "net/connman_onion_dial_policy.h"
@@ -22,11 +25,9 @@
 #include "util/log_macros.h"
 #include "util/thread_work_probe.h"
 #include <errno.h>
-#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 /* ── Persistent dial scheduler: deduplicated candidates, one attempt ──────
  * A serial dial once spent 5 seconds per dead address. Shared gathering now
@@ -546,15 +547,14 @@ static void connman_dial_batch(struct connman *cm,
         if (remaining <= 0)
             break;
 
-        struct pollfd pfds[ZCL_DIAL_BATCH_MAX + 1];
+        struct platform_socket_poll_entry pfds[ZCL_DIAL_BATCH_MAX + 1];
         for (size_t i = 0; i < nin; i++) {
-            pfds[i].fd = inflight[i].sock;
-            pfds[i].events = POLLOUT;
-            pfds[i].revents = 0;
+            pfds[i].socket = inflight[i].sock;
         }
-        int r = poll(pfds, nin, (int)(remaining > 1000000 ? 1000000 : remaining));
+        int r = platform_socket_wait_writable_many(
+            pfds, nin, (int)(remaining > 1000000 ? 1000000 : remaining));
         if (r < 0) {
-            if (errno == EINTR)
+            if (platform_socket_error_interrupted(platform_socket_last_error()))
                 continue;
             break;
         }
@@ -563,12 +563,10 @@ static void connman_dial_batch(struct connman *cm,
 
         /* Resolve every ready fd; swap-remove from the in-flight set. */
         for (size_t i = 0; i < nin; ) {
-            short re = pfds[i].revents;
-            if (re == 0) { i++; continue; }
+            if (!pfds[i].writable && !pfds[i].error) { i++; continue; }
             zcl_socket_t s = inflight[i].sock;
             struct connman_dial_candidate *c = &batch[inflight[i].ci];
-            bool ok = !(re & (POLLERR | POLLHUP | POLLNVAL)) &&
-                      connect_socket_check(s);
+            bool ok = !pfds[i].error && connect_socket_check(s);
             if (ok) {
                 connman_complete_dial(cm, c, s);   /* takes ownership of s */
             } else {
@@ -682,7 +680,7 @@ void *thread_open_connections(void *arg)
 
         if (outbound >= MAX_OUTBOUND_CONNECTIONS ||
             cm->manager.num_nodes >= (size_t)cm->manager.max_connections) {
-            sleep(1);
+            platform_sleep_ms(1000);
             continue;
         }
 
@@ -692,7 +690,7 @@ void *thread_open_connections(void *arg)
         if (connect_only_wait_needed(
                 g_connect_only, outbound, (size_t)cm->num_addnodes,
                 connman_dht_hint_pending(cm))) {
-            sleep(1);
+            platform_sleep_ms(1000);
             continue;
         }
 
@@ -787,11 +785,11 @@ void *thread_open_connections(void *arg)
          * below target: 1s
          * at target: 10s (just monitoring) */
         if (outbound == 0)
-            usleep(200000); /* 200ms */
+            platform_sleep_ms(200);
         else if (outbound < MAX_OUTBOUND_CONNECTIONS)
-            sleep(1);
+            platform_sleep_ms(1000);
         else
-            sleep(10);
+            platform_sleep_ms(10000);
     }
     return NULL;
 }

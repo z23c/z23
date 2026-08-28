@@ -123,6 +123,22 @@ bool platform_private_file_open_locked(const char *path,
   return true;
 }
 
+bool platform_private_file_open_locked_create(
+    const char *path, struct platform_private_file *file) {
+  if (platform_private_file_create(path, file)) {
+    OVERLAPPED ov = {0};
+    if (LockFileEx(pf_handle(file),
+                   LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0,
+                   UINT32_MAX, UINT32_MAX, &ov)) {
+      file->locked = true;
+      return true;
+    }
+    platform_private_file_close(file);
+    return false;
+  }
+  return platform_private_file_open_locked(path, file);
+}
+
 void platform_private_file_close(struct platform_private_file *file) {
   if (!file || pf_handle(file) == INVALID_HANDLE_VALUE)
     return;
@@ -360,10 +376,10 @@ bool platform_private_file_link_no_clobber(
   *same = false;
   if (!pf_wide(s, ws) || !pf_wide(d, wd))
     return false;
-  if (CreateHardLinkW(wd, ws, NULL))
-    return true;
-  DWORD link_error = GetLastError();
-  if (link_error != ERROR_ALREADY_EXISTS && link_error != ERROR_FILE_EXISTS)
+  bool created = CreateHardLinkW(wd, ws, NULL) != 0;
+  DWORD link_error = created ? ERROR_SUCCESS : GetLastError();
+  if (!created && link_error != ERROR_ALREADY_EXISTS &&
+      link_error != ERROR_FILE_EXISTS)
     return false;
   HANDLE h =
       CreateFileW(wd, FILE_READ_ATTRIBUTES,
@@ -378,8 +394,13 @@ bool platform_private_file_link_no_clobber(
   struct platform_private_file_identity did = {
       .volume = info.dwVolumeSerialNumber,
       .file = ((uint64_t)info.nFileIndexHigh << 32) | info.nFileIndexLow};
-  CloseHandle(h);
   *same = ok && did.volume == sid->volume && did.file == sid->file;
+  if (created && !*same) {
+    FILE_DISPOSITION_INFO disposition = {.DeleteFile = TRUE};
+    (void)SetFileInformationByHandle(h, FileDispositionInfo, &disposition,
+                                     sizeof(disposition));
+  }
+  CloseHandle(h);
   return *same;
 }
 
@@ -460,6 +481,18 @@ bool platform_private_file_open_locked(const char *p,
   f->native = (uintptr_t)fd;
   f->locked = true;
   return true;
+}
+bool platform_private_file_open_locked_create(
+    const char *p, struct platform_private_file *f) {
+  if (platform_private_file_create(p, f)) {
+    if (flock(pf_fd(f), LOCK_EX | LOCK_NB) == 0) {
+      f->locked = true;
+      return true;
+    }
+    platform_private_file_close(f);
+    return false;
+  }
+  return platform_private_file_open_locked(p, f);
 }
 void platform_private_file_close(struct platform_private_file *f) {
   if (f && (int)f->native >= 0) {
@@ -602,14 +635,15 @@ bool platform_private_file_link_no_clobber(
     const char *s, const char *d,
     const struct platform_private_file_identity *si, bool *same) {
   *same = false;
-  if (link(s, d) == 0)
-    return true;
-  if (errno != EEXIST)
+  bool created = link(s, d) == 0;
+  if (!created && errno != EEXIST)
     return false;
   struct stat st;
   if (lstat(d, &st))
     return false;
   *same = (uint64_t)st.st_dev == si->volume && (uint64_t)st.st_ino == si->file;
+  if (created && !*same)
+    (void)unlink(d);
   return *same;
 }
 bool platform_private_file_unlink_missing_ok(const char *p) {

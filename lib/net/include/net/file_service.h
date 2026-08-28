@@ -26,6 +26,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 
+#include "platform/socket_compat.h"
 #include "net/fast_sync.h"
 #include "net/puzzle.h"
 
@@ -89,7 +90,7 @@ enum fs_admit_result {
 };
 
 struct fs_session {
-    int              fd;              /* TCP socket */
+    platform_socket_t fd;              /* TCP socket */
     uint8_t          key[32];         /* X25519/HKDF-SHA3 session key */
     bool             key_established; /* true after key confirmation */
     uint8_t          our_nonce[32];   /* our ephemeral public key / token */
@@ -103,7 +104,7 @@ struct fs_session {
 };
 
 /* Initialize a session on an existing TCP socket. */
-void fs_session_init(struct fs_session *s, int fd);
+void fs_session_init(struct fs_session *s, platform_socket_t fd);
 
 /* Erase session key material after the owning connection is finished. */
 void fs_session_cleanup(struct fs_session *s);
