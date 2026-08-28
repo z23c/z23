@@ -4,9 +4,13 @@
 #if defined(_WIN32)
 
 #include "vcs/vcs_devloop.h"
+#include "base/hex.h"
 
 #include <stdio.h>
 #include <string.h>
+
+bool vcs_devloop_hex32_decode(const char *hex, uint8_t out[32])
+{ return zcl_hex_decode(hex, out, 32); }
 
 static bool devloop_windows_refuse_receipt(uint8_t root[32], bool *reused)
 {

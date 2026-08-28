@@ -472,7 +472,8 @@ LIB_SRCS := $(filter-out lib/platform/src/os_sandbox_stub.c \
 	lib/util/src/self_backtrace_stub.c,$(LIB_SRCS))
 else ifeq ($(ZCL_HOST_WINDOWS),1)
 LIB_SRCS := $(filter-out lib/platform/src/os_sandbox_linux.c \
-	lib/util/src/self_backtrace_stub.c,$(LIB_SRCS))
+	lib/util/src/self_backtrace_stub.c \
+	lib/vcs/src/vcs_devloop.c,$(LIB_SRCS))
 else
 LIB_SRCS := $(filter-out lib/platform/src/os_sandbox_linux.c \
 	lib/util/src/self_backtrace.c,$(LIB_SRCS))
