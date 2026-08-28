@@ -8,6 +8,7 @@
 #include "base/hex.h"
 #include "json/json.h"
 #include "platform/time_compat.h"
+#include "platform/directory_compat.h"
 #include "services/metaverse_space_service.h"
 #include "support/cleanse.h"
 #include "vcs/package_store.h"
@@ -21,7 +22,6 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 
 #define MVSPACE_PATH_MAX 4096u
 #define MVSPACE_RECORD_SECONDS INT64_C(3600)
@@ -131,14 +131,14 @@ static const char *mvspace_workspace(const struct json_value *input,
 static bool mvspace_workspace_store_shape_valid(const char *workspace)
 {
   char path[MVSPACE_PATH_MAX];
-  struct stat st;
   int n = workspace
       ? snprintf(path, sizeof(path), "%s/.zvcs", workspace) : -1;
   if (n <= 0 || n >= (int)sizeof(path))
     return false;
-  if (lstat(path, &st) == 0)
-    return S_ISDIR(st.st_mode);
-  return errno == ENOENT;
+  enum platform_directory_probe_result result =
+      platform_directory_probe_real(path);
+  return result == PLATFORM_DIRECTORY_PROBE_OK ||
+         result == PLATFORM_DIRECTORY_PROBE_MISSING;
 }
 
 static bool mvspace_root(const char *hex, uint8_t out[32])
