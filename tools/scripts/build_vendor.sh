@@ -172,7 +172,7 @@ archive_group() {
         libcrypto.a|libssl.a) printf 'openssl' ;;
         libevent.a|libevent_openssl.a|libevent_pthreads.a) printf 'libevent' ;;
         libleveldb.a) printf 'leveldb' ;;
-        libsecp256k1-darwin.a) printf 'secp_native' ;;
+        libsecp256k1-darwin.a|libsecp256k1-windows.a) printf 'secp_native' ;;
         *) return 1 ;;
     esac
 }
@@ -647,14 +647,19 @@ build_leveldb() {      # FETCHED: LevelDB -> libleveldb.a
 }
 
 build_secp_native() {
-    [[ "$(uname -s 2>/dev/null)" == Darwin ]] ||
-        die "libsecp256k1-darwin.a requires Darwin"
-    have libsecp256k1-darwin.a && {
-        say "skip    libsecp256k1-darwin.a (provenance current)"; return;
+    local host archive
+    host="$(uname -s 2>/dev/null)"
+    case "$host" in
+        Darwin) archive=libsecp256k1-darwin.a ;;
+        MINGW*|MSYS*) archive=libsecp256k1-windows.a ;;
+        *) die "native libsecp256k1 archive requires Darwin or Windows" ;;
+    esac
+    have "$archive" && {
+        say "skip    $archive (provenance current)"; return;
     }
     need cmake
-    say "build   libsecp256k1-darwin.a  (secp256k1 ${SECP_VER})"
-    invalidate_stamps libsecp256k1-darwin.a
+    say "build   $archive  (secp256k1 ${SECP_VER})"
+    invalidate_stamps "$archive"
     local tb d
     tb="$(fetch "$SECP_URL" "$SECP_SHA" "secp256k1-${SECP_VER}.tar.gz")"
     d="$WORK/secp256k1-${SECP_VER}"
@@ -671,9 +676,9 @@ build_secp_native() {
         -DSECP256K1_BUILD_EXAMPLES=OFF >/dev/null
     cmake --build "$WORK/secp-native-build" -j"$JOBS" >/dev/null
     install_archive "$WORK/secp-native-build/lib/libsecp256k1.a" \
-        libsecp256k1-darwin.a
-    stamp_archives libsecp256k1-darwin.a
-    ok "built   libsecp256k1-darwin.a"
+        "$archive"
+    stamp_archives "$archive"
+    ok "built   $archive"
 }
 
 # --- orchestration ----------------------------------------------------------
@@ -686,6 +691,9 @@ REQUIRED=(libsecp256k1.a libcrypto.a libssl.a libevent.a libevent_openssl.a
           libtor_stub.a)
 if [[ "$(uname -s 2>/dev/null)" == Darwin ]]; then
     REQUIRED+=(libsecp256k1-darwin.a)
+elif [[ "$(uname -s 2>/dev/null)" == MINGW* ||
+        "$(uname -s 2>/dev/null)" == MSYS* ]]; then
+    REQUIRED+=(libsecp256k1-windows.a)
 fi
 
 check_one_provenance() {
@@ -730,6 +738,9 @@ fi
 ALL=(build_tor_stub build_zlib build_sqlite build_openssl build_libevent build_leveldb)
 if [[ "$(uname -s 2>/dev/null)" == Darwin ]]; then
     ALL+=(build_secp_native)
+elif [[ "$(uname -s 2>/dev/null)" == MINGW* ||
+        "$(uname -s 2>/dev/null)" == MSYS* ]]; then
+    ALL+=(build_secp_native)
 fi
 
 # Map .a names -> builder for the subset form.
@@ -741,6 +752,7 @@ declare -A BUILDER=(
     [libevent.a]=build_libevent [libevent_openssl.a]=build_libevent [libevent_pthreads.a]=build_libevent
     [libleveldb.a]=build_leveldb
     [libsecp256k1-darwin.a]=build_secp_native
+    [libsecp256k1-windows.a]=build_secp_native
 )
 
 if [[ $# -gt 0 ]]; then
