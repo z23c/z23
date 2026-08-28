@@ -1,4 +1,7 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * purpose: read-only memory mapping of a file, portable across POSIX mmap
+ * and Windows file mappings. */
 
 #include "platform/read_mapping.h"
 

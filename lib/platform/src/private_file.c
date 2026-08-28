@@ -1,4 +1,7 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * purpose: exclusive-create, lock, and durable-retire operations on a
+ * single private file, portable across POSIX and Windows. */
 #include "platform/private_file.h"
 
 #include <errno.h>
