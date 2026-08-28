@@ -139,9 +139,9 @@ static bool wbs_write_file_atomic(const char *path,
         LOG_FAIL("wallet_backup", "write_file_atomic: NULL path or buf");
 
     char destination[1024], parent[1024];
-    if (!platform_private_path_resolve(path, destination,
-                                       sizeof(destination), parent,
-                                       sizeof(parent)))
+    if (!platform_private_destination_resolve(path, destination,
+                                              sizeof(destination), parent,
+                                              sizeof(parent)))
         LOG_FAIL("wallet_backup",
                  "write_file_atomic: destination parent is not a safe real directory");
 

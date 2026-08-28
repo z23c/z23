@@ -113,9 +113,9 @@ static bool wbs_canonical_backup_path(const char *backup_dir,
     int n = snprintf(probe, sizeof(probe), "%s/%s", backup_dir,
                      ".z23-wallet-backup-root-probe");
     if (n <= 0 || (size_t)n >= sizeof(probe) ||
-        !platform_private_path_resolve(probe, resolved, sizeof(resolved),
-                                       canonical_root,
-                                       sizeof(canonical_root)))
+        !platform_private_destination_resolve(
+            probe, resolved, sizeof(resolved), canonical_root,
+            sizeof(canonical_root)))
         return false;
     size_t root_len = strlen(canonical_root);
     size_t path_len = strlen(canonical_path);
