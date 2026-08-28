@@ -9,6 +9,7 @@
  */
 
 #include "storage/checkpoint_rung.h"
+#include "base/format_attribute.h"
 
 #include "crypto/sha3.h"
 #include "util/log_macros.h"
@@ -461,7 +462,7 @@ struct frag_cursor {
 };
 
 static void frag_appendf(struct frag_cursor *fc, const char *fmt, ...)
-    __attribute__((format(printf, 2, 3)));
+    ZCL_PRINTF_LIKE(2, 3);
 
 static void frag_appendf(struct frag_cursor *fc, const char *fmt, ...)
 {

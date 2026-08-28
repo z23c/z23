@@ -28,9 +28,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "base/format_attribute.h"
 #include "net/site_routes.h"
 
-[[gnu::format(printf, 4, 5)]]
+ZCL_PRINTF_LIKE(4, 5)
 static inline size_t site_appendf(char *buf, size_t max, size_t off,
                                   const char *format, ...)
 {
