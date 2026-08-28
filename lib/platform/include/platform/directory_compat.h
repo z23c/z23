@@ -20,4 +20,11 @@ static inline int platform_directory_create(const char *path, int mode)
 #endif
 }
 
+#if defined(_WIN32)
+/* This header is force-included before application headers on Windows. The
+ * native CRT declaration above is therefore complete before the project-wide
+ * two-argument spelling is redirected through the platform seam. */
+#define mkdir(path, mode) platform_directory_create((path), (mode))
+#endif
+
 #endif

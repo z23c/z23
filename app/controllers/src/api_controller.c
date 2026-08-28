@@ -6,6 +6,7 @@
  * when called from HTTPS handler threads). */
 
 #include "platform/time_compat.h"
+#include "platform/socket_compat.h"
 #include "rpc/zclassicd_port.h" /* ZCLASSICD_RPC_DEFAULT_PORT */
 #include "controllers/api_controller.h"
 #include "controllers/explorer_internal.h"
@@ -167,8 +168,10 @@ int api_rpc_call(const char *method, const char *params_json,
                 "api_rpc_call(%s): no node credentials configured; "
                 "not dialing", method);
 
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) LOG_ERR("api", "api_rpc_call(%s): socket() failed", method);
+    platform_socket_t fd = platform_socket_open(AF_INET, SOCK_STREAM, 0,
+                                                 true, false);
+    if (fd == PLATFORM_SOCKET_INVALID)
+        LOG_ERR("api", "api_rpc_call(%s): socket() failed", method);
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -176,12 +179,11 @@ int api_rpc_call(const char *method, const char *params_json,
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = htons((uint16_t)g_api_rpc.port);
 
-    struct timeval tv = { .tv_sec = 10, .tv_usec = 0 };
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    platform_socket_set_receive_timeout(fd, 10000);
+    platform_socket_set_send_timeout(fd, 10000);
 
     if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        close(fd);
+        platform_socket_close(fd);
         LOG_ERR("api", "api_rpc_call(%s): connect to port %d failed", method, g_api_rpc.port);
     }
 
@@ -219,16 +221,21 @@ int api_rpc_call(const char *method, const char *params_json,
         "Connection: close\r\n\r\n%s",
         auth_b64, blen, body);
 
-    if (write(fd, req, (size_t)rlen) != rlen) { close(fd); LOG_ERR("api", "api_rpc_call(%s): write failed (len=%d)", method, rlen); }
+    if (!platform_socket_send_all(fd, req, (size_t)rlen)) {
+        platform_socket_close(fd);
+        LOG_ERR("api", "api_rpc_call(%s): write failed (len=%d)", method,
+                rlen);
+    }
 
     size_t total = 0;
     while (total < outmax - 1) {
-        ssize_t r = read(fd, out + total, outmax - 1 - total);
+        ptrdiff_t r = platform_socket_receive(fd, out + total,
+                                              outmax - 1 - total);
         if (r <= 0) break;
         total += (size_t)r;
     }
     out[total] = '\0';
-    close(fd);
+    platform_socket_close(fd);
 
     /* Skip HTTP headers */
     char *body_start = strstr(out, "\r\n\r\n");
