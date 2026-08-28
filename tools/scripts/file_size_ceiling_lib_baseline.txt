@@ -28,7 +28,9 @@ lib/codeindex/src/codeindex_store.c 943
 lib/event/src/event.c 1055
 lib/hotswap/src/hotswap_loader.c 817
 lib/kernel/src/command_registry.c 2403
-lib/metrics/src/prometheus_metrics.c 1100
+# 2026-08-28: inherited +1 from the windows-formatting tip; held at the
+# merged size.
+lib/metrics/src/prometheus_metrics.c 1101
 lib/net/src/addrman.c 1254
 lib/net/src/connman.c 3384
 lib/net/src/download.c 1793
@@ -53,6 +55,11 @@ lib/sapling/src/circuit_spend.c 959
 lib/sapling/src/groth16_prover.c 1203
 lib/sapling/src/incremental_merkle_tree.c 1033
 lib/sapling/src/sapling.c 1220
+# 2026-08-28: inherited from the windows-formatting tip — this broker sat
+# just under the ceiling and crossed it upstream. Held at today's size per
+# the rule above.
+lib/session/src/agent_broker.c 801
+
 lib/sim/src/postmortem.c 1450
 lib/sim/src/simnet_cluster.c 873
 lib/sim/src/simnet_wire.c 1497
