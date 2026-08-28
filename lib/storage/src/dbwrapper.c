@@ -5,39 +5,54 @@
 
 #include "storage/dbwrapper.h"
 #include "storage/ldb_c_api.h"
+#include "platform/directory_compat.h"
 #include "util/util.h"
 #include "util/log_macros.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include "util/safe_alloc.h"
+
+static bool db_wrapper_ensure_directory(const char *path)
+{
+    if (!path || !path[0]) return false;
+#if defined(_WIN32)
+    if ((path[0] == '/' && path[1] == '/') ||
+        (path[0] == '\\' && path[1] == '\\'))
+        return false; /* UNC custody policy is not qualified. */
+#endif
+    char tmp[1024];
+    int n = snprintf(tmp, sizeof(tmp), "%s", path);
+    if (n < 0 || (size_t)n >= sizeof(tmp)) return false;
+    for (char *p = tmp; *p; ++p) {
+        if (*p != '/' && *p != '\\') continue;
+        if (p == tmp || (p == tmp + 2 && tmp[1] == ':')) continue;
+        char separator = *p;
+        *p = '\0';
+        bool ok = platform_directory_ensure(tmp, 0755);
+        *p = separator;
+        if (!ok) return false;
+    }
+    return platform_directory_ensure(tmp, 0755);
+}
 
 bool db_wrapper_open(struct db_wrapper *w, const char *path,
                      size_t cache_size, bool memory, bool wipe)
 {
+    if (!w || !path || !path[0]) return false;
     memset(w, 0, sizeof(*w));
 
-    if (wipe) {
+    if (!memory && !db_wrapper_ensure_directory(path)) {
+        LogPrintf("LevelDB directory validation failure at %s\n", path);
+        return false;
+    }
+
+    if (wipe && !memory) {
         leveldb_options_t *opts = leveldb_options_create();
         char *err = NULL;
         leveldb_destroy_db(opts, path, &err);
         leveldb_options_destroy(opts);
         if (err) { leveldb_free(err); }
-    }
-
-    if (!memory) {
-        /* Create parent directories recursively */
-        char tmp[1024];
-        snprintf(tmp, sizeof(tmp), "%s", path);
-        for (char *p = tmp + 1; *p; p++) {
-            if (*p == '/') {
-                *p = '\0';
-                mkdir(tmp, 0755);
-                *p = '/';
-            }
-        }
-        mkdir(tmp, 0755);
     }
 
     w->options = leveldb_options_create();
