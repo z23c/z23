@@ -135,6 +135,11 @@ struct wallet_recovery_report {
 struct zcl_result wallet_recovery_run(const struct wallet_recovery_request *req,
                                       struct wallet_recovery_report *out);
 
+#ifdef ZCL_TESTING
+struct zcl_result wallet_recovery_test_ensure_datadir(
+    const char *datadir, struct wallet_recovery_report *out);
+#endif
+
 /* ── status: a strictly READ-ONLY question, in two halves ───────────
  *
  * `core.wallet.recovery.status` is declared a READ leaf, and its `datadir`
