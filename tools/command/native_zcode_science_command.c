@@ -10,6 +10,7 @@
 #include "controllers/rpc_client.h"
 #include "json/json.h"
 #include "models/database.h"
+#include "platform/directory_compat.h"
 #include "platform/time_compat.h"
 #include "services/zcode_science_service.h"
 #include "util/safe_alloc.h"
@@ -23,7 +24,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 #define ZSCI_PATH_MAX 4096
 #define ZSCI_WIRE_MAX 422 /* study_spec.v1 is the largest science wire */
@@ -130,7 +130,8 @@ static const char *zsci_workspace(const struct json_value *input,
 {
     const char *workspace = zsci_str(input, "workspace");
     if (workspace && workspace[0]) {
-        if (realpath(workspace, resolved))
+        if (platform_directory_canonical_real(workspace, resolved,
+                                              resolved_size))
             return resolved;
         return NULL;
     }
