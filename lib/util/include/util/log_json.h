@@ -51,8 +51,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "base/format_attribute.h"
-
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -67,7 +65,7 @@ enum log_json_level {
  *
  * `event` MUST be a stable short string (snake_case is conventional).
  * `fields_fmt` may be NULL or "" if there are no extra fields. */
-ZCL_PRINTF_LIKE(3, 4)
+__attribute__((format(printf, 3, 4)))
 void log_jsonf(enum log_json_level level, const char *event,
                 const char *fields_fmt, ...);
 
@@ -79,7 +77,7 @@ size_t log_json_escape(char *out, size_t cap, const char *in);
  * sending it to LogPrintStr().  Used by the unit tests so they can
  * inspect the wire format without redirecting stdout.  Returns the
  * number of bytes written. */
-ZCL_PRINTF_LIKE(5, 6)
+__attribute__((format(printf, 5, 6)))
 size_t log_json_format(char *buf, size_t cap, enum log_json_level level,
                         const char *event, const char *fields_fmt, ...);
 

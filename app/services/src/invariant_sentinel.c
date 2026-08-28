@@ -14,7 +14,6 @@
  * the process and every other stage keep running. */
 
 #include "services/invariant_sentinel.h"
-#include "base/format_attribute.h"
 
 #include "invariant_sentinel_internal.h"
 #include "services/authority_projection_audit.h"
@@ -119,7 +118,7 @@ static struct node_db *sentinel_ndb(void)
 
 /* Page once per fresh blocker write (the dedup discipline). */
 static void sentinel_raise_blocker(const char *id, const char *fmt, ...)
-    ZCL_PRINTF_LIKE(2, 3);
+    __attribute__((format(printf, 2, 3)));
 static void sentinel_raise_blocker(const char *id, const char *fmt, ...)
 {
     char reason[BLOCKER_REASON_MAX];

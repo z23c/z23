@@ -41,16 +41,20 @@
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
+#include <arpa/inet.h>
 #include <ctype.h>
 #include <inttypes.h>
 #include <math.h>
+#include <netinet/in.h>
 #include <pthread.h>
 #include <sqlite3.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
 

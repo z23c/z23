@@ -431,27 +431,20 @@ static void bench_sha3_256_x4(unsigned char *msg)
         .unit = "batches",
         .inner = 4000,
         .bytes_per_op = 4.0 * X4_MSG_BYTES,
+        .ntiers = 2,
     };
     b.tier[0].name = "generic (scalar x4)";
-#if defined(__aarch64__)
-    b.tier[1].name = "NEON (4-lane)";
-    b.tier[2].name = "AVX-512 (4-lane)";
-    const enum sha3_impl want[3] = { SHA3_IMPL_SCALAR, SHA3_IMPL_NEON,
-                                     SHA3_IMPL_AVX512 };
-#else
     b.tier[1].name = "AVX-512 (4-lane)";
-    const enum sha3_impl want[2] = { SHA3_IMPL_SCALAR, SHA3_IMPL_AVX512 };
-#endif
-    b.ntiers = (int)(sizeof(want) / sizeof(want[0]));
 
     const uint8_t *msgs[4] = { msg, msg + 1024, msg + 2048, msg + 3072 };
     size_t lens[4] = { X4_MSG_BYTES, X4_MSG_BYTES, X4_MSG_BYTES, X4_MSG_BYTES };
     struct x4_ctx ctx = { .msgs = msgs, .lens = lens };
-    static uint8_t digest[3][4][32];
+    uint8_t digest[2][4][32];
 
-    for (int i = 0; i < b.ntiers; i++) {
+    const enum sha3_impl want[2] = { SHA3_IMPL_SCALAR, SHA3_IMPL_AVX512 };
+    for (int i = 0; i < 2; i++) {
         int got = sha3_256_x4_select_impl(want[i]);
-        b.tier[i].available = (i == 0) || (got == want[i]);
+        b.tier[i].available = (i == 0) || (got == SHA3_IMPL_AVX512);
         if (!b.tier[i].available) continue;
 
         sha3_256_x4(msgs, lens, digest[i]);
@@ -491,27 +484,20 @@ static void bench_sha3_512_x4(unsigned char *msg)
         .unit = "calls",
         .inner = 20000,
         .bytes_per_op = 256.0,
+        .ntiers = 2,
     };
     b.tier[0].name = "generic (scalar x4)";
-#if defined(__aarch64__)
-    b.tier[1].name = "NEON (4-lane)";
-    b.tier[2].name = "AVX-512 (4-lane)";
-    const enum sha3_impl want[3] = { SHA3_IMPL_SCALAR, SHA3_IMPL_NEON,
-                                     SHA3_IMPL_AVX512 };
-#else
     b.tier[1].name = "AVX-512 (4-lane)";
-    const enum sha3_impl want[2] = { SHA3_IMPL_SCALAR, SHA3_IMPL_AVX512 };
-#endif
-    b.ntiers = (int)(sizeof(want) / sizeof(want[0]));
 
     const uint8_t *key = msg;
     const uint8_t *nonce = msg + 32;
     struct k4_ctx ctx = { .key = key, .nonce = nonce };
-    static uint8_t ks[3][256];
+    uint8_t ks[2][256];
 
-    for (int i = 0; i < b.ntiers; i++) {
+    const enum sha3_impl want[2] = { SHA3_IMPL_SCALAR, SHA3_IMPL_AVX512 };
+    for (int i = 0; i < 2; i++) {
         int got = sha3_512_x4_select_impl(want[i]);
-        b.tier[i].available = (i == 0) || (got == want[i]);
+        b.tier[i].available = (i == 0) || (got == SHA3_IMPL_AVX512);
         if (!b.tier[i].available) continue;
 
         sha3_512_x4(key, nonce, 12345, ks[i]);

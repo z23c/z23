@@ -28,7 +28,6 @@
 #include "net/rom_seed.h"                      /* registry: scan/list/serve */
 #include "encoding/utilstrencodings.h"
 #include "json/json.h"
-#include "util/safe_alloc.h"
 
 #include <string.h>
 
@@ -211,20 +210,7 @@ void zcl_native_handle_rom_seed_publish(
      * re-derives its digests and refreshes the same slot. */
     int registered = rom_seed_scan_datadir(datadir);
 
-    /* ~1MB of whole artifacts (each carries the 128KB chunk-digest table):
-     * heap, not stack — native-command threads run on default 512KB stacks. */
-    struct rom_artifact *arts = zcl_calloc(ROM_SEED_MAX_ARTIFACTS,
-                                           sizeof(*arts),
-                                           "rom_seed_publish_artifacts");
-    if (!arts) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_FAILED, "NO_MEM",
-                               "execute", false, false,
-                               "artifact snapshot allocation failed; nothing "
-                               "was published",
-                               "ops.debug.rom_seed.publish");
-        return;
-    }
+    struct rom_artifact arts[ROM_SEED_MAX_ARTIFACTS];
     int n = rom_seed_list(arts, ROM_SEED_MAX_ARTIFACTS);
 
     bool serving_bundle = false;
@@ -269,7 +255,6 @@ void zcl_native_handle_rom_seed_publish(
                             serving_header_seed);
     (void)json_push_kv(&reply->data, "artifacts", &list);
     json_free(&list);
-    free(arts);
 
     if (!serving_bundle) {
         (void)json_push_kv_str(&reply->data, "note",

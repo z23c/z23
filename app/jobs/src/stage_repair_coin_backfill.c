@@ -15,7 +15,6 @@
  * coins_applied_height, never tip_finalize_log. */
 
 #include "jobs/stage_repair_coin_backfill.h"
-#include "base/format_attribute.h"
 #include "stage_repair_coin_backfill_internal.h"
 #include "stage_repair_coin_backfill_util.h"
 
@@ -37,7 +36,7 @@
 #define COIN_BACKFILL_SCAN_CHUNK_BLOCKS  8192
 #define COIN_BACKFILL_SCAN_CHUNK_WALL_MS 1500
 
-ZCL_PRINTF_LIKE(4, 5)
+__attribute__((format(printf, 4, 5)))
 static bool refuse(struct coin_backfill_result *r,
                    enum coin_backfill_status st,
                    const struct uint256 *hole_hash, const char *fmt, ...)

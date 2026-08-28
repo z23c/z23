@@ -3,7 +3,6 @@
  * Alert routing implementation — see alerts.h for the contract. */
 
 #include "event/alerts.h"
-#include "base/format_attribute.h"
 #include "util/sd_notify.h"
 #include "util/spawn.h"
 #include "event/event.h"
@@ -471,7 +470,7 @@ void alerts_operator_needed_clear(void)
 
 /* ── Printf helper (same pattern as metrics.c) ──────────────── */
 
-ZCL_PRINTF_LIKE(4, 5)
+__attribute__((format(printf, 4, 5)))
 static size_t append(char *buf, size_t cap, size_t pos, const char *fmt, ...)
 {
     if (pos >= cap) return pos;
