@@ -25,7 +25,29 @@ if [ ! -x "$TOR_DIR/configure" ]; then
     (cd "$TOR_DIR" && ./autogen.sh)
 fi
 
+# Compile Tor against the SAME OpenSSL the node links, not the host's.
+#
+# The C23 node links vendor/lib/libssl.a + libcrypto.a (pinned 3.0.16),
+# but Tor's configure searched the host for headers -- so libtor.a was
+# compiled against whatever OpenSSL the box happened to have and then
+# linked against the pinned one. On this Linux reference box that is
+# 3.0.13 headers against a 3.0.16 archive: same 3.0 series, ABI-stable,
+# which is why it has always worked and why nothing caught it.
+#
+# It stops working off this box. Homebrew ships OpenSSL 3.5.x, so a Mac
+# would compile libtor.a against 3.5 headers and link it to the pinned
+# 3.0.16 archive -- a cross-series mismatch that need not fail at link
+# time, which makes it worse than a build error, not better. Pinning the
+# directory makes the node and its embedded Tor agree by construction on
+# every host, and matches the repo rule that third-party input is an
+# exact pinned archive rather than whatever the host offers.
+#
+# libevent and zlib are NOT pinned the same way: vendor/include has no
+# event2/ headers, so Tor still resolves libevent from the host while
+# the node links vendor/lib/libevent.a. That is the same latent skew,
+# still open, and it needs the headers vendored before it can be closed.
 configure_opts=(
+    --with-openssl-dir="$ROOT/vendor"
     --disable-asciidoc
     --disable-systemd
     --disable-seccomp
