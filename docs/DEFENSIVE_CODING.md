@@ -969,7 +969,6 @@ add/remove a gate.
 - `check-zcode-package-registry`
 - `check-package-anatomy`
 - `check-api-reference-generated`
-- `check-app-bundle-reproducible`
 - `check-before-save-hooks`
 - `check-build-epoch-integrity`
 - `check-checkout-lock`

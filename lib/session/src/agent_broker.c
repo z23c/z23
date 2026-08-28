@@ -45,6 +45,7 @@
  */
 #define _GNU_SOURCE  /* struct ucred, execvpe — must precede every include */
 #include "session/agent_broker.h"
+#include "base/format_attribute.h"
 #include "session/agent_broker_vocab.h"
 #include "base/hex.h"
 #include "base/log_macros.h"
@@ -317,7 +318,7 @@ static void resp_init(struct mvap_response *r, const struct mvap_request *req,
 }
 
 static void resp_body(struct mvap_response *r, const char *fmt, ...)
-    __attribute__((format(printf, 2, 3)));
+    ZCL_PRINTF_LIKE(2, 3);
 
 static void resp_body(struct mvap_response *r, const char *fmt, ...)
 {

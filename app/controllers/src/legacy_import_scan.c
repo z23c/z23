@@ -5,12 +5,12 @@
 #include "legacy_import_scan.h"
 
 #include "core/serialize.h"
+#include "platform/read_mapping.h"
 #include "util/safe_alloc.h"
 
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -67,13 +67,22 @@ void *legacy_import_scan_file_thread(void *arg)
     if (fd < 0) { a->result = false; return NULL; }
     struct stat st;
     if (fstat(fd, &st) != 0) { close(fd); a->result = false; return NULL; }
+    if (st.st_size <= 0 || (uintmax_t)st.st_size > SIZE_MAX) {
+        close(fd);
+        a->result = false;
+        return NULL;
+    }
     size_t sz = (size_t)st.st_size;
-    uint8_t *data = mmap(NULL, sz, PROT_READ, MAP_PRIVATE, fd, 0);
+    struct platform_read_mapping mapping;
+    platform_read_mapping_init(&mapping);
+    if (!platform_read_mapping_open(&mapping, fd, sz)) {
+        close(fd);
+        a->result = false;
+        return NULL;
+    }
+    a->result = scan_file_raw(mapping.data, mapping.size, a->ht);
+    platform_read_mapping_close(&mapping);
     close(fd);
-    if (data == MAP_FAILED) { a->result = false; return NULL; }
-    posix_madvise(data, sz, POSIX_MADV_SEQUENTIAL);
-    a->result = scan_file_raw(data, sz, a->ht);
-    munmap(data, sz);
     return NULL;
 }
 
@@ -298,11 +307,18 @@ void *legacy_import_sapling_filter_thread(void *arg)
     if (fd < 0) return NULL;
     struct stat st;
     if (fstat(fd, &st) != 0) { close(fd); return NULL; }
+    if (st.st_size <= 0 || (uintmax_t)st.st_size > SIZE_MAX) {
+        close(fd);
+        return NULL;
+    }
     size_t fsize = (size_t)st.st_size;
-    uint8_t *fdata = mmap(NULL, fsize, PROT_READ, MAP_PRIVATE, fd, 0);
-    close(fd);
-    if (fdata == MAP_FAILED) return NULL;
-    posix_madvise(fdata, fsize, POSIX_MADV_SEQUENTIAL);
+    struct platform_read_mapping mapping;
+    platform_read_mapping_init(&mapping);
+    if (!platform_read_mapping_open(&mapping, fd, fsize)) {
+        close(fd);
+        return NULL;
+    }
+    const uint8_t *fdata = mapping.data;
 
     ctx->hit_cap = 256;
     ctx->hits = zcl_malloc((size_t)ctx->hit_cap *
@@ -311,7 +327,8 @@ void *legacy_import_sapling_filter_thread(void *arg)
     if (!ctx->hits) {
         /* zcl_malloc already logged the OOM; unmap the block file and abort
          * the scan thread rather than writing through NULL at the hit append. */
-        munmap(fdata, fsize);
+        platform_read_mapping_close(&mapping);
+        close(fd);
         return NULL;
     }
 
@@ -359,7 +376,8 @@ void *legacy_import_sapling_filter_thread(void *arg)
         ctx->blocks_passed++;
         pos += 8 + blk_size;
     }
-    munmap(fdata, fsize);
+    platform_read_mapping_close(&mapping);
+    close(fd);
     return NULL;
 }
 
@@ -376,13 +394,24 @@ void *legacy_import_decrypt_thread(void *arg)
     if (fd < 0) return NULL;
     struct stat st;
     if (fstat(fd, &st) != 0) { close(fd); return NULL; }
+    if (st.st_size <= 0 || (uintmax_t)st.st_size > SIZE_MAX) {
+        close(fd);
+        return NULL;
+    }
     size_t fsize = (size_t)st.st_size;
-    uint8_t *fdata = mmap(NULL, fsize, PROT_READ, MAP_PRIVATE, fd, 0);
-    close(fd);
-    if (fdata == MAP_FAILED) return NULL;
+    struct platform_read_mapping mapping;
+    platform_read_mapping_init(&mapping);
+    if (!platform_read_mapping_open(&mapping, fd, fsize)) {
+        close(fd);
+        return NULL;
+    }
+    const uint8_t *fdata = mapping.data;
 
     for (int hi = 0; hi < c->count; hi++) {
         struct legacy_import_block_pos *bp = &c->hits[hi];
+        if (bp->offset > fsize || fsize - bp->offset < 8 ||
+            (size_t)bp->blk_size > fsize - bp->offset - 8)
+            continue;
         const uint8_t *bdata = fdata + bp->offset + 8;
         struct block blk;
         block_init(&blk);
@@ -449,6 +478,7 @@ void *legacy_import_decrypt_thread(void *arg)
         }
         block_free(&blk);
     }
-    munmap(fdata, fsize);
+    platform_read_mapping_close(&mapping);
+    close(fd);
     return NULL;
 }

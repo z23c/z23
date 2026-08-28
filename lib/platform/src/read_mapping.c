@@ -54,6 +54,35 @@ bool platform_read_mapping_open(struct platform_read_mapping *mapping,
     return true;
 }
 
+void platform_read_mapping_advise_sequential(
+    const struct platform_read_mapping *mapping)
+{
+    if (!mapping || !mapping->data || mapping->size == 0) return;
+#if defined(_WIN32)
+    /* Resolve this Windows 8+ API dynamically so older MinGW header feature
+     * levels do not decide whether this implementation compiles. */
+    typedef BOOL (WINAPI *prefetch_virtual_memory_fn)(
+        HANDLE, ULONG_PTR, const WIN32_MEMORY_RANGE_ENTRY *, ULONG);
+    HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
+    prefetch_virtual_memory_fn prefetch = kernel
+        ? (prefetch_virtual_memory_fn)(void *)GetProcAddress(
+              kernel, "PrefetchVirtualMemory")
+        : NULL;
+    if (prefetch) {
+        WIN32_MEMORY_RANGE_ENTRY range = {
+            .VirtualAddress = (PVOID)mapping->data,
+            .NumberOfBytes = mapping->size,
+        };
+        (void)prefetch(GetCurrentProcess(), 1, &range, 0);
+    }
+#else
+    (void)posix_madvise((void *)mapping->data, mapping->size,
+                        POSIX_MADV_SEQUENTIAL);
+    (void)posix_madvise((void *)mapping->data, mapping->size,
+                        POSIX_MADV_WILLNEED);
+#endif
+}
+
 void platform_read_mapping_close(struct platform_read_mapping *mapping)
 {
     if (!mapping) return;

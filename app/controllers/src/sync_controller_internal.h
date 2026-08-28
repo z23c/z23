@@ -17,6 +17,7 @@
 #include "config/db_service.h"
 #include "models/database.h"
 #include "models/db_txn.h"
+#include "platform/read_mapping.h"
 #include "primitives/block.h"
 #include "primitives/transaction.h"
 #include "sapling/incremental_merkle_tree.h"
@@ -111,9 +112,17 @@ bool advance_wallet_witnesses(struct node_db *ndb,
                               const struct block *blk,
                               struct incremental_merkle_tree *tree,
                               int height, struct wallet *wallet);
-uint8_t *sync_controller_mmap_block_file(const char *datadir,
-                                         int file_num,
-                                         size_t *out_size);
+/* Own the descriptor and mapping as one lifetime.  This is required on
+ * Windows and avoids relying on POSIX's close-after-mmap behavior. */
+struct sync_block_file_mapping {
+    int fd;
+    struct platform_read_mapping view;
+};
+
+void sync_block_file_mapping_init(struct sync_block_file_mapping *mapping);
+bool sync_block_file_mapping_open(struct sync_block_file_mapping *mapping,
+                                  const char *datadir, int file_num);
+void sync_block_file_mapping_close(struct sync_block_file_mapping *mapping);
 
 /* ── Sapling-tree persist (definitions in sync_controller_sapling_tree_persist.c) ──
  * Tri-state outcome of a persist attempt. DEFERRED is distinct from FAILED:

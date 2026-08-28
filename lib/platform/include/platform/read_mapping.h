@@ -21,6 +21,12 @@ void platform_read_mapping_init(struct platform_read_mapping *mapping);
 bool platform_read_mapping_open(struct platform_read_mapping *mapping,
                                 int fd, size_t size);
 
+/* Hint that the whole mapping will be consumed in ascending address order.
+ * This is advisory only: unsupported platforms and transient hint failures
+ * leave the mapping valid and readable. */
+void platform_read_mapping_advise_sequential(
+    const struct platform_read_mapping *mapping);
+
 void platform_read_mapping_close(struct platform_read_mapping *mapping);
 
 #endif

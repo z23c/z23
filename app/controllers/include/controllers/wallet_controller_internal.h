@@ -44,14 +44,10 @@
 #include "util/safe_alloc.h"
 #include "wallet/wallet_canary.h"
 #include "services/wallet_backup_service.h"
+#include "platform/socket_compat.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <sys/socket.h>
-#include <sys/time.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
 
 /* Shared accessor for the current wallet RPC context. */
 static inline struct wallet_rpc_context *wallet_ctx(void)

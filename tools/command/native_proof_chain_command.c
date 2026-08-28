@@ -56,6 +56,7 @@
  * function and is called, not copied. */
 
 #include "command/native_command.h"
+#include "base/format_attribute.h"
 
 #include "base/log_macros.h"
 #include "base/safe_alloc.h"
@@ -164,7 +165,7 @@ static const char *pcw_result_tag(enum pcw_result r)
     return "-- SKIP";
 }
 
-__attribute__((format(printf, 3, 4)))
+ZCL_PRINTF_LIKE(3, 4)
 static void pcw_set(struct pcw_rung *r, enum pcw_result result,
                     const char *fmt, ...)
 {

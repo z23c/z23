@@ -11,39 +11,7 @@
  * Any per-bit timing or cache leak here correlates across many
  * spends, so the reduction loop and its helpers must be
  * branchless. See lib/test/src/test_sapling_crypto.c for the
- * diff and Hamming-weight timing regressions.
- *
- * Branch-free is necessary but NOT sufficient: on arm64 (Apple
- * Silicon, Apple Clang 17) the previous 9x32-bit mask-selected
- * implementation ran ~25% faster on a near-zero input than on a
- * full-weight one (2x2000-iteration paired median: lo=~22.3ms,
- * hi=~27.9ms, ratio 1.24-1.26 across runs and checkouts, against a
- * 0.85..1.15 gate).  The disassembly has no data-dependent branch -
- * the divergence is microarchitectural: when the accumulator is
- * zero, the value-carrying chains through the load/store loop are
- * recognised as producing zero and their dependencies are
- * eliminated at rename, so 512 iterations of "stay zero" run
- * materially faster than 512 iterations of "carry a value".
- * Forcing the accumulator nonzero (timing probe) collapses the gap
- * to ~1.00, which confirms the mechanism.
- *
- * The fix used here keeps every intermediate nonzero for EVERY
- * input, so there is no zero-mode to fall into: the accumulator is
- * carried in the redundant shifted representation A = value + r
- * (invariant r <= A < 2r), and each MSB-down step is fused as
- *
- *      A' = 2A|b            (>= 2r, never zero)
- *      D  = A' - 3r         (single fused subtract, borrow = [A' < 3r])
- *      A  = D + r + borrow*r
- *
- * which is algebraically the old `acc = 2acc|b; if (acc >= r) acc -= r`
- * plus the constant r.  D hits zero only on a ~2^-256 limb alignment,
- * never persistently for any input class.  Measured on the same host:
- * ratio 0.94-1.03 across runs, and the real-world (nonzero-input) path
- * got faster than the old code (about 5.4us vs 7.0us per call in the
- * same session; 4.6us on a quieter one) because the 4x64-bit carry
- * chains replace 9x32-bit ones, matching the limb style already used
- * in lib/sapling/src/fr.c. */
+ * diff and Hamming-weight timing regressions. */
 
 #include "sapling/jubjub.h"
 #include <string.h>
@@ -57,88 +25,74 @@ static const unsigned char JUBJUB_R[32] = {
     0xa9, 0xaf, 0x33, 0x65, 0xea, 0xb4, 0x7d, 0x0e
 };
 
-/* 256-bit integer (4 x 64-bit limbs, little-endian).  r < 2^252, so the
- * shifted accumulator A < 2r < 2^253 and its doubled form 2A|b < 2^254
- * always fit without a limb carry-out; a subtracting step may wrap and
- * is corrected in the same iteration.  Carry chains use unsigned
- * __int128, as in fr.c. */
-#define NL 4
+/* 288-bit big integer (9 x 32-bit limbs, little-endian).
+ * r is 256 bits, so an accumulator < 2r always fits without a carry-out. */
+#define NL 9
 
 struct bigint {
-    uint64_t d[NL];
+    uint32_t d[NL];
 };
+
+static void bi_zero(struct bigint *a)
+{
+    memset(a->d, 0, sizeof(a->d));
+}
 
 static void bi_from_bytes(struct bigint *a, const unsigned char *b, size_t n)
 {
-    memset(a->d, 0, sizeof(a->d));
-    for (size_t i = 0; i < n && i < NL * 8; i++)
-        a->d[i / 8] |= (uint64_t)b[i] << (8 * (i % 8));
+    bi_zero(a);
+    for (size_t i = 0; i < n && i < NL * 4; i++)
+        a->d[i / 4] |= (uint32_t)b[i] << (8 * (i % 4));
 }
 
 static void bi_to_bytes(const struct bigint *a, unsigned char *b, size_t n)
 {
     for (size_t i = 0; i < n; i++)
-        b[i] = (unsigned char)(a->d[i / 8] >> (8 * (i % 8)));
+        b[i] = (unsigned char)(a->d[i / 4] >> (8 * (i % 4)));
 }
 
-/* a <<= 1.  Branchless.  Callers keep A < 2r < 2^253, so the discarded
- * carry is always 0. */
+/* acc <<= 1.  Branchless, carry is thrown away.  Safe because callers
+ * keep acc < r so 2*acc < 2r fits in 257 bits (<< our 288-bit struct). */
 static void bi_shl1(struct bigint *a)
 {
-    uint64_t carry = 0;
+    uint32_t carry = 0;
     for (int i = 0; i < NL; i++) {
-        uint64_t new_carry = a->d[i] >> 63;
+        uint32_t new_carry = a->d[i] >> 31;
         a->d[i] = (a->d[i] << 1) | carry;
         carry = new_carry;
     }
     (void)carry;
 }
 
-/* unsigned __int128 is a compiler extension, not ISO C, and this tree
- * compiles -std=c23 -pedantic. The carry chains below need a 128-bit
- * accumulator; lib/sapling/src/bls12_381.c suppresses the same warning
- * over the same construct for the same reason. */
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wpedantic"
-
-/* a -= c (mod 2^256).  Returns the borrow (0 or 1); the caller folds it
- * back in within the same iteration, so no information escapes. */
-static uint64_t bi_sub(struct bigint *a, const struct bigint *c)
+/* If (a >= r): a := a - r.
+ * Implementation is constant-time: always computes the full
+ * 9-limb subtraction `sub = a - r`, then selects limb-wise between
+ * `sub` (when no borrow propagated out of the top limb, i.e. a>=r)
+ * and the original `a` (when a<r).  No data-dependent branches,
+ * no data-dependent memory accesses. */
+static void bi_cond_sub(struct bigint *a, const struct bigint *r)
 {
+    struct bigint sub;
     uint64_t borrow = 0;
     for (int i = 0; i < NL; i++) {
-        unsigned __int128 diff =
-            (unsigned __int128)a->d[i] - c->d[i] - borrow;
-        a->d[i] = (uint64_t)diff;
-        borrow = (uint64_t)(diff >> 64) & 1u;
+        uint64_t diff = (uint64_t)a->d[i] - (uint64_t)r->d[i] - borrow;
+        sub.d[i] = (uint32_t)diff;
+        borrow = (diff >> 32) & 1u;
     }
-    return borrow;
-}
-
-/* a += r + w*r, with w in {0,1}.  Branchless: the weight only ever
- * multiplies a public constant, and the carry chain is unconditional. */
-static void bi_add_r_weighted(struct bigint *a, const struct bigint *r,
-                              uint64_t w)
-{
-    unsigned __int128 carry = 0;
-    for (int i = 0; i < NL; i++) {
-        unsigned __int128 sum = (unsigned __int128)a->d[i] +
-                                (unsigned __int128)r->d[i] +
-                                (unsigned __int128)r->d[i] * w + carry;
-        a->d[i] = (uint64_t)sum;
-        carry = sum >> 64;
-    }
+    /* mask = 0xFFFFFFFF iff no final borrow (i.e., a >= r); else 0. */
+    uint32_t mask = (uint32_t)borrow - 1u;
+    for (int i = 0; i < NL; i++)
+        a->d[i] = (sub.d[i] & mask) | (a->d[i] & ~mask);
 }
 
 /* result = a mod r, where a is 512-bit LE and r is 256-bit.
  *
- * Schoolbook shift-and-subtract, one bit per iteration from MSB down,
- * carried in the shifted representation A = value + r (see the file
- * comment for why the offset is load-bearing for timing).  All 512
- * iterations always execute; every operation inside an iteration runs
- * unconditionally; there are no data-dependent branches and no
- * data-dependent memory accesses.  Total work AND the value-pattern of
- * the intermediates are independent of the secret input.
+ * Schoolbook shift-and-subtract, one bit per iteration from MSB down.
+ * All 512 iterations always execute; inside each iteration every
+ * operation runs unconditionally, and the would-be "if bit set" and
+ * "if acc >= r" branches are replaced by bitmask selects.  Total
+ * work is identical regardless of the secret input's Hamming weight
+ * or the exact reduction schedule.
  *
  * Threat: callers include `prf_nsk` (Sapling nullifier key) where the
  * input is derived from a long-lived spending secret; any timing leak
@@ -146,49 +100,28 @@ static void bi_add_r_weighted(struct bigint *a, const struct bigint *r,
  * nullifier-path constant-time audit"). */
 void jubjub_to_scalar(const unsigned char *input, unsigned char *result)
 {
-    struct bigint r, r3, acc;
-
+    struct bigint r;
     bi_from_bytes(&r, JUBJUB_R, 32);
 
-    /* r3 = 3r, the fused per-step subtract constant. */
-    bi_from_bytes(&r3, JUBJUB_R, 32);
-    {
-        uint64_t carry = 0;
-        for (int i = 0; i < NL; i++) {
-            unsigned __int128 s = (unsigned __int128)r3.d[i] * 3u + carry;
-            r3.d[i] = (uint64_t)s;
-            carry = (uint64_t)(s >> 64);
-        }
-    }
-
-    /* Shifted representation: A = value + r.  value starts at 0, so
-     * A starts at r. */
-    bi_from_bytes(&acc, JUBJUB_R, 32);
+    struct bigint acc;
+    bi_zero(&acc);
 
     /* Process 512 bits from MSB (bit 511) to LSB (bit 0). */
     for (int bit = 511; bit >= 0; bit--) {
-        /* acc = 2A | b.  A >= r, so 2A|b >= 2r: never zero, and the
-         * next subtract's borrow is exactly the old
-         * "value >= r after shift" test. */
+        /* acc = acc << 1.  Low bit of acc.d[0] is now 0. */
         bi_shl1(&acc);
 
-        /* OR in the next input bit - branchless.  byte_idx / bit_idx
+        /* OR in the next input bit — branchless.  byte_idx / bit_idx
          * are derived from the public loop counter only, not from the
          * secret. */
         int byte_idx = bit >> 3;
         int bit_idx = bit & 7;
-        acc.d[0] |= (uint64_t)((input[byte_idx] >> bit_idx) & 1u);
+        acc.d[0] |= (uint32_t)((input[byte_idx] >> bit_idx) & 1u);
 
-        /* Reduce: D = 2A|b - 3r, borrow = [2A|b < 3r] = [value' < r],
-         * then A = D + r + borrow*r restores A = value + r.  Always
-         * executes; the borrow only ever scales a public constant. */
-        uint64_t need_add = bi_sub(&acc, &r3);
-        bi_add_r_weighted(&acc, &r, need_add);
+        /* Reduce: if acc >= r, subtract r.  Always executes the
+         * subtraction and chooses the result via a mask. */
+        bi_cond_sub(&acc, &r);
     }
 
-    /* Back to canonical form: result = A - r (in [0, r)). */
-    (void)bi_sub(&acc, &r);
     bi_to_bytes(&acc, result, 32);
 }
-
-#pragma GCC diagnostic pop

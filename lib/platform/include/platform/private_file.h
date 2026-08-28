@@ -35,6 +35,9 @@ bool platform_private_file_write_at(struct platform_private_file *file,
                                     const void *data, size_t size,
                                     uint64_t offset);
 bool platform_private_file_flush(struct platform_private_file *file);
+bool platform_private_file_replace(struct platform_private_file *file,
+                                   const char *staging_path,
+                                   const char *destination_path);
 bool platform_private_file_retire(struct platform_private_file *file,
                                   const char *path);
 bool platform_private_file_identity(struct platform_private_file *file,

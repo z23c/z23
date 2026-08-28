@@ -32,6 +32,8 @@
 #include <stdarg.h>
 #include <stdbool.h>
 
+#include "base/format_attribute.h"
+
 #define ZCL_RESULT_MSG_MAX 256
 
 /* [[nodiscard]] on the TYPE, so every function returning it inherits the
@@ -93,7 +95,7 @@ struct [[nodiscard]] zcl_result {
  * marker; use "" for an intentionally empty message. */
 struct zcl_result zcl_result_make(int code, const char *file, int line,
                                    const char *fmt, ...)
-    __attribute__((format(printf, 4, 5)));
+    ZCL_PRINTF_LIKE(4, 5);
 
 /* Convenience: convert a zcl_result to bool, for callers still on
  * the bool API. Returns r.ok directly — does NOT log. Use the

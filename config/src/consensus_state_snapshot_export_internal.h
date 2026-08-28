@@ -4,6 +4,7 @@
 #define ZCL_CONSENSUS_STATE_SNAPSHOT_EXPORT_INTERNAL_H
 
 #include "config/consensus_state_snapshot_export.h"
+#include "base/format_attribute.h"
 #include "storage/consensus_state_bundle_codec.h"
 
 #include <sqlite3.h>
@@ -48,7 +49,7 @@ bool consensus_export_fail(struct consensus_state_export_result *result,
  * between named phases. Never used in any gate decision. */
 int64_t consensus_export_clock_ms(void);
 void consensus_export_progress_emit(const char *fmt, ...)
-    __attribute__((format(printf, 1, 2)));
+    ZCL_PRINTF_LIKE(1, 2);
 
 bool consensus_export_prove_source(
     sqlite3 *source,
