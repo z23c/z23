@@ -10,15 +10,51 @@
 #include "storage/coins_kv.h"           /* boundary utxo_root read */
 #include "storage/progress_store.h"     /* progress_store_db() handle */
 #include "platform/time_compat.h"
+#include "platform/file_sync.h"
 #include "util/log_macros.h"
 #include "validation/chainstate.h"
 #include <string.h>
 #include <stdio.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
 #include <time.h>
+
+#if defined(_WIN32)
+#include <io.h>
+#define zcl_ftruncate(fd, length) _chsize_s((fd), (length))
+#define ZCL_LEAF_STORE_OPEN_FLAGS (O_RDWR | O_CREAT | O_BINARY)
+#else
+#define zcl_ftruncate(fd, length) ftruncate((fd), (length))
+#define ZCL_LEAF_STORE_OPEN_FLAGS (O_RDWR | O_CREAT)
+#endif
+
+static void mmb_leaf_store_unmap(struct mmb_leaf_store *store)
+{
+    platform_read_mapping_close(&store->mapping);
+    store->map = NULL;
+    store->capacity = 0;
+}
+
+static bool mmb_leaf_store_map(struct mmb_leaf_store *store, size_t size)
+{
+    if (!platform_read_mapping_open(&store->mapping, store->fd, size)) {
+        store->map = NULL;
+        store->capacity = 0;
+        return false;
+    }
+    store->map = store->mapping.data;
+    store->capacity = (uint64_t)(size / 32u);
+    return true;
+}
+
+static bool mmb_leaf_store_sync(struct mmb_leaf_store *store)
+{
+    if (!store->dirty) return true;
+    if (platform_data_sync(store->fd) != 0) return false;
+    store->dirty = false;
+    return true;
+}
 
 bool mmb_leaf_store_validate(struct mmb_leaf_store *store,
                              struct ar_errors *errors)
@@ -40,8 +76,13 @@ bool mmb_leaf_store_validate(struct mmb_leaf_store *store,
 
 bool mmb_leaf_store_open(struct mmb_leaf_store *store, const char *path)
 {
+    if (!store || !path || !path[0]) return false;
     memset(store, 0, sizeof(*store));
-    snprintf(store->path, sizeof(store->path), "%s", path);
+    store->fd = -1;
+    platform_read_mapping_init(&store->mapping);
+    int path_length = snprintf(store->path, sizeof(store->path), "%s", path);
+    if (path_length < 0 || (size_t)path_length >= sizeof(store->path))
+        return false;
 
     struct ar_errors errors;
     if (!mmb_leaf_store_validate(store, &errors)) {
@@ -50,7 +91,7 @@ bool mmb_leaf_store_open(struct mmb_leaf_store *store, const char *path)
         LOG_FAIL("mmb_leaf_store", "mmb_leaf_store: invalid: %s", msg);
     }
 
-    store->fd = open(path, O_RDWR | O_CREAT, 0644);
+    store->fd = open(path, ZCL_LEAF_STORE_OPEN_FLAGS, 0644);
     if (store->fd < 0) {
         LOG_FAIL("mmb_leaf_store", "mmb_leaf_store: cannot open %s", path);
     }
@@ -58,11 +99,8 @@ bool mmb_leaf_store_open(struct mmb_leaf_store *store, const char *path)
     struct stat st;
     if (fstat(store->fd, &st) == 0 && st.st_size > 0) {
         store->num_leaves = (uint64_t)st.st_size / 32;
-        store->capacity = store->num_leaves;
-        store->map = mmap(NULL, (size_t)st.st_size, PROT_READ,
-                          MAP_PRIVATE, store->fd, 0);
-        if (store->map == MAP_FAILED) {
-            store->map = NULL;
+        if ((uintmax_t)st.st_size > SIZE_MAX ||
+            !mmb_leaf_store_map(store, (size_t)st.st_size)) {
             LOG_WARN("mmb_leaf_store", "mmb_leaf_store: mmap failed for %s", path);
         }
     }
@@ -74,11 +112,9 @@ bool mmb_leaf_store_open(struct mmb_leaf_store *store, const char *path)
 void mmb_leaf_store_close(struct mmb_leaf_store *store)
 {
     if (!store->open) return;
-    if (store->map && store->map != MAP_FAILED) {
-        munmap(store->map, (size_t)(store->num_leaves * 32));
-        store->map = NULL;
-    }
+    mmb_leaf_store_unmap(store);
     if (store->fd >= 0) {
+        (void)mmb_leaf_store_sync(store);
         close(store->fd);
         store->fd = -1;
     }
@@ -90,19 +126,24 @@ bool mmb_leaf_store_append(struct mmb_leaf_store *store,
 {
     if (!store->open || store->fd < 0) return false;
 
-    if (store->map && store->map != MAP_FAILED) {
-        munmap(store->map, (size_t)(store->num_leaves * 32));
-        store->map = NULL;
-        store->capacity = 0;
+    mmb_leaf_store_unmap(store);
+
+    off_t original_size = lseek(store->fd, 0, SEEK_END);
+    if (original_size < 0) return false;
+
+    size_t written = 0;
+    while (written < 32u) {
+        ssize_t w = write(store->fd, hash + written, 32u - written);
+        if (w <= 0) {
+            (void)zcl_ftruncate(store->fd, original_size);
+            (void)lseek(store->fd, original_size, SEEK_SET);
+            return false;
+        }
+        written += (size_t)w;
     }
 
-    if (lseek(store->fd, 0, SEEK_END) < 0)
-        return false;
-
-    ssize_t w = write(store->fd, hash, 32);
-    if (w != 32) return false;
-
     store->num_leaves++;
+    store->dirty = true;
     return true;
 }
 
@@ -111,26 +152,20 @@ bool mmb_leaf_store_remap(struct mmb_leaf_store *store)
     if (!store || !store->open || store->fd < 0)
         return false;
 
-    if (store->map && store->map != MAP_FAILED) {
-        munmap(store->map, (size_t)(store->capacity * 32));
-        store->map = NULL;
-    }
+    mmb_leaf_store_unmap(store);
 
     struct stat st;
     if (fstat(store->fd, &st) != 0 || st.st_size <= 0)
         return false;
     if ((st.st_size % 32) != 0)
         return false;
+    if (!mmb_leaf_store_sync(store))
+        return false;
 
     store->num_leaves = (uint64_t)st.st_size / 32;
     store->capacity = store->num_leaves;
-    store->map = mmap(NULL, (size_t)st.st_size, PROT_READ,
-                      MAP_PRIVATE, store->fd, 0);
-    if (store->map == MAP_FAILED) {
-        store->map = NULL;
-        return false;
-    }
-    return true;
+    if ((uintmax_t)st.st_size > SIZE_MAX) return false;
+    return mmb_leaf_store_map(store, (size_t)st.st_size);
 }
 
 const uint8_t *mmb_leaf_store_get(const struct mmb_leaf_store *store,
@@ -138,12 +173,17 @@ const uint8_t *mmb_leaf_store_get(const struct mmb_leaf_store *store,
 {
     if (!store || !store->map || index >= store->num_leaves)
         return NULL;
-    return store->map + (index * 32);
+    if (index > (uint64_t)(SIZE_MAX / 32u)) return NULL;
+    size_t offset = (size_t)index * 32u;
+    if (offset > store->mapping.size ||
+        store->mapping.size - offset < 32u) return NULL;
+    return store->map + offset;
 }
 
 const uint8_t (*mmb_leaf_store_all(const struct mmb_leaf_store *store))[32]
 {
-    if (!store || !store->map || store->num_leaves == 0)
+    if (!store || !store->map || store->num_leaves == 0 ||
+        store->num_leaves > store->mapping.size / 32u)
         return NULL;
     return (const uint8_t (*)[32])store->map;
 }
@@ -159,15 +199,13 @@ uint64_t mmb_leaf_store_rebuild(struct mmb_leaf_store *store,
     if (height < 0) return 0;
 
     /* Unmap existing data */
-    if (store->map && store->map != MAP_FAILED) {
-        munmap(store->map, (size_t)(store->num_leaves * 32));
-        store->map = NULL;
-    }
+    mmb_leaf_store_unmap(store);
 
     /* Truncate and rewrite */
-    if (ftruncate(store->fd, 0) != 0) return 0;
+    if (zcl_ftruncate(store->fd, 0) != 0) return 0;
     lseek(store->fd, 0, SEEK_SET);
     store->num_leaves = 0;
+    store->dirty = true;
 
     uint64_t count = 0;
     int64_t t0 = platform_time_monotonic_us();
@@ -215,14 +253,8 @@ uint64_t mmb_leaf_store_rebuild(struct mmb_leaf_store *store,
     printf("[mmb_leaf_store] Built %llu leaf hashes in %llds (%s)\n",
            (unsigned long long)count, (long long)elapsed, store->path);
 
-    /* Remap for read access */
-    struct stat st;
-    if (fstat(store->fd, &st) == 0 && st.st_size > 0) {
-        store->map = mmap(NULL, (size_t)st.st_size, PROT_READ,
-                          MAP_PRIVATE, store->fd, 0);
-        if (store->map == MAP_FAILED) store->map = NULL;
-        store->capacity = store->num_leaves;
-    }
+    /* The remap boundary is also the durability boundary for the rebuild. */
+    if (count > 0) (void)mmb_leaf_store_remap(store);
 
     return count;
 }

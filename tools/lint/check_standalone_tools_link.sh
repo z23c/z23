@@ -71,14 +71,19 @@ declare -A EXEMPT=(
     [zcl-rpc]="built by make ci (test-crash)"
     # The node and the test runners: whole-program relinks, and each is
     # already the direct product of make zclassic23 / test-parallel / ci.
+    # The node rules were renamed zclassic23* -> z23* when the canonical
+    # binary became build/bin/z23; both spellings stay exempt so a checkout
+    # on either side of the rename lints clean.
     [zclassic23]="built by make ci and make test-parallel"
-    [zclassic23-dev]="dev-profile whole-node relink (make dev)"
-    [zclassic23-dev-asan]="sanitizer whole-node relink (make dev-asan)"
-    [zclassic23-dev-tsan]="sanitizer whole-node relink (make dev-tsan)"
+    [z23]="built by make ci and make test-parallel (zclassic23 rename)"
+    [z23-dev]="dev-profile whole-node relink (make dev)"
+    [z23-dev-asan]="sanitizer whole-node relink (make dev-asan)"
+    [z23-dev-tsan]="sanitizer whole-node relink (make dev-tsan)"
     [test_parallel]="built by make test-parallel"
     [test_parallel_fast]="built by make t-fast"
     [test-asan]="sanitizer whole-test relink (make test-asan)"
     [test-tsan]="sanitizer whole-test relink (make test-tsan)"
+    [test_zcl]="whole-test relink (make test / make ci)"
     [test_zcl_cov]="coverage whole-test relink (make coverage, in make ci)"
     # Too expensive to relink inside a lint gate.
     [session]="whole-node relink over \$(ALL_SRCS) — minutes, not seconds"

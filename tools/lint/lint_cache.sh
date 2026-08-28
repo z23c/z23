@@ -135,6 +135,8 @@ lint_cache_never_reason() {
     case "$1" in
         check-standalone-tools-link)
             echo "runs 'make' and links 18 tool binaries — depends on build/ state and the toolchain" ;;
+        check-app-bundle-reproducible)
+            echo "compiles its subject twice with cc and runs codesign over two bundles — depends on the toolchain and the host's signing behavior" ;;
         check-build-epoch-integrity)
             echo "keys on the installed compiler id and 'make --version', and runs cc probes on a miss" ;;
         check-clang-portability)
