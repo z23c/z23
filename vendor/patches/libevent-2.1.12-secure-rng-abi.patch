@@ -21,3 +21,22 @@ diff --git a/evutil_rand.c b/evutil_rand.c
  
  void
  evutil_free_secure_rng_globals_(void)
+diff --git a/include/event2/util.h b/include/event2/util.h
+--- a/include/event2/util.h
++++ b/include/event2/util.h
+@@ -862,7 +862,6 @@
+ EVENT2_EXPORT_SYMBOL
+ int evutil_secure_rng_set_urandom_device_file(char *fname);
+ 
+-#if !defined(EVENT__HAVE_ARC4RANDOM) || defined(EVENT__HAVE_ARC4RANDOM_ADDRANDOM)
+ /** Seed the random number generator with extra random bytes.
+ 
+     You should almost never need to call this function; it should be
+@@ -879,7 +878,6 @@
+  */
+ EVENT2_EXPORT_SYMBOL
+ void evutil_secure_rng_add_bytes(const char *dat, size_t datlen);
+-#endif
+ 
+ #ifdef __cplusplus
+ }
