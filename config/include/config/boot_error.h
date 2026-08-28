@@ -54,6 +54,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#include "base/format_attribute.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -86,7 +88,7 @@ void boot_error_report(enum boot_error_level level, const char *code,
                        const char *phase, const char *message,
                        const struct boot_error_next *next, size_t next_count,
                        const char *evidence_fmt, ...)
-    __attribute__((format(printf, 7, 8)));
+    ZCL_PRINTF_LIKE(7, 8);
 
 /* True once a FATAL has been rendered in this process. WARN does not set it. */
 bool boot_error_reported(void);

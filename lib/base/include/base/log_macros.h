@@ -23,6 +23,7 @@
 
 #include <stdio.h>
 
+#include "base/format_attribute.h"
 #include "base/log_level.h"
 
 /* Malformed inputs are the expected hot path in fuzz binaries. Keep the
@@ -32,7 +33,7 @@
  * checking. Normal builds go through zcl_log_emit_at() (log_level.c), which
  * prepends the ISO-8601 UTC timestamp + level token to every line. */
 #ifdef ZCL_FUZZ_QUIET_LOG_MACROS
-static inline __attribute__((format(printf, 1, 2)))
+static inline ZCL_PRINTF_LIKE(1, 2)
 void zcl_fuzz_discard_log(const char *fmt, ...)
 {
     (void)fmt;
