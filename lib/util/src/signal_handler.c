@@ -6,6 +6,120 @@
 #include "util/signal_handler.h"
 #include "util/async_safe_write.h"
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
+static signal_handler_crash_hook_fn g_crash_hook;
+static void *g_crash_hook_ctx;
+static volatile LONG g_crash_hook_running;
+static void (*g_termination_handler)(int);
+static INIT_ONCE g_exception_once = INIT_ONCE_STATIC_INIT;
+static INIT_ONCE g_console_once = INIT_ONCE_STATIC_INIT;
+
+void signal_handler_set_crash_log(const char *path)
+{
+    /* The POSIX integer-fd crash-log ABI cannot safely represent a Win32
+     * HANDLE. Native crash persistence remains disabled until the event/crash
+     * reporters share an opaque durable handle. */
+    (void)path;
+}
+
+int signal_handler_crash_log_fd(void) { return -1; }
+
+void signal_handler_set_crash_hook(signal_handler_crash_hook_fn fn, void *ctx)
+{
+    g_crash_hook_ctx = ctx;
+    g_crash_hook = fn;
+}
+
+void signal_handler_clear_crash_hook(void)
+{
+    g_crash_hook = NULL;
+    g_crash_hook_ctx = NULL;
+    InterlockedExchange(&g_crash_hook_running, 0);
+}
+
+void signal_handler_run_crash_hook(int sig, zcl_signal_info_t *info,
+                                   void *ucontext)
+{
+    signal_handler_crash_hook_fn fn = g_crash_hook;
+    if (!fn || InterlockedCompareExchange(&g_crash_hook_running, 1, 0) != 0)
+        return;
+    fn(sig, info, ucontext, g_crash_hook_ctx);
+    InterlockedExchange(&g_crash_hook_running, 0);
+}
+
+static LONG CALLBACK windows_exception_handler(EXCEPTION_POINTERS *exception)
+{
+    zcl_signal_info_t info = {
+        .code = exception && exception->ExceptionRecord
+                    ? (int)exception->ExceptionRecord->ExceptionCode : 0,
+        .address = exception && exception->ExceptionRecord
+                       ? exception->ExceptionRecord->ExceptionAddress : NULL,
+    };
+    signal_handler_run_crash_hook(info.code, &info,
+                                  exception ? exception->ContextRecord : NULL);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+static BOOL WINAPI windows_console_handler(DWORD event)
+{
+    void (*handler)(int) = g_termination_handler;
+    if (!handler)
+        return FALSE;
+    if (event == CTRL_C_EVENT || event == CTRL_BREAK_EVENT ||
+        event == CTRL_CLOSE_EVENT || event == CTRL_LOGOFF_EVENT ||
+        event == CTRL_SHUTDOWN_EVENT) {
+        handler(event == CTRL_C_EVENT ? SIGINT : SIGTERM);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static BOOL CALLBACK windows_exception_install_once(PINIT_ONCE once,
+                                                    PVOID parameter,
+                                                    PVOID *context)
+{
+    (void)once;
+    (void)parameter;
+    (void)context;
+    SetErrorMode(GetErrorMode() | SEM_NOGPFAULTERRORBOX |
+                 SEM_FAILCRITICALERRORS);
+    return AddVectoredExceptionHandler(1, windows_exception_handler) != NULL;
+}
+
+static BOOL CALLBACK windows_console_install_once(PINIT_ONCE once,
+                                                  PVOID parameter,
+                                                  PVOID *context)
+{
+    (void)once;
+    (void)parameter;
+    (void)context;
+    return SetConsoleCtrlHandler(windows_console_handler, TRUE);
+}
+
+int signal_handler_install(void)
+{
+    /* Prevent Windows Error Reporting UI; the supervisor observes the real
+     * exception because the vectored handler always continues the search. */
+    return InitOnceExecuteOnce(&g_exception_once,
+                               windows_exception_install_once, NULL, NULL)
+               ? 0 : -1;
+}
+
+int signal_handler_install_termination(void (*handler)(int))
+{
+    if (!handler)
+        return -1;
+    g_termination_handler = handler;
+    return InitOnceExecuteOnce(&g_console_once, windows_console_install_once,
+                               NULL, NULL) ? 0 : -1;
+}
+
+#else
 #include <execinfo.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -191,3 +305,4 @@ int signal_handler_install_termination(void (*handler)(int))
         return -1;
     return 0;
 }
+#endif

@@ -224,6 +224,12 @@ MANIFEST=(
   # directory/launch work), so this could only ever be a compile check here.
   "tools/winacceptance/os_binary_slots_refusal_acceptance.c|win|"
 
+  # ── Wave 4 ─────────────────────────────────────────────────────────────
+  # --- win: includes <windows.h> unconditionally and drives VirtualAlloc /
+  # VirtualFree directly. Every assertion is about the Win32 page-locking
+  # seam, so there is nothing for this host to execute -- compile check only.
+  "tools/winacceptance/pagelocker_acceptance.c|win|"
+
   # --- run: portable, meaningful, and actually executed on this host ------
   # No <windows.h> and no _WIN32 split anywhere: it drives rng_fill() through
   # the public seam and asserts properties that hold on EVERY arm — two
