@@ -977,6 +977,11 @@ AGENT_IMPACT_RULE("lib/hotswap/src/hotswap_sealed_image.c|lib/hotswap/include/ho
  * static caller; otherwise an explicitly admitted live edit is mislabeled as
  * an unmapped code change. Public contract headers still classify as restart. */
 AGENT_IMPACT_RULE("app/services/src/zcode_c23_corpus_service.c|app/services/include/services/zcode_c23_corpus_service.h|app/services/src/zcode_c23_economics_service.c|app/services/src/zcode_c23_economics_internal.h|app/services/include/services/zcode_c23_economics_service.h|lib/test/src/test_zcode_commons.c", "zcode_commons")
+/* Projection and family-admission suites are self-owned: a change to the
+ * test source proves through its own registered group, like the commons
+ * row above. */
+AGENT_IMPACT_RULE("lib/test/src/test_zcode_commons_projection.c", "zcode_commons_projection")
+AGENT_IMPACT_RULE("lib/test/src/test_zcode_family_admission.c", "zcode_family_admission")
 AGENT_IMPACT_RULE("tools/command/native_zcode_commons_command.c|lib/test/src/test_zcode_creation_attribution.c", "zcode_creation_attribution cli_render command_registry_catalog make_lint_gates")
 /* Package search/show presentation is a pure service island. The resident
  * host continues to own CAS/index reads and every publication or execution
@@ -999,6 +1004,10 @@ AGENT_IMPACT_RULE("app/services/src/zcode_lane_view_service.c|app/services/inclu
 /* The service registry and its purity/contract checker are harness ownership,
  * separate from any product island named by a row. */
 AGENT_IMPACT_RULE("config/hotswap_services.def|lib/hotswap/src/hotswap_service_registry.c|lib/hotswap/include/hotswap/hotswap_service_registry.h|tools/lint/check_hotswap_service_islands.sh|lib/test/src/test_hotswap_service_registry.c|lib/test/fixtures/hotswap_service_*.def|lib/test/fixtures/hotswap_service_*.c|lib/test/fixtures/hotswap_service_*.h", "hotswap_service_registry dev_platform make_lint_gates")
+/* Shadow-owner membership is a config def included directly by the hotswap
+ * service; registry + dev_platform own its behavioral proof (dev_platform
+ * plants the def as a closure fixture). */
+AGENT_IMPACT_RULE("config/hotswap_shadow_owners.def", "hotswap_service_registry dev_platform make_lint_gates")
 AGENT_IMPACT_RULE("app/services/src/dev_reflex_policy_service.c|app/services/include/services/dev_reflex_policy_service.h", "dev_platform hotswap_service_registry hotswap_module_v2 make_lint_gates")
 AGENT_IMPACT_RULE("app/controllers/src/metaverse_controller.c|app/services/src/property_catalog_service.c|lib/metaverse/src/property_id.c|lib/metaverse/src/property_view.c|lib/metaverse/src/property_work.c|lib/metaverse/src/property_action.c|lib/metaverse/src/adapter_registry.c|lib/metaverse/src/manifest_read.c|lib/metaverse/src/adapter_content.c|lib/metaverse/src/adapter_zcode.c|lib/metaverse/src/adapter_znam.c|lib/metaverse/src/adapter_zslp.c|app/models/src/znam.c|app/models/include/models/znam.h|app/models/src/zslp.c|app/models/include/models/zslp.h", "hotswap_module_v2 hotswap_module metaverse_catalog metaverse_broker_authority telemetry_metaverse znam zslp_store_port zslp_ledger make_lint_gates")
 /* Model-neutral ZCODE development wires compose package/source/lock/toolchain
