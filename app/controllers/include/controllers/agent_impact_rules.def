@@ -1137,7 +1137,7 @@ AGENT_IMPACT_RULE("app/services/include/services/tip_agreement_watch.h|lib/test/
  * shape, the diagnostics dumper, the site route and the controller are one
  * fail-closed slice — a change to any of them can silently alter what a peer
  * reads as another peer's claim. */
-AGENT_IMPACT_RULE("app/services/src/mesh_observation_collect.c|app/services/src/mesh_observation_compose.c|app/services/src/mesh_observation_json.c|app/services/src/mesh_observation_sample.c|app/services/include/services/mesh_observation.h|app/controllers/src/diagnostics_mesh_observation.c|app/controllers/src/observation_site_controller.c|app/controllers/include/controllers/observation_site_controller.h|lib/test/src/test_mesh_observation.c|lib/test/src/test_mesh_observation_compose.c", "mesh_observation mesh_observation_compose site_routes make_lint_gates")
+AGENT_IMPACT_RULE("app/services/src/mesh_observation_collect.c|app/services/src/mesh_observation_compose.c|app/services/src/mesh_observation_json.c|app/services/src/mesh_observation_sample.c|app/services/include/services/mesh_observation.h|app/controllers/src/diagnostics_mesh_observation.c|app/controllers/src/observation_site_controller.c|app/controllers/include/controllers/observation_site_controller.h|lib/test/src/test_mesh_observation.c|lib/test/src/test_mesh_observation_compose.c|lib/test/src/test_mesh_observation_dump.c", "mesh_observation mesh_observation_compose mesh_observation_dump site_routes make_lint_gates")
 
 /* The site-route registry itself. site_routes.def is the single X-macro table
  * every HTTP surface is declared in, so any lane that adds a page edits it and

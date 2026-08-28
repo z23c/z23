@@ -369,6 +369,12 @@ void mesh_observation_sample_once(void)
     snprintf(s->onion, sizeof(s->onion), "%s", addr ? addr : "");
     const char *sid = zcl_build_source_id_sha256();
     snprintf(s->source_id, sizeof(s->source_id), "%s", sid ? sid : "");
+    /* Compile-time, like source_id beside it: this says what the binary was
+     * BUILT FOR, which is the question a reader needs when it sees
+     * tor_stub_build. A runtime probe would answer a different question and
+     * would disagree on a cross-built or emulated host. */
+    snprintf(s->os, sizeof(s->os), "%s", mesh_obs_platform_os());
+    snprintf(s->arch, sizeof(s->arch), "%s", mesh_obs_platform_arch());
     s->fsync_us = -1;
     s->pread_us = -1;
 

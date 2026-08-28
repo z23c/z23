@@ -28,6 +28,7 @@
 #include <stdint.h>
 
 struct json_value;
+struct mesh_obs_slot;
 
 /* Same handler shape as blog_site_handle_request: returns the full HTTP
  * response length written to `response`, or 0 when the mount cannot answer
@@ -46,5 +47,23 @@ bool mesh_observation_dump_state_json(struct json_value *out, const char *key);
  * never healthy. */
 bool mesh_observation_compose_dump_state_json(struct json_value *out,
                                               const char *key);
+
+/* Render an ALREADY-COLLECTED slot array as the `records` coverage list of
+ * the mesh_compose dumper. Split out for the same reason
+ * agent_push_security_posture_snapshot_json is: the rendering is a pure
+ * function of the slots, so a caller that already holds them must be able
+ * to render without repeating the collection. The live dumper collects into
+ * one file-static array under a leaf mutex and calls this; a test passes
+ * slots it built itself and reads the JSON back.
+ *
+ * `n` slots render IN ORDER, one object each. n == 0 renders an EMPTY
+ * array, never a missing key — a reader must be able to tell "I looked and
+ * found nobody" from "this build does not report coverage".
+ *
+ * Nothing here grades a slot. `os`/`arch` are carried through verbatim,
+ * including the empty string that means the emitter said nothing. */
+void mesh_observation_push_slot_coverage_json(struct json_value *out,
+                                              const struct mesh_obs_slot *slots,
+                                              size_t n);
 
 #endif /* ZCL_CONTROLLERS_OBSERVATION_SITE_CONTROLLER_H */

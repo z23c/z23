@@ -816,6 +816,80 @@ static int t_slow_box_is_reachable_not_failed(void)
     return failures;
 }
 
+/* The same ruling for the build target. A fleet that spans Linux, macOS and
+ * Windows only stays honest if the platform a record came from can be READ
+ * without ever being GRADED. FAIL-ARM: two runs whose records differ in
+ * nothing but `os`/`arch` must produce byte-identical conclusions, and the
+ * all-macOS run in particular must not be downgraded for being macOS. */
+static int t_platform_is_weighted_never_graded(void)
+{
+    int failures = 0;
+    TEST_CASE("compose: a macOS fleet grades identically to a Linux one")
+    {
+        struct mesh_reader_chain reader;
+        struct obs_reader_ctx ctx;
+        obs_reader_init(&reader, &ctx, 0);
+
+        struct mesh_obs_slot linux_fleet[2];
+        obs_make_slot(&linux_fleet[0], "lin1.onion", OBS_BASE_TIP, 0,
+                      OBS_NOW - 10);
+        obs_make_slot(&linux_fleet[1], "lin2.onion", OBS_BASE_TIP, 0,
+                      OBS_NOW - 10);
+        obs_add_edge(&linux_fleet[0], "lin2.onion", OBS_BASE_TIP,
+                     linux_fleet[1].rec.self.tip_hash_hex);
+        obs_add_edge(&linux_fleet[1], "lin1.onion", OBS_BASE_TIP,
+                     linux_fleet[0].rec.self.tip_hash_hex);
+        for (int i = 0; i < 2; i++) {
+            snprintf(linux_fleet[i].rec.self.os,
+                     sizeof(linux_fleet[i].rec.self.os), "%s", "linux");
+            snprintf(linux_fleet[i].rec.self.arch,
+                     sizeof(linux_fleet[i].rec.self.arch), "%s", "x86_64");
+        }
+
+        /* Identical chain content. The ONLY difference is the build target —
+         * and the macOS records also carry the honest tor_stub_build that
+         * platform forces, which must not be read as a fault either. */
+        struct mesh_obs_slot mac_fleet[2];
+        memcpy(mac_fleet, linux_fleet, sizeof(linux_fleet));
+        for (int i = 0; i < 2; i++) {
+            snprintf(mac_fleet[i].rec.self.os,
+                     sizeof(mac_fleet[i].rec.self.os), "%s", "macos");
+            snprintf(mac_fleet[i].rec.self.arch,
+                     sizeof(mac_fleet[i].rec.self.arch), "%s", "arm64");
+            mac_fleet[i].rec.self.tor_stub_build = true;
+        }
+
+        /* Positive control: the two inputs really are different, so an
+         * equal verdict below is evidence and not a comparison of one
+         * buffer with itself. */
+        ASSERT(memcmp(linux_fleet, mac_fleet, sizeof(linux_fleet)) != 0);
+        ASSERT(strcmp(mac_fleet[0].rec.self.os, "macos") == 0);
+
+        struct mesh_conclusion a, b;
+        mesh_observation_compose(linux_fleet, 2, &reader, &k_obs_budget,
+                                 OBS_NOW, &a);
+        mesh_observation_compose(mac_fleet, 2, &reader, &k_obs_budget,
+                                 OBS_NOW, &b);
+
+        ASSERT(a.state == MESH_AGREEING);
+        ASSERT(b.state == MESH_AGREEING);
+        ASSERT_EQ(a.records_fresh, b.records_fresh);
+        ASSERT_EQ(a.distinct_identities, b.distinct_identities);
+        ASSERT_EQ(a.agree_at_anchor, b.agree_at_anchor);
+        ASSERT(obs_conclusion_eq(&a, &b));
+
+        /* A mixed fleet is not a lesser fleet either. */
+        struct mesh_obs_slot mixed[2];
+        memcpy(&mixed[0], &linux_fleet[0], sizeof(mixed[0]));
+        memcpy(&mixed[1], &mac_fleet[1], sizeof(mixed[1]));
+        struct mesh_conclusion c;
+        mesh_observation_compose(mixed, 2, &reader, &k_obs_budget, OBS_NOW,
+                                 &c);
+        ASSERT(obs_conclusion_eq(&a, &c));
+    } TEST_END
+    return failures;
+}
+
 /* RULING 2 as a source-text lint, in C — `printf ... | grep -q` under
  * pipefail returns 141 on a MATCH and would invert exactly this assertion.
  * FAIL-LOUD: an unreadable or short file is a FAILURE, never a skip, because
@@ -856,6 +930,10 @@ static int t_composer_cannot_see_timing(void)
             "fsync_us", "pread_us", "min_ping_us", "stage_elapsed_us",
             "rotational", "cores", "ram_bytes", "sample_elapsed_us",
             "hw_fingerprint",
+            /* A platform is WEIGHTED by a reader, never a bar a machine is
+             * graded against. The day the composer can name a build target
+             * is the day "macOS" or "Windows" can become a failing grade. */
+            "arch",
         };
         for (size_t i = 0; i < sizeof(forbidden) / sizeof(forbidden[0]); i++) {
             if (strstr(buf, forbidden[i]) != NULL) {
@@ -1109,6 +1187,7 @@ int test_mesh_observation_compose(void)
     failures += t_no_common_height_is_unverified();
     failures += t_reader_without_chain_cannot_conclude();
     failures += t_slow_box_is_reachable_not_failed();
+    failures += t_platform_is_weighted_never_graded();
     failures += t_composer_cannot_see_timing();
     failures += t_reciprocity();
     failures += t_contradiction_is_reported_not_graded();

@@ -50,6 +50,11 @@ static void mo_make_record(struct mesh_observation *r)
              "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvw.onion");
     snprintf(r->self.source_id, sizeof(r->self.source_id), "%s",
              "0123456789abcdef0123456789abcdef01234567");
+    /* Deliberately NOT this test host's own platform: a round trip that
+     * quietly re-derived the field from the running build instead of
+     * carrying the emitter's would still pass if these said "linux". */
+    snprintf(r->self.os, sizeof(r->self.os), "%s", "macos");
+    snprintf(r->self.arch, sizeof(r->self.arch), "%s", "arm64");
     r->self.tip_height = 2413907;
     snprintf(r->self.tip_hash_hex, sizeof(r->self.tip_hash_hex), "%064llx",
              (unsigned long long)0x1234abcdULL);
@@ -328,6 +333,9 @@ static int t_round_trip_is_byte_stable(void)
 
         ASSERT_EQ(back.self.pread_us, -1);          /* never rewritten to 0 */
         ASSERT_EQ(back.self.fsync_us, 72649);
+        /* The EMITTER's build target survives, not the reader's. */
+        ASSERT_STR_EQ(back.self.os, "macos");
+        ASSERT_STR_EQ(back.self.arch, "arm64");
         ASSERT_EQ(back.edge_count, 2);
         ASSERT(back.edges[1].transport == MESH_OBS_DEADLINE);
         ASSERT(back.edges[1].header_service == MESH_OBS_NOT_PROBED);
@@ -346,6 +354,109 @@ static int t_round_trip_is_byte_stable(void)
         size_t w2 = mo_emit(&back, g_mo_b, sizeof(g_mo_b));
         ASSERT_EQ(w1, w2);
         ASSERT_STR_EQ(g_mo_a, g_mo_b);
+    } TEST_END
+    return failures;
+}
+
+/* PLATFORM TRUTH. `tor_stub_build` cannot carry it alone: a Linux box built
+ * with plain `make` and a macOS box whose platform HAS no embedded Tor emit
+ * the identical `true`, and a reader that cannot separate them is guessing
+ * about which machines can ever be reached.
+ *
+ * Three arms, because the field is only worth having if all three hold:
+ *   - this build states its own target, and never as "";
+ *   - a token from a platform THIS BUILD HAS NEVER HEARD OF survives the
+ *     wire verbatim, so the mesh does not go blind on the first node of the
+ *     next platform;
+ *   - a malformed token is refused under its OWN name.
+ */
+static int t_platform_is_named_and_survives_the_wire(void)
+{
+    int failures = 0;
+    TEST_CASE("mesh_observation: a node names the platform it was built for")
+    {
+        /* 1. this build answers, and "" is never the answer */
+        const char *os = mesh_obs_platform_os();
+        const char *arch = mesh_obs_platform_arch();
+        ASSERT(os != NULL && os[0] != '\0');
+        ASSERT(arch != NULL && arch[0] != '\0');
+        ASSERT(mesh_obs_platform_token_ok(os));
+        ASSERT(mesh_obs_platform_token_ok(arch));
+        ASSERT(strlen(os) < MESH_OBS_PLATFORM_MAX);
+        ASSERT(strlen(arch) < MESH_OBS_PLATFORM_MAX);
+
+        /* the token vocabulary is bounded and lowercase; "" means the
+         * emitter said nothing and is a real, valid value */
+        ASSERT(mesh_obs_platform_token_ok(""));
+        ASSERT(mesh_obs_platform_token_ok("macos"));
+        ASSERT(mesh_obs_platform_token_ok("windows"));
+        ASSERT(mesh_obs_platform_token_ok("x86_64"));
+        ASSERT(mesh_obs_platform_token_ok("MacOS") == false);
+        ASSERT(mesh_obs_platform_token_ok("mac os") == false);
+        ASSERT(mesh_obs_platform_token_ok("mac.os") == false);
+        ASSERT(mesh_obs_platform_token_ok(NULL) == false);
+        ASSERT(mesh_obs_platform_token_ok("abcdefghijklmnop") == false);
+
+        /* 2. the tokens reach the document as their own keys */
+        struct mesh_observation r;
+        mo_make_record(&r);
+        size_t w = mo_emit(&r, g_mo_a, sizeof(g_mo_a));
+        ASSERT(w > 0 && w < sizeof(g_mo_a));
+        ASSERT(strstr(g_mo_a, "\"os\"") != NULL);
+        ASSERT(strstr(g_mo_a, "\"arch\"") != NULL);
+        ASSERT(strstr(g_mo_a, "\"macos\"") != NULL);
+        ASSERT(strstr(g_mo_a, "\"arm64\"") != NULL);
+
+        /* 3. a platform this build has never heard of is CARRIED, not
+         * refused. FAIL-ARM against anyone turning this into a closed enum:
+         * that change would drop this document entirely, which is exactly
+         * how a new platform becomes invisible to the fleet. */
+        static char future[512];
+        snprintf(future, sizeof(future),
+                 "{\"schema\":\"%s\",\"self\":{\"os\":\"plan9\","
+                 "\"arch\":\"riscv64\"},\"edges\":[],\"coverage\":"
+                 "{\"edge_count\":0,\"edges_truncated\":0,"
+                 "\"rows_unreadable\":0}}", MESH_OBS_SCHEMA);
+        struct mesh_observation fwd;
+        char freason[MESH_OBS_REASON_MAX];
+        memset(freason, 0, sizeof(freason));
+        ASSERT(mesh_observation_parse_json(future, strlen(future), &fwd,
+                                           freason));
+        ASSERT_STR_EQ(fwd.self.os, "plan9");
+        ASSERT_STR_EQ(fwd.self.arch, "riscv64");
+
+        /* 4. an emitter that says nothing is distinguishable from one that
+         * says something — "" survives as "", never as a guess */
+        static char silent[512];
+        snprintf(silent, sizeof(silent),
+                 "{\"schema\":\"%s\",\"self\":{},\"edges\":[],\"coverage\":"
+                 "{\"edge_count\":0,\"edges_truncated\":0,"
+                 "\"rows_unreadable\":0}}", MESH_OBS_SCHEMA);
+        struct mesh_observation quiet;
+        char qreason[MESH_OBS_REASON_MAX];
+        memset(qreason, 0, sizeof(qreason));
+        ASSERT(mesh_observation_parse_json(silent, strlen(silent), &quiet,
+                                           qreason));
+        ASSERT_STR_EQ(quiet.self.os, "");
+        ASSERT_STR_EQ(quiet.self.arch, "");
+
+        /* 5. a MALFORMED token is refused under its own name, and the
+         * caller's struct is left untouched */
+        static char bad[512];
+        snprintf(bad, sizeof(bad),
+                 "{\"schema\":\"%s\",\"self\":{\"os\":\"Linux!\"},"
+                 "\"edges\":[],\"coverage\":{\"edge_count\":0,"
+                 "\"edges_truncated\":0,\"rows_unreadable\":0}}",
+                 MESH_OBS_SCHEMA);
+        struct mesh_observation sentinel, out;
+        memset(&sentinel, 0x5A, sizeof(sentinel));
+        memcpy(&out, &sentinel, sizeof(out));
+        char breason[MESH_OBS_REASON_MAX];
+        memset(breason, 0, sizeof(breason));
+        ASSERT(mesh_observation_parse_json(bad, strlen(bad), &out,
+                                           breason) == false);
+        ASSERT_STR_EQ(breason, "bad_platform_token");
+        ASSERT(memcmp(&out, &sentinel, sizeof(out)) == 0);
     } TEST_END
     return failures;
 }
@@ -602,6 +713,7 @@ int test_mesh_observation(void)
     failures += t_document_has_no_verdict_vocabulary();
     failures += t_enums_cross_the_wire_as_tokens();
     failures += t_round_trip_is_byte_stable();
+    failures += t_platform_is_named_and_survives_the_wire();
     failures += t_truncation_is_published_not_hidden();
     failures += t_parse_refuses_by_name_and_leaves_out_untouched();
     failures += t_unsampled_node_publishes_nothing_usable();
