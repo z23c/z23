@@ -4,13 +4,16 @@
 
 #include "base/hex.h"
 #include "json/json.h"
+#include "platform/private_directory.h"
 #include "vcs/vcs_object.h"
 #include "vcs/zcode_creation_claim.h"
 
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <sys/stat.h>
+#endif
 
 static const char *zclaim_str(const struct json_value *input, const char *key)
 {
@@ -123,7 +126,15 @@ static void zclaim_handle_inline(const struct zcl_command_request *request,
     const char *workspace = NULL;
     if (!zclaim_parse_inline(request, reply, &claim, wire, root, &workspace))
         return;
-    if (persist && mkdir(workspace, 0700) != 0 && errno != EEXIST) {
+    bool workspace_ready = true;
+    if (persist) {
+#if defined(_WIN32)
+        workspace_ready = platform_private_directory_ensure(workspace);
+#else
+        workspace_ready = mkdir(workspace, 0700) == 0 || errno == EEXIST;
+#endif
+    }
+    if (!workspace_ready) {
         zclaim_fail(reply, "CREATION_CLAIM_WORKSPACE_CREATE_REFUSED",
                     "explicit scratch workspace root could not be created");
         return;
