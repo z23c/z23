@@ -37,11 +37,7 @@ static inline bool platform_socket_runtime_init(void)
 #include <fcntl.h>
 #include <sys/select.h>
 #include <sys/socket.h>
-/* fd_set, FD_ZERO/FD_SET, select(), and struct timeval live here, not in
- * sys/socket.h: a TU that reaches this header without a prior time-header
- * include (the package verifier's main_cli_modes does exactly that) must
- * still compile. */
-#include <sys/select.h>
+#include <sys/time.h>
 #include <unistd.h>
 typedef int platform_socket_t;
 #define PLATFORM_SOCKET_INVALID (-1)

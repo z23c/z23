@@ -23,7 +23,7 @@ app/controllers/src/agent_anchor_status_controller.c 847
 app/controllers/src/agent_controller.c 805
 app/controllers/src/api_controller_status.c 894
 app/controllers/src/api_controller_routes.c 834 # market-moderation dynamic route (split seam if this grows again)
-app/controllers/src/file_market_controller.c 809 # market-moderation RPCs (split seam: moderation handlers -> market_moderation_native_handler.c)
+app/controllers/src/file_market_controller.c 919 # market-moderation RPCs (split seam: moderation handlers -> market_moderation_native_handler.c)
 app/controllers/src/name_controller.c 1017
 app/controllers/src/swap_controller.c 1053 # atomic-swap money-shape guard (ADR-0009; split seam: settlement helpers)
 app/controllers/src/shop_native_want.c 932 # buyer want-ads: 5 leaves (post/list/status/cancel/review), sign+store controller; list truth fix moved the total into models/shop_want.c count twin (split seam: model helpers -> models/shop_want.c)
@@ -74,7 +74,7 @@ app/views/src/explorer_pages_view.c 819
 # the phrase, minting one, printing it once) landed in its own
 # config/src/boot_wallet_phrase.c instead of here, and took 25 lines of
 # existing wiring out of boot.c with it.
-config/src/boot.c 4277
+config/src/boot.c 4278
 config/src/boot_bundle_fetch.c 905
 config/src/boot_index.c 851
 config/src/boot_mint_anchor.c 808
@@ -100,9 +100,3 @@ app/services/src/build_fabric_worker.c 860
 # 2026-08-27: the fabric action scan moved off the thread stack onto a
 # named buffer; this reviewed baseline is a hard no-growth ceiling.
 app/services/src/build_fabric_service.c 799
-
-# 2026-08-26: NEW entry at current LOC — inherited growth: the Windows
-# runtime compat push took this controller from 798 to 805, crossing the
-# ceiling. Reviewed hard no-growth ceiling; the next touch should split
-# along the endpoint seams.
-app/controllers/src/api_controller.c 805

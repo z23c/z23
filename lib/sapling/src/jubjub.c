@@ -16,11 +16,6 @@
 #include "sapling/jubjub.h"
 #include <string.h>
 
-/* The 64-bit carry chains below use GCC's __int128; fr.c suppresses the same
- * pedantic diagnostics for the same reason. */
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wpedantic"
-
 /* Jubjub scalar field order r (little-endian bytes):
  * r = 0x0e7db4ea6533afa906673b0101343b00a6682093ccc81082d0970e5ed6f72cb7 */
 static const unsigned char JUBJUB_R[32] = {
@@ -130,5 +125,3 @@ void jubjub_to_scalar(const unsigned char *input, unsigned char *result)
 
     bi_to_bytes(&acc, result, 32);
 }
-
-#pragma GCC diagnostic pop
