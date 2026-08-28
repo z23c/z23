@@ -1083,6 +1083,8 @@ static int zpd_test_work_start_package_bounds(void)
         (void)snprintf(path, sizeof(path), "%s/src/x.c", root);
         ASSERT(zpd_write(path, "int x(void) { return 1; }\n"));
         ASSERT(zpd_plant_build_output(root));
+        char absolute_root[4400];
+        ASSERT(realpath(root, absolute_root) != NULL);
 
         struct json_value input;
         json_init(&input); json_set_object(&input);
@@ -1107,7 +1109,7 @@ static int zpd_test_work_start_package_bounds(void)
                       "unchanged") == 0);
         ASSERT(json_get(&reply.data, "details_available") &&
                !json_get_bool(json_get(&reply.data, "details_available")));
-        ASSERT(zpd_next_init_plan_is(&reply, root));
+        ASSERT(zpd_next_init_plan_is(&reply, absolute_root));
         zcl_command_reply_free(&reply);
         json_free(&input);
         zpd_fixture_cleanup(root);
@@ -1192,7 +1194,7 @@ static int zpd_test_work_start(void)
         ASSERT(json_read(&next_input, reply.next[0].input_json,
                          strlen(reply.next[0].input_json)));
         ASSERT(strcmp(json_get_str(json_get(&next_input, "workspace")),
-                      root) == 0);
+                      absolute_root) == 0);
         ASSERT(strcmp(json_get_str(json_get(&next_input, "work")),
                       saved_work_id) == 0);
         ASSERT(json_get(&next_input, "task_root") == NULL);
