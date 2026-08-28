@@ -112,14 +112,18 @@ selftest() {
     if check_paths "$fixture" "$LAB_BASELINE" "$MICRO_BASELINE" 2>/dev/null; then
         fail "selftest accepted a tracked live confirmation" || return 1
     fi
-    sed -i '$d' "$fixture/$LAB_BASELINE"
+    # Drop the last line via rewrite, not GNU `sed -i`: BSD sed takes the
+    # next argument as an in-place backup suffix, so `sed -i '$d' FILE`
+    # would eat FILE as the script and mutate nothing.
+    drop_last_line() { sed '$d' "$1" > "$1.nolid" && mv "$1.nolid" "$1"; }
+    drop_last_line "$fixture/$LAB_BASELINE"
 
     printf '%s\n' '{"schema":"zcl.transaction_micro_lab_event.v1"}' \
         >> "$fixture/$MICRO_BASELINE"
     if check_paths "$fixture" "$LAB_BASELINE" "$MICRO_BASELINE" 2>/dev/null; then
         fail "selftest accepted tracked micro-lab history" || return 1
     fi
-    sed -i '$d' "$fixture/$MICRO_BASELINE"
+    drop_last_line "$fixture/$MICRO_BASELINE"
 
     cp "$fixture/$LAB_BASELINE" "$fixture/private/$LAB_NAME"
     if check_paths "$fixture" "$LAB_BASELINE" "$MICRO_BASELINE" \

@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: immutable family-c23.v1 policy and deterministic moderation mesh. */
 
-#include "vcs/zcode_commons_v2.h"
+#include "vcs/zcode_commons.h"
 
 #include "base/serialize_le.h"
 #include "crypto/sha3.h"
@@ -46,7 +46,7 @@ void vcs_zcode_family_policy_v1_init(
     if (!policy) return;
     memset(policy, 0, sizeof(*policy));
     policy->schema_version = 1;
-    policy->flags = VCS_ZCODE_COMMONS_V2_REQUIRED_FLAGS;
+    policy->flags = VCS_ZCODE_COMMONS_REQUIRED_FLAGS;
     policy->excluded_reason_mask = VCS_ZCODE_FAMILY_EXCLUSION_MASK;
     policy->max_metadata_items = 4096;
     policy->max_dependency_objects = 4096;
@@ -87,34 +87,34 @@ void vcs_zcode_family_policy_v1_default(
     vcs_zcode_family_policy_v1_init(policy, profile_root, text_root);
 }
 
-enum vcs_zcode_commons_v2_error vcs_zcode_family_policy_v1_validate(
+enum vcs_zcode_commons_error vcs_zcode_family_policy_v1_validate(
     const struct vcs_zcode_family_policy_v1 *policy)
 {
-    if (!policy) return VCS_ZCODE_COMMONS_V2_NULL;
+    if (!policy) return VCS_ZCODE_COMMONS_NULL;
     if (policy->schema_version != 1)
-        return VCS_ZCODE_COMMONS_V2_VERSION_ERROR;
-    if (policy->flags != VCS_ZCODE_COMMONS_V2_REQUIRED_FLAGS)
-        return VCS_ZCODE_COMMONS_V2_FLAGS;
+        return VCS_ZCODE_COMMONS_VERSION_ERROR;
+    if (policy->flags != VCS_ZCODE_COMMONS_REQUIRED_FLAGS)
+        return VCS_ZCODE_COMMONS_FLAGS;
     if (policy->excluded_reason_mask != VCS_ZCODE_FAMILY_EXCLUSION_MASK)
-        return VCS_ZCODE_COMMONS_V2_POLICY;
+        return VCS_ZCODE_COMMONS_POLICY;
     if (policy->max_metadata_items != 4096 ||
         policy->max_dependency_objects != 4096 ||
         policy->max_extracted_bytes != UINT64_C(64) * 1024u * 1024u)
-        return VCS_ZCODE_COMMONS_V2_LIMIT;
+        return VCS_ZCODE_COMMONS_LIMIT;
     if (!family_nonzero(policy->profile_name_root) ||
         !family_nonzero(policy->policy_text_root))
-        return VCS_ZCODE_COMMONS_V2_ROOT;
-    return VCS_ZCODE_COMMONS_V2_OK;
+        return VCS_ZCODE_COMMONS_ROOT;
+    return VCS_ZCODE_COMMONS_OK;
 }
 
-enum vcs_zcode_commons_v2_error vcs_zcode_family_policy_v1_root(
+enum vcs_zcode_commons_error vcs_zcode_family_policy_v1_root(
     const struct vcs_zcode_family_policy_v1 *policy, uint8_t out[32])
 {
     if (out) memset(out, 0, 32);
-    if (!policy || !out) return VCS_ZCODE_COMMONS_V2_NULL;
-    enum vcs_zcode_commons_v2_error error =
+    if (!policy || !out) return VCS_ZCODE_COMMONS_NULL;
+    enum vcs_zcode_commons_error error =
         vcs_zcode_family_policy_v1_validate(policy);
-    if (error != VCS_ZCODE_COMMONS_V2_OK) return error;
+    if (error != VCS_ZCODE_COMMONS_OK) return error;
     struct sha3_256_ctx sha;
     static const char domain[] = VCS_ZCODE_FAMILY_POLICY_V1_DOMAIN;
     sha3_256_init(&sha);
@@ -128,7 +128,7 @@ enum vcs_zcode_commons_v2_error vcs_zcode_family_policy_v1_root(
     sha3_256_write(&sha, policy->profile_name_root, 32);
     sha3_256_write(&sha, policy->policy_text_root, 32);
     sha3_256_finalize(&sha, out);
-    return VCS_ZCODE_COMMONS_V2_OK;
+    return VCS_ZCODE_COMMONS_OK;
 }
 
 enum vcs_zcode_moderation_vote_v1 vcs_zcode_moderation_coverage_vote_v1(
@@ -157,14 +157,14 @@ enum vcs_zcode_moderation_vote_v1 vcs_zcode_moderation_coverage_vote_v1(
     return VCS_ZCODE_MODERATION_VOTE_BLOCK;
 }
 
-enum vcs_zcode_commons_v2_error vcs_zcode_classification_receipt_v1_validate(
+enum vcs_zcode_commons_error vcs_zcode_classification_receipt_v1_validate(
     const struct vcs_zcode_classification_receipt_v1 *receipt)
 {
-    if (!receipt) return VCS_ZCODE_COMMONS_V2_NULL;
+    if (!receipt) return VCS_ZCODE_COMMONS_NULL;
     if (receipt->schema_version != 1)
-        return VCS_ZCODE_COMMONS_V2_VERSION_ERROR;
-    if (receipt->flags != VCS_ZCODE_COMMONS_V2_REQUIRED_FLAGS)
-        return VCS_ZCODE_COMMONS_V2_FLAGS;
+        return VCS_ZCODE_COMMONS_VERSION_ERROR;
+    if (receipt->flags != VCS_ZCODE_COMMONS_REQUIRED_FLAGS)
+        return VCS_ZCODE_COMMONS_FLAGS;
     if (!family_nonzero(receipt->request_root) ||
         !family_nonzero(receipt->content_root) ||
         !family_nonzero(receipt->policy_root) ||
@@ -172,12 +172,12 @@ enum vcs_zcode_commons_v2_error vcs_zcode_classification_receipt_v1_validate(
         !family_nonzero(receipt->operator_group_root) ||
         !family_nonzero(receipt->model_family_root) ||
         !family_nonzero(receipt->signature))
-        return VCS_ZCODE_COMMONS_V2_ROOT;
+        return VCS_ZCODE_COMMONS_ROOT;
     if (receipt->audience > VCS_ZCODE_AUDIENCE_UNKNOWN ||
         receipt->behavior > VCS_ZCODE_BEHAVIOR_UNKNOWN)
-        return VCS_ZCODE_COMMONS_V2_ENUM;
+        return VCS_ZCODE_COMMONS_ENUM;
     if (receipt->completed_height == 0 || receipt->completed_mtp <= 0)
-        return VCS_ZCODE_COMMONS_V2_IMMATURE;
+        return VCS_ZCODE_COMMONS_IMMATURE;
     enum vcs_zcode_moderation_vote_v1 vote =
         vcs_zcode_moderation_coverage_vote_v1(
             &receipt->coverage,
@@ -185,19 +185,19 @@ enum vcs_zcode_commons_v2_error vcs_zcode_classification_receipt_v1_validate(
             (enum vcs_zcode_moderation_behavior_v1)receipt->behavior);
     if (vote == VCS_ZCODE_MODERATION_VOTE_UNKNOWN &&
         receipt->reason_code_mask == 0)
-        return VCS_ZCODE_COMMONS_V2_COVERAGE;
-    return VCS_ZCODE_COMMONS_V2_OK;
+        return VCS_ZCODE_COMMONS_COVERAGE;
+    return VCS_ZCODE_COMMONS_OK;
 }
 
-enum vcs_zcode_commons_v2_error vcs_zcode_classification_receipt_v1_root(
+enum vcs_zcode_commons_error vcs_zcode_classification_receipt_v1_root(
     const struct vcs_zcode_classification_receipt_v1 *receipt,
     uint8_t out[32])
 {
     if (out) memset(out, 0, 32);
-    if (!receipt || !out) return VCS_ZCODE_COMMONS_V2_NULL;
-    enum vcs_zcode_commons_v2_error error =
+    if (!receipt || !out) return VCS_ZCODE_COMMONS_NULL;
+    enum vcs_zcode_commons_error error =
         vcs_zcode_classification_receipt_v1_validate(receipt);
-    if (error != VCS_ZCODE_COMMONS_V2_OK) return error;
+    if (error != VCS_ZCODE_COMMONS_OK) return error;
     struct sha3_256_ctx sha;
     static const char domain[] = VCS_ZCODE_CLASSIFICATION_RECEIPT_V1_DOMAIN;
     sha3_256_init(&sha);
@@ -224,7 +224,7 @@ enum vcs_zcode_commons_v2_error vcs_zcode_classification_receipt_v1_root(
     family_hash_u64(&sha, (uint64_t)receipt->completed_mtp);
     sha3_256_write(&sha, receipt->signature, 64);
     sha3_256_finalize(&sha, out);
-    return VCS_ZCODE_COMMONS_V2_OK;
+    return VCS_ZCODE_COMMONS_OK;
 }
 
 struct family_panel_candidate {
@@ -275,7 +275,7 @@ static enum vcs_zcode_moderation_tier_v1 family_tier(size_t groups)
     return VCS_ZCODE_MODERATION_TIER_RESILIENT_PASS;
 }
 
-enum vcs_zcode_commons_v2_error vcs_zcode_classification_panel_v1_select(
+enum vcs_zcode_commons_error vcs_zcode_classification_panel_v1_select(
     const struct vcs_zcode_moderation_service_v1 *services,
     size_t service_count, const uint8_t future_block_hash[32],
     bool resilient_appeal,
@@ -283,10 +283,10 @@ enum vcs_zcode_commons_v2_error vcs_zcode_classification_panel_v1_select(
 {
     if (out) memset(out, 0, sizeof(*out));
     if ((!services && service_count > 0) || !future_block_hash || !out)
-        return VCS_ZCODE_COMMONS_V2_NULL;
+        return VCS_ZCODE_COMMONS_NULL;
     if (service_count > VCS_ZCODE_MODERATION_MAX_SERVICES ||
         !family_nonzero(future_block_hash))
-        return VCS_ZCODE_COMMONS_V2_LIMIT;
+        return VCS_ZCODE_COMMONS_LIMIT;
     struct family_panel_candidate candidates[
         VCS_ZCODE_MODERATION_MAX_SERVICES];
     size_t candidate_count = 0;
@@ -324,7 +324,7 @@ enum vcs_zcode_commons_v2_error vcs_zcode_classification_panel_v1_select(
     out->eligible_operator_groups = candidate_count;
     out->tier = family_tier(candidate_count);
     if (resilient_appeal && candidate_count < 11)
-        return VCS_ZCODE_COMMONS_V2_QUORUM;
+        return VCS_ZCODE_COMMONS_QUORUM;
     size_t target = resilient_appeal ? 11u
         : candidate_count >= 7 ? 7u : candidate_count;
     out->required_votes = resilient_appeal ? 8u
@@ -383,7 +383,7 @@ enum vcs_zcode_commons_v2_error vcs_zcode_classification_panel_v1_select(
         sha3_256_write(&sha, service->model_family_root, 32);
     }
     sha3_256_finalize(&sha, out->selection_root);
-    return VCS_ZCODE_COMMONS_V2_OK;
+    return VCS_ZCODE_COMMONS_OK;
 }
 
 enum vcs_zcode_commons_admission_state_v1

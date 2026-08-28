@@ -15,7 +15,7 @@
 #include "vcs/zcode_accepted_work_bundle.h"
 #include "vcs/package_mapping.h"
 #include "vcs/package_release.h"
-#include "vcs/zcode_commons_v2.h"
+#include "vcs/zcode_commons.h"
 #include "vcs/zcode_dht_record.h"
 #include "vcs/build_action.h"
 #include "base/hex.h"
@@ -1177,10 +1177,10 @@ static bool publication_workspace_release_load(
             &workspace_wire, &workspace_wire_len) == 0 &&
         vcs_zcode_workspace_manifest_v1_decode(
             &decoded, workspace_wire, workspace_wire_len) ==
-            VCS_ZCODE_COMMONS_V2_OK &&
+            VCS_ZCODE_COMMONS_OK &&
         vcs_zcode_workspace_manifest_v1_root(
             &decoded.manifest, checked_workspace_root) ==
-            VCS_ZCODE_COMMONS_V2_OK &&
+            VCS_ZCODE_COMMONS_OK &&
         memcmp(checked_workspace_root,
                chain->workspace.artifact_root, 32) == 0;
     size_t matching_entries = 0;

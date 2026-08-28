@@ -17,6 +17,8 @@
 #include <stdlib.h>
 #include <wchar.h>
 
+#include "base/safe_alloc.h"
+
 #define Z23_HEADLESS_ERROR_MODE \
     (SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX)
 
@@ -31,7 +33,8 @@ static bool append(struct wide_buffer *buffer, wchar_t value)
     if (buffer->used == buffer->capacity) {
         size_t next = buffer->capacity ? buffer->capacity * 2u : 256u;
         if (next < buffer->capacity || next > 32768u) return false;
-        wchar_t *grown = realloc(buffer->data, next * sizeof(*grown)); // raw-alloc-ok:standalone-mingw-launcher-links-no-safe_alloc
+        wchar_t *grown = zcl_realloc(buffer->data, next * sizeof(*grown),
+                                     "win-headless widebuf");
         if (!grown) return false;
         buffer->data = grown;
         buffer->capacity = next;
@@ -164,7 +167,8 @@ int wmain(int argc, wchar_t **argv)
         ? CreateDesktopW(desktop_name, NULL, NULL, 0, GENERIC_ALL, NULL)
         : NULL;
     startup.StartupInfo.lpDesktop = desktop_name;
-    startup.lpAttributeList = malloc(attribute_size); // raw-alloc-ok:standalone-mingw-launcher-links-no-safe_alloc
+    startup.lpAttributeList = zcl_malloc(attribute_size,
+                                         "win-headless attrlist");
     bool list_initialized = startup.lpAttributeList &&
         InitializeProcThreadAttributeList(startup.lpAttributeList, 1, 0,
                                           &attribute_size);

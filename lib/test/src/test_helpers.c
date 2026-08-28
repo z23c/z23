@@ -137,6 +137,30 @@ void test_make_tmpdir(char *buf, size_t n, const char *prefix,
     mkdir(buf, 0700);
 }
 
+/* Absolutize `path` against the process cwd into `abs`. The
+ * platform_private_* seam (private_destination / private_file) is
+ * absolute-only by contract — '/'-rooted on POSIX, drive-absolute on
+ * Windows — so any fixture path handed to code that resolves a private
+ * destination (checkpoint flush, wallet backup dir, ...) must be in
+ * absolute form. Copies `path` through unchanged when cwd is unavailable;
+ * returns whether the result is absolute. */
+bool test_abs_path(const char *path, char *abs, size_t n)
+{
+    if (!path || !abs || n == 0)
+        return false;
+    if (path[0] == '/') {
+        snprintf(abs, n, "%s", path);
+        return true;
+    }
+    char cwd[1024];
+    if (!getcwd(cwd, sizeof(cwd))) {
+        snprintf(abs, n, "%s", path);
+        return false;
+    }
+    int w = snprintf(abs, n, "%s/%s", cwd, path);
+    return w > 0 && (size_t)w < n;
+}
+
 bool test_complete_genesis_shielded_replay(sqlite3 *db)
 {
     if (!db || !shielded_history_begin_full_replay(db, 0))

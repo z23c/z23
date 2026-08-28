@@ -12,6 +12,12 @@
 
 struct main_state;
 
+/* Distinct claims one signed offer may hold. claim_id is content-bound, so
+ * fresh buyer keypairs can mint unlimited self-consistent claims; the ingest
+ * refuses past this cap instead of evicting, which keeps the claim projection
+ * at O(active offers) x cap rather than O(attacker effort). */
+#define MARKET_PAYMENT_CLAIM_OFFER_MAX 64
+
 struct market_payment_authorization {
     bool authorized;
     char status[MARKET_PAYMENT_STATUS_MAX];
@@ -23,7 +29,9 @@ struct market_payment_authorization {
 
 /* Ingest a verified public claim locator, bind it to the seller's persisted
  * signed offer, and synchronously reconcile it. chain_current must describe
- * the caller's live sync state; false always yields UNKNOWN and no unlock. */
+ * the caller's live sync state; false always yields UNKNOWN and no unlock.
+ * Distinct claims are capped per offer at MARKET_PAYMENT_CLAIM_OFFER_MAX, and
+ * the next ingest touching an expired offer prunes its non-CONFIRMED rows. */
 struct zcl_result market_payment_claim_ingest(
     struct node_db *ndb, struct main_state *main_state,
     bool chain_current, int wallet_projection_height,

@@ -95,6 +95,9 @@ int test_rm_rf_recursive(const char *path);
  * directory at that path, then mkdir test-tmp and the dir itself. */
 void test_make_tmpdir(char *buf, size_t n, const char *prefix,
                       const char *tag);
+/* Absolutize a fixture path against the process cwd — for paths that
+ * cross the absolute-only platform_private_* destination seam. */
+bool test_abs_path(const char *path, char *abs, size_t n);
 
 /* Build the smallest exact bounded replay fixture (genesis only) and publish
  * shielded completeness through the production atomic completion API. */

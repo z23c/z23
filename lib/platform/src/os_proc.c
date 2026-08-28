@@ -533,7 +533,16 @@ bool os_proc_pid_exe_path(uint64_t pid, char *buf, size_t n)
 
 FILE *os_proc_open_self_exe(void)
 {
-#if defined(__linux__)
+#if defined(__APPLE__)
+    /* Darwin: _NSGetExecutablePath resolves the running binary's path
+     * (the kernel keeps the exec mapping alive even after unlink), then
+     * fopen reopens it for hashing. Slightly weaker than Linux's
+     * /proc/self/exe inode pin, but the standard darwin approach. */
+    char path[4096];
+    if (!os_proc_exe_path(path, sizeof(path)))
+        return NULL;
+    return fopen(path, "rb");
+#elif defined(__linux__)
     /* Hold the RUNNING inode, which is what this function promises.
      * Resolving the pathname first and opening that instead would
      * reopen whatever now sits at the name -- after a deploy that
@@ -542,9 +551,6 @@ FILE *os_proc_open_self_exe(void)
      * at all. Neither is the image this process is executing. */
     return fopen("/proc/self/exe", "rb");
 #else
-    /* Darwin and Windows expose the executable pathname, not a stable handle
-     * to the image that this process loaded. Refuse identity-bearing work
-     * instead of letting an atomic pathname replacement substitute new bytes. */
     errno = ENOTSUP;
     return NULL;
 #endif

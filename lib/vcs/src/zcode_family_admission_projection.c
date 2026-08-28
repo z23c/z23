@@ -155,7 +155,7 @@ static void projection_derive_root(
     sha3_256_init(&sha);
     sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
     projection_hash_u16(&sha, 1);
-    projection_hash_u16(&sha, VCS_ZCODE_COMMONS_V2_REQUIRED_FLAGS);
+    projection_hash_u16(&sha, VCS_ZCODE_COMMONS_REQUIRED_FLAGS);
     sha3_256_write(&sha, projection->config.family_policy_root, 32);
     sha3_256_write(&sha, projection->config.moderation_set_root, 32);
     sha3_256_write(&sha, projection->config.chain_tip_root, 32);

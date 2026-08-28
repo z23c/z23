@@ -99,7 +99,22 @@ run_selftest() {
         echo "  to tamper with; the fixture assumption broke." >&2
         exit 1
     fi
-    sed -i '0,/| planned |/s/| planned |/| ready |/' "$sandbox/$DOC"
+    # Flip the FIRST availability cell via an awk rewrite: GNU's
+    # `sed -i '0,/re/s//.../'` does not exist on BSD sed, which would treat
+    # the program string as an in-place backup suffix and mutate nothing
+    # (the selftest then passed for the wrong reason — hollow).
+    FROM='| planned |'
+    TO='| ready |'
+    awk -v from="$FROM" -v to="$TO" '
+        BEGIN { done = 0 }
+        !done && (i = index($0, from)) {
+            print substr($0, 1, i - 1) to substr($0, i + length(from))
+            done = 1
+            next
+        }
+        { print }
+    ' "$sandbox/$DOC" > "$sandbox/$DOC.next" \
+        && mv "$sandbox/$DOC.next" "$sandbox/$DOC"
 
     out="$tmp/tampered.log"
     rc=0

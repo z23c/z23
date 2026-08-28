@@ -341,6 +341,13 @@ static _Atomic bool g_push_getheaders_span_snapshot_streak = false;
 static _Atomic uint64_t g_push_getheaders_span_alloc_fail = 0;
 static _Atomic uint64_t g_getheaders_deferred_snapshot_serving = 0;
 static _Atomic bool g_getheaders_deferred_streak = false;
+/* getheaders requests DEFERRED past a peer's serve window — see the gate at
+ * the top of process_getheaders and the allowance note in net/msg_internal.h.
+ * Counted + rising-edge logged like the defers above: an honest peer never
+ * reaches the gate, so the line is a per-episode sighting of a peer whose
+ * demand outran the allowance, not an event anyone must react to per request. */
+static _Atomic uint64_t g_getheaders_deferred_rate_window = 0;
+static _Atomic bool g_getheaders_rate_streak = false;
 
 /* Height of the last header in the most recently accepted batch, over all
  * peers.  This is neither per-peer nor the active chain tip; it exists only
@@ -417,6 +424,12 @@ static uint64_t headers_reason_key(const char *reason)
 uint64_t getheaders_serve_refusals_no_header_bytes(void)
 {
     return atomic_load(&g_serve_refusals_no_bytes);
+}
+
+/* See net/msg_internal.h. */
+uint64_t getheaders_deferred_rate_window(void)
+{
+    return atomic_load(&g_getheaders_deferred_rate_window);
 }
 
 /* Build the wire header for `iter` from the IN-MEMORY INDEX ALONE. Returns
@@ -1039,6 +1052,8 @@ void msg_headers_get_stats(struct msg_headers_stats *out)
         atomic_load(&g_push_getheaders_span_alloc_fail);
     out->getheaders_deferred_snapshot_serving =
         atomic_load(&g_getheaders_deferred_snapshot_serving);
+    out->getheaders_deferred_rate_window =
+        atomic_load(&g_getheaders_deferred_rate_window);
     out->headers_served_total = atomic_load(&g_headers_served_total);
     out->getheaders_served_requests =
         atomic_load(&g_getheaders_served_requests);
@@ -1059,6 +1074,44 @@ bool process_getheaders(struct msg_processor *mp, struct p2p_node *node,
         return true;
     }
     atomic_store(&g_getheaders_deferred_streak, false);
+
+    /* ── per-peer serve window ─────────────────────────────────────────
+     * Each answered request serves up to 2000 headers — one Equihash
+     * verification each (~0.8 s of a core) and ~2.9 MB of wire — so an
+     * unbounded peer, not this node, chooses the serve bill. Honest IBD
+     * re-asks at its own scheduler-driven pace (roughly one request per
+     * poll, ~6/min), orders of magnitude below what an unbounded wire loop
+     * can demand, so the allowance (net/msg_internal.h) is set generously
+     * against the honest pace and exceeding it costs the peer nothing
+     * permanent: the request is DEFERRED — no reply, no disconnect, no
+     * offence, no ban-score. A deferred peer simply sees its next request go
+     * unanswered and retries; punishing here could only hurt a peer we
+     * mis-measured. Same fixed window as the addr limit
+     * (msgprocessor_inv.c::process_addr): roll on expiry, count admitted
+     * requests, defer the rest. Counted + rising-edge logged so a deferred
+     * peer's header sync never goes quiet without a name and a number. The
+     * window lives on `node`, so it dies with the connection. */
+    int64_t now_unix = platform_time_wall_unix();
+    if (node->getheaders_rate_window_start == 0 ||
+        now_unix - node->getheaders_rate_window_start >=
+            GETHEADERS_SERVE_WINDOW_SECS) {
+        node->getheaders_rate_window_start = now_unix;
+        node->getheaders_rate_window_count = 0;
+    }
+    if (node->getheaders_rate_window_count >=
+        GETHEADERS_SERVE_MAX_REQUESTS_PER_WINDOW) {
+        uint64_t n =
+            atomic_fetch_add(&g_getheaders_deferred_rate_window, 1) + 1;
+        if (getheaders_suppress_rising_edge(&g_getheaders_rate_streak))
+            LOG_WARN("headers",
+                     "process_getheaders: deferring getheaders from %s — "
+                     "per-peer serve window exhausted "
+                     "(deferred_rate_window=%llu)",
+                     node->addr_name, (unsigned long long)n);
+        return true;
+    }
+    atomic_store(&g_getheaders_rate_streak, false);
+    node->getheaders_rate_window_count++;
 
     struct block_locator locator;
     block_locator_init(&locator);

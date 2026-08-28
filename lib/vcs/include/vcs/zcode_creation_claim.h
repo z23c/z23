@@ -3,14 +3,13 @@
 #ifndef ZCL_VCS_ZCODE_CREATION_CLAIM_H
 #define ZCL_VCS_ZCODE_CREATION_CLAIM_H
 
-#include "vcs/zcode_commons_v2.h"
+#include "vcs/zcode_commons.h"
 
 #include <stddef.h>
 #include <stdint.h>
 
 #define VCS_ZCODE_CREATION_CLAIM_SIGNING_DOMAIN \
     "zcl.zcode.creation_claim.signature.v2"
-#define VCS_ZCODE_CREATION_CLAIM_V2_VERSION VCS_ZCODE_COMMONS_V2_VERSION
 #define VCS_ZCODE_CREATION_CLAIM_WIRE_BYTES 288u
 #define VCS_ZCODE_CREATION_CLAIM_UNSIGNED_BYTES 224u
 #define VCS_ZCODE_CREATION_CLAIM_KAT_ROOT \

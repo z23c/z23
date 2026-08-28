@@ -101,7 +101,7 @@
 #include "vcs/vcs_devloop.h"
 #include "vcs/vcs_object.h"
 #include "vcs/zcode_c23_corpus.h"
-#include "vcs/zcode_commons_v2.h"
+#include "vcs/zcode_commons.h"
 #include "vcs/zcode_dht_identity.h"
 #include "vcs/zcode_dht_service.h"
 #include "vcs/zcode_lane.h"
@@ -2499,7 +2499,7 @@ static int zwn_t_sovereign_source_build(const struct chain_params *params)
 
         struct vcs_zcode_module_passport_v1 passport = {
             .schema_version = 1,
-            .flags = VCS_ZCODE_COMMONS_V2_REQUIRED_FLAGS,
+            .flags = VCS_ZCODE_COMMONS_REQUIRED_FLAGS,
         };
         zwn_literal_root("fixture/sovereign-source-api-v1",
                          passport.stable_api_root);
@@ -2516,15 +2516,15 @@ static int zwn_t_sovereign_source_build(const struct chain_params *params)
         uint8_t passport_seed[32];
         memset(passport_seed, 0x92, sizeof(passport_seed));
         ASSERT(vcs_zcode_module_passport_v1_sign(
-                   &passport, passport_seed) == VCS_ZCODE_COMMONS_V2_OK);
+                   &passport, passport_seed) == VCS_ZCODE_COMMONS_OK);
         uint8_t passport_wire[VCS_ZCODE_MODULE_PASSPORT_V1_WIRE_BYTES];
         size_t passport_wire_len = 0;
         uint8_t passport_root[32];
         ASSERT(vcs_zcode_module_passport_v1_encode(
                    &passport, passport_wire, sizeof(passport_wire),
-                   &passport_wire_len) == VCS_ZCODE_COMMONS_V2_OK);
+                   &passport_wire_len) == VCS_ZCODE_COMMONS_OK);
         ASSERT(vcs_zcode_module_passport_v1_root(
-                   &passport, passport_root) == VCS_ZCODE_COMMONS_V2_OK);
+                   &passport, passport_root) == VCS_ZCODE_COMMONS_OK);
         ASSERT(vcs_object_put_addressed(
             publisher, passport_root, passport_wire, passport_wire_len));
         ASSERT(vcs_devloop_publication_advance_passport(
@@ -2545,7 +2545,7 @@ static int zwn_t_sovereign_source_build(const struct chain_params *params)
                assignment_root, 32);
         struct vcs_zcode_workspace_manifest_v1 workspace_manifest = {
             .schema_version = 1,
-            .flags = VCS_ZCODE_COMMONS_V2_REQUIRED_FLAGS,
+            .flags = VCS_ZCODE_COMMONS_REQUIRED_FLAGS,
             .sequence = 1,
             .entries = &workspace_entry,
             .entry_count = 1,
@@ -2560,28 +2560,28 @@ static int zwn_t_sovereign_source_build(const struct chain_params *params)
         ASSERT(vcs_zcode_workspace_manifest_v1_signing_payload(
                    &workspace_manifest, workspace_payload,
                    sizeof(workspace_payload), &workspace_payload_len) ==
-               VCS_ZCODE_COMMONS_V2_OK);
+               VCS_ZCODE_COMMONS_OK);
         ed25519_sign(workspace_manifest.signature, workspace_payload,
                      workspace_payload_len, workspace_secret,
                      workspace_manifest.signer_root);
         memset(workspace_secret, 0, sizeof(workspace_secret));
         ASSERT(vcs_zcode_workspace_manifest_v1_verify(
-                   &workspace_manifest) == VCS_ZCODE_COMMONS_V2_OK);
+                   &workspace_manifest) == VCS_ZCODE_COMMONS_OK);
         size_t workspace_wire_size = 0, workspace_wire_len = 0;
         ASSERT(vcs_zcode_workspace_manifest_v1_wire_size(
                    &workspace_manifest, &workspace_wire_size) ==
-               VCS_ZCODE_COMMONS_V2_OK);
+               VCS_ZCODE_COMMONS_OK);
         uint8_t *workspace_wire = zcl_malloc(
             workspace_wire_size, "zwn.workspace_wire");
         ASSERT(workspace_wire != NULL);
         ASSERT(vcs_zcode_workspace_manifest_v1_encode(
                    &workspace_manifest, workspace_wire,
                    workspace_wire_size, &workspace_wire_len) ==
-               VCS_ZCODE_COMMONS_V2_OK);
+               VCS_ZCODE_COMMONS_OK);
         uint8_t workspace_root[32];
         ASSERT(vcs_zcode_workspace_manifest_v1_root(
                    &workspace_manifest, workspace_root) ==
-               VCS_ZCODE_COMMONS_V2_OK);
+               VCS_ZCODE_COMMONS_OK);
         ASSERT(vcs_object_put_addressed(
             publisher, workspace_root, workspace_wire, workspace_wire_len));
         ASSERT(vcs_devloop_publication_advance_workspace(
@@ -2717,11 +2717,11 @@ static int zwn_t_sovereign_source_build(const struct chain_params *params)
             {0};
         ASSERT(vcs_zcode_workspace_manifest_v1_decode(
                    &consumer_workspace, received_wire,
-                   received_wire_len) == VCS_ZCODE_COMMONS_V2_OK);
+                   received_wire_len) == VCS_ZCODE_COMMONS_OK);
         uint8_t checked_root[32];
         ASSERT(vcs_zcode_workspace_manifest_v1_root(
                    &consumer_workspace.manifest, checked_root) ==
-               VCS_ZCODE_COMMONS_V2_OK);
+               VCS_ZCODE_COMMONS_OK);
         ASSERT(memcmp(checked_root, workspace_root, 32) == 0);
         ASSERT(consumer_workspace.manifest.entry_count == 1);
         struct vcs_zcode_workspace_entry_v1 consumer_entry =
@@ -2751,10 +2751,10 @@ static int zwn_t_sovereign_source_build(const struct chain_params *params)
         struct vcs_zcode_module_passport_v1 consumer_passport;
         ASSERT(vcs_zcode_module_passport_v1_decode(
                    &consumer_passport, received_wire,
-                   received_wire_len) == VCS_ZCODE_COMMONS_V2_OK);
+                   received_wire_len) == VCS_ZCODE_COMMONS_OK);
         ASSERT(vcs_zcode_module_passport_v1_root(
                    &consumer_passport, checked_root) ==
-               VCS_ZCODE_COMMONS_V2_OK);
+               VCS_ZCODE_COMMONS_OK);
         ASSERT(memcmp(checked_root,
                       consumer_entry.module_passport_root, 32) == 0);
         ASSERT(memcmp(consumer_passport.recipe_root,

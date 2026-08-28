@@ -127,6 +127,23 @@ size (whose smaller workload is noisier in both directions). Every
 one of those 32 concurrent clean runs passed and every one of the 32 armed runs
 failed, in both sizes.
 
+2026-08-28: the in-suite group stopped asserting the absolute budgets. A
+healthy tree failed the budget twice in one day, at both ladder sizes: first
+at the 96-block self-test size (clean growth 1905 vs the concurrent max 1429;
+solo rerun 1117, inside the idle band), then — after the group moved to the
+default workload on the compression argument above — again at 192 blocks
+(clean 2604, armed/clean discrimination compressed to 1.47x vs the 1.8x the
+idle regime shows; same binary, same tree, solo 1068). The suite's mixed
+worker mix is simply not the 32-concurrent-copies-of-this-test regime the
+calibration modeled, and at neither size does it compress growth. The
+absolute budgets (both directions, both metrics) are now asserted only by the
+dedicated lanes `make sim-perf` / `make sim-perf-teeth` on a quiet host;
+the in-suite group keeps the per-scale same-window A/B (armed per-tx fold
+cost >= 4x clean at every point; calibration margin ~13x), the count/UTXO/tip
+identity checks, and the expect()-surface self-tests, and prints the budget
+line informationally. The self-test-size rows stay as measured calibration
+history.
+
 ## Proving the detector has teeth
 
 Per this project's own hard-won lesson — a Groth16 QAP-matrix bug satisfied

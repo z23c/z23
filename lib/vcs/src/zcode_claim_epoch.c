@@ -64,7 +64,7 @@ enum vcs_zcode_claim_epoch_error vcs_zcode_claim_epoch_validate(
     if (!proposal) return VCS_ZCODE_CLAIM_EPOCH_NULL;
     if (proposal->schema_version != VCS_ZCODE_CLAIM_EPOCH_VERSION)
         return VCS_ZCODE_CLAIM_EPOCH_VERSION_ERROR;
-    if (proposal->flags != VCS_ZCODE_COMMONS_V2_REQUIRED_FLAGS)
+    if (proposal->flags != VCS_ZCODE_COMMONS_REQUIRED_FLAGS)
         return VCS_ZCODE_CLAIM_EPOCH_FLAGS;
     if (proposal->epoch == 0 || proposal->cutoff_height == 0 ||
         proposal->cutoff_mtp <= 0 || proposal->epoch_capacity_atoms == 0)
@@ -255,7 +255,7 @@ enum vcs_zcode_claim_epoch_error vcs_zcode_claim_epoch_from_selection(
         result->invalid_count > UINT32_MAX)
         return VCS_ZCODE_CLAIM_EPOCH_NULL;
     out->schema_version = VCS_ZCODE_CLAIM_EPOCH_VERSION;
-    out->flags = VCS_ZCODE_COMMONS_V2_REQUIRED_FLAGS;
+    out->flags = VCS_ZCODE_COMMONS_REQUIRED_FLAGS;
     out->epoch = input->epoch;
     out->cutoff_height = input->cutoff_height;
     out->cutoff_mtp = input->cutoff_mtp;

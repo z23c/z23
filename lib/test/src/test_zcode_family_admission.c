@@ -23,7 +23,7 @@ static bool family_policy_root(uint8_t out[32])
     struct vcs_zcode_family_policy_v1 policy;
     vcs_zcode_family_policy_v1_default(&policy);
     return vcs_zcode_family_policy_v1_root(&policy, out) ==
-           VCS_ZCODE_COMMONS_V2_OK;
+           VCS_ZCODE_COMMONS_OK;
 }
 
 static bool family_make_admission(
@@ -35,7 +35,7 @@ static bool family_make_admission(
 {
     memset(admission, 0, sizeof(*admission));
     admission->schema_version = 1;
-    admission->flags = VCS_ZCODE_COMMONS_V2_REQUIRED_FLAGS;
+    admission->flags = VCS_ZCODE_COMMONS_REQUIRED_FLAGS;
     admission->state = (uint16_t)state;
     admission->tier = (uint16_t)tier;
     admission->coverage_complete = 1;

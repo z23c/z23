@@ -136,12 +136,15 @@ static const char *ib_scratch_root(void)
 
 static void ib_make_dir(char *dir, size_t dirlen, const char *tag)
 {
-    snprintf(dir, dirlen, "%s/ibck_%d_%s", ib_scratch_root(), (int)getpid(),
-             tag);
-    /* 0700, and restated after the fact: a fixture directory here can reach
-     * platform_private_directory_ensure, which requires exactly 0700 and
-     * refuses a wider one rather than narrowing it, and mkdir's mode is
-     * masked by the process umask. */
+    char rel[192];
+    mkdir("./test-tmp", 0755);
+    snprintf(rel, sizeof(rel), "./test-tmp/ibck_%d_%s", (int)getpid(), tag);
+    /* wbs_ensure_backup_dir resolves its destination through the
+     * absolute-only platform_private seam — hand every dir this fixture
+     * mints to callers in absolute form. */
+    test_abs_path(rel, dir, dirlen);
+    /* platform_private_directory_ensure requires exactly 0700 on any dir
+     * it is handed to validate (EACCES otherwise) — mint them private. */
     mkdir(dir, 0700);
     chmod(dir, 0700);
 }
