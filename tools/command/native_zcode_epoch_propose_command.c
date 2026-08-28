@@ -365,17 +365,17 @@ static void zep_claim_handle(
         zcl_hotswap_service_acquire(ZCODE_C23_ECONOMICS_SERVICE_ID, &lease);
     if (!service) service = zcode_c23_economics_service_builtin();
     service->policy_init(&policy, roots[1], roots[2], roots[3], roots[4]);
-    enum vcs_zcode_commons_v2_error error = service->policy_validate(&policy);
-    if (error == VCS_ZCODE_COMMONS_V2_OK)
+    enum vcs_zcode_commons_error error = service->policy_validate(&policy);
+    if (error == VCS_ZCODE_COMMONS_OK)
         error = service->policy_root(&policy, policy_root);
-    if (error == VCS_ZCODE_COMMONS_V2_OK)
+    if (error == VCS_ZCODE_COMMONS_OK)
         error = service->epoch_select(&input, &policy, &result);
-    if (error != VCS_ZCODE_COMMONS_V2_OK) {
+    if (error != VCS_ZCODE_COMMONS_OK) {
         zcl_hotswap_service_release(&lease);
         free(claims);
         vcs_zcode_commons_projection_free(projection);
         zep_claim_fail(reply, "CLAIM_EPOCH_SELECTION_REFUSED",
-                       vcs_zcode_commons_v2_error_string(error), command);
+                       vcs_zcode_commons_error_string(error), command);
         return;
     }
     struct vcs_zcode_claim_epoch_proposal_v2 claim_epoch;
@@ -636,19 +636,19 @@ void zcl_native_handle_zcode_commons_schedule_claim_verify(
     if (!service) service = zcode_c23_economics_service_builtin();
     struct vcs_zcode_policy_candidate_v2 policy;
     service->policy_init(&policy, roots[1], roots[2], roots[3], roots[4]);
-    enum vcs_zcode_commons_v2_error error = service->policy_validate(&policy);
-    if (error == VCS_ZCODE_COMMONS_V2_OK)
+    enum vcs_zcode_commons_error error = service->policy_validate(&policy);
+    if (error == VCS_ZCODE_COMMONS_OK)
         error = service->policy_root(&policy, policy_root);
-    if (error != VCS_ZCODE_COMMONS_V2_OK ||
+    if (error != VCS_ZCODE_COMMONS_OK ||
         memcmp(policy_root, proposal.policy_root, 32) != 0) {
         zcl_hotswap_service_release(&lease);
         free(claims);
         vcs_zcode_commons_projection_free(projection);
         vcs_zcode_claim_epoch_free(&proposal);
         zep_claim_fail(reply, "CLAIM_EPOCH_POLICY_MISMATCH",
-                       error == VCS_ZCODE_COMMONS_V2_OK
+                       error == VCS_ZCODE_COMMONS_OK
                            ? "supplied policy bindings do not match the proposal"
-                           : vcs_zcode_commons_v2_error_string(error),
+                           : vcs_zcode_commons_error_string(error),
                        command);
         return;
     }
@@ -657,7 +657,7 @@ void zcl_native_handle_zcode_commons_schedule_claim_verify(
     error = service->epoch_select(&selection, &policy, &result);
     struct vcs_zcode_claim_epoch_proposal_v2 rebuilt;
     vcs_zcode_claim_epoch_init(&rebuilt);
-    if (error == VCS_ZCODE_COMMONS_V2_OK)
+    if (error == VCS_ZCODE_COMMONS_OK)
         proposal_error = vcs_zcode_claim_epoch_from_selection(
             &selection, policy_root, projection_root, &result, &rebuilt);
     else

@@ -1,5 +1,5 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Purpose: non-creating native views of Commons v2 policy authorities. */
+ * Purpose: non-creating native views of Commons policy authorities. */
 
 #include "command/native_command.h"
 
@@ -9,7 +9,7 @@
 #include "services/zcode_c23_economics_service.h"
 #include "services/zcode_moderation_view_service.h"
 #include "vcs/zcode_commons_projection.h"
-#include "vcs/zcode_commons_v2.h"
+#include "vcs/zcode_commons.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -66,7 +66,7 @@ static bool render_family_policy_with_service(
     char root_hex[65];
     vcs_zcode_family_policy_v1_default(&policy);
     if (vcs_zcode_family_policy_v1_root(&policy, root) !=
-            VCS_ZCODE_COMMONS_V2_OK) {
+            VCS_ZCODE_COMMONS_OK) {
         moderation_fail(reply, "MODERATION_POLICY_ROOT",
                         "the immutable Family policy root could not be derived");
         return false;
@@ -283,7 +283,7 @@ static bool moderation_view_frozen_kat(const void *opaque, char *why,
         !service->render_service_status ||
         !service->render_admission_status ||
         vcs_zcode_family_policy_v1_root(&policy, root) !=
-            VCS_ZCODE_COMMONS_V2_OK) {
+            VCS_ZCODE_COMMONS_OK) {
         if (why && why_sz) (void)snprintf(
             why, why_sz, "frozen moderation service shape/root vector failed");
         return false;
@@ -422,15 +422,15 @@ static bool economics_service_frozen_kat(const void *opaque, char *why,
         !service->render_backlog_status || !service->render_claim_epoch ||
         !service->schedule_class_name ||
         vcs_zcode_family_policy_v1_root(&family, family_root) !=
-            VCS_ZCODE_COMMONS_V2_OK) {
+            VCS_ZCODE_COMMONS_OK) {
         if (why && why_sz) (void)snprintf(why, why_sz,
             "frozen economics service shape/family-root vector failed");
         return false;
     }
     service->policy_init(&policy, network, family_root, qualification, backlog);
     uint8_t root[32], expected[32];
-    if (service->policy_validate(&policy) != VCS_ZCODE_COMMONS_V2_OK ||
-        service->policy_root(&policy, root) != VCS_ZCODE_COMMONS_V2_OK ||
+    if (service->policy_validate(&policy) != VCS_ZCODE_COMMONS_OK ||
+        service->policy_root(&policy, root) != VCS_ZCODE_COMMONS_OK ||
         !zcl_hex_decode(ZCODE_C23_ECONOMICS_POLICY_KAT_ROOT, expected, 32) ||
         memcmp(root, expected, 32) != 0 || !service->render_status(&status) ||
         status.award_atoms[VCS_ZCODE_CREATION_V2_MODULE_PUBLICATION] !=
@@ -448,7 +448,7 @@ static bool economics_service_frozen_kat(const void *opaque, char *why,
     };
     struct vcs_zcode_epoch_selection_result_v2 selected;
     if (service->epoch_select(&input, &policy, &selected) !=
-            VCS_ZCODE_COMMONS_V2_OK || selected.selected_count != 0 ||
+            VCS_ZCODE_COMMONS_OK || selected.selected_count != 0 ||
         selected.expired_capacity_atoms != UINT64_C(300000000) ||
         selected.recipient_cap_atoms != UINT64_C(100000000)) {
         if (why && why_sz) (void)snprintf(why, why_sz,

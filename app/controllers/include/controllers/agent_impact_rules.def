@@ -976,7 +976,7 @@ AGENT_IMPACT_RULE("lib/hotswap/src/hotswap_sealed_image.c|lib/hotswap/include/ho
  * proof independent of whether the current reverse-call graph can reach the
  * static caller; otherwise an explicitly admitted live edit is mislabeled as
  * an unmapped code change. Public contract headers still classify as restart. */
-AGENT_IMPACT_RULE("app/services/src/zcode_c23_corpus_service.c|app/services/include/services/zcode_c23_corpus_service.h|app/services/src/zcode_c23_economics_service.c|app/services/src/zcode_c23_economics_internal.h|app/services/include/services/zcode_c23_economics_service.h|lib/test/src/test_zcode_commons_v2.c", "zcode_commons_v2")
+AGENT_IMPACT_RULE("app/services/src/zcode_c23_corpus_service.c|app/services/include/services/zcode_c23_corpus_service.h|app/services/src/zcode_c23_economics_service.c|app/services/src/zcode_c23_economics_internal.h|app/services/include/services/zcode_c23_economics_service.h|lib/test/src/test_zcode_commons.c", "zcode_commons")
 AGENT_IMPACT_RULE("tools/command/native_zcode_commons_command.c|lib/test/src/test_zcode_creation_attribution.c", "zcode_creation_attribution cli_render command_registry_catalog make_lint_gates")
 /* Package search/show presentation is a pure service island. The resident
  * host continues to own CAS/index reads and every publication or execution
@@ -991,9 +991,9 @@ AGENT_IMPACT_RULE("app/controllers/src/shop_native_fulfill.c|app/controllers/src
 AGENT_IMPACT_RULE("app/controllers/src/shop_native_handler.c|app/services/src/shop_status_view_service.c|app/services/include/services/shop_status_view_service.h|lib/test/src/test_shop.c", "shop hotswap_service_registry command_registry_catalog make_lint_gates")
 /* Family policy presentation is live; immutable policy derivation and every
  * admission/enforcement decision remain resident static authority. */
-AGENT_IMPACT_RULE("app/services/src/zcode_moderation_view_service.c|app/services/include/services/zcode_moderation_view_service.h|tools/command/native_zcode_moderation_command.c", "zcode_commons_v2 hotswap_service_registry command_registry_catalog make_lint_gates")
-AGENT_IMPACT_RULE("app/services/src/zcode_workspace_view_service.c|app/services/include/services/zcode_workspace_view_service.h|tools/command/native_zcode_workspace_command.c", "zcode_commons_v2 hotswap_service_registry command_registry_catalog native_api_contract make_lint_gates")
-AGENT_IMPACT_RULE("app/services/src/zcode_passport_view_service.c|app/services/include/services/zcode_passport_view_service.h|tools/command/native_zcode_passport_command.c", "zcode_commons_v2 hotswap_service_registry command_registry_catalog native_api_contract make_lint_gates")
+AGENT_IMPACT_RULE("app/services/src/zcode_moderation_view_service.c|app/services/include/services/zcode_moderation_view_service.h|tools/command/native_zcode_moderation_command.c", "zcode_commons hotswap_service_registry command_registry_catalog make_lint_gates")
+AGENT_IMPACT_RULE("app/services/src/zcode_workspace_view_service.c|app/services/include/services/zcode_workspace_view_service.h|tools/command/native_zcode_workspace_command.c", "zcode_commons hotswap_service_registry command_registry_catalog native_api_contract make_lint_gates")
+AGENT_IMPACT_RULE("app/services/src/zcode_passport_view_service.c|app/services/include/services/zcode_passport_view_service.h|tools/command/native_zcode_passport_command.c", "zcode_commons hotswap_service_registry command_registry_catalog native_api_contract make_lint_gates")
 AGENT_IMPACT_RULE("app/services/src/zcode_goal_context_calc_service.c|app/services/include/services/zcode_goal_context_calc_service.h|app/services/src/zcode_goal_context_service.c|app/services/include/services/zcode_goal_context_service.h|tools/command/native_zcode_work_command.c", "codeindex hotswap_service_registry command_registry_catalog native_api_contract zcode_package_dev make_lint_gates")
 AGENT_IMPACT_RULE("app/services/src/zcode_lane_view_service.c|app/services/include/services/zcode_lane_view_service.h|app/services/src/zcode_lane_service.c|app/services/include/services/zcode_lane_service.h|tools/command/native_zcode_dev_command.c", "zcode_dev_objects hotswap_service_registry command_registry_catalog native_api_contract make_lint_gates")
 /* The service registry and its purity/contract checker are harness ownership,

@@ -63,7 +63,7 @@ static enum vcs_zcode_family_admission_error admission_shape(
     if (!admission) return VCS_ZCODE_FAMILY_ADMISSION_NULL;
     if (admission->schema_version != 1)
         return VCS_ZCODE_FAMILY_ADMISSION_VERSION;
-    if (admission->flags != VCS_ZCODE_COMMONS_V2_REQUIRED_FLAGS)
+    if (admission->flags != VCS_ZCODE_COMMONS_REQUIRED_FLAGS)
         return VCS_ZCODE_FAMILY_ADMISSION_FLAGS;
     if (admission->state > VCS_ZCODE_ADMISSION_REORGED ||
         admission->tier > VCS_ZCODE_MODERATION_TIER_RESILIENT_PASS ||

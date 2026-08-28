@@ -1,19 +1,22 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Purpose: additive simulation-only Living Commons v2 economics and family
+ * Purpose: additive simulation-only Living Commons economics and family
  * moderation authorities.  V1 wires are intentionally not included here. */
-#ifndef ZCL_VCS_ZCODE_COMMONS_V2_H
-#define ZCL_VCS_ZCODE_COMMONS_V2_H
+#ifndef ZCL_VCS_ZCODE_COMMONS_H
+#define ZCL_VCS_ZCODE_COMMONS_H
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
-#define VCS_ZCODE_COMMONS_V2_VERSION 2u
-#define VCS_ZCODE_COMMONS_V2_SIMULATION_ONLY (1u << 0)
-#define VCS_ZCODE_COMMONS_V2_NOT_OWNER_APPROVED (1u << 1)
-#define VCS_ZCODE_COMMONS_V2_REQUIRED_FLAGS \
-    (VCS_ZCODE_COMMONS_V2_SIMULATION_ONLY | \
-     VCS_ZCODE_COMMONS_V2_NOT_OWNER_APPROVED)
+/* Shared schema generation of the simulation-only claim wires: the creation
+ * claim, policy candidate and epoch selection formats are one deliberate v2
+ * ladder, stamped into their schema_version fields and hashed into roots. */
+#define VCS_ZCODE_CREATION_CLAIM_V2_VERSION 2u
+#define VCS_ZCODE_COMMONS_SIMULATION_ONLY (1u << 0)
+#define VCS_ZCODE_COMMONS_NOT_OWNER_APPROVED (1u << 1)
+#define VCS_ZCODE_COMMONS_REQUIRED_FLAGS \
+    (VCS_ZCODE_COMMONS_SIMULATION_ONLY | \
+     VCS_ZCODE_COMMONS_NOT_OWNER_APPROVED)
 
 #define VCS_ZCODE_POLICY_CANDIDATE_V2_DOMAIN \
     "zcl.zcode.zc23_policy_candidate.v2"
@@ -207,25 +210,25 @@ struct vcs_zcode_contribution_split_v1 {
     size_t entry_count;
 };
 
-enum vcs_zcode_commons_v2_error {
-    VCS_ZCODE_COMMONS_V2_OK = 0,
-    VCS_ZCODE_COMMONS_V2_NULL,
-    VCS_ZCODE_COMMONS_V2_VERSION_ERROR,
-    VCS_ZCODE_COMMONS_V2_FLAGS,
-    VCS_ZCODE_COMMONS_V2_ROOT,
-    VCS_ZCODE_COMMONS_V2_ENUM,
-    VCS_ZCODE_COMMONS_V2_AMOUNT,
-    VCS_ZCODE_COMMONS_V2_LIMIT,
-    VCS_ZCODE_COMMONS_V2_ORDER,
-    VCS_ZCODE_COMMONS_V2_DUPLICATE,
-    VCS_ZCODE_COMMONS_V2_IMMATURE,
-    VCS_ZCODE_COMMONS_V2_POLICY,
-    VCS_ZCODE_COMMONS_V2_COVERAGE,
-    VCS_ZCODE_COMMONS_V2_QUORUM,
-    VCS_ZCODE_COMMONS_V2_OVERFLOW,
-    VCS_ZCODE_COMMONS_V2_SIZE,
-    VCS_ZCODE_COMMONS_V2_MAGIC,
-    VCS_ZCODE_COMMONS_V2_SIGNATURE,
+enum vcs_zcode_commons_error {
+    VCS_ZCODE_COMMONS_OK = 0,
+    VCS_ZCODE_COMMONS_NULL,
+    VCS_ZCODE_COMMONS_VERSION_ERROR,
+    VCS_ZCODE_COMMONS_FLAGS,
+    VCS_ZCODE_COMMONS_ROOT,
+    VCS_ZCODE_COMMONS_ENUM,
+    VCS_ZCODE_COMMONS_AMOUNT,
+    VCS_ZCODE_COMMONS_LIMIT,
+    VCS_ZCODE_COMMONS_ORDER,
+    VCS_ZCODE_COMMONS_DUPLICATE,
+    VCS_ZCODE_COMMONS_IMMATURE,
+    VCS_ZCODE_COMMONS_POLICY,
+    VCS_ZCODE_COMMONS_COVERAGE,
+    VCS_ZCODE_COMMONS_QUORUM,
+    VCS_ZCODE_COMMONS_OVERFLOW,
+    VCS_ZCODE_COMMONS_SIZE,
+    VCS_ZCODE_COMMONS_MAGIC,
+    VCS_ZCODE_COMMONS_SIGNATURE,
 };
 
 enum vcs_zcode_creation_category_v2 {
@@ -453,70 +456,70 @@ struct vcs_zcode_classification_panel_v1 {
     uint8_t selection_root[32];
 };
 
-const char *vcs_zcode_commons_v2_error_string(
-    enum vcs_zcode_commons_v2_error error);
+const char *vcs_zcode_commons_error_string(
+    enum vcs_zcode_commons_error error);
 
-enum vcs_zcode_commons_v2_error vcs_zcode_typed_asset_manifest_v1_validate(
+enum vcs_zcode_commons_error vcs_zcode_typed_asset_manifest_v1_validate(
     const struct vcs_zcode_typed_asset_manifest_v1 *asset);
-enum vcs_zcode_commons_v2_error vcs_zcode_typed_asset_manifest_v1_root(
+enum vcs_zcode_commons_error vcs_zcode_typed_asset_manifest_v1_root(
     const struct vcs_zcode_typed_asset_manifest_v1 *asset, uint8_t out[32]);
-enum vcs_zcode_commons_v2_error vcs_zcode_quality_profile_v1_validate(
+enum vcs_zcode_commons_error vcs_zcode_quality_profile_v1_validate(
     const struct vcs_zcode_quality_profile_v1 *profile);
-enum vcs_zcode_commons_v2_error vcs_zcode_quality_profile_v1_root(
+enum vcs_zcode_commons_error vcs_zcode_quality_profile_v1_root(
     const struct vcs_zcode_quality_profile_v1 *profile, uint8_t out[32]);
-enum vcs_zcode_commons_v2_error vcs_zcode_module_passport_v1_validate(
+enum vcs_zcode_commons_error vcs_zcode_module_passport_v1_validate(
     const struct vcs_zcode_module_passport_v1 *passport);
-enum vcs_zcode_commons_v2_error vcs_zcode_module_passport_v1_signing_payload(
+enum vcs_zcode_commons_error vcs_zcode_module_passport_v1_signing_payload(
     const struct vcs_zcode_module_passport_v1 *passport,
     uint8_t *payload, size_t payload_capacity, size_t *payload_len);
-enum vcs_zcode_commons_v2_error vcs_zcode_module_passport_v1_sign(
+enum vcs_zcode_commons_error vcs_zcode_module_passport_v1_sign(
     struct vcs_zcode_module_passport_v1 *passport,
     const uint8_t signer_seed[32]);
-enum vcs_zcode_commons_v2_error vcs_zcode_module_passport_v1_verify(
+enum vcs_zcode_commons_error vcs_zcode_module_passport_v1_verify(
     const struct vcs_zcode_module_passport_v1 *passport);
-enum vcs_zcode_commons_v2_error vcs_zcode_module_passport_v1_encode(
+enum vcs_zcode_commons_error vcs_zcode_module_passport_v1_encode(
     const struct vcs_zcode_module_passport_v1 *passport,
     uint8_t *wire, size_t wire_capacity, size_t *wire_len);
-enum vcs_zcode_commons_v2_error vcs_zcode_module_passport_v1_decode(
+enum vcs_zcode_commons_error vcs_zcode_module_passport_v1_decode(
     struct vcs_zcode_module_passport_v1 *out,
     const uint8_t *wire, size_t wire_len);
-enum vcs_zcode_commons_v2_error vcs_zcode_module_passport_v1_root(
+enum vcs_zcode_commons_error vcs_zcode_module_passport_v1_root(
     const struct vcs_zcode_module_passport_v1 *passport, uint8_t out[32]);
-enum vcs_zcode_commons_v2_error vcs_zcode_workspace_manifest_v1_validate(
+enum vcs_zcode_commons_error vcs_zcode_workspace_manifest_v1_validate(
     const struct vcs_zcode_workspace_manifest_v1 *workspace);
-enum vcs_zcode_commons_v2_error vcs_zcode_workspace_manifest_v1_unsigned_root(
+enum vcs_zcode_commons_error vcs_zcode_workspace_manifest_v1_unsigned_root(
     const struct vcs_zcode_workspace_manifest_v1 *workspace,
     uint8_t out[32]);
-enum vcs_zcode_commons_v2_error vcs_zcode_workspace_manifest_v1_signing_payload(
+enum vcs_zcode_commons_error vcs_zcode_workspace_manifest_v1_signing_payload(
     const struct vcs_zcode_workspace_manifest_v1 *workspace,
     uint8_t *payload, size_t payload_capacity, size_t *payload_len);
-enum vcs_zcode_commons_v2_error vcs_zcode_workspace_manifest_v1_verify(
+enum vcs_zcode_commons_error vcs_zcode_workspace_manifest_v1_verify(
     const struct vcs_zcode_workspace_manifest_v1 *workspace);
-enum vcs_zcode_commons_v2_error vcs_zcode_workspace_manifest_v1_wire_size(
+enum vcs_zcode_commons_error vcs_zcode_workspace_manifest_v1_wire_size(
     const struct vcs_zcode_workspace_manifest_v1 *workspace,
     size_t *wire_size);
-enum vcs_zcode_commons_v2_error vcs_zcode_workspace_manifest_v1_encode(
+enum vcs_zcode_commons_error vcs_zcode_workspace_manifest_v1_encode(
     const struct vcs_zcode_workspace_manifest_v1 *workspace,
     uint8_t *wire, size_t wire_capacity, size_t *wire_len);
-enum vcs_zcode_commons_v2_error vcs_zcode_workspace_manifest_v1_decode(
+enum vcs_zcode_commons_error vcs_zcode_workspace_manifest_v1_decode(
     struct vcs_zcode_workspace_manifest_v1_decoded *out,
     const uint8_t *wire, size_t wire_len);
 void vcs_zcode_workspace_manifest_v1_decoded_free(
     struct vcs_zcode_workspace_manifest_v1_decoded *decoded);
-enum vcs_zcode_commons_v2_error vcs_zcode_workspace_entry_v1_validate(
+enum vcs_zcode_commons_error vcs_zcode_workspace_entry_v1_validate(
     const struct vcs_zcode_workspace_entry_v1 *entry);
-enum vcs_zcode_commons_v2_error vcs_zcode_workspace_entry_v1_root(
+enum vcs_zcode_commons_error vcs_zcode_workspace_entry_v1_root(
     const struct vcs_zcode_workspace_entry_v1 *entry, uint8_t out[32]);
-enum vcs_zcode_commons_v2_error vcs_zcode_workspace_manifest_v1_root(
+enum vcs_zcode_commons_error vcs_zcode_workspace_manifest_v1_root(
     const struct vcs_zcode_workspace_manifest_v1 *workspace,
     uint8_t out[32]);
-enum vcs_zcode_commons_v2_error vcs_zcode_mission_v1_validate(
+enum vcs_zcode_commons_error vcs_zcode_mission_v1_validate(
     const struct vcs_zcode_mission_v1 *mission);
-enum vcs_zcode_commons_v2_error vcs_zcode_mission_v1_root(
+enum vcs_zcode_commons_error vcs_zcode_mission_v1_root(
     const struct vcs_zcode_mission_v1 *mission, uint8_t out[32]);
-enum vcs_zcode_commons_v2_error vcs_zcode_contribution_split_v1_validate(
+enum vcs_zcode_commons_error vcs_zcode_contribution_split_v1_validate(
     const struct vcs_zcode_contribution_split_v1 *split);
-enum vcs_zcode_commons_v2_error vcs_zcode_contribution_split_v1_root(
+enum vcs_zcode_commons_error vcs_zcode_contribution_split_v1_root(
     const struct vcs_zcode_contribution_split_v1 *split, uint8_t out[32]);
 
 void vcs_zcode_policy_candidate_v2_init(
@@ -525,16 +528,16 @@ void vcs_zcode_policy_candidate_v2_init(
     const uint8_t moderation_policy_root[32],
     const uint8_t qualification_predicates_root[32],
     const uint8_t backlog_algorithm_root[32]);
-enum vcs_zcode_commons_v2_error vcs_zcode_policy_candidate_v2_validate(
+enum vcs_zcode_commons_error vcs_zcode_policy_candidate_v2_validate(
     const struct vcs_zcode_policy_candidate_v2 *policy);
-enum vcs_zcode_commons_v2_error vcs_zcode_policy_candidate_v2_root(
+enum vcs_zcode_commons_error vcs_zcode_policy_candidate_v2_root(
     const struct vcs_zcode_policy_candidate_v2 *policy, uint8_t out[32]);
 uint64_t vcs_zcode_creation_award_atoms_v2(uint16_t category);
 
-enum vcs_zcode_commons_v2_error vcs_zcode_creation_claim_v2_validate(
+enum vcs_zcode_commons_error vcs_zcode_creation_claim_v2_validate(
     const struct vcs_zcode_creation_claim_v2 *claim,
     const struct vcs_zcode_policy_candidate_v2 *policy);
-enum vcs_zcode_commons_v2_error vcs_zcode_epoch_select_v2(
+enum vcs_zcode_commons_error vcs_zcode_epoch_select_v2(
     const struct vcs_zcode_epoch_selection_v2 *input,
     const struct vcs_zcode_policy_candidate_v2 *policy,
     struct vcs_zcode_epoch_selection_result_v2 *out);
@@ -545,22 +548,22 @@ void vcs_zcode_family_policy_v1_init(
     const uint8_t policy_text_root[32]);
 void vcs_zcode_family_policy_v1_default(
     struct vcs_zcode_family_policy_v1 *policy);
-enum vcs_zcode_commons_v2_error vcs_zcode_family_policy_v1_validate(
+enum vcs_zcode_commons_error vcs_zcode_family_policy_v1_validate(
     const struct vcs_zcode_family_policy_v1 *policy);
-enum vcs_zcode_commons_v2_error vcs_zcode_family_policy_v1_root(
+enum vcs_zcode_commons_error vcs_zcode_family_policy_v1_root(
     const struct vcs_zcode_family_policy_v1 *policy, uint8_t out[32]);
 
 enum vcs_zcode_moderation_vote_v1 vcs_zcode_moderation_coverage_vote_v1(
     const struct vcs_zcode_moderation_coverage_v1 *coverage,
     enum vcs_zcode_moderation_audience_v1 audience,
     enum vcs_zcode_moderation_behavior_v1 behavior);
-enum vcs_zcode_commons_v2_error vcs_zcode_classification_receipt_v1_validate(
+enum vcs_zcode_commons_error vcs_zcode_classification_receipt_v1_validate(
     const struct vcs_zcode_classification_receipt_v1 *receipt);
-enum vcs_zcode_commons_v2_error vcs_zcode_classification_receipt_v1_root(
+enum vcs_zcode_commons_error vcs_zcode_classification_receipt_v1_root(
     const struct vcs_zcode_classification_receipt_v1 *receipt,
     uint8_t out[32]);
 
-enum vcs_zcode_commons_v2_error vcs_zcode_classification_panel_v1_select(
+enum vcs_zcode_commons_error vcs_zcode_classification_panel_v1_select(
     const struct vcs_zcode_moderation_service_v1 *services,
     size_t service_count, const uint8_t future_block_hash[32],
     bool resilient_appeal,
@@ -578,4 +581,4 @@ bool vcs_zcode_commons_admission_is_issuance_eligible_v1(
     enum vcs_zcode_moderation_tier_v1 highest_attainable_tier,
     bool challenge_mature);
 
-#endif /* ZCL_VCS_ZCODE_COMMONS_V2_H */
+#endif /* ZCL_VCS_ZCODE_COMMONS_H */
