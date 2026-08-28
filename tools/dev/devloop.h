@@ -255,10 +255,11 @@ struct zcl_devloop_hotswap_build_receipt {
 };
 
 /* Build exactly one compiled-allowlist source TU under the cached action plan
- * written by the authoritative Make configuration. Inputs are snapshotted
- * from the previous compiler depfile and re-stat'd after compilation; a new,
- * missing, or changed dependency refuses publication while refreshing the
- * baseline for the next edit. No shell or Make process is launched. */
+ * written by the authoritative Make configuration. A warm build snapshots
+ * the previous compiler depfile and re-stats after compilation. A cold build
+ * discovers the closure, then verifies it with a second compile in the same
+ * action; any dependency mutation or expansion refuses publication. No shell
+ * or Make process is launched. */
 bool zcl_devloop_hotswap_build(
     const char *repo_root, const char *source_tu,
     struct zcl_devloop_hotswap_build_receipt *receipt,
