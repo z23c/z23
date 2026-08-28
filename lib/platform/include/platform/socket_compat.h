@@ -386,6 +386,50 @@ static inline int platform_socket_receive(platform_socket_t sock, void *data,
 #endif
 }
 
+/* One nonblocking operation without leaking a socket-mode change to callers.
+ * Windows has no MSG_DONTWAIT, so temporarily toggle FIONBIO and restore the
+ * blocking mode expected by the framing layer. */
+static inline int platform_socket_send_nonblocking(platform_socket_t sock,
+                                                    const void *data,
+                                                    size_t size)
+{
+    int part = size > INT32_MAX ? INT32_MAX : (int)size;
+#if defined(_WIN32)
+    if (!platform_socket_set_nonblocking(sock, true)) return SOCKET_ERROR;
+    int result = send(sock, (const char *)data, part, 0);
+    int error = result == SOCKET_ERROR ? WSAGetLastError() : 0;
+    if (!platform_socket_set_nonblocking(sock, false) &&
+        result != SOCKET_ERROR)
+        return SOCKET_ERROR;
+    if (result == SOCKET_ERROR) WSASetLastError(error);
+    return result;
+#else
+    int flags = MSG_DONTWAIT;
+#ifdef MSG_NOSIGNAL
+    flags |= MSG_NOSIGNAL;
+#endif
+    return (int)send(sock, data, (size_t)part, flags);
+#endif
+}
+
+static inline int platform_socket_receive_nonblocking(platform_socket_t sock,
+                                                       void *data, size_t size)
+{
+    int part = size > INT32_MAX ? INT32_MAX : (int)size;
+#if defined(_WIN32)
+    if (!platform_socket_set_nonblocking(sock, true)) return SOCKET_ERROR;
+    int result = recv(sock, (char *)data, part, 0);
+    int error = result == SOCKET_ERROR ? WSAGetLastError() : 0;
+    if (!platform_socket_set_nonblocking(sock, false) &&
+        result != SOCKET_ERROR)
+        return SOCKET_ERROR;
+    if (result == SOCKET_ERROR) WSASetLastError(error);
+    return result;
+#else
+    return (int)recv(sock, data, (size_t)part, MSG_DONTWAIT);
+#endif
+}
+
 static inline int platform_socket_poll(platform_socket_pollfd *sockets,
                                        size_t count, int timeout_ms)
 {

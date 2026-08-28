@@ -42,9 +42,9 @@ void fs_session_cleanup(struct fs_session *s)
 
 double fs_session_mbps(const struct fs_session *s) { (void)s; return 0.0; }
 
-#if defined(__clang__)
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wunused-parameter"
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-parameter"
 #endif
 #define FS_WINDOWS_TRANSPORT_REFUSAL(name_, args_) \
     bool name_ args_ { errno = ENOTSUP; return false; }
@@ -83,8 +83,8 @@ FS_WINDOWS_TRANSPORT_REFUSAL(fs_recv_chunk_private_until,
      const uint8_t digest[32], int64_t deadline))
 
 #undef FS_WINDOWS_TRANSPORT_REFUSAL
-#if defined(__clang__)
-#pragma clang diagnostic pop
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
 #endif
 
 void fs_server_start(const char *datadir, uint16_t port)
@@ -129,8 +129,11 @@ bool fs_parse_serve_request(const uint8_t *p, uint32_t n, bool *all,
                             bool *range, const uint8_t **puzzle,
                             uint16_t *start, uint16_t *end)
 {
-    if (all) *all = false; if (range) *range = false;
-    if (puzzle) *puzzle = NULL; if (start) *start = 0; if (end) *end = 0;
+    if (all) *all = false;
+    if (range) *range = false;
+    if (puzzle) *puzzle = NULL;
+    if (start) *start = 0;
+    if (end) *end = 0;
     if (!p) return false;
     uint32_t off = 0;
     if (n >= FS_POW_SOLUTION_SIZE + 3 &&
