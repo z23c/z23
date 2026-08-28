@@ -204,7 +204,7 @@ void vcs_zcode_creation_claim_wire_v2_selection(
     if (!out) return;
     memset(out, 0, sizeof(*out));
     if (!claim || !claim_root) return;
-    out->schema_version = VCS_ZCODE_COMMONS_V2_VERSION;
+    out->schema_version = VCS_ZCODE_CREATION_CLAIM_V2_VERSION;
     out->flags = claim->flags;
     out->category = claim->category;
     memcpy(out->claim_root, claim_root, 32);

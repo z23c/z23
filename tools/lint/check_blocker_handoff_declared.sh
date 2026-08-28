@@ -279,7 +279,10 @@ while IFS=$'\t' read -r file line pattern; do
     [ -z "$file" ] && continue
     FILE_MARKER["$file"]="${FILE_MARKER[$file]:-}${FILE_MARKER[$file]:+ }$pattern"
 done < <(grep -rnoE '/\*[ \t]*blocker-id:[ \t]*[A-Za-z0-9_.*-]+[ \t]*\*/' "${scan_files[@]}" 2>/dev/null |
-         sed -E 's#^([^:]+):([0-9]+):.*blocker-id:[ \t]*([A-Za-z0-9_.*-]+).*#\1\t\2\t\3#' || true)
+         # [[:space:]], not [ \t]: BSD sed reads "\t" in a bracket expression as
+         # literal backslash-or-"t", so a marker id starting with "t" lost that
+         # letter here (check_blocker_remedy.sh carries the same fix).
+         sed -E 's#^([^:]+):([0-9]+):.*blocker-id:[[:space:]]*([A-Za-z0-9_.*-]+).*#\1\t\2\t\3#' || true)
 
 # ── Fold raise sites into: id -> can be raised with an empty escape? ─────
 # The question is "CAN this id be raised with an empty escape action", so a

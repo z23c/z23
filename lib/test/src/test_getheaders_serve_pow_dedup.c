@@ -46,6 +46,11 @@
  *      getheaders_served_requests both move on a real served request, and
  *      they are neither always-zero nor always-equal (a 0-header reply
  *      advances requests only).
+ *   D. the per-peer serve window bounds how OFTEN one peer may ask: an
+ *      honest burst is fully served, a flood gets exactly the allowance
+ *      worth of replies and the rest DEFERRED (no reply, no disconnect, no
+ *      offence), the window is per-peer, and expiry restores service.
+ *      Time is injected through the window field itself (see the D note).
  *
  * A and B cover complementary halves, so keep both: A watches the REFUSAL
  * path (a re-verify added after a failed check — literally the old
@@ -71,6 +76,7 @@
 #include "net/net.h"
 #include "net/netbase.h"
 #include "net/protocol.h"
+#include "platform/time_compat.h"
 #include "primitives/block.h"
 #include "storage/disk_block_io.h"
 #include "storage/node_db_runtime.h"
@@ -243,6 +249,18 @@ static void pd_drain_send_queue(struct p2p_node *node)
     node->send_tail = NULL;
     node->send_size = 0;
     node->send_offset = 0;
+}
+
+/* The fixture's peers own ZCL_INVALID_SOCKET, so every SERVED reply runs
+ * socket_send_data(), whose send() fails EBADF and latches
+ * p2p_node_close_socket's LOCAL_SHUTDOWN disconnect on the node. That latch
+ * is fake-socket noise, not the serve path's verdict — neither the serve nor
+ * the defer path punishes. Clear it so the defer checks observe only
+ * punishment the code under test actually performed. */
+static void pd_clear_fixture_disconnect(struct p2p_node *node)
+{
+    node->disconnect = false;
+    node->disconnect_reason = P2P_DISCONNECT_NONE;
 }
 
 /* Header count of the framed `headers` reply sitting in the send queue:
@@ -596,6 +614,199 @@ int test_getheaders_serve_pow_dedup(void)
             stream_free(&req2);
             stream_free(&buf2);
             pd_drain_send_queue(&node);
+
+        /* ── D. the per-peer serve window ─────────────────────────────
+         *
+         * Each reply costs real Equihash work, so the serve path bounds how
+         * OFTEN one peer may ask (GETHEADERS_SERVE_* in net/msg_internal.h).
+         * An honest IBD peer re-asks at its scheduler-driven pace, orders of
+         * magnitude under the allowance; a flood must get exactly the
+         * allowance worth of replies and DEFER the rest — no reply, no
+         * disconnect, no offence. Pins:
+         *
+         *   D1 an honest burst is fully served;
+         *   D2 the flood: served stops exactly at the allowance, every
+         *      excess request is deferred silently (true return, zero wire
+         *      bytes, no disconnect, its own counter — not the served one),
+         *      and the window is PER-PEER (a fresh peer is served while the
+         *      flooder is deferred);
+         *   D3 expiry restores service: the window rolls and the same peer
+         *      is served again.
+         *
+         * Time is injected through the window field itself — the same seam
+         * test_net_handshake_adversarial.c reads on the addr window: D3
+         * backdates node.getheaders_rate_window_start past the window and
+         * lets the roll condition do the rest. No sleeps: the production
+         * read is now >= window_start + WINDOW_SECS, so a start far enough
+         * in the past is deterministic no matter how slowly this runs. */
+            struct p2p_node flooder;
+            pd_setup_node(&flooder);
+            node_id_t flood_id = flooder.id;
+            const int allowance =
+                (int)GETHEADERS_SERVE_MAX_REQUESTS_PER_WINDOW;
+
+            /* hash_stop-only form anchored at h[2]: every admitted request
+             * serves exactly ONE header (h[3], B2's shape with a successor),
+             * so the window is measured against the real per-request cost,
+             * and a mutation that served without gating (or gated without
+             * serving) moves a checked number. */
+            struct byte_stream buf_d, req_d;
+            bool built_d = pd_build_getheaders(&buf_d, NULL, 0, &hash[2]);
+            PD_CHECK("D: getheaders payload built", built_d);
+            stream_init_from_data(&req_d, buf_d.data, buf_d.size);
+
+            uint64_t defer_before = getheaders_deferred_rate_window();
+            msg_headers_get_stats(&st_before);
+            /* The window's own baseline: everything this peer is served from
+             * here on is admitted against ONE allowance. */
+            uint64_t served_at_window_start =
+                st_before.getheaders_served_requests;
+            const int burst = 5;
+            bool burst_served = true;
+            int64_t burst_wire = 1;
+            for (int i = 0; i < burst && burst_served; i++) {
+                req_d.read_pos = 0;   /* re-send the identical request */
+                burst_served = process_getheaders(&mp, &flooder, &req_d);
+                burst_wire = pd_queued_headers_count(&flooder);
+                pd_drain_send_queue(&flooder);
+            }
+            msg_headers_get_stats(&st_after);
+            PD_CHECK("D1: an honest burst is answered every time",
+                     burst_served);
+            PD_CHECK("D1: every burst reply carried its header",
+                     burst_wire == 1);
+            PD_CHECK("D1: the burst moved only the served counters",
+                     st_after.getheaders_served_requests -
+                         st_before.getheaders_served_requests == burst &&
+                     st_after.headers_served_total -
+                         st_before.headers_served_total == burst);
+            PD_CHECK("D1: the burst deferred nothing",
+                     getheaders_deferred_rate_window() == defer_before);
+
+            /* D2 — the flood. Another burst+10 requests arrive in the SAME
+             * window; the allowance is what the peer gets, the rest are
+             * deferred. */
+            msg_headers_get_stats(&st_before);
+            uint64_t pow_before_d = getheaders_serve_pow_checks();
+            /* Every ADMITTED request is witnessed exactly once: either the
+             * receipt layer skips a proof it already paid (a hit) or the
+             * serve pays a fresh one (one pow check). The receipt layer on
+             * main means a repeat of the same anchor normally hits — so the
+             * pow counter alone no longer counts admitted serves (it would
+             * read 0 here, since B1 already proved the header D serves).
+             * What must NEVER happen: a witness count below the admitted
+             * count (a serve that skipped verification) or a fresh-proof
+             * bill above one (a receipt miss that re-proves per request). */
+            struct getheaders_receipt_stats rs_before;
+            getheaders_verify_receipt_stats(&rs_before);
+            const int flood_extra = 10;
+            const int flood_total = allowance - burst + flood_extra;
+            int deferred_seen = 0;
+            int served_seen = 0;
+            bool defer_clean = true;
+            for (int i = 0; i < flood_total; i++) {
+                req_d.read_pos = 0;   /* re-send the identical request */
+                bool answered = process_getheaders(&mp, &flooder, &req_d);
+                bool queued = pd_queued_headers_count(&flooder) >= 0;
+                pd_drain_send_queue(&flooder);
+                bool punished = flooder.disconnect;
+                pd_clear_fixture_disconnect(&flooder);
+                if (answered && queued) {
+                    served_seen++;
+                } else {
+                    /* DEFER shape: handled, nothing on the wire, and no NEW
+                     * disconnect — a defer queues nothing, so nothing but
+                     * the defer path itself could latch it here. */
+                    deferred_seen++;
+                    defer_clean = defer_clean && answered && !queued &&
+                                  !punished;
+                }
+            }
+            msg_headers_get_stats(&st_after);
+            PD_CHECK("D2: served stops EXACTLY at the window allowance",
+                     st_after.getheaders_served_requests -
+                         st_before.getheaders_served_requests ==
+                     allowance - burst);
+            PD_CHECK("D2: the window admitted the allowance and no more",
+                     st_after.getheaders_served_requests -
+                         served_at_window_start == allowance);
+            PD_CHECK("D2: every request past the allowance is deferred",
+                     deferred_seen == flood_extra &&
+                     served_seen == allowance - burst);
+            PD_CHECK("D2: a deferred request is silent, handled, and "
+                     "unpunished", defer_clean);
+            PD_CHECK("D2: deferrals are counted as deferrals, not serves",
+                     getheaders_deferred_rate_window() - defer_before ==
+                     flood_extra);
+            PD_CHECK("D2: the stats object surfaces the same defer count",
+                     st_after.getheaders_deferred_rate_window -
+                         st_before.getheaders_deferred_rate_window ==
+                     (uint64_t)flood_extra);
+            {
+                struct getheaders_receipt_stats rs_after;
+                getheaders_verify_receipt_stats(&rs_after);
+                uint64_t fresh = getheaders_serve_pow_checks() - pow_before_d;
+                PD_CHECK("D2: every admitted request was witnessed once — "
+                         "a receipt hit or a fresh proof, never neither, "
+                         "never both",
+                         rs_after.hits - rs_before.hits + fresh ==
+                         (uint64_t)(allowance - burst));
+                PD_CHECK("D2: the flood's fresh-proof bill is at most ONE — "
+                         "the receipt covers every repeat of a served "
+                         "header",
+                         fresh <= 1u);
+            }
+
+            /* D2b — the window is PER-PEER: a fresh peer is served while
+             * the flooder sits exhausted. */
+            {
+                struct p2p_node other;
+                pd_setup_node(&other);
+                other.id = flood_id + 1;
+                req_d.read_pos = 0;
+                bool other_served = process_getheaders(&mp, &other, &req_d);
+                bool other_queued = pd_queued_headers_count(&other) >= 0;
+                pd_drain_send_queue(&other);
+                pd_clear_fixture_disconnect(&other);
+                /* The strong per-peer pin: the fresh peer's OWN window
+                 * opened and drew one admission while the flooder's window
+                 * sits exhausted at exactly the allowance. */
+                PD_CHECK("D2: the window is per-peer, not global",
+                         other_served && other_queued &&
+                         other.getheaders_rate_window_count == 1 &&
+                         flooder.getheaders_rate_window_count == allowance);
+            }
+
+            /* D3 — expiry restores service. Backdate the window start to the
+             * exact window boundary and leave the count exhausted (time
+             * injection through the window field itself, no sleeps); the
+             * next request rolls the window and is served, and the roll
+             * resets the count, so the same peer can draw another full
+             * allowance. */
+            msg_headers_get_stats(&st_before);
+            uint64_t defer_stable = getheaders_deferred_rate_window();
+            flooder.getheaders_rate_window_start =
+                platform_time_wall_time_t() -
+                GETHEADERS_SERVE_WINDOW_SECS - 1;
+            flooder.getheaders_rate_window_count =
+                GETHEADERS_SERVE_MAX_REQUESTS_PER_WINDOW;
+            req_d.read_pos = 0;
+            bool resumed = process_getheaders(&mp, &flooder, &req_d);
+            int64_t resumed_wire = pd_queued_headers_count(&flooder);
+            pd_drain_send_queue(&flooder);
+            msg_headers_get_stats(&st_after);
+            PD_CHECK("D3: an expired window serves the same peer again",
+                     resumed && resumed_wire == 1);
+            PD_CHECK("D3: the roll reset the exhausted window",
+                     flooder.getheaders_rate_window_count == 1);
+            PD_CHECK("D3: resumed service counts as a serve, not a defer",
+                     st_after.getheaders_served_requests -
+                         st_before.getheaders_served_requests == 1 &&
+                     getheaders_deferred_rate_window() == defer_stable);
+
+            stream_free(&req_d);
+            stream_free(&buf_d);
+            pd_drain_send_queue(&flooder);
         }
 
         main_state_free(&ms);

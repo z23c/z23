@@ -233,11 +233,11 @@ static int claim_epoch_object_test(void)
         };
         struct vcs_zcode_epoch_selection_result_v2 result;
         ASSERT_EQ(vcs_zcode_epoch_select_v2(&input, &policy, &result),
-                  VCS_ZCODE_COMMONS_V2_OK);
+                  VCS_ZCODE_COMMONS_OK);
         ASSERT_EQ(result.selected_count, 2);
         uint8_t policy_root[32];
         ASSERT_EQ(vcs_zcode_policy_candidate_v2_root(&policy, policy_root),
-                  VCS_ZCODE_COMMONS_V2_OK);
+                  VCS_ZCODE_COMMONS_OK);
         struct vcs_zcode_claim_epoch_proposal_v2 proposal;
         ASSERT_EQ(vcs_zcode_claim_epoch_from_selection(
                       &input, policy_root, projection_root, &result, &proposal),

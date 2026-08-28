@@ -65,7 +65,7 @@
 #include "vcs/package_store.h"
 #include "vcs/signed_evidence.h"
 #include "vcs/zcode_c23_corpus.h"
-#include "vcs/zcode_commons_v2.h"
+#include "vcs/zcode_commons.h"
 #include "vcs/zcode_family_admission.h"
 
 #include <ctype.h>
@@ -2141,7 +2141,7 @@ static bool factory_admission(const struct run_args *args,
     vcs_zcode_family_policy_v1_default(&policy);
     uint8_t family_policy_root[32], frozen[32];
     if (vcs_zcode_family_policy_v1_root(&policy, family_policy_root) !=
-            VCS_ZCODE_COMMONS_V2_OK ||
+            VCS_ZCODE_COMMONS_OK ||
         !zcl_hex_decode_lower(PF_FAMILY_POLICY_ROOT_HEX, frozen, 32) ||
         memcmp(family_policy_root, frozen, 32) != 0)
         LOG_FAIL(PF_LOG, "family policy root mismatch with the frozen "
@@ -2161,7 +2161,7 @@ static bool factory_admission(const struct run_args *args,
     struct vcs_zcode_commons_admission_v1 admission;
     memset(&admission, 0, sizeof(admission));
     admission.schema_version = 1;
-    admission.flags = VCS_ZCODE_COMMONS_V2_REQUIRED_FLAGS;
+    admission.flags = VCS_ZCODE_COMMONS_REQUIRED_FLAGS;
     /* Founding self-screen: tier 0 with the SELF_SCREENED state; zero
      * independent operator groups (disclosed in the report). */
     admission.state = VCS_ZCODE_ADMISSION_SELF_SCREENED;

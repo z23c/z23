@@ -127,6 +127,22 @@ ship_is_proof_host() {
     [ -n "$PROOF_SERVER" ] && [ "$1" = "$PROOF_SERVER" ]
 }
 
+# True only when one observation binds the live process to the exact candidate
+# bytes and deploy identity. RPC readiness is deliberately separate: a slow
+# node can be the right process while still completing Type=notify startup.
+ship_observation_is_candidate() {
+    local line="$1" want_sha="$2"
+    [ "$(ship_field_num "$line" observed)" -eq 1 ] &&
+        [ "$(ship_field_num "$line" exists)" -eq 1 ] &&
+        [ "$(ship_field "$line" sha)" = "$want_sha" ] &&
+        [ "$(ship_field "$line" ident)" = yes ]
+}
+
+ship_observation_is_qualified() {
+    ship_observation_is_candidate "$1" "$2" &&
+        [ "$(ship_field "$1" rpc)" = ok ]
+}
+
 # Run immutable release staging with bounded concurrency.  The caller enters
 # the activation loop only after this function has reaped every child and all
 # of them succeeded, making the function a fleet-wide no-restart barrier.
@@ -189,6 +205,13 @@ if [ "${1:-}" = "--selftest" ]; then
     ship_glibc_satisfies 2.31 2.36
     ship_glibc_satisfies 2.31 2.39
     ! ship_glibc_satisfies 2.40 2.39
+    selftest_sha="$(printf 'a%.0s' {1..64})"
+    selftest_obs="observed=1 exists=1 pid=9 start=5 sha=$selftest_sha ident=yes rpc=ok cpu=1 blkio=1 io=1"
+    ship_observation_is_candidate "$selftest_obs" "$selftest_sha"
+    ship_observation_is_qualified "$selftest_obs" "$selftest_sha"
+    ! ship_observation_is_candidate "${selftest_obs/ident=yes/ident=no}" "$selftest_sha"
+    ! ship_observation_is_candidate "${selftest_obs/sha=$selftest_sha/sha=deadbeef}" "$selftest_sha"
+    ! ship_observation_is_qualified "${selftest_obs/rpc=ok/rpc=no}" "$selftest_sha"
     PROOF_SERVER=node3
     ! ship_is_proof_host node1 && ship_is_proof_host node3
     test_tmp="$(mktemp -d "${TMPDIR:-/tmp}/z23-ship-selftest.XXXXXX")"
@@ -764,6 +787,48 @@ REMOTE_RELEASE_CHECK
     [ "$release_state" = exact ] ||
         die "$host lost its verified staged release before activation; no bytes were installed"
     say "remote     immutable staged release remains exact"
+
+    # A rerun is an observation, not another deployment, when this exact
+    # immutable release is already the live executable. This is essential on
+    # spinning-disk nodes: restarting a healthy or still-starting candidate
+    # can discard tens of minutes of honest startup work and prevents a fleet
+    # rerun from continuing to later hosts.
+    if [ "$svc_bin" = "$release_root/z23" ]; then
+        local current_line current_rc=0
+        SHIP_OBS_UNIT=zclassic23
+        SHIP_OBS_SHA="$ARTIFACT_SHA"
+        SHIP_OBS_SRC="${CAND_SOURCE_ID:-}"
+        SHIP_OBS_COMMIT="${DEPLOY_COMMIT:-}"
+        SHIP_REMOTE_HOST="$host"
+        current_line="$(ship_remote_observe "$ARTIFACT_SHA" 2>/dev/null || true)"
+        if ship_observation_is_qualified "$current_line" "$ARTIFACT_SHA"; then
+            say "$host already runs the exact qualified candidate — no restart"
+            return 0
+        fi
+        if ship_observation_is_candidate "$current_line" "$ARTIFACT_SHA"; then
+            SHIP_AWAIT_WINDOW="$SHIP_REMOTE_WINDOW"
+            SHIP_AWAIT_SILENCE="$SHIP_REMOTE_SILENCE"
+            SHIP_AWAIT_POLL="${ZCL_SHIP_LOCAL_POLL_SECONDS:-10}"
+            SHIP_AWAIT_CRASH_SAMPLES="$SHIP_CRASH_SAMPLES"
+            SHIP_AWAIT_UNKNOWN_SAMPLES="$SHIP_UNKNOWN_SAMPLES"
+            SHIP_AWAIT_RPC_BUDGETS="$SHIP_RPC_BUDGETS"
+            ship_await "$host current candidate" ship_remote_observe \
+                "$ARTIFACT_SHA" || current_rc=$?
+            case "$current_rc" in
+                0)
+                    say "$host current candidate qualified — no restart"
+                    return 0
+                    ;;
+                3|4)
+                    say "$host current candidate remains $SHIP_AWAIT_LAST_VERDICT — no restart"
+                    return "$current_rc"
+                    ;;
+                *)
+                    say "$host current candidate is $SHIP_AWAIT_LAST_VERDICT — entering recovery activation"
+                    ;;
+            esac
+        fi
+    fi
 
     local activate_rc=0
     { printf '%s\n' "$SHIP_LIB_TEXT"; cat <<'REMOTE_SCRIPT'

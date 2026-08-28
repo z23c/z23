@@ -3,7 +3,7 @@
 #ifndef ZCL_VCS_ZCODE_FAMILY_ADMISSION_H
 #define ZCL_VCS_ZCODE_FAMILY_ADMISSION_H
 
-#include "vcs/zcode_commons_v2.h"
+#include "vcs/zcode_commons.h"
 #include "vcs/zcode_sovereignty_policy.h"
 
 #include <stdbool.h>

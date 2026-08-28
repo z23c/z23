@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Purpose: deterministic simulation-only Living Commons v2 economics. */
+ * Purpose: deterministic simulation-only Living Commons economics. */
 
-#include "vcs/zcode_commons_v2.h"
+#include "vcs/zcode_commons.h"
 
 #include "base/checked.h"
 #include "base/safe_alloc.h"
@@ -39,28 +39,28 @@ static void cv2_hash_u64(struct sha3_256_ctx *sha, uint64_t value)
     sha3_256_write(sha, le, sizeof(le));
 }
 
-const char *vcs_zcode_commons_v2_error_string(
-    enum vcs_zcode_commons_v2_error error)
+const char *vcs_zcode_commons_error_string(
+    enum vcs_zcode_commons_error error)
 {
     switch (error) {
-    case VCS_ZCODE_COMMONS_V2_OK: return "ok";
-    case VCS_ZCODE_COMMONS_V2_NULL: return "null-argument";
-    case VCS_ZCODE_COMMONS_V2_VERSION_ERROR: return "schema-version";
-    case VCS_ZCODE_COMMONS_V2_FLAGS: return "flags";
-    case VCS_ZCODE_COMMONS_V2_ROOT: return "root";
-    case VCS_ZCODE_COMMONS_V2_ENUM: return "closed-enum";
-    case VCS_ZCODE_COMMONS_V2_AMOUNT: return "amount";
-    case VCS_ZCODE_COMMONS_V2_LIMIT: return "limit";
-    case VCS_ZCODE_COMMONS_V2_ORDER: return "canonical-order";
-    case VCS_ZCODE_COMMONS_V2_DUPLICATE: return "duplicate";
-    case VCS_ZCODE_COMMONS_V2_IMMATURE: return "dual-maturity";
-    case VCS_ZCODE_COMMONS_V2_POLICY: return "policy";
-    case VCS_ZCODE_COMMONS_V2_COVERAGE: return "coverage";
-    case VCS_ZCODE_COMMONS_V2_QUORUM: return "quorum";
-    case VCS_ZCODE_COMMONS_V2_OVERFLOW: return "arithmetic-overflow";
-    case VCS_ZCODE_COMMONS_V2_SIZE: return "wire-size";
-    case VCS_ZCODE_COMMONS_V2_MAGIC: return "wire-magic";
-    case VCS_ZCODE_COMMONS_V2_SIGNATURE: return "signature";
+    case VCS_ZCODE_COMMONS_OK: return "ok";
+    case VCS_ZCODE_COMMONS_NULL: return "null-argument";
+    case VCS_ZCODE_COMMONS_VERSION_ERROR: return "schema-version";
+    case VCS_ZCODE_COMMONS_FLAGS: return "flags";
+    case VCS_ZCODE_COMMONS_ROOT: return "root";
+    case VCS_ZCODE_COMMONS_ENUM: return "closed-enum";
+    case VCS_ZCODE_COMMONS_AMOUNT: return "amount";
+    case VCS_ZCODE_COMMONS_LIMIT: return "limit";
+    case VCS_ZCODE_COMMONS_ORDER: return "canonical-order";
+    case VCS_ZCODE_COMMONS_DUPLICATE: return "duplicate";
+    case VCS_ZCODE_COMMONS_IMMATURE: return "dual-maturity";
+    case VCS_ZCODE_COMMONS_POLICY: return "policy";
+    case VCS_ZCODE_COMMONS_COVERAGE: return "coverage";
+    case VCS_ZCODE_COMMONS_QUORUM: return "quorum";
+    case VCS_ZCODE_COMMONS_OVERFLOW: return "arithmetic-overflow";
+    case VCS_ZCODE_COMMONS_SIZE: return "wire-size";
+    case VCS_ZCODE_COMMONS_MAGIC: return "wire-magic";
+    case VCS_ZCODE_COMMONS_SIGNATURE: return "signature";
     }
     return "unknown-commons-v2-error";
 }
@@ -80,8 +80,8 @@ void vcs_zcode_policy_candidate_v2_init(
 {
     if (!policy) return;
     memset(policy, 0, sizeof(*policy));
-    policy->schema_version = VCS_ZCODE_COMMONS_V2_VERSION;
-    policy->flags = VCS_ZCODE_COMMONS_V2_REQUIRED_FLAGS;
+    policy->schema_version = VCS_ZCODE_CREATION_CLAIM_V2_VERSION;
+    policy->flags = VCS_ZCODE_COMMONS_REQUIRED_FLAGS;
     policy->challenge_blocks = VCS_ZCODE_COMMONS_CHALLENGE_BLOCKS;
     policy->challenge_seconds = VCS_ZCODE_COMMONS_CHALLENGE_SECONDS;
     if (network_genesis_root)
@@ -96,36 +96,36 @@ void vcs_zcode_policy_candidate_v2_init(
     memcpy(policy->award_atoms, award_schedule, sizeof(award_schedule));
 }
 
-enum vcs_zcode_commons_v2_error vcs_zcode_policy_candidate_v2_validate(
+enum vcs_zcode_commons_error vcs_zcode_policy_candidate_v2_validate(
     const struct vcs_zcode_policy_candidate_v2 *policy)
 {
-    if (!policy) return VCS_ZCODE_COMMONS_V2_NULL;
-    if (policy->schema_version != VCS_ZCODE_COMMONS_V2_VERSION)
-        return VCS_ZCODE_COMMONS_V2_VERSION_ERROR;
-    if (policy->flags != VCS_ZCODE_COMMONS_V2_REQUIRED_FLAGS)
-        return VCS_ZCODE_COMMONS_V2_FLAGS;
+    if (!policy) return VCS_ZCODE_COMMONS_NULL;
+    if (policy->schema_version != VCS_ZCODE_CREATION_CLAIM_V2_VERSION)
+        return VCS_ZCODE_COMMONS_VERSION_ERROR;
+    if (policy->flags != VCS_ZCODE_COMMONS_REQUIRED_FLAGS)
+        return VCS_ZCODE_COMMONS_FLAGS;
     if (policy->challenge_blocks != VCS_ZCODE_COMMONS_CHALLENGE_BLOCKS ||
         policy->challenge_seconds != VCS_ZCODE_COMMONS_CHALLENGE_SECONDS)
-        return VCS_ZCODE_COMMONS_V2_POLICY;
+        return VCS_ZCODE_COMMONS_POLICY;
     if (!cv2_nonzero(policy->network_genesis_root) ||
         !cv2_nonzero(policy->moderation_policy_root) ||
         !cv2_nonzero(policy->qualification_predicates_root) ||
         !cv2_nonzero(policy->backlog_algorithm_root))
-        return VCS_ZCODE_COMMONS_V2_ROOT;
+        return VCS_ZCODE_COMMONS_ROOT;
     for (size_t i = 0; i < VCS_ZCODE_COMMONS_CATEGORY_COUNT; i++)
         if (policy->award_atoms[i] != award_schedule[i])
-            return VCS_ZCODE_COMMONS_V2_AMOUNT;
-    return VCS_ZCODE_COMMONS_V2_OK;
+            return VCS_ZCODE_COMMONS_AMOUNT;
+    return VCS_ZCODE_COMMONS_OK;
 }
 
-enum vcs_zcode_commons_v2_error vcs_zcode_policy_candidate_v2_root(
+enum vcs_zcode_commons_error vcs_zcode_policy_candidate_v2_root(
     const struct vcs_zcode_policy_candidate_v2 *policy, uint8_t out[32])
 {
     if (out) memset(out, 0, 32);
-    if (!policy || !out) return VCS_ZCODE_COMMONS_V2_NULL;
-    enum vcs_zcode_commons_v2_error error =
+    if (!policy || !out) return VCS_ZCODE_COMMONS_NULL;
+    enum vcs_zcode_commons_error error =
         vcs_zcode_policy_candidate_v2_validate(policy);
-    if (error != VCS_ZCODE_COMMONS_V2_OK) return error;
+    if (error != VCS_ZCODE_COMMONS_OK) return error;
     struct sha3_256_ctx sha;
     static const char domain[] = VCS_ZCODE_POLICY_CANDIDATE_V2_DOMAIN;
     sha3_256_init(&sha);
@@ -141,44 +141,44 @@ enum vcs_zcode_commons_v2_error vcs_zcode_policy_candidate_v2_root(
     for (size_t i = 0; i < VCS_ZCODE_COMMONS_CATEGORY_COUNT; i++)
         cv2_hash_u64(&sha, policy->award_atoms[i]);
     sha3_256_finalize(&sha, out);
-    return VCS_ZCODE_COMMONS_V2_OK;
+    return VCS_ZCODE_COMMONS_OK;
 }
 
-static enum vcs_zcode_commons_v2_error claim_shape(
+static enum vcs_zcode_commons_error claim_shape(
     const struct vcs_zcode_creation_claim_v2 *claim)
 {
-    if (!claim) return VCS_ZCODE_COMMONS_V2_NULL;
-    if (claim->schema_version != VCS_ZCODE_COMMONS_V2_VERSION)
-        return VCS_ZCODE_COMMONS_V2_VERSION_ERROR;
+    if (!claim) return VCS_ZCODE_COMMONS_NULL;
+    if (claim->schema_version != VCS_ZCODE_CREATION_CLAIM_V2_VERSION)
+        return VCS_ZCODE_COMMONS_VERSION_ERROR;
     if (claim->reserved != 0 ||
         claim->category >= VCS_ZCODE_COMMONS_CATEGORY_COUNT)
-        return VCS_ZCODE_COMMONS_V2_ENUM;
+        return VCS_ZCODE_COMMONS_ENUM;
     if (!cv2_nonzero(claim->claim_root) ||
         !cv2_nonzero(claim->recipient_binding_root) ||
         !cv2_nonzero(claim->workspace_lineage_root) ||
         !cv2_nonzero(claim->semantic_lineage_root) ||
         !cv2_nonzero(claim->evidence_root) ||
         !cv2_nonzero(claim->commons_admission_root))
-        return VCS_ZCODE_COMMONS_V2_ROOT;
+        return VCS_ZCODE_COMMONS_ROOT;
     if (claim->maturity_height == 0 || claim->maturity_mtp <= 0)
-        return VCS_ZCODE_COMMONS_V2_IMMATURE;
-    return VCS_ZCODE_COMMONS_V2_OK;
+        return VCS_ZCODE_COMMONS_IMMATURE;
+    return VCS_ZCODE_COMMONS_OK;
 }
 
-enum vcs_zcode_commons_v2_error vcs_zcode_creation_claim_v2_validate(
+enum vcs_zcode_commons_error vcs_zcode_creation_claim_v2_validate(
     const struct vcs_zcode_creation_claim_v2 *claim,
     const struct vcs_zcode_policy_candidate_v2 *policy)
 {
-    enum vcs_zcode_commons_v2_error error = claim_shape(claim);
-    if (error != VCS_ZCODE_COMMONS_V2_OK) return error;
+    enum vcs_zcode_commons_error error = claim_shape(claim);
+    if (error != VCS_ZCODE_COMMONS_OK) return error;
     error = vcs_zcode_policy_candidate_v2_validate(policy);
-    if (error != VCS_ZCODE_COMMONS_V2_OK) return error;
+    if (error != VCS_ZCODE_COMMONS_OK) return error;
     if ((claim->flags & VCS_ZCODE_CLAIM_V2_REQUIRED_FLAGS) !=
             VCS_ZCODE_CLAIM_V2_REQUIRED_FLAGS ||
         (claim->flags & VCS_ZCODE_CLAIM_V2_INVALIDATING_FLAGS) != 0)
-        return VCS_ZCODE_COMMONS_V2_FLAGS;
+        return VCS_ZCODE_COMMONS_FLAGS;
     return policy->award_atoms[claim->category] != 0
-        ? VCS_ZCODE_COMMONS_V2_OK : VCS_ZCODE_COMMONS_V2_AMOUNT;
+        ? VCS_ZCODE_COMMONS_OK : VCS_ZCODE_COMMONS_AMOUNT;
 }
 
 struct cv2_ranked_claim {
@@ -244,8 +244,8 @@ static void epoch_result_root(
     static const char domain[] = VCS_ZCODE_EPOCH_CREATION_SET_V2_DOMAIN;
     sha3_256_init(&sha);
     sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
-    cv2_hash_u16(&sha, VCS_ZCODE_COMMONS_V2_VERSION);
-    cv2_hash_u16(&sha, VCS_ZCODE_COMMONS_V2_REQUIRED_FLAGS);
+    cv2_hash_u16(&sha, VCS_ZCODE_CREATION_CLAIM_V2_VERSION);
+    cv2_hash_u16(&sha, VCS_ZCODE_COMMONS_REQUIRED_FLAGS);
     cv2_hash_u64(&sha, input->epoch);
     cv2_hash_u64(&sha, input->cutoff_height);
     cv2_hash_u64(&sha, (uint64_t)input->cutoff_mtp);
@@ -260,7 +260,7 @@ static void epoch_result_root(
     sha3_256_finalize(&sha, out);
 }
 
-enum vcs_zcode_commons_v2_error vcs_zcode_epoch_select_v2(
+enum vcs_zcode_commons_error vcs_zcode_epoch_select_v2(
     const struct vcs_zcode_epoch_selection_v2 *input,
     const struct vcs_zcode_policy_candidate_v2 *policy,
     struct vcs_zcode_epoch_selection_result_v2 *out)
@@ -268,14 +268,14 @@ enum vcs_zcode_commons_v2_error vcs_zcode_epoch_select_v2(
     if (out) memset(out, 0, sizeof(*out));
     if (!input || !policy || !out ||
         (input->claim_count > 0 && !input->claims))
-        return VCS_ZCODE_COMMONS_V2_NULL;
-    enum vcs_zcode_commons_v2_error error =
+        return VCS_ZCODE_COMMONS_NULL;
+    enum vcs_zcode_commons_error error =
         vcs_zcode_policy_candidate_v2_validate(policy);
-    if (error != VCS_ZCODE_COMMONS_V2_OK) return error;
+    if (error != VCS_ZCODE_COMMONS_OK) return error;
     if (input->claim_count > VCS_ZCODE_COMMONS_MAX_CLAIMS)
-        return VCS_ZCODE_COMMONS_V2_LIMIT;
+        return VCS_ZCODE_COMMONS_LIMIT;
     if (input->cutoff_height == 0 || input->cutoff_mtp <= 0)
-        return VCS_ZCODE_COMMONS_V2_IMMATURE;
+        return VCS_ZCODE_COMMONS_IMMATURE;
 
     uint64_t one_percent = input->epoch_capacity_atoms / UINT64_C(100);
     uint64_t per_root_cap = one_percent > VCS_ZCODE_COMMONS_ATOMS_PER_TOKEN
@@ -292,16 +292,16 @@ enum vcs_zcode_commons_v2_error vcs_zcode_epoch_select_v2(
     if (input->claim_count == 0 || input->epoch_capacity_atoms == 0) {
         out->expired_capacity_atoms = input->epoch_capacity_atoms;
         epoch_result_root(input, out, out->epoch_creation_root);
-        return VCS_ZCODE_COMMONS_V2_OK;
+        return VCS_ZCODE_COMMONS_OK;
     }
 
     struct cv2_ranked_claim *ranked = zcl_malloc(
-        input->claim_count * sizeof(*ranked), "commons_v2_ranked_claims");
+        input->claim_count * sizeof(*ranked), "commons_ranked_claims");
     bool *consumed = zcl_calloc(input->claim_count, sizeof(*consumed),
-                                "commons_v2_consumed_claims");
+                                "commons_consumed_claims");
     if (!ranked || !consumed) {
         free(ranked); free(consumed);
-        return VCS_ZCODE_COMMONS_V2_LIMIT;
+        return VCS_ZCODE_COMMONS_LIMIT;
     }
     for (size_t i = 0; i < input->claim_count; i++) {
         ranked[i].input_index = i;
@@ -328,7 +328,7 @@ enum vcs_zcode_commons_v2_error vcs_zcode_epoch_select_v2(
             const struct vcs_zcode_creation_claim_v2 *claim =
                 ranked[at].claim;
             error = claim_shape(claim);
-            bool eligible = error == VCS_ZCODE_COMMONS_V2_OK &&
+            bool eligible = error == VCS_ZCODE_COMMONS_OK &&
                 (claim->flags & VCS_ZCODE_CLAIM_V2_REQUIRED_FLAGS) ==
                     VCS_ZCODE_CLAIM_V2_REQUIRED_FLAGS &&
                 (claim->flags & VCS_ZCODE_CLAIM_V2_INVALIDATING_FLAGS) == 0 &&
@@ -354,7 +354,7 @@ enum vcs_zcode_commons_v2_error vcs_zcode_epoch_select_v2(
                 !zcl_u64_add(lineage_used, award, &next_lineage)) {
                 free(consumed); free(ranked);
                 memset(out, 0, sizeof(*out));
-                return VCS_ZCODE_COMMONS_V2_OVERFLOW;
+                return VCS_ZCODE_COMMONS_OVERFLOW;
             }
             if (next_total > input->epoch_capacity_atoms ||
                 next_recipient > out->recipient_cap_atoms ||
@@ -372,5 +372,5 @@ enum vcs_zcode_commons_v2_error vcs_zcode_epoch_select_v2(
     out->expired_capacity_atoms =
         input->epoch_capacity_atoms - out->selected_atoms;
     epoch_result_root(input, out, out->epoch_creation_root);
-    return VCS_ZCODE_COMMONS_V2_OK;
+    return VCS_ZCODE_COMMONS_OK;
 }

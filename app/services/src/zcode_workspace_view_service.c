@@ -35,9 +35,9 @@ static bool derive_binding(
            input->passport.source_assignment_root, 32);
     if (vcs_zcode_module_passport_v1_root(
             &input->passport, out->entry.module_passport_root) !=
-            VCS_ZCODE_COMMONS_V2_OK ||
+            VCS_ZCODE_COMMONS_OK ||
         vcs_zcode_workspace_entry_v1_root(
-            &out->entry, out->binding_root) != VCS_ZCODE_COMMONS_V2_OK)
+            &out->entry, out->binding_root) != VCS_ZCODE_COMMONS_OK)
         return false;
     out->valid = true;
     return true;

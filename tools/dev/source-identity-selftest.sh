@@ -279,7 +279,7 @@ printf '%s\n' '#!/usr/bin/env bash' \
     '    file) printf "late source input\n" > "$VERIFY_MUTATION_RACE_SOURCE" ;;' \
     '    gitlink-index)' \
     '      "$REAL_GIT" -C "$VERIFY_MUTATION_GITLINK_ROOT" add -f -- "$VERIFY_MUTATION_GITLINK_FILE" ;;' \
-    '    exclude-policy) sed -i -e "\$d" "$VERIFY_MUTATION_EXCLUDE_FILE" ;;' \
+    '    exclude-policy) sed -e "\$d" "$VERIFY_MUTATION_EXCLUDE_FILE" > "$VERIFY_MUTATION_EXCLUDE_FILE.t" && mv "$VERIFY_MUTATION_EXCLUDE_FILE.t" "$VERIFY_MUTATION_EXCLUDE_FILE" ;;' \
     '    selector-file)' \
     '      printf "%s\n" "$VERIFY_MUTATION_EXCLUDE_KEEP" > "$VERIFY_MUTATION_EXCLUDE_FILE" ;;' \
     '    *) exit 97 ;;' \

@@ -286,14 +286,14 @@ static int test_change_classification(void)
         ASSERT_STR_EQ(restart_set.sources[0],
                       "app/services/src/zcode_c23_economics_service.c");
         const char *later_static[] = {
-            "lib/test/src/test_zcode_commons_v2.c",
+            "lib/test/src/test_zcode_commons.c",
             "app/services/src/zcode_c23_economics_internal.h",
         };
         ASSERT(zcl_devloop_restart_source_set_add(
             &restart_set, later_static, 2));
         ASSERT(restart_set.count == 2);
         ASSERT_STR_EQ(restart_set.sources[1],
-                      "lib/test/src/test_zcode_commons_v2.c");
+                      "lib/test/src/test_zcode_commons.c");
 
         const char *cross_service_batch[] = {
             "app/services/src/zcode_c23_economics_service.c",

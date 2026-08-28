@@ -1975,8 +1975,12 @@ TEST_REL_OBJ_ROOT = $(BUILD_DIR)/test-rel-obj
 # defect. -Werror and -pedantic remain in force for every other warning.
 TEST_REL_CFLAGS = $(filter-out $(ZCL_LTO_FLAG),$(CACHED_CFLAGS)) -DZCL_TESTING \
 	-Wno-deprecated-declarations -Wno-format-truncation -Wno-format-overflow \
-	-Wno-array-bounds -Wno-stringop-truncation -Wno-stringop-overread \
-	-Wno-restrict -Wno-nonnull $(ZCL_WARN_MAYBE_UNINITIALIZED)
+	-Wno-array-bounds $(ZCL_WARN_MAYBE_UNINITIALIZED)
+ifeq ($(ZCL_HOST_OS),Linux)
+# GCC-only suppression spellings; Apple Clang rejects them under -Werror.
+TEST_REL_CFLAGS += -Wno-stringop-truncation -Wno-stringop-overread \
+	-Wno-restrict
+endif
 TEST_REL_LDFLAGS = $(filter-out $(ZCL_LTO_FLAG),$(LDFLAGS))
 INTEGRATION_CFLAGS := $(TEST_REL_CFLAGS)
 INTEGRATION_LDFLAGS := $(TEST_REL_LDFLAGS)
@@ -7655,6 +7659,25 @@ $(DEV_TSAN_OBJ_DIR)/lib/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
 # on stock Ubuntu/Debian hosts where the CLI isn't installed).  The tool
 # issues `sqlite3_wal_checkpoint_v2(TRUNCATE)` via the library only — no
 # DELETE, no unguarded statements, and safe to re-run.
+#
+# Deploy-half-shipping guards baked into the recipe below:
+#   - A frozen candidate that IS $(ZCLASSIC23_BIN) (same inode: the file
+#     itself, a hardlink, or a symlink resolving to it) skips the self-copy
+#     GNU install would otherwise refuse; the candidate hash + agentbuild +
+#     source-id assertions below still bind the exact bytes.
+#   - Stale higher-precedence drop-ins the deploy/ship family owns
+#     (zzzzz-z23-ship-release.conf, legacy zzzz-z23-release.conf) are removed
+#     before the ExecStart resolution, because systemd applies drop-ins
+#     last-wins: an old ship selector would otherwise win ExecStart and the
+#     expected-source-id environment over 90-build-identity.conf.
+#   - The rollback image is staged under $(BIN_DIR) (this deploy's own
+#     writable, executable scratch), never in dirname(SERVICE_BIN) — a
+#     release dir a fleet ship froze to 555 would break the arm mid-deploy.
+#     Before arming, the recipe refuses a non-writable service directory:
+#     a deploy that could not restore its rollback image must not start.
+#   - A fleet MANIFEST.sha256 beside SERVICE_BIN is regenerated from the
+#     installed bytes and re-verified after an in-place candidate change;
+#     writing a manifest that does not describe the live bytes is refused.
 # ── install (MVP criterion #1) ──────────────────────────────────────────────
 # Literal install for a fresh operator: copy the two binaries onto PATH and
 # install the systemd --user unit pointed at the installed binary, so a clean
@@ -7740,7 +7763,13 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	        echo "deploy: frozen candidate path must be absolute" >&2; exit 1;; esac; \
 	    test -x "$$ZCL_DEPLOY_FROZEN_CANDIDATE" || { \
 	        echo "deploy: frozen candidate is not executable" >&2; exit 1; }; \
-	    install -m 755 "$$ZCL_DEPLOY_FROZEN_CANDIDATE" $(ZCLASSIC23_BIN); \
+	    if [ "$$ZCL_DEPLOY_FROZEN_CANDIDATE" -ef "$(ZCLASSIC23_BIN)" ]; then \
+	        echo "deploy: frozen candidate is $(ZCLASSIC23_BIN) itself (same file); bytes are already in place, skipping the self-copy"; \
+	    else \
+	        install -m 755 "$$ZCL_DEPLOY_FROZEN_CANDIDATE" $(ZCLASSIC23_BIN); \
+	    fi; \
+	    test -x "$(ZCLASSIC23_BIN)" || { \
+	        echo "deploy: frozen candidate left $(ZCLASSIC23_BIN) missing or non-executable" >&2; exit 1; }; \
 	else \
 	    rm -f $(ZCLASSIC23_BIN); \
 	    $(MAKE) BUILD_SOURCE_RECORD="$(BUILD_SOURCE_RECORD)" zclassic23; \
@@ -7755,6 +7784,7 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	candidate="$$(mktemp "$(dir $(ZCLASSIC23_BIN)).zclassic23.deploy.XXXXXX")"; \
 	prior_snapshot="$(BIN_DIR)/.zclassic23.deploy-prior"; \
 	dropin_tmp=""; service_tmp=""; rollback_bin=""; rollback_dropin=""; \
+	fleet_manifest_tmp=""; \
 	rollback_dropin_present=0; rollback_armed=0; rollback_complete=0; \
 	rollback_source_id=""; rollback_artifact_sha256=""; SERVICE_BIN=""; dropin=""; \
 	cleanup_deploy() { \
@@ -7792,7 +7822,7 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	        fi; \
 	    fi; \
 	    rm -f "$$candidate" "$$prior_snapshot" "$$dropin_tmp" "$$service_tmp" \
-	          "$$rollback_bin" "$$rollback_dropin"; \
+	          "$$rollback_bin" "$$rollback_dropin" "$$fleet_manifest_tmp"; \
 	    exit "$$deploy_rc"; \
 	}; \
 	trap cleanup_deploy EXIT; \
@@ -7833,6 +7863,13 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	else \
 	    echo "deploy: preserving existing canonical service unit"; \
 	fi; \
+	dropin_dir="$(HOME)/.config/systemd/user/zclassic23.service.d"; \
+	for stale_dropin in zzzzz-z23-ship-release.conf zzzz-z23-release.conf; do \
+	    if [ -e "$$dropin_dir/$$stale_dropin" ]; then \
+	        rm -f "$$dropin_dir/$$stale_dropin"; \
+	        echo "deploy: removed stale higher-precedence drop-in $$stale_dropin (systemd applies drop-ins last-wins, so it outranked 90-build-identity.conf and could restart a stale ExecStart with a stale expected source id; 90-build-identity.conf owns the identity record again)"; \
+	    fi; \
+	done; \
 	systemctl --user daemon-reload; \
 	service_exec="$$(systemctl --user show zclassic23 -p ExecStart --value 2>/dev/null)"; \
 	service_path="$$(printf '%s\n' "$$service_exec" | \
@@ -7870,7 +7907,10 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	    "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" >/dev/null; \
 	install -d "$(HOME)/.config/systemd/user/zclassic23.service.d"; \
 	dropin="$(HOME)/.config/systemd/user/zclassic23.service.d/90-build-identity.conf"; \
-	rollback_bin="$$(mktemp "$$(dirname "$$SERVICE_BIN")/.zclassic23.rollback.XXXXXX")"; \
+	service_bin_dir="$$(dirname "$$SERVICE_BIN")"; \
+	[ -n "$$service_bin_dir" ] && [ -d "$$service_bin_dir" ] && [ -w "$$service_bin_dir" ] || { \
+	    echo "deploy: REFUSE: $$service_bin_dir is not a writable directory — this deploy could neither install the candidate nor restore the rollback image there (a frozen/read-only release dir cannot be deployed over in place). Nothing was mutated. chmod u+w that directory, or point zclassic23.service at a writable canonical path, then re-run." >&2; exit 1; }; \
+	rollback_bin="$$(mktemp "$(BIN_DIR)/.zclassic23.rollback.XXXXXX")"; \
 	install -m 755 "$$prior_snapshot" "$$rollback_bin"; \
 	rollback_artifact_sha256="$$(sha256sum < "$$rollback_bin" | awk '{print $$1}')"; \
 	rollback_agentbuild="$$(timeout 30 "$$rollback_bin" agentbuild 2>&1)" || { \
@@ -7901,6 +7941,19 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	[ "$$installed_sha256" = "$$artifact_sha256" ] || { \
 	    echo "deploy: installed service executable differs from frozen candidate" >&2; exit 1; }; \
 	echo "deploy: installed frozen candidate -> $$SERVICE_BIN (service ExecStart)"; \
+	if [ -f "$$service_bin_dir/MANIFEST.sha256" ]; then \
+	    fleet_manifest_tmp="$$(mktemp "$$service_bin_dir/.MANIFEST.sha256.XXXXXX")"; \
+	    ( cd "$$service_bin_dir" && \
+	      sha256sum "$${SERVICE_BIN##*/}" zclassic23-package-verify \
+	                zclassic23-package-verify-dev ) > "$$fleet_manifest_tmp" || { \
+	        echo "deploy: fleet MANIFEST.sha256 beside $$SERVICE_BIN implies a release set of the daemon plus zclassic23-package-verify and zclassic23-package-verify-dev, and that set is incomplete; refusing to write a partial manifest" >&2; \
+	        rm -f "$$fleet_manifest_tmp"; exit 1; }; \
+	    install -m 644 "$$fleet_manifest_tmp" "$$service_bin_dir/MANIFEST.sha256"; \
+	    rm -f "$$fleet_manifest_tmp"; fleet_manifest_tmp=""; \
+	    ( cd "$$service_bin_dir" && sha256sum -c --strict MANIFEST.sha256 ) >/dev/null || { \
+	        echo "deploy: regenerated MANIFEST.sha256 beside $$SERVICE_BIN does not verify; the staged release set is inconsistent" >&2; exit 1; }; \
+	    echo "deploy: regenerated fleet MANIFEST.sha256 beside $$SERVICE_BIN (an in-place candidate change left the old manifest describing stale bytes)"; \
+	fi; \
 	install -d "$(HOME)/.local/bin"; \
 	if [ "$$SERVICE_BIN" != "$(HOME)/.local/bin/zclassic23" ]; then \
 	    ln -sfn "$$SERVICE_BIN" "$(HOME)/.local/bin/zclassic23"; \

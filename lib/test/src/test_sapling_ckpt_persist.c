@@ -295,8 +295,12 @@ done_delta:;
     printf("sapling_ckpt_persist flat_checkpoint_note refuses height ahead "
            "of reducer applied frontier ... ");
     {
-        char dir[256];
-        test_make_tmpdir(dir, sizeof(dir), "sapling_ckpt_bound", "refuse");
+        char dir[256], dir_rel[256];
+        test_make_tmpdir(dir_rel, sizeof(dir_rel), "sapling_ckpt_bound",
+                         "refuse");
+        /* flush_checkpoint resolves its output through the absolute-only
+         * platform_private seam — hand it an absolute datadir. */
+        test_abs_path(dir_rel, dir, sizeof(dir));
         progress_store_close();
         bool ok = progress_store_open(dir);
         sqlite3 *pdb = ok ? progress_store_db() : NULL;
@@ -395,8 +399,11 @@ done_delta:;
     printf("sapling_ckpt_persist sapling_checkpoint_hook_in_tx lands a "
            "checkpoint that satisfies the healer's tier1 window ... ");
     {
-        char dir[256];
-        test_make_tmpdir(dir, sizeof(dir), "sapling_ckpt_hook", "e2e");
+        char dir[256], dir_rel[256];
+        test_make_tmpdir(dir_rel, sizeof(dir_rel), "sapling_ckpt_hook",
+                         "e2e");
+        /* Absolute-only private seam, as above. */
+        test_abs_path(dir_rel, dir, sizeof(dir));
         progress_store_close();
         bool ok = progress_store_open(dir);
         sqlite3 *pdb = ok ? progress_store_db() : NULL;
@@ -489,8 +496,11 @@ done_delta:;
     printf("sapling_ckpt_persist sapling_checkpoint_hook_in_tx names a typed "
            "blocker on an anchor read error, self-clears on repair ... ");
     {
-        char dir[256];
-        test_make_tmpdir(dir, sizeof(dir), "sapling_ckpt_hook", "anchor_err");
+        char dir[256], dir_rel[256];
+        test_make_tmpdir(dir_rel, sizeof(dir_rel), "sapling_ckpt_hook",
+                         "anchor_err");
+        /* Absolute-only private seam, as above. */
+        test_abs_path(dir_rel, dir, sizeof(dir));
         progress_store_close();
         bool ok = progress_store_open(dir);
         sqlite3 *pdb = ok ? progress_store_db() : NULL;

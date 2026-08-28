@@ -182,7 +182,7 @@
 #include "vcs/vcs_object.h"
 #include "vcs/zcode_c23_corpus.h"
 #include "vcs/zcode_c23_corpus_census.h"
-#include "vcs/zcode_commons_v2.h"
+#include "vcs/zcode_commons.h"
 #include "vcs/zcode_family_admission.h"
 
 #include <ctype.h>
@@ -2199,7 +2199,7 @@ static bool scope_admission_build(
     struct vcs_zcode_commons_admission_v1 admission;
     memset(&admission, 0, sizeof(admission));
     admission.schema_version = 1;
-    admission.flags = VCS_ZCODE_COMMONS_V2_REQUIRED_FLAGS;
+    admission.flags = VCS_ZCODE_COMMONS_REQUIRED_FLAGS;
     /* Founding self-screen: the pass-state rule requires
      * state == SELF_SCREENED + tier, so tier 0 (SELF_SCREENED) pairs with
      * the SELF_SCREENED state. Disclosed: 0 independent operator groups. */
@@ -2809,7 +2809,7 @@ int main(int argc, char **argv)
     vcs_zcode_family_policy_v1_default(&policy);
     uint8_t family_policy_root[32], frozen_root[32];
     if (vcs_zcode_family_policy_v1_root(&policy, family_policy_root) !=
-            VCS_ZCODE_COMMONS_V2_OK)
+            VCS_ZCODE_COMMONS_OK)
         LOG_ERR(CENSUS_LOG, "family policy root failed");
     if (!zcl_hex_decode_lower(CORPUS_CENSUS_FAMILY_POLICY_ROOT_HEX,
                               frozen_root, 32))

@@ -612,7 +612,7 @@ static int t_zcode_moderation_view(void)
         char root_hex[65];
         vcs_zcode_family_policy_v1_default(&policy);
         ASSERT_EQ(vcs_zcode_family_policy_v1_root(&policy, root),
-                  VCS_ZCODE_COMMONS_V2_OK);
+                  VCS_ZCODE_COMMONS_OK);
         zcl_hex_encode(root, sizeof(root), root_hex);
         ASSERT(builtin->render_policy(&policy, root_hex, &view));
         ASSERT(view.valid);

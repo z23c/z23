@@ -12,7 +12,7 @@
 #include "vcs/package_release.h"
 #include "vcs/vcs_devloop.h"
 #include "vcs/vcs_object.h"
-#include "vcs/zcode_commons_v2.h"
+#include "vcs/zcode_commons.h"
 #include "vcs/zcode_lane.h"
 
 #include <limits.h>
@@ -130,7 +130,7 @@ static bool passport_parse_roots(
     }
     memset(passport, 0, sizeof(*passport));
     passport->schema_version = 1;
-    passport->flags = VCS_ZCODE_COMMONS_V2_REQUIRED_FLAGS;
+    passport->flags = VCS_ZCODE_COMMONS_REQUIRED_FLAGS;
     static const char *keys[] = {
         "stable_api_root", "recipe_root", "toolchain_root", "tests_root",
         "license_root", "semantic_fingerprint_root",
@@ -219,7 +219,7 @@ static bool passport_job_preflight(
             VCS_DEVLOOP_PUBLICATION_PHASE_PASSPORT_PUBLISHED;
         bool rooted = vcs_zcode_module_passport_v1_root(
                 passport, expected_passport_root) ==
-                VCS_ZCODE_COMMONS_V2_OK;
+                VCS_ZCODE_COMMONS_OK;
         bool same_passport = rooted && loaded_passport &&
             memcmp(passport_receipt.artifact_root,
                    expected_passport_root, 32) == 0;
@@ -309,9 +309,9 @@ static bool passport_store_verified(
             &stored, &stored_len) == 0 &&
         stored_len == wire_len && memcmp(stored, wire, wire_len) == 0 &&
         vcs_zcode_module_passport_v1_decode(
-            &decoded, stored, stored_len) == VCS_ZCODE_COMMONS_V2_OK &&
+            &decoded, stored, stored_len) == VCS_ZCODE_COMMONS_OK &&
         vcs_zcode_module_passport_v1_root(&decoded, checked_root) ==
-            VCS_ZCODE_COMMONS_V2_OK &&
+            VCS_ZCODE_COMMONS_OK &&
         memcmp(checked_root, root, 32) == 0;
     free(stored);
     return ok;
@@ -347,12 +347,12 @@ void zcl_native_handle_zcode_passport_plan(
     if (!passport_job_preflight(request, reply, &passport, &binding)) return;
     uint8_t payload[VCS_ZCODE_MODULE_PASSPORT_V1_SIGNING_PAYLOAD_BYTES];
     size_t payload_len = 0;
-    enum vcs_zcode_commons_v2_error error =
+    enum vcs_zcode_commons_error error =
         vcs_zcode_module_passport_v1_signing_payload(
             &passport, payload, sizeof(payload), &payload_len);
-    if (error != VCS_ZCODE_COMMONS_V2_OK) {
+    if (error != VCS_ZCODE_COMMONS_OK) {
         passport_fail_action(reply, "MODULE_PASSPORT_PLAN_FAILED", "plan",
-                             vcs_zcode_commons_v2_error_string(error),
+                             vcs_zcode_commons_error_string(error),
                              "zcode.passport.plan");
         return;
     }
@@ -402,12 +402,12 @@ void zcl_native_handle_zcode_passport_commit(
             "zcode.passport.plan");
         return;
     }
-    enum vcs_zcode_commons_v2_error error =
+    enum vcs_zcode_commons_error error =
         vcs_zcode_module_passport_v1_verify(&passport);
-    if (error != VCS_ZCODE_COMMONS_V2_OK) {
+    if (error != VCS_ZCODE_COMMONS_OK) {
         passport_fail_action(reply, "MODULE_PASSPORT_SIGNATURE_INVALID",
                              "commit",
-                             vcs_zcode_commons_v2_error_string(error),
+                             vcs_zcode_commons_error_string(error),
                              "zcode.passport.plan");
         return;
     }
@@ -417,11 +417,11 @@ void zcl_native_handle_zcode_passport_commit(
     size_t wire_len = 0;
     error = vcs_zcode_module_passport_v1_encode(
         &passport, wire, sizeof(wire), &wire_len);
-    if (error == VCS_ZCODE_COMMONS_V2_OK)
+    if (error == VCS_ZCODE_COMMONS_OK)
         error = vcs_zcode_module_passport_v1_root(&passport, root);
-    if (error != VCS_ZCODE_COMMONS_V2_OK) {
+    if (error != VCS_ZCODE_COMMONS_OK) {
         passport_fail_action(reply, "MODULE_PASSPORT_COMMIT_FAILED", "commit",
-                             vcs_zcode_commons_v2_error_string(error),
+                             vcs_zcode_commons_error_string(error),
                              "zcode.passport.plan");
         return;
     }
@@ -502,18 +502,18 @@ void zcl_native_handle_zcode_passport_verify(
         return;
     }
     struct vcs_zcode_module_passport_v1 passport;
-    enum vcs_zcode_commons_v2_error error =
+    enum vcs_zcode_commons_error error =
         vcs_zcode_module_passport_v1_decode(&passport, wire, sizeof(wire));
-    if (error != VCS_ZCODE_COMMONS_V2_OK) {
+    if (error != VCS_ZCODE_COMMONS_OK) {
         passport_fail(reply, "MODULE_PASSPORT_INVALID",
-                      vcs_zcode_commons_v2_error_string(error));
+                      vcs_zcode_commons_error_string(error));
         return;
     }
     uint8_t root[32];
     error = vcs_zcode_module_passport_v1_root(&passport, root);
-    if (error != VCS_ZCODE_COMMONS_V2_OK) {
+    if (error != VCS_ZCODE_COMMONS_OK) {
         passport_fail(reply, "MODULE_PASSPORT_ROOT_FAILED",
-                      vcs_zcode_commons_v2_error_string(error));
+                      vcs_zcode_commons_error_string(error));
         return;
     }
 

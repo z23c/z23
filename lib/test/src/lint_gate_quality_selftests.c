@@ -548,7 +548,15 @@ int t_silent_errors_bool_fixture(void)
 }
 
 /* Returning LOG_* macros must match the enclosing function's return type:
- * LOG_ERR in bool functions used to return -1, which converts to true. */
+ * LOG_ERR in bool functions used to return -1, which converts to true.
+ *
+ * The trip fixture's only violation sits directly after an #include: the
+ * scanner resolves a function from the declaration text accumulated since the
+ * last ';' or '}', and preprocessor lines used to be re-appended to that
+ * accumulator, so any function declared after a directive carried a poisoned
+ * '#' prefix, never resolved, and every LOG_* inside it went unchecked. The
+ * trip therefore pins that path: if directive poisoning returns, this fixture
+ * goes invisible, trip_rc hits 0, and the check fails. */
 int t_log_macro_return_type_gate(void)
 {
     int failures = 0;
@@ -560,8 +568,12 @@ int t_log_macro_return_type_gate(void)
          write_file(path,
                     "#include <stdbool.h>\n"
                     "#include \"util/log_macros.h\"\n"
-                    "bool bad_bool(void) { LOG_ERR(\"fixture\", \"bad\"); }\n"
-                    "int bad_int(void) { LOG_FAIL(\"fixture\", \"bad\"); }\n") == 0)
+                    "bool bad_bool(void)\n"
+                    "{\n"
+                    "    LOG_ERR(\"fixture\", \"bad\");\n"
+                    "    return true;\n"
+                    "}\n"
+                    "int plain_int_after_brace(void) { return 0; }\n") == 0)
             ? 0
             : -1;
     int trip_rc =
@@ -569,7 +581,8 @@ int t_log_macro_return_type_gate(void)
     unlink_rel(LOG_MACRO_RETURN_FIXTURE_DST);
     int recover_rc = run_gate_script(LOG_MACRO_RETURN_SCRIPT_REL, NULL);
 
-    TEST("[lint-gate] LOG_* return-type gate: clean, trips, recovers") {
+    TEST("[lint-gate] LOG_* return-type gate: clean, trips after #include, "
+         "recovers") {
         ASSERT(baseline_rc == 0);
         ASSERT(planted == 0);
         ASSERT(trip_rc != 0);

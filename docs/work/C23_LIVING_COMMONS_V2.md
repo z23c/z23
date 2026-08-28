@@ -225,7 +225,7 @@ available, and neither reader posts externally.
 
 ## Mechanical evidence
 
-`test_zcode_commons_v2` freezes policy, asset, workspace and receipt KAT roots
+`test_zcode_commons` freezes policy, asset, workspace and receipt KAT roots
 and covers award drift, profile weakening, excluded licences, missing tests,
 dependency cycles, semantic duplication, split arithmetic, dual maturity,
 caps, backlog/expiry, input-order invariance, reorg exclusion, incomplete
