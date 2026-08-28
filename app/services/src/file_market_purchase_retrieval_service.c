@@ -70,14 +70,15 @@ static bool mp_private_paths(const uint8_t plan_id[32],
         return false; // raw-return-ok:caller returns private-path-safe error
     char plan_hex[65];
     zcl_hex_encode(plan_id, 32, plan_hex);
-    int s = snprintf(staging, MARKET_DOWNLOAD_PATH_MAX,
-                     "%s%c.zclassic23-market-%s.part", parent,
-#ifdef _WIN32
-                     '\\',
+    /* Path separator selected outside the macro arguments: a directive inside
+     * an argument list is UB (-Wembedded-directive) and varies by compiler. */
+#if defined(_WIN32)
+    const char sep = '\\';
 #else
-                     '/',
+    const char sep = '/';
 #endif
-                     plan_hex);
+    int s = snprintf(staging, MARKET_DOWNLOAD_PATH_MAX,
+                     "%s%c.zclassic23-market-%s.part", parent, sep, plan_hex);
     return s > 0 && s < (int)MARKET_DOWNLOAD_PATH_MAX;
 }
 

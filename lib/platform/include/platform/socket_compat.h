@@ -35,6 +35,8 @@ static inline bool platform_socket_runtime_init(void)
 #else
 #include <errno.h>
 #include <fcntl.h>
+#include <netinet/in.h> /* struct sockaddr_in, htons/htonl, INADDR_LOOPBACK —
+                         * winsock2.h supplies these to the _WIN32 branch */
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/time.h>
