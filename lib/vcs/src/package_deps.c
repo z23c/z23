@@ -304,6 +304,7 @@ static enum vcs_package_deps_error deps_push(
 
 static enum vcs_package_deps_error deps_emit(struct vcs_package_lock *out,
                                              const struct deps_frame *f,
+                                             struct vcs_package_deps *graph,
                                              char *detail, size_t detail_cap)
 {
     if (out->count >= VCS_PACKAGE_LOCK_MAX_NODES) {
@@ -311,6 +312,7 @@ static enum vcs_package_deps_error deps_emit(struct vcs_package_lock *out,
                     VCS_PACKAGE_LOCK_MAX_NODES);
         return VCS_PACKAGE_DEPS_ERR_NODE_COUNT;
     }
+    graph[out->count] = f->deps;
     struct vcs_package_lock_node *n = &out->nodes[out->count++];
     memset(n, 0, sizeof(*n));
     memcpy(n->root, f->root, 32);
@@ -318,6 +320,32 @@ static enum vcs_package_deps_error deps_emit(struct vcs_package_lock *out,
     (void)snprintf(n->semver, sizeof(n->semver), "%s", f->semver);
     n->depth = f->depth;
     n->direct_deps = (uint16_t)f->deps.count;
+    return VCS_PACKAGE_DEPS_OK;
+}
+
+/* Assign topology-derived maximum depths after the duplicate-free build order
+ * is known. A first-visit DFS depth depends on root sort order when one node is
+ * both a direct and transitive dependency; the lock wire must not. */
+static enum vcs_package_deps_error deps_normalize_depths(
+    struct vcs_package_lock *lock, const struct vcs_package_deps *graph)
+{
+    for (size_t i = 0; i < lock->count; i++)
+        lock->nodes[i].depth = 0;
+    for (size_t i = lock->count; i-- > 0;) {
+        struct vcs_package_lock_node *node = &lock->nodes[i];
+        const struct vcs_package_deps *deps = &graph[i];
+        if (node->depth >= VCS_PACKAGE_LOCK_MAX_DEPTH && deps->count > 0)
+            return VCS_PACKAGE_DEPS_ERR_DEPTH;
+        uint16_t dependency_depth = (uint16_t)(node->depth + 1u);
+        for (size_t d = 0; d < deps->count; d++) {
+            size_t dependency = vcs_package_lock_find(lock,
+                                                       deps->items[d].root);
+            if (dependency == SIZE_MAX || dependency >= i)
+                return VCS_PACKAGE_DEPS_ERR_WIRE_ORDER;
+            if (lock->nodes[dependency].depth < dependency_depth)
+                lock->nodes[dependency].depth = dependency_depth;
+        }
+    }
     return VCS_PACKAGE_DEPS_OK;
 }
 
@@ -341,13 +369,19 @@ enum vcs_package_deps_error vcs_package_lock_resolve(
         sizeof(*stack) * (VCS_PACKAGE_LOCK_MAX_DEPTH + 1u), "deps.stack");
     if (!stack)
         return VCS_PACKAGE_DEPS_ERR_ALLOC;
+    struct vcs_package_deps *graph = zcl_calloc(
+        VCS_PACKAGE_LOCK_MAX_NODES, sizeof(*graph), "deps.graph");
+    if (!graph) {
+        free(stack);
+        return VCS_PACKAGE_DEPS_ERR_ALLOC;
+    }
     size_t sp = 0;
     enum vcs_package_deps_error err =
         deps_push(stack, &sp, target_root, 0, NULL, src, detail, detail_cap);
     while (err == VCS_PACKAGE_DEPS_OK && sp > 0) {
         struct deps_frame *top = &stack[sp - 1];
         if (top->next >= top->deps.count) {
-            err = deps_emit(out, top, detail, detail_cap);
+            err = deps_emit(out, top, graph, detail, detail_cap);
             sp--;
             continue;
         }
@@ -376,6 +410,9 @@ enum vcs_package_deps_error vcs_package_lock_resolve(
                         edge, src, detail, detail_cap);
     }
     free(stack);
+    if (err == VCS_PACKAGE_DEPS_OK)
+        err = deps_normalize_depths(out, graph);
+    free(graph);
     if (err != VCS_PACKAGE_DEPS_OK)
         vcs_package_lock_init(out);
     return err;

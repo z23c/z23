@@ -191,7 +191,7 @@ struct za_fake_node {
 };
 
 struct za_fake_src {
-    struct za_fake_node nodes[8];
+    struct za_fake_node nodes[16];
     size_t count;
 };
 
@@ -359,6 +359,54 @@ static int t_deps_rules(void)
                    lock.count == 4 && lock.nodes[3].depth == 0 &&
                    lock.nodes[0].depth == 2;
     ZA_CHECK("a diamond resolves once, in build order", diamond);
+    struct vcs_package_lock diamond_lock = lock;
+
+    /* The shared leaf is visited directly before it is reached through the
+     * codec. Its depth must describe topology, not first-visit root order. */
+    memset(&s, 0, sizeof(s));
+    s.count = 3;
+    za_fake_root(s.nodes[0].root, 0x20);
+    s.nodes[0].name = "alice/top";
+    s.nodes[0].semver = "1.0.0";
+    s.nodes[0].dep_count = 2;
+    za_fake_root(s.nodes[0].deps[0], 0x21);
+    za_fake_root(s.nodes[0].deps[1], 0x22);
+    za_fake_root(s.nodes[1].root, 0x21);
+    s.nodes[1].name = "alice/base";
+    s.nodes[1].semver = "1.0.0";
+    za_fake_root(s.nodes[2].root, 0x22);
+    s.nodes[2].name = "alice/codec";
+    s.nodes[2].semver = "1.0.0";
+    s.nodes[2].dep_count = 1;
+    za_fake_root(s.nodes[2].deps[0], 0x21);
+    bool uneven = za_resolve(&s, 0x20, &lock) == VCS_PACKAGE_DEPS_OK &&
+                  lock.count == 3 && lock.nodes[0].depth == 2 &&
+                  lock.nodes[1].depth == 1 && lock.nodes[2].depth == 0;
+    ZA_CHECK("shared dependency depth follows the longest graph path", uneven);
+
+    /* A direct edge must not hide a second path beyond the depth bound. */
+    memset(&s, 0, sizeof(s));
+    s.count = 10;
+    za_fake_root(s.nodes[0].root, 0x30);
+    s.nodes[0].name = "alice/deep-top";
+    s.nodes[0].semver = "1.0.0";
+    s.nodes[0].dep_count = 2;
+    za_fake_root(s.nodes[0].deps[0], 0x31);
+    za_fake_root(s.nodes[0].deps[1], 0x32);
+    za_fake_root(s.nodes[1].root, 0x31);
+    s.nodes[1].name = "alice/shared";
+    s.nodes[1].semver = "1.0.0";
+    for (size_t i = 0; i < 8; i++) {
+        za_fake_root(s.nodes[i + 2].root, (uint8_t)(0x32u + i));
+        s.nodes[i + 2].name = "alice/chain";
+        s.nodes[i + 2].semver = "1.0.0";
+        s.nodes[i + 2].dep_count = 1;
+        za_fake_root(s.nodes[i + 2].deps[0],
+                     i == 7 ? 0x31 : (uint8_t)(0x33u + i));
+    }
+    ZA_CHECK("a shared direct edge cannot hide an over-depth path",
+             za_resolve(&s, 0x30, &lock) == VCS_PACKAGE_DEPS_ERR_DEPTH);
+    lock = diamond_lock;
 
     /* The lock wire is closed: it roundtrips and rejects a flipped byte. */
     uint8_t *wire = NULL;

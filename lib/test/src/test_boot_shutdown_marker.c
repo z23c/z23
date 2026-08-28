@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define BSM_CHECK(name, expr) do {                                      \
@@ -126,11 +127,23 @@ int test_boot_shutdown_marker(void)
     {
         char dir[256];
         test_make_tmpdir(dir, sizeof(dir), "boot_shutdown_marker", "write");
-        char marker[512];
+        char cwd[512];
+        char absolute_dir[768] = {0};
+        char marker[1024];
         char buf[64];
-        snprintf(marker, sizeof(marker), "%s/.shutdown_clean", dir);
+        bool fixture_private = chmod(dir, 0700) == 0 &&
+                               getcwd(cwd, sizeof(cwd)) != NULL;
+        int absolute_n = fixture_private
+            ? snprintf(absolute_dir, sizeof(absolute_dir), "%s/%s", cwd, dir)
+            : -1;
+        fixture_private = absolute_n > 0 &&
+                          (size_t)absolute_n < sizeof(absolute_dir);
+        int marker_n = snprintf(marker, sizeof(marker), "%s/.shutdown_clean",
+                                absolute_dir);
 
-        bool ok = boot_shutdown_marker_write_clean(dir);
+        bool ok = fixture_private && marker_n > 0 &&
+                  (size_t)marker_n < sizeof(marker) &&
+                  boot_shutdown_marker_write_clean(absolute_dir);
         ok = ok && bsm_read_file(marker, buf, sizeof(buf));
         char *end = NULL;
         long stamp = strtol(buf, &end, 10);

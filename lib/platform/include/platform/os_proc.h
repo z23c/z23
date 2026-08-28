@@ -140,6 +140,16 @@ void os_proc_mem_set_override(const struct os_proc_mem *forced);
  * two censuses taken the same way are directly comparable. */
 bool os_proc_open_fd_count(size_t *out);
 
+enum os_proc_liveness {
+    OS_PROC_LIVENESS_UNKNOWN = 0,
+    OS_PROC_LIVENESS_RUNNING,
+    OS_PROC_LIVENESS_DEAD
+};
+
+/* Fail-closed process liveness. Access denial or an indeterminate platform
+ * error is UNKNOWN, never proof that a process is dead. */
+enum os_proc_liveness os_proc_pid_liveness(uint64_t pid);
+
 #ifdef __cplusplus
 }
 #endif

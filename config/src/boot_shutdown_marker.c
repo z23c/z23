@@ -3,16 +3,17 @@
 #include "config/boot_shutdown_marker.h"
 
 #include "event/event.h"
+#include "platform/file_metadata.h"
+#include "platform/positioned_file.h"
+#include "platform/private_directory.h"
+#include "platform/private_file.h"
 #include "platform/time_compat.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 #define ZCL_SHUTDOWN_MARKER_NAME ".shutdown_clean"
 
@@ -25,6 +26,7 @@ static int                           g_schema_version = -1;
 static _Atomic bool                  g_quick_check_skipped;
 static _Atomic bool                  g_quick_check_deferred;
 static _Atomic bool                  g_quick_check_probe_consumed;
+static _Atomic uint64_t              g_marker_nonce;
 
 /* Tier-2 P2: the fast-restart binding parsed from THIS boot's marker (cached
  * before detect_unclean unlinks the file). Separate from g_cached_binding so
@@ -71,21 +73,17 @@ static bool boot_shutdown_marker_path(char *out, size_t out_n,
     return n >= 0 && (size_t)n < out_n;
 }
 
-static bool marker_write_all(int fd, const char *buf, size_t len)
+static bool marker_snapshot_equal(
+    const struct platform_positioned_file_snapshot *a,
+    const struct platform_positioned_file_snapshot *b)
 {
-    size_t off = 0;
-    while (off < len) {
-        ssize_t n = write(fd, buf + off, len - off);
-        if (n < 0) {
-            if (errno == EINTR)
-                continue;
-            return false;
-        }
-        if (n == 0)
-            return false;
-        off += (size_t)n;
-    }
-    return true;
+    return a->size == b->size &&
+           a->modified_seconds == b->modified_seconds &&
+           a->modified_nanoseconds == b->modified_nanoseconds &&
+           a->changed_seconds == b->changed_seconds &&
+           a->changed_nanoseconds == b->changed_nanoseconds &&
+           a->volume == b->volume && a->file_low == b->file_low &&
+           a->file_high == b->file_high;
 }
 
 /* ── Pure format/parse/decide helpers ─────────────────────────────── */
@@ -318,33 +316,40 @@ bool node_db_file_identity_read(const char *node_db_path,
     if (!node_db_path || !*node_db_path)
         return false;
 
-    int fd = open(node_db_path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0)
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before;
+    struct platform_positioned_file_snapshot after;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, node_db_path))
         return false;
 
-    struct stat st;
     uint8_t hdr[100];
     bool ok = false;
-    if (fstat(fd, &st) == 0 && st.st_size >= (off_t)sizeof(hdr)) {
-        ssize_t r = pread(fd, hdr, sizeof(hdr), 0);
-        if (r == (ssize_t)sizeof(hdr) &&
+    if (platform_positioned_file_snapshot(&file, &before) &&
+        before.size >= sizeof(hdr) && before.size <= INT64_MAX) {
+        int64_t r = platform_positioned_file_read(&file, hdr, sizeof(hdr), 0);
+        if (r == (int64_t)sizeof(hdr) &&
+            platform_positioned_file_snapshot(&file, &after) &&
+            marker_snapshot_equal(&before, &after) &&
             memcmp(hdr, "SQLite format 3\0", 16) == 0) {
             out->present = true;
-            out->size = (int64_t)st.st_size;
+            out->size = (int64_t)before.size;
             out->change_counter = be32(hdr + 24);
             out->version_valid_for = be32(hdr + 92);
             ok = true;
         }
     }
-    close(fd);
+    platform_positioned_file_close(&file);
 
     if (ok) {
         /* WAL present iff <node.db>-wal exists with size > 0. */
         char wal[1200];
         int n = snprintf(wal, sizeof(wal), "%s-wal", node_db_path);
         if (n > 0 && (size_t)n < sizeof(wal)) {
-            struct stat wst;
-            out->wal_present = (stat(wal, &wst) == 0 && wst.st_size > 0);
+            struct platform_file_metadata metadata;
+            out->wal_present =
+                platform_file_metadata_read(wal, &metadata) ==
+                    PLATFORM_FILE_METADATA_OK && metadata.size > 0;
         }
     }
     return ok;
@@ -443,9 +448,16 @@ bool boot_shutdown_marker_detect_unclean(const char *datadir)
         return false;
     }
 
-    struct stat wal_st;
-    bool wal_exists = (stat(wal_path, &wal_st) == 0 && wal_st.st_size > 0);
-    bool marker_exists = (access(marker_path, F_OK) == 0);
+    struct platform_file_metadata wal_metadata;
+    bool wal_exists =
+        platform_file_metadata_read(wal_path, &wal_metadata) ==
+            PLATFORM_FILE_METADATA_OK && wal_metadata.size > 0;
+    struct platform_private_file marker;
+    struct platform_private_file_identity marker_identity;
+    platform_private_file_init(&marker);
+    bool marker_exists = platform_private_file_open_locked(marker_path, &marker) &&
+                         platform_private_file_identity(&marker,
+                                                        &marker_identity);
     bool unclean = !marker_exists && wal_exists;
 
     /* Cache the v2 content-binding (if any) BEFORE unlinking, so
@@ -460,11 +472,13 @@ bool boot_shutdown_marker_detect_unclean(const char *datadir)
     atomic_store(&g_quick_check_deferred, false);
     atomic_store(&g_quick_check_probe_consumed, false);
     if (marker_exists && !wal_exists) {
-        FILE *mf = fopen(marker_path, "r");
-        if (mf) {
-            char buf[1024];
-            size_t rd = fread(buf, 1, sizeof(buf) - 1, mf);
-            fclose(mf);
+        uint64_t marker_size = 0;
+        char buf[1024];
+        if (platform_private_file_size(&marker, &marker_size) &&
+            marker_size > 0 && marker_size < sizeof(buf) &&
+            platform_private_file_read_at(&marker, buf, (size_t)marker_size,
+                                           0)) {
+            size_t rd = (size_t)marker_size;
             struct shutdown_clean_binding parsed;
             if (boot_shutdown_marker_parse(buf, rd, &parsed)) {
                 g_cached_binding = parsed;
@@ -477,17 +491,20 @@ bool boot_shutdown_marker_detect_unclean(const char *datadir)
     if (unclean) {
         printf("[boot] Unclean shutdown detected (WAL=%lldB, "
                "clean marker missing)\n",
-               (long long)wal_st.st_size);
+               (long long)wal_metadata.size);
         event_emitf(EV_CRASH_RECOVERY_START, 0,
                     "wal_size=%lld clean_marker=missing",
-                    (long long)wal_st.st_size);
+                    (long long)wal_metadata.size);
     } else if (!marker_exists) {
         printf("[boot] First boot or marker absent (no WAL)\n");
     } else {
         printf("[boot] Clean shutdown marker present\n");
     }
 
-    unlink(marker_path);
+    if (marker_exists)
+        (void)platform_private_file_retire_if_identity(
+            &marker, marker_path, &marker_identity);
+    platform_private_file_close(&marker);
     return unclean;
 }
 
@@ -500,10 +517,9 @@ bool boot_shutdown_marker_write_clean(const char *datadir)
                                    datadir, ZCL_SHUTDOWN_MARKER_NAME))
         return false;
 
-    int tn = snprintf(tmp, sizeof(tmp), "%s.tmp", path);
     int dn = snprintf(node_db_path, sizeof(node_db_path), "%s/node.db", datadir);
-    if (tn < 0 || (size_t)tn >= sizeof(tmp) ||
-        dn < 0 || (size_t)dn >= sizeof(node_db_path))
+    if (dn < 0 || (size_t)dn >= sizeof(node_db_path) ||
+        !platform_private_directory_ensure(datadir))
         return false;
 
     /* Bind the marker to node.db's final on-disk identity. The DB has already
@@ -543,31 +559,33 @@ bool boot_shutdown_marker_write_clean(const char *datadir)
     if (clen < 0 || (size_t)clen >= sizeof(content))
         return false;
 
-    /* Crash-safe write: temp file + fsync + atomic rename. */
-    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-    if (fd < 0)
+    char resolved[1024];
+    char parent[1024];
+    if (!platform_private_path_resolve(path, resolved, sizeof(resolved), parent,
+                                       sizeof(parent)))
         return false;
-    bool ok = false;
-    if (marker_write_all(fd, content, (size_t)clen) && fsync(fd) == 0)
-        ok = true;
-    if (close(fd) != 0)
-        ok = false;
-    if (!ok) {
-        unlink(tmp);
-        return false;
+    struct platform_private_file staging;
+    platform_private_file_init(&staging);
+    bool created = false;
+    for (unsigned attempt = 0; attempt < 64 && !created; attempt++) {
+        uint64_t nonce = atomic_fetch_add_explicit(
+            &g_marker_nonce, 1, memory_order_relaxed);
+        int tn = snprintf(tmp, sizeof(tmp), "%s.tmp.%016llx", resolved,
+                          (unsigned long long)nonce);
+        if (tn < 0 || (size_t)tn >= sizeof(tmp))
+            return false;
+        created = platform_private_file_create(tmp, &staging);
     }
-    if (rename(tmp, path) != 0) {
-        unlink(tmp);
+    if (!created)
         return false;
-    }
-
-    /* The marker is a durability claim, so its directory fsync is mandatory. */
-    int dfd = open(datadir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (dfd < 0)
-        return false;
-    ok = fsync(dfd) == 0;
-    if (close(dfd) != 0)
-        ok = false;
+    bool ok = platform_private_file_write_at(&staging, content, (size_t)clen,
+                                              0) &&
+              platform_private_file_flush(&staging) &&
+              platform_private_file_replace(&staging, tmp, resolved) &&
+              platform_private_parent_flush(parent);
+    platform_private_file_close(&staging);
+    if (!ok)
+        (void)platform_private_file_unlink_missing_ok(tmp);
     return ok;
 }
 
@@ -578,14 +596,15 @@ bool boot_shutdown_marker_remove_clean(const char *datadir)
                                    ZCL_SHUTDOWN_MARKER_NAME))
         return false;
 
-    if (unlink(path) != 0 && errno != ENOENT)
-        return false;
-
-    int dfd = open(datadir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (dfd < 0)
-        return false;
-    bool ok = fsync(dfd) == 0;
-    if (close(dfd) != 0)
-        ok = false;
-    return ok;
+    struct platform_private_file marker;
+    struct platform_private_file_identity identity;
+    platform_private_file_init(&marker);
+    if (!platform_private_file_open_locked(path, &marker))
+        return platform_private_path_absent(path) &&
+               platform_private_parent_flush(datadir);
+    bool ok = platform_private_file_identity(&marker, &identity) &&
+              platform_private_file_retire_if_identity(&marker, path,
+                                                        &identity);
+    platform_private_file_close(&marker);
+    return ok && platform_private_parent_flush(datadir);
 }

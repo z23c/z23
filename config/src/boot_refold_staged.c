@@ -3,8 +3,8 @@
  * reducer's durable derived state to genesis so the staged pipeline re-folds
  * forward over on-disk block BODIES. Contract declared in config/boot.h. */
 #include "config/boot.h"
-
 #include "platform/time_compat.h"
+#include "platform/file_sync.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -761,7 +761,7 @@ static void fsync_datadir_best_effort(const char *datadir)
 #endif
     if (fd < 0)
         return;
-    (void)fsync(fd);
+    (void)platform_file_sync(fd);
     close(fd);
 }
 

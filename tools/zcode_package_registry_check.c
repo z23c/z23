@@ -157,7 +157,9 @@ int main(int argc, char **argv)
                 for (size_t p = 0; p < i; p++)
                     found = found || root_equal(
                         prepared.lock.nodes[d].root, rows[p].content);
-                ok = found && prepared.lock.nodes[d].depth == 1;
+                ok = found && prepared.lock.nodes[d].depth >= 1 &&
+                     prepared.lock.nodes[d].depth <=
+                         VCS_PACKAGE_LOCK_MAX_DEPTH;
             }
         }
         if (derive && err == VCS_PACKAGE_PREPARE_OK) {

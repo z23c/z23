@@ -25,7 +25,9 @@ ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	read_mapping \
 	rpc_client_transport \
 	safe_root_read \
+	snapshot_candidate_output_refusal \
 	socket_compat \
+	stale_lock_capability \
 	ui_host_transport \
 	utxo_recovery_ldb_copy_refusal \
 	wallet_recovery_directory \
@@ -143,9 +145,19 @@ ZCL_WINDOWS_ACCEPTANCE_safe_root_read_SOURCES := \
 	lib/platform/tests/safe_root_read_windows_acceptance.c \
 	lib/platform/src/safe_root_read.c \
 	lib/base/src/safe_alloc.c
+ZCL_WINDOWS_ACCEPTANCE_snapshot_candidate_output_refusal_SOURCES := \
+	lib/test/src/snapshot_candidate_output_refusal_acceptance.c \
+	config/src/consensus_state_snapshot_candidate_output.c
+ZCL_WINDOWS_ACCEPTANCE_snapshot_candidate_output_refusal_FLAGS := -Iconfig/src
 ZCL_WINDOWS_ACCEPTANCE_socket_compat_SOURCES := \
 	lib/platform/tests/socket_compat_windows_acceptance.c
 ZCL_WINDOWS_ACCEPTANCE_socket_compat_LIBS := -lws2_32
+ZCL_WINDOWS_ACCEPTANCE_stale_lock_capability_SOURCES := \
+	lib/test/src/stale_lock_capability_acceptance.c \
+	lib/platform/src/os_proc.c \
+	lib/platform/src/private_file.c \
+	lib/base/src/safe_alloc.c
+ZCL_WINDOWS_ACCEPTANCE_stale_lock_capability_LIBS := -ladvapi32 -lpsapi
 ZCL_WINDOWS_ACCEPTANCE_ui_host_transport_SOURCES := \
 	lib/test/src/ui_host_transport_windows_acceptance.c \
 	app/views/src/ui_present_host_transport.c \

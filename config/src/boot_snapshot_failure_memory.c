@@ -3,6 +3,7 @@
 
 #include "config/boot.h"
 #include "config/boot_consensus_bundle_marker.h"
+#include "platform/private_directory.h"
 #include "util/log_macros.h"
 
 #include <errno.h>
@@ -10,7 +11,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <unistd.h>
 
 #define QUARANTINE_BORROWED_SEED_DIR "quarantine-borrowed-seed"
@@ -101,8 +101,14 @@ static void quarantine_borrowed_seed(const char *datadir, const char *seed_path)
     if (!datadir || !datadir[0] || !seed_path || !seed_path[0])
         return;
 
-    const char *base = strrchr(seed_path, '/');
-    base = base ? base + 1 : seed_path;
+    const char *slash = strrchr(seed_path, '/');
+    const char *backslash = strrchr(seed_path, '\\');
+    const char *separator = !slash ? backslash
+                            : !backslash || slash > backslash ? slash
+                                                              : backslash;
+    const char *base = separator ? separator + 1 : seed_path;
+    if (!base[0])
+        return;
 
     char qdir[1200];
     int dn = snprintf(qdir, sizeof(qdir), "%s/%s", datadir,
@@ -114,9 +120,12 @@ static void quarantine_borrowed_seed(const char *datadir, const char *seed_path)
                  datadir);
         return;
     }
-    if (mkdir(qdir, 0700) != 0 && errno != EEXIST) {
+    uintptr_t qdir_handle = 0;
+    if (!platform_private_directory_ensure(qdir) ||
+        !platform_private_directory_open_validated(qdir, &qdir_handle)) {
         LOG_WARN("boot",
-                 "[boot] could not create borrowed-seed quarantine dir %s (%s) "
+                 "[boot] could not create/validate private borrowed-seed "
+                 "quarantine dir %s (%s) "
                  "- leaving seed in place (marker still blocks auto-load)",
                  qdir, strerror(errno));
         return;
@@ -128,6 +137,7 @@ static void quarantine_borrowed_seed(const char *datadir, const char *seed_path)
         LOG_WARN("boot",
                  "[boot] borrowed-seed quarantine target path too long for %s - "
                  "leaving seed in place (marker still blocks auto-load)", base);
+        platform_private_directory_close(qdir_handle);
         return;
     }
     if (rename(seed_path, dst) != 0) {
@@ -135,8 +145,10 @@ static void quarantine_borrowed_seed(const char *datadir, const char *seed_path)
                  "[boot] could not move borrowed seed %s -> %s (%s) - leaving "
                  "it in place (marker still blocks auto-load)",
                  seed_path, dst, strerror(errno));
+        platform_private_directory_close(qdir_handle);
         return;
     }
+    platform_private_directory_close(qdir_handle);
     LOG_WARN("boot",
              "[boot] sovereign consensus bundle installed here "
              "(consensus-bundle-installed marker present) — REFUSING to "

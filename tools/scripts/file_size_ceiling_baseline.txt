@@ -77,7 +77,7 @@ config/src/boot.c 4023
 config/src/boot_bundle_fetch.c 840
 config/src/boot_index.c 851
 config/src/boot_refold_staged.c 2077
-config/src/boot_services.c 1476
+config/src/boot_services.c 1474
 # 2026-08-03: NEW entry at current LOC (gate's recorded-last-resort). The
 # file sat at exactly the 800 ceiling before the G2 swarm-clock slice; the
 # supervisor timer tick + all-peer drain + domain registration pushed it
