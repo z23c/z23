@@ -392,10 +392,9 @@ struct ldbr_db *ldbr_db_open_internal(const char *dir, bool verify,
 
     char current[4096];
     snprintf(current, sizeof(current), "%s/CURRENT", dir);
-    size_t probe = 0;
     char *probe_err = NULL;
-    const uint8_t *probe_map = ldb_map_file(current, &probe, &probe_err);
-    if (!probe_map) {
+    struct ldb_file_mapping probe = {0};
+    if (!ldb_map_file(current, &probe, &probe_err)) {
         free(probe_err);
         if (!allow_missing) {
             *err = ldb_errf("ldb: %s has no CURRENT file and "
@@ -422,7 +421,7 @@ struct ldbr_db *ldbr_db_open_internal(const char *dir, bool verify,
         db->empty = true;
         return db;
     }
-    ldb_unmap_file(probe_map, probe);
+    ldb_unmap_file(&probe);
 
     if (!ldb_version_load(&db->version, dir, err)) {
         ldbr_db_close_internal(db);

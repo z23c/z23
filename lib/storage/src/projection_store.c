@@ -13,6 +13,11 @@
  * tables it fronts are not models). */
 
 #include "platform/fd_path.h"
+#include "platform/file_metadata.h"
+#include "platform/os_proc.h"
+#include "platform/positioned_file.h"
+#include "platform/private_directory.h"
+#include "platform/private_file.h"
 #include "platform/time_compat.h"
 #include "base/serialize_le.h"
 #include "storage/projection_store.h"
@@ -46,7 +51,11 @@ static pthread_once_t g_tx_lock_once = PTHREAD_ONCE_INIT;
 static _Atomic(sqlite3 *) g_db = NULL;
 static char g_path[PROJECTION_STORE_PATH_MAX];
 static char g_display_path[PROJECTION_STORE_PATH_MAX];
+#ifdef _WIN32
+static uintptr_t g_dir_handle;
+#else
 static int g_dir_fd = -1;
+#endif
 static int64_t g_opened_at;
 
 static void projection_store_tx_lock_init(void)
@@ -83,25 +92,27 @@ static bool projection_file_identity_read(
     if (!path || !out)
         return false;
     memset(out, 0, sizeof(*out));
-    struct stat st;
-    if (stat(path, &st) != 0 || st.st_size < 100)
-        return false;
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0)
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path) ||
+        !platform_positioned_file_snapshot(&file, &before) || before.size < 100)
         return false;
     unsigned char hdr[100];
-    ssize_t nr = pread(fd, hdr, sizeof(hdr), 0);
-    (void)close(fd);
-    if (nr != (ssize_t)sizeof(hdr) ||
+    int64_t nr = platform_positioned_file_read(&file, hdr, sizeof(hdr), 0);
+    bool stable = platform_positioned_file_snapshot(&file, &after) &&
+        memcmp(&before, &after, sizeof(before)) == 0;
+    platform_positioned_file_close(&file);
+    if (!stable || nr != (int64_t)sizeof(hdr) ||
         memcmp(hdr, "SQLite format 3\000", 16) != 0)
         return false;
-    out->dev = (unsigned long long)st.st_dev;
-    out->ino = (unsigned long long)st.st_ino;
-    out->size = (long long)st.st_size;
-    out->mtime_sec = (long long)st.st_mtim.tv_sec;
-    out->mtime_nsec = (long long)st.st_mtim.tv_nsec;
-    out->ctime_sec = (long long)st.st_ctim.tv_sec;
-    out->ctime_nsec = (long long)st.st_ctim.tv_nsec;
+    out->dev = before.volume;
+    out->ino = before.file_low;
+    out->size = (long long)before.size;
+    out->mtime_sec = before.modified_seconds;
+    out->mtime_nsec = before.modified_nanoseconds;
+    out->ctime_sec = before.changed_seconds;
+    out->ctime_nsec = before.changed_nanoseconds;
     out->change_counter = zcl_read_u32_be(hdr + 24);
     out->version_valid_for = zcl_read_u32_be(hdr + 92);
     return true;
@@ -113,14 +124,19 @@ static bool projection_wal_absent(const char *path)
     int n = snprintf(wal, sizeof(wal), "%s-wal", path);
     if (n <= 0 || (size_t)n >= sizeof(wal))
         return false;
-    struct stat st;
-    return stat(wal, &st) != 0 ? errno == ENOENT : st.st_size == 0;
+    struct platform_file_metadata metadata;
+    enum platform_file_metadata_result result =
+        platform_file_metadata_read(wal, &metadata);
+    return result == PLATFORM_FILE_METADATA_MISSING ||
+           (result == PLATFORM_FILE_METADATA_OK && metadata.size == 0);
 }
 
 static long long projection_file_size_or_neg1(const char *path)
 {
-    struct stat st;
-    return path && stat(path, &st) == 0 ? (long long)st.st_size : -1;
+    struct platform_file_metadata metadata;
+    return path && platform_file_metadata_read(path, &metadata) ==
+                       PLATFORM_FILE_METADATA_OK
+        ? (long long)metadata.size : -1;
 }
 
 static bool projection_receipt_path(char *out, size_t out_n,
@@ -177,20 +193,6 @@ static bool projection_clean_receipt_consume(const char *path)
     return memcmp(&want, &have, sizeof(want)) == 0;
 }
 
-static bool write_all(int fd, const char *buf, size_t len)
-{
-    size_t off = 0;
-    while (off < len) {
-        ssize_t nw = write(fd, buf + off, len - off);
-        if (nw < 0 && errno == EINTR)
-            continue;
-        if (nw <= 0)
-            return false;
-        off += (size_t)nw;
-    }
-    return true;
-}
-
 static bool projection_clean_receipt_write(const char *path)
 {
     struct projection_file_identity id;
@@ -201,8 +203,8 @@ static bool projection_clean_receipt_write(const char *path)
     char tmp[PROJECTION_STORE_PATH_MAX + 64];
     if (!projection_receipt_path(receipt, sizeof(receipt), path))
         return false;
-    int tn = snprintf(tmp, sizeof(tmp), "%s.tmp.%lld", receipt,
-                      (long long)getpid());
+    int tn = snprintf(tmp, sizeof(tmp), "%s.tmp.%llu", receipt,
+                      (unsigned long long)os_proc_current_pid());
     if (tn <= 0 || (size_t)tn >= sizeof(tmp))
         return false;
     char content[768];
@@ -220,21 +222,25 @@ static bool projection_clean_receipt_write(const char *path)
         id.change_counter, id.version_valid_for);
     if (cn <= 0 || (size_t)cn >= sizeof(content))
         return false;
-    (void)unlink(tmp);
-    int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
-    if (fd < 0)
+    (void)platform_private_file_unlink_missing_ok(tmp);
+    struct platform_private_file staged;
+    platform_private_file_init(&staged);
+    if (!platform_private_file_create(tmp, &staged))
         return false;
-    bool ok = write_all(fd, content, (size_t)cn) && fsync(fd) == 0;
-    if (close(fd) != 0)
+    bool ok = platform_private_file_write_at(&staged, content, (size_t)cn, 0) &&
+              platform_private_file_truncate(&staged, (uint64_t)cn) &&
+              platform_private_file_flush(&staged) &&
+              platform_private_file_replace(&staged, tmp, receipt);
+    platform_private_file_close(&staged);
+    if (!ok) (void)platform_private_file_unlink_missing_ok(tmp);
+    char resolved[PROJECTION_STORE_PATH_MAX + 16];
+    char parent[PROJECTION_STORE_PATH_MAX + 16];
+    if (ok && (!platform_private_path_resolve(receipt, resolved,
+                                              sizeof(resolved), parent,
+                                              sizeof(parent)) ||
+               !platform_private_parent_flush(parent)))
         ok = false;
-    if (ok)
-        ok = rename(tmp, receipt) == 0;
-    if (!ok)
-        (void)unlink(tmp);
-    if (ok && g_dir_fd >= 0 && fsync(g_dir_fd) != 0) {
-        (void)unlink(receipt);
-        ok = false;
-    }
+    if (!ok) (void)platform_private_file_unlink_missing_ok(receipt);
     return ok;
 }
 
@@ -288,6 +294,14 @@ bool projection_store_open(const char *datadir)
     if (n <= 0 || (size_t)n >= sizeof(display_path))
         LOG_FAIL("projection_store", "open: datadir path too long");
 
+#ifdef _WIN32
+    uintptr_t opened_dir_handle = 0;
+    if (!platform_private_directory_open_validated(datadir,
+                                                    &opened_dir_handle))
+        LOG_FAIL("projection_store", "open: private datadir capability failed");
+    char path[PROJECTION_STORE_PATH_MAX];
+    snprintf(path, sizeof(path), "%s", display_path);
+#else
     int opened_dir_fd = open(datadir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (opened_dir_fd < 0)
         LOG_FAIL("projection_store", "open: datadir capability failed: %s",
@@ -298,16 +312,22 @@ bool projection_store_open(const char *datadir)
         (void)close(opened_dir_fd);
         LOG_FAIL("projection_store", "open: capability path too long");
     }
+#endif
 
     pthread_mutex_lock(&g_lock);
 
     if (atomic_load_explicit(&g_db, memory_order_relaxed) != NULL) {
+#ifdef _WIN32
+        bool same = strcmp(g_display_path, display_path) == 0;
+        platform_private_directory_close(opened_dir_handle);
+#else
         struct stat have;
         struct stat want;
         bool same = g_dir_fd >= 0 && fstat(g_dir_fd, &have) == 0 &&
                     fstat(opened_dir_fd, &want) == 0 &&
                     have.st_dev == want.st_dev && have.st_ino == want.st_ino;
         (void)close(opened_dir_fd);
+#endif
         pthread_mutex_unlock(&g_lock);
         if (!same)
             LOG_FAIL("projection_store",
@@ -332,7 +352,11 @@ bool projection_store_open(const char *datadir)
                 "[projection_store] sqlite3_open_v2(%s) failed: %s\n",
                 path, db ? sqlite3_errmsg(db) : sqlite3_errstr(rc));
         if (db) sqlite3_close(db);
+#ifdef _WIN32
+        platform_private_directory_close(opened_dir_handle);
+#else
         (void)close(opened_dir_fd);
+#endif
         pthread_mutex_unlock(&g_lock);
         return false;
     }
@@ -378,7 +402,11 @@ bool projection_store_open(const char *datadir)
                     "%s — disk/fs fault\n",
                     path, db ? sqlite3_errmsg(db) : sqlite3_errstr(rc));
             if (db) sqlite3_close(db);
+#ifdef _WIN32
+            platform_private_directory_close(opened_dir_handle);
+#else
             (void)close(opened_dir_fd);
+#endif
             event_emitf(EV_RECOVERY_ACTION, 0,
                         "action=projection_store_reopen_failed "
                         "reason=disk_fault path=%s", path);
@@ -393,7 +421,11 @@ bool projection_store_open(const char *datadir)
                     "[projection_store] FRESH %s still fails quick_check — "
                     "terminal disk/fs fault, refusing to loop\n", path);
             sqlite3_close(db);
+#ifdef _WIN32
+            platform_private_directory_close(opened_dir_handle);
+#else
             (void)close(opened_dir_fd);
+#endif
             event_emitf(EV_RECOVERY_ACTION, 0,
                         "action=projection_store_fresh_corrupt "
                         "reason=disk_fault path=%s", path);
@@ -413,14 +445,22 @@ bool projection_store_open(const char *datadir)
 
     if (!apply_pragmas(db)) {
         sqlite3_close(db);
+#ifdef _WIN32
+        platform_private_directory_close(opened_dir_handle);
+#else
         (void)close(opened_dir_fd);
+#endif
         pthread_mutex_unlock(&g_lock);
         return false;
     }
 
     snprintf(g_path, sizeof(g_path), "%s", path);
     snprintf(g_display_path, sizeof(g_display_path), "%s", display_path);
+#ifdef _WIN32
+    g_dir_handle = opened_dir_handle;
+#else
     g_dir_fd = opened_dir_fd;
+#endif
     g_opened_at = wall_now_s();
     atomic_store_explicit(&g_db, db, memory_order_release);
 
@@ -497,9 +537,15 @@ void projection_store_close(void)
                 checkpoint_rc, rc, log_frames, checkpointed_frames);
     }
 
+#ifdef _WIN32
+    if (g_dir_handle != 0)
+        platform_private_directory_close(g_dir_handle);
+    g_dir_handle = 0;
+#else
     if (g_dir_fd >= 0)
         (void)close(g_dir_fd);
     g_dir_fd = -1;
+#endif
     g_path[0] = '\0';
     g_display_path[0] = '\0';
     g_opened_at = 0;
