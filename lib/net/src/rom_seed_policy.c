@@ -9,17 +9,17 @@
 #include "net/rom_seed_policy.h"
 
 #include "json/json.h"
+#include "platform/positioned_file.h"
+#include "platform/private_file.h"
 #include "platform/time_compat.h"
 #include "util/log_macros.h"
 #include "util/util.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
 
 /* ── process-wide state ─────────────────────────────────────────────── */
 
@@ -40,6 +40,7 @@ static _Atomic uint64_t g_uploads_finished_total = 0;
 static _Atomic uint64_t g_uploads_refused_total = 0;
 static _Atomic uint64_t g_bytes_served_total = 0;
 static _Atomic uint32_t g_uploads_active = 0;
+static _Atomic uint64_t g_policy_temp_sequence = 0;
 
 /* ── validation (pure) ──────────────────────────────────────────────── */
 
@@ -162,35 +163,46 @@ static void persist_locked(const struct rom_seed_policy *p)
     }
 
     char final_path[600];
+    char resolved_path[600];
+    char parent[600];
     char tmp_path[640];
     policy_path(final_path, sizeof(final_path));
-    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.%ld", final_path,
-            (long)getpid());
+    if (!platform_private_path_resolve(final_path, resolved_path,
+                                       sizeof(resolved_path), parent,
+                                       sizeof(parent))) {
+        LOG_WARN("rom_seed_policy", "policy destination is not safe: %s",
+                 final_path);
+        return;
+    }
 
-    int fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) {
-        LOG_WARN("rom_seed_policy", "open(%s) failed: %s", tmp_path,
-                 strerror(errno));
+    struct platform_private_file staged;
+    platform_private_file_init(&staged);
+    bool created = false;
+    for (unsigned int attempt = 0; attempt < 64 && !created; attempt++) {
+        uint64_t seq = atomic_fetch_add(&g_policy_temp_sequence, 1);
+        int written = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.%llu",
+                               resolved_path, (unsigned long long)seq);
+        if (written <= 0 || (size_t)written >= sizeof(tmp_path))
+            break;
+        created = platform_private_file_create(tmp_path, &staged);
+        if (!created && errno != EEXIST)
+            break;
+    }
+    if (!created) {
+        LOG_WARN("rom_seed_policy", "private staging create failed for %s",
+                 resolved_path);
         return;
     }
-    ssize_t w = write(fd, buf, n);
-    if (w < 0 || (size_t)w != n) {
-        LOG_WARN("rom_seed_policy", "short write to %s", tmp_path);
-        close(fd);
-        (void)unlink(tmp_path);
-        return;
-    }
-    (void)fsync(fd);
-    if (close(fd) != 0) {
-        LOG_WARN("rom_seed_policy", "close(%s) failed: %s", tmp_path,
-                 strerror(errno));
-        (void)unlink(tmp_path);
-        return;
-    }
-    if (rename(tmp_path, final_path) != 0) {
-        LOG_WARN("rom_seed_policy", "rename(%s -> %s) failed: %s", tmp_path,
-                 final_path, strerror(errno));
-        (void)unlink(tmp_path);
+    bool ok = platform_private_file_write_at(&staged, buf, n, 0) &&
+              platform_private_file_truncate(&staged, n) &&
+              platform_private_file_flush(&staged) &&
+              platform_private_file_replace(&staged, tmp_path,
+                                             resolved_path);
+    platform_private_file_close(&staged);
+    if (!ok || !platform_private_parent_flush(parent)) {
+        LOG_WARN("rom_seed_policy", "durable policy replace failed for %s",
+                 resolved_path);
+        (void)platform_private_file_unlink_missing_ok(tmp_path);
     }
 }
 
@@ -203,13 +215,31 @@ static bool load_from_disk(struct rom_seed_policy *out)
     char path[600];
     policy_path(path, sizeof(path));
 
-    int fd = open(path, O_RDONLY);
-    if (fd < 0)
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path))
         return false;
     char raw[2048];
-    ssize_t r = read(fd, raw, sizeof(raw) - 1);
-    close(fd);
-    if (r <= 0)
+    if (!platform_positioned_file_snapshot(&file, &before) ||
+        before.size == 0 || before.size >= sizeof(raw)) {
+        platform_positioned_file_close(&file);
+        return false;
+    }
+    int64_t r = platform_positioned_file_read(&file, raw,
+                                              (size_t)before.size, 0);
+    bool stable = r == (int64_t)before.size &&
+                  platform_positioned_file_snapshot(&file, &after) &&
+                  before.volume == after.volume &&
+                  before.file_low == after.file_low &&
+                  before.file_high == after.file_high &&
+                  before.size == after.size &&
+                  before.modified_seconds == after.modified_seconds &&
+                  before.modified_nanoseconds == after.modified_nanoseconds &&
+                  before.changed_seconds == after.changed_seconds &&
+                  before.changed_nanoseconds == after.changed_nanoseconds;
+    platform_positioned_file_close(&file);
+    if (!stable)
         return false;
     raw[r] = '\0';
 
