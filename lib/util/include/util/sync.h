@@ -14,6 +14,25 @@
 
 typedef CRITICAL_SECTION zcl_mutex_t;
 typedef CONDITION_VARIABLE zcl_cond_t;
+typedef INIT_ONCE zcl_once_t;
+#define ZCL_ONCE_INIT INIT_ONCE_STATIC_INIT
+
+struct zcl_once_context { void (*function)(void); };
+static BOOL CALLBACK zcl_once_callback(PINIT_ONCE once, PVOID parameter,
+                                       PVOID *context)
+{
+    (void)once;
+    (void)context;
+    const struct zcl_once_context *call = parameter;
+    call->function();
+    return TRUE;
+}
+static inline bool zcl_once_call(zcl_once_t *once, void (*function)(void))
+{
+    struct zcl_once_context context = { .function = function };
+    return once && function &&
+           InitOnceExecuteOnce(once, zcl_once_callback, &context, NULL) != 0;
+}
 
 static inline void zcl_mutex_init(zcl_mutex_t *m) { InitializeCriticalSection(m); }
 static inline void zcl_mutex_destroy(zcl_mutex_t *m) { DeleteCriticalSection(m); }
@@ -32,6 +51,13 @@ static inline void zcl_cond_broadcast(zcl_cond_t *c) { WakeAllConditionVariable(
 
 typedef pthread_mutex_t zcl_mutex_t;
 typedef pthread_cond_t zcl_cond_t;
+typedef pthread_once_t zcl_once_t;
+#define ZCL_ONCE_INIT PTHREAD_ONCE_INIT
+
+static inline bool zcl_once_call(zcl_once_t *once, void (*function)(void))
+{
+    return once && function && pthread_once(once, function) == 0;
+}
 
 static inline void zcl_mutex_init(zcl_mutex_t *m)
 {

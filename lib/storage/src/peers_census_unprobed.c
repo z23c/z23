@@ -25,13 +25,18 @@
 
 #include "util/sync.h"
 
-#include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
 
 static _Atomic uint64_t g_unprobed_total = 0;
-static zcl_mutex_t g_unprobed_lock = PTHREAD_MUTEX_INITIALIZER;
+static zcl_mutex_t g_unprobed_lock;
+static zcl_once_t g_unprobed_once = ZCL_ONCE_INIT;
 static char g_unprobed_reason[PEERS_CENSUS_UNPROBED_REASON_MAX] = "";
+
+static void unprobed_lock_init(void)
+{
+    zcl_mutex_init(&g_unprobed_lock);
+}
 
 bool peers_projection_note_census_unprobed(const uint8_t ip[16], uint16_t port,
                                            const char *reason)
@@ -44,6 +49,8 @@ bool peers_projection_note_census_unprobed(const uint8_t ip[16], uint16_t port,
     (void)port;
     atomic_fetch_add_explicit(&g_unprobed_total, 1, memory_order_relaxed);
     if (reason && reason[0]) {
+        if (!zcl_once_call(&g_unprobed_once, unprobed_lock_init))
+            return true;
         zcl_mutex_lock(&g_unprobed_lock);
         snprintf(g_unprobed_reason, sizeof(g_unprobed_reason), "%s", reason);
         zcl_mutex_unlock(&g_unprobed_lock);
@@ -60,6 +67,10 @@ void peers_projection_census_unprobed_reason(char *out, size_t cap)
 {
     if (!out || cap == 0)
         return;
+    if (!zcl_once_call(&g_unprobed_once, unprobed_lock_init)) {
+        out[0] = '\0';
+        return;
+    }
     zcl_mutex_lock(&g_unprobed_lock);
     snprintf(out, cap, "%s", g_unprobed_reason);
     zcl_mutex_unlock(&g_unprobed_lock);
