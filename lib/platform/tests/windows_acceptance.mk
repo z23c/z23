@@ -30,6 +30,7 @@ ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	package_lifecycle_store_refusal \
 	os_binary_slots_refusal \
 	os_proc_pid_image \
+	os_proc_self_image \
 	pagelocker \
 	positioned_file \
 	positioned_io \
@@ -245,6 +246,15 @@ ZCL_WINDOWS_ACCEPTANCE_os_proc_pid_image_SOURCES := \
 	lib/platform/src/private_file.c \
 	lib/base/src/safe_alloc.c
 ZCL_WINDOWS_ACCEPTANCE_os_proc_pid_image_LIBS := -ladvapi32 -lpsapi
+# The SELF-image row, separate from the pid-image row above on purpose: this
+# one is the only reader in the tree of the _WIN32 arm of
+# os_proc_open_self_exe(), and a POSIX gcc/clang cannot see inside that arm at
+# all. Deleting this row does not fail anything -- it silently returns the
+# Windows running-image read to being compiled by nothing.
+ZCL_WINDOWS_ACCEPTANCE_os_proc_self_image_SOURCES := \
+	lib/platform/tests/os_proc_self_image_windows_acceptance.c \
+	lib/platform/src/os_proc.c
+ZCL_WINDOWS_ACCEPTANCE_os_proc_self_image_LIBS := -ladvapi32 -lpsapi -lshell32
 ZCL_WINDOWS_ACCEPTANCE_pagelocker_SOURCES := \
 	lib/test/src/pagelocker_acceptance.c \
 	lib/support/src/pagelocker.c \

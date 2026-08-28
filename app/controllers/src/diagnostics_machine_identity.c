@@ -79,6 +79,35 @@ static void push_platform(struct json_value *out)
     json_free(&platform);
 }
 
+/* What the published binary digest is actually evidence OF. Derived from the
+ * platform authority's own identity ladder (platform/os_proc.h) rather than
+ * from a second #if here: this file used to carry its own
+ * `#if defined(__linux__)`, which is how the label ends up disagreeing with
+ * the mechanism the moment a platform gains or loses an implementation.
+ *
+ *   running_image_at_boot        Linux. The boot digest was read through the
+ *     kernel's exe_file reference, so it is the image this process is
+ *     executing whatever later replaced the file on disk.
+ *   resolved_image_path_at_boot  Windows and macOS. The boot digest was read
+ *     by RE-OPENING the running image's pathname. Weaker on purpose and
+ *     labelled as such: a deploy that swaps the file between the name lookup
+ *     and the open is what got hashed. Useful evidence, NOT proof of what
+ *     the node is executing -- do not compare it against a fleet-wide
+ *     expected digest and treat a match as custody.
+ *   unavailable                  No running-image read on this platform. */
+static const char *binary_identity_scope(void)
+{
+    switch (os_proc_self_exe_identity()) {
+    case OS_PROC_IMAGE_IDENTITY_RUNNING_IMAGE:
+        return "running_image_at_boot";
+    case OS_PROC_IMAGE_IDENTITY_RESOLVED_PATH:
+        return "resolved_image_path_at_boot";
+    case OS_PROC_IMAGE_IDENTITY_UNAVAILABLE:
+        break;
+    }
+    return "unavailable";
+}
+
 static bool push_build(struct json_value *out)
 {
     struct binary_staleness_status status;
@@ -94,12 +123,8 @@ static bool push_build(struct json_value *out)
     json_push_kv_bool(&build, "binary_identity_available", have_digest);
     json_push_kv_str(&build, "binary_sha3_256",
                      have_digest ? status.boot_digest_hex : "");
-#if defined(__linux__) && !defined(_WIN32)
     json_push_kv_str(&build, "binary_identity_scope",
-                     "running_image_at_boot");
-#else
-    json_push_kv_str(&build, "binary_identity_scope", "unavailable");
-#endif
+                     binary_identity_scope());
     json_push_kv_bool(&build, "installed_path_matches_running_image",
                       have_digest && status.path_valid && !status.stale);
     json_push_kv(out, "build", &build);

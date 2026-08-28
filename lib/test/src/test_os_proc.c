@@ -112,6 +112,41 @@ int test_os_proc(void)
         }
     }
 
+    /* ── running-image identity rung ──────────────────────────────── */
+    {
+        /* The rung is published to operators as the diagnostics
+         * `binary_identity_scope`, so it is a CLAIM about custody, not a
+         * decoration. These two checks are what stops it being widened for
+         * cosmetic platform parity: a platform may only carry the strong
+         * rung when it opens the running image without resolving a
+         * pathname, and it may only carry ANY rung when the open works. */
+        enum os_proc_image_identity rung = os_proc_self_exe_identity();
+#if defined(__linux__)
+        /* Linux earns RUNNING_IMAGE and only Linux: /proc/self/exe is the
+         * kernel's exe_file reference, no name lookup anywhere in it. */
+        OSPROC_CHECK("linux publishes the kernel-pinned running-image rung",
+                     rung == OS_PROC_IMAGE_IDENTITY_RUNNING_IMAGE);
+#elif defined(_WIN32) || defined(__APPLE__)
+        /* Both reopen BY NAME (GetModuleFileNameW / _NSGetExecutablePath),
+         * so both are honestly the weaker rung -- never RUNNING_IMAGE. */
+        OSPROC_CHECK("pathname reopen publishes the weaker resolved-path rung",
+                     rung == OS_PROC_IMAGE_IDENTITY_RESOLVED_PATH);
+#else
+        OSPROC_CHECK("platform with no running-image read reports unavailable",
+                     rung == OS_PROC_IMAGE_IDENTITY_UNAVAILABLE);
+#endif
+        /* The ladder and the implementation must agree in BOTH directions:
+         * a non-UNAVAILABLE rung that cannot actually open the image is an
+         * overclaim, and an UNAVAILABLE rung on a platform that opens it
+         * fine is a label nobody updated. */
+        FILE *probe = os_proc_open_self_exe();
+        bool opened = probe != NULL;
+        if (probe)
+            fclose(probe);
+        OSPROC_CHECK("identity rung agrees with whether the image opens",
+                     opened == (rung != OS_PROC_IMAGE_IDENTITY_UNAVAILABLE));
+    }
+
     /* ── cgroup dir ───────────────────────────────────────────────── */
     {
         char dir[768];
