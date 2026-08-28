@@ -5,8 +5,6 @@
  * ZSLP tokens, and address lookups. */
 
 #include "platform/time_compat.h"
-#include "platform/socket_compat.h"
-#include "platform/directory_compat.h"
 #include "controllers/explorer_controller.h"
 #include "controllers/api_controller.h"
 #include "chain/chain.h"
@@ -39,6 +37,10 @@
 #include <time.h>
 #include <ctype.h>
 #include <inttypes.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <stdatomic.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -110,7 +112,7 @@ void ensure_explorer_dir(void)
         assets->explorer_dir[0] = '\0';
         return;
     }
-    (void)platform_directory_create(assets->explorer_dir, 0755);
+    mkdir(assets->explorer_dir, 0755);
 }
 
 static void write_default_file(const char *filename, const char *content)
@@ -293,10 +295,8 @@ int rpc_call(const char *method, const char *params_json,
                 "rpc_call(%s): no node credentials configured; not "
                 "dialing", method);
 
-    platform_socket_t fd = platform_socket_open(AF_INET, SOCK_STREAM, 0,
-                                                true, false);
-    if (fd == PLATFORM_SOCKET_INVALID)
-        LOG_ERR("explorer", "rpc_call(%s): socket() failed", method);
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) LOG_ERR("explorer", "rpc_call(%s): socket() failed", method);
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -304,11 +304,12 @@ int rpc_call(const char *method, const char *params_json,
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = htons((uint16_t)explorer_rpc()->proxy_port);
 
-    (void)platform_socket_set_receive_timeout(fd, 5000);
-    (void)platform_socket_set_send_timeout(fd, 5000);
+    struct timeval tv = { .tv_sec = 5, .tv_usec = 0 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
     if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        platform_socket_close(fd);
+        close(fd);
         LOG_ERR("explorer", "rpc_call(%s): connect to port %d failed", method, explorer_rpc()->proxy_port);
     }
 
@@ -317,7 +318,7 @@ int rpc_call(const char *method, const char *params_json,
         "{\"jsonrpc\":\"1.0\",\"id\":1,\"method\":\"%s\",\"params\":%s}",
         method, params_json);
     if (blen < 0 || (size_t)blen >= sizeof(body)) {
-        platform_socket_close(fd);
+        close(fd);
         LOG_ERR("explorer", "rpc_call(%s): request body too large (%d bytes)", method, blen);
     }
 
@@ -326,7 +327,7 @@ int rpc_call(const char *method, const char *params_json,
     int auth_len = snprintf(auth_plain, sizeof(auth_plain), "%s:%s",
                             explorer_rpc()->user, explorer_rpc()->pass);
     if (auth_len < 0 || (size_t)auth_len >= sizeof(auth_plain)) {
-        platform_socket_close(fd);
+        close(fd);
         LOG_ERR("explorer", "rpc_call(%s): credentials exceed local limit",
                 method);
     }
@@ -355,25 +356,21 @@ int rpc_call(const char *method, const char *params_json,
         "Connection: close\r\n\r\n%s",
         auth_b64, blen, body);
     if (rlen < 0 || (size_t)rlen >= sizeof(req)) {
-        platform_socket_close(fd);
+        close(fd);
         LOG_ERR("explorer", "rpc_call(%s): request too large (%d bytes)", method, rlen);
     }
 
-    if (!platform_socket_send_all(fd, req, (size_t)rlen)) {
-        platform_socket_close(fd);
-        LOG_ERR("explorer", "rpc_call(%s): write failed", method);
-    }
+    if (write(fd, req, (size_t)rlen) != rlen) { close(fd); LOG_ERR("explorer", "rpc_call(%s): write failed", method); }
 
     /* Read response */
     size_t total = 0;
     while (total < outmax - 1) {
-        int r = platform_socket_receive(fd, out + total,
-                                        outmax - 1 - total);
+        ssize_t r = read(fd, out + total, outmax - 1 - total);
         if (r <= 0) break;
         total += (size_t)r;
     }
     out[total] = '\0';
-    platform_socket_close(fd);
+    close(fd);
 
     /* Skip HTTP headers — find \r\n\r\n */
     char *body_start = strstr(out, "\r\n\r\n");
