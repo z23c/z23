@@ -12,6 +12,7 @@
 
 #pragma GCC diagnostic ignored "-Wformat-truncation"
 #include "platform/time_compat.h"
+#include "platform/read_mapping.h"
 #include "controllers/snapshot_controller.h"
 #include "snapshot_controller_internal.h"
 #include "models/block.h"
@@ -24,7 +25,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/mman.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <limits.h>
@@ -34,6 +34,17 @@
 
 #define TX_INDEX_BATCH_TXS 1000
 #define TX_INDEX_BATCH_YIELD_MS 100
+
+static bool snapshot_stat_mapping_size(const struct stat *st,
+                                       size_t *size_out)
+{
+    if (!st || !size_out || st->st_size <= 0)
+        return false;
+    if ((uintmax_t)st->st_size > (uintmax_t)SIZE_MAX)
+        return false;
+    *size_out = (size_t)st->st_size;
+    return true;
+}
 
 static bool snapshot_deserialize_index_block(const uint8_t *data,
                                              size_t avail,
@@ -77,7 +88,8 @@ static bool snapshot_block_file_size_ok(uint32_t block_size,
 {
     return block_size > 0 &&
            block_size <= MAX_BLOCK_SIZE &&
-           envelope_pos + 8 <= file_size &&
+           envelope_pos <= file_size &&
+           file_size - envelope_pos >= 8 &&
            (size_t)block_size <= file_size - envelope_pos - 8;
 }
 
@@ -240,13 +252,18 @@ static bool snapshot_tx_index_build_from_block_files(struct node_db *ndb,
             close(fd);
             return false;
         }
-        size_t file_size = (size_t)st.st_size;
-        uint8_t *file_data = mmap(NULL, file_size, PROT_READ,
-                                  MAP_PRIVATE, fd, 0);
-        close(fd);
-        if (file_data == MAP_FAILED)
+        size_t file_size = 0;
+        if (!snapshot_stat_mapping_size(&st, &file_size)) {
+            close(fd);
             return false;
-        posix_madvise(file_data, file_size, POSIX_MADV_SEQUENTIAL);
+        }
+        struct platform_read_mapping mapping;
+        platform_read_mapping_init(&mapping);
+        if (!platform_read_mapping_open(&mapping, fd, file_size)) {
+            close(fd);
+            return false;
+        }
+        const uint8_t *file_data = mapping.data;
         files_seen++;
 
         size_t pos = 0;
@@ -283,12 +300,14 @@ static bool snapshot_tx_index_build_from_block_files(struct node_db *ndb,
                 indexed, t_start, tx_open);
             block_free(&blk);
             if (!saved) {
-                munmap(file_data, file_size);
+                platform_read_mapping_close(&mapping);
+                close(fd);
                 return false;
             }
             pos += 8 + block_size;
         }
-        munmap(file_data, file_size);
+        platform_read_mapping_close(&mapping);
+        close(fd);
     }
 
     return files_seen > 0;
@@ -366,8 +385,11 @@ static void *build_tx_index_thread(void *arg)
     int indexed = 0;
     int skipped = 0;
     int cached_file = -1;
-    uint8_t *cached_data = NULL;
+    const uint8_t *cached_data = NULL;
     size_t cached_size = 0;
+    int cached_fd = -1;
+    struct platform_read_mapping cached_mapping;
+    platform_read_mapping_init(&cached_mapping);
 
     if (!snapshot_tx_begin_checked(&ndb,
             "tx_index begin bulk load transaction")) {
@@ -390,36 +412,43 @@ static void *build_tx_index_thread(void *arg)
 
         if (!block_hash || file_num < 0 || data_pos < 0) continue;
 
-        /* mmap block file */
+        /* Keep the descriptor alive for the mapping's full lifetime. */
         if (file_num != cached_file) {
-            if (cached_data) munmap(cached_data, cached_size);
+            platform_read_mapping_close(&cached_mapping);
+            if (cached_fd >= 0)
+                close(cached_fd);
+            cached_fd = -1;
+            cached_data = NULL;
+            cached_size = 0;
+            cached_file = -1;
             char path[512];
             snprintf(path, sizeof(path), "%s/blocks/blk%05d.dat",
                      datadir, file_num);
-            int fd = open(path, O_RDONLY);
-            if (fd < 0) {
+            cached_fd = open(path, O_RDONLY);
+            if (cached_fd < 0) {
                 LOG_WARN("tx_index", "tx_index: failed to open %s", path);
                 ok = false;
                 break;
             }
             struct stat st;
-            if (fstat(fd, &st) != 0) {
+            if (fstat(cached_fd, &st) != 0) {
                 LOG_WARN("tx_index", "tx_index: failed to stat %s", path);
-                close(fd);
+                close(cached_fd);
+                cached_fd = -1;
                 ok = false;
                 break;
             }
-            cached_size = (size_t)st.st_size;
-            cached_data = mmap(NULL, cached_size, PROT_READ,
-                               MAP_PRIVATE, fd, 0);
-            close(fd);
-            if (cached_data == MAP_FAILED) {
-                LOG_WARN("tx_index", "tx_index: failed to mmap %s", path);
+            if (!snapshot_stat_mapping_size(&st, &cached_size) ||
+                !platform_read_mapping_open(&cached_mapping, cached_fd,
+                                            cached_size)) {
+                LOG_WARN("tx_index", "tx_index: failed to map %s", path);
                 cached_data = NULL;
+                close(cached_fd);
+                cached_fd = -1;
                 ok = false;
                 break;
             }
-            posix_madvise(cached_data, cached_size, POSIX_MADV_SEQUENTIAL);
+            cached_data = cached_mapping.data;
             cached_file = file_num;
         }
 
@@ -489,7 +518,9 @@ static void *build_tx_index_thread(void *arg)
         snapshot_tx_rollback_best_effort(&ndb, "tx_index rollback after final commit failure");
     }
 
-    if (cached_data) munmap(cached_data, cached_size);
+    platform_read_mapping_close(&cached_mapping);
+    if (cached_fd >= 0)
+        close(cached_fd);
     sqlite3_finalize(query);
     sqlite3_close(read_db);
     query = NULL;
