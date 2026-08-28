@@ -62,8 +62,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 #define BROKER_TAG "agent.broker"
-/* The child receives the connected socket as this descriptor. Fixed, so the
- * child needs no argument naming it — one less thing on a command line. */
+/* Fixed descriptor keeps it off the child's command line. */
 #define AGENT_CHILD_SOCKET_FD 3
 /* ── fd helpers (EINTR-safe, exact-length) ──────────────────────────────── */
 

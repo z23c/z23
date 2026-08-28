@@ -166,11 +166,11 @@ ship_remote_rollout() {
 # Keep this check ahead of every deployment function: no byte crosses a host
 # boundary and no service restarts before this exact value is observed.
 ship_candidate_has_real_tor() {
-    local candidate="$1" out tor_build
+    local candidate="$1" jsonq="${2:-$REPO_ROOT/build/bin/jsonq}" out tor_build
     out="$(timeout 30 "$candidate" ops telemetry network tor 2>/dev/null)" || return 1
-    [ -x "$REPO_ROOT/build/bin/jsonq" ] || return 1
+    [ -x "$jsonq" ] || return 1
     tor_build="$(printf '%s\n' "$out" |
-        "$REPO_ROOT/build/bin/jsonq" get data.values.tor.tor_build 2>/dev/null)" || return 1
+        "$jsonq" get data.values.tor.tor_build 2>/dev/null)" || return 1
     [ "$tor_build" = real_tor ]
 }
 
@@ -195,9 +195,10 @@ if [ "${1:-}" = "--selftest" ]; then
     trap 'find "$test_tmp" -depth -delete' EXIT HUP INT TERM
     printf '#!/bin/sh\nprintf '\''%%s\\n'\'' '\''{"data":{"values":{"tor":{"tor_build":"real_tor"}}}}'\''\n' > "$test_tmp/real"
     printf '#!/bin/sh\nprintf '\''%%s\\n'\'' '\''{"data":{"values":{"tor":{"tor_build":"stub_tor"}}}}'\''\n' > "$test_tmp/stub"
-    chmod 755 "$test_tmp/real" "$test_tmp/stub"
-    ship_candidate_has_real_tor "$test_tmp/real"
-    ! ship_candidate_has_real_tor "$test_tmp/stub"
+    printf '#!/bin/sh\nsed -n '\''s/.*"tor_build":"\\([^"]*\\)".*/\\1/p'\''\n' > "$test_tmp/jsonq"
+    chmod 755 "$test_tmp/real" "$test_tmp/stub" "$test_tmp/jsonq"
+    ship_candidate_has_real_tor "$test_tmp/real" "$test_tmp/jsonq"
+    ! ship_candidate_has_real_tor "$test_tmp/stub" "$test_tmp/jsonq"
     selftest_stage() {
         printf 'stage-start %s\n' "$1" >> "$test_tmp/order"
         case "$1" in bad) return 1 ;; esac

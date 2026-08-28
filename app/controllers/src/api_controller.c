@@ -61,10 +61,6 @@
 
 /* ── State ────────────────────────────────────────────────── */
 
-/* struct api_context defined in api_controller_internal.h */
-
-/* struct api_rpc_backend defined in api_controller_internal.h */
-
 struct api_context g_api_ctx = {0};
 /* Credentials start absent: boot fills them from the node's .cookie or
  * rpcuser/rpcpassword config, and api_rpc_call refuses to fire when
