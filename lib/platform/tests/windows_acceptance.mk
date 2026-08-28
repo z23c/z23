@@ -158,7 +158,15 @@ ZCL_WINDOWS_ACCEPTANCE_mint_anchor_export_refusal_LIBS := \
 	-Wl,--gc-sections
 ZCL_WINDOWS_ACCEPTANCE_mint_anchor_preflight_refusal_SOURCES := \
 	lib/test/src/mint_anchor_preflight_windows_refusal_acceptance.c \
-	config/src/boot_mint_anchor_preflight.c
+	config/src/boot_mint_anchor_preflight.c \
+	lib/platform/src/directory_transaction.c \
+	lib/platform/src/private_directory.c \
+	lib/platform/src/private_acl_internal.c \
+	lib/platform/src/rng.c lib/base/src/safe_alloc.c
+ZCL_WINDOWS_ACCEPTANCE_mint_anchor_preflight_refusal_FLAGS := \
+	-ffunction-sections -fno-unwind-tables -fno-asynchronous-unwind-tables
+ZCL_WINDOWS_ACCEPTANCE_mint_anchor_preflight_refusal_LIBS := \
+	-Wl,--gc-sections -lsqlite3 -ladvapi32 -lbcrypt
 ZCL_WINDOWS_ACCEPTANCE_package_lifecycle_store_refusal_SOURCES := \
 	lib/test/src/package_lifecycle_store_windows_refusal_acceptance.c \
 	app/services/src/package_lifecycle_store.c \
