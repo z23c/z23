@@ -16,6 +16,17 @@ struct platform_directory_list {
     size_t count;
 };
 
+enum platform_directory_probe_result {
+    PLATFORM_DIRECTORY_PROBE_OK = 0,
+    PLATFORM_DIRECTORY_PROBE_MISSING,
+    PLATFORM_DIRECTORY_PROBE_REFUSED,
+};
+
+/* Classify an existing real directory without creating it. Symlinks and
+ * reparse points are refused. */
+enum platform_directory_probe_result platform_directory_probe_real(
+    const char *path);
+
 int platform_directory_create(const char *path, int mode);
 
 /* Create path if absent and prove the resulting object is a real directory.

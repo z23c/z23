@@ -128,6 +128,42 @@ bool platform_directory_ensure(const char *path, int mode)
     return ok;
 }
 
+enum platform_directory_probe_result platform_directory_probe_real(
+    const char *path)
+{
+    wchar_t *wide = utf8_to_wide(path);
+    if (!wide) {
+        errno = EINVAL;
+        return PLATFORM_DIRECTORY_PROBE_REFUSED;
+    }
+    HANDLE h = CreateFileW(wide, FILE_READ_ATTRIBUTES,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE |
+                               FILE_SHARE_DELETE,
+                           NULL, OPEN_EXISTING,
+                           FILE_FLAG_BACKUP_SEMANTICS |
+                               FILE_FLAG_OPEN_REPARSE_POINT,
+                           NULL);
+    free(wide);
+    if (h == INVALID_HANDLE_VALUE) {
+        DWORD error = GetLastError();
+        if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) {
+            errno = ENOENT;
+            return PLATFORM_DIRECTORY_PROBE_MISSING;
+        }
+        set_errno_from_win32(error);
+        return PLATFORM_DIRECTORY_PROBE_REFUSED;
+    }
+    FILE_ATTRIBUTE_TAG_INFO info;
+    bool ok = GetFileInformationByHandleEx(h, FileAttributeTagInfo, &info,
+                                            sizeof(info)) &&
+              (info.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+              (info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
+    CloseHandle(h);
+    if (ok) return PLATFORM_DIRECTORY_PROBE_OK;
+    errno = ENOTDIR;
+    return PLATFORM_DIRECTORY_PROBE_REFUSED;
+}
+
 bool platform_directory_list_real_sorted(const char *path,
                                          struct platform_directory_list *out)
 {
@@ -283,6 +319,20 @@ bool platform_directory_ensure(const char *path, int mode)
     if (mkdir(path, (mode_t)mode) != 0 && errno != EEXIST) return false;
     struct stat st;
     return lstat(path, &st) == 0 && S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode);
+}
+
+enum platform_directory_probe_result platform_directory_probe_real(
+    const char *path)
+{
+    struct stat st;
+    if (lstat(path, &st) != 0)
+        return errno == ENOENT || errno == ENOTDIR
+                   ? PLATFORM_DIRECTORY_PROBE_MISSING
+                   : PLATFORM_DIRECTORY_PROBE_REFUSED;
+    if (S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode))
+        return PLATFORM_DIRECTORY_PROBE_OK;
+    errno = ENOTDIR;
+    return PLATFORM_DIRECTORY_PROBE_REFUSED;
 }
 
 bool platform_directory_list_real_sorted(const char *path,

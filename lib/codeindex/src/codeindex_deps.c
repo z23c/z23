@@ -41,15 +41,26 @@
 
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
+#include "platform/directory_compat.h"
+#include "platform/positioned_file.h"
 
-#include <dirent.h>
+#include <ctype.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
+
+static char *dep_strtok(char *text, const char *delimiters, char **save)
+{
+    char *cursor = text ? text : *save;
+    if (!cursor) return NULL;
+    cursor += strspn(cursor, delimiters);
+    if (!*cursor) { *save = NULL; return NULL; }
+    char *end = cursor + strcspn(cursor, delimiters);
+    if (*end) *end++ = '\0'; else end = NULL;
+    *save = end;
+    return cursor;
+}
 
 /* Rewrite an absolute or ./-relative depfile token to repo-relative, or return
  * false if the token is outside the tree (a system header). */
@@ -60,7 +71,7 @@ static bool to_relpath(const char *root, const char *tok, char out[CI_PATH_MAX])
         snprintf(out, CI_PATH_MAX, "%s", tok + rl + 1);
         return true;
     }
-    if (tok[0] == '/')
+    if (tok[0] == '/' || (isalpha((unsigned char)tok[0]) && tok[1] == ':'))
         return false;  /* absolute, outside root */
     /* already relative (build usually emits repo-relative prereqs) */
     if (strncmp(tok, "./", 2) == 0) tok += 2;
@@ -90,8 +101,8 @@ static void parse_depfile(const char *root, char *text, size_t len,
     }
     /* process one logical rule per physical line */
     char *save = NULL;
-    for (char *line = strtok_r(text, "\n", &save); line;
-         line = strtok_r(NULL, "\n", &save)) {
+    for (char *line = dep_strtok(text, "\n", &save); line;
+         line = dep_strtok(NULL, "\n", &save)) {
         char *colon = strchr(line, ':');
         if (!colon) continue;
         *colon = '\0';
@@ -100,8 +111,8 @@ static void parse_depfile(const char *root, char *text, size_t len,
         char src_rel[CI_PATH_MAX];
         bool have_src = false;
         char *tsave = NULL;
-        for (char *tok = strtok_r(rhs, " \t", &tsave); tok;
-             tok = strtok_r(NULL, " \t", &tsave)) {
+        for (char *tok = dep_strtok(rhs, " \t", &tsave); tok;
+             tok = dep_strtok(NULL, " \t", &tsave)) {
             char rel[CI_PATH_MAX];
             if (!to_relpath(root, tok, rel)) continue;
             if (!have_src && (has_ext(rel, ".c") || has_ext(rel, ".cc") ||
@@ -180,13 +191,20 @@ static enum epoch_state epoch_current_dir(const char *root, const char *reldir,
     char path[CI_PATH_MAX];
     int n = snprintf(path, sizeof(path), "%s/%s/epochs", root, reldir);
     if (n <= 0 || (size_t)n >= sizeof(path)) return EPOCH_NONE;
-    struct stat st;
-    if (lstat(path, &st) != 0 || !S_ISDIR(st.st_mode)) return EPOCH_NONE;
+    enum platform_directory_probe_result epochs =
+        platform_directory_probe_real(path);
+    if (epochs == PLATFORM_DIRECTORY_PROBE_MISSING) return EPOCH_NONE;
+    if (epochs != PLATFORM_DIRECTORY_PROBE_OK) return EPOCH_UNKNOWN;
 
     n = snprintf(path, sizeof(path), "%s/%s/.current-epoch", root, reldir);
     if (n <= 0 || (size_t)n >= sizeof(path)) return EPOCH_UNKNOWN;
-    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (fd < 0) {
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path) ||
+        !platform_positioned_file_snapshot(&file, &before) ||
+        before.size >= 72) {
+        platform_positioned_file_close(&file);
         LOG_WARN("codeindex",
                  "%s keeps compile epochs but claims no current one (%s) — its "
                  "depfiles are OUTSIDE the include graph; rebuild to restore it",
@@ -194,12 +212,18 @@ static enum epoch_state epoch_current_dir(const char *root, const char *reldir,
         return EPOCH_UNKNOWN;
     }
     char name[72];
-    ssize_t got;
-    do {
-        got = read(fd, name, sizeof(name));
-    } while (got < 0 && errno == EINTR);
-    close(fd);
-    size_t len = got > 0 ? (size_t)got : 0;
+    int64_t got = platform_positioned_file_read(&file, name,
+                                                 (size_t)before.size, 0);
+    bool stable = got == (int64_t)before.size &&
+                  platform_positioned_file_snapshot(&file, &after) &&
+                  before.volume == after.volume &&
+                  before.file_low == after.file_low &&
+                  before.file_high == after.file_high &&
+                  before.size == after.size &&
+                  before.modified_seconds == after.modified_seconds &&
+                  before.modified_nanoseconds == after.modified_nanoseconds;
+    platform_positioned_file_close(&file);
+    size_t len = stable ? (size_t)got : 0;
     while (len > 0 && (name[len - 1] == '\n' || name[len - 1] == '\r')) len--;
     if (!epoch_name_valid(name, len)) {
         LOG_WARN("codeindex",
@@ -211,8 +235,8 @@ static enum epoch_state epoch_current_dir(const char *root, const char *reldir,
                       name);
     if (cn <= 0 || (size_t)cn >= CI_PATH_MAX) return EPOCH_UNKNOWN;
     int fn = snprintf(path, sizeof(path), "%s/%s", root, out);
-    if (fn <= 0 || (size_t)fn >= sizeof(path) || lstat(path, &st) != 0 ||
-        !S_ISDIR(st.st_mode)) {
+    if (fn <= 0 || (size_t)fn >= sizeof(path) ||
+        platform_directory_probe_real(path) != PLATFORM_DIRECTORY_PROBE_OK) {
         LOG_WARN("codeindex",
                  "%s names current compile epoch %.*s, which is not a "
                  "directory — its depfiles are OUTSIDE the include graph",
@@ -240,49 +264,36 @@ static bool collect_dep_paths(const char *root, const char *reldir,
     int fn = snprintf(full, sizeof(full), "%s/%s", root, reldir);
     if (fn <= 0 || (size_t)fn >= sizeof(full))
         return false;
-    DIR *dir = opendir(full);
-    if (!dir) return false;
-
+    struct platform_directory_list directories = {0}, files = {0};
+    if (!platform_directory_list_real_sorted(full, &directories) ||
+        !platform_directory_list_regular_sorted(full, &files)) {
+        platform_directory_list_free(&directories);
+        platform_directory_list_free(&files);
+        return false;
+    }
     bool ok = true;
-    struct dirent *entry;
-    while (ok && (entry = readdir(dir)) != NULL) {
-        if (entry->d_name[0] == '.') continue;
+    for (size_t i = 0; ok && i < directories.count; i++) {
+        const char *name = directories.entries[i].name;
+        if (name[0] == '.' || strcmp(name, "history") == 0) continue;
         char child[CI_PATH_MAX];
-        int cn = snprintf(child, sizeof(child), "%s/%s", reldir,
-                          entry->d_name);
+        int cn = snprintf(child, sizeof(child), "%s/%s", reldir, name);
         if (cn <= 0 || (size_t)cn >= sizeof(child)) {
             ok = false;
             break;
         }
-        char child_full[CI_PATH_MAX];
-        int cfn = snprintf(child_full, sizeof(child_full), "%s/%s", root,
-                           child);
-        if (cfn <= 0 || (size_t)cfn >= sizeof(child_full)) {
-            ok = false;
-            break;
-        }
-        struct stat st;
-        if (lstat(child_full, &st) != 0) {
-            ok = false;
-            break;
-        }
-        if (S_ISDIR(st.st_mode)) {
-            /* `epochs` is unreachable here: a root that has one was resolved to
-             * its live generation above. `history` is the same kind of retained
-             * receipt and is never the active graph. */
-            if (strcmp(entry->d_name, "history") == 0)
-                continue;
-            ok = collect_dep_paths(root, child, paths);
-        } else if (has_ext(entry->d_name, ".d")) {
-            ok = S_ISREG(st.st_mode) && dep_paths_push(paths, child);
-        }
+        ok = collect_dep_paths(root, child, paths);
     }
-    int saved = errno;
-    if (closedir(dir) != 0 && ok) {
-        ok = false;
-        saved = errno;
+    for (size_t i = 0; ok && i < files.count; i++) {
+        const char *name = files.entries[i].name;
+        if (name[0] == '.' || !has_ext(name, ".d")) continue;
+        char child[CI_PATH_MAX];
+        int cn = snprintf(child, sizeof(child), "%s/%s", reldir, name);
+        ok = cn > 0 && (size_t)cn < sizeof(child) &&
+             dep_paths_push(paths, child);
     }
-    if (!ok) errno = saved ? saved : EIO;
+    platform_directory_list_free(&directories);
+    platform_directory_list_free(&files);
+    if (!ok) errno = EIO;
     return ok;
 }
 
@@ -313,16 +324,16 @@ static void dep_sha_write_u64le(struct sha3_256_ctx *sha, uint64_t value)
 }
 
 static void dep_stat_root_add(struct sha3_256_ctx *sha, const char *relpath,
-                              const struct stat *st)
+                              const struct platform_positioned_file_snapshot *st)
 {
     sha3_256_write(sha, (const unsigned char *)relpath, strlen(relpath) + 1);
-    dep_sha_write_u64le(sha, (uint64_t)st->st_dev);
-    dep_sha_write_u64le(sha, (uint64_t)st->st_ino);
-    dep_sha_write_u64le(sha, (uint64_t)st->st_size);
-    dep_sha_write_u64le(sha, (uint64_t)st->st_mtim.tv_sec);
-    dep_sha_write_u64le(sha, (uint64_t)st->st_mtim.tv_nsec);
-    dep_sha_write_u64le(sha, (uint64_t)st->st_ctim.tv_sec);
-    dep_sha_write_u64le(sha, (uint64_t)st->st_ctim.tv_nsec);
+    dep_sha_write_u64le(sha, st->volume);
+    dep_sha_write_u64le(sha, st->file_low);
+    dep_sha_write_u64le(sha, st->size);
+    dep_sha_write_u64le(sha, (uint64_t)st->modified_seconds);
+    dep_sha_write_u64le(sha, st->modified_nanoseconds);
+    dep_sha_write_u64le(sha, (uint64_t)st->changed_seconds);
+    dep_sha_write_u64le(sha, st->changed_nanoseconds);
 }
 
 static bool scan_one_depfile(const char *root, const char *relpath,
@@ -334,67 +345,40 @@ static bool scan_one_depfile(const char *root, const char *relpath,
     int fn = snprintf(full, sizeof(full), "%s/%s", root, relpath);
     if (fn <= 0 || (size_t)fn >= sizeof(full))
         LOG_FAIL("codeindex", "depfile path too long: %s", relpath);
-    int fd = open(full, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (fd < 0)
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, full))
         LOG_FAIL("codeindex", "open depfile failed path=%s: %s", relpath,
                  strerror(errno));
-    struct stat before;
-    if (fstat(fd, &before) != 0 || !S_ISREG(before.st_mode) ||
-        before.st_size < 0 || before.st_size > INT64_C(67108864)) {
+    if (!platform_positioned_file_snapshot(&file, &before) ||
+        before.size > UINT64_C(67108864)) {
         int saved = errno ? errno : EFBIG;
-        close(fd);
+        platform_positioned_file_close(&file);
         LOG_FAIL("codeindex", "invalid depfile path=%s: %s", relpath,
                  strerror(saved));
     }
-    size_t len = (size_t)before.st_size;
+    size_t len = (size_t)before.size;
     char *buf = zcl_malloc(len + 1, "codeindex depfile bytes");
     if (!buf) {
-        close(fd);
+        platform_positioned_file_close(&file);
         LOG_FAIL("codeindex", "allocate depfile path=%s", relpath);
     }
-    size_t used = 0;
-    bool ok = true;
-    int saved = 0;
-    while (used < len) {
-        ssize_t got = read(fd, buf + used, len - used);
-        if (got < 0 && errno == EINTR) continue;
-        if (got <= 0) {
-            ok = false;
-            saved = got < 0 ? errno : EIO;
-            break;
-        }
-        used += (size_t)got;
-    }
-    char extra;
-    if (ok) {
-        ssize_t got;
-        do {
-            got = read(fd, &extra, 1);
-        } while (got < 0 && errno == EINTR);
-        if (got != 0) {
-            ok = false;
-            saved = got < 0 ? errno : EBUSY;
-        }
-    }
-    struct stat after;
-    if (ok && (fstat(fd, &after) != 0 || !S_ISREG(after.st_mode) ||
-               before.st_dev != after.st_dev || before.st_ino != after.st_ino ||
-               before.st_size != after.st_size ||
-               before.st_mtim.tv_sec != after.st_mtim.tv_sec ||
-               before.st_mtim.tv_nsec != after.st_mtim.tv_nsec ||
-               before.st_ctim.tv_sec != after.st_ctim.tv_sec ||
-               before.st_ctim.tv_nsec != after.st_ctim.tv_nsec)) {
-        ok = false;
-        saved = errno ? errno : EBUSY;
-    }
-    if (close(fd) != 0 && ok) {
-        ok = false;
-        saved = errno;
-    }
+    bool ok = platform_positioned_file_read(&file, buf, len, 0) ==
+                  (int64_t)len &&
+              platform_positioned_file_snapshot(&file, &after) &&
+              before.size == after.size && before.volume == after.volume &&
+              before.file_low == after.file_low &&
+              before.file_high == after.file_high &&
+              before.modified_seconds == after.modified_seconds &&
+              before.modified_nanoseconds == after.modified_nanoseconds &&
+              before.changed_seconds == after.changed_seconds &&
+              before.changed_nanoseconds == after.changed_nanoseconds;
+    platform_positioned_file_close(&file);
     if (!ok) {
         free(buf);
         LOG_FAIL("codeindex", "read depfile failed path=%s: %s", relpath,
-                 strerror(saved ? saved : EIO));
+                 strerror(errno ? errno : EIO));
     }
     buf[len] = '\0';
     sha3_256_write(sha, (const unsigned char *)relpath, strlen(relpath) + 1);
@@ -419,13 +403,12 @@ static bool deps_scan_exact(const char *root, ci_dep_cb cb, void *user,
     int bn = snprintf(build, sizeof(build), "%s/build", root);
     if (bn <= 0 || (size_t)bn >= sizeof(build))
         LOG_FAIL("codeindex", "build path too long");
-    struct stat build_st;
-    bool present = lstat(build, &build_st) == 0;
-    if (!present && errno != ENOENT)
+    enum platform_directory_probe_result build_probe =
+        platform_directory_probe_real(build);
+    bool present = build_probe == PLATFORM_DIRECTORY_PROBE_OK;
+    if (build_probe == PLATFORM_DIRECTORY_PROBE_REFUSED)
         LOG_FAIL("codeindex", "inspect build directory failed: %s",
                  strerror(errno));
-    if (present && !S_ISDIR(build_st.st_mode))
-        LOG_FAIL("codeindex", "build path is not a directory");
 
     struct sha3_256_ctx sha;
     dep_root_init(&sha, present);
@@ -481,15 +464,14 @@ bool codeindex_depfile_graph(const char *root, size_t *out_count,
     int bn = snprintf(build, sizeof(build), "%s/build", root);
     if (bn <= 0 || (size_t)bn >= sizeof(build))
         LOG_FAIL("codeindex", "build path too long");
-    struct stat build_st;
-    if (lstat(build, &build_st) != 0) {
-        if (errno == ENOENT)
+    enum platform_directory_probe_result build_probe =
+        platform_directory_probe_real(build);
+    if (build_probe != PLATFORM_DIRECTORY_PROBE_OK) {
+        if (build_probe == PLATFORM_DIRECTORY_PROBE_MISSING)
             return true;  /* fresh tree: the graph is absent, not broken */
         LOG_FAIL("codeindex", "inspect build directory failed: %s",
                  strerror(errno));
     }
-    if (!S_ISDIR(build_st.st_mode))
-        LOG_FAIL("codeindex", "build path is not a directory");
 
     struct dep_paths paths = {0};
     if (!collect_dep_paths(root, "build", &paths)) {
@@ -503,15 +485,26 @@ bool codeindex_depfile_graph(const char *root, size_t *out_count,
     for (size_t i = 0; i < paths.count; i++) {
         char full[CI_PATH_MAX];
         int fn = snprintf(full, sizeof(full), "%s/%s", root, paths.items[i]);
-        struct stat st;
+        struct platform_positioned_file file;
+        struct platform_positioned_file_snapshot snapshot;
+        platform_positioned_file_init(&file);
         if (fn <= 0 || (size_t)fn >= sizeof(full) ||
-            lstat(full, &st) != 0 || !S_ISREG(st.st_mode)) {
+            !platform_positioned_file_open(&file, full) ||
+            !platform_positioned_file_snapshot(&file, &snapshot)) {
+            platform_positioned_file_close(&file);
             ok = false;
             break;
         }
+        platform_positioned_file_close(&file);
         count++;
-        int64_t mt = (int64_t)st.st_mtim.tv_sec * INT64_C(1000000000) +
-                     (int64_t)st.st_mtim.tv_nsec;
+        if (snapshot.modified_seconds > INT64_MAX / INT64_C(1000000000) ||
+            snapshot.modified_seconds < INT64_MIN / INT64_C(1000000000)) {
+            errno = EOVERFLOW;
+            ok = false;
+            break;
+        }
+        int64_t mt = snapshot.modified_seconds * INT64_C(1000000000) +
+                     (int64_t)snapshot.modified_nanoseconds;
         if (mt > newest) newest = mt;
     }
     dep_paths_free(&paths);
@@ -531,13 +524,12 @@ bool ci_deps_stat_root_sha3(const char *root, uint8_t out_root[32])
     int bn = snprintf(build, sizeof(build), "%s/build", root);
     if (bn <= 0 || (size_t)bn >= sizeof(build))
         LOG_FAIL("codeindex", "build path too long");
-    struct stat build_st;
-    bool present = lstat(build, &build_st) == 0;
-    if (!present && errno != ENOENT)
+    enum platform_directory_probe_result build_probe =
+        platform_directory_probe_real(build);
+    bool present = build_probe == PLATFORM_DIRECTORY_PROBE_OK;
+    if (build_probe == PLATFORM_DIRECTORY_PROBE_REFUSED)
         LOG_FAIL("codeindex", "inspect build directory failed: %s",
                  strerror(errno));
-    if (present && !S_ISDIR(build_st.st_mode))
-        LOG_FAIL("codeindex", "build path is not a directory");
 
     struct sha3_256_ctx sha;
     dep_stat_root_init(&sha, present);
@@ -557,13 +549,18 @@ bool ci_deps_stat_root_sha3(const char *root, uint8_t out_root[32])
     for (size_t i = 0; i < paths.count; i++) {
         char full[CI_PATH_MAX];
         int fn = snprintf(full, sizeof(full), "%s/%s", root, paths.items[i]);
-        struct stat st;
+        struct platform_positioned_file file;
+        struct platform_positioned_file_snapshot snapshot;
+        platform_positioned_file_init(&file);
         if (fn <= 0 || (size_t)fn >= sizeof(full) ||
-            lstat(full, &st) != 0 || !S_ISREG(st.st_mode)) {
+            !platform_positioned_file_open(&file, full) ||
+            !platform_positioned_file_snapshot(&file, &snapshot)) {
+            platform_positioned_file_close(&file);
             ok = false;
             break;
         }
-        dep_stat_root_add(&sha, paths.items[i], &st);
+        platform_positioned_file_close(&file);
+        dep_stat_root_add(&sha, paths.items[i], &snapshot);
     }
     dep_paths_free(&paths);
     if (!ok)
