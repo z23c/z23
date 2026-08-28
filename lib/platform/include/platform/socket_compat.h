@@ -510,6 +510,21 @@ static inline int platform_socket_parse_address(int family, const char *text,
 #endif
 }
 
+static inline bool platform_socket_format_address(int family,
+                                                   const void *address,
+                                                   char *text,
+                                                   size_t text_size)
+{
+    if (!address || !text || text_size == 0 || text_size > INT32_MAX ||
+        !platform_socket_runtime_init())
+        return false;
+#if defined(_WIN32)
+    return InetNtopA(family, (void *)address, text, (DWORD)text_size) != NULL;
+#else
+    return inet_ntop(family, address, text, (socklen_t)text_size) != NULL;
+#endif
+}
+
 /* Resolve one UTF-8 host name to the node's canonical 16-byte address form.
  * IPv4 is returned as an IPv4-mapped IPv6 address. Windows uses the wide
  * resolver so non-ASCII UTF-8 host names are never interpreted in the active
