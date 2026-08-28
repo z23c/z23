@@ -3,7 +3,6 @@
  * reducer's durable derived state to genesis so the staged pipeline re-folds
  * forward over on-disk block BODIES. Contract declared in config/boot.h. */
 #include "config/boot.h"
-
 #include "platform/time_compat.h"
 #include "platform/file_sync.h"
 

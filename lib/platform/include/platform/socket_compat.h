@@ -402,6 +402,8 @@ static inline int platform_socket_pending_error(platform_socket_t sock,
 static inline int platform_socket_wait_writable(platform_socket_t sock,
                                                  int timeout_ms)
 {
+#if defined(_WIN32)
+    if (timeout_ms < 0) return SOCKET_ERROR;
     fd_set writable;
     FD_ZERO(&writable);
     FD_SET(sock, &writable);
@@ -409,16 +411,22 @@ static inline int platform_socket_wait_writable(platform_socket_t sock,
         .tv_sec = timeout_ms / 1000,
         .tv_usec = (timeout_ms % 1000) * 1000,
     };
-#if defined(_WIN32)
     return select(0, NULL, &writable, NULL, &timeout);
 #else
-    return select(sock + 1, NULL, &writable, NULL, &timeout);
+    if (sock < 0 || timeout_ms < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    struct pollfd descriptor = {.fd = sock, .events = POLLOUT};
+    return poll(&descriptor, 1, timeout_ms);
 #endif
 }
 
 static inline int platform_socket_wait_readable(platform_socket_t sock,
                                                  int timeout_ms)
 {
+#if defined(_WIN32)
+    if (timeout_ms < 0) return SOCKET_ERROR;
     fd_set readable;
     FD_ZERO(&readable);
     FD_SET(sock, &readable);
@@ -426,10 +434,14 @@ static inline int platform_socket_wait_readable(platform_socket_t sock,
         .tv_sec = timeout_ms / 1000,
         .tv_usec = (timeout_ms % 1000) * 1000,
     };
-#if defined(_WIN32)
     return select(0, &readable, NULL, NULL, &timeout);
 #else
-    return select(sock + 1, &readable, NULL, NULL, &timeout);
+    if (sock < 0 || timeout_ms < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    struct pollfd descriptor = {.fd = sock, .events = POLLIN};
+    return poll(&descriptor, 1, timeout_ms);
 #endif
 }
 

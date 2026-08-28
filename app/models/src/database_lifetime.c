@@ -308,12 +308,12 @@ static bool lifetime_delete_unauthorized(const char *path,
     return unauthorized;
 }
 
-/* SQLite's unix VFS performs some WAL/SHM retirement with direct unlink(2)
+/* SQLite's Linux VFS performs some WAL/SHM retirement with direct unlink(2)
  * calls below xDelete (notably xShmUnmap).  Interpose the process filesystem
  * calls as the final ownership boundary so no raw SQLite caller or helper can
  * evade the same generation/refcount audit.  The syscall forms avoid calling
  * back through libc and therefore cannot recurse into these wrappers. */
-#if !defined(_WIN32)
+#if defined(__linux__)
 static int lifetime_os_remove(const char *event, int dirfd, const char *path,
                               int flags)
 {
@@ -330,21 +330,7 @@ static int lifetime_os_remove(const char *event, int dirfd, const char *path,
         errno = EPERM;
         rc = -1;
     } else {
-#if defined(__APPLE__)
-        /* Darwin: calling our own unlinkat() wrapper recurses (the call
-         * resolves to the definition in this TU). libc's remove(3) is NOT
-         * wrapped here and deletes through libc's internal unlink, which
-         * the lifetime check above has already authorised. AT_FDCWD with
-         * no flags is the only form the lifetime model uses. */
-        if (dirfd == AT_FDCWD && flags == 0)
-            rc = remove(path);
-        else {
-            errno = ENOTSUP;
-            rc = -1;
-        }
-#else
         rc = (int)syscall(SYS_unlinkat, dirfd, path, flags);
-#endif
     }
     if (tracked)
         lifetime_log(unauthorized ? "os_unlink_refused" : event,
@@ -378,19 +364,7 @@ static int lifetime_os_rename(const char *event,
         errno = EPERM;
         rc = -1;
     } else {
-#if defined(__APPLE__)
-        /* Same recursion risk as unlinkat: call libc's rename(2), which is
-         * NOT wrapped in this TU. AT_FDCWD is the only form the lifetime
-         * model uses; other dirfd combinations fall through to ENOTSUP. */
-        if (olddirfd == AT_FDCWD && newdirfd == AT_FDCWD)
-            rc = rename(oldpath, newpath);
-        else {
-            errno = ENOTSUP;
-            rc = -1;
-        }
-#else
         rc = (int)syscall(SYS_renameat, olddirfd, oldpath, newdirfd, newpath);
-#endif
     }
     if (tracked)
         lifetime_log(unauthorized ? "os_rename_refused" : event,
@@ -411,10 +385,6 @@ int renameat(int olddirfd, const char *oldpath,
     return lifetime_os_rename("os_renameat", olddirfd, oldpath,
                               newdirfd, newpath);
 }
-#else
-/* SQLite's Win32 VFS does not call the Unix unlink/rename symbols. Native
- * Windows lifecycle enforcement belongs in the Win32 VFS wrapper; package
- * and canonical runtime acceptance remain blocked until that hook is wired. */
 #endif
 
 static struct db_lifetime_file *lifetime_file(sqlite3_file *file)

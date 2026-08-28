@@ -39,6 +39,9 @@
 
 #include "json/json.h"
 #include "kernel/command_registry.h"
+#if defined(_WIN32)
+#include "platform/directory_transaction.h"
+#endif
 #include "util/file_io.h"
 #include "util/spawn.h"
 #include "util/util.h"
@@ -46,6 +49,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(_WIN32)
+#include <process.h>
+#endif
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -180,6 +186,135 @@ static int znj_line_value(const char *line, const char *flag)
 static bool znj_write_conf(const char *path, bool build_worker,
                            bool *changed, char *why, size_t why_cap)
 {
+#if defined(_WIN32)
+    char directory[4700];
+    const char *leaf = NULL;
+    const char *slash = strrchr(path, '/');
+    const char *backslash = strrchr(path, '\\');
+    if (!slash || (backslash && backslash > slash))
+        slash = backslash;
+    size_t directory_len = slash ? (size_t)(slash - path) : 0u;
+    if (slash && directory_len == 2u && path[1] == ':')
+        directory_len++;
+    if (!slash || slash == path || !slash[1] ||
+        directory_len >= sizeof(directory)) {
+        snprintf(why, why_cap, "config file path is invalid or too long");
+        return false;
+    }
+    memcpy(directory, path, directory_len);
+    directory[directory_len] = '\0';
+    leaf = slash + 1;
+
+    struct platform_directory_transaction dir;
+    struct platform_directory_child source, staged;
+    platform_directory_transaction_init(&dir);
+    platform_directory_child_init(&source);
+    platform_directory_child_init(&staged);
+    char *existing = NULL;
+    size_t existing_len = 0;
+    bool ok = platform_directory_transaction_open(&dir, directory);
+    if (!ok) {
+        snprintf(why, why_cap, "config directory is not private or safe");
+        return false;
+    }
+
+    enum platform_directory_result opened =
+        platform_directory_child_open_result(&dir, leaf, false, false,
+                                             &source, NULL);
+    if (opened == PLATFORM_DIRECTORY_OK) {
+        struct platform_directory_child_info info;
+        ok = platform_directory_child_info(&source, &info) &&
+             info.size <= ZNJ_CONF_MAX_BYTES;
+        if (ok) {
+            existing_len = (size_t)info.size;
+            existing = zcl_malloc(existing_len + 1u,
+                                  "zcode.node.join.existing-config");
+            ok = existing != NULL &&
+                 platform_directory_child_read_exact(&source, existing,
+                                                     existing_len, 0);
+            if (ok)
+                existing[existing_len] = '\0';
+        }
+        platform_directory_child_close(&source);
+        if (!ok) {
+            free(existing);
+            platform_directory_transaction_close(&dir);
+            snprintf(why, why_cap,
+                     "existing config file is unreadable or larger than %u bytes",
+                     ZNJ_CONF_MAX_BYTES);
+            return false;
+        }
+    } else if (opened != PLATFORM_DIRECTORY_MISSING) {
+        platform_directory_transaction_close(&dir);
+        snprintf(why, why_cap, "existing config file is not a safe regular file");
+        return false;
+    }
+
+    static const char header[] =
+        "# Written by `z23 join`. Command-line flags still win.\n";
+    size_t output_cap = existing_len + sizeof(header) + 64u;
+    char *output = zcl_malloc(output_cap, "zcode.node.join.config-output");
+    if (!output) {
+        free(existing);
+        platform_directory_transaction_close(&dir);
+        snprintf(why, why_cap, "cannot allocate config output");
+        return false;
+    }
+    size_t output_len = sizeof(header) - 1u;
+    memcpy(output, header, output_len);
+    int prev_packagehost = -1, prev_buildworker = -1;
+    for (char *line = existing; line && *line;) {
+        char *nl = strchr(line, '\n');
+        if (nl)
+            *nl = '\0';
+        int v;
+        if ((v = znj_line_value(line, "packagehost")) >= 0) {
+            prev_packagehost = v;
+        } else if ((v = znj_line_value(line, "buildworker")) >= 0) {
+            prev_buildworker = v;
+        } else if (strncmp(line, "# Written by `z23 join`", 23) != 0) {
+            size_t line_len = strlen(line);
+            memcpy(output + output_len, line, line_len);
+            output_len += line_len;
+            output[output_len++] = '\n';
+        }
+        if (!nl)
+            break;
+        line = nl + 1;
+    }
+    int tail = snprintf(output + output_len, output_cap - output_len,
+                        "packagehost=1\nbuildworker=%d\n",
+                        build_worker ? 1 : 0);
+    ok = tail > 0 && (size_t)tail < output_cap - output_len;
+    if (ok)
+        output_len += (size_t)tail;
+
+    char staged_leaf[64];
+    int staged_n = snprintf(staged_leaf, sizeof(staged_leaf),
+                            "z23.conf.join.%ld.tmp", (long)_getpid());
+    bool staged_created = false;
+    ok = ok && staged_n > 0 && (size_t)staged_n < sizeof(staged_leaf) &&
+         platform_directory_child_create(&dir, staged_leaf, &staged) &&
+         (staged_created = true) &&
+         platform_directory_child_write_exact(&staged, output, output_len, 0) &&
+         platform_directory_child_flush(&staged) &&
+         platform_directory_child_replace(&dir, &staged, leaf, false) &&
+         platform_directory_transaction_flush(&dir);
+    platform_directory_child_close(&staged);
+    if (!ok && staged_created)
+        (void)platform_directory_child_unlink(&dir, staged_leaf, true);
+    free(output);
+    free(existing);
+    platform_directory_transaction_close(&dir);
+    if (!ok) {
+        snprintf(why, why_cap, "cannot atomically publish %s", path);
+        return false;
+    }
+    if (changed)
+        *changed = prev_packagehost != 1 ||
+                   prev_buildworker != (build_worker ? 1 : 0);
+    return true;
+#else
     char *existing = NULL;
     size_t existing_len = 0;
     if (access(path, F_OK) == 0 &&
@@ -272,6 +407,7 @@ static bool znj_write_conf(const char *path, bool build_worker,
         *changed = prev_packagehost != 1 ||
                    prev_buildworker != (build_worker ? 1 : 0);
     return true;
+#endif
 }
 
 static bool znj_push_tier(struct json_value *data, const char *key,

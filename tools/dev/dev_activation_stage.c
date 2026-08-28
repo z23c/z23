@@ -287,24 +287,28 @@ int dev_activation_stage_candidate(struct dev_activation_txn *txn)
      * directory is sealed below, once it has landed at its final name. */
     (void)chmod(tmp_manifest, 0444);
 #endif
-    if (!platform_private_directory_publish_no_clobber(
-            tmpdir, txn->candidate_dir)) {
+    bool published = platform_private_directory_publish_no_clobber(
+        tmpdir, txn->candidate_dir);
+    if (!published) {
         (void)platform_private_file_unlink_missing_ok(tmp_bin);
         (void)platform_private_file_unlink_missing_ok(tmp_manifest);
         (void)platform_private_directory_remove_empty(tmpdir);
         if (access(txn->candidate_bin, X_OK) != 0) {
-            LOG_ERR("dev-activation", "candidate publish failed: %s",
+            LOG_ERR("dev-activation", "candidate rename lost the race: %s",
                     strerror(errno));
             return DEV_ACTIVATION_E_STAGE;
         }
-    } else {
-#if !defined(_WIN32)
-        /* Sealed only now, and only for the directory this call
-         * published: the loser of a publish race must not re-mode the
-         * winner's generation. */
-        (void)chmod(txn->candidate_dir, 0555);
-#endif
     }
+#if !defined(_WIN32)
+    /* Sealed only now, and only for the directory this call published:
+     * the loser of a publish race must not re-mode the winner's
+     * generation. */
+    if (published && chmod(txn->candidate_dir, 0555) != 0) {
+        LOG_ERR("dev-activation", "candidate chmod failed: %s",
+                strerror(errno));
+        return DEV_ACTIVATION_E_STAGE;
+    }
+#endif
     if (!platform_private_parent_flush(txn->gen_root)) {
         LOG_ERR("dev-activation", "generation parent flush failed: %s",
                 strerror(errno));

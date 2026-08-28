@@ -5,57 +5,7 @@
 
 #include "vcs/fastobj_carrier.h"
 
-#if defined(_WIN32)
-#include <stdio.h>
-
-static bool fastobj_carrier_windows_refused(char *err, size_t err_cap)
-{
-    if (err && err_cap)
-        (void)snprintf(err, err_cap,
-                       "fastobj carrier disabled on native Windows until "
-                       "sandboxed immutable cache admission is qualified");
-    return false;
-}
-
-bool vcs_fastobj_carrier_export(const char *cache_dir,
-                                struct vcs_package_store *store,
-                                uint8_t root_out[32],
-                                struct vcs_fastobj_carrier_stats *stats,
-                                char *err, size_t err_cap)
-{
-    (void)cache_dir; (void)store; (void)root_out; (void)stats;
-    return fastobj_carrier_windows_refused(err, err_cap);
-}
-
-bool vcs_fastobj_carrier_fetch(struct vcs_package_store *dst,
-                               struct vcs_package_store *src,
-                               const uint8_t root[32],
-                               struct vcs_fastobj_carrier_stats *stats,
-                               char *err, size_t err_cap)
-{
-    (void)dst; (void)src; (void)root; (void)stats;
-    return fastobj_carrier_windows_refused(err, err_cap);
-}
-
-bool vcs_fastobj_carrier_verify(struct vcs_package_store *store,
-                                const uint8_t root[32],
-                                char *err, size_t err_cap)
-{
-    (void)store; (void)root;
-    return fastobj_carrier_windows_refused(err, err_cap);
-}
-
-bool vcs_fastobj_carrier_admit(const char *cache_dir,
-                               struct vcs_package_store *store,
-                               const uint8_t root[32],
-                               struct vcs_fastobj_carrier_stats *stats,
-                               char *err, size_t err_cap)
-{
-    (void)cache_dir; (void)store; (void)root; (void)stats;
-    return fastobj_carrier_windows_refused(err, err_cap);
-}
-
-#else
+#if !defined(_WIN32)
 #include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "sha3/sha3.h"
@@ -79,9 +29,7 @@ bool vcs_fastobj_carrier_admit(const char *cache_dir,
 #define FASTOBJ_CARRIER_MAX_OBJECT_BYTES VCS_PACKAGE_STORE_MAX_PACKAGE_BYTES
 
 static const char carrier_dir[] = VCS_FASTOBJ_CARRIER_DIR "/";
-
 /* ── small local io helpers (the lib/vcs revert convention) ─────────── */
-
 static bool fc_read_file(const char *path, size_t cap, uint8_t **out,
                          size_t *out_len)
 {

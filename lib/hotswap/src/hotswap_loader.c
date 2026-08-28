@@ -710,11 +710,15 @@ bool hotswap_load_leaves(const char *so_path,
     return true;
 }
 
+#else
+#define ZCL_HOTSWAP_LOADER_UNAVAILABLE 1
 #endif /* !_WIN32 */
+#else
+#define ZCL_HOTSWAP_LOADER_UNAVAILABLE 1
 #endif /* ZCL_DEV_BUILD */
 
-#if !defined(ZCL_DEV_BUILD) || defined(_WIN32)
-/* release build or native Windows (fail closed) */
+#ifdef ZCL_HOTSWAP_LOADER_UNAVAILABLE
+/* Release build or native Windows: fail closed. */
 
 bool hotswap_load_leaves(const char *so_path,
                          const char *datadir,
@@ -747,4 +751,5 @@ bool hotswap_load_leaves(const char *so_path,
     return false;
 }
 
-#endif /* !ZCL_DEV_BUILD || _WIN32 */
+#endif /* ZCL_HOTSWAP_LOADER_UNAVAILABLE */
+#undef ZCL_HOTSWAP_LOADER_UNAVAILABLE

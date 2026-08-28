@@ -525,7 +525,9 @@ void projection_store_close(void)
     }
 
     if (checkpoint_rc == SQLITE_OK && rc == SQLITE_OK) {
-        if (!projection_clean_receipt_write(g_display_path))
+        /* Private publication requires the retained absolute capability path;
+         * g_display_path may be relative and is observational only. */
+        if (!projection_clean_receipt_write(g_path))
             fprintf(stderr,  // obs-ok:projection-store-lifecycle
                     "[projection_store] clean-close receipt unavailable; "
                     "next boot will run full quick_check path=%s\n",

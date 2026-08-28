@@ -8,17 +8,16 @@
  *   1. boot:  rolling_anchor_init(datadir)
  *   2. supervisor tick: rolling_anchor_extend_if_due(ms, datadir)
  *      every 60s under the chain domain. */
-
 #include "platform/time_compat.h"
 #include "platform/positioned_file.h"
 #include "platform/private_file.h"
+#include "rolling_anchor_file_internal.h"
 #include "services/rolling_anchor_service.h"
 #include "rolling_anchor_internal.h"
 #include "services/oracle_policy.h"
 #include "services/quorum_oracle_service.h"
 #include "services/seal_service.h"
 #include "storage/progress_store.h"
-
 #include "supervisors/domains.h"
 #include "chain/chain.h"
 #include "chain/sha3_windows.h"
@@ -36,7 +35,6 @@
 #include "validation/main_state.h"
 #include "validation/main_constants.h"
 #include "validation/sync_evidence_policy.h"
-
 #include <errno.h>
 #include <inttypes.h>
 #include <limits.h>
@@ -46,7 +44,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-
 #define RA_MAGIC           "ZCLRAW1"     /* 7 bytes + NUL = 8 */
 #define RA_MAGIC_LEN       8
 #define RA_SCHEMA          1u
@@ -60,12 +57,10 @@
  * unrecoverable by re-fetch). Above the prefix, a read failure is normal
  * window territory (re-fetch) and never pages. */
 #define RA_READ_FAIL_PAGE_THRESHOLD 5
-
 struct ra_record {
     int32_t start_height;
     uint8_t hash[32];
 };
-
 static struct {
     pthread_mutex_t lock;
     bool   initialized;
@@ -96,12 +91,11 @@ static struct {
 } g_ra = {
     .lock = PTHREAD_MUTEX_INITIALIZER,
 };
-
 static struct liveness_contract g_ra_contract;
 static _Atomic supervisor_child_id g_ra_supervisor_id = SUPERVISOR_INVALID_ID;
 
 /* The state-free helpers this file calls — ra_compile_time_end,
- * ra_file_digest, ra_snapshot_equal, ra_compute_window_hash, and
+ * ra_file_digest, ra_compute_window_hash, and
  * ra_quorum_allows_commit — live in rolling_anchor_compute.c (declared in
  * rolling_anchor_internal.h). None of them touch g_ra or its lock. */
 
@@ -158,7 +152,6 @@ static bool ra_persist_locked(void)
     }
     uint8_t digest[32];
     ra_file_digest(body, body_len, digest);
-
     bool ok = platform_private_file_write_at(&staging, body, body_len, 0) &&
               platform_private_file_write_at(&staging, digest, 32, body_len) &&
               platform_private_file_flush(&staging);
@@ -179,20 +172,8 @@ static bool ra_persist_locked(void)
                 strerror(errno));
         return false;
     }
-    char parent[sizeof(g_ra.file_path)];
-    (void)snprintf(parent, sizeof(parent), "%s", g_ra.file_path);
-    char *slash = strrchr(parent, '/');
-#ifdef _WIN32
-    char *backslash = strrchr(parent, '\\');
-    if (!slash || (backslash && backslash > slash))
-        slash = backslash;
-#endif
-    if (!slash)
-        return false;
-    *slash = '\0';
-    return platform_private_parent_flush(parent);
+    return rolling_anchor_parent_flush(g_ra.file_path);
 }
-
 /* Read + verify file. Returns true on success (file absent counts as
  * success — caller leaves g_ra empty). On corruption returns false;
  * caller decides whether to delete the file. */
@@ -239,13 +220,12 @@ static bool ra_load_locked(void)
     }
     struct platform_positioned_file_snapshot after;
     if (!platform_positioned_file_snapshot(&file, &after) ||
-        !ra_snapshot_equal(&before, &after)) {
+        !platform_positioned_file_snapshot_equal(&before, &after)) {
         free(buf);
         platform_positioned_file_close(&file);
         return false;
     }
     platform_positioned_file_close(&file);
-
     /* Layout: body (fsz - 32) || digest (32). */
     size_t body_len = fsz - 32;
     uint8_t expected[32];
@@ -257,7 +237,6 @@ static bool ra_load_locked(void)
         free(buf);
         return false;
     }
-
     if (memcmp(buf, RA_MAGIC, RA_MAGIC_LEN) != 0) {
         fprintf(stderr,
                 "[rolling_anchor] load: bad magic — discarding\n");
@@ -280,13 +259,11 @@ static bool ra_load_locked(void)
         free(buf);
         return false;
     }
-
     /* Validate monotonic + alignment + contiguity with compile-time
      * prefix. */
     int compile_end = ra_compile_time_end();
     int expected_start =
         (compile_end >= 0) ? compile_end + 1 : 0;
-
     struct ra_record *recs = NULL;
     if (count > 0) {
         recs = zcl_calloc(count, sizeof(*recs), "ra.load.recs");
@@ -308,7 +285,6 @@ static bool ra_load_locked(void)
         expected_start += (int)SHA3_WINDOW_SIZE;
     }
     free(buf);
-
     /* Adopt. */
     free(g_ra.windows);
     g_ra.windows  = recs;
@@ -319,7 +295,6 @@ static bool ra_load_locked(void)
     }
     return true;
 }
-
 struct zcl_result rolling_anchor_init(const char *datadir,
                           const struct rolling_anchor_config *cfg)
 {
@@ -338,7 +313,6 @@ struct zcl_result rolling_anchor_init(const char *datadir,
             ? cfg->max_extend_per_call : RA_DEFAULT_CAP;
     snprintf(g_ra.file_path, sizeof(g_ra.file_path), "%s/%s",
              datadir, RA_FILE_NAME);
-
     bool ok = ra_load_locked();
     if (!ok) {
         /* Corrupt — wipe so we don't keep refusing to load. */
@@ -370,7 +344,6 @@ static bool ra_note_window_read_failure(int sealed_end,
                  fail_h, next_start, sealed_end);
         return true;
     }
-
     int64_t skipped =
         atomic_fetch_add(&g_ra.total_skipped_missing_body, 1) + 1;
     atomic_store(&g_ra.last_missing_body_height, (int32_t)fail_h);
@@ -383,31 +356,25 @@ static bool ra_note_window_read_failure(int sealed_end,
     }
     return false;
 }
-
 int rolling_anchor_extend_if_due(struct main_state *ms,
                                   const char *datadir)
 {
     if (!ms || !datadir || !datadir[0]) return 0;
     if (!g_ra.initialized) return 0;
-
     enum oracle_policy_state ops = oracle_policy_get_state();
     if (ops != OP_NORMAL) {  /* B8: evidence, never a gate — self-derived */
         atomic_fetch_add(&g_ra.total_oracle_divergence_observed, 1);
         event_emitf(EV_SYNC_STATE_CHANGE, 0,
                     "rolling_anchor oracle divergence state=%s", oracle_policy_state_name(ops));
     }
-
     int tip = active_chain_height(&ms->chain_active);
     if (tip < 0) return 0;
-
     pthread_mutex_lock(&g_ra.lock);
     int current_end = ra_runtime_end_locked();
     int cap = g_ra.max_extend_per_call;
     pthread_mutex_unlock(&g_ra.lock);
-
     if (current_end < 0) return 0;  /* no compile-time anchors */
     int sealed_end = current_end;
-
     int next_start = ((current_end + 1) / (int)SHA3_WINDOW_SIZE) *
                      (int)SHA3_WINDOW_SIZE;
     if (next_start <= current_end) {
@@ -415,7 +382,6 @@ int rolling_anchor_extend_if_due(struct main_state *ms,
         next_start = current_end + 1;
         if (next_start % SHA3_WINDOW_SIZE != 0) return 0;
     }
-
     int extended = 0;
     while (extended < cap) {
         int last_h_in_win = next_start + (int)SHA3_WINDOW_SIZE - 1;
@@ -432,14 +398,12 @@ int rolling_anchor_extend_if_due(struct main_state *ms,
                     "start=%d end=%d\n", next_start, last_h_in_win);
             break;
         }
-
         uint8_t hash[32];
         int fail_h = -1;
         if (!ra_compute_window_hash(ms, datadir, next_start, hash, &fail_h)) {
             (void)ra_note_window_read_failure(sealed_end, next_start, fail_h);
             break;
         }
-
         pthread_mutex_lock(&g_ra.lock);
         if (g_ra.count == g_ra.capacity) {
             int new_cap = g_ra.capacity ? g_ra.capacity * 2 : 16;
@@ -459,7 +423,6 @@ int rolling_anchor_extend_if_due(struct main_state *ms,
         g_ra.count++;
         bool persisted = ra_persist_locked();
         pthread_mutex_unlock(&g_ra.lock);
-
         if (!persisted) {
             /* Disk write failure - roll back the in-memory entry so
              * we don't claim evidence that is not on disk. */
@@ -469,7 +432,6 @@ int rolling_anchor_extend_if_due(struct main_state *ms,
             LOG_WARN("rolling_anchor", "[rolling_anchor] extend: persist failed at start=%d " "— in-memory rollback", next_start);
             break;
         }
-
         char hex[65];
         HexStr(hash, 32, false, hex, sizeof(hex));
         LOG_INFO("rolling_anchor", "[rolling_anchor] extended: start=%d end=%d sha3=%s", next_start, last_h_in_win, hex);
@@ -479,16 +441,13 @@ int rolling_anchor_extend_if_due(struct main_state *ms,
         atomic_store(&g_ra.consecutive_read_failures, 0);
         atomic_store(&g_ra.read_fail_paged, false);
         atomic_store(&g_ra.last_extend_unix, (int64_t)platform_time_wall_time_t());
-
         sealed_end = last_h_in_win;
         next_start += (int)SHA3_WINDOW_SIZE;
         extended++;
     }
     return extended;
 }
-
 /* ── Periodic-tick wrapper ─────────────────────────────────────── */
-
 int rolling_anchor_effective_prefix_end(void)
 {
     pthread_mutex_lock(&g_ra.lock);
@@ -496,7 +455,6 @@ int rolling_anchor_effective_prefix_end(void)
     pthread_mutex_unlock(&g_ra.lock);
     return runtime_end;
 }
-
 struct zcl_result rolling_anchor_window_hash_ending_at(int32_t end_h,
                                                         uint8_t out[32])
 {
@@ -509,7 +467,6 @@ struct zcl_result rolling_anchor_window_hash_ending_at(int32_t end_h,
     int32_t start_height = end_h - (int)SHA3_WINDOW_SIZE + 1;
     if (start_height < 0)
         return ZCL_ERR(-3, "window_hash_ending_at: end_h=%d start<0", end_h);
-
     pthread_mutex_lock(&g_ra.lock);
     /* Compile-time prefix windows first (g_sha3_windows is start-indexed). */
     int compile_end = ra_compile_time_end();
@@ -535,7 +492,6 @@ struct zcl_result rolling_anchor_window_hash_ending_at(int32_t end_h,
     pthread_mutex_unlock(&g_ra.lock);
     return ZCL_ERR(-5, "window_hash_ending_at: no runtime window start=%d", start_height);
 }
-
 static void rolling_anchor_on_stall(struct liveness_contract *c)
 {
     int reason = c ? atomic_load(&c->stall_reason) : SUPERVISOR_STALL_NONE;
@@ -543,12 +499,10 @@ static void rolling_anchor_on_stall(struct liveness_contract *c)
     int64_t read_failures = atomic_load(&g_ra.total_read_failures);
     const char *reason_name = supervisor_stall_reason_name(
         (enum supervisor_stall_reason)reason);
-
     LOG_WARN("supervisor", "[supervisor] chain.rolling_anchor stalled reason=%s effective_prefix_end=%d read_failures=%lld", reason_name, runtime_end, (long long)read_failures);
     event_emitf(EV_CHAIN_ADVANCE_DECISION, 0,
                 "chain.rolling_anchor stalled reason=%s effective_prefix_end=%d read_failures=%lld",
                 reason_name, runtime_end, (long long)read_failures);
-
     /* §4d row-8: a corrupt block frame AT OR BELOW the sealed input prefix is
      * unrecoverable by re-fetch — it pages instead of retrying forever. Above
      * the prefix is ordinary window territory (the re-fetch is normal), so we
@@ -567,7 +521,6 @@ static void rolling_anchor_on_stall(struct liveness_contract *c)
                     (long long)consec, runtime_end, fail_h);
     }
 }
-
 static void rolling_anchor_on_tick(struct liveness_contract *c)
 {
     (void)c;
@@ -576,13 +529,11 @@ static void rolling_anchor_on_tick(struct liveness_contract *c)
     char datadir[1024];
     memcpy(datadir, g_ra.tick_datadir, sizeof(datadir));
     pthread_mutex_unlock(&g_ra.lock);
-
     supervisor_child_id id = atomic_load(&g_ra_supervisor_id);
     if (!ms) {
         supervisor_tick(id);
         return;
     }
-
     int64_t before_failures = atomic_load(&g_ra.total_read_failures);
     (void)rolling_anchor_extend_if_due(ms, datadir);
     /* Ratify the newest state-seal candidate at depth — the OUTPUT companion
@@ -594,26 +545,21 @@ static void rolling_anchor_on_tick(struct liveness_contract *c)
         supervisor_report_stall(id, SUPERVISOR_STALL_CHILD_REPORTED);
     supervisor_tick(id);
 }
-
 struct zcl_result rolling_anchor_start(struct main_state *ms, const char *datadir)
 {
     if (!ms || !datadir || !datadir[0])
         return ZCL_ERR(-1, "rolling_anchor_start: bad args ms=%p datadir=%s",
                        (void*)ms, datadir ? datadir : "(null)");
-
     /* Idempotent — init() returns ZCL_OK if file absent. */
     (void)rolling_anchor_init(datadir, NULL);
-
     /* Ensure the state-seal ring schema (progress_meta is already ensured by
      * progress_store_open; this is idempotent belt-and-braces so the seal path
      * never races a missing table). The ratifier runs from this service's tick. */
     (void)seal_service_init(progress_store_db());
-
     pthread_mutex_lock(&g_ra.lock);
     g_ra.tick_ms = ms;
     snprintf(g_ra.tick_datadir, sizeof(g_ra.tick_datadir), "%s", datadir);
     pthread_mutex_unlock(&g_ra.lock);
-
     supervisor_child_id id = atomic_load(&g_ra_supervisor_id);
     if (id != SUPERVISOR_INVALID_ID) {
         supervisor_set_period(id, RA_TICK_SECS);
@@ -621,14 +567,12 @@ struct zcl_result rolling_anchor_start(struct main_state *ms, const char *datadi
         supervisor_tick(id);
         return ZCL_OK;
     }
-
     liveness_contract_init(&g_ra_contract, "chain.rolling_anchor");
     atomic_store(&g_ra_contract.period_secs, (int64_t)RA_TICK_SECS);
     atomic_store(&g_ra_contract.deadline_secs, (int64_t)0);
     atomic_store(&g_ra_contract.progress_max_quiet_us, (int64_t)0);
     g_ra_contract.on_tick = rolling_anchor_on_tick;
     g_ra_contract.on_stall = rolling_anchor_on_stall;
-
     supervisor_domains_init();
     id = supervisor_register_in_domain(g_chain_sup, &g_ra_contract);
     atomic_store(&g_ra_supervisor_id, id);
@@ -638,7 +582,6 @@ struct zcl_result rolling_anchor_start(struct main_state *ms, const char *datadi
     supervisor_tick(id);
     return ZCL_OK;
 }
-
 void rolling_anchor_stop(void)
 {
     supervisor_child_id id = atomic_load(&g_ra_supervisor_id);
@@ -649,13 +592,11 @@ void rolling_anchor_stop(void)
     g_ra.tick_datadir[0] = '\0';
     pthread_mutex_unlock(&g_ra.lock);
 }
-
 bool rolling_anchor_dump_state_json(struct json_value *out, const char *key)
 {
     (void)key;
     if (!out) return false;
     json_set_object(out);
-
     pthread_mutex_lock(&g_ra.lock);
     int count = g_ra.count;
     int compile_end = ra_compile_time_end();
@@ -665,7 +606,6 @@ bool rolling_anchor_dump_state_json(struct json_value *out, const char *key)
     char path_copy[sizeof(g_ra.file_path)];
     memcpy(path_copy, g_ra.file_path, sizeof(path_copy));
     pthread_mutex_unlock(&g_ra.lock);
-
     json_push_kv_int (out, "runtime_window_count", count);
     json_push_kv_int (out, "compile_time_window_count",
                       (int64_t)g_sha3_windows_count);
@@ -697,7 +637,6 @@ bool rolling_anchor_dump_state_json(struct json_value *out, const char *key)
                       atomic_load(&g_ra.last_extend_unix));
     return true;
 }
-
 void rolling_anchor_reset_for_test(void)
 {
     rolling_anchor_stop();
@@ -729,7 +668,6 @@ void rolling_anchor_reset_for_test(void)
     atomic_store(&g_ra.read_fail_paged, false);
     atomic_store(&g_ra.last_extend_unix, 0);
 }
-
 #ifdef ZCL_TESTING
 struct zcl_result rolling_anchor_test_commit_window(int32_t start_height,
                                                      const uint8_t hash[32])
@@ -767,23 +705,17 @@ struct zcl_result rolling_anchor_test_commit_window(int32_t start_height,
     return persisted ? ZCL_OK
                      : ZCL_ERR(-1, "rolling_anchor test commit: persist failed");
 }
-
 void rolling_anchor_test_inject_read_failure(int32_t failing_height)
 { atomic_fetch_add(&g_ra.total_read_failures, 1); atomic_fetch_add(&g_ra.consecutive_read_failures, 1); atomic_store(&g_ra.last_read_fail_height, failing_height); }
-
 void rolling_anchor_test_note_window_read_failure(int32_t sealed_end,
         int32_t next_start, int32_t failing_height)
 { (void)ra_note_window_read_failure(sealed_end, next_start, failing_height); }
-
 int64_t rolling_anchor_test_total_read_failures(void)
 { return atomic_load(&g_ra.total_read_failures); }
-
 int64_t rolling_anchor_test_total_skipped_missing_body(void)
 { return atomic_load(&g_ra.total_skipped_missing_body); }
-
 int64_t rolling_anchor_test_consecutive_read_failures(void)
 { return atomic_load(&g_ra.consecutive_read_failures); }
-
 void rolling_anchor_test_reset_read_failures(void)
 {
     atomic_store(&g_ra.consecutive_read_failures, 0);
@@ -793,7 +725,6 @@ void rolling_anchor_test_reset_read_failures(void)
     atomic_store(&g_ra.last_missing_body_height, -1);
     atomic_store(&g_ra.read_fail_paged, false);
 }
-
 void rolling_anchor_test_run_stall_escalation(void)
 { rolling_anchor_on_stall(NULL); }
 #endif

@@ -8,7 +8,6 @@
 // one-result-type-ok:cas-total-decision-plus-durable-record-io — the digest,
 // staleness, and codec surfaces are TOTAL predicates over their inputs;
 // only the fallible run/load I/O surfaces return struct zcl_result.
-
 #include "services/consensus_state_publication_cas.h"
 
 #include "consensus_state_publication_cas_internal.h"
@@ -20,7 +19,6 @@
 #include "storage/progress_store.h"
 #include "util/log_macros.h"
 #include "validation/main_state.h"
-
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -424,34 +422,6 @@ struct zcl_result consensus_state_publication_cas_load(
         return ZCL_ERR(-55, "cas load: record failed digest verification");
     return ZCL_OK;
 }
-#else
-/* Windows may not emulate this directory-capability boundary with joined
- * path strings. Refuse until the platform layer can perform relative opens,
- * staging, replacement, and verification beneath one pinned directory
- * HANDLE. These stubs perform no I/O and mutate no caller-owned record. */
-#ifdef ZCL_TESTING
-struct zcl_result consensus_state_publication_cas_persist_for_test(
-    int dir_fd, const char *name,
-    const struct consensus_state_publication_decision_record *record)
-{
-    (void)dir_fd;
-    (void)name;
-    (void)record;
-    return ZCL_ERR(-47, "cas persist: native Windows directory capability "
-                        "is unavailable");
-}
-#endif
-
-struct zcl_result consensus_state_publication_cas_load(
-    int dir_fd, const char *name,
-    struct consensus_state_publication_decision_record *out_record)
-{
-    (void)dir_fd;
-    (void)name;
-    (void)out_record;
-    return ZCL_ERR(-56, "cas load: native Windows directory capability "
-                        "is unavailable");
-}
 #endif
 
 #if !defined(_WIN32)
@@ -465,18 +435,11 @@ static void store_latest(
 }
 #endif
 
+#if !defined(_WIN32)
 struct zcl_result consensus_state_publication_cas_run(
     const struct consensus_state_publication_cas_request *request,
     struct consensus_state_publication_decision_record *out_record)
 {
-#if defined(_WIN32)
-    (void)request;
-    (void)out_record;
-    /* Refuse before validating evidence, capturing the frontier, deciding,
-     * touching disk, or updating the process-local latest projection. */
-    return ZCL_ERR(-67, "cas run: native Windows directory capability "
-                        "is unavailable");
-#else
     struct consensus_state_publication_decision_record local;
     struct consensus_state_publication_decision_record *rec =
         out_record ? out_record : &local;
@@ -560,8 +523,8 @@ struct zcl_result consensus_state_publication_cas_run(
     if (!persisted.ok)
         return persisted;
     return ZCL_OK;
-#endif
 }
+#endif
 
 /* ── dumpstate surface ────────────────────────────────────────────────── */
 static void push_hex32(struct json_value *out, const char *key,

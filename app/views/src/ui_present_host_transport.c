@@ -12,6 +12,7 @@
 #include "platform/socket_compat.h"
 #include "presentation/model.h"
 #include "util/log_macros.h"
+#include "util/safe_alloc.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -87,7 +88,7 @@ static HANDLE ui_host_pipe_instance(void)
     bool ok = OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token) &&
               !GetTokenInformation(token, TokenUser, NULL, 0, &bytes) &&
               GetLastError() == ERROR_INSUFFICIENT_BUFFER;
-    if (ok) user = zcl_malloc(bytes, "ui_host_token_user");
+    if (ok) user = zcl_malloc(bytes, "ui_host_pipe_token_user");
     ok = ok && user && GetTokenInformation(token, TokenUser, user, bytes,
                                             &bytes) &&
          ConvertSidToStringSidW(user->User.Sid, &sid) != 0;

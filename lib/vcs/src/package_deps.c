@@ -305,14 +305,9 @@ static enum vcs_package_deps_error deps_push(
 /* One emitted node's outgoing edges, parallel to lock->nodes. The DFS pops
  * its frames as it goes, so the graph would otherwise be unavailable by the
  * time the depth pass needs to see all of it at once. */
-struct deps_edges {
-    uint8_t roots[VCS_PACKAGE_DEPS_MAX_DIRECT][32];
-    uint16_t count;
-};
-
 static enum vcs_package_deps_error deps_emit(struct vcs_package_lock *out,
-                                             struct deps_edges *edges,
                                              const struct deps_frame *f,
+                                             struct vcs_package_deps *graph,
                                              char *detail, size_t detail_cap)
 {
     if (out->count >= VCS_PACKAGE_LOCK_MAX_NODES) {
@@ -320,10 +315,7 @@ static enum vcs_package_deps_error deps_emit(struct vcs_package_lock *out,
                     VCS_PACKAGE_LOCK_MAX_NODES);
         return VCS_PACKAGE_DEPS_ERR_NODE_COUNT;
     }
-    struct deps_edges *e = &edges[out->count];
-    e->count = (uint16_t)f->deps.count;
-    for (size_t i = 0; i < f->deps.count; i++)
-        memcpy(e->roots[i], f->deps.items[i].root, 32);
+    graph[out->count] = f->deps;
     struct vcs_package_lock_node *n = &out->nodes[out->count++];
     memset(n, 0, sizeof(*n));
     memcpy(n->root, f->root, 32);
@@ -355,43 +347,49 @@ static enum vcs_package_deps_error deps_emit(struct vcs_package_lock *out,
  * One reverse pass settles it. Emit order is build order (every node appears
  * after all of its dependencies), so walking it backwards visits every
  * dependent BEFORE the dependency it needs; a node's own depth is therefore
- * already final when its outgoing edges are relaxed. The DFS depth is kept as
- * the starting value because it is already the length of a real path, so
- * relaxation can only raise it, never invent one. */
-static enum vcs_package_deps_error deps_settle_depths(
-    struct vcs_package_lock *lock, const struct deps_edges *edges,
+ * already final when its outgoing edges are relaxed. Each dependency's index
+ * must be strictly earlier than its dependent's (WIRE_ORDER) or that
+ * finality assumption is false. */
+static enum vcs_package_deps_error deps_normalize_depths(
+    struct vcs_package_lock *lock, const struct vcs_package_deps *graph,
     char *detail, size_t detail_cap)
 {
+    for (size_t i = 0; i < lock->count; i++)
+        lock->nodes[i].depth = 0;
     for (size_t i = lock->count; i-- > 0;) {
-        uint16_t here = lock->nodes[i].depth;
-        for (uint16_t e = 0; e < edges[i].count; e++) {
-            size_t j = vcs_package_lock_find(lock, edges[i].roots[e]);
-            if (j == SIZE_MAX) {
+        struct vcs_package_lock_node *node = &lock->nodes[i];
+        const struct vcs_package_deps *deps = &graph[i];
+        if (node->depth >= VCS_PACKAGE_LOCK_MAX_DEPTH && deps->count > 0) {
+            char hex[65];
+            deps_hexify(node->root, hex);
+            deps_detail(detail, detail_cap,
+                        "root %s sits %u levels under the target, past %u",
+                        hex, (unsigned)node->depth,
+                        VCS_PACKAGE_LOCK_MAX_DEPTH);
+            return VCS_PACKAGE_DEPS_ERR_DEPTH;
+        }
+        uint16_t dependency_depth = (uint16_t)(node->depth + 1u);
+        for (size_t d = 0; d < deps->count; d++) {
+            size_t dependency = vcs_package_lock_find(lock,
+                                                       deps->items[d].root);
+            if (dependency == SIZE_MAX) {
                 char hex[65];
-                deps_hexify(edges[i].roots[e], hex);
+                deps_hexify(deps->items[d].root, hex);
                 deps_detail(detail, detail_cap,
                             "root %s is an edge with no node in the closure",
                             hex);
                 return VCS_PACKAGE_DEPS_ERR_UNRESOLVED;
             }
-            if (lock->nodes[j].depth < (uint16_t)(here + 1u))
-                lock->nodes[j].depth = (uint16_t)(here + 1u);
-        }
-    }
-    /* The DFS bounds the depth of the path it WALKS, but it skips descending
-     * into a root it already emitted, so a LONGER path through that root is
-     * never on the stack and never meets that bound. Re-check the settled
-     * value here or a lock could serialize at a depth its own parser
-     * rejects. */
-    for (size_t i = 0; i < lock->count; i++) {
-        if (lock->nodes[i].depth > VCS_PACKAGE_LOCK_MAX_DEPTH) {
-            char hex[65];
-            deps_hexify(lock->nodes[i].root, hex);
-            deps_detail(detail, detail_cap,
-                        "root %s sits %u levels under the target, past %u",
-                        hex, (unsigned)lock->nodes[i].depth,
-                        VCS_PACKAGE_LOCK_MAX_DEPTH);
-            return VCS_PACKAGE_DEPS_ERR_DEPTH;
+            if (dependency >= i) {
+                char hex[65];
+                deps_hexify(deps->items[d].root, hex);
+                deps_detail(detail, detail_cap,
+                            "root %s is not ordered before its dependent in "
+                            "the closure", hex);
+                return VCS_PACKAGE_DEPS_ERR_WIRE_ORDER;
+            }
+            if (lock->nodes[dependency].depth < dependency_depth)
+                lock->nodes[dependency].depth = dependency_depth;
         }
     }
     return VCS_PACKAGE_DEPS_OK;
@@ -415,10 +413,11 @@ enum vcs_package_deps_error vcs_package_lock_resolve(
 
     struct deps_frame *stack = zcl_malloc(
         sizeof(*stack) * (VCS_PACKAGE_LOCK_MAX_DEPTH + 1u), "deps.stack");
-    struct deps_edges *edges = zcl_calloc(
-        VCS_PACKAGE_LOCK_MAX_NODES, sizeof(*edges), "deps.edges");
-    if (!stack || !edges) {
-        free(edges);
+    if (!stack)
+        return VCS_PACKAGE_DEPS_ERR_ALLOC;
+    struct vcs_package_deps *graph = zcl_calloc(
+        VCS_PACKAGE_LOCK_MAX_NODES, sizeof(*graph), "deps.graph");
+    if (!graph) {
         free(stack);
         return VCS_PACKAGE_DEPS_ERR_ALLOC;
     }
@@ -428,7 +427,7 @@ enum vcs_package_deps_error vcs_package_lock_resolve(
     while (err == VCS_PACKAGE_DEPS_OK && sp > 0) {
         struct deps_frame *top = &stack[sp - 1];
         if (top->next >= top->deps.count) {
-            err = deps_emit(out, edges, top, detail, detail_cap);
+            err = deps_emit(out, top, graph, detail, detail_cap);
             sp--;
             continue;
         }
@@ -456,10 +455,10 @@ enum vcs_package_deps_error vcs_package_lock_resolve(
         err = deps_push(stack, &sp, edge->root, (uint16_t)(top->depth + 1u),
                         edge, src, detail, detail_cap);
     }
-    if (err == VCS_PACKAGE_DEPS_OK)
-        err = deps_settle_depths(out, edges, detail, detail_cap);
-    free(edges);
     free(stack);
+    if (err == VCS_PACKAGE_DEPS_OK)
+        err = deps_normalize_depths(out, graph, detail, detail_cap);
+    free(graph);
     if (err != VCS_PACKAGE_DEPS_OK)
         vcs_package_lock_init(out);
     return err;

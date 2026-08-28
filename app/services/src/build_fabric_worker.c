@@ -22,44 +22,7 @@
 #include "vcs/zcode_action_input.h"
 #include "vcs/zcode_dev.h"
 #include "vcs/zcode_patch.h"
-
-#if defined(_WIN32)
-
-#include <string.h>
-
-/* Windows package/agent execution is deliberately unavailable until the
- * native launcher has passed the restricted-token, Job Object, low-integrity
- * (or AppContainer), resource-limit, and network-denial qualification suite.
- * Keep this refusal ahead of every database lookup, filesystem mutation, and
- * process-launch primitive so an unqualified build can never partially stage
- * or execute attacker-controlled work. */
-struct zcl_result build_fabric_worker_execute(
-    struct node_db *ndb, const char *workspace, const char *datadir,
-    const char *action_id,
-    const char *lease_id, const uint8_t signer_secret[32],
-    const uint8_t signer_pubkey[32], struct db_build_receipt *out_receipt,
-    struct build_fabric_worker_feedback *out_feedback)
-{
-    (void)ndb;
-    (void)workspace;
-    (void)datadir;
-    (void)action_id;
-    (void)lease_id;
-    (void)signer_secret;
-    (void)signer_pubkey;
-    if (out_receipt)
-        memset(out_receipt, 0, sizeof(*out_receipt));
-    if (out_feedback)
-        memset(out_feedback, 0, sizeof(*out_feedback));
-    return ZCL_ERR(
-        -1,
-        "windows-build-fabric-execution-refused: restricted-token Job Object "
-        "low-integrity/AppContainer resource-limit network-denial sandbox "
-        "qualification is not complete");
-}
-
-#else
-
+#if !defined(_WIN32)
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -148,7 +111,6 @@ static bool bfw_path_join(char *out, size_t cap, const char *dir, const char *le
     int n = snprintf(out, cap, "%s/%s", dir, leaf);
     return n > 0 && (size_t)n < cap;
 }
-
 static struct zcl_result bfw_paths_init(const char *workspace, const char *lease_id,
                                         const char *kind,
                                         struct bfw_paths *p)
@@ -196,7 +158,6 @@ static struct zcl_result bfw_paths_init(const char *workspace, const char *lease
     }
     return ZCL_OK;
 }
-
 static void bfw_paths_cleanup(const struct bfw_paths *p)
 {
     if (!p) return;
@@ -250,7 +211,6 @@ static uint8_t *bfw_read_output(const char *path, size_t *len_out)
     *len_out = len;
     return bytes;
 }
-
 static bool bfw_elf_relocatable_x86_64(const uint8_t *bytes, size_t len)
 {
     return bytes && len >= 64 && bytes[0] == 0x7f && bytes[1] == 'E' &&

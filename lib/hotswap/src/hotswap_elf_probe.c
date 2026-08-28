@@ -51,8 +51,6 @@
 #include <unistd.h>
 #endif
 
-/* ── refusal ────────────────────────────────────────────────────────────── */
-
 static bool fail(struct hotswap_elf_facts *out, char *err, size_t err_cap,
                  const char *fmt, ...)
 {
@@ -73,8 +71,6 @@ static bool fail(struct hotswap_elf_facts *out, char *err, size_t err_cap,
  * primitives at()/rd16()/rd32()/rd64() now live in
  * hotswap_elf_probe_internal.h, shared with the table reads in
  * hotswap_elf_probe_tables.c. */
-
-/* ── whole-image read ───────────────────────────────────────────────────── */
 
 /* Reads the descriptor's full contents into a fresh buffer. Returns NULL and
  * fills `why` on any refusal.
@@ -894,17 +890,6 @@ bool hotswap_elf_probe_fd(int fd, struct hotswap_elf_facts *out,
     if (err && err_cap > 0)
         err[0] = '\0';
     return true;
-}
-
-#else
-
-bool hotswap_elf_probe_fd(int fd, struct hotswap_elf_facts *out,
-                          char *err, size_t err_cap)
-{
-    (void)fd;
-    return fail(out, err, err_cap,
-                "ELF probing is unavailable on native Windows; PE admission "
-                "requires a qualified PE import validator");
 }
 
 #endif

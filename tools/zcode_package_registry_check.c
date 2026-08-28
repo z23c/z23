@@ -157,7 +157,9 @@ int main(int argc, char **argv)
                 for (size_t p = 0; p < i; p++)
                     found = found || root_equal(
                         prepared.lock.nodes[d].root, rows[p].content);
-                ok = found && prepared.lock.nodes[d].depth == 1;
+                ok = found && prepared.lock.nodes[d].depth >= 1 &&
+                     prepared.lock.nodes[d].depth <=
+                         VCS_PACKAGE_LOCK_MAX_DEPTH;
             }
         }
         if (derive && err == VCS_PACKAGE_PREPARE_OK) {
@@ -169,6 +171,16 @@ int main(int argc, char **argv)
                     detail);
             if (err == VCS_PACKAGE_PREPARE_OK)
                 print_derived_roots(&prepared);
+            if (err == VCS_PACKAGE_PREPARE_OK && prepared.lock.count > 0) {
+                const size_t root = prepared.lock.count - 1u;
+                fprintf(stderr,
+                        "  release_verify=%d lock_count=%zu root_depth=%u "
+                        "root_direct_deps=%u\n",
+                        (int)vcs_package_release_verify(&prepared.release),
+                        prepared.lock.count,
+                        (unsigned)prepared.lock.nodes[root].depth,
+                        (unsigned)prepared.lock.nodes[root].direct_deps);
+            }
             /* Naming the values is not enough to act on: this row's new
              * content root is ALSO pinned in dependencies[].root of every
              * dependent's zcode-package.json, and rewriting those moves

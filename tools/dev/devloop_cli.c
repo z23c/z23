@@ -1,19 +1,32 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0 */
 
+#if !defined(_WIN32)
 #define _GNU_SOURCE
+#endif
 #include "devloop.h"
 #include "test_group_catalog.h"
 
 #include "config/command_catalog.h"
 #include "kernel/command_registry.h"
+#include "platform/directory_compat.h"
+#include "platform/os_proc.h"
+#include "platform/positioned_file.h"
+#include "platform/state_root.h"
+#include "platform/watcher_lease.h"
+#include "platform/watcher_record.h"
+#include "platform/watcher_store.h"
 
+#if !defined(_WIN32)
 #include <fcntl.h>
+#endif
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 bool zcl_devloop_is_method(const char *method)
 {
@@ -81,12 +94,32 @@ static int run_focused(const char *group)
         return 2;
     }
     char root[PATH_MAX], bin[PATH_MAX], selector[256];
-    if (!realpath(source_root(), root)) {
+    if (!platform_directory_canonical_real(source_root(), root,
+                                            sizeof(root))) {
         fprintf(stderr, "[devloop] focused: source root unavailable\n");
         return 2;
     }
+#if defined(_WIN32)
+    snprintf(bin, sizeof(bin), "%s/build/bin/test_parallel_fast.exe", root);
+#else
     snprintf(bin, sizeof(bin), "%s/build/bin/test_parallel_fast", root);
+#endif
     snprintf(selector, sizeof(selector), "--exact=%s", full_group);
+#if defined(_WIN32)
+    struct platform_positioned_file runner;
+    platform_positioned_file_init(&runner);
+    if (!platform_positioned_file_open(&runner, bin) ||
+        !platform_positioned_file_is_executable(&runner)) {
+        platform_positioned_file_close(&runner);
+        fprintf(stderr, "[devloop] focused: prebuilt runner unavailable\n");
+        return 2;
+    }
+    platform_positioned_file_close(&runner);
+    fprintf(stderr,
+            "[devloop] focused: native handle-bound runner execution is "
+            "unavailable\n");
+    return 2;
+#else
     int runner_fd = open(bin, O_RDONLY);
     struct stat runner_stat;
     if (runner_fd < 0 || fstat(runner_fd, &runner_stat) != 0 ||
@@ -135,6 +168,7 @@ static int run_focused(const char *group)
     if (!ok && result.output_len)
         fprintf(stderr, "%s\n", result.output);
     return ok ? 0 : 1;
+#endif
 #endif
 }
 
@@ -271,4 +305,138 @@ int zcl_devloop_cli_main(const char **args, int nargs)
         return 2;
     }
     return print_menu(path);
+}
+
+#if !defined(_WIN32)
+static bool worker_lease_stopped(void *opaque)
+{ return platform_watcher_lease_wait_stop(opaque, 0); }
+#endif
+
+#if defined(_WIN32)
+struct worker_store_context {
+    struct platform_watcher_lease *lease;
+    struct platform_watcher_store store;
+    struct platform_watcher_record record;
+    struct platform_watcher_record_identity identity;
+    char record_leaf[96];
+    bool stopping_published;
+};
+
+static bool worker_store_publish(struct worker_store_context *ctx,
+                                 enum platform_watcher_state state)
+{
+    char encoded[PLATFORM_WATCHER_RECORD_ENCODED_MAX];
+    size_t length = 0;
+    ctx->record.state = state;
+    const struct platform_watcher_record_identity *expected =
+        ctx->identity.size ? &ctx->identity : NULL;
+    return platform_watcher_record_serialize(&ctx->record, encoded,
+                                              sizeof(encoded), &length) &&
+           platform_watcher_store_publish(&ctx->store, ctx->record_leaf,
+                                           encoded, length, expected,
+                                           &ctx->identity) ==
+               PLATFORM_WATCHER_STORE_OK;
+}
+
+static bool worker_store_stopped(void *opaque)
+{
+    struct worker_store_context *ctx = opaque;
+    bool stopped = platform_watcher_lease_wait_stop(ctx->lease, 0);
+    if (stopped && !ctx->stopping_published) {
+        ctx->stopping_published = worker_store_publish(
+            ctx, PLATFORM_WATCHER_STATE_STOPPING);
+    }
+    return stopped;
+}
+#endif
+
+int zcl_devloop_watch_worker_main(uintptr_t inherited, const char *root,
+                                  const char *mode, const char image_sha256[65])
+{
+#ifndef ZCL_DEV_BUILD
+    (void)inherited; (void)root; (void)mode; (void)image_sha256;
+    return 2;
+#else
+    char canonical[PATH_MAX], image[PATH_MAX];
+    struct platform_watcher_lease lease;
+    platform_watcher_lease_init(&lease);
+    enum zcl_devloop_publish_mode publish_mode;
+    if (!root || !mode ||
+        !platform_directory_canonical_real(root, canonical, sizeof(canonical)) ||
+        !os_proc_exe_path(image, sizeof(image)) ||
+        !platform_watcher_lease_accept(&lease, inherited, canonical, image,
+                                       image_sha256))
+        return 2;
+    if (strcmp(mode, "verify") == 0)
+        publish_mode = ZCL_DEVLOOP_PUBLISH_VERIFY_ONLY;
+    else if (strcmp(mode, "auto") == 0)
+        publish_mode = ZCL_DEVLOOP_PUBLISH_APPLY;
+    else
+        { platform_watcher_lease_close(&lease); return 2; }
+#if defined(_WIN32)
+    struct platform_watcher_accepted_binding accepted;
+    struct worker_store_context ownership = {.lease = &lease};
+    char state_root[PATH_MAX], workspace[65], lock_leaf[96];
+    platform_watcher_store_init(&ownership.store);
+    uint64_t pid = os_proc_current_pid(), start_token = 0;
+    if (!platform_watcher_lease_binding(&lease, &accepted) ||
+        !os_proc_pid_start_token(pid, &start_token) ||
+        !platform_state_root(state_root, sizeof(state_root)) ||
+        !zcl_devloop_workspace_id(canonical, workspace) ||
+        snprintf(lock_leaf, sizeof(lock_leaf), "watch-%s.lock", workspace) <= 0 ||
+        snprintf(ownership.record_leaf, sizeof(ownership.record_leaf),
+                 "watch-%s.record", workspace) <= 0 ||
+        platform_watcher_store_open(&ownership.store, state_root) !=
+            PLATFORM_WATCHER_STORE_OK ||
+        platform_watcher_store_try_acquire(&ownership.store, lock_leaf, true) !=
+            PLATFORM_WATCHER_STORE_OK) {
+        platform_watcher_store_close(&ownership.store);
+        platform_watcher_lease_close(&lease);
+        return 2;
+    }
+    ownership.record = (struct platform_watcher_record){
+        .version = PLATFORM_WATCHER_RECORD_VERSION,
+        .pid = pid, .start_token = start_token,
+        .mode = publish_mode == ZCL_DEVLOOP_PUBLISH_APPLY
+                    ? PLATFORM_WATCHER_MODE_AUTO
+                    : PLATFORM_WATCHER_MODE_VERIFY,
+        .root_identity = {accepted.root_volume, accepted.root_low,
+                          accepted.root_high},
+        .image_identity = {accepted.image_volume, accepted.image_low,
+                           accepted.image_high},
+        .image_size = accepted.image_size,
+        .state = PLATFORM_WATCHER_STATE_STARTING};
+    memcpy(ownership.record.nonce, accepted.nonce,
+           sizeof(ownership.record.nonce));
+    memcpy(ownership.record.canonical_root, accepted.canonical_root,
+           sizeof(ownership.record.canonical_root));
+    memcpy(ownership.record.canonical_image, accepted.canonical_image,
+           sizeof(ownership.record.canonical_image));
+    memcpy(ownership.record.image_sha256, accepted.image_sha256,
+           sizeof(ownership.record.image_sha256));
+    if (!worker_store_publish(&ownership, PLATFORM_WATCHER_STATE_STARTING) ||
+        !worker_store_publish(&ownership, PLATFORM_WATCHER_STATE_READY)) {
+        if (ownership.identity.size)
+            (void)platform_watcher_store_retire_exact(
+                &ownership.store, ownership.record_leaf,
+                &ownership.identity);
+        platform_watcher_store_close(&ownership.store);
+        platform_watcher_lease_close(&lease);
+        return 2;
+    }
+    int rc = zcl_devloop_watch_mode_until(canonical, publish_mode,
+                                           worker_store_stopped, &ownership);
+    if (!ownership.stopping_published)
+        ownership.stopping_published = worker_store_publish(
+            &ownership, PLATFORM_WATCHER_STATE_STOPPING);
+    (void)platform_watcher_store_retire_exact(
+        &ownership.store, ownership.record_leaf, &ownership.identity);
+    platform_watcher_store_close(&ownership.store);
+#else
+    int rc = zcl_devloop_watch_mode_until(canonical, publish_mode,
+                                           worker_lease_stopped, &lease);
+#endif
+    platform_watcher_lease_close(&lease);
+    return rc == 0 ? 0 : 1;
+#endif
 }

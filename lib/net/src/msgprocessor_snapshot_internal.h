@@ -15,8 +15,7 @@
  *                                   the mp_handle_zcl23_sync dispatcher,
  *                                   the requester-side push_chunk_request
  *                                   / push_block_piece_request /
- *                                   parse_block_piece_payload_refs /
- *                                   block_payload_submit_all.
+ *                                   parse_block_piece_payload_refs.
  *   msgprocessor_snapshot_fcrate.c — the fc_rate_* FlyClient-challenge
  *                                   rate limiter (table, mutex, admit +
  *                                   flood-score check) plus its
@@ -25,6 +24,8 @@
  *                                   state with the rest of the dispatcher
  *                                   except the two calls into it from the
  *                                   MSG_FC_CHALLENGE branch.
+ *   msgprocessor_snapshot_payload.c — verified block-piece reducer intake
+ *                                   (mp_block_payload_submit_all).
  *   msgprocessor_snapshot_serve.c — the SERVE side: cached offer/manifest
  *                                   /block-manifest publish+accessor
  *                                   APIs, send_snapshot_offer_msg,
@@ -56,12 +57,23 @@
 #include "net/msg_internal.h"
 #include "core/serialize.h"
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <stdatomic.h>
 
 struct msg_processor;
 struct p2p_node;
 struct byte_stream;
 struct block_swarm;
+
+struct block_piece_payload_ref {
+    const unsigned char *data;
+    size_t len;
+};
+
+bool mp_block_payload_submit_all(
+    struct msg_processor *mp, struct p2p_node *node,
+    const struct block_piece_payload_ref *refs, uint32_t count);
 
 struct block_swarm_abandonment {
     uint32_t complete;

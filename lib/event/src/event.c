@@ -1,33 +1,14 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0 */
 
-#if !defined(_WIN32)
-#define _GNU_SOURCE  /* sigaltstack / SA_ONSTACK in the crash handler */
-#endif
-
 #include "platform/time_compat.h"
 #include "event/event.h"
 #include "util/safe_alloc.h"
-#include "util/signal_handler.h"
 #include "util/thread_liveness.h"
 #include "util/thread_registry.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
-#include <signal.h>
-#include <time.h>
-
-#if defined(_WIN32)
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <io.h>
-#include <process.h>
-#include <windows.h>
-#else
-#include <execinfo.h>
-#include <unistd.h>
-#endif
 
 /* ── Global event log ─────────────────────────────────────
  * Single instance. Lock-free ring buffer. Every thread writes
@@ -746,138 +727,6 @@ uint64_t event_log_head_sequence(void)
     return atomic_load_explicit(&g_log.write_pos, memory_order_acquire);
 }
 
-/* ── Crash handler ───────────────────────────────────────── */
-
-/* async-signal-safe stderr write. When systemd has StandardError
- * redirected to node.log (fully-buffered FILE*), fprintf() output
- * silently dies on _exit because libc's atexit handlers don't run.
- * backtrace_symbols_fd() writes straight to STDERR_FILENO via write(2)
- * which bypasses the FILE buffer and therefore always lands. So
- * everything this handler emits goes through write(2) directly, and we
- * flush+fsync before _exit so event_dump_recent's fprintf output lands too. */
-static void crash_write_fd(int fd, const char *s, size_t n)
-{
-#if defined(_WIN32)
-    int w = _write(fd, s, (unsigned int)(n > UINT_MAX ? UINT_MAX : n));
-#else
-    ssize_t w = write(fd, s, n);
-#endif
-    (void)w;  /* best-effort — nothing we can do if the fd is gone */
-}
-
-/* Emit header + backtrace to one fd. Reused for stderr and the durable
- * crash log so a crash is recorded in BOTH places (the durable file
- * survives even when systemd's stderr routing loses the buffer). */
-static void crash_emit_to(int fd, int sig, void *const *frames, int nframes)
-{
-    char buf[160];
-    /* snprintf is technically not POSIX async-signal-safe but glibc's
-     * bounded numeric variant is lock-free; the alternative (hand-rolled
-     * itoa) doesn't meaningfully improve safety here. Trade-off acknowledged. */
-#if defined(_WIN32)
-    int pid = _getpid();
-#else
-    int pid = (int)getpid();
-#endif
-    int n = snprintf(buf, sizeof(buf),
-                     "\n\n*** FATAL SIGNAL %d (pid=%d t=%ld) ***\n",
-                     sig,
-                     pid,
-                     (long)time(NULL));  // platform-ok:async-signal-safe-crash-handler (platform.clock may lock)
-    if (n > 0) crash_write_fd(fd, buf, (size_t)n);
-    n = snprintf(buf, sizeof(buf),
-                 "=== STACK BACKTRACE (%d frames) ===\n", nframes);
-    if (n > 0) crash_write_fd(fd, buf, (size_t)n);
-#if defined(_WIN32)
-    for (int i = 0; i < nframes; i++) {
-        n = snprintf(buf, sizeof(buf), "  #%d %p\n", i, frames[i]);
-        if (n > 0) crash_write_fd(fd, buf, (size_t)n);
-    }
-#else
-    backtrace_symbols_fd(frames, nframes, fd);  /* -rdynamic for symbol names */
-#endif
-    static const char end_bt[] = "=== END BACKTRACE ===\n\n";
-    crash_write_fd(fd, end_bt, sizeof(end_bt) - 1);
-}
-
-static void crash_signal_handler(int sig)
-{
-    signal_handler_run_crash_hook(sig, NULL, NULL);
-
-    void *frames[64];
-#if defined(_WIN32)
-    int nframes = (int)CaptureStackBackTrace(0, 64, frames, NULL);
-#else
-    int nframes = backtrace(frames, 64);
-#endif
-
-    crash_emit_to(2, sig, frames, nframes);
-
-    /* Durable, fsync'd copy independent of stderr routing. */
-    int cfd = signal_handler_crash_log_fd();
-    if (cfd >= 0) {
-        crash_emit_to(cfd, sig, frames, nframes);
-#if defined(_WIN32)
-        _commit(cfd);
-#else
-        fsync(cfd);
-#endif
-    }
-
-    event_emitf(EV_CRASH, 0, "signal %d", sig);
-    event_dump_recent(200);  /* fprintf-based; flushes stderr at end */
-
-    /* Belt-and-suspenders flush: event_dump_recent already flushes on
-     * its way out, but a caller that emits more output after this
-     * handler runs (SA_RESETHAND one-shot still lets the default
-     * disposition produce its own output) would want the buffer
-     * drained.  fsync drives the kernel page cache down to the
-     * journald/journal-file so the log line is durable. */
-    fflush(stderr);
-#if defined(_WIN32)
-    _commit(2);
-#else
-    fsync(STDERR_FILENO);
-#endif
-    _exit(128 + sig);
-}
-
-void event_install_crash_handler(void)
-{
-#if defined(_WIN32)
-    /* Suppress Windows Error Reporting UI: a background node must terminate
-     * through the installed handler without displaying an interactive dialog. */
-    SetErrorMode(GetErrorMode() | SEM_FAILCRITICALERRORS |
-                 SEM_NOGPFAULTERRORBOX);
-    signal(SIGSEGV, crash_signal_handler);
-    signal(SIGABRT, crash_signal_handler);
-    signal(SIGFPE, crash_signal_handler);
-    signal(SIGILL, crash_signal_handler);
-#else
-    /* Alternate signal stack: without SA_ONSTACK + a registered alt stack a
-     * stack-overflow SIGSEGV cannot run this handler at all (the thread stack
-     * is already exhausted). The static buffer lives for the process lifetime. */
-    static char alt_stack[64 * 1024];
-    stack_t ss;
-    memset(&ss, 0, sizeof(ss));
-    ss.ss_sp = alt_stack;
-    ss.ss_size = sizeof(alt_stack);
-    ss.ss_flags = 0;
-    sigaltstack(&ss, NULL);  /* best-effort; safe at boot (single-threaded) */
-
-    struct sigaction sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sa_handler = crash_signal_handler;
-    /* one-shot (avoid infinite recursion) + run on the alt stack. */
-    sa.sa_flags = SA_RESETHAND | SA_ONSTACK;
-    sigemptyset(&sa.sa_mask);
-    sigaction(SIGSEGV, &sa, NULL);
-    sigaction(SIGABRT, &sa, NULL);
-    sigaction(SIGBUS, &sa, NULL);
-    sigaction(SIGFPE, &sa, NULL);
-    sigaction(SIGILL, &sa, NULL);
-#endif
-}
 /* ── Error accumulator ──────────────────────────────────── */
 
 void error_ring_init(struct error_ring *r)

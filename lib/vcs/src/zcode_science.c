@@ -3,28 +3,15 @@
 
 #include "vcs/zcode_science.h"
 
+#include "zcode_science_platform.h"
+
 #include "base/serialize_le.h"
-#include "platform/logical_cpu.h"
 #include "util/hw_profile.h"
 #include "vcs/signed_evidence.h"
 
-#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#if defined(_WIN32)
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#else
-#include <sys/utsname.h>
-#include <unistd.h>
-#endif
-
-#if defined(__x86_64__) || defined(__i386__)
-#include <cpuid.h>
-#endif
 
 static const uint8_t study_magic[8] = {'Z','C','S','T','U','D','\r','\n'};
 static const uint8_t result_magic[8] = {'Z','C','B','E','N','C','\r','\n'};
@@ -1015,165 +1002,6 @@ enum vcs_zcode_science_error vcs_zcode_hardware_profile_root(
         ? VCS_ZCODE_SCIENCE_OK : VCS_ZCODE_SCIENCE_ERR_NULL;
 }
 
-/* Copy a NUL-terminated string into a pre-zeroed fixed field, truncating to
- * keep at least one NUL byte of padding. */
-static void capture_str(uint8_t *field, size_t len, const char *value)
-{
-    size_t n = strlen(value);
-    if (n >= len) n = len - 1;
-    memcpy(field, value, n);
-}
-
-/* Extract the value of "key\t...: value" from one /proc/cpuinfo line into a
- * NUL-terminated buffer. Returns false when the line is not that key. */
-#if !defined(_WIN32)
-static bool cpuinfo_field(const char *line, const char *key, char *out,
-                          size_t cap)
-{
-    size_t key_len = strlen(key);
-    if (strncmp(line, key, key_len) != 0) return false;
-    const char *colon = strchr(line, ':');
-    if (!colon) return false;
-    const char *value = colon + 1;
-    while (*value == ' ' || *value == '\t') value++;
-    size_t n = strcspn(value, "\r\n");
-    if (n == 0 || cap == 0) return false;
-    if (n >= cap) n = cap - 1;
-    memcpy(out, value, n);
-    out[n] = '\0';
-    return true;
-}
-#endif
-
-/* The invariant TSC frequency is a hardware constant; the "cpu MHz"
- * cpuinfo line is the CURRENT scaled clock of the first processor and
- * moves with frequency scaling (observed 545 <-> 3555 MHz within 200 ms
- * of load). Two captures of the SAME machine must produce the same
- * profile object — an attested environment whose bytes wobble run-to-run
- * makes every root that binds it wobble too — so the volatile line is
- * never bound. CPUID 0x15 reports the exact TSC Hz from the crystal
- * clock when the hardware enumerates it; CPUID 0x16 reports the integer
- * base frequency (the clock the invariant TSC runs at); neither -> 0,
- * the documented "unknown". */
-static uint64_t capture_invariant_tsc_hz(void)
-{
-#if defined(__x86_64__) || defined(__i386__)
-    unsigned int eax, ebx, ecx, edx;
-    /* __get_cpuid_count consults the maximum supported leaf first, so an
-     * absent leaf fails instead of aliasing another leaf's registers. */
-    if (__get_cpuid_count(0x15, 0, &eax, &ebx, &ecx, &edx) &&
-        eax != 0 && ebx != 0 && ecx != 0)
-        return (uint64_t)ecx * ebx / eax;
-    if (__get_cpuid_count(0x16, 0, &eax, &ebx, &ecx, &edx) && eax != 0)
-        return (uint64_t)eax * UINT64_C(1000000);
-#endif
-    return 0;
-}
-
-/* Best-effort /proc/cpuinfo scan: cpu_vendor (vendor_id), cpu_brand (model
- * name). Missing file or keys leave the fields at their zeroed "unknown"
- * state. The "cpu MHz" line is deliberately NOT read here — see
- * capture_invariant_tsc_hz for the stable frequency source. */
-static void capture_cpuinfo(struct vcs_zcode_hardware_profile_v1 *out)
-{
-#if defined(_WIN32)
-#if defined(__x86_64__) || defined(__i386__)
-    unsigned int eax, ebx, ecx, edx;
-    char vendor[13] = {0};
-    if (__get_cpuid(0, &eax, &ebx, &ecx, &edx)) {
-        memcpy(vendor, &ebx, 4);
-        memcpy(vendor + 4, &edx, 4);
-        memcpy(vendor + 8, &ecx, 4);
-        capture_str(out->cpu_vendor, sizeof(out->cpu_vendor), vendor);
-    }
-    unsigned int maximum = __get_cpuid_max(0x80000000u, NULL);
-    if (maximum >= 0x80000004u) {
-        char brand[49] = {0};
-        for (unsigned int leaf = 0; leaf < 3; leaf++) {
-            __cpuid(0x80000002u + leaf, eax, ebx, ecx, edx);
-            memcpy(brand + leaf * 16, &eax, 4);
-            memcpy(brand + leaf * 16 + 4, &ebx, 4);
-            memcpy(brand + leaf * 16 + 8, &ecx, 4);
-            memcpy(brand + leaf * 16 + 12, &edx, 4);
-        }
-        const char *start = brand;
-        while (*start == ' ') start++;
-        capture_str(out->cpu_brand, sizeof(out->cpu_brand), start);
-    }
-#endif
-#else
-    FILE *f = fopen("/proc/cpuinfo", "r");
-    if (!f) return;
-    char line[256], value[128];
-    bool have_vendor = false, have_brand = false;
-    while (fgets(line, sizeof(line), f) && !(have_vendor && have_brand)) {
-        if (!have_vendor &&
-            cpuinfo_field(line, "vendor_id", value, sizeof(value))) {
-            capture_str(out->cpu_vendor, sizeof(out->cpu_vendor), value);
-            have_vendor = true;
-        } else if (!have_brand &&
-                   cpuinfo_field(line, "model name", value, sizeof(value))) {
-            capture_str(out->cpu_brand, sizeof(out->cpu_brand), value);
-            have_brand = true;
-        }
-    }
-    fclose(f);
-#endif
-}
-
-static void capture_timer_source(struct vcs_zcode_hardware_profile_v1 *out)
-{
-#if defined(_WIN32)
-    LARGE_INTEGER frequency;
-    if (QueryPerformanceFrequency(&frequency) && frequency.QuadPart > 0)
-        capture_str(out->timer_source, sizeof(out->timer_source),
-                    "QueryPerformanceCounter");
-#else
-    static const char path[] =
-        "/sys/devices/system/clocksource/clocksource0/current_clocksource";
-    FILE *f = fopen(path, "r");
-    if (!f) return;
-    char buf[64];
-    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
-    fclose(f);
-    buf[n] = '\0';
-    buf[strcspn(buf, "\r\n")] = '\0';
-    if (buf[0] != '\0')
-        capture_str(out->timer_source, sizeof(out->timer_source), buf);
-#endif
-}
-
-static void capture_os(struct vcs_zcode_hardware_profile_v1 *out)
-{
-#if defined(_WIN32)
-    capture_str(out->os_sysname, sizeof(out->os_sysname), "Windows_NT");
-#if defined(_M_X64) || defined(__x86_64__)
-    capture_str(out->os_machine, sizeof(out->os_machine), "x86_64");
-#elif defined(_M_IX86) || defined(__i386__)
-    capture_str(out->os_machine, sizeof(out->os_machine), "x86");
-#elif defined(_M_ARM64) || defined(__aarch64__)
-    capture_str(out->os_machine, sizeof(out->os_machine), "aarch64");
-#endif
-    OSVERSIONINFOW version = {.dwOSVersionInfoSize = sizeof(version)};
-    if (GetVersionExW(&version)) {
-        char release[48];
-        int n = snprintf(release, sizeof(release), "%lu.%lu.%lu",
-                         (unsigned long)version.dwMajorVersion,
-                         (unsigned long)version.dwMinorVersion,
-                         (unsigned long)version.dwBuildNumber);
-        if (n > 0 && (size_t)n < sizeof(release))
-            capture_str(out->os_release, sizeof(out->os_release), release);
-    }
-#else
-    struct utsname uts;
-    if (uname(&uts) == 0) {
-        capture_str(out->os_sysname, sizeof(out->os_sysname), uts.sysname);
-        capture_str(out->os_machine, sizeof(out->os_machine), uts.machine);
-        capture_str(out->os_release, sizeof(out->os_release), uts.release);
-    }
-#endif
-}
-
 bool vcs_zcode_hardware_profile_capture(
     struct vcs_zcode_hardware_profile_v1 *out, int64_t now_unix)
 {
@@ -1184,10 +1012,7 @@ bool vcs_zcode_hardware_profile_capture(
     (void)hw_profile_init(NULL);
     int physical = hw_profile_physical_cores();
     int logical = hw_profile_online_cores();
-    if (logical <= 0) {
-        uint32_t detected = platform_logical_cpu_count();
-        logical = detected > INT_MAX ? INT_MAX : (int)detected;
-    }
+    if (logical <= 0) logical = zcode_science_platform_logical_cores();
     if (physical <= 0) physical = logical;
     /* The capture itself is executing, so at least one core exists: clamp
      * the unknown case to 1 rather than emit an unvalidatable object. */
@@ -1218,10 +1043,7 @@ bool vcs_zcode_hardware_profile_capture(
     if (__builtin_cpu_supports("aes"))
         out->isa_bits |= VCS_ZCODE_HW_ISA_AES_NI;
 #endif
-    capture_os(out);
-    capture_cpuinfo(out);
-    capture_timer_source(out);
-    out->tsc_freq_hz = capture_invariant_tsc_hz();
+    zcode_science_platform_capture(out);
     /* device_facts_root stays all-zero: the canonical extended-facts bundle
      * (DMI/firmware) is the documented extension point and no producer fills
      * it yet. */

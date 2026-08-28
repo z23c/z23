@@ -874,7 +874,7 @@ AGENT_IMPACT_RULE("lib/storage/src/checkpoint_rung.c|lib/storage/src/checkpoint_
 /* Independent replay-derived receipt (-verify-consensus-bundle): the offline
  * verifier + the ACTIVATE authority gate it feeds. Tests live in the
  * consensus_state_snapshot_install group. */
-AGENT_IMPACT_RULE("config/src/consensus_state_replay_receipt.c|config/include/config/consensus_state_replay_receipt.h|config/src/boot_verify_consensus_bundle.c", "consensus_state_snapshot_install make_lint_gates")
+AGENT_IMPACT_RULE("config/src/consensus_state_replay_receipt*.c|config/include/config/consensus_state_replay_receipt*.h|config/src/boot_verify_consensus_bundle.c", "consensus_state_snapshot_install make_lint_gates")
 /* -ratify-mint-anchor: the terminal ratifier that stamps a completed producer
  * datadir's exporter-required markers. Touches coins_kv (the migration stamp)
  * and the bundle exporter's admission proof. */
@@ -887,7 +887,7 @@ AGENT_IMPACT_RULE("config/src/boot_export_consensus_bundle.c", "consensus_state_
  * foundation) + its Law-7 lint gate. Any edit to the replay receipt (the live
  * instance) also re-runs the new authority_receipt group so the extraction
  * stays behaviorally consistent with its origin. */
-AGENT_IMPACT_RULE("lib/util/src/authority_receipt.c|lib/util/include/util/authority_receipt.h|lib/test/src/test_authority_receipt.c|tools/lint/check_privileged_transition_receipt.sh|tools/lint/privileged_transition_receipt_baseline.txt|config/src/consensus_state_replay_receipt.c", "authority_receipt consensus_state_snapshot_install make_lint_gates")
+AGENT_IMPACT_RULE("lib/util/src/authority_receipt.c|lib/util/include/util/authority_receipt.h|lib/test/src/test_authority_receipt.c|tools/lint/check_privileged_transition_receipt.sh|tools/lint/privileged_transition_receipt_baseline.txt|config/src/consensus_state_replay_receipt*.c", "authority_receipt consensus_state_snapshot_install make_lint_gates")
 AGENT_IMPACT_RULE("app/services/src/consensus_state_chain_binding_service.c|app/services/include/services/consensus_state_chain_binding_service.h|lib/test/src/test_consensus_state_chain_binding.c", "consensus_state_chain_binding consensus_state_snapshot_install make_lint_gates")
 AGENT_IMPACT_RULE("config/src/consensus_state_producer_receipt*.c|config/src/consensus_state_producer_receipt_internal.h|config/src/consensus_state_producer_session_retire.c|config/src/consensus_state_producer_status.c|config/include/config/consensus_state_producer_receipt.h|config/src/boot_mint_anchor.c|lib/test/src/test_consensus_state_producer_receipt.c", "consensus_state_producer_receipt consensus_state_snapshot_export make_lint_gates")
 AGENT_IMPACT_RULE("app/services/src/consensus_state_publication_cas.c|app/services/include/services/consensus_state_publication_cas.h|lib/test/src/test_consensus_state_publication_cas.c", "consensus_state_publication_cas consensus_state_chain_binding make_lint_gates")
@@ -1892,13 +1892,14 @@ AGENT_IMPACT_RULE("config/src/boot_timing_marks.c|config/src/boot_timing_marks_i
  * sb_write_atomic, which is where the absolute-path refusal bites. */
 AGENT_IMPACT_RULE("lib/test/src/test_store_buyer.c", "store_buyer make_lint_gates")
 
-/* tests/windows/ was renamed to tools/winacceptance/. Changes that still
- * name the OLD path are deletions from that rename, and the thing that
- * observes them is the lint tier: check-winacceptance builds every program
- * at the new location and fails closed on one that is not declared. That is
- * a real observer, not a shape check -- it is what caught 23 undeclared
- * programs on the merge that created these deletions. */
-AGENT_IMPACT_RULE("tests/windows/*", "make_lint_gates")
+/* tests/windows/ was renamed away twice, and this side lost the race: the
+ * programs now live in lib/test/src/, lib/platform/tests/ and
+ * lib/base/tests/, declared by the catalog in
+ * lib/platform/tests/windows_acceptance.mk. Changes that still name the OLD
+ * path are deletions from that rename, and the thing that observes them is
+ * the lint tier: check-windows-acceptance cross-compiles every program the
+ * catalog declares and fails closed on one that is not declared. That is a
+ * real observer, not a shape check. */
 
 /* The DERIVATION half of the independent replay receipt, split out of
  * consensus_state_replay_receipt.c at the E1 file-size seam. Mapped by
@@ -1968,10 +1969,11 @@ AGENT_IMPACT_RULE("config/src/boot_cold_start_driver.c", "make_lint_gates")
  * refusal report. NO REGISTERED GROUP EXECUTES IT. The one production caller
  * is boot_report_datadir_create_failed() in config/src/boot_refusal_reports.c,
  * reached only from boot.c when the datadir mkdir itself fails, and nothing
- * under lib/test/src/ drives that. The one program that does run it,
- * tools/tests/test_boot_refusal_identity.c, is built and executed by
- * check-winacceptance -- the lint tier, not a test group, and not even part of
- * LINT_FAST_GATES, so the push gate never runs it either. Closing this needs a
+ * under lib/test/src/ drives that. Nothing runs it: this file is a source of
+ * the state_root and watcher_lease entries in the Windows acceptance catalog,
+ * so check-windows-acceptance cross-compiles it, and a cross-link is not an
+ * execution. That gate is also not part of LINT_FAST_GATES, so the push gate
+ * never sees it either. Closing this needs a
  * lib/test/src/ case that calls boot_report_datadir_create_failed() with
  * EACCES and asserts boot_error_last_render() carries the identity= token. */
 AGENT_IMPACT_RULE("lib/platform/src/current_identity.c|lib/platform/include/platform/current_identity.h", "make_lint_gates")
@@ -1983,8 +1985,8 @@ AGENT_IMPACT_RULE("lib/platform/src/current_identity.c|lib/platform/include/plat
  * "complete generation exports" check goes through it -- a wrong offset breaks
  * that assertion. The WRITE arm is NOT executed by any test: its only caller
  * is mmb_leaf_store_write_at(), whose only caller is boot_flyclient.c's legacy
- * prefix repair, and no test drives either; the winacceptance program for it
- * sits in the `win` bucket, cross-compiled and never run. `models` is
+ * prefix repair, and no test drives either; the acceptance catalog entry for
+ * it is cross-compiled for Windows and never run here. `models` is
  * deliberately absent -- test_mmb.c uses open/append, never write_at, so
  * naming it here would claim coverage that does not exist. */
 AGENT_IMPACT_RULE("lib/platform/src/positioned_io.c|lib/platform/include/platform/positioned_io.h", "consensus_state_snapshot_export make_lint_gates")

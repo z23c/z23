@@ -1,12 +1,12 @@
 // one-result-type-ok:state-free-window-predicates — every export here is a
 // TOTAL predicate over caller-supplied inputs, not a fallible service
-// surface: ra_snapshot_equal is snapshot equality, ra_quorum_allows_commit
-// is a verdict that deliberately fails OPEN (an unprobeable oracle means
-// "allowed"), and ra_compute_window_hash already threads its one
-// distinguishable reason out through *out_failure_height — the same
-// contract-bool-with-in/out shape E2 accepts elsewhere in this shape dir.
-// The fallible surfaces of this service (init, start, window_hash_ending_at)
-// return struct zcl_result and stay in rolling_anchor_service.c.
+// surface: ra_quorum_allows_commit is a verdict that deliberately fails
+// OPEN (an unprobeable oracle means "allowed"), and ra_compute_window_hash
+// already threads its one distinguishable reason out through
+// *out_failure_height — the same contract-bool-with-in/out shape E2 accepts
+// elsewhere in this shape dir. The fallible surfaces of this service (init,
+// start, window_hash_ending_at) return struct zcl_result and stay in
+// rolling_anchor_service.c.
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * Purpose: the rolling anchor's state-free computations — compile-time
@@ -45,19 +45,6 @@ void ra_file_digest(const uint8_t *body, size_t body_len,
                      uint8_t out[32])
 {
     sha3_256(body, body_len, out);
-}
-
-bool ra_snapshot_equal(
-    const struct platform_positioned_file_snapshot *a,
-    const struct platform_positioned_file_snapshot *b)
-{
-    return a->size == b->size &&
-           a->modified_seconds == b->modified_seconds &&
-           a->modified_nanoseconds == b->modified_nanoseconds &&
-           a->changed_seconds == b->changed_seconds &&
-           a->changed_nanoseconds == b->changed_nanoseconds &&
-           a->volume == b->volume && a->file_low == b->file_low &&
-           a->file_high == b->file_high;
 }
 
 /* Caller holds lock. Compute SHA3 over heights [start_h..start_h+999]

@@ -9,6 +9,7 @@
 #include "net/file_service.h"
 #include "net/rom_journal.h"
 #include "net/rom_peer_scoring.h"
+#include "rom_fetch_transport.h"
 #include "crypto/sha3.h"
 #include "encoding/utilstrencodings.h"
 #include "json/json.h"
@@ -64,15 +65,6 @@ static int64_t rf_windows_pwrite(int fd, const void *data, size_t size,
 #include <unistd.h>
 #endif
 #define RF_SUBSYS "rom_fetch"
-static void rf_session_close(struct fs_session *session, platform_socket_t fd)
-{
-    fs_session_cleanup(session);
-    platform_socket_close(fd);
-}
-/* Connect timeout for one chunk-fetch connection (seconds). */
-#define RF_CONNECT_TIMEOUT_SEC 10
-/* Per-socket timeout: bound a stalled LAN/fast-WAN peer. */
-#define RF_IO_TIMEOUT_SEC 120
 /* Bounded per-chunk retry against the seeder's wall-clock-1s rate window
  * (rom_seed_rate_charge): 1100 ms always crosses a second boundary, and
  * 25 retries bound a persistently-refusing peer to ~28 s per chunk before
@@ -101,24 +93,6 @@ static bool rf_filename_ok(const char *filename)
         return false;
     if (strstr(filename, ".."))
         return false;
-    return true;
-}
-
-/* Read exactly n bytes into buf. Returns false on EOF/error/timeout. */
-static bool rf_recv_exact(platform_socket_t fd, uint8_t *buf, size_t n)
-{
-    size_t got = 0;
-    while (got < n) {
-        int r = platform_socket_receive(fd, buf + got, n - got);
-        if (r < 0) {
-            if (platform_socket_error_interrupted(platform_socket_last_error()))
-                continue;
-            return false;
-        }
-        if (r == 0)
-            return false;
-        got += (size_t)r;
-    }
     return true;
 }
 
@@ -221,58 +195,6 @@ int rom_fetch_parse_directory(const char *json_body,
 }
 
 /* ── Verified chunk fetch ───────────────────────────────────────────── */
-
-/* Connect to peer_addr:port with a bounded connect timeout. Returns the fd
- * or -1 (logged). */
-static platform_socket_t rf_connect(const char *peer_addr, uint16_t port)
-{
-    char port_str[8];
-    snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
-
-    struct addrinfo hints;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    struct addrinfo *res = NULL;
-    if (getaddrinfo(peer_addr, port_str, &hints, &res) != 0 || !res)
-        LOG_ERR(RF_SUBSYS, "chunk: resolve failed for %s", peer_addr);
-
-    platform_socket_t fd = platform_socket_open(
-        res->ai_family, res->ai_socktype, res->ai_protocol, true, true);
-    if (fd == PLATFORM_SOCKET_INVALID) {
-        freeaddrinfo(res);
-        LOG_ERR(RF_SUBSYS, "chunk: socket() failed: %s", strerror(errno));
-    }
-
-    int rc = platform_socket_connect(fd, res->ai_addr, res->ai_addrlen);
-    int connect_error = rc == 0 ? 0 : platform_socket_last_error();
-    if (rc != 0 && platform_socket_error_in_progress(connect_error)) {
-        rc = platform_socket_wait_writable(fd, RF_CONNECT_TIMEOUT_SEC * 1000);
-        int err = 0;
-        if (rc > 0)
-            (void)platform_socket_pending_error(fd, &err);
-        if (rc <= 0 || err != 0) {
-            platform_socket_close(fd);
-            freeaddrinfo(res);
-            LOG_ERR(RF_SUBSYS, "chunk: connect to %s:%u failed/timed out",
-                    peer_addr, (unsigned)port);
-        }
-    } else if (rc != 0) {
-        platform_socket_close(fd);
-        freeaddrinfo(res);
-        LOG_ERR(RF_SUBSYS, "chunk: connect to %s:%u failed: %s",
-                peer_addr, (unsigned)port, strerror(errno));
-    }
-    freeaddrinfo(res);
-    if (!platform_socket_set_nonblocking(fd, false)) {
-        platform_socket_close(fd);
-        LOG_ERR(RF_SUBSYS, "chunk: restore blocking socket failed");
-    }
-
-    (void)platform_socket_set_receive_timeout(fd, RF_IO_TIMEOUT_SEC * 1000);
-    (void)platform_socket_set_send_timeout(fd, RF_IO_TIMEOUT_SEC * 1000);
-    return fd;
-}
 
 /* Must byte-match FS_ROM_REFUSAL_MAC_TAG in file_service.c: the typed ROM
  * chunk refusal frame rides fs_send_chunk_refusal's MAC scheme with this

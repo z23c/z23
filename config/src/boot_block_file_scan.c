@@ -14,7 +14,6 @@
  *
  * Consensus-adjacent: touches the block-index load surface. Moved
  * byte-identically from boot_index.c — no logic change. */
-
 #include "platform/socket_compat.h"
 #include "config/boot_internal.h"
 #include "boot_block_file_scan_internal.h"
@@ -39,40 +38,32 @@
 #ifndef _WIN32
 #include <sys/stat.h>
 #endif
-
 /* ZClassic mainnet block file magic (little-endian 0x6427e924) */
 #define ZCL_BLOCK_MAGIC 0x6427e924
-
 /* Max bytes to read from a block for header parsing + tx count.
  * ZClassic header = 140 fixed + ~1347 equihash solution = ~1487 bytes.
  * 1600 gives margin for the compact_size tx count after the header. */
 #define BLOCK_HEADER_READ_SIZE 1600
-
 /* ── scan_block_files_mark_data helpers ──────────────────────── */
-
 /* The parsed-metadata structs (boot_scan_block_meta, boot_scan_file_result,
  * boot_scan_apply_counts) and the APPLY half — create_block_index_fast and
  * scan_apply_one_file — live in config/src/boot_block_index_apply.c
  * (declared in boot_block_file_scan_internal.h). */
-
 /* recompute_index_from_genesis and resolve_orphan_pprev_from_disk —
  * the genesis-rooted ancestry repair passes this scan runs after every
  * block is in the map — live in config/src/boot_block_index_ancestry.c
  * (declared in config/boot_internal.h). */
-
 static uint32_t scan_read_u32_le(const uint8_t *p)
 {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
-
 static long scan_find_next_magic(const uint8_t *data, long start, long size)
 {
     const uint8_t m0 = (uint8_t)(ZCL_BLOCK_MAGIC & 0xFF);
     const uint8_t m1 = (uint8_t)((ZCL_BLOCK_MAGIC >> 8) & 0xFF);
     const uint8_t m2 = (uint8_t)((ZCL_BLOCK_MAGIC >> 16) & 0xFF);
     const uint8_t m3 = (uint8_t)((ZCL_BLOCK_MAGIC >> 24) & 0xFF);
-
     for (long pos = start; pos + 8 + 140 <= size; pos++) {
         if (data[pos] == m0 && data[pos + 1] == m1 &&
             data[pos + 2] == m2 && data[pos + 3] == m3)
@@ -80,7 +71,6 @@ static long scan_find_next_magic(const uint8_t *data, long start, long size)
     }
     return -1;
 }
-
 static bool scan_file_append_meta(struct boot_scan_file_result *r,
                                   const struct boot_scan_block_meta *meta)
 {
@@ -97,7 +87,6 @@ static bool scan_file_append_meta(struct boot_scan_file_result *r,
     r->blocks[r->count++] = *meta;
     return true;
 }
-
 static void scan_parse_one_file(struct boot_scan_file_result *r)
 {
     r->ok = false;
@@ -111,7 +100,6 @@ static void scan_parse_one_file(struct boot_scan_file_result *r)
         fprintf(stderr, "scan: cannot open %s: %s\n", r->path, strerror(errno));
         return;
     }
-
     if (!platform_positioned_file_snapshot(&file, &before) ||
         before.size == 0) {
         platform_positioned_file_close(&file);
@@ -125,7 +113,6 @@ static void scan_parse_one_file(struct boot_scan_file_result *r)
         return;
     }
     r->file_size = (long)before.size;
-
     /* This scan walks the whole blk*.dat front-to-back (the `pos` cursor
      * below only ever advances) during boot index rebuild / import — tell
      * the kernel to read ahead aggressively instead of caching for random
@@ -140,14 +127,12 @@ static void scan_parse_one_file(struct boot_scan_file_result *r)
     }
     platform_read_mapping_advise_sequential(&mapping);
     const uint8_t *data = mapping.data;
-
     bool complete = true;
     int consec_errors = 0;
     long pos = 0;
     while (pos + 8 + 140 <= r->file_size) {
         uint32_t magic = scan_read_u32_le(data + pos);
         uint32_t blk_size = scan_read_u32_le(data + pos + 4);
-
         if (magic != ZCL_BLOCK_MAGIC) {
             long next = scan_find_next_magic(data, pos + 1, r->file_size);
             if (next < 0)
@@ -156,13 +141,11 @@ static void scan_parse_one_file(struct boot_scan_file_result *r)
             r->skipped++;
             continue;
         }
-
         if (blk_size < 140 || blk_size > 2000000 ||
             pos + 8 + (long)blk_size > r->file_size) {
             pos += 8;
             continue;
         }
-
         size_t read_sz = (blk_size < BLOCK_HEADER_READ_SIZE)
                              ? blk_size
                              : BLOCK_HEADER_READ_SIZE;
@@ -183,7 +166,6 @@ static void scan_parse_one_file(struct boot_scan_file_result *r)
             continue;
         }
         consec_errors = 0;
-
         uint64_t num_tx = 0;
         if (!stream_read_compact_size(&bs, &num_tx) || num_tx == 0)
             num_tx = 1;
@@ -193,7 +175,6 @@ static void scan_parse_one_file(struct boot_scan_file_result *r)
                     r->file_idx, pos);
             num_tx = 1;
         }
-
         struct boot_scan_block_meta meta;
         memset(&meta, 0, sizeof(meta));
         block_header_get_hash(&bhdr, &meta.hash);
@@ -212,10 +193,8 @@ static void scan_parse_one_file(struct boot_scan_file_result *r)
             complete = false;
             break;
         }
-
         pos += 8 + (long)blk_size;
     }
-
     bool stable = platform_positioned_file_snapshot(&file, &after) &&
                   before.size == after.size &&
                   before.modified_seconds == after.modified_seconds &&
@@ -231,13 +210,11 @@ static void scan_parse_one_file(struct boot_scan_file_result *r)
         fprintf(stderr, "scan: block file changed during scan: %s\n", r->path);
     r->ok = complete && stable;
 }
-
 struct boot_scan_parallel_ctx {
     struct boot_scan_file_result *files;
     int nfiles;
     _Atomic int next;
 };
-
 static void *scan_parse_worker(void *arg)
 {
     struct boot_scan_parallel_ctx *ctx = arg;
@@ -249,7 +226,6 @@ static void *scan_parse_worker(void *arg)
     }
     return NULL;
 }
-
 static int scan_worker_count(int nfiles)
 {
     const char *override = getenv("ZCL_BLOCK_SCAN_WORKERS");
@@ -265,7 +241,6 @@ static int scan_worker_count(int nfiles)
         fprintf(stderr, "scan: ignoring invalid ZCL_BLOCK_SCAN_WORKERS=%s\n",
                 override);
     }
-
     uint32_t cpus = platform_logical_cpu_count();
     int n = cpus > 0 ? (int)cpus : 1;
     if (n > nfiles) n = nfiles;
@@ -273,13 +248,11 @@ static int scan_worker_count(int nfiles)
     if (n < 1) n = 1;
     return n;
 }
-
 static int scan_parse_files_parallel(struct boot_scan_file_result *files,
                                      int nfiles)
 {
     if (nfiles <= 0)
         return 0;
-
     int workers = scan_worker_count(nfiles);
     printf("  parallel block-file parse: %d files, %d workers\n",
            nfiles, workers);
@@ -288,7 +261,6 @@ static int scan_parse_files_parallel(struct boot_scan_file_result *files,
             scan_parse_one_file(&files[i]);
         return workers;
     }
-
     pthread_t *threads = zcl_calloc((size_t)workers, sizeof(*threads),
                                     "boot.index.scan_threads");
     if (!threads) {
@@ -296,7 +268,6 @@ static int scan_parse_files_parallel(struct boot_scan_file_result *files,
             scan_parse_one_file(&files[i]);
         return 1;
     }
-
     struct boot_scan_parallel_ctx ctx = {
         .files = files,
         .nfiles = nfiles,
@@ -319,14 +290,12 @@ static int scan_parse_files_parallel(struct boot_scan_file_result *files,
     free(threads);
     return started;
 }
-
 static void scan_free_file_results(struct boot_scan_file_result *files,
                                    int nfiles)
 {
     for (int i = 0; i < nfiles; i++)
         free(files[i].blocks);
 }
-
 static bool scan_regular_nonempty(const char *path)
 {
     struct platform_positioned_file file;
@@ -337,7 +306,6 @@ static bool scan_regular_nonempty(const char *path)
     platform_positioned_file_close(&file);
     return ok;
 }
-
 /* Scan block files on disk, parse proper ZClassic headers (with
  * equihash solution), create block_index entries if missing, set
  * nTx, mark BLOCK_HAVE_DATA, and propagate nChainTx so
@@ -354,14 +322,12 @@ int scan_block_files_mark_data(struct main_state *ms, const char *datadir,
         fprintf(stderr, "scan_block_files_mark_data: NULL argument\n");
         return 0;
     }
-
     int marked = 0, created = 0;
     char path[576];
     int64_t t0 = (int64_t)platform_time_wall_time_t();
     struct boot_scan_file_result files[257];
     int nfiles = 0;
     memset(files, 0, sizeof(files));
-
     /* Pass 1: parse all block files in parallel.
      * Don't break on first gap — blk00000.dat may be empty (0 bytes)
      * while blk00001.dat+ have data. Stop after 3 consecutive misses. */
@@ -374,7 +340,6 @@ int scan_block_files_mark_data(struct main_state *ms, const char *datadir,
             continue;
         }
         consecutive_misses = 0;
-
 #ifndef _WIN32
         /* Advisory hardlink tripwire. Authoritative scan acceptance remains
          * bound to the opened file identity checked by scan_parse_one_file. */
@@ -385,12 +350,10 @@ int scan_block_files_mark_data(struct main_state *ms, const char *datadir,
                     "a foreign writer may invalidate indexed positions\n",
                     path, (unsigned long)st.st_nlink);
 #endif
-
         struct boot_scan_file_result *r = &files[nfiles++];
         snprintf(r->path, sizeof(r->path), "%s", path);
         r->file_idx = file_idx;
     }
-
     /* Also scan blk_sync.dat when it exists.
      * File-service bootstrap does not always create it, so missing
      * sync spool should not look like a scan failure. */
@@ -400,11 +363,9 @@ int scan_block_files_mark_data(struct main_state *ms, const char *datadir,
         snprintf(r->path, sizeof(r->path), "%s", path);
         r->file_idx = 255;
     }
-
     int64_t parse_t0 = (int64_t)platform_time_wall_time_t();
     int scan_workers = scan_parse_files_parallel(files, nfiles);
     int64_t parse_elapsed = (int64_t)platform_time_wall_time_t() - parse_t0;
-
     int64_t apply_t0 = (int64_t)platform_time_wall_time_t();
     for (int i = 0; i < nfiles; i++) {
         struct boot_scan_file_result *r = &files[i];
@@ -425,7 +386,6 @@ int scan_block_files_mark_data(struct main_state *ms, const char *datadir,
                    r->file_size / (1024 * 1024));
         }
     }
-
     /* Pass 2: retry for out-of-order blocks (prevblock now in map).
      * Block files from zclassicd are 99%+ in order, so pass 1 catches
      * nearly everything. Pass 2 picks up stragglers without re-reading
@@ -447,7 +407,6 @@ int scan_block_files_mark_data(struct main_state *ms, const char *datadir,
         }
     }
     int64_t apply_elapsed = (int64_t)platform_time_wall_time_t() - apply_t0;
-
     /* Resolve orphan pprev links by reading hashPrevBlock from disk.
      * All blocks are now in the map — pprev lookup will succeed for
      * any block whose parent exists on disk. This fixes the case where
@@ -471,12 +430,9 @@ int scan_block_files_mark_data(struct main_state *ms, const char *datadir,
             fflush(stdout);
         }
     }
-
     scan_free_file_results(files, nfiles);
-
     if (marked > 0 && params)
         recompute_index_from_genesis(ms, params);
-
     /* Propagate nChainTx along the chain. This is REQUIRED for
      * find_most_work_chain to consider these blocks as candidates.
      * Collect all blocks with BLOCK_HAVE_DATA, sort by height,
@@ -496,9 +452,7 @@ int scan_block_files_mark_data(struct main_state *ms, const char *datadir,
                 if (bi && (bi->pprev || (bi->nStatus & BLOCK_HAVE_DATA)))
                     sorted[n++] = bi;
             }
-
             qsort(sorted, n, sizeof(struct block_index *), block_index_cmp_height);
-
             int total_propagated = 0;
             for (int pass = 0; pass < 50; pass++) {
                 int propagated = 0;
@@ -558,7 +512,6 @@ int scan_block_files_mark_data(struct main_state *ms, const char *datadir,
                     printf("  nChainTx pass %d: +%d blocks\n",
                            pass + 1, propagated);
             }
-
             /* Find first gap in chain — diagnostic for pprev breaks */
             {
                 struct block_index *genesis_bi = NULL;
@@ -604,7 +557,6 @@ int scan_block_files_mark_data(struct main_state *ms, const char *datadir,
                         printf("  Chain contiguous from genesis to h=999+\n");
                 }
             }
-
             /* Count blocks with HAVE_DATA but no nChainTx — these are
              * unreachable from genesis (orphans or broken pprev links) */
             int orphans = 0;
@@ -621,7 +573,6 @@ int scan_block_files_mark_data(struct main_state *ms, const char *datadir,
             }
             /* Note: chain_work is NOT re-propagated here to avoid
              * overwriting correct values from P2P-synced blocks. */
-
             free(sorted);
             if (total_propagated > 0)
                 printf("  nChainTx propagated for %d blocks",
@@ -633,9 +584,7 @@ int scan_block_files_mark_data(struct main_state *ms, const char *datadir,
                 printf("\n");
         }
     }
-
     int64_t elapsed = (int64_t)platform_time_wall_time_t() - t0;
-
     /* Summary stats: how many index entries have BLOCK_HAVE_DATA vs total */
     size_t total_entries = 0, have_data_entries = 0;
     {
@@ -648,7 +597,6 @@ int scan_block_files_mark_data(struct main_state *ms, const char *datadir,
                 have_data_entries++;
         }
     }
-
     printf("Block file scan: %d marked, %d created in %llds  "
            "[parse=%llds apply=%llds workers=%d index: %zu entries, "
            "%zu have data]\n",
@@ -656,6 +604,5 @@ int scan_block_files_mark_data(struct main_state *ms, const char *datadir,
            (long long)parse_elapsed, (long long)apply_elapsed,
            scan_workers,
            total_entries, have_data_entries);
-
     return marked;
 }

@@ -40,7 +40,7 @@
 #define _GNU_SOURCE  /* struct ucred, execvpe — must precede every include */
 #endif
 #include "session/agent_broker.h"
-#include "base/format_attribute.h"
+#include "agent_broker_internal.h"
 #include "session/agent_broker_vocab.h"
 #include "base/hex.h"
 #include "base/log_macros.h"
@@ -51,7 +51,6 @@
 #include <fcntl.h>
 #include <poll.h>
 #endif
-#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 #if !defined(_WIN32)
@@ -61,8 +60,7 @@
 #include <unistd.h>
 #endif
 #define BROKER_TAG "agent.broker"
-/* The child receives the connected socket as this descriptor. Fixed, so the
- * child needs no argument naming it — one less thing on a command line. */
+/* Fixed descriptor keeps it off the child's command line. */
 #define AGENT_CHILD_SOCKET_FD 3
 /* ── fd helpers (EINTR-safe, exact-length) ──────────────────────────────── */
 
@@ -171,30 +169,6 @@ bool agent_broker_session_bind(struct agent_broker_session *s,
 
 /* ── the request pipeline ───────────────────────────────────────────────── */
 
-static void resp_init(struct mvap_response *r, const struct mvap_request *req,
-                      int32_t status)
-{
-    memset(r, 0, sizeof(*r));
-    r->verb       = req ? req->verb : MVAP_VERB_NONE;
-    r->request_id = req ? req->request_id : 0;
-    /* Reply in the dialect the peer spoke, not the one this build prefers. */
-    r->version    = req ? req->version : 0;
-    r->status     = status;
-}
-
-static void resp_body(struct mvap_response *r, const char *fmt, ...)
-    ZCL_PRINTF_LIKE(2, 3);
-
-static void resp_body(struct mvap_response *r, const char *fmt, ...)
-{
-    va_list ap;
-    va_start(ap, fmt);
-    int n = vsnprintf(r->body, sizeof(r->body), fmt, ap);
-    va_end(ap);
-    if (n < 0)
-        r->body[0] = '\0';
-}
-
 /* Replay protection lives in agent_broker_idem.c — the digest, the ring, and
  * the replay label. What is left in this file is WHERE it is consulted, and
  * that is exactly TWO places: a claim before anything is dispatched, and a
@@ -227,95 +201,13 @@ static int32_t authorize_live(const struct agent_broker_session *s,
     return agent_broker_scope_check(&a->scope, req);
 }
 
-static const char *session_principal(const struct agent_broker_session *s)
+static const char *session_grant_id(const struct agent_broker_session *session)
 {
-    return (s->authority && s->authority->bound) ? s->authority->principal : "";
-}
-
-static const char *session_grant_id(const struct agent_broker_session *s)
-{
-    return (s->authority && s->authority->bound)
-               ? s->authority->canonical_grant_id
+    return (session->authority && session->authority->bound)
+               ? session->authority->canonical_grant_id
                : "";
 }
 
-/* One confinement receipt. `action_receipt_id` is the canonical metaverse
- * action receipt this row COMMITS TO — passed in from the COMMIT outcome, all
- * zero when the operation minted none (a refusal, or a query, which never
- * reaches here at all). It is inside the row's digest, so a confinement row
- * cannot later be pointed at a different action. */
-static void broker_receipt(struct agent_broker_session *s,
-                           const struct mvap_request *req,
-                           struct mvap_response *resp, const char *detail,
-                           const uint8_t action_receipt_id[32])
-{
-    if (!s->audit || !s->audit->open)
-        return;
-    struct agent_receipt r = { 0 };
-    r.receipt_version = 3;
-    snprintf(r.money_snapshot_status, sizeof(r.money_snapshot_status),
-             "UNKNOWN");
-    r.verb       = req->verb;
-    r.request_id = req->request_id;
-    r.status     = resp->status;
-    r.value_zats = req->value_zats;
-    memcpy(r.property_id, req->property_id, MVAP_PROPERTY_ID_LEN);
-    if (action_receipt_id)
-        memcpy(r.action_receipt_id, action_receipt_id, 32);
-    snprintf(r.principal, sizeof(r.principal), "%s", session_principal(s));
-    snprintf(r.grant_id, sizeof(r.grant_id), "%s", session_grant_id(s));
-    r.peer = s->peer;
-    snprintf(r.detail, sizeof(r.detail), "%s", detail ? detail : "");
-    if (agent_audit_append(s->audit, &r)) {
-        memcpy(resp->receipt_id, r.id, MVAP_RECEIPT_ID_LEN);
-        s->receipts_written++;
-    }
-}
-
-/* The audit row a REPLAY writes.
- *
- * It is its own row, and deliberately so: the agent asked twice, and a log that
- * records only the first ask cannot answer "how many times did this agent
- * present this receipt". It is DISTINGUISHABLE from a first execution on its
- * face — the detail begins with the word REPLAYED and names the receipt of the
- * execution it is replaying, which no first execution's detail can do.
- *
- * It is NOT counted in `receipts_written`, because that counter answers "how
- * much work did this broker commit" and a replay commits none; `replays_served`
- * counts it instead.
- *
- * `resp` is const on purpose. A replay returns the ORIGINAL confinement
- * receipt id, so this row must not stamp its own id over it — otherwise a
- * retry would hand the agent a second receipt for one action, which is the
- * double-count the ring exists to prevent. */
-static void broker_replay_receipt(struct agent_broker_session *s,
-                                  const struct mvap_request *req,
-                                  const struct mvap_response *resp,
-                                  const struct agent_idem_slot *slot)
-{
-    if (!s->audit || !s->audit->open || !slot)
-        return;
-    struct agent_receipt r = { 0 };
-    r.receipt_version = 3;
-    snprintf(r.money_snapshot_status, sizeof(r.money_snapshot_status),
-             "UNKNOWN");
-    r.verb       = req->verb;
-    r.request_id = req->request_id;
-    r.status     = resp->status;
-    r.value_zats = req->value_zats;
-    memcpy(r.property_id, req->property_id, MVAP_PROPERTY_ID_LEN);
-    memcpy(r.action_receipt_id, slot->action_receipt_id, 32);
-    snprintf(r.principal, sizeof(r.principal), "%s", session_principal(s));
-    snprintf(r.grant_id, sizeof(r.grant_id), "%s", session_grant_id(s));
-    r.peer = s->peer;
-
-    char first[65];
-    zcl_hex_encode(slot->resp.receipt_id, MVAP_RECEIPT_ID_LEN, first);
-    snprintf(r.detail, sizeof(r.detail),
-             "REPLAYED request_id=%u: executed nothing; first_receipt=%s",
-             req->request_id, first);
-    (void)agent_audit_append(s->audit, &r);
-}
 #endif
 
 void agent_broker_handle(struct agent_broker_session *s,

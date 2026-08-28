@@ -53,7 +53,7 @@ static bool mmb_leaf_store_sync(struct mmb_leaf_store *store)
 {
     if (!store->dirty) return true;
     if (platform_data_sync(store->fd) != 0)
-        LOG_FAIL("mmb_leaf_store", "fsync failed for %s", store->path);
+        LOG_FAIL("mmb_leaf_store", "data sync failed for %s", store->path);
     store->dirty = false;
     return true;
 }

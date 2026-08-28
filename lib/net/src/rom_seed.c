@@ -38,17 +38,14 @@
  * rom_seed_classify.c. */
 
 /* ── Registry ───────────────────────────────────────────────────────── */
-
 static struct rom_artifact g_artifacts[ROM_SEED_MAX_ARTIFACTS];
 static pthread_mutex_t g_reg_mutex = PTHREAD_MUTEX_INITIALIZER;
 /* ── Config (read from serve threads; set at boot) ──────────────────── */
-
 static _Atomic bool     g_enabled = true;
 static _Atomic uint32_t g_max_inflight_per_peer = ROM_SEED_DEFAULT_MAX_INFLIGHT_PER_PEER;
 static _Atomic uint64_t g_peer_bps_cap   = ROM_SEED_DEFAULT_PEER_BPS_CAP;
 static _Atomic uint64_t g_global_bps_cap = ROM_SEED_DEFAULT_GLOBAL_BPS_CAP;
 /* ── Caps + stats state (one mutex) ─────────────────────────────────── */
-
 struct rom_peer_stat {
     uint8_t  ip[16];
     bool     used;
@@ -64,7 +61,6 @@ static int64_t  g_global_win_start = 0;
 static uint64_t g_global_win_bytes = 0;
 
 /* ── Background scan lifecycle ──────────────────────────────────────── */
-
 static pthread_t g_scan_thread;
 static bool      g_scan_started = false;
 static uint16_t  g_scan_fs_port = 0;

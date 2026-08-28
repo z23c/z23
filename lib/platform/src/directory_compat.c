@@ -8,6 +8,7 @@
 #endif
 
 #include "platform/directory_compat.h"
+#include "base/safe_alloc.h"
 
 #include "base/safe_alloc.h"
 

@@ -488,19 +488,37 @@ static bool registry_graph_shape(const char *datadir,
 {
     const struct registry_expected *app =
         registry_named("zclassic23/commons-demo");
-    if (!app || !levels_out || !closure_out)
+    if (!app || !levels_out || !closure_out) {
+        printf("  zcode_package_registry: graph inputs missing app=%s "
+               "levels=%s closure=%s\n", app ? "present" : "missing",
+               levels_out ? "present" : "missing",
+               closure_out ? "present" : "missing");
         return false;
+    }
     struct package_lifecycle_plan_report plan;
     struct zcl_result planned = package_lifecycle_plan(
         datadir, app->content_root, INT64_C(1700000900), &plan);
-    if (!planned.ok || !plan.ready || plan.plan.step_count < 4u)
+    if (!planned.ok || !plan.ready || plan.plan.step_count < 4u) {
+        printf("  zcode_package_registry: graph plan failed ready=%s "
+               "steps=%zu rule=%s detail=%s message=%s\n",
+               plan.ready ? "true" : "false", plan.plan.step_count,
+               plan.rule, plan.detail, planned.message);
         return false;
+    }
     uint16_t maximum_depth = 0;
     for (size_t i = 0; i < plan.plan.step_count; i++)
         if (plan.plan.steps[i].depth > maximum_depth)
             maximum_depth = plan.plan.steps[i].depth;
     *levels_out = (size_t)maximum_depth + 1u;
     *closure_out = plan.plan.step_count;
+    if (*levels_out < 3u) {
+        printf("  zcode_package_registry: graph too shallow levels=%zu "
+               "closure=%zu\n", *levels_out, *closure_out);
+        for (size_t i = 0; i < plan.plan.step_count; i++)
+            printf("    step=%zu depth=%u name=%s\n", i,
+                   (unsigned)plan.plan.steps[i].depth,
+                   plan.plan.steps[i].name);
+    }
     return *levels_out >= 3u;
 }
 
@@ -517,6 +535,10 @@ static bool registry_independent_reproduction(size_t *reproduced_out)
     struct vcs_package_store *store_b = vcs_package_store_open(
         builder_b, UINT64_C(256) * 1024u * 1024u);
     bool ok = store_a && store_b;
+    if (!ok)
+        printf("  zcode_package_registry: builder store open failed a=%s "
+               "b=%s\n", store_a ? "open" : "failed",
+               store_b ? "open" : "failed");
     for (size_t i = 0;
          ok && i < sizeof(registry_packages) / sizeof(registry_packages[0]);
          i++) {

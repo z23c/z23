@@ -5,7 +5,7 @@
  * independent derivation pass.
  *
  * consensus_state_replay_receipt.c owns the RECEIPT half (payload codec,
- * atomic write, read-back, the verifier-binary digest, and the public
+ * atomic publish call, read-back, the verifier-binary digest, and public
  * authority/binding queries); consensus_state_replay_receipt_derive.c owns
  * the DERIVATION half — the UTXO/anchor/nullifier row scans over the
  * datadir's OWN folded progress-store tables. The split happened when the

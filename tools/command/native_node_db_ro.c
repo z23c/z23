@@ -85,6 +85,7 @@
 #include "base/safe_alloc.h"
 #include "models/database.h"
 #include "storage/consensus_db.h"
+#include "platform/positioned_file.h"
 
 #include <sqlite3.h>
 #include <stdio.h>
@@ -184,11 +185,7 @@ static void zcl_ro_probe_sidecars(const char *path,
 struct zcl_ro_guard {
     char path[1200];
     struct zcl_ro_sidecars at_open;
-    dev_t dev;
-    ino_t ino;
-    long long size;
-    long long mtime_sec;
-    long mtime_nsec;
+    struct platform_positioned_file_snapshot snapshot;
     /* One log line per handle: the authorizer fires per statement and a
      * drifted snapshot stays drifted, so without this a refused read would
      * repeat itself down the log. */
@@ -221,15 +218,22 @@ static bool zcl_ro_guard_intact(struct zcl_ro_guard *g)
         why = "its write-ahead log changed length";
 
     if (!why) {
-        struct stat st;
-        if (stat(g->path, &st) != 0)
-            why = "it can no longer be stat'ed";
-        else if (st.st_dev != g->dev || st.st_ino != g->ino)
+        struct platform_positioned_file file;
+        struct platform_positioned_file_snapshot snapshot;
+        platform_positioned_file_init(&file);
+        bool opened = platform_positioned_file_open(&file, g->path);
+        bool snapped = opened && platform_positioned_file_snapshot(&file, &snapshot);
+        platform_positioned_file_close(&file);
+        if (!snapped)
+            why = "it can no longer be opened and snapshotted";
+        else if (snapshot.volume != g->snapshot.volume ||
+                 snapshot.file_low != g->snapshot.file_low ||
+                 snapshot.file_high != g->snapshot.file_high)
             why = "it was replaced by a different file";
-        else if ((long long)st.st_size != g->size)
+        else if (snapshot.size != g->snapshot.size)
             why = "its length changed";
-        else if ((long long)st.st_mtim.tv_sec != g->mtime_sec ||
-                 st.st_mtim.tv_nsec != g->mtime_nsec)
+        else if (snapshot.modified_seconds != g->snapshot.modified_seconds ||
+                 snapshot.modified_nanoseconds != g->snapshot.modified_nanoseconds)
             why = "it was written to";
     }
     if (!why)
@@ -303,8 +307,13 @@ static void zcl_ro_guard_destroy(void *arg)
 static enum zcl_node_db_ro_status zcl_ro_guard_arm(
     sqlite3 *db, const char *path, const struct zcl_ro_sidecars *at_open)
 {
-    struct stat st;
-    if (stat(path, &st) != 0)
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot snapshot;
+    platform_positioned_file_init(&file);
+    bool snapped = platform_positioned_file_open(&file, path) &&
+                   platform_positioned_file_snapshot(&file, &snapshot);
+    platform_positioned_file_close(&file);
+    if (!snapped)
         LOG_RETURN(ZCL_NODE_DB_RO_UNREADABLE, "cmd",
                    "cannot stat %s to pin the read-only snapshot it was just "
                    "opened from", path);
@@ -323,11 +332,7 @@ static enum zcl_node_db_ro_status zcl_ro_guard_arm(
     }
     memcpy(g->path, path, n + 1);
     g->at_open = *at_open;
-    g->dev = st.st_dev;
-    g->ino = st.st_ino;
-    g->size = (long long)st.st_size;
-    g->mtime_sec = (long long)st.st_mtim.tv_sec;
-    g->mtime_nsec = st.st_mtim.tv_nsec;
+    g->snapshot = snapshot;
 
     /* The destructor registration comes FIRST: once it is in place the guard
      * is owned by the connection and cannot leak, whatever the next call

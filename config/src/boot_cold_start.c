@@ -10,11 +10,8 @@
  *       the plain serving boot. Composes the existing stages; never duplicates
  *       normal boot.
  */
-
 #include "config/boot_cold_start.h"
-
 #include "boot_cold_start_internal.h"
-
 #include "platform/os_proc.h"    /* os_proc_exe_path */
 #include "platform/directory_compat.h"
 #include "platform/positioned_file.h"
@@ -24,7 +21,6 @@
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"     /* zcl_malloc */
 #include "util/write_all.h"      /* zcl_write_all */
-
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -43,12 +39,9 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
-
 #define COLD_START_MAGIC   "ZCLCOLDSTART"
 #define COLD_START_VERSION 2 /* v2 adds outcome=/reason= (refusal receipts) */
-
 /* ── (1) Pure helpers ─────────────────────────────────────────────────── */
-
 const char *cold_start_stage_name(enum cold_start_stage stage)
 {
     switch (stage) {
@@ -59,7 +52,6 @@ const char *cold_start_stage_name(enum cold_start_stage stage)
     }
     return "?";
 }
-
 const char *cold_start_stage_param(const struct cold_start_plan *plan,
                                    enum cold_start_stage stage)
 {
@@ -74,7 +66,6 @@ const char *cold_start_stage_param(const struct cold_start_plan *plan,
     }
     return (p && p[0]) ? p : NULL;
 }
-
 bool cold_start_stage_configured(const struct cold_start_plan *plan,
                                  enum cold_start_stage stage)
 {
@@ -82,7 +73,6 @@ bool cold_start_stage_configured(const struct cold_start_plan *plan,
         return true; /* the driver always ends by serving */
     return cold_start_stage_param(plan, stage) != NULL;
 }
-
 int cold_start_receipt_path(const char *datadir, enum cold_start_stage stage,
                             char *buf, size_t n)
 {
@@ -94,9 +84,7 @@ int cold_start_receipt_path(const char *datadir, enum cold_start_stage stage,
         return -1;
     return w;
 }
-
 static _Atomic uint64_t g_cold_start_receipt_nonce;
-
 /* Copy at most `in_len` bytes of `in` into `out` (bounded by `out_n`), replacing
  * any CR/LF with a space so the result is a single line. Always NUL-terminates. */
 void cold_start_singleline_bounded(const char *in, size_t in_len,
@@ -109,27 +97,23 @@ void cold_start_singleline_bounded(const char *in, size_t in_len,
         out[j++] = (in[i] == '\n' || in[i] == '\r') ? ' ' : in[i];
     out[j] = '\0';
 }
-
 /* Single-line the NUL-terminated `in` into `out` (bounded); NULL => empty. */
 static void cold_start_singleline(const char *in, char *out, size_t out_n)
 {
     cold_start_singleline_bounded(in, in ? strlen(in) : 0, out, out_n);
 }
-
 bool cold_start_receipt_write(const char *datadir, enum cold_start_stage stage,
                               const char *param, bool refused,
                               const char *reason)
 {
     if (!datadir || !datadir[0])
         LOG_FAIL(COLD_START_SUBSYS, "receipt write: empty datadir");
-
     char dir[PATH_MAX];
     int dn = snprintf(dir, sizeof(dir), "%s/coldstart", datadir);
     if (dn < 0 || (size_t)dn >= sizeof(dir))
         LOG_FAIL(COLD_START_SUBSYS, "receipt write: coldstart dir path too long");
     if (!platform_private_directory_ensure(dir))
         LOG_FAIL(COLD_START_SUBSYS, "receipt write: private directory refused");
-
     char path[PATH_MAX];
     if (cold_start_receipt_path(datadir, stage, path, sizeof(path)) < 0)
         LOG_FAIL(COLD_START_SUBSYS, "receipt write: path build failed");
@@ -138,11 +122,9 @@ bool cold_start_receipt_write(const char *datadir, enum cold_start_stage stage,
     if (!platform_private_path_resolve(path, resolved, sizeof(resolved), parent,
                                        sizeof(parent)))
         LOG_FAIL(COLD_START_SUBSYS, "receipt write: path resolution failed");
-
     char reason_line[COLD_START_REASON_MAX];
     cold_start_singleline(refused ? reason : NULL, reason_line,
                           sizeof(reason_line));
-
     char content[PATH_MAX + COLD_START_REASON_MAX + 192];
     int cn = snprintf(content, sizeof(content),
                       "magic=%s\nversion=%d\nstage=%s\noutcome=%s\n"
@@ -155,7 +137,6 @@ bool cold_start_receipt_write(const char *datadir, enum cold_start_stage stage,
                       reason_line);
     if (cn < 0 || (size_t)cn >= sizeof(content))
         LOG_FAIL(COLD_START_SUBSYS, "receipt write: content build failed");
-
     struct platform_private_file staging;
     platform_private_file_init(&staging);
     char tmp[PATH_MAX];
@@ -184,7 +165,6 @@ bool cold_start_receipt_write(const char *datadir, enum cold_start_stage stage,
              cold_start_stage_name(stage), refused ? "REFUSAL" : "success", path);
     return true;
 }
-
 /* Extract the value of `key=` from a receipt buffer into out (bounded). Returns
  * true iff the key line is present. */
 static bool cold_start_receipt_field(const char *buf, const char *key,
@@ -215,7 +195,6 @@ static bool cold_start_receipt_field(const char *buf, const char *key,
     }
     return false;
 }
-
 /* Read + validate a receipt into `buf`: true iff it exists, carries the magic,
  * and its parameter matches `param` (both-NULL equal). Leaves the raw receipt in
  * `buf` for the caller to inspect `outcome`. */
@@ -252,12 +231,10 @@ static bool cold_start_receipt_load(const char *datadir,
     if (!stable)
         return false;
     buf[(size_t)r] = '\0';
-
     char magic[32];
     if (!cold_start_receipt_field(buf, "magic", magic, sizeof(magic)) ||
         strcmp(magic, COLD_START_MAGIC) != 0)
         return false;
-
     char has_param[8];
     bool recorded_has = cold_start_receipt_field(buf, "has_param", has_param,
                                                  sizeof(has_param)) &&
@@ -267,14 +244,12 @@ static bool cold_start_receipt_load(const char *datadir,
         return false;
     if (!want_has)
         return true; /* both parameter-less — parameter matches */
-
     char recorded_param[PATH_MAX];
     if (!cold_start_receipt_field(buf, "param", recorded_param,
                                   sizeof(recorded_param)))
         return false;
     return strcmp(recorded_param, param) == 0;
 }
-
 /* True iff the receipt records a REFUSAL (outcome=refused); an absent outcome
  * field reads as a success receipt (forward-compatible with v1). */
 static bool cold_start_receipt_is_refused(const char *buf)
@@ -283,7 +258,6 @@ static bool cold_start_receipt_is_refused(const char *buf)
     return cold_start_receipt_field(buf, "outcome", outcome, sizeof(outcome)) &&
            strcmp(outcome, "refused") == 0;
 }
-
 bool cold_start_receipt_matches(const char *datadir, enum cold_start_stage stage,
                                 const char *param)
 {
@@ -292,7 +266,6 @@ bool cold_start_receipt_matches(const char *datadir, enum cold_start_stage stage
         return false;
     return !cold_start_receipt_is_refused(buf); /* a refusal is not "stage done" */
 }
-
 bool cold_start_receipt_refused(const char *datadir, enum cold_start_stage stage,
                                 const char *param, char *reason, size_t reason_n)
 {
@@ -307,7 +280,6 @@ bool cold_start_receipt_refused(const char *datadir, enum cold_start_stage stage
         (void)cold_start_receipt_field(buf, "reason", reason, reason_n);
     return true;
 }
-
 enum cold_start_stage cold_start_plan_next(const struct cold_start_plan *plan)
 {
     static const enum cold_start_stage order[COLD_START_PREP_STAGE_COUNT] = {
@@ -327,13 +299,11 @@ enum cold_start_stage cold_start_plan_next(const struct cold_start_plan *plan)
     }
     return COLD_START_STAGE_SERVE;
 }
-
 /* Copy `src` into `dst` (bounded, single-lined, always NUL-terminated). */
 void cold_start_reason_copy(char *dst, size_t dst_n, const char *src)
 {
     cold_start_singleline(src, dst, dst_n);
 }
-
 enum cold_start_result cold_start_drive(const struct cold_start_plan *plan,
                                         cold_start_stage_runner_fn runner,
                                         void *user,
@@ -354,7 +324,6 @@ enum cold_start_result cold_start_drive(const struct cold_start_plan *plan,
         LOG_WARN(COLD_START_SUBSYS, "drive: NULL stage runner");
         return COLD_START_TRANSIENT;
     }
-
     /* Bounded: each iteration serves, stops (transient/blocked), or converts one
      * prep stage to "success receipt present" — at most prep-count + 1 loops. */
     for (int guard = 0; guard <= COLD_START_PREP_STAGE_COUNT; guard++) {
@@ -363,9 +332,7 @@ enum cold_start_result cold_start_drive(const struct cold_start_plan *plan,
             *out_reached = next;
         if (next == COLD_START_STAGE_SERVE)
             return COLD_START_OK;
-
         const char *param = cold_start_stage_param(plan, next);
-
         /* Sticky refusal: a prior run REFUSED this stage under this same param.
          * Refusals are decisions — never auto-retry; re-emit the verdict. */
         char sticky[COLD_START_REASON_MAX];
@@ -377,14 +344,12 @@ enum cold_start_result cold_start_drive(const struct cold_start_plan *plan,
             cold_start_reason_copy(reason, reason_n, sticky);
             return COLD_START_BLOCKED;
         }
-
         LOG_INFO(COLD_START_SUBSYS, "running stage '%s'",
                  cold_start_stage_name(next));
         char stage_reason[COLD_START_REASON_MAX];
         stage_reason[0] = '\0';
         enum cold_start_result rc =
             runner(plan, next, user, stage_reason, sizeof(stage_reason));
-
         if (rc == COLD_START_BLOCKED) {
             /* A decision refusal — persist a refusal receipt (verbatim) so a
              * rerun stays blocked, then report BLOCKED. */

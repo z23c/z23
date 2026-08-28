@@ -17,6 +17,7 @@
 #include "platform/positioned_file.h"
 #include "platform/private_directory.h"
 #include "platform/private_file.h"
+#include "package_file_io.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
@@ -469,18 +470,6 @@ bool badge_atomic_write(const char *path, const uint8_t *data,
     return true;
 }
 
-static bool badge_snapshot_equal(
-    const struct platform_positioned_file_snapshot *a,
-    const struct platform_positioned_file_snapshot *b)
-{
-    return a->size == b->size && a->volume == b->volume &&
-           a->file_low == b->file_low && a->file_high == b->file_high &&
-           a->modified_seconds == b->modified_seconds &&
-           a->modified_nanoseconds == b->modified_nanoseconds &&
-           a->changed_seconds == b->changed_seconds &&
-           a->changed_nanoseconds == b->changed_nanoseconds;
-}
-
 /* Read a whole bounded file. NULL when missing, empty, oversize, or
  * unreadable (missing is not an error: callers treat it as absent). */
 uint8_t *badge_read_file(const char *path, size_t cap,
@@ -510,7 +499,7 @@ uint8_t *badge_read_file(const char *path, size_t cap,
     }
     struct platform_positioned_file_snapshot after;
     bool stable = platform_positioned_file_snapshot(&file, &after) &&
-                  badge_snapshot_equal(&stamp, &after);
+                  vcs_package_file_snapshot_equal(&stamp, &after);
     platform_positioned_file_close(&file);
     if (!stable) { free(buf); return NULL; }
     *out_len = len;
@@ -940,7 +929,7 @@ enum vcs_badge_persist_error vcs_badge_store_persist(
         LOG_ERROR(BADGE_LOG, "badge path too long");
         return VCS_BADGE_PERSIST_IO;
     }
-    if (!badge_file_exists(path)) {
+    if (!vcs_package_file_exists(path)) {
         uint8_t wire[VCS_PACKAGE_BADGE_WIRE_BYTES];
         if (vcs_badge_serialize(badge, wire, sizeof(wire)) !=
                 VCS_BADGE_OK ||
@@ -1137,7 +1126,7 @@ enum vcs_badge_plan_persist_error vcs_badge_plan_persist(
         LOG_ERROR(BADGE_LOG, "plan path too long");
         return VCS_BADGE_PLAN_PERSIST_IO;
     }
-    if (badge_file_exists(path))
+    if (vcs_package_file_exists(path))
         return VCS_BADGE_PLAN_PERSIST_DUPLICATE;
     if (s->plan_count >= VCS_BADGE_MAX_PLANS)
         return VCS_BADGE_PLAN_PERSIST_FULL;

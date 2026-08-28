@@ -12,6 +12,12 @@
 #include "json/json.h"
 #include "models/database.h"
 #include "models/database_owner_lease.h"
+#include "platform/directory_compat.h"
+#include "platform/directory_transaction.h"
+#include "platform/positioned_file.h"
+#include "platform/private_directory.h"
+#include "platform/private_file.h"
+#include "platform/rng.h"
 #include "platform/time_compat.h"
 #include "services/build_fabric_service.h"
 #include "services/build_fabric_async.h"
@@ -50,8 +56,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 #define ZDEV_PATH_MAX 4096
 
@@ -73,7 +81,11 @@ static bool zdev_open_build_ledger(
     struct node_db *ndb, const char *path, const char *reason)
 {
     if (!ndb || !path || !path[0] || !reason || !reason[0]) return false;
-    if (access(path, F_OK) == 0)
+    struct platform_positioned_file existing;
+    platform_positioned_file_init(&existing);
+    bool present = platform_positioned_file_open(&existing, path);
+    platform_positioned_file_close(&existing);
+    if (present)
         return node_db_open_existing_runtime(ndb, path, reason);
     return node_db_open(ndb, path);
 }
@@ -374,10 +386,17 @@ static bool zdev_capture_write_scope(
 static bool zdev_paths_overlap(const char *a, const char *b)
 {
     size_t alen = strlen(a), blen = strlen(b);
+#if defined(_WIN32)
+    bool a_contains_b = blen >= alen && _strnicmp(a, b, alen) == 0 &&
+        (blen == alen || b[alen] == '/' || b[alen] == '\\');
+    bool b_contains_a = alen >= blen && _strnicmp(b, a, blen) == 0 &&
+        (alen == blen || a[blen] == '/' || a[blen] == '\\');
+#else
     bool a_contains_b = blen >= alen && memcmp(a, b, alen) == 0 &&
         (blen == alen || b[alen] == '/');
     bool b_contains_a = alen >= blen && memcmp(b, a, blen) == 0 &&
         (alen == blen || a[blen] == '/');
+#endif
     return a_contains_b || b_contains_a;
 }
 
@@ -388,20 +407,39 @@ static bool zdev_candidate_input_path(
     const char *selected = claimed;
     char candidate[ZDEV_PATH_MAX], fixed[ZDEV_PATH_MAX];
     if (fixed_path) {
-        if (!candidate_arg || !realpath(candidate_arg, candidate) ||
-            !realpath(fixed_path, fixed)) {
+        struct platform_positioned_file input;
+        platform_positioned_file_init(&input);
+        bool resolved = candidate_arg &&
+            platform_directory_canonical_real(candidate_arg, candidate,
+                                              sizeof(candidate)) &&
+            platform_positioned_file_open(&input, fixed_path) &&
+            platform_positioned_file_path(&input, fixed, sizeof(fixed));
+        platform_positioned_file_close(&input);
+        if (!resolved) {
             zdev_fail(reply, "BAD_FIXED_INPUT",
                       "fixed input must resolve inside candidate_workspace");
             return false;
         }
         size_t candidate_len = strlen(candidate);
-        if (strncmp(candidate, fixed, candidate_len) != 0 ||
-            fixed[candidate_len] != '/' || fixed[candidate_len + 1u] == '\0') {
+#if defined(_WIN32)
+        bool prefix_matches = _strnicmp(candidate, fixed, candidate_len) == 0;
+        bool child_separator = fixed[candidate_len] == '/' ||
+                               fixed[candidate_len] == '\\';
+#else
+        bool prefix_matches = strncmp(candidate, fixed, candidate_len) == 0;
+        bool child_separator = fixed[candidate_len] == '/';
+#endif
+        if (!prefix_matches || !child_separator ||
+            fixed[candidate_len + 1u] == '\0') {
             zdev_fail(reply, "FIXED_INPUT_OUTSIDE_CANDIDATE",
                       "fixed input authority is limited to candidate_workspace");
             return false;
         }
-        const char *derived = fixed + candidate_len + 1u;
+        char *derived = fixed + candidate_len + 1u;
+#if defined(_WIN32)
+        for (char *p = derived; *p; ++p)
+            if (*p == '\\') *p = '/';
+#endif
         if (claimed && strcmp(claimed, derived) != 0) {
             zdev_fail(reply, "FIXED_INPUT_PATH_MISMATCH",
                       "fixed_input_relpath does not match fixed_input_path");
@@ -443,9 +481,10 @@ static bool zdev_capture_candidate(
     uint32_t *changed_files, uint64_t *patch_bytes,
     struct zcl_command_reply *reply)
 {
-    char candidate_workspace[ZDEV_PATH_MAX]; struct stat st;
-    if (!candidate_arg || !realpath(candidate_arg, candidate_workspace) ||
-        stat(candidate_workspace, &st) != 0 || !S_ISDIR(st.st_mode) ||
+    char candidate_workspace[ZDEV_PATH_MAX];
+    if (!candidate_arg ||
+        !platform_directory_canonical_real(candidate_arg, candidate_workspace,
+                                           sizeof(candidate_workspace)) ||
         zdev_paths_overlap(workspace, candidate_workspace)) {
         zdev_fail(reply, "BAD_CANDIDATE_WORKSPACE",
                   "candidate_workspace must be an existing non-overlapping directory");
@@ -672,7 +711,8 @@ void zcl_native_handle_zcode_evidence(
         return;
     char workspace[ZDEV_PATH_MAX];
     uint8_t action_check[32];
-    if (!workspace_arg || !realpath(workspace_arg, workspace) || !datadir ||
+    if (!workspace_arg || !platform_directory_canonical_real(
+            workspace_arg, workspace, sizeof(workspace)) || !datadir ||
         !action_id || !zcl_hex_decode_lower(action_id, action_check, 32)) {
         zcl_command_reply_fail(
             reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
@@ -787,7 +827,8 @@ void zcl_native_handle_zcode_accept(
         ? VCS_ZCODE_LANE_CANDIDATE : 0;
     char workspace[ZDEV_PATH_MAX];
     uint8_t action_root[32];
-    if (!workspace_arg || !realpath(workspace_arg, workspace) ||
+    if (!workspace_arg || !platform_directory_canonical_real(
+            workspace_arg, workspace, sizeof(workspace)) ||
         !action_id || !zcl_hex_decode_lower(action_id, action_root, 32) ||
         !target) {
         zcl_command_reply_fail(
@@ -838,7 +879,8 @@ void zcl_native_handle_zcode_lane(
     if (!datadir || !datadir[0]) datadir = zcl_native_command_datadir();
     char workspace[ZDEV_PATH_MAX];
     uint8_t root[32];
-    if (!workspace_arg || !realpath(workspace_arg, workspace) ||
+    if (!workspace_arg || !platform_directory_canonical_real(
+            workspace_arg, workspace, sizeof(workspace)) ||
         !source_root || !zcl_hex_decode_lower(source_root, root, 32)) {
         zcl_command_reply_fail(
             reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
@@ -918,7 +960,8 @@ void zcl_native_handle_zcode_tasks(
     if (!request || !reply) return;
     const char *workspace_arg = zdev_str(request->input, "workspace");
     char workspace[ZDEV_PATH_MAX];
-    if (!workspace_arg || !realpath(workspace_arg, workspace)) {
+    if (!workspace_arg || !platform_directory_canonical_real(
+            workspace_arg, workspace, sizeof(workspace))) {
         zcl_command_reply_fail(
             reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
             "BAD_WORKSPACE", "validate", false, false,
@@ -1056,7 +1099,8 @@ void zcl_native_handle_zcode_improve(
         return;
     }
     char workspace[ZDEV_PATH_MAX];
-    if (!realpath(workspace_arg, workspace)) {
+    if (!platform_directory_canonical_real(workspace_arg, workspace,
+                                           sizeof(workspace))) {
         zdev_fail(reply, "BAD_WORKSPACE", "workspace must resolve to an existing directory");
         return;
     }
@@ -1800,6 +1844,45 @@ static bool zpub_proof_set_valid(
 static bool zpub_stage_file(const char *dir, const char *relpath,
                             const uint8_t *bytes, size_t len)
 {
+#if defined(_WIN32)
+    char relative[ZPUB_PATH_MAX];
+    if (!dir || !relpath || strlen(relpath) >= sizeof(relative)) return false;
+    (void)snprintf(relative, sizeof(relative), "%s", relpath);
+    struct platform_directory_transaction root, current, next;
+    struct platform_directory_transaction *active = &root;
+    platform_directory_transaction_init(&root);
+    platform_directory_transaction_init(&current);
+    platform_directory_transaction_init(&next);
+    if (!platform_directory_transaction_open(&root, dir)) return false;
+    char *leaf = relative;
+    for (char *slash = strchr(leaf, '/'); slash; slash = strchr(leaf, '/')) {
+        *slash = '\0';
+        enum platform_directory_result opened =
+            platform_directory_transaction_open_child(active, leaf, true, &next);
+        if (opened != PLATFORM_DIRECTORY_OK) {
+            platform_directory_transaction_close(&next);
+            platform_directory_transaction_close(&current);
+            platform_directory_transaction_close(&root);
+            return false;
+        }
+        if (active == &current) platform_directory_transaction_close(&current);
+        current = next;
+        platform_directory_transaction_init(&next);
+        active = &current;
+        leaf = slash + 1;
+    }
+    struct platform_directory_child file;
+    platform_directory_child_init(&file);
+    bool ok = leaf[0] && platform_directory_child_create(active, leaf, &file) &&
+        platform_directory_child_write_exact(&file, bytes, len, 0) &&
+        platform_directory_child_flush(&file) &&
+        platform_directory_transaction_flush(active);
+    platform_directory_child_close(&file);
+    platform_directory_transaction_close(&next);
+    platform_directory_transaction_close(&current);
+    platform_directory_transaction_close(&root);
+    return ok;
+#else
     char path[ZPUB_PATH_MAX];
     int n = snprintf(path, sizeof(path), "%s/%s", dir, relpath);
     if (n <= 0 || (size_t)n >= sizeof(path))
@@ -1818,6 +1901,7 @@ static bool zpub_stage_file(const char *dir, const char *relpath,
         return false;
     bool ok = len == 0 || fwrite(bytes, 1, len, f) == len;
     return fclose(f) == 0 && ok;
+#endif
 }
 
 static bool zpub_stage_transport(
@@ -1839,6 +1923,31 @@ static bool zpub_stage_transport(
 static void zpub_stage_cleanup(
     const char *dir, const struct vcs_source_package_transport *transport)
 {
+#if defined(_WIN32)
+    char path[ZPUB_PATH_MAX];
+    size_t count = vcs_source_package_transport_file_count(transport);
+    for (size_t i = 0; i < count; i++) {
+        const char *relative = NULL; const uint8_t *bytes = NULL; size_t len = 0;
+        if (!vcs_source_package_transport_file_at(
+                transport, i, &relative, &bytes, &len)) continue;
+        int n = snprintf(path, sizeof(path), "%s/%s", dir, relative);
+        if (n > 0 && (size_t)n < sizeof(path))
+            (void)platform_private_file_unlink_missing_ok(path);
+    }
+    for (size_t i = 0; i < count; i++) {
+        const char *relative = NULL; const uint8_t *bytes = NULL; size_t len = 0;
+        if (!vcs_source_package_transport_file_at(
+                transport, i, &relative, &bytes, &len)) continue;
+        int n = snprintf(path, sizeof(path), "%s/%s", dir, relative);
+        if (n <= 0 || (size_t)n >= sizeof(path)) continue;
+        for (char *p = strrchr(path, '/'); p && p > path + strlen(dir);
+             p = strrchr(path, '/')) {
+            *p = '\0';
+            (void)platform_private_directory_remove_empty(path);
+        }
+    }
+    (void)platform_private_directory_remove_empty(dir);
+#else
     char path[ZPUB_PATH_MAX];
     size_t count = vcs_source_package_transport_file_count(transport);
     size_t base = strlen(dir);
@@ -1870,6 +1979,29 @@ static void zpub_stage_cleanup(
         }
     }
     (void)rmdir(dir);
+#endif
+}
+
+static bool zpub_stage_create(const char *datadir,
+                              char out[ZPUB_PATH_MAX])
+{
+#if defined(_WIN32)
+    uint8_t nonce[16];
+    char hex[33];
+    for (unsigned attempt = 0; attempt < 16; ++attempt) {
+        if (!rng_fill(nonce, sizeof(nonce))) return false;
+        zcl_hex_encode(nonce, sizeof(nonce), hex);
+        int n = snprintf(out, ZPUB_PATH_MAX, "%s/.accept-publish-%s",
+                         datadir, hex);
+        if (n <= 0 || n >= ZPUB_PATH_MAX) return false;
+        if (platform_private_directory_create(out)) return true;
+    }
+    return false;
+#else
+    int n = snprintf(out, ZPUB_PATH_MAX, "%s/.accept-publish-XXXXXX",
+                     datadir);
+    return n > 0 && n < ZPUB_PATH_MAX && mkdtemp(out) != NULL;
+#endif
 }
 
 /* Publisher lineage from the persisted releases (rebuildable projection):
@@ -1981,11 +2113,14 @@ static bool zpub_normalize(
     const char *acceptance_datadir_arg =
         zdev_str(request->input, "acceptance_datadir");
     const char *source_root_arg = zdev_str(request->input, "source_root");
-    if (!workspace_arg || !realpath(workspace_arg, bundle->workspace) ||
-        !datadir_arg || !realpath(datadir_arg, bundle->datadir) ||
-        !realpath(acceptance_datadir_arg && acceptance_datadir_arg[0]
-                      ? acceptance_datadir_arg : datadir_arg,
-                  bundle->acceptance_datadir) ||
+    if (!workspace_arg || !platform_directory_canonical_real(
+            workspace_arg, bundle->workspace, sizeof(bundle->workspace)) ||
+        !datadir_arg || !platform_directory_canonical_real(
+            datadir_arg, bundle->datadir, sizeof(bundle->datadir)) ||
+        !platform_directory_canonical_real(
+            acceptance_datadir_arg && acceptance_datadir_arg[0]
+                ? acceptance_datadir_arg : datadir_arg,
+            bundle->acceptance_datadir, sizeof(bundle->acceptance_datadir)) ||
         !source_root_arg ||
         !zcl_hex_decode_lower(source_root_arg, bundle->source_root, 32)) {
         zpub_fail(reply, "BAD_PUBLISH_INPUT",
@@ -2365,7 +2500,7 @@ static enum zpub_package_facts_state zpub_package_facts_load(
         vcs_manifest_free(&tree);
         return ZPUB_PACKAGE_FACTS_ABSENT;
     }
-    bool bounded = S_ISREG(entry->mode) && entry->size > 0 &&
+    bool bounded = (entry->mode & 0170000u) == 0100000u && entry->size > 0 &&
         entry->size <= VCS_PACKAGE_DEPS_META_MAX_BYTES;
     uint8_t *wire = NULL;
     size_t wire_len = 0;
@@ -2673,10 +2808,7 @@ void zcl_native_handle_zcode_publish_commit(
     }
 
     char staging[ZPUB_PATH_MAX] = {0};
-    n = snprintf(staging, sizeof(staging), "%s/.accept-publish-XXXXXX",
-                 bundle.datadir);
-    bool stage_created = n > 0 && (size_t)n < sizeof(staging) &&
-        mkdtemp(staging) != NULL;
+    bool stage_created = zpub_stage_create(bundle.datadir, staging);
     bool staged = stage_created &&
         zpub_stage_transport(staging, &bundle.transport);
     if (!staged) {

@@ -46,118 +46,7 @@ sqlite3 *ci_store_db(struct ci_store *s) { return s ? s->db : NULL; }
 void ci_store_lock(struct ci_store *s) { if (s) pthread_mutex_lock(&s->lock); }
 void ci_store_unlock(struct ci_store *s) { if (s) pthread_mutex_unlock(&s->lock); }
 
-/* ── canonical per-symbol row hash (verify-on-read) ─────────────────── */
-
-void ci_symbol_row_hash(const struct ci_symbol *sym, uint8_t out[32])
-{
-    struct sha3_256_ctx ctx;
-    sha3_256_init(&ctx);
-    static const uint8_t tag = 0x01;  /* domain separator for symbol rows */
-    sha3_256_write(&ctx, &tag, 1);
-    /* Serialize every card field, each length-free but delimited by a NUL so
-     * two fields cannot alias. Fixed integers appended little-endian. */
-    const char *fields[] = { sym->name, sym->def_path, sym->decl_path,
-                             sym->signature, sym->doc, sym->guard, sym->group };
-    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
-        sha3_256_write(&ctx, (const unsigned char *)fields[i],
-                       strlen(fields[i]) + 1);
-    }
-    unsigned char sc[6];
-    sc[0] = (unsigned char)sym->kind;
-    sc[1] = sym->partial ? 1u : 0u;
-    sc[2] = (unsigned char)(sym->def_line & 0xff);
-    sc[3] = (unsigned char)((sym->def_line >> 8) & 0xff);
-    sc[4] = (unsigned char)(sym->decl_line & 0xff);
-    sc[5] = (unsigned char)((sym->decl_line >> 8) & 0xff);
-    sha3_256_write(&ctx, sc, sizeof(sc));
-    sha3_256_finalize(&ctx, out);
-}
-
 /* ── open / schema ──────────────────────────────────────────────────── */
-
-static bool apply_pragmas(sqlite3 *db)
-{
-    static const char *const pragmas[] = {
-        /* A rollback journal keeps an already-open reader bound only to the
-         * old main-file inode while a rebuilt generation is atomically
-         * renamed over the canonical pathname. WAL sidecars are pathname-
-         * shared and would violate that old-reader-retention contract. */
-        "PRAGMA journal_mode=DELETE",
-        "PRAGMA synchronous=FULL",
-        "PRAGMA busy_timeout=5000",
-        NULL,
-    };
-    for (size_t i = 0; pragmas[i]; i++) {
-        char *err = NULL;
-        if (sqlite3_exec(db, pragmas[i], NULL, NULL, &err) != SQLITE_OK) {
-            fprintf(stderr, "[codeindex] pragma failed (%s): %s\n",  // obs-ok:codeindex-open-failure
-                    pragmas[i], err ? err : "(no message)");
-            if (err) sqlite3_free(err);
-            return false;
-        }
-    }
-    return true;
-}
-
-static bool ensure_schema(sqlite3 *db)
-{
-    static const char *const ddl =
-        "CREATE TABLE IF NOT EXISTS files ("
-        "  id INTEGER PRIMARY KEY,"
-        "  path TEXT UNIQUE NOT NULL,"
-        "  \"group\" TEXT NOT NULL,"
-        "  purpose TEXT NOT NULL,"
-        "  content_sha3 BLOB NOT NULL,"
-        "  mtime INTEGER NOT NULL);"
-        "CREATE TABLE IF NOT EXISTS symbols ("
-        "  id INTEGER PRIMARY KEY,"
-        "  name TEXT NOT NULL,"
-        "  kind TEXT NOT NULL,"
-        "  def_path TEXT NOT NULL,"
-        "  def_line INTEGER NOT NULL,"
-        "  decl_path TEXT NOT NULL,"
-        "  decl_line INTEGER NOT NULL,"
-        "  signature TEXT NOT NULL,"
-        "  doc TEXT NOT NULL,"
-        "  guard TEXT NOT NULL,"
-        "  \"group\" TEXT NOT NULL,"
-        "  partial INTEGER NOT NULL,"
-        "  row_sha3 BLOB NOT NULL);"
-        "CREATE TABLE IF NOT EXISTS includes ("
-        "  file_id INTEGER NOT NULL,"
-        "  dep_path TEXT NOT NULL,"
-        "  UNIQUE(file_id,dep_path));"
-        "CREATE TABLE IF NOT EXISTS refs ("
-        "  callee_name TEXT NOT NULL,"
-        "  ref_file TEXT NOT NULL,"
-        "  ref_line INTEGER NOT NULL,"
-        "  enclosing TEXT NOT NULL DEFAULT '');"
-        "CREATE TABLE IF NOT EXISTS groups ("
-        "  path TEXT PRIMARY KEY,"
-        "  kind TEXT NOT NULL,"
-        "  parent TEXT NOT NULL,"
-        "  purpose TEXT NOT NULL);"
-        "CREATE TABLE IF NOT EXISTS meta ("
-        "  k TEXT PRIMARY KEY,"
-        "  v BLOB NOT NULL);"
-        "CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);"
-        "CREATE INDEX IF NOT EXISTS idx_refs_callee ON refs(callee_name);"
-        "CREATE INDEX IF NOT EXISTS idx_refs_enclosing ON refs(enclosing);"
-        "CREATE INDEX IF NOT EXISTS idx_files_group ON files(\"group\");"
-        /* The REVERSE include lookup ("who reads this header/registry") is a
-         * dep_path equality probe. Without this index it is a full scan of the
-         * whole edge table per query, which is how a reverse walk gets written
-         * off as too expensive and the include dimension goes missing. */
-        "CREATE INDEX IF NOT EXISTS idx_includes_dep ON includes(dep_path);";
-    char *err = NULL;
-    if (sqlite3_exec(db, ddl, NULL, NULL, &err) != SQLITE_OK) {
-        fprintf(stderr, "[codeindex] schema failed: %s\n",  // obs-ok:codeindex-open-failure
-                err ? err : "(no message)");
-        if (err) sqlite3_free(err);
-        return false;
-    }
-    return true;
-}
 
 struct ci_store *ci_store_open_path(const char *dbpath)
 {
@@ -187,7 +76,7 @@ struct ci_store *ci_store_open_path(const char *dbpath)
         free(s);
         return NULL;
     }
-    if (!apply_pragmas(s->db) || !ensure_schema(s->db)) {
+    if (!ci_store_apply_pragmas(s->db) || !ci_store_ensure_schema(s->db)) {
         sqlite3_close(s->db);
         pthread_mutex_destroy(&s->lock);
         free(s);

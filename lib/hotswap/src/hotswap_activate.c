@@ -2220,11 +2220,15 @@ bool hotswap_verify_module_so(const char *so_path, const char *expect_tu,
     return true;
 }
 
+#else
+#define ZCL_HOTSWAP_ACTIVATE_UNAVAILABLE 1
 #endif /* !_WIN32 */
+#else
+#define ZCL_HOTSWAP_ACTIVATE_UNAVAILABLE 1
 #endif /* ZCL_DEV_BUILD */
 
-#if !defined(ZCL_DEV_BUILD) || defined(_WIN32)
-/* release or Windows: no dynamic activation surface */
+#ifdef ZCL_HOTSWAP_ACTIVATE_UNAVAILABLE
+/* Release or Windows: no dynamic activation surface. */
 
 #if defined(_WIN32)
 #define HOTSWAP_UNAVAILABLE_STAGE "windows"
@@ -2325,4 +2329,5 @@ bool hotswap_rollback(const char *source_tu,
 #undef HOTSWAP_UNAVAILABLE_STAGE
 #undef HOTSWAP_UNAVAILABLE_REASON
 
-#endif /* !ZCL_DEV_BUILD || _WIN32 */
+#endif /* ZCL_HOTSWAP_ACTIVATE_UNAVAILABLE */
+#undef ZCL_HOTSWAP_ACTIVATE_UNAVAILABLE

@@ -15,4 +15,12 @@
 # which took the count to 22, and disk_block_io.c and codeindex_store.c fell
 # back under the 800 ceiling entirely, so their baseline entries were deleted
 # rather than tightened.
-22
+# 2026-08-28: 22 -> 16. Merging origin/main a second time. The 40
+# commits it brought reformed several of the same files this side had
+# already split, so eleven baselined files came back UNDER their
+# recorded LOC and three (codeindex_scan, event, https_server) fell
+# back under the 800 ceiling entirely and lost their baseline lines.
+# Nothing was widened to reach this: the ratchet is recorded at what
+# the merged tree actually measures.
+
+16

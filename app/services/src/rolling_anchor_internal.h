@@ -31,8 +31,6 @@ void ra_file_digest(const uint8_t *body, size_t body_len, uint8_t out[32]);
 
 /* True when two positioned-file snapshots describe the same unchanged file
  * identity, size, and timestamps. */
-bool ra_snapshot_equal(const struct platform_positioned_file_snapshot *a,
-                       const struct platform_positioned_file_snapshot *b);
 
 /* SHA3 over the serialized blocks of one window [start_h .. +999], read
  * from disk through active_chain. True when every block was read; on false

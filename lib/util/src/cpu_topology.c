@@ -26,6 +26,7 @@
 
 #include "util/cpu_topology.h"
 
+#include "base/safe_alloc.h"
 #include "json/json.h"
 #include "platform/logical_cpu.h"
 #include "util/log_macros.h"
@@ -233,7 +234,7 @@ static bool scan_windows(struct cpu_topology_state *st)
         GetLastError() != ERROR_INSUFFICIENT_BUFFER || bytes == 0)
         return false;
     SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *records =
-        zcl_malloc(bytes, "cpu_topology_windows_records");
+        zcl_malloc(bytes, "cpu_topology.windows_records");
     if (!records || !GetLogicalProcessorInformationEx(RelationAll, records,
                                                         &bytes)) {
         free(records);

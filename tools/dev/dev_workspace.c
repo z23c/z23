@@ -1,31 +1,332 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * purpose: Resolve dev workspaces and publish monotonic sealed cycle state. */
 
+#if !defined(_WIN32)
 #define _GNU_SOURCE
+#endif
 #include "devloop.h"
 
 #include "base/serialize_le.h"
 #include "crypto/sha3.h"
 #include "json/json.h"
+#include "platform/directory_compat.h"
+#include "platform/directory_transaction.h"
+#include "platform/private_directory.h"
 #include "platform/time_compat.h"
 
 #include <errno.h>
+#if !defined(_WIN32)
 #include <fcntl.h>
+#endif
 #include <limits.h>
+#if defined(__linux__)
 #include <poll.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <sys/file.h>
+#endif
 #if defined(__linux__)
 #include <sys/inotify.h>
 #endif
+#if !defined(_WIN32)
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#endif
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
+#endif
+
+#if defined(_WIN32)
+/* Keep the protocol implementation below platform-neutral without pretending
+ * that Win32 handles are POSIX descriptors.  These bounded, process-local
+ * indices retain the audited directory/file/lock capabilities and map the
+ * small *at-style vocabulary used by this module onto them. */
+typedef int64_t ssize_t;
+struct stat { off_t st_size; unsigned st_mode, st_uid, st_nlink; };
+#define WS_MODE_DIR 0040000u
+#define WS_MODE_REG 0100000u
+#define S_ISDIR(mode) (((mode) & 0170000u) == WS_MODE_DIR)
+#define S_ISREG(mode) (((mode) & 0170000u) == WS_MODE_REG)
+#define O_RDONLY 0x0001
+#define O_WRONLY 0x0002
+#define O_RDWR 0x0004
+#define O_CREAT 0x0008
+#define O_EXCL 0x0010
+#define O_DIRECTORY 0x0020
+#define O_CLOEXEC 0
+#define O_NOFOLLOW 0
+#define LOCK_SH 1
+#define LOCK_EX 2
+#define AT_REMOVEDIR 1
+
+enum ws_cap_kind { WS_CAP_FREE, WS_CAP_DIR, WS_CAP_FILE, WS_CAP_LOCK };
+struct ws_cap {
+    enum ws_cap_kind kind;
+    int parent;
+    uint64_t cursor;
+    union {
+        struct platform_directory_transaction dir;
+        struct platform_directory_child file;
+        struct platform_directory_lock lock;
+    } value;
+};
+#define WS_CAP_LIMIT 64
+static _Thread_local struct ws_cap ws_caps[WS_CAP_LIMIT];
+
+static void ws_result_errno(enum platform_directory_result result)
+{
+    errno = result == PLATFORM_DIRECTORY_MISSING ? ENOENT
+            : result == PLATFORM_DIRECTORY_EXISTS ? EEXIST
+            : result == PLATFORM_DIRECTORY_REFUSED ? EACCES : EIO;
+}
+
+static int ws_cap_take(enum ws_cap_kind kind)
+{
+    for (int i = 0; i < WS_CAP_LIMIT; i++) {
+        if (ws_caps[i].kind == WS_CAP_FREE) {
+            memset(&ws_caps[i], 0, sizeof(ws_caps[i]));
+            ws_caps[i].kind = kind;
+            ws_caps[i].parent = -1;
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int ws_close(int fd)
+{
+    if (fd < 0 || fd >= WS_CAP_LIMIT || ws_caps[fd].kind == WS_CAP_FREE)
+        return -1;
+    if (ws_caps[fd].kind == WS_CAP_DIR)
+        platform_directory_transaction_close(&ws_caps[fd].value.dir);
+    else if (ws_caps[fd].kind == WS_CAP_FILE)
+        platform_directory_child_close(&ws_caps[fd].value.file);
+    else
+        platform_directory_lock_release(&ws_caps[fd].value.lock);
+    memset(&ws_caps[fd], 0, sizeof(ws_caps[fd]));
+    return 0;
+}
+
+static int ws_open(const char *path, int flags, ...)
+{
+    if (!path || !(flags & O_DIRECTORY))
+        return -1;
+    int fd = ws_cap_take(WS_CAP_DIR);
+    if (fd < 0)
+        return -1;
+    platform_directory_transaction_init(&ws_caps[fd].value.dir);
+    if (!platform_directory_transaction_open(&ws_caps[fd].value.dir, path)) {
+        errno = platform_directory_probe_real(path) ==
+                        PLATFORM_DIRECTORY_PROBE_MISSING
+                    ? ENOENT : EACCES;
+        (void)ws_close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static int ws_openat(int dirfd, const char *leaf, int flags, ...)
+{
+    if (dirfd < 0 || dirfd >= WS_CAP_LIMIT ||
+        ws_caps[dirfd].kind != WS_CAP_DIR)
+        return -1;
+    if (flags & O_DIRECTORY) {
+        int child = ws_cap_take(WS_CAP_DIR);
+        if (child < 0)
+            return -1;
+        platform_directory_transaction_init(&ws_caps[child].value.dir);
+        enum platform_directory_result result =
+            platform_directory_transaction_open_child(
+                &ws_caps[dirfd].value.dir, leaf, false,
+                &ws_caps[child].value.dir);
+        if (result != PLATFORM_DIRECTORY_OK) {
+            ws_result_errno(result);
+            (void)ws_close(child);
+            return -1;
+        }
+        ws_caps[child].parent = dirfd;
+        return child;
+    }
+    int child = ws_cap_take(WS_CAP_FILE);
+    if (child < 0)
+        return -1;
+    platform_directory_child_init(&ws_caps[child].value.file);
+    bool created = false;
+    enum platform_directory_result result = platform_directory_child_open_result(
+        &ws_caps[dirfd].value.dir, leaf, (flags & O_CREAT) != 0,
+        (flags & O_EXCL) == 0, &ws_caps[child].value.file, &created);
+    (void)created;
+    if (result != PLATFORM_DIRECTORY_OK) {
+        ws_result_errno(result);
+        (void)ws_close(child);
+        return -1;
+    }
+    ws_caps[child].parent = dirfd;
+    return child;
+}
+
+static int ws_fstat(int fd, struct stat *st)
+{
+    if (!st || fd < 0 || fd >= WS_CAP_LIMIT)
+        return -1;
+    memset(st, 0, sizeof(*st));
+    if (ws_caps[fd].kind == WS_CAP_DIR) {
+        st->st_mode = WS_MODE_DIR | 0700u;
+        st->st_uid = 1u;
+        return 0;
+    }
+    if (ws_caps[fd].kind != WS_CAP_FILE)
+        return -1;
+    struct platform_directory_child_info info;
+    if (!platform_directory_child_info(&ws_caps[fd].value.file, &info))
+        return -1;
+    st->st_mode = WS_MODE_REG | 0600u;
+    st->st_size = (off_t)info.size;
+    st->st_nlink = (unsigned)info.link_count;
+    st->st_uid = info.current_user_only ? 1u : 0u;
+    return 0;
+}
+
+static unsigned ws_geteuid(void) { return 1u; }
+
+static int ws_flock(int fd, int operation)
+{
+    if (fd < 0 || fd >= WS_CAP_LIMIT || ws_caps[fd].kind != WS_CAP_FILE ||
+        ws_caps[fd].parent < 0)
+        return -1;
+    int parent = ws_caps[fd].parent;
+    char leaf[PLATFORM_DIRECTORY_CHILD_LEAF_MAX + 1u];
+    (void)snprintf(leaf, sizeof(leaf), "%s", ws_caps[fd].value.file.leaf);
+    platform_directory_child_close(&ws_caps[fd].value.file);
+    ws_caps[fd].kind = WS_CAP_LOCK;
+    platform_directory_lock_init(&ws_caps[fd].value.lock);
+    enum platform_directory_result result = platform_directory_lock_acquire(
+        &ws_caps[parent].value.dir, leaf, false,
+        operation == LOCK_EX ? PLATFORM_DIRECTORY_LOCK_EXCLUSIVE
+                             : PLATFORM_DIRECTORY_LOCK_SHARED,
+        &ws_caps[fd].value.lock);
+    if (result != PLATFORM_DIRECTORY_OK) {
+        memset(&ws_caps[fd], 0, sizeof(ws_caps[fd]));
+        return -1;
+    }
+    return 0;
+}
+
+static ssize_t ws_pread(int fd, void *data, size_t size, off_t offset)
+{
+    if (fd < 0 || fd >= WS_CAP_LIMIT || ws_caps[fd].kind != WS_CAP_FILE ||
+        offset < 0)
+        return -1;
+    return platform_directory_child_read(&ws_caps[fd].value.file, data, size,
+                                         (uint64_t)offset);
+}
+
+static ssize_t ws_pwrite(int fd, const void *data, size_t size, off_t offset)
+{
+    if (fd < 0 || fd >= WS_CAP_LIMIT || ws_caps[fd].kind != WS_CAP_FILE ||
+        offset < 0)
+        return -1;
+    return platform_directory_child_write(&ws_caps[fd].value.file, data, size,
+                                           (uint64_t)offset)
+        ? (ssize_t)size : -1;
+}
+
+static ssize_t ws_write(int fd, const void *data, size_t size)
+{
+    ssize_t result = ws_pwrite(fd, data, size, (off_t)ws_caps[fd].cursor);
+    if (result > 0)
+        ws_caps[fd].cursor += (uint64_t)result;
+    return result;
+}
+
+static int ws_ftruncate(int fd, off_t size)
+{
+    return fd >= 0 && fd < WS_CAP_LIMIT && ws_caps[fd].kind == WS_CAP_FILE &&
+           size >= 0 && platform_directory_child_truncate(
+               &ws_caps[fd].value.file, (uint64_t)size) ? 0 : -1;
+}
+
+static int ws_fsync(int fd)
+{
+    if (fd < 0 || fd >= WS_CAP_LIMIT)
+        return -1;
+    if (ws_caps[fd].kind == WS_CAP_DIR)
+        return platform_directory_transaction_flush(&ws_caps[fd].value.dir)
+                   ? 0 : -1;
+    if (ws_caps[fd].kind == WS_CAP_FILE)
+        return platform_directory_child_flush(&ws_caps[fd].value.file) ? 0 : -1;
+    return -1;
+}
+
+static int ws_unlinkat(int dirfd, const char *leaf, int flags)
+{
+    (void)flags;
+    return dirfd >= 0 && dirfd < WS_CAP_LIMIT &&
+           ws_caps[dirfd].kind == WS_CAP_DIR &&
+           platform_directory_child_unlink(&ws_caps[dirfd].value.dir, leaf,
+                                           true) ? 0 : -1;
+}
+
+static int ws_renameat(int fromfd, const char *from, int tofd, const char *to)
+{
+    if (fromfd != tofd || fromfd < 0 || fromfd >= WS_CAP_LIMIT ||
+        ws_caps[fromfd].kind != WS_CAP_DIR)
+        return -1;
+    struct platform_directory_child staged;
+    platform_directory_child_init(&staged);
+    if (!platform_directory_child_open(&ws_caps[fromfd].value.dir, from,
+                                       &staged))
+        return -1;
+    bool ok = platform_directory_child_replace(&ws_caps[fromfd].value.dir,
+                                               &staged, to, false);
+    platform_directory_child_close(&staged);
+    return ok ? 0 : -1;
+}
+
+static int ws_mkdirat(int dirfd, const char *leaf, int mode)
+{
+    (void)mode;
+    if (dirfd < 0 || dirfd >= WS_CAP_LIMIT ||
+        ws_caps[dirfd].kind != WS_CAP_DIR)
+        return -1;
+    struct platform_directory_transaction child;
+    platform_directory_transaction_init(&child);
+    enum platform_directory_result result =
+        platform_directory_transaction_open_child(
+            &ws_caps[dirfd].value.dir, leaf, true, &child);
+    platform_directory_transaction_close(&child);
+    return result == PLATFORM_DIRECTORY_OK ? 0 : -1;
+}
+
+static int ws_mkdir(const char *path, int mode)
+{
+    (void)mode;
+    return platform_private_directory_ensure(path) ? 0 : -1;
+}
+
+static int ws_getpid(void) { return 1; }
+
+#define open ws_open
+#define openat ws_openat
+#define close ws_close
+#define fstat ws_fstat
+#define geteuid ws_geteuid
+#define flock ws_flock
+#define pread ws_pread
+#define pwrite ws_pwrite
+#define write ws_write
+#define ftruncate ws_ftruncate
+#define fsync ws_fsync
+#define unlinkat ws_unlinkat
+#define renameat ws_renameat
+#define mkdirat ws_mkdirat
+#define mkdir ws_mkdir
+#define getpid ws_getpid
 #endif
 
 #define CYCLE_CANONICAL_MAX ZCL_DEVLOOP_CYCLE_JSON_MAX
@@ -105,10 +406,17 @@ const char *zcl_devloop_event_edit_epoch(void)
 static bool workspace_identity(const char *repo_root, char out[65])
 {
     char canonical[PATH_MAX];
+#if defined(_WIN32)
+    if (!repo_root || !out ||
+        !platform_directory_canonical_real(repo_root, canonical,
+                                           sizeof(canonical)))
+        return false;
+#else
     struct stat st;
     if (!repo_root || !out || !realpath(repo_root, canonical) ||
         stat(canonical, &st) != 0 || !S_ISDIR(st.st_mode))
         return false;
+#endif
     struct sha3_256_ctx ctx;
     sha3_256_init(&ctx);
     hash_field(&ctx, "domain", "zcl.dev_workspace.v1");
@@ -125,12 +433,20 @@ bool zcl_devloop_workspace_id(const char *repo_root, char out[65])
 bool zcl_devloop_workspace_resolve(const char *repo_root, char out_id[65],
                                    char *out_dir, size_t out_dir_len)
 {
+#if defined(_WIN32)
+    const char *home = getenv("LOCALAPPDATA");
+#else
     const char *home = getenv("HOME");
+#endif
     if (!home || !home[0] || !out_id || !out_dir || out_dir_len == 0 ||
         !workspace_identity(repo_root, out_id))
         return false;
     int n = snprintf(out_dir, out_dir_len,
+#if defined(_WIN32)
+                     "%s/z23/dev/workspaces/%s",
+#else
                      "%s/.local/state/zclassic23-dev/workspaces/%s",
+#endif
                      home, out_id);
     return n > 0 && (size_t)n < out_dir_len;
 }
@@ -148,7 +464,17 @@ static bool mkdirs(const char *path)
     if (!path || !path[0] || strlen(path) >= sizeof(copy))
         return false;
     (void)snprintf(copy, sizeof(copy), "%s", path);
-    for (char *p = copy + 1; *p; p++) {
+#if defined(_WIN32)
+    const char *local = getenv("LOCALAPPDATA");
+    size_t local_len = local ? strlen(local) : 0;
+    if (!local_len || strncmp(copy, local, local_len) != 0 ||
+        (copy[local_len] != '/' && copy[local_len] != '\\'))
+        return false;
+    char *start = copy + local_len + 1u;
+#else
+    char *start = copy + 1;
+#endif
+    for (char *p = start; *p; p++) {
         if (*p != '/')
             continue;
         *p = 0;
@@ -1192,9 +1518,7 @@ enum zcl_devloop_state_lookup zcl_devloop_cycle_state_wait_after(
         while (read(notify_fd, events, sizeof(events)) > 0) {}
 #else
         int slice_ms = wait_ms < 25 ? wait_ms : 25;
-        int ready = poll(NULL, 0, slice_ms);
-        if (ready < 0 && errno == EINTR)
-            continue;
+        platform_sleep_ms((uint32_t)slice_ms);
 #endif
     }
 #if defined(__linux__)

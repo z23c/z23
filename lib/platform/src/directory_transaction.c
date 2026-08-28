@@ -11,11 +11,10 @@
 #endif
 #include "platform/directory_transaction.h"
 #include "platform/private_directory.h"
+#include "base/safe_alloc.h"
 #if defined(_WIN32)
 #include "private_acl_internal.h"
 #endif
-
-#include "base/safe_alloc.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -374,8 +373,9 @@ enum platform_directory_result platform_directory_lock_acquire(
         d, leaf, create, create, &child, NULL);
     if (opened != PLATFORM_DIRECTORY_OK) return opened;
     OVERLAPPED operation = {0};
-    DWORD flags = mode == PLATFORM_DIRECTORY_LOCK_EXCLUSIVE
-                    ? LOCKFILE_EXCLUSIVE_LOCK : 0;
+    DWORD flags = LOCKFILE_FAIL_IMMEDIATELY |
+                  (mode == PLATFORM_DIRECTORY_LOCK_EXCLUSIVE
+                       ? LOCKFILE_EXCLUSIVE_LOCK : 0);
     if (!LockFileEx(fh(&child), flags, 0, UINT32_MAX, UINT32_MAX, &operation)) {
         platform_directory_child_close(&child);
         return GetLastError() == ERROR_LOCK_VIOLATION
@@ -503,9 +503,9 @@ moved=linkat(dd(d),f->leaf,dd(d),to,0);if(moved==0&&unlinkat(dd(d),f->leaf,0)!=0
 }else moved=renameat(dd(d),f->leaf,dd(d),to);if(moved!=0)return false;memcpy(f->leaf,to,strlen(to)+1u);return platform_directory_transaction_flush(d);}
 enum platform_directory_result platform_directory_child_unlink_result(struct platform_directory_transaction*d,const char*l){if(!d||!valid_leaf(l))return PLATFORM_DIRECTORY_INVALID;if(unlinkat(dd(d),l,0)==0)return platform_directory_transaction_flush(d)?PLATFORM_DIRECTORY_OK:PLATFORM_DIRECTORY_IO;if(errno==ENOENT)return PLATFORM_DIRECTORY_MISSING;if(errno==EACCES||errno==EPERM||errno==EISDIR)return PLATFORM_DIRECTORY_REFUSED;return PLATFORM_DIRECTORY_IO;}
 bool platform_directory_child_unlink(struct platform_directory_transaction*d,const char*l,bool missing){enum platform_directory_result r=platform_directory_child_unlink_result(d,l);return r==PLATFORM_DIRECTORY_OK||(missing&&r==PLATFORM_DIRECTORY_MISSING);}
-enum platform_directory_result platform_directory_lock_acquire(struct platform_directory_transaction*d,const char*l,bool create,enum platform_directory_lock_mode mode,struct platform_directory_lock*lock){if(!lock||lock->native!=UINTPTR_MAX)return PLATFORM_DIRECTORY_INVALID;struct platform_directory_child f;platform_directory_child_init(&f);enum platform_directory_result r=platform_directory_child_open_result(d,l,create,create,&f,NULL);if(r!=PLATFORM_DIRECTORY_OK)return r;if(flock(ff(&f),mode==PLATFORM_DIRECTORY_LOCK_EXCLUSIVE?LOCK_EX:LOCK_SH)!=0){platform_directory_child_close(&f);return errno==EWOULDBLOCK?PLATFORM_DIRECTORY_REFUSED:PLATFORM_DIRECTORY_IO;}lock->native=f.native;f.native=UINTPTR_MAX;return PLATFORM_DIRECTORY_OK;}
+enum platform_directory_result platform_directory_lock_acquire(struct platform_directory_transaction*d,const char*l,bool create,enum platform_directory_lock_mode mode,struct platform_directory_lock*lock){if(!lock||lock->native!=UINTPTR_MAX)return PLATFORM_DIRECTORY_INVALID;struct platform_directory_child f;platform_directory_child_init(&f);enum platform_directory_result r=platform_directory_child_open_result(d,l,create,create,&f,NULL);if(r!=PLATFORM_DIRECTORY_OK)return r;if(flock(ff(&f),(mode==PLATFORM_DIRECTORY_LOCK_EXCLUSIVE?LOCK_EX:LOCK_SH)|LOCK_NB)!=0){platform_directory_child_close(&f);return errno==EWOULDBLOCK||errno==EAGAIN?PLATFORM_DIRECTORY_REFUSED:PLATFORM_DIRECTORY_IO;}lock->native=f.native;f.native=UINTPTR_MAX;return PLATFORM_DIRECTORY_OK;}
 void platform_directory_lock_release(struct platform_directory_lock*l){if(!l||l->native==UINTPTR_MAX)return;(void)flock((int)l->native,LOCK_UN);close((int)l->native);platform_directory_lock_init(l);}
-bool platform_directory_transaction_list_regular(struct platform_directory_transaction*d,struct platform_directory_names*out){if(!d||!out)return false;memset(out,0,sizeof(*out));int dupfd=dup(dd(d));DIR*dir=dupfd>=0?fdopendir(dupfd):NULL;if(!dir){if(dupfd>=0)close(dupfd);return false;}struct dirent*e;while((e=readdir(dir))){struct stat s;if(!valid_leaf(e->d_name)||fstatat(dd(d),e->d_name,&s,AT_SYMLINK_NOFOLLOW)||!S_ISREG(s.st_mode))continue;char**items=realloc(out->items,(out->count+1)*sizeof(*items));char*n=strdup(e->d_name);if(!items||!n){free(items);free(n);closedir(dir);platform_directory_names_free(out);return false;}out->items=items;out->items[out->count++]=n;}closedir(dir);qsort(out->items,out->count,sizeof(*out->items),name_compare);return true;} // raw-alloc-ok:packed-oneliner-ceiling-deferred
+bool platform_directory_transaction_list_regular(struct platform_directory_transaction*d,struct platform_directory_names*out){if(!d||!out)return false;memset(out,0,sizeof(*out));int dupfd=dup(dd(d));DIR*dir=dupfd>=0?fdopendir(dupfd):NULL;if(!dir){if(dupfd>=0)close(dupfd);return false;}struct dirent*e;while((e=readdir(dir))){struct stat s;if(!valid_leaf(e->d_name)||fstatat(dd(d),e->d_name,&s,AT_SYMLINK_NOFOLLOW)||!S_ISREG(s.st_mode))continue;char*n=zcl_strdup(e->d_name,"directory_transaction_list_name");if(!n){closedir(dir);platform_directory_names_free(out);return false;}char**items=zcl_realloc(out->items,(out->count+1)*sizeof(*items),"directory_transaction_list_items");if(!items){free(n);closedir(dir);platform_directory_names_free(out);return false;}out->items=items;out->items[out->count++]=n;}closedir(dir);qsort(out->items,out->count,sizeof(*out->items),name_compare);return true;}
 #endif
 
 bool platform_directory_child_read_exact(struct platform_directory_child *f,

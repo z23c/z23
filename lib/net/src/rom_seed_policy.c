@@ -16,10 +16,16 @@
 #include "util/util.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+#ifndef _WIN32
+char *realpath(const char *restrict path, char *restrict resolved_path);
+#endif
 
 /* ── process-wide state ─────────────────────────────────────────────── */
 
@@ -96,16 +102,27 @@ static bool policy_valid(const struct rom_seed_policy *p, char *err,
 
 /* ── persistence (tmp+rename, mirrors boot_status_publish_locked) ─────── */
 
-static void policy_path(char *out, size_t out_size)
+static bool policy_path(char *out, size_t out_size)
 {
-    if (g_datadir_override[0]) {
-        snprintf(out, out_size, "%s/%s", g_datadir_override,
-                ROM_SEED_POLICY_FILENAME);
-        return;
-    }
-    char datadir[512];
-    GetDataDir(false, datadir, sizeof(datadir));
-    snprintf(out, out_size, "%s/%s", datadir, ROM_SEED_POLICY_FILENAME);
+    char datadir[512], canonical[PATH_MAX], requested[600];
+    if (g_datadir_override[0])
+        (void)snprintf(datadir, sizeof(datadir), "%s", g_datadir_override);
+    else
+        GetDataDir(false, datadir, sizeof(datadir));
+#ifdef _WIN32
+    if (!_fullpath(canonical, datadir, sizeof(canonical)))
+        return false;
+#else
+    if (!realpath(datadir, canonical))
+        return false;
+#endif
+    int written = snprintf(requested, sizeof(requested), "%s/%s", canonical,
+                           ROM_SEED_POLICY_FILENAME);
+    if (written <= 0 || (size_t)written >= sizeof(requested))
+        return false;
+    char parent[600];
+    return platform_private_path_resolve(requested, out, out_size, parent,
+                                         sizeof(parent));
 }
 
 static void snapshot_locked(struct rom_seed_policy *out)
@@ -162,12 +179,12 @@ static void persist_locked(const struct rom_seed_policy *p)
         return;
     }
 
-    char final_path[600];
+    char final_path[600] = {0};
     char resolved_path[600];
     char parent[600];
     char tmp_path[640];
-    policy_path(final_path, sizeof(final_path));
-    if (!platform_private_path_resolve(final_path, resolved_path,
+    if (!policy_path(final_path, sizeof(final_path)) ||
+        !platform_private_path_resolve(final_path, resolved_path,
                                        sizeof(resolved_path), parent,
                                        sizeof(parent))) {
         LOG_WARN("rom_seed_policy", "policy destination is not safe: %s",
@@ -213,7 +230,8 @@ static void persist_locked(const struct rom_seed_policy *p)
 static bool load_from_disk(struct rom_seed_policy *out)
 {
     char path[600];
-    policy_path(path, sizeof(path));
+    if (!policy_path(path, sizeof(path)))
+        return false;
 
     struct platform_positioned_file file;
     struct platform_positioned_file_snapshot before, after;

@@ -1,9 +1,11 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * Quiet block-file read-mapping helper for node_db catchup. */
+// one-result-type-ok:owned-mapping-lifecycle
 
 #include "node_db_catchup_internal.h"
 
+#include "base/safe_alloc.h"
 #include "services/node_db_catchup_service.h"
 #include "base/result.h"
 #include "base/safe_alloc.h"
@@ -75,7 +77,7 @@ static int catchup_open_readonly_binary(const char *path)
                                "node_db_catchup_wide_path");
     if (!wide) {
         errno = ENOMEM;
-        return -1; // raw-return-ok:open() contract, errno reported by the _quiet caller
+        return -1; // raw-return-ok:allocation-wrapper-logged
     }
     if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
                             wide, wide_len) != wide_len) {
@@ -150,3 +152,43 @@ struct zcl_result node_db_catchup_block_mapping_open_quiet(
     platform_read_mapping_advise_sequential(&block_mapping->mapping);
     return ZCL_OK;
 }
+
+#ifdef ZCL_TESTING
+bool node_db_catchup_test_block_mapping_open(
+    const char *datadir, int file_num, void **mapping_out,
+    const uint8_t **data_out, size_t *size_out, int *error_out)
+{
+    if (mapping_out) *mapping_out = NULL;
+    if (data_out) *data_out = NULL;
+    if (size_out) *size_out = 0;
+    if (error_out) *error_out = 0;
+    if (!mapping_out || !data_out || !size_out) {
+        if (error_out) *error_out = EINVAL;
+        return false;
+    }
+    struct node_db_catchup_block_mapping *mapping = zcl_calloc(
+        1, sizeof(*mapping), "catchup-test-block-mapping");
+    if (!mapping) {
+        if (error_out) *error_out = ENOMEM;
+        return false;
+    }
+    node_db_catchup_block_mapping_init(mapping);
+    if (!node_db_catchup_block_mapping_open_quiet(
+            mapping, datadir, file_num, error_out)) {
+        free(mapping);
+        return false;
+    }
+    *mapping_out = mapping;
+    *data_out = mapping->mapping.data;
+    *size_out = mapping->mapping.size;
+    return true;
+}
+
+void node_db_catchup_test_block_mapping_close(void *opaque)
+{
+    struct node_db_catchup_block_mapping *mapping = opaque;
+    if (!mapping) return;
+    node_db_catchup_block_mapping_close(mapping);
+    free(mapping);
+}
+#endif

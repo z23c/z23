@@ -7,6 +7,7 @@
 #include "base/hex.h"
 #include "config/c23_commons_build_profile.h"
 #include "json/json.h"
+#include "platform/directory_compat.h"
 #include "vcs/build_action.h"
 #include "vcs/vcs_object.h"
 #include "vcs/zcode_commons_projection.h"
@@ -65,19 +66,27 @@ static bool zcc_workspace_is_lexical_scratch(const char *workspace)
         return false;
     size_t len = strlen(workspace);
     if (len > 4096 || strcmp(workspace, "/") == 0 ||
+        strcmp(workspace, "\\") == 0 ||
         strcmp(workspace, ".") == 0 || strcmp(workspace, "./") == 0 ||
-        strcmp(workspace, "..") == 0)
+        strcmp(workspace, ".\\") == 0 || strcmp(workspace, "..") == 0)
         return false;
 
     size_t pos = 0;
-    if (workspace[0] == '/') pos = 1;
-    else if (workspace[0] == '.' && workspace[1] == '/') pos = 2;
+    if (workspace[0] == '/' || workspace[0] == '\\') pos = 1;
+    else if (workspace[0] == '.' &&
+             (workspace[1] == '/' || workspace[1] == '\\')) pos = 2;
+#if defined(_WIN32)
+    else if (((workspace[0] >= 'A' && workspace[0] <= 'Z') ||
+              (workspace[0] >= 'a' && workspace[0] <= 'z')) &&
+             workspace[1] == ':' &&
+             (workspace[2] == '/' || workspace[2] == '\\')) pos = 3;
+#endif
     bool scratch_named = false;
     while (pos < len) {
         size_t start = pos;
-        while (pos < len && workspace[pos] != '/') {
+        while (pos < len && workspace[pos] != '/' && workspace[pos] != '\\') {
             unsigned char ch = (unsigned char)workspace[pos];
-            if (ch < 0x20 || ch == 0x7f) return false;
+            if (ch < 0x20 || ch == 0x7f || ch == ':') return false;
             pos++;
         }
         size_t segment_len = pos - start;
@@ -98,14 +107,16 @@ static bool zcc_workspace_is_lexical_scratch(const char *workspace)
             scratch_named = true;
         if (pos < len) pos++;
     }
-    return scratch_named && workspace[len - 1] != '/';
+    return scratch_named && workspace[len - 1] != '/' &&
+           workspace[len - 1] != '\\';
 }
 
 bool zcl_native_zcode_workspace_is_explicit_scratch(const char *workspace)
 {
     if (!zcc_workspace_is_lexical_scratch(workspace)) return false;
     char resolved[4097];
-    if (realpath(workspace, resolved) != NULL &&
+    if (platform_directory_canonical_real(workspace, resolved,
+                                          sizeof(resolved)) &&
         !zcc_workspace_is_lexical_scratch(resolved))
         return false;
     return true;

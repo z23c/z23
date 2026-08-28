@@ -11,10 +11,9 @@
  * module sits below the AR lifecycle — the stage_cursor row is not a
  * model. */
 
-#include "platform/fd_path.h"
-#include "platform/private_directory.h"
 #include "platform/time_compat.h"
 #include "storage/progress_store.h"
+#include "progress_store_directory.h"
 
 #include "sqlite_integrity_gate.h"
 #include "storage/consensus_db.h"
@@ -83,39 +82,6 @@ static int64_t wall_now_s(void)
     struct timespec ts;
     platform_time_realtime_timespec(&ts);
     return (int64_t)ts.tv_sec;
-}
-
-static bool progress_directory_open(const char *datadir, char *path,
-                                    size_t path_size, uintptr_t *handle)
-{
-#ifdef _WIN32
-    if (!platform_private_directory_open_validated(datadir, handle))
-        return false;
-    int n = snprintf(path, path_size, "%s/%s", datadir,
-                     PROGRESS_STORE_FILENAME);
-    if (n > 0 && (size_t)n < path_size)
-        return true;
-    platform_private_directory_close(*handle);
-    *handle = UINTPTR_MAX;
-    return false;
-#else
-    int fd = open(datadir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (fd < 0)
-        return false;
-    if (!platform_dirfd_child_path(path, path_size, fd,
-                                   PROGRESS_STORE_FILENAME)) {
-        close(fd);
-        return false;
-    }
-    *handle = (uintptr_t)fd;
-    return true;
-#endif
-}
-
-static void progress_directory_close(uintptr_t handle)
-{
-    if (handle != UINTPTR_MAX)
-        platform_private_directory_close(handle);
 }
 
 /* A contained consensus-state candidate deliberately carries convincing
@@ -263,7 +229,8 @@ bool progress_store_open(const char *datadir)
 
     uintptr_t opened_dir_handle = UINTPTR_MAX;
     char path[PROGRESS_STORE_PATH_MAX];
-    if (!progress_directory_open(datadir, path, sizeof(path),
+    if (!progress_directory_open(datadir, PROGRESS_STORE_FILENAME, path,
+                                 sizeof(path),
                                  &opened_dir_handle))
         LOG_FAIL("progress_store", "open: datadir capability failed: %s",
                  strerror(errno));
@@ -272,17 +239,8 @@ bool progress_store_open(const char *datadir)
 
     /* Already open with this path → idempotent success. */
     if (atomic_load_explicit(&g_db, memory_order_relaxed) != NULL) {
-        bool same = false;
-#ifdef _WIN32
-        same = strcmp(g_display_path, display_path) == 0;
-#else
-        struct stat have;
-        struct stat want;
-        same = g_dir_handle != UINTPTR_MAX &&
-               fstat((int)g_dir_handle, &have) == 0 &&
-               fstat((int)opened_dir_handle, &want) == 0 &&
-               have.st_dev == want.st_dev && have.st_ino == want.st_ino;
-#endif
+        bool same = progress_directory_same(g_dir_handle,
+                                            opened_dir_handle);
         progress_directory_close(opened_dir_handle);
         pthread_mutex_unlock(&g_lock);
         if (!same)
@@ -482,25 +440,13 @@ sqlite3 *progress_store_open_reader(void)
 
 bool progress_store_directory_matches_fd(sqlite3 *db, int dir_fd)
 {
-#ifdef _WIN32
-    (void)db;
-    (void)dir_fd;
-    return false;
-#else
     if (!db || dir_fd < 0)
         return false;
     pthread_mutex_lock(&g_lock);
-    struct stat have;
-    struct stat want;
     bool ok = atomic_load_explicit(&g_db, memory_order_acquire) == db &&
-              g_dir_handle != UINTPTR_MAX &&
-              fstat((int)g_dir_handle, &have) == 0 &&
-              fstat(dir_fd, &want) == 0 && S_ISDIR(have.st_mode) &&
-              S_ISDIR(want.st_mode) && have.st_dev == want.st_dev &&
-              have.st_ino == want.st_ino;
+              progress_directory_matches_fd(g_dir_handle, dir_fd);
     pthread_mutex_unlock(&g_lock);
     return ok;
-#endif
 }
 
 void progress_store_tx_lock(void)

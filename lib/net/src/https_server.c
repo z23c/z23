@@ -578,7 +578,8 @@ bool https_server_start_on_port(const char *cert_path, const char *key_path,
     if (!g_ssl_ctx) {
         ERR_print_errors_fp(stderr);
         pthread_mutex_unlock(&g_https_state_mutex);
-        LOG_FAIL("https", "SSL_CTX_new failed");
+        LOG_ERROR("https", "SSL_CTX_new failed");
+        return false;
     }
 
     /* Set minimum TLS 1.2 */
@@ -589,20 +590,24 @@ bool https_server_start_on_port(const char *cert_path, const char *key_path,
         SSL_CTX_free(g_ssl_ctx);
         g_ssl_ctx = NULL;
         pthread_mutex_unlock(&g_https_state_mutex);
-        LOG_FAIL("https", "failed to load cert: %s", cert_path);
+        LOG_ERROR("https", "failed to load cert: %s", cert_path);
+        return false;
     }
     if (SSL_CTX_use_PrivateKey_file(g_ssl_ctx, key_path, SSL_FILETYPE_PEM) <= 0) {
         ERR_print_errors_fp(stderr);
         SSL_CTX_free(g_ssl_ctx);
         g_ssl_ctx = NULL;
         pthread_mutex_unlock(&g_https_state_mutex);
-        LOG_FAIL("https", "failed to load private key: %s", key_path);
+        LOG_ERROR("https", "failed to load private key: %s", key_path);
+        return false;
     }
     if (!SSL_CTX_check_private_key(g_ssl_ctx)) {
         SSL_CTX_free(g_ssl_ctx);
         g_ssl_ctx = NULL;
         pthread_mutex_unlock(&g_https_state_mutex);
-        LOG_FAIL("https", "cert/key mismatch: cert=%s key=%s", cert_path, key_path);
+        LOG_ERROR("https", "cert/key mismatch: cert=%s key=%s",
+                  cert_path, key_path);
+        return false;
     }
 
     /* Bind HTTPS port (iptables redirects 443→default 8443) */
@@ -611,7 +616,8 @@ bool https_server_start_on_port(const char *cert_path, const char *key_path,
         SSL_CTX_free(g_ssl_ctx);
         g_ssl_ctx = NULL;
         pthread_mutex_unlock(&g_https_state_mutex);
-        LOG_FAIL("https", "cannot bind HTTPS port %d", https_port);
+        LOG_ERROR("https", "cannot bind HTTPS port %d", https_port);
+        return false;
     }
 
     /* Bind HTTP port for redirect */
@@ -651,7 +657,8 @@ bool https_server_start_on_port(const char *cert_path, const char *key_path,
             g_ssl_ctx = NULL;
         }
         pthread_mutex_unlock(&g_https_state_mutex);
-        LOG_FAIL("https", "no worker threads could be started");
+        LOG_ERROR("https", "no worker threads could be started");
+        return false;
     }
 
     if (thread_registry_spawn("zcl_https_listen", https_listen_fn, NULL,
@@ -668,7 +675,8 @@ bool https_server_start_on_port(const char *cert_path, const char *key_path,
             SSL_CTX_free(g_ssl_ctx);
             g_ssl_ctx = NULL;
         }
-        LOG_FAIL("https", "thread_registry_spawn failed for HTTPS listen thread");
+        LOG_ERROR("https", "thread_registry_spawn failed for HTTPS listen thread");
+        return false;
     }
     g_https_thread_started = true;
     thread_liveness_register(&g_https_listen_liveness, "zcl_https_listen", 0, 0);
@@ -770,23 +778,6 @@ void https_server_stop(void)
 
 /* ── Deferred HTTPS start (after IBD completes) ──────────── */
 
-static char g_deferred_cert[1024];
-static char g_deferred_key[1024];
-static char g_deferred_host[256];
-static _Atomic bool g_deferred_pending = false;
-
-void https_deferred_set(const char *cert, const char *key, const char *hostname)
-{
-    strncpy(g_deferred_cert, cert, sizeof(g_deferred_cert) - 1);
-    strncpy(g_deferred_key, key, sizeof(g_deferred_key) - 1);
-    if (hostname && hostname[0])
-        snprintf(g_deferred_host, sizeof(g_deferred_host), "%s", hostname);
-    else
-        g_deferred_host[0] = '\0';
-    atomic_store(&g_deferred_pending, true);
-    printf("HTTPS: deferred start queued (will start when synced)\n");
-}
-
 bool https_server_is_running(void)
 {
     return atomic_load(&g_running);
@@ -795,21 +786,4 @@ bool https_server_is_running(void)
 int https_server_port(void)
 {
     return atomic_load(&g_https_port);
-}
-
-bool https_deferred_pending(void)
-{
-    return atomic_load(&g_deferred_pending);
-}
-
-void https_deferred_check(void)
-{
-    if (atomic_load(&g_deferred_pending) && !g_running) {
-        atomic_store(&g_deferred_pending, false);
-        printf("HTTPS: starting deferred server (node synced)\n");
-        /* hostname NULL when the operator did not set -httpsdomain; with a
-         * single cert the presented cert is the same regardless of SNI. */
-        https_server_start(g_deferred_cert, g_deferred_key,
-                           g_deferred_host[0] ? g_deferred_host : NULL);
-    }
 }

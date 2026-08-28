@@ -69,7 +69,9 @@ bool platform_positioned_file_snapshot(
  * platform_positioned_file_snapshot nor C itself defines what those padding
  * bytes hold — so `memcmp` over the whole object compares stack garbage and
  * reports two snapshots of one unchanged file as DIFFERENT. Every
- * read-then-prove-stable caller must use this predicate, never memcmp. */
+ * read-then-prove-stable caller must use this predicate, never memcmp.
+ * Structure padding is indeterminate and must never participate in an
+ * identity or stability decision. */
 bool platform_positioned_file_snapshot_equal(
     const struct platform_positioned_file_snapshot *a,
     const struct platform_positioned_file_snapshot *b);

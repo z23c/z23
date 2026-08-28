@@ -16,12 +16,20 @@ export ZCL_VENDOR_OFFLINE
 export ZCL_USE_CCACHE
 endif
 
+
+# The Windows API floor is ONE value. The product build below and the mingw
+# cross-compile of the acceptance catalog (windows_acceptance.mk) must agree:
+# a catalog compiled at a different floor grades a Windows the product does
+# not ship, and the disagreement is invisible because both sides compile.
+# That is exactly what happened -- 217d3eb6e raised the product to the
+# Windows 10 baseline and left the catalog at 0x0600.
+ZCL_WINDOWS_API_FLOOR := -D_WIN32_WINNT=0x0A00
 ZCL_HOST_OS := $(shell uname -s 2>/dev/null)
 ZCL_HOST_WINDOWS := $(if $(filter MINGW% MSYS%,$(ZCL_HOST_OS)),1,)
 ifneq ($(ZCL_HOST_WINDOWS),)
 CC = gcc
 CXX ?= g++
-ZCL_PLATFORM_CPPFLAGS = -D_WIN32_WINNT=0x0A00 -DWIN32_LEAN_AND_MEAN \
+ZCL_PLATFORM_CPPFLAGS = $(ZCL_WINDOWS_API_FLOOR) -DWIN32_LEAN_AND_MEAN \
 	-D__USE_MINGW_ANSI_STDIO=1
 ZCL_LTO_FLAG = -flto=auto
 ZCL_PLATFORM_NODE_LIBS = -lws2_32 -liphlpapi -lbcrypt -luserenv \
@@ -118,6 +126,7 @@ ZCL_GUI_APP_GOALS := $(foreach a,$(GUI_APPS),$(a) $(a)-selftest $(a)-clean \
 ZCL_HOTSWAP_LOOP_GOALS := hotswap-try hotswap-apply hotswap \
 	presentation-lib presentation-demo presentation-relaunch \
 	presentation-desktop-install presentation-portability \
+	windows-acceptance-compile windows-acceptance \
 	new-app new-app-selftest test-windows-thread-join-acceptance \
 	$(ZCL_GUI_APP_GOALS)
 ZCL_HOTSWAP_LOOP_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_HOTSWAP_LOOP_GOALS),$(MAKECMDGOALS))),,1),)
@@ -1576,6 +1585,48 @@ presentation-portability: presentation-demo
 	else \
 		printf '%s\n' 'presentation-portability: MinGW unavailable (Windows cross-link skipped)'; \
 	fi
+
+include lib/platform/tests/windows_acceptance.mk
+
+ZCL_WINDOWS_ACCEPTANCE_CC ?= x86_64-w64-mingw32-gcc
+ZCL_WINDOWS_ACCEPTANCE_DIR := build/tests/windows
+ZCL_WINDOWS_ACCEPTANCE_FLAGS := -std=c2x -O2 -Wall -Wextra -Werror \
+	-pedantic -static -D_POSIX_C_SOURCE=200809L $(ZCL_WINDOWS_API_FLOOR) \
+	-DWIN32_LEAN_AND_MEAN -D__USE_MINGW_ANSI_STDIO=1 \
+	$(APP_INCLUDES) $(CONFIG_INCLUDES) $(LIB_INCLUDES) $(CORE_INCLUDES) \
+	$(PORTS_INCLUDES) $(DOMAIN_INCLUDES) $(APPLICATION_INCLUDES) \
+	$(ADAPTERS_INCLUDES) -Ivendor/include
+ZCL_WINDOWS_ACCEPTANCE_BINS := $(addprefix \
+	$(ZCL_WINDOWS_ACCEPTANCE_DIR)/,$(addsuffix .exe,$(ZCL_WINDOWS_ACCEPTANCE_TESTS)))
+
+define ZCL_WINDOWS_ACCEPTANCE_RULE
+$$(ZCL_WINDOWS_ACCEPTANCE_DIR)/$(1).exe: \
+	$$(ZCL_WINDOWS_ACCEPTANCE_$(1)_SOURCES)
+	@mkdir -p $$(@D)
+	$$(ZCL_WINDOWS_ACCEPTANCE_CC) $$(ZCL_WINDOWS_ACCEPTANCE_FLAGS) \
+		$$(ZCL_WINDOWS_ACCEPTANCE_$(1)_FLAGS) \
+		$$(ZCL_WINDOWS_ACCEPTANCE_$(1)_SOURCES) \
+		$$(ZCL_WINDOWS_ACCEPTANCE_$(1)_LIBS) -o $$@
+endef
+$(foreach test,$(ZCL_WINDOWS_ACCEPTANCE_TESTS), \
+	$(eval $(call ZCL_WINDOWS_ACCEPTANCE_RULE,$(test))))
+
+.PHONY: windows-acceptance-compile windows-acceptance
+windows-acceptance-compile: $(ZCL_WINDOWS_ACCEPTANCE_BINS)
+	@printf '%s\n' 'windows-acceptance: strict C23 cross-link PASS'
+
+windows-acceptance: windows-acceptance-compile
+	@command -v wine >/dev/null 2>&1 || { \
+		printf '%s\n' 'windows-acceptance: REFUSE: Wine unavailable; use windows-acceptance-compile for cross-link evidence'; \
+		exit 2; \
+	}; \
+	for executable in $(ZCL_WINDOWS_ACCEPTANCE_BINS); do \
+		WINEDEBUG=-all wine "$$executable"; rc=$$?; \
+		if test $$rc -eq 77; then \
+			printf '%s\n' "windows-acceptance: honest runtime refusal: $$executable"; \
+		elif test $$rc -ne 0; then exit $$rc; fi; \
+	done; \
+	printf '%s\n' 'windows-acceptance: execution PASS (explicit runtime refusals reported above)'
 
 # ── GUI packages: the prompt-to-pixel loop ───────────────────────────────
 # `make <app>` opens a real window on this host and prints the timestamp it
@@ -5911,10 +5962,11 @@ THREAD_JOIN_ACCEPTANCE_BIN := $(BIN_DIR)/thread-join-acceptance
 test-windows-thread-join-acceptance: $(THREAD_JOIN_ACCEPTANCE_BIN)
 	@$(THREAD_JOIN_ACCEPTANCE_BIN)
 
-$(THREAD_JOIN_ACCEPTANCE_BIN): tools/winacceptance/thread_join_acceptance.c \
+$(THREAD_JOIN_ACCEPTANCE_BIN): lib/platform/tests/thread_join_windows_acceptance.c \
 		lib/platform/include/platform/thread_compat.h
 	@mkdir -p $(dir $@)
-	$(CC) $(ZCL_PLATFORM_CPPFLAGS) -std=c23 -Wall -Wextra -Werror -pedantic \
+	$(CC) $(ZCL_PLATFORM_CPPFLAGS) -D_GNU_SOURCE \
+		-std=c23 -Wall -Wextra -Werror -pedantic \
 		-Ilib/platform/include $< $(ZCL_STATIC_FLAG) -pthread -o $@
 
 # ── STICKINESS fault-injection matrix (sticky-node-plan §4 metric) ──
@@ -9456,48 +9508,45 @@ check-windows-platform-seam:
 	@./tools/lint/check_windows_platform_seam.sh --self-test && ./tools/lint/check_windows_platform_seam.sh
 
 # ─────────────────────────────────────────────────────────────────────────
-# BEGIN winacceptance lane — one contiguous block, nothing above or below
+# BEGIN windows-acceptance lane — one contiguous block, nothing above or below
 # this belongs to it.
 #
-# tools/winacceptance/ (24 programs) and tools/tests/ (2 programs) are the
-# acceptance tests for the macOS/Windows platform seam, and until this block
-# existed NOTHING built or ran any of them: no target, no test group, no CI
-# reference, and outside its own directory the string "winacceptance"
-# appeared nowhere in the tree. Twenty-six programs no compiler had ever seen
-# were standing in for the verification of the seam that is the active work.
+# The platform-seam acceptance programs live in lib/test/src/,
+# lib/platform/tests/ and lib/base/tests/, and are cross-compiled for Windows
+# by the catalog in lib/platform/tests/windows_acceptance.mk (included near
+# the top of this file, where ZCL_WINDOWS_ACCEPTANCE_FLAGS is defined).
 #
-# `winacceptance` cross-compiles all 26 for the Windows target with mingw at
-# the project's REAL API floor (ZCL_PLATFORM_CPPFLAGS, read out of this
-# Makefile by the script rather than copied into it — see
-# check-windows-platform-seam above for why a guessed floor is a false
-# green), natively compiles the portable ones, and EXECUTES only the six that
-# can genuinely run on a POSIX host. It prints those three numbers
-# separately and never sums them: a Windows binary does not run here, so for
-# twenty of the twenty-six the honest deliverable is a compile check, and it
-# is labelled as one. A program whose bucket says it runs but which exits 77
-# is graded a FAILURE, not a skip.
+# That catalog is complete and correct, and until this entry existed it was
+# invoked by NOTHING: `windows-acceptance-compile` appeared in a .PHONY list
+# and in no gate, no CI path and no script. Fifty-one acceptance programs
+# with real per-test source lists were standing in for the verification of
+# the macOS/Windows seam without a compiler ever reading them on a clean
+# tree. A catalog nothing runs is the same false green as no catalog.
 #
-# `winacceptance-selftest` proves the gate can trip before you believe a
-# green: it asserts mingw REJECTS a TU using an API above the project's own
-# _WIN32_WINNT floor (the real defect this found in
-# logical_cpu_acceptance.c), accepts clean code, and grades both a failing
-# run and a 77 skip as failures.
+# Compile, not execute: these are Windows binaries and this is a POSIX host,
+# so the honest deliverable is a mingw cross-link at the product's own API
+# floor ($(ZCL_WINDOWS_API_FLOOR), shared with ZCL_PLATFORM_CPPFLAGS so the
+# two can never drift apart again). `make windows-acceptance` additionally
+# runs them under Wine and REFUSES rather than skipping when Wine is absent.
+#
+# UNOBSERVED contract: with no mingw toolchain the gate prints UNOBSERVED, in
+# that word, and exits 0 -- an outside contributor is never blocked by a
+# cross-compiler they do not have -- but UNOBSERVED is not a pass and is not
+# cached.
 #
 # Wired into LINT_GATES, which takes three files as a set: the list entry
 # below, a gate_command() row in tools/lint/run_lint.sh, and a row in
 # docs/DEFENSIVE_CODING.md. check-lint-gate-wiring enforces all three
 # together, because a half-wired gate makes `make lint` exit 2 for EVERY
 # gate, not just this one.
-.PHONY: check-winacceptance winacceptance-selftest winacceptance-compile-only
-check-winacceptance:
-	@tools/scripts/winacceptance.sh
-
-winacceptance-compile-only:
-	@tools/scripts/winacceptance.sh --compile-only
-
-winacceptance-selftest:
-	@tools/scripts/winacceptance.sh --self-test
-# END winacceptance lane
+.PHONY: check-windows-acceptance
+check-windows-acceptance:
+	@if command -v $(ZCL_WINDOWS_ACCEPTANCE_CC) >/dev/null 2>&1; then \
+		$(MAKE) --no-print-directory windows-acceptance-compile; \
+	else \
+		printf '%s\n' 'check-windows-acceptance: UNOBSERVED ($(ZCL_WINDOWS_ACCEPTANCE_CC) not installed)'; \
+	fi
+# END windows-acceptance lane
 # ─────────────────────────────────────────────────────────────────────────
 
 # C23 lets a `(void)` cast suppress [[nodiscard]], so annotating
@@ -10506,7 +10555,7 @@ LINT_GATES := \
     check-no-snapshot-struct-memcmp \
     check-clang-portability \
     check-windows-platform-seam \
-    check-winacceptance \
+    check-windows-acceptance \
     check-result-discard \
     check-c23-only \
     check-no-python \

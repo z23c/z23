@@ -23,18 +23,15 @@ app/controllers/src/agent_anchor_status_controller.c 847
 app/controllers/src/agent_controller.c 805
 app/controllers/src/api_controller_status.c 894
 app/controllers/src/api_controller_routes.c 834 # market-moderation dynamic route (split seam if this grows again)
-app/controllers/src/file_market_controller.c 809 # market-moderation RPCs (split seam: moderation handlers -> market_moderation_native_handler.c)
 app/controllers/src/name_controller.c 1017
 app/controllers/src/swap_controller.c 1053 # atomic-swap money-shape guard (ADR-0009; split seam: settlement helpers)
 app/controllers/src/shop_native_want.c 932 # buyer want-ads: 5 leaves (post/list/status/cancel/review), sign+store controller; list truth fix moved the total into models/shop_want.c count twin (split seam: model helpers -> models/shop_want.c)
-app/jobs/src/reducer_frontier.c 801
 app/jobs/src/reducer_frontier_replay.c 806
 app/jobs/src/tip_finalize_stage.c 809
 app/jobs/src/utxo_apply_stage.c 939
 app/jobs/src/validate_headers_stage.c 1049
 app/models/src/block.c 823
 app/models/src/database_migrate_features_v49_up.c 812 # append-only migration accumulator — splitting breaks the append order it exists to preserve
-app/services/src/block_index_loader.c 851 # block_index_flat_header_at (replay-canary FAIL#7 tip-bind point read)
 app/services/src/block_index_loader_rebuild.c 853 # ADR-0008 (seed-floor declaration)
 # 2026-07-27 (work/db-lock-fixes): node_db_catchup_service.c shed the
 # try-decrypt helper to node_db_catchup_decrypt.c (-111) and gained the
@@ -48,7 +45,7 @@ app/services/src/sync_monitor.c 810
 # the confined runner (fork + Landlock/seccomp/rlimits + sandbox self-check
 # canaries + crash discipline) is one fail-closed ritual that must stay
 # together; baselined at creation per the zcode_science_service.c precedent.
-app/services/src/zcode_benchmark_executor.c 1172
+app/services/src/zcode_benchmark_executor.c 1071
 # ZCODE Scientific Metaverse S3: plan/commit services + review/vote submit +
 # CAS rebuild for the science store — one fail-closed write ritual per kind;
 # baselined at creation (gate option 3), expected to shrink when S5's
@@ -76,10 +73,9 @@ app/views/src/explorer_pages_view.c 819
 # 2026-08-28: TIGHTENED 4277 -> 4262. The boot phase-timing marks
 # (boot_clock_ms / boot_submark / boot_topmark) moved to
 # config/src/boot_timing_marks.c.
-config/src/boot.c 4262
-config/src/boot_bundle_fetch.c 805
+config/src/boot.c 4001
 config/src/boot_index.c 851
-config/src/boot_refold_staged.c 1811
+config/src/boot_refold_staged.c 1810
 config/src/boot_services.c 1474
 # 2026-08-03: NEW entry at current LOC (gate's recorded-last-resort). The
 # file sat at exactly the 800 ceiling before the G2 swarm-clock slice; the
@@ -91,7 +87,6 @@ config/src/boot_zcode_swarm.c 885
 # (filename convention, newest-generation scan, keep-N retention rotation)
 # moved to config/src/bundle_exporter_generations.c. Still over the 800
 # ceiling; the export job + worker are the next seam.
-config/src/bundle_exporter.c 867
 # 2026-08-28: ENTRY REMOVED (was 919). The post-install derived-state
 # reconciliation moved to config/src/consensus_state_install_derived_state.c,
 # leaving the engine at 768 - back under the 800 ceiling, so the plain
@@ -100,13 +95,11 @@ config/src/bundle_exporter.c 867
 # (read cursor / write / exact-match compare) moved to
 # config/src/consensus_state_producer_receipt_final.c, leaving this file at
 # 667 - under the 800 ceiling, so no baseline line is needed.
-config/src/consensus_state_snapshot_install_activate.c 949 # ADR-0008 (seed-floor declaration); reduced after descriptor binding
-app/services/src/header_sync_service.c 846
+config/src/consensus_state_snapshot_install_activate.c 899 # ADR-0008 (seed-floor declaration); reduced after descriptor binding
 app/controllers/src/event_agent_summary.c 853
 # 2026-08-15: worker-side quarantine now records exact input/output hashes and
 # bounded execution observations. Observation assembly will move beside the
 # evidence codec; this reviewed baseline remains a hard no-growth ceiling.
-app/services/src/build_fabric_worker.c 860
 
 # 2026-08-27: the fabric action scan moved off the thread stack onto a
 # named buffer; this reviewed baseline is a hard no-growth ceiling.

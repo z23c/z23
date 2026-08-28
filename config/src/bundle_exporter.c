@@ -17,25 +17,18 @@
  * and still arms the worker. It returns false only on a hard wiring error (NULL
  * progress handle / datadir), which the boot caller ignores anyway.
  */
-
 #include "config/bundle_exporter.h"
-
 #include "config/consensus_state_producer_receipt.h"
 #include "config/consensus_state_snapshot_export.h"
 #include "config/consensus_state_bundle_validate.h"
-
 #include "storage/progress_store.h"
 #include "storage/coins_kv.h"
 #include "storage/coins_ram.h"
 #include "storage/consensus_state_bundle_codec.h"
-
 #include "net/rom_seed.h"   /* reseed the produced bundle so it serves now */
-
 #include "jobs/tip_finalize_stage.h"
-
 #include "services/sync_trust_policy.h"
 #include "services/node_health_service.h"
-
 #include "kernel/service_kernel.h"
 #include "util/blocker.h"
 #include "util/supervisor.h"
@@ -43,19 +36,15 @@
 #include "util/thread_registry.h"
 #include "util/clientversion.h"
 #include "util/log_macros.h"
-
 #include "json/json.h"
 #include "core/utiltime.h"
-
 #include <ctype.h>
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
 #if defined(_WIN32)
-
 /* Native Windows export/retention stays fail-closed until the snapshot writer,
  * durable installation, and pruning transaction have passed the Windows
  * private-directory and atomic-file acceptance suite.  These exported gates
@@ -66,9 +55,7 @@ bool bundle_exporter_start(sqlite3 *pdb, const char *datadir)
     (void)datadir;
     return false;
 }
-
 void bundle_exporter_stop(void) {}
-
 bool bundle_exporter_register_service(struct zcl_service_kernel *kernel,
                                       const char *datadir)
 {
@@ -76,7 +63,6 @@ bool bundle_exporter_register_service(struct zcl_service_kernel *kernel,
     (void)datadir;
     return false;
 }
-
 bool bundle_exporter_dump_state_json(struct json_value *out, const char *key)
 {
     (void)key;
@@ -90,7 +76,6 @@ bool bundle_exporter_dump_state_json(struct json_value *out, const char *key)
                      "windows_export_retention_not_qualified");
     return true;
 }
-
 #ifdef ZCL_TESTING
 bool bundle_exporter_source_identity_is_exact_for_test(const char *source_id)
 {
@@ -101,14 +86,12 @@ bool bundle_exporter_source_identity_is_exact_for_test(const char *source_id)
             return false;
     return true;
 }
-
 bool bundle_exporter_at_tip_ok_for_test(bool synced, int log_head_gap,
                                         int64_t max_tip_gap)
 {
     return synced || (log_head_gap >= 0 &&
                       (int64_t)log_head_gap <= max_tip_gap);
 }
-
 bool bundle_exporter_export_due_for_test(
     int64_t h, int64_t last_h, int64_t elapsed_secs, int64_t every_blocks,
     int64_t every_secs, int64_t min_secs)
@@ -116,7 +99,6 @@ bool bundle_exporter_export_due_for_test(
     return h > last_h && elapsed_secs >= min_secs &&
            ((h - last_h) >= every_blocks || elapsed_secs >= every_secs);
 }
-
 void bundle_exporter_rotate_for_test(const char *dir, int keep,
                                      const char *datadir)
 {
@@ -124,12 +106,9 @@ void bundle_exporter_rotate_for_test(const char *dir, int keep,
     (void)keep;
     (void)datadir;
 }
-
 void bundle_exporter_set_rotate_skip_validate_for_test(bool on) { (void)on; }
 #endif
-
 #else
-
 #include <dirent.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -138,48 +117,37 @@ void bundle_exporter_set_rotate_skip_validate_for_test(bool on) { (void)on; }
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
-
 #include "bundle_exporter_generations_internal.h"
-
 /* ── Module state ───────────────────────────────────────────────── */
-
 static struct {
     pthread_mutex_t lock;
-
     sqlite3 *pdb;                 /* owned progress.kv handle (borrowed) */
     char     datadir[1024];
     char     bundles_dir[1100];   /* "<datadir>/bundles" */
-
     bool     session_open;        /* producer receipt session is held open */
     bool     qualified;           /* provenance qualified at start */
     char     degradation_reason[256];
     char     last_refusal[256];
-
     int64_t  every_blocks;        /* ZCL_BUNDLE_EXPORT_EVERY_BLOCKS (>=1) */
     int64_t  every_secs;          /* ZCL_BUNDLE_EXPORT_EVERY_SECS ceiling  */
     int64_t  min_secs;            /* ZCL_BUNDLE_EXPORT_MIN_SECS floor      */
     int64_t  max_tip_gap;         /* ZCL_BUNDLE_EXPORT_MAX_TIP_GAP at-tip  */
     int      keep;                /* ZCL_BUNDLE_EXPORT_KEEP (>=1) */
     int64_t  tick_secs;           /* ZCL_BUNDLE_EXPORT_TICK_SECS worker poll */
-
     pthread_t worker;
     bool      worker_running;     /* true iff `worker` is joinable */
 } g_bx = {
     .lock = PTHREAD_MUTEX_INITIALIZER,
 };
-
 static _Atomic int32_t g_bx_last_export_height   = -1;
 static _Atomic int64_t g_bx_last_export_time_us  = 0;
 static _Atomic int64_t g_bx_last_export_duration_us = 0;
 static _Atomic int64_t g_bx_exports_ok           = 0;
 static _Atomic int64_t g_bx_exports_failed       = 0;
-
 static atomic_bool g_bx_running = false;
 static _Atomic supervisor_child_id g_bx_supervisor_id = SUPERVISOR_INVALID_ID;
 static struct liveness_contract g_bx_contract;
-
 /* ── Small helpers ──────────────────────────────────────────────── */
-
 static void bx_note_refusal(const char *fmt, ...)
 {
     char buf[256];
@@ -191,7 +159,6 @@ static void bx_note_refusal(const char *fmt, ...)
     snprintf(g_bx.last_refusal, sizeof g_bx.last_refusal, "%s", buf);
     pthread_mutex_unlock(&g_bx.lock);
 }
-
 /* A degraded exporter is a SILENT production outage, and that is the whole
  * reason this exists. Qualification and the producer session are decided ONCE,
  * in bundle_exporter_start; nothing re-runs them in-process. So a node that
@@ -214,7 +181,6 @@ static void bx_name_degraded(const char *degradation)
     int32_t last_h = atomic_load(&g_bx_last_export_height);
     int64_t last_us = atomic_load(&g_bx_last_export_time_us);
     int64_t age_secs = last_us > 0 ? (GetTimeMicros() - last_us) / 1000000 : -1;
-
     /* blocker_init applies the shared visible-cut policy to this full reason. */
     char reason[512];
     if (last_h >= 0 && age_secs >= 0)
@@ -228,13 +194,11 @@ static void bx_name_degraded(const char *degradation)
                  "no consensus-state bundle has ever been minted here: "
                  "%.110s — cold-starting peers get no state source from this "
                  "node, and no in-process retry exists", degradation);
-
     struct blocker_record b;
     if (blocker_init(&b, "bundle_exporter.degraded", "bundle_exporter",
                      BLOCKER_DEPENDENCY, reason))
         (void)blocker_set(&b);
 }
-
 static int64_t bx_env_i64(const char *name, int64_t dflt)
 {
     const char *v = getenv(name);
@@ -247,7 +211,6 @@ static int64_t bx_env_i64(const char *name, int64_t dflt)
         return dflt;
     return (int64_t)parsed;
 }
-
 /* True iff `s` is the exact lowercase SHA-256 source identity baked by the
  * canonical build. Git object IDs intentionally stay outside the sovereign
  * executable (clientversion.c); producer receipts bind this same 32-byte
@@ -267,7 +230,6 @@ static bool bx_is_exact_source_id(const char *s)
     }
     return true;
 }
-
 /* The qualification gate — ALL must hold or the producer session stays closed
  * and `reason` names the first failing rung. The coins predicates read the
  * shared singleton progress.kv handle, which is only safe under
@@ -311,16 +273,13 @@ static bool bx_qualified(sqlite3 *pdb, char *reason, size_t cap)
         reason[0] = '\0';
     return true;
 }
-
 #ifdef ZCL_TESTING
 bool bundle_exporter_source_identity_is_exact_for_test(const char *source_id)
 {
     return bx_is_exact_source_id(source_id);
 }
 #endif
-
 /* ── GAP-1: at-tip + time-cadence gates (pure, unit-tested) ─────────── */
-
 /* GAP-1a — is the node close enough to the network tip to publish a STARTER
  * bundle? A fresh consumer must land on a near-tip generation; a
  * still-catching-up node would mint a stale starter. True iff SYNC_AT_TIP, or
@@ -336,7 +295,6 @@ static bool bx_at_tip_ok(bool synced, int log_head_gap, int64_t max_tip_gap)
         return false;
     return (int64_t)log_head_gap <= max_tip_gap;
 }
-
 /* GAP-1b — is an export DUE, given the durable tip height `h`, the last exported
  * height `last_h`, seconds since the last export `elapsed_secs`, and the three
  * cadence knobs? Two triggers, both fenced by a minimum-interval FLOOR so a
@@ -361,7 +319,6 @@ static bool bx_export_due(int64_t h, int64_t last_h, int64_t elapsed_secs,
         return false;
     return elapsed_secs >= min_secs;
 }
-
 #ifdef ZCL_TESTING
 bool bundle_exporter_at_tip_ok_for_test(bool synced, int log_head_gap,
                                         int64_t max_tip_gap)
@@ -377,9 +334,7 @@ bool bundle_exporter_export_due_for_test(int64_t h, int64_t last_h,
                          min_secs);
 }
 #endif
-
 /* ── One export attempt ─────────────────────────────────────────── */
-
 static void bx_try_export_once(void)
 {
     pthread_mutex_lock(&g_bx.lock);
@@ -394,14 +349,12 @@ static void bx_try_export_once(void)
     snprintf(bundles_dir, sizeof bundles_dir, "%s", g_bx.bundles_dir);
     snprintf(datadir, sizeof datadir, "%s", g_bx.datadir);
     pthread_mutex_unlock(&g_bx.lock);
-
     /* Belt+braces: the proof independently refuses while the overlay is live,
      * but never even finalize the receipt against a mutable in-RAM view. */
     if (coins_ram_active()) {
         bx_note_refusal("in-RAM overlay active");
         return;
     }
-
     /* The durable-tip read touches the shared singleton handle and does NOT
      * self-lock; serialize it with the reducer's batches. Brief: two indexed
      * lookups. (The receipt finalize + the snapshot pin below each take the
@@ -415,7 +368,6 @@ static void bx_try_export_once(void)
         bx_note_refusal("durable tip unavailable");
         return;
     }
-
     /* GAP-1b — time + block cadence. elapsed is measured from the last export's
      * wall-clock time (seeded from the newest on-disk generation's mtime at
      * start, so both cadences survive a restart). A zero/absent last-time means
@@ -431,11 +383,9 @@ static void bx_try_export_once(void)
         elapsed_secs = 0; /* clock skew → fail the floor, fail-safe */
     else
         elapsed_secs = (now_us - last_time_us) / 1000000;
-
     if (!bx_export_due((int64_t)h, (int64_t)last, elapsed_secs, every,
                        every_secs, min_secs))
         return; /* not due yet (block ceiling / time ceiling / min-secs floor) */
-
     /* GAP-1a — at-tip gate. A STARTER bundle must be near the network tip so a
      * fresh consumer lands there; a still-catching-up node would mint a stale
      * generation. node_health_collect(NULL,NULL) self-resolves the runtime
@@ -451,10 +401,8 @@ static void bx_try_export_once(void)
                         (long long)max_tip_gap);
         return;
     }
-
     char name[128];
     snprintf(name, sizeof name, BX_BUNDLE_PREFIX "%d" BX_BUNDLE_SUFFIX, h);
-
     /* Already exported this generation? Treat as done. */
     char full[1300];
     snprintf(full, sizeof full, "%s/%s", bundles_dir, name);
@@ -463,7 +411,6 @@ static void bx_try_export_once(void)
         atomic_store(&g_bx_last_export_height, h);
         return;
     }
-
     /* Roll the source receipt forward to the current durable tip. Monotonic:
      * an equal height is idempotent, a lower one is refused inside finalize. */
     char err[256] = "";
@@ -473,28 +420,24 @@ static void bx_try_export_once(void)
         atomic_fetch_add(&g_bx_exports_failed, 1);
         return;
     }
-
     int dir_fd = open(bundles_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (dir_fd < 0) {
         bx_note_refusal("open bundles dir failed: %s", strerror(errno));
         atomic_fetch_add(&g_bx_exports_failed, 1);
         return;
     }
-
     struct consensus_state_snapshot_export_request req;
     memset(&req, 0, sizeof req);
     req.output_dir_fd = dir_fd;
     req.output_name = name;
     req.expected_height = h;
     memcpy(req.expected_block_hash, hash, 32);
-
     struct consensus_state_export_result res;
     memset(&res, 0, sizeof res);
     int64_t t0 = GetTimeMicros();
     bool ok = consensus_state_snapshot_export_from_progress_snapshot(&req, &res);
     close(dir_fd);
     int64_t dur = GetTimeMicros() - t0;
-
     if (ok && res.status == CONSENSUS_EXPORT_EXPORTED) {
         atomic_store(&g_bx_last_export_height, h);
         atomic_store(&g_bx_last_export_time_us, GetTimeMicros());
@@ -541,24 +484,19 @@ static void bx_try_export_once(void)
                  res.reason[0] ? res.reason : "(none)");
     }
 }
-
 /* ── Worker loop ────────────────────────────────────────────────── */
-
 static void *bx_worker_main(void *arg)
 {
     (void)arg;
     supervisor_child_id id = atomic_load(&g_bx_supervisor_id);
-
     while (atomic_load(&g_bx_running)) {
         if (id != SUPERVISOR_INVALID_ID)
             supervisor_tick(id); /* heartbeat */
-
         pthread_mutex_lock(&g_bx.lock);
         int64_t tick = g_bx.tick_secs;
         pthread_mutex_unlock(&g_bx.lock);
         if (tick < 1)
             tick = 1;
-
         /* Sleep in <=1s increments so _stop stays responsive. */
         for (int64_t i = 0; i < tick && atomic_load(&g_bx_running); i++) {
             struct timespec ts = { .tv_sec = 1, .tv_nsec = 0 };
@@ -566,7 +504,6 @@ static void *bx_worker_main(void *arg)
         }
         if (!atomic_load(&g_bx_running))
             break;
-
         pthread_mutex_lock(&g_bx.lock);
         bool session = g_bx.session_open;
         pthread_mutex_unlock(&g_bx.lock);
@@ -584,30 +521,24 @@ static void *bx_worker_main(void *arg)
             bx_name_degraded(degradation);
             continue;
         }
-
         bx_try_export_once();
     }
     return NULL;
 }
-
 /* ── Lifecycle ──────────────────────────────────────────────────── */
-
 bool bundle_exporter_start(sqlite3 *pdb, const char *datadir)
 {
     if (!pdb || !datadir || !*datadir)
         LOG_FAIL("bundle_exporter",
                  "start: NULL progress handle or datadir — not armed");
-
     pthread_mutex_lock(&g_bx.lock);
     if (atomic_load(&g_bx_running)) {
         pthread_mutex_unlock(&g_bx.lock);
         return true; /* idempotent */
     }
-
     g_bx.pdb = pdb;
     snprintf(g_bx.datadir, sizeof g_bx.datadir, "%s", datadir);
     snprintf(g_bx.bundles_dir, sizeof g_bx.bundles_dir, "%s/bundles", datadir);
-
     g_bx.every_blocks = bx_env_i64("ZCL_BUNDLE_EXPORT_EVERY_BLOCKS", 5000);
     if (g_bx.every_blocks < 1)
         g_bx.every_blocks = 1;
@@ -630,18 +561,15 @@ bool bundle_exporter_start(sqlite3 *pdb, const char *datadir)
     g_bx.tick_secs = bx_env_i64("ZCL_BUNDLE_EXPORT_TICK_SECS", 30);
     if (g_bx.tick_secs < 1)
         g_bx.tick_secs = 1;
-
     if (mkdir(g_bx.bundles_dir, 0700) != 0 && errno != EEXIST)
         LOG_WARN("bundle_exporter", "mkdir %s failed: %s",
                  g_bx.bundles_dir, strerror(errno));
-
     char bundles_dir[1100];
     int64_t every = g_bx.every_blocks;
     int keep = g_bx.keep;
     int64_t tick = g_bx.tick_secs;
     snprintf(bundles_dir, sizeof bundles_dir, "%s", g_bx.bundles_dir);
     pthread_mutex_unlock(&g_bx.lock);
-
     /* Qualify + (maybe) open the producer session — OUTSIDE g_bx.lock: both
      * bx_qualified and receipt_begin take progress_store_tx_lock, and this
      * module keeps the two locks strictly disjoint (no nesting order exists,
@@ -674,26 +602,22 @@ bool bundle_exporter_start(sqlite3 *pdb, const char *datadir)
         LOG_WARN("bundle_exporter",
                  "not qualified: %s (degraded, still armed)", reason);
     }
-
     pthread_mutex_lock(&g_bx.lock);
     g_bx.session_open = session_open;
     g_bx.qualified = qualified;
     snprintf(g_bx.degradation_reason, sizeof g_bx.degradation_reason, "%s",
              degradation);
     pthread_mutex_unlock(&g_bx.lock);
-
     int64_t newest_mtime_us = 0;
     atomic_store(&g_bx_last_export_height,
                  bx_scan_newest(bundles_dir, &newest_mtime_us));
     atomic_store(&g_bx_last_export_time_us, newest_mtime_us);
-
     /* Name it now, not one worker tick from now: the generation scan above is
      * what supplies the staleness numbers, so this is the first moment the
      * blocker can carry them. The worker re-fires it on every tick. */
     if (!session_open)
         bx_name_degraded(degradation[0] ? degradation
                                         : "producer session not open");
-
     /* Register the supervised (best-effort, no-stall) contract. */
     if (supervisor_start()) {
         liveness_contract_init(&g_bx_contract, "ops.bundle_exporter");
@@ -710,7 +634,6 @@ bool bundle_exporter_start(sqlite3 *pdb, const char *datadir)
         LOG_WARN("bundle_exporter",
                  "supervisor_start failed; exporter runs unsupervised");
     }
-
     atomic_store(&g_bx_running, true);
     int rc = thread_registry_spawn("zcl_bundle_exp", bx_worker_main, NULL,
                                    &g_bx.worker);
@@ -728,11 +651,9 @@ bool bundle_exporter_start(sqlite3 *pdb, const char *datadir)
     pthread_mutex_unlock(&g_bx.lock);
     return true;
 }
-
 void bundle_exporter_stop(void)
 {
     atomic_store(&g_bx_running, false);
-
     pthread_t th;
     bool joinable = false;
     pthread_mutex_lock(&g_bx.lock);
@@ -744,15 +665,12 @@ void bundle_exporter_stop(void)
     pthread_mutex_unlock(&g_bx.lock);
     if (joinable)
         pthread_join(th, NULL);
-
     atomic_store(&g_bx_contract.completed, true);
     supervisor_child_id id = atomic_load(&g_bx_supervisor_id);
     if (id != SUPERVISOR_INVALID_ID)
         supervisor_child_complete(id);
 }
-
 /* ── Boot service registration ──────────────────────────────────── */
-
 static bool bx_service_start(void *ctx)
 {
     const char *datadir = ctx;
@@ -761,13 +679,11 @@ static bool bx_service_start(void *ctx)
     (void)bundle_exporter_start(progress_store_db(), datadir);
     return true;
 }
-
 static void bx_service_stop(void *ctx)
 {
     (void)ctx;
     bundle_exporter_stop();
 }
-
 bool bundle_exporter_register_service(struct zcl_service_kernel *kernel,
                                       const char *datadir)
 {
@@ -780,16 +696,13 @@ bool bundle_exporter_register_service(struct zcl_service_kernel *kernel,
     };
     return zcl_service_kernel_register(kernel, &spec);
 }
-
 /* ── `z23 dumpstate bundle_exporter` ────────────────────── */
-
 bool bundle_exporter_dump_state_json(struct json_value *out, const char *key)
 {
     (void)key;
     if (!out)
         return false;
     json_set_object(out);
-
     /* Atomics read directly; string fields under a brief lock. */
     char degradation_reason[256];
     char last_refusal[256];
@@ -810,7 +723,6 @@ bool bundle_exporter_dump_state_json(struct json_value *out, const char *key)
     snprintf(last_refusal, sizeof last_refusal, "%s", g_bx.last_refusal);
     snprintf(bundles_dir, sizeof bundles_dir, "%s", g_bx.bundles_dir);
     pthread_mutex_unlock(&g_bx.lock);
-
     json_push_kv_bool(out, "session_open", session_open);
     json_push_kv_bool(out, "qualified", qualified);
     json_push_kv_str(out, "degradation_reason", degradation_reason);
@@ -829,7 +741,6 @@ bool bundle_exporter_dump_state_json(struct json_value *out, const char *key)
     json_push_kv_int(out, "max_tip_gap", max_tip_gap);
     json_push_kv_int(out, "keep", keep);
     json_push_kv_str(out, "bundles_dir", bundles_dir);
-
     /* Generations currently on disk (heights present), newest first. */
     struct bx_gen gens[BX_MAX_GENERATIONS];
     int n = 0;
@@ -847,7 +758,6 @@ bool bundle_exporter_dump_state_json(struct json_value *out, const char *key)
         closedir(d);
     }
     qsort(gens, (size_t)n, sizeof gens[0], bx_gen_cmp_desc);
-
     struct json_value arr;
     json_init(&arr);
     json_set_array(&arr);
@@ -860,8 +770,6 @@ bool bundle_exporter_dump_state_json(struct json_value *out, const char *key)
     }
     json_push_kv(out, "generations", &arr);
     json_free(&arr);
-
     return true;
 }
-
 #endif /* _WIN32 */

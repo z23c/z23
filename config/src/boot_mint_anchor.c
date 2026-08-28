@@ -48,7 +48,6 @@
 #include "config/mint_anchor_progress.h"
 #include "config/consensus_state_producer_receipt.h"
 #include "config/consensus_state_snapshot_export.h"  /* consensus_state_snapshot_export */
-
 #include <errno.h>
 #include <fcntl.h>           /* open, O_DIRECTORY */
 #include <stdbool.h>
@@ -59,7 +58,6 @@
 #include <sys/stat.h>
 #include <unistd.h>          /* _exit */
 #include <sqlite3.h>
-
 #include "chain/checkpoints.h"                  /* get_sha3_utxo_checkpoint */
 #include "storage/coins_kv.h"                   /* coins_kv_snapshot_write,
                                                  * coins_kv_get_applied_height,
@@ -81,7 +79,6 @@
 #include "util/blocker.h"                       /* blocker_init, blocker_set */
 #include "util/log_macros.h"
 #include "core/utiltime.h"                       /* GetTimeMicros */
-
 bool boot_mint_anchor_normal_boot_gate(sqlite3 *progress_db)
 {
     char reason[512];
@@ -95,7 +92,6 @@ bool boot_mint_anchor_normal_boot_gate(sqlite3 *progress_db)
                 reason[0] ? reason : "profile_scan_failed");
     return false;
 }
-
 void boot_mint_anchor_require_producer_lane(sqlite3 *progress_db,
                                             bool checkpoint_fold)
 {
@@ -107,7 +103,6 @@ void boot_mint_anchor_require_producer_lane(sqlite3 *progress_db,
                 "mint_anchor producer_lane_profile_mismatch");
     _exit(EXIT_FAILURE);
 }
-
 /* The utxo_apply frontier is a NEXT-height cursor: applied-through `h` means
  * coins_applied_height == h+1. Read it; return -1 when unknown (absent). */
 static int32_t mint_applied_through(sqlite3 *pdb)
@@ -118,7 +113,6 @@ static int32_t mint_applied_through(sqlite3 *pdb)
         return -1;
     return frontier - 1;
 }
-
 /* The IMMEDIATE fold frontier: the utxo_apply STAGE cursor (next height to
  * apply; batch-committed by the drain). This is the drive loop's progress
  * metric. mint_applied_through above reads the durable coins_applied_height
@@ -137,7 +131,6 @@ static int32_t mint_frontier_through(void)
         return INT32_MAX;
     return (int32_t)cursor - 1;
 }
-
 /* Fail-closed stall diagnosis: the fold frontier stopped below the anchor.
  * Read the eight durable stage cursors, name the WALLED stage (the earliest
  * pipeline stage sitting at the minimum cursor — upstream of the wall runs
@@ -158,13 +151,11 @@ void boot_mint_anchor_report_frontier_walled(sqlite3 *pdb, int32_t frontier,
     uint64_t cur[8] = {0};
     for (int i = 0; i < 8; i++)
         cur[i] = stage_cursor_persisted(pdb, stages[i], "mint_anchor");
-
     int wall = 0;
     for (int i = 1; i < 7; i++)          /* exclude tip_finalize (index 7) */
         if (cur[i] < cur[wall])
             wall = i;
     bool bodies_gap = (wall == 2);       /* body_fetch */
-
     char reason[BLOCKER_REASON_MAX];
     snprintf(reason, sizeof(reason),
              "mint fold frontier walled at h=%d (anchor=%d) after %d "
@@ -175,14 +166,12 @@ void boot_mint_anchor_report_frontier_walled(sqlite3 *pdb, int32_t frontier,
              (unsigned long long)cur[2], (unsigned long long)cur[3],
              (unsigned long long)cur[4], (unsigned long long)cur[5],
              (unsigned long long)cur[6], (unsigned long long)cur[7]);
-
     struct blocker_record rec;
     if (blocker_init(&rec, "mint_fold.frontier_walled", "mint_anchor",
                      BLOCKER_PERMANENT, reason))
         (void)blocker_set(&rec);
     event_emitf(EV_OPERATOR_NEEDED, 0,
                 "condition=mint_fold_frontier_walled %s", reason);
-
     if (bodies_gap)
         fprintf(stderr,
                 "[mint-anchor] fold stalled at applied-through=%d (target "
@@ -197,7 +186,6 @@ void boot_mint_anchor_report_frontier_walled(sqlite3 *pdb, int32_t frontier,
                 "its stage log at the frontier height. (%s)\n",
                 frontier, anchor, stages[wall], reason);
 }
-
 bool boot_mint_anchor_stamp_sovereign_markers(sqlite3 *pdb)
 {
     if (!pdb)
@@ -210,7 +198,6 @@ bool boot_mint_anchor_stamp_sovereign_markers(sqlite3 *pdb)
                  "stamp sovereign markers: self-folded stamp failed");
     return true;
 }
-
 bool boot_mint_anchor_run(const char *datadir)
 {
     const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
@@ -225,7 +212,6 @@ bool boot_mint_anchor_run(const char *datadir)
     int32_t ff_target = -1;
     const bool full_fold = boot_full_fold_is_armed(&ff_target);
     const int32_t anchor = full_fold ? ff_target : cp->height;
-
     sqlite3 *pdb = progress_store_db();
     if (!pdb) {
         fprintf(stderr, "FATAL: -mint-anchor: progress store not open\n");
@@ -236,7 +222,6 @@ bool boot_mint_anchor_run(const char *datadir)
         fprintf(stderr, "FATAL: -mint-anchor: no activation controller\n");
         _exit(EXIT_FAILURE);
     }
-
     /* Producer-START ownership of the durable source receipt (see
      * config/consensus_state_producer_receipt.h): record the running executable
      * + source-identity claim and publish the source-epoch digest BEFORE the
@@ -262,7 +247,6 @@ bool boot_mint_anchor_run(const char *datadir)
                     profile == CONSENSUS_STATE_VALIDATION_FULL
                         ? "full" : "checkpoint_fold");
     }
-
     /* (1) Drive the fold to the anchor. reducer_kick_unbudgeted drains the same
      * eight-stage pipeline the supervisor uses, under the activation mutex (no
      * race with the background ticks) AND with the reducer-drive guard held so
@@ -304,7 +288,6 @@ bool boot_mint_anchor_run(const char *datadir)
                 "[mint-anchor] S1.2: event_log emission suppressed for the fold "
                 "(artifact reads coins_kv + shielded only)\n");
     }
-
     /* S1.3: progress.kv synchronous=OFF for the fold's duration. This is the
      * same IBD durability trade the live sync path already makes via
      * progress_store_set_sync_mode() from the staged-sync supervisor tick —
@@ -325,7 +308,6 @@ bool boot_mint_anchor_run(const char *datadir)
                 "(bodies still fdatasync'd before each COMMIT; restored to "
                 "NORMAL+checkpoint at the anchor)\n");
     }
-
     int32_t last_through = mint_frontier_through();
     if (last_through < 0)
         last_through = mint_applied_through(pdb);  /* pre-init fallback */
@@ -341,13 +323,11 @@ bool boot_mint_anchor_run(const char *datadir)
             anchor, last_through, progress_log);
     boot_mint_anchor_progress_log_tick(progress_log, last_through, anchor,
                            drive_start_us, /*force=*/true);
-
     /* Serial mint pipeline: mark this drive thread so every stage step reads the
      * un-flushed overlay via coins_kv_overlay_safe() (the writer bracket only
      * spans utxo_apply). Sound ONLY because the mint fold is single-threaded.
      * Balanced on every exit path below. */
     coins_ram_mint_drive_enter();
-
     /* Cross-height proof pre-verification (jobs/pv_lookahead.h): workers
      * verify shielded proofs AHEAD of this drive so the pv stage consumes
      * cached verdicts instead of paying 13-18ms serial per block. The workers
@@ -361,26 +341,22 @@ bool boot_mint_anchor_run(const char *datadir)
         fprintf(stderr, "[mint-anchor] proof lookahead %s\n",
                 lookahead ? "started" : "unavailable — folding serially");
     }
-
     /* WAL policy: once the overlay is the write path, hold auto-checkpoints off
      * and TRUNCATE the WAL at each overlay flush boundary (where the durable
      * coins_applied_height advances), bounding WAL growth without an fsync per
      * commit. SQLite default when the overlay is opted out (ZCL_FOLD_INRAM=0). */
     bool wal_manual = false;
     int32_t last_durable = -1;
-
     for (;;) {
         int32_t through = mint_frontier_through();
         if (through >= anchor)
             break;
-
         /* Bounded drain chunk: returns within ZCL_MINT_KICK_BUDGET_MS (or at
          * the first frontier-stalled round) so THIS loop reliably regains
          * control to log progress and run the stall detector below — an
          * unbounded kick can otherwise spin silently for hours with no
          * progress line and no stall guard ever running. */
         (void)reducer_kick_unbudgeted(ctl);
-
         if (!wal_manual && coins_ram_active()) {
             mint_wal_autocheckpoint(pdb, 0);
             wal_manual = true;
@@ -397,7 +373,6 @@ bool boot_mint_anchor_run(const char *datadir)
                 last_durable = durable_now;
             }
         }
-
         int32_t now = mint_frontier_through();
         /* Throttled on-disk progress (every ~5s) — readable while the fold
          * runs, regardless of the sparse stderr cadence below. */
@@ -440,16 +415,13 @@ bool boot_mint_anchor_run(const char *datadir)
             return false;
         }
     }
-
     if (lookahead)
         proof_validate_lookahead_stop();
     coins_ram_mint_drive_exit();
-
     int32_t through = mint_frontier_through();
     int64_t count = coins_kv_count(pdb);
     boot_mint_anchor_progress_log_tick(progress_log, through, anchor, drive_start_us,
                            /*force=*/true);
-
     /* Restore durability BEFORE any artifact derives from the DB (shared by the
      * mint ceremony AND the -full-fold early return): NORMAL first (set_sync_mode
      * does not checkpoint), then wal_checkpoint(TRUNCATE) so every fold write is
@@ -467,17 +439,14 @@ bool boot_mint_anchor_run(const char *datadir)
         mint_wal_autocheckpoint(pdb, 1000);
         (void)progress_store_checkpoint();
     }
-
     /* -full-fold: SKIP the cp->height ceremony; verdict + tip bundle export. */
     if (full_fold)
         return boot_full_fold_conclude(pdb, datadir, through, count, anchor,
                                        kStallLimit);
-
     fprintf(stderr,
             "[mint-anchor] fold reached the anchor: applied-through=%d, "
             "coins_kv count=%lld — writing the snapshot\n",
             through, (long long)count);
-
     /* (2) Write the snapshot artifact. Output path: $ZCL_MINT_ANCHOR_OUT, else
      * <datadir>/utxo-anchor.snapshot. */
     char out_path[1100];
@@ -488,7 +457,6 @@ bool boot_mint_anchor_run(const char *datadir)
         snprintf(out_path, sizeof(out_path), "%s/utxo-anchor.snapshot",
                  datadir ? datadir : ".");
     }
-
     /* Collect the live SHIELDED frontier at the anchor (Sapling + Sprout
      * commitment-tree frontiers + the nullifier set) so the legacy artifact is
      * a locally self-minted current-state candidate, not a coins-only borrow.
@@ -508,7 +476,6 @@ bool boot_mint_anchor_run(const char *datadir)
                     "mint_anchor shielded_collect_failed h=%d", anchor);
         _exit(EXIT_FAILURE);
     }
-
     uint8_t got_sha3[32] = {0};
     uint64_t got_count = 0;
     int64_t  got_supply = 0;
@@ -522,7 +489,6 @@ bool boot_mint_anchor_run(const char *datadir)
         _exit(EXIT_FAILURE);
     }
     snapshot_shielded_free_collected(&shielded);
-
     /* Coins-only commitment over the SAME effective set the writer streamed.
      * got_sha3 is the v3 BODY SHA3 (coins + shielded section), so it is NOT the
      * coins commitment the compiled checkpoint pins; compute that separately,
@@ -539,7 +505,6 @@ bool boot_mint_anchor_run(const char *datadir)
         unlink(out_path);
         _exit(EXIT_FAILURE);
     }
-
     /* (3) HARD-ASSERT the written set == the compiled checkpoint. The writer's
      * body SHA3 equals coins_kv_commitment (same record encoder),
      * so a match here proves our independently-folded anchor set reproduces
@@ -572,11 +537,9 @@ bool boot_mint_anchor_run(const char *datadir)
         unlink(out_path);
         _exit(EXIT_FAILURE);
     }
-
     /* (3b) HARD-ASSERT the shielded keystone: anchors/nullifiers/frontier
      * folds == the compiled ROM state checkpoint (boot_mint_anchor_rom_keystone.c). */
     boot_mint_anchor_rom_keystone_assert(pdb, out_path);
-
     char sha3_hex[65];
     for (int i = 0; i < 32; i++)
         snprintf(sha3_hex + 2 * i, 3, "%02x", coins_sha3[i]);
@@ -595,7 +558,6 @@ bool boot_mint_anchor_run(const char *datadir)
                  "[mint-anchor] verified snapshot was written, but clearing "
                  "the resume marker failed; future -mint-anchor runs may "
                  "resume/rewrite the same verified artifact");
-
     /* Producer-END ownership: finalize the durable source receipt, binding it
      * to the completed (anchor, cp->block_hash) generation and the H*+1 fold
      * cursor, and verifying the SAME running executable that opened the start
@@ -620,7 +582,6 @@ bool boot_mint_anchor_run(const char *datadir)
                     anchor, anchor + 1);
         }
     }
-
     /* Producer-END part 2 (lane A1): emit the contained full-history
      * zcl.consensus_state_bundle.v1 into the datadir. The exporter's ONLY
      * viable caller is this in-process point (its proof binds the running

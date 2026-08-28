@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* Arm-independent: the snapshot struct's layout (and therefore its padding
@@ -150,8 +151,8 @@ bool platform_positioned_file_open_beneath(
     HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
     FARPROC symbol = ntdll ? GetProcAddress(ntdll, "NtCreateFile") : NULL;
     nt_create_file_fn create_file = NULL;
-    _Static_assert(sizeof(create_file) == sizeof(symbol),
-                   "Windows function pointer representations must match");
+    static_assert(sizeof(create_file) == sizeof(symbol),
+                  "Windows function pointer representations must match");
     memcpy(&create_file, &symbol, sizeof(create_file));
     HANDLE handle = INVALID_HANDLE_VALUE;
     HANDLE current = directory;
@@ -543,9 +544,15 @@ bool platform_positioned_file_snapshot(
     *snapshot = (struct platform_positioned_file_snapshot){
         .size = (uint64_t)st.st_size,
         .modified_seconds = (int64_t)st.st_mtime,
+#if defined(__APPLE__)
+        .modified_nanoseconds = (uint32_t)st.st_mtimespec.tv_nsec,
+        .changed_seconds = (int64_t)st.st_ctime,
+        .changed_nanoseconds = (uint32_t)st.st_ctimespec.tv_nsec,
+#else
         .modified_nanoseconds = (uint32_t)st.st_mtim.tv_nsec,
         .changed_seconds = (int64_t)st.st_ctime,
         .changed_nanoseconds = (uint32_t)st.st_ctim.tv_nsec,
+#endif
         .volume = (uint64_t)st.st_dev,
         .file_low = (uint64_t)st.st_ino,
         .file_high = 0,
@@ -564,8 +571,9 @@ bool platform_positioned_file_path(
     char proc[64];
     int n = snprintf(proc, sizeof(proc), "/proc/self/fd/%d", fd);
     if (n <= 0 || (size_t)n >= sizeof(proc)) return false;
+    if (path_size < 2) return false;
     ssize_t got = readlink(proc, path, path_size - 1);
-    if (got < 0 || (size_t)got >= path_size) return false;
+    if (got < 0 || (size_t)got >= path_size - 1) return false;
     path[got] = '\0';
     return true;
 #endif

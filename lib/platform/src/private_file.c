@@ -3,6 +3,7 @@
  * purpose: exclusive-create, lock, and durable-retire operations on a
  * single private file, portable across POSIX and Windows. */
 #include "platform/private_file.h"
+#include "base/safe_alloc.h"
 
 #include "base/safe_alloc.h"
 
@@ -63,6 +64,36 @@ static bool pf_utf8(const wchar_t *wide, char *out, size_t out_size) {
   return n > 0;
 }
 
+static PSECURITY_DESCRIPTOR pf_private_descriptor(void) {
+  HANDLE token = NULL;
+  DWORD bytes = 0;
+  if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
+    return NULL;
+  (void)GetTokenInformation(token, TokenUser, NULL, 0, &bytes);
+  TOKEN_USER *user = bytes
+      ? zcl_malloc(bytes, "platform-private-file-token-user") : NULL;
+  if (!user || !GetTokenInformation(token, TokenUser, user, bytes, &bytes)) {
+    free(user);
+    CloseHandle(token);
+    return NULL;
+  }
+  LPWSTR sid = NULL;
+  bool sid_ok = ConvertSidToStringSidW(user->User.Sid, &sid) != 0;
+  free(user);
+  CloseHandle(token);
+  if (!sid_ok) return NULL;
+  wchar_t rule[512];
+  int n = swprintf(rule, sizeof(rule) / sizeof(rule[0]),
+                   L"D:P(A;;FA;;;SY)(A;;FA;;;%ls)", sid);
+  LocalFree(sid);
+  PSECURITY_DESCRIPTOR descriptor = NULL;
+  if (n <= 0 || (size_t)n >= sizeof(rule) / sizeof(rule[0]) ||
+      !ConvertStringSecurityDescriptorToSecurityDescriptorW(
+          rule, SDDL_REVISION_1, &descriptor, NULL))
+    return NULL;
+  return descriptor;
+}
+
 void platform_private_file_init(struct platform_private_file *file) {
   if (file) {
     file->native = (uintptr_t)INVALID_HANDLE_VALUE;
@@ -78,10 +109,8 @@ static bool pf_open(const char *path, DWORD creation,
   PSECURITY_DESCRIPTOR descriptor = NULL;
   SECURITY_ATTRIBUTES security = {.nLength = sizeof(security)};
   if (creation == CREATE_NEW) {
-    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            L"D:P(A;;FA;;;SY)(A;;FA;;;OW)", SDDL_REVISION_1, &descriptor,
-            NULL))
-      return false;
+    descriptor = pf_private_descriptor();
+    if (!descriptor) return false;
     security.lpSecurityDescriptor = descriptor;
   }
   HANDLE h = CreateFileW(wide, GENERIC_READ | GENERIC_WRITE | DELETE,
@@ -574,8 +603,14 @@ bool platform_private_file_replace(struct platform_private_file *f,
 }
 bool platform_private_file_retire(struct platform_private_file *f,
                                   const char *path) {
-  (void)f;
-  return unlink(path) == 0 || errno == ENOENT;
+  struct stat held, named;
+  if (!f || !path || fstat(pf_fd(f), &held) != 0 ||
+      lstat(path, &named) != 0 || !S_ISREG(held.st_mode) ||
+      !S_ISREG(named.st_mode) || held.st_dev != named.st_dev ||
+      held.st_ino != named.st_ino || unlink(path) != 0)
+    return false;
+  platform_private_file_close(f);
+  return true;
 }
 bool platform_private_file_retire_if_identity(
     struct platform_private_file *f, const char *path,
@@ -654,6 +689,8 @@ bool platform_private_path_absent(const char *p) {
 bool platform_private_file_link_no_clobber(
     const char *s, const char *d,
     const struct platform_private_file_identity *si, bool *same) {
+  if (!s || !d || !si || !same)
+    return false;
   *same = false;
   struct stat source;
   if (lstat(s, &source) || !S_ISREG(source.st_mode) ||
@@ -666,8 +703,8 @@ bool platform_private_file_link_no_clobber(
   struct stat st;
   if (lstat(d, &st))
     return false;
-  bool identity_matches = (uint64_t)st.st_dev == si->volume &&
-                          (uint64_t)st.st_ino == si->file;
+  bool identity_matches = S_ISREG(st.st_mode) &&
+      (uint64_t)st.st_dev == si->volume && (uint64_t)st.st_ino == si->file;
   *same = !created && identity_matches;
   if (created && !identity_matches)
     (void)unlink(d);

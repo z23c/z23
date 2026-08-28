@@ -15,6 +15,7 @@
 #endif
 #include <windows.h>
 #include <io.h>
+
 #else
 #include <sys/mman.h>
 #endif
@@ -98,11 +99,11 @@ void platform_read_mapping_advise_sequential(
         HANDLE, ULONG_PTR,
         const struct platform_win_memory_range_entry *, ULONG);
     HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
-    FARPROC symbol = kernel
-        ? GetProcAddress(kernel, "PrefetchVirtualMemory") : NULL;
+    FARPROC symbol = kernel ? GetProcAddress(kernel, "PrefetchVirtualMemory")
+                            : NULL;
     prefetch_virtual_memory_fn prefetch = NULL;
-    _Static_assert(sizeof(prefetch) == sizeof(symbol),
-                   "Windows function pointer representations must match");
+    static_assert(sizeof(prefetch) == sizeof(symbol),
+                  "Windows function pointer representations must match");
     memcpy(&prefetch, &symbol, sizeof(prefetch));
     if (prefetch) {
         struct platform_win_memory_range_entry range = {

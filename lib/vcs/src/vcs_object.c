@@ -59,7 +59,19 @@ static bool zvcs_path(const char *repo_root, const char *suffix,
 
 static bool ensure_dir(const char *path)
 {
-    return platform_private_directory_ensure(path);
+    if (platform_private_directory_ensure(path))
+        return true;
+#if !defined(_WIN32)
+    /* Existing public code repositories may be world-readable. Preserve that
+     * compatibility only when the directory is real, owner-controlled, and
+     * not writable by group or other users. New stores remain mode 0700. */
+    struct stat st;
+    return lstat(path, &st) == 0 && S_ISDIR(st.st_mode) &&
+           !S_ISLNK(st.st_mode) && st.st_uid == geteuid() &&
+           (st.st_mode & 0022) == 0;
+#else
+    return false;
+#endif
 }
 
 bool vcs_object_store_init(const char *repo_root)

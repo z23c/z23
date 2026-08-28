@@ -13,25 +13,12 @@
 #include "primitives/transaction.h"
 #include "storage/disk_block_io.h"
 
-/* Internal seam: the owned-lifetime block mapping
- * (node_db_catchup_block_mapping_{init,open_quiet,close}) is declared in this
- * shape's sibling-file-only header, not the public
- * services/node_db_catchup_service.h. Reaching into a shape's own _internal.h
- * from a focused test has established precedent — see
- * test_block_source_policy_status_json.c (services/block_source_policy_internal.h)
- * and test_utxo_apply_stage.c (jobs/utxo_apply_stage_internal.h). */
-#include "../../../app/services/src/node_db_catchup_internal.h"
-
 #include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <stdio.h>
-
 
 #define NDC_CHECK(name, expr) do { \
     printf("node_db_catchup_service: %s... ", (name)); \
@@ -50,39 +37,27 @@ int test_node_db_catchup_service(void)
     snprintf(blocks, sizeof(blocks), "%s/blocks", dir);
     mkdir(blocks, 0755);
 
-    /* The block mapping owns BOTH the descriptor and the mapped range, so
-     * every probe below is paired with node_db_catchup_block_mapping_close()
-     * — that is what the old munmap(data, sz) becomes, plus the close(fd) the
-     * old raw-pointer seam never had to do.
-     *
-     * `bm.mapping.size = 99` before a probe is the direct analogue of the old
-     * `size_t sz = 99` out-param sentinel: it proves a quiet failure
-     * re-initializes the mapping rather than leaving the caller's stale size
-     * standing. It is safe with data == NULL because
-     * platform_read_mapping_close() only unmaps when data is non-NULL. */
-    struct node_db_catchup_block_mapping bm;
-    node_db_catchup_block_mapping_init(&bm);
-
-    bm.mapping.size = 99;
-    struct zcl_result opened =
-        node_db_catchup_block_mapping_open_quiet(&bm, dir, 7);
-    const uint8_t *data = bm.mapping.data;
-    size_t sz = bm.mapping.size;
-    node_db_catchup_block_mapping_close(&bm);
+    size_t sz = 99;
+    int err = 0;
+    void *mapping = NULL;
+    const uint8_t *data = NULL;
+    bool opened = node_db_catchup_test_block_mapping_open(
+        dir, 7, &mapping, &data, &sz, &err);
     NDC_CHECK("missing block file is quiet ENOENT",
-              !opened.ok && data == NULL && sz == 0 && opened.code == ENOENT);
+              !opened && mapping == NULL && data == NULL &&
+              sz == 0 && err == ENOENT);
 
     char path[512];
     snprintf(path, sizeof(path), "%s/blk00008.dat", blocks);
     int fd = open(path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
     if (fd >= 0) close(fd);
-    bm.mapping.size = 99;
-    opened = node_db_catchup_block_mapping_open_quiet(&bm, dir, 8);
-    data = bm.mapping.data;
-    sz = bm.mapping.size;
-    node_db_catchup_block_mapping_close(&bm);
+    sz = 99;
+    err = 0;
+    opened = node_db_catchup_test_block_mapping_open(
+        dir, 8, &mapping, &data, &sz, &err);
     NDC_CHECK("empty block file is quiet EINVAL",
-              !opened.ok && data == NULL && sz == 0 && opened.code == EINVAL);
+              !opened && mapping == NULL && data == NULL &&
+              sz == 0 && err == EINVAL);
 
     snprintf(path, sizeof(path), "%s/blk00009.dat", blocks);
     fd = open(path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
@@ -90,18 +65,15 @@ int test_node_db_catchup_service(void)
     bool wrote = fd >= 0 &&
         write(fd, bytes, sizeof(bytes)) == (ssize_t)sizeof(bytes);
     if (fd >= 0) close(fd);
-    opened = node_db_catchup_block_mapping_open_quiet(&bm, dir, 9);
-    data = bm.mapping.data;
-    sz = bm.mapping.size;
-    bool mapped = wrote && opened.ok && data != NULL && sz == sizeof(bytes) &&
-                  opened.code == 0 && memcmp(data, bytes, sizeof(bytes)) == 0;
-    node_db_catchup_block_mapping_close(&bm);
+    sz = 0;
+    err = 0;
+    opened = node_db_catchup_test_block_mapping_open(
+        dir, 9, &mapping, &data, &sz, &err);
+    bool mapped = wrote && opened && mapping != NULL && data != NULL &&
+                  sz == sizeof(bytes) && err == 0 &&
+                  memcmp(data, bytes, sizeof(bytes)) == 0;
+    node_db_catchup_test_block_mapping_close(mapping);
     NDC_CHECK("valid block file maps", mapped);
-    /* The close above must release the descriptor the mapping owns, not just
-     * the mapped range: a leaked fd here would accumulate across the catchup
-     * walk that reuses one mapping per block file. */
-    NDC_CHECK("closing a mapping releases its descriptor and range",
-              bm.fd < 0 && bm.mapping.data == NULL && bm.mapping.size == 0);
 
     NDC_CHECK("header target defers catchup for a two-block canonical gap",
               node_db_catchup_tail_fold_in_progress(102, 100));

@@ -6,6 +6,7 @@
 #include "base/hex.h"
 #include "controllers/agent_impact_rules.h"
 #include "json/json.h"
+#include "platform/directory_compat.h"
 #include "presentation/model.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
@@ -378,7 +379,9 @@ void zcl_native_handle_presentation_code_change(
     const char *after_behavior = npc_str(request->input, "after_behavior");
     char workspace[PATH_MAX];
     uint8_t before_root[32], candidate_root[32];
-    if (!workspace_arg || !realpath(workspace_arg, workspace) ||
+    if (!workspace_arg ||
+        !platform_directory_canonical_real(workspace_arg, workspace,
+                                           sizeof(workspace)) ||
         !before_root_hex || !candidate_root_hex ||
         !zcl_hex_decode_lower(before_root_hex, before_root, 32) ||
         !zcl_hex_decode_lower(candidate_root_hex, candidate_root, 32) ||

@@ -6,6 +6,9 @@
 #include "base/checked.h"
 #include "base/hex.h"
 #include "json/json.h"
+#if defined(_WIN32)
+#include "platform/directory_transaction.h"
+#endif
 #include "sha3/sha3.h"
 #include "vcs/package_prepare.h"
 #include "vcs/zcode_dev_product.h"
@@ -16,6 +19,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(_WIN32)
+#include <process.h>
+#endif
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -111,6 +117,35 @@ static bool zproject_infer_name(const char *workspace, char *out, size_t cap)
 static bool zproject_infer_license(const char *workspace, char *out,
                                    size_t cap)
 {
+#if defined(_WIN32)
+    struct platform_directory_transaction root;
+    struct platform_directory_child file;
+    struct platform_directory_child_info info;
+    platform_directory_transaction_init(&root);
+    platform_directory_child_init(&file);
+    if (!platform_directory_transaction_open(&root, workspace) ||
+        !platform_directory_child_open(&root, "LICENSE", &file) ||
+        !platform_directory_child_info(&file, &info) || info.size > 8192u) {
+        platform_directory_child_close(&file);
+        platform_directory_transaction_close(&root);
+        return false;
+    }
+    char text[8193];
+    size_t used = (size_t)info.size;
+    struct platform_directory_child_info after;
+    bool ok = platform_directory_child_read_exact(&file, text, used, 0) &&
+        platform_directory_child_info(&file, &after) &&
+        after.volume == info.volume && after.file_low == info.file_low &&
+        after.file_high == info.file_high && after.size == info.size &&
+        after.modified_seconds == info.modified_seconds &&
+        after.modified_nanoseconds == info.modified_nanoseconds &&
+        after.changed_seconds == info.changed_seconds &&
+        after.changed_nanoseconds == info.changed_nanoseconds;
+    platform_directory_child_close(&file);
+    platform_directory_transaction_close(&root);
+    if (!ok)
+        return false;
+#else
     int root = open(workspace, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (root < 0)
         return false;
@@ -139,6 +174,7 @@ static bool zproject_infer_license(const char *workspace, char *out,
     close(fd);
     if (!ok)
         return false;
+#endif
     text[used] = '\0';
     const char *license = NULL;
     if (strstr(text, "Apache License") || strstr(text, "Apache-2.0"))
@@ -605,6 +641,7 @@ void zcl_native_handle_zcode_project_init_plan(
                          "zcode project inspect");
 }
 
+#if !defined(_WIN32)
 static bool zproject_write_all(int fd, const char *text)
 {
     size_t off = 0, len = strlen(text);
@@ -618,6 +655,7 @@ static bool zproject_write_all(int fd, const char *text)
     }
     return true;
 }
+#endif
 
 void zcl_native_handle_zcode_project_init_commit(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
@@ -654,6 +692,42 @@ void zcl_native_handle_zcode_project_init_commit(
                          "zcode project init plan");
         return;
     }
+#if defined(_WIN32)
+    struct platform_directory_transaction root;
+    struct platform_directory_child staged;
+    platform_directory_transaction_init(&root);
+    platform_directory_child_init(&staged);
+    if (!platform_directory_transaction_open(&root, workspace)) {
+        zproject_fail_at(reply, "PROJECT_INIT_OPEN", "init_commit",
+                         "workspace could not be reopened as a private real directory",
+                         "zcode project init plan");
+        return;
+    }
+    char staged_leaf[80];
+    int staged_n = snprintf(staged_leaf, sizeof(staged_leaf),
+                            ".zcode-package.%ld.tmp", (long)_getpid());
+    bool staged_created = false;
+    size_t configuration_len = strlen(plan.configuration);
+    bool written = staged_n > 0 && (size_t)staged_n < sizeof(staged_leaf) &&
+        platform_directory_child_create(&root, staged_leaf, &staged) &&
+        (staged_created = true) &&
+        platform_directory_child_write_exact(&staged, plan.configuration,
+                                             configuration_len, 0) &&
+        platform_directory_child_flush(&staged) &&
+        platform_directory_child_replace(&root, &staged,
+                                         VCS_PACKAGE_DEPS_META_PATH, true) &&
+        platform_directory_transaction_flush(&root);
+    platform_directory_child_close(&staged);
+    if (!written && staged_created)
+        (void)platform_directory_child_unlink(&root, staged_leaf, true);
+    platform_directory_transaction_close(&root);
+    if (!written) {
+        zproject_fail_at(reply, "PROJECT_INIT_OVERWRITE_REFUSED", "init_commit",
+                         "metadata exists or its atomic durable creation failed",
+                         "zcode project status");
+        return;
+    }
+#else
     int root = open(workspace, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (root < 0) {
         zproject_fail_at(reply, "PROJECT_INIT_OPEN", "init_commit",
@@ -686,6 +760,7 @@ void zcl_native_handle_zcode_project_init_commit(
                          "zcode project init plan");
         return;
     }
+#endif
     struct vcs_package_prepare_options options = {
         .dir = workspace,
         .publisher_sequence = 1,
@@ -699,12 +774,22 @@ void zcl_native_handle_zcode_project_init_commit(
     enum vcs_package_prepare_error err = vcs_package_prepare(
         &options, &prepared, detail, sizeof(detail));
     if (err != VCS_PACKAGE_PREPARE_OK) {
+#if defined(_WIN32)
+        struct platform_directory_transaction cleanup_root;
+        platform_directory_transaction_init(&cleanup_root);
+        if (platform_directory_transaction_open(&cleanup_root, workspace)) {
+            (void)platform_directory_child_unlink(
+                &cleanup_root, VCS_PACKAGE_DEPS_META_PATH, true);
+            platform_directory_transaction_close(&cleanup_root);
+        }
+#else
         int cleanup_root = open(workspace, O_RDONLY | O_DIRECTORY | O_CLOEXEC |
                                            O_NOFOLLOW);
         if (cleanup_root >= 0) {
             (void)unlinkat(cleanup_root, VCS_PACKAGE_DEPS_META_PATH, 0);
             close(cleanup_root);
         }
+#endif
         vcs_package_prepared_free(&prepared);
         zproject_fail_at(reply, "PROJECT_INIT_VALIDATION_FAILED", "init_commit",
                          detail[0] ? detail : "created metadata did not prepare",

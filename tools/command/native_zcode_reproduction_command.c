@@ -4,13 +4,16 @@
 
 #include "base/hex.h"
 #include "json/json.h"
+#include "platform/private_directory.h"
 #include "vcs/vcs_object.h"
 #include "vcs/zcode_reproduction_request.h"
 
-#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
+#include <errno.h>
 #include <sys/stat.h>
+#endif
 
 static const char *zrr_str(const struct json_value *input, const char *key)
 {
@@ -140,7 +143,15 @@ static void zrr_handle(const struct zcl_command_request *request,
     uint8_t wire[VCS_ZCODE_REPRODUCTION_REQUEST_WIRE_BYTES], root[32];
     const char *workspace = NULL;
     if (!zrr_parse(request, reply, &parsed, wire, root, &workspace)) return;
-    if (persist && mkdir(workspace, 0700) != 0 && errno != EEXIST) {
+    bool workspace_ready = true;
+    if (persist) {
+#if defined(_WIN32)
+        workspace_ready = platform_private_directory_ensure(workspace);
+#else
+        workspace_ready = mkdir(workspace, 0700) == 0 || errno == EEXIST;
+#endif
+    }
+    if (!workspace_ready) {
         zrr_fail(reply, "REPRODUCTION_WORKSPACE_CREATE_REFUSED",
                  "explicit scratch workspace root could not be created");
         return;

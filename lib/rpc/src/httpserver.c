@@ -5,6 +5,7 @@
 #include "platform/time_compat.h"
 #include "platform/socket_compat.h"
 #include "rpc/httpserver.h"
+#include "httpserver_transport.h"
 #include "rpc/http_middleware.h"
 #include <sys/stat.h>
 #include "rpc/rpc_timeout.h"
@@ -85,14 +86,6 @@
  * watchdog is not a substitute: it fails open when its 128 slots are
  * exhausted and is disabled outright by ZCL_RPC_TIMEOUT_MS=0. */
 #define RPC_HTTP_SOCKET_TIMEOUT_SEC 5
-
-/* ── Connection abstraction for plain + TLS ───────────────────────── */
-
-struct rpc_conn {
-    platform_socket_t fd;
-    SSL    *ssl;         /* NULL for plain-text connections */
-    int64_t admitted_us; /* monotonic stamp set by enqueue_client() */
-};
 
 static platform_socket_t g_listen_fd = PLATFORM_SOCKET_INVALID;
 static const struct rpc_table *g_table = NULL;
@@ -251,85 +244,10 @@ static bool check_auth(const char *auth_header)
     return ok;
 }
 
-/* ── I/O wrappers: plain fd or SSL ─────────────────────────────── */
-
-static int conn_read(const struct rpc_conn *c, void *buf, size_t len)
-{
-    if (c->ssl)
-        return SSL_read(c->ssl, buf, len > INT32_MAX ? INT32_MAX : (int)len);
-    return platform_socket_receive(c->fd, buf, len);
-}
-
-static int conn_write(const struct rpc_conn *c, const void *buf, size_t len)
-{
-    if (c->ssl)
-        return SSL_write(c->ssl, buf, len > INT32_MAX ? INT32_MAX : (int)len);
-    return platform_socket_send(c->fd, buf, len);
-}
-
-/* Send the whole buffer, or give up. A blocking write() with
- * SO_SNDTIMEO set returns SHORT when the window closes mid-transfer,
- * so the send deadline that stops a non-reading client from parking a
- * worker would otherwise truncate a large response into a corrupt
- * reply. The rule here is progress, not wall-clock: any bytes accepted
- * restart the deadline, so a slow-but-live client is served in full
- * however long it takes, and only a client that moves ZERO bytes for a
- * whole RPC_HTTP_SOCKET_TIMEOUT_SEC window is dropped. Returns false
- * when the connection is finished; the caller is already unwinding to
- * done: on any subsequent failure. */
-static bool conn_write_all(const struct rpc_conn *c, const void *buf, size_t len)
-{
-    const char *p = (const char *)buf;
-    size_t sent = 0;
-
-    while (sent < len) {
-        int w = conn_write(c, p + sent, len - sent);
-        if (w > 0) {
-            sent += (size_t)w;
-            continue;
-        }
-        if (w < 0 && platform_socket_error_interrupted(
-                         platform_socket_last_error()))
-            continue;
-        return false;
-    }
-    return true;
-}
-
 /* Cap request-header count so an endless-header stream (a slowloris variant)
  * cannot pin a server thread reading header lines forever. Legitimate
  * RPC/metrics/WebSocket clients send well under this. */
 #define HTTP_MAX_REQUEST_HEADERS 512
-
-static bool read_line(const struct rpc_conn *c, char *buf, size_t buflen)
-{
-    size_t pos = 0;
-    while (pos < buflen - 1) {
-        char ch;
-        int r = conn_read(c, &ch, 1);
-        if (r <= 0) return false;
-        if (ch == '\n') {
-            if (pos > 0 && buf[pos - 1] == '\r')
-                pos--;
-            buf[pos] = '\0';
-            return true;
-        }
-        buf[pos++] = ch;
-    }
-    buf[pos] = '\0';
-    return true;
-}
-
-static bool read_exact(const struct rpc_conn *c, char *buf, size_t len)
-{
-    size_t total = 0;
-    while (total < len) {
-        int r = conn_read(c, buf + total, len - total);
-        if (r <= 0) return false;
-        total += (size_t)r;
-    }
-    return true;
-}
 
 static void send_response_with_type(const struct rpc_conn *c, int status_code,
                                      const char *status_text,

@@ -498,10 +498,14 @@ bool zcl_hotswap_service_activate_so(
     return zcl_hotswap_service_activate_so_any(
         so_path, resolved_datadir, request_activate, contracts, 1, report);
 }
+#else
+#define ZCL_HOTSWAP_SERVICE_UNAVAILABLE 1
 #endif /* !_WIN32 */
+#else
+#define ZCL_HOTSWAP_SERVICE_UNAVAILABLE 1
 #endif /* ZCL_DEV_BUILD */
 
-#if !defined(ZCL_DEV_BUILD) || defined(_WIN32)
+#ifdef ZCL_HOTSWAP_SERVICE_UNAVAILABLE
 bool zcl_hotswap_service_activate_so_any(
     const char *so_path, const char *resolved_datadir, bool request_activate,
     const struct zcl_hotswap_service_contract *const *contracts,
@@ -532,4 +536,5 @@ bool zcl_hotswap_service_activate_so(
     return zcl_hotswap_service_activate_so_any(
         so_path, resolved_datadir, request_activate, contracts, 1, report);
 }
-#endif /* !ZCL_DEV_BUILD || _WIN32 */
+#endif /* ZCL_HOTSWAP_SERVICE_UNAVAILABLE */
+#undef ZCL_HOTSWAP_SERVICE_UNAVAILABLE

@@ -5,6 +5,7 @@
  * (exactly two non-inherited allow ACEs, one per grantee) still match it.
  * An empty translation unit on POSIX. */
 #include "private_acl_internal.h"
+#include "base/safe_alloc.h"
 
 #if defined(_WIN32)
 #include "base/safe_alloc.h"

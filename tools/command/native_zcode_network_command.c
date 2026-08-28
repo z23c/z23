@@ -11,6 +11,8 @@
 #include "models/zid_identity.h"
 #include "net/v2_identity.h"
 #include "platform/time_compat.h"
+#include "platform/positioned_file.h"
+#include "platform/file_metadata.h"
 #include "support/cleanse.h"
 #include "validation/main_constants.h"
 #include "vcs/zcode_dht.h"
@@ -20,13 +22,10 @@
 #include "json/json.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 #define ZDN_COMMAND "zcode.network.delegate"
 
@@ -67,21 +66,31 @@ static bool zdn_u64(const struct json_value *in, const char *key, uint64_t *out,
 
 static bool zdn_read_master_seed(const char *path, uint8_t out[32], char *err,
                                  size_t err_cap) {
-  int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-  if (fd < 0) {
+  struct platform_positioned_file file;
+  struct platform_positioned_file_snapshot before, after;
+  platform_positioned_file_init(&file);
+  if (!platform_positioned_file_open(&file, path)) {
     snprintf(err, err_cap, "cannot open master seed: %s", strerror(errno));
     return false;
   }
-  struct stat st;
-  if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
-      ((st.st_mode & 0777) != 0600 && (st.st_mode & 0777) != 0400)) {
-    close(fd);
-    snprintf(err, err_cap, "master seed must be a regular mode-0400/0600 file");
+  if (!platform_positioned_file_is_current_user_only(&file) ||
+      !platform_positioned_file_snapshot(&file, &before) ||
+      (before.size != 64 && before.size != 65)) {
+    platform_positioned_file_close(&file);
+    snprintf(err, err_cap, "master seed must be a private regular file");
     return false;
   }
   char hex[66];
-  ssize_t n = read(fd, hex, sizeof(hex));
-  close(fd);
+  int64_t n = platform_positioned_file_read(&file, hex, (size_t)before.size, 0);
+  bool stable = platform_positioned_file_snapshot(&file, &after) &&
+      before.size == after.size && before.volume == after.volume &&
+      before.file_low == after.file_low && before.file_high == after.file_high &&
+      before.modified_seconds == after.modified_seconds &&
+      before.modified_nanoseconds == after.modified_nanoseconds &&
+      before.changed_seconds == after.changed_seconds &&
+      before.changed_nanoseconds == after.changed_nanoseconds;
+  platform_positioned_file_close(&file);
+  if (!stable) n = -1;
   if (n != 64 && !(n == 65 && hex[64] == '\n')) {
     memory_cleanse(hex, sizeof(hex));
     snprintf(err, err_cap, "master seed must contain exactly 64 hex chars");
@@ -161,11 +170,12 @@ static enum zdn_existing_result zdn_existing_sequence(const char *datadir,
     snprintf(err, err_cap, "delegation path too long");
     return ZDN_EXISTING_CORRUPT;
   }
-  if (access(path, F_OK) != 0) {
-    if (errno == ENOENT)
-      return ZDN_EXISTING_ABSENT;
-    snprintf(err, err_cap, "cannot inspect existing delegation: %s",
-             strerror(errno));
+  struct platform_file_metadata metadata;
+  enum platform_file_metadata_result probe =
+      platform_file_metadata_read(path, &metadata);
+  if (probe != PLATFORM_FILE_METADATA_OK) {
+    if (probe == PLATFORM_FILE_METADATA_MISSING) return ZDN_EXISTING_ABSENT;
+    snprintf(err, err_cap, "cannot inspect existing delegation safely");
     return ZDN_EXISTING_CORRUPT;
   }
   struct vcs_zcode_dht_delegation old;
