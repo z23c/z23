@@ -20,6 +20,7 @@
 #include "net/port_policy.h"
 #include "core/random.h"
 #include "util/log_macros.h"
+#include "util/thread_work_probe.h"
 #include <errno.h>
 #include <poll.h>
 #include <stdio.h>
@@ -617,6 +618,17 @@ void *thread_open_connections(void *arg)
     static int64_t s_last_addrman_attempt = 0;
     uint64_t open_iterations = 0;
     thread_liveness_beat(&g_open_liveness, 0);
+
+    /* Publish this thread's kernel id. The loop marker restamped below says
+     * only "a whole pass finished"; one pass is allowed by the code beneath it
+     * to block on DEFAULT_CONNECT_TIMEOUT plus a full onion-connect budget per
+     * onion candidate (with one retry on a fresh budget), which routinely
+     * exceeds any watchdog window on a healthy node dialing a slow or dead
+     * hidden service. The tid lets a liveness gate ask the kernel whether this
+     * thread is still working while that pass is in flight, instead of
+     * concluding it is dead because Tor was slow. */
+    atomic_store_explicit(&cm->dial_thread_tid, thread_work_probe_self_tid(),
+                          memory_order_relaxed);
 
     while (!g_stop) {
         atomic_store_explicit(&cm->dial_scheduler_last_progress_us,
