@@ -1,4 +1,5 @@
-/* Headless acceptance for concurrent, cursor-free positioned file reads. */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Headless acceptance for concurrent, cursor-free positioned file reads. */
 #include "platform/positioned_file.h"
 
 #include <stdio.h>

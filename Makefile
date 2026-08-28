@@ -99,7 +99,8 @@ ZCL_ZERO_SHA256 = 00000000000000000000000000000000000000000000000000000000000000
 # loop, so it has to answer in ~2 s, not ~13 s.
 ZCL_HOTSWAP_LOOP_GOALS := hotswap-try hotswap-apply hotswap \
 	presentation-lib presentation-demo presentation-relaunch \
-	presentation-desktop-install presentation-portability
+	presentation-desktop-install presentation-portability \
+	windows-acceptance-compile windows-acceptance
 ZCL_HOTSWAP_LOOP_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_HOTSWAP_LOOP_GOALS),$(MAKECMDGOALS))),,1),)
 
 # hotswap-module-so compiles exactly one TU via a direct $(CC) shell command in
@@ -1553,6 +1554,43 @@ presentation-portability: presentation-demo
 	else \
 		printf '%s\n' 'presentation-portability: MinGW unavailable (Windows cross-link skipped)'; \
 	fi
+
+include lib/platform/tests/windows_acceptance.mk
+
+ZCL_WINDOWS_ACCEPTANCE_CC ?= x86_64-w64-mingw32-gcc
+ZCL_WINDOWS_ACCEPTANCE_DIR := build/tests/windows
+ZCL_WINDOWS_ACCEPTANCE_FLAGS := -std=c2x -O2 -Wall -Wextra -Werror \
+	-pedantic -static -D_POSIX_C_SOURCE=200809L -D_WIN32_WINNT=0x0600 \
+	-DWIN32_LEAN_AND_MEAN -D__USE_MINGW_ANSI_STDIO=1 \
+	-Ilib/base/include -Ilib/platform/include -Iapp/controllers/include \
+	-Ilib/json/include -Ilib/util/include
+ZCL_WINDOWS_ACCEPTANCE_BINS := $(addprefix \
+	$(ZCL_WINDOWS_ACCEPTANCE_DIR)/,$(addsuffix .exe,$(ZCL_WINDOWS_ACCEPTANCE_TESTS)))
+
+define ZCL_WINDOWS_ACCEPTANCE_RULE
+$$(ZCL_WINDOWS_ACCEPTANCE_DIR)/$(1).exe: \
+	$$(ZCL_WINDOWS_ACCEPTANCE_$(1)_SOURCES)
+	@mkdir -p $$(@D)
+	$$(ZCL_WINDOWS_ACCEPTANCE_CC) $$(ZCL_WINDOWS_ACCEPTANCE_FLAGS) \
+		$$(ZCL_WINDOWS_ACCEPTANCE_$(1)_SOURCES) \
+		$$(ZCL_WINDOWS_ACCEPTANCE_$(1)_LIBS) -o $$@
+endef
+$(foreach test,$(ZCL_WINDOWS_ACCEPTANCE_TESTS), \
+	$(eval $(call ZCL_WINDOWS_ACCEPTANCE_RULE,$(test))))
+
+.PHONY: windows-acceptance-compile windows-acceptance
+windows-acceptance-compile: $(ZCL_WINDOWS_ACCEPTANCE_BINS)
+	@printf '%s\n' 'windows-acceptance: strict C23 cross-link PASS'
+
+windows-acceptance: windows-acceptance-compile
+	@command -v wine >/dev/null 2>&1 || { \
+		printf '%s\n' 'windows-acceptance: REFUSE: Wine unavailable; use windows-acceptance-compile for cross-link evidence'; \
+		exit 2; \
+	}; \
+	for executable in $(ZCL_WINDOWS_ACCEPTANCE_BINS); do \
+		WINEDEBUG=-all wine "$$executable" || exit; \
+	done; \
+	printf '%s\n' 'windows-acceptance: execution PASS'
 
 .PHONY: worktree-prime
 # Formalizes the "cp -a vendor/lib before a fresh worktree can link" tribal

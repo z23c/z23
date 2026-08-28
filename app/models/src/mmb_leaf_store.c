@@ -51,7 +51,8 @@ static bool mmb_leaf_store_map(struct mmb_leaf_store *store, size_t size)
 static bool mmb_leaf_store_sync(struct mmb_leaf_store *store)
 {
     if (!store->dirty) return true;
-    if (platform_data_sync(store->fd) != 0) return false;
+    if (platform_data_sync(store->fd) != 0)
+        LOG_FAIL("mmb_leaf_store", "data sync failed for %s", store->path);
     store->dirty = false;
     return true;
 }
@@ -160,7 +161,7 @@ bool mmb_leaf_store_remap(struct mmb_leaf_store *store)
     if ((st.st_size % 32) != 0)
         return false;
     if (!mmb_leaf_store_sync(store))
-        return false;
+        LOG_FAIL("mmb_leaf_store", "sync before remap failed for %s", store->path);
 
     store->num_leaves = (uint64_t)st.st_size / 32;
     store->capacity = store->num_leaves;

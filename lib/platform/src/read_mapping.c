@@ -1,4 +1,5 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Purpose: Read-only mappings backed by an already-open descriptor. */
 
 #include "platform/read_mapping.h"
 
@@ -10,6 +11,11 @@
 #endif
 #include <windows.h>
 #include <io.h>
+
+struct platform_windows_memory_range {
+    PVOID virtual_address;
+    SIZE_T number_of_bytes;
+};
 #else
 #include <sys/mman.h>
 #endif
@@ -59,16 +65,17 @@ void platform_read_mapping_advise_sequential(
     /* Resolve this Windows 8+ API dynamically so older MinGW header feature
      * levels do not decide whether this implementation compiles. */
     typedef BOOL (WINAPI *prefetch_virtual_memory_fn)(
-        HANDLE, ULONG_PTR, const WIN32_MEMORY_RANGE_ENTRY *, ULONG);
+        HANDLE, ULONG_PTR, const struct platform_windows_memory_range *, ULONG);
     HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
-    prefetch_virtual_memory_fn prefetch = kernel
-        ? (prefetch_virtual_memory_fn)(void *)GetProcAddress(
-              kernel, "PrefetchVirtualMemory")
-        : NULL;
+    FARPROC symbol = kernel ? GetProcAddress(kernel, "PrefetchVirtualMemory")
+                            : NULL;
+    prefetch_virtual_memory_fn prefetch = NULL;
+    static_assert(sizeof(prefetch) == sizeof(symbol));
+    memcpy(&prefetch, &symbol, sizeof(prefetch));
     if (prefetch) {
-        WIN32_MEMORY_RANGE_ENTRY range = {
-            .VirtualAddress = (PVOID)mapping->data,
-            .NumberOfBytes = mapping->size,
+        struct platform_windows_memory_range range = {
+            .virtual_address = (PVOID)mapping->data,
+            .number_of_bytes = mapping->size,
         };
         (void)prefetch(GetCurrentProcess(), 1, &range, 0);
     }

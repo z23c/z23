@@ -1,4 +1,5 @@
-/* Compile-time acceptance for the project's portable printf annotation. */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Compile-time acceptance for the project's portable printf annotation. */
 
 #include "base/format_attribute.h"
 

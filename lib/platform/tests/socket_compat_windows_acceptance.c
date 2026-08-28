@@ -1,8 +1,13 @@
-/* Headless native acceptance for Winsock lifecycle and socket options. */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Headless native acceptance for Winsock lifecycle and socket options. */
 #include "platform/socket_compat.h"
 
 #include <stdio.h>
 #include <string.h>
+#if !defined(_WIN32)
+#include <fcntl.h>
+#include <sys/resource.h>
+#endif
 
 int main(void)
 {
@@ -22,13 +27,24 @@ int main(void)
         platform_socket_close(socket_handle);
         return 5;
     }
-    if (platform_socket_close(socket_handle) != 0) return 6;
-
 #if defined(_WIN32)
     if (!platform_socket_error_refused(WSAECONNREFUSED)) return 7;
 #else
     if (!platform_socket_error_refused(ECONNREFUSED)) return 7;
+    struct rlimit descriptors;
+    if (getrlimit(RLIMIT_NOFILE, &descriptors) != 0) return 8;
+    if (descriptors.rlim_cur <= FD_SETSIZE) {
+        rlim_t needed = (rlim_t)FD_SETSIZE + 1u;
+        if (needed > descriptors.rlim_max) return 8;
+        descriptors.rlim_cur = needed;
+        if (setrlimit(RLIMIT_NOFILE, &descriptors) != 0) return 8;
+    }
+    platform_socket_t high = fcntl(socket_handle, F_DUPFD, FD_SETSIZE);
+    if (high < FD_SETSIZE || platform_socket_wait_writable(high, 0) < 0 ||
+        platform_socket_wait_readable(high, 0) < 0 || close(high) != 0)
+        return 9;
 #endif
+    if (platform_socket_close(socket_handle) != 0) return 6;
     puts("socket_compat_acceptance: PASS");
     return 0;
 }

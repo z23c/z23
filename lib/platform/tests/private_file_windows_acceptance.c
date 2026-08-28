@@ -1,7 +1,10 @@
-/* Focused native acceptance test for the private-file publication seam. */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Focused native acceptance test for the private-file publication seam. */
 #include "platform/private_file.h"
 
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>
@@ -10,6 +13,16 @@ static int fail(const char *message) {
   fprintf(stderr, "FAIL: %s (win32=%lu)\n", message,
           (unsigned long)GetLastError());
   return 1;
+}
+
+static bool join_path(char *out, size_t capacity, const char *root,
+                      const char *suffix) {
+  size_t root_size = strlen(root), suffix_size = strlen(suffix);
+  if (root_size >= capacity || suffix_size >= capacity - root_size)
+    return false;
+  memcpy(out, root, root_size);
+  memcpy(out + root_size, suffix, suffix_size + 1u);
+  return true;
 }
 
 int main(void) {
@@ -25,11 +38,12 @@ int main(void) {
     return fail("temporary path encoding");
   char stage[4 * MAX_PATH], destination[4 * MAX_PATH], resolved[4 * MAX_PATH],
       parent[4 * MAX_PATH], conflict[4 * MAX_PATH];
-  snprintf(stage, sizeof(stage), "%s\\stage.part", dir);
-  snprintf(destination, sizeof(destination), "%s\\result.bin", dir);
-  snprintf(conflict, sizeof(conflict), "%s\\conflict.bin", dir);
   char invalid[4 * MAX_PATH];
-  snprintf(invalid, sizeof(invalid), "%s\\file:stream", dir);
+  if (!join_path(stage, sizeof(stage), dir, "\\stage.part") ||
+      !join_path(destination, sizeof(destination), dir, "\\result.bin") ||
+      !join_path(conflict, sizeof(conflict), dir, "\\conflict.bin") ||
+      !join_path(invalid, sizeof(invalid), dir, "\\file:stream"))
+    return fail("fixture path");
   if (platform_private_path_resolve("relative\\file", resolved,
                                     sizeof(resolved), parent,
                                     sizeof(parent)) ||
@@ -39,11 +53,13 @@ int main(void) {
       platform_private_path_resolve(invalid, resolved, sizeof(resolved),
                                     parent, sizeof(parent)))
     return fail("unsafe path accepted");
-  snprintf(invalid, sizeof(invalid), "%s\\CON.txt", dir);
+  if (!join_path(invalid, sizeof(invalid), dir, "\\CON.txt"))
+    return fail("reserved path");
   if (platform_private_path_resolve(invalid, resolved, sizeof(resolved),
                                     parent, sizeof(parent)))
     return fail("reserved device leaf accepted");
-  snprintf(invalid, sizeof(invalid), "%s\\trailing.", dir);
+  if (!join_path(invalid, sizeof(invalid), dir, "\\trailing."))
+    return fail("trailing-dot path");
   if (platform_private_path_resolve(invalid, resolved, sizeof(resolved),
                                     parent, sizeof(parent)))
     return fail("ambiguous trailing-dot leaf accepted");
@@ -104,7 +120,9 @@ int main(void) {
   /* Replacement stays tied to the verified staging handle and replaces an
    * existing destination atomically. */
   char replacement[4 * MAX_PATH];
-  snprintf(replacement, sizeof(replacement), "%s\\replacement.part", dir);
+  if (!join_path(replacement, sizeof(replacement), dir,
+                 "\\replacement.part"))
+    return fail("replacement path");
   if (!platform_private_file_create(replacement, &second) ||
       !platform_private_file_write_at(&second, payload, sizeof(payload), 0) ||
       !platform_private_file_replace(&second, replacement, conflict) ||

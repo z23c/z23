@@ -1,4 +1,5 @@
-/* Native acceptance for the bounded platform glob matcher. */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Native acceptance for the bounded platform glob matcher. */
 #include "platform/glob_match.h"
 
 #include <stdio.h>

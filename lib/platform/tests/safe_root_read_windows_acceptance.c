@@ -18,20 +18,29 @@ static int failures;
 
 static bool write_utf8(const char *path, const char *bytes)
 {
+    wchar_t wide[32768];
     int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
-                                NULL, 0);
-    wchar_t *wide = n > 0 ? malloc((size_t)n * sizeof(*wide)) : NULL;
-    if (!wide || !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
-                                      wide, n)) { free(wide); return false; }
+                                wide, 32768);
+    if (n <= 0) return false;
     HANDLE h = CreateFileW(wide, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
                            FILE_ATTRIBUTE_NORMAL, NULL);
-    free(wide);
     if (h == INVALID_HANDLE_VALUE) return false;
     DWORD wrote = 0;
     bool ok = WriteFile(h, bytes, (DWORD)strlen(bytes), &wrote, NULL) &&
               wrote == strlen(bytes);
     CloseHandle(h);
     return ok;
+}
+
+static bool join_path(char *out, size_t capacity, const char *root,
+                      const char *suffix)
+{
+    size_t root_size = strlen(root), suffix_size = strlen(suffix);
+    if (root_size >= capacity || suffix_size >= capacity - root_size)
+        return false;
+    memcpy(out, root, root_size);
+    memcpy(out + root_size, suffix, suffix_size + 1u);
+    return true;
 }
 
 int main(void)
@@ -45,12 +54,12 @@ int main(void)
     CHECK("root UTF-8", WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
           root_wide, -1, root, sizeof(root), NULL, NULL) != 0);
     char sub[MAX_PATH * 4], file[MAX_PATH * 4];
-    snprintf(sub, sizeof(sub), "%s/%s", root, "caf\xc3\xa9");
+    CHECK("sub path", join_path(sub, sizeof(sub), root, "/caf\xc3\xa9"));
     wchar_t sub_wide[MAX_PATH];
     CHECK("sub UTF-16", MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
           sub, -1, sub_wide, MAX_PATH) != 0);
     CHECK("create unicode directory", CreateDirectoryW(sub_wide, NULL));
-    snprintf(file, sizeof(file), "%s/page.txt", sub);
+    CHECK("file path", join_path(file, sizeof(file), sub, "/page.txt"));
     CHECK("write unicode file", write_utf8(file, "native-c23"));
 
     uint8_t *data = NULL;

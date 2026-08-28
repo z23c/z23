@@ -1,7 +1,10 @@
-/* Headless native acceptance for UTF-8 directory creation and enumeration. */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Headless native acceptance for UTF-8 directory creation and enumeration. */
 #include "platform/directory_compat.h"
 
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>
@@ -11,6 +14,17 @@ static int fail(const char *message)
     fprintf(stderr, "FAIL: %s (win32=%lu)\n", message,
             (unsigned long)GetLastError());
     return 1;
+}
+
+static bool join_path(char *out, size_t capacity, const char *root,
+                      const char *suffix)
+{
+    size_t root_size = strlen(root), suffix_size = strlen(suffix);
+    if (root_size >= capacity || suffix_size >= capacity - root_size)
+        return false;
+    memcpy(out, root, root_size);
+    memcpy(out + root_size, suffix, suffix_size + 1u);
+    return true;
 }
 
 int main(void)
@@ -27,10 +41,11 @@ int main(void)
         return fail("UTF-8 root creation");
 
     char alpha[4 * MAX_PATH], unicode[4 * MAX_PATH], plain[4 * MAX_PATH];
-    snprintf(alpha, sizeof(alpha), "%s/20260101_000000", root);
-    snprintf(unicode, sizeof(unicode), "%s/20260101_000002-\xE9\x9B\xAA", root);
-    snprintf(plain, sizeof(plain), "%s/plain-file", root);
-    if (!platform_directory_ensure(unicode, 0700) ||
+    if (!join_path(alpha, sizeof(alpha), root, "/20260101_000000") ||
+        !join_path(unicode, sizeof(unicode), root,
+                   "/20260101_000002-\xE9\x9B\xAA") ||
+        !join_path(plain, sizeof(plain), root, "/plain-file") ||
+        !platform_directory_ensure(unicode, 0700) ||
         !platform_directory_ensure(alpha, 0700))
         return fail("child creation");
     HANDLE file;
@@ -44,7 +59,8 @@ int main(void)
 
     wchar_t link_wide[4 * MAX_PATH], alpha_wide[4 * MAX_PATH];
     char link[4 * MAX_PATH];
-    snprintf(link, sizeof(link), "%s/20260101_000001", root);
+    if (!join_path(link, sizeof(link), root, "/20260101_000001"))
+        return fail("link path");
     MultiByteToWideChar(CP_UTF8, 0, link, -1, link_wide, 4 * MAX_PATH);
     MultiByteToWideChar(CP_UTF8, 0, alpha, -1, alpha_wide, 4 * MAX_PATH);
     bool made_link = CreateSymbolicLinkW(link_wide, alpha_wide,

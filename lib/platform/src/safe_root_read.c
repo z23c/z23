@@ -1,5 +1,7 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Purpose: Bounded descriptor-relative reads beneath a trusted root. */
 #include "platform/safe_root_read.h"
+#include "base/safe_alloc.h"
 
 #include <stdbool.h>
 #include <stdlib.h>
@@ -41,10 +43,12 @@ static bool native_file_functions(nt_create_file_fn *create_file,
 {
     HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
     if (!ntdll) return false;
-    *create_file = (nt_create_file_fn)(void *)GetProcAddress(ntdll,
-                                                             "NtCreateFile");
-    *to_dos_error = (rtl_status_to_dos_error_fn)(void *)GetProcAddress(
-        ntdll, "RtlNtStatusToDosError");
+    FARPROC create_symbol = GetProcAddress(ntdll, "NtCreateFile");
+    FARPROC error_symbol = GetProcAddress(ntdll, "RtlNtStatusToDosError");
+    static_assert(sizeof(*create_file) == sizeof(create_symbol));
+    static_assert(sizeof(*to_dos_error) == sizeof(error_symbol));
+    memcpy(create_file, &create_symbol, sizeof(*create_file));
+    memcpy(to_dos_error, &error_symbol, sizeof(*to_dos_error));
     return *create_file != NULL && *to_dos_error != NULL;
 }
 
@@ -63,7 +67,8 @@ static bool utf8_to_wide(const char *input, wchar_t **output)
     int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, input, -1,
                                 NULL, 0);
     if (n <= 0) return false;
-    wchar_t *wide = malloc((size_t)n * sizeof(*wide));
+    wchar_t *wide = zcl_malloc((size_t)n * sizeof(*wide),
+                               "safe-root-wide-path");
     if (!wide) return false;
     if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, input, -1,
                              wide, n)) {
@@ -165,7 +170,8 @@ enum platform_safe_root_read_result platform_safe_root_read(
                 goto done;
             }
             size_t wanted = (size_t)length.QuadPart;
-            uint8_t *buffer = malloc(wanted ? wanted : 1);
+            uint8_t *buffer = zcl_malloc(wanted ? wanted : 1,
+                                         "safe-root-read-buffer");
             if (!buffer) goto done;
             size_t offset = 0;
             while (offset < wanted) {
@@ -243,7 +249,8 @@ enum platform_safe_root_read_result platform_safe_root_read(
             result = PLATFORM_SAFE_ROOT_READ_TOO_LARGE; break;
         }
         size_t wanted = (size_t)st.st_size;
-        uint8_t *buffer = malloc(wanted ? wanted : 1);
+        uint8_t *buffer = zcl_malloc(wanted ? wanted : 1,
+                                     "safe-root-read-buffer");
         if (!buffer) break;
         size_t offset = 0;
         while (offset < wanted) {

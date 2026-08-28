@@ -1,5 +1,5 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Read-only whole-file mappings backed by an already-open file descriptor. */
+ * Purpose: Read-only mappings backed by an already-open descriptor. */
 
 #ifndef ZCL_PLATFORM_READ_MAPPING_H
 #define ZCL_PLATFORM_READ_MAPPING_H

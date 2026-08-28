@@ -1,5 +1,7 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Purpose: Handle-bound private file publication across POSIX and Win32. */
 #include "platform/private_file.h"
+#include "base/safe_alloc.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -10,7 +12,9 @@
 #include <wctype.h>
 
 #ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 #include <sddl.h>
 
@@ -56,6 +60,36 @@ static bool pf_utf8(const wchar_t *wide, char *out, size_t out_size) {
   return n > 0;
 }
 
+static PSECURITY_DESCRIPTOR pf_private_descriptor(void) {
+  HANDLE token = NULL;
+  DWORD bytes = 0;
+  if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
+    return NULL;
+  (void)GetTokenInformation(token, TokenUser, NULL, 0, &bytes);
+  TOKEN_USER *user = bytes
+      ? zcl_malloc(bytes, "platform-private-file-token-user") : NULL;
+  if (!user || !GetTokenInformation(token, TokenUser, user, bytes, &bytes)) {
+    free(user);
+    CloseHandle(token);
+    return NULL;
+  }
+  LPWSTR sid = NULL;
+  bool sid_ok = ConvertSidToStringSidW(user->User.Sid, &sid) != 0;
+  free(user);
+  CloseHandle(token);
+  if (!sid_ok) return NULL;
+  wchar_t rule[512];
+  int n = swprintf(rule, sizeof(rule) / sizeof(rule[0]),
+                   L"D:P(A;;FA;;;SY)(A;;FA;;;%ls)", sid);
+  LocalFree(sid);
+  PSECURITY_DESCRIPTOR descriptor = NULL;
+  if (n <= 0 || (size_t)n >= sizeof(rule) / sizeof(rule[0]) ||
+      !ConvertStringSecurityDescriptorToSecurityDescriptorW(
+          rule, SDDL_REVISION_1, &descriptor, NULL))
+    return NULL;
+  return descriptor;
+}
+
 void platform_private_file_init(struct platform_private_file *file) {
   if (file) {
     file->native = (uintptr_t)INVALID_HANDLE_VALUE;
@@ -71,10 +105,8 @@ static bool pf_open(const char *path, DWORD creation,
   PSECURITY_DESCRIPTOR descriptor = NULL;
   SECURITY_ATTRIBUTES security = {.nLength = sizeof(security)};
   if (creation == CREATE_NEW) {
-    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            L"D:P(A;;FA;;;SY)(A;;FA;;;OW)", SDDL_REVISION_1, &descriptor,
-            NULL))
-      return false;
+    descriptor = pf_private_descriptor();
+    if (!descriptor) return false;
     security.lpSecurityDescriptor = descriptor;
   }
   HANDLE h = CreateFileW(wide, GENERIC_READ | GENERIC_WRITE | DELETE,
@@ -110,7 +142,7 @@ bool platform_private_file_open_locked(const char *path,
   OVERLAPPED ov = {0};
   if (!LockFileEx(pf_handle(file),
                   LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0,
-                  UINT32_MAX, UINT32_MAX, &ov)) {
+                  1, 0, &ov)) {
     platform_private_file_close(file);
     return false;
   }
@@ -123,7 +155,7 @@ void platform_private_file_close(struct platform_private_file *file) {
     return;
   if (file->locked) {
     OVERLAPPED ov = {0};
-    (void)UnlockFileEx(pf_handle(file), 0, UINT32_MAX, UINT32_MAX, &ov);
+    (void)UnlockFileEx(pf_handle(file), 0, 1, 0, &ov);
   }
   CloseHandle(pf_handle(file));
   platform_private_file_init(file);
@@ -197,7 +229,8 @@ bool platform_private_file_replace(struct platform_private_file *f,
   if (bytes > UINT32_MAX - sizeof(FILE_RENAME_INFO))
     return false;
   size_t allocation = sizeof(FILE_RENAME_INFO) + bytes;
-  FILE_RENAME_INFO *rename_info = calloc(1, allocation);
+  FILE_RENAME_INFO *rename_info = zcl_calloc(
+      1, allocation, "platform-private-file-rename");
   if (!rename_info)
     return false;
   rename_info->ReplaceIfExists = TRUE;
@@ -334,10 +367,10 @@ bool platform_private_file_link_no_clobber(
   *same = false;
   if (!pf_wide(s, ws) || !pf_wide(d, wd))
     return false;
-  if (CreateHardLinkW(wd, ws, NULL))
-    return true;
-  DWORD link_error = GetLastError();
-  if (link_error != ERROR_ALREADY_EXISTS && link_error != ERROR_FILE_EXISTS)
+  bool created = CreateHardLinkW(wd, ws, NULL) != 0;
+  DWORD link_error = created ? ERROR_SUCCESS : GetLastError();
+  if (!created && link_error != ERROR_ALREADY_EXISTS &&
+      link_error != ERROR_FILE_EXISTS)
     return false;
   HANDLE h =
       CreateFileW(wd, FILE_READ_ATTRIBUTES,
@@ -353,8 +386,12 @@ bool platform_private_file_link_no_clobber(
       .volume = info.dwVolumeSerialNumber,
       .file = ((uint64_t)info.nFileIndexHigh << 32) | info.nFileIndexLow};
   CloseHandle(h);
-  *same = ok && did.volume == sid->volume && did.file == sid->file;
-  return *same;
+  bool identity_matches = ok && did.volume == sid->volume &&
+                          did.file == sid->file;
+  if (created)
+    return identity_matches;
+  *same = identity_matches;
+  return identity_matches;
 }
 
 bool platform_private_file_unlink_missing_ok(const char *path) {
@@ -484,8 +521,14 @@ bool platform_private_file_replace(struct platform_private_file *f,
 }
 bool platform_private_file_retire(struct platform_private_file *f,
                                   const char *path) {
-  (void)f;
-  return unlink(path) == 0 || errno == ENOENT;
+  struct stat held, named;
+  if (!f || !path || fstat(pf_fd(f), &held) != 0 ||
+      lstat(path, &named) != 0 || !S_ISREG(held.st_mode) ||
+      !S_ISREG(named.st_mode) || held.st_dev != named.st_dev ||
+      held.st_ino != named.st_ino || unlink(path) != 0)
+    return false;
+  platform_private_file_close(f);
+  return true;
 }
 bool platform_private_file_identity(struct platform_private_file *f,
                                     struct platform_private_file_identity *i) {
@@ -527,16 +570,21 @@ bool platform_private_path_absent(const char *p) {
 bool platform_private_file_link_no_clobber(
     const char *s, const char *d,
     const struct platform_private_file_identity *si, bool *same) {
+  if (!s || !d || !si || !same)
+    return false;
   *same = false;
-  if (link(s, d) == 0)
-    return true;
-  if (errno != EEXIST)
+  bool created = link(s, d) == 0;
+  if (!created && errno != EEXIST)
     return false;
   struct stat st;
   if (lstat(d, &st))
     return false;
-  *same = (uint64_t)st.st_dev == si->volume && (uint64_t)st.st_ino == si->file;
-  return *same;
+  bool identity_matches = S_ISREG(st.st_mode) &&
+      (uint64_t)st.st_dev == si->volume && (uint64_t)st.st_ino == si->file;
+  if (created)
+    return identity_matches;
+  *same = identity_matches;
+  return identity_matches;
 }
 bool platform_private_file_unlink_missing_ok(const char *p) {
   return unlink(p) == 0 || errno == ENOENT;

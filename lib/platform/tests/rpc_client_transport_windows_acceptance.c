@@ -1,4 +1,5 @@
-/* Headless adversarial acceptance for the native loopback RPC transport. */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Headless adversarial acceptance for the native loopback RPC transport. */
 #include "controllers/rpc_client.h"
 #include "platform/socket_compat.h"
 #include "platform/time_compat.h"
@@ -25,9 +26,10 @@ static DWORD WINAPI server_thread(void *opaque)
         (void)platform_socket_receive(peer, request, sizeof(request));
         if (test->mode == SERVER_REPLY) {
             static const char reply[] =
-                "HTTP/1.1 200 OK\r\nContent-Length: 37\r\n\r\n"
+                "HTTP/1.1 200 OK\r\nContent-Length: 38\r\n\r\n"
                 "{\"result\":{\"ready\":true},\"error\":null}";
             (void)platform_socket_send_all(peer, reply, sizeof(reply) - 1);
+            Sleep(10);
         } else if (test->mode == SERVER_PARTIAL) {
             static const char partial[] =
                 "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{";
@@ -84,6 +86,9 @@ static bool run_case(const char *datadir, enum server_mode mode,
                                               100, 100);
     int64_t elapsed = platform_time_monotonic_ms() - started;
     bool ok = answer && strstr(answer, expected) != NULL && elapsed < 250;
+    if (!ok)
+        fprintf(stderr, "rpc case failed: mode=%d elapsed_ms=%lld answer=%s\n",
+                (int)mode, (long long)elapsed, answer ? answer : "<null>");
     free(answer);
     WaitForSingleObject(thread, 1000);
     CloseHandle(thread);
@@ -95,12 +100,14 @@ int main(void)
     char temp[MAX_PATH];
     DWORD count = GetTempPathA((DWORD)sizeof(temp), temp);
     if (count == 0 || count >= sizeof(temp)) return 1;
-    char datadir[MAX_PATH];
-    snprintf(datadir, sizeof(datadir), "%sz23-rpc-%lu", temp,
-             (unsigned long)GetCurrentProcessId());
-    if (_mkdir(datadir) != 0) return 2;
-    char cookie_path[MAX_PATH];
-    snprintf(cookie_path, sizeof(cookie_path), "%s/.cookie", datadir);
+    char datadir[4 * MAX_PATH];
+    if (!GetTempFileNameA(temp, "zrp", 0, datadir) ||
+        remove(datadir) != 0 || _mkdir(datadir) != 0) return 2;
+    char cookie_path[4 * MAX_PATH + 16];
+    int cookie_length = snprintf(cookie_path, sizeof(cookie_path),
+                                 "%s/.cookie", datadir);
+    if (cookie_length <= 0 || (size_t)cookie_length >= sizeof(cookie_path))
+        return 3;
     FILE *cookie = fopen(cookie_path, "wb");
     if (!cookie) return 3;
     fputs("__cookie__:first\n", cookie);

@@ -1,4 +1,5 @@
-/* Native acceptance for the descriptor-backed read mapping seam. */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Native acceptance for the descriptor-backed read mapping seam. */
 #include "platform/read_mapping.h"
 
 #include <fcntl.h>

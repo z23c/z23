@@ -1,4 +1,5 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Purpose: Handle-bound private file publication across POSIX and Win32. */
 #ifndef ZCL_PLATFORM_PRIVATE_FILE_H
 #define ZCL_PLATFORM_PRIVATE_FILE_H
 

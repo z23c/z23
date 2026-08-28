@@ -1,4 +1,5 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Purpose: Concurrent cursor-free reads from one verified regular file. */
 #include "platform/positioned_file.h"
 
 #include <errno.h>

@@ -1,4 +1,5 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Purpose: Bounded descriptor-relative reads beneath a trusted root. */
 #ifndef ZCL_PLATFORM_SAFE_ROOT_READ_H
 #define ZCL_PLATFORM_SAFE_ROOT_READ_H
 
