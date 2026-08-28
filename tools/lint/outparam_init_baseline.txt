@@ -154,9 +154,6 @@ zwn_prepare_package_transport|prepared|vcs_package_prepared
 # failing lookup.
 db_utxo_find|out|db_utxo
 
-# yardsale_prevout_fetch_confirmed/ysa_prevout_fetch_fn write *tx_out/*out
-# only through the caller's pointer AFTER the locator, chain-membership and
-# body-hash validations pass; every early return leaves the caller's out-param
-# untouched, and both callers test the return before reading it.
-yardsale_prevout_fetch_confirmed|tx_out|transaction
+# ysa_prevout_fetch_fn writes *out only after the locator, chain-membership and
+# body-hash validations pass; its caller tests the return before reading it.
 ysa_prevout_fetch_fn|out|transaction
