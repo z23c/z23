@@ -80,13 +80,15 @@ int main(void)
 
     struct timespec short_deadline = deadline_after_ms(20);
     if (platform_thread_join_until(thread, NULL, &short_deadline) != ETIMEDOUT) {
-        fprintf(stderr, "thread join did not honor short deadline\n");
+        fprintf(stderr,  // obs-ok:acceptance-failure-exits-synchronously
+                "thread join did not honor short deadline\n");
         return 2;
     }
 
     struct timespec long_deadline = deadline_after_ms(2000);
     if (platform_thread_join_until(thread, NULL, &long_deadline) != 0) {
-        fprintf(stderr, "thread join did not reap completed worker\n");
+        fprintf(stderr,  // obs-ok:acceptance-failure-exits-synchronously
+                "thread join did not reap completed worker\n");
         return 3;
     }
 
