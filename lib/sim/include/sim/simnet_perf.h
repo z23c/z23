@@ -91,10 +91,12 @@ extern "C" {
  * used until 2026-08-28 was calibrated the same way (32 concurrent runs:
  * clean max 1429, armed min 2174) but its real-suite contention regime is
  * NOT its calibration regime: a mixed 32-worker suite inflates the growth
- * ratio (observed clean 1905 on a tree whose solo rerun gave 1117), while at
- * the default size the calibrated contention direction is compression
- * (32-concurrent max 1111 vs idle max 1254) and each point is long enough
- * that scheduler contention averages out. The armed direction costs ~4 s
+ * ratio (observed clean 1905 on a tree whose solo rerun gave 1117), and the
+ * same proved true at this default size (in-suite clean 2604 vs solo 1068 —
+ * see docs/SIMNET_PERF.md). Which is why the in-suite group asserts no
+ * growth budget at any size: the budgets live in `make sim-perf` /
+ * `make sim-perf-teeth` on a quiet host, and the suite keeps the per-scale
+ * same-window armed-vs-clean discrimination. The armed direction costs ~4 s
  * in-suite at this size. */
 
 /* Test-only regressions this harness knows how to arm. Default NONE. */
