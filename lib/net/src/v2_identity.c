@@ -5,16 +5,14 @@
 
 #include "crypto/curve25519.h"
 #include "crypto/random_secret.h"
+#include "platform/positioned_file.h"
+#include "platform/private_file.h"
 #include "support/cleanse.h"
-#include "util/write_all.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 static _Atomic uint64_t g_v2_identity_temp_sequence;
 
@@ -28,24 +26,30 @@ static bool identity_error(char *out, size_t cap, const char *what)
 static bool identity_read(const char *path, uint8_t private_out[32],
                           uint8_t public_out[32], char *err, size_t err_cap)
 {
-    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (fd < 0)
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path))
         return false;
-    struct stat st;
-    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size != 32 ||
-        (st.st_mode & 0777) != 0600) {
-        close(fd);
+    if (!platform_positioned_file_snapshot(&file, &before) ||
+        before.size != 32 || !platform_positioned_file_is_private(&file)) {
+        platform_positioned_file_close(&file);
         return identity_error(err, err_cap,
-                              "v2 identity must be a 32-byte mode-0600 file");
+                              "v2 identity must be a private 32-byte file");
     }
-    uint8_t extra = 0;
-    ssize_t n = read(fd, private_out, 32);
-    ssize_t tail = read(fd, &extra, 1);
-    int saved = errno;
-    close(fd);
-    if (n != 32 || tail != 0) {
+    bool stable = platform_positioned_file_read(&file, private_out, 32, 0) == 32 &&
+                  platform_positioned_file_snapshot(&file, &after) &&
+                  before.volume == after.volume &&
+                  before.file_low == after.file_low &&
+                  before.file_high == after.file_high &&
+                  before.size == after.size &&
+                  before.modified_seconds == after.modified_seconds &&
+                  before.modified_nanoseconds == after.modified_nanoseconds &&
+                  before.changed_seconds == after.changed_seconds &&
+                  before.changed_nanoseconds == after.changed_nanoseconds;
+    platform_positioned_file_close(&file);
+    if (!stable) {
         memory_cleanse(private_out, 32);
-        errno = saved;
         return identity_error(err, err_cap, "v2 identity read was not exact");
     }
     if (!curve25519_scalarmult_base(public_out, private_out)) {
@@ -59,33 +63,36 @@ static bool identity_write(const char *dir, const char *path,
                            const uint8_t private_key[32], char *err,
                            size_t err_cap)
 {
-    uint64_t seq = atomic_fetch_add(&g_v2_identity_temp_sequence, 1);
     char temp[1280];
-    int n = snprintf(temp, sizeof(temp), "%s.tmp.%ld.%llu", path,
-                     (long)getpid(), (unsigned long long)seq);
-    if (n <= 0 || (size_t)n >= sizeof(temp))
-        return identity_error(err, err_cap, "v2 identity temp path too long");
-    int fd = open(temp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
-    if (fd < 0)
+    struct platform_private_file file;
+    platform_private_file_init(&file);
+    bool created = false;
+    for (unsigned int attempt = 0; attempt < 64 && !created; attempt++) {
+        uint64_t seq = atomic_fetch_add(&g_v2_identity_temp_sequence, 1);
+        int n = snprintf(temp, sizeof(temp), "%s.tmp.%llu", path,
+                         (unsigned long long)seq);
+        if (n <= 0 || (size_t)n >= sizeof(temp))
+            return identity_error(err, err_cap,
+                                  "v2 identity temp path too long");
+        created = platform_private_file_create(temp, &file);
+        if (!created && errno != EEXIST)
+            break;
+    }
+    if (!created)
         return identity_error(err, err_cap, "cannot create v2 identity temp");
-    bool ok = zcl_write_all(fd, private_key, 32) && fsync(fd) == 0 &&
-              close(fd) == 0;
+    bool ok = platform_private_file_write_at(&file, private_key, 32, 0) &&
+              platform_private_file_flush(&file) &&
+              platform_private_file_replace(&file, temp, path);
     if (!ok) {
-        (void)close(fd);
-        (void)unlink(temp);
+        platform_private_file_close(&file);
+        (void)platform_private_file_unlink_missing_ok(temp);
         return identity_error(err, err_cap, "cannot persist v2 identity temp");
     }
-    if (rename(temp, path) != 0) {
-        (void)unlink(temp);
-        return identity_error(err, err_cap, "cannot publish v2 identity");
-    }
-    int dfd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    if (dfd < 0 || fsync(dfd) != 0) {
-        if (dfd >= 0) close(dfd);
+    platform_private_file_close(&file);
+    if (!platform_private_parent_flush(dir)) {
         return identity_error(err, err_cap,
                               "cannot fsync v2 identity directory");
     }
-    close(dfd);
     return true;
 }
 
@@ -96,6 +103,8 @@ bool v2_identity_load_or_create(const char *datadir,
 {
     if (!datadir || !datadir[0] || !private_out || !public_out)
         return identity_error(err, err_cap, "v2 identity argument missing");
+    if (err && err_cap > 0)
+        err[0] = '\0';
     memset(private_out, 0, 32);
     memset(public_out, 0, 32);
     char path[1152];
@@ -103,10 +112,13 @@ bool v2_identity_load_or_create(const char *datadir,
     if (n <= 0 || (size_t)n >= sizeof(path))
         return identity_error(err, err_cap, "v2 identity path too long");
 
-    if (access(path, F_OK) == 0)
-        return identity_read(path, private_out, public_out, err, err_cap);
-    if (errno != ENOENT)
+    if (identity_read(path, private_out, public_out, err, err_cap))
+        return true;
+    if (!platform_private_path_absent(path)) {
+        if (err && err_cap > 0 && err[0])
+            return false;
         return identity_error(err, err_cap, "cannot inspect v2 identity");
+    }
 
     uint8_t fresh[32];
     if (!zcl_random_secret_bytes(fresh, sizeof(fresh), "v2_identity") ||
