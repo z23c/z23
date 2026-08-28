@@ -1313,6 +1313,7 @@ AGENT_IMPACT_RULE("deploy/*.env.example|deploy/examples/*.env.example", "make_li
  * itself. Its selftest plants both forbidden shapes, so an edit that hollows
  * the gate trips the same group that proves it. */
 AGENT_IMPACT_RULE("tools/lint/check_no_unattended_publish.sh", "make_lint_gates")
+AGENT_IMPACT_RULE("tools/lint/check_standalone_tools_link.sh", "make_lint_gates")
 /* [lane: public-docs-truth] docs/ARCHITECTURE_DIAGRAMS.md, ARCH_QUEST_BOARD.md,
  * and DEVELOPING.md carried no impact rule at all — a change to any of them
  * could reach the push gate having run zero test groups, the exact

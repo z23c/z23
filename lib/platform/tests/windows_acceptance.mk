@@ -193,8 +193,13 @@ ZCL_WINDOWS_ACCEPTANCE_glob_match_SOURCES := \
 # under its pre-ratification spelling, so this is one compiler driver's
 # spelling, not a weaker standard. -municode is required and not optional: the
 # program's entry point is wmain(), and without it the link has no entry.
+# The launcher stopped being a single self-contained translation unit when
+# its allocations moved onto the shared wrappers, so it needs their
+# definition. Compiled at -std=c2x because the mingw here rejects -std=c23;
+# the native Windows rule in the top-level Makefile uses -std=c23.
 ZCL_WINDOWS_ACCEPTANCE_headless_run_SOURCES := \
-	tools/dev/windows_headless_run.c
+	tools/dev/windows_headless_run.c \
+	lib/base/src/safe_alloc.c
 ZCL_WINDOWS_ACCEPTANCE_headless_run_FLAGS := -municode
 ZCL_WINDOWS_ACCEPTANCE_hotswap_elf_probe_refusal_SOURCES := \
 	lib/test/src/hotswap_elf_probe_refusal_acceptance.c \

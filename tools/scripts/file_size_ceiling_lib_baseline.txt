@@ -30,18 +30,18 @@ lib/hotswap/src/hotswap_loader.c 857
 lib/kernel/src/command_registry.c 2403
 # 2026-08-28: inherited +1 from the windows-formatting tip; held at the
 # merged size.
-lib/metrics/src/prometheus_metrics.c 1100
+lib/metrics/src/prometheus_metrics.c 932
 lib/net/src/addrman.c 1254
-lib/net/src/connman.c 3390
+lib/net/src/connman.c 3432
 lib/net/src/download.c 1793
-lib/net/src/fast_sync.c 1935
+lib/net/src/fast_sync.c 1688
 lib/net/src/file_service.c 3078
 lib/net/src/https_server.c 979
 lib/net/src/msg_blocks.c 913 # getblocks pre-handshake service gate (defense-in-depth)
 lib/net/src/msg_headers.c 2370 # 2026-08-28: getheaders per-peer serve window (+53), re-measured after the pick.
 lib/net/src/msgprocessor.c 3033
-lib/net/src/msgprocessor_snapshot.c 1948
-lib/net/src/msgprocessor_snapshot_serve.c 1149
+lib/net/src/msgprocessor_snapshot.c 1810
+lib/net/src/msgprocessor_snapshot_serve.c 946
 # 2026-08-28: ban-table clamp + banlist write debounce + raced-flush
 # generation (single-flight write mutex), re-measured at the raced-flush
 # pick's size.
@@ -51,9 +51,9 @@ lib/net/src/net.c 2688
 # stays 0.
 lib/net/src/onion_directory.c 1516
 lib/net/src/onion_service.c 1324
-lib/net/src/peer_lifecycle.c 1906
-lib/net/src/rom_fetch.c 1694
-lib/net/src/rom_seed.c 1111
+lib/net/src/peer_lifecycle.c 1634
+lib/net/src/rom_fetch.c 1599
+lib/net/src/rom_seed.c 985
 lib/platform/src/os_sandbox_linux.c 1526
 lib/rpc/src/httpserver.c 1496
 lib/sapling/src/circuit_gadgets.c 1053
@@ -66,9 +66,9 @@ lib/sapling/src/sapling.c 1220
 # the rule above.
 lib/session/src/agent_broker.c 801
 
-lib/sim/src/postmortem.c 1546
+lib/sim/src/postmortem.c 1004
 lib/sim/src/simnet_cluster.c 873
-lib/sim/src/simnet_wire.c 1497
+lib/sim/src/simnet_wire.c 1283
 lib/storage/src/census_read.c 868
 lib/storage/src/coins_kv.c 1363
 lib/storage/src/consensus_db.c 883
@@ -81,18 +81,18 @@ lib/validation/src/chainstate.c 1038
 lib/validation/src/connect_block.c 899
 lib/wallet/src/wallet.c 1560
 lib/wallet/src/wallet_sqlite.c 1603
-lib/sim/src/simnet_chaos_faults.c 2732
+lib/sim/src/simnet_chaos_faults.c 1126
 lib/util/src/blocker.c 836
-lib/util/src/supervisor.c 1278
+lib/util/src/supervisor.c 1290
 lib/sync/src/stage.c 817
 src/main_cli_modes.c 4275
-lib/hotswap/src/hotswap_activate.c 2327
+lib/hotswap/src/hotswap_activate.c 2333
 lib/vcs/src/package_store.c 1301
 lib/vcs/src/package_score.c 845
-lib/vcs/src/package_reward.c 2092
-lib/vcs/src/fastobj_carrier.c 915
+lib/vcs/src/package_reward.c 1986
+lib/vcs/src/fastobj_carrier.c 822
 lib/codeindex/src/codeindex_merkle.c 1776
-lib/vcs/src/package_badge.c 1296
+lib/vcs/src/package_badge.c 1177
 lib/vcs/src/package_badge_eligible.c 817
 lib/vcs/src/package_swarm_node.c 2015
 lib/vcs/src/package_service.c 1040
@@ -122,3 +122,11 @@ lib/vcs/src/zcode_workspace_manifest.c 846
 # pusher. Held here at today's size per the rule above.
 lib/hotswap/src/hotswap_elf_probe.c 975
 lib/vcs/src/zcode_dht_service.c 833
+
+# 2026-08-28: merging the two Windows/macOS lanes recorded three files at the
+# merged tree's own size — hotswap_activate.c 2327 -> 2333, connman.c
+# 3390 -> 3432, supervisor.c 1278 -> 1290. Each is the arithmetic sum of two
+# independently reviewed sets of additions, one on each side of the merge;
+# neither side grew past its own record. Thirteen other entries were tightened
+# in the same pass because the merged files came out SMALLER. The drift count
+# stays at 0, which is the ratchet: no file sits above its record.

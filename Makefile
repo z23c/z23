@@ -363,10 +363,18 @@ WINDOWS_HEADLESS_RUN_BIN = $(BIN_DIR)/z23-headless-run.exe
 ifeq ($(ZCL_HOST_WINDOWS),1)
 windows-headless-run: $(WINDOWS_HEADLESS_RUN_BIN)
 
-$(WINDOWS_HEADLESS_RUN_BIN): tools/dev/windows_headless_run.c
+# The launcher routes its allocations through the shared wrappers, so it is
+# no longer a single self-contained translation unit: it needs their header
+# and their definition. Left out, this rule fails on a real Windows host at
+# the #include, and nothing on a POSIX host would notice, because there is no
+# rule here to run. lib/platform/tests/windows_acceptance.mk carries the same
+# two inputs so a Linux box cross-links the same program.
+$(WINDOWS_HEADLESS_RUN_BIN): tools/dev/windows_headless_run.c \
+		lib/base/src/safe_alloc.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -Wall -Wextra -Werror -pedantic \
-		-D_WIN32_WINNT=0x0A00 -DWIN32_LEAN_AND_MEAN -municode $< -o $@
+		-Ilib/base/include \
+		-D_WIN32_WINNT=0x0A00 -DWIN32_LEAN_AND_MEAN -municode $^ -o $@
 
 windows-headless-run-selftest: $(WINDOWS_HEADLESS_RUN_BIN)
 	@root="$$(cygpath -aw .)"; runner="$$(cygpath -aw $<)"; \
