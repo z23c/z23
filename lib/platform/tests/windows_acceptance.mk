@@ -5,6 +5,7 @@ ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	boot_auto_install_bundle_refusal \
 	build_fabric_worker_refusal \
 	bundle_exporter_refusal \
+	consensus_bundle_marker \
 	consensus_state_install_runtime_refusal \
 	consensus_state_publication_cas_refusal \
 	directory_compat \
@@ -13,8 +14,11 @@ ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	format_attribute \
 	glob_match \
 	logical_cpu \
+	mint_anchor_export_refusal \
+	mint_anchor_preflight_refusal \
 	package_lifecycle_store_refusal \
 	positioned_file \
+	positioned_io \
 	private_directory \
 	private_file \
 	private_file_path_swap \
@@ -42,6 +46,14 @@ ZCL_WINDOWS_ACCEPTANCE_bundle_exporter_refusal_SOURCES := \
 	lib/json/src/json.c \
 	lib/base/src/safe_alloc.c
 ZCL_WINDOWS_ACCEPTANCE_bundle_exporter_refusal_FLAGS := -DZCL_TESTING
+ZCL_WINDOWS_ACCEPTANCE_consensus_bundle_marker_SOURCES := \
+	lib/test/src/consensus_bundle_marker_windows_acceptance.c \
+	config/src/boot_consensus_bundle_marker.c \
+	lib/platform/src/private_file.c \
+	lib/platform/src/file_metadata.c \
+	lib/platform/src/clock.c \
+	lib/base/src/safe_alloc.c
+ZCL_WINDOWS_ACCEPTANCE_consensus_bundle_marker_LIBS := -ladvapi32
 ZCL_WINDOWS_ACCEPTANCE_consensus_state_install_runtime_refusal_SOURCES := \
 	lib/test/src/consensus_state_install_runtime_windows_refusal_acceptance.c \
 	config/src/consensus_state_install_runtime.c \
@@ -77,6 +89,16 @@ ZCL_WINDOWS_ACCEPTANCE_logical_cpu_SOURCES := \
 	lib/platform/src/logical_cpu.c
 ZCL_WINDOWS_ACCEPTANCE_logical_cpu_FLAGS := \
 	-U_WIN32_WINNT -D_WIN32_WINNT=0x0601
+ZCL_WINDOWS_ACCEPTANCE_mint_anchor_export_refusal_SOURCES := \
+	lib/test/src/mint_anchor_export_windows_refusal_acceptance.c \
+	config/src/boot_mint_anchor.c
+ZCL_WINDOWS_ACCEPTANCE_mint_anchor_export_refusal_FLAGS := \
+	-ffunction-sections -fno-unwind-tables -fno-asynchronous-unwind-tables
+ZCL_WINDOWS_ACCEPTANCE_mint_anchor_export_refusal_LIBS := \
+	-Wl,--gc-sections
+ZCL_WINDOWS_ACCEPTANCE_mint_anchor_preflight_refusal_SOURCES := \
+	lib/test/src/mint_anchor_preflight_windows_refusal_acceptance.c \
+	config/src/boot_mint_anchor_preflight.c
 ZCL_WINDOWS_ACCEPTANCE_package_lifecycle_store_refusal_SOURCES := \
 	lib/test/src/package_lifecycle_store_windows_refusal_acceptance.c \
 	app/services/src/package_lifecycle_store.c \
@@ -89,6 +111,9 @@ ZCL_WINDOWS_ACCEPTANCE_package_lifecycle_store_refusal_LIBS := \
 ZCL_WINDOWS_ACCEPTANCE_positioned_file_SOURCES := \
 	lib/platform/tests/positioned_file_windows_acceptance.c \
 	lib/platform/src/positioned_file.c
+ZCL_WINDOWS_ACCEPTANCE_positioned_io_SOURCES := \
+	lib/platform/tests/positioned_io_windows_acceptance.c \
+	lib/platform/src/positioned_io.c
 ZCL_WINDOWS_ACCEPTANCE_private_directory_SOURCES := \
 	lib/platform/tests/private_directory_windows_acceptance.c \
 	lib/platform/src/private_directory.c

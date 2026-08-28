@@ -41,7 +41,6 @@ app/services/src/block_index_loader_rebuild.c 853 # ADR-0008 (seed-floor declara
 # lock-contention seatbelts (commit cadence, BEGIN IMMEDIATE, BUSY_SNAPSHOT
 # restart call, abort-streak park) — net 886 -> 866; baseline tightened.
 app/services/src/node_db_catchup_service.c 861
-app/services/src/rolling_anchor_service.c 801
 
 app/services/src/sticky_escalator.c 1271
 app/services/src/sync_monitor.c 810
@@ -49,7 +48,7 @@ app/services/src/sync_monitor.c 810
 # the confined runner (fork + Landlock/seccomp/rlimits + sandbox self-check
 # canaries + crash discipline) is one fail-closed ritual that must stay
 # together; baselined at creation per the zcode_science_service.c precedent.
-app/services/src/zcode_benchmark_executor.c 1228
+app/services/src/zcode_benchmark_executor.c 1181
 # ZCODE Scientific Metaverse S3: plan/commit services + review/vote submit +
 # CAS rebuild for the science store — one fail-closed write ritual per kind;
 # baselined at creation (gate option 3), expected to shrink when S5's
@@ -74,10 +73,9 @@ app/views/src/explorer_pages_view.c 819
 # the phrase, minting one, printing it once) landed in its own
 # config/src/boot_wallet_phrase.c instead of here, and took 25 lines of
 # existing wiring out of boot.c with it.
-config/src/boot.c 4278
-config/src/boot_bundle_fetch.c 905
+config/src/boot.c 4023
+config/src/boot_bundle_fetch.c 840
 config/src/boot_index.c 851
-config/src/boot_mint_anchor.c 808
 config/src/boot_refold_staged.c 2077
 config/src/boot_services.c 1476
 # 2026-08-03: NEW entry at current LOC (gate's recorded-last-resort). The
@@ -86,9 +84,8 @@ config/src/boot_services.c 1476
 # over. The work-adapter half (boot_zcode_work_*) is the natural future
 # split seam if this file grows again.
 config/src/boot_zcode_swarm.c 885
-config/src/bundle_exporter.c 988
-config/src/consensus_state_install_runtime.c 919
-config/src/consensus_state_producer_receipt.c 787
+config/src/bundle_exporter.c 962
+config/src/consensus_state_install_runtime.c 876
 config/src/consensus_state_snapshot_install_activate.c 1169 # ADR-0008 (seed-floor declaration); reduced after descriptor binding
 app/services/src/header_sync_service.c 846
 app/controllers/src/event_agent_summary.c 853

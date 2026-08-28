@@ -1,4 +1,5 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * purpose: Verify mapped reads preserve exact positioned-file bytes. */
 #include "platform/positioned_file.h"
 #include "platform/read_mapping.h"
 

@@ -11,6 +11,7 @@
 #include "storage/progress_store.h"     /* progress_store_db() handle */
 #include "platform/time_compat.h"
 #include "platform/file_sync.h"
+#include "platform/positioned_io.h"
 #include "util/log_macros.h"
 #include "validation/chainstate.h"
 #include <string.h>
@@ -144,6 +145,19 @@ bool mmb_leaf_store_append(struct mmb_leaf_store *store,
     }
 
     store->num_leaves++;
+    store->dirty = true;
+    return true;
+}
+
+bool mmb_leaf_store_write_at(struct mmb_leaf_store *store, uint64_t index,
+                             const uint8_t hash[32])
+{
+    if (!store || !store->open || store->fd < 0 || !hash ||
+        index >= store->num_leaves || index > UINT64_MAX / 32u)
+        return false;
+    int64_t wrote = platform_positioned_write(store->fd, hash, 32u,
+                                               index * 32u);
+    if (wrote != 32) return false;
     store->dirty = true;
     return true;
 }

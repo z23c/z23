@@ -25,6 +25,101 @@
 #define BDL_PIDFILE "zclassic23.pid"
 #define BDL_PHASE   "datadir_lock"
 
+#if defined(_WIN32)
+
+#include "platform/private_directory.h"
+#include "platform/private_file.h"
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
+static HANDLE g_datadir_handle = INVALID_HANDLE_VALUE;
+static struct platform_private_file g_pidfile;
+static bool g_pidfile_initialized;
+
+bool boot_datadir_lock_acquire(const char *datadir)
+{
+    if (!datadir || !datadir[0]) {
+        boot_error_report(BOOT_ERROR_FATAL, "BOOT_DATADIR_UNSET", BDL_PHASE,
+                          "no data directory was resolved", NULL, 0,
+                          "datadir=%s", datadir ? "(empty string)" : "(null)");
+        return false;
+    }
+    if (g_datadir_handle != INVALID_HANDLE_VALUE) {
+        boot_error_report(BOOT_ERROR_FATAL, "BOOT_DATADIR_LOCK_REENTERED",
+                          BDL_PHASE,
+                          "this process already holds a datadir lock", NULL, 0,
+                          "datadir=%s pid=%lu", datadir,
+                          (unsigned long)GetCurrentProcessId());
+        return false;
+    }
+
+    uintptr_t directory_native = (uintptr_t)INVALID_HANDLE_VALUE;
+    if (!platform_private_directory_open_validated(datadir,
+                                                   &directory_native)) {
+        boot_error_report(BOOT_ERROR_FATAL, "BOOT_DATADIR_NOT_PRIVATE",
+                          BDL_PHASE,
+                          "the Windows datadir must be a real owner-private directory",
+                          NULL, 0, "datadir=%s", datadir);
+        return false;
+    }
+    HANDLE directory = (HANDLE)directory_native;
+
+    char pidpath[32768];
+    int n = snprintf(pidpath, sizeof(pidpath), "%s/%s", datadir, BDL_PIDFILE);
+    platform_private_file_init(&g_pidfile);
+    g_pidfile_initialized = true;
+    if (n <= 0 || (size_t)n >= sizeof(pidpath) ||
+        !platform_private_file_open_locked_create(pidpath, &g_pidfile)) {
+        platform_private_file_close(&g_pidfile);
+        g_pidfile_initialized = false;
+        platform_private_directory_close(directory_native);
+        boot_error_report(BOOT_ERROR_FATAL, "BOOT_DATADIR_LOCKED", BDL_PHASE,
+                          "another process holds the datadir or its private lock file is invalid",
+                          NULL, 0, "datadir=%s lockfile=%s", datadir,
+                          BDL_PIDFILE);
+        return false;
+    }
+
+    char text[32];
+    int length = snprintf(text, sizeof(text), "%lu\n",
+                          (unsigned long)GetCurrentProcessId());
+    if (length <= 0 || (size_t)length >= sizeof(text) ||
+        !platform_private_file_truncate(&g_pidfile, 0) ||
+        !platform_private_file_write_at(&g_pidfile, text, (size_t)length, 0) ||
+        !platform_private_file_flush(&g_pidfile) ||
+        !FlushFileBuffers(directory)) {
+        platform_private_file_close(&g_pidfile);
+        g_pidfile_initialized = false;
+        platform_private_directory_close(directory_native);
+        boot_error_report(BOOT_ERROR_FATAL,
+                          "BOOT_DATADIR_LOCK_PERSIST_FAILED", BDL_PHASE,
+                          "the datadir lock could not be durably recorded",
+                          NULL, 0, "datadir=%s lockfile=%s", datadir,
+                          BDL_PIDFILE);
+        return false;
+    }
+    g_datadir_handle = directory;
+    hw_bench_init(datadir);
+    return true;
+}
+
+void boot_datadir_lock_release(void)
+{
+    if (g_pidfile_initialized) {
+        platform_private_file_close(&g_pidfile);
+        g_pidfile_initialized = false;
+    }
+    if (g_datadir_handle != INVALID_HANDLE_VALUE) {
+        platform_private_directory_close((uintptr_t)g_datadir_handle);
+        g_datadir_handle = INVALID_HANDLE_VALUE;
+    }
+}
+
+#else
+
 static int g_pidfile_fd = -1;
 
 static bool write_all(int fd, const char *buf, size_t len)
@@ -391,3 +486,5 @@ void boot_datadir_lock_release(void)
                 strerror(errno));
     }
 }
+
+#endif

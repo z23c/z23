@@ -16,6 +16,46 @@
 #include "util/ar_step_readonly.h"
 #include "util/log_macros.h"
 
+#if defined(_WIN32)
+
+#include <stdio.h>
+
+/* The POSIX implementation below proves a stable directory-relative snapshot
+ * while copying a SQLite main/WAL family into disposable storage. Windows must
+ * not approximate that transaction with mutable pathnames. Refuse at each
+ * exported execution boundary before creating, copying, opening, or removing
+ * anything in either the datadir or a staging directory. */
+bool boot_mint_anchor_normal_boot_preflight(const char *datadir)
+{
+    (void)datadir;
+    fprintf(stderr,
+            "REFUSED: mint-anchor preflight is unavailable on Windows until "
+            "the directory-handle-relative containment transaction is "
+            "qualified\n");
+    return false;
+}
+
+bool boot_mint_anchor_preflight_run_all(const char *datadir,
+                                        struct json_value *report)
+{
+    (void)datadir;
+    (void)report;
+    fprintf(stderr,
+            "REFUSED: -mint-anchor is unavailable on Windows until the "
+            "directory-handle-relative containment transaction is qualified\n");
+    return false;
+}
+
+bool boot_mint_anchor_preflight_dump_state_json(struct json_value *out,
+                                                const char *key)
+{
+    (void)out;
+    (void)key;
+    return false;
+}
+
+#else
+
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -750,3 +790,5 @@ bool boot_mint_anchor_preflight_dump_state_json(struct json_value *out,
     json_free(&arr);
     return true;
 }
+
+#endif

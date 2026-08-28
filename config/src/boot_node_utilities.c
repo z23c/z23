@@ -26,6 +26,7 @@
  * so its prototype lives in config/boot_internal.h; app_wire_metrics_sources is
  * called unconditionally from main() and is declared in config/boot.h. */
 
+#include "platform/socket_compat.h"
 #include "config/boot_internal.h"
 #include "config/boot_seniority.h"
 #include "services/node_health_service.h"
@@ -53,13 +54,10 @@
 #include "net/netbase.h"
 #include "net/onion_stream.h"
 #include "util/log_macros.h"
-#include <netdb.h>
+#include "platform/file_metadata.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <unistd.h>
 
 /* External-gauge callback injected into the metrics thread: snapshots
  * sync state, UTXO count, tip-advance age, mirror lag, and peer counts. */
@@ -227,25 +225,7 @@ void app_add_node(const char *host, int port)
         return;
     }
 
-    struct addrinfo hints;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-
-    struct addrinfo *res = NULL;
-    if (getaddrinfo(hostbuf, NULL, &hints, &res) == 0 && res) {
-        if (res->ai_family == AF_INET) {
-            struct sockaddr_in *s4 = (struct sockaddr_in *)res->ai_addr;
-            memset(addr.svc.addr.ip, 0, 10);
-            addr.svc.addr.ip[10] = 0xff;
-            addr.svc.addr.ip[11] = 0xff;
-            memcpy(addr.svc.addr.ip + 12, &s4->sin_addr, 4);
-        } else if (res->ai_family == AF_INET6) {
-            struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)res->ai_addr;
-            memcpy(addr.svc.addr.ip, &s6->sin6_addr, 16);
-        }
-        freeaddrinfo(res);
-
+    if (platform_socket_resolve_ip(hostbuf, addr.svc.addr.ip)) {
         printf("Connecting to addnode %s:%u\n", hostbuf, use_port);
         connman_open_connection(svc->connman, &addr);
     } else {
@@ -277,7 +257,10 @@ void app_log_bootstrap_sources(const struct chain_params *params,
     if (home) {
         char p[512];
         snprintf(p, sizeof(p), "%s/.config/zclassic23/onion-seeds", home);
-        operator_onion_seed_file = access(p, R_OK) == 0;
+        struct platform_file_metadata metadata;
+        operator_onion_seed_file =
+            platform_file_metadata_read(p, &metadata) ==
+            PLATFORM_FILE_METADATA_OK;
     }
     /* The ONE advisory influence path into peer selection, and the supervised
      * worker that keeps it rotating with the ranking epoch — see

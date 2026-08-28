@@ -24,6 +24,8 @@
 
 #include "encoding/utilstrencodings.h"
 #include "json/json.h"
+#include "platform/directory_compat.h"
+#include "platform/positioned_file.h"
 #include "platform/time_compat.h"
 #include "supervisors/domains.h"
 #include "util/supervisor.h"
@@ -33,13 +35,10 @@
 
 #include "base/log_macros.h"
 
-#include <dirent.h>
-#include <fcntl.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
-#include <unistd.h>
 
 #define BER_LOG "boot.endpoint_records"
 
@@ -123,19 +122,33 @@ void boot_endpoint_records_register(void)
 static size_t ber_read_record_file(const char *dir, const char *name,
                                    uint8_t *wire, size_t wire_size)
 {
-    char path[1400];
-    int n = snprintf(path, sizeof(path), "%s/%s", dir, name);
-    if (n <= 0 || (size_t)n >= sizeof(path))
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open_beneath(&file, dir, name))
         return 0;
-
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0)
+    if (!platform_positioned_file_snapshot(&file, &before) ||
+        before.size == 0 || before.size >= ZID_DOC_MAX * 2 + 2) {
+        platform_positioned_file_close(&file);
         return 0;
-    static char hex[ZID_DOC_MAX * 2 + 2];
-    ssize_t r = read(fd, hex, sizeof(hex) - 1);
-    close(fd);
-    if (r <= 0)
+    }
+    char hex[ZID_DOC_MAX * 2 + 2];
+    int64_t read = platform_positioned_file_read(
+        &file, hex, (size_t)before.size, 0);
+    bool stable = read == (int64_t)before.size &&
+                  platform_positioned_file_snapshot(&file, &after) &&
+                  before.size == after.size &&
+                  before.modified_seconds == after.modified_seconds &&
+                  before.modified_nanoseconds == after.modified_nanoseconds &&
+                  before.changed_seconds == after.changed_seconds &&
+                  before.changed_nanoseconds == after.changed_nanoseconds &&
+                  before.volume == after.volume &&
+                  before.file_low == after.file_low &&
+                  before.file_high == after.file_high;
+    platform_positioned_file_close(&file);
+    if (!stable)
         return 0;
+    size_t r = (size_t)read;
     while (r > 0 && (hex[r - 1] == '\n' || hex[r - 1] == '\r' ||
                      hex[r - 1] == ' '))
         r--;
@@ -156,30 +169,39 @@ int boot_endpoint_records_load(const char *datadir)
     if (n <= 0 || (size_t)n >= sizeof(dir))
         LOG_RETURN(0, BER_LOG, "load: path too long under datadir");
 
-    DIR *d = opendir(dir);
-    if (!d)
+    struct platform_directory_list files;
+    if (!platform_directory_list_regular_sorted(dir, &files))
         return 0; /* No records filed yet — the common, non-error case. */
 
     struct zendp_directory *gdir = zendp_directory_global();
     uint64_t now = (uint64_t)platform_time_wall_unix();
 
     int installed = 0, discarded = 0, scanned = 0;
-    struct dirent *de;
-    while ((de = readdir(d)) != NULL && scanned < BER_SCAN_MAX) {
-        size_t len = strlen(de->d_name);
+    for (size_t i = 0; i < files.count && scanned < BER_SCAN_MAX; ++i) {
+        const char *name = files.entries[i].name;
+        size_t len = strlen(name);
         /* <64 hex chars>.zid — anything else is not one of ours. */
-        if (len != 68 || strcmp(de->d_name + 64, ".zid") != 0)
+        if (len != 68 || strcmp(name + 64, ".zid") != 0)
             continue;
+        bool name_is_hex = true;
+        for (size_t j = 0; j < 64; ++j)
+            if (!((name[j] >= '0' && name[j] <= '9') ||
+                  (name[j] >= 'a' && name[j] <= 'f') ||
+                  (name[j] >= 'A' && name[j] <= 'F'))) {
+                name_is_hex = false;
+                break;
+            }
+        if (!name_is_hex) continue;
         scanned++;
 
         uint8_t wire[ZID_DOC_MAX];
-        size_t wire_len = ber_read_record_file(dir, de->d_name, wire,
+        size_t wire_len = ber_read_record_file(dir, name, wire,
                                                sizeof(wire));
         if (wire_len == 0) {
             discarded++;
             LOG_WARN(BER_LOG,
                      "load: %s does not hold a well-formed record — "
-                     "discarded", de->d_name);
+                     "discarded", name);
             continue;
         }
 
@@ -196,12 +218,12 @@ int boot_endpoint_records_load(const char *datadir)
                      "load: discarded %s — %s. A record that does not "
                      "resolve to an ACTIVE on-chain identity is dropped, "
                      "not kept in a lesser state",
-                     de->d_name, zendp_result_string(r));
+                     name, zendp_result_string(r));
             continue;
         }
         installed++;
     }
-    closedir(d);
+    platform_directory_list_free(&files);
 
     if (scanned > 0)
         LOG_INFO(BER_LOG,

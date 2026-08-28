@@ -14,7 +14,6 @@
 #include "util/log_macros.h"
 
 #include <stdio.h>
-#include <unistd.h>
 
 struct mmb_leaf_store g_mmb_leaf_store = {0};
 
@@ -180,8 +179,7 @@ static bool boot_mmb_leaf_store_repair_prefix_legacy(
             return false;
         }
         mmb_hash_leaf(&leaf, hash);
-        ssize_t w = pwrite(store->fd, hash, sizeof(hash), (off_t)(i * 32));
-        if (w != (ssize_t)sizeof(hash)) {
+        if (!mmb_leaf_store_write_at(store, i, hash)) {
             printf("[FlyClient] MMB leaf prefix repair write failed at h=%llu\n",
                    (unsigned long long)i);
             return false;

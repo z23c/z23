@@ -36,6 +36,7 @@ static inline bool platform_socket_runtime_init(void)
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <netdb.h>
 #include <netinet/in.h> /* struct sockaddr_in, htons/htonl, INADDR_LOOPBACK —
                          * winsock2.h supplies these to the _WIN32 branch */
 #include <poll.h>
@@ -346,6 +347,77 @@ static inline int platform_socket_parse_address(int family, const char *text,
 #else
     return inet_pton(family, text, address);
 #endif
+}
+
+/* Resolve one UTF-8 host name to the node's canonical 16-byte address form.
+ * IPv4 is returned as an IPv4-mapped IPv6 address. Windows uses the wide
+ * resolver so non-ASCII UTF-8 host names are never interpreted in the active
+ * ANSI code page. */
+static inline bool platform_socket_resolve_ip(const char *host,
+                                               uint8_t address[16])
+{
+    if (!host || !host[0] || !address || !platform_socket_runtime_init())
+        return false;
+    memset(address, 0, 16);
+#if defined(_WIN32)
+    wchar_t wide[256];
+    int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, host, -1,
+                                    wide, (int)(sizeof(wide) / sizeof(*wide)));
+    if (count <= 0)
+        return false;
+    ADDRINFOW hints = {0};
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    PADDRINFOW results = NULL;
+    if (GetAddrInfoW(wide, NULL, &hints, &results) != 0)
+        return false;
+    bool found = false;
+    for (PADDRINFOW it = results; it && !found; it = it->ai_next) {
+        if (it->ai_family == AF_INET &&
+            it->ai_addrlen >= sizeof(struct sockaddr_in)) {
+            const struct sockaddr_in *v4 =
+                (const struct sockaddr_in *)it->ai_addr;
+            address[10] = 0xff;
+            address[11] = 0xff;
+            memcpy(address + 12, &v4->sin_addr, 4);
+            found = true;
+        } else if (it->ai_family == AF_INET6 &&
+                   it->ai_addrlen >= sizeof(struct sockaddr_in6)) {
+            const struct sockaddr_in6 *v6 =
+                (const struct sockaddr_in6 *)it->ai_addr;
+            memcpy(address, &v6->sin6_addr, 16);
+            found = true;
+        }
+    }
+    FreeAddrInfoW(results);
+#else
+    struct addrinfo hints = {0};
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo *results = NULL;
+    if (getaddrinfo(host, NULL, &hints, &results) != 0)
+        return false;
+    bool found = false;
+    for (struct addrinfo *it = results; it && !found; it = it->ai_next) {
+        if (it->ai_family == AF_INET &&
+            it->ai_addrlen >= sizeof(struct sockaddr_in)) {
+            const struct sockaddr_in *v4 =
+                (const struct sockaddr_in *)it->ai_addr;
+            address[10] = 0xff;
+            address[11] = 0xff;
+            memcpy(address + 12, &v4->sin_addr, 4);
+            found = true;
+        } else if (it->ai_family == AF_INET6 &&
+                   it->ai_addrlen >= sizeof(struct sockaddr_in6)) {
+            const struct sockaddr_in6 *v6 =
+                (const struct sockaddr_in6 *)it->ai_addr;
+            memcpy(address, &v6->sin6_addr, 16);
+            found = true;
+        }
+    }
+    freeaddrinfo(results);
+#endif
+    return found;
 }
 
 #endif

@@ -1,4 +1,5 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * purpose: Report the host's usable logical processor count portably. */
 #include "platform/logical_cpu.h"
 
 #if defined(_WIN32)
