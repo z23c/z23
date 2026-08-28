@@ -12,11 +12,15 @@
  */
 
 #include "storage/boot_auto_refold.h"
+#include "platform/positioned_file.h"
+#include "platform/private_file.h"
 
-#include <fcntl.h>
+#include <errno.h>
 #include <stdio.h>
+#include <stdatomic.h>
 #include <string.h>
-#include <unistd.h>
+
+static _Atomic uint64_t g_arf_temp_sequence;
 
 static void arf_path(const char *datadir, char *out, size_t n)
 {
@@ -29,11 +33,34 @@ static bool arf_read(const char *path, int32_t *anchor, int *count)
 {
     *anchor = 0;
     *count = 0;
-    FILE *r = fopen(path, "r");
-    if (!r)
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path) ||
+        !platform_positioned_file_snapshot(&file, &before) ||
+        !platform_positioned_file_is_private(&file) || before.size == 0 ||
+        before.size >= 64) {
+        platform_positioned_file_close(&file);
         return false;
-    bool ok = (fscanf(r, "%d %d", anchor, count) == 2);
-    fclose(r);
+    }
+    char raw[64];
+    int64_t got = platform_positioned_file_read(&file, raw,
+                                                (size_t)before.size, 0);
+    bool stable = got == (int64_t)before.size &&
+                  platform_positioned_file_snapshot(&file, &after) &&
+                  before.volume == after.volume &&
+                  before.file_low == after.file_low &&
+                  before.file_high == after.file_high &&
+                  before.size == after.size &&
+                  before.modified_seconds == after.modified_seconds &&
+                  before.modified_nanoseconds == after.modified_nanoseconds &&
+                  before.changed_seconds == after.changed_seconds &&
+                  before.changed_nanoseconds == after.changed_nanoseconds;
+    platform_positioned_file_close(&file);
+    if (!stable)
+        return false;
+    raw[before.size] = '\0';
+    bool ok = sscanf(raw, "%d %d", anchor, count) == 2;
     if (!ok) {
         *anchor = 0;
         *count = 0;
@@ -50,26 +77,40 @@ static bool arf_write(const char *datadir, const char *path,
     if (len < 0 || len >= (int)sizeof(buf))
         return false;
 
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-    if (fd < 0) {
+    char resolved[512], parent[512], staging_path[576];
+    if (!platform_private_path_resolve(path, resolved, sizeof(resolved),
+                                       parent, sizeof(parent))) {
         fprintf(stderr,  // obs-ok:storage-primitive-error
-                "[boot] boot_auto_refold: open(%s) failed\n", path);
+                "[boot] boot_auto_refold: unsafe destination %s\n", path);
         return false;
     }
-    ssize_t w = write(fd, buf, (size_t)len);
-    int sync_rc = fsync(fd);  /* the budget MUST survive a crash mid-refold */
-    int close_rc = close(fd);
-    if (w != (ssize_t)len || sync_rc != 0 || close_rc != 0) {
+    struct platform_private_file staged;
+    platform_private_file_init(&staged);
+    bool created = false;
+    for (unsigned int attempt = 0; attempt < 64 && !created; attempt++) {
+        uint64_t seq = atomic_fetch_add(&g_arf_temp_sequence, 1);
+        int n = snprintf(staging_path, sizeof(staging_path), "%s.tmp.%llu",
+                         resolved, (unsigned long long)seq);
+        if (n <= 0 || (size_t)n >= sizeof(staging_path))
+            break;
+        created = platform_private_file_create(staging_path, &staged);
+        if (!created && errno != EEXIST)
+            break;
+    }
+    bool ok = created &&
+              platform_private_file_write_at(&staged, buf, (size_t)len, 0) &&
+              platform_private_file_truncate(&staged, (uint64_t)len) &&
+              platform_private_file_flush(&staged) &&
+              platform_private_file_replace(&staged, staging_path, resolved);
+    platform_private_file_close(&staged);
+    if (!ok || !platform_private_parent_flush(parent)) {
         fprintf(stderr,  // obs-ok:storage-primitive-error
-                "[boot] boot_auto_refold: write/fsync(%s) failed\n", path);
+                "[boot] boot_auto_refold: durable replace(%s) failed\n", path);
+        if (created)
+            (void)platform_private_file_unlink_missing_ok(staging_path);
         return false;
     }
-    /* fsync the directory so the file's existence is durable across a crash. */
-    int dfd = open(datadir, O_RDONLY | O_DIRECTORY);
-    if (dfd >= 0) {
-        (void)fsync(dfd);
-        close(dfd);
-    }
+    (void)datadir;
     return true;
 }
 
@@ -109,7 +150,7 @@ bool boot_auto_refold_pending(const char *datadir)
         return false;
     char path[512];
     arf_path(datadir, path, sizeof(path));
-    if (access(path, F_OK) != 0)
+    if (platform_private_path_absent(path))
         return false;
     int32_t a = 0;
     int c = 0;
@@ -193,5 +234,6 @@ void boot_auto_refold_clear(const char *datadir)
         return;
     char path[512];
     arf_path(datadir, path, sizeof(path));
-    (void)remove(path);
+    (void)platform_private_file_unlink_missing_ok(path);
+    (void)platform_private_parent_flush(datadir);
 }
