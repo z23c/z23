@@ -5196,12 +5196,14 @@ $(BIN_DIR)/ldb_verify_c23: tools/ldb_verify_c23.c \
 		lib/storage/src/ldb_reader_version.c \
 		lib/storage/src/ldb_reader_db.c \
 		lib/storage/src/ldb_reader_api.c \
-		lib/util/src/crc32c.c lib/base/src/safe_alloc.c
+		lib/util/src/crc32c.c lib/base/src/safe_alloc.c \
+		lib/platform/src/positioned_file.c \
+		lib/platform/src/read_mapping.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -Ivendor/include -Ilib/base/include -Ilib/util/include \
-	    -Ilib/storage/include \
+	    -Ilib/storage/include -Ilib/platform/include \
 	    -o $@ $^ -Lvendor/lib vendor/lib/libleveldb.a -lstdc++ -lpthread -lm -ldl
 
 .PHONY: zcl-blog

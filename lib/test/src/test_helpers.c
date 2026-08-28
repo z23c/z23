@@ -126,7 +126,15 @@ void test_make_tmpdir(char *buf, size_t n, const char *prefix,
     test_fmt_tmpdir(buf, n, prefix, tag);
     test_rm_rf_recursive(buf);
     mkdir("test-tmp", 0755);
-    mkdir(buf, 0755);
+    /* 0700, not 0755: a fixture directory stands in for a datadir, and
+     * platform_private_directory_ensure() (lib/platform/src/private_directory.c)
+     * refuses any directory whose mode is not exactly 0700 — so every
+     * production atomic write a fixture drives through this directory fails
+     * with EACCES while the directory is group/other-readable. A real datadir
+     * is 0700 too, so this makes the fixture match what the write path has
+     * always required rather than relaxing the requirement. The shared
+     * test-tmp/ parent stays 0755: only the leaf is validated. */
+    mkdir(buf, 0700);
 }
 
 bool test_complete_genesis_shielded_replay(sqlite3 *db)

@@ -9,6 +9,7 @@
 
 #include "config/file_ops.h"
 #include "platform/directory_compat.h"
+#include "platform/file_metadata.h"
 #include "platform/positioned_file.h"
 #include "platform/private_directory.h"
 #include "platform/private_file.h"
@@ -141,6 +142,38 @@ bool dir_copy(const char *src_dir, const char *dst_dir)
 #endif
 }
 
+/* What a blk/rev coordinate holds, as three outcomes rather than a bool.
+ *
+ * The block series is walked by probing consecutive names until one is not
+ * there, so "nothing at this coordinate" is a normal end-of-series and must
+ * never be confused with "something is there that this copier will not
+ * touch". A single open()-succeeded bool collapses those: since
+ * platform_positioned_file_open() started refusing every non-regular object
+ * (S_ISREG check) and every symlink (O_NOFOLLOW), a directory or a symlink
+ * planted at blk00000.dat read as end-of-series and the copy reported
+ * success having silently skipped it — a snapshot import would land a
+ * truncated block series and call it complete. platform_file_metadata_read()
+ * already separates the two: MISSING is ENOENT, REFUSED is "exists but is
+ * not a regular file we can read", which is a hard failure here. */
+enum block_files_probe {
+    BLOCK_FILES_PROBE_PRESENT = 0,
+    BLOCK_FILES_PROBE_MISSING,
+    BLOCK_FILES_PROBE_REFUSED,
+};
+
+static enum block_files_probe block_files_probe_coordinate(const char *path)
+{
+    struct platform_file_metadata metadata;
+    switch (platform_file_metadata_read(path, &metadata)) {
+    case PLATFORM_FILE_METADATA_OK:
+        return BLOCK_FILES_PROBE_PRESENT;
+    case PLATFORM_FILE_METADATA_MISSING:
+        return BLOCK_FILES_PROBE_MISSING;
+    default:
+        return BLOCK_FILES_PROBE_REFUSED;
+    }
+}
+
 int block_files_copy(const char *src_dir, const char *dst_dir)
 {
 #ifdef _WIN32
@@ -151,17 +184,14 @@ int block_files_copy(const char *src_dir, const char *dst_dir)
     int count = 0;
     char src[1024], dst[1024];
     for (int i = 0; i < 9999; i++) {
-        struct platform_positioned_file_snapshot st;
         char name[32];
         snprintf(name, sizeof(name), "blk%05d.dat", i);
         if (!file_ops_join(src, sizeof(src), src_dir, name))
             return -1;
-        struct platform_positioned_file probe;
-        platform_positioned_file_init(&probe);
-        bool exists = platform_positioned_file_open(&probe, src) &&
-                      platform_positioned_file_snapshot(&probe, &st);
-        platform_positioned_file_close(&probe);
-        if (!exists) break;
+        enum block_files_probe blk = block_files_probe_coordinate(src);
+        if (blk == BLOCK_FILES_PROBE_REFUSED)
+            return -1;
+        if (blk == BLOCK_FILES_PROBE_MISSING) break;
         if (!file_ops_join(dst, sizeof(dst), dst_dir, name))
             return -1;
         if (!file_copy(src, dst))
@@ -170,11 +200,10 @@ int block_files_copy(const char *src_dir, const char *dst_dir)
         snprintf(name, sizeof(name), "rev%05d.dat", i);
         if (!file_ops_join(src, sizeof(src), src_dir, name))
             return -1;
-        platform_positioned_file_init(&probe);
-        exists = platform_positioned_file_open(&probe, src) &&
-                 platform_positioned_file_snapshot(&probe, &st);
-        platform_positioned_file_close(&probe);
-        if (exists) {
+        enum block_files_probe rev = block_files_probe_coordinate(src);
+        if (rev == BLOCK_FILES_PROBE_REFUSED)
+            return -1;
+        if (rev == BLOCK_FILES_PROBE_PRESENT) {
             if (!file_ops_join(dst, sizeof(dst), dst_dir, name))
                 return -1;
             if (!file_copy(src, dst))
