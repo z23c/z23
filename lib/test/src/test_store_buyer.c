@@ -182,6 +182,34 @@ static bool tsb_attach_blob(struct node_db *ndb, int64_t product_id,
     return db_store_product_save_content(ndb, product_id, hash);
 }
 
+/* Make a fixture datadir under ./test-tmp and hand it back as an ABSOLUTE
+ * path.
+ *
+ * test_make_tmpdir spells the directory relative to the working directory
+ * ("./test-tmp/store_buyer_<pid>_<tag>"). store_buyer_collect writes the
+ * delivered payload through sb_write_atomic -> platform_private_path_resolve,
+ * which realpath()s the destination's parent and refuses any pathname that
+ * does not start at the root ("destination parent is not a safe real
+ * directory"). A relative output path is rejected before a byte is written,
+ * so the fixture must anchor the same in-tree directory at the working
+ * directory. */
+static void tsb_tmpdir(char *dir, size_t dir_size, const char *tag)
+{
+    char rel[192];
+    test_make_tmpdir(rel, sizeof(rel), "store_buyer", tag);
+
+    const char *leaf = rel;
+    if (leaf[0] == '.' && leaf[1] == '/')
+        leaf += 2;
+
+    char cwd[256];
+    if (!getcwd(cwd, sizeof(cwd))) {
+        (void)snprintf(dir, dir_size, "%s", rel);  /* write fails loudly */
+        return;
+    }
+    (void)snprintf(dir, dir_size, "%s/%s", cwd, leaf);
+}
+
 static bool tsb_file_exists(const char *path)
 {
     struct stat st;
@@ -202,9 +230,9 @@ static long tsb_read_file(const char *path, uint8_t *buf, size_t cap)
 int test_store_buyer(void)
 {
     int failures = 0;
-    char datadir[256];
-    char out_path[320];
-    char part_path[352];
+    char datadir[512];
+    char out_path[640];
+    char part_path[704];
     struct node_db ndb;
 
     printf("\n=== store buyer (MVP #5, buying side) ===\n");
@@ -212,7 +240,7 @@ int test_store_buyer(void)
     /* Under ./test-tmp/, not the repository root: this group keeps its
      * datadir on failure for post-mortem, and a kept directory in the root
      * is exactly what check-no-stray-root-files exists to catch. */
-    test_make_tmpdir(datadir, sizeof(datadir), "store_buyer", "main");
+    tsb_tmpdir(datadir, sizeof(datadir), "main");
     (void)snprintf(out_path, sizeof(out_path), "%s/bought.bin", datadir);
     (void)snprintf(part_path, sizeof(part_path), "%s.part", out_path);
 
@@ -365,7 +393,7 @@ int test_store_buyer(void)
     memset(&unpaid, 0, sizeof(unpaid));
     {
         const char *step = "order";
-        char decoy_out[352];
+        char decoy_out[640];
         (void)snprintf(decoy_out, sizeof(decoy_out), "%s/decoy.bin", datadir);
         bool ok = store_buyer_order(datadir, product_id, TSB_CUSTOMER,
                                     decoy_out, false, &unpaid).ok;
@@ -457,7 +485,7 @@ int test_store_buyer(void)
     {
         const char *step = "order";
         struct store_buyer_order stale;
-        char stale_out[352];
+        char stale_out[640];
         (void)snprintf(stale_out, sizeof(stale_out), "%s/stale.bin", datadir);
         bool ok = store_buyer_order(datadir, product_id, TSB_CUSTOMER,
                                     stale_out, false, &stale).ok;
@@ -498,7 +526,7 @@ int test_store_buyer(void)
     {
         const char *step = "order";
         struct store_buyer_order swapped;
-        char swap_out[352];
+        char swap_out[640];
         char swap_part[384];
         (void)snprintf(swap_out, sizeof(swap_out), "%s/swapped.bin", datadir);
         (void)snprintf(swap_part, sizeof(swap_part), "%s.part", swap_out);
@@ -616,7 +644,7 @@ int test_store_buyer(void)
     chain_params_select(CHAIN_MAIN);
 
     if (failures == 0) {
-        char cmd[512];
+        char cmd[640];
         (void)snprintf(cmd, sizeof(cmd), "rm -rf %s", datadir);
         (void)system(cmd);
     } else {

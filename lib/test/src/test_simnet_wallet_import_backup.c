@@ -114,10 +114,30 @@ static bool ib_wif_decode(const char *wif, struct privkey *out)
     return decode_secret(wif, pfx, pfxlen, out);
 }
 
+/* Fixture scratch root, as an ABSOLUTE path.
+ *
+ * wallet_backup_encrypt_file writes through wbs_write_file_atomic ->
+ * platform_private_path_resolve, which realpath()s the destination's parent
+ * and refuses any pathname that does not start at the root. The encrypted
+ * backup in part 2 is built from a path this helper returns, so the helper
+ * anchors every fixture directory at the working directory. */
+static const char *ib_scratch_root(void)
+{
+    static char root[512];
+    mkdir("./test-tmp", 0755);
+    if (root[0])
+        return root;
+    char cwd[384];
+    if (!getcwd(cwd, sizeof(cwd)))
+        return "./test-tmp";   /* caller's write then fails loudly */
+    snprintf(root, sizeof(root), "%s/test-tmp", cwd);
+    return root;
+}
+
 static void ib_make_dir(char *dir, size_t dirlen, const char *tag)
 {
-    mkdir("./test-tmp", 0755);
-    snprintf(dir, dirlen, "./test-tmp/ibck_%d_%s", (int)getpid(), tag);
+    snprintf(dir, dirlen, "%s/ibck_%d_%s", ib_scratch_root(), (int)getpid(),
+             tag);
     mkdir(dir, 0755);
 }
 
@@ -604,6 +624,11 @@ static int part2_backup_restore(void)
     char srcdir[256], backupdir[256], restoredir[256];
     ib_make_dir(srcdir, sizeof(srcdir), "bksrc");
     ib_make_dir(backupdir, sizeof(backupdir), "bkdst");
+    /* wallet_backup_run_once -> wbs_ensure_backup_dir ->
+     * platform_private_directory_ensure requires exactly 0700 and refuses a
+     * wider directory rather than narrowing it. mkdir is umask-masked, so
+     * state the mode here rather than depend on the caller's umask. */
+    chmod(backupdir, 0700);
     ib_make_dir(restoredir, sizeof(restoredir), "bkrestore");
 
     char srcdb[320];
