@@ -439,6 +439,43 @@ bool os_proc_exe_path(char *buf, size_t n)
 #endif
 }
 
+bool os_proc_pid_exe_path(uint64_t pid, char *buf, size_t n)
+{
+    if (pid == 0 || pid > UINT32_MAX || !buf || n == 0) return false;
+#if defined(_WIN32)
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
+                                 (DWORD)pid);
+    if (!process) return false;
+    wchar_t wide[32768];
+    DWORD length = (DWORD)(sizeof(wide) / sizeof(wide[0]));
+    bool ok = QueryFullProcessImageNameW(process, 0, wide, &length) != 0 &&
+              length > 0 && length < sizeof(wide) / sizeof(wide[0]);
+    CloseHandle(process);
+    if (!ok) return false;
+    int required = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide,
+                                       (int)length, NULL, 0, NULL, NULL);
+    if (required <= 0 || (size_t)required >= n) return false;
+    if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, (int)length,
+                            buf, required, NULL, NULL) != required)
+        return false;
+    buf[required] = '\0';
+    return true;
+#elif defined(__APPLE__)
+    if (pid > INT_MAX || n > INT_MAX) return false;
+    int length = proc_pidpath((int)pid, buf, (uint32_t)n);
+    return length > 0 && (size_t)length < n;
+#else
+    char link[64];
+    int written = snprintf(link, sizeof(link), "/proc/%llu/exe",
+                           (unsigned long long)pid);
+    if (written <= 0 || (size_t)written >= sizeof(link)) return false;
+    ssize_t length = readlink(link, buf, n - 1);
+    if (length <= 0 || (size_t)length >= n) return false;
+    buf[length] = '\0';
+    return true;
+#endif
+}
+
 FILE *os_proc_open_self_exe(void)
 {
     char path[4096];
