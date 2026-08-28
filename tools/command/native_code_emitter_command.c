@@ -476,7 +476,9 @@ void zcl_native_handle_code_emitter(const struct zcl_command_request *request,
     if (primary >= 0 && !registry_pin && scan.candidates > 20 &&
         sites[primary].kind != CI_EMIT_BLOCKER_MARKER &&
         sites[primary].literal_chars < 40) {
-        char caveat[248];
+        /* query_shown is intentionally bounded to 128 bytes, but the fixed
+         * explanatory suffix is longer than the old 248-byte destination. */
+        char caveat[512];
         (void)snprintf(caveat, sizeof(caveat),
                        "'%s' occurs at %d sites and no registry row pins one, so "
                        "the emitter below is first by rank, not unique. Compare "
