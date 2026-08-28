@@ -12,6 +12,22 @@
 #include <stdio.h>
 #include <string.h>
 
+/* Arm-independent: the snapshot struct's layout (and therefore its padding
+ * hazard) is identical on every platform, so the equality predicate has one
+ * definition ahead of the per-arm implementations below. */
+bool platform_positioned_file_snapshot_equal(
+    const struct platform_positioned_file_snapshot *a,
+    const struct platform_positioned_file_snapshot *b)
+{
+    return a && b && a->size == b->size &&
+           a->modified_seconds == b->modified_seconds &&
+           a->modified_nanoseconds == b->modified_nanoseconds &&
+           a->changed_seconds == b->changed_seconds &&
+           a->changed_nanoseconds == b->changed_nanoseconds &&
+           a->volume == b->volume && a->file_low == b->file_low &&
+           a->file_high == b->file_high;
+}
+
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN

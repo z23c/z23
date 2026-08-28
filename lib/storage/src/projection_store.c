@@ -100,8 +100,11 @@ static bool projection_file_identity_read(
         return false;
     unsigned char hdr[100];
     int64_t nr = platform_positioned_file_read(&file, hdr, sizeof(hdr), 0);
+    /* Field-wise, never memcmp: the snapshot struct's alignment padding is
+     * undefined, so a whole-object compare can report an unchanged file as
+     * changed and reject a perfectly good projection. */
     bool stable = platform_positioned_file_snapshot(&file, &after) &&
-        memcmp(&before, &after, sizeof(before)) == 0;
+        platform_positioned_file_snapshot_equal(&before, &after);
     platform_positioned_file_close(&file);
     if (!stable || nr != (int64_t)sizeof(hdr) ||
         memcmp(hdr, "SQLite format 3\000", 16) != 0)

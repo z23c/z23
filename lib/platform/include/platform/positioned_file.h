@@ -44,6 +44,15 @@ bool platform_positioned_file_size(const struct platform_positioned_file *file,
 bool platform_positioned_file_snapshot(
     const struct platform_positioned_file *file,
     struct platform_positioned_file_snapshot *snapshot);
+/* Compare two snapshots FIELD-WISE. The struct carries 8 bytes of alignment
+ * padding (after each nanoseconds member), and neither the assignment inside
+ * platform_positioned_file_snapshot nor C itself defines what those padding
+ * bytes hold — so `memcmp` over the whole object compares stack garbage and
+ * reports two snapshots of one unchanged file as DIFFERENT. Every
+ * read-then-prove-stable caller must use this predicate, never memcmp. */
+bool platform_positioned_file_snapshot_equal(
+    const struct platform_positioned_file_snapshot *a,
+    const struct platform_positioned_file_snapshot *b);
 /* Return the canonical path of the opened object, bound to its handle. */
 bool platform_positioned_file_path(
     const struct platform_positioned_file *file, char *utf8_path,
