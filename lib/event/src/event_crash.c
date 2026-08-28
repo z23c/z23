@@ -38,13 +38,17 @@ static void crash_write_fd(int fd, const char *s, size_t n)
 static void crash_emit_to(int fd, int sig, void *const *frames, int nframes)
 {
     char buf[160];
+    /* The pid is chosen BEFORE the call: _FORTIFY_SOURCE makes snprintf a
+     * macro, and a preprocessor directive between a macro's parentheses is
+     * undefined behaviour (clang -Wembedded-directive rejects it). */
+#if defined(_WIN32)
+    const int crash_pid = _getpid();
+#else
+    const int crash_pid = (int)getpid();
+#endif
     int n = snprintf(buf, sizeof(buf),
                      "\n\n*** FATAL SIGNAL %d (pid=%d t=%ld) ***\n", sig,
-#if defined(_WIN32)
-                     _getpid(),
-#else
-                     (int)getpid(),
-#endif
+                     crash_pid,
                      (long)time(NULL)); // platform-ok:async-signal-safe-crash-handler
     if (n > 0) crash_write_fd(fd, buf, (size_t)n);
     n = snprintf(buf, sizeof(buf),

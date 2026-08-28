@@ -441,13 +441,18 @@ bool zcl_devloop_workspace_resolve(const char *repo_root, char out_id[65],
     if (!home || !home[0] || !out_id || !out_dir || out_dir_len == 0 ||
         !workspace_identity(repo_root, out_id))
         return false;
-    int n = snprintf(out_dir, out_dir_len,
+    /* One whole snprintf per platform: _FORTIFY_SOURCE makes snprintf a
+     * macro, so the #if cannot sit between its parentheses (undefined
+     * behaviour), and selecting the format through a variable instead would
+     * cost the compiler's literal-format checking. */
 #if defined(_WIN32)
-                     "%s/z23/dev/workspaces/%s",
+    int n = snprintf(out_dir, out_dir_len,
+                     "%s/z23/dev/workspaces/%s", home, out_id);
 #else
+    int n = snprintf(out_dir, out_dir_len,
                      "%s/.local/state/zclassic23-dev/workspaces/%s",
-#endif
                      home, out_id);
+#endif
     return n > 0 && (size_t)n < out_dir_len;
 }
 
