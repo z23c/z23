@@ -19,7 +19,7 @@
  * reducer drive — no coins_kv held on entry, no csr or chain-evidence init.
  *
  * The g_soak mutex is a leaf mutex (no further mutex is acquired while it is
- * held, aside from the libc write() / fsync() kernel calls). */
+ * held, aside from the platform file write/flush calls). */
 
 // one-result-type-ok:soak-attest-no-fallible-surface
 /* E2 override. soak_attestation_tick() and soak_attestation_init() return
@@ -31,18 +31,15 @@
 #include "controllers/agent_security_posture.h"
 #include "services/node_health_service.h"
 #include "json/json.h"
+#include "platform/private_file.h"
 #include "platform/time_compat.h"
 #include "util/clientversion.h"
 #include "util/log_macros.h"
 
-#include <errno.h>
-#include <fcntl.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 /* ── Global state ──────────────────────────────────────────────── */
 
@@ -51,8 +48,9 @@ static struct {
     bool   initialized;
     char   datadir[512];
 
-    /* File handle; -1 = not open. */
-    int    fd;
+    /* Private, no-reparse file handle; file_open says whether it is live. */
+    struct platform_private_file file;
+    bool   file_open;
     /* Current file size in bytes (approximate; used for rotation). */
     int64_t file_bytes;
     /* Lines written since last fsync. */
@@ -73,7 +71,6 @@ static struct {
     int failure_streak;
 } g_soak = {
     .lock = PTHREAD_MUTEX_INITIALIZER,
-    .fd   = -1,
 };
 
 /* ── File management ────────────────────────────────────────────── */
@@ -88,20 +85,29 @@ static void soak_path_rotated(const char *datadir, char *out, size_t sz)
     snprintf(out, sz, "%s/soak_attestation.jsonl.1", datadir);
 }
 
-/* Close + reopen the file in O_APPEND mode.  Returns the fd on success,
- * -1 on error (caller logs; we write the path for diagnosis). */
-static int soak_open_file(const char *datadir)
+/* Open the existing private file or create it owner-private. The service has
+ * one locked writer and carries its own explicit append offset. */
+static bool soak_open_file(const char *datadir)
 {
     char path[560];
     soak_path_primary(datadir, path, sizeof(path));
-    /* O_CREAT|O_WRONLY|O_APPEND: all writes land at the logical EOF even
-     * with multiple writers or after a crash-reopen.  NFS O_APPEND is not
-     * guaranteed atomic but we have exactly one writer on this path. */
-    int fd = open(path, O_CREAT | O_WRONLY | O_APPEND, 0644);
-    if (fd < 0) {
-        LOG_WARN("soak_attest", "open %s: %s", path, strerror(errno));
+    platform_private_file_init(&g_soak.file);
+    bool opened = platform_private_file_open_locked(path, &g_soak.file);
+    if (!opened && platform_private_path_absent(path))
+        opened = platform_private_file_create(path, &g_soak.file);
+    uint64_t size = 0;
+    if (!opened || !platform_private_file_size(&g_soak.file, &size) ||
+        size > INT64_MAX) {
+        if (opened)
+            platform_private_file_close(&g_soak.file);
+        LOG_WARN("soak_attest", "open private attestation file failed: %s",
+                 path);
+        g_soak.file_open = false;
+        return false;
     }
-    return fd;
+    g_soak.file_open = true;
+    g_soak.file_bytes = (int64_t)size;
+    return true;
 }
 
 /* Rotate: rename primary to .1 (overwrites any stale .1), close old fd,
@@ -113,24 +119,27 @@ static void soak_rotate(void)
     soak_path_primary(dd, primary, sizeof(primary));
     soak_path_rotated(dd, rotated, sizeof(rotated));
 
-    /* fsync + close the current fd before rename so the kernel flushes the
-     * just-written data to the rotation target. */
-    if (g_soak.fd >= 0) {
-        fsync(g_soak.fd);  // platform-ok:shutdown-fsync-best-effort
-        close(g_soak.fd);
-        g_soak.fd = -1;
+    bool replaced = false;
+    if (g_soak.file_open) {
+        /* The periodic log is best-effort, but a published rotation must be
+         * handle-flushed, atomically replaced, and directory-durable. */
+        (void)platform_private_file_flush(&g_soak.file);
+        replaced = platform_private_file_replace(
+            &g_soak.file, primary, rotated);
+        g_soak.file_open = false;
+        if (!replaced) {
+            platform_private_file_close(&g_soak.file);
+            LOG_WARN("soak_attest", "rotate replace %s -> %s failed",
+                     primary, rotated);
+        }
     }
-    /* Rename primary → rotated (overwrites).  Ignore ENOENT (no primary
-     * yet) — that just means we have nothing to rotate. */
-    if (rename(primary, rotated) < 0 && errno != ENOENT) {
-        LOG_WARN("soak_attest", "rotate rename %s → %s: %s",
-                 primary, rotated, strerror(errno));
+    if (replaced && !platform_private_parent_flush(dd)) {
+        LOG_WARN("soak_attest", "rotation directory flush failed: %s", dd);
     }
     atomic_fetch_add(&g_soak.rotations, 1);
 
     /* Open a fresh primary for subsequent writes. */
-    g_soak.fd          = soak_open_file(dd);
-    g_soak.file_bytes  = 0;
+    (void)soak_open_file(dd);
     g_soak.lines_since_fsync = 0;
 }
 
@@ -146,15 +155,8 @@ void soak_attestation_tick(void)
     const char *dd = g_soak.datadir;
 
     /* Lazy open: first tick after init opens the file. */
-    if (g_soak.fd < 0) {
-        /* Seed file_bytes from the existing file size so we don't over-rotate. */
-        char path[560];
-        soak_path_primary(dd, path, sizeof(path));
-        struct stat st;
-        if (stat(path, &st) == 0)
-            g_soak.file_bytes = (int64_t)st.st_size;
-        g_soak.fd = soak_open_file(dd);
-    }
+    if (!g_soak.file_open)
+        (void)soak_open_file(dd);
 
     /* Rotation check: rotate BEFORE writing the new line so we don't
      * overshoot by a full line. */
@@ -230,19 +232,14 @@ void soak_attestation_tick(void)
 
     /* Write + failure tracking. */
     pthread_mutex_lock(&g_soak.lock);
-    if (line_len > 0 && g_soak.fd >= 0) {
-        ssize_t written = write(g_soak.fd, line, (size_t)line_len);
-        if (written < 0 || written != line_len) {
-            /* Log once when the streak starts; suppress repeats. errno is
-             * only meaningful when write() itself failed — a short write
-             * leaves it stale, so report the byte counts instead. */
+    if (line_len > 0 && g_soak.file_open) {
+        bool written = platform_private_file_write_at(
+            &g_soak.file, line, (size_t)line_len,
+            (uint64_t)g_soak.file_bytes);
+        if (!written) {
             if (g_soak.failure_streak == 0) {
-                if (written < 0)
-                    LOG_WARN("soak_attest", "write to soak_attestation.jsonl failed: %s",
-                             strerror(errno));
-                else
-                    LOG_WARN("soak_attest", "short write to soak_attestation.jsonl: %zd of %d bytes",
-                             written, line_len);
+                LOG_WARN("soak_attest",
+                         "write to soak_attestation.jsonl failed");
             }
             g_soak.failure_streak++;
             atomic_fetch_add(&g_soak.write_failures, 1);
@@ -259,12 +256,12 @@ void soak_attestation_tick(void)
 
             /* fsync every N lines to bound data-loss window. */
             if (g_soak.lines_since_fsync >= SOAK_ATTESTATION_FSYNC_EVERY) {
-                fsync(g_soak.fd);  // platform-ok:soak-attest-periodic-fsync
+                (void)platform_private_file_flush(&g_soak.file);
                 g_soak.lines_since_fsync = 0;
             }
             (void)total; /* used above only for readable counter update */
         }
-    } else if (line_len > 0 && g_soak.fd < 0) {
+    } else if (line_len > 0 && !g_soak.file_open) {
         /* fd open failed on this tick cycle (e.g. datadir not yet mounted). */
         if (g_soak.failure_streak == 0)
             LOG_WARN("soak_attest", "fd not open; skipping line write");
@@ -279,9 +276,11 @@ void soak_attestation_tick(void)
 void soak_attestation_init(const char *datadir)
 {
     pthread_mutex_lock(&g_soak.lock);
-    if (g_soak.fd >= 0) {
-        close(g_soak.fd);
-        g_soak.fd = -1;
+    if (g_soak.file_open) {
+        /* Shutdown/init replacement remains best-effort by service contract. */
+        (void)platform_private_file_flush(&g_soak.file);
+        platform_private_file_close(&g_soak.file);
+        g_soak.file_open = false;
     }
     if (datadir && datadir[0]) {
         snprintf(g_soak.datadir, sizeof(g_soak.datadir), "%s", datadir);
@@ -298,7 +297,11 @@ void soak_attestation_init(const char *datadir)
 void soak_attestation_reset_for_test(void)
 {
     pthread_mutex_lock(&g_soak.lock);
-    if (g_soak.fd >= 0) { close(g_soak.fd); g_soak.fd = -1; }
+    if (g_soak.file_open) {
+        (void)platform_private_file_flush(&g_soak.file);
+        platform_private_file_close(&g_soak.file);
+        g_soak.file_open = false;
+    }
     g_soak.initialized        = false;
     g_soak.datadir[0]         = '\0';
     g_soak.file_bytes         = 0;
