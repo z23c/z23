@@ -19,6 +19,10 @@
 #include "net/rom_seed.h"                       /* ROM_SEED_* bounds */
 #include "net/file_service.h"                   /* FS_PORT default */
 #include "encoding/utilstrencodings.h"          /* HexStr */
+#include "platform/file_metadata.h"
+#include "platform/private_directory.h"
+#include "platform/private_file.h"
+#include "platform/safe_root_read.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"                    /* zcl_malloc */
 
@@ -28,9 +32,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <unistd.h>
 
 #define BBF_SUBSYS "boot_bundle_fetch"
 
@@ -237,8 +238,9 @@ bool boot_bundle_fetch_download(const char *datadir,
     int bn = snprintf(bundles, sizeof(bundles), "%s/bundles", datadir);
     if (bn < 0 || (size_t)bn >= sizeof(bundles))
         LOG_FAIL(BBF_SUBSYS, "bundles path too long under %s", datadir);
-    if (mkdir(bundles, 0700) != 0 && errno != EEXIST)
-        LOG_FAIL(BBF_SUBSYS, "mkdir(%s) failed: %s", bundles, strerror(errno));
+    if (!platform_private_directory_ensure(bundles))
+        LOG_FAIL(BBF_SUBSYS, "private bundles directory %s refused: %s",
+                 bundles, strerror(errno));
 
     /* Prefer the per-chunk-verified swarm path (rom_fetch_download_verified_
      * parallel): probe reachable seeders for the artifact's "RMF" manifest and,
@@ -336,24 +338,24 @@ bool boot_bundle_fetch_download(const char *datadir,
 
 /* Read up to `cap` bytes of a text file into a NUL-terminated malloc'd buffer.
  * Returns NULL when absent/empty/too-large (all non-fatal). */
-static char *bbf_read_text_file(const char *path, size_t cap)
+static char *bbf_read_text_file(const char *root, const char *relative,
+                                size_t cap)
 {
-    FILE *f = fopen(path, "rb");
-    if (!f)
+    uint8_t *bytes = NULL;
+    size_t size = 0;
+    if (platform_safe_root_read(root, relative, cap, &bytes, &size) !=
+            PLATFORM_SAFE_ROOT_READ_OK || size == 0) {
+        free(bytes);
         return NULL;
-    char *buf = zcl_malloc(cap + 1, "bbf_directory_json");
+    }
+    char *buf = zcl_malloc(size + 1, "bbf_directory_json");
     if (!buf) {
-        fclose(f);
+        free(bytes);
         return NULL;
     }
-    size_t rd = fread(buf, 1, cap, f);
-    int too_big = (rd == cap && fgetc(f) != EOF);
-    fclose(f);
-    if (rd == 0 || too_big) {
-        free(buf);
-        return NULL;
-    }
-    buf[rd] = '\0';
+    memcpy(buf, bytes, size);
+    buf[size] = '\0';
+    free(bytes);
     return buf;
 }
 
@@ -416,9 +418,9 @@ static bool bbf_write_directory_hint(const char *datadir,
     if (bn < 0 || (size_t)bn >= sizeof(bundles))
         LOG_FAIL(BBF_SUBSYS, "write hint: bundles path too long under %s",
                  datadir);
-    if (mkdir(bundles, 0700) != 0 && errno != EEXIST)
-        LOG_FAIL(BBF_SUBSYS, "write hint: mkdir(%s) failed: %s", bundles,
-                 strerror(errno));
+    if (!platform_private_directory_ensure(bundles))
+        LOG_FAIL(BBF_SUBSYS, "write hint: private directory %s refused: %s",
+                 bundles, strerror(errno));
 
     char body[2048];
     int off = snprintf(body, sizeof(body), "{\"artifacts\":[");
@@ -456,20 +458,17 @@ static bool bbf_write_directory_hint(const char *datadir,
     if (tn < 0 || (size_t)tn >= sizeof(tmp))
         LOG_FAIL(BBF_SUBSYS, "write hint: tmp path too long under %s", datadir);
 
-    FILE *f = fopen(tmp, "wb");
-    if (!f)
-        LOG_FAIL(BBF_SUBSYS, "write hint: fopen(%s) failed: %s", tmp,
-                 strerror(errno));
-    bool ok = fwrite(body, 1, (size_t)wn, f) == (size_t)wn;
-    if (fclose(f) != 0)
-        ok = false;
-    if (!ok) {
-        (void)unlink(tmp);
-        LOG_FAIL(BBF_SUBSYS, "write hint: writing %s failed", tmp);
-    }
-    if (rename(tmp, path) != 0) {
-        (void)unlink(tmp);
-        LOG_FAIL(BBF_SUBSYS, "write hint: rename %s -> %s failed: %s", tmp, path,
+    (void)platform_private_file_unlink_missing_ok(tmp);
+    struct platform_private_file staging;
+    platform_private_file_init(&staging);
+    if (!platform_private_file_create(tmp, &staging) ||
+        !platform_private_file_write_at(&staging, body, (size_t)wn, 0) ||
+        !platform_private_file_flush(&staging) ||
+        !platform_private_file_replace(&staging, tmp, path) ||
+        !platform_private_parent_flush(bundles)) {
+        (void)platform_private_file_retire(&staging, tmp);
+        platform_private_file_close(&staging);
+        LOG_FAIL(BBF_SUBSYS, "write hint: durable private replace failed: %s",
                  strerror(errno));
     }
     return true;
@@ -775,12 +774,16 @@ static bool bbf_header_seed_needed(const char *datadir,
         return false;
 
     char path[PATH_MAX];
-    struct stat st;
+    struct platform_file_metadata metadata;
     int pn = snprintf(path, sizeof(path), "%s/block_index.bin", datadir);
-    if (pn > 0 && (size_t)pn < sizeof(path) && stat(path, &st) == 0)
+    if (pn > 0 && (size_t)pn < sizeof(path) &&
+        platform_file_metadata_read(path, &metadata) ==
+            PLATFORM_FILE_METADATA_OK)
         return false; /* already imported (or a legacy flat cache present) */
     pn = snprintf(path, sizeof(path), "%s/bundles/block_index.bin", datadir);
-    if (pn > 0 && (size_t)pn < sizeof(path) && stat(path, &st) == 0)
+    if (pn > 0 && (size_t)pn < sizeof(path) &&
+        platform_file_metadata_read(path, &metadata) ==
+            PLATFORM_FILE_METADATA_OK)
         return false; /* already downloaded — import consumes it, no re-fetch */
     return true;
 }
@@ -824,7 +827,12 @@ bool boot_bundle_fetch_maybe(const char *datadir, const struct app_context *ctx)
     struct bbf_discovery disc;
     memset(&disc, 0, sizeof(disc));
 
-    char *body = bbf_read_text_file(hint_path, BBF_DIRECTORY_JSON_MAX);
+    char bundles_root[PATH_MAX];
+    int brn = snprintf(bundles_root, sizeof(bundles_root), "%s/bundles",
+                       datadir);
+    if (brn < 0 || (size_t)brn >= sizeof(bundles_root)) return false;
+    char *body = bbf_read_text_file(bundles_root, "directory.json",
+                                    BBF_DIRECTORY_JSON_MAX);
     if (body) {
         if (boot_bundle_pick_manifest(body, &disc.bundles[0]))
             disc.n_bundles = 1;
