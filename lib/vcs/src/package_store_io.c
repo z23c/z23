@@ -7,13 +7,19 @@
  * the CAS presence set, and the open-time recovery sweep; policy (quota,
  * pools, eviction) lives in package_store.c. */
 
+#if !defined(_WIN32)
+#define _GNU_SOURCE
+#endif
+
 #include "package_store_priv.h"
 
 #include "base/hex.h"
 #include "base/log_macros.h"
 #include "base/safe_alloc.h"
+#include "platform/positioned_file.h"
 
 #include <stdatomic.h>
+#if !defined(_WIN32)
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -23,6 +29,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 #define STORE_LOG "vcs.store"
 
@@ -34,6 +41,10 @@ bool store_name_is_hex64(const char *name)
 
 bool store_mkdir_p(const char *path)
 {
+#if defined(_WIN32)
+    (void)path;
+    return false;
+#else
     char buf[STORE_PATH_MAX];
     size_t len = strlen(path);
     if (len == 0 || len >= sizeof(buf))
@@ -50,10 +61,15 @@ bool store_mkdir_p(const char *path)
     if (mkdir(buf, 0700) != 0 && errno != EEXIST)
         return false;
     return true;
+#endif
 }
 
 bool store_rm_rf(const char *path)
 {
+#if defined(_WIN32)
+    (void)path;
+    return false;
+#else
     struct stat st;
     if (lstat(path, &st) != 0)
         return errno == ENOENT;
@@ -80,11 +96,18 @@ bool store_rm_rf(const char *path)
     if (rmdir(path) != 0)
         ok = false;
     return ok;
+#endif
 }
 
 bool store_atomic_write(const char *path, const uint8_t *data,
                         size_t data_len)
 {
+#if defined(_WIN32)
+    (void)path;
+    (void)data;
+    (void)data_len;
+    return false;
+#else
     static _Atomic uint64_t g_seq = 0;
     uint64_t seq = atomic_fetch_add(&g_seq, 1);
     char tmp[STORE_PATH_MAX];
@@ -123,6 +146,7 @@ bool store_atomic_write(const char *path, const uint8_t *data,
                  strerror(errno));
     }
     return true;
+#endif
 }
 
 void store_cas_path(const struct vcs_package_store *store,
@@ -141,7 +165,6 @@ bool vcs_package_cas_present_in(const char *zcode_dir, const uint8_t hash[32])
 {
     char hex[65];
     char path[STORE_PATH_MAX];
-    struct stat st;
     int n;
 
     if (!zcode_dir || !hash)
@@ -151,7 +174,13 @@ bool vcs_package_cas_present_in(const char *zcode_dir, const uint8_t hash[32])
                  hex);
     if (n < 0 || (size_t)n >= sizeof(path))
         return false;
-    return stat(path, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0;
+    struct platform_positioned_file file;
+    uint64_t size = 0;
+    platform_positioned_file_init(&file);
+    bool present = platform_positioned_file_open(&file, path) &&
+                   platform_positioned_file_size(&file, &size) && size > 0;
+    platform_positioned_file_close(&file);
+    return present;
 }
 
 /* ── CAS presence set (ascending hashes, bsearch) ─────────────────── */
@@ -275,6 +304,11 @@ bool store_package_complete(const struct vcs_package_store *store,
 bool store_package_commit(struct vcs_package_store *store,
                           struct store_package *pkg)
 {
+#if defined(_WIN32)
+    (void)store;
+    (void)pkg;
+    return false;
+#else
     char staging_dir[STORE_PATH_MAX];
     char staged[STORE_PATH_MAX];
     char final[STORE_PATH_MAX];
@@ -295,9 +329,12 @@ bool store_package_commit(struct vcs_package_store *store,
     pkg->committed = true;
     store_package_touch(store, pkg);
     return true;
+#endif
 }
 
 /* ── open / recovery ──────────────────────────────────────────────── */
+
+#if !defined(_WIN32)
 
 static void store_sweep_temps(struct vcs_package_store *store,
                               const char *dir)
@@ -668,3 +705,10 @@ bool store_open_recover(struct vcs_package_store *store)
         LOG_FAIL(STORE_LOG, "commit sweep under %s", store->root);
     return true;
 }
+#else
+bool store_open_recover(struct vcs_package_store *store)
+{
+    (void)store;
+    return false;
+}
+#endif
