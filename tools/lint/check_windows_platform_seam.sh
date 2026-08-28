@@ -198,13 +198,36 @@ fi
 # no separate exemption list to fall out of sync.
 exempt_files() {
     awk '
-        /^ifeq \(\$\(ZCL_HOST_OS\),Linux\)$/ { inblock = 1; branch = 0; next }
-        inblock && /^else$/                  { branch = 1; next }
+        # The guard opener has had two spellings; accept both, so a cosmetic
+        # rewrite of the condition does not empty this set.
+        /^ifeq \(\$\(ZCL_HOST_OS\),Linux\)$/       { inblock = 1; branch = 0; next }
+        /^ifneq \(\$\(filter Linux,\$\(ZCL_HOST_OS\)\),\)$/ { inblock = 1; branch = 0; next }
+        # Every branch after the first is a non-Linux host, including the
+        # `else ifeq ($(ZCL_HOST_WINDOWS),1)` arm added for Windows.
+        inblock && /^else/                   { branch = 1; next }
         inblock && /^endif$/                 { inblock = 0; next }
         inblock && branch == 1               { print }
     ' "$MAKEFILE" | grep -oE "${SEAM_DIR}/[A-Za-z0-9_]+\.c" | sort -u
 }
 mapfile -t EXEMPT < <(exempt_files)
+
+# An empty parse is a REFUSAL, not a wider scan. If the Makefile guard is
+# rewritten into a shape the awk above does not know, EXEMPT comes back
+# empty and this gate would start grading os_sandbox_linux.c against a
+# baseline that deliberately does not list it. That reads as a real
+# regression and invites someone to baseline a Linux-only backend for
+# Windows, which is the one outcome the exemption exists to prevent.
+# Say what actually broke instead.
+if [ "${#EXEMPT[@]}" -eq 0 ]; then
+    echo "  $GATE: FAIL — parsed ZERO Makefile-exempt seam files." >&2
+    echo "      The host-OS guard around LIB_SRCS in '$MAKEFILE' no longer" >&2
+    echo "      matches any opener this gate knows, so the build's own" >&2
+    echo "      platform decision could not be read. Refusing to grade the" >&2
+    echo "      seam against a guessed exemption set. Update exempt_files()" >&2
+    echo "      to track the guard's new shape — do NOT baseline the files" >&2
+    echo "      that suddenly appear." >&2
+    exit 1
+fi
 
 is_exempt() {
     local f="$1" e
