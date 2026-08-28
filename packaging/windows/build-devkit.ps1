@@ -65,6 +65,20 @@ foreach ($source in $sources) { Require-Path $source Leaf }
     '-ladvapi32' '-lshell32' '-o' $controller
 if ($LASTEXITCODE -ne 0) { throw "controller build failed: $LASTEXITCODE" }
 
+# Fail the devkit build before packaging if the controller accidentally gains
+# a dependency on an emulation layer or compiler runtime DLL.
+$readobj = Join-Path $toolchain 'bin\llvm-readobj.exe'
+Require-Path $readobj Leaf
+$imports = (& $readobj '--coff-imports' $controller | Select-String 'Name: .*\.dll' |
+    ForEach-Object { $_.Matches[0].Value.Substring(6).ToLowerInvariant() })
+if ($LASTEXITCODE -ne 0) { throw "controller PE import audit failed: $LASTEXITCODE" }
+$forbiddenImports = @($imports | Where-Object {
+    $_ -match '^(msys-|cygwin|libgcc|libstdc\+\+|libwinpthread|clang_rt|api-ms-win-crt-private)'
+})
+if ($forbiddenImports.Count -ne 0) {
+    throw "controller requires forbidden DLLs: $($forbiddenImports -join ', ')"
+}
+
 $signed = $false
 if ($SignTool -and $CertificateThumbprint) {
     Require-Path $SignTool Leaf
@@ -91,6 +105,7 @@ $manifest = [ordered]@{
     compiler = 'portable-llvm-mingw'
     signed = $signed
     signature_status = if ($signed) { 'signed' } else { 'unsigned-development-snapshot' }
+    controller_imports = @($imports)
     files = @($payload)
 }
 $manifestPath = Join-Path $kit 'devkit-manifest.json'

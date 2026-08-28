@@ -90,6 +90,47 @@ function Assert-NativeGraphicalExecutable {
         throw "application is not a Windows graphical executable (PE subsystem=$subsystem): $Path"
     }
 
+    $sectionCount = [BitConverter]::ToUInt16($bytes, $peOffset + 6)
+    $optionalSize = [BitConverter]::ToUInt16($bytes, $peOffset + 20)
+    $magic = [BitConverter]::ToUInt16($bytes, $optionalHeader)
+    $dataDirectory = if ($magic -eq 0x20b) { $optionalHeader + 112 } `
+                     elseif ($magic -eq 0x10b) { $optionalHeader + 96 } `
+                     else { throw "unsupported PE optional-header magic: $magic" }
+    $importRva = [BitConverter]::ToUInt32($bytes, $dataDirectory + 8)
+    $sectionTable = $optionalHeader + $optionalSize
+    function Convert-RvaToOffset([uint32]$Rva) {
+        for ($index = 0; $index -lt $sectionCount; $index++) {
+            $section = $sectionTable + ($index * 40)
+            $virtualSize = [BitConverter]::ToUInt32($bytes, $section + 8)
+            $virtualAddress = [BitConverter]::ToUInt32($bytes, $section + 12)
+            $rawSize = [BitConverter]::ToUInt32($bytes, $section + 16)
+            $rawOffset = [BitConverter]::ToUInt32($bytes, $section + 20)
+            $extent = [Math]::Max($virtualSize, $rawSize)
+            if ($Rva -ge $virtualAddress -and $Rva -lt ($virtualAddress + $extent)) {
+                return [int]($rawOffset + ($Rva - $virtualAddress))
+            }
+        }
+        throw "PE RVA is outside declared sections: $Rva"
+    }
+    if ($importRva -ne 0) {
+        $descriptor = Convert-RvaToOffset $importRva
+        $imports = [System.Collections.Generic.List[string]]::new()
+        while ([BitConverter]::ToUInt32($bytes, $descriptor) -ne 0 -or
+               [BitConverter]::ToUInt32($bytes, $descriptor + 12) -ne 0) {
+            $nameOffset = Convert-RvaToOffset ([BitConverter]::ToUInt32($bytes, $descriptor + 12))
+            $end = $nameOffset
+            while ($end -lt $bytes.Length -and $bytes[$end] -ne 0) { $end++ }
+            if ($end -ge $bytes.Length) { throw 'unterminated PE import name' }
+            $imports.Add([Text.Encoding]::ASCII.GetString($bytes, $nameOffset, $end - $nameOffset))
+            $descriptor += 20
+        }
+        $forbidden = @($imports | Where-Object {
+            $_ -match '^(msys-|cygwin|libgcc|libstdc\+\+|libwinpthread|clang_rt|api-ms-win-crt-private)' })
+        if ($forbidden.Count -ne 0) {
+            throw "application requires forbidden toolchain DLLs: $($forbidden -join ', ')"
+        }
+    }
+
     $process = Start-Process -FilePath $Path -PassThru
     try {
         $deadline = [DateTime]::UtcNow.AddSeconds($GuiReadySeconds)
