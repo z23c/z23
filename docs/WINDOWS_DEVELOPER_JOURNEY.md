@@ -9,10 +9,10 @@ Studio, an SDK, CMake, Ninja, Make, compiler selection, environment variables,
 and DLL placement are not user decisions.
 
 The checked-in controller currently implements the relocatable tool selection,
-native GUI scaffold, isolated builds, timing output, and unsigned development
-packaging portions of this contract. Manifest installation, continuous watch,
-release signing, and clean-machine certification remain release gates; this
-document does not claim they are complete.
+native GUI scaffold, isolated builds, resident incremental watch/restart loop,
+timing output, and unsigned development packaging portions of this contract.
+Manifest installation, release signing, and clean-machine certification remain
+release gates; this document does not claim they are complete.
 
 ## The entire interface
 

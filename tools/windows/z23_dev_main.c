@@ -13,6 +13,82 @@
 #include <string.h>
 #include <wchar.h>
 
+static HANDLE shutdown_event;
+
+static BOOL WINAPI console_control(DWORD control)
+{
+    if (control == CTRL_C_EVENT || control == CTRL_BREAK_EVENT ||
+        control == CTRL_CLOSE_EVENT || control == CTRL_LOGOFF_EVENT ||
+        control == CTRL_SHUTDOWN_EVENT) {
+        if (shutdown_event != NULL)
+            SetEvent(shutdown_event);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static BOOL CALLBACK close_process_window(HWND window, LPARAM value)
+{
+    DWORD owner = 0;
+    GetWindowThreadProcessId(window, &owner);
+    if (owner == (DWORD)value)
+        PostMessageW(window, WM_CLOSE, 0, 0);
+    return TRUE;
+}
+
+static void stop_application(HANDLE *process, wchar_t *generation)
+{
+    if (*process != NULL) {
+        DWORD pid = GetProcessId(*process);
+        EnumWindows(close_process_window, (LPARAM)pid);
+        if (WaitForSingleObject(*process, 3000) == WAIT_TIMEOUT) {
+            TerminateProcess(*process, 1);
+            WaitForSingleObject(*process, 1000);
+        }
+        CloseHandle(*process);
+        *process = NULL;
+    }
+    if (generation[0] != L'\0') {
+        DeleteFileW(generation);
+        generation[0] = L'\0';
+    }
+}
+
+static bool launch_generation(const wchar_t *built, HANDLE *process,
+                              wchar_t *generation, size_t capacity)
+{
+    static LONG counter;
+    STARTUPINFOW startup = { .cb = sizeof(startup) };
+    PROCESS_INFORMATION child = {0};
+    wchar_t absolute[32768];
+    unsigned int attempt;
+
+    if (!CreateDirectoryW(L".z23\\run", NULL) &&
+        GetLastError() != ERROR_ALREADY_EXISTS)
+        return false;
+    for (attempt = 0; attempt < 100; ++attempt) {
+        LONG id = InterlockedIncrement(&counter);
+        if (swprintf(generation, capacity, L".z23\\run\\app-%lu-%ld.exe",
+                     (unsigned long)GetCurrentProcessId(), (long)id) < 0)
+            return false;
+        if (CopyFileW(built, generation, TRUE))
+            break;
+        if (GetLastError() != ERROR_FILE_EXISTS)
+            return false;
+    }
+    if (attempt == 100 ||
+        GetFullPathNameW(generation, 32768, absolute, NULL) == 0 ||
+        !CreateProcessW(absolute, absolute, NULL, NULL, FALSE,
+                        CREATE_NEW_PROCESS_GROUP, NULL, NULL, &startup, &child)) {
+        DeleteFileW(generation);
+        generation[0] = L'\0';
+        return false;
+    }
+    CloseHandle(child.hThread);
+    *process = child.hProcess;
+    return true;
+}
+
 static void usage(void)
 {
     fputs("Usage: z23-dev bootstrap | create <name> | "
@@ -241,22 +317,159 @@ static int develop(const struct z23_dev_layout *layout, bool once)
     size_t count = z23_dev_plan(Z23_DEV_DEVELOP, layout, steps, 3);
     size_t i;
     DWORD result;
+    HANDLE lock = INVALID_HANDLE_VALUE;
+    HANDLE directory = INVALID_HANDLE_VALUE;
+    HANDLE app = NULL;
+    HANDLE changed = NULL;
+    wchar_t generation[32768] = L"";
+    bool watch_error = false;
+    OVERLAPPED overlap = {0};
+    BYTE notifications[65536];
+    DWORD ignored;
+
+    if (!CreateDirectoryW(L".z23", NULL) &&
+        GetLastError() != ERROR_ALREADY_EXISTS) {
+        fputs("develop: cannot create private build state\n", stderr);
+        return 1;
+    }
+    lock = CreateFileW(L".z23\\develop.lock", GENERIC_READ | GENERIC_WRITE,
+                       0, NULL, OPEN_ALWAYS,
+                       FILE_ATTRIBUTE_HIDDEN | FILE_FLAG_DELETE_ON_CLOSE, NULL);
+    if (lock == INVALID_HANDLE_VALUE) {
+        fputs("develop: another watcher already owns this project\n", stderr);
+        return 1;
+    }
     for (i = 0; i < count; ++i) {
         result = run_process(steps[i].executable, steps[i].arguments,
                              steps[i].name, L"develop", true);
-        if (result != 0)
+        if (result != 0) {
+            CloseHandle(lock);
             return 1;
+        }
     }
-    if (once)
+    if (once) {
+        CloseHandle(lock);
         return 0;
+    }
     if (read_project_name(name, 64) != 0 ||
         swprintf(executable, 32768, L".z23\\build\\develop\\%ls.exe", name) < 0) {
         fputs("develop: project directory must match its C identifier name\n",
               stderr);
+        CloseHandle(lock);
         return 1;
     }
-    result = run_process(executable, L"", L"launch", L"develop", false);
-    return result == 0 ? 0 : 1;
+
+    shutdown_event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    changed = CreateEventW(NULL, TRUE, FALSE, NULL);
+    directory = CreateFileW(L".", FILE_LIST_DIRECTORY,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, NULL);
+    if (shutdown_event == NULL || changed == NULL ||
+        directory == INVALID_HANDLE_VALUE ||
+        !SetConsoleCtrlHandler(console_control, TRUE)) {
+        fputs("develop: cannot initialize the native file watcher\n", stderr);
+        watch_error = true;
+        goto watch_failure;
+    }
+
+    if (!launch_generation(executable, &app, generation, 32768)) {
+        fputs("develop: built application could not be launched\n", stderr);
+        watch_error = true;
+        goto watch_failure;
+    }
+    json_step(L"develop", L"launch", 0, 0);
+    overlap.hEvent = changed;
+    if (!ReadDirectoryChangesW(directory, notifications,
+            (DWORD)sizeof(notifications), TRUE,
+            FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME |
+            FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_SIZE,
+            NULL, &overlap, NULL)) {
+        fputs("develop: cannot begin watching project files\n", stderr);
+        watch_error = true;
+        goto watch_failure;
+    }
+    puts("Watching project files. Press Ctrl-C to stop.");
+    for (;;) {
+        HANDLE waits[2] = { shutdown_event, changed };
+        DWORD wait = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
+        bool source_change = false;
+        FILE_NOTIFY_INFORMATION *entry;
+        BYTE *cursor;
+        if (wait == WAIT_OBJECT_0)
+            break;
+        if (wait != WAIT_OBJECT_0 + 1 ||
+            !GetOverlappedResult(directory, &overlap, &ignored, FALSE)) {
+            fputs("develop: project watcher failed\n", stderr);
+            watch_error = true;
+            goto watch_failure;
+        }
+        cursor = notifications;
+        do {
+            size_t chars;
+            entry = (FILE_NOTIFY_INFORMATION *)cursor;
+            chars = entry->FileNameLength / sizeof(wchar_t);
+            if (!((chars >= 5 && _wcsnicmp(entry->FileName, L".z23\\", 5) == 0) ||
+                  (chars >= 5 && _wcsnicmp(entry->FileName, L"dist\\", 5) == 0) ||
+                  (chars == 4 && _wcsnicmp(entry->FileName, L"dist", 4) == 0)))
+                source_change = true;
+            if (entry->NextEntryOffset == 0)
+                break;
+            cursor += entry->NextEntryOffset;
+        } while (cursor < notifications + sizeof(notifications));
+        ResetEvent(changed);
+        memset(&overlap, 0, sizeof(overlap));
+        overlap.hEvent = changed;
+        if (!ReadDirectoryChangesW(directory, notifications,
+                (DWORD)sizeof(notifications), TRUE,
+                FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME |
+                FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_SIZE,
+                NULL, &overlap, NULL)) {
+            watch_error = true;
+            goto watch_failure;
+        }
+        if (!source_change)
+            continue;
+        /* Coalesce editor save sequences without delaying console shutdown. */
+        if (WaitForSingleObject(shutdown_event, 200) == WAIT_OBJECT_0)
+            break;
+        result = run_process(steps[1].executable, steps[1].arguments,
+                             steps[1].name, L"develop", true);
+        if (result != 0) {
+            fputs("develop: build failed; previous application remains running\n",
+                  stderr);
+            continue;
+        }
+        {
+            HANDLE replacement = NULL;
+            wchar_t replacement_generation[32768] = L"";
+            if (launch_generation(executable, &replacement,
+                                  replacement_generation, 32768)) {
+                stop_application(&app, generation);
+                app = replacement;
+                wcscpy(generation, replacement_generation);
+            } else {
+                fputs("develop: rebuilt application could not be launched; "
+                      "previous application remains running\n", stderr);
+                continue;
+            }
+            json_step(L"develop", L"restart", 0, 0);
+        }
+    }
+
+watch_failure:
+    if (directory != INVALID_HANDLE_VALUE) {
+        CancelIoEx(directory, &overlap);
+        CloseHandle(directory);
+    }
+    stop_application(&app, generation);
+    SetConsoleCtrlHandler(console_control, FALSE);
+    if (changed != NULL)
+        CloseHandle(changed);
+    if (shutdown_event != NULL)
+        CloseHandle(shutdown_event);
+    shutdown_event = NULL;
+    CloseHandle(lock);
+    return watch_error ? 1 : 0;
 }
 
 static int ship(const struct z23_dev_layout *layout)
