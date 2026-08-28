@@ -29,13 +29,19 @@ static bool runtime_is_wine(void)
 
 static int child_mode(int argc, char **argv)
 {
+    DWORD inherited_error_mode = GetErrorMode();
     platform_process_child_prepare_headless();
     if (argc != 9 || strcmp(argv[2], "space value") != 0 ||
         strcmp(argv[3], "quote\"value") != 0 ||
         strcmp(argv[4], "trailing\\") != 0 ||
         !getenv("Z23_PROCESS_TEST") ||
         strcmp(getenv("Z23_PROCESS_TEST"), "controlled") != 0 ||
-        getenv("Z23_PROCESS_UNEXPECTED") != NULL || GetConsoleWindow() != NULL)
+        getenv("Z23_PROCESS_UNEXPECTED") != NULL || GetConsoleWindow() != NULL ||
+        (inherited_error_mode & (SEM_FAILCRITICALERRORS |
+                                 SEM_NOGPFAULTERRORBOX |
+                                 SEM_NOOPENFILEERRORBOX)) !=
+            (SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX |
+             SEM_NOOPENFILEERRORBOX))
         return 20;
     wchar_t image[32768], cwd[32768], expected_image[32768], expected_cwd[32768];
     if (!GetModuleFileNameW(NULL, image, 32768) ||
