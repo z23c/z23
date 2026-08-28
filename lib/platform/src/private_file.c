@@ -370,10 +370,10 @@ bool platform_private_file_link_no_clobber(
   *same = false;
   if (!pf_wide(s, ws) || !pf_wide(d, wd))
     return false;
-  if (CreateHardLinkW(wd, ws, NULL))
-    return true;
-  DWORD link_error = GetLastError();
-  if (link_error != ERROR_ALREADY_EXISTS && link_error != ERROR_FILE_EXISTS)
+  bool created = CreateHardLinkW(wd, ws, NULL) != 0;
+  DWORD link_error = created ? ERROR_SUCCESS : GetLastError();
+  if (!created && link_error != ERROR_ALREADY_EXISTS &&
+      link_error != ERROR_FILE_EXISTS)
     return false;
   HANDLE h =
       CreateFileW(wd, FILE_READ_ATTRIBUTES,
@@ -388,8 +388,13 @@ bool platform_private_file_link_no_clobber(
   struct platform_private_file_identity did = {
       .volume = info.dwVolumeSerialNumber,
       .file = ((uint64_t)info.nFileIndexHigh << 32) | info.nFileIndexLow};
-  CloseHandle(h);
   *same = ok && did.volume == sid->volume && did.file == sid->file;
+  if (created && !*same) {
+    FILE_DISPOSITION_INFO disposition = {.DeleteFile = TRUE};
+    (void)SetFileInformationByHandle(h, FileDispositionInfo, &disposition,
+                                     sizeof(disposition));
+  }
+  CloseHandle(h);
   return *same;
 }
 
@@ -624,14 +629,15 @@ bool platform_private_file_link_no_clobber(
     const char *s, const char *d,
     const struct platform_private_file_identity *si, bool *same) {
   *same = false;
-  if (link(s, d) == 0)
-    return true;
-  if (errno != EEXIST)
+  bool created = link(s, d) == 0;
+  if (!created && errno != EEXIST)
     return false;
   struct stat st;
   if (lstat(d, &st))
     return false;
   *same = (uint64_t)st.st_dev == si->volume && (uint64_t)st.st_ino == si->file;
+  if (created && !*same)
+    (void)unlink(d);
   return *same;
 }
 bool platform_private_file_unlink_missing_ok(const char *p) {

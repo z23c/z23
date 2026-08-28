@@ -3,13 +3,83 @@
 #include "config/boot_legacy_blocks.h"
 
 #include "config/file_ops.h"
+#include "platform/positioned_file.h"
+#include "platform/private_file.h"
 #include "util/log_macros.h"
 
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
+
+static bool boot_snapshot_equal(
+    const struct platform_positioned_file_snapshot *a,
+    const struct platform_positioned_file_snapshot *b)
+{
+    return a->size == b->size &&
+           a->modified_seconds == b->modified_seconds &&
+           a->modified_nanoseconds == b->modified_nanoseconds &&
+           a->changed_seconds == b->changed_seconds &&
+           a->changed_nanoseconds == b->changed_nanoseconds &&
+           a->volume == b->volume && a->file_low == b->file_low &&
+           a->file_high == b->file_high;
+}
+
+static bool boot_file_snapshot(const char *path,
+                               struct platform_positioned_file_snapshot *out)
+{
+    struct platform_positioned_file file;
+    platform_positioned_file_init(&file);
+    bool ok = platform_positioned_file_open(&file, path) &&
+              platform_positioned_file_snapshot(&file, out);
+    platform_positioned_file_close(&file);
+    return ok;
+}
+
+static bool boot_copy_no_clobber(
+    const char *src, const char *dst,
+    const struct platform_positioned_file_snapshot *expected)
+{
+    struct platform_positioned_file input;
+    struct platform_private_file output;
+    struct platform_positioned_file_snapshot before;
+    struct platform_positioned_file_snapshot after;
+    struct platform_private_file_identity output_id;
+    platform_positioned_file_init(&input);
+    platform_private_file_init(&output);
+    if (!platform_positioned_file_open(&input, src) ||
+        !platform_positioned_file_snapshot(&input, &before) ||
+        !boot_snapshot_equal(&before, expected) ||
+        !platform_private_file_create(dst, &output) ||
+        !platform_private_file_identity(&output, &output_id)) {
+        platform_positioned_file_close(&input);
+        platform_private_file_close(&output);
+        return false;
+    }
+    uint8_t bytes[64 * 1024];
+    uint64_t offset = 0;
+    bool ok = true;
+    while (offset < before.size) {
+        size_t want = before.size - offset < sizeof(bytes)
+                          ? (size_t)(before.size - offset)
+                          : sizeof(bytes);
+        int64_t got = platform_positioned_file_read(&input, bytes, want, offset);
+        if (got != (int64_t)want ||
+            !platform_private_file_write_at(&output, bytes, want, offset)) {
+            ok = false;
+            break;
+        }
+        offset += want;
+    }
+    ok = ok && platform_private_file_flush(&output) &&
+         platform_positioned_file_snapshot(&input, &after) &&
+         boot_snapshot_equal(&before, &after);
+    platform_positioned_file_close(&input);
+    if (!ok)
+        (void)platform_private_file_retire_if_identity(&output, dst,
+                                                       &output_id);
+    platform_private_file_close(&output);
+    return ok;
+}
 
 static bool boot_legacy_blocks_dir(char *out, size_t out_n,
                                    const char *datadir)
@@ -42,7 +112,16 @@ static bool boot_link_or_copy_import_block_file(const char *src,
                                                 long long bytes,
                                                 bool announce)
 {
-    if (link(src, dst) == 0) {
+    struct platform_positioned_file_snapshot source;
+    if (!boot_file_snapshot(src, &source))
+        return false;
+    struct platform_private_file_identity source_id = {
+        .volume = source.volume,
+        .file = source.file_low,
+    };
+    bool already_same = false;
+    if (platform_private_file_link_no_clobber(src, dst, &source_id,
+                                               &already_same)) {
         if (announce && file_index % 10 == 0)
             printf("  linked %s%05d.dat (%lld MB)\n",
                    prefix, file_index, bytes >> 20);
@@ -50,13 +129,16 @@ static bool boot_link_or_copy_import_block_file(const char *src,
     }
 
     int link_errno = errno;
+    if (already_same)
+        return true;
     if (announce) {
         printf("  copying %s%05d.dat (%lld MB)...\n",
                prefix, file_index, bytes >> 20);
         fflush(stdout);
     }
 
-    if (file_copy(src, dst))
+    if (platform_private_path_absent(dst) &&
+        boot_copy_no_clobber(src, dst, &source))
         return true;
 
     int copy_errno = errno;
@@ -97,8 +179,8 @@ boot_legacy_import_block_files(const char *legacy_blocks_dir,
             break;
         }
 
-        struct stat src_st, dst_st;
-        if (stat(src_path, &src_st) != 0) {
+        struct platform_positioned_file_snapshot src_st, dst_st;
+        if (!boot_file_snapshot(src_path, &src_st)) {
             if (fi > 2)
                 break;
             continue;
@@ -108,14 +190,14 @@ boot_legacy_import_block_files(const char *legacy_blocks_dir,
         /* Preserve the historical boot behavior: if the blk file already
          * exists with the same size, this index is complete enough for this
          * pass and rev linking is left to the later warm-boot helper. */
-        if (stat(dst_path, &dst_st) == 0 &&
-            dst_st.st_size == src_st.st_size)
+        if (boot_file_snapshot(dst_path, &dst_st) &&
+            dst_st.size == src_st.size)
             continue;
 
         int index_failures = 0;
         if (!boot_link_or_copy_import_block_file(
                 src_path, dst_path, "blk", fi,
-                (long long)src_st.st_size, true))
+                (long long)src_st.size, true))
             index_failures++;
 
         if (!boot_legacy_file_path(src_path, sizeof(src_path),
@@ -125,10 +207,10 @@ boot_legacy_import_block_files(const char *legacy_blocks_dir,
             result.truncated_path = true;
             break;
         }
-        if (stat(src_path, &src_st) == 0) {
+        if (boot_file_snapshot(src_path, &src_st)) {
             if (!boot_link_or_copy_import_block_file(
                     src_path, dst_path, "rev", fi,
-                    (long long)src_st.st_size, false))
+                    (long long)src_st.size, false))
                 index_failures++;
         }
 
@@ -151,13 +233,25 @@ boot_legacy_import_block_files(const char *legacy_blocks_dir,
 static bool boot_legacy_link_if_missing(const char *src, const char *dst,
                                         int *failures, int *first_errno)
 {
-    struct stat st;
-    if (stat(dst, &st) == 0)
+    struct platform_positioned_file_snapshot existing;
+    if (boot_file_snapshot(dst, &existing))
         return false;
-    if (link(src, dst) == 0)
+    struct platform_positioned_file_snapshot source;
+    if (!boot_file_snapshot(src, &source))
+        return false;
+    struct platform_private_file_identity source_id = {
+        .volume = source.volume,
+        .file = source.file_low,
+    };
+    bool already_same = false;
+    if (platform_private_file_link_no_clobber(src, dst, &source_id,
+                                               &already_same))
         return true;
-    if (errno == EEXIST)
+    if (already_same || boot_file_snapshot(dst, &existing))
         return false;
+    if (platform_private_path_absent(dst) &&
+        boot_copy_no_clobber(src, dst, &source))
+        return true;
     (*failures)++;
     if (*first_errno == 0)
         *first_errno = errno;
@@ -193,8 +287,8 @@ boot_legacy_link_missing_block_files(const char *legacy_blocks_dir,
             break;
         }
 
-        struct stat ss;
-        if (stat(src, &ss) != 0) {
+        struct platform_positioned_file_snapshot ss;
+        if (!boot_file_snapshot(src, &ss)) {
             if (fi > 2)
                 break;
             continue;
@@ -226,7 +320,7 @@ boot_legacy_link_missing_block_files(const char *legacy_blocks_dir,
          * historically blk-only), counted in `failures`, which is also the
          * early warning for whatever would hit blk files next (EXDEV across
          * filesystems, ENOSPC, EPERM). */
-        if (stat(src, &ss) == 0)
+        if (boot_file_snapshot(src, &ss))
             (void)boot_legacy_link_if_missing(src, dst, &result.failures,
                                               &first_errno);
     }
