@@ -4,6 +4,7 @@
 #include "test/test_core.h"
 #include "zslp/slp.h"
 #include "wallet/wallet.h"
+#include "util/safe_alloc.h"
 #include "script/standard.h"
 #include "services/zslp_command_service.h"
 
@@ -479,18 +480,19 @@ int test_slp(void)
     printf("ordinary wallet coin selection reserves token and baton dust... ");
     {
         wallet_set_coin_reservation_probe(test_slp_coin_reserved, NULL);
-        struct wallet w;
+        struct wallet *w = zcl_calloc(1, sizeof(*w), "test-wallet");
+        /* ~40 MB wallet: heap, never stack */
         uint8_t seed[32];
         memset(seed, 0x5a, sizeof(seed));
-        wallet_init(&w);
-        bool ok = wallet_init_hd(&w, seed, sizeof(seed));
+        wallet_init(w);
+        bool ok = wallet_init_hd(w, seed, sizeof(seed));
         char address[128];
         struct key_id kid = {0};
         ok = ok && wallet_get_new_address_with_key_id(
-                       &w, address, sizeof(address), &kid);
-        ok = ok && wallet_top_up_key_pool(&w, 4);
+                       w, address, sizeof(address), &kid);
+        ok = ok && wallet_top_up_key_pool(w, 4);
         wallet_key_pool_mark_persisted_through(
-            &w, wallet_key_pool_generation_ceiling(&w));
+            w, wallet_key_pool_generation_ceiling(w));
         struct tx_destination owner = { .type = DEST_KEY_ID, .id.key = kid };
 
         struct wallet_tx asset;
@@ -509,7 +511,7 @@ int test_slp(void)
         transaction_compute_hash(&asset.tx);
         struct uint256 token_id = asset.tx.hash;
         asset.confirms = 10;
-        ok = ok && wallet_add_to_wallet(&w, &asset);
+        ok = ok && wallet_add_to_wallet(w, &asset);
         transaction_free(&asset.tx);
 
         struct wallet_tx funding;
@@ -520,13 +522,13 @@ int test_slp(void)
         script_for_destination(&funding.tx.vout[0].script_pub_key, &owner);
         transaction_compute_hash(&funding.tx);
         funding.confirms = 10;
-        ok = ok && wallet_add_to_wallet(&w, &funding);
+        ok = ok && wallet_add_to_wallet(w, &funding);
         transaction_free(&funding.tx);
 
         struct coin_entry ordinary[8], asset_aware[8];
         size_t ordinary_count = 0, asset_count = 0;
-        wallet_available_coins(&w, ordinary, &ordinary_count, 8, true, false);
-        wallet_available_coins_ex(&w, asset_aware, &asset_count, 8, true,
+        wallet_available_coins(w, ordinary, &ordinary_count, 8, true, false);
+        wallet_available_coins_ex(w, asset_aware, &asset_count, 8, true,
                                   false, true);
         ok = ok && ordinary_count == 1 && asset_count == 3;
 
@@ -534,9 +536,9 @@ int test_slp(void)
         int64_t fee_paid = 0;
         const char *tx_error = NULL;
         struct zcl_result send_built = zslp_command_build_token_send_tx(
-            &w, token_id.data, address, 400, &send_tx, &fee_paid, &tx_error);
+            w, token_id.data, address, 400, &send_tx, &fee_paid, &tx_error);
         ok = ok && send_built.ok && send_tx.tx.num_vin == 2 &&
-             send_tx.tx.num_vout == 4 && fee_paid == wallet_default_fee(&w);
+             send_tx.tx.num_vout == 4 && fee_paid == wallet_default_fee(w);
         bool spent_token = false, spent_baton = false;
         for (size_t i = 0; send_built.ok && i < send_tx.tx.num_vin; i++) {
             if (uint256_eq(&send_tx.tx.vin[i].prevout.hash, &token_id) &&
@@ -558,7 +560,7 @@ int test_slp(void)
         struct wallet_tx mint_tx;
         tx_error = NULL;
         struct zcl_result mint_built = zslp_command_build_token_mint_tx(
-            &w, token_id.data, address, 250, &mint_tx, &fee_paid, &tx_error);
+            w, token_id.data, address, 250, &mint_tx, &fee_paid, &tx_error);
         bool mint_spent_baton = false;
         for (size_t i = 0; mint_built.ok && i < mint_tx.tx.num_vin; i++) {
             if (uint256_eq(&mint_tx.tx.vin[i].prevout.hash, &token_id) &&
@@ -577,7 +579,7 @@ int test_slp(void)
         struct wallet_tx burn_tx;
         tx_error = NULL;
         struct zcl_result burn_built = zslp_command_build_token_burn_tx(
-            &w, token_id.data, 400, &burn_tx, &fee_paid, &tx_error);
+            w, token_id.data, 400, &burn_tx, &fee_paid, &tx_error);
         bool burn_spent_token = false, burn_spent_baton = false;
         for (size_t i = 0; burn_built.ok && i < burn_tx.tx.num_vin; i++) {
             if (uint256_eq(&burn_tx.tx.vin[i].prevout.hash, &token_id) &&
@@ -594,7 +596,7 @@ int test_slp(void)
              memcmp(burn_change.token_id, token_id.data, 32) == 0;
         if (burn_built.ok)
             transaction_free(&burn_tx.tx);
-        wallet_free(&w);
+        wallet_free(w); free(w);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
