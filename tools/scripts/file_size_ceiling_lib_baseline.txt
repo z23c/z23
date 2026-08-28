@@ -35,7 +35,7 @@ lib/net/src/addrman.c 1254
 lib/net/src/connman.c 3390
 lib/net/src/download.c 1793
 lib/net/src/fast_sync.c 1935
-lib/net/src/file_service.c 3078
+lib/net/src/file_service.c 3058
 lib/net/src/https_server.c 979
 lib/net/src/msg_blocks.c 913 # getblocks pre-handshake service gate (defense-in-depth)
 lib/net/src/msg_headers.c 2370 # 2026-08-28: getheaders per-peer serve window (+53), re-measured after the pick.
