@@ -14,6 +14,10 @@
 #include "config/boot_cold_start.h"
 
 #include "platform/os_proc.h"    /* os_proc_exe_path */
+#include "platform/directory_compat.h"
+#include "platform/positioned_file.h"
+#include "platform/private_directory.h"
+#include "platform/private_file.h"
 #include "util/file_tree_ops.h"  /* zcl_mkdir_p */
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"     /* zcl_malloc */
@@ -25,10 +29,18 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdatomic.h>
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
 
 #define COLD_START_SUBSYS  "cold_start"
 #define COLD_START_MAGIC   "ZCLCOLDSTART"
@@ -82,23 +94,7 @@ int cold_start_receipt_path(const char *datadir, enum cold_start_stage stage,
     return w;
 }
 
-/* fsync the directory that holds `path` so a rename into it is durable. */
-static void cold_start_fsync_parent_dir(const char *path)
-{
-    char dir[PATH_MAX];
-    int w = snprintf(dir, sizeof(dir), "%s", path);
-    if (w < 0 || (size_t)w >= sizeof(dir))
-        return;
-    char *slash = strrchr(dir, '/');
-    if (!slash)
-        return;
-    *slash = '\0';
-    int fd = open(dir[0] ? dir : "/", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (fd < 0)
-        return;
-    (void)fsync(fd);
-    (void)close(fd);
-}
+static _Atomic uint64_t g_cold_start_receipt_nonce;
 
 /* Copy at most `in_len` bytes of `in` into `out` (bounded by `out_n`), replacing
  * any CR/LF with a space so the result is a single line. Always NUL-terminates. */
@@ -130,18 +126,17 @@ bool cold_start_receipt_write(const char *datadir, enum cold_start_stage stage,
     int dn = snprintf(dir, sizeof(dir), "%s/coldstart", datadir);
     if (dn < 0 || (size_t)dn >= sizeof(dir))
         LOG_FAIL(COLD_START_SUBSYS, "receipt write: coldstart dir path too long");
-    struct zcl_result mk = zcl_mkdir_p(dir, 0755);
-    if (!mk.ok)
-        LOG_FAIL(COLD_START_SUBSYS, "receipt write: mkdir %s failed: %s",
-                 dir, mk.message);
+    if (!platform_private_directory_ensure(dir))
+        LOG_FAIL(COLD_START_SUBSYS, "receipt write: private directory refused");
 
     char path[PATH_MAX];
     if (cold_start_receipt_path(datadir, stage, path, sizeof(path)) < 0)
         LOG_FAIL(COLD_START_SUBSYS, "receipt write: path build failed");
-    char tmp[PATH_MAX];
-    int tn = snprintf(tmp, sizeof(tmp), "%s.tmp", path);
-    if (tn < 0 || (size_t)tn >= sizeof(tmp))
-        LOG_FAIL(COLD_START_SUBSYS, "receipt write: tmp path too long");
+    char resolved[PATH_MAX];
+    char parent[PATH_MAX];
+    if (!platform_private_path_resolve(path, resolved, sizeof(resolved), parent,
+                                       sizeof(parent)))
+        LOG_FAIL(COLD_START_SUBSYS, "receipt write: path resolution failed");
 
     char reason_line[COLD_START_REASON_MAX];
     cold_start_singleline(refused ? reason : NULL, reason_line,
@@ -160,24 +155,30 @@ bool cold_start_receipt_write(const char *datadir, enum cold_start_stage stage,
     if (cn < 0 || (size_t)cn >= sizeof(content))
         LOG_FAIL(COLD_START_SUBSYS, "receipt write: content build failed");
 
-    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-    if (fd < 0)
-        LOG_FAIL(COLD_START_SUBSYS, "receipt write: open %s failed: %s",
-                 tmp, strerror(errno));
-    bool ok = (write(fd, content, (size_t)cn) == (ssize_t)cn) &&
-              (fsync(fd) == 0);
-    if (close(fd) != 0)
-        ok = false;
+    struct platform_private_file staging;
+    platform_private_file_init(&staging);
+    char tmp[PATH_MAX];
+    bool created = false;
+    for (unsigned attempt = 0; attempt < 64 && !created; attempt++) {
+        uint64_t nonce = atomic_fetch_add_explicit(
+            &g_cold_start_receipt_nonce, 1, memory_order_relaxed);
+        int tn = snprintf(tmp, sizeof(tmp), "%s.tmp.%016llx", resolved,
+                          (unsigned long long)nonce);
+        if (tn < 0 || (size_t)tn >= sizeof(tmp))
+            LOG_FAIL(COLD_START_SUBSYS, "receipt write: tmp path too long");
+        created = platform_private_file_create(tmp, &staging);
+    }
+    if (!created)
+        LOG_FAIL(COLD_START_SUBSYS, "receipt write: staging create failed");
+    bool ok = platform_private_file_write_at(&staging, content, (size_t)cn, 0) &&
+              platform_private_file_flush(&staging) &&
+              platform_private_file_replace(&staging, tmp, resolved) &&
+              platform_private_parent_flush(parent);
+    platform_private_file_close(&staging);
     if (!ok) {
-        (void)unlink(tmp);
-        LOG_FAIL(COLD_START_SUBSYS, "receipt write: write/fsync %s failed", tmp);
+        (void)platform_private_file_unlink_missing_ok(tmp);
+        LOG_FAIL(COLD_START_SUBSYS, "receipt write: durable replacement failed");
     }
-    if (rename(tmp, path) != 0) {
-        (void)unlink(tmp);
-        LOG_FAIL(COLD_START_SUBSYS, "receipt write: rename %s failed: %s",
-                 path, strerror(errno));
-    }
-    cold_start_fsync_parent_dir(path);
     LOG_INFO(COLD_START_SUBSYS, "stage '%s' %s receipt written (%s)",
              cold_start_stage_name(stage), refused ? "REFUSAL" : "success", path);
     return true;
@@ -224,14 +225,32 @@ static bool cold_start_receipt_load(const char *datadir,
     char path[PATH_MAX];
     if (cold_start_receipt_path(datadir, stage, path, sizeof(path)) < 0)
         return false;
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0)
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before;
+    struct platform_positioned_file_snapshot after;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path))
         return false;
-    ssize_t r = read(fd, buf, buf_n - 1);
-    (void)close(fd);
-    if (r <= 0)
+    bool valid = platform_positioned_file_is_private(&file) &&
+                 platform_positioned_file_snapshot(&file, &before) &&
+                 before.size > 0 && before.size < buf_n;
+    int64_t r = valid ? platform_positioned_file_read(
+                            &file, buf, (size_t)before.size, 0)
+                      : -1;
+    bool stable = valid && r == (int64_t)before.size &&
+                  platform_positioned_file_snapshot(&file, &after) &&
+                  before.size == after.size &&
+                  before.modified_seconds == after.modified_seconds &&
+                  before.modified_nanoseconds == after.modified_nanoseconds &&
+                  before.changed_seconds == after.changed_seconds &&
+                  before.changed_nanoseconds == after.changed_nanoseconds &&
+                  before.volume == after.volume &&
+                  before.file_low == after.file_low &&
+                  before.file_high == after.file_high;
+    platform_positioned_file_close(&file);
+    if (!stable)
         return false;
-    buf[r] = '\0';
+    buf[(size_t)r] = '\0';
 
     char magic[32];
     if (!cold_start_receipt_field(buf, "magic", magic, sizeof(magic)) ||
@@ -484,6 +503,128 @@ static enum cold_start_result cold_start_spawn_classify(char *const child_argv[]
         return COLD_START_TRANSIENT;
     }
 
+#ifdef _WIN32
+    wchar_t command[32768];
+    size_t used = 0;
+    command[0] = L'\0';
+    for (size_t ai = 0; child_argv[ai]; ai++) {
+        wchar_t arg[32768];
+        int converted = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                             child_argv[ai], -1, arg,
+                                             (int)(sizeof(arg) / sizeof(*arg)));
+        if (converted <= 0 || (ai && used + 1 >= 32768)) {
+            cold_start_reason_copy(reason, reason_n,
+                                   "child argument conversion failed");
+            return COLD_START_TRANSIENT;
+        }
+        if (ai)
+            command[used++] = L' ';
+        if (used + 2 >= 32768)
+            return COLD_START_TRANSIENT;
+        command[used++] = L'"';
+        size_t slashes = 0;
+        for (const wchar_t *p = arg;; p++) {
+            if (*p == L'\\') {
+                slashes++;
+                continue;
+            }
+            size_t copies = slashes;
+            if (*p == L'"' || *p == L'\0')
+                copies *= 2;
+            if (used + copies + 2 >= 32768)
+                return COLD_START_TRANSIENT;
+            while (copies--)
+                command[used++] = L'\\';
+            slashes = 0;
+            if (*p == L'\0')
+                break;
+            if (*p == L'"')
+                command[used++] = L'\\';
+            command[used++] = *p;
+        }
+        command[used++] = L'"';
+        command[used] = L'\0';
+    }
+
+    SECURITY_ATTRIBUTES sa = {.nLength = sizeof(sa),
+                              .lpSecurityDescriptor = NULL,
+                              .bInheritHandle = TRUE};
+    HANDLE pipe_read = NULL;
+    HANDLE pipe_write = NULL;
+    if (!CreatePipe(&pipe_read, &pipe_write, &sa, 0) ||
+        !SetHandleInformation(pipe_read, HANDLE_FLAG_INHERIT, 0)) {
+        if (pipe_read) CloseHandle(pipe_read);
+        if (pipe_write) CloseHandle(pipe_write);
+        cold_start_reason_copy(reason, reason_n, "stderr pipe creation failed");
+        return COLD_START_TRANSIENT;
+    }
+    STARTUPINFOW si = {.cb = sizeof(si),
+                       .dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW,
+                       .wShowWindow = SW_HIDE,
+                       .hStdInput = GetStdHandle(STD_INPUT_HANDLE),
+                       .hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE),
+                       .hStdError = pipe_write};
+    PROCESS_INFORMATION pi = {0};
+    HANDLE job = CreateJobObjectW(NULL, NULL);
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    bool job_ok = job && SetInformationJobObject(
+                              job, JobObjectExtendedLimitInformation, &limits,
+                              sizeof(limits));
+    BOOL spawned = job_ok && CreateProcessW(
+        NULL, command, NULL, NULL, TRUE, CREATE_NO_WINDOW | CREATE_SUSPENDED,
+        NULL, NULL, &si, &pi);
+    CloseHandle(pipe_write);
+    if (!spawned || !AssignProcessToJobObject(job, pi.hProcess) ||
+        ResumeThread(pi.hThread) == (DWORD)-1) {
+        if (spawned) {
+            TerminateProcess(pi.hProcess, 127);
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+        }
+        CloseHandle(pipe_read);
+        if (job) CloseHandle(job);
+        cold_start_reason_copy(reason, reason_n, "CreateProcessW failed");
+        return COLD_START_TRANSIENT;
+    }
+    CloseHandle(pi.hThread);
+    char tail[COLD_START_TAIL_CAP + 1];
+    size_t tail_len = 0;
+    char chunk[1024];
+    for (;;) {
+        DWORD got = 0;
+        if (!ReadFile(pipe_read, chunk, sizeof(chunk), &got, NULL) || got == 0)
+            break;
+        (void)fwrite(chunk, 1, got, stderr);
+        (void)fflush(stderr);
+        cold_start_tail_append(tail, &tail_len, COLD_START_TAIL_CAP, chunk,
+                               (size_t)got);
+    }
+    CloseHandle(pipe_read);
+    DWORD waited = WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD exit_code = 127;
+    bool exited = waited == WAIT_OBJECT_0 &&
+                  GetExitCodeProcess(pi.hProcess, &exit_code);
+    CloseHandle(pi.hProcess);
+    CloseHandle(job);
+    tail[tail_len] = '\0';
+    if (exited && exit_code == 0)
+        return COLD_START_OK;
+    char refusal[COLD_START_REASON_MAX];
+    if (cold_start_extract_refusal(tail, refusal, sizeof(refusal))) {
+        cold_start_reason_copy(reason, reason_n, refusal);
+        return COLD_START_BLOCKED;
+    }
+    char msg[96];
+    if (exited)
+        snprintf(msg, sizeof(msg), "child exited with code %lu",
+                 (unsigned long)exit_code);
+    else
+        snprintf(msg, sizeof(msg), "child wait failed");
+    cold_start_reason_copy(reason, reason_n, msg);
+    LOG_WARN(COLD_START_SUBSYS, "%s", msg);
+    return COLD_START_TRANSIENT;
+#else
     int pipefd[2];
     if (pipe(pipefd) != 0) {
         cold_start_reason_copy(reason, reason_n, "stderr pipe creation failed");
@@ -572,6 +713,7 @@ static enum cold_start_result cold_start_spawn_classify(char *const child_argv[]
                  status);
     }
     return COLD_START_TRANSIENT;
+#endif
 }
 
 /* Live stage runner: fork/exec the existing verb for each prep stage, classifying
@@ -684,10 +826,17 @@ static int cold_start_exec_serve(int argc, char **argv)
     serve_argv[n] = NULL;
 
     LOG_INFO(COLD_START_SUBSYS, "all prep stages complete — exec serving boot");
+#ifdef _WIN32
+    enum cold_start_result served =
+        cold_start_spawn_classify(serve_argv, NULL, 0);
+    free(serve_argv);
+    return served == COLD_START_OK ? 0 : 1;
+#else
     execv(exe, serve_argv);
     int e = errno;
     free(serve_argv);
     LOG_ERR(COLD_START_SUBSYS, "serve: execv failed: %s", strerror(e));
+#endif
 }
 
 int boot_cold_start_run(int argc, char **argv)
@@ -726,8 +875,9 @@ int boot_cold_start_run(int argc, char **argv)
             char idx[PATH_MAX];
             if (snprintf(idx, sizeof(idx), "%s/.zclassic/blocks/index", home) <
                 (int)sizeof(idx)) {
-                struct stat st;
-                if (stat(idx, &st) == 0 && S_ISDIR(st.st_mode)) {
+                struct platform_directory_list probe = {0};
+                if (platform_directory_list_regular_sorted(idx, &probe)) {
+                    platform_directory_list_free(&probe);
                     if (snprintf(default_source, sizeof(default_source),
                                  "%s/.zclassic", home) <
                         (int)sizeof(default_source))

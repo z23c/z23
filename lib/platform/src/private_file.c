@@ -118,6 +118,22 @@ bool platform_private_file_open_locked(const char *path,
   return true;
 }
 
+bool platform_private_file_open_locked_create(
+    const char *path, struct platform_private_file *file) {
+  if (platform_private_file_create(path, file)) {
+    OVERLAPPED ov = {0};
+    if (LockFileEx(pf_handle(file),
+                   LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0,
+                   UINT32_MAX, UINT32_MAX, &ov)) {
+      file->locked = true;
+      return true;
+    }
+    platform_private_file_close(file);
+    return false;
+  }
+  return platform_private_file_open_locked(path, file);
+}
+
 void platform_private_file_close(struct platform_private_file *file) {
   if (!file || pf_handle(file) == INVALID_HANDLE_VALUE)
     return;
@@ -454,6 +470,18 @@ bool platform_private_file_open_locked(const char *p,
   f->native = (uintptr_t)fd;
   f->locked = true;
   return true;
+}
+bool platform_private_file_open_locked_create(
+    const char *p, struct platform_private_file *f) {
+  if (platform_private_file_create(p, f)) {
+    if (flock(pf_fd(f), LOCK_EX | LOCK_NB) == 0) {
+      f->locked = true;
+      return true;
+    }
+    platform_private_file_close(f);
+    return false;
+  }
+  return platform_private_file_open_locked(p, f);
 }
 void platform_private_file_close(struct platform_private_file *f) {
   if (f && (int)f->native >= 0) {
