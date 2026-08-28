@@ -10,8 +10,6 @@
 #include "net/file_market.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
-#include "platform/file_compat.h"
-#include "platform/path_compat.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -57,8 +55,8 @@ static bool market_content_read_exact(int fd, uint8_t *out, size_t size,
 {
     size_t done = 0;
     while (done < size) {
-        ssize_t got = platform_file_pread(fd, out + done, size - done,
-                                          (off_t)(offset + done));
+        ssize_t got = pread(fd, out + done, size - done,
+                            (off_t)(offset + done));
         if (got < 0 && errno == EINTR)
             continue;
         if (got <= 0)
@@ -106,39 +104,32 @@ struct zcl_result file_market_content_manifest_build(
         return ZCL_ERR(MARKET_CONTENT_ERR_ARGS,
                        "content reference and manifest outputs are required");
 
-    int source_fd = platform_file_open_nofollow(
-        content_path, O_RDONLY | O_CLOEXEC, 0);
+    int source_fd = open(content_path,
+                         O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     if (source_fd < 0)
         return ZCL_ERR(MARKET_CONTENT_ERR_OPEN,
                        "content reference is unavailable or is a symbolic link");
     struct stat source_stat;
-    struct platform_file_identity source_identity;
     if (fstat(source_fd, &source_stat) != 0 ||
-        !S_ISREG(source_stat.st_mode) || source_stat.st_size <= 0 ||
-        !platform_file_identity_read(source_fd, &source_identity)) {
+        !S_ISREG(source_stat.st_mode) || source_stat.st_size <= 0) {
         close(source_fd);
         return ZCL_ERR(MARKET_CONTENT_ERR_TYPE,
                        "content reference must be a non-empty regular file");
     }
 
     char canonical[MARKET_CONTENT_PATH_MAX];
-#if defined(_WIN32)
-    if (!platform_path_resolve(canonical, sizeof(canonical), content_path)) {
-#else
     if (!realpath(content_path, canonical)) {
-#endif
         close(source_fd);
         return ZCL_ERR(MARKET_CONTENT_ERR_OPEN,
                        "content reference could not be canonicalized");
     }
-    int fd = platform_file_open_nofollow(canonical, O_RDONLY | O_CLOEXEC, 0);
+    int fd = open(canonical,
+                  O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     struct stat canonical_stat;
-    struct platform_file_identity canonical_identity;
     if (fd < 0 || fstat(fd, &canonical_stat) != 0 ||
         !S_ISREG(canonical_stat.st_mode) ||
-        !platform_file_identity_read(fd, &canonical_identity) ||
-        memcmp(&source_identity, &canonical_identity,
-               sizeof(source_identity)) != 0) {
+        canonical_stat.st_dev != source_stat.st_dev ||
+        canonical_stat.st_ino != source_stat.st_ino) {
         if (fd >= 0) close(fd);
         close(source_fd);
         return ZCL_ERR(MARKET_CONTENT_ERR_OPEN,
@@ -170,11 +161,9 @@ struct zcl_result file_market_content_manifest_build(
     bool hashed = market_content_manifest(fd, size_bytes, num_chunks,
                                           hashes, root);
     struct stat after_stat;
-    struct platform_file_identity after_identity;
     bool stable = fstat(fd, &after_stat) == 0 &&
-        platform_file_identity_read(fd, &after_identity) &&
-        memcmp(&canonical_identity, &after_identity,
-               sizeof(canonical_identity)) == 0 &&
+        after_stat.st_dev == canonical_stat.st_dev &&
+        after_stat.st_ino == canonical_stat.st_ino &&
         after_stat.st_size == canonical_stat.st_size;
     close(fd);
     if (!hashed || !stable) {
@@ -456,24 +445,19 @@ struct market_content_digest_entry {
     bool used;
     uint8_t offer_id[32];
     uint32_t chunk_index;
-#if !defined(_WIN32)
     dev_t dev;
     ino_t ino;
     off_t size;
     struct timespec mtim;
     struct timespec ctim;
-#endif
     uint8_t sha3[32];
 };
 
 #define MARKET_CONTENT_DIGEST_SLOTS 4
-#if !defined(_WIN32)
 static struct market_content_digest_entry
     g_content_digests[MARKET_CONTENT_DIGEST_SLOTS];
 static pthread_mutex_t g_content_digests_mutex = PTHREAD_MUTEX_INITIALIZER;
-#endif
 
-#if !defined(_WIN32)
 static void content_digest_slot_stage(struct market_content_digest_entry *staged,
                                       const uint8_t offer_id[32],
                                       uint32_t chunk_index,
@@ -491,7 +475,6 @@ static void content_digest_slot_stage(struct market_content_digest_entry *staged
     staged->ctim = st->st_ctim;
     memcpy(staged->sha3, sha3, 32);
 }
-#endif
 
 static bool content_digest_lookup(const uint8_t offer_id[32],
                                   uint32_t chunk_index,
@@ -500,11 +483,6 @@ static bool content_digest_lookup(const uint8_t offer_id[32],
                                   const uint8_t chunk_sha3[32],
                                   uint8_t digest_out[32])
 {
-#if defined(_WIN32)
-    (void)offer_id; (void)chunk_index; (void)want; (void)st;
-    (void)chunk_sha3; (void)digest_out;
-    return false;
-#else
     /* The key must pin both the exact bytes observed this call and the
      * registration the digest will be compared against; anything less
      * reruns the hash. */
@@ -528,7 +506,6 @@ static bool content_digest_lookup(const uint8_t offer_id[32],
     }
     pthread_mutex_unlock(&g_content_digests_mutex);
     return false;
-#endif
 }
 
 static void content_digest_store(const uint8_t offer_id[32],
@@ -537,10 +514,6 @@ static void content_digest_store(const uint8_t offer_id[32],
                                  const struct stat *st,
                                  const uint8_t digest[32])
 {
-#if defined(_WIN32)
-    (void)offer_id; (void)chunk_index; (void)want; (void)st; (void)digest;
-    return;
-#else
     if ((uint64_t)st->st_size != (uint64_t)want)
         return;
     struct market_content_digest_entry staged;
@@ -562,7 +535,6 @@ static void content_digest_store(const uint8_t offer_id[32],
     }
     *chosen = staged;
     pthread_mutex_unlock(&g_content_digests_mutex);
-#endif
 }
 
 struct zcl_result file_market_content_load_chunk(
@@ -579,13 +551,11 @@ struct zcl_result file_market_content_load_chunk(
     if (!db_market_content_find_chunk(ndb, offer_id, chunk_index, &record))
         return ZCL_ERR(MARKET_CONTENT_ERR_OFFER,
                        "private content chunk is not registered");
-    int fd = platform_file_open_nofollow(record.private_path,
-                                         O_RDONLY | O_CLOEXEC, 0);
+    int fd = open(record.private_path,
+                  O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     struct stat st;
-    struct platform_file_identity before_identity;
     if (fd < 0 || fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
-        st.st_size <= 0 || (uint64_t)st.st_size != record.content.size_bytes ||
-        !platform_file_identity_read(fd, &before_identity)) {
+        st.st_size <= 0 || (uint64_t)st.st_size != record.content.size_bytes) {
         if (fd >= 0) close(fd);
         return ZCL_ERR(MARKET_CONTENT_ERR_OPEN,
                        "registered private content is unavailable or changed");
@@ -603,12 +573,8 @@ struct zcl_result file_market_content_load_chunk(
     }
     bool read_ok = market_content_read_exact(fd, data, want, offset);
     struct stat after;
-    struct platform_file_identity after_identity;
-    bool stable = fstat(fd, &after) == 0 &&
-        platform_file_identity_read(fd, &after_identity) &&
-        memcmp(&before_identity, &after_identity,
-               sizeof(before_identity)) == 0 &&
-        after.st_size == st.st_size;
+    bool stable = fstat(fd, &after) == 0 && after.st_dev == st.st_dev &&
+        after.st_ino == st.st_ino && after.st_size == st.st_size;
     close(fd);
     uint8_t digest[32];
     if (!read_ok || !stable) {
