@@ -1906,6 +1906,15 @@ AGENT_IMPACT_RULE("lib/test/src/test_store_buyer.c", "store_buyer make_lint_gate
  * sat unread under lib/platform/tests for exactly that reason. It is a real
  * observer now, not a shape check. */
 
+/* The two rehomed probe programs' OLD paths, restored. The commit that moved
+ * them into lib/test/src as registered groups also deleted the rule that had
+ * named these paths, which orphaned the comment directly above and left the
+ * two deletions in a push range matching nothing at all. Neither name exists
+ * on disk any more, so the lint tier is the whole honest claim: the live
+ * assertions travelled with the programs and are graded by the
+ * directory_watcher and watcher_record rules further down, not here. */
+AGENT_IMPACT_RULE("lib/platform/tests/test_directory_watcher.c|lib/platform/tests/test_watcher_record.c", "make_lint_gates")
+
 /* The DERIVATION half of the independent replay receipt, split out of
  * consensus_state_replay_receipt.c at the E1 file-size seam. Mapped by
  * EXECUTION, not by inheritance from the parent:
@@ -2466,3 +2475,87 @@ AGENT_IMPACT_RULE("app/services/src/build_fabric_worker_windows.c|app/services/s
 AGENT_IMPACT_RULE("lib/platform/src/directory_watcher.c|lib/platform/include/platform/directory_watcher.h", "directory_watcher make_lint_gates")
 AGENT_IMPACT_RULE("lib/platform/src/watcher_record.c|lib/platform/include/platform/watcher_record.h", "watcher_record make_lint_gates")
 AGENT_IMPACT_RULE("lib/platform/src/watcher_lease.c|lib/platform/include/platform/watcher_lease.h|lib/platform/src/watcher_store.c|lib/platform/include/platform/watcher_store.h|lib/platform/src/process_lifecycle.c|lib/platform/include/platform/process_lifecycle.h|lib/platform/src/directory_transaction.c|lib/platform/src/state_root.c|lib/platform/include/platform/state_root.h", "make_lint_gates")
+
+/* ══ Five inputs the merge left unmapped ═════════════════════════════════
+ *
+ * Each of the five below failed the fail-closed refusal on its own. Three are
+ * headers or a makefile that the sibling rules above could never match --
+ * those rules name .c files -- and the other two are a platform TU and a test
+ * source that had no rule at all. Every verdict here was re-derived from the
+ * symbols and the preprocessor state, not inherited from a neighbour. */
+
+/* The public header of the retained, owner-verified directory handle. Its .c
+ * is carried by the watcher-family rule above, which paired every other
+ * member of that family with the header the merge added beside it and missed
+ * this one. Re-checked rather than inherited, and the verdict is the same:
+ * NOTHING under lib/test/src names a platform_directory_transaction_,
+ * platform_directory_child_ or platform_directory_lock_ symbol, and every one
+ * of the twelve includers in tools/command and tools/dev opens its use with
+ * "#if defined(_WIN32)" -- checked line by line, the first use in each file
+ * sits inside that arm. So no line of the POSIX arm executes on this host and
+ * the lint tier alone is honest. What observes it is
+ * check-windows-platform-seam, whose mingw -fsyntax-only pass over
+ * lib/platform/src compiles directory_transaction.c and therefore this
+ * header, plus the directory_transaction and watcher_store rows of the
+ * acceptance catalog -- a compile, not an execution. Closing this needs a
+ * registered lib/test/src group that opens a scratch directory through
+ * platform_directory_transaction_open and drives the child
+ * create/write/replace/unlink path directly. */
+AGENT_IMPACT_RULE("lib/platform/include/platform/directory_transaction.h", "make_lint_gates")
+
+/* The internal header of the Windows owner+SYSTEM ACL helper. Its .c sits in
+ * the five-Windows-boundary-units rule above, which names .c files only, so
+ * the header failed closed by itself. Every declaration it makes is inside a
+ * single "#if defined(_WIN32)" block, so on this host the header expands to
+ * nothing and no function it declares can be called by anything. Lint tier
+ * alone, for the same reason the .c has it: check-windows-platform-seam
+ * mingw-syntax-checks the four TUs that include it -- private_acl_internal.c,
+ * private_directory.c, watcher_lease.c and directory_transaction.c -- and the
+ * watcher_lease and watcher_store catalog rows cross-link the .c. Closing
+ * this needs a Windows host or Wine running those acceptance binaries. */
+AGENT_IMPACT_RULE("lib/platform/src/private_acl_internal.h", "make_lint_gates")
+
+/* The retained cross-process lock file. Unlike the rest of the watcher family
+ * this one IS executed on POSIX, and load-bearingly, so it gets a group and
+ * not the lint tier. tools/dev/dev_activation.c's dev_acquire_lock() calls
+ * platform_process_lock_try_acquire(create=true) with NO _WIN32 guard, and
+ * dev_activation.c is in DEVLOOP_SRCS rather than DEV_ONLY_SRCS, so it links
+ * into the test binary. lib/test/src/test_dev_activation.c then drives the
+ * module both ways: every non-refusing dev_activation_run() case has to get a
+ * true back from the acquire before it can reach dev_run_locked() at all, and
+ * the case "a held activation lock yields E_LOCK_BUSY" takes an flock on
+ * <gen_root>/activation.lock in the test process first, then asserts
+ * dev_activation_run() returns DEV_ACTIVATION_E_LOCK_BUSY and that the fake
+ * ops saw zero stop calls -- so the refusal arm is asserted, not merely
+ * compiled. dev_release_lock() exercises release and the `held` bookkeeping
+ * on the way out. Deliberately NOT counting tools/dev/dev_failure_store.c:
+ * its store_lock() reaches this module only inside "#if defined(_WIN32)" and
+ * its POSIX arm uses openat+flock directly. The header is named beside the
+ * .c because it declares exactly these three functions and nothing else. */
+AGENT_IMPACT_RULE("lib/platform/src/process_lock.c|lib/platform/include/platform/process_lock.h", "dev_activation make_lint_gates")
+
+/* The Windows acceptance catalog itself. It is a makefile, not C, and is
+ * mapped the way the other non-C gate inputs in this file are -- the
+ * tools/lint check scripts and their baseline goldens. NO TEST READS IT: three
+ * files under lib/test/src mention the catalog in a PROSE COMMENT and none
+ * opens it, nothing under lib/test/src names check-windows-acceptance, and
+ * the catalog declares no ZCL_TEST_GROUP row. What reads it is
+ * tools/lint/check_windows_acceptance.sh, which mingw-cross-links every
+ * program the catalog declares and reconciles the two directions, and the
+ * top-level Makefile, which includes the catalog so the
+ * ZCL_WINDOWS_ACCEPTANCE_ variables reach that gate. check-windows-acceptance
+ * is in LINT_GATES but NOT in LINT_FAST_GATES, so only a full `make lint`
+ * observes an edit here -- weaker than a group, and said plainly rather than
+ * dressed up. The lint tier alone is the honest answer. */
+AGENT_IMPACT_RULE("lib/platform/tests/windows_acceptance.mk", "make_lint_gates")
+
+/* The zcode sovereignty-policy test's own source. zcode_sovereignty_policy is
+ * a registered group -- tools/dev/test_group_catalog.def carries the
+ * ZCL_TEST_GROUP row and tools/dev/test-group-list.sh emits it -- and this
+ * file defines the int test_zcode_sovereignty_policy(void) entry that row
+ * names. A test source's own group is the only group that executes it, so
+ * that group plus the lint tier is the whole mapping; the implementation it
+ * drives, lib/vcs/src/zcode_sovereignty_policy.c, is deliberately left out so
+ * that a change to the implementation still trips the fail-closed refusal and
+ * earns its own reasoning. */
+AGENT_IMPACT_RULE("lib/test/src/test_zcode_sovereignty_policy.c", "zcode_sovereignty_policy make_lint_gates")
