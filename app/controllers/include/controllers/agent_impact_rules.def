@@ -1943,14 +1943,28 @@ AGENT_IMPACT_RULE("lib/platform/src/current_identity.c|lib/platform/include/plat
  * naming it here would claim coverage that does not exist. */
 AGENT_IMPACT_RULE("lib/platform/src/positioned_io.c|lib/platform/include/platform/positioned_io.h", "consensus_state_snapshot_export make_lint_gates")
 
-/* The CRT stream-lock shim. Header-only, with exactly one call site:
+/* The CRT stream-lock shim, owned by base (it moved out of platform, which the
+ * log sink at the bottom of the stack cannot depend on). Header-only, with
+ * exactly one call site:
  * zcl_log_emit_at() in lib/base/src/log_level.c brackets its fprintf+vfprintf
- * pair with platform_stdio_lock/unlock. test_log_level.c captures stderr
+ * pair with zcl_stdio_lock/unlock. test_log_level.c captures stderr
  * around real LOG_WARN/LOG_INFO calls and asserts the emitted line starts with
  * the ISO-8601 stamp and carries the level token, so the assertion is on
  * output produced inside that bracket. POSIX arm only: the _lock_file arm is
+ * observed by check-windows-platform-seam, not by a test. The pre-move path
+ * stays listed so this commit's deletion of it maps too. */
+AGENT_IMPACT_RULE("lib/base/include/base/stdio_lock.h|lib/platform/include/platform/stdio_compat.h", "log_level make_lint_gates")
+
+/* The UTC calendar-shape conversion, and the platform header that forwards to
+ * it. This is not a clock read -- the caller supplies the instant -- so base
+ * owns it: lib/base/src/log_level.c timestamps every line in the tree and is
+ * the sink platform.clock itself logs through, so it cannot include platform.
+ * test_log_level.c asserts the emitted line carries the ISO-8601 stamp, which
+ * is produced by exactly this conversion, so `log_level` observes the POSIX
+ * arm. time_compat.h's remaining helpers are thin wrappers over
+ * platform/clock.h and ride that header's groups. The _WIN32 arms of both are
  * observed by check-windows-platform-seam, not by a test. */
-AGENT_IMPACT_RULE("lib/platform/include/platform/stdio_compat.h", "log_level make_lint_gates")
+AGENT_IMPACT_RULE("lib/base/include/base/utc_tm.h|lib/platform/include/platform/time_compat.h", "log_level time_authority sticky_conditions make_lint_gates")
 
 /* The metric-alert CATALOG half, split out of prometheus_metrics.c (the
  * gauges and the firing engine stayed behind). The catalog is what

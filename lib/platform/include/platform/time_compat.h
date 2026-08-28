@@ -8,6 +8,7 @@
 #ifndef ZCL_PLATFORM_TIME_COMPAT_H
 #define ZCL_PLATFORM_TIME_COMPAT_H
 
+#include "base/utc_tm.h"
 #include "platform/clock.h"
 
 #include <stdbool.h>
@@ -27,14 +28,12 @@ static inline time_t platform_time_wall_time_t(void)
     return (time_t)platform_time_wall_unix();
 }
 
+/* Forwards to base. log_level.c -- the sink platform.clock itself logs
+ * through -- needs this conversion and cannot include platform, so base
+ * owns the definition and this stays the name the rest of the tree uses. */
 static inline bool platform_time_utc_tm(time_t value, struct tm *out)
 {
-    if (!out) return false;
-#if defined(_WIN32)
-    return gmtime_s(out, &value) == 0;
-#else
-    return gmtime_r(&value, out) != NULL;
-#endif
+    return zcl_utc_tm(value, out);
 }
 
 static inline int platform_time_monotonic_timespec(struct timespec *ts)

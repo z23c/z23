@@ -2710,6 +2710,9 @@ zcode-package-asan: $(ZCODE_PACKAGE_BASE_ASAN_BIN) \
 .PHONY: check-zcode-package-registry print-zcode-monolith-lib-sources
 check-zcode-package-registry: $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN)
 	@tools/lint/check_zcode_package_registry.sh
+.PHONY: check-zcode-package-standalone
+check-zcode-package-standalone:
+	@tools/lint/check_zcode_package_standalone.sh
 .PHONY: check-package-anatomy
 check-package-anatomy:
 	@./tools/lint/check_package_anatomy.sh --selftest
@@ -10315,6 +10318,7 @@ LINT_GATES := \
     check-malloc \
     check-byte-order-codec-single \
     check-zcode-package-registry \
+    check-zcode-package-standalone \
     check-package-anatomy \
     check-hotswap-dev-only \
     check-hotswap-eligible-scope \
