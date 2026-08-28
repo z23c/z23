@@ -37,17 +37,32 @@ set -Eeuo pipefail
 
 cd "$(dirname "$0")/../.."
 
-DEF=config/zcode_package_registry.def
+# The registry is spread over MORE THAN ONE .def -- config/
+# zcode_package_registry.def holds the library packages and
+# config/zcode_c23_commons_app.def holds the commons app. A tool that
+# assumes a single file silently fails to rewrite the rows it cannot
+# find, and then loops forever re-deriving a row it never changed.
+# Discover them instead of naming one.
+mapfile -t DEFS < <(LC_ALL=C grep -rl '^ZCODE_PACKAGE(' --include='*.def' config/ | sort)
+[ "${#DEFS[@]}" -gt 0 ] || { echo "FAIL: no registry .def found under config/" >&2; exit 2; }
+
+# Which .def owns a given package row.
+def_for() {
+    local n="$1" f
+    for f in "${DEFS[@]}"; do
+        if LC_ALL=C grep -q "^ZCODE_PACKAGE(\"$n\"," "$f"; then printf '%s' "$f"; return 0; fi
+    done
+    return 1
+}
 BIN=build/bin/zcode-package-registry-check
 CHECK_ONLY=0
 [ "${1:-}" = "--check" ] && CHECK_ONLY=1
 
-[ -f "$DEF" ] || { echo "FAIL: $DEF not found (wrong repo root?)" >&2; exit 2; }
 
 # One round per package is the theoretical worst case (a single dependency
 # chain, fixed one link at a time); double it so an honest non-convergence is
 # reported as such instead of being mistaken for the iteration cap.
-PKG_COUNT=$(LC_ALL=C grep -c '^ZCODE_PACKAGE(' "$DEF")
+PKG_COUNT=$(LC_ALL=C grep -ch '^ZCODE_PACKAGE(' "${DEFS[@]}" | awk '{s += $1} END {print s + 0}')
 MAX_ROUNDS=$((PKG_COUNT * 2 + 2))
 
 rebuild() {
@@ -63,10 +78,11 @@ rebuild() {
 # Field N (1-based) of a package's stored row: content release recipe lock
 # capsule publisher signature, in the order of the ZCODE_PACKAGE macro.
 stored_field() {
+    local d; d=$(def_for "$1") || return 1
     awk -v n="$1" -v k="$2" '
         index($0, "ZCODE_PACKAGE(\"" n "\",") == 1 { found = 1; i = 0; next }
         found { i++; if (i == k) { gsub(/[^0-9a-f]/, ""); print; exit } }
-    ' "$DEF"
+    ' "$d"
 }
 
 changed_any=0
@@ -107,7 +123,14 @@ for round in $(seq 1 "$MAX_ROUNDS"); do
 
     old_content=$(stored_field "$name" 1)
 
-    # 1. the registry row
+    # 1. the registry row, in whichever .def actually declares it. A row
+    #    we cannot locate is a hard failure, never a skipped edit: a
+    #    silent no-op here is precisely what makes the loop spin.
+    def=$(def_for "$name") || {
+        echo "FAIL: $name is not declared in any registry .def under config/." >&2
+        echo "      The checker knows a package the registry files do not." >&2
+        exit 2
+    }
     awk -v n="$name" -v a="$content" -v b="$release" -v c="$recipe" -v e="$lock" \
         -v f="$capsule" -v g="$publisher" -v h="$signature" '
         index($0, "ZCODE_PACKAGE(\"" n "\",") == 1 {
@@ -115,7 +138,7 @@ for round in $(seq 1 "$MAX_ROUNDS"); do
         }
         k >= 1 && k <= 7 { printf "    \"%s\"%s\n", V[k], (k == 7 ? ")" : ","); k++; next }
         { print }
-    ' "$DEF" > "$DEF.tmp.$$" && mv "$DEF.tmp.$$" "$DEF"
+    ' "$def" > "$def.tmp.$$" && mv "$def.tmp.$$" "$def"
 
     # 2. every dependent's pinned copy of the root that just moved
     pinned=0
