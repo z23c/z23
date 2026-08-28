@@ -1,3 +1,6 @@
+#if !defined(_WIN32) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * os_proc — Linux procfs and native Darwin process implementations. */
@@ -16,6 +19,7 @@
 #include <errno.h>
 #include <signal.h>
 #include <sys/resource.h>
+#include <sys/types.h>
 #include <unistd.h>
 #endif
 
@@ -66,6 +70,43 @@ uint64_t os_proc_current_pid(void)
     return (uint64_t)GetCurrentProcessId();
 #else
     return (uint64_t)getpid();
+#endif
+}
+
+bool os_proc_pid_start_token(uint64_t pid, uint64_t *token)
+{
+    if (!token || pid == 0 || pid > UINT32_MAX) return false;
+#if defined(_WIN32)
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
+                                 (DWORD)pid);
+    FILETIME created, exited, kernel, user;
+    bool ok = process && GetProcessTimes(process, &created, &exited,
+                                         &kernel, &user) != 0;
+    if (process) CloseHandle(process);
+    if (!ok) return false;
+    *token = ((uint64_t)created.dwHighDateTime << 32) | created.dwLowDateTime;
+    return true;
+#elif defined(__linux__)
+    char path[64], row[4096];
+    int n = snprintf(path, sizeof(path), "/proc/%llu/stat",
+                     (unsigned long long)pid);
+    FILE *file = n > 0 && (size_t)n < sizeof(path) ? fopen(path, "r") : NULL;
+    if (!file || !fgets(row, sizeof(row), file)) {
+        if (file) fclose(file);
+        return false;
+    }
+    fclose(file);
+    char *p = strrchr(row, ')');
+    if (!p || p[1] != ' ') return false;
+    p += 2;
+    for (int field = 3; field < 22; ++field) {
+        p = strchr(p, ' '); if (!p) return false; ++p;
+    }
+    char *end = NULL; unsigned long long value = strtoull(p, &end, 10);
+    if (!end || (end == p)) return false;
+    *token = (uint64_t)value; return true;
+#else
+    (void)pid; return false;
 #endif
 }
 
