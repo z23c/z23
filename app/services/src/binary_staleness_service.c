@@ -2,8 +2,8 @@
  *
  * Binary Staleness — see header for rationale and the detection trick.
  *
- * Uses `stat()` for the cheap per-tick probe and SHA3-256 (streaming) for
- * the boot baseline + any re-hash triggered by a stat() change. Polls in
+ * Uses handle-bound metadata for the cheap per-tick probe and SHA3-256 for
+ * the boot baseline + any re-hash triggered by a metadata change. Polls in
  * a background pthread with small sleep increments so stop() returns
  * promptly, same shape as disk_monitor.c.
  */
@@ -23,6 +23,7 @@
 #include "crypto/sha3.h"
 #include "json/json.h"
 #include "platform/os_proc.h"
+#include "platform/positioned_file.h"
 #include "supervisors/domains.h"
 #include "util/blocker.h"
 #include "util/supervisor.h"
@@ -35,7 +36,6 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/stat.h>
 
 #include "util/log_macros.h"
 
@@ -66,6 +66,10 @@ struct bs_state {
     int64_t boot_size;
     int64_t last_probe_mtime;
     int64_t last_probe_size;
+    uint64_t last_probe_volume;
+    uint64_t last_probe_file_low;
+    uint64_t last_probe_file_high;
+    bool last_probe_identity_valid;
     bool    probed_once;
     int64_t last_check_unix;
     int64_t check_count;
@@ -144,14 +148,36 @@ static bool bs_hash_running_image(unsigned char digest[32])
 
 /* Hashes whatever content currently sits at `path` (ordinary pathname
  * resolution — picks up a replaced file). */
-static bool bs_hash_path(const char *path, unsigned char digest[32])
+static bool bs_hash_positioned(
+    const struct platform_positioned_file *file, uint64_t size,
+    unsigned char digest[32])
 {
-    FILE *fp = fopen(path, "rb");
-    if (!fp)
-        return false;
-    bool ok = bs_hash_fp(fp, digest);
-    fclose(fp);
-    return ok;
+    struct sha3_256_ctx ctx;
+    sha3_256_init(&ctx);
+    unsigned char buffer[BS_HASH_READ_CHUNK];
+    uint64_t offset = 0;
+    while (offset < size) {
+        size_t wanted = size - offset > sizeof(buffer)
+            ? sizeof(buffer) : (size_t)(size - offset);
+        int64_t got = platform_positioned_file_read(file, buffer, wanted,
+                                                    offset);
+        if (got <= 0 || (uint64_t)got > wanted) return false;
+        sha3_256_write(&ctx, buffer, (size_t)got);
+        offset += (uint64_t)got;
+    }
+    sha3_256_finalize(&ctx, digest);
+    return true;
+}
+
+static bool bs_snapshot_equal(
+    const struct platform_positioned_file_snapshot *left,
+    const struct platform_positioned_file_snapshot *right)
+{
+    return left->size == right->size &&
+           left->modified_seconds == right->modified_seconds &&
+           left->volume == right->volume &&
+           left->file_low == right->file_low &&
+           left->file_high == right->file_high;
 }
 
 /* ── Supervisor liveness ────────────────────────────────────── */
@@ -249,12 +275,20 @@ bool binary_staleness_capture_boot_stamp(void)
     memcpy(g_bs.boot_digest, digest, sizeof(digest));
     zcl_hex_encode(digest, sizeof(digest), g_bs.boot_digest_hex);
 
-    struct stat st;
-    if (stat(g_bs.exe_path, &st) == 0) {
-        g_bs.boot_mtime = (int64_t)st.st_mtime;
-        g_bs.boot_size  = (int64_t)st.st_size;
+    struct platform_positioned_file named;
+    struct platform_positioned_file_snapshot snapshot;
+    platform_positioned_file_init(&named);
+    if (platform_positioned_file_open(&named, g_bs.exe_path) &&
+        platform_positioned_file_snapshot(&named, &snapshot) &&
+        snapshot.size <= INT64_MAX) {
+        g_bs.boot_mtime = snapshot.modified_seconds;
+        g_bs.boot_size  = (int64_t)snapshot.size;
         g_bs.last_probe_mtime = g_bs.boot_mtime;
         g_bs.last_probe_size  = g_bs.boot_size;
+        g_bs.last_probe_volume = snapshot.volume;
+        g_bs.last_probe_file_low = snapshot.file_low;
+        g_bs.last_probe_file_high = snapshot.file_high;
+        g_bs.last_probe_identity_valid = true;
         g_bs.probed_once = true;
         g_bs.path_valid = true;
     } else {
@@ -263,12 +297,14 @@ bool binary_staleness_capture_boot_stamp(void)
          * nothing to compare against yet until the path resolves again. */
         g_bs.boot_mtime = -1;
         g_bs.boot_size  = -1;
+        g_bs.last_probe_identity_valid = false;
         g_bs.probed_once = false;
         g_bs.path_valid = false;
         LOG_WARN("binary_staleness",
-                 "stat(%s) failed at boot capture: %s (staleness checks "
+                 "open/metadata(%s) failed at boot capture: %s (staleness checks "
                  "will retry on tick)", g_bs.exe_path, strerror(errno));
     }
+    platform_positioned_file_close(&named);
 
     g_bs.boot_captured = true;
     pthread_mutex_unlock(&g_bs.lock);
@@ -299,8 +335,13 @@ bool binary_staleness_check_now(void)
     }
 #endif
     if (!digest_known) {
-        struct stat st;
-        if (stat(g_bs.exe_path, &st) != 0) {
+        struct platform_positioned_file named;
+        struct platform_positioned_file_snapshot before;
+        platform_positioned_file_init(&named);
+        if (!platform_positioned_file_open(&named, g_bs.exe_path) ||
+            !platform_positioned_file_snapshot(&named, &before) ||
+            before.size > INT64_MAX) {
+            platform_positioned_file_close(&named);
             g_bs.probe_failures++;
             g_bs.path_valid = false;
             g_bs.check_count++;
@@ -309,9 +350,40 @@ bool binary_staleness_check_now(void)
             pthread_mutex_unlock(&g_bs.lock);
             return stale_now;
         }
-        cur_mtime = (int64_t)st.st_mtime;
-        cur_size  = (int64_t)st.st_size;
+        cur_mtime = before.modified_seconds;
+        cur_size  = (int64_t)before.size;
         g_bs.path_valid = true;
+        bool changed = !g_bs.probed_once ||
+                       cur_mtime != g_bs.last_probe_mtime ||
+                       cur_size != g_bs.last_probe_size ||
+                       !g_bs.last_probe_identity_valid ||
+                       before.volume != g_bs.last_probe_volume ||
+                       before.file_low != g_bs.last_probe_file_low ||
+                       before.file_high != g_bs.last_probe_file_high;
+        if (!changed) {
+            platform_positioned_file_close(&named);
+            g_bs.check_count++;
+            g_bs.last_check_unix = (int64_t)platform_time_wall_time_t();
+            bool stale_now = atomic_load(&g_bs.atomic_stale);
+            pthread_mutex_unlock(&g_bs.lock);
+            return stale_now;
+        }
+        struct platform_positioned_file_snapshot after;
+        if (!bs_hash_positioned(&named, before.size, probe_digest) ||
+            !platform_positioned_file_snapshot(&named, &after) ||
+            !bs_snapshot_equal(&before, &after)) {
+            platform_positioned_file_close(&named);
+            g_bs.probe_failures++;
+            bool stale_now = atomic_load(&g_bs.atomic_stale);
+            pthread_mutex_unlock(&g_bs.lock);
+            return stale_now;
+        }
+        platform_positioned_file_close(&named);
+        g_bs.last_probe_volume = after.volume;
+        g_bs.last_probe_file_low = after.file_low;
+        g_bs.last_probe_file_high = after.file_high;
+        g_bs.last_probe_identity_valid = true;
+        g_bs.rehash_count++;
     }
 
     g_bs.check_count++;
@@ -320,20 +392,10 @@ bool binary_staleness_check_now(void)
     bool changed = !g_bs.probed_once ||
                    cur_mtime != g_bs.last_probe_mtime ||
                    cur_size  != g_bs.last_probe_size;
-    if (!changed) {
+    if (!changed && digest_known) {
         bool stale_now = atomic_load(&g_bs.atomic_stale);
         pthread_mutex_unlock(&g_bs.lock);
         return stale_now;
-    }
-
-    if (!digest_known) {
-        if (!bs_hash_path(g_bs.exe_path, probe_digest)) {
-            g_bs.probe_failures++;
-            bool stale_now = atomic_load(&g_bs.atomic_stale);
-            pthread_mutex_unlock(&g_bs.lock);
-            return stale_now;
-        }
-        g_bs.rehash_count++;
     }
 
     g_bs.last_probe_mtime = cur_mtime;

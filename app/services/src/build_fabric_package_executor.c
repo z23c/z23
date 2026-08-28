@@ -3,6 +3,8 @@
 
 #include "services/build_fabric_package_executor.h"
 
+#if !defined(_WIN32)
+
 #include "base/hex.h"
 #include "crypto/sha3.h"
 #include "util/file_tree_ops.h"
@@ -348,3 +350,39 @@ struct zcl_result build_fabric_package_report_parse(
         : receipt.test_exit_code != 0 ? (int)receipt.test_exit_code : 1;
     return ZCL_OK;
 }
+
+#else
+
+static struct zcl_result bfp_windows_sandbox_refused(void)
+{
+    return ZCL_ERR(-1,
+        "package-execution-refused: Windows sandbox is not qualified");
+}
+
+struct zcl_result build_fabric_package_prepare(
+    const char *workspace, const char *datadir, const char *worker,
+    const char *source_dir, const char *emit_dir, const char *recipe_path,
+    const char *profile,
+    const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_candidate_v1 *candidate,
+    struct build_fabric_package_execution *out)
+{
+    (void)workspace; (void)datadir; (void)worker; (void)source_dir;
+    (void)emit_dir; (void)recipe_path; (void)profile; (void)task;
+    (void)candidate; (void)out;
+    return bfp_windows_sandbox_refused();
+}
+
+struct zcl_result build_fabric_package_report_parse(
+    const uint8_t *wire, size_t wire_len, const char *emit_dir,
+    const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_candidate_v1 *candidate,
+    const struct build_fabric_package_execution *execution,
+    uint8_t *work_status, int *exit_status)
+{
+    (void)wire; (void)wire_len; (void)emit_dir; (void)task;
+    (void)candidate; (void)execution; (void)work_status; (void)exit_status;
+    return bfp_windows_sandbox_refused();
+}
+
+#endif

@@ -93,6 +93,42 @@ bool platform_positioned_file_size(const struct platform_positioned_file *file,
     return true;
 }
 
+bool platform_positioned_file_snapshot(
+    const struct platform_positioned_file *file,
+    struct platform_positioned_file_snapshot *snapshot)
+{
+    HANDLE handle = positioned_handle(file);
+    BY_HANDLE_FILE_INFORMATION info = {0};
+    if (!snapshot || handle == INVALID_HANDLE_VALUE ||
+        !GetFileInformationByHandle(handle, &info) ||
+        (info.dwFileAttributes &
+         (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0)
+        return false;
+    ULARGE_INTEGER size = {
+        .LowPart = info.nFileSizeLow,
+        .HighPart = info.nFileSizeHigh,
+    };
+    ULARGE_INTEGER modified = {
+        .LowPart = info.ftLastWriteTime.dwLowDateTime,
+        .HighPart = info.ftLastWriteTime.dwHighDateTime,
+    };
+    const uint64_t windows_to_unix_100ns = UINT64_C(116444736000000000);
+    int64_t modified_seconds = modified.QuadPart >= windows_to_unix_100ns
+        ? (int64_t)((modified.QuadPart - windows_to_unix_100ns) /
+                    UINT64_C(10000000))
+        : -(int64_t)((windows_to_unix_100ns - modified.QuadPart) /
+                     UINT64_C(10000000));
+    *snapshot = (struct platform_positioned_file_snapshot){
+        .size = size.QuadPart,
+        .modified_seconds = modified_seconds,
+        .volume = info.dwVolumeSerialNumber,
+        .file_low = ((uint64_t)info.nFileIndexHigh << 32) |
+                    info.nFileIndexLow,
+        .file_high = 0,
+    };
+    return true;
+}
+
 bool platform_positioned_file_is_executable(
     const struct platform_positioned_file *file)
 {
@@ -182,6 +218,25 @@ bool platform_positioned_file_size(const struct platform_positioned_file *file,
         st.st_size < 0)
         return false;
     *size = (uint64_t)st.st_size;
+    return true;
+}
+
+bool platform_positioned_file_snapshot(
+    const struct platform_positioned_file *file,
+    struct platform_positioned_file_snapshot *snapshot)
+{
+    struct stat st;
+    int fd = file ? (int)file->native : -1;
+    if (!snapshot || fd < 0 || fstat(fd, &st) != 0 ||
+        !S_ISREG(st.st_mode) || st.st_size < 0)
+        return false;
+    *snapshot = (struct platform_positioned_file_snapshot){
+        .size = (uint64_t)st.st_size,
+        .modified_seconds = (int64_t)st.st_mtime,
+        .volume = (uint64_t)st.st_dev,
+        .file_low = (uint64_t)st.st_ino,
+        .file_high = 0,
+    };
     return true;
 }
 
