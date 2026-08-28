@@ -235,6 +235,9 @@ void zcl_native_handle_ops_mesh_join(
 void zcl_native_handle_ops_mesh_join_status(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+void zcl_native_handle_ops_mesh_identity(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 
 /* ── app.service.* — declared services (tools/command/native_service_command.c).
  * `list` and `inspect` read the compile-time zcl.service_binding.v1 catalog

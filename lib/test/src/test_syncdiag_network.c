@@ -16,6 +16,42 @@ int syncdiag_cases_network(void)
 {
     int failures = 0;
 
+    printf("machine_identity: reports independent live facts without secrets... ");
+    {
+        struct json_value result = {0};
+        bool ok = machine_identity_dump_state_json(&result, NULL);
+        const struct json_value *platform = json_get(&result, "platform");
+        const struct json_value *build = json_get(&result, "build");
+        const struct json_value *transport = json_get(&result, "transport");
+        const struct json_value *dht = json_get(&result,
+                                                "authenticated_dht");
+        const struct json_value *pairing = json_get(&result, "pairing");
+        const struct json_value *blockers = json_get(&result, "blockers");
+        ok = ok && result.type == JSON_OBJ;
+        ok = ok && strcmp(json_get_str(json_get(&result, "schema")),
+                          "zcl.machine_mesh_identity.v1") == 0;
+        ok = ok && platform && platform->type == JSON_OBJ;
+        ok = ok && build && build->type == JSON_OBJ;
+        ok = ok && transport && transport->type == JSON_OBJ;
+        ok = ok && dht && dht->type == JSON_OBJ;
+        ok = ok && pairing && pairing->type == JSON_OBJ;
+        ok = ok && !json_get_bool(json_get(pairing, "implemented"));
+        ok = ok && !json_get_bool(json_get(pairing, "private_mesh_ready"));
+        ok = ok && blockers && blockers->type == JSON_ARR;
+        ok = ok && json_array_has_str(blockers, "PAIRING_NOT_IMPLEMENTED");
+
+        char encoded[4096];
+        size_t encoded_len = json_write(&result, encoded, sizeof(encoded));
+        ok = ok && encoded_len > 0 && encoded_len < sizeof(encoded);
+        ok = ok && strstr(encoded, "identity_priv") == NULL;
+        ok = ok && strstr(encoded, "private_key") == NULL;
+        ok = ok && strstr(encoded, "datadir") == NULL;
+        ok = ok && strstr(encoded, "exe_path") == NULL;
+        json_free(&result);
+        if (ok) printf("OK\n");
+        else    { printf("FAIL\n"); failures++; }
+    }
+
     printf("onionstatus: exposes one coherent bootstrap-state contract... ");
     {
         struct rpc_table tbl;

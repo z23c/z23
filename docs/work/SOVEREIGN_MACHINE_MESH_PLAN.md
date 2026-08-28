@@ -222,6 +222,14 @@ the node process.
 
 ### Phase 0: measure and close transport prerequisites
 
+The read-only `z23 ops mesh identity` capsule now reports the running daemon's
+exact source identity, available running-image digest, native platform,
+encrypted-transport counts, authenticated DHT node identity, confinement, and
+native hot-swap capability. It redacts local paths and private material, names
+missing prerequisites, and reports pairing as unimplemented. This is local
+observation only; restart stability, four-host distinctness, and native macOS
+and Windows execution still require independent host receipts.
+
 - Make the authenticated-v2 capability visible and operable on every supported
   platform without claiming unsupported Tor or confinement features.
 - Bind cached peer identity to the active ZID delegation and refuse downgrade

@@ -279,6 +279,12 @@ bool network_dump_state_json(struct json_value *out, const char *key);
  * default-off (all-plaintext) node is explicit, not silent. */
 bool net_transport_dump_state_json(struct json_value *out, const char *key);
 
+/* diagnostics_machine_identity.c — one redacted, read-only projection of the
+ * running machine's build, transport, authenticated-DHT and platform facts.
+ * It creates no identity and grants no pairing or remote-control authority. */
+bool machine_identity_dump_state_json(struct json_value *out,
+                                      const char *key);
+
 /* diagnostics_connman.c — the "connman" g_dumpers[] entry: outbound/inbound
  * counts + diversity, the addnode dial ledger (lifetime + per-index detail),
  * reactor + message-cycle counters, the net.outbound_floor supervisor
