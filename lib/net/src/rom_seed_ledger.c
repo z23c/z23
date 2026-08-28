@@ -12,6 +12,7 @@
 #include "net/rom_seed_ledger.h"
 
 #include "json/json.h"
+#include "platform/file_metadata.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 #include "util/util.h"
@@ -20,7 +21,6 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/stat.h>
 
 struct rom_seed_ledger {
     sqlite3 *db;
@@ -270,8 +270,10 @@ bool rom_seed_ledger_dump_state_json(struct json_value *out, const char *key)
         char path[600];
         int n = snprintf(path, sizeof(path), "%s/%s", datadir,
                          ROM_SEED_LEDGER_FILENAME);
-        struct stat st;
-        if (n > 0 && (size_t)n < sizeof(path) && stat(path, &st) == 0)
+        struct platform_file_metadata metadata;
+        if (n > 0 && (size_t)n < sizeof(path) &&
+            platform_file_metadata_read(path, &metadata) ==
+                PLATFORM_FILE_METADATA_OK)
             open = true;
     }
     (void)json_push_kv_bool(out, "open", open);
