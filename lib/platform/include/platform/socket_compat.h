@@ -198,4 +198,71 @@ static inline int platform_socket_set_receive_timeout(platform_socket_t sock,
 #endif
 }
 
+static inline int platform_socket_set_send_timeout(platform_socket_t sock,
+                                                    int timeout_ms)
+{
+#if defined(_WIN32)
+    DWORD timeout = (DWORD)timeout_ms;
+    return setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char *)&timeout,
+                      (int)sizeof(timeout));
+#else
+    struct timeval timeout = {
+        .tv_sec = timeout_ms / 1000,
+        .tv_usec = (timeout_ms % 1000) * 1000,
+    };
+    return setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout,
+                      sizeof(timeout));
+#endif
+}
+
+static inline bool platform_socket_send_all(platform_socket_t sock,
+                                             const void *data, size_t size)
+{
+    const unsigned char *bytes = data;
+    size_t sent = 0;
+    while (sent < size) {
+        size_t remaining = size - sent;
+        int part = remaining > INT32_MAX ? INT32_MAX : (int)remaining;
+#if defined(_WIN32)
+        int result = send(sock, (const char *)bytes + sent, part, 0);
+#else
+        int flags = 0;
+#ifdef MSG_NOSIGNAL
+        flags = MSG_NOSIGNAL;
+#endif
+        int result = (int)send(sock, bytes + sent, (size_t)part, flags);
+#endif
+        if (result < 0) {
+#if defined(_WIN32)
+            if (WSAGetLastError() == WSAEINTR) continue;
+#else
+            if (errno == EINTR) continue;
+#endif
+            return false;
+        }
+        if (result == 0) return false;
+        sent += (size_t)result;
+    }
+    return true;
+}
+
+static inline int platform_socket_receive(platform_socket_t sock, void *data,
+                                           size_t size)
+{
+    int part = size > INT32_MAX ? INT32_MAX : (int)size;
+#if defined(_WIN32)
+    int result;
+    do {
+        result = recv(sock, (char *)data, part, 0);
+    } while (result < 0 && WSAGetLastError() == WSAEINTR);
+    return result;
+#else
+    int result;
+    do {
+        result = (int)recv(sock, data, (size_t)part, 0);
+    } while (result < 0 && errno == EINTR);
+    return result;
+#endif
+}
+
 #endif
