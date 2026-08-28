@@ -177,9 +177,13 @@ ZCL_WINDOWS_ACCEPTANCE_logical_cpu_FLAGS := \
 ZCL_WINDOWS_ACCEPTANCE_log_level_SOURCES := \
 	lib/test/src/log_level_acceptance.c \
 	lib/base/src/log_level.c
+# The subject moved: boot_mint_anchor_export_bundle() and its _WIN32 refusal
+# arm were split out of boot_mint_anchor.c along the E1 file-size seam, and
+# this row was not updated, so the cross-link failed with an undefined
+# reference. Nothing caught it because nothing ran the compile step.
 ZCL_WINDOWS_ACCEPTANCE_mint_anchor_export_refusal_SOURCES := \
 	lib/test/src/mint_anchor_export_windows_refusal_acceptance.c \
-	config/src/boot_mint_anchor.c
+	config/src/boot_mint_anchor_bundle_export.c
 ZCL_WINDOWS_ACCEPTANCE_mint_anchor_export_refusal_FLAGS := \
 	-ffunction-sections -fno-unwind-tables -fno-asynchronous-unwind-tables
 ZCL_WINDOWS_ACCEPTANCE_mint_anchor_export_refusal_LIBS := \
@@ -211,7 +215,8 @@ ZCL_WINDOWS_ACCEPTANCE_pagelocker_SOURCES := \
 	lib/base/src/cleanse.c
 ZCL_WINDOWS_ACCEPTANCE_positioned_file_SOURCES := \
 	lib/platform/tests/positioned_file_windows_acceptance.c \
-	lib/platform/src/positioned_file.c
+	lib/platform/src/positioned_file.c \
+	lib/base/src/safe_alloc.c
 ZCL_WINDOWS_ACCEPTANCE_positioned_io_SOURCES := \
 	lib/platform/tests/positioned_io_windows_acceptance.c \
 	lib/platform/src/positioned_io.c

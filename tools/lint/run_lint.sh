@@ -247,7 +247,7 @@ gate_command() {
         check-no-warning-suppression)      echo './tools/lint/check_no_warning_suppression.sh .' ;;
         check-clang-portability)           echo './tools/lint/check_clang_portability.sh --self-test && ./tools/lint/check_clang_portability.sh' ;;
         check-windows-platform-seam)       echo './tools/lint/check_windows_platform_seam.sh --self-test && ./tools/lint/check_windows_platform_seam.sh' ;;
-        check-windows-acceptance)          echo 'make check-windows-acceptance' ;;
+        check-windows-acceptance)          echo './tools/lint/check_windows_acceptance.sh --self-test && ./tools/lint/check_windows_acceptance.sh' ;;
         check-app-bundle-reproducible)     echo './tools/lint/check_app_bundle_reproducible.sh --selftest && ./tools/lint/check_app_bundle_reproducible.sh' ;;
         check-result-discard)              echo 'ZCL_LINT_MODE=FAIL ./tools/lint/check_result_discard.sh' ;;
         *) return 1 ;;

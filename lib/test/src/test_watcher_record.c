@@ -1,5 +1,18 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Purpose: Verify durable watcher-record encoding and identity matching. */
+ * Purpose: proves the durable watcher-record codec round-trips exactly,
+ * refuses every malformed encoding it is handed, and rejects a binding that
+ * differs from the record in any single member.
+ *
+ * Rehomed from lib/platform/tests/test_watcher_record.c, which NOTHING read:
+ * it was in no windows_acceptance.mk row, no Makefile rule and not in the
+ * files list of lib/platform/zcode-package.json. As a registered group it
+ * executes on every suite run. platform_watcher_record.c is pure, bounded and
+ * carries no _WIN32 arm at all, so the whole program runs natively here --
+ * the probe body below is the original main() verbatim, CHECK macro and all,
+ * including the Windows-shaped canonical paths, which are just opaque
+ * printable byte strings to this codec. */
+#include "test/test_core.h"
+
 #include "platform/watcher_record.h"
 
 #include <stdio.h>
@@ -32,7 +45,7 @@ static struct platform_watcher_record_binding binding(const struct platform_watc
     strcpy(b.image_sha256,r->image_sha256); b.state=r->state; return b;
 }
 
-int main(void)
+static int watcher_record_probe(void)
 {
     struct platform_watcher_record original=example(), decoded;
     char text[PLATFORM_WATCHER_RECORD_ENCODED_MAX]; size_t used=0;
@@ -77,4 +90,20 @@ int main(void)
     original=example(); original.canonical_root[2]='\n'; CHECK(!platform_watcher_record_is_valid(&original));
     original=example(); original.start_token=0; CHECK(!platform_watcher_record_is_valid(&original));
     return 0;
+}
+
+#undef CHECK
+
+int test_watcher_record(void)
+{
+    int failures = 0;
+    printf("watcher_record: exact round-trip, malformed-encoding refusals, "
+           "per-member binding mismatch... ");
+    if (watcher_record_probe() == 0) {
+        printf("OK\n");
+    } else {
+        printf("FAIL\n");
+        failures++;
+    }
+    return failures;
 }

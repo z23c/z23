@@ -9530,23 +9530,43 @@ check-windows-platform-seam:
 # by the catalog in lib/platform/tests/windows_acceptance.mk (included near
 # the top of this file, where ZCL_WINDOWS_ACCEPTANCE_FLAGS is defined).
 #
-# That catalog is complete and correct, and until this entry existed it was
-# invoked by NOTHING: `windows-acceptance-compile` appeared in a .PHONY list
-# and in no gate, no CI path and no script. Fifty-one acceptance programs
-# with real per-test source lists were standing in for the verification of
-# the macOS/Windows seam without a compiler ever reading them on a clean
-# tree. A catalog nothing runs is the same false green as no catalog.
+# That catalog was invoked by NOTHING until this entry existed:
+# `windows-acceptance-compile` appeared in a .PHONY list and in no gate, no CI
+# path and no script. Dozens of acceptance programs with real per-test source
+# lists were standing in for the verification of the macOS/Windows seam
+# without a compiler ever reading them on a clean tree. A catalog nothing runs
+# is the same false green as no catalog.
 #
-# Compile, not execute: these are Windows binaries and this is a POSIX host,
-# so the honest deliverable is a mingw cross-link at the product's own API
-# floor ($(ZCL_WINDOWS_API_FLOOR), shared with ZCL_PLATFORM_CPPFLAGS so the
-# two can never drift apart again). `make windows-acceptance` additionally
-# runs them under Wine and REFUSES rather than skipping when Wine is absent.
+# And a catalog nothing RECONCILES is the next false green along, which this
+# gate went through for real: test_directory_watcher.c and
+# test_watcher_record.c sat under lib/platform/tests read by nothing at all --
+# no catalog row, no Makefile rule, not in lib/platform/zcode-package.json --
+# while this target printed a clean PASS. So the work is now in
+# tools/lint/check_windows_acceptance.sh, which does TWO steps in this order:
 #
-# UNOBSERVED contract: with no mingw toolchain the gate prints UNOBSERVED, in
-# that word, and exits 0 -- an outside contributor is never blocked by a
-# cross-compiler they do not have -- but UNOBSERVED is not a pass and is not
-# cached.
+#   1. RECONCILE — every acceptance program on disk must be a source in a
+#      ZCL_WINDOWS_ACCEPTANCE_*_SOURCES row, or the entry point of a group
+#      registered in tools/dev/test_group_catalog.def, or an EXEMPT row with a
+#      written reason. Anything else is exit 1 naming the file, and an empty
+#      scan set is a hard failure rather than a clean pass. Needs no compiler,
+#      so it runs for everyone.
+#   2. COMPILE — then what this target always did: a mingw cross-link at the
+#      product's own API floor ($(ZCL_WINDOWS_API_FLOOR), shared with
+#      ZCL_PLATFORM_CPPFLAGS so the two can never drift apart again).
+#
+# Compile, not execute: these are Windows binaries and this is a POSIX host.
+# `make windows-acceptance` additionally runs them under Wine and REFUSES
+# rather than skipping when Wine is absent.
+#
+# UNOBSERVED contract: with no mingw toolchain the compile step prints
+# UNOBSERVED, in that word, and exits 0 -- an outside contributor is never
+# blocked by a cross-compiler they do not have -- but UNOBSERVED is not a pass
+# and is not cached. The reconcile step has already run by then either way.
+#
+# --self-test runs first on every invocation because a gate not proven able to
+# go red is not evidence: it plants an undeclared program in a throwaway
+# fixture, asserts the red names it, and asserts the pass returns once it is
+# removed.
 #
 # Wired into LINT_GATES, which takes three files as a set: the list entry
 # below, a gate_command() row in tools/lint/run_lint.sh, and a row in
@@ -9555,11 +9575,7 @@ check-windows-platform-seam:
 # gate, not just this one.
 .PHONY: check-windows-acceptance
 check-windows-acceptance:
-	@if command -v $(ZCL_WINDOWS_ACCEPTANCE_CC) >/dev/null 2>&1; then \
-		$(MAKE) --no-print-directory windows-acceptance-compile; \
-	else \
-		printf '%s\n' 'check-windows-acceptance: UNOBSERVED ($(ZCL_WINDOWS_ACCEPTANCE_CC) not installed)'; \
-	fi
+	@./tools/lint/check_windows_acceptance.sh --self-test && ./tools/lint/check_windows_acceptance.sh
 # END windows-acceptance lane
 # ─────────────────────────────────────────────────────────────────────────
 
