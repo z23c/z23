@@ -13,7 +13,9 @@
  * binary can describe the same grammar but cannot spawn, mutate, or activate
  * anything in the development lane. */
 
+#if !defined(_WIN32)
 #define _GNU_SOURCE
+#endif
 #ifdef ZCL_HOTFORK_NATIVE_DEV_INPUT_CORE
 #include "dev_failure_store.h"
 #include "devloop.h"
@@ -38,6 +40,19 @@
 #include "models/database.h"
 #include "models/build_fabric.h"
 #include "platform/time_compat.h"
+#include "platform/directory_compat.h"
+#include "platform/private_directory.h"
+#include "platform/process_lock.h"
+#include "platform/process_lifecycle.h"
+#include "platform/positioned_file.h"
+#include "platform/os_proc.h"
+#include "platform/state_root.h"
+#include "platform/watcher_lease.h"
+#include "platform/watcher_record.h"
+#include "platform/watcher_store.h"
+#ifdef ZCL_DEV_BUILD
+#include "dev_activation_internal.h"
+#endif
 #include "services/dev_reflex_policy_service.h"
 #include "services/zcode_lane_service.h"
 #include "services/vault_intent_decision_service.h"
@@ -55,9 +70,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <unistd.h>
+#else
+#include <io.h>
+#include <windows.h>
+#endif
 
 #ifdef ZCL_DEV_BUILD
+#if !defined(_WIN32)
 #include <dirent.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -66,6 +87,24 @@
 #include <sys/types.h>
 #include <time.h>
 #endif
+#endif
+#endif
+
+#if defined(_WIN32)
+static int dev_fd_dup(int fd) { return _dup(fd); }
+static int dev_fd_dup2(int from, int to) { return _dup2(from, to); }
+static int dev_fd_close(int fd) { return _close(fd); }
+#else
+static int dev_fd_dup(int fd) { return dup(fd); }
+static int dev_fd_dup2(int from, int to) { return dup2(from, to); }
+static int dev_fd_close(int fd) { return close(fd); }
+#endif
+
+#ifndef ZCL_HOTFORK_NATIVE_DEV_INPUT_CORE
+static bool dev_canonical_directory(const char *path, char out[PATH_MAX])
+{
+    return platform_directory_canonical_real(path, out, PATH_MAX);
+}
 #endif
 
 /* Pure, caller-owned input policy shared by the static command shell and the
@@ -265,7 +304,7 @@ void zcl_native_handle_dev_ff(const struct zcl_command_request *request,
 #else
     char root[PATH_MAX];
     const char *src_root = dev_source_root(request);
-    if (!realpath(src_root, root)) {
+    if (!dev_canonical_directory(src_root, root)) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INTERNAL, "ROOT_RESOLVE_FAILED",
                                "normalize", false, false,
@@ -874,7 +913,7 @@ void zcl_native_handle_dev_publication_advance(
                                                    "workspace"));
     const char *repo_root = dev_source_root(request);
     if (workspace && workspace[0]) {
-        if (!realpath(workspace, resolved_workspace)) {
+        if (!dev_canonical_directory(workspace, resolved_workspace)) {
             zcl_command_reply_fail(
                 reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
                 "PUBLICATION_WORKSPACE_INVALID", "normalize", false, false,
@@ -1040,7 +1079,7 @@ void zcl_native_handle_dev_publication_advance(
     bool acceptance_verified = false;
     if (datadir && datadir[0] && have_job) {
         char workspace[PATH_MAX];
-        bool lane_found = realpath(repo_root, workspace) &&
+        bool lane_found = dev_canonical_directory(repo_root, workspace) &&
             dev_publication_lane_lookup(
                 workspace, datadir, job.source_tree_root, lane_root,
                 proof_set_hex, lane_name, &projection_rebuilt);
@@ -2129,21 +2168,21 @@ static bool dev_capture_stdout(dev_captured_fn fn, void *arg, char *out,
     FILE *tmp = tmpfile();
     if (!tmp)
         return false;
-    int saved = dup(STDOUT_FILENO);
+    int saved = dev_fd_dup(STDOUT_FILENO);
     if (saved < 0) {
         fclose(tmp);
         return false;
     }
     fflush(stdout);
-    if (dup2(fileno(tmp), STDOUT_FILENO) < 0) {
-        close(saved);
+    if (dev_fd_dup2(fileno(tmp), STDOUT_FILENO) < 0) {
+        dev_fd_close(saved);
         fclose(tmp);
         return false;
     }
     *call_rc = fn(arg);
     fflush(stdout);
-    bool restored = dup2(saved, STDOUT_FILENO) >= 0;
-    close(saved);
+    bool restored = dev_fd_dup2(saved, STDOUT_FILENO) >= 0;
+    dev_fd_close(saved);
     if (!restored || fseek(tmp, 0, SEEK_SET) != 0) {
         fclose(tmp);
         return false;
@@ -2233,14 +2272,23 @@ void zcl_native_handle_dev_change_apply(
 
 static bool dev_state_dir(char out[PATH_MAX])
 {
+#if defined(_WIN32)
+    return platform_state_root(out, PATH_MAX);
+#else
     const char *home = getenv("HOME");
     int n = home && home[0]
         ? snprintf(out, PATH_MAX, "%s/.local/state/zclassic23-dev", home) : -1;
     return n > 0 && n < PATH_MAX;
+#endif
 }
 
 static bool dev_mkdirs(const char *path)
 {
+#if defined(_WIN32)
+    char state[PATH_MAX];
+    return path && platform_state_root(state, sizeof(state)) &&
+           strcmp(path, state) == 0;
+#else
     char copy[PATH_MAX];
     if (!path || !path[0] || strlen(path) >= sizeof(copy))
         return false;
@@ -2254,6 +2302,7 @@ static bool dev_mkdirs(const char *path)
         *p = '/';
     }
     return mkdir(copy, 0700) == 0 || errno == EEXIST;
+#endif
 }
 
 static bool dev_watch_paths(const char *repo_root,
@@ -2267,6 +2316,9 @@ static bool dev_watch_paths(const char *repo_root,
     return on > 0 && on < PATH_MAX;
 }
 
+typedef uint64_t dev_pid_t;
+
+#if !defined(_WIN32)
 static bool dev_legacy_watch_lock_path(char lock[PATH_MAX])
 {
     char dir[PATH_MAX];
@@ -2275,9 +2327,19 @@ static bool dev_legacy_watch_lock_path(char lock[PATH_MAX])
     int n = snprintf(lock, PATH_MAX, "%s/native-watch.lock", dir);
     return n > 0 && n < PATH_MAX;
 }
+#endif
 
-static bool dev_pid_is_watcher(pid_t pid)
+static bool dev_pid_is_watcher(dev_pid_t pid)
 {
+#if defined(_WIN32)
+    char exe[PATH_MAX];
+    if (pid <= 1 || os_proc_pid_liveness(pid) != OS_PROC_LIVENESS_RUNNING ||
+        !os_proc_pid_exe_path(pid, exe, sizeof(exe))) return false;
+    const char *base = strrchr(exe, '\\');
+    if (!base) base = strrchr(exe, '/');
+    return base && (_stricmp(base + 1, "zclassic23-dev.exe") == 0 ||
+                    _stricmp(base + 1, "zclassic23-dev") == 0);
+#else
     if (pid <= 1 || (kill(pid, 0) != 0 && errno != EPERM))
         return false;
     char proc[64], exe[PATH_MAX];
@@ -2301,15 +2363,18 @@ static bool dev_pid_is_watcher(pid_t pid)
         exe[got - dlen] = 0;
     const char *base = strrchr(exe, '/');
     return base && strcmp(base + 1, "zclassic23-dev") == 0;
+#endif
 }
 
-static bool dev_pid_cwd_matches_root(pid_t pid, const char *repo_root)
+#if !defined(_WIN32)
+static bool dev_pid_cwd_matches_root(dev_pid_t pid, const char *repo_root)
 {
     if (pid <= 1 || !repo_root || !repo_root[0])
         return false;
     char proc[64], cwd[PATH_MAX], root[PATH_MAX];
     int n = snprintf(proc, sizeof(proc), "/proc/%ld/cwd", (long)pid);
-    if (n <= 0 || n >= (int)sizeof(proc) || !realpath(repo_root, root))
+    if (n <= 0 || n >= (int)sizeof(proc) ||
+        !dev_canonical_directory(repo_root, root))
         return false;
     ssize_t got = readlink(proc, cwd, sizeof(cwd) - 1);
     if (got <= 0 || (size_t)got >= sizeof(cwd))
@@ -2317,12 +2382,18 @@ static bool dev_pid_cwd_matches_root(pid_t pid, const char *repo_root)
     cwd[got] = 0;
     return strcmp(cwd, root) == 0;
 }
+#endif
 
 struct dev_watcher_info {
-    pid_t pid;
+    dev_pid_t pid;
     enum zcl_devloop_publish_mode publish_mode;
     char mode_name[16];
     bool ready;
+#if defined(_WIN32)
+    uint64_t start_token;
+    char nonce[65];
+    char image[PATH_MAX];
+#endif
 };
 
 /* A busy advisory lock is the ownership proof; the PID is diagnostic and is
@@ -2332,6 +2403,7 @@ struct dev_watcher_info {
  * (`pid verify|auto`).  A pid-only record is an already-running
  * pre-containment watcher, whose historical behavior was auto publication, so
  * it is reported truthfully as legacy-auto. */
+#if !defined(_WIN32)
 static bool dev_watcher_active_at(const char *lock,
                                   struct dev_watcher_info *info_out)
 {
@@ -2404,7 +2476,7 @@ static bool dev_watcher_active_at(const char *lock,
                 return false;
         }
     }
-    pid_t pid = (pid_t)value;
+    dev_pid_t pid = (dev_pid_t)value;
     if (info_out) {
         info_out->pid = pid;
         info_out->publish_mode = publish_mode;
@@ -2414,10 +2486,107 @@ static bool dev_watcher_active_at(const char *lock,
     }
     return true;
 }
+#endif
+
+#if defined(_WIN32)
+static bool dev_root_identity(const char *root,
+                              struct platform_watcher_file_identity *id)
+{
+    int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, root, -1,
+                                NULL, 0);
+    wchar_t *wide = n > 0 ? malloc((size_t)n * sizeof(*wide)) : NULL;
+    if (!wide || MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, root, -1,
+                                     wide, n) != n) { free(wide); return false; }
+    HANDLE h = CreateFileW(wide, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+        NULL);
+    free(wide);
+    BY_HANDLE_FILE_INFORMATION info = {0};
+    bool ok = h != INVALID_HANDLE_VALUE &&
+        GetFileInformationByHandle(h, &info) &&
+        (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+        (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
+    if (ok) *id = (struct platform_watcher_file_identity){
+        info.dwVolumeSerialNumber, info.nFileIndexLow, info.nFileIndexHigh};
+    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+    return ok;
+}
+
+static bool dev_watcher_active_windows(const char *repo_root,
+                                       struct dev_watcher_info *out)
+{
+    char root[PATH_MAX], state[PATH_MAX], workspace[65], lock_leaf[96],
+         record_leaf[96], encoded[PLATFORM_WATCHER_RECORD_ENCODED_MAX];
+    size_t length = 0;
+    struct platform_watcher_store store;
+    struct platform_watcher_record record;
+    platform_watcher_store_init(&store);
+    if (out) memset(out, 0, sizeof(*out));
+    bool names = dev_canonical_directory(repo_root, root) &&
+        platform_state_root(state, sizeof(state)) &&
+        zcl_devloop_workspace_id(root, workspace) &&
+        snprintf(lock_leaf, sizeof(lock_leaf), "watch-%s.lock", workspace) > 0 &&
+        snprintf(record_leaf, sizeof(record_leaf), "watch-%s.record", workspace) > 0;
+    enum platform_watcher_store_result read = names &&
+        platform_watcher_store_open(&store, state) == PLATFORM_WATCHER_STORE_OK
+        ? platform_watcher_store_read_while_busy(
+              &store, lock_leaf, record_leaf, encoded, sizeof(encoded),
+              &length, NULL)
+        : PLATFORM_WATCHER_STORE_INVALID;
+    platform_watcher_store_close(&store);
+    if (read != PLATFORM_WATCHER_STORE_OK ||
+        !platform_watcher_record_parse(encoded, length, &record) ||
+        strcmp(record.canonical_root, root) != 0 ||
+        record.pid <= 1 || os_proc_pid_liveness(record.pid) !=
+                              OS_PROC_LIVENESS_RUNNING)
+        return false;
+    uint64_t start = 0;
+    char process_image[PATH_MAX], current_image[PATH_MAX], current_hash[65];
+    struct platform_watcher_file_identity root_id;
+    struct platform_positioned_file image_file;
+    struct platform_positioned_file_snapshot image_info;
+    platform_positioned_file_init(&image_file);
+    bool valid = os_proc_pid_start_token(record.pid, &start) &&
+        start == record.start_token &&
+        os_proc_pid_exe_path(record.pid, process_image, sizeof(process_image)) &&
+        strcmp(process_image, record.canonical_image) == 0 &&
+        os_proc_exe_path(current_image, sizeof(current_image)) &&
+        strcmp(current_image, record.canonical_image) == 0 &&
+        dev_activation_sha256_file(current_image, current_hash) &&
+        strcmp(current_hash, record.image_sha256) == 0 &&
+        dev_root_identity(root, &root_id) &&
+        root_id.volume == record.root_identity.volume &&
+        root_id.file_low == record.root_identity.file_low &&
+        root_id.file_high == record.root_identity.file_high &&
+        platform_positioned_file_open(&image_file, current_image) &&
+        platform_positioned_file_snapshot(&image_file, &image_info) &&
+        image_info.volume == record.image_identity.volume &&
+        image_info.file_low == record.image_identity.file_low &&
+        image_info.file_high == record.image_identity.file_high &&
+        image_info.size == record.image_size;
+    platform_positioned_file_close(&image_file);
+    if (!valid) return false;
+    if (out) {
+        out->pid = record.pid; out->start_token = record.start_token;
+        out->publish_mode = record.mode == PLATFORM_WATCHER_MODE_AUTO
+            ? ZCL_DEVLOOP_PUBLISH_APPLY : ZCL_DEVLOOP_PUBLISH_VERIFY_ONLY;
+        out->ready = record.state == PLATFORM_WATCHER_STATE_READY;
+        (void)snprintf(out->mode_name, sizeof(out->mode_name), "%s",
+                       record.mode == PLATFORM_WATCHER_MODE_AUTO ? "auto" : "verify");
+        memcpy(out->nonce, record.nonce, sizeof(out->nonce));
+        memcpy(out->image, record.canonical_image, sizeof(out->image));
+    }
+    return true;
+}
+#endif
 
 static bool dev_watcher_active(const char *repo_root,
                                struct dev_watcher_info *info_out)
 {
+#if defined(_WIN32)
+    return dev_watcher_active_windows(repo_root, info_out);
+#else
     char lock[PATH_MAX], log[PATH_MAX], legacy[PATH_MAX];
     bool have_worktree_lock = dev_watch_paths(repo_root, lock, log);
     if (have_worktree_lock && dev_watcher_active_at(lock, info_out))
@@ -2436,6 +2605,7 @@ static bool dev_watcher_active(const char *repo_root,
     if (info_out)
         *info_out = old;
     return true;
+#endif
 }
 
 static enum zcl_devloop_state_lookup dev_read_cycle(
@@ -2661,7 +2831,7 @@ void zcl_native_handle_dev_loop_ensure(
     const char *requested = root_v && root_v->type == JSON_STR
         ? json_get_str(root_v) : dev_source_root(request);
     char root[PATH_MAX], makefile[PATH_MAX], lock[PATH_MAX], log[PATH_MAX];
-    if (!requested || !realpath(requested, root) ||
+    if (!requested || !dev_canonical_directory(requested, root) ||
         snprintf(makefile, sizeof(makefile), "%s/Makefile", root) <= 0 ||
         access(makefile, R_OK) != 0 || !dev_watch_paths(root, lock, log)) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
@@ -2687,7 +2857,7 @@ void zcl_native_handle_dev_loop_ensure(
             return;
         }
         for (int i = 0; i < 250 && !existing.ready; i++) {
-            usleep(20000);
+            platform_sleep_ms(20);
             if (!dev_watcher_active(root, &existing))
                 break;
         }
@@ -2714,6 +2884,43 @@ void zcl_native_handle_dev_loop_ensure(
                                "could not prepare watcher state directory", "");
         return;
     }
+#if defined(_WIN32)
+    char image[PATH_MAX];
+    char image_hash[65], inherited_text[32];
+    struct platform_watcher_launch launch;
+    platform_watcher_launch_init(&launch);
+    const char *worker_argv[] = {NULL, "--z23-internal-watch-worker",
+                                 inherited_text, root, requested_mode_name,
+                                 image_hash, NULL};
+    struct platform_process child;
+    platform_process_init(&child);
+    if (!os_proc_exe_path(image, sizeof(image)) ||
+        !dev_activation_sha256_file(image, image_hash) ||
+        !platform_watcher_launch_prepare(&launch, root, image, image_hash)) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "WATCH_IMAGE_FAILED",
+                               "start", false, false,
+                               "could not resolve the exact watcher image", "");
+        return;
+    }
+    (void)snprintf(inherited_text, sizeof(inherited_text), "%llu",
+        (unsigned long long)platform_watcher_launch_inherited(&launch));
+    worker_argv[0] = image;
+    uintptr_t inherited[] = {platform_watcher_launch_inherited(&launch)};
+    struct platform_process_options options = {
+        .image = image, .argv = worker_argv, .cwd = root,
+        .env = NULL, .inherited = inherited, .inherited_count = 1};
+    if (!platform_process_start_hidden(&child, &options) ||
+        !platform_watcher_launch_publish(&launch)) {
+        platform_watcher_launch_close(&launch);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "WATCH_START_FAILED",
+                               "start", false, false,
+                               "could not start native watcher", "CreateProcessW");
+        return;
+    }
+    platform_watcher_launch_close(&launch);
+#else
     pid_t child = fork();
     if (child < 0) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
@@ -2738,10 +2945,11 @@ void zcl_native_handle_dev_loop_ensure(
         int rc = zcl_devloop_watch_mode(root, requested_mode);
         _exit(rc == 0 ? 0 : 1);
     }
+#endif
     struct dev_watcher_info started = {0};
     for (int i = 0; i < 250 &&
          (!dev_watcher_active(root, &started) || !started.ready); i++)
-        usleep(20000);
+        platform_sleep_ms(20);
     if (started.pid <= 1 || !started.ready ||
         started.publish_mode != requested_mode ||
         !dev_pid_is_watcher(started.pid)) {
@@ -2749,8 +2957,15 @@ void zcl_native_handle_dev_loop_ensure(
                                ZCL_COMMAND_EXIT_FAILED, "WATCH_START_FAILED",
                                "start", true, false,
                                "watcher did not acquire its singleton lock", log);
+#if defined(_WIN32)
+        (void)platform_process_terminate(&child, 1);
+        platform_process_close(&child);
+#endif
         return;
     }
+#if defined(_WIN32)
+    platform_process_close(&child);
+#endif
     dev_emit_loop_status(root, reply);
     (void)json_push_kv_bool(&reply->data, "created", true);
     (void)json_push_kv_str(&reply->data, "root", root);
@@ -2936,7 +3151,28 @@ void zcl_native_handle_dev_loop_stop(
                                "refusing to signal a different process", "watcher_id");
         return;
     }
-    if (kill(active.pid, SIGTERM) != 0) {
+#if defined(_WIN32)
+    struct platform_process watcher;
+    platform_process_init(&watcher);
+    uint64_t start = 0;
+    bool authorized = os_proc_pid_start_token(active.pid, &start) &&
+        start == active.start_token &&
+        platform_process_open_existing(&watcher, active.pid, active.image);
+    bool signaled = authorized && platform_watcher_lease_signal_stop(active.nonce);
+    uint32_t exit_code = 0;
+    enum platform_process_wait_result waited = signaled
+        ? platform_process_wait(&watcher, 5000, &exit_code)
+        : PLATFORM_PROCESS_WAIT_FAILED;
+    bool stopped = waited == PLATFORM_PROCESS_WAIT_EXITED;
+    if (!stopped && authorized)
+        stopped = platform_process_terminate(&watcher, 1) &&
+                  platform_process_wait(&watcher, 5000, &exit_code) ==
+                      PLATFORM_PROCESS_WAIT_EXITED;
+    platform_process_close(&watcher);
+    if (!stopped) {
+#else
+    if (kill((pid_t)active.pid, SIGTERM) != 0) {
+#endif
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_FAILED, "WATCHER_STOP_FAILED",
                                "stop", true, false,
@@ -2947,7 +3183,7 @@ void zcl_native_handle_dev_loop_stop(
     for (int i = 0; i < 250; i++) {
         if (!dev_watcher_active(repo_root, &still))
             break;
-        usleep(20000);
+        platform_sleep_ms(20);
     }
     dev_emit_loop_status(repo_root, reply);
     if (dev_watcher_active(repo_root, &still))
@@ -2959,6 +3195,7 @@ void zcl_native_handle_dev_loop_stop(
         (void)json_push_kv_bool(&reply->data, "stopped", true);
 }
 
+#if !defined(_WIN32)
 static bool dev_test_phase_receipt_parse(
     const struct zcl_devloop_process_result *result,
     int64_t *startup_ms, int64_t *test_body_ms)
@@ -2978,6 +3215,7 @@ static bool dev_test_phase_receipt_parse(
     *test_body_ms = body;
     return true;
 }
+#endif
 
 void zcl_native_handle_dev_test_run(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
@@ -2998,9 +3236,16 @@ void zcl_native_handle_dev_test_run(
         return;
     }
     int64_t graph_load_us = platform_time_monotonic_us() - graph_started_us;
+#if defined(_WIN32)
+    (void)graph_load_us;
+#endif
     char root[PATH_MAX], bin[PATH_MAX], selector[160];
-    if (!realpath(dev_source_root(request), root) ||
+    if (!dev_canonical_directory(dev_source_root(request), root) ||
+#if defined(_WIN32)
+        snprintf(bin, sizeof(bin), "%s/build/bin/test_parallel_fast.exe", root) <= 0 ||
+#else
         snprintf(bin, sizeof(bin), "%s/build/bin/test_parallel_fast", root) <= 0 ||
+#endif
         snprintf(selector, sizeof(selector), "--exact=%s", full_group) <= 0) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
                                ZCL_COMMAND_EXIT_BLOCKED, "TEST_RUNNER_MISSING",
@@ -3009,6 +3254,30 @@ void zcl_native_handle_dev_test_run(
                                "run make test_parallel_fast");
         return;
     }
+#if defined(_WIN32)
+    (void)graph_load_us;
+    (void)handler_started_us;
+    struct platform_positioned_file runner;
+    platform_positioned_file_init(&runner);
+    if (!platform_positioned_file_open(&runner, bin) ||
+        !platform_positioned_file_is_executable(&runner)) {
+        platform_positioned_file_close(&runner);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
+                               ZCL_COMMAND_EXIT_BLOCKED, "TEST_RUNNER_MISSING",
+                               "precondition", true, false,
+                               "prebuilt focused test runner is unavailable",
+                               "run make test_parallel_fast");
+        return;
+    }
+    platform_positioned_file_close(&runner);
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
+                           ZCL_COMMAND_EXIT_BLOCKED,
+                           "TEST_RUNNER_EXECUTION_UNAVAILABLE", "precondition",
+                           true, false,
+                           "native handle-bound focused runner execution is unavailable",
+                           "use the POSIX reference lane until native execution is ported");
+    return;
+#else
     int runner_fd = open(bin, O_RDONLY);
     struct stat runner_stat;
     if (runner_fd < 0 || fstat(runner_fd, &runner_stat) != 0 ||
@@ -3148,6 +3417,7 @@ void zcl_native_handle_dev_test_run(
                                "prove", true, false,
                                "focused test group failed", full_group);
     }
+#endif
 }
 
 struct dev_vault_story_case {
@@ -3403,6 +3673,17 @@ void zcl_native_handle_dev_test_sim(
 static bool dev_generation_root(char out[PATH_MAX])
 {
     const char *override = getenv("ZCL_DEV_GENERATION_ROOT");
+#if defined(_WIN32)
+    if (override && override[0]) {
+        int n = snprintf(out, PATH_MAX, "%s", override);
+        return n > 2 && n < PATH_MAX && out[1] == ':' &&
+               (out[2] == '/' || out[2] == '\\') && !strstr(out, "..");
+    }
+    char state[PATH_MAX];
+    if (!platform_state_root(state, sizeof(state))) return false;
+    int n = snprintf(out, PATH_MAX, "%s/generations", state);
+    return n > 0 && n < PATH_MAX;
+#else
     const char *home = getenv("HOME");
     int n = override && override[0]
         ? snprintf(out, PATH_MAX, "%s", override)
@@ -3410,11 +3691,44 @@ static bool dev_generation_root(char out[PATH_MAX])
             ? snprintf(out, PATH_MAX, "%s/.local/lib/zclassic23-dev", home)
             : -1;
     return n > 0 && n < PATH_MAX && out[0] == '/' && !strstr(out, "..");
+#endif
 }
 
 static bool dev_read_generation_link(const char *root, const char *link_name,
                                      char out[96])
 {
+#if defined(_WIN32)
+    struct platform_directory_transaction directory;
+    struct platform_directory_child selection;
+    platform_directory_transaction_init(&directory);
+    platform_directory_child_init(&selection);
+    char blob[256];
+    struct platform_directory_child_info info;
+    bool ok = platform_directory_transaction_open(&directory, root) &&
+        platform_directory_child_open(&directory, link_name, &selection) &&
+        platform_directory_child_info(&selection, &info) &&
+        info.current_user_only && info.size > 0 && info.size < sizeof(blob) &&
+        platform_directory_child_read_exact(&selection, blob,
+                                             (size_t)info.size, 0);
+    if (ok) {
+        blob[info.size] = 0;
+        ok = dev_activation_json_first_string(blob, "generation", out, 96) &&
+             dev_generation_name_valid(out);
+    }
+    platform_directory_child_close(&selection);
+    platform_directory_transaction_close(&directory);
+    if (!ok) return false;
+    char binary[PATH_MAX];
+    int n = snprintf(binary, sizeof(binary), "%s/%s/zclassic23-dev.exe",
+                     root, out);
+    struct platform_positioned_file file;
+    platform_positioned_file_init(&file);
+    ok = n > 0 && n < (int)sizeof(binary) &&
+         platform_positioned_file_open(&file, binary) &&
+         platform_positioned_file_is_executable(&file);
+    platform_positioned_file_close(&file);
+    return ok;
+#else
     char path[PATH_MAX];
     int n = snprintf(path, sizeof(path), "%s/%s", root, link_name);
     if (n <= 0 || (size_t)n >= sizeof(path))
@@ -3424,6 +3738,7 @@ static bool dev_read_generation_link(const char *root, const char *link_name,
         return false;
     out[got] = 0;
     return dev_generation_name_valid(out);
+#endif
 }
 
 void zcl_native_handle_dev_generation_current(
@@ -3469,6 +3784,31 @@ static void dev_scan_generation_markers(const char *root, const char *subdir,
                                         struct dev_generation_entry *entries,
                                         size_t capacity, size_t *count)
 {
+#if defined(_WIN32)
+    struct platform_directory_transaction parent, directory;
+    struct platform_directory_names names = {0};
+    platform_directory_transaction_init(&parent);
+    platform_directory_transaction_init(&directory);
+    bool ok = platform_directory_transaction_open(&parent, root) &&
+        platform_directory_transaction_open_child(&parent, subdir, false,
+                                                   &directory) ==
+            PLATFORM_DIRECTORY_OK &&
+        platform_directory_transaction_list_regular(&directory, &names);
+    if (ok) for (size_t i = 0; i < names.count && *count < capacity; i++) {
+        size_t len = strlen(names.items[i]);
+        if (len <= 5 || strcmp(names.items[i] + len - 5, ".json") != 0 ||
+            len - 5 >= sizeof(entries[*count].name)) continue;
+        memcpy(entries[*count].name, names.items[i], len - 5);
+        entries[*count].name[len - 5] = 0;
+        if (!dev_generation_name_valid(entries[*count].name)) continue;
+        (void)snprintf(entries[*count].disposition,
+                       sizeof(entries[*count].disposition), "%s", disposition);
+        (*count)++;
+    }
+    platform_directory_names_free(&names);
+    platform_directory_transaction_close(&directory);
+    platform_directory_transaction_close(&parent);
+#else
     char path[PATH_MAX];
     if (snprintf(path, sizeof(path), "%s/%s", root, subdir) <= 0)
         return;
@@ -3490,6 +3830,7 @@ static void dev_scan_generation_markers(const char *root, const char *subdir,
         (*count)++;
     }
     closedir(dir);
+#endif
 }
 
 void zcl_native_handle_dev_generation_history(
@@ -3975,7 +4316,7 @@ static void dev_vcs_seal_iso_utc_now(char out[32])
 {
     time_t t = platform_time_wall_time_t();
     struct tm tmv;
-    if (gmtime_r(&t, &tmv))
+    if (platform_time_utc_tm(t, &tmv))
         strftime(out, 32, "%Y-%m-%dT%H:%M:%SZ", &tmv);
     else
         snprintf(out, 32, "1970-01-01T00:00:00Z");

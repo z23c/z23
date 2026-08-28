@@ -38,6 +38,9 @@
 #include "util/sd_notify.h"             /* -sandbox=steady NOTIFY_SOCKET check */
 #include "platform/directory_compat.h"
 #include "platform/environment_compat.h"
+#ifdef ZCL_DEV_BUILD
+#include "devloop.h"
+#endif
 #include "session/agent_broker.h"       /* confined metaverse agent + broker modes */
 #include "services/agent_broker_provider.h" /* the broker's real authority, composed pre-fork */
 #include <signal.h>
@@ -180,6 +183,15 @@ static void report_app_init_failed(const struct app_context *ctx)
 
 int main(int argc, char **argv)
 {
+#ifdef ZCL_DEV_BUILD
+    if (argc == 6 && strcmp(argv[1], "--z23-internal-watch-worker") == 0) {
+        char *end = NULL;
+        uint64_t inherited = strtoull(argv[2], &end, 10);
+        if (!end || *end || inherited == UINT64_MAX) return 2;
+        return zcl_devloop_watch_worker_main((uintptr_t)inherited, argv[3],
+                                             argv[4], argv[5]);
+    }
+#endif
     /* Private same-binary presentation boundary. Exact argv shape only: the
      * payload arrives later on stdin, never in process-visible argv. Dispatch
      * before argument parsing and node initialization so the child owns only

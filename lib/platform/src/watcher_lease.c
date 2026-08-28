@@ -28,6 +28,7 @@ struct watcher_record {
     char image[WL_PATH];
     char image_sha256[65];
     uint64_t creator_pid;
+    uint64_t creator_start_token;
     uint64_t root_volume, root_low, root_high;
     uint64_t image_volume, image_low, image_high, image_size;
 };
@@ -245,6 +246,9 @@ bool platform_watcher_launch_prepare(struct platform_watcher_launch *launch,
         !rng_fill(nonce, sizeof(nonce))) return false;
     memcpy(record.magic, WL_MAGIC, sizeof(WL_MAGIC));
     memcpy(record.image_sha256, hash, 65); record.creator_pid = os_proc_current_pid();
+    if (!os_proc_pid_start_token(record.creator_pid,
+                                 &record.creator_start_token))
+        return false;
     hex_bytes(nonce, record.nonce); memcpy(launch->nonce, record.nonce, 65);
 #if defined(_WIN32)
     SECURITY_ATTRIBUTES sa = {.nLength = sizeof(sa), .bInheritHandle = TRUE};
@@ -367,8 +371,53 @@ bool platform_watcher_lease_accept(struct platform_watcher_lease *lease,
         ? open(lease->stop_locator, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW) : -1;
     ok = ok && stop >= 0; if (ok) lease->stop_native = (uintptr_t)stop;
 #endif
-    if (ok) memcpy(lease->nonce, record.nonce, 65);
+    uint64_t creator_start = 0;
+    ok = ok && os_proc_pid_start_token(record.creator_pid, &creator_start) &&
+         creator_start == record.creator_start_token;
+    if (ok) {
+        struct platform_watcher_accepted_binding *accepted =
+            calloc(1, sizeof(*accepted));
+        if (!accepted) ok = false;
+        else {
+            memcpy(accepted->nonce, record.nonce, 65);
+            accepted->creator_pid = record.creator_pid;
+            accepted->creator_start_token = record.creator_start_token;
+            memcpy(accepted->canonical_root, record.root,
+                   sizeof(accepted->canonical_root));
+            accepted->root_volume = record.root_volume;
+            accepted->root_low = record.root_low;
+            accepted->root_high = record.root_high;
+            memcpy(accepted->canonical_image, record.image,
+                   sizeof(accepted->canonical_image));
+            accepted->image_volume = record.image_volume;
+            accepted->image_low = record.image_low;
+            accepted->image_high = record.image_high;
+            accepted->image_size = record.image_size;
+            memcpy(accepted->image_sha256, record.image_sha256, 65);
+            lease->accepted = accepted;
+            memcpy(lease->nonce, record.nonce, 65);
+        }
+    }
+    if (!ok && lease->stop_native != UINTPTR_MAX) {
+#if defined(_WIN32)
+        CloseHandle((HANDLE)lease->stop_native);
+#else
+        close((int)lease->stop_native);
+#endif
+        lease->stop_native = UINTPTR_MAX;
+        lease->stop_locator[0] = 0;
+    }
     return ok;
+}
+
+bool platform_watcher_lease_binding(
+    const struct platform_watcher_lease *lease,
+    struct platform_watcher_accepted_binding *out)
+{
+    if (!lease || !out || !lease->accepted ||
+        lease->stop_native == UINTPTR_MAX) return false;
+    *out = *lease->accepted;
+    return true;
 }
 
 bool platform_watcher_lease_signal_stop(const char nonce[65])
@@ -407,5 +456,6 @@ void platform_watcher_lease_close(struct platform_watcher_lease *lease)
     if (lease->stop_native != UINTPTR_MAX) close((int)lease->stop_native);
     if (lease->stop_locator[0]) unlink(lease->stop_locator);
 #endif
+    free(lease->accepted);
     platform_watcher_lease_init(lease);
 }

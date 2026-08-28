@@ -1141,8 +1141,9 @@ static bool mark_singleton_ready(
                    zcl_devloop_publish_mode_name(publish_mode)) > 0;
 }
 
-int zcl_devloop_watch_mode(const char *repo_root,
-                           enum zcl_devloop_publish_mode publish_mode)
+int zcl_devloop_watch_mode_until(const char *repo_root,
+    enum zcl_devloop_publish_mode publish_mode,
+    zcl_devloop_stop_predicate stop, void *stop_opaque)
 {
     struct watch_context ctx = {0};
     const char *root = repo_root && repo_root[0] ? repo_root : ".";
@@ -1229,14 +1230,14 @@ int zcl_devloop_watch_mode(const char *repo_root,
            zcl_devloop_publish_mode_applies(publish_mode) ? "true" : "false");
     fflush(stdout);
 
-    while (!g_watch_stop) {
+    while (!g_watch_stop && !(stop && stop(stop_opaque))) {
         if (!watch_proof_start(&ctx, lock_fd)) {
             fprintf(stderr, "[devloop] complete proof worker start failed\n");
             break;
         }
         if (ctx.changed_count == 0 && !ctx.prepared_epoch_ready) {
             struct pollfd pfd = { .fd = ctx.fd, .events = POLLIN };
-            int prc = poll(&pfd, 1, 1000);
+            int prc = poll(&pfd, 1, stop ? 100 : 1000);
             if (prc < 0 && errno == EINTR)
                 continue;
             if (prc < 0) {
@@ -1278,12 +1279,13 @@ int zcl_devloop_watch_mode(const char *repo_root,
              * cheaper and more exact than delaying their first impact. */
             int64_t quiet_until =
                 platform_time_monotonic_us() + DEVLOOP_EDIT_QUIET_US;
-            while (!g_watch_stop) {
+            while (!g_watch_stop && !(stop && stop(stop_opaque))) {
                 int64_t remain_us =
                     quiet_until - platform_time_monotonic_us();
                 if (remain_us <= 0)
                     break;
                 int wait_ms = (int)((remain_us + 999) / 1000);
+                if (stop && wait_ms > 100) wait_ms = 100;
                 struct pollfd debounce = { .fd = ctx.fd, .events = POLLIN };
                 int drc = poll(&debounce, 1, wait_ms);
                 if (drc > 0 && collect_events(&ctx))
@@ -1409,7 +1411,7 @@ int zcl_devloop_watch_mode(const char *repo_root,
                 ZCL_DEVLOOP_PUBLISH_VERIFY_ONLY);
         }
         zcl_devloop_process_cancel_poll_clear();
-        if (g_watch_stop)
+        if (g_watch_stop || (stop && stop(stop_opaque)))
             break;
         bool superseded = ctx.changed_count > 0;
         zcl_devloop_process_cancel_clear();
@@ -1443,6 +1445,10 @@ int zcl_devloop_watch_mode(const char *repo_root,
     return 0;
 }
 
+int zcl_devloop_watch_mode(const char *repo_root,
+                           enum zcl_devloop_publish_mode publish_mode)
+{ return zcl_devloop_watch_mode_until(repo_root, publish_mode, NULL, NULL); }
+
 int zcl_devloop_watch(const char *repo_root)
 {
     return zcl_devloop_watch_mode(repo_root,
@@ -1459,6 +1465,10 @@ int zcl_devloop_watch_mode(const char *repo_root,
     fprintf(stderr, "[devloop] watch is compiled out of release builds\n");
     return 2;
 }
+int zcl_devloop_watch_mode_until(const char *repo_root,
+    enum zcl_devloop_publish_mode publish_mode,
+    zcl_devloop_stop_predicate stop, void *opaque)
+{ (void)stop; (void)opaque; return zcl_devloop_watch_mode(repo_root, publish_mode); }
 
 int zcl_devloop_watch(const char *repo_root)
 {
