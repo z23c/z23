@@ -53,9 +53,9 @@ bool boot_consensus_bundle_marker_write(const char *datadir, int32_t height,
     if (!marker_path(final_path, sizeof(final_path), datadir))
         LOG_FAIL("install_consensus_bundle",
                  "marker write: datadir path too long (%s)", datadir);
-    if (!platform_private_path_resolve(final_path, resolved_path,
-                                       sizeof(resolved_path), parent,
-                                       sizeof(parent)))
+    if (!platform_private_destination_resolve(
+            final_path, resolved_path, sizeof(resolved_path), parent,
+            sizeof(parent)))
         LOG_FAIL("install_consensus_bundle",
                  "marker write: unsafe/non-canonical datadir path (%s)",
                  datadir);

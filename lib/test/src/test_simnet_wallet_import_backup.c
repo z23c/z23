@@ -118,7 +118,7 @@ static void ib_make_dir(char *dir, size_t dirlen, const char *tag)
 {
     mkdir("./test-tmp", 0755);
     snprintf(dir, dirlen, "./test-tmp/ibck_%d_%s", (int)getpid(), tag);
-    mkdir(dir, 0755);
+    mkdir(dir, 0700);
 }
 
 /* A datadir that also needs a blocks/ subdir for write_block_to_disk. */

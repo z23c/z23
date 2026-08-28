@@ -53,8 +53,8 @@ int main(void)
             PLATFORM_FILE_METADATA_MISSING)
         return fail("missing verdict");
     if (platform_file_metadata_read(utf8_directory, &metadata) !=
-            PLATFORM_FILE_METADATA_REFUSED)
-        return fail("directory refusal");
+            PLATFORM_FILE_METADATA_NOT_REGULAR)
+        return fail("directory shape verdict");
     if (!RemoveDirectoryW(directory))
         return fail("cleanup");
     puts("file_metadata_acceptance: PASS");

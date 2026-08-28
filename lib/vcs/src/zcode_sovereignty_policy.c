@@ -468,8 +468,8 @@ enum vcs_zcode_sovereignty_result vcs_zcode_sovereignty_policy_save(
                i * VCS_ZCODE_SOVEREIGNTY_RULE_WIRE_BYTES,
            policy->entries[i].wire, VCS_ZCODE_SOVEREIGNTY_RULE_WIRE_BYTES);
   char resolved[1500], parent[1400], temporary[1600];
-  if (!platform_private_path_resolve(path, resolved, sizeof(resolved), parent,
-                                     sizeof(parent))) {
+  if (!platform_private_destination_resolve(
+          path, resolved, sizeof(resolved), parent, sizeof(parent))) {
     free(wire);
     return policy_error(error_out, error_capacity, VCS_ZCODE_SOVEREIGNTY_IO,
                         "sovereignty destination is unsafe");
