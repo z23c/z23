@@ -223,9 +223,20 @@ static bool probe_datadir_rotational(const char *block_root,
                                      const char *datadir, bool *out)
 {
 #if defined(_WIN32)
-    /* Windows storage stacks do not always expose seek-penalty truth (virtual,
-     * Storage Spaces, network and filter volumes). Unknown is safer than
-     * silently tuning an HDD as solid-state or vice versa. */
+    /* NOT OBSERVABLE with what this module is willing to do, so it reports
+     * unknown --- *out is left untouched and the caller's `rotational_known`
+     * stays false. The Windows answer exists, but only behind a much heavier
+     * path than a stat(): open a handle on the volume (\\.\X:) and issue
+     * DeviceIoControl(IOCTL_STORAGE_QUERY_PROPERTY) with
+     * StorageDeviceSeekPenaltyProperty, reading DEVICE_SEEK_PENALTY_DESCRIPTOR
+     * .IncursSeekPenalty --- and even that is a driver self-report that is
+     * wrong on several USB bridges and on storage behind a RAID or
+     * virtualization layer. Until that is implemented AND measured against
+     * real Windows spindles and SSDs, guessing "not rotational" here would be
+     * a lie with consequences: a peer composing a verdict from this node's
+     * published observation cannot tell an invented flag from an observed
+     * one, and an SSD-shaped assumption is exactly what grades an honest
+     * slow-disk box as failing. Unknown is the correct, composable answer. */
     (void)block_root;
     (void)datadir;
     (void)out;
@@ -237,35 +248,6 @@ static bool probe_datadir_rotational(const char *block_root,
     return probe_rotational_under(block_root, st.st_dev, out);
 #endif
 }
-
-#else /* _WIN32 */
-
-/* Windows: NOT OBSERVABLE with what this module is willing to do, so it
- * reports unknown — *out is left untouched and the caller's
- * `rotational_known` stays false.
- *
- * The Windows answer exists, but only behind a much heavier path than a
- * stat(): open a handle on the volume (\\.\X:) and issue
- * DeviceIoControl(IOCTL_STORAGE_QUERY_PROPERTY) with
- * StorageDeviceSeekPenaltyProperty, reading DEVICE_SEEK_PENALTY_DESCRIPTOR
- * .IncursSeekPenalty — and even that is a driver self-report that is wrong
- * on several USB bridges and on storage behind a RAID/virtualization layer.
- * Until that is implemented AND measured against real Windows spindles and
- * SSDs, guessing "not rotational" here would be a lie with consequences: a
- * peer composing a verdict from this node's published observation cannot
- * tell an invented flag from an observed one, and an SSD-shaped assumption
- * is exactly what grades an honest slow-disk box as failing. Unknown is the
- * correct, composable answer. */
-static bool probe_datadir_rotational(const char *block_root,
-                                     const char *datadir, bool *out)
-{
-    (void)block_root;
-    (void)datadir;
-    (void)out;
-    return false;
-}
-
-#endif /* !_WIN32 */
 
 /* ── Lifecycle ─────────────────────────────────────────────────────── */
 
