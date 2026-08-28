@@ -44,6 +44,7 @@ static inline bool platform_socket_runtime_init(void)
 #include <netdb.h>
 #include <netinet/in.h> /* struct sockaddr_in, htons/htonl, INADDR_LOOPBACK —
                          * winsock2.h supplies these to the _WIN32 branch */
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <sys/select.h>
 #include <sys/socket.h>
@@ -203,6 +204,63 @@ static inline platform_socket_t platform_socket_accept(
     int accepted = accept(sock, address, &size);
     if (accepted >= 0) *address_size = (size_t)size;
     return accepted;
+#endif
+}
+
+/* Connected, process-local stream pair. Windows has no socketpair(); build
+ * the equivalent over the IPv4 loopback and verify that accept returned the
+ * exact client endpoint we created, so another local process cannot splice
+ * itself into the pair. */
+static inline bool platform_socket_pair(platform_socket_t pair[2])
+{
+    if (!pair) return false;
+    pair[0] = PLATFORM_SOCKET_INVALID;
+    pair[1] = PLATFORM_SOCKET_INVALID;
+#if defined(_WIN32)
+    platform_socket_t listener = platform_socket_open(AF_INET, SOCK_STREAM, 0,
+                                                       true, false);
+    platform_socket_t client = PLATFORM_SOCKET_INVALID;
+    platform_socket_t accepted = PLATFORM_SOCKET_INVALID;
+    struct sockaddr_in address = {0};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    int address_size = (int)sizeof(address);
+    if (listener == PLATFORM_SOCKET_INVALID ||
+        platform_socket_bind(listener, (const struct sockaddr *)&address,
+                             sizeof(address)) != 0 ||
+        getsockname(listener, (struct sockaddr *)&address, &address_size) != 0 ||
+        platform_socket_listen(listener, 1) != 0)
+        goto fail;
+    client = platform_socket_open(AF_INET, SOCK_STREAM, 0, true, false);
+    if (client == PLATFORM_SOCKET_INVALID ||
+        connect(client, (const struct sockaddr *)&address,
+                (int)sizeof(address)) != 0)
+        goto fail;
+    size_t accepted_size = sizeof(address);
+    accepted = platform_socket_accept(listener, (struct sockaddr *)&address,
+                                      &accepted_size);
+    if (accepted == PLATFORM_SOCKET_INVALID) goto fail;
+    struct sockaddr_in client_local = {0};
+    struct sockaddr_in accepted_peer = {0};
+    int client_size = (int)sizeof(client_local);
+    int peer_size = (int)sizeof(accepted_peer);
+    if (getsockname(client, (struct sockaddr *)&client_local, &client_size) != 0 ||
+        getpeername(accepted, (struct sockaddr *)&accepted_peer, &peer_size) != 0 ||
+        client_local.sin_family != accepted_peer.sin_family ||
+        client_local.sin_port != accepted_peer.sin_port ||
+        client_local.sin_addr.s_addr != accepted_peer.sin_addr.s_addr)
+        goto fail;
+    platform_socket_close(listener);
+    pair[0] = client;
+    pair[1] = accepted;
+    return true;
+fail:
+    if (listener != PLATFORM_SOCKET_INVALID) platform_socket_close(listener);
+    if (client != PLATFORM_SOCKET_INVALID) platform_socket_close(client);
+    if (accepted != PLATFORM_SOCKET_INVALID) platform_socket_close(accepted);
+    return false;
+#else
+    return socketpair(AF_UNIX, SOCK_STREAM, 0, pair) == 0;
 #endif
 }
 
@@ -390,6 +448,18 @@ static inline int platform_socket_set_send_timeout(platform_socket_t sock,
 #endif
 }
 
+static inline int platform_socket_set_no_delay(platform_socket_t sock,
+                                                bool enabled)
+{
+    int value = enabled ? 1 : 0;
+#if defined(_WIN32)
+    return setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (const char *)&value,
+                      (int)sizeof(value));
+#else
+    return setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &value, sizeof(value));
+#endif
+}
+
 static inline bool platform_socket_send_all(platform_socket_t sock,
                                              const void *data, size_t size)
 {
@@ -523,6 +593,66 @@ static inline bool platform_socket_format_address(int family,
 #else
     return inet_ntop(family, address, text, (socklen_t)text_size) != NULL;
 #endif
+}
+
+static inline bool platform_socket_resolve_addresses(
+    const char *host, bool allow_lookup, uint8_t (*addresses)[16],
+    size_t capacity, size_t *count)
+{
+    if (count) *count = 0;
+    if (!host || !host[0] || !addresses || capacity == 0 || !count ||
+        !platform_socket_runtime_init())
+        return false;
+#if defined(_WIN32)
+    wchar_t wide[256];
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, host, -1, wide,
+                            (int)(sizeof(wide) / sizeof(*wide))) <= 0)
+        return false;
+    ADDRINFOW hints = {0};
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+    hints.ai_flags = allow_lookup ? 0 : AI_NUMERICHOST;
+    PADDRINFOW results = NULL;
+    if (GetAddrInfoW(wide, NULL, &hints, &results) != 0)
+        return false;
+    for (PADDRINFOW it = results; it && *count < capacity; it = it->ai_next) {
+#else
+    struct addrinfo hints = {0};
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+    hints.ai_flags = allow_lookup ? AI_ADDRCONFIG : AI_NUMERICHOST;
+    struct addrinfo *results = NULL;
+    if (getaddrinfo(host, NULL, &hints, &results) != 0)
+        return false;
+    for (struct addrinfo *it = results; it && *count < capacity;
+         it = it->ai_next) {
+#endif
+        uint8_t *out = addresses[*count];
+        if (it->ai_family == AF_INET &&
+            it->ai_addrlen >= sizeof(struct sockaddr_in)) {
+            const struct sockaddr_in *v4 =
+                (const struct sockaddr_in *)it->ai_addr;
+            memset(out, 0, 10);
+            out[10] = 0xff;
+            out[11] = 0xff;
+            memcpy(out + 12, &v4->sin_addr, 4);
+            (*count)++;
+        } else if (it->ai_family == AF_INET6 &&
+                   it->ai_addrlen >= sizeof(struct sockaddr_in6)) {
+            const struct sockaddr_in6 *v6 =
+                (const struct sockaddr_in6 *)it->ai_addr;
+            memcpy(out, &v6->sin6_addr, 16);
+            (*count)++;
+        }
+    }
+#if defined(_WIN32)
+    FreeAddrInfoW(results);
+#else
+    freeaddrinfo(results);
+#endif
+    return *count > 0;
 }
 
 /* Resolve one UTF-8 host name to the node's canonical 16-byte address form.

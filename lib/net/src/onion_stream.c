@@ -8,28 +8,23 @@
  * in the same frame, so there is no long-running loop to supervise, and at
  * most MAX_OUTBOUND_ONION such threads exist at once. */
 
-#define _DEFAULT_SOURCE   /* usleep, MSG_NOSIGNAL */
+#if !defined(_WIN32)
+#define _DEFAULT_SOURCE
+#endif
 #include "base/compiler.h"
 #include "net/onion_stream.h"
 #include "net/onion_stream_telemetry.h"
 #include "net/onion_v3_address.h"
 #include "net/tor_integration.h"
 #include "platform/time_compat.h"
+#include "platform/socket_compat.h"
 #include "util/safe_alloc.h"
 #include "util/log_macros.h"
 
-#include <errno.h>
 #include <pthread.h>
-#include <poll.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
-#include <sys/socket.h>
-
-#ifndef MSG_NOSIGNAL
-#define MSG_NOSIGNAL 0
-#endif
 
 /* ── Weak dynhost raw-stream symbols ─────────────────────────────────────
  * Present when linked against the real vendored libtor.a; NULL against
@@ -66,6 +61,32 @@ extern void dynhost_stream_close(dynhost_stream_t *) ZCL_WEAK_IMPORT;
  * refusal is ordinary backpressure, NOT a dead stream, so the pump waits it
  * out for this long before giving up on the connection. */
 #define ONION_TX_BACKPRESSURE_MS 5000
+
+static int onion_socket_send(platform_socket_t socket, const void *data,
+                             size_t size)
+{
+    int part = size > INT32_MAX ? INT32_MAX : (int)size;
+#if defined(_WIN32)
+    return send(socket, (const char *)data, part, 0);
+#else
+    int flags = MSG_DONTWAIT;
+#ifdef MSG_NOSIGNAL
+    flags |= MSG_NOSIGNAL;
+#endif
+    return (int)send(socket, data, (size_t)part, flags);
+#endif
+}
+
+static int onion_socket_receive(platform_socket_t socket, void *data,
+                                size_t size)
+{
+    int part = size > INT32_MAX ? INT32_MAX : (int)size;
+#if defined(_WIN32)
+    return recv(socket, (char *)data, part, 0);
+#else
+    return (int)recv(socket, data, (size_t)part, MSG_DONTWAIT);
+#endif
+}
 
 enum onion_bridge_phase {
     BRIDGE_CONNECTING = 0,
@@ -173,11 +194,12 @@ static void onion_bridge_read(struct onion_stream_raw *stream,
     }
     size_t off = 0;
     if (b->rxq_len == 0) {
-        ssize_t w = send(b->pump_fd, data, len, MSG_NOSIGNAL);
+        int w = onion_socket_send(b->pump_fd, data, len);
         if (w > 0)
             off = (size_t)w;
-        else if (w < 0 && errno != EAGAIN && errno != EWOULDBLOCK &&
-                 errno != EINTR)
+        else if (w < 0 &&
+                 !platform_socket_error_would_block(platform_socket_last_error()) &&
+                 !platform_socket_error_interrupted(platform_socket_last_error()))
             off = len;  /* fd is dying; the pump's poll sees it and tears
                          * down — do not stage bytes nobody will read */
     }
@@ -220,8 +242,8 @@ static bool onion_bridge_drain(struct onion_bridge *b)
 {
     pthread_mutex_lock(&b->mu);
     while (b->rxq_len > 0 && !b->dead) {
-        ssize_t w = send(b->pump_fd, b->rxq + b->rxq_head, b->rxq_len,
-                         MSG_NOSIGNAL);
+        int w = onion_socket_send(b->pump_fd, b->rxq + b->rxq_head,
+                                  b->rxq_len);
         if (w > 0) {
             b->rxq_head += (size_t)w;
             b->rxq_len -= (size_t)w;
@@ -229,8 +251,9 @@ static bool onion_bridge_drain(struct onion_bridge *b)
                 b->rxq_head = 0;
             continue;
         }
-        if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK ||
-                      errno == EINTR))
+        if (w < 0 &&
+            (platform_socket_error_would_block(platform_socket_last_error()) ||
+             platform_socket_error_interrupted(platform_socket_last_error())))
             break;
         b->dead = true;   /* hard fd error */
     }
@@ -270,7 +293,7 @@ static bool onion_bridge_push(struct onion_bridge *b, const uint8_t *data,
                      b->desc, len, waited_ms);
             return false;
         }
-        usleep(ONION_CONNECT_POLL_MS * 1000);
+        platform_sleep_ms(ONION_CONNECT_POLL_MS);
         waited_ms += ONION_CONNECT_POLL_MS;
     }
 }
@@ -293,7 +316,7 @@ static void onion_bridge_teardown(struct onion_bridge *b,
 
     int waited = 0;
     while (!atomic_load(&b->terminal_seen) && waited < ONION_TERMINAL_WAIT_MS) {
-        usleep(ONION_CONNECT_POLL_MS * 1000);
+        platform_sleep_ms(ONION_CONNECT_POLL_MS);
         waited += ONION_CONNECT_POLL_MS;
     }
     if (!atomic_load(&b->terminal_seen))
@@ -367,11 +390,11 @@ static void *onion_bridge_pump(void *arg)
         short events = POLLIN;
         if (qlen > 0)
             events |= POLLOUT;
-        struct pollfd pfd = { .fd = b->pump_fd, .events = events,
-                              .revents = 0 };
-        int r = poll(&pfd, 1, ONION_PUMP_TICK_MS);
+        platform_socket_pollfd pfd = { .fd = b->pump_fd, .events = events,
+                                       .revents = 0 };
+        int r = platform_socket_poll(&pfd, 1, ONION_PUMP_TICK_MS);
         if (r < 0) {
-            if (errno == EINTR)
+            if (platform_socket_error_interrupted(platform_socket_last_error()))
                 continue;
             b->close_reason = "pump_poll_error";
             break;
@@ -390,7 +413,7 @@ static void *onion_bridge_pump(void *arg)
          * until EAGAIN before giving the revents their meaning. */
         bool app_gone = false;
         for (;;) {
-            ssize_t n = recv(b->pump_fd, buf, sizeof(buf), 0);
+            int n = onion_socket_receive(b->pump_fd, buf, sizeof(buf));
             if (n > 0) {
                 if (!onion_bridge_push(b, buf, (size_t)n)) {
                     app_gone = true;   /* close_reason named by the push */
@@ -401,8 +424,10 @@ static void *onion_bridge_pump(void *arg)
             if (n == 0) {
                 b->close_reason = "app_closed";   /* app closed its end */
                 app_gone = true;
-            } else if (errno != EAGAIN && errno != EWOULDBLOCK &&
-                       errno != EINTR) {
+            } else if (!platform_socket_error_would_block(
+                           platform_socket_last_error()) &&
+                       !platform_socket_error_interrupted(
+                           platform_socket_last_error())) {
                 b->close_reason = "app_fd_read_error";
                 app_gone = true;
             }
@@ -487,9 +512,9 @@ static bool onion_stream_connect_once(const struct net_service *svc,
     if (!onion_v3_address_from_pubkey(svc->addr.torv3, host))
         LOG_FAIL("onion", "onion_stream_connect: torv3 key does not render");
 
-    int sv[2];
-    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0)
-        LOG_FAIL("onion", "socketpair failed for %s: errno=%d", host, errno);
+    platform_socket_t sv[2];
+    if (!platform_socket_pair(sv))
+        LOG_FAIL("onion", "local socket pair failed for %s", host);
     zcl_socket_t app_fd = sv[0];
     zcl_socket_t pump_fd = sv[1];
     /* Match connect_socket_start() semantics: the node above expects a
@@ -544,7 +569,7 @@ static bool onion_stream_connect_once(const struct net_service *svc,
     while (atomic_load(&b->phase) != BRIDGE_CONNECTED &&
            !atomic_load(&b->terminal_seen) &&
            waited_ms < connect_timeout_ms) {
-        usleep(ONION_CONNECT_POLL_MS * 1000);
+        platform_sleep_ms(ONION_CONNECT_POLL_MS);
         waited_ms += ONION_CONNECT_POLL_MS;
     }
 
