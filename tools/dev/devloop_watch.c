@@ -16,24 +16,35 @@
 #include "hotswap/hotswap_service.h"
 #include "json/json.h"
 #include "platform/file_watch_compat.h"
+#include "platform/directory_compat.h"
+#include "platform/directory_watcher.h"
+#include "platform/private_directory.h"
+#include "platform/process_lock.h"
 #include "platform/time_compat.h"
 
+#if !defined(_WIN32)
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <poll.h>
 #include <signal.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#else
+#include <process.h>
+#endif
 #endif
 
-#if defined(ZCL_DEV_BUILD) || defined(ZCL_HOTFORK_DEVLOOP_WATCH_CORE)
+#if defined(ZCL_HOTFORK_DEVLOOP_WATCH_CORE) || \
+    (defined(ZCL_DEV_BUILD) && !defined(_WIN32))
 static bool watch_c_source(const char *path)
 {
     size_t n = path ? strlen(path) : 0;
@@ -76,6 +87,93 @@ static void watch_component_for_files(const char *const *files, size_t count,
 #ifndef ZCL_HOTFORK_DEVLOOP_WATCH_CORE
 
 #ifdef ZCL_DEV_BUILD
+
+#if defined(_WIN32)
+
+/* ReadDirectoryChangesW intentionally reports only that the retained tree
+ * changed.  Until the backend exposes a trustworthy relative-name batch,
+ * treat every notification as the conservative Makefile/full-source lane.
+ * This costs more work but cannot incorrectly qualify an unsafe hot swap. */
+static bool watch_windows_stop(void *opaque)
+{
+    struct {
+        zcl_devloop_stop_predicate stop;
+        void *opaque;
+    } *state = opaque;
+    return state && state->stop && state->stop(state->opaque);
+}
+
+int zcl_devloop_watch_mode_until(const char *repo_root,
+    enum zcl_devloop_publish_mode publish_mode,
+    zcl_devloop_stop_predicate stop, void *stop_opaque)
+{
+    char root[ZCL_DEVLOOP_PATH_MAX], cache[ZCL_DEVLOOP_PATH_MAX];
+    char lock_path[ZCL_DEVLOOP_PATH_MAX];
+    const char *requested = repo_root && repo_root[0] ? repo_root : ".";
+    const char *mode = zcl_devloop_publish_mode_name(publish_mode);
+    if (!mode || !platform_directory_canonical_real(requested, root,
+                                                     sizeof(root)))
+        return 2;
+    int n = snprintf(cache, sizeof(cache), "%s/.cache", root);
+    if (n <= 0 || (size_t)n >= sizeof(cache) ||
+        !platform_private_directory_ensure(cache) ||
+        !zcl_devloop_watch_lock_path(root, lock_path, sizeof(lock_path)))
+        return 1;
+    struct platform_process_lock lock;
+    platform_process_lock_init(&lock);
+    if (!platform_process_lock_try_acquire(&lock, lock_path, true))
+        return 1;
+    struct platform_directory_watcher watcher;
+    platform_directory_watcher_init(&watcher);
+    if (!platform_directory_watcher_open(&watcher, root)) {
+        platform_process_lock_release(&lock);
+        return 1;
+    }
+    struct { zcl_devloop_stop_predicate stop; void *opaque; } stop_state = {
+        stop, stop_opaque};
+    printf("{\"schema\":\"zcl.dev_watch_heartbeat.v1\","
+           "\"status\":\"watching\",\"pid\":%ld,\"root\":\"%s\","
+           "\"mode\":\"%s\",\"watch_backend\":\"ReadDirectoryChangesW\"}\n",
+           (long)_getpid(), root, mode);
+    fflush(stdout);
+    int rc = 0;
+    for (;;) {
+        enum platform_directory_watch_result changed =
+            platform_directory_watcher_wait(&watcher, 1000,
+                stop ? watch_windows_stop : NULL, &stop_state);
+        if (changed == PLATFORM_DIRECTORY_WATCH_TIMEOUT)
+            continue;
+        if (changed == PLATFORM_DIRECTORY_WATCH_STOPPED)
+            break;
+        if (changed == PLATFORM_DIRECTORY_WATCH_ERROR) {
+            rc = 1;
+            break;
+        }
+        const char *files[] = {"Makefile"};
+        (void)ci_merkle_forget(root);
+        if (zcl_devloop_run_cycle_mode(root, files, 1,
+                                      ZCL_DEVLOOP_PUBLISH_VERIFY_ONLY) != 0) {
+            rc = 1;
+            break;
+        }
+    }
+    printf("{\"schema\":\"zcl.dev_watch_heartbeat.v1\","
+           "\"status\":\"stopped\",\"pid\":%ld}\n", (long)_getpid());
+    fflush(stdout);
+    platform_directory_watcher_close(&watcher);
+    platform_process_lock_release(&lock);
+    return rc;
+}
+
+int zcl_devloop_watch_mode(const char *repo_root,
+                           enum zcl_devloop_publish_mode publish_mode)
+{ return zcl_devloop_watch_mode_until(repo_root, publish_mode, NULL, NULL); }
+
+int zcl_devloop_watch(const char *repo_root)
+{ return zcl_devloop_watch_mode(repo_root,
+                                zcl_devloop_default_watch_publish_mode()); }
+
+#else
 
 #define DEVLOOP_MAX_WATCHES 512
 #define DEVLOOP_EDIT_EPOCH_MAX_FILES 16
@@ -1454,6 +1552,8 @@ int zcl_devloop_watch(const char *repo_root)
     return zcl_devloop_watch_mode(repo_root,
                                   zcl_devloop_default_watch_publish_mode());
 }
+
+#endif /* _WIN32 */
 
 #else
 

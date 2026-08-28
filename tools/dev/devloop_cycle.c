@@ -6,6 +6,8 @@
 
 #include "base/hex.h"
 #include "crypto/sha3.h"
+#include "platform/directory_compat.h"
+#include "platform/positioned_file.h"
 #include "platform/time_compat.h"
 #include "vcs/vcs_devloop.h"
 
@@ -20,6 +22,20 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+
+static const char *bounded_find(const char *haystack, size_t haystack_len,
+                                const char *needle, size_t needle_len)
+{
+    if (!haystack || !needle || needle_len == 0 ||
+        needle_len > haystack_len)
+        return NULL;
+    size_t last = haystack_len - needle_len;
+    for (size_t i = 0; i <= last; ++i)
+        if (haystack[i] == needle[0] &&
+            memcmp(haystack + i, needle, needle_len) == 0)
+            return haystack + i;
+    return NULL;
+}
 
 static bool appendf(char *out, size_t cap, size_t *pos,
                     const char *fmt, ...)
@@ -89,10 +105,10 @@ static bool distill_first_error(const char *out, size_t len,
         if (line_len == 0)
             continue;
         const char *line = out + start;
-        bool hit = memmem(line, line_len, ": error:", 8) != NULL ||
-                   memmem(line, line_len, "FAIL", 4) != NULL ||
-                   memmem(line, line_len, "Assertion", 9) != NULL ||
-                   memmem(line, line_len, "EXPECT", 6) != NULL;
+        bool hit = bounded_find(line, line_len, ": error:", 8) != NULL ||
+                   bounded_find(line, line_len, "FAIL", 4) != NULL ||
+                   bounded_find(line, line_len, "Assertion", 9) != NULL ||
+                   bounded_find(line, line_len, "EXPECT", 6) != NULL;
         if (hit) {
             size_t copy = line_len < dstcap - 1 ? line_len : dstcap - 1;
             memcpy(dst, line, copy);
@@ -127,7 +143,7 @@ static bool compiler_error_shape(const char *line, size_t len)
         "sccache"
     };
     for (size_t i = 0; i < sizeof(transient) / sizeof(transient[0]); i++)
-        if (memmem(line, len, transient[i], strlen(transient[i])) != NULL)
+        if (bounded_find(line, len, transient[i], strlen(transient[i])) != NULL)
             return false;
     const char *end = line + len;
     for (const char *p = line; p < end; p++) {
@@ -170,8 +186,8 @@ bool zcl_devloop_deterministic_compile_failure(
     const char *end_output = result->output + result->output_len;
     const char *match = NULL;
     while (p < end_output) {
-        const char *found = memmem(p, (size_t)(end_output - p), marker,
-                                   sizeof(marker) - 1);
+        const char *found = bounded_find(
+            p, (size_t)(end_output - p), marker, sizeof(marker) - 1);
         if (!found)
             break;
         if (found == result->output || found[-1] == '\n' || found[-1] == '\r')
@@ -278,15 +294,22 @@ static bool result_ok(const struct zcl_devloop_process_result *result)
 static bool repo_root_resolve(const char *requested, char out[PATH_MAX])
 {
     const char *root = requested && requested[0] ? requested : ".";
-    if (!realpath(root, out))
+    if (!platform_directory_canonical_real(root, out, PATH_MAX))
         return false;
     char makefile[PATH_MAX], git[PATH_MAX];
     int mn = snprintf(makefile, sizeof(makefile), "%s/Makefile", out);
     int gn = snprintf(git, sizeof(git), "%s/.git", out);
-    struct stat st;
-    return mn > 0 && (size_t)mn < sizeof(makefile) &&
-           gn > 0 && (size_t)gn < sizeof(git) &&
-           stat(makefile, &st) == 0 && stat(git, &st) == 0;
+    struct platform_positioned_file file;
+    platform_positioned_file_init(&file);
+    bool makefile_ok = mn > 0 && (size_t)mn < sizeof(makefile) &&
+        platform_positioned_file_open(&file, makefile);
+    platform_positioned_file_close(&file);
+    platform_positioned_file_init(&file);
+    bool git_ok = gn > 0 && (size_t)gn < sizeof(git) &&
+        (platform_directory_probe_real(git) == PLATFORM_DIRECTORY_PROBE_OK ||
+         platform_positioned_file_open(&file, git));
+    platform_positioned_file_close(&file);
+    return makefile_ok && git_ok;
 }
 
 static bool lower_hex64(const char *input, char out[65])
@@ -404,7 +427,12 @@ static bool find_artifact(const char *root, const char *output,
             else
                 snprintf(candidate, sizeof(candidate), "%s/%.*s",
                          root, (int)len, start);
-            if (realpath(candidate, artifact)) {
+            struct platform_positioned_file file;
+            platform_positioned_file_init(&file);
+            bool resolved = platform_positioned_file_open(&file, candidate) &&
+                platform_positioned_file_path(&file, artifact, PATH_MAX);
+            platform_positioned_file_close(&file);
+            if (resolved) {
                 char expected[PATH_MAX];
                 snprintf(expected, sizeof(expected), "%s/build/hotswap/", root);
                 return strncmp(artifact, expected, strlen(expected)) == 0;
