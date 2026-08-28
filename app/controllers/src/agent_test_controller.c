@@ -46,6 +46,7 @@
 
 #include "json/json.h"
 #include "platform/time_compat.h"
+#include "platform/directory_compat.h"
 #include "util/safe_alloc.h"
 #include "util/spawn.h"
 
@@ -135,11 +136,11 @@ static void at_mkdir_p(const char *path)
     for (char *p = tmp + 1; *p; p++) {
         if (*p == '/') {
             *p = '\0';
-            mkdir(tmp, 0700);
+            (void)platform_directory_create(tmp, 0700);
             *p = '/';
         }
     }
-    mkdir(tmp, 0700);
+    (void)platform_directory_create(tmp, 0700);
 }
 
 /* ── test_group registry cross-check ─────────────────────────────────
