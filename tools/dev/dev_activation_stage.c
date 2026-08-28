@@ -281,22 +281,29 @@ int dev_activation_stage_candidate(struct dev_activation_txn *txn)
         return DEV_ACTIVATION_E_STAGE;
     }
 #if !defined(_WIN32)
+    /* The manifest is sealed here, but the DIRECTORY is not: publishing it
+     * proves sole ownership by requiring mode 0700, so a staging directory
+     * already sealed to 0555 could never be published at all. The
+     * directory is sealed below, once it has landed at its final name. */
     (void)chmod(tmp_manifest, 0444);
-    (void)chmod(tmpdir, 0555);
 #endif
     if (!platform_private_directory_publish_no_clobber(
             tmpdir, txn->candidate_dir)) {
-#if !defined(_WIN32)
-        (void)chmod(tmpdir, 0755);
-#endif
         (void)platform_private_file_unlink_missing_ok(tmp_bin);
         (void)platform_private_file_unlink_missing_ok(tmp_manifest);
         (void)platform_private_directory_remove_empty(tmpdir);
         if (access(txn->candidate_bin, X_OK) != 0) {
-            LOG_ERR("dev-activation", "candidate rename lost the race: %s",
+            LOG_ERR("dev-activation", "candidate publish failed: %s",
                     strerror(errno));
             return DEV_ACTIVATION_E_STAGE;
         }
+    } else {
+#if !defined(_WIN32)
+        /* Sealed only now, and only for the directory this call
+         * published: the loser of a publish race must not re-mode the
+         * winner's generation. */
+        (void)chmod(txn->candidate_dir, 0555);
+#endif
     }
     if (!platform_private_parent_flush(txn->gen_root)) {
         LOG_ERR("dev-activation", "generation parent flush failed: %s",

@@ -810,8 +810,16 @@ static bool dev_write_in_progress(struct dev_activation_txn *txn)
     size_t line_len = (size_t)n;
 
     char tmp[PATH_MAX];
+#if defined(_WIN32)
     n = snprintf(tmp, sizeof(tmp), "%s.tmp.%llu", txn->inprogress_path,
                  (unsigned long long)os_proc_current_pid());
+#else
+    /* mkstemp() below requires the path to END in exactly six X's. A pid
+     * suffix makes it fail with EINVAL before it ever touches the disk,
+     * so the POSIX arm keeps the template and lets mkstemp pick the
+     * unique suffix itself. */
+    n = snprintf(tmp, sizeof(tmp), "%s.tmp.XXXXXX", txn->inprogress_path);
+#endif
     if (n <= 0 || (size_t)n >= sizeof(tmp))
         LOG_FAIL("dev-activation", "in-progress marker temp path overflow");
 #if defined(_WIN32)
