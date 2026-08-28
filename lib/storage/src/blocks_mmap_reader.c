@@ -20,17 +20,16 @@
 
 #include "storage/blocks_mmap_reader.h"
 
+#include "platform/directory_compat.h"
+#include "platform/positioned_file.h"
+#include "platform/read_mapping.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 #define BMR_LRU_SIZE 8
 
@@ -39,6 +38,8 @@ struct bmr_slot {
     const uint8_t *base;
     size_t size;
     uint64_t last_used;
+    struct platform_positioned_file file;
+    struct platform_read_mapping mapping;
 };
 
 struct blocks_mmap {
@@ -53,8 +54,8 @@ bool bmr_open(const char *blocks_dir, struct blocks_mmap **out)
         return false;
     *out = NULL;
 
-    struct stat st;
-    if (stat(blocks_dir, &st) != 0 || !S_ISDIR(st.st_mode)) {
+    if (platform_directory_probe_real(blocks_dir) !=
+        PLATFORM_DIRECTORY_PROBE_OK) {
         fprintf(stderr, "[bmr] not a directory: %s\n", blocks_dir);
         return false;
     }
@@ -77,7 +78,8 @@ bool bmr_open(const char *blocks_dir, struct blocks_mmap **out)
 static void bmr_evict_slot(struct bmr_slot *s)
 {
     if (s->base) {
-        munmap((void *)s->base, s->size);
+        platform_read_mapping_close(&s->mapping);
+        platform_positioned_file_close(&s->file);
         s->base = NULL;
         s->size = 0;
     }
@@ -119,38 +121,43 @@ static struct bmr_slot *bmr_ensure_slot(struct blocks_mmap *m, int32_t nFile)
     bmr_evict_slot(&m->lru[victim]);
 
     char path[1024];
-    snprintf(path, sizeof(path), "%s/blk%05d.dat", m->blocks_dir, nFile);
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) {
-        fprintf(stderr, "[bmr] open failed: %s (%s)\n", path, strerror(errno));
+    int path_len = snprintf(path, sizeof(path), "blk%05d.dat", nFile);
+    if (path_len < 0 || (size_t)path_len >= sizeof(path))
+        return NULL;
+    struct platform_positioned_file file;
+    struct platform_read_mapping mapping;
+    platform_positioned_file_init(&file);
+    platform_read_mapping_init(&mapping);
+    if (!platform_positioned_file_open_beneath(&file, m->blocks_dir, path)) {
+        fprintf(stderr, "[bmr] open failed: %s/%s\n", m->blocks_dir, path);
         return NULL;
     }
-    struct stat st;
-    if (fstat(fd, &st) != 0) {
-        close(fd);
-        fprintf(stderr, "[bmr] fstat failed: %s\n", path);
+    uint64_t file_size = 0;
+    if (!platform_positioned_file_size(&file, &file_size) ||
+        file_size == 0 || file_size > SIZE_MAX) {
+        platform_positioned_file_close(&file);
+        fprintf(stderr, "[bmr] invalid file size: %s/%s\n", m->blocks_dir,
+                path);
         return NULL;
     }
-    if (st.st_size <= 0) {
-        close(fd);
-        fprintf(stderr, "[bmr] empty file: %s\n", path);
-        return NULL;
-    }
-    void *base = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-    close(fd);
-    if (base == MAP_FAILED) {
-        fprintf(stderr, "[bmr] mmap failed: %s (%s)\n", path, strerror(errno));
+    if (!platform_read_mapping_open_positioned(&mapping, &file,
+                                               (size_t)file_size)) {
+        platform_positioned_file_close(&file);
+        fprintf(stderr, "[bmr] mapping failed: %s/%s\n", m->blocks_dir,
+                path);
         return NULL;
     }
 
     /* Advise sequential — we walk height-ordered, but per-file the
      * blocks are mostly in receive-order which IS sequential within
      * the file. */
-    (void)posix_madvise(base, (size_t)st.st_size, POSIX_MADV_SEQUENTIAL);
+    platform_read_mapping_advise_sequential(&mapping);
 
     m->lru[victim].nFile = nFile;
-    m->lru[victim].base  = (const uint8_t *)base;
-    m->lru[victim].size  = (size_t)st.st_size;
+    m->lru[victim].file = file;
+    m->lru[victim].mapping = mapping;
+    m->lru[victim].base  = mapping.data;
+    m->lru[victim].size  = mapping.size;
     m->lru[victim].last_used = ++m->clock;
     return &m->lru[victim];
 }
