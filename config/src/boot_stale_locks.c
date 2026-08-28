@@ -1,12 +1,12 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0 */
 
 #include "config/boot_stale_locks.h"
+#include "platform/os_proc.h"
+#include "platform/private_file.h"
 
 #include <errno.h>
-#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <sys/types.h>
 #include <unistd.h>
 
 static bool boot_stale_locks_path(char *out, size_t out_n,
@@ -20,19 +20,17 @@ static bool boot_stale_locks_path(char *out, size_t out_n,
     return n >= 0 && (size_t)n < out_n;
 }
 
-static bool boot_stale_locks_read_pid(const char *path, long *pid_out)
+static bool boot_stale_locks_read_pid(struct platform_private_file *lock,
+                                      long *pid_out)
 {
-    if (!path || !*path || !pid_out)
+    if (!lock || !pid_out)
         return false;
-
-    FILE *lf = fopen(path, "r");
-    if (!lf)
+    uint64_t size = 0;
+    if (!platform_private_file_size(lock, &size) || size == 0 || size >= 32)
         return false;
 
     char pidbuf[32] = {0};
-    size_t nr = fread(pidbuf, 1, sizeof(pidbuf) - 1, lf);
-    fclose(lf);
-    if (nr == 0)
+    if (!platform_private_file_read_at(lock, pidbuf, (size_t)size, 0))
         return false;
 
     char *end = NULL;
@@ -45,51 +43,42 @@ static bool boot_stale_locks_read_pid(const char *path, long *pid_out)
     return true;
 }
 
-static bool boot_stale_locks_pid_dead(long pid, bool *running_out)
-{
-    if (running_out)
-        *running_out = false;
-
-    errno = 0;
-    if (kill((pid_t)pid, 0) == 0) {
-        if (running_out)
-            *running_out = true;
-        return false;
-    }
-
-    if (errno == ESRCH)
-        return true;
-
-    /* EPERM and unexpected errors are not proof that the owner is dead. */
-    if (running_out)
-        *running_out = true;
-    return false;
-}
-
 static void boot_stale_locks_check_pid_lock(const char *path,
                                             const char *label,
                                             bool print_running,
                                             bool *removed_out,
                                             bool *running_out)
 {
-    if (!path || !label || access(path, F_OK) != 0)
+    if (!path || !label)
         return;
 
+    struct platform_private_file lock;
+    platform_private_file_init(&lock);
+    if (!platform_private_file_open_locked(path, &lock))
+        return;
+    struct platform_private_file_identity identity;
     long pid = 0;
-    if (!boot_stale_locks_read_pid(path, &pid))
-        return;
-
-    bool running = false;
-    if (boot_stale_locks_pid_dead(pid, &running)) {
-        printf("Removing stale %s LOCK (pid %ld dead)\n", label, pid);
-        if (unlink(path) == 0 && removed_out)
-            *removed_out = true;
+    if (!platform_private_file_identity(&lock, &identity) ||
+        !boot_stale_locks_read_pid(&lock, &pid)) {
+        platform_private_file_close(&lock);
         return;
     }
 
-    if (running && running_out)
+    enum os_proc_liveness liveness = os_proc_pid_liveness((uint64_t)pid);
+    if (liveness == OS_PROC_LIVENESS_DEAD) {
+        printf("Removing stale %s LOCK (pid %ld dead)\n", label, pid);
+        if (platform_private_file_retire_if_identity(&lock, path, &identity) &&
+            removed_out)
+            *removed_out = true;
+        else
+            platform_private_file_close(&lock);
+        return;
+    }
+
+    platform_private_file_close(&lock);
+    if (running_out)
         *running_out = true;
-    if (running && print_running) {
+    if (print_running) {
         fprintf(stderr,
                 "ERROR: LevelDB locked by pid %ld (still running)\n"
                 "Kill the other process or use a different datadir.\n",
