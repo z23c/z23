@@ -8,6 +8,8 @@
 #include "util/shutdown_stagewatch.h"
 
 #include "platform/time_compat.h"
+#include "platform/file_sync.h"
+#include "platform/private_file.h"
 #include "util/log_macros.h"
 
 #include <errno.h>
@@ -17,6 +19,17 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <io.h>
+#define STAGEWATCH_CLOEXEC _O_NOINHERIT
+#else
+#define STAGEWATCH_CLOEXEC O_CLOEXEC
+#endif
 
 /* Bounded graces for a durability-critical stall: each grace re-arms alarm()
  * for GRACE_SECS and logs loudly, so a slow-but-progressing fsync finishes
@@ -171,6 +184,17 @@ static shutdown_stagewatch_clock_fn g_clock = real_clock_us;
 static char g_receipt_path[1088];
 static _Atomic bool g_receipt_ok;   /* read in signal ctx */
 static int g_datadir_fd = -1;       /* opened by begin; safe to fsync in SIGALRM */
+static char g_datadir_path[1088];
+
+static bool stagewatch_sync_datadir(void)
+{
+#ifdef _WIN32
+    return g_datadir_path[0] != '\0' &&
+           platform_private_parent_flush(g_datadir_path);
+#else
+    return g_datadir_fd >= 0 && platform_file_sync(g_datadir_fd) == 0;
+#endif
+}
 
 /* Exit-reason breadcrumb path — same "compute once in begin(), signal
  * handler only ever does raw open/write/fsync of the pre-computed path"
@@ -196,6 +220,42 @@ static volatile sig_atomic_t g_durable;
 static volatile sig_atomic_t g_graces_used;
 static volatile sig_atomic_t g_active;   /* begin() called */
 
+#ifdef _WIN32
+static _Atomic uint32_t g_timer_generation;
+
+static DWORD WINAPI stagewatch_timer_thread(LPVOID parameter)
+{
+    uint64_t packed = (uint64_t)(uintptr_t)parameter;
+    uint32_t generation = (uint32_t)packed;
+    uint32_t seconds = (uint32_t)(packed >> 32);
+    HANDLE timer = CreateWaitableTimerW(NULL, TRUE, NULL);
+    if (!timer)
+        return 0;
+    LARGE_INTEGER due;
+    due.QuadPart = -(LONGLONG)10000000 * seconds;
+    if (SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE) &&
+        WaitForSingleObject(timer, INFINITE) == WAIT_OBJECT_0 &&
+        atomic_load(&g_timer_generation) == generation)
+        shutdown_stagewatch_on_alarm();
+    CloseHandle(timer);
+    return 0;
+}
+
+static void stagewatch_arm(unsigned seconds)
+{
+    uint32_t generation = atomic_fetch_add(&g_timer_generation, 1) + 1;
+    uintptr_t packed = (uintptr_t)(((uint64_t)seconds << 32) | generation);
+    HANDLE thread = CreateThread(NULL, 0, stagewatch_timer_thread,
+                                 (LPVOID)packed, 0, NULL);
+    if (thread) CloseHandle(thread);
+}
+
+static void stagewatch_cancel(void) { (void)atomic_fetch_add(&g_timer_generation, 1); }
+#else
+static void stagewatch_arm(unsigned seconds) { alarm(seconds); }
+static void stagewatch_cancel(void) { alarm(0); }
+#endif
+
 void shutdown_stagewatch_set_clock_for_test(shutdown_stagewatch_clock_fn fn)
 {
     g_clock = fn ? fn : real_clock_us;
@@ -203,9 +263,11 @@ void shutdown_stagewatch_set_clock_for_test(shutdown_stagewatch_clock_fn fn)
 
 void shutdown_stagewatch_reset_for_test(void)
 {
+    stagewatch_cancel();
     if (g_datadir_fd >= 0)
         (void)close(g_datadir_fd);
     g_datadir_fd = -1;
+    g_datadir_path[0] = '\0';
     g_clock = real_clock_us;
     memset(g_receipt_path, 0, sizeof(g_receipt_path));
     atomic_store(&g_receipt_ok, false);
@@ -236,9 +298,11 @@ bool shutdown_stagewatch_is_durable(void) { return g_durable != 0; }
 
 void shutdown_stagewatch_begin(const char *datadir)
 {
+    stagewatch_cancel();
     if (g_datadir_fd >= 0)
         (void)close(g_datadir_fd);
     g_datadir_fd = -1;
+    g_datadir_path[0] = '\0';
     g_start_us = g_clock();
     g_n_stages = 0;
     g_cur_active = 0;
@@ -249,7 +313,10 @@ void shutdown_stagewatch_begin(const char *datadir)
     atomic_store(&g_receipt_ok, false);
     atomic_store(&g_exit_reason_path_ok, false);
     if (datadir && *datadir) {
+        (void)snprintf(g_datadir_path, sizeof(g_datadir_path), "%s", datadir);
+#ifndef _WIN32
         g_datadir_fd = open(datadir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+#endif
         int n = snprintf(g_receipt_path, sizeof(g_receipt_path), "%s/%s",
                          datadir, SHUTDOWN_RECEIPT_NAME);
         if (n > 0 && (size_t)n < sizeof(g_receipt_path))
@@ -306,7 +373,7 @@ void shutdown_stagewatch_enter(const char *stage, int budget_secs,
     g_cur_active = 1;
 
     if (arm_alarm && budget_secs > 0)
-        alarm((unsigned)budget_secs);
+        stagewatch_arm((unsigned)budget_secs);
 }
 
 void shutdown_stagewatch_mark_durable(void)
@@ -319,15 +386,14 @@ static void write_terminal_receipt_signalsafe(enum shutdown_outcome outcome)
 {
     if (!atomic_load(&g_receipt_ok))
         return;
-    int fd = open(g_receipt_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    int fd = open(g_receipt_path, O_WRONLY | O_CREAT | O_TRUNC | STAGEWATCH_CLOEXEC, 0644);
     if (fd < 0)
         return;
     (void)shutdown_stagewatch_write_terminal_receipt_fd(
         fd, outcome, g_cur_name, g_durable != 0);
-    (void)fsync(fd);
+    (void)platform_file_sync(fd);
     (void)close(fd);
-    if (g_datadir_fd >= 0)
-        (void)fsync(g_datadir_fd);
+    (void)stagewatch_sync_datadir();
 }
 
 /* AS-safe: append a "forced=1" marker to the exit-reason breadcrumb (see
@@ -345,12 +411,12 @@ static void mark_exit_reason_forced_signalsafe(void)
     if (!atomic_load(&g_exit_reason_path_ok))
         return;
     int fd = open(g_exit_reason_path,
-                 O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+                 O_WRONLY | O_CREAT | O_APPEND | STAGEWATCH_CLOEXEC, 0644);
     if (fd < 0)
         return;
     static const char line[] = "forced=1\n";
     (void)!write(fd, line, sizeof(line) - 1);
-    (void)fsync(fd);
+    (void)platform_file_sync(fd);
     (void)close(fd);
 }
 
@@ -379,7 +445,7 @@ void shutdown_stagewatch_on_alarm(void)
         (void)as_write_str(STDERR_FILENO,
             "[shutdown] watchdog: durability not yet secured; granting grace, "
             "durability-critical stage still running\n");
-        alarm(SHUTDOWN_GRACE_SECS);
+        stagewatch_arm(SHUTDOWN_GRACE_SECS);
         return;
 
     case SHUTDOWN_DEADLINE_EXIT_CLEAN:
@@ -418,15 +484,15 @@ static bool shutdown_stagewatch_complete(enum shutdown_outcome outcome)
             char tmp[1152];
             int tn = snprintf(tmp, sizeof(tmp), "%s.tmp", g_receipt_path);
             if (tn > 0 && (size_t)tn < sizeof(tmp)) {
-                int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+                int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | STAGEWATCH_CLOEXEC, 0644);
                 if (fd >= 0) {
                     bool ok = as_write_str(fd, content) == clen &&
-                              fsync(fd) == 0;
+                              platform_file_sync(fd) == 0;
                     if (close(fd) != 0)
                         ok = false;
                     if (ok && rename(tmp, g_receipt_path) != 0)
                         ok = false;
-                    if (ok && (g_datadir_fd < 0 || fsync(g_datadir_fd) != 0))
+                    if (ok && !stagewatch_sync_datadir())
                         ok = false;
                     if (!ok)
                         (void)unlink(tmp);
@@ -435,7 +501,7 @@ static bool shutdown_stagewatch_complete(enum shutdown_outcome outcome)
             }
         }
     }
-    alarm(0);
+    stagewatch_cancel();
     g_active = 0;
     if (g_datadir_fd >= 0)
         (void)close(g_datadir_fd);
@@ -485,14 +551,14 @@ void shutdown_stagewatch_write_exit_reason(const char *reason)
         return;
     }
 
-    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | STAGEWATCH_CLOEXEC, 0644);
     if (fd < 0) {
         LOG_WARN("shutdown", "write_exit_reason: open(%s) failed: %s",
                  tmp, strerror(errno));
         return;
     }
     bool ok = (write(fd, content, (size_t)clen) == (ssize_t)clen) &&
-             (fsync(fd) == 0);
+             (platform_file_sync(fd) == 0);
     if (close(fd) != 0)
         ok = false;
     if (ok && rename(tmp, g_exit_reason_path) != 0)
