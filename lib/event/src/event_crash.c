@@ -38,13 +38,15 @@ static void crash_write_fd(int fd, const char *s, size_t n)
 static void crash_emit_to(int fd, int sig, void *const *frames, int nframes)
 {
     char buf[160];
+    /* pid sourced outside the macro arguments (-Wembedded-directive). */
+#if defined(_WIN32)
+    int pid_val = _getpid();
+#else
+    int pid_val = (int)getpid();
+#endif
     int n = snprintf(buf, sizeof(buf),
                      "\n\n*** FATAL SIGNAL %d (pid=%d t=%ld) ***\n", sig,
-#if defined(_WIN32)
-                     _getpid(),
-#else
-                     (int)getpid(),
-#endif
+                     pid_val,
                      (long)time(NULL)); // platform-ok:async-signal-safe-crash-handler
     if (n > 0) crash_write_fd(fd, buf, (size_t)n);
     n = snprintf(buf, sizeof(buf),

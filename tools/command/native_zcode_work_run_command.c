@@ -220,14 +220,14 @@ static bool run_codex_runner_path(char out[ZWORK_RUN_PATH_MAX])
     if (!slash)
         return false;
     *slash = '\0';
+#if defined(_WIN32)
+    const char *exe_sfx = ".exe";
+#else
+    const char *exe_sfx = "";
+#endif
     int n = snprintf(out, ZWORK_RUN_PATH_MAX,
                      "%s/zclassic23-zcode-adapter-runner%s", executable,
-#if defined(_WIN32)
-                     ".exe"
-#else
-                     ""
-#endif
-    );
+                     exe_sfx);
 #if defined(_WIN32)
     struct platform_positioned_file runner;
     platform_positioned_file_init(&runner);
@@ -1837,14 +1837,14 @@ static bool run_preflight_runner_path(char out[ZWORK_RUN_PATH_MAX])
 #endif
     if (!slash) return false;
     *slash = '\0';
+#if defined(_WIN32)
+    const char *exe_sfx = ".exe";
+#else
+    const char *exe_sfx = "";
+#endif
     int n = snprintf(out, ZWORK_RUN_PATH_MAX,
                      "%s/zclassic23-zcode-adapter-runner%s", executable,
-#if defined(_WIN32)
-                     ".exe"
-#else
-                     ""
-#endif
-    );
+                     exe_sfx);
 #if defined(_WIN32)
     struct platform_positioned_file runner;
     platform_positioned_file_init(&runner);
