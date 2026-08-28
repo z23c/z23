@@ -19,6 +19,7 @@
 #include "util/trace.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 #include <pthread.h>
@@ -451,21 +452,26 @@ static void conn_set_deadlines(platform_socket_t fd)
  * already said the socket is readable. */
 static bool conn_peer_gone(const struct rpc_conn *c)
 {
-    if (c->fd < 0)
+    if (c->fd == PLATFORM_SOCKET_INVALID)
         return true;
 
     platform_socket_pollfd pfd = { .fd = c->fd, .events = POLLIN,
                                    .revents = 0 };
     int r = platform_socket_poll(&pfd, 1, 0);
     if (r < 0)
-        return errno != EINTR;   /* a broken poll target is unservable */
+        return !platform_socket_error_interrupted(
+            platform_socket_last_error()); /* broken target is unservable */
     if (r == 0)
         return false;            /* connected, still thinking */
     if (pfd.revents & (POLLHUP | POLLERR | POLLNVAL))
         return true;
     if (pfd.revents & POLLIN) {
         char probe;
-        ssize_t n = recv(c->fd, &probe, 1, MSG_PEEK);
+#if defined(_WIN32)
+        int n = recv(c->fd, &probe, 1, MSG_PEEK);
+#else
+        int n = (int)recv(c->fd, &probe, 1, MSG_PEEK);
+#endif
         if (n == 0)
             return true;         /* clean EOF, nothing to serve */
     }
@@ -748,7 +754,11 @@ static void handle_client(struct rpc_conn conn)
     uint32_t client_ip_be = 0x0100007Fu; /* fall back to 127.0.0.1 */
     {
         struct sockaddr_in peer;
+#if defined(_WIN32)
+        int peer_len = sizeof(peer);
+#else
         socklen_t peer_len = sizeof(peer);
+#endif
         if (getpeername(client_fd, (struct sockaddr *)&peer, &peer_len) == 0
             && peer.sin_family == AF_INET) {
             client_ip_be = peer.sin_addr.s_addr;
@@ -1159,7 +1169,15 @@ static void *tls_listen_thread_fn(void *arg)
             platform_socket_close(client_fd);
             continue;
         }
-        SSL_set_fd(ssl, client_fd);
+#if defined(_WIN32)
+        if (client_fd > INT_MAX || SSL_set_fd(ssl, (int)client_fd) != 1) {
+#else
+        if (SSL_set_fd(ssl, client_fd) != 1) {
+#endif
+            SSL_free(ssl);
+            platform_socket_close(client_fd);
+            continue;
+        }
         if (SSL_accept(ssl) <= 0) {
             /* TLS handshake failure — drop silently (common with
              * port scanners and misconfigured clients) */
