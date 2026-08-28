@@ -21,7 +21,6 @@
 #include <string.h>
 
 #if defined(__linux__)
-#include <poll.h>
 #include <sys/socket.h>
 #include <sys/prctl.h>
 #include <sys/types.h>
@@ -50,10 +49,10 @@ static struct zcl_result ui_host_launch(void)
     return zcl_spawn_detached(argv, NULL);
 }
 
-static int ui_host_connect(bool *reused)
+static ui_host_transport_t ui_host_connect(bool *reused)
 {
-    int fd = ui_host_transport_connect_once();
-    if (fd >= 0) {
+    ui_host_transport_t fd = ui_host_transport_connect_once();
+    if (fd != UI_HOST_TRANSPORT_INVALID) {
         *reused = true;
         return fd;
     }
@@ -68,14 +67,14 @@ static int ui_host_connect(bool *reused)
     do {
         platform_sleep_ms(5);
         fd = ui_host_transport_connect_once();
-        if (fd >= 0) return fd;
+        if (fd != UI_HOST_TRANSPORT_INVALID) return fd;
     } while (platform_time_monotonic_us() < deadline);
     errno = ETIMEDOUT;
-    return -1;
+    return UI_HOST_TRANSPORT_INVALID;
 }
 
 struct ui_host_ready_context {
-    int fd;
+    ui_host_transport_t fd;
     int replacement_gate;
     int64_t started_us;
     uint32_t ready_value;
@@ -106,7 +105,7 @@ static void ui_host_window_ready(void *context)
 }
 
 static void ui_host_send_rejected(
-    int fd, uint16_t phase, uint32_t status,
+    ui_host_transport_t fd, uint16_t phase, uint32_t status,
     const uint8_t nonce[UI_HOST_NONCE_BYTES])
 {
     uint8_t reply[UI_HOST_REPLY_BYTES];
@@ -115,7 +114,7 @@ static void ui_host_send_rejected(
 }
 
 static bool ui_host_show_document(
-    int client,
+    ui_host_transport_t client,
     int replacement_gate,
     uint16_t flags,
     bool view_replaced,
@@ -203,7 +202,8 @@ static bool ui_host_show_document(
     return shown;
 }
 
-static bool ui_host_worker_model(int client, int replacement_gate,
+static bool ui_host_worker_model(ui_host_transport_t client,
+                                 int replacement_gate,
                                  uint16_t flags,
                                  bool view_replaced,
                                  const uint8_t *wire, uint32_t wire_len,
@@ -223,13 +223,14 @@ static bool ui_host_worker_model(int client, int replacement_gate,
     return shown;
 }
 
-static int ui_host_worker(int listener, int client, int replacement_gate,
+static int ui_host_worker(ui_host_transport_t listener,
+                          ui_host_transport_t client, int replacement_gate,
                           uint16_t flags,
                           bool view_replaced, const uint8_t *wire,
                           uint32_t wire_len,
                           const uint8_t nonce[UI_HOST_NONCE_BYTES])
 {
-    close(listener);
+    ui_host_transport_close(listener);
     bool shown = ui_host_worker_model(client, replacement_gate, flags,
                                       view_replaced,
                                       wire, wire_len, nonce);
@@ -237,7 +238,7 @@ static int ui_host_worker(int listener, int client, int replacement_gate,
         ui_host_send_rejected(client, UI_HOST_PHASE_READY,
                               UI_HOST_STATUS_REJECTED, nonce);
     if (replacement_gate >= 0) close(replacement_gate);
-    close(client);
+    ui_host_transport_close(client);
     return shown ? 0 : 1;
 }
 
@@ -360,12 +361,13 @@ static struct zcl_result ui_host_submit_wire(
     char display_why[96];
     if (!ui_present_host_display_ready(display_why, sizeof(display_why)))
         return ZCL_ERR(-1, "%s", display_why);
-    int fd = ui_host_connect(&reused);
-    if (fd < 0) return ui_host_error("presentation host connect");
+    ui_host_transport_t fd = ui_host_connect(&reused);
+    if (fd == UI_HOST_TRANSPORT_INVALID)
+        return ui_host_error("presentation host connect");
     uint8_t header[UI_HOST_REQUEST_BYTES];
     uint8_t nonce[UI_HOST_NONCE_BYTES];
     if (!ui_host_transport_nonce(nonce)) {
-        close(fd);
+        ui_host_transport_close(fd);
         return ui_host_error("presentation host request nonce");
     }
     ui_host_transport_request_header(header, flags, (uint32_t)wire_len,
@@ -373,7 +375,7 @@ static struct zcl_result ui_host_submit_wire(
     if (!ui_host_transport_send_all(fd, header, sizeof(header)) ||
         !ui_host_transport_send_all(fd, wire, wire_len)) {
         int saved = errno;
-        close(fd);
+        ui_host_transport_close(fd);
         errno = saved;
         return ui_host_error("presentation host request");
     }
@@ -388,11 +390,11 @@ static struct zcl_result ui_host_submit_wire(
                                        &value, &payload_len,
                                        &elapsed_us, nonce) ||
         payload_len != 0) {
-        close(fd);
+        ui_host_transport_close(fd);
         return ZCL_ERR(-1, "presentation host rejected the native window");
     }
     if (status != UI_HOST_STATUS_OK) {
-        close(fd);
+        ui_host_transport_close(fd);
         if (status == UI_HOST_STATUS_CAPACITY)
             return ZCL_ERR(-1, "presentation host capacity exhausted");
         if (status == UI_HOST_STATUS_REQUEST_BUSY)
@@ -406,7 +408,7 @@ static struct zcl_result ui_host_submit_wire(
     result->ready_us = elapsed_us > INT64_MAX ? INT64_MAX
                                                : (int64_t)elapsed_us;
     if (!(flags & UI_HOST_FLAG_WAIT_EVENT)) {
-        close(fd);
+        ui_host_transport_close(fd);
         return ZCL_OK;
     }
     if (!ui_host_transport_recv_all(fd, reply, sizeof(reply),
@@ -415,7 +417,7 @@ static struct zcl_result ui_host_submit_wire(
                                        &value, &payload_len,
                                        &elapsed_us, nonce) ||
         status != UI_HOST_STATUS_OK) {
-        close(fd);
+        ui_host_transport_close(fd);
         return ZCL_ERR(-1, "presentation host event channel closed");
     }
     result->event_received = true;
@@ -439,7 +441,7 @@ static struct zcl_result ui_host_submit_wire(
                 original, &submitted, why, sizeof(why))) ||
             (is_canvas && !zcl_present_model_canvas_submission_validate_v1(
                 original, &submitted, why, sizeof(why)))) {
-            close(fd);
+            ui_host_transport_close(fd);
             return ZCL_ERR(-1,
                            "presentation host control event failed exact validation");
         }
@@ -471,11 +473,11 @@ static struct zcl_result ui_host_submit_wire(
                 original->kind == ZCL_PRESENT_MODEL_CANVAS) &&
                value < original->action_count &&
                original->actions[value].kind == ZCL_PRESENT_ACTION_SUBMIT) {
-        close(fd);
+        ui_host_transport_close(fd);
         return ZCL_ERR(-1,
                        "presentation host omitted the submitted control values");
     }
-    close(fd);
+    ui_host_transport_close(fd);
     return ZCL_OK;
 }
 #endif /* __linux__ */
@@ -514,27 +516,23 @@ int ui_present_host_main(void)
     (void)fprintf(stderr, "Resident presentation host unsupported.\n"); // obs-ok:detached-child-terminal-diagnostic
     return 2;
 #else
-    int listener = ui_host_transport_listen();
-    if (listener < 0) return 2;
+    ui_host_transport_t listener = ui_host_transport_listen();
+    if (listener == UI_HOST_TRANSPORT_INVALID) return 2;
     struct ui_host_session sessions[UI_HOST_SESSIONS_MAX] = {{0}};
     int64_t last_request_us = platform_time_monotonic_us();
     for (;;) {
-        struct pollfd wait = {.fd = listener, .events = POLLIN};
-        int ready = poll(&wait, 1, 1000);
-        if (ready < 0 && errno == EINTR) continue;
-        if (ready < 0) break;
-        if (ready == 0) {
+        ui_host_transport_t client = ui_host_transport_accept(&listener, 1000);
+        if (client == UI_HOST_TRANSPORT_INVALID) {
+            if (errno == EINTR) continue;
             ui_host_sessions_reap(sessions);
             if (platform_time_monotonic_us() - last_request_us >
                 UI_HOST_IDLE_EXIT_US)
                 break;
             continue;
         }
-        int client = accept4(listener, NULL, NULL, SOCK_CLOEXEC);
-        if (client < 0) continue;
         last_request_us = platform_time_monotonic_us();
         if (!ui_host_transport_peer_allowed(client)) {
-            close(client);
+            ui_host_transport_close(client);
             continue;
         }
         uint8_t header[UI_HOST_REQUEST_BYTES];
@@ -547,7 +545,7 @@ int ui_present_host_main(void)
                 header, &flags, &wire_len, nonce)) {
             ui_host_send_rejected(client, UI_HOST_PHASE_READY,
                                   UI_HOST_STATUS_REJECTED, nonce);
-            close(client);
+            ui_host_transport_close(client);
             continue;
         }
         uint8_t wire[ZCL_PRESENT_MODEL_WIRE_MAX];
@@ -555,7 +553,7 @@ int ui_present_host_main(void)
                                         UI_HOST_READY_TIMEOUT_MS)) {
             ui_host_send_rejected(client, UI_HOST_PHASE_READY,
                                   UI_HOST_STATUS_REJECTED, nonce);
-            close(client);
+            ui_host_transport_close(client);
             continue;
         }
         bool replaceable = false;
@@ -571,7 +569,7 @@ int ui_present_host_main(void)
                      "resident visual request rejected before fork");
             ui_host_send_rejected(client, UI_HOST_PHASE_READY,
                                   UI_HOST_STATUS_REJECTED, nonce);
-            close(client);
+            ui_host_transport_close(client);
             continue;
         }
         replaceable = model.action_count == 0;
@@ -586,7 +584,7 @@ int ui_present_host_main(void)
                 admission == UI_HOST_SESSION_CAPACITY
                     ? UI_HOST_STATUS_CAPACITY : UI_HOST_STATUS_REQUEST_BUSY,
                 nonce);
-            close(client);
+            ui_host_transport_close(client);
             continue;
         }
         int replacement_gate[2] = {-1, -1};
@@ -595,7 +593,7 @@ int ui_present_host_main(void)
                        replacement_gate) != 0) {
             ui_host_send_rejected(client, UI_HOST_PHASE_READY,
                                   UI_HOST_STATUS_REJECTED, nonce);
-            close(client);
+            ui_host_transport_close(client);
             continue;
         }
         view_replaced = admission == UI_HOST_SESSION_REPLACE;
@@ -634,17 +632,17 @@ int ui_present_host_main(void)
             }
             ui_host_send_rejected(client, UI_HOST_PHASE_READY,
                                   UI_HOST_STATUS_REJECTED, nonce);
-            close(client);
+            ui_host_transport_close(client);
             continue;
         }
-        close(client);
+        ui_host_transport_close(client);
     }
     for (size_t i = 0; i < UI_HOST_SESSIONS_MAX; i++) {
         if (sessions[i].worker <= 0) continue;
         (void)kill(sessions[i].worker, SIGTERM);
         while (waitpid(sessions[i].worker, NULL, 0) < 0 && errno == EINTR) {}
     }
-    close(listener);
+    ui_host_transport_close(listener);
     ui_host_transport_cleanup();
     return 0;
 #endif

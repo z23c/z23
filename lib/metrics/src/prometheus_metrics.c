@@ -1094,7 +1094,6 @@ size_t metrics_prometheus_consensus_report_json(char *buf, size_t cap)
             (unsigned long long)g_reject_slots[i].count);
     }
     pos = append(buf, cap, pos, "]}");
-
     if (pos < cap) buf[pos] = '\0';
     pthread_mutex_unlock(&g_lock);
     return pos;

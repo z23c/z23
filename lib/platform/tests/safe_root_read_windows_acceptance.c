@@ -12,8 +12,12 @@
 #include <windows.h>
 
 static int failures;
+// obs-ok:test-diagnostic
 #define CHECK(label, expression) do {                                         \
-    if (!(expression)) { fprintf(stderr, "FAIL: %s\n", label); failures++; } \
+    if (!(expression)) { /* obs-ok:test-diagnostic */                         \
+        fprintf(stderr, "FAIL: %s\n", label);                               \
+        failures++;                                                           \
+    }                                                                         \
 } while (0)
 
 static bool write_utf8(const char *path, const char *bytes)

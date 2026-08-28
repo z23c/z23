@@ -3,31 +3,29 @@
  * bind the artifact-admission, selected-chain, and producer-source receipts into
  * one durable ADMIT/typed-refusal decision record. Never publishes/loads/mutates
  * node state; frontier-bound for CAS staleness. */
-
 // one-result-type-ok:cas-total-decision-plus-durable-record-io — the decision,
 // digest, staleness, and codec surfaces are TOTAL predicates over their inputs;
 // only the fallible run/load I/O surfaces return struct zcl_result.
-
 #include "services/consensus_state_publication_cas.h"
-
 #include "config/consensus_state_snapshot_install.h"
 #include "crypto/sha3.h"
 #include "framework/condition.h"
 #include "json/json.h"
-#include "platform/file_sync.h"
 #include "storage/progress_store.h"
 #include "util/log_macros.h"
 #include "validation/main_state.h"
-
-#include <errno.h>
-#include <fcntl.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#if !defined(_WIN32)
+#include "platform/file_sync.h"
+#include <errno.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 #define CAS_SUBSYS "consensus_publication_cas"
 
@@ -40,10 +38,14 @@
 
 /* ── latest-decision snapshot for dumpstate ──────────────────────────── */
 static pthread_mutex_t g_latest_lock = PTHREAD_MUTEX_INITIALIZER;
+#if !defined(_WIN32)
 static pthread_mutex_t g_persist_lock = PTHREAD_MUTEX_INITIALIZER;
+#endif
 static bool g_latest_present;
 static struct consensus_state_publication_decision_record g_latest;
+#if !defined(_WIN32)
 static _Atomic uint64_t g_temp_nonce;
+#endif
 
 #ifdef ZCL_TESTING
 static consensus_state_publication_cas_after_temp_open_hook
@@ -387,6 +389,7 @@ void consensus_state_publication_cas_decide(
 }
 
 /* ── durable record I/O (FULL durability, contained) ──────────────────── */
+#if !defined(_WIN32)
 static bool valid_output_name(const char *name)
 {
     if (!name || !name[0])
@@ -634,7 +637,9 @@ struct zcl_result consensus_state_publication_cas_load(
         return ZCL_ERR(-55, "cas load: record failed digest verification");
     return ZCL_OK;
 }
+#endif
 
+#if !defined(_WIN32)
 static void store_latest(
     const struct consensus_state_publication_decision_record *record)
 {
@@ -643,7 +648,9 @@ static void store_latest(
     g_latest_present = true;
     pthread_mutex_unlock(&g_latest_lock);
 }
+#endif
 
+#if !defined(_WIN32)
 struct zcl_result consensus_state_publication_cas_run(
     const struct consensus_state_publication_cas_request *request,
     struct consensus_state_publication_decision_record *out_record)
@@ -732,6 +739,7 @@ struct zcl_result consensus_state_publication_cas_run(
         return persisted;
     return ZCL_OK;
 }
+#endif
 
 /* ── dumpstate surface ────────────────────────────────────────────────── */
 static void push_hex32(struct json_value *out, const char *key,

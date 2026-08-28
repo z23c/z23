@@ -13,9 +13,6 @@
 #include "encoding/utilstrencodings.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
-#include <sys/time.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
 
 /* Wallet sync from zclassicd plus its JSON mini-parser. */
 

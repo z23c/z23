@@ -8,6 +8,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#if defined(_WIN32)
+typedef intptr_t ui_host_transport_t;
+#define UI_HOST_TRANSPORT_INVALID ((ui_host_transport_t)-1)
+#else
+typedef int ui_host_transport_t;
+#define UI_HOST_TRANSPORT_INVALID (-1)
+#endif
+
 #define UI_HOST_PROTOCOL_VERSION 4u
 #define UI_HOST_REQUEST_BYTES 32u
 #define UI_HOST_REPLY_BYTES 48u
@@ -20,12 +28,17 @@
 #define UI_HOST_STATUS_CAPACITY 2u
 #define UI_HOST_STATUS_REQUEST_BUSY 3u
 
-int ui_host_transport_connect_once(void);
-int ui_host_transport_listen(void);
+ui_host_transport_t ui_host_transport_connect_once(void);
+ui_host_transport_t ui_host_transport_listen(void);
+ui_host_transport_t ui_host_transport_accept(ui_host_transport_t *listener,
+                                             int timeout_ms);
+void ui_host_transport_close(ui_host_transport_t stream);
 void ui_host_transport_cleanup(void);
-bool ui_host_transport_peer_allowed(int client);
-bool ui_host_transport_send_all(int fd, const uint8_t *bytes, size_t length);
-bool ui_host_transport_recv_all(int fd, uint8_t *bytes, size_t length,
+bool ui_host_transport_peer_allowed(ui_host_transport_t client);
+bool ui_host_transport_send_all(ui_host_transport_t fd,
+                                const uint8_t *bytes, size_t length);
+bool ui_host_transport_recv_all(ui_host_transport_t fd, uint8_t *bytes,
+                                size_t length,
                                 int timeout_ms);
 bool ui_host_transport_nonce(uint8_t nonce[UI_HOST_NONCE_BYTES]);
 void ui_host_transport_request_header(

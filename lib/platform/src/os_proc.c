@@ -381,8 +381,15 @@ bool os_proc_exe_path(char *buf, size_t n)
 
 FILE *os_proc_open_self_exe(void)
 {
-    char path[4096];
-    return os_proc_exe_path(path, sizeof(path)) ? fopen(path, "rb") : NULL;
+#if defined(__linux__)
+    return fopen("/proc/self/exe", "rb");
+#else
+    /* Darwin and Windows expose the executable pathname, not a stable handle
+     * to the image that this process loaded. Refuse identity-bearing work
+     * instead of letting an atomic pathname replacement substitute new bytes. */
+    errno = ENOTSUP;
+    return NULL;
+#endif
 }
 
 bool os_proc_cmdline_has_token(const char *token)

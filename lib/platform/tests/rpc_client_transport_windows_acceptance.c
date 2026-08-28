@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Headless adversarial acceptance for the native loopback RPC transport. */
-#include "controllers/rpc_client.h"
+#include "controllers/rpc_client.h" // lib-layer-ok:windows-rpc-acceptance
 #include "platform/socket_compat.h"
 #include "platform/time_compat.h"
 
@@ -87,7 +87,8 @@ static bool run_case(const char *datadir, enum server_mode mode,
     int64_t elapsed = platform_time_monotonic_ms() - started;
     bool ok = answer && strstr(answer, expected) != NULL && elapsed < 250;
     if (!ok)
-        fprintf(stderr, "rpc case failed: mode=%d elapsed_ms=%lld answer=%s\n",
+        fprintf(stderr, // obs-ok:test-diagnostic
+                "rpc case failed: mode=%d elapsed_ms=%lld answer=%s\n",
                 (int)mode, (long long)elapsed, answer ? answer : "<null>");
     free(answer);
     WaitForSingleObject(thread, 1000);

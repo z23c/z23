@@ -215,6 +215,13 @@ bool platform_private_file_write_at(struct platform_private_file *f,
 bool platform_private_file_flush(struct platform_private_file *f) {
   return FlushFileBuffers(pf_handle(f)) != 0;
 }
+bool platform_private_file_mark_executable(struct platform_private_file *f) {
+  BY_HANDLE_FILE_INFORMATION info = {0};
+  return f && pf_handle(f) != INVALID_HANDLE_VALUE &&
+         GetFileInformationByHandle(pf_handle(f), &info) &&
+         (info.dwFileAttributes &
+          (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0;
+}
 
 bool platform_private_file_replace(struct platform_private_file *f,
                                    const char *staging_path,
@@ -505,6 +512,9 @@ bool platform_private_file_write_at(struct platform_private_file *f,
 }
 bool platform_private_file_flush(struct platform_private_file *f) {
   return fsync(pf_fd(f)) == 0;
+}
+bool platform_private_file_mark_executable(struct platform_private_file *f) {
+  return f && fchmod(pf_fd(f), 0755) == 0;
 }
 bool platform_private_file_replace(struct platform_private_file *f,
                                    const char *staging_path,

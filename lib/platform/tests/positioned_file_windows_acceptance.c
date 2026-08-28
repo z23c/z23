@@ -80,6 +80,20 @@ int main(void)
     failed |= platform_positioned_file_read(&file, tail, sizeof(tail), 30) != 2;
     failed |= platform_positioned_file_read(&file, tail, 1, UINT64_MAX) != -1;
     platform_positioned_file_close(&file);
+    char root[MAX_PATH * 3];
+    char *leaf = strrchr(utf8_path, '\\');
+    if (!leaf) leaf = strrchr(utf8_path, '/');
+    if (!leaf || (size_t)(leaf - utf8_path) >= sizeof(root)) {
+        DeleteFileW(path);
+        return 5;
+    }
+    memcpy(root, utf8_path, (size_t)(leaf - utf8_path));
+    root[leaf - utf8_path] = '\0';
+    failed |= !platform_positioned_file_open_beneath(&file, root, leaf + 1);
+    struct platform_positioned_file_snapshot snapshot;
+    failed |= !platform_positioned_file_snapshot(&file, &snapshot) ||
+              snapshot.size != 32 || snapshot.file_low == 0;
+    platform_positioned_file_close(&file);
     DeleteFileW(path);
     if (failed) return 5;
     puts("positioned_file_acceptance: PASS");

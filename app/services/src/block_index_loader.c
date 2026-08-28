@@ -4,6 +4,7 @@
  * LevelDB block tree compatibility. */
 
 #include "platform/time_compat.h"
+#include "platform/read_mapping.h"
 #include "services/block_index_loader.h"
 #include "block_index_flat_internal.h"
 #include "services/block_index_flat_anchor.h"
@@ -32,9 +33,12 @@
 #include <stdatomic.h>
 #include <limits.h>
 #include <sys/stat.h>
-#include <sys/mman.h>
 #include <fcntl.h>
+#if defined(_WIN32)
+#include <io.h>
+#else
 #include <unistd.h>
+#endif
 #include <time.h>
 #include <errno.h>
 #include <sqlite3.h>
@@ -51,6 +55,14 @@
  * whole-artifact guards; failed rows are left for P2P to re-supply. */
 static _Atomic int64_t g_flat_row_quarantined = 0;
 static struct log_throttle g_flat_row_quarantine_log = LOG_THROTTLE_INIT;
+
+static void flat_read_mapping_close(struct platform_read_mapping *mapping,
+                                    int fd)
+{
+    platform_read_mapping_close(mapping);
+    if (fd >= 0)
+        close(fd);
+}
 int64_t block_index_flat_row_quarantined(void)
 {
     return atomic_load_explicit(&g_flat_row_quarantined, memory_order_relaxed);
@@ -357,11 +369,15 @@ struct zcl_result load_block_index_flat(const char *datadir, struct main_state *
                        file_size);
     }
 
-    uint8_t *data = mmap(NULL, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
-    close(fd);
-    if (data == MAP_FAILED)
-        return ZCL_ERR(-4, "block_index_flat: mmap failed (%zu bytes): %s",
-                       file_size, strerror(errno));
+    struct platform_read_mapping mapping;
+    platform_read_mapping_init(&mapping);
+    if (!platform_read_mapping_open(&mapping, fd, file_size)) {
+        close(fd);
+        return ZCL_ERR(-4, "block_index_flat: mapping failed (%zu bytes)",
+                       file_size);
+    }
+    platform_read_mapping_advise_sequential(&mapping);
+    const uint8_t *data = mapping.data;
 
     /* BIIE embeds a 48-byte integrity header; legacy ZCLI begins at offset 0.
      * Verify the embedded payload before reading any row. */
@@ -376,7 +392,7 @@ struct zcl_result load_block_index_flat(const char *datadir, struct main_state *
             struct ssio_sidecar_header ehdr;
             int ev = bii_verify_embedded(datadir, &ehdr, &payload_off);
             if (ev != 0) {
-                munmap(data, file_size);
+                flat_read_mapping_close(&mapping, fd);
                 return ZCL_ERR(-5, "block_index_flat: embedded integrity check "
                                "FAILED (verdict=%d) — refusing the body", ev);
             }
@@ -388,28 +404,34 @@ struct zcl_result load_block_index_flat(const char *datadir, struct main_state *
     }
 
     uint32_t magic, count;
+    if (payload_off > file_size - 8) {
+        flat_read_mapping_close(&mapping, fd);
+        return ZCL_ERR(-6, "block_index_flat: payload offset %llu exceeds "
+                       "mapped file (%zu bytes)",
+                       (unsigned long long)payload_off, file_size);
+    }
     memcpy(&magic, data + payload_off, 4);
     memcpy(&count, data + payload_off + 4, 4);
     if (magic != 0x5A434C49) {
-        munmap(data, file_size);
+        flat_read_mapping_close(&mapping, fd);
         return ZCL_ERR(-6, "block_index_flat: bad payload magic 0x%08x "
                        "(expected 0x5A434C49)", magic);
     }
     if (count > 10000000) {
-        munmap(data, file_size);
+        flat_read_mapping_close(&mapping, fd);
         return ZCL_ERR(-7, "block_index_flat: count %u too large (max 10M)",
                        count);
     }
     if (count == 0) {
         /* An empty index is useless and would make entries[count-1] below an
          * out-of-bounds read (entries[-1]); reject so the caller re-derives. */
-        munmap(data, file_size);
+        flat_read_mapping_close(&mapping, fd);
         return ZCL_ERR(-8, "block_index_flat: empty index (count 0)");
     }
 
     size_t expected = payload_off + 8 + (size_t)count * sizeof(struct block_index_flat);
     if (file_size < expected) {
-        munmap(data, file_size);
+        flat_read_mapping_close(&mapping, fd);
         return ZCL_ERR(-9, "block_index_flat: truncated — %zu bytes < %zu "
                        "expected (%u entries)", file_size, expected, count);
     }
@@ -422,7 +444,7 @@ struct zcl_result load_block_index_flat(const char *datadir, struct main_state *
     block_map_reserve(&ms->map_block_index, count);
     struct block_index *arena = zcl_calloc(count, sizeof(struct block_index), "block_index arena");
     if (!arena) {
-        munmap(data, file_size);
+        flat_read_mapping_close(&mapping, fd);
         return ZCL_ERR(-10, "block_index_flat: calloc failed for %u entries "
                        "(%zu bytes)", count,
                        (size_t)count * sizeof(struct block_index));
@@ -600,7 +622,7 @@ struct zcl_result load_block_index_flat(const char *datadir, struct main_state *
                  "(%u entries) — chain stats may be stale", count);
     }
 
-    munmap(data, file_size);
+    flat_read_mapping_close(&mapping, fd);
 
     t_fwd_ms = platform_time_monotonic_ms() - t_fwd_ms;
     printf("[boot]   %-28s %lldms\n", "blkidx.flat_parse_insert",
@@ -618,114 +640,6 @@ struct zcl_result load_block_index_flat(const char *datadir, struct main_state *
         block_index_flat_identity_remember(datadir, &verified_identity);
     }
 
-    return ZCL_OK;
-}
-
-/* ── block_index_flat_header_at ────────────────────────────── */
-struct zcl_result block_index_flat_header_at(const char *datadir,
-                                             int32_t height,
-                                             uint8_t out_hash[32],
-                                             uint8_t out_root[32])
-{
-    if (!datadir || height < 0 || !out_hash || !out_root)
-        return ZCL_ERR(-100, "block_index_flat_header_at: bad args");
-
-    char path[1024];
-    snprintf(path, sizeof(path), "%s/block_index.bin", datadir);
-    int fd = open(path, O_RDONLY);
-    if (fd < 0)
-        return ZCL_ERR(-101, "block_index_flat_header_at: cannot open "
-                       "%s: %s", path, strerror(errno));
-    struct stat st;
-    if (fstat(fd, &st) != 0) {
-        int saved_errno = errno;
-        close(fd);
-        return ZCL_ERR(-102, "block_index_flat_header_at: fstat: %s",
-                       strerror(saved_errno));
-    }
-    size_t file_size = (size_t)st.st_size;
-    if (file_size < 8) {
-        close(fd);
-        return ZCL_ERR(-103, "block_index_flat_header_at: file too "
-                       "small (%zu bytes)", file_size);
-    }
-    uint8_t *data = mmap(NULL, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
-    close(fd);
-    if (data == MAP_FAILED)
-        return ZCL_ERR(-104, "block_index_flat_header_at: mmap "
-                       "(%zu bytes): %s", file_size, strerror(errno));
-
-    /* Same integrity posture as load_block_index_flat: a BIIE-magic file
-     * is trusted only after the embedded SHA3 verifies; a legacy "ZCLI"
-     * body has no embedded commitment and is REFUSED here — a bind this
-     * load-bearing does not read unverified bytes. */
-    uint64_t payload_off = 0;
-    {
-        uint32_t lead;
-        memcpy(&lead, data, 4);
-        uint32_t embedded_magic;
-        memcpy(&embedded_magic, BII_EMBEDDED_MAGIC, 4);
-        if (lead != embedded_magic) {
-            munmap(data, file_size);
-            return ZCL_ERR(-105, "block_index_flat_header_at: no "
-                           "embedded integrity header (legacy format) — "
-                           "refusing unverified bytes");
-        }
-        struct ssio_sidecar_header ehdr;
-        int ev = bii_verify_embedded(datadir, &ehdr, &payload_off);
-        if (ev != 0) {
-            munmap(data, file_size);
-            return ZCL_ERR(-106, "block_index_flat_header_at: "
-                           "embedded integrity check FAILED (verdict=%d)",
-                           ev);
-        }
-    }
-
-    uint32_t magic, count;
-    memcpy(&magic, data + payload_off, 4);
-    memcpy(&count, data + payload_off + 4, 4);
-    if (magic != 0x5A434C49) {
-        munmap(data, file_size);
-        return ZCL_ERR(-107, "block_index_flat_header_at: bad payload "
-                       "magic 0x%08x", magic);
-    }
-    if (count == 0 || count > 10000000) {
-        munmap(data, file_size);
-        return ZCL_ERR(-108, "block_index_flat_header_at: count %u "
-                       "out of range", count);
-    }
-    size_t expected = payload_off + 8 +
-                      (size_t)count * sizeof(struct block_index_flat);
-    if (file_size < expected) {
-        munmap(data, file_size);
-        return ZCL_ERR(-109, "block_index_flat_header_at: truncated "
-                       "(%zu < %zu bytes for %u entries)",
-                       file_size, expected, count);
-    }
-    /* Height-sorted rows: lower-bound binary search, exact-height test.
-     * Siblings sharing a height return an arbitrary one — a caller binding
-     * a shielded frontier against a foreign root fails CLOSED downstream
-     * (the by-root source lookup), never a silent misbind. */
-    const struct block_index_flat *entries =
-        (const struct block_index_flat *)(data + payload_off + 8);
-    uint32_t lo = 0, hi = count;
-    while (lo < hi) {
-        uint32_t mid = lo + (hi - lo) / 2;
-        if (entries[mid].height < height)
-            lo = mid + 1;
-        else
-            hi = mid;
-    }
-    if (lo >= count || entries[lo].height != height) {
-        int32_t max_h = count ? entries[count - 1].height : -1;
-        munmap(data, file_size);
-        return ZCL_ERR(-110, "block_index_flat_header_at: no row at "
-                       "height %d (flat tip %d) — the last flat save "
-                       "predates that header", height, max_h);
-    }
-    memcpy(out_hash, entries[lo].hash, 32);
-    memcpy(out_root, entries[lo].sapling_root, 32);
-    munmap(data, file_size);
     return ZCL_OK;
 }
 

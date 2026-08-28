@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * Quiet block-file read-mapping helper for node_db catchup. */
+// one-result-type-ok:owned-mapping-lifecycle
 
 #include "node_db_catchup_internal.h"
 

@@ -75,6 +75,12 @@ int main(void)
         return fail("sorted real-directory filtering");
     platform_directory_list_free(&list);
 
+    if (!platform_directory_list_regular_sorted(root, &list))
+        return fail("regular-file enumeration");
+    if (list.count != 1 || strcmp(list.entries[0].name, "plain-file"))
+        return fail("sorted regular-file filtering");
+    platform_directory_list_free(&list);
+
     if (made_link) RemoveDirectoryW(link_wide);
     DeleteFileW(plain_wide);
     wchar_t unicode_wide[4 * MAX_PATH];

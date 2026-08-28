@@ -13,7 +13,7 @@ static int checked_format(const char *format, ...)
 {
     va_list arguments;
     va_start(arguments, format);
-    int result = vfprintf(stderr, format, arguments);
+    int result = vfprintf(stderr, format, arguments); // obs-ok:test-diagnostic
     va_end(arguments);
     return result;
 }

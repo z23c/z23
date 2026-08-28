@@ -34,10 +34,8 @@
  * Darwin implementation:
  *   - process memory and start time: proc_pid_rusage/proc_pidinfo; virtual
  *     size: Mach task_info; total RAM: sysctl hw.memsize.
- *   - executable path and argv: dyld and crt_externs APIs. Opening the image
- *     uses the resolved path because Darwin has no /proc-held executable
- *     inode; callers must revalidate identity when pathname replacement is a
- *     security boundary.
+ *   - executable path and argv: dyld and crt_externs APIs. Opening the loaded
+ *     image is refused because a pathname cannot prove running-image identity.
  *   - cgroup fields and available-system-memory remain -1 (unavailable).
  *
  * FreeBSD mapping (header comments only — no FreeBSD build in this repo,
@@ -109,9 +107,9 @@ int64_t os_proc_uptime_seconds(void);
  * themselves. */
 bool os_proc_exe_path(char *buf, size_t n);
 
-/* Open the executable image for reading. Linux holds the running inode via
- * /proc/self/exe; Darwin opens the dyld-resolved pathname. Caller owns the
- * returned FILE* and must fclose() it. */
+/* Open the exact executable image for reading. Linux holds the running inode
+ * via /proc/self/exe. Platforms without an identity-bound running-image
+ * primitive fail with ENOTSUP. Caller owns a successful FILE*. */
 FILE *os_proc_open_self_exe(void);
 
 /* True iff this process's command line contains `token` as a WHOLE argument

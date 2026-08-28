@@ -21,6 +21,7 @@
 #include "vcs/zcode_action_input.h"
 #include "vcs/zcode_dev.h"
 #include "vcs/zcode_patch.h"
+#if !defined(_WIN32)
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -109,7 +110,6 @@ static bool bfw_path_join(char *out, size_t cap, const char *dir, const char *le
     int n = snprintf(out, cap, "%s/%s", dir, leaf);
     return n > 0 && (size_t)n < cap;
 }
-
 static struct zcl_result bfw_paths_init(const char *workspace, const char *lease_id,
                                         const char *kind,
                                         struct bfw_paths *p)
@@ -157,7 +157,6 @@ static struct zcl_result bfw_paths_init(const char *workspace, const char *lease
     }
     return ZCL_OK;
 }
-
 static void bfw_paths_cleanup(const struct bfw_paths *p)
 {
     if (!p) return;
@@ -211,7 +210,6 @@ static uint8_t *bfw_read_output(const char *path, size_t *len_out)
     *len_out = len;
     return bytes;
 }
-
 static bool bfw_elf_relocatable_x86_64(const uint8_t *bytes, size_t len)
 {
     return bytes && len >= 64 && bytes[0] == 0x7f && bytes[1] == 'E' &&
@@ -858,3 +856,5 @@ struct zcl_result build_fabric_worker_execute(
     *out_receipt = receipt;
     return ZCL_OK;
 }
+
+#endif

@@ -169,6 +169,16 @@ int main(int argc, char **argv)
                     detail);
             if (err == VCS_PACKAGE_PREPARE_OK)
                 print_derived_roots(&prepared);
+            if (err == VCS_PACKAGE_PREPARE_OK && prepared.lock.count > 0) {
+                const size_t root = prepared.lock.count - 1u;
+                fprintf(stderr,
+                        "  release_verify=%d lock_count=%zu root_depth=%u "
+                        "root_direct_deps=%u\n",
+                        (int)vcs_package_release_verify(&prepared.release),
+                        prepared.lock.count,
+                        (unsigned)prepared.lock.nodes[root].depth,
+                        (unsigned)prepared.lock.nodes[root].direct_deps);
+            }
             vcs_package_prepared_free(&prepared);
             return 1;
         }

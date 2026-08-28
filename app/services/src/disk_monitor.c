@@ -2,7 +2,7 @@
  *
  * Disk Monitor — see header for rationale.
  *
- * Uses `statvfs` for portable free-space queries. Polls in a
+ * Uses the platform disk-space seam for free-space queries. Polls in a
  * background pthread with small sleep increments so stop()
  * returns promptly.
  *
@@ -18,6 +18,7 @@
 // introspection"). Neither has a genuinely fallible surface to convert.
 
 #include "platform/time_compat.h"
+#include "platform/disk_space.h"
 #include "services/disk_monitor.h"
 
 #include "event/event.h"
@@ -27,13 +28,12 @@
 #include "util/supervisor.h"
 #include "util/thread_registry.h"
 
-#include <errno.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/statvfs.h>
 #include <time.h>
 
 #include "util/log_macros.h"
@@ -157,17 +157,16 @@ int64_t disk_monitor_free_bytes(const char *path)
         fprintf(stderr, "[disk] %s: path is NULL or empty\n", __func__);
         return -1; // raw-return-ok:logged-above
     }
-    struct statvfs st;
-    if (statvfs(path, &st) != 0) {
-        fprintf(stderr, "[disk] %s: statvfs failed for '%s': %s\n",
-                __func__, path, strerror(errno));
+    uint64_t available = 0;
+    if (!platform_disk_space_available(path, &available)) {
+        fprintf(stderr, "[disk] %s: free-space query failed for '%s'\n",
+                __func__, path);
         return -1; // raw-return-ok:logged-above
     }
-    /* `f_bavail` is the blocks available to unprivileged users —
-     * the right number to compare against a "should I keep
-     * writing?" threshold. Multiplied by `f_frsize` which is the
-     * fundamental block size (not `f_bsize` which can differ). */
-    return (int64_t)st.f_bavail * (int64_t)st.f_frsize;
+    /* Thresholds are signed int64 values. Capacities beyond that range are
+     * necessarily healthy for every representable threshold, so saturate
+     * instead of allowing an unsigned-to-signed wrap to look critical. */
+    return available > INT64_MAX ? INT64_MAX : (int64_t)available;
 }
 
 void disk_monitor_set_free_bytes_for_test(int64_t bytes)
