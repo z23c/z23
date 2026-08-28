@@ -46,3 +46,29 @@ make lint                                       PASS (158/158 gates)
 
 No production service, canonical datadir, consensus predicate, or custody path
 was changed or exercised.
+
+## Concurrent main integration
+
+The cleanup was merged locally with the task/work transport added concurrently
+to `origin/main`. Review of that intersection found and corrected three
+fail-closed defects before publication:
+
+- a read-only task board no longer opens or creates a caller-selected package
+  store;
+- record discovery applies local policy before its output limit, so a denied
+  prefix cannot conceal an allowed record or disclose a pre-policy count; and
+- a task pointer cannot remain publishable after its signed task expires.
+
+Task goal projection now honors its documented bounded-prefix contract. Dormant
+agent-scope text no longer implies an active authorization system, and an
+unused scope-grant API was removed.
+
+Measured at `2026-08-28T19:16:40-04:00`
+(`2026-08-28T23:16:40Z`) on GCC 16.1.1, AMD Ryzen 7 PRO 8840U:
+
+```text
+task/DHT/hot-swap intersection                  PASS (23/23 groups)
+                                                groups_failed=0 self_skips=0
+zcode dht policy-prefix regression              PASS
+make lint                                      PASS (158/158 gates)
+```

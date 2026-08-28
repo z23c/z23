@@ -30,4 +30,3 @@ docs/work/never-stuck-plan.md|transparent loader, but canonical is now wedged at
 docs/work/reducer-shielded-consensus-plan.md|1. **Live-wedge precondition — NOT MET.** Canonical is held at H*=3,176,325 on
 docs/work/sovereign-cutover-runbook.md|3,176,325 and at the new live tip hash-agrees with `zclassicd` (RPC 8232)
 docs/work/sovereign-cutover-runbook.md|`H*=3,176,325` on `utxo_apply.anchor_backfill_gap`, or wherever it was)
-docs/work/SOVEREIGN-NETWORK-ROADMAP.md|- Canonical is wedged at H\*=3,176,325 (`coins_applied=3,176,326`) on missing

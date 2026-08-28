@@ -297,6 +297,28 @@ size_t vcs_zcode_dht_record_store_query(
   return count;
 }
 
+size_t vcs_zcode_dht_record_store_scan(
+    const struct vcs_zcode_dht_record_store *store,
+    enum vcs_zcode_dht_record_kind kind, const char *namespace_name,
+    uint64_t now_unix, struct vcs_zcode_dht_record *out,
+    size_t out_capacity)
+{
+  if (!store || !namespace_name || (!out && out_capacity))
+    return 0;
+  size_t count = 0;
+  for (size_t i = 0; i < store->count; i++) {
+    const struct vcs_zcode_dht_record *record = &store->entries[i].record;
+    if (record->kind != kind ||
+        strcmp(record->namespace_name, namespace_name) != 0 ||
+        now_unix < record->not_before || now_unix >= record->expiry)
+      continue;
+    if (count < out_capacity)
+      out[count] = *record;
+    count++;
+  }
+  return count;
+}
+
 static void digest_entries(const struct vcs_zcode_dht_record_store *store,
                            uint8_t out[32])
 {

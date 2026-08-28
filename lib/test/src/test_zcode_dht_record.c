@@ -662,8 +662,115 @@ static int test_record_store_caps(void)
   return failures;
 }
 
-static int test_record_store_sequence_and_expiry(void)
+/* The namespace-wide scan the task board reads: kind + namespace filter,
+ * live-window check, canonical order, capacity truncation that still
+ * reports the true total, and the NULL-out counting form. */
+static int test_record_store_scan(void)
 {
+  int failures = 0;
+  TEST("zcode dht records: namespace scan filters, orders and truncates") {
+    struct record_fixture f;
+    int chain_calls = 0;
+    ASSERT(rf_init(&f, &chain_calls));
+    struct vcs_zcode_dht_record_store *store =
+        vcs_zcode_dht_record_store_create(f.verify.network_genesis);
+    ASSERT(store != NULL);
+    /* Four live pointers in the scanned namespace (distinct roots), one
+     * pointer in a DIFFERENT namespace, one PROVIDER in the scanned
+     * namespace, and one pointer whose window has already closed. */
+    struct vcs_zcode_dht_record record;
+    for (size_t i = 0; i < 4; i++) {
+      rf_record(&f, &record, VCS_ZCODE_DHT_RECORD_POINTER);
+      (void)snprintf(record.namespace_name, sizeof(record.namespace_name),
+                     "zclassic23.task");
+      /* Distinct semantic roots keep these four postings separate roots,
+       * not conflicts on one root. */
+      rf_fill(record.semantic_root, 32, (uint8_t)(0x30 + i));
+      record.transport_root[0] = (uint8_t)(i + 1);
+      ASSERT_EQ(vcs_zcode_dht_record_sign(&record, f.online_seed),
+                VCS_ZCODE_DHT_RECORD_OK);
+      ASSERT_EQ(vcs_zcode_dht_record_store_put(store, &record, 1500),
+                VCS_ZCODE_DHT_RECORD_STORE_ADDED);
+    }
+    rf_record(&f, &record, VCS_ZCODE_DHT_RECORD_POINTER);
+    (void)snprintf(record.namespace_name, sizeof(record.namespace_name),
+                   "science.study");
+    ASSERT_EQ(vcs_zcode_dht_record_sign(&record, f.online_seed),
+              VCS_ZCODE_DHT_RECORD_OK);
+    ASSERT_EQ(vcs_zcode_dht_record_store_put(store, &record, 1500),
+              VCS_ZCODE_DHT_RECORD_STORE_ADDED);
+    rf_record(&f, &record, VCS_ZCODE_DHT_RECORD_PROVIDER);
+    (void)snprintf(record.namespace_name, sizeof(record.namespace_name),
+                   "zclassic23.task");
+    ASSERT_EQ(vcs_zcode_dht_record_sign(&record, f.online_seed),
+              VCS_ZCODE_DHT_RECORD_OK);
+    ASSERT_EQ(vcs_zcode_dht_record_store_put(store, &record, 1500),
+              VCS_ZCODE_DHT_RECORD_STORE_ADDED);
+    rf_record(&f, &record, VCS_ZCODE_DHT_RECORD_POINTER);
+    (void)snprintf(record.namespace_name, sizeof(record.namespace_name),
+                   "zclassic23.task");
+    record.transport_root[0] = 0x9a;
+    record.expiry = 1400;
+    ASSERT_EQ(vcs_zcode_dht_record_sign(&record, f.online_seed),
+              VCS_ZCODE_DHT_RECORD_OK);
+    ASSERT_EQ(vcs_zcode_dht_record_store_put(store, &record, 1350),
+              VCS_ZCODE_DHT_RECORD_STORE_ADDED);
+
+    struct vcs_zcode_dht_record rows[8];
+    size_t total = vcs_zcode_dht_record_store_scan(
+        store, VCS_ZCODE_DHT_RECORD_POINTER, "zclassic23.task", 1500, rows,
+        8);
+    ASSERT_EQ(total, 4u);
+    for (size_t i = 0; i < total; i++) {
+      ASSERT(strcmp(rows[i].namespace_name, "zclassic23.task") == 0);
+      ASSERT(rows[i].kind == VCS_ZCODE_DHT_RECORD_POINTER);
+      ASSERT(rows[i].expiry > 1500);
+    }
+    /* Canonical order: sequence is the tie-break the store maintains. */
+    for (size_t i = 1; i < total; i++)
+      ASSERT(rows[i - 1].sequence <= rows[i].sequence);
+    /* Truncation still reports the true total; the fill is a prefix of
+     * the untruncated rows — checked before rows[] is reused below. */
+    struct vcs_zcode_dht_record first_two[2];
+    ASSERT_EQ(vcs_zcode_dht_record_store_scan(
+                  store, VCS_ZCODE_DHT_RECORD_POINTER, "zclassic23.task",
+                  1500, first_two, 2),
+              4u);
+    uint8_t prefix_id[32], full_id[32];
+    for (size_t i = 0; i < 2; i++) {
+      ASSERT_EQ(vcs_zcode_dht_record_id(&first_two[i], prefix_id),
+                VCS_ZCODE_DHT_RECORD_OK);
+      ASSERT_EQ(vcs_zcode_dht_record_id(&rows[i], full_id),
+                VCS_ZCODE_DHT_RECORD_OK);
+      ASSERT(memcmp(prefix_id, full_id, 32) == 0);
+    }
+    /* The same roots, name-spaced-invisible, do not leak in. */
+    ASSERT_EQ(vcs_zcode_dht_record_store_scan(
+                  store, VCS_ZCODE_DHT_RECORD_POINTER, "science.study",
+                  1500, rows, 8),
+              1u);
+    ASSERT_EQ(vcs_zcode_dht_record_store_scan(
+                  store, VCS_ZCODE_DHT_RECORD_PROVIDER, "zclassic23.task",
+                  1500, rows, 8),
+              1u);
+    /* A clock past the scanned window sees none of them. */
+    ASSERT_EQ(vcs_zcode_dht_record_store_scan(
+                  store, VCS_ZCODE_DHT_RECORD_POINTER, "zclassic23.task",
+                  1900, rows, 8),
+              0u);
+    /* The counting form: NULL out, any capacity, same total. */
+    ASSERT_EQ(vcs_zcode_dht_record_store_scan(
+                  store, VCS_ZCODE_DHT_RECORD_POINTER, "zclassic23.task",
+                  1500, NULL, 0),
+              4u);
+    vcs_zcode_dht_record_store_free(store);
+    PASS();
+  }
+  _test_next:;
+  return failures;
+}
+
+static int test_record_store_sequence_and_expiry(void){
   int failures = 0;
   TEST("zcode dht records: sequence replay and expiry fail closed") {
     struct record_fixture f;
@@ -1507,6 +1614,7 @@ int test_zcode_dht_record(void)
   failures += test_record_conflicts();
   failures += test_record_store_restart();
   failures += test_record_store_sequence_and_expiry();
+  failures += test_record_store_scan();
   failures += test_record_store_caps();
   failures += test_record_store_expiry_reclaim();
   failures += test_declared_replication();

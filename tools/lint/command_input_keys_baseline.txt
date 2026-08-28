@@ -22,6 +22,7 @@ zcode.science.fetch kind      # pointer resolver reads its private RPC selector 
 zcode.science.fetch namespace # pointer resolver reads its private RPC selector built by fetch; request->input never reaches that helper.
 zcode.science.fetch semantic_root # pointer resolver reads its private RPC selector built by fetch; request->input never reaches that helper.
 zcode.science.fetch transport_root # provider discovery reads its private RPC selector built by fetch; request->input never reaches that helper.
+zcode.science.fetch board # the records board arm lives in the nested handler; fetch builds its own private records selector and request->input never reaches that arm.
 zcode.science.publish mode    # discovery helper reads its private RPC object built by publish; request->input never reaches that helper.
 zcode.science.publish kind    # discovery helper reads its private RPC object built by publish; request->input never reaches that helper.
 zcode.science.publish namespace # discovery helper reads its private RPC object built by publish; request->input never reaches that helper.
@@ -38,13 +39,8 @@ zcode.package.dev.publish.commit recipe_hex # accepted-lane commit injects its t
 zcode.package.source.reproduce day # nested package fetch reads this only from the private fetch object; reproduce does not copy request->input day into that object.
 zcode.package.source.reproduce maximum_bytes # reproduce injects the fixed source-carrier ceiling into its private package-fetch request; request->input never reaches that helper.
 zcode.package.source.reproduce name # nested package fetch reads this only from the private fetch object; reproduce copies root, not a local library name, into that object.
-zcode.package.attest.pull kind # pointer discovery fixes kind=pointer in its private records request; request->input never reaches the nested handler.
-zcode.package.attest.pull namespace # pointer discovery injects the fixed attestation namespace into its private records request; request->input never reaches it.
-zcode.package.attest.pull semantic_root # pointer discovery injects the attested package root as semantic_root into its private records request; request->input never reaches it.
-zcode.package.attest.pull root # attestation fetch injects the discovered transport root into its private package-fetch request; request->input never reaches it.
-zcode.package.attest.pull maximum_bytes # attestation fetch injects the fixed attestation wire ceiling into its private package-fetch request; request->input never reaches it.
-zcode.package.attest.pull day # nested package fetch reads this only from the private fetch object; attest pull builds that object itself and never copies a day into it.
-zcode.package.attest.pull name # nested package fetch reads this only from the private fetch object; attest pull fetches by transport root, never by local library name.
+zcode.package.fetch board # the records board arm lives in the nested handler; fetch builds its own private records selector and request->input never reaches that arm.
+zcode.package.source.reproduce board # the records board arm lives in the nested handler; reproduce builds its own private records selector and request->input never reaches that arm.
 metaverse.space.plan delegation_wire # delegation authorization serializes a private RPC object; request->input never reaches that helper.
 metaverse.space.commit delegation_wire # delegation authorization serializes a private RPC object; request->input never reaches that helper.
 metaverse.space.show delegation_wire # delegation authorization serializes a private RPC object; request->input never reaches that helper.
@@ -54,6 +50,7 @@ metaverse.space.publish delegation_wire # delegation authorization serializes a 
 metaverse.space.discover delegation_wire # delegation authorization serializes a private RPC object; request->input never reaches that helper.
 metaverse.space.discover lookup_id # bounded discovery creates this private lookup capability after begin; request->input never reaches it.
 metaverse.space.discover owner_token # bounded discovery creates this private owner capability after begin; request->input never reaches it.
+metaverse.space.discover board # the records board arm lives in the nested handler; discover builds its own private records selector and request->input never reaches that arm.
 metaverse.space.scout.run delegation_wire # observer/manifest chain checks serialize private public delegation RPC objects; request->input never reaches them.
 metaverse.space.scout.show delegation_wire # current observer chain status serializes a private public delegation RPC object; request->input never reaches it.
 metaverse.space.publish mode # DHT publication reads its private plan/commit RPC object; request->input never reaches that helper.
@@ -140,5 +137,9 @@ dev.publication.collect kind # collector fixes this to storage_ack in its privat
 dev.publication.collect namespace # collector reloads this from the immutable provider receipt for its private DHT discovery request; request->input never reaches it.
 dev.publication.collect transport_root # collector reloads this from the verified release package for its private DHT discovery request; request->input never reaches it.
 dev.publication.collect include_evidence_wires # collector fixes this true only for its bounded private evidence handoff; request->input never reaches it.
+dev.publication.collect board # the records board arm lives in the nested handler; the collector builds its own private discovery request and request->input never reaches that arm.
 app.presentation.publication-status namespace # the model reads this only from the node's internal signed-record projection; request->input never reaches it.
 app.presentation.publication-status semantic_root # the model reads this only from the node's internal signed pointer projection; request->input never reaches it.
+zcode.task.board kind # task board fixes this to pointer in its private local-record projection; request->input never reaches it.
+zcode.task.board namespace # task board fixes this to zclassic23.task in its private local-record projection; request->input never reaches it.
+zcode.task.board board # task board fixes this true in its private local-record projection; request->input never reaches it.

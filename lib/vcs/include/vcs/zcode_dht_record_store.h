@@ -78,6 +78,21 @@ size_t vcs_zcode_dht_record_store_query(
     const uint8_t root[32], uint64_t now_unix,
     struct vcs_zcode_dht_record *out, size_t out_capacity);
 
+/* Namespace-wide seen-set listing: every live record of `kind` in
+ * `namespace_name` this store holds, in the store's canonical order —
+ * the local half of a task board. store_query answers "who names this
+ * root"; scan answers "what roots does this node know in the namespace",
+ * which no root-filtered query can. Records reach a node only through the
+ * ordinary paths (publish, exact-root discovery merges, replication), so
+ * a cold node honestly reports what it has SEEN, never a network
+ * promise. The return value is the total live count; `out` collects the
+ * first out_capacity of them (NULL out counts only). */
+size_t vcs_zcode_dht_record_store_scan(
+    const struct vcs_zcode_dht_record_store *store,
+    enum vcs_zcode_dht_record_kind kind, const char *namespace_name,
+    uint64_t now_unix, struct vcs_zcode_dht_record *out,
+    size_t out_capacity);
+
 void vcs_zcode_dht_record_store_digest(
     const struct vcs_zcode_dht_record_store *store, uint8_t out[32]);
 

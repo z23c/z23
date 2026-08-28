@@ -2,8 +2,8 @@
  *
  * fact_store_writers.def — the manifest of DERIVATIONS for the writer census.
  *
- * Same law as config/onto/extractors.def: nothing here is a FACT about the
- * system. Not one key name, not one file path that writes one, not one count.
+ * Nothing here is a FACT about the system. Not one key name, not one file
+ * path that writes one, not one count.
  * Every row states only *how to re-derive* writers of a class of durable named
  * slot from sources that are already canonical — the store's own header (which
  * declares its write API) and the tree's own text (which contains the call

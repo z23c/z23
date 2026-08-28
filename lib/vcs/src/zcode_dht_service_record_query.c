@@ -3,6 +3,8 @@
 
 #include "zcode_dht_service_internal.h"
 
+#include "base/safe_alloc.h"
+
 #include <stdlib.h>
 #include <string.h>
 
@@ -77,6 +79,45 @@ size_t vcs_zcode_dht_service_record_local_query(
   if (copied && out)
     memcpy(out, ordered, copied * sizeof(*out));
   return count;
+}
+
+size_t vcs_zcode_dht_service_record_local_scan(
+    const struct vcs_zcode_dht_service *service, uint64_t now_unix,
+    enum vcs_zcode_dht_record_kind kind, const char *namespace_name,
+    struct vcs_zcode_dht_record *out, size_t out_capacity,
+    size_t *seen_total_out)
+{
+  if (seen_total_out)
+    *seen_total_out = 0;
+  if (!service || !service->record_store || !namespace_name ||
+      (!out && out_capacity))
+    return 0;
+  /* Filter the complete bounded store before applying the caller's output
+   * cap. Otherwise denied records in the canonical prefix can hide later
+   * permitted rows. Counts are policy-filtered too: a local projection
+   * must not disclose the size of a set local policy refuses to reveal. */
+  struct vcs_zcode_dht_record *candidates = zcl_calloc(
+      VCS_ZCODE_DHT_RECORD_STORE_MAX_RECORDS, sizeof(*candidates),
+      "zcode dht board candidates");
+  if (!candidates)
+    return 0;
+  size_t scanned = vcs_zcode_dht_record_store_scan(
+      service->record_store, kind, namespace_name, now_unix, candidates,
+      VCS_ZCODE_DHT_RECORD_STORE_MAX_RECORDS);
+  if (scanned > VCS_ZCODE_DHT_RECORD_STORE_MAX_RECORDS)
+    scanned = VCS_ZCODE_DHT_RECORD_STORE_MAX_RECORDS;
+  size_t allowed = 0, copied = 0;
+  for (size_t i = 0; i < scanned; i++)
+    if (vcs_zcode_dht_records_policy_allows(
+            service, VCS_ZCODE_SOVEREIGNTY_DISCOVER, &candidates[i])) {
+      if (copied < out_capacity)
+        out[copied++] = candidates[i];
+      allowed++;
+    }
+  free(candidates);
+  if (seen_total_out)
+    *seen_total_out = allowed;
+  return copied;
 }
 
 size_t vcs_zcode_dht_service_record_local_query_page(

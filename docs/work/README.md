@@ -51,6 +51,8 @@ citation, `git log --follow -- docs/work/<name>.md` recovers older intent.
 | [`ZCODE_SCIENTIFIC_METAVERSE.md`](./ZCODE_SCIENTIFIC_METAVERSE.md) | PLAN | owner-directed ZCODE scientific object, evidence-network, discovery, proof-of-contribution, committee, and staged-custody implementation plan; includes parallel file ownership and no-live-funds gates |
 | [`ZC23_LIVING_COMMONS.md`](./ZC23_LIVING_COMMONS.md) | PLAN | people+AI shared-metaverse mission, one creation API, immutable pre-genesis ZC23 naming, creation-backed issuance covenant, patronage boundary, and LC0-LC5 safe implementation order |
 | [`ZC23_REPRODUCTION_RUNBOOK.md`](./ZC23_REPRODUCTION_RUNBOOK.md) | LIVE | O5 three-party portable-reproduction protocol, exact same-host acceptance gate, genuine second-machine verifier command, and explicit no-credit/no-live-authority boundaries |
+| [`NATIVE_MACOS_RUNBOOK.md`](./NATIVE_MACOS_RUNBOOK.md) | LIVE | native arm64 macOS maintenance: expected-green set, per-host platform-seam selection, known host quirks, and the first fix move per gate that can go red there |
+| [`NEON_CRYPTO_MATRIX.md`](./NEON_CRYPTO_MATRIX.md) | LIVE | per-crypto-family x86-64/arm64 tier matrix: gating, the test group proving bit-identity, the bench that times each tier, and honest no-clean-NEON-equivalent markers |
 | [`ZCODE_PLAN.md`](./ZCODE_PLAN.md) | FOUNDATION | original 15-slice ZCODE package-hosting order; slices 1–13 remain live foundations, while payout slices 14–15 are deferred behind the development network; `lib/vcs/include/vcs/package_reward.h` cites its "ZCL fuel economics" section by name |
 | [`MARKETPLACE_PLAN.md`](./MARKETPLACE_PLAN.md) | PLAN | owner directive: on-chain P2P ZSLP/ZCL marketplace (same-chain single-tx swap + cross-chain HTLC) over the existing ZSWP/ZSLP primitives; application protocol only, no consensus surface |
 | [`MARKETPLACE_NEXT.md`](./MARKETPLACE_NEXT.md) | PLAN | post-metaverse-MVP ordered checklist: two-laptop Tor market test, `zmarket_buy` end-to-end settlement wiring, ZC23 distribution design (owner decision gate) |
@@ -98,6 +100,7 @@ citation, `git log --follow -- docs/work/<name>.md` recovers older intent.
 | [`parity-audit-round2-findings.md`](./parity-audit-round2-findings.md) | RETAINED | superseded audit, retained — findings L1/L2/L3 cited by the consensus-parity lock-in tests |
 | [`consensus-parity-supplemental-audit-2026-06-08.md`](./consensus-parity-supplemental-audit-2026-06-08.md) | RETAINED | superseded audit, retained — §2 item 5 cited by `docs/AGENT_TRAPS.md`; landed-fix summary condensed into `docs/CONSENSUS_PARITY_DOCTRINE.md` |
 | [`lint-gate-hollowness-audit.md`](./lint-gate-hollowness-audit.md) | RETAINED | the fail-loud-scan-floor lint-gate pattern, cited by `tools/lint/gate_lib.sh` and its self-test |
+| [`utxo-mirror-authority-rewind.md`](./utxo-mirror-authority-rewind.md) | EVIDENCE | mirror-cursor-above-authority diagnosis (next-height cursors on both sides), the quarantine verdict, and the recovery experiment record |
 
 This table covers **every** tracked file in this directory. Reconcile it after
 adding one — `git ls-files docs/work/` minus the paths linked above must be

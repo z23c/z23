@@ -16,6 +16,9 @@
 #include "vcs/package_reproduce.h"
 #include "vcs/package_store.h"
 #include "vcs/package_transport.h"
+#include "vcs/source_package_checkout.h"
+#include "vcs/zcode_task_context.h"
+#include "platform/time_compat.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -321,5 +324,146 @@ bool boot_zcode_dht_attestation_pointer_publish_gate(
                  vcs_blob_result_string(outcome.blob_error),
                  vcs_package_attest_error_string(outcome.attest_error));
   gate_error(result, code, message);
+  return false;
+}
+
+/* ── work-solution POINTER gate ─────────────────────────────────────────
+ *
+ * The full doctrine is written at the attestation gate above and applies
+ * unchanged; this comment records only what differs.
+ *
+ * A POINTER in VCS_ZCODE_WORK_DHT_NAMESPACE claims "the package at
+ * transport_root SOLVES the task at semantic_root". The claim is honest
+ * from this node only when the package is held complete AND reconstructs
+ * to a verified accepted-work chain whose own task root is the pointer's
+ * semantic_root. vcs_zcode_work_solution_admit carries every one of those
+ * rules in one call; unlike the attestation gate it writes nothing —
+ * reconstruction happens in fresh private scratch that is removed before
+ * returning — so plan and commit are gated identically and read-only.
+ *
+ * A hostile node publishes any pointer it likes; the DHT carries it; the
+ * puller's vcs_zcode_work_solution_admit(expect_task_root) refusal is the
+ * only thing that has ever stopped a lying solution pointer. */
+bool boot_zcode_dht_work_pointer_publish_gate(
+    const struct vcs_zcode_dht_publish_spec *spec,
+    struct json_value *result) {
+  struct vcs_package_store *store = vcs_package_store_global();
+  if (!store) {
+    gate_error(result, "NO_PACKAGE_STORE",
+               "package hosting is disabled on this node; enable -packagehost=1"
+               " and hold the accepted source package before publishing its"
+               " work pointer");
+    return false;
+  }
+  uint8_t task_root[32], source_root[32], accepted_work_root[32];
+  enum vcs_zcode_work_admit_result admitted = vcs_zcode_work_solution_admit(
+      store, spec->transport_root, spec->semantic_root, task_root,
+      source_root, accepted_work_root);
+  if (admitted == VCS_ZCODE_WORK_ADMIT_OK)
+    return true;
+  char root_hex[65];
+  zcl_hex_encode(spec->transport_root, 32, root_hex);
+  if (admitted == VCS_ZCODE_WORK_ADMIT_TASK_MISMATCH) {
+    LOG_ERROR("net.zcode_dht",
+              "publish gate: package %s solves a different task than the"
+              " pointer names",
+              root_hex);
+    gate_error(result, "TASK_ROOT_NOT_BOUND",
+               "the package at transport_root reconstructs to a proven"
+               " accepted work for a DIFFERENT task than this pointer's"
+               " semantic_root; publish the package built from exactly this"
+               " task");
+    return false;
+  }
+  /* NOT_RECONSTRUCTIBLE and the never-in-practice NULL arm both land here:
+   * the checkout layer already names the exact rule, and the operator's
+   * next step is the same for every one of them — get the real package
+   * into this node's store first. */
+  LOG_ERROR("net.zcode_dht",
+            "publish gate: package %s does not reconstruct to a proven"
+            " accepted work",
+            root_hex);
+  gate_error(result, "WORK_NOT_RECONSTRUCTIBLE",
+             "the package at transport_root is not held complete, or does"
+             " not reconstruct to a verified accepted-work chain; accept the"
+             " work on this node (zcode work accept) and publish the"
+             " resulting source package root");
+  return false;
+}
+
+/* ── task-posting POINTER gate ──────────────────────────────────────────
+ *
+ * The full doctrine is written at the attestation gate above and applies
+ * unchanged; this comment records only what differs.
+ *
+ * A POINTER in VCS_ZCODE_TASK_DHT_NAMESPACE claims "the context package at
+ * transport_root POSTS the dev task whose root is semantic_root, and this
+ * node holds the bytes". The claim is honest from this node only when the
+ * carrier is held complete, re-derives to exactly the fixed three-file
+ * shape, re-passes every cross-binding (goal hashes to task.goal_root,
+ * policy wire roots to task.proof_policy_root), and proves a task that is
+ * LIVE at this instant — vcs_zcode_task_context_admit carries all of that
+ * in one read-only call, so plan and commit are gated identically. An
+ * expired task refuses here for the same reason it refuses at every
+ * puller: a posting nobody may start on is not one to advertise.
+ *
+ * A hostile node publishes any pointer it likes; the DHT carries it; the
+ * puller's vcs_zcode_task_context_admit(expect_task_root) refusal is the
+ * only thing that has ever stopped a lying task pointer. */
+bool boot_zcode_dht_task_pointer_publish_gate(
+    const struct vcs_zcode_dht_publish_spec *spec,
+    struct json_value *result) {
+  struct vcs_package_store *store = vcs_package_store_global();
+  if (!store) {
+    gate_error(result, "NO_PACKAGE_STORE",
+               "package hosting is disabled on this node; enable -packagehost=1"
+               " and export the task context (zcode task offer) before"
+               " publishing its task pointer");
+    return false;
+  }
+  struct vcs_zcode_task_v1 task;
+  enum vcs_zcode_task_context_error admitted =
+      vcs_zcode_task_context_admit(store, spec->transport_root,
+                                   spec->semantic_root,
+                                   (int64_t)platform_time_wall_unix(), &task,
+                                   NULL, NULL, 0, NULL, NULL);
+  if (admitted == VCS_ZCODE_TASK_CONTEXT_OK &&
+      spec->expiry <= (uint64_t)task.expires_unix)
+    return true;
+  char root_hex[65];
+  zcl_hex_encode(spec->transport_root, 32, root_hex);
+  if (admitted == VCS_ZCODE_TASK_CONTEXT_OK) {
+    LOG_ERROR("net.zcode_dht",
+              "publish gate: context %s task expires before pointer",
+              root_hex);
+    gate_error(result, "TASK_POINTER_OUTLIVES_TASK",
+               "pointer expiry exceeds the task's own expiry; shorten the"
+               " pointer window or export a fresh live task");
+    return false;
+  }
+  if (admitted == VCS_ZCODE_TASK_CONTEXT_TASK_MISMATCH) {
+    LOG_ERROR("net.zcode_dht",
+              "publish gate: context %s posts a different task than the"
+              " pointer names",
+              root_hex);
+    gate_error(result, "TASK_ROOT_NOT_BOUND",
+               "the context at transport_root re-verifies to a DIFFERENT task"
+               " than this pointer's semantic_root; export the context for"
+               " exactly this task (zcode task offer <task_root>)");
+    return false;
+  }
+  /* Every other arm — not held, wrong shape, failed cross-binding, expired
+     * task, store refusal — shares one operator next step, and the carrier
+     * layer already names the exact rule. */
+  char message[512];
+  (void)snprintf(message, sizeof(message),
+                 "the context at transport_root is not a live, verifiable"
+                 " task posting for this pointer's semantic_root (rule=%s);"
+                 " export it fresh with zcode task offer",
+                 vcs_zcode_task_context_error_string(admitted));
+  LOG_ERROR("net.zcode_dht", "publish gate: context %s failed task-context"
+                             " admit (%s)",
+            root_hex, vcs_zcode_task_context_error_string(admitted));
+  gate_error(result, "TASK_CONTEXT_NOT_VERIFIABLE", message);
   return false;
 }

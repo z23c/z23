@@ -1126,6 +1126,51 @@ void zcl_native_handle_zcode_package_attest_pull(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 
+/* zcode work transport leaves — how a proven accepted solution MOVES
+ * between nodes, keyed by the task it solves (native_zcode_work_transport_
+ * command.c). offer verifies one held source package reconstructs to a
+ * proven accepted work, derives the task root it solves, and returns the
+ * two ready-to-run publish inputs (PROVIDER on the package root, POINTER
+ * binding task root to it). pull resolves every published work-solution
+ * POINTER for one task root, fetches each distinct package, and re-derives
+ * each package's own task chain with expect_task_root ALWAYS set — that
+ * receiver-side binding check, not the publish gate, is what stops a
+ * hostile pointer delivering a solution to a different problem. Pulling is
+ * not accepting, and nothing is executed. Bound by config/commands/
+ * zcode.def. */
+void zcl_native_handle_zcode_work_offer(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_zcode_work_pull(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+
+/* zcode task transport leaves — how a posted dev task MOVES between nodes
+ * so a stranger can pick it up (native_zcode_task_transport_command.c).
+ * offer loads one task's three wires from the workspace CAS (task wire,
+ * goal preimage, proof policy — each re-hashed against its own address,
+ * since raw CAS loads do not verify), binds them into the fixed-layout
+ * task-context carrier, admits it to the package store, and returns the
+ * two ready-to-run publish inputs (PROVIDER on the context root, POINTER
+ * binding task root to it) for the task namespace. pull resolves every
+ * task POINTER for one task root, fetches each distinct context, and
+ * re-verifies it with expect_task_root ALWAYS set, returning the goal and
+ * proof policy a remote agent needs to start work. board lists what this
+ * node has seen posted in the task namespace (local seen-set projection,
+ * never a peer query), enriching every row whose context is held and
+ * verified. The task object is deliberately unsigned: authenticity of a
+ * posting is the signed record pair; integrity is the root. Bound by
+ * config/commands/zcode.def. */
+void zcl_native_handle_zcode_task_offer(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_zcode_task_pull(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_zcode_task_board(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+
 /* zcode attestation admit — the third transport leaf, and the one that
  * decouples carriage from the DHT. It admits ONE attestation blob this
  * node ALREADY HOLDS, named directly by its transport root: the bytes are
