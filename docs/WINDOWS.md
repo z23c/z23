@@ -7,31 +7,27 @@ vendored archives.
 
 | Lane | Purpose | Artifact status |
 | --- | --- | --- |
-| MSYS2 UCRT64 | Native C23 editing, GCC/Clang diagnostics, and the ongoing Win32 port | Native Windows `.exe`; the full node is not yet linkable |
+| MSYS2 UCRT64 | Native C23 build, GCC/Clang diagnostics, and the ongoing Win32 port | GCC builds the native `z23.exe`; Clang and runtime acceptance remain in progress |
 | WSL2 Ubuntu | Build, test, and operate the complete node today | Linux ELF running under WSL2 |
 
-The UCRT64 bootstrap, source-identity checks, compile-epoch leases, OpenSSL,
-SQLite, zlib, libevent, and LevelDB builds are supported.
+The UCRT64 bootstrap, source-identity checks, compile-epoch leases, pinned
+static C dependencies, and canonical GCC node build are supported. The built
+binary is a native x86-64 PE named `build/bin/z23.exe`; its release audit
+allows only declared Windows system DLLs. Some optional package, snapshot, and
+agent operations still refuse where their Windows capability backend is not
+qualified. The agent adapter is deliberately unavailable because Windows
+confinement is not yet implemented. Never weaken those refusals to obtain a
+green build.
 
-What actually blocks the full native node was measured, not assumed. Almost
-every one of the node's translation units already cross-compiles for Windows,
-and the process, signal, socket and filesystem adapters this page once named
-as the blockers resolve cleanly — the platform seam covers them. What is left
-is a much shorter list:
-
-- The vendored third-party archives — SQLite above all, then OpenSSL,
-  libsecp256k1, zlib, LevelDB, and the Tor stub. These build natively under
-  UCRT64 today; what does not exist is a path to cross-build them from Linux,
-  because the vendor script decides POSIX-versus-Windows from the machine it
-  is running on rather than from the compiler it was handed.
-- A handful of the node's own functions that are still defined only outside
-  Windows while a Windows caller still reaches them.
-- Two POSIX facilities with no mingw equivalent yet: a temporary-directory
-  call, and POSIX regular expressions in the node-log reader. The latter wants
-  a small in-tree matcher rather than a dependency.
-
-The agent adapter is deliberately unavailable because Windows confinement is
-not yet implemented. Never weaken that refusal to obtain a green build.
+One limit is worth stating plainly, because it decides where the work can
+happen rather than whether it works. The vendored third-party archives —
+SQLite, OpenSSL, libsecp256k1, zlib, LevelDB, and the Tor stub — build
+natively under UCRT64, and that is the only way they can be built. There is
+no path to cross-build them from Linux, because `tools/scripts/build_vendor.sh`
+decides POSIX-versus-Windows from `uname -s`, the machine it is running on,
+rather than from the target of the compiler it was handed in `VENDOR_CC`. So
+a Windows artifact needs a Windows machine, and a Linux host cannot stand in
+for one.
 
 ## Native UCRT64 lane
 
@@ -45,7 +41,8 @@ pacman -S --needed base-devel git \
   mingw-w64-ucrt-x86_64-clang \
   mingw-w64-ucrt-x86_64-clang-tools-extra \
   mingw-w64-ucrt-x86_64-cmake \
-  mingw-w64-ucrt-x86_64-ninja
+  mingw-w64-ucrt-x86_64-ninja \
+  mingw-w64-ucrt-x86_64-libsystre
 ```
 
 Keep the checkout on the Windows filesystem rather than inside the
@@ -61,6 +58,8 @@ code .
 tools/scripts/doctor.sh
 tools/scripts/build_vendor.sh
 tools/dev/source-identity-selftest.sh
+make -j"$(getconf _NPROCESSORS_ONLN)" z23
+make windows-acceptance
 ```
 
 Use both native compilers for focused C23 work:

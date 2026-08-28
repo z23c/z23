@@ -35,11 +35,6 @@ void fs_session_init(struct fs_session *s, platform_socket_t fd)
     s->fd = fd;
 }
 
-void fs_session_cleanup(struct fs_session *s)
-{
-    if (s) memset(s, 0, sizeof(*s));
-}
-
 double fs_session_mbps(const struct fs_session *s) { (void)s; return 0.0; }
 
 #if defined(__GNUC__)
@@ -49,11 +44,6 @@ double fs_session_mbps(const struct fs_session *s) { (void)s; return 0.0; }
 #define FS_WINDOWS_TRANSPORT_REFUSAL(name_, args_) \
     bool name_ args_ { errno = ENOTSUP; return false; }
 
-FS_WINDOWS_TRANSPORT_REFUSAL(fs_handshake,
-    (struct fs_session *s, const uint8_t root[32], bool initiator))
-FS_WINDOWS_TRANSPORT_REFUSAL(fs_handshake_until,
-    (struct fs_session *s, const uint8_t root[32], bool initiator,
-     int64_t deadline))
 FS_WINDOWS_TRANSPORT_REFUSAL(fs_send_frame,
     (struct fs_session *s, uint8_t type, const uint8_t *p, uint32_t n))
 FS_WINDOWS_TRANSPORT_REFUSAL(fs_send_frame_until,
@@ -72,16 +62,6 @@ FS_WINDOWS_TRANSPORT_REFUSAL(fs_send_chunk_refusal,
 FS_WINDOWS_TRANSPORT_REFUSAL(fs_recv_chunk_fast,
     (struct fs_session *s, uint8_t **p, uint32_t *n,
      const uint8_t digest[32]))
-FS_WINDOWS_TRANSPORT_REFUSAL(fs_send_chunk_private,
-    (struct fs_session *s, const uint8_t *p, uint32_t n,
-     const uint8_t digest[32]))
-FS_WINDOWS_TRANSPORT_REFUSAL(fs_recv_chunk_private,
-    (struct fs_session *s, uint8_t **p, uint32_t *n, uint32_t expected,
-     const uint8_t digest[32]))
-FS_WINDOWS_TRANSPORT_REFUSAL(fs_recv_chunk_private_until,
-    (struct fs_session *s, uint8_t **p, uint32_t *n, uint32_t expected,
-     const uint8_t digest[32], int64_t deadline))
-
 #undef FS_WINDOWS_TRANSPORT_REFUSAL
 #if defined(__GNUC__)
 #pragma GCC diagnostic pop

@@ -79,7 +79,9 @@ bool platform_directory_watcher_open(struct platform_directory_watcher *w,
         (s->event = CreateEventW(NULL, TRUE, FALSE, NULL)) != NULL && arm(s);
     if (!ok) {
         if (s->directory != INVALID_HANDLE_VALUE) CloseHandle(s->directory);
-        if (s->event) CloseHandle(s->event); free(s); return false;
+        if (s->event) CloseHandle(s->event);
+        free(s);
+        return false;
     }
     w->native = (uintptr_t)s; return true;
 }

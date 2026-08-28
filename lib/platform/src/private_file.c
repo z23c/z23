@@ -34,6 +34,9 @@ static bool pf_wide(const char *utf8, wchar_t out[32768]) {
                               32768);
   if (n <= 0)
     return false;
+  for (int i = 0; i < n - 1; i++)
+    if (plain[i] == L'/')
+      plain[i] = L'\\';
   if (wcsncmp(plain, L"\\\\?\\", 4) == 0) {
     wmemcpy(out, plain, (size_t)n);
     return true;

@@ -120,7 +120,22 @@ bool platform_private_directory_publish_no_clobber(
 bool platform_private_directory_remove_empty(const char *path)
 {
     wchar_t wide[32768];
-    return private_directory_wide(path, wide) && RemoveDirectoryW(wide) != 0;
+    if (!private_directory_wide(path, wide)) return false;
+    for (unsigned attempt = 0; attempt < 250u; attempt++) {
+        if (RemoveDirectoryW(wide)) return true;
+        DWORD error = GetLastError();
+        if (error != ERROR_DIR_NOT_EMPTY && error != ERROR_ACCESS_DENIED) {
+            errno = error == ERROR_PATH_NOT_FOUND || error == ERROR_FILE_NOT_FOUND
+                        ? ENOENT : EIO;
+            return false;
+        }
+        /* Windows completes delete-pending namespace operations only after
+         * every sharing handle closes.  Bound this wait to 250 ms and retry
+         * only the two errors that can represent that transient state. */
+        Sleep(1);
+    }
+    errno = EBUSY;
+    return false;
 }
 
 bool platform_private_directory_open_validated(const char *path,
