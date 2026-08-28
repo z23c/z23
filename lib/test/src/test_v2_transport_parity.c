@@ -23,6 +23,7 @@
  * function (see test_connect_node_locked.c for the same convention). */
 
 #include "test/test_core.h"
+#include "base/hex.h"
 #include "net/v2_identity.h"
 #include "net/v2_transport.h"
 
@@ -373,6 +374,25 @@ int test_v2_transport_parity(void)
                                                sizeof(err)));
             ASSERT(memcmp(priv1, priv2, 32) == 0);
             ASSERT(memcmp(pub1, pub2, 32) == 0);
+            uint8_t fingerprint1[32], fingerprint2[32], zero[32] = {0};
+            ASSERT(v2_identity_public_fingerprint(pub1, fingerprint1));
+            ASSERT(v2_identity_public_fingerprint(pub2, fingerprint2));
+            ASSERT(memcmp(fingerprint1, fingerprint2, 32) == 0);
+            pub2[0] ^= 1;
+            ASSERT(v2_identity_public_fingerprint(pub2, fingerprint2));
+            ASSERT(memcmp(fingerprint1, fingerprint2, 32) != 0);
+            ASSERT(!v2_identity_public_fingerprint(zero, fingerprint2));
+            ASSERT(!v2_identity_public_fingerprint(NULL, fingerprint2));
+            uint8_t kat_public[32];
+            for (size_t i = 0; i < sizeof(kat_public); i++)
+                kat_public[i] = (uint8_t)i;
+            ASSERT(v2_identity_public_fingerprint(kat_public, fingerprint2));
+            char fingerprint_hex[65];
+            zcl_hex_encode(fingerprint2, sizeof(fingerprint2),
+                           fingerprint_hex);
+            ASSERT(strcmp(fingerprint_hex,
+                          "69fb527161c541eeceeb9809b9ce40d7"
+                          "610cba4a65655bbd3c56bebb5786f34e") == 0);
             char path[256];
             snprintf(path, sizeof(path), "%s/v2_identity.key", dir);
             struct stat st;

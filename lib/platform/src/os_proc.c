@@ -39,6 +39,72 @@
 
 #define OS_PROC_CGROUP_ROOT "/sys/fs/cgroup"
 
+static bool os_proc_ascii_contains_ci(const char *text, const char *needle)
+{
+    if (!text || !needle || !needle[0])
+        return false;
+    for (const char *start = text; *start; start++) {
+        const char *a = start;
+        const char *b = needle;
+        while (*a && *b) {
+            unsigned char ca = (unsigned char)*a;
+            unsigned char cb = (unsigned char)*b;
+            if (ca >= 'A' && ca <= 'Z') ca = (unsigned char)(ca + 'a' - 'A');
+            if (cb >= 'A' && cb <= 'Z') cb = (unsigned char)(cb + 'a' - 'A');
+            if (ca != cb) break;
+            a++;
+            b++;
+        }
+        if (!*b) return true;
+    }
+    return false;
+}
+
+enum os_proc_environment
+os_proc_environment_classify_kernel_release(const char *release)
+{
+    if (!release || !release[0])
+        return OS_PROC_ENVIRONMENT_UNKNOWN;
+    if (os_proc_ascii_contains_ci(release, "microsoft") ||
+        os_proc_ascii_contains_ci(release, "wsl"))
+        return OS_PROC_ENVIRONMENT_WSL;
+    return OS_PROC_ENVIRONMENT_NATIVE;
+}
+
+enum os_proc_environment os_proc_environment_observe(void)
+{
+#if defined(_WIN32)
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    if (ntdll && GetProcAddress(ntdll, "wine_get_version"))
+        return OS_PROC_ENVIRONMENT_WINE;
+    return OS_PROC_ENVIRONMENT_NATIVE;
+#elif defined(__linux__)
+    FILE *file = fopen("/proc/sys/kernel/osrelease", "r");
+    char release[256] = {0};
+    if (!file || !fgets(release, sizeof(release), file)) {
+        if (file) fclose(file);
+        return OS_PROC_ENVIRONMENT_UNKNOWN;
+    }
+    fclose(file);
+    return os_proc_environment_classify_kernel_release(release);
+#elif defined(__APPLE__)
+    return OS_PROC_ENVIRONMENT_NATIVE;
+#else
+    return OS_PROC_ENVIRONMENT_UNKNOWN;
+#endif
+}
+
+const char *os_proc_environment_string(enum os_proc_environment environment)
+{
+    switch (environment) {
+    case OS_PROC_ENVIRONMENT_NATIVE: return "native";
+    case OS_PROC_ENVIRONMENT_WSL: return "wsl";
+    case OS_PROC_ENVIRONMENT_WINE: return "wine";
+    case OS_PROC_ENVIRONMENT_UNKNOWN: return "unknown";
+    }
+    return "unknown";
+}
+
 enum os_proc_liveness os_proc_pid_liveness(uint64_t pid)
 {
     if (pid == 0 || pid > UINT32_MAX)

@@ -4,6 +4,7 @@
 #include "net/v2_identity.h"
 
 #include "crypto/curve25519.h"
+#include "crypto/sha3.h"
 #include "crypto/random_secret.h"
 #include "platform/positioned_file.h"
 #include "platform/private_file.h"
@@ -15,6 +16,27 @@
 #include <string.h>
 
 static _Atomic uint64_t g_v2_identity_temp_sequence;
+
+bool v2_identity_public_fingerprint(const uint8_t public_key[32],
+                                    uint8_t fingerprint_out[32])
+{
+    if (!public_key || !fingerprint_out)
+        return false;
+    uint8_t nonzero = 0;
+    for (size_t i = 0; i < 32; i++)
+        nonzero |= public_key[i];
+    if (nonzero == 0)
+        return false;
+
+    static const unsigned char domain[] =
+        "zcl.noise.static.fingerprint.v1";
+    struct sha3_256_ctx hash;
+    sha3_256_init(&hash);
+    sha3_256_write(&hash, domain, sizeof(domain) - 1);
+    sha3_256_write(&hash, public_key, 32);
+    sha3_256_finalize(&hash, fingerprint_out);
+    return true;
+}
 
 static bool identity_error(char *out, size_t cap, const char *what)
 {
