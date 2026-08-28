@@ -99,4 +99,4 @@ app/services/src/build_fabric_worker.c 860
 
 # 2026-08-27: the fabric action scan moved off the thread stack onto a
 # named buffer; this reviewed baseline is a hard no-growth ceiling.
-app/services/src/build_fabric_service.c 819
+app/services/src/build_fabric_service.c 799

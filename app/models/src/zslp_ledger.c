@@ -214,6 +214,53 @@ int64_t zslp_ledger_balance(struct node_db *ndb, const uint8_t token_id[32],
         AR_BIND_BLOB(s, 2, address, 20));
 }
 
+struct zslp_outpoint_read {
+    uint8_t token_id[32];
+    int token_id_len;
+    int64_t amount;
+    int role;
+    bool spent;
+};
+
+static int zslp_ledger_read_outpoint(struct node_db *ndb,
+                                     const uint8_t txid[32], uint32_t vout,
+                                     struct zslp_outpoint_read out[2])
+{
+    sqlite3_stmt *s = NULL;
+    AR_QUERY_LIST(ndb, s,
+        "SELECT token_id,amount,role,spent_by_txid FROM zslp_ledger "
+        "WHERE txid=? AND vout=? LIMIT 2", out, 2,
+        AR_BIND_BLOB(s, 1, txid, 32);
+        AR_BIND_INT(s, 2, vout),
+        out[count].token_id_len = AR_COL_BYTES(s, 0);
+        if (out[count].token_id_len == 32)
+            AR_READ_BLOB(s, 0, out[count].token_id, 32);
+        out[count].amount = AR_COL_INT(s, 1);
+        out[count].role = (int)AR_COL_INT(s, 2);
+        out[count].spent = sqlite3_column_type(s, 3) != SQLITE_NULL);
+}
+
+enum zslp_ledger_outpoint_state zslp_ledger_token_outpoint_state(
+    struct node_db *ndb, const uint8_t txid[32], uint32_t vout,
+    const uint8_t token_id[32], uint64_t amount)
+{
+    if (!ndb || !ndb->open || !txid || !token_id || amount > INT64_MAX) {
+        LOG_WARN("zslp_ledger", "outpoint lookup rejected invalid arguments");
+        return ZSLP_LEDGER_OUTPOINT_ERROR;
+    }
+    struct zslp_outpoint_read rows[2];
+    int count = zslp_ledger_read_outpoint(ndb, txid, vout, rows);
+    if (count == 0)
+        return ZSLP_LEDGER_OUTPOINT_ABSENT;
+    if (count != 1 || rows[0].token_id_len != 32 ||
+        memcmp(rows[0].token_id, token_id, 32) != 0 ||
+        rows[0].amount != (int64_t)amount ||
+        rows[0].role != ZSLP_LEDGER_TOKEN)
+        return ZSLP_LEDGER_OUTPOINT_MISMATCH;
+    return rows[0].spent ? ZSLP_LEDGER_OUTPOINT_SPENT
+                         : ZSLP_LEDGER_OUTPOINT_UNSPENT_TOKEN;
+}
+
 /* ── as-of-height reads (the reproducible half of a token gate) ────────
  *
  * Every row already carries created_height and (once consumed) spent_height,

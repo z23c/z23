@@ -77,7 +77,7 @@ struct wal_ckpt_stats {
 
     /* The last attempt, from any source. */
     int64_t     last_unix;
-    int64_t     last_log_frames;
+    int64_t     last_log_frames;  /* total frames observed in the WAL */
     int64_t     last_ckpt_frames;
     int         last_rc;
     const char *last_outcome;  /* static, from wal_ckpt_outcome_name() */

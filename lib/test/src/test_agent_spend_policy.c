@@ -1091,17 +1091,14 @@ static int test_canonical_intent_session(void)
         ASSERT_EQ(charged, 0);
         ASSERT_EQ(spent_now(f, k_sid_a), 1910000);
 
-        /* Virtual time. These transitions only record updated_at, which
-         * nothing here reads back, so the verdict must not depend on when
-         * the test happened to run. A fixed stamp keeps it deterministic on
-         * a loaded or slow box. */
-        const int64_t asp_at = INT64_C(1750000000);
+        /* Derive transition stamps from the stored row so the verdict does
+         * not depend on wall-clock scheduling on a loaded or slow host. */
 
         /* A known pre-broadcast terminal failure releases the marker and
          * window. A network-accepted transaction never does. */
         ASSERT(vault_intent_set_state(&f->ndb, row.plan_id,
             VAULT_INTENT_FAILED, NULL, "EXACT_BUILD_FAILED",
-            asp_at));
+            row.created_at + 1));
         ASSERT(agent_session_service_release_bound_intent(
             &f->ndb, row.plan_id));
         ASSERT_EQ(spent_now(f, k_sid_a), 0);
@@ -1110,13 +1107,13 @@ static int test_canonical_intent_session(void)
 
         ASSERT(vault_intent_set_state(&f->ndb, row.plan_id,
             VAULT_INTENT_PLANNED, NULL, "",
-            asp_at));
+            row.created_at + 2));
         ASSERT(agent_session_client_authorize_intent(
             k_sid_a, k_plan_a, &managed, &charged, why, sizeof(why)));
         ASSERT_EQ(charged, 1910000);
         ASSERT(vault_intent_set_state(&f->ndb, row.plan_id,
             VAULT_INTENT_MEMPOOL_ACCEPTED, row.txid, "",
-            asp_at));
+            row.created_at + 3));
         ASSERT(agent_session_service_release_bound_intent(
             &f->ndb, row.plan_id));
         ASSERT_EQ(spent_now(f, k_sid_a), 1910000);

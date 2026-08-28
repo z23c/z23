@@ -893,12 +893,17 @@ static int64_t rom_bundle_height_from_name(const char *filename)
 size_t rom_seed_directory_json(char *buf, size_t max)
 {
     if (!buf || max == 0) return 0;
-    struct rom_artifact arts[ROM_SEED_MAX_ARTIFACTS];
+    /* ~1MB of whole artifacts (see rom_seed_dump_state_json): heap, not
+     * stack — the file-service threads run on default 512KB stacks. */
+    struct rom_artifact *arts = zcl_calloc(ROM_SEED_MAX_ARTIFACTS,
+                                           sizeof(*arts),
+                                           "rom_seed_directory_artifacts");
+    if (!arts) return 0;
     int n = rom_seed_list(arts, ROM_SEED_MAX_ARTIFACTS);
 
     size_t off = 0;
     int w = snprintf(buf + off, max - off, "[");
-    if (w < 0 || (size_t)w >= max - off) return 0;
+    if (w < 0 || (size_t)w >= max - off) { free(arts); return 0; }
     off += (size_t)w;
 
     int emitted = 0;
@@ -926,8 +931,9 @@ size_t rom_seed_directory_json(char *buf, size_t max)
     }
 
     w = snprintf(buf + off, max - off, "]");
-    if (w < 0 || (size_t)w >= max - off) return 0;
+    if (w < 0 || (size_t)w >= max - off) { free(arts); return 0; }
     off += (size_t)w;
+    free(arts);
     return off;
 }
 
@@ -1045,7 +1051,18 @@ bool rom_seed_dump_state_json(struct json_value *out, const char *key)
     json_push_kv_int(out, "unique_peers_served", (int64_t)unique_peers);
     json_push_kv_int(out, "current_bps", (int64_t)cur_bps);
 
-    struct rom_artifact arts[ROM_SEED_MAX_ARTIFACTS];
+    /* A whole-artifact listing is ~1MB (each entry carries the
+     * chunk_sha3[ROM_SEED_MAX_CHUNKS][32] digest table), past every default
+     * 512KB thread stack: the supervisor-stall auto-capture worker faulted in
+     * ___chkstk_darwin probing this dumper's frame. Heap, not stack — same as
+     * rom_seed_announce_all above. */
+    struct rom_artifact *arts = zcl_calloc(ROM_SEED_MAX_ARTIFACTS,
+                                           sizeof(*arts),
+                                           "rom_seed_dump_artifacts");
+    if (!arts) {
+        diag_push_health(out, false, "artifact snapshot allocation failed");
+        return false;
+    }
     int n = rom_seed_list(arts, ROM_SEED_MAX_ARTIFACTS);
     json_push_kv_int(out, "artifact_count", n);
 
@@ -1068,6 +1085,7 @@ bool rom_seed_dump_state_json(struct json_value *out, const char *key)
     }
     json_push_kv(out, "artifacts", &arr);
     json_free(&arr);
+    free(arts);
 
     bool ok = atomic_load(&g_enabled);
     diag_push_health(out, ok,

@@ -68,13 +68,16 @@
  * folded the whole log away — so the frame counts, not the return value, are
  * what tells an operator whether reclamation is happening.
  *
- * The engine also reports internal contention as a SUCCESSFUL call whose
- * result row carries a busy flag, so `busy` is a third distinct state: the
- * checkpoint never ran, and nothing about the WAL changed. */
+ * `truncate_rc` separately records whether the second-stage filesystem reset
+ * succeeded. BUSY/LOCKED there is nonfatal after PASSIVE already moved the
+ * frames; any other TRUNCATE error makes the operation fail. */
 struct db_maintenance_wal_outcome {
-    int64_t log_frames;   /* frames left in the WAL afterwards; -1 unknown */
+    int64_t log_frames;   /* total frames observed in the WAL;    -1 unknown */
     int64_t ckpt_frames;  /* frames folded into the database;   -1 unknown */
-    bool    busy;         /* a lock refused or deferred the checkpoint     */
+    int     rc;           /* effective SQLite result for the whole request */
+    int     truncate_rc;  /* exact file-reset result; -1 when not attempted */
+    bool    busy;         /* PASSIVE was refused by a lock                  */
+    bool    truncated;    /* the second-stage file reset returned OK       */
 };
 
 struct db_maintenance_port {

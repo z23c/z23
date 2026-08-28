@@ -1,3 +1,5 @@
+<!-- Copyright 2026 Rhett Creighton - Apache License 2.0 -->
+
 # NEON_CRYPTO_MATRIX — crypto acceleration across x86-64 and arm64
 
 Status: work-document. Owner: the arm64/NEON crypto lane. It records, for

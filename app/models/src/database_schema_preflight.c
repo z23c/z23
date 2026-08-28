@@ -11,7 +11,6 @@
 
 #include "models/database_internal.h"
 #include "platform/fd_path.h"
-#include "platform/file_compat.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -48,8 +47,7 @@ static bool read_header(int fd, unsigned char header[20])
 {
     size_t off = 0;
     while (off < 20) {
-        ssize_t n = platform_file_pread(fd, header + off, 20 - off,
-                                       (int64_t)off);
+        ssize_t n = pread(fd, header + off, 20 - off, (off_t)off);
         if (n > 0) {
             off += (size_t)n;
             continue;
@@ -309,7 +307,7 @@ struct node_db_schema_preflight node_db_schema_preflight_existing(
         return preflight_result(NODE_DB_SCHEMA_PREFLIGHT_FRESH, 0,
                                 "empty database file");
 
-    int fd = platform_file_open_nofollow(path, O_RDONLY, 0);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0)
         return preflight_result(NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN, 0,
             "SCHEMA_VERSION_UNKNOWN: database file cannot be read");

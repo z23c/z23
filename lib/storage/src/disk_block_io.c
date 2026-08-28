@@ -4,7 +4,6 @@
  * Distributed under the MIT software license, see the accompanying
  * file COPYING or http://www.opensource.org/licenses/mit-license.php. */
 #include "storage/disk_block_io.h"
-#include "storage/disk_block_datadir_guard.h"
 #include "core/serialize.h"
 #include "core/hash.h"
 #include "util/log_macros.h"
@@ -641,10 +640,10 @@ bool read_block_from_disk_pread_profiled(struct block *b,
     int64_t read_started = platform_time_monotonic_us();
     block_init(b);
 
-    if (!pos || pos->nFile < 0)
-        LOG_FAIL("disk_block_io", "read_block_pread: invalid pos=%p", (const void *)pos);
-    if (!disk_block_datadir_ok_or_refuse(datadir, pos->nFile, pos->nPos))
-        return false;  // raw-return-ok:throttled-named-refusal-replaces-LOG_FAIL
+    if (!datadir || !pos || pos->nFile < 0)
+        LOG_FAIL("disk_block_io",
+                 "read_block_pread: invalid arguments (datadir=%p pos=%p)",
+                 (const void *)datadir, (const void *)pos);
 
     char path[512];
     get_block_pos_filename(path, sizeof(path), datadir, pos, "blk");

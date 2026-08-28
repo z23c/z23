@@ -108,7 +108,7 @@ int test_db_maintenance_port(void)
                    db_maintenance_sqlite_bind(&ctx, db, &port));
 
         char err[256] = "sentinel";
-        struct db_maintenance_wal_outcome wal = { 0, 0, true };
+        struct db_maintenance_wal_outcome wal = {0};
         DBMP_CHECK("wal_checkpoint ok",
                    port.wal_checkpoint(port.self, &wal, err, sizeof err));
         DBMP_CHECK("wal_checkpoint clears err on success", err[0] == 0);
@@ -126,6 +126,9 @@ int test_db_maintenance_port(void)
         DBMP_CHECK("wal_checkpoint drained the whole log",
                    wal.ckpt_frames >= wal.log_frames);
         DBMP_CHECK("wal_checkpoint was not busy", !wal.busy);
+        DBMP_CHECK("wal_checkpoint records SQLITE_OK", wal.rc == SQLITE_OK);
+        DBMP_CHECK("wal_checkpoint records file reset",
+                   wal.truncate_rc == SQLITE_OK && wal.truncated);
         DBMP_CHECK("a drain classifies as drained",
                    wal_ckpt_classify(true, wal.busy, wal.log_frames,
                                      wal.ckpt_frames) == WAL_CKPT_DRAINED);
@@ -133,7 +136,7 @@ int test_db_maintenance_port(void)
         /* Immediately re-checkpointing an already-drained WAL moves zero
          * frames. That is a NO-OP, and it must not read as a drain of a WAL
          * that had something in it. */
-        struct db_maintenance_wal_outcome again = { -1, -1, true };
+        struct db_maintenance_wal_outcome again = {0};
         DBMP_CHECK("second checkpoint also succeeds",
                    port.wal_checkpoint(port.self, &again, err, sizeof err));
         DBMP_CHECK("second checkpoint moved nothing",
@@ -199,7 +202,7 @@ int test_db_maintenance_port(void)
         /* A non-WAL connection has no log to reclaim; the engine reports the
          * frame counts as unknown rather than as zero, and the outcome is
          * UNKNOWN — never a claimed drain. */
-        struct db_maintenance_wal_outcome wal = { 0, 0, true };
+        struct db_maintenance_wal_outcome wal = {0};
         DBMP_CHECK("memdb wal_checkpoint ok",
                    port.wal_checkpoint(port.self, &wal, err, sizeof err));
         DBMP_CHECK("memdb wal_checkpoint reports unknown counts",
@@ -229,12 +232,15 @@ int test_db_maintenance_port(void)
         DBMP_CHECK("bind NULL conn ok",
                    db_maintenance_sqlite_bind(&ctx, NULL, &port));
         char err[256] = "";
-        struct db_maintenance_wal_outcome wal = { 0, 0, false };
+        struct db_maintenance_wal_outcome wal = {0};
         DBMP_CHECK("wal_checkpoint NULL db false",
                    !port.wal_checkpoint(port.self, &wal, err, sizeof err));
         DBMP_CHECK("wal_checkpoint NULL db fills err", err[0] != 0);
         DBMP_CHECK("wal_checkpoint NULL db reports unknown counts",
                    wal.log_frames == -1 && wal.ckpt_frames == -1);
+        DBMP_CHECK("wal_checkpoint NULL db records misuse",
+                   wal.rc == SQLITE_MISUSE && wal.truncate_rc == -1 &&
+                   !wal.truncated);
         DBMP_CHECK("analyze NULL db false",
                    !port.analyze(port.self, err, sizeof err));
         DBMP_CHECK("vacuum NULL db false",

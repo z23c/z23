@@ -1850,7 +1850,17 @@ static bool activate_from_sealed_fd(int fd,
         .unmap = dev_unmap_module,
         .hooks = hooks,
     };
-    (void)hotswap_commit_image(&commit);
+    if (!hotswap_commit_image(&commit)) {
+        /* The registry publish succeeded, but a newer publish for this source
+         * won before image ownership was recorded. The commit path owns and
+         * safely retires this stale mapping; it is not the live activation
+         * this caller requested and must not be reported as success. */
+        report->activated = false;
+        return act_reject(report, "superseded",
+                          "registry generation %u was superseded before the "
+                          "image ownership commit",
+                          report->generation);
+    }
     return true;
 }
 

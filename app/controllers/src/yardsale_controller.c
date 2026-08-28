@@ -296,68 +296,6 @@ int yardsale_pending_count(int64_t now_unix)
     return count;
 }
 
-/* ── Buyer outcome ring ──────────────────────────────────────────── */
-
-/* A begun buy outlives its pending row: the row is consumed the moment a
- * partial arrives, but the wallet's committed replay must still learn how
- * the ceremony ENDED. This bounded ring is that memory, keyed by
- * quote_root: buyer_begin resets the root to in-flight, and every
- * partial-ingest terminal path records completed or failed. Thirty-two
- * roots of recent history; eviction and restart both read as unknown,
- * which the wallet answers conservatively (stay committed). */
-#define YARDSALE_OUTCOME_RING_MAX 32
-struct yardsale_outcome {
-    bool used;
-    uint8_t quote_root[32];
-    int outcome; /* enum yardsale_buy_outcome, carried as int */
-};
-static struct yardsale_outcome g_outcomes[YARDSALE_OUTCOME_RING_MAX];
-static size_t g_outcome_cursor;
-
-/* Caller holds g_yardsale_mutex. One entry per root: a record for a root
- * the ring already holds updates that entry in place (begin resets it to
- * in-flight, the terminal path moves it on); only an unseen root claims
- * the next ring slot, evicting the oldest once the ring wraps. */
-static void outcome_record_locked(const uint8_t quote_root[32], int outcome)
-{
-    for (size_t i = 0; i < YARDSALE_OUTCOME_RING_MAX; i++) {
-        if (g_outcomes[i].used &&
-            memcmp(g_outcomes[i].quote_root, quote_root, 32) == 0) {
-            g_outcomes[i].outcome = outcome;
-            return;
-        }
-    }
-    struct yardsale_outcome *slot =
-        &g_outcomes[g_outcome_cursor++ % YARDSALE_OUTCOME_RING_MAX];
-    slot->used = true;
-    memcpy(slot->quote_root, quote_root, 32);
-    slot->outcome = outcome;
-}
-
-static void outcome_record(const uint8_t quote_root[32], int outcome)
-{
-    pthread_mutex_lock(&g_yardsale_mutex);
-    outcome_record_locked(quote_root, outcome);
-    pthread_mutex_unlock(&g_yardsale_mutex);
-}
-
-int yardsale_ceremony_buy_outcome(const uint8_t quote_root[32])
-{
-    if (!quote_root)
-        return YARDSALE_BUY_OUTCOME_UNKNOWN;
-    pthread_mutex_lock(&g_yardsale_mutex);
-    int found = YARDSALE_BUY_OUTCOME_UNKNOWN;
-    for (size_t i = 0; i < YARDSALE_OUTCOME_RING_MAX; i++) {
-        if (g_outcomes[i].used &&
-            memcmp(g_outcomes[i].quote_root, quote_root, 32) == 0) {
-            found = g_outcomes[i].outcome;
-            break;
-        }
-    }
-    pthread_mutex_unlock(&g_yardsale_mutex);
-    return found;
-}
-
 /* ── Seller side ─────────────────────────────────────────────────── */
 
 enum yardsale_error yardsale_seller_handle_accept_wire(
@@ -488,7 +426,6 @@ enum yardsale_error yardsale_buyer_begin(
     for (size_t i = 0; i < num_keys; i++)
         slot->input_keys[i] = input_keys[i];
     slot->deadline_unix = ad->expires_unix;
-    outcome_record_locked(accept.quote_root, YARDSALE_BUY_OUTCOME_IN_FLIGHT);
     pthread_mutex_unlock(&g_yardsale_mutex);
 
     g_flood(ZSWAP_MSG_ACCEPT, wire_out, len, g_flood_ctx);
@@ -606,7 +543,6 @@ int yardsale_ceremony_partial_ingest(const uint8_t *wire, size_t wire_len,
         LOG_WARN("yardsale", "zswappartial rejected (%s) — the buy is off; "
                  "no transaction exists and nothing was lost",
                  zswap_ceremony_error_string(e));
-        outcome_record(partial.quote_root, YARDSALE_BUY_OUTCOME_FAILED);
         memory_cleanse(buy.input_keys, sizeof(buy.input_keys));
         return ZSWAP_CEREMONY_WIRE_DROP;
     }
@@ -621,7 +557,6 @@ int yardsale_ceremony_partial_ingest(const uint8_t *wire, size_t wire_len,
     if (!g_prevout_fetch) {
         LOG_WARN("yardsale", "prevout port unwired — refusing to sign a "
                  "swap whose token input was never chain-checked");
-        outcome_record(partial.quote_root, YARDSALE_BUY_OUTCOME_FAILED);
         memory_cleanse(buy.input_keys, sizeof(buy.input_keys));
         transaction_free(&tx);
         return ZSWAP_CEREMONY_WIRE_DROP;
@@ -630,7 +565,9 @@ int yardsale_ceremony_partial_ingest(const uint8_t *wire, size_t wire_len,
     memset(&token_tx, 0, sizeof(token_tx));
     struct zcl_result fetched =
         g_prevout_fetch(g_prevout_fetch_ctx,
-                        partial.seller.token_input.txid, &token_tx);
+                        partial.seller.token_input.txid,
+                        partial.seller.token_input.vout, buy.ad.token_id,
+                        buy.ad.token_amount, &token_tx);
     bool token_ok = fetched.ok &&
         partial.seller.token_input.vout < token_tx.num_vout;
     const struct tx_out *claimed =
@@ -655,7 +592,6 @@ int yardsale_ceremony_partial_ingest(const uint8_t *wire, size_t wire_len,
                  "holder of the ad's exact token — the swap names money "
                  "this chain does not hold; the buy is off (%s)",
                  fetched.ok ? "content mismatch" : fetched.message);
-        outcome_record(partial.quote_root, YARDSALE_BUY_OUTCOME_FAILED);
         memory_cleanse(buy.input_keys, sizeof(buy.input_keys));
         transaction_free(&tx);
         return ZSWAP_CEREMONY_WIRE_DROP;
@@ -690,18 +626,13 @@ int yardsale_ceremony_partial_ingest(const uint8_t *wire, size_t wire_len,
         sign_ok = false;
 
     if (!sign_ok) {
-        outcome_record(partial.quote_root, YARDSALE_BUY_OUTCOME_FAILED);
         transaction_free(&tx);
         return ZSWAP_CEREMONY_WIRE_DROP;
     }
 
     yardsale_broadcast_fn broadcast =
         g_broadcast ? g_broadcast : yardsale_broadcast_default;
-    bool sent = broadcast(&tx, g_broadcast_ctx);
-    outcome_record(partial.quote_root,
-                   sent ? YARDSALE_BUY_OUTCOME_COMPLETED
-                        : YARDSALE_BUY_OUTCOME_FAILED);
-    if (!sent)
+    if (!broadcast(&tx, g_broadcast_ctx))
         LOG_WARN("yardsale", "completed swap was not broadcast (named "
                  "above) — the ceremony produced a transaction the "
                  "network never saw");
@@ -719,7 +650,5 @@ void yardsale_ceremony_reset(void)
     memset(g_seen, 0, sizeof(g_seen));
     g_seen_pos = 0;
     memset(g_peers, 0, sizeof(g_peers));
-    memset(g_outcomes, 0, sizeof(g_outcomes));
-    g_outcome_cursor = 0;
     pthread_mutex_unlock(&g_yardsale_mutex);
 }

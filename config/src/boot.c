@@ -869,11 +869,11 @@ static bool boot_db_maintenance_service_start(void *ctx)
         return true;
     }
     struct db_maintenance_schedule dbm_sched;
-    db_maintenance_schedule_wal_only(&dbm_sched);
+    db_maintenance_schedule_wal_cap_only(&dbm_sched);
     struct zcl_result _dbm_r = db_maintenance_start(db, &dbm_sched);
     if (_dbm_r.ok) {
-        printf("DB maintenance started (wal=%dmin, %lldMB cap;"
-               " analyze/vacuum exempt)\n", dbm_sched.wal_checkpoint_minutes,
+        printf("DB maintenance started (wal=%lldMB size cap; periodic via "
+               "db_service; analyze/vacuum exempt)\n",
                (long long)(DB_MAINT_DEFAULT_WAL_MAX_BYTES >> 20));
         return true;
     }

@@ -64,9 +64,10 @@
  * The three ops share a thread but not a risk profile, so boot arms them
  * individually rather than shipping all three or none:
  *
- *   wal      ARMED. Its cost is bounded by the size of the WAL, it is the op
- *            the service exists for, and a checkpoint that loses a lock race
- *            records itself as deferred instead of failing.
+ *   wal      SIZE CAP ARMED. The DB-service writer already runs the periodic
+ *            five-minute checkpoint. This scheduler adds only the independent
+ *            byte threshold and emergency handle, avoiding two synchronized
+ *            periodic checkpoints against the same connection.
  *   analyze  EXEMPT. A full scan of every index on a multi-GB node.db, with
  *            no idle gate and no bound, on the same serialized connection
  *            the writer uses — so it blocks writes for its whole duration.
@@ -127,11 +128,10 @@ struct db_maintenance_schedule {
 
 void db_maintenance_schedule_defaults(struct db_maintenance_schedule *s);
 
-/* The boot schedule: the WAL checkpoint armed on a 5-minute interval plus its
- * byte cap, ANALYZE and VACUUM declared EXEMPT. This is the arrangement
- * described under "Boot policy" above, spelled once here so the reason and
- * the settings cannot drift apart in a caller. */
-void db_maintenance_schedule_wal_only(struct db_maintenance_schedule *s);
+/* The boot schedule: only the WAL byte cap is armed here; periodic WAL work is
+ * owned by the serialized DB-service writer. ANALYZE and VACUUM are exempt. */
+void db_maintenance_schedule_wal_cap_only(
+    struct db_maintenance_schedule *s);
 
 /* ── Status snapshot ────────────────────────────────────────── */
 

@@ -391,18 +391,12 @@ bool os_proc_cmdline_has_token(const char *token)
         return false; // raw-return-ok:null-arg
 
 #if defined(_WIN32)
-    int wide_token_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-                                             token, -1, NULL, 0);
+    wchar_t wide_token[32768];
+    int wide_token_len = MultiByteToWideChar(
+        CP_UTF8, MB_ERR_INVALID_CHARS, token, -1, wide_token,
+        (int)(sizeof(wide_token) / sizeof(wide_token[0])));
     if (wide_token_len <= 0)
         return false;
-    wchar_t *wide_token = malloc((size_t)wide_token_len * sizeof(*wide_token)); // raw-alloc-ok:win32-wide-token-scratch
-    if (!wide_token)
-        return false;
-    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, token, -1,
-                            wide_token, wide_token_len) != wide_token_len) {
-        free(wide_token);
-        return false;
-    }
     int argc = 0;
     wchar_t **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     bool found = false;
@@ -414,7 +408,6 @@ bool os_proc_cmdline_has_token(const char *token)
     }
     if (argv)
         LocalFree(argv);
-    free(wide_token);
     return found;
 #elif defined(__APPLE__)
     int argc = *_NSGetArgc();

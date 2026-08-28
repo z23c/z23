@@ -192,11 +192,12 @@ void db_maintenance_schedule_defaults(struct db_maintenance_schedule *s)
     s->tick_seconds           = 60;
 }
 
-void db_maintenance_schedule_wal_only(struct db_maintenance_schedule *s)
+void db_maintenance_schedule_wal_cap_only(
+    struct db_maintenance_schedule *s)
 {
     if (!s) return;
     db_maintenance_schedule_defaults(s);
-    s->wal_checkpoint_minutes = 5;
+    s->wal_checkpoint_minutes = -1; /* periodic leg owned by db_service */
     s->analyze_hours = -1;   /* exempt: unbounded index scan, no idle gate */
     s->vacuum_days   = -1;   /* exempt: needs an at-tip-and-idle gate */
 }
@@ -339,7 +340,7 @@ static enum wal_ckpt_outcome dbm_publish_wal_outcome(
     struct wal_ckpt_record rec = {
         .outcome = wal_ckpt_classify(completed, w->busy,
                                      w->log_frames, w->ckpt_frames),
-        .rc = 0,
+        .rc = w->rc,
         .log_frames = w->log_frames,
         .ckpt_frames = w->ckpt_frames,
         .source = "db_maintenance",
@@ -389,7 +390,10 @@ struct zcl_result db_maintenance_run_now(struct node_db *db, const char *op)
     int64_t start_ms = platform_time_monotonic_ms();
     char errmsg[256];
     errmsg[0] = '\0';
-    struct db_maintenance_wal_outcome wal = { -1, -1, false };
+    struct db_maintenance_wal_outcome wal = {
+        .log_frames = -1, .ckpt_frames = -1,
+        .rc = -1, .truncate_rc = -1,
+    };
     bool ok = dbm_run_op_via_port(&port, op, &wal, errmsg, sizeof(errmsg));
     int64_t elapsed_ms = platform_time_monotonic_ms() - start_ms;
 
@@ -512,12 +516,13 @@ static void *dbm_thread_fn(void *arg)
             /* WAL size cap: force checkpoint regardless of interval
              * when WAL exceeds the configured byte limit.
              *
-             * Each leg runs only if its interval is positive. A zero interval
-             * is a leg the caller declared exempt at start(), not a leg due
-             * every tick — the arithmetic without that guard would make
-             * "disabled" the busiest setting there is. */
+             * The WAL byte cap remains armed even when its periodic interval
+             * is exempt; DB service owns the ordinary five-minute cadence.
+             * Other interval-zero legs stay exempt rather than becoming due
+             * on every tick. */
             bool wal_over_cap = (wal_cap > 0 && dbm_wal_size(db) > wal_cap);
-            if (wal_sec > 0 && (wal_over_cap || dbm_due(wal_last, wal_sec)))
+            if (wal_over_cap ||
+                (wal_sec > 0 && dbm_due(wal_last, wal_sec)))
                 (void)db_maintenance_run_now(db, "wal");
             if (analyze_sec > 0 && dbm_due(analyze_last, analyze_sec))
                 (void)db_maintenance_run_now(db, "analyze");

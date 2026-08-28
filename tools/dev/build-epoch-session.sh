@@ -79,7 +79,9 @@ process_parent()
 {
     local pid="$1"
     case "$(uname -s 2>/dev/null)" in
-        MINGW*|MSYS*) ps -p "$pid" 2>/dev/null | awk 'NR == 2 { print $2 }' ;;
+        MINGW*|MSYS*)
+            sed -n '1p' "/proc/$pid/ppid" 2>/dev/null || true
+            ;;
         *) ps -p "$pid" -o ppid= 2>/dev/null || true ;;
     esac
 }
@@ -88,7 +90,10 @@ process_comm()
 {
     local pid="$1"
     case "$(uname -s 2>/dev/null)" in
-        MINGW*|MSYS*) ps -p "$pid" 2>/dev/null | awk 'NR == 2 { print $8 }' ;;
+        MINGW*|MSYS*)
+            sed -n 's/^Name:[[:space:]]*//p' "/proc/$pid/status" \
+                2>/dev/null || true
+            ;;
         *) ps -p "$pid" -o comm= 2>/dev/null || true ;;
     esac
 }
