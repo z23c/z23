@@ -5,6 +5,7 @@ ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	boot_auto_install_bundle_refusal \
 	build_fabric_worker_refusal \
 	bundle_exporter_refusal \
+	cli_render_env \
 	codeindex_build_refusal \
 	consensus_bundle_marker \
 	consensus_export_fd_io_refusal \
@@ -12,6 +13,7 @@ ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	consensus_state_install_runtime_refusal \
 	consensus_state_publication_cas_refusal \
 	directory_compat \
+	directory_transaction \
 	disk_space \
 	file_metadata \
 	format_attribute \
@@ -30,6 +32,7 @@ ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	private_directory \
 	private_file \
 	private_file_path_swap \
+	process_lifecycle \
 	read_mapping \
 	rom_bundle_admission_refusal \
 	rpc_client_transport \
@@ -41,10 +44,13 @@ ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	snapshot_install_activate_refusal \
 	socket_compat \
 	stale_lock_capability \
+	state_root \
 	thread_join \
 	ui_host_transport \
 	utxo_recovery_ldb_copy_refusal \
 	wallet_recovery_directory \
+	watcher_lease \
+	watcher_store \
 	workpool \
 	zcode_benchmark_executor_refusal
 
@@ -62,6 +68,12 @@ ZCL_WINDOWS_ACCEPTANCE_bundle_exporter_refusal_SOURCES := \
 	lib/json/src/json.c \
 	lib/base/src/safe_alloc.c
 ZCL_WINDOWS_ACCEPTANCE_bundle_exporter_refusal_FLAGS := -DZCL_TESTING
+ZCL_WINDOWS_ACCEPTANCE_cli_render_env_SOURCES := \
+	lib/platform/tests/cli_render_env_windows_acceptance.c \
+	tools/command/cli_render.c \
+	lib/json/src/json.c \
+	lib/base/src/safe_alloc.c
+ZCL_WINDOWS_ACCEPTANCE_cli_render_env_FLAGS := -Itools
 ZCL_WINDOWS_ACCEPTANCE_codeindex_build_refusal_SOURCES := \
 	lib/test/src/codeindex_build_refusal_acceptance.c \
 	lib/codeindex/src/codeindex_build_windows.c
@@ -106,6 +118,13 @@ ZCL_WINDOWS_ACCEPTANCE_directory_compat_SOURCES := \
 	lib/platform/tests/directory_compat_windows_acceptance.c \
 	lib/platform/src/directory_compat.c \
 	lib/base/src/safe_alloc.c
+ZCL_WINDOWS_ACCEPTANCE_directory_transaction_SOURCES := \
+	lib/platform/tests/directory_transaction_windows_acceptance.c \
+	lib/platform/src/directory_transaction.c \
+	lib/platform/src/private_directory.c \
+	lib/platform/src/private_acl_internal.c \
+	lib/base/src/safe_alloc.c
+ZCL_WINDOWS_ACCEPTANCE_directory_transaction_LIBS := -ladvapi32
 ZCL_WINDOWS_ACCEPTANCE_disk_space_SOURCES := \
 	lib/platform/tests/disk_space_windows_acceptance.c \
 	lib/platform/src/disk_space.c
@@ -168,7 +187,9 @@ ZCL_WINDOWS_ACCEPTANCE_positioned_io_SOURCES := \
 	lib/platform/src/positioned_io.c
 ZCL_WINDOWS_ACCEPTANCE_private_directory_SOURCES := \
 	lib/platform/tests/private_directory_windows_acceptance.c \
-	lib/platform/src/private_directory.c
+	lib/platform/src/private_directory.c \
+	lib/platform/src/private_acl_internal.c \
+	lib/base/src/safe_alloc.c
 ZCL_WINDOWS_ACCEPTANCE_private_directory_LIBS := -ladvapi32
 ZCL_WINDOWS_ACCEPTANCE_private_file_SOURCES := \
 	lib/platform/tests/private_file_windows_acceptance.c \
@@ -181,6 +202,12 @@ ZCL_WINDOWS_ACCEPTANCE_private_file_path_swap_SOURCES := \
 	lib/platform/src/private_file.c \
 	lib/base/src/safe_alloc.c
 ZCL_WINDOWS_ACCEPTANCE_private_file_path_swap_LIBS := -ladvapi32
+ZCL_WINDOWS_ACCEPTANCE_process_lifecycle_SOURCES := \
+	lib/platform/tests/process_lifecycle_windows_acceptance.c \
+	lib/platform/src/process_lifecycle.c \
+	lib/platform/src/os_proc.c \
+	lib/base/src/safe_alloc.c
+ZCL_WINDOWS_ACCEPTANCE_process_lifecycle_LIBS := -lpsapi -lshell32
 ZCL_WINDOWS_ACCEPTANCE_read_mapping_SOURCES := \
 	lib/platform/tests/read_mapping_windows_acceptance.c \
 	lib/platform/src/read_mapping.c
@@ -226,6 +253,13 @@ ZCL_WINDOWS_ACCEPTANCE_stale_lock_capability_SOURCES := \
 	lib/platform/src/private_file.c \
 	lib/base/src/safe_alloc.c
 ZCL_WINDOWS_ACCEPTANCE_stale_lock_capability_LIBS := -ladvapi32 -lpsapi
+ZCL_WINDOWS_ACCEPTANCE_state_root_SOURCES := \
+	lib/platform/tests/state_root_windows_acceptance.c \
+	lib/platform/src/state_root.c \
+	lib/platform/src/private_directory.c \
+	lib/platform/src/private_acl_internal.c \
+	lib/base/src/safe_alloc.c
+ZCL_WINDOWS_ACCEPTANCE_state_root_LIBS := -ladvapi32 -lshell32 -lole32 -luuid
 ZCL_WINDOWS_ACCEPTANCE_thread_join_SOURCES := \
 	lib/platform/tests/thread_join_windows_acceptance.c
 ZCL_WINDOWS_ACCEPTANCE_ui_host_transport_SOURCES := \
@@ -242,6 +276,7 @@ ZCL_WINDOWS_ACCEPTANCE_wallet_recovery_directory_SOURCES := \
 	lib/test/src/wallet_recovery_directory_windows_acceptance.c \
 	app/services/src/wallet_recovery_service.c \
 	lib/platform/src/private_directory.c \
+	lib/platform/src/private_acl_internal.c \
 	lib/platform/src/private_file.c \
 	lib/base/src/safe_alloc.c \
 	lib/base/src/result.c
@@ -250,6 +285,28 @@ ZCL_WINDOWS_ACCEPTANCE_wallet_recovery_directory_FLAGS := \
 	-fno-unwind-tables -fno-asynchronous-unwind-tables
 ZCL_WINDOWS_ACCEPTANCE_wallet_recovery_directory_LIBS := \
 	-Wl,--gc-sections -ladvapi32
+ZCL_WINDOWS_ACCEPTANCE_watcher_lease_SOURCES := \
+	lib/platform/tests/watcher_lease_windows_acceptance.c \
+	lib/platform/src/watcher_lease.c \
+	lib/platform/src/process_lifecycle.c \
+	lib/platform/src/current_identity.c \
+	lib/platform/src/directory_compat.c \
+	lib/platform/src/os_proc.c \
+	lib/platform/src/positioned_file.c \
+	lib/platform/src/rng.c \
+	lib/platform/src/private_acl_internal.c \
+	lib/base/src/safe_alloc.c
+ZCL_WINDOWS_ACCEPTANCE_watcher_lease_LIBS := \
+	-ladvapi32 -lpsapi -lshell32 -lbcrypt
+ZCL_WINDOWS_ACCEPTANCE_watcher_store_SOURCES := \
+	lib/platform/tests/watcher_store_windows_acceptance.c \
+	lib/platform/src/watcher_store.c \
+	lib/platform/src/directory_transaction.c \
+	lib/platform/src/private_directory.c \
+	lib/platform/src/private_acl_internal.c \
+	lib/platform/src/rng.c \
+	lib/base/src/safe_alloc.c
+ZCL_WINDOWS_ACCEPTANCE_watcher_store_LIBS := -ladvapi32 -lbcrypt
 ZCL_WINDOWS_ACCEPTANCE_workpool_SOURCES := \
 	lib/test/src/workpool_windows_acceptance.c \
 	lib/util/src/workpool.c \

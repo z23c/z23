@@ -14,17 +14,21 @@
 #include "dev_activation.h"
 #include "devloop.h"
 #include "json/json.h"
+#include "platform/directory_compat.h"
+#include "platform/directory_transaction.h"
 #include "platform/time_compat.h"
 #include "util/authority_receipt.h"
 #include "util/log_macros.h"
 
-#include <fcntl.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
+#include <fcntl.h>
 #include <unistd.h>
+#endif
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -75,6 +79,21 @@ static bool dac_key(const char *s)
                   "0123456789._:-") == strlen(s);
 }
 
+#if defined(_WIN32)
+static bool dac_child_stable(const struct platform_directory_child_info *a,
+                             const struct platform_directory_child_info *b)
+{
+    return a->size == b->size && a->volume == b->volume &&
+           a->file_low == b->file_low && a->file_high == b->file_high &&
+           a->link_count == b->link_count &&
+           a->modified_seconds == b->modified_seconds &&
+           a->modified_nanoseconds == b->modified_nanoseconds &&
+           a->changed_seconds == b->changed_seconds &&
+           a->changed_nanoseconds == b->changed_nanoseconds &&
+           a->current_user_only == b->current_user_only;
+}
+#endif
+
 static bool dac_unhex32(const char hex[65], uint8_t out[32])
 {
     return zcl_hex_decode_lower(hex, out, 32);
@@ -121,6 +140,60 @@ static bool dac_authority_name(const char *intent, char out[96])
 
 static bool dac_read_current(const char *gen_root, char out[80])
 {
+#if defined(_WIN32)
+    struct platform_directory_transaction root, generation;
+    struct platform_directory_child selection, binary;
+    platform_directory_transaction_init(&root);
+    platform_directory_transaction_init(&generation);
+    platform_directory_child_init(&selection);
+    platform_directory_child_init(&binary);
+    struct platform_directory_child_info before = {0}, after = {0};
+    char blob[256];
+    bool ok = platform_directory_transaction_open(&root, gen_root);
+    enum platform_directory_result selected = ok
+        ? platform_directory_child_open_result(&root, "current", false, true,
+                                               &selection, NULL)
+        : PLATFORM_DIRECTORY_IO;
+    if (selected == PLATFORM_DIRECTORY_MISSING) {
+        out[0] = 0;
+        platform_directory_transaction_close(&root);
+        return true;
+    }
+    ok = ok && selected == PLATFORM_DIRECTORY_OK &&
+              platform_directory_child_info(&selection, &before) &&
+              before.current_user_only && before.size > 0 &&
+              before.size < sizeof(blob) &&
+              platform_directory_child_read_exact(&selection, blob,
+                                                   (size_t)before.size, 0) &&
+              platform_directory_child_info(&selection, &after) &&
+              dac_child_stable(&before, &after);
+    if (ok) {
+        blob[before.size] = 0;
+        struct json_value doc;
+        json_init(&doc);
+        ok = json_read(&doc, blob, (size_t)before.size) &&
+             doc.type == JSON_OBJ;
+        const char *schema = ok ? json_get_str(json_get(&doc, "schema")) : NULL;
+        const char *selected = ok ? json_get_str(json_get(&doc, "generation")) : NULL;
+        ok = schema && selected &&
+             strcmp(schema, "zcl.dev_generation_selection.v1") == 0 &&
+             dac_generation(selected) &&
+             snprintf(out, 80, "%s", selected) > 0;
+        json_free(&doc);
+    }
+    if (ok)
+        ok = platform_directory_transaction_open_child(
+                 &root, out, false, &generation) == PLATFORM_DIRECTORY_OK &&
+             platform_directory_child_open(&generation,
+                                           "zclassic23-dev.exe", &binary) &&
+             platform_directory_child_info(&binary, &before) &&
+             before.current_user_only && before.size > 0;
+    platform_directory_child_close(&binary);
+    platform_directory_transaction_close(&generation);
+    platform_directory_child_close(&selection);
+    platform_directory_transaction_close(&root);
+    return ok;
+#else
     char link[PATH_MAX];
     int n = snprintf(link, sizeof(link), "%s/current", gen_root);
     if (n <= 0 || (size_t)n >= sizeof(link))
@@ -134,6 +207,58 @@ static bool dac_read_current(const char *gen_root, char out[80])
         return false;
     out[got] = 0;
     return dac_generation(out);
+#endif
+}
+
+static bool dac_resolve_root(const struct zcl_command_request *request,
+                             char out[PATH_MAX])
+{
+    return platform_directory_canonical_real(dac_source_root(request), out,
+                                             PATH_MAX);
+}
+
+static bool dac_authority_available(
+    const char *datadir, const char *name, const uint8_t artifact[32],
+    const uint8_t anchor[32], const uint8_t detail[32])
+{
+#if defined(_WIN32)
+    struct platform_directory_transaction directory;
+    struct platform_directory_child receipt;
+    struct platform_directory_child_info before = {0}, after = {0};
+    platform_directory_transaction_init(&directory);
+    platform_directory_child_init(&receipt);
+    uint8_t blob[AUTHORITY_RECEIPT_HEADER_BYTES];
+    bool ok = platform_directory_transaction_open(&directory, datadir) &&
+              platform_directory_child_open(&directory, name, &receipt) &&
+              platform_directory_child_info(&receipt, &before) &&
+              before.current_user_only &&
+              before.size == AUTHORITY_RECEIPT_HEADER_BYTES &&
+              platform_directory_child_read_exact(&receipt, blob,
+                                                   sizeof(blob), 0) &&
+              platform_directory_child_info(&receipt, &after) &&
+              dac_child_stable(&before, &after);
+    struct authority_receipt_header header;
+    ok = ok && authority_receipt_header_deserialize(blob, &header);
+    uint8_t running[32];
+    ok = ok && authority_receipt_running_binary_digest(running) &&
+         strcmp(header.schema, DAC_AUTHORITY_SCHEMA) == 0 &&
+         memcmp(header.verifier_binary_digest, running, 32) == 0 &&
+         memcmp(header.artifact_digest, artifact, 32) == 0 &&
+         memcmp(header.context_anchor, anchor, 32) == 0 &&
+         memcmp(header.detail_digest, detail, 32) == 0;
+    platform_directory_child_close(&receipt);
+    platform_directory_transaction_close(&directory);
+    return ok;
+#else
+    int datadir_fd = open(datadir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    bool ok = datadir_fd >= 0 &&
+              authority_receipt_header_authority_available(
+                  datadir_fd, name, DAC_AUTHORITY_SCHEMA, artifact, anchor,
+                  detail);
+    if (datadir_fd >= 0)
+        (void)close(datadir_fd);
+    return ok;
+#endif
 }
 
 static bool dac_capture_source(const char *root,
@@ -213,7 +338,7 @@ static void dac_plan(const struct zcl_command_request *request,
     }
 
     char root[PATH_MAX];
-    if (!realpath(dac_source_root(request), root)) {
+    if (!dac_resolve_root(request, root)) {
         dac_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
                  "ROOT_RESOLVE_FAILED", "normalize",
                  "could not resolve the checkout root", "");
@@ -378,7 +503,7 @@ static void dac_commit(const struct zcl_command_request *request,
     }
 
     char root[PATH_MAX];
-    if (!realpath(dac_source_root(request), root)) {
+    if (!dac_resolve_root(request, root)) {
         dac_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
                  "ROOT_RESOLVE_FAILED", "normalize",
                  "could not resolve the checkout root", "");
@@ -407,24 +532,18 @@ static void dac_commit(const struct zcl_command_request *request,
     }
     uint8_t artifact_digest[32], context_anchor[32], detail_digest[32];
     char authority_name[96];
-    int datadir_fd = -1;
     if (!dac_authority_fields(candidate, expected, effect, artifact_digest,
                               context_anchor, detail_digest) ||
         !dac_authority_name(intent, authority_name) ||
-        (datadir_fd = open(cycle.datadir,
-                           O_RDONLY | O_DIRECTORY | O_CLOEXEC)) < 0 ||
-        !authority_receipt_header_authority_available(
-            datadir_fd, authority_name, DAC_AUTHORITY_SCHEMA, artifact_digest,
-            context_anchor, detail_digest)) {
-        if (datadir_fd >= 0)
-            (void)close(datadir_fd);
+        !dac_authority_available(cycle.datadir, authority_name,
+                                 artifact_digest, context_anchor,
+                                 detail_digest)) {
         dac_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_DENIED,
                  "AUTHORITY_RECEIPT_UNAVAILABLE", "authorize",
                  "activation requires the exact independently sealed plan receipt",
                  "create a fresh plan with this exact dev binary");
         return;
     }
-    (void)close(datadir_fd);
     char current[80];
     if (!dac_read_current(cycle.gen_root, current)) {
         dac_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,

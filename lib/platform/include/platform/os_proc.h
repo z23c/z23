@@ -155,6 +155,8 @@ enum os_proc_liveness {
  * error is UNKNOWN, never proof that a process is dead. */
 enum os_proc_liveness os_proc_pid_liveness(uint64_t pid);
 uint64_t os_proc_current_pid(void);
+/* Stable kernel process-birth token. Pair with PID to reject PID reuse. */
+bool os_proc_pid_start_token(uint64_t pid, uint64_t *token);
 
 /* Cumulative process filesystem I/O bytes suitable for progress evidence.
  * Windows uses GetProcessIoCounters transfer bytes; POSIX uses getrusage

@@ -9,6 +9,7 @@
 
 #include "devloop.h"
 #include "json/json.h"
+#include "platform/directory_compat.h"
 
 #include <limits.h>
 #include <stdio.h>
@@ -16,8 +17,6 @@
 #include <string.h>
 
 #ifdef ZCL_DEV_BUILD
-#include <unistd.h>
-
 static const char *verify_source_root(
     const struct zcl_command_request *request)
 {
@@ -54,7 +53,7 @@ void zcl_native_handle_dev_verify_change(
 #else
     char root[PATH_MAX];
     const char *source_root = verify_source_root(request);
-    if (!realpath(source_root, root)) {
+    if (!platform_directory_canonical_real(source_root, root, sizeof(root))) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INTERNAL,
                                "ROOT_RESOLVE_FAILED", "normalize", false,

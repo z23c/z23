@@ -19,8 +19,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <io.h>
+#include <windows.h>
+#else
 #include <sys/ioctl.h>
 #include <unistd.h>
+#endif
 
 /* ── output buffer ─────────────────────────────────────────────────── */
 
@@ -90,13 +98,34 @@ struct zcl_cli_render_env zcl_cli_render_resolve(int fd)
 
     bool decided = false;
     bool forced = env_bool("ZCL_HUMAN", &decided);
-    env.human = decided ? forced : (isatty(fd) != 0);
+    env.human = decided ? forced : (
+#if defined(_WIN32)
+        fd >= 0 && _isatty(fd) != 0
+#else
+        isatty(fd) != 0
+#endif
+    );
 
     const char *term = getenv("TERM");
     /* NO_COLOR: presence disables, even empty (no-color.org convention). */
     env.ansi = env.human && !getenv("NO_COLOR") &&
                !(term && strcmp(term, "dumb") == 0);
 
+#if defined(_WIN32)
+    if (fd >= 0) {
+        intptr_t native = _get_osfhandle(fd);
+        HANDLE output = native == -1 ? INVALID_HANDLE_VALUE : (HANDLE)native;
+        DWORD mode = 0;
+        CONSOLE_SCREEN_BUFFER_INFO info;
+        if (output != INVALID_HANDLE_VALUE &&
+            GetConsoleMode(output, &mode) &&
+            GetConsoleScreenBufferInfo(output, &info)) {
+            SHORT columns = info.srWindow.Right - info.srWindow.Left + 1;
+            if (columns > 0)
+                env.width = columns;
+        }
+    }
+#else
     struct winsize ws;
     if (fd >= 0 && ioctl(fd, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0)
         env.width = ws.ws_col;
@@ -108,6 +137,7 @@ struct zcl_cli_render_env zcl_cli_render_resolve(int fd)
                 env.width = c;
         }
     }
+#endif
     if (env.width < 40)
         env.width = 40;
     if (env.width > 240)
@@ -633,8 +663,14 @@ static void next_as_shell(const struct json_value *next, char *out,
         char ij[384];
         size_t n = json_write(input, ij, sizeof(ij));
         if (n > 0 && n < sizeof(ij)) {
-            snprintf(out, cap, "z23 %s --input='%s'", words, ij);
-            return;
+            int prefix = snprintf(out, cap, "z23 %s --input='", words);
+            if (prefix > 0 && (size_t)prefix < cap &&
+                n + 2 <= cap - (size_t)prefix) {
+                memcpy(out + prefix, ij, n);
+                out[prefix + n] = '\'';
+                out[prefix + n + 1] = '\0';
+                return;
+            }
         }
     }
     snprintf(out, cap, "z23 %s", words);
