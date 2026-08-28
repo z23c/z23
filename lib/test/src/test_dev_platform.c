@@ -2232,6 +2232,8 @@ static bool dp_hotswap_cache_fixture_init(const char *root,
                      owner_v1) ||
         !dp_mk_write(root, "app/controllers/src/status_native_helpers.c",
                      "int zcl_hotswap_fixture_helper(void) { return 2; }\n") ||
+        !dp_mk_write(root, "app/controllers/src/status_mutation_fixture.h",
+                     "#define ZCL_HOTSWAP_MUTATION_FIXTURE 1\n") ||
         /* Every island member of the owner TU must exist in the sandbox: the
          * island wrapper #includes each one, and a member it cannot stat
          * fails the build with "island member list is invalid or unwritable".
@@ -2287,13 +2289,20 @@ static bool run_hotswap_artifact_cache_fixture(void)
         "done\n"
         "[ -n \"$out\" ]\n"
         "if [ \"$compile\" -eq 1 ]; then\n"
+        "  extra=\n"
+        "  if [ \"${ZCL_DEVLOOP_TEST_MUTATE_DEPS:-0}\" = 1 ]; then\n"
+        "    count_file=build/hotswap/fast/mutation-compile-count\n"
+        "    n=$(cat \"$count_file\" 2>/dev/null || echo 0); n=$((n + 1))\n"
+        "    printf '%s\\n' \"$n\" >\"$count_file\"\n"
+        "    if [ \"$n\" -ge 2 ]; then extra=' app/controllers/src/status_mutation_fixture.h'; fi\n"
+        "  fi\n"
         "  printf 'fixture-object-v1\\n' >\"$out\"\n"
         "  if [ \"$source\" = app/services/src/zcode_c23_corpus_service.c ]; then\n"
         "    printf '%s: %s\\n' \"$out\" \"$source\" >\"$dep\"\n"
         "  elif [ \"$source\" = app/services/src/zcode_c23_economics_service.c ]; then\n"
         "    printf '%s: %s app/services/src/zcode_c23_economics_internal.h\\n' \"$out\" \"$source\" >\"$dep\"\n"
         "  else\n"
-        "    printf '%s: app/controllers/src/status_native_helpers.c app/controllers/src/status_native_handlers.c\\n' \"$out\" >\"$dep\"\n"
+        "    printf '%s: app/controllers/src/status_native_helpers.c app/controllers/src/status_native_handlers.c%s\\n' \"$out\" \"$extra\" >\"$dep\"\n"
         "  fi\n"
         "else\n"
         "  printf 'fixture-module-v1\\n' >\"$out\"\n"
@@ -2339,30 +2348,21 @@ static bool run_hotswap_artifact_cache_fixture(void)
         setenv("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY", "1", 1) != 0)
         goto out;
 
-    struct zcl_devloop_hotswap_build_receipt first = {0}, built = {0};
+    struct zcl_devloop_hotswap_build_receipt built = {0};
     struct zcl_devloop_hotswap_build_receipt hit = {0}, edited = {0};
     struct zcl_devloop_hotswap_build_receipt reverted = {0}, cross = {0};
-    struct zcl_devloop_hotswap_build_receipt service_first = {0};
+    struct zcl_devloop_hotswap_build_receipt mutated = {0};
     struct zcl_devloop_hotswap_build_receipt service_built = {0};
-    struct zcl_devloop_hotswap_build_receipt batch_first = {0};
     struct zcl_devloop_hotswap_build_receipt batch_built = {0};
     struct zcl_devloop_hotswap_build_receipt batch_edited = {0};
-    struct zcl_devloop_hotswap_build_receipt batch_cross_first = {0};
     struct zcl_devloop_hotswap_build_receipt batch_cross = {0};
     struct zcl_devloop_process_result process = {0};
     const char *owner = "app/controllers/src/status_native_handlers.c";
 
-    stage = "dependency-baseline";
-    if (zcl_devloop_hotswap_build(root_a, owner, &first, &process,
-                                  why, sizeof(why)) ||
-        strcmp(why,
-               "dependency baseline initialized; save once more to activate") != 0 ||
-        first.compiler_processes != 1 || first.linker_processes != 0)
-        goto out;
-    stage = "cross-device-publish";
+    stage = "cold-first-publish";
     if (!zcl_devloop_hotswap_build(root_a, owner, &built, &process,
                                    why, sizeof(why)) ||
-        built.artifact_cache_hit || built.compiler_processes != 1 ||
+        built.artifact_cache_hit || built.compiler_processes != 2 ||
         built.linker_processes != 1 || strlen(built.artifact_cache_key) != 64 ||
         strlen(built.candidate_object_sha256) != 64)
         goto out;
@@ -2422,18 +2422,31 @@ static bool run_hotswap_artifact_cache_fixture(void)
         strcmp(reverted.artifact_cache_key, built.artifact_cache_key) != 0)
         goto out;
 
-    /* The second checkout must learn its depfile once, then reuse the exact
-     * artifact produced in the first checkout without a compiler or linker. */
-    if (zcl_devloop_hotswap_build(root_b, owner, &first, &process,
-                                  why, sizeof(why)) ||
-        !zcl_devloop_hotswap_build(root_b, owner, &cross, &process,
+    /* A second checkout discovers its closure once, then reuses the exact
+     * artifact immediately without requiring a second save. */
+    if (!zcl_devloop_hotswap_build(root_b, owner, &cross, &process,
                                    why, sizeof(why)) ||
-        !cross.artifact_cache_hit || cross.compiler_processes != 0 ||
+        !cross.artifact_cache_hit || cross.compiler_processes != 1 ||
         cross.linker_processes != 0 ||
         strcmp(cross.artifact_cache_key, built.artifact_cache_key) != 0 ||
         strcmp(cross.artifact_sha256, built.artifact_sha256) != 0 ||
         strcmp(cross.candidate_object_sha256,
                built.candidate_object_sha256) != 0)
+        goto out;
+
+    /* A dependency appearing between the discovery and verification compile
+     * must refuse the cold activation and publish no module. */
+    stage = "cold-dependency-mutation";
+    if (!dp_mk_write(root_b, owner,
+                     "int zcl_hotswap_fixture_owner(void) { return 13; }\n") ||
+        unlink("test-tmp/dev_hotswap_cache_b/build/hotswap/fast/"
+               "app_controllers_src_status_native_handlers.c.d") != 0 ||
+        setenv("ZCL_DEVLOOP_TEST_MUTATE_DEPS", "1", 1) != 0 ||
+        zcl_devloop_hotswap_build(root_b, owner, &mutated, &process,
+                                  why, sizeof(why)) ||
+        unsetenv("ZCL_DEVLOOP_TEST_MUTATE_DEPS") != 0 ||
+        mutated.compiler_processes != 2 || mutated.linker_processes != 0 ||
+        strstr(why, "dependency closure size changed") == NULL)
         goto out;
 
     /* A pure service island compiles its owner directly; it has no command
@@ -2442,15 +2455,9 @@ static bool run_hotswap_artifact_cache_fixture(void)
     const char *service =
         "app/services/src/zcode_c23_corpus_service.c";
     stage = "service-island";
-    if (zcl_devloop_hotswap_build(root_a, service, &service_first, &process,
-                                  why, sizeof(why)) ||
-        strcmp(why,
-               "dependency baseline initialized; save once more to activate") != 0 ||
-        service_first.compiler_processes != 1 ||
-        service_first.linker_processes != 0 ||
-        !zcl_devloop_hotswap_build(root_a, service, &service_built, &process,
+    if (!zcl_devloop_hotswap_build(root_a, service, &service_built, &process,
                                    why, sizeof(why)) ||
-        service_built.compiler_processes != 1 ||
+        service_built.compiler_processes != 2 ||
         service_built.linker_processes != 1 ||
         strcmp(service_built.source_tu, service) != 0)
         goto out;
@@ -2462,12 +2469,9 @@ static bool run_hotswap_artifact_cache_fixture(void)
     const char *economics_header =
         "app/services/src/zcode_c23_economics_internal.h";
     stage = "multi-file-island";
-    if (zcl_devloop_hotswap_build(root_a, economics_header, &batch_first,
-                                  &process, why, sizeof(why)) ||
-        batch_first.compiler_processes != 1 ||
-        !zcl_devloop_hotswap_build(root_a, economics_header, &batch_built,
+    if (!zcl_devloop_hotswap_build(root_a, economics_header, &batch_built,
                                    &process, why, sizeof(why)) ||
-        batch_built.compiler_processes != 1 ||
+        batch_built.compiler_processes != 2 ||
         batch_built.linker_processes != 1 ||
         strcmp(batch_built.source_tu, economics_source) != 0 ||
         !dp_mk_write(root_a, economics_source,
@@ -2482,13 +2486,10 @@ static bool run_hotswap_artifact_cache_fixture(void)
         strcmp(batch_edited.artifact_cache_key,
                batch_built.artifact_cache_key) == 0)
         goto out;
-    if (zcl_devloop_hotswap_build(root_b, economics_header,
-                                  &batch_cross_first, &process, why,
-                                  sizeof(why)) ||
-        !zcl_devloop_hotswap_build(root_b, economics_header, &batch_cross,
+    if (!zcl_devloop_hotswap_build(root_b, economics_header, &batch_cross,
                                    &process, why, sizeof(why)) ||
         !batch_cross.artifact_cache_hit ||
-        batch_cross.compiler_processes != 0 ||
+        batch_cross.compiler_processes != 1 ||
         batch_cross.linker_processes != 0 ||
         strcmp(batch_cross.artifact_cache_key,
                batch_built.artifact_cache_key) != 0 ||
@@ -2498,6 +2499,7 @@ static bool run_hotswap_artifact_cache_fixture(void)
     ok = true;
 
 out:
+    (void)unsetenv("ZCL_DEVLOOP_TEST_MUTATE_DEPS");
     if (!ok)
         fprintf(stderr, "hotswap cache fixture failed at %s: %s\n", stage,
                 why[0] ? why : "no build reason");

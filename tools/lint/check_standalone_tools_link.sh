@@ -111,6 +111,12 @@ declare -A DARWIN_EXEMPT=(
     [fuzz_zcode_science]="host lacks libclang_rt.fuzzer_osx.a (standalone CLT ships no libFuzzer runtime)"
 )
 
+# The native Windows launcher has no recipe on POSIX hosts.  Keep proving it
+# on MinGW/MSYS while refusing to manufacture a meaningless Linux `.exe` rule.
+declare -A NON_WINDOWS_EXEMPT=(
+    [z23-headless-run.exe]="recipe exists only when ZCL_HOST_WINDOWS=1"
+)
+
 # ── Derive the tool list from the Makefile ───────────────────────────────
 # Two rule spellings carry a standalone tool:
 #   $(BIN_DIR)/<name>:  ...
@@ -143,6 +149,12 @@ GATE_HOST_OS="$(uname -s 2>/dev/null)"
 targets=()
 for name in $(printf '%s\n' "${!TOOLS[@]}" | sort); do
     [[ -n "${EXEMPT[$name]:-}" ]] && continue
+    if [[ "$GATE_HOST_OS" != MINGW* && "$GATE_HOST_OS" != MSYS* && \
+          -n "${NON_WINDOWS_EXEMPT[$name]:-}" ]]; then
+        echo "[check_standalone_tools_link] non-windows-exempt $name:" \
+             "${NON_WINDOWS_EXEMPT[$name]}" >&2
+        continue
+    fi
     if [[ "$GATE_HOST_OS" == Darwin && -n "${DARWIN_EXEMPT[$name]:-}" ]]; then
         echo "[check_standalone_tools_link] darwin-exempt $name: ${DARWIN_EXEMPT[$name]}" >&2
         continue
