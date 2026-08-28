@@ -1,5 +1,10 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Purpose: create and verify a directory only its owner can read -- Win32
+ * (an explicit DACL naming the token user alone, no inherited ACEs) and
+ * POSIX (0700 plus an ownership and mode recheck). Refuses rather than
+ * loosening when the directory already exists with wider access. */
 #include "platform/private_directory.h"
+#include "base/safe_alloc.h"
 
 #include <errno.h>
 
@@ -27,7 +32,7 @@ static bool current_user_sid(HANDLE *token_out, TOKEN_USER **user_out)
     bool ok = OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token) &&
               !GetTokenInformation(token, TokenUser, NULL, 0, &size) &&
               GetLastError() == ERROR_INSUFFICIENT_BUFFER;
-    if (ok) user = malloc(size);
+    if (ok) user = zcl_malloc(size, "private_directory.token_user");
     ok = ok && user && GetTokenInformation(token, TokenUser, user, size,
                                             &size);
     if (!ok) {

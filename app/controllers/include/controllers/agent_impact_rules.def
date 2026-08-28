@@ -318,7 +318,7 @@ AGENT_IMPACT_RULE("app/conditions/src/mirror_divergence_located.c|app/conditions
 AGENT_IMPACT_RULE("app/conditions/src/catalog_lag_exceeded.c|app/conditions/include/conditions/catalog_lag_exceeded.h|lib/test/src/test_catalog_lag_exceeded.c", "catalog_lag_exceeded catalog_completeness condition_engine make_lint_gates")
 AGENT_IMPACT_RULE("app/services/src/sync_monitor.c|app/services/include/services/sync_monitor.h|lib/test/src/test_sync_watchdog_conditions.c", "sync_watchdog_conditions body_fetch_missing_have_data_condition make_lint_gates")
 AGENT_IMPACT_RULE("app/services/src/wallet_money_service.c|app/services/include/services/wallet_money_service.h|lib/test/src/test_agent_spend_policy.c", "agent_spend_policy metaverse_agent_broker make_lint_gates")
-AGENT_IMPACT_RULE("app/services/src/node_db_catchup_service.c|app/services/src/node_db_catchup_sparse.c|app/services/src/node_db_catchup_internal.h|app/services/include/services/node_db_catchup_service.h|app/services/src/node_db_catchup_lock_guard.c|app/services/include/services/node_db_catchup_lock_guard.h|app/services/src/node_db_catchup_decrypt.c|app/services/src/catchup_lifecycle_service.c|app/services/include/services/catchup_lifecycle_service.h|lib/test/src/test_catchup_lifecycle_service.c|app/controllers/src/sync_controller_catchup_jobs.c|lib/test/src/test_node_db_catchup_service.c|config/src/boot_background_workers.c|config/src/boot_services.c|config/include/config/boot_internal.h|config/src/boot_utxo_replay.c", "node_db_catchup_service catchup_lifecycle_service syncdiag_rpc supervisor make_lint_gates")
+AGENT_IMPACT_RULE("app/services/src/node_db_catchup_service.c|app/services/src/node_db_catchup_sparse.c|app/services/src/node_db_catchup_mmap.c|app/services/src/node_db_catchup_internal.h|app/services/include/services/node_db_catchup_service.h|app/services/src/node_db_catchup_lock_guard.c|app/services/include/services/node_db_catchup_lock_guard.h|app/services/src/node_db_catchup_decrypt.c|app/services/src/catchup_lifecycle_service.c|app/services/include/services/catchup_lifecycle_service.h|lib/test/src/test_catchup_lifecycle_service.c|app/controllers/src/sync_controller_catchup_jobs.c|lib/test/src/test_node_db_catchup_service.c|config/src/boot_background_workers.c|config/src/boot_services.c|config/include/config/boot_internal.h|config/src/boot_utxo_replay.c", "node_db_catchup_service catchup_lifecycle_service syncdiag_rpc supervisor make_lint_gates")
 AGENT_IMPACT_RULE("lib/storage/src/progress_store.c|lib/storage/include/storage/progress_store.h|lib/test/src/test_progress_store.c", "progress_store node_db_catchup_service reducer_forward_progress_gate make_lint_gates")
 AGENT_IMPACT_RULE("lib/test/src/test_kill9_recovery.c", "kill9_recovery make_lint_gates")
 AGENT_IMPACT_RULE("config/include/config/boot_background_workers.h|config/src/boot_worker_supervisor.c|lib/test/src/test_chain_tip_watchdog_bounded_restart.c", "chain_tip_watchdog_bounded_restart supervisor make_lint_gates")
@@ -702,7 +702,7 @@ AGENT_IMPACT_RULE("lib/vcs/include/vcs/vcs_devloop.h|lib/vcs/src/vcs_devloop.c|l
 AGENT_IMPACT_RULE("lib/vcs/src/vcs.c|lib/vcs/include/vcs/vcs.h|lib/vcs/src/vcs_commit.c|lib/test/src/test_vcs_core.c", "vcs_core vcs_devloop command_registry_catalog make_lint_gates")
 AGENT_IMPACT_RULE("tools/dev/dev_activation*.c|tools/dev/dev_activation*.h|lib/test/src/test_dev_activation.c", "dev_activation dev_platform make_lint_gates")
 AGENT_IMPACT_RULE("app/services/src/consensus_reject_index.c|app/services/include/services/consensus_reject_index.h|lib/test/src/test_consensus_reject_index.c", "consensus_reject_index make_lint_gates")
-AGENT_IMPACT_RULE("app/services/src/rolling_anchor_service.c|app/services/include/services/rolling_anchor_service.h|lib/test/src/test_rolling_anchor_service.c", "rolling_anchor_service make_lint_gates")
+AGENT_IMPACT_RULE("app/services/src/rolling_anchor_service.c|app/services/src/rolling_anchor_compute.c|app/services/src/rolling_anchor_internal.h|app/services/include/services/rolling_anchor_service.h|lib/test/src/test_rolling_anchor_service.c", "rolling_anchor_service make_lint_gates")
 AGENT_IMPACT_RULE("app/services/src/mirror_divergence_locator.c|app/services/include/services/mirror_divergence_locator.h|lib/test/src/test_mirror_divergence_locator.c", "mirror_divergence_locator oracle_policy make_lint_gates")
 AGENT_IMPACT_RULE("app/services/src/block_pruning_service.c|app/services/include/services/block_pruning_service.h|lib/test/src/test_block_pruning.c", "block_pruning segment_sealer make_lint_gates")
 AGENT_IMPACT_RULE("app/supervisors/src/legacy_mirror_supervisor.c", "supervisor supervisor_production_tree oracle_policy make_lint_gates")
@@ -731,7 +731,7 @@ AGENT_IMPACT_RULE("tools/scripts/remote_node_update.sh|tools/scripts/lane_recove
 /* Instant dev loop Wave 1/2: Tier-2 fast restart (clean-shutdown marker + skip). */
 AGENT_IMPACT_RULE("config/src/boot_shutdown_marker.c|config/include/config/boot_shutdown_marker.h|config/src/boot_fast_restart.c|config/include/config/boot_fast_restart.h|lib/test/src/test_shutdown_marker.c", "shutdown_marker unclean_shutdown_advance boot_phase make_lint_gates")
 AGENT_IMPACT_RULE("config/src/boot_datadir_lock.c|config/include/config/boot_datadir_lock.h|lib/test/src/test_boot_datadir_lock.c", "boot_datadir_lock make_lint_gates")
-AGENT_IMPACT_RULE("app/services/src/block_index_loader.c|app/services/src/block_index_loader_rebuild.c|app/services/src/block_index_blocks_hydrate.c|app/services/src/block_index_flat_anchor.c|app/services/src/block_index_flat_internal.h|app/services/src/block_index_flat_save.c|app/services/include/services/block_index_loader.h|app/services/include/services/block_index_flat_anchor.h|lib/test/src/test_block_index_loader.c|lib/test/src/test_block_index_rebuild.c", "load_verify_boot block_index_loader block_index_rebuild block_index_integrity boot_header_seed_import checkpoint_header_solution_repair make_lint_gates")
+AGENT_IMPACT_RULE("app/services/src/block_index_loader.c|app/services/src/block_index_post_load.c|app/services/src/block_index_loader_rebuild.c|app/services/src/block_index_blocks_hydrate.c|app/services/src/block_index_flat_anchor.c|app/services/src/block_index_flat_internal.h|app/services/src/block_index_flat_save.c|app/services/include/services/block_index_loader.h|app/services/include/services/block_index_flat_anchor.h|lib/test/src/test_block_index_loader.c|lib/test/src/test_block_index_rebuild.c", "load_verify_boot block_index_loader block_index_rebuild block_index_integrity boot_header_seed_import checkpoint_header_solution_repair make_lint_gates")
 /* Canonical per-row header admission verify shared by every persisted-state
  * loader (import, blocks-hydrate, flat). Exercised through those loaders'
  * focused tests + the validate-headers stage. */
@@ -1646,6 +1646,58 @@ AGENT_IMPACT_RULE("lib/base/include/base/compiler.h|lib/crypto/src/blake2b_avx2.
  * independently reproduced Commons acceptance that exposed the regressions. */
 AGENT_IMPACT_RULE("lib/platform/include/arpa/inet.h|lib/platform/include/fnmatch.h|lib/platform/include/netinet/in.h|lib/platform/include/platform/directory_compat.h|lib/platform/include/platform/fcntl_compat.h|lib/platform/include/platform/file_compat.h|lib/platform/include/sys/mman.h|lib/platform/include/sys/socket.h|lib/platform/tests/test_platform.c", "dev_platform os_proc sqlite models db_validators zcode_package_registry zcode_swarm_net make_lint_gates")
 
+/* The one online-logical-CPU primitive. cpu_topology.c delegates its fallback
+ * count to it rather than carrying a second sysconf, and BOTH tests below
+ * force that fallback by pointing the sysfs root at a path that cannot exist:
+ * test_cpu_topology asserts the fallback count equals sysconf(_SC_NPROCESSORS_ONLN)
+ * exactly, test_hw_profile asserts the single synthetic domain it produces. */
+AGENT_IMPACT_RULE("lib/platform/include/platform/logical_cpu.h|lib/platform/src/logical_cpu.c", "cpu_topology hw_profile make_lint_gates")
+
+/* The private-state file organ: a pread/pwrite handle that refuses to follow a
+ * symlink or reparse point (positioned_file), the 0600 create/replace/retire
+ * durable-swap surface (private_file), and the sorted, link-free directory
+ * listing both scans use (directory_compat).
+ *
+ * rolling_anchor_service drives the production durable transaction end to end
+ * — create + write_at + flush + replace + parent_flush on commit, then
+ * open + is_private + snapshot + read + close on reload — and asserts the
+ * committed 32 bytes come back exactly, that a successful commit leaves no
+ * staging file (a listing assertion), and that a corrupted file is refused and
+ * removed. canary_sentinel_watch drives the read side from the other end: its
+ * tick lists the verdict dir and reads each sentinel through the same handle,
+ * and the absent-dir case covers the listing refusal path. */
+AGENT_IMPACT_RULE("lib/platform/include/platform/positioned_file.h|lib/platform/src/positioned_file.c|lib/platform/include/platform/private_file.h|lib/platform/src/private_file.c|lib/platform/src/directory_compat.c", "rolling_anchor_service canary_sentinel_watch make_lint_gates")
+
+/* Read-only whole-file mappings. node_db_catchup_mmap is the only consumer any
+ * registered test drives directly: test_node_db_catchup_service opens a real
+ * blk file through it and asserts the mapped bytes, the zero-byte refusal, and
+ * that close() releases both the range and the descriptor. */
+AGENT_IMPACT_RULE("lib/platform/src/read_mapping.c", "node_db_catchup_service make_lint_gates")
+
+/* Component-at-a-time reader beneath a trusted root. boot_bundle_fetch covers
+ * the success path (it must read a planted <datadir>/bundles/directory.json for
+ * boot_bundle_fetch_maybe to succeed) and the absent path (the fresh-datadir
+ * discovery case); blog covers the absent path from its own 404 contract. */
+AGENT_IMPACT_RULE("lib/platform/include/platform/safe_root_read.h|lib/platform/src/safe_root_read.c", "boot_bundle_fetch blog make_lint_gates")
+
+/* Caller-available filesystem capacity. disk_monitor_free_bytes is a thin
+ * wrapper over it, and test_disk_monitor calls that wrapper with no test
+ * override installed: a real dir must report positive, an unstattable path
+ * must report -1. Both branches of the primitive. */
+AGENT_IMPACT_RULE("lib/platform/src/disk_space.c", "disk_monitor make_lint_gates")
+
+/* Race-aware regular-file metadata. bii_verify turns its three-way verdict
+ * straight into BII_BODY_MISSING vs BII_BODY_UNREADABLE vs "keep going", and
+ * test_block_index_integrity asserts the missing-body and present-body verdicts
+ * separately. */
+AGENT_IMPACT_RULE("lib/platform/src/file_metadata.c", "block_index_integrity make_lint_gates")
+
+/* The injectable RNG contract (header + implementation). test_rng is the
+ * dedicated unit test for the default vtable (fill, u64, u32_range,
+ * set/reset_default); test_seed_tape drives the rng_u64 install-hook this
+ * header declares and asserts the same seed replays the same 1000 draws. */
+AGENT_IMPACT_RULE("lib/platform/include/platform/rng.h|lib/platform/src/rng.c", "rng seed_tape make_lint_gates")
+
 AGENT_IMPACT_RULE("app/controllers/src/metaverse_site_controller.c|app/controllers/src/shop_native_probes.c|app/controllers/src/zcode_site_controller.c|app/services/src/agent_broker_catalog_seam.c|app/services/src/agent_broker_provider.c|app/services/src/agent_spend_policy.c|app/services/src/binary_staleness_service.c|app/services/src/blocker_history.c|app/services/src/invariant_sentinel.c|app/services/src/network_telemetry_fill.c|app/services/src/utxo_audit_service.c|app/services/src/vault_read.c|app/services/src/zcode_agent_context_service.c|app/services/src/zcode_pointer.c|app/views/include/views/site_layout.h|lib/policy/src/fees.c", "site_routes metaverse_catalog metaverse_broker_authority metaverse_agent_broker agent_spend_policy shop_fulfill shop_want zcode_add zcode_verify binary_ab_fallback blocker condition_engine integrity network_monitor utxo_apply_stage wallet make_lint_gates")
 
 AGENT_IMPACT_RULE("app/jobs/src/reducer_commit_invariants.c|config/src/boot_block_file_scan.c|lib/storage/src/projection_store.c", "reducer_forward_progress_gate reducer_frontier boot_odelta_scan block_scan models integrity make_lint_gates")
@@ -1662,3 +1714,130 @@ AGENT_IMPACT_RULE("lib/util/src/wal_checkpoint_stats.c|lib/util/include/util/wal
  * controller ingest that consumes it, and the app lane that exercises
  * all of it move together. */
 AGENT_IMPACT_RULE("app/services/src/yardsale_prevout_service.c|app/services/include/services/yardsale_prevout_service.h|app/controllers/src/yardsale_controller.c|app/controllers/include/controllers/yardsale_controller.h|app/models/src/zslp_ledger.c|app/models/include/models/zslp_ledger.h|config/src/boot_msg_callbacks.c|lib/test/src/test_yardsale_app.c", "yardsale_app zswap_ceremony dev_platform make_lint_gates")
+
+/* The in-node replay-canary sentinel observer. It arrived with no rule at all,
+ * so the push gate saw it as unmapped code and failed closed — correctly. Its
+ * own group is the whole of its coverage: test_canary_sentinel_watch drives
+ * canary_sentinel_watch_tick_once() over a private verdict dir and asserts all
+ * ten documented contracts (raise, clear, latch-across-absence, idempotency,
+ * mixed kinds, cross-source refusal, corrupt-JSON quiet). test_replay_canary_verdict
+ * names this file only in a comment and never calls it, so it is NOT listed. */
+AGENT_IMPACT_RULE("app/services/src/canary_sentinel_watch.c", "canary_sentinel_watch make_lint_gates")
+
+/* The leased build action's binding recheck + ZCODE context load (E1 file-size
+ * split out of build_fabric_worker.c). Both halves sit on the one entry point
+ * build_fabric_worker_execute(): test_build_fabric asserts a full execute
+ * succeeds, which requires bfw_binding_current + bfw_input_root_current +
+ * bfw_toolchain_current to all hold; test_zcode_dev_objects drives the same
+ * entry point through the compile/package/test/fuzz actions that carry a ZCODE
+ * context, which is the only path into bfw_load_zcode_context. */
+AGENT_IMPACT_RULE("app/services/src/build_fabric_worker_binding.c|app/services/src/build_fabric_worker_internal.h", "build_fabric zcode_dev_objects make_lint_gates")
+
+/* The pure publication CAS decision (E1 file-size split out of
+ * consensus_state_publication_cas.c, plus the lane-naming header both halves
+ * include). consensus_state_publication_cas_decide() is called directly by
+ * test_consensus_state_publication_cas (admit, traced refusal, v2, moved,
+ * bootstrap, assisted, NULL) and by test_consensus_state_snapshot_install at
+ * ten further call sites. Deliberately NOT carrying consensus_state_chain_binding
+ * from the parent rule: that test never touches the publication CAS. */
+AGENT_IMPACT_RULE("app/services/src/consensus_state_publication_decide.c|app/services/src/consensus_state_publication_cas_internal.h", "consensus_state_publication_cas consensus_state_snapshot_install make_lint_gates")
+
+/* ── E1 file-size splits, 2026-08-28 ───────────────────────────────────────
+ * Each rule below carries ONLY the groups whose tests were verified to
+ * execute the code that MOVED. Several parents match rules whose groups do
+ * not reach the moved half at all; inheriting those would have turned a hard
+ * failure into a green that proves nothing, so they are deliberately absent
+ * and the omission is named in each comment. */
+
+/* wallet-backup configuration defaults + the WALLET_BACKUP_PASSWORD policy,
+ * split out of wallet_backup_service.c. test_wallet_backup calls
+ * wallet_backup_config_defaults() at eight sites before driving each backup.
+ * NOT carrying the parent rule's wallet_backup_port / wallet_restore: neither
+ * test names this entry point, and its only other caller is boot.c's app_init,
+ * which no test runs. The env-set arm of the password policy is unexercised —
+ * every test takes the unset arm. */
+AGENT_IMPACT_RULE("app/services/src/wallet_backup_config.c", "wallet_backup make_lint_gates")
+
+/* The S4 benchmark executor's sandbox escape suite (three forked canaries)
+ * plus the path-bound header its two TUs share, split out of
+ * zcode_benchmark_executor.c. test_zcode_benchmark_exec asserts the real
+ * zcode_benchmark_executor_sandbox_selfcheck() succeeds before injecting a
+ * failing hook. NOT carrying the parent rule's zcode_science_store /
+ * zcode_science: neither test mentions the executor at all. */
+AGENT_IMPACT_RULE("app/services/src/zcode_benchmark_sandbox_selfcheck.c|app/services/src/zcode_benchmark_executor_internal.h", "zcode_benchmark_exec make_lint_gates")
+
+/* The APPLY half of the boot block-file scan — create/repair the block_index
+ * entry, link pprev, accumulate work, mark BLOCK_HAVE_DATA — split out of
+ * boot_block_file_scan.c, plus the struct contract the two halves share.
+ * test_disk_block_io writes real blocks, calls scan_block_files_mark_data(),
+ * and then asserts BLOCK_HAVE_DATA plus the exact nFile/nDataPos this file
+ * wrote. NOTE: none of the six groups on the parent's rule reach this code —
+ * not one of their tests calls the scan — so this rule stands alone rather
+ * than inheriting a set that would never observe a regression here. */
+AGENT_IMPACT_RULE("config/src/boot_block_index_apply.c|config/src/boot_block_file_scan_internal.h", "disk_block_io make_lint_gates")
+
+/* The pure manifest-SELECTION policy of the bundle weld (kind-aware
+ * newest-then-largest + canonical filename), split out of boot_bundle_fetch.c.
+ * test_boot_bundle_fetch calls boot_bundle_pick_manifest() directly for the
+ * admit, empty-array, malformed-JSON and NULL cases; test_boot_header_seed_import
+ * calls boot_bundle_pick_header_seed_manifest() directly. NOT carrying the
+ * parent rule's consensus_state_install_runtime / rom_fetch (neither test names
+ * either pick function), and NOT bundle_publish_serve, whose only mention of
+ * them is a comment. */
+AGENT_IMPACT_RULE("config/src/boot_bundle_manifest_pick.c", "boot_bundle_fetch boot_header_seed_import make_lint_gates")
+
+/* The exporter's on-disk bundle GENERATIONS — filename convention, newest
+ * scan, keep-N retention rotation — split out of bundle_exporter.c.
+ * test_bundle_publish_serve drives bundle_exporter_rotate_for_test() and then
+ * asserts exactly which generations survive, which is the whole of
+ * bx_parse_bundle_height + bx_gen_cmp_desc + bx_rotate. NOT carrying the
+ * parent rule's consensus_state_snapshot_export / consensus_state_snapshot_install:
+ * neither test drives rotation. */
+AGENT_IMPACT_RULE("config/src/bundle_exporter_generations.c|config/src/bundle_exporter_generations_internal.h", "bundle_publish_serve make_lint_gates")
+
+/* POST-INSTALL derived-state reconciliation — coin-tip check, bundle Sapling
+ * tree cache, provable-tip reset, `utxos` mirror reset — split out of
+ * consensus_state_install_runtime.c. test_install_verb_warm drives
+ * icb_invalidate_derived_state through its ZCL_TESTING seam and asserts the
+ * match / coin-tip-mismatch / empty-coin-set verdicts, the replaced
+ * sapling_tree, its rebuild height, the decoded frontier root, and the
+ * provable-tip reset; test_consensus_state_snapshot_install drives
+ * icb_reset_utxo_mirror through its own seam. NOT carrying the parent rule's
+ * consensus_state_install_runtime / boot_bundle_fetch / checkpoint_header_solution_repair:
+ * each of those tests calls consensus_state_install_from_bundle only with
+ * NULL/bogus arguments and asserts it REFUSES, so none reaches this code. */
+AGENT_IMPACT_RULE("config/src/consensus_state_install_derived_state.c|config/src/consensus_state_install_derived_state_internal.h", "install_verb_warm consensus_state_snapshot_install make_lint_gates")
+
+/* The COMMITTED final receipt row's private contract, shared by
+ * consensus_state_producer_receipt_final.c and its only caller, finalize() in
+ * consensus_state_producer_receipt.c. The .c half already rides the
+ * `consensus_state_producer_receipt*.c` glob; that glob cannot match a header,
+ * which is why this one file failed closed. test_consensus_state_producer_receipt
+ * asserts finalize() succeeds and then reads back the singleton
+ * consensus_state_source_receipt row that write_final_receipt wrote. NOT
+ * carrying consensus_state_snapshot_export from the parent rule: that test
+ * builds and mutates the same table with raw SQL and never calls this code. */
+AGENT_IMPACT_RULE("config/src/consensus_state_producer_receipt_final_internal.h", "consensus_state_producer_receipt make_lint_gates")
+
+/* Owner-only directory creation + validation. Both consumers below LOG_FAIL or
+ * refuse when it returns false, and both tests assert the surrounding operation
+ * SUCCEEDS, so the POSIX arm's success verdict is load-bearing in each:
+ * test_boot_bundle_fetch must get <datadir>/bundles created before any download,
+ * test_wallet_backup before any backup run. CAVEAT: only the POSIX arm is
+ * compiled and executed here; the Win32 DACL arm has no executed coverage on
+ * this platform, and check_malloc.sh scans app/ and tools/ only, so of the two
+ * halves of a lib/platform edit just the file-purpose header is observed by a
+ * gate (check_file_purpose.sh). The refusal paths (wrong mode, wrong owner,
+ * symlink) are unexercised by any test. */
+AGENT_IMPACT_RULE("lib/platform/src/private_directory.c", "boot_bundle_fetch wallet_backup make_lint_gates")
+
+/* Boot phase-timing instrumentation, split out of boot.c. These three
+ * functions had NO executing test at all -- their only caller was app_init(),
+ * which no test invokes -- so mapping them to boot.c's own groups would have
+ * been a shape-level green over unrun code. lib/test/src/test_boot_flight_recorder.c
+ * now calls boot_clock_ms/boot_submark/boot_topmark directly through
+ * boot_timing_marks_internal.h and asserts the recorder actually received the
+ * marks; that assertion was mutation-proven to go red when the
+ * boot_flight_recorder_mark() call is removed. So this rule names real
+ * execution, not a file-shape check. */
+AGENT_IMPACT_RULE("config/src/boot_timing_marks.c|config/src/boot_timing_marks_internal.h", "boot_flight_recorder make_lint_gates")

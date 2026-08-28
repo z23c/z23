@@ -9,7 +9,16 @@
  *     exists (>=3 samples) to trust a median, and never on the boot that
  *     first establishes it;
  *   - the durable table is pruned to the last BOOT_FLIGHT_RECORDER_MAX_BOOTS
- *     distinct boot_epochs.
+ *     distinct boot_epochs;
+ *   - config/src/boot_timing_marks.c (boot_clock_ms / boot_submark /
+ *     boot_topmark — split out of boot.c, contract in
+ *     boot_timing_marks_internal.h): boot_clock_ms() is monotonic on its
+ *     own source (never the wall clock); boot_submark/boot_topmark record
+ *     the elapsed-since-`since` ms into THIS module via
+ *     boot_flight_recorder_mark(), and boot_submark hands back a fresh
+ *     clock reading for the next phase to chain from. app_init() is the
+ *     only caller in the tree and no test reaches app_init(), so this is
+ *     the only place these three functions are exercised at all.
  */
 
 #include "test/test_core.h"
@@ -24,6 +33,7 @@
 #include "services/binary_ab_fallback.h"
 #include "util/blocker.h"
 #include "util/shutdown_stagewatch.h"
+#include "../../../config/src/boot_timing_marks_internal.h"
 
 #include <sqlite3.h>
 #include <stdio.h>
@@ -414,6 +424,142 @@ int test_boot_flight_recorder(void)
             fresh_dir, reason_buf, sizeof(reason_buf), &forced);
         BFR_CHECK("no breadcrumb -> read_exit_reason returns false, clears output",
                   !have && reason_buf[0] == '\0' && !forced);
+    }
+
+    /* ── boot_timing_marks: boot_clock_ms / boot_submark / boot_topmark.
+     * Start from a clean slate — the sections above already leave
+     * boot_stage_timings empty (last cleared "ahead of breadcrumb tests"),
+     * but clear again defensively so this section's history-dependent
+     * counts never depend on what ran before it. */
+    {
+        char *errmsg = NULL;
+        int rc = sqlite3_exec(ndb.db, "DELETE FROM boot_stage_timings",
+                              NULL, NULL, &errmsg);
+        BFR_CHECK("clear history ahead of boot_timing_marks tests", rc == SQLITE_OK);
+        if (errmsg) sqlite3_free(errmsg);
+        boot_flight_recorder_reset_buffer_for_testing();
+        blocker_clear("boot.stage_regression");
+
+        /* boot_clock_ms(): ordered on its OWN monotonic source, never
+         * against the wall clock. A real sleep between two readings forces
+         * observable forward progress; a slower box only widens that
+         * margin, so this can never flip under load. */
+        int64_t c0 = boot_clock_ms();
+        BFR_CHECK("boot_clock_ms: a reading is a sane positive ms value",
+                  c0 > 0);
+        platform_sleep_ms(5);
+        int64_t c1 = boot_clock_ms();
+        BFR_CHECK("boot_clock_ms: never goes backwards", c1 >= c0);
+        BFR_CHECK("boot_clock_ms: real work between two readings is "
+                  "observable as forward progress", c1 > c0);
+
+        /* boot_submark(name, since): records (an internal clock read -
+         * since) into the flight recorder, then returns a FRESH
+         * boot_clock_ms() reading for the caller to chain as the next
+         * `since` (t = boot_submark("x", t)). Chain two calls with a real
+         * sleep between them. */
+        int64_t t0 = boot_clock_ms();
+        int64_t t1 = boot_submark("tm_test_submark_one", t0);
+        BFR_CHECK("boot_submark: returned since >= the since it was given",
+                  t1 >= t0);
+        platform_sleep_ms(5);
+        int64_t t2 = boot_submark("tm_test_submark_two", t1);
+        BFR_CHECK("boot_submark: returned since strictly advances when real "
+                  "work happens before the next call", t2 > t1);
+
+        boot_flight_recorder_finish(&ndb);
+        {
+            struct json_value v = {0};
+            json_set_object(&v);
+            bool ok = boot_flight_recorder_dump_state_json(&v, NULL);
+            const struct json_value *stages = json_get(&v, "stages");
+            BFR_CHECK("dump_state_json ok + exactly 2 submark stages recorded",
+                      ok && stages && json_size(stages) == 2);
+
+            int64_t ms_one = -1, ms_two = -1;
+            bool found_one = false, found_two = false;
+            size_t n = stages ? json_size(stages) : 0;
+            for (size_t i = 0; i < n; i++) {
+                const struct json_value *row = json_at(stages, i);
+                const char *stage = row ? json_get_str(json_get(row, "stage")) : NULL;
+                if (stage && strcmp(stage, "tm_test_submark_one") == 0) {
+                    ms_one = json_get_int(json_get(row, "last_ms"));
+                    found_one = true;
+                } else if (stage && strcmp(stage, "tm_test_submark_two") == 0) {
+                    ms_two = json_get_int(json_get(row, "last_ms"));
+                    found_two = true;
+                }
+            }
+            BFR_CHECK("recorder actually received both boot_submark marks "
+                      "(not just a compile-time no-op)", found_one && found_two);
+            /* boot_submark's internal `ms` = (an internal boot_clock_ms()
+             * read) - since. That internal read happens strictly between
+             * the `since` handed in and the fresh reading the call
+             * returned (both boot_clock_ms(), monotonic), so the recorded
+             * ms is exactly bounded by the window already observed above —
+             * an exact derived bound, never a hardcoded threshold. */
+            BFR_CHECK("submark one: recorded ms is bounded by [0, t1-t0]",
+                      ms_one >= 0 && ms_one <= (t1 - t0));
+            BFR_CHECK("submark two: recorded ms is bounded by [0, t2-t1]",
+                      ms_two >= 0 && ms_two <= (t2 - t1));
+            /* The sleep before submark_two guarantees its internal read
+             * landed strictly after t1, so its own recorded elapsed ms
+             * must be strictly positive on any box. */
+            BFR_CHECK("submark two: real work before the call shows up as "
+                      "strictly positive recorded ms", ms_two > 0);
+            json_free(&v);
+        }
+
+        /* boot_topmark(name, since): same recording contract, void
+         * return. Isolate it in its own boot_epoch so the stage count is
+         * unambiguous. */
+        boot_flight_recorder_reset_buffer_for_testing();
+        {
+            char *e2 = NULL;
+            int r2 = sqlite3_exec(ndb.db, "DELETE FROM boot_stage_timings",
+                                  NULL, NULL, &e2);
+            BFR_CHECK("clear history ahead of boot_topmark test", r2 == SQLITE_OK);
+            if (e2) sqlite3_free(e2);
+        }
+        int64_t t3 = boot_clock_ms();
+        platform_sleep_ms(5);
+        boot_topmark("tm_test_topmark", t3);
+        int64_t t4 = boot_clock_ms();
+        boot_flight_recorder_finish(&ndb);
+        {
+            struct json_value v = {0};
+            json_set_object(&v);
+            bool ok = boot_flight_recorder_dump_state_json(&v, NULL);
+            const struct json_value *stages = json_get(&v, "stages");
+            bool found = false;
+            int64_t ms = -1;
+            size_t n = stages ? json_size(stages) : 0;
+            for (size_t i = 0; i < n; i++) {
+                const struct json_value *row = json_at(stages, i);
+                const char *stage = row ? json_get_str(json_get(row, "stage")) : NULL;
+                if (stage && strcmp(stage, "tm_test_topmark") == 0) {
+                    ms = json_get_int(json_get(row, "last_ms"));
+                    found = true;
+                }
+            }
+            BFR_CHECK("dump_state_json ok + exactly 1 topmark stage recorded",
+                      ok && stages && json_size(stages) == 1 && found);
+            BFR_CHECK("boot_topmark: recorded ms is bounded by [0, t4-t3]",
+                      ms >= 0 && ms <= (t4 - t3));
+            BFR_CHECK("boot_topmark: real work before the call shows up as "
+                      "strictly positive recorded ms", ms > 0);
+            json_free(&v);
+        }
+
+        boot_flight_recorder_reset_buffer_for_testing();
+        blocker_clear("boot.stage_regression");
+        {
+            char *e3 = NULL;
+            int r3 = sqlite3_exec(ndb.db, "DELETE FROM boot_stage_timings",
+                                  NULL, NULL, &e3);
+            BFR_CHECK("clear history after boot_timing_marks tests", r3 == SQLITE_OK);
+            if (e3) sqlite3_free(e3);
+        }
     }
 
     app_runtime_set_current(NULL);
