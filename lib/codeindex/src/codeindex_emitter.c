@@ -16,13 +16,12 @@
 
 #include "base/log_macros.h"
 #include "base/safe_alloc.h"
+#include "platform/positioned_file.h"
 
 #include <ctype.h>
-#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 enum {
     EMIT_MAX_FILE_BYTES = 1u << 21, /* 2 MiB; the largest in-tree .c is ~660 KB */
@@ -514,27 +513,32 @@ static bool emit_file_cb(const char *relpath, const struct stat *st, void *user)
         sc->failed = true;
         return false;
     }
-    char full[CI_PATH_MAX];
-    int path_len = snprintf(full, sizeof(full), "%s/%s", sc->ci->root,
-                            relpath);
-    if (path_len <= 0 || (size_t)path_len >= sizeof(full)) {
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open_beneath(&file, sc->ci->root, relpath) ||
+        !platform_positioned_file_snapshot(&file, &before) ||
+        before.size != (uint64_t)st->st_size) {
         sc->report.files_unreadable++;
-        return true;
-    }
-    int fd = open(full, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) {
-        sc->report.files_unreadable++;
+        platform_positioned_file_close(&file);
         return true;
     }
     size_t got = 0;
-    for (;;) {
-        ssize_t k = read(fd, sc->buf.text + got, (size_t)st->st_size - got);
+    while (got < (size_t)st->st_size) {
+        int64_t k = platform_positioned_file_read(
+            &file, sc->buf.text + got, (size_t)st->st_size - got, got);
         if (k <= 0) break;
         got += (size_t)k;
-        if (got >= (size_t)st->st_size) break;
     }
-    (void)close(fd);
-    if (got == 0) {
+    bool stable = platform_positioned_file_snapshot(&file, &after) &&
+        before.size == after.size && before.volume == after.volume &&
+        before.file_low == after.file_low && before.file_high == after.file_high &&
+        before.modified_seconds == after.modified_seconds &&
+        before.modified_nanoseconds == after.modified_nanoseconds &&
+        before.changed_seconds == after.changed_seconds &&
+        before.changed_nanoseconds == after.changed_nanoseconds;
+    platform_positioned_file_close(&file);
+    if (got != (size_t)st->st_size || !stable) {
         sc->report.files_unreadable++;
         return true;
     }

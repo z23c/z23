@@ -9,6 +9,7 @@
  * opened solely to obtain the manifest values that the derivation is compared
  * AGAINST — they are never fed into the digests. */
 #include "config/consensus_state_replay_receipt.h"
+#include "config/consensus_state_replay_receipt_write.h"
 #include "config/consensus_state_snapshot_install.h"
 #include "base/serialize_le.h"
 #include "coins/utxo_commitment.h"
@@ -16,8 +17,6 @@
 #include "crypto/sha3.h"
 #include "platform/os_proc.h"
 #include "platform/positioned_file.h"
-#include "platform/private_directory.h"
-#include "platform/private_file.h"
 #include "script/script.h"
 #include "storage/anchor_kv.h"
 #include "storage/coins_kv.h"
@@ -27,7 +26,6 @@
 #include <limits.h>
 #include <sqlite3.h>
 #include <stdarg.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -53,7 +51,6 @@
 #define RR_OFF_VERIFIER    280u
 #define RR_OFF_RECEIPT_DIG 312u
 #define RR_PAYLOAD_BYTES   344u
-static _Atomic uint64_t g_rr_staging_nonce;
 _Static_assert(RR_OFF_RECEIPT_DIG + 32u == RR_PAYLOAD_BYTES,
                "replay receipt payload layout");
 /* One decoded receipt, independent of the on-disk byte order. */
@@ -218,56 +215,6 @@ static bool rr_deserialize(const uint8_t buf[RR_PAYLOAD_BYTES],
     uint8_t recomputed[32];
     rr_receipt_digest(r, recomputed);
     return memcmp(recomputed, r->receipt_digest, 32) == 0;
-}
-static bool rr_receipt_path(const char *datadir, char *out, size_t cap)
-{
-    int n = snprintf(out, cap, "%s/%s", datadir,
-                     CONSENSUS_STATE_REPLAY_RECEIPT_NAME);
-    return n > 0 && (size_t)n < cap;
-}
-/* Atomic keyed-file write: tmp -> fsync(file) -> rename -> fsync(dir). */
-static bool rr_write_atomic(const char *datadir,
-                            const uint8_t buf[RR_PAYLOAD_BYTES],
-                            char *final_out, size_t final_cap)
-{
-    char final_path[PATH_MAX], tmp_path[PATH_MAX];
-    if (!rr_receipt_path(datadir, final_path, sizeof(final_path)))
-        return false;
-    if (final_out && strlen(final_path) >= final_cap)
-        return false;
-    if (!platform_private_directory_ensure(datadir))
-        return false;
-    char resolved[PATH_MAX], parent[PATH_MAX];
-    if (!platform_private_path_resolve(final_path, resolved, sizeof(resolved),
-                                       parent, sizeof(parent)))
-        return false;
-    struct platform_private_file staging;
-    platform_private_file_init(&staging);
-    bool created = false;
-    for (unsigned attempt = 0; attempt < 64 && !created; attempt++) {
-        uint64_t nonce = atomic_fetch_add_explicit(
-            &g_rr_staging_nonce, 1, memory_order_relaxed);
-        int n = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.%016llx",
-                         resolved, (unsigned long long)nonce);
-        if (n <= 0 || (size_t)n >= sizeof(tmp_path))
-            return false;
-        created = platform_private_file_create(tmp_path, &staging);
-    }
-    if (!created)
-        return false;
-    bool ok = platform_private_file_write_at(&staging, buf, RR_PAYLOAD_BYTES,
-                                              0) &&
-              platform_private_file_flush(&staging) &&
-              platform_private_file_replace(&staging, tmp_path, resolved) &&
-              platform_private_parent_flush(parent);
-    platform_private_file_close(&staging);
-    if (!ok) {
-        (void)platform_private_file_unlink_missing_ok(tmp_path);
-        return false;
-    }
-    if (final_out)
-        memcpy(final_out, final_path, strlen(final_path) + 1u);
-    return true;
 }
 /* Reads through the datadir capability fd, matching ACTIVATE's rule that
  * pathnames are locators, never authority. */
@@ -611,7 +558,8 @@ bool consensus_state_replay_verify_and_write_receipt(
     uint8_t buf[RR_PAYLOAD_BYTES];
     rr_serialize(&r, buf);
     char final_path[256] = {0};
-    if (!rr_write_atomic(datadir, buf, final_path, sizeof(final_path)))
+    if (!consensus_state_replay_receipt_write(
+            datadir, buf, sizeof(buf), final_path, sizeof(final_path)))
         return rr_fail(out, "receipt persist (fsync'd) failed");
 
     if (out) {
@@ -795,6 +743,7 @@ bool consensus_state_replay_receipt_write_for_test(
     rr_receipt_digest(&r, r.receipt_digest);
     uint8_t buf[RR_PAYLOAD_BYTES];
     rr_serialize(&r, buf);
-    return rr_write_atomic(datadir, buf, out_path, out_cap);
+    return consensus_state_replay_receipt_write(datadir, buf, sizeof(buf),
+                                                out_path, out_cap);
 }
 #endif

@@ -305,7 +305,7 @@ bool platform_positioned_file_is_private(
         dacl && OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token) &&
         !GetTokenInformation(token, TokenUser, NULL, 0, &bytes) &&
         GetLastError() == ERROR_INSUFFICIENT_BUFFER;
-    if (ok) user = malloc(bytes);
+    if (ok) user = malloc(bytes); /* raw-alloc-ok:win32-token-sid */
     ok = ok && user && GetTokenInformation(token, TokenUser, user, bytes,
                                             &bytes) &&
          CreateWellKnownSid(WinLocalSystemSid, NULL, system_buffer,

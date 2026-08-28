@@ -28,7 +28,7 @@ static bool current_user_sid(HANDLE *token_out, TOKEN_USER **user_out)
     bool ok = OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token) &&
               !GetTokenInformation(token, TokenUser, NULL, 0, &size) &&
               GetLastError() == ERROR_INSUFFICIENT_BUFFER;
-    if (ok) user = malloc(size);
+    if (ok) user = malloc(size); /* raw-alloc-ok:win32-token-sid */
     ok = ok && user && GetTokenInformation(token, TokenUser, user, size,
                                             &size);
     if (!ok) {

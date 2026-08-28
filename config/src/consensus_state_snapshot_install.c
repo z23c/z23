@@ -21,10 +21,116 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 #define INSTALL_SUBSYS "consensus_bundle_install"
+
+#ifdef _WIN32
+
+struct consensus_state_artifact_evidence { unsigned char unavailable; };
+
+struct zcl_result consensus_state_artifact_evidence_open(
+    const char *bundle_path, int receipt_datadir_fd,
+    struct consensus_state_artifact_evidence **out)
+{
+    (void)bundle_path;
+    (void)receipt_datadir_fd;
+    if (out)
+        *out = NULL;
+    return ZCL_ERR(-1,
+                   "artifact evidence refused: native Windows consensus "
+                   "install is disabled pending qualified handle-bound "
+                   "SQLite admission and atomic generation activation");
+}
+
+void consensus_state_artifact_evidence_free(
+    struct consensus_state_artifact_evidence *evidence)
+{
+    (void)evidence;
+}
+
+bool consensus_state_artifact_evidence_manifest_copy(
+    const struct consensus_state_artifact_evidence *evidence,
+    struct consensus_state_bundle_manifest *manifest)
+{
+    (void)evidence;
+    if (manifest)
+        memset(manifest, 0, sizeof(*manifest));
+    return false;
+}
+
+bool consensus_state_artifact_evidence_digest(
+    const struct consensus_state_artifact_evidence *evidence, uint8_t out[32])
+{
+    (void)evidence;
+    if (out)
+        memset(out, 0, 32);
+    return false;
+}
+
+bool consensus_state_artifact_evidence_revalidate(
+    const struct consensus_state_artifact_evidence *evidence)
+{
+    (void)evidence;
+    return false;
+}
+
+bool consensus_state_artifact_evidence_receipt_digest(
+    const struct consensus_state_artifact_evidence *evidence, uint8_t out[32])
+{
+    return consensus_state_artifact_evidence_digest(evidence, out);
+}
+
+bool consensus_state_artifact_evidence_file_digest(
+    const struct consensus_state_artifact_evidence *evidence, uint8_t out[32])
+{
+    return consensus_state_artifact_evidence_digest(evidence, out);
+}
+
+bool consensus_state_artifact_evidence_candidate_lease_begin(
+    const struct consensus_state_artifact_evidence *evidence,
+    struct consensus_state_bundle_manifest *manifest,
+    uint8_t receipt_digest[32], sqlite3 **db)
+{
+    (void)evidence;
+    if (manifest)
+        memset(manifest, 0, sizeof(*manifest));
+    if (receipt_digest)
+        memset(receipt_digest, 0, 32);
+    if (db)
+        *db = NULL;
+    return false;
+}
+
+void consensus_state_artifact_evidence_candidate_lease_end(
+    const struct consensus_state_artifact_evidence *evidence)
+{
+    (void)evidence;
+}
+
+bool consensus_state_snapshot_install(
+    sqlite3 *progress_db,
+    const struct consensus_state_snapshot_install_request *request,
+    struct consensus_state_install_result *result)
+{
+    (void)progress_db;
+    (void)request;
+    if (result) {
+        memset(result, 0, sizeof(*result));
+        result->status = CONSENSUS_INSTALL_REFUSED;
+        snprintf(result->reason, sizeof(result->reason),
+                 "native Windows consensus install refused before file, "
+                 "datadir, or state mutation");
+    }
+    LOG_WARN(INSTALL_SUBSYS,
+             "native Windows consensus install refused before mutation");
+    return false;
+}
+
+#else
 
 struct consensus_state_artifact_evidence {
     zcl_mutex_t mutex;
@@ -531,3 +637,5 @@ bool consensus_state_snapshot_install(
     consensus_state_artifact_evidence_free(evidence);
     return ok; /* Always false while activation containment is in force. */
 }
+
+#endif

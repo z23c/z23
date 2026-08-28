@@ -14,7 +14,7 @@
 
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
-
+#if !defined(_WIN32)
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -27,9 +27,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
-
 /* ── source enumeration ─────────────────────────────────────────────── */
-
 struct strvec {
     char  **v;
     size_t  n;
@@ -989,3 +987,5 @@ bool codeindex_rebuild(struct codeindex *ci)
 {
     return codeindex_rebuild_internal(ci, false);
 }
+
+#endif

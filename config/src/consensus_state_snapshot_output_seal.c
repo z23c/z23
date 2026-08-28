@@ -8,14 +8,39 @@
 
 #include "crypto/sha3.h"
 
+#include <stdio.h>
+#include <sys/stat.h>
+#if !defined(_WIN32)
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <stdlib.h>
-#include <stdio.h>
-#include <sys/stat.h>
 #include <unistd.h>
+#endif
+
+#if defined(_WIN32)
+
+bool consensus_export_descriptor_digest(int fd, uint8_t out[32])
+{
+    (void)fd;
+    (void)out;
+    /* Native export is disabled until immutable output generations and the
+     * Windows sandbox are qualified. A descriptor alone cannot prove those
+     * publication properties, so validation fails closed too. */
+    return false;
+}
+
+bool consensus_export_seal_readonly(
+    struct consensus_export_output_binding *output, struct stat *sealed)
+{
+    (void)output;
+    (void)sealed;
+    /* Do not close, chmod, duplicate, hash, or otherwise mutate caller state. */
+    return false;
+}
+
+#else
 
 /* An O_TMPFILE is private by name, but a callback or another in-process
  * subsystem could retain a duplicate of its original O_RDWR descriptor.
@@ -137,3 +162,5 @@ bool consensus_export_seal_readonly(
     }
     return true;
 }
+
+#endif

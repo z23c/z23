@@ -13,6 +13,38 @@
 #include "util/thread_registry.h"
 #include "util/thread_liveness.h"
 
+#if defined(_WIN32)
+
+#include <stdio.h>
+
+enum rom_bundle_admission_result rom_bundle_admission_register(
+    const char *dir, const char *filename, struct rom_artifact *out)
+{
+    (void)dir;
+    (void)filename;
+    (void)out;
+    fprintf(stderr,
+            "REFUSED: ROM bundle admission is unavailable on Windows until "
+            "scan, hash, receipt, and registration share one validated "
+            "directory capability\n");
+    return ROM_BUNDLE_ADMIT_ERR_NO_RECEIPT;
+}
+
+int rom_bundle_admission_scan(const char *dir)
+{
+    (void)dir;
+    return 0;
+}
+
+void rom_bundle_admission_start_scan(const char *dir)
+{
+    (void)dir;
+}
+
+void rom_bundle_admission_stop_scan(void) { }
+
+#else
+
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -237,3 +269,5 @@ void rom_bundle_admission_stop_scan(void)
     pthread_join(t, NULL);
     thread_liveness_retire(&g_scan_liveness);
 }
+
+#endif

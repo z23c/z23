@@ -102,7 +102,7 @@ static bool wbs_path_char_equal(char a, char b)
     if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
     if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
 #endif
-    return a == b;
+    return a == b; // raw-return-ok:path-comparison
 }
 static bool wbs_canonical_backup_path(const char *backup_dir,
                                       const char *canonical_path)
@@ -123,9 +123,9 @@ static bool wbs_canonical_backup_path(const char *backup_dir,
         return false;
     for (size_t i = 0; i < root_len; i++)
         if (!wbs_path_char_equal(canonical_root[i], canonical_path[i]))
-            return false;
+            return false; // raw-return-ok:path-containment-predicate
     if (!wbs_path_char_equal(canonical_path[root_len], '/'))
-        return false;
+        return false; // raw-return-ok:path-containment-predicate
     const char *leaf = canonical_path + root_len + 1;
     if (strchr(leaf, '/') || strchr(leaf, '\\') ||
         strncmp(leaf, WALLET_BACKUP_FILENAME_PREFIX,

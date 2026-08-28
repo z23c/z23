@@ -25,7 +25,7 @@
 #include "platform/fd_path.h"
 #include "platform/time_compat.h"
 #include "util/log_macros.h"
-
+#if !defined(_WIN32)
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -37,9 +37,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
-
 #define ACTIVATE_SUBSYS "consensus_bundle_activate"
-
 /* Reuse the content-verify heartbeat primitive for the multi-minute activate
  * phases so a long install is never silent (VALIDATE_SUBSYS aliases here). */
 #define VALIDATE_SUBSYS ACTIVATE_SUBSYS
@@ -1167,3 +1165,5 @@ bool consensus_state_snapshot_install_activate(
     LOG_INFO(ACTIVATE_SUBSYS, "%s", result->reason);
     return true;
 }
+
+#endif

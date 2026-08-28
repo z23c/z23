@@ -829,7 +829,7 @@ AGENT_IMPACT_RULE("lib/storage/src/checkpoint_rung.c|lib/storage/src/checkpoint_
 /* Independent replay-derived receipt (-verify-consensus-bundle): the offline
  * verifier + the ACTIVATE authority gate it feeds. Tests live in the
  * consensus_state_snapshot_install group. */
-AGENT_IMPACT_RULE("config/src/consensus_state_replay_receipt.c|config/include/config/consensus_state_replay_receipt.h|config/src/boot_verify_consensus_bundle.c", "consensus_state_snapshot_install make_lint_gates")
+AGENT_IMPACT_RULE("config/src/consensus_state_replay_receipt*.c|config/include/config/consensus_state_replay_receipt*.h|config/src/boot_verify_consensus_bundle.c", "consensus_state_snapshot_install make_lint_gates")
 /* -ratify-mint-anchor: the terminal ratifier that stamps a completed producer
  * datadir's exporter-required markers. Touches coins_kv (the migration stamp)
  * and the bundle exporter's admission proof. */
@@ -842,7 +842,7 @@ AGENT_IMPACT_RULE("config/src/boot_export_consensus_bundle.c", "consensus_state_
  * foundation) + its Law-7 lint gate. Any edit to the replay receipt (the live
  * instance) also re-runs the new authority_receipt group so the extraction
  * stays behaviorally consistent with its origin. */
-AGENT_IMPACT_RULE("lib/util/src/authority_receipt.c|lib/util/include/util/authority_receipt.h|lib/test/src/test_authority_receipt.c|tools/lint/check_privileged_transition_receipt.sh|tools/lint/privileged_transition_receipt_baseline.txt|config/src/consensus_state_replay_receipt.c", "authority_receipt consensus_state_snapshot_install make_lint_gates")
+AGENT_IMPACT_RULE("lib/util/src/authority_receipt.c|lib/util/include/util/authority_receipt.h|lib/test/src/test_authority_receipt.c|tools/lint/check_privileged_transition_receipt.sh|tools/lint/privileged_transition_receipt_baseline.txt|config/src/consensus_state_replay_receipt*.c", "authority_receipt consensus_state_snapshot_install make_lint_gates")
 AGENT_IMPACT_RULE("app/services/src/consensus_state_chain_binding_service.c|app/services/include/services/consensus_state_chain_binding_service.h|lib/test/src/test_consensus_state_chain_binding.c", "consensus_state_chain_binding consensus_state_snapshot_install make_lint_gates")
 AGENT_IMPACT_RULE("config/src/consensus_state_producer_receipt*.c|config/src/consensus_state_producer_receipt_internal.h|config/src/consensus_state_producer_session_retire.c|config/src/consensus_state_producer_status.c|config/include/config/consensus_state_producer_receipt.h|config/src/boot_mint_anchor.c|lib/test/src/test_consensus_state_producer_receipt.c", "consensus_state_producer_receipt consensus_state_snapshot_export make_lint_gates")
 AGENT_IMPACT_RULE("app/services/src/consensus_state_publication_cas.c|app/services/include/services/consensus_state_publication_cas.h|lib/test/src/test_consensus_state_publication_cas.c", "consensus_state_publication_cas consensus_state_chain_binding make_lint_gates")

@@ -143,6 +143,8 @@ int64_t ci_store_include_edge_count(struct ci_store *s);
 /* Canonical per-symbol row hash used for verify-on-read. Deterministic over
  * all card fields. */
 void ci_symbol_row_hash(const struct ci_symbol *sym, uint8_t out[32]);
+bool ci_store_apply_pragmas(sqlite3 *db);
+bool ci_store_ensure_schema(sqlite3 *db);
 
 /* ── source enumeration ───────────────────────────────────────────────
  * Deterministic, sorted, repo-relative .c/.h paths across the configured

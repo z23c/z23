@@ -9,6 +9,7 @@
 #include "storage/progress_store.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
+#if !defined(_WIN32)
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -19,9 +20,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
-
 #define EXPORT_SUBSYS "consensus_bundle_export"
-
 bool consensus_export_fail(struct consensus_state_export_result *result,
                            enum consensus_state_export_status status,
                            const char *fmt, ...)
@@ -68,7 +67,6 @@ static bool output_name_valid(const char *name)
         return false;
     return strlen(name) < CONSENSUS_EXPORT_NAME_MAX - 48;
 }
-
 void consensus_export_output_init(struct consensus_export_output_binding *output)
 {
     memset(output, 0, sizeof(*output));
@@ -798,3 +796,5 @@ bool consensus_state_snapshot_export(
         free(output);
     return true;
 }
+
+#endif

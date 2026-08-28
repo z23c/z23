@@ -17,148 +17,49 @@
 #include "codeindex_priv.h"
 
 #include "platform/fd_path.h"
+#include "platform/positioned_file.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
 #include <sqlite3.h>
 
 #include <errno.h>
+#if !defined(_WIN32)
 #include <fcntl.h>
+#endif
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#if defined(_WIN32)
+#include <io.h>
+#else
 #include <unistd.h>
+#endif
 
 struct ci_store {
     sqlite3        *db;
     pthread_mutex_t lock;   /* recursive: held begin..commit; reads take briefly */
     int             bound_fd; /* immutable canonical inode, -1 for :memory: */
+    bool            readonly;
 };
 
 sqlite3 *ci_store_db(struct ci_store *s) { return s ? s->db : NULL; }
 void ci_store_lock(struct ci_store *s) { if (s) pthread_mutex_lock(&s->lock); }
 void ci_store_unlock(struct ci_store *s) { if (s) pthread_mutex_unlock(&s->lock); }
 
-/* ── canonical per-symbol row hash (verify-on-read) ─────────────────── */
-
-void ci_symbol_row_hash(const struct ci_symbol *sym, uint8_t out[32])
-{
-    struct sha3_256_ctx ctx;
-    sha3_256_init(&ctx);
-    static const uint8_t tag = 0x01;  /* domain separator for symbol rows */
-    sha3_256_write(&ctx, &tag, 1);
-    /* Serialize every card field, each length-free but delimited by a NUL so
-     * two fields cannot alias. Fixed integers appended little-endian. */
-    const char *fields[] = { sym->name, sym->def_path, sym->decl_path,
-                             sym->signature, sym->doc, sym->guard, sym->group };
-    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
-        sha3_256_write(&ctx, (const unsigned char *)fields[i],
-                       strlen(fields[i]) + 1);
-    }
-    unsigned char sc[6];
-    sc[0] = (unsigned char)sym->kind;
-    sc[1] = sym->partial ? 1u : 0u;
-    sc[2] = (unsigned char)(sym->def_line & 0xff);
-    sc[3] = (unsigned char)((sym->def_line >> 8) & 0xff);
-    sc[4] = (unsigned char)(sym->decl_line & 0xff);
-    sc[5] = (unsigned char)((sym->decl_line >> 8) & 0xff);
-    sha3_256_write(&ctx, sc, sizeof(sc));
-    sha3_256_finalize(&ctx, out);
-}
-
 /* ── open / schema ──────────────────────────────────────────────────── */
-
-static bool apply_pragmas(sqlite3 *db)
-{
-    static const char *const pragmas[] = {
-        /* A rollback journal keeps an already-open reader bound only to the
-         * old main-file inode while a rebuilt generation is atomically
-         * renamed over the canonical pathname. WAL sidecars are pathname-
-         * shared and would violate that old-reader-retention contract. */
-        "PRAGMA journal_mode=DELETE",
-        "PRAGMA synchronous=FULL",
-        "PRAGMA busy_timeout=5000",
-        NULL,
-    };
-    for (size_t i = 0; pragmas[i]; i++) {
-        char *err = NULL;
-        if (sqlite3_exec(db, pragmas[i], NULL, NULL, &err) != SQLITE_OK) {
-            fprintf(stderr, "[codeindex] pragma failed (%s): %s\n",  // obs-ok:codeindex-open-failure
-                    pragmas[i], err ? err : "(no message)");
-            if (err) sqlite3_free(err);
-            return false;
-        }
-    }
-    return true;
-}
-
-static bool ensure_schema(sqlite3 *db)
-{
-    static const char *const ddl =
-        "CREATE TABLE IF NOT EXISTS files ("
-        "  id INTEGER PRIMARY KEY,"
-        "  path TEXT UNIQUE NOT NULL,"
-        "  \"group\" TEXT NOT NULL,"
-        "  purpose TEXT NOT NULL,"
-        "  content_sha3 BLOB NOT NULL,"
-        "  mtime INTEGER NOT NULL);"
-        "CREATE TABLE IF NOT EXISTS symbols ("
-        "  id INTEGER PRIMARY KEY,"
-        "  name TEXT NOT NULL,"
-        "  kind TEXT NOT NULL,"
-        "  def_path TEXT NOT NULL,"
-        "  def_line INTEGER NOT NULL,"
-        "  decl_path TEXT NOT NULL,"
-        "  decl_line INTEGER NOT NULL,"
-        "  signature TEXT NOT NULL,"
-        "  doc TEXT NOT NULL,"
-        "  guard TEXT NOT NULL,"
-        "  \"group\" TEXT NOT NULL,"
-        "  partial INTEGER NOT NULL,"
-        "  row_sha3 BLOB NOT NULL);"
-        "CREATE TABLE IF NOT EXISTS includes ("
-        "  file_id INTEGER NOT NULL,"
-        "  dep_path TEXT NOT NULL,"
-        "  UNIQUE(file_id,dep_path));"
-        "CREATE TABLE IF NOT EXISTS refs ("
-        "  callee_name TEXT NOT NULL,"
-        "  ref_file TEXT NOT NULL,"
-        "  ref_line INTEGER NOT NULL,"
-        "  enclosing TEXT NOT NULL DEFAULT '');"
-        "CREATE TABLE IF NOT EXISTS groups ("
-        "  path TEXT PRIMARY KEY,"
-        "  kind TEXT NOT NULL,"
-        "  parent TEXT NOT NULL,"
-        "  purpose TEXT NOT NULL);"
-        "CREATE TABLE IF NOT EXISTS meta ("
-        "  k TEXT PRIMARY KEY,"
-        "  v BLOB NOT NULL);"
-        "CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);"
-        "CREATE INDEX IF NOT EXISTS idx_refs_callee ON refs(callee_name);"
-        "CREATE INDEX IF NOT EXISTS idx_refs_enclosing ON refs(enclosing);"
-        "CREATE INDEX IF NOT EXISTS idx_files_group ON files(\"group\");"
-        /* The REVERSE include lookup ("who reads this header/registry") is a
-         * dep_path equality probe. Without this index it is a full scan of the
-         * whole edge table per query, which is how a reverse walk gets written
-         * off as too expensive and the include dimension goes missing. */
-        "CREATE INDEX IF NOT EXISTS idx_includes_dep ON includes(dep_path);";
-    char *err = NULL;
-    if (sqlite3_exec(db, ddl, NULL, NULL, &err) != SQLITE_OK) {
-        fprintf(stderr, "[codeindex] schema failed: %s\n",  // obs-ok:codeindex-open-failure
-                err ? err : "(no message)");
-        if (err) sqlite3_free(err);
-        return false;
-    }
-    return true;
-}
 
 struct ci_store *ci_store_open_path(const char *dbpath)
 {
     if (!dbpath || !dbpath[0])
         LOG_NULL("codeindex", "null dbpath");
+#if defined(_WIN32)
+    if (strcmp(dbpath, ":memory:") != 0)
+        return NULL;
+#endif
 
     struct ci_store *s = zcl_calloc(1, sizeof(*s), "ci_store");
     if (!s)
@@ -179,7 +80,7 @@ struct ci_store *ci_store_open_path(const char *dbpath)
         free(s);
         return NULL;
     }
-    if (!apply_pragmas(s->db) || !ensure_schema(s->db)) {
+    if (!ci_store_apply_pragmas(s->db) || !ci_store_ensure_schema(s->db)) {
         sqlite3_close(s->db);
         pthread_mutex_destroy(&s->lock);
         free(s);
@@ -192,6 +93,75 @@ struct ci_store *ci_store_open(const char *root)
 {
     if (!root || !root[0])
         LOG_NULL("codeindex", "null root");
+#if defined(_WIN32)
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open_beneath(
+            &file, root, ".codeindex/index.kv"))
+        return NULL;
+    uint64_t image_size = 0;
+    if (!platform_positioned_file_is_private(&file) ||
+        !platform_positioned_file_snapshot(&file, &before) ||
+        !platform_positioned_file_size(&file, &image_size) || image_size == 0 ||
+        image_size > INT64_MAX || image_size > (uint64_t)SIZE_MAX) {
+        platform_positioned_file_close(&file);
+        return NULL;
+    }
+    unsigned char *image = sqlite3_malloc64((sqlite3_uint64)image_size);
+    if (!image) {
+        platform_positioned_file_close(&file);
+        return NULL;
+    }
+    size_t done = 0;
+    while (done < (size_t)image_size) {
+        int64_t read = platform_positioned_file_read(
+            &file, image + done, (size_t)image_size - done, done);
+        if (read <= 0) break;
+        done += (size_t)read;
+    }
+    bool stable = done == (size_t)image_size &&
+        platform_positioned_file_snapshot(&file, &after) &&
+        before.size == after.size && before.volume == after.volume &&
+        before.file_low == after.file_low && before.file_high == after.file_high &&
+        before.modified_seconds == after.modified_seconds &&
+        before.modified_nanoseconds == after.modified_nanoseconds &&
+        before.changed_seconds == after.changed_seconds &&
+        before.changed_nanoseconds == after.changed_nanoseconds;
+    platform_positioned_file_close(&file);
+    if (!stable) {
+        sqlite3_free(image);
+        return NULL;
+    }
+    struct ci_store *s = zcl_calloc(1, sizeof(*s), "ci_store_readonly");
+    if (!s) { sqlite3_free(image); return NULL; }
+    s->bound_fd = -1;
+    s->readonly = true;
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&s->lock, &attr);
+    pthread_mutexattr_destroy(&attr);
+    int flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE |
+                SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_MEMORY;
+    int opened = sqlite3_open_v2(":memory:", &s->db, flags, NULL);
+    int loaded = opened == SQLITE_OK
+        ? sqlite3_deserialize(s->db, "main", image,
+                              (sqlite3_int64)image_size,
+                              (sqlite3_int64)image_size,
+                              SQLITE_DESERIALIZE_FREEONCLOSE |
+                                  SQLITE_DESERIALIZE_READONLY)
+        : SQLITE_ERROR;
+    if (opened != SQLITE_OK || loaded != SQLITE_OK) {
+        if (s->db) sqlite3_close(s->db);
+        sqlite3_free(image);
+        pthread_mutex_destroy(&s->lock);
+        free(s);
+        return NULL;
+    }
+    (void)sqlite3_busy_timeout(s->db, 5000);
+    return s;
+#else
     char dir[CI_PATH_MAX];
     int dn = snprintf(dir, sizeof(dir), "%s/.codeindex", root);
     if (dn <= 0 || (size_t)dn >= sizeof(dir))
@@ -237,6 +207,7 @@ struct ci_store *ci_store_open(const char *root)
         LOG_NULL("codeindex", "calloc readonly ci_store");
     }
     s->bound_fd = fd;
+    s->readonly = true;
     pthread_mutexattr_t attr;
     pthread_mutexattr_init(&attr);
     pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
@@ -272,6 +243,7 @@ struct ci_store *ci_store_open(const char *root)
     }
     (void)sqlite3_busy_timeout(s->db, 5000);
     return s;
+#endif
 }
 
 bool ci_store_write_image_fd(struct ci_store *s, int fd)
@@ -279,6 +251,11 @@ bool ci_store_write_image_fd(struct ci_store *s, int fd)
     if (!s || fd < 0)
         LOG_FAIL("codeindex", "invalid store/image fd");
 
+#if defined(_WIN32)
+    (void)s;
+    (void)fd;
+    return false;
+#else
     pthread_mutex_lock(&s->lock);
     sqlite3_int64 image_size = 0;
     unsigned char *image = sqlite3_serialize(s->db, "main", &image_size, 0);
@@ -316,13 +293,20 @@ bool ci_store_write_image_fd(struct ci_store *s, int fd)
         LOG_FAIL("codeindex", "serialize staging image failed: %s",
                  strerror(saved));
     return true;
+#endif
 }
 
 void ci_store_close(struct ci_store *s)
 {
     if (!s) return;
     if (s->db) sqlite3_close(s->db);
-    if (s->bound_fd >= 0) close(s->bound_fd);
+    if (s->bound_fd >= 0) {
+#if defined(_WIN32)
+        _close(s->bound_fd);
+#else
+        close(s->bound_fd);
+#endif
+    }
     pthread_mutex_destroy(&s->lock);
     free(s);
 }
@@ -332,6 +316,7 @@ void ci_store_close(struct ci_store *s)
 bool ci_store_begin(struct ci_store *s)
 {
     if (!s) LOG_FAIL("codeindex", "null store");
+    if (s->readonly) return false;
     pthread_mutex_lock(&s->lock);
     char *err = NULL;
     if (sqlite3_exec(s->db, "BEGIN IMMEDIATE", NULL, NULL, &err) != SQLITE_OK) {
@@ -366,6 +351,7 @@ bool ci_store_rollback(struct ci_store *s)
 bool ci_store_clear(struct ci_store *s)
 {
     if (!s) LOG_FAIL("codeindex", "null store");
+    if (s->readonly) return false;
     char *err = NULL;
     if (sqlite3_exec(s->db,
         "DELETE FROM files; DELETE FROM symbols; DELETE FROM includes;"
@@ -383,6 +369,7 @@ bool ci_store_put_file(struct ci_store *s, const struct ci_file *f,
                        const uint8_t content_sha3[32], int64_t mtime,
                        int64_t *out_file_id)
 {
+    if (s && s->readonly) return false;
     if (!s || !f || !content_sha3)
         LOG_FAIL("codeindex", "null arg to put_file");
     sqlite3_stmt *stmt = NULL;
@@ -405,6 +392,7 @@ bool ci_store_put_file(struct ci_store *s, const struct ci_file *f,
 
 bool ci_store_put_symbol(struct ci_store *s, const struct ci_symbol *sym)
 {
+    if (s && s->readonly) return false;
     if (!s || !sym)
         LOG_FAIL("codeindex", "null arg to put_symbol");
     uint8_t row[32];
@@ -438,6 +426,7 @@ bool ci_store_put_symbol(struct ci_store *s, const struct ci_symbol *sym)
 bool ci_store_put_include(struct ci_store *s, int64_t file_id,
                           const char *dep_path)
 {
+    if (s && s->readonly) return false;
     if (!s || !dep_path)
         LOG_FAIL("codeindex", "null arg to put_include");
     sqlite3_stmt *stmt = NULL;
@@ -458,6 +447,7 @@ bool ci_store_put_ref(struct ci_store *s, const char *callee,
                       const char *ref_file, int ref_line,
                       const char *enclosing)
 {
+    if (s && s->readonly) return false;
     if (!s || !callee || !ref_file)
         LOG_FAIL("codeindex", "null arg to put_ref");
     sqlite3_stmt *stmt = NULL;
@@ -479,6 +469,7 @@ bool ci_store_put_ref(struct ci_store *s, const char *callee,
 
 bool ci_store_put_group(struct ci_store *s, const struct ci_group *g)
 {
+    if (s && s->readonly) return false;
     if (!s || !g)
         LOG_FAIL("codeindex", "null arg to put_group");
     sqlite3_stmt *stmt = NULL;
@@ -500,6 +491,7 @@ bool ci_store_put_group(struct ci_store *s, const struct ci_group *g)
 bool ci_store_meta_set(struct ci_store *s, const char *k, const void *v,
                        size_t vlen)
 {
+    if (s && s->readonly) return false;
     if (!s || !k || !k[0] || (vlen > 0 && !v))
         LOG_FAIL("codeindex", "null arg to meta_set");
     sqlite3_stmt *stmt = NULL;

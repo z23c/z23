@@ -5,7 +5,10 @@ ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	boot_auto_install_bundle_refusal \
 	build_fabric_worker_refusal \
 	bundle_exporter_refusal \
+	codeindex_build_refusal \
 	consensus_bundle_marker \
+	consensus_export_fd_io_refusal \
+	consensus_export_output_seal_refusal \
 	consensus_state_install_runtime_refusal \
 	consensus_state_publication_cas_refusal \
 	directory_compat \
@@ -14,6 +17,7 @@ ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	format_attribute \
 	glob_match \
 	logical_cpu \
+	log_level \
 	mint_anchor_export_refusal \
 	mint_anchor_preflight_refusal \
 	package_lifecycle_store_refusal \
@@ -23,9 +27,12 @@ ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	private_file \
 	private_file_path_swap \
 	read_mapping \
+	rom_bundle_admission_refusal \
 	rpc_client_transport \
 	safe_root_read \
 	snapshot_candidate_output_refusal \
+	snapshot_export_refusal \
+	snapshot_install_activate_refusal \
 	socket_compat \
 	stale_lock_capability \
 	ui_host_transport \
@@ -48,6 +55,10 @@ ZCL_WINDOWS_ACCEPTANCE_bundle_exporter_refusal_SOURCES := \
 	lib/json/src/json.c \
 	lib/base/src/safe_alloc.c
 ZCL_WINDOWS_ACCEPTANCE_bundle_exporter_refusal_FLAGS := -DZCL_TESTING
+ZCL_WINDOWS_ACCEPTANCE_codeindex_build_refusal_SOURCES := \
+	lib/test/src/codeindex_build_refusal_acceptance.c \
+	lib/codeindex/src/codeindex_build_windows.c
+ZCL_WINDOWS_ACCEPTANCE_codeindex_build_refusal_FLAGS := -Ilib/codeindex/src
 ZCL_WINDOWS_ACCEPTANCE_consensus_bundle_marker_SOURCES := \
 	lib/test/src/consensus_bundle_marker_windows_acceptance.c \
 	config/src/boot_consensus_bundle_marker.c \
@@ -56,6 +67,18 @@ ZCL_WINDOWS_ACCEPTANCE_consensus_bundle_marker_SOURCES := \
 	lib/platform/src/clock.c \
 	lib/base/src/safe_alloc.c
 ZCL_WINDOWS_ACCEPTANCE_consensus_bundle_marker_LIBS := -ladvapi32
+ZCL_WINDOWS_ACCEPTANCE_consensus_export_fd_io_refusal_SOURCES := \
+	lib/test/src/consensus_export_fd_io_refusal_acceptance.c \
+	config/src/consensus_state_snapshot_export_fd_io.c \
+	lib/platform/src/positioned_io.c \
+	vendor/sqlite3.c
+ZCL_WINDOWS_ACCEPTANCE_consensus_export_fd_io_refusal_FLAGS := \
+	-Iconfig/src -Wno-unused-but-set-variable -Wno-unused-parameter
+ZCL_WINDOWS_ACCEPTANCE_consensus_export_output_seal_refusal_SOURCES := \
+	lib/test/src/consensus_export_output_seal_refusal_acceptance.c \
+	config/src/consensus_state_snapshot_output_seal.c
+ZCL_WINDOWS_ACCEPTANCE_consensus_export_output_seal_refusal_FLAGS := \
+	-Iconfig/src
 ZCL_WINDOWS_ACCEPTANCE_consensus_state_install_runtime_refusal_SOURCES := \
 	lib/test/src/consensus_state_install_runtime_windows_refusal_acceptance.c \
 	config/src/consensus_state_install_runtime.c \
@@ -91,6 +114,9 @@ ZCL_WINDOWS_ACCEPTANCE_logical_cpu_SOURCES := \
 	lib/platform/src/logical_cpu.c
 ZCL_WINDOWS_ACCEPTANCE_logical_cpu_FLAGS := \
 	-U_WIN32_WINNT -D_WIN32_WINNT=0x0601
+ZCL_WINDOWS_ACCEPTANCE_log_level_SOURCES := \
+	lib/test/src/log_level_acceptance.c \
+	lib/base/src/log_level.c
 ZCL_WINDOWS_ACCEPTANCE_mint_anchor_export_refusal_SOURCES := \
 	lib/test/src/mint_anchor_export_windows_refusal_acceptance.c \
 	config/src/boot_mint_anchor.c
@@ -134,6 +160,9 @@ ZCL_WINDOWS_ACCEPTANCE_private_file_path_swap_LIBS := -ladvapi32
 ZCL_WINDOWS_ACCEPTANCE_read_mapping_SOURCES := \
 	lib/platform/tests/read_mapping_windows_acceptance.c \
 	lib/platform/src/read_mapping.c
+ZCL_WINDOWS_ACCEPTANCE_rom_bundle_admission_refusal_SOURCES := \
+	lib/test/src/rom_bundle_admission_refusal_acceptance.c \
+	config/src/rom_bundle_admission.c
 ZCL_WINDOWS_ACCEPTANCE_rpc_client_transport_SOURCES := \
 	lib/platform/tests/rpc_client_transport_windows_acceptance.c \
 	app/controllers/src/rpc_client.c \
@@ -149,6 +178,14 @@ ZCL_WINDOWS_ACCEPTANCE_snapshot_candidate_output_refusal_SOURCES := \
 	lib/test/src/snapshot_candidate_output_refusal_acceptance.c \
 	config/src/consensus_state_snapshot_candidate_output.c
 ZCL_WINDOWS_ACCEPTANCE_snapshot_candidate_output_refusal_FLAGS := -Iconfig/src
+ZCL_WINDOWS_ACCEPTANCE_snapshot_export_refusal_SOURCES := \
+	lib/test/src/snapshot_export_refusal_acceptance.c \
+	config/src/consensus_state_snapshot_export_windows.c
+ZCL_WINDOWS_ACCEPTANCE_snapshot_export_refusal_FLAGS := -Iconfig/src
+ZCL_WINDOWS_ACCEPTANCE_snapshot_install_activate_refusal_SOURCES := \
+	lib/test/src/snapshot_install_activate_refusal_acceptance.c \
+	config/src/consensus_state_snapshot_install_activate_windows.c
+ZCL_WINDOWS_ACCEPTANCE_snapshot_install_activate_refusal_FLAGS := -Iconfig/src
 ZCL_WINDOWS_ACCEPTANCE_socket_compat_SOURCES := \
 	lib/platform/tests/socket_compat_windows_acceptance.c
 ZCL_WINDOWS_ACCEPTANCE_socket_compat_LIBS := -lws2_32

@@ -25,18 +25,14 @@
  * This is deliberately heuristic. It is expected to be iterated; correctness
  * lives in test_codeindex against a controlled fixture. */
 #include "codeindex_priv.h"
-
-#include "util/log_macros.h"
 #include "base/text_fit.h"
 #include "util/safe_alloc.h"
 
 #include <ctype.h>
-#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>   /* strncasecmp */
-#include <unistd.h>
 
 #define CI_MAX_SYMS_PER_FILE  20000
 #define CI_MAX_REFS_PER_FILE  20000
@@ -972,61 +968,4 @@ done:
     free(c.pp_line);
     free(c.comments);
     free(c.funcs);
-}
-
-/* ── file front-end ─────────────────────────────────────────────────── */
-
-bool ci_scan_file(const char *root, const char *relpath,
-                  ci_sym_cb on_sym, ci_ref_cb on_ref, void *user,
-                  uint8_t out_sha3[32], char purpose_out[160])
-{
-    if (purpose_out) purpose_out[0] = '\0';
-    if (!root || !relpath || !on_sym || !on_ref)
-        LOG_FAIL("codeindex", "null arg to scan_file");
-
-    char full[CI_PATH_MAX];
-    int n = snprintf(full, sizeof(full), "%s/%s", root, relpath);
-    if (n <= 0 || (size_t)n >= sizeof(full))
-        LOG_FAIL("codeindex", "scan path too long");
-
-    int fd = open(full, O_RDONLY | O_CLOEXEC);
-    if (fd < 0)
-        LOG_FAIL("codeindex", "open %s", full);
-
-    /* read whole file */
-    size_t cap = 1 << 16, len = 0;
-    char *buf = zcl_malloc(cap, "ci_filebuf");
-    if (!buf) { close(fd); LOG_FAIL("codeindex", "alloc filebuf"); }
-    for (;;) {
-        if (len == cap) {
-            size_t ncap = cap * 2;
-            char *nb = zcl_realloc(buf, ncap, "ci_filebuf");
-            if (!nb) { free(buf); close(fd); LOG_FAIL("codeindex", "grow filebuf"); }
-            buf = nb; cap = ncap;
-        }
-        ssize_t r = read(fd, buf + len, cap - len);
-        if (r < 0) { free(buf); close(fd); LOG_FAIL("codeindex", "read %s", full); }
-        if (r == 0) break;
-        len += (size_t)r;
-    }
-    close(fd);
-
-    if (out_sha3) {
-        static const uint8_t tag = 0x02;  /* content-hash domain tag */
-        struct sha3_256_ctx ctx;
-        sha3_256_init(&ctx);
-        sha3_256_write(&ctx, &tag, 1);
-        if (len) sha3_256_write(&ctx, (const unsigned char *)buf, len);
-        sha3_256_finalize(&ctx, out_sha3);
-    }
-
-    size_t rl = strlen(relpath);
-    bool is_header = rl >= 2 && relpath[rl - 2] == '.' && relpath[rl - 1] == 'h';
-    char group[64];
-    ci_group_for_path(relpath, group);
-
-    ci_scan_text(buf, len, relpath, is_header, group, on_sym, on_ref, user,
-                 purpose_out);
-    free(buf);
-    return true;
 }

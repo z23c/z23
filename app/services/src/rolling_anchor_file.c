@@ -1,5 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: bind rolling-anchor snapshots and durable parent publication. */
+// one-result-type-ok:internal-file-identity-helpers
 
 #include "rolling_anchor_file_internal.h"
 #include "platform/private_file.h"
