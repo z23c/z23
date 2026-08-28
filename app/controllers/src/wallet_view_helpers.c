@@ -4,6 +4,7 @@
  * parsing, and wallet-view initialization. */
 
 #include "platform/time_compat.h"
+#include "platform/socket_compat.h"
 #include "controllers/wallet_view_internal.h"
 #include "controllers/web_form.h"
 /* CSS is now in app/views/css/wallet.ccss, compiled as CSS_WALLET */
@@ -14,9 +15,6 @@
 #include "encoding/utilstrencodings.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
-#include <sys/time.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
 
 /* ── Global state (non-static, declared extern in wallet_view_internal.h) ── */
 
@@ -166,8 +164,9 @@ int wv_rpc_call(const char *method, const char *params_json,
         }
     }
 
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0)
+    platform_socket_t fd = platform_socket_open(AF_INET, SOCK_STREAM, 0,
+                                                true, false);
+    if (fd == PLATFORM_SOCKET_INVALID)
         LOG_ERR("wallet_view", "rpc_call(%s): socket() failed", method);
 
     struct sockaddr_in addr;
@@ -176,12 +175,12 @@ int wv_rpc_call(const char *method, const char *params_json,
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = htons(ZCLASSICD_RPC_DEFAULT_PORT);
 
-    struct timeval tv = { .tv_sec = 3, .tv_usec = 0 };
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    (void)platform_socket_set_receive_timeout(fd, 3000);
+    (void)platform_socket_set_send_timeout(fd, 3000);
 
-    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        close(fd);
+    if (platform_socket_connect(fd, (struct sockaddr *)&addr,
+                                sizeof(addr)) < 0) {
+        (void)platform_socket_close(fd);
         LOG_ERR("wallet_view", "rpc_call(%s): connect to port %d failed",
                 method, ZCLASSICD_RPC_DEFAULT_PORT);
     }
@@ -191,7 +190,7 @@ int wv_rpc_call(const char *method, const char *params_json,
         "{\"jsonrpc\":\"1.0\",\"id\":1,\"method\":\"%s\",\"params\":%s}",
         method, params_json);
     if (blen < 0 || (size_t)blen >= sizeof(body)) {
-        close(fd);
+        (void)platform_socket_close(fd);
         LOG_ERR("wallet_view", "rpc_call(%s): request body too large (%d bytes)", method, blen);
     }
 
@@ -218,23 +217,24 @@ int wv_rpc_call(const char *method, const char *params_json,
         "Content-Length: %d\r\nConnection: close\r\n\r\n%s",
         auth_b64, blen, body);
     if (rlen < 0 || (size_t)rlen >= sizeof(req)) {
-        close(fd);
+        (void)platform_socket_close(fd);
         LOG_ERR("wallet_view", "rpc_call(%s): request too large (%d bytes)", method, rlen);
     }
 
-    if (write(fd, req, (size_t)rlen) != rlen) {
-        close(fd);
+    if (!platform_socket_send_all(fd, req, (size_t)rlen)) {
+        (void)platform_socket_close(fd);
         LOG_ERR("wallet_view", "rpc_call(%s): write failed (expected %d bytes)", method, rlen);
     }
 
     size_t total = 0;
     while (total < outmax - 1) {
-        ssize_t r = read(fd, out + total, outmax - 1 - total);
+        int r = platform_socket_receive(fd, out + total,
+                                        outmax - 1 - total);
         if (r <= 0) break;
         total += (size_t)r;
     }
     out[total] = '\0';
-    close(fd);
+    (void)platform_socket_close(fd);
 
     char *body_start = strstr(out, "\r\n\r\n");
     if (body_start) {

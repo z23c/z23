@@ -16,15 +16,15 @@
 
 #include "platform/os_binary_slots.h"
 #include "platform/os_proc.h"
+#include "platform/positioned_file.h"
+#include "platform/private_file.h"
+#include "platform/rng.h"
 #include "util/blocker.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 #include "util/log_macros.h"
 
@@ -38,45 +38,6 @@ void binary_ab_test_fail_before_promote_rename_once(void)
     g_binary_ab_fail_before_promote_rename_once = true;
 }
 #endif
-
-/* ── fsync helpers ──────────────────────────────────────────────────── */
-
-/* fsync the directory that contains `path` so a rename into it is durable.
- * Promotion is not successful unless this persistence barrier succeeds. */
-static bool binary_ab_fsync_parent_dir(const char *path)
-{
-    char dir[1024];
-    int dir_len = snprintf(dir, sizeof(dir), "%s", path);
-    if (dir_len < 0 || (size_t)dir_len >= sizeof(dir)) {
-        LOG_WARN("binary_ab", "parent directory path is too long");
-        return false;
-    }
-    char *slash = strrchr(dir, '/');
-    if (!slash) {
-        dir[0] = '.';
-        dir[1] = '\0';
-    } else if (slash == dir) {
-        dir[1] = '\0'; /* path was "/x" → parent is "/" */
-    } else {
-        *slash = '\0';
-    }
-    int dfd = open(dir, O_RDONLY | O_DIRECTORY);
-    if (dfd < 0) {
-        LOG_WARN("binary_ab", "open(%s) for dir fsync failed: %s",
-                 dir, strerror(errno));
-        return false;
-    }
-    if (fsync(dfd) != 0) {
-        LOG_WARN("binary_ab", "fsync(%s) failed: %s", dir, strerror(errno));
-        close(dfd);
-        return false;
-    }
-    if (close(dfd) != 0) {
-        LOG_WARN("binary_ab", "close(%s) failed: %s", dir, strerror(errno));
-        return false;
-    }
-    return true;
-}
 
 /* ── Streak reset ───────────────────────────────────────────────────── */
 
@@ -115,59 +76,79 @@ bool binary_ab_note_self_respawn_exit(const char *streak_file)
 
 /* ── Promotion (current -> last-good) ───────────────────────────────── */
 
-static bool binary_ab_promote_open_file(const char *slots_dir, FILE *input,
-                                        const char *source_name)
+static bool binary_ab_open_staging(const char *destination,
+                                   char staging[1088],
+                                   struct platform_private_file *output)
+{
+    for (unsigned attempt = 0; attempt < 16; ++attempt) {
+        uint8_t nonce[16];
+        if (!rng_fill(nonce, sizeof(nonce)))
+            return false;
+        char suffix[2 * sizeof(nonce) + 1];
+        for (size_t i = 0; i < sizeof(nonce); ++i)
+            (void)snprintf(suffix + 2 * i, 3, "%02x", nonce[i]);
+        int n = snprintf(staging, 1088, "%s.tmp.%s", destination, suffix);
+        if (n <= 0 || n >= 1088)
+            return false;
+        if (platform_private_file_create(staging, output))
+            return true;
+    }
+    return false;
+}
+
+static bool binary_ab_install_staging(struct platform_private_file *output,
+                                      const char *staging,
+                                      const char *destination,
+                                      const char *parent)
+{
+    if (!platform_private_file_mark_executable(output) ||
+        !platform_private_file_flush(output))
+        return false;
+#ifdef ZCL_TESTING
+    if (g_binary_ab_fail_before_promote_rename_once) {
+        g_binary_ab_fail_before_promote_rename_once = false;
+        LOG_WARN("binary_ab", "promote: injected failure before replace");
+        return false;
+    }
+#endif
+    return platform_private_file_replace(output, staging, destination) &&
+           platform_private_parent_flush(parent);
+}
+
+static bool binary_ab_promote_stream(const char *slots_dir, FILE *input,
+                                     const char *source_name)
 {
     if (!slots_dir || slots_dir[0] == '\0')
         LOG_FAIL("binary_ab", "promote: empty slots_dir");
     if (!input)
         LOG_FAIL("binary_ab", "promote: empty input stream");
 
-    int input_fd = fileno(input);
-    struct stat input_stat;
-    if (input_fd < 0 || fstat(input_fd, &input_stat) != 0 ||
-        !S_ISREG(input_stat.st_mode) ||
-        (input_stat.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) == 0)
-        LOG_FAIL("binary_ab", "promote: %s is not a regular executable",
-                 source_name);
-
-    char dst[1024];
-    int dst_len = snprintf(dst, sizeof(dst), "%s/%s", slots_dir,
+    char requested[1024];
+    int dst_len = snprintf(requested, sizeof(requested), "%s/%s", slots_dir,
                            BINARY_AB_LASTGOOD_BASENAME);
-    if (dst_len < 0 || (size_t)dst_len >= sizeof(dst))
+    if (dst_len < 0 || (size_t)dst_len >= sizeof(requested))
         LOG_FAIL("binary_ab", "promote: last-good path is too long");
+    char dst[1024], parent[1024];
+    if (!platform_private_path_resolve(requested, dst, sizeof(dst), parent,
+                                       sizeof(parent)))
+        LOG_FAIL("binary_ab", "promote: cannot resolve slots directory");
     char tmp[1088];
-    int tmp_len = snprintf(tmp, sizeof(tmp), "%s.tmp.%ld", dst,
-                           (long)getpid());
-    if (tmp_len < 0 || (size_t)tmp_len >= sizeof(tmp))
-        LOG_FAIL("binary_ab", "promote: temporary path is too long");
-
-    (void)unlink(tmp);
-    int out = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
-                   0600);
-    if (out < 0)
-        LOG_FAIL("binary_ab", "promote: open(%s) failed: %s",
-                 tmp, strerror(errno));
+    struct platform_private_file output;
+    platform_private_file_init(&output);
+    if (!binary_ab_open_staging(dst, tmp, &output))
+        LOG_FAIL("binary_ab", "promote: cannot create exclusive staging file");
 
     unsigned char buf[BINARY_AB_COPY_CHUNK];
     bool copy_ok = true;
+    uint64_t offset = 0;
     size_t n = 0;
     while ((n = fread(buf, 1, sizeof(buf), input)) > 0) {
-        size_t off = 0;
-        while (off < n) {
-            ssize_t w = write(out, buf + off, n - off);
-            if (w < 0 && errno == EINTR)
-                continue;
-            if (w <= 0) {
-                LOG_WARN("binary_ab", "promote: write(%s) failed: %s",
-                         tmp, strerror(errno));
-                copy_ok = false;
-                break;
-            }
-            off += (size_t)w;
-        }
-        if (!copy_ok)
+        if (UINT64_MAX - offset < n ||
+            !platform_private_file_write_at(&output, buf, n, offset)) {
+            copy_ok = false;
             break;
+        }
+        offset += n;
     }
     if (ferror(input)) {
         LOG_WARN("binary_ab", "promote: read(%s) failed: %s",
@@ -175,48 +156,13 @@ static bool binary_ab_promote_open_file(const char *slots_dir, FILE *input,
         copy_ok = false;
     }
 
-    if (copy_ok) {
-        if (fchmod(out, 0755) != 0) {
-            LOG_WARN("binary_ab", "promote: fchmod(%s) failed: %s",
-                     tmp, strerror(errno));
-            copy_ok = false;
-        }
-        if (fsync(out) != 0) {
-            LOG_WARN("binary_ab", "promote: fsync(%s) failed: %s",
-                     tmp, strerror(errno));
-            copy_ok = false;
-        }
-    }
-    if (close(out) != 0) {
-        LOG_WARN("binary_ab", "promote: close(%s) failed: %s",
-                 tmp, strerror(errno));
-        copy_ok = false;
-    }
-
-    if (!copy_ok) {
-        unlink(tmp);
+    if (copy_ok)
+        copy_ok = binary_ab_install_staging(&output, tmp, dst, parent);
+    if (!copy_ok && output.native != (uintptr_t)-1)
+        (void)platform_private_file_retire(&output, tmp);
+    platform_private_file_close(&output);
+    if (!copy_ok)
         return false;
-    }
-
-#ifdef ZCL_TESTING
-    if (g_binary_ab_fail_before_promote_rename_once) {
-        g_binary_ab_fail_before_promote_rename_once = false;
-        LOG_WARN("binary_ab", "promote: injected failure before rename");
-        unlink(tmp);
-        return false;
-    }
-#endif
-
-    if (rename(tmp, dst) != 0) {
-        LOG_WARN("binary_ab", "promote: rename(%s->%s) failed: %s",
-                 tmp, dst, strerror(errno));
-        unlink(tmp);
-        return false;
-    }
-    if (!binary_ab_fsync_parent_dir(dst)) {
-        LOG_WARN("binary_ab", "promote: last-good directory sync failed");
-        return false;
-    }
     LOG_INFO("binary_ab", "promoted current binary to last-good slot (%s)", dst);
     return true;
 }
@@ -225,24 +171,39 @@ bool binary_ab_promote(const char *slots_dir, const char *current_path)
 {
     if (!current_path || current_path[0] == '\0')
         LOG_FAIL("binary_ab", "promote: empty current_path");
-    int fd = open(current_path,
-                  O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
-    if (fd < 0)
-        LOG_FAIL("binary_ab", "promote: open(%s) failed: %s",
-                 current_path, strerror(errno));
-    FILE *input = fdopen(fd, "rb");
-    if (!input) {
-        int saved_errno = errno;
-        close(fd);
-        LOG_FAIL("binary_ab", "promote: fdopen(%s) failed: %s",
-                 current_path, strerror(saved_errno));
-    }
-    bool ok = binary_ab_promote_open_file(slots_dir, input, current_path);
-    if (fclose(input) != 0 && ok) {
-        LOG_WARN("binary_ab", "promote: close(%s) failed: %s",
-                 current_path, strerror(errno));
+    struct platform_positioned_file input;
+    platform_positioned_file_init(&input);
+    if (!platform_positioned_file_open(&input, current_path) ||
+        !platform_positioned_file_is_executable(&input))
+        LOG_FAIL("binary_ab", "promote: %s is not a regular executable",
+                 current_path);
+    uint64_t size = 0;
+    bool ok = platform_positioned_file_size(&input, &size);
+    char requested[1024], dst[1024], parent[1024], tmp[1088];
+    int requested_len = snprintf(requested, sizeof(requested), "%s/%s",
+                                 slots_dir, BINARY_AB_LASTGOOD_BASENAME);
+    if (!ok || requested_len <= 0 ||
+        (size_t)requested_len >= sizeof(requested) ||
+        !platform_private_path_resolve(requested, dst, sizeof(dst), parent,
+                                       sizeof(parent)))
         ok = false;
+    struct platform_private_file output;
+    platform_private_file_init(&output);
+    if (ok) ok = binary_ab_open_staging(dst, tmp, &output);
+    unsigned char buf[BINARY_AB_COPY_CHUNK];
+    for (uint64_t offset = 0; ok && offset < size;) {
+        size_t chunk = size - offset > sizeof(buf) ? sizeof(buf) :
+                       (size_t)(size - offset);
+        int64_t read = platform_positioned_file_read(&input, buf, chunk, offset);
+        ok = read == (int64_t)chunk &&
+             platform_private_file_write_at(&output, buf, chunk, offset);
+        offset += chunk;
     }
+    if (ok) ok = binary_ab_install_staging(&output, tmp, dst, parent);
+    if (!ok && output.native != (uintptr_t)-1)
+        (void)platform_private_file_retire(&output, tmp);
+    platform_private_file_close(&output);
+    platform_positioned_file_close(&input);
     return ok;
 }
 
@@ -252,8 +213,8 @@ static bool binary_ab_promote_running(const char *slots_dir)
     if (!input)
         LOG_FAIL("binary_ab", "promote: open running executable failed: %s",
                  strerror(errno));
-    bool ok = binary_ab_promote_open_file(slots_dir, input,
-                                          "running executable image");
+    bool ok = binary_ab_promote_stream(slots_dir, input,
+                                       "running executable image");
     if (fclose(input) != 0 && ok) {
         LOG_WARN("binary_ab", "promote: close running executable failed: %s",
                  strerror(errno));

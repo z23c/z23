@@ -70,18 +70,17 @@ static bool mp_private_paths(const uint8_t plan_id[32],
         return false; // raw-return-ok:caller returns private-path-safe error
     char plan_hex[65];
     zcl_hex_encode(plan_id, 32, plan_hex);
-    /* Preprocessor directives inside the argument list of a function-like
-     * macro are undefined behaviour, and a C implementation is allowed to
-     * define snprintf as a macro -- so this was UB by permission, not by
-     * accident. The separator resolves to a plain local first instead. */
-#ifdef _WIN32
-    const char path_sep = '\\';
+    /* Separator chosen outside the macro arguments: a directive inside an
+     * argument list is UB (-Wembedded-directive). */
+    const char sep =
+#if defined(_WIN32)
+        '\\';
 #else
-    const char path_sep = '/';
+        '/';
 #endif
     int s = snprintf(staging, MARKET_DOWNLOAD_PATH_MAX,
-                     "%s%c.zclassic23-market-%s.part", parent,
-                     path_sep, plan_hex);
+                     "%s%c.zclassic23-market-%s.part", parent, sep,
+                     plan_hex);
     return s > 0 && s < (int)MARKET_DOWNLOAD_PATH_MAX;
 }
 

@@ -35,6 +35,9 @@ bool platform_private_file_write_at(struct platform_private_file *file,
                                     const void *data, size_t size,
                                     uint64_t offset);
 bool platform_private_file_flush(struct platform_private_file *file);
+/* Make a staged binary owner-executable on POSIX. Windows executability is
+ * determined by the PE image and extension, so this is a validated no-op. */
+bool platform_private_file_mark_executable(struct platform_private_file *file);
 bool platform_private_file_replace(struct platform_private_file *file,
                                    const char *staging_path,
                                    const char *destination_path);

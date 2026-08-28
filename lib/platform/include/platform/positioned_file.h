@@ -19,6 +19,10 @@ bool platform_positioned_file_open(struct platform_positioned_file *file,
 void platform_positioned_file_close(struct platform_positioned_file *file);
 bool platform_positioned_file_size(const struct platform_positioned_file *file,
                                    uint64_t *size);
+/* True for a regular executable image. Windows validates the PE image magic;
+ * POSIX additionally requires at least one execute permission bit. */
+bool platform_positioned_file_is_executable(
+    const struct platform_positioned_file *file);
 
 /* Return bytes read (zero at EOF), or -1 on invalid input/I/O failure.  A
  * successful short read is preserved for callers that deliberately race an
