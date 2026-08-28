@@ -50,7 +50,7 @@ struct reward_dir {
 typedef struct reward_dir DIR;
 static DIR *opendir(const char *path)
 {
-    DIR *dir = calloc(1, sizeof(*dir));
+    DIR *dir = zcl_calloc(1, sizeof(*dir), "reward_dir_shim");
     if (!dir || !platform_directory_list_regular_sorted(path, &dir->list)) {
         free(dir);
         return NULL;

@@ -21,6 +21,7 @@
 #include "util/safe_alloc.h"
 
 #include "vcs_priv.h"
+#include "package_badge_priv.h"
 
 #include <secp256k1.h>
 
@@ -40,11 +41,10 @@ static const uint8_t badge_wire_magic[VCS_PACKAGE_BADGE_WIRE_MAGIC_BYTES] =
     { 'Z', 'C', 'L', 'B', 'D', 'G', '\r', '\n' };
 static const uint8_t badge_id_domain[] = VCS_PACKAGE_BADGE_ID_DOMAIN;
 
-/* Plan/commit wire magics + id domains. */
+/* Plan wire magic + id domain (the commit wire magic lives with the
+ * commit record in package_badge_commit.c). */
 static const uint8_t badge_plan_magic[8] =
     { 'Z', 'C', 'L', 'B', 'P', 'L', '\r', '\n' };
-static const uint8_t badge_commit_magic[8] =
-    { 'Z', 'C', 'L', 'B', 'C', 'M', '\r', '\n' };
 static const uint8_t k_domain_plan[] = "zcl.zcode_badge_plan.v1";
 
 /* The vendored libsecp256k1 archive does not export the
@@ -419,7 +419,7 @@ bool vcs_badge_policy_load(const char *zcode_dir,
 
 /* ── filesystem helpers (the package_store_io discipline) ───────────── */
 
-static bool badge_mkdir_p(const char *path)
+bool badge_mkdir_p(const char *path)
 {
 #if defined(_WIN32)
     return platform_private_directory_ensure(path);
@@ -443,8 +443,8 @@ static bool badge_mkdir_p(const char *path)
 
 /* Durable write: temp sibling + fsync + atomic rename. A crash leaves
  * either the old file or the new one, never a torn one. */
-static bool badge_atomic_write(const char *path, const uint8_t *data,
-                               size_t data_len)
+bool badge_atomic_write(const char *path, const uint8_t *data,
+                        size_t data_len)
 {
     static _Atomic uint64_t g_seq = 0;
     uint64_t seq = atomic_fetch_add(&g_seq, 1);
@@ -483,8 +483,8 @@ static bool badge_snapshot_equal(
 
 /* Read a whole bounded file. NULL when missing, empty, oversize, or
  * unreadable (missing is not an error: callers treat it as absent). */
-static uint8_t *badge_read_file(const char *path, size_t cap,
-                                size_t *out_len)
+uint8_t *badge_read_file(const char *path, size_t cap,
+                         size_t *out_len)
 {
     *out_len = 0;
     struct platform_positioned_file file;
@@ -526,27 +526,9 @@ static bool badge_file_exists(const char *path)
     return exists;
 }
 
-/* ── the store ──────────────────────────────────────────────────────── */
-
-struct vcs_badge_loaded {
-    struct vcs_badge badge;
-    uint8_t id[32];
-};
-
-struct vcs_badge_store {
-    char root[4400]; /* <datadir>/zcode/badges */
-    struct vcs_badge_loaded *badges; /* ascending badge id */
-    size_t badge_count;
-    size_t badge_cap;
-    uint8_t (*plans)[32]; /* persisted plan ids, ascending */
-    size_t plan_count;
-    size_t plan_cap;
-    uint8_t (*commits)[32]; /* committed plan ids, ascending */
-    size_t commit_count;
-    size_t commit_cap;
-    uint32_t corrupt;
-    bool truncated;
-};
+/* ── the store (struct vcs_badge_store and struct vcs_badge_loaded are
+ *    defined in package_badge_priv.h, shared with package_badge_commit.c)
+ *    ──────────────────────────────────────────────────────────────────── */
 
 static int badge_id_cmp(const uint8_t a[32], const uint8_t b[32])
 {
@@ -570,9 +552,9 @@ static size_t badge_lower_bound(const uint8_t (*ids)[32], size_t count,
 
 /* Insert into a sorted id set; returns the slot index or (size_t)-1 on
  * allocation failure. *inserted is set true when the id was new. */
-static size_t badge_id_set_insert(uint8_t (**ids)[32], size_t *count,
-                                  size_t *cap, const uint8_t id[32],
-                                  bool *inserted)
+size_t badge_id_set_insert(uint8_t (**ids)[32], size_t *count,
+                           size_t *cap, const uint8_t id[32],
+                           bool *inserted)
 {
     bool found = false;
     size_t at = badge_lower_bound(*ids, *count, id, &found);
@@ -594,8 +576,8 @@ static size_t badge_id_set_insert(uint8_t (**ids)[32], size_t *count,
     return at;
 }
 
-static bool badge_id_set_contains(const uint8_t (*ids)[32], size_t count,
-                                  const uint8_t id[32])
+bool badge_id_set_contains(const uint8_t (*ids)[32], size_t count,
+                           const uint8_t id[32])
 {
     bool found = false;
     (void)badge_lower_bound(ids, count, id, &found);
@@ -1210,107 +1192,6 @@ int vcs_badge_plan_read(const struct vcs_badge_store *s,
     return 0;
 }
 
-/* ── the commit record ──────────────────────────────────────────────── */
-
-bool vcs_badge_commit_known(const struct vcs_badge_store *s,
-                            const uint8_t plan_id[32])
-{
-    if (!s || !plan_id)
-        return false;
-    return badge_id_set_contains(s->commits, s->commit_count, plan_id);
-}
-
-#define BADGE_COMMIT_HEADER_BYTES (8u + 2u + 32u + 4u)
-
-bool vcs_badge_commit_record_write(struct vcs_badge_store *s,
-                                   const uint8_t plan_id[32],
-                                   const uint8_t (*badge_ids)[32],
-                                   size_t badge_count)
-{
-    if (!s || !plan_id || (badge_count > 0 && !badge_ids))
-        LOG_RETURN(false, BADGE_LOG, "null commit record write");
-    if (badge_count > VCS_BADGE_MAX_PLAN_ROWS)
-        LOG_RETURN(false, BADGE_LOG, "commit rows %zu over bound",
-                   badge_count);
-    char dir[4400];
-    int dn = snprintf(dir, sizeof(dir), "%s/commits", s->root);
-    if (dn <= 0 || (size_t)dn >= sizeof(dir))
-        LOG_RETURN(false, BADGE_LOG, "commit dir path too long");
-    if (!badge_mkdir_p(dir))
-        LOG_RETURN(false, BADGE_LOG, "mkdir %s: %s", dir, strerror(errno));
-    size_t wire_len = BADGE_COMMIT_HEADER_BYTES + badge_count * 32u;
-    uint8_t *wire = zcl_malloc(wire_len, "badge_commit_wire");
-    if (!wire)
-        LOG_RETURN(false, BADGE_LOG, "alloc %zu commit wire", wire_len);
-    uint8_t *p = wire;
-    memcpy(p, badge_commit_magic, 8);
-    p += 8;
-    vcs_wr_u16le(p, VCS_PACKAGE_BADGE_VERSION);
-    p += 2;
-    memcpy(p, plan_id, 32);
-    p += 32;
-    vcs_wr_u32le(p, (uint32_t)badge_count);
-    p += 4;
-    for (size_t i = 0; i < badge_count; i++) {
-        memcpy(p, badge_ids[i], 32);
-        p += 32;
-    }
-    char id_hex[65];
-    zcl_hex_encode(plan_id, 32, id_hex);
-    char path[4400];
-    int n = snprintf(path, sizeof(path), "%s/%s", dir, id_hex);
-    bool ok = n > 0 && (size_t)n < sizeof(path) &&
-              badge_atomic_write(path, wire, wire_len);
-    free(wire);
-    if (!ok)
-        LOG_RETURN(false, BADGE_LOG, "commit record write failed for %s",
-                   id_hex);
-    bool inserted = false;
-    if (badge_id_set_insert(&s->commits, &s->commit_count, &s->commit_cap,
-                            plan_id, &inserted) == (size_t)-1)
-        return false;
-    return true;
-}
-
-size_t vcs_badge_commit_record_badges(const struct vcs_badge_store *s,
-                                      const uint8_t plan_id[32],
-                                      uint8_t (*out)[32], size_t cap)
-{
-    if (!s || !plan_id)
-        return 0;
-    char id_hex[65];
-    zcl_hex_encode(plan_id, 32, id_hex);
-    char path[4400];
-    int n = snprintf(path, sizeof(path), "%s/commits/%s", s->root, id_hex);
-    if (n <= 0 || (size_t)n >= sizeof(path))
-        return 0;
-    size_t wire_len = 0;
-    uint8_t *wire =
-        badge_read_file(path, VCS_BADGE_MAX_COMMIT_WIRE_BYTES, &wire_len);
-    if (!wire)
-        return 0;
-    size_t total = 0;
-    if (wire_len >= BADGE_COMMIT_HEADER_BYTES &&
-        memcmp(wire, badge_commit_magic, 8) == 0 &&
-        vcs_rd_u16le(wire + 8) == VCS_PACKAGE_BADGE_VERSION &&
-        memcmp(wire + 10, plan_id, 32) == 0) {
-        uint32_t rows = vcs_rd_u32le(wire + 42);
-        if ((size_t)rows <= VCS_BADGE_MAX_PLAN_ROWS &&
-            BADGE_COMMIT_HEADER_BYTES + (size_t)rows * 32u == wire_len) {
-            total = rows;
-            size_t render = total < cap ? total : cap;
-            if (out)
-                for (size_t i = 0; i < render; i++)
-                    memcpy(out[i],
-                           wire + BADGE_COMMIT_HEADER_BYTES + i * 32u, 32);
-        } else {
-            LOG_ERROR(BADGE_LOG, "commit record %s row count invalid",
-                      id_hex);
-            total = 0;
-        }
-    } else {
-        LOG_ERROR(BADGE_LOG, "commit record %s corrupt", id_hex);
-    }
-    free(wire);
-    return total;
-}
+/* ── the commit record (the issuance idempotence authority) now lives in
+ *    package_badge_commit.c, sharing this file's store shape and
+ *    filesystem/id-set primitives through package_badge_priv.h ───────── */

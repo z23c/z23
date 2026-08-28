@@ -12,7 +12,10 @@
  *   msgprocessor_inv.c         — inv, getdata, notfound, addr, getaddr
  *   msgprocessor_pingpong.c    — ping, pong, feefilter, reject
  *   msgprocessor_snapshot.c    — sync_manifest, chunk_*, block_piece_*,
- *                                swarm state, fc_rate, fast-sync globals
+ *                                swarm state, fast-sync globals
+ *   msgprocessor_snapshot_fcrate.c — the fc_rate_* FlyClient-challenge
+ *                                rate limiter, split out of
+ *                                msgprocessor_snapshot.c
  */
 
 #ifndef ZCL_NET_MSGPROCESSOR_INTERNAL_H

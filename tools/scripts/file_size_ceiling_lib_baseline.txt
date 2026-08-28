@@ -37,14 +37,14 @@ lib/net/src/https_server.c 815
 lib/net/src/msg_blocks.c 913 # getblocks pre-handshake service gate (defense-in-depth)
 lib/net/src/msg_headers.c 2066
 lib/net/src/msgprocessor.c 2817
-lib/net/src/msgprocessor_snapshot.c 2014
+lib/net/src/msgprocessor_snapshot.c 1938
 lib/net/src/msgprocessor_snapshot_serve.c 946
 lib/net/src/net.c 1973
 lib/net/src/onion_directory.c 865
 lib/net/src/onion_service.c 1225
 lib/net/src/peer_lifecycle.c 1634
-lib/net/src/rom_fetch.c 1709
-lib/net/src/rom_seed.c 1111
+lib/net/src/rom_fetch.c 1677
+lib/net/src/rom_seed.c 989
 lib/platform/src/os_sandbox_linux.c 1526
 lib/rpc/src/httpserver.c 1578
 lib/sapling/src/circuit_gadgets.c 1053
@@ -52,7 +52,7 @@ lib/sapling/src/circuit_spend.c 959
 lib/sapling/src/groth16_prover.c 1203
 lib/sapling/src/incremental_merkle_tree.c 1029
 lib/sapling/src/sapling.c 1220
-lib/sim/src/postmortem.c 1265
+lib/sim/src/postmortem.c 1004
 lib/sim/src/simnet_cluster.c 873
 lib/sim/src/simnet_wire.c 1283
 lib/storage/src/census_read.c 868
@@ -65,7 +65,7 @@ lib/validation/src/chainstate.c 1038
 lib/validation/src/connect_block.c 896
 lib/wallet/src/wallet.c 1560
 lib/wallet/src/wallet_sqlite.c 1603
-lib/sim/src/simnet_chaos_faults.c 1487
+lib/sim/src/simnet_chaos_faults.c 1126
 lib/util/src/blocker.c 836
 lib/util/src/supervisor.c 1211
 lib/sync/src/stage.c 817
@@ -74,9 +74,9 @@ lib/hotswap/src/hotswap_activate.c 948
 lib/vcs/src/package_store.c 1132
 lib/vcs/src/package_score.c 845
 lib/vcs/src/package_reward.c 2048
-lib/vcs/src/fastobj_carrier.c 915
+lib/vcs/src/fastobj_carrier.c 874
 lib/codeindex/src/codeindex_merkle.c 1069
-lib/vcs/src/package_badge.c 1299
+lib/vcs/src/package_badge.c 1197
 lib/vcs/src/package_badge_eligible.c 817
 lib/vcs/src/package_swarm_node.c 1840
 lib/vcs/src/package_service.c 1040

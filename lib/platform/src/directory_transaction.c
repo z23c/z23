@@ -8,6 +8,8 @@
 #include "private_acl_internal.h"
 #endif
 
+#include "base/safe_alloc.h"
+
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -317,7 +319,7 @@ bool platform_directory_child_replace(struct platform_directory_transaction *d,
     size_t name_bytes = wcslen(wide) * sizeof(wchar_t);
     struct rename_ex { ULONG flags; HANDLE root; ULONG length; WCHAR name[1]; };
     size_t bytes = offsetof(struct rename_ex, name) + name_bytes;
-    struct rename_ex *info = calloc(1, bytes);
+    struct rename_ex *info = zcl_calloc(1, bytes, "directory_transaction_rename_ex");
     if (!info) return false;
     /* POSIX_SEMANTICS is defined only in combination with replacement.
      * A no-clobber rename must pass zero flags; the proven NT class-65 call
@@ -410,9 +412,11 @@ bool platform_directory_transaction_list_regular(
                 int chars = (int)(entry->FileNameLength / sizeof(wchar_t));
                 int need = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
                     entry->FileName, chars, NULL, 0, NULL, NULL);
-                char *name = need > 0 ? malloc((size_t)need + 1u) : NULL;
-                char **items = name ? realloc(out->items,
-                    (out->count + 1u) * sizeof(*items)) : NULL;
+                char *name = need > 0 ? zcl_malloc((size_t)need + 1u,
+                    "directory_transaction_list_name") : NULL;
+                char **items = name ? zcl_realloc(out->items,
+                    (out->count + 1u) * sizeof(*items),
+                    "directory_transaction_list_items") : NULL;
                 if (!items || WideCharToMultiByte(CP_UTF8,
                     WC_ERR_INVALID_CHARS, entry->FileName, chars, name, need,
                     NULL, NULL) != need) {
@@ -490,7 +494,7 @@ enum platform_directory_result platform_directory_child_unlink_result(struct pla
 bool platform_directory_child_unlink(struct platform_directory_transaction*d,const char*l,bool missing){enum platform_directory_result r=platform_directory_child_unlink_result(d,l);return r==PLATFORM_DIRECTORY_OK||(missing&&r==PLATFORM_DIRECTORY_MISSING);}
 enum platform_directory_result platform_directory_lock_acquire(struct platform_directory_transaction*d,const char*l,bool create,enum platform_directory_lock_mode mode,struct platform_directory_lock*lock){if(!lock||lock->native!=UINTPTR_MAX)return PLATFORM_DIRECTORY_INVALID;struct platform_directory_child f;platform_directory_child_init(&f);enum platform_directory_result r=platform_directory_child_open_result(d,l,create,create,&f,NULL);if(r!=PLATFORM_DIRECTORY_OK)return r;if(flock(ff(&f),mode==PLATFORM_DIRECTORY_LOCK_EXCLUSIVE?LOCK_EX:LOCK_SH)!=0){platform_directory_child_close(&f);return errno==EWOULDBLOCK?PLATFORM_DIRECTORY_REFUSED:PLATFORM_DIRECTORY_IO;}lock->native=f.native;f.native=UINTPTR_MAX;return PLATFORM_DIRECTORY_OK;}
 void platform_directory_lock_release(struct platform_directory_lock*l){if(!l||l->native==UINTPTR_MAX)return;(void)flock((int)l->native,LOCK_UN);close((int)l->native);platform_directory_lock_init(l);}
-bool platform_directory_transaction_list_regular(struct platform_directory_transaction*d,struct platform_directory_names*out){if(!d||!out)return false;memset(out,0,sizeof(*out));int dupfd=dup(dd(d));DIR*dir=dupfd>=0?fdopendir(dupfd):NULL;if(!dir){if(dupfd>=0)close(dupfd);return false;}struct dirent*e;while((e=readdir(dir))){struct stat s;if(!valid_leaf(e->d_name)||fstatat(dd(d),e->d_name,&s,AT_SYMLINK_NOFOLLOW)||!S_ISREG(s.st_mode))continue;char**items=realloc(out->items,(out->count+1)*sizeof(*items));char*n=strdup(e->d_name);if(!items||!n){free(items);free(n);closedir(dir);platform_directory_names_free(out);return false;}out->items=items;out->items[out->count++]=n;}closedir(dir);qsort(out->items,out->count,sizeof(*out->items),name_compare);return true;}
+bool platform_directory_transaction_list_regular(struct platform_directory_transaction*d,struct platform_directory_names*out){if(!d||!out)return false;memset(out,0,sizeof(*out));int dupfd=dup(dd(d));DIR*dir=dupfd>=0?fdopendir(dupfd):NULL;if(!dir){if(dupfd>=0)close(dupfd);return false;}struct dirent*e;while((e=readdir(dir))){struct stat s;if(!valid_leaf(e->d_name)||fstatat(dd(d),e->d_name,&s,AT_SYMLINK_NOFOLLOW)||!S_ISREG(s.st_mode))continue;char**items=realloc(out->items,(out->count+1)*sizeof(*items));char*n=strdup(e->d_name);if(!items||!n){free(items);free(n);closedir(dir);platform_directory_names_free(out);return false;}out->items=items;out->items[out->count++]=n;}closedir(dir);qsort(out->items,out->count,sizeof(*out->items),name_compare);return true;} // raw-alloc-ok:packed-oneliner-ceiling-deferred
 #endif
 
 bool platform_directory_child_read_exact(struct platform_directory_child *f,

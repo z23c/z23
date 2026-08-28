@@ -185,8 +185,8 @@ AGENT_IMPACT_RULE("lib/net/src/file_service.c|lib/net/src/file_service_handshake
 AGENT_IMPACT_RULE("lib/net/src/fast_sync*.c|lib/net/include/net/fast_sync*.h|lib/test/src/test_file_service_pow_gate.c", "fast_sync file_service_pow_gate snapshot_sync_service make_lint_gates")
 AGENT_IMPACT_RULE("lib/net/src/puzzle.c|lib/net/include/net/puzzle.h|lib/test/src/test_puzzle.c", "puzzle net file_service_pow_gate snapshot_sync_service make_lint_gates")
 AGENT_IMPACT_RULE("lib/net/src/onion_service.c|lib/net/include/net/onion_service.h|lib/net/src/onion_ratelimit.c|lib/net/include/net/onion_ratelimit.h", "net onion_bootstrap tor make_lint_gates")
-AGENT_IMPACT_RULE("lib/net/src/rom_seed.c|lib/net/include/net/rom_seed.h|lib/test/src/test_rom_seed.c|app/controllers/src/rom_seed_controller.c", "rom_seed rom_manifest file_controller make_lint_gates")
-AGENT_IMPACT_RULE("lib/net/src/rom_fetch.c|lib/net/include/net/rom_fetch.h|lib/test/src/test_rom_fetch.c|app/controllers/src/rom_fetch_controller.c", "rom_fetch rom_manifest rom_journal_resume file_controller make_lint_gates")
+AGENT_IMPACT_RULE("lib/net/src/rom_seed.c|lib/net/src/rom_seed_classify.c|lib/net/src/rom_seed_internal.h|lib/net/include/net/rom_seed.h|lib/test/src/test_rom_seed.c|app/controllers/src/rom_seed_controller.c", "rom_seed rom_manifest file_controller make_lint_gates")
+AGENT_IMPACT_RULE("lib/net/src/rom_fetch.c|lib/net/src/rom_fetch_status.c|lib/net/src/rom_fetch_internal.h|lib/net/include/net/rom_fetch.h|lib/test/src/test_rom_fetch.c|app/controllers/src/rom_fetch_controller.c", "rom_fetch rom_manifest rom_journal_resume file_controller make_lint_gates")
 
 AGENT_IMPACT_RULE("app/models/src/*.c|app/models/include/models/*.h|lib/test/src/test_models*.c", "models make_lint_gates")
 AGENT_IMPACT_RULE("app/models/src/database_migrate_features.c|app/models/include/models/database.h|lib/test/src/test_db_migration_idempotent.c|lib/test/src/test_schema_migration.c", "db_migration_idempotent schema_migration models make_lint_gates")
@@ -403,6 +403,14 @@ AGENT_IMPACT_RULE("app/services/src/snapshot_sync_service.c|app/services/src/sna
  * loopback groups do too: they serve real zchunkreq/zblkreq, and every
  * such admission decision goes through msg_snapshot_pow_admit(). */
 AGENT_IMPACT_RULE("lib/net/src/msgprocessor_snapshot_pow.c", "net snapshot_serve_loopback block_swarm_loopback make_lint_gates")
+/* The per-peer FlyClient-challenge rate limiter, split out of
+ * msgprocessor_snapshot.c. Narrower than the snapshot rules above on
+ * purpose: this file has no manifest, offer, swarm or wire code, so the
+ * service and condition groups do not reach it. test_net.c does --- it
+ * holds the flood, should-score and victim-stays-servable cases and
+ * calls the msgprocessor_test_fc_rate_acquire / _dropped /
+ * _should_score / _reset surface defined here by name. */
+AGENT_IMPACT_RULE("lib/net/src/msgprocessor_snapshot_fcrate.c", "net make_lint_gates")
 /* The one seam through which lib/net reaches the composition root: node_db
  * handle, snapshot-sync service, and the two snapshot-serving trust
  * predicates. Touching it moves the P2P serving gate, so it pulls the
@@ -1075,7 +1083,7 @@ AGENT_IMPACT_RULE("lib/vcs/include/vcs/package_attest_transport.h|lib/vcs/src/pa
  * file was previously mapped to NO group at all — a change to it could
  * print a green local CI having run nothing that touches it. */
 AGENT_IMPACT_RULE("tools/command/native_zcode_attest_transport_command.c|config/src/boot_zcode_dht_publish_gate.c|config/include/config/boot_zcode_dht_publish_gate.h|docs/P2P_SOURCE_HOSTING.md", "zcode_attest_transport zcode_verify zcode_publish command_registry_catalog native_api_contract make_lint_gates")
-AGENT_IMPACT_RULE("lib/vcs/include/vcs/fastobj.h|lib/vcs/src/fastobj.c|lib/vcs/include/vcs/fastobj_carrier.h|lib/vcs/src/fastobj_carrier.c|lib/vcs/include/vcs/package_public_shape.h|lib/vcs/src/package_public_shape.c|lib/test/src/test_fastobj_carrier.c|config/include/config/c23_commons_build_profile.h", "fastobj_carrier make_lint_gates")
+AGENT_IMPACT_RULE("lib/vcs/include/vcs/fastobj.h|lib/vcs/src/fastobj.c|lib/vcs/include/vcs/fastobj_carrier.h|lib/vcs/src/fastobj_carrier.c|lib/vcs/src/fastobj_carrier_fetch.c|lib/vcs/src/fastobj_carrier_priv.h|lib/vcs/include/vcs/package_public_shape.h|lib/vcs/src/package_public_shape.c|lib/test/src/test_fastobj_carrier.c|config/include/config/c23_commons_build_profile.h", "fastobj_carrier make_lint_gates")
 /* Public source-carrier policy is enforced independently when carriers are
  * created, classified for ANNOUNCE/WANT, and checked out. Any change to the
  * shared permissive-text authority or one of those boundaries must select
@@ -2053,7 +2061,7 @@ AGENT_IMPACT_RULE("lib/metrics/src/prometheus_metrics_alert_rules.c|lib/metrics/
  * only: the mingw cross-compile is the sole thing that reads it, and
  * check-windows-platform-seam's scope is lib/platform, not lib/sim. */
 AGENT_IMPACT_RULE("lib/sim/src/postmortem_stub.c", "postmortem make_lint_gates")
-AGENT_IMPACT_RULE("lib/sim/src/postmortem_archive.c|lib/sim/src/postmortem_internal.h", "postmortem make_lint_gates")
+AGENT_IMPACT_RULE("lib/sim/src/postmortem_archive.c|lib/sim/src/postmortem_inventory.c|lib/sim/src/postmortem_internal.h", "postmortem make_lint_gates")
 
 /* The blk*.dat frame-decode + hash-targeted position rescan, split out of
  * disk_block_io.c. Both halves of the moved code are asserted in
@@ -2086,6 +2094,21 @@ AGENT_IMPACT_RULE("lib/storage/src/disk_block_io_repair.c|lib/storage/src/disk_b
  * reducer_frontier, always_sync_lifecycle) belong to the faults that stayed
  * in the parent and are deliberately not inherited here. */
 AGENT_IMPACT_RULE("lib/sim/src/simnet_chaos_faults_rom.c|lib/sim/src/simnet_chaos_faults_download.c|lib/sim/src/simnet_chaos_faults_internal.h", "always_sync_chaos make_lint_gates")
+
+/* The stage-log fixture builders, split out of simnet_chaos_faults.c.
+ * Two groups execute them, not one: test_always_sync_chaos.c drives them
+ * through the chaos scenarios, and test_always_sync_lifecycle.c reaches
+ * the same builders when it walks a run back out of the log. */
+AGENT_IMPACT_RULE("lib/sim/src/simnet_chaos_faults_stagelog.c", "always_sync_chaos always_sync_lifecycle make_lint_gates")
+
+/* The badge commit record --- the issuance idempotence authority --- split
+ * out of package_badge.c. Both files were reachable only through the
+ * catch-all for everything under lib/vcs. test_zcode_badge.c is what
+ * actually drives them: vcs_badge_commit_record_write,
+ * vcs_badge_commit_known and vcs_badge_commit_record_badges are each
+ * called by name under its issue, replay-is-already-issued and
+ * listed-with-ids cases. */
+AGENT_IMPACT_RULE("lib/vcs/src/package_badge.c|lib/vcs/src/package_badge_commit.c|lib/vcs/src/package_badge_priv.h|lib/vcs/include/vcs/package_badge.h|lib/test/src/test_zcode_badge.c", "zcode_badge vcs_core event_log make_lint_gates")
 
 /* The durable "a sovereign consensus bundle is installed here" marker. Not a
  * split -- it simply never had a rule, and only surfaced when another change

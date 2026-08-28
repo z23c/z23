@@ -16,8 +16,15 @@
  *                                   the requester-side push_chunk_request
  *                                   / push_block_piece_request /
  *                                   parse_block_piece_payload_refs /
- *                                   block_payload_submit_all, and the
- *                                   fc_rate_* FlyClient-challenge limiter.
+ *                                   block_payload_submit_all.
+ *   msgprocessor_snapshot_fcrate.c — the fc_rate_* FlyClient-challenge
+ *                                   rate limiter (table, mutex, admit +
+ *                                   flood-score check) plus its
+ *                                   deterministic test surface, split out
+ *                                   of msgprocessor_snapshot.c — shares no
+ *                                   state with the rest of the dispatcher
+ *                                   except the two calls into it from the
+ *                                   MSG_FC_CHALLENGE branch.
  *   msgprocessor_snapshot_serve.c — the SERVE side: cached offer/manifest
  *                                   /block-manifest publish+accessor
  *                                   APIs, send_snapshot_offer_msg,
@@ -83,6 +90,19 @@ void mp_block_swarm_mark_complete_through_height(
  * msgprocessor_snapshot.c's MSG_BLOCK_DATA intake) must agree on the same
  * cap. */
 #define BLOCK_PIECE_MAX_BLOCK_BYTES 2000000u
+
+/* ── msgprocessor_snapshot_fcrate.c: called from the MSG_FC_CHALLENGE
+ * branch of mp_handle_zcl23_sync in msgprocessor_snapshot.c ──────────── */
+
+/* Acquire this peer's FlyClient-challenge token at now_ms. Returns true
+ * when the challenge may be answered; false means drop it silently. */
+bool fc_rate_acquire(node_id_t peer_id, int64_t now_ms);
+
+/* Returns true the first time this is called after peer_id's bucket empties
+ * (letting the caller register one PEER_OFFENCE_FLOOD per episode); false
+ * on subsequent calls within the same flood. dropped_out, if non-NULL, gets
+ * the peer's current lifetime drop count. */
+bool fc_rate_should_score(node_id_t peer_id, uint32_t *dropped_out);
 
 /* ── msgprocessor_snapshot_serve.c: called from the mp_handle_zcl23_sync
  * dispatcher and mp_snapshot_send_tick in msgprocessor_snapshot.c ──── */

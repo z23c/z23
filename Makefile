@@ -10741,6 +10741,7 @@ check-restart-follow:
 tools/postmortem_to_scenario: $(BIN_DIR)/postmortem_to_scenario
 $(BIN_DIR)/postmortem_to_scenario: tools/postmortem_to_scenario.c \
 		lib/sim/src/postmortem.c lib/sim/src/postmortem_archive.c \
+		lib/sim/src/postmortem_inventory.c \
 		lib/sim/src/postmortem_stub.c lib/sim/src/seed_tape.c \
 		lib/platform/src/clock.c lib/platform/src/rng.c \
 		lib/util/src/signal_handler.c lib/util/src/clientversion.c \

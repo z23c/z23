@@ -71,6 +71,11 @@ static struct timespec deadline_after_ms(int milliseconds)
 int main(void)
 {
     pthread_t thread;
+    /* This is a headless acceptance program for platform_thread_join_until()
+     * itself: thread_registry is that primitive's CALLER in production
+     * code, not its subject here, so routing this spawn through the
+     * registry would test the wrong thing -- it deliberately stays bare. */
+    /* raw-pthread-ok: thread-join-primitive-under-test */
     if (pthread_create(&thread, NULL, delayed_exit, NULL) != 0)
         return 1;
 

@@ -6,9 +6,10 @@
  *
  * Split out of postmortem.c along the file-size ceiling seam: that file keeps
  * the capsule itself (crash hook, async-signal-safe capture, manifest,
- * inventory/list/prune). Nothing here knows what a capsule MEANS — it only
- * knows the archive format. The three symbols that cross back are declared in
- * postmortem_internal.h.
+ * load/validate/compress), and postmortem_inventory.c keeps the capsule
+ * directory's list/summarise/prune surface. Nothing here knows what a capsule
+ * MEANS — it only knows the archive format. The three symbols that cross back
+ * are declared in postmortem_internal.h.
  */
 
 #ifndef _GNU_SOURCE

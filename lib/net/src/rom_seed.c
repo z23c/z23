@@ -7,6 +7,8 @@
  * re-derives every digest from the bytes on disk in one pass (never a sidecar).
  * The serve caps are in-memory DDoS bounds only — nothing here is persisted or
  * a consensus predicate. */
+#include "rom_seed_internal.h"
+
 #include "platform/time_compat.h"
 #include "platform/positioned_file.h"
 #include "net/rom_seed.h"
@@ -32,7 +34,8 @@
  * Measured 2026-08-19: the canonical node's datadir root held 5,686 entries
  * with block_index.bin at readdir position 4,499, so a silent cap of 4,096
  * hid the header seed from every fresh node and the C3 instant-on install
- * could never arm. See rom_seed_exact_names below. */
+ * could never arm. See rom_seed_exact_names in
+ * rom_seed_classify.c. */
 
 /* ── Registry ───────────────────────────────────────────────────────── */
 
@@ -73,134 +76,6 @@ static struct thread_liveness_child g_scan_liveness = { .id = SUPERVISOR_INVALID
 static uint64_t g_chunks_served = 0;
 static uint64_t g_bytes_served_total = 0;
 static uint64_t g_unique_peers_served = 0;
-
-/* ── Small helpers ──────────────────────────────────────────────────── */
-
-/* A registerable filename is a bare basename — no separators, no traversal,
- * non-empty, short enough to store — OR a one-level-deep
- * "ROM_SEED_BUNDLES_SUBDIR/<basename>" (i.e. "bundles/<basename>") relative
- * path: the ONE subdirectory rom_seed ever reaches into (see the constant's
- * doc comment). Any other separator shape — a leading '/', a second '/', or a
- * different subdir name — is refused exactly like today's bare-basename rule. */
-static bool rom_filename_ok(const char *filename)
-{
-    if (!filename || !filename[0])
-        return false;
-    size_t n = strlen(filename);
-    if (n >= ROM_SEED_NAME_MAX)
-        return false;
-    if (strstr(filename, ".."))
-        return false;
-
-    const char *slash = strchr(filename, '/');
-    const char *base = filename;
-    if (slash) {
-        static const char subdir[] = ROM_SEED_BUNDLES_SUBDIR;
-        size_t prefix_len = (size_t)(slash - filename);
-        if (prefix_len != strlen(subdir) ||
-            strncmp(filename, subdir, prefix_len) != 0)
-            return false;
-        base = slash + 1;
-        if (!base[0] || strchr(base, '/'))
-            return false;
-    }
-    if (strcmp(base, ".") == 0 || strcmp(base, "..") == 0)
-        return false;
-    return true;
-}
-
-/* Case-sensitive "does `s` start with `prefix`". */
-static bool str_has_prefix(const char *s, const char *prefix)
-{
-    size_t pl = strlen(prefix);
-    return strncmp(s, prefix, pl) == 0;
-}
-
-static bool str_has_suffix(const char *s, const char *suffix)
-{
-    size_t sl = strlen(s), fl = strlen(suffix);
-    return sl >= fl && strcmp(s + (sl - fl), suffix) == 0;
-}
-
-/* ── Classification + content check ─────────────────────────────────── */
-
-enum rom_artifact_kind rom_seed_classify(const char *filename)
-{
-    if (!filename || !filename[0])
-        return ROM_ARTIFACT_UNKNOWN;
-    /* Classify on the basename: a caller may pass a bare name (the datadir-
-     * root scan) or a "bundles/<name>" relative path (the bundles/ subdir
-     * scan / a freshly fetched bundle) — the artifact kind rules are
-     * identical either way. */
-    const char *base = strrchr(filename, '/');
-    base = base ? base + 1 : filename;
-    if (str_has_prefix(base, "consensus-state-bundle-") &&
-        str_has_suffix(base, ".sqlite"))
-        return ROM_ARTIFACT_CONSENSUS_BUNDLE;
-    if (strcmp(base, "block_index.bin") == 0)
-        return ROM_ARTIFACT_HEADER_SEED;
-    return ROM_ARTIFACT_UNKNOWN;
-}
-
-/* Artifacts whose name is EXACT, not a pattern. These are looked up by name
- * instead of being waited for in a directory walk: a datadir root is an
- * ordinary directory that grows without bound, readdir order is arbitrary,
- * and an artifact that happens to sort late must not become invisible. The
- * pattern-named kinds (consensus-state-bundle-*.sqlite) still need the walk.
- * rom_seed_classify stays the one authority on what a name means; this list
- * only says which names are worth trying directly. */
-static const char *const rom_seed_exact_names[] = {
-    "block_index.bin",      /* ROM_ARTIFACT_HEADER_SEED */
-};
-
-/* True for a basename the exactly-named pass already owns. The directory walk
- * uses this to skip those names rather than register them a second time. */
-static bool rom_seed_is_exact_name(const char *base)
-{
-    for (size_t i = 0; i < sizeof(rom_seed_exact_names) /
-                           sizeof(rom_seed_exact_names[0]); i++)
-        if (strcmp(base, rom_seed_exact_names[i]) == 0)
-            return true;
-    return false;
-}
-
-enum rom_artifact_kind rom_seed_kind_from_name(const char *name)
-{
-    if (!name || !name[0])
-        return ROM_ARTIFACT_UNKNOWN;
-    /* Mirror the tokens kind_name() emits in rom_seed_directory_json. */
-    if (strcmp(name, "consensus_bundle") == 0)
-        return ROM_ARTIFACT_CONSENSUS_BUNDLE;
-    if (strcmp(name, "header_seed") == 0)
-        return ROM_ARTIFACT_HEADER_SEED;
-    return ROM_ARTIFACT_UNKNOWN;
-}
-
-bool rom_seed_kind_content_ok(enum rom_artifact_kind kind,
-                              const uint8_t *header, size_t n,
-                              uint64_t size_bytes)
-{
-    if (size_bytes < ROM_SEED_MIN_ARTIFACT_BYTES ||
-        size_bytes > ROM_SEED_MAX_ARTIFACT_BYTES)
-        return false;
-    switch (kind) {
-    case ROM_ARTIFACT_CONSENSUS_BUNDLE: {
-        /* The bundle is a SQLite database — the file must begin with the
-         * canonical 16-byte magic. A truncated/garbage/non-SQLite file fails
-         * here and is never offered. */
-        static const uint8_t sqlite_magic[16] = "SQLite format 3";
-        if (!header || n < 16)
-            return false;
-        return memcmp(header, sqlite_magic, 16) == 0;
-    }
-    case ROM_ARTIFACT_HEADER_SEED:
-        /* Header seed has no strong magic; the size band is the guard. */
-        return true;
-    case ROM_ARTIFACT_UNKNOWN:
-    default:
-        return false;
-    }
-}
 
 /* ── Registration ───────────────────────────────────────────────────── */
 
@@ -494,8 +369,7 @@ int rom_seed_scan_datadir(const char *datadir)
      * by filename, so finding the same name again in the walk below is a
      * no-op. */
     int registered = 0;
-    for (size_t i = 0; i < sizeof(rom_seed_exact_names) /
-                           sizeof(rom_seed_exact_names[0]); i++) {
+    for (size_t i = 0; i < rom_seed_exact_name_count; i++) {
         if (rom_seed_count() >= (int)ROM_SEED_MAX_ARTIFACTS)
             break;
         /* Absent is the normal case on a node that has never synced — check

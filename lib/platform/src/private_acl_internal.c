@@ -2,6 +2,8 @@
 #include "private_acl_internal.h"
 
 #if defined(_WIN32)
+#include "base/safe_alloc.h"
+
 #include <aclapi.h>
 #include <sddl.h>
 #include <stdio.h>
@@ -18,7 +20,7 @@ static bool current_user(struct platform_private_acl *acl)
     bool ok = OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &acl->token) &&
               !GetTokenInformation(acl->token, TokenUser, NULL, 0, &size) &&
               GetLastError() == ERROR_INSUFFICIENT_BUFFER;
-    if (ok) acl->user = malloc(size);
+    if (ok) acl->user = zcl_malloc(size, "private_acl_token_user");
     return ok && acl->user &&
            GetTokenInformation(acl->token, TokenUser, acl->user, size, &size);
 }
