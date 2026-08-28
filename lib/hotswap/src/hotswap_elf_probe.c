@@ -44,8 +44,28 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
+
+/* ── refusal ────────────────────────────────────────────────────────────── */
+
+static bool fail(struct hotswap_elf_facts *out, char *err, size_t err_cap,
+                 const char *fmt, ...)
+{
+    if (out)
+        memset(out, 0, sizeof(*out));
+    if (err && err_cap > 0) {
+        va_list ap;
+        va_start(ap, fmt);
+        (void)vsnprintf(err, err_cap, fmt, ap);
+        va_end(ap);
+    }
+    return false;
+}
+
+#if !defined(_WIN32)
 
 /* ── on-disk ELF64 constants (little-endian x86-64 shared object only) ────
  * Spelled out here rather than pulled from <elf.h> so the values this parser
@@ -143,25 +163,6 @@ static uint32_t rd32(const unsigned char *p)
 static uint64_t rd64(const unsigned char *p)
 {
     return zcl_read_u64_le((const uint8_t *)p);
-}
-
-/* ── refusal ────────────────────────────────────────────────────────────── */
-
-/* Single exit for every refusal. Zeroing *out here is the load-bearing part:
- * a caller that ignores the return value must not find half-parsed facts from
- * a hostile file sitting in the struct. */
-static bool fail(struct hotswap_elf_facts *out, char *err, size_t err_cap,
-                 const char *fmt, ...)
-{
-    if (out)
-        memset(out, 0, sizeof(*out));
-    if (err && err_cap > 0) {
-        va_list ap;
-        va_start(ap, fmt);
-        (void)vsnprintf(err, err_cap, fmt, ap);
-        va_end(ap);
-    }
-    return false;
 }
 
 /* ── whole-image read ───────────────────────────────────────────────────── */
@@ -1149,6 +1150,19 @@ bool hotswap_elf_probe_fd(int fd, struct hotswap_elf_facts *out,
         err[0] = '\0';
     return true;
 }
+
+#else
+
+bool hotswap_elf_probe_fd(int fd, struct hotswap_elf_facts *out,
+                          char *err, size_t err_cap)
+{
+    (void)fd;
+    return fail(out, err, err_cap,
+                "ELF probing is unavailable on native Windows; PE admission "
+                "requires a qualified PE import validator");
+}
+
+#endif
 
 static bool runtime_import_allowed(const char *name)
 {
