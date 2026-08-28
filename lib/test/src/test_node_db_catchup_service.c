@@ -20,6 +20,44 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+
+/* Test-local helper: mmap <dir>/blocks/blk%08u.dat read-only and return the
+ * mapped bytes. Quiet on failure: *err_out carries errno, NULL is returned,
+ * *size_out is zeroed. Restores the helper the catchup-service tests were
+ * written against before its parent TU was absorbed. */
+static uint8_t *node_db_catchup_test_mmap_block_file_quiet(
+    const char *dir, unsigned height, size_t *size_out, int *err_out)
+{
+    char path[512];
+    snprintf(path, sizeof(path), "%s/blocks/blk%08u.dat", dir, height);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        *err_out = errno;
+        *size_out = 0;
+        return NULL;
+    }
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size == 0) {
+        int e = errno ? errno : EINVAL;
+        close(fd);
+        *err_out = e ? e : EINVAL;
+        *size_out = 0;
+        return NULL;
+    }
+    void *mapped = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (mapped == MAP_FAILED) {
+        *err_out = errno;
+        *size_out = 0;
+        return NULL;
+    }
+    *err_out = 0;
+    *size_out = (size_t)st.st_size;
+    return mapped;
+}
 
 #define NDC_CHECK(name, expr) do { \
     printf("node_db_catchup_service: %s... ", (name)); \
