@@ -48,6 +48,10 @@ bool platform_positioned_file_path(
  * POSIX additionally requires at least one execute permission bit. */
 bool platform_positioned_file_is_executable(
     const struct platform_positioned_file *file);
+/* True only when the opened file is private to the current user (plus SYSTEM
+ * on Windows), matching POSIX mode 0600 policy files. */
+bool platform_positioned_file_is_private(
+    const struct platform_positioned_file *file);
 
 /* Return bytes read (zero at EOF), or -1 on invalid input/I/O failure.  A
  * successful short read is preserved for callers that deliberately race an

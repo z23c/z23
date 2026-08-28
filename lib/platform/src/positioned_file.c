@@ -11,6 +11,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <aclapi.h>
 #include <winternl.h>
 #include <wchar.h>
 
@@ -258,6 +259,66 @@ bool platform_positioned_file_is_executable(
            signature == IMAGE_NT_SIGNATURE;
 }
 
+bool platform_positioned_file_is_private(
+    const struct platform_positioned_file *file)
+{
+    HANDLE handle = positioned_handle(file);
+    PACL dacl = NULL;
+    PSID owner = NULL;
+    PSECURITY_DESCRIPTOR descriptor = NULL;
+    HANDLE token = NULL;
+    DWORD bytes = 0;
+    TOKEN_USER *user = NULL;
+    BYTE system_buffer[SECURITY_MAX_SID_SIZE];
+    DWORD system_size = sizeof(system_buffer);
+    SID_IDENTIFIER_AUTHORITY creator_authority = SECURITY_CREATOR_SID_AUTHORITY;
+    PSID owner_rights = NULL;
+    bool ok = handle != INVALID_HANDLE_VALUE &&
+        GetSecurityInfo(handle, SE_FILE_OBJECT,
+                        OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                        &owner, NULL, &dacl, NULL, &descriptor) == ERROR_SUCCESS &&
+        dacl && OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token) &&
+        !GetTokenInformation(token, TokenUser, NULL, 0, &bytes) &&
+        GetLastError() == ERROR_INSUFFICIENT_BUFFER;
+    if (ok) user = malloc(bytes);
+    ok = ok && user && GetTokenInformation(token, TokenUser, user, bytes,
+                                            &bytes) &&
+         CreateWellKnownSid(WinLocalSystemSid, NULL, system_buffer,
+                            &system_size) &&
+         EqualSid(owner, user->User.Sid) &&
+         AllocateAndInitializeSid(&creator_authority, 1,
+                                  SECURITY_CREATOR_OWNER_RIGHTS_RID,
+                                  0, 0, 0, 0, 0, 0, 0, &owner_rights);
+    bool user_allowed = false;
+    ACL_SIZE_INFORMATION info = {0};
+    ok = ok && GetAclInformation(dacl, &info, sizeof(info),
+                                 AclSizeInformation);
+    for (DWORD i = 0; ok && i < info.AceCount; i++) {
+        void *raw = NULL;
+        if (!GetAce(dacl, i, &raw)) { ok = false; break; }
+        ACE_HEADER *header = raw;
+        PSID sid = NULL;
+        if (header->AceType == ACCESS_ALLOWED_ACE_TYPE)
+            sid = &((ACCESS_ALLOWED_ACE *)raw)->SidStart;
+        else if (header->AceType == ACCESS_DENIED_ACE_TYPE)
+            sid = &((ACCESS_DENIED_ACE *)raw)->SidStart;
+        else { ok = false; break; }
+        bool is_user = EqualSid(sid, user->User.Sid) != 0;
+        bool is_system = EqualSid(sid, system_buffer) != 0;
+        bool is_owner_rights = EqualSid(sid, owner_rights) != 0;
+        if (!is_user && !is_system && !is_owner_rights) ok = false;
+        if ((is_user || is_owner_rights) &&
+            header->AceType == ACCESS_ALLOWED_ACE_TYPE)
+            user_allowed = true;
+    }
+    ok = ok && user_allowed;
+    free(user);
+    if (owner_rights) FreeSid(owner_rights);
+    if (token) CloseHandle(token);
+    if (descriptor) LocalFree(descriptor);
+    return ok;
+}
+
 int64_t platform_positioned_file_read(
     const struct platform_positioned_file *file, void *data, size_t size,
     uint64_t offset)
@@ -400,6 +461,15 @@ bool platform_positioned_file_is_executable(
     int fd = file ? (int)file->native : -1;
     return fd >= 0 && fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
            (st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) != 0;
+}
+
+bool platform_positioned_file_is_private(
+    const struct platform_positioned_file *file)
+{
+    struct stat st;
+    int fd = file ? (int)file->native : -1;
+    return fd >= 0 && fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
+           (st.st_mode & 0777) == 0600;
 }
 
 int64_t platform_positioned_file_read(

@@ -329,7 +329,10 @@ bool platform_private_path_absent(const char *path) {
   if (!pf_wide(path, w))
     return false;
   DWORD a = GetFileAttributesW(w);
-  return a == INVALID_FILE_ATTRIBUTES && GetLastError() == ERROR_FILE_NOT_FOUND;
+  if (a != INVALID_FILE_ATTRIBUTES)
+    return false;
+  DWORD error = GetLastError();
+  return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
 }
 
 bool platform_private_file_link_no_clobber(
@@ -532,7 +535,7 @@ bool platform_private_path_resolve(const char *p, char *r, size_t rs,
 }
 bool platform_private_path_absent(const char *p) {
   struct stat st;
-  return lstat(p, &st) != 0 && errno == ENOENT;
+  return lstat(p, &st) != 0 && (errno == ENOENT || errno == ENOTDIR);
 }
 bool platform_private_file_link_no_clobber(
     const char *s, const char *d,

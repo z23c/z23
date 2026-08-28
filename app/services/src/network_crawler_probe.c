@@ -45,6 +45,7 @@
 #include "net/protocol.h"
 #include "net/tor_integration.h"
 #include "net/version.h"
+#include "platform/socket_compat.h"
 #include "platform/time_compat.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
@@ -53,15 +54,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-#ifndef _WIN32
-#include <sys/socket.h>
-#include <sys/time.h>
-#endif
-
-#ifndef MSG_NOSIGNAL
-#define MSG_NOSIGNAL 0
-#endif
 
 #define NCRAWL_MAX_MSG_PAYLOAD  (1u << 20) /* 1 MiB cap on any handshake frame */
 #define NCRAWL_MAX_HANDSHAKE_MSGS 4        /* frames read while awaiting version */
@@ -84,23 +76,17 @@ static bool ncrawl_not_probed(struct ncrawl_probe_result *out, const char *why)
     return true;
 }
 
-static bool ncrawl_send_all(zcl_socket_t sock, const uint8_t *buf, size_t len)
+static bool ncrawl_send_all(platform_socket_t sock, const uint8_t *buf,
+                            size_t len)
 {
-    size_t sent = 0;
-    while (sent < len) {
-        ssize_t n = send(sock, buf + sent, len - sent, MSG_NOSIGNAL);
-        if (n <= 0)
-            return false;
-        sent += (size_t)n;
-    }
-    return true;
+    return platform_socket_send_all(sock, buf, len);
 }
 
-static bool ncrawl_recv_all(zcl_socket_t sock, uint8_t *buf, size_t len)
+static bool ncrawl_recv_all(platform_socket_t sock, uint8_t *buf, size_t len)
 {
     size_t got = 0;
     while (got < len) {
-        ssize_t n = recv(sock, buf + got, len - got, 0);
+        int n = platform_socket_receive(sock, buf + got, len - got);
         if (n <= 0)
             return false; /* 0 = peer closed, <0 = error/timeout */
         got += (size_t)n;
@@ -111,7 +97,7 @@ static bool ncrawl_recv_all(zcl_socket_t sock, uint8_t *buf, size_t len)
 /* Frame `payload` as a P2P message with the given command and send it. Mirrors
  * p2p_node_end_message: 24-byte header (magic, command, LE length, checksum)
  * then payload; checksum = first 4 bytes of hash256(payload). */
-static bool ncrawl_send_framed(zcl_socket_t sock,
+static bool ncrawl_send_framed(platform_socket_t sock,
                                const struct chain_params *params,
                                const char *command,
                                const struct byte_stream *payload)
@@ -145,7 +131,7 @@ static bool ncrawl_send_framed(zcl_socket_t sock,
     return ok;
 }
 
-static bool ncrawl_send_version(zcl_socket_t sock,
+static bool ncrawl_send_version(platform_socket_t sock,
                                 const struct chain_params *params,
                                 const struct net_address *peer)
 {
@@ -174,7 +160,7 @@ static bool ncrawl_send_version(zcl_socket_t sock,
 }
 
 /* Read framed messages (bounded) until the peer's `version`, parsed into out. */
-static bool ncrawl_read_version(zcl_socket_t sock,
+static bool ncrawl_read_version(platform_socket_t sock,
                                 const struct chain_params *params,
                                 struct ncrawl_probe_result *out)
 {
@@ -221,7 +207,8 @@ static bool ncrawl_read_version(zcl_socket_t sock,
             out->version = ver.protocol_version;
             out->services = ver.services;
             out->best_height = ver.start_height >= 0 ? ver.start_height : -1;
-            snprintf(out->subver, sizeof(out->subver), "%s", ver.sub_version);
+            snprintf(out->subver, sizeof(out->subver), "%.*s",
+                     (int)sizeof(out->subver) - 1, ver.sub_version);
             return true;
         }
         free(payload);
@@ -475,17 +462,16 @@ bool network_crawler_default_probe(const struct net_address *addr,
         return ncrawl_not_probed(out, "chain params not loaded");
     }
 
-    zcl_socket_t sock = ZCL_INVALID_SOCKET;
+    platform_socket_t sock = PLATFORM_SOCKET_INVALID;
     int64_t t0 = platform_time_monotonic_us();
     if (!connect_socket_directly(&addr->svc, &sock, connect_timeout_ms) ||
-        sock == ZCL_INVALID_SOCKET) {
+        sock == PLATFORM_SOCKET_INVALID) {
         snprintf(out->reason, sizeof(out->reason), "tcp connect failed");
         return true; /* MEASURED unreachable */
     }
 
-    struct timeval tv = millis_to_timeval(handshake_timeout_ms);
-    (void)setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    (void)setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    (void)platform_socket_set_receive_timeout(sock, handshake_timeout_ms);
+    (void)platform_socket_set_send_timeout(sock, handshake_timeout_ms);
 
     if (ncrawl_send_version(sock, params, addr) &&
         ncrawl_read_version(sock, params, out)) {
@@ -496,6 +482,6 @@ bool network_crawler_default_probe(const struct net_address *addr,
         snprintf(out->reason, sizeof(out->reason), "version handshake failed");
     }
 
-    close_socket(&sock);
+    (void)platform_socket_close(sock);
     return true;
 }
