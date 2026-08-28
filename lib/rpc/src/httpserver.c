@@ -38,14 +38,6 @@
 #define RPC_HTTP_WORKERS 4
 #define RPC_HTTP_QUEUE_CAP 64
 
-/* Upper bound on a single serialized JSON-RPC response body. Generous
- * enough for the largest legitimate responses (gettxoutsetinfo, a full
- * listunspent / getrawmempool true) while bounding the one-shot
- * allocation an authenticated client can drive. A response that would
- * exceed this returns a proper RPC error envelope instead of a partial
- * or out-of-band send. */
-#define RPC_HTTP_MAX_RESP_BYTES ((size_t)128 * 1024 * 1024)
-
 /* ── SINGLE-OWNER INVARIANT for accepted sockets ───────────────────
  *
  * Every accepted fd has exactly ONE owner at every instant, and no
@@ -185,41 +177,6 @@ static struct thread_liveness_child g_rpc_worker_liveness = { .id = SUPERVISOR_I
 static struct thread_liveness_child g_rpc_listen_liveness = { .id = SUPERVISOR_INVALID_ID };
 static struct thread_liveness_child g_rpc_tls_liveness    = { .id = SUPERVISOR_INVALID_ID };
 static struct thread_liveness_child g_rpc_cookie_liveness = { .id = SUPERVISOR_INVALID_ID };
-
-bool rpc_http_test_build_response_envelope(bool rpc_ok,
-                                           const char *method,
-                                           struct json_value *rpc_result,
-                                           const struct json_value *id,
-                                           struct json_value *response)
-{
-    struct json_value null_err = {0};
-    struct json_value null_res = {0};
-    bool ok = true;
-
-    if (!rpc_result || !id || !response)
-        return false;
-
-    json_init(response);
-    json_set_object(response);
-
-    if (rpc_ok) {
-        ok = ok && json_push_kv(response, "result", rpc_result);
-        json_set_null(&null_err);
-        ok = ok && json_push_kv(response, "error", &null_err);
-        json_free(&null_err);
-    } else {
-        json_set_null(&null_res);
-        ok = ok && json_push_kv(response, "result", &null_res);
-        json_free(&null_res);
-        if (rpc_result->type == JSON_OBJ)
-            ok = ok && json_push_kv_str(rpc_result, "method",
-                                        method ? method : "");
-        ok = ok && json_push_kv(response, "error", rpc_result);
-    }
-
-    ok = ok && json_push_kv(response, "id", id);
-    return ok;
-}
 
 /* Both credential buffers in check_auth() below are 512 bytes and both strings
  * are NUL-terminated inside them, so no live length can reach this bound. */
@@ -608,10 +565,10 @@ static struct rpc_conn dequeue_client(void)
 
 /* ── Admission-queue test surface ──────────────────────────────────
  *
- * Same convention as rpc_http_test_build_response_envelope above:
- * production and the regression test drive the EXACT same admission
- * path, so the single-owner invariant is proved on the real code
- * rather than on a copy of it. */
+ * Same convention as rpc_http_test_build_response_envelope in
+ * httpserver_response.c: production and the regression test drive the
+ * EXACT same admission path, so the single-owner invariant is proved on
+ * the real code rather than on a copy of it. */
 
 bool rpc_http_test_queue_admit(platform_socket_t fd)
 {
@@ -660,67 +617,6 @@ void rpc_http_test_queue_stats(struct rpc_http_queue_stats *out)
     out->reclaimed_stale   = g_client_reclaimed_stale;
     out->rejected_busy     = g_client_rejected_busy;
     pthread_mutex_unlock(&g_client_queue_mutex);
-}
-
-/* Two-pass serialization of a JSON-RPC response. json_write() returns
- * the FULL required length regardless of the buffer it is handed (it
- * only writes where pos < buflen, and a zero-length buffer is never
- * dereferenced), so we size first with a zero-length probe, reject
- * anything past RPC_HTTP_MAX_RESP_BYTES, then allocate exactly len+1
- * and write the body. This replaces the old fixed 4 MiB buffer whose
- * unclamped length was fed straight to write() — for a response larger
- * than the buffer that read (len - 4 MiB) bytes past the allocation and
- * shipped adjacent heap memory to the client (crash/DoS + info-leak).
- *
- * On success: *out_buf owns a heap buffer the caller must free(), and
- * *out_len is the exact body length to send. Returns false (with
- * *out_buf == NULL) on OOM or when the response exceeds the cap; the
- * caller sends a proper RPC error envelope instead.
- *
- * Exposed (non-static) so the regression test exercises the exact same
- * sizing path the HTTP response uses — same convention as
- * rpc_http_test_build_response_envelope above. */
-bool rpc_http_test_serialize_response(const struct json_value *response,
-                                      char **out_buf, size_t *out_len)
-{
-    if (!response || !out_buf || !out_len) {
-        if (out_buf) *out_buf = NULL;
-        if (out_len) *out_len = 0;
-        return false;
-    }
-    *out_buf = NULL;
-    *out_len = 0;
-
-    /* Pass 1: size the body without writing (zero-length buffer). */
-    size_t need = json_write(response, NULL, 0);
-    if (need > RPC_HTTP_MAX_RESP_BYTES) {
-        LOG_FAIL("rpc", "response too large: %zu > %zu bytes", need,
-                 RPC_HTTP_MAX_RESP_BYTES);
-        return false;
-    }
-
-    char *buf = zcl_malloc(need + 1, "http_resp_buf");
-    if (!buf) {
-        LOG_FAIL("rpc", "response buffer alloc failed: %zu bytes", need + 1);
-        return false;
-    }
-
-    /* Pass 2: write exactly into a buffer sized to hold the whole body.
-     * json_write writes the NUL only when pos < buflen; need+1 guarantees
-     * room for it, and the returned length is the body length to send. */
-    size_t wrote = json_write(response, buf, need + 1);
-    if (wrote != need) {
-        /* Should be impossible (the two passes serialize the same value),
-         * but never ship a length that disagrees with what we wrote. Free
-         * before logging since LOG_FAIL returns. */
-        free(buf);
-        LOG_FAIL("rpc", "response size mismatch: sized %zu wrote %zu", need,
-                 wrote);
-    }
-
-    *out_buf = buf;
-    *out_len = wrote;
-    return true;
 }
 
 static void handle_client(struct rpc_conn conn)

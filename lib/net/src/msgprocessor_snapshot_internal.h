@@ -22,14 +22,18 @@
  *                                   /block-manifest publish+accessor
  *                                   APIs, send_snapshot_offer_msg,
  *                                   push_manifest, push_block_manifest,
- *                                   build_block_piece_payloads, the
- *                                   zchunkreq/zblkreq client-puzzle PoW
- *                                   guard, and the per-message-command
+ *                                   build_block_piece_payloads, and the
+ *                                   per-message-command
  *                                   serve handlers the dispatcher calls
  *                                   into (mp_serve_snapshot_req,
  *                                   mp_serve_chunk_req, mp_serve_block_req)
  *                                   plus the PEER_SNAPSHOT_SERVING chunk
  *                                   send loop (mp_snapshot_send_tick_serve).
+ *   msgprocessor_snapshot_pow.c   — the zchunkreq/zblkreq client-puzzle
+ *                                   PoW guard: the arming flag, the
+ *                                   adaptive-difficulty load window, and
+ *                                   the deterministic-clock test surface
+ *                                   over both.
  *   msgprocessor_block_swarm_abandon.c — the shared fail-closed transition
  *                                   from block swarm to legacy body fetch.
  *
@@ -94,6 +98,16 @@ void mp_serve_chunk_req(struct msg_processor *mp, struct p2p_node *node,
 /* Serve a zblkreq (peer asking for one block piece by index). */
 void mp_serve_block_req(struct msg_processor *mp, struct p2p_node *node,
                         struct byte_stream *s);
+
+/* Admit a zchunkreq/zblkreq at the current wall clock. `nonce` is the
+ * peer-supplied puzzle solution, NULL when the request carried none.
+ * Returns true when the request may be served — always true while the
+ * guard is disarmed. The only call that crosses from the serve handlers
+ * into msgprocessor_snapshot_pow.c; every other entry point of that file
+ * is either its own static detail or the public test surface declared in
+ * net/msgprocessor.h. */
+bool msg_snapshot_pow_admit(uint8_t request_kind, uint32_t request_index,
+                            const uint64_t *nonce);
 
 /* The PEER_SNAPSHOT_SERVING half of mp_snapshot_send_tick: streams
  * snapshot chunks to a peer we're actively serving. Returns true if the
