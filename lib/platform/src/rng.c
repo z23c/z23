@@ -9,23 +9,28 @@
 #include "util/log_macros.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <stdatomic.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(_WIN32)
+#include <windows.h>
+#include <bcrypt.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 #if defined(__linux__)
 #include <sys/random.h>
 #endif
-#include <unistd.h>
 
 /* ── Real-syscall implementation ─────────────────────────────────── */
 
 /* /dev/urandom fallback for the unlikely case getrandom(2) is not
  * available (very old kernel or sandbox without the syscall). Opens
  * lazily on first failure, then cached. */
-#if !defined(__APPLE__)
+#if !defined(__APPLE__) && !defined(_WIN32)
 static _Atomic int g_urandom_fd = -1;
 
 static bool fallback_urandom_fill(uint8_t *out, size_t len)
@@ -73,7 +78,34 @@ static bool real_fill(void *self, uint8_t *out, size_t len)
     (void)self;
     if (!out || len == 0) return true;
 
-#if defined(__APPLE__)
+#if defined(_WIN32)
+    /* CNG's system-preferred RNG (hAlgorithm must be NULL when the
+     * BCRYPT_USE_SYSTEM_PREFERRED_RNG flag is used). It is the kernel
+     * CSPRNG, needs no provider handle to open or close, and is
+     * thread-safe — the same shape as the Darwin arm above.
+     *
+     * BCryptGenRandom either fills the whole request or fails; there
+     * is no short-fill status. Its length is a 32-bit ULONG while
+     * `len` is a 64-bit size_t, so chunk rather than truncating the
+     * cast — a truncated cast would return an under-filled buffer and
+     * report success. */
+    size_t done = 0;
+    while (done < len) {
+        size_t want = len - done;
+        if (want > (size_t)0x40000000u) want = (size_t)0x40000000u; /* 1 GiB */
+        NTSTATUS st = BCryptGenRandom(NULL, (PUCHAR)(out + done),
+                                      (ULONG)want,
+                                      BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+        if (!BCRYPT_SUCCESS(st)) {
+            fprintf(stderr,
+                "[platform] %s:%d %s(): BCryptGenRandom failed status=0x%08lx\n",
+                __FILE__, __LINE__, __func__, (unsigned long)st);
+            return false;
+        }
+        done += want;
+    }
+    return true;
+#elif defined(__APPLE__)
     arc4random_buf(out, len);
     return true;
 #else
