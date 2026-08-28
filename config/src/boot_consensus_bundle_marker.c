@@ -24,6 +24,9 @@ static bool marker_path(char *out, size_t cap, const char *datadir)
 {
     if (!out || cap == 0 || !datadir || !datadir[0])
         return false;
+    /* The separator is chosen BEFORE the call: _FORTIFY_SOURCE makes
+     * snprintf a macro, and a preprocessor directive between a macro's
+     * parentheses is undefined behaviour. */
 #if defined(_WIN32)
     const char *fmt = "%s\\%s";
 #else
@@ -51,9 +54,9 @@ bool boot_consensus_bundle_marker_write(const char *datadir, int32_t height,
     if (!marker_path(final_path, sizeof(final_path), datadir))
         LOG_FAIL("install_consensus_bundle",
                  "marker write: datadir path too long (%s)", datadir);
-    if (!platform_private_path_resolve(final_path, resolved_path,
-                                       sizeof(resolved_path), parent,
-                                       sizeof(parent)))
+    if (!platform_private_destination_resolve(
+            final_path, resolved_path, sizeof(resolved_path), parent,
+            sizeof(parent)))
         LOG_FAIL("install_consensus_bundle",
                  "marker write: unsafe/non-canonical datadir path (%s)",
                  datadir);

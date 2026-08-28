@@ -138,7 +138,12 @@ static void ib_make_dir(char *dir, size_t dirlen, const char *tag)
 {
     snprintf(dir, dirlen, "%s/ibck_%d_%s", ib_scratch_root(), (int)getpid(),
              tag);
-    mkdir(dir, 0755);
+    /* 0700, and restated after the fact: a fixture directory here can reach
+     * platform_private_directory_ensure, which requires exactly 0700 and
+     * refuses a wider one rather than narrowing it, and mkdir's mode is
+     * masked by the process umask. */
+    mkdir(dir, 0700);
+    chmod(dir, 0700);
 }
 
 /* A datadir that also needs a blocks/ subdir for write_block_to_disk. */

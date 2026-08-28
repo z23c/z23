@@ -90,6 +90,8 @@ ZCL_WINDOWS_ACCEPTANCE_codeindex_build_refusal_FLAGS := -Ilib/codeindex/src
 ZCL_WINDOWS_ACCEPTANCE_consensus_bundle_marker_SOURCES := \
 	lib/test/src/consensus_bundle_marker_windows_acceptance.c \
 	config/src/boot_consensus_bundle_marker.c \
+	lib/platform/src/private_destination.c \
+	lib/platform/src/directory_compat.c \
 	lib/platform/src/private_file.c \
 	lib/platform/src/file_metadata.c \
 	lib/platform/src/clock.c \

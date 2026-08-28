@@ -776,21 +776,34 @@ size_t error_ring_dump_json(const struct error_ring *r, char *buf, size_t sz)
     int count = total < ERROR_RING_SIZE ? total : ERROR_RING_SIZE;
     int wp = atomic_load(&r->write_pos);
 
+    /* snprintf returns the WOULD-BE length, not the truncated length.
+     * Accumulating that into `off` without clamping lets `off` run past
+     * `sz`, and the next `sz - off` becomes a huge unsigned value — a
+     * buffer overrun on every subsequent write. Clamp after every call. */
     size_t off = 0;
-    off += (size_t)snprintf(buf + off, sz - off,
-        "{\"total\":%d,\"errors\":[", total);
+    int wr = snprintf(buf, sz, "{\"total\":%d,\"errors\":[", total);
+    if (wr < 0) return 0;
+    off = (size_t)wr < sz ? (size_t)wr : sz - 1;
 
     for (int i = 0; i < count && off < sz - 2; i++) {
         int idx = (wp - count + i + ERROR_RING_SIZE) % ERROR_RING_SIZE;
         const struct error_entry *e = &r->entries[idx];
-        if (i > 0) off += (size_t)snprintf(buf + off, sz - off, ",");
-        off += (size_t)snprintf(buf + off, sz - off,
+        wr = snprintf(buf + off, sz - off, ",");
+        if (wr < 0) break;
+        off += (size_t)wr < sz - off ? (size_t)wr : sz - off - 1;
+
+        wr = snprintf(buf + off, sz - off,
             "{\"type\":\"%s\",\"time\":%lld,\"msg\":\"%s\"}",
             event_type_name(e->type),
             (long long)(e->timestamp_us / 1000000),
             e->message);
+        if (wr < 0) break;
+        off += (size_t)wr < sz - off ? (size_t)wr : sz - off - 1;
     }
-    off += (size_t)snprintf(buf + off, sz - off, "]}");
+
+    if (off >= sz - 2) off = sz - 3 > 0 ? sz - 3 : 0;
+    wr = snprintf(buf + off, sz - off, "]}");
+    if (wr > 0) off += (size_t)wr < sz - off ? (size_t)wr : sz - off - 1;
     return off;
 }
 

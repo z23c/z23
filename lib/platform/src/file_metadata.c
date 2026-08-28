@@ -64,11 +64,13 @@ enum platform_file_metadata_result platform_file_metadata_read(
             : PLATFORM_FILE_METADATA_REFUSED;
     }
     BY_HANDLE_FILE_INFORMATION info = {0};
-    bool ok = GetFileInformationByHandle(file, &info) &&
-              (info.dwFileAttributes &
-               (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0;
+    bool inspected = GetFileInformationByHandle(file, &info) != 0;
     CloseHandle(file);
-    if (!ok) return PLATFORM_FILE_METADATA_REFUSED;
+    if (!inspected) return PLATFORM_FILE_METADATA_REFUSED;
+    if ((info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+        return PLATFORM_FILE_METADATA_REPARSE;
+    if ((info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+        return PLATFORM_FILE_METADATA_NOT_REGULAR;
     out->size = ((uint64_t)info.nFileSizeHigh << 32) | info.nFileSizeLow;
     uint64_t ticks = ((uint64_t)info.ftLastWriteTime.dwHighDateTime << 32) |
                      info.ftLastWriteTime.dwLowDateTime;
@@ -121,7 +123,11 @@ enum platform_file_metadata_result platform_file_metadata_read(
         return errno == ENOENT || errno == ENOTDIR
             ? PLATFORM_FILE_METADATA_MISSING
             : PLATFORM_FILE_METADATA_REFUSED;
-    if (!S_ISREG(st.st_mode) || st.st_size < 0)
+    if (S_ISLNK(st.st_mode))
+        return PLATFORM_FILE_METADATA_REPARSE;
+    if (!S_ISREG(st.st_mode))
+        return PLATFORM_FILE_METADATA_NOT_REGULAR;
+    if (st.st_size < 0)
         return PLATFORM_FILE_METADATA_REFUSED;
     out->size = (uint64_t)st.st_size;
     out->modified_seconds = (int64_t)st.st_mtime;

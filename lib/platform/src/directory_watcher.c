@@ -123,7 +123,7 @@ void platform_directory_watcher_close(struct platform_directory_watcher *w)
     platform_directory_watcher_init(w);
 }
 
-#else
+#elif defined(__linux__)
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -226,4 +226,21 @@ void platform_directory_watcher_close(struct platform_directory_watcher *w)
     for(size_t i=0;i<s->count;i++) free(s->items[i].path);
     free(s->items); free(s); platform_directory_watcher_init(w);
 }
+#elif defined(__APPLE__)
+/* Darwin: no inotify. The watcher is fail-closed unavailable until a
+ * kqueue(FSEvents) implementation is landed (separate lane). */
+#include <errno.h>
+struct watcher_state { int unused; };
+void platform_directory_watcher_init(struct platform_directory_watcher *w)
+{ if (w) w->native = UINTPTR_MAX; }
+bool platform_directory_watcher_open(struct platform_directory_watcher *w,
+                                     const char *root)
+{ (void)w; (void)root; return false; }
+enum platform_directory_watch_result platform_directory_watcher_wait(
+    struct platform_directory_watcher *w, uint32_t timeout,
+    platform_directory_watcher_stop stop, void *opaque)
+{ (void)w; (void)timeout; (void)stop; (void)opaque;
+  return PLATFORM_DIRECTORY_WATCH_ERROR; }
+void platform_directory_watcher_close(struct platform_directory_watcher *w)
+{ platform_directory_watcher_init(w); }
 #endif

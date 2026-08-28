@@ -199,8 +199,8 @@ static void boot_status_publish_locked(void)
     snprintf(final_path, sizeof(final_path), "%s/%s", g_datadir,
              ZCL_BOOT_STATUS_FILENAME);
     char resolved[640], parent[600];
-    if (!platform_private_path_resolve(final_path, resolved, sizeof(resolved),
-                                       parent, sizeof(parent))) {
+    if (!platform_private_destination_resolve(
+            final_path, resolved, sizeof(resolved), parent, sizeof(parent))) {
         LOG_WARN("boot_status", "cannot resolve private status destination");
         return;
     }
