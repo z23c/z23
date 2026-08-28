@@ -330,7 +330,13 @@ static int lifetime_os_remove(const char *event, int dirfd, const char *path,
         errno = EPERM;
         rc = -1;
     } else {
+#if defined(__APPLE__)
+        /* Darwin exposes unlinkat(2) as a libc function; SYS_unlinkat is a
+         * Linux syscall number with no darwin equivalent. */
+        rc = unlinkat(dirfd, path, flags);
+#else
         rc = (int)syscall(SYS_unlinkat, dirfd, path, flags);
+#endif
     }
     if (tracked)
         lifetime_log(unauthorized ? "os_unlink_refused" : event,
@@ -364,7 +370,11 @@ static int lifetime_os_rename(const char *event,
         errno = EPERM;
         rc = -1;
     } else {
+#if defined(__APPLE__)
+        rc = renameat(olddirfd, oldpath, newdirfd, newpath);
+#else
         rc = (int)syscall(SYS_renameat, olddirfd, oldpath, newdirfd, newpath);
+#endif
     }
     if (tracked)
         lifetime_log(unauthorized ? "os_rename_refused" : event,
