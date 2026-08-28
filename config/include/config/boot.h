@@ -387,7 +387,7 @@ struct app_context {
                                  * see docs; page-cache warm only helps when the FS
                                  * can evict, so a ramdisk sandbox cannot show the
                                  * win). K3. */
-    bool pv_lookahead;         /* -pv-lookahead : start the bounded, supervised
+    bool pv_lookahead;         /* -pv-lookahead[=0] : start the bounded, supervised
                                  * cross-block shielded-proof pre-verification
                                  * pool (app/jobs/pv_lookahead.c) alongside the
                                  * reducer drive, so proof_validate consumes a
@@ -395,8 +395,13 @@ struct app_context {
                                  * inline on the serial fold thread. FAIL-SAFE:
                                  * a miss verifies inline exactly as today, so a
                                  * failed start costs throughput, never a verdict.
-                                 * Default false → a normal boot runs its current
-                                 * path exactly. */
+                                 * Default TRUE: profiled IBD spends ~77% of the
+                                 * fold inside proof_validate (sprout PHGR13
+                                 * pairings), and 8 lookahead workers roughly
+                                 * halved whole-chain wall clock with a verdict
+                                 * stream identical to the inline sweep
+                                 * (test_pv_lookahead parity oracle). Opt out with
+                                 * -pv-lookahead=0. */
 };
 
 void app_context_defaults(struct app_context *ctx);
