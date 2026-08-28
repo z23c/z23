@@ -9,6 +9,9 @@
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 #include "platform/file_sync.h"
+#include "platform/positioned_file.h"
+#include "platform/private_file.h"
+#include "platform/read_mapping.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -19,9 +22,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#if defined(_WIN32)
+#include <process.h>
+#endif
 
 static const uint8_t SEG_MAGIC[8] = { 'Z','C','L','S','E','G','0','1' };
 static const uint8_t MAN_MAGIC[8] = { 'Z','C','L','M','A','N','0','1' };
@@ -101,6 +106,33 @@ static enum cseg_status atomic_write_ro(const char *path,
                                         const uint8_t *buf, size_t len,
                                         char *err, size_t errlen)
 {
+#if defined(_WIN32)
+    char tmp[4096], resolved[4096], parent[4096];
+    if (!platform_private_path_resolve(path, resolved, sizeof(resolved),
+                                       parent, sizeof(parent))) {
+        set_err(err, errlen, "invalid publication path: %s", path);
+        return CSEG_ERR_IO;
+    }
+    int n = snprintf(tmp, sizeof(tmp), "%s.%d-%u.tmp", resolved, _getpid(),
+                     (unsigned)atomic_fetch_add(&g_stage_seq, 1));
+    struct platform_private_file staged;
+    platform_private_file_init(&staged);
+    if (n < 0 || (size_t)n >= sizeof(tmp) ||
+        !platform_private_file_create(tmp, &staged)) {
+        set_err(err, errlen, "exclusive stage create failed: %s", path);
+        return CSEG_ERR_IO;
+    }
+    bool ok = platform_private_file_write_at(&staged, buf, len, 0) &&
+              platform_private_file_flush(&staged) &&
+              platform_private_file_replace(&staged, tmp, resolved) &&
+              platform_private_parent_flush(parent);
+    if (!ok && staged.native != (uintptr_t)-1) {
+        (void)platform_private_file_retire(&staged, tmp);
+        platform_private_file_close(&staged);
+    }
+    if (!ok) set_err(err, errlen, "durable publication failed: %s", path);
+    return ok ? CSEG_OK : CSEG_ERR_IO;
+#else
     char tmp[4096];
     int fd;
     for (;;) {
@@ -153,6 +185,7 @@ static enum cseg_status atomic_write_ro(const char *path,
     /* Seal read-only: finalized history is never rewritten. */
     (void)chmod(path, 0444);
     return CSEG_OK;
+#endif
 }
 
 /* ── Writer ──────────────────────────────────────────────────────────── */
@@ -274,8 +307,10 @@ unlock:
 /* ── Reader ──────────────────────────────────────────────────────────── */
 
 struct chain_segment {
-    uint8_t *base;      /* mmap base */
+    const uint8_t *base; /* retained read-only mapping */
     size_t   size;      /* file size */
+    struct platform_positioned_file file;
+    struct platform_read_mapping mapping;
     uint32_t first_height;
     uint32_t count;
     uint64_t data_offset;
@@ -355,39 +390,57 @@ enum cseg_status chain_segment_open(const char *path,
     if (!path || !out) { set_err(err, errlen, "null path/out"); return CSEG_ERR_ARG; }
     *out = NULL;
 
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) {
-        set_err(err, errlen, "open(%s): %s", path, strerror(errno));
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path) ||
+        !platform_positioned_file_snapshot(&file, &before) ||
+        before.size == 0 || before.size > SIZE_MAX) {
+        platform_positioned_file_close(&file);
+        set_err(err, errlen, "validated open(%s) failed", path);
         return CSEG_ERR_IO;
     }
-    struct stat sb;
-    if (fstat(fd, &sb) != 0 || sb.st_size <= 0) {
-        set_err(err, errlen, "fstat(%s): %s", path, strerror(errno));
-        close(fd);
-        return CSEG_ERR_IO;
-    }
-    void *base = mmap(NULL, (size_t)sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-    close(fd);
-    if (base == MAP_FAILED) {
-        set_err(err, errlen, "mmap(%s): %s", path, strerror(errno));
+    struct platform_read_mapping mapping;
+    platform_read_mapping_init(&mapping);
+    if (!platform_read_mapping_open_positioned(&mapping, &file,
+                                                (size_t)before.size)) {
+        platform_positioned_file_close(&file);
+        set_err(err, errlen, "read mapping(%s) failed", path);
         return CSEG_ERR_IO;
     }
 
     struct chain_segment *seg = zcl_malloc(sizeof(*seg), "chain_segment/open");
     if (!seg) {
-        munmap(base, (size_t)sb.st_size);
+        platform_read_mapping_close(&mapping);
+        platform_positioned_file_close(&file);
         set_err(err, errlen, "alloc chain_segment");
         return CSEG_ERR_IO;
     }
     memset(seg, 0, sizeof(*seg));
-    seg->base = base;
-    seg->size = (size_t)sb.st_size;
+    seg->file = file;
+    seg->mapping = mapping;
+    seg->base = mapping.data;
+    seg->size = mapping.size;
 
     enum cseg_status st = parse_segment(seg, path, err, errlen);
     if (st != CSEG_OK) {
-        munmap(seg->base, seg->size);
+        platform_read_mapping_close(&seg->mapping);
+        platform_positioned_file_close(&seg->file);
         free(seg);
         return st;
+    }
+    if (!platform_positioned_file_snapshot(&seg->file, &after) ||
+        before.size != after.size || before.volume != after.volume ||
+        before.file_low != after.file_low || before.file_high != after.file_high ||
+        before.modified_seconds != after.modified_seconds ||
+        before.modified_nanoseconds != after.modified_nanoseconds ||
+        before.changed_seconds != after.changed_seconds ||
+        before.changed_nanoseconds != after.changed_nanoseconds) {
+        platform_read_mapping_close(&seg->mapping);
+        platform_positioned_file_close(&seg->file);
+        free(seg);
+        set_err(err, errlen, "%s: changed while validating", path);
+        return CSEG_ERR_IO;
     }
     *out = seg;
     return CSEG_OK;
@@ -396,7 +449,8 @@ enum cseg_status chain_segment_open(const char *path,
 void chain_segment_close(struct chain_segment *seg)
 {
     if (!seg) return;
-    if (seg->base) munmap(seg->base, seg->size);
+    platform_read_mapping_close(&seg->mapping);
+    platform_positioned_file_close(&seg->file);
     free(seg);
 }
 
@@ -596,30 +650,41 @@ static enum cseg_status load_manifest(const char *dir,
     char path[4096];
     manifest_path(path, sizeof(path), dir);
 
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) {
-        if (errno == ENOENT) return CSEG_OK;
-        set_err(err, errlen, "open(%s): %s", path, strerror(errno));
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path)) {
+        if (platform_private_path_absent(path)) return CSEG_OK;
+        set_err(err, errlen, "validated open(%s) failed", path);
         return CSEG_ERR_IO;
     }
-    struct stat sb;
-    if (fstat(fd, &sb) != 0) {
-        set_err(err, errlen, "fstat(%s): %s", path, strerror(errno));
-        close(fd);
+    if (!platform_positioned_file_snapshot(&file, &before) ||
+        before.size > SIZE_MAX) {
+        set_err(err, errlen, "snapshot(%s) failed", path);
+        platform_positioned_file_close(&file);
         return CSEG_ERR_IO;
     }
-    if ((uint64_t)sb.st_size < CHAIN_MANIFEST_HEADER_SIZE + CHAIN_MANIFEST_TRAILER_SIZE) {
-        close(fd);
+    if (before.size < CHAIN_MANIFEST_HEADER_SIZE + CHAIN_MANIFEST_TRAILER_SIZE) {
+        platform_positioned_file_close(&file);
         set_err(err, errlen, "%s: truncated", path);
         return CSEG_ERR_MANIFEST;
     }
-    uint8_t *buf = zcl_malloc((size_t)sb.st_size, "chain_segment/load_manifest");
-    if (!buf) { close(fd); set_err(err, errlen, "alloc"); return CSEG_ERR_IO; }
-    ssize_t got = read(fd, buf, (size_t)sb.st_size);
-    close(fd);
-    if (got != sb.st_size) {
+    uint8_t *buf = zcl_malloc((size_t)before.size, "chain_segment/load_manifest");
+    if (!buf) { platform_positioned_file_close(&file); set_err(err, errlen, "alloc"); return CSEG_ERR_IO; }
+    int64_t got = platform_positioned_file_read(&file, buf,
+                                                (size_t)before.size, 0);
+    bool stable = got >= 0 && (uint64_t)got == before.size &&
+        platform_positioned_file_snapshot(&file, &after) &&
+        before.size == after.size && before.volume == after.volume &&
+        before.file_low == after.file_low && before.file_high == after.file_high &&
+        before.modified_seconds == after.modified_seconds &&
+        before.modified_nanoseconds == after.modified_nanoseconds &&
+        before.changed_seconds == after.changed_seconds &&
+        before.changed_nanoseconds == after.changed_nanoseconds;
+    platform_positioned_file_close(&file);
+    if (!stable) {
         free(buf);
-        set_err(err, errlen, "%s: short read", path);
+        set_err(err, errlen, "%s: unstable/short read", path);
         return CSEG_ERR_IO;
     }
     if (memcmp(buf, MAN_MAGIC, 8) != 0 ||
@@ -629,7 +694,7 @@ static enum cseg_status load_manifest(const char *dir,
     }
     uint32_t n = get_u32(buf + 12);
     uint64_t body = CHAIN_MANIFEST_HEADER_SIZE + (uint64_t)n * CHAIN_MANIFEST_ENTRY_SIZE;
-    if (body + CHAIN_MANIFEST_TRAILER_SIZE != (uint64_t)sb.st_size) {
+    if (body + CHAIN_MANIFEST_TRAILER_SIZE != before.size) {
         free(buf); set_err(err, errlen, "%s: size inconsistent with count %u", path, n);
         return CSEG_ERR_MANIFEST;
     }
@@ -697,9 +762,12 @@ enum cseg_status chain_segment_store_stat(const char *dir,
             }
             out->verified_count++;
         } else {
-            struct stat sb;
-            if (stat(path, &sb) == 0 && S_ISREG(sb.st_mode))
+            struct platform_positioned_file file;
+            platform_positioned_file_init(&file);
+            if (platform_positioned_file_open(&file, path)) {
                 out->verified_count++;
+                platform_positioned_file_close(&file);
+            }
         }
     }
     free(ents);

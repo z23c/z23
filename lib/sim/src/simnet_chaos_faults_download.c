@@ -58,19 +58,14 @@
 #include "validation/chainstate.h"
 #include "validation/connect_block.h"
 #include "validation/main_state.h"
-#include <arpa/inet.h>
 #include <fcntl.h>
-#include <netinet/in.h>
 #include <pthread.h>
-#include <signal.h>
 #include <sqlite3.h>
 #include <stdarg.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/resource.h>
-#include <sys/socket.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -353,7 +348,7 @@ bool chaos_fault_invalid_tail_block(uint64_t seed,
     simnet_free(&sim);
 
     snprintf(out->state_after, sizeof(out->state_after),
-             "tail_accepted=%d reject=%s tip_unmoved=%d honest_advanced=%d",
+             "tail_accepted=%d reject=%.100s tip_unmoved=%d honest_advanced=%d",
              tail_accepted, vs.reject_reason, tip_unmoved, honest_advanced);
     out->event_number = (uint32_t)(prefix_blocks + 1); /* +1 for the tail */
     snprintf(out->phase, sizeof(out->phase), "connect_block");
@@ -569,8 +564,7 @@ bool chaos_fault_peer_disconnect_mid_body_download(
         }
 
         struct uint256 *hh = &out_hashes[batch_off++];
-        struct timespec xfer = { .tv_sec = 0, .tv_nsec = 2 * 1000 * 1000 };
-        nanosleep(&xfer, NULL);   /* simulated LAN body-transfer latency */
+        platform_sleep_ms(2);   /* simulated LAN body-transfer latency */
         uint32_t got_peer = dl_mark_received(&dm, hh);
         if (got_peer != PEER_B) {
             dl_free(&dm); free(chain); free(hashes);

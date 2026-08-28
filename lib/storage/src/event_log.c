@@ -23,8 +23,8 @@
 #include "storage/event_log.h"
 #include "storage/event_log_pending.h"
 
+#include "platform/private_file.h"
 #include "platform/time_compat.h"   /* platform_time_monotonic_us */
-#include "platform/file_sync.h"
 #include "util/crc32c.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
@@ -32,16 +32,12 @@
 #include "crypto/sha3.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <unistd.h>
 
 /* ── on-disk constants ─────────────────────────────────────────────── */
 
@@ -114,7 +110,7 @@ static uint64_t get_u64_le(const uint8_t *src)
 /* ── struct ─────────────────────────────────────────────────────────── */
 
 struct event_log {
-    int fd;
+    struct platform_private_file file;
     pthread_mutex_t lock;
     char path[1024];
     /* Byte offset for the next append (== file size); cached so append
@@ -182,53 +178,31 @@ static bool event_log_force_per_append_sync(void)
 
 /* ── pread/pwrite wrappers that retry short ops ─────────────────────── */
 
-static int full_pread(int fd, void *buf, size_t n, off_t off)
+static int full_pread(struct platform_private_file *file, void *buf, size_t n,
+                      uint64_t off)
 {
-    uint8_t *p = (uint8_t *)buf;
-    while (n > 0) {
-        ssize_t r = pread(fd, p, n, off);
-        if (r < 0) {
-            if (errno == EINTR) continue;
-            return -1;
-        }
-        if (r == 0) return -1;  /* short read at EOF */
-        p += (size_t)r;
-        off += r;
-        n   -= (size_t)r;
-    }
-    return 0;
+    return platform_private_file_read_at(file, buf, n, off) ? 0 : -1;
 }
 
-static int full_pwrite(int fd, const void *buf, size_t n, off_t off)
+static int full_pwrite(struct platform_private_file *file, const void *buf,
+                       size_t n, uint64_t off)
 {
-    const uint8_t *p = (const uint8_t *)buf;
-    while (n > 0) {
-        ssize_t w = pwrite(fd, p, n, off);
-        if (w < 0) {
-            if (errno == EINTR) continue;
-            return -1;
-        }
-        if (w == 0) return -1;
-        p += (size_t)w;
-        off += w;
-        n   -= (size_t)w;
-    }
-    return 0;
+    return platform_private_file_write_at(file, buf, n, off) ? 0 : -1;
 }
 
 /* ── recovery: validate the tail event, truncate if partial ─────────── */
 
 /* Returns the post-recovery file size (>= 0) or -1 on hard error. */
-static int64_t recover_truncate_partial(int fd, const char *path)
+static int64_t recover_truncate_partial(struct platform_private_file *file,
+                                        const char *path)
 {
-    struct stat st;
-    if (fstat(fd, &st) < 0) {
+    uint64_t size = 0;
+    if (!platform_private_file_size(file, &size) || size > INT64_MAX) {
         fprintf(stderr,  // obs-ok:event-log-open-failure
                 "[event_log] fstat(%s) failed: %s\n",
                 path, strerror(errno));
         return -1;
     }
-    uint64_t size = (uint64_t)st.st_size;
 
     /* Walk from the start (cheap because typical logs are small at
      * boot and we only re-walk on open). We track the last KNOWN-good
@@ -238,7 +212,7 @@ static int64_t recover_truncate_partial(int fd, const char *path)
 
     while (cursor + EVT_HDR_LEN + EVT_SENTINEL_LEN <= size) {
         uint8_t hdr[EVT_HDR_LEN];
-        if (full_pread(fd, hdr, EVT_HDR_LEN, (off_t)cursor) < 0) break;
+        if (full_pread(file, hdr, EVT_HDR_LEN, cursor) < 0) break;
         uint32_t plen   = get_u32_le(hdr + 0);
         /* type/flags/crc parsed below if we proceed */
 
@@ -250,8 +224,8 @@ static int64_t recover_truncate_partial(int fd, const char *path)
 
         /* Validate sentinel. */
         uint8_t sent[EVT_SENTINEL_LEN];
-        if (full_pread(fd, sent, EVT_SENTINEL_LEN,
-                       (off_t)(cursor + EVT_HDR_LEN + plen)) < 0)
+        if (full_pread(file, sent, EVT_SENTINEL_LEN,
+                       cursor + EVT_HDR_LEN + plen) < 0)
             break;
         uint64_t magic  = get_u64_le(sent + 0);
         uint64_t offset = get_u64_le(sent + 8);
@@ -264,8 +238,7 @@ static int64_t recover_truncate_partial(int fd, const char *path)
         if (plen > 0) {
             payload = (uint8_t *)zcl_malloc(plen, "event_log/recover");
             if (!payload) break;
-            if (full_pread(fd, payload, plen,
-                           (off_t)(cursor + EVT_HDR_LEN)) < 0) {
+            if (full_pread(file, payload, plen, cursor + EVT_HDR_LEN) < 0) {
                 free(payload);
                 break;
             }
@@ -284,14 +257,14 @@ static int64_t recover_truncate_partial(int fd, const char *path)
                 "[event_log] truncating partial tail: %llu -> %llu (%s)\n",
                 (unsigned long long)size,
                 (unsigned long long)last_good_end, path);
-        if (ftruncate(fd, (off_t)last_good_end) < 0) {
+        if (!platform_private_file_truncate(file, last_good_end)) {
             fprintf(stderr,  // obs-ok:event-log-open-failure
                     "[event_log] ftruncate(%s) failed: %s\n",
                     path, strerror(errno));
             return -1;
         }
         /* Make the truncation durable before publishing the handle. */
-        if (fsync(fd) < 0) {
+        if (!platform_private_file_flush(file)) {
             fprintf(stderr,  // obs-ok:event-log-open-failure
                     "[event_log] fsync after truncate(%s) failed: %s\n",
                     path, strerror(errno));
@@ -308,27 +281,28 @@ event_log_t *event_log_open(const char *path)
     if (!path || !path[0])
         LOG_NULL("event_log", "open: empty path");
 
-    int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
-    if (fd < 0) {
+    struct platform_private_file file;
+    platform_private_file_init(&file);
+    if (!platform_private_file_open_locked_create(path, &file)) {
         fprintf(stderr,  // obs-ok:event-log-open-failure
                 "[event_log] open(%s) failed: %s\n",
                 path, strerror(errno));
         return NULL;
     }
 
-    int64_t end = recover_truncate_partial(fd, path);
+    int64_t end = recover_truncate_partial(&file, path);
     if (end < 0) {
-        close(fd);
+        platform_private_file_close(&file);
         return NULL;
     }
 
     event_log_t *log = (event_log_t *)zcl_malloc(sizeof(*log),
                                                   "event_log/handle");
     if (!log) {
-        close(fd);
+        platform_private_file_close(&file);
         return NULL;
     }
-    log->fd = fd;
+    log->file = file;
     pthread_mutex_init(&log->lock, NULL);
     snprintf(log->path, sizeof(log->path), "%s", path);
     log->end_offset = (uint64_t)end;
@@ -346,11 +320,8 @@ void event_log_close(event_log_t *log)
 {
     if (!log) return;
     /* Best-effort flush also publishes any deferred in-memory span. */
-    if (log->fd >= 0) {
-        (void)event_log_flush(log);
-        close(log->fd);
-        log->fd = -1;
-    }
+    (void)event_log_flush(log);
+    platform_private_file_close(&log->file);
     event_log_pending_destroy(&log->pending);
     pthread_mutex_destroy(&log->lock);
     free(log);
@@ -361,10 +332,10 @@ void event_log_close(event_log_t *log)
  * the per-call-site totals cannot separate barrier wait from anything else.
  * Returns fsync()'s own result unchanged — the time is accumulated on the
  * failure path too, since a barrier that failed still cost its wait. */
-static int event_log_barrier(int fd)
+static int event_log_barrier(struct platform_private_file *file)
 {
     int64_t t0 = platform_time_monotonic_us();
-    int rc = fsync(fd);
+    int rc = platform_private_file_flush(file) ? 0 : -1;
     int64_t dt = platform_time_monotonic_us() - t0;
     atomic_fetch_add_explicit(&g_barrier_us_total,
                               dt > 0 ? (uint64_t)dt : 0u,
@@ -374,7 +345,7 @@ static int event_log_barrier(int fd)
 
 static bool event_log_write_pending_locked(event_log_t *log)
 {
-    return log && event_log_pending_write(&log->pending, log->fd,
+    return log && event_log_pending_write(&log->pending, &log->file,
                                            &log->end_offset);
 }
 
@@ -411,7 +382,7 @@ uint64_t event_log_append(event_log_t *log,
 
     if (defer) {
         size_t event_len = EVT_HDR_LEN + payload_len + EVT_SENTINEL_LEN;
-        if (!event_log_pending_prepare(&log->pending, event_len, log->fd,
+        if (!event_log_pending_prepare(&log->pending, event_len, &log->file,
                                        &log->end_offset)) {
             pthread_mutex_unlock(&log->lock);
             return UINT64_MAX;
@@ -444,7 +415,7 @@ uint64_t event_log_append(event_log_t *log,
     put_u64_le(sent + 8, start);
 
     /* Durable body write: header + payload. */
-    if (full_pwrite(log->fd, hdr, EVT_HDR_LEN, (off_t)start) < 0) {
+    if (full_pwrite(&log->file, hdr, EVT_HDR_LEN, start) < 0) {
         pthread_mutex_unlock(&log->lock);
         fprintf(stderr,  // obs-ok:event-log-append-failure
                 "[event_log] pwrite(hdr) failed at off=%llu: %s\n",
@@ -452,8 +423,8 @@ uint64_t event_log_append(event_log_t *log,
         return UINT64_MAX;
     }
     if (payload_len > 0) {
-        if (full_pwrite(log->fd, payload, payload_len,
-                        (off_t)(start + EVT_HDR_LEN)) < 0) {
+        if (full_pwrite(&log->file, payload, payload_len,
+                        start + EVT_HDR_LEN) < 0) {
             pthread_mutex_unlock(&log->lock);
             fprintf(stderr,  // obs-ok:event-log-append-failure
                     "[event_log] pwrite(payload) failed at off=%llu: %s\n",
@@ -462,7 +433,7 @@ uint64_t event_log_append(event_log_t *log,
             return UINT64_MAX;
         }
     }
-    if (event_log_barrier(log->fd) < 0) {
+    if (event_log_barrier(&log->file) < 0) {
         pthread_mutex_unlock(&log->lock);
         fprintf(stderr,  // obs-ok:event-log-append-failure
                 "[event_log] fsync(hdr+payload) failed: %s\n",
@@ -471,15 +442,15 @@ uint64_t event_log_append(event_log_t *log,
     }
 
     /* Durable completion marker: sentinel. */
-    if (full_pwrite(log->fd, sent, EVT_SENTINEL_LEN,
-                    (off_t)(start + EVT_HDR_LEN + payload_len)) < 0) {
+    if (full_pwrite(&log->file, sent, EVT_SENTINEL_LEN,
+                    start + EVT_HDR_LEN + payload_len) < 0) {
         pthread_mutex_unlock(&log->lock);
         fprintf(stderr,  // obs-ok:event-log-append-failure
                 "[event_log] pwrite(sentinel) failed: %s\n",
                 strerror(errno));
         return UINT64_MAX;
     }
-    if (event_log_barrier(log->fd) < 0) {
+    if (event_log_barrier(&log->file) < 0) {
         pthread_mutex_unlock(&log->lock);
         fprintf(stderr,  // obs-ok:event-log-append-failure
                 "[event_log] fsync(sentinel) failed: %s\n",
@@ -522,7 +493,7 @@ bool event_log_flush(event_log_t *log)
         LOG_FAIL("event_log", "flush: pwrite(%s) failed: %s",
                  log->path, strerror(errno));
     }
-    if (platform_data_sync(log->fd) < 0) {
+    if (!platform_private_file_flush(&log->file)) {
         /* Keep `dirty` set so a retry re-attempts the fdatasync; the caller
          * (the stage pre-commit hook) must veto the commit on this false. */
         pthread_mutex_unlock(&log->lock);
@@ -551,7 +522,7 @@ int event_log_read(event_log_t *log, uint64_t offset,
         return -1;
     }
     uint8_t hdr[EVT_HDR_LEN];
-    if (full_pread(log->fd, hdr, EVT_HDR_LEN, (off_t)offset) < 0) {
+    if (full_pread(&log->file, hdr, EVT_HDR_LEN, offset) < 0) {
         fprintf(stderr,  // obs-ok:event-log-read-failure
                 "[event_log] read: pread(hdr) at off=%llu: %s\n",
                 (unsigned long long)offset, strerror(errno));
@@ -581,8 +552,7 @@ int event_log_read(event_log_t *log, uint64_t offset,
          * pre-size). Use a temp buffer so we can always validate CRC. */
         uint8_t *tmp = (uint8_t *)zcl_malloc(plen, "event_log/read");
         if (!tmp) return -1;
-        if (full_pread(log->fd, tmp, plen,
-                       (off_t)(offset + EVT_HDR_LEN)) < 0) {
+        if (full_pread(&log->file, tmp, plen, offset + EVT_HDR_LEN) < 0) {
             free(tmp);
             return -1;
         }
@@ -606,8 +576,8 @@ int event_log_read(event_log_t *log, uint64_t offset,
 
     /* Validate sentinel. */
     uint8_t sent[EVT_SENTINEL_LEN];
-    if (full_pread(log->fd, sent, EVT_SENTINEL_LEN,
-                   (off_t)(offset + EVT_HDR_LEN + plen)) < 0) {
+    if (full_pread(&log->file, sent, EVT_SENTINEL_LEN,
+                   offset + EVT_HDR_LEN + plen) < 0) {
         fprintf(stderr,  // obs-ok:event-log-read-failure
                 "[event_log] read: sentinel pread at off=%llu\n",
                 (unsigned long long)offset);
@@ -640,7 +610,7 @@ int event_log_stream(event_log_t *log, uint64_t start_offset,
 
     while (cursor + EVT_HDR_LEN + EVT_SENTINEL_LEN <= end) {
         uint8_t hdr[EVT_HDR_LEN];
-        if (full_pread(log->fd, hdr, EVT_HDR_LEN, (off_t)cursor) < 0) {
+        if (full_pread(&log->file, hdr, EVT_HDR_LEN, cursor) < 0) {
             free(buf);
             return -1;
         }
@@ -668,8 +638,8 @@ int event_log_stream(event_log_t *log, uint64_t start_offset,
             cap = ncap;
         }
         if (plen > 0) {
-            if (full_pread(log->fd, buf, plen,
-                           (off_t)(cursor + EVT_HDR_LEN)) < 0) {
+            if (full_pread(&log->file, buf, plen,
+                           cursor + EVT_HDR_LEN) < 0) {
                 free(buf);
                 return -1;
             }
@@ -681,8 +651,8 @@ int event_log_stream(event_log_t *log, uint64_t start_offset,
         }
         /* Sentinel validation (cheap, catches in-flight corruption). */
         uint8_t sent[EVT_SENTINEL_LEN];
-        if (full_pread(log->fd, sent, EVT_SENTINEL_LEN,
-                       (off_t)(cursor + EVT_HDR_LEN + plen)) < 0) {
+        if (full_pread(&log->file, sent, EVT_SENTINEL_LEN,
+                       cursor + EVT_HDR_LEN + plen) < 0) {
             free(buf);
             return -1;
         }
@@ -759,11 +729,21 @@ void event_log_test_set_force_per_append(int v)
 
 int event_log_test_fd(event_log_t *log)
 {
-    return log ? log->fd : -1;
+#ifdef _WIN32
+    (void)log;
+    return -1;
+#else
+    return log ? (int)log->file.native : -1;
+#endif
 }
 
 void event_log_test_set_fd(event_log_t *log, int fd)
 {
-    if (log) log->fd = fd;
+#ifdef _WIN32
+    (void)log;
+    (void)fd;
+#else
+    if (log) log->file.native = (uintptr_t)fd;
+#endif
 }
 #endif

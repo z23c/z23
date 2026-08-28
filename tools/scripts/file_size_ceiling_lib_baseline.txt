@@ -66,7 +66,7 @@ lib/validation/src/chainstate.c 1038
 lib/validation/src/connect_block.c 896
 lib/wallet/src/wallet.c 1560
 lib/wallet/src/wallet_sqlite.c 1603
-lib/sim/src/simnet_chaos_faults.c 1492
+lib/sim/src/simnet_chaos_faults.c 1487
 lib/util/src/blocker.c 836
 lib/util/src/supervisor.c 1211
 lib/sync/src/stage.c 817

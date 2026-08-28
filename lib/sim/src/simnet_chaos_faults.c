@@ -18,6 +18,8 @@
 
 #include "sim/simnet_chaos_faults.h"
 #include "platform/file_sync.h"
+#include "platform/directory_compat.h"
+#include "platform/socket_compat.h"
 
 #include "test/test_helpers.h"
 
@@ -60,19 +62,14 @@
 #include "validation/chainstate.h"
 #include "validation/connect_block.h"
 #include "validation/main_state.h"
-#include <arpa/inet.h>
 #include <fcntl.h>
-#include <netinet/in.h>
 #include <pthread.h>
-#include <signal.h>
 #include <sqlite3.h>
 #include <stdarg.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/resource.h>
-#include <sys/socket.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -505,9 +502,9 @@ bool chaos_fault_empty_active_chain_window(int gap_height,
     int N = gap_height;
 
     char dir[256];
-    mkdir("./test-tmp", 0755);
+    platform_directory_create("./test-tmp", 0755);
     test_fmt_tmpdir(dir, sizeof(dir), "chaos_empty_window", "main");
-    mkdir(dir, 0755);
+    platform_directory_create(dir, 0755);
 
     progress_store_close();
     bool store_ok = progress_store_open(dir);
@@ -621,9 +618,9 @@ bool chaos_fault_kill_restart_mid_fold(struct chaos_fault_result *out)
     const int32_t K = 37;
 
     char dir[256];
-    mkdir("./test-tmp", 0755);
+    platform_directory_create("./test-tmp", 0755);
     test_fmt_tmpdir(dir, sizeof(dir), "chaos_kill_restart", "main");
-    mkdir(dir, 0755);
+    platform_directory_create(dir, 0755);
 
     progress_store_close();
     if (!progress_store_open(dir)) {
@@ -793,9 +790,7 @@ bool chaos_fault_corrupt_sealed_segment(struct chaos_fault_result *out)
 #ifdef ZCL_TESTING
 void chaos_sleep_ms(int ms)
 {
-    struct timespec ts = { .tv_sec = ms / 1000,
-                           .tv_nsec = (ms % 1000) * 1000000L };
-    nanosleep(&ts, NULL);
+    platform_sleep_ms(ms);
 }
 
 bool chaos_fault_freeze_reducer_drive(struct chaos_fault_result *out)
@@ -999,9 +994,9 @@ bool chaos_fault_kill_restart_mid_recovery(struct chaos_fault_result *out)
     const int32_t HOLE = 25;  /* recovery-window target: rederive [HOLE,HOLE] */
 
     char dir[256];
-    mkdir("./test-tmp", 0755);
+    platform_directory_create("./test-tmp", 0755);
     test_fmt_tmpdir(dir, sizeof(dir), "chaos_kill_recovery", "main");
-    mkdir(dir, 0755);
+    platform_directory_create(dir, 0755);
 
     progress_store_close();
     if (!progress_store_open(dir)) {
@@ -1136,11 +1131,11 @@ bool chaos_fault_torn_progress_wal(struct chaos_fault_result *out)
     const int32_t K = 24;     /* stamped into the un-checkpointed WAL suffix */
 
     char dir[256], torn[256];
-    mkdir("./test-tmp", 0755);
+    platform_directory_create("./test-tmp", 0755);
     test_fmt_tmpdir(dir, sizeof(dir), "chaos_torn_wal", "main");
     test_fmt_tmpdir(torn, sizeof(torn), "chaos_torn_wal", "torn");
-    mkdir(dir, 0755);
-    mkdir(torn, 0755);
+    platform_directory_create(dir, 0755);
+    platform_directory_create(torn, 0755);
 
     progress_store_close();
     if (!progress_store_open(dir)) {
@@ -1186,7 +1181,7 @@ bool chaos_fault_torn_progress_wal(struct chaos_fault_result *out)
         const char *base = strrchr(src_db, '/');
         base = base ? base + 1 : src_db;
         snprintf(src_wal, sizeof(src_wal), "%s-wal", src_db);
-        snprintf(dst_db, sizeof(dst_db), "%s/%s", torn, base);
+        snprintf(dst_db, sizeof(dst_db), "%.255s/%.767s", torn, base);
         snprintf(dst_wal, sizeof(dst_wal), "%s-wal", dst_db);
         copied = chaos_copy_file(src_db, dst_db) &&
                  chaos_copy_file(src_wal, dst_wal);
@@ -1319,9 +1314,9 @@ bool chaos_fault_disk_full_pause(struct chaos_fault_result *out)
     chaos_result_init(out);
 
     char dir[256];
-    mkdir("./test-tmp", 0755);
+    platform_directory_create("./test-tmp", 0755);
     test_fmt_tmpdir(dir, sizeof(dir), "chaos_disk_full", "main");
-    mkdir(dir, 0755);
+    platform_directory_create(dir, 0755);
 
     progress_store_close();
     if (!progress_store_open(dir)) {
@@ -1415,9 +1410,9 @@ bool chaos_fault_cleared_have_data_hole(struct chaos_fault_result *out)
     const int32_t HOLE = 10; /* body_fetch stalls here: its body vanished */
 
     char dir[256];
-    mkdir("./test-tmp", 0755);
+    platform_directory_create("./test-tmp", 0755);
     test_fmt_tmpdir(dir, sizeof(dir), "chaos_have_data_hole", "main");
-    mkdir(dir, 0755);
+    platform_directory_create(dir, 0755);
 
     progress_store_close();
     if (!progress_store_open(dir)) {

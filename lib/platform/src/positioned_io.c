@@ -66,6 +66,7 @@ int64_t platform_positioned_read(int fd, void *data, size_t size,
 }
 
 #else
+#include <errno.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -75,7 +76,10 @@ int64_t platform_positioned_write(int fd, const void *data, size_t size,
     if (fd < 0 || (!data && size) || offset > INT64_MAX ||
         size > (size_t)SSIZE_MAX)
         return -1;
-    ssize_t wrote = pwrite(fd, data, size, (off_t)offset);
+    ssize_t wrote;
+    do {
+        wrote = pwrite(fd, data, size, (off_t)offset);
+    } while (wrote < 0 && errno == EINTR);
     return wrote < 0 ? -1 : (int64_t)wrote;
 }
 
@@ -85,7 +89,10 @@ int64_t platform_positioned_read(int fd, void *data, size_t size,
     if (fd < 0 || (!data && size) || offset > INT64_MAX ||
         size > (size_t)SSIZE_MAX)
         return -1;
-    ssize_t read_count = pread(fd, data, size, (off_t)offset);
+    ssize_t read_count;
+    do {
+        read_count = pread(fd, data, size, (off_t)offset);
+    } while (read_count < 0 && errno == EINTR);
     return read_count < 0 ? -1 : (int64_t)read_count;
 }
 #endif

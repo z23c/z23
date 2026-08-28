@@ -21,13 +21,19 @@
 #include "core/hash.h"
 #include "util/log_macros.h"
 #include "platform/time_compat.h"
+#include "platform/positioned_file.h"
+#include "platform/positioned_io.h"
+#include "platform/read_mapping.h"
 #include <errno.h>
+#include <limits.h>
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
 #include <sys/mman.h>
+#endif
 
 static bool disk_block_frame_header_valid(const uint8_t hdr[8],
                                           uint32_t *out_size)
@@ -48,10 +54,11 @@ static bool disk_block_frame_header_valid(const uint8_t hdr[8],
 }
 
 /* True when an 8-byte magic+size frame header sits at `off`. */
-static bool disk_block_frame_at(int fd, off_t off, uint32_t *out_size)
+static bool disk_block_frame_at(int fd, uint64_t off, uint32_t *out_size)
 {
     uint8_t hdr[8];
-    return pread(fd, hdr, sizeof(hdr), off) == (ssize_t)sizeof(hdr) &&
+    return platform_positioned_read(fd, hdr, sizeof(hdr), off) ==
+               (int64_t)sizeof(hdr) &&
            disk_block_frame_header_valid(hdr, out_size);
 }
 
@@ -67,14 +74,14 @@ bool disk_block_locate_payload(int fd,
     uint32_t block_size = 0;
     /* Canonical block indexes store the PAYLOAD offset: frame sits at pos-8. */
     if (pos->nPos >= 8 &&
-        disk_block_frame_at(fd, (off_t)(pos->nPos - 8), &block_size)) {
+        disk_block_frame_at(fd, (uint64_t)pos->nPos - 8, &block_size)) {
         *out_payload_pos = pos->nPos;
         *out_size = block_size;
         return true;
     }
     /* Some recovery/import paths hand the FRAME offset instead. Accept it. */
     if (pos->nPos <= UINT32_MAX - 8u &&
-        disk_block_frame_at(fd, (off_t)pos->nPos, &block_size)) {
+        disk_block_frame_at(fd, pos->nPos, &block_size)) {
         *out_payload_pos = pos->nPos + 8u;
         *out_size = block_size;
         return true;
@@ -105,19 +112,25 @@ static bool repair_scan_one_file(const char *path,
                                  const struct uint256 *target,
                                  unsigned int *pos_out)
 {
-    int fd = open(path, O_RDONLY);
-    if (fd < 0)
+    struct platform_positioned_file file;
+    struct platform_read_mapping mapping;
+    platform_positioned_file_init(&file);
+    platform_read_mapping_init(&mapping);
+    if (!platform_positioned_file_open(&file, path))
         return false;
-    struct stat st;
-    if (fstat(fd, &st) != 0 || st.st_size <= 0) {
-        close(fd);
+    uint64_t file_size = 0;
+    if (!platform_positioned_file_size(&file, &file_size) ||
+        file_size == 0 || file_size > LONG_MAX || file_size > SIZE_MAX) {
+        platform_positioned_file_close(&file);
         return false;
     }
-    long fsize = (long)st.st_size;
-    uint8_t *data = mmap(NULL, (size_t)fsize, PROT_READ, MAP_PRIVATE, fd, 0);
-    close(fd);
-    if (data == MAP_FAILED)
+    long fsize = (long)file_size;
+    if (!platform_read_mapping_open_positioned(&mapping, &file,
+                                               (size_t)file_size)) {
+        platform_positioned_file_close(&file);
         return false;
+    }
+    const uint8_t *data = mapping.data;
 
     bool found = false;
     long pos = 0;
@@ -158,7 +171,8 @@ static bool repair_scan_one_file(const char *path,
         pos += 8 + (long)blk_size;
     }
 
-    munmap(data, (size_t)fsize);
+    platform_read_mapping_close(&mapping);
+    platform_positioned_file_close(&file);
     return found;
 }
 

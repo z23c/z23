@@ -11,11 +11,15 @@
  */
 
 #include "storage/boot_auto_reindex.h"
+#include "platform/os_proc.h"
+#include "platform/positioned_file.h"
+#include "platform/private_file.h"
 
-#include <fcntl.h>
 #include <stdio.h>
+#include <stdatomic.h>
 #include <string.h>
-#include <unistd.h>
+
+static _Atomic uint32_t g_ar_stage_seq;
 
 static void ar_path(const char *datadir, char *out, size_t n)
 {
@@ -28,11 +32,26 @@ static bool ar_read(const char *path, int32_t *anchor, int *count)
 {
     *anchor = 0;
     *count = 0;
-    FILE *r = fopen(path, "r");
-    if (!r)
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path) ||
+        !platform_positioned_file_snapshot(&file, &before) ||
+        before.size == 0 || before.size >= 64) {
+        platform_positioned_file_close(&file);
         return false;
-    bool ok = (fscanf(r, "%d %d", anchor, count) == 2);
-    fclose(r);
+    }
+    char buf[64];
+    int64_t got = platform_positioned_file_read(
+        &file, buf, (size_t)before.size, 0);
+    bool ok = got == (int64_t)before.size &&
+              platform_positioned_file_snapshot(&file, &after) &&
+              memcmp(&before, &after, sizeof(before)) == 0;
+    platform_positioned_file_close(&file);
+    if (ok) {
+        buf[before.size] = '\0';
+        ok = sscanf(buf, "%d %d", anchor, count) == 2;
+    }
     if (!ok) {
         *anchor = 0;
         *count = 0;
@@ -49,26 +68,35 @@ static bool ar_write(const char *datadir, const char *path,
     if (len < 0 || len >= (int)sizeof(buf))
         return false;
 
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-    if (fd < 0) {
+    char staging[640];
+    int staged_len = snprintf(
+        staging, sizeof(staging), "%s.%llu-%u.tmp", path,
+        (unsigned long long)os_proc_current_pid(),
+        (unsigned)atomic_fetch_add(&g_ar_stage_seq, 1));
+    if (staged_len < 0 || (size_t)staged_len >= sizeof(staging))
+        return false;
+    struct platform_private_file file;
+    struct platform_private_file_identity identity;
+    platform_private_file_init(&file);
+    bool created = platform_private_file_create(staging, &file);
+    bool identified = created &&
+                      platform_private_file_identity(&file, &identity);
+    bool ok = identified &&
+              platform_private_file_write_at(&file, buf, (size_t)len, 0) &&
+              platform_private_file_truncate(&file, (uint64_t)len) &&
+              platform_private_file_flush(&file) &&
+              platform_private_file_replace(&file, staging, path) &&
+              platform_private_parent_flush(datadir);
+    if (!ok) {
+        if (identified)
+            (void)platform_private_file_retire_if_identity(
+                &file, staging, &identity);
+        platform_private_file_close(&file);
         fprintf(stderr,  // obs-ok:storage-primitive-error
-                "[boot] boot_auto_reindex: open(%s) failed\n", path);
+                "[boot] boot_auto_reindex: durable write(%s) failed\n", path);
         return false;
     }
-    ssize_t w = write(fd, buf, (size_t)len);
-    int sync_rc = fsync(fd);  /* the budget MUST survive a crash mid-rebuild */
-    int close_rc = close(fd);
-    if (w != (ssize_t)len || sync_rc != 0 || close_rc != 0) {
-        fprintf(stderr,  // obs-ok:storage-primitive-error
-                "[boot] boot_auto_reindex: write/fsync(%s) failed\n", path);
-        return false;
-    }
-    /* fsync the directory so the file's existence is durable across a crash. */
-    int dfd = open(datadir, O_RDONLY | O_DIRECTORY);
-    if (dfd >= 0) {
-        (void)fsync(dfd);
-        close(dfd);
-    }
+    platform_private_file_close(&file);
     return true;
 }
 
@@ -139,7 +167,7 @@ bool boot_auto_reindex_pending(const char *datadir)
         return false;
     char path[512];
     ar_path(datadir, path, sizeof(path));
-    if (access(path, F_OK) != 0)
+    if (platform_private_path_absent(path))
         return false;
     /* A terminal marker is present-but-not-pending: the budget is spent, so the
      * next boot must NOT consume it as a reindex request. */
@@ -179,5 +207,14 @@ void boot_auto_reindex_clear(const char *datadir)
         return;
     char path[512];
     ar_path(datadir, path, sizeof(path));
-    (void)remove(path);
+    if (platform_private_path_absent(path))
+        return;
+    struct platform_private_file file;
+    struct platform_private_file_identity identity;
+    platform_private_file_init(&file);
+    if (platform_private_file_open_locked(path, &file) &&
+        platform_private_file_identity(&file, &identity) &&
+        platform_private_file_retire_if_identity(&file, path, &identity))
+        (void)platform_private_parent_flush(datadir);
+    platform_private_file_close(&file);
 }

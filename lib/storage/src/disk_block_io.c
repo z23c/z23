@@ -11,13 +11,14 @@
 #include "support/log_throttle.h"
 #include "platform/time_compat.h"
 #include "platform/file_sync.h"
+#include "platform/directory_compat.h"
+#include "platform/positioned_io.h"
 #include <errno.h>
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
-#include <sys/mman.h>
 #include <pthread.h>
 #include "util/safe_alloc.h"
 
@@ -44,10 +45,7 @@ void get_block_pos_filename(char *buf, size_t buflen,
 
 static bool ensure_directory(const char *path)
 {
-    struct stat st;
-    if (stat(path, &st) == 0)
-        return S_ISDIR(st.st_mode);
-    return mkdir(path, 0755) == 0;
+    return platform_directory_ensure(path, 0755);
 }
 
 /* A hardlinked blk file may have a live foreign appender. Warn once per file;
@@ -464,7 +462,7 @@ ssize_t disk_block_pread(const char *datadir, const struct disk_block_pos *pos,
         return -1;
     }
 
-    ssize_t nread = pread(fd, buf, len, (off_t)pos->nPos);
+    int64_t nread = platform_positioned_read(fd, buf, len, pos->nPos);
     close(fd);
     return nread;
 }
@@ -629,13 +627,13 @@ bool read_block_from_disk_pread_profiled(struct block *b,
         LOG_FAIL("disk_block_io", "read_block_pread: malloc(%zu) failed", bufsize);
     }
 
-    ssize_t nread = pread(fd, buf, bufsize, (off_t)payload_pos);
+    int64_t nread = platform_positioned_read(fd, buf, bufsize, payload_pos);
     if (!fd_cached) close(fd);
 
     if (nread <= 0) {
         free(buf);
-        LOG_FAIL("disk_block_io", "read_block_pread: pread returned %zd for file=%d pos=%u",
-                 nread, pos->nFile, payload_pos);
+        LOG_FAIL("disk_block_io", "read_block_pread: positioned read returned %lld for file=%d pos=%u",
+                 (long long)nread, pos->nFile, payload_pos);
     }
     if (read_us_out)
         *read_us_out = (uint64_t)(platform_time_monotonic_us() - read_started);

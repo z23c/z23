@@ -15,10 +15,10 @@
 
 #include "storage/chain_segment.h"
 
+#include "platform/directory_compat.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
-#include <dirent.h>
 #include <errno.h>
 #include <pthread.h>
 #include <stdarg.h>
@@ -87,35 +87,52 @@ static int css_entry_cmp(const void *a, const void *b)
 static enum cseg_status css_scan(struct chain_segment_store *s,
                                  char *err, size_t errlen)
 {
-    DIR *d = opendir(s->dir);
-    if (!d) {
-        if (errno == ENOENT) return CSEG_OK; /* no store yet */
-        css_set_err(err, errlen, "opendir(%s): %s", s->dir, strerror(errno));
+    enum platform_directory_probe_result probe =
+        platform_directory_probe_real(s->dir);
+    if (probe == PLATFORM_DIRECTORY_PROBE_MISSING)
+        return CSEG_OK; /* no store yet */
+    if (probe != PLATFORM_DIRECTORY_PROBE_OK) {
+        css_set_err(err, errlen, "segment directory is not a real directory: %s",
+                    s->dir);
+        return CSEG_ERR_IO;
+    }
+
+    struct platform_directory_list files = {0};
+    if (!platform_directory_list_regular_sorted(s->dir, &files)) {
+        css_set_err(err, errlen, "cannot enumerate segment directory: %s",
+                    s->dir);
         return CSEG_ERR_IO;
     }
     size_t cap = 16, n = 0;
     struct css_table_entry *tab =
         zcl_malloc(cap * sizeof(*tab), "css/table");
-    if (!tab) { closedir(d); css_set_err(err, errlen, "alloc"); return CSEG_ERR_IO; }
+    if (!tab) {
+        platform_directory_list_free(&files);
+        css_set_err(err, errlen, "alloc");
+        return CSEG_ERR_IO;
+    }
 
-    struct dirent *de;
-    while ((de = readdir(d)) != NULL) {
+    for (size_t file_i = 0; file_i < files.count; file_i++) {
         uint32_t fh, cnt;
-        if (!css_parse_name(de->d_name, &fh, &cnt)) continue;
+        if (!css_parse_name(files.entries[file_i].name, &fh, &cnt)) continue;
         if (cnt == 0) continue;
         if (n == cap) {
             cap *= 2;
             struct css_table_entry *grown =
                 zcl_realloc(tab, cap * sizeof(*tab), "css/table");
-            if (!grown) { free(tab); closedir(d);
-                          css_set_err(err, errlen, "grow"); return CSEG_ERR_IO; }
+            if (!grown) {
+                free(tab);
+                platform_directory_list_free(&files);
+                css_set_err(err, errlen, "grow");
+                return CSEG_ERR_IO;
+            }
             tab = grown;
         }
         tab[n].first_height = fh;
         tab[n].count = cnt;
         n++;
     }
-    closedir(d);
+    platform_directory_list_free(&files);
 
     qsort(tab, n, sizeof(*tab), css_entry_cmp);
     s->table = tab;

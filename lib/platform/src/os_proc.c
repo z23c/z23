@@ -70,6 +70,15 @@ enum os_proc_liveness os_proc_pid_liveness(uint64_t pid)
 #endif
 }
 
+uint64_t os_proc_current_pid(void)
+{
+#if defined(_WIN32)
+    return (uint64_t)GetCurrentProcessId();
+#else
+    return (uint64_t)getpid();
+#endif
+}
+
 /* ── Test override seam (mirrors platform/clock.h, platform/rng.h) ──── */
 
 static _Atomic bool g_override_active;
