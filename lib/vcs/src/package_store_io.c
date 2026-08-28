@@ -711,4 +711,9 @@ bool store_open_recover(struct vcs_package_store *store)
     (void)store;
     return false;
 }
+uint32_t store_releases_count(const struct vcs_package_store *store)
+{
+    (void)store;
+    return 0;
+}
 #endif

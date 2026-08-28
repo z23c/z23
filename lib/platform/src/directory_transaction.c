@@ -349,11 +349,19 @@ enum platform_directory_result platform_directory_child_unlink_result(
 {
     struct platform_directory_child f; platform_directory_child_init(&f);
     if (!platform_directory_child_open(d, leaf, &f)) return child_last_result;
-    FILE_DISPOSITION_INFO disposition = {.DeleteFile = TRUE};
-    bool ok = SetFileInformationByHandle(fh(&f), FileDispositionInfo,
-                                         &disposition, sizeof(disposition)) &&
-              platform_directory_transaction_flush(d);
+    nt_set_information_file_fn set_info = resolve_nt_set_information_file();
+    struct disposition_ex { ULONG flags; } disposition = {.flags = 1u | 2u};
+    IO_STATUS_BLOCK status = {0};
+    /* Class 64 + POSIX semantics removes the directory entry while this
+     * retained handle is still open.  Legacy FileDispositionInfo only marks
+     * the file delete-pending; on Windows another transient handle can then
+     * keep the child visible after CloseHandle and make an immediately
+     * following parent-directory removal fail with ERROR_DIR_NOT_EMPTY. */
+    bool ok = set_info && set_info(fh(&f), &status, &disposition,
+                                   sizeof(disposition),
+                                   (FILE_INFORMATION_CLASS)64) >= 0;
     platform_directory_child_close(&f);
+    if (ok) ok = platform_directory_transaction_flush(d);
     return ok ? PLATFORM_DIRECTORY_OK : PLATFORM_DIRECTORY_IO;
 }
 

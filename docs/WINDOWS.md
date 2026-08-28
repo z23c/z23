@@ -7,15 +7,17 @@ vendored archives.
 
 | Lane | Purpose | Artifact status |
 | --- | --- | --- |
-| MSYS2 UCRT64 | Native C23 editing, GCC/Clang diagnostics, and the ongoing Win32 port | Native Windows `.exe`; the full node is not yet linkable |
+| MSYS2 UCRT64 | Native C23 build, GCC/Clang diagnostics, and the ongoing Win32 port | GCC builds the native `z23.exe`; Clang and runtime acceptance remain in progress |
 | WSL2 Ubuntu | Build, test, and operate the complete node today | Linux ELF running under WSL2 |
 
-The UCRT64 bootstrap, source-identity checks, compile-epoch leases, OpenSSL,
-SQLite, zlib, libevent, and LevelDB builds are supported. The full native node
-currently stops at POSIX APIs that still need platform adapters: signals,
-users/groups, sockets, and a small set of filesystem/process calls. The agent
-adapter is deliberately unavailable because Windows confinement is not yet
-implemented. Never weaken that refusal to obtain a green build.
+The UCRT64 bootstrap, source-identity checks, compile-epoch leases, pinned
+static C dependencies, and canonical GCC node build are supported. The built
+binary is a native x86-64 PE named `build/bin/z23.exe`; its release audit
+allows only declared Windows system DLLs. Some optional package, snapshot, and
+agent operations still refuse where their Windows capability backend is not
+qualified. The agent adapter is deliberately unavailable because Windows
+confinement is not yet implemented. Never weaken those refusals to obtain a
+green build.
 
 ## Native UCRT64 lane
 
@@ -29,7 +31,8 @@ pacman -S --needed base-devel git \
   mingw-w64-ucrt-x86_64-clang \
   mingw-w64-ucrt-x86_64-clang-tools-extra \
   mingw-w64-ucrt-x86_64-cmake \
-  mingw-w64-ucrt-x86_64-ninja
+  mingw-w64-ucrt-x86_64-ninja \
+  mingw-w64-ucrt-x86_64-libsystre
 ```
 
 Keep the checkout on the Windows filesystem rather than inside the
@@ -45,6 +48,8 @@ code .
 tools/scripts/doctor.sh
 tools/scripts/build_vendor.sh
 tools/dev/source-identity-selftest.sh
+make -j"$(getconf _NPROCESSORS_ONLN)" z23
+make windows-acceptance
 ```
 
 Use both native compilers for focused C23 work:

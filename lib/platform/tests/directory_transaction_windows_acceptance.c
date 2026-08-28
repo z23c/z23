@@ -60,18 +60,19 @@ int main(int argc, char **argv)
         struct platform_directory_lock child_lock;
         platform_directory_transaction_init(&child_directory);
         platform_directory_lock_init(&child_lock);
-        bool ok = platform_directory_transaction_open(&child_directory, argv[2]) &&
+        if (!platform_directory_transaction_open(&child_directory, argv[2]))
+            return 4;
+        enum platform_directory_result acquired =
             platform_directory_lock_acquire(&child_directory, "state.lock", false,
-                PLATFORM_DIRECTORY_LOCK_EXCLUSIVE, &child_lock) ==
-                PLATFORM_DIRECTORY_OK;
+                PLATFORM_DIRECTORY_LOCK_EXCLUSIVE, &child_lock);
         platform_directory_lock_release(&child_lock);
         platform_directory_transaction_close(&child_directory);
-        return ok ? 0 : 3;
+        return acquired == PLATFORM_DIRECTORY_OK ? 0 : 10 + (int)acquired;
     }
     wchar_t temp[MAX_PATH], root_wide[MAX_PATH];
     char root[MAX_PATH * 3];
     if (!GetTempPathW(MAX_PATH, temp) ||
-        swprintf(root_wide, MAX_PATH, L"%sz23-dtxn-%lu-%llu", temp,
+        swprintf(root_wide, MAX_PATH, L"%lsz23-dtxn-%lu-%llu", temp,
                  (unsigned long)GetCurrentProcessId(),
                  (unsigned long long)GetTickCount64()) <= 0 ||
         WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, root_wide, -1,
@@ -152,37 +153,58 @@ int main(int argc, char **argv)
     }
     platform_directory_transaction_close(&nested);
     detail = "remove child directory";
-    wchar_t nested_wide[MAX_PATH];
-    if (swprintf(nested_wide, MAX_PATH, L"%s\\nested", root_wide) <= 0 ||
-        !RemoveDirectoryW(nested_wide))
+    char nested_path[MAX_PATH];
+    if (snprintf(nested_path, sizeof(nested_path), "%s/nested", root) <= 0 ||
+        !platform_private_directory_remove_empty(nested_path))
         goto cleanup;
 
     phase = "retained exclusive lock";
+    detail = "acquire parent-relative lock";
     struct platform_directory_lock lock;
     platform_directory_lock_init(&lock);
     if (platform_directory_lock_acquire(&directory, "state.lock", true,
             PLATFORM_DIRECTORY_LOCK_EXCLUSIVE, &lock) != PLATFORM_DIRECTORY_OK)
         goto cleanup;
     wchar_t executable[MAX_PATH], command[MAX_PATH * 4];
+    detail = "construct lock contender command";
     if (!GetModuleFileNameW(NULL, executable, MAX_PATH) ||
         swprintf(command, sizeof(command) / sizeof(command[0]),
-                 L"\"%s\" --lock-child \"%s\"", executable, root_wide) <= 0)
+                 L"\"%ls\" --lock-child \"%ls\"", executable, root_wide) <= 0)
         goto cleanup;
     STARTUPINFOW startup = {.cb = sizeof(startup)};
     PROCESS_INFORMATION process = {0};
+    detail = "start lock contender";
     if (!CreateProcessW(executable, command, NULL, NULL, FALSE,
                         CREATE_NO_WINDOW, NULL, NULL, &startup, &process))
         goto cleanup;
     CloseHandle(process.hThread);
-    bool lock_blocked =
-        WaitForSingleObject(process.hProcess, 250) == WAIT_TIMEOUT;
-    platform_directory_lock_release(&lock);
     DWORD child_wait = WaitForSingleObject(process.hProcess, 10000);
     DWORD child_exit = UINT32_MAX;
     (void)GetExitCodeProcess(process.hProcess, &child_exit);
     CloseHandle(process.hProcess);
-    if (!lock_blocked || child_wait != WAIT_OBJECT_0 || child_exit != 0)
+    if (child_wait != WAIT_OBJECT_0 ||
+        child_exit != 10 + PLATFORM_DIRECTORY_REFUSED) {
+        fprintf(stderr, "lock contender held: wait=%lu exit=%lu\n",
+                (unsigned long)child_wait, (unsigned long)child_exit);
         goto cleanup;
+    }
+    detail = "release lock and start successful contender";
+    platform_directory_lock_release(&lock);
+    process = (PROCESS_INFORMATION){0};
+    if (!CreateProcessW(executable, command, NULL, NULL, FALSE,
+                        CREATE_NO_WINDOW, NULL, NULL, &startup, &process))
+        goto cleanup;
+    CloseHandle(process.hThread);
+    child_wait = WaitForSingleObject(process.hProcess, 10000);
+    child_exit = UINT32_MAX;
+    (void)GetExitCodeProcess(process.hProcess, &child_exit);
+    CloseHandle(process.hProcess);
+    if (child_wait != WAIT_OBJECT_0 || child_exit != 0) {
+        fprintf(stderr, "lock contender released: wait=%lu exit=%lu\n",
+                (unsigned long)child_wait, (unsigned long)child_exit);
+        goto cleanup;
+    }
+    detail = "unlink released lock file";
     if (platform_directory_child_unlink_result(&directory, "state.lock") !=
         PLATFORM_DIRECTORY_OK)
         goto cleanup;
@@ -285,8 +307,8 @@ int main(int argc, char **argv)
 
     phase = "reparse child refusal";
     wchar_t alpha_path[MAX_PATH], link_path[MAX_PATH];
-    if (swprintf(alpha_path, MAX_PATH, L"%s\\alpha", root_wide) <= 0 ||
-        swprintf(link_path, MAX_PATH, L"%s\\alpha-link", root_wide) <= 0)
+    if (swprintf(alpha_path, MAX_PATH, L"%ls\\alpha", root_wide) <= 0 ||
+        swprintf(link_path, MAX_PATH, L"%ls\\alpha-link", root_wide) <= 0)
         goto cleanup;
     if (CreateSymbolicLinkW(link_path, alpha_path,
                             SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE)) {
@@ -301,7 +323,7 @@ int main(int argc, char **argv)
 
     phase = "missing versus non-file refusal";
     wchar_t blocked[MAX_PATH];
-    if (swprintf(blocked, MAX_PATH, L"%s\\blocked", root_wide) <= 0 ||
+    if (swprintf(blocked, MAX_PATH, L"%ls\\blocked", root_wide) <= 0 ||
         !CreateDirectoryW(blocked, NULL) ||
         platform_directory_child_unlink_result(&directory, "blocked") !=
             PLATFORM_DIRECTORY_REFUSED)
@@ -370,10 +392,10 @@ cleanup:
     }
     platform_directory_transaction_close(&directory);
     wchar_t blocked_cleanup[MAX_PATH];
-    if (swprintf(blocked_cleanup, MAX_PATH, L"%s\\blocked", root_wide) > 0)
+    if (swprintf(blocked_cleanup, MAX_PATH, L"%ls\\blocked", root_wide) > 0)
         (void)RemoveDirectoryW(blocked_cleanup);
     wchar_t nested_cleanup[MAX_PATH];
-    if (swprintf(nested_cleanup, MAX_PATH, L"%s\\nested", root_wide) > 0)
+    if (swprintf(nested_cleanup, MAX_PATH, L"%ls\\nested", root_wide) > 0)
         (void)RemoveDirectoryW(nested_cleanup);
     if (!platform_private_directory_remove_empty(root)) result = 1;
     if (result) {

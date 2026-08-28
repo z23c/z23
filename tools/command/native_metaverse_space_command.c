@@ -1404,7 +1404,8 @@ void zcl_native_metaverse_space_discover_until(
       policy_denied++;
       continue;
     }
-    enum metaverse_space_object_kind admitted_kind;
+    enum metaverse_space_object_kind admitted_kind =
+        METAVERSE_SPACE_OBJECT_NONE;
     struct zcl_result stored = resolved ? metaverse_space_admit_bounded(
         store, resolved, root, candidates.rows[i].transport_root,
         maximum_wire_bytes, &admitted_kind, &is_new)
