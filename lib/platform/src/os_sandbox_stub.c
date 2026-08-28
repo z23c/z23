@@ -3,10 +3,18 @@
 
 #include "platform/os_sandbox.h"
 
+#include "util/log_macros.h"
+
 #include <stdlib.h>
 #include <string.h>
-#include <sys/resource.h>
 #include <unistd.h>
+
+/* struct rlimit / getrlimit / RLIMIT_NPROC are POSIX; Windows has no per-uid
+ * process ceiling to read at all (see os_sandbox_nproc_hard_limit below), so
+ * this header is only pulled in where it actually exists. */
+#if !defined(_WIN32)
+#include <sys/resource.h>
+#endif
 
 #if defined(__APPLE__)
 #include <libproc.h> /* proc_pidinfo: per-process BSD identity and task size */
@@ -185,16 +193,43 @@ uint64_t os_sandbox_uid_task_count(void)
     free(procs);
     return total;
 }
+#elif defined(_WIN32)
+/* No Windows equivalent of a per-uid /proc walk is implemented here (that is
+ * a real design task, not this compile fix). Per the documented contract on
+ * os_sandbox_uid_task_count() in platform/os_sandbox.h ("Returns 0 when
+ * /proc is unreadable"), 0 already means "could not observe", not "verified
+ * zero threads" — but on a platform that can never observe it at all, that
+ * distinction is worth spelling out where it can be seen, so log it by name
+ * instead of failing silently. */
+uint64_t os_sandbox_uid_task_count(void)
+{
+    LOG_WARN("os_sandbox",
+             "uid task census is unavailable on this operating system "
+             "(no Windows equivalent implemented); reporting 0, which the "
+             "process-budget admission path reads as unobserved load, not "
+             "a verified idle host");
+    return 0;
+}
 #else
 uint64_t os_sandbox_uid_task_count(void) { return 0; }
 #endif
 
 uint64_t os_sandbox_nproc_hard_limit(void)
 {
+#if defined(_WIN32)
+    /* Windows does not charge process/thread creation against a per-uid
+     * RLIMIT_NPROC-style ceiling at all, so there is nothing to probe and
+     * nothing can fail to be read here: "no such limit exists" is the true
+     * answer, not a stand-in for "could not determine it". OS_SANDBOX_
+     * RLIMIT_KEEP is exactly that sentinel per its definition in
+     * platform/os_sandbox.h ("unlimited or unreadable"). */
+    return OS_SANDBOX_RLIMIT_KEEP;
+#else
     struct rlimit limit;
     if (getrlimit(RLIMIT_NPROC, &limit) != 0 || limit.rlim_max == RLIM_INFINITY)
         return OS_SANDBOX_RLIMIT_KEEP;
     return (uint64_t)limit.rlim_max;
+#endif
 }
 
 struct os_sandbox_process_budget os_sandbox_process_budget_at(
@@ -254,6 +289,17 @@ uint64_t os_sandbox_process_group_census(pid_t group)
     }
     free(procs);
     return total;
+#elif defined(_WIN32)
+    /* No Windows equivalent of a POSIX process-group id is implemented here
+     * (that is a real design task, not this compile fix). Same reporting
+     * discipline as os_sandbox_uid_task_count above: 0 is the documented
+     * "unreadable" sentinel per platform/os_sandbox.h, but log it by name so
+     * it is never mistaken for a verified empty group. */
+    LOG_WARN("os_sandbox",
+             "process-group census is unavailable on this operating system "
+             "(no Windows equivalent implemented); reporting 0 for group=%ld",
+             (long)group);
+    return 0;
 #else
     (void)group;
     return 0;
