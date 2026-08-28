@@ -18,6 +18,10 @@
 #include "util/hw_profile.h"
 #include "util/util.h"              /* GetDataDir */
 #include "platform/time_compat.h"   /* platform_time_monotonic_us/realtime_us */
+#include "platform/directory_compat.h"
+#include "platform/file_metadata.h"
+#include "platform/positioned_file.h"
+#include "platform/private_file.h"
 #include "json/json.h"
 #include "util/log_macros.h"
 
@@ -217,8 +221,10 @@ static int64_t bench_fsync(const char *datadir, int64_t budget_us)
                      HW_BENCH_PROBE_FILENAME);
     if (n <= 0 || (size_t)n >= sizeof(path)) return -1;
 
-    int fd = open(path, O_CREAT | O_WRONLY | O_TRUNC, 0600);
-    if (fd < 0) return -1;
+    (void)platform_private_file_unlink_missing_ok(path);
+    struct platform_private_file probe;
+    platform_private_file_init(&probe);
+    if (!platform_private_file_create(path, &probe)) return -1;
 
     unsigned char buf[64];
     memset(buf, 0xA5, sizeof(buf));
@@ -227,17 +233,17 @@ static int64_t bench_fsync(const char *datadir, int64_t budget_us)
     int got = 0;
     int64_t start = platform_time_monotonic_us();
     for (int i = 0; i < HW_BENCH_FSYNC_SAMPLES; i++) {
-        if (lseek(fd, 0, SEEK_SET) < 0) break;
-        if (write(fd, buf, sizeof(buf)) != (ssize_t)sizeof(buf)) break;
+        if (!platform_private_file_write_at(&probe, buf, sizeof(buf), 0) ||
+            !platform_private_file_truncate(&probe, sizeof(buf))) break;
         int64_t t0 = platform_time_monotonic_us();
-        if (fsync(fd) != 0) break;
+        if (!platform_private_file_flush(&probe)) break;
         int64_t t1 = platform_time_monotonic_us();
         samples[got++] = t1 - t0;
         if (budget_us > 0 && platform_time_monotonic_us() - start > budget_us)
             break;
     }
-    close(fd);
-    unlink(path);
+    platform_private_file_close(&probe);
+    (void)platform_private_file_unlink_missing_ok(path);
     return got >= 3 ? median_i64(samples, got) : -1;
 }
 
@@ -248,25 +254,25 @@ static int64_t bench_fsync(const char *datadir, int64_t budget_us)
 static bool find_sample_file(const char *datadir, char *out, size_t outsz,
                              off_t *out_size)
 {
-    DIR *d = opendir(datadir);
-    if (!d) return false;
-
+    struct platform_directory_list list = {0};
+    if (!platform_directory_list_regular_sorted(datadir, &list)) return false;
     bool found = false;
-    struct dirent *ent;
-    while ((ent = readdir(d)) != NULL) {
-        if (ent->d_name[0] == '.') continue;
+    for (size_t i = 0; i < list.count; i++) {
+        const char *name = list.entries[i].name;
+        if (!name || name[0] == '.') continue;
         char full[HW_BENCH_PATH_MAX];
-        int n = snprintf(full, sizeof(full), "%s/%s", datadir, ent->d_name);
+        int n = snprintf(full, sizeof(full), "%s/%s", datadir, name);
         if (n <= 0 || (size_t)n >= (int)sizeof(full)) continue;
-        struct stat st;
-        if (stat(full, &st) != 0 || !S_ISREG(st.st_mode)) continue;
-        if (st.st_size < HW_BENCH_MIN_SAMPLE_FILE_BYTES) continue;
+        struct platform_file_metadata metadata;
+        if (platform_file_metadata_read(full, &metadata) !=
+                PLATFORM_FILE_METADATA_OK ||
+            metadata.size < HW_BENCH_MIN_SAMPLE_FILE_BYTES) continue;
         snprintf(out, outsz, "%s", full);
-        *out_size = st.st_size;
+        *out_size = (off_t)metadata.size;
         found = true;
         break;
     }
-    closedir(d);
+    platform_directory_list_free(&list);
     return found;
 }
 
@@ -280,11 +286,12 @@ static int64_t bench_pread(const char *datadir, int64_t budget_us)
     if (!find_sample_file(datadir, path, sizeof(path), &size))
         return -1;
 
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) return -1;
+    struct platform_positioned_file file;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path)) return -1;
 
     off_t max_off = size - HW_BENCH_PREAD_CHUNK;
-    if (max_off < 0) { close(fd); return -1; }
+    if (max_off < 0) { platform_positioned_file_close(&file); return -1; }
 
     uint64_t seed = (uint64_t)platform_time_monotonic_us() ^
                     0x9E3779B97F4A7C15ULL;
@@ -295,14 +302,15 @@ static int64_t bench_pread(const char *datadir, int64_t budget_us)
     for (int i = 0; i < HW_BENCH_PREAD_SAMPLES; i++) {
         off_t off = (off_t)(xorshift64(&seed) % (uint64_t)(max_off + 1));
         int64_t t0 = platform_time_monotonic_us();
-        ssize_t r = pread(fd, buf, sizeof(buf), off);
+        int64_t r = platform_positioned_file_read(&file, buf, sizeof(buf),
+                                                  (uint64_t)off);
         int64_t t1 = platform_time_monotonic_us();
         if (r <= 0) break;
         samples[got++] = t1 - t0;
         if (budget_us > 0 && platform_time_monotonic_us() - start > budget_us)
             break;
     }
-    close(fd);
+    platform_positioned_file_close(&file);
     return got >= 3 ? median_i64(samples, got) : -1;
 }
 
