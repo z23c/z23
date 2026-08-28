@@ -48,12 +48,15 @@ Linux compatibility layer is involved.
 
 ```bash
 xcode-select --install
-brew install autoconf automake cmake coreutils flock libtool make pkgconf
-export PATH="$(brew --prefix make)/libexec/gnubin:$(brew --prefix coreutils)/libexec/gnubin:$PATH"
+brew install autoconf automake bash cmake coreutils findutils flock libtool make pkgconf
+export PATH="$(brew --prefix make)/libexec/gnubin:$(brew --prefix coreutils)/libexec/gnubin:$(brew --prefix findutils)/libexec/gnubin:$PATH"
 ```
 
 Apple Clang 17 or newer is required. The `flock` formula supplies the build
-lease primitive absent from the macOS base system.
+lease primitive absent from the macOS base system. `bash` (4+) and `findutils`
+(GNU find with `-printf`) are required by the source-identity capture that
+selects every compile epoch and by `make lint`; Apple's stock bash 3.2 and BSD
+find are not sufficient for either.
 
 **Get the source and build:**
 

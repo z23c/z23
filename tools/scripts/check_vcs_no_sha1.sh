@@ -366,7 +366,10 @@ self_test()
     if scan_tree "$sandbox" >/dev/null 2>&1; then
         fatal 'host-local mutation receipt escaped into release identity flags'
     fi
-    sed -i '$d' "$sandbox/Makefile"
+    # Rewrite, not GNU `sed -i`: BSD sed would take '$d' as an in-place
+    # backup suffix and the Makefile path as the script, mutating nothing.
+    sed '$d' "$sandbox/Makefile" > "$sandbox/Makefile.nolid" \
+        && mv "$sandbox/Makefile.nolid" "$sandbox/Makefile"
     mkdir -p "$sandbox/fail-bin"
     printf '%s\n' '#!/usr/bin/env bash' 'exit 2' \
         > "$sandbox/fail-bin/grep"
@@ -434,7 +437,9 @@ self_test()
     if scan_tree "$sandbox" >/dev/null 2>&1; then
         fatal 'baked Git commit executable-authority fixture passed'
     fi
-    sed -i '/CFLAGS += -DZCL_BUILD_COMMIT/d' "$sandbox/Makefile"
+    # Same rewrite rule as above: no GNU `sed -i` on a BSD host.
+    sed '/CFLAGS += -DZCL_BUILD_COMMIT/d' "$sandbox/Makefile" \
+        > "$sandbox/Makefile.nocommit" && mv "$sandbox/Makefile.nocommit" "$sandbox/Makefile"
     printf '%s\n' \
         'unverified: $(BUILD_IDENTITY_STAMP)' \
         '	@cp source.c "$@"' >> "$sandbox/Makefile"

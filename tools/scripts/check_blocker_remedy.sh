@@ -214,7 +214,11 @@ extract_call_sites() {
 # a dynamic (bare-variable) call-site id. ──
 extract_markers() {
     grep -rnoE '/\*[ \t]*blocker-id:[ \t]*[A-Za-z0-9_.*-]+[ \t]*\*/' "$@" 2>/dev/null |
-    sed -E 's#^([^:]+):([0-9]+):.*blocker-id:[ \t]*([A-Za-z0-9_.*-]+).*#\1\t\2\t\3#'
+    # [[:space:]], not [ \t]: inside a bracket expression Apple/BSD sed reads
+    # "\t" as literal backslash-or-"t" (GNU reads TAB), so a pattern id whose
+    # first letter is "t" lost that letter here and the gate invented a
+    # phantom missing binding.
+    sed -E 's#^([^:]+):([0-9]+):.*blocker-id:[[:space:]]*([A-Za-z0-9_.*-]+).*#\1\t\2\t\3#'
 }
 
 declare -A FILE_HAS_MARKER
@@ -350,7 +354,8 @@ done < <(extract_condition_names "${scan_files[@]}")
 # extraction above). ──
 extract_registered_escapes() {
     grep -rhoE 'blocker_register_escape\([ \t]*"[^"]+"' "$@" 2>/dev/null |
-    sed -E 's/^blocker_register_escape\([ \t]*"//; s/"$//'
+    # Same [[:space:]] rule as extract_markers above (BSD sed bracket \t).
+    sed -E 's/^blocker_register_escape\([[:space:]]*"//; s/"$//'
 }
 declare -A ESCAPES
 while IFS= read -r name; do

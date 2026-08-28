@@ -41,7 +41,9 @@ derive() {
     while IFS= read -r line; do
         stage=$(sed -n 's/.*\.stage[[:space:]]*=[[:space:]]*BOOT_STAGE_\([A-Z_]*\).*/\1/p' <<<"$line")
         [[ -n "$stage" ]] || continue
-        order=$(sed -n 's/.*\.order[[:space:]]*=[[:space:]]*\(-\?[0-9]*\).*/\1/p' <<<"$line")
+        # \{0,1\}, not GNU \?: the optional-sign quantifier must stay POSIX BRE
+        # so Apple's sed parses the same pattern as GNU sed.
+        order=$(sed -n 's/.*\.order[[:space:]]*=[[:space:]]*\(-\{0,1\}[0-9]*\).*/\1/p' <<<"$line")
         name=$(sed -n 's/.*\.name[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' <<<"$line")
         if [[ -z "$order" || -z "$name" ]]; then
             echo "check_sysinit_ordering: FATAL — record line missing .order/.name: $line" >&2

@@ -74,7 +74,10 @@ else
     bad "$ACTIVATE_C has ${enforced:-0} module_consensus_pin_ok reference(s); expected a definition plus a call on BOTH dlsym paths"
 fi
 
-sites="$(grep -c 'dlsym(handle,$\|dlsym(handle, ZCL_HOTSWAP_MODULE_SYMBOL)' "$ACTIVATE_C" || true)"
+# POSIX ERE, not GNU BRE alternation `\|` (which Apple's grep reads as a
+# literal backslash-pipe): that read counted 1 dlsym site instead of 2 and
+# failed the gate as if a pin check were missing.
+sites="$(grep -Ec 'dlsym\(handle,($|[[:space:]]ZCL_HOTSWAP_MODULE_SYMBOL\))' "$ACTIVATE_C" || true)"
 if [ "${sites:-0}" -ne $((enforced - 1)) ]; then
     bad "$ACTIVATE_C resolves ${sites:-0} zcl_hotswap_module symbol(s) but pins $((enforced - 1)); every dlsym path must carry the check"
 fi

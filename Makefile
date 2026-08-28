@@ -1937,8 +1937,12 @@ TEST_REL_OBJ_ROOT = $(BUILD_DIR)/test-rel-obj
 # defect. -Werror and -pedantic remain in force for every other warning.
 TEST_REL_CFLAGS = $(filter-out $(ZCL_LTO_FLAG),$(CACHED_CFLAGS)) -DZCL_TESTING \
 	-Wno-deprecated-declarations -Wno-format-truncation -Wno-format-overflow \
-	-Wno-array-bounds -Wno-stringop-truncation -Wno-stringop-overread \
-	-Wno-restrict -Wno-nonnull $(ZCL_WARN_MAYBE_UNINITIALIZED)
+	-Wno-array-bounds $(ZCL_WARN_MAYBE_UNINITIALIZED)
+ifeq ($(ZCL_HOST_OS),Linux)
+# GCC-only suppression spellings; Apple Clang rejects them under -Werror.
+TEST_REL_CFLAGS += -Wno-stringop-truncation -Wno-stringop-overread \
+	-Wno-restrict
+endif
 TEST_REL_LDFLAGS = $(filter-out $(ZCL_LTO_FLAG),$(LDFLAGS))
 INTEGRATION_CFLAGS := $(TEST_REL_CFLAGS)
 INTEGRATION_LDFLAGS := $(TEST_REL_LDFLAGS)
