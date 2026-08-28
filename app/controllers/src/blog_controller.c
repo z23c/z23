@@ -2,7 +2,6 @@
  *
  * Blog controller — static file server + ZSLP node registry. */
 
-#define _XOPEN_SOURCE 700
 #include "controllers/blog_controller.h"
 #include "models/database.h"
 #include "models/onion_announcement.h"
@@ -18,9 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <limits.h>
-#include <sys/stat.h>
-#include "util/file_io.h"
+#include "platform/safe_root_read.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
@@ -120,11 +117,28 @@ size_t blog_serve(const char *datadir, const char *path,
                              body, strlen(body));
     }
 
-    /* Build canonical blog root for path containment check */
+    /* The platform seam opens each component without following links/reparse
+     * points and reads from the same pinned leaf handle.  This avoids both the
+     * check/reopen race and Windows' lack of realpath(3). */
     char blog_root[1024];
-    snprintf(blog_root, sizeof(blog_root), "%s/blog", datadir);
-    char real_root[PATH_MAX];
-    if (!realpath(blog_root, real_root)) {
+    int root_n = snprintf(blog_root, sizeof(blog_root), "%s/blog", datadir);
+    if (root_n < 0 || (size_t)root_n >= sizeof(blog_root)) return 0;
+    size_t max_body = (out_len > 512) ? out_len - 512 : 0;
+    uint8_t *body_data = NULL;
+    size_t nread = 0;
+    enum platform_safe_root_read_result read_result = platform_safe_root_read(
+        blog_root, rel, max_body, &body_data, &nread);
+    char rel_html[1024];
+    const char *served_rel = rel;
+    if (read_result == PLATFORM_SAFE_ROOT_READ_NOT_FOUND) {
+        int rel_n = snprintf(rel_html, sizeof(rel_html), "%s.html", rel);
+        if (rel_n >= 0 && (size_t)rel_n < sizeof(rel_html)) {
+            read_result = platform_safe_root_read(blog_root, rel_html, max_body,
+                                                  &body_data, &nread);
+            if (read_result == PLATFORM_SAFE_ROOT_READ_OK) served_rel = rel_html;
+        }
+    }
+    if (read_result == PLATFORM_SAFE_ROOT_READ_NOT_FOUND) {
         const char *body =
             "<html><head><style>body{background:#0a0a0a;color:#e0e0e0;"
             "font-family:monospace;text-align:center;padding:80px 20px}"
@@ -134,35 +148,7 @@ size_t blog_serve(const char *datadir, const char *path,
         return http_response(out, out_len, 404, "text/html",
                              body, strlen(body));
     }
-    size_t root_len = strlen(real_root);
-
-    /* Read file from {datadir}/blog/{rel} */
-    char filepath[1024];
-    snprintf(filepath, sizeof(filepath), "%s/blog/%s", datadir, rel);
-
-    FILE *f = fopen(filepath, "rb");
-    if (!f) {
-        /* Try with .html extension */
-        snprintf(filepath, sizeof(filepath), "%s/blog/%s.html", datadir, rel);
-        f = fopen(filepath, "rb");
-    }
-    if (!f) {
-        const char *body =
-            "<html><head><style>body{background:#0a0a0a;color:#e0e0e0;"
-            "font-family:monospace;text-align:center;padding:80px 20px}"
-            "</style></head><body><h1>404 Not Found</h1>"
-            "<p><a href='/' style='color:#00ff88'>Return home</a></p>"
-            "</body></html>";
-        return http_response(out, out_len, 404, "text/html",
-                             body, strlen(body));
-    }
-
-    /* Verify resolved path stays under blog root */
-    char real_file[PATH_MAX];
-    if (!realpath(filepath, real_file) ||
-        strncmp(real_file, real_root, root_len) != 0 ||
-        (real_file[root_len] != '/' && real_file[root_len] != '\0')) {
-        fclose(f);
+    if (read_result == PLATFORM_SAFE_ROOT_READ_FORBIDDEN) {
         const char *body =
             "<html><head><style>body{background:#0a0a0a;color:#e0e0e0;"
             "font-family:monospace;text-align:center;padding:80px 20px}"
@@ -172,25 +158,16 @@ size_t blog_serve(const char *datadir, const char *path,
         return http_response(out, out_len, 403, "text/html",
                              body, strlen(body));
     }
-
-    fclose(f);
-
-    /* Cap the read at what the response buffer can hold (leaving room for
-     * the HTTP headers) so an oversized file is refused before it is ever
-     * allocated, matching the pre-consolidation behavior. */
-    size_t max_body = (out_len > 512) ? out_len - 512 : 0;
-    uint8_t *body = NULL;
-    size_t nread = 0;
-    if (!zcl_read_whole_file(filepath, max_body, &body, &nread, "blog")) {
+    if (read_result != PLATFORM_SAFE_ROOT_READ_OK) {
         const char *msg = "<h1>500 File too large</h1>";
         return http_response(out, out_len, 500, "text/html",
                              msg, strlen(msg));
     }
 
     size_t result = http_response(out, out_len, 200,
-                                   content_type_for(filepath),
-                                   (const char *)body, nread);
-    free(body);
+                                   content_type_for(served_rel),
+                                   (const char *)body_data, nread);
+    free(body_data);
     return result;
 }
 
