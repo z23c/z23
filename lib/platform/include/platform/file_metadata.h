@@ -8,6 +8,8 @@
 enum platform_file_metadata_result {
     PLATFORM_FILE_METADATA_OK = 0,
     PLATFORM_FILE_METADATA_MISSING,
+    PLATFORM_FILE_METADATA_REPARSE,
+    PLATFORM_FILE_METADATA_NOT_REGULAR,
     PLATFORM_FILE_METADATA_REFUSED,
 };
 
@@ -17,8 +19,8 @@ struct platform_file_metadata {
 };
 
 /* Open the named object without following a final symlink/reparse point and
- * report metadata only when it is a regular file. Missing is distinct from
- * unreadable/non-regular so integrity callers can preserve exact verdicts. */
+ * report metadata only when it is a regular file. Missing, reparse points,
+ * other object shapes, and unreadable paths retain distinct verdicts. */
 enum platform_file_metadata_result platform_file_metadata_read(
     const char *utf8_path, struct platform_file_metadata *out);
 

@@ -519,8 +519,8 @@ bool sapling_tree_flush_checkpoint(const struct incremental_merkle_tree *t,
      * bytes, replace atomically, then make the parent transition durable. */
     char resolved[32768];
     char parent[32768];
-    if (!platform_private_path_resolve(path, resolved, sizeof(resolved),
-                                       parent, sizeof(parent))) {
+    if (!platform_private_destination_resolve(
+            path, resolved, sizeof(resolved), parent, sizeof(parent))) {
         free(body);
         LOG_FAIL("sapling_tree",
                  "flush_checkpoint: invalid checkpoint path");

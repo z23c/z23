@@ -480,7 +480,7 @@ int t_block_index_flat_atomic_save_contract(void)
         char *fn        = strstr(buf, "ssio_write_embedded(");
         ASSERT(fn != NULL);
         char *open_tmp  = strstr(fn, "fopen(tmp_path, \"wb\")");
-        char *fsync_fd  = strstr(fn, "(void)fsync(fd)");
+        char *fsync_fd  = strstr(fn, "(void)platform_file_sync(fd)");
         char *rename_tmp = strstr(fn, "rename(tmp_path, body_path)");
         char *unlink_err = strstr(fn, "unlink(tmp_path)");
         ASSERT(open_tmp != NULL);

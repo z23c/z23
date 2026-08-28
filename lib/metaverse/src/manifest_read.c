@@ -307,7 +307,21 @@ static void mv_manifest_verify_possession_impl(
             platform_positioned_file_init(&file_handle);
             if (!platform_positioned_file_open_beneath(
                     &file_handle, zcode_dir, path)) {
-                mv_verification_gap(manifest, "chunk_missing");
+                char full[MV_PATH_MAX];
+                struct platform_file_metadata metadata;
+                int full_length = snprintf(full, sizeof(full), "%s/%s",
+                                           zcode_dir, path);
+                enum platform_file_metadata_result metadata_result =
+                    full_length > 0 && (size_t)full_length < sizeof(full)
+                        ? platform_file_metadata_read(full, &metadata)
+                        : PLATFORM_FILE_METADATA_REFUSED;
+                const char *gap = metadata_result == PLATFORM_FILE_METADATA_MISSING
+                    ? "chunk_missing"
+                    : metadata_result == PLATFORM_FILE_METADATA_REPARSE
+                        ? "chunk_symlink"
+                        : metadata_result == PLATFORM_FILE_METADATA_NOT_REGULAR
+                            ? "chunk_not_regular" : "chunk_unreadable";
+                mv_verification_gap(manifest, gap);
                 goto done;
             }
             if (!platform_positioned_file_snapshot(&file_handle, &before)) {
