@@ -184,6 +184,33 @@ bool platform_private_file_flush(struct platform_private_file *f) {
   return FlushFileBuffers(pf_handle(f)) != 0;
 }
 
+bool platform_private_file_replace(struct platform_private_file *f,
+                                   const char *staging_path,
+                                   const char *destination_path) {
+  (void)staging_path;
+  wchar_t destination[32768];
+  if (!f || pf_handle(f) == INVALID_HANDLE_VALUE ||
+      !pf_wide(destination_path, destination) ||
+      !platform_private_file_flush(f))
+    return false;
+  size_t bytes = wcslen(destination) * sizeof(*destination);
+  if (bytes > UINT32_MAX - sizeof(FILE_RENAME_INFO))
+    return false;
+  size_t allocation = sizeof(FILE_RENAME_INFO) + bytes;
+  FILE_RENAME_INFO *rename_info = calloc(1, allocation);
+  if (!rename_info)
+    return false;
+  rename_info->ReplaceIfExists = TRUE;
+  rename_info->FileNameLength = (DWORD)bytes;
+  memcpy(rename_info->FileName, destination, bytes);
+  bool ok = SetFileInformationByHandle(pf_handle(f), FileRenameInfo,
+                                       rename_info, (DWORD)allocation) != 0;
+  free(rename_info);
+  if (ok)
+    platform_private_file_close(f);
+  return ok;
+}
+
 bool platform_private_file_retire(struct platform_private_file *f,
                                   const char *path) {
   (void)path;
@@ -441,6 +468,19 @@ bool platform_private_file_write_at(struct platform_private_file *f,
 }
 bool platform_private_file_flush(struct platform_private_file *f) {
   return fsync(pf_fd(f)) == 0;
+}
+bool platform_private_file_replace(struct platform_private_file *f,
+                                   const char *staging_path,
+                                   const char *destination_path) {
+  struct stat held, named;
+  if (!f || !staging_path || !destination_path ||
+      fstat(pf_fd(f), &held) != 0 || lstat(staging_path, &named) != 0 ||
+      !S_ISREG(held.st_mode) || !S_ISREG(named.st_mode) ||
+      held.st_dev != named.st_dev || held.st_ino != named.st_ino ||
+      !platform_private_file_flush(f) || rename(staging_path, destination_path))
+    return false;
+  platform_private_file_close(f);
+  return true;
 }
 bool platform_private_file_retire(struct platform_private_file *f,
                                   const char *path) {

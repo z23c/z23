@@ -100,6 +100,25 @@ int main(void) {
                                             &same) ||
       same)
     return fail("conflicting destination accepted");
+
+  /* Replacement stays tied to the verified staging handle and replaces an
+   * existing destination atomically. */
+  char replacement[4 * MAX_PATH];
+  snprintf(replacement, sizeof(replacement), "%s\\replacement.part", dir);
+  if (!platform_private_file_create(replacement, &second) ||
+      !platform_private_file_write_at(&second, payload, sizeof(payload), 0) ||
+      !platform_private_file_replace(&second, replacement, conflict) ||
+      !platform_private_path_absent(replacement) ||
+      !platform_private_parent_flush(parent))
+    return fail("handle-bound replacement");
+  platform_private_file_init(&second);
+  FILE *installed = fopen(conflict, "rb");
+  memset(observed, 0, sizeof(observed));
+  if (!installed || fread(observed, 1, sizeof(observed), installed) !=
+                        sizeof(observed) ||
+      fclose(installed) != 0 || memcmp(observed, payload, sizeof(payload)))
+    return fail("replacement contents");
+
   if (!platform_private_file_open_locked(stage, &file) ||
       !platform_private_file_retire(&file, stage) ||
       !platform_private_path_absent(stage) ||
