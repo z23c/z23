@@ -127,6 +127,8 @@ ZCL_HOTSWAP_LOOP_GOALS := hotswap-try hotswap-apply hotswap \
 	presentation-lib presentation-demo presentation-relaunch \
 	presentation-desktop-install presentation-portability \
 	windows-acceptance-compile windows-acceptance \
+	windows-headless-run windows-headless-run-selftest \
+	build/bin/z23-headless-run.exe \
 	new-app new-app-selftest test-windows-thread-join-acceptance \
 	$(ZCL_GUI_APP_GOALS)
 ZCL_HOTSWAP_LOOP_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_HOTSWAP_LOOP_GOALS),$(MAKECMDGOALS))),,1),)
@@ -341,6 +343,26 @@ endif
 endif
 BUILD_DIR = build
 BIN_DIR = $(BUILD_DIR)/bin
+WINDOWS_HEADLESS_RUN_BIN = $(BIN_DIR)/z23-headless-run.exe
+
+.PHONY: windows-headless-run windows-headless-run-selftest
+ifeq ($(ZCL_HOST_WINDOWS),1)
+windows-headless-run: $(WINDOWS_HEADLESS_RUN_BIN)
+
+$(WINDOWS_HEADLESS_RUN_BIN): tools/dev/windows_headless_run.c
+	@mkdir -p $(dir $@)
+	$(CC) -std=c23 -Wall -Wextra -Werror -pedantic \
+		-D_WIN32_WINNT=0x0A00 -DWIN32_LEAN_AND_MEAN -municode $< -o $@
+
+windows-headless-run-selftest: $(WINDOWS_HEADLESS_RUN_BIN)
+	@root="$$(cygpath -aw .)"; runner="$$(cygpath -aw $<)"; \
+	log="$$root\\build\\headless-selftest.log"; \
+	"$$runner" --cwd "$$root" --log "$$log" -- "$$runner" \
+		--selftest-child "space value" 'trailing\'
+else
+windows-headless-run windows-headless-run-selftest:
+	@echo "windows headless runner requires native Windows" >&2; false
+endif
 OBJ_ROOT = $(BUILD_DIR)/obj
 DEV_OBJ_ROOT = $(BUILD_DIR)/dev-obj
 OBJ_DIR = $(OBJ_ROOT)/epochs/$(BUILD_ONLY_COMPILE_EPOCH)
@@ -555,7 +577,8 @@ DEVLOOP_INCLUDES = -Itools/dev
 # binary, or the test harness. They must leave the wildcard BEFORE the
 # DEV_ONLY_SRCS split, because DEV_ONLY_SRCS is still linked (into the dev
 # binary) — filtering there would only move the duplicate-`main` link error.
-DEV_STANDALONE_SRCS = tools/dev/hotswap_verify_so.c
+DEV_STANDALONE_SRCS = tools/dev/hotswap_verify_so.c \
+	tools/dev/windows_headless_run.c
 DEVLOOP_ALL_SRCS = $(call zcl_filter_ephemeral_sources,\
 	$(filter-out $(DEV_STANDALONE_SRCS),$(wildcard tools/dev/*.c)))
 DEV_ONLY_SRCS = tools/dev/devloop_cli.c tools/dev/devloop_cycle.c \
@@ -1630,6 +1653,16 @@ windows-acceptance-compile: $(ZCL_WINDOWS_ACCEPTANCE_BINS)
 	@printf '%s\n' 'windows-acceptance: strict C23 cross-link PASS'
 
 windows-acceptance: windows-acceptance-compile
+
+ifeq ($(ZCL_HOST_WINDOWS),1)
+	@for executable in $(ZCL_WINDOWS_ACCEPTANCE_BINS); do \
+		"$$executable"; rc=$$?; \
+		if test $$rc -eq 77; then \
+			printf '%s\n' "windows-acceptance: honest runtime refusal: $$executable"; \
+		elif test $$rc -ne 0; then exit $$rc; fi; \
+	done; \
+	printf '%s\n' 'windows-acceptance: native execution PASS (explicit runtime refusals reported above)'
+else
 	@command -v wine >/dev/null 2>&1 || { \
 		printf '%s\n' 'windows-acceptance: REFUSE: Wine unavailable; use windows-acceptance-compile for cross-link evidence'; \
 		exit 2; \
@@ -1641,6 +1674,7 @@ windows-acceptance: windows-acceptance-compile
 		elif test $$rc -ne 0; then exit $$rc; fi; \
 	done; \
 	printf '%s\n' 'windows-acceptance: execution PASS (explicit runtime refusals reported above)'
+endif
 
 # ── GUI packages: the prompt-to-pixel loop ───────────────────────────────
 # `make <app>` opens a real window on this host and prints the timestamp it

@@ -779,7 +779,9 @@ REMOTE_HASH
     git cat-file -e "$prior_commit^{commit}" 2>/dev/null ||
         die "$host rollback commit $prior_commit is unavailable locally"
     if ! git diff --quiet "$prior_commit" "$HEAD_SHA" -- \
-        'app/models/src/database_*.c' 'app/models/src/schema_migration.c' \
+        'app/models/src/database_migrate*.c' \
+        'app/models/src/database_schema.c' \
+        'app/models/src/schema_migration.c' \
         'app/models/include/models/schema_migration.h'; then
         die "$host candidate changes persistent-schema code; automatic binary rollback is not safe"
     fi
