@@ -8,6 +8,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+struct platform_positioned_file;
+
 struct platform_read_mapping {
     const uint8_t *data;
     size_t size;
@@ -20,6 +22,9 @@ void platform_read_mapping_init(struct platform_read_mapping *mapping);
  * platform_read_mapping_close().  A zero-byte mapping is rejected. */
 bool platform_read_mapping_open(struct platform_read_mapping *mapping,
                                 int fd, size_t size);
+bool platform_read_mapping_open_positioned(
+    struct platform_read_mapping *mapping,
+    const struct platform_positioned_file *file, size_t size);
 
 /* Hint that the whole mapping will be consumed in ascending address order.
  * This is advisory only: unsupported platforms and transient hint failures
