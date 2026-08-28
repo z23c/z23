@@ -25,7 +25,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#if !defined(_WIN32)
+#if defined(__linux__)
 #include <sys/syscall.h>
 #endif
 #include <unistd.h>
