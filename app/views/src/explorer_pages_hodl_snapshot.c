@@ -176,7 +176,7 @@ static bool hodl_view_disk_cache_paths(
     if (n < 0 || (size_t)n >= sizeof(dir))
         return false;
     if (!platform_directory_ensure(dir, 0700))
-        return false;
+        LOG_FAIL("explorer", "hodl disk cache: cannot create %s", dir);
 
     char requested[HODL_VIEW_DISK_CACHE_PATH_MAX];
     n = snprintf(requested, sizeof(requested), "%s/%s",
@@ -236,8 +236,11 @@ static bool hodl_view_disk_cache_read(
     cached_hash[0] = '\0';
 
     platform_positioned_file_init(&file);
+    /* No cache file yet is the normal first-run path, not an incident: the
+     * caller recomputes the snapshot and writes one. Logging here would fire
+     * on every cold boot. */
     if (!platform_positioned_file_open(&file, path))
-        return false;
+        return false; // raw-return-ok:cache-miss-not-error
     uint64_t size = 0;
     bool ok = false;
     if (!platform_positioned_file_size(&file, &size) || size == 0 ||
