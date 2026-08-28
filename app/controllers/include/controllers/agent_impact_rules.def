@@ -1853,3 +1853,175 @@ AGENT_IMPACT_RULE("lib/test/src/test_store_buyer.c", "store_buyer make_lint_gate
  * a real observer, not a shape check -- it is what caught 23 undeclared
  * programs on the merge that created these deletions. */
 AGENT_IMPACT_RULE("tests/windows/*", "make_lint_gates")
+
+/* The DERIVATION half of the independent replay receipt, split out of
+ * consensus_state_replay_receipt.c at the E1 file-size seam. Mapped by
+ * EXECUTION, not by inheritance from the parent:
+ * test_consensus_state_snapshot_install.c's "replay: verifier re-derives
+ * from the datadir's own tables and writes a receipt" calls
+ * consensus_state_replay_verify_and_write_receipt(), and the only producer
+ * of the vres.utxo_count / anchor_count / nullifier_count that same check
+ * asserts are all 2 is rr_derive_from_datadir() in this file -- the three
+ * row scans are load-bearing there, not merely compiled. Deliberately NOT
+ * given the parent's authority_receipt group: that rule exists because the
+ * RECEIPT half calls consensus_state_replay_receipt_authority_available()
+ * and check_privileged_transition_receipt.sh greps for exactly that call.
+ * Neither the call nor the gate's interest crosses into the derive half. */
+AGENT_IMPACT_RULE("config/src/consensus_state_replay_receipt_derive.c|config/src/consensus_state_replay_receipt_internal.h", "consensus_state_snapshot_install make_lint_gates")
+
+/* The PRIOR-GENERATION half of ACTIVATE -- the store health/identity probes
+ * and the VACUUM INTO capture -- split out of
+ * consensus_state_snapshot_install_activate.c at the E1 seam. Execution
+ * reaches PAST the refusals, which is the thing worth checking here:
+ * test_consensus_state_snapshot_install.c's "activate: restorable prior
+ * generation is a valid standalone store" sqlite3_open_v2()s
+ * ares.prior_generation_path and reads rows out of it, and that path exists
+ * only because activate_backup_prior_generation() ran to completion; the
+ * data-version fence (activate_data_version) is asserted separately by
+ * "activate: commit between backup and BEGIN is fenced before cutover".
+ * The export group the parent rule also carries is left off: nothing in
+ * this file touches the bundle codec. */
+AGENT_IMPACT_RULE("config/src/consensus_state_snapshot_install_activate_backup.c|config/src/consensus_state_snapshot_install_activate_internal.h", "consensus_state_snapshot_install make_lint_gates")
+
+/* The contained bundle-export step, split out of boot_mint_anchor.c. Its one
+ * public symbol boot_mint_anchor_export_bundle() is called DIRECTLY by
+ * test_consensus_state_snapshot_export.c -- "mint finalize wiring exports the
+ * datadir bundle" asserts it returns true and the bundle file appears, and a
+ * second check re-runs it for idempotence. So this maps to the group that
+ * runs that file instead of inheriting boot_mint_anchor.c's ten mint groups:
+ * none of those drive a producer datadir to a finalized source receipt, which
+ * is the precondition for reaching this call at all. */
+AGENT_IMPACT_RULE("config/src/boot_mint_anchor_bundle_export.c", "consensus_state_snapshot_export make_lint_gates")
+
+/* The `-cold-start` PURE layer plus the two-symbol seam header. boot_cold_start.c
+ * had no rule at all, which was a real gap rather than a split artefact --
+ * the group covering it has existed all along. test_cold_start_driver.c calls
+ * cold_start_stage_name/param/configured, receipt_path/write/matches/refused,
+ * cold_start_plan_next and cold_start_drive directly with an injected runner,
+ * and asserts the resume, bundle-skip and refusal-stickiness properties. The
+ * seam header's two symbols ride the same path: cold_start_singleline_bounded
+ * through the verbatim "reason=REFUSED: ... canonical lane" receipt assertion,
+ * cold_start_reason_copy through the reason cold_start_drive hands back on a
+ * BLOCKED stage. */
+AGENT_IMPACT_RULE("config/src/boot_cold_start.c|config/src/boot_cold_start_internal.h", "cold_start_driver make_lint_gates")
+
+/* The `-cold-start` LIVE layer: fork/exec of each prep verb, child-outcome
+ * classification, and the exec of the serving boot. NO TEST REACHES THIS, so
+ * the lint tier alone is the honest answer. test_cold_start_driver.c is
+ * hermetic by construction ("no child processes, no node boot") and injects a
+ * fake runner in place of cold_start_run_stage_live(); boot_cold_start_run()'s
+ * only caller in the tree is src/main.c; and test_e2e_cold_start.c drives the
+ * two-step recipe's service entry points in-process, never the `-cold-start`
+ * verb. Closing this needs a case that spawns a real child through
+ * cold_start_spawn_classify() -- a stub executable that prints a REFUSED:
+ * line on stderr and exits -- and asserts the DECISION-vs-TRANSIENT verdict
+ * and the captured stderr tail. */
+AGENT_IMPACT_RULE("config/src/boot_cold_start_driver.c", "make_lint_gates")
+
+/* platform_current_identity() -- the "who was refused" string in a boot
+ * refusal report. NO REGISTERED GROUP EXECUTES IT. The one production caller
+ * is boot_report_datadir_create_failed() in config/src/boot_refusal_reports.c,
+ * reached only from boot.c when the datadir mkdir itself fails, and nothing
+ * under lib/test/src/ drives that. The one program that does run it,
+ * tools/tests/test_boot_refusal_identity.c, is built and executed by
+ * check-winacceptance -- the lint tier, not a test group, and not even part of
+ * LINT_FAST_GATES, so the push gate never runs it either. Closing this needs a
+ * lib/test/src/ case that calls boot_report_datadir_create_failed() with
+ * EACCES and asserts boot_error_last_render() carries the identity= token. */
+AGENT_IMPACT_RULE("lib/platform/src/current_identity.c|lib/platform/include/platform/current_identity.h", "make_lint_gates")
+
+/* platform_positioned_read/write. The READ arm is executed and load-bearing:
+ * it is the xRead method of the contained exporter's fd-only SQLite VFS
+ * (config/src/consensus_state_snapshot_export_fd_io.c), so every page SQLite
+ * reads back while producing the bundle in test_consensus_state_snapshot_export.c's
+ * "complete generation exports" check goes through it -- a wrong offset breaks
+ * that assertion. The WRITE arm is NOT executed by any test: its only caller
+ * is mmb_leaf_store_write_at(), whose only caller is boot_flyclient.c's legacy
+ * prefix repair, and no test drives either; the winacceptance program for it
+ * sits in the `win` bucket, cross-compiled and never run. `models` is
+ * deliberately absent -- test_mmb.c uses open/append, never write_at, so
+ * naming it here would claim coverage that does not exist. */
+AGENT_IMPACT_RULE("lib/platform/src/positioned_io.c|lib/platform/include/platform/positioned_io.h", "consensus_state_snapshot_export make_lint_gates")
+
+/* The CRT stream-lock shim. Header-only, with exactly one call site:
+ * zcl_log_emit_at() in lib/base/src/log_level.c brackets its fprintf+vfprintf
+ * pair with platform_stdio_lock/unlock. test_log_level.c captures stderr
+ * around real LOG_WARN/LOG_INFO calls and asserts the emitted line starts with
+ * the ISO-8601 stamp and carries the level token, so the assertion is on
+ * output produced inside that bracket. POSIX arm only: the _lock_file arm is
+ * observed by check-windows-platform-seam, not by a test. */
+AGENT_IMPACT_RULE("lib/platform/include/platform/stdio_compat.h", "log_level make_lint_gates")
+
+/* The metric-alert CATALOG half, split out of prometheus_metrics.c (the
+ * gauges and the firing engine stayed behind). The catalog is what
+ * test_metric_alerts.c actually pins: it asserts
+ * metrics_prometheus_alert_rule_count() == 9, which reads g_alert_rule_count
+ * straight out of alert_rules_seed_locked(), and then asserts each rule's
+ * event_name and severity verbatim ("name=metric_alert.tip_stalled",
+ * "severity=critical", mirror_lag_high/_critical, blocker_permanent_active,
+ * rss_high, header_gap_growing, ...) -- strings that exist only in this
+ * file's table. alert_cmp_crossed() is on the asserted fire/no-fire edge of
+ * every one of those rows. One honest gap inside the file:
+ * alert_cmp_symbol() is executed (its result goes into the emitted payload)
+ * but nothing asserts the symbol text, so a wrong glyph would pass. */
+AGENT_IMPACT_RULE("lib/metrics/src/prometheus_metrics_alert_rules.c|lib/metrics/src/prometheus_metrics_internal.h", "metric_alerts make_lint_gates")
+
+/* The postmortem capsule's `.cap.gz` CONTAINER layer -- ustar header
+ * encode/decode, the octal field codecs, the gzip read/write/skip helpers and
+ * the single-member extractor -- split out of postmortem.c, which keeps the
+ * capsule semantics. Mapped to the group that round-trips the format rather
+ * than to the parent's simnet/simnet_wire groups, which are about seed tapes
+ * and never touch the archive: test_postmortem.c compresses a real capsule
+ * ("compress writes .cap.gz", "compress leaves archive"), then reads it back
+ * through the extractor and asserts the RECOVERED CONTENT -- "compressed tape
+ * preserves inject count" == 1 out of tape.bin, and "compressed list
+ * metadata" checking crash_signal == 11 and tape_size_bytes against the live
+ * tape, both parsed out of manifest.json pulled from inside the gzipped tar.
+ * A bad octal field or a mis-skipped block breaks those, not just the open. */
+AGENT_IMPACT_RULE("lib/sim/src/postmortem_archive.c|lib/sim/src/postmortem_internal.h", "postmortem make_lint_gates")
+
+/* The blk*.dat frame-decode + hash-targeted position rescan, split out of
+ * disk_block_io.c. Both halves of the moved code are asserted in
+ * test_disk_block_io.c's test_position_repair_from_local_copy():
+ * block_index_repair_pos_from_disk() heals a deliberately bogus mid-record
+ * position and the test asserts the healed value equals the block's real
+ * (nFile,nPos), then reads the block back and asserts nTime == 555555 --
+ * that read runs through disk_block_locate_payload(), the one symbol crossing
+ * the seam header. The second arm asserts the no-copy-on-disk case returns
+ * false and leaves the entry untouched, so the refusal is pinned too. The
+ * parent's block_parse_cache and stage groups are left off: they consume the
+ * read path but assert nothing about framing that disk_block_io does not
+ * already assert directly. */
+AGENT_IMPACT_RULE("lib/storage/src/disk_block_io_repair.c|lib/storage/src/disk_block_io_internal.h", "disk_block_io make_lint_gates")
+
+/* The two chaos-fault families split out of simnet_chaos_faults.c: the ROM
+ * artifact fixtures with faults (g) conflicting chunk peers, (h) journal
+ * commit ENOSPC and (i) kill at the resume boundary, and the download matrix
+ * with (j) reorg mid-download, (k) slow-loris seeder, (l) invalid tail block
+ * and (m) peer disconnect mid body-download. Checked rather than assumed:
+ * test_always_sync_chaos.c calls all seven MOVED injectors by name and gives
+ * each an unconditional ASC_CHECK triple -- fixture built, never pages
+ * operator, recovered -- so the covering group drives the moved code and not
+ * merely the (a)-(f) set that stayed behind. Only the (a-2) row SKIPs, and
+ * that row is in the parent. The group carries no stress/env proof contract,
+ * so nothing self-skips it; and the one arm compiled without ZCL_TESTING
+ * (slow-loris) returns false rather than a hollow success, so a build without
+ * the macro goes red instead of vacuously green. The parent's other groups
+ * (segment_corruption, supervisor, condition_engine, stage_repair,
+ * reducer_frontier, always_sync_lifecycle) belong to the faults that stayed
+ * in the parent and are deliberately not inherited here. */
+AGENT_IMPACT_RULE("lib/sim/src/simnet_chaos_faults_rom.c|lib/sim/src/simnet_chaos_faults_download.c|lib/sim/src/simnet_chaos_faults_internal.h", "always_sync_chaos make_lint_gates")
+
+/* The durable "a sovereign consensus bundle is installed here" marker. Not a
+ * split -- it simply never had a rule, and only surfaced when another change
+ * put it in a push set. Its header had the same gap and is added with it.
+ * Three registered groups assert both entry points AND the behaviour the
+ * marker gates: test_boot_snapshot_failure_memory.c asserts the write+exists
+ * round trip and then that the marker quarantines a borrowed seed, with the
+ * very next case asserting the same datadir auto-loads that seed when the
+ * marker is absent; test_boot_bundle_fetch.c asserts a written marker makes
+ * boot_bundle_fetch_should_run() false and that a refused install leaves NO
+ * marker; test_consensus_state_install_runtime.c asserts a written marker
+ * makes boot_autodetect_consensus_bundle() return NULL. Those pairs pin the
+ * durable replace path, not just that a file appeared. */
+AGENT_IMPACT_RULE("config/src/boot_consensus_bundle_marker.c|config/include/config/boot_consensus_bundle_marker.h", "boot_snapshot_failure_memory boot_bundle_fetch consensus_state_install_runtime make_lint_gates")
