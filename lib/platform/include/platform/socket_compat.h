@@ -491,6 +491,21 @@ static inline bool platform_socket_send_all(platform_socket_t sock,
     return true;
 }
 
+static inline int platform_socket_send(platform_socket_t sock,
+                                       const void *data, size_t size)
+{
+    int part = size > INT32_MAX ? INT32_MAX : (int)size;
+#if defined(_WIN32)
+    return send(sock, (const char *)data, part, 0);
+#else
+    int flags = 0;
+#ifdef MSG_NOSIGNAL
+    flags = MSG_NOSIGNAL;
+#endif
+    return (int)send(sock, data, (size_t)part, flags);
+#endif
+}
+
 static inline int platform_socket_receive(platform_socket_t sock, void *data,
                                            size_t size)
 {
@@ -507,6 +522,17 @@ static inline int platform_socket_receive(platform_socket_t sock, void *data,
         result = (int)recv(sock, data, (size_t)part, 0);
     } while (result < 0 && errno == EINTR);
     return result;
+#endif
+}
+
+static inline int platform_socket_peek(platform_socket_t sock, void *data,
+                                       size_t size)
+{
+    int part = size > INT32_MAX ? INT32_MAX : (int)size;
+#if defined(_WIN32)
+    return recv(sock, (char *)data, part, MSG_PEEK);
+#else
+    return (int)recv(sock, data, (size_t)part, MSG_PEEK);
 #endif
 }
 

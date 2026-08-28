@@ -3,6 +3,7 @@
  * file COPYING or http://www.opensource.org/licenses/mit-license.php. */
 
 #include "platform/time_compat.h"
+#include "platform/socket_compat.h"
 #include "rpc/httpserver.h"
 #include "rpc/http_middleware.h"
 #include <sys/stat.h>
@@ -16,20 +17,16 @@
 #include "support/cleanse.h"
 #include "util/log_macros.h"
 #include "util/trace.h"
-#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <netinet/in.h>
 #include <openssl/err.h>
 #include <openssl/ssl.h>
-#include <poll.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include <sys/socket.h>
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
@@ -99,12 +96,12 @@
 /* ── Connection abstraction for plain + TLS ───────────────────────── */
 
 struct rpc_conn {
-    int     fd;
+    platform_socket_t fd;
     SSL    *ssl;         /* NULL for plain-text connections */
     int64_t admitted_us; /* monotonic stamp set by enqueue_client() */
 };
 
-static int g_listen_fd = -1;
+static platform_socket_t g_listen_fd = PLATFORM_SOCKET_INVALID;
 static const struct rpc_table *g_table = NULL;
 static pthread_t g_listen_thread;
 static bool g_listen_thread_started = false;
@@ -166,7 +163,7 @@ static uint64_t g_client_rejected_busy = 0;
 
 /* ── TLS state ────────────────────────────────────────────────────── */
 static SSL_CTX *g_tls_ctx = NULL;
-static int g_tls_listen_fd = -1;
+static platform_socket_t g_tls_listen_fd = PLATFORM_SOCKET_INVALID;
 static pthread_t g_tls_listen_thread;
 static bool g_tls_listen_thread_started = false;
 static uint16_t g_tls_port = 0;
@@ -298,18 +295,18 @@ static bool check_auth(const char *auth_header)
 
 /* ── I/O wrappers: plain fd or SSL ─────────────────────────────── */
 
-static ssize_t conn_read(const struct rpc_conn *c, void *buf, size_t len)
+static int conn_read(const struct rpc_conn *c, void *buf, size_t len)
 {
     if (c->ssl)
-        return SSL_read(c->ssl, buf, (int)len);
-    return read(c->fd, buf, len);
+        return SSL_read(c->ssl, buf, len > INT32_MAX ? INT32_MAX : (int)len);
+    return platform_socket_receive(c->fd, buf, len);
 }
 
-static ssize_t conn_write(const struct rpc_conn *c, const void *buf, size_t len)
+static int conn_write(const struct rpc_conn *c, const void *buf, size_t len)
 {
     if (c->ssl)
-        return SSL_write(c->ssl, buf, (int)len);
-    return write(c->fd, buf, len);
+        return SSL_write(c->ssl, buf, len > INT32_MAX ? INT32_MAX : (int)len);
+    return platform_socket_send(c->fd, buf, len);
 }
 
 /* Send the whole buffer, or give up. A blocking write() with
@@ -328,12 +325,13 @@ static bool conn_write_all(const struct rpc_conn *c, const void *buf, size_t len
     size_t sent = 0;
 
     while (sent < len) {
-        ssize_t w = conn_write(c, p + sent, len - sent);
+        int w = conn_write(c, p + sent, len - sent);
         if (w > 0) {
             sent += (size_t)w;
             continue;
         }
-        if (w < 0 && errno == EINTR)
+        if (w < 0 && platform_socket_error_interrupted(
+                         platform_socket_last_error()))
             continue;
         return false;
     }
@@ -350,7 +348,7 @@ static bool read_line(const struct rpc_conn *c, char *buf, size_t buflen)
     size_t pos = 0;
     while (pos < buflen - 1) {
         char ch;
-        ssize_t r = conn_read(c, &ch, 1);
+        int r = conn_read(c, &ch, 1);
         if (r <= 0) return false;
         if (ch == '\n') {
             if (pos > 0 && buf[pos - 1] == '\r')
@@ -368,7 +366,7 @@ static bool read_exact(const struct rpc_conn *c, char *buf, size_t len)
 {
     size_t total = 0;
     while (total < len) {
-        ssize_t r = conn_read(c, buf + total, len - total);
+        int r = conn_read(c, buf + total, len - total);
         if (r <= 0) return false;
         total += (size_t)r;
     }
@@ -409,9 +407,9 @@ static void conn_close(struct rpc_conn *c)
         SSL_free(c->ssl);
         c->ssl = NULL;
     }
-    if (c->fd >= 0) {
-        close(c->fd);
-        c->fd = -1;
+    if (c->fd != PLATFORM_SOCKET_INVALID) {
+        platform_socket_close(c->fd);
+        c->fd = PLATFORM_SOCKET_INVALID;
     }
 }
 
@@ -426,9 +424,9 @@ static void conn_discard(struct rpc_conn *c)
         SSL_free(c->ssl);
         c->ssl = NULL;
     }
-    if (c->fd >= 0) {
-        close(c->fd);
-        c->fd = -1;
+    if (c->fd != PLATFORM_SOCKET_INVALID) {
+        platform_socket_close(c->fd);
+        c->fd = PLATFORM_SOCKET_INVALID;
     }
 }
 
@@ -436,11 +434,12 @@ static void conn_discard(struct rpc_conn *c)
  * fd we are about to write to — including the 503 rejection path, where
  * a client that never reads would otherwise wedge the ACCEPT LOOP
  * itself and stop the node taking any new RPC at all. */
-static void conn_set_deadlines(int fd)
+static void conn_set_deadlines(platform_socket_t fd)
 {
-    struct timeval tv = { .tv_sec = RPC_HTTP_SOCKET_TIMEOUT_SEC, .tv_usec = 0 };
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    (void)platform_socket_set_receive_timeout(fd,
+        RPC_HTTP_SOCKET_TIMEOUT_SEC * 1000);
+    (void)platform_socket_set_send_timeout(fd,
+        RPC_HTTP_SOCKET_TIMEOUT_SEC * 1000);
 }
 
 /* True when nothing this connection could ever say is still coming:
@@ -455,8 +454,9 @@ static bool conn_peer_gone(const struct rpc_conn *c)
     if (c->fd < 0)
         return true;
 
-    struct pollfd pfd = { .fd = c->fd, .events = POLLIN, .revents = 0 };
-    int r = poll(&pfd, 1, 0);
+    platform_socket_pollfd pfd = { .fd = c->fd, .events = POLLIN,
+                                   .revents = 0 };
+    int r = platform_socket_poll(&pfd, 1, 0);
     if (r < 0)
         return errno != EINTR;   /* a broken poll target is unservable */
     if (r == 0)
@@ -565,7 +565,8 @@ static bool enqueue_client(struct rpc_conn conn)
  * this arithmetic. */
 static struct rpc_conn queue_pop_locked(void)
 {
-    struct rpc_conn conn = { .fd = -1, .ssl = NULL, .admitted_us = 0 };
+    struct rpc_conn conn = { .fd = PLATFORM_SOCKET_INVALID, .ssl = NULL,
+                             .admitted_us = 0 };
 
     if (g_client_queue_count > 0) {
         conn = g_client_queue[g_client_queue_head];
@@ -606,13 +607,13 @@ static struct rpc_conn dequeue_client(void)
  * path, so the single-owner invariant is proved on the real code
  * rather than on a copy of it. */
 
-bool rpc_http_test_queue_admit(int fd)
+bool rpc_http_test_queue_admit(platform_socket_t fd)
 {
     struct rpc_conn conn = { .fd = fd, .ssl = NULL, .admitted_us = 0 };
     return enqueue_client(conn);
 }
 
-int rpc_http_test_queue_take(void)
+platform_socket_t rpc_http_test_queue_take(void)
 {
     /* Non-blocking on purpose: dequeue_client() would park for 2 s on
      * an empty queue and a test must never depend on that. */
@@ -719,7 +720,7 @@ bool rpc_http_test_serialize_response(const struct json_value *response,
 static void handle_client(struct rpc_conn conn)
 {
     struct trace_span *rpc_span = trace_start("rpc.dispatch");
-    int client_fd = conn.fd;
+        platform_socket_t client_fd = conn.fd;
     /* Ownership hand-off flag. Set only where another module takes the
      * fd; done: is then the SINGLE exit that closes what we still own.
      * The /events upgrade used to `return` past done: outright, which
@@ -1086,7 +1087,7 @@ static void *rpc_worker_thread_fn(void *arg)
     while (g_running) {
         struct rpc_conn conn = dequeue_client();
         thread_liveness_beat(&g_rpc_worker_liveness, -1);
-        if (conn.fd < 0)
+        if (conn.fd == PLATFORM_SOCKET_INVALID)
             continue;
         handle_client(conn);
     }
@@ -1099,11 +1100,11 @@ static void *listen_thread_fn(void *arg)
     (void)arg;
     while (g_running) {
         struct sockaddr_in client_addr;
-        socklen_t addr_len = sizeof(client_addr);
-        int client_fd = accept(g_listen_fd,
-                                (struct sockaddr *)&client_addr, &addr_len);
+        size_t addr_len = sizeof(client_addr);
+        platform_socket_t client_fd = platform_socket_accept(
+            g_listen_fd, (struct sockaddr *)&client_addr, &addr_len);
         thread_liveness_beat(&g_rpc_listen_liveness, -1);
-        if (client_fd < 0) {
+        if (client_fd == PLATFORM_SOCKET_INVALID) {
             if (g_running)
                 perror("accept");
             continue;
@@ -1133,11 +1134,11 @@ static void *tls_listen_thread_fn(void *arg)
     (void)arg;
     while (g_running) {
         struct sockaddr_in client_addr;
-        socklen_t addr_len = sizeof(client_addr);
-        int client_fd = accept(g_tls_listen_fd,
-                                (struct sockaddr *)&client_addr, &addr_len);
+        size_t addr_len = sizeof(client_addr);
+        platform_socket_t client_fd = platform_socket_accept(
+            g_tls_listen_fd, (struct sockaddr *)&client_addr, &addr_len);
         thread_liveness_beat(&g_rpc_tls_liveness, -1);
-        if (client_fd < 0) {
+        if (client_fd == PLATFORM_SOCKET_INVALID) {
             if (g_running)
                 perror("tls accept");
             continue;
@@ -1148,15 +1149,14 @@ static void *tls_listen_thread_fn(void *arg)
          * would stall ALL new TLS RPC connections. Blocking-socket
          * timeouts make its internal reads/writes fail after 5 s and
          * fall into the existing drop path below. */
-        struct timeval hs_tv = { .tv_sec = 5, .tv_usec = 0 };
-        setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &hs_tv, sizeof(hs_tv));
-        setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &hs_tv, sizeof(hs_tv));
+        (void)platform_socket_set_receive_timeout(client_fd, 5000);
+        (void)platform_socket_set_send_timeout(client_fd, 5000);
 
         /* Perform TLS handshake */
         SSL *ssl = SSL_new(g_tls_ctx);
         if (!ssl) {
             fprintf(stderr, "RPC TLS: SSL_new failed\n");  // obs-ok:helper-context-logged
-            close(client_fd);
+            platform_socket_close(client_fd);
             continue;
         }
         SSL_set_fd(ssl, client_fd);
@@ -1164,7 +1164,7 @@ static void *tls_listen_thread_fn(void *arg)
             /* TLS handshake failure — drop silently (common with
              * port scanners and misconfigured clients) */
             SSL_free(ssl);
-            close(client_fd);
+            platform_socket_close(client_fd);
             continue;
         }
 
@@ -1365,14 +1365,14 @@ bool rpc_http_start(const struct rpc_table *table, uint16_t port,
         }
     }
 
-    g_listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (g_listen_fd < 0) {
+    g_listen_fd = platform_socket_open(AF_INET, SOCK_STREAM, 0, true, false);
+    if (g_listen_fd == PLATFORM_SOCKET_INVALID) {
         perror("socket");
         goto fail;
     }
 
     int opt = 1;
-    setsockopt(g_listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    (void)platform_socket_set_reuse_address(g_listen_fd, opt != 0);
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -1380,12 +1380,13 @@ bool rpc_http_start(const struct rpc_table *table, uint16_t port,
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = htons(port);
 
-    if (bind(g_listen_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+    if (platform_socket_bind(g_listen_fd, (struct sockaddr *)&addr,
+                             sizeof(addr)) < 0) {
         perror("bind");
         goto fail;
     }
 
-    if (listen(g_listen_fd, 8) < 0) {
+    if (platform_socket_listen(g_listen_fd, 8) < 0) {
         perror("listen");
         goto fail;
     }
@@ -1450,7 +1451,7 @@ bool rpc_http_start(const struct rpc_table *table, uint16_t port,
      * 0.0.0.0 on rpcport+1 (or ZCL_RPC_TLS_PORT). Plain-text listener
      * stays on 127.0.0.1 for local tools. */
     g_tls_ctx = NULL;
-    g_tls_listen_fd = -1;
+    g_tls_listen_fd = PLATFORM_SOCKET_INVALID;
     g_tls_listen_thread_started = false;
     g_tls_port = 0;
     {
@@ -1469,11 +1470,12 @@ bool rpc_http_start(const struct rpc_table *table, uint16_t port,
                 }
 
                 /* Create TLS listen socket on all interfaces */
-                g_tls_listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-                if (g_tls_listen_fd >= 0) {
+                g_tls_listen_fd = platform_socket_open(
+                    AF_INET, SOCK_STREAM, 0, true, false);
+                if (g_tls_listen_fd != PLATFORM_SOCKET_INVALID) {
                     int topt = 1;
-                    setsockopt(g_tls_listen_fd, SOL_SOCKET, SO_REUSEADDR,
-                               &topt, sizeof(topt));
+                    (void)platform_socket_set_reuse_address(g_tls_listen_fd,
+                                                            topt != 0);
 
                     struct sockaddr_in taddr;
                     memset(&taddr, 0, sizeof(taddr));
@@ -1481,21 +1483,21 @@ bool rpc_http_start(const struct rpc_table *table, uint16_t port,
                     taddr.sin_addr.s_addr = htonl(INADDR_ANY);
                     taddr.sin_port = htons(g_tls_port);
 
-                    if (bind(g_tls_listen_fd, (struct sockaddr *)&taddr,
-                             sizeof(taddr)) < 0) {
+                    if (platform_socket_bind(g_tls_listen_fd,
+                            (struct sockaddr *)&taddr, sizeof(taddr)) < 0) {
                         fprintf(stderr, "RPC TLS: bind port %u failed: %s\n",  // obs-ok:helper-context-logged
                                 g_tls_port, strerror(errno));
-                        close(g_tls_listen_fd);
-                        g_tls_listen_fd = -1;
-                    } else if (listen(g_tls_listen_fd, 8) < 0) {
+                        platform_socket_close(g_tls_listen_fd);
+                        g_tls_listen_fd = PLATFORM_SOCKET_INVALID;
+                    } else if (platform_socket_listen(g_tls_listen_fd, 8) < 0) {
                         fprintf(stderr, "RPC TLS: listen failed: %s\n",  // obs-ok:helper-context-logged
                                 strerror(errno));
-                        close(g_tls_listen_fd);
-                        g_tls_listen_fd = -1;
+                        platform_socket_close(g_tls_listen_fd);
+                        g_tls_listen_fd = PLATFORM_SOCKET_INVALID;
                     }
                 }
 
-                if (g_tls_listen_fd < 0) {
+                if (g_tls_listen_fd == PLATFORM_SOCKET_INVALID) {
                     /* TLS socket failed — clean up ctx but continue
                      * with plain-text listener only */
                     SSL_CTX_free(g_tls_ctx);
@@ -1531,15 +1533,15 @@ bool rpc_http_start(const struct rpc_table *table, uint16_t port,
     thread_liveness_register(&g_rpc_listen_liveness, "zcl_rpc_listen", 0, 0);
 
     /* Start TLS listener thread if configured */
-    if (g_tls_ctx && g_tls_listen_fd >= 0) {
+    if (g_tls_ctx && g_tls_listen_fd != PLATFORM_SOCKET_INVALID) {
         if (thread_registry_spawn("zcl_rpc_tls", tls_listen_thread_fn,
                                       NULL, &g_tls_listen_thread) == 0) {
             g_tls_listen_thread_started = true;
             thread_liveness_register(&g_rpc_tls_liveness, "zcl_rpc_tls", 0, 0);
         } else {
             fprintf(stderr, "RPC TLS: listener thread start failed\n");  // obs-ok:helper-context-logged
-            close(g_tls_listen_fd);
-            g_tls_listen_fd = -1;
+            platform_socket_close(g_tls_listen_fd);
+            g_tls_listen_fd = PLATFORM_SOCKET_INVALID;
             SSL_CTX_free(g_tls_ctx);
             g_tls_ctx = NULL;
         }
@@ -1566,15 +1568,15 @@ fail:
 void rpc_http_stop(void)
 {
     g_running = false;
-    if (g_listen_fd >= 0) {
-        shutdown(g_listen_fd, SHUT_RDWR);
-        close(g_listen_fd);
-        g_listen_fd = -1;
+    if (g_listen_fd != PLATFORM_SOCKET_INVALID) {
+        platform_socket_shutdown_both(g_listen_fd);
+        platform_socket_close(g_listen_fd);
+        g_listen_fd = PLATFORM_SOCKET_INVALID;
     }
-    if (g_tls_listen_fd >= 0) {
-        shutdown(g_tls_listen_fd, SHUT_RDWR);
-        close(g_tls_listen_fd);
-        g_tls_listen_fd = -1;
+    if (g_tls_listen_fd != PLATFORM_SOCKET_INVALID) {
+        platform_socket_shutdown_both(g_tls_listen_fd);
+        platform_socket_close(g_tls_listen_fd);
+        g_tls_listen_fd = PLATFORM_SOCKET_INVALID;
     }
     pthread_mutex_lock(&g_client_queue_mutex);
     pthread_cond_broadcast(&g_client_queue_cond);

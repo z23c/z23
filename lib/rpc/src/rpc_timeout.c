@@ -10,21 +10,17 @@
  */
 
 #include "platform/time_compat.h"
+#include "platform/socket_compat.h"
 #include "rpc/rpc_timeout.h"
 #include "event/event.h"
 #include "util/thread_liveness.h"
 #include "util/thread_registry.h"
 
-#include <arpa/inet.h>
-#include <errno.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <sys/time.h>
 #include <time.h>
-#include <unistd.h>
 
 #define RPC_TIMEOUT_DEFAULT_MS       10000
 #define RPC_TIMEOUT_DEFAULT_SWEEP_MS   250
@@ -77,9 +73,8 @@ static void ip_be_to_str(uint32_t ip_be, char *out, size_t outlen)
 {
     struct in_addr a;
     a.s_addr = ip_be;
-    const char *s = inet_ntoa(a);
-    if (!s) s = "0.0.0.0";
-    snprintf(out, outlen, "%s", s);
+    if (!platform_socket_format_address(AF_INET, &a, out, outlen))
+        snprintf(out, outlen, "0.0.0.0");
 }
 
 /* ── Lifecycle ─────────────────────────────────────────────── */
@@ -130,7 +125,7 @@ void rpc_timeout_reset_state(struct rpc_timeout_mgr *mgr)
 /* ── Slot registration ─────────────────────────────────────── */
 
 int rpc_timeout_register(struct rpc_timeout_mgr *mgr,
-                          int client_fd, uint32_t ip_be)
+                          platform_socket_t client_fd, uint32_t ip_be)
 {
     if (!mgr || !mgr->initialized) return -1;
     if (mgr->timeout_ms <= 0) {
@@ -235,7 +230,7 @@ int rpc_timeout_sweep(struct rpc_timeout_mgr *mgr, int64_t current_us)
      * registrations.  Snapshot the kill list (bounded to slot count)
      * then act on it. */
     struct kill_info {
-        int      fd;
+        platform_socket_t fd;
         uint32_t ip_be;
         int64_t  elapsed_us;
         char     method[RPC_TIMEOUT_METHOD_LEN];
@@ -266,9 +261,8 @@ int rpc_timeout_sweep(struct rpc_timeout_mgr *mgr, int64_t current_us)
 
     for (int i = 0; i < nkills; i++) {
         /* Force the worker's in-flight read/write to fail fast. */
-        if (kills[i].fd >= 0) {
-            shutdown(kills[i].fd, SHUT_RDWR);
-        }
+        if (kills[i].fd != PLATFORM_SOCKET_INVALID)
+            (void)platform_socket_shutdown_both(kills[i].fd);
         char ipbuf[32];
         ip_be_to_str(kills[i].ip_be, ipbuf, sizeof(ipbuf));
         const char *m = kills[i].method[0] ? kills[i].method : "(none)";
