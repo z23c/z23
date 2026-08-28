@@ -24,14 +24,14 @@
 lib/crypto/src/ed25519.c 1033
 lib/codeindex/src/codeindex_build.c 991
 lib/codeindex/src/codeindex_scan.c 848
-lib/event/src/event.c 1055
-lib/hotswap/src/hotswap_loader.c 817
+lib/event/src/event.c 951
+lib/hotswap/src/hotswap_loader.c 750
 lib/kernel/src/command_registry.c 2289
 lib/metrics/src/prometheus_metrics.c 933
 lib/net/src/addrman.c 1254
 lib/net/src/connman.c 2929
 lib/net/src/download.c 1623
-lib/net/src/fast_sync.c 1904
+lib/net/src/fast_sync.c 1688
 lib/net/src/file_service.c 2255
 lib/net/src/https_server.c 815
 lib/net/src/msg_blocks.c 913 # getblocks pre-handshake service gate (defense-in-depth)
@@ -42,7 +42,7 @@ lib/net/src/msgprocessor_snapshot_serve.c 946
 lib/net/src/net.c 1973
 lib/net/src/onion_directory.c 865
 lib/net/src/onion_service.c 1225
-lib/net/src/peer_lifecycle.c 1856
+lib/net/src/peer_lifecycle.c 1634
 lib/net/src/rom_fetch.c 1709
 lib/net/src/rom_seed.c 1111
 lib/platform/src/os_sandbox_linux.c 1526
@@ -59,7 +59,6 @@ lib/storage/src/census_read.c 868
 lib/storage/src/coins_kv.c 1363
 lib/storage/src/consensus_db.c 883
 lib/storage/src/peers_projection.c 1304
-lib/storage/src/progress_store.c 881
 lib/storage/src/coins_ram.c 1406
 lib/storage/src/coins_view_sqlite.c 1247
 lib/validation/src/chainstate.c 1038
@@ -74,7 +73,7 @@ src/main_cli_modes.c 4275
 lib/hotswap/src/hotswap_activate.c 948
 lib/vcs/src/package_store.c 1132
 lib/vcs/src/package_score.c 845
-lib/vcs/src/package_reward.c 2094
+lib/vcs/src/package_reward.c 2048
 lib/vcs/src/fastobj_carrier.c 915
 lib/codeindex/src/codeindex_merkle.c 1069
 lib/vcs/src/package_badge.c 1299
