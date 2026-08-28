@@ -170,14 +170,23 @@ for my $file (sort @files) {
         }
 
         if ($depth == 0) {
-            if ($code =~ /^\s*#/) {
+            my $is_directive = ($code =~ /^\s*#/);
+            if ($is_directive) {
+                # A preprocessor line is never declaration text: it must
+                # reset the accumulator AND stay out of it. Re-appending the
+                # directive poisoned the prefix of the next candidate, so a
+                # function defined directly after any directive (no
+                # ';'/'}'-bearing line between) accumulated a leading '#' and
+                # was never resolved -- leaving every LOG_* inside it
+                # unchecked.
                 $decl = '';
+            } else {
+                if ($code =~ /^\s*[A-Z][A-Z0-9_]+\s*\([^;{}]*\)\s*$/) {
+                    $decl = '';
+                    next;
+                }
+                $decl .= $code;
             }
-            if ($code =~ /^\s*[A-Z][A-Z0-9_]+\s*\([^;{}]*\)\s*$/) {
-                $decl = '';
-                next;
-            }
-            $decl .= $code;
             if ($code =~ /\{/) {
                 my $candidate = $decl;
                 $candidate =~ s/\{.*\z//s;
