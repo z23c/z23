@@ -29,7 +29,8 @@
 #define TOPOLOGY_SUBSYS "topology_store"
 #define TOPOLOGY_SELF_OBSERVER "self"
 
-static zcl_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+static zcl_mutex_t g_lock;
+static zcl_once_t g_lock_once = ZCL_ONCE_INIT;
 static _Atomic(sqlite3 *) g_db = NULL;
 static _Atomic int64_t g_row_count = 0;
 static _Atomic int64_t g_cap = TOPOLOGY_EDGES_CAP_DEFAULT;
@@ -38,6 +39,17 @@ static _Atomic uint64_t g_edges_recorded_total = 0;
 static _Atomic uint64_t g_edges_rejected_total = 0;
 static _Atomic uint64_t g_evicted_total = 0;
 static _Atomic uint64_t g_sweeps_recorded_total = 0;
+
+static void topology_lock_init(void)
+{
+    zcl_mutex_init(&g_lock);
+}
+
+static zcl_mutex_t *topology_lock_handle(void)
+{
+    (void)zcl_once_call(&g_lock_once, topology_lock_init);
+    return &g_lock;
+}
 
 /* ── small sql helpers ───────────────────────────────────────────────── */
 
@@ -98,9 +110,9 @@ bool topology_store_open(const char *datadir)
         LOG_WARN(TOPOLOGY_SUBSYS, "open: empty datadir");
         return false;
     }
-    zcl_mutex_lock(&g_lock);
+    zcl_mutex_lock(topology_lock_handle());
     if (atomic_load_explicit(&g_db, memory_order_acquire)) {
-        zcl_mutex_unlock(&g_lock);
+        zcl_mutex_unlock(topology_lock_handle());
         return true; /* idempotent */
     }
 
@@ -108,7 +120,7 @@ bool topology_store_open(const char *datadir)
     int n = snprintf(path, sizeof(path), "%s/topology.db", datadir);
     if (n <= 0 || (size_t)n >= sizeof(path)) {
         LOG_WARN(TOPOLOGY_SUBSYS, "open: datadir path too long");
-        zcl_mutex_unlock(&g_lock);
+        zcl_mutex_unlock(topology_lock_handle());
         return false;
     }
 
@@ -122,7 +134,7 @@ bool topology_store_open(const char *datadir)
                  db ? sqlite3_errmsg(db) : "?");
         if (db)
             sqlite3_close(db);
-        zcl_mutex_unlock(&g_lock);
+        zcl_mutex_unlock(topology_lock_handle());
         return false;
     }
     (void)sqlite3_exec(db, "PRAGMA journal_mode=WAL", NULL, NULL, NULL);
@@ -130,7 +142,7 @@ bool topology_store_open(const char *datadir)
 
     if (!ensure_schema(db)) {
         sqlite3_close(db);
-        zcl_mutex_unlock(&g_lock);
+        zcl_mutex_unlock(topology_lock_handle());
         return false;
     }
 
@@ -144,15 +156,15 @@ bool topology_store_open(const char *datadir)
     }
     atomic_store_explicit(&g_row_count, count, memory_order_relaxed);
     atomic_store_explicit(&g_db, db, memory_order_release);
-    zcl_mutex_unlock(&g_lock);
+    zcl_mutex_unlock(topology_lock_handle());
     return true;
 }
 
 void topology_store_close(void)
 {
-    zcl_mutex_lock(&g_lock);
+    zcl_mutex_lock(topology_lock_handle());
     sqlite3 *db = atomic_exchange_explicit(&g_db, NULL, memory_order_acq_rel);
-    zcl_mutex_unlock(&g_lock);
+    zcl_mutex_unlock(topology_lock_handle());
     if (db)
         sqlite3_close(db);
 }
@@ -236,10 +248,10 @@ static bool record_edge_core(const char *observer_str, uint16_t observer_port,
     if (now_unix <= 0)
         now_unix = platform_time_wall_unix();
 
-    zcl_mutex_lock(&g_lock);
+    zcl_mutex_lock(topology_lock_handle());
     sqlite3 *db = atomic_load_explicit(&g_db, memory_order_acquire);
     if (!db) {
-        zcl_mutex_unlock(&g_lock);
+        zcl_mutex_unlock(topology_lock_handle());
         return false;
     }
 
@@ -307,7 +319,7 @@ static bool record_edge_core(const char *observer_str, uint16_t observer_port,
                 topology_evict_locked(db, rc - cap);
         }
     }
-    zcl_mutex_unlock(&g_lock);
+    zcl_mutex_unlock(topology_lock_handle());
     return ok;
 }
 
@@ -368,10 +380,10 @@ bool topology_store_record_sweep(int64_t started_unix, int64_t finished_unix,
                                  int32_t nodes_reachable, int32_t edges_seen,
                                  int32_t new_nodes)
 {
-    zcl_mutex_lock(&g_lock);
+    zcl_mutex_lock(topology_lock_handle());
     sqlite3 *db = atomic_load_explicit(&g_db, memory_order_acquire);
     if (!db) {
-        zcl_mutex_unlock(&g_lock);
+        zcl_mutex_unlock(topology_lock_handle());
         return false;
     }
     sqlite3_stmt *s = NULL;
@@ -404,7 +416,7 @@ bool topology_store_record_sweep(int64_t started_unix, int64_t finished_unix,
                 (int)TOPOLOGY_SWEEPS_CAP);
         (void)exec_sql(db, prune, "prune topology_sweeps");
     }
-    zcl_mutex_unlock(&g_lock);
+    zcl_mutex_unlock(topology_lock_handle());
     return ok;
 }
 
@@ -433,7 +445,7 @@ bool topology_store_dump_state_json(struct json_value *out, const char *key)
         return false;
     json_set_object(out);
 
-    zcl_mutex_lock(&g_lock);
+    zcl_mutex_lock(topology_lock_handle());
     sqlite3 *db = atomic_load_explicit(&g_db, memory_order_acquire);
     bool open = db != NULL;
 
@@ -457,7 +469,7 @@ bool topology_store_dump_state_json(struct json_value *out, const char *key)
 
     if (!open) {
         diag_push_health(out, true, "topology store not open");
-        zcl_mutex_unlock(&g_lock);
+        zcl_mutex_unlock(topology_lock_handle());
         return true;
     }
 
@@ -531,14 +543,14 @@ bool topology_store_dump_state_json(struct json_value *out, const char *key)
     }
 
     diag_push_health(out, true, "ok");
-    zcl_mutex_unlock(&g_lock);
+    zcl_mutex_unlock(topology_lock_handle());
     return true;
 }
 
 #ifdef ZCL_TESTING
 void topology_store_test_reset(void)
 {
-    zcl_mutex_lock(&g_lock);
+    zcl_mutex_lock(topology_lock_handle());
     sqlite3 *db = atomic_load_explicit(&g_db, memory_order_acquire);
     if (db) {
         (void)exec_sql(db, "DELETE FROM topology_edges", "test_reset edges");
@@ -551,7 +563,7 @@ void topology_store_test_reset(void)
     atomic_store_explicit(&g_sweeps_recorded_total, 0, memory_order_relaxed);
     atomic_store_explicit(&g_cap, TOPOLOGY_EDGES_CAP_DEFAULT,
                           memory_order_relaxed);
-    zcl_mutex_unlock(&g_lock);
+    zcl_mutex_unlock(topology_lock_handle());
 }
 
 int64_t topology_store_test_edge_count(void)
@@ -561,7 +573,7 @@ int64_t topology_store_test_edge_count(void)
 
 int64_t topology_store_test_sweep_count(void)
 {
-    zcl_mutex_lock(&g_lock);
+    zcl_mutex_lock(topology_lock_handle());
     sqlite3 *db = atomic_load_explicit(&g_db, memory_order_acquire);
     int64_t n = 0;
     if (db) {
@@ -573,7 +585,7 @@ int64_t topology_store_test_sweep_count(void)
             sqlite3_finalize(s);
         }
     }
-    zcl_mutex_unlock(&g_lock);
+    zcl_mutex_unlock(topology_lock_handle());
     return n;
 }
 
