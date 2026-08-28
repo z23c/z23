@@ -3,6 +3,8 @@
  * See lib/base/include/base/log_level.h for the contract. */
 
 #include "base/log_level.h"
+#include "platform/time_compat.h"
+#include "platform/stdio_compat.h"
 
 #include <stdarg.h>
 #include <stdatomic.h>
@@ -61,7 +63,7 @@ void zcl_log_emit_at(enum zcl_log_level level, const char *fmt, ...)
      * log_level.c without the platform clock objects. */
     time_t now = time(NULL);  // platform-ok:leaf-log-sink-no-clock-dependency
     struct tm tmv;
-    if (gmtime_r(&now, &tmv) &&
+    if (platform_time_utc_tm(now, &tmv) &&
         strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", &tmv) > 0) {
         /* ts ready */
     } else {
@@ -70,7 +72,7 @@ void zcl_log_emit_at(enum zcl_log_level level, const char *fmt, ...)
 
     /* One flockfile'd sequence: the prefix and the body stay a single
      * unbroken line even with many LOG_* threads racing on stderr. */
-    flockfile(stderr);
+    platform_stdio_lock(stderr);
     (void)fprintf(stderr,  // obs-ok:log-sink-is-the-observable-surface
                   "%s %s ", ts, zcl_log_level_token(level));
     va_list ap;
@@ -78,5 +80,5 @@ void zcl_log_emit_at(enum zcl_log_level level, const char *fmt, ...)
     (void)vfprintf(stderr,  // obs-ok:log-sink-is-the-observable-surface
                    fmt, ap);
     va_end(ap);
-    funlockfile(stderr);
+    platform_stdio_unlock(stderr);
 }
