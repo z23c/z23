@@ -97,7 +97,7 @@ static bool read_key_0600(const char *path, uint8_t secret[32])
     }
     int64_t nr = platform_positioned_file_read(&file, secret, 32, 0);
     bool stable = platform_positioned_file_snapshot(&file, &after) &&
-                  memcmp(&before, &after, sizeof(before)) == 0;
+                  platform_positioned_file_snapshot_equal(&before, &after);
     platform_positioned_file_close(&file);
     if (nr != 32 || !stable) {
         memory_cleanse(secret, 32);

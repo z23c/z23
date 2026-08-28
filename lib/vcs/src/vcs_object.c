@@ -295,7 +295,7 @@ static int object_read(const char *repo_root, const uint8_t addr[32],
         }
     }
     bool stable = platform_positioned_file_snapshot(&file, &after) &&
-                  memcmp(&before, &after, sizeof(before)) == 0;
+                  platform_positioned_file_snapshot_equal(&before, &after);
     platform_positioned_file_close(&file);
     if (!stable) { free(buf); LOG_ERR("vcs", "object changed while read"); }
     *out = buf;

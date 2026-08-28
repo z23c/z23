@@ -516,7 +516,7 @@ enum vcs_zcode_dht_record_store_result vcs_zcode_dht_record_store_load(
   bool read_ok = platform_positioned_file_read(&file, wire, bytes, 0) ==
                      (int64_t)bytes &&
                  platform_positioned_file_snapshot(&file, &after) &&
-                 memcmp(&before, &after, sizeof(before)) == 0;
+                 platform_positioned_file_snapshot_equal(&before, &after);
   platform_positioned_file_close(&file);
   if (!read_ok || memcmp(wire, record_store_magic, 8) != 0 ||
       zcl_read_u32_le(wire + 8) != RECORD_STORE_VERSION ||
