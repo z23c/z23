@@ -75,6 +75,33 @@ int main(void)
     close(second);
     if (unlink(file_path) != 0)
         return 6;
+    const char replacement_path[] = "z23-platform-file.replacement";
+    first = platform_file_open_nofollow(file_path,
+                                        O_WRONLY | O_CREAT | O_EXCL, 0600);
+    second = platform_file_open_nofollow(
+        replacement_path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (first < 0 || second < 0 ||
+        write(first, "old", 3) != 3 || write(second, "new", 3) != 3) {
+        if (first >= 0) close(first);
+        if (second >= 0) close(second);
+        unlink(file_path);
+        unlink(replacement_path);
+        return 9;
+    }
+    close(first);
+    close(second);
+    if (platform_file_replace_atomic(replacement_path, file_path) != 0)
+        return 10;
+    first = platform_file_open_nofollow(file_path, O_RDONLY, 0);
+    char replaced[4] = { 0 };
+    if (first < 0 || read(first, replaced, 3) != 3 ||
+        memcmp(replaced, "new", 3) != 0) {
+        if (first >= 0) close(first);
+        unlink(file_path);
+        return 11;
+    }
+    close(first);
+    unlink(file_path);
     if (fnmatch("app/*/src/*.c", "app/models/src/block.c", FNM_PATHNAME) != 0 ||
         fnmatch("app/*/src/*.c", "app/models/deep/src/block.c",
                 FNM_PATHNAME) == 0 ||

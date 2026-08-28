@@ -23,6 +23,35 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#if defined(_WIN32)
+struct zcl_result build_fabric_package_prepare(
+    const char *workspace, const char *datadir, const char *worker,
+    const char *source_dir, const char *emit_dir, const char *recipe_path,
+    const char *profile, const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_candidate_v1 *candidate,
+    struct build_fabric_package_execution *out)
+{
+    (void)workspace; (void)datadir; (void)worker; (void)source_dir;
+    (void)emit_dir; (void)recipe_path; (void)profile; (void)task;
+    (void)candidate; (void)out;
+    return ZCL_ERR(-1, "package execution disabled on Windows until the "
+                   "restricted-token Job Object sandbox passes admission");
+}
+
+struct zcl_result build_fabric_package_report_parse(
+    const uint8_t *wire, size_t wire_len, const char *emit_dir,
+    const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_candidate_v1 *candidate,
+    const struct build_fabric_package_execution *execution,
+    uint8_t *work_status, int *exit_status)
+{
+    (void)wire; (void)wire_len; (void)emit_dir; (void)task;
+    (void)candidate; (void)execution; (void)work_status; (void)exit_status;
+    return ZCL_ERR(-1, "package execution disabled on Windows until the "
+                   "restricted-token Job Object sandbox passes admission");
+}
+#else
+
 #define BFP_PATH_MAX BUILD_FABRIC_PACKAGE_PATH_MAX
 
 static bool bfp_write(const char *path, const uint8_t *bytes, size_t len)
@@ -348,3 +377,4 @@ struct zcl_result build_fabric_package_report_parse(
         : receipt.test_exit_code != 0 ? (int)receipt.test_exit_code : 1;
     return ZCL_OK;
 }
+#endif

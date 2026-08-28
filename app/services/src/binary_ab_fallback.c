@@ -16,6 +16,8 @@
 
 #include "platform/os_binary_slots.h"
 #include "platform/os_proc.h"
+#include "platform/file_compat.h"
+#include "platform/file_sync.h"
 #include "util/blocker.h"
 
 #include <errno.h>
@@ -45,6 +47,11 @@ void binary_ab_test_fail_before_promote_rename_once(void)
  * Promotion is not successful unless this persistence barrier succeeds. */
 static bool binary_ab_fsync_parent_dir(const char *path)
 {
+#if defined(_WIN32)
+    (void)path;
+    /* MoveFileExW(MOVEFILE_WRITE_THROUGH) supplies the replacement barrier. */
+    return true;
+#else
     char dir[1024];
     int dir_len = snprintf(dir, sizeof(dir), "%s", path);
     if (dir_len < 0 || (size_t)dir_len >= sizeof(dir)) {
@@ -76,6 +83,7 @@ static bool binary_ab_fsync_parent_dir(const char *path)
         return false;
     }
     return true;
+#endif
 }
 
 /* ── Streak reset ───────────────────────────────────────────────────── */
@@ -127,7 +135,11 @@ static bool binary_ab_promote_open_file(const char *slots_dir, FILE *input,
     struct stat input_stat;
     if (input_fd < 0 || fstat(input_fd, &input_stat) != 0 ||
         !S_ISREG(input_stat.st_mode) ||
+#if !defined(_WIN32)
         (input_stat.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) == 0)
+#else
+        false)
+#endif
         LOG_FAIL("binary_ab", "promote: %s is not a regular executable",
                  source_name);
 
@@ -143,8 +155,8 @@ static bool binary_ab_promote_open_file(const char *slots_dir, FILE *input,
         LOG_FAIL("binary_ab", "promote: temporary path is too long");
 
     (void)unlink(tmp);
-    int out = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
-                   0600);
+    int out = platform_file_open_nofollow(
+        tmp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
     if (out < 0)
         LOG_FAIL("binary_ab", "promote: open(%s) failed: %s",
                  tmp, strerror(errno));
@@ -176,12 +188,14 @@ static bool binary_ab_promote_open_file(const char *slots_dir, FILE *input,
     }
 
     if (copy_ok) {
+#if !defined(_WIN32)
         if (fchmod(out, 0755) != 0) {
             LOG_WARN("binary_ab", "promote: fchmod(%s) failed: %s",
                      tmp, strerror(errno));
             copy_ok = false;
         }
-        if (fsync(out) != 0) {
+#endif
+        if (platform_data_sync(out) != 0) {
             LOG_WARN("binary_ab", "promote: fsync(%s) failed: %s",
                      tmp, strerror(errno));
             copy_ok = false;
@@ -207,7 +221,7 @@ static bool binary_ab_promote_open_file(const char *slots_dir, FILE *input,
     }
 #endif
 
-    if (rename(tmp, dst) != 0) {
+    if (platform_file_replace_atomic(tmp, dst) != 0) {
         LOG_WARN("binary_ab", "promote: rename(%s->%s) failed: %s",
                  tmp, dst, strerror(errno));
         unlink(tmp);
@@ -225,8 +239,8 @@ bool binary_ab_promote(const char *slots_dir, const char *current_path)
 {
     if (!current_path || current_path[0] == '\0')
         LOG_FAIL("binary_ab", "promote: empty current_path");
-    int fd = open(current_path,
-                  O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    int fd = platform_file_open_nofollow(current_path,
+                                         O_RDONLY | O_CLOEXEC, 0);
     if (fd < 0)
         LOG_FAIL("binary_ab", "promote: open(%s) failed: %s",
                  current_path, strerror(errno));

@@ -9,6 +9,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <sys/types.h>
 
 #if defined(_WIN32)
@@ -37,9 +38,12 @@ static inline int platform_file_open_nofollow(const char *path, int flags,
     wchar_t wide[32768];
     if (!platform_file_utf8_path(path, wide))
         return -1;
-    DWORD access = (flags & O_RDWR) ? (GENERIC_READ | GENERIC_WRITE)
-                                    : GENERIC_READ;
-    DWORD creation = (flags & O_CREAT) ? OPEN_ALWAYS : OPEN_EXISTING;
+    DWORD access = (flags & O_RDWR) ? (GENERIC_READ | GENERIC_WRITE) :
+                   (flags & O_WRONLY) ? GENERIC_WRITE : GENERIC_READ;
+    DWORD creation = OPEN_EXISTING;
+    if ((flags & O_CREAT) && (flags & O_EXCL)) creation = CREATE_NEW;
+    else if (flags & O_TRUNC) creation = CREATE_ALWAYS;
+    else if (flags & O_CREAT) creation = OPEN_ALWAYS;
     HANDLE handle = CreateFileW(wide, access,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, creation,
         FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
@@ -55,7 +59,8 @@ static inline int platform_file_open_nofollow(const char *path, int flags,
         errno = ELOOP;
         return -1;
     }
-    int crt_flags = (flags & O_RDWR) ? O_RDWR : O_RDONLY;
+    int crt_flags = (flags & O_RDWR) ? O_RDWR :
+                    (flags & O_WRONLY) ? O_WRONLY : O_RDONLY;
     crt_flags |= O_BINARY;
     int fd = _open_osfhandle((intptr_t)handle, crt_flags);
     if (fd < 0) {
@@ -64,6 +69,21 @@ static inline int platform_file_open_nofollow(const char *path, int flags,
     }
     (void)mode;
     return fd;
+}
+
+static inline int platform_file_replace_atomic(const char *source,
+                                               const char *destination)
+{
+    wchar_t source_wide[32768];
+    wchar_t destination_wide[32768];
+    if (!platform_file_utf8_path(source, source_wide) ||
+        !platform_file_utf8_path(destination, destination_wide))
+        return -1;
+    if (MoveFileExW(source_wide, destination_wide,
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        return 0;
+    errno = GetLastError() == ERROR_ACCESS_DENIED ? EACCES : EIO;
+    return -1;
 }
 
 static inline int platform_file_lock_exclusive(int fd)
@@ -126,6 +146,12 @@ static inline int platform_file_open_nofollow(const char *path, int flags,
                                                int mode)
 {
     return open(path, flags | O_CLOEXEC | O_NOFOLLOW, (mode_t)mode);
+}
+
+static inline int platform_file_replace_atomic(const char *source,
+                                               const char *destination)
+{
+    return rename(source, destination);
 }
 
 static inline int platform_file_lock_exclusive(int fd)
