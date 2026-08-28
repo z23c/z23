@@ -71,7 +71,10 @@ declare -A EXEMPT=(
     [zcl-rpc]="built by make ci (test-crash)"
     # The node and the test runners: whole-program relinks, and each is
     # already the direct product of make zclassic23 / test-parallel / ci.
+    # The canonical node binary is build/bin/z23 (the zclassic23 symlink
+    # exists for compatibility), so both spellings are exempt.
     [zclassic23]="built by make ci and make test-parallel"
+    [z23]="built by make ci and make test-parallel (canonical node name)"
     [zclassic23-dev]="dev-profile whole-node relink (make dev)"
     [zclassic23-dev-asan]="sanitizer whole-node relink (make dev-asan)"
     [zclassic23-dev-tsan]="sanitizer whole-node relink (make dev-tsan)"
