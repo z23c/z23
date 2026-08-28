@@ -4,6 +4,7 @@
 #include "platform/positioned_file.h"
 
 #include <limits.h>
+#include <string.h>
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -94,10 +95,12 @@ void platform_read_mapping_advise_sequential(
         HANDLE, ULONG_PTR,
         const struct platform_win_memory_range_entry *, ULONG);
     HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
-    prefetch_virtual_memory_fn prefetch = kernel
-        ? (prefetch_virtual_memory_fn)(void *)GetProcAddress(
-              kernel, "PrefetchVirtualMemory")
-        : NULL;
+    FARPROC symbol = kernel
+        ? GetProcAddress(kernel, "PrefetchVirtualMemory") : NULL;
+    prefetch_virtual_memory_fn prefetch = NULL;
+    _Static_assert(sizeof(prefetch) == sizeof(symbol),
+                   "Windows function pointer representations must match");
+    memcpy(&prefetch, &symbol, sizeof(prefetch));
     if (prefetch) {
         struct platform_win_memory_range_entry range = {
             .virtual_address = (PVOID)mapping->data,
