@@ -30,7 +30,11 @@
 
 #include "net/site_routes.h"
 
+#if defined(_WIN32) && defined(__GNUC__)
+[[gnu::format(gnu_printf, 4, 5)]]
+#else
 [[gnu::format(printf, 4, 5)]]
+#endif
 static inline size_t site_appendf(char *buf, size_t max, size_t off,
                                   const char *format, ...)
 {

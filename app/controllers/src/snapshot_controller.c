@@ -88,36 +88,34 @@ void snapshot_tx_rollback_best_effort(struct node_db *ndb,
 
 static void rotate_snapshots(const char *snapshots_dir, int max_keep)
 {
-    struct dirent **entries;
-    int n = scandir(snapshots_dir, &entries, NULL, alphasort);
-    if (n < 0) return;
-
-    /* Count real snapshot dirs (YYYYMMDD_HHMMSS format) */
+    DIR *directory = opendir(snapshots_dir);
+    if (!directory) return;
     int count = 0;
-    for (int i = 0; i < n; i++) {
-        if (entries[i]->d_name[0] != '.' && strlen(entries[i]->d_name) == 15)
+    struct dirent *entry;
+    while ((entry = readdir(directory)) != NULL) {
+        if (entry->d_name[0] != '.' && strlen(entry->d_name) == 15)
             count++;
     }
+    closedir(directory);
 
-    /* Remove oldest if over limit */
     int to_remove = count - max_keep;
-    if (to_remove > 0) {
-        for (int i = 0; i < n && to_remove > 0; i++) {
-            if (entries[i]->d_name[0] == '.' ||
-                strlen(entries[i]->d_name) != 15)
+    while (to_remove-- > 0) {
+        char oldest[16] = { 0 };
+        directory = opendir(snapshots_dir);
+        if (!directory) return;
+        while ((entry = readdir(directory)) != NULL) {
+            if (entry->d_name[0] == '.' || strlen(entry->d_name) != 15)
                 continue;
-            char path[1024];
-            snprintf(path, sizeof(path), "%s/%s",
-                     snapshots_dir, entries[i]->d_name);
-            printf("snapshot: removing old snapshot %s\n",
-                   entries[i]->d_name);
-            dir_remove_tree(path);
-            to_remove--;
+            if (!oldest[0] || strcmp(entry->d_name, oldest) < 0)
+                memcpy(oldest, entry->d_name, sizeof(oldest));
         }
+        closedir(directory);
+        if (!oldest[0]) return;
+        char path[1024];
+        snprintf(path, sizeof(path), "%s/%s", snapshots_dir, oldest);
+        printf("snapshot: removing old snapshot %s\n", oldest);
+        dir_remove_tree(path);
     }
-
-    for (int i = 0; i < n; i++) free(entries[i]);
-    free(entries);
 }
 
 const char *snapshot_create(const char *legacy_datadir,

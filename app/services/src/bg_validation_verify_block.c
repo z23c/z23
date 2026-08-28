@@ -23,6 +23,7 @@
  */
 
 #include "bg_validation_internal.h"
+#include "platform/file_compat.h"
 
 #include "validation/main_state.h"
 #include "validation/chainstate.h"
@@ -94,7 +95,8 @@ static bool read_block_undo(struct block_undo *undo, const struct block_index *p
         LOG_FAIL("bg_validation", "read_block_undo: malloc failed for %zu bytes", read_len);
     }
 
-    ssize_t nread = pread(fd, buf, read_len, (off_t)undo_pos.nPos);
+    ssize_t nread = platform_file_pread(fd, buf, read_len,
+                                       (off_t)undo_pos.nPos);
     close(fd);
 
     if (nread <= 0) {
